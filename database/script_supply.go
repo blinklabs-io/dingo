@@ -14,13 +14,19 @@
 
 package database
 
-import "context"
+import (
+	"context"
+	"fmt"
+
+	"github.com/blinklabs-io/dingo/database/types"
+)
 
 // RebuildScriptLockedSupply replaces the running script-locked supply
 // aggregate with a full scan of the live UTxOs, recorded at slot. A bulk load
 // that inserts live outputs without the per-write maintenance (ledger-state
 // import) calls it once the outputs are in place. A nil txn runs in its own
-// read-write transaction.
+// read-write transaction; a non-nil txn must be a read-write metadata
+// transaction of this database, so the rebuild cannot commit outside it.
 func (d *Database) RebuildScriptLockedSupply(
 	ctx context.Context,
 	slot uint64,
@@ -30,6 +36,12 @@ func (d *Database) RebuildScriptLockedSupply(
 		return d.MetadataTxn(ctx, true).Do(func(t *Txn) error {
 			return d.utxoStore().RebuildScriptLockedSupply(slot, t.Metadata())
 		})
+	}
+	if txn.db != d || txn.Metadata() == nil || !txn.IsReadWrite() {
+		return fmt.Errorf(
+			"rebuild script-locked supply: %w",
+			types.ErrTxnWrongType,
+		)
 	}
 	return d.utxoStore().RebuildScriptLockedSupply(slot, txn.Metadata())
 }

@@ -613,7 +613,10 @@ func (o *utxoOverlay) create(
 		if err != nil {
 			return nil, 0, err
 		}
-		scriptLocked += locked
+		scriptLocked, err = checkedSupplyStep(scriptLocked, locked)
+		if err != nil {
+			return nil, 0, err
+		}
 		if len(model.StakingKey) > 0 {
 			gain, err := producedStakeCredentialDelta(
 				model.CredentialTag, model.StakingKey, model.Amount, true,
@@ -684,7 +687,10 @@ func (o *utxoOverlay) consume(
 			if err != nil {
 				return nil, nil, 0, err
 			}
-			scriptLocked += locked
+			scriptLocked, err = checkedSupplyStep(scriptLocked, locked)
+			if err != nil {
+				return nil, nil, 0, err
+			}
 			delta, ok, err := consumedUtxoStakeDelta(
 				int64(out.model.CredentialTag),
 				out.model.StakingKey,
@@ -731,7 +737,10 @@ func (o *utxoOverlay) consume(
 		if err != nil {
 			return nil, nil, 0, err
 		}
-		scriptLocked += locked
+		scriptLocked, err = checkedSupplyStep(scriptLocked, locked)
+		if err != nil {
+			return nil, nil, 0, err
+		}
 		delta, ok, err := consumedUtxoStakeDelta(
 			in.tag, in.stakingKey, in.amount,
 		)

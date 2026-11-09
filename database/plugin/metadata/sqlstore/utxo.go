@@ -917,7 +917,13 @@ func (s *Store) importUtxos(
 					if err != nil {
 						return err
 					}
-					scriptDeltas[item.AddedSlot] += delta
+					scriptDeltas[item.AddedSlot], err = checkedSupplyStep(
+						scriptDeltas[item.AddedSlot],
+						delta,
+					)
+					if err != nil {
+						return err
+					}
 				}
 				// See CreateUtxo: the pointer position is a separate
 				// row, and persistUtxoPointer converges, so an output
@@ -1393,7 +1399,10 @@ func (s *Store) queryUtxoStakeConsumedDeltas(
 				if err != nil {
 					return err
 				}
-				scriptLocked += locked
+				scriptLocked, err = checkedSupplyStep(scriptLocked, locked)
+				if err != nil {
+					return err
+				}
 				delta, ok, err := consumedUtxoStakeDelta(tag, key, raw)
 				if err != nil {
 					return err
@@ -1825,7 +1834,13 @@ func queryUtxoDeletionRows(
 							if err != nil {
 								return err
 							}
-							scriptLocked += locked
+							scriptLocked, err = checkedSupplyStep(
+								scriptLocked,
+								locked,
+							)
+							if err != nil {
+								return err
+							}
 						}
 					}
 				}

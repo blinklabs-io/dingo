@@ -16,6 +16,7 @@ package database
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -285,4 +286,52 @@ func TestUtxosDeleteConsumedPrunesSupplyBelowPersistedFloor(t *testing.T) {
 	require.EqualValues(t, 20, minSlot, "row at slot 10 is below the base")
 	require.EqualValues(t, 2, rows)
 	require.EqualValues(t, 700, scriptSupply(t, db))
+}
+
+// Contributions are summed per slot before they reach the aggregate, so the
+// sum itself must be range-checked: math.MaxInt64 and 1 would otherwise wrap
+// to a negative delta the aggregate accepts.
+func TestImportUtxosRejectsScriptSupplyOverflow(t *testing.T) {
+	t.Parallel()
+	for _, deferred := range []bool{false, true} {
+		t.Run(map[bool]string{false: "per-row", true: "batched"}[deferred],
+			func(t *testing.T) {
+				t.Parallel()
+				db := newTestDB(t)
+				outs := []models.Utxo{
+					*supplyTestUtxo(1, 10, 0, math.MaxInt64, true),
+					*supplyTestUtxo(2, 10, 0, 1, true),
+				}
+				err := db.MetadataTxn(context.Background(), true).Do(
+					func(txn *Txn) error {
+						if deferred {
+							return deferredImporter(t, db).
+								ImportUtxosDeferredRewardLiveStakeRefresh(
+									outs, txn.Metadata(),
+								)
+						}
+						return db.Metadata().ImportUtxos(
+							outs, txn.Metadata(),
+						)
+					},
+				)
+				require.ErrorContains(t, err, "out of range")
+				require.EqualValues(t, 0, scriptSupply(t, db))
+			})
+	}
+}
+
+// A caller transaction without a writable metadata handle would let the
+// rebuild commit on its own, outside the caller's rollback.
+func TestRebuildScriptLockedSupplyRejectsWrongTxn(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	for name, txn := range map[string]*Txn{
+		"blob":      db.BlobTxn(true),
+		"read-only": db.MetadataTxn(context.Background(), false),
+	} {
+		err := db.RebuildScriptLockedSupply(context.Background(), 1, txn)
+		require.ErrorIs(t, err, types.ErrTxnWrongType, name)
+		txn.Rollback() //nolint:errcheck
+	}
 }

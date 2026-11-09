@@ -335,7 +335,11 @@ func scanConsumedUtxoRows(
 				_ = rows.Close()
 				return nil, nil, 0, err
 			}
-			scriptLocked += locked
+			scriptLocked, err = checkedSupplyStep(scriptLocked, locked)
+			if err != nil {
+				_ = rows.Close()
+				return nil, nil, 0, err
+			}
 			delta, ok, err := consumedUtxoStakeDelta(tag, key, amount)
 			if err != nil {
 				_ = rows.Close()
@@ -468,7 +472,13 @@ func (s *Store) insertUtxoModelsChecked(
 			if err != nil {
 				return nil, err
 			}
-			scriptDeltas[utxo.AddedSlot] += delta
+			scriptDeltas[utxo.AddedSlot], err = checkedSupplyStep(
+				scriptDeltas[utxo.AddedSlot],
+				delta,
+			)
+			if err != nil {
+				return nil, err
+			}
 			if deferredRows != nil {
 				err = s.persistUtxoRelationsWithDeferredAssets(
 					ctx, db, utxo, id, deferredRows,
@@ -1533,7 +1543,13 @@ func (s *Store) setTransactionWithAccumulator(
 						return scanErr
 					}
 					updated = updatedRows
-					consumedScriptLocked += locked
+					consumedScriptLocked, err = checkedSupplyStep(
+						consumedScriptLocked,
+						locked,
+					)
+					if err != nil {
+						return err
+					}
 					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
 				} else if s.dialect.Name() == "sqlite" {
 					rows, err := s.queryRowsCached(
@@ -1550,7 +1566,13 @@ func (s *Store) setTransactionWithAccumulator(
 						return scanErr
 					}
 					updated = updatedRows
-					consumedScriptLocked += locked
+					consumedScriptLocked, err = checkedSupplyStep(
+						consumedScriptLocked,
+						locked,
+					)
+					if err != nil {
+						return err
+					}
 					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
 				} else {
 					for _, ref := range batch {
