@@ -250,6 +250,8 @@ func TestMetadataStoreBadCredentialsFailsCleanly(t *testing.T) {
 		storagetest.EscapeLibpqValue(database),
 	)
 
+	storagetest.SkipIfPostgresIgnoresPassword(t, dsn)
+
 	store, err := openStore(
 		Config{DSN: dsn},
 		metadata.ProviderDependencies{},
