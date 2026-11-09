@@ -17,12 +17,15 @@ package koiosparity
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -33,6 +36,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -49,10 +55,16 @@ const (
 // koiosTx is a valid transaction with one of each association.
 func koiosTx() KoiosTxInfoItem {
 	return KoiosTxInfoItem{
-		TxHash:           txParityHash,
-		Inputs:           []KoiosTxInfoUtxoRef{{TxHash: txParityPrev, TxIndex: 1}},
-		CollateralInputs: []KoiosTxInfoUtxoRef{{TxHash: txParityColl, TxIndex: 0}},
-		ReferenceInputs:  []KoiosTxInfoUtxoRef{{TxHash: txParityRef, TxIndex: 2}},
+		TxHash: txParityHash,
+		Inputs: []KoiosTxInfoUtxoRef{
+			{TxHash: txParityPrev, TxIndex: 1},
+		},
+		CollateralInputs: []KoiosTxInfoUtxoRef{
+			{TxHash: txParityColl, TxIndex: 0},
+		},
+		ReferenceInputs: []KoiosTxInfoUtxoRef{
+			{TxHash: txParityRef, TxIndex: 2},
+		},
 		Outputs: []KoiosTxInfoOutput{{
 			TxHash:  txParityHash,
 			TxIndex: 0,
@@ -372,7 +384,11 @@ func TestCacheTxInfoRoundTripsReferenceInputs(t *testing.T) {
 	))
 	got, err := cache.GetTxInfos("preview", []string{txParityHash})
 	require.NoError(t, err)
-	require.Equal(t, koiosTx().ReferenceInputs, got[txParityHash].ReferenceInputs)
+	require.Equal(
+		t,
+		koiosTx().ReferenceInputs,
+		got[txParityHash].ReferenceInputs,
+	)
 }
 
 // TestObserverFetchesOnlyUncachedSampledTransactions pins the fetch half:
@@ -407,9 +423,12 @@ func TestObserverFetchesOnlyUncachedSampledTransactions(t *testing.T) {
 	second := dingoTx()
 	second.Hash = "ee55"
 	o, err := NewObserver(ObserverConfig{
-		Network:               "preview",
-		CachePath:             filepath.Join(t.TempDir(), "cache.db"),
-		Source:                &txSampleStub{RewardParitySource: base, sample: []DingoTransaction{dingoTx(), second}},
+		Network:   "preview",
+		CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		Source: &txSampleStub{
+			RewardParitySource: base,
+			sample:             []DingoTransaction{dingoTx(), second},
+		},
 		BaseURL:               srv.URL,
 		AllowInsecureHTTP:     true,
 		AllowPrivateAddresses: true,
@@ -483,6 +502,72 @@ func TestObserverFetchIfNeededCachesTransactionSample(t *testing.T) {
 // TestCacheTxInfoIgnoresRowsWithoutReferenceInputs: a row stored before
 // ReferenceInputs existed decodes with none, which would read as a
 // transaction that references nothing, so it must be re-fetched.
+// TestObserverRetriesTransientEmptyTxInfo pins the bounded retry around
+// /tx_info: the public host intermittently answers a valid request with 200
+// and an empty array, and one such answer must not become an ERROR epoch.
+func TestObserverRetriesTransientEmptyTxInfo(t *testing.T) {
+	t.Parallel()
+
+	const attempts = 3
+	cases := []struct {
+		name       string
+		emptyFirst int32
+		wantCached bool
+		wantCalls  int32
+	}{
+		{"recovers after empty answers", attempts - 1, true, attempts},
+		{"gives up after the attempt bound", attempts + 1, false, attempts},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					if calls.Add(1) <= tc.emptyFirst {
+						_ = json.NewEncoder(w).Encode([]KoiosTxInfoItem{})
+						return
+					}
+					_ = json.NewEncoder(w).Encode([]KoiosTxInfoItem{koiosTx()})
+				}))
+			defer srv.Close()
+
+			base, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
+			require.NoError(t, err)
+			o, err := NewObserver(ObserverConfig{
+				Network:   "preview",
+				CachePath: filepath.Join(t.TempDir(), "cache.db"),
+				Source: &txSampleStub{
+					RewardParitySource: base,
+					sample:             []DingoTransaction{dingoTx()},
+				},
+				BaseURL:               srv.URL,
+				AllowInsecureHTTP:     true,
+				AllowPrivateAddresses: true,
+				FetchRetryAttempts:    attempts,
+				FetchRetryDelay:       time.Millisecond,
+				Logger:                slog.New(slog.DiscardHandler),
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+			require.NoError(
+				t, o.fetchTransactionsIfNeeded(context.Background(), 5),
+			)
+			got, err := o.cache.GetTxInfos("preview", []string{txParityHash})
+			require.NoError(t, err)
+			if tc.wantCached {
+				require.Contains(t, got, txParityHash)
+			} else {
+				require.Empty(t, got)
+			}
+			require.Equal(t, tc.wantCalls, calls.Load())
+		})
+	}
+}
+
 func TestCacheTxInfoIgnoresRowsWithoutReferenceInputs(t *testing.T) {
 	t.Parallel()
 
@@ -538,4 +623,188 @@ func TestDatabaseSourceTransactionSampleAPIModeWalksEpochBlocks(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Empty(t, sample)
+}
+
+const (
+	txParityBlockSlot    = 127444628
+	txParityBlockHash    = "ec0a1469c3ed4d747dd13fcbb59232e1b2f7cd32b16576730dd1002796eda3be"
+	txParityScriptTxHash = "ff740cdc5650212514eb4ad26ae136093b5933ada512050f3be1656816c40217"
+	txParityScriptTxIdx  = 5
+)
+
+// TestDatabaseSourceTransactionSampleMatchesRecordedKoios stores a real
+// Preview block through the production write path and compares what the
+// sample reads back against the recorded /tx_info answer for the same
+// transactions. It covers what hand-built models cannot: the spend, collateral
+// and reference associations the writer records, and the address, lovelace and
+// asset values read back from the block's CBOR.
+func TestDatabaseSourceTransactionSampleMatchesRecordedKoios(t *testing.T) {
+	t.Parallel()
+
+	rawHex, err := os.ReadFile("testdata/tx_parity_preview_block.hex")
+	require.NoError(t, err)
+	blockCbor, err := hex.DecodeString(strings.TrimSpace(string(rawHex)))
+	require.NoError(t, err)
+	var recorded []KoiosTxInfoItem
+	rawJSON, err := os.ReadFile("testdata/tx_parity_preview_koios.json")
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(rawJSON, &recorded))
+	koios := make(map[string]KoiosTxInfoItem, len(recorded))
+	for _, item := range recorded {
+		koios[item.TxHash] = item
+	}
+
+	cases := []struct {
+		name      string
+		invalidTx bool
+	}{
+		{"valid block", false},
+		{"phase-2-invalid script transaction", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			stored := blockCbor
+			want := koios
+			if tc.invalidTx {
+				stored, want = markTxParityScriptTxInvalid(
+					t, blockCbor, koios,
+				)
+			}
+			sample := sampleStoredTxParityBlock(t, stored)
+			require.Len(t, sample, len(recorded))
+			require.Empty(t, CompareEpochTransactions(
+				"preview", 3, sample, want, time.Now(),
+			))
+			if tc.invalidTx {
+				for _, tx := range sample {
+					if tx.Hash != txParityScriptTxHash {
+						continue
+					}
+					assert.False(t, tx.Valid)
+					assert.Equal(t, tx.Collateral, tx.Inputs)
+					assert.Len(t, tx.Outputs, 1)
+					assert.True(t, strings.HasPrefix(tx.Outputs[0], "3|"),
+						"collateral return sits at index len(outputs)")
+				}
+			}
+		})
+	}
+}
+
+// markTxParityScriptTxInvalid lists the script transaction in the block's
+// invalid-transaction set, the block's final element, and flips the Koios
+// verdict to match, so both sides describe a phase-2 failure of a transaction
+// that carries a collateral return.
+func markTxParityScriptTxInvalid(
+	t *testing.T,
+	blockCbor []byte,
+	koios map[string]KoiosTxInfoItem,
+) ([]byte, map[string]KoiosTxInfoItem) {
+	t.Helper()
+	require.Equal(t, byte(0x80), blockCbor[len(blockCbor)-1],
+		"fixture block must have an empty invalid-transaction set")
+	stored := append(
+		append([]byte{}, blockCbor[:len(blockCbor)-1]...),
+		0x81, txParityScriptTxIdx,
+	)
+	want := maps.Clone(koios)
+	invalid := false
+	item := want[txParityScriptTxHash]
+	item.PlutusContracts = []KoiosTxInfoPlutusContract{
+		{ValidContract: &invalid},
+	}
+	want[txParityScriptTxHash] = item
+	return stored, want
+}
+
+// sampleStoredTxParityBlock writes the block to an API-mode database and
+// returns the epoch sample. The block's external inputs are seeded as bare
+// utxo rows, because the association writers only link rows that exist.
+func sampleStoredTxParityBlock(
+	t *testing.T,
+	blockCbor []byte,
+) []DingoTransaction {
+	t.Helper()
+	ctx := context.Background()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     t.TempDir(),
+		StorageMode: types.StorageModeAPI,
+	})
+	require.NoError(t, err)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	// The tampered invalid-transaction set no longer matches the header's
+	// body hash, which is not what this test is about.
+	block, err := ledger.NewBlockFromCbor(
+		ledger.BlockTypeConway,
+		blockCbor,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+	)
+	require.NoError(t, err)
+	hash, err := hex.DecodeString(txParityBlockHash)
+	require.NoError(t, err)
+
+	raw := sourceSQLDB(t, db)
+	_, err = raw.db.Exec(
+		`INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots)
+		VALUES (3, 127000000, 6, 1000, 1000000)`,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: txParityBlockSlot, Hash: hash, Cbor: blockCbor,
+		Type:     ledger.BlockTypeConway,
+		Number:   1,
+		PrevHash: bytes.Repeat([]byte{0x09}, 32),
+	}, nil))
+
+	txs := block.Transactions()
+	known := make(map[string]struct{})
+	for _, tx := range txs {
+		var inputs []lcommon.TransactionInput
+		inputs = append(inputs, tx.Inputs()...)
+		inputs = append(inputs, tx.Collateral()...)
+		inputs = append(inputs, tx.ReferenceInputs()...)
+		for _, in := range inputs {
+			key := in.String()
+			if _, ok := known[key]; ok {
+				continue
+			}
+			known[key] = struct{}{}
+			_, err = raw.db.Exec(
+				`INSERT INTO utxo (tx_id, output_idx, amount, added_slot,
+					deleted_slot, payment_script, credential_tag)
+				VALUES (?, ?, '1', 1, 0, 0, 0)`,
+				in.Id().Bytes(), in.Index(),
+			)
+			require.NoError(t, err)
+		}
+		for _, produced := range tx.Produced() {
+			known[produced.Id.String()] = struct{}{}
+		}
+	}
+
+	offsets, err := database.NewBlockIndexer(
+		txParityBlockSlot, hash,
+	).ComputeOffsets(blockCbor, block)
+	require.NoError(t, err)
+	point := ocommon.NewPoint(txParityBlockSlot, hash)
+	acc := db.NewValidatedBlockBatchAccumulator()
+	require.NotNil(t, acc)
+	txn := db.Transaction(ctx, true)
+	for i, tx := range txs {
+		require.NoError(t, db.SetTransactionBatched(
+			ctx, tx, point, uint32(i), 0, nil, nil, offsets, acc, txn, 10,
+		))
+	}
+	require.NoError(t, db.FlushBatch(acc, txn))
+	require.NoError(t, txn.Commit())
+
+	sample, err := source.GetEpochTransactionSample(
+		ctx, 3, EpochTransactionSampleSize,
+	)
+	require.NoError(t, err)
+	return sample
 }

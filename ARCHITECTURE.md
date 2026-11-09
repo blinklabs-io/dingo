@@ -16688,8 +16688,9 @@ second sync:
     unless the error moves a total. A source that implements
     `TransactionParitySource` (`DatabaseSource`, in API storage mode only)
     reports up to `EpochTransactionSampleSize` transactions of the epoch, in
-    block order. `fetchIfNeeded` caches their `/tx_info` rows (a Koios failure
-    is logged, not fatal, and surfaces as a `dingo_db_missing` mismatch), and
+    block order. `fetchIfNeeded` caches their `/tx_info` rows under the
+    observer's bounded fetch retry (a Koios failure that outlasts it is logged
+    and surfaces as a `dingo_db_missing` mismatch, an `ERROR` epoch), and
     `checkEpoch` compares, in the aggregate scope, the consumed inputs,
     collateral inputs, reference inputs and produced outputs including lovelace
     and native-asset amounts, plus the validity flag. A phase-2-invalid

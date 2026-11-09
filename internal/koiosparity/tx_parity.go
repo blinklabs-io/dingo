@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -243,9 +244,8 @@ func dingoTransactionFromModel(tx *models.Transaction) DingoTransaction {
 	}
 }
 
-// resolveOutputAddresses fills in the address of each produced output. The
-// metadata store has no address column: the output's address lives only in
-// its CBOR, which is resolved from the blob store.
+// resolveOutputAddresses fills in the address of each produced output from
+// its CBOR in the blob store, since hydrated utxo rows do not carry one.
 func (s *DatabaseSource) resolveOutputAddresses(
 	ctx context.Context,
 	txn *database.Txn,
@@ -334,10 +334,10 @@ func (s *DatabaseSource) GetEpochTransactionSample(
 }
 
 // fetchTransactionsIfNeeded caches the /tx_info rows of the epoch's sampled
-// transactions that are not cached yet. A Koios failure is logged and
-// swallowed: the check then records each uncached transaction as a missing
-// reference (an ERROR), and the rest of the epoch is still compared. Only
-// cancellation is returned.
+// transactions that are not cached yet. A Koios failure that outlasts the
+// retries is logged and swallowed: the check then records each uncached
+// transaction as a missing reference (an ERROR), and the rest of the epoch is
+// still compared. Only cancellation is returned.
 func (o *Observer) fetchTransactionsIfNeeded(
 	ctx context.Context,
 	epoch uint64,
@@ -377,7 +377,7 @@ func (o *Observer) fetchTransactionsIfNeeded(
 	if len(missing) == 0 {
 		return nil
 	}
-	items, err := o.koios.GetTxInfos(ctx, missing)
+	items, err := o.getTxInfosWithRetry(ctx, missing)
 	if err != nil {
 		return fail(err)
 	}
@@ -387,4 +387,34 @@ func (o *Observer) fetchTransactionsIfNeeded(
 		return fail(err)
 	}
 	return nil
+}
+
+// getTxInfosWithRetry applies the observer's bounded fetch retry to /tx_info.
+// The retry covers ErrTxInfoMissing too: the public host can answer a valid
+// request with 200 and an empty array, and an answer that the next request
+// would correct must not turn the epoch into an ERROR.
+func (o *Observer) getTxInfosWithRetry(
+	ctx context.Context,
+	hashes []string,
+) ([]KoiosTxInfoItem, error) {
+	var lastErr error
+	for attempt := range o.cfg.FetchRetryAttempts {
+		items, err := o.koios.GetTxInfos(ctx, hashes)
+		if err == nil {
+			return items, nil
+		}
+		if errors.Is(err, ErrKoiosPermanent) {
+			return nil, err
+		}
+		lastErr = err
+		if attempt == o.cfg.FetchRetryAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(o.cfg.FetchRetryDelay):
+		}
+	}
+	return nil, lastErr
 }
