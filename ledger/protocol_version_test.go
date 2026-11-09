@@ -169,6 +169,41 @@ func TestEvaluateProtocolVersionBump_DetectsQuorumMetUpdate(t *testing.T) {
 		"the peek must not mutate the live currentPParams pointer")
 }
 
+// TestEvaluateProtocolVersionBump_NamesSuccessorOfLedgerEpochLabel pins that the
+// known transition is the successor of the ledger epoch label, not of the
+// epoch the tip is in (Shelley/Inspect.hs pparamsUpdate returns succ nesEL).
+// The ledger epoch is 2 here but the label stayed at 0 across an empty epoch,
+// so the update pending for epoch 1 names epoch 1.
+func TestEvaluateProtocolVersionBump_NamesSuccessorOfLedgerEpochLabel(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newBabbageQuorum1Cfg(t)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	ls := newQuorumMetVersionBumpLedger(t, cfg, db)
+	// Epoch 2 spans slots 200-299, so its voting deadline is slot 240 and
+	// the block at 255 is the k=1 block past it.
+	testChain, tips := newVersionBumpChain(t, db, 245, 10, 2)
+	ls.chain = testChain
+	ls.currentTip = tips[1]
+	ls.currentEpoch = models.Epoch{
+		EpochId:       2,
+		StartSlot:     200,
+		LengthInSlots: 100,
+		SlotLength:    1000,
+		EraId:         eras.BabbageEraDesc.Id,
+	}
+	ls.ledgerEpoch = 0
+	ls.publishSnapshotsLocked()
+
+	ls.evaluateProtocolVersionBump(t.Context())
+
+	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+	require.Equal(t, uint64(1), ls.transitionInfo.KnownEpoch)
+}
+
 func TestQueueProtocolVersionBumpEvaluation_PublishesDetectedTransition(
 	t *testing.T,
 ) {

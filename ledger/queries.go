@@ -1639,6 +1639,10 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 			epoch = row.EpochId
 		}
 	}
+	// The reference answers from the ledger state's own snapshots, which an
+	// empty epoch leaves at the ledger epoch label: its mark is the one
+	// captured at the label's boundary, however far the tip's epoch is past it.
+	epoch = ledgerEpochLabelInCache(epoch, consensus.epochCache)
 	setEpoch, hasSet := priorEpoch(epoch, 1)
 	goEpoch, hasGo := priorEpoch(epoch, 2)
 

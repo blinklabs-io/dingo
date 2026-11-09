@@ -12872,6 +12872,7 @@ func stabilityFixtureLedgerState(
 			stabilityFixtureEpochLen,
 			eras.ConwayEraDesc.Id,
 		),
+		ledgerEpoch:    stabilityFixtureEpochID,
 		currentPParams: &pparams,
 		transitionInfo: hardfork.NewTransitionUnknown(),
 		config: LedgerStateConfig{

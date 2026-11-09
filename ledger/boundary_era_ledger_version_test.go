@@ -609,6 +609,45 @@ func TestVersionTriggeredTransitionIntoEmptyEpochs(t *testing.T) {
 	})
 }
 
+// TestTranslationAcrossEmptyEpochCarriesProtocolMajor pins that the Conway
+// translation carries the Babbage protocol major over unchanged
+// (Conway/PParams.hs upgradeConwayPParams). A block beyond an empty epoch
+// translates the frozen ledger, which has not enacted the pending major, so
+// the Conway ledger keeps the old major and stays out of the bootstrap phase
+// (Conway/Era.hs hardforkConwayBootstrapPhase, major 9) rather than being
+// raised to the era's first major.
+func TestTranslationAcrossEmptyEpochCarriesProtocolMajor(t *testing.T) {
+	t.Parallel()
+
+	skipped := uint64(3 * boundaryEraTestEpochLength)
+	conwayEpoch := uint64(2)
+	for name, tc := range map[string]boundaryEraCase{
+		"version trigger": {
+			pparamsMajor:       8,
+			classicUpdateMajor: 9,
+			votingBlocks:       uint64(boundaryEraTestSecurityParam),
+			blockSlot:          skipped + 1,
+		},
+		"scheduled": {
+			pparamsMajor: 8,
+			blockSlot:    skipped + 1,
+			configure: func(cfg *cardano.CardanoNodeConfig) {
+				cfg.TestConwayHardForkAtEpoch = &conwayEpoch
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ls, err := runBoundaryEraCase(t, tc)
+			require.NoError(t, err)
+			require.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id)
+			ver, err := GetProtocolVersion(ls.currentPParams)
+			require.NoError(t, err)
+			assert.Equal(t, uint(8), ver.Major)
+		})
+	}
+}
+
 // TestTrustedReplayBoundaryEraFollowsBlock pins that a boundary the node does
 // not validate keeps following the block that opens the epoch: the era
 // decision runs only where the block is validated.

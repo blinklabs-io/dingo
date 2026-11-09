@@ -12074,7 +12074,10 @@ func (ls *LedgerState) protocolVersionBumpSnapshot() (
 	if entry.NextEraTrigger.Kind != hardfork.TriggerAtVersion {
 		return protocolVersionBumpSnapshot{}, false
 	}
-	targetEpoch := ls.currentEpoch.EpochId + 1
+	// The hard-fork combinator names the successor of the ledger epoch label
+	// (Shelley/Inspect.hs pparamsUpdate: succ nesEL), which is not the
+	// epoch after the tip's when an empty epoch left the label behind.
+	targetEpoch := ls.ledgerEpoch + 1
 	if ls.transitionInfo.State == hardfork.TransitionKnown &&
 		ls.transitionInfo.KnownEpoch == targetEpoch {
 		return protocolVersionBumpSnapshot{}, false
@@ -12507,9 +12510,11 @@ func (ls *LedgerState) evaluateHardForkInitiationStability(
 		}
 		// Re-derive the target epoch from the current state at
 		// commit time so an epoch rollover that landed during the
-		// tally doesn't pin TransitionKnown to a stale epoch id.
+		// tally doesn't pin TransitionKnown to a stale epoch id. The
+		// successor of the ledger epoch label is the epoch the
+		// hard-fork combinator names (Shelley/Inspect.hs pparamsUpdate).
 		ls.transitionInfo = hardfork.NewTransitionKnown(
-			ls.currentEpoch.EpochId + 1,
+			ls.ledgerEpoch + 1,
 		)
 		shouldPublish = true
 	}()
