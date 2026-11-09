@@ -2459,6 +2459,11 @@ func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {
 		forger.metrics.remainingKESPeriods,
 	)
 	lastValidExpiry := testutil.ToFloat64(forger.metrics.opCertExpiryKES)
+	creds.kesMu.RLock()
+	expiringKey := creds.kesSKey
+	require.NotNil(t, expiringKey)
+	expiringData := expiringKey.Data
+	creds.kesMu.RUnlock()
 
 	// The same loaded producer reaches the first expired period while running.
 	clock.currentSlot = 2
@@ -2466,9 +2471,9 @@ func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.Equal(
 		t,
-		1,
+		2,
 		leader.callCount(),
-		"expired period must not run leader selection",
+		"expired period checks eligibility once to decide whether to report",
 	)
 	require.Equal(t, 1, builder.calls, "expired period must not build a block")
 	require.Equal(
@@ -2502,6 +2507,231 @@ func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {
 		float64(1),
 		testutil.ToFloat64(forger.metrics.forgeCouldNot),
 	)
+	require.False(t, creds.IsLoaded(), "expired signing key must be retired")
+	creds.kesMu.RLock()
+	require.Nil(t, creds.kesSKey)
+	creds.kesMu.RUnlock()
+	require.Equal(t, make([]byte, len(expiringData)), expiringData)
+}
+
+func TestCheckAndForgeProductionEvolvesKESBeforeNonLeaderSlot(t *testing.T) {
+	t.Parallel()
+
+	creds := setupTestCredentials(t)
+	require.NoError(t, creds.ValidateKESPeriod(
+		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+		0,
+	))
+	leader := &forgerNotLeader{}
+	builder := &forgerTestBuilder{}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      creds,
+		LeaderChecker:    leader,
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       1,
+			chainTipSlot:      0,
+			slotsPerKESPeriod: 1,
+		},
+	})
+	require.NoError(t, err)
+	require.Zero(t, creds.GetKESPeriod())
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Equal(t, 1, leader.callCount())
+	require.Equal(t, uint64(1), creds.GetKESPeriod())
+	require.Zero(t, builder.calls)
+	require.Zero(t, broadcaster.calls)
+}
+
+func TestUpdateKESForSlotDropsExpiredRemoteSigner(t *testing.T) {
+	t.Parallel()
+	vrfPath, _, opCertPath := createTestKeys(t)
+	creds := NewPoolCredentials()
+	require.NoError(
+		t,
+		creds.LoadFromAgentSign(
+			vrfPath,
+			opCertPath,
+			&fakeRemoteKESSigner{},
+		),
+	)
+	require.NoError(t, creds.ValidateKESPeriod(
+		synthGenesis(1, 1, time.Second, time.Unix(0, 0)),
+		0,
+	))
+
+	_, _, _, err := creds.updateKESForSlot(1)
+	require.ErrorIs(t, err, errOpCertExpired)
+	creds.kesMu.RLock()
+	require.Nil(t, creds.remoteSigner)
+	creds.kesMu.RUnlock()
+	require.False(t, creds.IsLoaded())
+}
+
+func TestCheckAndForgeProductionExpiredKESRefusalReportedOnlyForLeaderSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		leader     LeaderChecker
+		wantCount  float64
+		wantLogged bool
+	}{
+		{name: "non-leader slot is silent", leader: &forgerNotLeader{}},
+		{
+			name:       "leader slot is counted and logged",
+			leader:     &forgerCountingLeader{},
+			wantCount:  1,
+			wantLogged: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			creds := setupTestCredentials(t)
+			require.NoError(t, creds.ValidateKESPeriod(
+				synthGenesis(1, 1, time.Second, time.Unix(0, 0)),
+				0,
+			))
+			builder := &forgerTestBuilder{}
+			broadcaster := &forgerTestBroadcaster{}
+			var logs bytes.Buffer
+			forger, err := NewBlockForger(ForgerConfig{
+				Mode:             ModeProduction,
+				Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
+				Credentials:      creds,
+				LeaderChecker:    tc.leader,
+				BlockBuilder:     builder,
+				BlockBroadcaster: broadcaster,
+				SlotClock: forgerTestSlotClock{
+					currentSlot:       1,
+					chainTipSlot:      0,
+					slotsPerKESPeriod: 1,
+				},
+				PromRegistry: prometheus.NewRegistry(),
+			})
+			require.NoError(t, err)
+
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+			)
+			require.Zero(t, builder.calls)
+			require.Zero(t, broadcaster.calls)
+			require.False(t, creds.IsLoaded(), "expired key must be retired")
+			require.Equal(
+				t,
+				tc.wantCount,
+				testutil.ToFloat64(forger.metrics.forgeCouldNot),
+			)
+			if tc.wantLogged {
+				require.Contains(
+					t, logs.String(), "operational certificate expired",
+				)
+			} else {
+				require.NotContains(
+					t, logs.String(), "operational certificate expired",
+				)
+			}
+		})
+	}
+}
+
+func TestCheckAndForgeProductionKESStateFaultCountedOnlyForLeaderSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		leader    LeaderChecker
+		wantCount float64
+	}{
+		{name: "non-leader slot is not counted", leader: &forgerNotLeader{}},
+		{
+			name:      "leader slot is counted",
+			leader:    &forgerCountingLeader{},
+			wantCount: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			creds := setupTestCredentials(t)
+			require.NoError(t, creds.ValidateKESPeriod(
+				synthGenesis(10, 10, time.Second, time.Unix(0, 0)),
+				0,
+			))
+			builder := &forgerTestBuilder{}
+			broadcaster := &forgerTestBroadcaster{}
+			forger, err := NewBlockForger(ForgerConfig{
+				Mode:             ModeProduction,
+				Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				Credentials:      creds,
+				LeaderChecker:    tc.leader,
+				BlockBuilder:     builder,
+				BlockBroadcaster: broadcaster,
+				SlotClock: forgerTestSlotClock{
+					currentSlot:       1,
+					chainTipSlot:      0,
+					slotsPerKESPeriod: 10,
+				},
+				PromRegistry: prometheus.NewRegistry(),
+			})
+			require.NoError(t, err)
+
+			creds.mu.Lock()
+			creds.vrfSKey = nil
+			creds.mu.Unlock()
+
+			err = forger.checkAndForgeProduction(context.Background())
+			require.ErrorContains(t, err, "credentials not loaded")
+			require.Zero(t, builder.calls)
+			require.Zero(t, broadcaster.calls)
+			require.Equal(
+				t,
+				tc.wantCount,
+				testutil.ToFloat64(forger.metrics.forgeCouldNot),
+			)
+		})
+	}
+}
+
+type closableRemoteKESSigner struct {
+	fakeRemoteKESSigner
+	closed int
+}
+
+func (s *closableRemoteKESSigner) Close() error {
+	s.closed++
+	return nil
+}
+
+func TestUpdateKESForSlotClosesExpiredRemoteSigner(t *testing.T) {
+	t.Parallel()
+	vrfPath, _, opCertPath := createTestKeys(t)
+	creds := NewPoolCredentials()
+	signer := &closableRemoteKESSigner{}
+	require.NoError(t, creds.LoadFromAgentSign(vrfPath, opCertPath, signer))
+	require.NoError(t, creds.ValidateKESPeriod(
+		synthGenesis(1, 1, time.Second, time.Unix(0, 0)),
+		0,
+	))
+
+	_, _, _, err := creds.updateKESForSlot(0)
+	require.NoError(t, err)
+	require.Zero(t, signer.closed, "a valid period must keep the signer open")
+
+	_, _, _, err = creds.updateKESForSlot(1)
+	require.ErrorIs(t, err, errOpCertExpired)
+	require.Equal(t, 1, signer.closed)
 }
 
 func TestCheckAndForgeProductionStopsBeforeOpCertStart(t *testing.T) {
@@ -2550,10 +2780,11 @@ func TestCheckAndForgeProductionStopsBeforeOpCertStart(t *testing.T) {
 		forger.checkAndForgeProduction(context.Background()),
 		"pre-start policy gate must decline before KES evolution",
 	)
-	require.Zero(
+	require.Equal(
 		t,
+		1,
 		leader.callCount(),
-		"pre-start period must not run leader selection",
+		"pre-start period checks eligibility once to decide whether to report",
 	)
 	require.Zero(t, leiosChecker.calls, "pre-start period must not run Leios")
 	require.Zero(t, builder.calls, "pre-start period must not build a block")
@@ -3103,6 +3334,7 @@ func (b *forgerTestBlock) Type() int { return int(babbage.BlockTypeBabbage) }
 func (b *forgerTestBlock) Transactions() []lcommon.Transaction {
 	return b.transactions
 }
+
 func (b *forgerTestBlock) Utxorpc() (*utxorpc_cardano.Block, error) {
 	return nil, nil
 }
@@ -3185,7 +3417,7 @@ func TestCheckAndForgeProductionUsesRetainedReconnectFrontier(t *testing.T) {
 			currentSlot:       114220801,
 			chainTipSlot:      114220600,
 			upstreamTipSlot:   114220800,
-			slotsPerKESPeriod: 100,
+			slotsPerKESPeriod: 114220801,
 		},
 		PromRegistry: prometheus.NewRegistry(),
 	})

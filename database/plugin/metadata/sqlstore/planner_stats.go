@@ -288,6 +288,19 @@ func reloadStatistics(ctx context.Context, conn *sql.Conn) error {
 // goroutine holding a write transaction: preparing against writeDB needs the
 // connection that transaction holds.
 func (s *Store) reprepareHotStatements(ctx context.Context) {
+	if s.lazyHotStatements {
+		// Drop the cache; borrowStmt prepares against the new statistics on
+		// next use. Failures are forgotten because the schema may differ.
+		s.stmtMu.Lock()
+		idle := s.retireStatementsLocked(s.stmts)
+		s.stmts = nil
+		s.stmtFailed = nil
+		s.stmtMu.Unlock()
+		for _, stmt := range idle {
+			_ = stmt.Close()
+		}
+		return
+	}
 	fresh := s.buildHotStatements(ctx)
 	if ctx.Err() != nil || s.closed.Load() {
 		for _, stmt := range fresh {

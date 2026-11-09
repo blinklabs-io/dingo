@@ -261,6 +261,22 @@ func TestVerifySTMSignatureRejectsZeroK(t *testing.T) {
 	require.Contains(t, err.Error(), "K=0")
 }
 
+func TestSTMLotteryMatchesReferenceLogarithm(t *testing.T) {
+	t.Parallel()
+
+	// This evaluation lies between the thresholds produced by ln(0.8) and
+	// log1p(-0.2). The reference uses ln(1 - phi_f), so the lottery ticket loses.
+	evBytes, err := hex.DecodeString(
+		"c4c2d13bb9dcc59cc1c5a4740478c6c50235427909a1952f884fdec936939550" +
+			"c1d53be23e73c2cfedad4f5a59a1ab9383a9d466ae0173c31f32333333333333",
+	)
+	require.NoError(t, err)
+	var ev [64]byte
+	copy(ev[:], evBytes)
+
+	require.False(t, stmIsLotteryWon(0.2, ev, 1, 1))
+}
+
 func TestParseSTMAggregateVerificationKeyRejectsZeroLeaves(t *testing.T) {
 	t.Parallel()
 
