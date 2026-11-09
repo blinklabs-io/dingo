@@ -311,8 +311,9 @@ func dumpRewardBatchTables(t *testing.T, raw *sql.DB) string {
 	queries := []string{
 		`SELECT credential_tag, staking_key, reward, active FROM account
 ORDER BY credential_tag, staking_key`,
-		// output_id is the output row's id, which a database assigns from its
-		// own sequence, so it is not part of what two databases must agree on.
+		// output_id is left out because callers whose output rows come from
+		// each database's own sequence cannot agree on it; callers that supply
+		// it compare rewardCreditOutputIDs as well.
 		`SELECT a.staking_key, a.credential_tag, c.boundary_slot,
     c.amount FROM reward_credit c JOIN account a ON a.id = c.account_id
 ORDER BY a.credential_tag, a.staking_key, c.boundary_slot, c.amount`,
@@ -353,6 +354,28 @@ ORDER BY epoch, pool_key_hash, credential_tag, staking_key`,
 		require.NoError(t, rows.Close())
 		sb.WriteString("--\n")
 	}
+	return sb.String()
+}
+
+// rewardCreditOutputIDs renders each reward_credit row with the output_id the
+// writer stored, for differentials whose credits carry literal output ids.
+func rewardCreditOutputIDs(t *testing.T, raw *sql.DB) string {
+	t.Helper()
+	rows, err := raw.Query(`SELECT a.credential_tag, a.staking_key,
+    c.boundary_slot, c.output_id, c.amount
+FROM reward_credit c JOIN account a ON a.id = c.account_id
+ORDER BY a.credential_tag, a.staking_key, c.boundary_slot, c.output_id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var sb strings.Builder
+	for rows.Next() {
+		var tag, slot, outputID int64
+		var key []byte
+		var amount string
+		require.NoError(t, rows.Scan(&tag, &key, &slot, &outputID, &amount))
+		fmt.Fprintf(&sb, "%d %x %d %d %s\n", tag, key, slot, outputID, amount)
+	}
+	require.NoError(t, rows.Err())
 	return sb.String()
 }
 
@@ -460,6 +483,11 @@ func TestAddAccountRewardsByCredentialMatchesOneAtATime(t *testing.T) {
 				require.Equal(
 					t, dumpRewardBatchTables(t, oneRaw),
 					dumpRewardBatchTables(t, batchRaw),
+					"pass %d", replay,
+				)
+				require.Equal(
+					t, rewardCreditOutputIDs(t, oneRaw),
+					rewardCreditOutputIDs(t, batchRaw),
 					"pass %d", replay,
 				)
 			}

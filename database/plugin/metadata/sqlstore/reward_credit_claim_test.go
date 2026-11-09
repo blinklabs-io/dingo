@@ -313,3 +313,53 @@ func TestClaimUnfoldedRewardCreditsFollowsAccountOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, rest, "nothing is claimed twice")
 }
+
+// TestClaimUnfoldedRewardCreditsResumesInsideAnAccount pins the inclusive
+// cursor: a chunk that ends between two outputs of one account resumes at that
+// account and claims the output the chunk left.
+func TestClaimUnfoldedRewardCreditsResumesInsideAnAccount(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	require.NoError(t, store.SetPendingRewardCreditRounds(
+		[]models.RewardCreditRound{{SnapshotEpoch: 1, BoundarySlot: 100}}, nil,
+	))
+	keyA, keyB := bytesRepeat(0x41, 28), bytesRepeat(0x42, 28)
+	for _, key := range [][]byte{keyA, keyB} {
+		require.NoError(t, store.CreateAccount(nil, &models.Account{
+			StakingKey: key, Active: true,
+		}))
+	}
+	var outputs []*models.RewardAccountOutput
+	for _, row := range []struct {
+		key  []byte
+		kind string
+	}{{keyA, "member"}, {keyA, "leader"}, {keyB, "member"}} {
+		outputs = append(outputs, &models.RewardAccountOutput{
+			Epoch: 1, StakingKey: row.key, PoolKeyHash: bytesRepeat(0x31, 28),
+			RewardType: row.kind, Amount: types.Uint64(5), Spendable: true,
+			BoundarySlot: 100,
+		})
+	}
+	require.NoError(t, store.SaveRewardAccountOutputs(outputs, nil))
+	accountA, err := store.GetAccountByCredential(0, keyA, false, nil)
+	require.NoError(t, err)
+
+	first, err := store.ClaimUnfoldedRewardCredits(1, 0, 1, nil)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	require.Equal(t, accountA.ID, first[0].AccountID)
+	second, err := store.ClaimUnfoldedRewardCredits(
+		1, first[0].AccountID, 1, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, second, 1)
+	require.Equal(t, keyA, second[0].StakingKey,
+		"the resumed chunk claims account A's remaining output")
+	require.NotEqual(t, first[0].ID, second[0].ID)
+	third, err := store.ClaimUnfoldedRewardCredits(
+		1, second[0].AccountID, 1, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, third, 1)
+	require.Equal(t, keyB, third[0].StakingKey)
+}

@@ -214,6 +214,62 @@ WHERE folded GROUP BY epoch`,
 	return strings.Join(lines, "\n")
 }
 
+// expectedMigratedRewardRows lists the rows seedLegacyRewardJournal's journal
+// must migrate to, by the first byte of the account's staking key.
+func expectedMigratedRewardRows() []string {
+	var rows []string
+	for _, slot := range []int{500, 600, 700} {
+		for i := 1; i <= 6; i++ {
+			rows = append(rows, fmt.Sprintf("credit|%02X|%d|%d", i, slot, 10+i))
+		}
+	}
+	rows = append(rows,
+		"event|01|600|7|1",
+		"event|02|600|5|0",
+		"event|04|650|13|0",
+		"event|02|700|9|0",
+		"event|03|700|11|1",
+	)
+	for i := 1; i <= 4; i++ {
+		previous := 20 * i
+		if i == 4 {
+			previous = 0
+		}
+		rows = append(rows,
+			fmt.Sprintf("withdrawal|%02X|%d|%d|%d", i, 640+i, i, previous))
+	}
+	return rows
+}
+
+func migratedRewardRows(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), `
+SELECT 'credit|' || hex(substr(a.staking_key, 1, 1)) || '|' || c.boundary_slot
+    || '|' || c.amount, 0, c.boundary_slot, a.id
+FROM reward_credit c JOIN account a ON a.id = c.account_id
+UNION ALL
+SELECT 'event|' || hex(substr(a.staking_key, 1, 1)) || '|' || e.slot || '|'
+    || e.amount || '|' || e.post_snapshot, 1, e.slot, a.id
+FROM reward_event_credit e JOIN account a ON a.id = e.account_id
+UNION ALL
+SELECT 'withdrawal|' || hex(substr(a.staking_key, 1, 1)) || '|' || w.slot
+    || '|' || w.amount || '|' || COALESCE(w.previous_reward, '0'), 2, w.slot,
+    a.id
+FROM reward_withdrawal w JOIN account a ON a.id = w.account_id
+ORDER BY 2, 3, 4`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var ret []string
+	for rows.Next() {
+		var line string
+		var kind, slot, account int64
+		require.NoError(t, rows.Scan(&line, &kind, &slot, &account))
+		ret = append(ret, line)
+	}
+	require.NoError(t, rows.Err())
+	return ret
+}
+
 func tableExists(t *testing.T, db *sql.DB, name string) bool {
 	t.Helper()
 	var n int
@@ -308,6 +364,12 @@ WHERE post_snapshot AND slot = 700`),
 				count(t, db, `SELECT COUNT(*) FROM reward_withdrawal
 WHERE amount = '4' AND previous_reward = '0'`),
 				"a NULL previous reward reads as zero",
+			)
+			require.Equal(
+				t,
+				expectedMigratedRewardRows(),
+				migratedRewardRows(t, db),
+				"each legacy row keeps its account, amount and slot",
 			)
 
 			// A second run finds nothing to do.

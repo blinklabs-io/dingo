@@ -25,6 +25,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -95,20 +96,23 @@ type rewardJournalRound struct {
 }
 
 type rewardJournalRun struct {
-	t        *testing.T
-	store    *sqlstore.Store
-	driver   rewardJournalDriver
-	rng      *rand.Rand
-	refs     []models.StakeCredentialRef
-	slot     uint64
-	epoch    uint64
-	txSeq    uint64
-	rounds   []rewardJournalRound
-	events   []uint64
-	cov      rewardJournalCoverage
-	out      strings.Builder
-	cpHashes []string
-	cpCount  int
+	t      *testing.T
+	store  *sqlstore.Store
+	driver rewardJournalDriver
+	rng    *rand.Rand
+	refs   []models.StakeCredentialRef
+	slot   uint64
+	epoch  uint64
+	txSeq  uint64
+	rounds []rewardJournalRound
+	events []uint64
+	// withdrawals holds the slot of every applied withdrawal not yet rolled
+	// back.
+	withdrawals []uint64
+	cov         rewardJournalCoverage
+	out         strings.Builder
+	cpHashes    []string
+	cpCount     int
 }
 
 func TestRewardJournalEquivalence(t *testing.T) {
@@ -435,14 +439,35 @@ func (r *rewardJournalRun) compact() {
 		limit := 1 + r.rng.Intn(9)
 		claimed := r.driver.foldChunk(r.t, round.epoch, limit)
 		if claimed > 0 {
-			round.partial = true
-			r.cov.partialCompactions++
+			round.partial = r.roundHasUnfolded(round.epoch)
+			if round.partial {
+				r.cov.partialCompactions++
+			}
 		}
 		return
 	}
 	r.driver.foldRound(r.t, round.epoch)
 	round.partial = false
 	r.cov.fullCompactions++
+}
+
+// roundHasUnfolded reports whether any account still has an unfolded output
+// of the round.
+func (r *rewardJournalRun) roundHasUnfolded(epoch uint64) bool {
+	for _, ref := range r.refs {
+		pending, err := r.store.GetPendingRewardAccountOutputsForCredential(
+			ref.Tag,
+			ref.Key,
+			nil,
+		)
+		require.NoError(r.t, err)
+		for _, output := range pending {
+			if output.Epoch == epoch {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // withdraw folds the credential's pending credits first, as the ledger does
@@ -503,6 +528,7 @@ func (r *rewardJournalRun) withdraw() {
 		)
 	}
 	require.NoError(t, apply())
+	r.withdrawals = append(r.withdrawals, r.slot)
 	r.cov.withdrawals++
 	if r.rng.Intn(100) < 15 {
 		require.NoError(t, apply())
@@ -536,7 +562,9 @@ func (r *rewardJournalRun) rollback() {
 			}
 		}
 	}
-	if r.cov.withdrawals > 0 && r.txSeq > 0 {
+	if slices.ContainsFunc(r.withdrawals, func(slot uint64) bool {
+		return slot > target
+	}) {
 		r.cov.rollbackAfterWithdrw++
 	}
 	require.NoError(t, r.store.DeleteAccountRewardsAfterSlot(target, nil))
@@ -559,6 +587,9 @@ func (r *rewardJournalRun) rollback() {
 		}
 	}
 	r.events = keptEvents
+	r.withdrawals = slices.DeleteFunc(r.withdrawals, func(slot uint64) bool {
+		return slot > target
+	})
 }
 
 func (r *rewardJournalRun) checkpoint() {
