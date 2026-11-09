@@ -187,3 +187,24 @@ func TestMeshRetainsUnsupportedHeightBoundary(t *testing.T) {
 	)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
+
+func TestMeshHeightBoundaryIsSignedInt64(t *testing.T) {
+	t.Parallel()
+	db := newAdapterDatabase(t)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID: 1, Number: math.MaxInt64, Slot: 1, Hash: testHash(0xaa),
+		Cbor: []byte{0x80},
+	}, nil))
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID: 2, Number: math.MaxInt64 + 1, Slot: 2, Hash: testHash(0xab),
+		Cbor: []byte{0x80},
+	}, nil))
+	meshDB := NewMeshDatabase(db)
+	block, err := meshDB.BlockByIndex(context.Background(), math.MaxInt64)
+	require.NoError(t, err)
+	require.Equal(t, testHash(0xaa), block.Hash)
+	_, err = meshDB.BlockByIndex(
+		context.Background(), uint64(math.MaxInt64)+1,
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}

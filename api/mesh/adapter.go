@@ -47,9 +47,11 @@ func (a *meshDatabaseAdapter) BlockByHash(ctx context.Context,
 func (a *meshDatabaseAdapter) BlockByIndex(ctx context.Context,
 	height uint64,
 ) (models.Block, error) {
-	if height > math.MaxUint64-database.BlockInitialIndex {
+	// Mesh block indexes are signed 64-bit, so a larger height cannot be
+	// represented in any response.
+	if height > math.MaxInt64 {
 		return models.Block{}, fmt.Errorf(
-			"block height %d exceeds supported range: %w",
+			"block height %d exceeds the Mesh index range: %w",
 			height,
 			models.ErrBlockNotFound,
 		)
