@@ -65,7 +65,8 @@ The transaction table has no size or deposit column. Transaction hash and block
 hash are different identities. The utxo.transaction_id integer refers to the
 transaction row's id; utxo.tx_id is the binary transaction hash. To relate
 outputs to a transaction, filter on utxo.producer_tx_id (the transaction row id
-of the producing or collateral-return transaction) or utxo.transaction_id.
+of the producing or collateral-return transaction); utxo.transaction_id covers
+regular outputs only.
 No index leads with utxo.tx_id for produced rows, so a filter on tx_id alone scans
 the table. Outputs a ledger-state import wrote before their transaction was
 applied have a NULL producer_tx_id; only a lookup that also states

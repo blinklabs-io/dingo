@@ -149,8 +149,8 @@ row selection exists.
 Transaction application records collateral through the durable
 `utxo_collateral_edge` association table, keyed by transaction id. Hydration
 joins that table per transaction, so shared collateral remains visible to every
-owner; rollback deletes only the rolled-back transaction's edges. The legacy
-scalar marker is no longer written.
+owner; rollback deletes only the rolled-back transaction's edges. The
+transaction-application path no longer writes the legacy scalar marker.
 
 The public compatibility interface is decomposing into narrow capabilities so
 components need not inherit the full historical metadata surface. Three are

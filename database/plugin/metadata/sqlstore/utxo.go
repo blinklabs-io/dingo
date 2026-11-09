@@ -1384,7 +1384,7 @@ func distinctUtxoTxIDs(
 // is filtered in Go instead.
 //
 // Filtering by tx_id alone -- rather than an OR of per-(tx_id, output_idx)
-// equalities, see utxoIDPredicate -- keeps SQLite's planner on the leading
+// equalities -- keeps SQLite's planner on the leading
 // column of the unique output index (idx_utxo_producer_output on SQLite) no
 // matter how many terms are in the batch. The OR-of-pairs form defeats that index past a handful of
 // terms and falls back to a full scan of idx_utxo_deleted_staking_amount
