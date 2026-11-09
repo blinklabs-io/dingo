@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	// Registers the aggregate sqlstore's account totals call on SQLite.
 	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/bigintsum"
+	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/coinsum"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	driversqlite "modernc.org/sqlite"
@@ -540,6 +541,13 @@ func NewSQLStore(
 // that ordering is what excludes a data race with the readers.
 var BeforeOpenDataDir func(dataDir string) error
 
+// LazyHotStatements makes every store this package opens defer preparing its
+// hot statements to first use instead of preparing them in Start. It exists
+// for test binaries that open many short-lived stores; production code never
+// sets it. Like BeforeOpenDataDir it must be assigned only from a test
+// package's init function.
+var LazyHotStatements bool
+
 func openSQLStore(
 	config Config,
 	dependencies metadata.ProviderDependencies,
@@ -696,6 +704,7 @@ func openSQLStoreWithDialect(
 		SQLitePath:          databasePath,
 		// modernc prepares eagerly; runtime probing remains on the active Tx.
 		SQLiteOverlayInsertRows: 2047,
+		LazyHotStatements:       LazyHotStatements,
 		WriteDB:                 writeDB,
 		ReadDB:                  readDB,
 		Dialect:                 dialect,

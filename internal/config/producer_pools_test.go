@@ -79,6 +79,38 @@ func TestValidateBlockProducerPools(t *testing.T) {
 			wantErr: "blockProducerPools[0].shelleyKesAgentServerSpkiSha256 must be 64 hex characters",
 		},
 		{
+			name: "plaintext entry with a pin",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyKESAgentPlaintext = true
+				c.BlockProducerPools = []BlockProducerPool{b}
+			},
+			wantErr: "so blockProducerPools[0].shelleyKesAgentPlaintext takes neither",
+		},
+		{
+			name: "plaintext entry without an address",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyKESAgentAddress = ""
+				b.ShelleyKESAgentClientCertFile = ""
+				b.ShelleyKESAgentClientKeyFile = ""
+				b.ShelleyKESAgentServerSPKISHA256 = ""
+				b.ShelleyKESKey = "/keys/b/kes.skey"
+				b.ShelleyKESAgentPlaintext = true
+				c.BlockProducerPools = []BlockProducerPool{b}
+			},
+			wantErr: "blockProducerPools[0].shelleyKesAgentPlaintext requires blockProducerPools[0].shelleyKesAgentAddress",
+		},
+		{
+			name: "entry with an out-of-range port",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyKESAgentAddress = "kes-agent.example:0"
+				c.BlockProducerPools = []BlockProducerPool{b}
+			},
+			wantErr: "blockProducerPools[0].shelleyKesAgentAddress \"kes-agent.example:0\" must be host:port",
+		},
+		{
 			name: "entry with two KES sources",
 			modify: func(c *Config) {
 				b := remotePool("b")

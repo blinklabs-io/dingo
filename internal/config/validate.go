@@ -58,12 +58,36 @@ func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
 	return nil
 }
 
+// validateHostPort checks that addr is host:port with a non-empty host and a
+// numeric port in 1-65535.
+func validateHostPort(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if host == "" {
+		return errors.New("empty host")
+	}
+	if p, err := strconv.ParseUint(port, 10, 16); err != nil || p == 0 {
+		return fmt.Errorf("port %q is not in 1-65535", port)
+	}
+	return nil
+}
+
 // validateRemoteKESAgent checks a pool's remote KES agent configuration: one
-// KES source only, sign mode, and the client certificate, key and server pin
-// it cannot authenticate without. prefix is prepended to every setting name,
-// so errors name the list entry they came from.
+// KES source only, sign mode, and a transport that can work: the server pin
+// and the client certificate are optional, but need TLS, so plain TCP takes
+// neither, and a client certificate is set as a pair. prefix is prepended to
+// every setting name, so errors name the list entry they came from.
 func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
 	if p.ShelleyKESAgentAddress == "" {
+		if p.ShelleyKESAgentPlaintext {
+			return []error{fmt.Errorf(
+				"%sshelleyKesAgentPlaintext requires %sshelleyKesAgentAddress",
+				prefix,
+				prefix,
+			)}
+		}
 		return nil
 	}
 	field := func(name string) string { return prefix + name }
@@ -76,7 +100,7 @@ func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
 			field("shelleyKesAgentSocket"),
 		))
 	}
-	if _, _, err := net.SplitHostPort(p.ShelleyKESAgentAddress); err != nil {
+	if err := validateHostPort(p.ShelleyKESAgentAddress); err != nil {
 		errs = append(errs, fmt.Errorf(
 			"%s %q must be host:port: %w",
 			field("shelleyKesAgentAddress"),
@@ -91,29 +115,37 @@ func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
 			p.ShelleyKESAgentMode,
 		))
 	}
-	if p.ShelleyKESAgentClientCertFile == "" ||
-		p.ShelleyKESAgentClientKeyFile == "" {
+	clientCert := p.ShelleyKESAgentClientCertFile != "" ||
+		p.ShelleyKESAgentClientKeyFile != ""
+	if clientCert && (p.ShelleyKESAgentClientCertFile == "" ||
+		p.ShelleyKESAgentClientKeyFile == "") {
 		errs = append(errs, fmt.Errorf(
-			"%s requires %s and %s",
-			field("shelleyKesAgentAddress"),
+			"%s and %s must be set together",
 			field("shelleyKesAgentClientCertFile"),
 			field("shelleyKesAgentClientKeyFile"),
 		))
 	}
-	if p.ShelleyKESAgentServerSPKISHA256 == "" {
-		errs = append(errs, fmt.Errorf(
-			"%s requires %s",
-			field("shelleyKesAgentAddress"),
-			field("shelleyKesAgentServerSpkiSha256"),
-		))
-	} else if pin, err := hex.DecodeString(
-		strings.TrimSpace(p.ShelleyKESAgentServerSPKISHA256),
-	); err != nil || len(pin) != sha256.Size {
-		errs = append(errs, fmt.Errorf(
-			"%s must be %d hex characters",
-			field("shelleyKesAgentServerSpkiSha256"),
-			2*sha256.Size,
-		))
+	pinned := strings.TrimSpace(p.ShelleyKESAgentServerSPKISHA256) != ""
+	if p.ShelleyKESAgentPlaintext {
+		if pinned || clientCert {
+			errs = append(errs, fmt.Errorf(
+				"%s and a client certificate need TLS, so %s takes neither",
+				field("shelleyKesAgentServerSpkiSha256"),
+				field("shelleyKesAgentPlaintext"),
+			))
+		}
+		return errs
+	}
+	if pinned {
+		if pin, err := hex.DecodeString(
+			strings.TrimSpace(p.ShelleyKESAgentServerSPKISHA256),
+		); err != nil || len(pin) != sha256.Size {
+			errs = append(errs, fmt.Errorf(
+				"%s must be %d hex characters",
+				field("shelleyKesAgentServerSpkiSha256"),
+				2*sha256.Size,
+			))
+		}
 	}
 	return errs
 }

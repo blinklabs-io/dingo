@@ -17,46 +17,51 @@ package ledger
 import (
 	"testing"
 
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/require"
 )
 
-// A network that starts in Dijkstra records no previous-era parameters, so a
-// Conway transaction used to be validated with Dijkstra parameters and failed
-// with ErrIncompatibleProtocolParams.
-func TestValidationPParamsConwayTxOnDijkstraWithoutPreviousParams(t *testing.T) {
+// A network that starts in Dijkstra records no previous-era parameters, so
+// historical Conway block validation uses Dijkstra's embedded Conway params.
+func TestPreviousEraPParamsConwayOnDijkstraWithoutRecordedParams(t *testing.T) {
 	t.Parallel()
 
 	dpp := &dijkstra.DijkstraProtocolParameters{}
 	dpp.MaxTxSize = 32_768
-	active := eras.ActiveEras(true)
-	snap := txValidationSnapshot{
-		currentEra:     eraDesc(t, active, dijkstra.EraIdDijkstra),
-		currentPParams: dpp,
-		eraList:        active,
-	}
-
-	pp, isCurrent := snap.validationPParams(conway.EraIdConway)
-	require.False(t, isCurrent)
+	pp := previousEraPParams(
+		conway.EraIdConway,
+		dijkstra.EraIdDijkstra,
+		dpp,
+		nil,
+	)
 	require.Same(t, &dpp.ConwayProtocolParameters, pp)
 
-	pp, isCurrent = snap.validationPParams(dijkstra.EraIdDijkstra)
-	require.True(t, isCurrent)
-	require.Same(t, dpp, pp)
+	pp = previousEraPParams(
+		dijkstra.EraIdDijkstra,
+		dijkstra.EraIdDijkstra,
+		dpp,
+		nil,
+	)
+	require.Nil(t, pp)
 
 	// Recorded previous-era parameters still win.
 	recorded := &conway.ConwayProtocolParameters{}
-	snap.prevEraPParams = recorded
-	pp, isCurrent = snap.validationPParams(conway.EraIdConway)
-	require.False(t, isCurrent)
+	pp = previousEraPParams(
+		conway.EraIdConway,
+		dijkstra.EraIdDijkstra,
+		dpp,
+		recorded,
+	)
 	require.Same(t, recorded, pp)
 
 	// No derivation for other eras.
-	snap.prevEraPParams = nil
-	pp, isCurrent = snap.validationPParams(babbage.EraIdBabbage)
-	require.True(t, isCurrent)
-	require.Same(t, dpp, pp)
+	pp = previousEraPParams(
+		babbage.EraIdBabbage,
+		dijkstra.EraIdDijkstra,
+		dpp,
+		nil,
+	)
+	require.Nil(t, pp)
 }

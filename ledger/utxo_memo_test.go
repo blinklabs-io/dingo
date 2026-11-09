@@ -459,15 +459,8 @@ func newIntraBlockDoubleSpendFixture(
 	}
 }
 
-// TestLedgerProcessBlockRejectsIntraBlockDoubleSpend checks the block-apply
-// path: tx1's delta removes the shared input from the database transaction
-// before tx2's view is built, so tx2 must fail to resolve it. A memo shared
-// across the per-transaction views would answer tx2 from tx1's resolution.
-func TestLedgerProcessBlockRejectsIntraBlockDoubleSpend(t *testing.T) {
-	t.Parallel()
-	fx := newIntraBlockDoubleSpendFixture(t)
-
-	processErr := fx.db.Transaction(context.Background(), true).
+func processIntraBlockFixture(fx *intraBlockDoubleSpendFixture) error {
+	return fx.db.Transaction(context.Background(), true).
 		Do(func(txn *database.Txn) error {
 			_, err := fx.ls.ledgerProcessBlock(
 				context.Background(),
@@ -489,6 +482,17 @@ func TestLedgerProcessBlockRejectsIntraBlockDoubleSpend(t *testing.T) {
 			)
 			return err
 		})
+}
+
+// TestLedgerProcessBlockRejectsIntraBlockDoubleSpend checks the block-apply
+// path: tx1's delta removes the shared input from the database transaction
+// before tx2's view is built, so tx2 must fail to resolve it. A memo shared
+// across the per-transaction views would answer tx2 from tx1's resolution.
+func TestLedgerProcessBlockRejectsIntraBlockDoubleSpend(t *testing.T) {
+	t.Parallel()
+	fx := newIntraBlockDoubleSpendFixture(t)
+
+	processErr := processIntraBlockFixture(fx)
 
 	require.ErrorIs(
 		t,
@@ -499,6 +503,55 @@ func TestLedgerProcessBlockRejectsIntraBlockDoubleSpend(t *testing.T) {
 	require.Equal(
 		t, []string{fx.tx1.Hash().String()}, *fx.validated,
 		"tx1 must validate successfully before tx2 is attempted and rejected",
+	)
+}
+
+func TestLedgerProcessBlockRejectsSpentIntraBlockOutput(t *testing.T) {
+	t.Parallel()
+	fx := newIntraBlockDoubleSpendFixture(t)
+
+	created := fx.tx1.Produced()[0]
+	spend := omockledger.NewTransactionBuilder()
+	spend.WithId(bytes.Repeat([]byte{0x95}, 32))
+	spend.WithType(gdijkstra.TxTypeDijkstra)
+	spend.WithInputs(created.Id)
+	spend.WithOutputs(created.Output)
+	spend.WithValid(true)
+
+	reuse := omockledger.NewTransactionBuilder()
+	reuse.WithId(bytes.Repeat([]byte{0x96}, 32))
+	reuse.WithType(gdijkstra.TxTypeDijkstra)
+	reuse.WithInputs(created.Id)
+	reuse.WithOutputs(created.Output)
+	reuse.WithValid(true)
+
+	fx.block.txs = []lcommon.Transaction{fx.tx1, spend, reuse}
+	for _, tx := range fx.block.txs[1:] {
+		var txHash [32]byte
+		copy(txHash[:], tx.Hash().Bytes())
+		fx.offsets.TxOffsets[txHash] = database.CborOffset{
+			BlockSlot:  10,
+			ByteLength: 1,
+		}
+		fx.offsets.UtxoOffsets[database.UtxoRef{
+			TxId:      txHash,
+			OutputIdx: 0,
+		}] = database.CborOffset{BlockSlot: 10, ByteLength: 1}
+	}
+
+	processErr := processIntraBlockFixture(fx)
+
+	require.ErrorIs(
+		t,
+		processErr,
+		database.ErrUtxoNotFound,
+		"a later transaction must not resolve an intra-block output after it is spent",
+	)
+	require.Equal(
+		t,
+		[]string{fx.tx1.Hash().String(), spend.Hash().String()},
+		*fx.validated,
+		"the output must resolve only until the transaction that spends it applies",
 	)
 }
 

@@ -516,6 +516,20 @@ func (e *Election) invalidateTachysSchedules() {
 	e.mu.Unlock()
 }
 
+// invalidatePraosFutureSchedules drops schedules whose nonce may have changed
+// when consensus state was restored. The current epoch's nonce is already
+// immutable at the rollback horizon, so its schedule remains usable.
+func (e *Election) invalidatePraosFutureSchedules(currentEpoch uint64) {
+	e.mu.Lock()
+	for epoch := range e.schedules {
+		if epoch > currentEpoch {
+			delete(e.schedules, epoch)
+		}
+	}
+	e.scheduleGeneration++
+	e.mu.Unlock()
+}
+
 // invalidateTachysSchedule drops one epoch's schedule. The generation bump
 // refuses any in-flight result, so callers re-queue every epoch that might
 // have been computing.
@@ -532,11 +546,13 @@ func (e *Election) invalidateTachysSchedule(epoch uint64) {
 // ConsensusStateRestored invalidates provider-owned schedules before a
 // rollback becomes observable to block production.
 func (e *Election) ConsensusStateRestored() {
-	if e.tachysProvider == nil {
-		return
+	currentEpoch := e.epochProvider.CurrentEpoch()
+	if e.tachysProvider != nil {
+		e.invalidateTachysSchedules()
+	} else {
+		e.invalidatePraosFutureSchedules(currentEpoch)
 	}
-	e.invalidateTachysSchedules()
-	e.queueScheduleCompute(e.epochProvider.CurrentEpoch())
+	e.queueScheduleCompute(currentEpoch)
 	if nextEpoch, ok := e.epochProvider.NextEpochNonceReadyEpoch(); ok {
 		e.queueScheduleCompute(nextEpoch)
 	}
