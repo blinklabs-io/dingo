@@ -95,6 +95,7 @@ const (
 	utxoStakingPartialIndexSchemaRelease                = "utxo-staking-partial-indexes"
 	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
 	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
+	blockNonceSlotIndexSchemaRelease                    = "block-nonce-slot-leading-index"
 	utxoSpentStakingIndexSchemaRelease                  = "utxo-spent-staking-index"
 )
 
@@ -271,7 +272,8 @@ var schemaVersions = []struct {
 		Dir:     "v54",
 	},
 	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
-	{Version: 56, Name: utxoSpentStakingIndexSchemaRelease, Dir: "v56"},
+	{Version: 56, Name: blockNonceSlotIndexSchemaRelease, Dir: "v56"},
+	{Version: 57, Name: utxoSpentStakingIndexSchemaRelease, Dir: "v57"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -392,7 +394,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.Backfill = utxoStakingPartialIndexBackfill
 		}
 		// MySQL replaces the index with a single-column one from its native
-		// v56 resource, so only the partial-index engines backfill.
+		// v57 resource, so only the partial-index engines backfill.
 		if version.Name == utxoSpentStakingIndexSchemaRelease &&
 			dialect != "mysql" {
 			migration.BackfillRevision = "1"
@@ -1996,6 +1998,11 @@ func translateSchemaSQLInSchema(
 				value,
 				"DROP INDEX IF EXISTS `idx_asset_amount`",
 				"DROP INDEX `idx_asset_amount` ON `asset`",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `hash_slot`",
+				"DROP INDEX `hash_slot` ON `block_nonce`",
 			)
 			value = strings.ReplaceAll(
 				value,

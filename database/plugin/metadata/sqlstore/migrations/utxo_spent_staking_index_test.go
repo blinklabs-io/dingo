@@ -28,7 +28,7 @@ import (
 
 // utxoSpentStakingIndexVersion is the schema version that makes
 // idx_utxo_deleted_staking_amount cover spent rows only.
-const utxoSpentStakingIndexVersion = 56
+const utxoSpentStakingIndexVersion = 57
 
 // utxoSpentStakingIndexDB returns a database migrated through the version
 // before the index became partial, holding live outputs with and without a
@@ -169,7 +169,7 @@ func TestUtxoSpentStakingIndexLeftToPendingRebuild(t *testing.T) {
 	require.True(t, ok, "the script-supply index is not part of this upgrade")
 }
 
-// MySQL has no partial index, so v56 replaces the four-column index with one
+// MySQL has no partial index, so v57 replaces the four-column index with one
 // on deleted_slot alone; the other engines run the partial-index backfill.
 func TestUtxoSpentStakingIndexMigrationPerDialect(t *testing.T) {
 	t.Parallel()

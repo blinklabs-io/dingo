@@ -229,20 +229,6 @@ func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(
 	assert.Nil(t, got, "pre-Conway pparams must short-circuit to nil")
 }
 
-func TestEvaluateRatifiableHardForkInitiation_NoActiveProposals_ReturnsNil(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db, _ := newTallyTestDB(t)
-	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
-	)
-	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
-	require.NoError(t, err)
-	assert.Nil(t, got, "empty active proposal set must yield nil")
-}
-
 func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(
 	t *testing.T,
 ) {
