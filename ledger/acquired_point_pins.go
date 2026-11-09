@@ -143,6 +143,19 @@ func (ls *LedgerState) capPoolSnapshotPruneBefore(
 	before, minBefore uint64,
 	epochOf func(slot uint64) (uint64, bool),
 ) uint64 {
+	return ls.capPoolSnapshotPruneBeforeWith(
+		before, minBefore, epochOf, ls.LeaderStakeSnapshotEpoch,
+	)
+}
+
+// capPoolSnapshotPruneBeforeWith is capPoolSnapshotPruneBefore with the
+// snapshot an epoch is elected by supplied, so a caller holding one epoch-cache
+// generation resolves every pin against it.
+func (ls *LedgerState) capPoolSnapshotPruneBeforeWith(
+	before, minBefore uint64,
+	epochOf func(slot uint64) (uint64, bool),
+	snapshotOf func(epoch uint64) uint64,
+) uint64 {
 	p := &ls.acquiredPins
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -152,7 +165,7 @@ func (ls *LedgerState) capPoolSnapshotPruneBefore(
 			before = 0
 			break
 		}
-		if snap := ls.LeaderStakeSnapshotEpoch(epoch); snap < before {
+		if snap := snapshotOf(epoch); snap < before {
 			before = snap
 		}
 	}

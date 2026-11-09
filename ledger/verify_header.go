@@ -3643,7 +3643,7 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 	// released; the epoch cache is an atomic snapshot and takes no lock. One
 	// cache generation for every pin keeps the floor coherent, as above.
 	cache := ls.loadConsensusSnapshot().epochCache
-	before = ls.capPoolSnapshotPruneBefore(
+	before = ls.capPoolSnapshotPruneBeforeWith(
 		before, minBefore,
 		func(slot uint64) (uint64, bool) {
 			epoch, err := epochForSlotInCache(cache, slot)
@@ -3652,7 +3652,23 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 			}
 			return epoch.EpochId, true
 		},
+		func(epoch uint64) uint64 {
+			return leaderStakeSnapshotEpochInCache(epoch, cache)
+		},
 	)
+	// Once an epoch has been empty the ledger epoch label stops advancing, so
+	// the distribution leaders are elected by stays the one captured before the
+	// gap however many epochs pass. It is not a deferred header's need and so
+	// is exempt from the depth backstop: pruning it leaves every later block
+	// without a leader distribution.
+	if len(cache) > 0 &&
+		ledgerEpochFromCache(cache) < cache[len(cache)-1].EpochId {
+		if frozen := leaderStakeSnapshotEpochInCache(
+			cache[len(cache)-1].EpochId+1, cache,
+		); frozen < before {
+			before = frozen
+		}
+	}
 	// Prune runs with the mutex RELEASED: it opens the single sqlite write
 	// connection, which block apply holds before taking this mutex, so running
 	// it under the lock deadlocks. See the doc comment.

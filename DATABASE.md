@@ -4003,12 +4003,17 @@ therefore prunes `pool_stake_snapshot` *through a retention guard*
    returns nil and the block is adopted with its stateful leader-eligibility
    check never run. Keys whose slot cannot be parsed are evicted regardless —
    they can never be validated.
-2. **Computes the floor** as the minimum of `StakeSnapshotEpoch(epochOf(slot))`
-   over the surviving deferred headers and lowers the pool-snapshot delete
+2. **Computes the floor** as the minimum of the leader snapshot epoch
+   (`StakeSnapshotEpoch` of the ledger epoch label when the slot lies beyond an
+   empty epoch, else of `epochOf(slot)`) over the surviving deferred headers and lowers the pool-snapshot delete
    boundary to it when it is below `current-3` (reward-table retention is
    untouched at `current-3`). While ANY surviving deferred slot is not yet
    mappable to an epoch, the floor is **0** (retain everything) so the snapshot
    the header will need once the epoch cache advances is not pruned meanwhile.
+   After an empty epoch the guard additionally lowers the boundary to the
+   snapshot the frozen leader distribution reads (`StakeSnapshotEpoch(label)`),
+   and that bound is not subject to the depth cap: no later boundary captures a
+   replacement.
 3. **Clamps to a depth cap.** The boundary is clamped up to
    `current - poolSnapshotRetentionMaxDepth` (24), a hard backstop so even a
    stuck header can never pin more than a bounded number of epochs of pool

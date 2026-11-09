@@ -9857,3 +9857,46 @@ func TestLeaderStakeSnapshotEpochInCacheFollowsTheLedgerLabel(t *testing.T) {
 			leaderStakeSnapshotEpochInCache(tc.epoch, tc.cache), tc.name)
 	}
 }
+
+// TestPrunePoolSnapshotsWithRetentionFloor_KeepsDistributionFrozenByAnEmptyEpoch
+// pins that cleanup after an empty epoch leaves the snapshot nesPd still
+// corresponds to. The ledger epoch label stops advancing, so no later epoch
+// ever captures a replacement and every block is elected by the one row
+// captured before the gap, which the default window and the depth backstop
+// would otherwise reach.
+func TestPrunePoolSnapshotsWithRetentionFloor_KeepsDistributionFrozenByAnEmptyEpoch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{74}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	row := func(id uint64) models.Epoch {
+		return models.Epoch{
+			EpochId:       id,
+			StartSlot:     id * 1_000,
+			LengthInSlots: 1_000,
+			Nonce:         tb.epochNonce,
+		}
+	}
+	// Label 40, then a jump to 60: epochs 41-59 are empty.
+	ls.epochCache = []models.Epoch{row(40), row(60), row(61)}
+	ls.publishSnapshotsLocked()
+
+	for _, tc := range []struct {
+		name         string
+		defaultFloor uint64
+		minFloor     uint64
+	}{
+		{name: "default window", defaultFloor: 58, minFloor: 37},
+		{name: "depth backstop", defaultFloor: 58, minFloor: 57},
+	} {
+		var seenBefore uint64
+		require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(
+			tc.defaultFloor, tc.minFloor,
+			func(before uint64) error { seenBefore = before; return nil },
+		), tc.name)
+		assert.LessOrEqual(t, seenBefore, uint64(39),
+			"%s: mark[39], the frozen distribution, must be retained", tc.name)
+	}
+}
