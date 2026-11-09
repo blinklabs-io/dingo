@@ -96,6 +96,11 @@ func checkedSupplyStep(total, delta int64) (int64, error) {
 // ascending order, which costs one read and one write; a slot below the
 // newest row (historical replay) also shifts every row above it, because each
 // row is a cumulative total.
+//
+// The read and the write are not one atomic statement. They rely on block
+// application being the only writer of a nonzero delta and applying one block
+// at a time; a caller off that path must make them atomic first, because a
+// lost update here persists until the next rebuild.
 func (s *Store) addScriptLockedSupply(
 	ctx context.Context,
 	db queryer,
@@ -145,6 +150,7 @@ func (s *Store) addScriptLockedSupplyBelowLatest(
 	err := db.QueryRowContext(ctx, s.dialect.Rebind(
 		`SELECT amount FROM script_locked_supply
 WHERE slot < ? ORDER BY slot DESC LIMIT 1`), slot).Scan(&previous)
+	hasPrevious := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -170,7 +176,10 @@ WHERE slot >= ? ORDER BY slot`), slot)
 	if err != nil {
 		return err
 	}
-	if len(tail) == 0 || tail[0].slot != slot {
+	// With no row below slot there is no base to sum from: a seed above it
+	// already counts outputs a replay spends here, so the delta only shifts
+	// the tail, and a rollback to this range rebuilds by scan.
+	if hasPrevious && (len(tail) == 0 || tail[0].slot != slot) {
 		next, err := checkedSupplyStep(previous, delta)
 		if err != nil {
 			return err

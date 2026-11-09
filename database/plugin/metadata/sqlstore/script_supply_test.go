@@ -79,6 +79,30 @@ func TestScriptLockedSupplyOutOfOrderSlotsShiftLaterRows(t *testing.T) {
 	require.EqualValues(t, 16, got)
 }
 
+// A write older than every row has no base to sum from: the seed row already
+// counts the output, so the delta only shifts the rows above it. Writing
+// delta alone as a row would fail a debit and leave a credit as a total a
+// rollback would then trust.
+func TestScriptLockedSupplyBelowOldestRowShiftsWithoutARow(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	_, err := store.writeDB.Exec(
+		`INSERT INTO script_locked_supply (slot, amount) VALUES (100, 1000)`,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, addSupply(t, store, 50, -10))
+	require.Equal(t, map[int64]int64{100: 990}, supplyRows(t, store))
+
+	require.NoError(t, addSupply(t, store, 60, 4))
+	require.Equal(t, map[int64]int64{100: 994}, supplyRows(t, store))
+
+	require.ErrorContains(
+		t, addSupply(t, store, 70, -995), "out of range",
+	)
+	require.Equal(t, map[int64]int64{100: 994}, supplyRows(t, store))
+}
+
 func TestScriptLockedSupplyRejectsOverflowAndUnderflow(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
