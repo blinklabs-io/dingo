@@ -1092,25 +1092,27 @@ func unsetBarkAllowPrivateEnv(t *testing.T) {
 	unsetEnv(t, "DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES")
 }
 
-func TestCIP0203ConfigPrecedence(t *testing.T) {
+func TestBlockSoftwareTagConfig(t *testing.T) {
 	// Not t.Parallel: LoadConfig uses process-global configuration and environment.
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
-	unsetEnv(t, "DINGO_CIP0203_ENABLED")
-	unsetEnv(t, "CARDANO_DINGO_CIP0203_ENABLED")
-	require.False(t, newDefaultConfig().CIP0203Enabled)
+	unsetEnv(t, "DINGO_BLOCK_SOFTWARE_TAG")
+	unsetEnv(t, "CARDANO_DINGO_BLOCK_SOFTWARE_TAG")
+	require.Empty(t, newDefaultConfig().BlockSoftwareTag)
 	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
-	require.NoError(t, os.WriteFile(configFile, []byte("cip0203Enabled: true\n"), 0o600))
+	require.NoError(t, os.WriteFile(configFile, []byte("blockSoftwareTag: version\n"), 0o600))
 	cfg, err := LoadConfig(configFile)
 	require.NoError(t, err)
-	require.True(t, cfg.CIP0203Enabled)
-	t.Setenv("DINGO_CIP0203_ENABLED", "false")
+	require.Equal(t, "version", cfg.BlockSoftwareTag)
+	t.Setenv("DINGO_BLOCK_SOFTWARE_TAG", "obfuscated")
 	cfg, err = LoadConfig(configFile)
 	require.NoError(t, err)
-	require.False(t, cfg.CIP0203Enabled)
+	require.Equal(t, "obfuscated", cfg.BlockSoftwareTag)
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
-	require.NoError(t, cmd.ParseFlags([]string{"--cip-0203-enabled"}))
+	require.NoError(t, cmd.ParseFlags([]string{"--block-software-tag=identifier"}))
 	require.NoError(t, ApplyFlags(cmd, cfg))
-	require.True(t, cfg.CIP0203Enabled)
+	require.Equal(t, "identifier", cfg.BlockSoftwareTag)
+	cfg.BlockSoftwareTag = "bogus"
+	require.Error(t, cfg.validate(cfg.RunMode, 0))
 }

@@ -1266,11 +1266,14 @@
 # minPoolMargin: 0        # basis points, 0..10000 (150 = 1.5%); 0 disables
 
 # ---
-# Include the compiled release version in forged block headers (default off).
+# What forged block headers report in their software tag (default identifier):
+#   identifier  the Dingo identifier (69) only
+#   version     the identifier plus the compiled release version
+#   obfuscated  a random 32-bit value per block, hiding that Dingo forged it
 # See docs/cip-0203.md for the payload encoding and build requirements.
-# CLI: --cip-0203-enabled
-# Env: DINGO_CIP0203_ENABLED
-# cip0203Enabled: false
+# CLI: --block-software-tag
+# Env: DINGO_BLOCK_SOFTWARE_TAG
+# blockSoftwareTag: identifier
 
 # ---
 # Experimental pre-Dijkstra CIP-50 override (consensus-affecting)

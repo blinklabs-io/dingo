@@ -257,7 +257,7 @@ type DefaultBlockBuilder struct {
 	// leiosHeaderExtension selects the 12-field Dijkstra header body for
 	// every ranking block, not only those carrying Leios data.
 	leiosHeaderExtension bool
-	protocolMinor        uint64
+	blockSoftwareTag     dingoversion.SoftwareTag
 }
 
 // BlockBuilderConfig holds configuration for the DefaultBlockBuilder.
@@ -281,8 +281,9 @@ type BlockBuilderConfig struct {
 	// it carries Leios data; any other block gets the 10-field Praos body
 	// that cardano-node 11.2.0 produces and requires.
 	LeiosHeaderExtension bool
-	// CIP0203Enabled includes the linker-populated Dingo release version.
-	CIP0203Enabled bool
+	// BlockSoftwareTag selects the software tag of forged headers; empty means
+	// identifier only.
+	BlockSoftwareTag dingoversion.SoftwareTag
 }
 
 // NewDefaultBlockBuilder creates a new DefaultBlockBuilder.
@@ -308,20 +309,21 @@ func NewDefaultBlockBuilder(
 		cfg.Logger = slog.Default()
 	}
 
-	minor, err := dingoversion.HeaderProtocolMinor(cfg.CIP0203Enabled)
-	if err != nil {
+	if _, err := dingoversion.NextHeaderProtocolMinor(
+		cfg.BlockSoftwareTag,
+	); err != nil {
 		return nil, err
 	}
 	return &DefaultBlockBuilder{
-		protocolMinor:   minor,
-		now:             time.Now,
-		logger:          cfg.Logger,
-		mempool:         cfg.Mempool,
-		pparamsProvider: cfg.PParamsProvider,
-		chainTip:        cfg.ChainTip,
-		epochNonce:      cfg.EpochNonce,
-		creds:           cfg.Credentials,
-		txValidator:     cfg.TxValidator,
+		blockSoftwareTag: cfg.BlockSoftwareTag,
+		now:              time.Now,
+		logger:           cfg.Logger,
+		mempool:          cfg.Mempool,
+		pparamsProvider:  cfg.PParamsProvider,
+		chainTip:         cfg.ChainTip,
+		epochNonce:       cfg.EpochNonce,
+		creds:            cfg.Credentials,
+		txValidator:      cfg.TxValidator,
 
 		leiosHeaderExtension: cfg.LeiosHeaderExtension,
 	}, nil
@@ -1295,6 +1297,13 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 		prevHash = &h
 	}
 
+	protocolMinor, err := dingoversion.NextHeaderProtocolMinor(
+		b.blockSoftwareTag,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// The header body shape differs between Praos and TPraos eras:
 	// Praos packs OpCert/ProtoVersion as nested structs and carries a
 	// single combined VrfResult; TPraos uses flat OpCert/proto fields
@@ -1317,7 +1326,7 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 			OpCertKesPeriod:      opCert.KESPeriod,
 			OpCertSignature:      opCert.Signature,
 			ProtoMajorVersion:    limits.protoMajor,
-			ProtoMinorVersion:    b.protocolMinor,
+			ProtoMinorVersion:    protocolMinor,
 		}
 	} else if limits.era == eraDijkstra &&
 		(b.leiosHeaderExtension || !leios.empty() || leiosCert != nil) {
@@ -1342,7 +1351,7 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 			},
 			ProtoVersion: babbage.BabbageProtoVersion{
 				Major: limits.protoMajor,
-				Minor: b.protocolMinor,
+				Minor: protocolMinor,
 			},
 			LeiosCertified:    leiosCert != nil,
 			LeiosAnnouncement: leiosAnnouncement,
@@ -1365,7 +1374,7 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 			},
 			ProtoVersion: babbage.BabbageProtoVersion{
 				Major: limits.protoMajor,
-				Minor: b.protocolMinor,
+				Minor: protocolMinor,
 			},
 		}
 	}

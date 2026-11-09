@@ -39,6 +39,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
@@ -861,6 +862,10 @@ func LoadWithDB(
 	); err != nil {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
+	headerMode, err := dingoversion.ParseSoftwareTag(cfg.BlockSoftwareTag)
+	if err != nil {
+		return err
+	}
 	// Load state
 	ls, err := newLedgerStateForLoad(
 		ledger.LedgerStateConfig{
@@ -869,7 +874,7 @@ func LoadWithDB(
 			Logger:            logger,
 			CardanoNodeConfig: nodeCfg,
 			Network:           cfg.Network,
-			CIP0203Enabled:    cfg.CIP0203Enabled,
+			BlockSoftwareTag:  headerMode,
 			DijkstraBlsProofDomain: cardano.DijkstraPoolBlsProofDomain(
 				nodeCfg,
 				cfg.Network,

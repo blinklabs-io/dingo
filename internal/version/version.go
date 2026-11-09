@@ -15,6 +15,8 @@
 package version
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -48,12 +50,56 @@ func HeaderProtocolMinor(enabled bool) (uint64, error) {
 	return encodeHeaderVersion(Version)
 }
 
+// SoftwareTag selects what a forged header reports in its minor protocol
+// version (self_reported_software_tag).
+type SoftwareTag string
+
+const (
+	// SoftwareTagIdentifier reports only the Dingo identifier (69).
+	SoftwareTagIdentifier SoftwareTag = "identifier"
+	// SoftwareTagVersion reports the identifier plus the release version.
+	SoftwareTagVersion SoftwareTag = "version"
+	// SoftwareTagObfuscated reports a fresh random value for every block.
+	SoftwareTagObfuscated SoftwareTag = "obfuscated"
+)
+
+// ParseSoftwareTag validates the configured software tag. Empty means
+// identifier.
+func ParseSoftwareTag(mode string) (SoftwareTag, error) {
+	switch m := SoftwareTag(mode); m {
+	case "":
+		return SoftwareTagIdentifier, nil
+	case SoftwareTagIdentifier, SoftwareTagVersion, SoftwareTagObfuscated:
+		return m, nil
+	}
+	return "", fmt.Errorf(
+		"invalid blockSoftwareTag %q: expected %q, %q or %q", mode,
+		SoftwareTagIdentifier, SoftwareTagVersion, SoftwareTagObfuscated,
+	)
+}
+
+// NextHeaderProtocolMinor returns the minor protocol version for one forged
+// header. Obfuscated mode ignores the build version and returns a fresh
+// uniformly random value over the whole range the header CDDL allows for
+// self_reported_software_tag (uint .size 4), so neither the Dingo identifier
+// nor a release version can be read from the block.
+func NextHeaderProtocolMinor(mode SoftwareTag) (uint64, error) {
+	if mode != SoftwareTagObfuscated {
+		return HeaderProtocolMinor(mode == SoftwareTagVersion)
+	}
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0, fmt.Errorf("generate obfuscated software tag: %w", err)
+	}
+	return uint64(binary.BigEndian.Uint32(b[:])), nil
+}
+
 var releaseVersion = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
 
 func encodeHeaderVersion(value string) (uint64, error) {
 	parts := releaseVersion.FindStringSubmatch(value)
 	if parts == nil {
-		return 0, fmt.Errorf("CIP-0203 requires a build version major.minor.patch, got %q", value)
+		return 0, fmt.Errorf("version software tag requires a build version major.minor.patch, got %q", value)
 	}
 	// Reject empty identifiers and numeric prerelease identifiers with leading zeros.
 	for i, suffix := range parts[4:] {
@@ -73,7 +119,7 @@ func encodeHeaderVersion(value string) (uint64, error) {
 	for i, width := range []int{6, 8, 8} {
 		n, err := strconv.ParseUint(parts[i+1], 10, width)
 		if err != nil {
-			return 0, fmt.Errorf("CIP-0203 version component %q exceeds %d bits", parts[i+1], width)
+			return 0, fmt.Errorf("version software tag component %q exceeds %d bits", parts[i+1], width)
 		}
 		numbers[i] = n
 	}

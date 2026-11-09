@@ -984,7 +984,7 @@ var flagSpecs = []flagSpec{
 		"keep SQLite planner statistics current with PRAGMA optimize at startup and after each epoch rollover",
 	),
 
-	boolFlag("CIP0203Enabled", "cip-0203-enabled", "include the build version in forged block headers (CIP-0203)"),
+	stringFlag("BlockSoftwareTag", "block-software-tag", "", "software tag in forged block headers: identifier, version, or obfuscated"),
 
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)
 	uintFlag(

@@ -14,7 +14,10 @@
 
 package version
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestEncodeHeaderVersion(t *testing.T) {
 	t.Parallel()
@@ -52,5 +55,45 @@ func TestHeaderProtocolMinor(t *testing.T) {
 	got, err = HeaderProtocolMinor(true)
 	if (err == nil) != (wantErr == nil) || got != want {
 		t.Fatalf("enabled: got %d, %v; want %d, %v", got, err, want, wantErr)
+	}
+}
+
+func TestParseSoftwareTag(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]SoftwareTag{
+		"":           SoftwareTagIdentifier,
+		"identifier": SoftwareTagIdentifier,
+		"version":    SoftwareTagVersion,
+		"obfuscated": SoftwareTagObfuscated,
+	} {
+		got, err := ParseSoftwareTag(in)
+		if err != nil || got != want {
+			t.Fatalf("%q: got %q, %v", in, got, err)
+		}
+	}
+	if _, err := ParseSoftwareTag("full"); err == nil {
+		t.Fatal("accepted unknown mode")
+	}
+}
+
+func TestNextHeaderProtocolMinorObfuscated(t *testing.T) {
+	t.Parallel()
+	seen := map[uint64]struct{}{}
+	for range 64 {
+		got, err := NextHeaderProtocolMinor(SoftwareTagObfuscated)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got > math.MaxUint32 {
+			t.Fatalf("tag %d exceeds uint .size 4", got)
+		}
+		seen[got] = struct{}{}
+	}
+	if len(seen) < 60 {
+		t.Fatalf("expected near-unique tags, got %d of 64", len(seen))
+	}
+	got, err := NextHeaderProtocolMinor(SoftwareTagIdentifier)
+	if err != nil || got != BlockHeaderProtocolMinor {
+		t.Fatalf("identifier: got %d, %v", got, err)
 	}
 }

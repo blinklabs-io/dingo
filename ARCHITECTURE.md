@@ -1505,11 +1505,11 @@ graph TB
 
 ### Block Forging
 
-The optional `cip0203Enabled` setting adds the linker-populated Dingo release
-version to the header software tag through `internal/version`. It defaults
-to false, preserving identifier 69 with no version payload. Composition
-passes the setting to both the credential-backed block builder and the dev
-ledger forging path. See [the payload specification](docs/cip-0203.md).
+The `blockSoftwareTag` setting selects the header software tag through
+`internal/version`: `identifier` (default, identifier 69 with no payload),
+`version` (adds the linker-populated Dingo release version), or `obfuscated`
+(a random 32-bit tag per forged header). Composition passes the mode to both
+the credential-backed block builder and the dev ledger forging path. See [the payload specification](docs/cip-0203.md).
 
 The block production pipeline from leader election through broadcast.
 

@@ -1070,8 +1070,10 @@ type Config struct {
 	// only to explicitly opt out.
 	ValidateForgedBlock bool `yaml:"validateForgedBlock"              envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
-	// CIP0203Enabled adds the build version to forged block identifiers.
-	CIP0203Enabled bool `yaml:"cip0203Enabled" envconfig:"DINGO_CIP0203_ENABLED"`
+	// BlockSoftwareTag selects what forged block headers report in the software
+	// tag: "identifier" (default, Dingo identifier 69), "version" (identifier
+	// plus release version), or "obfuscated" (a random 32-bit value per block).
+	BlockSoftwareTag string `yaml:"blockSoftwareTag" envconfig:"DINGO_BLOCK_SOFTWARE_TAG"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting

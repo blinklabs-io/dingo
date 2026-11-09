@@ -304,7 +304,7 @@ func hasCapNetBindService() bool {
 // depend on the effective UID or kernel settings of the test runner.
 func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	var errs []error
-	if _, err := dingoversion.HeaderProtocolMinor(c.CIP0203Enabled); err != nil {
+	if _, err := dingoversion.ParseSoftwareTag(c.BlockSoftwareTag); err != nil {
 		errs = append(errs, err)
 	}
 

@@ -2701,7 +2701,7 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		enabled      bool
+		mode         dingoversion.SoftwareTag
 		major        uint
 		pparamMinor  uint
 		expectedSlot uint64
@@ -2718,7 +2718,7 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 			pparamMinor:  5,
 			expectedSlot: 1002,
 		},
-		{name: "version payload", enabled: true, major: 9, expectedSlot: 1003},
+		{name: "version payload", mode: dingoversion.SoftwareTagVersion, major: 9, expectedSlot: 1003},
 	}
 
 	for _, tt := range tests {
@@ -2756,10 +2756,10 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 					epoch: 1,
 					nonce: make([]byte, 32),
 				},
-				Credentials:    creds,
-				CIP0203Enabled: tt.enabled,
+				Credentials:      creds,
+				BlockSoftwareTag: tt.mode,
 			})
-			wantMinor, versionErr := dingoversion.HeaderProtocolMinor(tt.enabled)
+			wantMinor, versionErr := dingoversion.NextHeaderProtocolMinor(tt.mode)
 			require.NoError(t, versionErr)
 			require.NoError(t, err)
 
@@ -2782,6 +2782,52 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestBuildBlockObfuscatesSoftwareTag(t *testing.T) {
+	creds := setupTestCredentials(t)
+	prior := dingoversion.Version
+	t.Cleanup(func() { dingoversion.Version = prior })
+	// Obfuscation must not require a valid build version.
+	dingoversion.Version = ""
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool: &mockMempool{transactions: []MempoolTransaction{}},
+		PParamsProvider: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: 9,
+				},
+				MaxTxSize:        16384,
+				MaxBlockBodySize: 90112,
+				MaxBlockExUnits: lcommon.ExUnits{
+					Memory: 62000000,
+					Steps:  20000000000,
+				},
+			},
+		},
+		ChainTip: &mockChainTip{
+			tip: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 1000, Hash: make([]byte, 32)},
+				BlockNumber: 100,
+			},
+		},
+		EpochNonce:       &mockEpochNonceProvider{epoch: 1, nonce: make([]byte, 32)},
+		Credentials:      creds,
+		BlockSoftwareTag: dingoversion.SoftwareTagObfuscated,
+	})
+	require.NoError(t, err)
+
+	seen := map[uint64]struct{}{}
+	for slot := uint64(1001); slot < 1009; slot++ {
+		_, blockCbor, err := builder.BuildBlock(context.Background(), slot, 0)
+		require.NoError(t, err)
+		block, err := conway.NewConwayBlockFromCbor(blockCbor)
+		require.NoError(t, err)
+		minor := block.BlockHeader.Body.ProtoVersion.Minor
+		require.LessOrEqual(t, minor, uint64(math.MaxUint32))
+		seen[minor] = struct{}{}
+	}
+	require.Greater(t, len(seen), 1, "the tag must be drawn per block")
 }
 
 func TestBuildBlockMissingVRFKey(t *testing.T) {

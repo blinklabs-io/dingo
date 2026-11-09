@@ -907,14 +907,14 @@ func (n *Node) initBlockForger(
 
 	// Create block builder
 	builder, err := forging.NewDefaultBlockBuilder(forging.BlockBuilderConfig{
-		Logger:          n.config.logger,
-		Mempool:         mempoolAdapter,
-		PParamsProvider: n.ledgerState,
-		ChainTip:        n.chainManager.PrimaryChain(),
-		EpochNonce:      epochNonceAdapter,
-		Credentials:     creds,
-		CIP0203Enabled:  n.config.cip0203Enabled,
-		TxValidator:     n.ledgerState,
+		Logger:           n.config.logger,
+		Mempool:          mempoolAdapter,
+		PParamsProvider:  n.ledgerState,
+		ChainTip:         n.chainManager.PrimaryChain(),
+		EpochNonce:       epochNonceAdapter,
+		Credentials:      creds,
+		BlockSoftwareTag: n.config.blockSoftwareTagMode(),
+		TxValidator:      n.ledgerState,
 		// The 12-field prototype header body belongs to Leios networks only.
 		LeiosHeaderExtension: n.config.leiosForgingEnabled(),
 	})

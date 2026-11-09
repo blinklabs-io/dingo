@@ -1178,9 +1178,9 @@ type LedgerStateConfig struct {
 	// DelegatorInactivityEnabled is true.
 	DelegatorInactivity uint64
 	ValidateHistorical  bool
-	// CIP0203Enabled includes the build version in dev-mode forged headers.
-	CIP0203Enabled bool
-	EnableDijkstra bool
+	// BlockSoftwareTag selects the software tag of dev-mode forged headers.
+	BlockSoftwareTag dingoversion.SoftwareTag
+	EnableDijkstra   bool
 	// WarmGenesisStake makes the first reward rounds of a network that
 	// declares Shelley at epoch 0 pay from genesis staking, as the Leios
 	// prototype networks do. A standard cardano-node leaves those rounds
@@ -17120,7 +17120,9 @@ func (ls *LedgerState) forgeBlock() {
 		return
 	}
 
-	minor, err := dingoversion.HeaderProtocolMinor(ls.config.CIP0203Enabled)
+	minor, err := dingoversion.NextHeaderProtocolMinor(
+		ls.config.BlockSoftwareTag,
+	)
 	if err != nil {
 		ls.config.Logger.Error(
 			"cannot encode forged block version",

@@ -314,16 +314,16 @@ func TestForgeBlockRevalidatesMempoolTransactions(t *testing.T) {
 
 // Not t.Parallel: sets the process-wide dingoversion.Version, which the
 // linker populates in release builds and is empty in a test binary.
-func TestForgeBlockCIP0203(t *testing.T) {
+func TestForgeBlockSoftwareTag(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		enabled   bool
+		mode      dingoversion.SoftwareTag
 		version   string
 		wantBlock bool
 	}{
 		{name: "legacy identifier", wantBlock: true},
-		{name: "version signalled", enabled: true, version: "v1.2.3", wantBlock: true},
-		{name: "enabled without a build version", enabled: true},
+		{name: "version signalled", mode: dingoversion.SoftwareTagVersion, version: "v1.2.3", wantBlock: true},
+		{name: "version without a build version", mode: dingoversion.SoftwareTagVersion},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prior := dingoversion.Version
@@ -331,8 +331,8 @@ func TestForgeBlockCIP0203(t *testing.T) {
 			dingoversion.Version = tc.version
 
 			f := newForgeRevalidationFixture(t)
-			f.ls.config.CIP0203Enabled = tc.enabled
-			want, versionErr := dingoversion.HeaderProtocolMinor(tc.enabled)
+			f.ls.config.BlockSoftwareTag = tc.mode
+			want, versionErr := dingoversion.NextHeaderProtocolMinor(tc.mode)
 			f.ls.forgeBlock()
 			tip := f.ls.chain.Tip()
 			if !tc.wantBlock {
@@ -351,7 +351,7 @@ func TestForgeBlockCIP0203(t *testing.T) {
 			got := block.BlockHeader.Body.ProtoVersion.Minor
 			require.Equal(t, want, got)
 			require.Equal(t, dingoversion.BlockHeaderProtocolMinor, got&0xff)
-			if tc.enabled {
+			if tc.mode == dingoversion.SoftwareTagVersion {
 				require.NotEqual(
 					t, dingoversion.BlockHeaderProtocolMinor, got,
 					"an enabled header carries a version payload above the identifier",

@@ -204,7 +204,7 @@ Cardano's ledger rules use ` + "`ProtocolMajorVersion`" + ` to govern era transi
 
 Whenever a block is inspected on-chain:
 - Header: ` + "`{ \"proto_major\": 9, \"proto_minor\": 69 }`" + `
-- A scheme-0 block with ` + "`(proto_minor & 255) == 69`" + ` self-reports **Dingo**. With CIP-0203 enabled, the upper payload bits encode the compiled release version; see docs/cip-0203.md.
+- A scheme-0 block with ` + "`(proto_minor & 255) == 69`" + ` self-reports **Dingo**. With blockSoftwareTag set to version, the upper payload bits encode the compiled release version; with obfuscated, the tag is random and identifies nothing; see docs/cip-0203.md.
 
 ---
 
@@ -251,7 +251,7 @@ const docsFAQContent = `# Dingo Frequently Asked Questions (FAQ)
 **Dingo** is an independent, pure-Go modular implementation of the Cardano blockchain node developed by Blink Labs. It provides high performance, memory efficiency, and native queryability without requiring Haskell dependencies.
 
 ### Q2: How does Dingo identify blocks it forged on Cardano?
-By default, Dingo sets the block header **Protocol Minor Version to ` + "`69`" + `** (` + "`BlockHeaderProtocolMinor = 69`" + `). While the major version indicates the protocol era (e.g. Conway 9 or 10), the minor version 69 identifies Dingo block producers on-chain. With CIP-0203 enabled, scheme 0 and the low byte (` + "`(proto_minor & 255) == 69`" + `) still identify Dingo, while the upper bits carry the release version.
+By default, Dingo sets the block header **Protocol Minor Version to ` + "`69`" + `** (` + "`BlockHeaderProtocolMinor = 69`" + `). While the major version indicates the protocol era (e.g. Conway 9 or 10), the minor version 69 identifies Dingo block producers on-chain. With blockSoftwareTag set to version, scheme 0 and the low byte (` + "`(proto_minor & 255) == 69`" + `) still identify Dingo, while the upper bits carry the release version.
 
 ### Q3: How does Dingo prevent slot double-signing?
 Dingo records a durable **Forge Fence** in SQLite (` + "`sync_state`" + ` table under ` + "`forge_fence:<pool_id>`" + `). It records the highest slot signed and fences against double-signing even across process restarts.
