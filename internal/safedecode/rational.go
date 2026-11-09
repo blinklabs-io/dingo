@@ -146,7 +146,7 @@ func scanRational(data []byte, pos int, depth int) (int, error) {
 		return scanItem(data, start, depth+1)
 	}
 	pos = next
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if indefinite && (pos >= len(data) || data[pos] == 0xff) {
 			return scanItem(data, start, depth+1)
 		}
