@@ -199,7 +199,7 @@ JOIN reward_source s ON s.id = e.source_id`,
 		"withdrawal",
 		`SELECT hex(t.hash), hex(a.staking_key), w.slot, w.amount, w.previous_reward
 FROM reward_withdrawal w JOIN account a ON a.id = w.account_id
-JOIN "transaction" t ON t.id = w.tx_id`,
+JOIN "transaction" t ON t.id = w.transaction_id`,
 	)
 	collect(
 		"round",

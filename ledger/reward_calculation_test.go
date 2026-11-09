@@ -8509,7 +8509,7 @@ ORDER BY a.credential_tag, a.staking_key, s.hash, e.slot`},
 		{"reward_withdrawal", `SELECT a.credential_tag, hex(a.staking_key),
     hex(t.hash), w.amount, w.previous_reward, w.slot
 FROM reward_withdrawal w JOIN account a ON a.id = w.account_id
-JOIN "transaction" t ON t.id = w.tx_id
+JOIN "transaction" t ON t.id = w.transaction_id
 ORDER BY a.credential_tag, a.staking_key, t.hash`},
 		{"reward_live_stake", `SELECT credential_tag, hex(staking_key),
     hex(pool_key_hash), utxo_stake, reward_stake, total_stake, registered,

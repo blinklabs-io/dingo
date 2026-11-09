@@ -29,12 +29,12 @@ CREATE TABLE IF NOT EXISTS `reward_event_credit` (
 );
 
 CREATE TABLE IF NOT EXISTS `reward_withdrawal` (
-    `tx_id` BIGINT NOT NULL,
+    `transaction_id` BIGINT NOT NULL,
     `account_id` BIGINT NOT NULL,
     `slot` BIGINT NOT NULL,
     `amount` VARCHAR(20) NOT NULL,
     `previous_reward` VARCHAR(20) NOT NULL,
-    PRIMARY KEY (`tx_id`, `account_id`),
+    PRIMARY KEY (`transaction_id`, `account_id`),
     KEY `idx_reward_withdrawal_account_slot` (`account_id`, `slot`),
     KEY `idx_reward_withdrawal_slot` (`slot`)
 );

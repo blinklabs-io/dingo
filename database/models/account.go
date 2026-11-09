@@ -25,6 +25,11 @@ import (
 
 var (
 	ErrAccountNotFound = errors.New("account not found")
+	// ErrWithdrawalTransactionNotFound identifies a reward withdrawal whose
+	// withdrawing transaction has no row in the transaction table.
+	ErrWithdrawalTransactionNotFound = errors.New(
+		"withdrawing transaction not found",
+	)
 	// ErrRewardWithdrawalExceedsBalance identifies a transaction whose
 	// withdrawal cannot be satisfied by the node's persisted reward account.
 	ErrRewardWithdrawalExceedsBalance = errors.New(

@@ -131,13 +131,13 @@ func newRewardJournalStatements(dialect string) rewardJournalStatements {
 			"source_id, account_id, slot",
 			"source_id",
 		),
-		copyWithdrawals: "INSERT INTO reward_withdrawal (tx_id, account_id, slot, amount, previous_reward)" +
+		copyWithdrawals: "INSERT INTO reward_withdrawal (transaction_id, account_id, slot, amount, previous_reward)" +
 			" SELECT tx.id, a.id, d.added_slot, d.amount, COALESCE(d.previous_reward, '0')" +
 			" FROM account_reward_delta d" + withdrawalJoin +
 			" WHERE" + idRange + " AND d.withdrawal = TRUE ORDER BY tx.id, a.id " +
 			nothing(
-				"tx_id, account_id",
-				"tx_id",
+				"transaction_id, account_id",
+				"transaction_id",
 			),
 		expectCredits: "SELECT COUNT(*) FROM account_reward_delta d WHERE" + idRange + " AND " + round,
 		matchCredits: "SELECT COUNT(*) FROM account_reward_delta d" + accountJoin +
@@ -150,7 +150,7 @@ func newRewardJournalStatements(dialect string) rewardJournalStatements {
 		expectWithdraws: "SELECT COUNT(*) FROM account_reward_delta d WHERE" + idRange +
 			" AND d.withdrawal = TRUE",
 		matchWithdraws: "SELECT COUNT(*) FROM account_reward_delta d" + withdrawalJoin +
-			" JOIN reward_withdrawal w ON w.tx_id = tx.id AND w.account_id = a.id" +
+			" JOIN reward_withdrawal w ON w.transaction_id = tx.id AND w.account_id = a.id" +
 			" AND w.slot = d.added_slot AND w.amount = d.amount" +
 			" AND w.previous_reward = COALESCE(d.previous_reward, '0')" +
 			" WHERE" + idRange + " AND d.withdrawal = TRUE",

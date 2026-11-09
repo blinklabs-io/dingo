@@ -2431,6 +2431,9 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal(
 		Reward:     types.Uint64(1_000_000),
 		Active:     true,
 	}))
+	require.NoError(t, db.Metadata().SetGenesisTransaction(
+		bytes.Repeat([]byte{0x55}, 32), nil, nil, nil,
+	))
 	require.NoError(t, db.Metadata().ApplyAccountRewardWithdrawal(
 		0,
 		stakeKey,

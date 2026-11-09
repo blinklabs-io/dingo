@@ -126,6 +126,9 @@ func TestSharedSQLStoreAccountParity(t *testing.T) {
 	))
 	gotAfterCredit, err := store.GetAccountByCredential(0, activeKey, true, nil)
 	require.NoError(t, err)
+	require.NoError(t, store.SetGenesisTransaction(
+		[]byte("withdraw"), nil, nil, nil,
+	))
 	require.NoError(t, store.ApplyAccountRewardWithdrawal(
 		0, activeKey, 60, 90, []byte("withdraw"), nil,
 	))
@@ -2346,7 +2349,7 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1234), uint64(account.Reward))
 	require.NoError(t, raw.QueryRow(
-		"SELECT COUNT(*) FROM reward_withdrawal w JOIN \"transaction\" t ON t.id = w.tx_id WHERE t.hash = ?",
+		"SELECT COUNT(*) FROM reward_withdrawal w JOIN \"transaction\" t ON t.id = w.transaction_id WHERE t.hash = ?",
 		backfillHash.Bytes(),
 	).Scan(&deltas))
 	require.Equal(t, 1, deltas)
@@ -2448,7 +2451,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 				var journaled int
 				require.NoError(t, raw.QueryRow(
 					"SELECT COUNT(*) FROM reward_withdrawal w "+
-						"JOIN \"transaction\" t ON t.id = w.tx_id WHERE t.hash = ?",
+						"JOIN \"transaction\" t ON t.id = w.transaction_id WHERE t.hash = ?",
 					backfillHash.Bytes(),
 				).Scan(&journaled))
 				require.Zero(t, journaled)
@@ -2470,7 +2473,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 			var deltas int
 			var previousReward string
 			require.NoError(t, raw.QueryRow(
-				"SELECT COUNT(*), COALESCE(MAX(w.previous_reward), '') FROM reward_withdrawal w JOIN \"transaction\" t ON t.id = w.tx_id WHERE t.hash = ?",
+				"SELECT COUNT(*), COALESCE(MAX(w.previous_reward), '') FROM reward_withdrawal w JOIN \"transaction\" t ON t.id = w.transaction_id WHERE t.hash = ?",
 				backfillHash.Bytes(),
 			).Scan(&deltas, &previousReward))
 			require.Equal(t, 1, deltas)
@@ -2489,7 +2492,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 				nil, 0,
 			))
 			require.NoError(t, raw.QueryRow(
-				"SELECT COUNT(*) FROM reward_withdrawal w JOIN \"transaction\" t ON t.id = w.tx_id WHERE t.hash = ?",
+				"SELECT COUNT(*) FROM reward_withdrawal w JOIN \"transaction\" t ON t.id = w.transaction_id WHERE t.hash = ?",
 				backfillHash.Bytes(),
 			).Scan(&deltas))
 			require.Equal(t, 1, deltas)

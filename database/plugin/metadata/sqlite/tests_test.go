@@ -2894,6 +2894,9 @@ func TestEpochBoundaryStakeHandlesBoundaryWithdrawal(t *testing.T) {
 		bytes.Repeat([]byte{0xb2}, 32), nil,
 	))
 	// A withdrawal in the boundary block clears the whole balance.
+	require.NoError(t, store.SetGenesisTransaction(
+		bytes.Repeat([]byte{0xb3}, 32), nil, nil, nil,
+	))
 	require.NoError(t, store.ApplyAccountRewardWithdrawal(
 		0, stakeKey, 57, boundarySlot,
 		bytes.Repeat([]byte{0xb3}, 32), nil,

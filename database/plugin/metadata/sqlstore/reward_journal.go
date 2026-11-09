@@ -82,28 +82,24 @@ WHERE source_id = ? AND account_id = ? AND slot = ?`
 
 	rewardWithdrawalExistsSQL = `-- name: RewardWithdrawalExists :one
 SELECT EXISTS (
-    SELECT 1 FROM reward_withdrawal WHERE tx_id = ? AND account_id = ?
+    SELECT 1 FROM reward_withdrawal WHERE transaction_id = ? AND account_id = ?
 )`
 
 	insertRewardWithdrawalSQL = `-- name: InsertRewardWithdrawal :exec
 INSERT INTO reward_withdrawal (
-    tx_id, account_id, slot, amount, previous_reward
+    transaction_id, account_id, slot, amount, previous_reward
 ) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (tx_id, account_id) DO NOTHING`
+ON CONFLICT (transaction_id, account_id) DO NOTHING`
 
 	getTransactionIDByHashSQL = `-- name: GetWithdrawalTransactionID :one
 SELECT id FROM "transaction" WHERE hash = ?`
-
-	insertBareTransactionSQL = `-- name: InsertBareTransaction :exec
-INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, 0)
-ON CONFLICT (hash) DO NOTHING`
 
 	rollbackRewardEventAccountsSQL = `
 SELECT e.account_id, e.slot, e.amount FROM reward_event_credit e
 WHERE e.slot > ?`
 
 	rollbackRewardWithdrawalsSQL = `
-SELECT account_id, slot, tx_id, previous_reward FROM reward_withdrawal
+SELECT account_id, slot, transaction_id, previous_reward FROM reward_withdrawal
 WHERE slot > ?`
 
 	rollbackRewardCreditsOfSlotSQL = `
@@ -144,7 +140,6 @@ var rewardJournalHotStatements = []string{
 	getAccountIdentityRewardSQL,
 	getAccountIDByCredentialSQL,
 	getTransactionIDByHashSQL,
-	insertBareTransactionSQL,
 	insertRewardCreditSQL,
 	insertRewardCreditSlotSQL,
 	insertRewardSourceSQL,
@@ -433,9 +428,11 @@ func (s *Store) AddAccountRewardsByCredential(
 }
 
 // ApplyAccountRewardWithdrawal clears a registered reward account after a
-// withdrawal by the transaction with hash txHash, creating a bare transaction
-// row for a hash that has none so the withdrawal always has an owner to roll
-// back with. The block path records withdrawals through applyTransactionWithdrawals.
+// withdrawal by the transaction with hash txHash. The transaction row must
+// already exist, and models.ErrWithdrawalTransactionNotFound is returned
+// otherwise: the real transaction insert keeps a pre-existing row's type, fee,
+// ttl, metadata and valid columns, so a placeholder row would stay incomplete.
+// The block path records withdrawals through applyTransactionWithdrawals.
 func (s *Store) ApplyAccountRewardWithdrawal(
 	credentialTag uint8,
 	stakeKey []byte,
@@ -446,9 +443,6 @@ func (s *Store) ApplyAccountRewardWithdrawal(
 ) error {
 	if amount == 0 {
 		return nil
-	}
-	if txHash == nil {
-		txHash = []byte{}
 	}
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
@@ -468,24 +462,20 @@ func (s *Store) ApplyAccountRewardWithdrawal(
 			if err != nil {
 				return err
 			}
-			var txID int64
+			var transactionID int64
 			err = s.queryRowCached(ctx, db, getTransactionIDByHashSQL, txHash).
-				Scan(&txID)
+				Scan(&transactionID)
 			if errors.Is(err, sql.ErrNoRows) {
-				if _, err := s.execCached(
-					ctx, db, insertBareTransactionSQL, txHash, slotValue,
-				); err != nil {
-					return err
-				}
-				err = s.queryRowCached(ctx, db, getTransactionIDByHashSQL, txHash).
-					Scan(&txID)
+				return fmt.Errorf(
+					"%w: %x", models.ErrWithdrawalTransactionNotFound, txHash,
+				)
 			}
 			if err != nil {
 				return err
 			}
 			var exists bool
 			if err := s.queryRowCached(
-				ctx, db, rewardWithdrawalExistsSQL, txID, accountID,
+				ctx, db, rewardWithdrawalExistsSQL, transactionID, accountID,
 			).Scan(&exists); err != nil {
 				return err
 			}
@@ -503,7 +493,7 @@ func (s *Store) ApplyAccountRewardWithdrawal(
 			}
 			result, err := s.execCached(
 				ctx, db, insertRewardWithdrawalSQL,
-				txID, accountID, slotValue,
+				transactionID, accountID, slotValue,
 				strconv.FormatUint(amount, 10),
 				strconv.FormatUint(current, 10),
 			)
@@ -533,11 +523,11 @@ type rewardRollbackAccount struct {
 	// beforeWithdrawal is the part of credits that precedes the account's
 	// earliest withdrawal after the slot, a credit at the withdrawal's own
 	// slot counting as before it.
-	beforeWithdrawal uint64
-	hasWithdrawal    bool
-	withdrawalSlot   int64
-	withdrawalTx     int64
-	previous         uint64
+	beforeWithdrawal        uint64
+	hasWithdrawal           bool
+	withdrawalSlot          int64
+	withdrawalTransactionID int64
+	previous                uint64
 }
 
 // DeleteAccountRewardsAfterSlot reverts the journal above slot and each
@@ -700,9 +690,9 @@ func (s *Store) collectRollbackWithdrawals(
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, withdrawnAt, txID int64
+		var id, withdrawnAt, transactionID int64
 		var raw sql.NullString
-		if err := rows.Scan(&id, &withdrawnAt, &txID, &raw); err != nil {
+		if err := rows.Scan(&id, &withdrawnAt, &transactionID, &raw); err != nil {
 			return err
 		}
 		previous, err := parseNullUint64(
@@ -715,12 +705,12 @@ func (s *Store) collectRollbackWithdrawals(
 		entry := account(id)
 		if entry.hasWithdrawal &&
 			(withdrawnAt > entry.withdrawalSlot ||
-				(withdrawnAt == entry.withdrawalSlot && txID > entry.withdrawalTx)) {
+				(withdrawnAt == entry.withdrawalSlot && transactionID > entry.withdrawalTransactionID)) {
 			continue
 		}
 		entry.hasWithdrawal = true
 		entry.withdrawalSlot = withdrawnAt
-		entry.withdrawalTx = txID
+		entry.withdrawalTransactionID = transactionID
 		entry.previous = previous
 	}
 	return rows.Err()

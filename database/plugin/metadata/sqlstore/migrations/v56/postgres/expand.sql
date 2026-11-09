@@ -33,12 +33,12 @@ CREATE INDEX IF NOT EXISTS "idx_reward_event_credit_account"
     ON "reward_event_credit"("account_id", "slot");
 
 CREATE TABLE IF NOT EXISTS "reward_withdrawal" (
-    "tx_id" BIGINT NOT NULL,
+    "transaction_id" BIGINT NOT NULL,
     "account_id" BIGINT NOT NULL,
     "slot" BIGINT NOT NULL,
     "amount" TEXT NOT NULL,
     "previous_reward" TEXT NOT NULL,
-    PRIMARY KEY ("tx_id", "account_id")
+    PRIMARY KEY ("transaction_id", "account_id")
 );
 CREATE INDEX IF NOT EXISTS "idx_reward_withdrawal_account_slot"
     ON "reward_withdrawal"("account_id", "slot");

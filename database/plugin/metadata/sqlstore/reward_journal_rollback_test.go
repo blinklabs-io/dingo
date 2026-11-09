@@ -29,6 +29,13 @@ func rollbackAccount(t *testing.T, store *Store, key []byte, reward uint64) {
 	}))
 }
 
+// seedWithdrawingTransaction stores the transaction row a withdrawal by hash
+// is applied against.
+func seedWithdrawingTransaction(t *testing.T, store *Store, hash []byte) {
+	t.Helper()
+	require.NoError(t, store.SetGenesisTransaction(hash, hash, nil, nil))
+}
+
 func rewardOf(t *testing.T, store *Store, key []byte) uint64 {
 	t.Helper()
 	account, err := store.GetAccountByCredential(0, key, false, nil)
@@ -65,6 +72,7 @@ func TestRollbackRestoresBalanceAroundWithdrawals(t *testing.T) {
 			require.NoError(t, store.AddAccountRewardByCredential(
 				0, key, 50, 100, bytesRepeat(0x01, 32), nil))
 			require.Equal(t, uint64(57), rewardOf(t, store, key))
+			seedWithdrawingTransaction(t, store, bytesRepeat(0x02, 32))
 			require.NoError(t, store.ApplyAccountRewardWithdrawal(
 				0, key, 30, 200, bytesRepeat(0x02, 32), nil))
 			require.Equal(t, uint64(0), rewardOf(t, store, key))
@@ -88,6 +96,7 @@ func TestRollbackCreditAtWithdrawalSlot(t *testing.T) {
 	rollbackAccount(t, store, key, 4)
 	require.NoError(t, store.AddAccountRewardByCredential(
 		0, key, 20, 200, bytesRepeat(0x11, 32), nil))
+	seedWithdrawingTransaction(t, store, bytesRepeat(0x12, 32))
 	require.NoError(t, store.ApplyAccountRewardWithdrawal(
 		0, key, 24, 200, bytesRepeat(0x12, 32), nil))
 	require.Equal(t, uint64(0), rewardOf(t, store, key))
@@ -237,10 +246,12 @@ func TestRollbackAnchorsOnEarliestWithdrawal(t *testing.T) {
 	rollbackAccount(t, store, key, 2)
 	require.NoError(t, store.AddAccountRewardByCredential(
 		0, key, 50, 100, bytesRepeat(0x31, 32), nil))
+	seedWithdrawingTransaction(t, store, bytesRepeat(0x32, 32))
 	require.NoError(t, store.ApplyAccountRewardWithdrawal(
 		0, key, 52, 200, bytesRepeat(0x32, 32), nil))
 	require.NoError(t, store.AddAccountRewardByCredential(
 		0, key, 30, 220, bytesRepeat(0x33, 32), nil))
+	seedWithdrawingTransaction(t, store, bytesRepeat(0x34, 32))
 	require.NoError(t, store.ApplyAccountRewardWithdrawal(
 		0, key, 30, 300, bytesRepeat(0x34, 32), nil))
 	require.NoError(t, store.AddAccountRewardByCredential(
