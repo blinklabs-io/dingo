@@ -122,18 +122,45 @@ func scanItem(data []byte, pos int, depth int) (int, error) {
 }
 
 // scanRational walks the content of a tag-30 item and checks the width of each
-// component of a two-element array.
+// component of a two-element array. gouroboros reads the array through any tag
+// stack, a head of any width and the indefinite-length form, so the scan does
+// too. An array that does not hold exactly two items is rejected by the
+// decoder before it builds anything, so it is walked as ordinary data.
 func scanRational(data []byte, pos int, depth int) (int, error) {
-	if pos >= len(data) || data[pos] != 0x82 {
-		return scanItem(data, pos, depth+1)
+	start := pos
+	for pos < len(data) && data[pos]>>5 == 6 {
+		_, next, _, err := readHead(data, pos, data[pos]&0x1f)
+		if err != nil {
+			return 0, err
+		}
+		pos = next
 	}
-	pos++
-	for range 2 {
+	if pos >= len(data) || data[pos]>>5 != 4 {
+		return scanItem(data, start, depth+1)
+	}
+	count, next, indefinite, err := readHead(data, pos, data[pos]&0x1f)
+	if err != nil {
+		return 0, err
+	}
+	if !indefinite && count != 2 {
+		return scanItem(data, start, depth+1)
+	}
+	pos = next
+	for i := 0; i < 2; i++ {
+		if indefinite && (pos >= len(data) || data[pos] == 0xff) {
+			return scanItem(data, start, depth+1)
+		}
 		end, err := scanComponent(data, pos, depth+1)
 		if err != nil {
 			return 0, err
 		}
 		pos = end
+	}
+	if indefinite {
+		if pos >= len(data) || data[pos] != 0xff {
+			return scanItem(data, start, depth+1)
+		}
+		pos++
 	}
 	return pos, nil
 }
@@ -215,26 +242,53 @@ func significantBytes(data []byte, pos int) (int, int, error) {
 }
 
 // scanEncodedCbor walks a tag-24 byte string, scanning the item it wraps. A
-// wrapper that is not a definite-length byte string, or whose content is not
-// one well-formed item, is skipped as ordinary data: only an oversized rational
-// is reported.
+// wrapper that is not a byte string, or whose content is not one well-formed
+// item, is skipped as ordinary data: only an oversized rational is reported.
+// An indefinite-length wrapper is scanned over its concatenated chunks, since
+// the wrapped item may straddle a chunk boundary; that is the only place the
+// scan copies bytes.
 func scanEncodedCbor(data []byte, pos int, depth int) (int, error) {
 	end, err := scanItem(data, pos, depth+1)
 	if err != nil {
 		return 0, err
 	}
-	if data[pos]>>5 != 2 || data[pos]&0x1f == 31 {
+	if data[pos]>>5 != 2 {
 		return end, nil
 	}
-	_, contentStart, _, err := readHead(data, pos, data[pos]&0x1f)
+	_, contentStart, indefinite, err := readHead(
+		data,
+		pos,
+		data[pos]&0x1f,
+	)
 	if err != nil {
 		return 0, err
 	}
-	_, scanErr := scanItem(data[contentStart:end], 0, depth+1)
+	content := data[contentStart:end]
+	if indefinite {
+		content = joinChunks(data[contentStart : end-1])
+	}
+	_, scanErr := scanItem(content, 0, depth+1)
 	if errors.Is(scanErr, ErrOversizedRational) {
 		return 0, scanErr
 	}
 	return end, nil
+}
+
+// joinChunks concatenates the definite-length chunks of an indefinite byte
+// string, given the bytes between its head and its break. scanItem has already
+// validated the chunk structure.
+func joinChunks(chunks []byte) []byte {
+	var out []byte
+	for pos := 0; pos < len(chunks); {
+		length, next, _, err := readHead(chunks, pos, chunks[pos]&0x1f)
+		if err != nil {
+			return nil
+		}
+		end := next + int(length) //nolint:gosec // validated by scanItem
+		out = append(out, chunks[next:end]...)
+		pos = end
+	}
+	return out
 }
 
 func scanSequence(

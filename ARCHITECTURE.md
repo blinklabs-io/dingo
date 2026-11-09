@@ -8875,8 +8875,9 @@ or denominator. `decodeBlockfetchBlock` and the transaction-submission decoder
 therefore call `safedecode.RejectOversizedRationals` first: a linear scan of the
 raw CBOR that returns `safedecode.ErrOversizedRational` for a tag-30 component
 whose significant magnitude is wider than a Word64, the range gouroboros
-requires of a pool margin, without copying payload bytes, and that descends
-into tag-24 byte strings. It rejects only what it
+requires of a pool margin. It reads the rational's array through any tag stack,
+head width or indefinite-length form, copies no payload bytes, and descends into
+tag-24 byte strings, joining the chunks of an indefinite-length one. It rejects only what it
 positively identifies and leaves malformed input to the decoder.
 `safedecode.Transaction` and `safedecode.DijkstraBlockTransaction` apply the
 same check for API submission and endorser-block transactions, and

@@ -49,6 +49,23 @@ func wrapped(item []byte) []byte {
 	return append(out, item...)
 }
 
+// negBignum is bignum with the negative tag (3).
+func negBignum(n int) []byte {
+	out := bignum(n)
+	out[0] = 0xc3
+	return out
+}
+
+// chunked encodes item as an indefinite-length tag-24 byte string split into
+// two chunks at split, so an item inside it straddles a chunk boundary.
+func chunked(item []byte, split int) []byte {
+	out := []byte{0xd8, 0x18, 0x5f, 0x58, byte(split)}
+	out = append(out, item[:split]...)
+	out = append(out, 0x58, byte(len(item)-split))
+	out = append(out, item[split:]...)
+	return append(out, 0xff)
+}
+
 // nest wraps item the way a certificate sits in a transaction: inside a map
 // value inside an array.
 func nest(item []byte) []byte {
@@ -86,6 +103,14 @@ func TestRejectOversizedRationals(t *testing.T) {
 			),
 			true,
 		},
+		{"oversized negative bignum", rational(negBignum(9), small), true},
+		{"negative bignum at the limit", rational(small, negBignum(8)), false},
+		{"non-minimal array head", append([]byte{0xd8, 0x1e, 0x98, 0x02, 0x01}, pastLimit...), true},
+		{"indefinite array", append(append([]byte{0xd8, 0x1e, 0x9f, 0x01}, pastLimit...), 0xff), true},
+		{"tag stack before the array", append([]byte{0xd8, 0x1e, 0xd9, 0xd9, 0xf7, 0x82, 0x01}, pastLimit...), true},
+		{"array of three is left to the decoder", append(append([]byte{0xd8, 0x1e, 0x83, 0x01, 0x01}, pastLimit...)), false},
+		{"oversized rational in an indefinite tag-24", nest(chunked(rational(small, pastLimit), 5)), true},
+		{"small rational in an indefinite tag-24", nest(chunked(rational(small, []byte{0x05}), 2)), false},
 		{"oversized byte string outside a rational", nest(append([]byte{0x59, 0x01, 0x00}, make([]byte, 256)...)), false},
 		{"oversized bignum outside a rational", nest(bignum(200)), false},
 		{"small rational inside a tag-24 byte string", nest(wrapped(rational(small, []byte{0x05}))), false},
