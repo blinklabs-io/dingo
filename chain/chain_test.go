@@ -2364,6 +2364,114 @@ func TestChainRollbackExceedsSecurityParam(t *testing.T) {
 	}
 }
 
+func TestChainRollbackBoundIsCumulative(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	mustSetLedger(t, cm, 3)
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(context.Background(), testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+
+	firstPoint := blockPoint(testBlocks[3])
+	if err := c.Rollback(context.Background(), firstPoint); err != nil {
+		t.Fatalf("first rollback within K: %s", err)
+	}
+
+	// Both steps are individually only two blocks deep, but the second target
+	// is four blocks behind the highest selected tip and therefore past K.
+	secondPoint := blockPoint(testBlocks[1])
+	if err := c.ValidateRollback(context.Background(), secondPoint); !errors.Is(
+		err,
+		chain.ErrRollbackExceedsSecurityParam,
+	) {
+		t.Fatalf(
+			"expected cumulative rollback validation to exceed K, got: %v",
+			err,
+		)
+	}
+	if err := c.Rollback(context.Background(), secondPoint); !errors.Is(
+		err,
+		chain.ErrRollbackExceedsSecurityParam,
+	) {
+		t.Fatalf("expected cumulative rollback to exceed K, got: %v", err)
+	}
+	if tip := c.Tip(); !reflect.DeepEqual(tip.Point, firstPoint) {
+		t.Fatalf(
+			"rejected cumulative rollback changed tip: got %v, want %v",
+			tip.Point,
+			firstPoint,
+		)
+	}
+}
+
+func TestChainRollbackCumulativeBoundControls(t *testing.T) {
+	t.Parallel()
+
+	t.Run("successive rollback to exact K boundary", func(t *testing.T) {
+		db := newTestDB(t)
+		cm, err := chain.NewManager(context.Background(), db, nil)
+		if err != nil {
+			t.Fatalf("unexpected error creating chain manager: %s", err)
+		}
+		mustSetLedger(t, cm, 3)
+		c := cm.PrimaryChain()
+		for _, testBlock := range testBlocks {
+			if err := c.AddBlock(context.Background(), testBlock, nil); err != nil {
+				t.Fatalf("unexpected error adding block to chain: %s", err)
+			}
+		}
+
+		if err := c.Rollback(
+			context.Background(),
+			blockPoint(testBlocks[3]),
+		); err != nil {
+			t.Fatalf("first rollback within K: %s", err)
+		}
+		exactBoundary := blockPoint(testBlocks[2])
+		if err := c.Rollback(context.Background(), exactBoundary); err != nil {
+			t.Fatalf("rollback to exact K boundary: %s", err)
+		}
+		if tip := c.Tip(); !reflect.DeepEqual(tip.Point, exactBoundary) {
+			t.Fatalf(
+				"tip at exact K boundary: got %v, want %v",
+				tip.Point,
+				exactBoundary,
+			)
+		}
+	})
+
+	t.Run("unbounded local reconciliation resets anchor", func(t *testing.T) {
+		db := newTestDB(t)
+		cm, err := chain.NewManager(context.Background(), db, nil)
+		if err != nil {
+			t.Fatalf("unexpected error creating chain manager: %s", err)
+		}
+		mustSetLedger(t, cm, 3)
+		c := cm.PrimaryChain()
+		for _, testBlock := range testBlocks {
+			if err := c.AddBlock(context.Background(), testBlock, nil); err != nil {
+				t.Fatalf("unexpected error adding block to chain: %s", err)
+			}
+		}
+
+		localPoint := blockPoint(testBlocks[1])
+		if err := c.RollbackUnbounded(context.Background(), localPoint); err != nil {
+			t.Fatalf("unbounded local reconciliation: %s", err)
+		}
+		if err := c.Rollback(context.Background(), ocommon.Point{}); err != nil {
+			t.Fatalf("short reconciled chain rollback to origin: %s", err)
+		}
+	})
+}
+
 // TestChainRollbackPreservesQueuedHeadersOnOverKRejection covers a
 // no-state-change-on-rejection gap: rollbackLocked used to delete queued
 // headers above the rollback point before computing and enforcing the

@@ -483,6 +483,7 @@ func (cm *ChainManager) loadPrimaryChain(ctx context.Context) error {
 				BlockNumber: recentBlocks[0].Number,
 			}
 			chain.tipBlockIndex = recentBlocks[0].ID
+			chain.rollbackAnchorBlockIndex = recentBlocks[0].ID
 		}
 	}
 	cm.chains[primaryChainId] = chain

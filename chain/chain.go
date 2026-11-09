@@ -59,6 +59,13 @@ type Chain struct {
 	iterators     []*ChainIterator
 	currentTip    ochainsync.Tip
 	tipBlockIndex uint64
+	// rollbackAnchorBlockIndex is the highest block index reached by the
+	// persistent selected chain since it was loaded. Ordinary rollbacks never
+	// lower it, so successive peer rollbacks cannot move the chain more than K
+	// blocks from the highest durable point by taking several individually
+	// shallow steps. Startup reconciliation may reset it through an explicitly
+	// unbounded rollback.
+	rollbackAnchorBlockIndex uint64
 	// mutationGeneration counts mutations of the in-memory block state:
 	// currentTip, tipBlockIndex, the ephemeral block buffer, and its common
 	// block anchor.
@@ -1368,6 +1375,9 @@ func (c *Chain) addBlockLocked(
 		BlockNumber: blockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
+	if c.persistent && newBlockIndex > c.rollbackAnchorBlockIndex {
+		c.rollbackAnchorBlockIndex = newBlockIndex
+	}
 	c.mutationGeneration++
 	c.headerMutationGeneration++
 	// A locally forged block discards the queued peer headers without
@@ -1615,6 +1625,9 @@ func (c *Chain) addRawBlockLocked(
 		BlockNumber: rb.BlockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
+	if c.persistent && newBlockIndex > c.rollbackAnchorBlockIndex {
+		c.rollbackAnchorBlockIndex = newBlockIndex
+	}
 	c.mutationGeneration++
 	c.headerMutationGeneration++
 	// Build event for deferred publication (same pattern as
@@ -1982,6 +1995,26 @@ func (c *Chain) rollbackForkDepth(
 	return 0
 }
 
+// rollbackExceedsSecurityParam reports whether rollbackBlockIndex lies more
+// than K blocks behind the highest durable point reached by the persistent
+// selected chain. The anchor, rather than the current tip, makes the bound
+// cumulative across successive rollbacks.
+//
+// Callers must hold c.mutex and c.manager.mutex and must separately reject an
+// unconfigured security parameter.
+func (c *Chain) rollbackExceedsSecurityParam(
+	rollbackBlockIndex uint64,
+) bool {
+	if !c.persistent {
+		return false
+	}
+	securityParam := uint64(c.manager.securityParam) //nolint:gosec
+	if c.rollbackAnchorBlockIndex < securityParam {
+		return false
+	}
+	return rollbackBlockIndex < c.rollbackAnchorBlockIndex-securityParam
+}
+
 // rollbackPointBlock resolves a rollback target to the block this chain must
 // truncate to, rejecting any target the chain does not currently hold.
 //
@@ -2179,18 +2212,18 @@ func (c *Chain) ValidateRollback(
 	// Calculate fork depth before deleting blocks
 	forkDepth := c.rollbackForkDepth(point, rollbackBlockIndex)
 	// Reject rollbacks that exceed the security parameter K on
-	// the persistent chain. Ephemeral (fork-tracking) chains are
-	// not subject to this limit. When the chain is shorter than K
-	// blocks (initial sync), the entire chain can be safely
-	// replaced during sync.
+	// the persistent chain's highest durable point. Ephemeral
+	// (fork-tracking) chains are not subject to this limit. When
+	// the chain has never reached K blocks (initial sync), the
+	// entire chain can be safely replaced during sync.
 	securityParam := c.manager.securityParam
-	if c.persistent &&
-		c.tipBlockIndex >= uint64(securityParam) && //nolint:gosec
-		forkDepth > uint64(securityParam) { //nolint:gosec
+	if c.rollbackExceedsSecurityParam(rollbackBlockIndex) {
 		slog.Default().Warn(
 			"rejecting rollback that exceeds "+
 				"security parameter K",
 			"fork_depth", forkDepth,
+			"rollback_depth",
+			c.rollbackAnchorBlockIndex-rollbackBlockIndex,
 			"security_param", securityParam,
 			"rollback_slot", point.Slot,
 		)
@@ -2375,20 +2408,21 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 	}
 	// Calculate fork depth before deleting blocks
 	forkDepth := c.rollbackForkDepth(point, rollbackBlockIndex)
-	// Reject rollbacks that exceed the security parameter K on
-	// the persistent chain. Ephemeral (fork-tracking) chains are
-	// not subject to this limit. When the chain is shorter than K
-	// blocks (initial sync), the entire chain can be safely
-	// replaced during sync. An unbounded rollback skips this bound
-	// too -- see RollbackUnbounded.
+	// Reject rollbacks that exceed the security parameter K from
+	// the persistent chain's highest durable point. Ephemeral
+	// (fork-tracking) chains are not subject to this limit. When
+	// the chain has never reached K blocks (initial sync), the
+	// entire chain can be safely replaced during sync. An
+	// unbounded rollback skips this bound too -- see
+	// RollbackUnbounded.
 	securityParam := c.manager.securityParam
-	if c.persistent && !unbounded &&
-		c.tipBlockIndex >= uint64(securityParam) && //nolint:gosec
-		forkDepth > uint64(securityParam) { //nolint:gosec
+	if !unbounded && c.rollbackExceedsSecurityParam(rollbackBlockIndex) {
 		slog.Default().Warn(
 			"rejecting rollback that exceeds "+
 				"security parameter K",
 			"fork_depth", forkDepth,
+			"rollback_depth",
+			c.rollbackAnchorBlockIndex-rollbackBlockIndex,
 			"security_param", securityParam,
 			"rollback_slot", point.Slot,
 		)
@@ -2466,6 +2500,9 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 		BlockNumber: tmpBlock.Number,
 	}
 	c.tipBlockIndex = rollbackBlockIndex
+	if c.persistent && unbounded {
+		c.rollbackAnchorBlockIndex = rollbackBlockIndex
+	}
 	c.mutationGeneration++
 	c.headerMutationGeneration++
 	// Update iterators for rollback
