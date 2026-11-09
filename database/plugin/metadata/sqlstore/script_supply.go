@@ -33,9 +33,9 @@ import (
 // (created outputs leave through ON DELETE CASCADE, invisible to Go).
 //
 // The table is written only here, in the transaction that changes the utxo
-// rows, by the primitives that insert an output or move one from live to
-// spent. A caller that bulk-loads live outputs without those primitives
-// (snapshot import) calls RebuildScriptLockedSupply when it finishes.
+// rows, by the primitives that insert an output or move one between live and
+// spent. Snapshot import also calls RebuildScriptLockedSupply when it
+// finishes, so the imported total is a scan at the snapshot slot.
 const (
 	scriptSupplyLatestQuery = `-- name: GetLatestScriptLockedSupply :one
 SELECT slot, amount FROM script_locked_supply ORDER BY slot DESC LIMIT 1`

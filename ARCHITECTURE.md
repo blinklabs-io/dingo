@@ -985,8 +985,8 @@ that changes the `utxo` rows, on every apply path including the batch UTxO
 overlay, which credits and debits logically because it elides rows. A rollback
 keeps the rows at or below its slot, so outputs removed by cascade need no
 accounting, and the floor never lets a rollback reach the rows the trim deletes.
-Ledger-state import, which bulk-inserts live outputs outside those primitives,
-replaces the aggregate with a scan at the snapshot slot.
+Ledger-state import replaces the aggregate with a scan at the snapshot slot once
+its outputs are in place.
 
 `rollback` and `rollbackChainAndState` refuse a target below the floor with
 `ErrRollbackBelowUtxoPruneFloor` before mutating anything, and

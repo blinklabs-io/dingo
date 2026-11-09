@@ -1868,6 +1868,13 @@ func (d *Database) UtxosDeleteConsumed(
 			return 0, err
 		}
 	}
+	if utxoCount > 0 {
+		if err := d.pruneScriptLockedSupplyToFloor(
+			slot, pruneFloor, txn,
+		); err != nil {
+			return 0, err
+		}
+	}
 
 	if owned {
 		if err := txn.Commit(); err != nil {
@@ -1938,9 +1945,11 @@ func (d *Database) utxosDropSpentInBatch(
 		}
 	}
 	if slot > pruneFloor {
-		return d.writeConsumedUtxoPruneFloor(slot, txn)
+		if err := d.writeConsumedUtxoPruneFloor(slot, txn); err != nil {
+			return err
+		}
 	}
-	return nil
+	return d.pruneScriptLockedSupplyToFloor(slot, pruneFloor, txn)
 }
 
 func (d *Database) UtxosDeleteRolledback(

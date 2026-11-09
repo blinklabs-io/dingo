@@ -857,6 +857,7 @@ func (s *Store) importUtxos(
 			q := s.operationalQueries(db)
 			refs := make(map[string]models.StakeCredentialRef)
 			slots := make(map[string]uint64)
+			scriptDeltas := make(map[uint64]int64, 1)
 			for i := range utxos {
 				item := utxos[i]
 				params, err := createUtxoParams(&item)
@@ -898,7 +899,7 @@ func (s *Store) importUtxos(
 						)
 					}
 					if hydrateProvenance {
-						if err := hydrateImportedUtxo(
+						if err := s.hydrateImportedUtxo(
 							ctx,
 							db,
 							&item,
@@ -908,6 +909,15 @@ func (s *Store) importUtxos(
 					}
 				} else if err != nil {
 					return fmt.Errorf("import UTxO: %w", err)
+				} else {
+					// A recovered input is imported live here and spent
+					// later through the maintained primitives, so its
+					// amount has to be in the total first.
+					delta, err := modelScriptLockedContribution(&item)
+					if err != nil {
+						return err
+					}
+					scriptDeltas[item.AddedSlot] += delta
 				}
 				// See CreateUtxo: the pointer position is a separate
 				// row, and persistUtxoPointer converges, so an output
@@ -950,6 +960,13 @@ func (s *Store) importUtxos(
 					if item.AddedSlot > slots[ref.MapKey()] {
 						slots[ref.MapKey()] = item.AddedSlot
 					}
+				}
+			}
+			for slot, delta := range scriptDeltas {
+				if err := s.addScriptLockedSupply(
+					ctx, db, slot, delta,
+				); err != nil {
+					return err
 				}
 			}
 			if refreshRewardLiveStake {
@@ -998,7 +1015,7 @@ func (s *Store) importUtxosDeferredSQLite(
 		if inserted[i] {
 			continue
 		}
-		if err := hydrateImportedUtxo(ctx, db, &utxos[i]); err != nil {
+		if err := s.hydrateImportedUtxo(ctx, db, &utxos[i]); err != nil {
 			return fmt.Errorf("hydrating imported UTxO: %w", err)
 		}
 	}
@@ -1008,7 +1025,7 @@ func (s *Store) importUtxosDeferredSQLite(
 	return nil
 }
 
-func hydrateImportedUtxo(
+func (s *Store) hydrateImportedUtxo(
 	ctx context.Context,
 	db queryer,
 	utxo *models.Utxo,
@@ -1073,6 +1090,23 @@ WHERE tx_id = ? AND output_idx = ?
 	// certified snapshot's own declaration" apart from "a locally
 	// reconstructed row that merely happens to declare DeletedSlot == 0".
 	if utxo.DeletedSlot == 0 {
+		var (
+			priorDeleted sql.NullInt64
+			priorScript  sql.NullBool
+			priorAmount  sql.NullString
+		)
+		err := db.QueryRowContext(ctx, `
+SELECT deleted_slot, payment_script, amount FROM utxo
+WHERE tx_id = ? AND output_idx = ?`,
+			utxo.TxId,
+			utxo.OutputIdx,
+		).Scan(&priorDeleted, &priorScript, &priorAmount)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read re-imported UTxO spend: %w", err)
+		}
+		if !priorDeleted.Valid || priorDeleted.Int64 <= 0 {
+			return nil
+		}
 		if _, err := db.ExecContext(ctx, `
 UPDATE utxo
 SET deleted_slot = 0, spent_at_tx_id = NULL
@@ -1085,6 +1119,16 @@ WHERE tx_id = ? AND output_idx = ? AND deleted_slot > 0`,
 				err,
 			)
 		}
+		// Clearing the spend makes the output live again, so return the
+		// lovelace its spend debited, at the slot that debited it.
+		locked, err := scriptLockedContribution(priorScript, priorAmount)
+		if err != nil {
+			return err
+		}
+		return s.addScriptLockedSupply(
+			// #nosec G115 -- checked positive above
+			ctx, db, uint64(priorDeleted.Int64), locked,
+		)
 	}
 	return nil
 }
