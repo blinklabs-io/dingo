@@ -292,10 +292,27 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 				s.castVote(t, p, models.VoterTypeCC, s.hotCredential, models.VoteYes, slot)
 				first := s.epoch.EpochId + 1
 				boundaries := 3
+				rp := s.addRewardPool(t)
 				c := newRollbackCycle(t, s, entry.ledger, false, gap, boundaries)
 				c.postTarget = func(t *testing.T, next models.Epoch, _ bool) {
 					target := next.StartSlot - gap
 					if next.EpochId == first {
+						// The pool re-registers with new terms above the
+						// target; the rollback must restore the old ones.
+						margin := &types.Rat{Rat: big.NewRat(1, 4)}
+						require.NoError(t, s.db.ImportPool(
+							context.Background(), nil,
+							&models.Pool{
+								PoolKeyHash: rp.key, VrfKeyHash: make([]byte, 32),
+								Pledge: 700, Cost: 2_000, Margin: margin,
+								RewardAccount: rp.owner,
+							},
+							&models.PoolRegistration{
+								PoolKeyHash: rp.key, AddedSlot: target + 3,
+								Pledge: 700, Cost: 2_000, Margin: margin,
+								VrfKeyHash: make([]byte, 32), RewardAccount: rp.owner,
+							},
+						))
 						// Without the SPO vote the action cannot ratify.
 						s.castVote(t, p, models.VoterTypeSPO,
 							[]byte(hfrLiveYesPool), models.VoteYes, target+5)
@@ -317,7 +334,8 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 				}
 				results := runBoundaries(t, c, boundaries)
 				requireChanged(t, results,
-					"governance_vote", "governance_vote_history", "network_donation")
+					"governance_vote", "governance_vote_history", "network_donation",
+					"pool_registration")
 				if !v.fork {
 					require.True(t, s.enacted(t, 0x85))
 				}

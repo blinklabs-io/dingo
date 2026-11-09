@@ -275,6 +275,9 @@ func (c *rollbackCycle) run(
 	}
 	before := dumpComparableTables(t, c.raw)
 	preDump := s.dump(t, epoch.EpochId, pparams)
+	preEpochs, err := s.db.GetEpochs(nil)
+	require.NoError(t, err)
+	epochCacheLen := len(preEpochs)
 
 	apply := func(replay bool) (models.Epoch, lcommon.ProtocolParameters) {
 		switch {
@@ -287,6 +290,13 @@ func (c *rollbackCycle) run(
 			t, epoch, pparams, c.settle(),
 		)
 		c.setTip(t, next.StartSlot)
+		// The node publishes a committed boundary into the ledger's
+		// in-memory state; a rollback has to rewind that as well.
+		s.ls.Lock()
+		s.ls.currentEpoch = newEpoch
+		s.ls.currentPParams = newPParams
+		s.ls.ledgerEpoch = newEpoch.EpochId
+		s.ls.Unlock()
 		return newEpoch, newPParams
 	}
 	firstEpoch, firstPParams := apply(false)
@@ -335,6 +345,10 @@ func (c *rollbackCycle) run(
 		require.Equal(t, epoch.EpochId, gotEpoch.EpochId)
 		require.Equal(t, epoch.EpochId, gotLedgerEpoch)
 		require.Equal(t, eras.ConwayEraDesc.Id, gotEra)
+		s.ls.RLock()
+		require.Len(t, s.ls.epochCache, epochCacheLen,
+			"the epoch cache must drop the rolled-back boundary's epoch")
+		s.ls.RUnlock()
 	} else {
 		s.ls.currentEpoch = epoch
 		s.ls.currentPParams = pparams

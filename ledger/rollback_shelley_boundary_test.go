@@ -139,6 +139,11 @@ VALUES (?, 0, ?, 0)`, key, h.poolHash)
 	})
 	require.NoError(t, err)
 	writeAboveTarget := func() {
+		// A block above the target also creates an output, which the
+		// rollback must remove for the HARDFORK scan of the live set not to
+		// see it.
+		h.addUtxo(0x34, delegatorKey, 1_000_000, aboveTarget)
+		storeByronPubkeyOutput(t, db, bytes.Repeat([]byte{0x34}, 32), 1_000_000)
 		require.NoError(t, db.SetPParamUpdate(
 			[]byte{0xaa}, update, aboveTarget, replayBoundaryEndedEra, nil,
 		))
