@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -241,6 +242,12 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 	blockType uint,
 	raw []byte,
 ) (block gledger.Block, err error) {
+	// Peer bytes are decoded before the body is compared with the header's
+	// body hash, so refuse the one input whose decode cost is quadratic in
+	// its size before any decoder runs.
+	if err := safedecode.RejectOversizedRationals(raw); err != nil {
+		return nil, err
+	}
 	defer func() {
 		if err == nil && block != nil {
 			block.Hash()

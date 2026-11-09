@@ -8868,6 +8868,21 @@ poison. This mirrors the existing `leiosEndorserBlocks` cache's bounded,
 waiter-channel design (see Leios CertRB Serving below), applied to ordinary
 block/header decoding rather than Leios EB closures.
 
+**Oversized rational pre-check.** Peer bytes are decoded before any size or
+body-hash check, and gouroboros builds a tag-30 rational (a pool margin) with
+`big.Rat.SetFrac`, whose cost is quadratic in the size of an oversized numerator
+or denominator. `decodeBlockfetchBlock` and the transaction-submission decoder
+therefore call `safedecode.RejectOversizedRationals` first: a linear scan of the
+raw CBOR that returns `safedecode.ErrOversizedRational` for a tag-30 component
+whose significant magnitude is wider than a Word64, the range gouroboros
+requires of a pool margin, without copying payload bytes, and that descends
+into tag-24 byte strings. It rejects only what it
+positively identifies and leaves malformed input to the decoder.
+`safedecode.Transaction` and `safedecode.DijkstraBlockTransaction` apply the
+same check for API submission and endorser-block transactions, and
+`models.DecodeBlockCbor` applies it to every stored or downloaded block (Bark
+archive responses, Mithril chunks, backfill, API reads).
+
 A decode function that panics (adversarial/malformed peer bytes could in
 principle trigger this) does not strand the key and does not crash the
 decoding goroutine either: `getOrDecode` recovers the panic, records it as an
