@@ -1825,7 +1825,11 @@ func TestEnsureReferencedEndorserBlocksDoesNotBlockOnUnreadAnnouncement(
 		// Drain background work: announcing a header does not mean this peer
 		// has its EB body. Notify offers drive that best-effort prefetch.
 		synctest.Wait()
-		require.Zero(t, fetched.Load(), "unoffered announcement triggered a by-point fetch")
+		require.Zero(
+			t,
+			fetched.Load(),
+			"unoffered announcement triggered a by-point fetch",
+		)
 	})
 }
 
