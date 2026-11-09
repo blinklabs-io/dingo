@@ -15,6 +15,7 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"math"
 	"testing"
@@ -134,6 +135,51 @@ func TestConsumedUtxoPruneFloorPrunesScriptLockedSupply(t *testing.T) {
 	require.Equal(t, 1, pruned)
 	require.Equal(t, 2, count(), "rows at slots 20 and 30 remain")
 	require.EqualValues(t, 700, scriptSupply(t, db))
+}
+
+// A trusted batch raises the prune floor without the periodic sweep, so both
+// of its drop paths have to trim the rows below the base at that floor.
+func TestSpentInBatchPrunesScriptLockedSupply(t *testing.T) {
+	t.Parallel()
+	drops := map[string]func(
+		*Database, []models.UtxoId, uint64, *Txn,
+	) error{
+		"delete rows": (*Database).UtxosDeleteSpentInBatch,
+		"drop blobs":  (*Database).UtxosDropSpentInBatchBlobs,
+	}
+	for name, drop := range drops {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dataDir := t.TempDir()
+			db, err := newTestDatabase(t, &Config{DataDir: dataDir})
+			require.NoError(t, err)
+			for _, u := range []*models.Utxo{
+				supplyTestUtxo(1, 10, 0, 100, true),
+				supplyTestUtxo(2, 20, 0, 200, true),
+				supplyTestUtxo(3, 30, 0, 400, true),
+			} {
+				require.NoError(t, db.Metadata().CreateUtxo(nil, u))
+			}
+			ids := []models.UtxoId{
+				{Hash: bytes.Repeat([]byte{0x77}, 32), Idx: 0},
+			}
+			txn := db.Transaction(context.Background(), true)
+			require.NoError(t, txn.Do(func(txn *Txn) error {
+				return drop(db, ids, 25, txn)
+			}))
+
+			raw, err := openMetadataSQLite(dataDir)
+			require.NoError(t, err)
+			defer raw.Close()
+			var oldest, rows int
+			require.NoError(t, raw.QueryRow(
+				"SELECT MIN(slot), COUNT(*) FROM script_locked_supply",
+			).Scan(&oldest, &rows))
+			require.Equal(t, 20, oldest, "the base row at the floor stays")
+			require.Equal(t, 2, rows)
+			require.EqualValues(t, 700, scriptSupply(t, db))
+		})
+	}
 }
 
 // RebuildScriptLockedSupply replaces the aggregate with a scan of the live
