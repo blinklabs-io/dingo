@@ -9819,7 +9819,10 @@ waits for the full tracking window, since a refused rollback to our own chain
 means the peer is behind or forked. Origin is on every chain and never
 escalates. A prune-floor rejection whose target is on the local chain is
 logged at WARN rather than ERROR. Unavailable chain state or a lookup error
-cannot produce a diagnosis.
+cannot produce a diagnosis. History expiry removes only a block's CBOR, so the
+membership check, like the behind-peer check on these rejection paths, reads
+the retained local block metadata and block index: an expired point on the
+primary chain stays on-chain and never needs an archive read.
 The membership result is cached for the unchanged local tip, avoiding repeated
 storage reads on the rollback-failure path.
 When the per-connection loop

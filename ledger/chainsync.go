@@ -2773,10 +2773,13 @@ func (ls *LedgerState) historicalPointOnPrimaryChain(
 		return false, nil
 	}
 	block, err := ls.blockByHash(ls.lifecycleContext(), point.Hash)
-	if errors.Is(err, models.ErrBlockNotFound) {
+	if errors.Is(err, models.ErrBlockNotFound) ||
+		errors.Is(err, types.ErrHistoryExpired) {
 		// Blocks written before the hash index was introduced still have an
-		// exact point key and metadata. Probe that local path without allowing
-		// Bark to fall through to its archive on an unknown fork hash.
+		// exact point key and metadata, and history expiry removes only a
+		// block's CBOR, keeping the metadata that records its membership.
+		// Probe that local path without allowing Bark to fall through to its
+		// archive on an unknown fork hash.
 		blockID, localErr := database.BlockIDByPointLocal(ls.db, point)
 		if errors.Is(localErr, models.ErrBlockNotFound) {
 			return false, nil

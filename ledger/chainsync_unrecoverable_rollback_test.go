@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -479,4 +481,53 @@ func TestReportProtocolConstrainedRollbackAtOriginDoesNotAlarm(t *testing.T) {
 			require.Zero(t, promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
 		})
 	}
+}
+
+// expirePrimaryChainBlock expires point's local CBOR the way history expiry
+// does, keeping the metadata and block index that record chain membership.
+func expirePrimaryChainBlock(t *testing.T, ls *LedgerState, point ocommon.Point) {
+	t.Helper()
+	_, err := ls.db.PruneBlock(context.Background(), point.Slot, point.Hash)
+	require.NoError(t, err)
+	_, err = database.BlockByPoint(context.Background(), ls.db, point)
+	require.ErrorIs(t, err, dbtypes.ErrHistoryExpired)
+}
+
+// Expiring a primary-chain block's CBOR does not take it off the primary
+// chain, so a refused rollback to it must keep the on-chain classification.
+func TestReportProtocolConstrainedRollbackExpiredOnPrimaryChainDoesNotAlarm(t *testing.T) {
+	t.Parallel()
+	for _, reason := range protocolConstrainedRollbackReasons {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			expirePrimaryChainBlock(t, fixture.ls, fixture.ancestorTip.Point)
+			for cycle := range unrecoverableRollbackThreshold * 3 {
+				fixture.ls.reportUnrecoverableRollbackIfStuck(
+					fixture.ancestorTip.Point,
+					reason,
+					freshUnrecoverableConnId(6000+cycle),
+				)
+			}
+			require.Zero(t, promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
+			rec := fixture.ls.unrecoverableRollbacks[unrecoverableRollbackKey(fixture.ancestorTip.Point)]
+			require.True(t, rec.primaryChainChecked, "expired CBOR must not make membership unknown")
+			require.True(t, rec.onPrimaryChain)
+		})
+	}
+}
+
+// A prune-floor rejection of an expired primary-chain target is logged at
+// WARN, not ERROR, because the target is still on the local chain.
+func TestRollbackTargetOnLocalChainExpiredCbor(t *testing.T) {
+	t.Parallel()
+	fixture := newChainsyncRollbackFixture(t)
+	expirePrimaryChainBlock(t, fixture.ls, fixture.ancestorTip.Point)
+	require.True(t, fixture.ls.rollbackTargetOnLocalChain(fixture.ancestorTip.Point))
+	require.False(t, fixture.ls.rollbackTargetOnLocalChain(
+		ocommon.NewPoint(
+			fixture.ancestorTip.Point.Slot,
+			testHashBytes("expired-off-chain-point"),
+		),
+	))
 }

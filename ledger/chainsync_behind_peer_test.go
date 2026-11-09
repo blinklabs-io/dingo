@@ -469,3 +469,24 @@ func TestChainsyncPeerBehindDepthIgnoresAdvertisedBlockNumber(t *testing.T) {
 		)
 	}
 }
+
+// A peer behind us on our chain stays behind when the CBOR of its tip and its
+// rollback point has expired: history expiry keeps the metadata and block
+// index that record primary-chain membership and block number.
+func TestChainsyncPeerBehindWithExpiredHistory(t *testing.T) {
+	t.Parallel()
+
+	f := newBehindPeerFixture(t)
+	peerTip := f.tipAtDepth(6)
+	rollbackPoint := f.pointAtDepth(12)
+	expirePrimaryChainBlock(t, f.ls, peerTip.Point)
+	expirePrimaryChainBlock(t, f.ls, rollbackPoint)
+
+	depth, behind := f.ls.chainsyncPeerBehindOnOurChain(ChainsyncEvent{
+		ConnectionId: f.connId,
+		Point:        rollbackPoint,
+		Tip:          peerTip,
+	})
+	require.True(t, behind)
+	assert.Equal(t, uint64(6), depth)
+}
