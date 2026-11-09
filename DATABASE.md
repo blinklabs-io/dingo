@@ -3089,7 +3089,7 @@ manifest in the staged copy. The full rebuild after the run
 clears the marker. For the same run SQLite raises the write connection's
 `cache_size` to 200 MB and sets `temp_store = MEMORY` (`SetCatchUpPragmas`),
 leaving `synchronous` and the journal mode alone, and `RestoreNormalPragmas`
-puts them back. PostgreSQL and MySQL keep every index and their settings for
+puts them back (`temp_store` returns to the write connection's `MEMORY` default). PostgreSQL and MySQL keep every index and their settings for
 the run: they rebuild the manifest in one transaction, whose locks on the
 rebuilt tables would stall writes after the catch-up hands back to
 Ouroboros.
@@ -4385,6 +4385,16 @@ on an active WAL: a transaction can grow it beyond 64 MiB, and a reader holding
 an older snapshot can prevent reset and leave the file larger. The periodic
 TRUNCATE checkpoint below remains the operation that can reduce an idle WAL to
 zero.
+
+The write connection (not the read pool) also sets `temp_store=MEMORY`
+(`sqliteWritePragmas`). Inside a write transaction, a multi-row
+`INSERT ... RETURNING` keeps a statement journal of the pages it modifies, and
+SQLite moves that journal to an anonymous temp file once it exceeds its
+64 KiB in-memory threshold; with `temp_store=MEMORY` it stays in RAM, bounded
+by the pages one statement touches. Sorter, materialised-subquery and
+index-build temporaries on that connection also stay in RAM. `synchronous` and
+`journal_mode` are unchanged, and `RestoreNormalPragmas` restores
+`temp_store=MEMORY` rather than the SQLite default.
 
 **Periodic forced WAL checkpoint (`checkpointWAL`,
 `database/plugin/metadata/sqlite/shared_sqlstore.go`).** Raising
