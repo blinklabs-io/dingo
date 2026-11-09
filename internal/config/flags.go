@@ -734,6 +734,11 @@ var flagSpecs = []flagSpec{
 		"max-trusted-local-ntc-conns",
 		"max trusted local node-to-client connections",
 	),
+	durationFlag(
+		"TrustedNtCIdleTimeout",
+		"trusted-ntc-idle-timeout",
+		"close idle trusted local node-to-client connections after this duration (0 = no limit)",
+	),
 	intFlag(
 		"MaxNtCConnectionsPerIP",
 		"max-ntc-connections-per-ip",

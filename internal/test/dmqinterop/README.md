@@ -67,12 +67,13 @@ message. Remove the container (`docker rm -f`) when done.
 
 ## The Cardano node's idle limit
 
-Dingo closes a node-to-client connection after two minutes without traffic.
-dmq-node keeps one open to its Cardano node and sends nothing between epochs,
-so against a Dingo with that limit it exits within minutes with `BearerClosed`.
-Until dmq-node is exempted, point `DMQ_INTEROP_CARDANO_BIN` at a Linux build of
-Dingo from before the limit for the Cardano node. The Dingo under test is
-always built from this tree.
+dmq-node keeps a node-to-client connection open to its Cardano node and sends
+nothing between epochs. Dingo applies no idle limit to trusted local
+connections unless `trustedNtCIdleTimeout` is set, so the Cardano node built
+from this tree works as is. With a limit set, Dingo closes the idle connection
+and dmq-node exits with `BearerClosed`, so `DMQ_INTEROP_CARDANO_BIN` must not
+point at a Dingo whose configuration sets `trustedNtCIdleTimeout`. The Dingo
+under test is always built from this tree.
 
 ## gouroboros version
 

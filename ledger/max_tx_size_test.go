@@ -49,9 +49,7 @@ func TestLedgerStateMaxTxSize(t *testing.T) {
 	got, ok := ls.MaxTxSize(conway.EraIdConway)
 	require.True(t, ok)
 	require.Equal(t, uint(16_384), got)
-	// Without previous-era parameters the ledger validates a previous-era
-	// transaction with the current ones, which Babbage validation refuses
-	// before any size rule, so no limit applies.
+	// Wrong-era submissions reach ledger validation for the typed mismatch.
 	_, ok = ls.MaxTxSize(babbage.EraIdBabbage)
 	require.False(t, ok)
 
@@ -69,17 +67,14 @@ func TestLedgerStateMaxTxSize(t *testing.T) {
 	require.Equal(t, uint(32_768), got)
 }
 
-// A transaction of the previous era is validated with the previous era's
-// parameters, so its limit is the previous MaxTxSize even when the current
-// one is smaller. Eras the ledger would refuse outright report no limit, so
-// the ledger's era-mismatch rejection is the one a submitter sees.
-func TestLedgerStateMaxTxSizeUsesTransactionEraParameters(t *testing.T) {
+// A wrong-era transaction has no early size limit so submission reaches the
+// ledger's typed era-mismatch rejection.
+func TestLedgerStateMaxTxSizeRejectsWrongEra(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{
 		currentEra:     eraDesc(t, eras.Eras, conway.EraIdConway),
 		currentPParams: &conway.ConwayProtocolParameters{MaxTxSize: 16_384},
-		prevEraPParams: &babbage.BabbageProtocolParameters{MaxTxSize: 32_768},
 	}
 	ls.publishSnapshotsLocked()
 
@@ -87,9 +82,8 @@ func TestLedgerStateMaxTxSizeUsesTransactionEraParameters(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, uint(16_384), got)
 
-	got, ok = ls.MaxTxSize(babbage.EraIdBabbage)
-	require.True(t, ok)
-	require.Equal(t, uint(32_768), got)
+	_, ok = ls.MaxTxSize(babbage.EraIdBabbage)
+	require.False(t, ok, "the previous era must reach ledger validation")
 
 	_, ok = ls.MaxTxSize(alonzo.EraIdAlonzo)
 	require.False(t, ok, "an era two back is refused by the ledger")

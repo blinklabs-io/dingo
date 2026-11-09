@@ -506,15 +506,11 @@ func (c *ConnectionManager) setupAcceptedConnection(
 		return
 	}
 	if l.UseNtC && l.TrustedLocal {
-		timeout := c.config.trustedNtCPostHandshakeTimeout
-		if timeout <= 0 {
-			timeout = trustedNtCIdleTimeout
-		}
 		if err := c.registerTrustedNtCActivity(
 			oConn.Id(),
 			oConn,
 			deadlineConn,
-			timeout,
+			c.config.TrustedNtCIdleTimeout,
 			c.config.Logger,
 		); err != nil {
 			c.config.Logger.Warn(

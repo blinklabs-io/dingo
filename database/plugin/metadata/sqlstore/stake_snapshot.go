@@ -192,7 +192,7 @@ func (s *Store) GetPoolStakeSnapshotsByEpochBounded(
 // expects, in the order it scans them.
 const poolStakeSnapshotColumns = `id, epoch, snapshot_type, pool_key_hash,
 total_stake, stake_denominator, delegator_count, captured_slot,
-leios_key_public, leios_key_possession_proof,
+vrf_key_hash, leios_key_public, leios_key_possession_proof,
 leios_key_registration_epoch,
 calculation_version, reward_account_auto_vote,
 reward_account_auto_vote_resolved`
@@ -297,6 +297,7 @@ func (s *Store) scanPoolStakeSnapshots(
 			&row.StakeDenominator,
 			&row.DelegatorCount,
 			&row.CapturedSlot,
+			&row.VrfKeyHash,
 			&row.LeiosKeyPublic,
 			&row.LeiosKeyPossessionProof,
 			&row.LeiosKeyRegistrationEpoch,
@@ -560,6 +561,7 @@ type poolStakeSnapshotQueryParams struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
+	VrfKeyHash                    []byte
 	LeiosKeyPublic                []byte
 	LeiosKeyPossessionProof       []byte
 	LeiosKeyRegistrationEpoch     sql.NullInt64
@@ -608,6 +610,7 @@ func poolStakeSnapshotParams(
 		),
 		DelegatorCount: delegatorCount,
 		CapturedSlot:   capturedSlot,
+		VrfKeyHash:     append([]byte(nil), snapshot.VrfKeyHash...),
 		LeiosKeyPublic: append(
 			[]byte(nil), snapshot.LeiosKeyPublic...,
 		),
@@ -655,6 +658,7 @@ func poolStakeSnapshotFromSQLite(
 		StakeDenominator: types.Uint64(stakeDenominator),
 		DelegatorCount:   uint64(row.DelegatorCount),
 		CapturedSlot:     uint64(row.CapturedSlot),
+		VrfKeyHash:       append([]byte(nil), row.VrfKeyHash...),
 		LeiosKeyPublic: append(
 			[]byte(nil), row.LeiosKeyPublic...,
 		),

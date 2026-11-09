@@ -99,6 +99,21 @@ func TestDefaultUnixSocketModes(t *testing.T) {
 	require.Equal(t, DefaultUnixSocketMode, cfg.DMQ.SocketMode)
 }
 
+func TestValidateTrustedNtCIdleTimeout(t *testing.T) {
+	cfg := validTestConfig()
+	assert.Zero(t, cfg.TrustedNtCIdleTimeout)
+
+	cfg.TrustedNtCIdleTimeout = 2 * time.Minute
+	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+
+	cfg.TrustedNtCIdleTimeout = -time.Second
+	assert.ErrorContains(
+		t,
+		cfg.validate(cfg.RunMode, minUnprivilegedPort),
+		"invalid trustedNtCIdleTimeout",
+	)
+}
+
 func TestValidateDevModeForcesStandardProductionAndAPIStorage(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.RunMode = RunModeDev

@@ -201,12 +201,8 @@ func ValidateTxAlonzo(
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-	// Validate transaction size against protocol limit
-	if err = ValidateTxSize(tx, tmpPparams.MaxTxSize); err != nil {
-		return err
-	}
-	// The fee minimum, including declared execution units, is enforced by
-	// alonzo.UtxoValidationRules (FeeTooSmall); do not price it again here.
+	// The max-size and minimum-fee rules, the latter including declared
+	// execution units, run from alonzoUtxoValidationRules on TxSizeForFee.
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
@@ -354,10 +350,24 @@ func ValidateTxAlonzo(
 var alonzoUtxoValidationRules = buildAlonzoValidationRules()
 
 func buildAlonzoValidationRules() []indexedUtxoValidationRule {
-	return buildIndexedUtxoValidationRules(
+	return buildSizeFeeValidationRules(
 		alonzo.UtxoValidationRuleDescriptors(),
 		alonzo.UtxoValidationRules,
-		lcommon.UtxoValidationRulePlutusScripts,
+		[]lcommon.UtxoValidationRuleId{lcommon.UtxoValidationRulePlutusScripts},
+		maxTxSizeRule(func(pp lcommon.ProtocolParameters) (uint, bool) {
+			p, ok := pp.(*alonzo.AlonzoProtocolParameters)
+			if !ok || p == nil {
+				return 0, false
+			}
+			return p.MaxTxSize, true
+		}),
+		minFeeRule(func(pp lcommon.ProtocolParameters) (feeParams, bool) {
+			p, ok := pp.(*alonzo.AlonzoProtocolParameters)
+			if !ok || p == nil {
+				return feeParams{}, false
+			}
+			return feeParams{p.MinFeeA, p.MinFeeB, p.ExecutionCosts}, true
+		}),
 	)
 }
 

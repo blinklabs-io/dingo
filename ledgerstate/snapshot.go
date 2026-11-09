@@ -1821,9 +1821,10 @@ func AggregatePoolStake(
 		}
 
 		pool := snap.PoolParams[poolHex]
-		var leiosKeyPublic, leiosKeyPossessionProof []byte
+		var vrfKeyHash, leiosKeyPublic, leiosKeyPossessionProof []byte
 		var leiosKeyRegistrationEpoch *uint64
 		if pool != nil {
+			vrfKeyHash = append([]byte(nil), pool.VrfKeyHash...)
 			leiosKeyPublic = append([]byte(nil), pool.LeiosKeyPublic...)
 			leiosKeyPossessionProof = append(
 				[]byte(nil), pool.LeiosKeyPossessionProof...,
@@ -1841,6 +1842,7 @@ func AggregatePoolStake(
 			TotalStake:                types.Uint64(agg.totalStake),
 			DelegatorCount:            agg.delegatorCount,
 			CapturedSlot:              capturedSlot,
+			VrfKeyHash:                vrfKeyHash,
 			LeiosKeyPublic:            leiosKeyPublic,
 			LeiosKeyPossessionProof:   leiosKeyPossessionProof,
 			LeiosKeyRegistrationEpoch: leiosKeyRegistrationEpoch,
