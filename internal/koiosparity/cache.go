@@ -2311,6 +2311,39 @@ var errAccountUniverseCrawlSuperseded = errors.New(
 	"koios account universe crawl superseded by another crawler",
 )
 
+// readAccountUniverseCrawlOwner returns the recorded crawl's start time and
+// page count, and whether one is recorded. Claims the writer slot first, since
+// the caller's writes depend on this read and so cannot precede it; see
+// withClaimedSource for why upgrading a read snapshot is the failure.
+func readAccountUniverseCrawlOwner(
+	tx *sql.Tx,
+	network string,
+) (time.Time, int, bool, error) {
+	if _, err := tx.Exec(
+		`UPDATE koios_account_universe_crawl SET network = network WHERE network = ?`,
+		network,
+	); err != nil {
+		return time.Time{}, 0, false, fmt.Errorf(
+			"claim account universe crawl write: %w", err,
+		)
+	}
+	var recStart time.Time
+	var recPages int
+	err := tx.QueryRow(
+		`SELECT started_at, pages FROM koios_account_universe_crawl WHERE network = ?`,
+		network,
+	).Scan(&recStart, &recPages)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, 0, false, nil
+	}
+	if err != nil {
+		return time.Time{}, 0, false, fmt.Errorf(
+			"read account universe crawl: %w", err,
+		)
+	}
+	return recStart, recPages, true, nil
+}
+
 // checkAccountUniverseCrawlOwner fails unless a write of page number pages
 // follows the recorded crawl for network: one that started at startedAt and
 // has recorded pages-1 pages. With no recorded crawl only a first page, pages
@@ -2321,20 +2354,15 @@ func checkAccountUniverseCrawlOwner(
 	startedAt time.Time,
 	pages int,
 ) error {
-	var recStart time.Time
-	var recPages int
-	err := tx.QueryRow(
-		`SELECT started_at, pages FROM koios_account_universe_crawl WHERE network = ?`,
-		network,
-	).Scan(&recStart, &recPages)
-	if errors.Is(err, sql.ErrNoRows) {
+	recStart, recPages, found, err := readAccountUniverseCrawlOwner(tx, network)
+	if err != nil {
+		return err
+	}
+	if !found {
 		if pages <= 1 {
 			return nil
 		}
 		return errAccountUniverseCrawlSuperseded
-	}
-	if err != nil {
-		return fmt.Errorf("read account universe crawl: %w", err)
 	}
 	if !recStart.Equal(startedAt) || recPages != pages-1 {
 		return errAccountUniverseCrawlSuperseded
@@ -2422,20 +2450,15 @@ func (c *Cache) CompleteAccountUniverseCrawl(
 		return fmt.Errorf("complete account universe: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	var recStart time.Time
-	var recPages int
-	err = tx.QueryRow(
-		`SELECT started_at, pages FROM koios_account_universe_crawl WHERE network = ?`,
-		network,
-	).Scan(&recStart, &recPages)
-	if errors.Is(err, sql.ErrNoRows) {
+	recStart, recPages, found, err := readAccountUniverseCrawlOwner(tx, network)
+	if err != nil {
+		return fmt.Errorf("complete account universe: %w", err)
+	}
+	if !found {
 		return fmt.Errorf(
 			"complete account universe: no crawl for %q: %w",
 			network, errAccountUniverseCrawlSuperseded,
 		)
-	}
-	if err != nil {
-		return fmt.Errorf("complete account universe: %w", err)
 	}
 	if !recStart.Equal(startedAt) || recPages != pages {
 		return errAccountUniverseCrawlSuperseded

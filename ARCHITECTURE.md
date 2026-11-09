@@ -16912,9 +16912,11 @@ never the reverse.
   the list does not shift, so the first request after a resume starts one row
   early and that row must equal the recorded last address; on a mismatch the
   partial crawl is discarded and restarted from zero, once per call. Within a
-  walk pages are contiguous and unchecked, relying on the list growing only at
-  its tail; an insert and a removal that cancel out ahead of the offset also
-  pass the overlap check. A partial crawl is likewise discarded when its
+  walk pages are contiguous and unchecked: `grest.account_list` orders by
+  `stake_address.id`, so the list grows only at its tail and a rollback at the
+  tip moves only accounts registered after the crawl started, which the
+  universe does not vouch for. An insert and a removal that cancel out ahead of
+  the offset also pass the overlap check. A partial crawl is likewise discarded when its
   recorded query differs from the current one or it started before the epoch
   being checked ended (the completed universe is stamped with the crawl's
   start). `/account_list` requests use a longer response-header and request

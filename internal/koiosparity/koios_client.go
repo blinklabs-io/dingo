@@ -1033,11 +1033,14 @@ func (k *KoiosClient) get(
 		client := k.http
 		if k.accountListHTTP != nil &&
 			strings.HasPrefix(path, "/account_list") {
+			client = k.accountListHTTP
 			// A transport other than the one NewKoiosClient built has been
 			// wrapped (fault injection, a recording proxy) and has to see
-			// every request, so it keeps the general client.
-			if _, std := k.http.Transport.(*http.Transport); std {
-				client = k.accountListHTTP
+			// every request, so it stays in the path under the long bound.
+			if _, std := k.http.Transport.(*http.Transport); !std {
+				wrapped := *k.http
+				wrapped.Timeout = k.accountListHTTP.Timeout
+				client = &wrapped
 			}
 		}
 		resp, doErr := client.Do(req.Clone(ctx))
@@ -1737,8 +1740,10 @@ func (k *KoiosClient) GetAllAccountAddresses(
 // misaligned, so the walk returns errAccountListDrifted rather than skipping
 // or repeating accounts. An overlap that matches does not rule out an insert
 // and a removal that cancel out before it; the check bounds drift, it does not
-// prove stability. Within one walk pages are contiguous and unchecked, which
-// relies on the list only growing at its tail while it is read.
+// prove stability. Within one walk pages are contiguous and unchecked:
+// grest.account_list orders by stake_address.id, so new accounts land at the
+// tail and only a rollback at the tip can move rows already read, and those
+// registered after the crawl started, which the universe does not vouch for.
 // The walk ends on the first response shorter than koiosPageSize, the only
 // end-of-list signal the default-order endpoint gives.
 func (k *KoiosClient) walkAccountList(

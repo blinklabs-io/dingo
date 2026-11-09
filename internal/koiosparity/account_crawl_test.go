@@ -470,6 +470,30 @@ func TestAccountListHonoursWrappedTransport(t *testing.T) {
 	assert.Equal(t, int32(1), wrapped.n.Load())
 }
 
+// TestAccountListWrappedTransportKeepsLongTimeout checks that routing through
+// a wrapped transport does not cost /account_list its longer timeout: the deep
+// offset pages that need it are just as slow behind a wrapper.
+func TestAccountListWrappedTransportKeepsLongTimeout(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			time.Sleep(300 * time.Millisecond)
+			_, _ = w.Write([]byte(`[{"stake_address":"stake1ua"}]`))
+		},
+	))
+	defer srv.Close()
+	k := newUniverseTestClient(srv)
+	wrapped := &countingTransport{next: http.DefaultTransport}
+	k.http = &http.Client{Timeout: 50 * time.Millisecond, Transport: wrapped}
+	k.accountListHTTP = &http.Client{Timeout: 5 * time.Second}
+
+	addrs, err := k.GetAllAccountAddresses(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"stake1ua"}, addrs)
+	assert.Equal(t, int32(1), wrapped.n.Load())
+}
+
 // TestWalkAccountListAdvancesPastEmptyAddressRows serves a full first page
 // whose rows all carry an empty stake_address. The walk must still move its
 // offset past those rows; refetching the same window would never end.
