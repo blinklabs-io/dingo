@@ -16,8 +16,6 @@ package ledger
 
 import (
 	"sync"
-
-	"github.com/blinklabs-io/dingo/consensus/praos"
 )
 
 // acquiredPointMaxUtxoHoldWindows bounds how far an acquired point may hold
@@ -154,7 +152,7 @@ func (ls *LedgerState) capPoolSnapshotPruneBefore(
 			before = 0
 			break
 		}
-		if snap := praos.StakeSnapshotEpoch(epoch); snap < before {
+		if snap := ls.LeaderStakeSnapshotEpoch(epoch); snap < before {
 			before = snap
 		}
 	}

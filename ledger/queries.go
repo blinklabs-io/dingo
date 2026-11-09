@@ -25,7 +25,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -495,7 +494,7 @@ func (ls *LedgerState) checkAnnouncedPruneFloors(
 		if !found {
 			return errEpochNotResolved(at)
 		}
-		if snap := praos.StakeSnapshotEpoch(targetEpoch); snap < poolFloor {
+		if snap := ls.LeaderStakeSnapshotEpoch(targetEpoch); snap < poolFloor {
 			return fmt.Errorf(
 				"%w: pinned slot %d needs the mark snapshot from epoch %d, "+
 					"below the pool-snapshot prune floor (epoch %d) a "+

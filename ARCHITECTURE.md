@@ -11161,7 +11161,14 @@ era, provider identity, and full-distribution commitment.
 The stake distribution is the reference node's active `set`/`nesPd`
 distribution, as of the end of E-2. Dingo captures `mark[K]` at the boundary
 into K, holding stake as of the end of K-1; the electing row is therefore
-Mark E-1 (`praos.StakeSnapshotEpoch(E)`). Header validation uses the same
+Mark E-1 (`praos.StakeSnapshotEpoch(E)`). The reference `nesPd` is rewritten
+only when NEWEPOCH runs for the successor of the ledger epoch label, so once
+an epoch is empty the label stops advancing and every later epoch is elected
+by the distribution frozen at the label, `StakeSnapshotEpoch(label)`
+(`praos.LeaderStakeSnapshotEpoch`, resolved from the epoch cache by
+`LedgerState.LeaderStakeSnapshotEpoch`). Header validation, the forging
+schedule, Tachys, the pool-distribution queries and the retention pins all
+use that resolution. Header validation uses the same
 row except in the imported Mithril epoch, which uses the imported active
 `pool-distr` stake fraction. Boundary snapshots use slot-aware delegation
 and UTxO state. An absent pool is rejected, while an entirely empty Mark

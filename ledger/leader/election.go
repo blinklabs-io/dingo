@@ -207,6 +207,23 @@ type EraInfoProvider interface {
 	EraIDForEpoch(epoch uint64) (uint, error)
 }
 
+// LeaderStakeSnapshotProvider resolves the mark snapshot epoch whose stake
+// distribution elects leaders in an epoch. Across a skipped epoch boundary
+// that is the distribution frozen at the ledger epoch label rather than
+// praos.StakeSnapshotEpoch of the epoch itself; a provider that does not
+// implement it gets the latter.
+type LeaderStakeSnapshotProvider interface {
+	LeaderStakeSnapshotEpoch(epoch uint64) uint64
+}
+
+// leaderStakeSnapshotEpoch returns the snapshot epoch electing leaders in epoch.
+func (e *Election) leaderStakeSnapshotEpoch(epoch uint64) uint64 {
+	if p, ok := e.epochProvider.(LeaderStakeSnapshotProvider); ok {
+		return p.LeaderStakeSnapshotEpoch(epoch)
+	}
+	return praos.StakeSnapshotEpoch(epoch)
+}
+
 // ScheduleStore persists computed schedules for later reuse.
 type ScheduleStore interface {
 	LoadSchedule(epoch uint64, poolId lcommon.PoolKeyHash) (*Schedule, error)
@@ -895,7 +912,7 @@ func (e *Election) validatePersistedSchedule(
 		}
 	}
 
-	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
+	snapshotEpoch := e.leaderStakeSnapshotEpoch(epoch)
 	if e.tachysProvider != nil {
 		eraProvider, ok := e.epochProvider.(EraInfoProvider)
 		if !ok {
@@ -987,7 +1004,7 @@ func (e *Election) computeSchedule(
 	}
 
 	// Leader election uses the mark snapshot that is active for the epoch.
-	snapshotEpoch := praos.StakeSnapshotEpoch(currentEpoch)
+	snapshotEpoch := e.leaderStakeSnapshotEpoch(currentEpoch)
 	if e.tachysProvider != nil {
 		return e.computeTachysSchedule(ctx, currentEpoch, snapshotEpoch)
 	}

@@ -2250,6 +2250,34 @@ func (ls *LedgerState) epochCacheSnapshot() []models.Epoch {
 	return snapshot.epochCache
 }
 
+// leaderStakeSnapshotEpochInCache returns the mark snapshot epoch that elects
+// a block in epoch, given the epoch cache that describes the chain the block
+// extends. The ledger epoch label is reconstructed from the rows up to epoch,
+// so rows persisted for a jump over an empty epoch leave it behind and the
+// distribution frozen at the label stays in force.
+func leaderStakeSnapshotEpochInCache(
+	epoch uint64,
+	cache []models.Epoch,
+) uint64 {
+	end := 0
+	for end < len(cache) && cache[end].EpochId <= epoch {
+		end++
+	}
+	if end == 0 {
+		return praos.StakeSnapshotEpoch(epoch)
+	}
+	return praos.LeaderStakeSnapshotEpoch(
+		epoch,
+		ledgerEpochFromCache(cache[:end]),
+	)
+}
+
+// LeaderStakeSnapshotEpoch returns the mark snapshot epoch that elects leaders
+// for the given epoch against the published epoch cache.
+func (ls *LedgerState) LeaderStakeSnapshotEpoch(epoch uint64) uint64 {
+	return leaderStakeSnapshotEpochInCache(epoch, ls.epochCacheSnapshot())
+}
+
 //nolint:unused // retained as a test helper
 func (ls *LedgerState) verifyBlockLeaderEligibility(
 	block ledger.Block,
@@ -2533,7 +2561,7 @@ func (ls *LedgerState) resolveElectingSnapshotAtSlot(
 	txn types.Txn,
 ) electingSnapshot {
 	snap := electingSnapshot{
-		epoch: praos.StakeSnapshotEpoch(epochId),
+		epoch: leaderStakeSnapshotEpochInCache(epochId, epochCache),
 		kind:  models.PoolStakeSnapshotTypeMark,
 
 		epochCache: epochCache,
@@ -3526,7 +3554,7 @@ func (ls *LedgerState) oldestRequiredSnapshotEpochLocked() (uint64, bool) {
 			// will read once the cache advances, looping the header on defer.
 			return 0, true
 		}
-		snapshotEpoch := praos.StakeSnapshotEpoch(epoch.EpochId)
+		snapshotEpoch := leaderStakeSnapshotEpochInCache(epoch.EpochId, cache)
 		if !have || snapshotEpoch < floor {
 			floor = snapshotEpoch
 			have = true
