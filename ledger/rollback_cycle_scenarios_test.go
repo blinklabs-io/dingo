@@ -106,9 +106,23 @@ func (s *govDiffScenario) voteAll(
 	t.Helper()
 	slot := s.epoch.StartSlot - 5
 	s.castVote(t, p, models.VoterTypeDRep, s.drep, models.VoteYes, slot)
-	s.castVote(t, p, models.VoterTypeSPO, []byte(hfrLiveYesPool), models.VoteYes, slot)
+	s.castVote(
+		t,
+		p,
+		models.VoterTypeSPO,
+		[]byte(hfrLiveYesPool),
+		models.VoteYes,
+		slot,
+	)
 	if cc {
-		s.castVote(t, p, models.VoterTypeCC, s.hotCredential, models.VoteYes, slot)
+		s.castVote(
+			t,
+			p,
+			models.VoterTypeCC,
+			s.hotCredential,
+			models.VoteYes,
+			slot,
+		)
 	}
 }
 
@@ -136,7 +150,10 @@ func TestRollbackAcrossGovernanceEnactmentsRestoresEveryTable(t *testing.T) {
 	}{{"database", false}, {"ledger", true}} {
 		t.Run("constitution/"+entry.name, func(t *testing.T) {
 			t.Parallel()
-			s := newGovDiffScenarioWithOptions(t, govDiffScenarioOptions{noProposals: true})
+			s := newGovDiffScenarioWithOptions(
+				t,
+				govDiffScenarioOptions{noProposals: true},
+			)
 			prior := &models.Constitution{
 				AnchorURL:  "https://example.invalid/genesis-constitution",
 				AnchorHash: repeatByte(32, 0xc1),
@@ -152,11 +169,18 @@ func TestRollbackAcrossGovernanceEnactmentsRestoresEveryTable(t *testing.T) {
 			requireChanged(t, results, "constitution")
 			got, err := s.db.GetConstitution(nil)
 			require.NoError(t, err)
-			require.Equal(t, "https://example.invalid/new-constitution", got.AnchorURL)
+			require.Equal(
+				t,
+				"https://example.invalid/new-constitution",
+				got.AnchorURL,
+			)
 		})
 		t.Run("no confidence/"+entry.name, func(t *testing.T) {
 			t.Parallel()
-			s := newGovDiffScenarioWithOptions(t, govDiffScenarioOptions{noProposals: true})
+			s := newGovDiffScenarioWithOptions(
+				t,
+				govDiffScenarioOptions{noProposals: true},
+			)
 			p := s.propose(t, 0x83, lcommon.GovActionTypeNoConfidence,
 				&lcommon.NoConfidenceGovAction{
 					Type: uint(lcommon.GovActionTypeNoConfidence),
@@ -172,7 +196,10 @@ func TestRollbackAcrossGovernanceEnactmentsRestoresEveryTable(t *testing.T) {
 		})
 		t.Run("hard fork/"+entry.name, func(t *testing.T) {
 			t.Parallel()
-			s := newGovDiffScenarioWithOptions(t, govDiffScenarioOptions{noProposals: true})
+			s := newGovDiffScenarioWithOptions(
+				t,
+				govDiffScenarioOptions{noProposals: true},
+			)
 			hf := &lcommon.HardForkInitiationGovAction{
 				Type: uint(lcommon.GovActionTypeHardForkInitiation),
 			}
@@ -232,13 +259,21 @@ func TestRollbackAcrossPlominHardForkRestoresDRepDelegations(t *testing.T) {
 	}{{"database", false}, {"ledger", true}} {
 		t.Run(entry.name, func(t *testing.T) {
 			t.Parallel()
-			s := newGovDiffScenarioWithOptions(t, govDiffScenarioOptions{noProposals: true})
+			s := newGovDiffScenarioWithOptions(
+				t,
+				govDiffScenarioOptions{noProposals: true},
+			)
 			bootstrap := donationTestConwayPParams(9)
 			bootstrap.MinCommitteeSize = 1
 			bootstrap.CommitteeTermLimit = 100
 			s.pparams = bootstrap
 			s.ls.currentPParams = bootstrap
-			dangling := s.addAccount(t, 0xf1, repeatByte(28, 0xf2), hfrLiveYesPool)
+			dangling := s.addAccount(
+				t,
+				0xf1,
+				repeatByte(28, 0xf2),
+				hfrLiveYesPool,
+			)
 			hf := &lcommon.HardForkInitiationGovAction{
 				Type: uint(lcommon.GovActionTypeHardForkInitiation),
 			}
@@ -272,7 +307,10 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 		// fork replays a chain without the post-target votes and donation.
 		fork bool
 	}
-	variants := []variant{{"same chain", false}, {"fork without the votes", true}}
+	variants := []variant{
+		{"same chain", false},
+		{"fork without the votes", true},
+	}
 	for _, entry := range []struct {
 		name   string
 		ledger bool
@@ -281,19 +319,48 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 			name := entry.name + "/" + v.name
 			t.Run("new vote/"+name, func(t *testing.T) {
 				t.Parallel()
-				s := newGovDiffScenarioWithOptions(t, govDiffScenarioOptions{noProposals: true})
+				s := newGovDiffScenarioWithOptions(
+					t,
+					govDiffScenarioOptions{noProposals: true},
+				)
 				hf := &lcommon.HardForkInitiationGovAction{
 					Type: uint(lcommon.GovActionTypeHardForkInitiation),
 				}
 				hf.ProtocolVersion.Major = 11
-				p := s.propose(t, 0x85, lcommon.GovActionTypeHardForkInitiation, hf)
+				p := s.propose(
+					t,
+					0x85,
+					lcommon.GovActionTypeHardForkInitiation,
+					hf,
+				)
 				slot := s.epoch.StartSlot - 5
-				s.castVote(t, p, models.VoterTypeDRep, s.drep, models.VoteYes, slot)
-				s.castVote(t, p, models.VoterTypeCC, s.hotCredential, models.VoteYes, slot)
+				s.castVote(
+					t,
+					p,
+					models.VoterTypeDRep,
+					s.drep,
+					models.VoteYes,
+					slot,
+				)
+				s.castVote(
+					t,
+					p,
+					models.VoterTypeCC,
+					s.hotCredential,
+					models.VoteYes,
+					slot,
+				)
 				first := s.epoch.EpochId + 1
 				boundaries := 3
 				rp := s.addRewardPool(t)
-				c := newRollbackCycle(t, s, entry.ledger, false, gap, boundaries)
+				c := newRollbackCycle(
+					t,
+					s,
+					entry.ledger,
+					false,
+					gap,
+					boundaries,
+				)
 				c.postTarget = func(t *testing.T, next models.Epoch, _ bool) {
 					target := next.StartSlot - gap
 					if next.EpochId == first {
@@ -310,7 +377,10 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 							&models.PoolRegistration{
 								PoolKeyHash: rp.key, AddedSlot: target + 3,
 								Pledge: 700, Cost: 2_000, Margin: margin,
-								VrfKeyHash: make([]byte, 32), RewardAccount: rp.owner,
+								VrfKeyHash: make(
+									[]byte,
+									32,
+								), RewardAccount: rp.owner,
 							},
 						))
 						// Without the SPO vote the action cannot ratify.
@@ -333,16 +403,24 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 					}
 				}
 				results := runBoundaries(t, c, boundaries)
-				requireChanged(t, results,
-					"governance_vote", "governance_vote_history", "network_donation",
-					"pool_registration")
+				requireChanged(
+					t,
+					results,
+					"governance_vote",
+					"governance_vote_history",
+					"network_donation",
+					"pool_registration",
+				)
 				if !v.fork {
 					require.True(t, s.enacted(t, 0x85))
 				}
 			})
 			t.Run("changed vote/"+name, func(t *testing.T) {
 				t.Parallel()
-				s := newGovDiffScenarioWithOptions(t, govDiffScenarioOptions{noProposals: true})
+				s := newGovDiffScenarioWithOptions(
+					t,
+					govDiffScenarioOptions{noProposals: true},
+				)
 				minFee := uint(88)
 				change := &conway.ConwayParameterChangeGovAction{
 					Type: uint(lcommon.GovActionTypeParameterChange),
@@ -350,16 +428,42 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 						MinFeeA: &minFee,
 					},
 				}
-				p := s.propose(t, 0x89, lcommon.GovActionTypeParameterChange, change)
+				p := s.propose(
+					t,
+					0x89,
+					lcommon.GovActionTypeParameterChange,
+					change,
+				)
 				slot := s.epoch.StartSlot - 5
-				s.castVote(t, p, models.VoterTypeDRep, s.drep, models.VoteNo, slot)
+				s.castVote(
+					t,
+					p,
+					models.VoterTypeDRep,
+					s.drep,
+					models.VoteNo,
+					slot,
+				)
 				// A fee change is a security parameter, so pools vote too.
 				s.castVote(t, p, models.VoterTypeSPO,
 					[]byte(hfrLiveYesPool), models.VoteYes, slot)
-				s.castVote(t, p, models.VoterTypeCC, s.hotCredential, models.VoteYes, slot)
+				s.castVote(
+					t,
+					p,
+					models.VoterTypeCC,
+					s.hotCredential,
+					models.VoteYes,
+					slot,
+				)
 				first := s.epoch.EpochId + 1
 				boundaries := 3
-				c := newRollbackCycle(t, s, entry.ledger, false, gap, boundaries)
+				c := newRollbackCycle(
+					t,
+					s,
+					entry.ledger,
+					false,
+					gap,
+					boundaries,
+				)
 				c.postTarget = func(t *testing.T, next models.Epoch, _ bool) {
 					target := next.StartSlot - gap
 					if next.EpochId != first {
@@ -387,7 +491,12 @@ func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
 					}
 				}
 				results := runBoundaries(t, c, boundaries)
-				requireChanged(t, results, "governance_vote", "governance_vote_history")
+				requireChanged(
+					t,
+					results,
+					"governance_vote",
+					"governance_vote_history",
+				)
 				if !v.fork {
 					require.True(t, s.enacted(t, 0x89))
 				}
@@ -404,7 +513,11 @@ func rewardUpdateNodeConfig(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("5a", 32),
 	}
-	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(
+		t,
+		completeTestShelleyGenesis(
+			cfg,
+		).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.5,
 		"epochLength": 432000,
 		"maxLovelaceSupply": 100000000,
@@ -412,7 +525,8 @@ func rewardUpdateNodeConfig(t *testing.T) *cardano.CardanoNodeConfig {
 		"slotLength": 1,
 		"updateQuorum": 5,
 		"systemStart": "2017-09-23T21:44:51Z"
-	}`)))
+	}`)),
+	)
 	return cfg
 }
 
@@ -478,7 +592,11 @@ func (s *govDiffScenario) seedRewardRound(
 	copy(poolID[:], rp.key)
 	for i := range blocks {
 		require.NoError(t, s.db.UpdatePoolOpCertSequence(
-			context.Background(), poolID, epoch.EpochId*100+uint64(i)+1, perf.StartSlot+uint64(i), nil,
+			context.Background(),
+			poolID,
+			epoch.EpochId*100+uint64(i)+1,
+			perf.StartSlot+uint64(i),
+			nil,
 		))
 	}
 	captured, boundary := epoch.StartSlot, epoch.StartSlot
@@ -531,7 +649,10 @@ func TestRollbackAcrossRewardPayoutRestoresEveryTable(t *testing.T) {
 	}{{"database", false}, {"ledger", true}} {
 		t.Run(entry.name, func(t *testing.T) {
 			t.Parallel()
-			s := newGovDiffScenarioWithOptions(t, govDiffScenarioOptions{noProposals: true})
+			s := newGovDiffScenarioWithOptions(
+				t,
+				govDiffScenarioOptions{noProposals: true},
+			)
 			rp := s.addRewardPool(t)
 			// One desired pool lets the pool's stake earn its full share.
 			s.pparams.(*conway.ConwayProtocolParameters).NOpt = 1
@@ -554,9 +675,16 @@ func TestRollbackAcrossRewardPayoutRestoresEveryTable(t *testing.T) {
 			require.NotZero(t, uint64(outputs[0].LeaderReward))
 			require.NotZero(t, uint64(outputs[0].MemberRewardTotal),
 				"the pool's members must be paid")
-			requireChanged(t, results,
-				"network_state", "reward_ada_pots", "reward_pool_output", "reward_account_output",
-				"reward_credit_round", "account_reward_delta")
+			requireChanged(
+				t,
+				results,
+				"network_state",
+				"reward_ada_pots",
+				"reward_pool_output",
+				"reward_account_output",
+				"reward_credit_round",
+				"account_reward_delta",
+			)
 		})
 	}
 }

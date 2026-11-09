@@ -85,7 +85,10 @@ func (c *rollbackCycle) settle() func(*LedgerState) {
 }
 
 func rollbackPoint(slot uint64) ocommon.Point {
-	return ocommon.NewPoint(slot, testHashBytes("rollback-cycle-"+slotLabel(slot)))
+	return ocommon.NewPoint(
+		slot,
+		testHashBytes("rollback-cycle-"+slotLabel(slot)),
+	)
 }
 
 func slotLabel(slot uint64) string { return strconv.FormatUint(slot, 10) }
@@ -263,7 +266,10 @@ func (c *rollbackCycle) run(
 	next.StartSlot = epoch.StartSlot + uint64(epoch.LengthInSlots)
 	target := next.StartSlot - c.gap
 	if c.postTarget == nil && c.gap > 1 {
-		t.Fatalf("a rollback target %d slots early needs post-target rows", c.gap)
+		t.Fatalf(
+			"a rollback target %d slots early needs post-target rows",
+			c.gap,
+		)
 	}
 	c.setTip(t, target)
 	if c.ledger {
