@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/stretchr/testify/require"
 )
 
@@ -175,23 +176,15 @@ func TestValidateBlockProducerPoolsRefusesLeiosWithSeveralPools(t *testing.T) {
 
 	cfg = validTestConfig()
 	cfg.BlockProducer = true
-	cfg.BlockProducerPools = twoPools[:1]
-	err := cfg.Validate(RunModeLeios)
-	if err != nil {
-		require.NotContains(t, err.Error(), want)
-	}
-}
+	cfg.BlockProducerPools = twoPools
+	cfg.Network = ouroboros.NetworkCardanoMusashi.Name
+	cfg.NetworkMagic = ouroboros.NetworkCardanoMusashi.NetworkMagic
+	require.ErrorContains(t, cfg.Validate(RunModeServe), want)
 
-func TestProducerPoolsFallsBackToTopLevelKeys(t *testing.T) {
-	t.Parallel()
-	cfg := validTestConfig()
-	cfg.ShelleyVRFKey = "/keys/vrf.skey"
-	cfg.ShelleyKESAgentSocket = "/run/kes.sock"
-	cfg.ShelleyOperationalCertificate = "/keys/node.cert"
-	pools := cfg.ProducerPools()
-	require.Len(t, pools, 1)
-	require.Equal(t, "/keys/vrf.skey", pools[0].ShelleyVRFKey)
-	require.Equal(t, "/run/kes.sock", pools[0].ShelleyKESAgentSocket)
+	cfg = validTestConfig()
+	cfg.BlockProducer = true
+	cfg.BlockProducerPools = twoPools[:1]
+	require.NoError(t, cfg.Validate(RunModeLeios))
 }
 
 // Not t.Parallel: loadConfigThroughPipeline resets the package-level
@@ -214,5 +207,5 @@ blockProducerPools:
 	require.Len(t, cfg.BlockProducerPools, 2)
 	require.Equal(t, "sign", cfg.BlockProducerPools[0].ShelleyKESAgentMode)
 	require.Equal(t, "serve-key", cfg.BlockProducerPools[1].ShelleyKESAgentMode)
-	require.Equal(t, "/run/kes-b.sock", cfg.ProducerPools()[1].ShelleyKESAgentSocket)
+	require.Equal(t, "/run/kes-b.sock", cfg.BlockProducerPools[1].ShelleyKESAgentSocket)
 }

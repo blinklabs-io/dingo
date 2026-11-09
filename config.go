@@ -2933,6 +2933,9 @@ func (c *Config) ShelleyOperationalCertificate() string {
 // BlockProducerPools returns a copy of the pools listed with
 // WithBlockProducerPools, or nil when the single-pool settings are used.
 func (c *Config) BlockProducerPools() []BlockProducerPool {
+	if len(c.cfg.BlockProducerPools) == 0 {
+		return nil
+	}
 	return slices.Clone(c.cfg.BlockProducerPools)
 }
 
