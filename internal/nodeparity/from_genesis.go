@@ -919,6 +919,18 @@ func RunFromGenesis(
 			return fmt.Errorf("boundary capture directory: %w", err)
 		}
 		captures = newBoundaryCaptures(options.captureDir)
+		loaded, removed, err := captures.load(startPoint)
+		if err != nil {
+			return fmt.Errorf("boundary capture directory: %w", err)
+		}
+		if loaded > 0 || removed > 0 {
+			logf(
+				"nodeparity: picked up %d boundary capture(s) left by an "+
+					"earlier run; removed %d file(s) for boundaries at or "+
+					"before the start point, superseded or partly written",
+				loaded, removed,
+			)
+		}
 		followerCtx, stopFollower := context.WithCancel(ctx)
 		var followerDone sync.WaitGroup
 		defer func() {
@@ -1541,7 +1553,9 @@ func RunFromGenesis(
 							// for it.
 							defer func() {
 								if !captureCompared {
-									captures.put(capture)
+									if err := captures.put(capture); err != nil {
+										logf("nodeparity: %v", err)
+									}
 								}
 							}()
 						}
@@ -1690,9 +1704,6 @@ func RunFromGenesis(
 							result.UTxOAttempted = false
 						}
 						captureCompared = true
-						if capture != nil && capture.utxoPath != "" {
-							_ = os.Remove(capture.utxoPath)
-						}
 						result.UTxOElapsed = time.Since(utxoStart)
 						utxoTaintCause = ""
 
@@ -1702,6 +1713,11 @@ func RunFromGenesis(
 						txInfoFlushElapsed = 0
 
 						report(result)
+						// Only once reported: a process that dies first finds
+						// the capture again on restart.
+						if capture != nil {
+							capture.removeFiles()
+						}
 						return nil
 					},
 				),
