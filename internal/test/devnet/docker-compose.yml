@@ -144,8 +144,8 @@ services:
       # host-owned bind mount. The in-container unix socket lives on a named
       # volume (like conformance mode) for txpump and the healthcheck.
       DINGO_PRIVATE_BIND_ADDR: "0.0.0.0"
-      DINGO_PRIVATE_PORT: "3002"
       CARDANO_PRIVATE_BIND_ADDR: "0.0.0.0"
+      CARDANO_PRIVATE_PORT: "3002"
     volumes:
       - p1-configs:/configs:ro
       - ${DEVNET_TOPOLOGY_DIR:-./topology}/dingo-1.json:/topology/topology.json:ro
@@ -331,8 +331,8 @@ services:
       # so the in-network txpump can submit transactions without a cross-uid
       # unix-socket mount (the socket is owned by the dingo uid).
       DINGO_PRIVATE_BIND_ADDR: "0.0.0.0"
-      DINGO_PRIVATE_PORT: "3002"
       CARDANO_PRIVATE_BIND_ADDR: "0.0.0.0"
+      CARDANO_PRIVATE_PORT: "3002"
     volumes:
       - p1-configs:/configs:ro
       - ${DEVNET_TOPOLOGY_DIR:-./topology}/dingo-producer.json:/topology/topology.json:ro
