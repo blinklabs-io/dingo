@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/hex"
 	"math"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -378,4 +379,50 @@ func TestNeighborBlocksSkipSparseIDs(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, []uint64{0}, heights(got))
+}
+
+// errCountingContext counts how often the walk checks for cancellation, once
+// per index entry it steps over.
+type errCountingContext struct {
+	context.Context
+	calls *atomic.Int64
+}
+
+func (c errCountingContext) Err() error {
+	c.calls.Add(1)
+	return c.Context.Err()
+}
+
+func TestNeighborBlocksOutOfRangePageDoesNotWalkTheIndex(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	blocks := seedSparseChain(t, db, []uint64{2, 1000, 1005, 2000})
+
+	steps := func(hash []byte, page, count int, forward bool) ([]models.Block, int64) {
+		var calls atomic.Int64
+		got, _, err := adapter.neighborBlocks(
+			errCountingContext{Context: t.Context(), calls: &calls},
+			hex.EncodeToString(hash),
+			PaginationParams{Count: count, Page: page},
+			forward,
+		)
+		require.NoError(t, err)
+		return got, calls.Load()
+	}
+
+	// A one-entry page checks for cancellation at least once more than the
+	// fixed cost of a lookup; an out-of-range page must cost less than it.
+	for _, tc := range []struct {
+		name    string
+		hash    []byte
+		forward bool
+	}{
+		{"forward", blocks[0].Hash, true},
+		{"backward", blocks[3].Hash, false},
+	} {
+		_, walked := steps(tc.hash, 1, 1, tc.forward)
+		got, calls := steps(tc.hash, 21474836, 100, tc.forward)
+		require.Empty(t, got, tc.name)
+		require.Less(t, calls, walked, tc.name)
+	}
 }

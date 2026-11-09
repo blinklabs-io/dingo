@@ -74,6 +74,20 @@ func (a *NodeAdapter) neighborBlocks(
 	}
 	// Entries on the pages before the requested one are stepped over.
 	skip := uint64(offset) // #nosec G115 -- offset is non-negative
+	// Each step consumes one distinct ID, so a page that starts at or past
+	// the last ID on this side holds nothing. Returning here keeps an
+	// out-of-range page from walking the whole index.
+	var span uint64
+	if forward {
+		if tipID > origin.ID {
+			span = tipID - origin.ID
+		}
+	} else if origin.ID > database.BlockInitialIndex {
+		span = origin.ID - database.BlockInitialIndex
+	}
+	if skip >= span {
+		return []models.Block{}, total, nil
+	}
 	ret := make([]models.Block, 0, params.Count)
 	cursor := origin.ID
 	for i := uint64(0); i < skip+uint64(params.Count); i++ { // #nosec G115 -- Count is non-negative
