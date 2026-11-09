@@ -1200,14 +1200,21 @@ func (b *Blockfrost) admitMetadataLabelPage(
 }
 
 // writeMetadataLabelDeadlineError answers a page that ran past its deadline
-// and reports whether it did.
-func writeMetadataLabelDeadlineError(
+// and reports whether it did. The overrun is logged so an operator can see a
+// label whose pages exhaust the budget.
+func (b *Blockfrost) writeMetadataLabelDeadlineError(
 	w http.ResponseWriter,
+	label uint64,
 	err error,
 ) bool {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	b.logger.Warn(
+		"metadata label page exceeded its deadline",
+		"label", label,
+		"error", err,
+	)
 	w.Header().Set("Retry-After", "1")
 	writeError(
 		w,
@@ -1251,7 +1258,7 @@ func (b *Blockfrost) handleMetadataTransactions(
 		if errors.Is(err, context.Canceled) {
 			return
 		}
-		if writeMetadataLabelDeadlineError(w, err) {
+		if b.writeMetadataLabelDeadlineError(w, label, err) {
 			return
 		}
 		b.logger.Error(
@@ -1309,7 +1316,7 @@ func (b *Blockfrost) handleMetadataTransactionsCBOR(
 		if errors.Is(err, context.Canceled) {
 			return
 		}
-		if writeMetadataLabelDeadlineError(w, err) {
+		if b.writeMetadataLabelDeadlineError(w, label, err) {
 			return
 		}
 		b.logger.Error(
