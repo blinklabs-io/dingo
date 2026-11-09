@@ -9561,6 +9561,76 @@ func TestGenesisOverlayForecastsNextEpochInEraUpdate(t *testing.T) {
 	assert.Equal(t, genesisOverlayNone, status)
 }
 
+// TestGenesisOverlayKeepsFrozenParametersAfterEmptyEpoch pins that a TPraos
+// block in the epoch after a tip beyond an empty epoch is led under the
+// parameters in force at the ledger epoch label. NEWEPOCH enacts only for the
+// successor of the label, so the pending decentralization update does not apply
+// to this boundary.
+func TestGenesisOverlayKeepsFrozenParametersAfterEmptyEpoch(t *testing.T) {
+	t.Parallel()
+
+	genesisCfg := newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
+		t,
+		strings.Repeat("00", lcommon.Blake2b224Size),
+		strings.Repeat("00", lcommon.Blake2b256Size),
+		"0.05",
+	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	epoch := func(id uint64) models.Epoch {
+		return models.Epoch{
+			EpochId:       id,
+			StartSlot:     id * 86_400,
+			LengthInSlots: 86_400,
+			SlotLength:    1,
+			EraId:         eras.AlonzoEraDesc.Id,
+		}
+	}
+	initialPParams := &alonzo.AlonzoProtocolParameters{
+		MaxBlockBodySize:   65_536,
+		MaxTxSize:          16_384,
+		MaxBlockHeaderSize: 1_100,
+		Decentralization:   &cbor.Rat{Rat: big.NewRat(1, 1)},
+	}
+	initialCbor, err := cbor.Encode(initialPParams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		initialCbor, 0, 0, eras.AlonzoEraDesc.Id, nil,
+	))
+	// {12: 0/1}, submitted in epoch 2 for the boundary into epoch 3.
+	update, err := hex.DecodeString("a10cd81e820001")
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size),
+		update, 2*86_400+200, 2, nil,
+	))
+
+	ls := &LedgerState{
+		db:             db,
+		currentEpoch:   epoch(2),
+		currentEra:     eras.AlonzoEraDesc,
+		currentPParams: initialPParams,
+		// Epoch 1 was empty, so the label stayed at 0 and epoch 3 is not the
+		// successor of the label.
+		epochCache: []models.Epoch{epoch(0), epoch(2), epoch(3)},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: genesisCfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	block := &mockBoundaryAlonzoBlock{
+		Block: &mockBabbageBlock{slot: 3*86_400 + 36},
+		slot:  3*86_400 + 36,
+	}
+	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
+	require.NotNil(t, pparams)
+	require.Equal(t, big.NewRat(1, 1), decentralizationParamRat(pparams))
+}
+
 func TestValidatePeerChainSelectionHeaderCryptoUsesCandidateOpCertState(
 	t *testing.T,
 ) {

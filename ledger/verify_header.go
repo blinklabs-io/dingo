@@ -2154,8 +2154,18 @@ func (ls *LedgerState) genesisOverlayProtocolParamsForFutureEpoch(
 	// A boundary block encoded in the current era is led under that era's
 	// parameters with the pending in-era update applied, before any hard-fork
 	// translation, which ProtocolParamsForSlot would also apply.
+	//
+	// NEWEPOCH enacts only for the successor of the ledger epoch label. When
+	// an empty epoch left the label behind, the boundary into paramsEpoch
+	// enacts nothing and the parameters stay as they were.
 	if paramsEpoch == snapshot.currentEpoch.EpochId+1 &&
 		paramsEraID == snapshot.currentEra.Id {
+		label := ledgerEpochLabelInCache(
+			snapshot.currentEpoch.EpochId, snapshot.epochCache,
+		)
+		if paramsEpoch != label+1 {
+			return snapshot.currentPParams
+		}
 		updated, err := ls.forecastPendingPParamUpdate(
 			snapshot.currentEra,
 			paramsEpoch,
