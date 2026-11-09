@@ -49,7 +49,7 @@ func requireEdgeBackfillBoundsBatches(
 	locker migrations.Locker,
 ) {
 	t.Helper()
-	const edgeMigration = 57
+	const edgeMigration = 58
 	db, err := OpenDB(driver, dsn, dialectName, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })

@@ -47,7 +47,7 @@ func peakRSSKiB() int64 {
 	return 0
 }
 
-// TestUtxoSpenderTxIDMigrationScale times the version-56 upgrade over a
+// TestUtxoSpenderTxIDMigrationScale times the version-57 upgrade over a
 // previous-schema database with DINGO_MIGRATION_BENCH_ROWS utxo rows, four in
 // five of them spent, and reports the time, the database and WAL sizes and
 // the process's peak resident memory. It only runs when the variable is set.

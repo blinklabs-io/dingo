@@ -24,9 +24,14 @@ import (
 )
 
 type eagernessDelivery struct {
-	fragment   CandidateFragment
-	generation uint64
-	valid      func() bool
+	fragment CandidateFragment
+	// fragmentRef locates fragment.points in a window this entry owns
+	// exclusively. Its points and hash bytes are copies, never shared with the
+	// admitted frontier, so the entry stays an independent record of what the
+	// peer delivered. Points are replaced only through the window helpers.
+	fragmentRef windowRef[ocommon.Point]
+	generation  uint64
+	valid       func() bool
 	// A normal delivery can refresh continuity without reauthenticating its
 	// older ancestors. Only the strict exported range is corroboration proof.
 	proofBase       uint64
@@ -109,10 +114,7 @@ func (cs *ChainSelector) recordEagernessDeliveryLocked(
 		entry, exists = eagernessDelivery{}, false
 	}
 	if !exists || !extendsFragment(entry.fragment, base) {
-		entry = eagernessDelivery{}
-		entry.fragment = CandidateFragment{
-			points: cloneObservedPoints(base.points), baseBlock: base.baseBlock,
-		}
+		entry = rebuildEagernessDelivery(entry.fragment, entry.fragmentRef, base)
 	}
 	fragment := entry.fragment
 	headBlock, ok := eagernessFragmentHead(fragment)
@@ -127,7 +129,12 @@ func (cs *ChainSelector) recordEagernessDeliveryLocked(
 	case headBlock != math.MaxUint64 && observed.BlockNumber == headBlock+1 &&
 		observed.Point.Slot > head.Slot && !update.ObservedBoundary &&
 		bytes.Equal(update.ObservedPrevHash, head.Hash):
-		fragment.points = append(fragment.points, clonePoint(observed.Point))
+		fragment.points = windowAppend(
+			&entry.fragmentRef,
+			fragment.points,
+			clonePoint(observed.Point),
+			pointsEqual,
+		)
 	default:
 		delete(cs.eagernessDeliveries, update.ConnectionId)
 		return
@@ -137,8 +144,12 @@ func (cs *ChainSelector) recordEagernessDeliveryLocked(
 	count := uint64(len(fragment.points))
 	if count > capacity {
 		excess := count - capacity
-		clear(fragment.points[:excess])
-		fragment.points = fragment.points[excess:]
+		// #nosec G115 -- excess is at most the retained slice length.
+		fragment.points = windowTrimFront(
+			&entry.fragmentRef,
+			fragment.points,
+			int(excess),
+		)
 		fragment.baseBlock += excess
 	}
 	if !exists && len(cs.eagernessDeliveries) >= cs.maxTrackedPeers {
@@ -148,6 +159,42 @@ func (cs *ChainSelector) recordEagernessDeliveryLocked(
 	entry.generation = update.HeaderCryptoVerificationGeneration
 	entry.trimProof()
 	cs.eagernessDeliveries[update.ConnectionId] = entry
+}
+
+// rebuildEagernessDelivery returns a fresh delivery entry holding a copy of
+// base. When previous is a prefix of base, previous's own points are kept and
+// only base's newer points are copied, so a delivery that trails the admitted
+// frontier by a header does not re-copy the whole window. The result is equal
+// in value to a full copy of base.
+func rebuildEagernessDelivery(
+	previous CandidateFragment,
+	ref windowRef[ocommon.Point],
+	base CandidateFragment,
+) eagernessDelivery {
+	previousHead, ok := eagernessFragmentHead(previous)
+	if !ok || previous.baseBlock > base.baseBlock ||
+		!extendsFragment(base, previous) {
+		return eagernessDelivery{fragment: CandidateFragment{
+			points: cloneObservedPoints(base.points), baseBlock: base.baseBlock,
+		}}
+	}
+	// base.baseBlock <= previousHead (extendsFragment), so a point of previous
+	// remains after dropping what base no longer retains.
+	// #nosec G115 -- the dropped count is at most len(previous.points)-1.
+	points := windowTrimFront(
+		&ref,
+		previous.points,
+		int(base.baseBlock-previous.baseBlock),
+	)
+	// #nosec G115 -- previousHead >= base.baseBlock and both are bounded.
+	suffix := base.points[previousHead-base.baseBlock+1:]
+	for _, point := range suffix {
+		points = windowAppend(&ref, points, clonePoint(point), pointsEqual)
+	}
+	return eagernessDelivery{
+		fragment:    CandidateFragment{points: points, baseBlock: base.baseBlock},
+		fragmentRef: ref,
+	}
 }
 
 func (cs *ChainSelector) eagernessFragmentLocked(
@@ -196,8 +243,7 @@ func (cs *ChainSelector) rollbackEagernessDeliveryLocked(
 		delete(cs.eagernessDeliveries, connId)
 		return
 	}
-	clear(entry.fragment.points[index+1:])
-	entry.fragment.points = entry.fragment.points[:index+1]
+	entry.fragment.points = windowTruncate(entry.fragment.points, index+1)
 	entry.trimProof()
 	cs.eagernessDeliveries[connId] = entry
 }

@@ -1,0 +1,3 @@
+-- No schema statements. The backfill adds the generated column
+-- producer_tx_id, which the generic ADD COLUMN replay check cannot verify,
+-- and the contract phase builds the indexes over it.
