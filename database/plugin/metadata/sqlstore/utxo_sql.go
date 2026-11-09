@@ -600,3 +600,29 @@ func (u *utxoSQL) edgeInsertQuery(edgeTable string, size int) string {
 	}
 	return sqliteRefs.edgeInsert[edgeTable][size]
 }
+
+// repairUnlinkedUtxosBatchQuery builds the provenance fill for rowCount
+// outputs that exist with neither a producing-transaction nor a
+// collateral-return link, which is how a ledger-state import leaves them.
+// Each output is its own fully bound arm of the id subquery. On SQLite the
+// unlinked predicate in the arm makes it the imported-row identity, so the arm
+// is a point lookup in the partial unique index idx_utxo_imported_ref; on
+// PostgreSQL and MySQL it is a lookup in the unique (tx_id, output_idx)
+// index.
+// Arguments are the transaction_id CASE triples (tx_id, output_idx, value),
+// the collateral_return_for_tx_id CASE triples, then tx_id, output_idx per
+// arm. Rows already linked do not match and are not returned.
+func repairUnlinkedUtxosBatchQuery(rowCount int) string {
+	const when = "WHEN tx_id = ? AND output_idx = ? THEN ? "
+	const arm = "SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ? " +
+		"AND transaction_id IS NULL AND collateral_return_for_tx_id IS NULL"
+	cases := strings.TrimSpace(strings.Repeat(when, rowCount))
+	arms := strings.TrimSuffix(
+		strings.Repeat(arm+" UNION ALL ", rowCount),
+		" UNION ALL ",
+	)
+	return "-- name: RepairUnlinkedUtxosBatch :many\n" +
+		"UPDATE utxo SET transaction_id = CASE " + cases +
+		" END, collateral_return_for_tx_id = CASE " + cases +
+		" END WHERE id IN (" + arms + ") RETURNING id, tx_id, output_idx"
+}

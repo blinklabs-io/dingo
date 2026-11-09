@@ -67,6 +67,8 @@ func overlayInsertOutputs(start, count int) []*overlayOutput {
 		id := start + i
 		model := utxoForBenchmarkIteration(uint64(id))
 		model.TransactionID = &parent
+		// One producer owns each output index once.
+		model.OutputIdx = uint32(id)
 		outputs[i] = &overlayOutput{id: int64(id), model: *model}
 	}
 	return outputs
@@ -255,6 +257,12 @@ func TestSQLiteOverlayInsertRechecksTemporarySchema(t *testing.T) {
 		"CREATE TEMP TABLE UTXO AS SELECT * FROM main.utxo WHERE 0",
 	)
 	require.NoError(t, err)
+	// The duplicate probe names the imported-row index, which the copy lacks.
+	_, err = db.ExecContext(
+		ctx,
+		"CREATE INDEX temp.idx_utxo_imported_ref ON UTXO(tx_id, output_idx)",
+	)
+	require.NoError(t, err)
 	require.NoError(
 		t,
 		store.insertOverlayUtxos(
@@ -273,6 +281,7 @@ func TestSQLiteOverlayInsertKeepsConflictAndCancellationRollback(t *testing.T) {
 	store, _ := newOverlayInsertStore(t, false, 2047)
 	outputs := overlayInsertOutputs(1, 4096)
 	outputs[3000].model.TxId = outputs[0].model.TxId
+	outputs[3000].model.OutputIdx = outputs[0].model.OutputIdx
 	err := insertOverlayFixture(store, outputs)
 	require.ErrorIs(t, err, types.ErrBatchUtxoOverlayConflict)
 	var count int

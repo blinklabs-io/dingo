@@ -43,6 +43,18 @@ func conflictRepairUtxo(seed int, assets bool) models.Utxo {
 	return utxo
 }
 
+// producerFor stores the transaction that produced the output with hash txID
+// and returns its row id. An output's producer is the transaction whose hash
+// is the output's tx_id, which is how a reference by hash resolves to it.
+func producerFor(t *testing.T, store *Store, txID []byte) uint {
+	t.Helper()
+	var id uint
+	require.NoError(t, store.writeDB.QueryRow(
+		`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`, txID,
+	).Scan(&id))
+	return id
+}
+
 func replayConflicting(
 	t *testing.T,
 	store *Store,
@@ -82,13 +94,8 @@ func TestInsertUtxoModelsCheckedBatchesConflictRepair(t *testing.T) {
 	store.storageMode = types.StorageModeAPI
 
 	const count = utxoInsertBatchSize + 8
-	var producerID uint
-	require.NoError(t, store.writeDB.QueryRow(
-		`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`,
-		bytes.Repeat([]byte{0xEE}, 32),
-	).Scan(&producerID))
-
 	imported := make([]models.Utxo, count)
+	producers := make([]uint, count)
 	replay := make([]models.Utxo, count)
 	for i := range imported {
 		imported[i] = conflictRepairUtxo(i+1, i%2 == 0)
@@ -99,6 +106,8 @@ func TestInsertUtxoModelsCheckedBatchesConflictRepair(t *testing.T) {
 			}
 		}
 		replay[i] = imported[i]
+		producerID := producerFor(t, store, imported[i].TxId)
+		producers[i] = producerID
 		replay[i].TransactionID = &producerID
 	}
 	require.NoError(t, store.ImportUtxos(imported, nil))
@@ -129,7 +138,7 @@ func TestInsertUtxoModelsCheckedBatchesConflictRepair(t *testing.T) {
 		got, err := store.GetUtxo(replay[i].TxId, replay[i].OutputIdx, nil)
 		require.NoError(t, err)
 		require.NotNil(t, got.TransactionID, "output %d", i)
-		require.Equal(t, producerID, *got.TransactionID, "output %d", i)
+		require.Equal(t, producers[i], *got.TransactionID, "output %d", i)
 		var address []byte
 		require.NoError(t, store.writeDB.QueryRow(
 			`SELECT address FROM utxo_address WHERE utxo_id = ?`, got.ID,
@@ -175,17 +184,13 @@ func TestInsertUtxoModelsCheckedRepairsLinkedConflictsInFull(t *testing.T) {
 	store := newMigratedSQLiteStore(t)
 	store.storageMode = types.StorageModeAPI
 
-	var firstTx, secondTx, collateralTx uint
-	for i, dst := range []*uint{&firstTx, &secondTx, &collateralTx} {
-		require.NoError(t, store.writeDB.QueryRow(
-			`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`,
-			bytes.Repeat([]byte{0xD0 + byte(i)}, 32),
-		).Scan(dst))
-	}
 	linked := conflictRepairUtxo(1, true)
-	linked.TransactionID = &firstTx
 	unlinked := conflictRepairUtxo(2, true)
 	collateral := conflictRepairUtxo(3, false)
+	firstTx := producerFor(t, store, linked.TxId)
+	secondTx := producerFor(t, store, unlinked.TxId)
+	collateralTx := producerFor(t, store, collateral.TxId)
+	linked.TransactionID = &firstTx
 	require.NoError(t, store.ImportUtxos(
 		[]models.Utxo{linked, unlinked, collateral}, nil,
 	))
@@ -198,7 +203,7 @@ func TestInsertUtxoModelsCheckedRepairsLinkedConflictsInFull(t *testing.T) {
 	require.NoError(t, err)
 
 	replayLinked := linked
-	replayLinked.TransactionID = &secondTx
+	replayLinked.TransactionID = &firstTx
 	replayUnlinked := unlinked
 	replayUnlinked.TransactionID = &secondTx
 	replayCollateral := collateral
@@ -238,15 +243,11 @@ func TestInsertUtxoModelsCheckedDuplicateKeepsFirstProvenance(t *testing.T) {
 	store := newMigratedSQLiteStore(t)
 	store.storageMode = types.StorageModeAPI
 
-	var firstTx, secondTx uint
-	for i, dst := range []*uint{&firstTx, &secondTx} {
-		require.NoError(t, store.writeDB.QueryRow(
-			`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`,
-			bytes.Repeat([]byte{0xC0 + byte(i)}, 32),
-		).Scan(dst))
-	}
 	imported := conflictRepairUtxo(1, true)
 	other := conflictRepairUtxo(2, false)
+	firstTx := producerFor(t, store, imported.TxId)
+	otherTx := producerFor(t, store, other.TxId)
+	secondTx := producerFor(t, store, bytes.Repeat([]byte{0xC1}, 32))
 	require.NoError(t, store.ImportUtxos(
 		[]models.Utxo{imported, other}, nil,
 	))
@@ -254,7 +255,7 @@ func TestInsertUtxoModelsCheckedDuplicateKeepsFirstProvenance(t *testing.T) {
 	first := imported
 	first.TransactionID = &firstTx
 	between := other
-	between.TransactionID = &firstTx
+	between.TransactionID = &otherTx
 	later := imported
 	later.TransactionID = &secondTx
 	inserted := replayConflicting(t, store, []models.Utxo{
@@ -269,7 +270,7 @@ func TestInsertUtxoModelsCheckedDuplicateKeepsFirstProvenance(t *testing.T) {
 }
 
 // TestRepairUnlinkedUtxosBatchQueryPlan checks that every arm of the batched
-// repair is resolved through the unique tx_id_output_idx index, with and
+// repair is resolved through the unique idx_utxo_imported_ref index, with and
 // without planner statistics, so it never drives from a deleted_slot index.
 func TestRepairUnlinkedUtxosBatchQueryPlan(t *testing.T) {
 	skipPlanTestUnderRace(t)
@@ -303,7 +304,7 @@ func TestRepairUnlinkedUtxosBatchQueryPlan(t *testing.T) {
 		require.NotContains(t, plan, "SCAN utxo", stage+": "+plan)
 		require.Equal(t, keys, bytes.Count(
 			[]byte(plan),
-			[]byte("USING INDEX tx_id_output_idx (tx_id=? AND output_idx=?)"),
+			[]byte("USING INDEX idx_utxo_imported_ref (tx_id=? AND output_idx=?)"),
 		), stage+": "+plan)
 	}
 }

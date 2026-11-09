@@ -361,16 +361,18 @@ func TestPreparedStatementReplansAfterOptimizeOnSameConnection(t *testing.T) {
 	stmt, err := store.writeDB.PrepareContext(
 		ctx,
 		"SELECT COUNT(*) FROM utxo WHERE deleted_slot = 0 AND "+
-			"spent_at_tx_id IS NULL AND (tx_id, output_idx) IN "+
-			"((?, ?), (?, ?)) AND "+name+" = 1",
+			"spent_by_tx_id IS NULL AND producer_tx_id IS NOT NULL AND "+
+			"(producer_tx_id, output_idx) IN ((?, ?), (?, ?)) AND "+
+			name+" = 1",
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = stmt.Close() })
 	run := func() int64 {
 		visited.Store(0)
-		zero := make([]byte, 32)
 		var n int
-		require.NoError(t, stmt.QueryRowContext(ctx, zero, 0, zero, 1).Scan(&n))
+		require.NoError(t, stmt.QueryRowContext(
+			ctx, int64(1), 0, int64(2), 1,
+		).Scan(&n))
 		return visited.Load()
 	}
 	require.Greater(t, run(), int64(1_000), "stale plan must scan the table")

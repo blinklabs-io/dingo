@@ -828,7 +828,10 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 	for _, stage := range stages {
 		stage.setup()
 		for _, returnStake := range []bool{false, true} {
-			args := append([]any{int64(1), make([]byte, 32)}, prefetchArgs...)
+			args := []any{int64(1), int64(1)}
+			for i := range keys {
+				args = sqliteUtxoSQL.bindRef(args, skewedUtxoTxID(i*7), i%4)
+			}
 			spend := connQueryPlan(
 				t, conn, consumeUtxosBatchQuery(keys, returnStake), args...,
 			)
@@ -841,7 +844,7 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 			require.NotContains(t, spend, "SCAN utxo", stage.name+": "+spend)
 			require.Equal(t, keys, strings.Count(
 				spend,
-				"USING INDEX tx_id_output_idx (tx_id=? AND output_idx=?)",
+				"USING INDEX idx_utxo_producer_output (producer_tx_id=? AND output_idx=?)",
 			), stage.name+": "+spend)
 		}
 		prefetch := connQueryPlan(

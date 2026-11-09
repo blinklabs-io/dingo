@@ -358,26 +358,32 @@ func (s *Store) insertUtxoModelsChecked(
 	if err != nil {
 		return nil, err
 	}
-	for _, utxo := range utxos {
-		if _, ok := existing[utxoIdentityKey(utxo.TxId, utxo.OutputIdx)]; ok {
-			if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
-				return nil, err
-			}
-		}
-	}
-
 	for start := 0; start < len(utxos); start += utxoInsertBatchSize {
 		end := min(start+utxoInsertBatchSize, len(utxos))
 		batch := make([]*models.Utxo, 0, end-start)
 		batchPos := make([]int, 0, end-start)
+		var conflicted, duplicates []*models.Utxo
+		storedKeys := make(map[string]struct{})
 		for i := start; i < end; i++ {
-			if _, ok := existing[utxoIdentityKey(utxos[i].TxId, utxos[i].OutputIdx)]; ok {
+			key := utxoIdentityKey(utxos[i].TxId, utxos[i].OutputIdx)
+			if _, ok := existing[key]; ok {
+				if _, repeat := storedKeys[key]; repeat {
+					duplicates = append(duplicates, utxos[i])
+				} else {
+					storedKeys[key] = struct{}{}
+					conflicted = append(conflicted, utxos[i])
+				}
 				continue
 			}
 			batch = append(batch, utxos[i])
 			batchPos = append(batchPos, i)
 		}
 		if len(batch) == 0 {
+			if err := s.repairConflictedChunk(
+				ctx, db, conflicted, duplicates, deferredRows,
+			); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		query := insertUtxoBatchQuery(len(batch))
@@ -433,7 +439,6 @@ func (s *Store) insertUtxoModelsChecked(
 		}
 
 		processed := make(map[string]struct{}, len(batch))
-		var conflicted, duplicates []*models.Utxo
 		for i, utxo := range batch {
 			key := utxoIdentityKey(utxo.TxId, utxo.OutputIdx)
 			if _, duplicate := processed[key]; duplicate {
@@ -460,44 +465,37 @@ func (s *Store) insertUtxoModelsChecked(
 				return nil, err
 			}
 		}
-		if err := s.repairConflictedUtxosBatch(
-			ctx, db, conflicted, deferredRows,
+		if err := s.repairConflictedChunk(
+			ctx, db, conflicted, duplicates, deferredRows,
 		); err != nil {
 			return nil, err
-		}
-		// A repeat is repaired only after the first occurrence, which is
-		// deferred to the batch above, so the first occurrence's provenance
-		// fills an unlinked row and the repeat only adds missing links.
-		for _, utxo := range duplicates {
-			if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
-				return nil, err
-			}
 		}
 	}
 	return inserted, nil
 }
 
-// repairUnlinkedUtxosBatchQuery builds the provenance fill for rowCount
-// outputs that exist with neither a producing-transaction nor a
-// collateral-return link. Each output is its own fully bound arm of the id
-// subquery so SQLite resolves it through the unique tx_id_output_idx index
-// (see consumeUtxosBatchQuery); the unlinked predicate stays inside the arm.
-// Arguments are the transaction_id CASE triples (tx_id, output_idx, value),
-// the collateral_return_for_tx_id CASE triples, then tx_id, output_idx per
-// arm. Rows already linked do not match and are not returned.
-func repairUnlinkedUtxosBatchQuery(rowCount int) string {
-	const when = "WHEN tx_id = ? AND output_idx = ? THEN ? "
-	const arm = "SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ? " +
-		"AND transaction_id IS NULL AND collateral_return_for_tx_id IS NULL"
-	cases := strings.TrimSpace(strings.Repeat(when, rowCount))
-	arms := strings.TrimSuffix(
-		strings.Repeat(arm+" UNION ALL ", rowCount),
-		" UNION ALL ",
-	)
-	return "-- name: RepairUnlinkedUtxosBatch :many\n" +
-		"UPDATE utxo SET transaction_id = CASE " + cases +
-		" END, collateral_return_for_tx_id = CASE " + cases +
-		" END WHERE id IN (" + arms + ") RETURNING id, tx_id, output_idx"
+// repairConflictedChunk repairs the conflicted outputs of one insert batch in
+// one batched statement, then the repeats of an output within the batch. A
+// repeat is repaired only after the first occurrence, which the batch handles,
+// so the first occurrence's provenance fills an unlinked row and the repeat
+// only adds missing links.
+func (s *Store) repairConflictedChunk(
+	ctx context.Context,
+	db queryer,
+	conflicted, duplicates []*models.Utxo,
+	deferredRows *rowBatch,
+) error {
+	if err := s.repairConflictedUtxosBatch(
+		ctx, db, conflicted, deferredRows,
+	); err != nil {
+		return err
+	}
+	for _, utxo := range duplicates {
+		if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // repairConflictedUtxosBatch links outputs that already exist to the
