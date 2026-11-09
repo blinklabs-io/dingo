@@ -2259,6 +2259,9 @@ func leaderStakeSnapshotEpochInCache(
 	epoch uint64,
 	cache []models.Epoch,
 ) uint64 {
+	if len(cache) == 0 {
+		return praos.StakeSnapshotEpoch(epoch)
+	}
 	end := 0
 	for end < len(cache) && cache[end].EpochId <= epoch {
 		end++
