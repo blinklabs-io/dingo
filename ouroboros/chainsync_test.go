@@ -4851,9 +4851,10 @@ func TestTrustedNtCChainSyncAwaitKeepsIdleDeadlineSuspended(t *testing.T) {
 		UseNtC:   true,
 	}})
 	manager := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{
-		EventBus:  bus,
-		Listeners: listeners,
-		Logger:    logger,
+		EventBus:              bus,
+		Listeners:             listeners,
+		Logger:                logger,
+		TrustedNtCIdleTimeout: 2 * time.Minute,
 	})
 	o.connManager = manager
 	t.Cleanup(func() {
