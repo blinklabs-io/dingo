@@ -504,3 +504,53 @@ func TestWalkAccountListAdvancesPastEmptyAddressRows(t *testing.T) {
 		LastAddress: addrs[koiosPageSize+2],
 	}, last)
 }
+
+// TestAccountUniverseCrawlRejectsForeignWrites interleaves two crawlers on one
+// cache. A page that does not follow the recorded crawl, and a completion by a
+// crawler whose crawl is no longer the recorded one, must be refused rather
+// than mixed into or promoted from the other crawler's partial set.
+func TestAccountUniverseCrawlRejectsForeignWrites(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	startA := time.Now().UTC().Add(-time.Minute)
+	startB := startA.Add(time.Second)
+	save := func(start time.Time, addr string, offset, pages int) error {
+		return cache.SaveAccountUniverseCrawlPage(
+			network, accountListQuery, start,
+			[]string{addr}, offset, addr, pages,
+		)
+	}
+
+	require.NoError(t, save(startA, "stake1ua1", 1, 1))
+	require.ErrorIs(t, save(startB, "stake1ub1", 1, 1),
+		errAccountUniverseCrawlSuperseded,
+		"a second fresh crawl must not overwrite the recorded one")
+	require.NoError(t, save(startA, "stake1ua2", 2, 2))
+	require.ErrorIs(t, save(startA, "stake1ua2", 2, 2),
+		errAccountUniverseCrawlSuperseded,
+		"a page the recorded crawl already passed must be refused")
+	require.ErrorIs(t,
+		cache.CompleteAccountUniverseCrawl(network, startB, 1),
+		errAccountUniverseCrawlSuperseded,
+		"a crawler must not promote another crawler's partial set")
+	require.ErrorIs(t,
+		cache.CompleteAccountUniverseCrawl(network, startA, 1),
+		errAccountUniverseCrawlSuperseded,
+		"a completion behind the recorded crawl must be refused")
+	require.NoError(t, cache.CompleteAccountUniverseCrawl(network, startA, 2))
+
+	require.ErrorIs(t, save(startB, "stake1ub2", 2, 2),
+		errAccountUniverseCrawlSuperseded,
+		"a page after the crawl completed must not start a new one mid-list")
+	addrs, _, cached, err := cache.GetAccountUniverse(network)
+	require.NoError(t, err)
+	require.True(t, cached)
+	assert.ElementsMatch(t, []string{"stake1ua1", "stake1ua2"}, addrs)
+	progress, err := cache.GetAccountUniverseCrawl(network)
+	require.NoError(t, err)
+	assert.Nil(t, progress)
+}

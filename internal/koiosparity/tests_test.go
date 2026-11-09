@@ -3345,5 +3345,5 @@ func seedAccountUniverse(
 	); err != nil {
 		return err
 	}
-	return c.CompleteAccountUniverseCrawl(network)
+	return c.CompleteAccountUniverseCrawl(network, at, 1)
 }

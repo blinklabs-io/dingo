@@ -16926,7 +16926,12 @@ never the reverse.
   resolver returns a complete universe or an error, and account-level checks
   never start on an incomplete list, since a "no missing accounts" verdict
   needs the whole list. A crawl is logged every 50 pages so a long one is
-  distinguishable from a stalled one.
+  distinguishable from a stalled one. Two resolvers sharing a cache file are
+  kept apart by the recorded start time and page count: a page save must
+  follow the recorded crawl's previous page, and completion must name the
+  recorded crawl at its current page, so a crawler that was overtaken,
+  completed, or discarded by another fails with an error instead of mixing
+  its pages into the other's set or promoting it incomplete.
 - **Koios host.** `koiosBaseURLs` maps the network to the public `*.koios.rest`
   v1 root, and `KoiosParityConfig.BaseURL` (`--koios-parity-base-url`,
   `DINGO_KOIOS_PARITY_BASE_URL`, and `--koios-url` / `KOIOS_URL` on the

@@ -248,7 +248,9 @@ func resumeAccountUniverseCrawl(
 			return nil, err
 		}
 	}
-	if err := cache.CompleteAccountUniverseCrawl(network); err != nil {
+	if err := cache.CompleteAccountUniverseCrawl(
+		network, started, pages,
+	); err != nil {
 		return nil, err
 	}
 	addrs, _, _, err := cache.GetAccountUniverse(network)

@@ -2303,11 +2303,53 @@ func discardAccountUniverseCrawl(tx *sql.Tx, network string) error {
 	return nil
 }
 
+// errAccountUniverseCrawlSuperseded reports a crawl write that does not follow
+// the crawl the cache records: another crawler sharing the cache started,
+// advanced, completed, or discarded it first. The write is refused so neither
+// crawler's rows are mixed into the other's or promoted incomplete.
+var errAccountUniverseCrawlSuperseded = errors.New(
+	"koios account universe crawl superseded by another crawler",
+)
+
+// checkAccountUniverseCrawlOwner fails unless a write of page number pages
+// follows the recorded crawl for network: one that started at startedAt and
+// has recorded pages-1 pages. With no recorded crawl only a first page, pages
+// of zero or one, may be written, since that write starts the crawl.
+func checkAccountUniverseCrawlOwner(
+	tx *sql.Tx,
+	network string,
+	startedAt time.Time,
+	pages int,
+) error {
+	var recStart time.Time
+	var recPages int
+	err := tx.QueryRow(
+		`SELECT started_at, pages FROM koios_account_universe_crawl WHERE network = ?`,
+		network,
+	).Scan(&recStart, &recPages)
+	if errors.Is(err, sql.ErrNoRows) {
+		if pages <= 1 {
+			return nil
+		}
+		return errAccountUniverseCrawlSuperseded
+	}
+	if err != nil {
+		return fmt.Errorf("read account universe crawl: %w", err)
+	}
+	if !recStart.Equal(startedAt) || recPages != pages-1 {
+		return errAccountUniverseCrawlSuperseded
+	}
+	return nil
+}
+
 // SaveAccountUniverseCrawlPage persists one fetched page and advances the
 // crawl's resume point to nextOffset, whose last row is lastAddress, in a
 // single transaction, so the offset never covers a page whose rows are not
-// stored and a stored page is never past the offset. The first call for a crawl records query and startedAt; later calls
-// leave them as recorded.
+// stored and a stored page is never past the offset. pages is the crawl's
+// page count including this one. The first page, pages of zero or one, starts
+// a crawl and records query and startedAt; every later page must follow the
+// recorded crawl's previous page under the same startedAt, or the write
+// returns errAccountUniverseCrawlSuperseded.
 func (c *Cache) SaveAccountUniverseCrawlPage(
 	network, query string,
 	startedAt time.Time,
@@ -2321,6 +2363,11 @@ func (c *Cache) SaveAccountUniverseCrawlPage(
 		return fmt.Errorf("save account universe page: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := checkAccountUniverseCrawlOwner(
+		tx, network, startedAt.UTC(), pages,
+	); err != nil {
+		return err
+	}
 	stmt, err := tx.Prepare(`
 INSERT INTO koios_account_universe_partial (network, stake_address)
 VALUES (?, ?) ON CONFLICT (network, stake_address) DO NOTHING`)
@@ -2362,23 +2409,36 @@ ON CONFLICT (network) DO UPDATE SET
 // cached universe, stamped with the crawl's start time, and clears the crawl.
 // It is the only path that makes a crawl visible to GetAccountUniverse, and
 // runs in one transaction so a failure leaves the previous universe, if any,
-// and the unfinished crawl as they were.
-func (c *Cache) CompleteAccountUniverseCrawl(network string) error {
+// and the unfinished crawl as they were. startedAt and pages identify the
+// caller's crawl; when the recorded crawl is another one, or has moved past
+// pages, it returns errAccountUniverseCrawlSuperseded and promotes nothing.
+func (c *Cache) CompleteAccountUniverseCrawl(
+	network string,
+	startedAt time.Time,
+	pages int,
+) error {
 	tx, err := c.db.Begin()
 	if err != nil {
 		return fmt.Errorf("complete account universe: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	var startedAt time.Time
+	var recStart time.Time
+	var recPages int
 	err = tx.QueryRow(
-		`SELECT started_at FROM koios_account_universe_crawl WHERE network = ?`,
+		`SELECT started_at, pages FROM koios_account_universe_crawl WHERE network = ?`,
 		network,
-	).Scan(&startedAt)
+	).Scan(&recStart, &recPages)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("complete account universe: no crawl for %q", network)
+		return fmt.Errorf(
+			"complete account universe: no crawl for %q: %w",
+			network, errAccountUniverseCrawlSuperseded,
+		)
 	}
 	if err != nil {
 		return fmt.Errorf("complete account universe: %w", err)
+	}
+	if !recStart.Equal(startedAt) || recPages != pages {
+		return errAccountUniverseCrawlSuperseded
 	}
 	if _, err := tx.Exec(
 		`DELETE FROM koios_account_universe WHERE network = ?`, network,
