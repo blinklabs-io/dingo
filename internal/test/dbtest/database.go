@@ -38,6 +38,13 @@ import (
 
 var databaseHosts sync.Map
 
+// Opening a test store would otherwise prepare every hot statement in Start,
+// which is a large share of a short test's cost under the race detector. The
+// sqlstore tests still exercise the eager default.
+func init() {
+	sqlite.LazyHotStatements = true
+}
+
 // StorageProvider selects a storage provider by name, supplies its
 // provider-specific config, and names the registrar that installs it on the
 // test host. A zero value selects the always-built default for its capability
