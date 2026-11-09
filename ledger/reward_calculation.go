@@ -134,24 +134,14 @@ func (ls *LedgerState) applyStakeRewardUpdate(ctx context.Context,
 			ctx, txn, newEpoch, boundarySlot,
 		)
 	}
-	if rewardEpochs, ok := stakeRewardEpochsForApplication(newEpoch); ok {
-		performanceEpoch, err := ls.db.Metadata().GetEpoch(
-			rewardEpochs.performance,
-			txn.Metadata(),
+	byronPerformance, err := ls.rewardPerformanceEpochIsByron(txn, newEpoch)
+	if err != nil {
+		return err
+	}
+	if byronPerformance {
+		return ls.applyFirstShelleyStakeRewardRound(
+			ctx, txn, newEpoch, boundarySlot,
 		)
-		if err != nil {
-			return fmt.Errorf(
-				"get reward performance epoch %d: %w",
-				rewardEpochs.performance,
-				err,
-			)
-		}
-		if performanceEpoch != nil &&
-			performanceEpoch.EraId == eras.ByronEraDesc.Id {
-			return ls.applyFirstShelleyStakeRewardRound(
-				ctx, txn, newEpoch, boundarySlot,
-			)
-		}
 	}
 	app, ok, err := ls.boundaryStakeRewardApplication(ctx,
 		txn, newEpoch, boundarySlot,
@@ -173,37 +163,83 @@ func (ls *LedgerState) applyStakeRewardUpdate(ctx context.Context,
 	return ls.applyStakeRewardApplication(ctx, txn, app, boundarySlot)
 }
 
+// rewardPerformanceEpochIsByron reports whether the round applied at the
+// boundary into newEpoch has a Byron performance epoch, which has no pparams
+// or stake snapshot. Only the round of the first Shelley epoch does.
+func (ls *LedgerState) rewardPerformanceEpochIsByron(
+	txn *database.Txn,
+	newEpoch uint64,
+) (bool, error) {
+	rewardEpochs, ok := stakeRewardEpochsForApplication(newEpoch)
+	if !ok {
+		return false, nil
+	}
+	performanceEpoch, err := ls.db.Metadata().GetEpoch(
+		rewardEpochs.performance,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return false, fmt.Errorf(
+			"get reward performance epoch %d: %w",
+			rewardEpochs.performance,
+			err,
+		)
+	}
+	return performanceEpoch != nil &&
+		performanceEpoch.EraId == eras.ByronEraDesc.Id, nil
+}
+
 // applyFirstShelleyStakeRewardRound applies the update built during the first
-// Shelley epoch of a network that starts in Byron. Its performance epoch is
-// still Byron, so no pparams or stake snapshot exist for it; cardano-ledger
-// starts Shelley with empty blocks-made (translateToShelleyLedgerStateFromUtxo),
-// so the round has no pool performance and, under d >= 0.8, expands reserves
-// with eta = 1. Parameters come from the first Shelley epoch, the one whose
-// prevPParams the update was built under.
+// Shelley epoch of a network that starts in Byron at the boundary into
+// newEpoch.
 func (ls *LedgerState) applyFirstShelleyStakeRewardRound(ctx context.Context,
 	txn *database.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
+	app, err := ls.firstShelleyStakeRewardApplication(txn, newEpoch)
+	if err != nil {
+		return err
+	}
+	return ls.applyStakeRewardApplication(ctx, txn, app, boundarySlot)
+}
+
+// firstShelleyStakeRewardApplication builds the round of the boundary into
+// newEpoch when its performance epoch is still Byron, so no pparams or stake
+// snapshot exist for it. cardano-ledger starts Shelley with empty
+// blocks-made (translateToShelleyLedgerStateFromUtxo), so the round has no
+// pool performance and, under d >= 0.8, expands reserves with eta = 1.
+// Parameters come from the first Shelley epoch, the one whose prevPParams the
+// update was built under.
+func (ls *LedgerState) firstShelleyStakeRewardApplication(
+	txn *database.Txn,
+	newEpoch uint64,
+) (*stakeRewardApplication, error) {
 	firstShelley := newEpoch - 1
 	pots, err := ls.db.Metadata().GetRewardAdaPots(
 		firstShelley, txn.Metadata(),
 	)
 	if err != nil {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"get reward ADA pots for epoch %d: %w", firstShelley, err,
 		)
 	}
 	if pots == nil {
-		return ls.requiredStakeRewardBasisUnavailable(
+		if err := ls.requiredStakeRewardBasisUnavailable(
 			true, newEpoch, "missing ADA pots", "pots_epoch", firstShelley,
+		); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf(
+			"first Shelley reward round for epoch %d: missing ADA pots",
+			newEpoch,
 		)
 	}
 	pparams, params, _, err := ls.rewardParameters(
 		txn, firstShelley, firstShelley, pots,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	result, err := rewards.Calculate(
 		rewards.Pots{
@@ -215,13 +251,13 @@ func (ls *LedgerState) applyFirstShelleyStakeRewardRound(ctx context.Context,
 		params,
 	)
 	if err != nil {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"calculate first Shelley stake rewards for epoch %d: %w",
 			newEpoch, err,
 		)
 	}
 	suppressBootstrapStakeRewards(result)
-	return ls.applyStakeRewardApplication(ctx, txn, &stakeRewardApplication{
+	return &stakeRewardApplication{
 		epochs: stakeRewardEpochs{
 			snapshot:    firstShelley,
 			performance: firstShelley,
@@ -237,7 +273,7 @@ func (ls *LedgerState) applyFirstShelleyStakeRewardRound(ctx context.Context,
 		totalCirculation: result.TotalCirculation,
 		totalBlocks:      result.TotalBlocks,
 		rewardEfficiency: result.Efficiency,
-	}, boundarySlot)
+	}, nil
 }
 
 // boundaryStakeRewardApplication resolves the reward round a boundary

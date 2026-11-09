@@ -37,7 +37,9 @@ import (
 // performance epoch, reserves and fee seed as the round applied at the
 // boundary into X. It is then applied, once, at the boundary into X+1,
 // added to the pots as they stand there. The performance of epoch X-1 is
-// never paid.
+// never paid. On a network that starts in Byron, a late first block of the
+// epoch after the first Shelley epoch replays the first Shelley round, whose
+// performance epoch is Byron and has no pool performance.
 //
 // The update's deltas are applied to the live pots (applyRUpdFiltered), and
 // its deltaF subtracts the replayed fee seed from the fees the ledger
@@ -179,14 +181,30 @@ func (ls *LedgerState) applyReplayedStakeRewardRound(
 			true, newEpoch, "missing ADA pots", "pots_epoch", newEpoch-1,
 		)
 	}
-	app, ok, err := ls.calculateStakeRewardApplication(
-		txn, newEpoch-1, boundarySlot, boundarySlot, true,
-	)
+	// The round being replayed is that of the boundary into newEpoch-1. When
+	// that is the first Shelley round its performance epoch is Byron and it
+	// has no pool performance; cardano-ledger rebuilds the same update.
+	byronPerformance, err := ls.rewardPerformanceEpochIsByron(txn, newEpoch-1)
 	if err != nil {
 		return err
 	}
-	if !ok || app == nil {
-		return nil
+	var app *stakeRewardApplication
+	if byronPerformance {
+		app, err = ls.firstShelleyStakeRewardApplication(txn, newEpoch-1)
+		if err != nil {
+			return err
+		}
+	} else {
+		var ok bool
+		app, ok, err = ls.calculateStakeRewardApplication(
+			txn, newEpoch-1, boundarySlot, boundarySlot, true,
+		)
+		if err != nil {
+			return err
+		}
+		if !ok || app == nil {
+			return nil
+		}
 	}
 	baselineCopy := *baseline
 	app.replayBaseline = &baselineCopy

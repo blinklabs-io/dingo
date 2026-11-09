@@ -370,3 +370,105 @@ func TestReplaysPreviousStakeRewardRoundNeedsContiguousEpochs(t *testing.T) {
 		return nil
 	}))
 }
+
+// On a network that starts in Byron, the late first block of the epoch after
+// the first Shelley epoch replays the first Shelley round, whose performance
+// epoch is Byron. The replay must not look for Byron pparams or a stake
+// snapshot, and applies the same reserve expansion to the pots of its own
+// boundary.
+func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
+	t *testing.T,
+) {
+	t.Parallel()
+	ls, db := newLateFirstBlockTestLedger(t)
+	meta := db.Metadata()
+	const byronEpochs = uint64(4)
+	for e := range byronEpochs {
+		require.NoError(t, meta.SetEpoch(
+			e*100, e, nil, nil, nil, nil,
+			eras.ByronEraDesc.Id, 1, 100, nil,
+		))
+	}
+	for e := byronEpochs; e <= byronEpochs+2; e++ {
+		require.NoError(t, meta.SetEpoch(
+			e*100, e, nil, nil, nil, nil,
+			eras.ShelleyEraDesc.Id, 1, 100, nil,
+		))
+	}
+	pparamsCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameters{
+		NOpt:             10,
+		A0:               rewardCalcRat(1, 2),
+		Rho:              rewardCalcRat(1, 100),
+		Tau:              rewardCalcRat(1, 5),
+		Decentralization: rewardCalcRat(1, 1),
+		ProtocolMajor:    2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		pparamsCbor, byronEpochs*100, byronEpochs,
+		eras.ShelleyEraDesc.Id, nil,
+	))
+	// The first Shelley epoch has a block; the next opens at 550, after
+	// 500 + 40.
+	seedLateFirstBlockBlocks(t, db, 410, 550)
+	const reserves = uint64(100_000_000)
+	require.NoError(t, meta.SetNetworkState(0, reserves, 400, nil))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch: byronEpochs, Reserves: types.Uint64(reserves),
+		CapturedSlot: 400,
+	}, nil))
+
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(context.Background(), txn, 5, 500)
+	}))
+	state, err := meta.GetNetworkState(nil)
+	require.NoError(t, err)
+	reserveDelta := reserves - uint64(state.Reserves)
+	treasuryDelta := uint64(state.Treasury)
+	require.NotZero(t, reserveDelta)
+	require.Equal(t, reserveDelta, treasuryDelta)
+
+	// The boundary into 5 leaves different pots than the ones the first
+	// round was built from.
+	const reserves5 = uint64(99_000_000)
+	const treasury5 = uint64(7_000)
+	require.NoError(t, meta.SetNetworkState(treasury5, reserves5, 500, nil))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch: 5, Reserves: types.Uint64(reserves5),
+		Treasury: types.Uint64(treasury5), Fees: 3_000, CapturedSlot: 500,
+	}, nil))
+
+	replay := false
+	rtxn := db.Transaction(context.Background(), false)
+	require.NoError(t, rtxn.Do(func(txn *database.Txn) error {
+		var err error
+		replay, err = ls.replaysPreviousStakeRewardRound(
+			context.Background(), txn, 6,
+		)
+		return err
+	}))
+	require.True(t, replay)
+
+	txn = db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(context.Background(), txn, 6, 600)
+	}))
+	state, err = meta.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.Equal(t, reserves5-reserveDelta, uint64(state.Reserves))
+	require.Equal(t, treasury5+treasuryDelta, uint64(state.Treasury))
+
+	// The boundary into 6 carries the fees of 5, less the replayed seed.
+	txn = db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		ended, err := meta.GetEpoch(5, txn.Metadata())
+		require.NoError(t, err)
+		return ls.saveRewardAdaPotsForEpoch(
+			context.Background(), txn, 6, *ended, 600,
+		)
+	}))
+	pots, err := meta.GetRewardAdaPots(6, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3_000), uint64(pots.Fees))
+}

@@ -4334,9 +4334,14 @@ update NEWEPOCH leaves is empty, so that tick starts the update from the end of
 the previous epoch: the same snapshot, performance epoch, reserves and fee seed
 as the update applied at the boundary into that epoch. The boundary after it
 therefore applies the previous round again (`replaysPreviousStakeRewardRound`,
-`reward_late_first_block.go`), and the performance of the epoch just ended is
-never paid. The replayed round is calculated from the previous round's inputs
-but its deltas are added to the ADA pots of the boundary it is applied at, as
+`reward_late_first_block.go`). With X the epoch whose first block was late,
+the boundary into X+1 would normally apply the round whose performance epoch
+is X-1; that round is never built, so the performance of epoch X-1 is never
+paid. When the replayed round is the first Shelley round of a Byron-prefix
+network (X is the second Shelley epoch), it is rebuilt through
+`firstShelleyStakeRewardApplication`, since its Byron performance epoch has no
+pparams or stake snapshot. The replayed round is calculated from the previous
+round's inputs but its deltas are added to the ADA pots of the boundary it is applied at, as
 `applyRUpdFiltered` adds `deltaR`/`deltaT` to the live pots, and its `deltaF`
 removes the replayed fee seed from the fees carried into the next round:
 `saveRewardAdaPotsForEpoch` records the ended epoch's fees plus the fees
