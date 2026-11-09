@@ -1757,89 +1757,76 @@ func leiosWaitTestAnnouncingBlock(
 	}
 }
 
-// TestEnsureReferencedEndorserBlocksDoesNotBlockOnUnreadAnnouncement is the
-// apply-lag regression. On the Haskell-conformant (Musashi) path, ledger
-// application of a ranking block reads only the certified closure announced by
-// a certifying block's PARENT; a block's own announcement is never read when
-// that block is applied. Blocking the single ledger pipeline on it stalled
-// every block queued behind it for a whole diffusion window and then applied
-// the block unchanged anyway, which is where the multi-second apply lag and
-// the resulting stale-tip forge came from.
-//
-// Before the fix this returns after the full window; after it, immediately.
+// An announcing block does not read its own EB during application, and its
+// peer may not have the body yet. It must neither block application nor trigger
+// a by-point request before offer-driven prefetch can supply the content.
 func TestEnsureReferencedEndorserBlocksDoesNotBlockOnUnreadAnnouncement(
 	t *testing.T,
 ) {
-	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xA1))
-	block := leiosWaitTestAnnouncingBlock(t, 1, 100, ebHash)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ebHash := lcommon.NewBlake2b256(leiosTestHash(0xA1))
+		block := leiosWaitTestAnnouncingBlock(t, 1, 100, ebHash)
 
-	var fetched, waitPolls atomic.Int64
-	fetchedCh := make(chan struct{}, 1)
-	cfg := LedgerStateConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
-			// Counting polls that come from INSIDE waitForEndorserBlock is
-			// what makes this test's verdict event-driven: a gate that
-			// blocked on this announcement must poll from there, and one
-			// that correctly skips it never can.
-			if leiosWaitTestPolledFromWait() {
-				waitPolls.Add(1)
-			}
-			// The endorser block never arrives.
-			return nil, false
-		},
-		EndorserBlockFetcher: func(
-			_ context.Context,
-			_ uint64,
-			_ []byte,
-		) error {
-			fetched.Add(1)
-			select {
-			case fetchedCh <- struct{}{}:
-			default:
-			}
-			return nil
-		},
-		EndorserBlockWaitSlots: leiosWaitTestWaitSlots,
-	}
-	ls := &LedgerState{config: cfg}
-	ls.leiosBackfill = newLeiosBackfiller(cfg)
-	withLeiosWaitTestSlotLength(t, ls)
-	require.Equal(t, leiosWaitTestSlotLen, ls.shelleySlotLength())
+		var fetched, waitPolls atomic.Int64
+		cfg := LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+				// Counting polls that come from INSIDE waitForEndorserBlock is
+				// what makes this test's verdict event-driven: a gate that
+				// blocked on this announcement must poll from there, and one
+				// that correctly skips it never can.
+				if leiosWaitTestPolledFromWait() {
+					waitPolls.Add(1)
+				}
+				// The endorser block never arrives.
+				return nil, false
+			},
+			EndorserBlockFetcher: func(
+				_ context.Context,
+				_ uint64,
+				_ []byte,
+			) error {
+				fetched.Add(1)
+				return nil
+			},
+			EndorserBlockWaitSlots: leiosWaitTestWaitSlots,
+		}
+		ls := &LedgerState{config: cfg}
+		ls.leiosBackfill = newLeiosBackfiller(cfg)
+		withLeiosWaitTestSlotLength(t, ls)
+		require.Equal(t, leiosWaitTestSlotLen, ls.shelleySlotLength())
 
-	start := time.Now()
-	require.NoError(t, ls.ensureReferencedEndorserBlocks(
-		t.Context(),
-		[]gledger.Block{block},
-	))
-	elapsed := time.Since(start)
-	// The load-bearing assertion is event-driven, not a stopwatch: if the gate
-	// blocked on this announcement it would have polled from inside
-	// waitForEndorserBlock. Asserting that directly cannot flake on a loaded
-	// runner, whereas a short wall-clock budget has to cover goroutine
-	// scheduling as well as the absence of a window.
-	require.Zero(
-		t,
-		waitPolls.Load(),
-		"apply gate blocked on an announcement ledger application never reads",
-	)
-	// Clock kept only as a loose backstop against a full window being spent
-	// somewhere the poll counter cannot see. Generous on purpose.
-	require.Less(
-		t,
-		elapsed,
-		leiosWaitTestWindow,
-		"apply gate spent a whole diffusion window",
-	)
+		start := time.Now()
+		require.NoError(t, ls.ensureReferencedEndorserBlocks(
+			t.Context(),
+			[]gledger.Block{block},
+		))
+		elapsed := time.Since(start)
+		// The load-bearing assertion is event-driven, not a stopwatch: if the gate
+		// blocked on this announcement it would have polled from inside
+		// waitForEndorserBlock. Asserting that directly cannot flake on a loaded
+		// runner, whereas a short wall-clock budget has to cover goroutine
+		// scheduling as well as the absence of a window.
+		require.Zero(
+			t,
+			waitPolls.Load(),
+			"apply gate blocked on an announcement ledger application never reads",
+		)
+		// Clock kept only as a loose backstop against a full window being spent
+		// somewhere the poll counter cannot see. Generous on purpose.
+		require.Less(
+			t,
+			elapsed,
+			leiosWaitTestWindow,
+			"apply gate spent a whole diffusion window",
+		)
 
-	// The announcement is prefetched in the background rather than dropped, so
-	// it is cached before anything actually depends on it.
-	select {
-	case <-fetchedCh:
-	case <-time.After(testutil.AsyncWait):
-		t.Fatal("background by-point fetch was never dispatched")
-	}
-	require.Positive(t, fetched.Load())
+		// Drain background work: announcing a header does not mean this peer
+		// has its EB body. Notify offers drive that best-effort prefetch.
+		synctest.Wait()
+		require.Zero(t, fetched.Load(), "unoffered announcement triggered a by-point fetch")
+	})
 }
 
 // leiosWaitTestPolledFromWait reports whether the current call stack passes

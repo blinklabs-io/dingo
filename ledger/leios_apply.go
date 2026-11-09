@@ -993,17 +993,11 @@ func (ls *LedgerState) ensureReadyEndorserPrefix(
 	}
 	// Near the head: block only on the references applying THIS batch reads.
 	// See splitTipWaitByApplyDependency for the contract.
-	blockingWait, prefetch := splitTipWaitByApplyDependency(tipWait, required)
-	// Best-effort references: never block the ledger pipeline on them. The
-	// fetch is dispatched in the background (deduped and concurrency-bounded by
-	// the backfiller) so the endorser block is in cache by the time something
-	// does depend on it, and this batch is delivered to ledgerProcessBlock
-	// immediately.
-	if ls.leiosBackfill != nil {
-		for _, r := range prefetch {
-			ls.leiosBackfill.spawn(ctx, r)
-		}
-	}
+	blockingWait, _ := splitTipWaitByApplyDependency(tipWait, required)
+	// An announcement does not promise that its sender holds the EB body.
+	// Fetching that best-effort reference before a notify offer can disconnect
+	// the shared peer. Leave these references to offer-driven prefetch;
+	// certified dependencies below still receive an active by-point fetch.
 	// Blocking references: one shared diffusion window for the whole batch,
 	// with an active by-point fetch dispatched up front for each one.
 	ls.awaitEndorserBlocks(ctx, blockingWait, timeout, poll)
@@ -1030,7 +1024,7 @@ func (ls *LedgerState) ensureReadyEndorserPrefix(
 
 // splitTipWaitByApplyDependency partitions the near-head references into the
 // ones ledger application of this batch depends on (blocking) and the ones it
-// does not (prefetch, dispatched in the background and never waited on).
+// does not (prefetch, left to notify offers and never waited on).
 //
 // Application reads only certified closures: the endorser block announced by a
 // certifying ranking block's PARENT. A block's own announcement is never read

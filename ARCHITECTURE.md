@@ -5069,10 +5069,11 @@ certificate-driven: only the endorser block a certifying ranking block certifies
 is fetched — the one announced by the CertRB's parent (prevHash), resolved from
 the in-batch announcement index or the block store — and uncertified historical
 announcements are skipped, since they are never applied and the relay does not
-reliably serve them. Near the head, current announcements are prefetched in the
-background for voting and later certification, and a CertRB also fetches its
-parent announcement, because one block may both certify and announce; only the
-certified closures the batch applies are waited for
+reliably serve them. Near the head, notify offers drive prefetch for voting and
+later certification: a header announcement alone does not establish that its
+sender holds the EB body. The ledger does not start a by-point fetch for an
+unread announcement. A CertRB still actively fetches its parent announcement
+and waits for that certified closure before application
 (`splitTipWaitByApplyDependency`).
 
 Historical application in the chain-iterator loop can commit a fully available
