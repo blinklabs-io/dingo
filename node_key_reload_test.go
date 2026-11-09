@@ -27,6 +27,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger/forging"
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -221,7 +223,7 @@ func TestAgentSignReloadLeavesTheLiveCredentialsOnRefusal(t *testing.T) {
 		err := s.reloadAgentSignCredentials(
 			0, true, noLedgerCheck, other.opCertCBOR(t, 2),
 		)
-		require.Error(t, err)
+		require.ErrorContains(t, err, "cannot change pool or VRF identity")
 		s.requireLiveCounter(t, 1)
 		require.Same(t, s.initial, s.kesAgentClient)
 	})
@@ -234,6 +236,27 @@ func TestReloadInServeKeyModeIsRefused(t *testing.T) {
 	s.rotateTo(t, 2, nil)
 	require.ErrorContains(t, s.reload(nil), "serve-key mode")
 	s.requireLiveCounter(t, 1)
+}
+
+func TestKeyWatchIsSkippedInServeKeyMode(t *testing.T) {
+	t.Parallel()
+	s := newSignModeReloadNode(t, 1)
+	s.config.shelleyKESAgentMode = kesagent.ModeServeKey
+	s.config.shelleyKeyWatchInterval = time.Millisecond
+	s.startKeyReloadLoops()
+	t.Cleanup(s.stopKeyReloadLoops)
+	require.Contains(t, s.logs.String(), "ignored in KES agent serve-key mode")
+}
+
+func TestCredentialReloadMetricStartsWithEverySeries(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	n := &Node{config: Config{promRegistry: reg}}
+	require.NotNil(t, n.credentialReloadMetric())
+	require.Equal(t, 9, promtestutil.CollectAndCount(
+		reg,
+		"dingo_forge_credential_reloads_total",
+	))
 }
 
 func TestShouldTryAgentOpCertSkipsARecentRetry(t *testing.T) {

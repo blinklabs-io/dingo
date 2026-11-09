@@ -357,10 +357,20 @@ func (n *Node) startKeyReloadLoops() {
 	}
 	n.keyReload.loopsCancel = cancel
 	n.keyReload.mu.Unlock()
+	n.credentialReloadMetric()
 	go n.agentOpCertLoop(ctx, func(opCert []byte) error {
 		return n.reloadCredentials(reloadTriggerAgent, opCert)
 	})
 	if interval := n.config.shelleyKeyWatchInterval; interval > 0 {
+		if n.kesAgentConfigured() && !n.kesAgentSignMode() {
+			// A serve-key reload is always refused, so every file change
+			// would only log and count a failure.
+			n.config.logger.Warn(
+				"shelleyKeyWatchInterval is ignored in KES agent serve-key mode, where the agent pushes key rotations",
+				"component", "node",
+			)
+			return
+		}
 		go n.credentialFileWatchLoop(
 			ctx,
 			interval,
@@ -547,6 +557,15 @@ func (n *Node) credentialReloadMetric() *prometheus.CounterVec {
 			},
 			[]string{"trigger", "result"},
 		)
+		// Every series exists from the start, so rate() reads zero rather
+		// than an empty vector before the first reload.
+		for _, trigger := range []string{
+			reloadTriggerSignal, reloadTriggerFile, reloadTriggerAgent,
+		} {
+			for _, result := range []string{"success", "unchanged", "failure"} {
+				n.keyReload.reloads.WithLabelValues(trigger, result)
+			}
+		}
 	})
 	return n.keyReload.reloads
 }
