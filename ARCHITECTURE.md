@@ -18900,6 +18900,17 @@ index:
   deletes registration rows for the rolled-back block alongside the epoch
   snapshot cleanup.
 
+**Block transactions**: each block's transactions come from
+`LedgerState.BlockTransactions` (the `Config.BlockTransactions` hook) on the
+live, backfill, registration-rebuild and rollback paths, not from the decoded
+ranking block. A Leios certifying ranking block has no transactions of its own:
+the ledger applies the endorser block its parent announced, so those
+transactions are indexed, tracked and rolled back with the certifying block.
+When a certified endorser block cannot be loaded, the live and backfill paths
+fail like a decode failure. An undo that cannot load it commits the rest of the
+rollback, retains the committee candidate registration rows, leaves the created
+candidates in memory and returns `errIncompleteRollback`.
+
 **Epoch tracking**: `processBlock` resolves and advances the epoch (via
 `advanceEpochLocked`) for every block, on both the live event path and the
 backfill path (both call `processBlock`, which is the single place this
