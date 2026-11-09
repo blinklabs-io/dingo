@@ -11679,8 +11679,14 @@ func TestHeaderAlreadyOnPrimaryChainSkipsLookupBeyondLocalTip(t *testing.T) {
 
 func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 	t.Helper()
+	return newChainsyncRollbackFixtureWithDB(t, newTestDB(t))
+}
 
-	db := newTestDB(t)
+func newChainsyncRollbackFixtureWithDB(
+	t *testing.T,
+	db *database.Database,
+) *chainsyncRollbackFixture {
+	t.Helper()
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(

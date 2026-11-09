@@ -17,13 +17,20 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 	"math/big"
+	"slices"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -95,8 +102,16 @@ type boundaryReplayHarness struct {
 
 func newBoundaryReplayHarness(t *testing.T) *boundaryReplayHarness {
 	t.Helper()
+	return newBoundaryReplayHarnessWithDB(t, newTestDB(t))
+}
 
-	fixture := newChainsyncRollbackFixture(t)
+func newBoundaryReplayHarnessWithDB(
+	t *testing.T,
+	db *database.Database,
+) *boundaryReplayHarness {
+	t.Helper()
+
+	fixture := newChainsyncRollbackFixtureWithDB(t, db)
 	ls := fixture.ls
 	h := &boundaryReplayHarness{t: t, fixture: fixture, ls: ls}
 	ls.config.CardanoNodeConfig.ShelleyGenesisHash = "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
@@ -259,6 +274,7 @@ func (h *boundaryReplayHarness) applyBoundary() boundaryReplayEffects {
 	ls.currentEra = result.NewCurrentEra
 	ls.currentPParams = result.NewCurrentPParams
 	ls.ledgerEpoch = result.newLedgerEpoch
+	ls.checkpointWrittenForEpoch = result.CheckpointWrittenForEpoch
 	ls.Unlock()
 	return h.readEffects()
 }
@@ -310,11 +326,18 @@ func (h *boundaryReplayHarness) readEffects() boundaryReplayEffects {
 
 func (h *boundaryReplayHarness) rollbackBeforeBoundary() {
 	h.t.Helper()
+	h.rollbackBeforeBoundaryRepairing(false)
+}
+
+// rollbackBeforeBoundaryRepairing is rollbackBeforeBoundary for a ledger whose
+// tip already sits at the target, where only a repairing rollback truncates.
+func (h *boundaryReplayHarness) rollbackBeforeBoundaryRepairing(repair bool) {
+	h.t.Helper()
 	require.NoError(h.t, h.ls.rollbackWithBlocksAndIntent(
 		context.Background(),
 		h.fixture.ancestorTip.Point,
 		nil,
-		false,
+		repair,
 		false,
 		false,
 	))
@@ -375,7 +398,22 @@ func TestRollbackAcrossEpochBoundaryReplaysEpochEffects(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.Nil(t, pots, "the rollback must delete epoch E's pots")
+			staleMarks, err := h.ls.db.GetPoolStakeSnapshotsByEpoch(
+				replayBoundaryNewEpoch, models.PoolStakeSnapshotTypeMark, nil,
+			)
+			require.NoError(t, err)
+			require.Empty(t, staleMarks,
+				"the rollback must delete epoch E's mark snapshot rows")
+			staleSummary, err := h.ls.db.Metadata().GetEpochSummary(
+				replayBoundaryNewEpoch, nil,
+			)
+			require.NoError(t, err)
+			require.Nil(t, staleSummary,
+				"the rollback must delete epoch E's summary")
 			require.Equal(t, replayBoundaryEndedEra, h.ls.currentEpoch.EpochId)
+			require.True(t, h.ls.checkpointWrittenForEpoch,
+				"the rollback target's epoch already has its checkpoint row, "+
+					"so replay must not write a second one")
 			rewoundPParams, err := cbor.Encode(h.ls.currentPParams)
 			require.NoError(t, err)
 			require.Equal(t, preBoundaryPParams, rewoundPParams,
@@ -410,4 +448,131 @@ func TestRollbackAcrossEpochBoundaryReplaysEpochEffects(t *testing.T) {
 			}
 		})
 	}
+}
+
+// dumpAllMetadataTables renders every row of every metadata table as text so
+// two states can be compared without enumerating what a boundary writes.
+func dumpAllMetadataTables(
+	t *testing.T,
+	raw *sql.DB,
+) map[string][]string {
+	t.Helper()
+	names, err := raw.Query(
+		`SELECT name FROM sqlite_master WHERE type = 'table' ` +
+			`AND name NOT LIKE 'sqlite_%'`,
+	)
+	require.NoError(t, err)
+	var tables []string
+	for names.Next() {
+		var name string
+		require.NoError(t, names.Scan(&name))
+		tables = append(tables, name)
+	}
+	require.NoError(t, names.Err())
+	require.NoError(t, names.Close())
+	out := make(map[string][]string, len(tables))
+	for _, table := range tables {
+		rows, err := raw.Query("SELECT * FROM `" + table + "`")
+		require.NoError(t, err)
+		cols, err := rows.Columns()
+		require.NoError(t, err)
+		var lines []string
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			require.NoError(t, rows.Scan(ptrs...))
+			parts := make([]string, len(cols))
+			for i, v := range vals {
+				if b, ok := v.([]byte); ok {
+					parts[i] = fmt.Sprintf("%s=%x", cols[i], b)
+				} else {
+					parts[i] = fmt.Sprintf("%s=%v", cols[i], v)
+				}
+			}
+			lines = append(lines, strings.Join(parts, " "))
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+		sort.Strings(lines)
+		out[table] = lines
+	}
+	return out
+}
+
+func diffMetadataTables(before, after map[string][]string) []string {
+	var diffs []string
+	for table, want := range before {
+		got := after[table]
+		if slices.Equal(want, got) {
+			continue
+		}
+		for _, line := range want {
+			if !slices.Contains(got, line) {
+				diffs = append(diffs, table+" lost: "+line)
+			}
+		}
+		for _, line := range got {
+			if !slices.Contains(want, line) {
+				diffs = append(diffs, table+" added: "+line)
+			}
+		}
+	}
+	sort.Strings(diffs)
+	return diffs
+}
+
+func TestRollbackAcrossEpochBoundaryRestoresEveryTable(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	h := newBoundaryReplayHarnessWithDB(t, db)
+	raw, err := dbtest.RawSQLiteMetadata(t, h.ls.db)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = raw.Close() })
+	delegatorKey := bytes.Repeat([]byte{0x72}, 28)
+	// Rolling back without crossing the boundary first drops everything the
+	// blocks above the target contributed, leaving only what the boundary
+	// itself could add or alter.
+	h.addUtxo(0x33, delegatorKey, 7_000_000, h.next.StartSlot-1)
+	h.rollbackBeforeBoundary()
+	before := dumpComparableTables(t, raw)
+	h.addUtxo(0x33, delegatorKey, 7_000_000, h.next.StartSlot-1)
+	h.applyBoundary()
+	h.rollbackBeforeBoundaryRepairing(true)
+	after := dumpComparableTables(t, raw)
+	diffs := diffMetadataTables(before, after)
+	for _, d := range diffs {
+		t.Log(d)
+	}
+	require.Empty(t, diffs)
+}
+
+// A boundary whose deferred reward_stake_input write has not finished leaves a
+// pending entry for its snapshot. Rolling the boundary back deletes the
+// snapshot, so the entry must go with it: nothing remains for it to describe
+// and RewardStakeInputsIncomplete would report the epoch as unfinished.
+func TestRollbackDiscardsPendingRewardStakeInputsOfRewoundBoundary(
+	t *testing.T,
+) {
+	h := newBoundaryReplayHarness(t)
+	h.ls.deferredStakeInputsFailHook = func() error {
+		return errors.New("deferred write held back")
+	}
+	h.applyBoundary()
+
+	meta := h.ls.db.Metadata()
+	pending, err := loadRewardStakeInputsPending(meta, nil)
+	require.NoError(t, err)
+	require.Len(t, pending.Entries, 1,
+		"the boundary must leave its snapshot's basis pending")
+	require.Equal(t, replayBoundaryNewEpoch, pending.Entries[0].Epoch)
+
+	h.rollbackBeforeBoundary()
+
+	pending, err = loadRewardStakeInputsPending(meta, nil)
+	require.NoError(t, err)
+	require.Empty(t, pending.Entries,
+		"the rollback deleted the snapshot the entry describes")
 }

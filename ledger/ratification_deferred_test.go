@@ -704,42 +704,77 @@ func (s *govDiffScenario) run(
 ) []govDiffEpochDump {
 	t.Helper()
 	dumps := make([]govDiffEpochDump, 0, boundaries)
-	epoch, pparams := s.epoch, s.pparams
 	for range boundaries {
-		seedEmptyRewardBasisForRollover(t, s.db, epoch, pparams)
-		// The reward application reads the performance epoch's parameters
-		// from the table a real node writes every boundary.
-		stored, err := s.db.GetPParams(
-			epoch.EpochId, eras.ConwayEraDesc.Id,
-			eras.ConwayEraDesc.DecodePParamsFunc, nil,
-		)
-		require.NoError(t, err)
-		if stored == nil {
-			encoded, err := cbor.Encode(&pparams)
-			require.NoError(t, err)
-			require.NoError(t, s.db.SetPParams(
-				encoded, epoch.StartSlot, epoch.EpochId,
-				eras.ConwayEraDesc.Id, nil,
-			))
-		}
-		var result *EpochRolloverResult
-		txn := s.db.Transaction(context.Background(), true)
-		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			var err error
-			result, err = s.ls.processEpochRollover(context.Background(),
-				txn, epoch, eras.ConwayEraDesc, pparams,
-			)
-			return err
-		}))
-		require.NotNil(t, result)
-		settle(s.ls)
-		epoch, pparams = result.NewCurrentEpoch, result.NewCurrentPParams
+		epoch, pparams := s.rollover(t, s.epoch, s.pparams, settle)
+		s.epoch, s.pparams = epoch, pparams
 		s.ls.currentEpoch = epoch
 		s.ls.currentPParams = pparams
 		dumps = append(dumps, s.dump(t, epoch.EpochId, pparams))
 	}
-	s.epoch, s.pparams = epoch, pparams
 	return dumps
+}
+
+// rollover commits one epoch rollover from the given ledger state and returns
+// the epoch and parameters it produced. It leaves the scenario's own cursor
+// alone so a caller can roll the same boundary over again after a rollback.
+func (s *govDiffScenario) rollover(
+	t *testing.T,
+	epoch models.Epoch,
+	pparams lcommon.ProtocolParameters,
+	settle func(*LedgerState),
+) (models.Epoch, lcommon.ProtocolParameters) {
+	t.Helper()
+	s.prepareRollover(t, epoch, pparams)
+	return s.commitRollover(t, epoch, pparams, settle)
+}
+
+// commitRollover is rollover without the preparation, for a caller that
+// applies one boundary more than once.
+func (s *govDiffScenario) commitRollover(
+	t *testing.T,
+	epoch models.Epoch,
+	pparams lcommon.ProtocolParameters,
+	settle func(*LedgerState),
+) (models.Epoch, lcommon.ProtocolParameters) {
+	t.Helper()
+	var result *EpochRolloverResult
+	txn := s.db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		result, err = s.ls.processEpochRollover(context.Background(),
+			txn, epoch, eras.ConwayEraDesc, pparams,
+		)
+		return err
+	}))
+	require.NotNil(t, result)
+	settle(s.ls)
+	return result.NewCurrentEpoch, result.NewCurrentPParams
+}
+
+// prepareRollover writes the rows a real node has already stored by the time
+// an epoch ends. Call it once per boundary.
+func (s *govDiffScenario) prepareRollover(
+	t *testing.T,
+	epoch models.Epoch,
+	pparams lcommon.ProtocolParameters,
+) {
+	t.Helper()
+	seedEmptyRewardBasisForRollover(t, s.db, epoch, pparams)
+	// The reward application reads the performance epoch's parameters
+	// from the table a real node writes every boundary.
+	stored, err := s.db.GetPParams(
+		epoch.EpochId, eras.ConwayEraDesc.Id,
+		eras.ConwayEraDesc.DecodePParamsFunc, nil,
+	)
+	require.NoError(t, err)
+	if stored == nil {
+		encoded, err := cbor.Encode(&pparams)
+		require.NoError(t, err)
+		require.NoError(t, s.db.SetPParams(
+			encoded, epoch.StartSlot, epoch.EpochId,
+			eras.ConwayEraDesc.Id, nil,
+		))
+	}
 }
 
 func (s *govDiffScenario) dump(
