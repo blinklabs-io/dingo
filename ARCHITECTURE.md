@@ -628,7 +628,7 @@ sequenceDiagram
     LS->>LS: validate transactions (Phase 1 + Phase 2)
     LS->>LS: update UTXO set, process certs & governance
     LS->>LS: compute epoch nonce contributions
-    LS->>LS: when a block jumps over empty epochs, tick consensus once at the target; NEWEPOCH effects and the block-based epoch-transition event run only for an immediate successor
+    LS->>LS: when a block jumps over empty epochs, tick consensus once at the target; NEWEPOCH effects and the run only for an immediate successor of the ledger epoch label, and the block-based epoch-transition event is published whenever the target is the immediate successor of the consensus epoch
     LS->>LS: at an era boundary, enact source-era pparams, then translate before successor-era epoch rules and SNAP
     LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block, never ahead of a configured TriggerAtEpoch
     LS->>LS: before translating, decide the era the ledger enters from its own state, and refuse a validated boundary block encoded in any other era, in either direction

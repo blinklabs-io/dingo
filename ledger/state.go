@@ -8839,6 +8839,24 @@ func epochAtID(current models.Epoch, targetEpochID uint64) (models.Epoch, error)
 	)
 }
 
+// rolloverSkipsEmptyEpoch reports whether a rollover to targetEpochID passes
+// over at least one epoch holding no blocks, judged from the epoch of the
+// previous tip projected from the current epoch's geometry.
+func rolloverSkipsEmptyEpoch(
+	current models.Epoch,
+	tipSlot uint64,
+	targetEpochID uint64,
+) bool {
+	previous := current.EpochId
+	if tipSlot >= current.StartSlot {
+		if tipEpoch, err := epochAtSlot(current, tipSlot); err == nil &&
+			tipEpoch.EpochId > previous {
+			previous = tipEpoch.EpochId
+		}
+	}
+	return targetEpochID > previous+1
+}
+
 // byronTransitionEpochs projects a version-triggered Byron-to-Shelley
 // boundary using Byron geometry up to the adoption slot and Shelley geometry
 // afterwards. The transition is learned from Byron update state, so it may not
@@ -9411,8 +9429,19 @@ func (ls *LedgerState) processBlocksFromSource(
 				}
 			}
 
-			// Emit epoch transition event (coordinated with slot clock)
-			if rolloverResult != nil && ls.config.EventBus != nil {
+			// Publish the block-based event unless the block skipped a whole
+			// epoch that had no blocks: the slot clock already ticks those.
+			// The previous epoch is taken from the tip, not the ledger epoch
+			// label, which lags after a sparse jump or a truncate. Only this
+			// event carries the persisted nonce, so a block landing in the
+			// epoch after its predecessor's always publishes it.
+			if rolloverResult != nil &&
+				!rolloverSkipsEmptyEpoch(
+					snapshotEpoch,
+					snapshotTip.Point.Slot,
+					rolloverResult.NewCurrentEpoch.EpochId,
+				) &&
+				ls.config.EventBus != nil {
 				newEpochId := rolloverResult.NewCurrentEpoch.EpochId
 
 				// Always emit block-based epoch transitions. Even if the
