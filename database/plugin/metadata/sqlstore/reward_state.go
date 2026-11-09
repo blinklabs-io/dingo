@@ -1446,6 +1446,19 @@ WHERE credential_tag = ? AND staking_key = ?
 	return count, nil
 }
 
+// rewardPotWithoutOutputsResetQuery clears the reward pot of every pots-epoch
+// row whose round has no pool outputs. A round's snapshot epoch is two below
+// its pots epoch (stakeRewardEpochsForNewEpoch); the bootstrap rounds below
+// that mapping are always recalculated and keep their pot.
+const rewardPotWithoutOutputsResetQuery = `UPDATE reward_ada_pots
+SET rewards = 0
+WHERE rewards <> 0
+  AND epoch >= 2
+  AND NOT EXISTS (
+      SELECT 1 FROM reward_pool_output
+      WHERE reward_pool_output.epoch = reward_ada_pots.epoch - 2
+  )`
+
 func (s *Store) DeleteRewardStateAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -1515,6 +1528,18 @@ func (s *Store) DeleteRewardStateAfterSlot(
 			}
 			if err := q.DeleteRewardAccountOutputsAfterSlot(
 				ctx, sqlSlot,
+			); err != nil {
+				return err
+			}
+			// Applying a round writes its reward pot into the row of its
+			// pots epoch, which sits below the rollback slot, and the round's
+			// outputs at the boundary above it. With the outputs gone the pot
+			// the row records belongs to a round no surviving state computed,
+			// and a row with a nonzero pot is what marks a round as
+			// precomputed. A round whose outputs survived keeps its pot.
+			if _, err := db.ExecContext(
+				ctx,
+				rewardPotWithoutOutputsResetQuery,
 			); err != nil {
 				return err
 			}

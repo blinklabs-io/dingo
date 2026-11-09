@@ -2057,7 +2057,13 @@ epoch). `GetPendingRewardCreditRounds` and
 then reads the rows by primary key, so a claim, including an empty one, does not
 visit every spendable, unguarded row.
 `DeleteRewardStateAfterSlot` drops every round whose `boundary_slot` is after
-the rollback slot and clears `folded` on its surviving outputs.
+the rollback slot and clears `folded` on its surviving outputs. It also zeroes
+`reward_ada_pots.rewards` for every pots epoch from 2 up whose snapshot epoch
+(two below the pots epoch) has no `reward_pool_output` left: applying a round
+writes its pot into the earlier pots-epoch row, which the sweep does not
+delete, and a nonzero pot marks a round as precomputed, so a pot whose outputs
+the rollback removed must not survive it. A round whose outputs survive keeps
+its pot.
 `DeleteRewardStateBeforeEpoch` keeps applied rounds' unfolded rows. Migration
 31 imports any earlier JSON list from
 `models.PendingRewardCreditRoundsKey` into this table.

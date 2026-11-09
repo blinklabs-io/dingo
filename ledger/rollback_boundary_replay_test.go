@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
@@ -58,6 +59,7 @@ type boundaryReplayEffects struct {
 	ledgerEpoch   uint64
 	currentEpoch  uint64
 	snapshotCalls int
+	pparams       lcommon.ProtocolParameters
 }
 
 func normalizeReplayEpoch(epoch models.Epoch) models.Epoch {
@@ -318,6 +320,7 @@ func (h *boundaryReplayHarness) readEffects() boundaryReplayEffects {
 	if e.network != nil {
 		e.network.ID = 0
 	}
+	e.pparams = h.ls.currentPParams
 	e.ledgerEpoch = h.ls.ledgerEpoch
 	e.currentEpoch = h.ls.currentEpoch.EpochId
 	e.snapshotCalls = h.snapCalls

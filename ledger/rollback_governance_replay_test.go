@@ -154,7 +154,12 @@ func withoutRowIDs(tables map[string][]string) map[string][]string {
 			fields := strings.Fields(line)
 			kept := fields[:0]
 			for _, f := range fields {
-				if !strings.HasPrefix(f, "id=") {
+				// A history or reward row's vote_id or mir_id names its
+				// parent row, whose own id a re-applied boundary allocates
+				// anew.
+				if !strings.HasPrefix(f, "id=") &&
+					!strings.HasPrefix(f, "vote_id=") &&
+					!strings.HasPrefix(f, "mir_id=") {
 					kept = append(kept, f)
 				}
 			}
@@ -229,6 +234,11 @@ func dumpComparableTables(t *testing.T, raw *sql.DB) map[string][]string {
 		tables["sync_state"],
 		func(line string) bool {
 			return strings.Contains(line, models.RewardEligibilityRecheckKey) ||
+				// A reward precompute cursor is a resumable cache of a
+				// round whose inputs are already stored and fingerprinted;
+				// the rollback's own restart of the worker writes it for an
+				// epoch the rollback did not touch.
+				strings.Contains(line, "dingo:stake-reward:precompute-cursor:") ||
 				// An empty pending list is the same state as no list.
 				strings.HasSuffix(line, `value={"entries":[]}`)
 		},
