@@ -1010,7 +1010,10 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 			if err := o.fetchPoolsIfNeeded(ctx, epoch); err != nil {
 				return nil, err
 			}
-			return nil, o.fetchParamsIfNeeded(ctx, epoch)
+			if err := o.fetchParamsIfNeeded(ctx, epoch); err != nil {
+				return nil, err
+			}
+			return nil, o.fetchTransactionsIfNeeded(ctx, epoch)
 		},
 	)
 	return err

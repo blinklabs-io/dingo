@@ -2293,6 +2293,9 @@ type KoiosTxInfoItem struct {
 	CollateralInputs []KoiosTxInfoUtxoRef        `json:"collateral_inputs"`
 	CollateralOutput *KoiosTxInfoOutput          `json:"collateral_output"`
 	PlutusContracts  []KoiosTxInfoPlutusContract `json:"plutus_contracts"`
+
+	// ReferenceInputs are the refs the transaction read without spending.
+	ReferenceInputs []KoiosTxInfoUtxoRef `json:"reference_inputs"`
 }
 
 // IsValid reports whether the ledger applied this transaction's body, i.e.
