@@ -15,7 +15,6 @@
 package sqlstore
 
 import (
-	"bytes"
 	"fmt"
 	"regexp"
 	"testing"
@@ -24,30 +23,32 @@ import (
 )
 
 // seedRewardJournalPlanRows fills the journal with enough rows that a plan
-// that ignores an index shows up as a scan.
+// that ignores an index shows up as a scan, and that statistics prefer an
+// index over a scan of a table the size of a batched IN list.
 func seedRewardJournalPlanRows(t *testing.T, store *Store) {
 	t.Helper()
-	tx, err := store.writeDB.Begin()
-	require.NoError(t, err)
-	for i := range 60 {
-		key := bytes.Repeat([]byte{byte(i + 1)}, 28)
-		insertTestRewardRow(t, tx, testRewardRow{
-			key: key, hash: []byte(fmt.Sprintf("evt-%04d", i)), amount: "5",
-			slot: int64(100 + i%7), postSnapshot: i%3 == 0,
-		})
-		insertTestRewardRow(t, tx, testRewardRow{
-			key: key, hash: []byte(fmt.Sprintf("tx--%04d", i)), amount: "3",
-			previous: "9", slot: int64(200 + i%11), withdrawal: true,
-		})
-		_, err := tx.Exec(`INSERT INTO reward_credit (boundary_slot, account_id, output_id, amount)
-SELECT ?, id, ?, '4' FROM account WHERE staking_key = ?`, 300+(i%4)*100, i+1, key)
-		require.NoError(t, err)
+	const accounts = 6000
+	for _, statement := range []string{
+		fmt.Sprintf(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < %d)
+INSERT INTO account (staking_key, credential_tag, added_slot, created_slot, active, reward)
+SELECT randomblob(28), 0, 0, 0, TRUE, '0' FROM n`, accounts),
+		`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 6000)
+INSERT INTO reward_source (hash) SELECT randomblob(32) FROM n`,
+		`INSERT INTO reward_event_credit (source_id, account_id, slot, amount, post_snapshot)
+SELECT s.id, a.id, 100 + a.id % 7, '5', a.id % 3 = 0
+FROM account a JOIN reward_source s ON s.id = a.id`,
+		`INSERT INTO "transaction" (hash, slot, block_index)
+SELECT randomblob(32), 200 + id % 11, 0 FROM account`,
+		`INSERT INTO reward_withdrawal (tx_id, account_id, slot, amount, previous_reward)
+SELECT t.id, a.id, 200 + a.id % 11, '3', '9'
+FROM account a JOIN "transaction" t ON t.id = a.id`,
+		`INSERT INTO reward_credit (boundary_slot, account_id, output_id, amount)
+SELECT 300 + (id % 4) * 100, id, id, '4' FROM account`,
+		`INSERT INTO reward_credit_slot (boundary_slot) VALUES (300), (400), (500), (600)`,
+	} {
+		_, err := store.writeDB.Exec(statement)
+		require.NoError(t, err, statement)
 	}
-	for _, slot := range []int{300, 400, 500, 600} {
-		_, err := tx.Exec(`INSERT INTO reward_credit_slot (boundary_slot) VALUES (?)`, slot)
-		require.NoError(t, err)
-	}
-	require.NoError(t, tx.Commit())
 }
 
 // TestRewardJournalPlansDoNotDependOnStatistics pins the access path of every
@@ -68,18 +69,18 @@ func TestRewardJournalPlansDoNotDependOnStatistics(t *testing.T) {
 		args  []any
 		want  []string
 	}{
-		{"credit slots after a slot", rewardCreditSlotsAfterSQL, []any{300},
-			[]string{`SEARCH reward_credit_slot USING (COVERING )?INDEX|SEARCH reward_credit_slot USING PRIMARY KEY`}},
-		{"credits of a slot and account", roundRewardCreditsAtSlotSQL, []any{300, 1},
-			[]string{`PRIMARY KEY \(boundary_slot=\? AND account_id=\?\)`}},
-		{"event credits after a slot", rewardEventCreditsAfterSQL, []any{1, 150},
-			[]string{`idx_reward_event_credit_account`}},
-		{"event credits including post-snapshot", rewardEventCreditsAfterOrPostSnapshotSQL, []any{1, 150, 150},
-			[]string{`idx_reward_event_credit_account`}},
-		{"first withdrawal after a slot", firstRewardWithdrawalAfterSQL, []any{1, 150},
+		{"history accounts", rewardHistoryAccountsSQL, append([]any{0}, idArgs([]int64{1})...),
+			[]string{`idx_account_credential`}},
+		{"history withdrawals", rewardHistoryWithdrawalsSQL[false], idArgs([]int64{1}, 150),
 			[]string{`idx_reward_withdrawal_account_slot`}},
-		{"first withdrawal from a slot", firstRewardWithdrawalFromSQL, []any{1, 150},
+		{"history boundary withdrawals", rewardHistoryWithdrawalsSQL[true], idArgs([]int64{1}, 150),
 			[]string{`idx_reward_withdrawal_account_slot`}},
+		{"history credits", rewardHistoryCreditsSQL, idArgs([]int64{1}, 150),
+			[]string{`SEARCH c USING PRIMARY KEY \(boundary_slot=\? AND account_id=\?\)`}},
+		{"history events", rewardHistoryEventsSQL[false], idArgs([]int64{1}, 150),
+			[]string{`idx_reward_event_credit_account`}},
+		{"history events with post-snapshot", rewardHistoryEventsSQL[true], idArgs([]int64{1}, 150, 150),
+			[]string{`idx_reward_event_credit_account`}},
 		{"last withdrawal slots", lastRewardWithdrawalSlotsSQL, lastSlotsArgs,
 			[]string{`idx_account_credential`, `idx_reward_withdrawal_account_slot`}},
 		{"witnessed after a slot", rewardWithdrawalsWitnessedAfterSQL, []any{150},

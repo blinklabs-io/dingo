@@ -6118,17 +6118,18 @@ bounded Go-side pass over account/reward-delta rows, keyed by credential, and
 adds it once while folding live UTxO rows. This keeps decimal `uint64` values
 exact and avoids multiplication across the UTxO join fan-out.
 
-Each credential is resolved to its `account.id` and read through fixed
-statements: its `reward_credit` rows for the slots in `reward_credit_slot` above
-the requested slot (the slot index drives, a primary-key probe per slot), its
-`reward_event_credit` rows through `idx_reward_event_credit_account`, and its
-first later `reward_withdrawal` through `idx_reward_withdrawal_account_slot`.
-Event credits and withdrawals resolve the Leios context slot
-(`COALESCE(lc.slot, ...)`) through `LEFT JOIN`s on the unique `transaction.hash`
-(event credits whose source is a transaction hash) or the withdrawing
-`transaction.id`, and `leios_transaction_context`'s primary key. A credit counts
-before the first later withdrawal when its slot is at or below the withdrawal's.
-No plan depends on `sqlite_stat1`.
+Credentials are resolved to `account.id` and their journals read in batches of
+100 accounts through fixed statements (a shorter batch repeats its last id, so
+each statement keeps one text): `reward_credit` rows through the primary key for
+each slot in `reward_credit_slot` above the requested slot, `reward_event_credit`
+rows through `idx_reward_event_credit_account`, and `reward_withdrawal` rows
+through `idx_reward_withdrawal_account_slot`; the first later withdrawal by slot
+and transaction id anchors the reconstruction. Event credits and withdrawals
+resolve the Leios context slot (`COALESCE(lc.slot, ...)`) through `LEFT JOIN`s on
+the unique `transaction.hash` (event credits whose source is a transaction hash)
+or the withdrawing `transaction.id`, and `leios_transaction_context`'s primary
+key. A credit counts before the first later withdrawal when its slot is at or
+below the withdrawal's. No plan depends on `sqlite_stat1`.
 
 `utxo.amount`, `account.reward`, and the reward-delta amounts are stored as text
 (`types.Uint64`) on postgres and mysql, so each is cast to the backend's native

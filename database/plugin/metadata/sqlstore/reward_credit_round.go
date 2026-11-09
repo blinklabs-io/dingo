@@ -506,7 +506,7 @@ func (s *Store) ClaimUnfoldedRewardCredits(
 	var ret []*models.RewardAccountOutput
 	err = s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
 		rows, err := db.QueryContext(
-			ctx, s.unfoldedRewardOutputsSQL(), int64(fromAccountID), epoch, limit,
+			ctx, s.unfoldedRewardOutputsSQL(), int64(fromAccountID), epoch, limit, //nolint:gosec // account ids are positive SQL integers
 		)
 		if err != nil {
 			return fmt.Errorf("select unfolded reward credits: %w", err)

@@ -27,6 +27,9 @@ import (
 // equivalence test that depends on how the journal is keyed.
 type rewardJournalDriver struct {
 	store *sqlstore.Store
+	// cursors holds, per round, the account the last chunk ended on, as the
+	// compaction job does.
+	cursors map[uint64]uint
 }
 
 func (d rewardJournalDriver) write(t *testing.T, outputs []*models.RewardAccountOutput) {
@@ -50,9 +53,16 @@ func (d rewardJournalDriver) write(t *testing.T, outputs []*models.RewardAccount
 
 func (d rewardJournalDriver) foldChunk(t *testing.T, epoch uint64, limit int) int {
 	t.Helper()
-	outputs, err := d.store.ClaimUnfoldedRewardCredits(epoch, 0, limit, nil)
+	from := uint(0)
+	if d.cursors != nil {
+		from = d.cursors[epoch]
+	}
+	outputs, err := d.store.ClaimUnfoldedRewardCredits(epoch, from, limit, nil)
 	require.NoError(t, err)
 	d.write(t, outputs)
+	if d.cursors != nil && len(outputs) > 0 {
+		d.cursors[epoch] = outputs[len(outputs)-1].AccountID
+	}
 	return len(outputs)
 }
 

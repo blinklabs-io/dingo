@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//nolint:gosec // G101 reads "cred" in credit statement names; ids are non-negative SQL integers
 package migrations
 
 import (

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//nolint:rowserrcheck,sqlclosecheck // Cursors are explicitly closed and close errors are propagated before dependent queries.
+//nolint:gosec,rowserrcheck,sqlclosecheck // gosec G101 reads "cred" in credit statement names; cursors are explicitly closed and close errors are propagated before dependent queries.
 package sqlstore
 
 import (
@@ -194,9 +194,8 @@ func historicalRewardsBatch(
 	// when its effective slot is above the snapshot slot, or at or above the
 	// boundary.
 	threshold := slotValue
-	withdrawalThreshold := slotValue
-	withdrawalQuery := firstRewardWithdrawalAfterSQL
-	creditQuery := rewardEventCreditsAfterSQL
+	includePostSnapshot := false
+	atBoundary := false
 	if boundarySlot > 0 {
 		boundaryValue, boundaryErr := checkedInt64(boundarySlot)
 		if boundaryErr != nil {
@@ -211,11 +210,8 @@ func historicalRewardsBatch(
 			return nil, err
 		}
 		threshold = boundaryValue
-		withdrawalThreshold = boundaryValue
-		withdrawalQuery = firstRewardWithdrawalFromSQL
-		if !afterEnactment {
-			creditQuery = rewardEventCreditsAfterOrPostSnapshotSQL
-		}
+		atBoundary = true
+		includePostSnapshot = !afterEnactment
 	}
 	keys := make([]historicalRewardKey, 0, len(selected))
 	for key := range selected {
@@ -227,7 +223,9 @@ func historicalRewardsBatch(
 		}
 		return keys[i].key < keys[j].key
 	})
-	creditSlots, err := rewardCreditSlotsAfter(ctx, db, threshold)
+	histories, err := readRewardHistories(
+		ctx, db, keys, threshold, atBoundary, includePostSnapshot,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -236,91 +234,53 @@ func historicalRewardsBatch(
 	total := make(map[historicalRewardKey]uint64)
 	beforeWithdrawal := make(map[historicalRewardKey]uint64)
 	for _, ref := range keys {
-		var accountID int64
-		var raw sql.NullString
-		var active sql.NullBool
-		err := db.QueryRowContext(
-			ctx, getAccountRewardStateSQL, ref.tag, []byte(ref.key),
-		).Scan(&accountID, &raw, &active)
-		if errors.Is(err, sql.ErrNoRows) {
+		entries, ok := histories[ref]
+		if !ok {
 			continue
 		}
-		if err != nil {
-			return nil, err
-		}
-		if raw.Valid && raw.String != "" {
-			value, err := parseUint64("historical account reward", raw.String)
+		if entries.reward.Valid && entries.reward.String != "" {
+			value, err := parseUint64("historical account reward", entries.reward.String)
 			if err != nil {
 				return nil, err
 			}
 			base[ref] = value
 		}
-		var (
-			withdrawalSlot int64
-			txID           int64
-			previousRaw    sql.NullString
-		)
-		err = db.QueryRowContext(
-			ctx, withdrawalQuery, accountID, withdrawalThreshold,
-		).Scan(&withdrawalSlot, &txID, &previousRaw)
-		hasWithdrawal := false
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-		case err != nil:
-			return nil, err
-		default:
-			hasWithdrawal = true
+		hasWithdrawal := entries.hasWithdrawal
+		if hasWithdrawal {
 			previous := uint64(0)
-			if previousRaw.Valid && previousRaw.String != "" {
+			if entries.previous.Valid && entries.previous.String != "" {
 				previous, err = parseUint64(
-					"historical previous reward", previousRaw.String,
+					"historical previous reward", entries.previous.String,
 				)
 				if err != nil {
 					return nil, err
 				}
 			}
 			withdrawals[ref] = historicalWithdrawal{
-				slot:     withdrawalSlot,
-				id:       txID,
+				slot:     entries.withdrawalSlot,
+				id:       entries.withdrawalTx,
 				previous: previous,
 			}
 		}
-		credit := func(effectiveSlot int64, raw sql.NullString) error {
-			if !raw.Valid || raw.String == "" {
-				return nil
+		for _, credit := range entries.credits {
+			if !credit.amount.Valid || credit.amount.String == "" {
+				continue
 			}
-			value, err := parseUint64("historical future reward credit", raw.String)
+			value, err := parseUint64("historical future reward credit", credit.amount.String)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if ^uint64(0)-total[ref] < value {
-				return errors.New("historical reward credit overflow")
+				return nil, errors.New("historical reward credit overflow")
 			}
 			total[ref] += value
 			// Credits of a slot precede its withdrawals.
-			if hasWithdrawal && effectiveSlot <= withdrawalSlot {
+			if hasWithdrawal && credit.slot <= entries.withdrawalSlot {
 				if ^uint64(0)-beforeWithdrawal[ref] < value {
-					return errors.New("historical reward credit overflow")
+					return nil, errors.New("historical reward credit overflow")
 				}
 				beforeWithdrawal[ref] += value
 			}
-			return nil
-		}
-		for _, creditSlot := range creditSlots {
-			if err := scanHistoricalCredits(
-				ctx, db, roundRewardCreditsAtSlotSQL, credit, creditSlot, accountID,
-			); err != nil {
-				return nil, err
-			}
-		}
-		creditArgs := []any{accountID, threshold}
-		if creditQuery == rewardEventCreditsAfterOrPostSnapshotSQL {
-			creditArgs = append(creditArgs, threshold)
-		}
-		if err := scanHistoricalCredits(
-			ctx, db, creditQuery, credit, creditArgs...,
-		); err != nil {
-			return nil, err
 		}
 	}
 
@@ -349,84 +309,204 @@ func historicalRewardsBatch(
 	return ret, nil
 }
 
-// The reconstruction reads each credential's journal through its account id.
-// The Leios transaction context slot, when a credit's source is a transaction
-// or a withdrawal's own transaction has one, replaces the journal slot.
-const (
-	// rewardCreditSlotsAfterSQL lists the credited boundaries once per read;
-	// each credential then probes reward_credit by its primary key per slot. A
-	// join between the two lets the planner scan every credit of the later
-	// rounds and filter by account afterwards.
-	rewardCreditSlotsAfterSQL = `-- name: GetRewardCreditSlotsAfter :many
-SELECT boundary_slot FROM reward_credit_slot WHERE boundary_slot > ?`
+// rewardHistoryBatch is the fixed number of accounts one history statement
+// covers. A shorter batch repeats its last account, which an IN list ignores,
+// so each statement keeps one text however many credentials a read selects.
+const rewardHistoryBatch = 100
 
-	roundRewardCreditsAtSlotSQL = `-- name: GetRoundRewardCreditsAtSlot :many
-SELECT boundary_slot, amount FROM reward_credit
-WHERE boundary_slot = ? AND account_id = ?`
-
-	rewardEventCreditsAfterSQL = `-- name: GetRewardEventCreditsAfter :many
-SELECT COALESCE(lc.slot, e.slot), e.amount
-FROM reward_event_credit e
-LEFT JOIN reward_source s ON s.id = e.source_id
-LEFT JOIN "transaction" tx ON tx.hash = s.hash
-LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id
-WHERE e.account_id = ? AND COALESCE(lc.slot, e.slot) > ?`
-
-	rewardEventCreditsAfterOrPostSnapshotSQL = `-- name: GetRewardEventCreditsAfterOrPostSnapshot :many
-SELECT COALESCE(lc.slot, e.slot), e.amount
-FROM reward_event_credit e
-LEFT JOIN reward_source s ON s.id = e.source_id
-LEFT JOIN "transaction" tx ON tx.hash = s.hash
-LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id
-WHERE e.account_id = ? AND (
-    COALESCE(lc.slot, e.slot) > ?
-    OR (COALESCE(lc.slot, e.slot) = ? AND e.post_snapshot = TRUE)
-)`
-
-	firstRewardWithdrawalAfterSQL = `-- name: GetFirstRewardWithdrawalAfter :one
-SELECT COALESCE(lc.slot, w.slot), w.tx_id, w.previous_reward
-FROM reward_withdrawal w
-LEFT JOIN leios_transaction_context lc ON lc.transaction_id = w.tx_id
-WHERE w.account_id = ? AND COALESCE(lc.slot, w.slot) > ?
-ORDER BY w.slot, w.tx_id
-LIMIT 1`
-
-	firstRewardWithdrawalFromSQL = `-- name: GetFirstRewardWithdrawalFrom :one
-SELECT COALESCE(lc.slot, w.slot), w.tx_id, w.previous_reward
-FROM reward_withdrawal w
-LEFT JOIN leios_transaction_context lc ON lc.transaction_id = w.tx_id
-WHERE w.account_id = ? AND COALESCE(lc.slot, w.slot) >= ?
-ORDER BY w.slot, w.tx_id
-LIMIT 1`
-)
-
-func rewardCreditSlotsAfter(
-	ctx context.Context,
-	db queryer,
-	threshold int64,
-) ([]int64, error) {
-	rows, err := db.QueryContext(ctx, rewardCreditSlotsAfterSQL, threshold)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var slots []int64
-	for rows.Next() {
-		var slot int64
-		if err := rows.Scan(&slot); err != nil {
-			return nil, err
-		}
-		slots = append(slots, slot)
-	}
-	return slots, rows.Err()
+func rewardHistoryPlaceholders() string {
+	return strings.TrimSuffix(strings.Repeat("?,", rewardHistoryBatch), ",")
 }
 
-func scanHistoricalCredits(
+// The history statements read a batch of accounts' journal rows. The Leios
+// context slot, when an event credit's source is a transaction hash or a
+// withdrawal's transaction has one, replaces the journal slot. Credits are
+// probed through reward_credit's primary key for the slots reward_credit_slot
+// lists above the threshold; a join between the two lets the planner scan
+// every credit of the later rounds and filter by account afterwards.
+var (
+	rewardHistoryAccountsSQL = `-- name: GetRewardHistoryAccounts :many
+SELECT id, staking_key, reward FROM account
+WHERE credential_tag = ? AND staking_key IN (` + rewardHistoryPlaceholders() + `)`
+
+	// rewardHistoryWithdrawalsSQL is indexed by whether the threshold is
+	// inclusive: a boundary read counts a withdrawal at the boundary slot.
+	rewardHistoryWithdrawalsSQL = map[bool]string{
+		false: rewardHistoryWithdrawalsQuery(">"),
+		true:  rewardHistoryWithdrawalsQuery(">="),
+	}
+
+	rewardHistoryCreditsSQL = `-- name: GetRewardHistoryCredits :many
+SELECT c.account_id, c.boundary_slot, c.amount FROM reward_credit c
+WHERE c.account_id IN (` + rewardHistoryPlaceholders() + `)
+  AND c.boundary_slot IN (
+      SELECT boundary_slot FROM reward_credit_slot WHERE boundary_slot > ?
+  )`
+
+	// rewardHistoryEventsSQL is indexed by whether a post-snapshot credit at
+	// the threshold slot counts.
+	rewardHistoryEventsSQL = map[bool]string{
+		false: rewardHistoryEventsQuery(false),
+		true:  rewardHistoryEventsQuery(true),
+	}
+)
+
+func rewardHistoryWithdrawalsQuery(op string) string {
+	return `-- name: GetRewardHistoryWithdrawals :many
+SELECT w.account_id, COALESCE(lc.slot, w.slot), w.previous_reward, w.tx_id, w.slot
+FROM reward_withdrawal w
+LEFT JOIN leios_transaction_context lc ON lc.transaction_id = w.tx_id
+WHERE w.account_id IN (` + rewardHistoryPlaceholders() + `)
+  AND COALESCE(lc.slot, w.slot) ` + op + ` ?`
+}
+
+func rewardHistoryEventsQuery(includePostSnapshot bool) string {
+	slot := "COALESCE(lc.slot, e.slot)"
+	filter := slot + " > ?"
+	if includePostSnapshot {
+		filter = "(" + slot + " > ? OR (" + slot + " = ? AND e.post_snapshot = TRUE))"
+	}
+	return `-- name: GetRewardHistoryEvents :many
+SELECT e.account_id, ` + slot + `, e.amount
+FROM reward_event_credit e
+LEFT JOIN reward_source s ON s.id = e.source_id
+LEFT JOIN "transaction" tx ON tx.hash = s.hash
+LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id
+WHERE e.account_id IN (` + rewardHistoryPlaceholders() + `) AND ` + filter
+}
+
+type rewardHistoryCredit struct {
+	slot   int64
+	amount sql.NullString
+}
+
+type rewardHistory struct {
+	reward         sql.NullString
+	hasWithdrawal  bool
+	withdrawalSlot int64
+	withdrawalTx   int64
+	anchorSlot     int64
+	previous       sql.NullString
+	credits        []rewardHistoryCredit
+}
+
+func idArgs(ids []int64, trailing ...any) []any {
+	args := make([]any, 0, rewardHistoryBatch+len(trailing))
+	for i := range rewardHistoryBatch {
+		args = append(args, ids[min(i, len(ids)-1)])
+	}
+	return append(args, trailing...)
+}
+
+// readRewardHistories resolves the credentials to accounts and reads their
+// journals in batches. A credential without an account row is absent from the
+// result. The first withdrawal by journal slot and transaction id anchors a
+// reconstruction.
+func readRewardHistories(
+	ctx context.Context,
+	db queryer,
+	keys []historicalRewardKey,
+	threshold int64,
+	atBoundary, includePostSnapshot bool,
+) (map[historicalRewardKey]*rewardHistory, error) {
+	out := make(map[historicalRewardKey]*rewardHistory, len(keys))
+	owner := make(map[int64]*rewardHistory, len(keys))
+	var ids []int64
+	byTag := make(map[uint8][][]byte, 2)
+	for _, key := range keys {
+		byTag[key.tag] = append(byTag[key.tag], []byte(key.key))
+	}
+	for tag, tagKeys := range byTag {
+		for start := 0; start < len(tagKeys); start += rewardHistoryBatch {
+			batch := tagKeys[start:min(start+rewardHistoryBatch, len(tagKeys))]
+			args := make([]any, 0, rewardHistoryBatch+1)
+			args = append(args, tag)
+			for i := range rewardHistoryBatch {
+				args = append(args, batch[min(i, len(batch)-1)])
+			}
+			if err := func() error {
+				rows, err := db.QueryContext(ctx, rewardHistoryAccountsSQL, args...)
+				if err != nil {
+					return err
+				}
+				defer rows.Close()
+				for rows.Next() {
+					var id int64
+					var key []byte
+					var reward sql.NullString
+					if err := rows.Scan(&id, &key, &reward); err != nil {
+						return err
+					}
+					entry := &rewardHistory{reward: reward}
+					out[historicalRewardKey{tag: tag, key: string(key)}] = entry
+					owner[id] = entry
+					ids = append(ids, id)
+				}
+				return rows.Err()
+			}(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for start := 0; start < len(ids); start += rewardHistoryBatch {
+		batch := ids[start:min(start+rewardHistoryBatch, len(ids))]
+		if err := scanRewardHistoryRows(
+			ctx, db, rewardHistoryWithdrawalsSQL[atBoundary],
+			idArgs(batch, threshold),
+			func(rows *sql.Rows) error {
+				var id, effective, tx, raw int64
+				var previous sql.NullString
+				if err := rows.Scan(&id, &effective, &previous, &tx, &raw); err != nil {
+					return err
+				}
+				entry := owner[id]
+				if !entry.hasWithdrawal || raw < entry.anchorSlot ||
+					(raw == entry.anchorSlot && tx < entry.withdrawalTx) {
+					entry.hasWithdrawal = true
+					entry.anchorSlot = raw
+					entry.withdrawalSlot = effective
+					entry.withdrawalTx = tx
+					entry.previous = previous
+				}
+				return nil
+			},
+		); err != nil {
+			return nil, err
+		}
+		credit := func(rows *sql.Rows) error {
+			var id, slot int64
+			var amount sql.NullString
+			if err := rows.Scan(&id, &slot, &amount); err != nil {
+				return err
+			}
+			entry := owner[id]
+			entry.credits = append(entry.credits, rewardHistoryCredit{slot: slot, amount: amount})
+			return nil
+		}
+		if err := scanRewardHistoryRows(
+			ctx, db, rewardHistoryCreditsSQL, idArgs(batch, threshold), credit,
+		); err != nil {
+			return nil, err
+		}
+		eventArgs := idArgs(batch, threshold)
+		if includePostSnapshot {
+			eventArgs = append(eventArgs, threshold)
+		}
+		if err := scanRewardHistoryRows(
+			ctx, db, rewardHistoryEventsSQL[includePostSnapshot], eventArgs, credit,
+		); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func scanRewardHistoryRows(
 	ctx context.Context,
 	db queryer,
 	query string,
-	credit func(int64, sql.NullString) error,
-	args ...any,
+	args []any,
+	scan func(*sql.Rows) error,
 ) error {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -434,12 +514,7 @@ func scanHistoricalCredits(
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var effectiveSlot int64
-		var raw sql.NullString
-		if err := rows.Scan(&effectiveSlot, &raw); err != nil {
-			return err
-		}
-		if err := credit(effectiveSlot, raw); err != nil {
+		if err := scan(rows); err != nil {
 			return err
 		}
 	}
