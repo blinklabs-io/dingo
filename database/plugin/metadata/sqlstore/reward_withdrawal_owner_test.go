@@ -62,7 +62,7 @@ WHERE type IS NULL OR fee IS NULL OR valid IS NULL OR block_hash IS NULL`,
 	).Scan(&incomplete))
 	require.NoError(t, raw.QueryRow(`
 SELECT COUNT(*) FROM reward_withdrawal w
-JOIN "transaction" t ON t.id = w.transaction_id AND t.hash = ?`, hash,
+JOIN "transaction" t ON t.id = w.tx_id AND t.hash = ?`, hash,
 	).Scan(&owned))
 	require.Zero(t, incomplete)
 	require.Equal(t, 1, owned)

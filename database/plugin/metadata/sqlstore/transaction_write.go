@@ -2455,7 +2455,7 @@ func (s *Store) applyTransactionWithdrawals(
 	transaction lcommon.Transaction,
 	slot uint64,
 	txHash []byte,
-	transactionID int64,
+	txID int64,
 	skipWithdrawalWitness bool,
 	historicalBackfill bool,
 	txn types.Txn,
@@ -2525,7 +2525,7 @@ func (s *Store) applyTransactionWithdrawals(
 		}
 		var exists bool
 		if err := s.queryRowCached(ctx, db, rewardWithdrawalExistsSQL,
-			transactionID,
+			txID,
 			accountID,
 		).Scan(&exists); err != nil {
 			return err
@@ -2565,7 +2565,7 @@ func (s *Store) applyTransactionWithdrawals(
 			}
 		}
 		if _, err := s.execCached(ctx, db, insertRewardWithdrawalSQL,
-			transactionID,
+			txID,
 			accountID,
 			slot,
 			strconv.FormatUint(amount.Uint64(), 10),

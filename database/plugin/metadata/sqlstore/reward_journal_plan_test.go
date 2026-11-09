@@ -39,7 +39,7 @@ SELECT s.id, a.id, 100 + a.id % 7, '5', a.id % 3 = 0
 FROM account a JOIN reward_source s ON s.id = a.id`,
 		`INSERT INTO "transaction" (hash, slot, block_index)
 SELECT randomblob(32), 200 + id % 11, 0 FROM account`,
-		`INSERT INTO reward_withdrawal (transaction_id, account_id, slot, amount, previous_reward)
+		`INSERT INTO reward_withdrawal (tx_id, account_id, slot, amount, previous_reward)
 SELECT t.id, a.id, 200 + a.id % 11, '3', '9'
 FROM account a JOIN "transaction" t ON t.id = a.id`,
 		`INSERT INTO reward_credit (boundary_slot, account_id, output_id, amount)

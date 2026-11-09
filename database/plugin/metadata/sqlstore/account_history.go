@@ -419,7 +419,7 @@ func withdrawalHistoryQuery(
 	return `
 SELECT tx.hash AS tx_hash, w.amount, tx.slot AS tx_slot, tx.block_index, tx.block_hash
 FROM reward_withdrawal w
-JOIN "transaction" tx ON tx.id = w.transaction_id
+JOIN "transaction" tx ON tx.id = w.tx_id
 WHERE w.account_id = (
     SELECT id FROM account WHERE credential_tag = ? AND staking_key = ?
 )`, []any{credentialTag, stakingKey}

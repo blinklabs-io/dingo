@@ -354,9 +354,9 @@ WHERE c.account_id IN (` + rewardHistoryPlaceholders() + `)
 
 func rewardHistoryWithdrawalsQuery(op string) string {
 	return `-- name: GetRewardHistoryWithdrawals :many
-SELECT w.account_id, COALESCE(lc.slot, w.slot), w.previous_reward, w.transaction_id, w.slot
+SELECT w.account_id, COALESCE(lc.slot, w.slot), w.previous_reward, w.tx_id, w.slot
 FROM reward_withdrawal w
-LEFT JOIN leios_transaction_context lc ON lc.transaction_id = w.transaction_id
+LEFT JOIN leios_transaction_context lc ON lc.transaction_id = w.tx_id
 WHERE w.account_id IN (` + rewardHistoryPlaceholders() + `)
   AND COALESCE(lc.slot, w.slot) ` + op + ` ?`
 }
@@ -1471,7 +1471,7 @@ LIMIT 1`).Scan(&value)
   FROM account_withdrawal_witness witness
   WHERE witness.credential_tag = active.credential_tag
     AND witness.staking_key = active.staking_key`, `
-  SELECT COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = witness.transaction_id), witness.slot) AS added_slot
+  SELECT COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = witness.tx_id), witness.slot) AS added_slot
   FROM reward_withdrawal witness
   WHERE witness.account_id = (
     SELECT wa.id FROM account wa

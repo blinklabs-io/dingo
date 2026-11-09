@@ -62,7 +62,7 @@ ON CONFLICT (hash) DO NOTHING`, hash, slot); err != nil {
 			previous = "0"
 		}
 		_, err := db.Exec(`
-INSERT INTO reward_withdrawal (transaction_id, account_id, slot, amount, previous_reward)
+INSERT INTO reward_withdrawal (tx_id, account_id, slot, amount, previous_reward)
 VALUES (?, ?, ?, ?, ?)`, txID, accountID, slot, amount, previous)
 		return err
 	}
