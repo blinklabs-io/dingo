@@ -1795,8 +1795,13 @@ local restore is accepted on Unix only when the snapshot directory and its fixed
 files are owned by the current user or root, are not group- or other-writable,
 and every lexical and symlink-resolved directory ancestor, and every symlink in
 the path, is owned by the current user or root, with the sticky bit required on
-any ancestor writable by group or other. Windows local restores require the
-trust key. A restore reads the manifest first and, under a trust key, refuses
+any ancestor writable by group or other. The error names the refused ancestor;
+set its sticky bit (`chmod +t`) or remove its group and other write access.
+Group membership is not trusted: setgid does not stop another member of the
+group from renaming entries. A Kubernetes `fsGroup` volume root is group-writable
+and setgid, so the deployer or operator must set the sticky bit on it. The
+kubelet's `fsGroup` permission change keeps a sticky bit that is already set.
+Windows local restores require the trust key. A restore reads the manifest first and, under a trust key, refuses
 one whose tag is missing or wrong (`ErrManifestUnauthenticated`) or that
 declares no digests. `FormatVersion` 2 adds `id`, the snapshot ID (the snapshot
 directory name or cloud prefix segment), inside the authenticated bytes. Under a

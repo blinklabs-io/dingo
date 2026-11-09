@@ -270,6 +270,7 @@ func TestSnapshotAncestorRejectsSharedGroupDirectory(t *testing.T) {
 			require.ErrorContains(
 				t, err, "writable by group or other without the sticky bit",
 			)
+			require.ErrorContains(t, err, "set the sticky bit on it (chmod +t)")
 		})
 	}
 }

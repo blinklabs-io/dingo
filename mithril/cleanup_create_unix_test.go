@@ -153,4 +153,5 @@ func TestBootstrapParentRejectsSharedGroupDirectory(t *testing.T) {
 	require.ErrorContains(
 		t, err, `bootstrap parent ancestor "/shared" is writable`,
 	)
+	require.ErrorContains(t, err, "set the sticky bit on it (chmod +t)")
 }

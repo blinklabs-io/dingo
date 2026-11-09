@@ -12975,8 +12975,11 @@ completion.
 Temporary feed, extraction, and probe directories are created privately before
 their names are exposed. On Unix, each real directory in the absolute ancestor
 chain must be owned by the current user or root and may be group- or
-other-writable only when a trusted owner also set the sticky bit. On Windows,
-creation installs a protected inheritable ACL and retains no-delete handles on
+other-writable only when a trusted owner also set the sticky bit. The refusal
+names the ancestor and asks for the sticky bit (`chmod +t`) or the removal of
+its group and other write access. A Kubernetes `fsGroup` volume root is
+group-writable and setgid, which does not stop another group member from
+renaming entries, so it needs the sticky bit too. On Windows, creation installs a protected inheritable ACL and retains no-delete handles on
 the created directory and every ancestor until cleanup or publication. The
 identity returned by native creation must match the directory opened for later
 work.
