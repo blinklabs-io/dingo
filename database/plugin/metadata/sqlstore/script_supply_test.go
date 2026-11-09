@@ -267,3 +267,27 @@ func TestScriptLockedSupplyDirectUtxoPrimitives(t *testing.T) {
 	)
 	check("DeleteUtxos live and spent", 800)
 }
+
+// DeleteUtxos reads the rows it removes once, for the supply debit and for the
+// stake credentials it refreshes, so a live row's stake must still leave.
+func TestDeleteUtxosRefreshesStakeOfDeletedLiveRow(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	key := lcommon.NewBlake2b224([]byte("delete-utxos-stake")).Bytes()
+	for id, amount := range map[byte]uint64{1: 100, 2: 200} {
+		utxo := scriptModel(id, 10, amount, false)
+		utxo.StakingKey = key
+		require.NoError(t, store.CreateUtxo(nil, utxo))
+	}
+	require.NoError(t, store.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{Slot: 30, Hash: hash32(0xEE)}, BlockNumber: 3,
+	}, nil))
+	require.NoError(t, store.DeleteUtxos(
+		[]models.UtxoId{{Hash: hash32(1), Idx: 0}},
+		nil,
+	))
+	utxoStake, _, _, _ := readRewardLiveStake(
+		t, store, models.NewStakeCredentialRef(0, key),
+	)
+	require.EqualValues(t, 200, utxoStake)
+}

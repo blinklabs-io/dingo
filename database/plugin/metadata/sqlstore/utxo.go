@@ -161,14 +161,10 @@ func (s *Store) DeleteUtxos(
 			if err != nil {
 				return err
 			}
-			refs, err := queryUtxoStakeRefs(ctx, db, utxoIDs, true)
-			if err != nil {
-				return err
-			}
 			// Deleting a row that is still live takes its lovelace out of
 			// the script-locked total. The prune and batch-elision callers
 			// only name spent rows, for which this reads zero.
-			_, _, liveScript, err := queryUtxoDeletionRows(
+			_, refs, liveScript, err := queryUtxoDeletionRows(
 				ctx, db, utxoIDs, false,
 			)
 			if err != nil {
