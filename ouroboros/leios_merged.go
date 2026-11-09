@@ -1079,7 +1079,7 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 }
 
 // ValidateLeiosEndorserBlockForHeader waits through the configured diffusion
-// window for the exact endorser block announced by header, then validates it
+// window for an unexpired endorser-block announcement, then validates it
 // synchronously while basis is still the applied ledger tip. The ledger's
 // apply boundary passes ledger.LeiosEndorserBlockBasisHash, once the
 // announcing block is the tip and before the block that may certify it
@@ -1087,6 +1087,8 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 // ledger.LeiosValidationParentHash (see
 // ledger.LedgerState.ValidateLeiosEndorserBlockTransactions). Endorser-block
 // bodies arrive independently on asynchronous Leios fetch workers.
+// Expired missing closures return unavailable without waiting; complete cached
+// closures still undergo semantic validation.
 func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	ctx context.Context,
 	header lcommon.BlockHeader,
@@ -1133,6 +1135,25 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		header.SlotNumber(),
 	); publish != nil {
 		publish()
+	}
+	// Settled announcements are not prefetched. Waiting for their missing
+	// bodies here would delay the certified fetch that follows this callback.
+	// Complete cached closures still take the full semantic-validation path.
+	start, timeErr := o.leiosAnnouncementLedger.SlotToTime(header.SlotNumber())
+	if timeErr == nil && !start.IsZero() &&
+		time.Since(start) > leiosNotifyMaxAnnouncementAge {
+		key := leiosBlockKey(header.SlotNumber(), ebHash.Bytes())
+		o.leiosMu.RLock()
+		complete := o.leiosClosureCompleteLocked(key)
+		o.leiosMu.RUnlock()
+		if !complete {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("wait for Leios endorser closure: %w", err)
+			}
+			return errors.New(
+				"leios endorser closure unavailable for expired announcement",
+			)
+		}
 	}
 	waitCtx := ctx
 	cancel := func() {}
