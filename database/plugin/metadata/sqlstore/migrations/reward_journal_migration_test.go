@@ -328,10 +328,24 @@ func TestRewardJournalMigrationResumesAfterInterruption(t *testing.T) {
 	referenceRun(registry)
 	want := rewardJournalDigest(t, reference)
 
+	counter, counterRun := migratedPrefixDB(t, rewardJournalVersion-1)
+	seedLegacyRewardJournal(t, counter)
+	counted := append([]migrations.Migration(nil), registry...)
+	counted[rewardJournalVersion-1].BatchSize = 3
+	countedBackfill := counted[rewardJournalVersion-1].Backfill
+	calls := 0
+	counted[rewardJournalVersion-1].Backfill = func(ctx context.Context, batch migrations.Batch) (migrations.BatchResult, error) {
+		calls++
+		return countedBackfill(ctx, batch)
+	}
+	counterRun(counted)
+	require.Equal(t, want, rewardJournalDigest(t, counter))
+	require.Greater(t, calls, 2)
+
 	errInterrupted := errors.New("interrupted")
-	// Crash after the nth batch commits, for every n: each restart resumes
-	// from the committed cursor and ends in the same state.
-	for crashAfter := 1; crashAfter <= 12; crashAfter++ {
+	// Crash after the nth batch commits, for every n before the last: each
+	// restart resumes from the committed cursor and ends in the same state.
+	for crashAfter := 1; crashAfter < calls; crashAfter++ {
 		t.Run(fmt.Sprintf("after batch %d", crashAfter), func(t *testing.T) {
 			t.Parallel()
 			db, runTo := migratedPrefixDB(t, rewardJournalVersion-1)
@@ -353,12 +367,9 @@ func TestRewardJournalMigrationResumesAfterInterruption(t *testing.T) {
 				DB: db, Dialect: "sqlite", Registry: interrupted,
 				Locker: migrations.NewProcessLocker(),
 			}
-			err := runner.Run(context.Background())
-			if err != nil {
-				require.ErrorIs(t, err, errInterrupted)
-				require.True(t, tableExists(t, db, "account_reward_delta"),
-					"the legacy table survives an interrupted backfill")
-			}
+			require.ErrorIs(t, runner.Run(context.Background()), errInterrupted)
+			require.True(t, tableExists(t, db, "account_reward_delta"),
+				"the legacy table survives an interrupted backfill")
 			resumed := append([]migrations.Migration(nil), registry...)
 			resumed[rewardJournalVersion-1].BatchSize = 3
 			runTo(resumed)

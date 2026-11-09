@@ -40,6 +40,13 @@ func requireSoleCreditPostSnapshot(
 	msg string,
 ) {
 	t.Helper()
+	var credits int
+	require.NoError(t, db.QueryRow(`
+SELECT COUNT(*) FROM reward_event_credit e
+JOIN account a ON a.id = e.account_id
+WHERE a.credential_tag = ? AND a.staking_key = ?`,
+		0, credential).Scan(&credits))
+	require.Equal(t, 1, credits, msg)
 	var postSnapshot bool
 	require.NoError(t, db.QueryRow(`
 SELECT e.post_snapshot FROM reward_event_credit e

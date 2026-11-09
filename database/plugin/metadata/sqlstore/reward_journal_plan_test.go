@@ -127,7 +127,7 @@ func TestRewardJournalPlansDoNotDependOnStatistics(t *testing.T) {
 					}
 					require.NotRegexp(
 						t,
-						`SCAN (c|w|e|reward_\w+)\b`,
+						`SCAN (c|w|e|s|reward_\w+)\b`,
 						plan,
 						"plan:\n%s",
 						plan,

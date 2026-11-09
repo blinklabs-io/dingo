@@ -268,7 +268,7 @@ INSERT INTO utxo (
 		{"9223372036854775807", true},
 		{"5", false},
 	} {
-		insertTestRewardRow(t, store.writeDB, testRewardRow{
+		insertTestRewardRow(t, newDialectExecer(store), testRewardRow{
 			key:        keyA,
 			hash:       bytes.Repeat([]byte{byte(i + 1)}, 32),
 			amount:     row.amount,

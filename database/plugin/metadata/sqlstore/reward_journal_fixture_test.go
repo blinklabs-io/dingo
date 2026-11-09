@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 
@@ -24,6 +25,27 @@ import (
 type rewardJournalExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 	QueryRow(query string, args ...any) *sql.Row
+}
+
+// dialectExecer runs fixture statements through the store's dialect
+// translation, so a fixture written in SQLite's spelling also seeds Postgres
+// and MySQL.
+type dialectExecer struct {
+	db queryer
+}
+
+func newDialectExecer(store *Store) dialectExecer {
+	return dialectExecer{
+		db: newDialectQueryer(store.writeDB, store.dialect.Name()),
+	}
+}
+
+func (e dialectExecer) Exec(query string, args ...any) (sql.Result, error) {
+	return e.db.ExecContext(context.Background(), query, args...)
+}
+
+func (e dialectExecer) QueryRow(query string, args ...any) *sql.Row {
+	return e.db.QueryRowContext(context.Background(), query, args...)
 }
 
 // testRewardRow is a journal row in the shape fixtures are written in; the
