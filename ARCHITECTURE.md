@@ -15121,7 +15121,14 @@ database reads in one transaction under the request context and a 15-second
 deadline (a disconnected client stops the scan; an overrun answers 503 with
 `Retry-After`), and the metadata store sums the holdings in SQL, reading at most
 `models.MaxAssetQuantityHoldings` (1,000,000) of them: an asset held by more
-answers 400 as exceeding the service limit. Pool and account list routes reject
+answers 400 as exceeding the service limit. `GET /metadata/txs/labels/{label}`
+and its `/cbor` form page over every transaction carrying a label, so they
+share a metadata label admission pool (4 active, 2 per client address, 429 with
+`Retry-After` when full) and run under the request context and a 15-second
+deadline (a disconnected client stops the page; an overrun answers 503 with
+`Retry-After`). The page reads the label's rows through the
+`(label, slot, transaction_id)` index, so its cost follows the page offset
+rather than the number of transactions with the label. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,

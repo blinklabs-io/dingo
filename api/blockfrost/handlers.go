@@ -1172,6 +1172,52 @@ func (b *Blockfrost) handleAddressTransactions(
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// metadataLabelTimeout bounds how long one metadata label page may run.
+const metadataLabelTimeout = 15 * time.Second
+
+// admitMetadataLabelPage reserves a slot in the metadata label pool for the
+// request's client. When it is full it writes the 429 response and reports
+// false.
+func (b *Blockfrost) admitMetadataLabelPage(
+	w http.ResponseWriter,
+	r *http.Request,
+) (func(), bool) {
+	release, ok := b.metadataLabelAdmission.acquire(
+		r.Context(),
+		requestClient(r),
+	)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			"Too Many Requests",
+			"metadata label capacity reached, try again later",
+		)
+		return nil, false
+	}
+	return release, true
+}
+
+// writeMetadataLabelDeadlineError answers a page that ran past its deadline
+// and reports whether it did.
+func writeMetadataLabelDeadlineError(
+	w http.ResponseWriter,
+	err error,
+) bool {
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	w.Header().Set("Retry-After", "1")
+	writeError(
+		w,
+		http.StatusServiceUnavailable,
+		"Service Unavailable",
+		"metadata label deadline exceeded, try again later",
+	)
+	return true
+}
+
 // handleMetadataTransactions handles
 // GET /api/v0/metadata/txs/labels/{label} and returns metadata values for the
 // requested label in JSON form.
@@ -1188,13 +1234,24 @@ func (b *Blockfrost) handleMetadataTransactions(
 		return
 	}
 
+	release, ok := b.admitMetadataLabelPage(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(r.Context(), metadataLabelTimeout)
+	defer cancel()
+
 	rows, total, err := b.node.MetadataTransactions(
-		r.Context(),
+		ctx,
 		label,
 		params,
 	)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
+			return
+		}
+		if writeMetadataLabelDeadlineError(w, err) {
 			return
 		}
 		b.logger.Error(
@@ -1235,13 +1292,24 @@ func (b *Blockfrost) handleMetadataTransactionsCBOR(
 		return
 	}
 
+	release, ok := b.admitMetadataLabelPage(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(r.Context(), metadataLabelTimeout)
+	defer cancel()
+
 	rows, total, err := b.node.MetadataTransactionsCBOR(
-		r.Context(),
+		ctx,
 		label,
 		params,
 	)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
+			return
+		}
+		if writeMetadataLabelDeadlineError(w, err) {
 			return
 		}
 		b.logger.Error(
