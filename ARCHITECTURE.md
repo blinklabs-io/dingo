@@ -6824,6 +6824,9 @@ for each requested pool and the corresponding totals. For protocol version 11
 and later, requested pools whose mark, set, and go stake are all zero are
 omitted; without a pool filter, the result contains the union of pools present
 in those snapshots and the corresponding totals.
+The snapshots are those of the ledger epoch label (`ledgerEpochLabelInCache`), so
+after an empty epoch, which no boundary captured, the reply stays at the label's
+mark/set/go as the reference ledger state does.
 
 **Acquiring a specific historical point.** A real
 NtC client can `Acquire` LocalStateQuery at a specific past point, not just

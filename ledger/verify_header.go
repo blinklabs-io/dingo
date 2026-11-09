@@ -2250,6 +2250,20 @@ func (ls *LedgerState) epochCacheSnapshot() []models.Epoch {
 	return snapshot.epochCache
 }
 
+// ledgerEpochLabelInCache returns the ledger epoch label in force at epoch,
+// reconstructed from the cache rows up to it. It is epoch itself when the cache
+// holds none.
+func ledgerEpochLabelInCache(epoch uint64, cache []models.Epoch) uint64 {
+	end := 0
+	for end < len(cache) && cache[end].EpochId <= epoch {
+		end++
+	}
+	if end == 0 {
+		return epoch
+	}
+	return ledgerEpochFromCache(cache[:end])
+}
+
 // leaderStakeSnapshotEpochInCache returns the mark snapshot epoch that elects
 // a block in epoch, given the epoch cache that describes the chain the block
 // extends. The ledger epoch label is reconstructed from the rows up to epoch,
