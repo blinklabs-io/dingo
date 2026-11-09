@@ -5768,6 +5768,38 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	newSyntheticV2CostModel := resolveSyntheticV2CostModel(
 		newSyntheticV2CostModelValue, newPParams,
 	)
+	// The checkpoint flag records that the current epoch already has its
+	// is_checkpoint block_nonce row. A rollback can leave it describing the
+	// abandoned epoch, so derive it from the rows that survived: the target's
+	// epoch keeps its checkpoint when that epoch's first block is at or before
+	// the target.
+	newCheckpointWritten := false
+	if len(newEpochs) > 0 {
+		nonceRows, nonceErr := ls.db.GetBlockNoncesInSlotRange(
+			newCurrentEpoch.StartSlot,
+			point.Slot+1,
+			nil,
+		)
+		if nonceErr != nil {
+			ls.config.Logger.Warn(
+				"failed to reload epoch checkpoint state after rollback",
+				"error", nonceErr,
+				"component", "ledger",
+			)
+			if postCommitReloadErr == nil {
+				postCommitReloadErr = fmt.Errorf(
+					"reload epoch checkpoint state after rollback: %w",
+					nonceErr,
+				)
+			}
+		}
+		for i := range nonceRows {
+			if nonceRows[i].IsCheckpoint {
+				newCheckpointWritten = true
+				break
+			}
+		}
+	}
 	newTipDensity := ls.chainFragmentDensity(
 		ctx,
 		newTip,
@@ -5820,6 +5852,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		ls.prevEraPParams = newPrevPParams
 	}
 	ls.syntheticV2CostModel = newSyntheticV2CostModel
+	ls.checkpointWrittenForEpoch = newCheckpointWritten
 	ls.lastLocalRollbackSeq++
 	ls.lastLocalRollbackPoint = ocommon.Point{
 		Slot: point.Slot,

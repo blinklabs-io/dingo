@@ -259,6 +259,7 @@ func (h *boundaryReplayHarness) applyBoundary() boundaryReplayEffects {
 	ls.currentEra = result.NewCurrentEra
 	ls.currentPParams = result.NewCurrentPParams
 	ls.ledgerEpoch = result.newLedgerEpoch
+	ls.checkpointWrittenForEpoch = result.CheckpointWrittenForEpoch
 	ls.Unlock()
 	return h.readEffects()
 }
@@ -375,7 +376,22 @@ func TestRollbackAcrossEpochBoundaryReplaysEpochEffects(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.Nil(t, pots, "the rollback must delete epoch E's pots")
+			staleMarks, err := h.ls.db.GetPoolStakeSnapshotsByEpoch(
+				replayBoundaryNewEpoch, models.PoolStakeSnapshotTypeMark, nil,
+			)
+			require.NoError(t, err)
+			require.Empty(t, staleMarks,
+				"the rollback must delete epoch E's mark snapshot rows")
+			staleSummary, err := h.ls.db.Metadata().GetEpochSummary(
+				replayBoundaryNewEpoch, nil,
+			)
+			require.NoError(t, err)
+			require.Nil(t, staleSummary,
+				"the rollback must delete epoch E's summary")
 			require.Equal(t, replayBoundaryEndedEra, h.ls.currentEpoch.EpochId)
+			require.True(t, h.ls.checkpointWrittenForEpoch,
+				"the rollback target's epoch already has its checkpoint row, "+
+					"so replay must not write a second one")
 			rewoundPParams, err := cbor.Encode(h.ls.currentPParams)
 			require.NoError(t, err)
 			require.Equal(t, preBoundaryPParams, rewoundPParams,

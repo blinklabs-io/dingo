@@ -353,6 +353,15 @@ func (d *Database) rollbackAfterSlot(
 			err,
 		)
 	}
+	// Pool stake snapshots and epoch summaries are keyed by epoch number, not
+	// slot, so DeleteEpochsAfterSlot does not reach them. Drop those of every
+	// epoch the rollback rewound past: a restored ledger snapshot has no
+	// distribution for an epoch whose boundary it never crossed, and a
+	// competing fork that does not reach that epoch must not leave one behind
+	// for leader-schedule, stake-distribution or epoch API reads.
+	if err := d.deleteEpochKeyedStateAfterRemainingEpochs(txn); err != nil {
+		return ochainsync.Tip{}, nil, err
+	}
 	// Delete reward-state rows captured at epoch boundaries that no
 	// longer exist on the selected chain.
 	if err := d.DeleteRewardStateAfterSlot(
@@ -566,4 +575,43 @@ func (d *Database) rollbackAfterSlot(
 		committedInternally = true
 	}
 	return newTip, newNonce, nil
+}
+
+// deleteEpochKeyedStateAfterRemainingEpochs deletes the pool stake snapshot
+// and epoch summary rows of every epoch above the newest epoch row that
+// survived DeleteEpochsAfterSlot. It must run after that deletion.
+func (d *Database) deleteEpochKeyedStateAfterRemainingEpochs(
+	txn *Txn,
+) error {
+	epochs, err := d.GetEpochs(txn)
+	if err != nil {
+		return fmt.Errorf("read epochs after rollback: %w", err)
+	}
+	if len(epochs) == 0 {
+		return nil
+	}
+	lastEpoch := epochs[0].EpochId
+	for _, epoch := range epochs[1:] {
+		lastEpoch = max(lastEpoch, epoch.EpochId)
+	}
+	store := d.stakeSnapshotStore()
+	if err := store.DeletePoolStakeSnapshotsAfterEpoch(
+		lastEpoch,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"delete pool stake snapshots after rollback: %w",
+			err,
+		)
+	}
+	if err := store.DeleteEpochSummariesAfterEpoch(
+		lastEpoch,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"delete epoch summaries after rollback: %w",
+			err,
+		)
+	}
+	return nil
 }
