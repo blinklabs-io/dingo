@@ -9098,8 +9098,50 @@ func (ls *LedgerState) processBlocksFromSource(
 			currentReadResultDone = nil
 		}
 	}
+	var midEpochEra *midEpochEraDecision
 	for {
-		if needsEpochRollover {
+		if midEpochEra != nil {
+			decision := midEpochEra
+			midEpochEra = nil
+			needsEpochRollover = false
+			if len(cachedNextBatch) == 0 {
+				completeReadResult()
+				return errors.New("mid-epoch era decision has no block")
+			}
+			block := cachedNextBatch[0]
+			var eraErr error
+			if decision.body != decision.required {
+				eraErr = midEpochEraRefusal(block, decision)
+			} else {
+				eraErr = ls.applyMidEpochEraSwitch(ctx, block, decision.required)
+			}
+			if eraErr != nil {
+				if !errors.Is(eraErr, errBoundaryEraNotAuthorized) {
+					completeReadResult()
+					return eraErr
+				}
+				// The block is already on the primary chain, so a plain
+				// restart would re-read it: rewind past it as rejected.
+				rejected := &headerValidationError{
+					BlockPoint: ocommon.Point{
+						Slot: block.SlotNumber(),
+						Hash: block.Hash().Bytes(),
+					},
+					Cause: eraErr,
+				}
+				recovered, recoverErr := ls.tryRecoverFromHeaderValidationError( //nolint:contextcheck
+					rejected,
+				)
+				completeReadResult()
+				if recoverErr != nil {
+					return fmt.Errorf("refuse mid-epoch block: %w", recoverErr)
+				}
+				if recovered {
+					return ls.restartAfterRecovery(rejected)
+				}
+				return fmt.Errorf("refuse mid-epoch block: %w", rejected)
+			}
+		} else if needsEpochRollover {
 			needsEpochRollover = false
 			boundaryAllowsTwoEraTransition := allowTwoEraBoundaryTransition
 			allowTwoEraBoundaryTransition = false
@@ -9918,6 +9960,9 @@ func (ls *LedgerState) processBlocksFromSource(
 				!opts.trusted
 			snapshotChainsyncState := applySnapshot.chainsyncState
 			snapshotMithrilSlot := applySnapshot.mithrilSlot
+			midEpochGate := ls.newMidEpochEraGate(
+				snapshotEra, snapshotEpoch, snapshotPParams,
+			)
 
 			stabilityWindow = ls.calculateStabilityWindowForEra(snapshotEra.Id)
 			referenceSlot = applySnapshot.chainTipSlot
@@ -10213,6 +10258,31 @@ func (ls *LedgerState) processBlocksFromSource(
 						)
 						if reachedTipRegion {
 							wantEnableValidation = true
+						}
+						if midEpochGate != nil && shouldValidateBlock {
+							prevTip := snapshotTip
+							if len(pendingTip.Point.Hash) > 0 {
+								prevTip = pendingTip
+							}
+							required, err := midEpochGate.requiredEra(
+								ctx, ls, txn, prevTip,
+							)
+							if err != nil {
+								deltaBatch.Release()
+								return err
+							}
+							bodyEra := uint(next.Era().Id)
+							if required != snapshotEra.Id ||
+								bodyEra != snapshotEra.Id {
+								midEpochEra = &midEpochEraDecision{
+									required: required,
+									body:     bodyEra,
+								}
+								needsEpochRollover = true
+								cachedNextBatch = nextBatch[i+offset:]
+								nextBatch = nil
+								break
+							}
 						}
 						// A certified closure applies inside ledgerProcessBlock,
 						// before its ranking-block delta. Earlier ranking effects
