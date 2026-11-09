@@ -596,8 +596,8 @@ func (d *Database) SetGapBlockTransaction(
 		)
 	}
 	// ensureGapConsumedUtxos must run after SetGapBlockTransaction: it marks
-	// the consumed inputs spent by this tx (utxo.spent_at_tx_id is a FK to
-	// transaction.hash), so the transaction row has to exist first.
+	// the consumed inputs spent by this tx (utxo.spent_by_tx_id holds
+	// transaction.id), so the transaction row has to exist first.
 	if err := d.ensureGapConsumedUtxos(
 		tx,
 		point,

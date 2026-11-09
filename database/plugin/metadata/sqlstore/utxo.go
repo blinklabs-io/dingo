@@ -1218,9 +1218,9 @@ func producedStakeCredentialDelta(
 // utxoStakeConsumedDeltaQuery is queryUtxoStakeConsumedDeltas' batched
 // lookup, built the same way utxoStakeRefsByTxIDQuery is: driven by distinct
 // tx_id values with the (tx_id, output_idx) pair filtered in Go, so SQLite's
-// planner stays on the unique output index (idx_utxo_producer_output on SQLite) instead of falling back
-// to a full idx_utxo_staking_deleted_amount scan once the batch has more than
-// a handful of terms.
+// planner stays on the unique output index (idx_utxo_producer_output on
+// SQLite) instead of falling back to a full idx_utxo_staking_deleted_amount
+// scan once the batch has more than a handful of terms.
 func utxoStakeConsumedDeltaSharedQuery(n int) string {
 	return "-- name: GetUtxoStakeConsumedDeltaBatch :many\n" +
 		"SELECT tx_id, output_idx, credential_tag, staking_key, amount " +
@@ -1385,8 +1385,8 @@ func distinctUtxoTxIDs(
 //
 // Filtering by tx_id alone -- rather than an OR of per-(tx_id, output_idx)
 // equalities, see utxoIDPredicate -- keeps SQLite's planner on the leading
-// column of the unique output index (idx_utxo_producer_output on SQLite) no matter how many terms are
-// in the batch. The OR-of-pairs form defeats that index past a handful of
+// column of the unique output index (idx_utxo_producer_output on SQLite) no
+// matter how many terms are in the batch. The OR-of-pairs form defeats that index past a handful of
 // terms and falls back to a full scan of idx_utxo_deleted_staking_amount
 // once liveOnly's "deleted_slot = 0" looks like a cheaper driving predicate --
 // measured on an 11M-row live UTxO table which starves block
@@ -2548,8 +2548,8 @@ ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir 
 // GetUtxosWithHistory returns the retained lifecycle of matching outputs,
 // rather than limiting the query to the live UTxO set. The transaction joins
 // are deliberately separate: transaction_id or collateral_return_for_tx_id
-// identifies the producing row, while spent_at_tx_id stores the consuming
-// transaction hash.
+// identifies the producing row, while spent_by_tx_id stores the consuming
+// transaction's row id.
 func (s *Store) GetUtxosWithHistory(
 	query *models.UtxoHistoryQuery,
 	txn types.Txn,
