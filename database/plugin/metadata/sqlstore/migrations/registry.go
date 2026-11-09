@@ -96,6 +96,7 @@ const (
 	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
 	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
 	blockNonceSlotIndexSchemaRelease                    = "block-nonce-slot-leading-index"
+	rewardOutputIndexReshapeSchemaRelease               = "reward-account-output-index-reshape"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -272,6 +273,7 @@ var schemaVersions = []struct {
 	},
 	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
 	{Version: 56, Name: blockNonceSlotIndexSchemaRelease, Dir: "v56"},
+	{Version: 57, Name: rewardOutputIndexReshapeSchemaRelease, Dir: "v57"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
