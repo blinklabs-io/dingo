@@ -22,6 +22,12 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+// maxHeldMessages bounds the messages one connection keeps back. Past it the
+// connection stops reading ahead in the pool, so a large backlog from one pool
+// stays in the pool, which already bounds it, instead of being copied per
+// connection.
+const maxHeldMessages = 256
+
 // DefaultMinPoolMessageInterval is dmq-node's minimum delay between two
 // messages signed by the same pool (minSigDelay in DMQ/Policy.hs). CIP-0137
 // does not state it.
@@ -68,11 +74,14 @@ func (p *poolPacer) admitLocked(pool lcommon.Blake2b224, now time.Time) bool {
 }
 
 // releaseHeld returns up to limit held messages whose pool's interval has
-// passed, in arrival order. Entries for pools whose interval has passed are forgotten,
-// since an absent pool is treated the same.
+// passed, in arrival order. A held message for which usable is false is
+// dropped without counting as an announcement, so an expired or already known
+// one does not delay a later message of its pool. Entries for pools whose
+// interval has passed are forgotten, since an absent pool is treated the same.
 func (p *poolPacer) releaseHeld(
 	now time.Time,
 	limit int,
+	usable func(ocommon.DmqMessage) bool,
 ) []ocommon.DmqMessage {
 	if p == nil {
 		return nil
@@ -87,6 +96,9 @@ func (p *poolPacer) releaseHeld(
 	var out []ocommon.DmqMessage
 	kept := p.held[:0]
 	for _, h := range p.held {
+		if !usable(h.msg) {
+			continue
+		}
 		if len(out) < limit && p.admitLocked(h.pool, now) {
 			out = append(out, h.msg)
 			continue
@@ -112,6 +124,16 @@ func (p *poolPacer) admit(msg ocommon.DmqMessage, now time.Time) bool {
 	}
 	p.held = append(p.held, pacedMessage{pool: pool, msg: msg})
 	return false
+}
+
+// full reports whether the pacer holds as many messages as it may.
+func (p *poolPacer) full() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.held) >= maxHeldMessages
 }
 
 // nextRelease reports how long until a held message can be announced. It

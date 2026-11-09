@@ -108,17 +108,18 @@ func (p *PeerConn) nextMessageIDs(limit int) []ocommon.MessageIDAndSize {
 			SizeInBytes: uint32(len(raw)),
 		})
 	}
-	for _, msg := range p.pace.releaseHeld(now, limit) {
-		if msg.IsValidAt(now) && !p.known.has(msg.ID()) {
-			announce(msg)
-		}
+	usable := func(msg ocommon.DmqMessage) bool {
+		return msg.IsValidAt(now) && !p.known.has(msg.ID())
 	}
-	for len(ids) < limit {
+	for _, msg := range p.pace.releaseHeld(now, limit, usable) {
+		announce(msg)
+	}
+	for len(ids) < limit && !p.pace.full() {
 		msg, ok := p.stack.pool.NextForPeer(p.cursorKey)
 		if !ok {
 			break
 		}
-		if !msg.IsValidAt(now) || p.known.has(msg.ID()) {
+		if !usable(msg) {
 			continue
 		}
 		if !p.pace.admit(msg, now) {

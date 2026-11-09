@@ -10873,7 +10873,10 @@ whole connection when a pool's message reaches it sooner than its minimum
 signature delay after that pool's previous one (`SigTooFrequent`), and redialing
 offers the same message again. The pacer records when each pool's message was
 announced, keeps a later one from the same pool, and announces it once the
-interval has passed; other pools' messages are announced past it. A blocking
+interval has passed; other pools' messages are announced past it. A held
+message that expires, or that the peer announced meanwhile, is dropped without
+using up its pool's interval, and at most 256 messages are held per connection:
+past that the connection stops reading ahead in the pool. A blocking
 request that has only held messages to answer waits for the first to fall due as
 well as for `AddedSignal`. The spacing is per connection and applies on
 announcement only, so admission, and the local notification feed, are

@@ -16,6 +16,7 @@ package dmq
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 	"time"
 
@@ -204,4 +205,41 @@ func TestPeerAnnouncesAHeldMessageOnABlockingRequestWhenItFallsDue(t *testing.T)
 		return b.pool.Len() == 2
 	})
 	require.False(t, closed(pb.Done()))
+}
+
+// An expired held message is dropped without spending its pool's interval.
+func TestPeerDropsAnExpiredHeldMessageWithoutDelayingItsPool(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	p, s := newPacedPeer(t, time.Minute, &now)
+	// #nosec G115 -- test fixture timestamp
+	soon := uint32(now.Add(90 * time.Second).Unix())
+	first := poolMessage(t, "a1", 1)
+	short := newTestMessage([]byte("a2"), soon)
+	short.ColdVerificationKey = bytes.Repeat([]byte{1}, 32)
+	last := poolMessage(t, "a3", 1)
+	for _, m := range []ocommon.DmqMessage{first, short, last} {
+		_, err := s.pool.Add(m)
+		require.NoError(t, err)
+	}
+	require.Equal(t, []string{"a1"}, announcedBodies(t, s, p.nextMessageIDs(10)))
+
+	// a2 expires while held. Dropping it must not spend the pool's interval,
+	// or a3 would wait another minute.
+	now = now.Add(95 * time.Second)
+	require.Equal(t, []string{"a3"}, announcedBodies(t, s, p.nextMessageIDs(10)))
+}
+
+// One pool's backlog is not copied into a connection without bound.
+func TestPeerStopsReadingAheadWhenTooManyMessagesAreHeld(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	p, s := newPacedPeer(t, time.Minute, &now)
+	for i := range maxHeldMessages + 50 {
+		_, err := s.pool.Add(poolMessage(t, fmt.Sprintf("a%d", i), 1))
+		require.NoError(t, err)
+	}
+	require.Len(t, p.nextMessageIDs(10), 1)
+	require.True(t, p.pace.full())
+	require.Len(t, p.pace.held, maxHeldMessages)
 }
