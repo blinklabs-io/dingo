@@ -301,7 +301,9 @@ The migration builds `transaction_identity`, `applied_transaction`,
 order in batches with integer joins (the producer of an imported output and the
 spender hash of a spent one get identity rows first; an edge naming a hash with
 no transaction row is dropped; a row whose `transaction_id` and `tx_id` hash
-disagree keeps the linked producer and is logged), checks the row counts,
+disagree keeps the linked producer and is logged), copies the input edges a
+fixed number per batch, so an output named by many transactions cannot make a
+batch unbounded, checks the row counts,
 swaps the new tables in for the old ones in one transaction and builds the
 secondary indexes before it completes. It is resumable from its cursor at every
 batch. PostgreSQL and MySQL keep `transaction` in place and drop its columns
