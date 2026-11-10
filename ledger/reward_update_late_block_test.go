@@ -101,34 +101,29 @@ func applyLateBlockRewardRound(
 	return uint64(owner.Reward), uint64(owner2.Reward), len(outputs), len(late)
 }
 
-// TestRewardUpdateAppliesWithBlockAfterStabilityWindow is the control: the
-// reference applies the reward update when a block lands after
-// epochStart + 4k/f in the ended epoch. It asserts the late block is present
-// in the fixture, but the reward round applies with or without it today, so
-// it only guards against a late-block gate that rejects the present-block case.
-func TestRewardUpdateAppliesWithBlockAfterStabilityWindow(t *testing.T) {
-	t.Parallel()
-	const endedEpochStart = uint64(200)
-	before, after, outputs, lateBlocks := applyLateBlockRewardRound(
-		t, []uint64{endedEpochStart + lateBlockRewardWindow + 10},
-	)
-	require.Equal(t, 1, lateBlocks, "fixture must hold a late-window block")
-	assert.Greater(t, after, before, "owner must be credited")
-	assert.Equal(t, 1, outputs)
-}
-
 // TestRewardUpdateRequiresLateEpochBlock pins the reference rule (RUPD runs
-// only once a block is ticked past epochStart + 4k/f): when no block was
-// applied in the late window of the ended epoch, no reward update applies,
-// whether the epoch had no blocks at all or only early ones.
+// only once a block is ticked past epochStart + 4k/f): the reward update
+// applies when a block landed in the late window of the ended epoch and does
+// not apply when the epoch had no blocks or only early ones. The applying
+// case is the control for the other two, so the cases only mean something
+// together; the test is skipped until the reward update is gated on a
+// late-window block, because the round applies in every case today.
 func TestRewardUpdateRequiresLateEpochBlock(t *testing.T) {
 	t.Parallel()
-	t.Skip("known divergence from the reference ledger, see https://github.com/blinklabs-io/dingo/issues/6244")
+	t.Skip("reward update is not yet gated on a late-window block")
 	const endedEpochStart = uint64(200)
 	tests := []struct {
 		name       string
 		blockSlots []uint64
+		wantLate   int
+		wantReward bool
 	}{
+		{
+			name:       "block after the stability window",
+			blockSlots: []uint64{endedEpochStart + lateBlockRewardWindow + 10},
+			wantLate:   1,
+			wantReward: true,
+		},
 		{name: "no blocks in the ended epoch"},
 		{
 			name:       "only blocks before the stability window",
@@ -141,7 +136,12 @@ func TestRewardUpdateRequiresLateEpochBlock(t *testing.T) {
 			before, after, outputs, lateBlocks := applyLateBlockRewardRound(
 				t, tt.blockSlots,
 			)
-			require.Zero(t, lateBlocks, "fixture must hold no late-window block")
+			require.Equal(t, tt.wantLate, lateBlocks, "late-window fixture blocks")
+			if tt.wantReward {
+				assert.Greater(t, after, before, "owner must be credited")
+				assert.Equal(t, 1, outputs)
+				return
+			}
 			assert.Equal(t, before, after,
 				"no reward may be credited without a late-window block")
 			assert.Zero(t, outputs,
