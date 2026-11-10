@@ -347,6 +347,10 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name:   "serve mode accepts the disabled private listener",
+			modify: func(c *Config) { c.PrivatePort = 0 },
+		},
+		{
 			name:    "serve mode still requires listener ports",
 			modify:  func(c *Config) { c.RelayPort = 0 },
 			wantErr: "port (relay/NtN) must be set",

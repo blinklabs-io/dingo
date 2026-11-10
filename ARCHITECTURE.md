@@ -17670,6 +17670,11 @@ two already-running, already-synced NtC listeners. `watch`'s `--mode`
 defaults to `incremental`; pass `--mode full` explicitly for the
 whole-ledger-state comparison instead.
 
+Dingo's TCP node-to-client listener is disabled by default. The
+`--dingo-addr localhost:3002` examples below need `privatePort: 3002` (or
+`CARDANO_PRIVATE_PORT=3002`); otherwise pass the path of `dingo.socket` as
+`--dingo-addr`.
+
 ```shell
 # One-shot: run a single comparison cycle and exit non-zero on divergence
 # or a discarded cycle.
@@ -17936,9 +17941,9 @@ LocalStateQuery requests have a bounded process-wide footprint.
 Disabling the mux segment-read timeout is unsafe to grant unconditionally,
 though: `internal/node/node.go` builds two separate `UseNtC` listeners from
 ordinary operator config -- a Unix socket (`cfg.SocketPath`) and a TCP listener
-(`cfg.PrivateBindAddr:cfg.PrivatePort`, defaulting to `127.0.0.1:3002` but not
-code-enforced to stay there) -- and there is no authentication or identity check
-between `accept()` and these options being applied; `connmanager` only enforces
+(`cfg.PrivateBindAddr:cfg.PrivatePort`, disabled by default with `PrivatePort`
+0 and bound to `127.0.0.1` when enabled, but not code-enforced to stay there)
+-- and there is no authentication or identity check between `accept()` and these options being applied; `connmanager` only enforces
 a connection-count limit (`MaxNtCConns`/`MaxNtCConnectionsPerIP`), not who is
 connecting. Disabling the mux segment-read timeout for *any* client that
 completes an NtC handshake -- not just a trusted local tool -- would widen the
@@ -19534,7 +19539,8 @@ pprof listener therefore requires an explicit override of the dedicated setting;
 both serving modes and Mithril snapshot sync use the same resolved address. Port
 checks apply only to the listeners a given invocation actually starts, derived
 from the *effective* run mode plus the storage mode: the serving modes start the
-relay, private, metrics, debug, and bark listeners (and, under `api` storage or
+relay, metrics, debug, and bark listeners, plus the private TCP listener only
+when `privatePort` is non-zero (and, under `api` storage or
 a configured `dev` run mode — which forces `api` storage — the
 UTxORPC/Blockfrost/Mesh listeners and an explicitly enabled Midnight listener);
 the Mithril snapshot sync (`dingo sync --mithril` or `dingo mithril sync`)
@@ -19545,8 +19551,9 @@ create` and `load` start none. A port configured for an inactive listener cannot
 bind, so it is neither range-checked nor counted toward a collision; two active
 listeners are only reported as colliding when their bind addresses overlap
 (equal, or either side a wildcard) — listeners on distinct specific addresses
-may share a port. The relay, private, and metrics ports must additionally be set
-in the serving modes. Because the one-shot subcommands run a fixed operation
+may share a port. The relay and metrics ports must additionally be set in the
+serving modes; `privatePort` is optional, and 0 leaves only the Unix socket.
+Because the one-shot subcommands run a fixed operation
 regardless of the configured `runMode` (which defaults to `serve`), `cmd/dingo`
 passes `Validate()` the effective run mode derived from the invoked command, so
 listener and ImmutableDB-source requirements match what the command actually

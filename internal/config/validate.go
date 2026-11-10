@@ -379,7 +379,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// cannot bind and so cannot conflict. The active set is derived from
 	// the effective run mode plus the storage mode, mirroring the gating in
 	// (*dingo.Node).Start and cmd/dingo's node.Run/mithril paths:
-	//   - relay, private: serving modes only (required there);
+	//   - relay: serving modes only (required there);
+	//   - private: serving modes only (optional: port 0 disables the TCP
+	//     node-to-client listener);
 	//   - metrics, debug: serving modes and the Mithril sync operation
 	//     (RunModeSync); the read-only Mithril subcommands start neither;
 	//   - health: serving modes and the Mithril sync operation
@@ -457,7 +459,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 	ports := slices.Concat([]portSpec{
 		{"port (relay/NtN)", c.BindAddr, c.RelayPort, serving, serving},
-		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
+		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, false},
 		{
 			"metricsPort",
 			c.MetricsBindAddr,
