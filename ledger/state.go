@@ -1074,7 +1074,7 @@ type LedgerStateConfig struct {
 	// block that block has already been certified, so the certify-by deadline
 	// is the bound for when it is actually available to fetch) rather than a
 	// hardcoded duration; the ledger converts it to wall-clock using the
-	// Shelley slot length. Zero disables best-effort announcement waiting, but
+	// Shelley slot length. Zero disables the near-head diffusion wait, but
 	// does not permit a certifying ranking block to commit without its
 	// certified closure.
 	EndorserBlockWaitSlots uint64
@@ -1797,6 +1797,10 @@ type LedgerState struct {
 	// headerVerificationEpochWithCache, before the snapshot is re-read, so a
 	// test can publish a new snapshot mid-lookup.
 	headerVerificationEpochLookupHook func()
+	// peerForkOpCertCheckedHook is a test seam, nil in production. It runs
+	// after a candidate's opcert counters are checked and before they are
+	// committed, so a test can publish a snapshot mid-check.
+	peerForkOpCertCheckedHook func()
 	// blockfetchContinuationPending prevents a chainsync handler from starting
 	// a competing batch in the short interval after the blockfetch subscriber
 	// schedules its next request on a worker. The worker must run outside the
@@ -2684,16 +2688,30 @@ func sameHeaderVerificationContext(a, b *consensusSnapshot) bool {
 	return reflect.DeepEqual(a.epochCache, b.epochCache)
 }
 
-// sameProtocolParameters compares parameter sets by identity. Writers install
-// a new value when parameters change; a replacement with equal content is
-// treated as a change, which only costs a re-verification.
+// sameProtocolParameters reports whether two parameter sets have the same
+// content. Rollbacks and epoch reloads rebuild parameters from the database as
+// a new pointer with identical values, so identity alone would invalidate every
+// header verdict after each local rollback. Header verification depends only on
+// parameter values, so value equality is the correct test. The same pointer
+// short-circuits the comparison; types that cannot be compared (for example
+// holding a func) compare unequal, which only costs a re-verification.
 func sameProtocolParameters(a, b lcommon.ProtocolParameters) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
 	av, bv := reflect.ValueOf(a), reflect.ValueOf(b)
-	return av.Type() == bv.Type() && av.Kind() == reflect.Pointer &&
-		av.Pointer() == bv.Pointer()
+	if av.Type() != bv.Type() {
+		return false
+	}
+	if av.Kind() == reflect.Pointer {
+		if av.IsNil() || bv.IsNil() {
+			return av.IsNil() && bv.IsNil()
+		}
+		if av.Pointer() == bv.Pointer() {
+			return true
+		}
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // snapshotPublishedChan returns a channel closed by the next snapshot

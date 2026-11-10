@@ -120,6 +120,12 @@ type StackConfig struct {
 	// enforces when it decodes a message.
 	MessageBodyMin int
 	MessageBodyMax int
+	// MinPoolMessageInterval is the shortest time between two messages of
+	// one pool that this stack announces to a peer. A message that arrives
+	// sooner is held until it has passed, because dmq-node ends the
+	// connection on one. Zero uses DefaultMinPoolMessageInterval; a negative
+	// value announces without spacing.
+	MinPoolMessageInterval time.Duration
 	// Topic names the stack's topic. When set, every metric the stack
 	// registers carries it as a topic label, so the stacks of several topics
 	// can share one registry.
@@ -505,6 +511,14 @@ func (s *Stack) addToPool(msg *ocommon.DmqMessage) ocommon.RejectReason {
 		return ocommon.AlreadyReceivedReason{}
 	}
 	return nil
+}
+
+// minPoolInterval resolves StackConfig.MinPoolMessageInterval.
+func (s *Stack) minPoolInterval() time.Duration {
+	if s.cfg.MinPoolMessageInterval == 0 {
+		return DefaultMinPoolMessageInterval
+	}
+	return s.cfg.MinPoolMessageInterval
 }
 
 func reasonLabel(reason ocommon.RejectReason) string {

@@ -672,6 +672,11 @@ type DMQConfig struct {
 	// MessageTTL is the longest expiry, in seconds, a submitted message may
 	// claim.
 	MessageTTL uint `yaml:"messageTtl"   envconfig:"DINGO_DMQ_MESSAGE_TTL"`
+	// MinPoolMessageInterval is the shortest time, in seconds, between two
+	// messages of one pool that are announced to a peer. dmq-node ends the
+	// connection when a pool's messages come closer together than its own
+	// setting, which defaults to 60 seconds. Zero announces without spacing.
+	MinPoolMessageInterval uint `yaml:"minPoolMessageInterval" envconfig:"DINGO_DMQ_MIN_POOL_MESSAGE_INTERVAL"`
 	// MaxMempoolSize bounds the message pool, in megabytes.
 	MaxMempoolSize uint `yaml:"maxMempoolSize" envconfig:"DINGO_DMQ_MAX_MEMPOOL_SIZE"`
 	// N2NPort is the TCP port peers connect to. It is independent of the
@@ -713,14 +718,15 @@ func (c *DMQConfig) UnmarshalYAML(node *yaml.Node) error {
 // DefaultDMQConfig returns the default DMQ settings.
 func DefaultDMQConfig() DMQConfig {
 	return DMQConfig{
-		Topic:             "mithril",
-		SocketPath:        "dingo-dmq.socket",
-		MessageTTL:        1800,
-		MaxMempoolSize:    128,
-		ListenAddress:     "0.0.0.0",
-		ListenIPv6Address: "::",
-		MinPeers:          3,
-		MaxPeers:          10,
+		Topic:                  "mithril",
+		SocketPath:             "dingo-dmq.socket",
+		MessageTTL:             1800,
+		MinPoolMessageInterval: 60,
+		MaxMempoolSize:         128,
+		ListenAddress:          "0.0.0.0",
+		ListenIPv6Address:      "::",
+		MinPeers:               3,
+		MaxPeers:               10,
 	}
 }
 
@@ -955,6 +961,9 @@ type Config struct {
 	MaxNtCConns              int           `yaml:"maxNtCConns"              envconfig:"DINGO_MAX_NTC_CONNS"`
 	MaxNtCConnectionsPerIP   int           `yaml:"maxNtCConnectionsPerIP"   envconfig:"DINGO_MAX_NTC_CONNECTIONS_PER_IP"`
 	MaxTrustedLocalNtCConns  int           `yaml:"maxTrustedLocalNtCConns"  envconfig:"DINGO_MAX_TRUSTED_LOCAL_NTC_CONNS"`
+	// TrustedNtCIdleTimeout closes a trusted local node-to-client connection
+	// that has been idle this long. Zero, the default, means no limit.
+	TrustedNtCIdleTimeout time.Duration `yaml:"trustedNtCIdleTimeout" envconfig:"DINGO_TRUSTED_NTC_IDLE_TIMEOUT"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`

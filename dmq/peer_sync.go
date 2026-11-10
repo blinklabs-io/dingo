@@ -58,15 +58,33 @@ func (p *PeerConn) answerMessageIDs(blocking bool, limit int) {
 			}
 			return
 		}
+		// A message held back for its pool's interval is not announced by
+		// an admission, so the wait also ends when the first one is due.
+		var due <-chan time.Time
+		var dueTimer *time.Timer
+		if wait, ok := p.pace.nextRelease(p.stack.cfg.Now()); ok {
+			dueTimer = time.NewTimer(wait)
+			due = dueTimer.C
+		}
 		select {
 		case <-added:
+		case <-due:
 		case <-deadline:
+			if dueTimer != nil {
+				dueTimer.Stop()
+			}
 			if err := p.server.ReplyNoIDs(); err != nil {
 				p.failSend("reply no message IDs", err)
 			}
 			return
 		case <-p.ctx.Done():
+			if dueTimer != nil {
+				dueTimer.Stop()
+			}
 			return
+		}
+		if dueTimer != nil {
+			dueTimer.Stop()
 		}
 	}
 }
@@ -77,28 +95,37 @@ func (p *PeerConn) answerMessageIDs(blocking bool, limit int) {
 func (p *PeerConn) nextMessageIDs(limit int) []ocommon.MessageIDAndSize {
 	now := p.stack.cfg.Now()
 	ids := make([]ocommon.MessageIDAndSize, 0, limit)
-	for len(ids) < limit {
-		msg, ok := p.stack.pool.NextForPeer(p.cursorKey)
-		if !ok {
-			break
-		}
-		if !msg.IsValidAt(now) {
-			continue
-		}
+	announce := func(msg ocommon.DmqMessage) {
 		id := msg.ID()
-		if p.known.has(id) {
-			continue
-		}
 		raw, err := msg.MarshalCBOR()
 		if err != nil {
 			p.logger.Warn("dmq peer: encode message", "error", err)
-			continue
+			return
 		}
 		ids = append(ids, ocommon.MessageIDAndSize{
 			MessageID: id,
 			// #nosec G115 -- a message is far smaller than 4 GiB
 			SizeInBytes: uint32(len(raw)),
 		})
+	}
+	usable := func(msg ocommon.DmqMessage) bool {
+		return msg.IsValidAt(now) && !p.known.has(msg.ID())
+	}
+	for _, msg := range p.pace.releaseHeld(now, limit, usable) {
+		announce(msg)
+	}
+	for len(ids) < limit && !p.pace.full() {
+		msg, ok := p.stack.pool.NextForPeer(p.cursorKey)
+		if !ok {
+			break
+		}
+		if !usable(msg) {
+			continue
+		}
+		if !p.pace.admit(msg, now) {
+			continue
+		}
+		announce(msg)
 	}
 	return ids
 }
