@@ -40,11 +40,21 @@ const (
 	refEq      = `tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`
 	refEqAlias = `u.tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND u.output_idx = ?`
 
-	// utxoRowByHashJoin selects the rows of the outputs of the transactions
-	// whose hashes follow it. The join starts from the transaction hash
-	// index; a plain JOIN lets SQLite choose to scan utxo instead.
-	utxoRowByHashJoin = ` FROM "transaction" AS t CROSS JOIN utxo AS u ON u.tx_id = t.id WHERE t.hash IN (`
+	utxoRowByHashFrom = ` FROM "transaction" AS t `
+	utxoRowByHashOn   = ` utxo AS u ON u.tx_id = t.id WHERE t.hash IN (`
 )
+
+// utxoRowByHashJoin selects the rows of the outputs of the transactions whose
+// hashes follow it. On SQLite the join starts from the transaction hash
+// index; a plain JOIN lets SQLite choose to scan utxo instead, and CROSS JOIN
+// fixes the loop order. PostgreSQL does not accept ON after CROSS JOIN and
+// plans the lookup from the hash index on its own.
+func utxoRowByHashJoin(sqlite bool) string {
+	if sqlite {
+		return utxoRowByHashFrom + "CROSS JOIN" + utxoRowByHashOn
+	}
+	return utxoRowByHashFrom + "JOIN" + utxoRowByHashOn
+}
 
 // utxoSQL holds the statement text of one dialect family for every statement
 // that names an output by reference. The SQLite and shared sets differ only
@@ -289,9 +299,9 @@ func newSQLiteRefStatements() *sqliteRefStatements {
 		insertBatch:  make(map[int]string),
 	}
 	for _, n := range sqliteInListSizes {
-		st.stakeConsumedDelta[n] = utxoStakeConsumedDeltaQuery(n)
-		st.stakeRefsByTxIDs[n] = utxoStakeRefsByTxIDQuery(n)
-		st.deletionRows[n] = utxoDeletionRowsQuery(n, false)
+		st.stakeConsumedDelta[n] = utxoStakeConsumedDeltaQuery(n, true)
+		st.stakeRefsByTxIDs[n] = utxoStakeRefsByTxIDQuery(n, true)
+		st.deletionRows[n] = utxoDeletionRowsQuery(n, false, true)
 	}
 	for _, n := range sqliteExactRefSizes {
 		st.exactRefs[n] = utxoRefsExactQuery(n)
@@ -345,26 +355,26 @@ func joinN(n int, sep, item string) string {
 // transaction and the caller matches (hash, output_idx) in Go, so the lookup
 // stays on the leading column of the unique output index however many
 // references the batch names.
-func utxoStakeConsumedDeltaQuery(n int) string {
+func utxoStakeConsumedDeltaQuery(n int, sqlite bool) string {
 	return "-- name: GetUtxoStakeConsumedDeltaBatch :many\n" +
 		"SELECT t.hash, u.output_idx, u.credential_tag, u.staking_key, u.amount" +
-		utxoRowByHashJoin + bindPlaceholders(n) + ")"
+		utxoRowByHashJoin(sqlite) + bindPlaceholders(n) + ")"
 }
 
 // utxoStakeRefsByTxIDQuery is the lookup of the stake credentials of every
 // output of the transactions named by n hashes. It carries no
 // "deleted_slot = 0" predicate, which would let the planner drive the lookup
 // from a deleted_slot index; the caller filters in Go.
-func utxoStakeRefsByTxIDQuery(n int) string {
+func utxoStakeRefsByTxIDQuery(n int, sqlite bool) string {
 	return "-- name: GetUtxoStakeRefsByTxIDs :many\n" +
 		"SELECT t.hash, u.output_idx, u.deleted_slot, u.credential_tag, " +
-		"u.staking_key" + utxoRowByHashJoin + bindPlaceholders(n) + ")"
+		"u.staking_key" + utxoRowByHashJoin(sqlite) + bindPlaceholders(n) + ")"
 }
 
 // utxoDeletionRowsQuery is the lookup of every output row of the
 // transactions named by n hashes. lockRows adds the row lock PostgreSQL and
 // MySQL take, which SQLite has no use for.
-func utxoDeletionRowsQuery(n int, lockRows bool) string {
+func utxoDeletionRowsQuery(n int, lockRows, sqlite bool) string {
 	name := "GetUtxoRowsByTxIDs"
 	if lockRows {
 		name = "LockUtxoRowsByTxIDs"
@@ -372,7 +382,7 @@ func utxoDeletionRowsQuery(n int, lockRows bool) string {
 	query := "-- name: " + name + " :many\n" +
 		"SELECT u.id, t.hash, u.output_idx, u.deleted_slot, " +
 		"u.credential_tag, u.staking_key" +
-		utxoRowByHashJoin + bindPlaceholders(n) + ")"
+		utxoRowByHashJoin(sqlite) + bindPlaceholders(n) + ")"
 	if lockRows {
 		query += " ORDER BY u.id FOR UPDATE OF u"
 	}
@@ -394,7 +404,7 @@ func utxoRefsExactQuery(n int) string {
 // credentials by transaction hash, for up to the 400 hashes of one batch.
 func (u *utxoSQL) stakeConsumedDelta(hashes [][]byte) (string, []any) {
 	if !u.sqlite {
-		return utxoStakeConsumedDeltaQuery(len(hashes)),
+		return utxoStakeConsumedDeltaQuery(len(hashes), false),
 			u.bindHashes(make([]any, 0, len(hashes)), hashes, len(hashes))
 	}
 	size := sizeFor(sqliteInListSizes[:], len(hashes))
@@ -406,7 +416,7 @@ func (u *utxoSQL) stakeConsumedDelta(hashes [][]byte) (string, []any) {
 // the given transactions, for up to 400 hashes.
 func (u *utxoSQL) stakeRefsByTxIDs(hashes [][]byte) (string, []any) {
 	if !u.sqlite {
-		return utxoStakeRefsByTxIDQuery(len(hashes)),
+		return utxoStakeRefsByTxIDQuery(len(hashes), false),
 			u.bindHashes(make([]any, 0, len(hashes)), hashes, len(hashes))
 	}
 	size := sizeFor(sqliteInListSizes[:], len(hashes))
@@ -421,7 +431,7 @@ func (u *utxoSQL) deletionRows(
 	lockRows bool,
 ) (string, []any) {
 	if !u.sqlite {
-		return utxoDeletionRowsQuery(len(hashes), lockRows),
+		return utxoDeletionRowsQuery(len(hashes), lockRows, false),
 			u.bindHashes(make([]any, 0, len(hashes)), hashes, len(hashes))
 	}
 	size := sizeFor(sqliteInListSizes[:], len(hashes))
@@ -489,7 +499,7 @@ func (u *utxoSQL) exactRefs(refs []models.UtxoId) (string, []any) {
 // list of size hashes.
 func (u *utxoSQL) stakeConsumedDeltaQuery(size int) string {
 	if !u.sqlite {
-		return utxoStakeConsumedDeltaQuery(size)
+		return utxoStakeConsumedDeltaQuery(size, false)
 	}
 	return sqliteRefs.stakeConsumedDelta[size]
 }

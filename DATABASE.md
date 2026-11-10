@@ -245,7 +245,8 @@ resolve the producer in a scalar subquery,
 (`utxo_sql.go`), which is one probe of the unique `transaction.hash` index and
 one of the output index. List-shaped SQLite statements join from the hash
 index, `FROM "transaction" t CROSS JOIN utxo u ON u.tx_id = t.id WHERE t.hash
-IN (...)`; the `CROSS JOIN` fixes the loop order. No SQL is rewritten at run
+IN (...)`; the `CROSS JOIN` fixes the loop order, and PostgreSQL and MySQL use a plain
+`JOIN`, which PostgreSQL requires. No SQL is rewritten at run
 time: a list-shaped SQLite statement exists only in a fixed set of sizes
 (powers of two, the apply path's batch sizes, and the 200 and 400 caps),
 composed once at start-up, and callers pad the arguments with NULL, which
