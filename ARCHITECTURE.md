@@ -12096,7 +12096,9 @@ replacement is refused keeps its loaded credentials without holding back the
 others. Each successful swap logs its `pool_id` with the old and new counter,
 each refusal is named in the returned error and counted on
 `dingo_block_producer_credential_reload_failures_total{pool_id}`. A pool whose
-KES key comes from an agent is still refused, as above.
+credentials were already loaded reports itself unchanged, which is not a
+failure; the reload as a whole reads `unchanged` only when every pool did.
+The credential file watch covers every pool's files.
 
 **Reload with a KES agent.** In serve-key mode the agent pushes each new key
 and the node installs it as it arrives, so a reload is refused. In sign mode
@@ -12123,7 +12125,10 @@ byte; when the agent's carries the same cold key and a higher counter, the
 client hands it to `RemoteConfig.OnNewerOpCert` and still refuses the session.
 The node runs a reload with that certificate in place of the file
 (`Node.agentOpCertLoop`), keeping only the newest offer and retrying the same
-certificate at most once a minute after a refusal. The reloaded certificate
+certificate at most once a minute after a refusal. With several pools each
+pool's remote client offers to that pool's own queue (`agentOfferState`) and
+loop, so a newer certificate from pool A's agent reloads pool A only, and a
+refusal counts against that pool. The reloaded certificate
 lives in memory only; after a restart the node loads its file again and the
 agent's newer certificate is picked up the same way. A rotation that lands
 after admission, between the pre-connect and the sign, is refused by the
@@ -12443,7 +12448,8 @@ attempt) deadlocks `Close` behind the very read only it can unblock.
 VRF key, operational certificate and one KES source: a local key file, a local
 KES agent socket in serve-key or sign mode, or a remote agent. The list
 replaces the single-pool `shelley*` settings, and configuration validation
-refuses the two together, two entries sharing an opcert, and more than one pool
+refuses the two together, two entries sharing an opcert or a remote agent
+address, and more than one pool
 with Leios forging or voting, whose pipeline and vote key are wired for one.
 
 The first pool keeps the node's own forging fields (`blockForger`,
@@ -12451,8 +12457,13 @@ The first pool keeps the node's own forging fields (`blockForger`,
 runs exactly as before. Every other pool is a `poolProducer` with its own
 credentials, KES agent client, leader election, durable forge fence (keyed by
 pool) and `BlockForger`. Each pool's key source (`poolKeySource`) loads and
-validates its credentials exactly as the first pool's does, and one KES agent
-client per pool means one agent can serve them all through its profiles.
+validates its credentials exactly as the first pool's does, with one KES
+agent client per pool. Over a local agent socket one agent can serve every
+pool through its profiles. Over the remote listener it cannot: an attested
+session cannot name a profile yet and Bursa refuses more than one profile per
+attested listener (blinklabs-io/bursa#1276), so each pool signing remotely
+needs its own agent and address, and configuration validation refuses two
+pools with the same `shelleyKesAgentAddress`.
 
 **Startup and isolation.** The other pools start after the first. A pool whose
 serve-key KES source cannot be reached -- an agent that never pushes its key --
