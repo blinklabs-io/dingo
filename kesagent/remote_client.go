@@ -627,6 +627,29 @@ var finalSignRefusals = []string{
 	"sign request is not a matching Praos header body",
 }
 
+// opCertMismatchRefusals are the agent reasons, as blinklabs-io/bursa words
+// them in internal/kesagent, for a header that carries another operational
+// certificate than the one the agent has installed: its key was rotated after
+// this session was admitted. They are final refusals, and the session is
+// dropped too, so the next Prepare or Sign re-admits and offers the agent's
+// newer certificate to OnNewerOpCert.
+var opCertMismatchRefusals = []string{
+	"operational certificate names a different KES key",
+	"operational certificate counter/period do not match the installed one",
+	"operational certificate cold signature is not the installed one",
+}
+
+// isOpCertMismatchRefusal reports whether an agent's refusal reason says the
+// header's operational certificate is not the one the agent has installed.
+func isOpCertMismatchRefusal(reason string) bool {
+	for _, mismatch := range opCertMismatchRefusals {
+		if strings.Contains(reason, mismatch) {
+			return true
+		}
+	}
+	return false
+}
+
 // isFinalSignRefusal reports whether an agent's refusal reason is one a
 // resend of the same body cannot change.
 func isFinalSignRefusal(reason string) bool {
@@ -642,7 +665,9 @@ func isFinalSignRefusal(reason string) bool {
 // reuses the open session, or opens one within SignTimeout, sends the request
 // and verifies the signature against the local operational certificate's KES
 // key. A transport or verification failure drops the session, and the next
-// Prepare or Sign redials; an agent refusal keeps it.
+// Prepare or Sign redials; an agent refusal keeps it, except one saying the
+// header's operational certificate is not the agent's installed one, which
+// drops it so the redial can offer the agent's newer certificate.
 //
 // A request that got no signature back, because the reply was lost with the
 // session or the agent returned an error that is not a final refusal, is
@@ -742,12 +767,13 @@ func (c *RemoteClient) signOnce(
 		req.Message,
 		resp,
 	); err != nil {
-		// A well-formed refusal leaves the session usable; anything else,
-		// including an error on a frame of the wrong type or period, means
-		// the agent cannot be trusted on this session.
+		// A well-formed refusal leaves the session usable, unless it says
+		// the agent now holds another operational certificate; anything
+		// else, including an error on a frame of the wrong type or period,
+		// means the agent cannot be trusted on this session.
 		refusal := resp.Error != "" && resp.Type == "sign_response" &&
 			resp.Period == req.Period
-		if !refusal {
+		if !refusal || isOpCertMismatchRefusal(resp.Error) {
 			c.dropConn(conn)
 		}
 		return nil, refusal && !isFinalSignRefusal(resp.Error), err

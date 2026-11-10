@@ -845,3 +845,65 @@ func TestRemoteClientOffersANewerOpCertForTheSamePool(t *testing.T) {
 		})
 	}
 }
+
+// A refusal saying the header carries another operational certificate than
+// the agent has installed means the agents key was rotated after admission.
+
+// A refusal saying the header carries another operational certificate than
+// the agent has installed means the agent's key was rotated after admission.
+// The session is dropped, so the next Prepare re-admits and offers the
+// agent's newer certificate instead of reusing a session that can no longer
+// sign.
+func TestRemoteClientDropsSessionOnAnOpCertMismatchRefusal(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	local, err := bursa.DecodeOpCert(opCert)
+	require.NoError(t, err)
+	newer := opCertVariant(t, opCert, local.IssueNumber+1, local.KESPeriod, nil)
+	for _, refusal := range []string{
+		"kesagent: sign request is not a matching Praos header body: operational certificate names a different KES key",
+		"kesagent: sign request is not a matching Praos header body: operational certificate counter/period do not match the installed one",
+		"kesagent: sign request is not a matching Praos header body: operational certificate cold signature is not the installed one",
+	} {
+		t.Run(refusal, func(t *testing.T) {
+			t.Parallel()
+			client := newTestCert(t, "node")
+			a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+			var rotated atomic.Bool
+			a.admitFix = func(r *attestationResponse) {
+				if rotated.Load() {
+					r.OpCert = newer
+				}
+			}
+			certFile, keyFile := client.writePEM(t)
+			offers := make(chan []byte, 1)
+			c, err := NewRemoteClient(RemoteConfig{
+				Address:          a.addr,
+				ClientCertFile:   certFile,
+				ClientKeyFile:    keyFile,
+				ServerSPKISHA256: a.server.spki,
+				KESVKey:          vkey,
+				OpCert:           opCert,
+				SignTimeout:      2 * time.Second,
+				OnNewerOpCert:    func(b []byte) { offers <- b },
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = c.Close() })
+
+			require.NoError(t, c.Prepare())
+			rotated.Store(true)
+			a.refusal = refusal
+			a.refuseRequests.Store(1)
+			_, err = c.Sign(0, []byte("header"))
+			require.ErrorContains(t, err, refusal)
+			require.Len(t, a.received(), 1, "a final refusal must not be resent")
+
+			require.ErrorIs(t, c.Prepare(), ErrRemoteAdmission)
+			require.Equal(t, int32(2), a.accepts.Load(),
+				"an operational certificate mismatch must not keep the session")
+			require.Equal(t, newer, testutil.RequireReceive(
+				t, offers, time.Second, "newer certificate offered",
+			))
+		})
+	}
+}
