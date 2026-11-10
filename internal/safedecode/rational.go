@@ -120,13 +120,28 @@ func (s scanner) item(data []byte, pos int, depth int) (int, error) {
 		}
 		return s.sequence(data, next, value, indefinite, depth)
 	default:
-		switch value {
-		case cborTagRational:
-			return s.rational(data, next, depth)
-		case cborTagEncodedCbor:
-			return s.encodedCbor(data, next, depth)
+		// The decoder reads a stack of tags without charging each one to its
+		// nesting budget, so a stack of any length must not use up this one
+		// before the item underneath is reached. The loop also keeps a long
+		// stack from recursing once per tag.
+		for {
+			switch value {
+			case cborTagRational:
+				return s.rational(data, next, depth)
+			case cborTagEncodedCbor:
+				return s.encodedCbor(data, next, depth)
+			}
+			if next >= len(data) {
+				return 0, errScanMalformed
+			}
+			if data[next]>>5 != 6 {
+				return s.item(data, next, depth+1)
+			}
+			value, next, _, err = readHead(data, next, data[next]&0x1f)
+			if err != nil {
+				return 0, err
+			}
 		}
-		return s.item(data, next, depth+1)
 	}
 }
 

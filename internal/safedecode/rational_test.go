@@ -173,8 +173,15 @@ func TestRejectOversizedRationalsThroughDeepNesting(t *testing.T) {
 	earlier := append([]byte{0x82}, bytes.Repeat([]byte{0x81}, 200)...)
 	earlier = append(earlier, 0x00)
 	earlier = append(earlier, item...)
+	// The decoder reads a tag stack without charging each tag to its nesting
+	// budget, so a stack longer than that budget still reaches the rational.
+	stack := append(
+		bytes.Repeat([]byte{0xd8, 0x37}, cbor.MaxNestedLevels+100),
+		item...,
+	)
 	for name, data := range map[string][]byte{
 		"tags before the rational":             tags,
+		"tag stack past the nesting limit":     stack,
 		"arrays around the rational":           arrays,
 		"deep nesting before a later rational": earlier,
 	} {
