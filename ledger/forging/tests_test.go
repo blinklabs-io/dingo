@@ -1535,11 +1535,11 @@ func TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip(
 	}
 }
 
-// TestForgeRefusesUnknownUpstreamTargetWhileWallClockIsStale verifies that a
-// live upstream with an unpublished target does not license forging on a tip
-// that trails the wall clock by more than the sync tolerance, because a block
-// on that parent can fork the honest chain deeper than k.
-func TestForgeRefusesUnknownUpstreamTargetWhileWallClockIsStale(
+// TestForgeRefusesUnknownUpstreamTargetPastForecastHorizon verifies that a
+// live upstream with an unpublished target does not license forging once the
+// slot is past the ledger-view forecast horizon from the applied tip, which is
+// where the reference node stops forging.
+func TestForgeRefusesUnknownUpstreamTargetPastForecastHorizon(
 	t *testing.T,
 ) {
 	leader := &forgerCountingLeader{}
@@ -1560,6 +1560,7 @@ func TestForgeRefusesUnknownUpstreamTargetWhileWallClockIsStale(
 			chainTipSlot:      9,
 			upstreamTipSlot:   0,
 			upstreamActive:    true,
+			stabilityWindow:   500,
 			slotsPerKESPeriod: 100000,
 		},
 		ForgeSyncToleranceSlots: 100,
@@ -1605,49 +1606,72 @@ func TestForgeRefusesUnknownUpstreamTargetWhileWallClockIsStale(
 	)
 }
 
-// TestForgeDoesNotBuildOnStaleParentWithoutUpstreamEvidence asserts that a
-// restarted node whose tip trails the wall clock by far more than the sync
-// tolerance (and, at the fixture's density, by far more than k blocks) does
-// not forge a block on that stale parent merely because it has no upstream
-// evidence yet. Such a block forks the honest chain deeper than k.
-//
-// Fixed defect: a live upstream whose target was still unpublished made
-// upstreamSyncSkipsForge return false, so the node forged. The gate now falls
-// back to the wall clock for that state. A node with no live upstream at all
-// (a solo producer, which has no peer evidence to wait for) still forges; see
+// TestForgeUnpublishedUpstreamTargetFollowsForecastHorizon pins the lag bound
+// for a live upstream whose target is not yet published. The reference node
+// forges on its selected tip whatever the wall-clock lag and refuses only when
+// the slot is past the ledger-view forecast horizon, a stability window beyond
+// the tip. A tip lagging by more than forgeSyncToleranceSlots but inside the
+// window must forge: otherwise every producer restarted at the same tip
+// refuses, no header is produced, and no target is ever published. Past the
+// window the node must not forge. A solo producer is covered by
 // TestSoloProducerForgesWithStaleTipAndNoUpstream.
-func TestForgeDoesNotBuildOnStaleParentWithoutUpstreamEvidence(
+func TestForgeUnpublishedUpstreamTargetFollowsForecastHorizon(
 	t *testing.T,
 ) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name  string
-		clock forgerTestSlotClock
+		name       string
+		clock      forgerTestSlotClock
+		wantForged int
 	}{
 		{
-			name: "live upstream with unpublished target",
+			name: "lag beyond tolerance but inside the horizon forges",
 			clock: forgerTestSlotClock{
 				currentSlot:       1000,
 				chainTipSlot:      9,
 				upstreamActive:    true,
-				upstreamTipSlot:   0,
+				stabilityWindow:   2000,
 				slotsPerKESPeriod: 100000,
 			},
+			wantForged: 1,
 		},
 		{
-			// Control: once the upstream tip is known and far ahead, the
-			// existing sync gate refuses. This passes today and shows the
-			// fixture can refuse.
-			name: "live upstream with known target far ahead",
+			name: "lag exactly one stability window forges",
+			clock: forgerTestSlotClock{
+				currentSlot:       1009,
+				chainTipSlot:      9,
+				upstreamActive:    true,
+				stabilityWindow:   1000,
+				slotsPerKESPeriod: 100000,
+			},
+			wantForged: 1,
+		},
+		{
+			name: "lag past the horizon does not forge",
+			clock: forgerTestSlotClock{
+				currentSlot:       1010,
+				chainTipSlot:      9,
+				upstreamActive:    true,
+				stabilityWindow:   1000,
+				slotsPerKESPeriod: 100000,
+			},
+			wantForged: 0,
+		},
+		{
+			// Control: a known target far ahead is still refused by the
+			// bulk-sync gate.
+			name: "known target far ahead does not forge",
 			clock: forgerTestSlotClock{
 				currentSlot:            1000,
 				chainTipSlot:           9,
 				upstreamActive:         true,
 				upstreamTipSlot:        990,
 				upstreamTipBlockNumber: 50,
+				stabilityWindow:        2000,
 				slotsPerKESPeriod:      100000,
 			},
+			wantForged: 0,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1677,16 +1701,16 @@ func TestForgeDoesNotBuildOnStaleParentWithoutUpstreamEvidence(
 				forger.checkAndForgeProduction(context.Background()),
 			)
 
-			assert.Zero(
+			assert.Equal(
 				t,
+				tc.wantForged,
 				builder.calls,
-				"forged on a parent at slot %d while the wall clock is at "+
-					"slot %d (tolerance 100): a block on a parent this "+
-					"far behind forks the honest chain deeper than k",
+				"parent at slot %d, wall clock at slot %d, window %d",
 				tc.clock.chainTipSlot,
 				tc.clock.currentSlot,
+				tc.clock.stabilityWindow,
 			)
-			assert.Zero(t, broadcaster.calls)
+			assert.Equal(t, tc.wantForged, broadcaster.calls)
 		})
 	}
 }

@@ -1524,12 +1524,10 @@ func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 }
 
 // TestForgeDoesNotTreatUnknownUpstreamAsStalenessEvidence pins that an unknown
-// upstream target never trips the applied-staleness bound. Separately, a live
-// upstream with an unpublished target no longer licenses forging on a tip that
-// trails the wall clock by more than the sync tolerance: the sync gate falls
-// back to the wall clock and refuses (a block on that parent can fork the
-// honest chain deeper than k). Without a live upstream, or within tolerance,
-// the node still forges.
+// upstream target never trips the applied-staleness bound, and that the sync
+// tolerance is not a lag bound for it: the node forges at and beyond the
+// tolerance. The fixture supplies no stability window, so the forecast bound
+// is not in play; see TestForgeUnpublishedUpstreamTargetFollowsForecastHorizon.
 func TestForgeDoesNotTreatUnknownUpstreamAsStalenessEvidence(t *testing.T) {
 	for _, upstreamActive := range []bool{false, true} {
 		for _, gap := range []uint64{100, 101} {
@@ -1561,9 +1559,6 @@ func TestForgeDoesNotTreatUnknownUpstreamAsStalenessEvidence(t *testing.T) {
 						forger.checkAndForgeProduction(context.Background()),
 					)
 					wantForge := 1
-					if upstreamActive && gap > 100 {
-						wantForge = 0
-					}
 					require.Equal(t, wantForge, builder.calls)
 					require.Equal(
 						t,
@@ -2312,6 +2307,7 @@ type forgerTestSlotClock struct {
 	upstreamTipBlockNumber uint64
 	upstreamActive         bool
 	securityParam          int
+	stabilityWindow        uint64
 	slotsPerKESPeriod      uint64
 }
 
@@ -2424,6 +2420,10 @@ func (c forgerTestSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
 		Point:       ocommon.Point{Slot: c.upstreamTipSlot},
 		BlockNumber: c.upstreamTipBlockNumber,
 	}, c.upstreamActive || c.upstreamTipSlot > 0
+}
+
+func (c forgerTestSlotClock) StabilityWindow() uint64 {
+	return c.stabilityWindow
 }
 
 func (c forgerTestSlotClock) SecurityParam() int {
