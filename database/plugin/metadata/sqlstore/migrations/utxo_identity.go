@@ -776,7 +776,7 @@ WHERE table_schema = DATABASE() AND table_name = 'utxo'`,
 	}
 	// One statement drops the moved columns: each separate ALTER would
 	// rebuild the whole table.
-	alter := "ALTER TABLE `transaction` MODIFY `hash` VARBINARY(255) NOT NULL"
+	clauses := []string{"MODIFY `hash` VARBINARY(255) NOT NULL"}
 	for _, column := range transactionAppliedColumns {
 		var present int
 		if err := batch.Tx.QueryRowContext(ctx, `
@@ -786,10 +786,11 @@ WHERE table_schema = DATABASE() AND table_name = 'transaction'
 			return fmt.Errorf("check transaction.%s: %w", column, err)
 		}
 		if present > 0 {
-			alter += ", DROP COLUMN `" + column + "`"
+			clauses = append(clauses, "DROP COLUMN `"+column+"`")
 		}
 	}
-	return b.exec(ctx, batch, alter)
+	return b.exec(ctx, batch,
+		"ALTER TABLE `transaction` "+strings.Join(clauses, ", "))
 }
 
 func (b identityBackfill) mysqlConstraintExists(
