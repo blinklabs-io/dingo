@@ -103,6 +103,57 @@ func (d *Database) EnableBatchUtxoOverlay(
 	)
 }
 
+// EnableLeiosClosureUtxoOverlay enables retained UTxO staging when the
+// provider supports the complete closure. Unsupported providers or closures
+// continue through the ordinary ordered API writer.
+func (d *Database) EnableLeiosClosureUtxoOverlay(
+	acc BatchAccumulator, txn *Txn, transactions []lcommon.Transaction,
+) (bool, error) {
+	if acc == nil || txn == nil {
+		return false, nil
+	}
+	overlay, ok := d.transactionStore().(metadata.LeiosClosureUtxoOverlay)
+	if !ok {
+		return false, nil
+	}
+	metadataTxn := txn.Metadata()
+	if metadataTxn == nil {
+		return false, types.ErrNilTxn
+	}
+	return overlay.EnableLeiosClosureUtxoOverlay(acc, metadataTxn, transactions)
+}
+
+// PrepareLeiosClosureBatch prepares the next ordered closure window. Providers
+// without window support retain the complete-closure batching behavior.
+func (d *Database) PrepareLeiosClosureBatch(
+	acc BatchAccumulator, txn *Txn, transactions []lcommon.Transaction,
+) (int, error) {
+	if len(transactions) == 0 || acc == nil || txn == nil {
+		return len(transactions), nil
+	}
+	preparer, ok := d.transactionStore().(metadata.LeiosClosureBatchPreparer)
+	if !ok {
+		_, err := d.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)
+		return len(transactions), err
+	}
+	metadataTxn := txn.Metadata()
+	if metadataTxn == nil {
+		return 0, types.ErrNilTxn
+	}
+	n, err := preparer.PrepareLeiosClosureBatch(acc, metadataTxn, transactions)
+	if err != nil {
+		return 0, err
+	}
+	if n < 1 || n > len(transactions) {
+		return 0, fmt.Errorf(
+			"invalid closure batch length %d for %d transactions",
+			n,
+			len(transactions),
+		)
+	}
+	return n, nil
+}
+
 // WithBatchUtxoOverlayError joins err with the error acc's batch UTxO overlay
 // recorded. A read barrier inside QueryRowContext cannot return its error, so
 // the statement and those after it run against tables the barrier failed to

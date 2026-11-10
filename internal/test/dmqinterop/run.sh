@@ -26,11 +26,8 @@
 #                          every mini-protocol message)
 #   DMQ_INTEROP_CARDANO_BIN path to a Linux dingo binary for the Cardano node
 #                          dmq-node talks to (default: built from this tree).
-#                          Dingo closes a node-to-client connection that has
-#                          been idle for two minutes, and dmq-node holds one
-#                          open and idle between epochs, so dmq-node exits
-#                          within minutes against a build with that limit. Use
-#                          a build from before it until dmq-node is exempted.
+#                          dmq-node holds an idle node-to-client connection, so
+#                          the binary must not set trustedNtCIdleTimeout.
 #   DMQ_INTEROP_NODE_MODE  set to also run a native Dingo with dmq.enabled,
 #                          which dials dmq-node from its topology and listens
 #                          on DMQ_INTEROP_LISTEN_PORT, and to run only the

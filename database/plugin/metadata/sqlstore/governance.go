@@ -869,10 +869,78 @@ func (s *Store) DeleteGovernanceProposalsAfterSlot(
 	)
 }
 
+// Materializing surviving vote IDs avoids a history scan for each vote when
+// the history lookup index is absent. NULL IDs cannot represent membership.
+const governanceVoteRollbackDeleteQuery = `-- name: DeleteGovernanceVotesAfterRollback :exec
+DELETE FROM governance_vote
+WHERE added_slot > ?
+   OR id NOT IN (
+       SELECT vote_id FROM governance_vote_history
+       WHERE vote_id IS NOT NULL
+   )`
+
+const governanceVoteRollbackRestoreValues = `
+UPDATE governance_vote
+SET vote = (
+SELECT history.vote
+FROM governance_vote_history AS history
+WHERE history.vote_id = governance_vote.id
+ORDER BY history.transition_slot DESC, history.id DESC
+LIMIT 1
+), anchor_url = (
+SELECT history.anchor_url
+FROM governance_vote_history AS history
+WHERE history.vote_id = governance_vote.id
+ORDER BY history.transition_slot DESC, history.id DESC
+LIMIT 1
+), anchor_hash = (
+SELECT history.anchor_hash
+FROM governance_vote_history AS history
+WHERE history.vote_id = governance_vote.id
+ORDER BY history.transition_slot DESC, history.id DESC
+LIMIT 1
+), vote_updated_slot = (
+SELECT history.transition_slot
+FROM governance_vote_history AS history
+WHERE history.vote_id = governance_vote.id
+ORDER BY history.transition_slot DESC, history.id DESC
+LIMIT 1
+)
+`
+
+const governanceVoteRollbackRestoreQuery = `-- name: RestoreGovernanceVotesAfterRollback :exec` +
+	governanceVoteRollbackRestoreValues + `WHERE EXISTS (
+ SELECT 1 FROM governance_vote_history AS history
+ WHERE history.vote_id = governance_vote.id
+)`
+
+const governanceVoteRollbackRestoreSQLiteQuery = `-- name: RestoreGovernanceVotesAfterRollbackSQLite :exec` +
+	governanceVoteRollbackRestoreValues + `WHERE typeof(governance_vote.anchor_hash) IN ('integer', 'real')
+OR (
+ governance_vote.vote, governance_vote.anchor_url,
+ governance_vote.anchor_hash, governance_vote.vote_updated_slot
+) IS NOT (
+ SELECT history.vote, history.anchor_url, history.anchor_hash,
+        history.transition_slot
+ FROM governance_vote_history AS history
+ WHERE history.vote_id = governance_vote.id
+ ORDER BY history.transition_slot DESC, history.id DESC
+ LIMIT 1
+)`
+
 func (s *Store) DeleteGovernanceVotesAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
+	restoreQuery := governanceVoteRollbackRestoreQuery
+	if s.dialect.Name() == "sqlite" {
+		// Replay can materialize an older cast even when newer history exists.
+		// Compare the complete latest value, not only its slot, and distinguish
+		// NULL from empty anchors before skipping a redundant write. Numeric
+		// values in the affinity-free BLOB column always restore: SQL equality
+		// does not distinguish their storage classes or signed-zero bits.
+		restoreQuery = governanceVoteRollbackRestoreSQLiteQuery
+	}
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
@@ -885,7 +953,8 @@ func (s *Store) DeleteGovernanceVotesAfterSlot(
 				args  []any
 			}{
 				{
-					query: `DELETE FROM governance_vote_history
+					query: `-- name: DeleteGovernanceVoteHistoryAfterSlot :exec
+DELETE FROM governance_vote_history
 				 WHERE transition_slot > ?`,
 					args: []any{slot},
 				},
@@ -901,55 +970,17 @@ func (s *Store) DeleteGovernanceVotesAfterSlot(
 					// from. Falling back to deletion here matches the
 					// pre-fix behavior instead of writing NULL into the
 					// NOT NULL vote column below.
-					query: `DELETE FROM governance_vote
-				 WHERE added_slot > ?
-				    OR NOT EXISTS (
-				        SELECT 1 FROM governance_vote_history AS history
-				        WHERE history.vote_id = governance_vote.id
-				    )`,
-					args: []any{slot},
+					query: governanceVoteRollbackDeleteQuery,
+					args:  []any{slot},
 				},
 				{
-					// Restore the vote value that was current at the
-					// rollback point from the latest surviving history
-					// entry. This is a no-op for a vote whose
-					// vote_updated_slot was already at or before slot, since
-					// that entry is still the latest remaining one. Scoped to
-					// rows with surviving history: every other row was just
-					// deleted above.
-					query: `UPDATE governance_vote
-				 SET vote = (
-				     SELECT history.vote
-				     FROM governance_vote_history AS history
-				     WHERE history.vote_id = governance_vote.id
-				     ORDER BY history.transition_slot DESC, history.id DESC
-				     LIMIT 1
-				 ), anchor_url = (
-				     SELECT history.anchor_url
-				     FROM governance_vote_history AS history
-				     WHERE history.vote_id = governance_vote.id
-				     ORDER BY history.transition_slot DESC, history.id DESC
-				     LIMIT 1
-				 ), anchor_hash = (
-				     SELECT history.anchor_hash
-				     FROM governance_vote_history AS history
-				     WHERE history.vote_id = governance_vote.id
-				     ORDER BY history.transition_slot DESC, history.id DESC
-				     LIMIT 1
-				 ), vote_updated_slot = (
-				     SELECT history.transition_slot
-				     FROM governance_vote_history AS history
-				     WHERE history.vote_id = governance_vote.id
-				     ORDER BY history.transition_slot DESC, history.id DESC
-				     LIMIT 1
-				 )
-				 WHERE EXISTS (
-				     SELECT 1 FROM governance_vote_history AS history
-				     WHERE history.vote_id = governance_vote.id
-				 )`,
+					// Orphan deletion above ensures every surviving vote
+					// has a latest history value to restore.
+					query: restoreQuery,
 				},
 				{
-					query: `UPDATE governance_vote SET deleted_slot = NULL
+					query: `-- name: RestoreGovernanceVoteDeletionAfterSlot :exec
+UPDATE governance_vote SET deleted_slot = NULL
 				 WHERE deleted_slot > ?`,
 					args: []any{slot},
 				},

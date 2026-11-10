@@ -606,6 +606,10 @@ func (ls *LedgerState) storeTrustedBatchBlocks(
 	if held == len(blocks) {
 		return nil
 	}
+	// A cancelled membership read reports the block absent.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	anchor := expected
 	if held > 0 {
 		prev := blocks[held-1]
@@ -672,6 +676,15 @@ func (s *intraBatchSpends) removeFromTxn(
 	overlay bool,
 ) error {
 	if !s.enabled || len(applied) == 0 {
+		return nil
+	}
+	_, protected, err := pendingRewardStakeInputHistoryFloor(db.Metadata(), txn.Metadata())
+	if err != nil {
+		return err
+	}
+	// Intra-batch deletion advances the global history floor to the batch tip.
+	// Even deleting only newer outputs would invalidate the pending basis.
+	if protected {
 		return nil
 	}
 	var spent []models.UtxoId

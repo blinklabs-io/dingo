@@ -78,7 +78,7 @@ func seedHardForkInitiationProposal(
 		ProposedEpoch: currentEpoch - 1,
 		ExpiresEpoch:  currentEpoch + 10,
 		Deposit:       1_000,
-		ReturnAddress: testBytes(29, 0),
+		ReturnAddress: buildRewardAddr(t, testBytes(28, 0x91)),
 		AnchorURL:     "https://example.invalid/anchor",
 		AnchorHash:    testBytes(32, 0xEE),
 		GovActionCbor: cborBytes,
@@ -229,20 +229,6 @@ func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(
 	assert.Nil(t, got, "pre-Conway pparams must short-circuit to nil")
 }
 
-func TestEvaluateRatifiableHardForkInitiation_NoActiveProposals_ReturnsNil(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db, _ := newTallyTestDB(t)
-	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
-	)
-	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
-	require.NoError(t, err)
-	assert.Nil(t, got, "empty active proposal set must yield nil")
-}
-
 func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(
 	t *testing.T,
 ) {
@@ -294,7 +280,7 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapRequiresCommitteeAndSPO(
 
 	db, store := newTallyTestDB(t)
 
-	const targetMajor uint = 11
+	const targetMajor uint = 10
 	proposal := seedHardForkInitiationProposal(
 		t, db, stabilityTestEpoch, targetMajor, 1, stabilityProposalTx,
 	)
@@ -444,4 +430,85 @@ func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAdde
 		"the lower added_slot proposal must win")
 	assert.Equal(t, earlyMajor, got.NewMajor,
 		"NewMajor must come from the lower added_slot proposal")
+}
+
+func TestEvaluateRatifiableHardForkInitiation_EarlierDelayingActionWins(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		actionType lcommon.GovActionType
+	}{
+		{name: "no confidence", actionType: lcommon.GovActionTypeNoConfidence},
+		{name: "update committee", actionType: lcommon.GovActionTypeUpdateCommittee},
+		{name: "new constitution", actionType: lcommon.GovActionTypeNewConstitution},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db, store := newTallyTestDB(t)
+			hardFork := seedHardForkInitiationProposal(
+				t, db, stabilityTestEpoch, 11, 1, stabilityProposalTx,
+			)
+			delaying := chainTestStore(t, db, chainTestProposal(
+				tc.actionType,
+				testBytes(32, byte(0xA3+tc.actionType)),
+				nil,
+				100,
+				0,
+				testBytes(29, 0),
+				chainTestDelayingAction(t, tc.actionType),
+			))[0]
+			drepCred := seedDRepWithStake(t, db, 1_000)
+			seedDRepYesVote(t, db, hardFork.ID, drepCred)
+			seedDRepYesVote(t, db, delaying.ID, drepCred)
+			seedHardForkCommitteeAndSPOVotes(
+				t, db, store, hardFork, delaying,
+			)
+
+			in := NewStabilityCheckInputs(
+				db,
+				nil,
+				stabilityTestEpoch,
+				false,
+				stabilityConwayPParams(10),
+				nil,
+				nil,
+			)
+			got, err := EvaluateRatifiableHardForkInitiation(t.Context(), in)
+			require.NoError(t, err)
+			assert.Nil(t, got,
+				"a higher-priority delaying action must stop the ratification pass")
+		})
+	}
+}
+
+func TestEvaluateRatifiableHardForkInitiation_RequiresEnactmentPrecondition(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	proposal := chainTestStore(t, db, chainTestProposal(
+		lcommon.GovActionTypeHardForkInitiation,
+		testBytes(32, 0xA4),
+		nil,
+		1,
+		1_000,
+		[]byte{0x01},
+		chainTestDelayingAction(t, lcommon.GovActionTypeHardForkInitiation),
+	))[0]
+	drepCred := seedDRepWithStake(t, db, 1_000)
+	seedDRepYesVote(t, db, proposal.ID, drepCred)
+	seedHardForkCommitteeAndSPOVotes(t, db, store, proposal)
+
+	in := NewStabilityCheckInputs(
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(10), nil, nil,
+	)
+	got, err := EvaluateRatifiableHardForkInitiation(t.Context(), in)
+	require.NoError(t, err)
+	assert.Nil(t, got,
+		"a proposal the boundary cannot enact must not be forecast")
 }

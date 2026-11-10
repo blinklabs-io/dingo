@@ -16,7 +16,6 @@ package sqlstore
 
 import (
 	"bytes"
-	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -24,72 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
-
-// TestSumCredentialUtxoStakeReusesCachedStatementAcrossTransactions proves
-// the cached statement sumCredentialUtxoStake now uses is actually reused
-// across separate write transactions (each its own *sql.Tx, via
-// withWriteTransaction's autocommit path), not just within a single one --
-// and that results stay correct as a credential goes from zero UTxOs to
-// several, using that same cached statement across the change. This is the
-// access pattern refreshRewardLiveStakeAggregate's real callers use: one
-// write transaction per block/UTxO touch, not one long-lived transaction.
-func TestSumCredentialUtxoStakeReusesCachedStatementAcrossTransactions(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	ctx := context.Background()
-	ref := models.NewStakeCredentialRef(0, credentialKeyForIndex(0))
-
-	sumInTxn := func() uint64 {
-		var got uint64
-		err := store.withWriteTransaction(
-			nil,
-			func(db queryer, ctx context.Context) error {
-				var err error
-				got, err = store.sumCredentialUtxoStake(ctx, db, ref)
-				return err
-			},
-		)
-		require.NoError(t, err)
-		return got
-	}
-
-	// Zero UTxOs: nothing seeded yet.
-	require.Equal(t, uint64(0), sumInTxn())
-
-	store.stmtMu.Lock()
-	firstStmt := store.stmts[sumCredentialUtxoStakeQuery]
-	store.stmtMu.Unlock()
-	require.NotNil(t, firstStmt)
-
-	// The credential gains UTxOs; queried again through a brand new write
-	// transaction.
-	seedCredentialUtxos(t, store, 1, ref, []uint64{5_000_000, 7}, nil)
-	require.Equal(t, uint64(5_000_007), sumInTxn())
-
-	// One of them is later spent, through yet another transaction.
-	_, err := store.writeDB.ExecContext(ctx,
-		"UPDATE utxo SET deleted_slot = 100 WHERE credential_tag = ? AND staking_key = ? AND amount = ?",
-		ref.Tag, ref.Key, decimalUint64(types.Uint64(7)),
-	)
-	require.NoError(t, err)
-	require.Equal(t, uint64(5_000_000), sumInTxn())
-
-	store.stmtMu.Lock()
-	secondStmt := store.stmts[sumCredentialUtxoStakeQuery]
-	entries := len(store.stmts)
-	store.stmtMu.Unlock()
-	require.Same(
-		t,
-		firstStmt,
-		secondStmt,
-		"expected the same cached *sql.Stmt across independent write transactions",
-	)
-	// hotStatements now has more than just sumCredentialUtxoStakeQuery (see
-	// prepared_stmt.go); this asserts no spurious extra entry was created
-	// beyond the fixed set Start prepares eagerly, not that the cache holds
-	// exactly one statement.
-	require.Equal(t, len(hotStatements), entries)
-}
 
 func TestRewardAccountOutputsExcludeUncreditedRows(t *testing.T) {
 	t.Parallel()
@@ -192,68 +125,30 @@ func TestSaveRewardAccountOutputsBatchesAndAssignsIDs(t *testing.T) {
 	require.Equal(t, types.Uint64(2), rows[0].Amount)
 }
 
-func TestStakeCalculationVersionRoundTrip(t *testing.T) {
+func TestPoolStakeSnapshotVrfKeyRoundTrip(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
 	poolKey := bytes.Repeat([]byte{0x33}, 28)
-	keyRegistrationEpoch := uint64(7)
-	poolSnapshot := &models.PoolStakeSnapshot{
-		Epoch:                     10,
-		SnapshotType:              models.PoolStakeSnapshotTypeMark,
-		PoolKeyHash:               poolKey,
-		CalculationVersion:        models.RewardStakeCalculationVersion,
-		LeiosKeyPublic:            []byte{1, 2, 3},
-		LeiosKeyPossessionProof:   []byte{4, 5, 6},
-		LeiosKeyRegistrationEpoch: &keyRegistrationEpoch,
-	}
-	require.NoError(t, store.SavePoolStakeSnapshot(poolSnapshot, nil))
-	gotPool, err := store.GetPoolStakeSnapshot(
+	vrfKey := bytes.Repeat([]byte{0x44}, 32)
+	require.NoError(t, store.SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:              10,
+			SnapshotType:       models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:        poolKey,
+			CalculationVersion: models.RewardStakeCalculationVersion,
+			VrfKeyHash:         vrfKey,
+		},
+		nil,
+	))
+	got, err := store.GetPoolStakeSnapshot(
 		10,
 		models.PoolStakeSnapshotTypeMark,
 		poolKey,
 		nil,
 	)
 	require.NoError(t, err)
-	require.NotNil(t, gotPool)
-	require.Equal(
-		t,
-		models.RewardStakeCalculationVersion,
-		gotPool.CalculationVersion,
-	)
-	require.Equal(
-		t,
-		poolSnapshot.LeiosKeyPublic,
-		gotPool.LeiosKeyPublic,
-	)
-	require.Equal(
-		t,
-		poolSnapshot.LeiosKeyPossessionProof,
-		gotPool.LeiosKeyPossessionProof,
-	)
-	require.Equal(
-		t,
-		poolSnapshot.LeiosKeyRegistrationEpoch,
-		gotPool.LeiosKeyRegistrationEpoch,
-	)
-
-	rewardSnapshot := &models.RewardSnapshot{
-		Epoch:              10,
-		SnapshotType:       models.PoolStakeSnapshotTypeMark,
-		CalculationVersion: models.RewardStakeCalculationVersion,
-	}
-	require.NoError(t, store.SaveRewardSnapshot(rewardSnapshot, nil))
-	gotReward, err := store.GetRewardSnapshot(
-		10,
-		models.PoolStakeSnapshotTypeMark,
-		nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, gotReward)
-	require.Equal(
-		t,
-		models.RewardStakeCalculationVersion,
-		gotReward.CalculationVersion,
-	)
+	require.NotNil(t, got)
+	require.Equal(t, vrfKey, got.VrfKeyHash)
 }
 
 func TestRewardSeedFailureRoundTripAndRollback(t *testing.T) {

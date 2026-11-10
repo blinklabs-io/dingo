@@ -25,6 +25,7 @@ import (
 )
 
 func TestNewClientPinsRelativeSocketPath(t *testing.T) {
+	// Not t.Parallel: t.Chdir changes the process working directory.
 	root, err := os.MkdirTemp("", "kesagent-endpoint-")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(root)) })

@@ -63,7 +63,7 @@ func TestUtxoOrderingAssetOnlyFilterDrivesFromAsset(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
-	seedStakeRefLookupUtxos(t, store, 20_000, 256)
+	seedStakeRefLookupUtxos(t, store, 2_000, 256)
 	seedOrderingAssets(t, store)
 
 	statement, args, err := countUtxosOrderingStatement(

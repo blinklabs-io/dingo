@@ -435,3 +435,34 @@ func TestChainHoldsPointRejectsUncommittedFailedBatch(t *testing.T) {
 	require.False(t, c.HoldsPoint(t.Context(), point))
 	require.True(t, c.HoldsPoint(t.Context(), prefix))
 }
+
+// A cancelled read learned nothing about the point, so it must not report the
+// point absent, before the read or while it is in flight.
+func TestChainHoldsPointSettledCancelledReadIsUnsettled(t *testing.T) {
+	t.Parallel()
+	db, store := newLocalProbeDB(t, nil)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	mustSetLedger(t, cm, 100)
+	c := cm.PrimaryChain()
+	for _, block := range testBlocks {
+		require.NoError(t, c.AddBlock(t.Context(), block, nil))
+	}
+	survivor := blockPoint(testBlocks[len(testBlocks)-2])
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	held, settled := c.HoldsPointSettled(ctx, survivor)
+	require.False(t, held)
+	require.False(t, settled, "a cancelled context is not an absent block")
+
+	ctx, cancel = context.WithCancel(t.Context())
+	defer cancel()
+	hook := func() { cancel() }
+	store.indexKey = dbtypes.BlockBlobIndexKey(uint64(len(testBlocks) - 1))
+	db.SetBlobStore(store)
+	store.afterIndexGet.Store(&hook)
+	held, settled = c.HoldsPointSettled(ctx, survivor)
+	require.False(t, held)
+	require.False(t, settled, "cancellation during the read proves nothing")
+}

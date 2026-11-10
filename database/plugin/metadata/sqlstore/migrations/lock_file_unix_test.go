@@ -39,20 +39,13 @@ import (
 func TestAssetAmountFingerprintIndexDropRemovesIndexes(t *testing.T) {
 	t.Parallel()
 
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, len(registry))
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-
-	registry, err := migrations.SQLiteRegistry()
-	require.NoError(t, err)
-	runner := migrations.Runner{
-		DB:       db,
-		Dialect:  "sqlite",
-		Registry: registry,
-		Locker:   migrations.NewFileLocker(databasePath + ".migrate.lock"),
-	}
-	require.NoError(t, runner.Run(context.Background()))
 
 	wantColumns := map[string]bool{"amount": false, "fingerprint": false}
 	rows, err := db.Query(`PRAGMA table_info("asset")`)
@@ -118,20 +111,13 @@ func TestAssetAmountFingerprintIndexDropRemovesIndexes(t *testing.T) {
 func TestAssetNameHexColumnDropRemovesColumnAndIndex(t *testing.T) {
 	t.Parallel()
 
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, len(registry))
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-
-	registry, err := migrations.SQLiteRegistry()
-	require.NoError(t, err)
-	runner := migrations.Runner{
-		DB:       db,
-		Dialect:  "sqlite",
-		Registry: registry,
-		Locker:   migrations.NewFileLocker(databasePath + ".migrate.lock"),
-	}
-	require.NoError(t, runner.Run(context.Background()))
 
 	rows, err := db.Query(`PRAGMA table_info("asset")`)
 	require.NoError(t, err)
@@ -177,12 +163,13 @@ func TestAssetNameHexColumnDropRemovesColumnAndIndex(t *testing.T) {
 
 func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 6)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 53)
+	require.Len(t, registry, 57)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -195,7 +182,6 @@ func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 		require.NoError(t, runner.Run(context.Background()))
 	}
 
-	runTo(registry[:6])
 	cold := []byte{0x11, 0x22}
 	hot := []byte{0x33, 0x44}
 	_, err = db.Exec(
@@ -294,6 +280,7 @@ func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 
 func TestCommitteeTermStartBackfillResumesAfterInterruption(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 8)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -312,7 +299,6 @@ func TestCommitteeTermStartBackfillResumesAfterInterruption(t *testing.T) {
 		return runner.Run(context.Background())
 	}
 
-	require.NoError(t, run(registry[:8]))
 	for slot := int64(1); slot <= 3; slot++ {
 		_, err = db.Exec(
 			"INSERT INTO committee_member (cold_cred_hash, expires_epoch, added_slot) VALUES (?, ?, ?)",
@@ -352,6 +338,7 @@ func TestCommitteeTermStartBackfillResumesAfterInterruption(t *testing.T) {
 
 func TestCommitteeZeroQuorumMigrationConvertsLegacyClearMarkers(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 22)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -364,12 +351,11 @@ func TestCommitteeZeroQuorumMigrationConvertsLegacyClearMarkers(t *testing.T) {
 		}
 		require.NoError(t, runner.Run(context.Background()))
 	}
-	run(registry[:22])
 	_, err = db.Exec(
 		"INSERT INTO committee_quorum (quorum, added_slot) VALUES ('0', 10)",
 	)
 	require.NoError(t, err)
-	run(registry)
+	run(registry[:23])
 
 	var quorum sql.NullString
 	require.NoError(t, db.QueryRow(
@@ -400,12 +386,13 @@ func TestGovernanceProposalDropBackfillMarksAlreadyRefundedProposals(
 	t *testing.T,
 ) {
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 16)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 53)
+	require.Len(t, registry, 57)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -420,7 +407,6 @@ func TestGovernanceProposalDropBackfillMarksAlreadyRefundedProposals(
 
 	// Pre-v17 schema, holding one proposal already expired (and, under that
 	// schema's code, already refunded) and one still active.
-	runTo(registry[:16])
 	expiredHash := []byte{0xaa, 0xbb}
 	activeHash := []byte{0xcc, 0xdd}
 	_, err = db.Exec(
@@ -439,7 +425,7 @@ func TestGovernanceProposalDropBackfillMarksAlreadyRefundedProposals(
 	)
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:17])
 
 	var droppedEpoch, droppedSlot uint64
 	require.NoError(t, db.QueryRow(
@@ -476,12 +462,13 @@ func TestGovernanceProposalDropBackfillMarksAlreadyRefundedProposals(
 func TestRewardAdaPotsImportedEpochFeesColumnIsAdditive(t *testing.T) {
 	t.Parallel()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 23)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 53)
+	require.Len(t, registry, 57)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -496,7 +483,6 @@ func TestRewardAdaPotsImportedEpochFeesColumnIsAdditive(t *testing.T) {
 
 	// Pre-v24 schema: write a row the way a live boundary always has, with
 	// no imported_epoch_fees column to fill in.
-	runTo(registry[:23])
 	_, err = db.Exec(
 		"INSERT INTO reward_ada_pots "+
 			"(epoch, treasury, reserves, fees, rewards, captured_slot) "+
@@ -505,7 +491,7 @@ func TestRewardAdaPotsImportedEpochFeesColumnIsAdditive(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:24])
 
 	var imported sql.NullString
 	require.NoError(t, db.QueryRow(
@@ -544,6 +530,7 @@ func TestRewardAdaPotsImportedFeesMigrationSchedulesLegacyMithrilRepair(
 ) {
 	t.Parallel()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 23)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -560,7 +547,6 @@ func TestRewardAdaPotsImportedFeesMigrationSchedulesLegacyMithrilRepair(
 		}
 		require.NoError(t, runner.Run(context.Background()))
 	}
-	runTo(registry[:23])
 	_, err = db.Exec(`INSERT INTO sync_state (sync_key, value)
 VALUES ('mithril_ledger_slot', '121763516')`)
 	require.NoError(t, err)
@@ -569,7 +555,7 @@ VALUES ('mithril_ledger_slot', '121763516')`)
 VALUES (1409, '1000', '2000', '300', '0', 121763516)`)
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:24])
 
 	var pending string
 	require.NoError(t, db.QueryRow(
@@ -582,6 +568,7 @@ VALUES (1409, '1000', '2000', '300', '0', 121763516)`)
 func TestRewardRepairCoverageMigrationFindsMissingAnchorPotRow(t *testing.T) {
 	t.Parallel()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 23)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -598,7 +585,6 @@ func TestRewardRepairCoverageMigrationFindsMissingAnchorPotRow(t *testing.T) {
 		}
 		require.NoError(t, runner.Run(context.Background()))
 	}
-	runTo(registry[:23])
 	_, err = db.Exec(`INSERT INTO sync_state (sync_key, value)
 VALUES ('mithril_ledger_slot', '121763516')`)
 	require.NoError(t, err)
@@ -613,7 +599,7 @@ VALUES ('mithril_ledger_slot', '121763516')`)
 
 	// The follow-up backfill must schedule repair from the anchor itself so the
 	// database cannot keep serving incomplete reward state.
-	runTo(registry)
+	runTo(registry[:25])
 	require.NoError(t, db.QueryRow(
 		"SELECT value FROM sync_state WHERE sync_key = ?",
 		"mithril_reward_repair_pending",
@@ -624,6 +610,7 @@ VALUES ('mithril_ledger_slot', '121763516')`)
 func TestRewardRepairCoverageMigrationKeepsCurrentMithrilImport(t *testing.T) {
 	t.Parallel()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 24)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -640,7 +627,6 @@ func TestRewardRepairCoverageMigrationKeepsCurrentMithrilImport(t *testing.T) {
 		}
 		require.NoError(t, runner.Run(context.Background()))
 	}
-	runTo(registry[:24])
 	_, err = db.Exec(`INSERT INTO sync_state (sync_key, value)
 VALUES ('mithril_ledger_slot', '121763516')`)
 	require.NoError(t, err)
@@ -648,7 +634,7 @@ VALUES ('mithril_ledger_slot', '121763516')`)
 (epoch, treasury, reserves, fees, rewards, captured_slot, imported_epoch_fees)
 VALUES (1409, '1000', '2000', '300', '0', 121763516, '0')`)
 	require.NoError(t, err)
-	runTo(registry)
+	runTo(registry[:25])
 
 	var pending string
 	require.ErrorIs(t, db.QueryRow(

@@ -4802,6 +4802,65 @@ func queuePeerHeaderHistoryInvalidation(
 	pending.addAfterUnlock(e.InvalidatePeerHeaderHistory)
 }
 
+// pinChainsyncHeaderVerdict pins generation for admitting e, verifying the
+// header again when the verdict expired first. It returns a nil release and a
+// nil error when the header is withheld, and an error, after queueing the
+// connection for recycling, when the header fails verification again: a
+// verdict that expired says nothing about the header, but a fresh failure is
+// the same rejection as the first verification's.
+func (ls *LedgerState) pinChainsyncHeaderVerdict(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+	generation uint64,
+	reverify func() (uint64, error),
+) (uint64, func(), error) {
+	pinned, release, err := ls.pinHeaderVerdict(generation, reverify)
+	if err != nil && !IsHeaderVerificationDeferred(err) {
+		return 0, nil, ls.rejectChainsyncHeaderVerification(e, pending, err)
+	}
+	if release == nil {
+		ls.config.Logger.Debug(
+			"withholding chainsync header after producer authorization changed before admission",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"error", err,
+		)
+		return generation, nil, nil
+	}
+	return pinned, release, nil
+}
+
+// rejectChainsyncHeaderVerification queues a recycle of the connection that
+// sent a header failing crypto verification and returns the failure.
+func (ls *LedgerState) rejectChainsyncHeaderVerification(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+	err error,
+) error {
+	if ls.config.EventBus != nil {
+		ls.config.Logger.Warn(
+			"recycling connection after header verification failure",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+		)
+		pending.add(
+			ls.config.EventBus,
+			ConnectionRecycleRequestedEventType,
+			event.NewEvent(
+				ConnectionRecycleRequestedEventType,
+				ConnectionRecycleRequestedEvent{
+					ConnectionId: e.ConnectionId,
+					Reason:       "header_verification_failure",
+				},
+			),
+		)
+	}
+	return fmt.Errorf("block header crypto verification failed: %w", err)
+}
+
 func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
@@ -4882,50 +4941,40 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			producerAuthorizationGeneration = 0
 			clearChainsyncHeaderAuthorization(&e)
 		default:
-			{
-				if ls.config.EventBus != nil {
-					ls.config.Logger.Warn(
-						"recycling connection after header verification failure",
-						"component", "ledger",
-						"connection_id", e.ConnectionId.String(),
-						"slot", e.Point.Slot,
-						"hash", hex.EncodeToString(e.Point.Hash),
-					)
-					pending.add(
-						ls.config.EventBus,
-						ConnectionRecycleRequestedEventType,
-						event.NewEvent(
-							ConnectionRecycleRequestedEventType,
-							ConnectionRecycleRequestedEvent{
-								ConnectionId: e.ConnectionId,
-								Reason:       "header_verification_failure",
-							},
-						),
-					)
-				}
-				return fmt.Errorf(
-					"block header crypto verification failed: %w",
-					err,
-				)
-			}
+			return ls.rejectChainsyncHeaderVerification(e, pending, err)
 		}
 	}
 	var releaseVerificationGeneration func()
 	verificationGenerationReleased := false
 	if headerCryptoVerificationGeneration != 0 {
-		var generationCurrent bool
-		releaseVerificationGeneration, generationCurrent = ls.
-			PinHeaderCryptoVerificationGeneration(
-				headerCryptoVerificationGeneration,
-			)
-		if !generationCurrent {
-			ls.config.Logger.Debug(
-				"withholding chainsync header after producer authorization changed before admission",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-			)
+		var reverify func() (uint64, error)
+		if headerValidationRequired {
+			reverify = func() (uint64, error) {
+				return ls.ValidateChainSelectionHeaderCryptoWithGeneration(
+					e.BlockHeader,
+				)
+			}
+		}
+		pinnedGeneration, release, err := ls.pinChainsyncHeaderVerdict(
+			e,
+			pending,
+			headerCryptoVerificationGeneration,
+			reverify,
+		)
+		if err != nil {
+			return err
+		}
+		if release == nil {
 			return nil
+		}
+		releaseVerificationGeneration = release
+		if pinnedGeneration != headerCryptoVerificationGeneration {
+			headerCryptoVerificationGeneration = pinnedGeneration
+			producerAuthorizationGeneration = pinnedGeneration
+			e.HeaderCryptoVerificationGeneration = pinnedGeneration
+			if e.PeerTipUpdate != nil {
+				e.PeerTipUpdate.HeaderCryptoVerificationGeneration = pinnedGeneration
+			}
 		}
 		defer func() {
 			if releaseVerificationGeneration != nil {
@@ -5433,13 +5482,23 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 			return false, fmt.Errorf("wait for forecast horizon: %w", err)
 		}
 		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
-	} else if err == nil && ls.headerBeyondForecastHorizon(ctx, e) {
-		// The slot is in range from the local tip, but the peer's chain
-		// leaves the local chain earlier, and is forecast from there.
-		if err := ls.awaitForecastHorizon(ctx, e); err != nil {
-			return false, fmt.Errorf("wait for forecast horizon: %w", err)
+	} else if err == nil {
+		beyond := ls.headerBeyondForecastHorizon(ctx, e)
+		// A context that ended during the anchor walk reads every membership
+		// as absent, which looks like a header inside the horizon.
+		if ctx != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return false, fmt.Errorf("wait for forecast horizon: %w", cerr)
+			}
 		}
-		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
+		if beyond {
+			// The slot is in range from the local tip, but the peer's chain
+			// leaves the local chain earlier, and is forecast from there.
+			if err := ls.awaitForecastHorizon(ctx, e); err != nil {
+				return false, fmt.Errorf("wait for forecast horizon: %w", err)
+			}
+			slotTime, err = ls.slotClock.SlotToTime(headerSlot)
+		}
 	}
 	if err != nil {
 		return false, fmt.Errorf("resolve header slot onset: %w", err)
@@ -5509,7 +5568,7 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 		if beyond, _ := ls.headerBeyondForecastHorizonFrom(
 			ctx, e, &anchor,
 		); !beyond && !anchor.disconnected {
-			return nil
+			return ctx.Err()
 		}
 		if !parked {
 			parked = true
@@ -5629,9 +5688,17 @@ func (ls *LedgerState) awaitForecastHorizon(
 		capacityChanged := ls.chainsyncCapacityChanged
 		ls.chainsyncBlockfetchMutex.Unlock()
 		if !ls.headerBeyondForecastHorizon(ctx, e) {
-			return nil
+			// A context that ended during the anchor walk reads every
+			// membership as absent, which looks like a header that is not
+			// past the horizon.
+			return ctx.Err()
 		}
 		if ls.chainsyncHeaderDisconnected(ctx, e) {
+			// Cancellation during the ancestry walk reads every block as
+			// absent, which is indistinguishable from a real disconnect.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if !ls.flushQueuedHeadersForHorizonWait(e.ConnectionId) &&
 				!ls.chainAheadOfAppliedTip() {
 				return ErrChainsyncHeaderDisconnected
@@ -5661,7 +5728,14 @@ func (ls *LedgerState) awaitForecastHorizon(
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if !ls.headerBeyondForecastHorizon(ctx, e) {
+			beyond := ls.headerBeyondForecastHorizon(ctx, e)
+			// A context that ended during the recheck reads every membership
+			// as absent: the header may look inside the horizon or past it,
+			// and neither admits it nor owes it a resync.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !beyond {
 				return nil
 			}
 			select {
@@ -5832,6 +5906,9 @@ func (ls *LedgerState) holdsPointSettled(
 		held, settled = ls.chain.HoldsPointSettled(ctx, point)
 		if settled {
 			return held, true
+		}
+		if ctx.Err() != nil {
+			return false, false
 		}
 	}
 	return false, false

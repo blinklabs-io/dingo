@@ -202,7 +202,7 @@ func TestValidateEbCertificateQuorumFailure(t *testing.T) {
 	assert.ErrorIs(t, err, ErrQuorumNotMet)
 }
 
-func TestValidateEbCertificateUnknownSignerSkipsSigCheck(t *testing.T) {
+func TestValidateEbCertificateUnknownSignerFails(t *testing.T) {
 	t.Parallel()
 
 	fixture := newTestCommitteeFixture(t, 10)
@@ -211,8 +211,7 @@ func TestValidateEbCertificateUnknownSignerSkipsSigCheck(t *testing.T) {
 	cert, err := BuildEbCertificate(77, ebHash, fixture.committee, votes)
 	require.NoError(t, err)
 
-	// Registry missing one signer's key: quorum still validates but the
-	// aggregate signature cannot be checked.
+	// Registry missing one signer's key: quorum alone must not validate.
 	partialEntries := make(map[string]string)
 	for _, member := range fixture.committee.Members[1:] {
 		key := fixture.keys[member.VoterId]
@@ -226,7 +225,13 @@ func TestValidateEbCertificateUnknownSignerSkipsSigCheck(t *testing.T) {
 	sigChecked, err := ValidateEbCertificate(
 		cert, fixture.committee, big.NewRat(7, 10), partialRegistry,
 	)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrUnknownSignerKey)
+	assert.False(t, sigChecked)
+
+	sigChecked, err = ValidateEbCertificate(
+		cert, fixture.committee, big.NewRat(7, 10), nil,
+	)
+	require.ErrorIs(t, err, ErrUnknownSignerKey)
 	assert.False(t, sigChecked)
 }
 
@@ -268,4 +273,28 @@ func TestValidateEbCertificateWrongBitfieldSize(t *testing.T) {
 		fixture.registry,
 	)
 	assert.Error(t, err)
+}
+
+func TestValidatePrototypeEbCertificateUnknownSignerFails(t *testing.T) {
+	t.Parallel()
+
+	fixture := newTestCommitteeFixture(t, 10)
+	rbHash := lcommon.NewBlake2b256([]byte("rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	votes := fixture.signVotes(t, 77, ebHash, 0, 1, 2, 3, 4)
+	cert, err := BuildEbCertificate(77, ebHash, fixture.committee, votes)
+	require.NoError(t, err)
+
+	emptyRegistry, err := NewVoterRegistry(nil)
+	require.NoError(t, err)
+	for name, registry := range map[string]*VoterRegistry{
+		"nil":   nil,
+		"empty": emptyRegistry,
+	} {
+		sigChecked, err := ValidatePrototypeEbCertificate(
+			cert, rbHash, fixture.committee, big.NewRat(7, 10), registry,
+		)
+		require.ErrorIs(t, err, ErrUnknownSignerKey, name)
+		assert.False(t, sigChecked, name)
+	}
 }

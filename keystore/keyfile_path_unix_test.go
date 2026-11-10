@@ -27,6 +27,7 @@ import (
 )
 
 func TestKeyFileLoadersRejectFIFOWithoutWriter(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		load func(string) (*loadedKey, error)
@@ -36,6 +37,7 @@ func TestKeyFileLoadersRejectFIFOWithoutWriter(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			path := filepath.Join(t.TempDir(), "key.fifo")
 			require.NoError(t, syscall.Mkfifo(path, 0o600))
 

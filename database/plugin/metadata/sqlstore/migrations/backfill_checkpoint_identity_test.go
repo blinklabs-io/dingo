@@ -31,12 +31,13 @@ func checkpointIdentityUpgradeDB(
 	t.Helper()
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 51)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 53)
+	require.Len(t, registry, 57)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -48,7 +49,6 @@ func checkpointIdentityUpgradeDB(
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
-	runTo(registry[:51])
 	return db, func() { runTo(registry) }
 }
 

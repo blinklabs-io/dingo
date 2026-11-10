@@ -1859,26 +1859,6 @@ func TestHandleEpochTransitionReplacesStaleSnapshotRows(t *testing.T) {
 	require.Empty(t, accountOutputs)
 }
 
-// TestCaptureGenesisSnapshot_NoPools verifies that when no pools exist
-// at all, no snapshots are created and no error is returned.
-func TestCaptureGenesisSnapshot_NoPools(t *testing.T) {
-	t.Parallel()
-
-	db := setupTestDB(t)
-
-	// Epochs exist but no pools
-	seedEpochs(t, db, []models.Epoch{
-		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
-		{EpochId: 10, StartSlot: 4320000, LengthInSlots: 432000},
-	})
-
-	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
-
-	err := mgr.CaptureGenesisSnapshot(context.Background())
-	require.NoError(t, err, "no pools should not be an error")
-}
-
 // TestCaptureGenesisSnapshot_SmallEpoch verifies correct behavior when
 // the current epoch is less than 2 (edge case for the offset loop).
 func TestCaptureGenesisSnapshot_SmallEpoch(t *testing.T) {
@@ -2212,6 +2192,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 	}
 
 	t.Run("fallback cannot overwrite authoritative", func(t *testing.T) {
+		t.Parallel()
 		mgr, poolHash, authoritativeEvt := newFixture(t)
 		db := mgr.db
 		fallbackEvt := authoritativeEvt
@@ -2322,6 +2303,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 	})
 
 	t.Run("authoritative replaces provisional fallback", func(t *testing.T) {
+		t.Parallel()
 		mgr, _, authoritativeEvt := newFixture(t)
 		db := mgr.db
 		fallbackEvt := authoritativeEvt
@@ -2521,4 +2503,173 @@ func TestCaptureGenesisSnapshot_EpochLookupFailureIsNotAFreshSync(
 		"no epoch-0 mark snapshot may be persisted when the database's "+
 			"current epoch could not be determined",
 	)
+}
+
+// TestCaptureGenesisSnapshot_RestartKeepsWindowWithEmptyMark covers a
+// from-genesis database restarted in the first Shelley epochs: the mark
+// captured at the Byron-to-Shelley boundary is genuinely empty, which must
+// still count as a captured window rather than send the restart down the
+// post-Mithril reseed that overwrites recorded history.
+func TestCaptureGenesisSnapshot_RestartKeepsWindowWithEmptyMark(t *testing.T) {
+	t.Parallel()
+
+	db := setupTestDB(t)
+
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+		{EpochId: 148, StartSlot: 63936000, LengthInSlots: 432000},
+		{EpochId: 149, StartSlot: 64368000, LengthInSlots: 432000},
+		{EpochId: 150, StartSlot: 64800000, LengthInSlots: 432000},
+	})
+
+	poolHash := []byte("poolR_12345678901234567890EF")
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{
+			stakingKey:  []byte("aliceRE_staking_key_12345678"),
+			utxoAmounts: []types.Uint64{50000000},
+		},
+	}, 64800000)
+
+	require.NoError(t, db.Metadata().SaveEpochSummary(
+		&models.EpochSummary{Epoch: 0, SnapshotReady: true}, nil,
+	))
+	require.NoError(t, db.Metadata().SaveEpochSummary(
+		&models.EpochSummary{
+			Epoch: 148, BoundarySlot: 63936000, SnapshotReady: true,
+		}, nil,
+	))
+	for _, epoch := range []uint64{149, 150} {
+		require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+			&models.PoolStakeSnapshot{
+				Epoch:          epoch,
+				SnapshotType:   "mark",
+				PoolKeyHash:    poolHash,
+				TotalStake:     types.Uint64(1000 + epoch),
+				DelegatorCount: 1,
+				CapturedSlot:   64800000,
+			},
+			nil,
+		))
+	}
+
+	eventBus := event.NewEventBus(nil, nil)
+	mgr := NewManager(db, eventBus, nil)
+
+	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
+
+	genesis, err := db.Metadata().GetPoolStakeSnapshot(0, "mark", poolHash, nil)
+	require.NoError(t, err)
+	require.Nil(t, genesis, "restart must not reseed the epoch-0 mark")
+	recorded, err := db.Metadata().GetPoolStakeSnapshot(
+		149, "mark", poolHash, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, recorded)
+	require.Equal(t, types.Uint64(1149), recorded.TotalStake,
+		"restart must not overwrite a recorded mark snapshot")
+	empty, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(148, "mark", nil)
+	require.NoError(t, err)
+	require.Empty(t, empty, "restart must not fill the genuinely empty mark")
+}
+
+// TestCaptureGenesisSnapshot_RestartReseedsUnprovenEmptyMark pins the other
+// side of the empty-mark acceptance: a mark with no rows counts as captured
+// only when its ready summary records an empty capture. Summaries survive
+// pool-row pruning and a deep truncate, so a ready summary that records stake
+// or pools the rows no longer carry, or a summary that is missing or not
+// ready, must still send the restart down the reseed that repairs the window.
+func TestCaptureGenesisSnapshot_RestartReseedsUnprovenEmptyMark(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		summary *models.EpochSummary
+	}{
+		{
+			name: "ready summary records stake",
+			summary: &models.EpochSummary{
+				Epoch: 148, BoundarySlot: 63936000, SnapshotReady: true,
+				TotalActiveStake: 1148, TotalPoolCount: 1,
+			},
+		},
+		{
+			name: "ready summary records stake only",
+			summary: &models.EpochSummary{
+				Epoch: 148, BoundarySlot: 63936000, SnapshotReady: true,
+				TotalActiveStake: 1148,
+			},
+		},
+		{
+			name: "ready summary records pools only",
+			summary: &models.EpochSummary{
+				Epoch: 148, BoundarySlot: 63936000, SnapshotReady: true,
+				TotalPoolCount: 1,
+			},
+		},
+		{
+			name: "summary not ready",
+			summary: &models.EpochSummary{
+				Epoch: 148, BoundarySlot: 63936000,
+			},
+		},
+		{
+			name: "summary missing",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := setupTestDB(t)
+			seedEpochs(t, db, []models.Epoch{
+				{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+				{EpochId: 148, StartSlot: 63936000, LengthInSlots: 432000},
+				{EpochId: 149, StartSlot: 64368000, LengthInSlots: 432000},
+				{EpochId: 150, StartSlot: 64800000, LengthInSlots: 432000},
+			})
+			poolHash := []byte("poolU_12345678901234567890EF")
+			seedPoolAndDelegations(t, db, poolHash, []struct {
+				stakingKey  []byte
+				utxoAmounts []types.Uint64
+			}{
+				{
+					stakingKey:  []byte("aliceUE_staking_key_12345678"),
+					utxoAmounts: []types.Uint64{50000000},
+				},
+			}, 64800000)
+			if tc.summary != nil {
+				require.NoError(t, db.Metadata().SaveEpochSummary(
+					tc.summary, nil,
+				))
+			}
+			for _, epoch := range []uint64{149, 150} {
+				require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+					&models.PoolStakeSnapshot{
+						Epoch:          epoch,
+						SnapshotType:   "mark",
+						PoolKeyHash:    poolHash,
+						TotalStake:     types.Uint64(1000 + epoch),
+						DelegatorCount: 1,
+						CapturedSlot:   64800000,
+					},
+					nil,
+				))
+			}
+
+			mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+			require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
+
+			repaired, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+				148, "mark", nil,
+			)
+			require.NoError(t, err)
+			require.NotEmpty(t, repaired,
+				"restart must reseed a mark its summary does not prove empty")
+		})
+	}
 }

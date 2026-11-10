@@ -44,10 +44,19 @@ type Config struct {
 	// could point introspection clients at a different database. It is empty
 	// for in-memory SQLite and other backends, and immutable after construction.
 	SQLitePath string
-	WriteDB    *sql.DB
-	ReadDB     *sql.DB
-	Dialect    Dialect
-	Logger     *slog.Logger
+	// SQLiteOverlayInsertRows opts an eager-preparing SQLite provider into
+	// wider overlay INSERTs after transaction-local limit and trigger checks.
+	// Zero retains the dialect's parameter bound; the maximum is 2047 rows.
+	SQLiteOverlayInsertRows int
+	// LazyHotStatements defers preparing the hot-statement cache from Start
+	// to the first use of each statement on the write pool. It is off by
+	// default and exists for test stores, which open many short-lived stores;
+	// a production Store keeps eager preparation. See borrowStmt.
+	LazyHotStatements bool
+	WriteDB           *sql.DB
+	ReadDB            *sql.DB
+	Dialect           Dialect
+	Logger            *slog.Logger
 	// StorageMode controls retention of API-only transaction detail. Empty
 	// selects the consensus-focused core mode.
 	StorageMode string
@@ -134,12 +143,13 @@ type Config struct {
 // Store owns the shared database/sql pools. Provider packages own DSN and
 // driver selection; metadata behavior belongs here.
 type Store struct {
-	sqlitePath  string
-	writeDB     *sql.DB
-	readDB      *sql.DB
-	dialect     Dialect
-	logger      *slog.Logger
-	storageMode string
+	sqlitePath              string
+	sqliteOverlayInsertRows int
+	writeDB                 *sql.DB
+	readDB                  *sql.DB
+	dialect                 Dialect
+	logger                  *slog.Logger
+	storageMode             string
 
 	// committeeAuthRetentionSlots is the configured rollback window for
 	// auth_committee_hot pruning. Read it through committeeAuthRetention(),
@@ -150,6 +160,22 @@ type Store struct {
 	// non-zero. Only tests set it, to drive the rebuild across many batch
 	// boundaries without a production-sized fixture.
 	rewardLiveStakeBatchSize int
+
+	// rewardStateDeleteBatchSize fixes the prune batch at that many rows
+	// when non-zero, in place of the adaptive sizing;
+	// rewardStatePruneInitialRows replaces the 5000-row starting batch size
+	// when non-zero; rewardStatePruneNow replaces time.Now for the hold
+	// measurement; rewardStateDeleteBatchDone runs after each committed
+	// batch. Only tests set them, to drive the prune across batch
+	// boundaries, to stop it between two of them, and to feed the sizing a
+	// scripted clock. rewardStatePruneRows carries each table's learned
+	// batch size from one prune to the next, under rewardStatePruneMu.
+	rewardStateDeleteBatchSize  int
+	rewardStatePruneInitialRows int
+	rewardStatePruneNow         func() time.Time
+	rewardStateDeleteBatchDone  func(rewardStatePruneBatch) error
+	rewardStatePruneMu          sync.Mutex
+	rewardStatePruneRows        map[string]int
 
 	// committeeAuthImmutableSlot caches the live rollback-safe immutable slot
 	// (tip depth securityParam blocks back), pushed in by
@@ -175,6 +201,9 @@ type Store struct {
 	// Test hook runs after a prune has selected its horizon. Production leaves
 	// it nil.
 	committeeAuthPruneLocked func()
+	// Test hook runs after GetLiveStakeInputsForPools has totalled pending
+	// reward credits and before its pool reads. Production leaves it nil.
+	liveStakePendingTotalsRead func()
 
 	migrations          []migrations.Migration
 	genesisStakingEmpty bool
@@ -235,6 +264,12 @@ type Store struct {
 	stmts       map[string]*sql.Stmt
 	stmtBorrows map[*sql.Stmt]int
 	stmtRetired map[*sql.Stmt]struct{}
+	// stmtFailed holds hot queries whose lazy prepare failed; stmtsInvalidated
+	// is set once closePreparedStatements has emptied the cache for good.
+	stmtFailed       map[string]struct{}
+	stmtsInvalidated bool
+	// lazyHotStatements is Config.LazyHotStatements; immutable after New.
+	lazyHotStatements bool
 
 	// sumCredentialUtxoStakeCalls counts invocations of
 	// sumCredentialUtxoStake, the per-credential full live-UTxO aggregate
@@ -266,6 +301,15 @@ func New(config Config) (*Store, error) {
 	}
 	if config.Dialect == nil {
 		return nil, errors.New("sqlstore: dialect is required")
+	}
+	if config.SQLiteOverlayInsertRows < 0 ||
+		config.SQLiteOverlayInsertRows > maxSQLiteOverlayInsertRows {
+		return nil, errors.New(
+			"sqlstore: SQLite overlay insert rows must be between 0 and 2047",
+		)
+	}
+	if config.SQLiteOverlayInsertRows > 0 && config.Dialect.Name() != "sqlite" {
+		return nil, errors.New("sqlstore: wider overlay inserts require SQLite")
 	}
 	if config.ReadDB == nil {
 		config.ReadDB = config.WriteDB
@@ -304,6 +348,8 @@ func New(config Config) (*Store, error) {
 		writeDB:                     config.WriteDB,
 		readDB:                      config.ReadDB,
 		sqlitePath:                  config.SQLitePath,
+		sqliteOverlayInsertRows:     config.SQLiteOverlayInsertRows,
+		lazyHotStatements:           config.LazyHotStatements,
 		dialect:                     config.Dialect,
 		logger:                      config.Logger,
 		storageMode:                 config.StorageMode,
@@ -325,7 +371,9 @@ func New(config Config) (*Store, error) {
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
 		closeDone:                   make(chan struct{}),
-		plannerStats:                newPlannerStatsMetrics(config.PromRegistry),
+		plannerStats: newPlannerStatsMetrics(
+			config.PromRegistry,
+		),
 		sqlOperations: newSQLOperationsCounter(
 			config.PromRegistry,
 		),
@@ -709,7 +757,8 @@ func (s *Store) startMaintenance() {
 func jitteredInterval(every time.Duration) time.Duration {
 	const maxDuration = time.Duration(1<<63 - 1)
 	jitterMax := min(every/10, maxDuration-every)
-	return every + rand.N(jitterMax+1) //nolint:gosec // schedule jitter, not a secret
+	//nolint:gosec // schedule jitter is not a secret
+	return every + rand.N(jitterMax+1)
 }
 
 // postponeWarnEvery is how many consecutive postponements pass between

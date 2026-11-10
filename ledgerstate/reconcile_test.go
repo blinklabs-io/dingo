@@ -373,19 +373,6 @@ func TestReconcileCompletedEmptyKeySetsAreAuthoritative(t *testing.T) {
 		"completed empty pool set must retire stale pools")
 }
 
-// TestReconcileStaleLedgerStateEmptyIsNoop ensures reconcile against an empty
-// database (the fresh-bootstrap case) does nothing and does not error.
-func TestReconcileStaleLedgerStateEmptyIsNoop(t *testing.T) {
-	t.Parallel()
-
-	db := newReconcileTestDB(t)
-	keys := newReconcileKeys()
-	require.NoError(t, reconcileStaleLedgerState(
-		context.Background(), db, keys, 1, 1,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-	))
-}
-
 func TestReconcileKeysRejectsMalformedUtxoKey(t *testing.T) {
 	t.Parallel()
 

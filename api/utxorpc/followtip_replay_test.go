@@ -207,7 +207,7 @@ func followTipFrom(
 	return stream
 }
 
-const followTipReplayBlocks = 25
+const followTipReplayBlocks = 10
 
 func TestConnect_FollowTipReplayRefusedWhenReplaySlotsHeld(t *testing.T) {
 	t.Parallel()
@@ -293,8 +293,8 @@ func TestConnect_FollowTipReplayIsPaced(t *testing.T) {
 		require.True(t, stream.Receive(), "block %d: %v", i, stream.Err())
 	}
 
-	// Blocks 1..23 are behind the tip and charged; block 24 is the tip.
-	// The first two ride the burst, the remaining 21 each wait.
+	// Blocks 1..N-2 are behind the tip and charged; block N-1 is the tip.
+	// The first two ride the burst, the remaining ones each wait.
 	sleeps := clock.recorded()
 	require.Len(t, sleeps, followTipReplayBlocks-4)
 	assert.Equal(t, 500*time.Millisecond, sleeps[0])

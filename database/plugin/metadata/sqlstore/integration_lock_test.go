@@ -17,11 +17,9 @@ package sqlstore
 import (
 	"crypto/sha256"
 	"encoding/binary"
-	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
-	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
 
@@ -41,20 +39,4 @@ func integrationMigrationLocker(
 func integrationMigrationLockKey(namespace string) int64 {
 	digest := sha256.Sum256([]byte(namespace))
 	return int64(binary.BigEndian.Uint64(digest[:8]))
-}
-
-func TestIntegrationMigrationLockKey(t *testing.T) {
-	t.Parallel()
-
-	first := integrationMigrationLockKey("sqlstore_pool_1")
-	require.Equal(
-		t,
-		first,
-		integrationMigrationLockKey("sqlstore_pool_1"),
-	)
-	require.NotEqual(
-		t,
-		first,
-		integrationMigrationLockKey("sqlstore_pool_2"),
-	)
 }

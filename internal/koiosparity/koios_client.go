@@ -64,8 +64,6 @@ const (
 	koiosBurstLimitSafe = 80
 	koiosBurstCooldown  = 60 * time.Second
 
-	koiosRetryBackoff5xx = 2 * time.Second
-
 	// koios408MaxRetriesDefault/koios408InitialBackoffDefault/
 	// koios408MaxBackoffDefault give HTTP 408 ("Request Time-out") its own,
 	// much longer retry budget than koiosMaxRetries/koiosRetryBackoff5xx.
@@ -198,6 +196,18 @@ const (
 	// on how long a legitimately slow bulk operation may run in total.
 	koiosRequestTimeout = 20 * time.Second
 )
+
+// koiosRetryBackoff5xx is the step of the linear backoff between retries of a
+// request that failed with a transport error, a 5xx status or an unreadable
+// body. It is a variable only so test binaries can shorten it before any
+// client runs; see SetRetryBackoff5xxForTesting.
+var koiosRetryBackoff5xx = 2 * time.Second
+
+// SetRetryBackoff5xxForTesting changes the retry backoff step. It is not safe
+// for concurrent use with running clients, so call it only from TestMain.
+func SetRetryBackoff5xxForTesting(d time.Duration) {
+	koiosRetryBackoff5xx = d
+}
 
 // koiosBaseURLs maps network name to Koios v1 base URL.
 var koiosBaseURLs = map[string]string{
@@ -2405,6 +2415,9 @@ type KoiosTxInfoItem struct {
 	CollateralInputs []KoiosTxInfoUtxoRef        `json:"collateral_inputs"`
 	CollateralOutput *KoiosTxInfoOutput          `json:"collateral_output"`
 	PlutusContracts  []KoiosTxInfoPlutusContract `json:"plutus_contracts"`
+
+	// ReferenceInputs are the refs the transaction read without spending.
+	ReferenceInputs []KoiosTxInfoUtxoRef `json:"reference_inputs"`
 }
 
 // IsValid reports whether the ledger applied this transaction's body, i.e.
@@ -2510,6 +2523,30 @@ func (k *KoiosClient) GetTxInfos(
 	ctx context.Context,
 	txHashes []string,
 ) ([]KoiosTxInfoItem, error) {
+	byHash, err := k.getAvailableTxInfos(ctx, txHashes)
+	if err != nil {
+		return nil, err
+	}
+	all := make([]KoiosTxInfoItem, len(txHashes))
+	for i, hash := range txHashes {
+		item, ok := byHash[hash]
+		if !ok {
+			return nil, fmt.Errorf("%w %s", ErrTxInfoMissing, hash)
+		}
+		all[i] = item
+	}
+	return all, nil
+}
+
+// getAvailableTxInfos requests txHashes and returns the rows Koios answered
+// with, keyed by hash. A hash Koios has no row for is simply absent, which
+// suits a caller that treats each transaction independently; GetTxInfos layers
+// its every-hash contract on top. A failed request or a duplicated row still
+// fails the call.
+func (k *KoiosClient) getAvailableTxInfos(
+	ctx context.Context,
+	txHashes []string,
+) (map[string]KoiosTxInfoItem, error) {
 	byHash := make(map[string]KoiosTxInfoItem, len(txHashes))
 	batch := k.TxInfoBatchSize()
 	for start := 0; start < len(txHashes); start += batch {
@@ -2560,16 +2597,7 @@ func (k *KoiosClient) GetTxInfos(
 			byHash[item.TxHash] = item
 		}
 	}
-
-	all := make([]KoiosTxInfoItem, len(txHashes))
-	for i, hash := range txHashes {
-		item, ok := byHash[hash]
-		if !ok {
-			return nil, fmt.Errorf("%w %s", ErrTxInfoMissing, hash)
-		}
-		all[i] = item
-	}
-	return all, nil
+	return byHash, nil
 }
 
 // describeTxInfoDecodeFailure turns a whole-response /tx_info decode failure

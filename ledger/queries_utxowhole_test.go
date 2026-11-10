@@ -549,7 +549,7 @@ func TestQueryShelleyUtxoWhole_CancelsDuringDecode(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	const rowCount = 100
+	const rowCount = 2 * utxoWholeResolveWorkers
 	for i := range rowCount {
 		seedBabbageUtxo(
 			t,
@@ -610,7 +610,7 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 	// Not t.Parallel: swaps the package-level decodeUtxoWholeCborFunc seam.
 	db := newTestDB(t)
 
-	const rowCount = 100
+	const rowCount = 3 * utxoWholeResolveWorkers
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
 		lcommon.AddressNetworkTestnet,
@@ -681,8 +681,8 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 	// A bound near utxoWholeResolveWorkers, not just under rowCount: only
 	// the rows already dispatched by the time the abort above fired
 	// should ever reach the gated decode branch. Without the early
-	// abort, every remaining row of the 99 still would (rowCount minus
-	// the one that failed), so this stays a meaningful regression check
+	// abort, every remaining row (rowCount minus the one that failed)
+	// still would, so this stays a meaningful regression check
 	// rather than one only a total mechanism removal could fail.
 	require.Less(
 		t, decodedCount.Load(), int64(rowCount/2),

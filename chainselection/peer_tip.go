@@ -59,6 +59,13 @@ type PeerChainTip struct {
 	// intersection is not lost merely because a peer advanced past the window.
 	observedSlots  []uint64
 	observedPoints []ocommon.Point
+	// observedSlotsRef and observedPointsRef locate those views in shared,
+	// append-only windows (see frontierWindow), so staging a frontier copy
+	// shares history instead of duplicating it. Both views are replaced only
+	// through the window helpers; the plain slices are read-only to every
+	// other path.
+	observedSlotsRef  windowRef[uint64]
+	observedPointsRef windowRef[ocommon.Point]
 	// observedPointBaseBlock is the block number of observedPoints[0]. The
 	// remaining entries are consecutive block numbers, which lets density
 	// comparisons align two frontiers without scanning a full Genesis window.
@@ -231,15 +238,13 @@ func (p *PeerChainTip) ApplyRollback(
 	p.PraosView = PraosTiebreakerView{}
 	p.LastUpdated = p.now()
 	if point.Slot == 0 && len(point.Hash) == 0 {
-		p.observedSlots = nil
-		p.observedPoints = nil
-		p.observedPointBaseBlock = 0
+		p.resetObservedFrontier()
 		return
 	}
 	keepSlots := sort.Search(len(p.observedSlots), func(i int) bool {
 		return p.observedSlots[i] > point.Slot
 	})
-	p.observedSlots = p.observedSlots[:keepSlots]
+	p.observedSlots = windowTruncate(p.observedSlots, keepSlots)
 	pointIdx := sort.Search(len(p.observedPoints), func(i int) bool {
 		return p.observedPoints[i].Slot >= point.Slot
 	})
@@ -255,15 +260,26 @@ func (p *PeerChainTip) ApplyRollback(
 		p.observedSlots = nil
 		keepSlots = 0
 	}
-	clear(p.observedPoints[keepPoints:])
-	p.observedPoints = p.observedPoints[:keepPoints]
+	p.observedPoints = windowTruncate(p.observedPoints, keepPoints)
 	if keepSlots == 0 {
 		p.observedSlots = nil
+		p.observedSlotsRef = windowRef[uint64]{}
 	}
 	if keepPoints == 0 {
-		p.observedPoints = nil
-		p.observedPointBaseBlock = 0
+		p.resetObservedPoints()
 	}
+}
+
+func (p *PeerChainTip) resetObservedPoints() {
+	p.observedPoints = nil
+	p.observedPointsRef = windowRef[ocommon.Point]{}
+	p.observedPointBaseBlock = 0
+}
+
+func (p *PeerChainTip) resetObservedFrontier() {
+	p.observedSlots = nil
+	p.observedSlotsRef = windowRef[uint64]{}
+	p.resetObservedPoints()
 }
 
 func (p *PeerChainTip) recordAdmittedTipPoint(
@@ -367,8 +383,7 @@ func (p *PeerChainTip) recordObservedPoint(
 		return
 	}
 	if !trackHashes {
-		p.observedPoints = nil
-		p.observedPointBaseBlock = 0
+		p.resetObservedPoints()
 	} else if maxPoints == 0 {
 		maxPoints = 1
 	}
@@ -376,9 +391,7 @@ func (p *PeerChainTip) recordObservedPoint(
 	// The origin carries no hash. A block at slot 0 does, and is a delivered
 	// point like any other.
 	if slot == 0 && len(point.Hash) == 0 {
-		p.observedSlots = nil
-		p.observedPoints = nil
-		p.observedPointBaseBlock = 0
+		p.resetObservedFrontier()
 		return
 	}
 
@@ -387,12 +400,20 @@ func (p *PeerChainTip) recordObservedPoint(
 	// full chain history.
 	for len(p.observedSlots) > 0 &&
 		p.observedSlots[len(p.observedSlots)-1] > slot {
-		p.observedSlots = p.observedSlots[:len(p.observedSlots)-1]
+		p.observedSlots = windowTruncate(
+			p.observedSlots,
+			len(p.observedSlots)-1,
+		)
 	}
 	switch {
 	case len(p.observedSlots) == 0 ||
 		p.observedSlots[len(p.observedSlots)-1] < slot:
-		p.observedSlots = append(p.observedSlots, slot)
+		p.observedSlots = windowAppend(
+			&p.observedSlotsRef,
+			p.observedSlots,
+			slot,
+			slotsEqual,
+		)
 	}
 	if trackHashes {
 		var tailBlock uint64
@@ -404,35 +425,62 @@ func (p *PeerChainTip) recordObservedPoint(
 		switch {
 		case len(p.observedPoints) == 0:
 			p.observedPointBaseBlock = blockNumber
-			p.observedPoints = append(p.observedPoints, clonePoint(point))
+			p.observedPoints = windowAppend(
+				&p.observedPointsRef,
+				p.observedPoints,
+				clonePoint(point),
+				pointsEqual,
+			)
 		case p.observedPoints[len(p.observedPoints)-1].Slot == slot &&
 			blockNumber == tailBlock:
-			p.observedPoints[len(p.observedPoints)-1] = clonePoint(point)
+			p.observedPoints = windowAppend(
+				&p.observedPointsRef,
+				windowTruncate(p.observedPoints, len(p.observedPoints)-1),
+				clonePoint(point),
+				pointsEqual,
+			)
 		case p.observedPoints[len(p.observedPoints)-1].Slot < slot &&
 			blockNumber > p.observedPointBaseBlock &&
 			blockNumber-p.observedPointBaseBlock ==
 				uint64(len(p.observedPoints)):
-			p.observedPoints = append(p.observedPoints, clonePoint(point))
+			p.observedPoints = windowAppend(
+				&p.observedPointsRef,
+				p.observedPoints,
+				clonePoint(point),
+				pointsEqual,
+			)
 		default:
 			// A height gap or non-tail replacement cannot be represented by one
 			// base height. Start a new contiguous frontier so intersection is
 			// undecidable until enough linked headers have been observed again.
-			clear(p.observedPoints)
-			p.observedPoints = p.observedPoints[:0]
+			p.resetObservedPoints()
 			p.observedPointBaseBlock = blockNumber
-			p.observedPoints = append(p.observedPoints, clonePoint(point))
+			p.observedPoints = windowAppend(
+				&p.observedPointsRef,
+				nil,
+				clonePoint(point),
+				pointsEqual,
+			)
 		}
 		if uint64(len(p.observedPoints)) > maxPoints {
 			excess := uint64(len(p.observedPoints)) - maxPoints
-			clear(p.observedPoints[:excess])
-			p.observedPoints = p.observedPoints[excess:]
+			// #nosec G115 -- excess is at most the retained slice length.
+			p.observedPoints = windowTrimFront(
+				&p.observedPointsRef,
+				p.observedPoints,
+				int(excess),
+			)
 			p.observedPointBaseBlock += excess
 		}
 	}
 
 	if window == 0 {
 		if len(p.observedSlots) > 1 {
-			p.observedSlots = p.observedSlots[len(p.observedSlots)-1:]
+			p.observedSlots = windowTrimFront(
+				&p.observedSlotsRef,
+				p.observedSlots,
+				len(p.observedSlots)-1,
+			)
 		}
 		return
 	}
@@ -448,9 +496,11 @@ func (p *PeerChainTip) recordObservedPoint(
 		p.observedSlots[pruneIdx] < cutoff {
 		pruneIdx++
 	}
-	if pruneIdx > 0 {
-		p.observedSlots = p.observedSlots[pruneIdx:]
-	}
+	p.observedSlots = windowTrimFront(
+		&p.observedSlotsRef,
+		p.observedSlots,
+		pruneIdx,
+	)
 }
 
 // clonePoint returns a copy of point with its own hash backing array so the

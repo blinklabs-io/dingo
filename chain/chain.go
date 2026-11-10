@@ -1892,6 +1892,34 @@ func (c *Chain) RollbackDeferred(
 	return c.rollbackLocked(ctx, point, false)
 }
 
+// RollbackDeferredWithPreflight runs before and the rollback under one chain
+// mutation barrier. The callback must validate the point and complete any
+// external effects that have to precede truncation. A callback error leaves
+// the chain unchanged; callers must settle any prior rollback intent before
+// entering the barrier, because its recovery may itself rewind the chain.
+func (c *Chain) RollbackDeferredWithPreflight(
+	ctx context.Context,
+	point ocommon.Point,
+	before func() error,
+) ([]event.Event, error) {
+	if c == nil {
+		return nil, errors.New("chain is nil")
+	}
+	c.batchCommitMutex.Lock()
+	defer c.batchCommitMutex.Unlock()
+	if err := c.awaitPendingCallerAdds(); err != nil {
+		return nil, fmt.Errorf(
+			"wait for pending caller adds before preflight: %w", err,
+		)
+	}
+	if before != nil {
+		if err := before(); err != nil {
+			return nil, err
+		}
+	}
+	return c.rollbackWithMutationBarrierHeld(ctx, point, false)
+}
+
 // RollbackDeferredThen rewinds the chain like RollbackDeferred and runs after
 // the rewind before admitting another persistent-chain mutation. Event
 // publication stays deferred until the caller has released its own outer locks.
@@ -3197,9 +3225,9 @@ func (c *Chain) HoldsPoint(ctx context.Context, point ocommon.Point) bool {
 
 // HoldsPointSettled is HoldsPoint that also reports whether the answer is
 // settled. A block mutation that overlaps the unlocked read of a persistent
-// chain leaves the membership unknown: held is then false and settled is
-// false, and the caller must not treat the point as absent. Every other false
-// answer is settled.
+// chain leaves the membership unknown, as does a cancelled context: held is
+// then false and settled is false, and the caller must not treat the point as
+// absent. Every other false answer is settled.
 //
 //nolint:contextcheck // A nil caller has no context to inherit.
 func (c *Chain) HoldsPointSettled(
@@ -3213,18 +3241,24 @@ func (c *Chain) HoldsPointSettled(
 		ctx = context.Background()
 	}
 	if ctx.Err() != nil {
-		return false, true
+		// A cancelled read learned nothing about the point.
+		return false, false
 	}
 	if c.persistent {
 		return c.holdsPersistentPoint(ctx, point)
 	}
 	blk, err := c.BlockByPoint(ctx, point, nil)
 	if err != nil {
-		return false, true
+		return false, ctx.Err() == nil
 	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	return c.holdsBlockAtIndex(ctx, blk.ID, point.Hash), true
+	held = c.holdsBlockAtIndex(ctx, blk.ID, point.Hash)
+	if ctx.Err() != nil {
+		// A membership read that overlapped cancellation proves nothing.
+		return false, false
+	}
+	return held, true
 }
 
 // holdsPersistentPoint needs only the retained metadata and active index.
@@ -3252,14 +3286,14 @@ func (c *Chain) holdsPersistentPoint(
 	defer txn.Rollback() //nolint:errcheck
 	index, err := database.BlockIDByPointMetadataTxn(txn, point)
 	if ctx.Err() != nil {
-		return false, true
+		return false, false
 	}
 	if err != nil {
 		return false, !c.blockMutatedSince(generation)
 	}
 	indexed, err := db.BlockPointByIndex(index, txn)
 	if ctx.Err() != nil {
-		return false, true
+		return false, false
 	}
 	if err != nil || indexed.Slot != point.Slot ||
 		!bytes.Equal(indexed.Hash, point.Hash) {

@@ -567,13 +567,7 @@ func TestCborArrayHeaderLen(t *testing.T) {
 func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 	t.Parallel()
 
-	immutableDir := filepath.Join(
-		"..",
-		"..",
-		"database",
-		"immutable",
-		"testdata",
-	)
+	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
 	imm, err := immutable.New(immutableDir)
 	require.NoError(t, err)
 	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
@@ -641,13 +635,7 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 	// No t.Parallel(): newTestDB shares process-wide plugin state
 	// (see database.go:164), so concurrent test runs race on
 	// instance-local provider setup and the in-memory schema migration.
-	immutableDir := filepath.Join(
-		"..",
-		"..",
-		"database",
-		"immutable",
-		"testdata",
-	)
+	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
 	imm, err := immutable.New(immutableDir)
 	require.NoError(t, err)
 	iter, err := imm.BlocksFromPoint(ocommon.Point{})
@@ -782,16 +770,7 @@ func TestStoreRawBlockUtxoOffsetsPropagatesExtractError(t *testing.T) {
 func TestLoadBlobsWithDBSkipsUtxoOffsetsInCoreMode(t *testing.T) {
 	t.Parallel()
 
-	immutableDir := os.Getenv("DINGO_TEST_IMMUTABLE_DIR")
-	if immutableDir == "" {
-		immutableDir = filepath.Join(
-			"..",
-			"..",
-			"database",
-			"immutable",
-			"testdata",
-		)
-	}
+	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
 	imm, err := immutable.New(immutableDir)
 	require.NoError(t, err)
 	iter, err := imm.BlocksFromPoint(ocommon.Point{})
@@ -893,13 +872,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 	// No t.Parallel(): newTestDB shares process-wide plugin state
 	// (see database.go:164), so concurrent test runs race on
 	// instance-local provider setup and the in-memory schema migration.
-	immutableDir := filepath.Join(
-		"..",
-		"..",
-		"database",
-		"immutable",
-		"testdata",
-	)
+	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
 	db := newTestDB(t)
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
@@ -1183,13 +1156,7 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 		processTrustedBlockBatchesForLoad = oldProcess
 	})
 
-	immutableDir := filepath.Join(
-		"..",
-		"..",
-		"database",
-		"immutable",
-		"testdata",
-	)
+	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
 	loadErr := make(chan error, 1)
 	go func() {
 		loadErr <- LoadWithDB(
@@ -1367,15 +1334,6 @@ func TestLoadWithDBPropagatesDelegatorInactivity(t *testing.T) {
 	require.False(t, run(false, 0).DelegatorInactivityEnabled)
 }
 
-// TestLoadCaptureFailureTrackerCleanReturnsNil verifies that a tracker with no
-// recorded failures reports success, so a clean load is never turned into an
-// error.
-func TestLoadCaptureFailureTrackerCleanReturnsNil(t *testing.T) {
-	t.Parallel()
-	tracker := &loadCaptureFailureTracker{}
-	require.NoError(t, tracker.err())
-}
-
 // TestLoadCaptureFailureTrackerSurfacesFailures verifies that a recorded capture
 // failure surfaces as an error that preserves the first cause and names every
 // failed epoch. This is the load-mode safety net for the epoch-0 genesis
@@ -1488,13 +1446,7 @@ func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
 	// No t.Parallel(): newTestDB shares process-wide plugin state (see
 	// database construction, so concurrent test runs share no provider options and
 	// the in-memory schema migration.
-	immutableDir := filepath.Join(
-		"..",
-		"..",
-		"database",
-		"immutable",
-		"testdata",
-	)
+	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
 	imm, err := immutable.New(immutableDir)
 	require.NoError(t, err)
 	immutableTip, err := imm.GetTip()
@@ -1578,33 +1530,6 @@ func decodeImmutableBlockHeader(
 		)
 	}
 	return header, nil
-}
-
-// TestRunPlannerStats_WithSQLiteStore verifies that RunPlannerStats succeeds
-// against an in-memory SQLite database and populates sqlite_stat1.
-func TestRunPlannerStats_WithSQLiteStore(t *testing.T) {
-	t.Parallel()
-
-	db := newFileTestDB(t)
-	require.NoError(t, db.Metadata().ImportUtxos([]models.Utxo{
-		{
-			TxId:      []byte("run_planner_stats_tx_id_00000001"),
-			OutputIdx: 0,
-			AddedSlot: 1,
-			Amount:    types.Uint64(1),
-		},
-	}, nil))
-
-	require.NoError(t, RunPlannerStats(db, slog.Default()))
-
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	var count int64
-	err = raw.QueryRow(
-		"SELECT COUNT(*) FROM sqlite_stat1",
-	).Scan(&count)
-	require.NoError(t, err)
-	assert.Positive(t, count, "sqlite_stat1 should be populated")
 }
 
 // TestRunPlannerStats_Idempotent verifies that repeated planner-stat

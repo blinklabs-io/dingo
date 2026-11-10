@@ -17,10 +17,12 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -44,6 +46,7 @@ type peerForkPathPrefix struct {
 	ancestorCrypto peerForkAncestorPrefix
 	ancestorState  peerForkAncestorPrefix
 	ancestor       models.Block
+	unresolved     bool
 	headers        []gledger.BlockHeader
 	generation     uint64
 	opCertLastHash []byte
@@ -56,6 +59,7 @@ type peerForkPathPrefix struct {
 }
 
 type peerForkNoncePrefix struct {
+	contextGeneration     uint64
 	sourceEpoch           uint64
 	cutoff                uint64
 	sourceNonce           []byte
@@ -135,7 +139,22 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 			localTip.Slot == ancestor.Slot && bytes.Equal(localTip.Hash, ancestor.Hash) {
 			return nil, models.Epoch{}, false, nil
 		}
-		return nil, models.Epoch{}, false, err
+		// After a rollback across an epoch boundary the published cache ends
+		// at the anchor's epoch. A fork header inside the forecast horizon but
+		// in the next epoch is verified against forecast epochs derived from
+		// the fork's own ancestry instead of waiting for the ledger to apply
+		// the fork, which it cannot do until the fork is selected.
+		forecast, ok := ls.forecastPeerForkEpochCache(
+			snapshot,
+			header.SlotNumber(),
+			err,
+		)
+		if !ok {
+			return nil, models.Epoch{}, false, err
+		}
+		forecastSnapshot := *snapshot
+		forecastSnapshot.epochCache = forecast
+		snapshot = &forecastSnapshot
 	}
 	if snapshot == nil {
 		return nil, models.Epoch{}, false, fmt.Errorf(
@@ -239,13 +258,8 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 		) {
 			continue
 		}
-		if event.HeaderCryptoVerificationGeneration != 0 {
-			return fmt.Errorf(
-				"%w: candidate ancestor at slot %d was verified in a stale context",
-				errHeaderVerificationDeferred,
-				header.SlotNumber(),
-			)
-		}
+		// A retained header with an old verdict is still ancestry. Verify its
+		// crypto and state against this snapshot before using the candidate.
 		block := headerOnlyBlock{header: header, peerRelative: true}
 		if err := ls.verifyPeerForkAncestorCrypto(connID, headers, index,
 			epoch.EpochId, epochNonce, snapshot.contextGeneration, func() error {
@@ -279,6 +293,87 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 		}
 	}
 	return nil
+}
+
+// frozenCandidateNonceFromAncestor needs only the state before the freeze
+// cutoff. A later fetched block may have no applied nonce yet; reconstructing
+// the full epoch in that case decodes transaction bodies that cannot change
+// the candidate. Follow the intersection's own chain so a retained sibling
+// cannot supply the prefix nonce.
+func (ls *LedgerState) frozenCandidateNonceFromAncestor(
+	ctx context.Context,
+	sourceEpoch models.Epoch,
+	ancestor ocommon.Point,
+) ([]byte, error) {
+	cfg := ls.config.CardanoNodeConfig
+	if cfg == nil || cfg.ShelleyGenesisHash == "" {
+		return ls.frozenCandidateNonce(ctx, sourceEpoch)
+	}
+	if _, err := hex.DecodeString(cfg.ShelleyGenesisHash); err != nil {
+		return ls.frozenCandidateNonce(ctx, sourceEpoch)
+	}
+	cutoff, ready := ls.nextEpochNonceReadyCutoffSlot(sourceEpoch)
+	if ready && len(sourceEpoch.Nonce) == lcommon.Blake2b256Size &&
+		ancestor.Slot >= cutoff && len(ancestor.Hash) != 0 {
+		if cutoff <= sourceEpoch.StartSlot &&
+			len(sourceEpoch.CandidateNonce) == lcommon.Blake2b256Size {
+			return cloneNonce(sourceEpoch.CandidateNonce), nil
+		}
+		var candidate []byte
+		txn := ls.db.Transaction(ctx, false)
+		err := txn.Do(func(txn *database.Txn) error {
+			block, err := ancestorBeforeSlot(ctx, txn, ancestor, cutoff)
+			if err != nil {
+				return err
+			}
+			if block.Slot < sourceEpoch.StartSlot {
+				candidate = cloneNonce(sourceEpoch.CandidateNonce)
+				return nil
+			}
+			candidate, err = ls.db.GetBlockNonce(
+				ocommon.Point{Slot: block.Slot, Hash: block.Hash}, txn,
+			)
+			return err
+		})
+		txn.Release()
+		if err == nil && len(candidate) == lcommon.Blake2b256Size {
+			return cloneNonce(candidate), nil
+		}
+	}
+	// Imported or older stores may lack the retained ancestry or nonce row.
+	// Keep the existing reconstruction for those cases.
+	return ls.frozenCandidateNonce(ctx, sourceEpoch)
+}
+
+// frozenCandidateNonce recomputes the candidate nonce that froze at the end of
+// sourceEpoch from the local chain. computeEpochNonceForSlot seeds an epoch
+// that has no nonce with the genesis nonce, which is correct only for the
+// initial epoch; for any later epoch the genesis hash would be a wrong
+// candidate that rejects a valid fork header, so that case defers.
+func (ls *LedgerState) frozenCandidateNonce(
+	ctx context.Context,
+	sourceEpoch models.Epoch,
+) ([]byte, error) {
+	if len(sourceEpoch.Nonce) == 0 && sourceEpoch.EpochId != 0 {
+		return nil, fmt.Errorf(
+			"%w: epoch %d has no published nonce",
+			errHeaderVerificationDeferred,
+			sourceEpoch.EpochId,
+		)
+	}
+	_, _, frozen, _, err := ls.computeEpochNonceForSlot(
+		ctx,
+		sourceEpoch.StartSlot+uint64(sourceEpoch.LengthInSlots),
+		sourceEpoch,
+	)
+	if err != nil || len(frozen) != lcommon.Blake2b256Size {
+		return nil, fmt.Errorf(
+			"%w: frozen candidate nonce for epoch %d is unavailable",
+			errHeaderVerificationDeferred,
+			sourceEpoch.EpochId,
+		)
+	}
+	return frozen, nil
 }
 
 func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
@@ -352,11 +447,19 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 			sourceEpoch.EpochId+1,
 		)
 		if !ok || len(nextEpoch.CandidateNonce) != lcommon.Blake2b256Size {
-			return nil, models.Epoch{}, false, fmt.Errorf(
-				"%w: frozen candidate nonce for epoch %d is unavailable",
-				errHeaderVerificationDeferred,
-				sourceEpoch.EpochId,
+			// The ledger has not applied the next epoch, as after a local
+			// rollback across the boundary. The candidate froze at the
+			// cutoff, which precedes the intersection, so the local chain's
+			// prefix up to it is the fork's prefix and yields the same value.
+			frozen, frozenErr := ls.frozenCandidateNonceFromAncestor(
+				ctx,
+				sourceEpoch,
+				ancestor,
 			)
+			if frozenErr != nil {
+				return nil, models.Epoch{}, false, frozenErr
+			}
+			nextEpoch.CandidateNonce = frozen
 		}
 		initialCandidateNonce = cloneNonce(nextEpoch.CandidateNonce)
 		// The evolving nonce after the cutoff cannot change the next
@@ -409,6 +512,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 		startIndex := 0
 		if cachedEvolving, cachedCandidate, next, ok := ls.peerForkNoncePrefix(
 			connId,
+			snapshot.contextGeneration,
 			currentEpoch,
 			cutoff,
 			initialEvolvingNonce,
@@ -472,6 +576,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 		if lastFolded != nil {
 			ls.storePeerForkNoncePrefix(
 				connId,
+				snapshot.contextGeneration,
 				currentEpoch,
 				cutoff,
 				initialEvolvingNonce,
@@ -662,6 +767,7 @@ func peerHeaderPathHasParentPoint(
 
 func (ls *LedgerState) peerForkNoncePrefix(
 	connId ouroboros.ConnectionId,
+	contextGeneration uint64,
 	sourceEpoch models.Epoch,
 	cutoff uint64,
 	initialEvolvingNonce []byte,
@@ -672,7 +778,9 @@ func (ls *LedgerState) peerForkNoncePrefix(
 	ls.forkHeaderNonceCacheMutex.Lock()
 	entry, ok := ls.forkHeaderNonceCache[key][sourceEpoch.EpochId]
 	ls.forkHeaderNonceCacheMutex.Unlock()
-	if !ok || entry.sourceEpoch != sourceEpoch.EpochId ||
+	if !ok || contextGeneration == 0 ||
+		entry.contextGeneration != contextGeneration ||
+		entry.sourceEpoch != sourceEpoch.EpochId ||
 		entry.cutoff != cutoff ||
 		!bytes.Equal(entry.sourceNonce, sourceEpoch.Nonce) ||
 		!bytes.Equal(entry.initialEvolvingNonce, initialEvolvingNonce) ||
@@ -694,6 +802,7 @@ func (ls *LedgerState) peerForkNoncePrefix(
 
 func (ls *LedgerState) storePeerForkNoncePrefix(
 	connId ouroboros.ConnectionId,
+	contextGeneration uint64,
 	sourceEpoch models.Epoch,
 	cutoff uint64,
 	initialEvolvingNonce []byte,
@@ -714,6 +823,7 @@ func (ls *LedgerState) storePeerForkNoncePrefix(
 		ls.forkHeaderNonceCache[key] = make(map[uint64]peerForkNoncePrefix)
 	}
 	ls.forkHeaderNonceCache[key][sourceEpoch.EpochId] = peerForkNoncePrefix{
+		contextGeneration:     contextGeneration,
 		sourceEpoch:           sourceEpoch.EpochId,
 		cutoff:                cutoff,
 		sourceNonce:           cloneNonce(sourceEpoch.Nonce),
@@ -808,8 +918,13 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 	)
 	validCached := cachedOK && headerVerdictInContext(
 		cached.generation, contextGeneration, verificationGeneration,
-	) && ls.peerForkAncestorOnChain(ctx, cachedAncestor)
-	if validCached {
+	) && (cached.unresolved ||
+		ls.peerForkAncestorOnChain(ctx, cachedAncestor))
+	// A cancelled membership read reports the cached anchor absent.
+	if err := ctx.Err(); err != nil {
+		return ocommon.Point{}, nil, false, err
+	}
+	if validCached && !cached.unresolved {
 		var err error
 		cached, err = ls.trimPeerForkPathAtAppliedTip(
 			ctx,
@@ -827,7 +942,8 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 	}
 	if validCached && len(cached.headers) > 0 {
 		lastHeader := cached.headers[len(cached.headers)-1]
-		if bytes.Equal(lastHeader.Hash().Bytes(), header.Hash().Bytes()) {
+		if !cached.unresolved &&
+			bytes.Equal(lastHeader.Hash().Bytes(), header.Hash().Bytes()) {
 			tipOnCachedPath := false
 			if tip := ls.loadTipSnapshot(); tip != nil {
 				point := tip.currentTip.Point
@@ -854,6 +970,21 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 		// cached header. While the chain tip is below all of them the walk
 		// would read every ancestor and defer, so defer without the walk.
 		if limit := ls.peerHeaderHistoryLimit(); len(cached.headers) > limit {
+			//nolint:gosec // G115: the history limit is never negative
+			walkSpan := uint64(limit)
+			if cached.unresolved &&
+				(bytes.Equal(lastHeader.Hash().Bytes(), header.Hash().Bytes()) ||
+					bytes.Equal(cached.overflowTail, header.Hash().Bytes())) &&
+				header.BlockNumber() > 0 &&
+				ls.chain.Tip().BlockNumber+walkSpan <
+					header.BlockNumber()-1 {
+				if contextChanged() {
+					return ocommon.Point{}, nil, false,
+						errHeaderVerificationContextChanged
+				}
+				return ocommon.Point{}, nil, false,
+					errHeaderVerificationDeferred
+			}
 			prevHash := header.PrevHash().Bytes()
 			parentDepth, extends := uint64(0), false
 			switch {
@@ -865,8 +996,6 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 			}
 			// The lowest ancestor the walk reads is at parentNumber-limit.
 			parentNumber := lastHeader.BlockNumber() + parentDepth
-			//nolint:gosec // G115: the history limit is never negative
-			walkSpan := uint64(limit)
 			if extends && ls.chain.Tip().BlockNumber+walkSpan < parentNumber {
 				ls.markPeerForkPathOverflow(
 					key,
@@ -875,6 +1004,10 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 					parentDepth,
 					header,
 				)
+				if contextChanged() {
+					return ocommon.Point{}, nil, false,
+						errHeaderVerificationContextChanged
+				}
 				return ocommon.Point{}, nil, false,
 					errHeaderVerificationDeferred
 			}
@@ -913,10 +1046,12 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				if ls.chain.HoldsQueuedHeaderHash(parentPoint.Hash) {
 					return ocommon.Point{}, nil, false, nil
 				}
-				if (!ok || event.HeaderCryptoVerificationGeneration != 0) &&
-					!ls.chain.HoldsPoint(ctx, parentPoint) {
+				if !ok && !ls.chain.HoldsPoint(ctx, parentPoint) {
+					if err := ctx.Err(); err != nil {
+						return ocommon.Point{}, nil, false, err
+					}
 					return ocommon.Point{}, nil, false, fmt.Errorf(
-						"%w: candidate parent at slot %d has no current crypto verdict",
+						"%w: candidate parent at slot %d is unavailable",
 						errHeaderVerificationDeferred,
 						parentPoint.Slot,
 					)
@@ -951,6 +1086,9 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 		if isOrigin {
 			origin := ocommon.Point{}
 			if !ls.peerForkAncestorOnChain(ctx, origin) {
+				if err := ctx.Err(); err != nil {
+					return ocommon.Point{}, nil, false, err
+				}
 				return ocommon.Point{}, nil, false, nil
 			}
 			slices.Reverse(pathReversed)
@@ -997,6 +1135,11 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				)
 				return point, pathReversed, true, nil
 			}
+			// A cancelled read reports the ancestor absent, which would send
+			// the walk on to the peer's older headers.
+			if err := ctx.Err(); err != nil {
+				return ocommon.Point{}, nil, false, err
+			}
 		} else if !errors.Is(err, models.ErrBlockNotFound) {
 			return ocommon.Point{}, nil, false, fmt.Errorf(
 				"%w: lookup candidate ancestor %x: %w",
@@ -1005,12 +1148,22 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				err,
 			)
 		}
-		key := string(prevHash)
-		if _, ok := visited[key]; ok {
+		hashKey := string(prevHash)
+		if _, ok := visited[hashKey]; ok {
 			return ocommon.Point{}, nil, false, nil
 		}
-		visited[key] = struct{}{}
+		visited[hashKey] = struct{}{}
 		if remaining == 0 {
+			slices.Reverse(pathReversed)
+			if contextChanged() {
+				return ocommon.Point{}, nil, false,
+					errHeaderVerificationContextChanged
+			}
+			ls.storeDeferredPeerForkPathPrefix(
+				key,
+				pathReversed,
+				verificationGeneration,
+			)
 			return ocommon.Point{}, nil, false, errHeaderVerificationDeferred
 		}
 		event, nextPrevHash, ok := ls.config.PeerHeaderLookupFunc(
@@ -1026,8 +1179,9 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 			) {
 			return ocommon.Point{}, nil, false, nil
 		}
-		// Do not use an unverified queued header as fork ancestry; its child
-		// must go through local admission or wait for a current verdict.
+		// A queued header follows the local admission path. A retained peer
+		// header may have an old verdict; the caller rechecks it before using
+		// this path for chain selection.
 		if !headerVerdictInContext(
 			event.HeaderCryptoVerificationGeneration,
 			contextGeneration,
@@ -1036,17 +1190,29 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 			if ls.chain.HoldsQueuedHeaderHash(prevHash) {
 				return ocommon.Point{}, nil, false, nil
 			}
-			if event.HeaderCryptoVerificationGeneration != 0 &&
-				!ls.chain.HoldsPoint(ctx, event.Point) {
-				return ocommon.Point{}, nil, false, fmt.Errorf(
-					"%w: candidate ancestor at slot %d has no current crypto verdict",
-					errHeaderVerificationDeferred,
-					event.Point.Slot,
-				)
-			}
 		}
 		pathReversed = append(pathReversed, event.BlockHeader)
 		prevHash = append(prevHash[:0], nextPrevHash...)
+	}
+}
+
+// storeDeferredPeerForkPathPrefix retains a bounded peer path whose ancestry
+// walk did not reach the primary chain. It can only suppress another walk while
+// the local tip is still below every ancestor that walk could reach.
+func (ls *LedgerState) storeDeferredPeerForkPathPrefix(
+	key string,
+	headers []gledger.BlockHeader,
+	generation uint64,
+) {
+	ls.forkHeaderNonceCacheMutex.Lock()
+	defer ls.forkHeaderNonceCacheMutex.Unlock()
+	if ls.forkHeaderPathCache == nil {
+		ls.forkHeaderPathCache = make(map[string]peerForkPathPrefix)
+	}
+	ls.forkHeaderPathCache[key] = peerForkPathPrefix{
+		unresolved: true,
+		headers:    slices.Clone(headers),
+		generation: generation,
 	}
 }
 
@@ -1300,7 +1466,8 @@ func (ls *LedgerState) verifyPeerForkAncestorMemo(
 		prefix.epoch != epoch ||
 		!bytes.Equal(prefix.nonce, nonce) ||
 		index > prefix.lastIndex {
-		*selector(&entry) = peerForkAncestorPrefix{
+		target := selector(&entry)
+		*target = peerForkAncestorPrefix{
 			contextGeneration: contextGeneration,
 			epoch:             epoch,
 			nonce:             cloneNonce(nonce),
@@ -1345,6 +1512,9 @@ func (ls *LedgerState) trimPeerForkPathAtAppliedTip(
 		}
 		if block.Slot != point.Slot || !bytes.Equal(block.Hash, point.Hash) ||
 			!ls.peerForkAncestorOnChain(ctx, point) {
+			if err := ctx.Err(); err != nil {
+				return cached, err
+			}
 			return cached, fmt.Errorf(
 				"%w: applied candidate anchor changed",
 				errHeaderVerificationDeferred,
@@ -1361,4 +1531,82 @@ func (ls *LedgerState) trimPeerForkPathAtAppliedTip(
 		return trimmed, nil
 	}
 	return cached, nil
+}
+
+// forecastPeerForkEpochCache extends the snapshot's epoch cache with same-era
+// forecast epochs so that a peer fork header past the cached epochs, but within
+// the forecast horizon, can be verified. The forecast epochs carry no nonces:
+// the fork's nonce is derived from its own headers. It returns false when
+// cause is not an uncovered-epoch deferral, the slot is past the forecast
+// horizon, the cache tail's era is not the published current era, the era
+// boundary is near, or the cache cannot reach the header's slot.
+func (ls *LedgerState) forecastPeerForkEpochCache(
+	snapshot *consensusSnapshot,
+	slot uint64,
+	cause error,
+) ([]models.Epoch, bool) {
+	if snapshot == nil || len(snapshot.epochCache) == 0 ||
+		errors.Is(cause, ErrHeaderBeyondForecastHorizon) ||
+		!IsHeaderVerificationDeferred(cause) {
+		return nil, false
+	}
+	return ls.forecastEpochCacheThrough(snapshot, slot)
+}
+
+// forecastEpochCacheThrough returns the snapshot's epoch cache extended with
+// same-era forecast epochs, intermediate ones included, up to the epoch that
+// holds slot. The electing snapshot of a forecast epoch is the one before it,
+// so state verification needs every epoch on the way, not only the last.
+func (ls *LedgerState) forecastEpochCacheThrough(
+	snapshot *consensusSnapshot,
+	slot uint64,
+) ([]models.Epoch, bool) {
+	if snapshot == nil || len(snapshot.epochCache) == 0 {
+		return nil, false
+	}
+	if _, err := epochForSlotInCache(snapshot.epochCache, slot); err == nil {
+		return nil, false
+	}
+	// A deferral's cause may carry no horizon information, such as a summary
+	// that could not be built, so the horizon is checked here.
+	summary, err := ls.HardForkSummary()
+	if err != nil {
+		return nil, false
+	}
+	if _, err := summary.SlotToEpoch(slot); err != nil {
+		return nil, false
+	}
+	const maxForecastEpochs = 5
+	cache := make(
+		[]models.Epoch,
+		len(snapshot.epochCache),
+		len(snapshot.epochCache)+maxForecastEpochs,
+	)
+	copy(cache, snapshot.epochCache)
+	for range maxForecastEpochs {
+		last := cache[len(cache)-1]
+		// The era check uses the cache tail's own era: a published current
+		// era that disagrees with it cannot vouch that the tail's era
+		// boundary is still ahead.
+		if last.LengthInSlots == 0 || slot < last.StartSlot ||
+			last.EraId != snapshot.currentEra.Id ||
+			ls.validateEpochCacheForecast(
+				last,
+				snapshot.currentEra.Id,
+				snapshot.transitionInfo,
+			) != nil {
+			return nil, false
+		}
+		cache = append(cache, models.Epoch{
+			EpochId:       last.EpochId + 1,
+			StartSlot:     last.StartSlot + uint64(last.LengthInSlots),
+			LengthInSlots: last.LengthInSlots,
+			SlotLength:    last.SlotLength,
+			EraId:         last.EraId,
+		})
+		if _, err := epochForSlotInCache(cache, slot); err == nil {
+			return cache, true
+		}
+	}
+	return nil, false
 }

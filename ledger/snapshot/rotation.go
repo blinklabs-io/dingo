@@ -1387,13 +1387,14 @@ func (m *Manager) cleanupOldSnapshots(
 		}
 	}
 
-	// Reward-state pruning: unchanged currentEpoch-3 window, separate
-	// transaction (not under the retention guard).
-	txn := m.db.Transaction(ctx, true) // read-write transaction
-	defer func() { _ = txn.Rollback() }()
-
+	// Reward-state pruning: unchanged currentEpoch-3 window, outside the
+	// retention guard and outside any transaction of this function's own.
+	// The store prunes in bounded batches, each committed on its own, so
+	// the write connection is free for block application between them; a
+	// single enclosing transaction would hold it for the whole prune, which
+	// on mainnet is minutes.
 	meta := m.db.Metadata()
-	metaTxn := txn.Metadata()
+	var metaTxn types.Txn
 
 	switch {
 	case m.db.StorageMode() == types.StorageModeAPI:
@@ -1405,6 +1406,7 @@ func (m *Manager) cleanupOldSnapshots(
 		// The in-process Koios parity observer needs reward_account_output
 		// only (see doc comment above).
 		if err := meta.DeleteRewardStakeInputBeforeEpoch(
+			ctx,
 			deleteBeforeEpoch,
 			metaTxn,
 		); err != nil {
@@ -1412,6 +1414,7 @@ func (m *Manager) cleanupOldSnapshots(
 		}
 	default:
 		if err := meta.DeleteRewardStateBeforeEpoch(
+			ctx,
 			deleteBeforeEpoch,
 			metaTxn,
 		); err != nil {
@@ -1425,7 +1428,7 @@ func (m *Manager) cleanupOldSnapshots(
 		"before_epoch", deleteBeforeEpoch,
 	)
 
-	return txn.Commit()
+	return nil
 }
 
 // sumDelegators totals all delegator counts.

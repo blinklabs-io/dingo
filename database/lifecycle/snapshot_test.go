@@ -31,216 +31,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSnapshotWritesManifestAndBackupFiles verifies that Snapshot writes
-// a manifest plus blob/metadata backup files with matching commit timestamps.
-func TestSnapshotWritesManifestAndBackupFiles(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
-	dir := snapshotTestDir(t, "snap1")
-	m, err := lifecycle.Snapshot(
-		context.Background(),
-		db,
-		dir,
-		lifecycle.TriggerManual,
-		"test-version",
-		"badger",
-		"sqlite",
-	)
-	require.NoError(t, err)
-	require.Equal(t, "badger", m.BlobPlugin)
-	require.Equal(t, "sqlite", m.MetadataPlugin)
-	require.NotZero(t, m.BlobBytes)
-	require.NotZero(t, m.MetadataBytes)
-
-	got, err := lifecycle.ReadManifest(dir)
-	require.NoError(t, err)
-	require.Equal(t, m.CommitTimestamp, got.CommitTimestamp)
-
-	require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
-	require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
-}
-
-// TestSnapshotCreatesPrivateDirectory verifies that local backup contents are
-// not accessible to group or other users through the snapshot directory.
-func TestSnapshotCreatesPrivateDirectory(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows does not expose Unix permission bits")
-	}
-
-	db := newTestDB(t)
-	parentDir := t.TempDir()
-	require.NoError(t, os.Chmod(parentDir, 0o700))
-	dir := filepath.Join(parentDir, "snap-private")
-	_, err := lifecycle.Snapshot(
-		context.Background(),
-		db,
-		dir,
-		lifecycle.TriggerManual,
-		"test-version",
-		"badger",
-		"sqlite",
-	)
-	require.NoError(t, err)
-
-	info, err := os.Stat(dir)
-	require.NoError(t, err)
-	require.Zero(
-		t,
-		info.Mode().Perm()&0o077,
-		"snapshot directory must not be accessible by group or other users",
-	)
-	for _, name := range []string{
-		lifecycle.BlobBackupFileName,
-		lifecycle.MetadataBackupFileName,
-		lifecycle.ManifestFileName,
-	} {
-		info, err := os.Stat(filepath.Join(dir, name))
-		require.NoError(t, err)
-		require.Zero(
-			t,
-			info.Mode().Perm()&0o077,
-			"snapshot file %q must not be accessible by group or other users",
-			name,
-		)
-	}
-}
-
-// TestSnapshotRefusesExistingDirectory verifies that Snapshot errors when
-// the target directory already exists.
-func TestSnapshotRefusesExistingDirectory(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	dir := t.TempDir() // already exists
-
-	_, err := lifecycle.Snapshot(
-		context.Background(),
-		db,
-		dir,
-		lifecycle.TriggerManual,
-		"test-version",
-		"badger",
-		"sqlite",
-	)
-	require.Error(t, err)
-}
-
-// TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents guards
-// against a real data-loss bug: two concurrent Snapshot
-// calls racing to the same dir used to both pass an initial
-// os.Stat-then-MkdirAll check (MkdirAll doesn't error on an existing
-// directory, and the Stat-then-MkdirAll gap is a TOCTOU race even if it
-// did), so the loser would proceed to open blob.bak with O_EXCL, fail
-// with "file exists", and then run its failure-cleanup os.RemoveAll(dir)
-// — deleting the winner's in-progress or already-completed backup files
-// out from under it. This simulates the loser's view directly: a dir
-// that already contains another caller's file when Snapshot is invoked
-// must be refused without that file being removed.
-func TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := newTestDB(t)
-
-	dir := snapshotTestDir(t, "snap-contested")
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	winnerFile := filepath.Join(dir, "blob.bak")
-	require.NoError(t, os.WriteFile(winnerFile, []byte("winner's data"), 0o644))
-
-	_, err := lifecycle.Snapshot(
-		context.Background(),
-		db,
-		dir,
-		lifecycle.TriggerManual,
-		"test-version",
-		"badger",
-		"sqlite",
-	)
-	require.Error(t, err)
-
-	require.DirExists(t, dir)
-	require.FileExists(t, winnerFile)
-	data, readErr := os.ReadFile(winnerFile)
-	require.NoError(t, readErr)
-	require.Equal(t, "winner's data", string(data))
-}
-
-// TestSnapshotConcurrentCallsToSameDirLeaveWinnersFilesIntact is the
-// direct concurrency regression test for the same data-loss bug above: several Snapshot
-// calls racing to create the exact same, not-yet-existing dir used to be
-// able to all pass an os.Stat-then-MkdirAll check (MkdirAll doesn't error
-// on an existing directory, and Stat-then-MkdirAll has a TOCTOU gap
-// between the two calls regardless), so more than one caller could
-// believe it owned dir; the loser(s) would then fail opening blob.bak
-// with O_EXCL and run their failure-cleanup os.RemoveAll(dir) — deleting
-// the winner's in-progress or already-completed backup files. Firing many
-// callers at the same dir simultaneously (released off a shared barrier
-// to maximize interleaving) must now yield exactly one success whose
-// output is a complete, valid, undamaged snapshot, with every other
-// caller failing immediately without touching dir's contents at all.
-func TestSnapshotConcurrentCallsToSameDirLeaveWinnersFilesIntact(t *testing.T) {
-	t.Parallel()
-
-	const attempts = 8
-
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
-	dir := snapshotTestDir(t, "snap-race")
-
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	errs := make([]error, attempts)
-	wg.Add(attempts)
-	for i := range attempts {
-		go func(i int) {
-			defer wg.Done()
-			<-start
-			_, err := lifecycle.Snapshot(
-				context.Background(),
-				db,
-				dir,
-				lifecycle.TriggerManual,
-				"test-version",
-				"badger",
-				"sqlite",
-			)
-			errs[i] = err
-		}(i)
-	}
-	close(start)
-	wg.Wait()
-
-	successes := 0
-	for _, err := range errs {
-		if err == nil {
-			successes++
-		}
-	}
-	require.Equal(
-		t,
-		1,
-		successes,
-		"exactly one concurrent Snapshot call to the same dir must succeed",
-	)
-
-	require.DirExists(t, dir)
-	require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
-	require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
-	m, err := lifecycle.ReadManifest(dir)
-	require.NoError(
-		t,
-		err,
-		"the winner's manifest must be intact, not deleted by a losing caller",
-	)
-	require.NotZero(t, m.BlobBytes)
-	require.NotZero(t, m.MetadataBytes)
-}
-
 // TestSnapshotConsistentUnderConcurrentWrites is the end-to-end regression
 // test for the blob/metadata drift bug: Snapshot backs up blob then
 // metadata sequentially, so without Database.PauseCommits bracketing both
@@ -309,25 +99,142 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestSnapshotCleansUpOnFailure verifies that a Snapshot failure (here, a
-// pre-cancelled context) removes the partially-created directory.
-func TestSnapshotCleansUpOnFailure(t *testing.T) {
+// Snapshot only reads the source database, so every case that takes one shares
+// a database holding block 1.
+func TestSnapshot(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	dir := snapshotTestDir(t, "snap-fail")
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	snapshot := func(dir string, opts ...lifecycle.ManifestOption) (lifecycle.Manifest, error) {
+		return lifecycle.Snapshot(
+			context.Background(), db, dir, lifecycle.TriggerManual,
+			"test-version", "badger", "sqlite", opts...,
+		)
+	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := lifecycle.Snapshot(
-		ctx,
-		db,
-		dir,
-		lifecycle.TriggerManual,
-		"test-version",
-		"badger",
-		"sqlite",
-	)
-	require.Error(t, err)
-	require.NoDirExists(t, dir)
+	t.Run("writes manifest and backup files", func(t *testing.T) {
+		dir := snapshotTestDir(t, "snap1")
+		m, err := snapshot(dir)
+		require.NoError(t, err)
+		require.Equal(t, "badger", m.BlobPlugin)
+		require.Equal(t, "sqlite", m.MetadataPlugin)
+		require.NotZero(t, m.BlobBytes)
+		require.NotZero(t, m.MetadataBytes)
+
+		got, err := lifecycle.ReadManifest(dir)
+		require.NoError(t, err)
+		require.Equal(t, m.CommitTimestamp, got.CommitTimestamp)
+		require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
+		require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
+	})
+
+	t.Run("records payload digests", func(t *testing.T) {
+		key := []byte("operator-trust-root-0123456789ab")
+		dir := snapshotTestDir(t, "snap-digests")
+		m, err := snapshot(dir, lifecycle.WithManifestKey(key))
+		require.NoError(t, err)
+		blob, err := os.ReadFile(filepath.Join(dir, lifecycle.BlobBackupFileName))
+		require.NoError(t, err)
+		metadata, err := os.ReadFile(filepath.Join(dir, lifecycle.MetadataBackupFileName))
+		require.NoError(t, err)
+		require.Equal(t, sha256Hex(blob), m.BlobSHA256)
+		require.Equal(t, sha256Hex(metadata), m.MetadataSHA256)
+		require.NoError(t, m.Authenticate(lifecycle.WithManifestKey(key)))
+	})
+
+	t.Run("creates a private directory", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose Unix permission bits")
+		}
+		parentDir := t.TempDir()
+		require.NoError(t, os.Chmod(parentDir, 0o700))
+		dir := filepath.Join(parentDir, "snap-private")
+		_, err := snapshot(dir)
+		require.NoError(t, err)
+
+		info, err := os.Stat(dir)
+		require.NoError(t, err)
+		require.Zero(
+			t, info.Mode().Perm()&0o077,
+			"snapshot directory must not be accessible by group or other users",
+		)
+		for _, name := range []string{
+			lifecycle.BlobBackupFileName,
+			lifecycle.MetadataBackupFileName,
+			lifecycle.ManifestFileName,
+		} {
+			info, err := os.Stat(filepath.Join(dir, name))
+			require.NoError(t, err)
+			require.Zero(
+				t, info.Mode().Perm()&0o077,
+				"snapshot file %q must not be accessible by group or other users",
+				name,
+			)
+		}
+	})
+
+	t.Run("refuses an existing directory and keeps its contents", func(t *testing.T) {
+		dir := snapshotTestDir(t, "snap-contested")
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		winnerFile := filepath.Join(dir, "blob.bak")
+		require.NoError(t, os.WriteFile(winnerFile, []byte("winner's data"), 0o644))
+
+		_, err := snapshot(dir)
+		require.Error(t, err)
+		require.DirExists(t, dir)
+		data, readErr := os.ReadFile(winnerFile)
+		require.NoError(t, readErr)
+		require.Equal(t, "winner's data", string(data))
+	})
+
+	t.Run("cleans up on failure", func(t *testing.T) {
+		dir := snapshotTestDir(t, "snap-fail")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := lifecycle.Snapshot(
+			ctx, db, dir, lifecycle.TriggerManual, "test-version",
+			"badger", "sqlite",
+		)
+		require.Error(t, err)
+		require.NoDirExists(t, dir)
+	})
+
+	t.Run("concurrent calls to one directory leave the winner intact", func(t *testing.T) {
+		const attempts = 8
+		dir := snapshotTestDir(t, "snap-race")
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		errs := make([]error, attempts)
+		wg.Add(attempts)
+		for i := range attempts {
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				_, errs[i] = snapshot(dir)
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		successes := 0
+		for _, err := range errs {
+			if err == nil {
+				successes++
+			}
+		}
+		require.Equal(
+			t, 1, successes,
+			"exactly one concurrent Snapshot call to the same dir must succeed",
+		)
+		require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
+		require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
+		m, err := lifecycle.ReadManifest(dir)
+		require.NoError(
+			t, err,
+			"the winner's manifest must be intact, not deleted by a losing caller",
+		)
+		require.NotZero(t, m.BlobBytes)
+		require.NotZero(t, m.MetadataBytes)
+	})
 }

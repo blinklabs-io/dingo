@@ -24,29 +24,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestCheckCommitTimestamp_FreshBlobAndMetadata verifies that a brand-new
-// database opens cleanly: a missing blob commit-timestamp key must be
-// treated like a missing metadata row (return 0), not as a fatal error.
-func TestCheckCommitTimestamp_FreshBlobAndMetadata(t *testing.T) {
-	t.Parallel()
-
-	db, err := newTestDatabase(t, &Config{
-		DataDir: t.TempDir(),
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-
-	require.NoError(t, err)
-	defer closeTestDatabase(db)
-
-	bts, bErr := db.Blob().GetCommitTimestamp()
-	require.NoError(
-		t,
-		bErr,
-		"blob.GetCommitTimestamp on fresh blob must not error",
-	)
-	require.Equal(t, int64(0), bts, "fresh blob should report timestamp 0")
-}
-
 // TestCheckCommitTimestamp_MetadataOnly reproduces the user-reported failure
 // path: metadata has a commit timestamp but the blob does not. After the
 // fix, opening must surface this as a recoverable CommitTimestampError

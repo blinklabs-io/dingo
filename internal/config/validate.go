@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -303,6 +304,9 @@ func hasCapNetBindService() bool {
 // depend on the effective UID or kernel settings of the test runner.
 func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	var errs []error
+	if _, err := dingoversion.HeaderProtocolMinor(c.CIP0203Enabled); err != nil {
+		errs = append(errs, err)
+	}
 
 	// Mode enums
 	if !c.RunMode.Valid() {
@@ -323,6 +327,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"invalid storageMode %q: must be %q or %q",
 			c.StorageMode, storageModeCore, storageModeAPI,
+		))
+	}
+
+	if c.TrustedNtCIdleTimeout < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid trustedNtCIdleTimeout: %s (must be zero or positive)",
+			c.TrustedNtCIdleTimeout,
 		))
 	}
 
@@ -1159,6 +1170,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		case uint64(c.DMQ.MessageTTL) > maxMessageTTL:
 			errs = append(errs, fmt.Errorf(
 				"dmq.messageTtl must be at most %d seconds",
+				maxMessageTTL,
+			))
+		}
+		if uint64(c.DMQ.MinPoolMessageInterval) > maxMessageTTL {
+			errs = append(errs, fmt.Errorf(
+				"dmq.minPoolMessageInterval must be at most %d seconds",
 				maxMessageTTL,
 			))
 		}

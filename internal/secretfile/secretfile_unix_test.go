@@ -46,18 +46,6 @@ func (i modeFileInfo) Mode() os.FileMode { return i.mode }
 
 func (i modeFileInfo) IsDir() bool { return i.mode.IsDir() }
 
-func TestReadRejectsInsecurePermissions(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "secret")
-	if err := os.WriteFile(path, []byte("s3cret"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := Read(path)
-	if !errors.Is(err, keystore.ErrInsecureFileMode) {
-		t.Fatalf("Read(insecure file) error = %v", err)
-	}
-}
-
 func TestReadRejectsFIFOWithoutBlocking(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "fifo")

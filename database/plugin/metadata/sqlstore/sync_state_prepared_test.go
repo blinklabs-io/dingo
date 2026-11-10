@@ -25,8 +25,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSyncStatePreparedReadKeepsSeparateReadPool(t *testing.T) {
-	t.Parallel()
+func newSplitReadPoolTestStore(t *testing.T) *Store {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "metadata.sqlite")
 	writeDB, err := sql.Open(
 		"sqlite",
@@ -39,6 +39,7 @@ func TestSyncStatePreparedReadKeepsSeparateReadPool(t *testing.T) {
 		"file:"+path+"?mode=ro&_pragma=synchronous(OFF)",
 	)
 	require.NoError(t, err)
+	seedMigratedSQLite(t, writeDB)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(
@@ -53,6 +54,12 @@ func TestSyncStatePreparedReadKeepsSeparateReadPool(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.Start(t.Context()))
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	return store
+}
+
+func TestSyncStatePreparedReadKeepsSeparateReadPool(t *testing.T) {
+	t.Parallel()
+	store := newSplitReadPoolTestStore(t)
 	require.NoError(t, store.SetSyncState("boundary", "before", nil))
 	// The fixture owns rollback; the test context cancels before cleanups.
 	txn := store.Transaction(context.Background())

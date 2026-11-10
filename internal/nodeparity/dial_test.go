@@ -95,7 +95,11 @@ func TestDial_CancelledContextUnblocksStalledHandshake(t *testing.T) {
 // adversarially against that version, which did not return within
 // dialTimeout+margin.
 func TestDial_HandshakeStallIsBoundedByDialTimeout(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: shortens the package-wide dialTimeout; parallel tests
+	// only resume after every serial test has restored it.
+	prev := dialTimeout
+	dialTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { dialTimeout = prev })
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

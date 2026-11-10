@@ -93,6 +93,10 @@ const (
 	leiosKeyLookupIndexSchemaRelease                    = "leios-key-lookup-indexes"
 	backfillCheckpointIdentitySchemaRelease             = "backfill-checkpoint-identity"
 	utxoStakingPartialIndexSchemaRelease                = "utxo-staking-partial-indexes"
+	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
+	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
+	blockNonceSlotIndexSchemaRelease                    = "block-nonce-slot-leading-index"
+	rewardOutputIndexReshapeSchemaRelease               = "reward-account-output-index-reshape"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -262,6 +266,14 @@ var schemaVersions = []struct {
 	{Version: 51, Name: leiosKeyLookupIndexSchemaRelease, Dir: "v51"},
 	{Version: 52, Name: backfillCheckpointIdentitySchemaRelease, Dir: "v52"},
 	{Version: 53, Name: utxoStakingPartialIndexSchemaRelease, Dir: "v53"},
+	{
+		Version: 54,
+		Name:    rewardOutputCredentialPendingIndexSchemaRelease,
+		Dir:     "v54",
+	},
+	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
+	{Version: 56, Name: blockNonceSlotIndexSchemaRelease, Dir: "v56"},
+	{Version: 57, Name: rewardOutputIndexReshapeSchemaRelease, Dir: "v57"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -361,6 +373,13 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == addressTransactionCredentialKindSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = addressTransactionCredentialKindBackfill
+		}
+		// MySQL indexes blob and text columns by prefix, and a prefix index
+		// never covers its column, so the pending-credit covering index would
+		// cost every reward output write there and save no table fetch.
+		if version.Name == rewardOutputCredentialPendingIndexSchemaRelease &&
+			dialect == "mysql" {
+			migration.SQL[dialect] = SQL{}
 		}
 		// MySQL has no partial indexes and keeps the full indexes its
 		// foreign keys require.
@@ -1972,6 +1991,11 @@ func translateSchemaSQLInSchema(
 				value,
 				"DROP INDEX IF EXISTS `idx_asset_amount`",
 				"DROP INDEX `idx_asset_amount` ON `asset`",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `hash_slot`",
+				"DROP INDEX `hash_slot` ON `block_nonce`",
 			)
 			value = strings.ReplaceAll(
 				value,

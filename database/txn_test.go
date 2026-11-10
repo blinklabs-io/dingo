@@ -55,7 +55,7 @@ func (*blockingAfterCommitTxn) Rollback() error {
 func TestTxnAfterCommitRunsOnCommit(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := newStubBarrierDB(&mockBlobStore{})
 
 	txn := db.Transaction(context.Background(), true)
 	var order []int
@@ -76,7 +76,7 @@ func TestTxnAfterCommitRunsOnCommit(t *testing.T) {
 func TestTxnAfterCommitSkippedOnRollback(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := newStubBarrierDB(&mockBlobStore{})
 
 	txn := db.Transaction(context.Background(), true)
 	fired := false
@@ -92,7 +92,7 @@ func TestTxnAfterCommitSkippedOnRollback(t *testing.T) {
 func TestTxnAfterCommitSkippedOnReadOnly(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := newStubBarrierDB(&mockBlobStore{})
 
 	txn := db.Transaction(context.Background(), false)
 	fired := false
@@ -164,7 +164,7 @@ func TestTxnAfterCommitConcurrentWithCommitIsNotLost(t *testing.T) {
 func TestTxnAfterCommitRegisteredAfterCommitRuns(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := newStubBarrierDB(&mockBlobStore{})
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Commit())
 
@@ -177,7 +177,7 @@ func TestTxnAfterCommitRegisteredAfterCommitRuns(t *testing.T) {
 func TestTxnAfterCommitCallbackCanRegisterCallback(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := newStubBarrierDB(&mockBlobStore{})
 	txn := db.Transaction(context.Background(), true)
 	var order []int
 	txn.AfterCommit(func() {
@@ -198,7 +198,7 @@ func TestTxnAfterCommitCallbackCanRegisterCallback(t *testing.T) {
 func TestTxnAfterCommitPanicIsContained(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := newStubBarrierDB(&mockBlobStore{})
 	txn := db.Transaction(context.Background(), true)
 
 	var ran []string
@@ -260,6 +260,19 @@ func (m *commitFailingMetadata) SetCommitTimestamp(
 	types.Txn,
 ) error {
 	return nil
+}
+
+// newStubBarrierDB builds a Database over stub stores whose commits succeed,
+// for tests that exercise Txn's lifecycle and barrier accounting and need no
+// real storage engine.
+func newStubBarrierDB(store blob.BlobStore) *Database {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	return &Database{
+		blobRef:  newBlobStoreRef(store),
+		metadata: &commitFailingMetadata{},
+		logger:   logger,
+		config:   &Config{Logger: logger},
+	}
 }
 
 type commitFailingTxn struct {
@@ -358,10 +371,9 @@ func TestFailedBlobSyncDoesNotBlockTheNextWriter(t *testing.T) {
 
 	syncErr := errors.New("fsync failed")
 	store := &mockBlobStore{syncErr: syncErr}
-	db := newSyncBarrierTestDB(t, store)
+	db := newStubBarrierDB(store)
 
 	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 	err := txn.Commit()
 	require.ErrorIs(t, err, types.ErrPartialCommit)
 	require.ErrorIs(t, err, syncErr)
@@ -383,7 +395,6 @@ func TestFailedBlobSyncDoesNotBlockTheNextWriter(t *testing.T) {
 		5*time.Second,
 		"a new read-write Txn must open after a failed blob sync",
 	)
-	require.NoError(t, db.SetTip(syncBarrierTestTip(), nextTxn))
 	require.NoError(t, nextTxn.Commit())
 	requireCommitBarrierFree(t, db)
 }
@@ -410,11 +421,10 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "successful combined commit",
 			newDB: func(t *testing.T) *Database {
-				return newSyncBarrierTestDB(t, &mockBlobStore{})
+				return newStubBarrierDB(&mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.Transaction(context.Background(), true)
-				require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 				require.NoError(t, txn.Commit())
 				return txn
 			},
@@ -422,11 +432,10 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "successful metadata-only commit",
 			newDB: func(t *testing.T) *Database {
-				return newSyncBarrierTestDB(t, &mockBlobStore{})
+				return newStubBarrierDB(&mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.MetadataTxn(context.Background(), true)
-				require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 				require.NoError(t, txn.Commit())
 				return txn
 			},
@@ -434,7 +443,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "read-only commit",
 			newDB: func(t *testing.T) *Database {
-				return newSyncBarrierTestDB(t, &mockBlobStore{})
+				return newStubBarrierDB(&mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.Transaction(context.Background(), false)
@@ -445,11 +454,10 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "rollback",
 			newDB: func(t *testing.T) *Database {
-				return newSyncBarrierTestDB(t, &mockBlobStore{})
+				return newStubBarrierDB(&mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.Transaction(context.Background(), true)
-				require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 				require.NoError(t, txn.Rollback())
 				return txn
 			},
@@ -457,7 +465,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "release",
 			newDB: func(t *testing.T) *Database {
-				return newSyncBarrierTestDB(t, &mockBlobStore{})
+				return newStubBarrierDB(&mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.Transaction(context.Background(), true)
@@ -468,14 +476,13 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "commit timestamp failure",
 			newDB: func(t *testing.T) *Database {
-				return newSyncBarrierTestDB(t, &timestampFailingBlobStore{
+				return newStubBarrierDB(&timestampFailingBlobStore{
 					mockBlobStore: &mockBlobStore{},
 					err:           injected,
 				})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.Transaction(context.Background(), true)
-				require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 				err := txn.Commit()
 				require.ErrorIs(t, err, injected)
 				require.ErrorContains(
@@ -489,13 +496,12 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "blob commit failure",
 			newDB: func(t *testing.T) *Database {
-				return newSyncBarrierTestDB(t, &mockBlobStore{
+				return newStubBarrierDB(&mockBlobStore{
 					commitErrs: []error{injected},
 				})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.Transaction(context.Background(), true)
-				require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 				err := txn.Commit()
 				require.ErrorIs(t, err, injected)
 				require.ErrorContains(t, err, "blob commit failed")
@@ -505,13 +511,12 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		{
 			name: "blob sync failure",
 			newDB: func(t *testing.T) *Database {
-				return newSyncBarrierTestDB(t, &mockBlobStore{
+				return newStubBarrierDB(&mockBlobStore{
 					syncErr: injected,
 				})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
 				txn := db.Transaction(context.Background(), true)
-				require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 				err := txn.Commit()
 				require.ErrorIs(t, err, types.ErrPartialCommit)
 				require.ErrorIs(t, err, injected)
@@ -582,6 +587,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			db := tc.newDB(t)
 			txn := tc.run(t, db)
 			requireCommitBarrierFree(t, db)
@@ -659,7 +665,8 @@ func TestOnFinishFiresOnEveryTerminalPath(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db := newTestDB(t)
+			t.Parallel()
+			db := newStubBarrierDB(&mockBlobStore{})
 			txn := db.BlobTxn(tc.readWrite)
 			var calls int
 			var mu sync.Mutex
@@ -698,7 +705,7 @@ func TestOnFinishFiresOnEveryTerminalPath(t *testing.T) {
 // TestOnFinishAfterFinishRunsImmediately pins that an acquire-then-register
 // sequence cannot lose its release to a transaction that concluded in between.
 func TestOnFinishAfterFinishRunsImmediately(t *testing.T) {
-	db := newTestDB(t)
+	db := newStubBarrierDB(&mockBlobStore{})
 	txn := db.BlobTxn(true)
 	require.NoError(t, txn.Commit())
 	fired := false
@@ -713,7 +720,7 @@ func TestOnFinishAfterFinishRunsImmediately(t *testing.T) {
 // TestOnFinishRunsInRegistrationOrderAndContainsPanics pins that one caller's
 // panicking callback cannot strand another caller's hold.
 func TestOnFinishRunsInRegistrationOrderAndContainsPanics(t *testing.T) {
-	db := newTestDB(t)
+	db := newStubBarrierDB(&mockBlobStore{})
 	txn := db.BlobTxn(true)
 	var order []string
 	txn.OnFinish(func() { order = append(order, "first") })
@@ -726,7 +733,7 @@ func TestOnFinishRunsInRegistrationOrderAndContainsPanics(t *testing.T) {
 // TestOnFinishCallbackMayTakeLocks pins that callbacks run without the
 // transaction lock held, which is what lets them release a lock of their own.
 func TestOnFinishCallbackMayTakeLocks(t *testing.T) {
-	db := newTestDB(t)
+	db := newStubBarrierDB(&mockBlobStore{})
 	txn := db.BlobTxn(true)
 	var held sync.Mutex
 	held.Lock()
@@ -745,7 +752,7 @@ func TestOnFinishCallbackMayTakeLocks(t *testing.T) {
 func TestOnFinishNestedRegistrationRunsImmediately(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
+	db := newStubBarrierDB(&mockBlobStore{})
 	txn := db.BlobTxn(true)
 	var order []string
 	txn.OnFinish(func() {

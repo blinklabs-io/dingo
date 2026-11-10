@@ -368,6 +368,7 @@ type PoolStakeSnapshot struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
+	VrfKeyHash                    []byte
 	LeiosKeyPublic                []byte
 	LeiosKeyPossessionProof       []byte
 	LeiosKeyRegistrationEpoch     sql.NullInt64

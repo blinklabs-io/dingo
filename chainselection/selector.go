@@ -340,6 +340,10 @@ type ChainSelector struct {
 	// nowFn is injectable for deterministic tests; defaults to time.Now.
 	nowFn func() time.Time
 
+	// generationStableWait overrides headerCryptoGenerationStableWait when
+	// positive, so tests need not wait out the production bound.
+	generationStableWait time.Duration
+
 	// switchBackCooldown is the resolved value of
 	// ChainSelectorConfig.SwitchBackCooldown (defaulted by NewChainSelector).
 	switchBackCooldown time.Duration
@@ -540,12 +544,11 @@ func (cs *ChainSelector) clonePeerTipAdmissionFrontier(
 	result.observedTipHistory = nil
 	result.admittedTipHistory = nil
 	if cs.mode == SelectionModeGenesis {
-		result.observedSlots = append([]uint64(nil), peerTip.observedSlots...)
-		result.observedPoints = cloneObservedPoints(peerTip.observedPoints)
+		// The struct copy shares the committed frontier's windows. Points
+		// and hash bytes in a window are never written after they are
+		// appended, so both peers may keep reading and appending to them.
 	} else {
-		result.observedSlots = nil
-		result.observedPoints = nil
-		result.observedPointBaseBlock = 0
+		result.resetObservedFrontier()
 	}
 	return &result
 }
@@ -908,8 +911,7 @@ func (cs *ChainSelector) advanceSelectionModeWithBestKnownBlockLocked(
 	// Corroboration no longer applies in Praos; drop the per-peer hash
 	// frontier so it does not linger for the full window on every tracked peer.
 	for _, peerTip := range cs.peerTips {
-		peerTip.observedPoints = nil
-		peerTip.observedPointBaseBlock = 0
+		peerTip.resetObservedPoints()
 	}
 	clear(cs.deliveredPeerTips)
 	clear(cs.eagernessDeliveries)
@@ -2048,22 +2050,40 @@ func (cs *ChainSelector) pinCurrentHeaderCryptoGeneration() (func(), bool) {
 		cs.config.PinHeaderCryptoVerificationGeneration == nil {
 		return func() {}, true
 	}
-	deadline := time.Now().Add(headerCryptoGenerationStableWait)
+	wait := headerCryptoGenerationStableWait
+	if cs.generationStableWait > 0 {
+		wait = cs.generationStableWait
+	}
+	deadline := time.Now().Add(wait)
 	for {
-		generation := cs.config.CurrentHeaderCryptoVerificationGeneration()
-		if generation != 0 {
-			release, current := cs.config.PinHeaderCryptoVerificationGeneration(
-				generation,
-			)
-			if current && release != nil {
-				return release, true
-			}
+		if release, ok := cs.tryPinCurrentHeaderCryptoGeneration(); ok {
+			return release, true
 		}
 		if !time.Now().Before(deadline) {
 			return func() {}, false
 		}
 		time.Sleep(headerCryptoGenerationPollInterval)
 	}
+}
+
+// tryPinCurrentHeaderCryptoGeneration makes a single attempt at the pin that
+// pinCurrentHeaderCryptoGeneration waits for.
+func (cs *ChainSelector) tryPinCurrentHeaderCryptoGeneration() (func(), bool) {
+	if cs.config.CurrentHeaderCryptoVerificationGeneration == nil ||
+		cs.config.PinHeaderCryptoVerificationGeneration == nil {
+		return func() {}, true
+	}
+	generation := cs.config.CurrentHeaderCryptoVerificationGeneration()
+	if generation == 0 {
+		return nil, false
+	}
+	release, current := cs.config.PinHeaderCryptoVerificationGeneration(
+		generation,
+	)
+	if !current || release == nil {
+		return nil, false
+	}
+	return release, true
 }
 
 // ResolvePeerTipAdmission promotes an accepted header or removes a rejected

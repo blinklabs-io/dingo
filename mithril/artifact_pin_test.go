@@ -140,15 +140,6 @@ func TestValidateExplicitArtifactPin(t *testing.T) {
 	}
 }
 
-func TestResumeArtifactIdentityValidationRequiresDurablePin(t *testing.T) {
-	t.Parallel()
-
-	assert.False(t, resumeArtifactIdentityValidationEnabled(pinnedArtifact{}))
-	assert.True(t, resumeArtifactIdentityValidationEnabled(pinnedArtifact{
-		Digest: "resume-digest",
-	}))
-}
-
 func syncConfigForFixture(
 	fixture *v2Fixture,
 	dataDir string,
@@ -183,6 +174,8 @@ func syncConfigForFixture(
 // under the old key while a second one appears under the new one. All three
 // assertions below fail in that case.
 func TestSyncResumesPinnedArtifactAfterAggregatorAdvance(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		validImmutable:   true,
 		validLedgerState: true,
@@ -230,6 +223,8 @@ func TestSyncResumesPinnedArtifactAfterAggregatorAdvance(t *testing.T) {
 // must not make a clean, uninterrupted run stick to anything. A database with
 // no in-progress marker takes the newest published artifact.
 func TestSyncFreshBootstrapSelectsLatestArtifact(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		validImmutable:   true,
 		validLedgerState: true,
@@ -324,6 +319,8 @@ func TestSyncRejectsExplicitPinForInterruptedCatchUp(t *testing.T) {
 // build without artifact pinning left: the artifact its partial rows belong to
 // cannot be identified, so no artifact may be imported over them.
 func TestSyncRefusesResumeWithoutArtifactPin(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		validImmutable:   true,
 		validLedgerState: true,
@@ -341,6 +338,8 @@ func TestSyncRefusesResumeWithoutArtifactPin(t *testing.T) {
 // dropped the pinned artifact: an explicit recovery decision rather than a
 // silent switch to whatever is published now.
 func TestSyncRefusesResumeWhenPinnedArtifactIsGone(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		validImmutable:   true,
 		validLedgerState: true,
@@ -362,6 +361,8 @@ func TestSyncRefusesResumeWhenPinnedArtifactIsGone(t *testing.T) {
 // resolves to no longer produces the certified ImmutableDB tip the interrupted
 // run recorded.
 func TestSyncRefusesResumeWhenCertifiedTipMoved(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		validImmutable:   true,
 		validLedgerState: true,

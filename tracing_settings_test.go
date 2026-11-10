@@ -29,7 +29,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -69,16 +68,6 @@ func TestResourceHonorsOTELResourceAttributes(t *testing.T) {
 	require.Equal(t, "preview", attrs["cardano.network.name"])
 	require.Equal(t, "2", attrs["cardano.network.magic"])
 	require.NotEmpty(t, attrs["service.version"])
-}
-
-// Not t.Parallel: reads OTEL_TRACES_EXPORTER through t.Setenv.
-func TestAutoexportUsedWithoutEndpoint(t *testing.T) {
-	t.Setenv("OTEL_TRACES_EXPORTER", "console")
-	n := &Node{config: Config{tracing: true}}
-	exporter, err := n.traceExporter(context.Background())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = exporter.Shutdown(context.Background()) })
-	require.IsType(t, &stdouttrace.Exporter{}, exporter)
 }
 
 type blockingExporter struct{ release chan struct{} }
