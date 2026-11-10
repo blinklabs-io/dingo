@@ -1250,7 +1250,7 @@ func TestGenesisSelectionModeHonorsConsensusMode(t *testing.T) {
 				intersectTip:      tt.intersectTip,
 				intersectPoints:   tt.intersectPnts,
 			}
-			assert.Equal(t, tt.want, cfg.genesisSelectionMode())
+			assert.Equal(t, tt.want, cfg.GenesisSelectionMode())
 		})
 	}
 }

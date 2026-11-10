@@ -496,16 +496,6 @@ func Run(
 		),
 		"component", "node",
 	)
-	// Mirrors Config.genesisSelectionMode in the root package: Genesis
-	// bootstrap on, syncing from origin (the node wires no explicit
-	// intersect points), and the node config not naming PraosMode.
-	logEffectiveConfig(
-		logger,
-		cfg,
-		cfg.GenesisBootstrap.Enabled &&
-			!cfg.IntersectTip &&
-			!nodeCfg.PraosConsensusMode(),
-	)
 	// Apply cardano-node config.json P2P targets as fallback when the
 	// Dingo-native config (YAML / env / CLI) does not specify them.
 	// Priority: Dingo config > cardano config.json > peergov defaults.
@@ -650,6 +640,7 @@ func Run(
 	for _, opt := range opts {
 		opt(&dingoCfg)
 	}
+	logEffectiveConfig(logger, cfg, dingoCfg.GenesisSelectionMode())
 	d, err := dingo.New(dingoCfg) //nolint:contextcheck
 	if err != nil {
 		return err

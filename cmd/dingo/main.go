@@ -88,6 +88,7 @@ func commonRun(
 		os.Stderr,
 	)
 	slog.SetDefault(logger)
+	applyDebugLevelOverride(cfg, globalFlags.debug)
 	// Config-validation warnings go to stderr, not the logger: a high
 	// configured level (e.g. error) would otherwise suppress them, leaving the
 	// operator with no feedback that their value was ignored.
@@ -115,6 +116,15 @@ func commonRun(
 		"component", programName,
 	)
 	return logger, nil
+}
+
+// applyDebugLevelOverride records the --debug override in cfg so anything that
+// reports the configured level, such as the startup effective-configuration
+// line, matches the level the logger actually uses.
+func applyDebugLevelOverride(cfg *config.Config, debug bool) {
+	if debug {
+		cfg.Logging.Level = "debug"
+	}
 }
 
 // newLogger builds a slog.Logger writing to w. format selects the handler

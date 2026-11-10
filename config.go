@@ -3013,10 +3013,10 @@ func (c *Config) CardanoNodeConfig() *cardano.CardanoNodeConfig {
 	return c.cardanoNodeConfig
 }
 
-// genesisSelectionMode reports whether the chain selector starts in Genesis
+// GenesisSelectionMode reports whether the chain selector starts in Genesis
 // mode: Genesis bootstrap is enabled, the sync starts from origin, and the
 // Cardano node configuration does not name PraosMode.
-func (c *Config) genesisSelectionMode() bool {
+func (c *Config) GenesisSelectionMode() bool {
 	return c.genesisBootstrap &&
 		!c.intersectTip &&
 		len(c.intersectPoints) == 0 &&

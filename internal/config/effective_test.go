@@ -15,6 +15,7 @@
 package config
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -137,6 +138,82 @@ func TestEffectiveLogAttrsPinsFieldSet(t *testing.T) {
 			if a.Value.String() != "127.0.0.1:3001" {
 				t.Errorf("private_addr = %s", a.Value)
 			}
+		}
+	}
+}
+
+// perturbField sets the Config leaf at the dotted path to a non-zero value of
+// its kind, allocating pointers on the way, and reports whether the kind is
+// one it can set.
+func perturbField(cfg *Config, path string) bool {
+	v := reflect.ValueOf(cfg).Elem()
+	for name := range strings.SplitSeq(path, ".") {
+		for v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				v.Set(reflect.New(v.Type().Elem()))
+			}
+			v = v.Elem()
+		}
+		v = v.FieldByName(name)
+	}
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		v = v.Elem()
+	}
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString("PERTURBED")
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(7)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		v.SetUint(7)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(7)
+	case reflect.Slice:
+		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+	case reflect.Map:
+		v.Set(reflect.MakeMap(v.Type()))
+	default:
+		return false
+	}
+	return true
+}
+
+func renderEffectiveAttrs(cfg *Config) string {
+	var b strings.Builder
+	for _, a := range cfg.EffectiveLogAttrs(false) {
+		b.WriteString(a.String())
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// TestEffectiveLogAttrsReadOnlyListedFields ties EffectiveLogAttrs to
+// EffectiveConfigSourceFields: changing any Config field outside the list
+// must leave the line unchanged, so a field read without being listed (and
+// therefore without the plain-classification check) fails here.
+func TestEffectiveLogAttrsReadOnlyListedFields(t *testing.T) {
+	t.Parallel()
+
+	baseline := renderEffectiveAttrs(&Config{})
+	for _, path := range configLeafFieldPaths(t) {
+		if slices.Contains(EffectiveConfigSourceFields, path) {
+			continue
+		}
+		cfg := &Config{}
+		if !perturbField(cfg, path) {
+			continue
+		}
+		if got := renderEffectiveAttrs(cfg); got != baseline {
+			t.Errorf(
+				"EffectiveLogAttrs reads %s, which is not in "+
+					"EffectiveConfigSourceFields",
+				path,
+			)
 		}
 	}
 }

@@ -131,3 +131,25 @@ func TestConsumedUtxoSweepMetrics(t *testing.T) {
 	)
 	require.Positive(t, pruned)
 }
+
+// A sweep whose candidate floor is below the durable one must export the
+// durable floor, so the gauge never decreases.
+func TestConsumedUtxoSweepMetricsExportDurableFloor(t *testing.T) {
+	t.Parallel()
+
+	fixture := seedRetentionReconstructionFixture(t)
+	reg := prometheus.NewRegistry()
+	fixture.ls.metrics.init(reg)
+	require.NoError(t, fixture.ls.persistConsumedUtxoPruneFloor(5000, nil))
+
+	_, floor, err := fixture.ls.pruneConsumedUtxosUpTo(
+		context.Background(), 200, 50, 1000,
+	)
+	require.NoError(t, err)
+	require.Less(t, floor, uint64(5000))
+	require.Equal(
+		t,
+		float64(5000),
+		promtestutil.ToFloat64(fixture.ls.metrics.consumedUtxoPruneFloorSlot),
+	)
+}

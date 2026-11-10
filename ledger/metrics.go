@@ -211,7 +211,8 @@ type stateMetrics struct {
 	// handleEventChainsyncRollback applied on a peer's MsgRollBackward
 	// without comparing the peer's chain to ours; its _count is the number
 	// of applied peer-driven rollbacks. Depth is the header-tip block number
-	// before minus after, so it is bounded by the security parameter.
+	// before minus after, so it is bounded by the security parameter; a
+	// header added concurrently by blockfetch can make it read low.
 	peerRollbackDepthBlocks prometheus.Histogram
 	// Incremented each time stateful block header verification is deferred
 	// to ledger apply (verification timeout against a busy ledger, or a fork
