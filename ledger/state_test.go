@@ -13112,6 +13112,9 @@ const (
 	pruneFixtureFloorSlot       = 114_080
 	pruneFixtureRetainedSlot    = 120_000
 	pruneFixtureTipSlot         = 140_000
+	// pruneFixtureDepthFillers puts the floor block exactly k=432 blocks
+	// behind the tip: 431 fillers, the tip, and the floor block itself.
+	pruneFixtureDepthFillers = 431
 )
 
 type prunedUtxoFixture struct {
@@ -13127,6 +13130,36 @@ type prunedUtxoFixture struct {
 }
 
 func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFixture {
+	t.Helper()
+	return newPrunedUtxoFixtureWithFillers(t, mithrilLedgerSlot, 0, false)
+}
+
+// newDeepPrunedUtxoFixture is the prune-floor fixture for tests that run the
+// consumed-UTxO sweep: it adds the filler blocks that make the chain k blocks
+// deep so the sweep prunes at pruneFixtureFloorSlot.
+func newDeepPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFixture {
+	t.Helper()
+	return newPrunedUtxoFixtureWithFillers(
+		t,
+		mithrilLedgerSlot,
+		pruneFixtureDepthFillers,
+		false,
+	)
+}
+
+// newPrunedUtxoFixtureWithFillers builds the prune-floor fixture with filler
+// blocks so the chain is at least k (=432) blocks deep, which the sweep needs
+// before it will delete anything. With the default placement the fillers sit
+// between the floor block and the tip, so the block exactly k deep is the
+// floor block and the sweep floor stays at pruneFixtureFloorSlot. With
+// sparseTail the fillers instead sit one slot apart just above the consumer
+// block, which leaves the block k deep far below tip-3k/f.
+func newPrunedUtxoFixtureWithFillers(
+	t *testing.T,
+	mithrilLedgerSlot uint64,
+	fillers int,
+	sparseTail bool,
+) *prunedUtxoFixture {
 	t.Helper()
 
 	db := newTestDB(t)
@@ -13147,9 +13180,28 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 		{pruneFixtureProducerSlot, 2, testHashBytes("3766-producer")},
 		{pruneFixtureDeepRewindSlot, 3, testHashBytes("3766-deep")},
 		{pruneFixtureConsumerSlot, 4, testHashBytes("3766-consumer")},
-		{pruneFixtureFloorSlot, 5, testHashBytes("3766-floor")},
-		{pruneFixtureTipSlot, 6, testHashBytes("3766-tip")},
 	}
+	addFillers := func(firstSlot, step uint64) {
+		for i := range fillers {
+			blocks = append(blocks, fixtureBlock{
+				firstSlot + uint64(i)*step, //nolint:gosec
+				uint64(len(blocks)) + 1,
+				testHashBytes(fmt.Sprintf("3766-filler-%d", i)),
+			})
+		}
+	}
+	if sparseTail {
+		addFillers(pruneFixtureConsumerSlot+1, 1)
+	}
+	blocks = append(blocks, fixtureBlock{
+		pruneFixtureFloorSlot, uint64(len(blocks)) + 1, testHashBytes("3766-floor"),
+	})
+	if !sparseTail {
+		addFillers(pruneFixtureFloorSlot+1, 60)
+	}
+	blocks = append(blocks, fixtureBlock{
+		pruneFixtureTipSlot, uint64(len(blocks)) + 1, testHashBytes("3766-tip"),
+	})
 	rawBlocks := make([]chain.RawBlock, 0, len(blocks))
 	for i, b := range blocks {
 		var prevHash []byte
@@ -13352,7 +13404,7 @@ func (f *prunedUtxoFixture) assertLiveSetConsistentAtTip(t *testing.T) {
 func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 
 	require.Equal(
 		t,
@@ -13404,7 +13456,7 @@ func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos(context.Background())
 	tipBefore := f.ls.currentTip
 
@@ -13453,7 +13505,7 @@ func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
 func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 
 	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
 	require.NoError(t, err)
@@ -13516,7 +13568,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos(context.Background())
 
 	// Put the applied ledger tip on a same-slot competitor at the floor, with
@@ -14392,4 +14444,63 @@ func TestCleanupBlockNoncesRetainsHistoryInAPIMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRollbackWithinSecurityParamIsNotRefusedByUtxoPruneFloor asserts the
+// Praos rule: a rollback of at most k blocks must be accepted. The consumed
+// UTxO prune floor was measured in slots (tip minus the 3k/f stability window)
+// while k is measured in blocks, so on a low-density chain the k-th block back
+// from the tip can sit below that slot floor. The sweep now caps its target at
+// the slot of the block k deep.
+//
+// The fixture's tail is sparse in slots but dense in blocks: the consumer block
+// is 430 blocks (k=432) below the tip yet 30000 slots below it, under the
+// 114080 slot window. Before the fix the sweep raised the floor to 114080 and
+// refused this rollback with ErrRollbackBelowUtxoPruneFloor.
+func TestRollbackWithinSecurityParamIsNotRefusedByUtxoPruneFloor(t *testing.T) {
+	t.Parallel()
+
+	f := newPrunedUtxoFixtureWithFillers(t, 0, 428, true)
+	f.ls.cleanupConsumedUtxos(context.Background())
+	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		uint64(pruneFixtureProducerSlot),
+		floor,
+		"the floor must be the slot of the block k deep, not tip-3k/f",
+	)
+
+	target := ocommon.NewPoint(
+		pruneFixtureConsumerSlot,
+		testHashBytes("3766-consumer"),
+	)
+	require.Less(
+		t,
+		target.Slot,
+		uint64(pruneFixtureFloorSlot),
+		"fixture must place the fork point below the slot-based window",
+	)
+	require.NoError(
+		t,
+		f.ls.chain.ValidateRollback(context.Background(), target),
+		"fork point is 430 blocks deep and must be within k",
+	)
+	err = f.ls.rollback(context.Background(), target)
+	require.NotErrorIs(t, err, ErrRollbackBelowUtxoPruneFloor)
+	require.NoError(t, err)
+	require.Equal(t, target.Slot, f.ls.currentTip.Point.Slot)
+}
+
+// TestConsumedUtxoSweepWaitsForKBlocks pins the other half of the fix: a chain
+// shorter than k blocks may be replaced whole, so nothing may be pruned yet,
+// however far the tip is past the slot window.
+func TestConsumedUtxoSweepWaitsForKBlocks(t *testing.T) {
+	t.Parallel()
+
+	f := newPrunedUtxoFixtureWithFillers(t, 0, 0, false)
+	f.ls.cleanupConsumedUtxos(context.Background())
+	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	require.Zero(t, floor)
 }

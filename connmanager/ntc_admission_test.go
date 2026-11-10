@@ -20,6 +20,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -528,4 +529,91 @@ func TestTrustedLocalNtCIdleTimeoutDisabledKeepsIdleClient(t *testing.T) {
 		return manager.trustedLocalNtCCount != 1
 	}, 300*time.Millisecond, 5*time.Millisecond,
 		"idle trusted NtC client was closed with the idle timeout disabled")
+}
+
+// TestNtCAdmissionDefaultLimitsBoundRemoteFlood pins the admission boundary an
+// unauthenticated remote NtC client faces at the documented limits: 5
+// connections per source IP and 100 in total. A flood from one address must
+// not reduce admission for another address, while the total stays shared
+// across addresses.
+func TestNtCAdmissionDefaultLimitsBoundRemoteFlood(t *testing.T) {
+	t.Parallel()
+
+	const (
+		total = 100
+		perIP = 5
+	)
+	manager := NewConnectionManager(ConnectionManagerConfig{
+		MaxNtCConns:            total,
+		MaxNtCConnectionsPerIP: perIP,
+	})
+	reserve := func(ip string, port int) func() {
+		return manager.reserveNtCSlot(&net.TCPAddr{
+			IP: net.ParseIP(ip), Port: port,
+		}, false)
+	}
+
+	// A flooder takes its 5 and is refused after that.
+	flooder := make([]func(), 0, perIP)
+	for i := range perIP {
+		release := reserve("192.0.2.1", 40000+i)
+		require.NotNil(t, release, "connection %d from one IP must be admitted", i+1)
+		flooder = append(flooder, release)
+	}
+	for i := range 20 {
+		require.Nil(
+			t,
+			reserve("192.0.2.1", 41000+i),
+			"connection %d beyond the per-IP limit must be refused",
+			perIP+i+1,
+		)
+	}
+
+	// The flood does not consume another address's budget.
+	txpump := make([]func(), 0, perIP)
+	for i := range perIP {
+		release := reserve("192.0.2.2", 42000+i)
+		require.NotNil(t, release, "flood from one IP reduced admission for another")
+		txpump = append(txpump, release)
+	}
+
+	// Fill the remainder of the total from distinct addresses, then a fresh
+	// address is refused on the shared total.
+	var others []func()
+	for i := 0; manager.ntcCountForTest() < total; i++ {
+		release := reserve(
+			net.IPv4(198, 51, 100, byte(i/perIP+1)).String(),
+			43000+i,
+		)
+		require.NotNil(t, release, "total budget not yet reached")
+		others = append(others, release)
+	}
+	require.Equal(t, total, manager.ntcCountForTest())
+	require.Nil(
+		t,
+		reserve("203.0.113.9", 44000),
+		"the shared total of 100 must refuse a fresh address",
+	)
+
+	// Releasing restores admission, and a repeated release is harmless.
+	flooder[0]()
+	flooder[0]()
+	require.Equal(t, total-1, manager.ntcCountForTest())
+	again := reserve("203.0.113.9", 44001)
+	require.NotNil(t, again, "a released slot must be reusable")
+
+	for _, release := range slices.Concat(flooder, txpump, others, []func(){again}) {
+		release()
+	}
+	require.Zero(t, manager.ntcCountForTest())
+	manager.ntcAdmissionMutex.Lock()
+	sources := len(manager.ntcIPConns)
+	manager.ntcAdmissionMutex.Unlock()
+	require.Zero(t, sources, "released connections leaked per-IP slots")
+}
+
+func (c *ConnectionManager) ntcCountForTest() int {
+	c.ntcAdmissionMutex.Lock()
+	defer c.ntcAdmissionMutex.Unlock()
+	return c.ntcCount
 }

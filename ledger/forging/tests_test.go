@@ -1535,11 +1535,14 @@ func TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip(
 	}
 }
 
-// TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale verifies that a
-// quiet network is not mistaken for an upstream peer being ahead. The target
-// is unknown, so the forge gate has no peer-relative evidence that this node
-// is behind.
-func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
+// TestForgeRefusesUnknownUpstreamTargetWhileWallClockIsStale verifies that a
+// live upstream with an unpublished target does not license forging on a tip
+// that trails the wall clock by more than the sync tolerance. This used to
+// assert the opposite (TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale,
+// #4241 anti-wedge); the maintainer ruled that a defect, since a block on that
+// parent can fork the honest chain deeper than k. The sync gate now falls back
+// to the wall clock when the target is unknown.
+func TestForgeRefusesUnknownUpstreamTargetWhileWallClockIsStale(
 	t *testing.T,
 ) {
 	leader := &forgerCountingLeader{}
@@ -1569,12 +1572,11 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
-	assert.Equal(t, 1, leader.callCount())
-	assert.Equal(t, 1, builder.calls)
-	assert.Equal(t, 1, broadcaster.calls)
+	assert.Zero(t, builder.calls)
+	assert.Zero(t, broadcaster.calls)
 	assert.Equal(
 		t,
-		float64(0),
+		float64(1),
 		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 	)
 	assert.Equal(
@@ -1604,6 +1606,124 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 		"dingo_forge_tip_gap_slots reports the ledger-apply backlog, "+
 			"not the wall-clock lag",
 	)
+}
+
+// TestForgeDoesNotBuildOnStaleParentWithoutUpstreamEvidence asserts that a
+// restarted node whose tip trails the wall clock by far more than the sync
+// tolerance (and, at the fixture's density, by far more than k blocks) does
+// not forge a block on that stale parent merely because it has no upstream
+// evidence yet. Such a block forks the honest chain deeper than k.
+//
+// Fixed defect: a live upstream whose target was still unpublished made
+// upstreamSyncSkipsForge return false, so the node forged. The gate now falls
+// back to the wall clock for that state. A node with no live upstream at all
+// (a solo producer, which has no peer evidence to wait for) still forges; see
+// TestSoloProducerForgesWithStaleTipAndNoUpstream.
+func TestForgeDoesNotBuildOnStaleParentWithoutUpstreamEvidence(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		clock forgerTestSlotClock
+	}{
+		{
+			name: "live upstream with unpublished target",
+			clock: forgerTestSlotClock{
+				currentSlot:       1000,
+				chainTipSlot:      9,
+				upstreamActive:    true,
+				upstreamTipSlot:   0,
+				slotsPerKESPeriod: 100000,
+			},
+		},
+		{
+			// Control: once the upstream tip is known and far ahead, the
+			// existing sync gate refuses. This passes today and shows the
+			// fixture can refuse.
+			name: "live upstream with known target far ahead",
+			clock: forgerTestSlotClock{
+				currentSlot:            1000,
+				chainTipSlot:           9,
+				upstreamActive:         true,
+				upstreamTipSlot:        990,
+				upstreamTipBlockNumber: 50,
+				slotsPerKESPeriod:      100000,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			leader := &forgerCountingLeader{}
+			block := newForgerTestBlock(1000, 9)
+			builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+			broadcaster := &forgerTestBroadcaster{}
+			forger, err := NewBlockForger(ForgerConfig{
+				Mode: ModeProduction,
+				Logger: slog.New(
+					slog.NewJSONHandler(io.Discard, nil),
+				),
+				Credentials:             setupTestCredentials(t),
+				LeaderChecker:           leader,
+				BlockBuilder:            builder,
+				BlockBroadcaster:        broadcaster,
+				SlotClock:               tc.clock,
+				ForgeSyncToleranceSlots: 100,
+				PromRegistry:            prometheus.NewRegistry(),
+			})
+			require.NoError(t, err)
+
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+			)
+
+			assert.Zero(
+				t,
+				builder.calls,
+				"forged on a parent at slot %d while the wall clock is at "+
+					"slot %d (tolerance 100): a block on a parent this "+
+					"far behind forks the honest chain deeper than k",
+				tc.clock.chainTipSlot,
+				tc.clock.currentSlot,
+			)
+			assert.Zero(t, broadcaster.calls)
+		})
+	}
+}
+
+// TestSoloProducerForgesWithStaleTipAndNoUpstream is the control for the
+// stale-parent fix: with no live upstream there is no peer evidence to wait
+// for, so a solo producer restarting behind the wall clock must still forge.
+func TestSoloProducerForgesWithStaleTipAndNoUpstream(t *testing.T) {
+	t.Parallel()
+
+	leader := &forgerCountingLeader{}
+	block := newForgerTestBlock(1000, 9)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    leader,
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       1000,
+			chainTipSlot:      9,
+			upstreamActive:    false,
+			slotsPerKESPeriod: 100000,
+		},
+		ForgeSyncToleranceSlots: 100,
+		PromRegistry:            prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Equal(t, 1, builder.calls)
+	assert.Equal(t, 1, broadcaster.calls)
 }
 
 // forgerScheduleAwareLeader reports a fixed set of scheduled leader

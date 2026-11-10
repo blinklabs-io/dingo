@@ -20239,7 +20239,7 @@ func TestEpochDonationWithdrawalRollback(t *testing.T) {
 func TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos(context.Background())
 
 	require.True(

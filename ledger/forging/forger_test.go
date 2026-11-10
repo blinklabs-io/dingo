@@ -1523,6 +1523,13 @@ func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 	})
 }
 
+// TestForgeDoesNotTreatUnknownUpstreamAsStalenessEvidence pins that an unknown
+// upstream target never trips the applied-staleness bound. Separately, a live
+// upstream with an unpublished target no longer licenses forging on a tip that
+// trails the wall clock by more than the sync tolerance: the sync gate falls
+// back to the wall clock and refuses (a block on that parent can fork the
+// honest chain deeper than k). Without a live upstream, or within tolerance,
+// the node still forges.
 func TestForgeDoesNotTreatUnknownUpstreamAsStalenessEvidence(t *testing.T) {
 	for _, upstreamActive := range []bool{false, true} {
 		for _, gap := range []uint64{100, 101} {
@@ -1553,10 +1560,14 @@ func TestForgeDoesNotTreatUnknownUpstreamAsStalenessEvidence(t *testing.T) {
 						t,
 						forger.checkAndForgeProduction(context.Background()),
 					)
-					require.Equal(t, 1, builder.calls)
+					wantForge := 1
+					if upstreamActive && gap > 100 {
+						wantForge = 0
+					}
+					require.Equal(t, wantForge, builder.calls)
 					require.Equal(
 						t,
-						1,
+						wantForge,
 						forger.blockBroadcaster.(*forgerTestBroadcaster).calls,
 					)
 					require.Zero(

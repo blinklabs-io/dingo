@@ -3728,14 +3728,18 @@ func (f *BlockForger) checkOpCertSequence(
 // lower of the two, so a node whose pipeline is behind is measured as behind
 // rather than credited with headers it has admitted but not applied.
 func (f *BlockForger) upstreamSyncSkipsForge(
-	_, tipSlot, upstreamTip uint64,
+	currentSlot, tipSlot, upstreamTip uint64,
 ) bool {
 	if upstreamTip == 0 {
-		// An unpublished target is not evidence that a peer is ahead. The
-		// wall-clock slot can be arbitrarily far past our tip during an
-		// ordinary network gap, so comparing it with tipSlot would reject
-		// valid leader slots on an otherwise current node.
-		return false
+		// An unpublished target is not evidence that a peer is ahead, but a
+		// live upstream with no target also gives no evidence that this
+		// node is current. Falling back to the wall clock keeps a restarted
+		// node from building on a parent far behind the network (deeper than
+		// k on a sparse chain) before its peer's first header arrives. A
+		// node whose tip is within tolerance of the wall clock still forges,
+		// which is what ends the window.
+		return currentSlot > tipSlot &&
+			currentSlot-tipSlot > f.forgeSyncToleranceSlots
 	}
 	return upstreamTip > tipSlot &&
 		upstreamTip-tipSlot > f.forgeSyncToleranceSlots
