@@ -3129,9 +3129,8 @@ this admission.
 
 `Config.Database` (set to `midnightserver.NewDatabase(n.db)` — `adapter.go`'s
 `databaseAdapter`, which bridges the package-level
-`database.BlockByHash`/`BlocksRecent`/`BlockBeforeSlot` functions and the
-0-based/1-based block-number translation into `MidnightDatabase` interface
-methods, mirroring `api/mesh`'s `meshDatabaseAdapter`/`MeshDatabase`) and
+`database.BlockByHash`/`BlocksRecent`/`BlockBeforeSlot`/`BlockByNumber`
+functions into `MidnightDatabase` interface methods, mirroring `api/mesh`'s `meshDatabaseAdapter`/`MeshDatabase`) and
 `Config.SlotTimer` (set to `n.ledgerState`, satisfying `SlotToTime`/
 `TimeToSlot`) back the governance/parameters/block/epoch/stability RPCs
 implemented in `midnight/server/service.go`:
@@ -3162,8 +3161,10 @@ implemented in `midnight/server/service.go`:
   the latest block at or before that wall-clock time
   (`SlotTimer.TimeToSlot` + `database.BlockBeforeSlot`) instead of the live
   tip. `GetLatestStableBlock` looks the target block number up via
-  `Database.BlockByIndex`, translating 0-based block number to the blob
-  store's 1-based index the same way `api/blockfrost` does. A client-supplied
+  `database.BlockByNumber`, which resolves the chain block number by searching
+  block metadata and returns the earliest block carrying that number (Byron
+  epoch boundary blocks share a number with their parent), as `api/blockfrost`
+  does. A client-supplied
   `as_of_timestamp_unix_millis` above `int64` range (`resolveTipBlock`) is
   rejected with `codes.InvalidArgument` rather than being converted with
   `int64(v)`, which would silently wrap it into a negative timestamp and
@@ -4339,6 +4340,31 @@ Shelley epoch with empty blocks-made (`translateToShelleyLedgerStateFromUtxo`).
 parameters and ADA pots with no pool rewards, so with `d >= 0.8` reserves expand
 with `eta = 1` and the treasury takes its share. Later updates use the normal
 delayed E-3 snapshot, E-2 performance, and E-1 pots mapping.
+
+The exception is an epoch whose first block lands later than its start plus the
+randomness stabilisation window (4k/f). cardano-ledger's `bheadTransition`
+hands RUPD the epoch state and blocks-made from *before* NEWEPOCH ran, and the
+update NEWEPOCH leaves is empty, so that tick starts the update from the end of
+the previous epoch: the same snapshot, performance epoch, reserves and fee seed
+as the update applied at the boundary into that epoch. The boundary after it
+therefore applies the previous round again (`replaysPreviousStakeRewardRound`,
+`reward_late_first_block.go`). With X the epoch whose first block was late,
+the boundary into X+1 would normally apply the round whose performance epoch
+is X-1; that round is never built, so the performance of epoch X-1 is never
+paid. When the replayed round is the first Shelley round of a Byron-prefix
+network (X is the second Shelley epoch), it is rebuilt through
+`firstShelleyStakeRewardApplication`, since its Byron performance epoch has no
+pparams or stake snapshot. The replayed round is calculated from the previous
+round's inputs but its deltas are added to the ADA pots of the boundary it is applied at, as
+`applyRUpdFiltered` adds `deltaR`/`deltaT` to the live pots, and its `deltaF`
+removes the replayed fee seed from the fees carried into the next round:
+`saveRewardAdaPotsForEpoch` records the ended epoch's fees plus the fees
+carried at the previous boundary minus that seed, and halts the boundary if
+that would be negative. The decision reads persisted blocks (the first block of
+the ended epoch, and a block in the epoch before it, since NEWEPOCH does not run
+after an empty epoch), so a rollback re-derives it. Not mirrored: boundaries
+into epochs below 4, nonMyopic state, and nodes whose block store lacks the two
+epochs involved.
 
 Within that mapping, every protocol-parameter input to the calculation — d,
 rho, tau, and the pool-level parameters — is read from the **performance**
@@ -15324,9 +15350,10 @@ out into that table), so the query pages directly against it with SQL
 `ORDER BY`/`LIMIT`/`OFFSET` and an inclusive `(slot, tx_index)` range
 predicate for `from`/`to` — no application-level fan-out or filtering
 happens after the query returns. A block number in `from`/`to` is resolved
-with bounded index lookups (`Database.BlockByIndex` and, when the exact
-block is absent, `Database.BlockAtOrAfterIndex` for `from` or
-`Database.BlockAtOrBeforeIndex` for `to`) rather than a scan. In an import
+with a bounded metadata search by chain block number
+(`database.BlockNumberBoundaryTxn`: the first indexed block numbered at least
+`from`, or the last numbered at most `to`) rather than a scan. The search
+reads block metadata only and fetches just the selected block body. In an import
 gap, `from` resolves to the next existing block and `to` resolves to the
 preceding existing block. If the needed boundary does not exist, the range
 is empty; a `to` beyond the latest block resolves to the latest block. An
@@ -15516,11 +15543,13 @@ Two contracts follow from that boundary:
 
 - **Block numbering.** `block_identifier.index` is the Cardano block height in
   both directions: `/block` reports it, and `/block` accepts it. The blob
-  store's own block index is 1-based (`database.BlockInitialIndex`), so
-  `meshDatabaseAdapter.BlockByIndex` translates height to internal index, the
-  same translation `api/blockfrost`'s block-by-height lookup and
-  `midnight/server`'s `databaseAdapter` perform. Handlers deal only in
-  consensus block numbers.
+  store's internal block index is a separate, storage-private sequence that
+  does not equal the chain block number. `meshDatabaseAdapter.BlockByIndex`
+  resolves the height through `database.BlockByNumber`, a bounded search over
+  block metadata that returns the earliest block carrying that number (Byron
+  epoch boundary blocks share a number with their parent). `api/blockfrost`'s
+  block-by-height lookup and `midnight/server`'s `databaseAdapter` resolve
+  numbers the same way. Handlers deal only in consensus block numbers.
 - **Historical balances are pinned to the requested point.**
   `/network/options` advertises `historical_balance_lookup: true`, and
   `/account/balance` honors it. A request carrying a `block_identifier`
