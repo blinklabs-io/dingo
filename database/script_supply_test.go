@@ -381,3 +381,45 @@ func TestRebuildScriptLockedSupplyRejectsWrongTxn(t *testing.T) {
 		txn.Rollback() //nolint:errcheck
 	}
 }
+
+// Deleting the outputs created above a slot without the rest of the rollback
+// sweep (the completed-import cleanup) takes their contribution out of every
+// supply row they were live at, so the total matches the remaining rows and a
+// replay that re-creates one counts it once.
+func TestUtxosDeleteRolledbackRemovesScriptLockedSupply(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	for _, u := range []*models.Utxo{
+		supplyTestUtxo(1, 40, 0, 300, true),
+		supplyTestUtxo(2, 40, 0, 200, true),
+		supplyTestUtxo(3, 60, 0, 500, true),
+		supplyTestUtxo(4, 60, 0, 700, true),
+		supplyTestUtxo(5, 60, 0, 900, false),
+	} {
+		require.NoError(t, db.Metadata().CreateUtxo(nil, u))
+	}
+	spend := func(id byte, slot uint64) {
+		require.NoError(
+			t,
+			db.MetadataTxn(context.Background(), true).Do(func(txn *Txn) error {
+				return db.Metadata().MarkUtxosDeletedAtSlot(
+					txn.Metadata(),
+					[]types.UtxoKey{{TxId: supplyTestUtxo(id, 0, 0, 0, true).TxId}},
+					slot,
+				)
+			}),
+		)
+	}
+	spend(2, 70)
+	spend(4, 80)
+	require.EqualValues(t, 800, scriptSupply(t, db))
+
+	require.NoError(t, db.UtxosDeleteRolledback(context.Background(), 50, nil))
+	require.EqualValues(t, 300, scriptSupply(t, db))
+
+	require.NoError(
+		t,
+		db.Metadata().CreateUtxo(nil, supplyTestUtxo(3, 60, 0, 500, true)),
+	)
+	require.EqualValues(t, 800, scriptSupply(t, db))
+}

@@ -122,3 +122,26 @@ func explainPlan(t *testing.T, store *Store, query string) string {
 	require.NoError(t, rows.Err())
 	return strings.Join(plan, " | ")
 }
+
+// DeleteUtxosAfterSlot reads the script-locked outputs it is about to remove
+// on every rollback, so the read must range-search the added_slot index and
+// visit only the rolled-back window, with and without planner statistics.
+func TestScriptSupplyRollbackReadUsesAddedSlotIndex(t *testing.T) {
+	t.Parallel()
+	const rolledBackFrom = int64(2_656_808)
+	for _, analyzed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("analyzed=%v", analyzed), func(t *testing.T) {
+			t.Parallel()
+			store := newMigratedSQLiteStore(t)
+			seedRollbackUtxos(t, store, 2_000, 64, rolledBackFrom, 40)
+			if analyzed {
+				analyzeStore(t, store)
+			}
+			plan := queryPlan(
+				t, store.writeDB, scriptSupplyAddedAfterSlotQuery, rolledBackFrom,
+			)
+			require.Contains(t, plan, "idx_utxo_added_slot (added_slot>?)", plan)
+			require.NotContains(t, plan, "SCAN", plan)
+		})
+	}
+}

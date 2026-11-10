@@ -46,6 +46,9 @@ UPDATE script_locked_supply SET amount = ? WHERE slot = ?`
 	scriptSupplyLiveScanQuery = `-- name: ListLiveScriptLockedUtxoAmounts :many
 SELECT amount FROM utxo
 WHERE payment_script = TRUE AND deleted_slot = 0`
+	scriptSupplyAddedAfterSlotQuery = `-- name: ListScriptLockedUtxosAddedAfterSlot :many
+SELECT added_slot, deleted_slot, payment_script, amount FROM utxo
+WHERE added_slot > ? AND payment_script = TRUE`
 )
 
 // scriptLockedContribution is the lovelace a live output adds to the
@@ -274,6 +277,84 @@ func (s *Store) seedScriptLockedSupply(
 		ctx, s.dialect.Rebind(scriptSupplyInsertQuery), slotValue, int64(total),
 	)
 	return err
+}
+
+// removeScriptLockedSupplyAddedAfter takes the script-locked outputs created
+// above slot out of every row they were live at, [added_slot, deleted_slot),
+// before the caller deletes them. The rollback sweep drops those rows
+// afterwards anyway; the completed-import cleanup deletes the outputs without
+// it and keeps the rows, which then still count the outputs, and the replay
+// that re-creates one would count it twice.
+func (s *Store) removeScriptLockedSupplyAddedAfter(
+	ctx context.Context,
+	db queryer,
+	slot int64,
+) error {
+	type lifetime struct{ added, deleted int64 }
+	removed := make(map[lifetime]int64)
+	err := func() error {
+		rows, err := db.QueryContext(
+			ctx, s.dialect.Rebind(scriptSupplyAddedAfterSlotQuery), slot,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				life          lifetime
+				paymentScript sql.NullBool
+				amount        sql.NullString
+			)
+			if err := rows.Scan(
+				&life.added, &life.deleted, &paymentScript, &amount,
+			); err != nil {
+				return err
+			}
+			value, err := scriptLockedContribution(paymentScript, amount)
+			if err != nil {
+				return err
+			}
+			if value == 0 {
+				continue
+			}
+			sum, err := checkedSupplyStep(removed[life], value)
+			if err != nil {
+				return err
+			}
+			removed[life] = sum
+		}
+		return rows.Err()
+	}()
+	if err != nil || len(removed) == 0 {
+		return err
+	}
+	for life, amount := range removed {
+		deleted := int64(math.MaxInt64)
+		if life.deleted != 0 {
+			deleted = life.deleted
+		}
+		if _, err := db.ExecContext(ctx, s.dialect.Rebind(
+			`-- name: SubtractScriptLockedSupplyInRange :exec
+UPDATE script_locked_supply SET amount = amount - ?
+WHERE slot >= ? AND slot < ?`), amount, life.added, deleted); err != nil {
+			return err
+		}
+	}
+	var negative int
+	if err := db.QueryRowContext(ctx, s.dialect.Rebind(
+		`-- name: CountNegativeScriptLockedSupplyAfterSlot :one
+SELECT COUNT(*) FROM script_locked_supply WHERE slot > ? AND amount < 0`),
+		slot).Scan(&negative); err != nil {
+		return err
+	}
+	if negative > 0 {
+		return fmt.Errorf(
+			"script-locked supply negative in %d rows after removing outputs above slot %d",
+			negative, slot,
+		)
+	}
+	return nil
 }
 
 // rollbackScriptLockedSupply drops the rows above slot after a rollback has

@@ -234,6 +234,11 @@ func (s *Store) DeleteUtxosAfterSlot(
 			if err != nil {
 				return err
 			}
+			if err := s.removeScriptLockedSupplyAddedAfter(
+				ctx, db, slotValue,
+			); err != nil {
+				return err
+			}
 			if _, err := db.ExecContext(
 				ctx,
 				"DELETE FROM utxo WHERE added_slot > ?",
