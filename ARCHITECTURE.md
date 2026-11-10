@@ -768,7 +768,13 @@ last epoch-block nonce, and checks operational-certificate counters along that
 same path. This bounded history is scoped to the peer and consensus context:
 tip-only snapshot publications preserve cached verdicts, while a consensus
 input change requires revalidation. It is discarded when the retained path is
-reset or the connection closes. Deferred headers may remain as raw ancestry,
+reset or the connection closes. The operational-certificate counters are read
+at the fork ancestor, so their commit survives tip-only publications: it is
+discarded only for a validation transition, a changed consensus context, or an
+ancestor that left the local chain. Requiring an unchanged generation instead
+never commits a long check during catch-up, when blocks publish a tip every few
+milliseconds, and parks the connection for a re-intersection each time. Deferred
+headers may remain as raw ancestry,
 but selection waits until the candidate path and required header checks are
 available. A header beyond the forecast horizon or with unavailable ancestry
 or context is deferred.
@@ -784,7 +790,11 @@ again, up to four waits per roll-forward. All waits of one roll-forward share
 one `catchUpBandWaitTimeout` bound, which stays under the protocol state
 timers, and end when the connection closes. Only a header still deferred at
 the bound is parked by `markDeferredHeaderRecovery`; an invalid header is
-rejected without waiting. A snapshot publication or validation transition
+rejected without waiting.
+Queue admission has the same tolerance: a verdict that a tip publication expires
+between its verification and its pin (`pinHeaderVerdict`) is verified again, up
+to three times, before the header is withheld; a header that fails that
+verification is rejected and its connection recycled, as on its first. A snapshot publication or validation transition
 also waits and retries a local extension: otherwise an unstamped header can
 be withheld by corroboration while its peer cursor advances past it. Other
 deferrals on local extensions are forwarded unverified at once because
@@ -4813,8 +4823,9 @@ of validating against another epoch's. The rules follow the reference
 `validateTx`, `validateTxAux` and `updateUTxOTxWitness`: inputs are a list, so a
 repeated input is valid, while balances restrict the UTxO to the input set and
 are bounded Lovelace sums; witness `i` must authorize input `i`, pairing the two
-lists as `zip` does; and a witness's address root is hashed over the canonical
-encoding of the address's decoded attributes.
+lists as `zip` does and ignoring unpaired trailing values from either list; and
+a witness's address root is hashed over the canonical encoding of the address's
+decoded attributes.
 
 Byron output indexes are Word16. The reference `txOutputUTxO` zips a
 transaction's outputs with `[0 ..] :: [Word16]`, so only outputs 0 through
@@ -5040,8 +5051,8 @@ same slot and diffuses them together, the ranking block otherwise reaches
 cache lookup misses; to close this ordering gap, batch delivery is gated
 upstream by `ensureReferencedEndorserBlocks` (`ledger/leios_apply.go`), which —
 at the chain tip only (`IsAtTip`) and before the block-processing DB transaction
-opens — waits up to the Leios certify-by deadline for each referenced endorser
-block's fetch to complete. That window is
+opens — waits up to the Leios certify-by deadline for each certified closure the
+batch applies (the only endorser blocks application reads) to be fetched. That window is
 `LedgerStateConfig.EndorserBlockWaitSlots`, sourced from the pipeline timing's
 `CertifyByDeadlineSlots` (the wire mini-protocol specs define no timeout, so the
 override-able `PipelineTiming` struct is the timing source) and converted to
@@ -5069,10 +5080,11 @@ certificate-driven: only the endorser block a certifying ranking block certifies
 is fetched — the one announced by the CertRB's parent (prevHash), resolved from
 the in-batch announcement index or the block store — and uncertified historical
 announcements are skipped, since they are never applied and the relay does not
-reliably serve them. Near the head, current announcements are prefetched in the
-background for voting and later certification, and a CertRB also fetches its
-parent announcement, because one block may both certify and announce; only the
-certified closures the batch applies are waited for
+reliably serve them. Near the head, notify offers drive prefetch for voting and
+later certification: a header announcement alone does not establish that its
+sender holds the EB body. The ledger does not start a by-point fetch for an
+unread announcement. A CertRB still actively fetches its parent announcement
+and waits for that certified closure before application
 (`splitTipWaitByApplyDependency`).
 
 Historical application in the chain-iterator loop can commit a fully available
@@ -5178,9 +5190,9 @@ only from the point the node starts. The remaining dependency is relay
 availability: the prototype relay's by-point responses are reliable when it is
 idle but can turn flaky — empty manifests — when one connection also carries
 blockfetch, so the backfiller fetches across every connected leios-fetch peer
-(`connmanager.LeiosFetchConnectionIds`). Best-effort announcement prefetches may
-still advance when no peer fully serves an endorser block, but a certified
-closure is mandatory: `fetchRequired` retries a bounded number of all-peer
+(`connmanager.LeiosFetchConnectionIds`). The ledger fetches no uncertified
+announcement, so an endorser block no peer serves cannot hold the sync back
+until a certificate names it, but a certified closure is mandatory: `fetchRequired` retries a bounded number of all-peer
 sweeps within `leiosBackfillMaxWait`, deduplicates with any `spawn` fetch
 already in flight for the same (slot, hash), and returns the last fetch error
 when the closure remains unavailable. The block transaction is not opened until
@@ -5281,7 +5293,8 @@ transaction; a provider lacking the capability uses the existing immediate path.
 This does not activate the trusted UTxO overlay for Dijkstra.
 
 **Certified-closure consistency gate:** a certified EB is held to a stricter
-rule than the best-effort announcement prefetch described above.
+rule than a current announcement, which application never reads and which the
+ledger neither waits for nor fetches (leios-notify offers drive that prefetch).
 `ensureReferencedEndorserBlocks` resolves every CertRB's parent announcement and
 requires the complete certified EB to be cached before opening the block
 transaction. It checks only the blocks that transaction applies: a batch that
@@ -5304,7 +5317,7 @@ parameters). A block at exactly that slot may certify.
 `LedgerState.CheckLeiosCertificationTiming` is the single decision; ledger
 admission applies it before the certificate is verified, and the forger applies
 it to each eligible certificate before selecting one. Uncertified current
-announcements remain best-effort prefetches. This prevents historical catch-up
+announcements are neither waited for nor fetched by the ledger. This prevents historical catch-up
 from silently omitting pool registrations, delegations, UTxOs, or other
 certified transaction effects that only become visible as a fatal state gap when
 near-tip validation starts. Databases created by a version that already skipped
@@ -5377,7 +5390,19 @@ transaction values are the unwrapped `block_transaction` CBOR, `[body,
 witnesses, auxiliary_data / null, is_valid]`, and the manifest hash and size
 cover exactly those bytes. The forger converts mempool encodings to that form
 with `is_valid` true, and the apply path decodes it so a transaction with
-`is_valid` false consumes its collateral and creates no outputs. On a notify
+`is_valid` false consumes its collateral and creates no outputs. Block and
+transactions offers are screened before they touch the endorser-block cache or the
+backfill-source table: the hash must be 32 bytes, the slot must lie between the
+announcement clock-skew bound and the cache TTL when a ledger is wired, and each
+remote host has a per-minute offer budget shared by all its connections, so
+reconnecting does not refresh it. At most 4096 hosts are tracked per window;
+further hosts share one overflow budget, which keeps the map bounded without a
+process-wide limit on tracked hosts. Each connection may also hold only a bounded number of
+intent-only cache entries and backfill-source points, replacing its own oldest
+past the cap, so one connection cannot churn others' entries; the shared global
+cache and table bounds still apply. An intent entry's owner is the connection
+that created it and is not transferred by a later offer of the same point.
+Dropped offers are not penalized. On a notify
 block offer, `ouroboros/` fetches the endorser-block manifest over leios-fetch,
 decodes and hash-validates it, rejects it if the fetched body's length does not
 match the offer's declared size (`MsgBlockOffer.Size`) or if caching it would
@@ -5561,8 +5586,9 @@ traffic on the shared muxer can delay the relay's pong past 10s, and dropping
 the only relay then costs a reconnect and fork rollback, so dingo tolerates a
 slow-but-alive relay instead. It is left unset (0) on other networks, where the
 10s default still evicts genuinely dead peers quickly. Tip prefetch on
-leios-notify offers is suppressed while the node is far behind the chain tip
-(`SlotsBehindHead` beyond a small lag bound), so a deep catch-up does not
+leios-notify offers, the only prefetch of an uncertified current announcement,
+is suppressed while the node is far behind the chain tip (`SlotsBehindHead`
+beyond a small lag bound), so a deep catch-up does not
 contend the connection fetching current-tip endorser blocks it will not apply
 for hours; the historical references it actually needs are driven by the
 backfiller (see "Era-Specific Validation"). A complete endorser block is then
@@ -5726,13 +5752,18 @@ other validation error rejects the local forge, so an unclassified failure
 cannot publish an unchecked announcement. The composition adapter marks
 confirmed transaction failures for the forger without introducing a dependency
 from forging to the parent ledger package.
-Endorser manifests and
-transactions arrive independently on the asynchronous LeiosNotify and
-LeiosFetch workers, so this wait does not serialize the fetch that satisfies
-it. The wait is bounded by the configured diffusion window and observes node
-shutdown cancellation. A missing, late, wrong-sized, or ledger-invalid
-closure fails apply-boundary validation; the remote ranking-block header remains
-admitted. Prototype VoteManager votes attest to authenticated announcements
+Endorser manifests and transactions can arrive on the asynchronous LeiosNotify
+and LeiosFetch workers. Announcement validation runs before the next chunk's
+required certified-closure fetch. Its passive wait is bounded by the configured
+diffusion window and observes node shutdown cancellation. When the ledger can resolve an announcement's slot time
+and it is older than the existing ten-minute announcement lifetime, an incomplete
+closure returns unavailable without a passive wait. Historical uncertified
+announcements are not prefetched, so waiting for one here would delay the next
+chunk's mandatory certified fetch. Complete cached closures retain synchronous
+semantic validation, including pending results. Certified closures still require
+their active fetch and validation before application. A missing, late,
+wrong-sized, or ledger-invalid closure fails apply-boundary validation; the
+remote ranking-block header remains admitted. Prototype VoteManager votes attest to authenticated announcements
 and acquisition, and may be emitted before this semantic validation. The
 LeiosVoteHandler validation path remains separate.
 
@@ -7689,7 +7720,10 @@ Each tracked peer keeps a bounded recent frontier of `(slot, hash)` points
 (`PeerChainTip.observedPoints`, in lockstep with the `observedSlots` used for
 density), trimmed to the window and on rollback. That rolling frontier ranks
 peers before a fork is available locally; it is not the authoritative
-fork-choice measurement. When an incoming header conflicts with the primary
+fork-choice measurement. Both views live in append-only windows
+(`frontierWindow`) whose written prefix is never modified, so a staged
+admission frontier shares the committed peer's history and costs O(1) per
+header; the Limit on Eagerness delivery entries keep private copies. When an incoming header conflicts with the primary
 chain, the handler discards it through the in-memory duplicate and stale-header
 checks first, then asks whether the header point is still on the authoritative
 primary chain (`headerAlreadyOnPrimaryChain`). A historical replay can be behind
@@ -10863,8 +10897,24 @@ goes unanswered for 20 seconds, so after `blockingReplyWait` (10 seconds) the
 answer is `MsgReplyNoIDs` and the peer asks again. A run against dmq-node showed
 the connection being dropped every 20 seconds until it did. Messages that
 expired, and messages the peer itself announced (kept in a bounded `idSet`), are
-passed over, so a message is not announced back to where it came from. A body
-request returns the messages the pool still holds, which may be fewer than
+passed over, so a message is not announced back to where it came from. A
+connection's `poolPacer` also spaces one pool's messages by
+`dmq.minPoolMessageInterval` plus one second of slack (60 seconds; zero turns it
+off): dmq-node ends the
+whole connection when a pool's message reaches it sooner than its minimum
+signature delay after that pool's previous one (`SigTooFrequent`), and redialing
+offers the same message again. The pacer records when each pool's message was
+announced, keeps a later one from the same pool, and announces it once the
+interval and the slack have passed. The slack is there because dmq-node times
+the gap from when each message reaches it: a run against dmq-node 0.7.2.1 was
+refused at 59.998 seconds without it; other pools' messages are announced past it. A held
+message that expires, or that the peer announced meanwhile, is dropped without
+using up its pool's interval, and at most 256 messages are held per connection:
+past that the connection stops reading ahead in the pool. A blocking
+request that has only held messages to answer waits for the first to fall due as
+well as for `AddedSignal`. The spacing is per connection and applies on
+announcement only, so admission, and the local notification feed, are
+unchanged. A body request returns the messages the pool still holds, which may be fewer than
 asked. The window of announced IDs, and the rules for it, are
 `sigsub_protocol.go`'s: a blocking request only with nothing left
 unacknowledged, no zero request, acknowledgements within what is outstanding,
@@ -12033,8 +12083,7 @@ another pool or VRF key, or whose counter is **below** the loaded one, and every
 refusal leaves the loaded credentials untouched: loading into the live set
 instead would fail closed on a bad file and stop a healthy producer. A
 successful reload logs the old and new counter and certificate KES period.
-Credentials sourced from a KES agent are rotated through the agent, and a
-reload against them is refused. A reload is also refused while startup,
+A reload is also refused while startup,
 shutdown, or a live restore or truncate holds the lifecycle gates, since those
 replace the ledger state and the live credentials the reload reads. Unlike
 initial startup, reload refuses a wall-clock slot outside confirmed era history:
@@ -12048,6 +12097,61 @@ others. Each successful swap logs its `pool_id` with the old and new counter,
 each refusal is named in the returned error and counted on
 `dingo_block_producer_credential_reload_failures_total{pool_id}`. A pool whose
 KES key comes from an agent is still refused, as above.
+
+**Reload with a KES agent.** In serve-key mode the agent pushes each new key
+and the node installs it as it arrives, so a reload is refused. In sign mode
+(`node_key_reload.go`) a reload re-reads the VRF key and operational
+certificate and moves signing to a new agent client that expects the new
+certificate's KES key. The certificate must differ from the loaded one and
+carry a **higher** counter: an equal counter with different bytes, or a lower
+one, is refused before any client is built. The new credentials pass the same
+signature, KES-window and ledger checks, the ledger check enforcing the
+on-chain counter rule (rejecting a stale counter and, where the era's rule
+applies, one more than one above the last seen), and the agent must
+serve the certificate before the swap: a remote client is admitted, which
+checks the agent reports this certificate and its KES key; a local socket
+client, whose protocol carries neither, is only checked to answer in sign mode,
+and its signatures are still verified against the certificate on every sign.
+After `ReplaceWith` the replaced client stays open for
+`retiredKESAgentClientGrace` (10s), because a forge attempt that selected its
+snapshot before the swap still signs through it. The VRF key cannot change on
+reload; a new VRF key is a new pool registration and needs a restart.
+
+A rotation done at the agent reaches a remote-agent node without any file
+change. Admission compares the agent's certificate with the node's byte for
+byte; when the agent's carries the same cold key and a higher counter, the
+client hands it to `RemoteConfig.OnNewerOpCert` and still refuses the session.
+The node runs a reload with that certificate in place of the file
+(`Node.agentOpCertLoop`), keeping only the newest offer and retrying the same
+certificate at most once a minute after a refusal. The reloaded certificate
+lives in memory only; after a restart the node loads its file again and the
+agent's newer certificate is picked up the same way. A rotation that lands
+after admission, between the pre-connect and the sign, is refused by the
+agent as a header for another certificate; that refusal drops the session,
+so the next prepare or sign re-admits and the offer follows.
+
+With several agent replicas sharing one key store, Bursa installs a new key
+on one replica and the others load it within their `key_poll_interval`
+(default 10s); until then a replica keeps serving the previous certificate.
+In that window admission fails wherever the node's certificate and the
+replica's differ: after a reload, at a replica that has not polled yet, and
+before it, at one that has. A leader slot whose sign reaches such a replica
+is missed. The reload's own admission can also reach a replica that has not
+polled; the reload is then refused, and an offered certificate is retried
+only after `agentOpCertRetryInterval` (one minute), so on that path the
+window lasts up to a minute.
+
+`shelleyKeyWatchInterval` (off by default) makes the node poll the credential
+files and reload once a changed content has held for two polls. Polling
+content rather than file events sees the atomic `..data` symlink swap
+Kubernetes uses for a mounted Secret and needs no notification support. The
+two-poll wait reduces reloads during short writes; credential validation still
+rejects an incomplete credential set. In serve-key mode, where a reload is
+always refused, the watch is not started and a warning says so.
+`dingo_forge_credential_reloads_total{trigger,result}` counts reloads by
+trigger (`signal`, `file`, `agent`) and result (`success`, `unchanged`,
+`failure`), and `dingo_forge_opcert_counter_loaded` reports the counter the
+forger is using, so an operator can confirm a rotation took effect.
 
 `ReplaceWith` deliberately does not advance the credential generation. A forge
 attempt that already holds a snapshot owns a private copy of the outgoing
@@ -12138,7 +12242,9 @@ set):
 **Remote sign agent** (`kesagent.RemoteClient`). `--shelley-kes-agent-address`
 (`host:port`) signs through a bursa agent's remote sign listener
 (`bursa-attested-kes/1`) instead of a local socket, so the KES key never has
-to be on the producer's host and several producers can share one agent. It
+to be on the producer's host and several producers can share one agent;
+sharing is safe only with an agent that refuses a second header body for a
+slot it has already signed, since one without that guard signs both. It
 implies sign mode and is exclusive with `--shelley-kes-agent-socket` and
 `--shelley-kes-key`. The transport is configuration, and the client logs
 which one it uses at startup (`KES agent link: TLS, pinned server key`,
@@ -12193,11 +12299,25 @@ prepare at most every 30s. It never dials in the caller. On a WAN link the
 pre-connect is required, not an optimisation: at about 95ms round trip, a
 dial and admission take about 400ms and a redial inside a sign about 520ms,
 beyond the 500ms default `shelleyKesAgentSignTimeout`, while a sign on an
-open session takes about one round trip. The
-send-once rule is the same as the local sign mode: a transport or
-verification failure drops the session and is returned, never resent on a new
-connection; an agent refusal (`error` in the response) keeps the session. A
-failed dial or admission backs off before the next attempt. Each signature is
+open session takes about one round trip. A transport or verification failure
+drops the session; an agent refusal (`error` in the response) keeps it,
+except a refusal saying the header's operational certificate is not the one
+the agent has installed (`opCertMismatchRefusals`), which drops it: the
+agent's key was rotated after admission, and the redial lets admission offer
+the newer certificate. A
+sign that gets no signature back sends the identical header body once more
+(`maxSignSends`), on a new session after a lost reply or on the same session
+after an agent error, while its `SignTimeout` lasts. The agent may already
+have recorded the slot, and it signs a recorded slot again only for the same
+body, so a resend is never a different header. A final refusal
+(`finalSignRefusals`: a different header already signed for the slot, an
+older slot, a period the key has passed or a period below its floor, an
+exhausted key, a message that is not a header for its key) is returned at
+once, and so is a signature that fails verification. The wire protocol
+carries no error code, so the client matches the agent's reason text. A
+resend after a lost reply needs a redial inside the same `SignTimeout`, which
+at the WAN round trip above does not fit the 500ms default. A failed dial or admission backs off before the
+next attempt. Each signature is
 verified against the local operational certificate's KES key by the same
 `validateSignResponse` the local client uses.
 
@@ -13077,8 +13197,11 @@ completion.
 Temporary feed, extraction, and probe directories are created privately before
 their names are exposed. On Unix, each real directory in the absolute ancestor
 chain must be owned by the current user or root and may be group- or
-other-writable only when a trusted owner also set the sticky bit. On Windows,
-creation installs a protected inheritable ACL and retains no-delete handles on
+other-writable only when a trusted owner also set the sticky bit. The refusal
+names the ancestor and asks for the sticky bit (`chmod +t`) or the removal of
+its group and other write access. A Kubernetes `fsGroup` volume root is
+group-writable and setgid, which does not stop another group member from
+renaming entries, so it needs the sticky bit too. On Windows, creation installs a protected inheritable ACL and retains no-delete handles on
 the created directory and every ancestor until cleanup or publication. The
 identity returned by native creation must match the directory opened for later
 work.
@@ -15239,7 +15362,14 @@ database reads in one transaction under the request context and a 15-second
 deadline (a disconnected client stops the scan; an overrun answers 503 with
 `Retry-After`), and the metadata store sums the holdings in SQL, reading at most
 `models.MaxAssetQuantityHoldings` (1,000,000) of them: an asset held by more
-answers 400 as exceeding the service limit. Pool and account list routes reject
+answers 400 as exceeding the service limit. `GET /metadata/txs/labels/{label}`
+and its `/cbor` form page over every transaction carrying a label, so they
+share a metadata label admission pool (4 active, 2 per client address, 429 with
+`Retry-After` when full) and run under the request context and a 15-second
+deadline (a disconnected client stops the page; an overrun answers 503 with
+`Retry-After`). The page reads the label's rows through the
+`(label, slot, transaction_id)` index, so its cost follows the page offset
+rather than the number of transactions with the label. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,
@@ -15953,8 +16083,10 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `koios_tx_info` (one row per `(network, tx_hash)` holding the decoded
   `/tx_info` subset `node-parity from-genesis` rebuilds the UTxO set from: body
   inputs and outputs, plus the collateral inputs, collateral return and phase-2
-  validity verdict its `Consumed`/`Produced` need). That table is written by
-  `cmd/node-parity from-genesis`, not by the `fetch` subcommand, and unlike the
+  validity verdict its `Consumed`/`Produced` need; the reference inputs serve
+  only the in-process observer's transaction sample, below). That table is
+  written by `cmd/node-parity from-genesis` and by that sample, not by the
+  `fetch` subcommand, and unlike the
   per-epoch tables it needs no TTL — a settled transaction never changes
   Koios-side. A `payload_version` column stands in for one: it stamps the struct
   shape each row was written from, and rows carrying an older version are
@@ -16819,6 +16951,24 @@ second sync:
     may already have failed — cannot be read as the epoch's own answer. The
     observer's `epoch validated` log line and `reportError`'s synthesized
     `ERROR` carry that set too.
+  - **Transaction sample** (`internal/koiosparity/tx_parity.go`). Epoch-level
+    totals cannot see a stored transaction whose inputs or outputs are wrong
+    unless the error moves a total. A source that implements
+    `TransactionParitySource` (`DatabaseSource`, in API storage mode only)
+    reports up to `EpochTransactionSampleSize` transactions of the epoch, in
+    block order. `fetchIfNeeded` caches their `/tx_info` rows under the
+    observer's bounded fetch retry (rows that arrived are kept, and each hash
+    that outlasts it is logged and surfaces as a `dingo_db_missing` mismatch,
+    an `ERROR` epoch), and
+    `checkEpoch` compares, in the aggregate scope, the consumed inputs,
+    collateral inputs, reference inputs and produced outputs including lovelace
+    and native-asset amounts, plus the validity flag. A phase-2-invalid
+    transaction is compared on what the ledger applied: its collateral and
+    collateral return. Core storage mode is not sampled: it hard-deletes
+    consumed UTxOs after the stability window and does not retain the
+    collateral and reference associations. The standalone `check` CLI reads
+    through `DingoDB`, which does not implement the interface, so it skips
+    this comparison.
   - **Prometheus metrics** (`internal/koiosparity/metrics.go`). Before this, a
     FAIL/ERROR result was visible only by grepping the node's log or querying
     `check_epoch_status`/`check_mismatches` directly. `Observer .emitResult` —
@@ -18014,10 +18164,15 @@ activity-aware idle deadline described below. A listener that doesn't qualify
 address, not a loopback one) keeps gouroboros' default. Both use the same 1MiB
 LocalStateQuery request cap.
 
-Trusted-local admission still has a bounded idle state. After negotiation,
-`connmanager` gives an idle client two minutes to complete the next mux
-segment; only a complete segment refreshes that deadline, so partial header or
-payload traffic cannot extend it. The deadline is suspended while a decoded
+Trusted-local admission can bound the idle state. By default there is no
+limit: neither the reference node nor CIP-0137 closes an idle local client,
+and a client waiting on a blocking notification request is quiet by design.
+When `TrustedNtCIdleTimeout` (`--trusted-ntc-idle-timeout`,
+`DINGO_TRUSTED_NTC_IDLE_TIMEOUT`) is set above zero, `connmanager` gives an
+idle client that long to complete the next mux segment after negotiation; only
+a complete segment refreshes that deadline, so partial header or payload
+traffic cannot extend it. With no limit, an idle client keeps its admission
+slot until it disconnects. The deadline is suspended while a decoded
 NtC request is executing and while its first response segment is being
 prepared, then every complete response segment refreshes it. ChainSync keeps
 the request active across `AwaitReply` until the deferred reply finishes.
@@ -18992,6 +19147,17 @@ index:
   observed, write-before-track same as the in-memory update. `rollbackBlock`
   deletes registration rows for the rolled-back block alongside the epoch
   snapshot cleanup.
+
+**Block transactions**: each block's transactions come from
+`LedgerState.BlockTransactions` (the `Config.BlockTransactions` hook) on the
+live, backfill, registration-rebuild and rollback paths, not from the decoded
+ranking block. A Leios certifying ranking block has no transactions of its own:
+the ledger applies the endorser block its parent announced, so those
+transactions are indexed, tracked and rolled back with the certifying block.
+When a certified endorser block cannot be loaded, the live and backfill paths
+fail like a decode failure. An undo that cannot load it commits the rest of the
+rollback, retains the committee candidate registration rows, leaves the created
+candidates in memory and returns `errIncompleteRollback`.
 
 **Epoch tracking**: `processBlock` resolves and advances the epoch (via
 `advanceEpochLocked`) for every block, on both the live event path and the

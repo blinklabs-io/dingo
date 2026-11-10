@@ -185,45 +185,16 @@ func (n *Node) blockProducerContext() context.Context {
 // its own key source, and a pool that fails does not stop the others. It is
 // refused while startup, shutdown, or a live restore or truncate is in
 // progress.
+//
+// In KES agent sign mode it re-reads the VRF key and the operational
+// certificate and moves signing to a client for the new certificate; in
+// serve-key mode it is refused, since the agent pushes each new key itself.
 func (n *Node) ReloadBlockProducerCredentials() error {
 	// The reload reads n.ledgerState and the live credentials, both of which
 	// those operations replace, from its own goroutine. Holding the gates for
 	// the whole reload is acceptable where a probe's would not be: it runs
 	// once per operator-initiated rotation, not on every probe interval.
-	release, err := n.tryLifecycleGates()
-	if err != nil {
-		return err
-	}
-	defer release()
-	slot, supported, err := n.blockProducerStartupClock()
-	if err != nil {
-		return err
-	}
-	primaryErr := n.reloadBlockProducerCredentials(
-		slot,
-		supported,
-		n.validateBlockProducerLedger,
-	)
-	if n.producerPoolCount() <= 1 {
-		return primaryErr
-	}
-	// Each pool reloads on its own: one whose replacement is refused keeps
-	// forging with what it had and does not hold back the others.
-	if live := n.blockProducerCreds.Load(); primaryErr != nil && live != nil {
-		primaryErr = fmt.Errorf(
-			"pool %s: %w",
-			live.GetPoolID().String(),
-			primaryErr,
-		)
-	}
-	return errors.Join(
-		primaryErr,
-		n.reloadPoolProducerCredentials(
-			slot,
-			supported,
-			n.validateBlockProducerLedger,
-		),
-	)
+	return n.reloadCredentials(reloadTriggerSignal, nil)
 }
 
 // reloadBlockProducerCredentials is ReloadBlockProducerCredentials with the
@@ -266,8 +237,18 @@ func (n *Node) reloadPoolCredentials(
 		}()
 	}
 	if ks.kesAgentConfigured() {
-		return errors.New(
-			"block producer credentials come from a KES agent; rotate the key through the agent",
+		if !ks.kesAgentSignMode() {
+			return errors.New(
+				"block producer credentials come from a KES agent in serve-key mode; rotate the key through the agent, which pushes each new key",
+			)
+		}
+		return n.reloadPoolAgentSignCredentials(
+			ks,
+			live,
+			slot,
+			supported,
+			ledgerCheck,
+			nil,
 		)
 	}
 	if !supported {
@@ -558,7 +539,10 @@ func (n *Node) startBlockProducer(
 	}
 	n.blockProducerCreds.Store(creds)
 	n.setEquivocationSelfPoolID(creds)
+	//nolint:contextcheck // the reload loops are bound to the node lifecycle context, not this call
+	n.startKeyReloadLoops()
 	started = append(started, func() {
+		n.stopKeyReloadLoops()
 		logErrIfNotNil(
 			n.config.logger,
 			"failed to stop the other block producer pools during cleanup",

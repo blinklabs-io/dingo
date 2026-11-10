@@ -1033,6 +1033,7 @@ func buildDingoConfig(
 		dingo.WithMaxNtCConns(cfg.MaxNtCConns),
 		dingo.WithMaxNtCConnectionsPerIP(cfg.MaxNtCConnectionsPerIP),
 		dingo.WithMaxTrustedLocalNtCConns(cfg.MaxTrustedLocalNtCConns),
+		dingo.WithTrustedNtCIdleTimeout(cfg.TrustedNtCIdleTimeout),
 		dingo.WithSkipRewardLiveStakeBackfillCheck(
 			cfg.SkipRewardLiveStakeBackfillCheck,
 		),
@@ -1081,6 +1082,7 @@ func buildDingoConfig(
 		dingo.WithShelleyKESAgentSignTimeout(
 			cfg.ShelleyKESAgentSignTimeout,
 		),
+		dingo.WithShelleyKeyWatchInterval(cfg.ShelleyKeyWatchInterval),
 		dingo.WithShelleyKESAgentRemote(
 			cfg.ShelleyKESAgentAddress,
 			cfg.ShelleyKESAgentClientCertFile,

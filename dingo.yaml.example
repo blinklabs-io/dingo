@@ -945,6 +945,16 @@
 # CLI: --inbound-cooldown
 # inboundCooldown: 0s
 
+# Close a trusted local (Unix socket or loopback) node-to-client connection
+# that has been idle for this long, freeing its admission slot. 0 means no
+# limit, matching the reference node and CIP-0137, which define no idle limit
+# on the local protocols; a client waiting on a blocking notification request,
+# such as dmq-node, stays quiet by design. Requests in progress never count as
+# idle.
+# CLI: --trusted-ntc-idle-timeout
+# Env: DINGO_TRUSTED_NTC_IDLE_TIMEOUT
+# trustedNtCIdleTimeout: 0s
+
 # Genesis bootstrap configuration
 # Used only for from-origin sync. Default behavior keeps this enabled and
 # exits Genesis mode automatically near the best known peer tip. A Cardano node
@@ -994,11 +1004,13 @@
 # topologyFile, then ledger peers found through the topic's SRV records, to
 # keep minPeers connections. DMQ peers are independent of Cardano peers.
 # CLI: --dmq-enabled, --dmq-topic, --dmq-network-magic, --dmq-socket-path,
-#   --dmq-message-ttl, --dmq-max-mempool-size, --dmq-n2n-port,
+#   --dmq-message-ttl, --dmq-min-pool-message-interval,
+#   --dmq-max-mempool-size, --dmq-n2n-port,
 #   --dmq-listen-address, --dmq-listen-ipv6-address, --dmq-topology-file,
 #   --dmq-min-peers, --dmq-max-peers
 # Env: DINGO_DMQ_ENABLED, DINGO_DMQ_TOPIC, DINGO_DMQ_NETWORK_MAGIC,
-#   DINGO_DMQ_SOCKET_PATH, DINGO_DMQ_MESSAGE_TTL, DINGO_DMQ_MAX_MEMPOOL_SIZE,
+#   DINGO_DMQ_SOCKET_PATH, DINGO_DMQ_MESSAGE_TTL,
+#   DINGO_DMQ_MIN_POOL_MESSAGE_INTERVAL, DINGO_DMQ_MAX_MEMPOOL_SIZE,
 #   DINGO_DMQ_N2N_PORT, DINGO_DMQ_LISTEN_ADDRESS,
 #   DINGO_DMQ_LISTEN_IPV6_ADDRESS, DINGO_DMQ_TOPOLOGY_FILE,
 #   DINGO_DMQ_MIN_PEERS, DINGO_DMQ_MAX_PEERS
@@ -1015,6 +1027,11 @@
   # socketPath: "dingo-dmq.socket"
   # Longest expiry, in seconds, a submitted message may claim. Default: 1800.
   # messageTtl: 1800
+  # Shortest time, in seconds, between two messages of one pool that are
+  # announced to a peer. dmq-node ends the connection when a pool's messages
+  # come closer together than its own setting, which defaults to 60 seconds.
+  # 0 announces without spacing. Default: 60.
+  # minPoolMessageInterval: 60
   # Message pool size limit in megabytes. Default: 128.
   # maxMempoolSize: 128
   # TCP port DMQ peers connect to, separate from the Cardano relay port.

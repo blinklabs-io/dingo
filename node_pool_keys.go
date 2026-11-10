@@ -46,12 +46,15 @@ type producerKeys struct {
 // cancel point at where that pool keeps its KES agent client and serve-key
 // loop: the node's own fields for the first pool, a poolProducer's for the
 // others. metrics returns that pool's KES agent client metrics.
+// onNewerOpCert, when set, receives the operational certificate a remote
+// agent presents at admission with the same cold key and a higher counter.
 type poolKeySource struct {
-	n       *Node
-	keys    producerKeys
-	client  *io.Closer
-	cancel  *context.CancelFunc
-	metrics func() *kesagent.Metrics
+	n             *Node
+	keys          producerKeys
+	client        *io.Closer
+	cancel        *context.CancelFunc
+	metrics       func() *kesagent.Metrics
+	onNewerOpCert func([]byte)
 }
 
 // errKESSourceUnavailable marks a pool whose KES source could not be reached
@@ -86,11 +89,12 @@ func (n *Node) producerPoolCount() int {
 func (n *Node) primaryKeySource() *poolKeySource {
 	if len(n.config.blockProducerPools) > 0 {
 		return &poolKeySource{
-			n:       n,
-			keys:    producerKeysFromPool(n.config.blockProducerPools[0]),
-			client:  &n.kesAgentClient,
-			cancel:  &n.kesAgentCancel,
-			metrics: n.kesAgentClientMetrics,
+			n:             n,
+			keys:          producerKeysFromPool(n.config.blockProducerPools[0]),
+			client:        &n.kesAgentClient,
+			cancel:        &n.kesAgentCancel,
+			metrics:       n.kesAgentClientMetrics,
+			onNewerOpCert: n.offerAgentOpCert,
 		}
 	}
 	return &poolKeySource{
@@ -107,9 +111,10 @@ func (n *Node) primaryKeySource() *poolKeySource {
 			agentServerSPKISHA256: n.config.shelleyKESAgentServerSPKISHA256,
 			agentPlaintext:        n.config.shelleyKESAgentPlaintext,
 		},
-		client:  &n.kesAgentClient,
-		cancel:  &n.kesAgentCancel,
-		metrics: n.kesAgentClientMetrics,
+		client:        &n.kesAgentClient,
+		cancel:        &n.kesAgentCancel,
+		metrics:       n.kesAgentClientMetrics,
+		onNewerOpCert: n.offerAgentOpCert,
 	}
 }
 
@@ -485,6 +490,7 @@ func (ks *poolKeySource) newKESAgentSignClient(
 		})
 	}
 	return kesagent.NewRemoteClient(kesagent.RemoteConfig{
+		OnNewerOpCert:     ks.onNewerOpCert,
 		Address:           ks.keys.agentAddress,
 		ClientCertFile:    ks.keys.agentClientCertFile,
 		ClientKeyFile:     ks.keys.agentClientKeyFile,
@@ -504,6 +510,13 @@ func (ks *poolKeySource) newKESAgentSignClient(
 func (ks *poolKeySource) kesAgentConfigured() bool {
 	return ks.keys.agentSocket != "" ||
 		ks.keys.agentAddress != ""
+}
+
+// kesAgentSignMode reports whether a configured KES agent signs headers
+// (sign mode, local or remote) rather than pushing the key (serve-key).
+func (ks *poolKeySource) kesAgentSignMode() bool {
+	return ks.keys.agentAddress != "" ||
+		ks.keys.agentMode == kesagent.ModeSign
 }
 
 // closeKESAgentClient stops the serve-key background loop (if any) and

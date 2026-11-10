@@ -268,6 +268,23 @@ func ValidateKESAgentSignTimeout(timeout time.Duration) error {
 	return nil
 }
 
+// minKeyWatchInterval keeps the credential file watch from reading the key
+// files many times a second.
+const minKeyWatchInterval = time.Second
+
+// ValidateKeyWatchInterval accepts zero (watch disabled) or an interval of at
+// least a second.
+func ValidateKeyWatchInterval(interval time.Duration) error {
+	if interval != 0 && interval < minKeyWatchInterval {
+		return fmt.Errorf(
+			"shelleyKeyWatchInterval (%s) must be zero (disabled) or at least %s",
+			interval,
+			minKeyWatchInterval,
+		)
+	}
+	return nil
+}
+
 // ValidateMithrilPublicBaseURL accepts an absolute public origin. Plain HTTP
 // is restricted to loopback so artifact locations are HTTPS for normal
 // bootstrap clients.
@@ -503,6 +520,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"invalid storageMode %q: must be %q or %q",
 			c.StorageMode, storageModeCore, storageModeAPI,
+		))
+	}
+
+	if c.TrustedNtCIdleTimeout < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid trustedNtCIdleTimeout: %s (must be zero or positive)",
+			c.TrustedNtCIdleTimeout,
 		))
 	}
 
@@ -994,6 +1018,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	); err != nil {
 		errs = append(errs, err)
 	}
+	if err := ValidateKeyWatchInterval(c.ShelleyKeyWatchInterval); err != nil {
+		errs = append(errs, err)
+	}
 
 	// CIP-23 minimum pool margin is basis points; must be within [0, 10000].
 	if c.MinPoolMargin > 10_000 {
@@ -1327,6 +1354,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		case uint64(c.DMQ.MessageTTL) > maxMessageTTL:
 			errs = append(errs, fmt.Errorf(
 				"dmq.messageTtl must be at most %d seconds",
+				maxMessageTTL,
+			))
+		}
+		if uint64(c.DMQ.MinPoolMessageInterval) > maxMessageTTL {
+			errs = append(errs, fmt.Errorf(
+				"dmq.minPoolMessageInterval must be at most %d seconds",
 				maxMessageTTL,
 			))
 		}

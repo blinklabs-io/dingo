@@ -466,6 +466,11 @@ var flagSpecs = []flagSpec{
 		"longest message expiry accepted, in seconds",
 	),
 	uintFlag(
+		"DMQ.MinPoolMessageInterval",
+		"dmq-min-pool-message-interval",
+		"shortest time, in seconds, between one pool's messages announced to a peer; 0 disables",
+	),
+	uintFlag(
 		"DMQ.MaxMempoolSize",
 		"dmq-max-mempool-size",
 		"DMQ message pool size limit, in megabytes",
@@ -722,6 +727,11 @@ var flagSpecs = []flagSpec{
 		"max-trusted-local-ntc-conns",
 		"max trusted local node-to-client connections",
 	),
+	durationFlag(
+		"TrustedNtCIdleTimeout",
+		"trusted-ntc-idle-timeout",
+		"close idle trusted local node-to-client connections after this duration (0 = no limit)",
+	),
 	intFlag(
 		"MaxNtCConnectionsPerIP",
 		"max-ntc-connections-per-ip",
@@ -941,6 +951,11 @@ var flagSpecs = []flagSpec{
 		"ShelleyKESAgentPlaintext",
 		"shelley-kes-agent-plaintext",
 		"run the remote KES agent link over plain TCP",
+	),
+	durationFlag(
+		"ShelleyKeyWatchInterval",
+		"shelley-key-watch-interval",
+		"poll the block producer credential files at this interval and reload them in place on a change (0 disables)",
 	),
 	durationFlag(
 		"ShelleyKESAgentSignTimeout",

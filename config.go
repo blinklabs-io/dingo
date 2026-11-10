@@ -282,6 +282,7 @@ type Config struct {
 	inboundDuplexOnlyForHot                                                             bool
 	maxConnectionsPerIP, maxInboundConns, maxNtCConns, maxNtCConnectionsPerIP           int
 	maxTrustedLocalNtCConns                                                             int
+	trustedNtCIdleTimeout                                                               time.Duration
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
 	genesisCorroborationPeers                                                           int
@@ -289,6 +290,7 @@ type Config struct {
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
 	shelleyKESAgentSignTimeout                                                          time.Duration
+	shelleyKeyWatchInterval                                                             time.Duration
 	shelleyKESAgentAddress, shelleyKESAgentClientCertFile, shelleyKESAgentClientKeyFile string
 	shelleyKESAgentServerSPKISHA256                                                     string
 	shelleyKESAgentPlaintext                                                            bool
@@ -1004,11 +1006,13 @@ func (c *Config) syncCompatFields() {
 	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
 	c.maxNtCConns, c.maxNtCConnectionsPerIP = c.cfg.MaxNtCConns, c.cfg.MaxNtCConnectionsPerIP
 	c.maxTrustedLocalNtCConns = c.cfg.MaxTrustedLocalNtCConns
+	c.trustedNtCIdleTimeout = c.cfg.TrustedNtCIdleTimeout
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.shelleyKESAgentAddress, c.shelleyKESAgentClientCertFile, c.shelleyKESAgentClientKeyFile = c.cfg.ShelleyKESAgentAddress, c.cfg.ShelleyKESAgentClientCertFile, c.cfg.ShelleyKESAgentClientKeyFile
 	c.shelleyKESAgentServerSPKISHA256 = c.cfg.ShelleyKESAgentServerSPKISHA256
+	c.shelleyKeyWatchInterval = c.cfg.ShelleyKeyWatchInterval
 	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
 	c.blockProducerPools = slices.Clone(c.cfg.BlockProducerPools)
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
@@ -1692,6 +1696,17 @@ func WithMaxTrustedLocalNtCConns(n int) ConfigOptionFunc {
 	}
 }
 
+// WithTrustedNtCIdleTimeout specifies how long a trusted local
+// node-to-client connection may stay idle before it is closed. Zero means no
+// limit and negative values are ignored. Default: 0.
+func WithTrustedNtCIdleTimeout(d time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		if d >= 0 {
+			c.cfg.TrustedNtCIdleTimeout = d
+		}
+	}
+}
+
 // WithSkipRewardLiveStakeBackfillCheck skips the startup scan that verifies
 // reward live-stake rows against the full UTxO table.
 func WithSkipRewardLiveStakeBackfillCheck(skip bool) ConfigOptionFunc {
@@ -1780,6 +1795,16 @@ func WithShelleyKESAgentMode(mode string) ConfigOptionFunc {
 func WithShelleyKESAgentSignTimeout(timeout time.Duration) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ShelleyKESAgentSignTimeout = timeout
+	}
+}
+
+// WithShelleyKeyWatchInterval makes a block producer poll its credential
+// files (CARDANO_SHELLEY_KEY_WATCH_INTERVAL) and reload them in place, as on
+// SIGHUP, once a change has held for two polls. It lets a mounted Secret be
+// rotated without a restart. 0, the default, disables the watch.
+func WithShelleyKeyWatchInterval(interval time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKeyWatchInterval = interval
 	}
 }
 

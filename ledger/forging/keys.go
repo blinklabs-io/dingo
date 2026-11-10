@@ -714,19 +714,53 @@ func loadPoolCredentialsFromAgentSign(
 			err,
 		)
 	}
-	loaded.opCert = &OpCert{
+	loaded.setAgentSignOpCert(&OpCert{
 		KESVKey:     opCertKey.VKey,
 		IssueNumber: opCertKey.OpCertIssueNumber,
 		KESPeriod:   opCertKey.OpCertKesPeriod,
 		Signature:   opCertKey.OpCertSignature,
 		ColdVKey:    opCertKey.OpCertColdVKey,
-	}
-	loaded.kesVKey = append([]byte(nil), opCertKey.VKey...)
-	loaded.poolID = lcommon.PoolId(
-		lcommon.Blake2b224Hash(loaded.opCert.ColdVKey),
-	)
+	})
 
 	return loaded, nil
+}
+
+// setAgentSignOpCert installs a sign-mode operational certificate: the KES
+// verification key and the pool ID both derive from it.
+func (loaded *loadedPoolCredentials) setAgentSignOpCert(opCert *OpCert) {
+	loaded.opCert = opCert
+	loaded.kesVKey = append([]byte(nil), opCert.KESVKey...)
+	loaded.poolID = lcommon.PoolId(
+		lcommon.Blake2b224Hash(opCert.ColdVKey),
+	)
+}
+
+// LoadFromAgentSignOpCert is LoadFromAgentSign with the operational
+// certificate supplied rather than read from a file: the one a KES agent
+// presented for its active key, after an opcert rotation the local file has
+// not caught up with. The certificate goes through the same validation as a
+// file-loaded one; this only changes where it comes from.
+func (pc *PoolCredentials) LoadFromAgentSignOpCert(
+	vrfSKeyPath string,
+	opCert *OpCert,
+	signer RemoteKESSigner,
+) error {
+	if signer == nil || opCert == nil {
+		return pc.installLoaded(
+			nil,
+			errors.New(
+				"kes agent sign mode requires a signer and an operational certificate",
+			),
+			nil,
+		)
+	}
+	vrfSKey, vrfVKey, err := loadVRFKeyFromFile(vrfSKeyPath)
+	if err != nil {
+		return pc.installLoaded(nil, err, nil)
+	}
+	loaded := &loadedPoolCredentials{vrfSKey: vrfSKey, vrfVKey: vrfVKey}
+	loaded.setAgentSignOpCert(cloneOpCert(opCert))
+	return pc.installLoaded(loaded, nil, signer)
 }
 
 func (pc *PoolCredentials) relativeKESPeriodUnsafe(

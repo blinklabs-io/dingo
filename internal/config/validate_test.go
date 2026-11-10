@@ -71,6 +71,21 @@ func TestValidateDefaultsPass(t *testing.T) {
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
+func TestValidateTrustedNtCIdleTimeout(t *testing.T) {
+	cfg := validTestConfig()
+	assert.Zero(t, cfg.TrustedNtCIdleTimeout)
+
+	cfg.TrustedNtCIdleTimeout = 2 * time.Minute
+	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+
+	cfg.TrustedNtCIdleTimeout = -time.Second
+	assert.ErrorContains(
+		t,
+		cfg.validate(cfg.RunMode, minUnprivilegedPort),
+		"invalid trustedNtCIdleTimeout",
+	)
+}
+
 func TestValidateDevModeForcesStandardProductionAndAPIStorage(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.RunMode = RunModeDev
@@ -841,6 +856,32 @@ func TestValidate(t *testing.T) {
 				c.ShelleyKESAgentSignTimeout = time.Second + time.Nanosecond
 			},
 			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
+			name: "key watch disabled at zero",
+			modify: func(c *Config) {
+				c.ShelleyKeyWatchInterval = 0
+			},
+		},
+		{
+			name: "key watch interval of ten seconds",
+			modify: func(c *Config) {
+				c.ShelleyKeyWatchInterval = 10 * time.Second
+			},
+		},
+		{
+			name: "key watch interval below a second",
+			modify: func(c *Config) {
+				c.ShelleyKeyWatchInterval = 500 * time.Millisecond
+			},
+			wantErr: "shelleyKeyWatchInterval",
+		},
+		{
+			name: "negative key watch interval",
+			modify: func(c *Config) {
+				c.ShelleyKeyWatchInterval = -time.Second
+			},
+			wantErr: "shelleyKeyWatchInterval",
 		},
 		{
 			name: "no network and no magic",
@@ -2350,6 +2391,20 @@ func TestValidateDMQBounds(t *testing.T) {
 				c.DMQ.MessageTTL = uint(maxTTL + 1)
 			},
 			wantErr: "dmq.messageTtl must be at most",
+		},
+		{
+			name: "pool message interval turned off",
+			mutate: func(c *Config) {
+				c.DMQ.MinPoolMessageInterval = 0
+			},
+		},
+		{
+			name: "pool message interval overflowing a duration",
+			wide: true,
+			mutate: func(c *Config) {
+				c.DMQ.MinPoolMessageInterval = uint(maxTTL + 1)
+			},
+			wantErr: "dmq.minPoolMessageInterval must be at most",
 		},
 		{
 			name: "largest mempool size",
