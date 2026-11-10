@@ -619,3 +619,49 @@ func TestGetUtxosWithMetadataSchema(t *testing.T) {
 		"Invalid address or payment credential",
 	)
 }
+
+// TestGetUtxosByAssetOrdersAcrossSharedHoldings requires newest UTxO first and,
+// within one UTxO, the later-recorded holding first, with an asset shared by
+// several UTxOs listed once per holding and spent holdings left out.
+func TestGetUtxosByAssetOrdersAcrossSharedHoldings(t *testing.T) {
+	t.Parallel()
+	db := newSchemaDB(t)
+	policy := bytes.Repeat([]byte{0xa1}, 28)
+	for id := int64(1); id <= 4; id++ {
+		deleted := int64(0)
+		if id == 4 {
+			deleted = 9
+		}
+		_, err := db.Exec(
+			`INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot)
+VALUES(?,?,0,zeroblob(28),'1',?)`,
+			id, bytes.Repeat([]byte{byte(0x10 * id)}, 32), deleted,
+		)
+		require.NoError(t, err)
+	}
+	seedMCPAsset(t, db, 1, policy, []byte("A"), "1")
+	seedMCPAsset(t, db, 1, policy, []byte("B"), "2")
+	seedMCPAsset(t, db, 2, policy, []byte("A"), "3")
+	seedMCPAsset(t, db, 3, policy, []byte("B"), "4")
+	seedMCPAsset(t, db, 4, policy, []byte("A"), "5")
+	cs := newToolSession(t, db, 100)
+
+	var rows []string
+	text := callTool(t, cs, "get_utxos_by_asset",
+		map[string]any{"policy_id": hex.EncodeToString(policy)}, false)
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(line, "| ") || !strings.Contains(line, "#0") {
+			continue
+		}
+		cells := strings.Split(line, "|")
+		rows = append(rows, strings.TrimSpace(cells[1])[:2]+" "+
+			strings.TrimSpace(cells[4])+" "+strings.TrimSpace(cells[6]))
+	}
+	require.Equal(t,
+		[]string{"30 B 4", "20 A 3", "10 B 2", "10 A 1"}, rows)
+
+	text = callTool(t, cs, "get_utxos_by_asset", map[string]any{
+		"policy_id": hex.EncodeToString(policy), "asset_name": "A",
+	}, false)
+	require.Contains(t, text, "Found 2 UTxOs")
+}

@@ -592,3 +592,42 @@ func TestNodeAdapterAssetUTXOsRangeUsesCollateralReturnPosition(t *testing.T) {
 	require.Len(t, rows, 1)
 	require.Equal(t, hex.EncodeToString(valid.Hash), rows[0].TxHash)
 }
+
+// TestNodeAdapterAssetDetailReadsHoldings covers the detail read's reliance
+// on the held-asset lookup: a held asset reports its live quantity, a spent
+// holding keeps the asset known with no quantity, and an unknown asset is not
+// found.
+func TestNodeAdapterAssetDetailReadsHoldings(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xc4, 0)
+	policy := bytes.Repeat([]byte{0xc5}, lcommon.AddressHashSize)
+	policyHex := hex.EncodeToString(policy)
+
+	seedAddressOutput(t, raw, db, addr, fill32(0x51), 5, 1_000_000,
+		[]models.Asset{{PolicyId: policy, Name: []byte("live"), Amount: 4}},
+		nil)
+	seedAddressOutput(t, raw, db, addr, fill32(0x52), 5, 1_000_000,
+		[]models.Asset{{PolicyId: policy, Name: []byte{}, Amount: 9}}, nil)
+	insertAdapterTransaction(t, raw, &models.Transaction{
+		Hash: fill32(0x98), Slot: 7, Valid: true,
+	})
+	seedAddressOutput(t, raw, db, addr, fill32(0x53), 5, 1_000_000,
+		[]models.Asset{{PolicyId: policy, Name: []byte("gone"), Amount: 2}},
+		fill32(0x98))
+
+	info, err := adapter.Asset(context.Background(), policyHex, []byte("live"))
+	require.NoError(t, err)
+	require.Equal(t, "4", info.Quantity)
+
+	info, err = adapter.Asset(context.Background(), policyHex, []byte{})
+	require.NoError(t, err)
+	require.Equal(t, "9", info.Quantity, "the empty name is a real asset")
+
+	info, err = adapter.Asset(context.Background(), policyHex, []byte("gone"))
+	require.NoError(t, err)
+	require.Equal(t, "0", info.Quantity)
+
+	_, err = adapter.Asset(context.Background(), policyHex, []byte("never"))
+	require.ErrorIs(t, err, ErrAssetNotFound)
+}
