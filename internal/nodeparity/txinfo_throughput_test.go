@@ -66,7 +66,7 @@ func TestRunFromGenesisTxInfoThroughput(t *testing.T) {
 	koiosparity.SetRetryBackoff5xxForTesting(20 * time.Millisecond)
 	t.Cleanup(func() {
 		txInfoIndexWaits = prevWaits
-		koiosparity.SetRetryBackoff5xxForTesting(2 * time.Second)
+		koiosparity.SetRetryBackoff5xxForTesting(time.Millisecond) // TestMain's value
 	})
 
 	server := newGenesisFakeServerWithTransactions(t, blocks)

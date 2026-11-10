@@ -1233,7 +1233,7 @@ func (s *genesisFakeServer) waitForSessions(t *testing.T, n int) {
 // chain carries one real transaction per block
 // (internal/test/fixtures.GenerateConwayChainWithTransactions) instead of
 // newGenesisFakeServer's empty-body csmock.BuildChain blocks. RunFromGenesis's
-// roll-forward callback only ever appends to pendingTxHashes from a block's
+// roll-forward callback only ever queues /tx_info hashes from a block's
 // own Transactions() (see from_genesis.go), so an empty-body chain never
 // gives flushPendingTxInfos anything to fetch at all -- its own
 // tx_info-chunk-failure taint path (the "if failed" branch inside
@@ -1727,7 +1727,7 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 // with the forced initial rollback, so it never itself starts a new epoch
 // boundary or reports -- see TestRunFromGenesis_UTxOTaintLifecycle's own
 // doc comment). Block 1 is the first real epoch boundary: its transaction
-// hash is buffered into pendingTxHashes and flushed via flushPendingTxInfos
+// hash is queued on the /tx_info pipeline and flushed via flushPendingTxInfos
 // right before that epoch's report is built. The Koios fake here 404s
 // every request, including /tx_info, so that flush fails and this epoch
 // must report errUTxOTainted rather than a false "clean" match against the

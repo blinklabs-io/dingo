@@ -934,10 +934,11 @@ func RunFromGenesis(
 	// sessionCtx is cancelled when the chainsync session calling it ends,
 	// which closes the lookup's connections, so a callback blocked in one
 	// returns: the reconnect loop waits for that callback before starting the
-	// next session. Every other query the callbacks make -- the UTxO baseline
-	// captures, the /tx_info flushes and the epoch checks -- runs under the
-	// same sessionCtx for the same reason; only the lookup carries a
-	// deadline, since a whole-UTxO reply can legitimately take minutes.
+	// next session. The UTxO baseline captures, the epoch checks and every
+	// wait for /tx_info results run under the same sessionCtx for the same
+	// reason; only the lookup carries a deadline, since a whole-UTxO reply
+	// can legitimately take minutes. The /tx_info fetches themselves run
+	// under ctx, so a session end leaves them fetching for the next session.
 	epochAt := func(
 		sessionCtx context.Context, point pcommon.Point,
 	) (epoch uint64, skip bool, err error) {

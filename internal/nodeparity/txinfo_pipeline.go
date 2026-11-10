@@ -157,19 +157,25 @@ func (p *txInfoPipeline) flush(
 func (p *txInfoPipeline) drain(
 	sessionCtx context.Context, utxoRefs UTxOSet, keep int,
 ) (failed bool, err error) {
-	if len(p.queue) <= keep {
-		return false, nil
-	}
-	start := time.Now()
-	defer func() {
-		p.waitCount++
-		p.waitElapsed += time.Since(start)
-	}()
+	waited := false
 	for len(p.queue) > keep {
+		// Only time spent blocked counts as a wait: a result that has
+		// already arrived is applied, not waited for.
 		select {
 		case <-p.queue[0].done:
-		case <-sessionCtx.Done():
-			return false, sessionCtx.Err()
+		default:
+			if !waited {
+				waited = true
+				p.waitCount++
+			}
+			start := time.Now()
+			select {
+			case <-p.queue[0].done:
+				p.waitElapsed += time.Since(start)
+			case <-sessionCtx.Done():
+				p.waitElapsed += time.Since(start)
+				return false, sessionCtx.Err()
+			}
 		}
 		if failed, err := p.apply(utxoRefs); failed || err != nil {
 			return failed, err

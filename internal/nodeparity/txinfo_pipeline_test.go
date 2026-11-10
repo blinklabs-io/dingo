@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -413,4 +414,99 @@ func TestOrderedSlotsGrantsTheEarliestChunkFirst(t *testing.T) {
 	s.release()
 	assert.Equal(t, uint64(9),
 		testutil.RequireReceive(t, granted, 5*time.Second, "second grant"))
+}
+
+// A chunk waiting to be fetched again gives up its request slot: with one
+// slot, the chunk behind it is fetched during the wait. Were the slot held,
+// the later chunk could never be fetched and the wait would time out.
+func TestTxInfoPipelineLendsAWaitingChunksSlot(t *testing.T) {
+	t.Parallel()
+	laterFetched := make(chan struct{})
+	var once sync.Once
+	f := &txInfoChunkFake{
+		attempts: map[string]int{},
+		respond: func(chunk []string, attempt int) error {
+			switch {
+			case chunk[0] == "aa" && attempt == 1:
+				return errTxNotIndexed("aa")
+			case chunk[0] == "ba":
+				once.Do(func() { close(laterFetched) })
+			}
+			return nil
+		},
+	}
+	wait := func(ctx context.Context, _ time.Duration) error {
+		select {
+		case <-laterFetched:
+			return nil
+		case <-time.After(5 * time.Second):
+			return errors.New("the later chunk was not fetched during the wait")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	p := newTestTxInfoPipeline(
+		t, context.Background(), f.fetch, 1, 1, 8,
+		[]time.Duration{time.Second}, false, wait,
+	)
+
+	refs := UTxOSet{}
+	_, err := p.add(context.Background(), refs, "aa")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return f.attemptsFor("aa") >= 1 },
+		5*time.Second, time.Millisecond)
+	_, err = p.add(context.Background(), refs, "ba")
+	require.NoError(t, err)
+	failed, err := p.flush(context.Background(), refs)
+	require.NoError(t, err)
+	assert.False(t, failed, "the waiting chunk must apply after its wait")
+	assert.Equal(t, 2, f.attemptsFor("aa"))
+	assert.Equal(t, 1, f.attemptsFor("ba"))
+}
+
+// takeWaits counts only time add and flush spent blocked: a flush whose
+// results have all arrived applies them without waiting, and must not be
+// reported as a Koios stall in the epoch's diagnostics.
+func TestTxInfoPipelineCountsOnlyBlockingWaits(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	var gated atomic.Bool
+	fetch := func(
+		ctx context.Context, chunk []string,
+	) ([]koiosparity.KoiosTxInfoItem, error) {
+		if gated.Load() {
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return []koiosparity.KoiosTxInfoItem{{TxHash: chunk[0]}}, nil
+	}
+	p := newTestTxInfoPipeline(
+		t, context.Background(), fetch, 1, 4, 8, nil, false, noWait,
+	)
+
+	refs := UTxOSet{}
+	_, err := p.add(context.Background(), refs, "aa", "ab")
+	require.NoError(t, err)
+	awaitQueued(t, p)
+	_, err = p.flush(context.Background(), refs)
+	require.NoError(t, err)
+	n, d := p.takeWaits()
+	assert.Zero(t, n, "results that had arrived are not a wait")
+	assert.Zero(t, d)
+
+	gated.Store(true)
+	_, err = p.add(context.Background(), refs, "ba")
+	require.NoError(t, err)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		close(release)
+	}()
+	_, err = p.flush(context.Background(), refs)
+	require.NoError(t, err)
+	n, d = p.takeWaits()
+	assert.Equal(t, 1, n)
+	assert.Positive(t, d)
 }
