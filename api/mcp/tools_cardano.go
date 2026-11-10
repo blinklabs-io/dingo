@@ -124,20 +124,12 @@ func formatHash(val any) string {
 	}
 }
 
-// transactionOutputTotalsSQL counts the outputs of a transaction: those its
-// row produced, its collateral return included, and those imported under its
-// hash with no producer. producer_tx_id is the SQLite generated column indexed
-// by idx_utxo_producer_output and the imported arm reads idx_utxo_imported_ref;
-// no index leads with utxo.tx_id for produced rows. It binds the transaction's
-// row id, then its hash.
+// transactionOutputTotalsSQL counts the outputs of a transaction, its
+// collateral return included: every output carries its producer's row id in
+// tx_id, which the unique (tx_id, output_idx) index leads with. It binds the
+// transaction's row id.
 const transactionOutputTotalsSQL = `SELECT count(*), coalesce(sum(amount), 0)
-FROM (
-    SELECT amount FROM utxo WHERE producer_tx_id = ?
-    UNION ALL
-    SELECT amount FROM utxo INDEXED BY idx_utxo_imported_ref
-    WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL
-      AND tx_id = ?
-)`
+FROM utxo WHERE tx_id = ?`
 
 type utxoAddressLookup func(context.Context, *models.UtxoWithOrderingQuery, int) (models.UtxoAddressPage, error)
 
@@ -369,7 +361,7 @@ func registerCardanoTools(
 			}
 		}
 		if found {
-			for _, table := range []string{`"transaction"`, "tx"} {
+			for _, table := range []string{"applied_transaction", "tx"} {
 				err := db.QueryRowContext(qCtx, "SELECT count(*), coalesce(sum(fee), 0) FROM "+table+" WHERE slot = ?", slot).
 					Scan(&txCount, &totalFees)
 				if err != nil && strings.Contains(err.Error(), "no such table:") {
@@ -386,7 +378,7 @@ func registerCardanoTools(
 			if !bySlot {
 				where = "block_hash = ? OR block_hash = ?"
 			}
-			for _, table := range []string{`"transaction"`, "tx"} {
+			for _, table := range []string{"applied_transaction", "tx"} {
 				// HAVING avoids scanning NULL aggregates when no transaction matches.
 				ok, err := scan("SELECT count(*), coalesce(sum(fee), 0), min(slot), min(block_hash) FROM "+table+" WHERE "+where+" HAVING count(*) > 0", &txCount, &totalFees, &slot, &rawHash)
 				if err != nil {
@@ -464,7 +456,7 @@ func registerCardanoTools(
 
 		err = db.QueryRowContext(
 			qCtx,
-			"SELECT id, slot, fee, block_index FROM \"transaction\" WHERE hash = ? OR hash = ?",
+			"SELECT t.id, a.slot, a.fee, a.block_index FROM \"transaction\" t JOIN applied_transaction a ON a.tx_id = t.id WHERE t.hash = ? OR t.hash = ?",
 			hashBytes,
 			cleanHash,
 		).Scan(&txID, &slot, &fee, &blockIndex)
@@ -494,7 +486,7 @@ func registerCardanoTools(
 		// Count UTxOs created by this tx
 		var outCount int
 		var totalOut uint64
-		err = db.QueryRowContext(qCtx, transactionOutputTotalsSQL, txID, hashBytes).
+		err = db.QueryRowContext(qCtx, transactionOutputTotalsSQL, txID).
 			Scan(&outCount, &totalOut)
 		if err != nil {
 			return nil, nil, fmt.Errorf("query transaction outputs: %w", err)
@@ -1200,9 +1192,10 @@ func registerCardanoTools(
 			if len(rawName) > 32 {
 				return nil, nil, errors.New("asset name exceeds 32 bytes")
 			}
-			q = `SELECT u.tx_id, u.output_idx, u.payment_key, u.amount, a.name, a.fingerprint, a.amount, u.datum_hash
+			q = `SELECT p.hash, u.output_idx, u.payment_key, u.amount, a.name, a.fingerprint, a.amount, u.datum_hash
 				 FROM asset a
 				 JOIN utxo u ON a.utxo_id = u.id
+				 JOIN "transaction" p ON p.id = u.tx_id
 				 WHERE a.policy_id = ? AND a.name = ? AND u.deleted_slot = 0
 				 ORDER BY u.id DESC, a.id DESC
 				 LIMIT ? OFFSET ?`
@@ -1213,9 +1206,10 @@ func registerCardanoTools(
 				offset,
 			}
 		} else {
-			q = `SELECT u.tx_id, u.output_idx, u.payment_key, u.amount, a.name, a.fingerprint, a.amount, u.datum_hash
+			q = `SELECT p.hash, u.output_idx, u.payment_key, u.amount, a.name, a.fingerprint, a.amount, u.datum_hash
 				 FROM asset a
 				 JOIN utxo u ON a.utxo_id = u.id
+				 JOIN "transaction" p ON p.id = u.tx_id
 				 WHERE a.policy_id = ? AND u.deleted_slot = 0
 				 ORDER BY u.id DESC, a.id DESC
 				 LIMIT ? OFFSET ?`

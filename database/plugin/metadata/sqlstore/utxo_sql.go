@@ -90,7 +90,7 @@ func newUtxoSQL(sqlite bool) *utxoSQL {
 		markDeletedAtSlot: markUtxoDeletedAtSlotHead + refEq +
 			markUtxoDeletedAtSlotTail,
 		countByRef: countUtxoByRefHead + refEq,
-		hydrate: hydrateUtxoHead + refEq,
+		hydrate:    hydrateUtxoHead + refEq,
 		clearStaleSpend: clearStaleUtxoSpendHead + refEq +
 			clearStaleUtxoSpendTail,
 		insertIgnore:    insertUtxoIgnoreConflictStatement,

@@ -642,7 +642,7 @@ func (d *Database) consumedUtxoSpendState(
 		return nil, err
 	}
 	return &models.UtxoSpendState{
-		DeletedSlot: utxo.DeletedSlot,
+		DeletedSlot:   utxo.DeletedSlot,
 		SpentAtTxHash: utxo.SpentAtTxHash,
 	}, nil
 }

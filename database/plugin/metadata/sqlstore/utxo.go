@@ -166,12 +166,59 @@ func (s *Store) DeleteUtxos(
 					return err
 				}
 			}
+			if err := s.sweepOrphanTransactionIdentities(
+				ctx, db, utxoIDs,
+			); err != nil {
+				return err
+			}
 			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
 		},
 	)
 }
 
-// utxoStakeRefsAddedAfterSlotQuery and utxoStakeRefsDeletedAfterSlotQuery
+// orphanIdentityDelete deletes the identity rows named by hash that no
+// application row, output, spend or edge references. A transaction becomes an
+// identity row with no application row only through an import or recovery,
+// so the row it leaves behind once pruning retires its last output is
+// swept here rather than accumulating.
+const (
+	orphanIdentityDelete = `-- name: DeleteOrphanTransactionIdentities :exec
+DELETE FROM "transaction" WHERE hash IN (`
+	orphanIdentityGuard = `)
+  AND NOT EXISTS (SELECT 1 FROM applied_transaction a WHERE a.tx_id = "transaction".id)
+  AND NOT EXISTS (SELECT 1 FROM utxo u WHERE u.tx_id = "transaction".id)
+  AND NOT EXISTS (SELECT 1 FROM utxo u WHERE u.spent_at_tx_id = "transaction".id)
+  AND NOT EXISTS (SELECT 1 FROM utxo_reference_edge e WHERE e.tx_id = "transaction".id)
+  AND NOT EXISTS (SELECT 1 FROM utxo_collateral_edge e WHERE e.tx_id = "transaction".id)`
+)
+
+func (s *Store) sweepOrphanTransactionIdentities(
+	ctx context.Context,
+	db queryer,
+	ids []models.UtxoId,
+) error {
+	hashes, _ := distinctUtxoTxIDs(ids)
+	for start := 0; start < len(hashes); start += 400 {
+		end := min(start+400, len(hashes))
+		args := make([]any, 0, end-start)
+		for _, hash := range hashes[start:end] {
+			args = append(args, hash)
+		}
+		if _, err := db.ExecContext(
+			ctx,
+			s.dialect.Rebind(
+				orphanIdentityDelete+bindPlaceholders(len(args))+
+					orphanIdentityGuard,
+			),
+			args...,
+		); err != nil {
+			return fmt.Errorf("sweep orphan transaction identities: %w", err)
+		}
+	}
+	return nil
+}
+
+// utxoStakeRefsAddedAfterSlot and utxoStakeRefsDeletedAfterSlotQuery
 // collect the stake credentials whose live stake a rollback sweep has to
 // recompute. They are deliberately free of SQL DISTINCT so the planner keeps
 // using the index that answers the slot predicate; see
@@ -373,7 +420,7 @@ func (s *Store) SetUtxosNotDeletedAfterSlot(
 			}
 			if _, err := db.ExecContext(ctx, `
 UPDATE utxo
-SET deleted_slot = 0, spent_by_tx_id = NULL, spent_at_tx_id = NULL
+SET deleted_slot = 0, spent_at_tx_id = NULL
 WHERE deleted_slot > ?`,
 				slotValue,
 			); err != nil {
@@ -2243,17 +2290,17 @@ func utxoOrderingRanged(query *models.UtxoWithOrderingQuery) bool {
 	return query.CreatedFrom != nil || query.CreatedTo != nil
 }
 
-// utxoProducerJoin joins the transaction that produced a UTxO. A collateral
-// return has no transaction_id; it belongs to the transaction named by
-// collateral_return_for_tx_id, whose position it takes.
+// utxoProducerJoin joins the application row of the transaction that
+// produced a UTxO, whose block position the output takes. A producer that
+// was never applied here, as with an imported output, has none, and the
+// output takes its own added_slot.
 const utxoProducerJoin = `
-LEFT JOIN "transaction"
-    ON COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)
-       = "transaction".id`
+LEFT JOIN applied_transaction
+    ON applied_transaction.tx_id = utxo.tx_id`
 
 const (
-	utxoOrderingSlotExpr       = `COALESCE("transaction".slot, utxo.added_slot)`
-	utxoOrderingBlockIndexExpr = `COALESCE("transaction".block_index, 0)`
+	utxoOrderingSlotExpr       = `COALESCE(applied_transaction.slot, utxo.added_slot)`
+	utxoOrderingBlockIndexExpr = `COALESCE(applied_transaction.block_index, 0)`
 )
 
 func countUtxosOrderingStatement(
@@ -2313,7 +2360,13 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	}
 	slotExpr := utxoOrderingSlotExpr
 	blockIndexExpr := utxoOrderingBlockIndexExpr
+	var afterTxID int64
 	if query.After != nil {
+		var err error
+		afterTxID, err = s.cursorTxID(ctx, db, query.After.TxId)
+		if err != nil {
+			return nil, err
+		}
 		comparison := ">"
 		if query.Descending {
 			comparison = "<"
@@ -2338,7 +2391,7 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			query.After.Slot,
 			query.After.BlockIndex,
 			query.After.OutputIdx,
-			query.After.TxId,
+			afterTxID,
 		)
 	}
 	orderDir := "ASC"
@@ -2388,9 +2441,8 @@ ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir 
 
 // GetUtxosWithHistory returns the retained lifecycle of matching outputs,
 // rather than limiting the query to the live UTxO set. The transaction joins
-// are deliberately separate: transaction_id or collateral_return_for_tx_id
-// identifies the producing row, while spent_by_tx_id stores the consuming
-// transaction's row id.
+// are deliberately separate: tx_id identifies the producing transaction and
+// spent_at_tx_id the consuming one.
 func (s *Store) GetUtxosWithHistory(
 	query *models.UtxoHistoryQuery,
 	txn types.Txn,
@@ -2415,6 +2467,7 @@ func (s *Store) GetUtxosWithHistory(
 
 	createdSlotExpr := `COALESCE(created_transaction.slot, utxo.added_slot)`
 	createdBlockIndexExpr := `COALESCE(created_transaction.block_index, 0)`
+	var afterTxID int64
 	predicate := "1 = 1"
 	args := []any{}
 	switch {
@@ -2477,10 +2530,7 @@ func (s *Store) GetUtxosWithHistory(
 		predicate += `
  AND EXISTS (
      SELECT 1 FROM transaction_metadata_label AS metadata_label
-     WHERE metadata_label.transaction_id = COALESCE(
-         utxo.transaction_id,
-         utxo.collateral_return_for_tx_id
-     )
+     WHERE metadata_label.transaction_id = utxo.tx_id
        AND metadata_label.label = ?
  )`
 		args = append(args, strconv.FormatUint(*query.MetadataLabel, 10))
@@ -2507,6 +2557,10 @@ func (s *Store) GetUtxosWithHistory(
 		args = append(args, *query.SpentBefore)
 	}
 	if query.After != nil {
+		afterTxID, err = s.cursorTxID(ctx, db, query.After.TxId)
+		if err != nil {
+			return nil, err
+		}
 		comparison := ">"
 		if query.Descending {
 			comparison = "<"
@@ -2531,7 +2585,7 @@ func (s *Store) GetUtxosWithHistory(
 			query.After.Slot,
 			query.After.BlockIndex,
 			query.After.OutputIdx,
-			query.After.TxId,
+			afterTxID,
 		)
 	}
 
@@ -2546,10 +2600,10 @@ SELECT ` + utxoRowColumns + `,
        created_transaction.block_hash,
        spent_transaction.block_hash
 FROM utxo
-LEFT JOIN "transaction" AS created_transaction
-    ON COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id) = created_transaction.id
-LEFT JOIN "transaction" AS spent_transaction
-    ON utxo.spent_by_tx_id = spent_transaction.id
+LEFT JOIN applied_transaction AS created_transaction
+    ON created_transaction.tx_id = utxo.tx_id
+LEFT JOIN applied_transaction AS spent_transaction
+    ON spent_transaction.tx_id = utxo.spent_at_tx_id
 WHERE ` + predicate + `
 ORDER BY ` + createdSlotExpr + ` ` + orderDirection + `,
          ` + createdBlockIndexExpr + ` ` + orderDirection + `,
@@ -3520,4 +3574,23 @@ func nullableUint(value *uint) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: int64(*value), Valid: true}
+}
+
+// cursorTxID resolves the transaction hash of a keyset cursor to its row id,
+// the final ordering key. Cursors carry the hash so their format does not
+// depend on row ids. A hash with no row resolves to zero, which orders
+// before every stored transaction.
+func (s *Store) cursorTxID(
+	ctx context.Context,
+	db queryer,
+	hash []byte,
+) (int64, error) {
+	if len(hash) == 0 {
+		return 0, nil
+	}
+	ids, err := s.transactionIdentityIDs(ctx, db, [][]byte{hash}, false)
+	if err != nil {
+		return 0, err
+	}
+	return ids[string(hash)], nil
 }

@@ -23,7 +23,6 @@ import (
 	"maps"
 	"math"
 	"strconv"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
@@ -251,7 +250,7 @@ func insertUtxoBatchQuery(rowCount int) string {
 // statistics say.
 //
 // A row-value "(tx_id, output_idx) IN (...)" list or a join against VALUES
-// does not hold that plan. "deleted_slot = 0" and "spent_by_tx_id IS NULL"
+// does not hold that plan. "deleted_slot = 0" and "spent_at_tx_id IS NULL"
 // match every live row, but spent rows carry many distinct values with few
 // rows each, so sqlite_stat1 reports both columns as selective and SQLite
 // drives the statement from a deleted_slot-leading index, visiting every live
@@ -1508,7 +1507,7 @@ func (s *Store) setTransactionWithAccumulator(
 						continue
 					}
 					return fmt.Errorf(
-						"%w: %x:%d (already spent_by_tx_id=%v deleted_slot=%d, this_tx_id=%d)",
+						"%w: %x:%d (already spent_at_tx_id=%v deleted_slot=%d, this_tx_id=%d)",
 						types.ErrUtxoConflict,
 						utxoID.Hash,
 						utxoID.Idx,
@@ -1844,6 +1843,38 @@ RETURNING id`,
 	)
 }
 
+// rollbackTransactionDeletes delete what a transaction's id names, ahead of
+// its application row. The statements end where the id list begins. The
+// foreign keys to "transaction" do not cascade from applied_transaction, and
+// the identity row can outlive the rollback, so none of this is left to a
+// cascade.
+var rollbackTransactionDeletes = []string{
+	"DELETE FROM utxo_reference_edge WHERE tx_id IN (",
+	"DELETE FROM utxo_collateral_edge WHERE tx_id IN (",
+	"DELETE FROM utxo WHERE tx_id IN (",
+	"DELETE FROM certs WHERE transaction_id IN (",
+	"DELETE FROM key_witness WHERE transaction_id IN (",
+	"DELETE FROM plutus_data WHERE transaction_id IN (",
+	"DELETE FROM redeemer WHERE transaction_id IN (",
+	"DELETE FROM redeemer_script WHERE transaction_id IN (",
+	"DELETE FROM witness_scripts WHERE transaction_id IN (",
+	"DELETE FROM leios_transaction_context WHERE transaction_id IN (",
+}
+
+const (
+	rollbackIdentityDelete = `DELETE FROM "transaction" WHERE id IN (`
+	rollbackIdentityGuard  = `)
+  AND NOT EXISTS (SELECT 1 FROM utxo u WHERE u.tx_id = "transaction".id)
+  AND NOT EXISTS (SELECT 1 FROM utxo u WHERE u.spent_at_tx_id = "transaction".id)
+  AND NOT EXISTS (SELECT 1 FROM utxo_reference_edge e WHERE e.tx_id = "transaction".id)
+  AND NOT EXISTS (SELECT 1 FROM utxo_collateral_edge e WHERE e.tx_id = "transaction".id)`
+)
+
+// DeleteTransactionsAfterSlot removes the transactions applied after slot:
+// their application rows, outputs, edges and detail rows, and the spends they
+// recorded. A transaction's identity row is deleted when nothing references
+// it any more and otherwise kept; the row id of a deleted transaction is not
+// handed out again.
 func (s *Store) DeleteTransactionsAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -1852,7 +1883,7 @@ func (s *Store) DeleteTransactionsAfterSlot(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			rows, err := db.QueryContext(ctx, `
-SELECT id FROM "transaction" WHERE slot > ?`,
+SELECT tx_id FROM applied_transaction WHERE slot > ?`,
 				slot,
 			)
 			if err != nil {
@@ -1908,21 +1939,20 @@ SELECT id FROM "transaction" WHERE slot > ?`,
 					)
 				}
 				if _, err := db.ExecContext(ctx, `
-UPDATE utxo SET spent_by_tx_id = NULL, deleted_slot = 0
-WHERE spent_by_tx_id IN (`+bindPlaceholders(len(idArgs))+`)`,
+UPDATE utxo SET spent_at_tx_id = NULL, deleted_slot = 0
+WHERE spent_at_tx_id IN (`+bindPlaceholders(len(idArgs))+`)`,
 					idArgs...,
 				); err != nil {
 					return err
 				}
-				if _, err := db.ExecContext(ctx, `
-DELETE FROM utxo_reference_edge
-WHERE transaction_id IN (`+bindPlaceholders(len(idArgs))+`)`, idArgs...); err != nil {
-					return err
-				}
-				if _, err := db.ExecContext(ctx, `
-DELETE FROM utxo_collateral_edge
-WHERE transaction_id IN (`+bindPlaceholders(len(idArgs))+`)`, idArgs...); err != nil {
-					return err
+				for _, statement := range rollbackTransactionDeletes {
+					if _, err := db.ExecContext(
+						ctx,
+						statement+bindPlaceholders(len(idArgs))+")",
+						idArgs...,
+					); err != nil {
+						return err
+					}
 				}
 			}
 			if _, err := db.ExecContext(ctx, `
@@ -1939,10 +1969,30 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 			}
 			if _, err := db.ExecContext(
 				ctx,
-				`DELETE FROM "transaction" WHERE slot > ?`,
+				`DELETE FROM applied_transaction WHERE slot > ?`,
 				slot,
 			); err != nil {
 				return err
+			}
+			// A rolled-back transaction's identity row is deleted unless
+			// something still names it. Nothing that outlives the rollback
+			// should, since its outputs, spends and edges were deleted above;
+			// the guard keeps the row, and the foreign keys that point at it
+			// intact, if one does.
+			for start := 0; start < len(txIDs); start += 400 {
+				end := min(start+400, len(txIDs))
+				idArgs := make([]any, end-start)
+				for i, id := range txIDs[start:end] {
+					idArgs[i] = id
+				}
+				if _, err := db.ExecContext(
+					ctx,
+					rollbackIdentityDelete+bindPlaceholders(len(idArgs))+
+						rollbackIdentityGuard,
+					idArgs...,
+				); err != nil {
+					return err
+				}
 			}
 			// The stake lookup returns one row per spent UTxO; refresh each
 			// credential once.
@@ -2492,16 +2542,16 @@ INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CO
 // reads. It is a deferred index, so it can be absent while a bulk-load
 // rebuild is pending.
 var rollbackSpentStakeRefsIndex = deferred.Index{
-	Name:  "idx_utxo_spent_by_tx_id",
+	Name:  "idx_utxo_spent_at_tx_id",
 	Table: "utxo",
 }
 
 // rollbackSpentStakeRefsQuery returns the statement that collects the stake
 // credentials of the UTxOs spent by n rolled-back transactions.
 //
-// On SQLite the statement names idx_utxo_spent_by_tx_id whenever that index
+// On SQLite the statement names idx_utxo_spent_at_tx_id whenever that index
 // exists. Its statistics are unreliable: utxo statistics taken over an
-// imported, never-spent UTxO set record spent_by_tx_id as one value covering
+// imported, never-spent UTxO set record spent_at_tx_id as one value covering
 // every row, and the table never grows enough afterwards for the incremental
 // refresh to re-analyze it. With those statistics a single-hash lookup was
 // planned as a pass over every utxo row, holding the ledger write lock for
@@ -2532,7 +2582,7 @@ func (s *Store) rollbackSpentStakeRefsQuery(
 	}
 	return "-- name: GetRollbackSpentStakeRefs\n" +
 		"SELECT credential_tag, staking_key " + from + "\n" +
-		"WHERE spent_by_tx_id IN (" + bindPlaceholders(n) + ")", nil
+		"WHERE spent_at_tx_id IN (" + bindPlaceholders(n) + ")", nil
 }
 
 const insertAccountWithdrawalWitnessSQL = `-- name: InsertAccountWithdrawalWitness :exec

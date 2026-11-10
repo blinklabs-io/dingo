@@ -1031,8 +1031,8 @@ active_delegator_stake AS (
  LEFT JOIN utxo
    ON utxo.credential_tag = active_delegation.credential_tag
   AND utxo.staking_key = active_delegation.staking_key
-  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)), utxo.added_slot) <= ?
-  AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.spent_by_tx_id), utxo.deleted_slot) > ?)
+  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.tx_id), utxo.added_slot) <= ?
+  AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
  WHERE ` + expiryPredicate + predicate
 	args = append(args, slot, slot)
 	if expiryEpoch > 0 {
@@ -1056,8 +1056,8 @@ active_delegator_stake AS (
   AND pointer_resolution.staking_key = active_delegation.staking_key
  JOIN utxo
    ON utxo.id = pointer_resolution.utxo_id
-  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)), utxo.added_slot) <= ?
-  AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.spent_by_tx_id), utxo.deleted_slot) > ?)
+  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.tx_id), utxo.added_slot) <= ?
+  AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
  WHERE ` + expiryPredicate + predicate
 		args = append(args, slot, slot)
 		if expiryEpoch > 0 {
@@ -1396,12 +1396,12 @@ LIMIT 1`).Scan(&value)
 	// predicate lets SQLite choose the (withdrawal, ...) index and scan every
 	// withdrawal row once per credential.
 	parts = append(parts, `
-  SELECT COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN applied_transaction tx ON tx.tx_id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot) AS added_slot
+  SELECT COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot) AS added_slot
   FROM account_withdrawal_witness witness
   WHERE witness.credential_tag = active.credential_tag
     AND witness.staking_key = active.staking_key`, `
   SELECT CASE WHEN witness.withdrawal = TRUE
-         THEN COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN applied_transaction tx ON tx.tx_id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot)
+         THEN COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot)
          END AS added_slot
   FROM account_reward_delta witness
   WHERE witness.credential_tag = active.credential_tag
