@@ -551,13 +551,14 @@ func (n *Node) poolProducersReady() error {
 }
 
 // reloadPoolProducerCredentials reloads every running pool after the first
-// through its own key source. A pool that fails keeps its credentials and is
-// counted; the others still reload.
+// through its own key source and returns one result per pool, each error
+// naming its pool. A pool that fails keeps its credentials and is counted;
+// the others still reload.
 func (n *Node) reloadPoolProducerCredentials(
 	slot uint64,
 	supported bool,
 	ledgerCheck func(*forging.PoolCredentials) error,
-) error {
+) []error {
 	n.multiPool.mu.Lock()
 	type target struct {
 		pp   *poolProducer
@@ -570,19 +571,21 @@ func (n *Node) reloadPoolProducerCredentials(
 		}
 	}
 	n.multiPool.mu.Unlock()
-	var errs []error
+	results := make([]error, 0, len(targets))
 	for _, t := range targets {
-		if err := n.reloadPoolCredentials(
+		err := n.reloadPoolCredentials(
 			t.pp.keySource(n),
 			t.live,
 			slot,
 			supported,
 			ledgerCheck,
-		); err != nil {
-			errs = append(errs, fmt.Errorf("pool %s: %w", t.pp.poolID, err))
+		)
+		if err != nil {
+			err = fmt.Errorf("pool %s: %w", t.pp.poolID, err)
 		}
+		results = append(results, err)
 	}
-	return errors.Join(errs...)
+	return results
 }
 
 // countReloadFailure counts a credential reload that left poolID's keys as

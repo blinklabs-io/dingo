@@ -221,7 +221,8 @@ func (n *Node) reloadBlockProducerCredentials(
 // source. The replacement is loaded into credentials of its own and only moved
 // into the live set once every check has passed, because loading into the live
 // set fails closed on error, which would stop a healthy producer. A failure is
-// counted against the pool when the node forges for several.
+// counted against the pool when the node forges for several; credentials
+// found already loaded are not a failure.
 func (n *Node) reloadPoolCredentials(
 	ks *poolKeySource,
 	live *forging.PoolCredentials,
@@ -231,7 +232,8 @@ func (n *Node) reloadPoolCredentials(
 ) (retErr error) {
 	if n.producerPoolCount() > 1 {
 		defer func() {
-			if retErr != nil {
+			if retErr != nil &&
+				!errors.Is(retErr, errCredentialsUnchanged) {
 				n.countReloadFailure(live.GetPoolID().String())
 			}
 		}()

@@ -135,10 +135,34 @@ func (n *Node) reloadEveryPool(
 			primaryErr,
 		)
 	}
-	return errors.Join(
-		primaryErr,
-		n.reloadPoolProducerCredentials(slot, supported, ledgerCheck),
-	)
+	return joinPoolReloads(append(
+		[]error{primaryErr},
+		n.reloadPoolProducerCredentials(slot, supported, ledgerCheck)...,
+	))
+}
+
+// joinPoolReloads combines one reload result per pool. A pool whose
+// credentials were already loaded is not a failure: the result is the other
+// pools' failures, errCredentialsUnchanged when every pool was unchanged, and
+// nil otherwise.
+func joinPoolReloads(results []error) error {
+	var errs []error
+	unchanged := 0
+	for _, err := range results {
+		switch {
+		case errors.Is(err, errCredentialsUnchanged):
+			unchanged++
+		case err != nil:
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	if unchanged == len(results) {
+		return errCredentialsUnchanged
+	}
+	return nil
 }
 
 // reloadAgentSignCredentials is reloadPoolAgentSignCredentials for the first
