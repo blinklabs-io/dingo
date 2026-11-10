@@ -16,4 +16,12 @@
 // "antithesis" tag it forwards to the SDK's assert and lifecycle packages;
 // without the tag every function is a no-op, so call sites need no build tags
 // and default builds carry no SDK dependency.
+//
+// The SDK requires assertion messages to be string literals so its
+// instrumentor can catalog them before the run. The shim forwards a variable,
+// so the instrumentor cannot see assertions made through it: a property
+// registers only when its call first executes, and a Sometimes or Reachable
+// assertion that is never reached is never reported as failing. Where that
+// catalog entry matters, call the SDK directly from a file with the
+// "antithesis" build tag.
 package antithesis
