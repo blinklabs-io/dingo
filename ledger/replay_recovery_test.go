@@ -59,12 +59,27 @@ import (
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
+// The ledger can schedule recovery work before Start. Register its close
+// after database construction so that cleanup joins it before closing storage.
+func newReplayRecoveryLedgerState(
+	t *testing.T,
+	config LedgerStateConfig,
+) (*LedgerState, error) {
+	t.Helper()
+	ls, err := NewLedgerState(config)
+	if ls != nil {
+		t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	}
+	return ls, err
+}
+
 // TestReplayRecoveryRollbackLockOrder protects the lock-order contract shared
 // with rollbackChainAndStateDeferred. The blockfetch lock must be acquired
 // before transactionEventMutex. The old implementation acquired those locks
 // in the opposite order, so this test fails against the unfixed code instead
 // of merely checking that both mutexes appear somewhere in the function.
 func TestReplayRecoveryRollbackLockOrder(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(
 		fset,
@@ -209,7 +224,7 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 		),
 	)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -340,7 +355,7 @@ func TestFindReplayRecoveryCandidateFallsBackWhenProducerParentIsMissing(
 
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().SecurityParam = 3
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: nodeConfig,
@@ -436,7 +451,7 @@ func TestFindReplayRecoveryCandidateHandlesPrunedFallbackTail(
 
 			nodeConfig := newTestShelleyGenesisCfg(t)
 			nodeConfig.ShelleyGenesis().SecurityParam = tc.securityParam
-			ls, err := NewLedgerState(LedgerStateConfig{
+			ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 				Database:          db,
 				ChainManager:      cm,
 				CardanoNodeConfig: nodeConfig,
@@ -544,7 +559,7 @@ func TestFindReplayRecoveryCandidateFlagsUnresolvedWithoutLocalFallbackAnchor(
 
 				nodeConfig := newTestShelleyGenesisCfg(t)
 				nodeConfig.ShelleyGenesis().SecurityParam = securityParam
-				ls, err := NewLedgerState(LedgerStateConfig{
+				ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 					Database:          db,
 					ChainManager:      cm,
 					CardanoNodeConfig: nodeConfig,
@@ -670,7 +685,7 @@ func newPrunedProducerLedger(
 
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().SecurityParam = securityParam
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: nodeConfig,
@@ -853,7 +868,7 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 			Port: 3001,
 		},
 	}
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		EventBus:          bus,
@@ -1007,7 +1022,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		),
 	)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -1117,6 +1132,357 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	)
 }
 
+func TestAtTipRecoveryRetainsImmutableBlocksAcrossRetries(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name           string
+		ledgerTipIndex int
+		growAfterFirst bool
+	}{
+		{name: "single over-K target", ledgerTipIndex: 12},
+		{name: "cumulative retry depth", ledgerTipIndex: 18},
+		{name: "advancing K boundary", ledgerTipIndex: 18, growAfterFirst: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			testAtTipRecoveryRetainsImmutableBlocks(
+				t, tc.ledgerTipIndex, tc.growAfterFirst,
+			)
+		})
+	}
+}
+
+func testAtTipRecoveryRetainsImmutableBlocks(
+	t *testing.T,
+	ledgerTipIndex int,
+	growAfterFirst bool,
+) {
+	const securityParam = 3
+	db := newTestDB(t)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	raw := make([]chain.RawBlock, 20)
+	var prev []byte
+	for i := range raw {
+		raw[i] = testRawBlock(
+			fmt.Sprintf("at-tip-k-bound-%d", i),
+			uint64((i+1)*5000), //nolint:gosec
+			uint64(i+1),        //nolint:gosec
+			prev,
+		)
+		prev = raw[i].Hash
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), raw))
+
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.currentEra = eras.ShelleyEraDesc
+	require.NoError(t, cm.SetLedger(ls))
+	ls.metrics.init(prometheus.NewRegistry())
+	ledgerBlock := raw[ledgerTipIndex]
+	ledgerTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(ledgerBlock.Slot, ledgerBlock.Hash),
+		BlockNumber: ledgerBlock.BlockNumber,
+	}
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+	ls.currentTip = ledgerTip
+	ls.reachedTip.Store(true)
+	ls.publishSnapshotsLocked()
+
+	failingBlock := raw[len(raw)-1]
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
+		TxHash:     testHashBytes("at-tip-k-bound-tx"),
+		Cause:      errors.New("transaction validation failure"),
+	}
+	immutable := raw[len(raw)-1-securityParam]
+	var advancedFloor chain.RawBlock
+	for attempt := 1; attempt <= maxAtTipRecoveryAttempts; attempt++ {
+		if attempt > 1 {
+			ls.currentEra = eras.ShelleyEraDesc
+			require.NoError(t, cm.SetLedger(ls))
+			assert.Equal(t, securityParam, cm.SecurityParam())
+		}
+		recovered, recoverErr := ls.recoverAtTipFromTxValidationError(validationErr)
+		require.NoError(t, recoverErr)
+		require.True(t, recovered)
+		if attempt == 1 && ledgerTipIndex == 12 {
+			assert.Equal(t, ocommon.NewPoint(immutable.Slot, immutable.Hash),
+				ls.chain.Tip().Point)
+		}
+		if attempt == 1 && ledgerTipIndex == len(raw)-2 {
+			assert.Equal(t, ledgerTip.Point, ls.chain.Tip().Point)
+			if growAfterFirst {
+				grown := make([]chain.RawBlock, 4)
+				prev = ledgerBlock.Hash
+				for i := range grown {
+					grown[i] = testRawBlock(
+						fmt.Sprintf("at-tip-k-grown-%d", i),
+						failingBlock.Slot+uint64(i*5000),   //nolint:gosec
+						failingBlock.BlockNumber+uint64(i), //nolint:gosec
+						prev,
+					)
+					prev = grown[i].Hash
+				}
+				require.NoError(t, ls.chain.AddRawBlocks(context.Background(), grown))
+				advancedFloor = grown[0]
+			}
+			continue
+		}
+		assert.GreaterOrEqual(
+			t, ls.chain.Tip().Point.Slot, immutable.Slot,
+			"attempt %d must retain blocks immutable at first failure", attempt,
+		)
+		_, lookupErr := database.BlockByPoint(context.Background(), db,
+			ocommon.NewPoint(immutable.Slot, immutable.Hash))
+		require.NoError(t, lookupErr,
+			"attempt %d must retain the first failure's immutable block", attempt)
+		if growAfterFirst && attempt > 1 {
+			_, lookupErr = database.BlockByPoint(context.Background(), db,
+				ocommon.NewPoint(advancedFloor.Slot, advancedFloor.Hash))
+			require.NoError(t, lookupErr,
+				"attempt %d must retain the advanced K boundary", attempt)
+		}
+	}
+	if ledgerTipIndex == len(raw)-2 && !growAfterFirst {
+		belowFloor := raw[len(raw)-2-securityParam]
+		_, err = ls.chain.RollbackDeferred(context.Background(),
+			ocommon.NewPoint(belowFloor.Slot, belowFloor.Hash))
+		require.NoError(t, err)
+		priorTip := ls.chain.Tip().Point
+		_, recoverErr := ls.recoverAtTipFromTxValidationError(validationErr)
+		require.ErrorIs(t, recoverErr, errHaltLedgerPipeline)
+		assert.Contains(t, recoverErr.Error(), "immutable at-tip recovery floor")
+		assert.Equal(t, priorTip, ls.chain.Tip().Point)
+
+		alternate := testRawBlock("at-tip-k-bound-alternate",
+			immutable.Slot, immutable.BlockNumber, belowFloor.Hash)
+		require.NoError(t, ls.chain.AddRawBlocks(context.Background(),
+			[]chain.RawBlock{alternate}))
+		priorTip = ls.chain.Tip().Point
+		_, recoverErr = ls.recoverAtTipFromTxValidationError(validationErr)
+		require.ErrorIs(t, recoverErr, errHaltLedgerPipeline)
+		assert.Contains(t, recoverErr.Error(), "immutable at-tip recovery floor")
+		assert.Equal(t, priorTip, ls.chain.Tip().Point)
+	}
+}
+
+func TestAtTipRecoveryShortChainCanReachOrigin(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	first := testRawBlock("at-tip-short-first", 5000, 1, nil)
+	second := testRawBlock("at-tip-short-second", 10000, 2, first.Hash)
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(),
+		[]chain.RawBlock{first, second}))
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, 3),
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(ls))
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.currentEra = eras.ShelleyEraDesc
+	require.NoError(t, db.SetTip(ochainsync.Tip{}, nil))
+	ls.currentTip = ochainsync.Tip{}
+	ls.reachedTip.Store(true)
+	ls.publishSnapshotsLocked()
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(second.Slot, second.Hash),
+		TxHash:     testHashBytes("at-tip-short-tx"),
+		Cause:      errors.New("transaction validation failure"),
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		recovered, recoverErr := ls.recoverAtTipFromTxValidationError(validationErr)
+		require.NoError(t, recoverErr)
+		require.True(t, recovered)
+		assert.Equal(t, ocommon.Point{}, ls.chain.Tip().Point)
+	}
+}
+
+func TestAtTipRollbackPreflightExcludesCompetingBlockAdd(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	blocks := loadTestBlocksWithTxs(t, 3)
+	raw := make([]chain.RawBlock, len(blocks))
+	for i, block := range blocks {
+		raw[i] = chain.RawBlock{
+			Slot: block.Slot, Hash: block.Hash,
+			BlockNumber: block.Number, Type: block.Type, Cbor: block.Cbor,
+		}
+		if i > 0 {
+			raw[i].PrevHash = raw[i-1].Hash
+		}
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), raw))
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	subID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotZero(t, subID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
+		Database: db, ChainManager: cm, EventBus: bus,
+		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, 2),
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.currentEra = eras.ShelleyEraDesc
+	require.NoError(t, cm.SetLedger(ls))
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(raw[2].Slot, raw[2].Hash),
+		BlockNumber: raw[2].BlockNumber,
+	}
+	require.NoError(t, db.SetTip(tip, nil))
+	ls.currentTip = tip
+	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
+	preflightErr := errors.New("rollback preflight rejected")
+	_, err = ls.chain.RollbackDeferredWithPreflight(
+		context.Background(), target, func() error { return preflightErr },
+	)
+	require.ErrorIs(t, err, preflightErr)
+	assert.Equal(t, tip.Point, ls.chain.Tip().Point)
+	next := testRawBlock("at-tip-competing-add", raw[2].Slot+1,
+		raw[2].BlockNumber+1, raw[2].Hash)
+	addReached := make(chan struct{})
+	releaseAdd := make(chan struct{})
+	addDone := make(chan error, 1)
+	ls.chain.SetBeforeRawBlockMutationBarrierForTesting(func() {
+		close(addReached)
+		<-releaseAdd
+	})
+	t.Cleanup(func() {
+		ls.chain.SetBeforeRawBlockMutationBarrierForTesting(nil)
+	})
+	_, err = ls.chain.RollbackDeferredWithPreflight(
+		context.Background(), target, func() error {
+			if err := ls.validateAndEmitRollbackUndo(
+				context.Background(), target,
+			); err != nil {
+				return err
+			}
+			go func() {
+				addDone <- ls.chain.AddRawBlocks(context.Background(),
+					[]chain.RawBlock{next})
+			}()
+			<-addReached
+			held := ls.chain.RawBlockMutationBarrierExcludesAddsForTesting()
+			close(releaseAdd)
+			if !held {
+				return errors.New("Undo and rollback do not share the mutation barrier")
+			}
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Error(t, <-addDone, "add based on discarded tip must be rejected")
+	assert.Equal(t, target, ls.chain.Tip().Point)
+	undoEvent := testutil.RequireReceive(t, txCh, 2*time.Second,
+		"expected Undo before primary chain truncation")
+	undo, ok := undoEvent.Data.(TransactionEvent)
+	require.True(t, ok)
+	assert.True(t, undo.Rollback)
+	_, _, pending, err := loadRollbackIntent(db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	ls.currentTip = ochainsync.Tip{}
+	committed, err := ls.rollbackPrimaryChainWithinSecurityParam(target)
+	require.NoError(t, err)
+	assert.False(t, committed)
+	_, _, pending, err = loadRollbackIntent(db)
+	require.NoError(t, err)
+	assert.False(t, pending)
+}
+
+func TestAtTipRollbackRefreshesFloorAfterConcurrentGrowth(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		targetIndex  int
+		wantRejected bool
+	}{
+		{name: "legal target pins advanced floor", targetIndex: 18},
+		{name: "stale target is retried", targetIndex: 17, wantRejected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			cm, err := chain.NewManager(context.Background(), db, nil)
+			require.NoError(t, err)
+			raw := make([]chain.RawBlock, 20)
+			var prev []byte
+			for i := range raw {
+				raw[i] = testRawBlock(fmt.Sprintf("at-tip-gap-%d", i),
+					uint64((i+1)*5000), uint64(i+1), prev) //nolint:gosec
+				prev = raw[i].Hash
+			}
+			require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), raw))
+			ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
+				Database: db, ChainManager: cm,
+				CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, 3),
+				Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+			})
+			require.NoError(t, err)
+			ls.currentEra = eras.ShelleyEraDesc
+			require.NoError(t, cm.SetLedger(ls))
+			tip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(raw[19].Slot, raw[19].Hash),
+				BlockNumber: raw[19].BlockNumber,
+			}
+			require.NoError(t, db.SetTip(tip, nil))
+			ls.currentTip = tip
+			target := ocommon.NewPoint(raw[tc.targetIndex].Slot,
+				raw[tc.targetIndex].Hash)
+			bounded, err := ls.clampAtTipRecoveryToImmutableFloor(target)
+			require.NoError(t, err)
+			assert.Equal(t, target, bounded)
+
+			grown := []chain.RawBlock{
+				testRawBlock("at-tip-gap-new-1", 105000, 21, raw[19].Hash),
+			}
+			grown = append(grown, testRawBlock("at-tip-gap-new-2",
+				110000, 22, grown[0].Hash))
+			require.NoError(t, ls.chain.AddRawBlocks(context.Background(), grown))
+			grownTip := ls.chain.Tip().Point
+			committed, rollbackErr := ls.rollbackPrimaryChainWithinSecurityParam(target)
+			if tc.wantRejected {
+				require.ErrorIs(t, rollbackErr, errAtTipRecoveryFloorAdvanced)
+				assert.False(t, committed)
+				assert.Equal(t, grownTip, ls.chain.Tip().Point)
+				bounded, err = ls.clampAtTipRecoveryToImmutableFloor(target)
+				require.NoError(t, err)
+				assert.Equal(t, ocommon.NewPoint(raw[18].Slot, raw[18].Hash),
+					bounded)
+				committed, rollbackErr = ls.rollbackPrimaryChainWithinSecurityParam(bounded)
+			}
+			require.NoError(t, rollbackErr)
+			assert.True(t, committed)
+			assert.Equal(t, ocommon.NewPoint(raw[18].Slot, raw[18].Hash),
+				ls.chain.Tip().Point)
+			assert.Equal(t, ocommon.NewPoint(raw[18].Slot, raw[18].Hash),
+				ls.atTipRecoveryFloor.Point)
+			bounded, err = ls.clampAtTipRecoveryToImmutableFloor(
+				ocommon.NewPoint(raw[16].Slot, raw[16].Hash))
+			require.NoError(t, err)
+			assert.Equal(t, ls.atTipRecoveryFloor.Point, bounded)
+		})
+	}
+}
+
 // newAtTipDescentLedger builds a LedgerState sitting at a fixed tip with
 // at-tip validation enabled, for exercising the non-convergence guard in
 // recoverAtTipFromTxValidationError. The failing blocks fed in these tests are
@@ -1148,7 +1514,7 @@ func newAtTipDescentLedger(t *testing.T) (*LedgerState, ochainsync.Tip) {
 		),
 	)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -1428,7 +1794,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 			Port: 3001,
 		},
 	}
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		EventBus:          bus,
@@ -1533,7 +1899,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 		),
 	)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -1718,7 +2084,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 	)
 	require.NoError(t, db.SetTip(currentTip, nil))
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -1877,13 +2243,13 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	// This recovery test uses a synthetic Shelley-only cache. Keep the config
 	// Shelley-only so the forecast shape does not alter recovery semantics.
 	recoveryCfg := &nodeconfig.CardanoNodeConfig{}
-	err = recoveryCfg.LoadShelleyGenesisFromReader(
+	err = completeTestShelleyGenesis(recoveryCfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(
 			`{"activeSlotsCoeff":0.05,"securityParam":432,"slotsPerKESPeriod":129600,"systemStart":"2022-10-25T00:00:00Z"}`,
 		),
 	)
 	require.NoError(t, err)
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: recoveryCfg,
@@ -1985,7 +2351,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().SecurityParam = 2
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		EventBus:          bus,
@@ -2190,7 +2556,7 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().SecurityParam = 2
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		EventBus:          bus,
@@ -2350,7 +2716,7 @@ func newReplayRecoveryAuditLedger(
 
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().SecurityParam = 2
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: nodeConfig,
@@ -2453,6 +2819,7 @@ func TestReplayRecoveryKeepsPrimaryRewindForDeeperKnownProducer(
 }
 
 func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
+	t.Parallel()
 	ls := newReplayRecoveryAuditLedger(t, true)
 	const pruneFloorSyncKey = database.ConsumedUtxoPruneFloorSyncKey
 	require.NoError(t, ls.db.SetSyncState(pruneFloorSyncKey, "120", nil))
@@ -3389,7 +3756,7 @@ func TestReplayRecoveryParentPointGenesisPredecessor(t *testing.T) {
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -3517,7 +3884,7 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 		[]chain.RawBlock{parentBlock, producerBlock, currentBlock},
 	))
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -3596,7 +3963,7 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	require.NoError(t, err)
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -3940,7 +4307,7 @@ func newTrustWindowLedger(
 		RemoteAddr: &net.TCPAddr{IP: net.IPv4(192, 0, 2, 61), Port: 32611},
 	}
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		EventBus:          bus,
@@ -4343,7 +4710,7 @@ func newTestShelleyGenesisCfgWithK(
 	cfg := &configcardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 	return cfg
 }
@@ -4403,7 +4770,7 @@ func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -4468,7 +4835,7 @@ func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -4543,7 +4910,7 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, ledgerWindow),
@@ -4683,7 +5050,7 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),
@@ -4763,7 +5130,7 @@ func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),

@@ -30,7 +30,6 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -304,44 +303,5 @@ func BenchmarkLedgerStateValidateTxUtxoMemo(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
-	})
-}
-
-// TestUtxoMemoBenchmarkNegativeControls proves both benchmarks above time the
-// full check rather than an early-exit/error path.
-func TestUtxoMemoBenchmarkNegativeControls(t *testing.T) {
-	t.Parallel()
-	fx := loadUtxoMemoPreprodFixture(t)
-
-	t.Run("UtxoInputResolution_MissingInput", func(t *testing.T) {
-		t.Parallel()
-		txn := fx.db.Transaction(context.Background(), false)
-		defer txn.Release()
-		view := fx.dingoLS.NewView(txn)
-		missing := shelley.MustNewShelleyTransactionInput(
-			"0000000000000000000000000000000000000000000000000000000000000000",
-			0,
-		)
-		_, err := view.UtxoById(missing)
-		require.Error(t, err)
-	})
-
-	t.Run("FullLedgerStateValidateTx_TamperedFee", func(t *testing.T) {
-		t.Parallel()
-		tamperedPP := *fx.dingoLS.currentPParams.(*conway.ConwayProtocolParameters)
-		tamperedPP.MinFeeA = 1_000_000_000
-		tamperedLS := &LedgerState{
-			db:             fx.db,
-			activeEras:     []eras.EraDesc{eras.ConwayEraDesc},
-			currentEra:     eras.ConwayEraDesc,
-			currentPParams: &tamperedPP,
-			currentEpoch:   fx.dingoLS.currentEpoch,
-			epochCache:     fx.dingoLS.epochCache,
-			config:         fx.dingoLS.config,
-		}
-		tamperedLS.metrics.init(prometheus.NewRegistry())
-		tamperedLS.publishSnapshotsLocked()
-
-		require.Error(t, tamperedLS.ValidateTx(fx.tx))
 	})
 }

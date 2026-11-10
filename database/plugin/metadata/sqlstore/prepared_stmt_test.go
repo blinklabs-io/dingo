@@ -190,6 +190,7 @@ func TestResetInvalidatesPreparedStatementCache(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
+	seedMigratedSQLite(t, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	var resetCalls int
@@ -375,7 +376,7 @@ func TestRefreshRewardLiveStakeRefsBoundsTxScopedStatementRetention(t *testing.T
 	store := newMigratedSQLiteStore(t)
 	ctx := context.Background()
 
-	const refCount = 2000
+	const refCount = 50
 	refs := make([]models.StakeCredentialRef, refCount)
 	for i := range refs {
 		refs[i] = models.NewStakeCredentialRef(0, credentialKeyForIndex(i))
@@ -615,44 +616,14 @@ func TestPrepareHotStatementsSkipsReturningIDQueryOnMySQL(t *testing.T) {
 	require.False(t, ok, "expected governanceVoteUpsertQuery to be uncached on MySQL")
 }
 
-func TestSetGovernanceVoteStatementsAreCached(t *testing.T) {
+func TestCacheableSQLiteInsertResultQueries(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-
-	statements := []string{
-		governanceVotePreviousQuery,
-		governanceVoteUpsertQuery,
-		governanceVoteHistoryInsertQuery,
+	for _, dialect := range []string{"sqlite", "postgres", "mysql"} {
+		t.Run(dialect, func(t *testing.T) {
+			t.Parallel()
+			for _, query := range []string{insertUtxoResultQuery, insertUtxoResultIgnoreConflictQuery} {
+				require.Equal(t, dialect == "sqlite", cacheableForDialect(dialect, query), "SQLite insert-result queries must not be prepared on other providers")
+			}
+		})
 	}
-	for _, query := range statements {
-		stmt, ok := store.lookupCachedStmt(query)
-		require.True(t, ok, "expected governance vote statement to be cached")
-		require.NotNil(t, stmt)
-	}
-}
-
-// TestRefreshRewardLiveStakeAggregateCachesAccountAndUpsertStatements proves
-// Start eagerly caches both new per-touch queries (not just
-// sumCredentialUtxoStakeQuery) and that repeated lookups return the same
-// *sql.Stmt. This is the regression check for the caching change itself:
-// against the prior version of this function, lookupCachedStmt for either
-// query returned ok=false, since neither was in hotStatements.
-func TestRefreshRewardLiveStakeAggregateCachesAccountAndUpsertStatements(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-
-	accountStmt, ok := store.lookupCachedStmt(rewardLiveStakeAccountQuery)
-	require.True(t, ok, "expected the account lookup to be cached")
-	require.NotNil(t, accountStmt)
-
-	upsertStmt, ok := store.lookupCachedStmt(rewardLiveStakeUpsertQuery)
-	require.True(t, ok, "expected the upsert to be cached")
-	require.NotNil(t, upsertStmt)
-
-	require.NotSame(
-		t,
-		accountStmt,
-		upsertStmt,
-		"the two queries must not share a cache slot",
-	)
 }

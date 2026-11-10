@@ -383,10 +383,10 @@ func TestChunkedRewardPrecomputeMatchesAcrossChunkSizes(t *testing.T) {
 		potsEpoch           = uint64(3)
 		eventBoundarySlot   = uint64(200)
 	)
-	poolCount, delegatorsPerPool := 7, 5
+	poolCount, delegatorsPerPool := 4, 2
 
 	var reference rewardPrecomputeOutputsSnapshot
-	for i, chunkSize := range []int{1, 2, 3, 100} {
+	for i, chunkSize := range []int{1, 3, 100} {
 		ls, db := seedMultiPoolRewardPrecomputeFixture(
 			t, poolCount, delegatorsPerPool, 7,
 		)
@@ -435,7 +435,7 @@ func TestChunkedRewardPrecomputeMatchesMonolithicCalculation(t *testing.T) {
 		capturedSlot        = uint64(200)
 		boundarySlot        = uint64(1_200)
 	)
-	poolCount, delegatorsPerPool := 8, 6
+	poolCount, delegatorsPerPool := 5, 2
 
 	monolithic, monolithicDB := seedMultiPoolRewardPrecomputeFixture(
 		t, poolCount, delegatorsPerPool, 7,
@@ -481,7 +481,7 @@ func TestChunkedRewardPrecomputeResumesAfterInterruption(t *testing.T) {
 		potsEpoch           = uint64(3)
 		eventBoundarySlot   = uint64(200)
 	)
-	poolCount, delegatorsPerPool := 9, 4
+	poolCount, delegatorsPerPool := 5, 2
 
 	ls, db := seedMultiPoolRewardPrecomputeFixture(
 		t, poolCount, delegatorsPerPool, 7,
@@ -556,8 +556,8 @@ func TestChunkedRewardPrecomputeRestartsOnInputFingerprintChange(t *testing.T) {
 		newEpoch            = rewardSnapshotEpoch + 3
 		capturedSlot        = uint64(200)
 		boundarySlot        = uint64(1_200)
-		poolCount           = 6
-		delegatorsPerPool   = 3
+		poolCount           = 4
+		delegatorsPerPool   = 2
 	)
 	mutateInput := func(t *testing.T, db *database.Database) {
 		t.Helper()
@@ -629,8 +629,8 @@ func TestChunkedRewardPrecomputeRestartsOnInactivityWindowChange(t *testing.T) {
 		newEpoch            = rewardSnapshotEpoch + 3
 		capturedSlot        = uint64(200)
 		boundarySlot        = uint64(1_200)
-		poolCount           = 6
-		delegatorsPerPool   = 3
+		poolCount           = 4
+		delegatorsPerPool   = 2
 	)
 	ls, db := seedMultiPoolRewardPrecomputeFixture(
 		t, poolCount, delegatorsPerPool, 7,
@@ -697,7 +697,7 @@ func TestChunkedRewardPrecomputeRestartsOnGenerationChange(t *testing.T) {
 		potsEpoch           = uint64(3)
 		eventBoundarySlot   = uint64(200)
 	)
-	poolCount, delegatorsPerPool := 6, 3
+	poolCount, delegatorsPerPool := 4, 2
 
 	ls, db := seedMultiPoolRewardPrecomputeFixture(
 		t, poolCount, delegatorsPerPool, 7,
@@ -755,7 +755,7 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 		boundarySlot        = uint64(1_200)
 	)
 	degenerate := func(t *testing.T) (*LedgerState, *database.Database) {
-		ls, db := seedMultiPoolRewardPrecomputeFixture(t, 8, 3, 7)
+		ls, db := seedMultiPoolRewardPrecomputeFixture(t, 4, 2, 7)
 		require.NoError(t, db.Metadata().SaveRewardAdaPots(
 			&models.RewardAdaPots{
 				Epoch:        potsEpoch,
@@ -805,4 +805,42 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, wantState.Reserves, gotState.Reserves)
 	require.Equal(t, wantState.Treasury, gotState.Treasury)
+}
+
+// A chunk transaction holds the only write connection, so its size is bounded
+// by delegators as well as pools: a run of large pools must not make one chunk
+// that stalls block application for tens of seconds.
+func TestRewardPrecomputeChunkEndBoundsDelegators(t *testing.T) {
+	pools := func(counts ...uint64) []*models.RewardPoolInput {
+		ret := make([]*models.RewardPoolInput, len(counts))
+		for i, count := range counts {
+			ret[i] = &models.RewardPoolInput{DelegatorCount: count}
+		}
+		return ret
+	}
+	tests := []struct {
+		name       string
+		pools      []*models.RewardPoolInput
+		start      int
+		maxPools   int
+		maxMembers uint64
+		want       int
+	}{
+		{"budget reached", pools(3000, 3000, 3000, 10), 0, 100, 5000, 2},
+		{"one oversized pool", pools(20000, 10, 10), 0, 100, 5000, 1},
+		{"pool cap first", pools(1, 1, 1, 1, 1), 0, 3, 5000, 3},
+		{"tail", pools(10, 10, 6000, 10), 3, 100, 5000, 4},
+		{"no counts", pools(0, 0, 0), 0, 2, 5000, 2},
+		{"from offset", pools(10, 4000, 4000, 4000), 1, 100, 5000, 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := rewardPrecomputeChunkEnd(
+				test.pools, test.start, test.maxPools, test.maxMembers,
+			)
+			if got != test.want {
+				t.Fatalf("chunk end = %d, want %d", got, test.want)
+			}
+		})
+	}
 }

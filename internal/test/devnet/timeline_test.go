@@ -48,6 +48,7 @@ func canonicalTestConfig() *DevNetConfig {
 }
 
 func TestStabilityWindowsDerivedFromSecurityParam(t *testing.T) {
+	t.Parallel()
 	cfg := acceleratedTestConfig()
 	// 4k/f and 3k/f, the windows cardano-node derives from k and f.
 	require.Equal(t, uint64(100), cfg.NonceStabilityWindowSlots())
@@ -56,6 +57,7 @@ func TestStabilityWindowsDerivedFromSecurityParam(t *testing.T) {
 }
 
 func TestValidateRejectsStabilityWindowOverrunningEpoch(t *testing.T) {
+	t.Parallel()
 	cfg := acceleratedTestConfig()
 	require.NoError(t, cfg.Validate())
 
@@ -82,6 +84,7 @@ func TestValidateRejectsStabilityWindowOverrunningEpoch(t *testing.T) {
 }
 
 func TestValidateRejectsDegenerateParameters(t *testing.T) {
+	t.Parallel()
 	for name, mutate := range map[string]func(*DevNetConfig){
 		"zero pools":     func(c *DevNetConfig) { c.PoolCount = 0 },
 		"zero magic":     func(c *DevNetConfig) { c.NetworkMagic = 0 },
@@ -93,6 +96,7 @@ func TestValidateRejectsDegenerateParameters(t *testing.T) {
 		"negative coeff": func(c *DevNetConfig) { c.ActiveSlotsCoeff = -0.1 },
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			cfg := acceleratedTestConfig()
 			mutate(cfg)
 			require.Error(t, cfg.Validate())
@@ -101,6 +105,7 @@ func TestValidateRejectsDegenerateParameters(t *testing.T) {
 }
 
 func TestNextEpochBoundary(t *testing.T) {
+	t.Parallel()
 	cfg := acceleratedTestConfig() // epochLength 120
 
 	// From inside epoch 0 the next boundary is the start of epoch 1.
@@ -115,6 +120,7 @@ func TestNextEpochBoundary(t *testing.T) {
 }
 
 func TestScenarioPlanPhasesAreOrderedAndBounded(t *testing.T) {
+	t.Parallel()
 	plan, err := NewScenarioPlan(acceleratedTestConfig())
 	require.NoError(t, err)
 
@@ -147,6 +153,7 @@ func TestScenarioPlanPhasesAreOrderedAndBounded(t *testing.T) {
 // canonical ones do not, so nobody can quietly point the fast scenario at
 // the soak configuration.
 func TestAcceleratedPlanFitsReferenceBudgetAndCanonicalDoesNot(t *testing.T) {
+	t.Parallel()
 	fast, err := NewScenarioPlan(acceleratedTestConfig())
 	require.NoError(t, err)
 	require.LessOrEqual(t, fast.Total(), ReferenceRunnerBudget,
@@ -160,22 +167,11 @@ func TestAcceleratedPlanFitsReferenceBudgetAndCanonicalDoesNot(t *testing.T) {
 			"stays available for soak and canary runs")
 }
 
-func TestScenarioPlanPhaseLookup(t *testing.T) {
-	plan, err := NewScenarioPlan(acceleratedTestConfig())
-	require.NoError(t, err)
-
-	epoch, ok := plan.Phase(PhaseEpochTransition)
-	require.True(t, ok)
-	require.Equal(t, PhaseEpochTransition, epoch.Name)
-
-	_, ok = plan.Phase("no-such-phase")
-	require.False(t, ok)
-}
-
 // A stopped producer must be brought back well inside the k-block window;
 // holding it down longer risks a recovery the security parameter cannot
 // cover, which would make the scenario flaky rather than diagnostic.
 func TestInterruptionHoldStaysInsideSecurityWindow(t *testing.T) {
+	t.Parallel()
 	cfg := acceleratedTestConfig()
 	plan, err := NewScenarioPlan(cfg)
 	require.NoError(t, err)
@@ -189,6 +185,7 @@ func TestInterruptionHoldStaysInsideSecurityWindow(t *testing.T) {
 }
 
 func TestNewScenarioPlanRejectsInvalidConfig(t *testing.T) {
+	t.Parallel()
 	cfg := acceleratedTestConfig()
 	cfg.EpochLength = 10 // far below both stability windows
 	_, err := NewScenarioPlan(cfg)
@@ -196,6 +193,7 @@ func TestNewScenarioPlanRejectsInvalidConfig(t *testing.T) {
 }
 
 func TestOutageBlocksStayInsideSecurityParam(t *testing.T) {
+	t.Parallel()
 	cfg := acceleratedTestConfig()
 	plan, err := NewScenarioPlan(cfg)
 	require.NoError(t, err)

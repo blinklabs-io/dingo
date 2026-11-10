@@ -31,6 +31,7 @@ import (
 )
 
 func TestHeaderAlternativeBound(t *testing.T) {
+	t.Parallel()
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 	_, events := bus.Subscribe(ForkDetectedEventType)
@@ -123,6 +124,7 @@ func TestHeaderAlternativeBound(t *testing.T) {
 }
 
 func TestUpdateClientRollbackRefreshesActivityAndOwnsHashes(t *testing.T) {
+	t.Parallel()
 	connID := connection.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 3001},

@@ -855,14 +855,23 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 		return
 	}
 	if result.CoversScope(ScopeAccount) {
-		var accountMismatches []CheckMismatch
+		var accountMismatches, aggregateMismatches []CheckMismatch
 		for _, mismatch := range result.Mismatches {
 			if mismatch.Scope == ScopeAccount {
 				accountMismatches = append(accountMismatches, mismatch)
+			} else {
+				aggregateMismatches = append(aggregateMismatches, mismatch)
 			}
 		}
 		// The merged verdict can hide an account ERROR under an aggregate FAIL.
 		o.scheduleErrorRetry(epoch, true, DetermineStatus(accountMismatches))
+		// This check also rewrites the aggregate row. An aggregate ERROR it
+		// computed from state older than the aggregate queue's own pass would
+		// otherwise stay stored with no queue left to retry it, so hand it
+		// back to the aggregate queue.
+		if DetermineStatus(aggregateMismatches) == StatusError {
+			o.scheduleErrorRetry(epoch, false, StatusError)
+		}
 	}
 	o.emitResult(result)
 	if err := o.cache.PruneAccountCoverage(o.cfg.Network, epoch); err != nil {
@@ -975,6 +984,12 @@ func (o *Observer) emitResult(result *EpochCompareResult) {
 // one epoch can never delay this fast fetch — and therefore the fast
 // pool/aggregate check that follows it — for any later epoch.
 //
+// It also caches the /tx_info rows of the epoch's transaction sample, under
+// the same per-epoch singleflight. Those rows cannot be left to one queue:
+// CheckEpoch compares them on both, and an account-queue check owns the
+// aggregate scope of its commit too, so a queue that ran ahead of the fetch
+// would record each sampled transaction as missing from Koios.
+//
 // Both queues call this, since the account queue must not assume the
 // aggregate queue has already reached the epoch, so it is gated per epoch
 // with singleflight. The cache-presence gates below (fetchPoolsIfNeeded's
@@ -1001,7 +1016,10 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 			if err := o.fetchPoolsIfNeeded(ctx, epoch); err != nil {
 				return nil, err
 			}
-			return nil, o.fetchParamsIfNeeded(ctx, epoch)
+			if err := o.fetchParamsIfNeeded(ctx, epoch); err != nil {
+				return nil, err
+			}
+			return nil, o.fetchTransactionsIfNeeded(ctx, epoch)
 		},
 	)
 	return err

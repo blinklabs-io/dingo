@@ -837,13 +837,16 @@ func (c *Cache) GetAllPoolsForEpoch(
 // reading one back would report a phase-2-invalid transaction as having
 // applied its body -- the bug the new fields exist to fix. They are
 // re-fetched instead.
-const koiosTxInfoPayloadVersion = 2
+//
+// Version 3 added ReferenceInputs, so version 2 rows would read back as a
+// transaction that references nothing.
+const koiosTxInfoPayloadVersion = 3
 
 // txInfoLookupChunk bounds how many hashes go into one
 // "SELECT ... WHERE tx_hash IN (?, ?, ...)" so a caller that hands GetTxInfos
 // an arbitrarily long hash list never trips SQLite's bound-parameter limit
-// (999 by default). Callers in practice ask in KoiosTxInfoBatchSize-sized
-// chunks, well under this.
+// (999 by default). Callers in practice ask in chunks of a KoiosClient's
+// TxInfoBatchSize, at most koiosPageSize-1.
 const txInfoLookupChunk = 500
 
 // GetTxInfos returns every cached /tx_info item among txHashes, keyed by

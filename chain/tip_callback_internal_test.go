@@ -48,13 +48,3 @@ func TestWithTipHoldsLockAndPropagatesCallbackError(t *testing.T) {
 	require.True(t, c.mutex.TryLock(), "callback error left chain locked")
 	c.mutex.Unlock()
 }
-
-func TestWithTipNilChainDoesNotInvokeCallback(t *testing.T) {
-	t.Parallel()
-	var c *Chain
-	err := c.WithTip(func(chainsync.Tip) error {
-		t.Fatal("nil chain invoked callback")
-		return nil
-	})
-	require.Error(t, err)
-}

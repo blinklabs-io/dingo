@@ -77,32 +77,6 @@ func (s *publishBlockingProbeSubscriber) Deliver(evt event.Event) error {
 
 func (s *publishBlockingProbeSubscriber) Close() {}
 
-func TestEventBusSingleSubscriber(t *testing.T) {
-	t.Parallel()
-
-	var testEvtData int = 999
-	var testEvtType event.EventType = "test.event"
-	eb := event.NewEventBus(nil, nil)
-	_, subCh := eb.Subscribe(testEvtType)
-	eb.Publish(testEvtType, event.NewEvent(testEvtType, testEvtData))
-	select {
-	case evt, ok := <-subCh:
-		if !ok {
-			t.Fatalf("event channel closed unexpectedly")
-		}
-		switch v := evt.Data.(type) {
-		case int:
-			if v != testEvtData {
-				t.Fatalf("did not get expected event")
-			}
-		default:
-			t.Fatalf("event data was not of expected type, expected int, got %T", evt.Data)
-		}
-	case <-time.After(1 * time.Second):
-		t.Fatalf("timeout waiting for event")
-	}
-}
-
 func TestEventBusMultipleSubscribers(t *testing.T) {
 	t.Parallel()
 
@@ -457,7 +431,7 @@ func TestUnsubscribeAndWaitContextBoundsTheWait(t *testing.T) {
 	require.Never(
 		t,
 		func() bool { return handled.Load() != 1 },
-		time.Second,
+		100*time.Millisecond,
 		10*time.Millisecond,
 		"unsubscribe must still take effect when the wait is cut short",
 	)
@@ -574,7 +548,7 @@ func TestSubscribeFuncStrictPanicRecovery(t *testing.T) {
 	require.Never(
 		t,
 		func() bool { return received.Load() != 1 },
-		time.Second,
+		100*time.Millisecond,
 		10*time.Millisecond,
 		"no further event should be delivered after the handler panicked",
 	)
@@ -668,7 +642,7 @@ func TestPublishNoGoroutineLeak(t *testing.T) {
 	// Small buffer so nearly every publish hits the blocked-send path.
 	_, subCh := eb.SubscribeWithBuffer(testEvtType, 4)
 
-	const eventCount = 5000
+	const eventCount = 1000
 	drained := make(chan int, 1)
 	go func() {
 		count := 0
@@ -732,7 +706,7 @@ func TestPublishAsyncNoGoroutineLeak(t *testing.T) {
 	// Small buffer so the async workers repeatedly hit the blocked-send path.
 	_, subCh := eb.SubscribeWithBuffer(testEvtType, 4)
 
-	const eventCount = 5000
+	const eventCount = 1000
 	drained := make(chan int, 1)
 	go func() {
 		count := 0

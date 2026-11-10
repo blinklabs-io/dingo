@@ -159,10 +159,8 @@ func (h *externalIngestHarness) shutdown(t testing.TB) {
 // without Start's reload of epoch and tip state from the empty store.
 func (h *externalIngestHarness) startLiveLoop(t *testing.T) {
 	t.Helper()
-	// A node that has not latched reachedTip holds each under-full batch for
-	// up to two seconds waiting for more blocks (gatherCoalesceMaxGapAttempts),
-	// which would leave these tests nothing under their five second waits on
-	// a slow runner. These tests drive a live node, so latch it.
+	// These fixtures model a live node at tip, so under-full batches should
+	// not wait for catch-up coalescing (gatherCoalesceMaxGapAttempts).
 	h.ls.reachedTip.Store(true)
 	ctx, cancel := context.WithCancel(t.Context())
 	h.ls.processBlocksCancel = cancel
@@ -615,7 +613,7 @@ func TestPauseChainIngest(t *testing.T) {
 	// Pausing again while paused does not wait on itself.
 	resumeAgain := h.ls.PauseChainIngest()
 	require.NoError(t, h.cm.PrimaryChain().AddBlocks(t.Context(), blocks))
-	testutil.RequireReceive(t, waiting, 5*time.Second,
+	testutil.RequireReceive(t, waiting, testutil.AsyncWait,
 		"the live loop never reached the paused gate")
 	require.Equal(t, ochainsync.Tip{}, h.ls.Tip(),
 		"a block was applied while chain ingest was paused")
@@ -624,9 +622,9 @@ func TestPauseChainIngest(t *testing.T) {
 	resume()
 	resume() // idempotent
 	last := blockPoint(blocks[len(blocks)-1])
-	require.Eventually(t, func() bool {
+	testutil.WaitForCondition(t, func() bool {
 		return pointMatches(h.ls.Tip().Point, last)
-	}, 5*time.Second, 10*time.Millisecond)
+	}, testutil.AsyncWait, "live fixture reaches its committed tip")
 }
 
 // TestPauseChainIngestResumesFromExternalTip applies a trusted batch while the
@@ -652,9 +650,9 @@ func TestPauseChainIngestResumesFromExternalTip(t *testing.T) {
 		t.Context(), blocks[split:],
 	))
 	last := blockPoint(blocks[len(blocks)-1])
-	require.Eventually(t, func() bool {
+	testutil.WaitForCondition(t, func() bool {
 		return pointMatches(h.ls.Tip().Point, last)
-	}, 5*time.Second, 10*time.Millisecond)
+	}, testutil.AsyncWait, "live fixture reaches its committed tip")
 
 	reference := newExternalIngestHarness(t, false)
 	_, err = reference.applyPaused(t, ocommon.Point{}, blocks[:split])
@@ -1012,16 +1010,16 @@ func TestApplyTrustedBatchCrashRestart(t *testing.T) {
 		require.NoError(t, clean.cm.PrimaryChain().AddBlocks(
 			t.Context(), second,
 		))
-		require.Eventually(t, func() bool {
+		testutil.WaitForCondition(t, func() bool {
 			return pointMatches(clean.ls.Tip().Point, lastTip)
-		}, 5*time.Second, 10*time.Millisecond)
+		}, testutil.AsyncWait, "live fixture reaches its committed tip")
 
 		h := newExternalIngestHarnessAt(t, false, crashed(t))
 		require.Equal(t, firstTip, h.ls.Tip().Point)
 		h.startLiveLoop(t)
-		require.Eventually(t, func() bool {
+		testutil.WaitForCondition(t, func() bool {
 			return pointMatches(h.ls.Tip().Point, lastTip)
-		}, 5*time.Second, 10*time.Millisecond)
+		}, testutil.AsyncWait, "live fixture reaches its committed tip")
 		require.Equal(t, liveUtxoKeys(t, clean.db), liveUtxoKeys(t, h.db),
 			"duplicate or missing UTxOs after restart")
 		require.Equal(t,
@@ -1289,7 +1287,7 @@ func TestDrainTrustedPruneWaitsOutAnotherRun(t *testing.T) {
 	testutil.RequireNoReceive(t, done, 300*time.Millisecond,
 		"the drain gave up while another cleanup run held the connection")
 	h.ls.cleanupConsumedUtxosRunning.Store(false)
-	require.NoError(t, testutil.RequireReceive(t, done, 5*time.Second,
+	require.NoError(t, testutil.RequireReceive(t, done, testutil.AsyncWait,
 		"the drain did not finish once the other run ended"))
 	require.Zero(t, spentUtxoRowCount(t, h.db),
 		"the drain left spent rows at or below the trusted tip")
@@ -1442,9 +1440,9 @@ func TestApplyTrustedBatchPruneStopsAtTrustedTip(t *testing.T) {
 	h.startLiveLoop(t)
 	require.NoError(t, h.cm.PrimaryChain().AddBlocks(t.Context(), blocks[4:]))
 	last := blockPoint(blocks[len(blocks)-1])
-	require.Eventually(t, func() bool {
+	testutil.WaitForCondition(t, func() bool {
 		return pointMatches(h.ls.Tip().Point, last)
-	}, 5*time.Second, 10*time.Millisecond)
+	}, testutil.AsyncWait, "live fixture reaches its committed tip")
 	require.Greater(t, spentUtxoRowCount(t, h.db), owed,
 		"the live blocks must spend a committed output")
 	liveSpent := spentUtxoRowCount(t, h.db) - owed
@@ -1456,4 +1454,19 @@ func TestApplyTrustedBatchPruneStopsAtTrustedTip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, trusted.Slot, floor,
 		"the owed cleanup raised the prune floor above the trusted tip")
+}
+
+// A cancelled context makes the chain report every block absent. Storing
+// must surface the cancellation instead of treating the batch as new blocks.
+func TestStoreTrustedBatchBlocksCancelled(t *testing.T) {
+	t.Parallel()
+
+	h := newExternalIngestHarness(t, false)
+	blocks, _ := externalIngestBlocks(t, 0)
+	require.NoError(t, h.cm.PrimaryChain().AddBlocks(t.Context(), blocks))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := h.ls.storeTrustedBatchBlocks(ctx, ocommon.Point{}, blocks)
+	require.ErrorIs(t, err, context.Canceled)
 }

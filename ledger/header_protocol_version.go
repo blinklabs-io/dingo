@@ -70,6 +70,20 @@ func (e *HeaderProtocolVersionTooHighError) Error() string {
 	)
 }
 
+// UnsupportedHeaderProtocolVersionError is returned when a block header's
+// protocol major version is newer than the eras enabled by this node.
+type UnsupportedHeaderProtocolVersionError struct {
+	Supplied uint
+	Maximum  uint
+}
+
+func (e *UnsupportedHeaderProtocolVersionError) Error() string {
+	return fmt.Sprintf(
+		"header protocol major version %d exceeds node maximum %d",
+		e.Supplied, e.Maximum,
+	)
+}
+
 // HeaderProtocolMajor extracts the protocol major version stored in a
 // block header. Returns (0, false) for Byron-era headers, which use a
 // different consensus mechanism (PBFT) and do not carry a Praos-style
@@ -226,11 +240,11 @@ func (ls *LedgerState) isMainnet() (bool, error) {
 }
 
 // validateBlockHeaderProtocolVersion is the LedgerState-bound entry
-// point for ValidateHeaderProtocolVersion. It pulls the current
-// protocol major version from pparams and the network identity from
-// the Shelley genesis, then delegates the BBODY-rule check. If the
-// network cannot be identified, returns the underlying error so the
-// block is rejected rather than validated against a guessed network.
+// point for header protocol-version checks. It first rejects versions newer
+// than the eras enabled by this node on every network, then delegates the
+// network-specific BBODY rule to ValidateHeaderProtocolVersion. If the network
+// cannot be identified, it returns the underlying error so the block is
+// rejected rather than validated against a guessed network.
 //
 // A header that carries no protocol major version has nothing to compare, so
 // it returns before reading pparams. That is Byron, which has no ProtVer field
@@ -262,6 +276,9 @@ func (ls *LedgerState) validateBlockHeaderProtocolVersion(
 	header lcommon.BlockHeader,
 	pparams lcommon.ProtocolParameters,
 ) error {
+	if err := ls.validateSupportedHeaderProtocolVersion(header); err != nil {
+		return err
+	}
 	if _, ok := HeaderProtocolMajor(header); !ok {
 		return nil
 	}
@@ -278,4 +295,24 @@ func (ls *LedgerState) validateBlockHeaderProtocolVersion(
 		)
 	}
 	return ValidateHeaderProtocolVersion(header, pv.Major, mainnet)
+}
+
+// validateSupportedHeaderProtocolVersion rejects a header newer than the eras
+// enabled by this node without applying the network-specific BBODY rule.
+func (ls *LedgerState) validateSupportedHeaderProtocolVersion(
+	header lcommon.BlockHeader,
+) error {
+	bhMajor, ok := HeaderProtocolMajor(header)
+	if !ok {
+		return nil
+	}
+	activeEras := ls.eraList()
+	maxMajor := activeEras[len(activeEras)-1].MaxMajorVersion
+	if bhMajor > maxMajor {
+		return &UnsupportedHeaderProtocolVersionError{
+			Supplied: bhMajor,
+			Maximum:  maxMajor,
+		}
+	}
+	return nil
 }

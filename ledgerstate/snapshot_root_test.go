@@ -15,6 +15,7 @@
 package ledgerstate
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 )
 
@@ -830,6 +832,147 @@ func TestParseSnapshotBytesParsesWhatTheCallerHolds(t *testing.T) {
 	}
 	if _, err := ParseSnapshotBytes(nil); err == nil {
 		t.Fatal("expected empty input to be refused")
+	}
+}
+
+func TestSnapshotFileReadersRejectOversizedState(t *testing.T) {
+	// Not t.Parallel: this lowers the package-wide byte-limit test seam.
+	oldLimit := ledgerStateSnapshotByteLimit
+	ledgerStateSnapshotByteLimit = 4
+	defer func() { ledgerStateSnapshotByteLimit = oldLimit }()
+
+	path := filepath.Join(t.TempDir(), "state")
+	if err := os.WriteFile(path, []byte("12345"), 0o600); err != nil {
+		t.Fatalf("writing state file: %s", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		read func() error
+	}{
+		{
+			name: "read open file",
+			read: func() error {
+				file, err := os.Open(path)
+				if err != nil {
+					return err
+				}
+				defer file.Close()
+				_, err = ReadSnapshotFile(file)
+				return err
+			},
+		},
+		{
+			name: "parse open file",
+			read: func() error {
+				file, err := os.Open(path)
+				if err != nil {
+					return err
+				}
+				defer file.Close()
+				_, err = ParseSnapshotFile(file)
+				return err
+			},
+		},
+		{
+			name: "parse held bytes",
+			read: func() error {
+				_, err := ParseSnapshotBytes([]byte("12345"))
+				return err
+			},
+		},
+		{
+			name: "parse path",
+			read: func() error {
+				_, err := ParseSnapshot(path)
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.read(); !errors.Is(
+				err,
+				ErrLedgerStateSnapshotTooLarge,
+			) {
+				t.Fatalf("expected size-limit error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestReadSnapshotFileStartsAtBeginning(t *testing.T) {
+	t.Parallel()
+
+	want := []byte("ledger state")
+	path := filepath.Join(t.TempDir(), "state")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatalf("writing state file: %s", err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("opening state file: %s", err)
+	}
+	defer file.Close()
+	if _, err := file.Seek(3, io.SeekStart); err != nil {
+		t.Fatalf("advancing state file: %s", err)
+	}
+
+	got, err := ReadSnapshotFile(file)
+	if err != nil {
+		t.Fatalf("reading state file: %s", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestReadSnapshotFileRetainsOnlyTheAcceptedBytes(t *testing.T) {
+	t.Parallel()
+
+	const limit = int64(8192)
+	for _, size := range []int64{4095, 4096, limit - 1, limit} {
+		t.Run(strconv.FormatInt(size, 10), func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "state")
+			if err := os.WriteFile(path, make([]byte, size), 0o600); err != nil {
+				t.Fatalf("writing state file: %s", err)
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatalf("opening state file: %s", err)
+			}
+			defer file.Close()
+
+			data, err := readSnapshotFile(file, limit)
+			if err != nil {
+				t.Fatalf("reading state file: %s", err)
+			}
+			if len(data) != int(size) || cap(data) != int(size) {
+				t.Fatalf(
+					"buffer len/cap = %d/%d, want %d/%d",
+					len(data), cap(data), size, size,
+				)
+			}
+		})
+	}
+}
+
+func TestReadSnapshotFileRejectsGrowthAfterStat(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state")
+	if err := os.WriteFile(path, []byte("12345"), 0o600); err != nil {
+		t.Fatalf("writing state file: %s", err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("opening state file: %s", err)
+	}
+	defer file.Close()
+
+	_, err = readSnapshotFileAtSize(file, 4)
+	if !errors.Is(err, errLedgerStateSnapshotChanged) {
+		t.Fatalf("expected changed-file error, got %v", err)
 	}
 }
 

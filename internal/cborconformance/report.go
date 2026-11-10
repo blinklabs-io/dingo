@@ -27,8 +27,8 @@ const (
 	maxSampleBytes   = int64(16 << 20)
 
 	// Update this inventory together with the dataset revision in both conformance workflows.
-	primaryConwayCorpusRevision  = "95e9e7c296ca1b641c8d99af2ab7c286a90caebf"
-	primaryConwayCorpusInventory = "37337a6065d7137bd71eeb0e5da5e51fb364f2beb82546a8cd33b6452bfe1bb7"
+	primaryConwayCorpusRevision  = "bfb004144bfdfab2ddf0cf48fd7d5731f072da52"
+	primaryConwayCorpusInventory = "f606c4d5c2b77d3d0982c296e9f40b39c480fd02adde20ab3ed24741a5467682"
 
 	decodeFailed        = "decoding failed"
 	decodeSucceeded     = "decoding succeeded but the sample must be rejected"
@@ -582,11 +582,6 @@ func loadSampleWaivers(
 		sampleRules[file.name] = file.rule
 	}
 	waivers := append([]corpusWaiver(nil), metadata.Waivers...)
-	for _, divergence := range metadata.Divergences {
-		if divergence.Kind == "verified-by-parent" {
-			waivers = append(waivers, divergence)
-		}
-	}
 	waived := make(map[string]WaivedSample)
 	for _, waiver := range waivers {
 		if len(waiver.Samples) == 0 {

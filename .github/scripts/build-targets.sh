@@ -71,8 +71,18 @@ for target in $BUILD_TARGETS; do
   done
 
   echo "::group::build ${goos}/${goarch}"
-  GOOS="$goos" GOARCH="$goarch" make build
+  # set -e would exit on a failed build before the disk report, and a failed
+  # build is exactly when the report is needed, so capture the status.
+  build_status=0
+  GOOS="$goos" GOARCH="$goarch" make build || build_status=$?
   echo "::endgroup::"
+  # Each target adds a GOOS/GOARCH-specific slice of the build cache; the
+  # trace shows which target a disk-full failure belongs to. Diagnostic only:
+  # under pipefail a df failure must not replace the build's exit status.
+  df -h . | tail -n 1 || true
+  if [ "$build_status" -ne 0 ]; then
+    exit "$build_status"
+  fi
 
   for name in "${binaries[@]}"; do
     if [ ! -f "${name}${suffix}" ]; then

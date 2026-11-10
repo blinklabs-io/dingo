@@ -40,7 +40,8 @@ func newSubGovLedger(t *testing.T) (*LedgerState, *database.Database) {
 	t.Helper()
 	db := newTestDB(t)
 	ls := &LedgerState{
-		db: db,
+		db:         db,
+		activeEras: eras.ErasWithDijkstra,
 		currentPParams: &dijkstra.DijkstraProtocolParameters{
 			ConwayProtocolParameters: conway.ConwayProtocolParameters{
 				GovActionValidityPeriod: 20,

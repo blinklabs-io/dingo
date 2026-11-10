@@ -173,6 +173,11 @@ var flagSpecs = []flagSpec{
 		"tracing-sample-ratio",
 		"fraction of new traces sampled, from 0 to 1",
 	),
+	stringSliceFlag(
+		"TracingAlwaysSamplePools",
+		"tracing-always-sample-pools",
+		"pool IDs (bech32 or hex) whose blocks are always traced",
+	),
 	boolFlag(
 		"TracingStdout",
 		"tracing-stdout",
@@ -461,6 +466,11 @@ var flagSpecs = []flagSpec{
 		"longest message expiry accepted, in seconds",
 	),
 	uintFlag(
+		"DMQ.MinPoolMessageInterval",
+		"dmq-min-pool-message-interval",
+		"shortest time, in seconds, between one pool's messages announced to a peer; 0 disables",
+	),
+	uintFlag(
 		"DMQ.MaxMempoolSize",
 		"dmq-max-mempool-size",
 		"DMQ message pool size limit, in megabytes",
@@ -712,7 +722,16 @@ var flagSpecs = []flagSpec{
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
 	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections"),
-	intFlag("MaxTrustedLocalNtCConns", "max-trusted-local-ntc-conns", "max trusted local node-to-client connections"),
+	intFlag(
+		"MaxTrustedLocalNtCConns",
+		"max-trusted-local-ntc-conns",
+		"max trusted local node-to-client connections",
+	),
+	durationFlag(
+		"TrustedNtCIdleTimeout",
+		"trusted-ntc-idle-timeout",
+		"close idle trusted local node-to-client connections after this duration (0 = no limit)",
+	),
 	intFlag(
 		"MaxNtCConnectionsPerIP",
 		"max-ntc-connections-per-ip",
@@ -969,6 +988,8 @@ var flagSpecs = []flagSpec{
 		"planner-stats-refresh-enabled",
 		"keep SQLite planner statistics current with PRAGMA optimize at startup and after each epoch rollover",
 	),
+
+	boolFlag("CIP0203Enabled", "cip-0203-enabled", "include the build version in forged block headers (CIP-0203)"),
 
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)
 	uintFlag(

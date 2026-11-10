@@ -66,7 +66,10 @@ func RunCloudBlockNumberBoundWork(
 	// Budget: one initial seek, 64 bisection probes, and five requests
 	// of headroom for bounded changes to the lookup algorithm.
 	const maxLists = 70
-	for _, n := range []uint64{200, 75_000} {
+	// Listing the whole index would list every seeded key; a bounded search
+	// lists a few pages regardless of archive size.
+	const maxListed = 10_000
+	for _, n := range []uint64{200, 20_000} {
 		seedTo(n)
 		lists, listed := fc.Requests("LIST"), fc.Listed()
 		bound, err := database.ResolveBlockNumberBound(context.Background(), db)
@@ -85,7 +88,7 @@ func RunCloudBlockNumberBoundWork(
 			n,
 			lists,
 		)
-		require.LessOrEqualf(t, listed, maxLists*1000,
+		require.LessOrEqualf(t, listed, maxListed,
 			"%d indexed blocks: bound resolution listed %d keys", n, listed)
 	}
 }

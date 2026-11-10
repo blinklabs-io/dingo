@@ -107,6 +107,11 @@ var releasedMigrationChecksums = map[string]map[int]string{
 		50: "d0b1eba1802eab079e7e217d82bfb8162047e011f44ef0127c1b84ad49114c3d",
 		51: "3f14e192687d6e6b5e8fe6ea25f5694beecba82b8d3c3b62266699d079a3767a",
 		52: "9a2461e03725ff43af3c45aa864e68cb2e6bec4d8c6fdbd4ebb11f45bd1b71bc",
+		53: "d0e428346625de964b7bb7fc428f1f270685e09199d1f5a6b7be70fcdec9cc4b",
+		54: "072e58e72f0ae0c235587e410c8afeb8dd964383ab9c2d5cce214e1a53ffce22",
+		55: "dfc4faf1ebbcda1bfc3e32798cfbd3349644efc1a2877c89d6d40db9ade2e7c2",
+		56: "9cec83aefa2af335308cc53fc11fa981120c596ac1fb242bce4141eab729b776",
+		57: "0870d02c56a31144118ba8ba447ec01efc0167648d89c7a87dcd1389c5100eb1",
 	},
 	"postgres": {
 		1:  "21d634f2dd7b1675438cded1804a9ff2808dda0f1d10517a93f2a0422a80e1b9",
@@ -161,6 +166,11 @@ var releasedMigrationChecksums = map[string]map[int]string{
 		50: "d227a3782e5561b860645e97c92612d4e9202993b81cf3b7bb9c36e8715bc4cd",
 		51: "e28f6543192c1c066a075d21431ba99f1a71dfdd14bd0320c5cfabdc78885022",
 		52: "3254469e7c4b53713bc365175c8ce0484fc790c9b20b57695aee105b517a4fc1",
+		53: "101643e2d344248f5d7be1cfb7b9fdba2a99e9f1f5a0e893e44b252b7f85728a",
+		54: "7e50c355b873d6ce6807a72068f509345d6bd3a58ade1195f9a866325f0eef24",
+		55: "fe14bb1d85ac39ef1170093728eaa6bf51958b5e85943bf8ac5f2f127d6d0b8a",
+		56: "329924c927c6bde73d4ea4b697e2b12e6297de5046f2ea4d6d951655f8c4b51d",
+		57: "1b658babb9fd35de83a24485c09355cb0adda449a7514a4865985b417c9c3889",
 	},
 	"mysql": {
 		1:  "c7fcf43f66c587e3ce22212f7bc6c5464b270394fff2d80bf064471dc424370f",
@@ -215,6 +225,11 @@ var releasedMigrationChecksums = map[string]map[int]string{
 		50: "86e3a122a76ecd5faa524bc96dc1f7fd2d3532e9244d6b3dca9024c331f79f9e",
 		51: "69d8f70a2e96005efd308a25f8c570afe15e446c399ae906263d47ca9ca3a9a1",
 		52: "baf7500dfe50267e63e88e25e52800299ab7c69e37d139df64c8f62ff6f89558",
+		53: "38a9490bb43b66a5226b4286f22e326784d9ad169cdd4ab9b84d4e3e29319aed",
+		54: "778d6129ecdbf5abf1a818e555daa92a85665a8076bfbb9b5fbdc360cd731920",
+		55: "12c666180b0cbfbe5d342be215d11418c78924f1dbb7def94d34a188a4161460",
+		56: "6400d2382b548bfdd3f511de843e9aa100ee44856a948764a09df54afed9e0a4",
+		57: "d931da031402052189abd52252f340aff54a906b3426b205574ab10bc4274d90",
 	},
 }
 
@@ -228,7 +243,7 @@ func TestReleasedMigrationChecksumsAreStable(t *testing.T) {
 		t.Run(dialect, func(t *testing.T) {
 			t.Parallel()
 
-			registry, err := registryForDialect(dialect)
+			registry, err := cachedRegistryForDialect(dialect)
 			require.NoError(t, err)
 			pinned := releasedMigrationChecksums[dialect]
 			require.NotEmpty(t, pinned, "no pinned checksums for %s", dialect)

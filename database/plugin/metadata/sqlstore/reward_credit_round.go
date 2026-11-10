@@ -239,10 +239,10 @@ func (s *Store) pendingCreditsForCredentials(
 SELECT rao.credential_tag, rao.staking_key,
        SUM(CAST(rao.amount AS `+s.pendingCreditCastType()+`))
 FROM reward_account_output rao
-WHERE rao.spendable = TRUE AND rao.guarded = FALSE AND NOT rao.folded
-  AND EXISTS (
-      SELECT 1 FROM reward_credit_round rcr
-      WHERE rcr.snapshot_epoch = rao.epoch AND rcr.boundary_slot <= ?
+WHERE rao.spendable AND NOT rao.guarded AND NOT rao.folded
+  AND rao.epoch IN (
+      SELECT rcr.snapshot_epoch FROM reward_credit_round rcr
+      WHERE rcr.boundary_slot <= ?
   )
   AND (`+predicate+`)
 GROUP BY rao.credential_tag, rao.staking_key`), args...)
@@ -272,14 +272,14 @@ GROUP BY rao.credential_tag, rao.staking_key`), args...)
 
 // credentialUnfoldedRewardCreditPredicate selects the rows of a stake
 // credential's credits not yet in account.reward, for a query that looks up
-// one stake credential. Written with NOT folded, the flag tests stop matching
-// the (spendable, guarded, folded, epoch) index as equalities, so SQLite looks
-// the rows up on the credential index instead of walking every unfolded row
-// for each stake credential.
-const credentialUnfoldedRewardCreditPredicate = `spendable = TRUE AND guarded = FALSE AND NOT folded`
+// one stake credential. The flag tests are boolean expressions, not
+// equalities, so they do not match the (spendable, guarded, folded, epoch)
+// index as a prefix and SQLite looks the rows up on the credential index
+// instead of walking every unfolded row for each stake credential.
+const credentialUnfoldedRewardCreditPredicate = `spendable AND NOT guarded AND NOT folded`
 
 // FoldRewardAccountOutputs marks a credential's unfolded credits of the given
-// rounds as added to account.reward, in the transaction that adds them.
+// rounds as included in account.reward, in the transaction establishing it.
 func (s *Store) FoldRewardAccountOutputs(
 	epochs []uint64,
 	credentialTag uint8,
@@ -322,10 +322,7 @@ func (s *Store) FoldPendingRewardAccountOutputs(
 UPDATE reward_account_output SET folded = TRUE
 WHERE credential_tag = ? AND staking_key = ?
   AND `+credentialUnfoldedRewardCreditPredicate+`
-  AND EXISTS (
-      SELECT 1 FROM reward_credit_round rcr
-      WHERE rcr.snapshot_epoch = reward_account_output.epoch
-  )`), credentialTag, stakingKey); err != nil {
+  AND epoch IN (SELECT snapshot_epoch FROM reward_credit_round)`), credentialTag, stakingKey); err != nil {
 			return fmt.Errorf("fold pending reward account outputs: %w", err)
 		}
 		return nil
@@ -361,11 +358,8 @@ func (s *Store) claimUnfoldedRewardCreditsIn(
 SELECT ` + rewardAccountOutputColumns + `
 FROM reward_account_output rao
 WHERE ` + where + `
-  AND rao.spendable = TRUE AND rao.guarded = FALSE AND NOT rao.folded
-  AND EXISTS (
-      SELECT 1 FROM reward_credit_round rcr
-      WHERE rcr.snapshot_epoch = rao.epoch
-  )
+  AND rao.spendable AND NOT rao.guarded AND NOT rao.folded
+  AND rao.epoch IN (SELECT snapshot_epoch FROM reward_credit_round)
 ORDER BY rao.id`
 	if s.dialect.Name() != "sqlite" {
 		query += " FOR UPDATE"
@@ -483,12 +477,22 @@ func scanRewardCreditIDs(rows *sql.Rows) ([]any, error) {
 	return ids, nil
 }
 
-const rollbackUnfoldRewardAccountOutputsSQL = `
-UPDATE reward_account_output SET folded = FALSE
+// rollbackUnfoldRewardAccountOutputsSQL unfolds the outputs of the rounds a
+// rollback undoes, found through the epoch-leading unique index. With current
+// planner statistics SQLite scans the whole table for it, so SQLite is told
+// to use the index.
+func (s *Store) rollbackUnfoldRewardAccountOutputsSQL() string {
+	table := "reward_account_output"
+	if s.dialect.Name() == "sqlite" {
+		table += " INDEXED BY idx_reward_account_output_epoch_pool_cred_type"
+	}
+	return `
+UPDATE ` + table + ` SET folded = FALSE
 WHERE folded = TRUE
   AND epoch IN (
       SELECT snapshot_epoch FROM reward_credit_round WHERE boundary_slot > ?
   )`
+}
 
 // deleteRewardCreditRoundsAfterSlot drops rounds applied at a boundary a
 // rollback undoes, and the fold progress recorded for them.
@@ -504,7 +508,7 @@ func (s *Store) deleteRewardCreditRoundsAfterSlot(
 	// A rollback removes account deltas through the same transaction. Outputs
 	// that survive because their snapshot predates the rollback must be
 	// unfolded before their applied-round marker is removed.
-	if _, err := db.ExecContext(ctx, s.dialect.Rebind(rollbackUnfoldRewardAccountOutputsSQL), sqlSlot); err != nil {
+	if _, err := db.ExecContext(ctx, s.dialect.Rebind(s.rollbackUnfoldRewardAccountOutputsSQL()), sqlSlot); err != nil {
 		return fmt.Errorf("unfold reward account outputs: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, s.dialect.Rebind(
@@ -526,19 +530,85 @@ func (s *Store) pendingCreditCastType() string {
 	}
 }
 
+// pendingRewardCreditTotals returns every credential's pending credit total:
+// the rows pendingRewardCreditSubquery sums, read in one pass and totalled in
+// Go. The subquery is right for a lookup of a few credentials, but a read of
+// every delegator pays it once per row.
+//
+// The key is the credential tag byte followed by the staking key. A credential
+// absent from the map has no pending credit, which is the subquery's
+// COALESCE(..., 0).
+func (s *Store) pendingRewardCreditTotals(
+	ctx context.Context,
+	db queryer,
+) (map[string]uint64, error) {
+	rows, err := db.QueryContext(ctx, s.pendingRewardCreditRowsSQL())
+	if err != nil {
+		return nil, fmt.Errorf("get pending reward credit totals: %w", err)
+	}
+	defer rows.Close()
+	ret := make(map[string]uint64)
+	for rows.Next() {
+		var tag uint8
+		var key []byte
+		var raw string
+		if err := rows.Scan(&tag, &key, &raw); err != nil {
+			return nil, err
+		}
+		amount, err := parseUint64("pending reward credit", raw)
+		if err != nil {
+			return nil, err
+		}
+		mapKey := pendingRewardCreditKey(tag, key)
+		total := ret[mapKey] + amount
+		if total < amount {
+			return nil, errors.New("pending reward credit total overflows")
+		}
+		ret[mapKey] = total
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get pending reward credit totals: %w", err)
+	}
+	return ret, nil
+}
+
+// pendingRewardCreditRowsSQL selects the unfolded credits of the credited
+// rounds. The flag equalities and the epoch IN list are the four columns of
+// idx_reward_account_output_pending_round, so only the credited rounds'
+// unfolded rows are visited, in row-id order, and no credential-keyed index
+// is involved. Totalling in Go avoids a sort for GROUP BY. With current
+// planner statistics SQLite judges the low-cardinality flag columns useless
+// and scans the table, so SQLite is told to use the index.
+func (s *Store) pendingRewardCreditRowsSQL() string {
+	table := "reward_account_output"
+	if s.dialect.Name() == "sqlite" {
+		table += " INDEXED BY idx_reward_account_output_pending_round"
+	}
+	return `
+SELECT credential_tag, staking_key, amount
+FROM ` + table + `
+WHERE spendable = TRUE AND guarded = FALSE AND folded = FALSE
+  AND epoch IN (SELECT snapshot_epoch FROM reward_credit_round)`
+}
+
+func pendingRewardCreditKey(tag uint8, stakingKey []byte) string {
+	return string([]byte{tag}) + string(stakingKey)
+}
+
 // pendingRewardCreditSubquery is a scalar subquery totalling the pending
 // rounds' spendable, unguarded outputs for the credential named by tagCol and
-// keyCol. The indexed round lookup keeps the query's bind count independent
-// of how many rounds remain unfolded.
+// keyCol. It is driven from the credited rounds, each probing
+// idx_reward_account_output_credential_epoch on (credential, epoch), so its
+// cost does not grow with the credential's reward history and its bind count
+// is independent of how many rounds remain unfolded.
 func (s *Store) pendingRewardCreditSubquery(
 	tagCol, keyCol string,
 ) string {
 	return `(SELECT COALESCE(SUM(CAST(prc.amount AS ` + s.pendingCreditCastType() +
-		`)), 0) FROM reward_account_output prc WHERE prc.credential_tag = ` +
+		`)), 0) FROM reward_credit_round rcr JOIN reward_account_output prc` +
+		` ON prc.epoch = rcr.snapshot_epoch WHERE prc.credential_tag = ` +
 		tagCol + ` AND prc.staking_key = ` + keyCol +
-		` AND prc.spendable = TRUE AND prc.guarded = FALSE AND NOT prc.folded` +
-		` AND EXISTS (SELECT 1 FROM reward_credit_round rcr` +
-		` WHERE rcr.snapshot_epoch = prc.epoch))`
+		` AND prc.spendable AND NOT prc.guarded AND NOT prc.folded)`
 }
 
 func scanRewardAccountOutputRows(
@@ -651,11 +721,8 @@ func (s *Store) GetPendingRewardAccountOutputsForCredential(
 SELECT `+rewardAccountOutputColumns+`
 FROM reward_account_output rao
 WHERE rao.credential_tag = ? AND rao.staking_key = ?
-  AND rao.spendable = TRUE AND rao.guarded = FALSE AND NOT rao.folded
-  AND EXISTS (
-      SELECT 1 FROM reward_credit_round rcr
-      WHERE rcr.snapshot_epoch = rao.epoch
-  )
+  AND rao.spendable AND NOT rao.guarded AND NOT rao.folded
+  AND rao.epoch IN (SELECT snapshot_epoch FROM reward_credit_round)
 ORDER BY rao.epoch, rao.pool_key_hash, rao.reward_type`),
 		credentialTag, stakingKey,
 	)

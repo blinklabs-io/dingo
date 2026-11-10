@@ -30,13 +30,14 @@ func TestOpCertCounterEncodingMigrationPreservesLegacyValues(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 48)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 52)
+	require.Len(t, registry, 57)
 	run := func(selected []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -48,7 +49,6 @@ func TestOpCertCounterEncodingMigrationPreservesLegacyValues(t *testing.T) {
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
-	run(registry[:48])
 
 	poolKeyHash := []byte("legacy-opcert-pool-key-hash")
 	_, err = db.ExecContext(ctx, `

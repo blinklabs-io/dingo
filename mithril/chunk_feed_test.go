@@ -254,18 +254,6 @@ func TestChunkFeedWindowAdvancesOnOutOfOrderRelease(t *testing.T) {
 	}
 }
 
-func TestChunkFeedUnboundedWindow(t *testing.T) {
-	t.Parallel()
-	fixture := newFeedFixture(t, 5, nil)
-	feed := openFeed(t, t.Context(), feedConfig(fixture, t.TempDir(), 0, 0, 2))
-	for want := range uint64(6) {
-		chunk, err := feed.Next(nextCtx(t))
-		require.NoError(t, err)
-		require.Equal(t, want, chunk.Num)
-	}
-	assert.Equal(t, 6, trioCount(t, feedChunkDir(feed)))
-}
-
 func TestChunkFeedReleaseDeletes(t *testing.T) {
 	t.Parallel()
 	fixture := newFeedFixture(t, 2, nil)

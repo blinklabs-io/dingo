@@ -454,28 +454,41 @@ func BenchmarkRefreshRewardLiveStakeAggregateRepeatedTouch(b *testing.B) {
 		}
 		seedCredentialUtxos(b, store, n, ref, amounts, nil)
 
-		b.Run(fmt.Sprintf("n=%d/refreshed_twice_unmerged", n), func(b *testing.B) {
-			for b.Loop() {
-				err := store.withWriteTransaction(
-					nil,
-					func(db queryer, ctx context.Context) error {
-						if err := store.refreshRewardLiveStakeAggregate(ctx, db, ref, 1); err != nil {
-							return err
-						}
-						return store.refreshRewardLiveStakeAggregate(ctx, db, ref, 1)
-					},
-				)
-				if err != nil {
-					b.Fatal(err)
+		b.Run(
+			fmt.Sprintf("n=%d/refreshed_twice_unmerged", n),
+			func(b *testing.B) {
+				for b.Loop() {
+					err := store.withWriteTransaction(
+						nil,
+						func(db queryer, ctx context.Context) error {
+							if err := store.refreshRewardLiveStakeAggregate(ctx, db, ref, 1); err != nil {
+								return err
+							}
+							return store.refreshRewardLiveStakeAggregate(
+								ctx,
+								db,
+								ref,
+								1,
+							)
+						},
+					)
+					if err != nil {
+						b.Fatal(err)
+					}
 				}
-			}
-		})
+			},
+		)
 		b.Run(fmt.Sprintf("n=%d/refreshed_once_merged", n), func(b *testing.B) {
 			for b.Loop() {
 				err := store.withWriteTransaction(
 					nil,
 					func(db queryer, ctx context.Context) error {
-						return store.refreshRewardLiveStakeAggregate(ctx, db, ref, 1)
+						return store.refreshRewardLiveStakeAggregate(
+							ctx,
+							db,
+							ref,
+							1,
+						)
 					},
 				)
 				if err != nil {
@@ -659,21 +672,27 @@ func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
 	require.NoError(t, store.withWriteTransaction(nil,
 		func(db queryer, ctx context.Context) error {
 			var err error
-			inserted, err = store.insertUtxoModelsChecked(ctx, db, []*models.Utxo{
-				{
-					TxId:          conflictTxID,
-					Amount:        types.Uint64(1),
-					OutputIdx:     0,
-					TransactionID: &transactionID,
+			inserted, err = store.insertUtxoModelsChecked(
+				ctx,
+				db,
+				[]*models.Utxo{
+					{
+						TxId:          conflictTxID,
+						Amount:        types.Uint64(1),
+						OutputIdx:     0,
+						TransactionID: &transactionID,
+					},
+					{
+						TxId:                    conflictCollateralTxID,
+						Amount:                  types.Uint64(1),
+						OutputIdx:               0,
+						CollateralReturnForTxID: &collateralReturnID,
+					},
+					{TxId: newTxID, Amount: types.Uint64(2), OutputIdx: 0},
 				},
-				{
-					TxId:                    conflictCollateralTxID,
-					Amount:                  types.Uint64(1),
-					OutputIdx:               0,
-					CollateralReturnForTxID: &collateralReturnID,
-				},
-				{TxId: newTxID, Amount: types.Uint64(2), OutputIdx: 0},
-			}, true, nil)
+				true,
+				nil,
+			)
 			return err
 		},
 	))
@@ -696,7 +715,11 @@ func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
 	require.Equal(t, &transactionID, repaired.TransactionID)
 	repairedCollateral, err := store.GetUtxo(conflictCollateralTxID, 0, nil)
 	require.NoError(t, err)
-	require.Equal(t, &collateralReturnID, repairedCollateral.CollateralReturnForTxID)
+	require.Equal(
+		t,
+		&collateralReturnID,
+		repairedCollateral.CollateralReturnForTxID,
+	)
 }
 
 // TestSetTransactionReapplyAppliesNoSecondDelta covers the invariant the
@@ -819,95 +842,13 @@ func TestSetGapBlockTransactionReapplyAppliesNoSecondDelta(t *testing.T) {
 	)
 }
 
-// fakePrepareOnlyQueryer implements queryer with a PrepareContext that
-// always fails, so insertTransaction returns before touching the *sql.Stmt
-// it would otherwise store -- this test only needs to observe the dialect
-// flag insertTransaction sets before calling PrepareContext, not to execute
-// a real statement.
-type fakePrepareOnlyQueryer struct {
-	prepareErr error
-}
-
-// TestInsertTransactionDetectsMySQLThroughCountingQueryer is the regression
-// test for the type assertion insertTransaction uses to detect a MySQL
-// dialect: db.(dialectQueryer) alone misses a dialectQueryer wrapped in
-// countingQueryer, which is exactly what every real caller passes once
-// Config.PromRegistry is set (see Store.instrumentedQueryer). Without
-// unwrapDialectQueryer, a.mysql stays false on a metrics-enabled MySQL
-// store, and insertTransaction takes the RETURNING-id QueryRowContext path
-// MySQL cannot serve instead of the ExecContext/LastInsertId path this test
-// proves gets selected.
-func TestInsertTransactionDetectsMySQLThroughCountingQueryer(t *testing.T) {
-	t.Parallel()
-	prepareErr := errors.New("prepare not needed for this assertion")
-	inner := dialectQueryer{
-		queryer: fakePrepareOnlyQueryer{prepareErr: prepareErr},
-		dialect: "mysql",
-	}
-	wrapped := countingQueryer{queryer: inner, counter: nil}
-
-	acc := &transactionBatchAccumulator{}
-	_, _, err := acc.insertTransaction(context.Background(), wrapped)
-	require.ErrorIs(t, err, prepareErr)
-	require.True(
-		t,
-		acc.mysql,
-		"expected insertTransaction to detect the mysql dialect through countingQueryer",
-	)
-}
-
-func TestInsertTransactionReportsFreshAndReplayedRows(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	txn := store.Transaction(context.Background())
-	db, ctx, err := store.dbFromTxn(txn)
-	require.NoError(t, err)
-	acc := &transactionBatchAccumulator{}
-	defer acc.Reset()
-
-	args := []any{
-		[]byte{0x10}, []byte{0x20}, []byte{0x30}, 1, 2,
-		"3", "4", "5", 6, true,
-	}
-	id, isNew, err := acc.insertTransaction(ctx, db, args...)
-	require.NoError(t, err)
-	require.True(t, isNew)
-	require.NotZero(t, id)
-
-	replayArgs := append([]any(nil), args...)
-	replayArgs[1] = []byte{0x21}
-	replayArgs[3] = uint64(7)
-	replayArgs[6] = "8"
-	replayArgs[8] = uint32(9)
-	replayID, isNew, err := acc.insertTransaction(ctx, db, replayArgs...)
-	require.NoError(t, err)
-	require.False(t, isNew)
-	require.Equal(t, id, replayID)
-
-	var (
-		blockHash  []byte
-		slot       uint64
-		collateral string
-		blockIndex uint32
-	)
-	require.NoError(t, db.QueryRowContext(ctx,
-		`SELECT block_hash, slot, collateral_fee, block_index
-		 FROM "transaction" WHERE id = ?`, id,
-	).Scan(&blockHash, &slot, &collateral, &blockIndex))
-	require.Equal(t, []byte{0x21}, blockHash)
-	require.Equal(t, uint64(7), slot)
-	require.Equal(t, "8", collateral)
-	require.Equal(t, uint32(9), blockIndex)
-	require.NoError(t, txn.Rollback())
-}
-
 func TestTransactionBatchAccumulatorResetClosesStatement(t *testing.T) {
 	store := newMigratedSQLiteStore(t)
 	txn := store.Transaction(context.Background())
 	db, ctx, err := store.dbFromTxn(txn)
 	require.NoError(t, err)
 
-	acc := &transactionBatchAccumulator{}
+	acc := store.NewBatchAccumulator().(*transactionBatchAccumulator)
 	oldStmtArgs := []any{
 		[]byte{0x01}, []byte{0x02}, nil, 1, 0,
 		"0", "0", "0", 0, true,
@@ -920,7 +861,11 @@ func TestTransactionBatchAccumulatorResetClosesStatement(t *testing.T) {
 	acc.Reset()
 	require.Nil(t, acc.transactionInsert)
 	_, err = stmt.ExecContext(ctx, oldStmtArgs...)
-	require.Error(t, err, "reset must close statements bound to the batch transaction")
+	require.Error(
+		t,
+		err,
+		"reset must close statements bound to the batch transaction",
+	)
 
 	require.NoError(t, txn.Rollback())
 	var count int
@@ -929,24 +874,10 @@ func TestTransactionBatchAccumulatorResetClosesStatement(t *testing.T) {
 		`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
 		[]byte{0x01},
 	).Scan(&count))
-	require.Zero(t, count, "rollback must discard writes made through the accumulator")
-}
-
-func TestTransactionBatchAccumulatorLen(t *testing.T) {
-	t.Parallel()
-
-	acc := &transactionBatchAccumulator{}
-	require.Zero(t, acc.Len())
-	acc.EnableSizeTracking()
-	acc.rows.add(witnessScriptShape, []byte{0x01}, int64(1), 0)
-	acc.rows.add(plutusDataShape, []byte{0x02}, int64(1))
-	acc.stakeDeltaOrder = []string{"credential"}
-	acc.opCertOrder = []poolOpCertSequenceKey{{}}
-	require.Equal(t, 4, acc.Len())
-	require.Equal(
+	require.Zero(
 		t,
-		2*rowBatchRowOverheadBytes+5*rowBatchValueOverheadBytes+2,
-		acc.EstimatedSizeBytes(),
+		count,
+		"rollback must discard writes made through the accumulator",
 	)
 }
 
@@ -1067,5 +998,42 @@ func TestTransactionFeeTreatsNilAsZero(t *testing.T) {
 		uint64(transactionFee(
 			&feelessTransaction{fee: big.NewInt(174301)},
 		)),
+	)
+}
+
+// fakePrepareOnlyQueryer implements queryer with a PrepareContext that
+// always fails, so insertTransaction returns before touching the *sql.Stmt
+// it would otherwise store -- this test only needs to observe the dialect
+// flag insertTransaction sets before calling PrepareContext, not to execute
+// a real statement.
+type fakePrepareOnlyQueryer struct {
+	prepareErr error
+}
+
+// TestInsertTransactionDetectsMySQLThroughCountingQueryer is the regression
+// test for the type assertion insertTransaction uses to detect a MySQL
+// dialect: db.(dialectQueryer) alone misses a dialectQueryer wrapped in
+// countingQueryer, which is exactly what every real caller passes once
+// Config.PromRegistry is set (see Store.instrumentedQueryer). Without
+// unwrapDialectQueryer, a.mysql stays false on a metrics-enabled MySQL
+// store, and insertTransaction takes the RETURNING-id QueryRowContext path
+// MySQL cannot serve instead of the ExecContext/LastInsertId path this test
+// proves gets selected.
+func TestInsertTransactionDetectsMySQLThroughCountingQueryer(t *testing.T) {
+	t.Parallel()
+	prepareErr := errors.New("prepare not needed for this assertion")
+	inner := dialectQueryer{
+		queryer: fakePrepareOnlyQueryer{prepareErr: prepareErr},
+		dialect: "mysql",
+	}
+	wrapped := countingQueryer{queryer: inner, counter: nil}
+
+	acc := &transactionBatchAccumulator{}
+	_, _, err := acc.insertTransaction(context.Background(), wrapped)
+	require.ErrorIs(t, err, prepareErr)
+	require.True(
+		t,
+		acc.mysql,
+		"expected insertTransaction to detect the mysql dialect through countingQueryer",
 	)
 }

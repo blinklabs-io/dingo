@@ -48,6 +48,11 @@ concurrency:
 env:
   APPLICATION_NAME: 'dingo'
   RELEASE_TAG: ${{ github.ref_name }}
+  # A comma after a proxy falls back to the next entry only on a 404 or 410,
+  # so a dropped proxy connection fails the download outright. A pipe falls
+  # back on any error; go.sum and the checksum database still verify what a
+  # direct fetch returns.
+  GOPROXY: 'https://proxy.golang.org|direct'
 
 jobs:
   # A tag cannot publish while govulncheck is failing. This was lost once
@@ -225,8 +230,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      CBOR_DATASET_REVISION: '95e9e7c296ca1b641c8d99af2ab7c286a90caebf'
-      NDC_LEDGER_REVISION: 'e02a9e1c7dc15cc6d618c7ffdbd41167a38de2a4'
+      CBOR_DATASET_REVISION: 'bfb004144bfdfab2ddf0cf48fd7d5731f072da52'
+      NDC_LEDGER_REVISION: '01d11b7c1e63dfa1d4b0b39182a9f8ceaf28f3d1'
       UPLC_CORPUS_SHA256: '8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f'
       TURBO_CORPUS_SHA256: '821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576'
     permissions:
@@ -395,12 +400,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1 https://github.com/docker/setup-buildx-action/releases/tag/v4.4.1
       - name: Login to Docker Hub
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0 https://github.com/docker/login-action/releases/tag/v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0 https://github.com/docker/login-action/releases/tag/v4.8.0
         with:
           username: blinklabs
           password: ${{ secrets.DOCKER_PASSWORD }} # uses token
       - name: Login to GHCR
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0 https://github.com/docker/login-action/releases/tag/v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0 https://github.com/docker/login-action/releases/tag/v4.8.0
         with:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -504,12 +509,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1 https://github.com/docker/setup-buildx-action/releases/tag/v4.4.1
       - name: Login to Docker Hub
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0 https://github.com/docker/login-action/releases/tag/v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0 https://github.com/docker/login-action/releases/tag/v4.8.0
         with:
           username: blinklabs
           password: ${{ secrets.DOCKER_PASSWORD }} # uses token
       - name: Login to GHCR
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0 https://github.com/docker/login-action/releases/tag/v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0 https://github.com/docker/login-action/releases/tag/v4.8.0
         with:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}

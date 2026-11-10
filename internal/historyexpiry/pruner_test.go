@@ -81,6 +81,7 @@ func insertTestBlock(
 }
 
 func TestPrunerExpiresBlocksOlderThanStabilityWindow(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	oldHash := insertTestBlock(t, db, 9, 0x09)
 	boundaryHash := insertTestBlock(t, db, 10, 0x0a)
@@ -112,6 +113,7 @@ func TestPrunerExpiresBlocksOlderThanStabilityWindow(t *testing.T) {
 }
 
 func TestPrunerSkipsWhenCurrentSlotWithinStabilityWindow(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	hash := insertTestBlock(t, db, 1, 0x01)
 
@@ -132,6 +134,7 @@ func TestPrunerSkipsWhenCurrentSlotWithinStabilityWindow(t *testing.T) {
 }
 
 func TestPrunerSkipsAlreadyExpiredBlocks(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	firstHash := insertTestBlock(t, db, 1, 0x01)
 	secondHash := insertTestBlock(t, db, 2, 0x02)
@@ -156,6 +159,7 @@ func TestPrunerSkipsAlreadyExpiredBlocks(t *testing.T) {
 }
 
 func TestPrunerStartValidation(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	tests := []struct {
 		name string
@@ -192,6 +196,7 @@ func TestPrunerStartValidation(t *testing.T) {
 }
 
 func TestPrunerStartStop(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	pruner := NewPruner(PrunerConfig{
 		LedgerState: testLedgerWindow{},
@@ -206,6 +211,7 @@ func TestPrunerStartStop(t *testing.T) {
 }
 
 func TestPrunerHandlesCurrentSlotError(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	hash := insertTestBlock(t, db, 1, 0x01)
 
@@ -306,6 +312,7 @@ func TestPrunerCursorDoesNotPassFailedBlock(t *testing.T) {
 // tombstone keys in place; the second round must tolerate scanning them again,
 // and a block inserted after that round must be discovered by a fresh scan.
 func TestPrunerRepeatedRoundsSkipTombstonesAndFindNewlyEligible(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	oldHash := insertTestBlock(t, db, 1, 0x01)
 	secondHash := insertTestBlock(t, db, 2, 0x02)
@@ -337,6 +344,7 @@ func TestPrunerRepeatedRoundsSkipTombstonesAndFindNewlyEligible(t *testing.T) {
 }
 
 func TestPrunerCanceledBeforeScanDoesNotPrune(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	hash := insertTestBlock(t, db, 1, 0x01)
 	pruner := NewPruner(PrunerConfig{
@@ -351,4 +359,31 @@ func TestPrunerCanceledBeforeScanDoesNotPrune(t *testing.T) {
 	defer txn.Release()
 	_, _, err := db.Blob().GetBlock(txn.Blob(), 1, hash)
 	require.NoError(t, err)
+}
+
+// The running pruner keeps the bound expired-history errors name up to date,
+// so request paths never scan for it.
+func TestPrunerRefreshesOldestRetainedSlot(t *testing.T) {
+	db := newTestDB(t)
+	insertTestBlock(t, db, 9, 0x09)
+	insertTestBlock(t, db, 10, 0x0a)
+	insertTestBlock(t, db, 11, 0x0b)
+	pruner := NewPruner(PrunerConfig{
+		LedgerState: testLedgerWindow{
+			currentSlot:     15,
+			stabilityWindow: 5,
+		},
+		DB:        db,
+		Frequency: 10 * time.Millisecond,
+	})
+	require.NoError(t, pruner.Start(context.Background()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, pruner.Stop(ctx))
+	})
+	require.Eventually(t, func() bool {
+		slot, ok := db.OldestRetainedSlot()
+		return ok && slot == 10
+	}, 5*time.Second, 10*time.Millisecond)
 }

@@ -31,6 +31,7 @@ func TestDrepExpiryHistoryBackfillDatesCurrentExpiry(t *testing.T) {
 	t.Parallel()
 
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 36)
 	db, err := sql.Open(
 		"sqlite",
 		"file:"+databasePath+
@@ -40,7 +41,7 @@ func TestDrepExpiryHistoryBackfillDatesCurrentExpiry(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 52)
+	require.Len(t, registry, 57)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -53,7 +54,6 @@ func TestDrepExpiryHistoryBackfillDatesCurrentExpiry(t *testing.T) {
 		require.NoError(t, runner.Run(context.Background()))
 	}
 
-	runTo(registry[:36])
 	voted := []byte{0x01}
 	updated := []byte{0x02}
 	untouched := []byte{0x03}

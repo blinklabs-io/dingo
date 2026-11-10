@@ -36,49 +36,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestIsS3NotFoundErrorMatchesNoSuchKey verifies the case AWS's own S3
-// actually returns from GetObject on a missing key.
-func TestIsS3NotFoundErrorMatchesNoSuchKey(t *testing.T) {
-	t.Parallel()
-
-	require.True(t, isS3NotFoundError(&types.NoSuchKey{}))
-}
-
-// TestIsS3NotFoundErrorMatchesTypedNotFound guards the defensive
-// s3types.NotFound check, kept even though AWS's own GetObject never
-// actually constructs one.
-func TestIsS3NotFoundErrorMatchesTypedNotFound(t *testing.T) {
-	t.Parallel()
-
-	require.True(t, isS3NotFoundError(&types.NotFound{}))
-}
-
-// TestIsS3NotFoundErrorMatchesGenericNotFoundCode guards against
-// a real gap: an S3-compatible (non-AWS) endpoint can
-// report a missing key as a generic, untyped API error whose ErrorCode()
-// is "NotFound" without the SDK ever deserializing it into the strongly-
-// typed s3types.NotFound struct -- errors.As for that concrete type alone
-// would miss this, silently treating a confirmed-absent snapshot as a
-// real communication failure instead.
-func TestIsS3NotFoundErrorMatchesGenericNotFoundCode(t *testing.T) {
-	t.Parallel()
-
-	err := &smithy.GenericAPIError{Code: "NotFound", Message: "not found"}
-	require.True(t, isS3NotFoundError(err))
-}
-
-// TestIsS3NotFoundErrorRejectsOtherErrors verifies real failures (auth,
-// throttling, a generic error code that isn't "NotFound") are not
-// misclassified as a confirmed-absent object.
-func TestIsS3NotFoundErrorRejectsOtherErrors(t *testing.T) {
-	t.Parallel()
-
-	require.False(t, isS3NotFoundError(errors.New("connection reset")))
-	require.False(t, isS3NotFoundError(
-		&smithy.GenericAPIError{Code: "AccessDenied", Message: "denied"},
-	))
-}
-
 var _ smithy.APIError = (*smithy.GenericAPIError)(nil)
 
 type manifestRoundTripper func(*http.Request) (*http.Response, error)
@@ -332,4 +289,18 @@ func TestS3DownloadSkipsCloudMirrorMarker(t *testing.T) {
 	require.Equal(t, int32(1), objectFetches.Load())
 	require.FileExists(t, filepath.Join(dir, ManifestFileName))
 	require.NoFileExists(t, filepath.Join(dir, cloudMirrorMarkerName))
+}
+
+func TestIsS3NotFoundError(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, isS3NotFoundError(&types.NoSuchKey{}))
+	require.True(t, isS3NotFoundError(&types.NotFound{}))
+	require.True(t, isS3NotFoundError(
+		&smithy.GenericAPIError{Code: "NotFound", Message: "not found"},
+	))
+	require.False(t, isS3NotFoundError(errors.New("connection reset")))
+	require.False(t, isS3NotFoundError(
+		&smithy.GenericAPIError{Code: "AccessDenied", Message: "denied"},
+	))
 }

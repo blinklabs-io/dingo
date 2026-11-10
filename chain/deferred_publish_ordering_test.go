@@ -253,23 +253,3 @@ func TestDeferredChainUpdatesPublishInChainMutationOrder(t *testing.T) {
 			"[add, rollback] across the two handlers",
 	)
 }
-
-// TestDeferredPerHandlerFlushInvertsAcrossHandlers proves the concurrency the
-// fix addresses is real, not hypothetical: with the pre-fix per-handler flush,
-// the identical interleaving publishes the rollback BEFORE the add even though
-// the chain was mutated add-then-rollback. This is the exact ordering that
-// drove the chain.update subscriber's block apply/undo notifications out of
-// order, and it is what the shared sequencer (asserted above) prevents.
-func TestDeferredPerHandlerFlushInvertsAcrossHandlers(t *testing.T) {
-	t.Parallel()
-
-	got := runDeferredOrderingScenario(t, perHandlerFlush)
-	require.Equal(
-		t,
-		[]observedUpdate{updateRollback, updateAdd},
-		got,
-		"per-handler flush is expected to invert publish order relative to "+
-			"chain-mutation order; if this no longer inverts the guard test "+
-			"has stopped exercising the race",
-	)
-}

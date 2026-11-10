@@ -214,6 +214,10 @@ func ValidateTxConway(
 		)
 	}
 	tx = normalizedTx
+	// The rules below share one transaction-scoped state: UTxO lookups and
+	// the transaction's script view are computed once instead of once per
+	// rule. Dingo's capability lookups unwrap it (stateCapability).
+	ls = lcommon.NewTransactionScopedLedgerState(ls)
 	// Validate TX through ledger validation rules (Phase-1).
 	// These must run even for isValid=false transactions, which still
 	// require valid structure, fees, and UTxO references for collateral.
@@ -333,6 +337,7 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		lcommon.UtxoValidationRuleCommitteeCertificates,
 		lcommon.UtxoValidationRuleUnknownVoters,
 		lcommon.UtxoValidationRuleDelegation,
+		lcommon.UtxoValidationRuleMaxTxSize,
 	}
 	descriptors := conway.UtxoValidationRuleDescriptors()
 	indexes := make([]int, len(skipRuleIds))
@@ -362,6 +367,20 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		indexedUtxoValidationRule{
 			index:          indexes[5],
 			validationFunc: validateDelegationConwayBootstrapAware,
+		},
+		// The upstream rule sizes the transaction by wire length, not
+		// TxSizeForFee, which ValidateTxFeeConway already uses.
+		indexedUtxoValidationRule{
+			index: indexes[6],
+			validationFunc: maxTxSizeRule(
+				func(pp lcommon.ProtocolParameters) (uint, bool) {
+					p, ok := pp.(*conway.ConwayProtocolParameters)
+					if !ok || p == nil {
+						return 0, false
+					}
+					return p.MaxTxSize, true
+				},
+			),
 		},
 	)
 	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {

@@ -257,6 +257,7 @@ type DefaultBlockBuilder struct {
 	// leiosHeaderExtension selects the 12-field Dijkstra header body for
 	// every ranking block, not only those carrying Leios data.
 	leiosHeaderExtension bool
+	protocolMinor        uint64
 }
 
 // BlockBuilderConfig holds configuration for the DefaultBlockBuilder.
@@ -280,6 +281,8 @@ type BlockBuilderConfig struct {
 	// it carries Leios data; any other block gets the 10-field Praos body
 	// that cardano-node 11.2.0 produces and requires.
 	LeiosHeaderExtension bool
+	// CIP0203Enabled includes the linker-populated Dingo release version.
+	CIP0203Enabled bool
 }
 
 // NewDefaultBlockBuilder creates a new DefaultBlockBuilder.
@@ -305,7 +308,12 @@ func NewDefaultBlockBuilder(
 		cfg.Logger = slog.Default()
 	}
 
+	minor, err := dingoversion.HeaderProtocolMinor(cfg.CIP0203Enabled)
+	if err != nil {
+		return nil, err
+	}
 	return &DefaultBlockBuilder{
+		protocolMinor:   minor,
 		now:             time.Now,
 		logger:          cfg.Logger,
 		mempool:         cfg.Mempool,
@@ -1309,7 +1317,7 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 			OpCertKesPeriod:      opCert.KESPeriod,
 			OpCertSignature:      opCert.Signature,
 			ProtoMajorVersion:    limits.protoMajor,
-			ProtoMinorVersion:    dingoversion.BlockHeaderProtocolMinor,
+			ProtoMinorVersion:    b.protocolMinor,
 		}
 	} else if limits.era == eraDijkstra &&
 		(b.leiosHeaderExtension || !leios.empty() || leiosCert != nil) {
@@ -1334,7 +1342,7 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 			},
 			ProtoVersion: babbage.BabbageProtoVersion{
 				Major: limits.protoMajor,
-				Minor: dingoversion.BlockHeaderProtocolMinor,
+				Minor: b.protocolMinor,
 			},
 			LeiosCertified:    leiosCert != nil,
 			LeiosAnnouncement: leiosAnnouncement,
@@ -1357,7 +1365,7 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 			},
 			ProtoVersion: babbage.BabbageProtoVersion{
 				Major: limits.protoMajor,
-				Minor: dingoversion.BlockHeaderProtocolMinor,
+				Minor: b.protocolMinor,
 			},
 		}
 	}

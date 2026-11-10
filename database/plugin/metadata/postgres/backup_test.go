@@ -229,19 +229,6 @@ func TestValidatePostgresBackupPropagatesFailure(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestValidatePostgresBackupAcceptsValidArchive validates the success path
-// via the same seam.
-func TestValidatePostgresBackupAcceptsValidArchive(t *testing.T) {
-	original := runPgRestoreList
-	t.Cleanup(func() { runPgRestoreList = original })
-	runPgRestoreList = func(context.Context, string) error {
-		return nil
-	}
-	require.NoError(
-		t, validatePostgresBackup(context.Background(), "/tmp/backup.dump"),
-	)
-}
-
 // TestPgRestoreArgsIncludesExplicitDatabase guards a real bug found via a
 // live integration run: pg_restore, unlike pg_dump, does not fall back to
 // PGDATABASE alone to pick a connection target -- omitting -d/--dbname

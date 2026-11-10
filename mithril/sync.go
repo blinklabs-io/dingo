@@ -827,6 +827,27 @@ func Sync(
 	}
 	catchUp = dec.engage || cfg.RepairLegacyRewardState
 	catchUpStart = dec.start
+	if mode == syncModeResume && !catchUp && isAPIMode(cfg.StorageMode) {
+		status, statusErr := db.GetSyncState("sync_status", nil)
+		if statusErr != nil {
+			return SyncResult{}, fmt.Errorf("reading sync_status: %w", statusErr)
+		}
+		if status == syncStatusBackfill {
+			syncResult, syncErr = resumeMithrilBackfill(
+				ctx, cfg, db, nodeCfg, pinnedDigest, network, logger,
+			)
+			if syncErr != nil {
+				logger.Error(
+					"sync did not complete; "+
+						"re-run 'dingo mithril sync' to resume",
+					"component", "mithril",
+					"error", syncErr,
+				)
+			}
+			return syncResult, syncErr
+		}
+	}
+
 	// Artifact pin. A run that was interrupted after it began mutating the
 	// database must import the artifact those partial rows and ledger-state
 	// phase checkpoints belong to. Re-selecting the aggregator's latest
@@ -1111,6 +1132,7 @@ func Sync(
 	// descriptors. This runs after both import phases return, which makes
 	// clearing the fields safe against code that reads them.
 	defer bootstrapResult.CloseHandles()
+	cleanedUp := false
 	certifiedImmutable, err := openBootstrappedImmutable(bootstrapResult)
 	if err != nil {
 		return SyncResult{}, err
@@ -1787,6 +1809,14 @@ func Sync(
 		); err != nil {
 			return SyncResult{}, err
 		}
+		// Backfill reads blocks from the blob store, not the extracted
+		// immutable tree, and runs for days on mainnet; holding the tree
+		// (hundreds of GB there) until it ends can exhaust the disk. With
+		// sync_status now "backfill", serve resumes the backfill without it.
+		if cfg.CleanupAfterLoad {
+			bootstrapResult.Cleanup(logger)
+			cleanedUp = true
+		}
 	}
 
 	// Backfill historical metadata through the stable ledger anchor if storage
@@ -1872,7 +1902,7 @@ func Sync(
 	cfg.emit(SyncProgress{Phase: PhaseComplete, Active: true})
 
 	// Clean up temporary files after a successful complete load.
-	if cfg.CleanupAfterLoad {
+	if cfg.CleanupAfterLoad && !cleanedUp {
 		bootstrapResult.Cleanup(logger)
 	}
 

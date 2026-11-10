@@ -562,52 +562,37 @@ func dijkstraGuardPParams() *gdijkstra.DijkstraProtocolParameters {
 	}
 }
 
-// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticNormalPath pins that
-// ValidateTxDijkstra
-// delegates phase-2 validation entirely to
+// TestValidateTxDijkstraRejectsPlutusV2WhenSynthetic pins that
+// ValidateTxDijkstra delegates phase-2 validation entirely to
 // gdijkstra.UtxoValidatePlutusScripts, which has no idea about Dingo's
-// synthetic marker -- without dijkstraSyntheticV2CostModelGuard, a
-// transaction using a synthetic-cost-model PlutusV2 script would reach that
-// delegate and be priced against the fabricated value instead of rejected.
-func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticNormalPath(
-	t *testing.T,
-) {
-	disablePhase1RulesForTest(t)
+// synthetic marker: without dijkstraSyntheticV2CostModelGuard, a transaction
+// using a synthetic-cost-model PlutusV2 script would reach that delegate and
+// be priced against the fabricated value instead of rejected. The skip-phase-2
+// case covers the other half: shouldSkipPhase2Validation returns nil before
+// ever reaching the delegate, so the guard must run before that shortcut too.
+func TestValidateTxDijkstraRejectsPlutusV2WhenSynthetic(t *testing.T) {
+	for _, skipPhase2 := range []bool{false, true} {
+		name := "normal path"
+		if skipPhase2 {
+			name = "skip phase 2 path"
+		}
+		t.Run(name, func(t *testing.T) {
+			disablePhase1RulesForTest(t)
 
-	ls := newMockLedgerState()
-	ls.syntheticV2CostModel = true
+			ls := newMockLedgerState()
+			ls.syntheticV2CostModel = true
+			ls.skipPhase2Validation = skipPhase2
 
-	err := ValidateTxDijkstra(
-		dijkstraSyntheticV2Tx(),
-		0,
-		ls,
-		dijkstraGuardPParams(),
-	)
+			err := ValidateTxDijkstra(
+				dijkstraSyntheticV2Tx(),
+				0,
+				ls,
+				dijkstraGuardPParams(),
+			)
 
-	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
-}
-
-// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticSkipPhase2Path covers
-// the other half of the same finding: shouldSkipPhase2Validation returns nil
-// before ever reaching the delegate, so the guard must run before that
-// shortcut too, not only before the delegation call.
-func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticSkipPhase2Path(
-	t *testing.T,
-) {
-	disablePhase1RulesForTest(t)
-
-	ls := newMockLedgerState()
-	ls.syntheticV2CostModel = true
-	ls.skipPhase2Validation = true
-
-	err := ValidateTxDijkstra(
-		dijkstraSyntheticV2Tx(),
-		0,
-		ls,
-		dijkstraGuardPParams(),
-	)
-
-	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
+			require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
+		})
+	}
 }
 
 // TestValidateTxDijkstraAllowsNonPlutusV2TxWhenSynthetic proves the guard is
@@ -961,24 +946,6 @@ func TestValidateTxDijkstraTieredRefScriptFeeBoundaries(t *testing.T) {
 			requireFeeTooSmall(t, err)
 		})
 	}
-}
-
-func TestValidateTxDijkstraRefScriptFeeUsesPParamStrideAndMultiplier(
-	t *testing.T,
-) {
-	t.Parallel()
-	const size = 250
-	minFee := uint64(refFeeTestBase) + tieredRefScriptFee(size)
-	state := newRefFeeTestState(t, size)
-
-	// A Conway-default stride (25600) would price 250 bytes at one flat tier
-	// (250), far below the fee demanded by the configured stride/multiplier.
-	require.Greater(t, minFee, uint64(refFeeTestBase)+size)
-	err := ValidateTxDijkstra(
-		newRefFeeTestTx(t, uint64(refFeeTestBase)+size, false),
-		0, state, refFeeTestParams(),
-	)
-	requireFeeTooSmall(t, err)
 }
 
 func TestValidateTxDijkstraChildRefScriptsExcludedFromFee(t *testing.T) {

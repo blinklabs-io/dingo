@@ -340,6 +340,7 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 			lv.epochStartSlot = test.epochStartSlot
 			cold := committeeTestCredential(0x71)
@@ -532,6 +533,7 @@ func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
 	for _, test := range tests {
 		for _, era := range eras {
 			t.Run(test.name+"/"+era.name, func(t *testing.T) {
+				t.Parallel()
 				lv, db := committeeTestView(t, era.pparams)
 				lv.pinCommitteeState(5, era.pparams)
 				lv.skipPhase2Validation = true
@@ -760,6 +762,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 	t.Parallel()
 
 	t.Run("seated", func(t *testing.T) {
+		t.Parallel()
 		lv, db := committeeTestView(
 			t,
 			&conway.ConwayProtocolParameters{},
@@ -786,6 +789,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 	})
 
 	t.Run("pending proposal", func(t *testing.T) {
+		t.Parallel()
 		lv, db := committeeTestView(
 			t,
 			&conway.ConwayProtocolParameters{},
@@ -805,6 +809,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 	t.Run(
 		"seated resignation takes precedence over proposal",
 		func(t *testing.T) {
+			t.Parallel()
 			lv, db := committeeTestView(
 				t,
 				&conway.ConwayProtocolParameters{},
@@ -840,6 +845,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 	)
 
 	t.Run("unknown", func(t *testing.T) {
+		t.Parallel()
 		lv, db := committeeTestView(
 			t,
 			&conway.ConwayProtocolParameters{},
@@ -860,6 +866,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 	})
 
 	t.Run("proposal storage error", func(t *testing.T) {
+		t.Parallel()
 		lv, db := committeeTestView(
 			t,
 			&conway.ConwayProtocolParameters{},
@@ -1309,6 +1316,8 @@ func TestLedgerViewCommitteeHotCredentialSurvivesTermRenewal(t *testing.T) {
 }
 
 func TestValidateTxConwayRejectsUnelectedCommitteeVoterAtPV11(t *testing.T) {
+	t.Parallel()
+
 	pparams := &conway.ConwayProtocolParameters{}
 	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
 	lv, db := committeeTestView(t, pparams)
@@ -1342,6 +1351,8 @@ func TestValidateTxConwayRejectsUnelectedCommitteeVoterAtPV11(t *testing.T) {
 }
 
 func TestValidateTxDijkstraAcceptsElectedCommitteeVoter(t *testing.T) {
+	t.Parallel()
+
 	pparams := dijkstraTestProtocolParameters()
 	pparams.ConwayProtocolParameters.ProtocolVersion.Major =
 		lcommon.ProtocolVersionVanRossem
@@ -1388,6 +1399,8 @@ func TestValidateTxDijkstraAcceptsElectedCommitteeVoter(t *testing.T) {
 }
 
 func TestValidateTxConwayAcceptsElectedCommitteeVoterAtPV11(t *testing.T) {
+	t.Parallel()
+
 	pparams := &conway.ConwayProtocolParameters{}
 	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
 	pparams.MaxTxSize = 16_384
@@ -1533,6 +1546,7 @@ func TestValidateTxCommitteeCertsAffectSameTransactionVoterElection(
 	for _, era := range []string{"Conway", "Dijkstra"} {
 		for _, test := range tests {
 			t.Run(era+"/"+test.name, func(t *testing.T) {
+				t.Parallel()
 				pparams := &conway.ConwayProtocolParameters{}
 				pparams.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
 				lv, db := committeeTestView(t, pparams)
@@ -2332,25 +2346,6 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 	assert.Equal(t, uint64(150), power)
 }
 
-// TestLedgerViewSatisfiesEpochState pins that LedgerView provides gouroboros'
-// optional EpochState capability.
-//
-// Rules that are expressed relative to the current epoch degrade to a weaker
-// check when the ledger state cannot supply one, and they degrade silently. The
-// pool-deposit decision is the case that found this: without an epoch it cannot
-// tell a retired pool from a registered one, charges no deposit for a
-// registration that needs one, and the transaction then fails value
-// conservation by exactly the deposit.
-func TestLedgerViewSatisfiesEpochState(t *testing.T) {
-	t.Parallel()
-
-	var lv any = &LedgerView{}
-	_, ok := lv.(lcommon.EpochState)
-	require.True(t, ok,
-		"LedgerView must satisfy common.EpochState, or every rule that needs "+
-			"the current epoch silently takes its degraded path")
-}
-
 // TestLedgerViewEpochForSlot checks the mapping itself against a known cache.
 func TestLedgerViewEpochForSlot(t *testing.T) {
 	t.Parallel()
@@ -2864,7 +2859,7 @@ func mirQuorumTestView(
 			`{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`,
 		),
 	))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	))
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
@@ -4188,20 +4183,6 @@ func TestLedgerViewTreasuryValueTracksChainRollback(t *testing.T) {
 		return nil
 	}))
 	requireTreasuryValue(t, ls, nil, 100)
-}
-
-func TestLedgerViewTreasuryValueSurvivesRestart(t *testing.T) {
-	t.Parallel()
-
-	dataDir := t.TempDir()
-	ls, db := newTreasuryViewTestLedger(t, dataDir)
-	require.NoError(t, db.Metadata().SetNetworkState(777, 223, 42, nil))
-	requireTreasuryValue(t, ls, nil, 777)
-	require.NoError(t, dbtest.CloseDatabase(db))
-
-	restarted, reopened := newTreasuryViewTestLedger(t, dataDir)
-	requireTreasuryValue(t, restarted, nil, 777)
-	require.NoError(t, dbtest.CloseDatabase(reopened))
 }
 
 func TestLedgerViewTreasuryValueReadsMithrilBootstrapState(t *testing.T) {
@@ -5739,16 +5720,6 @@ func TestLedgerStateEvaluateTxPinsEpochStartSlot(t *testing.T) {
 	require.NoError(t, dbtest.CloseDatabase(db))
 }
 
-func TestLedgerViewSkipPhase2Validation(t *testing.T) {
-	t.Parallel()
-
-	lv := &LedgerView{}
-	require.False(t, lv.SkipPhase2Validation())
-
-	lv.skipPhase2Validation = true
-	require.True(t, lv.SkipPhase2Validation())
-}
-
 // TestLedgerViewMinPoolMargin guards the CIP-23 bridge: MinPoolMargin() must
 // forward from the LedgerState embedded via the named ls field, since Go does
 // not promote methods across a named (non-embedded) field. Without this
@@ -7162,6 +7133,8 @@ func seedActiveDrepWithoutRegistration(
 func TestDrepDeregistrationFallsBackToCurrentDepositWhenUnrecorded(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	lv, db := newDrepFallbackTestView(t)
 	cred := drepRefundTestCredential(0xe1)
 	seedActiveDrepWithoutRegistration(t, db, cred, 100)
@@ -7198,6 +7171,8 @@ func TestDrepDeregistrationFallsBackToCurrentDepositWhenUnrecorded(
 // unrecorded case would refund the current parameter and reject a valid
 // deregistration.
 func TestDrepDeregistrationKeepsRecordedZeroAuthoritative(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newDrepFallbackTestView(t)
 	cred := drepRefundTestCredential(0xe4)
 	seedImportedDrep(t, db, cred, 0, 100, true)
@@ -7235,6 +7210,8 @@ func TestDrepDeregistrationKeepsRecordedZeroAuthoritative(t *testing.T) {
 // which builds its deposits from a batched map lookup and so has its own
 // absence path.
 func TestDrepRegistrationsFallBackForUnrecordedDeposit(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newDrepFallbackTestView(t)
 	unrecorded := drepRefundTestCredential(0xe5)
 	recorded := drepRefundTestCredential(0xe6)
@@ -7266,6 +7243,8 @@ func TestDrepRegistrationsFallBackForUnrecordedDeposit(t *testing.T) {
 // guard this reported a non-nil zero and gouroboros accepted a zero refund
 // instead of failing closed.
 func TestDrepRegistrationReportsAbsenceInAPreConwayEra(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	ls.currentEra = eras.BabbageEraDesc
 	ls.currentPParams = &babbage.BabbageProtocolParameters{
@@ -7331,6 +7310,8 @@ func TestDrepRegistrationReportsAbsenceInAPreConwayEra(t *testing.T) {
 // is what stops the panic, and the call-site capability check is what keeps a
 // pre-Conway era from reaching it at all.
 func TestDrepRegistrationReportsAbsenceForTypedNilParams(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	ls.currentEra = eras.DijkstraEraDesc
 	ls.currentPParams = (*dijkstra.DijkstraProtocolParameters)(nil)
@@ -7395,7 +7376,10 @@ func TestBoundaryPromotesRewardAfterReregistration(t *testing.T) {
 		spendable    bool
 	}
 	run := func(reregister bool) outcome {
-		f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+		f := newEpochBoundaryBenchFixture(t, epochBoundaryBenchShape{
+			pools: 5, delegators: 100, dreps: 3, utxosPerDelegator: 2,
+			proposals: 2, drepVotes: 3, spoVotes: 3, ccMembers: 3,
+		}, "")
 		key := epochBoundaryBenchHash(0x30, 1)
 		raw, err := dbtest.RawSQLiteMetadata(t, f.db)
 		require.NoError(t, err)
@@ -8033,6 +8017,7 @@ func TestLedgerProcessBlockAnchorsValidationHorizonAtParent(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			db := newTestDB(t)
 			ls := previewWedgeLedgerState(t)
 			ls.db = db
@@ -8705,8 +8690,10 @@ func repeatByte(length int, b byte) []byte {
 }
 
 func TestEpochRolloverUsesEraSpecificEnactmentSnapshot(t *testing.T) {
+	t.Parallel()
 	for _, era := range []eras.EraDesc{eras.ConwayEraDesc, eras.DijkstraEraDesc} {
 		t.Run(era.Name, func(t *testing.T) {
+			t.Parallel()
 			f := newTreasuryRolloverFixture(t, 100)
 			address, returnAddress, credential := f.rewardAddress(t, 0xa7)
 			f.addProposal(

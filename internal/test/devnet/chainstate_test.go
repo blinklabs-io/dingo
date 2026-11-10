@@ -45,6 +45,7 @@ func tipOf(h ObservedHeader) ChainTip {
 }
 
 func TestObservedChainRollForwardTracksTip(t *testing.T) {
+	t.Parallel()
 	c := NewObservedChain("dingo-1")
 
 	require.Equal(t, uint64(0), c.Snapshot().Tip.SlotNumber,
@@ -66,6 +67,7 @@ func TestObservedChainRollForwardTracksTip(t *testing.T) {
 }
 
 func TestObservedChainRollBackwardTruncatesToPoint(t *testing.T) {
+	t.Parallel()
 	c := NewObservedChain("dingo-1")
 	for i := uint64(1); i <= 5; i++ {
 		h := hdr(i*10, i, 'a')
@@ -95,6 +97,7 @@ func TestObservedChainRollBackwardTruncatesToPoint(t *testing.T) {
 }
 
 func TestObservedChainRollBackwardToOriginClearsChain(t *testing.T) {
+	t.Parallel()
 	c := NewObservedChain("dingo-1")
 	for i := uint64(1); i <= 3; i++ {
 		h := hdr(i*10, i, 'a')
@@ -114,6 +117,7 @@ func TestObservedChainRollBackwardToOriginClearsChain(t *testing.T) {
 // truncate everything above it rather than silently keeping headers that
 // the peer has abandoned.
 func TestObservedChainRollBackwardToUnknownSlotTruncates(t *testing.T) {
+	t.Parallel()
 	c := NewObservedChain("dingo-1")
 	for i := uint64(1); i <= 4; i++ {
 		h := hdr(i*10, i, 'a')
@@ -130,6 +134,7 @@ func TestObservedChainRollBackwardToUnknownSlotTruncates(t *testing.T) {
 }
 
 func TestObservedChainAwaitReturnsWhenAlreadySatisfied(t *testing.T) {
+	t.Parallel()
 	c := NewObservedChain("dingo-1")
 	h := hdr(100, 7, 'a')
 	c.RollForward(h, tipOf(h))
@@ -145,6 +150,7 @@ func TestObservedChainAwaitReturnsWhenAlreadySatisfied(t *testing.T) {
 }
 
 func TestObservedChainAwaitWakesOnEvent(t *testing.T) {
+	t.Parallel()
 	c := NewObservedChain("dingo-1")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -171,6 +177,7 @@ func TestObservedChainAwaitWakesOnEvent(t *testing.T) {
 }
 
 func TestObservedChainAwaitRespectsContextDeadline(t *testing.T) {
+	t.Parallel()
 	c := NewObservedChain("dingo-1")
 
 	ctx, cancel := context.WithTimeout(
@@ -194,6 +201,7 @@ func TestObservedChainAwaitRespectsContextDeadline(t *testing.T) {
 // relay and interrupts a peer, and the assertions need to know that the
 // observer actually saw the drop and the recovery.
 func TestObservedChainRecordsConnectionChurn(t *testing.T) {
+	t.Parallel()
 	c := NewObservedChain("dingo-relay")
 
 	c.Connected()
@@ -211,6 +219,7 @@ func TestObservedChainRecordsConnectionChurn(t *testing.T) {
 }
 
 func TestObservedChainHeaderRetentionIsBounded(t *testing.T) {
+	t.Parallel()
 	c := NewObservedChain("dingo-1")
 
 	total := uint64(maxRetainedHeaders + 100)
@@ -229,6 +238,7 @@ func TestObservedChainHeaderRetentionIsBounded(t *testing.T) {
 }
 
 func TestChainAgreementAtDeepestCommonSlot(t *testing.T) {
+	t.Parallel()
 	a := NewObservedChain("dingo-1")
 	b := NewObservedChain("dingo-relay")
 
@@ -251,6 +261,7 @@ func TestChainAgreementAtDeepestCommonSlot(t *testing.T) {
 }
 
 func TestChainAgreementDetectsHashMismatch(t *testing.T) {
+	t.Parallel()
 	a := NewObservedChain("dingo-1")
 	b := NewObservedChain("dingo-2")
 
@@ -277,6 +288,7 @@ func TestChainAgreementDetectsHashMismatch(t *testing.T) {
 }
 
 func TestChainAgreementWithoutCommonSlot(t *testing.T) {
+	t.Parallel()
 	a := NewObservedChain("dingo-1")
 	b := NewObservedChain("dingo-2")
 	ha := hdr(10, 1, 'a')
@@ -291,6 +303,7 @@ func TestChainAgreementWithoutCommonSlot(t *testing.T) {
 }
 
 func TestChainGroupAwaitAcrossNodes(t *testing.T) {
+	t.Parallel()
 	g := NewChainGroup("dingo-1", "dingo-2", "dingo-relay")
 	require.Len(t, g.Chains(), 3)
 	require.NotNil(t, g.Chain("dingo-2"))
@@ -330,6 +343,7 @@ func TestChainGroupAwaitAcrossNodes(t *testing.T) {
 }
 
 func TestChainGroupAwaitReportsLaggingNodes(t *testing.T) {
+	t.Parallel()
 	g := NewChainGroup("dingo-1", "dingo-2")
 	h := hdr(20, 2, 'a')
 	lead := g.Chain("dingo-1")
@@ -359,6 +373,7 @@ func TestChainGroupAwaitReportsLaggingNodes(t *testing.T) {
 // The observer writes from a ChainSync callback goroutine while scenario
 // assertions read; -race must stay clean.
 func TestObservedChainConcurrentApplyAndAwait(t *testing.T) {
+	t.Parallel()
 	g := NewChainGroup("dingo-1", "dingo-2")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -406,6 +421,7 @@ func TestObservedChainConcurrentApplyAndAwait(t *testing.T) {
 }
 
 func TestAgreedHeaderAboveFindsFirstCommonBlock(t *testing.T) {
+	t.Parallel()
 	a := NewObservedChain("dingo-1")
 	b := NewObservedChain("dingo-relay")
 
@@ -434,6 +450,7 @@ func TestAgreedHeaderAboveFindsFirstCommonBlock(t *testing.T) {
 }
 
 func TestAgreedHeaderAboveIgnoresDisagreement(t *testing.T) {
+	t.Parallel()
 	a := NewObservedChain("dingo-1")
 	b := NewObservedChain("dingo-2")
 
@@ -463,6 +480,7 @@ func TestAgreedHeaderAboveIgnoresDisagreement(t *testing.T) {
 }
 
 func TestAgreedHeaderAboveNeedsEveryNode(t *testing.T) {
+	t.Parallel()
 	a := NewObservedChain("dingo-1")
 	b := NewObservedChain("dingo-2")
 	ha := hdr(20, 2, 'a')
@@ -474,33 +492,6 @@ func TestAgreedHeaderAboveNeedsEveryNode(t *testing.T) {
 	require.False(t, ok, "a header only one node saw has not propagated")
 }
 
-func TestMaxBlockNumber(t *testing.T) {
-	a := NewObservedChain("dingo-1")
-	b := NewObservedChain("dingo-2")
-	ha := hdr(40, 7, 'a')
-	a.RollForward(ha, tipOf(ha))
-	hb := hdr(25, 3, 'a')
-	b.RollForward(hb, tipOf(hb))
-
-	snaps := []ChainSnapshot{a.Snapshot(), b.Snapshot()}
-	require.Equal(t, uint64(7), MaxBlockNumber(snaps))
-	require.Equal(t, uint64(0), MaxBlockNumber(nil))
-}
-
-func TestMinAndMaxTipSlot(t *testing.T) {
-	a := NewObservedChain("dingo-1")
-	b := NewObservedChain("dingo-2")
-	ha := hdr(40, 4, 'a')
-	a.RollForward(ha, tipOf(ha))
-	hb := hdr(25, 2, 'a')
-	b.RollForward(hb, tipOf(hb))
-
-	snaps := []ChainSnapshot{a.Snapshot(), b.Snapshot()}
-	require.Equal(t, uint64(25), MinTipSlot(snaps))
-	require.Equal(t, uint64(40), MaxTipSlot(snaps))
-	require.Equal(t, uint64(0), MinTipSlot(nil))
-}
-
 // The observers intersect at origin and replay history before they reach
 // the tip, so our own tip lags the node's real one during catch-up. A
 // baseline taken from the observed tip would let an already-replayed
@@ -508,6 +499,7 @@ func TestMinAndMaxTipSlot(t *testing.T) {
 // already-passed epoch boundary satisfy the epoch phase. The peer's
 // reported tip is the honest answer to "where is the chain now".
 func TestMaxServerTipSlotIgnoresReplayLag(t *testing.T) {
+	t.Parallel()
 	a := NewObservedChain("dingo-1")
 	b := NewObservedChain("dingo-2")
 
@@ -522,4 +514,90 @@ func TestMaxServerTipSlotIgnoresReplayLag(t *testing.T) {
 	require.Equal(t, uint64(400), MaxServerTipSlot(snaps),
 		"the peer-reported tip reflects where the chain actually is")
 	require.Equal(t, uint64(0), MaxServerTipSlot(nil))
+}
+
+func TestAwaitAgreementAboveRejectsStaleSharedAncestry(t *testing.T) {
+	t.Parallel()
+	group := NewChainGroup("dingo", "reference")
+	a, b := group.Chain("dingo"), group.Chain("reference")
+	a.Connected()
+	b.Connected()
+	common := hdr(187, 42, 'a')
+	a.RollForward(common, tipOf(common))
+	b.RollForward(common, tipOf(common))
+	left, right := hdr(194, 43, 'a'), hdr(220, 43, 'b')
+	a.RollForward(left, tipOf(left))
+	b.RollForward(right, tipOf(right))
+	stale, ok := AgreementAtDeepestCommonSlot(group.Snapshots())
+	require.True(t, ok)
+	require.True(t, stale.Agree)
+	require.Equal(t, uint64(187), stale.Slot)
+	watermark := MaxServerTipSlot(group.Snapshots())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := group.AwaitAgreementAbove(ctx, "recovered chain", watermark)
+	require.ErrorIs(
+		t,
+		err,
+		context.Canceled,
+		"old shared ancestry cannot satisfy recovery",
+	)
+	fresh := hdr(241, 44, 'c')
+	a.RollForward(fresh, tipOf(fresh))
+	_, err = group.AwaitAgreementAbove(ctx, "lagging peer", watermark)
+	require.ErrorIs(
+		t,
+		err,
+		context.Canceled,
+		"every node must observe the fresh block",
+	)
+	b.RollForward(fresh, tipOf(fresh))
+	got, err := group.AwaitAgreementAbove(
+		t.Context(),
+		"recovered chain",
+		watermark,
+	)
+	require.NoError(t, err)
+	require.Equal(t, fresh, got)
+}
+
+func TestAwaitAgreementAboveRequiresConnectedNodesAndStrictWatermark(
+	t *testing.T,
+) {
+	t.Parallel()
+	group := NewChainGroup("producer", "relay")
+	a, b := group.Chain("producer"), group.Chain("relay")
+	a.Connected()
+	b.Connected()
+	fresh := hdr(241, 44, 'c')
+	a.RollForward(fresh, tipOf(fresh))
+	b.RollForward(fresh, tipOf(fresh))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := group.AwaitAgreementAbove(ctx, "strict watermark", 241)
+	require.ErrorIs(t, err, context.Canceled)
+	b.Disconnected(nil)
+	_, err = group.AwaitAgreementAbove(ctx, "disconnected peer", 240)
+	require.ErrorIs(t, err, context.Canceled)
+	b.Connected()
+	got, err := group.AwaitAgreementAbove(t.Context(), "connected peers", 240)
+	require.NoError(t, err)
+	require.Equal(t, fresh, got)
+}
+
+func TestAwaitAgreementAboveRequiresMultipleNodes(t *testing.T) {
+	t.Parallel()
+	for _, names := range [][]string{nil, {"single"}} {
+		group := NewChainGroup(names...)
+		if len(names) == 1 {
+			node := group.Chain(names[0])
+			node.Connected()
+			fresh := hdr(241, 44, 'c')
+			node.RollForward(fresh, tipOf(fresh))
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := group.AwaitAgreementAbove(ctx, "multiple connected nodes", 240)
+		require.ErrorIs(t, err, context.Canceled)
+	}
 }

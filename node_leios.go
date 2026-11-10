@@ -400,13 +400,45 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	return nil
 }
 
-// leiosPipelineTiming returns the configured pipeline timing, falling back
-// to the provisional defaults when no override is set.
+// leiosPipelineTiming keeps explicit overrides in slots and converts the
+// one-second reference defaults to the configured Shelley slot duration.
 func (n *Node) leiosPipelineTiming() leios.PipelineTiming {
 	if n.config.leiosPipelineTiming != nil {
 		return *n.config.leiosPipelineTiming
 	}
-	return leios.DefaultPipelineTiming()
+	defaults := leios.DefaultPipelineTiming()
+	if n.config.cardanoNodeConfig == nil {
+		return defaults
+	}
+	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.SlotLength.Rat == nil ||
+		genesis.SlotLength.Sign() <= 0 {
+		return defaults
+	}
+	timing := defaults
+	for _, window := range []*uint64{
+		&timing.ProduceWindowSlots,
+		&timing.DiffuseWindowSlots,
+		&timing.VoteWindowSlots,
+		&timing.CertifyByDeadlineSlots,
+		&timing.RbInclusionWindowSlots,
+		&timing.InstanceTTLSlots,
+	} {
+		slots := new(big.Rat).Quo(
+			new(big.Rat).SetUint64(*window),
+			genesis.SlotLength.Rat,
+		)
+		var rounded, remainder big.Int
+		rounded.QuoRem(slots.Num(), slots.Denom(), &remainder)
+		if remainder.Sign() != 0 {
+			rounded.Add(&rounded, big.NewInt(1))
+		}
+		if !rounded.IsUint64() {
+			return defaults
+		}
+		*window = rounded.Uint64()
+	}
+	return timing
 }
 
 // initLeiosPipelineManager builds and starts the Leios pipeline manager and

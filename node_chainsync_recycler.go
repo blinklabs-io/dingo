@@ -241,6 +241,25 @@ func (n *Node) isChainsyncIngressEligible(
 	return eligible
 }
 
+// chainsyncIngressAdmitted reports whether a peer may be a Limit on Eagerness
+// candidate. A tracked client demoted to observability-only has its headers
+// dropped from ingress, so its candidate fragment can freeze at a point the
+// live peers never share with it and hold the limit there. A connection
+// chainsync does not track has no such state and stays admitted: the
+// selector's liveness check covers a connection that is gone.
+func (n *Node) chainsyncIngressAdmitted(
+	connId ouroboros.ConnectionId,
+) bool {
+	// The selector keeps calling this hook while a live Restore republishes
+	// the chainsync state, so read it through the atomic mirror.
+	state := n.selectorChainsyncState.Load()
+	if state == nil {
+		return true
+	}
+	observabilityOnly, tracked := state.ClientObservabilityOnly(connId)
+	return !tracked || !observabilityOnly
+}
+
 func (n *Node) peerChainSelectionEligible(
 	connId ouroboros.ConnectionId,
 ) (bool, bool) {

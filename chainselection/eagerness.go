@@ -101,6 +101,21 @@ func (cs *ChainSelector) EagernessLimit() EagernessLimit {
 	return cs.computeEagernessLimitLocked(nil, cs.localTip)
 }
 
+// TryEagernessLimit returns the current Limit on Eagerness without waiting for
+// the ledger to finish a state transition. It returns false while one is in
+// progress; during sync that is most of the time, because a block batch holds
+// the transition for its whole database transaction.
+func (cs *ChainSelector) TryEagernessLimit() (EagernessLimit, bool) {
+	releaseGeneration, generationCurrent := cs.tryPinCurrentHeaderCryptoGeneration()
+	if !generationCurrent {
+		return EagernessLimit{}, false
+	}
+	defer releaseGeneration()
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	return cs.computeEagernessLimitLocked(nil, cs.localTip), true
+}
+
 // computeEagernessLimitLocked derives the limit from the candidate fragments of
 // every live, eligible, non-stale peer that has delivered a header, excluding
 // peers whose advertised tip is wall-clock stale (advertisedTipStaleLocked).
@@ -165,6 +180,7 @@ func (cs *ChainSelector) computeEagernessLimitFromPeersLocked(
 	// the anchor is the last point the live candidates shared, and a forced
 	// lone fragment's head was never shared with any of them.
 	forced := false
+	forcedFragment := -1
 	for connId, peerTip := range peerTips {
 		if peerTip.awaitingFirstHeader {
 			continue
@@ -172,9 +188,12 @@ func (cs *ChainSelector) computeEagernessLimitFromPeersLocked(
 		peerForced := false
 		// A peer advertising a wall-clock-stale tip is never selectable, so
 		// there is no switch to it for the limit to protect; counting it would
-		// pin the limit at k past its fork point while it stays connected.
+		// pin the limit at k past its fork point while it stays connected. The
+		// ConnectionEligible hook drops a chainsync observer the same way: its
+		// headers are not ingested, so its fragment can freeze.
 		if !cs.peerLiveEligibleNonStaleLocked(connId, peerTip) ||
-			cs.advertisedTipStaleLocked(peerTip) {
+			cs.advertisedTipStaleLocked(peerTip) ||
+			!cs.eagernessCandidateAdmittedLocked(connId) {
 			if include == nil || *include != connId {
 				continue
 			}
@@ -193,7 +212,15 @@ func (cs *ChainSelector) computeEagernessLimitFromPeersLocked(
 			continue
 		}
 		fragments = append(fragments, fragment)
+		if peerForced {
+			forcedFragment = len(fragments) - 1
+		}
 	}
+	fragments = dropInertImmutableFragments(
+		fragments,
+		immutableBlock,
+		forcedFragment,
+	)
 	if len(fragments) == 0 {
 		if include == nil {
 			cs.setEagernessAnchor(nil)
@@ -262,6 +289,76 @@ func (cs *ChainSelector) computeEagernessLimitFromPeersLocked(
 		cs.securityParam,
 	)
 	return limit
+}
+
+// dropInertImmutableFragments removes fragments that end exactly at the
+// immutable tip and cannot constrain a selection: ones that share no point
+// with any candidate extending past the immutable tip, and ones that are a
+// strict prefix of such a candidate. A head at the immutable tip is either a
+// prefix of the local chain or a fork deeper than k, and a peer that stopped
+// delivering there keeps it indefinitely. Left in, it holds the limit at k
+// past its last shared point, which is the applied tip once the local chain
+// has advanced that far, and no later event can raise it. Fragments stalled
+// at the same head agree only with each other, so they are judged against the
+// extending candidates alone. A fork that shares a point with an extending
+// candidate without being its prefix is kept: the candidates disagree, and the
+// limit holds until one is removed. Without an extending candidate nothing is
+// dropped. The fragment at keep, when non-negative, belongs to the forced
+// sender and stays.
+func dropInertImmutableFragments(
+	fragments []CandidateFragment,
+	immutableBlock uint64,
+	keep int,
+) []CandidateFragment {
+	if immutableBlock == 0 {
+		return fragments
+	}
+	var extending []CandidateFragment
+	for _, fragment := range fragments {
+		if fragmentHeadBlock(fragment) > immutableBlock {
+			extending = append(extending, fragment)
+		}
+	}
+	if len(extending) == 0 || len(extending) == len(fragments) {
+		return fragments
+	}
+	var kept []CandidateFragment
+	for i, fragment := range fragments {
+		if i == keep || fragmentHeadBlock(fragment) != immutableBlock ||
+			!inertAgainst(fragment, extending) {
+			kept = append(kept, fragment)
+		}
+	}
+	return kept
+}
+
+// inertAgainst reports whether fragment, which ends at the immutable tip, is a
+// strict prefix of any extending candidate or shares no point with any of
+// them. Every extending fragment ends past it, so containing its head makes it
+// a strict prefix. The prefix check runs first so the verdict does not depend
+// on candidate order.
+func inertAgainst(
+	fragment CandidateFragment,
+	extending []CandidateFragment,
+) bool {
+	headPoint := fragment.HeadPoint()
+	for _, other := range extending {
+		if other.containsPoint(headPoint) {
+			return true
+		}
+	}
+	for _, other := range extending {
+		if _, ok := fragment.intersectTip(other); ok {
+			return false
+		}
+	}
+	return true
+}
+
+// fragmentHeadBlock returns the block number of a non-empty fragment's head.
+func fragmentHeadBlock(fragment CandidateFragment) uint64 {
+	// #nosec G115 -- the retained fragment length is bounded.
+	return fragment.baseBlock + uint64(fragment.Len()-1)
 }
 
 func (cs *ChainSelector) setEagernessAnchor(anchor *eagernessAnchor) {

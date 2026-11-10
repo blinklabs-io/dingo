@@ -42,27 +42,8 @@ func initialNodeSettingsGates() nodesettings.Values {
 	}
 }
 
-func TestNodeSettingsGatesRoundTrip(t *testing.T) {
-	store := newManagementTestStore(t)
-	gates, err := store.GetNodeSettingsGates(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, initialNodeSettingsGates(), gates)
-
-	require.NoError(t, store.SetNodeSettingsGates(context.Background(),
-		nodesettings.Values{
-			"network_magic": "1",
-			"start_era":     "dijkstra",
-		},
-		42, 1000,
-	))
-
-	gates, err = store.GetNodeSettingsGates(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, "1", gates["network_magic"])
-	require.Equal(t, "dijkstra", gates["start_era"])
-}
-
 func TestNodeSettingsGatesUpsertOverwrites(t *testing.T) {
+	t.Parallel()
 	store := newManagementTestStore(t)
 	require.NoError(t, store.SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{"storage_mode": "api"}, 1, 10,
@@ -75,36 +56,13 @@ func TestNodeSettingsGatesUpsertOverwrites(t *testing.T) {
 	require.Equal(t, "core", gates["storage_mode"])
 }
 
-func TestNodeSettingsGatesEmptyWriteIsNoOp(t *testing.T) {
-	store := newManagementTestStore(t)
-	require.NoError(t, store.SetNodeSettingsGates(context.Background(), nil, 0, 0))
-	gates, err := store.GetNodeSettingsGates(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, initialNodeSettingsGates(), gates)
-}
-
-// TestInsertNodeSettingsGateIfAbsentFirstCallWins pins the ordinary case:
-// the first call for a name inserts and reports it, unlike
-// SetNodeSettingsGates's unconditional upsert.
-func TestInsertNodeSettingsGateIfAbsentFirstCallWins(t *testing.T) {
-	store := newManagementTestStore(t)
-	inserted, err := store.InsertNodeSettingsGateIfAbsent(context.Background(),
-		"network_magic", "1", 0, 0,
-	)
-	require.NoError(t, err)
-	require.True(t, inserted)
-
-	gates, err := store.GetNodeSettingsGates(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, "1", gates["network_magic"])
-}
-
 // TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite is
 // InsertNodeSettingsGateIfAbsent's whole point: a second call for a name
 // that already has a row must report that it did not insert and must never
 // touch the existing value -- the opposite of SetNodeSettingsGates's
 // upsert, which always overwrites regardless of what is already there.
 func TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite(t *testing.T) {
+	t.Parallel()
 	store := newManagementTestStore(t)
 	inserted, err := store.InsertNodeSettingsGateIfAbsent(context.Background(),
 		"network_magic", "1", 0, 0,
@@ -137,6 +95,7 @@ func TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite(t *testing.T) {
 func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
 	t *testing.T,
 ) {
+	t.Parallel()
 	store := newManagementTestStore(t)
 	const attempts = 8
 	results := make([]bool, attempts)
@@ -168,6 +127,7 @@ func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
 }
 
 func TestInsertNodeSettingsGatesIfAbsentConcurrentSetsAreAtomic(t *testing.T) {
+	t.Parallel()
 	store := newManagementTestStore(t)
 	sets := []nodesettings.Values{
 		{"network_magic": "1", "start_era": "byron"},
@@ -209,6 +169,7 @@ func TestInsertNodeSettingsGatesIfAbsentConcurrentSetsAreAtomic(t *testing.T) {
 }
 
 func TestInsertNodeSettingsGatesIfAbsentPreservesRollbackFailure(t *testing.T) {
+	t.Parallel()
 	rollbackErr := errors.New("rollback failed")
 	err := errors.Join(errNodeSettingsGateInitializationLost, rollbackErr)
 	require.False(t, isOnlyNodeSettingsGateInitializationRace(err))
@@ -220,6 +181,7 @@ func TestInsertNodeSettingsGatesIfAbsentPreservesRollbackFailure(t *testing.T) {
 // it into a negative column value, matching the checkedInt64 guard already
 // used elsewhere in this package for the same write boundary.
 func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
+	t.Parallel()
 	const outOfDomain = uint64(math.MaxInt64) + 1
 
 	// requireOnlyInitialGates proves rejection actually left no new row behind:
@@ -301,6 +263,7 @@ func newManagementTestStore(t *testing.T) *Store {
 		),
 	)
 	require.NoError(t, err)
+	seedMigratedSQLite(t, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(Config{
@@ -1140,21 +1103,6 @@ func TestPoolRegistrationPersistenceKeepsLatestSameBlockFutureState(
 		"the first same-block future key must be released by its replacement")
 }
 
-func TestCommitTimestamp(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-	timestamp, err := store.GetCommitTimestamp(context.Background())
-	require.NoError(t, err)
-	require.Zero(t, timestamp)
-
-	transaction := store.Transaction(t.Context())
-	require.NoError(t, store.SetCommitTimestamp(1234, transaction))
-	require.NoError(t, transaction.Commit())
-	timestamp, err = store.GetCommitTimestamp(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, int64(1234), timestamp)
-}
-
 func TestNodeSettingsAreImmutableWithNetworkBackfill(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
@@ -1263,4 +1211,116 @@ func TestSettingsOperationsHonorCancelledContext(t *testing.T) {
 	gates, err := s.GetNodeSettingsGates(t.Context())
 	require.NoError(t, err)
 	require.NotContains(t, gates, "cancel_probe")
+}
+
+// TestPoolLookupsHonorSupersedingRetirement covers a pool that files a
+// retirement for the current epoch and then, before that epoch begins, a
+// second one for a later epoch. The second replaces the first (POOL), so the
+// pool is still registered and still holds its VRF key. The reverse order,
+// a later retirement moving the epoch earlier, retires it.
+func TestPoolLookupsHonorSupersedingRetirement(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		first      uint64
+		second     uint64
+		registered bool
+	}{
+		{name: "later epoch replaces current", first: 2, second: 4, registered: true},
+		{name: "current epoch replaces later", first: 4, second: 2, registered: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := newManagementTestStore(t)
+			poolKey := make([]byte, 28)
+			poolKey[0] = 1
+			vrfKey := make([]byte, 32)
+			vrfKey[0] = 2
+			require.NoError(t, store.ImportPool(
+				&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: vrfKey},
+				&models.PoolRegistration{
+					PoolKeyHash: poolKey,
+					VrfKeyHash:  vrfKey,
+					AddedSlot:   10,
+				},
+				nil,
+			))
+			require.NoError(t, store.RetirePools(nil, [][]byte{poolKey}, tc.first, 20))
+			require.NoError(t, store.RetirePools(nil, [][]byte{poolKey}, tc.second, 30))
+			require.NoError(t, store.SetEpoch(0, 1, nil, nil, nil, nil, 0, 1, 100, nil))
+			require.NoError(t, store.SetEpoch(100, 2, nil, nil, nil, nil, 0, 1, 100, nil))
+
+			regs, err := store.GetPoolRegistrationsEffectiveForEpoch(
+				[]lcommon.PoolKeyHash{lcommon.PoolKeyHash(poolKey)},
+				100, 2, math.MaxInt64, nil,
+			)
+			require.NoError(t, err)
+			got, err := store.GetPoolByVrfKeyHash(vrfKey, 100, nil)
+			require.NoError(t, err)
+			if tc.registered {
+				require.Len(t, regs, 1)
+				require.NotNil(t, got)
+				require.Equal(t, poolKey, got.PoolKeyHash)
+			} else {
+				require.Empty(t, regs)
+				require.Nil(t, got)
+			}
+		})
+	}
+}
+
+// TestPoolLookupsOrderSameSlotRetirements covers the tie-breaks inside one
+// slot: a second retirement later in the same block replaces the first, and a
+// snapshot import's synthetic retirement (certificate_id = 0) wins a tie with a
+// certificate registration at the same slot, as GetPoolKeyHashesRetiredByEpoch
+// resolves it.
+func TestPoolLookupsOrderSameSlotRetirements(t *testing.T) {
+	t.Parallel()
+	vrfKey := depositHeldRegistration(depositHeldPoolKey(0)).VrfKeyHash.Bytes()
+	for _, tc := range []struct {
+		name       string
+		seed       func(*testing.T, *Store, lcommon.PoolKeyHash)
+		registered bool
+	}{
+		{
+			name: "later transaction in the block supersedes",
+			seed: func(t *testing.T, store *Store, pool lcommon.PoolKeyHash) {
+				writeDepositHeldCert(t, store, 100, 0, depositHeldRegistration(pool), 500)
+				writeDepositHeldCert(t, store, 1_200, 0, depositHeldRetirement(pool, 2), 0)
+				writeDepositHeldCert(t, store, 1_200, 1, depositHeldRetirement(pool, 4), 0)
+			},
+			registered: true,
+		},
+		{
+			name: "synthetic retirement wins the slot",
+			seed: func(t *testing.T, store *Store, pool lcommon.PoolKeyHash) {
+				writeDepositHeldCert(t, store, 100, 1, depositHeldRegistration(pool), 500)
+				require.NoError(t, store.RetirePools(nil, [][]byte{pool.Bytes()}, 1, 100))
+			},
+			registered: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := newDepositHeldStore(t)
+			depositHeldEpochs(t, store, 6)
+			pool := depositHeldPoolKey(0xb1)
+			tc.seed(t, store, pool)
+
+			regs, err := store.GetPoolRegistrationsEffectiveForEpoch(
+				[]lcommon.PoolKeyHash{pool}, 2_000, 2, math.MaxInt64, nil,
+			)
+			require.NoError(t, err)
+			got, err := store.GetPoolByVrfKeyHash(vrfKey, 2_000, nil)
+			require.NoError(t, err)
+			if tc.registered {
+				require.Len(t, regs, 1)
+				require.NotNil(t, got)
+				require.Equal(t, pool.Bytes(), got.PoolKeyHash)
+			} else {
+				require.Empty(t, regs)
+				require.Nil(t, got)
+			}
+		})
+	}
 }

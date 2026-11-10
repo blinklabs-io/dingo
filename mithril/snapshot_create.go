@@ -716,7 +716,7 @@ func readAncillary(root *os.Root) (*ancillaryState, uint64, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("selecting ledger state: %w", err)
 	}
-	stateData, err := io.ReadAll(files.State)
+	stateData, err := ledgerstate.ReadSnapshotFile(files.State)
 	if err != nil {
 		files.Close()
 		return nil, 0, fmt.Errorf("reading ledger state: %w", err)

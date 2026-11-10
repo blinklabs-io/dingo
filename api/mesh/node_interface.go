@@ -47,7 +47,10 @@ type MeshLedgerState interface {
 	GetCurrentPParams() lcommon.ProtocolParameters
 	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
 	SlotToTime(slot uint64) (time.Time, error)
-	UtxosByAddress(addrs []lcommon.Address) ([]models.Utxo, error)
+	UtxosByAddress(
+		ctx context.Context,
+		addrs []lcommon.Address,
+	) ([]models.Utxo, error)
 	// ScanUtxosByAddress visits every UTxO matching q's exact address
 	// patterns in bounded pages from one snapshot and returns the tip stored
 	// in that snapshot, as ledger.LedgerState.ScanUtxosByAddress does.

@@ -87,6 +87,9 @@ type PoolStakeSnapshot struct {
 	StakeDenominator types.Uint64
 	DelegatorCount   uint64
 	CapturedSlot     uint64
+	// VrfKeyHash freezes the VRF key that elects this pool with the stake
+	// distribution. Nil denotes a snapshot captured before the key was stored.
+	VrfKeyHash []byte
 	// LeiosKeyPublic and LeiosKeyPossessionProof freeze the pool's optional
 	// Dijkstra/Leios voting key at the same boundary as its stake. Both are
 	// nil for a keyless seat and for legacy snapshots captured before the key

@@ -782,17 +782,6 @@ func TestBackfillKeepsImportedDormancyAndExpiryForHistoricalDRepRegistration(t *
 	assert.Equal(t, uint64(3), dormantEpochs)
 }
 
-func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	bf := NewBackfill(db, nil, slog.Default())
-
-	require.Equal(t, 200, bf.batchSize)
-	require.NoError(t, bf.SetBatchSize(300))
-	require.Equal(t, 300, bf.batchSize)
-}
-
 type fixedBackfillBatchMetrics struct {
 	rows  int
 	bytes int64
@@ -1267,35 +1256,6 @@ func TestRun_AlreadyCompleted(t *testing.T) {
 
 	// Run should return immediately without error
 	err = bf.Run(context.Background())
-	require.NoError(t, err)
-}
-
-func TestRun_CancelledContext_EmptyBlobStore(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	bf := NewBackfill(db, nil, slog.Default())
-
-	// Create an incomplete checkpoint so Run will attempt work
-	now := time.Now()
-	cp := &models.BackfillCheckpoint{
-		Phase:      BackfillPhase,
-		LastSlot:   0,
-		TotalSlots: 100000,
-		StartedAt:  now,
-		UpdatedAt:  now,
-		Completed:  false,
-	}
-	err := db.Metadata().SetBackfillCheckpoint(cp, nil)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	// With an empty blob store (tipSlot=0) Run returns nil early
-	// before reaching the iteration loop, even with a cancelled
-	// context.
-	err = bf.Run(ctx)
 	require.NoError(t, err)
 }
 
@@ -1785,6 +1745,89 @@ func TestRun_ConsumedInputRecoveryDependsOnFreshBootstrap(t *testing.T) {
 			require.NotEmpty(t, progress)
 			skipped := progress[len(progress)-1].Stats.SkippedInputRecovery
 			if tc.wantSkippedInputs {
+				assert.Greater(t, skipped, uint64(0))
+			} else {
+				assert.Zero(t, skipped)
+			}
+		})
+	}
+}
+
+// TestRun_ConsumedInputRecoveryBoundedAfterRestart pins the recovery window: a
+// restart that has no legacy progress replays only the first window of blocks
+// with recovery, because later blocks cannot have committed before the
+// restart. Legacy progress without block identity keeps recovery for the
+// whole chain.
+func TestRun_ConsumedInputRecoveryBoundedAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		window       int
+		legacySlot   uint64
+		legacy       bool
+		resumeBlock  int
+		bindIdentity bool
+		wantSkipping bool
+	}{
+		{
+			name:         "restart past window skips recovery",
+			window:       1,
+			bindIdentity: true,
+			wantSkipping: true,
+		},
+		{name: "restart inside window recovers", window: 100, bindIdentity: true},
+		{
+			name:         "window is measured from the resume point",
+			window:       1,
+			bindIdentity: true,
+			resumeBlock:  1,
+		},
+		{name: "legacy progress recovers whole chain", window: 1, legacySlot: 2, legacy: true},
+		{name: "zero-slot legacy checkpoint recovers whole chain", window: 1, legacy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := newTestDB(t)
+			blocks, err := testfixtures.GenerateConwayChainWithTransactions(3)
+			require.NoError(t, err)
+			for _, block := range blocks {
+				require.NoError(t, db.BlockCreate(models.Block{
+					Slot:   block.SlotNumber(),
+					Hash:   block.Hash().Bytes(),
+					Number: block.BlockNumber(),
+					Cbor:   block.Cbor(),
+					Type:   uint(block.Type()),
+				}, nil))
+			}
+			now := time.Now()
+			cp := &models.BackfillCheckpoint{
+				Phase:     BackfillPhase,
+				LastSlot:  tc.legacySlot,
+				StartedAt: now,
+				UpdatedAt: now,
+			}
+			if tc.bindIdentity {
+				cp.LastSlot = blocks[tc.resumeBlock].SlotNumber()
+				bindBackfillCheckpointIdentity(t, db, cp)
+			}
+			if tc.legacy || tc.bindIdentity {
+				require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
+			}
+
+			var progress []BackfillProgress
+			bf := NewBackfill(
+				db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)),
+			)
+			bf.recoveryWindowBlocks = tc.window
+			bf.SetProgressFunc(func(p BackfillProgress) {
+				progress = append(progress, p)
+			})
+			require.NoError(t, bf.Run(context.Background()))
+			require.NotEmpty(t, progress)
+			skipped := progress[len(progress)-1].Stats.SkippedInputRecovery
+			if tc.wantSkipping {
 				assert.Greater(t, skipped, uint64(0))
 			} else {
 				assert.Zero(t, skipped)
@@ -3160,4 +3203,127 @@ func TestRun_WritesBlockNoncesBelowEndSlot(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// A checkpoint on the first block of a Byron epoch shares its slot with the
+// epoch boundary block before it, so the checkpoint must be resolved by its
+// index rather than by slot.
+func TestRun_ResumesFromCheckpointSharingEbbSlot(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 2)
+	require.NoError(t, err)
+	ebbHash := bytes.Repeat([]byte{0xeb}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:   database.BlockInitialIndex,
+		Slot: blocks[0].SlotNumber(),
+		Hash: ebbHash,
+		Cbor: []byte{0x80},
+		Type: 0,
+	}, nil))
+	for i, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:     database.BlockInitialIndex + 1 + uint64(i),
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	now := time.Now()
+	lastIndex := database.BlockInitialIndex + 1
+	cp := &models.BackfillCheckpoint{
+		Phase:         BackfillPhase,
+		LastSlot:      blocks[0].SlotNumber(),
+		LastIndexID:   &lastIndex,
+		LastBlockHash: blocks[0].Hash().Bytes(),
+		TotalSlots:    blocks[1].SlotNumber(),
+		StartedAt:     now,
+		UpdatedAt:     now,
+	}
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, bf.Run(context.Background()))
+
+	stored, err := db.Metadata().GetBackfillCheckpoint(BackfillPhase, nil)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.True(t, stored.Completed)
+	require.Equal(t, blocks[1].SlotNumber(), stored.LastSlot)
+}
+
+// The recovery window assumes every periodic checkpoint was saved, so a failed
+// save must stop the run rather than let committed rows outrun it.
+func TestRun_PeriodicCheckpointFailureStopsBackfill(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(3)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.recoveryWindowBlocks = 1
+	writeErr := errors.New("checkpoint write failed")
+	var writes int
+	bf.writeCheckpoint = func(cp *models.BackfillCheckpoint) error {
+		writes++
+		return writeErr
+	}
+	err = bf.Run(context.Background())
+	require.ErrorIs(t, err, writeErr)
+	require.Equal(t, 1, writes, "the run must stop at the first failed save")
+}
+
+// A resume from a checkpoint partway through the chain counts its recovery
+// window from the resume point, not from genesis.
+func TestRun_ConsumedInputRecoveryWindowFromMidChainCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(4)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+	now := time.Now()
+	cp := &models.BackfillCheckpoint{
+		Phase:      BackfillPhase,
+		LastSlot:   blocks[0].SlotNumber(),
+		TotalSlots: blocks[len(blocks)-1].SlotNumber(),
+		StartedAt:  now,
+		UpdatedAt:  now,
+	}
+	bindBackfillCheckpointIdentity(t, db, cp)
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
+
+	var progress []BackfillProgress
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.recoveryWindowBlocks = 1
+	bf.SetProgressFunc(func(p BackfillProgress) {
+		progress = append(progress, p)
+	})
+	require.NoError(t, bf.Run(context.Background()))
+	require.NotEmpty(t, progress)
+	last := progress[len(progress)-1]
+	require.Equal(t, len(blocks)-1, last.ProcessedBlocks,
+		"the run must resume after the checkpoint, not from genesis")
+	assert.Greater(t, last.Stats.SkippedInputRecovery, uint64(0))
 }

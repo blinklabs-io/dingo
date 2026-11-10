@@ -672,6 +672,11 @@ type DMQConfig struct {
 	// MessageTTL is the longest expiry, in seconds, a submitted message may
 	// claim.
 	MessageTTL uint `yaml:"messageTtl"   envconfig:"DINGO_DMQ_MESSAGE_TTL"`
+	// MinPoolMessageInterval is the shortest time, in seconds, between two
+	// messages of one pool that are announced to a peer. dmq-node ends the
+	// connection when a pool's messages come closer together than its own
+	// setting, which defaults to 60 seconds. Zero announces without spacing.
+	MinPoolMessageInterval uint `yaml:"minPoolMessageInterval" envconfig:"DINGO_DMQ_MIN_POOL_MESSAGE_INTERVAL"`
 	// MaxMempoolSize bounds the message pool, in megabytes.
 	MaxMempoolSize uint `yaml:"maxMempoolSize" envconfig:"DINGO_DMQ_MAX_MEMPOOL_SIZE"`
 	// N2NPort is the TCP port peers connect to. It is independent of the
@@ -713,14 +718,15 @@ func (c *DMQConfig) UnmarshalYAML(node *yaml.Node) error {
 // DefaultDMQConfig returns the default DMQ settings.
 func DefaultDMQConfig() DMQConfig {
 	return DMQConfig{
-		Topic:             "mithril",
-		SocketPath:        "dingo-dmq.socket",
-		MessageTTL:        1800,
-		MaxMempoolSize:    128,
-		ListenAddress:     "0.0.0.0",
-		ListenIPv6Address: "::",
-		MinPeers:          3,
-		MaxPeers:          10,
+		Topic:                  "mithril",
+		SocketPath:             "dingo-dmq.socket",
+		MessageTTL:             1800,
+		MinPoolMessageInterval: 60,
+		MaxMempoolSize:         128,
+		ListenAddress:          "0.0.0.0",
+		ListenIPv6Address:      "::",
+		MinPeers:               3,
+		MaxPeers:               10,
 	}
 }
 
@@ -874,6 +880,11 @@ type Config struct {
 	TracingServiceName string `yaml:"tracingServiceName"                  envconfig:"DINGO_TRACING_SERVICE_NAME"`
 	// TracingSampleRatio is the fraction of new traces sampled, from 0 to 1.
 	TracingSampleRatio float64 `yaml:"tracingSampleRatio"                  envconfig:"DINGO_TRACING_SAMPLE_RATIO"`
+
+	// TracingAlwaysSamplePools lists stake pool IDs (bech32 or hex key hash)
+	// whose blocks are traced regardless of TracingSampleRatio.
+	TracingAlwaysSamplePools []string `yaml:"tracingAlwaysSamplePools" envconfig:"DINGO_TRACING_ALWAYS_SAMPLE_POOLS"`
+
 	// TracingStdout redirects spans to stdout instead of OTLP. Requires
 	// Tracing to also be enabled. Mostly useful for local debugging.
 	TracingStdout   bool     `yaml:"tracingStdout"                       envconfig:"DINGO_TRACING_STDOUT"`
@@ -950,6 +961,9 @@ type Config struct {
 	MaxNtCConns              int           `yaml:"maxNtCConns"              envconfig:"DINGO_MAX_NTC_CONNS"`
 	MaxNtCConnectionsPerIP   int           `yaml:"maxNtCConnectionsPerIP"   envconfig:"DINGO_MAX_NTC_CONNECTIONS_PER_IP"`
 	MaxTrustedLocalNtCConns  int           `yaml:"maxTrustedLocalNtCConns"  envconfig:"DINGO_MAX_TRUSTED_LOCAL_NTC_CONNS"`
+	// TrustedNtCIdleTimeout closes a trusted local node-to-client connection
+	// that has been idle this long. Zero, the default, means no limit.
+	TrustedNtCIdleTimeout time.Duration `yaml:"trustedNtCIdleTimeout" envconfig:"DINGO_TRUSTED_NTC_IDLE_TIMEOUT"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
@@ -1061,6 +1075,9 @@ type Config struct {
 	// adoption and diffusion. Defaults to true (fail closed); set to false
 	// only to explicitly opt out.
 	ValidateForgedBlock bool `yaml:"validateForgedBlock"              envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+
+	// CIP0203Enabled adds the build version to forged block identifiers.
+	CIP0203Enabled bool `yaml:"cip0203Enabled" envconfig:"DINGO_CIP0203_ENABLED"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
@@ -1596,7 +1613,6 @@ func newDefaultConfig() *Config {
 		StrictUtxoValidation:                true,
 		Tracing:                             false,
 		TracingStdout:                       false,
-		TracingServiceName:                  "dingo",
 		TracingSampleRatio:                  1,
 		Network:                             "preview",
 		NetworkMagic:                        0,
@@ -1789,6 +1805,10 @@ func cloneConfig(cfg *Config) *Config {
 		cfg.BarkLifecycleOperatorCertificateFingerprints...,
 	)
 	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
+	clone.TracingAlwaysSamplePools = append(
+		[]string(nil),
+		cfg.TracingAlwaysSamplePools...,
+	)
 	if cfg.PeerSharing != nil {
 		peerSharing := *cfg.PeerSharing
 		clone.PeerSharing = &peerSharing

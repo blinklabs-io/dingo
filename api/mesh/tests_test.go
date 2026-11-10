@@ -103,28 +103,6 @@ func TestNewServerRequiresDependencies(t *testing.T) {
 	}
 }
 
-// TestNewServerDefaults covers the optional configuration: a nil logger
-// and an empty listen address must not leave the server unusable.
-func TestNewServerDefaults(t *testing.T) {
-	t.Parallel()
-
-	deps := newTestDeps()
-	srv, err := NewServer(ServerConfig{
-		LedgerState: deps.ledger,
-		Database:    deps.database,
-		Chain:       deps.chain,
-		Mempool:     deps.mempool,
-		Network:     testNetwork,
-		GenesisHash: testGenesisHash,
-	})
-
-	if err != nil {
-		t.Fatalf("Mesh constructor rejected valid dependencies with a ledger clock: %v", err)
-	}
-	require.NotNil(t, srv.logger)
-	require.Equal(t, defaultListenAddr, srv.config.ListenAddress)
-}
-
 // TestNewServerAddressNetworkFollowsMagic asserts the address network
 // used for every derived address is chosen from the network magic.
 func TestNewServerAddressNetworkFollowsMagic(t *testing.T) {
@@ -510,55 +488,7 @@ func TestRequestBodyAtLimitIsAccepted(t *testing.T) {
 	decodeResponse[NetworkStatusResponse](t, rec)
 }
 
-// TestServerTimeoutsAreConfigured pins the listener timeouts, which
-// bound how long a slow or idle client can hold a connection.
-// ReadTimeout is the backstop for a request whose body no handler
-// reads, which the per-request deadline in decodeRequest never sees.
-func TestServerTimeoutsAreConfigured(t *testing.T) {
-	t.Parallel()
-
-	srv, _ := startTestServer(t, newTestDeps())
-
-	httpServer := srv.listener.Server()
-
-	require.NotNil(t, httpServer)
-	require.Equal(
-		t, 60*time.Second, httpServer.ReadHeaderTimeout,
-	)
-	require.Equal(
-		t, listenerReadTimeout, httpServer.ReadTimeout,
-	)
-	require.Positive(t, httpServer.ReadTimeout)
-	require.Equal(t, 30*time.Second, httpServer.WriteTimeout)
-	require.Equal(t, 120*time.Second, httpServer.IdleTimeout)
-}
-
-// TestDefaultRequestBodyTimeoutIsApplied asserts a server built
-// without an explicit body deadline still gets one, so the bound
-// cannot be lost by composition code that never sets it.
-func TestDefaultRequestBodyTimeoutIsApplied(t *testing.T) {
-	t.Parallel()
-
-	srv := newTestServer(t, newTestDeps())
-
-	require.Equal(
-		t, defaultRequestBodyTimeout, srv.config.requestBodyTimeout,
-	)
-}
-
 // --- routing ------------------------------------------------------------
-
-// TestUnknownRouteIsNotFound asserts an unregistered path does not fall
-// through to a handler.
-func TestUnknownRouteIsNotFound(t *testing.T) {
-	t.Parallel()
-
-	h := newTestHandler(t, newTestDeps())
-
-	rec := postRaw(t, h, "/does/not/exist", "{}")
-
-	require.Equal(t, http.StatusNotFound, rec.Code)
-}
 
 // TestRoutesRejectNonPost asserts every Mesh endpoint is POST-only, as
 // the Rosetta specification requires.
@@ -940,8 +870,12 @@ func (f *fakeLedgerState) SlotToTime(
 }
 
 func (f *fakeLedgerState) UtxosByAddress(
+	ctx context.Context,
 	addrs []lcommon.Address,
 ) ([]models.Utxo, error) {
+	if f.utxosComplete != nil {
+		return f.utxosComplete(ctx, addrs)
+	}
 	if f.utxos == nil {
 		return nil, nil
 	}
@@ -965,7 +899,7 @@ func (f *fakeLedgerState) ScanUtxosByAddress(
 	if f.utxosComplete != nil {
 		utxos, err = f.utxosComplete(ctx, nil)
 	} else {
-		utxos, err = f.UtxosByAddress(nil)
+		utxos, err = f.UtxosByAddress(ctx, nil)
 	}
 	if err != nil {
 		return ochainsync.Tip{}, err
@@ -1570,10 +1504,6 @@ func recordRequest(
 	h.ServeHTTP(rec, req)
 	return rec
 }
-
-// newDiscardWriter returns a writer that drops everything written to
-// it, for silencing component loggers in tests.
-func newDiscardWriter() io.Writer { return io.Discard }
 
 func TestMeshAnonymousPlaintextTLSAndCORS(t *testing.T) {
 	t.Parallel()

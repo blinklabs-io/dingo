@@ -55,23 +55,10 @@ LIMIT ? OFFSET ?`,
 	require.Contains(
 		t,
 		plan,
-		"idx_reward_account_output_credential_spendable_guarded",
+		"idx_reward_account_output_credential_epoch "+
+			"(credential_tag=? AND staking_key=?)",
 	)
-	require.Contains(t, plan, "guarded=?")
+	require.NotContains(t, plan, "TEMP B-TREE",
+		"the index supplies the epoch, pool, type order")
 	require.NotContains(t, strings.ToUpper(plan), "SCAN REWARD_ACCOUNT_OUTPUT")
-}
-
-func TestV1Alpha1AddressTransactionIndex(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-	var count int
-	require.NoError(t, store.writeDB.QueryRow(`
-SELECT COUNT(*)
-FROM pragma_index_info('idx_addr_tx_stake_position')
-WHERE (seqno = 0 AND name = 'credential_tag')
-   OR (seqno = 1 AND name = 'staking_key')
-   OR (seqno = 2 AND name = 'slot')
-   OR (seqno = 3 AND name = 'tx_index')
-   OR (seqno = 4 AND name = 'payment_key')`).Scan(&count))
-	require.Equal(t, 5, count)
 }

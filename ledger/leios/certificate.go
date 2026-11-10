@@ -27,6 +27,11 @@ import (
 // represent enough stake to meet the quorum threshold.
 var ErrQuorumNotMet = errors.New("stake quorum not met")
 
+// ErrUnknownSignerKey is returned when a certificate signer has no
+// resolvable public key, so the aggregate signature cannot be verified.
+// A stake quorum alone never validates a certificate.
+var ErrUnknownSignerKey = errors.New("certificate signer has no known key")
+
 // ErrInvalidCertificate marks a VoteManager.ValidateDijkstraCertificate
 // failure as a verdict on the certificate: a malformed aggregate signature or
 // signer bitfield, a signer with no usable key, a quorum shortfall, or an
@@ -105,18 +110,10 @@ func BuildEbCertificate(
 
 // ValidateEbCertificate checks a certificate against the committee for its
 // epoch: structural validity (bitfield size, unused bits, signature size),
-// stake quorum (signer stake >= tau * total active stake), and -- when the
-// registry knows every signer's public key -- the aggregated BLS
-// signature. sigChecked reports whether the signature was verified; it is
-// false when one or more signer public keys are unknown (lenient mode,
-// pending CIP-0164 key registration).
-//
-// Callers: sigChecked=false means "quorum met, signature not confirmed,"
-// not "invalid" -- but nothing here enforces that a caller checks it. This
-// function has no production caller today, so getting that distinction
-// wrong currently costs nothing; the first one added should either use a
-// named result type or treat !sigChecked as a hard failure explicitly,
-// since a bool return is easy to drop on the floor.
+// stake quorum (signer stake >= tau * total active stake), and the
+// aggregated BLS signature. Every signer must have a public key in the
+// registry; a signer without one fails with ErrUnknownSignerKey, so stake
+// alone never validates. sigChecked is true exactly when err is nil.
 func ValidateEbCertificate(
 	cert *lcommon.LeiosEbCertificate,
 	committee *Committee,
@@ -134,20 +131,17 @@ func ValidateEbCertificate(
 	}
 	var signerStake uint64
 	signerPubs := make([]*bls12381.G2Affine, 0, len(committee.Members))
-	allKeysKnown := true
 	for _, member := range committee.Members {
 		if !cert.Signer(member.VoterId) {
 			continue
 		}
 		signerStake += member.Stake
 		if registry == nil {
-			allKeysKnown = false
-			continue
+			return false, unknownSignerKeyError(member.VoterId)
 		}
 		pub, ok := registry.PublicKeyFor(member.PoolKeyHash)
 		if !ok {
-			allKeysKnown = false
-			continue
+			return false, unknownSignerKeyError(member.VoterId)
 		}
 		signerPubs = append(signerPubs, pub)
 	}
@@ -168,11 +162,6 @@ func ValidateEbCertificate(
 			quorumStakeThreshold.String(),
 		)
 	}
-	if !allKeysKnown {
-		// Lenient mode: quorum validated, but the aggregate signature
-		// cannot be checked without every signer's public key.
-		return false, nil
-	}
 	msg := VoteMessageBytes(cert.SlotNo, cert.EndorserBlockHash)
 	if err := VerifyAggregateSignature(
 		signerPubs,
@@ -186,14 +175,10 @@ func ValidateEbCertificate(
 
 // ValidatePrototypeEbCertificate validates a Musashi prototype certificate.
 // Prototype vote signatures cover the announcing ranking-block hash rather
-// than the legacy slot-plus-EB-hash message. Like ValidateEbCertificate,
-// sigChecked reports whether the aggregate signature was verified; it is
-// false when one or more signers have no resolvable key (a keyless
-// committee seat, or a key registered on-chain that this call was not
-// given -- registry here is deliberately limited to private-harness keys,
-// not the on-chain resolution VoteManager performs). See
-// ValidateEbCertificate's doc comment for the same caveat about callers
-// needing to check sigChecked -- nothing here enforces that they do.
+// than the legacy slot-plus-EB-hash message. Like ValidateEbCertificate, it
+// fails with ErrUnknownSignerKey when any signer has no key in registry
+// (registry is limited to private-harness keys, not the on-chain resolution
+// VoteManager performs), and sigChecked is true exactly when err is nil.
 func ValidatePrototypeEbCertificate(
 	cert *lcommon.LeiosEbCertificate,
 	announcingRbHash lcommon.Blake2b256,
@@ -212,7 +197,6 @@ func ValidatePrototypeEbCertificate(
 	}
 	var signerStake uint64
 	signerPubs := make([]*bls12381.G2Affine, 0, len(committee.Members))
-	allKeysKnown := true
 	for _, member := range committee.Members {
 		if !cert.Signer(member.VoterId) {
 			continue
@@ -223,8 +207,7 @@ func ValidatePrototypeEbCertificate(
 			pub, _ = registry.PublicKeyFor(member.PoolKeyHash)
 		}
 		if pub == nil {
-			allKeysKnown = false
-			continue
+			return false, unknownSignerKeyError(member.VoterId)
 		}
 		signerPubs = append(signerPubs, pub)
 	}
@@ -245,9 +228,6 @@ func ValidatePrototypeEbCertificate(
 			quorumStakeThreshold.String(),
 		)
 	}
-	if !allKeysKnown {
-		return false, nil
-	}
 	if err := VerifyAggregateSignature(
 		signerPubs,
 		PrototypeVoteMessageBytes(announcingRbHash),
@@ -256,4 +236,8 @@ func ValidatePrototypeEbCertificate(
 		return false, err
 	}
 	return true, nil
+}
+
+func unknownSignerKeyError(voterId uint64) error {
+	return fmt.Errorf("%w: voter id %d", ErrUnknownSignerKey, voterId)
 }

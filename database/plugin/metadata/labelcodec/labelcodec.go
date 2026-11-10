@@ -198,7 +198,7 @@ func metadatumRawToJSON(raw cbor.RawMessage) (string, error) {
 	}
 	jsonBytes, err := json.Marshal(tmpValue)
 	if err != nil {
-		return "", fmt.Errorf("marshal metadatum json: %w", err)
+		return "", fmt.Errorf("%w: marshal metadatum json: %w", ErrJSONUnavailable, err)
 	}
 	return string(jsonBytes), nil
 }
@@ -262,9 +262,15 @@ func extractFromMetadatum(
 		if err == nil {
 			jsonBytes, marshalErr := json.Marshal(jsonValueAny)
 			if marshalErr != nil {
-				return nil, fmt.Errorf("encode metadata label %s JSON: %w", keyInt.Value.String(), marshalErr)
+				err = fmt.Errorf(
+					"%w: encode metadata label %s JSON: %w",
+					ErrJSONUnavailable,
+					keyInt.Value.String(),
+					marshalErr,
+				)
+			} else {
+				jsonValue = string(jsonBytes)
 			}
-			jsonValue = string(jsonBytes)
 		}
 		entry := Entry{
 			Label:     label,
@@ -282,6 +288,20 @@ func extractFromMetadatum(
 
 // Convert to JSON safe (int/text/bytes/list/map)
 func metadatumToJSONValue(md lcommon.TransactionMetadatum) (any, error) {
+	return metadatumToJSONValueAtDepth(md, 0)
+}
+
+func metadatumToJSONValueAtDepth(md lcommon.TransactionMetadatum, depth int) (any, error) {
+	if depth >= lcommon.MetadataJSONMaxNestingDepth {
+		switch md.(type) {
+		case lcommon.MetaList, lcommon.MetaMap:
+			return nil, fmt.Errorf(
+				"%w: metadata JSON exceeds maximum nesting depth %d",
+				ErrJSONUnavailable,
+				lcommon.MetadataJSONMaxNestingDepth,
+			)
+		}
+	}
 	switch m := md.(type) {
 	case lcommon.MetaInt:
 		if m.Value == nil {
@@ -298,7 +318,7 @@ func metadatumToJSONValue(md lcommon.TransactionMetadatum) (any, error) {
 	case lcommon.MetaList:
 		ret := make([]any, 0, len(m.Items))
 		for _, item := range m.Items {
-			tmp, err := metadatumToJSONValue(item)
+			tmp, err := metadatumToJSONValueAtDepth(item, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -319,7 +339,7 @@ func metadatumToJSONValue(md lcommon.TransactionMetadatum) (any, error) {
 					key,
 				)
 			}
-			tmp, err := metadatumToJSONValue(pair.Value)
+			tmp, err := metadatumToJSONValueAtDepth(pair.Value, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -342,15 +362,13 @@ func metadatumMapKeyToString(md lcommon.TransactionMetadatum) (string, error) {
 		return m.Value, nil
 	case lcommon.MetaBytes:
 		return hex.EncodeToString(m.Value), nil
+	case lcommon.MetaList, lcommon.MetaMap:
+		return "", fmt.Errorf(
+			"%w: metadata %s key cannot be represented as a JSON object key",
+			ErrJSONUnavailable,
+			md.TypeName(),
+		)
 	default:
-		tmp, err := metadatumToJSONValue(md)
-		if err != nil {
-			return "", err
-		}
-		jsonBytes, err := json.Marshal(tmp)
-		if err != nil {
-			return "", err
-		}
-		return string(jsonBytes), nil
+		return "", fmt.Errorf("unsupported metadatum map key type: %T", md)
 	}
 }

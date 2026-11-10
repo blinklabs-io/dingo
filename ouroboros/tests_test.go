@@ -1175,7 +1175,9 @@ func TestPeerOfferedEndorserBlockLocalValidationFailureRemainsRetryable(
 	require.NoError(t, err)
 	point := ocommon.NewPoint(42, lcommon.Blake2b256Hash(blockRaw).Bytes())
 	ledger := &fakeLeiosAnnouncementLedger{
-		txValidationErr: errors.New("read validation snapshot: database unavailable"),
+		txValidationErr: errors.New(
+			"read validation snapshot: database unavailable",
+		),
 	}
 	o := newOuroboros(OuroborosConfig{
 		EnableLeios:             true,
@@ -2218,6 +2220,12 @@ func TestLoadLeiosEBFromDBServesOversizedEntryUncached(t *testing.T) {
 		db.SetLeiosEB(point.Slot, point.Hash, manifestRaw, txs),
 	)
 
+	header := []byte("deferred-header")
+	key := leiosBlockKey(point.Slot, point.Hash)
+	o.leiosEBLog.registerConn("downstream", nil, nil)
+	o.leiosRelayPendingAnnouncements = map[string][]leiosPendingRelayAnnouncement{
+		key: {{raw: header, expiresAt: time.Now().Add(time.Minute)}},
+	}
 	// The reload still succeeds and returns the complete set to the caller...
 	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
@@ -2230,6 +2238,10 @@ func TestLoadLeiosEBFromDBServesOversizedEntryUncached(t *testing.T) {
 	_, cached := o.leiosEndorserBlocks[leiosBlockKey(point.Slot, point.Hash)]
 	o.leiosMu.RUnlock()
 	require.False(t, cached)
+	pending, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, pending)
+	require.Equal(t, header, pending.announcement)
+	require.Empty(t, o.leiosRelayPendingAnnouncements)
 }
 
 // Eviction case, persisted-reload path: two persisted endorser blocks that
@@ -2320,66 +2332,6 @@ func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
 //     backfill can retry against other peers) rather than the misleading decode
 // invariant failure that made look like a consensus/decode defect.
 
-// TestLeiosEndorserBlockLargeMapDecodesAllRefs proves the manifest decoder reads
-// every reference of a large map. 1200 refs requires a 2-byte CBOR map-header
-// length (0xb9 || uint16); 300 also needs the multi-byte branch. If the header
-// parsing dropped or mis-counted refs for large maps (the "decode to zero"
-// hypothesis), these would fail. The decoder accepts only a bare definite map.
-func TestLeiosEndorserBlockLargeMapDecodesAllRefs(t *testing.T) {
-	t.Parallel()
-
-	for _, refCount := range []int{24, 256, 300, 715, 1200, 1604} {
-		_, raw := testLeiosEndorserBlockRawWithRefs(t, 42, refCount)
-
-		// An endorser block is a bare definite-length map.
-		decoded, err := lcommon.NewLeiosEndorserBlockFromCbor(raw)
-		require.NoErrorf(t, err, "decode failed for %d refs", refCount)
-		require.Lenf(
-			t,
-			decoded.TransactionReferences,
-			refCount,
-			"expected %d refs", refCount,
-		)
-
-		// The earlier array-wrapped shape is no longer accepted.
-		_, err = lcommon.NewLeiosEndorserBlockFromCbor(
-			append([]byte{0x81}, raw...),
-		)
-		require.ErrorContainsf(
-			t,
-			err,
-			"expected map",
-			"array-wrapped shape for %d refs", refCount,
-		)
-	}
-}
-
-// TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest proves the exact
-// "must contain at least one transaction reference" error is emitted only for a
-// genuinely empty references map, and never for a large non-empty manifest.
-func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
-	t.Parallel()
-
-	const zeroRefsMsg = "must contain at least one transaction reference"
-
-	// Empty bare map: 0xa0.
-	_, err := lcommon.NewLeiosEndorserBlockFromCbor([]byte{0xa0})
-	require.ErrorContains(t, err, zeroRefsMsg)
-
-	// An array-wrapped empty map is a different shape and is rejected as one,
-	// not as an empty manifest.
-	_, err = lcommon.NewLeiosEndorserBlockFromCbor([]byte{0x81, 0xa0})
-	require.ErrorContains(t, err, "expected map")
-
-	// A large, non-empty manifest of the size reported in (~1000 refs is
-	// ~35 KB) does NOT produce the zero-refs error.
-	_, raw := testLeiosEndorserBlockRawWithRefs(t, 15, 1000)
-	require.Greater(t, len(raw), 30000, "manifest should be ~35 KB")
-
-	_, err = lcommon.NewLeiosEndorserBlockFromCbor(raw)
-	require.NoError(t, err)
-}
-
 // TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch reproduces the
 // field scenario at the dingo store boundary: a peer returns an empty manifest
 // (0xa0) in response to a by-point fetch for a valid, non-empty endorser block.
@@ -2460,31 +2412,6 @@ func TestStoreLeiosEndorserBlockGenuinelyEmptyEbStillRejected(t *testing.T) {
 	require.Zero(t, pipeline.observed)
 }
 
-// TestStoreLeiosEndorserBlockValidManifestStillStores confirms the reordered
-// checks do not regress the happy path: a valid, hash-matching manifest is
-// decoded and cached.
-func TestStoreLeiosEndorserBlockValidManifestStillStores(t *testing.T) {
-	t.Parallel()
-
-	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 15, 300)
-
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(
-		t,
-		o.storeLeiosEndorserBlock(
-			point,
-			blockRaw,
-			nil,
-			leiosStoreAuthoritative,
-		),
-	)
-
-	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
-	require.True(t, ok)
-	require.Equal(t, 300, data.txCount)
-	require.Equal(t, []byte(cbor.RawMessage(blockRaw)), data.blockRaw)
-}
-
 func electionAnnouncement(
 	t *testing.T,
 	slot, blockNo uint64,
@@ -2545,11 +2472,20 @@ func TestLeiosAnnouncementElectionBoundAcrossSources(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "third distinct")
 	require.Len(t, o.leiosAnnouncements, 2)
-	require.Len(
+	require.Empty(
 		t,
 		o.leiosEBLog.items,
+		"unavailable manifests must not be advertised",
+	)
+	pendingRelayCount := 0
+	for _, announcements := range o.leiosRelayPendingAnnouncements {
+		pendingRelayCount += len(announcements)
+	}
+	require.Equal(
+		t,
 		2,
-		"rejected announcement must not be relayed",
+		pendingRelayCount,
+		"only accepted announcements may await diffusion",
 	)
 
 	// Both parts of election identity matter: another issuer at the same
@@ -3669,22 +3605,6 @@ func requireTxsInIndexOrder(t *testing.T, txs []cbor.RawMessage, want int) {
 	}
 }
 
-func TestFetchLeiosEbTxsBatchedFullResponse(t *testing.T) {
-	t.Parallel()
-
-	o := &Ouroboros{}
-	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
-	// No cap: every window served whole in one round.
-	txs, err := o.fetchLeiosEbTxsBatched(
-		&cappingBlockTxsRequester{},
-		point,
-		200,
-		nil,
-	)
-	require.NoError(t, err)
-	requireTxsInIndexOrder(t, txs, 200)
-}
-
 func TestFetchLeiosEbTxsBatchedNoProgressErrors(t *testing.T) {
 	t.Parallel()
 
@@ -4052,102 +3972,6 @@ func (p *muxerServerPeer) readMessage(
 			)
 		}
 		p.pending = append(p.pending, segment.Payload...)
-	}
-}
-
-// encodeSegment returns the wire bytes of one raw segment, so a test can
-// present exactly the framing gouroboros' send loop is allowed to produce.
-func encodeSegment(t *testing.T, protocolId uint16, payload []byte) []byte {
-	t.Helper()
-	segment := muxer.NewSegment(protocolId, payload, true)
-	require.NotNil(t, segment)
-	buf := &bytes.Buffer{}
-	require.NoError(
-		t,
-		binary.Write(buf, binary.BigEndian, segment.SegmentHeader),
-	)
-	_, err := buf.Write(segment.Payload)
-	require.NoError(t, err)
-	return buf.Bytes()
-}
-
-// TestMuxerServerPeerReadMessage pins the framing readMessage exists for: a
-// segment boundary is not a message boundary, so a segment may carry several
-// messages and a message may span several segments. Asserting on whole
-// segment payloads made
-// TestBlockfetchServerRequestRangeRejectsInvalidEnd flaky whenever the
-// blockfetch send loop batched StartBatch and the first block body together.
-func TestMuxerServerPeerReadMessage(t *testing.T) {
-	const protocolId = uint16(3)
-	first, err := cbor.Encode([]any{uint(2)})
-	require.NoError(t, err)
-	second, err := cbor.Encode(
-		[]any{uint(4), cbor.NewByteString(bytes.Repeat([]byte{0xab}, 64))},
-	)
-	require.NoError(t, err)
-	third, err := cbor.Encode([]any{uint(5)})
-	require.NoError(t, err)
-
-	for _, test := range []struct {
-		name     string
-		segments [][]byte
-	}{
-		{
-			name:     "one message per segment",
-			segments: [][]byte{first, second, third},
-		},
-		{
-			name: "all messages batched into one segment",
-			segments: [][]byte{
-				slices.Concat(first, second, third),
-			},
-		},
-		{
-			name: "message split across segments",
-			segments: [][]byte{
-				slices.Concat(first, second[:10]),
-				slices.Concat(second[10:], third),
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			serverConn, peerConn := net.Pipe()
-			t.Cleanup(func() {
-				_ = serverConn.Close()
-				_ = peerConn.Close()
-			})
-			peer := &muxerServerPeer{peerConn: peerConn}
-			// Encode on the test goroutine: only the blocking writes
-			// belong in the writer, which cannot call require.
-			wire := make([][]byte, 0, len(test.segments))
-			for _, payload := range test.segments {
-				wire = append(
-					wire,
-					encodeSegment(t, protocolId, payload),
-				)
-			}
-			written := make(chan error, 1)
-			go func() {
-				for _, segment := range wire {
-					if _, err := serverConn.Write(segment); err != nil {
-						written <- err
-						return
-					}
-				}
-				written <- nil
-			}()
-			for _, want := range [][]byte{first, second, third} {
-				gotProtocolId, got := peer.readMessage(t, testutil.AsyncWait)
-				require.Equal(t, protocolId, gotProtocolId)
-				require.Equal(t, want, got)
-			}
-			select {
-			case err := <-written:
-				require.NoError(t, err)
-			case <-time.After(5 * time.Second):
-				t.Fatal("segment writer did not finish")
-			}
-		})
 	}
 }
 

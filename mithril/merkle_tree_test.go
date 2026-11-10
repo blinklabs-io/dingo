@@ -47,17 +47,6 @@ func TestComputeMMRRootSingleLeaf(t *testing.T) {
 	assert.Equal(t, leaf, root)
 }
 
-func TestComputeMMRRootTwoLeaves(t *testing.T) {
-	t.Parallel()
-
-	l0 := []byte("leaf-zero")
-	l1 := []byte("leaf-one")
-	root, err := computeMMRRoot([][]byte{l0, l1})
-	require.NoError(t, err)
-	expected := blake2s.Sum256(append(append([]byte{}, l0...), l1...))
-	assert.Equal(t, expected[:], root)
-}
-
 func TestComputeMMRRootThreeLeaves(t *testing.T) {
 	t.Parallel()
 

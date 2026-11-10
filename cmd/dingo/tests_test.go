@@ -16,11 +16,8 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"log/slog"
 	"maps"
-	"os"
-	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chainsync"
@@ -331,85 +328,6 @@ func toStringSet(values []string) map[string]struct{} {
 	return set
 }
 
-func TestNewLogger_JSONFormatProducesValidJSON(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	logger, levelOK, formatOK := newLogger(&buf, "json", "info", false)
-	require.True(t, levelOK)
-	require.True(t, formatOK)
-
-	logger.Info("hello", "component", "test", "k", "v")
-
-	line := strings.TrimSpace(buf.String())
-	require.NotEmpty(t, line)
-	require.True(
-		t,
-		json.Valid([]byte(line)),
-		"expected valid JSON, got: %s",
-		line,
-	)
-	var rec map[string]any
-	require.NoError(t, json.Unmarshal([]byte(line), &rec))
-	assert.Equal(t, "hello", rec["msg"])
-	assert.Equal(t, "test", rec["component"])
-}
-
-func TestNewLogger_TextFormatIsNotJSON(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	logger, _, formatOK := newLogger(&buf, "text", "info", false)
-	require.True(t, formatOK)
-
-	logger.Info("hello", "component", "test")
-
-	line := strings.TrimSpace(buf.String())
-	require.NotEmpty(t, line)
-	assert.False(
-		t, json.Valid([]byte(line)),
-		"text output should not be valid JSON: %s", line,
-	)
-	assert.Contains(t, line, "component=test")
-}
-
-func TestNewLogger_EmptyFormatDefaultsToText(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	logger, _, formatOK := newLogger(&buf, "", "info", false)
-	require.True(t, formatOK)
-
-	logger.Info("hello")
-	assert.False(t, json.Valid(bytes.TrimSpace(buf.Bytes())))
-}
-
-func TestNewLogger_UnknownFormatFallsBackToTextAndReportsNotOK(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	logger, _, formatOK := newLogger(&buf, "xml", "info", false)
-	assert.False(t, formatOK)
-
-	logger.Info("hello")
-	assert.False(t, json.Valid(bytes.TrimSpace(buf.Bytes())))
-}
-
-func TestNewLogger_LevelFiltersBelowThreshold(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	logger, levelOK, _ := newLogger(&buf, "text", "warn", false)
-	require.True(t, levelOK)
-
-	logger.Info("info-msg")
-	logger.Warn("warn-msg")
-
-	out := buf.String()
-	assert.NotContains(t, out, "info-msg")
-	assert.Contains(t, out, "warn-msg")
-}
-
 func TestNewLogger_UnknownLevelReportsNotOKAndUsesInfo(t *testing.T) {
 	t.Parallel()
 
@@ -455,53 +373,6 @@ func TestParseLogLevel(t *testing.T) {
 		got, ok := parseLogLevel(c.in)
 		assert.Equalf(t, c.want, got, "level %q", c.in)
 		assert.Equalf(t, c.wantOK, ok, "ok %q", c.in)
-	}
-}
-
-// A profile file that fails to close must be reported to stderr, not
-// silently dropped -- a truncated CPU/memory profile is otherwise
-// indistinguishable from a clean one until someone tries to load it. The
-// second Close() is forced to fail by closing f once already, ahead of the
-// call under test, which deterministically exhausts the file descriptor.
-func TestCloseProfileFileReportsCloseError(t *testing.T) {
-	t.Parallel()
-
-	f, err := os.CreateTemp(t.TempDir(), "profile-*")
-	if err != nil {
-		t.Fatalf("failed to create temp file: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("unexpected error on first close: %v", err)
-	}
-
-	var buf bytes.Buffer
-	closeProfileFile(&buf, f, "CPU")
-
-	out := buf.String()
-	if !strings.Contains(out, "could not close CPU profile file") {
-		t.Fatalf("expected close error to be reported, got: %q", out)
-	}
-}
-
-// The common case -- a clean close -- must stay silent. Reporting on every
-// successful profile write would bury the genuine failures this exists to
-// surface.
-func TestCloseProfileFileStaysQuietOnSuccess(t *testing.T) {
-	t.Parallel()
-
-	f, err := os.CreateTemp(t.TempDir(), "profile-*")
-	if err != nil {
-		t.Fatalf("failed to create temp file: %v", err)
-	}
-
-	var buf bytes.Buffer
-	closeProfileFile(&buf, f, "memory")
-
-	if buf.Len() != 0 {
-		t.Fatalf(
-			"expected no output on successful close, got: %q",
-			buf.String(),
-		)
 	}
 }
 

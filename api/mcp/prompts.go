@@ -66,7 +66,7 @@ func RegisterPrompts(
 			"You are a Cardano node operations engineer diagnosing the health and synchronization state of this Dingo node.%s\n\n"+
 				"Follow this diagnostic protocol:\n"+
 				"1. Retrieve the node's current tip using 'get_cardano_tip'. Record its slot, block height, sync status, and whether the result came from live ledger state or the metadata database.\n"+
-				"2. Inspect the node identity and block production fingerprint using 'get_node_info' with topic='identity'. Verify that BlockHeaderProtocolMinor is 69.\n"+
+				"2. Inspect the node identity and block production fingerprint using 'get_node_info' with topic='identity'. Verify that BlockHeaderProtocolMinor is 69 by default; when CIP-0203 is enabled, check scheme 0 and the low-byte identifier 69 instead.\n"+
 				"3. Query the 'sync_state' table using 'sqlite_query' (SELECT * FROM sync_state) to inspect the local sync watermark and check for any active forge fence ('forge_fence:<pool_id>').\n"+
 				"4. Read 'dingo://node/status' to cross-check the configured network, tip slot, block height/hash, and reported sync status. This resource does not expose storage statistics.\n"+
 				"5. Synthesize a structured diagnostic report with:\n"+

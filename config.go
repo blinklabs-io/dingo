@@ -214,11 +214,14 @@ type Config struct {
 	listeners         []ListenerConfig
 
 	// Programmatic API-only fields (not in YAML/env):
-	tracing             bool
-	tracingStdout       bool
-	tracingEndpoint     string
-	tracingServiceName  string
-	tracingSampleRatio  float64
+	tracing            bool
+	tracingStdout      bool
+	tracingEndpoint    string
+	tracingServiceName string
+	tracingSampleRatio float64
+
+	tracingAlwaysSamplePools []string
+
 	ledgerPeerTarget    int
 	leiosPipelineTiming *leios.PipelineTiming
 	// Runtime-only, programmatic offchain metadata config (preserves HTTPClient)
@@ -279,6 +282,7 @@ type Config struct {
 	inboundDuplexOnlyForHot                                                             bool
 	maxConnectionsPerIP, maxInboundConns, maxNtCConns, maxNtCConnectionsPerIP           int
 	maxTrustedLocalNtCConns                                                             int
+	trustedNtCIdleTimeout                                                               time.Duration
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
 	genesisCorroborationPeers                                                           int
@@ -299,6 +303,7 @@ type Config struct {
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
+	cip0203Enabled                                                                      bool
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
 	fullPotRewardsEnabled, unsafeFullPotRewardsOnStandardNetworks                       bool
@@ -339,6 +344,9 @@ func (n *Node) configPopulateNetworkMagic() error {
 func (n *Node) configWrapPromRegistry() {
 	if n.config.promRegistry == nil {
 		return
+	}
+	if g, ok := n.config.promRegistry.(prometheus.Gatherer); ok {
+		n.promGatherer = g
 	}
 	// Determine the network name: prefer the configured name, fall back to
 	// reverse-lookup by network magic.
@@ -560,11 +568,19 @@ func (c *Config) leiosForgingEnabled() bool {
 }
 
 // experimentalDijkstraEnabled reports whether the Dijkstra ledger era is
-// active. Beyond the explicit opt-ins, the Musashi and Dijkstra testnets
-// hard-fork into Dijkstra, so syncing either requires the Dijkstra era table.
-// DijkstraNet keeps the base Ouroboros protocols unless Leios is explicitly
-// enabled.
-func (c *Config) experimentalDijkstraEnabled() bool {
+// active. It is active on every network: a node that serves a chain carrying
+// Dijkstra's hard fork, or a private network that schedules it, must know the
+// era, and without a Dijkstra block or an enacted hard fork the era is never
+// entered. Leios runtime components stay gated by leiosRuntimeEnabled.
+func (*Config) experimentalDijkstraEnabled() bool {
+	return true
+}
+
+// leiosRuntimeEnabled reports whether the Leios vote and pipeline managers
+// run. Beyond the explicit opt-ins, the Musashi and Dijkstra testnets
+// hard-fork into Dijkstra and run them. DijkstraNet keeps the base Ouroboros
+// protocols unless Leios is explicitly enabled.
+func (c *Config) leiosRuntimeEnabled() bool {
 	if c.cfg == nil {
 		return false
 	}
@@ -574,6 +590,9 @@ func (c *Config) experimentalDijkstraEnabled() bool {
 }
 
 func (n *Node) configValidate() error {
+	if _, err := version.HeaderProtocolMinor(n.config.cfg.CIP0203Enabled); err != nil {
+		return err
+	}
 	// Default storageMode to "core" when unset, and validate.
 	storageMode := StorageMode(n.config.cfg.StorageMode)
 	if storageMode == "" {
@@ -839,7 +858,6 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
 		logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		tracingServiceName: "dingo",
 		tracingSampleRatio: 1,
 	}
 	// Apply options
@@ -983,6 +1001,7 @@ func (c *Config) syncCompatFields() {
 	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
 	c.maxNtCConns, c.maxNtCConnectionsPerIP = c.cfg.MaxNtCConns, c.cfg.MaxNtCConnectionsPerIP
 	c.maxTrustedLocalNtCConns = c.cfg.MaxTrustedLocalNtCConns
+	c.trustedNtCIdleTimeout = c.cfg.TrustedNtCIdleTimeout
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
@@ -997,6 +1016,7 @@ func (c *Config) syncCompatFields() {
 	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
+	c.cip0203Enabled = c.cfg.CIP0203Enabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -1081,10 +1101,14 @@ func clonePluginConfig(in map[string]any) map[string]any {
 // exclusive Genesis witness set. Dingo supplies no network defaults, so nil and
 // an empty slice both leave witness identities to the ledger, a peer snapshot,
 // or the connection address. The option copies its input.
-func WithGenesisControlGroups(groups []topology.PeerControlGroup) ConfigOptionFunc {
+func WithGenesisControlGroups(
+	groups []topology.PeerControlGroup,
+) ConfigOptionFunc {
 	owned := topology.ClonePeerControlGroups(groups)
 	return func(c *Config) {
-		c.cfg.GenesisBootstrap.ControlGroups = topology.ClonePeerControlGroups(owned)
+		c.cfg.GenesisBootstrap.ControlGroups = topology.ClonePeerControlGroups(
+			owned,
+		)
 	}
 }
 
@@ -1104,6 +1128,17 @@ func WithGenesisLimitOnPatience(
 		c.cfg.GenesisBootstrap.LimitOnPatienceEnabled = enabled
 		c.cfg.GenesisBootstrap.LimitOnPatienceCapacity = capacity
 		c.cfg.GenesisBootstrap.LimitOnPatienceRate = rate
+	}
+}
+
+// WithCIP0203 enables build-version signalling in forged block headers.
+func WithCIP0203(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.cfg.CIP0203Enabled = enabled
+		c.cip0203Enabled = enabled
 	}
 }
 
@@ -1193,6 +1228,9 @@ func NewConfigFromInternal(
 		tracingEndpoint:       cfg.TracingEndpoint,
 		tracingServiceName:    cfg.TracingServiceName,
 		tracingSampleRatio:    cfg.TracingSampleRatio,
+
+		tracingAlwaysSamplePools: cfg.TracingAlwaysSamplePools,
+
 		// The loaded config already resolved the capacity default from its
 		// run mode and network.
 		mempoolCapacitySet: true,
@@ -1371,6 +1409,14 @@ func WithTracingServiceName(name string) ConfigOptionFunc {
 func WithTracingSampleRatio(ratio float64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracingSampleRatio = ratio
+	}
+}
+
+// WithTracingAlwaysSamplePools sets the stake pool IDs, bech32 or hex key
+// hash, whose blocks are traced regardless of the sample ratio.
+func WithTracingAlwaysSamplePools(pools []string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tracingAlwaysSamplePools = pools
 	}
 }
 
@@ -1640,6 +1686,17 @@ func WithMaxTrustedLocalNtCConns(n int) ConfigOptionFunc {
 	}
 }
 
+// WithTrustedNtCIdleTimeout specifies how long a trusted local
+// node-to-client connection may stay idle before it is closed. Zero means no
+// limit and negative values are ignored. Default: 0.
+func WithTrustedNtCIdleTimeout(d time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		if d >= 0 {
+			c.cfg.TrustedNtCIdleTimeout = d
+		}
+	}
+}
+
 // WithSkipRewardLiveStakeBackfillCheck skips the startup scan that verifies
 // reward live-stake rows against the full UTxO table.
 func WithSkipRewardLiveStakeBackfillCheck(skip bool) ConfigOptionFunc {
@@ -1753,8 +1810,9 @@ func WithLeiosPersistenceRetentionSlots(slots uint64) ConfigOptionFunc {
 // WithLeiosPipelineTiming overrides the provisional Leios pipeline stage
 // timing windows. CIP-0164 has not finalized these parameters, so they are
 // kept off-chain and overridable here rather than as protocol parameters.
-// When unset, leios.DefaultPipelineTiming applies. Experimental, leios
-// runMode only.
+// When unset, the one-second reference defaults are converted to the Shelley
+// slot duration, rounding up to whole slots. Explicit overrides remain slot
+// counts. Experimental, leios runMode only.
 func WithLeiosPipelineTiming(timing leios.PipelineTiming) ConfigOptionFunc {
 	return func(c *Config) {
 		t := timing

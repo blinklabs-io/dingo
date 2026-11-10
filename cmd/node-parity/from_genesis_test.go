@@ -209,28 +209,6 @@ func TestRecordEpochDoesNotCountAWhollyIncompleteEpoch(t *testing.T) {
 		"an epoch where at least one check reached a verdict must count")
 }
 
-// TestRecordDivergenceIdentifiesKoiosAsTheReference pins the other half of
-// that review: from-genesis compares against Koios, not cardano-node, and a
-// responder reading NodeParityDivergence has to know which oracle
-// disagreed. Without the label the alert sends them to the wrong side.
-func TestRecordDivergenceIdentifiesKoiosAsTheReference(t *testing.T) {
-	t.Parallel()
-	c, m := countersWithMetrics(t)
-
-	c.recordEpoch(nodeparity.EpochResult{
-		Epoch:         702,
-		UTxOAttempted: true,
-		UTxOMissing:   []string{"txin#0"},
-	}, slog.New(slog.DiscardHandler))
-
-	require.InDelta(t, 1.0, testutil.ToFloat64(
-		m.divergenceTotal.WithLabelValues("utxo", ReferenceKoios),
-	), 0.001, "a from-genesis divergence must be tagged reference=koios")
-	require.InDelta(t, 0.0, testutil.ToFloat64(
-		m.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode),
-	), 0.001, "it must not be attributed to cardano-node")
-}
-
 // TestFromGenesisMetricsRegistersNoWatchCounters is the regression test for
 // the review finding that from-genesis would false-alert.
 //
@@ -773,4 +751,29 @@ func TestFromGenesisKoiosClientUsesKeyFile(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 7, epoch)
 	require.Equal(t, "Bearer from-file", authorization.Load())
+}
+
+func TestFromGenesisKoiosClientAppliesTxInfoLimits(t *testing.T) {
+	// Not t.Parallel: fromGenesisCommand binds its flags to the
+	// package-level koiosFlags.
+	cmd := fromGenesisCommand()
+	t.Cleanup(func() {
+		koiosFlags.txInfoBatchSize = koiosparity.KoiosTxInfoBatchSize
+		koiosFlags.txInfoConcurrency = koiosparity.KoiosTxInfoConcurrency
+	})
+	client, err := newFromGenesisKoiosClient(cmd, "preview")
+	require.NoError(t, err)
+	require.Equal(t, koiosparity.KoiosTxInfoBatchSize, client.TxInfoBatchSize())
+	require.Equal(t, koiosparity.KoiosTxInfoConcurrency, client.TxInfoConcurrency())
+
+	require.NoError(t, cmd.Flags().Set("koios-tx-info-batch-size", "250"))
+	require.NoError(t, cmd.Flags().Set("koios-tx-info-concurrency", "4"))
+	client, err = newFromGenesisKoiosClient(cmd, "preview")
+	require.NoError(t, err)
+	require.Equal(t, 250, client.TxInfoBatchSize())
+	require.Equal(t, 4, client.TxInfoConcurrency())
+
+	require.NoError(t, cmd.Flags().Set("koios-tx-info-batch-size", "1000"))
+	_, err = newFromGenesisKoiosClient(cmd, "preview")
+	require.ErrorContains(t, err, "tx_info batch size 1000 out of range")
 }

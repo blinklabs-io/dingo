@@ -1099,12 +1099,65 @@ func byteSliceArgs(values [][]byte) []any {
 // query, producing a stake-distribution mismatch against Koios of exactly
 // the reaped credentials' stake (dingo node-parity issue, epoch 647).
 func activeDelegationSQL(slot uint64, reapSlot uint64) (string, []any) {
+	return activeDelegationScopedSQL(slot, reapSlot, "", nil)
+}
+
+// activeDelegationScopedSQL is activeDelegationSQL restricted to the
+// credentials that scopeSQL, a query yielding (credential_tag, staking_key)
+// pairs, selects. An empty scopeSQL yields exactly activeDelegationSQL.
+//
+// Every CTE activeDelegationSQL builds is a per-credential function: the
+// window ranks partition by credential, the account fallbacks test only their
+// own credential's history, and the pool-reap guard reads only the
+// delegation's pool and slot. Joining each event source to the scope therefore
+// drops rows for other credentials without changing any row inside the scope,
+// so a caller that only ever joins the result back to scoped credentials gets
+// the same answer. What it buys is the join order: the ranking otherwise
+// materialises every credential's history before the first outer row is
+// read, which on mainnet is minutes of work per query when a handful of
+// credentials are wanted.
+func activeDelegationScopedSQL(
+	slot uint64,
+	reapSlot uint64,
+	scopeSQL string,
+	scopeArgs []any,
+) (string, []any) {
 	args := make(
 		[]any,
 		0,
-		3*len(historicalDelegationSources)+
+		len(scopeArgs)+
+			3*len(historicalDelegationSources)+
 			3*len(historicalRegistrationSources)+2,
 	)
+	// CROSS JOIN is an ordering constraint in SQLite: the scope is read
+	// first and each source is probed by its (credential_tag, staking_key)
+	// index. A plain JOIN leaves the order to the planner's row estimate for
+	// the CTE, which on a large source can still choose the full scan. The
+	// join condition goes in WHERE (scopedWhere) because PostgreSQL rejects
+	// ON after CROSS JOIN.
+	scopedFrom := func(table string, alias string) string {
+		if scopeSQL == "" {
+			if alias == table {
+				return "FROM " + table
+			}
+			return "FROM " + table + " " + alias
+		}
+		return "FROM credential_scope scope\nCROSS JOIN " + table + " " + alias
+	}
+	scopedWhere := func(alias string) string {
+		if scopeSQL == "" {
+			return ""
+		}
+		return alias + ".credential_tag = scope.credential_tag\n AND " +
+			alias + ".staking_key = scope.staking_key\n AND "
+	}
+	prefix := `
+WITH `
+	if scopeSQL != "" {
+		prefix += `credential_scope AS (` + scopeSQL + `
+), `
+		args = append(args, scopeArgs...)
+	}
 	delegationParts := make(
 		[]string,
 		0,
@@ -1114,10 +1167,10 @@ func activeDelegationSQL(slot uint64, reapSlot uint64) (string, []any) {
 		delegationParts = append(delegationParts, fmt.Sprintf(`
 SELECT event.credential_tag, event.staking_key, event.pool_key_hash,
        COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.id), event.added_slot) AS added_slot, event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
-FROM %[1]s event
+%[2]s
 JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
 JOIN "transaction" tx ON tx.id = certs.transaction_id
-WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`, source.table))
+WHERE %[3]sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`, source.table, scopedFrom(source.table, "event"), scopedWhere("event")))
 		args = append(args, source.certType, slot)
 	}
 	allHistoryTables := make(
@@ -1135,8 +1188,8 @@ WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_c
 	delegationParts = append(delegationParts, `
 SELECT account.credential_tag, account.staking_key, account.pool,
        account.added_slot, account.added_slot, 0, 0
-FROM account
-WHERE account.added_slot <= ? AND account.active = TRUE
+`+scopedFrom("account", "account")+`
+WHERE `+scopedWhere("account")+`account.added_slot <= ? AND account.active = TRUE
   AND account.pool IS NOT NULL AND length(account.pool) > 0`+
 		noHistorySQL("account", allHistoryTables))
 	args = append(args, slot)
@@ -1152,12 +1205,13 @@ WHERE account.added_slot <= ? AND account.active = TRUE
 		registrationParts = append(registrationParts, fmt.Sprintf(`
 SELECT event.credential_tag, event.staking_key, %d AS registered, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.id), event.added_slot) AS added_slot,
        event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
-FROM %s event
+%s
 JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
 JOIN "transaction" tx ON tx.id = certs.transaction_id
-WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`,
+WHERE %sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`,
 			source.registered,
-			source.table,
+			scopedFrom(source.table, "event"),
+			scopedWhere("event"),
 		))
 		args = append(args, source.certType, slot)
 	}
@@ -1173,15 +1227,14 @@ WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_c
 SELECT account.credential_tag, account.staking_key,
        CASE WHEN account.active THEN 1 ELSE 0 END,
        account.created_slot, account.created_slot, 0, 0
-FROM account
-WHERE account.created_slot <= ?`+
+`+scopedFrom("account", "account")+`
+WHERE `+scopedWhere("account")+`account.created_slot <= ?`+
 		noHistorySQL("account", registrationTables))
 	args = append(args, slot)
 	for range registrationTables {
 		args = append(args, slot)
 	}
-	return `
-WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
+	return prefix + `delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
 ), ranked_delegation AS (
  SELECT *, ROW_NUMBER() OVER (
    PARTITION BY credential_tag, staking_key

@@ -21,23 +21,12 @@ import (
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 func (c *ConnectionManager) CreateOutboundConn(
 	ctx context.Context,
 	address string,
 ) (*ouroboros.Connection, error) {
-	t := otel.Tracer("")
-	if t != nil {
-		_, span := t.Start(ctx, "create outbound connection")
-		defer span.End()
-		span.SetAttributes(
-			attribute.String("peer.address", address),
-		)
-	}
-
 	var clientAddr net.Addr
 	dialer := net.Dialer{
 		Timeout: 10 * time.Second,

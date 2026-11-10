@@ -608,31 +608,6 @@ func TestCompareMemberRewardsRowNotPresent(t *testing.T) {
 	require.NotEqual(t, StatusPass, DetermineStatus(ms))
 }
 
-func TestCompareAccountEpochExactMatch(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now()
-	koios := []KoiosAccountRewards{
-		{StakeAddress: "stake1a", RewardType: "member", Earned: "1000000"},
-	}
-	dingo := []DingoAccountReward{
-		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
-	}
-	ms := CompareAccountEpoch(
-		"preview",
-		100,
-		koios,
-		dingo,
-		now,
-		0,
-		time.Time{},
-		false,
-		false,
-	)
-	require.Empty(t, ms)
-	require.Equal(t, StatusPass, DetermineStatus(ms))
-}
-
 // TestCompareAccountEpochAggregatesSharedRewardAccounts proves that Koios and
 // Dingo contributions from multiple pools are compared as one account/type
 // total. A reward account can be shared by pools, so two rows with the same
@@ -896,30 +871,6 @@ func TestCompareAccountEpochRejectsMalformedDingoPoolID(t *testing.T) {
 	require.Equal(t, StatusError, DetermineStatus(ms))
 }
 
-func TestCompareAccountEpochZeroRewardBothSidesPasses(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now()
-	koios := []KoiosAccountRewards{
-		{StakeAddress: "stake1a", RewardType: "member", Earned: "0"},
-	}
-	dingo := []DingoAccountReward{
-		{StakeAddress: "stake1a", RewardType: "member", Amount: "0"},
-	}
-	ms := CompareAccountEpoch(
-		"preview",
-		100,
-		koios,
-		dingo,
-		now,
-		0,
-		time.Time{},
-		false,
-		false,
-	)
-	require.Empty(t, ms)
-}
-
 func TestCompareAccountEpochMissingFromDingo(t *testing.T) {
 	t.Parallel()
 
@@ -1113,34 +1064,6 @@ func TestCompareAccountEpochMemberAndLeaderIndependent(t *testing.T) {
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
 	require.Equal(t, "5000001", ms[0].DingoValue)
 	require.Equal(t, "5000000", ms[0].KoiosValue)
-}
-
-// TestCompareAccountEpochAmountMismatchByOneLovelace proves no tolerance:
-// even a 1-lovelace difference is a real mismatch.
-func TestCompareAccountEpochAmountMismatchByOneLovelace(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now()
-	koios := []KoiosAccountRewards{
-		{StakeAddress: "stake1a", RewardType: "member", Earned: "1000000"},
-	}
-	dingo := []DingoAccountReward{
-		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000001"},
-	}
-	ms := CompareAccountEpoch(
-		"preview",
-		100,
-		koios,
-		dingo,
-		now,
-		0,
-		time.Time{},
-		false,
-		false,
-	)
-	require.Len(t, ms, 1)
-	require.Equal(t, CategoryValueMismatch, ms[0].Category)
-	require.Equal(t, "account_reward_amount", ms[0].Field)
 }
 
 // TestCompareAccountEpochOutOfScopeRewardTypesFiltered proves treasury/

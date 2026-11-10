@@ -45,6 +45,7 @@ func newMigratedTestStore(t *testing.T) *Store {
 	)
 	require.NoError(t, err)
 	db.SetMaxOpenConns(1)
+	seedMigratedSQLite(t, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(Config{

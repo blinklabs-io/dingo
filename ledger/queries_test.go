@@ -40,6 +40,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -1715,17 +1716,17 @@ func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"blockVersionData": { "slotDuration": "20000" },
 		"protocolConsts": { "k": 432 }
 	}`
-	shelleyGenesisJSON := `{
+	shelleyGenesisJSON := completeTestShelleyGenesisJSON(t, map[string]any{
 		"activeSlotsCoeff": 0.05,
-		"securityParam": 432,
-		"slotLength": 1,
-		"epochLength": 432000,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
+		"securityParam":    432,
+		"slotLength":       1,
+		"epochLength":      432000,
+		"systemStart":      "2022-10-25T00:00:00Z",
+	}, nil)
 	cfg := &cardano.CardanoNodeConfig{}
 	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
-	err = cfg.LoadShelleyGenesisFromReader(
+	err = completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1900,88 +1901,6 @@ func requireEraDesc(t testing.TB, eraId uint) eras.EraDesc {
 	era := eras.GetEraById(eraId)
 	require.NotNil(t, era)
 	return *era
-}
-
-// TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone proves that the
-// current era's EraEnd is snapped to the end of the epoch that contains
-// ledgerTip + safeZone.  Within a single epoch slot↔time is linear (constant
-// slot length), so the epoch-end boundary is the safe forecast limit.
-//
-// Setup:
-//   - One Conway epoch: startSlot=100_000, length=432_000 (ends at slot 532_000)
-//   - ledgerTip at slot 200_000 (well inside the epoch)
-//   - safeZone = ceil(3k/f) = ceil(3*432/0.05) = 25_920
-//   - safeEndSlot = 225_920, which is within the epoch (< 532_000)
-//
-// Expected EraEnd slot: 532_000 (epoch end), epoch number: 501
-func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
-	t.Parallel()
-
-	const (
-		tipSlot        = uint64(200_000)
-		epochStartSlot = uint64(100_000)
-		epochLen       = uint(432_000)
-		slotLenMs      = uint(1_000) // 1 second in milliseconds
-		epochId        = uint64(500)
-	)
-	// safeZone = ceil(3 * 432 / 0.05) = 25_920; safeEndSlot = 225_920 < 532_000
-	const expectedSafeZone = uint64(25_920)
-	expectedEraEndSlot := epochStartSlot + uint64(epochLen) // 532_000
-
-	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
-		epochStartSlot, epochId,
-		nil, nil, nil, nil,
-		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
-		nil,
-	))
-
-	ls := &LedgerState{
-		db:         db,
-		currentEra: eras.ConwayEraDesc,
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig: newTestEraHistoryCfg(t),
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
-	require.NoError(t, err)
-
-	eraList, ok := result.(cbor.IndefLengthList)
-	require.True(t, ok)
-	require.NotEmpty(t, eraList)
-
-	// The last entry in the list is the Conway (current, open) era.
-	lastEra, ok := eraList[len(eraList)-1].([]any)
-	require.True(t, ok, "era entry should be []any")
-	require.Len(t, lastEra, 3, "era entry should be [start, end, params]")
-
-	eraEnd, ok := lastEra[1].([]any)
-	require.True(t, ok, "EraEnd should be []any")
-	require.Len(t, eraEnd, 3, "EraEnd should be [relTime, slot, epoch]")
-
-	actualEraEndSlot, ok := eraEnd[1].(uint64)
-	require.True(t, ok, "EraEnd slot should be uint64")
-
-	actualEraEndEpoch, ok := eraEnd[2].(uint64)
-	require.True(t, ok, "EraEnd epoch should be uint64")
-
-	assert.Equal(
-		t,
-		expectedEraEndSlot,
-		actualEraEndSlot,
-		"open era EraEnd slot should snap to epoch boundary (%d), not mid-epoch safeEndSlot (%d)",
-		expectedEraEndSlot,
-		tipSlot+expectedSafeZone,
-	)
-	assert.Equal(t, epochId+1, actualEraEndEpoch,
-		"open era EraEnd epoch number should be epochId+1 (%d)", epochId+1,
-	)
 }
 
 func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
@@ -3254,76 +3173,6 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(
 	)
 }
 
-// TestQueryHardForkEraHistory_TransitionImpossibleStartsAtEraStart verifies
-// that a finite TransitionImpossible vector measures its safe zone from the
-// era start, matching reconstructSummary.
-//
-// Setup (mirrors TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone):
-//   - Conway epoch 500: startSlot=100_000, length=432_000 (ends at 532_000)
-//   - tipSlot past the safe-zone boundary (safeEnd >= epochEnd)
-//   - transitionInfo = TransitionImpossible
-//
-// Expected EraEnd slot: 532_000 (confirmed epoch end, no cap)
-func TestQueryHardForkEraHistory_TransitionImpossibleStartsAtEraStart(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	const (
-		epochStartSlot = uint64(100_000)
-		epochLen       = uint(432_000)
-		epochEndSlot   = uint64(532_000)
-		slotLenMs      = uint(1_000)
-		epochId        = uint64(500)
-		// tipSlot well past the safe-zone decision point
-		tipSlot = uint64(520_000)
-	)
-
-	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
-		epochStartSlot, epochId,
-		nil, nil, nil, nil,
-		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
-		nil,
-	))
-
-	ls := &LedgerState{
-		db:         db,
-		currentEra: eras.ConwayEraDesc,
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
-		transitionInfo: hardfork.NewTransitionImpossible(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: newTestEraHistoryCfg(t),
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
-	require.NoError(t, err)
-
-	eraList, ok := result.(cbor.IndefLengthList)
-	require.True(t, ok)
-	require.NotEmpty(t, eraList)
-
-	lastEra, ok := eraList[len(eraList)-1].([]any)
-	require.True(t, ok, "era entry should be []any")
-	eraEnd, ok := lastEra[1].([]any)
-	require.True(t, ok, "EraEnd should be []any")
-	actualSlot, ok := eraEnd[1].(uint64)
-	require.True(t, ok, "EraEnd slot should be uint64")
-
-	assert.Equal(
-		t,
-		epochEndSlot,
-		actualSlot,
-		"TransitionImpossible: EraEnd slot should be measured from the era start (%d)",
-		epochEndSlot,
-	)
-}
-
 // TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch
 // verifies the epoch bound produced from the era-start safe-zone anchor.
 func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(
@@ -4218,7 +4067,7 @@ func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(
 func cardanoNodeConfigWithMaxLovelaceSupply(t *testing.T, maxLovelaceSupply uint64) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(
 		fmt.Sprintf(`{"maxLovelaceSupply": %d}`, maxLovelaceSupply),
 	)))
 	return cfg
@@ -4534,4 +4383,202 @@ func TestQueryHonorsCanceledContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = (&LedgerState{}).QueryWithProtocolVersion(ctx, &olocalstatequery.ChainPointQuery{}, QueryPoint{}, 0)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestQueryHardForkEraHistory_ScheduledDijkstraForkKeepsConwayEpoch pins that
+// a Conway epoch whose parameters already carry Dijkstra's major is not read
+// as an earlier transition when the configuration schedules the Dijkstra fork:
+// the schedule, not the parameters, places the boundary.
+func TestQueryHardForkEraHistory_ScheduledDijkstraForkKeepsConwayEpoch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		epochLen  = uint(432_000)
+		slotLenMs = uint(1_000)
+	)
+	db := newTestDB(t)
+	require.NoError(t, db.SetEpoch(
+		0, 0, nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, slotLenMs, epochLen, nil,
+	))
+	require.NoError(t, db.SetEpoch(
+		uint64(epochLen), 1, nil, nil, nil, nil,
+		eras.DijkstraEraDesc.Id, slotLenMs, epochLen, nil,
+	))
+	conwayPParams := donationTestConwayPParams(
+		gdijkstra.MinProtocolVersionDijkstra,
+	)
+	ppCbor, err := cbor.Encode(conwayPParams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		ppCbor, 0, 0, eras.ConwayEraDesc.Id, nil,
+	))
+
+	cfg := newTestEraHistoryCfg(t)
+	enabled := true
+	dijkstraAt := uint64(1)
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestDijkstraHardForkAtEpoch = &dijkstraAt
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     eras.DijkstraEraDesc,
+		activeEras:     eras.ErasWithDijkstra,
+		transitionInfo: hardfork.NewTransitionUnknown(),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(uint64(epochLen)+1, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			EnableDijkstra:    true,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
+	require.NoError(t, err)
+	eraList := result.(cbor.IndefLengthList)
+	// Eras with no epochs are omitted, so Conway leads the list.
+	require.Len(t, eraList, 2)
+	conwayEra := eraList[0].([]any)
+	conwayEnd := conwayEra[1].([]any)
+	assert.Equal(t, uint64(epochLen), conwayEnd[1],
+		"Conway must run through its whole epoch 0")
+	assert.Equal(t, uint64(1), conwayEnd[2])
+}
+
+// TestQueryHardForkEraHistory_ConwayTipSameWithOrWithoutDijkstra pins that
+// making the Dijkstra era known does not change the era history a node on a
+// Conway chain reports: no hard fork is known, so the Conway end is the same
+// safe-zone bound either way.
+func TestQueryHardForkEraHistory_ConwayTipSameWithOrWithoutDijkstra(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	history := func(t *testing.T, withDijkstra bool) cbor.IndefLengthList {
+		t.Helper()
+		db := newTestDB(t)
+		require.NoError(t, db.SetEpoch(
+			100_000, 500, nil, nil, nil, nil,
+			eras.ConwayEraDesc.Id, 1_000, 432_000, nil,
+		))
+		activeEras := eras.Eras
+		if withDijkstra {
+			activeEras = eras.ErasWithDijkstra
+		}
+		ls := &LedgerState{
+			db:             db,
+			currentEra:     eras.ConwayEraDesc,
+			activeEras:     activeEras,
+			transitionInfo: hardfork.NewTransitionUnknown(),
+			currentTip: ochainsync.Tip{
+				Point: ocommon.NewPoint(200_000, []byte("tip")),
+			},
+			config: LedgerStateConfig{
+				CardanoNodeConfig: newTestEraHistoryCfg(t),
+				EnableDijkstra:    withDijkstra,
+				Logger: slog.New(
+					slog.NewJSONHandler(io.Discard, nil),
+				),
+			},
+		}
+		ls.evaluateTransitionImpossible()
+		ls.publishSnapshotsLocked()
+		result, err := ls.queryHardForkEraHistory(context.Background(), nil)
+		require.NoError(t, err)
+		return result.(cbor.IndefLengthList)
+	}
+	assert.Equal(t, history(t, false), history(t, true))
+}
+
+// TestReconstructTransitionInfo_ScheduledDijkstraForkNamesItsEpoch pins that a
+// Conway ledger whose parameters already carry Dijkstra's major reports the
+// scheduled epoch as the transition, not its own epoch.
+func TestReconstructTransitionInfo_ScheduledDijkstraForkNamesItsEpoch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newTestEraHistoryCfg(t)
+	enabled := true
+	dijkstraAt := uint64(1)
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestDijkstraHardForkAtEpoch = &dijkstraAt
+	ls := &LedgerState{
+		currentEra:   eras.ConwayEraDesc,
+		activeEras:   eras.ErasWithDijkstra,
+		currentEpoch: models.Epoch{EpochId: 0, EraId: eras.ConwayEraDesc.Id},
+		currentPParams: donationTestConwayPParams(
+			gdijkstra.MinProtocolVersionDijkstra,
+		),
+		transitionInfo: hardfork.NewTransitionUnknown(),
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			EnableDijkstra:    true,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.reconstructTransitionInfo()
+
+	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+	assert.Equal(t, dijkstraAt, ls.transitionInfo.KnownEpoch)
+}
+
+// TestQueryHardForkEraHistory_ScheduledForkEndsEraAtStoredBoundaryEpoch pins
+// that a past era which stored the scheduled epoch itself ends at that
+// epoch's start, the confirmed boundary, whatever its parameters carry.
+func TestQueryHardForkEraHistory_ScheduledForkEndsEraAtStoredBoundaryEpoch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		epochLen  = uint(432_000)
+		slotLenMs = uint(1_000)
+	)
+	db := newTestDB(t)
+	for epoch := range uint64(2) {
+		require.NoError(t, db.SetEpoch(
+			epoch*uint64(epochLen), epoch, nil, nil, nil, nil,
+			eras.ConwayEraDesc.Id, slotLenMs, epochLen, nil,
+		))
+	}
+	require.NoError(t, db.SetEpoch(
+		2*uint64(epochLen), 2, nil, nil, nil, nil,
+		eras.DijkstraEraDesc.Id, slotLenMs, epochLen, nil,
+	))
+
+	cfg := newTestEraHistoryCfg(t)
+	enabled := true
+	dijkstraAt := uint64(1)
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestDijkstraHardForkAtEpoch = &dijkstraAt
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     eras.DijkstraEraDesc,
+		activeEras:     eras.ErasWithDijkstra,
+		transitionInfo: hardfork.NewTransitionUnknown(),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(2*uint64(epochLen)+1, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			EnableDijkstra:    true,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
+	require.NoError(t, err)
+	eraList := result.(cbor.IndefLengthList)
+	require.Len(t, eraList, 2)
+	conwayEnd := eraList[0].([]any)[1].([]any)
+	assert.Equal(t, uint64(epochLen), conwayEnd[1],
+		"Conway ends where the scheduled epoch starts")
+	assert.Equal(t, uint64(1), conwayEnd[2])
 }

@@ -300,15 +300,27 @@ func errEpochNotResolved(at QueryPoint) error {
 func (ls *LedgerState) queryShelleyEpochNo(ctx context.Context, at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
+	epoch, err := ls.shelleyEpochNo(ctx, at, txn)
+	if err != nil {
+		return nil, err
+	}
+	return []any{epoch}, nil
+}
+
+// shelleyEpochNo returns the epoch at the query point, by the same rules as
+// queryShelleyEpochNo.
+func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
+	txn *database.Txn,
+) (uint64, error) {
 	if !at.pinned() {
 		row, err := ls.snapshotEpoch(txn, at)
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
 		if row != nil {
-			return []any{row.EpochId}, nil
+			return row.EpochId, nil
 		}
-		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
+		return ls.loadConsensusSnapshot().currentEpoch.EpochId, nil
 	}
 	if txn == nil {
 		txn = ls.db.Transaction(ctx, false)
@@ -316,12 +328,12 @@ func (ls *LedgerState) queryShelleyEpochNo(ctx context.Context, at QueryPoint,
 	}
 	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	if !found {
-		return nil, errEpochNotResolved(at)
+		return 0, errEpochNotResolved(at)
 	}
-	return []any{epoch}, nil
+	return epoch, nil
 }
 
 // VerifyPointQueryable checks that at, once Acquired, is guaranteed to be
@@ -998,30 +1010,40 @@ func (ls *LedgerState) queryHardForkEraHistory(
 		// window that completed. The confirmed boundary is at lastEp.StartSlot,
 		// not lastEp.StartSlot + length; roll back timespan accordingly so the
 		// next era's Start.relTime stays contiguous.
+		//
+		// A scheduled hard fork names its boundary epoch, so the parameters'
+		// version says nothing about where the era ends: the era has run into
+		// its transition only when it stores the scheduled epoch itself.
 		if eraDesc.DecodePParamsFunc == nil {
 			continue
 		}
-		pp, ppErr := ls.loadPersistedProtocolParameters(
-			lastEp.EpochId, eraDesc, txn,
-		)
-		if ppErr != nil {
-			return nil, fmt.Errorf(
-				"getting pparams for epoch %d: %w", lastEp.EpochId, ppErr,
+		if entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch {
+			if lastEp.EpochId < entry.NextEraTrigger.Epoch {
+				continue
+			}
+		} else {
+			pp, ppErr := ls.loadPersistedProtocolParameters(
+				lastEp.EpochId, eraDesc, txn,
 			)
-		}
-		if pp == nil {
-			continue
-		}
-		ver, verErr := GetProtocolVersion(pp)
-		if verErr != nil {
-			return nil, fmt.Errorf(
-				"extracting protocol version for epoch %d: %w",
-				lastEp.EpochId, verErr,
-			)
-		}
-		pparamsEraId, ok := ls.eraForVersion(ver.Major)
-		if !ok || pparamsEraId <= entry.EraID {
-			continue
+			if ppErr != nil {
+				return nil, fmt.Errorf(
+					"getting pparams for epoch %d: %w", lastEp.EpochId, ppErr,
+				)
+			}
+			if pp == nil {
+				continue
+			}
+			ver, verErr := GetProtocolVersion(pp)
+			if verErr != nil {
+				return nil, fmt.Errorf(
+					"extracting protocol version for epoch %d: %w",
+					lastEp.EpochId, verErr,
+				)
+			}
+			pparamsEraId, ok := ls.eraForVersion(ver.Major)
+			if !ok || pparamsEraId <= entry.EraID {
+				continue
+			}
 		}
 		epPc := epochPicoseconds(lastEp.SlotLength, lastEp.LengthInSlots)
 		perEra[i].end = []any{
@@ -1282,6 +1304,8 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // their delegators as GetAccountsByCredentialAtSlot reads accounts), and
 // ShelleyGetProposalsQuery (the proposals set at at.Slot from the lifecycle
 // slots, with votes from governance_vote_history), and
+// ShelleyLeiosCommitteeQuery (queryShelleyLeiosCommittee: the committees of
+// at's epoch and the next, each built from persisted per-epoch snapshots),
 // ShelleyDebugChainDepStateQuery (queryShelleyDebugChainDepState: the epoch
 // rows of at's epoch, the nonce fold stopped at at.Slot, the lab from the
 // acquired block's parent hash, and the op-cert counters observed at or
@@ -1401,6 +1425,14 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 			return nil, fmt.Errorf("unsupported query type: %T", q)
 		}
 		return ls.queryShelleyStakePoolState(ctx, q, txn)
+	case *olocalstatequery.ShelleyLeiosCommitteeQuery:
+		// Released nodes do not support GetLeiosCommittee, so only the
+		// Leios prototype answers it; elsewhere it is unsupported like any
+		// other query dingo does not implement.
+		if ls.config.LeiosCommittee == nil {
+			return nil, fmt.Errorf("unsupported query type: %T", q)
+		}
+		return ls.queryShelleyLeiosCommittee(ctx, at, txn)
 	case *olocalstatequery.ShelleyRewardProvenanceQuery:
 		return ls.queryShelleyRewardProvenance()
 	case *olocalstatequery.ShelleyPoolStateQuery:
@@ -2426,6 +2458,23 @@ func (ls *LedgerState) allDRepDelegators(ctx context.Context, txn *database.Txn)
 	map[string][]olocalstatequery.StakeCredential,
 	error,
 ) {
+	return ls.allDRepDelegatorsBatched(ctx, txn, allDRepDelegatorsBatchSize)
+}
+
+func (ls *LedgerState) allDRepDelegatorsBatched(
+	ctx context.Context,
+	txn *database.Txn,
+	batchSize int,
+) (
+	map[string][]olocalstatequery.StakeCredential,
+	error,
+) {
+	if batchSize <= 0 {
+		return nil, fmt.Errorf(
+			"allDRepDelegators: batch size must be positive, got %d",
+			batchSize,
+		)
+	}
 	txn, release := ls.readTxn(ctx, txn)
 	defer release()
 	refs, err := ls.db.Metadata().GetActiveAccountCredentials(txn.Metadata())
@@ -2433,8 +2482,8 @@ func (ls *LedgerState) allDRepDelegators(ctx context.Context, txn *database.Txn)
 		return nil, err
 	}
 	ret := make(map[string][]olocalstatequery.StakeCredential)
-	for start := 0; start < len(refs); start += allDRepDelegatorsBatchSize {
-		end := min(start+allDRepDelegatorsBatchSize, len(refs))
+	for start := 0; start < len(refs); start += batchSize {
+		end := min(start+batchSize, len(refs))
 		batch := refs[start:end]
 		accounts, err := ls.db.GetAccountsByCredential(ctx, batch, false, txn)
 		if err != nil {

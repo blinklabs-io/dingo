@@ -203,7 +203,14 @@ type ChainSelectorConfig struct {
 	// "" has no trustworthy independence evidence and
 	// fails closed in corroboration: it is not corroborated as a candidate
 	// and does not count as a witness. A nil hook groups by remote host.
-	PeerIdentity       func(ouroboros.ConnectionId) string
+	PeerIdentity func(ouroboros.ConnectionId) string
+	// ConnectionEligible reports whether the connection may be a Limit on
+	// Eagerness candidate, in addition to the SetConnectionEligible state. It
+	// does not gate selection or corroboration witnesses. It is called under
+	// the selector lock, so it must not call back into the selector. The node
+	// backs it with chainsync ingress admission: a peer demoted to
+	// observability-only has its headers dropped, so its fragment can freeze
+	// and it must not hold the limit. A nil hook admits every connection.
 	ConnectionEligible func(ouroboros.ConnectionId) bool
 	ConnectionPriority func(ouroboros.ConnectionId) int
 	MaxTrackedPeers    int // 0 means use DefaultMaxTrackedPeers
@@ -332,6 +339,10 @@ type ChainSelector struct {
 	localTipProgressAt    time.Time
 	// nowFn is injectable for deterministic tests; defaults to time.Now.
 	nowFn func() time.Time
+
+	// generationStableWait overrides headerCryptoGenerationStableWait when
+	// positive, so tests need not wait out the production bound.
+	generationStableWait time.Duration
 
 	// switchBackCooldown is the resolved value of
 	// ChainSelectorConfig.SwitchBackCooldown (defaulted by NewChainSelector).
@@ -533,12 +544,11 @@ func (cs *ChainSelector) clonePeerTipAdmissionFrontier(
 	result.observedTipHistory = nil
 	result.admittedTipHistory = nil
 	if cs.mode == SelectionModeGenesis {
-		result.observedSlots = append([]uint64(nil), peerTip.observedSlots...)
-		result.observedPoints = cloneObservedPoints(peerTip.observedPoints)
+		// The struct copy shares the committed frontier's windows. Points
+		// and hash bytes in a window are never written after they are
+		// appended, so both peers may keep reading and appending to them.
 	} else {
-		result.observedSlots = nil
-		result.observedPoints = nil
-		result.observedPointBaseBlock = 0
+		result.resetObservedFrontier()
 	}
 	return &result
 }
@@ -901,8 +911,7 @@ func (cs *ChainSelector) advanceSelectionModeWithBestKnownBlockLocked(
 	// Corroboration no longer applies in Praos; drop the per-peer hash
 	// frontier so it does not linger for the full window on every tracked peer.
 	for _, peerTip := range cs.peerTips {
-		peerTip.observedPoints = nil
-		peerTip.observedPointBaseBlock = 0
+		peerTip.resetObservedPoints()
 	}
 	clear(cs.deliveredPeerTips)
 	clear(cs.eagernessDeliveries)
@@ -2041,22 +2050,40 @@ func (cs *ChainSelector) pinCurrentHeaderCryptoGeneration() (func(), bool) {
 		cs.config.PinHeaderCryptoVerificationGeneration == nil {
 		return func() {}, true
 	}
-	deadline := time.Now().Add(headerCryptoGenerationStableWait)
+	wait := headerCryptoGenerationStableWait
+	if cs.generationStableWait > 0 {
+		wait = cs.generationStableWait
+	}
+	deadline := time.Now().Add(wait)
 	for {
-		generation := cs.config.CurrentHeaderCryptoVerificationGeneration()
-		if generation != 0 {
-			release, current := cs.config.PinHeaderCryptoVerificationGeneration(
-				generation,
-			)
-			if current && release != nil {
-				return release, true
-			}
+		if release, ok := cs.tryPinCurrentHeaderCryptoGeneration(); ok {
+			return release, true
 		}
 		if !time.Now().Before(deadline) {
 			return func() {}, false
 		}
 		time.Sleep(headerCryptoGenerationPollInterval)
 	}
+}
+
+// tryPinCurrentHeaderCryptoGeneration makes a single attempt at the pin that
+// pinCurrentHeaderCryptoGeneration waits for.
+func (cs *ChainSelector) tryPinCurrentHeaderCryptoGeneration() (func(), bool) {
+	if cs.config.CurrentHeaderCryptoVerificationGeneration == nil ||
+		cs.config.PinHeaderCryptoVerificationGeneration == nil {
+		return func() {}, true
+	}
+	generation := cs.config.CurrentHeaderCryptoVerificationGeneration()
+	if generation == 0 {
+		return nil, false
+	}
+	release, current := cs.config.PinHeaderCryptoVerificationGeneration(
+		generation,
+	)
+	if !current || release == nil {
+		return nil, false
+	}
+	return release, true
 }
 
 // ResolvePeerTipAdmission promotes an accepted header or removes a rejected
@@ -3967,6 +3994,16 @@ func (cs *ChainSelector) isConnectionEligible(
 		return true
 	}
 	return eligible
+}
+
+// eagernessCandidateAdmittedLocked reports whether the ConnectionEligible hook
+// admits connId as a Limit on Eagerness candidate. It is consulted only by the
+// candidate set, after the peer-governance check, so it can only exclude.
+func (cs *ChainSelector) eagernessCandidateAdmittedLocked(
+	connId ouroboros.ConnectionId,
+) bool {
+	return cs.config.ConnectionEligible == nil ||
+		cs.config.ConnectionEligible(connId)
 }
 
 func (cs *ChainSelector) connectionPriority(

@@ -84,6 +84,10 @@ func (s *concurrencyStore) peakOpens() int {
 	return s.peak
 }
 
+// probeObjects is enough archives or metadata files to keep every probe
+// worker busy at once.
+const probeObjects = storeProbeWorkers + 4
+
 func testHash(n int) string {
 	return fmt.Sprintf("%064x", n+1)
 }
@@ -113,7 +117,7 @@ func storeWithArchives(
 // must not take one store round trip after another.
 func TestSnapshotArchivesPresentOpensConcurrently(t *testing.T) {
 	t.Parallel()
-	inner, snapshot := storeWithArchives(t, 40)
+	inner, snapshot := storeWithArchives(t, probeObjects)
 	store := newConcurrencyStore(inner)
 	t.Cleanup(store.releaseOpens)
 	type result struct {
@@ -146,10 +150,10 @@ func TestSnapshotArchivesPresentOpensConcurrently(t *testing.T) {
 
 func TestSnapshotArchivesPresentReportsMissingArchive(t *testing.T) {
 	t.Parallel()
-	store, snapshot := storeWithArchives(t, 40)
+	store, snapshot := storeWithArchives(t, probeObjects)
 	require.NoError(t, store.DeletePrefix(
 		context.Background(),
-		path.Join(snapshot.Hash, immutableArchiveName(37)),
+		path.Join(snapshot.Hash, immutableArchiveName(probeObjects-3)),
 	))
 	present, err := snapshotArchivesPresent(
 		context.Background(), store, snapshot,
@@ -162,7 +166,7 @@ func TestSnapshotArchivesPresentReportsMissingArchive(t *testing.T) {
 // because no probe ran to find one missing.
 func TestSnapshotArchivesPresentFailsWhenCancelled(t *testing.T) {
 	t.Parallel()
-	store, snapshot := storeWithArchives(t, 40)
+	store, snapshot := storeWithArchives(t, probeObjects)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	present, err := snapshotArchivesPresent(ctx, store, snapshot)
@@ -177,7 +181,7 @@ func TestListSnapshotsReadsConcurrently(t *testing.T) {
 	inner, err := OpenArtifactStore(context.Background(), t.TempDir())
 	require.NoError(t, err)
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	const count = 40
+	const count = probeObjects
 	for i := range count {
 		require.NoError(t, putJSON(
 			context.Background(), inner,

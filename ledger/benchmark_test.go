@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -57,7 +58,7 @@ const storageModeBenchmarkSkippedInputIndex = 3
 const blockProcessingBenchmarkFixtureBlockCount = 4096
 
 // openImmutableTestDB opens the immutable test database
-func openImmutableTestDB(b *testing.B) *immutable.ImmutableDb {
+func openImmutableTestDB(b testing.TB) *immutable.ImmutableDb {
 	b.Helper()
 	immDb, err := immutable.New("../database/immutable/testdata")
 	if err != nil {
@@ -2474,6 +2475,14 @@ func BenchmarkBlockfetchNearTipThroughput(b *testing.B) {
 // BenchmarkBlockfetchNearTipThroughputPredecoded measures the live
 // blockfetch near-tip path with block decoding removed from the timed region.
 func BenchmarkBlockfetchNearTipThroughputPredecoded(b *testing.B) {
+	b.Run("tracing=off", benchmarkBlockfetchNearTipThroughputPredecoded)
+	b.Run("tracing=unsampled", func(b *testing.B) {
+		testutil.InstallUnsampledTracing(b)
+		benchmarkBlockfetchNearTipThroughputPredecoded(b)
+	})
+}
+
+func benchmarkBlockfetchNearTipThroughputPredecoded(b *testing.B) {
 	seedModels, rawBlocks := loadBlockProcessingFixture(b)
 	blocks := make([]ledger.Block, 0, len(rawBlocks))
 	points := make([]ocommon.Point, 0, len(rawBlocks))
@@ -2671,6 +2680,14 @@ func BenchmarkBlockfetchNearTipQueuedHeaderPredecoded(b *testing.B) {
 // BenchmarkVerifyBlockHeader isolates the cryptographic header
 // verification path used by blockfetch near tip.
 func BenchmarkVerifyBlockHeader(b *testing.B) {
+	b.Run("tracing=off", benchmarkVerifyBlockHeader)
+	b.Run("tracing=unsampled", func(b *testing.B) {
+		testutil.InstallUnsampledTracing(b)
+		benchmarkVerifyBlockHeader(b)
+	})
+}
+
+func benchmarkVerifyBlockHeader(b *testing.B) {
 	const blockCount = 32
 
 	testBlocks := make([]*testBlockResult, 0, blockCount)
@@ -2697,6 +2714,7 @@ func BenchmarkVerifyBlockHeader(b *testing.B) {
 				testBlocks[i%len(testBlocks)].block,
 				epochNonceHex,
 				testBlocks[0].slotsPerKesPeriod,
+				testMaxKESEvolutions,
 			); err != nil {
 				b.Fatal(err)
 			}
@@ -2820,6 +2838,14 @@ func BenchmarkBlockfetchVerifiedHeaderDispatch(b *testing.B) {
 // BenchmarkBlockProcessingThroughputPredecoded measures block-processing
 // throughput with block CBOR decoding removed from the timed region.
 func BenchmarkBlockProcessingThroughputPredecoded(b *testing.B) {
+	b.Run("tracing=off", benchmarkBlockProcessingThroughputPredecoded)
+	b.Run("tracing=unsampled", func(b *testing.B) {
+		testutil.InstallUnsampledTracing(b)
+		benchmarkBlockProcessingThroughputPredecoded(b)
+	})
+}
+
+func benchmarkBlockProcessingThroughputPredecoded(b *testing.B) {
 	seedModels, rawBlocks := loadBlockProcessingFixture(b)
 	blocks := make([]ledger.Block, 0, len(rawBlocks))
 	for _, block := range rawBlocks {
@@ -3011,7 +3037,7 @@ func blockNumberFollowsParent(
 }
 
 func loadBlockProcessingFixture(
-	b *testing.B,
+	b testing.TB,
 ) ([]models.Block, []*immutable.Block) {
 	b.Helper()
 
@@ -3165,7 +3191,7 @@ func newBatchBenchmarkLedgerState(
 }
 
 func newBlockProcessingBenchmarkLedgerState(
-	b *testing.B,
+	b testing.TB,
 	seedModels []models.Block,
 ) (*database.Database, *LedgerState) {
 	b.Helper()

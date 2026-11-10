@@ -587,6 +587,14 @@ var _ eras.ByronProtocolParametersProvider = (*LedgerView)(nil)
 // which is exactly why it has to be a compile error here.
 var _ lcommon.StakeCredentialDepositState = (*LedgerView)(nil)
 
+var _ lcommon.DijkstraBlsProofDomainState = (*LedgerView)(nil)
+
+// DijkstraBlsProofDomain returns the immutable pool-proof policy shared by
+// block application, mempool validation, and transaction evaluation.
+func (lv *LedgerView) DijkstraBlsProofDomain() lcommon.DijkstraBlsProofDomain {
+	return lv.ls.config.DijkstraBlsProofDomain
+}
+
 func (lv *LedgerView) NetworkId() uint {
 	genesis := lv.ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if genesis == nil {
@@ -3014,8 +3022,9 @@ func (lv *LedgerView) GetStakeDistribution(
 
 // GetLeiosKeys returns the Dijkstra/Leios BLS key frozen with each named pool's
 // Mark stake snapshot for epoch. A pool absent from the result has no captured
-// key. The returned keys are raw; callers must verify proof of possession
-// before treating a key as usable.
+// key. A key is aged against the committee epoch the snapshot selects (epoch
+// plus one), matching the reference ledger. The returned keys are raw; callers
+// must verify proof of possession before treating a key as usable.
 func (lv *LedgerView) GetLeiosKeys(
 	epoch uint64,
 	poolKeyHashes []lcommon.PoolKeyHash,
@@ -3044,6 +3053,9 @@ func (lv *LedgerView) GetLeiosKeys(
 	if err != nil {
 		return nil, fmt.Errorf("resolve maximum Leios key age: %w", err)
 	}
+	// Mark[epoch] selects the committee for epoch+1, and the key age bound
+	// applies to that committee epoch.
+	committeeEpoch := epoch + 1
 	for _, snapshot := range snapshots {
 		if len(snapshot.LeiosKeyPublic) == 0 ||
 			len(snapshot.LeiosKeyPossessionProof) == 0 {
@@ -3054,7 +3066,7 @@ func (lv *LedgerView) GetLeiosKeys(
 		registrationEpoch := snapshot.LeiosKeyRegistrationEpoch
 		if registrationEpoch == nil ||
 			*registrationEpoch > epoch ||
-			epoch-*registrationEpoch >= maxKeyAgeEpochs {
+			committeeEpoch-*registrationEpoch >= maxKeyAgeEpochs {
 			continue
 		}
 		out[hex.EncodeToString(snapshot.PoolKeyHash)] = &lcommon.LeiosKey{

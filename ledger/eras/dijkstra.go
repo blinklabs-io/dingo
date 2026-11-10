@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/lang"
 )
 
@@ -144,9 +145,6 @@ func HardForkDijkstra(
 	applyDijkstraRefScriptDefaults(&ret)
 	if err := validateDijkstraProtocolParameterDomains(&ret, dijkstraGenesis); err != nil {
 		return nil, fmt.Errorf("validate Dijkstra genesis parameters: %w", err)
-	}
-	if ret.ProtocolVersion.Major < gdijkstra.MinProtocolVersionDijkstra {
-		ret.ProtocolVersion.Major = gdijkstra.MinProtocolVersionDijkstra
 	}
 	return &ret, nil
 }
@@ -443,6 +441,11 @@ func ValidateTxDijkstra(
 		)
 	}
 	tx = normalizedTx
+	// The rules below share one transaction-scoped state, as in
+	// ValidateTxConway. Its memo is keyed by transaction object, so the
+	// phase-2 copy and each sub-transaction get their own entries.
+	// Capability lookups, including blsstate.ProviderFor, unwrap it.
+	ls = lcommon.NewTransactionScopedLedgerState(ls)
 	errs := []error{}
 	// Phase-1 rules apply to every transaction regardless of its declared
 	// phase-2 result. A declared-invalid transaction still has to prove its
@@ -524,7 +527,8 @@ func ValidateTxDijkstra(
 		resultKey   phase2ResultKey
 		resultKeyOK bool
 	)
-	if resultCache != nil && tx.IsValid() {
+	if resultCache != nil && tx.IsValid() &&
+		dijkstraTransactionHasRedeemers(tx) {
 		resultKey, resultKeyOK = dijkstraPhase2ResultKey(
 			tx,
 			ls,
@@ -544,6 +548,23 @@ func ValidateTxDijkstra(
 		resultCache.add(resultKey)
 	}
 	return semanticRuleValidationErrorFor(validatePlutusOutcome(tx, phase2Err))
+}
+
+func transactionWitnessSetHasRedeemers(witness lcommon.TransactionWitnessSet) bool {
+	if witness != nil && witness.Redeemers() != nil {
+		for range witness.Redeemers().Iter() {
+			return true
+		}
+	}
+	return false
+}
+
+func dijkstraTransactionHasRedeemers(tx lcommon.Transaction) bool {
+	return transactionWitnessSetHasRedeemers(tx.Witnesses()) ||
+		slices.ContainsFunc(
+			lcommon.SubTransactionWitnessSetsFromTransaction(tx),
+			transactionWitnessSetHasRedeemers,
+		)
 }
 
 // validateDijkstraPhase2 is a test seam: production always resolves to
@@ -719,6 +740,8 @@ func buildDijkstraValidationRules() []indexedUtxoValidationRule {
 		lcommon.UtxoValidationRulePlutusScripts,
 		lcommon.UtxoValidationRuleCommitteeCertificates,
 		lcommon.UtxoValidationRuleUnknownVoters,
+		lcommon.UtxoValidationRuleMaxTxSize,
+		lcommon.UtxoValidationRuleFeeTooSmall,
 	}
 	descriptors := gdijkstra.UtxoValidationRuleDescriptors()
 	indexes := make([]int, len(skipRuleIds))
@@ -741,11 +764,73 @@ func buildDijkstraValidationRules() []indexedUtxoValidationRule {
 			index:          indexes[2],
 			validationFunc: validateUnknownVoters,
 		},
+		// The upstream size and fee rules measure the wire length of the
+		// transaction, not TxSizeForFee.
+		indexedUtxoValidationRule{
+			index: indexes[3],
+			validationFunc: maxTxSizeRule(
+				func(pp lcommon.ProtocolParameters) (uint, bool) {
+					p, ok := pp.(*gdijkstra.DijkstraProtocolParameters)
+					if !ok || p == nil {
+						return 0, false
+					}
+					return p.MaxTxSize, true
+				},
+			),
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[4],
+			validationFunc: validateDijkstraMinFee,
+		},
 	)
 	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
 		return a.index - b.index
 	})
 	return ret
+}
+
+// validateDijkstraMinFee applies the upstream Dijkstra minimum fee, which
+// includes execution units and tiered reference-script cost, with the size
+// component re-priced from TxSizeForFee. Upstream prices common.TxSizeForFee,
+// so the difference between the two sizes is the only term that changes.
+func validateDijkstraMinFee(
+	tx lcommon.Transaction,
+	_ uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	tmpPparams, ok := pp.(*gdijkstra.DijkstraProtocolParameters)
+	if !ok || tmpPparams == nil {
+		return ErrIncompatibleProtocolParams
+	}
+	upstreamMinFee, err := gdijkstra.MinFeeTxWithUtxo(tx, pp, ls)
+	if err != nil {
+		return err
+	}
+	upstreamSize, err := lcommon.TxSizeForFee(tx)
+	if err != nil {
+		return err
+	}
+	sizeDelta := new(big.Int).Sub(
+		new(big.Int).SetUint64(TxSizeForFee(tx)),
+		big.NewInt(int64(upstreamSize)),
+	)
+	minFee := new(big.Int).SetUint64(upstreamMinFee)
+	minFee.Add(
+		minFee,
+		sizeDelta.Mul(sizeDelta, new(big.Int).SetUint64(uint64(tmpPparams.MinFeeA))),
+	)
+	if minFee.Sign() < 0 {
+		minFee.SetInt64(0)
+	}
+	fee := tx.Fee()
+	if fee == nil {
+		fee = new(big.Int)
+	}
+	if fee.Cmp(minFee) >= 0 {
+		return nil
+	}
+	return shelley.FeeTooSmallUtxoError{Provided: fee, Min: minFee}
 }
 
 func dijkstraPhase1ValidationRules() []indexedUtxoValidationRule {
@@ -876,15 +961,9 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 }
 
 func dijkstraLevelsHaveRedeemers(levels []dijkstraPlutusScriptLevel) bool {
-	for _, level := range levels {
-		if level.witnesses == nil || level.witnesses.Redeemers() == nil {
-			continue
-		}
-		for range level.witnesses.Redeemers().Iter() {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(levels, func(level dijkstraPlutusScriptLevel) bool {
+		return transactionWitnessSetHasRedeemers(level.witnesses)
+	})
 }
 
 func resolveDijkstraScriptLevelInputs(

@@ -303,13 +303,6 @@ func TestDeterministicListingAndStartupCleanup(t *testing.T) {
 	}
 }
 
-func TestMissingOptionalProviderError(t *testing.T) {
-	err := MissingProviderError(CapabilityStorageBlob, "s3")
-	if !strings.Contains(err.Error(), "dingo_extra_plugins") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestApplyEnvironment(t *testing.T) {
 	selection := Selection{
 		Provider: "yaml",

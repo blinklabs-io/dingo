@@ -166,14 +166,14 @@ func TestRunBenchCachedReadsReduceActualStorageRequests(t *testing.T) {
 				counter := &countingBlobReads{BlobStore: db.Blob()}
 				db.SetBlobStore(counter)
 				config := validTestConfig()
-				config.downstreamPeers = 100
+				const peers = 5
+				config.downstreamPeers = peers
 				config.cachedReads = cached
 				if err := runBench(db, config); err != nil {
 					t.Fatal(err)
 				}
-				want := int64(
-					202,
-				) // one manifest and closure per peer, vote and apply
+				// one manifest and closure read per peer, vote and apply
+				want := int64(2*peers + 2)
 				if cached {
 					want = 2
 				}

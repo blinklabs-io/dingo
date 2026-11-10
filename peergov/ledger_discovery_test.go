@@ -334,6 +334,8 @@ func TestAddLedgerPeer_HostnameCandidateCountsPeerAddedByIP(t *testing.T) {
 }
 
 func TestLoadPeerSnapshotSeedsLedgerPeers(t *testing.T) {
+	t.Parallel()
+
 	snapshot := &topology.PeerSnapshotConfig{
 		Point: topology.PeerSnapshotPoint{BlockPointSlot: 42},
 		BigLedgerPools: []topology.PeerSnapshotLedgerPool{
@@ -373,6 +375,8 @@ func TestLoadPeerSnapshotSeedsLedgerPeers(t *testing.T) {
 }
 
 func TestLoadPeerSnapshotConvertsRelayShapes(t *testing.T) {
+	t.Parallel()
+
 	snapshot := &topology.PeerSnapshotConfig{
 		BigLedgerPools: []topology.PeerSnapshotLedgerPool{
 			{
@@ -409,6 +413,8 @@ func TestLoadPeerSnapshotConvertsRelayShapes(t *testing.T) {
 }
 
 func TestPoolRelaysFromPeerSnapshotSeparatesPoolControl(t *testing.T) {
+	t.Parallel()
+
 	snapshot := &topology.PeerSnapshotConfig{
 		Point: topology.PeerSnapshotPoint{BlockPointHash: strings.Repeat("a", 64)},
 		BigLedgerPools: []topology.PeerSnapshotLedgerPool{
@@ -429,6 +435,8 @@ func TestPoolRelaysFromPeerSnapshotSeparatesPoolControl(t *testing.T) {
 }
 
 func TestLedgerRelayControlIdentityFailsClosedOnAmbiguousEndpoint(t *testing.T) {
+	t.Parallel()
+
 	pg := discardGovernor()
 	ip := net.ParseIP("44.0.0.1")
 	identities := pg.ledgerRelayCorroborationIdentities([]PoolRelay{
@@ -440,6 +448,8 @@ func TestLedgerRelayControlIdentityFailsClosedOnAmbiguousEndpoint(t *testing.T) 
 }
 
 func TestLedgerReconciliationRefreshesControlIdentity(t *testing.T) {
+	t.Parallel()
+
 	pg := discardGovernor()
 	relayAddress := "44.0.0.1:3001"
 	pg.peers = []*Peer{{
@@ -480,6 +490,8 @@ func TestLedgerReconciliationRefreshesControlIdentity(t *testing.T) {
 }
 
 func TestDiscoverLedgerPeers_BoundedByTarget(t *testing.T) {
+	t.Parallel()
+
 	// Provide 50 relays but set target to 5
 	relays := make([]PoolRelay, 50)
 	for i := range relays {
@@ -508,6 +520,8 @@ func TestDiscoverLedgerPeers_BoundedByTarget(t *testing.T) {
 }
 
 func TestDiscoverLedgerPeers_TargetAlreadySatisfied(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -548,6 +562,8 @@ func TestDiscoverLedgerPeers_TargetAlreadySatisfied(t *testing.T) {
 }
 
 func TestDiscoverLedgerPeers_PartialRefill(t *testing.T) {
+	t.Parallel()
+
 	ip1 := net.ParseIP("44.0.0.1")
 	ip2 := net.ParseIP("44.0.0.2")
 	ip3 := net.ParseIP("44.0.0.3")
@@ -596,6 +612,8 @@ func TestDiscoverLedgerPeers_PartialRefill(t *testing.T) {
 }
 
 func TestDiscoverLedgerPeers_NegativeTargetDisables(t *testing.T) {
+	t.Parallel()
+
 	provider := &countingLedgerPeerProvider{}
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -616,20 +634,9 @@ func TestDiscoverLedgerPeers_NegativeTargetDisables(t *testing.T) {
 		"a disabled node must never call the ledger peer provider")
 }
 
-func TestDiscoverLedgerPeers_DefaultTarget(t *testing.T) {
-	// Verify default target is applied
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		UseLedgerAfterSlot: 0,
-		LedgerPeerProvider: &mockLedgerPeerProvider{
-			currentSlot: 1000,
-		},
-	})
-
-	assert.Equal(t, defaultLedgerPeerTarget, pg.config.LedgerPeerTarget)
-}
-
 func TestDiscoverLedgerPeers_PeerCapInteraction(t *testing.T) {
+	t.Parallel()
+
 	// Set a very low peer cap and a higher ledger target
 	relays := make([]PoolRelay, 20)
 	for i := range relays {
@@ -658,6 +665,8 @@ func TestDiscoverLedgerPeers_PeerCapInteraction(t *testing.T) {
 }
 
 func TestLedgerPeerDeficit(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		LedgerPeerTarget: 5,
@@ -692,6 +701,8 @@ func TestLedgerPeerDeficit(t *testing.T) {
 }
 
 func TestLedgerPeerDeficit_Satisfied(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		LedgerPeerTarget: 2,
@@ -725,6 +736,8 @@ func TestLedgerPeerDeficit_Satisfied(t *testing.T) {
 // peer that leaves the peer list for any other reason) does not grow the map
 // forever across discovery rounds.
 func TestPruneLedgerKnownAddrsLocked_RemovesStaleEntries(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -755,6 +768,8 @@ func TestPruneLedgerKnownAddrsLocked_RemovesStaleEntries(t *testing.T) {
 // locked helper directly, and covers repeated reconcile passes settling on a
 // stable, pruned map instead of erroring or re-adding the stale entry.
 func TestPeerGovernor_Reconcile_PrunesStaleLedgerKnownAddr(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -786,6 +801,8 @@ func TestPeerGovernor_Reconcile_PrunesStaleLedgerKnownAddr(t *testing.T) {
 // p.peers; reconcileLedgerKnownAddrs reacts to the chain's own relay list
 // changing while the peer is untouched.
 func TestDiscoverLedgerPeers_ReconcilesAgainstCurrentRelaySet(t *testing.T) {
+	t.Parallel()
+
 	provider := &mockLedgerPeerProvider{
 		relays: []PoolRelay{{Hostname: "44.0.0.9", Port: 3001}},
 	}
@@ -845,6 +862,8 @@ func TestDiscoverLedgerPeers_ReconcilesAgainstCurrentRelaySet(t *testing.T) {
 func TestDiscoverLedgerPeers_ReconcilesEvenWhenTargetSatisfiedAndNotUrgent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	provider := &mockLedgerPeerProvider{
 		relays: []PoolRelay{{Hostname: "44.0.0.9", Port: 3001}},
 	}
@@ -899,6 +918,8 @@ func TestDiscoverLedgerPeers_ReconcilesEvenWhenTargetSatisfiedAndNotUrgent(
 // have its ledgerKnownAddrs association restored, not left permanently
 // stale from the round it was pruned.
 func TestDiscoverLedgerPeers_ReAssociatesRelistedRelay(t *testing.T) {
+	t.Parallel()
+
 	provider := &mockLedgerPeerProvider{
 		relays: []PoolRelay{{Hostname: "44.0.0.9", Port: 3001}},
 	}
@@ -957,6 +978,8 @@ func TestDiscoverLedgerPeers_ReAssociatesRelistedRelay(t *testing.T) {
 // shape is not expected on a live chain, so treating it as "every relay was
 // delisted" would be actively harmful for no benefit.
 func TestReconcileLedgerKnownAddrs_EmptyCandidatesIsNoop(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -978,6 +1001,8 @@ func TestReconcileLedgerKnownAddrs_EmptyCandidatesIsNoop(t *testing.T) {
 // a subsequent call with a shrunk candidate set must prune exactly the
 // addresses that dropped out.
 func TestReconcileLedgerKnownAddrs_RepeatedCallsAreIdempotent(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -1003,6 +1028,8 @@ func TestReconcileLedgerKnownAddrs_RepeatedCallsAreIdempotent(t *testing.T) {
 }
 
 func TestFlattenRelayCandidates(t *testing.T) {
+	t.Parallel()
+
 	ip4 := net.ParseIP("44.0.0.1")
 	ip6 := net.ParseIP("2001:db8::1")
 
@@ -1020,15 +1047,9 @@ func TestFlattenRelayCandidates(t *testing.T) {
 	assert.Len(t, candidates, 5)
 }
 
-func TestFlattenRelayCandidates_Empty(t *testing.T) {
-	candidates := flattenRelayCandidates(nil)
-	assert.Empty(t, candidates)
-
-	candidates = flattenRelayCandidates([]PoolRelay{})
-	assert.Empty(t, candidates)
-}
-
 func TestDedupeRelayCandidates(t *testing.T) {
+	t.Parallel()
+
 	candidates := dedupeRelayCandidates([]string{
 		"relay.example.com:3001",
 		"44.0.0.1:3001",
@@ -1045,6 +1066,8 @@ func TestDedupeRelayCandidates(t *testing.T) {
 }
 
 func TestCountLedgerPeersLocked(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})

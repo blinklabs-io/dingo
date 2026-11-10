@@ -115,7 +115,7 @@ func NewMCPServer(
 	instructions := "Dingo Cardano MCP Server.\n" +
 		"Dingo is a pure Go, modular Cardano node implementation developed by Blink Labs.\n" +
 		"Key concepts & guidance for agents:\n" +
-		"- Node & Block Identification: Dingo identifies blocks it forges on-chain by setting Block Header Protocol Minor Version to 69 (BlockHeaderProtocolMinor = 69). This fingerprints Dingo-forged blocks without altering the ledger protocol major version. In network handshakes, it identifies as Dingo with its version string.\n" +
+		"- Node & Block Identification: Dingo identifies blocks it forges on-chain using identifier 69 (BlockHeaderProtocolMinor = 69 by default), optionally with a CIP-0203 release-version payload. This fingerprints Dingo-forged blocks without altering the ledger protocol major version. In network handshakes, it identifies as Dingo with its version string.\n" +
 		"- Block Production: When running with --block-producer, Dingo maintains a durable forge fence in SQLite ('forge_fence:<pool_id>' in table sync_state) to prevent double-signing, and tracks minting in 'pool_opcert_sequence'.\n" +
 		"- Storage Modes: 'core' (Badger block blobs + SQLite metadata) and 'api' (PostgreSQL / indexed store).\n" +
 		"- Documentation Resources: Inspect 'dingo://docs/identity' for details on node and block identification, 'dingo://docs/faq' for frequently asked questions, 'dingo://docs/architecture' for node internals, and 'dingo://dbsync/cheatsheet' for schema mappings.\n" +
