@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -583,10 +584,6 @@ VALUES (?, 1, 0, '1', 0, FALSE)`)
 INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`)
 	require.NoError(t, err)
 	defer addressStmt.Close()
-	assetStmt, err := txn.Prepare(`
-INSERT INTO asset (name, policy_id, utxo_id, amount) VALUES (?, ?, ?, ?)`)
-	require.NoError(t, err)
-	defer assetStmt.Close()
 	for i := range addresses {
 		txID := make([]byte, 32)
 		binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
@@ -596,8 +593,9 @@ INSERT INTO asset (name, policy_id, utxo_id, amount) VALUES (?, ?, ?, ?)`)
 		require.NoError(t, err)
 		_, err = addressStmt.Exec(utxoID, []byte(addresses[i]))
 		require.NoError(t, err)
-		_, err = assetStmt.Exec(assetName, policyID, utxoID, amounts[i])
-		require.NoError(t, err)
+		testutil.InsertAssetHolding(
+			t, txn, utxoID, policyID, assetName, amounts[i],
+		)
 	}
 	require.NoError(t, txn.Commit())
 }
@@ -919,16 +917,10 @@ INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
 	}
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
-		_, err = raw.Exec(`
-INSERT INTO asset (name, policy_id, fingerprint, utxo_id, amount)
-VALUES (?, ?, ?, ?, ?)`,
-			asset.Name,
-			asset.PolicyId,
-			asset.Fingerprint,
-			utxoID,
+		testutil.InsertAssetHolding(
+			t, raw, utxoID, asset.PolicyId, asset.Name,
 			strconv.FormatUint(uint64(asset.Amount), 10),
 		)
-		require.NoError(t, err)
 	}
 }
 

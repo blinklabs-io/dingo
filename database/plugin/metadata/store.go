@@ -2777,14 +2777,14 @@ type MetadataStore interface {
 		types.Txn,
 	) (models.AccountSums, error)
 
-	// GetAssetByPolicyAndName returns a live asset row for the provided
-	// policy ID and asset name. Implementations return an empty model and
-	// no error when the asset is not found.
-	GetAssetByPolicyAndName(
+	// AssetHeld reports whether any retained holding of the asset exists,
+	// live or spent and not yet pruned. An asset whose holdings were all
+	// removed is not held, even though its identity is still recorded.
+	AssetHeld(
 		lcommon.Blake2b224,
 		[]byte, // assetName
 		types.Txn,
-	) (models.Asset, error)
+	) (bool, error)
 
 	// GetAssetQuantityByPolicyAndName returns the sum of live quantities for
 	// the provided policy ID and asset name across all matching UTxOs.

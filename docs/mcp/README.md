@@ -258,12 +258,12 @@ Cardano domains:
 ### 3. Decentralized Exchange & Liquidity
 | Question Style / Intent | Example Natural Language Query | Mapped Tool / Resource | Parameters | Under-the-Hood Behavior |
 | :--- | :--- | :--- | :--- | :--- |
-| **Asset UTxO Matching** | *"Kupo-style search: Find all live UTxOs holding token policy X."* | `get_utxos_by_asset` | `{"policy_id": "00000000..."}` | Performs indexed multi-asset join across `asset` and `utxo` tables where `deleted_slot = 0`. |
+| **Asset UTxO Matching** | *"Kupo-style search: Find all live UTxOs holding token policy X."* | `get_utxos_by_asset` | `{"policy_id": "00000000..."}` | Performs an indexed join across `asset_identity`, `asset_holding` and `utxo` where `deleted_slot = 0`; the fingerprint is computed from the policy and name. |
 | **CIP-26 Token Registry** | *"Lookup decimals, ticker, and circulating supply for token Y."* | `get_asset_info` | `{"policy_id": "0000...", "asset_name": "TEST"}` | Calculates total on-chain circulating supply and queries CIP-26 registry metadata. |
 | **Mempool In-Flight** | *"Inspect pending transactions in the mempool or check if tx X is queued for admission."* | `get_mempool_info` | `{"tx_hash": "01ab..."}` | Queries live Go mempool service: pending transaction count, total memory footprint, capacity saturation percentage, and individual transaction presence. |
 | **DEX Contract UTxOs** | *"Fetch all unspent liquidity outputs for DEX script credential 5e68f6..."* | `get_utxos` | `{"address_or_credential": "5e68f6..."}` | Resolves 28-byte payment credential and returns list of UTxOs with amounts and datums. |
 | **Query Plan Tuning** | *"Explain the query execution plan for UTxO amount indexing."* | `sqlite_explain` | `{"query": "SELECT * FROM utxo WHERE amount > 10000000 LIMIT 10"}` | Executes `EXPLAIN QUERY PLAN` to reveal table scans, covering indexes, and opcode costs. |
-| **Asset Schema** | *"Show schema and indexes for native asset table."* | `sqlite_table_schema` | `{"table_name": "asset"}` | Inspects `asset` table DDL including `policy_id`, `name`, `fingerprint`, and `utxo_id`. |
+| **Asset Schema** | *"Show schema and indexes for the native asset identity table."* | `sqlite_table_schema` | `{"table_name": "asset_identity"}` | Inspects `asset_identity` table DDL including `policy_id` and `name`; `asset_holding` links it to `utxo_id` with the amount. |
 
 ### 4. Lending, Borrowing & CDP
 | Question Style / Intent | Example Natural Language Query | Mapped Tool / Resource | Parameters | Under-the-Hood Behavior |

@@ -252,10 +252,7 @@ var mysqlDeferredIndexPrefixColumns = map[string]map[string]bool{
 		"spent_at_tx_id": true, "referenced_by_tx_id": true,
 		"collateral_by_tx_id": true, "amount": true,
 	},
-	"transaction": {"block_hash": true},
-	"asset": {
-		"policy_id": true,
-	},
+	"transaction":          {"block_hash": true},
 	"pool_opcert_sequence": {"pool_key_hash": true},
 	"asset_mint_burn": {
 		"policy_id": true, "name": true, "fingerprint": true,

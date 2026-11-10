@@ -167,7 +167,7 @@ func TestCatchUpDroppableManifest(t *testing.T) {
 		"idx_utxo_added_slot":          "utxo",
 		"idx_utxo_transaction_id":      "utxo",
 		"idx_transaction_block_hash":   "transaction",
-		"idx_asset_policy_id":          "asset",
+		"idx_asset_holding_asset_id":   "asset_holding",
 	}
 	got := map[string]string{}
 	for _, idx := range CatchUpDroppableManifest() {

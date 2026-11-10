@@ -62,10 +62,12 @@ func newUTxOAdmissionSession(
 			output_idx INTEGER, payment_key BLOB, staking_key BLOB,
 			amount TEXT, added_slot INTEGER,
 			deleted_slot INTEGER NOT NULL DEFAULT 0, datum_hash BLOB);
-		CREATE TABLE asset (
-			id INTEGER PRIMARY KEY AUTOINCREMENT, utxo_id INTEGER NOT NULL,
-			policy_id BLOB NOT NULL, name BLOB NOT NULL,
-			fingerprint BLOB NOT NULL, amount TEXT NOT NULL);
+		CREATE TABLE asset_identity (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, policy_id BLOB NOT NULL,
+			name BLOB NOT NULL, UNIQUE (policy_id, name));
+		CREATE TABLE asset_holding (
+			utxo_id INTEGER NOT NULL, asset_id INTEGER NOT NULL, amount TEXT,
+			PRIMARY KEY (utxo_id, asset_id)) WITHOUT ROWID;
 	`)
 	require.NoError(t, err)
 	if rows > 0 {
@@ -78,10 +80,13 @@ func newUTxOAdmissionSession(
 		)
 		require.NoError(t, err)
 		_, err = db.Exec(`
-			INSERT INTO asset (utxo_id, policy_id, name, fingerprint, amount)
-			SELECT id, ?, X'', 'asset1', '1' FROM utxo`,
+			INSERT INTO asset_identity (policy_id, name) VALUES (?, X'')`,
 			mustDecodeHex(t, utxoAdmissionPolicy),
 		)
+		require.NoError(t, err)
+		_, err = db.Exec(`
+			INSERT INTO asset_holding (utxo_id, asset_id, amount)
+			SELECT id, 1, '1' FROM utxo`)
 		require.NoError(t, err)
 	}
 	if closed {

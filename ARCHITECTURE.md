@@ -14772,7 +14772,7 @@ connection, enable `query_only`, and apply 64 KiB value, 64 KiB SQL, and
 32-column limits before execution. Query results are also capped at 1 MiB of
 decoded cell data. The original settings are restored before the connection
 returns to an injected pool. `get_asset_info` takes one of the same slots and
-scans at most 50,000 live asset rows. A policy or asset with more matching rows
+scans at most 50,000 live asset holdings. A policy or asset with more matching rows
 returns an explicit incomplete error, never a partial supply or holder count.
 `get_utxos_by_asset` and raw-credential `get_utxos` searches also take a slot
 and reject offsets above 10,000; full-address `get_utxos` pages read through the
@@ -15410,7 +15410,11 @@ mainnet-comparable scale, not assumed from sqlite) and for the cross-backend
 behavioral tests confirming sqlite, postgres, and mysql return the identical
 oldest-first sequence against the same fixture.
 
-`GET /assets/{asset}` derives its mint-history fields from the API-mode
+`GET /assets/{asset}` answers 404 unless `MetadataStore.AssetHeld` finds a
+retained holding (live, or spent and not yet pruned) of the asset or the
+mint/burn history records it; an `asset_identity` row with no holdings does not
+count. The response's CIP-14 fingerprint is computed from the policy id and
+name, not stored. It derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from
 `tx.AssetMint()` (recorded in `SetTransaction`, `SetTransactionBatched`, and
 `SetGapBlockTransaction`; removed on rollback). `initial_mint_tx_hash` and
@@ -22371,7 +22375,8 @@ not incremented in place from dingo's side.
 by `dingo load`) extends the API-mode accumulator path of
 `LedgerDeltaBatch.apply` (`ledger/delta.go`) to core storage mode. API mode
 batches whether or not it is set. In core mode the accumulator defers produced
-UTxO asset rows to multi-row inserts, reuses one prepared transaction-row
+UTxO asset holdings to multi-row inserts that resolve each distinct asset to
+its `asset_identity` row at flush, reuses one prepared transaction-row
 upsert, and coalesces each block's live-stake deltas, which
 `FlushBatchStakeDeltas` writes after every delta; `FlushBatch` writes the rest
 before `apply` returns, inside the same database transaction and before the next

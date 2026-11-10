@@ -631,3 +631,36 @@ func TestNodeAdapterAssetDetailReadsHoldings(t *testing.T) {
 	_, err = adapter.Asset(context.Background(), policyHex, []byte("never"))
 	require.ErrorIs(t, err, ErrAssetNotFound)
 }
+
+// TestNodeAdapterAssetIdentityWithoutHoldingsIs404 removes every holding of an
+// asset while its identity row stays, as pruning the last holding UTxO does,
+// and requires the asset to read as absent rather than as an asset with zero
+// quantity.
+func TestNodeAdapterAssetIdentityWithoutHoldingsIs404(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xc6, 0)
+	policy := bytes.Repeat([]byte{0xc7}, lcommon.AddressHashSize)
+	policyHex := hex.EncodeToString(policy)
+	seedAddressOutput(t, raw, db, addr, fill32(0x61), 5, 1_000_000,
+		[]models.Asset{{PolicyId: policy, Name: []byte("pruned"), Amount: 4}},
+		nil)
+	_, err := adapter.Asset(context.Background(), policyHex, []byte("pruned"))
+	require.NoError(t, err)
+
+	_, err = raw.Exec(`DELETE FROM asset_holding`)
+	require.NoError(t, err)
+	var identities int
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM asset_identity`,
+	).Scan(&identities))
+	require.Equal(t, 1, identities)
+
+	_, err = adapter.Asset(context.Background(), policyHex, []byte("pruned"))
+	require.ErrorIs(t, err, ErrAssetNotFound)
+	_, _, err = adapter.AssetHistory(
+		context.Background(), policyHex, []byte("pruned"),
+		PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.ErrorIs(t, err, ErrAssetNotFound)
+}

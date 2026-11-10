@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,9 +47,18 @@ func newAssetInfoLimitSession(
 		CREATE TABLE utxo (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, tx_id BLOB NOT NULL,
 			deleted_slot INTEGER NOT NULL DEFAULT 0);
-		CREATE TABLE asset (
-			id INTEGER PRIMARY KEY AUTOINCREMENT, utxo_id INTEGER NOT NULL,
-			policy_id BLOB NOT NULL, name BLOB NOT NULL, amount TEXT NOT NULL);
+		CREATE TABLE asset_identity (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			policy_id BLOB NOT NULL,
+			name BLOB NOT NULL,
+			UNIQUE (policy_id, name)
+		);
+		CREATE TABLE asset_holding (
+			utxo_id INTEGER NOT NULL,
+			asset_id INTEGER NOT NULL,
+			amount TEXT,
+			PRIMARY KEY (utxo_id, asset_id)
+		) WITHOUT ROWID;
 		CREATE TABLE asset_mint_burn (
 			tx_hash BLOB NOT NULL, policy_id BLOB NOT NULL, name BLOB NOT NULL,
 			fingerprint BLOB, slot INTEGER NOT NULL, quantity TEXT NOT NULL,
@@ -67,13 +77,7 @@ func newAssetInfoLimitSession(
 			i, []byte{byte(i)},
 		)
 		require.NoError(t, err)
-		_, err = db.Exec(
-			`INSERT INTO asset (utxo_id, policy_id, name, amount) VALUES (?, ?, ?, '10')`,
-			i,
-			policy,
-			[]byte("T"),
-		)
-		require.NoError(t, err)
+		testutil.InsertAssetHolding(t, db, int64(i), policy, []byte("T"), "10")
 	}
 
 	server := mcp.NewServer(

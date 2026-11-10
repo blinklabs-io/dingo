@@ -995,20 +995,20 @@ func (a *NodeAdapter) Asset(
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
-	asset, err := meta.GetAssetByPolicyAndName(
+	held, err := meta.AssetHeld(
 		policyHash,
 		assetName,
 		txn.Metadata(),
 	)
 	if err != nil {
 		return AssetInfo{}, fmt.Errorf(
-			"get asset by policy %s and name %x: %w",
+			"check holdings of asset %s%x: %w",
 			policyID,
 			assetName,
 			err,
 		)
 	}
-	if asset.ID == 0 {
+	if !held {
 		return AssetInfo{}, fmt.Errorf(
 			"asset %s%x: %w",
 			policyID,
@@ -1045,11 +1045,13 @@ func (a *NodeAdapter) Asset(
 	}
 
 	info := AssetInfo{
-		Asset:           policyID + hex.EncodeToString(assetName),
-		PolicyID:        policyID,
-		AssetName:       hex.EncodeToString(assetName),
-		AssetNameASCII:  assetNameASCII(assetName),
-		Fingerprint:     string(asset.Fingerprint),
+		Asset:          policyID + hex.EncodeToString(assetName),
+		PolicyID:       policyID,
+		AssetName:      hex.EncodeToString(assetName),
+		AssetNameASCII: assetNameASCII(assetName),
+		Fingerprint: lcommon.NewAssetFingerprint(
+			policyIDBytes, assetName,
+		).String(),
 		Quantity:        strconv.FormatUint(quantity, 10),
 		MintOrBurnCount: mintOrBurnCount,
 	}

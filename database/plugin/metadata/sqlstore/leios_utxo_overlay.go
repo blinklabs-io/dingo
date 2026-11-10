@@ -212,13 +212,7 @@ SELECT EXISTS(SELECT 1 FROM utxo_pointer WHERE utxo_id IN (` + placeholders + `)
 				return err
 			}
 			overlay.utxoWritten = overlay.utxoSeq
-			overlay.assetSeq, overlay.assetSeqRow, err = readSQLiteSequence(
-				ctx,
-				db,
-				"asset",
-			)
-			overlay.assetWritten = overlay.assetSeq
-			return err
+			return nil
 		},
 	)
 	if err != nil {

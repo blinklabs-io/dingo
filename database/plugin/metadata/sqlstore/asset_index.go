@@ -216,22 +216,25 @@ SELECT t.hash AS hash, t.block_hash AS block_hash, t.slot AS slot,
        t.block_index AS block_index, t.id AS id
 FROM "transaction" AS t
 WHERE t.id IN (
-    SELECT u.transaction_id FROM asset AS a
+    SELECT u.transaction_id FROM asset_identity AS i
+    JOIN asset_holding AS a ON a.asset_id = i.id
     JOIN utxo AS u ON u.id = a.utxo_id
-    WHERE a.policy_id = ? AND a.name = ? AND u.transaction_id IS NOT NULL
+    WHERE i.policy_id = ? AND i.name = ? AND u.transaction_id IS NOT NULL
     UNION
-    SELECT u.collateral_return_for_tx_id FROM asset AS a
+    SELECT u.collateral_return_for_tx_id FROM asset_identity AS i
+    JOIN asset_holding AS a ON a.asset_id = i.id
     JOIN utxo AS u ON u.id = a.utxo_id
-    WHERE a.policy_id = ? AND a.name = ?
+    WHERE i.policy_id = ? AND i.name = ?
       AND u.collateral_return_for_tx_id IS NOT NULL
 )
 UNION
 SELECT t.hash, t.block_hash, t.slot, t.block_index, t.id
 FROM "transaction" AS t
 WHERE t.hash IN (
-    SELECT u.spent_at_tx_id FROM asset AS a
+    SELECT u.spent_at_tx_id FROM asset_identity AS i
+    JOIN asset_holding AS a ON a.asset_id = i.id
     JOIN utxo AS u ON u.id = a.utxo_id
-    WHERE a.policy_id = ? AND a.name = ? AND u.spent_at_tx_id IS NOT NULL
+    WHERE i.policy_id = ? AND i.name = ? AND u.spent_at_tx_id IS NOT NULL
     UNION
     SELECT m.tx_hash FROM asset_mint_burn AS m
     WHERE m.policy_id = ? AND m.name = ?

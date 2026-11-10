@@ -187,20 +187,3 @@ func callTool(
 	require.NotEmpty(t, result.Content)
 	return result.Content[0].(*mcp.TextContent).Text
 }
-
-// seedMCPAsset records that utxoID holds amount of the asset.
-func seedMCPAsset(
-	t *testing.T,
-	db *sql.DB,
-	utxoID int64,
-	policy, name []byte,
-	amount string,
-) {
-	t.Helper()
-	_, err := db.Exec(
-		`INSERT INTO asset (utxo_id, policy_id, name, fingerprint, amount)
-VALUES (?, ?, ?, ?, ?)`,
-		utxoID, policy, name, []byte("fp"), amount,
-	)
-	require.NoError(t, err)
-}

@@ -178,18 +178,23 @@ func applyOverlayChain(
 }
 
 // overlayStoreState dumps the tables the overlay writes, ids included, and
-// their id sequences.
+// the utxo id sequence. Holdings are dumped by asset identity bytes because
+// identity ids are node-local and the per-row path may create identities the
+// overlay does not.
 func overlayStoreState(t testing.TB, store *Store) string {
 	t.Helper()
 	var out strings.Builder
 	for _, query := range []string{
 		`SELECT * FROM utxo`,
-		`SELECT * FROM asset`,
+		`SELECT u.tx_id, u.output_idx, i.policy_id, i.name, h.amount
+		 FROM asset_holding h
+		 JOIN asset_identity i ON i.id = h.asset_id
+		 JOIN utxo u ON u.id = h.utxo_id`,
 		`SELECT * FROM utxo_address`,
 		`SELECT * FROM utxo_pointer`,
 		`SELECT credential_tag, staking_key, utxo_stake, reward_stake,
 		        total_stake, updated_slot FROM reward_live_stake`,
-		`SELECT * FROM sqlite_sequence WHERE name IN ('utxo', 'asset')`,
+		`SELECT * FROM sqlite_sequence WHERE name = 'utxo'`,
 	} {
 		rows, err := store.writeDB.QueryContext(context.Background(), query)
 		require.NoError(t, err)
@@ -279,7 +284,7 @@ func TestBatchUtxoOverlayWritesNoAddressInCoreMode(t *testing.T) {
 	applyOverlayChain(t, store, chain, true)
 	var assets, addresses int
 	require.NoError(t, store.writeDB.QueryRowContext(
-		context.Background(), `SELECT COUNT(*) FROM asset`,
+		context.Background(), `SELECT COUNT(*) FROM asset_holding`,
 	).Scan(&assets))
 	require.NoError(t, store.writeDB.QueryRowContext(
 		context.Background(), `SELECT COUNT(*) FROM utxo_address`,
@@ -922,14 +927,14 @@ func TestOverlayWriteErrorClassifiesOwnTables(t *testing.T) {
 	for msg, want := range map[string]bool{
 		"UNIQUE constraint failed: utxo.tx_id, utxo.output_idx (2067)": true,
 		"UNIQUE constraint failed: utxo.id (1555)":                     true,
-		"UNIQUE constraint failed: asset.id (1555)":                    true,
+		"UNIQUE constraint failed: asset_holding.utxo_id (1555)":       false,
 		"UNIQUE constraint failed: reward_live_stake.id (1555)":        true,
 		"UNIQUE constraint failed: transaction.hash (2067)":            true,
 		"UNIQUE constraint failed: transaction.id (1555)":              true,
 		"FOREIGN KEY constraint failed (787)":                          true,
 		"UNIQUE constraint failed: redeemer_script.transaction_id":     false,
 		"UNIQUE constraint failed: utxo_address.utxo_id":               false,
-		"database is locked":                                           false,
+		"database is locked": false,
 	} {
 		err := overlayWriteError("write", errors.New(msg))
 		require.Equal(t, want,

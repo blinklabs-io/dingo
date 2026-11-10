@@ -768,20 +768,27 @@ func TestBatchedProducedAssetRowsWaitForFlush(t *testing.T) {
 	}
 	require.Zero(
 		t,
-		tableCounts(t, store, txn, "asset")["asset"],
-		"new UTxO asset rows must remain staged with the transaction batch",
+		tableCounts(t, store, txn, "asset_holding")["asset_holding"],
+		"new UTxO holdings must remain staged with the transaction batch",
 	)
 	require.Zero(t, tableCounts(t, store, txn, "utxo_address")["utxo_address"])
 	require.NoError(t, store.FlushBatch(acc, txn))
-	require.Equal(t, 3, tableCounts(t, store, txn, "asset")["asset"])
+	require.Equal(
+		t, 3,
+		tableCounts(t, store, txn, "asset_holding")["asset_holding"],
+	)
 	require.Equal(t, 3, tableCounts(t, store, txn, "utxo_address")["utxo_address"])
 	for _, ref := range assets {
-		stored, err := store.GetAssetByPolicyAndName(
+		held, err := store.AssetHeld(
 			lcommon.NewBlake2b224(ref.policyID), ref.name, txn,
 		)
 		require.NoError(t, err)
-		require.NotZero(t, stored.ID)
-		require.Equal(t, types.Uint64(7), stored.Amount)
+		require.True(t, held)
+		quantity, err := store.GetAssetQuantityByPolicyAndName(
+			lcommon.NewBlake2b224(ref.policyID), ref.name, txn,
+		)
+		require.NoError(t, err)
+		require.Equal(t, uint64(7), quantity)
 	}
 }
 

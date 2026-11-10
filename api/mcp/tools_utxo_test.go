@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,14 +47,18 @@ func TestGetUtxosByAsset(t *testing.T) {
 			deleted_slot INTEGER NOT NULL DEFAULT 0,
 			datum_hash BLOB
 		);
-		CREATE TABLE asset (
+		CREATE TABLE asset_identity (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			utxo_id INTEGER NOT NULL,
 			policy_id BLOB NOT NULL,
 			name BLOB NOT NULL,
-			fingerprint BLOB NOT NULL,
-			amount TEXT NOT NULL
+			UNIQUE (policy_id, name)
 		);
+		CREATE TABLE asset_holding (
+			utxo_id INTEGER NOT NULL,
+			asset_id INTEGER NOT NULL,
+			amount TEXT,
+			PRIMARY KEY (utxo_id, asset_id)
+		) WITHOUT ROWID;
 	`)
 	require.NoError(t, err)
 
@@ -74,11 +79,7 @@ func TestGetUtxosByAsset(t *testing.T) {
 	require.NoError(t, err)
 
 	// Insert asset for UTxO 1
-	_, err = db.Exec(`
-		INSERT INTO asset (id, utxo_id, policy_id, name, fingerprint, amount)
-		VALUES (1, 1, ?, ?, ?, '1000')
-	`, policyBytes, []byte("HOSKY"), []byte("asset1hosky"))
-	require.NoError(t, err)
+	testutil.InsertAssetHolding(t, db, 1, policyBytes, []byte("HOSKY"), "1000")
 
 	// Insert spent UTxO 2
 	_, err = db.Exec(`
@@ -87,11 +88,7 @@ func TestGetUtxosByAsset(t *testing.T) {
 	`, txIDBytes, payKeyBytes)
 	require.NoError(t, err)
 
-	_, err = db.Exec(`
-		INSERT INTO asset (id, utxo_id, policy_id, name, fingerprint, amount)
-		VALUES (2, 2, ?, ?, ?, '500')
-	`, policyBytes, []byte("HOSKY"), []byte("asset1hosky"))
-	require.NoError(t, err)
+	testutil.InsertAssetHolding(t, db, 2, policyBytes, []byte("HOSKY"), "500")
 
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "test-server", Version: "1.0"},
@@ -249,13 +246,18 @@ func TestGetAssetInfo(t *testing.T) {
 			tx_id BLOB NOT NULL,
 			deleted_slot INTEGER NOT NULL DEFAULT 0
 		);
-		CREATE TABLE asset (
+		CREATE TABLE asset_identity (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			utxo_id INTEGER NOT NULL,
 			policy_id BLOB NOT NULL,
 			name BLOB NOT NULL,
-			amount TEXT NOT NULL
+			UNIQUE (policy_id, name)
 		);
+		CREATE TABLE asset_holding (
+			utxo_id INTEGER NOT NULL,
+			asset_id INTEGER NOT NULL,
+			amount TEXT,
+			PRIMARY KEY (utxo_id, asset_id)
+		) WITHOUT ROWID;
 		CREATE TABLE asset_mint_burn (
 			tx_hash BLOB NOT NULL,
 			policy_id BLOB NOT NULL,
@@ -297,11 +299,9 @@ func TestGetAssetInfo(t *testing.T) {
 		mintTxHash,
 	)
 	require.NoError(t, err)
-	_, err = db.Exec(`
-		INSERT INTO asset (id, utxo_id, policy_id, name, amount)
-		VALUES (1, 1, ?, ?, '500000')
-	`, policyBytes, []byte("TOKEN"))
-	require.NoError(t, err)
+	testutil.InsertAssetHolding(
+		t, db, 1, policyBytes, []byte("TOKEN"), "500000",
+	)
 
 	// 3. Insert mint record
 	_, err = db.Exec(`
@@ -639,17 +639,17 @@ VALUES(?,?,0,zeroblob(28),'1',?)`,
 		)
 		require.NoError(t, err)
 	}
-	seedMCPAsset(t, db, 1, policy, []byte("A"), "1")
-	seedMCPAsset(t, db, 1, policy, []byte("B"), "2")
-	seedMCPAsset(t, db, 2, policy, []byte("A"), "3")
-	seedMCPAsset(t, db, 3, policy, []byte("B"), "4")
-	seedMCPAsset(t, db, 4, policy, []byte("A"), "5")
+	testutil.InsertAssetHolding(t, db, 1, policy, []byte("A"), "1")
+	testutil.InsertAssetHolding(t, db, 1, policy, []byte("B"), "2")
+	testutil.InsertAssetHolding(t, db, 2, policy, []byte("A"), "3")
+	testutil.InsertAssetHolding(t, db, 3, policy, []byte("B"), "4")
+	testutil.InsertAssetHolding(t, db, 4, policy, []byte("A"), "5")
 	cs := newToolSession(t, db, 100)
 
 	var rows []string
 	text := callTool(t, cs, "get_utxos_by_asset",
 		map[string]any{"policy_id": hex.EncodeToString(policy)}, false)
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		if !strings.HasPrefix(line, "| ") || !strings.Contains(line, "#0") {
 			continue
 		}

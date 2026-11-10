@@ -98,6 +98,7 @@ const (
 	blockNonceSlotIndexSchemaRelease                    = "block-nonce-slot-leading-index"
 	rewardOutputIndexReshapeSchemaRelease               = "reward-account-output-index-reshape"
 	metadataLabelSlotIndexSchemaRelease                 = "transaction-metadata-label-slot-index"
+	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -276,6 +277,7 @@ var schemaVersions = []struct {
 	{Version: 56, Name: blockNonceSlotIndexSchemaRelease, Dir: "v56"},
 	{Version: 57, Name: rewardOutputIndexReshapeSchemaRelease, Dir: "v57"},
 	{Version: 58, Name: metadataLabelSlotIndexSchemaRelease, Dir: "v58"},
+	{Version: 59, Name: assetIdentityHoldingsSchemaRelease, Dir: "v59"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -430,6 +432,11 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == committeeRenewalTermStartSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = committeeRenewalTermStartBackfill
+		}
+		if version.Name == assetIdentityHoldingsSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = assetIdentityHoldingsBackfill(dialect)
+			migration.BatchSize = assetIdentityHoldingsBatchSize
 		}
 		ret = append(ret, migration)
 	}
@@ -1898,6 +1905,7 @@ var (
 	mysqlInlineKeyPattern = regexp.MustCompile(
 		`(?is)(PRIMARY\s+KEY|UNIQUE(?:\s+KEY)?)\s*\(([^)]*)\)`,
 	)
+	withoutRowIDClause      = regexp.MustCompile(`(?i)\s+WITHOUT\s+ROWID\b`)
 	mysqlTextDefaultPattern = regexp.MustCompile(
 		`(?i)\btext(\s+NOT\s+NULL)?\s+DEFAULT\s+'0'`,
 	)
@@ -1942,6 +1950,11 @@ func translateSchemaSQLInSchema(
 	}
 	for index, statement := range statements {
 		value := statement
+		// WITHOUT ROWID is a SQLite storage clause; the other engines
+		// cluster on the primary key already.
+		if dialect != "sqlite" {
+			value = withoutRowIDClause.ReplaceAllString(value, "")
+		}
 		switch dialect {
 		case "postgres":
 			value = strings.ReplaceAll(value, "`", `"`)

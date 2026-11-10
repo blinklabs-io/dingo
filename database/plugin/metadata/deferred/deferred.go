@@ -31,7 +31,7 @@ package deferred
 //   - Primary keys (autoincrement IDs).
 //   - Unique indexes that back ON CONFLICT clauses used during
 //     import (e.g. utxo.tx_id_output_idx, transaction.hash,
-//     asset.idx_asset_unique, datum.hash, script.hash,
+//     asset_identity.(policy_id, name), datum.hash, script.hash,
 //     certs.uniq_tx_cert).
 //   - Indexes on resume-checkpoint tables
 //     (import_checkpoint.import_key, backfill_checkpoint.phase).
@@ -117,8 +117,8 @@ type Index struct {
 	//     consumed-UTxO prune or an epoch rollover reads it, as a WHERE
 	//     predicate, a join or the child side of a foreign key whose
 	//     parent rows those paths delete or rekey.
-	//   - It is on utxo, transaction or asset, the tables whose index
-	//     maintenance dominates a trusted batch commit.
+	//   - It is on utxo, transaction or asset_holding, the tables whose
+	//     index maintenance dominates a trusted batch commit.
 	CatchUpDroppable bool
 }
 
@@ -278,9 +278,9 @@ var Manifest = []Index{
 		Notes:   "Rollback and transaction history ordering", Critical: true,
 	},
 	{
-		Name: "idx_asset_policy_id", Table: "asset",
-		Columns: []string{"policy_id"},
-		Notes:   "Policy lookup", Critical: true,
+		Name: "idx_asset_holding_asset_id", Table: "asset_holding",
+		Columns: []string{"asset_id"},
+		Notes:   "Holders and UTxOs of one asset", Critical: true,
 		CatchUpDroppable: true,
 	},
 	{

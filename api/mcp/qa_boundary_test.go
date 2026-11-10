@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/btcsuite/btcd/btcutil/bech32"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -169,13 +170,27 @@ func TestQAAssetNameCollision(t *testing.T) {
 	t.Parallel()
 	db := newSchemaDB(t)
 	_, err := db.Exec(
-		`INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot) VALUES(1,zeroblob(32),0,zeroblob(28),'1',0);
- INSERT INTO asset(id,utxo_id,policy_id,name,fingerprint,amount) VALUES(1,1,zeroblob(28),x'ab','binary','7'),(2,1,zeroblob(28),x'4142','text','1000'),(3,1,zeroblob(28),x'20','space','20');`,
+		`INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot) VALUES(1,zeroblob(32),0,zeroblob(28),'1',0);`,
 	)
 	require.NoError(t, err)
+	policy := make([]byte, 28)
+	for _, holding := range []struct {
+		name   []byte
+		amount string
+	}{
+		{[]byte{0xab}, "7"}, {[]byte("AB"), "1000"}, {[]byte{0x20}, "20"},
+	} {
+		testutil.InsertAssetHolding(
+			t, db, 1, policy, holding.name, holding.amount,
+		)
+	}
 	cs := newToolSession(t, db, 100)
-	for _, tc := range []struct{ name, supply, fingerprint string }{
-		{"AB", "7", "binary"}, {"4142", "1000", "text"}, {" ", "20", "space"},
+	for _, tc := range []struct {
+		name, supply string
+		raw          []byte
+	}{
+		{"AB", "7", []byte{0xab}}, {"4142", "1000", []byte("AB")},
+		{" ", "20", []byte{0x20}},
 	} {
 		text := callTool(
 			t,
@@ -193,7 +208,9 @@ func TestQAAssetNameCollision(t *testing.T) {
 			false,
 		)
 		require.Contains(t, text, "Found 1 UTxOs")
-		require.Contains(t, text, tc.fingerprint)
+		require.Contains(
+			t, text, lcommon.NewAssetFingerprint(policy, tc.raw).String(),
+		)
 	}
 }
 

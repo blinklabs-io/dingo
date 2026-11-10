@@ -64,9 +64,14 @@ func overlayStrictDigest(t testing.TB, db *database.Database) string {
 
 	var out strings.Builder
 	for _, table := range append(tables, "sqlite_sequence") {
-		query := fmt.Sprintf(`SELECT * FROM "%s"`, table)
+		query, ok := digestTableQuery(table)
+		if !ok {
+			continue
+		}
 		if table == "sqlite_sequence" {
-			query = `SELECT * FROM sqlite_sequence`
+			// asset_identity ids are node-local; see digestTableQuery.
+			query = `SELECT * FROM sqlite_sequence
+WHERE name <> 'asset_identity'`
 		}
 		rows, err := raw.Query(query)
 		require.NoError(t, err)
@@ -939,11 +944,9 @@ func TestTrustedBatchOverlayEraGate(t *testing.T) {
 	}
 }
 
-// Every asset-bearing output the batch creates is spent again inside it,
-// on a store that never held an asset row: sqlite_sequence then has no
-// asset row to raise, and the overlay must create the one the per-row
-// path's insert-and-delete leaves.
-func TestTrustedBatchOverlayCreatesMissingSequenceRow(t *testing.T) {
+// Every asset-bearing output the batch creates is spent again inside it. The
+// overlay writes neither a holding nor an identity for an elided output.
+func TestTrustedBatchOverlayElidedAssetWritesNothing(t *testing.T) {
 	t.Parallel()
 	seed := bytes.Repeat([]byte{0xB1}, 32)
 	payOther := rowBatchingBaseAddress(t, 0x44, 0x55)
@@ -967,9 +970,9 @@ func TestTrustedBatchOverlayCreatesMissingSequenceRow(t *testing.T) {
 	raw, err := dbtest.RawSQLiteMetadata(t, overlay.h.db)
 	require.NoError(t, err)
 	require.Zero(t, rowBatchingQueryOne[int](t, raw,
-		`SELECT COUNT(*) FROM asset`))
-	require.Equal(t, 1, rowBatchingQueryOne[int](t, raw,
-		`SELECT COUNT(*) FROM sqlite_sequence WHERE name = 'asset'`))
+		`SELECT COUNT(*) FROM asset_holding`))
+	require.Zero(t, rowBatchingQueryOne[int](t, raw,
+		`SELECT COUNT(*) FROM asset_identity`))
 }
 
 // Two account-existence cases the live-stake replay reads from

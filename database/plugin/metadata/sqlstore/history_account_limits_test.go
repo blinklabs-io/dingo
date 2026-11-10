@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
@@ -100,14 +101,14 @@ func accountAssetUtxo(
 		})
 	}
 	require.NoError(t, store.ImportUtxos([]models.Utxo{held}, nil))
-	_, err := store.writeDB.Exec(
-		`INSERT INTO asset (name, policy_id, utxo_id, amount)
-SELECT ?, ?, id, 'unparseable' FROM utxo WHERE tx_id = ?`,
-		[]byte("z"),
-		policy,
-		held.TxId,
-	)
+	var heldID int64
+	err := store.writeDB.QueryRow(
+		`SELECT id FROM utxo WHERE tx_id = ?`, held.TxId,
+	).Scan(&heldID)
 	require.NoError(t, err)
+	testutil.InsertAssetHolding(
+		t, store.writeDB, heldID, policy, []byte("z"), "unparseable",
+	)
 }
 
 // The asset scans stop at the first holding past MaxAssetRows and, ordered by

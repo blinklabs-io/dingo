@@ -25,69 +25,73 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// TestInsertUtxoModelCachesAssetInsert proves the conflict-tolerant asset
-// insert is cached, ordinary inserts populate caller-visible asset IDs, and
-// staged replay writes persist the relation without resolving transient IDs.
+// TestInsertUtxoModelCachesAssetInsert proves the holding insert is cached,
+// ordinary inserts store the holding, and staged replay writes persist the
+// holding once flushed.
 func TestInsertUtxoModelCachesAssetInsert(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
+	holdingAmount := func(utxoID uint, policy, name []byte) string {
+		var amount string
+		require.NoError(t, store.writeDB.QueryRow(`
+SELECT h.amount FROM asset_holding h
+JOIN asset_identity i ON i.id = h.asset_id
+WHERE h.utxo_id = ? AND i.policy_id = ? AND i.name = ?`,
+			utxoID, policy, name,
+		).Scan(&amount))
+		return amount
+	}
 
 	utxo := utxoForInsertCacheTest(10, 0, 2_000_000)
 	utxo.Address = []byte("test-address")
 	utxo.Assets = []models.Asset{
 		{
-			Name:        []byte("token"),
-			PolicyId:    bytes.Repeat([]byte{0xAA}, 28),
-			Fingerprint: []byte("asset1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-			Amount:      types.Uint64(42),
+			Name:     []byte("token"),
+			PolicyId: bytes.Repeat([]byte{0xAA}, 28),
+			Amount:   types.Uint64(42),
 		},
 	}
 	insertUtxoInTxn(t, store, utxo, true)
-	require.NotZero(t, utxo.Assets[0].ID)
-	var firstAssetID uint
-	require.NoError(t, store.writeDB.QueryRow(
-		`SELECT id FROM asset WHERE utxo_id = ? AND policy_id = ? AND name = ?`,
+	require.Equal(t, "42", holdingAmount(
 		utxo.ID, utxo.Assets[0].PolicyId, utxo.Assets[0].Name,
-	).Scan(&firstAssetID))
-	require.NotZero(t, firstAssetID)
+	))
 
 	store.stmtMu.Lock()
-	cachedBefore := store.stmts[importAssetQuery]
+	cachedBefore := store.stmts[insertAssetHoldingQuery]
+	identityBefore := store.stmts[insertAssetIdentityQuery]
 	store.stmtMu.Unlock()
 	require.NotNil(
 		t,
 		cachedBefore,
-		"expected importAssetQuery to be cached on SQLite",
+		"expected insertAssetHoldingQuery to be cached on SQLite",
+	)
+	require.NotNil(
+		t,
+		identityBefore,
+		"expected insertAssetIdentityQuery to be cached on SQLite",
 	)
 
 	utxo2 := utxoForInsertCacheTest(11, 0, 3_000_000)
 	utxo2.Address = []byte("test-address")
 	utxo2.Assets = []models.Asset{
 		{
-			Name:        []byte("token2"),
-			PolicyId:    bytes.Repeat([]byte{0xBB}, 28),
-			Fingerprint: []byte("asset1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
-			Amount:      types.Uint64(7),
+			Name:     []byte("token2"),
+			PolicyId: bytes.Repeat([]byte{0xBB}, 28),
+			Amount:   types.Uint64(7),
 		},
 	}
 	insertUtxoInTxn(t, store, utxo2, true)
-	require.NotZero(t, utxo2.Assets[0].ID)
-	var secondAssetID uint
-	require.NoError(t, store.writeDB.QueryRow(
-		`SELECT id FROM asset WHERE utxo_id = ? AND policy_id = ? AND name = ?`,
+	require.Equal(t, "7", holdingAmount(
 		utxo2.ID, utxo2.Assets[0].PolicyId, utxo2.Assets[0].Name,
-	).Scan(&secondAssetID))
-	require.NotZero(t, secondAssetID)
-	require.NotEqual(t, firstAssetID, secondAssetID)
+	))
 
 	batched := utxoForInsertCacheTest(12, 0, 4_000_000)
 	batched.Address = []byte("test-address")
 	batched.Assets = []models.Asset{
 		{
-			Name:        []byte("token3"),
-			PolicyId:    bytes.Repeat([]byte{0xDD}, 28),
-			Fingerprint: []byte("asset1ddddddddddddddddddddddddddddddddddddddd"),
-			Amount:      types.Uint64(9),
+			Name:     []byte("token3"),
+			PolicyId: bytes.Repeat([]byte{0xDD}, 28),
+			Amount:   types.Uint64(9),
 		},
 	}
 	var queued rowBatch
@@ -95,20 +99,23 @@ func TestInsertUtxoModelCachesAssetInsert(t *testing.T) {
 		context.Background(), store.writeDB, batched, true, &queued,
 	)
 	require.NoError(t, err)
-	require.Zero(t, batched.Assets[0].ID)
+	var queuedHoldings int
+	for _, entry := range queued.entries {
+		if entry.shape.resolveAssets {
+			queuedHoldings += len(entry.rows)
+		}
+	}
+	require.Equal(t, 1, queuedHoldings,
+		"the holding stays queued until the batch flushes")
 	require.NoError(t, queued.flush(
 		context.Background(), store.writeDB, store.dialect.ParameterLimit(),
 	))
-	require.Zero(t, batched.Assets[0].ID)
-	var batchedAssetID uint
-	require.NoError(t, store.writeDB.QueryRow(
-		`SELECT id FROM asset WHERE utxo_id = ? AND policy_id = ? AND name = ?`,
+	require.Equal(t, "9", holdingAmount(
 		batched.ID, batched.Assets[0].PolicyId, batched.Assets[0].Name,
-	).Scan(&batchedAssetID))
-	require.NotZero(t, batchedAssetID)
+	))
 
 	store.stmtMu.Lock()
-	cachedAfter := store.stmts[importAssetQuery]
+	cachedAfter := store.stmts[insertAssetHoldingQuery]
 	store.stmtMu.Unlock()
 	require.Same(
 		t,

@@ -195,10 +195,11 @@ func accountAssetRows(
 	maxRows int,
 	visit func(policyID, name []byte, quantity *big.Int, spent bool) error,
 ) error {
-	query := `SELECT a.policy_id AS policy_id, a.name AS name,
+	query := `SELECT i.policy_id AS policy_id, i.name AS name,
 a.amount AS amount, u.deleted_slot AS deleted_slot
-FROM asset a
-JOIN utxo u ON u.id = a.utxo_id
+FROM utxo u
+JOIN asset_holding a ON a.utxo_id = u.id
+JOIN asset_identity i ON i.id = a.asset_id
 WHERE u.credential_tag = ? AND u.staking_key = ?`
 	if liveOnly {
 		query += " AND u.deleted_slot = 0"
