@@ -12116,7 +12116,21 @@ The node runs a reload with that certificate in place of the file
 (`Node.agentOpCertLoop`), keeping only the newest offer and retrying the same
 certificate at most once a minute after a refusal. The reloaded certificate
 lives in memory only; after a restart the node loads its file again and the
-agent's newer certificate is picked up the same way.
+agent's newer certificate is picked up the same way. A rotation that lands
+after admission, between the pre-connect and the sign, is refused by the
+agent as a header for another certificate; that refusal drops the session,
+so the next prepare or sign re-admits and the offer follows.
+
+With several agent replicas sharing one key store, Bursa installs a new key
+on one replica and the others load it within their `key_poll_interval`
+(default 10s); until then a replica keeps serving the previous certificate.
+In that window admission fails wherever the node's certificate and the
+replica's differ: after a reload, at a replica that has not polled yet, and
+before it, at one that has. A leader slot whose sign reaches such a replica
+is missed. The reload's own admission can also reach a replica that has not
+polled; the reload is then refused, and an offered certificate is retried
+only after `agentOpCertRetryInterval` (one minute), so on that path the
+window lasts up to a minute.
 
 `shelleyKeyWatchInterval` (off by default) makes the node poll the credential
 files and reload once a changed content has held for two polls. Polling
@@ -12277,7 +12291,11 @@ pre-connect is required, not an optimisation: at about 95ms round trip, a
 dial and admission take about 400ms and a redial inside a sign about 520ms,
 beyond the 500ms default `shelleyKesAgentSignTimeout`, while a sign on an
 open session takes about one round trip. A transport or verification failure
-drops the session; an agent refusal (`error` in the response) keeps it. A
+drops the session; an agent refusal (`error` in the response) keeps it,
+except a refusal saying the header's operational certificate is not the one
+the agent has installed (`opCertMismatchRefusals`), which drops it: the
+agent's key was rotated after admission, and the redial lets admission offer
+the newer certificate. A
 sign that gets no signature back sends the identical header body once more
 (`maxSignSends`), on a new session after a lost reply or on the same session
 after an agent error, while its `SignTimeout` lasts. The agent may already
