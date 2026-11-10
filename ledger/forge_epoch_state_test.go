@@ -16,11 +16,14 @@ package ledger
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -29,6 +32,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -298,4 +302,145 @@ func TestValidateBlockReferenceScriptsUsesEnactedProtocolVersion(t *testing.T) {
 		t.Context(),
 		blockAt(boundary+1),
 	), "the next epoch runs under the enacted major")
+}
+
+// boundaryHookCalls counts the calls an epoch rollover makes into the
+// snapshot manager through the ledger's boundary hooks.
+type boundaryHookCalls struct {
+	snapshot, stake, spo, stakeInputs, capture, discard, prepare int
+}
+
+func (c *boundaryHookCalls) total() int {
+	return c.snapshot + c.stake + c.spo + c.stakeInputs +
+		c.capture + c.discard + c.prepare
+}
+
+func (c *boundaryHookCalls) install(ls *LedgerState, deferred bool) {
+	ls.SetEpochBoundarySnapshotHook(
+		func(*database.Txn, event.EpochTransitionEvent) error {
+			c.snapshot++
+			return nil
+		},
+	)
+	ls.SetEpochBoundarySnapshotStakeHook(
+		func(*database.Txn, event.EpochTransitionEvent) error {
+			c.stake++
+			return nil
+		},
+	)
+	ls.SetCurrentBoundarySPOStakeHook(
+		func(
+			*database.Txn,
+			event.EpochTransitionEvent,
+			uint,
+		) ([]*models.PoolStakeSnapshot, error) {
+			c.spo++
+			return nil, nil
+		},
+	)
+	ls.SetEpochBoundaryDeferredStakeInputsHook(
+		func(*database.Txn) (uint64, uint64, []*models.RewardStakeInput, bool) {
+			c.stakeInputs++
+			return 0, 0, nil, false
+		},
+	)
+	if !deferred {
+		return
+	}
+	ls.SetDeferredEpochBoundarySnapshotHooks(
+		func(*database.Txn, event.EpochTransitionEvent) error {
+			c.capture++
+			return nil
+		},
+		func(uint64) { c.discard++ },
+		func(*database.Txn, event.EpochTransitionEvent) (
+			DeferredBoundarySnapshot, error,
+		) {
+			c.prepare++
+			return nil, errors.New("unexpected prepare")
+		},
+	)
+}
+
+// TestTxValidationSessionTickLeavesBoundaryStateUntouched pins that the
+// validation-only tick of an epoch boundary never reaches the snapshot
+// manager. Its hooks keep shared state (the deferred captures, the pending
+// SNAP distribution, the staged reward inputs) that a tick landing after the
+// real rollover committed would overwrite from post-POOLREAP state.
+func TestTxValidationSessionTickLeavesBoundaryStateUntouched(t *testing.T) {
+	t.Parallel()
+
+	for _, deferred := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deferred=%t", deferred), func(t *testing.T) {
+			t.Parallel()
+
+			fixture := newTreasuryRolloverFixture(t, 1_000)
+			ls := fixture.ls
+			seedEmptyRewardBasisForRollover(
+				t, fixture.db, fixture.currentEpoch, fixture.currentPParams,
+			)
+			ls.epochCache = []models.Epoch{fixture.currentEpoch}
+			ls.metrics.init(prometheus.NewRegistry())
+			ls.publishSnapshotsLocked()
+			var calls boundaryHookCalls
+			calls.install(ls, deferred)
+
+			// The same rollover without the tick flag reaches the hooks,
+			// so a zero count below is not a hook that never fires here.
+			errRollBack := errors.New("roll back")
+			txn := fixture.db.Transaction(t.Context(), true)
+			require.ErrorIs(t, txn.Do(func(txn *database.Txn) error {
+				_, err := ls.processEpochRollover(
+					t.Context(),
+					txn,
+					fixture.currentEpoch,
+					ls.currentEra,
+					ls.currentPParams,
+				)
+				require.NoError(t, err)
+				return errRollBack
+			}), errRollBack)
+			require.NotZero(t, calls.total(),
+				"a real rollover must call the boundary hooks")
+			if deferred {
+				require.NotZero(t, calls.capture)
+			} else {
+				require.NotZero(t, calls.stake)
+				require.NotZero(t, calls.spo)
+				require.NotZero(t, calls.snapshot)
+			}
+			calls = boundaryHookCalls{}
+			phases := testutil.CollectAndCount(
+				ls.metrics.epochRolloverPhaseDuration,
+			)
+			seq := ls.ratificationSeq.Load()
+
+			boundary := fixture.currentEpoch.StartSlot +
+				uint64(fixture.currentEpoch.LengthInSlots)
+			require.NoError(t, ls.WithTxValidationSessionAtSlot(
+				t.Context(),
+				boundary,
+				func(
+					_ func(
+						lcommon.Transaction,
+						map[utxoref.Key]struct{},
+						map[utxoref.Key]lcommon.Utxo,
+						*utxoref.StateOverlay,
+					) error,
+					_ func() bool,
+					_ func(func() error) (bool, error),
+				) error {
+					return nil
+				},
+			))
+
+			require.Zero(t, calls.total(),
+				"the validation tick called the boundary hooks: %+v", calls)
+			require.Equal(t, seq, ls.ratificationSeq.Load(),
+				"the validation tick scheduled a boundary job")
+			require.Equal(t, phases, testutil.CollectAndCount(
+				ls.metrics.epochRolloverPhaseDuration,
+			), "the validation tick recorded rollover phase metrics")
+		})
+	}
 }

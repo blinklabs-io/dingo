@@ -11246,7 +11246,11 @@ transaction. The session's view is ticked to the forge slot
 the epoch rollover, any era transition and the pending protocol-parameter
 updates are staged in the session's rollback-only transaction, so selection
 sees the parameters and state enacted at that boundary and nothing is
-committed; a forge slot more than one epoch beyond the applied epoch is
+committed. The tick runs the rollover in validation-only mode: it never calls
+the snapshot manager's boundary hooks (whose pending SNAP distribution,
+deferred captures and staged reward inputs are shared with the real rollover),
+schedules no deferred boundary job, skips the RATIFY marking pass, and records
+no rollover phase metrics. A forge slot more than one epoch beyond the applied epoch is
 refused. A validator without the slot-ticked session falls back to the
 unticked `WithTxValidationSession`. If a block, rollback, or protocol-parameter
 change publishes a newer generation before selection finishes, the whole

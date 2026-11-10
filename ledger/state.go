@@ -16176,7 +16176,7 @@ func (ls *LedgerState) tickTxValidationSnapshot(
 	if !ok || workingEra == nil {
 		return fmt.Errorf("unknown era ID %d", workingEraID)
 	}
-	rollover, err := ls.processEpochRolloverWithClassicPParamsContext(
+	rollover, err := ls.processEpochRolloverWithOptions(
 		ctx,
 		txn,
 		epoch,
@@ -16185,6 +16185,7 @@ func (ls *LedgerState) tickTxValidationSnapshot(
 		len(transitionPath) > 0,
 		plutusV2CostModelWritten,
 		transitionHardForkMajors,
+		true,
 	)
 	if err != nil {
 		return err
