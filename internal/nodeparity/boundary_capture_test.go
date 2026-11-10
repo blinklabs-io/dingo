@@ -1041,7 +1041,7 @@ func TestReadUTxOSetFileRejectsADamagedCount(t *testing.T) {
 		count int
 	}{
 		{name: "negative", count: -1},
-		{name: "beyond the file size", count: 1 << 40},
+		{name: "beyond the file size", count: 1 << 30},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
