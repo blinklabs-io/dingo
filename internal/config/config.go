@@ -1623,7 +1623,7 @@ func newDefaultConfig() *Config {
 		HealthPort:                          DefaultHealthPort,
 		HealthReadyGapSlots:                 DefaultHealthReadyGapSlots,
 		PrivateBindAddr:                     "127.0.0.1",
-		PrivatePort:                         3002,
+		PrivatePort:                         0,
 		RelayPort:                           3001,
 		BarkBaseUrl:                         "",
 		BarkPort:                            0,
