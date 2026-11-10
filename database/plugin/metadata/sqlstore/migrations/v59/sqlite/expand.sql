@@ -1,0 +1,2 @@
+-- The backfill makes idx_utxo_deleted_staking_amount partial on SQLite and
+-- PostgreSQL. MySQL replaces it from v59/mysql/expand.sql.

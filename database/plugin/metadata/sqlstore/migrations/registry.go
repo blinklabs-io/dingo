@@ -97,6 +97,7 @@ const (
 	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
 	blockNonceSlotIndexSchemaRelease                    = "block-nonce-slot-leading-index"
 	rewardOutputIndexReshapeSchemaRelease               = "reward-account-output-index-reshape"
+	metadataLabelSlotIndexSchemaRelease                 = "transaction-metadata-label-slot-index"
 	utxoSpentStakingIndexSchemaRelease                  = "utxo-spent-staking-index"
 )
 
@@ -275,7 +276,8 @@ var schemaVersions = []struct {
 	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
 	{Version: 56, Name: blockNonceSlotIndexSchemaRelease, Dir: "v56"},
 	{Version: 57, Name: rewardOutputIndexReshapeSchemaRelease, Dir: "v57"},
-	{Version: 58, Name: utxoSpentStakingIndexSchemaRelease, Dir: "v58"},
+	{Version: 58, Name: metadataLabelSlotIndexSchemaRelease, Dir: "v58"},
+	{Version: 59, Name: utxoSpentStakingIndexSchemaRelease, Dir: "v59"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -396,7 +398,7 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.Backfill = utxoStakingPartialIndexBackfill
 		}
 		// MySQL replaces the index with a single-column one from its native
-		// v58 resource, so only the partial-index engines backfill.
+		// v59 resource, so only the partial-index engines backfill.
 		if version.Name == utxoSpentStakingIndexSchemaRelease &&
 			dialect != "mysql" {
 			migration.BackfillRevision = "1"

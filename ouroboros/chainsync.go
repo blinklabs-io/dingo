@@ -1464,6 +1464,9 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 	}
 	if nextErr == nil && next != nil && waitForLedger &&
 		o.chainsyncServerAheadOfLedger(next) {
+		if o.chainsyncServerAppliedWaitHook != nil {
+			o.chainsyncServerAppliedWaitHook()
+		}
 		waitCtx, cancel := context.WithCancel(context.Background())
 		applied := make(chan error, 1)
 		go func() {

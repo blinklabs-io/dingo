@@ -32,7 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// spentStakingEngineRows are inserted before v58: live and spent outputs, with
+// spentStakingEngineRows are inserted before v59: live and spent outputs, with
 // and without a stake credential.
 var spentStakingEngineRows = []struct {
 	deletedSlot int64
@@ -43,7 +43,7 @@ var spentStakingEngineRows = []struct {
 
 // runSpentStakingUpgrade migrates a fresh engine database to v54, loads the
 // rows, optionally marks a deferred rebuild pending and drops the index as a
-// bulk load would, then runs v58 and replays it. It returns the row digest
+// bulk load would, then runs v59 and replays it. It returns the row digest
 // taken before and after.
 func runSpentStakingUpgrade(
 	t *testing.T,
