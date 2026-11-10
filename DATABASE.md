@@ -762,8 +762,8 @@ runner's existing, already-generic "already applied" guard.
 Migration `v59` (`asset-identity-holdings`, integer version 59) replaces the
 per-output `asset` table with `asset_identity` (one row per distinct
 `(policy_id, name)`) and `asset_holding` (one row per output and asset,
-`WITHOUT ROWID` on SQLite; the clause is stripped for PostgreSQL and MySQL,
-which cluster on the primary key). The expand phase creates both tables and
+`WITHOUT ROWID` on SQLite; the clause is SQLite-only and is stripped for
+PostgreSQL and MySQL). The expand phase creates both tables and
 `idx_asset_holding_asset_id`. A resumable backfill copies the legacy rows in
 `asset.id` ranges of 50,000: it inserts the range's distinct identities, then
 the holdings joined to `utxo` and `asset_identity`, and commits both with its

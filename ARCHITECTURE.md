@@ -15411,9 +15411,8 @@ behavioral tests confirming sqlite, postgres, and mysql return the identical
 oldest-first sequence against the same fixture.
 
 `GET /assets/{asset}` answers 404 unless `MetadataStore.AssetHeld` finds a
-retained holding (live, or spent and not yet pruned) of the asset or the
-mint/burn history records it; an `asset_identity` row with no holdings does not
-count. The response's CIP-14 fingerprint is computed from the policy id and
+retained holding (live, or spent and not yet pruned) of the asset; neither an
+`asset_identity` row with no holdings nor a mint/burn record alone counts. The response's CIP-14 fingerprint is computed from the policy id and
 name, not stored. It derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from
 `tx.AssetMint()` (recorded in `SetTransaction`, `SetTransactionBatched`, and

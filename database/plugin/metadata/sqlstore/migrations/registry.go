@@ -1950,8 +1950,8 @@ func translateSchemaSQLInSchema(
 	}
 	for index, statement := range statements {
 		value := statement
-		// WITHOUT ROWID is a SQLite storage clause; the other engines
-		// cluster on the primary key already.
+		// WITHOUT ROWID is SQLite-only syntax, which PostgreSQL and MySQL
+		// reject.
 		if dialect != "sqlite" {
 			value = withoutRowIDClause.ReplaceAllString(value, "")
 		}
