@@ -789,6 +789,22 @@ and `idx_asset_utxo_id`, never drops a source that was not fully copied.
   does not change that; `idx_asset_policy_id` leaves the manifest because its
   table is dropped.
 
+Measured on a Preview SQLite database bootstrapped from Mithril (epoch 1476,
+1,472,619 legacy asset rows):
+
+| Measure | `asset` | identities + holdings |
+| --- | ---: | ---: |
+| Asset tables and indexes | 77,415 pages (317 MB) | 24,984 pages (102 MB) |
+| Database pages in use | 387,299 | 334,867 |
+| WAL frames per block, 3 runs of about 2,000 blocks | 17.59, 17.11, 18.48 | 15.66, 16.74, 17.79 |
+
+The migration copied every row into 487,298 identities with no orphans or
+merges in about 10 seconds, with a peak WAL of 62 MB. The dropped table's pages
+stay on the freelist until `VACUUM`, so the file does not shrink. Preview
+outputs carry few assets per block, so the WAL difference there is within
+run-to-run spread; the reduction grows with assets per output. Query plans for
+the asset reads show no full scan of either table.
+
 Writers create identities on demand: a per-row insert writes the holding when
 the identity exists and otherwise inserts the identity (`ON CONFLICT DO
 NOTHING`) and retries once; a batched flush selects the distinct assets,
