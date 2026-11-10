@@ -128,7 +128,8 @@ func validateBootstrapAncestorChain(
 		}
 		if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
 			return fmt.Errorf(
-				"bootstrap parent ancestor %q is writable by group or other without the sticky bit",
+				"bootstrap parent ancestor %q is writable by group or other without the sticky bit"+
+					"; set the sticky bit on it (chmod +t) or remove its group and other write access",
 				current,
 			)
 		}
