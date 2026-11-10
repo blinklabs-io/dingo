@@ -146,11 +146,16 @@ aborting indexing or dropping pagination rows. Duplicate top-level labels
 remain rejected because the relational label key is unique and no deterministic
 row selection exists.
 
-Transaction application records collateral through the durable
-`utxo_collateral_edge` association table, keyed by transaction id. Hydration
-joins that table per transaction, so shared collateral remains visible to every
-owner; rollback deletes only the rolled-back transaction's edges. The
-transaction-application path no longer writes the legacy scalar marker.
+The metadata `transaction` table is an identity table (id and hash); the
+`applied_transaction` table holds the rows of transactions applied to the
+chain, and readers that mean an applied transaction join it. An output names its
+producer and spender by `transaction.id`, and an imported or recovered output
+may name a producer that has an identity row and no application row until it is
+applied. Transaction application records collateral and reference inputs through
+the durable `utxo_collateral_edge` and `utxo_reference_edge` association tables,
+keyed by transaction id. Hydration joins those tables per transaction, so shared
+collateral remains visible to every owner; rollback deletes only the
+rolled-back transaction's edges, outputs, detail rows and application row.
 
 The public compatibility interface is decomposing into narrow capabilities so
 components need not inherit the full historical metadata surface. Three are
