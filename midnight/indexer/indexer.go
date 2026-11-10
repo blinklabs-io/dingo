@@ -108,7 +108,14 @@ type Config struct {
 	// LedgerTipBlock returns the applied tip block, or nil when the ledger is
 	// at origin. It is required to validate a complete registration rebuild.
 	LedgerTipBlock func() (*models.Block, error)
-	blockDecoder   func(models.Block) ([]lcommon.Transaction, error)
+	// BlockTransactions returns every transaction a stored block represents.
+	// A Leios certifying ranking block carries no transactions of its own; the
+	// ledger applies the endorser block its parent announced, so decoding the
+	// ranking block alone would index nothing from it. Node wiring provides
+	// LedgerState.BlockTransactions. Nil falls back to the block's own
+	// transactions, which is correct for every pre-Leios era.
+	BlockTransactions func(context.Context, models.Block) ([]lcommon.Transaction, error)
+	blockDecoder      func(models.Block) ([]lcommon.Transaction, error)
 	// FatalErrorFunc is called when the indexer encounters an error that
 	// cannot be recovered without risking a checkpoint gap. Node wiring
 	// should cancel the node context so the process exits cleanly.
@@ -683,19 +690,9 @@ func (idx *Indexer) replayCanonicalRegistrationHistory(tip *models.Block) (uint6
 	idx.metrics.beginBackfill()
 	defer idx.metrics.endBackfill()
 	err := idx.config.CanonicalBlockIterator(1, tip.ID+1, func(block models.Block) error {
-		var txs []lcommon.Transaction
-		if idx.config.blockDecoder != nil {
-			decodedTxs, err := idx.config.blockDecoder(block)
-			if err != nil {
-				return fmt.Errorf("midnight indexer: registration rebuild: decode block slot=%d number=%d: %w", block.Slot, block.Number, err)
-			}
-			txs = decodedTxs
-		} else {
-			decoded, err := block.Decode()
-			if err != nil {
-				return fmt.Errorf("midnight indexer: registration rebuild: decode block slot=%d: %w", block.Slot, err)
-			}
-			txs = decoded.Transactions()
+		txs, err := idx.blockTransactions(block)
+		if err != nil {
+			return fmt.Errorf("midnight indexer: registration rebuild: decode block slot=%d number=%d: %w", block.Slot, block.Number, err)
 		}
 		timestamp, err := idx.blockTimestamp(block.Slot)
 		if err != nil {
@@ -889,6 +886,25 @@ func (idx *Indexer) preflightRegistrationHistory() (*models.Block, *models.Block
 	return tip, last, nil
 }
 
+// blockTransactions returns the transactions a stored block represents, which
+// for a Leios certifying ranking block are those of the endorser block it
+// certifies rather than any carried in its own body.
+func (idx *Indexer) blockTransactions(
+	block models.Block,
+) ([]lcommon.Transaction, error) {
+	if idx.config.blockDecoder != nil {
+		return idx.config.blockDecoder(block)
+	}
+	if idx.config.BlockTransactions != nil {
+		return idx.config.BlockTransactions(context.Background(), block)
+	}
+	decoded, err := block.Decode()
+	if err != nil {
+		return nil, err
+	}
+	return decoded.Transactions(), nil
+}
+
 // backfillEndSlot resolves the exclusive upper bound of the catch-up sweep.
 // It is one past the applied ledger tip, so the tip block itself is included
 // and every later stored block is left to ledger replay. A nil resolver keeps
@@ -961,24 +977,14 @@ func (idx *Indexer) backfill() error {
 		idx.checkpointSlot,
 		endSlot,
 		func(block models.Block) error {
-			var txs []lcommon.Transaction
-			if idx.config.blockDecoder != nil {
-				decodedTxs, err := idx.config.blockDecoder(block)
-				if err != nil {
-					return fmt.Errorf(
-						"midnight indexer: backfill: decode block slot=%d block=%d: %w",
-						block.Slot,
-						block.Number,
-						err,
-					)
-				}
-				txs = decodedTxs
-			} else {
-				decoded, err := block.Decode()
-				if err != nil {
-					return fmt.Errorf("midnight indexer: backfill: decode block slot=%d: %w", block.Slot, err)
-				}
-				txs = decoded.Transactions()
+			txs, err := idx.blockTransactions(block)
+			if err != nil {
+				return fmt.Errorf(
+					"midnight indexer: backfill: decode block slot=%d block=%d: %w",
+					block.Slot,
+					block.Number,
+					err,
+				)
 			}
 			timestampMs, err := idx.blockTimestamp(block.Slot)
 			if err != nil {
@@ -1082,7 +1088,7 @@ func (idx *Indexer) handleBlockEvent(evt event.Event) {
 		}
 	case ledger.BlockActionApply:
 		block := blockEvt.Block
-		decoded, err := block.Decode()
+		txs, err := idx.blockTransactions(block)
 		if err != nil {
 			idx.fatal(fmt.Errorf(
 				"midnight indexer: decode block slot=%d block=%d: %w",
@@ -1100,7 +1106,7 @@ func (idx *Indexer) handleBlockEvent(evt event.Event) {
 		// so that the epoch-snapshot write it can trigger is covered by the
 		// same block-scoped write transaction as every other row this block
 		// produces, instead of committing separately beforehand.
-		if err := idx.processBlock(block, decoded.Transactions(), timestampMs); err != nil {
+		if err := idx.processBlock(block, txs, timestampMs); err != nil {
 			idx.fatal(fmt.Errorf(
 				"midnight indexer: process block slot=%d block=%d: %w",
 				block.Slot, block.Number, err,
@@ -1241,7 +1247,7 @@ func (idx *Indexer) rollbackBlock(block models.Block) error {
 			return fail("candidate spends", err)
 		}
 		memory = append(memory, apply)
-		decoded, err := block.Decode()
+		txs, err := idx.blockTransactions(block)
 		if err != nil {
 			// The in-memory candidate outputs this block created cannot be
 			// removed, so their MidnightCommitteeCandidateRegistration
@@ -1256,7 +1262,6 @@ func (idx *Indexer) rollbackBlock(block models.Block) error {
 				err,
 			)
 		} else {
-			txs := decoded.Transactions()
 			memory = append(memory, func() { idx.removeCandidateCreates(txs) })
 			// The created candidates leave the in-memory set, so their
 			// provenance rows are deleted in lockstep, preserving the
