@@ -636,6 +636,9 @@
 #   # shelleyKesAgentPlaintext: true
 #   # Or forge for several pools, each with its own keys and KES source
 #   # (replaces the shelley* settings above; YAML only, not with Leios):
+#   # A remote shelleyKesAgentAddress serves one pool only, so each pool
+#   # signing remotely needs its own agent address; a local socket can
+#   # serve several pools through its profiles.
 #   # blockProducerPools:
 #   #   - shelleyVrfKey: "/keys/pool-a/vrf.skey"
 #   #     shelleyOperationalCertificate: "/keys/pool-a/opcert.cert"

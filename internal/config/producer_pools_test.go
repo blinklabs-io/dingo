@@ -187,6 +187,40 @@ func TestValidateBlockProducerPoolsRefusesLeiosWithSeveralPools(t *testing.T) {
 	require.NoError(t, cfg.Validate(RunModeLeios))
 }
 
+func TestValidateBlockProducerPoolsRefusesASharedKESAgentAddress(t *testing.T) {
+	t.Parallel()
+	validate := func(pools ...BlockProducerPool) error {
+		cfg := validTestConfig()
+		cfg.BlockProducer = true
+		cfg.BlockProducerPools = pools
+		return cfg.Validate(RunModeServe)
+	}
+
+	a, b := remotePool("a"), remotePool("b")
+	b.ShelleyKESAgentAddress = "KES-AGENT.example:3443"
+	err := validate(a, b)
+	require.ErrorContains(
+		t,
+		err,
+		"blockProducerPools[0] and blockProducerPools[1] use the same shelleyKesAgentAddress",
+	)
+	require.ErrorContains(t, err, "bursa#1276")
+
+	b.ShelleyKESAgentAddress = "kes-agent-b.example:3443"
+	require.NoError(t, validate(a, b))
+
+	// A local agent socket serves several pools through its profiles.
+	local := func(n string) BlockProducerPool {
+		return BlockProducerPool{
+			ShelleyVRFKey:                 "/keys/" + n + "/vrf.skey",
+			ShelleyOperationalCertificate: "/keys/" + n + "/node.cert",
+			ShelleyKESAgentSocket:         "/run/kes-agent.sock",
+			ShelleyKESAgentMode:           "sign",
+		}
+	}
+	require.NoError(t, validate(local("a"), local("b")))
+}
+
 // Not t.Parallel: loadConfigThroughPipeline resets the package-level
 // globalConfig.
 func TestPipeline_BlockProducerPoolsFromYAML(t *testing.T) {
