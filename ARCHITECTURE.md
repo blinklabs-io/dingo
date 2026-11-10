@@ -19692,7 +19692,7 @@ excluded from `FullPotRewardsStandardNetwork`.
 
 Key configuration areas:
 - Network selection (preview, preprod, mainnet, dijkstra, musashi, devnet,
-  prime-testnet). DijkstraNet uses magic 6 and the canonical `dijkstra`
+  prime-testnet, prime-mainnet). DijkstraNet uses magic 6 and the canonical `dijkstra`
   configuration bundle; it does not enable Musashi prototype trust bypasses.
 - Storage mode (`core` or `api`)
 - Database path and `plugins.storage` provider selections
