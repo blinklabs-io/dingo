@@ -1146,9 +1146,15 @@ func seedRewardRaceStakeCert(
 	hash := make([]byte, 32)
 	binary.BigEndian.PutUint64(hash[24:], uint64(id))
 	_, err := raw.Exec(fmt.Sprintf(
-		"INSERT INTO %s (id, hash, slot, block_index) VALUES (%s, %s, %s, 0)",
-		table, bind(1), bind(2), bind(3),
-	), id, hash, slot)
+		"INSERT INTO %s (id, hash) VALUES (%s, %s)",
+		table, bind(1), bind(2),
+	), id, hash)
+	require.NoError(t, err)
+	_, err = raw.Exec(fmt.Sprintf(
+		"INSERT INTO applied_transaction (tx_id, slot, block_index) "+
+			"VALUES (%s, %s, 0)",
+		bind(1), bind(2),
+	), id, slot)
 	require.NoError(t, err)
 	_, err = raw.Exec(fmt.Sprintf(
 		"INSERT INTO certs (id, transaction_id, cert_index, slot, cert_type) "+
