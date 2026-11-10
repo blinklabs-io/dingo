@@ -97,6 +97,12 @@ VALUES (?, 0, ?, ?, 10, 5, '0', ?, ?, 0)`,
 		}
 	}
 	require.Greater(t, n, 1000)
+	var seq int64
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT seq FROM sqlite_sequence WHERE name = 'account'",
+	).Scan(&seq))
+	require.Equal(t, int64(4*n), seq,
+		"each upsert must reserve an id, as the full upsert does")
 }
 
 func liveStakeRowText(t *testing.T, db *sql.DB, key []byte) string {
