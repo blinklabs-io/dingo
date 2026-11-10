@@ -236,7 +236,7 @@ func (b identityBackfill) run(
 	case identityPhaseSwap:
 		return b.swap(ctx, batch)
 	case identityPhaseIdx:
-		return b.buildIndex(ctx, batch, int(last))
+		return b.buildIndex(ctx, batch, last)
 	default:
 		return BatchResult{}, fmt.Errorf(
 			"utxo identity backfill: unknown cursor %q", batch.Cursor,
@@ -813,9 +813,9 @@ WHERE table_schema = DATABASE() AND table_name = ?
 func (b identityBackfill) buildIndex(
 	ctx context.Context,
 	batch Batch,
-	position int,
+	position int64,
 ) (BatchResult, error) {
-	if position >= len(utxoIdentityIndexes) {
+	if position >= int64(len(utxoIdentityIndexes)) {
 		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 	}
 	index := utxoIdentityIndexes[position]
@@ -829,7 +829,7 @@ WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?`,
 		}
 		if exists > 0 {
 			return BatchResult{
-				Cursor: identityCursor(identityPhaseIdx, int64(position+1)),
+				Cursor: identityCursor(identityPhaseIdx, position+1),
 			}, nil
 		}
 	}
@@ -839,7 +839,7 @@ WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?`,
 		return BatchResult{}, fmt.Errorf("create %s: %w", index.name, err)
 	}
 	return BatchResult{
-		Cursor: identityCursor(identityPhaseIdx, int64(position+1)),
+		Cursor: identityCursor(identityPhaseIdx, position+1),
 		Rows:   1,
 	}, nil
 }
