@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -181,4 +182,120 @@ func TestValidateBlockReferenceScriptsUsesTickedSession(t *testing.T) {
 		blockAt(nextEpochEnd+1),
 	)
 	require.ErrorContains(t, err, "more than one epoch beyond")
+}
+
+// TestTxValidationSessionTicksTwoEraBoundary pins that the forger's tick
+// follows the era the ledger decides for a boundary even when that crosses two
+// eras. The ledger enters both scheduled eras at one boundary whether or not a
+// block header announces the second, so a mempool validation session at a slot
+// past the boundary must tick the same path the rollover takes.
+func TestTxValidationSessionTicksTwoEraBoundary(t *testing.T) {
+	t.Parallel()
+
+	ls, block := newBoundaryEraLedger(t, boundaryEraCase{
+		pparamsMajor:   8,
+		enableDijkstra: true,
+		configure: func(cfg *cardano.CardanoNodeConfig) {
+			enabled := true
+			cfg.ExperimentalHardForksEnabled = &enabled
+			epoch := uint64(1)
+			cfg.TestConwayHardForkAtEpoch = &epoch
+			cfg.TestDijkstraHardForkAtEpoch = &epoch
+		},
+	})
+	require.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id)
+
+	err := ls.WithTxValidationSessionAtSlot(
+		t.Context(),
+		block.SlotNumber(),
+		func(
+			_ func(
+				lcommon.Transaction,
+				map[utxoref.Key]struct{},
+				map[utxoref.Key]lcommon.Utxo,
+				*utxoref.StateOverlay,
+			) error,
+			_ func() bool,
+			_ func(func() error) (bool, error),
+		) error {
+			return nil
+		},
+	)
+	require.NoError(t, err)
+}
+
+// TestValidateBlockReferenceScriptsUsesEnactedProtocolVersion pins that the
+// aggregate reference-script check reads the parameters the boundary enacts.
+// Under major 10 a reference input missing from the UTxO set contributes
+// nothing to the aggregate; from major 11 it is an error. A HardForkInitiation
+// to major 11 ratified in the ending epoch must therefore change the verdict on
+// a block forged at the first slot of the next epoch and leave one in the
+// ending epoch alone.
+func TestValidateBlockReferenceScriptsUsesEnactedProtocolVersion(t *testing.T) {
+	t.Parallel()
+
+	fixture := newTreasuryRolloverFixture(t, 1_000)
+	seedEmptyRewardBasisForRollover(
+		t,
+		fixture.db,
+		fixture.currentEpoch,
+		fixture.currentPParams,
+	)
+	action := &lcommon.HardForkInitiationGovAction{Type: 1}
+	action.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
+	actionCbor, err := cbor.Encode(action)
+	require.NoError(t, err)
+	ratifiedEpoch := fixture.currentEpoch.EpochId
+	ratifiedSlot := fixture.currentEpoch.StartSlot + 50
+	proposal := &models.GovernanceProposal{
+		TxHash:        bytes.Repeat([]byte{0x61}, 32),
+		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
+		ProposedEpoch: fixture.currentEpoch.EpochId,
+		ExpiresEpoch:  fixture.currentEpoch.EpochId + 20,
+		ReturnAddress: bytes.Repeat([]byte{0}, 29),
+		AnchorURL:     "https://example.invalid/van-rossem",
+		AnchorHash:    bytes.Repeat([]byte{0x62}, 32),
+		GovActionCbor: actionCbor,
+		AddedSlot:     fixture.currentEpoch.StartSlot + 1,
+		RatifiedEpoch: &ratifiedEpoch,
+		RatifiedSlot:  &ratifiedSlot,
+	}
+	require.NoError(t, fixture.db.SetGovernanceProposal(
+		t.Context(), proposal, nil,
+	))
+	fixture.ls.epochCache = []models.Epoch{fixture.currentEpoch}
+	fixture.ls.metrics.init(prometheus.NewRegistry())
+	fixture.ls.publishSnapshotsLocked()
+
+	blockAt := func(slot uint64) *conway.ConwayBlock {
+		return &conway.ConwayBlock{
+			BlockHeader: &conway.ConwayBlockHeader{
+				BabbageBlockHeader: babbage.BabbageBlockHeader{
+					Body: babbage.BabbageBlockHeaderBody{Slot: slot},
+				},
+			},
+			TransactionBodies: []conway.ConwayTransactionBody{{
+				TxReferenceInputs: cbor.NewSetType(
+					[]shelley.ShelleyTransactionInput{{
+						TxId: lcommon.NewBlake2b256(
+							bytes.Repeat([]byte{7}, 32),
+						),
+					}},
+					false,
+				),
+			}},
+			TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{{}},
+		}
+	}
+	boundary := fixture.currentEpoch.StartSlot +
+		uint64(fixture.currentEpoch.LengthInSlots)
+
+	require.NoError(t, fixture.ls.ValidateBlockReferenceScripts(
+		t.Context(),
+		blockAt(boundary-1),
+	), "the ending epoch still runs under the unenacted major")
+	require.Error(t, fixture.ls.ValidateBlockReferenceScripts(
+		t.Context(),
+		blockAt(boundary+1),
+	), "the next epoch runs under the enacted major")
 }

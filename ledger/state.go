@@ -16145,10 +16145,13 @@ func (ls *LedgerState) tickTxValidationSnapshot(
 	if !decided {
 		targetEraID = snapshot.currentEra.Id
 	}
+	// ledgerBoundaryEra decides the era from ledger state alone, so a
+	// two-era result is the boundary the rollover takes with a validated
+	// header; no block is available here to carry that header.
 	transitionPath, ok := ls.eraTransitionPath(
 		snapshot.currentEra.Id,
 		targetEraID,
-		false,
+		true,
 	)
 	if !ok {
 		return fmt.Errorf(
