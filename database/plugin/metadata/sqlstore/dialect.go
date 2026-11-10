@@ -325,22 +325,24 @@ func SQLiteDialect() Dialect {
 		// ordinary, non-bulk chain sync, and this restore path must agree
 		// with that value rather than quietly regressing a connection back
 		// to the smaller threshold once a bulk load finishes.
+		//
+		// temp_store is restored to MEMORY for the same reason: the write
+		// connection runs with it from the DSN (sqliteWritePragmas) so
+		// statement journals never spill to a temp file, and DEFAULT here
+		// would silently bring those spills back after the first bulk load.
 		restore: execStatements(
 			"PRAGMA synchronous = NORMAL",
 			"PRAGMA cache_size = -50000",
-			"PRAGMA temp_store = DEFAULT",
+			"PRAGMA temp_store = MEMORY",
 			"PRAGMA threads = 0",
 			"PRAGMA wal_autocheckpoint = 10000",
 		),
 		analyze: execStatements("ANALYZE"),
-		// 0x10002 is the "run ANALYZE" bit plus "consider every table": a
-		// plain PRAGMA optimize only looks at tables the issuing connection
-		// has already queried, which a freshly opened connection has not,
-		// and it samples rows (analysis_limit) where this form measures them
-		// all. Tables without statistics are always analyzed; tables that
-		// have them are re-analyzed only after growing roughly 25-fold, so a
-		// repeat run is effectively free.
-		optimize:       execStatements("PRAGMA optimize(0x10002)"),
+		// An explicit mask replaces SQLite's defaults, so retain the
+		// temporary analysis-limit bit alongside the all-table check.
+		// Unrestricted index analysis holds the sole write connection and
+		// pauses block application for the duration of the scan.
+		optimize:       execStatements("PRAGMA optimize(0x10012)"),
 		updateFromJoin: standardUpdateFromJoinSQL,
 	}
 }

@@ -827,6 +827,27 @@ func Sync(
 	}
 	catchUp = dec.engage || cfg.RepairLegacyRewardState
 	catchUpStart = dec.start
+	if mode == syncModeResume && !catchUp && isAPIMode(cfg.StorageMode) {
+		status, statusErr := db.GetSyncState("sync_status", nil)
+		if statusErr != nil {
+			return SyncResult{}, fmt.Errorf("reading sync_status: %w", statusErr)
+		}
+		if status == syncStatusBackfill {
+			syncResult, syncErr = resumeMithrilBackfill(
+				ctx, cfg, db, nodeCfg, pinnedDigest, network, logger,
+			)
+			if syncErr != nil {
+				logger.Error(
+					"sync did not complete; "+
+						"re-run 'dingo mithril sync' to resume",
+					"component", "mithril",
+					"error", syncErr,
+				)
+			}
+			return syncResult, syncErr
+		}
+	}
+
 	// Artifact pin. A run that was interrupted after it began mutating the
 	// database must import the artifact those partial rows and ledger-state
 	// phase checkpoints belong to. Re-selecting the aggregator's latest

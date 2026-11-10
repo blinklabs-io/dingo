@@ -89,6 +89,16 @@ func stat1Rows(tb testing.TB, db *sql.DB) (int, bool) {
 	return rows, true
 }
 
+// Uniform liveness lets the cache-refresh probe depend on stat1 alone.
+// Periodic analysis samples indexes and does not collect stat4 histograms.
+// The production spend-plan tests keep their mixed live/spent distributions.
+func seedPlannerStatsProbeUtxos(t *testing.T, store *Store) {
+	t.Helper()
+	seedStakeRefLookupUtxos(t, store, 3_000, 256)
+	_, err := store.writeDB.Exec("UPDATE utxo SET deleted_slot = 0")
+	require.NoError(t, err)
+}
+
 // statsSensitiveSpendSQL is the row-value form of the batched spend UPDATE.
 // Its plan depends on planner statistics: without them SQLite drives it from
 // a deleted_slot-leading index, with them from tx_id_output_idx. It is kept
@@ -172,7 +182,7 @@ func TestOptimizePlannerStatsRefreshesPooledReadConnections(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newFilePlannerStatsStore(t, nil)
-	seedStakeRefLookupUtxos(t, store, 3_000, 256)
+	seedPlannerStatsProbeUtxos(t, store)
 
 	// Park every read connection in the idle pool holding pre-statistics
 	// schema state.
@@ -257,7 +267,7 @@ func TestOptimizePlannerStatsReloadsSharedCacheStatistics(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	require.Same(t, store.readDB, store.writeDB)
-	seedStakeRefLookupUtxos(t, store, 3_000, 256)
+	seedPlannerStatsProbeUtxos(t, store)
 	store.writeDB.SetMaxIdleConns(2)
 
 	// Hold two connections so the pool has idle ones carrying old state.
@@ -346,7 +356,7 @@ func TestPreparedStatementReplansAfterOptimizeOnSameConnection(t *testing.T) {
 	name := fmt.Sprintf("%s(%d)", rowProbeName, token)
 	visited := &visitedCounter
 	store := newFilePlannerStatsStore(t, nil)
-	seedStakeRefLookupUtxos(t, store, 3_000, 256)
+	seedPlannerStatsProbeUtxos(t, store)
 	ctx := context.Background()
 	stmt, err := store.writeDB.PrepareContext(
 		ctx,

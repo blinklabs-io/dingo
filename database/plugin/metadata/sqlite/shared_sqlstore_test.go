@@ -3433,3 +3433,37 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	}
 	require.ElementsMatch(t, []string{"reg-a"}, afterRegistrationTxHashes)
 }
+
+// A write-transaction statement journal spills to an anonymous temp file
+// unless the connection's temp_store is MEMORY. The write connection must run
+// with it in steady state, including after a bulk load restores the pragmas,
+// while the read pool keeps SQLite's default.
+func TestWriteConnectionKeepsTempStoreInMemory(t *testing.T) {
+	t.Parallel()
+	const tempStoreMemory = 2
+	store, writeDB, readDB, err := openSQLStore(
+		Config{DataDir: t.TempDir()},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+	tempStore := func(db *sql.DB) int {
+		t.Helper()
+		var v int
+		require.NoError(t, db.QueryRowContext(
+			t.Context(), "PRAGMA temp_store",
+		).Scan(&v))
+		return v
+	}
+	require.Equal(t, tempStoreMemory, tempStore(writeDB),
+		"write connection must keep statement journals in memory")
+	require.NotEqual(t, tempStoreMemory, tempStore(readDB),
+		"read pool must not hold temporaries in memory")
+
+	require.NoError(t, store.SetBulkLoadPragmas())
+	require.NoError(t, store.RestoreNormalPragmas())
+	require.Equal(t, tempStoreMemory, tempStore(writeDB),
+		"RestoreNormalPragmas must keep the steady-state temp_store")
+}

@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	// Registers the aggregate sqlstore's account totals call on SQLite.
 	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/bigintsum"
+	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/coinsum"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	driversqlite "modernc.org/sqlite"
@@ -52,7 +53,8 @@ func (s *uint64Sum) Step(
 		return fmt.Errorf("uint64 sum expects text, got %T", args[0])
 	}
 	var item big.Int
-	if _, ok := item.SetString(value, 10); !ok || item.Sign() < 0 || item.BitLen() > 64 {
+	if _, ok := item.SetString(value, 10); !ok || item.Sign() < 0 ||
+		item.BitLen() > 64 {
 		return fmt.Errorf("invalid uint64 amount %q", value)
 	}
 	s.total.Add(&s.total, &item)
@@ -88,13 +90,16 @@ func (s *uint64Sum) WindowValue(
 func (*uint64Sum) Final(_ *driversqlite.FunctionContext) {}
 
 func init() {
-	driversqlite.MustRegisterFunction("dingo_uint64_sum", &driversqlite.FunctionImpl{
-		NArgs:         1,
-		Deterministic: true,
-		MakeAggregate: func(driversqlite.FunctionContext) (driversqlite.AggregateFunction, error) {
-			return &uint64Sum{}, nil
+	driversqlite.MustRegisterFunction(
+		"dingo_uint64_sum",
+		&driversqlite.FunctionImpl{
+			NArgs:         1,
+			Deterministic: true,
+			MakeAggregate: func(driversqlite.FunctionContext) (driversqlite.AggregateFunction, error) {
+				return &uint64Sum{}, nil
+			},
 		},
-	})
+	)
 }
 
 var sharedMemoryDBSequence atomic.Uint64
@@ -294,6 +299,22 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 	"&_pragma=cache_size(-50000)" +
 	"&_pragma=foreign_keys(1)" +
 	"&_pragma=mmap_size(268435456)"
+
+// sqliteWritePragmas is appended to the write pool's DSN only.
+//
+// temp_store(MEMORY) keeps SQLite's statement journals off disk. A multi-row
+// INSERT ... RETURNING inside a write transaction saves every page it
+// modifies to a statement journal so a constraint failure can undo just that
+// statement; the journal spills to an anonymous temp file once it outgrows
+// SQLite's 64 KiB in-memory threshold, which a 32-row UTxO batch spread
+// across the indexes routinely does, and with temp_store=MEMORY the journal is
+// never given a file. The journal is bounded by the pages one statement
+// touches. The same setting keeps sorter, materialised-subquery and
+// index-build temporaries in RAM, so it is applied to the single write
+// connection and not to the read pool, where many concurrent connections
+// could each hold large temporaries. synchronous and journal_mode are not
+// touched, so durability is unchanged.
+const sqliteWritePragmas = "&_pragma=temp_store(MEMORY)"
 
 // checkpointInterval is how often checkpointWAL forces a WAL checkpoint,
 // independent of the commit-triggered wal_autocheckpoint(10000) pragma above.
@@ -536,6 +557,13 @@ func NewSQLStore(
 // that ordering is what excludes a data race with the readers.
 var BeforeOpenDataDir func(dataDir string) error
 
+// LazyHotStatements makes every store this package opens defer preparing its
+// hot statements to first use instead of preparing them in Start. It exists
+// for test binaries that open many short-lived stores; production code never
+// sets it. Like BeforeOpenDataDir it must be assigned only from a test
+// package's init function.
+var LazyHotStatements bool
+
 func openSQLStore(
 	config Config,
 	dependencies metadata.ProviderDependencies,
@@ -632,9 +660,10 @@ func openSQLStoreWithDialect(
 		writeDB, err = sqlstore.OpenDB(
 			"sqlite",
 			fmt.Sprintf(
-				"%s?_txlock=immediate%s",
+				"%s?_txlock=immediate%s%s",
 				databaseURI,
 				sqliteCommonPragmas,
+				sqliteWritePragmas,
 			),
 			"sqlite",
 			dependencies.TracingEnabled,
@@ -690,24 +719,27 @@ func openSQLStoreWithDialect(
 	store, err := sqlstore.New(sqlstore.Config{
 		GenesisStakingEmpty: dependencies.GenesisStakingEmpty,
 		SQLitePath:          databasePath,
-		WriteDB:             writeDB,
-		ReadDB:              readDB,
-		Dialect:             dialect,
-		Logger:              dependencies.Logger,
-		StorageMode:         dependencies.StorageMode,
-		Migrations:          registry,
-		MigrationLocker:     locker,
-		Prepare:             prepare,
-		DiskSize:            diskSizeFunc,
-		Maintenance:         maintenance,
-		MaintenanceInterval: 24 * time.Hour,
-		Vacuum:              vacuum,
-		VacuumInterval:      vacuumInterval,
-		Checkpoint:          checkpoint,
-		CheckpointInterval:  checkpointInterval,
-		BackupTo:            backupTo,
-		RestoreFrom:         restoreFrom,
-		PromRegistry:        dependencies.PromRegistry,
+		// modernc prepares eagerly; runtime probing remains on the active Tx.
+		SQLiteOverlayInsertRows: 2047,
+		LazyHotStatements:       LazyHotStatements,
+		WriteDB:                 writeDB,
+		ReadDB:                  readDB,
+		Dialect:                 dialect,
+		Logger:                  dependencies.Logger,
+		StorageMode:             dependencies.StorageMode,
+		Migrations:              registry,
+		MigrationLocker:         locker,
+		Prepare:                 prepare,
+		DiskSize:                diskSizeFunc,
+		Maintenance:             maintenance,
+		MaintenanceInterval:     24 * time.Hour,
+		Vacuum:                  vacuum,
+		VacuumInterval:          vacuumInterval,
+		Checkpoint:              checkpoint,
+		CheckpointInterval:      checkpointInterval,
+		BackupTo:                backupTo,
+		RestoreFrom:             restoreFrom,
+		PromRegistry:            dependencies.PromRegistry,
 	})
 	if err != nil {
 		if readDB != writeDB {

@@ -3400,6 +3400,33 @@ func seedPoolStakeSnapshotOfTypeAtSlot(
 	require.NoError(t, err)
 }
 
+func seedPoolStakeSnapshotWithVrfKeyAtSlot(
+	t *testing.T,
+	db *database.Database,
+	epoch uint64,
+	snapshotType string,
+	poolKeyHash []byte,
+	vrfKeyHash []byte,
+	totalStake uint64,
+	stakeDenominator uint64,
+	capturedSlot uint64,
+) {
+	t.Helper()
+	err := db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:            epoch,
+			SnapshotType:     snapshotType,
+			PoolKeyHash:      poolKeyHash,
+			VrfKeyHash:       vrfKeyHash,
+			TotalStake:       types.Uint64(totalStake),
+			StakeDenominator: types.Uint64(stakeDenominator),
+			CapturedSlot:     capturedSlot,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+}
+
 func seedEligibilityEpochs(
 	t *testing.T,
 	db *database.Database,

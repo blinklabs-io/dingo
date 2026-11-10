@@ -28,6 +28,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
@@ -45,6 +47,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const txTypeAlonzo = alonzo.TxTypeAlonzo
 
 // TestCheckPoolMarginFloorErrorPoolIdIsSingleHexEncoded pins the pool id in
 // the CIP-23 margin-floor rejection to its 56-character hex form.
@@ -1108,20 +1112,27 @@ func TestDijkstraCommitteeValidatorChecksSubtransactionLevels(t *testing.T) {
 	tx := &gdijkstra.DijkstraTransaction{
 		TxIsValid: true,
 		Body: gdijkstra.DijkstraTransactionBody{
-			TxSubTransactions: cbor.NewSetType([]gdijkstra.DijkstraSubTransaction{
-				{Body: gdijkstra.DijkstraSubTransactionBody{
-					TxCertificates: []lcommon.CertificateWrapper{{
-						Type:        uint(lcommon.CertificateTypeResignCommitteeCold),
-						Certificate: resign,
+			TxSubTransactions: cbor.NewSetType(
+				[]gdijkstra.DijkstraSubTransaction{
+					{Body: gdijkstra.DijkstraSubTransactionBody{
+						TxCertificates: []lcommon.CertificateWrapper{{
+							Type: uint(
+								lcommon.CertificateTypeResignCommitteeCold,
+							),
+							Certificate: resign,
+						}},
 					}},
-				}},
-				{Body: gdijkstra.DijkstraSubTransactionBody{
-					TxCertificates: []lcommon.CertificateWrapper{{
-						Type:        uint(lcommon.CertificateTypeAuthCommitteeHot),
-						Certificate: authorize,
+					{Body: gdijkstra.DijkstraSubTransactionBody{
+						TxCertificates: []lcommon.CertificateWrapper{{
+							Type: uint(
+								lcommon.CertificateTypeAuthCommitteeHot,
+							),
+							Certificate: authorize,
+						}},
 					}},
-				}},
-			}, true),
+				},
+				true,
+			),
 		},
 	}
 	state := &taggedCommitteeLedgerState{
@@ -1909,10 +1920,12 @@ func TestBuildIndexedUtxoValidationRulesResolvesByRuleId(t *testing.T) {
 	require.Zero(t, resolveUtxoValidationSkipIndex(
 		descriptors, rules, lcommon.UtxoValidationRulePlutusScripts,
 	))
-	indexed := buildIndexedUtxoValidationRules(
+	indexed := buildIndexedUtxoValidationRulesWithSkips(
 		descriptors,
 		rules,
-		lcommon.UtxoValidationRulePlutusScripts,
+		[]lcommon.UtxoValidationRuleId{
+			lcommon.UtxoValidationRulePlutusScripts,
+		},
 	)
 	require.Len(t, indexed, len(rules)-1)
 	requireIndexedRulesDropRuleIndex(
@@ -2034,12 +2047,11 @@ func TestTxSizeForFee(t *testing.T) {
 			expected: 256,
 		},
 		{
-			// Alonzo+ 4-element TX: fee size excludes the
-			// 1-byte IsValid boolean.
-			name:     "alonzo subtracts isvalid byte",
+			// Malformed Alonzo CBOR cannot be safely reframed.
+			name:     "malformed alonzo keeps full size",
 			txType:   4, // Alonzo
 			cbor:     make([]byte, 256),
-			expected: 255,
+			expected: 256,
 		},
 		{
 			// Mary (pre-Alonzo) TX: no subtraction.
@@ -2057,6 +2069,325 @@ func TestTxSizeForFee(t *testing.T) {
 			}
 			size := TxSizeForFee(tx)
 			assert.Equal(t, tc.expected, size)
+		})
+	}
+}
+
+func txSizeBytes(parts ...[]byte) []byte {
+	var size int
+	for _, part := range parts {
+		size += len(part)
+	}
+	ret := make([]byte, 0, size)
+	for _, part := range parts {
+		ret = append(ret, part...)
+	}
+	return ret
+}
+
+func alonzoFeeTestCBOR(feeSize int) []byte {
+	// The canonical size is one outer-array byte, a three-byte byte-string
+	// header plus its payload, and one byte each for witnesses and auxiliary
+	// data. The on-wire four-component form adds the IsValid boolean.
+	payloadSize := feeSize - 6
+	body := txSizeBytes(
+		[]byte{0x59, byte(payloadSize >> 8), byte(payloadSize)},
+		make([]byte, payloadSize),
+	)
+	return txSizeBytes(
+		[]byte{0x84}, body, []byte{0xa0, 0xf5, 0xf6},
+	)
+}
+
+func TestTxSizeForFeeUsesCanonicalAlonzoFamilyEnvelope(t *testing.T) {
+	t.Parallel()
+
+	body := []byte{0xa3, 0x00, 0x80, 0x01, 0x80, 0x02, 0x00}
+	witnesses := []byte{0xa0}
+	auxiliaryData := []byte{0xa1, 0x00, 0x00}
+	canonicalSize := uint64(1 + len(body) + len(witnesses) + len(auxiliaryData))
+	encodings := []struct {
+		name string
+		cbor []byte
+	}{
+		{
+			name: "definite four components",
+			cbor: txSizeBytes(
+				[]byte{0x84}, body, witnesses, []byte{0xf5}, auxiliaryData,
+			),
+		},
+		{
+			name: "definite four components invalid",
+			cbor: txSizeBytes(
+				[]byte{0x84}, body, witnesses, []byte{0xf4}, auxiliaryData,
+			),
+		},
+		{
+			name: "indefinite four components",
+			cbor: txSizeBytes(
+				[]byte{0x9f}, body, witnesses, []byte{0xf5}, auxiliaryData,
+				[]byte{0xff},
+			),
+		},
+		{
+			name: "wide four-component header",
+			cbor: txSizeBytes(
+				[]byte{
+					0x98,
+					0x04,
+				},
+				body,
+				witnesses,
+				[]byte{0xf5},
+				auxiliaryData,
+			),
+		},
+		{
+			name: "definite three components",
+			cbor: txSizeBytes(
+				[]byte{0x83}, body, witnesses, auxiliaryData,
+			),
+		},
+		{
+			name: "indefinite three components",
+			cbor: txSizeBytes(
+				[]byte{0x9f}, body, witnesses, auxiliaryData, []byte{0xff},
+			),
+		},
+		{
+			name: "wide three-component header",
+			cbor: txSizeBytes(
+				[]byte{0x98, 0x03}, body, witnesses, auxiliaryData,
+			),
+		},
+	}
+
+	for _, txType := range []struct {
+		name string
+		id   int
+	}{
+		{name: "Alonzo", id: alonzo.TxTypeAlonzo},
+		{name: "Babbage", id: babbage.TxTypeBabbage},
+		{name: "Conway", id: conway.TxTypeConway},
+	} {
+		t.Run(txType.name, func(t *testing.T) {
+			for _, encoding := range encodings {
+				t.Run(encoding.name, func(t *testing.T) {
+					tx := &mockFeeTx{
+						cbor:   encoding.cbor,
+						txType: txType.id,
+						fee:    new(big.Int).SetUint64(canonicalSize),
+					}
+					if got := TxSizeForFee(tx); got != canonicalSize {
+						t.Fatalf(
+							"fee size must use the canonical three-component envelope: got %d, want %d",
+							got,
+							canonicalSize,
+						)
+					}
+					require.NoError(t, ValidateTxSize(tx, uint(canonicalSize)))
+					require.Error(t, ValidateTxSize(tx, uint(canonicalSize)-1))
+					require.NoError(t, ValidateTxFee(tx, 1, 0, nil, nil))
+				})
+			}
+		})
+	}
+}
+
+func TestTxSizeForFeePreservesMalformedAlonzoEnvelope(t *testing.T) {
+	t.Parallel()
+
+	body := []byte{0xa3, 0x00, 0x80, 0x01, 0x80, 0x02, 0x00}
+	witnesses := []byte{0xa0}
+	for _, testCase := range []struct {
+		name string
+		cbor []byte
+	}{
+		{
+			name: "four components without validity boolean",
+			cbor: txSizeBytes(
+				[]byte{0x84}, body, witnesses, []byte{0x00, 0xf6},
+			),
+		},
+		{
+			name: "wide three components ending in true",
+			cbor: txSizeBytes(
+				[]byte{0x98, 0x03}, body, witnesses, []byte{0xf5},
+			),
+		},
+		{
+			name: "indefinite three components ending in false",
+			cbor: txSizeBytes(
+				[]byte{0x9f}, body, witnesses, []byte{0xf4, 0xff},
+			),
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			tx := &mockTransaction{
+				cbor:   testCase.cbor,
+				txType: alonzo.TxTypeAlonzo,
+			}
+			fullSize := uint64(len(testCase.cbor))
+			require.Equal(t, fullSize, TxSizeForFee(tx))
+			require.NoError(t, ValidateTxSize(tx, uint(fullSize)))
+			require.Error(t, ValidateTxSize(tx, uint(fullSize)-1))
+		})
+	}
+}
+
+func TestTxSizeForFeeUsesCanonicalDijkstraEnvelope(t *testing.T) {
+	t.Parallel()
+
+	mempool := testutil.DijkstraShapeMempoolTxBytes(
+		t, testutil.ShapeTxBody(nil),
+	)
+	var components []cbor.RawMessage
+	bytesRead, err := cbor.Decode(mempool, &components)
+	require.NoError(t, err)
+	require.Equal(t, len(mempool), bytesRead)
+	require.Len(t, components, 3)
+	canonicalSize := uint64(
+		1 + len(components[0]) + len(components[1]) + len(components[2]),
+	)
+
+	type decoder func([]byte) (lcommon.Transaction, error)
+	mempoolDecoder := func(data []byte) (lcommon.Transaction, error) {
+		return safedecode.Transaction(uint(gdijkstra.TxTypeDijkstra), data)
+	}
+	blockDecoder := safedecode.DijkstraBlockTransaction
+	for _, testCase := range []struct {
+		name   string
+		cbor   []byte
+		decode decoder
+	}{
+		{
+			name:   "mempool definite",
+			cbor:   mempool,
+			decode: mempoolDecoder,
+		},
+		{
+			name: "mempool indefinite",
+			cbor: txSizeBytes(
+				[]byte{0x9f}, components[0], components[1], components[2],
+				[]byte{0xff},
+			),
+			decode: mempoolDecoder,
+		},
+		{
+			name: "mempool wide header",
+			cbor: txSizeBytes(
+				[]byte{0x98, 0x03}, components[0], components[1], components[2],
+			),
+			decode: mempoolDecoder,
+		},
+		{
+			name: "legacy mempool definite",
+			cbor: txSizeBytes(
+				[]byte{0x84}, components[0], components[1],
+				[]byte{0xf5}, components[2],
+			),
+			decode: mempoolDecoder,
+		},
+		{
+			name: "legacy mempool indefinite",
+			cbor: txSizeBytes(
+				[]byte{0x9f}, components[0], components[1],
+				[]byte{0xf5}, components[2], []byte{0xff},
+			),
+			decode: mempoolDecoder,
+		},
+		{
+			name: "legacy mempool wide header",
+			cbor: txSizeBytes(
+				[]byte{0x98, 0x04}, components[0], components[1],
+				[]byte{0xf5}, components[2],
+			),
+			decode: mempoolDecoder,
+		},
+		{
+			name: "block definite valid",
+			cbor: txSizeBytes(
+				[]byte{0x84}, components[0], components[1], components[2],
+				[]byte{0xf5},
+			),
+			decode: blockDecoder,
+		},
+		{
+			name: "block indefinite invalid",
+			cbor: txSizeBytes(
+				[]byte{0x9f}, components[0], components[1], components[2],
+				[]byte{0xf4, 0xff},
+			),
+			decode: blockDecoder,
+		},
+		{
+			name: "block wide header valid",
+			cbor: txSizeBytes(
+				[]byte{0x98, 0x04}, components[0], components[1], components[2],
+				[]byte{0xf5},
+			),
+			decode: blockDecoder,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			tx, err := testCase.decode(testCase.cbor)
+			require.NoError(t, err)
+			require.Equal(t, canonicalSize, TxSizeForFee(tx))
+			require.NoError(t, ValidateTxSize(tx, uint(canonicalSize)))
+			require.Error(t, ValidateTxSize(tx, uint(canonicalSize)-1))
+			require.NoError(t, ValidateTxFee(tx, 1, 0, nil, nil))
+		})
+	}
+}
+
+func TestTxSizeForFeePreservesMalformedDijkstraEnvelope(t *testing.T) {
+	t.Parallel()
+
+	body := []byte{0xa3, 0x00, 0x80, 0x01, 0x80, 0x02, 0x00}
+	witnesses := []byte{0xa0}
+	auxiliaryData := []byte{0xf6}
+	for _, testCase := range []struct {
+		name string
+		cbor []byte
+	}{
+		{
+			name: "legacy false flag",
+			cbor: txSizeBytes(
+				[]byte{0x84}, body, witnesses, []byte{0xf4}, auxiliaryData,
+			),
+		},
+		{
+			name: "no boolean",
+			cbor: txSizeBytes(
+				[]byte{0x84}, body, witnesses, auxiliaryData, []byte{0x00},
+			),
+		},
+		{
+			name: "ambiguous boolean positions",
+			cbor: txSizeBytes(
+				[]byte{0x84}, body, witnesses, []byte{0xf5, 0xf4},
+			),
+		},
+		{
+			name: "five components",
+			cbor: txSizeBytes(
+				[]byte{0x85}, body, witnesses, auxiliaryData,
+				[]byte{0xf5, 0x00},
+			),
+		},
+		{
+			name: "trailing data",
+			cbor: txSizeBytes(
+				[]byte{0x83}, body, witnesses, auxiliaryData, []byte{0x00},
+			),
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			tx := &mockTransaction{
+				cbor:   testCase.cbor,
+				txType: gdijkstra.TxTypeDijkstra,
+			}
+			require.Equal(t, uint64(len(testCase.cbor)), TxSizeForFee(tx))
 		})
 	}
 }
@@ -2399,7 +2730,7 @@ func TestValidateTxSize(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			// Fee-relevant size = 16386 - 1 = 16385 > 16384
+			// Malformed CBOR keeps its full size.
 			name:      "one byte over limit",
 			txSize:    16386,
 			txType:    txTypeAlonzo,
@@ -2419,7 +2750,7 @@ func TestValidateTxSize(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			// Fee-relevant size = 2 - 1 = 1 > 0
+			// Malformed CBOR keeps its full size.
 			name:      "zero max size with non-zero tx",
 			txSize:    2,
 			txType:    txTypeAlonzo,
@@ -3069,15 +3400,21 @@ func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
 			require.NoError(t, err)
 			output := babbage.BabbageTransactionOutput{
 				OutputAddress: paymentAddress,
-				OutputAmount:  mary.MaryTransactionOutputValue{Amount: 1_000_000},
+				OutputAmount: mary.MaryTransactionOutputValue{
+					Amount: 1_000_000,
+				},
 			}
 			tx := &conway.ConwayTransaction{
 				Body: conway.ConwayTransactionBody{
 					TxInputs: conway.NewConwayTransactionInputSet(
 						[]shelley.ShelleyTransactionInput{input},
 					),
-					TxOutputs:            []babbage.BabbageTransactionOutput{output},
-					TxProposalProcedures: []conway.ConwayProposalProcedure{*proposal},
+					TxOutputs: []babbage.BabbageTransactionOutput{
+						output,
+					},
+					TxProposalProcedures: []conway.ConwayProposalProcedure{
+						*proposal,
+					},
 				},
 				TxIsValid: true,
 			}
@@ -3694,7 +4031,7 @@ func TestValidateTxFee(t *testing.T) {
 			// Fee = 200000 >= 168581 => valid
 			name: "sufficient fee no scripts",
 			tx: &mockFeeTx{
-				cbor:      make([]byte, 301),
+				cbor:      alonzoFeeTestCBOR(300),
 				txType:    txTypeAlonzo,
 				fee:       big.NewInt(200000),
 				witnesses: nil,
@@ -3711,7 +4048,7 @@ func TestValidateTxFee(t *testing.T) {
 			// Fee = 168581 (exact) => valid
 			name: "exact minimum fee no scripts",
 			tx: &mockFeeTx{
-				cbor:      make([]byte, 301),
+				cbor:      alonzoFeeTestCBOR(300),
 				txType:    txTypeAlonzo,
 				fee:       big.NewInt(168581),
 				witnesses: nil,
@@ -3728,7 +4065,7 @@ func TestValidateTxFee(t *testing.T) {
 			// Fee = 168580 < 168581 => invalid
 			name: "one lovelace under minimum no scripts",
 			tx: &mockFeeTx{
-				cbor:      make([]byte, 301),
+				cbor:      alonzoFeeTestCBOR(300),
 				txType:    txTypeAlonzo,
 				fee:       big.NewInt(168580),
 				witnesses: nil,
@@ -3748,7 +4085,7 @@ func TestValidateTxFee(t *testing.T) {
 			// Fee = 240701 (exact) => valid
 			name: "exact minimum fee with scripts",
 			tx: &mockFeeTx{
-				cbor:   make([]byte, 301),
+				cbor:   alonzoFeeTestCBOR(300),
 				txType: txTypeAlonzo,
 				fee:    big.NewInt(240701),
 				witnesses: &mockWitnessSet{
@@ -3781,7 +4118,7 @@ func TestValidateTxFee(t *testing.T) {
 			// Fee = 240700 < 240701 => invalid
 			name: "one lovelace under minimum with scripts",
 			tx: &mockFeeTx{
-				cbor:   make([]byte, 301),
+				cbor:   alonzoFeeTestCBOR(300),
 				txType: txTypeAlonzo,
 				fee:    big.NewInt(240700),
 				witnesses: &mockWitnessSet{
@@ -3812,7 +4149,7 @@ func TestValidateTxFee(t *testing.T) {
 			// Overpaying is fine
 			name: "overpaying fee with scripts",
 			tx: &mockFeeTx{
-				cbor:   make([]byte, 301),
+				cbor:   alonzoFeeTestCBOR(300),
 				txType: txTypeAlonzo,
 				fee:    big.NewInt(500000),
 				witnesses: &mockWitnessSet{
@@ -3847,7 +4184,7 @@ func TestValidateTxFee(t *testing.T) {
 			// minFee = 172981 + 49040 = 222021
 			name: "multiple redeemers exact fee",
 			tx: &mockFeeTx{
-				cbor:   make([]byte, 401),
+				cbor:   alonzoFeeTestCBOR(400),
 				txType: txTypeAlonzo,
 				fee:    big.NewInt(222021),
 				witnesses: &mockWitnessSet{
@@ -3894,7 +4231,7 @@ func TestValidateTxFee(t *testing.T) {
 			// nil fee defaults to 0, should fail
 			name: "nil fee fails",
 			tx: &mockFeeTx{
-				cbor:      make([]byte, 301),
+				cbor:      alonzoFeeTestCBOR(300),
 				txType:    txTypeAlonzo,
 				fee:       nil,
 				witnesses: nil,
@@ -3911,7 +4248,7 @@ func TestValidateTxFee(t *testing.T) {
 			// baseFee = 44*300 + 155381 = 168581
 			name: "nil prices no script fee",
 			tx: &mockFeeTx{
-				cbor:   make([]byte, 301),
+				cbor:   alonzoFeeTestCBOR(300),
 				txType: txTypeAlonzo,
 				fee:    big.NewInt(168581),
 				witnesses: &mockWitnessSet{
@@ -3982,7 +4319,7 @@ func TestValidateTxFee_ErrorMessageIncludesFees(
 	// Verify the error message contains both the
 	// provided fee and the calculated minimum.
 	tx := &mockFeeTx{
-		cbor:      make([]byte, 301),
+		cbor:      alonzoFeeTestCBOR(300),
 		txType:    txTypeAlonzo,
 		fee:       big.NewInt(100000),
 		witnesses: nil,
@@ -4990,7 +5327,9 @@ func newTestTxCbor(
 		0: []any{
 			[]any{inputHash, uint64(0)},
 		},
-		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1_000_000)}},
+		1: []any{
+			[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1_000_000)},
+		},
 		2: uint64(200_000),
 		3: ttl,
 	}

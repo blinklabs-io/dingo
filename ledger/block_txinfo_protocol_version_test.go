@@ -234,6 +234,10 @@ func TestLedgerProcessBlockConwayV3TxInfoFollowsBlockProtocolVersion(
 								newTestDB(t),
 								testEra,
 							)
+							ls.activeEras = []eras.EraDesc{
+								testEra,
+								eras.DijkstraEraDesc,
+							}
 							err := applyRequiredDatumBlock(
 								ls, block, slot, reachesTip, offsets,
 								testEra, pparams,

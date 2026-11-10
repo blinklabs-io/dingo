@@ -125,6 +125,32 @@ func TestSaveRewardAccountOutputsBatchesAndAssignsIDs(t *testing.T) {
 	require.Equal(t, types.Uint64(2), rows[0].Amount)
 }
 
+func TestPoolStakeSnapshotVrfKeyRoundTrip(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	poolKey := bytes.Repeat([]byte{0x33}, 28)
+	vrfKey := bytes.Repeat([]byte{0x44}, 32)
+	require.NoError(t, store.SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:              10,
+			SnapshotType:       models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:        poolKey,
+			CalculationVersion: models.RewardStakeCalculationVersion,
+			VrfKeyHash:         vrfKey,
+		},
+		nil,
+	))
+	got, err := store.GetPoolStakeSnapshot(
+		10,
+		models.PoolStakeSnapshotTypeMark,
+		poolKey,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, vrfKey, got.VrfKeyHash)
+}
+
 func TestRewardSeedFailureRoundTripAndRollback(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)

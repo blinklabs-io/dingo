@@ -350,6 +350,9 @@ type Ouroboros struct {
 	acceptedHeaderTips map[ouroboros.ConnectionId][]byte
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
+	// Pending headers share the announcement admission/expiry bounds. leiosMu
+	// protects their ordered publication once the manifest can be served.
+	leiosRelayPendingAnnouncements map[string][]leiosPendingRelayAnnouncement
 	// Cached Leios EB material fetched from peers. This lets NtC
 	// ChainSync serve merged RB+EB blocks without coupling the chain
 	// package to Leios prototype protocols.
@@ -382,7 +385,7 @@ type Ouroboros struct {
 	// transaction closure is cached. Keyed by leiosBlockKey(ebHash); each
 	// channel is closed once a complete closure is stored for that key.
 	leiosClosureWaiters map[string][]chan struct{}
-	// Waiters blocked in the NtC serving path, keyed by the serving
+	// Waiters blocked in NtC closure or NtN pending-content serving, keyed by the serving
 	// connection rather than by endorser block. Closed when that connection
 	// goes away, so a closure wait cannot outlive the connection it serves.
 	// The chainsync server callback owns gouroboros's receive loop while it
@@ -414,7 +417,10 @@ type Ouroboros struct {
 	leiosTxFetchBeforeLaunch func()
 	// Manifest offers have their own claim: a pending manifest fetch must not
 	// suppress a transaction offer needed to complete the same occurrence.
-	leiosManifestFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	leiosManifestFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → *leiosManifestFetchClaim
+	leiosFetchServeWaiting       atomic.Int32
+	// Instance-local test override; production always uses the fixed serving budget.
+	leiosFetchServeTimeoutOverride time.Duration
 	// leiosFetchClaimPublished is an instance-local test seam used to hold a
 	// claimed manifest before dispatch and expose admission ordering deterministically.
 	leiosFetchClaimPublished func()
@@ -445,6 +451,12 @@ type Ouroboros struct {
 	leiosAnnouncementInFlight  map[string]struct{}
 	leiosInvalidAnnouncements  *ratewindow.FixedWindow
 	leiosInvalidAnnouncementMu sync.Mutex
+	// leiosOfferBudget caps how many endorser-block offers one remote host
+	// may send per window, so a peer cannot keep the shared cache and
+	// backfill-source locks busy with arbitrary points.
+	leiosOfferBudget           *ratewindow.FixedWindow
+	leiosOfferOverflowBudget   *ratewindow.FixedWindow
+	leiosOfferBudgetMu         sync.Mutex
 	leiosDeferredMu            sync.Mutex
 	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
 	leiosAnnouncementSizes     map[string]uint64

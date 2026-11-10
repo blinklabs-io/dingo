@@ -12,28 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hardfork_test
+package ledger
 
-import (
-	"testing"
-
-	"github.com/stretchr/testify/assert"
-
-	"github.com/blinklabs-io/dingo/ledger/hardfork"
-)
-
-func TestTriggerHardFork_String(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		in   hardfork.TriggerHardFork
-		want string
-	}{
-		{hardfork.NewTriggerAtVersion(4), "AtVersion(4)"},
-		{hardfork.NewTriggerAtEpoch(123), "AtEpoch(123)"},
-		{hardfork.NewTriggerNotDuringThisExecution(), "NotDuringThisExecution"},
-		{hardfork.TriggerHardFork{Kind: 99}, "TriggerHardFork(?kind=99)"},
+func leiosReadyApplyPrefix(
+	infos []leiosBlockInfo,
+	announcements map[string]leiosEbRef,
+	provider EndorserBlockProviderFunc,
+) int {
+	for i, info := range infos {
+		if !info.certifies {
+			continue
+		}
+		ref, ok := announcements[info.prevHash]
+		if !ok {
+			return 0
+		}
+		if !endorserBlockAvailableAt(provider, ref.hash.Bytes(), ref.slot) {
+			return i
+		}
 	}
-	for _, tc := range cases {
-		assert.Equal(t, tc.want, tc.in.String())
-	}
+	return len(infos)
 }

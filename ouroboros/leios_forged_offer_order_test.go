@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
@@ -68,6 +69,17 @@ func newForgedOfferOrderOuroboros(t *testing.T) *Ouroboros {
 	return o
 }
 
+func completeForgedOfferFixture(
+	t *testing.T,
+	seed byte,
+) (ocommon.Point, cbor.RawMessage, cbor.RawMessage) {
+	t.Helper()
+	tx, ref := testLeiosManifestTx(t, seed)
+	raw, err := (lcommon.LeiosEndorserBlock{TransactionReferences: []lcommon.LeiosTransactionReference{ref}}).MarshalCBOR()
+	require.NoError(t, err)
+	return ocommon.NewPoint(1, lcommon.Blake2b256Hash(raw).Bytes()), raw, tx
+}
+
 // A peer may offer only an endorser block it has itself announced: the
 // reference node answers a LeiosNotify block or closure offer for an endorser
 // block the peer never announced to it by disconnecting the peer
@@ -82,12 +94,12 @@ func TestForgedEndorserBlockOffersFollowItsAnnouncement(t *testing.T) {
 	const conn = "peer"
 	o.leiosEBLog.registerConn(conn, nil, nil)
 
-	ebPoint, ebRaw := testLeiosEndorserBlockRaw(t, 1)
+	ebPoint, ebRaw, tx := completeForgedOfferFixture(t, 1)
 	require.NoError(t, o.BroadcastEndorserBlock(
 		ebPoint.Slot,
 		ebPoint.Hash,
 		ebRaw,
-		nil,
+		[][]byte{tx},
 	))
 	require.Empty(t, drainLeiosNotify(o, conn),
 		"nothing may be offered before the announcing header is sent")
@@ -125,11 +137,20 @@ func TestUnannouncedForgedEndorserBlockIsNeverOffered(t *testing.T) {
 	const conn = "peer"
 	o.leiosEBLog.registerConn(conn, nil, nil)
 
-	ebPoint, ebRaw := testLeiosEndorserBlockRaw(t, 1)
+	ebPoint, ebRaw, tx := completeForgedOfferFixture(t, 1)
 	require.NoError(t, o.BroadcastEndorserBlock(
-		ebPoint.Slot, ebPoint.Hash, ebRaw, nil,
+		ebPoint.Slot, ebPoint.Hash, ebRaw, [][]byte{tx},
 	))
-	_, otherRaw := testLeiosEndorserBlockRaw(t, 2)
+	otherPoint, otherRaw, otherTx := completeForgedOfferFixture(t, 2)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			otherPoint,
+			otherRaw,
+			[]cbor.RawMessage{otherTx},
+			leiosStoreAuthoritative,
+		),
+	)
 	o.EnqueueLeiosBlockAnnouncement(testDijkstraHeaderAnnouncing(t, otherRaw))
 	entries := drainLeiosNotify(o, conn)
 	require.NotEmpty(t, entries, "the unrelated announcement must be queued")

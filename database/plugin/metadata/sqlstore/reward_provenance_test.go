@@ -55,8 +55,10 @@ LIMIT ? OFFSET ?`,
 	require.Contains(
 		t,
 		plan,
-		"idx_reward_account_output_credential_spendable_guarded",
+		"idx_reward_account_output_credential_epoch "+
+			"(credential_tag=? AND staking_key=?)",
 	)
-	require.Contains(t, plan, "guarded=?")
+	require.NotContains(t, plan, "TEMP B-TREE",
+		"the index supplies the epoch, pool, type order")
 	require.NotContains(t, strings.ToUpper(plan), "SCAN REWARD_ACCOUNT_OUTPUT")
 }

@@ -37,6 +37,12 @@ type leiosBackfillSource struct {
 // the number of serveable endorser-block points retained in the cache.
 const leiosBackfillMaxSourcesPerPoint = 64
 
+// leiosBackfillMaxPointsPerConn bounds how many points one connection may
+// hold in the source table. A connection past it replaces its own oldest
+// source, so offers for arbitrary points can only displace that same
+// connection's entries, never sources recorded by other peers.
+const leiosBackfillMaxPointsPerConn = 32
+
 func (o *Ouroboros) recordLeiosBackfillSource(
 	point ocommon.Point,
 	connId ouroboros.ConnectionId,
@@ -51,6 +57,10 @@ func (o *Ouroboros) recordLeiosBackfillSource(
 	defer o.leiosBackfillSourcesMu.Unlock()
 	o.pruneLeiosBackfillSourcesLocked(now)
 	sources := o.leiosBackfillSources[key]
+	if _, held := sources.announcersFor(connId); !held {
+		o.evictLeiosBackfillConnOverflowLocked(connId)
+	}
+	sources = o.leiosBackfillSources[key]
 	if sources == nil {
 		sources = &leiosBackfillPointSources{
 			announcers: make(map[ouroboros.ConnectionId]leiosBackfillSource),
@@ -65,6 +75,54 @@ func (o *Ouroboros) recordLeiosBackfillSource(
 		seq:        o.leiosBackfillSourceSeq,
 	}
 	o.pruneLeiosBackfillSourcesLocked(now)
+}
+
+// announcersFor reports connId's source for the point, tolerating a nil
+// receiver.
+func (s *leiosBackfillPointSources) announcersFor(
+	connId ouroboros.ConnectionId,
+) (leiosBackfillSource, bool) {
+	if s == nil {
+		return leiosBackfillSource{}, false
+	}
+	source, ok := s.announcers[connId]
+	return source, ok
+}
+
+// evictLeiosBackfillConnOverflowLocked makes room for one more point from
+// connId by dropping that connection's own oldest sources until it holds
+// fewer than leiosBackfillMaxPointsPerConn points. Callers hold
+// leiosBackfillSourcesMu.
+func (o *Ouroboros) evictLeiosBackfillConnOverflowLocked(
+	connId ouroboros.ConnectionId,
+) {
+	for {
+		count := 0
+		var oldestKey string
+		var oldestSeq uint64
+		for key, sources := range o.leiosBackfillSources {
+			source, ok := sources.announcersFor(connId)
+			if !ok {
+				continue
+			}
+			if count == 0 || source.seq < oldestSeq {
+				oldestKey = key
+				oldestSeq = source.seq
+			}
+			count++
+		}
+		if count < leiosBackfillMaxPointsPerConn {
+			return
+		}
+		sources := o.leiosBackfillSources[oldestKey]
+		if sources == nil {
+			return
+		}
+		delete(sources.announcers, connId)
+		if len(sources.announcers) == 0 {
+			delete(o.leiosBackfillSources, oldestKey)
+		}
+	}
 }
 
 func (o *Ouroboros) leiosBackfillSourceConn(

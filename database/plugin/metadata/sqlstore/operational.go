@@ -817,6 +817,15 @@ func (s *Store) GetLastBlockNonceInRange(
 	return nonce, err
 }
 
+// latestBlockNonceQuery finds the highest slot through the slot-leading index
+// and orders only that slot's rows by id. A plain ORDER BY slot DESC, id DESC
+// cannot use the index for its id term and sorts the whole table.
+const latestBlockNonceQuery = `SELECT hash, nonce, id, slot, is_checkpoint
+FROM block_nonce
+WHERE slot = (SELECT MAX(slot) FROM block_nonce)
+ORDER BY id DESC
+LIMIT 1`
+
 // GetLatestBlockNonce returns the highest-slot nonce row, using its ID to
 // preserve application order when multiple blocks share a slot. The nonce is
 // written in the same metadata transaction as the corresponding ledger
@@ -828,12 +837,7 @@ func (s *Store) GetLatestBlockNonce(
 	if err != nil {
 		return models.BlockNonce{}, false, err
 	}
-	row := db.QueryRowContext(ctx,
-		`SELECT hash, nonce, id, slot, is_checkpoint
-		 FROM block_nonce
-		 ORDER BY slot DESC, id DESC
-		 LIMIT 1`,
-	)
+	row := db.QueryRowContext(ctx, latestBlockNonceQuery)
 	var ret models.BlockNonce
 	var slot sql.NullInt64
 	var checkpoint sql.NullBool
