@@ -719,10 +719,12 @@ SELECT GREATEST(
 		),
 		`ALTER TABLE "transaction" ALTER COLUMN "hash" SET NOT NULL`,
 	)
-	for _, column := range transactionAppliedColumns {
-		statements = append(statements,
-			`ALTER TABLE "transaction" DROP COLUMN IF EXISTS "`+column+`"`)
+	drops := make([]string, len(transactionAppliedColumns))
+	for i, column := range transactionAppliedColumns {
+		drops[i] = `DROP COLUMN IF EXISTS "` + column + `"`
 	}
+	statements = append(statements,
+		`ALTER TABLE "transaction" `+strings.Join(drops, ", "))
 	return b.exec(ctx, batch, statements...)
 }
 
@@ -772,11 +774,9 @@ WHERE table_schema = DATABASE() AND table_name = 'utxo'`,
 			return err
 		}
 	}
-	if err := b.exec(ctx, batch,
-		"ALTER TABLE `transaction` MODIFY `hash` VARBINARY(255) NOT NULL",
-	); err != nil {
-		return err
-	}
+	// One statement drops the moved columns: each separate ALTER would
+	// rebuild the whole table.
+	alter := "ALTER TABLE `transaction` MODIFY `hash` VARBINARY(255) NOT NULL"
 	for _, column := range transactionAppliedColumns {
 		var present int
 		if err := batch.Tx.QueryRowContext(ctx, `
@@ -785,16 +785,11 @@ WHERE table_schema = DATABASE() AND table_name = 'transaction'
   AND column_name = ?`, column).Scan(&present); err != nil {
 			return fmt.Errorf("check transaction.%s: %w", column, err)
 		}
-		if present == 0 {
-			continue
-		}
-		if err := b.exec(ctx, batch,
-			"ALTER TABLE `transaction` DROP COLUMN `"+column+"`",
-		); err != nil {
-			return err
+		if present > 0 {
+			alter += ", DROP COLUMN `" + column + "`"
 		}
 	}
-	return nil
+	return b.exec(ctx, batch, alter)
 }
 
 func (b identityBackfill) mysqlConstraintExists(
