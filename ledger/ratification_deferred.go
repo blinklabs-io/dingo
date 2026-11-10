@@ -297,15 +297,10 @@ func (ls *LedgerState) writeRatificationDecisionWithOptions(
 	return nil
 }
 
-// consumePendingRatification writes the previous boundary's RATIFY decision
+// consumePendingRatificationWithOptions writes the previous boundary's RATIFY decision
 // in this boundary's transaction if the background job has not, waiting for
 // the job to decide. It runs before anything else at the boundary, so ENACT
 // and DROP read the same marks the boundary before would have written.
-func (ls *LedgerState) consumePendingRatification(ctx context.Context, txn *database.Txn) error {
-	return ls.consumePendingRatificationWithOptions(ctx, txn, false)
-}
-
-// consumePendingRatificationWithOptions is consumePendingRatification.
 // validationOnly is passed to writeRatificationDecisionWithOptions.
 func (ls *LedgerState) consumePendingRatificationWithOptions(
 	ctx context.Context,
