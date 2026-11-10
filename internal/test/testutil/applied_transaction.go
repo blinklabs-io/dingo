@@ -291,7 +291,7 @@ func parseTransactionInsert(query string) ([]string, []string, error) {
 		return nil, nil, fmt.Errorf("unsupported transaction insert: %s", query)
 	}
 	var columns []string
-	for _, column := range strings.Split(query[open+1:closeCols], ",") {
+	for column := range strings.SplitSeq(query[open+1:closeCols], ",") {
 		columns = append(columns, strings.Trim(strings.TrimSpace(column), "`\""))
 	}
 	rest := query[closeCols+1:]
