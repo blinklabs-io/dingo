@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -321,6 +322,11 @@ var (
 // a process that died mid-write.
 const partialSuffix = ".partial"
 
+// maxUTxOSetSizeHint caps the map size a UTxO set file's own count asks
+// for, above mainnet's set, so a damaged count cannot allocate gigabytes up
+// front; a larger set still loads, growing the map as it goes.
+const maxUTxOSetSizeHint = 1 << 24
+
 func captureRecordFileName(epoch uint64, point pcommon.Point) string {
 	return fmt.Sprintf(
 		"capture-epoch-%d-slot-%d-%x.json", epoch, point.Slot, point.Hash,
@@ -412,8 +418,12 @@ func readCaptureRecord(
 		return nil, time.Time{}, errors.New(
 			"record names neither a UTxO file nor why it has none",
 		)
-	case rec.UTxOFile != "" && filepath.Base(rec.UTxOFile) != rec.UTxOFile:
-		return nil, time.Time{}, fmt.Errorf("record names UTxO file %q outside the capture directory", rec.UTxOFile)
+	case rec.UTxOFile != "" && rec.UTxOFile != captureUTxOFileName(epoch, point):
+		// Any other name, even inside the directory, would compare this
+		// boundary against another boundary's set.
+		return nil, time.Time{}, fmt.Errorf(
+			"record names UTxO file %q, not this boundary's", rec.UTxOFile,
+		)
 	}
 	c := &boundaryCapture{
 		epoch:        epoch,
@@ -480,6 +490,10 @@ func (b *boundaryCaptures) load(
 		slot, err2 := strconv.ParseUint(m[2], 10, 64)
 		hash, err3 := hex.DecodeString(m[3])
 		if err := errors.Join(err1, err2, err3); err != nil {
+			// No boundary has this name, so the record can never be
+			// compared; its UTxO file, if any, goes as unreferenced.
+			_ = os.Remove(path)
+			removed++
 			continue
 		}
 		point := pcommon.NewPoint(slot, hash)
@@ -565,12 +579,20 @@ func writeFileAtomic(path string, write func(*os.File) error) (err error) {
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
-	// The rename is durable only once the directory entry is.
-	if d, err := os.Open(filepath.Dir(path)); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+	// The rename is durable only once the directory entry is. Windows cannot
+	// flush a directory handle; NTFS journals the rename itself.
+	if runtime.GOOS == "windows" {
+		return nil
 	}
-	return nil
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
 }
 
 func writeUTxOSetFile(path string, set UTxOSet) error {
@@ -607,11 +629,23 @@ func readUTxOSetFile(path string) (UTxOSet, error) {
 	}
 	defer f.Close() //nolint:errcheck
 	dec := gob.NewDecoder(bufio.NewReaderSize(f, 1<<20))
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
 	var n int
 	if err := dec.Decode(&n); err != nil {
 		return nil, err
 	}
-	set := make(UTxOSet, n)
+	// Every entry takes at least a byte, so a count beyond the file size
+	// means a damaged file, not a set to allocate for.
+	if n < 0 || int64(n) > info.Size() {
+		return nil, fmt.Errorf(
+			"UTxO set file %s claims %d entries in %d bytes",
+			filepath.Base(path), n, info.Size(),
+		)
+	}
+	set := make(UTxOSet, min(n, maxUTxOSetSizeHint))
 	for range n {
 		var e utxoSetFileEntry
 		if err := dec.Decode(&e); err != nil {

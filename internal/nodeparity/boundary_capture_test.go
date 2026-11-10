@@ -16,6 +16,7 @@ package nodeparity
 
 import (
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"net"
@@ -23,11 +24,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -552,7 +556,7 @@ func TestRunFromGenesis_ComparesACaptureFromAnEarlierProcess(t *testing.T) {
 	firstCtx, stopFirst := context.WithCancel(context.Background())
 	defer stopFirst()
 	first := run(firstCtx, firstAddr, func(_ context.Context, captures *boundaryCaptures) {
-		path := filepath.Join(dir, "utxo-epoch-2.gob")
+		path := filepath.Join(dir, captureUTxOFileName(2, server.chain.Points[1]))
 		require.NoError(t, writeUTxOSetFile(path, UTxOSet{"ff#0": "addr|1"}))
 		require.NoError(t, captures.put(&boundaryCapture{
 			epoch:    2,
@@ -838,4 +842,217 @@ func TestRunFromGenesis_WaitsForACaptureStillBeingMade(t *testing.T) {
 	cancel()
 	err = testutil.RequireReceive(t, done, 10*time.Second, "RunFromGenesis exit")
 	assert.True(t, err == nil || errors.Is(err, context.Canceled))
+}
+
+// TestRunFromGenesis_RedeliversACapturedBoundaryAfterAFailedFlush covers the
+// session ending while a captured boundary block's transactions are fetched,
+// before its checks run. The capture answers only for that exact block, so
+// the resumed session must deliver it again: resuming after it would check
+// the epoch live at a later block, which Dingo refuses as too old. The
+// block's own hash must also not be buffered twice.
+func TestRunFromGenesis_RedeliversACapturedBoundaryAfterAFailedFlush(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// epochs gives each block's epoch; the last block of epoch 1 is
+		// followed by the captured epoch 2 boundary.
+		epochs []int
+		// limits, when set, lowers the flush threshold to 4 hashes so the
+		// boundary block's own flush is the threshold one.
+		limits bool
+	}{
+		{name: "flush before the checks", epochs: []int{1, 2, 2}},
+		{
+			name:   "flush at the threshold",
+			epochs: []int{1, 1, 1, 1, 1, 2, 2},
+			limits: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const magic = 42
+			server := newGenesisFakeServerWithTransactions(t, len(tc.epochs))
+			server.epochBySlot = map[uint64]int{}
+			boundaryIdx := -1
+			for i, e := range tc.epochs {
+				server.epochBySlot[server.chain.Points[i].Slot] = e
+				if e == 2 && boundaryIdx < 0 {
+					boundaryIdx = i
+				}
+			}
+			boundary := server.chain.Points[boundaryIdx]
+			boundaryHash := server.chain.Blocks[boundaryIdx].Transactions()[0].Hash().String()
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = listener.Close() })
+			server.serve(t, listener, magic)
+
+			// /tx_info answers every hash with a transaction that spends and
+			// creates nothing, except that the first request carrying the
+			// boundary block's hash ends the chainsync session and is never
+			// answered.
+			var (
+				interrupted  atomic.Bool
+				answeredMu   sync.Mutex
+				boundarySeen int
+			)
+			koiosSrv := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					if !strings.HasSuffix(r.URL.Path, "/tx_info") {
+						http.NotFound(w, r)
+						return
+					}
+					var body struct {
+						TxHashes []string `json:"_tx_hashes"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					if slices.Contains(body.TxHashes, boundaryHash) &&
+						interrupted.CompareAndSwap(false, true) {
+						server.mu.Lock()
+						conn := server.conns[server.chainSyncAddr]
+						server.mu.Unlock()
+						if conn != nil {
+							_ = conn.Close()
+						}
+						select {
+						case <-r.Context().Done():
+						case <-time.After(10 * time.Second):
+						}
+						return
+					}
+					items := make([]koiosparity.KoiosTxInfoItem, 0, len(body.TxHashes))
+					answeredMu.Lock()
+					for _, h := range body.TxHashes {
+						if h == boundaryHash {
+							boundarySeen++
+						}
+						items = append(items, koiosparity.KoiosTxInfoItem{TxHash: h})
+					}
+					answeredMu.Unlock()
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(items)
+				},
+			))
+			t.Cleanup(koiosSrv.Close)
+			koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+			require.NoError(t, err)
+			if tc.limits {
+				require.NoError(t, koios.SetTxInfoLimits(1, 1))
+			}
+
+			ppMarker := errors.New("protocol params read at the boundary capture")
+			capture := &boundaryCapture{
+				epoch:   2,
+				point:   boundary,
+				ppErr:   ppMarker,
+				utxoErr: errors.New("no UTxO set at the boundary capture"),
+			}
+			put := make(chan struct{})
+			follower := func(_ context.Context, captures *boundaryCaptures) {
+				_ = captures.put(capture)
+				close(put)
+			}
+
+			logs := newLogCollector()
+			t.Cleanup(func() { t.Logf("logs: %q", logs.all()) })
+			results := make(chan EpochResult, 16)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- RunFromGenesis(
+					ctx, listener.Addr().String(), "preview", magic, koios, nil,
+					func(r EpochResult) { results <- r },
+					logs.logf, nil, false,
+					WithBoundaryCaptureDir(t.TempDir()),
+					withBoundaryFollower(follower),
+				)
+			}()
+			testutil.RequireReceive(t, put, 5*time.Second, "capture handed to the main loop")
+
+			for range boundaryIdx + 1 {
+				server.allowStep(t)
+			}
+			server.waitForSessions(t, 2)
+			require.True(t, interrupted.Load(), "the boundary flush was never interrupted")
+			server.allowStep(t) // the boundary again, or the block after it
+
+			var r EpochResult
+			for r.Epoch != 2 {
+				r = testutil.RequireReceive(t, results, 20*time.Second, "epoch 2 result")
+			}
+			assert.ErrorIs(t, r.ProtocolParamsErr, ppMarker,
+				"the boundary was checked live at a later block, not against its capture")
+			answeredMu.Lock()
+			assert.Equal(t, 1, boundarySeen,
+				"the boundary block's hash was fetched more than once")
+			answeredMu.Unlock()
+
+			cancel()
+			err = testutil.RequireReceive(t, done, 10*time.Second, "RunFromGenesis exit")
+			assert.True(t, err == nil || errors.Is(err, context.Canceled))
+		})
+	}
+}
+
+// TestBoundaryCapturesLoadRejectsForeignAndMalformedRecords covers records no
+// boundary can use: one naming another boundary's UTxO file would compare
+// this boundary against that set, and one whose name does not parse can never
+// be matched to a boundary at all.
+func TestBoundaryCapturesLoadRejectsForeignAndMalformedRecords(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	own := pcommon.NewPoint(500, []byte{0x05})
+	other := pcommon.NewPoint(600, []byte{0x06})
+	foreign := filepath.Join(dir, captureUTxOFileName(6, other))
+	require.NoError(t, writeUTxOSetFile(foreign, UTxOSet{"aa#0": "addr|1"}))
+	_, err := writeCaptureRecord(dir, &boundaryCapture{
+		epoch: 5, point: own, utxoPath: foreign,
+	})
+	require.NoError(t, err)
+	malformed := filepath.Join(dir, "capture-epoch-99999999999999999999999-slot-1-ab.json")
+	require.NoError(t, os.WriteFile(malformed, []byte("{}"), 0o600))
+
+	captures := newBoundaryCaptures(dir)
+	loaded, removed, err := captures.load(pcommon.NewPoint(0, nil))
+	require.NoError(t, err)
+	assert.Equal(t, 1, loaded)
+	// The malformed record, and the foreign UTxO file no usable record names.
+	assert.Equal(t, 2, removed)
+	assert.False(t, fileExists(malformed), "a record no boundary can match is removed")
+
+	c := captures.take(5, own)
+	require.NotNil(t, c, "the record still holds its epoch")
+	for _, err := range []error{c.ppErr, c.stakeErr, c.utxoErr} {
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not this boundary's")
+	}
+	assert.Empty(t, c.utxoPath, "the other boundary's set is never read")
+}
+
+// TestReadUTxOSetFileRejectsADamagedCount covers a UTxO set file whose entry
+// count cannot be right: it must be reported as unreadable, not panic or
+// allocate for the count.
+func TestReadUTxOSetFileRejectsADamagedCount(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		count int
+	}{
+		{name: "negative", count: -1},
+		{name: "beyond the file size", count: 1 << 40},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "utxo-epoch-1-slot-1-01.gob")
+			f, err := os.Create(path)
+			require.NoError(t, err)
+			require.NoError(t, gob.NewEncoder(f).Encode(tc.count))
+			require.NoError(t, f.Close())
+			_, err = readUTxOSetFile(path)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "claims")
+		})
+	}
 }

@@ -1359,6 +1359,30 @@ func RunFromGenesis(
 						// see lastPoint's doc comment above.
 						parentPoint := lastPoint
 						lastPoint = point
+						// A boundary block whose capture, held or still
+						// being made, failed before being reported is
+						// delivered again: the capture answers only for this
+						// exact block, and the next block of its epoch would
+						// be checked live, which Dingo refuses as too old.
+						// Registered first, so it runs after the capture is
+						// handed back. This block's hashes are dropped from
+						// the buffer if no flush applied them, so the
+						// redelivery fetches each once; transactions already
+						// applied are applied again, which deletes and adds
+						// the same entries.
+						ownPending := 0
+						defer func() {
+							if retErr == nil {
+								return
+							}
+							if _, ok := captures.epochAt(point); !ok {
+								return
+							}
+							lastPoint = parentPoint
+							if n := len(pendingTxHashes); ownPending > 0 && n >= ownPending {
+								pendingTxHashes = pendingTxHashes[:n-ownPending]
+							}
+						}()
 						// Only a block whose callback succeeded counts: a
 						// failed one is delivered again by the resumed
 						// session, which must still see the crossing.
@@ -1426,6 +1450,7 @@ func RunFromGenesis(
 									pendingTxHashes, tx.Hash().String(),
 								)
 							}
+							ownPending = len(block.Transactions())
 							if len(pendingTxHashes) >= flushThreshold {
 								if err := flushPendingTxInfos(
 									sessionCtx, point,
@@ -1498,14 +1523,6 @@ func RunFromGenesis(
 						var capture *boundaryCapture
 						interrupted := func() error {
 							lastEpochInterrupted = true
-							if capture != nil {
-								// A capture answers only for this exact
-								// block, so the resumed session must deliver
-								// it again rather than resume after it.
-								// Applying its transactions a second time
-								// deletes and adds the same entries.
-								lastPoint = parentPoint
-							}
 							err := callbackErr(
 								"%w: epoch %d at slot %d: %w",
 								errEpochChecksInterrupted, epoch,
@@ -1548,9 +1565,6 @@ func RunFromGenesis(
 								sessionCtx, epoch, point, logf,
 							)
 							if err != nil {
-								// The capture being waited for answers only
-								// for this block: deliver it again.
-								lastPoint = parentPoint
 								return interrupted()
 							}
 						}
