@@ -50,6 +50,8 @@ const (
 	defaultMaxMempoolAddressesPerClient         = 1
 	defaultMaxPoolAggregates               uint = 4
 	defaultMaxPoolAggregatesPerClient           = 2
+	defaultMaxMetadataLabelPages           uint = 4
+	defaultMaxMetadataLabelPagesPerClient       = 2
 )
 
 // Blockfrost is the Blockfrost-compatible REST API server.
@@ -80,6 +82,10 @@ type Blockfrost struct {
 	// poolAggregateAdmission is shared by the pool detail and the extended
 	// pool list, whose live stake is aggregated over the pool's delegators.
 	poolAggregateAdmission *requestAdmission
+	// metadataLabelAdmission is shared by the metadata label transaction
+	// pages, whose cost scales with the page offset into a label that can
+	// cover most of the chain.
+	metadataLabelAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -142,6 +148,10 @@ func New(
 		poolAggregateAdmission: newRequestAdmission(
 			defaultMaxPoolAggregates,
 			defaultMaxPoolAggregatesPerClient,
+		),
+		metadataLabelAdmission: newRequestAdmission(
+			defaultMaxMetadataLabelPages,
+			defaultMaxMetadataLabelPagesPerClient,
 		),
 		listener: apilistener.New("Blockfrost API", logger),
 	}

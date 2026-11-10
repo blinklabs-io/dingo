@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -107,6 +108,37 @@ type fakeRemoteAgent struct {
 	// malformedRefusal answers a sign request with an error on a frame of
 	// the wrong type.
 	malformedRefusal atomic.Bool
+	// dropRequests is how many of the next sign requests are read and
+	// left unanswered, with the connection closed.
+	dropRequests atomic.Int32
+	// refuseRequests is how many of the next sign requests are refused
+	// with refusal on a well-formed sign_response.
+	refuseRequests atomic.Int32
+	refusal        string
+
+	mu sync.Mutex
+	// messages is every sign request's message, in arrival order.
+	messages [][]byte
+}
+
+// received returns the message of every sign request the agent read.
+func (a *fakeRemoteAgent) received() [][]byte {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([][]byte(nil), a.messages...)
+}
+
+// take decrements n when it is positive and reports whether it was.
+func take(n *atomic.Int32) bool {
+	for {
+		v := n.Load()
+		if v <= 0 {
+			return false
+		}
+		if n.CompareAndSwap(v, v-1) {
+			return true
+		}
+	}
 }
 
 // fakeTransport is the listener a fakeRemoteAgent runs.
@@ -207,8 +239,20 @@ func (a *fakeRemoteAgent) serve(conn net.Conn, skeyData, vkey, opCert []byte) {
 		if err := readFrame(conn, MaxSignFrameLen, &sreq); err != nil {
 			return
 		}
-		if a.dropAfterRequest.Load() {
+		a.mu.Lock()
+		a.messages = append(a.messages, append([]byte(nil), sreq.Message...))
+		a.mu.Unlock()
+		if a.dropAfterRequest.Load() || take(&a.dropRequests) {
 			return
+		}
+		if take(&a.refuseRequests) {
+			if err := writeFrame(conn, MaxSignFrameLen, SignResponse{
+				Type: "sign_response", Period: sreq.Period,
+				Error: a.refusal,
+			}); err != nil {
+				return
+			}
+			continue
 		}
 		if a.malformedRefusal.Load() {
 			if err := writeFrame(conn, MaxSignFrameLen, SignResponse{
@@ -446,7 +490,31 @@ func TestRemoteClientAdmissionChecks(t *testing.T) {
 	}
 }
 
-func TestRemoteClientDoesNotResendAfterADroppedRequest(t *testing.T) {
+// A reply lost with its session is answered by resending the identical body
+// on a new session: the agent may already have recorded the slot, and only
+// the same body is signed again for it.
+func TestRemoteClientResendsTheIdenticalBodyAfterALostReply(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+
+	require.NoError(t, c.Prepare())
+	a.dropRequests.Store(1)
+	sig, err := c.Sign(0, []byte("header"))
+	require.NoError(t, err)
+	require.True(t, kes.VerifySignedKES(vkey, 0, []byte("header"), sig))
+	require.Equal(t, int32(2), a.accepts.Load(),
+		"the resend must run on a newly admitted session")
+	require.Equal(t,
+		[][]byte{[]byte("header"), []byte("header")}, a.received(),
+		"the resend must carry the identical body")
+}
+
+// A session that never answers is resent to once, then the failure is
+// returned; the next sign opens a new session.
+func TestRemoteClientStopsResendingAfterOneLostReply(t *testing.T) {
 	t.Parallel()
 	skeyData, vkey, opCert := testKESMaterial(t)
 	client := newTestCert(t, "node")
@@ -457,15 +525,62 @@ func TestRemoteClientDoesNotResendAfterADroppedRequest(t *testing.T) {
 	a.dropAfterRequest.Store(true)
 	_, err := c.Sign(0, []byte("header"))
 	require.Error(t, err)
-	require.Equal(t, int32(1), a.accepts.Load(),
-		"a request that may have reached the agent must not be resent")
+	require.Len(t, a.received(), 2)
 
-	// The next call opens a new session: Sign dials through the reconnect
-	// backoff, so one call must succeed.
 	a.dropAfterRequest.Store(false)
 	_, err = c.Sign(0, []byte("next-header"))
 	require.NoError(t, err)
-	require.Equal(t, int32(2), a.accepts.Load())
+}
+
+// A refusal for a slot the agent already signed, an older slot, a period the
+// key has passed, or a request the agent can never sign is final: it is
+// returned with the agent's reason, never resent, and the session is kept.
+func TestRemoteClientDoesNotResendAFinalRefusal(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	for _, refusal := range []string{
+		"kesagent: a different header was already signed for this slot",
+		"kesagent: header slot below the last signed slot refused",
+		"kesagent: requested KES period is in the past for the active key: requested 4, key at 5",
+		"kesagent: KES period rollback refused (period below monotonic floor)",
+		"kesagent: active KES key has exhausted its evolutions: cannot reach period 70 (key ends at 69)",
+		"kesagent: sign request is not a matching Praos header body: issuer key is not this pool's cold key",
+	} {
+		t.Run(refusal, func(t *testing.T) {
+			t.Parallel()
+			client := newTestCert(t, "node")
+			a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+			c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+			require.NoError(t, c.Prepare())
+			a.refusal = refusal
+			a.refuseRequests.Store(1)
+			_, err := c.Sign(0, []byte("header"))
+			require.ErrorContains(t, err, refusal)
+			require.Len(t, a.received(), 1, "a final refusal must not be resent")
+			require.Equal(t, int32(1), a.accepts.Load())
+		})
+	}
+}
+
+// Any other agent error, such as a slot store that is briefly unavailable,
+// is answered by resending the identical body on the same session.
+func TestRemoteClientResendsAfterANonRefusalError(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+
+	require.NoError(t, c.Prepare())
+	a.refusal = "kesagent: record signed slot: connection refused"
+	a.refuseRequests.Store(1)
+	sig, err := c.Sign(0, []byte("header"))
+	require.NoError(t, err)
+	require.True(t, kes.VerifySignedKES(vkey, 0, []byte("header"), sig))
+	require.Equal(t,
+		[][]byte{[]byte("header"), []byte("header")}, a.received())
+	require.Equal(t, int32(1), a.accepts.Load(),
+		"a well-formed agent error keeps the session")
 }
 
 func TestRemoteClientDropsSessionOnMalformedRefusal(t *testing.T) {

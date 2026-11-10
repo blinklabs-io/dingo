@@ -843,7 +843,7 @@ func TestLeiosTxsOfferCancellationBeforeWorkerLaunch(t *testing.T) {
 		close(entered)
 		<-release
 	}
-	point := ocommon.NewPoint(462, []byte{0x46, 0x47})
+	point := ocommon.NewPoint(462, bytes.Repeat([]byte{0x46}, 32))
 	done := make(chan any)
 	result := make(chan error, 1)
 	go func() {
@@ -877,7 +877,7 @@ func TestLeiosTxFetchLaunchChecksConnectionBeforeDispatch(t *testing.T) {
 	guard := &leiosFetchGuard{}
 	guard.inflight.Store(1)
 	guard.mu.Lock()
-	point := ocommon.NewPoint(463, []byte{0x47, 0x48})
+	point := ocommon.NewPoint(463, bytes.Repeat([]byte{0x47}, 32))
 	candidate := newLeiosTxFetchCandidate(
 		gouroboros.ConnectionId{}, "", guard, nil, point, done,
 	)
@@ -1491,7 +1491,7 @@ func TestLeiosTxsOfferDisconnectedWaiterIsRemoved(t *testing.T) {
 			<-release
 		})
 	}
-	point := ocommon.NewPoint(463, []byte{0x47, 0x48})
+	point := ocommon.NewPoint(463, bytes.Repeat([]byte{0x47}, 32))
 	firstDone := make(chan any)
 	secondDone := make(chan any)
 	result := make(chan error, 1)

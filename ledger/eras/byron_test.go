@@ -908,6 +908,31 @@ func TestValidateTxByron_PositionalWitnesses(t *testing.T) {
 	}
 }
 
+// TestByronValidateWitnesses_EmptyZipNeedsNoProtocolMagic covers: with no
+// witness to pair with an input there is nothing to verify, so the protocol
+// magic is not looked up; a single pair still requires it.
+func TestByronValidateWitnesses_EmptyZipNeedsNoProtocolMagic(t *testing.T) {
+	t.Parallel()
+	payTo := newTestByronAddress(t, lcommon.ByronAddressTypePubkey, 0xF1)
+	key := newByronTestKey(t, 0x31, false)
+	ls := newByronRulesLedgerState()
+	input := fundByronInput(t, ls, 0x01, key, 1_000_000)
+	build := func(signers []byronTestKey) *byron.ByronTransaction {
+		return byronTestTx{
+			inputs:  []lcommon.TransactionInput{input},
+			outputs: []byronOutputWire{byronEncodeOutput(t, payTo, 800_000)},
+			signers: signers,
+		}.build(t, ls.protocolMagic)
+	}
+	ls.protocolMagicErr = errors.New("byron genesis unavailable")
+
+	require.NoError(t, byronValidateWitnesses(build(nil), 0, ls, nil))
+
+	err := byronValidateWitnesses(build([]byronTestKey{key}), 0, ls, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "get Byron protocol magic")
+}
+
 // TestValidateTxByron_RepeatedInput covers: a repeated input is valid,
 // and the input balance counts it once.
 func TestValidateTxByron_RepeatedInput(t *testing.T) {

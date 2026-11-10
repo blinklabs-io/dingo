@@ -153,9 +153,14 @@ type ConnectionManagerConfig struct {
 	MaxNtCConns             int
 	MaxNtCConnectionsPerIP  int
 	MaxTrustedLocalNtCConns int
-	// trustedNtCPostHandshakeTimeout overrides the trusted local NtC
-	// post-handshake segment deadline in tests.
-	trustedNtCPostHandshakeTimeout time.Duration
+	// TrustedNtCIdleTimeout bounds idle time and stalled mux segment
+	// transfers on trusted local NtC connections, and reclaims the admission
+	// slot of a client that goes quiet. Active protocol callbacks suspend the
+	// deadline so supported long-running requests remain unbounded. Zero
+	// means no limit, which matches the reference node and CIP-0137: neither
+	// defines an idle limit on the local protocols, and a client waiting on a
+	// blocking notification request is expected to stay quiet.
+	TrustedNtCIdleTimeout time.Duration
 }
 
 type connectionManagerMetrics struct {

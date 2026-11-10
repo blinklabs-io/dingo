@@ -835,3 +835,11 @@ func TestDMQStakeAuthorityAcrossLiveTruncate(t *testing.T) {
 		require.NoError(t, lookups[name](), name)
 	}
 }
+
+func TestDMQMinPoolMessageIntervalConversion(t *testing.T) {
+	t.Parallel()
+	// Zero must reach the stack as "off", because the stack reads its own
+	// zero as the 60-second default.
+	require.Negative(t, dmqMinPoolMessageInterval(0))
+	require.Equal(t, 90*time.Second, dmqMinPoolMessageInterval(90))
+}

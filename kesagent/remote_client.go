@@ -131,9 +131,9 @@ type RemoteConfig struct {
 // forger calls Prepare shortly before each leader slot, so the dial, the TLS
 // handshake and the admission exchange happen before the slot and Sign finds
 // an admitted session; Sign reuses a session while it is fresh and otherwise
-// opens one itself. A sign request is sent at most once per Sign call: a
-// failure after it may have reached the agent is returned, never resent on a
-// new session. It is safe for concurrent use.
+// opens one itself. A Sign that gets no signature back sends the identical
+// body once more, never a different one, and never after a final refusal.
+// It is safe for concurrent use.
 type RemoteClient struct {
 	cfg    RemoteConfig
 	logger *slog.Logger
@@ -607,11 +607,50 @@ func (c *RemoteClient) offerNewerOpCert(agentOpCert []byte) {
 	c.cfg.OnNewerOpCert(append([]byte(nil), agentOpCert...))
 }
 
+// maxSignSends bounds how often one Sign sends its request: once, and once
+// more with the identical body after a lost reply or an agent error that is
+// not a final refusal.
+const maxSignSends = 2
+
+// finalSignRefusals are the agent's reasons, as blinklabs-io/bursa words them
+// in internal/kesagent, for refusing a request that the identical body cannot
+// get past on a resend: a second header for a slot it already signed, an
+// older slot, a period its key has passed, a period below its floor, an
+// exhausted key, and a message that is not a header for its key. The wire
+// protocol carries no error code, so the reason text is all a client has.
+var finalSignRefusals = []string{
+	"a different header was already signed for this slot",
+	"header slot below the last signed slot",
+	"requested KES period is in the past for the active key",
+	"KES period rollback refused",
+	"active KES key has exhausted its evolutions",
+	"sign request is not a matching Praos header body",
+}
+
+// isFinalSignRefusal reports whether an agent's refusal reason is one a
+// resend of the same body cannot change.
+func isFinalSignRefusal(reason string) bool {
+	for _, final := range finalSignRefusals {
+		if strings.Contains(reason, final) {
+			return true
+		}
+	}
+	return false
+}
+
 // Sign implements ledger/forging.RemoteKESSigner over the remote session. It
 // reuses the open session, or opens one within SignTimeout, sends the request
-// once and verifies the signature against the local operational
-// certificate's KES key. A transport or verification failure drops the
-// session, and the next Prepare or Sign redials; an agent refusal keeps it.
+// and verifies the signature against the local operational certificate's KES
+// key. A transport or verification failure drops the session, and the next
+// Prepare or Sign redials; an agent refusal keeps it.
+//
+// A request that got no signature back, because the reply was lost with the
+// session or the agent returned an error that is not a final refusal, is
+// sent once more with the identical body while SignTimeout allows: the agent
+// may already have recorded the slot, and it signs a recorded slot again
+// only for the same body. A final refusal, such as a different header
+// already signed for the slot, is returned at once, and so is a signature
+// that fails verification.
 func (c *RemoteClient) Sign(
 	period uint64,
 	message []byte,
@@ -639,30 +678,57 @@ func (c *RemoteClient) Sign(
 		return nil, err
 	}
 	defer c.release()
+	req := SignRequest{Type: "sign_request", Period: period, Message: message}
+	for sends := 1; ; sends++ {
+		sig, resend, err := c.signOnce(ctx, req)
+		if err == nil {
+			c.cfg.Metrics.observeSignLatency(time.Since(start))
+			c.cfg.Metrics.incSignSuccess()
+			return sig, nil
+		}
+		if !resend || sends >= maxSignSends || ctx.Err() != nil {
+			return nil, err
+		}
+		c.logger.Warn(
+			"KES agent returned no signature, resending the identical header body",
+			"component", "kesagent",
+			"period", period,
+			"error", err,
+		)
+	}
+}
+
+// signOnce sends req on the session, opening one if needed, and verifies the
+// reply. resend reports whether the identical request may be sent again: the
+// reply was lost, or the agent answered with an error that is not a final
+// refusal. The caller holds the turn.
+func (c *RemoteClient) signOnce(
+	ctx context.Context,
+	req SignRequest,
+) (_ []byte, resend bool, _ error) {
 	// A sign ignores the reconnect backoff: a leader slot is worth a dial.
 	if err := c.ensureSession(ctx, false); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
 	if conn == nil {
-		return nil, ErrClosed
+		return nil, false, ErrClosed
 	}
 	deadline, _ := ctx.Deadline()
 	if err := conn.SetDeadline(deadline); err != nil {
 		c.dropConn(conn)
-		return nil, fmt.Errorf("kesagent: set sign deadline: %w", err)
+		return nil, true, fmt.Errorf("kesagent: set sign deadline: %w", err)
 	}
-	req := SignRequest{Type: "sign_request", Period: period, Message: message}
 	if err := writeFrame(conn, MaxSignFrameLen, req); err != nil {
 		c.dropConn(conn)
-		return nil, fmt.Errorf("kesagent: send sign request: %w", err)
+		return nil, true, fmt.Errorf("kesagent: send sign request: %w", err)
 	}
 	var resp SignResponse
 	if err := readFrame(conn, MaxSignFrameLen, &resp); err != nil {
 		c.dropConn(conn)
-		return nil, fmt.Errorf("kesagent: read sign response: %w", err)
+		return nil, true, fmt.Errorf("kesagent: read sign response: %w", err)
 	}
 	c.mu.Lock()
 	if c.conn == conn {
@@ -672,22 +738,21 @@ func (c *RemoteClient) Sign(
 	if err := validateSignResponse(
 		c.cfg.KESVKey,
 		c.cfg.OpCertStartPeriod,
-		period,
-		message,
+		req.Period,
+		req.Message,
 		resp,
 	); err != nil {
 		// A well-formed refusal leaves the session usable; anything else,
 		// including an error on a frame of the wrong type or period, means
 		// the agent cannot be trusted on this session.
-		if resp.Error == "" || resp.Type != "sign_response" ||
-			resp.Period != period {
+		refusal := resp.Error != "" && resp.Type == "sign_response" &&
+			resp.Period == req.Period
+		if !refusal {
 			c.dropConn(conn)
 		}
-		return nil, err
+		return nil, refusal && !isFinalSignRefusal(resp.Error), err
 	}
-	c.cfg.Metrics.observeSignLatency(time.Since(start))
-	c.cfg.Metrics.incSignSuccess()
-	return resp.Signature, nil
+	return resp.Signature, false, nil
 }
 
 // Close closes the session. It is safe to call more than once.

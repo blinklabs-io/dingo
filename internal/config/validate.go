@@ -429,6 +429,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if c.TrustedNtCIdleTimeout < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid trustedNtCIdleTimeout: %s (must be zero or positive)",
+			c.TrustedNtCIdleTimeout,
+		))
+	}
+
 	for _, pool := range c.TracingAlwaysSamplePools {
 		if _, err := ParsePoolKeyHash(pool); err != nil {
 			errs = append(errs, fmt.Errorf(
@@ -1267,6 +1274,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		case uint64(c.DMQ.MessageTTL) > maxMessageTTL:
 			errs = append(errs, fmt.Errorf(
 				"dmq.messageTtl must be at most %d seconds",
+				maxMessageTTL,
+			))
+		}
+		if uint64(c.DMQ.MinPoolMessageInterval) > maxMessageTTL {
+			errs = append(errs, fmt.Errorf(
+				"dmq.minPoolMessageInterval must be at most %d seconds",
 				maxMessageTTL,
 			))
 		}
