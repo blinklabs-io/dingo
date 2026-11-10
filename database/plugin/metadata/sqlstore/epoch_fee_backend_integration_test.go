@@ -88,10 +88,10 @@ func testEpochFeeSumBackend(t *testing.T, store *Store) {
 	got, err = store.SumTransactionFeesInSlotRange(1000, 1000, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(math.MaxUint64), got)
+	fixtureIdentityRow(t, store, 7, bytes.Repeat([]byte{7}, 32))
 	_, err = store.writeDB.ExecContext(t.Context(), store.dialect.Rebind(
-		"INSERT INTO "+store.dialect.QuoteIdentifier("transaction")+
-			" (id,hash,slot,valid,fee,collateral_fee) VALUES (7,?,1000,TRUE,'1','0')"),
-		bytes.Repeat([]byte{7}, 32))
+		"INSERT INTO applied_transaction (tx_id,slot,valid,fee,collateral_fee) "+
+			"VALUES (7,1000,TRUE,'1','0')"))
 	require.NoError(t, err)
 	_, err = store.SumTransactionFeesInSlotRange(1000, 1000, nil)
 	require.Error(t, err)
