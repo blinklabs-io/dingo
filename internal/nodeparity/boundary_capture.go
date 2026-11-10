@@ -218,6 +218,22 @@ func (b *boundaryCaptures) put(c *boundaryCapture) error {
 	return err
 }
 
+// handBack re-holds c, which take returned, for a session that ended before
+// comparing it. If the follower has meanwhile captured c's epoch at another
+// point, that capture is the one on Dingo's chain: it is kept, and c and its
+// files are dropped instead.
+func (b *boundaryCaptures) handBack(c *boundaryCapture) error {
+	b.mu.Lock()
+	cur := b.byEpoch[c.epoch]
+	if cur != nil && cur != c && !pointsEqual(cur.point, c.point) {
+		b.mu.Unlock()
+		c.removeFiles()
+		return nil
+	}
+	b.mu.Unlock()
+	return b.put(c)
+}
+
 // holds reports whether the capture for epoch was read at exactly point.
 func (b *boundaryCaptures) holds(epoch uint64, point pcommon.Point) bool {
 	b.mu.Lock()

@@ -1056,3 +1056,45 @@ func TestReadUTxOSetFileRejectsADamagedCount(t *testing.T) {
 		})
 	}
 }
+
+// A capture handed back after an interrupted session must not replace one the
+// follower has since read at another point of the same epoch, nor remove that
+// capture's files.
+func TestBoundaryCapturesHandBackKeepsANewerCapture(t *testing.T) {
+	dir := t.TempDir()
+	captures := newBoundaryCaptures(dir)
+	file := func(name string) string {
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(path, nil, 0o600))
+		return path
+	}
+	stalePoint := pcommon.NewPoint(700, []byte{7})
+	newPoint := pcommon.NewPoint(701, []byte{8})
+	stale := &boundaryCapture{epoch: 7, point: stalePoint, utxoPath: file("stale")}
+	require.NoError(t, captures.put(stale))
+	require.Same(t, stale, captures.take(7, stalePoint))
+
+	newer := &boundaryCapture{epoch: 7, point: newPoint, utxoPath: file("newer")}
+	require.NoError(t, captures.put(newer))
+	require.NoError(t, captures.handBack(stale))
+
+	assert.True(t, captures.holds(7, newPoint))
+	assert.False(t, captures.holds(7, stalePoint))
+	for _, path := range []string{newer.utxoPath, newer.recordPath} {
+		_, err := os.Stat(path)
+		assert.NoError(t, err, path)
+	}
+	for _, path := range []string{stale.utxoPath, stale.recordPath} {
+		_, err := os.Stat(path)
+		assert.ErrorIs(t, err, os.ErrNotExist, path)
+	}
+
+	// With no other capture held, the handed-back one is held again.
+	again := &boundaryCapture{epoch: 8, point: newPoint, utxoPath: file("again")}
+	require.NoError(t, captures.put(again))
+	require.Same(t, again, captures.take(8, newPoint))
+	require.NoError(t, captures.handBack(again))
+	assert.True(t, captures.holds(8, newPoint))
+	_, err := os.Stat(again.utxoPath)
+	assert.NoError(t, err)
+}

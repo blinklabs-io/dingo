@@ -1576,7 +1576,7 @@ func RunFromGenesis(
 							// for it.
 							defer func() {
 								if !captureCompared {
-									if err := captures.put(capture); err != nil {
+									if err := captures.handBack(capture); err != nil {
 										logf("nodeparity: %v", err)
 									}
 								}
