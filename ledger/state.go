@@ -4915,6 +4915,7 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 		)
 		return 0, floor, err
 	}
+	ls.metrics.observeConsumedUtxoSweep(floor, 0)
 	// No lock needed here - the database handles its own consistency
 	// and we're not accessing any in-memory LedgerState fields.
 	// The target was derived by the caller from a tip read under a lock.
@@ -4938,6 +4939,7 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 	// exists. UtxosDeleteConsumed persisted the floor in the same
 	// transaction that removed them, so rollback already refuses to
 	// target a point below it.
+	ls.metrics.observeConsumedUtxoSweep(floor, pruned)
 	if pruned > 0 {
 		ls.config.Logger.Debug(
 			"consumed UTxO sweep raised the prune floor",

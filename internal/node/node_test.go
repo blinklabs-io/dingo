@@ -540,6 +540,55 @@ func TestWaitForSignalOrErrorPrefersQueuedError(t *testing.T) {
 	}
 }
 
+// The effective-configuration Info line carries the plain allowlist and no
+// secret, even when the config holds secret-bearing fields.
+func TestLogEffectiveConfigInfoLineHasNoSecrets(t *testing.T) {
+	t.Parallel()
+
+	cfg, sentinels := sentinelConfig()
+	cfg.HealthPort = 12799
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	logEffectiveConfig(logger, cfg, true)
+
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("not one JSON record: %v: %q", err, buf.String())
+	}
+	if rec["msg"] != "effective configuration" || rec["level"] != "INFO" {
+		t.Fatalf("unexpected record: %v", rec)
+	}
+	if rec["component"] != "node" ||
+		rec["genesis_selection_mode"] != true ||
+		rec["health_ready_gap_slots"] != float64(config.DefaultHealthReadyGapSlots) {
+		t.Fatalf("unexpected fields: %v", rec)
+	}
+	for _, sentinel := range sentinels {
+		if strings.Contains(buf.String(), sentinel) {
+			t.Errorf("line leaks %s: %s", sentinel, buf.String())
+		}
+	}
+}
+
+// The "serving ... on" Info line must follow a successful bind and carry
+// the resolved address.
+func TestLogAuxiliaryListenerBoundReportsResolvedAddress(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	logAuxiliaryListenerBound(logger, "health probes", listener)
+	want := "serving health probes on " + listener.Addr().String()
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("log %q missing %q", buf.String(), want)
+	}
+}
+
 // A bind failure on a non-essential observability listener (metrics, pprof
 // or the health probe) must be logged and non-fatal: Run gets no listener
 // back and carries on, rather than an error that would take down an
