@@ -1074,7 +1074,7 @@ type LedgerStateConfig struct {
 	// block that block has already been certified, so the certify-by deadline
 	// is the bound for when it is actually available to fetch) rather than a
 	// hardcoded duration; the ledger converts it to wall-clock using the
-	// Shelley slot length. Zero disables best-effort announcement waiting, but
+	// Shelley slot length. Zero disables the near-head diffusion wait, but
 	// does not permit a certifying ranking block to commit without its
 	// certified closure.
 	EndorserBlockWaitSlots uint64
@@ -1797,6 +1797,10 @@ type LedgerState struct {
 	// headerVerificationEpochWithCache, before the snapshot is re-read, so a
 	// test can publish a new snapshot mid-lookup.
 	headerVerificationEpochLookupHook func()
+	// peerForkOpCertCheckedHook is a test seam, nil in production. It runs
+	// after a candidate's opcert counters are checked and before they are
+	// committed, so a test can publish a snapshot mid-check.
+	peerForkOpCertCheckedHook func()
 	// blockfetchContinuationPending prevents a chainsync handler from starting
 	// a competing batch in the short interval after the blockfetch subscriber
 	// schedules its next request on a worker. The worker must run outside the

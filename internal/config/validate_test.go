@@ -2270,6 +2270,20 @@ func TestValidateDMQBounds(t *testing.T) {
 			wantErr: "dmq.messageTtl must be at most",
 		},
 		{
+			name: "pool message interval turned off",
+			mutate: func(c *Config) {
+				c.DMQ.MinPoolMessageInterval = 0
+			},
+		},
+		{
+			name: "pool message interval overflowing a duration",
+			wide: true,
+			mutate: func(c *Config) {
+				c.DMQ.MinPoolMessageInterval = uint(maxTTL + 1)
+			},
+			wantErr: "dmq.minPoolMessageInterval must be at most",
+		},
+		{
 			name: "largest mempool size",
 			wide: true,
 			mutate: func(c *Config) {

@@ -72,6 +72,11 @@ func newTestStack(
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	reg := prometheus.NewRegistry()
 	cfg.PromRegistry = reg
+	// The fixtures sign every message with one key; the pacing has tests of
+	// its own.
+	if cfg.MinPoolMessageInterval == 0 {
+		cfg.MinPoolMessageInterval = -1
+	}
 	// The fixtures use short bodies; the size limits have tests of their own.
 	if cfg.MessageBodyMin == 0 {
 		cfg.MessageBodyMin = 1

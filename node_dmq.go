@@ -250,6 +250,9 @@ func (n *Node) startDMQ() error {
 		SocketModeSet: true,
 		// #nosec G115 -- validation bounds both to fit int64 once scaled
 		MessageTTL: time.Duration(cfg.MessageTTL) * time.Second,
+		MinPoolMessageInterval: dmqMinPoolMessageInterval(
+			cfg.MinPoolMessageInterval,
+		),
 		// #nosec G115 -- validation bounds both to fit int64 once scaled
 		MaxMempoolBytes:  int64(cfg.MaxMempoolSize) << 20,
 		Authenticator:    authenticator,
@@ -333,4 +336,15 @@ func clampToInt(v uint) int {
 		return math.MaxInt32
 	}
 	return int(v) // #nosec G115 -- bounded just above
+}
+
+// dmqMinPoolMessageInterval converts the configured seconds into the stack's
+// setting, where zero would mean the default and a negative value turns the
+// spacing off.
+func dmqMinPoolMessageInterval(seconds uint) time.Duration {
+	if seconds == 0 {
+		return -1
+	}
+	// #nosec G115 -- validation bounds it to fit int64 once scaled
+	return time.Duration(seconds) * time.Second
 }

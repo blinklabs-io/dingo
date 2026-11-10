@@ -674,6 +674,11 @@ type DMQConfig struct {
 	// MessageTTL is the longest expiry, in seconds, a submitted message may
 	// claim.
 	MessageTTL uint `yaml:"messageTtl"   envconfig:"DINGO_DMQ_MESSAGE_TTL"`
+	// MinPoolMessageInterval is the shortest time, in seconds, between two
+	// messages of one pool that are announced to a peer. dmq-node ends the
+	// connection when a pool's messages come closer together than its own
+	// setting, which defaults to 60 seconds. Zero announces without spacing.
+	MinPoolMessageInterval uint `yaml:"minPoolMessageInterval" envconfig:"DINGO_DMQ_MIN_POOL_MESSAGE_INTERVAL"`
 	// MaxMempoolSize bounds the message pool, in megabytes.
 	MaxMempoolSize uint `yaml:"maxMempoolSize" envconfig:"DINGO_DMQ_MAX_MEMPOOL_SIZE"`
 	// N2NPort is the TCP port peers connect to. It is independent of the
@@ -715,15 +720,16 @@ func (c *DMQConfig) UnmarshalYAML(node *yaml.Node) error {
 // DefaultDMQConfig returns the default DMQ settings.
 func DefaultDMQConfig() DMQConfig {
 	return DMQConfig{
-		Topic:             "mithril",
-		SocketPath:        "dingo-dmq.socket",
-		SocketMode:        DefaultUnixSocketMode,
-		MessageTTL:        1800,
-		MaxMempoolSize:    128,
-		ListenAddress:     "0.0.0.0",
-		ListenIPv6Address: "::",
-		MinPeers:          3,
-		MaxPeers:          10,
+		Topic:                  "mithril",
+		SocketPath:             "dingo-dmq.socket",
+		SocketMode:             DefaultUnixSocketMode,
+		MessageTTL:             1800,
+		MinPoolMessageInterval: 60,
+		MaxMempoolSize:         128,
+		ListenAddress:          "0.0.0.0",
+		ListenIPv6Address:      "::",
+		MinPeers:               3,
+		MaxPeers:               10,
 	}
 }
 

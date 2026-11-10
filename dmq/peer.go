@@ -147,7 +147,9 @@ type PeerConn struct {
 	// pullDone is closed when the pulling loop ends.
 	pullDone chan struct{}
 
-	known      *idSet
+	known *idSet
+	// pace spaces the announcements of one pool's messages. Nil disables it.
+	pace       *poolPacer
 	idReplies  chan []ocommon.MessageIDAndSize
 	msgReplies chan []ocommon.DmqMessage
 
@@ -219,6 +221,7 @@ func (s *Stack) registerPeer(conn net.Conn, dialed bool) (*PeerConn, error) {
 		finished:   make(chan struct{}),
 		pullDone:   make(chan struct{}),
 		known:      newIDSet(s.peerTune.knownIDs),
+		pace:       newPoolPacer(s.minPoolInterval()),
 		idReplies:  make(chan []ocommon.MessageIDAndSize, 1),
 		msgReplies: make(chan []ocommon.DmqMessage, 1),
 		closed:     make(chan struct{}),

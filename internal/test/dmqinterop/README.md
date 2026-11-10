@@ -35,6 +35,7 @@ tests are not built or are skipped, so `make test` is unaffected.
 | `TestInteropDingoDialsDmqNode` | The handshake settles on version 2 and the connection stays up with keep-alive on mini-protocol 12. |
 | `TestInteropDmqNodeServesAMessageToDingo` | A message signed by the devnet pool's real KES key, accepted by dmq-node, is pulled by Dingo, which checks the signatures and certificate itself. |
 | `TestInteropDmqNodePullsAMessageFromDingo` | dmq-node dials Dingo's peer listener, pulls a message from it and accepts it; a second Dingo stack then fetches it from dmq-node, which proves dmq-node kept it. |
+| `TestInteropDmqNodeAcceptsAPoolsSecondMessageFromDingo` | Dingo holds two messages signed by one pool and announces the second only after the pool's minimum interval, so dmq-node pulls both without logging `SigTooFrequent` for either. With the spacing off, the same test fails on dmq-node's refusals. |
 | `TestInteropPeerManagerDialsDmqNode` | Dingo's peer manager dials dmq-node from a topology, as the node does, and the connection holds. |
 | `TestInteropNodeExchangesMessagesWithDmqNode` | Node mode only. A real Dingo binary with `dmq.enabled` dials dmq-node from its topology and accepts dmq-node's connection. A message dmq-node accepted reaches a consumer on the node's local socket after the node authenticates it against its own ledger, and a message the node accepted on that socket is accepted by dmq-node. |
 
