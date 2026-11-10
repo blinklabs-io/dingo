@@ -98,6 +98,7 @@ const (
 	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
 	blockNonceSlotIndexSchemaRelease                    = "block-nonce-slot-leading-index"
 	rewardOutputIndexReshapeSchemaRelease               = "reward-account-output-index-reshape"
+	metadataLabelSlotIndexSchemaRelease                 = "transaction-metadata-label-slot-index"
 	scriptLockedSupplySchemaRelease                     = "script-locked-supply-aggregate"
 )
 
@@ -276,7 +277,8 @@ var schemaVersions = []struct {
 	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
 	{Version: 56, Name: blockNonceSlotIndexSchemaRelease, Dir: "v56"},
 	{Version: 57, Name: rewardOutputIndexReshapeSchemaRelease, Dir: "v57"},
-	{Version: 58, Name: scriptLockedSupplySchemaRelease, Dir: "v58"},
+	{Version: 58, Name: metadataLabelSlotIndexSchemaRelease, Dir: "v58"},
+	{Version: 59, Name: scriptLockedSupplySchemaRelease, Dir: "v59"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

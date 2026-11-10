@@ -47,7 +47,7 @@ func TestScriptLockedSupplyMigrationSeedsAggregate(t *testing.T) {
 				}
 				require.NoError(t, runner.Run(context.Background()))
 			}
-			run(registry[:57])
+			run(registry[:58])
 			_, ok := indexSQL(t, db, "idx_utxo_deleted_payment_script")
 			require.True(t, ok)
 			_, err = db.Exec(

@@ -1545,10 +1545,12 @@ func TestClassifyEndorserBlockFetchesKeepsDistinctSlotsOfSameHash(
 	}, backfill)
 }
 
-// TestClassifyEndorserBlockFetches verifies the fetch policy: near the head,
-// current announcements and certified parent announcements are both fetched;
-// in the settled backlog only certified parent announcements are fetched and
-// uncertified historical announcements are skipped.
+// TestClassifyEndorserBlockFetches verifies the classification: near the head,
+// current announcements and certified parent announcements are both returned
+// as tip references (splitTipWaitByApplyDependency then keeps only the
+// certified closures for the ledger to wait on and fetch); in the settled
+// backlog only certified parent announcements are fetched and uncertified
+// historical announcements are skipped.
 func TestClassifyEndorserBlockFetches(t *testing.T) {
 	t.Parallel()
 
@@ -1589,13 +1591,13 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	require.Len(t, backfill, 1)
 	require.Equal(t, ebA, backfill[0].hash)
 	require.Equal(t, uint64(100), backfill[0].slot)
-	// Only the near-head announcement (ebB) is fetched on announcement.
+	// Only the near-head announcement (ebB) is a tip reference.
 	require.Len(t, tipWait, 1)
 	require.Equal(t, ebB, tipWait[0].hash)
 
 	// One near-head block may certify its parent's EB and announce a new EB.
-	// Both references are fetched, but only the parent's EB is applied by the
-	// certifying block.
+	// Both are returned as tip references, but only the parent's EB is read
+	// when the certifying block is applied.
 	nearParentHash := leiosTestHash(0xF1)
 	nearCombinedHash := leiosTestHash(0xF2)
 	nearParentEb := lcommon.NewBlake2b256(leiosTestHash(0x1F))
@@ -1636,7 +1638,7 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	require.Empty(t, backfill)
 
 	// With an unknown wall-clock slot every block is treated as near-head, so
-	// all announcements fetch on announcement and none go to backfill.
+	// every announcement is a tip reference and none go to backfill.
 	backfill, tipWait = classifyEndorserBlockFetches(
 		infos, annByHash, 0, false, 100, neverCached,
 	)
@@ -2003,8 +2005,7 @@ func TestEnsureReferencedEndorserBlocksSharesOneWindowAcrossMissingBlocks(
 
 // TestSplitTipWaitByApplyDependency pins the apply-path contract itself,
 // independently of timing: only the mandatory certified closures are read at
-// apply time, and a block's own announcement is demoted to background
-// prefetch.
+// apply time, and a block's own announcement is left to leios-notify offers.
 func TestSplitTipWaitByApplyDependency(t *testing.T) {
 	certified := leiosEbRef{
 		slot: 100,
@@ -2402,9 +2403,8 @@ func TestFetchRequiredReportsCancellationNotBudgetExpiry(t *testing.T) {
 // spawn (best-effort) and fetchRequired (mandatory certified closure) used to
 // share one semaphore. A best-effort fetch holds its slot for up to
 // leiosBackfillMaxWait, so filling the semaphore with slow ones blocked a
-// mandatory fetch behind them -- and this path now dispatches near-head
-// prefetches through spawn as well, so that is far more reachable than when
-// only historical backfill used it. A mandatory fetch must proceed regardless.
+// mandatory fetch behind them, which is reachable whenever historical
+// backfill fills the semaphore. A mandatory fetch must proceed regardless.
 func TestMandatoryFetchIsNotStarvedByBestEffortSpawns(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })

@@ -1,4 +1,5 @@
--- Running total of live script-locked lovelace: one row per slot whose
--- commit changed it, holding the total after that slot. The backfill seeds it
--- from a full scan; the contract drops the index the scan used to need.
-CREATE TABLE IF NOT EXISTS `script_locked_supply` (`slot` integer PRIMARY KEY,`amount` integer NOT NULL);
+-- Serve the metadata label page query in slot order. The label-only index
+-- returns every transaction carrying the label in rowid order, so each page
+-- sorted all of them. With slot next in the key, a page reads its first rows
+-- in order and stops; transaction_id covers the join key.
+CREATE INDEX IF NOT EXISTS `idx_transaction_metadata_label_label_slot` ON `transaction_metadata_label`(`label`,`slot`,`transaction_id`);
