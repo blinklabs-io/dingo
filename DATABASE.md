@@ -4208,8 +4208,9 @@ it, where the horizon is `min(tipSlot - retentionSlots, liveImmutableSlot)`.
 immutability bound `internal/historyexpiry` uses to expire block history),
 overridable with `sqlstore.Config.CommitteeAuthRetentionSlots`. It only
 approximates the rollback bound: Ouroboros bounds a legal rollback in *blocks*
-(`securityParam`), not slots, and `Chain.rollbackForkDepth` enforces exactly
-that block count, so a chain sparser than the 3k/f assumption — a devnet with a
+(`securityParam`), not slots, and the chain enforces exactly that block count
+(`Chain.rollbackExceedsSecurityParam`, measured from the highest block index the
+persistent chain has held, its rollback anchor), so a chain sparser than the 3k/f assumption — a devnet with a
 low active-slot coefficient, or an occasional sparse span of an otherwise
 healthy chain — can have a legal rollback target below `tipSlot -
 retentionSlots`. Pruning to that slot-only horizon
@@ -4232,11 +4233,18 @@ below the horizon.
 
 **Suspension.** A cached `liveImmutableSlot` can be safe when resolved and
 still be wrong by the time it is used, because "at most `securityParam` blocks
-behind the tip" describes one instant, not a ratchet: a rollback to depth
-`d1 <= securityParam`, a little regrowth, and a second rollback to depth
-`d2 <= securityParam` measured from the new, shorter tip can legally land
-*before* a value cached before the first rollback — ordinary chain churn near
-the tip, not an adversarial scenario. `DeleteCertificatesAfterSlot` therefore
+behind the tip" describes one instant, not a ratchet. Peer-initiated rollbacks
+are held to a ratchet: the chain measures them from its rollback anchor, the
+highest block index it has held, which it persists in the
+`chain_rollback_high_water` sync-state row before any rollback removes blocks
+and restores on load, so successive rollbacks cannot undercut the cached value.
+An operator truncate removes the blocks above its target and caps the row at the
+target's block index (`Database.LowerRollbackHighWater`) in the transaction that
+truncates metadata, so a restart does not measure rollbacks from blocks that no
+longer exist.
+Local recovery that deliberately descends past K one K-bounded step at a time
+lowers the anchor to the tip first (`Chain.ResetRollbackAnchorToTip`) and so can
+land *before* a value cached earlier. `DeleteCertificatesAfterSlot` therefore
 invalidates the cached value on every rollback, and `committeeAuthHorizon`
 treats "a live syncer is wired (`SetCommitteeAuthImmutableSlot` has been called
 at least once) but currently has no value" — bootstrap before the first

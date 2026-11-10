@@ -2927,8 +2927,11 @@ with `ChainManager.RewindPrimaryChainToPoint`, once
 `ChainManager.SecurityParamConfigured()` reports K is set. That call shares its
 bound and side effects with a live `Chain.Rollback` rather than deleting blocks
 directly: it is rejected outright, without touching any state, when the ancestor
-sits more than the security parameter K behind the chain tip, and a rewind it
-does perform publishes `ChainRollbackEvent`/`ChainForkEvent` and wakes/marks
+sits more than the security parameter K behind the chain's rollback anchor (the
+highest block index it has held since the last reset, persisted across
+restarts; an unbounded rollback, `Chain.ResetRollbackAnchorToTip` or an operator
+truncate lowers it),
+and a rewind it does perform publishes `ChainRollbackEvent`/`ChainForkEvent` and wakes/marks
 chain iterators exactly once — the same rollback and iterator signal NtC clients
 rely on for a live rollback, rather than truncating the chain out from under
 them silently. `reconcileLivePrimaryChainLedgerDivergence` treats that rejection
@@ -9082,7 +9085,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
   local repair succeeds, connection-level recovery is skipped so ledger replay
   can resume from the repaired tip. If no divergence is found, or the
   divergence's common ancestor sits more than the security parameter K behind
-  the primary chain tip — a rewind that far is declined rather than forced
+  the primary chain's rollback anchor — a rewind that far is declined rather than forced
   through, per the bound below — the active chainsync connection is recycled —
   except when the primary (header) chain has already caught up to the peer and
   the gap is dominated by downloaded-but-not-yet-applied blocks
