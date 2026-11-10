@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -242,4 +243,34 @@ func TestSnapshotDirectoryReplacedLeavesReplacementUntouched(t *testing.T) {
 	movedEntries, err := os.ReadDir(moved)
 	require.NoError(t, err)
 	require.Empty(t, movedEntries, "opened snapshot directory was not emptied")
+}
+
+// A setgid directory group-writable by the process's own effective or
+// supplementary group is still shared: every other member of that group can
+// rename its entries, and setgid gives none of the sticky bit's protection.
+func TestSnapshotAncestorRejectsSharedGroupDirectory(t *testing.T) {
+	t.Parallel()
+	gids := []int{os.Getegid()}
+	groups, err := os.Getgroups()
+	require.NoError(t, err)
+	for _, g := range groups {
+		if g != gids[0] {
+			gids = append(gids, g)
+			break
+		}
+	}
+	for _, gid := range gids {
+		t.Run(strconv.Itoa(gid), func(t *testing.T) {
+			t.Parallel()
+			shared := filepath.Join(privateSnapshotBase(t), "shared")
+			require.NoError(t, os.Mkdir(shared, 0o700))
+			require.NoError(t, os.Chown(shared, -1, gid))
+			require.NoError(t, os.Chmod(shared, os.ModeSetgid|0o770))
+			err := validateSnapshotAncestorChain(shared)
+			require.ErrorContains(
+				t, err, "writable by group or other without the sticky bit",
+			)
+			require.ErrorContains(t, err, "set the sticky bit on it (chmod +t)")
+		})
+	}
 }

@@ -1351,7 +1351,7 @@ SELECT staking_key, pool_key_hash, reward_type, id, epoch, credential_tag,
        amount, spendable, guarded, captured_slot, boundary_slot
 FROM reward_account_output
 WHERE credential_tag = ? AND staking_key = ?
-  AND spendable = TRUE AND guarded = FALSE`
+  AND spendable AND NOT guarded`
 	if strings.EqualFold(order, "desc") {
 		query += " ORDER BY epoch DESC, pool_key_hash ASC, reward_type ASC"
 	} else {
@@ -1433,7 +1433,7 @@ func (s *Store) CountRewardAccountOutputsByCredential(
 SELECT COUNT(*)
 FROM reward_account_output
 WHERE credential_tag = ? AND staking_key = ?
-  AND spendable = TRUE AND guarded = FALSE`),
+  AND spendable AND NOT guarded`),
 		credentialTag,
 		stakingKey,
 	).Scan(&count)
