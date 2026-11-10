@@ -16,15 +16,12 @@ package blockfrost
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -60,7 +57,6 @@ type Blockfrost struct {
 	logger             *slog.Logger
 	requestBodyTimeout time.Duration
 	node               BlockfrostNode
-	mutationAuth       mutationAuth
 	mutationAdmission  *requestAdmission
 	drepAdmission      *requestAdmission
 	// addressSummaryAdmission is shared by every route that scans a whole
@@ -118,9 +114,6 @@ func New(
 		requestBodyTimeout: defaultRequestBodyTimeout,
 		logger:             logger,
 		node:               node,
-		mutationAuth: newMutationAuth(
-			cfg.AuthToken,
-		),
 		mutationAdmission: newRequestAdmission(
 			cfg.MaxConcurrentMutations,
 			cfg.MaxConcurrentMutationsPerClient,
@@ -155,43 +148,6 @@ func New(
 		),
 		listener: apilistener.New("Blockfrost API", logger),
 	}
-}
-
-type mutationAuth struct {
-	enabled   bool
-	tokenHash [sha256.Size]byte
-}
-
-func newMutationAuth(token string) mutationAuth {
-	return mutationAuth{
-		enabled:   token != "",
-		tokenHash: sha256.Sum256([]byte(token)),
-	}
-}
-
-func (a mutationAuth) authorized(r *http.Request) bool {
-	if !a.enabled {
-		return false
-	}
-	candidates := []string{
-		r.Header.Get("project_id"),
-		r.Header.Get("X-Blockfrost-Project-Id"),
-	}
-	scheme, value, ok := strings.Cut(r.Header.Get("Authorization"), " ")
-	if ok && strings.EqualFold(scheme, "Bearer") {
-		candidates = append(candidates, strings.TrimLeft(value, " "))
-	}
-	// Every credential is compared so a stale value in one header cannot mask
-	// a valid one in another, and the work does not depend on which matched.
-	matched := 0
-	for _, provided := range candidates {
-		providedHash := sha256.Sum256([]byte(provided))
-		matched |= subtle.ConstantTimeCompare(
-			providedHash[:],
-			a.tokenHash[:],
-		)
-	}
-	return matched == 1
 }
 
 type requestAdmission struct {
@@ -250,16 +206,6 @@ func requestClient(r *http.Request) string {
 
 func (b *Blockfrost) mutationHandler(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !b.mutationAuth.authorized(r) {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(
-				w,
-				http.StatusUnauthorized,
-				"Unauthorized",
-				"missing or invalid authentication token",
-			)
-			return
-		}
 		release, ok := b.mutationAdmission.acquire(
 			r.Context(),
 			requestClient(r),
@@ -658,16 +604,8 @@ func (b *Blockfrost) Start(
 	}
 	defer b.listener.EndStart(startDone)
 
-	host, _, err := net.SplitHostPort(b.config.ListenAddress)
-	if err != nil {
+	if _, _, err := net.SplitHostPort(b.config.ListenAddress); err != nil {
 		return fmt.Errorf("blockfrost: invalid listen address: %w", err)
-	}
-	if err := validateListenSecurity(
-		host,
-		b.config.AuthToken,
-		b.config.TLS,
-	); err != nil {
-		return fmt.Errorf("blockfrost: %w", err)
 	}
 
 	server, bindDone, err := b.listener.Publish(func() *http.Server {

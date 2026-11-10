@@ -1211,7 +1211,7 @@ boundary_slot = excluded.boundary_slot`
 	// (epoch, credential_tag, staking_key, pool_key_hash, reward_type) rows,
 	// not an OR-chain of five-way equality predicates -- the same
 	// GetAccountsByCredential planner limitation applies here:
-	// idx_reward_account_output_epoch_cred_pool_type exists on exactly these
+	// idx_reward_account_output_epoch_pool_cred_type exists on exactly these
 	// five columns, but a long OR-chain over it is not reliably compiled into
 	// per-term index seeks, and this runs on every epoch boundary for every
 	// account earning a reward.

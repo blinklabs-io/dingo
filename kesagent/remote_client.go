@@ -814,4 +814,5 @@ func (c *RemoteClient) recordDialFailureLocked() {
 		c.backoff = min(c.backoff*2, maxReconnectBackoff)
 	}
 	c.nextDialAfter = time.Now().Add(c.backoff)
+	c.cfg.Metrics.incReconnectFailures()
 }
