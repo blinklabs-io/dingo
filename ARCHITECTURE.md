@@ -3126,9 +3126,8 @@ this admission.
 
 `Config.Database` (set to `midnightserver.NewDatabase(n.db)` — `adapter.go`'s
 `databaseAdapter`, which bridges the package-level
-`database.BlockByHash`/`BlocksRecent`/`BlockBeforeSlot` functions and the
-0-based/1-based block-number translation into `MidnightDatabase` interface
-methods, mirroring `api/mesh`'s `meshDatabaseAdapter`/`MeshDatabase`) and
+`database.BlockByHash`/`BlocksRecent`/`BlockBeforeSlot`/`BlockByNumber`
+functions into `MidnightDatabase` interface methods, mirroring `api/mesh`'s `meshDatabaseAdapter`/`MeshDatabase`) and
 `Config.SlotTimer` (set to `n.ledgerState`, satisfying `SlotToTime`/
 `TimeToSlot`) back the governance/parameters/block/epoch/stability RPCs
 implemented in `midnight/server/service.go`:
@@ -3159,8 +3158,10 @@ implemented in `midnight/server/service.go`:
   the latest block at or before that wall-clock time
   (`SlotTimer.TimeToSlot` + `database.BlockBeforeSlot`) instead of the live
   tip. `GetLatestStableBlock` looks the target block number up via
-  `Database.BlockByIndex`, translating 0-based block number to the blob
-  store's 1-based index the same way `api/blockfrost` does. A client-supplied
+  `database.BlockByNumber`, which resolves the chain block number by searching
+  block metadata and returns the earliest block carrying that number (Byron
+  epoch boundary blocks share a number with their parent), as `api/blockfrost`
+  does. A client-supplied
   `as_of_timestamp_unix_millis` above `int64` range (`resolveTipBlock`) is
   rejected with `codes.InvalidArgument` rather than being converted with
   `int64(v)`, which would silently wrap it into a negative timestamp and
@@ -15264,9 +15265,10 @@ out into that table), so the query pages directly against it with SQL
 `ORDER BY`/`LIMIT`/`OFFSET` and an inclusive `(slot, tx_index)` range
 predicate for `from`/`to` — no application-level fan-out or filtering
 happens after the query returns. A block number in `from`/`to` is resolved
-with bounded index lookups (`Database.BlockByIndex` and, when the exact
-block is absent, `Database.BlockAtOrAfterIndex` for `from` or
-`Database.BlockAtOrBeforeIndex` for `to`) rather than a scan. In an import
+with a bounded metadata search by chain block number
+(`database.BlockNumberBoundaryTxn`: the first indexed block numbered at least
+`from`, or the last numbered at most `to`) rather than a scan. The search
+reads block metadata only and fetches just the selected block body. In an import
 gap, `from` resolves to the next existing block and `to` resolves to the
 preceding existing block. If the needed boundary does not exist, the range
 is empty; a `to` beyond the latest block resolves to the latest block. An
@@ -15456,11 +15458,13 @@ Two contracts follow from that boundary:
 
 - **Block numbering.** `block_identifier.index` is the Cardano block height in
   both directions: `/block` reports it, and `/block` accepts it. The blob
-  store's own block index is 1-based (`database.BlockInitialIndex`), so
-  `meshDatabaseAdapter.BlockByIndex` translates height to internal index, the
-  same translation `api/blockfrost`'s block-by-height lookup and
-  `midnight/server`'s `databaseAdapter` perform. Handlers deal only in
-  consensus block numbers.
+  store's internal block index is a separate, storage-private sequence that
+  does not equal the chain block number. `meshDatabaseAdapter.BlockByIndex`
+  resolves the height through `database.BlockByNumber`, a bounded search over
+  block metadata that returns the earliest block carrying that number (Byron
+  epoch boundary blocks share a number with their parent). `api/blockfrost`'s
+  block-by-height lookup and `midnight/server`'s `databaseAdapter` resolve
+  numbers the same way. Handlers deal only in consensus block numbers.
 - **Historical balances are pinned to the requested point.**
   `/network/options` advertises `historical_balance_lookup: true`, and
   `/account/balance` honors it. A request carrying a `block_identifier`
