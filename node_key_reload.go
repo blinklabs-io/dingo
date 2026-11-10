@@ -542,8 +542,7 @@ func (n *Node) startKeyReloadLoops() {
 		)
 	}
 	if interval := n.config.shelleyKeyWatchInterval; interval > 0 {
-		if ks := n.primaryKeySource(); ks.kesAgentConfigured() &&
-			!ks.kesAgentSignMode() {
+		if n.everyPoolServesKeys() {
 			// A serve-key reload is always refused, so every file change
 			// would only log and count a failure.
 			n.config.logger.Warn(
@@ -628,15 +627,46 @@ func (n *Node) shouldTryAgentOpCert(opCert []byte, now time.Time) bool {
 }
 
 // watchedCredentialFiles lists the files a reload reads in the configured
-// mode: the VRF key and operational certificate, and the KES key when it is a
-// local file.
+// mode, for every pool: the VRF key and operational certificate, and the KES
+// key when it is a local file. A change to any of them reloads every pool;
+// a pool whose files did not change reports itself unchanged.
 func (n *Node) watchedCredentialFiles() []string {
-	ks := n.primaryKeySource()
-	files := []string{ks.keys.vrfKey, ks.keys.opCert}
-	if !ks.kesAgentConfigured() {
-		files = append(files, ks.keys.kesKey)
+	var files []string
+	for _, ks := range n.configuredPoolKeySources() {
+		files = append(files, ks.keys.vrfKey, ks.keys.opCert)
+		if !ks.kesAgentConfigured() {
+			files = append(files, ks.keys.kesKey)
+		}
 	}
 	return files
+}
+
+// everyPoolServesKeys reports whether every pool's KES key comes from an
+// agent in serve-key mode, where a reload is always refused.
+func (n *Node) everyPoolServesKeys() bool {
+	for _, ks := range n.configuredPoolKeySources() {
+		if !ks.kesAgentConfigured() || ks.kesAgentSignMode() {
+			return false
+		}
+	}
+	return true
+}
+
+// configuredPoolKeySources is a key source per configured pool, the first
+// pool's first, for reading their settings only.
+func (n *Node) configuredPoolKeySources() []*poolKeySource {
+	pools := n.config.blockProducerPools
+	if len(pools) == 0 {
+		return []*poolKeySource{n.primaryKeySource()}
+	}
+	sources := make([]*poolKeySource, 0, len(pools))
+	for _, p := range pools {
+		sources = append(sources, &poolKeySource{
+			n:    n,
+			keys: producerKeysFromPool(p),
+		})
+	}
+	return sources
 }
 
 // credentialFileWatchLoop polls the credential files every interval and

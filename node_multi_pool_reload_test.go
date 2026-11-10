@@ -169,3 +169,27 @@ func TestAgentOpCertOfferReloadsOnlyItsOwnPool(t *testing.T) {
 		require.NotSame(t, n.first.initial, n.first.kesAgentClient)
 	})
 }
+
+func TestKeyWatchCoversEveryPool(t *testing.T) {
+	t.Parallel()
+	n := newTwoPoolSignNode(t)
+	files := n.first.watchedCredentialFiles()
+	second := n.first.config.blockProducerPools[1]
+	require.Contains(t, files, second.ShelleyVRFKey)
+	require.Contains(t, files, second.ShelleyOperationalCertificate)
+	require.Contains(t, files, n.first.opcertPath)
+}
+
+func TestKeyWatchRunsWhileAnyPoolCanReload(t *testing.T) {
+	t.Parallel()
+	n := newTwoPoolSignNode(t)
+	n.first.config.blockProducerPools[0].ShelleyKESAgentMode = kesagent.ModeServeKey
+	n.first.config.shelleyKeyWatchInterval = time.Millisecond
+	n.first.startKeyReloadLoops()
+	t.Cleanup(n.first.stopKeyReloadLoops)
+	require.NotContains(
+		t,
+		n.first.logs.String(),
+		"ignored in KES agent serve-key mode",
+	)
+}
