@@ -268,7 +268,7 @@ func (s *Store) SetUtxoDeletedAtSlot(
 				priorScript  sql.NullBool
 				priorAmount  sql.NullString
 			)
-			err := db.QueryRowContext(ctx, `
+			err := db.QueryRowContext(ctx, `-- name: GetUtxoLiveStateForScriptSupply :one
 SELECT deleted_slot, payment_script, amount FROM utxo
 WHERE tx_id = ? AND output_idx = ?`,
 				txID,
@@ -1097,7 +1097,7 @@ WHERE tx_id = ? AND output_idx = ?
 			priorScript  sql.NullBool
 			priorAmount  sql.NullString
 		)
-		err := db.QueryRowContext(ctx, `
+		err := db.QueryRowContext(ctx, `-- name: GetUtxoLiveStateForScriptSupply :one
 SELECT deleted_slot, payment_script, amount FROM utxo
 WHERE tx_id = ? AND output_idx = ?`,
 			utxo.TxId,

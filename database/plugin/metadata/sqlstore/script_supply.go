@@ -43,7 +43,8 @@ SELECT slot, amount FROM script_locked_supply ORDER BY slot DESC LIMIT 1`
 INSERT INTO script_locked_supply (slot, amount) VALUES (?, ?)`
 	scriptSupplySetQuery = `-- name: SetScriptLockedSupply :exec
 UPDATE script_locked_supply SET amount = ? WHERE slot = ?`
-	scriptSupplyLiveScanQuery = `SELECT amount FROM utxo
+	scriptSupplyLiveScanQuery = `-- name: ListLiveScriptLockedUtxoAmounts :many
+SELECT amount FROM utxo
 WHERE payment_script = TRUE AND deleted_slot = 0`
 )
 
@@ -148,7 +149,8 @@ func (s *Store) addScriptLockedSupplyBelowLatest(
 ) error {
 	var previous int64
 	err := db.QueryRowContext(ctx, s.dialect.Rebind(
-		`SELECT amount FROM script_locked_supply
+		`-- name: GetScriptLockedSupplyBelowSlot :one
+SELECT amount FROM script_locked_supply
 WHERE slot < ? ORDER BY slot DESC LIMIT 1`), slot).Scan(&previous)
 	hasPrevious := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -158,7 +160,8 @@ WHERE slot < ? ORDER BY slot DESC LIMIT 1`), slot).Scan(&previous)
 	var tail []row
 	err = func() error {
 		rows, err := db.QueryContext(ctx, s.dialect.Rebind(
-			`SELECT slot, amount FROM script_locked_supply
+			`-- name: ListScriptLockedSupplyFromSlot :many
+SELECT slot, amount FROM script_locked_supply
 WHERE slot >= ? ORDER BY slot`), slot)
 		if err != nil {
 			return err
@@ -237,7 +240,8 @@ func (s *Store) RebuildScriptLockedSupply(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			if _, err := db.ExecContext(
-				ctx, "DELETE FROM script_locked_supply",
+				ctx, `-- name: DeleteAllScriptLockedSupply :exec
+DELETE FROM script_locked_supply`,
 			); err != nil {
 				return err
 			}
@@ -288,7 +292,8 @@ func (s *Store) rollbackScriptLockedSupply(
 	}
 	result, err := db.ExecContext(
 		ctx,
-		s.dialect.Rebind("DELETE FROM script_locked_supply WHERE slot > ?"),
+		s.dialect.Rebind(`-- name: DeleteScriptLockedSupplyAfterSlot :exec
+DELETE FROM script_locked_supply WHERE slot > ?`),
 		slotValue,
 	)
 	if err != nil {
@@ -300,7 +305,8 @@ func (s *Store) rollbackScriptLockedSupply(
 	}
 	var remaining int
 	if err := db.QueryRowContext(
-		ctx, "SELECT COUNT(*) FROM script_locked_supply",
+		ctx, `-- name: CountScriptLockedSupply :one
+SELECT COUNT(*) FROM script_locked_supply`,
 	).Scan(&remaining); err != nil {
 		return err
 	}
@@ -326,7 +332,8 @@ func (s *Store) PruneScriptLockedSupplyBefore(
 		func(db queryer, ctx context.Context) error {
 			var base int64
 			err := db.QueryRowContext(ctx, s.dialect.Rebind(
-				`SELECT slot FROM script_locked_supply
+				`-- name: GetScriptLockedSupplyBaseAtFloor :one
+SELECT slot FROM script_locked_supply
 WHERE slot <= ? ORDER BY slot DESC LIMIT 1`), floorValue).Scan(&base)
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil
@@ -335,7 +342,8 @@ WHERE slot <= ? ORDER BY slot DESC LIMIT 1`), floorValue).Scan(&base)
 				return err
 			}
 			_, err = db.ExecContext(ctx, s.dialect.Rebind(
-				"DELETE FROM script_locked_supply WHERE slot < ?"), base)
+				`-- name: DeleteScriptLockedSupplyBeforeSlot :exec
+DELETE FROM script_locked_supply WHERE slot < ?`), base)
 			return err
 		},
 	)
