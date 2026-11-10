@@ -14491,9 +14491,8 @@ manifest entries.
 bootstrap: they produce the artifact format `dingo mithril sync` consumes (a
 Mithril Cardano database, v2) and serve it through the aggregator artifact API.
 Neither starts the node; both read the `mithril.server` configuration, and the
-server binds the shared `bindAddr`. Artifact reads are public. When the
-aggregator is enabled, signer registration and registration closure require an
-operator bearer token; non-loopback binds require TLS.
+server binds the shared `bindAddr`. All endpoints accept anonymous HTTP requests,
+including signer registration and registration closure.
 
 **Production** (`mithril.CreateSnapshot`) takes a sealed cardano-node database
 directory. Immutable file numbers must be contiguous from 0 with a chunk,
@@ -14547,8 +14546,7 @@ stored snapshot older than the newest N fails, since retention has removed it.
 /artifact/cardano-database`, `/artifact/cardano-database/{hash}`,
 `/download/{hash}/{name}` and `/certificate/{hash}` (a stored
 `certificates/{hash}.json`, if present). `mithril.server.publicBaseUrl` is the
-absolute origin used in artifact download locations; it must use HTTPS except
-for a loopback HTTP origin. Request Host and forwarded headers do not affect
+absolute HTTP(S) origin used in artifact download locations. Request Host and forwarded headers do not affect
 generated links. Archive downloads use `http.ServeContent`, giving range and
 HEAD support. From a remote store, a request naming more than one range is
 answered with the whole object instead: each range would cost a separate ranged
@@ -14585,10 +14583,7 @@ slow reader cannot retain a request slot indefinitely.
 **Aggregator** (`mithril.Aggregator`, enabled by `mithril.server.aggregator`)
 is mounted on the same handler and certifies the stored snapshots of the
 configured network. `POST /register-signer` and
-`POST /close-registrations` require the bearer token in the
-`Authorization` header, loaded from
-`mithril.server.aggregator.operatorTokenFile`; the token must contain at least
-32 random bytes, and a non-loopback bind requires server TLS. Pending reads and
+`POST /close-registrations` accept anonymous HTTP requests. Pending reads and
 signature submissions do not close registration. The operator closes it only
 after a snapshot awaits a certificate and at least one signer has registered;
 the aggregator then orders the signers as the reference key registry does,
@@ -14609,7 +14604,7 @@ certificate-chain verification of a Cardano database artifact reads. The closed
 signer set and chain head are stored in `aggregator.json` and restored on
 start; changing the epoch or parameters afterwards is refused. Signing itself is
 not part of the aggregator, and certificates carry no KES operational
-certificates. The operator supplies and authorizes the epoch's signer stakes.
+certificates. The caller supplies the epoch's signer stakes.
 
 After a completed metadata backfill,
 `internal/node.FinalizeBackfillPlannerStats` refreshes planner statistics after
@@ -14646,8 +14641,7 @@ HTTP interface here that is available in every storage mode.
 `bindAuxiliaryListener` and serving it with `serveAuxiliaryListenerOn` (bind or
 serve failures are logged, never fatal): Prometheus metrics on
 `metricsBindAddr:metricsPort` (loopback by default in the binary and container
-image; remote scraping requires setting `metricsBindAddr`; `metricsAuthToken`
-optionally requires Bearer authentication; `metricsPort` `0` disables it here
+image; remote scraping requires setting `metricsBindAddr`; `metricsPort` `0` disables it here
 and in `dingo mithril sync`), pprof on `debugPort` when enabled, and the health
 listener on `healthPort` (default `12799`, `0` disables).
 
@@ -14742,32 +14736,19 @@ introspects the same read-only SQLite pool at request time; without that pool it
 reports schema unavailability.
 
 MCP is opt-in: `plugins.api.mcp.config.port: 0` prevents node composition from
-constructing or starting the server. It does not request an ephemeral port. Set
-a positive port, such as `8088`, to enable it in either core or API storage
-mode. This keeps the SQL and node-inspection endpoint from starting
-automatically on existing nodes. Authentication is optional and unset by
-default; the listener defaults to `127.0.0.1`. Storage mode and retained
-metadata determine which queries have data available. Any non-loopback MCP bind
-additionally requires both a non-empty auth token and server TLS; unprotected
-network binds fail during provider construction and direct server construction,
-checked against the actual listen address. The canonical plugin auth-token
-environment setting overrides the compatibility `DINGO_MCP_AUTH_TOKEN` alias,
-which overrides YAML. Browser origins must be same-origin on loopback or
-explicitly listed in `corsAllowedOrigins`; the root wildcard does not grant
-access to MCP. Rejected origins receive HTTP 403 before any transport or
-preflight handling. Native clients can omit Origin. Streaming responses have no
-absolute write timeout. Streamable HTTP and legacy SSE share a 128-session
-admission budget with an eight-session limit per client address. New sessions
-fail immediately when either limit is full. Both transports close sessions after
-five idle minutes or one hour of total lifetime, and listener shutdown closes
-every admitted session. The pre-authentication rate limiter keeps at most 4096
-client identities in least-recently-used order. A single expiry timer removes
-identities after 30 idle minutes without waiting for more traffic. It runs
-before authentication, so failed credentials consume capacity; preflight and
-both health aliases bypass it. Negative or non-finite rate limits fail
-construction. Stopping MCP prevents new starts and closes its owned pool after
-listener shutdown; a timed-out start is awaited by deferred cleanup before
-closing that pool.
+constructing or starting the server; a positive port enables it. The default
+listener address is `127.0.0.1`, and every address supports plaintext HTTP.
+Storage mode and retained metadata determine which queries have data available.
+Browser origins must be same-origin on loopback or explicitly listed in
+`corsAllowedOrigins`; the root wildcard does not grant access to MCP. Native
+clients can omit Origin. Streaming responses have no absolute write timeout.
+Streamable HTTP and legacy SSE share a 128-session admission budget with an
+eight-session limit per client address. Sessions close after five idle minutes
+or one hour of total lifetime. Listener shutdown closes admitted sessions.
+The rate limiter retains at most 4096 client addresses and removes entries
+after 30 idle minutes. Preflight and both health aliases bypass it. Negative
+or non-finite rate limits fail construction. Stopping MCP prevents new starts
+and closes its owned pool after listener shutdown.
 
 SQLite-backed tools and resources enforce the configured query timeout.
 Per-table schema resources are enumerated once during server construction,
@@ -14851,14 +14832,10 @@ provider `mode: disabled` keeps that listener plaintext. Shared TLS values
 follow the normal CLI > environment > YAML > default precedence before this
 scope merge. Certificate files are loaded when the listener starts.
 
-Blockfrost read routes require no credentials. Its submission and evaluation
-routes require the provider's `authToken`; the listener cannot expose an
-authenticated mutation route on a non-loopback address without server TLS.
-Kupo, Mesh, and UTxO RPC routes require no credentials, including health and
-reflection routes. MCP supports an optional shared token through Bearer
-authentication or `X-API-Key`. Its `/healthz` route bypasses authentication and
-rate limiting; `/health` does not. Origin validation precedes both routes and
-preflight handling.
+Every API provider accepts anonymous requests, including transaction submission,
+evaluation, MCP, health, and reflection endpoints. Plaintext HTTP is supported
+on every bind address. Authentication and mandatory TLS are not API responsibilities.
+Optional TLS remains an operator-selected transport.
 
 The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
 RPC-only TLS compatibility input among these providers; Midnight also
@@ -14869,11 +14846,8 @@ defaulting to `127.0.0.1`; an explicitly empty provider host falls back to
 `bindAddr`. A non-loopback UTxO RPC listener has no built-in access policy
 and must be placed behind a protective gateway.
 `metricsBindAddr` and `debugBindAddr` separately configure Prometheus and pprof;
-both default to loopback. `metricsAuthToken` protects both the ordinary and
-Mithril-sync Prometheus listeners when configured. The listener remains plain
-HTTP, so remote Bearer authentication requires a TLS reverse proxy or an
-authenticated encrypted tunnel; network isolation is an additional access
-control. `corsAllowedOrigins` remains a shared root setting,
+both default to loopback. Both ordinary and Mithril-sync Prometheus listeners
+accept anonymous HTTP requests. `corsAllowedOrigins` remains a shared root setting,
 but MCP rejects its wildcard and applies the origin checks described above.
 
 ### API listener lifecycle (`internal/apilistener`)
@@ -15130,16 +15104,9 @@ write, and idle timeouts.
 
 The listener defaults to `127.0.0.1`. Set
 `plugins.api.blockfrost.config.host` to expose it on another interface.
-Transaction submission and evaluation require the configured
-`plugins.api.blockfrost.config.authToken`, accepted through the standard
-`project_id` header, `X-Blockfrost-Project-Id`, or Bearer authentication. A
-non-loopback listener with mutation authentication enabled also requires
-server TLS through `plugins.api.blockfrost.config.tls` so the credential is
-not sent in cleartext; `Start` enforces this for every server, including one
-built directly with `New`. When several credential headers are present, the
-request is accepted if any one of them matches. Read routes remain public.
+Transaction submission and evaluation accept anonymous requests over HTTP.
 
-Mutation admission runs after authentication and before body decoding. The
+Mutation admission runs before body decoding. The
 shared `maxConcurrentMutations` limit bounds process-wide submission and
 evaluation work, while `maxConcurrentMutationsPerClient` caps one remote address
 (it may equal the shared limit, in which case one address can use the whole
@@ -18720,16 +18687,9 @@ retained block contents.
 
 **LifecycleService** (`bark/lifecycle.go`) mounts bark's `LifecycleService`
 (Stop, Restart, GetStatus) when `BarkConfig.Node` is set, which `node.go`'s
-`Run()` does only when `barkLifecycleEnabled` is true. Stop and Restart use
-`barkLifecycleOperatorCertificateFingerprints`, a distinct allowlist from the
-DatabaseService operator policy, so enabling database lifecycle access grants
-no process-control privilege. Bark owns the transport,
-authentication and request validation (a negative `graceful_timeout` is
+`Run()` does only when `barkLifecycleEnabled` is true. Bark owns transport and request validation (a negative `graceful_timeout` is
 `INVALID_ARGUMENT`) and delegates to `bark.NodeControl`, implemented by
-`*dingo.Node` in `node_remote_lifecycle.go`. `Stop` and `Restart` are
-classified destructive and `GetStatus` read-only in
-`newOperatorAuthInterceptor`, so Stop and Restart need an allowlisted operator
-certificate and `GetStatus` only a verified one. `Node.RequestShutdown` accepts
+`*dingo.Node` in `node_remote_lifecycle.go`. `Node.RequestShutdown` accepts
 exactly one request (a later one gets `FAILED_PRECONDITION`), resolves the
 timeout (zero, or anything longer than `shutdownTimeout`, selects
 `shutdownTimeout`, the bound `Node.Stop` enforces), publishes
@@ -18808,58 +18768,10 @@ The HTTP server applies a 60-second request read timeout but no write timeout,
 so slow request bodies are bounded without imposing an overall deadline on
 long-lived server streams.
 
-**Authentication and authorization** (`bark/auth.go`).
-Bind address alone doesn't authenticate a caller. Every DatabaseService and
-LifecycleService RPC requires mTLS client-certificate authentication,
-independent of bind address;
-the entirely-read-only ArchiveService remains public. `BarkConfig.
-TlsClientCAFilePath` supplies a PEM CA bundle. `startServer` loads it into an
-`x509.CertPool` and sets the listener's `ClientAuth` to
-`tls.VerifyClientCertIfGiven` — "if given," not "required," because Archive is
-served on the same listener. Go's TLS stack still chain-verifies any presented
-certificate against `ClientCAs` during the handshake before request handling.
-
-Because Connect's `AnyRequest`/`StreamingHandlerConn` don't expose the
-underlying `tls.ConnectionState`, `peerCertContextMiddleware` wraps the mux
-(alongside the existing `httpcors.Handler` wrap) and stashes whether the
-connection presented a verified client certificate — plus, for audit
-logging, its Subject Common Name and a SHA-256 fingerprint — into the
-request context. `newOperatorAuthInterceptor`, wired via
-`connect.WithInterceptors` when `databaseconnect.NewDatabaseServiceHandler`
-is constructed, is deny-by-default and enforces two stages. It first rejects
-every DatabaseService request without a verified certificate with
-`connect.CodeUnauthenticated`. It then permits methods explicitly classified
-read-only, while destructive or unclassified methods additionally require the
-certificate's SHA-256 fingerprint in `BarkConfig.
-OperatorCertificateFingerprints`; a verified non-operator receives
-`connect.CodePermissionDenied`. Every non-read-only call, accepted or rejected,
-is logged with the caller's certificate identity. An unclassified procedure is
-also logged and treated as destructive. Because this all sits beneath
-`*http.Server`, one check covers
-Connect, gRPC, and gRPC-Web alike — they're just HTTP requests distinguished
-by content type once they reach the generated handler, not separate code
-paths needing separate wiring. The interceptor implements the full
-`connect.Interceptor` interface (including the no-op-today
-`WrapStreamingHandler`/`WrapStreamingClient` paths) so the same
-interceptor and destructive-procedure-set pattern can cover any other bark
-service that must refuse anonymous calls.
-
-`Start` (not `NewBark`) fails closed: mounting `Lifecycle` without
-`TlsClientCAFilePath`, at least one `OperatorCertificateFingerprint`, or
-`TlsCertFilePath`/`TlsKeyFilePath` is refused rather than silently serving
-DatabaseService with a missing authentication or authorization stage. The check
-lives at `Start`, not construction, because a `databaseServiceHandler` built
-via `newDatabaseServiceHandler` and exercised through direct in-process Go
-calls — as most of this package's own handler-level tests do — never goes
-through `Start`'s mux/interceptor wiring and so is never actually
-network-reachable in the first place; `internal/config/validate.go` also
-checks the same invariant upfront (`barkPort` + `databaseLifecycle.
-snapshotDir` set without `barkClientCaFilePath` or
-`barkOperatorCertificateFingerprints`), so a misconfigured `dingo` invocation
-fails fast at the CLI rather than deep inside `Node.Run()`.
-`dingoctl`'s existing `--client-cert`/`--client-key`/`--ca-cert` flags
-(`dingoctl/internal/client/tls.go`) are the client side of this — no new
-dingoctl plumbing was needed.
+All Bark RPCs accept requests without client certificates or operator allowlists.
+DatabaseService and LifecycleService support plaintext HTTP, as does ArchiveService.
+Request validation, lifecycle coordination, and storage integrity checks apply to
+every call independently of transport.
 
 The `snapshot_id` generated by `CreateSnapshot` is its directory name under
 `SnapshotDir`. Bark maintains a SQLite catalog of local directories and
@@ -18933,8 +18845,9 @@ terminal status is published only after the next operation can start.
 operation's in-memory state (no push notification from the goroutine to a
 concurrently open stream) — adequate given operations run for seconds to
 hours, far coarser than the poll interval. The handler admits at most 32
-progress streams globally and four for one verified client-certificate
-fingerprint. It rejects an excess stream before allocating its ticker. An
+progress streams globally and four for one remote client address (one IPv4
+address or one IPv6 /64).
+It rejects an excess stream before allocating its ticker. An
 admitted stream ends when the operation becomes terminal, its request context
 is cancelled, or its 15-minute lifetime expires; a client following a longer
 operation reconnects to renew the stream. The Bark HTTP middleware supplies a
@@ -18943,7 +18856,7 @@ handler installs the same absolute deadline before its first send. A client
 that stops reading therefore cannot keep `stream.Send` blocked beyond the
 lifetime. A missing or unsupported setter fails the stream before its first
 send, and the deadline is cleared as the handler exits. Admission, release,
-and rejection logs include the fingerprint plus the active global and
+and rejection logs include the client address plus the active global and
 per-client counts.
 
 Because `GetRestoreStatus`/`GetTruncateStatus` need to stay pollable for the

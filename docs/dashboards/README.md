@@ -23,10 +23,9 @@ Before you begin, make sure you have:
   guide](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
 - **Prometheus** scraping your Dingo node on port `12798` (configured in step 2
   below)
-- **Dingo** node with metrics enabled (default port `12798`, bound to loopback;
-  remote scraping sets `metricsBindAddr`, uses `metricsAuthToken`, and carries
-  the plain HTTP listener through a TLS reverse proxy or authenticated encrypted
-  tunnel)
+- **Dingo** node with metrics enabled (default port `12798`, bound to loopback)
+  — set `metricsBindAddr` to the interface used for remote scraping. Metrics
+  requests do not require authentication.
 - **[Business Text
   plugin](https://grafana.com/grafana/plugins/marcusolsson-dynamictext-panel/)**
   — required by every dashboard except Traces and Logs for the header panel

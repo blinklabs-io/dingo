@@ -18,9 +18,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,7 +29,6 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -42,7 +38,6 @@ const (
 	certificateVersion        = "0.1.0"
 	maxAggregatorRequestBytes = 1 << 20
 	stmVerificationKeyBytes   = 96
-	minOperatorTokenBytes     = 32
 )
 
 var (
@@ -64,8 +59,7 @@ type AggregatorConfig struct {
 	GenesisSigningKey ed25519.PrivateKey
 	// Store holds the snapshots to certify and receives the certificates.
 	Store ArtifactStore
-	// OperatorToken authorizes signer registration and registration closure.
-	// Use at least 32 unpredictable bytes and transport it over TLS.
+	// OperatorToken is unused. Aggregator HTTP endpoints accept anonymous requests.
 	OperatorToken string
 }
 
@@ -75,9 +69,7 @@ type AggregatorConfig struct {
 // signer set before signing starts; closure derives the aggregate verification
 // key and issues the genesis certificate.
 type Aggregator struct {
-	cfg               AggregatorConfig
-	operatorTokenKey  [sha256.Size]byte
-	operatorTokenHash [sha256.Size]byte
+	cfg AggregatorConfig
 
 	mu      sync.Mutex
 	regs    map[string]stmRegistration
@@ -153,25 +145,12 @@ func NewAggregator(
 			"aggregator parameter phi_f=%v must be in (0, 1]",
 			cfg.Parameters.PhiF,
 		)
-	case len(cfg.OperatorToken) < minOperatorTokenBytes:
-		return nil, fmt.Errorf(
-			"aggregator operator token must be at least %d bytes",
-			minOperatorTokenBytes,
-		)
 	}
-	var tokenKey [sha256.Size]byte
-	if _, err := rand.Read(tokenKey[:]); err != nil {
-		return nil, fmt.Errorf("generating operator token key: %w", err)
-	}
-	tokenHash := operatorTokenHash(tokenKey[:], cfg.OperatorToken)
-	cfg.OperatorToken = ""
 	a := &Aggregator{
-		cfg:               cfg,
-		operatorTokenKey:  tokenKey,
-		operatorTokenHash: tokenHash,
-		regs:              make(map[string]stmRegistration),
-		now:               time.Now,
-		catalog:           newSnapshotCatalog(cfg.Store),
+		cfg:     cfg,
+		regs:    make(map[string]stmRegistration),
+		now:     time.Now,
+		catalog: newSnapshotCatalog(cfg.Store),
 	}
 	found, err := getJSON(ctx, cfg.Store, aggregatorStateKey, &a.state)
 	if err != nil {
@@ -237,8 +216,8 @@ func (a *Aggregator) registerRoutes(
 	publicRequest func(http.HandlerFunc) http.HandlerFunc,
 	signatureRequest func(signatureRequestHandler) http.HandlerFunc,
 ) {
-	mux.HandleFunc("POST /register-signer", a.handleRegisterSigner)
-	mux.HandleFunc("POST /close-registrations", a.handleCloseRegistrations)
+	mux.HandleFunc("POST /register-signer", publicRequest(a.handleRegisterSigner))
+	mux.HandleFunc("POST /close-registrations", publicRequest(a.handleCloseRegistrations))
 	mux.HandleFunc(
 		"GET /certificate-pending", publicRequest(a.handlePending),
 	)
@@ -344,9 +323,6 @@ func (a *Aggregator) handleRegisterSigner(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	if !a.authorizeOperator(w, r) {
-		return
-	}
 	var req registerSignerRequest
 	if err := decodeJSONBody(w, r, &req); err != nil {
 		writeAPIError(w, err)
@@ -363,9 +339,6 @@ func (a *Aggregator) handleCloseRegistrations(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	if !a.authorizeOperator(w, r) {
-		return
-	}
 	a.mu.Lock()
 	if a.sealed != nil {
 		a.mu.Unlock()
@@ -391,31 +364,6 @@ func (a *Aggregator) handleCloseRegistrations(
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (a *Aggregator) authorizeOperator(
-	w http.ResponseWriter,
-	r *http.Request,
-) bool {
-	header := r.Header.Get("Authorization")
-	scheme, token, ok := strings.Cut(header, " ")
-	if ok && strings.EqualFold(scheme, "Bearer") && token != "" {
-		candidate := operatorTokenHash(a.operatorTokenKey[:], token)
-		if hmac.Equal(candidate[:], a.operatorTokenHash[:]) {
-			return true
-		}
-	}
-	w.Header().Set("WWW-Authenticate", "Bearer")
-	http.Error(w, "operator authorization required", http.StatusUnauthorized)
-	return false
-}
-
-func operatorTokenHash(key []byte, token string) [sha256.Size]byte {
-	h := hmac.New(sha256.New, key)
-	_, _ = h.Write([]byte(token))
-	var ret [sha256.Size]byte
-	copy(ret[:], h.Sum(nil))
-	return ret
 }
 
 func (a *Aggregator) registerSigner(req registerSignerRequest) error {

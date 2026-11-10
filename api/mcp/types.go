@@ -27,9 +27,10 @@ import (
 
 // ProviderConfig holds the configuration for the MCP API server.
 type ProviderConfig struct {
+	// AuthToken is ignored; API requests do not require authentication.
+	AuthToken    string              `yaml:"authToken"`
 	Port         uint                `yaml:"port"`
 	Host         string              `yaml:"host"`
-	AuthToken    string              `yaml:"authToken"`
 	RateLimit    float64             `yaml:"rateLimit"` // requests per second (0 = unlimited)
 	Burst        int                 `yaml:"burst"`     // rate limiter burst allowance (default 15)
 	QueryTimeout time.Duration       `yaml:"queryTimeout"`
@@ -58,7 +59,6 @@ func DefaultProviderConfig() ProviderConfig {
 	return ProviderConfig{
 		Port:         0,
 		Host:         "127.0.0.1",
-		AuthToken:    "",
 		RateLimit:    60.0, // requests per second
 		Burst:        15,
 		QueryTimeout: defaultQueryTimeout,

@@ -70,7 +70,7 @@ const (
 var logSecretConfigFields = []string{
 	// Koios Bearer token.
 	"KoiosParity.APIKey",
-	// Prometheus listener Bearer token.
+	// Legacy Prometheus authentication input.
 	"MetricsAuthToken",
 	// Outbound registry headers, typically Authorization.
 	"TokenRegistry.HeaderSecrets",
