@@ -17,6 +17,8 @@ package migrations
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -27,7 +29,10 @@ const utxoIdentityBatchSize = 5000
 
 // The phases of the utxo-transaction-identity backfill, in order. The cursor
 // is "<phase>:<position>"; the position is the last id a copy phase has
-// finished, or the number of indexes a build phase has created.
+// finished, or the number of indexes a build phase has created. An edge
+// phase copies a fixed number of edges per batch, so one output named by many
+// transactions cannot make a batch unbounded: its cursor is
+// "<phase>:<utxo id>:<transaction hash hex>", the last edge copied.
 const (
 	identityPhaseTx     = "tx"
 	identityPhaseImp    = "imp"
@@ -209,7 +214,7 @@ func (b identityBackfill) run(
 	ctx context.Context,
 	batch Batch,
 ) (BatchResult, error) {
-	phase, last, err := parseIdentityCursor(batch.Cursor)
+	phase, last, lastHash, err := parseIdentityCursor(batch.Cursor)
 	if err != nil {
 		return BatchResult{}, err
 	}
@@ -223,9 +228,9 @@ func (b identityBackfill) run(
 	case identityPhaseUtxo:
 		return b.copyUtxos(ctx, batch, last)
 	case identityPhaseRef:
-		return b.copyEdges(ctx, batch, last, identityPhaseRef)
+		return b.copyEdges(ctx, batch, last, lastHash, identityPhaseRef)
 	case identityPhaseCol:
-		return b.copyEdges(ctx, batch, last, identityPhaseCol)
+		return b.copyEdges(ctx, batch, last, lastHash, identityPhaseCol)
 	case identityPhaseVerify:
 		return b.verify(ctx, batch)
 	case identityPhaseSwap:
@@ -239,27 +244,39 @@ func (b identityBackfill) run(
 	}
 }
 
-func parseIdentityCursor(cursor string) (string, int64, error) {
+func parseIdentityCursor(cursor string) (string, int64, []byte, error) {
 	if cursor == "" {
-		return "", 0, nil
+		return "", 0, nil, nil
 	}
-	phase, position, ok := strings.Cut(cursor, ":")
-	if !ok {
-		return "", 0, fmt.Errorf(
+	malformed := func() (string, int64, []byte, error) {
+		return "", 0, nil, fmt.Errorf(
 			"utxo identity backfill: malformed cursor %q", cursor,
 		)
 	}
-	last, err := strconv.ParseInt(position, 10, 64)
+	parts := strings.Split(cursor, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return malformed()
+	}
+	last, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil || last < 0 {
-		return "", 0, fmt.Errorf(
-			"utxo identity backfill: malformed cursor %q", cursor,
-		)
+		return malformed()
 	}
-	return phase, last, nil
+	var hash []byte
+	if len(parts) == 3 {
+		hash, err = hex.DecodeString(parts[2])
+		if err != nil {
+			return malformed()
+		}
+	}
+	return parts[0], last, hash, nil
 }
 
 func identityCursor(phase string, position int64) string {
 	return phase + ":" + strconv.FormatInt(position, 10)
+}
+
+func edgeCursor(phase string, utxoID int64, hash []byte) string {
+	return identityCursor(phase, utxoID) + ":" + hex.EncodeToString(hash)
 }
 
 // init prepares the identity table on SQLite. Its unique hash index takes the
@@ -480,6 +497,7 @@ func (b identityBackfill) copyEdges(
 	ctx context.Context,
 	batch Batch,
 	last int64,
+	lastHash []byte,
 	phase string,
 ) (BatchResult, error) {
 	source, target, next := "utxo_reference_input", "utxo_reference_edge",
@@ -488,25 +506,41 @@ func (b identityBackfill) copyEdges(
 		source, target, next = "utxo_collateral_input",
 			"utxo_collateral_edge", identityPhaseVerify
 	}
-	var upper sql.NullInt64
-	if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
-SELECT MAX(utxo_id) FROM (
-    SELECT DISTINCT utxo_id FROM `+source+`
-    WHERE utxo_id > ? ORDER BY utxo_id LIMIT ?
-) AS window_ids`), last, batch.Limit).Scan(&upper); err != nil {
+	if lastHash == nil {
+		lastHash = []byte{}
+	}
+	// The window is the next Limit edges after the cursor in primary key
+	// order; its last edge bounds the copy. A short remainder has no
+	// bound and is copied to the end.
+	after := `(e.utxo_id > ? OR (e.utxo_id = ? AND e.transaction_hash > ?))`
+	var upperID sql.NullInt64
+	var upperHash []byte
+	err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT e.utxo_id, e.transaction_hash FROM `+source+` AS e
+WHERE `+after+`
+ORDER BY e.utxo_id, e.transaction_hash
+LIMIT 1 OFFSET ?`), last, last, lastHash, batch.Limit-1).Scan(
+		&upperID, &upperHash,
+	)
+	bounded := err == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return BatchResult{}, fmt.Errorf("select %s window: %w", source, err)
 	}
-	if !upper.Valid {
-		return BatchResult{Cursor: identityCursor(next, 0)}, nil
+	window := after
+	args := []any{last, last, lastHash}
+	if bounded {
+		window += ` AND (e.utxo_id < ? OR (e.utxo_id = ? ` +
+			`AND e.transaction_hash <= ?))`
+		args = append(args, upperID.Int64, upperID.Int64, upperHash)
 	}
 	identity := b.q(b.identityTable())
 	var dropped int64
 	if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
 SELECT COUNT(*) FROM `+source+` AS e
-WHERE e.utxo_id > ? AND e.utxo_id <= ?
+WHERE `+window+`
   AND NOT EXISTS (SELECT 1 FROM `+identity+` AS t
                   WHERE t.hash = e.transaction_hash)`),
-		last, upper.Int64).Scan(&dropped); err != nil {
+		args...).Scan(&dropped); err != nil {
 		return BatchResult{}, fmt.Errorf("count unresolved %s: %w", source, err)
 	}
 	if dropped > 0 {
@@ -519,13 +553,16 @@ WHERE e.utxo_id > ? AND e.utxo_id <= ?
 INSERT INTO `+target+` (utxo_id, tx_id)
 SELECT e.utxo_id, t.id FROM `+source+` AS e
 JOIN `+identity+` AS t ON t.hash = e.transaction_hash
-WHERE e.utxo_id > ? AND e.utxo_id <= ?`), last, upper.Int64)
+WHERE `+window), args...)
 	if err != nil {
 		return BatchResult{}, fmt.Errorf("copy %s: %w", source, err)
 	}
 	rows, _ := result.RowsAffected()
+	if !bounded {
+		return BatchResult{Cursor: identityCursor(next, 0), Rows: rows}, nil
+	}
 	return BatchResult{
-		Cursor: identityCursor(phase, upper.Int64),
+		Cursor: edgeCursor(phase, upperID.Int64, upperHash),
 		Rows:   rows,
 	}, nil
 }
@@ -559,7 +596,16 @@ func (b identityBackfill) verify(
 		{"utxo", "utxo_identity"},
 		{"transaction", "applied_transaction"},
 	} {
-		oldCount, err := count("SELECT COUNT(*) FROM " + b.q(pair[0]))
+		oldQuery := "SELECT COUNT(*) FROM " + b.q(pair[0])
+		if pair[0] == "transaction" && b.dialect != "sqlite" {
+			// The identity rows live in this table on PostgreSQL and
+			// MySQL, so the rows created for imported producers and
+			// spenders sit beside the original ones. They take ids above
+			// every original row, which the copy ordered by id.
+			oldQuery += " WHERE id <= (SELECT COALESCE(MAX(tx_id), 0) FROM " +
+				b.q("applied_transaction") + ")"
+		}
+		oldCount, err := count(oldQuery)
 		if err != nil {
 			return BatchResult{}, fmt.Errorf("count %s: %w", pair[0], err)
 		}

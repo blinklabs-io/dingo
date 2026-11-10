@@ -236,3 +236,60 @@ func TestUtxoTransactionIdentityUpgradeKeepsAutoincrementHighWater(t *testing.T)
 		`SELECT COUNT(*) FROM "transaction" WHERE id > 50 AND hash = ?`,
 		identityHash(0x77)))
 }
+
+// TestUtxoTransactionIdentityUpgradeBoundsEdgeBatches names one output from
+// five transactions and upgrades with a two-row batch. The edge phase
+// windows by edge rather than by output, so no batch copies more than two
+// edges however many transactions name one output.
+func TestUtxoTransactionIdentityUpgradeBoundsEdgeBatches(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "edges.sqlite")
+	db, err := sql.Open("sqlite", "file:"+path+"?"+testDBPragmas)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	run := func(reg []migrations.Migration) {
+		t.Helper()
+		require.NoError(t, (&migrations.Runner{
+			DB: db, Dialect: "sqlite", Registry: reg,
+			Locker: migrations.NewFileLocker(path + ".migrate.lock"),
+		}).Run(context.Background()))
+	}
+	run(registry[:identityMigrationVersion-1])
+
+	const edges = 5
+	exec := func(query string, args ...any) {
+		t.Helper()
+		_, err := db.Exec(query, args...)
+		require.NoError(t, err, query)
+	}
+	exec("INSERT INTO utxo (tx_id, output_idx, added_slot, deleted_slot, "+
+		"amount) VALUES (?, 0, 1, 0, '1')", identityHash(0xE0))
+	for i := range edges {
+		hash := identityHash(byte(0xE1 + i))
+		exec("INSERT INTO `transaction` (hash, slot, block_index, valid) "+
+			"VALUES (?, ?, 0, 1)", hash, i+1)
+		exec("INSERT INTO utxo_reference_input (utxo_id, transaction_hash) "+
+			"SELECT MIN(id), ? FROM utxo", hash)
+	}
+
+	reg := append([]migrations.Migration(nil), registry[:identityMigrationVersion]...)
+	last := &reg[len(reg)-1]
+	var largest int64
+	backfill := last.Backfill
+	last.BatchSize = 2
+	last.Backfill = func(
+		ctx context.Context,
+		batch migrations.Batch,
+	) (migrations.BatchResult, error) {
+		result, err := backfill(ctx, batch)
+		largest = max(largest, result.Rows)
+		return result, err
+	}
+	run(reg)
+
+	require.LessOrEqual(t, largest, int64(2))
+	require.Equal(t, edges, queryInt(t, db,
+		"SELECT COUNT(*) FROM utxo_reference_edge"))
+}
