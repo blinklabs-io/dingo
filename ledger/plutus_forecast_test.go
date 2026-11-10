@@ -83,7 +83,7 @@ func mainnetForecastLedgerState(
 		"blockVersionData": { "slotDuration": "20000" },
 		"protocolConsts": { "k": 2160 }
 	}`)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.05,
 		"networkId": "Mainnet",
 		"networkMagic": 764824073,
