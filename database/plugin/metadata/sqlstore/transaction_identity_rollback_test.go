@@ -25,6 +25,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fixtureIdentityRow writes the identity row of hash through the store's
+// dialect and returns its row id. A fixture that inserts outputs or
+// transactions directly names the producer by this id.
+func fixtureIdentityRow(t *testing.T, store *Store, id int64, hash []byte) int64 {
+	t.Helper()
+	table := store.dialect.QuoteIdentifier("transaction")
+	var err error
+	if id == 0 {
+		_, err = store.writeDB.Exec(store.dialect.Rebind(
+			"INSERT INTO "+table+" (hash) VALUES (?)"), hash)
+	} else {
+		_, err = store.writeDB.Exec(store.dialect.Rebind(
+			"INSERT INTO "+table+" (id, hash) VALUES (?, ?)"), id, hash)
+	}
+	require.NoError(t, err)
+	require.NoError(t, store.writeDB.QueryRow(store.dialect.Rebind(
+		"SELECT id FROM "+table+" WHERE hash = ?"), hash).Scan(&id))
+	return id
+}
+
 func identityCount(t *testing.T, store *Store, hash []byte) int {
 	t.Helper()
 	var n int

@@ -139,7 +139,8 @@ func testUtxoOrderingAssetFilter(t *testing.T, store *Store) {
 	require.NoError(t, store.AddUtxos(utxos, nil))
 	_, err := store.writeDB.Exec(
 		store.dialect.Rebind(
-			"UPDATE utxo SET deleted_slot = 9 WHERE tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?)",
+			"UPDATE utxo SET deleted_slot = 9 WHERE tx_id = (SELECT id FROM "+
+				store.dialect.QuoteIdentifier("transaction")+" WHERE hash = ?)",
 		),
 		mustDecodeHex(t, txHash(3)),
 	)

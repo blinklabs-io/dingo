@@ -283,3 +283,30 @@ func productionSources(t *testing.T) []string {
 	}
 	return paths
 }
+
+// TestHashJoinStatementsKeepCrossJoinToSQLite requires the statements that
+// name outputs by producer hash to fix the loop order with CROSS JOIN on
+// SQLite only: PostgreSQL rejects ON after CROSS JOIN.
+func TestHashJoinStatementsKeepCrossJoinToSQLite(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int{1, 4} {
+		for name, query := range map[string][2]string{
+			"stake_consumed_delta": {
+				utxoStakeConsumedDeltaQuery(n, true),
+				utxoStakeConsumedDeltaQuery(n, false),
+			},
+			"stake_refs": {
+				utxoStakeRefsByTxIDQuery(n, true),
+				utxoStakeRefsByTxIDQuery(n, false),
+			},
+			"deletion_rows": {
+				utxoDeletionRowsQuery(n, false, true),
+				utxoDeletionRowsQuery(n, true, false),
+			},
+		} {
+			require.Contains(t, query[0], "CROSS JOIN", name)
+			require.NotContains(t, query[1], "CROSS JOIN", name)
+			require.Contains(t, query[1], `JOIN utxo AS u ON u.tx_id = t.id`, name)
+		}
+	}
+}

@@ -209,7 +209,8 @@ func collateralProductionFlow(t *testing.T, store *Store, db *sql.DB) {
 	var spentBy sql.NullInt64
 	var deletedSlot sql.NullInt64
 	require.NoError(t, db.QueryRow(store.dialect.Rebind(
-		"SELECT spent_at_tx_id, deleted_slot FROM utxo WHERE tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?)",
+		"SELECT spent_at_tx_id, deleted_slot FROM utxo WHERE tx_id = (SELECT id FROM "+
+			store.dialect.QuoteIdentifier("transaction")+" WHERE hash = ?)",
 	), input.Id().Bytes()).Scan(&spentBy, &deletedSlot))
 	require.False(t, spentBy.Valid)
 	require.Zero(t, deletedSlot.Int64)
