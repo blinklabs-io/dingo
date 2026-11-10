@@ -335,6 +335,12 @@ type Ouroboros struct {
 	// block's previous hash in the node-to-client ChainSync waiter. Tests set
 	// it to inject a lookup failure.
 	chainsyncServerPrevHashFunc func(ocommon.Point) ([]byte, error)
+	// chainsyncServerAppliedWaitHook runs when the node-to-client ChainSync
+	// waiter finds the next block ahead of the applied tip and starts waiting
+	// for the ledger. Tests use it to publish the applied tip only once the
+	// waiter has seen the tip behind the block; a tip published earlier is
+	// served directly and never reaches the wait.
+	chainsyncServerAppliedWaitHook func()
 	// chainsyncLocalChainTips returns the hashes of the local block tip and
 	// header-queue tip. Tests override it without a LedgerState.
 	chainsyncLocalChainTips func() (tipHash, headerTipHash []byte)
