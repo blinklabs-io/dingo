@@ -2894,6 +2894,7 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 	}
 	chainsyncCfg.IsRoot = n.isConfiguredRootConnection
 	chainsyncCfg.CorroborationIdentity = n.corroborationIdentityForIngress
+	chainsyncCfg.AdvertisedTipStale = n.chainsyncAdvertisedTipStale
 	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
 		if n.chainSelector == nil {
 			return 0
