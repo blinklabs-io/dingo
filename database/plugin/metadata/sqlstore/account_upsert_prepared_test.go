@@ -24,10 +24,10 @@ import (
 )
 
 // TestCertificateAccountRowUpdatesRunPrepared updates an existing account
-// once for every combination of changed pool, drep and active, and requires
-// none of the account upserts to reach the driver after Start: each
-// changed-column variant must be served by the statement Start prepared,
-// not prepared and finalized again per call.
+// once for every combination of changed pool, drep, drep type and active, and
+// requires none of the account upserts to reach the driver after Start: each
+// changed-column variant must be served by the statement Start prepared, not
+// prepared and finalized again per call.
 func TestCertificateAccountRowUpdatesRunPrepared(t *testing.T) {
 	t.Parallel()
 	store, recorder := newRecordingSQLiteStore(t)
@@ -37,7 +37,7 @@ func TestCertificateAccountRowUpdatesRunPrepared(t *testing.T) {
 		pool:   []byte("pool-a"),
 		drep:   []byte("drep-a"),
 	}
-	for changed := range 8 {
+	for changed := range 16 {
 		key := []byte(fmt.Sprintf("account-%d", changed))
 		_, err := store.writeDB.ExecContext(ctx, `
 INSERT INTO account (staking_key, credential_tag, pool, drep, added_slot,
@@ -56,6 +56,9 @@ VALUES (?, 0, ?, ?, 10, 10, '0', 0, ?, 0)`,
 		if changed&4 != 0 {
 			next.active = false
 		}
+		if changed&8 != 0 {
+			next.drepType = 1
+		}
 		mark := len(recorder.snapshot())
 		require.NoError(t, store.updateCertificateAccountRow(
 			ctx, store.writeDB, 0, key, 20, stored, next,
@@ -63,7 +66,7 @@ VALUES (?, 0, ?, ?, 10, 10, '0', 0, ?, 0)`,
 		for _, executed := range recorder.snapshot()[mark:] {
 			require.NotContains(
 				t, executed, "-- name: UpsertAccount ",
-				"changed=%03b: account upsert prepared or run uncached "+
+				"changed=%04b: account upsert prepared or run uncached "+
 					"after Start:\n%s", changed,
 				strings.TrimSpace(executed),
 			)

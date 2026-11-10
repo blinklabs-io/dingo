@@ -3905,7 +3905,7 @@ naming columns they do not change.
 `updateCertificateAccount` reads the stored `active`, `pool`, `drep` and
 `drep_type` and names only the changed ones in the conflict branch of the
 account upsert; `added_slot` and `created_slot` are restated as before. Its
-eight changed-column variants (`upsertAccountChangedSQLs`) are fixed texts in
+sixteen changed-column variants (`upsertAccountChangedSQLs`) are fixed texts in
 `hotStatements`, so each is prepared at `Start` rather than per call. The
 live-stake refresh reads the stored `pool_key_hash` with the running total and
 uses the pool-preserving upsert when it is unchanged. Both stay

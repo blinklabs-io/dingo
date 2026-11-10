@@ -878,8 +878,11 @@ func (s *Store) updateCertificateAccountRow(
 	if !samePool(stored.pool, next.pool) {
 		changed |= accountChangedPool
 	}
-	if !samePool(stored.drep, next.drep) || stored.drepType != next.drepType {
+	if !samePool(stored.drep, next.drep) {
 		changed |= accountChangedDrep
+	}
+	if stored.drepType != next.drepType {
+		changed |= accountChangedDrepType
 	}
 	if stored.active != next.active {
 		changed |= accountChangedActive
@@ -1426,6 +1429,7 @@ const accountCreatedSlotAssignment = `created_slot = CASE
 const (
 	accountChangedPool = 1 << iota
 	accountChangedDrep
+	accountChangedDrepType
 	accountChangedActive
 	accountChangedVariants = 1 << iota
 )
@@ -1442,9 +1446,10 @@ var upsertAccountChangedSQLs = func() [accountChangedVariants]string {
 			assignments = append(assignments, "pool = excluded.pool")
 		}
 		if changed&accountChangedDrep != 0 {
-			assignments = append(assignments,
-				"drep = excluded.drep", "drep_type = excluded.drep_type",
-			)
+			assignments = append(assignments, "drep = excluded.drep")
+		}
+		if changed&accountChangedDrepType != 0 {
+			assignments = append(assignments, "drep_type = excluded.drep_type")
 		}
 		if changed&accountChangedActive != 0 {
 			assignments = append(assignments, "active = excluded.active")
