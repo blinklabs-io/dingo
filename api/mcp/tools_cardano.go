@@ -248,7 +248,7 @@ func registerCardanoTools(
 			queries := []struct{ sql, source string }{
 				{"SELECT slot, hash, block_number FROM tip ORDER BY id DESC LIMIT 1", "metadata_tip"},
 				{"SELECT slot, hash, height FROM blocks ORDER BY slot DESC LIMIT 1", "metadata_blocks"},
-				{"SELECT slot, block_hash, 0 FROM \"transaction\" ORDER BY slot DESC LIMIT 1", "metadata_transaction"},
+				{"SELECT slot, block_hash, 0 FROM applied_transaction ORDER BY slot DESC LIMIT 1", "metadata_transaction"},
 			}
 			for _, query := range queries {
 				err := db.QueryRowContext(qCtx, query.sql).Scan(&slot, &rawHash, &blockHeight)
