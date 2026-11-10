@@ -145,7 +145,11 @@ func (ls *LedgerState) validatePeerForkOpCertCounters(
 		}
 	}
 
+	if ls.peerForkOpCertCheckedHook != nil {
+		ls.peerForkOpCertCheckedHook()
+	}
 	return ls.commitPeerForkOpCertCounters(
+		ctx,
 		key,
 		prefix,
 		ancestor,
@@ -191,10 +195,15 @@ func (ls *LedgerState) peerForkOpCertPrefix(
 }
 
 // commitPeerForkOpCertCounters records counters checked through target on
-// the cached path. A generation that moved during the check is transient:
-// the counters were validated against a superseded ledger view, so they are
-// discarded and the header is checked again rather than accepted.
+// the cached path. The counters are read at the fork ancestor, so a
+// publication that only moves the applied tip leaves them valid while the
+// consensus context is unchanged and the ancestor is still on the local
+// chain; a validation transition, a changed context, or a lost ancestor
+// discards them and the header is checked again rather than accepted. Applied
+// blocks publish a tip every few milliseconds during catch-up, so requiring
+// the generation to be unchanged would make a long check never commit.
 func (ls *LedgerState) commitPeerForkOpCertCounters(
+	ctx context.Context,
 	key string,
 	prefix peerForkPathPrefix,
 	ancestor ocommon.Point,
@@ -202,7 +211,17 @@ func (ls *LedgerState) commitPeerForkOpCertCounters(
 	generation uint64,
 	counters map[lcommon.PoolKeyHash]opCertCounterSnapshot,
 ) error {
-	if !ls.headerCryptoVerificationGenerationCurrent(generation) {
+	current, contextGeneration := ls.currentHeaderVerificationContext()
+	valid := headerVerdictInContext(generation, contextGeneration, current)
+	if valid && current != generation &&
+		!ls.peerForkAncestorOnChain(ctx, ancestor) {
+		// A cancelled membership read reports the ancestor absent.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		valid = false
+	}
+	if !valid {
 		return fmt.Errorf(
 			"%w: candidate opcert state changed before commit",
 			errHeaderVerificationContextChanged,
@@ -210,13 +229,13 @@ func (ls *LedgerState) commitPeerForkOpCertCounters(
 	}
 	ls.forkHeaderNonceCacheMutex.Lock()
 	defer ls.forkHeaderNonceCacheMutex.Unlock()
-	current, ok := ls.forkHeaderPathCache[key]
-	if !ok || current.generation != prefix.generation ||
-		current.ancestor.Slot != ancestor.Slot ||
-		!bytes.Equal(current.ancestor.Hash, ancestor.Hash) ||
-		len(current.headers) == 0 ||
+	cached, ok := ls.forkHeaderPathCache[key]
+	if !ok || cached.generation != prefix.generation ||
+		cached.ancestor.Slot != ancestor.Slot ||
+		!bytes.Equal(cached.ancestor.Hash, ancestor.Hash) ||
+		len(cached.headers) == 0 ||
 		!bytes.Equal(
-			current.headers[len(current.headers)-1].Hash().Bytes(),
+			cached.headers[len(cached.headers)-1].Hash().Bytes(),
 			target.Hash().Bytes(),
 		) {
 		return fmt.Errorf(
@@ -224,18 +243,18 @@ func (ls *LedgerState) commitPeerForkOpCertCounters(
 			errHeaderVerificationDeferred,
 		)
 	}
-	if bytes.Equal(current.opCertLastHash, target.Hash().Bytes()) {
+	if bytes.Equal(cached.opCertLastHash, target.Hash().Bytes()) {
 		return nil
 	}
-	if !bytes.Equal(current.opCertLastHash, prefix.opCertLastHash) {
+	if !bytes.Equal(cached.opCertLastHash, prefix.opCertLastHash) {
 		return fmt.Errorf(
 			"%w: candidate opcert prefix changed before commit",
 			errHeaderVerificationDeferred,
 		)
 	}
-	current.opCertLastHash = append([]byte(nil), target.Hash().Bytes()...)
-	current.opCertCounters = counters
-	ls.forkHeaderPathCache[key] = current
+	cached.opCertLastHash = append([]byte(nil), target.Hash().Bytes()...)
+	cached.opCertCounters = counters
+	ls.forkHeaderPathCache[key] = cached
 	return nil
 }
 

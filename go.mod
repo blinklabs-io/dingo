@@ -17,8 +17,8 @@ require (
 	github.com/aws/smithy-go v1.28.7
 	github.com/blinklabs-io/bark v0.2.0
 	github.com/blinklabs-io/bursa v0.21.1
-	github.com/blinklabs-io/gouroboros v0.218.2-0.20261107081725-c2ba65c899a1
-	github.com/blinklabs-io/ouroboros-mock v0.21.1
+	github.com/blinklabs-io/gouroboros v0.218.2
+	github.com/blinklabs-io/ouroboros-mock v0.21.2
 	github.com/blinklabs-io/plutigo v0.11.6
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
@@ -29,7 +29,7 @@ require (
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/google/uuid v1.6.0
 	github.com/ipfs/go-cid v0.6.2
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.12.0
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/klauspost/compress v1.20.3
 	github.com/modelcontextprotocol/go-sdk v1.8.0
@@ -160,7 +160,7 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/puddle/v2 v2.2.2 // indirect
+	github.com/jackc/puddle/v2 v2.2.3 // indirect
 	github.com/jinzhu/copier v0.4.0 // indirect
 	github.com/json-iterator/go v1.1.13-0.20220915233716-71ac16282d12 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect

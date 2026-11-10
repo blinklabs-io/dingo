@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -254,7 +255,7 @@ func TestLeiosBackfillPointSelectorUsesActiveAnnouncingPeer(t *testing.T) {
 		ConnManager:    cm,
 		ChainsyncState: state,
 	})
-	point := ocommon.Point{Slot: 200, Hash: []byte{0x04, 0x05}}
+	point := ocommon.Point{Slot: 200, Hash: bytes.Repeat([]byte{0x04}, 32)}
 	for _, conn := range []*ouroboros.Connection{first, active, third} {
 		require.NoError(t, o.leiosnotifyClientNotification(
 			oleiosnotify.CallbackContext{

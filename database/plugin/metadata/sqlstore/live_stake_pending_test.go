@@ -151,12 +151,13 @@ ORDER BY rls.pool_key_hash ASC, rls.credential_tag ASC,
 }
 
 // TestPendingRewardCreditTotalsReadTheCoveringIndex is the regression for the
-// boundary stake read: totalling every credential's unfolded credits used to
-// fetch a table row per output to read folded and amount, millions of random
-// page reads on mainnet at every epoch boundary. The pass must be served by
-// idx_reward_account_output_credential_pending alone, in its order, whether or
-// not sqlite_stat1 has been populated: a node runs ANALYZE only around an
-// import, so the boundary read normally runs without current stats.
+// boundary stake read: totalling every credential's unfolded credits must
+// visit only the credited rounds' unfolded rows, through the four columns of
+// idx_reward_account_output_pending_round, with no scan of the table and no
+// sort, whether or not sqlite_stat1 has been populated: a node runs ANALYZE
+// only around an import, so the boundary read normally runs without current
+// stats. No credential-keyed index serves it, so folding a credit moves no
+// entry in one.
 func TestPendingRewardCreditTotalsReadTheCoveringIndex(t *testing.T) {
 	t.Parallel()
 	for _, stats := range []struct {
@@ -188,12 +189,14 @@ func TestPendingRewardCreditTotalsReadTheCoveringIndex(t *testing.T) {
 			if stats.analyze {
 				analyzeStore(t, store)
 			}
-			plan := queryPlan(t, store.readDB, store.pendingRewardCreditTotalsSQL())
+			plan := queryPlan(t, store.readDB, store.pendingRewardCreditRowsSQL())
 			require.Contains(t, plan,
-				"SCAN prc USING COVERING INDEX idx_reward_account_output_credential_pending",
+				"idx_reward_account_output_pending_round "+
+					"(spendable=? AND guarded=? AND folded=? AND epoch=?)",
 				"plan %s", plan)
-			require.NotContains(t, plan, "USE TEMP B-TREE FOR GROUP BY",
-				"the index supplies the group order: plan %s", plan)
+			require.NotContains(t, plan, "SCAN reward_account_output",
+				"plan %s", plan)
+			require.NotContains(t, plan, "TEMP B-TREE", "plan %s", plan)
 		})
 	}
 }
