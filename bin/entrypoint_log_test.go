@@ -33,6 +33,7 @@ func runEntrypointWithLogFileRace(
 	root string,
 	logPath string,
 	inject string,
+	extraEnv ...string,
 ) ([]byte, error) {
 	t.Helper()
 	fakeBin := filepath.Join(root, "bin")
@@ -71,6 +72,7 @@ func runEntrypointWithLogFileRace(
 			"CARDANO_NETWORK",
 			"DINGO_DEBUG",
 			"DINGO_LOG_FILE",
+			"DINGO_LOG_FILE_APPEND",
 			"DINGO_SOCKET_PATH",
 			"PATH",
 			"RESTORE_SNAPSHOT",
@@ -81,6 +83,7 @@ func runEntrypointWithLogFileRace(
 		"DINGO_SOCKET_PATH="+filepath.Join(root, "ipc", "dingo.socket"),
 		"DINGO_LOG_FILE="+logPath,
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	return cmd.CombinedOutput()
 }
 
@@ -291,4 +294,130 @@ func TestEntrypointLogFileReportsCreateFailureCause(t *testing.T) {
 	require.Contains(t, string(out), "DINGO_LOG_FILE cannot create")
 	require.Contains(t, string(out), "Permission denied")
 	require.NotContains(t, string(out), "must name a new file")
+}
+
+const appendEnv = "DINGO_LOG_FILE_APPEND=true"
+
+func TestEntrypointLogFileAppendKeepsExistingContent(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	logPath := filepath.Join(root, "dingo.log")
+	require.NoError(t, os.WriteFile(logPath, []byte("old line\n"), 0o600))
+
+	out, err := runEntrypointWithLogFileRace(t, root, logPath, "", appendEnv)
+	require.NoError(t, err, string(out))
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.Equal(t, "old line\nOUT stdout\nERR stderr\n", string(data))
+}
+
+func TestEntrypointLogFileAppendCreatesMissingFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	logPath := filepath.Join(root, "logs", "dingo.log")
+
+	out, err := runEntrypointWithLogFileRace(t, root, logPath, "", appendEnv)
+	require.NoError(t, err, string(out))
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.Equal(t, "OUT stdout\nERR stderr\n", string(data))
+	info, err := os.Stat(logPath)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o644), info.Mode().Perm())
+}
+
+func TestEntrypointLogFileAppendRefusesSymlink(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	target := filepath.Join(root, "target.log")
+	require.NoError(t, os.WriteFile(target, []byte("keep"), 0o600))
+	link := filepath.Join(root, "link.log")
+	require.NoError(t, os.Symlink(target, link))
+	dangling := filepath.Join(root, "dangling.log")
+	require.NoError(t, os.Symlink(filepath.Join(root, "absent"), dangling))
+
+	for _, path := range []string{link, dangling} {
+		out, err := runEntrypointWithLogFileRace(t, root, path, "", appendEnv)
+		require.Error(t, err, string(out))
+		require.Contains(t, string(out), "DINGO_LOG_FILE must not be a symlink")
+	}
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "keep", string(data))
+	_, err = os.Lstat(filepath.Join(root, "absent"))
+	require.True(t, os.IsNotExist(err))
+}
+
+func TestEntrypointLogFileAppendRefusesFifo(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	fifo := filepath.Join(root, "dingo.log")
+	require.NoError(t, syscall.Mkfifo(fifo, 0o600))
+
+	type result struct {
+		out []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := runEntrypointWithLogFileRace(t, root, fifo, "", appendEnv)
+		done <- result{out, err}
+	}()
+	select {
+	case res := <-done:
+		require.Error(t, res.err, string(res.out))
+		require.Contains(
+			t,
+			string(res.out),
+			"DINGO_LOG_FILE must name a regular file",
+		)
+	case <-time.After(20 * time.Second):
+		t.Fatal("entrypoint blocked opening a pre-existing FIFO")
+	}
+}
+
+func TestEntrypointLogFileAppendTerminatesTornLine(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	logPath := filepath.Join(root, "dingo.log")
+	require.NoError(t, os.WriteFile(logPath, []byte(`{"msg":"tor`), 0o600))
+
+	out, err := runEntrypointWithLogFileRace(t, root, logPath, "", appendEnv)
+	require.NoError(t, err, string(out))
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"{\"msg\":\"tor\nOUT stdout\nERR stderr\n",
+		string(data),
+	)
+}
+
+func TestEntrypointLogFileAppendEmptyFileGetsNoLeadingNewline(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	logPath := filepath.Join(root, "dingo.log")
+	require.NoError(t, os.WriteFile(logPath, nil, 0o600))
+
+	out, err := runEntrypointWithLogFileRace(t, root, logPath, "", appendEnv)
+	require.NoError(t, err, string(out))
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.Equal(t, "OUT stdout\nERR stderr\n", string(data))
+}
+
+func TestEntrypointLogFileAppendFlagOffKeepsRefusing(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	logPath := filepath.Join(root, "dingo.log")
+	require.NoError(t, os.WriteFile(logPath, []byte("keep\n"), 0o600))
+
+	out, err := runEntrypointWithLogFileRace(
+		t, root, logPath, "", "DINGO_LOG_FILE_APPEND=false",
+	)
+	require.Error(t, err, string(out))
+	require.Contains(t, string(out), "DINGO_LOG_FILE must name a new file")
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.Equal(t, "keep\n", string(data))
 }

@@ -30,6 +30,9 @@
 #   DINGO_DEBUG           - Set to any value to enable debug logging and set -x
 #                           (tracing stops before the dingo command line is built)
 #   DINGO_LOG_FILE        - Optional new file receiving dingo stdout/stderr
+#   DINGO_LOG_FILE_APPEND - Set to "true" to append to DINGO_LOG_FILE (created if
+#                           missing) instead of requiring a new file; a torn
+#                           last line is ended with a newline first
 #   RESTORE_SNAPSHOT      - Set to any value to bootstrap from Mithril snapshot on first run
 
 set -euo pipefail
@@ -306,7 +309,8 @@ run_managed_dingo() {
 # directory descriptor, so any check before them leaves a window in which a
 # FIFO or a symlinked parent can appear. This perl-base helper walks the
 # parents with O_NOFOLLOW descriptors, creates the log with one exclusive
-# no-follow open, sets the mode on the descriptor (a default ACL would
+# no-follow open (or, when DINGO_LOG_FILE_APPEND=true, one append no-follow
+# open that must yield a regular file), sets the mode on the descriptor (a default ACL would
 # otherwise override the umask), and execs dingo with stdout and stderr on it.
 # Running it as the managed child keeps the descriptor out of the entrypoint.
 # shellcheck disable=SC2016
@@ -314,7 +318,8 @@ DINGO_LOG_OPENER='
 use strict;
 use warnings;
 use Errno qw(EEXIST ENOENT);
-use Fcntl qw(O_CREAT O_DIRECTORY O_EXCL O_NOFOLLOW O_RDONLY O_WRONLY);
+use Fcntl qw(O_APPEND O_CREAT O_DIRECTORY O_EXCL O_NOFOLLOW O_RDONLY O_RDWR
+  O_WRONLY SEEK_END);
 
 my $path = shift @ARGV;
 sub fail {
@@ -350,9 +355,26 @@ for my $part (@parts) {
   }
   chdir($dir) or fail("cannot enter $walked: $!");
 }
-sysopen(my $log, $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644)
-  or fail($! == EEXIST ? "must name a new file: $path"
-                       : "cannot create $path: $!");
+my $log;
+if (($ENV{DINGO_LOG_FILE_APPEND} // q()) eq q(true)) {
+  # O_RDWR lets the torn-line check read the last byte; O_APPEND still sends
+  # every write to the end of the file.
+  sysopen($log, $name, O_RDWR | O_APPEND | O_CREAT | O_NOFOLLOW, 0644)
+    or fail(-l $name ? "must not be a symlink: $path"
+                     : "cannot open $path: $!");
+  -f $log or fail("must name a regular file: $path");
+  if (-s $log) {
+    sysseek($log, -1, SEEK_END) or fail("cannot seek in $path: $!");
+    defined(sysread($log, my $last, 1)) or fail("cannot read $path: $!");
+    if ($last ne "\n") {
+      defined(syswrite($log, "\n")) or fail("cannot write $path: $!");
+    }
+  }
+} else {
+  sysopen($log, $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644)
+    or fail($! == EEXIST ? "must name a new file: $path"
+                         : "cannot create $path: $!");
+}
 chmod(0644, $log) or fail("cannot set mode on $path: $!");
 chdir($cwd) or fail("cannot restore the working directory: $!");
 open(STDOUT, q(>&), $log) or fail("cannot redirect stdout: $!");
