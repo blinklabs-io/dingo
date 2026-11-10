@@ -54,15 +54,24 @@ func (ls *LedgerState) applyStakeRewards(ctx context.Context,
 	txn *database.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
+	validationOnly bool,
 ) error {
 	err := ls.applyStakeRewardUpdate(ctx, txn, newEpoch, boundarySlot)
 	if err == nil || (!errors.Is(err, rewards.ErrNegativeLeaderReward) &&
 		!errors.Is(err, errRequiredStakeRewardBasisUnavailable)) {
 		return err
 	}
+	haltErr := &rewardUpdateHaltError{err: err}
+	if validationOnly {
+		// A validation-only tick runs the boundary speculatively inside a
+		// transaction its caller discards. The failure rejects that
+		// validation; it is not the chain's own boundary, so it must not
+		// stop the node or count as a skipped round.
+		return haltErr
+	}
+	ls.metrics.incSkippedStakeRewardRounds()
 	// cardano-ledger fails this epoch boundary too, so no replay or retry
 	// gets past it: stop the pipeline and the node rather than restart.
-	haltErr := &rewardUpdateHaltError{err: err}
 	ls.config.Logger.Error(
 		"stake reward update cannot be applied, stopping",
 		"component", "ledger",
@@ -3271,7 +3280,6 @@ func (ls *LedgerState) requiredStakeRewardBasisUnavailable(
 	if !authoritative {
 		return nil
 	}
-	ls.metrics.incSkippedStakeRewardRounds()
 	if ls.config.Logger != nil {
 		args := make([]any, 0, 6+len(extra))
 		args = append(args,

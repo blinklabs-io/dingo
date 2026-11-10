@@ -16,15 +16,18 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -447,5 +450,180 @@ func TestTxValidationSessionTickLeavesBoundaryStateUntouched(t *testing.T) {
 				ls.metrics.epochRolloverPhaseDuration,
 			), "the validation tick recorded rollover phase metrics")
 		})
+	}
+}
+
+func slotSessionFixture(t *testing.T) *treasuryRolloverFixture {
+	t.Helper()
+	fixture := newTreasuryRolloverFixture(t, 1_000)
+	seedEmptyRewardBasisForRollover(
+		t, fixture.db, fixture.currentEpoch, fixture.currentPParams,
+	)
+	fixture.ls.epochCache = []models.Epoch{fixture.currentEpoch}
+	fixture.ls.metrics.init(prometheus.NewRegistry())
+	fixture.ls.publishSnapshotsLocked()
+	return fixture
+}
+
+func runSlotSession(
+	ctx context.Context,
+	ls *LedgerState,
+	slot uint64,
+) error {
+	return ls.WithTxValidationSessionAtSlot(
+		ctx,
+		slot,
+		func(
+			_ func(
+				lcommon.Transaction,
+				map[utxoref.Key]struct{},
+				map[utxoref.Key]lcommon.Utxo,
+				*utxoref.StateOverlay,
+			) error,
+			_ func() bool,
+			_ func(func() error) (bool, error),
+		) error {
+			return nil
+		},
+	)
+}
+
+// A slot inside the applied epoch needs no tick, so its session must not take
+// the write connection that block application holds.
+func TestTxValidationSessionWithinEpochDoesNotTakeWriter(t *testing.T) {
+	t.Parallel()
+
+	fixture := slotSessionFixture(t)
+	ls := fixture.ls
+	validationEra := eras.ConwayEraDesc
+	validationEra.ValidateTxFunc = func(
+		_ lcommon.Transaction,
+		_ uint64,
+		state lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) error {
+		_, err := state.(interface {
+			TreasuryValue() (uint64, error)
+		}).TreasuryValue()
+		return err
+	}
+	ls.currentEra = validationEra
+	ls.activeEras = []eras.EraDesc{validationEra}
+	ls.publishSnapshotsLocked()
+	writer := fixture.db.Transaction(t.Context(), true)
+	defer writer.Rollback() //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, ls.WithTxValidationSessionAtSlot(
+		ctx,
+		fixture.currentEpoch.StartSlot+99,
+		func(
+			validate func(
+				lcommon.Transaction,
+				map[utxoref.Key]struct{},
+				map[utxoref.Key]lcommon.Utxo,
+				*utxoref.StateOverlay,
+			) error,
+			_ func() bool,
+			_ func(func() error) (bool, error),
+		) error {
+			return validate(&conway.ConwayTransaction{}, nil, nil, nil)
+		},
+	), "a same-epoch session must read while another writer is open")
+}
+
+// The ledger can publish a new generation, as a committed rollover does,
+// between the session's snapshot and its write transaction; ticking the
+// boundary over that state would apply it twice.
+func TestTxValidationSessionTickRejectsSnapshotSupersededBeforeWriter(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := slotSessionFixture(t)
+	ls := fixture.ls
+	validationEra := eras.ConwayEraDesc
+	validatorCalls := 0
+	validationEra.ValidateTxFunc = func(
+		lcommon.Transaction,
+		uint64,
+		lcommon.LedgerState,
+		lcommon.ProtocolParameters,
+	) error {
+		validatorCalls++
+		return nil
+	}
+	ls.currentEra = validationEra
+	ls.activeEras = []eras.EraDesc{validationEra}
+	ls.publishSnapshotsLocked()
+	ls.txValidationSessionOpenedHook = func() {
+		ls.publishSnapshotsLocked()
+	}
+
+	err := runSlotSession(
+		t.Context(), ls, fixture.currentEpoch.StartSlot+100,
+	)
+	require.ErrorIs(t, err, ErrLeiosValidationParentSuperseded)
+	require.Zero(t, validatorCalls)
+
+	// The same session without a generation change still ticks.
+	ls.txValidationSessionOpenedHook = nil
+	require.NoError(t, runSlotSession(
+		t.Context(), ls, fixture.currentEpoch.StartSlot+100,
+	))
+}
+
+// A reference-script check whose snapshot went stale is dropped unjudged
+// through the forger's state-changed sentinel, not reported as a defect in the
+// block.
+func TestValidateBlockReferenceScriptsMapsSupersededSnapshot(t *testing.T) {
+	t.Parallel()
+
+	fixture := slotSessionFixture(t)
+	ls := fixture.ls
+	ls.txValidationSessionOpenedHook = func() {
+		ls.publishSnapshotsLocked()
+	}
+	err := ls.ValidateBlockReferenceScripts(
+		t.Context(),
+		refScriptBlockAt(fixture.currentEpoch.StartSlot+100),
+	)
+	require.ErrorIs(t, err, forging.ErrForgedBlockStateChanged)
+}
+
+func TestValidateBlockReferenceScriptsWithinEpochDoesNotTakeWriter(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := slotSessionFixture(t)
+	writer := fixture.db.Transaction(t.Context(), true)
+	defer writer.Rollback() //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, fixture.ls.ValidateBlockReferenceScripts(
+		ctx,
+		refScriptBlockAt(fixture.currentEpoch.StartSlot+99),
+	))
+}
+
+func refScriptBlockAt(slot uint64) *conway.ConwayBlock {
+	return &conway.ConwayBlock{
+		BlockHeader: &conway.ConwayBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{Slot: slot},
+			},
+		},
+		TransactionBodies: []conway.ConwayTransactionBody{{
+			TxReferenceInputs: cbor.NewSetType(
+				[]shelley.ShelleyTransactionInput{{
+					TxId: lcommon.NewBlake2b256(bytes.Repeat([]byte{7}, 32)),
+				}},
+				false,
+			),
+		}},
+		TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{{}},
 	}
 }

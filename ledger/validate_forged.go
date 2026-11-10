@@ -322,7 +322,7 @@ func (ls *LedgerState) validateForgedTxsOnce(
 		ctx,
 		sessionTip,
 		&slot,
-		true,
+		false,
 		false,
 		block,
 		func(
@@ -416,11 +416,11 @@ func (ls *LedgerState) ValidateBlockReferenceScripts(
 		return nil
 	}
 	slot := block.SlotNumber()
-	return ls.withTxValidationSession(
+	err := ls.withTxValidationSession(
 		ctx,
 		nil,
 		&slot,
-		true,
+		false,
 		false,
 		block,
 		func(
@@ -437,4 +437,10 @@ func (ls *LedgerState) ValidateBlockReferenceScripts(
 			return nil
 		},
 	)
+	if errors.Is(err, ErrLeiosValidationParentSuperseded) {
+		// The ledger moved while the session took its snapshot; the block
+		// was not judged.
+		return fmt.Errorf("%w: %w", forging.ErrForgedBlockStateChanged, err)
+	}
+	return err
 }

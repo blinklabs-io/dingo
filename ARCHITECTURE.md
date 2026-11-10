@@ -11246,11 +11246,22 @@ transaction. The session's view is ticked to the forge slot
 the epoch rollover, any era transition and the pending protocol-parameter
 updates are staged in the session's rollback-only transaction, so selection
 sees the parameters and state enacted at that boundary and nothing is
-committed. The tick runs the rollover in validation-only mode: it never calls
-the snapshot manager's boundary hooks (whose pending SNAP distribution,
-deferred captures and staged reward inputs are shared with the real rollover),
-schedules no deferred boundary job, skips the RATIFY marking pass, and records
-no rollover phase metrics. A forge slot more than one epoch beyond the applied epoch is
+committed. That transaction is read-only (read pool) unless the slot lies past
+the applied epoch; only a session that must tick opens a read-write
+transaction, because the tick writes the boundary into it, and on SQLite that
+holds the single write connection for the session. The snapshot is taken
+before that transaction is acquired, so the session re-checks the ledger
+generation once it holds the transaction and, if a block, rollback or rollover
+published a newer one, returns `ErrLeiosValidationParentSuperseded` instead of
+ticking over the committed state (the forged-block check treats that as a retry
+and the reference-script check drops the block unjudged). The tick runs the
+rollover in validation-only mode: it never calls the snapshot manager's
+boundary hooks (whose pending SNAP distribution, deferred captures and staged
+reward inputs are shared with the real rollover), schedules no deferred
+boundary job, skips the RATIFY marking pass, records no rollover phase or
+transition-span telemetry, and returns an unappliable reward update as an
+error that rejects the validation, without calling the node's fatal-error
+callback or counting a skipped reward round. A forge slot more than one epoch beyond the applied epoch is
 refused. A validator without the slot-ticked session falls back to the
 unticked `WithTxValidationSession`. If a block, rollback, or protocol-parameter
 change publishes a newer generation before selection finishes, the whole

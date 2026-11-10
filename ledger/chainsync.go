@@ -9535,12 +9535,14 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 			return fn()
 		}
 	}
-	_, span := tracing.Start(
-		ls.catchupContext(ctx),
-		"ledger.epoch_transition",
-		tracing.Uint64("epoch", currentEpoch.EpochId),
-	)
-	defer func() { tracing.End(span, err) }()
+	if !validationOnly {
+		_, span := tracing.Start(
+			ls.catchupContext(ctx),
+			"ledger.epoch_transition",
+			tracing.Uint64("epoch", currentEpoch.EpochId),
+		)
+		defer func() { tracing.End(span, err) }()
+	}
 	// Fail closed at the top of the production rollover path rather than
 	// letting a nil config reach one of the several unchecked
 	// ls.config.CardanoNodeConfig dereferences below (e.g. the
@@ -9724,6 +9726,7 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 		currentEpoch.EpochId+1, "reward_apply", func() error {
 			return ls.applyStakeRewards(ctx,
 				txn, currentEpoch.EpochId+1, epochStartSlot,
+				validationOnly,
 			)
 		},
 	); err != nil {

@@ -2268,6 +2268,10 @@ type LedgerState struct {
 	// runs inside the precompute write transaction after the rollback guard
 	// passes and before the outputs are written.
 	rewardPrecomputeBeforeSaveHook func()
+	// txValidationSessionOpenedHook is a test seam, nil in production. It
+	// runs once a validation session has acquired its database transaction,
+	// before the session checks the snapshot it took earlier is still current.
+	txValidationSessionOpenedHook func()
 	// rewardPrecomputeChunkPoolsOverride forces a smaller chunked-precompute
 	// pool batch than rewardPrecomputeChunkPools; zero (the production
 	// default) means use the package default. Tests use a small override so
@@ -15995,7 +15999,10 @@ func (ls *LedgerState) WithTxValidationSession(ctx context.Context,
 
 // WithTxValidationSessionAtSlot pins validation to a rollback-only ledger
 // view ticked to slot. Epoch-boundary effects are staged in the session's
-// transaction and are discarded when the session ends.
+// transaction and are discarded when the session ends. The transaction is
+// read-only unless slot lies past the applied epoch. When the published ledger
+// state moves between taking the snapshot and acquiring that write
+// transaction, the call returns ErrLeiosValidationParentSuperseded.
 func (ls *LedgerState) WithTxValidationSessionAtSlot(
 	ctx context.Context,
 	slot uint64,
@@ -16010,7 +16017,7 @@ func (ls *LedgerState) WithTxValidationSessionAtSlot(
 		commitIfCurrent func(func() error) (bool, error),
 	) error,
 ) error {
-	return ls.withTxValidationSession(ctx, nil, &slot, true, false, nil, func(
+	return ls.withTxValidationSession(ctx, nil, &slot, false, false, nil, func(
 		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
@@ -16131,6 +16138,28 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 			return fn(validate, stillCurrent, commitIfCurrent, applyTx)
 		},
 	)
+}
+
+// txValidationSnapshotNeedsTick reports whether the snapshot's reference slot
+// lies at or past the end of its applied epoch, so that validating it takes
+// the epoch boundary. A zero-length epoch also reports true so the tick
+// rejects it.
+func txValidationSnapshotNeedsTick(snapshot txValidationSnapshot) bool {
+	epoch := snapshot.currentEpochInfo
+	if epoch.LengthInSlots == 0 {
+		return true
+	}
+	return snapshot.referenceSlot >= epoch.StartSlot+uint64(epoch.LengthInSlots)
+}
+
+// txValidationSnapshotCurrent reports whether the published ledger state is
+// still the generation a validation snapshot was taken at, with no durable
+// state transition in flight.
+func (ls *LedgerState) txValidationSnapshotCurrent(generation uint64) bool {
+	currentConsensus, currentTip := ls.loadStateSnapshots()
+	return ls.txValidationTransitions.Load() == 0 &&
+		currentConsensus.generation == generation &&
+		currentTip.generation == generation
 }
 
 func (ls *LedgerState) tickTxValidationSnapshot(
@@ -16286,16 +16315,27 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 		snapshot.referenceSlot = *referenceSlot
 	}
 
-	txn := ls.db.Transaction(ctx, readWrite)
+	// The tick writes its boundary effects into the session's transaction, so
+	// only a session whose slot lies past the applied epoch needs one that can
+	// write; every other slot-pinned session reads through the read pool and
+	// leaves the single SQLite writer connection to block application.
+	needsTick := referenceSlot != nil && txValidationSnapshotNeedsTick(snapshot)
+	txn := ls.db.Transaction(ctx, readWrite || needsTick)
+	if hook := ls.txValidationSessionOpenedHook; hook != nil {
+		hook()
+	}
 	// Validation sessions may stage ledger effects so later transactions see
 	// prior certificate and governance changes, but must never persist them.
 	rollbackValidationSession := errRollbackLedgerValidationSession
 	err := txn.Do(func(txn *database.Txn) error {
-		if referenceSlot != nil {
-			if !readWrite {
-				return errors.New(
-					"slot-pinned transaction validation requires a write transaction",
-				)
+		if needsTick {
+			// The snapshot was taken before this transaction was acquired,
+			// and the real rollover may have committed in between; ticking
+			// the boundary again over its committed result would corrupt
+			// the view. Holding the write transaction excludes a commit from
+			// here on.
+			if !ls.txValidationSnapshotCurrent(snapshot.generation) {
+				return ErrLeiosValidationParentSuperseded
 			}
 			if err := ls.tickTxValidationSnapshot(ctx, txn, &snapshot); err != nil {
 				return fmt.Errorf(
@@ -16401,10 +16441,7 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 			return nil
 		}
 		stillCurrent := func() bool {
-			currentConsensus, currentTip := ls.loadStateSnapshots()
-			return ls.txValidationTransitions.Load() == 0 &&
-				currentConsensus.generation == snapshot.generation &&
-				currentTip.generation == snapshot.generation
+			return ls.txValidationSnapshotCurrent(snapshot.generation)
 		}
 		commitIfCurrent := func(commit func() error) (bool, error) {
 			ls.txValidationCommitMutex.RLock()
