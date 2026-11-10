@@ -67,15 +67,13 @@ func utxoStatements() map[string]string {
 					continue
 				}
 				for _, inner := range value.MapKeys() {
-					statements[fmt.Sprintf("%s[%v][%v]", name, key, inner)] =
-						value.MapIndex(inner).String()
+					statements[fmt.Sprintf("%s[%v][%v]", name, key, inner)] = value.MapIndex(inner).String()
 				}
 			}
 		case reflect.Array:
 			for n := range field.Len() {
 				for _, key := range field.Index(n).MapKeys() {
-					statements[fmt.Sprintf("%s[%d][%v]", name, n, key)] =
-						field.Index(n).MapIndex(key).String()
+					statements[fmt.Sprintf("%s[%d][%v]", name, n, key)] = field.Index(n).MapIndex(key).String()
 				}
 			}
 		}
@@ -197,6 +195,62 @@ func TestNoSourceReadsAppliedColumnsFromTransaction(t *testing.T) {
 		}
 	}
 	require.Greater(t, scanned, 500, "the scan must cover the tree")
+}
+
+// unaliasedTransaction matches a read of the identity table that takes no
+// alias; the columns that statement names are then unqualified.
+var (
+	unaliasedTransaction = regexp.MustCompile(
+		`FROM\s+(?:"transaction"|` + "`transaction`" +
+			`)\s*(?:$|\)|WHERE\b|ORDER\b|LIMIT\b|GROUP\b)`,
+	)
+	unqualifiedApplied = regexp.MustCompile(
+		`(?:^|[^.\w])(?:slot|block_index|block_hash|fee|valid)\b`,
+	)
+)
+
+// TestNoSourceReadsUnqualifiedAppliedColumnsFromTransaction covers the
+// statements that read the identity table without an alias, where the
+// applied columns carry no qualifier for the alias scan to match.
+func TestNoSourceReadsUnqualifiedAppliedColumnsFromTransaction(t *testing.T) {
+	t.Parallel()
+	for _, path := range productionSources(t) {
+		if strings.Contains(filepath.ToSlash(path), "/migrations/") {
+			continue
+		}
+		raw, err := os.ReadFile(path)
+		require.NoError(t, err)
+		lines := strings.Split(string(raw), "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") ||
+				!unaliasedTransaction.MatchString(line) {
+				continue
+			}
+			// The statement is the raw string around the read: back to the
+			// line that opens it and forward to the line that closes it.
+			first := i
+			for first > 0 && !strings.Contains(lines[first], "`") {
+				first--
+			}
+			last := i
+			for last < len(lines)-1 && (last == i || !strings.Contains(lines[last], "`")) &&
+				!strings.HasSuffix(strings.TrimSpace(lines[last]), "`") {
+				last++
+			}
+			if strings.Contains(lines[i], "SELECT") {
+				first, last = i, i
+			}
+			for j := first; j <= last; j++ {
+				if unqualifiedApplied.MatchString(lines[j]) {
+					t.Errorf(
+						"%s:%d: names an applied column in a statement that "+
+							"reads the transaction identity table: %s",
+						path, j+1, strings.TrimSpace(lines[j]),
+					)
+				}
+			}
+		}
+	}
 }
 
 // productionSources lists the non-test Go and SQL sources of api, database

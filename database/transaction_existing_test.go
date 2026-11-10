@@ -17,9 +17,9 @@ package database
 import (
 	"context"
 	"encoding/binary"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 

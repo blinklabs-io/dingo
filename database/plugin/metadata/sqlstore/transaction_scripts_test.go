@@ -16,9 +16,9 @@ package sqlstore
 
 import (
 	"bytes"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"

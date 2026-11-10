@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"io"
 	"log/slog"
 	"math/big"
@@ -35,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -1001,5 +1001,4 @@ func TestDeferredRatificationMatchesBoundaryRatification(t *testing.T) {
 	require.NotEqual(t, got[0].Treasury, last.Treasury)
 	require.NotZero(t, last.DRepPower)
 	require.NotEmpty(t, last.Mark)
-
 }

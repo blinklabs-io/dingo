@@ -19,7 +19,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"log/slog"
 	"sort"
 	"strings"
@@ -30,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -572,7 +572,8 @@ func TestTrustedBatchOverlayFallsBackOnConflict(t *testing.T) {
 			   credential_tag, added_slot, deleted_slot, amount,
 			   payment_script)
 			 VALUES (?, 0, ?, ?, 0, 10, 0, '1000000', 0)`,
-			names["pool"].hash, rowBatchingKey(0x44), rowBatchingKey(0x55),
+			testutil.TransactionID(t, raw, names["pool"].hash),
+			rowBatchingKey(0x44), rowBatchingKey(0x55),
 		)
 		require.NoError(t, err)
 	}

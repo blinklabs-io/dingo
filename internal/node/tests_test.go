@@ -34,9 +34,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// rollbackCascadeIndex is the child index for fk_transaction_outputs, the
-// foreign key the rollback's DELETE FROM "transaction" cascades through.
-const rollbackCascadeIndex = "idx_utxo_transaction_id"
+// rollbackCascadeIndex is the child index for fk_utxo_spent_at_tx, the foreign
+// key the rollback's delete of a transaction's identity row is checked
+// against.
+const rollbackCascadeIndex = "idx_utxo_spent_at_tx_id"
 
 func cancelDeferredIndexRepairContext(t *testing.T) context.Context {
 	t.Helper()

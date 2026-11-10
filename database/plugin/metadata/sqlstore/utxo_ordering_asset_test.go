@@ -43,8 +43,11 @@ func seedOrderingAssets(t *testing.T, store *Store) {
 		policy byte
 		name   string
 	}{
-		{5, 0xaa, "one"}, {5, 0xaa, "two"}, {7, 0xaa, "one"},
-		{98, 0xaa, "one"}, {200, 0xbb, "one"},
+		{5, 0xaa, "one"},
+		{5, 0xaa, "two"},
+		{7, 0xaa, "one"},
+		{98, 0xaa, "one"},
+		{200, 0xbb, "one"},
 	} {
 		_, err := store.writeDB.Exec(
 			"INSERT INTO asset (utxo_id, policy_id, name, amount) "+

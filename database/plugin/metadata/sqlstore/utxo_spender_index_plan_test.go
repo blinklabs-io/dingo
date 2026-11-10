@@ -17,10 +17,10 @@ package sqlstore
 import (
 	"context"
 	"fmt"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )

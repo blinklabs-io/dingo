@@ -19,12 +19,12 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -119,10 +119,10 @@ INSERT INTO "transaction" (
 				require.NoError(t, err)
 				_, err = tx.Exec(`
 INSERT INTO utxo (
-    transaction_id, tx_id, payment_key, added_slot, deleted_slot, amount,
+    tx_id, payment_key, added_slot, deleted_slot, amount,
     output_idx, payment_script
-) VALUES (?, ?, ?, ?, 0, '1000000', ?, FALSE)`,
-					txRowID, txID, historyFixturePayment, slot, output,
+) VALUES (?, ?, ?, 0, '1000000', ?, FALSE)`,
+					txRowID, historyFixturePayment, slot, output,
 				)
 				require.NoError(t, err)
 				refs = append(

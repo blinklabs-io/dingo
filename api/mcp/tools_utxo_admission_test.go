@@ -57,8 +57,9 @@ func newUTxOAdmissionSession(
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	_, err = db.Exec(`
+		CREATE TABLE "transaction" (id INTEGER PRIMARY KEY, hash BLOB);
 		CREATE TABLE utxo (
-			id INTEGER PRIMARY KEY AUTOINCREMENT, tx_id BLOB,
+			id INTEGER PRIMARY KEY AUTOINCREMENT, tx_id INTEGER,
 			output_idx INTEGER, payment_key BLOB, staking_key BLOB,
 			amount TEXT, added_slot INTEGER,
 			deleted_slot INTEGER NOT NULL DEFAULT 0, datum_hash BLOB);
@@ -72,8 +73,15 @@ func newUTxOAdmissionSession(
 		_, err = db.Exec(`
 			WITH RECURSIVE n(i) AS (
 				SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+			INSERT INTO "transaction" (id, hash) SELECT i, randomblob(32) FROM n`,
+			rows,
+		)
+		require.NoError(t, err)
+		_, err = db.Exec(`
+			WITH RECURSIVE n(i) AS (
+				SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
 			INSERT INTO utxo (tx_id, output_idx, payment_key, amount, added_slot)
-			SELECT randomblob(32), 0, ?, '1000000', i FROM n`,
+			SELECT i, 0, ?, '1000000', i FROM n`,
 			rows, mustDecodeHex(t, utxoAdmissionCredential),
 		)
 		require.NoError(t, err)

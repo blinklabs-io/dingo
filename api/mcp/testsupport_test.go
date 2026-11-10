@@ -33,7 +33,6 @@ func newFixtureDB(t *testing.T) *sql.DB {
 	db.SetMaxOpenConns(1)
 
 	_, err = db.Exec(`
-		CREATE TABLE "transaction" (id INTEGER PRIMARY KEY, slot INTEGER, hash BLOB, block_hash BLOB, fee INTEGER, block_index INTEGER);
         CREATE TABLE epoch (epoch_id INTEGER, start_slot INTEGER, length_in_slots INTEGER, nonce BLOB);
 		INSERT INTO epoch VALUES (10, 1000, 100, NULL);
 		CREATE TABLE epoch_summary (epoch INTEGER, epoch_nonce BLOB);
@@ -62,14 +61,16 @@ func newFixtureDB(t *testing.T) *sql.DB {
 			address TEXT NOT NULL,
 		value INTEGER NOT NULL,
 		amount TEXT,
-		transaction_id INTEGER,
 		collateral_return_for_tx_id INTEGER,
-		tx_id BLOB,
-		output_idx INTEGER,
-		producer_tx_id INTEGER AS (COALESCE(transaction_id, collateral_return_for_tx_id)) VIRTUAL
+		tx_id INTEGER,
+		output_idx INTEGER
 		);
-		CREATE UNIQUE INDEX idx_utxo_imported_ref ON utxo (tx_id, output_idx)
-		WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL;
+		CREATE UNIQUE INDEX idx_utxo_tx_id_output_idx ON utxo (tx_id, output_idx);
+		CREATE TABLE "transaction" (id INTEGER PRIMARY KEY, hash BLOB);
+		CREATE TABLE applied_transaction (
+			tx_id INTEGER PRIMARY KEY, slot INTEGER, block_hash BLOB,
+			fee TEXT, block_index INTEGER
+		);
 		CREATE TABLE account (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			stake_address TEXT NOT NULL UNIQUE,
@@ -84,11 +85,12 @@ func newFixtureDB(t *testing.T) *sql.DB {
 
 		INSERT INTO tx (hash, block_id, slot, fee, size)
 		VALUES ('1111111111111111111111111111111111111111111111111111111111111111', 1, 1000, 175000, 450);
- INSERT INTO "transaction"(id,slot,hash,fee,block_index) SELECT id,slot,hash,fee,0 FROM tx;
+ INSERT INTO "transaction"(id,hash) SELECT id,hash FROM tx;
+ INSERT INTO applied_transaction(tx_id,slot,fee,block_index) SELECT id,slot,fee,0 FROM tx;
 
 		INSERT INTO utxo (tx_hash, tx_index, address, value)
 		VALUES ('1111111111111111111111111111111111111111111111111111111111111111', 0, 'addr_test1vrm9x2zs...sample', 5000000);
-		UPDATE utxo SET amount='5000000',transaction_id=1;
+		UPDATE utxo SET amount='5000000',tx_id=1;
 
 		INSERT INTO account (stake_address, controlled_amount, rewards_sum, withdrawals_sum, pool_id)
 		VALUES ('stake_test1uq...sample', 10000000, 250000, 0, 'pool1sample');
@@ -113,23 +115,8 @@ func newSchemaDB(t *testing.T) *sql.DB {
 	require.NoError(t, err)
 	_, err = db.Exec(string(schema))
 	require.NoError(t, err)
-	// The generated column and its index are added by the SQLite
-	// migrations, not by the sqlc schema snapshot.
-	_, err = db.Exec(producerColumnDDL)
-	require.NoError(t, err)
 	return db
 }
-
-// producerColumnDDL mirrors the SQLite migrations that add utxo.producer_tx_id,
-// idx_utxo_producer_output and idx_utxo_imported_ref.
-const producerColumnDDL = `
-ALTER TABLE utxo ADD COLUMN producer_tx_id INTEGER
-    AS (COALESCE(transaction_id, collateral_return_for_tx_id)) VIRTUAL;
-CREATE UNIQUE INDEX idx_utxo_producer_output
-    ON utxo (producer_tx_id, output_idx) WHERE producer_tx_id IS NOT NULL;
-CREATE UNIQUE INDEX idx_utxo_imported_ref
-    ON utxo (tx_id, output_idx)
-    WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL;`
 
 func newToolSession(
 	t *testing.T,

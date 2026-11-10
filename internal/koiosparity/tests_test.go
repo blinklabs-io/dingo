@@ -3045,8 +3045,10 @@ func TestCountSignificantAgreesWithDetermineStatus(t *testing.T) {
 	}
 }
 
-type testDB struct{ db *sql.DB }
-type testResult struct{ Error error }
+type (
+	testDB     struct{ db *sql.DB }
+	testResult struct{ Error error }
+)
 
 func (d *testDB) DB() (*sql.DB, error) { return d.db, nil }
 func (d *testDB) Close() error         { return d.db.Close() }
@@ -3169,7 +3171,8 @@ func testSchema(includePools bool) []string {
 		`CREATE TABLE governance_proposal (id INTEGER PRIMARY KEY AUTOINCREMENT, tx_hash BLOB NOT NULL, action_index INTEGER NOT NULL DEFAULT 0, action_type INTEGER NOT NULL DEFAULT 0, gov_action_cbor BLOB, deposit TEXT, return_address BLOB, enacted_epoch INTEGER, enacted_slot INTEGER, ratified_epoch INTEGER, deleted_slot INTEGER)`,
 		`CREATE TABLE governance_proposal_drop (proposal_id INTEGER PRIMARY KEY, dropped_epoch INTEGER, dropped_slot INTEGER)`,
 		`CREATE TABLE account_reward_delta (id INTEGER PRIMARY KEY AUTOINCREMENT, staking_key BLOB NOT NULL, credential_tag INTEGER NOT NULL DEFAULT 0, tx_hash BLOB NOT NULL, amount TEXT, previous_reward TEXT, added_slot INTEGER NOT NULL, withdrawal NUMERIC NOT NULL DEFAULT 0, post_snapshot NUMERIC NOT NULL DEFAULT 0)`,
-		`CREATE TABLE "transaction" (id INTEGER PRIMARY KEY AUTOINCREMENT, hash BLOB, slot INTEGER, block_index INTEGER)`,
+		`CREATE TABLE "transaction" (id INTEGER PRIMARY KEY AUTOINCREMENT, hash BLOB NOT NULL UNIQUE)`,
+		`CREATE TABLE applied_transaction (tx_id INTEGER PRIMARY KEY, block_hash BLOB, metadata BLOB, slot INTEGER, type INTEGER, fee TEXT, collateral_fee TEXT, ttl TEXT, block_index INTEGER, valid NUMERIC NOT NULL DEFAULT 1)`,
 		`CREATE TABLE certs (id INTEGER PRIMARY KEY AUTOINCREMENT, transaction_id INTEGER, slot INTEGER, cert_index INTEGER)`,
 	}
 	if includePools {

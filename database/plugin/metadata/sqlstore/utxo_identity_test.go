@@ -103,8 +103,10 @@ func TestOutputsResolveToTheRowTheHashPathFinds(t *testing.T) {
 	apply(2, spendTx)
 
 	refs := []models.UtxoId{
-		{Hash: valid, Idx: 0}, {Hash: valid, Idx: 1},
-		{Hash: failed, Idx: 1}, {Hash: imported, Idx: 0},
+		{Hash: valid, Idx: 0},
+		{Hash: valid, Idx: 1},
+		{Hash: failed, Idx: 1},
+		{Hash: imported, Idx: 0},
 		{Hash: spender, Idx: 0},
 	}
 	for _, ref := range refs {
@@ -235,8 +237,10 @@ func TestOutputLookupsDoNotScan(t *testing.T) {
 			sqliteUtxoSQL.getIncludingSpent,
 			[]any{hash, int64(0)},
 		},
-		"spend_one": {consumeUtxoSQLiteReturningSQL,
-			[]any{int64(5), int64(1), hash, int64(0)}},
+		"spend_one": {
+			consumeUtxoSQLiteReturningSQL,
+			[]any{int64(5), int64(1), hash, int64(0)},
+		},
 		"spend_batch": {consumeUtxosBatchQuery(3, true), []any{
 			int64(5), int64(1),
 			hash, int64(0),

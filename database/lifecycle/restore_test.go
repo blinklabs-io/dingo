@@ -1274,7 +1274,7 @@ func TestRestoreRebuildsDeferredIndexes(t *testing.T) {
 	raw, err := dbtest.RawSQLiteMetadata(t, restored)
 	require.NoError(t, err)
 	for _, index := range []string{
-		"idx_utxo_transaction_id",
+		"idx_utxo_spent_at_tx_id",
 		dbtest.LazyManifestIndex(t),
 	} {
 		require.True(t, dbtest.MetadataIndexExists(t, raw, index), index)

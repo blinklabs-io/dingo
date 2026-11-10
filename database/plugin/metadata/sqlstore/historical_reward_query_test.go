@@ -18,13 +18,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )

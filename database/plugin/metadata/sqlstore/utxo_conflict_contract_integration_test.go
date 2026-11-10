@@ -18,7 +18,6 @@ package sqlstore
 
 import (
 	"context"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
@@ -39,10 +38,11 @@ func TestMySQLCreateUtxoConflictContract(t *testing.T) {
 	)
 }
 
-// requireEdgeBackfillBoundsBatches upgrades to the input-edge migration with a
-// two-row batch over one output named by five transactions, on the engine's
-// own comparison of the composite edge cursor.
-func requireEdgeBackfillBoundsBatches(
+// requireIdentityBackfillBoundsBatches upgrades a database holding hash-keyed
+// outputs, edges and applied transactions to the identity schema with a
+// two-row batch, on the engine's own comparison of the phase cursors, and
+// checks every batch stays within the bound and every row resolves.
+func requireIdentityBackfillBoundsBatches(
 	t *testing.T,
 	driver, dsn, dialectName string,
 	dialect Dialect,
@@ -50,7 +50,7 @@ func requireEdgeBackfillBoundsBatches(
 	locker migrations.Locker,
 ) {
 	t.Helper()
-	const edgeMigration = 58
+	const identityMigration = 58
 	db, err := OpenDB(driver, dsn, dialectName, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -60,39 +60,63 @@ func requireEdgeBackfillBoundsBatches(
 			DB: db, Dialect: dialectName, Registry: reg, Locker: locker,
 		}).Run(ctx))
 	}
-	run(registry[:edgeMigration-1])
+	run(registry[:identityMigration-1])
 
 	table := dialect.QuoteIdentifier("transaction")
 	exec := func(query string, args ...any) {
 		t.Helper()
 		_, err := db.ExecContext(ctx, dialect.Rebind(query), args...)
-		require.NoError(t, err)
+		require.NoError(t, err, query)
 	}
-	exec(
-		`INSERT INTO utxo (tx_id, output_idx, credential_tag, added_slot,
-    deleted_slot, amount) VALUES (?, 0, 0, 1, 0, '1')`,
-		testutil.TransactionID(t, store.writeDB, bytes32(0xe0)),
-	)
+	count := func(query string, args ...any) int {
+		t.Helper()
+		var n int
+		require.NoError(t, db.QueryRowContext(
+			ctx, dialect.Rebind(query), args...,
+		).Scan(&n), query)
+		return n
+	}
+	const applied = 5
+	for i := range applied {
+		hash := bytes32(byte(0xe1 + i))
+		exec(
+			"INSERT INTO "+table+" (hash, slot, block_index, fee, valid) "+
+				"VALUES (?, ?, ?, '1', TRUE)",
+			hash, i+1, i,
+		)
+		exec(
+			`INSERT INTO utxo (transaction_id, tx_id, output_idx,
+    credential_tag, added_slot, deleted_slot, amount)
+SELECT id, hash, 0, 0, slot, 0, '1' FROM `+table+` WHERE hash = ?`,
+			hash,
+		)
+	}
+	// Imported outputs of one producer without a transaction row, and one
+	// output referenced by every applied transaction.
+	for i := range 3 {
+		exec(
+			`INSERT INTO utxo (tx_id, output_idx, credential_tag, added_slot,
+    deleted_slot, amount) VALUES (?, ?, 0, 1, 0, '1')`,
+			bytes32(0xa1), i,
+		)
+	}
 	var utxoID int64
 	require.NoError(t, db.QueryRowContext(ctx,
 		"SELECT MIN(id) FROM utxo",
 	).Scan(&utxoID))
-	const edges = 5
-	for i := range edges {
-		hash := bytes32(byte(0xe1 + i))
-		exec("INSERT INTO "+table+" (hash, slot) VALUES (?, ?)", hash, i+1)
+	for i := range applied {
 		exec(
 			"INSERT INTO utxo_reference_input (utxo_id, transaction_hash) "+
 				"VALUES (?, ?)",
-			utxoID, hash,
+			utxoID, bytes32(byte(0xe1+i)),
 		)
 	}
 
-	reg := append([]migrations.Migration(nil), registry[:edgeMigration]...)
+	reg := append([]migrations.Migration(nil), registry[:identityMigration]...)
 	var largest int64
-	backfill := reg[edgeMigration-1].Backfill
-	reg[edgeMigration-1].BatchSize = 2
-	reg[edgeMigration-1].Backfill = func(
+	backfill := reg[identityMigration-1].Backfill
+	reg[identityMigration-1].BatchSize = 2
+	reg[identityMigration-1].Backfill = func(
 		ctx context.Context,
 		batch migrations.Batch,
 	) (migrations.BatchResult, error) {
@@ -102,29 +126,32 @@ func requireEdgeBackfillBoundsBatches(
 	}
 	run(reg)
 
-	var copied int
-	require.NoError(t, db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM utxo_reference_edge",
-	).Scan(&copied))
-	require.Equal(t, edges, copied)
 	require.LessOrEqual(t, largest, int64(2))
+	require.Equal(t, applied+1, count("SELECT COUNT(*) FROM "+table))
+	require.Equal(t, applied, count("SELECT COUNT(*) FROM applied_transaction"))
+	require.Equal(t, applied+3, count("SELECT COUNT(*) FROM utxo"))
+	require.Equal(t, applied+3, count(
+		"SELECT COUNT(*) FROM utxo u JOIN "+table+" t ON t.id = u.tx_id"))
+	require.Equal(t, applied, count("SELECT COUNT(*) FROM utxo_reference_edge"))
+	_, err = db.ExecContext(ctx, "SELECT slot FROM "+table)
+	require.Error(t, err, "transaction keeps only the identity columns")
 }
 
-func TestPostgresUtxoInputEdgeBackfillBoundsBatches(t *testing.T) {
+func TestPostgresUtxoIdentityBackfillBoundsBatches(t *testing.T) {
 	dsn, schema := newPostgresIntegrationSchema(t)
 	registry, err := migrations.PostgresRegistry()
 	require.NoError(t, err)
-	requireEdgeBackfillBoundsBatches(
+	requireIdentityBackfillBoundsBatches(
 		t, "pgx", dsn, "postgres", PostgresDialect(), registry,
 		integrationMigrationLocker("postgres", schema),
 	)
 }
 
-func TestMySQLUtxoInputEdgeBackfillBoundsBatches(t *testing.T) {
+func TestMySQLUtxoIdentityBackfillBoundsBatches(t *testing.T) {
 	dsn, database := newMySQLIntegrationDatabase(t)
 	registry, err := migrations.MySQLRegistry()
 	require.NoError(t, err)
-	requireEdgeBackfillBoundsBatches(
+	requireIdentityBackfillBoundsBatches(
 		t, "mysql", dsn, "mysql", MySQLDialect(), registry,
 		integrationMigrationLocker("mysql", database),
 	)

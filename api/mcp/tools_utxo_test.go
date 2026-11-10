@@ -19,11 +19,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,9 +38,13 @@ func TestGetUtxosByAsset(t *testing.T) {
 	defer db.Close()
 
 	_, err = db.Exec(`
+		CREATE TABLE "transaction" (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			hash BLOB NOT NULL
+		);
 		CREATE TABLE utxo (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			tx_id BLOB NOT NULL,
+			tx_id INTEGER NOT NULL,
 			output_idx INTEGER NOT NULL,
 			payment_key BLOB NOT NULL,
 			amount TEXT NOT NULL,
@@ -67,11 +71,16 @@ func TestGetUtxosByAsset(t *testing.T) {
 		"22222222222222222222222222222222222222222222222222222222",
 	)
 
+	_, err = db.Exec(
+		`INSERT INTO "transaction" (id, hash) VALUES (1, ?)`, txIDBytes,
+	)
+	require.NoError(t, err)
+
 	// Insert live UTxO 1
 	_, err = db.Exec(`
 		INSERT INTO utxo (id, tx_id, output_idx, payment_key, amount, deleted_slot)
-		VALUES (1, ?, 0, ?, '5000000', 0)
-	`, txIDBytes, payKeyBytes)
+		VALUES (1, 1, 0, ?, '5000000', 0)
+	`, payKeyBytes)
 	require.NoError(t, err)
 
 	// Insert asset for UTxO 1
@@ -84,8 +93,8 @@ func TestGetUtxosByAsset(t *testing.T) {
 	// Insert spent UTxO 2
 	_, err = db.Exec(`
 		INSERT INTO utxo (id, tx_id, output_idx, payment_key, amount, deleted_slot)
-		VALUES (2, ?, 1, ?, '3000000', 100)
-	`, txIDBytes, payKeyBytes)
+		VALUES (2, 1, 1, ?, '3000000', 100)
+	`, payKeyBytes)
 	require.NoError(t, err)
 
 	_, err = db.Exec(`
@@ -245,9 +254,12 @@ func TestGetAssetInfo(t *testing.T) {
 			url TEXT,
 			decimals INTEGER
 		);
+		CREATE TABLE applied_transaction (
+			tx_id INTEGER PRIMARY KEY, slot INTEGER, block_hash BLOB
+		);
 		CREATE TABLE utxo (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			tx_id BLOB NOT NULL,
+			tx_id INTEGER NOT NULL,
 			deleted_slot INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE asset (
@@ -294,8 +306,7 @@ func TestGetAssetInfo(t *testing.T) {
 
 	// 2. Insert UTxO & live asset
 	_, err = db.Exec(
-		`INSERT INTO utxo (id, tx_id, deleted_slot) VALUES (1, ?, 0)`,
-		mintTxHash,
+		`INSERT INTO utxo (id, tx_id, deleted_slot) VALUES (1, 1, 0)`,
 	)
 	require.NoError(t, err)
 	_, err = db.Exec(`

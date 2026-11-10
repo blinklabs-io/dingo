@@ -55,6 +55,8 @@ func newAssetInfoLimitSession(
 			tx_index INTEGER NOT NULL DEFAULT 0);
 		CREATE TABLE "transaction" (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, hash BLOB NOT NULL);
+		CREATE TABLE applied_transaction (
+			tx_id INTEGER PRIMARY KEY, slot INTEGER, block_hash BLOB);
 		CREATE TABLE transaction_metadata_label (
 			transaction_id INTEGER NOT NULL, label TEXT NOT NULL, json_value TEXT);
 	`)

@@ -16,7 +16,6 @@ package utxorpc
 
 import (
 	"context"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"io"
 	"log/slog"
 	"testing"
@@ -28,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"

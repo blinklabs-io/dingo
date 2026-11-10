@@ -17,12 +17,12 @@ package sqlstore
 import (
 	"bytes"
 	"context"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"

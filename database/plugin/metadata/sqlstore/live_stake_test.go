@@ -20,12 +20,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )

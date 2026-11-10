@@ -115,10 +115,14 @@ func testEpochOutputRange(t *testing.T, store *Store) {
 		start, end uint64
 		want       string
 	}{
-		{0, 0, "19"}, {10, 10, max.String()},
+		{0, 0, "19"},
+		{10, 10, max.String()},
 		{11, 11, new(big.Int).Add(new(big.Int).Set(max), big.NewInt(42)).String()},
 		{10, 12, new(big.Int).Add(twice, big.NewInt(49)).String()},
-		{12, 12, "7"}, {13, 24, "0"}, {25, 25, "17"}, {10, 9, "0"},
+		{12, 12, "7"},
+		{13, 24, "0"},
+		{25, 25, "17"},
+		{10, 9, "0"},
 	} {
 		got, err := store.SumTransactionOutputsInSlotRange(
 			tc.start,

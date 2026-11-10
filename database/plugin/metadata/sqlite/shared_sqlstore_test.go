@@ -266,7 +266,8 @@ func TestSharedStoreDeferredIndexLifecycle(t *testing.T) {
 
 func sqliteIndexExists(t *testing.T, db interface {
 	QueryRow(string, ...any) *sql.Row
-}, name string) bool {
+}, name string,
+) bool {
 	t.Helper()
 	var count int
 	require.NoError(t, db.QueryRow(
@@ -925,7 +926,8 @@ ORDER BY m.name, fk."from"`)
 		}
 	}
 	require.Subset(t, declared(), []child{
-		{"utxo", "tx_id"}, {"utxo", "spent_at_tx_id"},
+		{"utxo", "tx_id"},
+		{"utxo", "spent_at_tx_id"},
 		{"utxo", "collateral_return_for_tx_id"},
 		{"applied_transaction", "tx_id"},
 	}, "the schema must declare the utxo foreign keys to transaction(id)")
@@ -1146,12 +1148,11 @@ func TestSharedSQLStoreRewardStateParity(t *testing.T) {
 		nil,
 	))
 	provisionalTxn := store.Transaction(t.Context())
-	provisionalGuard, _, err :=
-		store.ClaimFallbackRewardSnapshotGuard(
-			8,
-			"mark",
-			provisionalTxn,
-		)
+	provisionalGuard, _, err := store.ClaimFallbackRewardSnapshotGuard(
+		8,
+		"mark",
+		provisionalTxn,
+	)
 	require.NoError(t, err)
 	require.NoError(t, provisionalTxn.Commit())
 
@@ -2099,9 +2100,11 @@ func (m *mockTransaction) Inputs() []lcommon.TransactionInput { return m.inputs 
 func (m *mockTransaction) Collateral() []lcommon.TransactionInput {
 	return m.collateral
 }
+
 func (m *mockTransaction) Certificates() []lcommon.Certificate {
 	return m.certificates
 }
+
 func (m *mockTransaction) ProtocolParameterUpdates() (
 	uint64,
 	map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
@@ -2124,9 +2127,11 @@ func (m *mockTransaction) ValidityIntervalStart() uint64            { return 0 }
 func (m *mockTransaction) ReferenceInputs() []lcommon.TransactionInput {
 	return m.refInputs
 }
+
 func (m *mockTransaction) TotalCollateral() *big.Int {
 	return big.NewInt(0)
 }
+
 func (m *mockTransaction) Withdrawals() map[*lcommon.Address]*big.Int {
 	return m.withdrawals
 }
@@ -2135,6 +2140,7 @@ func (m *mockTransaction) ScriptDataHash() *lcommon.Blake2b256   { return nil }
 func (m *mockTransaction) VotingProcedures() lcommon.VotingProcedures {
 	return lcommon.VotingProcedures{}
 }
+
 func (m *mockTransaction) ProposalProcedures() []lcommon.ProposalProcedure {
 	return nil
 }
@@ -3409,18 +3415,16 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	require.NoError(t, err)
 	gotLatestAriadne, err := store.GetLatestMidnightAriadneParams(nil)
 	require.NoError(t, err)
-	gotHistoricalAriadne, err :=
-		store.GetMidnightAriadneParamsAtOrBeforeEpoch(1, nil)
+	gotHistoricalAriadne, err := store.GetMidnightAriadneParamsAtOrBeforeEpoch(1, nil)
 	require.NoError(t, err)
 	gotRollbacks, err := store.FindMidnightAriadneRollbacksByBlock(nil, 12)
 	require.NoError(t, err)
 	gotCandidates, err := store.GetMidnightEpochCandidatesByEpoch(2, nil)
 	require.NoError(t, err)
-	gotRegistrations, err :=
-		store.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
-			[][]byte{[]byte("candidate-a"), []byte("missing")},
-			nil,
-		)
+	gotRegistrations, err := store.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+		[][]byte{[]byte("candidate-a"), []byte("missing")},
+		nil,
+	)
 	require.NoError(t, err)
 
 	rollback := store.Transaction(t.Context())
@@ -3439,8 +3443,7 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 		11,
 	)
 	require.NoError(t, err)
-	_, err =
-		store.DeleteMidnightDeregistrationsByBlock(rollback, 12)
+	_, err = store.DeleteMidnightDeregistrationsByBlock(rollback, 12)
 	require.NoError(t, err)
 	require.NoError(t, rollback.Commit())
 	assetTxHashes := make([]string, len(gotUnspentAssets))

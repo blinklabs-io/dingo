@@ -20,7 +20,6 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math/big"
 	"testing"
 
@@ -28,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

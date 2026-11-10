@@ -101,7 +101,7 @@ func TestQASchemaReservedIdentifier(t *testing.T) {
 		map[string]any{"table_name": "transaction"},
 		false,
 	)
-	require.Contains(t, text, "block_hash")
+	require.Contains(t, text, "hash")
 	for _, name := range []string{"transaction); DROP TABLE utxo;--", "transaction' OR 1=1 --", "transaction\x00"} {
 		callTool(t, cs, "sqlite_table_schema", map[string]any{"table_name": name}, true)
 	}
@@ -169,7 +169,8 @@ func TestQAAssetNameCollision(t *testing.T) {
 	t.Parallel()
 	db := newSchemaDB(t)
 	_, err := db.Exec(
-		`INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot) VALUES(1,zeroblob(32),0,zeroblob(28),'1',0);
+		`INSERT INTO "transaction"(id,hash) VALUES(1,zeroblob(32));
+ INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot) VALUES(1,1,0,zeroblob(28),'1',0);
  INSERT INTO asset(id,utxo_id,policy_id,name,fingerprint,amount) VALUES(1,1,zeroblob(28),x'ab','binary','7'),(2,1,zeroblob(28),x'4142','text','1000'),(3,1,zeroblob(28),x'20','space','20');`,
 	)
 	require.NoError(t, err)

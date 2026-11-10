@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
-
 	"github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"

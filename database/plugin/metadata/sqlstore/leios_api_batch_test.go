@@ -17,10 +17,10 @@ package sqlstore
 import (
 	"context"
 	"encoding/binary"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"

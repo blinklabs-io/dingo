@@ -18,11 +18,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -156,14 +156,20 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 	cases := map[string][]input{
 		"all_live": {live(1), live(2), live(3)},
 		"mixed": {
-			live(4), {skewedUtxoTxID(1), 1}, live(5),
-			{skewedUtxoTxID(7), 3}, {skewedUtxoTxID(9), 1},
-			{skewedUtxoTxID(999_999), 0}, live(6), live(7),
+			live(4),
+			{skewedUtxoTxID(1), 1},
+			live(5),
+			{skewedUtxoTxID(7), 3},
+			{skewedUtxoTxID(9), 1},
+			{skewedUtxoTxID(999_999), 0},
+			live(6), live(7),
 		},
 		"wrong_output_idx_of_live_tx": {live(8), {skewedUtxoTxID(80), 3}},
 		"none_live": {
-			{skewedUtxoTxID(1), 1}, {skewedUtxoTxID(2), 2},
-			{skewedUtxoTxID(19), 3}, {skewedUtxoTxID(999_998), 0},
+			{skewedUtxoTxID(1), 1},
+			{skewedUtxoTxID(2), 2},
+			{skewedUtxoTxID(19), 3},
+			{skewedUtxoTxID(999_998), 0},
 		},
 	}
 	legacyBind := func(args []any, hash, idx any) []any {

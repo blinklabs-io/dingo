@@ -7700,15 +7700,14 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	var result *EpochRolloverResult
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		params, eraID, transitions, transitionMajors, v2Written, err :=
-			ls.prepareEraTransitionsForRollover(
-				context.Background(),
-				txn,
-				ls.currentEpoch,
-				ls.currentEra,
-				ls.currentPParams,
-				transitionPath,
-			)
+		params, eraID, transitions, transitionMajors, v2Written, err := ls.prepareEraTransitionsForRollover(
+			context.Background(),
+			txn,
+			ls.currentEpoch,
+			ls.currentEra,
+			ls.currentPParams,
+			transitionPath,
+		)
 		if err != nil {
 			return err
 		}
@@ -10089,18 +10088,24 @@ func TestProtocolParamsForSlot_FallbackProjectsFromCurrentEpoch(t *testing.T) {
 
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
-			{EpochId: 0, StartSlot: 0, SlotLength: 20_000,
+			{
+				EpochId: 0, StartSlot: 0, SlotLength: 20_000,
 				LengthInSlots: uint(
 					byronEpochLength,
-				), EraId: eras.ByronEraDesc.Id},
-			{EpochId: 1, StartSlot: byronEpochLength, SlotLength: 20_000,
+				), EraId: eras.ByronEraDesc.Id,
+			},
+			{
+				EpochId: 1, StartSlot: byronEpochLength, SlotLength: 20_000,
 				LengthInSlots: uint(
 					byronEpochLength,
-				), EraId: eras.ByronEraDesc.Id},
-			{EpochId: currentEpoch, StartSlot: currentStart, SlotLength: 1_000,
+				), EraId: eras.ByronEraDesc.Id,
+			},
+			{
+				EpochId: currentEpoch, StartSlot: currentStart, SlotLength: 1_000,
 				LengthInSlots: uint(
 					shelleyEpochLen,
-				), EraId: eras.ShelleyEraDesc.Id},
+				), EraId: eras.ShelleyEraDesc.Id,
+			},
 		},
 		currentEra: eras.ShelleyEraDesc,
 		currentEpoch: models.Epoch{

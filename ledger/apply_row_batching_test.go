@@ -242,7 +242,8 @@ func rowBatchingScenario(t *testing.T) (
 			cbor.Tag{Number: 30, Content: []uint64{1, 10}},
 			rowBatchingRewardAccount(poolKey),
 			[]any{rowBatchingKey(poolKey)},
-			[]any{}, nil,
+			[]any{},
+			nil,
 		}},
 	})
 	names["register"] = newRowBatchingTx(t, map[uint]any{
@@ -271,7 +272,8 @@ func rowBatchingScenario(t *testing.T) (
 		}},
 		20: []any{[]any{
 			uint64(100_000_000), rowBatchingRewardAccount(stakeKey),
-			[]any{uint64(6)}, anchor,
+			[]any{uint64(6)},
+			anchor,
 		}},
 	})
 	registerOut := names["register"].hash

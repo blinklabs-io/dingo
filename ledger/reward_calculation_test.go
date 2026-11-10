@@ -7021,7 +7021,17 @@ func rewardCalcExecRows(
 	args ...any,
 ) int64 {
 	t.Helper()
-	result, err := rewardCalcSQLDB(t, db).Exec(query, args...)
+	var (
+		result sql.Result
+		err    error
+	)
+	if strings.HasPrefix(strings.TrimSpace(query), `INSERT INTO "transaction"`) {
+		result, err = testutil.ExecTransactionInsert(
+			rewardCalcSQLDB(t, db), query, args...,
+		)
+	} else {
+		result, err = rewardCalcSQLDB(t, db).Exec(query, args...)
+	}
 	require.NoError(t, err)
 	rows, err := result.RowsAffected()
 	require.NoError(t, err)
@@ -7070,18 +7080,20 @@ func rewardCalcSeedStakeCert(
 	raw := rewardCalcSQLDB(t, db)
 	hash := make([]byte, 32)
 	binary.BigEndian.PutUint64(hash[24:], uint64(id))
-	_, err := testutil.ExecTransactionInsert(raw,
+	txRes, err := testutil.ExecTransactionInsert(raw,
 		`
-INSERT INTO "transaction" (id, hash, slot, block_index)
-VALUES (?, ?, ?, 0)`,
-		id, hash, slot,
+INSERT INTO "transaction" (hash, slot, block_index)
+VALUES (?, ?, 0)`,
+		hash, slot,
 	)
+	require.NoError(t, err)
+	txID, err := txRes.LastInsertId()
 	require.NoError(t, err)
 	_, err = raw.Exec(`
 INSERT INTO certs (
     id, transaction_id, cert_index, slot, cert_type
 ) VALUES (?, ?, 0, ?, ?)`,
-		id, id, slot, certType,
+		id, txID, slot, certType,
 	)
 	require.NoError(t, err)
 	switch certType {
@@ -8041,6 +8053,7 @@ INSERT INTO reward_live_stake (pool_key_hash, staking_key, credential_tag,
     utxo_stake, reward_stake, total_stake, registered, pool_delegation_slot,
     updated_slot, calculation_version)
 VALUES (?, ?, 0, ?, ?, ?, 1, 1, 1, ?)`)
+	txStmt := prepare(`INSERT INTO "transaction" (hash) VALUES (?)`)
 	utxoStmt := prepare(`
 INSERT INTO utxo (tx_id, output_idx, payment_key, staking_key, credential_tag,
     added_slot, deleted_slot, amount, payment_script)
@@ -8141,8 +8154,12 @@ VALUES (?, ?, ?)`)
 			nextUtxo++
 			txID := make([]byte, 32)
 			binary.BigEndian.PutUint64(txID[24:], nextUtxo)
-			_, err := utxoStmt.Exec(
-				txID, 0, epochBoundaryBenchHash(0x50, nextUtxo), key,
+			txRes, err := txStmt.Exec(txID)
+			require.NoError(tb, err)
+			txRowID, err := txRes.LastInsertId()
+			require.NoError(tb, err)
+			_, err = utxoStmt.Exec(
+				txRowID, 0, epochBoundaryBenchHash(0x50, nextUtxo), key,
 				strconv.FormatUint(amount, 10),
 			)
 			require.NoError(tb, err)
@@ -9462,11 +9479,11 @@ func newPrototypeGenesisRewardLedger(
 			))
 		}
 	}
-	_, err = rewardCalcSQLDB(t, db).Exec(`
+	_, err = testutil.ExecTransactionInsert(rewardCalcSQLDB(t, db), `
 INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    hash, block_hash, slot, type, fee, collateral_fee, ttl,
     block_index, valid
-) VALUES (1, ?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
+) VALUES (?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
 		[]byte("genesis-performance-tx"), []byte("genesis-performance-block"))
 	require.NoError(t, err)
 	return ls, db
@@ -10560,14 +10577,19 @@ func TestApplyStakeRewardsPreviewGenesisToEpoch2(t *testing.T) {
 	}, nil))
 
 	// Preview's two epoch-0 transactions.
-	_, err := rewardCalcSQLDB(t, db).Exec(`
+	_, err := testutil.ExecTransactionInsert(rewardCalcSQLDB(t, db), `
 INSERT INTO "transaction" (
     id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
     block_index, valid
-) VALUES
-    (1, ?, ?, 60, 5, '200000', '0', '0', 0, TRUE),
-    (2, ?, ?, 320, 5, '237793', '0', '0', 0, TRUE)`,
+) VALUES (1, ?, ?, 60, 5, '200000', '0', '0', 0, TRUE)`,
 		[]byte("preview-tx-0"), []byte("preview-block-0"),
+	)
+	require.NoError(t, err)
+	_, err = testutil.ExecTransactionInsert(rewardCalcSQLDB(t, db), `
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (2, ?, ?, 320, 5, '237793', '0', '0', 0, TRUE)`,
 		[]byte("preview-tx-1"), []byte("preview-block-1"),
 	)
 	require.NoError(t, err)
@@ -10849,11 +10871,11 @@ func TestApplyStakeRewardsConwayGenesisPerformance(t *testing.T) {
 			))
 		}
 	}
-	_, err = rewardCalcSQLDB(t, db).Exec(`
+	_, err = testutil.ExecTransactionInsert(rewardCalcSQLDB(t, db), `
 INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    hash, block_hash, slot, type, fee, collateral_fee, ttl,
     block_index, valid
-) VALUES (1, ?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
+) VALUES (?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
 		[]byte("genesis-performance-tx"), []byte("genesis-performance-block"))
 	require.NoError(t, err)
 

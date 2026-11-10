@@ -359,7 +359,7 @@ func TestApplyEndorserBlockHaskellPathToleratesCrossEndorserDoubleConsume(
 	// recorded and its produced output is live at its ranking block's slot.
 	var storedSlot uint64
 	require.NoError(t, gdb.QueryRow(`
-SELECT slot FROM "transaction" WHERE hash = ?`,
+SELECT a.slot FROM applied_transaction a JOIN "transaction" t ON t.id = a.tx_id WHERE t.hash = ?`,
 		secondTx.Hash().Bytes(),
 	).Scan(&storedSlot))
 	require.Equal(t, secondPoint.Slot, storedSlot)
@@ -547,7 +547,7 @@ func TestRankingBlockDeltaKeepsHardConsumedInputConflict(t *testing.T) {
 	require.Equal(t, closurePoint.Slot, deletedSlot)
 	var rows int64
 	require.NoError(t, gdb.QueryRow(`
-SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
+SELECT COUNT(*) FROM applied_transaction a JOIN "transaction" t ON t.id = a.tx_id WHERE t.hash = ?`,
 		conflictTx.Hash().Bytes(),
 	).Scan(&rows))
 	require.Equal(t, int64(0), rows)
@@ -679,7 +679,7 @@ func requireLeiosApplyTestTxCount(
 	t.Helper()
 	var got int64
 	require.NoError(t, raw.QueryRow(
-		`SELECT COUNT(*) FROM "transaction"`,
+		`SELECT COUNT(*) FROM applied_transaction`,
 	).Scan(&got))
 	require.Equal(t, want, got)
 }
@@ -741,7 +741,7 @@ func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	// The transaction is recorded under the ranking block's point.
 	var got int64
 	require.NoError(t, gdb.QueryRow(
-		`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
+		`SELECT COUNT(*) FROM applied_transaction a JOIN "transaction" t ON t.id = a.tx_id WHERE t.hash = ?`,
 		tx.Hash().Bytes(),
 	).Scan(&got))
 	require.Equal(t, int64(1), got)
@@ -899,7 +899,7 @@ func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
 	requireLeiosApplyTestTxCount(t, gdb, 1)
 	var gotTx models.Transaction
 	require.NoError(t, gdb.QueryRow(
-		`SELECT slot FROM "transaction" WHERE hash = ?`,
+		`SELECT a.slot FROM applied_transaction a JOIN "transaction" t ON t.id = a.tx_id WHERE t.hash = ?`,
 		tx.Hash().Bytes(),
 	).Scan(&gotTx.Slot))
 	require.Equal(t, leiosApplyTestRankingPoint(0x77).Slot, gotTx.Slot)
@@ -1076,7 +1076,7 @@ func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 	requireLeiosApplyTestTxCount(t, gdb, 1)
 	var gotTx models.Transaction
 	require.NoError(t, gdb.QueryRow(`
-SELECT slot, block_index FROM "transaction" WHERE hash = ?`,
+SELECT a.slot, a.block_index FROM applied_transaction a JOIN "transaction" t ON t.id = a.tx_id WHERE t.hash = ?`,
 		tx.Hash().Bytes(),
 	).Scan(&gotTx.Slot, &gotTx.BlockIndex))
 	require.Equal(t, firstPoint.Slot, gotTx.Slot)
@@ -2006,7 +2006,6 @@ func TestEnsureReferencedEndorserBlocksSharesOneWindowAcrossMissingBlocks(
 			2*leiosWaitTestWindow,
 			"per-endorser-block waits stacked serially instead of sharing a window",
 		)
-
 	})
 }
 

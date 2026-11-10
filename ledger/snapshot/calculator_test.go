@@ -18,22 +18,21 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math"
 	"math/big"
 	"strconv"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/require"
 )
 
 // setupTestDB creates a database.Database backed by temporary Badger and
@@ -1268,7 +1267,7 @@ func runHistoricalBoundaryStakeIncludesUntickedClosure(t *testing.T, collateralR
 		if i == 0 && collateralReturn {
 			output.TransactionID = nil
 			output.CollateralReturnForTxID = &id
-			_, err := raw.Exec(`UPDATE "transaction" SET valid = FALSE WHERE id = ?`, id)
+			_, err := raw.Exec(`UPDATE applied_transaction SET valid = FALSE WHERE tx_id = ?`, id)
 			require.NoError(t, err)
 		}
 		require.NoError(t, db.CreateUtxo(t.Context(), nil, output))
