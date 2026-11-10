@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const identityMigrationVersion = 58
+const identityMigrationVersion = 59
 
 func identityHash(b byte) []byte {
 	hash := make([]byte, 32)

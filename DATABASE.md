@@ -202,7 +202,7 @@ the index's right edge. Every `block_nonce` read and delete supplies a slot or
 a slot range, and none looks a row up by hash alone. The upsert's
 `ON CONFLICT (hash, slot)` target resolves against the same column set.
 
-Schema version 58 (`utxo-transaction-identity`) makes `transaction` an identity
+Schema version 59 (`utxo-transaction-identity`) makes `transaction` an identity
 table and keys outputs, spenders and input edges by its row id. It is a
 user-visible change for anyone reading the metadata database with SQL:
 
@@ -670,14 +670,14 @@ cutover is a clean break, so users must remove the data directory (metadata and
 blob stores) and resync from genesis. This keeps startup deterministic and
 avoids carrying a large, fragile compatibility layer for obsolete schemas.
 Reference inputs are stored in the `utxo_reference_edge` association
-table (`utxo_reference_input` until schema version 58) so multiple transactions can reference one output; the legacy
+table (`utxo_reference_input` until schema version 59) so multiple transactions can reference one output; the legacy
 single-column marker is not used by the new store. `v1alpha1` also creates the
 `node_settings_gate` table described below: the schema is unreleased, so a new
 table belongs in the initial version rather than in a version of its own.
 
 Collateral inputs are stored in the `utxo_collateral_edge` association table,
 keyed by `(utxo_id, tx_id)` (`utxo_collateral_input` keyed by hash until
-schema version 58). This is the authoritative many-to-many
+schema version 59). This is the authoritative many-to-many
 relationship: one output can be collateral for multiple transactions, and
 rollback removes only the association belonging to the rolled-back
 transaction. Migration `v14` copies non-NULL legacy
@@ -3140,7 +3140,7 @@ the stored blocks as they age past the window, as it does on any node.
 | `asset` | `id`, `utxo_id`, `policy_id`, `name`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. Migration `v19` drops `name_hex` (`hex.EncodeToString(name)`, stored and indexed at write time): every asset lookup keys on `policy_id`/`name`, so nothing ever filtered on it, and `api/blockfrost`'s `NodeAdapter.Asset` and `api/mesh`'s `appendUtxoOps` already recompute the hex encoding from `name` on demand. Migration `v21` drops `idx_asset_fingerprint` and `idx_asset_amount`: a real WAL-frame-churn measurement during genesis sync found `idx_asset_amount` alone responsible for 23.4% of all frame writes to the metadata database -- the single largest contributor of any index or table -- and `idx_asset_fingerprint` for 3.4%, and neither backs a `WHERE`/`JOIN`/`ORDER BY` predicate anywhere in the tree. Unlike `name_hex`, the `fingerprint` and `amount` columns themselves are genuinely read and returned via the blockfrost/mesh API adapters, so only the indexes are dropped. |
 | `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset` (live holdings), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. The lookup and slot indexes are deferred during bulk import and restored before API or rollback traffic; the fingerprint index is rebuilt by background maintenance. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
 | `address_transaction` | `id`, `payment_key`, `payment_script`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `transaction_id`, `slot`; composite `(credential_tag, staking_key, slot, tx_index, payment_key)` | API-mode address-to-transaction index. Join to `transaction.id`. `payment_script` distinguishes key hashes from script hashes, which share one byte namespace. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. The composite index supports credential-scoped pagination and its leading columns cover simple credential lookups. The slot, stake-position, and payment query indexes are deferred during bulk import. The transaction-id index remains resident because SetTransaction clears address history by transaction_id on replays. Migration `v46` stages the old transaction inventory and reconstructs typed rows from retained blocks before API startup; startup fails if required block or input history is unavailable. The rebuild finds each transaction row by hash, not by `block_index`: a valid Dijkstra transaction stores each sub-transaction as its own row ahead of itself, so `block_index` counts those levels, and a certified Leios closure transaction is stored under its ranking block while its transaction offset names the endorser block's standalone blob, from which only its body is read, its stored `valid` deciding whether it produced its outputs or only its collateral return. |
-| `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot` | API-mode per-label metadata index. Join to `transaction.id`. The label and slot indexes are deferred during bulk import and restored before API or rollback traffic; the unique key remains for idempotent inserts. |
+| `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot`, `idx_transaction_metadata_label_label_slot` `(label, slot, transaction_id)` (schema version 58) | API-mode per-label metadata index. Join to `transaction.id`. `GetTransactionsByMetadataLabel` drives from the label rows through the `(label, slot, transaction_id)` index and joins `transaction` and `applied_transaction`, so a page reads its first rows in slot order and sorts only ties within a slot (by `block_index`, `id`) instead of every transaction carrying the label. A label row's `slot` equals its transaction's `slot`. The label, slot and label-slot indexes are deferred during bulk import and restored before API or rollback traffic; the unique key remains for idempotent inserts. |
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. The type index is deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
 | `redeemer_script` | `transaction_id`, `tag`, `index`, `script_hash`, `slot`, `tx_index` | PK (`transaction_id`, `tag`, `index`); FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_redeemer_script_position` (`script_hash`, `slot`, `tx_index`, `tag`, `index`) | API-mode index of the script each redeemer executes, one row per attributed redeemer pointer, written by `storeRedeemerScripts` next to the `redeemer` rows. A redeemer pointer does not name its script: it resolves through the transaction body -- the spent input's address for a spend (the index points into the inputs sorted by transaction id and output index, not their body order; the address is read from the stored output's `payment_key` and `payment_script`), the sorted mint policy for a mint, the certificate or withdrawal credential, the voter, the proposal guardrail. A pointer that cannot be resolved (an input the index never saw, a spend of an output no script locks) has no row rather than failing the block; a guarding redeemer has none either, because no script purpose is built for it. `slot` and `tx_index` repeat the transaction position so a script's redeemers page in chain order straight off the index; replaying a transaction deletes and rewrites its rows, and the cascade is how rollback reaches them. |
 | `witness_scripts` | `id`, `transaction_id`, `script_hash`, `type` | PK `id`; indexes `transaction_id`, `script_hash`, `type` | API-mode witness-script references. Join `script_hash = script.hash`. The script-hash and type indexes are deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
@@ -4317,8 +4317,9 @@ it, where the horizon is `min(tipSlot - retentionSlots, liveImmutableSlot)`.
 immutability bound `internal/historyexpiry` uses to expire block history),
 overridable with `sqlstore.Config.CommitteeAuthRetentionSlots`. It only
 approximates the rollback bound: Ouroboros bounds a legal rollback in *blocks*
-(`securityParam`), not slots, and `Chain.rollbackForkDepth` enforces exactly
-that block count, so a chain sparser than the 3k/f assumption — a devnet with a
+(`securityParam`), not slots, and the chain enforces exactly that block count
+(`Chain.rollbackExceedsSecurityParam`, measured from the highest block index the
+persistent chain has held, its rollback anchor), so a chain sparser than the 3k/f assumption — a devnet with a
 low active-slot coefficient, or an occasional sparse span of an otherwise
 healthy chain — can have a legal rollback target below `tipSlot -
 retentionSlots`. Pruning to that slot-only horizon
@@ -4341,11 +4342,18 @@ below the horizon.
 
 **Suspension.** A cached `liveImmutableSlot` can be safe when resolved and
 still be wrong by the time it is used, because "at most `securityParam` blocks
-behind the tip" describes one instant, not a ratchet: a rollback to depth
-`d1 <= securityParam`, a little regrowth, and a second rollback to depth
-`d2 <= securityParam` measured from the new, shorter tip can legally land
-*before* a value cached before the first rollback — ordinary chain churn near
-the tip, not an adversarial scenario. `DeleteCertificatesAfterSlot` therefore
+behind the tip" describes one instant, not a ratchet. Peer-initiated rollbacks
+are held to a ratchet: the chain measures them from its rollback anchor, the
+highest block index it has held, which it persists in the
+`chain_rollback_high_water` sync-state row before any rollback removes blocks
+and restores on load, so successive rollbacks cannot undercut the cached value.
+An operator truncate removes the blocks above its target and caps the row at the
+target's block index (`Database.LowerRollbackHighWater`) in the transaction that
+truncates metadata, so a restart does not measure rollbacks from blocks that no
+longer exist.
+Local recovery that deliberately descends past K one K-bounded step at a time
+lowers the anchor to the tip first (`Chain.ResetRollbackAnchorToTip`) and so can
+land *before* a value cached earlier. `DeleteCertificatesAfterSlot` therefore
 invalidates the cached value on every rollback, and `committeeAuthHorizon`
 treats "a live syncer is wired (`SetCommitteeAuthImmutableSlot` has been called
 at least once) but currently has no value" — bootstrap before the first
@@ -6374,7 +6382,7 @@ SELECT t.slot, t.block_index, encode(t.hash, 'hex') AS tx_hash, ml.json_value
 FROM transaction_metadata_label ml
 JOIN "transaction" t ON t.id = ml.transaction_id
 WHERE ml.label = $1
-ORDER BY t.slot DESC, t.block_index DESC, t.id DESC
+ORDER BY ml.slot DESC, t.block_index DESC, t.id DESC
 LIMIT 100;
 ```
 

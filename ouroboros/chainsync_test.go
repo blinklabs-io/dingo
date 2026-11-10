@@ -5089,10 +5089,14 @@ func TestChainsyncServerLocalClientNotServedAheadOfLedger(t *testing.T) {
 // parkOnByronBoundaryBlock serves block 1 to a local client, appends a Byron
 // epoch-boundary block and its same-slot successor, parks the client on the
 // boundary block, and then publishes the successor as the applied tip, as when
-// the ledger applies both before the waiter wakes.
+// the ledger applies both before the waiter wakes. A non-nil waiting is
+// received from before the tip is published, so the waiter is known to have
+// seen the tip behind the boundary block; otherwise the server may serve the
+// boundary block directly.
 func parkOnByronBoundaryBlock(
 	t *testing.T,
 	f *chainsyncServerFixture,
+	waiting <-chan struct{},
 ) (boundary, successor *testBlock) {
 	t.Helper()
 	block1, point1 := f.appendBlock(t, 1, 1, 0x01)
@@ -5135,6 +5139,9 @@ func parkOnByronBoundaryBlock(
 	require.NoError(t, f.h.RequestNext())
 	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
 	successor, successorPoint := appendChild(boundary, 2, 2, 0x03)
+	if waiting != nil {
+		testutil.RequireReceive(t, waiting, 10*time.Second, "waiter parks")
+	}
 	f.setTip(successor, successorPoint)
 	return boundary, successor
 }
@@ -5156,7 +5163,7 @@ func TestChainsyncServerLocalClientServedByronBoundaryBlockAppliedWithSuccessor(
 		OuroborosConfig{},
 		true,
 	)
-	boundary, successor := parkOnByronBoundaryBlock(t, f)
+	boundary, successor := parkOnByronBoundaryBlock(t, f, nil)
 
 	requireServed := func(want *testBlock) {
 		t.Helper()
@@ -5178,18 +5185,23 @@ func TestChainsyncServerLocalClientUnparkedWhenAppliedTipLookupFails(
 ) {
 	t.Parallel()
 
+	waiting := make(chan struct{})
+	var waitingOnce sync.Once
 	f := newChainsyncServerFixtureServing(
 		t,
 		csmock.ModeNtC,
 		OuroborosConfig{},
 		true,
 		func(o *Ouroboros) {
+			o.chainsyncServerAppliedWaitHook = func() {
+				waitingOnce.Do(func() { close(waiting) })
+			}
 			o.chainsyncServerPrevHashFunc = func(ocommon.Point) ([]byte, error) {
 				return nil, errors.New("injected block lookup failure")
 			}
 		},
 	)
-	parkOnByronBoundaryBlock(t, f)
+	parkOnByronBoundaryBlock(t, f, waiting)
 	f.requireClientUnparked(
 		t,
 		"a failed applied-tip lookup must release the parked client",

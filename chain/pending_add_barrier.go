@@ -102,6 +102,7 @@ type pendingAddBarrier struct {
 type callerTxnAdd struct {
 	tip              ochainsync.Tip
 	tipIndex         uint64
+	rollbackAnchor   uint64
 	generation       uint64
 	headerGeneration uint64
 	headers          []queuedHeader
@@ -328,6 +329,7 @@ func (c *Chain) recordCallerTxnAdd(txn *database.Txn) {
 	c.pendingAdds.record(txn, callerTxnAdd{
 		tip:              c.currentTip,
 		tipIndex:         c.tipBlockIndex,
+		rollbackAnchor:   c.rollbackAnchorBlockIndex,
 		generation:       c.mutationGeneration,
 		headerGeneration: c.headerMutationGeneration,
 		headers:          append([]queuedHeader(nil), c.headers...),
@@ -363,6 +365,7 @@ func (c *Chain) finishCallerTxnAdd(txn *database.Txn) {
 		finishWithdrawal := c.beginWithdrawalLocked()
 		c.currentTip = add.tip
 		c.tipBlockIndex = add.tipIndex
+		c.rollbackAnchorBlockIndex = add.rollbackAnchor
 		c.mutationGeneration = add.generation
 		if c.headerMutationGeneration == add.headerGeneration+1 {
 			c.headerMutationGeneration = add.headerGeneration

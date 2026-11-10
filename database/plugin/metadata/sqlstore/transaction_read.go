@@ -592,6 +592,22 @@ ORDER BY a.slot ` + direction + `, a.block_index ` + direction + `,
 	return s.queryTransactions(ctx, db, query, args)
 }
 
+// metadataLabelPageQuery drives from the label rows so the
+// (label, slot, transaction_id) index supplies slot order and the page stops
+// early. Ordering by the transaction's own slot instead would sort every
+// transaction with the label. A label row's slot equals its transaction's
+// slot, and (transaction_id, label) is unique, so this returns the same rows
+// as an IN subquery.
+func metadataLabelPageQuery(direction string) string {
+	return `SELECT ` + sqliteTransactionColumns + `
+FROM transaction_metadata_label AS ml
+JOIN "transaction" AS t ON t.id = ml.transaction_id
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE ml.label = ?
+ORDER BY ml.slot ` + direction + `, a.block_index ` + direction + `,
+         t.id ` + direction
+}
+
 func (s *Store) GetTransactionsByMetadataLabel(
 	label uint64,
 	limit int,
@@ -607,13 +623,7 @@ func (s *Store) GetTransactionsByMetadataLabel(
 	if descending {
 		direction = "DESC"
 	}
-	query := `SELECT ` + sqliteTransactionColumns + `
-FROM ` + appliedTransactionFrom + `
-WHERE t.id IN (
-    SELECT transaction_id FROM transaction_metadata_label WHERE label = ?
-)
-ORDER BY a.slot ` + direction + `, a.block_index ` + direction + `,
-         t.id ` + direction
+	query := metadataLabelPageQuery(direction)
 	args := []any{strconv.FormatUint(label, 10)}
 	query, args = addLimitOffset(query, args, limit, offset)
 	ret, err := s.queryTransactions(ctx, db, query, args)

@@ -50,7 +50,7 @@ func requireIdentityBackfillBoundsBatches(
 	locker migrations.Locker,
 ) {
 	t.Helper()
-	const identityMigration = 58
+	const identityMigration = 59
 	db, err := OpenDB(driver, dsn, dialectName, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })

@@ -372,6 +372,12 @@ var Manifest = []Index{
 		Notes:   "Metadata label query", Critical: true,
 	},
 	{
+		Name:    "idx_transaction_metadata_label_label_slot",
+		Table:   "transaction_metadata_label",
+		Columns: []string{"label", "slot", "transaction_id"},
+		Notes:   "Metadata label page order", Critical: true,
+	},
+	{
 		Name:    "idx_script_type",
 		Table:   "script",
 		Columns: []string{"type"},

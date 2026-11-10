@@ -298,7 +298,12 @@
 # Internal/private address to bind for listening for Ouroboros NtC
 # privateBindAddr: "127.0.0.1"
 
-# TCP port to bind for listening for Ouroboros NtC
+# TCP port to bind for listening for Ouroboros NtC. 0 (the default) disables
+# the TCP listener, leaving only the Unix socket. The TCP listener has no
+# authentication or file permissions, so who can reach it depends on
+# privateBindAddr: a loopback address limits it to processes in the node's
+# network namespace (in a bridged container, not processes on the host), while
+# a wildcard address lets remote hosts connect. Enable it only when needed.
 # CLI: --private-port
 # privatePort: 3002
 
