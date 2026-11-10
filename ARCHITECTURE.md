@@ -12129,7 +12129,9 @@ set):
 **Remote sign agent** (`kesagent.RemoteClient`). `--shelley-kes-agent-address`
 (`host:port`) signs through a bursa agent's remote sign listener
 (`bursa-attested-kes/1`) instead of a local socket, so the KES key never has
-to be on the producer's host and several producers can share one agent. It
+to be on the producer's host and several producers can share one agent;
+sharing is safe only with an agent that refuses a second header body for a
+slot it has already signed, since one without that guard signs both. It
 implies sign mode and is exclusive with `--shelley-kes-agent-socket` and
 `--shelley-kes-key`. The transport is configuration, and the client logs
 which one it uses at startup (`KES agent link: TLS, pinned server key`,
@@ -12184,11 +12186,21 @@ prepare at most every 30s. It never dials in the caller. On a WAN link the
 pre-connect is required, not an optimisation: at about 95ms round trip, a
 dial and admission take about 400ms and a redial inside a sign about 520ms,
 beyond the 500ms default `shelleyKesAgentSignTimeout`, while a sign on an
-open session takes about one round trip. The
-send-once rule is the same as the local sign mode: a transport or
-verification failure drops the session and is returned, never resent on a new
-connection; an agent refusal (`error` in the response) keeps the session. A
-failed dial or admission backs off before the next attempt. Each signature is
+open session takes about one round trip. A transport or verification failure
+drops the session; an agent refusal (`error` in the response) keeps it. A
+sign that gets no signature back sends the identical header body once more
+(`maxSignSends`), on a new session after a lost reply or on the same session
+after an agent error, while its `SignTimeout` lasts. The agent may already
+have recorded the slot, and it signs a recorded slot again only for the same
+body, so a resend is never a different header. A final refusal
+(`finalSignRefusals`: a different header already signed for the slot, an
+older slot, a period the key has passed or a period below its floor, an
+exhausted key, a message that is not a header for its key) is returned at
+once, and so is a signature that fails verification. The wire protocol
+carries no error code, so the client matches the agent's reason text. A
+resend after a lost reply needs a redial inside the same `SignTimeout`, which
+at the WAN round trip above does not fit the 500ms default. A failed dial or admission backs off before the
+next attempt. Each signature is
 verified against the local operational certificate's KES key by the same
 `validateSignResponse` the local client uses.
 
