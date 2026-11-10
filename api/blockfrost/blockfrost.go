@@ -52,6 +52,8 @@ const (
 	defaultMaxPoolAggregatesPerClient           = 2
 	defaultMaxMetadataLabelPages           uint = 4
 	defaultMaxMetadataLabelPagesPerClient       = 2
+	defaultMaxEpochStakePages              uint = 4
+	defaultMaxEpochStakePagesPerClient          = 2
 )
 
 // Blockfrost is the Blockfrost-compatible REST API server.
@@ -86,6 +88,9 @@ type Blockfrost struct {
 	// pages, whose cost scales with the page offset into a label that can
 	// cover most of the chain.
 	metadataLabelAdmission *requestAdmission
+	// epochStakesAdmission is shared by the epoch stakes pages, which read
+	// the epoch's stake rows and can cover every delegator on the chain.
+	epochStakesAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -152,6 +157,10 @@ func New(
 		metadataLabelAdmission: newRequestAdmission(
 			defaultMaxMetadataLabelPages,
 			defaultMaxMetadataLabelPagesPerClient,
+		),
+		epochStakesAdmission: newRequestAdmission(
+			defaultMaxEpochStakePages,
+			defaultMaxEpochStakePagesPerClient,
 		),
 		listener: apilistener.New("Blockfrost API", logger),
 	}

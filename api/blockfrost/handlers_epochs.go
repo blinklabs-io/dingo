@@ -16,8 +16,10 @@ package blockfrost
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 func epochNumberOrWriteError(
@@ -127,6 +129,71 @@ func (b *Blockfrost) handleEpochPrevious(
 	)
 }
 
+// epochStakesTimeout bounds how long one epoch stakes page may run.
+const epochStakesTimeout = 15 * time.Second
+
+// serveEpochStakesPage serves an epoch stakes list under the epoch stakes
+// admission pool and a deadline. The pagination query is validated before a
+// slot is taken. A full pool answers 429 and a page that outlasts its
+// deadline answers 503, both retryable.
+func serveEpochStakesPage[Item, Response any](
+	b *Blockfrost,
+	w http.ResponseWriter,
+	r *http.Request,
+	epoch uint64,
+	fetch func(context.Context, PaginationParams) ([]Item, int, error),
+	convert func(Item) Response,
+	internalMessage string,
+) {
+	req := withoutOrder(r)
+	params, ok := parsePaginationOrWriteError(w, req)
+	if !ok {
+		return
+	}
+	release, ok := b.epochStakesAdmission.acquire(
+		r.Context(), requestClient(r),
+	)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			"Too Many Requests",
+			"epoch stakes capacity reached, try again later",
+		)
+		return
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(r.Context(), epochStakesTimeout)
+	defer cancel()
+	items, total, err := fetch(ctx, params)
+	if errors.Is(err, context.DeadlineExceeded) {
+		b.logger.Warn(
+			"epoch stakes page exceeded its deadline",
+			"epoch", epoch,
+			"error", err,
+		)
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusServiceUnavailable,
+			"Service Unavailable",
+			"epoch stakes deadline exceeded, try again later",
+		)
+		return
+	}
+	if err != nil {
+		b.writeHistoryError(w, err, internalMessage)
+		return
+	}
+	SetPaginationHeaders(w, total, params)
+	resp := make([]Response, len(items))
+	for i, item := range items {
+		resp[i] = convert(item)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handleEpochStakes handles GET /api/v0/epochs/{number}/stakes.
 func (b *Blockfrost) handleEpochStakes(
 	w http.ResponseWriter,
@@ -136,10 +203,11 @@ func (b *Blockfrost) handleEpochStakes(
 	if !ok {
 		return
 	}
-	servePage(
+	serveEpochStakesPage(
 		b,
 		w,
-		withoutOrder(r),
+		r,
+		epoch,
 		func(ctx context.Context, params PaginationParams) ([]EpochStakeInfo, int, error) {
 			return b.node.EpochStakes(ctx, epoch, params)
 		},
@@ -160,10 +228,11 @@ func (b *Blockfrost) handleEpochPoolStakes(
 	if !ok {
 		return
 	}
-	servePage(
+	serveEpochStakesPage(
 		b,
 		w,
-		withoutOrder(r),
+		r,
+		epoch,
 		func(ctx context.Context, params PaginationParams) ([]EpochPoolStakeInfo, int, error) {
 			return b.node.EpochPoolStakes(
 				ctx, epoch, r.PathValue("pool_id"), params,

@@ -98,6 +98,7 @@ const (
 	blockNonceSlotIndexSchemaRelease                    = "block-nonce-slot-leading-index"
 	rewardOutputIndexReshapeSchemaRelease               = "reward-account-output-index-reshape"
 	metadataLabelSlotIndexSchemaRelease                 = "transaction-metadata-label-slot-index"
+	epochStakesIndexSchemaRelease                       = "reward-stake-input-epoch-registered-index"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -276,6 +277,7 @@ var schemaVersions = []struct {
 	{Version: 56, Name: blockNonceSlotIndexSchemaRelease, Dir: "v56"},
 	{Version: 57, Name: rewardOutputIndexReshapeSchemaRelease, Dir: "v57"},
 	{Version: 58, Name: metadataLabelSlotIndexSchemaRelease, Dir: "v58"},
+	{Version: 59, Name: epochStakesIndexSchemaRelease, Dir: "v59"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

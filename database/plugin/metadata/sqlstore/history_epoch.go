@@ -244,6 +244,30 @@ func (s *Store) blockHashesInSlotRange(
 	return ret, total, nil
 }
 
+// The epoch stake queries are served by
+// idx_reward_stake_input_epoch_registered_pool_cred, whose key leads with their
+// equality terms and ends in the page order, so the count reads only matching
+// index entries and a page needs no sort.
+const epochStakesFrom = " FROM reward_stake_input" +
+	" WHERE epoch = ? AND registered = TRUE"
+
+func epochStakesWhere(withPool bool) string {
+	if withPool {
+		return epochStakesFrom + " AND pool_key_hash = ?"
+	}
+	return epochStakesFrom
+}
+
+func epochStakesCountQuery(withPool bool) string {
+	return "SELECT COUNT(*)" + epochStakesWhere(withPool)
+}
+
+func epochStakesPageQuery(withPool bool) string {
+	return "SELECT pool_key_hash, credential_tag, staking_key, stake" +
+		epochStakesWhere(withPool) +
+		" ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC"
+}
+
 func (s *Store) GetEpochStakes(
 	epoch uint64,
 	poolKeyHash []byte,
@@ -260,25 +284,24 @@ func (s *Store) GetEpochStakes(
 	if err != nil {
 		return nil, 0, err
 	}
-	where := " FROM reward_stake_input WHERE epoch = ? AND registered = TRUE"
 	args := []any{sqlEpoch}
-	if len(poolKeyHash) > 0 {
-		where += " AND pool_key_hash = ?"
+	withPool := len(poolKeyHash) > 0
+	if withPool {
 		args = append(args, poolKeyHash)
 	}
 	var total int
 	if err := db.QueryRowContext(
-		ctx, "SELECT COUNT(*)"+where, args...,
+		ctx, epochStakesCountQuery(withPool), args...,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count epoch stakes: %w", err)
 	}
-	if total == 0 {
-		return ret, 0, nil
+	// A page that starts at or past the total can only be empty, and its
+	// OFFSET would still walk every row before it.
+	if total == 0 || offset >= total {
+		return ret, total, nil
 	}
 	query, queryArgs := addLimitOffset(
-		"SELECT pool_key_hash, credential_tag, staking_key, stake"+where+
-			" ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC",
-		args, limit, offset,
+		epochStakesPageQuery(withPool), args, limit, offset,
 	)
 	rows, err := db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {

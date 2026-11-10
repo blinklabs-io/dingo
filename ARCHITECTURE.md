@@ -15194,7 +15194,7 @@ share a metadata label admission pool (4 active, 2 per client address, 429 with
 deadline (a disconnected client stops the page; an overrun answers 503 with
 `Retry-After`). The page reads the label's rows through the
 `(label, slot, transaction_id)` index, so its cost follows the page offset
-rather than the number of transactions with the label. Pool and account list routes reject
+rather than the number of transactions with the label. `GET /epochs/{number}/stakes` and `GET /epochs/{number}/stakes/{pool_id}` share an epoch stakes admission pool (4 active, 2 per client address, 429 with `Retry-After` when full) and run under the request context and a 15-second deadline (an overrun answers 503 with `Retry-After`). The metadata store counts and pages the rows through the `(epoch, registered, pool_key_hash, credential_tag, staking_key)` index and skips the page query when the offset is at or past the count. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,
