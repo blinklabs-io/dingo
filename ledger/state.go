@@ -958,9 +958,21 @@ type ConnectionLiveFunc func(ouroboros.ConnectionId) bool
 // recently forged a block for a given slot. Chainsync uses it to attribute the
 // local side of same-slot and restricted-window Praos battles.
 type ForgedBlockChecker interface {
-	// WasForgedByUs returns the block hash and true if the local node
-	// forged a block for the given slot, or nil and false otherwise.
-	WasForgedByUs(slot uint64) (blockHash []byte, ok bool)
+	// ForgedBlockHashes returns the hash of every block the local node
+	// forged for the given slot, or nil when it forged none. A node forging
+	// for several pools can hold more than one: two of its pools may lead
+	// the same slot and both forge when the slot arbiter cannot decide.
+	ForgedBlockHashes(slot uint64) [][]byte
+}
+
+// forgedByUs reports whether hash is one of the blocks the local node forged
+// for slot. Every own hash counts, so a second own block in a slot is never
+// taken for a peer's.
+func forgedByUs(checker ForgedBlockChecker, slot uint64, hash []byte) bool {
+	return slices.ContainsFunc(
+		checker.ForgedBlockHashes(slot),
+		func(own []byte) bool { return bytes.Equal(own, hash) },
+	)
 }
 
 // SlotBattleRecorder records slot battle events for metrics.
@@ -10357,10 +10369,11 @@ func (ls *LedgerState) processBlocksFromSource(
 					// The tracker is keyed by slot, so a block that won a
 					// slot battle against ours shares the slot; only an
 					// equal hash makes the tip our block.
-					if forgedHash, forged := checker.WasForgedByUs(
+					if forgedByUs(
+						checker,
 						tipForLog.Point.Slot,
-					); forged &&
-						bytes.Equal(forgedHash, tipForLog.Point.Hash) {
+						tipForLog.Point.Hash,
+					) {
 						source = "forged"
 					}
 				}

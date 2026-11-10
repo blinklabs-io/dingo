@@ -290,14 +290,38 @@ func TestOwnForgedBlocksAnswersForEveryPool(t *testing.T) {
 	own := &ownForgedBlocks{}
 	own.set([]*forging.BlockForger{first, second})
 
-	hash, ok := own.WasForgedByUs(20)
-	require.True(t, ok, "a block of the second pool is the node's own")
-	require.Equal(t, []byte{0x14}, hash)
-	_, ok = own.WasForgedByUs(30)
-	require.False(t, ok)
-	hash, ok = own.WasForgedByUs(10)
-	require.True(t, ok)
-	require.Equal(t, []byte{0x0a}, hash)
+	require.Equal(t, [][]byte{{0x14}}, own.ForgedBlockHashes(20),
+		"a block of the second pool is the node's own")
+	require.Empty(t, own.ForgedBlockHashes(30))
+	require.Equal(t, [][]byte{{0x0a}}, own.ForgedBlockHashes(10))
+}
+
+// When the slot arbiter fails open, two pools that lead one slot both forge
+// it, and the two blocks differ. Either one is the node's own: the ledger
+// must not count a battle against the second, nor treat it as a peer's block
+// when its header fails.
+func TestOwnForgedBlocksAnswersBothBlocksOfASlotTwoPoolsForged(t *testing.T) {
+	t.Parallel()
+	newForger := func() *forging.BlockForger {
+		f, err := forging.NewBlockForger(forging.ForgerConfig{
+			Mode:   forging.ModeDev,
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		})
+		require.NoError(t, err)
+		return f
+	}
+	first, second := newForger(), newForger()
+	first.SlotTracker().RecordForgedBlock(10, []byte{0x0a})
+	second.SlotTracker().RecordForgedBlock(10, []byte{0x0b})
+
+	own := &ownForgedBlocks{}
+	own.set([]*forging.BlockForger{first, second})
+
+	require.ElementsMatch(t,
+		[][]byte{{0x0a}, {0x0b}},
+		own.ForgedBlockHashes(10),
+		"both pools' blocks for the slot are the node's own",
+	)
 }
 
 func TestPoolMetricsRegistryKeepsPoolsApart(t *testing.T) {

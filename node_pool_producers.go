@@ -492,9 +492,10 @@ func (n *Node) wireForgedBlockTracking() {
 type ownForgedBlocks struct {
 	mu      sync.RWMutex
 	forgers []*forging.BlockForger
-	// last is the forger whose block WasForgedByUs last matched. The ledger
-	// records a slot battle right after asking about the slot, so the battle
-	// is counted against the pool whose block fought it.
+	// last is the first forger with a block in the slot ForgedBlockHashes
+	// last found one in. The ledger records a slot battle right after asking
+	// about the slot, so the battle is counted against a pool whose block
+	// fought it.
 	last *forging.BlockForger
 }
 
@@ -505,19 +506,30 @@ func (o *ownForgedBlocks) set(forgers []*forging.BlockForger) {
 	o.last = nil
 }
 
-func (o *ownForgedBlocks) WasForgedByUs(slot uint64) ([]byte, bool) {
+// ForgedBlockHashes returns every pool's block for slot. Two pools that both
+// lead the slot forge it when the slot arbiter fails open, so the slot can
+// hold two blocks of the node's own, with different hashes, and the ledger
+// must recognise either one.
+func (o *ownForgedBlocks) ForgedBlockHashes(slot uint64) [][]byte {
 	o.mu.RLock()
 	forgers := o.forgers
 	o.mu.RUnlock()
+	var hashes [][]byte
+	var first *forging.BlockForger
 	for _, f := range forgers {
 		if hash, ok := f.SlotTracker().WasForgedByUs(slot); ok {
-			o.mu.Lock()
-			o.last = f
-			o.mu.Unlock()
-			return hash, true
+			if first == nil {
+				first = f
+			}
+			hashes = append(hashes, hash)
 		}
 	}
-	return nil, false
+	if first != nil {
+		o.mu.Lock()
+		o.last = first
+		o.mu.Unlock()
+	}
+	return hashes
 }
 
 func (o *ownForgedBlocks) RecordSlotBattle() {

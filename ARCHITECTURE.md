@@ -12502,9 +12502,12 @@ lost slot.
 
 **Own blocks.** The ledger's slot battle checks and the equivocation detector
 treat every pool as the node's own: `ownForgedBlocks` answers
-`WasForgedByUs` from every forger's slot tracker and counts a battle against
-the forger whose block fought it, and every pool ID is labelled
-`self_key="true"`.
+`ForgedBlockHashes` with every forger's block for the slot and counts a battle
+against the first forger with one, and every pool ID is labelled
+`self_key="true"`. A slot can hold two blocks of the node's own when the
+arbiter fails open, so the ledger compares a block against every own hash for
+its slot: the second own block is neither a slot battle nor a peer block for
+the header-failure path to rewind past.
 
 ### Leios Announcement Admission (`ouroboros/`)
 
