@@ -244,10 +244,16 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 ) (block gledger.Block, err error) {
 	// Peer bytes are decoded before the body is compared with the header's
 	// body hash, so refuse a rational the ledger would refuse, whose decode
-	// cost is quadratic in its size, before any decoder runs.
+	// cost is quadratic in its size, before any decoder runs. Only Dijkstra
+	// wire format carries the raw width rule; a Conway-format block is
+	// validated under Conway rules whatever version the ledger reports.
+	rationalWidth := 0
+	if blockType == gledger.BlockTypeDijkstra {
+		rationalWidth = o.peerDecodeLimits(gledger.TxTypeDijkstra).rationalWidth
+	}
 	if err := safedecode.RejectOversizedRationals(
 		raw,
-		o.peerDecodeLimits(0).rationalWidth,
+		rationalWidth,
 	); err != nil {
 		return nil, err
 	}

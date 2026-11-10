@@ -41,7 +41,21 @@ type peerDecodeLimits struct {
 //
 // The protocol version never decreases, so a peer block from a later epoch
 // than the ledger tip is checked against a rule no stricter than its own.
+//
+// The raw rational width is a rule of the Dijkstra wire format only. A network
+// can run protocol version 12 while its early blocks are still Conway format,
+// and the ledger validates those under Conway rules, which accept a wide
+// component that reduces to a valid rational. The ledger's version alone
+// therefore cannot decide it: the transaction's own era does.
 func (o *Ouroboros) peerDecodeLimits(txType uint) peerDecodeLimits {
+	limits := o.ledgerDecodeLimits(txType)
+	if txType != gledger.TxTypeDijkstra {
+		limits.rationalWidth = 0
+	}
+	return limits
+}
+
+func (o *Ouroboros) ledgerDecodeLimits(txType uint) peerDecodeLimits {
 	if o.decodeLimits != nil {
 		return o.decodeLimits(txType)
 	}

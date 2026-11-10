@@ -71,9 +71,9 @@ func withLimits(t *testing.T, limits peerDecodeLimits) *Ouroboros {
 	return o
 }
 
-// from protocol version 12 the ledger requires each rational component to fit a
-// Word64 as written, so peer bytes that break it are refused before the
-// quadratic decode, on both peer decode paths.
+// From protocol version 12 the ledger requires each rational component of a
+// Dijkstra-format value to fit a Word64 as written, so peer bytes that break it
+// are refused before the quadratic decode, on both peer decode paths.
 func TestPeerDecodersRefuseWideRationalsFromVersion12(t *testing.T) {
 	t.Parallel()
 	o := withLimits(t, peerDecodeLimits{rationalWidth: safedecode.Word64Bytes})
@@ -81,21 +81,44 @@ func TestPeerDecodersRefuseWideRationalsFromVersion12(t *testing.T) {
 	t.Run("txsubmission", func(t *testing.T) {
 		t.Parallel()
 		tx := conwayPoolRegistrationTx(t, rationalCbor(1, bytes.Repeat([]byte{1}, 40000)))
-		_, err := o.decodeTxsubmissionTx(gledger.TxTypeConway, tx)
+		_, err := o.decodeTxsubmissionTx(gledger.TxTypeDijkstra, tx)
 		require.ErrorIs(t, err, safedecode.ErrOversizedRational)
 	})
 
 	t.Run("blockfetch", func(t *testing.T) {
 		t.Parallel()
-		for _, blockType := range []uint{
-			gledger.BlockTypeConway,
+		_, err := o.decodeBlockfetchBlock(
 			gledger.BlockTypeDijkstra,
-			gledger.BlockTypeBabbage,
-		} {
-			_, err := o.decodeBlockfetchBlock(blockType, oversizedRationalPayload())
-			require.ErrorIs(t, err, safedecode.ErrOversizedRational)
-		}
+			oversizedRationalPayload(),
+		)
+		require.ErrorIs(t, err, safedecode.ErrOversizedRational)
 	})
+}
+
+// A network such as Musashi reports protocol version 12 while its early blocks
+// are Conway format, which the ledger validates under Conway rules. Those
+// accept a margin of 2^64/2^65, so the Word64 bound must not apply to them.
+func TestPeerDecodersAcceptWideRationalsInConwayFormatAtVersion12(t *testing.T) {
+	t.Parallel()
+	o := withLimits(t, peerDecodeLimits{rationalWidth: safedecode.Word64Bytes})
+	two64 := append([]byte{0xc2, 0x49, 0x01}, make([]byte, 8)...)
+	two65 := append([]byte{0xc2, 0x49, 0x02}, make([]byte, 8)...)
+	margin := append(append([]byte{0xd8, 0x1e, 0x82}, two64...), two65...)
+
+	tx, err := o.decodeTxsubmissionTx(
+		gledger.TxTypeConway,
+		conwayPoolRegistrationTx(t, margin),
+	)
+	require.NoError(t, err)
+	require.Len(t, tx.Certificates(), 1)
+
+	for _, blockType := range []uint{
+		gledger.BlockTypeConway,
+		gledger.BlockTypeBabbage,
+	} {
+		_, err := o.decodeBlockfetchBlock(blockType, oversizedRationalPayload())
+		require.NotErrorIs(t, err, safedecode.ErrOversizedRational)
+	}
 }
 
 // Below protocol version 12 the ledger bounds the reduced rational, so a
