@@ -648,3 +648,75 @@ func TestNeighborBlocksDeepPageAfterBoundaryBlocksStaysBounded(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, blockHashesOf(blocks[1:3]), blockHashesOf(pageBack))
 }
+
+func TestNeighborBlocksPageStartOnPrunedChain(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	specs := []indexedBlock{
+		{1, 0, uint(gledger.BlockTypeByronMain)},
+		{2, 1, uint(gledger.BlockTypeByronMain)},
+		{3, 1, uint(gledger.BlockTypeByronEbb)},
+		{4, 2, uint(gledger.BlockTypeByronMain)},
+	}
+	for i := range 40 {
+		specs = append(specs, indexedBlock{
+			id:     uint64(10 + i),
+			number: uint64(3 + i),
+			typ:    uint(gledger.BlockTypeConway),
+		})
+	}
+	blocks := seedIndexedBlocks(t, db, specs)
+
+	// History expires oldest first; only the last 20 blocks keep their body.
+	expired := blocks[:len(blocks)-20]
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+		for _, block := range expired {
+			if err := db.Blob().TombstoneBlock(
+				txn.Blob(), block.Slot, block.Hash,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+
+	last := len(blocks) - 1
+	got, total, err := adapter.neighborBlocks(
+		t.Context(),
+		hex.EncodeToString(blocks[last].Hash),
+		PaginationParams{Count: 5, Page: 2},
+		false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, blockHashesOf(blocks[last-10:last-5]), blockHashesOf(got))
+	require.Equal(t, int(blocks[last].Number), total)
+}
+
+func TestNeighborBlocksTotalIsStableAcrossPages(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	blocks := seedIndexedBlocks(t, db, []indexedBlock{
+		{1, 1, uint(gledger.BlockTypeByronMain)},
+		{2, 1, uint(gledger.BlockTypeByronEbb)},
+		{3, 2, uint(gledger.BlockTypeByronMain)},
+		{4, 3, uint(gledger.BlockTypeByronMain)},
+	})
+	for _, forward := range []bool{true, false} {
+		origin := blocks[0]
+		if !forward {
+			origin = blocks[3]
+		}
+		totals := map[int]struct{}{}
+		for page := 1; page <= 4; page++ {
+			_, total, err := adapter.neighborBlocks(
+				t.Context(),
+				hex.EncodeToString(origin.Hash),
+				PaginationParams{Count: 1, Page: page},
+				forward,
+			)
+			require.NoError(t, err)
+			totals[total] = struct{}{}
+		}
+		require.Len(t, totals, 1, "forward=%v totals=%v", forward, totals)
+	}
+}

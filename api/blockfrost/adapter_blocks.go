@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // neighborBlocks returns the page of blocks adjacent to the identified block
@@ -36,7 +37,8 @@ import (
 // indexed entries, so gaps in the internal ID space are skipped and a Byron
 // epoch boundary block, which shares its parent's height, is a neighbor of its
 // own. Pages count entries, so the height total can fall short of them by the
-// number of boundary blocks on that side.
+// number of boundary blocks on that side. The total is the same for every page
+// of a request.
 func (a *NodeAdapter) neighborBlocks(
 	ctx context.Context,
 	id string,
@@ -141,9 +143,7 @@ func (a *NodeAdapter) neighborBlocks(
 	if forward == (params.Order == PaginationOrderDesc) {
 		slices.Reverse(ret)
 	}
-	// Blocks sharing a height are listed individually but add nothing to the
-	// height count, so never report fewer than the pages already reached.
-	return ret, max(total, offset+len(ret)), nil
+	return ret, total, nil
 }
 
 func (a *NodeAdapter) blockInfos(ctx context.Context, blocks []models.Block) ([]BlockInfo, error) {
@@ -499,6 +499,53 @@ func isByronBlockType(blockType uint) bool {
 		blockType == gledger.BlockTypeByronMain
 }
 
+// blockHeaderByIndex returns the ID, number and type of the block at an index
+// entry from retained metadata, without its body: the metadata outlives a
+// block's expiry, so locating a page on a pruned chain never needs history
+// that has been removed.
+func blockHeaderByIndex(
+	db *database.Database,
+	txn *database.Txn,
+	index uint64,
+) (models.Block, error) {
+	point, err := db.BlockPointByIndex(index, txn)
+	if err != nil {
+		return models.Block{}, err
+	}
+	return blockHeaderByPoint(txn, point)
+}
+
+// blockHeaderAtOrAfterIndex is blockHeaderByIndex for the first entry at or
+// after index.
+func blockHeaderAtOrAfterIndex(
+	db *database.Database,
+	txn *database.Txn,
+	index uint64,
+) (models.Block, error) {
+	_, point, err := db.BlockPointAtOrAfterIndex(index, txn)
+	if err != nil {
+		return models.Block{}, err
+	}
+	return blockHeaderByPoint(txn, point)
+}
+
+func blockHeaderByPoint(
+	txn *database.Txn,
+	point ocommon.Point,
+) (models.Block, error) {
+	metadata, err := database.BlockMetadataByPointLocalTxn(txn, point)
+	if err != nil {
+		return models.Block{}, err
+	}
+	return models.Block{
+		ID:     metadata.ID,
+		Number: metadata.Height,
+		Type:   metadata.Type,
+		Slot:   point.Slot,
+		Hash:   point.Hash,
+	}, nil
+}
+
 // lastByronBlock returns the last indexed block of the Byron era at or below
 // highestID. Block types never return to an earlier era as the chain grows, so
 // the Byron blocks form a prefix of the index and a binary search finds its
@@ -519,7 +566,7 @@ func lastByronBlock(
 			return models.Block{}, false, err
 		}
 		mid := lo + (hi-lo)/2
-		block, err := db.BlockAtOrAfterIndex(mid, txn)
+		block, err := blockHeaderAtOrAfterIndex(db, txn, mid)
 		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
 			return models.Block{}, false, err
 		}
@@ -601,7 +648,7 @@ func (a *NodeAdapter) forwardPageStart(
 			return cursorID, true, nil
 		}
 		if cursorID != origin.ID {
-			cursor, err = db.BlockByIndex(cursorID, txn)
+			cursor, err = blockHeaderByIndex(db, txn, cursorID)
 			if err != nil {
 				return 0, false, err
 			}
@@ -649,7 +696,7 @@ func (a *NodeAdapter) backwardPageStart(
 			if err != nil {
 				return 0, false, err
 			}
-			first, err = db.BlockByIndex(firstID, txn)
+			first, err = blockHeaderByIndex(db, txn, firstID)
 			if err != nil {
 				return 0, false, err
 			}
