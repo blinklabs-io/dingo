@@ -1537,11 +1537,8 @@ func TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip(
 
 // TestForgeRefusesUnknownUpstreamTargetWhileWallClockIsStale verifies that a
 // live upstream with an unpublished target does not license forging on a tip
-// that trails the wall clock by more than the sync tolerance. This used to
-// assert the opposite (TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale,
-// #4241 anti-wedge); the maintainer ruled that a defect, since a block on that
-// parent can fork the honest chain deeper than k. The sync gate now falls back
-// to the wall clock when the target is unknown.
+// that trails the wall clock by more than the sync tolerance, because a block
+// on that parent can fork the honest chain deeper than k.
 func TestForgeRefusesUnknownUpstreamTargetWhileWallClockIsStale(
 	t *testing.T,
 ) {

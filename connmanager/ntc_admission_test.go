@@ -540,8 +540,8 @@ func TestNtCAdmissionDefaultLimitsBoundRemoteFlood(t *testing.T) {
 	t.Parallel()
 
 	const (
-		total = 100
-		perIP = 5
+		total = DefaultMaxNtCConnections
+		perIP = DefaultMaxNtCConnectionsPerIP
 	)
 	manager := NewConnectionManager(ConnectionManagerConfig{
 		MaxNtCConns:            total,

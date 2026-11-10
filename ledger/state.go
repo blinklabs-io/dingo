@@ -4846,7 +4846,11 @@ func (ls *LedgerState) cleanupConsumedUtxos(ctx context.Context) {
 	// can sit below tip-3k/f, and a rollback of at most k blocks (which the
 	// chain accepts) would then be refused as below the floor. Cap the target at
 	// that block's slot. A chain not yet k blocks deep may be replaced whole, so
-	// no spent row is safe to delete yet.
+	// no spent row is safe to delete yet. The depth is read under
+	// consumedUtxoPruneMutex, which every chain truncation also holds, so a
+	// rollback cannot lower the k-deep point between the lookup and the delete.
+	ls.consumedUtxoPruneMutex.Lock()
+	defer ls.consumedUtxoPruneMutex.Unlock()
 	pruneTarget := tipSlot - stabilityWindow
 	if ls.chain != nil {
 		depthPoint, found, err := ls.chain.PointAtDepth(
@@ -4866,7 +4870,7 @@ func (ls *LedgerState) cleanupConsumedUtxos(ctx context.Context) {
 		}
 		pruneTarget = min(pruneTarget, depthPoint.Slot)
 	}
-	_, _, _ = ls.pruneConsumedUtxosUpTo(
+	_, _, _ = ls.pruneConsumedUtxosLocked(
 		ctx,
 		pruneTarget,
 		stabilityWindow,
@@ -4894,6 +4898,16 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 ) (int, uint64, error) {
 	ls.consumedUtxoPruneMutex.Lock()
 	defer ls.consumedUtxoPruneMutex.Unlock()
+	return ls.pruneConsumedUtxosLocked(ctx, target, stabilityWindow, limit)
+}
+
+// pruneConsumedUtxosLocked is pruneConsumedUtxosUpTo for a caller that already
+// holds consumedUtxoPruneMutex.
+func (ls *LedgerState) pruneConsumedUtxosLocked(
+	ctx context.Context,
+	target, stabilityWindow uint64,
+	limit int,
+) (int, uint64, error) {
 	guardTxn := ls.db.Metadata().ReadTransaction(ctx)
 	pendingFloor, protected, err := pendingRewardStakeInputHistoryFloor(
 		ls.db.Metadata(),

@@ -13093,9 +13093,10 @@ func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(
 }
 
 // Slot grid for the prune-floor fixture. The Shelley genesis used here
-// (k=432, f=0.05) gives a stability window W of 3k/f = 25920 slots, so with a
-// tip at pruneFixtureTipSlot the consumed-UTxO sweep prunes everything with
-// deleted_slot <= pruneFixtureFloorSlot (140000-W).
+// (k=432, f=0.05) gives a stability window W of 3k/f = 25920 slots. The
+// consumed-UTxO sweep prunes up to the lower of tip-W and the slot of the block
+// k deep; the fixture places that block at pruneFixtureFloorSlot, so everything
+// with deleted_slot <= pruneFixtureFloorSlot is pruned.
 //
 // The at-tip rewind schedule then steps the ledger tip 140000 -> 114080 ->
 // 88160. Attempt 2 asks for W/2 below the tip (127040) and findRewindPoint
@@ -14503,4 +14504,39 @@ func TestConsumedUtxoSweepWaitsForKBlocks(t *testing.T) {
 	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
 	require.NoError(t, err)
 	require.Zero(t, floor)
+}
+
+// TestConsumedUtxoSweepReadsDepthAfterRollbackSerializes holds the prune
+// boundary the way a rolling-back caller does, truncates the chain below the
+// point k blocks deep, and then lets a sweep that started earlier run. The
+// sweep must locate the k-deep point after the truncation: a target computed
+// before it would delete rows a rollback from the new, shorter chain can
+// still need to restore.
+func TestConsumedUtxoSweepReadsDepthAfterRollbackSerializes(t *testing.T) {
+	t.Parallel()
+
+	f := newDeepPrunedUtxoFixture(t, 0)
+
+	f.ls.consumedUtxoPruneMutex.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.ls.cleanupConsumedUtxos(context.Background())
+	}()
+	// Give the sweep time to reach the boundary; the assertions hold
+	// whenever it gets there, but only a sweep that already read the depth
+	// can fail them.
+	time.Sleep(300 * time.Millisecond)
+	require.NoError(t, f.ls.chain.Rollback(
+		context.Background(),
+		ocommon.NewPoint(
+			pruneFixtureFloorSlot, testHashBytes("3766-floor"),
+		),
+	))
+	f.ls.consumedUtxoPruneMutex.Unlock()
+	<-done
+
+	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	require.Zero(t, floor, "no spent row is prunable on a chain shorter than k")
 }
