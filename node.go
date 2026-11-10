@@ -591,10 +591,9 @@ func (n *Node) apiPluginSelection(
 // ("0.0.0.0") expose them on every interface; with no lifecycle service
 // mounted, "" is returned unchanged so bark's own existing default behavior
 // (all interfaces) is preserved for deployments only using it for the read-only
-// Archive service. Bind address is a network control, independent of the mTLS
-// client-certificate authentication and operator-fingerprint authorization
-// checks Bark.Start enforces whenever lifecycleEnabled -- this default narrows
-// exposure as defense in depth, it is not what makes those RPCs safe to reach.
+// Archive service. Bark serves every RPC to anonymous callers, so the bind
+// address is the only exposure control: a caller that can reach the listener
+// can invoke the lifecycle RPCs, which is why they default to loopback.
 func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	if configuredHost != "" {
 		return configuredHost
