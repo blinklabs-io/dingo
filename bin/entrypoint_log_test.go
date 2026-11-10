@@ -326,6 +326,19 @@ func TestEntrypointLogFileAppendCreatesMissingFile(t *testing.T) {
 	require.Equal(t, os.FileMode(0o644), info.Mode().Perm())
 }
 
+func TestEntrypointLogFileAppendPreservesExistingMode(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	logPath := filepath.Join(root, "dingo.log")
+	require.NoError(t, os.WriteFile(logPath, []byte("old line\n"), 0o600))
+
+	out, err := runEntrypointWithLogFileRace(t, root, logPath, "", appendEnv)
+	require.NoError(t, err, string(out))
+	info, err := os.Stat(logPath)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
 func TestEntrypointLogFileAppendRefusesSymlink(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

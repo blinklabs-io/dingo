@@ -356,12 +356,24 @@ for my $part (@parts) {
   chdir($dir) or fail("cannot enter $walked: $!");
 }
 my $log;
+my $created = 0;
 if (($ENV{DINGO_LOG_FILE_APPEND} // q()) eq q(true)) {
   # O_RDWR lets the torn-line check read the last byte; O_APPEND still sends
-  # every write to the end of the file.
-  sysopen($log, $name, O_RDWR | O_APPEND | O_CREAT | O_NOFOLLOW, 0644)
-    or fail(-l $name ? "must not be a symlink: $path"
-                     : "cannot open $path: $!");
+  # every write to the end of the file. Opening without O_CREAT first tells
+  # a file this run creates, which gets 0644, from an existing one, whose
+  # mode must be left alone.
+  my $flags = O_RDWR | O_APPEND | O_NOFOLLOW;
+  my $opened = sysopen($log, $name, $flags);
+  if (!$opened && $! == ENOENT) {
+    $opened = sysopen($log, $name, $flags | O_CREAT | O_EXCL, 0644);
+    if ($opened) {
+      $created = 1;
+    } elsif ($! == EEXIST) {
+      $opened = sysopen($log, $name, $flags);
+    }
+  }
+  $opened or fail(-l $name ? "must not be a symlink: $path"
+                           : "cannot open $path: $!");
   -f $log or fail("must name a regular file: $path");
   if (-s $log) {
     sysseek($log, -1, SEEK_END) or fail("cannot seek in $path: $!");
@@ -374,8 +386,11 @@ if (($ENV{DINGO_LOG_FILE_APPEND} // q()) eq q(true)) {
   sysopen($log, $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644)
     or fail($! == EEXIST ? "must name a new file: $path"
                          : "cannot create $path: $!");
+  $created = 1;
 }
-chmod(0644, $log) or fail("cannot set mode on $path: $!");
+if ($created) {
+  chmod(0644, $log) or fail("cannot set mode on $path: $!");
+}
 chdir($cwd) or fail("cannot restore the working directory: $!");
 open(STDOUT, q(>&), $log) or fail("cannot redirect stdout: $!");
 open(STDERR, q(>&), $log) or fail("cannot redirect stderr: $!");
