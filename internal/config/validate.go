@@ -74,6 +74,26 @@ func validateHostPort(addr string) error {
 	return nil
 }
 
+// kesAgentAddressKey returns the listener a remote KES agent address names,
+// for spotting two pools that share one: the host lower-cased and the port as
+// a number, so a zero-padded port that validateHostPort accepts, a host typed
+// in another case and the bracketed IPv6 form all compare equal. An address
+// that does not parse returns "", since validateHostPort reports it already.
+func kesAgentAddressKey(addr string) string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil || host == "" {
+		return ""
+	}
+	p, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || p == 0 {
+		return ""
+	}
+	return net.JoinHostPort(
+		strings.ToLower(host),
+		strconv.FormatUint(p, 10),
+	)
+}
+
 // validateRemoteKESAgent checks a pool's remote KES agent configuration: one
 // KES source only, sign mode, and a transport that can work: the server pin
 // and the client certificate are optional, but need TLS, so plain TCP takes
@@ -211,9 +231,7 @@ func (c *Config) validateBlockProducerPools() []error {
 		// refuses more than one profile per attested listener, so a remote
 		// agent address can serve one pool only. A local socket is not
 		// limited: it serves several pools through its profiles.
-		if addr := strings.ToLower(
-			strings.TrimSpace(p.ShelleyKESAgentAddress),
-		); addr != "" {
+		if addr := kesAgentAddressKey(p.ShelleyKESAgentAddress); addr != "" {
 			if j, dup := agentAddresses[addr]; dup {
 				errs = append(errs, fmt.Errorf(
 					"blockProducerPools[%d] and blockProducerPools[%d] use the same shelleyKesAgentAddress %q: "+

@@ -206,6 +206,25 @@ func TestValidateBlockProducerPoolsRefusesASharedKESAgentAddress(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "bursa#1276")
 
+	// The port is compared as a number: validateHostPort accepts a
+	// zero-padded port, which names the same listener.
+	b.ShelleyKESAgentAddress = "kes-agent.example:03443"
+	require.ErrorContains(
+		t,
+		validate(a, b),
+		"blockProducerPools[0] and blockProducerPools[1] use the same shelleyKesAgentAddress",
+	)
+
+	// An IPv6 literal is compared case-insensitively, its port as a number.
+	a.ShelleyKESAgentAddress = "[2001:DB8::1]:3443"
+	b.ShelleyKESAgentAddress = "[2001:db8::1]:003443"
+	require.ErrorContains(
+		t,
+		validate(a, b),
+		"blockProducerPools[0] and blockProducerPools[1] use the same shelleyKesAgentAddress",
+	)
+	a = remotePool("a")
+
 	b.ShelleyKESAgentAddress = "kes-agent-b.example:3443"
 	require.NoError(t, validate(a, b))
 
