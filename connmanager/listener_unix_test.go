@@ -30,6 +30,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/event"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -443,4 +445,151 @@ func TestStartListener_UnixSocket_CloseSwapDuringTeardownPreservesReplacement(
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "teardown left quarantine data")
+}
+
+func TestCreateUnixSocketListenerRejectsDirectoryAddress(t *testing.T) {
+	dir := unixTestTempDir(t)
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "node"), 0o700))
+	for _, name := range []string{"node/", "node/.", "node/.."} {
+		t.Run(name, func(t *testing.T) {
+			listener, err := createUnixSocketListener(
+				t.Context(),
+				net.ListenConfig{},
+				filepath.Join(dir, "node")+strings.TrimPrefix(name, "node"),
+				0o600,
+				true,
+			)
+			if listener != nil {
+				_ = listener.Close()
+			}
+			require.ErrorContains(t, err, "must name a file")
+		})
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "node"))
+	require.NoError(t, err)
+	require.Empty(t, entries, "rejected address published a socket")
+}
+
+func TestCreateUnixSocketListenerChecksAddressLength(t *testing.T) {
+	dir := unixTestTempDir(t)
+	maxPathLen := len(syscall.RawSockaddrUnix{}.Path) - 1
+	nameLen := maxPathLen - len(dir) - 1
+	if nameLen < 32 {
+		t.Skip("temporary directory leaves no path-length test budget")
+	}
+
+	// The staged path is shorter than the address, so only the address
+	// length distinguishes a dialable socket from an undialable one.
+	listener, err := createUnixSocketListener(
+		t.Context(),
+		net.ListenConfig{},
+		filepath.Join(dir, strings.Repeat("a", nameLen+1)),
+		0o600,
+		true,
+	)
+	if listener != nil {
+		_ = listener.Close()
+	}
+	require.ErrorContains(t, err, "platform limit")
+	entries, readErr := os.ReadDir(dir)
+	require.NoError(t, readErr)
+	require.Empty(t, entries, "rejected address left data behind")
+
+	address := filepath.Join(dir, strings.Repeat("a", nameLen))
+	require.Len(t, address, maxPathLen)
+	listener, err = createUnixSocketListener(
+		t.Context(),
+		net.ListenConfig{},
+		address,
+		0o600,
+		true,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, listener.Close()) })
+	conn, err := net.DialTimeout("unix", address, time.Second)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+}
+
+func TestPublishedUnixListenerReportsPublishedLocalAddr(t *testing.T) {
+	address := unixTestSocketPath(t, unixTestTempDir(t), "local.sock")
+	listener, err := createUnixSocketListener(
+		t.Context(),
+		net.ListenConfig{},
+		address,
+		0o600,
+		true,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, listener.Close()) })
+
+	client, err := net.DialTimeout("unix", address, time.Second)
+	require.NoError(t, err)
+	defer client.Close()
+	accepted, err := listener.Accept()
+	require.NoError(t, err)
+	defer accepted.Close()
+
+	require.Equal(t, address, accepted.LocalAddr().String())
+	_, ok := unwrapConn(accepted).(*net.UnixConn)
+	require.True(t, ok, "the concrete socket must stay reachable")
+
+	wrapped, err := NewUnixConn(accepted)
+	require.NoError(t, err)
+	require.Equal(t, address, wrapped.LocalAddr().String())
+}
+
+func TestStartListener_UnixSocket_InboundEventReportsPublishedAddr(
+	t *testing.T,
+) {
+	address := unixTestSocketPath(t, unixTestTempDir(t), "event.sock")
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Close)
+	_, events := eventBus.Subscribe(InboundConnectionEventType)
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry: prometheus.NewRegistry(),
+		EventBus:     eventBus,
+		Listeners: []ListenerConfig{{
+			ListenNetwork:     "unix",
+			ListenAddress:     address,
+			UseNtC:            true,
+			UnixSocketMode:    0o600,
+			UnixSocketModeSet: true,
+			ConnectionOpts: []ouroboros.ConnectionOptionFunc{
+				ouroboros.WithNetworkMagic(1),
+			},
+		}},
+	})
+	require.NoError(t, cm.Start(t.Context()))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			2*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, cm.Stop(stopCtx))
+	})
+
+	conn, err := net.DialTimeout("unix", address, time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(2*time.Second)))
+	client, err := ouroboros.NewConnection(
+		ouroboros.WithConnection(conn),
+		ouroboros.WithNetworkMagic(1),
+		ouroboros.WithNodeToNode(false),
+	)
+	require.NoError(t, err)
+	defer client.Close()
+
+	select {
+	case evt := <-events:
+		inbound, ok := evt.Data.(InboundConnectionEvent)
+		require.True(t, ok)
+		require.Equal(t, address, inbound.LocalAddr.String())
+		require.Equal(t, address, inbound.ConnectionId.LocalAddr.String())
+	case <-time.After(5 * time.Second):
+		t.Fatal("no inbound connection event")
+	}
 }

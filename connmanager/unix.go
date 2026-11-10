@@ -25,11 +25,12 @@ import (
 // UnixConn is a wrapper around net.UnixConn that provides a unique remote address
 type UnixConn struct {
 	*net.UnixConn
+	localAddr  net.Addr
 	remoteAddr UnixConnAddr
 }
 
 func NewUnixConn(conn net.Conn) (*UnixConn, error) {
-	uConn, ok := conn.(*net.UnixConn)
+	uConn, ok := unwrapConn(conn).(*net.UnixConn)
 	if !ok {
 		return nil, errors.New("connection is not net.UnixConn")
 	}
@@ -55,7 +56,8 @@ func NewUnixConn(conn net.Conn) (*UnixConn, error) {
 		return nil, fmt.Errorf("failed to get socket file descriptor: %w", err)
 	}
 	return &UnixConn{
-		UnixConn: uConn,
+		UnixConn:  uConn,
+		localAddr: conn.LocalAddr(),
 		remoteAddr: UnixConnAddr{
 			addr: fmt.Sprintf(
 				"unix@%d",
@@ -63,6 +65,12 @@ func NewUnixConn(conn net.Conn) (*UnixConn, error) {
 			),
 		},
 	}, nil
+}
+
+// LocalAddr reports the local address of the connection NewUnixConn was given,
+// which a listener may have set to its published path.
+func (u UnixConn) LocalAddr() net.Addr {
+	return u.localAddr
 }
 
 func (u UnixConn) RemoteAddr() net.Addr {

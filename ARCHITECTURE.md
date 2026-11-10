@@ -8967,6 +8967,9 @@ retain their platform ACL policy. Managed socket parents must be owned by the
 process user or root and must not be writable by group or other users; a `0660`
 socket remains shareable from a group-searchable directory. Linux abstract
 Unix sockets retain their kernel-namespace behavior and have no pathname mode.
+A managed socket address must name a file, not end in a path separator, and fit
+in the platform's socket path limit as written. Accepted connections report the
+published path as their local address, never the staging path.
 
 Closing a published Unix listener removes only the socket that listener
 published. Teardown renames the entry into a private directory under the

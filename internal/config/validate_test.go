@@ -80,11 +80,16 @@ func TestValidateUnixSocketModes(t *testing.T) {
 	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 
 	cfg.SocketMode = "0666"
-	require.ErrorContains(
-		t,
-		cfg.validate(cfg.RunMode, minUnprivilegedPort),
-		"socketMode \"0666\" must not permit writes by other users",
-	)
+	if runtime.GOOS == "windows" {
+		// Windows has no group or other permission bits to restrict.
+		require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+	} else {
+		require.ErrorContains(
+			t,
+			cfg.validate(cfg.RunMode, minUnprivilegedPort),
+			"socketMode \"0666\" must not permit writes by other users",
+		)
+	}
 
 	cfg = validTestConfig()
 	cfg.SocketMode = "0000"

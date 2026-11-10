@@ -45,6 +45,32 @@ func (l *publishedUnixListener) Addr() net.Addr {
 	return &net.UnixAddr{Name: l.path, Net: "unix"}
 }
 
+// Accept reports the published path, not the private staging path the
+// socket is actually bound to, as the local address of accepted connections.
+func (l *publishedUnixListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	uConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		_ = conn.Close()
+		return nil, errors.New("unix listener accepted a non-unix connection")
+	}
+	return &publishedUnixConn{UnixConn: uConn, local: l.Addr()}, nil
+}
+
+// publishedUnixConn is an accepted connection whose local address is the
+// published socket path. Unwrap keeps the concrete *net.UnixConn reachable.
+type publishedUnixConn struct {
+	*net.UnixConn
+	local net.Addr
+}
+
+func (c *publishedUnixConn) LocalAddr() net.Addr { return c.local }
+
+func (c *publishedUnixConn) Unwrap() net.Conn { return c.UnixConn }
+
 func (l *publishedUnixListener) Close() error {
 	return errors.Join(
 		l.Listener.Close(),
@@ -191,6 +217,26 @@ func createUnixSocketListener(
 			mode,
 		)
 	}
+	// Staging places the socket at a different path than the one bound, so
+	// the address itself must name a file and fit in sockaddr_un: a trailing
+	// separator would publish the socket inside the directory it names, and
+	// a final component longer than the staging name would pass the staged
+	// path check yet be undialable.
+	maxPathLen := len(unix.RawSockaddrUnix{}.Path) - 1
+	if len(address) > maxPathLen {
+		return nil, fmt.Errorf(
+			"unix socket path is %d bytes; platform limit is %d",
+			len(address),
+			maxPathLen,
+		)
+	}
+	if strings.HasSuffix(address, "/") || strings.HasSuffix(address, "/.") ||
+		strings.HasSuffix(address, "/..") || address == "." || address == ".." {
+		return nil, fmt.Errorf(
+			"unix socket path %q must name a file, not a directory",
+			address,
+		)
+	}
 
 	parent := filepath.Dir(address)
 	base := filepath.Base(address)
@@ -220,7 +266,6 @@ func createUnixSocketListener(
 		_ = os.Remove(stagingDir)
 	}
 	defer removeStaging()
-	maxPathLen := len(unix.RawSockaddrUnix{}.Path) - 1
 	if len(stagedPath) > maxPathLen {
 		return nil, fmt.Errorf(
 			"secure unix socket staging path is %d bytes; platform limit is %d; shorten the parent directory by at least %d bytes",

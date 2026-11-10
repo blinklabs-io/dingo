@@ -416,8 +416,8 @@ func (c *ConnectionManager) setupAcceptedConnection(
 
 	// Preserve the Unix socket identity before applying the write and handshake
 	// wrappers so remote-address reporting and socket-specific helpers still work.
-	if uConn, ok := conn.(*net.UnixConn); ok {
-		tmpConn, err := NewUnixConn(uConn)
+	if _, ok := unwrapConn(conn).(*net.UnixConn); ok {
+		tmpConn, err := NewUnixConn(conn)
 		if err != nil {
 			c.config.Logger.Error("listener: accept failed", "error", err)
 			closeConnAndLog(c.config.Logger, conn, "listener: close failed")
