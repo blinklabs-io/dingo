@@ -5050,8 +5050,8 @@ same slot and diffuses them together, the ranking block otherwise reaches
 cache lookup misses; to close this ordering gap, batch delivery is gated
 upstream by `ensureReferencedEndorserBlocks` (`ledger/leios_apply.go`), which —
 at the chain tip only (`IsAtTip`) and before the block-processing DB transaction
-opens — waits up to the Leios certify-by deadline for each referenced endorser
-block's fetch to complete. That window is
+opens — waits up to the Leios certify-by deadline for each certified closure the
+batch applies (the only endorser blocks application reads) to be fetched. That window is
 `LedgerStateConfig.EndorserBlockWaitSlots`, sourced from the pipeline timing's
 `CertifyByDeadlineSlots` (the wire mini-protocol specs define no timeout, so the
 override-able `PipelineTiming` struct is the timing source) and converted to
@@ -5079,10 +5079,11 @@ certificate-driven: only the endorser block a certifying ranking block certifies
 is fetched — the one announced by the CertRB's parent (prevHash), resolved from
 the in-batch announcement index or the block store — and uncertified historical
 announcements are skipped, since they are never applied and the relay does not
-reliably serve them. Near the head, current announcements are prefetched in the
-background for voting and later certification, and a CertRB also fetches its
-parent announcement, because one block may both certify and announce; only the
-certified closures the batch applies are waited for
+reliably serve them. Near the head, notify offers drive prefetch for voting and
+later certification: a header announcement alone does not establish that its
+sender holds the EB body. The ledger does not start a by-point fetch for an
+unread announcement. A CertRB still actively fetches its parent announcement
+and waits for that certified closure before application
 (`splitTipWaitByApplyDependency`).
 
 Historical application in the chain-iterator loop can commit a fully available
@@ -5188,9 +5189,9 @@ only from the point the node starts. The remaining dependency is relay
 availability: the prototype relay's by-point responses are reliable when it is
 idle but can turn flaky — empty manifests — when one connection also carries
 blockfetch, so the backfiller fetches across every connected leios-fetch peer
-(`connmanager.LeiosFetchConnectionIds`). Best-effort announcement prefetches may
-still advance when no peer fully serves an endorser block, but a certified
-closure is mandatory: `fetchRequired` retries a bounded number of all-peer
+(`connmanager.LeiosFetchConnectionIds`). The ledger fetches no uncertified
+announcement, so an endorser block no peer serves cannot hold the sync back
+until a certificate names it, but a certified closure is mandatory: `fetchRequired` retries a bounded number of all-peer
 sweeps within `leiosBackfillMaxWait`, deduplicates with any `spawn` fetch
 already in flight for the same (slot, hash), and returns the last fetch error
 when the closure remains unavailable. The block transaction is not opened until
@@ -5291,7 +5292,8 @@ transaction; a provider lacking the capability uses the existing immediate path.
 This does not activate the trusted UTxO overlay for Dijkstra.
 
 **Certified-closure consistency gate:** a certified EB is held to a stricter
-rule than the best-effort announcement prefetch described above.
+rule than a current announcement, which application never reads and which the
+ledger neither waits for nor fetches (leios-notify offers drive that prefetch).
 `ensureReferencedEndorserBlocks` resolves every CertRB's parent announcement and
 requires the complete certified EB to be cached before opening the block
 transaction. It checks only the blocks that transaction applies: a batch that
@@ -5314,7 +5316,7 @@ parameters). A block at exactly that slot may certify.
 `LedgerState.CheckLeiosCertificationTiming` is the single decision; ledger
 admission applies it before the certificate is verified, and the forger applies
 it to each eligible certificate before selecting one. Uncertified current
-announcements remain best-effort prefetches. This prevents historical catch-up
+announcements are neither waited for nor fetched by the ledger. This prevents historical catch-up
 from silently omitting pool registrations, delegations, UTxOs, or other
 certified transaction effects that only become visible as a fatal state gap when
 near-tip validation starts. Databases created by a version that already skipped
@@ -5583,8 +5585,9 @@ traffic on the shared muxer can delay the relay's pong past 10s, and dropping
 the only relay then costs a reconnect and fork rollback, so dingo tolerates a
 slow-but-alive relay instead. It is left unset (0) on other networks, where the
 10s default still evicts genuinely dead peers quickly. Tip prefetch on
-leios-notify offers is suppressed while the node is far behind the chain tip
-(`SlotsBehindHead` beyond a small lag bound), so a deep catch-up does not
+leios-notify offers, the only prefetch of an uncertified current announcement,
+is suppressed while the node is far behind the chain tip (`SlotsBehindHead`
+beyond a small lag bound), so a deep catch-up does not
 contend the connection fetching current-tip endorser blocks it will not apply
 for hours; the historical references it actually needs are driven by the
 backfiller (see "Era-Specific Validation"). A complete endorser block is then
@@ -10893,8 +10896,24 @@ goes unanswered for 20 seconds, so after `blockingReplyWait` (10 seconds) the
 answer is `MsgReplyNoIDs` and the peer asks again. A run against dmq-node showed
 the connection being dropped every 20 seconds until it did. Messages that
 expired, and messages the peer itself announced (kept in a bounded `idSet`), are
-passed over, so a message is not announced back to where it came from. A body
-request returns the messages the pool still holds, which may be fewer than
+passed over, so a message is not announced back to where it came from. A
+connection's `poolPacer` also spaces one pool's messages by
+`dmq.minPoolMessageInterval` plus one second of slack (60 seconds; zero turns it
+off): dmq-node ends the
+whole connection when a pool's message reaches it sooner than its minimum
+signature delay after that pool's previous one (`SigTooFrequent`), and redialing
+offers the same message again. The pacer records when each pool's message was
+announced, keeps a later one from the same pool, and announces it once the
+interval and the slack have passed. The slack is there because dmq-node times
+the gap from when each message reaches it: a run against dmq-node 0.7.2.1 was
+refused at 59.998 seconds without it; other pools' messages are announced past it. A held
+message that expires, or that the peer announced meanwhile, is dropped without
+using up its pool's interval, and at most 256 messages are held per connection:
+past that the connection stops reading ahead in the pool. A blocking
+request that has only held messages to answer waits for the first to fall due as
+well as for `AddedSignal`. The spacing is per connection and applies on
+announcement only, so admission, and the local notification feed, are
+unchanged. A body request returns the messages the pool still holds, which may be fewer than
 asked. The window of announced IDs, and the rules for it, are
 `sigsub_protocol.go`'s: a blocking request only with nothing left
 unacknowledged, no zero request, acknowledgements within what is outstanding,
