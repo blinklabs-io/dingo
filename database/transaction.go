@@ -643,7 +643,7 @@ func (d *Database) consumedUtxoSpendState(
 	}
 	return &models.UtxoSpendState{
 		DeletedSlot: utxo.DeletedSlot,
-		SpentAtTxId: utxo.SpentAtTxId,
+		SpentAtTxHash: utxo.SpentAtTxHash,
 	}, nil
 }
 
@@ -706,7 +706,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			// Without this, metadata.SetTransaction's batch consume
 			// would fail with ErrUtxoConflict and rollback cleanup
 			// could not restore the row.
-			if existingUtxo.SpentAtTxId == nil &&
+			if existingUtxo.SpentAtTxHash == nil &&
 				existingUtxo.DeletedSlot == point.Slot {
 				if err := d.utxoStore().SetUtxoDeletedAtSlot(
 					input,
@@ -733,7 +733,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 		// recovery rather than reconstructing a row the flush will write.
 		// This check is deliberately after the existing-row repair above so a
 		// partially-written row from a resumed backfill (DeletedSlot ==
-		// point.Slot, SpentAtTxId == nil) still gets its spender link
+		// point.Slot, SpentAtTxHash == nil) still gets its spender link
 		// backfilled — batchSpendUtxos only updates rows where deleted_slot
 		// = 0 and would not fix it later.
 		if inFlight != nil &&
@@ -834,14 +834,14 @@ func (d *Database) ensureGapConsumedUtxos(
 		if existingUtxo != nil {
 			// Already spent by this same transaction: idempotent
 			// re-processing of the same gap block is a no-op.
-			if existingUtxo.SpentAtTxId != nil &&
-				bytes.Equal(existingUtxo.SpentAtTxId, spenderTxHash) {
+			if existingUtxo.SpentAtTxHash != nil &&
+				bytes.Equal(existingUtxo.SpentAtTxHash, spenderTxHash) {
 				continue
 			}
 			// Live rows from an earlier gap block or snapshot need to
 			// be consumed now. Same-slot deleted rows with a missing
-			// SpentAtTxId need their consumer link backfilled.
-			if existingUtxo.SpentAtTxId == nil &&
+			// SpentAtTxHash need their consumer link backfilled.
+			if existingUtxo.SpentAtTxHash == nil &&
 				(existingUtxo.DeletedSlot == 0 ||
 					existingUtxo.DeletedSlot == point.Slot) {
 				if err := d.utxoStore().SetUtxoDeletedAtSlot(
@@ -892,7 +892,7 @@ func (d *Database) ensureGapConsumedUtxos(
 			)
 		}
 		recoveredUtxo.DeletedSlot = point.Slot
-		recoveredUtxo.SpentAtTxId = append(
+		recoveredUtxo.SpentAtTxHash = append(
 			[]byte(nil),
 			spenderTxHash...,
 		)

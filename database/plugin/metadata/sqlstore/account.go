@@ -1538,7 +1538,7 @@ SELECT EXISTS (
     JOIN pool p ON p.id = rt.pool_id
     JOIN epoch e ON e.epoch_id = rt.epoch
     LEFT JOIN certs c ON c.id = rt.certificate_id
-    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    LEFT JOIN applied_transaction t ON t.tx_id = c.transaction_id
     WHERE p.pool_key_hash = ?
       AND rt.added_slot <= ?
       AND e.start_slot > ?
@@ -1547,7 +1547,7 @@ SELECT EXISTS (
           SELECT 1
           FROM pool_registration pr
           LEFT JOIN certs c2 ON c2.id = pr.certificate_id
-          LEFT JOIN "transaction" t2 ON t2.id = c2.transaction_id
+          LEFT JOIN applied_transaction t2 ON t2.tx_id = c2.transaction_id
           WHERE pr.pool_id = rt.pool_id
             AND pr.added_slot < e.start_slot
             AND (
@@ -1563,7 +1563,7 @@ SELECT EXISTS (
           SELECT 1
           FROM pool_retirement rt2
           LEFT JOIN certs c3 ON c3.id = rt2.certificate_id
-          LEFT JOIN "transaction" t3 ON t3.id = c3.transaction_id
+          LEFT JOIN applied_transaction t3 ON t3.tx_id = c3.transaction_id
           WHERE rt2.pool_id = rt.pool_id
             AND rt2.id <> rt.id
             AND rt2.added_slot < e.start_slot
@@ -1613,7 +1613,7 @@ SELECT event.added_slot, COALESCE(tx.block_index, 0),
        COALESCE(certs.cert_index, 0), `+valueExpr+`, `+typeExpr+`
 FROM `+table+` event
 LEFT JOIN certs ON certs.id = event.certificate_id
-LEFT JOIN "transaction" tx ON tx.id = certs.transaction_id
+LEFT JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
 WHERE event.credential_tag = ? AND event.staking_key = ?
   AND event.added_slot <= ?
 ORDER BY event.added_slot DESC, COALESCE(tx.block_index, 0) DESC,

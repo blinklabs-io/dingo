@@ -201,7 +201,7 @@ func TestUtxoSpentWithoutSpenderRowReadsItsLegacySpenderHash(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, utxo)
 	require.Equal(t, uint64(500), utxo.DeletedSlot)
-	require.Equal(t, bytes32(0xc8), []byte(utxo.SpentAtTxId))
+	require.Equal(t, bytes32(0xc8), []byte(utxo.SpentAtTxHash))
 
 	live, err := store.GetUtxo(hash, 0, nil)
 	require.NoError(t, err)

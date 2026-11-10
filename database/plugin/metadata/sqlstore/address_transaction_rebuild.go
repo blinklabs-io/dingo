@@ -142,10 +142,11 @@ func (s *Store) addressTransactionRebuildPage(
 	cursor int64,
 ) ([]models.Transaction, error) {
 	rows, err := s.readDB.QueryContext(ctx, s.dialect.Rebind(`
-SELECT source.transaction_id, tx.hash, tx.block_hash, tx.slot, tx.block_index,
+SELECT source.transaction_id, txh.hash, tx.block_hash, tx.slot, tx.block_index,
        tx.valid
 FROM address_transaction_rebuild_source source
-LEFT JOIN "transaction" tx ON tx.id = source.transaction_id
+LEFT JOIN "transaction" txh ON txh.id = source.transaction_id
+LEFT JOIN applied_transaction tx ON tx.tx_id = txh.id
 WHERE source.transaction_id > ?
 ORDER BY source.transaction_id
 LIMIT ?`), cursor, addressTransactionRebuildBatchSize)

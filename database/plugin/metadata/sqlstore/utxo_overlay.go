@@ -53,15 +53,17 @@ import (
 //     again on the per-row path, which repairs conflicting rows.
 
 const (
-	// overlayPrefetchChunk keys use four bind parameters each: the
-	// prefetch query binds every key once per UNION ALL arm.
-	overlayPrefetchChunk = 249
+	// overlayPrefetchChunk keys use two bind parameters each.
+	overlayPrefetchChunk = 400
 	// overlayUtxoInsertColumns is the explicit-id utxo insert width; the
-	// dialect's conservative SQLite bound fits 62 rows.
-	overlayUtxoInsertColumns = 16
+	// dialect's conservative SQLite bound fits 76 rows.
+	overlayUtxoInsertColumns = 13
 	overlayMarkChunk         = 333
 	overlayPointerColumns    = 4
-	overlayTxColumns         = 11
+	// overlayIdentityColumns and overlayAppliedColumns are the widths of
+	// the explicit-id transaction and applied_transaction inserts.
+	overlayIdentityColumns = 2
+	overlayAppliedColumns  = 10
 )
 
 var assetWithIDShape = rowShape{
@@ -137,11 +139,15 @@ type overlayStats struct {
 	TransactionWrites int
 }
 
-// overlayTransaction is a staged "transaction" row: its id and the values
-// of the per-row path's insert, in transactionBatchInsertSQL's order.
+// overlayTransaction is a staged transaction: its row id and the values of
+// the per-row path's insert, the hash first and then the applied_transaction
+// columns in appliedTransactionInsertSQL's order. existing reports that the
+// identity row was stored before the batch, which is how an imported
+// output's producer arrives; only its applied row is written.
 type overlayTransaction struct {
-	id     int64
-	values []any
+	id       int64
+	values   []any
+	existing bool
 }
 
 type utxoOverlay struct {
@@ -355,12 +361,14 @@ func transactionChildTables(
 	return tables, rows.Err()
 }
 
-// stageTransaction queues a "transaction" row with the id the per-row
-// path's AUTOINCREMENT insert would assign, in apply order: nothing else
-// inserts into the table inside a trusted batch, and the explicit-id insert
-// raises sqlite_sequence to the highest id as that insert would.
-// hash and rest are transactionBatchInsertSQL's arguments.
+// stageTransaction queues a transaction with the id the per-row path's
+// insert would give it, in apply order. A hash that already has an identity
+// row keeps that row's id, existingID. Otherwise the id is the next
+// AUTOINCREMENT value: nothing else inserts into the table inside a trusted
+// batch, and the explicit-id insert raises sqlite_sequence to the highest id
+// as that insert would. hash and rest are the per-row insert's arguments.
 func (o *utxoOverlay) stageTransaction(
+	existingID int64,
 	hash []byte,
 	rest ...any,
 ) (int64, error) {
@@ -372,12 +380,41 @@ func (o *utxoOverlay) stageTransaction(
 	}
 	o.mutations++
 	o.txHashes[string(hash)] = struct{}{}
-	o.txSeq++
+	id := existingID
+	if existingID == 0 {
+		o.txSeq++
+		id = o.txSeq
+	}
 	o.txPending = append(o.txPending, overlayTransaction{
-		id: o.txSeq, values: append([]any{hash}, rest...),
+		id:       id,
+		values:   append([]any{hash}, rest...),
+		existing: existingID != 0,
 	})
 	o.stats.Transactions++
-	return o.txSeq, nil
+	return id, nil
+}
+
+// existingTransactionID is the row id of the identity row of hash, or zero
+// when the store has none. It reads rows stored before the batch, which no
+// staged row changes, so like lookupInput it skips the read barrier.
+func (s *Store) existingTransactionID(
+	ctx context.Context,
+	db queryer,
+	o *utxoOverlay,
+	hash []byte,
+) (int64, error) {
+	flushing := o.flushing
+	o.flushing = true
+	defer func() { o.flushing = flushing }()
+	var id int64
+	err := s.queryRowCached(ctx, db, transactionIdentityIDSQL, hash).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("find transaction identity: %w", err)
+	}
+	return id, nil
 }
 
 // needsTransactions reports whether query names "transaction" or a table
@@ -408,20 +445,33 @@ func writeOverlayTransactions(
 	}
 	o.mutations++
 	o.stats.TransactionWrites++
-	args := make([]any, 0, len(o.txPending)*overlayTxColumns)
+	var identities, applied []any
 	for _, row := range o.txPending {
-		args = append(append(args, row.id), row.values...)
+		if !row.existing {
+			identities = append(identities, row.id, row.values[0])
+		}
+		applied = append(applied, row.id)
+		applied = append(applied, row.values[1:]...)
 	}
-	err := execChunked(ctx, db, args, overlayTxColumns, func(rows int) string {
-		return `-- name: BatchOverlayInsertTransactions :exec
-INSERT INTO "transaction" (
-    id, hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES ` + strings.TrimSuffix(strings.Repeat(
-			"(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), ", rows), ", ")
+	// The identity rows go first: applied_transaction references them.
+	err := execChunked(ctx, db, identities, overlayIdentityColumns, func(rows int) string {
+		return `-- name: BatchOverlayInsertTransactionIdentities :exec
+INSERT INTO "transaction" (id, hash) VALUES ` + strings.TrimSuffix(
+			strings.Repeat("(?, ?), ", rows), ", ")
 	})
 	if err != nil {
 		return overlayWriteError("insert batch transaction rows", err)
+	}
+	err = execChunked(ctx, db, applied, overlayAppliedColumns, func(rows int) string {
+		return `-- name: BatchOverlayInsertAppliedTransactions :exec
+INSERT INTO applied_transaction (
+    tx_id, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES ` + strings.TrimSuffix(strings.Repeat(
+			"(?, ?, ?, ?, ?, ?, ?, ?, ?, ?), ", rows), ", ")
+	})
+	if err != nil {
+		return overlayWriteError("insert batch applied transaction rows", err)
 	}
 	o.txPending = nil
 	return nil
@@ -455,26 +505,19 @@ func (s *Store) overlayTransactionBarrier(
 	return nil
 }
 
-// overlayPrefetchQuery reads pre-batch rows by key. CROSS JOIN fixes the
-// loop order and INDEXED BY the index: without both, sqlite_stat1's view of
-// the liveness columns drives SQLite to a deleted_slot index (see
-// consumeUtxosBatchQuery). TestBatchUtxoOverlayStatementPlans pins the plan.
+// overlayPrefetchQuery reads pre-batch rows by key. CROSS JOIN fixes the loop
+// order: the transaction hash index, then the unique output index. Without it
+// sqlite_stat1's view of the liveness columns can drive SQLite to a
+// deleted_slot index (see consumeUtxosBatchQuery).
+// TestBatchUtxoOverlayStatementPlans pins the plan.
 func overlayPrefetchQuery(keys int) string {
 	values := strings.TrimSuffix(strings.Repeat("(?, ?), ", keys), ", ")
-	const columns = `u.id, u.tx_id, u.output_idx, u.credential_tag, ` +
-		`u.staking_key, u.amount, u.deleted_slot, u.spent_by_tx_id`
 	return `-- name: BatchOverlayPrefetchInputs :many
-SELECT ` + columns + `
+SELECT u.id, t.hash, u.output_idx, u.credential_tag,
+       u.staking_key, u.amount, u.deleted_slot, u.spent_at_tx_id
 FROM (VALUES ` + values + `) AS k
 CROSS JOIN "transaction" AS t ON t.hash = k.column1
-CROSS JOIN utxo AS u INDEXED BY idx_utxo_producer_output
-  ON u.producer_tx_id = t.id AND u.output_idx = k.column2
-UNION ALL
-SELECT ` + columns + `
-FROM (VALUES ` + values + `) AS k
-CROSS JOIN utxo AS u INDEXED BY idx_utxo_imported_ref
-  ON u.tx_id = k.column1 AND u.output_idx = k.column2
-WHERE u.transaction_id IS NULL AND u.collateral_return_for_tx_id IS NULL`
+CROSS JOIN utxo AS u ON u.tx_id = t.id AND u.output_idx = k.column2`
 }
 
 func prefetchOverlayInputs(
@@ -504,7 +547,7 @@ func prefetchOverlayInputs(
 			args = append(args, key.Hash, key.Idx)
 		}
 		rows, err := db.QueryContext(
-			ctx, overlayPrefetchQuery(len(chunk)), append(args, args...)...,
+			ctx, overlayPrefetchQuery(len(chunk)), args...,
 		)
 		if err != nil {
 			return err
@@ -668,7 +711,7 @@ func (o *utxoOverlay) consume(
 			out.spentSlot = slot
 			if o.retainHistory {
 				out.model.DeletedSlot = slot
-				out.model.SpentAtTxId = out.spentBy
+				out.model.SpentAtTxHash = out.spentBy
 				if out.written {
 					o.marks = append(
 						o.marks,
@@ -762,7 +805,7 @@ func overlayConflict(
 	txID int64,
 ) error {
 	return fmt.Errorf(
-		"%w: %x:%d (already spent_by_tx_id=%d deleted_slot=%d, this_tx_id=%d)",
+		"%w: %x:%d (already spent_at_tx_id=%d deleted_slot=%d, this_tx_id=%d)",
 		types.ErrUtxoConflict,
 		input.Hash,
 		input.Idx,
@@ -874,59 +917,24 @@ func (s *Store) insertOverlayUtxos(
 	) + ")"
 	for start := 0; start < len(outputs); start += perStatement {
 		end := min(start+perStatement, len(outputs))
-		produced := make([]*models.Utxo, 0, end-start)
-		for _, out := range outputs[start:end] {
-			produced = append(produced, &out.model)
-		}
-		// The inserts carry no conflict clause, and no unique index spans a
-		// produced output and an imported row of the same output, so the
-		// latter is looked up here.
-		existing, err := s.existingUtxoRefs(ctx, db, produced)
-		if err != nil {
-			return err
-		}
-		for _, utxo := range produced {
-			if _, dup := existing[utxoIdentityKey(
-				utxo.TxId, utxo.OutputIdx,
-			)]; dup {
-				return fmt.Errorf(
-					"%w: a produced output is already stored by an import",
-					types.ErrBatchUtxoOverlayConflict,
-				)
-			}
-		}
 		args := make([]any, 0, (end-start)*overlayUtxoInsertColumns)
 		for _, out := range outputs[start:end] {
 			params, err := createUtxoParams(&out.model)
 			if err != nil {
 				return err
 			}
-			args = append(args,
-				out.id,
-				params.TransactionID,
-				params.CollateralReturnForTxID,
-				params.TxID,
-				params.PaymentKey,
-				params.StakingKey,
-				params.CredentialTag,
-				params.DatumHash,
-				overlaySpentByArg(out),
-				nullBytes(params.ReferencedByTxID),
-				nullBytes(params.CollateralByTxID),
-				params.AddedSlot,
-				params.DeletedSlot,
-				params.Amount,
-				params.OutputIdx,
-				params.PaymentScript,
-			)
+			params.SpentAtTxID = sql.NullInt64{}
+			if spender := overlaySpentByArg(out); spender != nil {
+				params.SpentAtTxID = sql.NullInt64{
+					Int64: spender.(int64), Valid: true,
+				}
+			}
+			args = append(args, out.id)
+			args = append(args, params.args()...)
 			o.utxoWritten = max(o.utxoWritten, out.id)
 		}
 		query := `-- name: BatchOverlayInsertUtxos :exec
-INSERT INTO utxo (
-    id, transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_by_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
+INSERT INTO utxo (id,` + utxoInsertColumns + `
 ) VALUES ` + strings.TrimSuffix(strings.Repeat(row+", ", end-start), ", ")
 		if _, err := db.ExecContext(ctx, query, args...); err != nil {
 			return overlayWriteError("insert batch UTxO rows", err)
@@ -982,7 +990,7 @@ VALUES ` + strings.TrimSuffix(strings.Repeat("(?, ?, ?, ?), ", rows), ", ")
 // a candidate.
 func overlayMarkQuery(rows int) string {
 	return `-- name: BatchOverlayMarkSpent :exec
-UPDATE utxo SET deleted_slot = v.column2, spent_by_tx_id = v.column3
+UPDATE utxo SET deleted_slot = v.column2, spent_at_tx_id = v.column3
 FROM (VALUES ` +
 		strings.TrimSuffix(strings.Repeat("(?, ?, ?), ", rows), ", ") + `) AS v
 WHERE utxo.id = v.column1`

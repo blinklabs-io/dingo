@@ -92,7 +92,7 @@ func TestSpendStoresSpenderTransactionID(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, spent)
 			require.Equal(
-				t, fx.tx.Hash().Bytes(), []byte(spent.SpentAtTxId),
+				t, fx.tx.Hash().Bytes(), []byte(spent.SpentAtTxHash),
 				"the model must still carry the spender's hash",
 			)
 
@@ -155,7 +155,7 @@ func TestInsertWithUnknownSpenderFails(t *testing.T) {
 	err := store.CreateUtxo(nil, &models.Utxo{
 		TxId:        bytes32(0x61),
 		DeletedSlot: 5,
-		SpentAtTxId: bytes32(0x62),
+		SpentAtTxHash: bytes32(0x62),
 	})
 	require.ErrorContains(t, err, "spender transaction")
 	var count int
@@ -213,7 +213,7 @@ func TestUnresolvedLegacySpenderIsReadAndClearedOnRestore(t *testing.T) {
 	state, err := store.GetUtxoSpendState(txID, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	require.Equal(t, spender, []byte(state.SpentAtTxId))
+	require.Equal(t, spender, []byte(state.SpentAtTxHash))
 
 	require.NoError(t, store.SetUtxosNotDeletedAfterSlot(5, nil))
 	row := readSpenderRow(t, store, txID)

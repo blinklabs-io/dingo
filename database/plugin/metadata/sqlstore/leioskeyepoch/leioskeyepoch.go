@@ -312,7 +312,7 @@ const executionSlotSQL = `COALESCE((
 // registrationBlockIndex is the block index of a registration's transaction,
 // zero for a synthesized row with no certificate.
 const registrationBlockIndex = `COALESCE((
-    SELECT tx.block_index FROM "transaction" tx WHERE tx.id = c.transaction_id
+    SELECT tx.block_index FROM applied_transaction tx WHERE tx.tx_id = c.transaction_id
 ), 0)`
 
 // registrationSelect lists the columns scanRegistration reads, aliased so a
@@ -601,7 +601,7 @@ SELECT rt.epoch, rt.added_slot, COALESCE(t.block_index, 0) AS block_index,
        COALESCE(c.cert_index, 0) AS cert_index
 FROM pool_retirement rt
 LEFT JOIN certs c ON c.id = rt.certificate_id
-LEFT JOIN "transaction" t ON t.id = c.transaction_id
+LEFT JOIN applied_transaction t ON t.tx_id = c.transaction_id
 WHERE rt.pool_id = ?`
 
 const retirementOrder = `

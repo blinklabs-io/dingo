@@ -21,92 +21,34 @@ import (
 )
 
 // Statements that name an output by its transaction hash and output index
-// exist in two forms.
-//
-// PostgreSQL and MySQL keep the unique (tx_id, output_idx) index, so their
-// statements say "tx_id = ? AND output_idx = ?" and bind two arguments per
-// reference.
-//
-// On SQLite an output produced by a transaction is identified by the
-// producer's transaction row id and its output index, through the unique
-// partial index idx_utxo_producer_output. The producer is the generated
-// column producer_tx_id, COALESCE(transaction_id, collateral_return_for_tx_id):
-// a collateral return shares its transaction's output-index space with the
-// regular outputs, and a transaction that fails phase 2 has no regular
-// outputs, so the pair is unique. An output with neither id (a ledger-state
-// or snapshot import, or one recovered for a missing producer) is identified
-// by its tx_id hash through the partial unique index idx_utxo_imported_ref.
-// The hash index over every output is gone: it received an insert at a random
-// leaf per output. A SQLite statement therefore resolves a reference to a row
-// id through sqliteRefID, which binds the hash and index twice, once per arm,
-// and every statement is written out here rather than derived at run time.
+// resolve the hash to the producer's transaction row id in a scalar subquery
+// and look the row up by the unique (tx_id, output_idx) index. One predicate,
+// refEq, serves every dialect and every kind of output: an output produced by
+// an applied transaction, an imported one and a collateral return all carry
+// the producer's row id in tx_id. A hash with no transaction row resolves to
+// NULL and matches nothing.
 //
 // Statements over a variable number of references come in a fixed set of
-// sizes. A caller pads its arguments up to the next size with NULL, which
-// matches no row, so each size is one statement text and one prepared
+// sizes on SQLite. A caller pads its arguments up to the next size with NULL,
+// which matches no row, so each size is one statement text and one prepared
 // statement. The texts are composed once, at package initialisation, by
-// sqliteRefStatements; nothing builds SQL text per call.
+// sqliteRefStatements; nothing builds SQL text per call. PostgreSQL and MySQL
+// build the text of the exact length.
 
 const (
-	// sharedRefEq is the reference predicate of the PostgreSQL and MySQL
-	// statements.
-	sharedRefEq      = "tx_id = ? AND output_idx = ?"
-	sharedRefEqAlias = "u.tx_id = ? AND u.output_idx = ?"
-	// sharedTxIDIn opens the hash list of the shared statements.
-	sharedTxIDIn = "tx_id IN ("
+	// refEq is the reference predicate of every statement over one output.
+	refEq      = `tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`
+	refEqAlias = `u.tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND u.output_idx = ?`
 
-	// sqliteRefID is the id of the output named by (hash, index): the
-	// produced output if there is one, else the imported one. Each arm
-	// matches at most one row, so the whole is a scalar, and "id = <scalar>"
-	// plans as a primary-key lookup whatever other predicates the statement
-	// carries. An "id IN (subquery)" form does not: with a liveness predicate
-	// beside it SQLite prefers a deleted_slot index and visits every live row.
-	// Its four arguments are hash, index, hash, index.
-	sqliteRefID = `COALESCE(` +
-		`(SELECT ref.id FROM utxo AS ref WHERE ref.producer_tx_id = ` +
-		`(SELECT ref_tx.id FROM "transaction" AS ref_tx WHERE ref_tx.hash = ?) ` +
-		`AND ref.output_idx = ?), ` +
-		`(SELECT ref.id FROM utxo AS ref ` +
-		`WHERE ref.transaction_id IS NULL AND ref.collateral_return_for_tx_id IS NULL ` +
-		`AND ref.tx_id = ? AND ref.output_idx = ?))`
-
-	// sqliteRefEq and sqliteRefEqAlias replace sharedRefEq.
-	sqliteRefEq      = "id = " + sqliteRefID
-	sqliteRefEqAlias = "u.id = " + sqliteRefID
-
-	// sqliteRefIDsInHead, Mid and Tail surround two hash lists, which are
-	// the same hashes, to select the ids of every output of those
-	// transactions: the produced outputs, then the imported ones.
-	sqliteRefIDsInHead = `SELECT ref.id FROM utxo AS ref ` +
-		`WHERE ref.producer_tx_id IN ` +
-		`(SELECT ref_tx.id FROM "transaction" AS ref_tx WHERE ref_tx.hash IN (`
-	sqliteRefIDsInMid = `)) UNION ALL SELECT ref.id FROM utxo AS ref ` +
-		`WHERE ref.transaction_id IS NULL AND ref.collateral_return_for_tx_id IS NULL ` +
-		`AND ref.tx_id IN (`
-	sqliteRefIDsInTail = `)`
-
-	// sqliteRefIDsIn1 is sqliteRefIDsIn for one hash.
-	sqliteRefIDsIn1 = sqliteRefIDsInHead + `?` +
-		sqliteRefIDsInMid + `?` + sqliteRefIDsInTail
-
-	// sqliteUtxoConflictTargets names both unique indexes of SQLite. A produced
-	// output can only collide in the first and an imported one only in the
-	// second, so one statement serves both kinds. A produced output
-	// colliding with an imported row, or the reverse, is not a unique
-	// violation; see existingUtxoRefs.
-	sqliteUtxoConflictTargets = `ON CONFLICT (producer_tx_id, output_idx) WHERE ` +
-		`producer_tx_id IS NOT NULL ` +
-		`DO NOTHING ON CONFLICT (tx_id, output_idx) WHERE ` +
-		`transaction_id IS NULL AND collateral_return_for_tx_id IS NULL ` +
-		`DO NOTHING`
-	sharedUtxoConflictTargets = `ON CONFLICT (tx_id, output_idx) DO NOTHING`
+	// utxoRowByHashJoin selects the rows of the outputs of the transactions
+	// whose hashes follow it. The join starts from the transaction hash
+	// index; a plain JOIN lets SQLite choose to scan utxo instead.
+	utxoRowByHashJoin = ` FROM "transaction" AS t CROSS JOIN utxo AS u ON u.tx_id = t.id WHERE t.hash IN (`
 )
 
 // utxoSQL holds the statement text of one dialect family for every statement
-// that names an output by reference. sharedUtxoSQL is PostgreSQL and MySQL;
-// sqliteUtxoSQL is SQLite. Callers take the set from Store.utxoSQL and bind
-// arguments through its methods, so the difference in argument count stays in
-// this file.
+// that names an output by reference. The SQLite and shared sets differ only
+// in the single-row insert forms.
 type utxoSQL struct {
 	sqlite bool
 
@@ -121,8 +63,7 @@ type utxoSQL struct {
 	spendScriptHash    string
 	markDeletedAtSlot  string
 	countByRef         string
-	hydrateTransaction string
-	hydrateCollateral  string
+	hydrate            string
 	clearStaleSpend    string
 	insertIgnore       string
 	insertResult       string
@@ -130,57 +71,36 @@ type utxoSQL struct {
 	historyTxFilter    string
 }
 
-var sharedUtxoSQL = &utxoSQL{
-	getSpendState:     getUtxoSpendStateHead + sharedRefEq,
-	getSpendStateHash: getUtxoSpendStateHashHead + sharedRefEq,
-	repairConflicted:  repairConflictedUtxoHead + sharedRefEq + repairConflictedUtxoTail,
-	getLiveByRef:      getLiveUtxoByRefHead + sharedRefEq + " AND deleted_slot = 0",
-	getIncludingSpent: getUtxoIncludingSpentByRefHead + sharedRefEq,
-	idByRef:           utxoIDByRefHead + sharedRefEq,
-	idByOutput:        utxoIDByOutputHead + sharedRefEq,
-	amountByOutput:    utxoAmountByOutputHead + sharedRefEq,
-	spendScriptHash:   spendScriptHashHead + sharedRefEq,
-	markDeletedAtSlot: markUtxoDeletedAtSlotHead + sharedRefEq +
-		markUtxoDeletedAtSlotTail,
-	countByRef: countUtxoByRefHead + sharedRefEq,
-	hydrateTransaction: hydrateUtxoTransactionHead + sharedRefEq +
-		hydrateUtxoTransactionTail,
-	hydrateCollateral: hydrateUtxoCollateralHead + sharedRefEq +
-		hydrateUtxoCollateralTail,
-	clearStaleSpend: clearStaleUtxoSpendHead + sharedRefEq +
-		clearStaleUtxoSpendTail,
-	insertIgnore: insertUtxoIgnoreConflictHead + sharedUtxoConflictTargets +
-		insertUtxoIgnoreConflictTail,
-	historyTxFilter: " AND utxo." + sharedTxIDIn + "?)",
-}
+var sharedUtxoSQL = newUtxoSQL(false)
 
-var sqliteUtxoSQL = &utxoSQL{
-	sqlite:            true,
-	getSpendState:     getUtxoSpendStateHead + sqliteRefEq,
-	getSpendStateHash: getUtxoSpendStateHashHead + sqliteRefEq,
-	repairConflicted: repairConflictedUtxoHead + sqliteRefEq + " AND tx_id = ?" +
-		repairConflictedUtxoTail,
-	getLiveByRef:      getLiveUtxoByRefHead + sqliteRefEq + " AND deleted_slot = 0",
-	getIncludingSpent: getUtxoIncludingSpentByRefHead + sqliteRefEq,
-	idByRef:           utxoIDByRefHead + sqliteRefEq,
-	idByOutput:        utxoIDByOutputHead + sqliteRefEq + " AND tx_id = ?",
-	amountByOutput:    utxoAmountByOutputHead + sqliteRefEq,
-	spendScriptHash:   spendScriptHashHead + sqliteRefEq,
-	markDeletedAtSlot: markUtxoDeletedAtSlotHead + sqliteRefEq +
-		markUtxoDeletedAtSlotTail,
-	countByRef: countUtxoByRefHead + sqliteRefEq,
-	hydrateTransaction: hydrateUtxoTransactionHead + sqliteRefEq +
-		hydrateUtxoTransactionTail,
-	hydrateCollateral: hydrateUtxoCollateralHead + sqliteRefEq +
-		hydrateUtxoCollateralTail,
-	clearStaleSpend: clearStaleUtxoSpendHead + sqliteRefEq +
-		clearStaleUtxoSpendTail,
-	insertIgnore: insertUtxoIgnoreConflictHead + sqliteUtxoConflictTargets +
-		insertUtxoIgnoreConflictTail,
-	insertResult: insertUtxoResultStatement,
-	insertResultIgnore: insertUtxoResultIgnoreHead +
-		sqliteUtxoConflictTargets,
-	historyTxFilter: " AND utxo.id IN (" + sqliteRefIDsIn1 + ")",
+var sqliteUtxoSQL = newUtxoSQL(true)
+
+func newUtxoSQL(sqlite bool) *utxoSQL {
+	u := &utxoSQL{
+		sqlite:            sqlite,
+		getSpendState:     getUtxoSpendStateHead + refEq,
+		getSpendStateHash: getUtxoSpendStateHashHead + refEq,
+		repairConflicted:  repairConflictedUtxoHead + refEq + repairConflictedUtxoTail,
+		getLiveByRef:      getLiveUtxoByRefHead + refEq + " AND deleted_slot = 0",
+		getIncludingSpent: getUtxoIncludingSpentByRefHead + refEq,
+		idByRef:           utxoIDByRefHead + refEq,
+		idByOutput:        utxoIDByOutputHead + refEq,
+		amountByOutput:    utxoAmountByOutputHead + refEq,
+		spendScriptHash:   spendScriptHashHead + refEq,
+		markDeletedAtSlot: markUtxoDeletedAtSlotHead + refEq +
+			markUtxoDeletedAtSlotTail,
+		countByRef: countUtxoByRefHead + refEq,
+		hydrate: hydrateUtxoHead + refEq,
+		clearStaleSpend: clearStaleUtxoSpendHead + refEq +
+			clearStaleUtxoSpendTail,
+		insertIgnore:    insertUtxoIgnoreConflictStatement,
+		historyTxFilter: " AND utxo.tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?)",
+	}
+	if sqlite {
+		u.insertResult = insertUtxoResultStatement
+		u.insertResultIgnore = insertUtxoResultIgnoreStatement
+	}
+	return u
 }
 
 // utxoSQL returns the statement set of the store's dialect.
@@ -193,63 +113,53 @@ func (s *Store) utxoSQL() *utxoSQL {
 
 // bindRef appends the arguments of one reference predicate.
 func (u *utxoSQL) bindRef(args []any, hash, idx any) []any {
-	if u.sqlite {
-		return append(args, hash, idx, hash, idx)
-	}
 	return append(args, hash, idx)
 }
 
 // refArgs is the argument list of a statement whose only placeholders are
 // one reference predicate.
 func (u *utxoSQL) refArgs(hash, idx any) []any {
-	return u.bindRef(make([]any, 0, 4), hash, idx)
+	return u.bindRef(make([]any, 0, 2), hash, idx)
 }
 
 // refParams is the number of bound arguments one reference takes.
 func (u *utxoSQL) refParams() int {
-	if u.sqlite {
-		return 4
-	}
 	return 2
 }
 
-// bindHashes appends the arguments of a list of hashes: once, or twice on
-// SQLite, where the list feeds both arms.
+// bindHashes appends the arguments of a list of hashes, padded with NULL up
+// to size.
 func (u *utxoSQL) bindHashes(args []any, hashes [][]byte, size int) []any {
-	repeats := 1
-	if u.sqlite {
-		repeats = 2
+	for _, hash := range hashes {
+		args = append(args, hash)
 	}
-	for range repeats {
-		for _, hash := range hashes {
-			args = append(args, hash)
-		}
-		for i := len(hashes); i < size; i++ {
-			args = append(args, nil)
-		}
+	for i := len(hashes); i < size; i++ {
+		args = append(args, nil)
 	}
 	return args
 }
 
-// Heads and tails of the statements that exist in both forms. The reference
+// Heads and tails of the statements that name one output. The reference
 // predicate sits between them.
 const (
 	getUtxoSpendStateHead = `-- name: GetUtxoSpendState :one
-SELECT deleted_slot, spent_by_tx_id
+SELECT deleted_slot, spent_at_tx_id
 FROM utxo WHERE `
 
 	// getUtxoSpendStateHashHead projects the spender's hash for readers
 	// that report it; the apply path compares transaction ids and uses
 	// getUtxoSpendStateHead.
 	getUtxoSpendStateHashHead = `-- name: GetUtxoSpendStateWithHash :one
-SELECT deleted_slot, COALESCE((SELECT spender.hash FROM "transaction" AS spender
-    WHERE spender.id = utxo.spent_by_tx_id), spent_at_tx_id)
+SELECT deleted_slot, spent_at_tx_id, (SELECT spender.hash FROM "transaction" AS spender
+    WHERE spender.id = utxo.spent_at_tx_id)
 FROM utxo WHERE `
 
+	// repairConflictedUtxoHead marks the collateral return of a producer
+	// whose output an import stored before the producer was applied. The
+	// row already carries the producer's id; only the marker is missing.
 	repairConflictedUtxoHead = `-- name: RepairConflictedUtxo :one
 UPDATE utxo
-SET transaction_id = COALESCE(transaction_id, ?),
-    collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
+SET collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
 WHERE `
 	repairConflictedUtxoTail = `
 RETURNING id`
@@ -269,82 +179,66 @@ WHERE `
 
 	markUtxoDeletedAtSlotHead = `
 UPDATE utxo
-SET deleted_slot = ?, spent_by_tx_id = ?
+SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE `
 	markUtxoDeletedAtSlotTail = `
-  AND spent_by_tx_id IS NULL
+  AND spent_at_tx_id IS NULL
   AND (deleted_slot = 0 OR deleted_slot = ?)`
 
 	countUtxoByRefHead = `
 SELECT COUNT(*) FROM utxo WHERE `
 
-	hydrateUtxoTransactionHead = `-- name: HydrateUtxoTransaction :execrows
+	hydrateUtxoHead = `-- name: HydrateUtxo :execrows
 UPDATE utxo
-SET transaction_id = ?, added_slot = ?
+SET added_slot = ?,
+    collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
 WHERE `
-	hydrateUtxoTransactionTail = ` AND transaction_id IS NULL`
-
-	hydrateUtxoCollateralHead = `-- name: HydrateUtxoCollateralReturn :execrows
-UPDATE utxo
-SET collateral_return_for_tx_id = ?, added_slot = ?
-WHERE `
-	hydrateUtxoCollateralTail = `
-  AND collateral_return_for_tx_id IS NULL`
 
 	clearStaleUtxoSpendHead = `-- name: ClearStaleUtxoSpend :execrows
 UPDATE utxo
-SET deleted_slot = 0, spent_by_tx_id = NULL, spent_at_tx_id = NULL
+SET deleted_slot = 0, spent_at_tx_id = NULL
 WHERE `
 	clearStaleUtxoSpendTail = ` AND deleted_slot > 0`
 
-	insertUtxoIgnoreConflictHead = `-- name: InsertUtxoIfAbsent :one
-INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_by_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ` + spentByPlaceholder + `, ?, ?, ?, ?, ?, ?, ?)
-`
-	insertUtxoIgnoreConflictTail = `
+	utxoInsertColumns = `
+    tx_id, output_idx, collateral_return_for_tx_id, spent_at_tx_id,
+    payment_key, staking_key, credential_tag, datum_hash, amount,
+    payment_script, added_slot, deleted_slot`
+
+	insertUtxoIgnoreConflictStatement = `-- name: InsertUtxoIfAbsent :one
+INSERT INTO utxo (` + utxoInsertColumns + `
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (tx_id, output_idx) DO NOTHING
 RETURNING id`
 )
 
-// insertUtxoResultStatement and insertUtxoResultIgnoreHead are the SQLite
-// Exec-result forms of the single-row inserts: they capture the inserted id
-// in the Exec result before releasing the connection, avoiding a RETURNING
-// cursor. A skipped conflict leaves LastInsertId unchanged, so callers check
-// RowsAffected first.
+// insertUtxoResultStatement and insertUtxoResultIgnoreStatement are the
+// SQLite Exec-result forms of the single-row inserts: they capture the
+// inserted id in the Exec result before releasing the connection, avoiding a
+// RETURNING cursor. A skipped conflict leaves LastInsertId unchanged, so
+// callers check RowsAffected first.
 const (
 	insertUtxoResultStatement = `-- name: InsertUtxoResult :execresult
-INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_by_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ` + spentByPlaceholder + `, ?, ?, ?, ?, ?, ?, ?)`
+INSERT INTO utxo (` + utxoInsertColumns + `
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-	insertUtxoResultIgnoreHead = `-- name: InsertUtxoIfAbsentResult :execresult
-INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_by_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ` + spentByPlaceholder + `, ?, ?, ?, ?, ?, ?, ?)
-`
+	insertUtxoResultIgnoreStatement = `-- name: InsertUtxoIfAbsentResult :execresult
+INSERT INTO utxo (` + utxoInsertColumns + `
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (tx_id, output_idx) DO NOTHING`
 )
 
 // Statement sizes of the SQLite statements over lists. A list shorter than
 // its size is padded with NULL arguments.
 var (
 	// sqliteInListSizes are the hash-list sizes, up to the 400 hashes one
-	// statement may name: with two lists of 400 bound arguments each the
-	// statement stays under SQLite's conservative 999-parameter limit.
+	// statement may name, under SQLite's conservative 999-parameter limit.
 	sqliteInListSizes = [...]int{1, 2, 4, 8, 16, 32, 64, 128, 256, 400}
 	// sqliteExactRefSizes are the reference counts of the exact-reference
 	// lookup, up to utxoRefsMaxPerQuery.
 	sqliteExactRefSizes = [...]int{1, 2, 4, 8, 16, 32, 64, 128, 200}
 	// sqliteOrRefSizes are the reference counts of the OR-of-references
-	// delete: 128 references bind 512 arguments.
+	// delete: 128 references bind 256 arguments.
 	sqliteOrRefSizes = [...]int{1, 2, 4, 8, 16, 32, 64, 128}
 )
 
@@ -370,8 +264,6 @@ type sqliteRefStatements struct {
 	edgeInsert         map[string]map[int]string
 	consumeBatch       [2]map[int]string
 	insertBatch        map[int]string
-	importedProbe      map[int]string
-	producedProbe      map[int]string
 }
 
 // sqliteRefs is the statement set of SQLite. This is the one place that
@@ -393,131 +285,148 @@ func newSQLiteRefStatements() *sqliteRefStatements {
 			utxoCollateralEdgeTable: {},
 			utxoReferenceEdgeTable:  {},
 		},
-		consumeBatch:  [2]map[int]string{{}, {}},
-		insertBatch:   make(map[int]string),
-		importedProbe: make(map[int]string),
-		producedProbe: make(map[int]string),
+		consumeBatch: [2]map[int]string{{}, {}},
+		insertBatch:  make(map[int]string),
 	}
 	for _, n := range sqliteInListSizes {
-		list := bindPlaceholders(n)
-		ids := "id IN (" + sqliteRefIDsInHead + list +
-			sqliteRefIDsInMid + list + sqliteRefIDsInTail + ")"
-		st.stakeConsumedDelta[n] = "-- name: GetUtxoStakeConsumedDeltaBatch :many\n" +
-			"SELECT tx_id, output_idx, credential_tag, staking_key, amount " +
-			"FROM utxo WHERE " + ids
-		st.stakeRefsByTxIDs[n] = "-- name: GetUtxoStakeRefsByTxIDs :many\n" +
-			"SELECT tx_id, output_idx, deleted_slot, credential_tag, " +
-			"staking_key FROM utxo WHERE " + ids
-		st.deletionRows[n] = "-- name: GetUtxoRowsByTxIDs :many\n" +
-			"SELECT id, tx_id, output_idx, deleted_slot, credential_tag, " +
-			"staking_key FROM utxo WHERE " + ids
+		st.stakeConsumedDelta[n] = utxoStakeConsumedDeltaQuery(n)
+		st.stakeRefsByTxIDs[n] = utxoStakeRefsByTxIDQuery(n)
+		st.deletionRows[n] = utxoDeletionRowsQuery(n, false)
 	}
 	for _, n := range sqliteExactRefSizes {
-		st.exactRefs[n] = "id IN (" + joinN(
-			n, " UNION ALL ", "SELECT id FROM utxo WHERE "+sqliteRefEq,
-		) + ")"
+		st.exactRefs[n] = utxoRefsExactQuery(n)
 	}
 	for _, n := range sqliteOrRefSizes {
 		st.deleteRefs[n] = "DELETE FROM utxo WHERE " + joinN(
-			n, " OR ", "("+sqliteRefEq+")",
+			n, " OR ", "("+refEq+")",
 		)
 	}
 	for _, n := range [...]int{1, 2, 4, 8, 16, 32} {
-		st.addressInputs[n] = "-- name: GetAddressTransactionInputs :many" +
-			joinN(n, " UNION ALL ", "\nSELECT payment_key, payment_script, "+
-				"credential_tag, staking_key\nFROM utxo WHERE "+sqliteRefEq)
+		st.addressInputs[n] = addressTransactionInputQuery(n)
 		for table, bySize := range st.edgeInsert {
-			bySize[n] = "-- name: InsertUtxoReferenceBatch :execrows\n" +
-				"INSERT INTO " + table + " (utxo_id, transaction_id)\n" +
-				"SELECT u.id, ? FROM utxo AS u\n" +
-				"WHERE (" + joinN(n, " OR ", "("+sqliteRefEqAlias+")") + ")\n" +
-				"  AND NOT EXISTS (\n" +
-				"      SELECT 1 FROM " + table + " AS r\n" +
-				"      WHERE r.utxo_id = u.id AND r.transaction_id = ?\n" +
-				"  )"
+			bySize[n] = utxoReferenceInsertBatchQuery(table, n)
 		}
 	}
-	const arm = "SELECT id FROM utxo WHERE " + sqliteRefEq +
-		" AND deleted_slot = 0 AND spent_by_tx_id IS NULL"
+	const arm = "SELECT id FROM utxo WHERE " + refEq +
+		" AND deleted_slot = 0 AND spent_at_tx_id IS NULL"
 	for n := 2; n <= utxoSpendBatchSize; n++ {
 		arms := joinN(n, " UNION ALL ", arm)
 		st.consumeBatch[0][n] = "-- name: ConsumeUtxosBatch :many\n" +
-			"UPDATE utxo\nSET deleted_slot = ?, spent_by_tx_id = ?\n" +
-			"WHERE id IN (" + arms + ")\nRETURNING tx_id, output_idx"
+			"UPDATE utxo\nSET deleted_slot = ?, spent_at_tx_id = ?\n" +
+			"WHERE id IN (" + arms + ")\nRETURNING " + utxoConsumedHash +
+			", output_idx"
 		st.consumeBatch[1][n] = "-- name: ConsumeUtxosBatchReturningStake :many\n" +
-			"UPDATE utxo\nSET deleted_slot = ?, spent_by_tx_id = ?\n" +
+			"UPDATE utxo\nSET deleted_slot = ?, spent_at_tx_id = ?\n" +
 			"WHERE id IN (" + arms + ")\n" +
-			"RETURNING tx_id, output_idx, credential_tag, staking_key, amount"
+			"RETURNING " + utxoConsumedHash +
+			", output_idx, credential_tag, staking_key, amount"
 	}
-	const row = "(?,?,?,?,?,?,?," + spentByPlaceholder + ",?,?,?,?,?,?,?)"
+	const row = "(?,?,?,?,?,?,?,?,?,?,?,?)"
 	for n := 1; n <= utxoInsertBatchSize; n++ {
 		st.insertBatch[n] = "-- name: InsertUtxoBatch :many\n" +
-			"INSERT INTO utxo (\n" +
-			"    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,\n" +
-			"    staking_key, credential_tag, datum_hash, spent_by_tx_id,\n" +
-			"    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,\n" +
-			"    amount, output_idx, payment_script\n" +
-			") VALUES " + joinN(n, ",", row) + "\n" +
-			sqliteUtxoConflictTargets + "\nRETURNING id, tx_id, output_idx"
-	}
-	for n := 1; n <= maxImportedProbeHashes; n *= 2 {
-		st.importedProbe[n] = "-- name: GetImportedUtxoKeys :many\n" +
-			"SELECT tx_id, output_idx FROM utxo INDEXED BY idx_utxo_imported_ref " +
-			"WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL " +
-			"AND tx_id IN (" + bindPlaceholders(n) + ")"
-	}
-	for n := 1; n <= maxImportedProbeHashes; n *= 2 {
-		st.producedProbe[n] = "-- name: GetProducedUtxoKeys :many\n" +
-			`SELECT t.hash, u.output_idx FROM "transaction" AS t ` +
-			"CROSS JOIN utxo AS u INDEXED BY idx_utxo_producer_output " +
-			"ON u.producer_tx_id = t.id " +
-			"WHERE t.hash IN (" + bindPlaceholders(n) + ")"
+			"INSERT INTO utxo (" + utxoInsertColumns + "\n) VALUES " +
+			joinN(n, ",", row) + "\n" +
+			"ON CONFLICT (tx_id, output_idx) DO NOTHING\n" +
+			"RETURNING id, tx_id, output_idx"
 	}
 	return st
 }
+
+// utxoConsumedHash projects the producer's hash of a row a statement
+// returns, so the caller can match returned rows to the references it bound.
+const utxoConsumedHash = `(SELECT p.hash FROM "transaction" AS p WHERE p.id = utxo.tx_id)`
 
 func joinN(n int, sep, item string) string {
 	return strings.TrimSuffix(strings.Repeat(item+sep, n), sep)
 }
 
+// utxoStakeConsumedDeltaQuery is the lookup of the consumed outputs' stake
+// credentials by producer hash. It reads every output of each named
+// transaction and the caller matches (hash, output_idx) in Go, so the lookup
+// stays on the leading column of the unique output index however many
+// references the batch names.
+func utxoStakeConsumedDeltaQuery(n int) string {
+	return "-- name: GetUtxoStakeConsumedDeltaBatch :many\n" +
+		"SELECT t.hash, u.output_idx, u.credential_tag, u.staking_key, u.amount" +
+		utxoRowByHashJoin + bindPlaceholders(n) + ")"
+}
+
+// utxoStakeRefsByTxIDQuery is the lookup of the stake credentials of every
+// output of the transactions named by n hashes. It carries no
+// "deleted_slot = 0" predicate, which would let the planner drive the lookup
+// from a deleted_slot index; the caller filters in Go.
+func utxoStakeRefsByTxIDQuery(n int) string {
+	return "-- name: GetUtxoStakeRefsByTxIDs :many\n" +
+		"SELECT t.hash, u.output_idx, u.deleted_slot, u.credential_tag, " +
+		"u.staking_key" + utxoRowByHashJoin + bindPlaceholders(n) + ")"
+}
+
+// utxoDeletionRowsQuery is the lookup of every output row of the
+// transactions named by n hashes. lockRows adds the row lock PostgreSQL and
+// MySQL take, which SQLite has no use for.
+func utxoDeletionRowsQuery(n int, lockRows bool) string {
+	name := "GetUtxoRowsByTxIDs"
+	if lockRows {
+		name = "LockUtxoRowsByTxIDs"
+	}
+	query := "-- name: " + name + " :many\n" +
+		"SELECT u.id, t.hash, u.output_idx, u.deleted_slot, " +
+		"u.credential_tag, u.staking_key" +
+		utxoRowByHashJoin + bindPlaceholders(n) + ")"
+	if lockRows {
+		query += " ORDER BY u.id FOR UPDATE OF u"
+	}
+	return query
+}
+
+// utxoRefsExactQuery builds the predicate selecting exactly the n outputs
+// bound to it. Each term is its own equality lookup, so the planner stays on
+// the unique output index for every reference, which a wide OR of pairs does
+// not guarantee. Only the requested outputs, and so only their assets, are
+// read.
+func utxoRefsExactQuery(n int) string {
+	return "id IN (" + joinN(
+		n, " UNION ALL ", "SELECT id FROM utxo WHERE "+refEq,
+	) + ")"
+}
+
 // stakeConsumedDelta is the lookup of the consumed outputs' stake
 // credentials by transaction hash, for up to the 400 hashes of one batch.
 func (u *utxoSQL) stakeConsumedDelta(hashes [][]byte) (string, []any) {
-	size := sizeFor(sqliteInListSizes[:], len(hashes))
 	if !u.sqlite {
-		return utxoStakeConsumedDeltaSharedQuery(size),
-			u.bindHashes(make([]any, 0, size), hashes, size)
+		return utxoStakeConsumedDeltaQuery(len(hashes)),
+			u.bindHashes(make([]any, 0, len(hashes)), hashes, len(hashes))
 	}
+	size := sizeFor(sqliteInListSizes[:], len(hashes))
 	return sqliteRefs.stakeConsumedDelta[size],
-		u.bindHashes(make([]any, 0, 2*size), hashes, size)
+		u.bindHashes(make([]any, 0, size), hashes, size)
 }
 
 // stakeRefsByTxIDs is the lookup of the stake credentials of every output of
 // the given transactions, for up to 400 hashes.
 func (u *utxoSQL) stakeRefsByTxIDs(hashes [][]byte) (string, []any) {
 	if !u.sqlite {
-		return utxoStakeRefsByTxIDSharedQuery(len(hashes)),
+		return utxoStakeRefsByTxIDQuery(len(hashes)),
 			u.bindHashes(make([]any, 0, len(hashes)), hashes, len(hashes))
 	}
 	size := sizeFor(sqliteInListSizes[:], len(hashes))
 	return sqliteRefs.stakeRefsByTxIDs[size],
-		u.bindHashes(make([]any, 0, 2*size), hashes, size)
+		u.bindHashes(make([]any, 0, size), hashes, size)
 }
 
 // deletionRows is the lookup of the live rows of every output of the given
-// transactions, for up to 400 hashes. lockRows is a PostgreSQL and MySQL
-// row lock, which SQLite has no use for.
+// transactions, for up to 400 hashes.
 func (u *utxoSQL) deletionRows(
 	hashes [][]byte,
 	lockRows bool,
 ) (string, []any) {
 	if !u.sqlite {
-		return utxoDeletionRowsSharedQuery(len(hashes), lockRows),
+		return utxoDeletionRowsQuery(len(hashes), lockRows),
 			u.bindHashes(make([]any, 0, len(hashes)), hashes, len(hashes))
 	}
 	size := sizeFor(sqliteInListSizes[:], len(hashes))
 	return sqliteRefs.deletionRows[size],
-		u.bindHashes(make([]any, 0, 2*size), hashes, size)
+		u.bindHashes(make([]any, 0, size), hashes, size)
 }
 
 // deleteRefsChunk is the number of references one DELETE names.
@@ -537,13 +446,13 @@ func (u *utxoSQL) deleteRefs(ids []models.UtxoId) (string, []any) {
 		parts := make([]string, len(ids))
 		args := make([]any, 0, len(ids)*2)
 		for i := range ids {
-			parts[i] = "(" + sharedRefEq + ")"
-			args = append(args, ids[i].Hash, ids[i].Idx)
+			parts[i] = "(" + refEq + ")"
+			args = u.bindRef(args, ids[i].Hash, ids[i].Idx)
 		}
 		return "DELETE FROM utxo WHERE " + strings.Join(parts, " OR "), args
 	}
 	size := sizeFor(sqliteOrRefSizes[:], len(ids))
-	args := make([]any, 0, size*4)
+	args := make([]any, 0, size*2)
 	for _, id := range ids {
 		args = u.bindRef(args, id.Hash, id.Idx)
 	}
@@ -561,17 +470,17 @@ func (u *utxoSQL) exactRefs(refs []models.UtxoId) (string, []any) {
 	if !u.sqlite {
 		args := make([]any, 0, len(refs)*2)
 		for _, ref := range refs {
-			args = append(args, ref.Hash, ref.Idx)
+			args = u.bindRef(args, ref.Hash, ref.Idx)
 		}
-		return utxoRefsExactSharedQuery(len(refs)), args
+		return utxoRefsExactQuery(len(refs)), args
 	}
 	size := sizeFor(sqliteExactRefSizes[:], len(refs))
-	args := make([]any, 0, size*4)
+	args := make([]any, 0, size*2)
 	for _, ref := range refs {
 		args = u.bindRef(args, ref.Hash, ref.Idx)
 	}
 	for i := len(refs); i < size; i++ {
-		args = append(args, nil, nil, nil, nil)
+		args = append(args, nil, nil)
 	}
 	return sqliteRefs.exactRefs[size], args
 }
@@ -580,7 +489,7 @@ func (u *utxoSQL) exactRefs(refs []models.UtxoId) (string, []any) {
 // list of size hashes.
 func (u *utxoSQL) stakeConsumedDeltaQuery(size int) string {
 	if !u.sqlite {
-		return utxoStakeConsumedDeltaSharedQuery(size)
+		return utxoStakeConsumedDeltaQuery(size)
 	}
 	return sqliteRefs.stakeConsumedDelta[size]
 }
@@ -588,7 +497,7 @@ func (u *utxoSQL) stakeConsumedDeltaQuery(size int) string {
 // addressInputsQuery is the input-address lookup of size references.
 func (u *utxoSQL) addressInputsQuery(size int) string {
 	if !u.sqlite {
-		return addressTransactionInputSharedQuery(size)
+		return addressTransactionInputQuery(size)
 	}
 	return sqliteRefs.addressInputs[size]
 }
@@ -597,33 +506,7 @@ func (u *utxoSQL) addressInputsQuery(size int) string {
 // edgeTable.
 func (u *utxoSQL) edgeInsertQuery(edgeTable string, size int) string {
 	if !u.sqlite {
-		return utxoReferenceInsertBatchSharedSQL(edgeTable, size)
+		return utxoReferenceInsertBatchQuery(edgeTable, size)
 	}
 	return sqliteRefs.edgeInsert[edgeTable][size]
-}
-
-// repairUnlinkedUtxosBatchQuery builds the provenance fill for rowCount
-// outputs that exist with neither a producing-transaction nor a
-// collateral-return link, which is how a ledger-state import leaves them.
-// Each output is its own fully bound arm of the id subquery. On SQLite the
-// unlinked predicate in the arm makes it the imported-row identity, so the arm
-// is a point lookup in the partial unique index idx_utxo_imported_ref; on
-// PostgreSQL and MySQL it is a lookup in the unique (tx_id, output_idx)
-// index.
-// Arguments are the transaction_id CASE triples (tx_id, output_idx, value),
-// the collateral_return_for_tx_id CASE triples, then tx_id, output_idx per
-// arm. Rows already linked do not match and are not returned.
-func repairUnlinkedUtxosBatchQuery(rowCount int) string {
-	const when = "WHEN tx_id = ? AND output_idx = ? THEN ? "
-	const arm = "SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ? " +
-		"AND transaction_id IS NULL AND collateral_return_for_tx_id IS NULL"
-	cases := strings.TrimSpace(strings.Repeat(when, rowCount))
-	arms := strings.TrimSuffix(
-		strings.Repeat(arm+" UNION ALL ", rowCount),
-		" UNION ALL ",
-	)
-	return "-- name: RepairUnlinkedUtxosBatch :many\n" +
-		"UPDATE utxo SET transaction_id = CASE " + cases +
-		" END, collateral_return_for_tx_id = CASE " + cases +
-		" END WHERE id IN (" + arms + ") RETURNING id, tx_id, output_idx"
 }

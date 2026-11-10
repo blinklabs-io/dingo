@@ -43,7 +43,7 @@ func TestUtxoSpendStateKeepsTransactionVisibilityWithoutAssetReads(
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Zero(t, state.DeletedSlot)
-	require.Nil(t, state.SpentAtTxId)
+	require.Nil(t, state.SpentAtTxHash)
 	for _, query := range recorder.snapshot()[mark:] {
 		require.NotContains(t, strings.ToLower(query), "from asset")
 	}
@@ -80,12 +80,12 @@ func TestUtxoSpendStateKeepsTransactionVisibilityWithoutAssetReads(
 	require.Equal(
 		t,
 		types.NullableHash(spender.Hash().Bytes()),
-		state.SpentAtTxId,
+		state.SpentAtTxHash,
 	)
 	full, err := store.GetUtxoIncludingSpent(id, 0, txn)
 	require.NoError(t, err)
 	require.Equal(t, full.DeletedSlot, state.DeletedSlot)
-	require.Equal(t, full.SpentAtTxId, state.SpentAtTxId)
+	require.Equal(t, full.SpentAtTxHash, state.SpentAtTxHash)
 }
 
 func TestUtxoSpendStateReadsUnflushedRetainedOverlay(t *testing.T) {
@@ -141,13 +141,13 @@ func TestUtxoSpendStateReadsUnflushedRetainedOverlay(t *testing.T) {
 	require.Equal(
 		t,
 		types.NullableHash(transactions[1].Hash().Bytes()),
-		spent.SpentAtTxId,
+		spent.SpentAtTxHash,
 	)
 	live, err := store.GetUtxoSpendState(transactions[1].Hash().Bytes(), 0, txn)
 	require.NoError(t, err)
 	require.NotNil(t, live)
 	require.Zero(t, live.DeletedSlot)
-	require.Nil(t, live.SpentAtTxId)
+	require.Nil(t, live.SpentAtTxHash)
 	require.Equal(t, barriers, overlay.stats.BarrierFlushes)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -246,5 +246,5 @@ func TestUtxoSpendStateKeepsNullableSlotSemantics(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, full.DeletedSlot, state.DeletedSlot)
-	require.Equal(t, full.SpentAtTxId, state.SpentAtTxId)
+	require.Equal(t, full.SpentAtTxHash, state.SpentAtTxHash)
 }

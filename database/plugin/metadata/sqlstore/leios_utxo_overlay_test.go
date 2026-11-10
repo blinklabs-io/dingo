@@ -126,7 +126,7 @@ func applyPlainOverlayChain(
 			)
 			require.NoError(t, err)
 			require.NotNil(t, historical)
-			require.Equal(t, tx.Hash().Bytes(), []byte(historical.SpentAtTxId))
+			require.Equal(t, tx.Hash().Bytes(), []byte(historical.SpentAtTxHash))
 			for _, value := range []any{again, historical} {
 				encoded, err := json.Marshal(value)
 				require.NoError(t, err)

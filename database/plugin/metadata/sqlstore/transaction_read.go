@@ -29,8 +29,32 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-const sqliteTransactionColumns = `hash, block_hash, metadata, slot, type, id,
-fee, collateral_fee, ttl, block_index, valid`
+// sqliteTransactionColumns and appliedTransactionFrom select a transaction
+// the way every applied-transaction reader sees it: the identity row joined
+// to its application row. An identity row with no application row, which an
+// imported output's producer is until it is applied, is not a transaction
+// here.
+const (
+	sqliteTransactionColumns = `t.hash, a.block_hash, a.metadata, a.slot,
+a.type, t.id, a.fee, a.collateral_fee, a.ttl, a.block_index, a.valid`
+	appliedTransactionFrom = `"transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id`
+)
+
+// transactionRow is one applied transaction as the readers select it.
+type transactionRow struct {
+	Hash          []byte
+	BlockHash     []byte
+	Metadata      []byte
+	Slot          sql.NullInt64
+	Type          sql.NullInt64
+	ID            int64
+	Fee           sql.NullString
+	CollateralFee sql.NullString
+	Ttl           sql.NullString
+	BlockIndex    sql.NullInt64
+	Valid         sql.NullBool
+}
 
 func (s *Store) GetTransactionByHash(
 	hash []byte,
@@ -48,7 +72,7 @@ func (s *Store) GetTransactionByHash(
 	if err != nil {
 		return nil, err
 	}
-	ret, err := transactionFromSQLite(row)
+	ret, err := transactionFromSQLite(transactionRow(row))
 	if err != nil {
 		return nil, err
 	}
@@ -133,13 +157,13 @@ func (s *Store) SumTransactionFeesInSlotRange(
 		return 0, err
 	}
 	query := `SELECT CASE WHEN tx.valid THEN tx.fee ELSE tx.collateral_fee END AS amount
-FROM "transaction" tx
+FROM applied_transaction tx
 WHERE tx.slot >= ? AND tx.slot <= ?
-  AND NOT EXISTS (SELECT 1 FROM leios_transaction_context context WHERE context.transaction_id = tx.id)
+  AND NOT EXISTS (SELECT 1 FROM leios_transaction_context context WHERE context.transaction_id = tx.tx_id)
 UNION ALL
 SELECT CASE WHEN tx.valid THEN tx.fee ELSE tx.collateral_fee END
 FROM leios_transaction_context context
-JOIN "transaction" tx ON tx.id = context.transaction_id
+JOIN applied_transaction tx ON tx.tx_id = context.transaction_id
 WHERE context.slot >= ? AND context.slot <= ?`
 	if s.dialect.Name() == "sqlite" {
 		// Check each coin before summing; signed aggregation could hide a
@@ -173,7 +197,11 @@ func (s *Store) GetTransactionsByBlockHash(
 	if err != nil {
 		return nil, fmt.Errorf("get txs by block %x: %w", blockHash, err)
 	}
-	ret, err := transactionsFromSQLite(rows)
+	converted := make([]transactionRow, len(rows))
+	for i := range rows {
+		converted[i] = transactionRow(rows[i])
+	}
+	ret, err := transactionsFromSQLite(converted)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +234,7 @@ func (s *Store) GetTransactionsByHashes(
 			ctx,
 			s.dialect.Rebind(
 				`SELECT `+sqliteTransactionColumns+`
-FROM "transaction" WHERE hash IN (`+bindPlaceholders(len(chunk))+`)`,
+FROM `+appliedTransactionFrom+` WHERE t.hash IN (`+bindPlaceholders(len(chunk))+`)`,
 			),
 			args...,
 		)
@@ -261,8 +289,8 @@ func (s *Store) GetExistingTransactionHashes(
 		rows, err := db.QueryContext(
 			ctx,
 			s.dialect.Rebind(
-				`SELECT hash FROM "transaction" WHERE hash IN (`+
-					bindPlaceholders(len(chunk))+`)`,
+				`SELECT t.hash FROM `+appliedTransactionFrom+
+					` WHERE t.hash IN (`+bindPlaceholders(len(chunk))+`)`,
 			),
 			args...,
 		)
@@ -545,8 +573,8 @@ func (s *Store) GetTransactionsByAddress(
 		direction = "ASC"
 	}
 	query := `SELECT ` + sqliteTransactionColumns + `
-FROM "transaction"
-WHERE id IN (
+FROM ` + appliedTransactionFrom + `
+WHERE t.id IN (
     SELECT DISTINCT transaction_id FROM address_transaction WHERE ` + predicate
 	if from != nil {
 		query += " AND (slot, tx_index) >= (?, ?)"
@@ -558,8 +586,8 @@ WHERE id IN (
 	}
 	query += "\n)"
 	query += `
-ORDER BY slot ` + direction + `, block_index ` + direction + `,
-         id ` + direction
+ORDER BY a.slot ` + direction + `, a.block_index ` + direction + `,
+         t.id ` + direction
 	query, args = addLimitOffset(query, args, limit, offset)
 	return s.queryTransactions(ctx, db, query, args)
 }
@@ -580,12 +608,12 @@ func (s *Store) GetTransactionsByMetadataLabel(
 		direction = "DESC"
 	}
 	query := `SELECT ` + sqliteTransactionColumns + `
-FROM "transaction"
-WHERE id IN (
+FROM ` + appliedTransactionFrom + `
+WHERE t.id IN (
     SELECT transaction_id FROM transaction_metadata_label WHERE label = ?
 )
-ORDER BY slot ` + direction + `, block_index ` + direction + `,
-         id ` + direction
+ORDER BY a.slot ` + direction + `, a.block_index ` + direction + `,
+         t.id ` + direction
 	args := []any{strconv.FormatUint(label, 10)}
 	query, args = addLimitOffset(query, args, limit, offset)
 	ret, err := s.queryTransactions(ctx, db, query, args)
@@ -790,9 +818,10 @@ func addressTransactionRangeQuery(
 	to *models.AddressTransactionPosition,
 ) (string, []any) {
 	query := `
-SELECT at.payment_key, tx.hash, at.slot, at.tx_index, tx.block_hash
+SELECT at.payment_key, th.hash, at.slot, at.tx_index, tx.block_hash
 FROM address_transaction at
-JOIN "transaction" tx ON tx.id = at.transaction_id
+JOIN "transaction" th ON th.id = at.transaction_id
+JOIN applied_transaction tx ON tx.tx_id = th.id
 WHERE at.credential_tag = ? AND at.staking_key = ?`
 	args := []any{credentialTag, stakingKey}
 	if from != nil {
@@ -868,7 +897,7 @@ func addressTransactionPredicate(
 }
 
 func transactionsFromSQLite(
-	rows []sqlitequery.Transaction,
+	rows []transactionRow,
 ) ([]models.Transaction, error) {
 	ret := make([]models.Transaction, len(rows))
 	for i := range rows {
@@ -882,7 +911,7 @@ func transactionsFromSQLite(
 }
 
 func transactionFromSQLite(
-	row sqlitequery.Transaction,
+	row transactionRow,
 ) (*models.Transaction, error) {
 	fee, err := parseNullUint64("transaction fee", row.Fee)
 	if err != nil {
@@ -925,8 +954,8 @@ func transactionFromSQLite(
 
 func scanSQLiteTransaction(
 	rows *sql.Rows,
-) (sqlitequery.Transaction, error) {
-	var row sqlitequery.Transaction
+) (transactionRow, error) {
+	var row transactionRow
 	err := rows.Scan(
 		&row.Hash,
 		&row.BlockHash,

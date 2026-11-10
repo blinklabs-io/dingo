@@ -55,8 +55,7 @@ func hotStatementsFor(u *utxoSQL) []string {
 		insertUtxoQuery,
 		u.insertIgnore,
 		u.repairConflicted,
-		u.hydrateTransaction,
-		u.hydrateCollateral,
+		u.hydrate,
 		u.clearStaleSpend,
 		u.amountByOutput,
 		u.idByOutput,
@@ -65,11 +64,11 @@ func hotStatementsFor(u *utxoSQL) []string {
 		getAssetIDQuery,
 		u.getLiveByRef,
 		u.getIncludingSpent,
-		transactionInsertSQL,
-		transactionBatchInsertSQL,
-		transactionBatchInsertResultSQL,
-		transactionBatchConflictUpdateSQL,
-		transactionBatchConflictIDSQL,
+		transactionIdentityInsertSQL,
+		transactionIdentityInsertReturningSQL,
+		transactionIdentityIDSQL,
+		appliedTransactionInsertSQL,
+		appliedTransactionUpdateSQL,
 		committeeHotAuthorizationDeleteIDQuery,
 		u.getSpendState,
 		u.getSpendStateHash,
@@ -138,9 +137,6 @@ func hotStatementsFor(u *utxoSQL) []string {
 			consumeUtxosBatchQuery(rowCount, true),
 		)
 	}
-	for size := 1; size <= maxImportedProbeHashes; size *= 2 {
-		queries = append(queries, importedProbeQuery(size), producedProbeQuery(size))
-	}
 	return queries
 }
 
@@ -167,7 +163,7 @@ var hotStatementSet = func() map[string]struct{} {
 // and are excluded from other dialects.
 func cacheableForDialect(dialect, query string) bool {
 	if dialect != "sqlite" && (isSQLiteBatchQuery(query) ||
-		query == transactionBatchInsertResultSQL ||
+		query == transactionIdentityInsertSQL ||
 		query == sqliteUtxoSQL.insertResult ||
 		query == sqliteUtxoSQL.insertResultIgnore) {
 		return false
@@ -176,9 +172,8 @@ func cacheableForDialect(dialect, query string) bool {
 }
 
 func isSQLiteBatchQuery(query string) bool {
-	return strings.Contains(query, "RETURNING id, tx_id, output_idx") ||
-		strings.Contains(query, "RETURNING tx_id, output_idx") ||
-		strings.Contains(query, "AND (tx_id, output_idx) IN (")
+	return strings.HasPrefix(query, "-- name: InsertUtxoBatch ") ||
+		strings.HasPrefix(query, "-- name: ConsumeUtxosBatch")
 }
 
 // prepareHotStatements prepares every entry in hotStatements once against

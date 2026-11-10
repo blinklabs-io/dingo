@@ -443,7 +443,7 @@ func TestSetTransactionBatched_SameBatchProducerSpentViaInFlight(t *testing.T) {
 	require.Equal(
 		t,
 		candidate.consumerTx.Hash().Bytes(),
-		[]byte(utxo.SpentAtTxId),
+		[]byte(utxo.SpentAtTxHash),
 	)
 }
 
@@ -523,7 +523,7 @@ func TestSetTransactionBatched_CrossBatchProducerResolvesFromDB(t *testing.T) {
 	require.Equal(
 		t,
 		candidate.consumerTx.Hash().Bytes(),
-		[]byte(post.SpentAtTxId),
+		[]byte(post.SpentAtTxHash),
 	)
 }
 
@@ -607,7 +607,7 @@ func ingestSameBatchProducerConsumer(
 
 // TestSetTransactionBatched_InFlightDoesNotSkipExistingRowRepair guards the
 // resumed-backfill case: when the consumed output already exists in metadata
-// as a partially-written spent row (DeletedSlot == consumer slot, SpentAtTxId
+// as a partially-written spent row (DeletedSlot == consumer slot, SpentAtTxHash
 // == nil from a prior partial run) and the producer is re-ingested into the
 // same batch (so it is also "in-flight"), the consumer must still backfill the
 // spender link. The in-flight short-circuit must run after the existing-row
@@ -647,7 +647,7 @@ WHERE tx_id = ? AND output_idx = ?`,
 	require.NoError(t, err)
 	require.NotNil(t, pre)
 	require.Equal(t, candidate.consumerPoint.Slot, pre.DeletedSlot)
-	require.Nil(t, pre.SpentAtTxId, "precondition: spender hash cleared")
+	require.Nil(t, pre.SpentAtTxHash, "precondition: spender hash cleared")
 
 	// Pass 2: re-ingest. The producer is in-flight again, but because the row
 	// already exists the consumer must repair the spender link rather than
@@ -663,7 +663,7 @@ WHERE tx_id = ? AND output_idx = ?`,
 	require.Equal(
 		t,
 		candidate.consumerTx.Hash().Bytes(),
-		[]byte(post.SpentAtTxId),
+		[]byte(post.SpentAtTxHash),
 		"spender link must be backfilled for a pre-existing same-slot row",
 	)
 }
@@ -895,7 +895,7 @@ func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 		require.Equal(
 			t,
 			candidate.consumerTx.Hash().Bytes(),
-			[]byte(utxo.SpentAtTxId),
+			[]byte(utxo.SpentAtTxHash),
 		)
 	}
 
@@ -925,7 +925,7 @@ func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 			input.String(),
 		)
 		require.Zero(t, utxo.DeletedSlot)
-		require.Nil(t, utxo.SpentAtTxId)
+		require.Nil(t, utxo.SpentAtTxHash)
 	}
 }
 
@@ -980,7 +980,7 @@ func TestSetTransactionRecoversMissingConsumedInputsFromBlob(
 		require.Equal(
 			t,
 			candidate.consumerTx.Hash().Bytes(),
-			[]byte(utxo.SpentAtTxId),
+			[]byte(utxo.SpentAtTxHash),
 		)
 	}
 }
@@ -1602,7 +1602,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 	}
 
 	// Seed each producer tx's own consumed inputs as already-spent
-	// rows (without a SpentAtTxId, to avoid needing a parent
+	// rows (without a SpentAtTxHash, to avoid needing a parent
 	// transaction row for the Inputs FK) so the producer's
 	// gap-block ingestion does not try to recover them from a blob
 	// store that lacks the predecessor blocks. This mimics the
@@ -1611,7 +1611,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 	//
 	// Contract for the gap path: AddedSlot = DeletedSlot = seedSlot
 	// with seedSlot != point.Slot drives ensureGapConsumedUtxos into
-	// its "already spent by a different tx" branch (SpentAtTxId == nil
+	// its "already spent by a different tx" branch (SpentAtTxHash == nil
 	// AND DeletedSlot != 0 AND DeletedSlot != point.Slot), so the
 	// existing row is left untouched. Future changes to the gap-path
 	// branch conditions must keep this skip path reachable or update
@@ -1682,7 +1682,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 		)
 		require.Nil(
 			t,
-			utxo.SpentAtTxId,
+			utxo.SpentAtTxHash,
 			"input %s should be unspent before consumer gap tx runs",
 			input.String(),
 		)
@@ -1727,7 +1727,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 		require.Equal(
 			t,
 			spenderTxHash,
-			[]byte(utxo.SpentAtTxId),
+			[]byte(utxo.SpentAtTxHash),
 			"input %s spent_by_tx_id not set to consumer tx hash",
 			input.String(),
 		)

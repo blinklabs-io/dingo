@@ -192,57 +192,51 @@ func (a *transactionBatchAccumulator) restore(
 	}
 }
 
-const transactionInsertSQL = `-- name: InsertTransaction :one
-INSERT INTO "transaction" (
-    hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (hash) DO UPDATE SET
-    block_hash = excluded.block_hash,
-    block_index = excluded.block_index,
-    slot = excluded.slot,
-    collateral_fee = excluded.collateral_fee
-RETURNING id`
+// Applying a transaction writes two rows. The identity row, which holds only
+// the hash, may already exist: an imported or recovered output names its
+// producer before the producer is applied. The application row exists exactly
+// when the transaction has been applied, so its insert is what tells a first
+// application from a replay.
+const transactionIdentityInsertSQL = `-- name: InsertTransactionIdentity :execresult
+INSERT INTO "transaction" (hash) VALUES (?)
+ON CONFLICT (hash) DO NOTHING`
 
-// A fresh transaction ID has no child rows, so both write paths can skip
-// replay cleanup after an insert that created the ID.
-const transactionBatchInsertSQL = `-- name: InsertTransactionIfAbsent :one
-INSERT INTO "transaction" (
-    hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+const transactionIdentityInsertReturningSQL = `-- name: InsertTransactionIdentityReturning :one
+INSERT INTO "transaction" (hash) VALUES (?)
 ON CONFLICT (hash) DO NOTHING
 RETURNING id`
 
-var transactionBatchInsertResultSQL = strings.Replace(
-	strings.TrimSuffix(transactionBatchInsertSQL, "\nRETURNING id"),
-	"InsertTransactionIfAbsent :one",
-	"InsertTransactionIfAbsentResult :execresult",
-	1,
-)
-
-const transactionBatchConflictUpdateSQL = `-- name: UpdateTransactionOnConflict :exec
-UPDATE "transaction"
-SET block_hash = ?, block_index = ?, slot = ?, collateral_fee = ?
-WHERE hash = ?`
-
-const transactionBatchConflictIDSQL = `-- name: GetTransactionIDOnConflict :one
+const transactionIdentityIDSQL = `-- name: GetTransactionIdentityID :one
 SELECT id FROM "transaction" WHERE hash = ?`
+
+// A fresh application row means the transaction has no child rows, so both
+// write paths can skip replay cleanup after an insert that created it.
+const appliedTransactionInsertSQL = `-- name: InsertAppliedTransaction :execresult
+INSERT INTO applied_transaction (
+    tx_id, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (tx_id) DO NOTHING`
+
+const appliedTransactionUpdateSQL = `-- name: UpdateAppliedTransactionOnConflict :exec
+UPDATE applied_transaction
+SET block_hash = ?, block_index = ?, slot = ?, collateral_fee = ?
+WHERE tx_id = ?`
 
 // consumeUtxoSQL is the PostgreSQL and MySQL spend of one input. SQLite
 // spends through consumeUtxoSQLiteReturningSQL and consumeUtxosBatchQuery.
 const consumeUtxoSQL = `-- name: ConsumeUtxo :execrows
 UPDATE utxo
-SET deleted_slot = ?, spent_by_tx_id = ?
-WHERE ` + sharedRefEq + `
-  AND deleted_slot = 0 AND spent_by_tx_id IS NULL`
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE ` + refEq + `
+  AND deleted_slot = 0 AND spent_at_tx_id IS NULL`
 
 const consumeUtxoSQLiteReturningSQL = `-- name: ConsumeUtxoReturningStake :one
 UPDATE utxo
-SET deleted_slot = ?, spent_by_tx_id = ?
-WHERE ` + sqliteRefEq + `
-  AND deleted_slot = 0 AND spent_by_tx_id IS NULL
-RETURNING tx_id, output_idx, credential_tag, staking_key, amount`
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE ` + refEq + `
+  AND deleted_slot = 0 AND spent_at_tx_id IS NULL
+RETURNING ` + utxoConsumedHash + `, output_idx, credential_tag, staking_key, amount`
 
 // insertUtxoBatchQuery is the SQLite batched insert of rowCount outputs, one
 // of the sizes in sqliteRefs.
@@ -351,83 +345,38 @@ func (s *Store) insertUtxoModelsChecked(
 		}
 		return inserted, nil
 	}
-	// An output stored under the other kind of identity would insert as a
-	// duplicate, since no unique index spans both kinds, so it is treated as
-	// the conflict it is and left out of the batch insert.
-	existing, err := s.existingUtxoRefs(ctx, db, utxos)
-	if err != nil {
+	if err := s.resolveUtxoIdentities(ctx, db, utxos); err != nil {
 		return nil, err
 	}
 	for start := 0; start < len(utxos); start += utxoInsertBatchSize {
 		end := min(start+utxoInsertBatchSize, len(utxos))
-		batch := make([]*models.Utxo, 0, end-start)
-		batchPos := make([]int, 0, end-start)
-		var conflicted, duplicates []*models.Utxo
-		storedKeys := make(map[string]struct{})
-		for i := start; i < end; i++ {
-			key := utxoIdentityKey(utxos[i].TxId, utxos[i].OutputIdx)
-			if _, ok := existing[key]; ok {
-				if _, repeat := storedKeys[key]; repeat {
-					duplicates = append(duplicates, utxos[i])
-				} else {
-					storedKeys[key] = struct{}{}
-					conflicted = append(conflicted, utxos[i])
-				}
-				continue
-			}
-			batch = append(batch, utxos[i])
-			batchPos = append(batchPos, i)
-		}
-		if len(batch) == 0 {
-			if err := s.repairConflictedChunk(
-				ctx, db, conflicted, duplicates, deferredRows,
-			); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		query := insertUtxoBatchQuery(len(batch))
-		args := make([]any, 0, len(batch)*15)
-		for _, utxo := range batch {
-			params, err := s.createUtxoParamsChecked(ctx, db, utxo)
+		chunk := utxos[start:end]
+		args := make([]any, 0, len(chunk)*12)
+		for _, utxo := range chunk {
+			params, err := createUtxoParams(utxo)
 			if err != nil {
 				return nil, err
 			}
-			args = append(args,
-				params.TransactionID,
-				params.CollateralReturnForTxID,
-				params.TxID,
-				params.PaymentKey,
-				params.StakingKey,
-				params.CredentialTag,
-				params.DatumHash,
-				nullBytes(params.SpentAtTxID),
-				nullBytes(params.ReferencedByTxID),
-				nullBytes(params.CollateralByTxID),
-				params.AddedSlot,
-				params.DeletedSlot,
-				params.Amount,
-				params.OutputIdx,
-				params.PaymentScript,
-			)
+			args = append(args, params.args()...)
 		}
-
-		rows, err := s.queryRowsCached(ctx, db, query, args...)
+		rows, err := s.queryRowsCached(
+			ctx, db, insertUtxoBatchQuery(len(chunk)), args...,
+		)
 		if err != nil {
 			return nil, err
 		}
-		createdIDs := make(map[string]uint, len(batch))
+		createdIDs := make(map[string]uint, len(chunk))
 		for rows.Next() {
 			var (
 				id        uint
-				txID      []byte
+				txID      int64
 				outputIdx uint32
 			)
 			if err := rows.Scan(&id, &txID, &outputIdx); err != nil {
 				_ = rows.Close()
 				return nil, err
 			}
-			createdIDs[utxoIdentityKey(txID, outputIdx)] = id
+			createdIDs[utxoRowKey(txID, outputIdx)] = id
 		}
 		rowsErr := rows.Err()
 		closeErr := rows.Close()
@@ -438,21 +387,25 @@ func (s *Store) insertUtxoModelsChecked(
 			return nil, closeErr
 		}
 
-		processed := make(map[string]struct{}, len(batch))
-		for i, utxo := range batch {
-			key := utxoIdentityKey(utxo.TxId, utxo.OutputIdx)
-			if _, duplicate := processed[key]; duplicate {
-				duplicates = append(duplicates, utxo)
-				continue
-			}
+		processed := make(map[string]struct{}, len(chunk))
+		for i, utxo := range chunk {
+			key := utxoRowKey(int64(utxoProducerID(utxo)), utxo.OutputIdx)
+			_, repeat := processed[key]
 			processed[key] = struct{}{}
 			id, created := createdIDs[key]
-			if !created {
-				conflicted = append(conflicted, utxo)
+			if repeat || !created {
+				// The output is stored already, by an import before its
+				// producer was applied or by an earlier occurrence in this
+				// batch: link it to this replay.
+				if err := s.repairConflictedUtxo(
+					ctx, db, utxo, deferredRows,
+				); err != nil {
+					return nil, err
+				}
 				continue
 			}
 			utxo.ID = id
-			inserted[batchPos[i]] = true
+			inserted[start+i] = true
 			var err error
 			if deferredRows != nil {
 				err = s.persistUtxoRelationsWithDeferredAssets(
@@ -465,125 +418,32 @@ func (s *Store) insertUtxoModelsChecked(
 				return nil, err
 			}
 		}
-		if err := s.repairConflictedChunk(
-			ctx, db, conflicted, duplicates, deferredRows,
-		); err != nil {
-			return nil, err
-		}
 	}
 	return inserted, nil
 }
 
-// repairConflictedChunk repairs the conflicted outputs of one insert batch in
-// one batched statement, then the repeats of an output within the batch. A
-// repeat is repaired only after the first occurrence, which the batch handles,
-// so the first occurrence's provenance fills an unlinked row and the repeat
-// only adds missing links.
-func (s *Store) repairConflictedChunk(
-	ctx context.Context,
-	db queryer,
-	conflicted, duplicates []*models.Utxo,
-	deferredRows *rowBatch,
-) error {
-	if err := s.repairConflictedUtxosBatch(
-		ctx, db, conflicted, deferredRows,
-	); err != nil {
-		return err
+// utxoProducerID is the row id of the transaction that produced utxo, which
+// resolveUtxoIdentities has set.
+func utxoProducerID(utxo *models.Utxo) uint {
+	if utxo.TransactionID != nil {
+		return *utxo.TransactionID
 	}
-	for _, utxo := range duplicates {
-		if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
-			return err
-		}
+	if utxo.CollateralReturnForTxID != nil {
+		return *utxo.CollateralReturnForTxID
 	}
-	return nil
+	return 0
 }
 
-// repairConflictedUtxosBatch links outputs that already exist to the
-// transaction replaying them and re-applies their relation rows. Outputs
-// with no provenance link, which is how a ledger-state import leaves them,
-// are repaired with one statement per chunk. Any other output is repaired
-// individually.
-//
-// An output with no provenance link was created by a ledger-state import or
-// by recovery of a consumed input. Both write the output's assets in the
-// same write transaction as the row, from the same decoded output, so the
-// replay skips the asset writes for it. An already-linked output is repaired
-// in full.
-func (s *Store) repairConflictedUtxosBatch(
-	ctx context.Context,
-	db queryer,
-	utxos []*models.Utxo,
-	addressRows *rowBatch,
-) error {
-	for start := 0; start < len(utxos); start += utxoInsertBatchSize {
-		end := min(start+utxoInsertBatchSize, len(utxos))
-		chunk := utxos[start:end]
-		var txCases, collateralCases, arms []any
-		for _, utxo := range chunk {
-			params, err := createUtxoParams(utxo)
-			if err != nil {
-				return err
-			}
-			txCases = append(
-				txCases, params.TxID, params.OutputIdx, params.TransactionID,
-			)
-			collateralCases = append(
-				collateralCases,
-				params.TxID, params.OutputIdx, params.CollateralReturnForTxID,
-			)
-			arms = append(arms, params.TxID, params.OutputIdx)
-		}
-		args := make([]any, 0, len(txCases)+len(collateralCases)+len(arms))
-		args = append(args, txCases...)
-		args = append(args, collateralCases...)
-		args = append(args, arms...)
-		rows, err := s.queryRowsCached(
-			ctx, db, repairUnlinkedUtxosBatchQuery(len(chunk)), args...,
-		)
-		if err != nil {
-			return err
-		}
-		unlinked := make(map[string]uint, len(chunk))
-		for rows.Next() {
-			var (
-				id        uint
-				txID      []byte
-				outputIdx uint32
-			)
-			if err := rows.Scan(&id, &txID, &outputIdx); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			unlinked[utxoIdentityKey(txID, outputIdx)] = id
-		}
-		rowsErr := rows.Err()
-		closeErr := rows.Close()
-		if rowsErr != nil {
-			return rowsErr
-		}
-		if closeErr != nil {
-			return closeErr
-		}
-		for _, utxo := range chunk {
-			id, ok := unlinked[utxoIdentityKey(utxo.TxId, utxo.OutputIdx)]
-			if !ok {
-				if err := s.repairConflictedUtxo(
-					ctx, db, utxo, addressRows,
-				); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := s.persistUtxoRelationsWithoutAssets(
-				ctx, db, utxo, id, addressRows,
-			); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+// utxoRowKey identifies an output by its producer's row id and index.
+func utxoRowKey(txID int64, outputIdx uint32) string {
+	return strconv.FormatInt(txID, 10) + ":" +
+		strconv.FormatUint(uint64(outputIdx), 10)
 }
 
+// repairConflictedUtxo links an output that is already stored to the
+// transaction replaying it and re-applies its relation rows. The stored row
+// already names the producer; an output an import stored before the producer
+// was applied lacks only the collateral-return marker.
 func (s *Store) repairConflictedUtxo(
 	ctx context.Context,
 	db queryer,
@@ -597,20 +457,13 @@ func (s *Store) repairConflictedUtxo(
 	var id int64
 	u := s.utxoSQL()
 	args := u.bindRef(
-		[]any{params.TransactionID, params.CollateralReturnForTxID},
-		params.TxID, params.OutputIdx,
+		[]any{params.CollateralReturnForTxID}, utxo.TxId, params.OutputIdx,
 	)
-	if u.sqlite {
-		// The SQLite statement also compares tx_id, because its reference
-		// resolves through the producer identity alone.
-		args = append(args, params.TxID)
-	}
 	if err := s.queryRowCached(ctx, db, u.repairConflicted, args...).
 		Scan(&id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// The insert was suppressed by a unique index, yet no stored
-			// output has this hash and index: the producer already has a
-			// different output at this index.
+			// The insert was suppressed by the unique index, yet no stored
+			// output has this reference.
 			return fmt.Errorf(
 				"%w: output %x:%d collides with a stored output of its "+
 					"producer",
@@ -623,9 +476,9 @@ func (s *Store) repairConflictedUtxo(
 	return s.persistUtxoRelationsWithAddressRows(ctx, db, utxo, uint(id), addressRows)
 }
 
-// A no-op conflict retains SQLite's preceding last-insert ID. Check the
-// captured result before using that ID to distinguish a fresh transaction.
-func sqliteTransactionInsertID(result sql.Result) (int64, error) {
+// A no-op conflict retains the preceding last-insert ID. Check the affected
+// count before using that ID to tell an inserted row from a skipped one.
+func insertedRowID(result sql.Result) (int64, error) {
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return 0, err
@@ -633,13 +486,65 @@ func sqliteTransactionInsertID(result sql.Result) (int64, error) {
 	if affected == 0 {
 		return 0, sql.ErrNoRows
 	}
-	return result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if id == 0 {
+		return 0, sql.ErrNoRows
+	}
+	return id, nil
 }
 
-func (s *Store) insertTransactionUnbatched(
-	ctx context.Context,
-	db queryer,
-	args ...any,
+// transactionRowOps are the statement runners insertTransactionRows writes
+// through: the Store's cached statements for a single write, the
+// accumulator's prepared identity insert for a batch.
+type transactionRowOps struct {
+	insertIdentity          func(hash any) (sql.Result, error)
+	insertIdentityReturning func(hash any) *sql.Row
+	exec                    func(query string, args ...any) (sql.Result, error)
+	queryRow                func(query string, args ...any) *sql.Row
+}
+
+// insertIdentityRow returns the id of the identity row of hash, inserting the
+// row if absent.
+func insertIdentityRow(
+	dialect string,
+	ops transactionRowOps,
+	hash any,
+) (int64, error) {
+	var (
+		id  int64
+		err error
+	)
+	if dialect == "postgres" {
+		err = ops.insertIdentityReturning(hash).Scan(&id)
+	} else {
+		var result sql.Result
+		result, err = ops.insertIdentity(hash)
+		if err == nil {
+			id, err = insertedRowID(result)
+		}
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		err = ops.queryRow(transactionIdentityIDSQL, hash).Scan(&id)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("insert transaction identity: %w", err)
+	}
+	return id, nil
+}
+
+// insertTransactionRows resolves the identity row of args[0], inserting it
+// if absent, then writes the application row. args are the ten values of
+// applied_transaction in column order after the hash: hash, block_hash,
+// metadata, slot, type, fee, collateral_fee, ttl, block_index, valid. It
+// returns the identity row id and whether the application row was created;
+// on a replay the application row's position fields are updated.
+func insertTransactionRows(
+	dialect string,
+	ops transactionRowOps,
+	args []any,
 ) (int64, bool, error) {
 	if len(args) != 10 {
 		return 0, false, fmt.Errorf(
@@ -647,41 +552,63 @@ func (s *Store) insertTransactionUnbatched(
 			len(args),
 		)
 	}
-	var id int64
-	if s.dialect.Name() == "mysql" {
-		err := s.queryRowCached(ctx, db, transactionInsertSQL, args...).
-			Scan(&id)
-		return id, false, err
-	}
-	var err error
-	if s.dialect.Name() == "sqlite" {
-		var result sql.Result
-		result, err = s.execCached(
-			ctx,
-			db,
-			transactionBatchInsertResultSQL,
-			args...)
-		if err == nil {
-			id, err = sqliteTransactionInsertID(result)
-		}
-	} else {
-		err = s.queryRowCached(ctx, db, transactionBatchInsertSQL, args...).Scan(&id)
-	}
-	if err == nil {
-		return id, true, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	id, err := insertIdentityRow(dialect, ops, args[0])
+	if err != nil {
 		return 0, false, err
 	}
-	if _, err := s.execCached(ctx, db, transactionBatchConflictUpdateSQL,
-		args[1], args[8], args[3], args[6], args[0],
-	); err != nil {
-		return 0, false, fmt.Errorf("update existing transaction: %w", err)
+	applied := append([]any{id}, args[1:]...)
+	result, err := ops.exec(appliedTransactionInsertSQL, applied...)
+	if err != nil {
+		return 0, false, fmt.Errorf("insert applied transaction: %w", err)
 	}
-	if err := s.queryRowCached(ctx, db, transactionBatchConflictIDSQL, args[0]).Scan(&id); err != nil {
-		return 0, false, fmt.Errorf("find existing transaction: %w", err)
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, false, err
+	}
+	if affected > 0 {
+		return id, true, nil
+	}
+	if _, err := ops.exec(
+		appliedTransactionUpdateSQL,
+		args[1], args[8], args[3], args[6], id,
+	); err != nil {
+		return 0, false, fmt.Errorf("update applied transaction: %w", err)
 	}
 	return id, false, nil
+}
+
+// cachedTransactionRowOps runs the transaction row statements through the
+// Store's cached statements.
+func (s *Store) cachedTransactionRowOps(
+	ctx context.Context,
+	db queryer,
+) transactionRowOps {
+	return transactionRowOps{
+		insertIdentity: func(hash any) (sql.Result, error) {
+			return s.execCached(ctx, db, transactionIdentityInsertSQL, hash)
+		},
+		insertIdentityReturning: func(hash any) *sql.Row {
+			return s.queryRowCached(
+				ctx, db, transactionIdentityInsertReturningSQL, hash,
+			)
+		},
+		exec: func(query string, args ...any) (sql.Result, error) {
+			return s.execCached(ctx, db, query, args...)
+		},
+		queryRow: func(query string, args ...any) *sql.Row {
+			return s.queryRowCached(ctx, db, query, args...)
+		},
+	}
+}
+
+func (s *Store) insertTransactionUnbatched(
+	ctx context.Context,
+	db queryer,
+	args ...any,
+) (int64, bool, error) {
+	return insertTransactionRows(
+		s.dialect.Name(), s.cachedTransactionRowOps(ctx, db), args,
+	)
 }
 
 func (a *transactionBatchAccumulator) insertTransaction(
@@ -695,17 +622,14 @@ func (a *transactionBatchAccumulator) insertTransaction(
 		// handle it hands out in countingQueryer, making countingQueryer
 		// (not dialectQueryer) db's outermost concrete type. A plain
 		// db.(dialectQueryer) would silently miss that case and leave
-		// a.mysql false on a metrics-enabled MySQL store, routing this
-		// insert down the RETURNING-id path MySQL cannot serve.
+		// a.mysql false on a metrics-enabled MySQL store.
 		if dialect, ok := unwrapDialectQueryer(db); ok {
 			a.mysql = dialect.dialect == "mysql"
 			a.sqlite = dialect.dialect == "sqlite"
 		}
-		query := transactionBatchInsertSQL
-		if a.sqlite {
-			query = transactionBatchInsertResultSQL
-		} else if a.mysql {
-			query = transactionInsertSQL
+		query := transactionIdentityInsertSQL
+		if !a.mysql && !a.sqlite {
+			query = transactionIdentityInsertReturningSQL
 		}
 		stmt, err := db.PrepareContext(ctx, query)
 		if err != nil {
@@ -713,59 +637,39 @@ func (a *transactionBatchAccumulator) insertTransaction(
 		}
 		a.transactionInsert = stmt
 	}
+	dialect := "postgres"
+	switch {
+	case a.sqlite:
+		dialect = "sqlite"
+	case a.mysql:
+		dialect = "mysql"
+	}
+	id, isNew, err := insertTransactionRows(dialect, transactionRowOps{
+		insertIdentity: func(hash any) (sql.Result, error) {
+			a.countInsert()
+			return a.transactionInsert.ExecContext(ctx, hash)
+		},
+		insertIdentityReturning: func(hash any) *sql.Row {
+			a.countInsert()
+			return a.transactionInsert.QueryRowContext(ctx, hash)
+		},
+		exec: func(query string, args ...any) (sql.Result, error) {
+			return db.ExecContext(ctx, query, args...)
+		},
+		queryRow: func(query string, args ...any) *sql.Row {
+			return db.QueryRowContext(ctx, query, args...)
+		},
+	}, args)
+	return uint(id), isNew, err
+}
+
+// countInsert counts the identity insert, which runs on a prepared
+// statement outside any countingQueryer.
+func (a *transactionBatchAccumulator) countInsert() {
 	if a.sqlOperations != nil {
-		op, _ := classifySQLStatement(transactionBatchInsertSQL)
+		op, _ := classifySQLStatement(transactionIdentityInsertSQL)
 		a.sqlOperations.WithLabelValues(op).Inc()
 	}
-	if a.mysql {
-		result, err := a.transactionInsert.ExecContext(ctx, args...)
-		if err != nil {
-			return 0, false, err
-		}
-		id, err := result.LastInsertId()
-		if err != nil {
-			return 0, false, err
-		}
-		return uint(id), false, nil
-	}
-	var id int64
-	var err error
-	if a.sqlite {
-		var result sql.Result
-		result, err = a.transactionInsert.ExecContext(ctx, args...)
-		if err == nil {
-			id, err = sqliteTransactionInsertID(result)
-		}
-	} else {
-		err = a.transactionInsert.QueryRowContext(ctx, args...).Scan(&id)
-	}
-	if err == nil {
-		return uint(id), true, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return 0, false, err
-	}
-	if len(args) != 10 {
-		return 0, false, fmt.Errorf(
-			"update existing transaction: got %d insert arguments, want 10",
-			len(args),
-		)
-	}
-	if _, err := db.ExecContext(
-		ctx,
-		transactionBatchConflictUpdateSQL,
-		args[1], args[8], args[3], args[6], args[0],
-	); err != nil {
-		return 0, false, fmt.Errorf("update existing transaction: %w", err)
-	}
-	if err := db.QueryRowContext(
-		ctx,
-		transactionBatchConflictIDSQL,
-		args[0],
-	).Scan(&id); err != nil {
-		return 0, false, fmt.Errorf("find existing transaction: %w", err)
-	}
-	return uint(id), false, nil
 }
 
 func (a *transactionBatchAccumulator) resetStatement() {
@@ -1254,7 +1158,13 @@ func (s *Store) setTransactionWithAccumulator(
 				return err
 			}
 			if overlay != nil && !overlay.retainHistory {
+				var existingID int64
+				existingID, err = s.existingTransactionID(ctx, db, overlay, hash)
+				if err != nil {
+					return err
+				}
 				transactionID, err = overlay.stageTransaction(
+					existingID,
 					hash,
 					point.Hash,
 					metadataValue,
@@ -2044,22 +1954,10 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 }
 
 // insertUtxoQuery inserts one new output. PostgreSQL reads RETURNING
-// natively; MySQL leaves this statement uncached so its dialect adapter
-// can emulate the returning ID. SQLite uses the Exec-result forms below.
-// spentByPlaceholder resolves a spender hash bound by the caller to the
-// spender's transaction row id inside the statement. A NULL hash, which every
-// freshly produced output carries, yields NULL without a lookup. Callers that
-// bind a non-empty hash go through createUtxoParamsChecked, which fails the
-// write when the hash has no transaction row.
-const spentByPlaceholder = `(SELECT id FROM "transaction" WHERE hash = ?)`
-
+// natively; MySQL's dialect layer emulates it from the insert result.
 const insertUtxoQuery = `-- name: InsertUtxo :one
-INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_by_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ` + spentByPlaceholder + `, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO utxo (` + utxoInsertColumns + `
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id`
 
 // utxoSQL.insertIgnore leaves an existing output untouched: its conflict
@@ -2128,7 +2026,12 @@ func (s *Store) insertUtxoModelCheckedWithRows(
 	deferredRows *rowBatch,
 ) (bool, error) {
 	inserted := true
-	params, err := s.createUtxoParamsChecked(ctx, db, utxo)
+	if err := s.resolveUtxoIdentities(
+		ctx, db, []*models.Utxo{utxo},
+	); err != nil {
+		return false, err
+	}
+	params, err := createUtxoParams(utxo)
 	if err != nil {
 		return false, err
 	}
@@ -2137,37 +2040,9 @@ func (s *Store) insertUtxoModelCheckedWithRows(
 	if ignoreConflict {
 		query = u.insertIgnore
 	}
-	args := []any{
-		params.TransactionID,
-		params.CollateralReturnForTxID,
-		params.TxID,
-		params.PaymentKey,
-		params.StakingKey,
-		params.CredentialTag,
-		params.DatumHash,
-		nullBytes(params.SpentAtTxID),
-		nullBytes(params.ReferencedByTxID),
-		nullBytes(params.CollateralByTxID),
-		params.AddedSlot,
-		params.DeletedSlot,
-		params.Amount,
-		params.OutputIdx,
-		params.PaymentScript,
-	}
+	args := params.args()
 	var id int64
-	duplicate := false
-	if ignoreConflict {
-		existing, existErr := s.existingUtxoRefs(
-			ctx, db, []*models.Utxo{utxo},
-		)
-		if existErr != nil {
-			return false, existErr
-		}
-		_, duplicate = existing[utxoIdentityKey(utxo.TxId, utxo.OutputIdx)]
-	}
-	if duplicate {
-		err = sql.ErrNoRows
-	} else if s.dialect.Name() == "sqlite" {
+	if s.dialect.Name() == "sqlite" {
 		query = u.insertResult
 		if ignoreConflict {
 			query = u.insertResultIgnore
@@ -2189,13 +2064,9 @@ func (s *Store) insertUtxoModelCheckedWithRows(
 	}
 	if errors.Is(err, sql.ErrNoRows) && ignoreConflict {
 		inserted = false
-		lookupArgs := u.refArgs(params.TxID, params.OutputIdx)
-		if u.sqlite {
-			// As in repairConflictedUtxo: the SQLite reference resolves
-			// through the producer identity alone.
-			lookupArgs = append(lookupArgs, params.TxID)
-		}
-		err = s.queryRowCached(ctx, db, u.idByOutput, lookupArgs...).Scan(&id)
+		err = s.queryRowCached(
+			ctx, db, u.idByOutput, u.refArgs(utxo.TxId, utxo.OutputIdx)...,
+		).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, fmt.Errorf(
 				"%w: output %x:%d collides with a stored output of its "+
@@ -2204,9 +2075,9 @@ func (s *Store) insertUtxoModelCheckedWithRows(
 			)
 		}
 		if err == nil {
-			// Snapshot imports can create an output before its producer
-			// transaction is replayed. Once that transaction is known, fill in
-			// the provenance without overwriting an already-linked output.
+			// An import can create an output before its producer is
+			// applied. The row already carries the producer's id; only the
+			// collateral-return marker is missing.
 			//
 			// The stake credential deliberately is not repaired here. A
 			// pointer address's credential is not stored on the row at all
@@ -2216,10 +2087,8 @@ func (s *Store) insertUtxoModelCheckedWithRows(
 				ctx,
 				`-- name: RepairConflictedUtxoByID :exec
 UPDATE utxo
-SET transaction_id = COALESCE(transaction_id, ?),
-    collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
+SET collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
 WHERE id = ?`,
-				params.TransactionID,
 				params.CollateralReturnForTxID,
 				id,
 			)

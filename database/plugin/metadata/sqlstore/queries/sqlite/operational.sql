@@ -995,16 +995,18 @@ WHERE utxo_id = ?
 ORDER BY id;
 
 -- name: GetLiveUtxoRefsBySlot :many
-SELECT tx_id, output_idx
-FROM utxo
-WHERE deleted_slot = 0 AND added_slot = ?
-ORDER BY id;
+SELECT t.hash AS tx_hash, u.output_idx
+FROM utxo AS u
+JOIN "transaction" AS t ON t.id = u.tx_id
+WHERE u.deleted_slot = 0 AND u.added_slot = ?
+ORDER BY u.id;
 
 -- name: GetUtxoRefsBySlot :many
-SELECT tx_id, output_idx
-FROM utxo
-WHERE added_slot = ?
-ORDER BY id;
+SELECT t.hash AS tx_hash, u.output_idx
+FROM utxo AS u
+JOIN "transaction" AS t ON t.id = u.tx_id
+WHERE u.added_slot = ?
+ORDER BY u.id;
 
 -- name: GetControlledAmountByCredential :many
 SELECT amount
@@ -1219,34 +1221,48 @@ JOIN registration_drep r
 WHERE d.active = TRUE;
 
 -- name: GetTransactionByHash :one
-SELECT hash, block_hash, metadata, slot, type, id, fee, collateral_fee,
-       ttl, block_index, valid
-FROM "transaction"
-WHERE hash = ?;
+SELECT t.hash, a.block_hash, a.metadata, a.slot, a.type, t.id, a.fee,
+       a.collateral_fee, a.ttl, a.block_index, a.valid
+FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE t.hash = ?;
 
 -- name: GetTransactionSlotByHash :one
-SELECT slot FROM "transaction" WHERE hash = ?;
+SELECT a.slot
+FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE t.hash = ?;
 
 -- name: GetTransactionIDByHash :one
-SELECT id FROM "transaction" WHERE hash = ?;
+SELECT t.id
+FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE t.hash = ?;
 
 -- name: GetTransactionMetadataByHash :one
-SELECT metadata FROM "transaction" WHERE hash = ?;
+SELECT a.metadata
+FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE t.hash = ?;
 
 -- name: GetTransactionsByBlockHash :many
-SELECT hash, block_hash, metadata, slot, type, id, fee, collateral_fee,
-       ttl, block_index, valid
-FROM "transaction"
-WHERE block_hash = ?
-ORDER BY block_index ASC;
+SELECT t.hash, a.block_hash, a.metadata, a.slot, a.type, t.id, a.fee,
+       a.collateral_fee, a.ttl, a.block_index, a.valid
+FROM applied_transaction AS a
+JOIN "transaction" AS t ON t.id = a.tx_id
+WHERE a.block_hash = ?
+ORDER BY a.block_index ASC;
 
 -- name: SumTransactionFeesInSlotRange :many
 SELECT CASE WHEN valid THEN fee ELSE collateral_fee END
-FROM "transaction"
+FROM applied_transaction
 WHERE slot >= ? AND slot <= ?;
 
 -- name: GetTransactionHashesAfterSlot :many
-SELECT hash FROM "transaction" WHERE slot > ?;
+SELECT t.hash
+FROM applied_transaction AS a
+JOIN "transaction" AS t ON t.id = a.tx_id
+WHERE a.slot > ?;
 
 -- name: DeleteAddressTransactionsAfterSlot :exec
 DELETE FROM address_transaction WHERE slot > ?;
@@ -1264,7 +1280,7 @@ SELECT COUNT(*) FROM transaction_metadata_label WHERE label = ?;
 
 -- name: CountTransactionsInSlotRange :one
 SELECT COUNT(*)
-FROM "transaction"
+FROM applied_transaction
 WHERE slot >= ? AND slot <= ?;
 
 -- name: GetBlockSlotRangeStats :one

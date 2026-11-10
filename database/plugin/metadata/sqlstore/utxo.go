@@ -35,19 +35,17 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// utxoRowColumns lists the columns scanUtxoRow reads. The table stores the
-// spender's row id; the spending transaction's hash is projected by the
-// subselect, falling back to a legacy hash the version 57 upgrade could not
-// resolve to a row.
-const utxoRowColumns = "utxo.transaction_id, utxo.collateral_return_for_tx_id, " +
-	"utxo.tx_id, utxo.payment_key, utxo.staking_key, utxo.credential_tag, " +
-	"utxo.datum_hash, " +
-	`COALESCE((SELECT spender.hash FROM "transaction" AS spender ` +
-	`WHERE spender.id = utxo.spent_by_tx_id), utxo.spent_at_tx_id) ` +
-	`AS spent_at_tx_id, ` +
-	"utxo.referenced_by_tx_id, utxo.collateral_by_tx_id, utxo.id, " +
-	"utxo.added_slot, utxo.deleted_slot, utxo.amount, utxo.output_idx, " +
-	"utxo.payment_script"
+// utxoRowColumns lists the columns utxoRow scans. The table stores the
+// producer's and the spender's transaction row ids; the hashes every reader
+// reports are projected from the transaction table by row id.
+const utxoRowColumns = "utxo.tx_id, " +
+	`(SELECT p.hash FROM "transaction" AS p WHERE p.id = utxo.tx_id) ` +
+	"AS tx_hash, utxo.collateral_return_for_tx_id, utxo.spent_at_tx_id, " +
+	`(SELECT spender.hash FROM "transaction" AS spender ` +
+	`WHERE spender.id = utxo.spent_at_tx_id) AS spent_at_tx_hash, ` +
+	"utxo.payment_key, utxo.staking_key, utxo.credential_tag, " +
+	"utxo.datum_hash, utxo.id, utxo.added_slot, utxo.deleted_slot, " +
+	"utxo.amount, utxo.output_idx, utxo.payment_script"
 
 func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 	if utxo == nil {
@@ -57,24 +55,14 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 		txn,
 		func(db queryer, ctx context.Context) error {
 			q := s.operationalQueries(db)
-			params, err := s.createUtxoParamsChecked(ctx, db, utxo)
-			if err != nil {
+			if err := s.resolveUtxoIdentities(
+				ctx, db, []*models.Utxo{utxo},
+			); err != nil {
 				return err
 			}
-			// The insert has no conflict clause, and on SQLite no unique
-			// index spans a produced output and an imported row of the same
-			// output, so look for the other identity first.
-			existing, err := s.existingUtxoRefs(ctx, db, []*models.Utxo{utxo})
+			params, err := createUtxoParams(utxo)
 			if err != nil {
 				return err
-			}
-			if _, dup := existing[utxoIdentityKey(
-				utxo.TxId, utxo.OutputIdx,
-			)]; dup {
-				return fmt.Errorf(
-					"%w: create UTxO %x:%d: output already stored",
-					types.ErrUtxoConflict, utxo.TxId, utxo.OutputIdx,
-				)
 			}
 			var id int64
 			if err := s.queryRowCached(
@@ -235,32 +223,6 @@ func (s *Store) DeleteUtxosAfterSlot(
 			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
 		},
 	)
-}
-
-// spenderTxID resolves a spender's hash to its transaction row id. An empty
-// hash is no spender and resolves to NULL. A hash with no transaction row is
-// an error: the spend would otherwise be recorded without its spender.
-func (s *Store) spenderTxID(
-	ctx context.Context,
-	db queryer,
-	hash []byte,
-) (sql.NullInt64, error) {
-	if len(hash) == 0 {
-		return sql.NullInt64{}, nil
-	}
-	var id int64
-	err := db.QueryRowContext(ctx, s.dialect.Rebind(
-		`SELECT id FROM "transaction" WHERE hash = ?`,
-	), hash).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return sql.NullInt64{}, fmt.Errorf(
-			"spender transaction %x not found", hash,
-		)
-	}
-	if err != nil {
-		return sql.NullInt64{}, err
-	}
-	return sql.NullInt64{Int64: id, Valid: true}, nil
 }
 
 func (s *Store) SetUtxoDeletedAtSlot(
@@ -827,60 +789,30 @@ func (s *Store) importUtxos(
 			u := s.utxoSQL()
 			refs := make(map[string]models.StakeCredentialRef)
 			slots := make(map[string]uint64)
-			// The other-identity probe runs once per chunk of rows. Rows
-			// inserted by this call after the probe are tracked by kind, so
-			// a later row of the other kind still counts as a conflict.
-			var existing map[string]struct{}
-			insertedKind := make(map[string]bool, len(utxos))
-			for i := range utxos {
-				item := utxos[i]
-				params, err := s.createUtxoParamsChecked(ctx, db, &item)
+			// Resolving producers writes their row ids onto the models, so
+			// work on a copy and leave the caller's slice untouched.
+			owned := slices.Clone(utxos)
+			linked := make([]bool, len(owned))
+			for i := range owned {
+				if i%importIdentityChunk == 0 {
+					chunk := make([]*models.Utxo, 0, importIdentityChunk)
+					for j := i; j < min(i+importIdentityChunk, len(owned)); j++ {
+						linked[j] = utxoNamesProducerRow(&owned[j])
+						chunk = append(chunk, &owned[j])
+					}
+					if err := s.resolveUtxoIdentities(ctx, db, chunk); err != nil {
+						return err
+					}
+				}
+				item := owned[i]
+				params, err := createUtxoParams(&item)
 				if err != nil {
 					return err
 				}
 				var id int64
-				if i%maxImportedProbeHashes == 0 {
-					chunk := make(
-						[]*models.Utxo, 0, maxImportedProbeHashes,
-					)
-					for j := i; j < min(i+maxImportedProbeHashes, len(utxos)); j++ {
-						chunk = append(chunk, &utxos[j])
-					}
-					existing, err = s.existingUtxoRefs(ctx, db, chunk)
-					if err != nil {
-						return err
-					}
-				}
-				key := utxoIdentityKey(item.TxId, item.OutputIdx)
-				_, duplicate := existing[key]
-				if produced, seen := insertedKind[key]; seen &&
-					produced != utxoProducedKind(&item) {
-					duplicate = true
-				}
-				if _, seen := insertedKind[key]; !seen {
-					insertedKind[key] = utxoProducedKind(&item)
-				}
-				if duplicate {
-					err = sql.ErrNoRows
-				} else {
-					err = s.queryRowCached(ctx, db, u.insertIgnore,
-						params.TransactionID,
-						params.CollateralReturnForTxID,
-						params.TxID,
-						params.PaymentKey,
-						params.StakingKey,
-						params.CredentialTag,
-						params.DatumHash,
-						nullBytes(params.SpentAtTxID),
-						nullBytes(params.ReferencedByTxID),
-						nullBytes(params.CollateralByTxID),
-						params.AddedSlot,
-						params.DeletedSlot,
-						params.Amount,
-						params.OutputIdx,
-						params.PaymentScript,
-					).Scan(&id)
-				}
+				err = s.queryRowCached(
+					ctx, db, u.insertIgnore, params.args()...,
+				).Scan(&id)
 				if errors.Is(err, sql.ErrNoRows) {
 					err = s.queryRowCached(
 						ctx, db, u.idByRef,
@@ -900,6 +832,7 @@ func (s *Store) importUtxos(
 							ctx,
 							db,
 							&item,
+							linked[i],
 						); err != nil {
 							return err
 						}
@@ -979,10 +912,12 @@ func (s *Store) importUtxosDeferredSQLite(
 	// on copies to leave the caller's slice untouched.
 	owned := make([]models.Utxo, len(utxos))
 	utxoPtrs := make([]*models.Utxo, len(utxos))
+	linked := make([]bool, len(utxos))
 	for i := range utxos {
 		owned[i] = utxos[i]
 		owned[i].Assets = slices.Clone(utxos[i].Assets)
 		utxoPtrs[i] = &owned[i]
+		linked[i] = utxoNamesProducerRow(&owned[i])
 	}
 	utxos = owned
 	var deferredRows rowBatch
@@ -996,7 +931,9 @@ func (s *Store) importUtxosDeferredSQLite(
 		if inserted[i] {
 			continue
 		}
-		if err := s.hydrateImportedUtxo(ctx, db, &utxos[i]); err != nil {
+		if err := s.hydrateImportedUtxo(
+			ctx, db, &utxos[i], linked[i],
+		); err != nil {
 			return fmt.Errorf("hydrating imported UTxO: %w", err)
 		}
 	}
@@ -1006,41 +943,43 @@ func (s *Store) importUtxosDeferredSQLite(
 	return nil
 }
 
+// importIdentityChunk is the number of imported outputs whose producers are
+// resolved to transaction rows together.
+const importIdentityChunk = maxIdentityLookupHashes
+
+// utxoNamesProducerRow reports whether the caller asserted that the output's
+// producer was applied: it set TransactionID or CollateralReturnForTxID
+// itself instead of leaving the store to resolve the hash. Read it before
+// resolveUtxoIdentities, which sets the id on every model.
+func utxoNamesProducerRow(utxo *models.Utxo) bool {
+	return utxo.TransactionID != nil || utxo.CollateralReturnForTxID != nil
+}
+
+// hydrateImportedUtxo reconciles an output that an import found already
+// stored. linked is utxoNamesProducerRow of the model: an output whose
+// producer is applied takes the producer's block slot and its
+// collateral-return marker, where a snapshot's output keeps its anchor slot.
 func (s *Store) hydrateImportedUtxo(
 	ctx context.Context,
 	db queryer,
 	utxo *models.Utxo,
+	linked bool,
 ) error {
 	u := s.utxoSQL()
-	addedSlot, err := checkedInt64(utxo.AddedSlot)
-	if err != nil {
-		return err
-	}
-	if utxo.TransactionID != nil {
-		if _, err := s.execCached(
-			ctx, db,
-			u.hydrateTransaction,
-			u.bindRef(
-				[]any{*utxo.TransactionID, addedSlot},
-				utxo.TxId, utxo.OutputIdx,
-			)...,
-		); err != nil {
-			return fmt.Errorf("hydrate UTxO transaction provenance: %w", err)
+	if linked {
+		addedSlot, err := checkedInt64(utxo.AddedSlot)
+		if err != nil {
+			return err
 		}
-	}
-	if utxo.CollateralReturnForTxID != nil {
 		if _, err := s.execCached(
 			ctx, db,
-			u.hydrateCollateral,
+			u.hydrate,
 			u.bindRef(
-				[]any{*utxo.CollateralReturnForTxID, addedSlot},
+				[]any{addedSlot, nullableUint(utxo.CollateralReturnForTxID)},
 				utxo.TxId, utxo.OutputIdx,
 			)...,
 		); err != nil {
-			return fmt.Errorf(
-				"hydrate UTxO collateral-return provenance: %w",
-				err,
-			)
+			return fmt.Errorf("hydrate UTxO provenance: %w", err)
 		}
 	}
 	// A certified snapshot's live UTxO set declares this specific output live
@@ -1217,19 +1156,6 @@ func producedStakeCredentialDelta(
 	return ret, nil
 }
 
-// utxoStakeConsumedDeltaQuery is queryUtxoStakeConsumedDeltas' batched
-// lookup, built the same way utxoStakeRefsByTxIDQuery is: driven by distinct
-// tx_id values with the (tx_id, output_idx) pair filtered in Go, so SQLite's
-// planner stays on the unique output index (idx_utxo_producer_output on
-// SQLite) instead of falling back to a full idx_utxo_staking_deleted_amount
-// scan once the batch has more than a handful of terms.
-func utxoStakeConsumedDeltaSharedQuery(n int) string {
-	return "-- name: GetUtxoStakeConsumedDeltaBatch :many\n" +
-		"SELECT tx_id, output_idx, credential_tag, staking_key, amount " +
-		"FROM utxo WHERE " + sharedTxIDIn +
-		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
-}
-
 func consumedUtxoStakeDelta(
 	tag int64,
 	key []byte,
@@ -1378,29 +1304,6 @@ func distinctUtxoTxIDs(
 		outs[id.Idx] = struct{}{}
 	}
 	return order, wanted
-}
-
-// utxoStakeRefsByTxIDQuery builds the tx_id-driven lookup queryUtxoStakeRefs
-// runs per batch of n distinct transaction hashes. It deliberately carries no
-// "deleted_slot = 0" predicate -- see queryUtxoStakeRefs -- so deleted_slot
-// is filtered in Go instead.
-//
-// Filtering by tx_id alone -- rather than an OR of per-(tx_id, output_idx)
-// equalities -- keeps SQLite's planner on the leading
-// column of the unique output index (idx_utxo_producer_output on SQLite) no
-// matter how many terms are in the batch. The OR-of-pairs form defeats that index past a handful of
-// terms and falls back to a full scan of idx_utxo_deleted_staking_amount
-// once liveOnly's "deleted_slot = 0" looks like a cheaper driving predicate --
-// measured on an 11M-row live UTxO table which starves block
-// application for minutes at a time. The caller filters the extra rows this
-// query can return (other outputs of the same transaction, and, for liveOnly,
-// already-deleted ones) down to the exact requested (tx_id, output_idx)
-// pairs in Go.
-func utxoStakeRefsByTxIDSharedQuery(n int) string {
-	return "-- name: GetUtxoStakeRefsByTxIDs :many\n" +
-		"SELECT tx_id, output_idx, deleted_slot, credential_tag, " +
-		"staking_key FROM utxo WHERE " + sharedTxIDIn +
-		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
 }
 
 func queryUtxoStakeRefs(
@@ -1573,34 +1476,6 @@ func mergeStakeCredentialRefs(
 	return ret
 }
 
-// utxoDeletionRowsSharedQuery is the PostgreSQL and MySQL form of the single
-// index-friendly lookup used by MarkUtxosDeletedAtSlot; utxoSQL.deletionRows
-// selects the form of the store's dialect. Querying distinct tx_id values
-// avoids the OR-of-pairs predicate that makes SQLite prefer a deleted_slot
-// index over the output index for larger batches. The result carries both
-// primary keys for the update and stake references for the reward-cache
-// refresh.
-//
-// deleted_slot is projected so liveness can be filtered in Go without making
-// SQLite drive the lookup from a deleted_slot index when sqlite_stat1 is
-// absent. Other dialects retain a liveness predicate on the primary-key
-// update to protect against another transaction changing a selected row.
-func utxoDeletionRowsSharedQuery(n int, lockRows bool) string {
-	placeholders := bindPlaceholders(n)
-	name := "GetUtxoRowsByTxIDs"
-	if lockRows {
-		name = "LockUtxoRowsByTxIDs"
-	}
-	query := "-- name: " + name + " :many\n" +
-		"SELECT id, tx_id, output_idx, deleted_slot, credential_tag, " +
-		"staking_key FROM utxo " +
-		"WHERE " + sharedTxIDIn + placeholders + ")"
-	if lockRows {
-		query += " ORDER BY id FOR UPDATE"
-	}
-	return query
-}
-
 // markUtxosDeletedQuery builds the primary-key update for the live row IDs
 // established by queryUtxoDeletionRows.
 //
@@ -1762,8 +1637,8 @@ func (s *Store) GetUtxoSpendState(
 		}
 		if model, ok := overlay.retainedUtxo(newOverlayKey(txID, index)); ok {
 			return &models.UtxoSpendState{
-				DeletedSlot: model.DeletedSlot,
-				SpentAtTxId: bytes.Clone(model.SpentAtTxId),
+				DeletedSlot:   model.DeletedSlot,
+				SpentAtTxHash: bytes.Clone(model.SpentAtTxHash),
 			}, nil
 		}
 	}
@@ -1778,8 +1653,9 @@ func (s *Store) GetUtxoSpendState(
 	}
 	var state models.UtxoSpendState
 	var deletedSlot sql.NullInt64
+	var spentByID sql.NullInt64
 	var spentBy []byte
-	if err := row.Scan(&deletedSlot, &spentBy); err != nil {
+	if err := row.Scan(&deletedSlot, &spentByID, &spentBy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -1791,7 +1667,7 @@ func (s *Store) GetUtxoSpendState(
 		)
 	}
 	state.DeletedSlot = uint64(deletedSlot.Int64)
-	state.SpentAtTxId = types.NullableHash(spentBy)
+	state.SpentAtTxHash = types.NullableHash(spentBy)
 	return &state, nil
 }
 
@@ -1814,7 +1690,7 @@ func (s *Store) getUtxo(
 		}
 		if model, ok := overlay.retainedUtxo(newOverlayKey(txID, index)); ok {
 			if !includeSpent &&
-				(model.DeletedSlot != 0 || len(model.SpentAtTxId) != 0) {
+				(model.DeletedSlot != 0 || len(model.SpentAtTxHash) != 0) {
 				return nil, nil
 			}
 			return model, nil
@@ -1854,26 +1730,9 @@ func (s *Store) getUtxo(
 	return ret, nil
 }
 
-func scanUtxoRow(row *sql.Row) (sqlitequery.Utxo, error) {
-	var ret sqlitequery.Utxo
-	err := row.Scan(
-		&ret.TransactionID,
-		&ret.CollateralReturnForTxID,
-		&ret.TxID,
-		&ret.PaymentKey,
-		&ret.StakingKey,
-		&ret.CredentialTag,
-		&ret.DatumHash,
-		&ret.SpentAtTxID,
-		&ret.ReferencedByTxID,
-		&ret.CollateralByTxID,
-		&ret.ID,
-		&ret.AddedSlot,
-		&ret.DeletedSlot,
-		&ret.Amount,
-		&ret.OutputIdx,
-		&ret.PaymentScript,
-	)
+func scanUtxoRow(row *sql.Row) (utxoRow, error) {
+	var ret utxoRow
+	err := row.Scan(ret.scanArgs()...)
 	return ret, err
 }
 
@@ -1881,26 +1740,6 @@ func scanUtxoRow(row *sql.Row) (sqlitequery.Utxo, error) {
 // reference binds two parameters, so 200 stays under SQLite's conservative
 // 999-parameter configuration and its 500-term compound-select limit.
 const utxoRefsMaxPerQuery = 200
-
-// utxoRefsExactSharedQuery builds the PostgreSQL and MySQL predicate that
-// selects exactly the n (tx_id, output_idx) references bound to it. Each term
-// is its own equality lookup, so the planner stays on the unique output
-// index for every reference, which a wide OR of pairs does not guarantee. Only
-// the requested outputs, and so only their assets, are read; querying by tx_id
-// alone would load every other output of each transaction as well.
-// utxoSQL.exactRefs selects the form of the store's dialect.
-func utxoRefsExactSharedQuery(n int) string {
-	var query strings.Builder
-	query.WriteString("id IN (")
-	for i := range n {
-		if i > 0 {
-			query.WriteString(" UNION ALL ")
-		}
-		query.WriteString("SELECT id FROM utxo WHERE " + sharedRefEq)
-	}
-	query.WriteString(")")
-	return query.String()
-}
 
 // utxosByExactRefs returns the utxo rows, spent or live, for exactly the
 // distinct (tx_id, output_idx) references in refs. A reference with no row is
@@ -2083,8 +1922,8 @@ func (s *Store) getUtxoRefsBySlot(
 	ret := make([]models.UtxoId, 0, len(rows))
 	for _, row := range rows {
 		ret = append(ret, models.UtxoId{
-			Hash: row.TxID,
-			Idx:  uint32(row.OutputIdx.Int64),
+			Hash: row.TxHash,
+			Idx:  uint32(row.OutputIdx),
 		})
 	}
 	return ret, nil
@@ -3451,7 +3290,47 @@ func (s *Store) queryUtxoModels(
 	return ret, rows.Err()
 }
 
-func utxoFromSQLite(row sqlitequery.Utxo) (*models.Utxo, error) {
+// utxoRow is one output as utxoRowColumns selects it.
+type utxoRow struct {
+	TxID                    int64
+	TxHash                  []byte
+	CollateralReturnForTxID sql.NullInt64
+	SpentAtTxID             sql.NullInt64
+	SpentAtTxHash           []byte
+	PaymentKey              []byte
+	StakingKey              []byte
+	CredentialTag           int64
+	DatumHash               []byte
+	ID                      int64
+	AddedSlot               sql.NullInt64
+	DeletedSlot             sql.NullInt64
+	Amount                  sql.NullString
+	OutputIdx               sql.NullInt64
+	PaymentScript           sql.NullBool
+}
+
+// scanArgs returns the destinations of utxoRowColumns, in order.
+func (r *utxoRow) scanArgs() []any {
+	return []any{
+		&r.TxID,
+		&r.TxHash,
+		&r.CollateralReturnForTxID,
+		&r.SpentAtTxID,
+		&r.SpentAtTxHash,
+		&r.PaymentKey,
+		&r.StakingKey,
+		&r.CredentialTag,
+		&r.DatumHash,
+		&r.ID,
+		&r.AddedSlot,
+		&r.DeletedSlot,
+		&r.Amount,
+		&r.OutputIdx,
+		&r.PaymentScript,
+	}
+}
+
+func utxoFromSQLite(row utxoRow) (*models.Utxo, error) {
 	amount := uint64(0)
 	var err error
 	if row.Amount.Valid {
@@ -3460,17 +3339,17 @@ func utxoFromSQLite(row sqlitequery.Utxo) (*models.Utxo, error) {
 			return nil, err
 		}
 	}
+	txID := uint(row.TxID)
 	return &models.Utxo{
-		TransactionID:           uintPointer(row.TransactionID),
+		TransactionID:           &txID,
 		CollateralReturnForTxID: uintPointer(row.CollateralReturnForTxID),
-		TxId:                    row.TxID,
+		TxId:                    row.TxHash,
 		PaymentKey:              row.PaymentKey,
 		StakingKey:              row.StakingKey,
 		CredentialTag:           uint8(row.CredentialTag),
 		DatumHash:               row.DatumHash,
-		SpentAtTxId:             types.NullableHash(row.SpentAtTxID),
-		ReferencedByTxId:        types.NullableHash(row.ReferencedByTxID),
-		CollateralByTxId:        types.NullableHash(row.CollateralByTxID),
+		SpentAtTxID:             uintPointer(row.SpentAtTxID),
+		SpentAtTxHash:           types.NullableHash(row.SpentAtTxHash),
 		ID:                      uint(row.ID),
 		AddedSlot:               uint64(row.AddedSlot.Int64),
 		DeletedSlot:             uint64(row.DeletedSlot.Int64),
@@ -3480,55 +3359,19 @@ func utxoFromSQLite(row sqlitequery.Utxo) (*models.Utxo, error) {
 	}, nil
 }
 
-func scanSQLiteUtxo(rows *sql.Rows) (sqlitequery.Utxo, error) {
-	var row sqlitequery.Utxo
-	err := rows.Scan(
-		&row.TransactionID,
-		&row.CollateralReturnForTxID,
-		&row.TxID,
-		&row.PaymentKey,
-		&row.StakingKey,
-		&row.CredentialTag,
-		&row.DatumHash,
-		&row.SpentAtTxID,
-		&row.ReferencedByTxID,
-		&row.CollateralByTxID,
-		&row.ID,
-		&row.AddedSlot,
-		&row.DeletedSlot,
-		&row.Amount,
-		&row.OutputIdx,
-		&row.PaymentScript,
-	)
+func scanSQLiteUtxo(rows *sql.Rows) (utxoRow, error) {
+	var row utxoRow
+	err := rows.Scan(row.scanArgs()...)
 	return row, err
 }
 
 func scanUtxoWithOrdering(
 	rows *sql.Rows,
 ) (models.UtxoWithOrdering, error) {
-	var raw sqlitequery.Utxo
+	var raw utxoRow
 	var slot sql.NullInt64
 	var blockIndex sql.NullInt64
-	err := rows.Scan(
-		&raw.TransactionID,
-		&raw.CollateralReturnForTxID,
-		&raw.TxID,
-		&raw.PaymentKey,
-		&raw.StakingKey,
-		&raw.CredentialTag,
-		&raw.DatumHash,
-		&raw.SpentAtTxID,
-		&raw.ReferencedByTxID,
-		&raw.CollateralByTxID,
-		&raw.ID,
-		&raw.AddedSlot,
-		&raw.DeletedSlot,
-		&raw.Amount,
-		&raw.OutputIdx,
-		&raw.PaymentScript,
-		&slot,
-		&blockIndex,
-	)
+	err := rows.Scan(append(raw.scanArgs(), &slot, &blockIndex)...)
 	if err != nil {
 		return models.UtxoWithOrdering{}, err
 	}
@@ -3546,33 +3389,14 @@ func scanUtxoWithOrdering(
 func scanUtxoWithHistory(
 	rows *sql.Rows,
 ) (models.UtxoWithHistory, error) {
-	var raw sqlitequery.Utxo
+	var raw utxoRow
 	var slot sql.NullInt64
 	var blockIndex sql.NullInt64
 	var createdBlockHash []byte
 	var spentBlockHash []byte
-	err := rows.Scan(
-		&raw.TransactionID,
-		&raw.CollateralReturnForTxID,
-		&raw.TxID,
-		&raw.PaymentKey,
-		&raw.StakingKey,
-		&raw.CredentialTag,
-		&raw.DatumHash,
-		&raw.SpentAtTxID,
-		&raw.ReferencedByTxID,
-		&raw.CollateralByTxID,
-		&raw.ID,
-		&raw.AddedSlot,
-		&raw.DeletedSlot,
-		&raw.Amount,
-		&raw.OutputIdx,
-		&raw.PaymentScript,
-		&slot,
-		&blockIndex,
-		&createdBlockHash,
-		&spentBlockHash,
-	)
+	err := rows.Scan(append(
+		raw.scanArgs(), &slot, &blockIndex, &createdBlockHash, &spentBlockHash,
+	)...)
 	if err != nil {
 		return models.UtxoWithHistory{}, err
 	}
@@ -3597,64 +3421,46 @@ func uintPointer(value sql.NullInt64) *uint {
 	return &ret
 }
 
-// utxoInsertParams are the values of one utxo insert. SpentAtTxID carries the
-// spender's hash; the insert statements resolve it to the spender's row id.
+// utxoInsertParams are the values of one utxo insert, in insertUtxoQuery's
+// placeholder order. TxID and SpentAtTxID are transaction row ids; a model
+// that names its producer or spender only by hash is resolved first, see
+// resolveUtxoIdentities.
 type utxoInsertParams struct {
-	TransactionID           sql.NullInt64
+	TxID                    int64
+	OutputIdx               sql.NullInt64
 	CollateralReturnForTxID sql.NullInt64
-	TxID                    []byte
+	SpentAtTxID             sql.NullInt64
 	PaymentKey              []byte
 	StakingKey              []byte
 	CredentialTag           int64
 	DatumHash               []byte
-	SpentAtTxID             types.NullableHash
-	ReferencedByTxID        types.NullableHash
-	CollateralByTxID        types.NullableHash
+	Amount                  sql.NullString
+	PaymentScript           sql.NullBool
 	AddedSlot               sql.NullInt64
 	DeletedSlot             sql.NullInt64
-	Amount                  sql.NullString
-	OutputIdx               sql.NullInt64
-	PaymentScript           sql.NullBool
 }
 
 // args returns the values in insertUtxoQuery's placeholder order.
 func (p utxoInsertParams) args() []any {
 	return []any{
-		p.TransactionID,
-		p.CollateralReturnForTxID,
 		p.TxID,
+		p.OutputIdx,
+		p.CollateralReturnForTxID,
+		p.SpentAtTxID,
 		p.PaymentKey,
 		p.StakingKey,
 		p.CredentialTag,
 		p.DatumHash,
-		nullBytes(p.SpentAtTxID),
-		nullBytes(p.ReferencedByTxID),
-		nullBytes(p.CollateralByTxID),
+		p.Amount,
+		p.PaymentScript,
 		p.AddedSlot,
 		p.DeletedSlot,
-		p.Amount,
-		p.OutputIdx,
-		p.PaymentScript,
 	}
 }
 
-// createUtxoParamsChecked is createUtxoParams plus the guarantee that a
-// spender hash names an existing transaction row. The insert statements
-// resolve the hash in SQL and would store NULL for an unknown one, so the
-// check runs first and fails the write as the legacy foreign key did.
-func (s *Store) createUtxoParamsChecked(
-	ctx context.Context,
-	db queryer,
-	utxo *models.Utxo,
-) (utxoInsertParams, error) {
-	if len(utxo.SpentAtTxId) != 0 {
-		if _, err := s.spenderTxID(ctx, db, utxo.SpentAtTxId); err != nil {
-			return utxoInsertParams{}, err
-		}
-	}
-	return createUtxoParams(utxo)
-}
-
+// createUtxoParams converts a model whose producer is already resolved to a
+// row id: utxo.TransactionID, or utxo.CollateralReturnForTxID for a
+// collateral return.
 func createUtxoParams(
 	utxo *models.Utxo,
 ) (utxoInsertParams, error) {
@@ -3666,17 +3472,26 @@ func createUtxoParams(
 	if err != nil {
 		return utxoInsertParams{}, err
 	}
+	var producer uint
+	switch {
+	case utxo.TransactionID != nil:
+		producer = *utxo.TransactionID
+	case utxo.CollateralReturnForTxID != nil:
+		producer = *utxo.CollateralReturnForTxID
+	default:
+		return utxoInsertParams{}, fmt.Errorf(
+			"UTxO %x:%d has no resolved producer transaction",
+			utxo.TxId, utxo.OutputIdx,
+		)
+	}
 	return utxoInsertParams{
-		TransactionID:           nullableUint(utxo.TransactionID),
+		TxID:                    int64(producer),
 		CollateralReturnForTxID: nullableUint(utxo.CollateralReturnForTxID),
-		TxID:                    utxo.TxId,
+		SpentAtTxID:             nullableUint(utxo.SpentAtTxID),
 		PaymentKey:              utxo.PaymentKey,
 		StakingKey:              utxo.StakingKey,
 		CredentialTag:           int64(utxo.CredentialTag),
 		DatumHash:               utxo.DatumHash,
-		SpentAtTxID:             utxo.SpentAtTxId,
-		ReferencedByTxID:        utxo.ReferencedByTxId,
-		CollateralByTxID:        utxo.CollateralByTxId,
 		AddedSlot: sql.NullInt64{
 			Int64: addedSlot,
 			Valid: true,

@@ -183,24 +183,24 @@ const (
 	utxoReferenceEdgeTable  = "utxo_reference_edge"
 )
 
-// utxoReferenceInsertBatchSharedSQL is the PostgreSQL and MySQL edge insert
-// for a batch of inputCount references; utxoSQL.edgeInsertQuery selects the
-// form of the store's dialect.
-func utxoReferenceInsertBatchSharedSQL(
+// utxoReferenceInsertBatchQuery is the edge insert for a batch of inputCount
+// references. The first argument is the naming transaction's row id, then
+// the references, then the transaction id again for the existence check.
+func utxoReferenceInsertBatchQuery(
 	edgeTable string,
 	inputCount int,
 ) string {
 	predicates := make([]string, inputCount)
 	for i := range predicates {
-		predicates[i] = "(" + sharedRefEqAlias + ")"
+		predicates[i] = "(" + refEqAlias + ")"
 	}
 	return `-- name: InsertUtxoReferenceBatch :execrows
-INSERT INTO ` + edgeTable + ` (utxo_id, transaction_id)
+INSERT INTO ` + edgeTable + ` (utxo_id, tx_id)
 SELECT u.id, ? FROM utxo AS u
 WHERE (` + strings.Join(predicates, " OR ") + `)
   AND NOT EXISTS (
       SELECT 1 FROM ` + edgeTable + ` AS r
-      WHERE r.utxo_id = u.id AND r.transaction_id = ?
+      WHERE r.utxo_id = u.id AND r.tx_id = ?
   )`
 }
 
@@ -268,11 +268,10 @@ const (
 
 var cachedAddressInputQuerySizes = [...]int{1, 2, 4, 8, 16, 32}
 
-// addressTransactionInputSharedQuery is the PostgreSQL and MySQL input-address
-// lookup for size references; utxoSQL.addressInputsQuery selects the form of
-// the store's dialect. Separate lookups keep the planner on the unique index
-// for every input.
-func addressTransactionInputSharedQuery(size int) string {
+// addressTransactionInputQuery is the input-address lookup for size
+// references. Separate lookups keep the planner on the unique index for every
+// input.
+func addressTransactionInputQuery(size int) string {
 	var query strings.Builder
 	query.WriteString("-- name: GetAddressTransactionInputs :many")
 	for i := range size {
@@ -281,7 +280,7 @@ func addressTransactionInputSharedQuery(size int) string {
 		}
 		query.WriteString(`
 SELECT payment_key, payment_script, credential_tag, staking_key
-FROM utxo WHERE ` + sharedRefEq)
+FROM utxo WHERE ` + refEq)
 	}
 	return query.String()
 }

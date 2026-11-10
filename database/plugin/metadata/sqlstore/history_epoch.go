@@ -92,28 +92,29 @@ func (s *Store) SumTransactionOutputsInSlotRange(
 // CROSS JOIN fixes that loop order on SQLite; INDEXED BY also protects sparse
 // collateral lookups when statistics mostly describe NULL foreign keys.
 func (s *Store) transactionOutputRangeQuery(collateral bool) string {
-	name, column, valid := "SumValidTransactionOutputsInSlotRange", "transaction_id", "TRUE"
+	name, column, valid := "SumValidTransactionOutputsInSlotRange", "tx_id", "TRUE"
+	regular := " AND u.collateral_return_for_tx_id IS NULL"
 	if collateral {
+		regular = ""
 		name, column, valid = "SumCollateralReturnsInSlotRange", "collateral_return_for_tx_id", "FALSE"
 	}
 	outputs := "utxo u"
 	if collateral && s.dialect.Name() == "sqlite" {
 		outputs += " INDEXED BY idx_utxo_" + column
 	}
-	transaction := s.dialect.QuoteIdentifier("transaction")
 	return fmt.Sprintf(`-- name: %s :one
 SELECT %s FROM (
  SELECT u.amount
- FROM %s tx CROSS JOIN %s
+ FROM applied_transaction tx CROSS JOIN %s
  WHERE tx.slot >= ? AND tx.slot <= ? AND tx.valid = %s
-  AND u.%s = tx.id
-  AND NOT EXISTS (SELECT 1 FROM leios_transaction_context lc WHERE lc.transaction_id = tx.id)
+  AND u.%s = tx.tx_id%s
+  AND NOT EXISTS (SELECT 1 FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id)
  UNION ALL
  SELECT u.amount
- FROM leios_transaction_context lc CROSS JOIN %s tx CROSS JOIN %s
+ FROM leios_transaction_context lc CROSS JOIN applied_transaction tx CROSS JOIN %s
  WHERE lc.slot >= ? AND lc.slot <= ? AND tx.valid = %s
-  AND tx.id = lc.transaction_id AND u.%s = tx.id
-) AS output_amounts`, name, s.wideSumExpr("amount"), transaction, outputs, valid, column, transaction, outputs, valid, column)
+  AND tx.tx_id = lc.transaction_id AND u.%s = tx.tx_id%s
+) AS output_amounts`, name, s.wideSumExpr("amount"), outputs, valid, column, regular, outputs, valid, column, regular)
 }
 
 func (s *Store) GetBlockHashesInSlotRange(

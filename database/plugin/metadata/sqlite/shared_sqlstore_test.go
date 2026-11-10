@@ -942,7 +942,7 @@ func TestSharedSQLStoreLeiosClosureTolerateDoubleConsume(t *testing.T) {
 		require.NotNil(t, spent)
 		require.True(
 			t,
-			bytes.Equal(txA.hash.Bytes(), spent.SpentAtTxId[:]),
+			bytes.Equal(txA.hash.Bytes(), spent.SpentAtTxHash[:]),
 			"producer input must remain spent by the first certified tx",
 		)
 
@@ -3038,7 +3038,7 @@ func exerciseTransactionWriteStore(
 		Fee:              uint64(stored.Fee),
 		Valid:            stored.Valid,
 		InputDeletedSlot: spent.DeletedSlot,
-		InputSpentBy:     spent.SpentAtTxId,
+		InputSpentBy:     spent.SpentAtTxHash,
 		OutputAmount:     uint64(produced.Amount),
 		AccountReward:    uint64(account.Reward),
 		WithdrawalDeltas: deltas,

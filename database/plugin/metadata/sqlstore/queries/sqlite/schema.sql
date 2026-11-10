@@ -434,23 +434,19 @@ CREATE TABLE token_registry_entry (
 );
 
 CREATE TABLE utxo (
-    transaction_id INTEGER,
-    collateral_return_for_tx_id INTEGER UNIQUE,
-    tx_id BLOB,
+    id INTEGER PRIMARY KEY,
+    tx_id INTEGER NOT NULL,
+    output_idx INTEGER NOT NULL,
+    collateral_return_for_tx_id INTEGER,
+    spent_at_tx_id INTEGER,
     payment_key BLOB,
     staking_key BLOB,
     credential_tag INTEGER NOT NULL DEFAULT 0,
     datum_hash BLOB,
-    spent_at_tx_id BLOB,
-    spent_by_tx_id INTEGER,
-    referenced_by_tx_id BLOB,
-    collateral_by_tx_id BLOB,
-    id INTEGER PRIMARY KEY,
+    amount TEXT,
+    payment_script BOOLEAN,
     added_slot INTEGER,
     deleted_slot INTEGER,
-    amount TEXT,
-    output_idx INTEGER,
-    payment_script BOOLEAN,
     UNIQUE (tx_id, output_idx)
 );
 
@@ -530,18 +526,22 @@ CREATE TABLE registration_drep (
 );
 
 CREATE TABLE "transaction" (
-    hash BLOB,
+    id INTEGER PRIMARY KEY,
+    hash BLOB NOT NULL,
+    UNIQUE (hash)
+);
+
+CREATE TABLE applied_transaction (
+    tx_id INTEGER PRIMARY KEY,
     block_hash BLOB,
     metadata BLOB,
     slot INTEGER,
     type INTEGER,
-    id INTEGER PRIMARY KEY,
     fee TEXT,
     collateral_fee TEXT,
     ttl TEXT,
     block_index INTEGER,
-    valid BOOLEAN,
-    UNIQUE (hash)
+    valid BOOLEAN
 );
 
 CREATE TABLE address_transaction (

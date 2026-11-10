@@ -601,7 +601,7 @@ func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	require.NotNil(t, stored)
 	require.Len(t, stored.Inputs, 1, "the closure must consume the earlier ranking-block output even in a shared batch")
 	require.Equal(t, certifier.SlotNumber(), stored.Inputs[0].DeletedSlot)
-	require.Equal(t, spender.Hash().Bytes(), []byte(stored.Inputs[0].SpentAtTxId))
+	require.Equal(t, spender.Hash().Bytes(), []byte(stored.Inputs[0].SpentAtTxHash))
 }
 
 // A certifying ranking block whose parent announced no endorser block has

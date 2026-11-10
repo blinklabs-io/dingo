@@ -540,7 +540,7 @@ SELECT event.added_slot, COALESCE(tx.block_index, 0),
        COALESCE(certs.cert_index, 0), `+anchorColumns+`
 FROM `+table+` event
 LEFT JOIN certs ON certs.id = event.certificate_id
-LEFT JOIN "transaction" tx ON tx.id = certs.transaction_id
+LEFT JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
 WHERE event.credential_tag = ? AND event.`+credentialColumn+` = ?
   AND event.added_slot <= ?
 ORDER BY event.added_slot DESC, COALESCE(tx.block_index, 0) DESC,

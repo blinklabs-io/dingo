@@ -25,123 +25,181 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// utxoProducedKind reports whether the output names a producing transaction.
-func utxoProducedKind(utxo *models.Utxo) bool {
-	return utxo.TransactionID != nil || utxo.CollateralReturnForTxID != nil
+// An output names its producer, and a spent output its spender, by the
+// transaction table's row id. A producer that was never applied here, which
+// is how an imported or recovered output arrives, has an identity row and no
+// applied_transaction row. resolveUtxoIdentities gives every model the ids it
+// needs before the insert.
+
+// identityLookupSizes are the hash-list sizes of the identity lookup; a list
+// is padded with NULL up to its size.
+var identityLookupSizes = [...]int{1, 2, 4, 8, 16, 32, 64}
+
+// maxIdentityLookupHashes is the largest identity lookup list.
+const maxIdentityLookupHashes = 64
+
+var identityLookupQueries = func() map[int]string {
+	queries := make(map[int]string, len(identityLookupSizes))
+	for _, size := range identityLookupSizes {
+		queries[size] = "-- name: GetTransactionIdentitiesByHash :many\n" +
+			`SELECT id, hash FROM "transaction" WHERE hash IN (` +
+			bindPlaceholders(size) + ")"
+	}
+	return queries
+}()
+
+// transactionIdentityIDs returns the row id of each distinct hash in hashes.
+// With create set, a hash with no row gets an identity row; without it, a
+// hash with no row is absent from the result.
+func (s *Store) transactionIdentityIDs(
+	ctx context.Context,
+	db queryer,
+	hashes [][]byte,
+	create bool,
+) (map[string]int64, error) {
+	ids := make(map[string]int64, len(hashes))
+	var pending [][]byte
+	seen := make(map[string]struct{}, len(hashes))
+	for _, hash := range hashes {
+		if _, dup := seen[string(hash)]; dup || len(hash) == 0 {
+			continue
+		}
+		seen[string(hash)] = struct{}{}
+		pending = append(pending, hash)
+	}
+	for start := 0; start < len(pending); start += maxIdentityLookupHashes {
+		chunk := pending[start:min(start+maxIdentityLookupHashes, len(pending))]
+		size := sizeFor(identityLookupSizes[:], len(chunk))
+		args := make([]any, 0, size)
+		for _, hash := range chunk {
+			args = append(args, hash)
+		}
+		for len(args) < size {
+			args = append(args, nil)
+		}
+		rows, err := s.queryRowsCached(
+			ctx, db, identityLookupQueries[size], args...,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var (
+				id   int64
+				hash []byte
+			)
+			if err := rows.Scan(&id, &hash); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			ids[string(hash)] = id
+		}
+		rowsErr := rows.Err()
+		closeErr := rows.Close()
+		if rowsErr != nil {
+			return nil, rowsErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+	}
+	if !create {
+		return ids, nil
+	}
+	ops := s.cachedTransactionRowOps(ctx, db)
+	for _, hash := range pending {
+		if _, ok := ids[string(hash)]; ok {
+			continue
+		}
+		id, err := insertIdentityRow(s.dialect.Name(), ops, hash)
+		if err != nil {
+			return nil, err
+		}
+		ids[string(hash)] = id
+	}
+	return ids, nil
 }
 
-// existingUtxoRefs returns the identity keys of the outputs already stored
-// under another kind of identity than the one the insert would conflict on: a
-// produced output whose hash an import already stored, or an imported output
-// whose producing transaction already wrote it. Those pairs would insert as
-// duplicates, since no unique index spans both kinds, so the caller treats
-// them as conflicts. It is a no-op away from SQLite, whose full unique index
-// sees both kinds.
-func (s *Store) existingUtxoRefs(
+// resolveUtxoIdentities sets TransactionID on every model that names its
+// producer only by hash, creating the producer's identity row when it has
+// none, and SpentAtTxID on every model that names its spender only by hash.
+// A spender must already have a row: a spend recorded for an unknown
+// transaction would be unattributable.
+func (s *Store) resolveUtxoIdentities(
 	ctx context.Context,
 	db queryer,
 	utxos []*models.Utxo,
-) (map[string]struct{}, error) {
-	if s.dialect.Name() != "sqlite" || len(utxos) == 0 {
-		return nil, nil
-	}
-	var produced, imported []*models.Utxo
+) error {
+	var producers, spenders [][]byte
 	for _, utxo := range utxos {
-		if utxoProducedKind(utxo) {
-			produced = append(produced, utxo)
-		} else {
-			imported = append(imported, utxo)
+		if utxo.TransactionID == nil && utxo.CollateralReturnForTxID == nil {
+			producers = append(producers, utxo.TxId)
+		}
+		if utxo.SpentAtTxID == nil && len(utxo.SpentAtTxHash) != 0 {
+			spenders = append(spenders, utxo.SpentAtTxHash)
 		}
 	}
-	found := make(map[string]struct{})
-	for start := 0; start < len(produced); start += maxImportedProbeHashes {
-		part := produced[start:min(start+maxImportedProbeHashes, len(produced))]
-		hashes := distinctUtxoHashes(part)
-		size := importedProbeSize(len(hashes))
-		for len(hashes) < size {
-			// NULL matches no row.
-			hashes = append(hashes, nil)
-		}
-		rows, err := s.queryRowsCached(
-			ctx, db, importedProbeQuery(size), hashes...,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if err := collectUtxoKeys(rows, found); err != nil {
-			return nil, err
-		}
+	if len(producers) == 0 && len(spenders) == 0 {
+		return nil
 	}
-	for start := 0; start < len(imported); start += maxImportedProbeHashes {
-		part := imported[start:min(start+maxImportedProbeHashes, len(imported))]
-		hashes := distinctUtxoHashes(part)
-		size := importedProbeSize(len(hashes))
-		for len(hashes) < size {
-			hashes = append(hashes, nil)
-		}
-		rows, err := s.queryRowsCached(
-			ctx, db, producedProbeQuery(size), hashes...,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if err := collectUtxoKeys(rows, found); err != nil {
-			return nil, err
-		}
+	producerIDs, err := s.transactionIdentityIDs(ctx, db, producers, true)
+	if err != nil {
+		return err
 	}
-	return found, nil
-}
-
-// maxImportedProbeHashes bounds the hashes one probe names; probes are padded
-// to a power of two so each size is one prepared statement.
-const maxImportedProbeHashes = 64
-
-func importedProbeSize(n int) int {
-	size := 1
-	for size < n {
-		size *= 2
+	spenderIDs, err := s.transactionIdentityIDs(ctx, db, spenders, false)
+	if err != nil {
+		return err
 	}
-	return size
-}
-
-// importedProbeQuery finds the imported rows of the given transaction hashes;
-// size is one of the sizes of sqliteRefs.
-func importedProbeQuery(size int) string {
-	return sqliteRefs.importedProbe[size]
-}
-
-// producedProbeQuery finds the produced rows of the given transaction hashes;
-// size is one of the sizes of sqliteRefs.
-func producedProbeQuery(size int) string {
-	return sqliteRefs.producedProbe[size]
-}
-
-func distinctUtxoHashes(utxos []*models.Utxo) []any {
-	seen := make(map[string]struct{}, len(utxos))
-	hashes := make([]any, 0, len(utxos))
 	for _, utxo := range utxos {
-		if _, ok := seen[string(utxo.TxId)]; ok {
-			continue
+		if utxo.TransactionID == nil && utxo.CollateralReturnForTxID == nil {
+			id, ok := producerIDs[string(utxo.TxId)]
+			if !ok {
+				return fmt.Errorf(
+					"UTxO %x:%d has no producer transaction hash",
+					utxo.TxId, utxo.OutputIdx,
+				)
+			}
+			txID := uint(id)
+			utxo.TransactionID = &txID
 		}
-		seen[string(utxo.TxId)] = struct{}{}
-		hashes = append(hashes, utxo.TxId)
+		if utxo.SpentAtTxID == nil && len(utxo.SpentAtTxHash) != 0 {
+			id, ok := spenderIDs[string(utxo.SpentAtTxHash)]
+			if !ok {
+				return fmt.Errorf(
+					"spender transaction %x not found", []byte(utxo.SpentAtTxHash),
+				)
+			}
+			spenderID := uint(id)
+			utxo.SpentAtTxID = &spenderID
+		}
 	}
-	return hashes
+	return nil
 }
 
-func collectUtxoKeys(rows *sql.Rows, into map[string]struct{}) error {
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			hash []byte
-			idx  int64
-		)
-		if err := rows.Scan(&hash, &idx); err != nil {
-			return err
-		}
-		into[utxoIdentityKey(hash, uint32(idx))] = struct{}{} //nolint:gosec
+// spenderTxID resolves a spender's hash to its transaction row id. An empty
+// hash is no spender and resolves to NULL. A hash with no transaction row is
+// an error: the spend would otherwise be recorded without its spender.
+func (s *Store) spenderTxID(
+	ctx context.Context,
+	db queryer,
+	hash []byte,
+) (sql.NullInt64, error) {
+	if len(hash) == 0 {
+		return sql.NullInt64{}, nil
 	}
-	return rows.Err()
+	var id int64
+	err := db.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT id FROM "transaction" WHERE hash = ?`,
+	), hash).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sql.NullInt64{}, fmt.Errorf(
+			"spender transaction %x not found", hash,
+		)
+	}
+	if err != nil {
+		return sql.NullInt64{}, err
+	}
+	return sql.NullInt64{Int64: id, Valid: true}, nil
 }
 
 // isUniqueViolation reports whether err is an engine's unique-constraint
@@ -163,10 +221,9 @@ func isUniqueViolation(err error) bool {
 }
 
 // utxoInsertConflict maps an engine's unique violation on a utxo insert to
-// types.ErrUtxoConflict, so every dialect reports an output that is already
-// stored the way the SQLite cross-identity probe does. MySQL's emulated
-// INSERT ... RETURNING discards the engine's error (dialectQueryer), so there
-// a failed insert is a conflict when the output is stored afterwards.
+// types.ErrUtxoConflict. MySQL's emulated INSERT ... RETURNING discards the
+// engine's error (dialectQueryer), so there a failed insert is a conflict
+// when the output is stored afterwards.
 func (s *Store) utxoInsertConflict(
 	ctx context.Context,
 	db queryer,

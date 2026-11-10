@@ -103,7 +103,7 @@ INSERT INTO transaction_metadata_label (
 			row.PaymentKey = paymentB
 		}
 		if i > 0 {
-			row.SpentAtTxId = types.NullableHash(spentHashes[i-1])
+			row.SpentAtTxHash = types.NullableHash(spentHashes[i-1])
 			row.DeletedSlot = uint64((i + 4) * 10)
 		}
 		require.NoError(t, store.CreateUtxo(nil, row))

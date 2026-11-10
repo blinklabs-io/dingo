@@ -84,7 +84,7 @@ func TestLeiosAPIBatchPreservesConsumedInputTolerance(t *testing.T) {
 	require.NoError(t, store.SetTransactionLeiosClosureBatched(fx.tx, fx.point, 0, fx.certDeposits, false, nil, acc, txn, 0))
 	stored, err := store.GetUtxoIncludingSpent(fx.consumedTxID, 0, txn)
 	require.NoError(t, err)
-	require.Equal(t, other, []byte(stored.SpentAtTxId))
+	require.Equal(t, other, []byte(stored.SpentAtTxHash))
 	require.NoError(t, store.FlushBatch(acc, txn))
 }
 
