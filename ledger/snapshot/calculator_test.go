@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math"
 	"math/big"
 	"strconv"
@@ -212,7 +213,8 @@ func seedCertificate(
 	txHash[2] = byte(blockIndex)
 	txHash[3] = byte(certIndex)
 	txHash[4] = byte(certType)
-	result, err := raw.Exec(`
+	result, err := testutil.ExecTransactionInsert(raw,
+		`
 INSERT INTO "transaction" (hash, slot, block_index)
 VALUES (?, ?, ?)`,
 		txHash, slot, blockIndex,
@@ -1249,12 +1251,12 @@ func runHistoricalBoundaryStakeIncludesUntickedClosure(t *testing.T, collateralR
 	closureHash := bytes.Repeat([]byte{0x83}, 32)
 	rankingHash := bytes.Repeat([]byte{0x84}, 32)
 	for _, hash := range [][]byte{closureHash, rankingHash} {
-		_, err := raw.Exec(`INSERT INTO "transaction" (hash, slot, fee, collateral_fee, valid, block_index) VALUES (?, 1020, '200000', '0', TRUE, 0)`, hash)
+		_, err := testutil.ExecTransactionInsert(raw, `INSERT INTO "transaction" (hash, slot, fee, collateral_fee, valid, block_index) VALUES (?, 1020, '200000', '0', TRUE, 0)`, hash)
 		require.NoError(t, err)
 	}
 	_, err := raw.Exec(`INSERT INTO leios_transaction_context (transaction_id, slot) SELECT id, 990 FROM "transaction" WHERE hash = ?`, closureHash)
 	require.NoError(t, err)
-	_, err = raw.Exec(`UPDATE utxo SET deleted_slot = 1020, spent_by_tx_id = (SELECT id FROM "transaction" WHERE hash = ?) WHERE staking_key = ?`, closureHash, key)
+	_, err = raw.Exec(`UPDATE utxo SET deleted_slot = 1020, spent_at_tx_id = (SELECT id FROM "transaction" WHERE hash = ?) WHERE staking_key = ?`, closureHash, key)
 	require.NoError(t, err)
 	for i, hash := range [][]byte{closureHash, rankingHash} {
 		var id uint
@@ -1294,7 +1296,7 @@ func TestUntickedPoolRegistrationUsesContextAtBoundary(t *testing.T) {
 	seedPoolAndDelegations(t, db, poolHash, nil, 1020)
 	raw := snapshotSQLDB(t, db)
 	hash := bytes.Repeat([]byte{0x92}, 32)
-	_, err := raw.Exec(`INSERT INTO "transaction" (hash, slot, valid, block_index) VALUES (?, 1020, TRUE, 0)`, hash)
+	_, err := testutil.ExecTransactionInsert(raw, `INSERT INTO "transaction" (hash, slot, valid, block_index) VALUES (?, 1020, TRUE, 0)`, hash)
 	require.NoError(t, err)
 	_, err = raw.Exec(`INSERT INTO leios_transaction_context (transaction_id, slot) SELECT id, 990 FROM "transaction" WHERE hash = ?`, hash)
 	require.NoError(t, err)

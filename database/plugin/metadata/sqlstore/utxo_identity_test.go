@@ -110,7 +110,7 @@ func TestOutputsResolveToTheRowTheHashPathFinds(t *testing.T) {
 	for _, ref := range refs {
 		var want int64
 		require.NoError(t, store.writeDB.QueryRowContext(ctx,
-			"SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?",
+			`SELECT id FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
 			ref.Hash, ref.Idx,
 		).Scan(&want), "%x#%d", ref.Hash, ref.Idx)
 		got, err := store.GetUtxoIncludingSpent(ref.Hash, ref.Idx, nil)
@@ -123,7 +123,7 @@ func TestOutputsResolveToTheRowTheHashPathFinds(t *testing.T) {
 	// the failed transaction's own row.
 	var returnFor int64
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT collateral_return_for_tx_id FROM utxo WHERE tx_id = ? AND output_idx = 1",
+		`SELECT collateral_return_for_tx_id FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 1`,
 		failed,
 	).Scan(&returnFor))
 	require.NotZero(t, returnFor)
@@ -133,7 +133,7 @@ func TestOutputsResolveToTheRowTheHashPathFinds(t *testing.T) {
 	for _, ref := range []models.UtxoId{refs[0], refs[2], refs[3]} {
 		var spentBy int64
 		require.NoError(t, store.writeDB.QueryRow(
-			"SELECT spent_by_tx_id FROM utxo WHERE tx_id = ? AND output_idx = ?",
+			`SELECT spent_at_tx_id FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
 			ref.Hash, ref.Idx,
 		).Scan(&spentBy), "%x#%d", ref.Hash, ref.Idx)
 		var want int64
@@ -151,7 +151,7 @@ func TestOutputsResolveToTheRowTheHashPathFinds(t *testing.T) {
 	}, nil))
 	var count int
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT COUNT(*) FROM utxo WHERE (tx_id = ? AND output_idx = 0) OR (tx_id = ? AND output_idx = 0)",
+		`SELECT COUNT(*) FROM utxo WHERE (tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0) OR (tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0)`,
 		valid, imported,
 	).Scan(&count))
 	require.Equal(t, 2, count, "an import duplicated a produced or imported output")
@@ -160,41 +160,58 @@ func TestOutputsResolveToTheRowTheHashPathFinds(t *testing.T) {
 		0, nil, false, nil, 0,
 	))
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT COUNT(*) FROM utxo WHERE tx_id = ?", valid,
+		`SELECT COUNT(*) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, valid,
 	).Scan(&count))
 	require.Equal(t, 2, count, "re-applying a transaction duplicated its outputs")
 }
 
-// TestImportedOutputIsHydratedByItsProducer replays a producer over an output
-// an import stored first. The output must stay one row, now carrying the
-// producer, rather than gain a second row under the producer index.
-func TestImportedOutputIsHydratedByItsProducer(t *testing.T) {
+// TestImportThenApplyKeepsOneRowPerOutput applies a producer over an output an
+// import stored first. The import gives the producer an identity row and no
+// application row; applying it reuses that row, adds its application row and
+// leaves the output one row carrying the producer's id.
+func TestImportThenApplyKeepsOneRowPerOutput(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	producer := bytes32(0x81)
 	require.NoError(t, store.ImportUtxos([]models.Utxo{{
 		TxId: producer, OutputIdx: 0, Amount: types.Uint64(2_000_000),
 	}}, nil))
+	var importedID int64
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT id FROM "transaction" WHERE hash = ?`, producer,
+	).Scan(&importedID))
+	var applied int
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT COUNT(*) FROM applied_transaction WHERE tx_id = ?`, importedID,
+	).Scan(&applied))
+	require.Zero(t, applied, "an imported producer has no application row")
+
 	tx := mockledger.NewTransactionBuilder()
 	tx.WithId(producer)
 	tx.WithInputs(producerTestInput(t, bytes32(0x80), 0))
-	tx.WithOutputs(producerTestOutput(t, 2_000_000))
+	tx.WithOutputs(
+		producerTestOutput(t, 2_000_000), producerTestOutput(t, 3_000_000),
+	)
 	tx.WithValid(true)
 	require.NoError(t, store.SetTransaction(
 		tx, ocommon.Point{Slot: 5, Hash: producer}, 0, nil, false, nil, 0,
 	))
+
 	var rows int
-	var transactionID *int64
-	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT COUNT(*), MAX(transaction_id) FROM utxo WHERE tx_id = ?", producer,
-	).Scan(&rows, &transactionID))
-	require.Equal(t, 1, rows)
-	require.NotNil(t, transactionID, "the producer must hydrate the imported row")
 	var producerID int64
 	require.NoError(t, store.writeDB.QueryRow(
-		`SELECT id FROM "transaction" WHERE hash = ?`, producer,
-	).Scan(&producerID))
-	require.Equal(t, producerID, *transactionID)
+		`SELECT COUNT(*), MIN(tx_id) FROM utxo WHERE tx_id = ?`, importedID,
+	).Scan(&rows, &producerID))
+	require.Equal(t, 2, rows, "the replayed output must reuse the imported row")
+	require.Equal(t, importedID, producerID)
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT COUNT(*) FROM applied_transaction WHERE tx_id = ?`, importedID,
+	).Scan(&applied))
+	require.Equal(t, 1, applied)
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`, producer,
+	).Scan(&rows))
+	require.Equal(t, 1, rows, "applying must not add a second identity row")
 }
 
 // TestOutputLookupsDoNotScan pins the plans of the reference lookups the apply
@@ -212,122 +229,32 @@ func TestOutputLookupsDoNotScan(t *testing.T) {
 		args  []any
 	}{
 		"input_resolution": {
-			sqliteUtxoSQL.getLiveByRef, []any{hash, int64(0), hash, int64(0)},
+			sqliteUtxoSQL.getLiveByRef, []any{hash, int64(0)},
 		},
 		"including_spent": {
 			sqliteUtxoSQL.getIncludingSpent,
-			[]any{hash, int64(0), hash, int64(0)},
+			[]any{hash, int64(0)},
 		},
 		"spend_one": {consumeUtxoSQLiteReturningSQL,
-			[]any{int64(5), int64(1), hash, int64(0), hash, int64(0)}},
+			[]any{int64(5), int64(1), hash, int64(0)}},
 		"spend_batch": {consumeUtxosBatchQuery(3, true), []any{
 			int64(5), int64(1),
-			hash, int64(0), hash, int64(0),
-			hash, int64(1), hash, int64(1),
-			hash, int64(2), hash, int64(2),
+			hash, int64(0),
+			hash, int64(1),
+			hash, int64(2),
 		}},
-		"spend_state": {sqliteUtxoSQL.getSpendState, []any{hash, int64(0), hash, int64(0)}},
+		"spend_state": {sqliteUtxoSQL.getSpendState, []any{hash, int64(0)}},
 		"spend_state_hash": {
-			sqliteUtxoSQL.getSpendStateHash, []any{hash, int64(0), hash, int64(0)},
+			sqliteUtxoSQL.getSpendStateHash, []any{hash, int64(0)},
 		},
 		"by_tx_hash": {
-			sqliteRefs.deletionRows[2], []any{hash, hash, hash, hash},
+			sqliteRefs.deletionRows[2], []any{hash, hash},
 		},
 	} {
 		plan := explainQueryPlan(t, store, tc.query, tc.args...)
 		require.NotContains(t, plan, "SCAN utxo", "%s: %s", name, plan)
 		require.NotContains(t, plan, "SCAN transaction", "%s: %s", name, plan)
-		require.Contains(t, plan, "idx_utxo_producer_output", "%s: %s", name, plan)
-		require.Contains(t, plan, "idx_utxo_imported_ref", "%s: %s", name, plan)
+		require.Contains(t, plan, "idx_utxo_tx_id_output_idx", "%s: %s", name, plan)
 		require.Contains(t, plan, "idx_transaction_hash", "%s: %s", name, plan)
 	}
-}
-
-// TestCrossIdentityProbeUsesTheImportedIndex pins the plan of the probe that
-// finds an imported row for a produced output. Without the index named, SQLite
-// searches idx_utxo_collateral_return_for_tx_id for NULL, which holds a row
-// per output.
-func TestCrossIdentityProbeUsesTheImportedIndex(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	seedRollbackUtxos(t, store, 20_000, 64, 2_656_808, 40)
-	analyzeStore(t, store)
-	hash := make([]byte, 32)
-	plan := explainQueryPlan(
-		t, store, importedProbeQuery(2), hash, hash,
-	)
-	require.Contains(t, plan, "idx_utxo_imported_ref", plan)
-	require.NotContains(t, plan, "SCAN utxo", plan)
-}
-
-// TestDirectInsertsRefuseTheOtherIdentity covers the writers with no conflict
-// clause: CreateUtxo refuses a produced output over an imported row and the
-// reverse, as the unique hash index did, and AddUtxos leaves a produced output
-// alone when it is declared again as an imported-kind row.
-func TestDirectInsertsRefuseTheOtherIdentity(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	importedHash, producedHash := bytes32(0x91), bytes32(0x92)
-	require.NoError(t, store.ImportUtxos([]models.Utxo{{
-		TxId: importedHash, OutputIdx: 0, Amount: types.Uint64(1),
-	}}, nil))
-	var producer int64
-	require.NoError(t, store.writeDB.QueryRow(
-		`INSERT INTO "transaction" (hash, slot) VALUES (?, 5) RETURNING id`,
-		producedHash,
-	).Scan(&producer))
-	id := uint(producer)
-	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
-		TxId: producedHash, OutputIdx: 0, TransactionID: &id,
-		Amount: types.Uint64(1),
-	}))
-
-	err := store.CreateUtxo(nil, &models.Utxo{
-		TxId: importedHash, OutputIdx: 0, TransactionID: &id,
-		Amount: types.Uint64(1),
-	})
-	require.ErrorIs(t, err, types.ErrUtxoConflict, "produced over imported")
-	err = store.CreateUtxo(nil, &models.Utxo{
-		TxId: producedHash, OutputIdx: 0, Amount: types.Uint64(1),
-	})
-	require.ErrorIs(t, err, types.ErrUtxoConflict, "imported over produced")
-
-	require.NoError(t, store.ImportUtxos([]models.Utxo{{
-		TxId: producedHash, OutputIdx: 0, Amount: types.Uint64(1),
-	}}, nil))
-	var count int
-	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT COUNT(*) FROM utxo WHERE tx_id IN (?, ?)",
-		importedHash, producedHash,
-	).Scan(&count))
-	require.Equal(t, 2, count)
-}
-
-// TestProducedProbePlanUnderImportedStatistics pins the plan of the probe that
-// finds the produced outputs of given hashes after statistics were gathered
-// over an imported set, before any output had a producer. The probe must walk
-// from the transaction hash to the producer index, never scan utxo.
-func TestProducedProbePlanUnderImportedStatistics(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	seedRollbackUtxos(t, store, 20_000, 64, 2_656_808, 40)
-	analyzeStore(t, store)
-	_, err := store.writeDB.Exec(`
-WITH RECURSIVE n(i) AS (
-    SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3000
-)
-INSERT INTO "transaction" (hash, slot, block_index)
-SELECT randomblob(32), i, 0 FROM n`)
-	require.NoError(t, err)
-	_, err = store.writeDB.Exec(`
-INSERT INTO utxo (transaction_id, tx_id, output_idx, deleted_slot, amount)
-SELECT t.id, t.hash, o.i, 0, '1' FROM "transaction" AS t
-JOIN (SELECT 0 AS i UNION ALL SELECT 1 UNION ALL SELECT 2) AS o`)
-	require.NoError(t, err)
-
-	hash := make([]byte, 32)
-	plan := explainQueryPlan(t, store, producedProbeQuery(2), hash, hash)
-	require.NotContains(t, plan, "SCAN", plan)
-	require.Contains(t, plan, "idx_utxo_producer_output", plan)
-	require.Contains(t, plan, "idx_transaction_hash", plan)
 }

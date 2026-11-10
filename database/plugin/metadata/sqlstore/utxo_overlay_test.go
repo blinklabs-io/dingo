@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"slices"
 	"sort"
 	"strings"
@@ -595,7 +596,7 @@ func TestBatchUtxoOverlayReportsTransactionConflict(t *testing.T) {
 	chain := buildOverlayChain(t, 2)
 	store := newMigratedSQLiteStore(t)
 	seedOverlayChain(t, store, chain)
-	_, err := store.writeDB.ExecContext(context.Background(),
+	_, err := testutil.ExecTransactionInsert(store.writeDB,
 		`INSERT INTO "transaction" (hash, slot, valid) VALUES (?, 5, 1)`,
 		chain.batch[1].Hash().Bytes())
 	require.NoError(t, err)
@@ -626,8 +627,7 @@ func TestBatchUtxoOverlayTransactionIDsAfterRollback(t *testing.T) {
 		store := newForeignKeySQLiteStore(t)
 		chain := buildOverlayChain(t, 4)
 		seedOverlayChain(t, store, chain)
-		_, err := store.writeDB.ExecContext(
-			context.Background(),
+		_, err := testutil.ExecTransactionInsert(store.writeDB,
 			`INSERT INTO "transaction" (hash, slot, valid) VALUES (X'AA', 900, 1)`,
 		)
 		require.NoError(t, err)
@@ -741,7 +741,8 @@ func TestBatchUtxoOverlayReportsConflict(t *testing.T) {
 	_, err := store.writeDB.ExecContext(context.Background(),
 		`INSERT INTO utxo (tx_id, output_idx, credential_tag, added_slot,
 		   deleted_slot, amount, payment_script)
-		 VALUES (?, 0, 0, 5, 0, '1', 0)`, overlayTxID(0x02, 1))
+		 VALUES (?, 0, 0, 5, 0, '1', 0)`,
+		testutil.TransactionID(t, store.writeDB, overlayTxID(0x02, 1)))
 	require.NoError(t, err)
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
@@ -844,18 +845,18 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 			require.NotContains(t, spend, "SCAN utxo", stage.name+": "+spend)
 			require.Equal(t, keys, strings.Count(
 				spend,
-				"USING INDEX idx_utxo_producer_output (producer_tx_id=? AND output_idx=?)",
+				"USING INDEX idx_utxo_tx_id_output_idx (tx_id=? AND output_idx=?)",
 			), stage.name+": "+spend)
 		}
 		prefetch := connQueryPlan(
 			t, conn, overlayPrefetchQuery(keys),
-			append(slices.Clone(prefetchArgs), prefetchArgs...)...,
+			slices.Clone(prefetchArgs)...,
 		)
 		require.Contains(t, prefetch,
-			"SEARCH u USING INDEX idx_utxo_producer_output",
+			"SEARCH t USING COVERING INDEX idx_transaction_hash (hash=?)",
 			stage.name+": "+prefetch)
 		require.Contains(t, prefetch,
-			"SEARCH u USING INDEX idx_utxo_imported_ref (tx_id=? AND output_idx=?)",
+			"SEARCH u USING INDEX idx_utxo_tx_id_output_idx (tx_id=? AND output_idx=?)",
 			stage.name+": "+prefetch)
 		require.NotContains(t, prefetch, "SCAN u", stage.name+": "+prefetch)
 		mark := connQueryPlan(t, conn, overlayMarkQuery(keys), markArgs...)

@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"bytes"
 	"context"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math/big"
 	"testing"
 
@@ -202,7 +203,7 @@ func TestGetScriptReferenceUtxos(t *testing.T) {
 	// 0x42's holder is spent.
 	_, err := rawDB(t, store, txn).ExecContext(
 		context.Background(),
-		`UPDATE utxo SET deleted_slot = 7 WHERE tx_id = ? AND output_idx = 0`,
+		`UPDATE utxo SET deleted_slot = 7 WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`,
 		bytes.Repeat([]byte{0x42}, 32),
 	)
 	require.NoError(t, err)
@@ -430,8 +431,8 @@ func TestGetScriptRedeemersOrdersByChainPosition(t *testing.T) {
 		{0xa1, 10, 2, 0, 0},
 		{0xa2, 10, 3, 0, 0},
 	} {
-		res, err := db.Exec(
-			`INSERT OR IGNORE INTO "transaction" (hash, block_hash, slot, block_index, valid, fee) VALUES (?, ?, ?, ?, 1, '0')`,
+		res, err := testutil.ExecTransactionInsert(db,
+			`INSERT INTO "transaction" (hash, block_hash, slot, block_index, valid, fee) VALUES (?, ?, ?, ?, 1, '0') ON CONFLICT (hash) DO NOTHING`,
 			bytes.Repeat(
 				[]byte{row.tx},
 				32,

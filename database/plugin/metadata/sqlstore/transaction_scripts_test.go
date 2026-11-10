@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"bytes"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -69,8 +70,7 @@ func TestStoreTransactionWitnessesIncludesPlutusV4(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
 	script := lcommon.PlutusV4Script{0x41, 0x00}
-	result, err := store.writeDB.ExecContext(
-		t.Context(),
+	result, err := testutil.ExecTransactionInsert(store.writeDB,
 		`INSERT INTO "transaction" (hash) VALUES (?)`,
 		bytes.Repeat([]byte{0x33}, 32),
 	)
@@ -131,8 +131,7 @@ func TestStoreTransactionWitnessesIncludesDijkstraSubTransactions(
 	require.NoError(t, sharedDatum.UnmarshalCBOR(sharedDatumRaw))
 	var nestedDatum lcommon.Datum
 	require.NoError(t, nestedDatum.UnmarshalCBOR(nestedDatumRaw))
-	result, err := store.writeDB.ExecContext(
-		t.Context(),
+	result, err := testutil.ExecTransactionInsert(store.writeDB,
 		`INSERT INTO "transaction" (hash) VALUES (?)`,
 		bytes.Repeat([]byte{0x34}, 32),
 	)

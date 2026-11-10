@@ -141,13 +141,10 @@ type overlayStats struct {
 
 // overlayTransaction is a staged transaction: its row id and the values of
 // the per-row path's insert, the hash first and then the applied_transaction
-// columns in appliedTransactionInsertSQL's order. existing reports that the
-// identity row was stored before the batch, which is how an imported
-// output's producer arrives; only its applied row is written.
+// columns in appliedTransactionInsertSQL's order.
 type overlayTransaction struct {
-	id       int64
-	values   []any
-	existing bool
+	id     int64
+	values []any
 }
 
 type utxoOverlay struct {
@@ -362,13 +359,16 @@ func transactionChildTables(
 }
 
 // stageTransaction queues a transaction with the id the per-row path's
-// insert would give it, in apply order. A hash that already has an identity
-// row keeps that row's id, existingID. Otherwise the id is the next
-// AUTOINCREMENT value: nothing else inserts into the table inside a trusted
-// batch, and the explicit-id insert raises sqlite_sequence to the highest id
-// as that insert would. hash and rest are the per-row insert's arguments.
+// insert would give it, in apply order: nothing else inserts into the table
+// inside a trusted batch, and the explicit-id insert raises sqlite_sequence
+// to the highest id as that insert would. hash and rest are the per-row
+// insert's arguments.
+//
+// A hash that already has an identity row, which an import leaves for the
+// producer of an imported output, makes the identity insert fail its unique
+// index at write time. That is an overlay conflict like any other: the batch
+// is applied again on the per-row path, which reuses the existing row.
 func (o *utxoOverlay) stageTransaction(
-	existingID int64,
 	hash []byte,
 	rest ...any,
 ) (int64, error) {
@@ -380,41 +380,12 @@ func (o *utxoOverlay) stageTransaction(
 	}
 	o.mutations++
 	o.txHashes[string(hash)] = struct{}{}
-	id := existingID
-	if existingID == 0 {
-		o.txSeq++
-		id = o.txSeq
-	}
+	o.txSeq++
 	o.txPending = append(o.txPending, overlayTransaction{
-		id:       id,
-		values:   append([]any{hash}, rest...),
-		existing: existingID != 0,
+		id: o.txSeq, values: append([]any{hash}, rest...),
 	})
 	o.stats.Transactions++
-	return id, nil
-}
-
-// existingTransactionID is the row id of the identity row of hash, or zero
-// when the store has none. It reads rows stored before the batch, which no
-// staged row changes, so like lookupInput it skips the read barrier.
-func (s *Store) existingTransactionID(
-	ctx context.Context,
-	db queryer,
-	o *utxoOverlay,
-	hash []byte,
-) (int64, error) {
-	flushing := o.flushing
-	o.flushing = true
-	defer func() { o.flushing = flushing }()
-	var id int64
-	err := s.queryRowCached(ctx, db, transactionIdentityIDSQL, hash).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, fmt.Errorf("find transaction identity: %w", err)
-	}
-	return id, nil
+	return o.txSeq, nil
 }
 
 // needsTransactions reports whether query names "transaction" or a table
@@ -447,9 +418,7 @@ func writeOverlayTransactions(
 	o.stats.TransactionWrites++
 	var identities, applied []any
 	for _, row := range o.txPending {
-		if !row.existing {
-			identities = append(identities, row.id, row.values[0])
-		}
+		identities = append(identities, row.id, row.values[0])
 		applied = append(applied, row.id)
 		applied = append(applied, row.values[1:]...)
 	}
@@ -712,6 +681,8 @@ func (o *utxoOverlay) consume(
 			if o.retainHistory {
 				out.model.DeletedSlot = slot
 				out.model.SpentAtTxHash = out.spentBy
+				spenderID := uint(txID)
+				out.model.SpentAtTxID = &spenderID
 				if out.written {
 					o.marks = append(
 						o.marks,
@@ -1150,7 +1121,7 @@ INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)`,
 // so it is retried there too.
 var overlayConflictPattern = regexp.MustCompile(
 	`UNIQUE constraint failed: ` +
-		`(utxo|asset|utxo_pointer|reward_live_stake|transaction)\.` +
+		`(utxo|asset|utxo_pointer|reward_live_stake|transaction|applied_transaction)\.` +
 		`|FOREIGN KEY constraint failed`,
 )
 

@@ -17,6 +17,7 @@ package database
 import (
 	"context"
 	"encoding/binary"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -46,7 +47,8 @@ func TestGetExistingTransactionHashesAcrossChunks(t *testing.T) {
 			continue
 		}
 		stored[string(hash)] = true
-		_, err := tx.Exec(`
+		_, err := testutil.ExecTransactionInsert(tx,
+			`
 INSERT INTO "transaction" (
     hash, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid
 ) VALUES (?, ?, 1, 1, '0', '0', '0', ?, TRUE)`,

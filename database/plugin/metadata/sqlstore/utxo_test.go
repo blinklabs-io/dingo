@@ -89,6 +89,7 @@ func seedUtxoLookupRows(tb testing.TB, store *Store, count int) {
 		tb.Fatal(err)
 	}
 	tb.Cleanup(func() { _ = tx.Rollback() })
+	ids := testutil.NewTransactionIDs(tb, tx)
 	stmt, err := tx.PrepareContext(
 		context.Background(),
 		"INSERT INTO utxo (tx_id, output_idx, added_slot, deleted_slot, amount) "+
@@ -101,7 +102,7 @@ func seedUtxoLookupRows(tb testing.TB, store *Store, count int) {
 	for i := range count {
 		if _, err := stmt.ExecContext(
 			context.Background(),
-			benchmarkUtxoTxID(i),
+			ids.ID(benchmarkUtxoTxID(i)),
 			int64(i+1),
 		); err != nil {
 			tb.Fatalf("seed UTxO %d: %v", i, err)
@@ -200,7 +201,7 @@ func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
 			newPlan := queryPlan(t, store.writeDB, newQuery, newArgs...)
 			t.Logf("tx_id-IN GetUtxosByRefs plan (n=%d): %s", nTerms, newPlan)
 
-			require.Contains(t, newPlan, "idx_utxo_producer_output")
+			require.Contains(t, newPlan, "idx_utxo_tx_id_output_idx")
 			require.NotContains(t, newPlan, "idx_utxo_deleted_payment_script")
 			require.NotContains(t, newPlan, "idx_utxo_deleted_staking_amount")
 
@@ -234,7 +235,7 @@ func TestAddressTransactionInputQueryUsesCompositeIndex(t *testing.T) {
 		sqliteUtxoSQL.addressInputsQuery(maxCachedAddressInputQuerySize),
 		sqliteOrRefArgs(refs)...,
 	)
-	require.Contains(t, plan, "idx_utxo_producer_output")
+	require.Contains(t, plan, "idx_utxo_tx_id_output_idx")
 	require.NotContains(t, plan, "SCAN utxo")
 }
 
@@ -297,6 +298,7 @@ func TestGetUtxosByRefsAsOfReturnsSameRows(t *testing.T) {
 	}
 	tx, err := store.writeDB.Begin()
 	require.NoError(t, err)
+	ids := testutil.NewTransactionIDs(t, tx)
 	stmt, err := tx.Prepare(
 		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
 			"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -306,7 +308,7 @@ func TestGetUtxosByRefsAsOfReturnsSameRows(t *testing.T) {
 		id := utxoIDAt(r.i)
 		key := make([]byte, 28)
 		key[0] = byte(r.i)
-		_, err := stmt.Exec(id.Hash, id.Idx, key, 0, r.addedSlot, r.deletedSlot, "1000000")
+		_, err := stmt.Exec(ids.ID(id.Hash), id.Idx, key, 0, r.addedSlot, r.deletedSlot, "1000000")
 		require.NoError(t, err)
 	}
 	require.NoError(t, stmt.Close())
@@ -353,7 +355,7 @@ func TestGetUtxosByRefsAsOfRejectsOutOfDomainSlot(t *testing.T) {
 	_, err := store.writeDB.Exec(
 		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, "+
 			"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		id.Hash, id.Idx, make([]byte, 28), 0, 100, 0, "1000000",
+		testutil.TransactionID(t, store.writeDB, id.Hash), id.Idx, make([]byte, 28), 0, 100, 0, "1000000",
 	)
 	require.NoError(t, err)
 	refs := []models.UtxoId{id}
@@ -496,7 +498,7 @@ func TestMarkUtxosDeletedAtSlotUsesTxIDIndex(t *testing.T) {
 			newPlan := queryPlan(t, store.writeDB, query, args...)
 			t.Logf("tx_id-IN mark lookup plan (n=%d): %s", nTerms, newPlan)
 
-			require.Contains(t, newPlan, "idx_utxo_producer_output")
+			require.Contains(t, newPlan, "idx_utxo_tx_id_output_idx")
 			require.NotContains(t, newPlan, "idx_utxo_deleted_payment_script")
 			require.NotContains(t, newPlan, "idx_utxo_deleted_staking_amount")
 
@@ -518,7 +520,7 @@ func TestUtxoDeletionRowsByTxIDQueryLocksNonSQLiteRows(t *testing.T) {
 
 	txIDs := [][]byte{[]byte("tx-a"), []byte("tx-b")}
 	query, _ := sharedUtxoSQL.deletionRows(txIDs, true)
-	require.Contains(t, query, "ORDER BY id FOR UPDATE")
+	require.Contains(t, query, "ORDER BY u.id FOR UPDATE OF u")
 	query, _ = sharedUtxoSQL.deletionRows(txIDs, false)
 	require.NotContains(t, query, "FOR UPDATE")
 	query, _ = sqliteUtxoSQL.deletionRows(txIDs, false)
@@ -547,7 +549,7 @@ func TestMarkUtxosDeletedAtSlotUpdatesOnlyRequestedLiveRows(t *testing.T) {
 		_, err := store.writeDB.Exec(
 			"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, "+
 				"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			row.txID,
+			testutil.TransactionID(t, store.writeDB, row.txID),
 			row.outputIdx,
 			[]byte{byte(i + 1)},
 			0,
@@ -573,7 +575,7 @@ func TestMarkUtxosDeletedAtSlotUpdatesOnlyRequestedLiveRows(t *testing.T) {
 	for i, row := range rows {
 		var got int64
 		require.NoError(t, store.writeDB.QueryRow(
-			"SELECT deleted_slot FROM utxo WHERE tx_id = ? AND output_idx = ?",
+			"SELECT deleted_slot FROM utxo WHERE tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?) AND output_idx = ?",
 			row.txID,
 			row.outputIdx,
 		).Scan(&got))
@@ -713,6 +715,7 @@ func seedRollbackUtxos(
 	tb.Helper()
 	tx, err := store.writeDB.Begin()
 	require.NoError(tb, err)
+	ids := testutil.NewTransactionIDs(tb, tx)
 	stmt, err := tx.Prepare(
 		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
 			"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -744,7 +747,7 @@ func seedRollbackUtxos(
 			deletedSlot = addedSlot + 1
 		}
 		_, err := stmt.Exec(
-			txID,
+			ids.ID(txID),
 			i%4,
 			key,
 			int64(cred%2),
@@ -933,6 +936,7 @@ func TestRollbackStakeRefsDedupeMatchesSQLDistinct(t *testing.T) {
 	}
 	tx, err := store.writeDB.Begin()
 	require.NoError(t, err)
+	ids := testutil.NewTransactionIDs(t, tx)
 	stmt, err := tx.Prepare(
 		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
 			"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -940,7 +944,7 @@ func TestRollbackStakeRefsDedupeMatchesSQLDistinct(t *testing.T) {
 	require.NoError(t, err)
 	for i, row := range rows {
 		_, err := stmt.Exec(
-			[]byte{byte(i)},
+			ids.ID([]byte{byte(i)}),
 			0,
 			row.stakingKey,
 			row.credentialTag,
@@ -1342,6 +1346,7 @@ func seedStakeRefLookupUtxos(
 	tb.Helper()
 	tx, err := store.writeDB.Begin()
 	require.NoError(tb, err)
+	ids := testutil.NewTransactionIDs(tb, tx)
 	stmt, err := tx.Prepare(
 		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
 			"added_slot, deleted_slot, amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1365,7 +1370,7 @@ func seedStakeRefLookupUtxos(
 			deletedSlot = int64(i + 1)
 		}
 		_, err := stmt.Exec(
-			txID,
+			ids.ID(txID),
 			i%4,
 			key,
 			int64(cred%2),
@@ -1432,7 +1437,7 @@ func TestQueryUtxoStakeRefsUsesTxIDIndex(t *testing.T) {
 			require.Contains(
 				t,
 				newPlan,
-				"idx_utxo_producer_output",
+				"idx_utxo_tx_id_output_idx",
 				"tx_id-IN lookup must use the unique tx_id/output_idx "+
 					"index: %s",
 				newPlan,
@@ -2375,7 +2380,7 @@ func TestUtxosByExactRefsLoadsOnlyRequestedOutputs(t *testing.T) {
 		_, err := store.writeDB.Exec(
 			"INSERT INTO utxo (tx_id, output_idx, added_slot, deleted_slot, "+
 				"amount) VALUES (?, ?, ?, ?, ?)",
-			tx, idx, 1, 0, "1",
+			testutil.TransactionID(t, store.writeDB, tx), idx, 1, 0, "1",
 		)
 		require.NoError(t, err)
 	}
@@ -2443,7 +2448,7 @@ func TestUtxoRefsExactQueryUsesCompositeIndex(t *testing.T) {
 		"SELECT id FROM utxo WHERE "+predicate,
 		args...,
 	)
-	require.Contains(t, plan, "idx_utxo_producer_output")
+	require.Contains(t, plan, "idx_utxo_tx_id_output_idx")
 	require.NotContains(t, plan, "idx_utxo_deleted_payment_script")
 	require.NotContains(t, plan, "idx_utxo_deleted_staking_amount")
 }

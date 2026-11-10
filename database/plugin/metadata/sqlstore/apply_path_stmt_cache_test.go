@@ -41,7 +41,8 @@ func TestApplyPathStatementsArePreparedOnce(t *testing.T) {
 	store, recorder := newRecordingSQLiteStore(t)
 
 	hot := []struct{ name, query string }{
-		{"transaction insert", transactionInsertSQL},
+		{"transaction identity insert", transactionIdentityInsertSQL},
+		{"applied transaction insert", appliedTransactionInsertSQL},
 		{"utxo spend state", sqliteUtxoSQL.getSpendState},
 		{"pool by key hash", poolByKeyHashQuery},
 		{"account by credential", sqlitequery.GetAccountByCredentialQuery},
@@ -282,7 +283,6 @@ func TestApplyPathUtxoStatementsComeFromThePreparedCache(t *testing.T) {
 		{"output insert (batch)", insertUtxoBatchQuery(2)},
 		{"un-spend of a stale spend", u.clearStaleSpend},
 		{"imported row id", u.idByRef},
-		{"imported row probe", producedProbeQuery(1)},
 		{"imported row insert", u.insertIgnore},
 	}
 	prepared := map[string]bool{}

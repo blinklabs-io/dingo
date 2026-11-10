@@ -274,8 +274,8 @@ func leiosApplyTestUtxoState(
 	t.Helper()
 	var spender []byte
 	require.NoError(t, raw.QueryRow(`
-SELECT (SELECT hash FROM "transaction" WHERE id = utxo.spent_by_tx_id), deleted_slot FROM utxo
-WHERE tx_id = ? AND output_idx = ?`,
+SELECT (SELECT hash FROM "transaction" WHERE id = utxo.spent_at_tx_id), deleted_slot FROM utxo
+WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
 		txId,
 		outputIdx,
 	).Scan(&spender, &deletedSlot))
@@ -370,7 +370,7 @@ SELECT slot FROM "transaction" WHERE hash = ?`,
 	require.Equal(t, uint64(0), deletedSlot)
 	var addedSlot uint64
 	require.NoError(t, gdb.QueryRow(`
-SELECT added_slot FROM utxo WHERE tx_id = ? AND output_idx = 0`,
+SELECT added_slot FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`,
 		secondTx.Hash().Bytes(),
 	).Scan(&addedSlot))
 	require.Equal(t, secondPoint.Slot, addedSlot)
@@ -976,7 +976,7 @@ func TestApplyEndorserBlockHaskellPathProducesUtxo(t *testing.T) {
 	// ranking block's slot (rollback-safe) and not marked spent.
 	var utxo models.Utxo
 	require.NoError(t, gdb.QueryRow(`
-SELECT added_slot, deleted_slot FROM utxo WHERE tx_id = ?`,
+SELECT added_slot, deleted_slot FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 		tx.Hash().Bytes(),
 	).Scan(&utxo.AddedSlot, &utxo.DeletedSlot))
 	require.Equal(t, rbPoint.Slot, utxo.AddedSlot)
@@ -2508,7 +2508,7 @@ func TestApplyEndorserBlockContextFailureRollsBackEffects(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, stored)
 	var outputs int
-	require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM utxo WHERE tx_id = ?`, tx.Hash().Bytes()).Scan(&outputs))
+	require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, tx.Hash().Bytes()).Scan(&outputs))
 	require.Zero(t, outputs)
 	fees, err := db.Metadata().SumTransactionFeesInSlotRange(0, 999, nil)
 	require.NoError(t, err)

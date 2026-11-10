@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -894,7 +895,7 @@ func sampleStoredTxParityBlock(
 				`INSERT INTO utxo (tx_id, output_idx, amount, added_slot,
 					deleted_slot, payment_script, credential_tag)
 				VALUES (?, ?, '1', 1, 0, 0, 0)`,
-				in.Id().Bytes(), in.Index(),
+				testutil.TransactionID(t, raw.db, in.Id().Bytes()), in.Index(),
 			)
 			require.NoError(t, err)
 		}

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math/big"
 	"testing"
 
@@ -68,7 +69,7 @@ func TestGetAccountAddressTotalsStopsAtUtxoLimit(t *testing.T) {
 		`INSERT INTO utxo (tx_id, staking_key, credential_tag,
     added_slot, deleted_slot, amount, output_idx)
 VALUES (?, ?, 0, 4, 0, 'unparseable', 0)`,
-		bytes.Repeat([]byte{0x04}, 32),
+		testutil.TransactionID(t, store.writeDB, bytes.Repeat([]byte{0x04}, 32)),
 		stakingKey,
 	)
 	require.NoError(t, err)
@@ -102,7 +103,7 @@ func accountAssetUtxo(
 	require.NoError(t, store.ImportUtxos([]models.Utxo{held}, nil))
 	_, err := store.writeDB.Exec(
 		`INSERT INTO asset (name, policy_id, utxo_id, amount)
-SELECT ?, ?, id, 'unparseable' FROM utxo WHERE tx_id = ?`,
+SELECT ?, ?, id, 'unparseable' FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 		[]byte("z"),
 		policy,
 		held.TxId,

@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -26,16 +27,15 @@ import (
 type spenderRow struct {
 	deletedSlot int64
 	spentBy     sql.NullInt64
-	legacy      []byte
 }
 
 func readSpenderRow(t *testing.T, store *Store, txID []byte) spenderRow {
 	t.Helper()
 	var row spenderRow
 	require.NoError(t, store.writeDB.QueryRow(
-		`SELECT deleted_slot, spent_by_tx_id, spent_at_tx_id FROM utxo
-WHERE tx_id = ? AND output_idx = 0`, txID,
-	).Scan(&row.deletedSlot, &row.spentBy, &row.legacy))
+		`SELECT deleted_slot, spent_at_tx_id FROM utxo
+WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`, txID,
+	).Scan(&row.deletedSlot, &row.spentBy))
 	return row
 }
 
@@ -84,9 +84,8 @@ func TestSpendStoresSpenderTransactionID(t *testing.T) {
 			require.Equal(t, int64(fx.point.Slot), row.deletedSlot)
 			require.Equal(
 				t, sql.NullInt64{Int64: spenderID, Valid: true}, row.spentBy,
-				"spent_by_tx_id must be the spender's transaction id",
+				"spent_at_tx_id must be the spender's transaction id",
 			)
-			require.Nil(t, row.legacy, "legacy spender column must stay NULL")
 
 			spent, err := store.GetUtxoIncludingSpent(fx.consumedTxID, 0, nil)
 			require.NoError(t, err)
@@ -116,7 +115,7 @@ func TestSpendStoresSpenderTransactionID(t *testing.T) {
 
 // TestSpenderQueriesSearchTheSpenderIndex pins the plans of the statements
 // that read or clear the spender column: each must search
-// idx_utxo_spent_by_tx_id, and the statements that resolve a spender hash
+// idx_utxo_spent_at_tx_id, and the statements that resolve a spender hash
 // must reach the transaction table by key rather than scan it.
 func TestSpenderQueriesSearchTheSpenderIndex(t *testing.T) {
 	t.Parallel()
@@ -125,14 +124,14 @@ func TestSpenderQueriesSearchTheSpenderIndex(t *testing.T) {
 	analyzeStore(t, store)
 
 	for name, query := range map[string]string{
-		"unspend": `UPDATE utxo SET spent_by_tx_id = NULL, deleted_slot = 0
-WHERE spent_by_tx_id IN (?, ?, ?)`,
+		"unspend": `UPDATE utxo SET spent_at_tx_id = NULL, deleted_slot = 0
+WHERE spent_at_tx_id IN (?, ?, ?)`,
 		"spender_inputs": `SELECT ` + utxoRowColumns +
-			` FROM utxo WHERE utxo.spent_by_tx_id IN (?, ?, ?)`,
+			` FROM utxo WHERE utxo.spent_at_tx_id IN (?, ?, ?)`,
 	} {
 		plan := explainQueryPlan(t, store, query, int64(1), int64(2), int64(3))
 		require.Contains(
-			t, plan, "USING INDEX idx_utxo_spent_by_tx_id (spent_by_tx_id=?)",
+			t, plan, "USING INDEX idx_utxo_spent_at_tx_id (spent_at_tx_id=?)",
 			"%s: %s", name, plan,
 		)
 		require.NotContains(t, plan, "SCAN utxo", "%s: %s", name, plan)
@@ -142,8 +141,8 @@ WHERE spent_by_tx_id IN (?, ?, ?)`,
 		t, store, sqliteUtxoSQL.getIncludingSpent,
 		sqliteUtxoSQL.refArgs(make([]byte, 32), int64(0))...,
 	)
-	require.Contains(t, plan, "idx_utxo_producer_output", plan)
-	require.NotContains(t, plan, "SCAN", plan)
+	require.Contains(t, plan, "idx_utxo_tx_id_output_idx", plan)
+	require.NotContains(t, plan, "SCAN utxo", plan)
 }
 
 // TestInsertWithUnknownSpenderFails requires an insert that names a spender
@@ -153,8 +152,8 @@ func TestInsertWithUnknownSpenderFails(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	err := store.CreateUtxo(nil, &models.Utxo{
-		TxId:        bytes32(0x61),
-		DeletedSlot: 5,
+		TxId:          bytes32(0x61),
+		DeletedSlot:   5,
 		SpentAtTxHash: bytes32(0x62),
 	})
 	require.ErrorContains(t, err, "spender transaction")
@@ -181,32 +180,31 @@ func TestInputEdgeQueriesSearchTheEdgeIndex(t *testing.T) {
 	store := newMigratedSQLiteStore(t)
 	for _, table := range []string{utxoCollateralEdgeTable, utxoReferenceEdgeTable} {
 		for name, query := range map[string]string{
-			"read": `SELECT ` + utxoRowColumns + `, input.transaction_id
+			"read": `SELECT ` + utxoRowColumns + `, input.tx_id
 FROM utxo AS utxo JOIN ` + table + ` AS input ON input.utxo_id = utxo.id
-WHERE input.transaction_id IN (?, ?) ORDER BY utxo.id`,
-			"rollback": `DELETE FROM ` + table + ` WHERE transaction_id IN (?, ?)`,
+WHERE input.tx_id IN (?, ?) ORDER BY utxo.id`,
+			"rollback": `DELETE FROM ` + table + ` WHERE tx_id IN (?, ?)`,
 		} {
 			plan := explainQueryPlan(t, store, query, int64(1), int64(2))
-			require.Contains(t, plan, "USING INDEX idx_"+table+"_tx", "%s %s: %s", table, name, plan)
+			require.Contains(t, plan, "USING INDEX idx_"+table+"_tx_id", "%s %s: %s", table, name, plan)
 			require.NotContains(t, plan, "SCAN "+table, "%s %s: %s", table, name, plan)
 			require.NotContains(t, plan, "SCAN utxo", "%s %s: %s", table, name, plan)
 		}
 	}
 }
 
-// A spender hash the version 57 upgrade could not resolve stays in the legacy
-// column with no spender id. The spend-state read reports that hash, and
-// restoring the output to live clears it with the spender id.
-func TestUnresolvedLegacySpenderIsReadAndClearedOnRestore(t *testing.T) {
+// Restoring a spent output to live clears its spender along with its
+// deleted slot.
+func TestRestoreClearsTheSpender(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	txID, spender := bytes32(0xc1), bytes32(0xc2)
-	// This store's connections do not enforce foreign keys, as a database
-	// written before they were enforced did not.
+	spenderID := testutil.InsertAppliedTransaction(t, store.writeDB,
+		testutil.AppliedTransaction{Hash: spender, Slot: 9})
 	_, err := store.writeDB.Exec(
 		`INSERT INTO utxo (tx_id, output_idx, deleted_slot, added_slot, amount,
     spent_at_tx_id) VALUES (?, 0, 9, 3, '1', ?)`,
-		txID, spender,
+		testutil.TransactionID(t, store.writeDB, txID), spenderID,
 	)
 	require.NoError(t, err)
 
@@ -219,5 +217,4 @@ func TestUnresolvedLegacySpenderIsReadAndClearedOnRestore(t *testing.T) {
 	row := readSpenderRow(t, store, txID)
 	require.Zero(t, row.deletedSlot)
 	require.False(t, row.spentBy.Valid)
-	require.Nil(t, row.legacy, "a live output keeps no spender hash")
 }

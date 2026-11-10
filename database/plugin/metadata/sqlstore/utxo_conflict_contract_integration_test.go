@@ -18,6 +18,7 @@ package sqlstore
 
 import (
 	"context"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
@@ -70,7 +71,7 @@ func requireEdgeBackfillBoundsBatches(
 	exec(
 		`INSERT INTO utxo (tx_id, output_idx, credential_tag, added_slot,
     deleted_slot, amount) VALUES (?, 0, 0, 1, 0, '1')`,
-		bytes32(0xe0),
+		testutil.TransactionID(t, store.writeDB, bytes32(0xe0)),
 	)
 	var utxoID int64
 	require.NoError(t, db.QueryRowContext(ctx,

@@ -16,6 +16,7 @@ package node
 
 import (
 	"context"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"log/slog"
 	"testing"
 	"time"
@@ -145,7 +146,7 @@ func TestFinalizeBackfillPlannerStatsRepairsAndResumes(t *testing.T) {
 	db := newFileTestDB(t)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
-	_, err = raw.Exec(
+	_, err = testutil.ExecTransactionInsert(raw,
 		`INSERT INTO "transaction"(id,hash,slot,fee) VALUES(1,randomblob(32),1,'0'); ANALYZE; WITH RECURSIVE n(i) AS (VALUES(2) UNION ALL SELECT i+1 FROM n WHERE i<1000) INSERT INTO "transaction"(id,hash,slot,fee) SELECT i,randomblob(32),i,'0' FROM n;`,
 	)
 	require.NoError(t, err)
@@ -231,7 +232,7 @@ func TestFinalizeMithrilBackfillPlannerStatsFreshBootstrap(t *testing.T) {
 	db := newFileTestDBWithPromRegistry(t, registry)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
-	_, err = raw.Exec(
+	_, err = testutil.ExecTransactionInsert(raw,
 		`INSERT INTO "transaction"(id,hash,slot,fee) VALUES(1,randomblob(32),1,'0');`,
 	)
 	require.NoError(t, err)

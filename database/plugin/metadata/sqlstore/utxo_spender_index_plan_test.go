@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"context"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"strings"
 	"testing"
 
@@ -25,12 +26,9 @@ import (
 )
 
 // spenderColumns are the nullable utxo columns naming the transaction that
-// spent, collateralised, or referenced the output, each with its own index.
+// spent the output, each with its own index.
 var spenderColumns = []string{
 	"spent_at_tx_id",
-	"spent_by_tx_id",
-	"collateral_by_tx_id",
-	"referenced_by_tx_id",
 }
 
 // newImportedLedgerStatsStore returns a store whose planner statistics were
@@ -49,25 +47,24 @@ func newImportedLedgerStatsStore(t *testing.T) (*Store, map[string]any) {
 WITH RECURSIVE n(i) AS (
     SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000
 )
+INSERT INTO "transaction" (id, hash) SELECT i, randomblob(32) FROM n`)
+	exec(`
+WITH RECURSIVE n(i) AS (
+    SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000
+)
 INSERT INTO utxo
     (tx_id, output_idx, credential_tag, staking_key,
      added_slot, deleted_slot, amount)
-SELECT randomblob(32), 0, i % 2, randomblob(28), 1, 0, '1' FROM n`)
+SELECT i, 0, i % 2, randomblob(28), 1, 0, '1' FROM n`)
 	exec("ANALYZE")
 
 	spender := []byte(fmt.Sprintf("%032d", 1))
-	exec(
-		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, 10, 0)`,
-		spender,
-	)
-	var spenderID int64
-	require.NoError(t, store.writeDB.QueryRow(
-		`SELECT id FROM "transaction" WHERE hash = ?`, spender,
-	).Scan(&spenderID))
+	spenderID := testutil.InsertAppliedTransaction(t, store.writeDB,
+		testutil.AppliedTransaction{Hash: spender, Slot: 10})
 	values := make(map[string]any, len(spenderColumns))
 	for i, column := range spenderColumns {
 		values[column] = spender
-		if column == "spent_by_tx_id" {
+		if column == "spent_at_tx_id" {
 			values[column] = spenderID
 		}
 		exec(
@@ -115,9 +112,9 @@ func TestRollbackSpenderLookupsSearchIndexUnderImportStatistics(
 	t.Parallel()
 	store, values := newImportedLedgerStatsStore(t)
 	statements := map[string]string{
-		"idx_utxo_spent_by_tx_id": `
+		"idx_utxo_spent_at_tx_id": `
 SELECT DISTINCT credential_tag, staking_key FROM utxo
-WHERE spent_by_tx_id IN (?)`,
+WHERE spent_at_tx_id IN (?)`,
 	}
 	for _, column := range spenderColumns {
 		statements["idx_utxo_"+column+" update"] = "UPDATE utxo SET " +

@@ -48,33 +48,43 @@ func testEpochOutputRange(t *testing.T, store *Store) {
 		{30, false, "29", true, new(uint64(11))},
 	} {
 		hash := bytes.Repeat([]byte{byte(i + 1)}, 32)
+		transaction := store.dialect.QuoteIdentifier("transaction")
 		_, err := store.writeDB.Exec(
-			store.dialect.Rebind(
-				"INSERT INTO "+store.dialect.QuoteIdentifier(
-					"transaction",
-				)+" (hash,slot,valid) VALUES (?,?,?)",
-			),
+			store.dialect.Rebind("INSERT INTO "+transaction+" (hash) VALUES (?)"),
 			hash,
+		)
+		require.NoError(t, err)
+		var id int64
+		err = store.writeDB.QueryRow(store.dialect.Rebind("SELECT id FROM "+transaction+" WHERE hash=?"), hash).
+			Scan(&id)
+		require.NoError(t, err)
+		_, err = store.writeDB.Exec(
+			store.dialect.Rebind(
+				"INSERT INTO applied_transaction (tx_id,slot,valid) VALUES (?,?,?)",
+			),
+			id,
 			row.slot,
 			row.valid,
 		)
 		require.NoError(t, err)
-		var id int64
-		err = store.writeDB.QueryRow(store.dialect.Rebind("SELECT id FROM "+store.dialect.QuoteIdentifier("transaction")+" WHERE hash=?"), hash).
-			Scan(&id)
-		require.NoError(t, err)
-		column := "transaction_id"
 		if row.collateral {
-			column = "collateral_return_for_tx_id"
+			_, err = store.writeDB.Exec(
+				store.dialect.Rebind(
+					"INSERT INTO utxo (tx_id,collateral_return_for_tx_id,output_idx,amount,deleted_slot) VALUES (?,?,0,?,999)",
+				),
+				id,
+				id,
+				row.amount,
+			)
+		} else {
+			_, err = store.writeDB.Exec(
+				store.dialect.Rebind(
+					"INSERT INTO utxo (tx_id,output_idx,amount,deleted_slot) VALUES (?,0,?,999)",
+				),
+				id,
+				row.amount,
+			)
 		}
-		_, err = store.writeDB.Exec(
-			store.dialect.Rebind(
-				"INSERT INTO utxo ("+column+",tx_id,output_idx,amount,deleted_slot) VALUES (?,?,0,?,999)",
-			),
-			id,
-			hash,
-			row.amount,
-		)
 		require.NoError(t, err)
 		if row.contextSlot != nil {
 			_, err = store.writeDB.Exec(
@@ -90,14 +100,13 @@ func testEpochOutputRange(t *testing.T, store *Store) {
 			// Invalid normal outputs and valid collateral returns are not output flow.
 			_, err = store.writeDB.Exec(
 				store.dialect.Rebind(
-					"INSERT INTO utxo (transaction_id,tx_id,output_idx,amount) VALUES (?,?,1,'100')",
+					"INSERT INTO utxo (tx_id,output_idx,amount) VALUES (?,1,'100')",
 				),
 				id,
-				hash,
 			)
 			require.NoError(t, err)
 		} else {
-			_, err = store.writeDB.Exec(store.dialect.Rebind("INSERT INTO utxo (collateral_return_for_tx_id,tx_id,output_idx,amount) VALUES (?,?,2,'100')"), id, hash)
+			_, err = store.writeDB.Exec(store.dialect.Rebind("INSERT INTO utxo (tx_id,collateral_return_for_tx_id,output_idx,amount) VALUES (?,?,2,'100')"), id, id)
 			require.NoError(t, err)
 		}
 	}
@@ -172,12 +181,4 @@ func TestEpochOutputRangeDoesNotScanRetainedHistory(t *testing.T) {
 			"epoch totals must look up the selected transactions' outputs",
 		)
 	}
-}
-
-func TestEpochOutputRangeWithoutDeferredOutputIndex(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	_, err := store.writeDB.Exec("DROP INDEX idx_utxo_transaction_id")
-	require.NoError(t, err)
-	testEpochOutputRange(t, store)
 }

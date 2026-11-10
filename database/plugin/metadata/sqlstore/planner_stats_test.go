@@ -95,25 +95,25 @@ func stat1Rows(tb testing.TB, db *sql.DB) (int, bool) {
 func seedPlannerStatsProbeUtxos(t *testing.T, store *Store) {
 	t.Helper()
 	seedStakeRefLookupUtxos(t, store, 3_000, 256)
-	_, err := store.writeDB.Exec(`INSERT INTO "transaction" (id, hash, slot)
-SELECT id, tx_id, added_slot FROM utxo`)
-	require.NoError(t, err)
-	_, err = store.writeDB.Exec(
-		"UPDATE utxo SET transaction_id = id, deleted_slot = 0",
+	_, err := store.writeDB.Exec(
+		`INSERT INTO applied_transaction (tx_id, slot)
+SELECT tx_id, MIN(added_slot) FROM utxo GROUP BY tx_id`,
 	)
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec("UPDATE utxo SET deleted_slot = 0")
 	require.NoError(t, err)
 }
 
 // statsSensitiveSpendSQL is the row-value form of the batched spend UPDATE,
 // keyed on the producer index. Its plan depends on planner statistics:
 // without them SQLite drives it from a deleted_slot-leading index, with them
-// from idx_utxo_producer_output. It is kept here as a fixed probe so these
+// from idx_utxo_tx_id_output_idx. It is kept here as a fixed probe so these
 // tests keep observing the statistics refresh whatever shape the production
 // query takes.
 const statsSensitiveSpendSQL = `UPDATE utxo
-SET deleted_slot = ?, spent_by_tx_id = ?
-WHERE deleted_slot = 0 AND spent_by_tx_id IS NULL AND producer_tx_id IS NOT NULL
-  AND (producer_tx_id, output_idx) IN ((?,?),(?,?))
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL
+  AND (tx_id, output_idx) IN ((?,?),(?,?))
 RETURNING id`
 
 // consumeBatchPlan returns the plan statsSensitiveSpendSQL gets on conn.
@@ -211,7 +211,7 @@ func TestOptimizePlannerStatsRefreshesPooledReadConnections(t *testing.T) {
 		require.Contains(
 			t,
 			plan,
-			"idx_utxo_producer_output",
+			"idx_utxo_tx_id_output_idx",
 			"read connection %d: %s",
 			i,
 			plan,
@@ -243,9 +243,15 @@ func TestOptimizePlannerStatsRefreshesAfterUpdateOnlyRun(t *testing.T) {
 	require.NoError(t, err)
 	_, err = tx.Exec(
 		"WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c " +
+			"WHERE i < 3000) INSERT INTO \"transaction\" (id, hash) " +
+			"SELECT 1000000 + i, randomblob(32) FROM c",
+	)
+	require.NoError(t, err)
+	_, err = tx.Exec(
+		"WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c " +
 			"WHERE i < 3000) INSERT INTO utxo (tx_id, output_idx, " +
 			"staking_key, credential_tag, added_slot, deleted_slot, amount) " +
-			"SELECT randomblob(32), i % 4, randomblob(28), 0, i, 0, '1' FROM c",
+			"SELECT 1000000 + i, i % 4, randomblob(28), 0, i, 0, '1' FROM c",
 	)
 	require.NoError(t, err)
 	require.NoError(t, tx.Commit())
@@ -259,7 +265,7 @@ func TestOptimizePlannerStatsRefreshesAfterUpdateOnlyRun(t *testing.T) {
 		require.Contains(
 			t,
 			plan,
-			"idx_utxo_producer_output",
+			"idx_utxo_tx_id_output_idx",
 			"read connection %d: %s",
 			i,
 			plan,
@@ -291,7 +297,7 @@ func TestOptimizePlannerStatsReloadsSharedCacheStatistics(t *testing.T) {
 		require.Contains(
 			t,
 			plan,
-			"idx_utxo_producer_output",
+			"idx_utxo_tx_id_output_idx",
 			"connection %d: %s",
 			i,
 			plan,
@@ -366,8 +372,8 @@ func TestPreparedStatementReplansAfterOptimizeOnSameConnection(t *testing.T) {
 	stmt, err := store.writeDB.PrepareContext(
 		ctx,
 		"SELECT COUNT(*) FROM utxo WHERE deleted_slot = 0 AND "+
-			"spent_by_tx_id IS NULL AND producer_tx_id IS NOT NULL AND "+
-			"(producer_tx_id, output_idx) IN ((?, ?), (?, ?)) AND "+
+			"spent_at_tx_id IS NULL AND "+
+			"(tx_id, output_idx) IN ((?, ?), (?, ?)) AND "+
 			name+" = 1",
 	)
 	require.NoError(t, err)

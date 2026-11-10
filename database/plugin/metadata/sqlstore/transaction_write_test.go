@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math/big"
 	"testing"
 
@@ -141,7 +142,7 @@ func seedConsumedUtxo(
 	_, err := store.writeDB.ExecContext(context.Background(), `
 INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
 VALUES (?, ?, ?, ?, ?, 0, ?)`,
-		fx.consumedTxID,
+		testutil.TransactionID(t, store.writeDB, fx.consumedTxID),
 		0,
 		fx.ref.Key,
 		int64(fx.ref.Tag),
@@ -623,7 +624,7 @@ func TestSetTransactionBatchedInputsReturnConsumedStake(t *testing.T) {
 	_, err = store.writeDB.ExecContext(ctx, `
 INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
 VALUES (?, 0, ?, ?, 1, 0, ?)`,
-		secondTxID,
+		testutil.TransactionID(t, store.writeDB, secondTxID),
 		fx.ref.Key,
 		int64(fx.ref.Tag),
 		decimalUint64(types.Uint64(7_000_000)),
@@ -649,17 +650,10 @@ func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
 	conflictTxID := bytes.Repeat([]byte{0x51}, 32)
 	conflictCollateralTxID := bytes.Repeat([]byte{0x53}, 32)
 	newTxID := bytes.Repeat([]byte{0x52}, 32)
-	var transactionID, collateralReturnID uint
-	require.NoError(t, store.writeDB.QueryRowContext(
-		context.Background(),
-		`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`,
-		conflictTxID,
-	).Scan(&transactionID))
-	require.NoError(t, store.writeDB.QueryRowContext(
-		context.Background(),
-		`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`,
-		conflictCollateralTxID,
-	).Scan(&collateralReturnID))
+	transactionID := uint(testutil.TransactionID(t, store.writeDB, conflictTxID))
+	collateralReturnID := uint(testutil.TransactionID(
+		t, store.writeDB, conflictCollateralTxID,
+	))
 	require.NoError(t, store.ImportUtxos([]models.Utxo{{
 		TxId: conflictTxID, Amount: types.Uint64(1), OutputIdx: 0,
 	}, {
@@ -700,16 +694,16 @@ func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
 	require.Equal(t, []bool{false, false, true}, inserted)
 	require.Equal(
 		t,
-		beforeInserts+1,
+		beforeInserts+2,
 		counterValue(t, reg, "insert"),
-		"a conflicting row in a SQLite batch should not issue a second per-row INSERT",
+		"the batch INSERT and the new producer's identity row are the only "+
+			"inserts: a conflicting row never issues a per-row INSERT",
 	)
 	require.Equal(
 		t,
-		beforeSelects+2,
+		beforeSelects+1,
 		counterValue(t, reg, "select"),
-		"only the two identity probes SELECT: one for the produced outputs and "+
-			"one for the imported output, never the conflicting row ID",
+		"only the producer identity lookup SELECTs, never the conflicting row ID",
 	)
 	repaired, err := store.GetUtxo(conflictTxID, 0, nil)
 	require.NoError(t, err)
@@ -778,8 +772,8 @@ func TestSetTransactionLeiosClosureSkippedInputAppliesNoDelta(t *testing.T) {
 
 	const otherSpenderID = 999999
 	_, err := store.writeDB.ExecContext(ctx, `
-UPDATE utxo SET deleted_slot = 900, spent_by_tx_id = ?
-WHERE tx_id = ? AND output_idx = 0`, otherSpenderID, fx.consumedTxID)
+UPDATE utxo SET deleted_slot = 900, spent_at_tx_id = ?
+WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`, otherSpenderID, fx.consumedTxID)
 	require.NoError(t, err)
 
 	// A second live UTxO keeps the credential's reward_live_stake row in

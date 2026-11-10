@@ -164,6 +164,7 @@ var hotStatementSet = func() map[string]struct{} {
 func cacheableForDialect(dialect, query string) bool {
 	if dialect != "sqlite" && (isSQLiteBatchQuery(query) ||
 		query == transactionIdentityInsertSQL ||
+		query == consumeUtxoSQLiteReturningSQL ||
 		query == sqliteUtxoSQL.insertResult ||
 		query == sqliteUtxoSQL.insertResultIgnore) {
 		return false

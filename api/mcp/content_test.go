@@ -17,6 +17,7 @@ package mcp
 import (
 	"context"
 	"database/sql"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -312,7 +313,8 @@ func TestSchemaGuidanceAgainstMigratedDatabase(t *testing.T) {
 	require.NoError(t, err)
 	db, err := dbtest.RawSQLiteMetadata(t, nodeDB)
 	require.NoError(t, err)
-	_, err = db.Exec(`
+	_, err = testutil.ExecTransactionInsert(db,
+		`
 INSERT INTO "transaction" (hash, block_hash, slot, block_index, fee)
 VALUES (zeroblob(32), zeroblob(32), 123, 0, '170001');
 INSERT INTO utxo (tx_id, output_idx, amount, deleted_slot)

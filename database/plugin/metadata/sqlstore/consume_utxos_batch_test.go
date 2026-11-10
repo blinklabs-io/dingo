@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"slices"
 	"strings"
 	"testing"
@@ -28,14 +29,16 @@ import (
 // legacyConsumeUtxosBatchQuery is the row-value IN form consumeUtxosBatchQuery
 // used before it was rewritten to one point lookup per input.
 func legacyConsumeUtxosBatchQuery(rowCount int, returnStake bool) string {
-	values := strings.TrimSuffix(strings.Repeat("(?,?),", rowCount), ",")
-	returning := "tx_id, output_idx"
+	values := strings.TrimSuffix(strings.Repeat(
+		`((SELECT id FROM "transaction" WHERE hash = ?),?),`, rowCount,
+	), ",")
+	returning := utxoConsumedHash + ", output_idx"
 	if returnStake {
 		returning += ", credential_tag, staking_key, amount"
 	}
 	return `UPDATE utxo
-SET deleted_slot = ?, spent_by_tx_id = ?
-WHERE deleted_slot = 0 AND spent_by_tx_id IS NULL
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL
   AND (tx_id, output_idx) IN (` + values + `)
 RETURNING ` + returning
 }
@@ -50,17 +53,18 @@ func skewedUtxoTxID(i int) []byte {
 }
 
 // seedSkewedUtxos inserts n rows of which one in ten is unspent. Every spent
-// row carries its own deleted_slot and spent_by_tx_id, so those columns have
+// row carries its own deleted_slot and spent_at_tx_id, so those columns have
 // many distinct values with few rows each while "deleted_slot = 0" and
-// "spent_by_tx_id IS NULL" match every live row. That is the distribution
+// "spent_at_tx_id IS NULL" match every live row. That is the distribution
 // that makes SQLite statistics report deleted_slot as selective.
 func seedSkewedUtxos(tb testing.TB, store *Store, n int) {
 	tb.Helper()
 	tx, err := store.writeDB.Begin()
 	require.NoError(tb, err)
+	ids := testutil.NewTransactionIDs(tb, tx)
 	stmt, err := tx.Prepare(
 		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
-			"added_slot, deleted_slot, spent_by_tx_id, amount, " +
+			"added_slot, deleted_slot, spent_at_tx_id, amount, " +
 			"payment_script) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 	)
 	require.NoError(tb, err)
@@ -72,7 +76,7 @@ func seedSkewedUtxos(tb testing.TB, store *Store, n int) {
 			spentBy = int64(i + 1)
 		}
 		_, err := stmt.Exec(
-			skewedUtxoTxID(i), i%4, make([]byte, 28), int64(i%2),
+			ids.ID(skewedUtxoTxID(i)), i%4, make([]byte, 28), int64(i%2),
 			int64(i), deletedSlot, spentBy, "1000000", i%2,
 		)
 		require.NoError(tb, err)
@@ -123,22 +127,22 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 	ctx := context.Background()
 
 	// Rows with i%10 == 0 are live and the rest spent. Row 7 is made
-	// deleted with a NULL spent_by_tx_id, and row 9 not deleted but with a
-	// spent_by_tx_id: each satisfies only one of the two liveness predicates.
+	// deleted with a NULL spent_at_tx_id, and row 9 not deleted but with a
+	// spent_at_tx_id: each satisfies only one of the two liveness predicates.
 	// Row 19 is already spent by the spending transaction itself.
 	_, err := store.writeDB.Exec(
-		"UPDATE utxo SET spent_by_tx_id = NULL WHERE added_slot = 7",
+		"UPDATE utxo SET spent_at_tx_id = NULL WHERE added_slot = 7",
 	)
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(
-		"UPDATE utxo SET deleted_slot = 0, spent_by_tx_id = ? "+
+		"UPDATE utxo SET deleted_slot = 0, spent_at_tx_id = ? "+
 			"WHERE added_slot = 9",
 		int64(9),
 	)
 	require.NoError(t, err)
 
 	_, err = store.writeDB.Exec(
-		"UPDATE utxo SET deleted_slot = 77, spent_by_tx_id = ? "+
+		"UPDATE utxo SET deleted_slot = 77, spent_at_tx_id = ? "+
 			"WHERE added_slot = 19",
 		int64(5_000_000),
 	)
@@ -211,7 +215,7 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 
 		var state []string
 		srows, err := tx.QueryContext(ctx,
-			"SELECT tx_id, output_idx, deleted_slot, spent_by_tx_id "+
+			"SELECT "+utxoConsumedHash+", output_idx, deleted_slot, spent_at_tx_id "+
 				"FROM utxo ORDER BY id",
 		)
 		require.NoError(t, err)

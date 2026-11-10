@@ -616,10 +616,14 @@ func (s *Store) refreshRewardLiveStakePlannerStats(
 	if s.dialect.Name() != "sqlite" {
 		return nil
 	}
-	// Historical replay grows this table after the bulk-load ANALYZE. Refresh
-	// its estimates before the finalizer joins certificates to transactions.
-	if _, err := db.ExecContext(ctx, `ANALYZE applied_transaction`); err != nil {
-		return fmt.Errorf("analyze applied_transaction before reward live stake rebuild: %w", err)
+	// Historical replay grows these tables after the bulk-load ANALYZE. Refresh
+	// their estimates before the finalizer joins certificates to transactions.
+	for _, table := range []string{`"transaction"`, "applied_transaction"} {
+		if _, err := db.ExecContext(ctx, "ANALYZE "+table); err != nil {
+			return fmt.Errorf(
+				"analyze %s before reward live stake rebuild: %w", table, err,
+			)
+		}
 	}
 	return nil
 }

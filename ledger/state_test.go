@@ -7182,7 +7182,7 @@ func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
 // storage mode: the periodic cleanup must leave
 // spent UTxO metadata rows in place so historical transaction queries
 // can resolve input / collateral / reference-input associations via
-// spent_by_tx_id and the utxo_collateral_edge and utxo_reference_edge tables.
+// spent_at_tx_id and the utxo_collateral_edge and utxo_reference_edge tables.
 func TestCleanupConsumedUtxos_APIModeRetains(t *testing.T) {
 	t.Parallel()
 

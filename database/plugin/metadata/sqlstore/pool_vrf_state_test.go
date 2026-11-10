@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"bytes"
 	"context"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -40,7 +41,7 @@ func TestGetPoolVrfStatePreservesRegistrationOrderWithoutAssociations(
 		{50, 100, 1, 1, 1}, {20, 100, 0, 0, 0}, {60, 100, 1, 1, 1},
 		{10, 99, 99, 99, 99}, {40, 100, 1, 1, 0}, {30, 100, 1, 0, 0},
 	} {
-		_, err = store.writeDB.Exec(
+		_, err = testutil.ExecTransactionInsert(store.writeDB,
 			`INSERT INTO "transaction" (id,hash,slot,block_index) VALUES (?,?,?,?)`,
 			row.id,
 			bytes.Repeat([]byte{byte(row.id)}, 32),

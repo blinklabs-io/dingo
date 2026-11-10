@@ -272,9 +272,6 @@ func TestDeferredRebuildKeepsUtxoIndexesPartial(t *testing.T) {
 
 	for _, column := range []string{
 		"spent_at_tx_id",
-		"spent_by_tx_id",
-		"collateral_by_tx_id",
-		"referenced_by_tx_id",
 	} {
 		var definition string
 		require.NoError(t, store.readDB.QueryRow(
@@ -320,7 +317,7 @@ func TestDeferredIndexSQLPartialPredicateByDialect(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		"CREATE INDEX `idx_utxo_spent_at_tx_id` ON `utxo` (`spent_at_tx_id`(255))",
+		"CREATE INDEX `idx_utxo_spent_at_tx_id` ON `utxo` (`spent_at_tx_id`)",
 		deferredIndexCreateSQL(MySQLDialect(), index),
 	)
 }

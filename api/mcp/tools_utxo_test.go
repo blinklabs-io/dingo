@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -311,7 +312,7 @@ func TestGetAssetInfo(t *testing.T) {
 	require.NoError(t, err)
 
 	// 4. Insert transaction and CIP-25 metadata
-	_, err = db.Exec(
+	_, err = testutil.ExecTransactionInsert(db,
 		`INSERT INTO "transaction" (id, hash) VALUES (1, ?)`,
 		mintTxHash,
 	)
@@ -444,7 +445,7 @@ func TestAssetInfoSanitizesExternalText(t *testing.T) {
 		[]byte(name),
 	)
 	require.NoError(t, err)
-	_, err = db.Exec(`INSERT INTO "transaction"(id, hash) VALUES (1,?)`, txHash)
+	_, err = testutil.ExecTransactionInsert(db, `INSERT INTO "transaction"(id, hash) VALUES (1,?)`, txHash)
 	require.NoError(t, err)
 	_, err = db.Exec(
 		"INSERT INTO transaction_metadata_label(transaction_id,label,json_value) VALUES (1,'721',?)",

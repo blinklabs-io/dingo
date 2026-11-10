@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -67,7 +68,7 @@ func (s *retiredPoolSeeder) insertCert(
 	s.seq++
 	hash := make([]byte, 32)
 	binary.BigEndian.PutUint64(hash, s.seq)
-	res, err := s.raw.Exec(
+	res, err := testutil.ExecTransactionInsert(s.raw,
 		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, ?)`,
 		hash, slot, blockIndex,
 	)

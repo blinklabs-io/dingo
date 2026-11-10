@@ -408,6 +408,11 @@ func (o *utxoOverlay) retainedUtxo(key overlayKey) (*models.Utxo, bool) {
 		}
 		model.DeletedSlot = state.deletedSlot
 		model.SpentAtTxHash = state.spentBy
+		model.SpentAtTxID = nil
+		if state.spentByID.Valid {
+			spenderID := uint(state.spentByID.Int64)
+			model.SpentAtTxID = &spenderID
+		}
 	} else {
 		return nil, false
 	}
@@ -429,6 +434,10 @@ func (o *utxoOverlay) retainedUtxo(key overlayKey) (*models.Utxo, bool) {
 	if model.TransactionID != nil {
 		id := *model.TransactionID
 		model.TransactionID = &id
+	}
+	if model.SpentAtTxID != nil {
+		id := *model.SpentAtTxID
+		model.SpentAtTxID = &id
 	}
 	return &model, true
 }

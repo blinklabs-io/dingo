@@ -7070,7 +7070,8 @@ func rewardCalcSeedStakeCert(
 	raw := rewardCalcSQLDB(t, db)
 	hash := make([]byte, 32)
 	binary.BigEndian.PutUint64(hash[24:], uint64(id))
-	_, err := raw.Exec(`
+	_, err := testutil.ExecTransactionInsert(raw,
+		`
 INSERT INTO "transaction" (id, hash, slot, block_index)
 VALUES (?, ?, ?, 0)`,
 		id, hash, slot,

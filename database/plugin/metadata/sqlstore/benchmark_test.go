@@ -50,7 +50,7 @@ func legacyInsertUtxo(
 	if err != nil {
 		return 0, err
 	}
-	return sqliteTransactionInsertID(result)
+	return insertedRowID(result)
 }
 
 // utxoForBenchmarkIteration builds a UTxO with a unique tx_id per i, so each
@@ -126,22 +126,8 @@ func cachedImportUtxoStatement(
 		return 0, err
 	}
 	var id int64
-	err = store.queryRowCached(ctx, db, sqliteUtxoSQL.insertIgnore,
-		params.TransactionID,
-		params.CollateralReturnForTxID,
-		params.TxID,
-		params.PaymentKey,
-		params.StakingKey,
-		params.CredentialTag,
-		params.DatumHash,
-		nullBytes(params.SpentAtTxID),
-		nullBytes(params.ReferencedByTxID),
-		nullBytes(params.CollateralByTxID),
-		params.AddedSlot,
-		params.DeletedSlot,
-		params.Amount,
-		params.OutputIdx,
-		params.PaymentScript,
+	err = store.queryRowCached(
+		ctx, db, sqliteUtxoSQL.insertIgnore, params.args()...,
 	).Scan(&id)
 	return id, err
 }

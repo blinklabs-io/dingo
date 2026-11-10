@@ -1157,13 +1157,7 @@ func (s *Store) setTransactionWithAccumulator(
 				return err
 			}
 			if overlay != nil && !overlay.retainHistory {
-				var existingID int64
-				existingID, err = s.existingTransactionID(ctx, db, overlay, hash)
-				if err != nil {
-					return err
-				}
 				transactionID, err = overlay.stageTransaction(
-					existingID,
 					hash,
 					point.Hash,
 					metadataValue,
@@ -1661,20 +1655,12 @@ func (s *Store) SetGapBlockTransaction(
 			if err != nil {
 				return err
 			}
-			transactionID, err := queryReturnedID(
+			rowID, _, err := s.insertTransactionUnbatched(
 				ctx,
 				db,
-				`-- name: UpsertTransactionWithoutMetadata :one
-INSERT INTO "transaction" (
-    hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (hash) DO UPDATE SET
-    block_hash = excluded.block_hash, block_index = excluded.block_index,
-    slot = excluded.slot, collateral_fee = excluded.collateral_fee
-RETURNING id`,
 				hash,
 				point.Hash,
+				nil,
 				point.Slot,
 				transaction.Type(),
 				decimalUint64(transactionFee(transaction)),
@@ -1683,6 +1669,7 @@ RETURNING id`,
 				index,
 				transaction.IsValid(),
 			)
+			transactionID := rowID
 			if err != nil {
 				return err
 			}
@@ -1797,18 +1784,9 @@ func (s *Store) SetGenesisTransaction(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			id, err := queryReturnedID(
-				ctx,
-				db,
-				`-- name: UpsertGenesisTransaction :one
-INSERT INTO "transaction" (
-    hash, block_hash, slot, type, fee, collateral_fee, ttl,
-    block_index, valid
-) VALUES (?, ?, 0, 0, '0', '0', '0', 0, TRUE)
-ON CONFLICT (hash) DO UPDATE SET hash = excluded.hash
-RETURNING id`,
-				hash,
-				blockHash,
+			id, _, err := s.insertTransactionUnbatched(
+				ctx, db,
+				hash, blockHash, nil, 0, 0, "0", "0", "0", 0, true,
 			)
 			if err != nil {
 				return fmt.Errorf(
@@ -2076,12 +2054,15 @@ func (s *Store) insertUtxoModelCheckedWithRows(
 	deferredRows *rowBatch,
 ) (bool, error) {
 	inserted := true
+	// Resolve on a copy: a row id written onto the caller's model would
+	// outlive a rollback of the identity row it names.
+	resolved := *utxo
 	if err := s.resolveUtxoIdentities(
-		ctx, db, []*models.Utxo{utxo},
+		ctx, db, []*models.Utxo{&resolved},
 	); err != nil {
 		return false, err
 	}
-	params, err := createUtxoParams(utxo)
+	params, err := createUtxoParams(&resolved)
 	if err != nil {
 		return false, err
 	}

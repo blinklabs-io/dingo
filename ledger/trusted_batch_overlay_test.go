@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"log/slog"
 	"sort"
 	"strings"
@@ -616,7 +617,7 @@ func TestTrustedBatchOverlayFallsBackOnTransactionConflict(t *testing.T) {
 	precreate := func(h *externalIngestHarness) {
 		raw, err := dbtest.RawSQLiteMetadata(t, h.db)
 		require.NoError(t, err)
-		_, err = raw.Exec(
+		_, err = testutil.ExecTransactionInsert(raw,
 			`INSERT INTO "transaction" (hash, slot, valid) VALUES (?, 5, 1)`,
 			names["pool"].hash,
 		)
@@ -674,7 +675,7 @@ func TestTrustedBatchOverlayFallsBackOnReadBarrierConflict(t *testing.T) {
 	prepare := func(h *externalIngestHarness) {
 		raw, err := dbtest.RawSQLiteMetadata(t, h.db)
 		require.NoError(t, err)
-		_, err = raw.Exec(
+		_, err = testutil.ExecTransactionInsert(raw,
 			`INSERT INTO "transaction" (hash, slot, valid) VALUES (?, 5, 1)`,
 			txA.hash,
 		)

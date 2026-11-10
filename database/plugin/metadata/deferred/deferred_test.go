@@ -159,16 +159,12 @@ func TestRetainedEntriesAreResolvable(t *testing.T) {
 // reads them.
 func TestCatchUpDroppableManifest(t *testing.T) {
 	want := map[string]string{
-		"idx_utxo_payment_key":         "utxo",
-		"idx_utxo_staking_key":         "utxo",
-		"idx_utxo_spent_at_tx_id":      "utxo",
-		"idx_utxo_spent_by_tx_id":      "utxo",
-		"idx_utxo_referenced_by_tx_id": "utxo",
-		"idx_utxo_collateral_by_tx_id": "utxo",
-		"idx_utxo_added_slot":          "utxo",
-		"idx_utxo_transaction_id":      "utxo",
-		"idx_transaction_block_hash":   "transaction",
-		"idx_asset_policy_id":          "asset",
+		"idx_utxo_payment_key":               "utxo",
+		"idx_utxo_staking_key":               "utxo",
+		"idx_utxo_spent_at_tx_id":            "utxo",
+		"idx_utxo_added_slot":                "utxo",
+		"idx_applied_transaction_block_hash": "applied_transaction",
+		"idx_asset_policy_id":                "asset",
 	}
 	got := map[string]string{}
 	for _, idx := range CatchUpDroppableManifest() {

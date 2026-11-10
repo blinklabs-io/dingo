@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"io"
 	"log/slog"
 	"math"
@@ -880,6 +881,7 @@ func newDBBackedAdapterWithStorageMode(
 // autocommit per statement.
 type sqlExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 func insertAdapterUtxo(
@@ -942,7 +944,8 @@ func insertAdapterTransaction(
 	if tx.ID != 0 {
 		id = tx.ID
 	}
-	result, err := raw.Exec(`
+	result, err := testutil.ExecTransactionInsert(raw,
+		`
 INSERT INTO "transaction" (
     id, hash, block_hash, metadata, slot, type, fee, collateral_fee,
     ttl, block_index, valid

@@ -55,12 +55,15 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 		txn,
 		func(db queryer, ctx context.Context) error {
 			q := s.operationalQueries(db)
+			// Resolve on a copy: a row id written onto the caller's model
+			// would outlive a rollback of the identity row it names.
+			resolved := *utxo
 			if err := s.resolveUtxoIdentities(
-				ctx, db, []*models.Utxo{utxo},
+				ctx, db, []*models.Utxo{&resolved},
 			); err != nil {
 				return err
 			}
-			params, err := createUtxoParams(utxo)
+			params, err := createUtxoParams(&resolved)
 			if err != nil {
 				return err
 			}
@@ -2360,7 +2363,7 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	}
 	slotExpr := utxoOrderingSlotExpr
 	blockIndexExpr := utxoOrderingBlockIndexExpr
-	var afterTxID int64
+	var afterTxID any
 	if query.After != nil {
 		var err error
 		afterTxID, err = s.cursorTxID(ctx, db, query.After.TxId)
@@ -2467,7 +2470,7 @@ func (s *Store) GetUtxosWithHistory(
 
 	createdSlotExpr := `COALESCE(created_transaction.slot, utxo.added_slot)`
 	createdBlockIndexExpr := `COALESCE(created_transaction.block_index, 0)`
-	var afterTxID int64
+	var afterTxID any
 	predicate := "1 = 1"
 	args := []any{}
 	switch {
@@ -3095,7 +3098,8 @@ func (s *Store) UtxoRefsAsOfAfterID(
 	}
 	rows, err := db.QueryContext(
 		ctx,
-		s.dialect.Rebind(`SELECT id, tx_id, output_idx FROM utxo
+		s.dialect.Rebind(`SELECT id, (SELECT p.hash FROM "transaction" AS p WHERE p.id = utxo.tx_id),
+       output_idx FROM utxo
 WHERE id > ? AND added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)
 ORDER BY id LIMIT ?`),
 		sqlAfterID,
@@ -3578,19 +3582,21 @@ func nullableUint(value *uint) sql.NullInt64 {
 
 // cursorTxID resolves the transaction hash of a keyset cursor to its row id,
 // the final ordering key. Cursors carry the hash so their format does not
-// depend on row ids. A hash with no row resolves to zero, which orders
-// before every stored transaction.
+// depend on row ids. An empty hash resolves to NULL, which makes the
+// tie-break comparison false: a cursor without a hash resumes after the
+// last row of its slot, block index and output index. A hash with no row
+// resolves to zero, which orders before every stored transaction.
 func (s *Store) cursorTxID(
 	ctx context.Context,
 	db queryer,
 	hash []byte,
-) (int64, error) {
+) (any, error) {
 	if len(hash) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 	ids, err := s.transactionIdentityIDs(ctx, db, [][]byte{hash}, false)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	return ids[string(hash)], nil
 }

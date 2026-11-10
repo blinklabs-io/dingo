@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -121,7 +122,7 @@ func seedHistoricalRewardDeltas(
 						hash := []byte(fmt.Sprintf("tx-%04d", deltaID))
 						if variant > 0 {
 							txID++
-							_, err := tx.Exec(
+							_, err := testutil.ExecTransactionInsert(tx,
 								`INSERT INTO "transaction" (id, hash, slot, block_index) VALUES (?, ?, ?, 0)`,
 								txID,
 								hash,

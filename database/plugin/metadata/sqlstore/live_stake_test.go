@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"sync"
 	"testing"
 
@@ -377,9 +378,16 @@ func insertLiveUtxoTx(
 ) error {
 	txID := make([]byte, 32)
 	txID[0] = txSeed
+	if _, err := testutil.ExecTransactionInsert(db,
+		`
+INSERT INTO "transaction" (hash) VALUES (?) ON CONFLICT (hash) DO NOTHING`,
+		txID,
+	); err != nil {
+		return err
+	}
 	_, err := db.ExecContext(ctx, `
 INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
-VALUES (?, 0, ?, ?, 1, 0, ?)`,
+VALUES ((SELECT id FROM "transaction" WHERE hash = ?), 0, ?, ?, 1, 0, ?)`,
 		txID, ref.Key, int64(ref.Tag), decimalUint64(types.Uint64(amount)),
 	)
 	return err
@@ -880,6 +888,7 @@ func seedCredentialUtxos(
 ) {
 	tb.Helper()
 	tx, err := store.writeDB.Begin()
+	ids := testutil.NewTransactionIDs(tb, tx)
 	require.NoError(tb, err)
 	stmt, err := tx.Prepare(
 		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
@@ -901,7 +910,7 @@ func seedCredentialUtxos(
 			deletedSlot = 100
 		}
 		_, err := stmt.Exec(
-			txID,
+			ids.ID(txID),
 			0,
 			ref.Key,
 			int64(ref.Tag),

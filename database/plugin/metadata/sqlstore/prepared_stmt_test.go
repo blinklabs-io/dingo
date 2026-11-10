@@ -99,7 +99,7 @@ func TestGetUtxoUsesPreparedLiveAndIncludingSpentStatements(t *testing.T) {
 
 	_, err = store.writeDB.ExecContext(
 		t.Context(),
-		"UPDATE utxo SET deleted_slot = 43 WHERE tx_id = ? AND output_idx = ?",
+		"UPDATE utxo SET deleted_slot = 43 WHERE tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?) AND output_idx = ?",
 		txID,
 		3,
 	)

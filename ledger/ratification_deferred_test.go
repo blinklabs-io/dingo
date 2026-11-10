@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"io"
 	"log/slog"
 	"math/big"
@@ -893,7 +894,7 @@ func (s *govDiffScenario) seedRetiringPool(t *testing.T, retireEpoch uint64) {
 	require.NoError(t, raw.QueryRow(
 		`SELECT id FROM pool WHERE pool_key_hash = ?`, pool,
 	).Scan(&poolID))
-	res, err := raw.Exec(
+	res, err := testutil.ExecTransactionInsert(raw,
 		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, ?)`,
 		repeatByte(32, 0xb5), s.epoch.StartSlot+1, 0,
 	)

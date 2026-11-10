@@ -26,7 +26,7 @@ func sqliteOrOfRefs(refs []models.UtxoId) (string, []any) {
 	for _, ref := range refs {
 		args = append(args, ref.Hash, ref.Idx)
 	}
-	return joinN(len(refs), " OR ", "(tx_id = ? AND output_idx = ?)"), args
+	return joinN(len(refs), " OR ", "(tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?) AND output_idx = ?)"), args
 }
 
 func sqliteOrRefArgs(refs []models.UtxoId) []any {

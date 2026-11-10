@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -53,7 +54,7 @@ func newOverlayInsertStore(
 	require.NoError(tb, err)
 	require.NoError(tb, store.Start(context.Background()))
 	tb.Cleanup(func() { require.NoError(tb, store.Close()) })
-	_, err = db.Exec(
+	_, err = testutil.ExecTransactionInsert(db,
 		`INSERT INTO "transaction" (id,hash,slot,valid,fee) VALUES (1,?,1,TRUE,'0')`,
 		bytes.Repeat([]byte{1}, 32),
 	)
@@ -122,7 +123,7 @@ func TestSQLiteOverlayInsertReducesStatementsWithSameRows(t *testing.T) {
 				)
 				count := overlayInsertStatementCount(t, metrics)
 				if limit == 0 {
-					require.Equal(t, uint64(133), count)
+					require.Equal(t, uint64(108), count)
 				} else {
 					require.Equal(t, uint64(5), count)
 				}
@@ -148,13 +149,13 @@ func TestSQLiteOverlayInsertRespectsRuntimeLimit(t *testing.T) {
 		t,
 		insertOverlayFixture(store, overlayInsertOutputs(1, 128)),
 	)
-	require.Equal(t, uint64(3), overlayInsertStatementCount(t, metrics))
+	require.Equal(t, uint64(2), overlayInsertStatementCount(t, metrics))
 	limitSQLiteVariableNumber(t, store.writeDB, 32766)
 	require.NoError(
 		t,
 		insertOverlayFixture(store, overlayInsertOutputs(129, 128)),
 	)
-	require.Equal(t, uint64(4), overlayInsertStatementCount(t, metrics))
+	require.Equal(t, uint64(3), overlayInsertStatementCount(t, metrics))
 }
 
 func TestSQLiteOverlayInsertPreservesTriggerBoundaries(t *testing.T) {
@@ -184,7 +185,7 @@ INSERT INTO output_audit VALUES (new.id, changes()); END`,
 				t,
 				insertOverlayFixture(store, overlayInsertOutputs(1, 128)),
 			)
-			require.Equal(t, uint64(3), overlayInsertStatementCount(t, metrics))
+			require.Equal(t, uint64(2), overlayInsertStatementCount(t, metrics))
 			rows, err := store.writeDB.Query(
 				"SELECT utxo_id,prior_changes FROM output_audit WHERE utxo_id>0 ORDER BY utxo_id",
 			)
@@ -195,8 +196,8 @@ INSERT INTO output_audit VALUES (new.id, changes()); END`,
 				var id, changes int
 				require.NoError(t, rows.Scan(&id, &changes))
 				require.Equal(t, i, id)
-				want := 62
-				if i <= 62 {
+				want := 76
+				if i <= 76 {
 					want = 1
 				}
 				require.Equal(t, want, changes)
@@ -240,7 +241,7 @@ func TestSQLiteOverlayInsertRechecksTemporarySchema(t *testing.T) {
 			overlayInsertOutputs(129, 128),
 		),
 	)
-	require.Equal(t, uint64(4), overlayInsertStatementCount(t, metrics))
+	require.Equal(t, uint64(3), overlayInsertStatementCount(t, metrics))
 	_, err = db.ExecContext(ctx, "DROP TRIGGER temp.observe_width")
 	require.NoError(t, err)
 	require.NoError(
@@ -252,7 +253,7 @@ func TestSQLiteOverlayInsertRechecksTemporarySchema(t *testing.T) {
 			overlayInsertOutputs(257, 128),
 		),
 	)
-	require.Equal(t, uint64(5), overlayInsertStatementCount(t, metrics))
+	require.Equal(t, uint64(4), overlayInsertStatementCount(t, metrics))
 	_, err = db.ExecContext(
 		ctx,
 		"CREATE TEMP TABLE UTXO AS SELECT * FROM main.utxo WHERE 0",
@@ -273,7 +274,7 @@ func TestSQLiteOverlayInsertRechecksTemporarySchema(t *testing.T) {
 			overlayInsertOutputs(385, 128),
 		),
 	)
-	require.Equal(t, uint64(8), overlayInsertStatementCount(t, metrics))
+	require.Equal(t, uint64(6), overlayInsertStatementCount(t, metrics))
 	require.NoError(t, txn.Rollback())
 }
 
@@ -290,10 +291,12 @@ func TestSQLiteOverlayInsertConflictsOnlyWithTheExactImportedOutput(t *testing.T
 			if sameIndex {
 				importedIdx = outputs[0].model.OutputIdx
 			}
+			producer := uint(1)
 			require.NoError(t, store.ImportUtxos([]models.Utxo{{
-				TxId:      outputs[0].model.TxId,
-				OutputIdx: importedIdx,
-				Amount:    types.Uint64(1),
+				TxId:          outputs[0].model.TxId,
+				TransactionID: &producer,
+				OutputIdx:     importedIdx,
+				Amount:        types.Uint64(1),
 			}}, nil))
 			err := insertOverlayFixture(store, outputs)
 			var rows int
@@ -400,30 +403,30 @@ func TestSQLiteOverlayInsertOptInAndBound(t *testing.T) {
 	}
 	rows, err := store.overlayInsertRows(t.Context(), store.writeDB, 8192)
 	require.NoError(t, err)
-	require.Equal(t, 62, rows)
+	require.Equal(t, 76, rows)
 	store.sqliteOverlayInsertRows = 2047
 	rows, err = store.overlayInsertRows(t.Context(), store.writeDB, 8192)
 	require.NoError(t, err)
 	require.Equal(
 		t,
-		62,
+		76,
 		rows,
 		"a pool does not pin the probe and insert to one connection",
 	)
 	for _, ctxErr := range []error{context.Canceled, context.DeadlineExceeded} {
 		rows, err = overlayInsertFallback(
 			t.Context(),
-			62,
+			76,
 			fmt.Errorf("probe: %w", ctxErr),
 		)
-		require.Equal(t, 62, rows)
+		require.Equal(t, 76, rows)
 		require.ErrorIs(t, err, ctxErr)
 	}
 	rows, err = overlayInsertFallback(
 		t.Context(),
-		62,
+		76,
 		errors.New("unsupported probe"),
 	)
 	require.NoError(t, err)
-	require.Equal(t, 62, rows)
+	require.Equal(t, 76, rows)
 }

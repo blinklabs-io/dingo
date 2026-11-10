@@ -76,7 +76,7 @@ func TestSQLiteOverlayInsertRetainsClosureHistoryThroughBarriers(t *testing.T) {
 				}
 				require.NoError(t, store.FlushBatch(acc, txn))
 				require.NoError(t, txn.Commit())
-				wantStatements := uint64(3)
+				wantStatements := uint64(2)
 				if limit != 0 {
 					wantStatements = 1
 				}

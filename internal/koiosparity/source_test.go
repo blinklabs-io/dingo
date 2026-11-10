@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math/big"
 	"testing"
 
@@ -575,7 +576,7 @@ func (s *retiredParitySeeder) cert(slot, blockIndex, certIndex uint64) int64 {
 	s.seq++
 	hash := make([]byte, 32)
 	binary.BigEndian.PutUint64(hash, s.seq)
-	res, err := s.raw.Exec(
+	res, err := testutil.ExecTransactionInsert(s.raw,
 		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, ?)`,
 		hash, slot, blockIndex,
 	)

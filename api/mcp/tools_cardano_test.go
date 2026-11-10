@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -409,7 +410,7 @@ func TestCardanoToolsWithMetadataSchema(t *testing.T) {
 		[]byte{0x22},
 		32,
 	)
-	_, err := db.Exec(
+	_, err := testutil.ExecTransactionInsert(db,
 		`INSERT INTO "transaction" (id, hash, block_hash, slot, fee, block_index) VALUES (7, ?, ?, 101, '123', 0)`,
 		txHash,
 		blockHash,
@@ -545,7 +546,7 @@ func TestParseAddressOrCredential(t *testing.T) {
 func TestTransactionOutputTotalsSearchProducerIndex(t *testing.T) {
 	t.Parallel()
 	db := newSchemaDB(t)
-	_, err := db.Exec(
+	_, err := testutil.ExecTransactionInsert(db,
 		`INSERT INTO "transaction" (id, hash, slot, block_index) VALUES (7, X'11', 1, 0), (8, X'22', 2, 0)`,
 	)
 	require.NoError(t, err)

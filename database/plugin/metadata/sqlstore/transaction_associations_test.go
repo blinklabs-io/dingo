@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math"
 	"os"
 	"path/filepath"
@@ -111,7 +112,8 @@ func TestSetTransactionBatchedCommitAndRollback(t *testing.T) {
 	require.NoError(t, commitTxn.Commit())
 
 	rows, err := store.writeDB.Query(
-		`SELECT id, hash, slot, block_index FROM "transaction" ORDER BY id`,
+		`SELECT t.id, t.hash, a.slot, a.block_index FROM "transaction" t
+JOIN applied_transaction a ON a.tx_id = t.id ORDER BY t.id`,
 	)
 	require.NoError(t, err)
 	defer rows.Close()
@@ -157,14 +159,29 @@ func TestSetTransactionBatchedCommitAndRollback(t *testing.T) {
 	require.Equal(t, len(committed), count)
 }
 
+// seedCollateralUtxo stores an output of the transaction with hash txHash,
+// creating the identity row the output's tx_id names.
+func seedCollateralUtxo(t *testing.T, store *Store, db *sql.DB, txHash []byte) {
+	t.Helper()
+	table := store.dialect.QuoteIdentifier("transaction")
+	_, err := db.Exec(
+		store.dialect.Rebind("INSERT INTO "+table+" (hash) VALUES (?)"), txHash,
+	)
+	require.NoError(t, err)
+	_, err = db.Exec(store.dialect.Rebind(
+		"INSERT INTO utxo (tx_id, output_idx, credential_tag, amount, payment_script) "+
+			"VALUES ((SELECT id FROM "+table+" WHERE hash = ?), 0, 0, '1', FALSE)",
+	), txHash)
+	require.NoError(t, err)
+}
+
 // collateralProductionFlow runs against an already-migrated provider store;
 // integration tests use it to exercise the same contract on every dialect.
 func collateralProductionFlow(t *testing.T, store *Store, db *sql.DB) {
 	t.Helper()
 	input, err := mockledger.NewSimpleTransactionInput(bytes.Repeat([]byte{0xaa}, 32), 0)
 	require.NoError(t, err)
-	_, err = db.Exec(store.dialect.Rebind("INSERT INTO utxo (tx_id, output_idx, credential_tag, amount, payment_script) VALUES (?, 0, 0, '1', FALSE)"), input.Id().Bytes())
-	require.NoError(t, err)
+	seedCollateralUtxo(t, store, db, input.Id().Bytes())
 	makeTx := func(first byte) lcommon.Transaction {
 		hash := bytes.Repeat([]byte{first}, 32)
 		builder := mockledger.NewTransactionBuilder()
@@ -192,16 +209,16 @@ func collateralProductionFlow(t *testing.T, store *Store, db *sql.DB) {
 	var spentBy sql.NullInt64
 	var deletedSlot sql.NullInt64
 	require.NoError(t, db.QueryRow(store.dialect.Rebind(
-		"SELECT spent_by_tx_id, deleted_slot FROM utxo WHERE tx_id = ?",
+		"SELECT spent_at_tx_id, deleted_slot FROM utxo WHERE tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?)",
 	), input.Id().Bytes()).Scan(&spentBy, &deletedSlot))
 	require.False(t, spentBy.Valid)
 	require.Zero(t, deletedSlot.Int64)
 
 	require.NoError(t, store.DeleteTransactionsAfterSlot(10, nil))
 	var associationCount int
-	require.NoError(t, db.QueryRow(store.dialect.Rebind(`SELECT COUNT(*) FROM utxo_collateral_edge e JOIN `+store.dialect.QuoteIdentifier("transaction")+` t ON t.id = e.transaction_id WHERE t.hash = ?`), txA.Hash().Bytes()).Scan(&associationCount))
+	require.NoError(t, db.QueryRow(store.dialect.Rebind(`SELECT COUNT(*) FROM utxo_collateral_edge e JOIN `+store.dialect.QuoteIdentifier("transaction")+` t ON t.id = e.tx_id WHERE t.hash = ?`), txA.Hash().Bytes()).Scan(&associationCount))
 	require.Equal(t, 1, associationCount)
-	require.NoError(t, db.QueryRow(store.dialect.Rebind(`SELECT COUNT(*) FROM utxo_collateral_edge e JOIN `+store.dialect.QuoteIdentifier("transaction")+` t ON t.id = e.transaction_id WHERE t.hash = ?`), txB.Hash().Bytes()).Scan(&associationCount))
+	require.NoError(t, db.QueryRow(store.dialect.Rebind(`SELECT COUNT(*) FROM utxo_collateral_edge e JOIN `+store.dialect.QuoteIdentifier("transaction")+` t ON t.id = e.tx_id WHERE t.hash = ?`), txB.Hash().Bytes()).Scan(&associationCount))
 	require.Equal(t, 0, associationCount)
 	got, err := store.GetTransactionByHash(txA.Hash().Bytes(), nil)
 	require.NoError(t, err)
@@ -256,11 +273,7 @@ func TestCollateralRollbackOrderAcrossRestart(t *testing.T) {
 		bytes.Repeat([]byte{0xaa}, 32), 0,
 	)
 	require.NoError(t, err)
-	_, err = db.Exec(
-		"INSERT INTO utxo (tx_id, output_idx, credential_tag, amount, payment_script) VALUES (?, 0, 0, '1', FALSE)",
-		input.Id().Bytes(),
-	)
-	require.NoError(t, err)
+	seedCollateralUtxo(t, store, db, input.Id().Bytes())
 	makeTx := func(id byte) lcommon.Transaction {
 		builder := mockledger.NewTransactionBuilder()
 		builder.WithId(bytes.Repeat([]byte{id}, 32))
@@ -282,7 +295,7 @@ func TestCollateralRollbackOrderAcrossRestart(t *testing.T) {
 	edges := func(tx lcommon.Transaction) int {
 		var n int
 		require.NoError(t, db.QueryRow(
-			`SELECT COUNT(*) FROM utxo_collateral_edge e JOIN "transaction" t ON t.id = e.transaction_id WHERE t.hash = ?`,
+			`SELECT COUNT(*) FROM utxo_collateral_edge e JOIN "transaction" t ON t.id = e.tx_id WHERE t.hash = ?`,
 			tx.Hash().Bytes(),
 		).Scan(&n))
 		return n
@@ -319,24 +332,22 @@ func TestCollateralInputsPreserveManyToManyOwnership(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
 	_, err := store.writeDB.Exec(`CREATE TABLE utxo (
-transaction_id INTEGER, collateral_return_for_tx_id INTEGER, tx_id BLOB,
-payment_key BLOB, staking_key BLOB, credential_tag INTEGER, datum_hash BLOB,
-spent_at_tx_id BLOB, spent_by_tx_id INTEGER, referenced_by_tx_id BLOB, collateral_by_tx_id BLOB,
-id INTEGER PRIMARY KEY AUTOINCREMENT, added_slot INTEGER, deleted_slot INTEGER,
-amount TEXT, output_idx INTEGER, payment_script BOOLEAN,
-producer_tx_id INTEGER GENERATED ALWAYS AS (
-COALESCE(transaction_id, collateral_return_for_tx_id)) VIRTUAL)`)
+id INTEGER PRIMARY KEY AUTOINCREMENT, tx_id INTEGER NOT NULL,
+output_idx INTEGER NOT NULL, collateral_return_for_tx_id INTEGER,
+spent_at_tx_id INTEGER, payment_key BLOB, staking_key BLOB,
+credential_tag INTEGER, datum_hash BLOB, amount TEXT, payment_script BOOLEAN,
+added_slot INTEGER, deleted_slot INTEGER)`)
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(`CREATE TABLE "transaction" (
 id INTEGER PRIMARY KEY AUTOINCREMENT, hash BLOB)`)
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(`CREATE TABLE utxo_collateral_edge (
-utxo_id INTEGER NOT NULL, transaction_id INTEGER NOT NULL,
-PRIMARY KEY (utxo_id, transaction_id))`)
+utxo_id INTEGER NOT NULL, tx_id INTEGER NOT NULL,
+PRIMARY KEY (utxo_id, tx_id))`)
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(`CREATE TABLE utxo_reference_edge (
-utxo_id INTEGER NOT NULL, transaction_id INTEGER NOT NULL,
-PRIMARY KEY (utxo_id, transaction_id))`)
+utxo_id INTEGER NOT NULL, tx_id INTEGER NOT NULL,
+PRIMARY KEY (utxo_id, tx_id))`)
 	require.NoError(t, err)
 	utxoID, err := hex.DecodeString("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	require.NoError(t, err)
@@ -345,12 +356,12 @@ PRIMARY KEY (utxo_id, transaction_id))`)
 	const ownerA, ownerB = int64(1), int64(2)
 	_, err = store.writeDB.Exec(
 		"INSERT INTO utxo (tx_id, output_idx, amount, credential_tag, payment_script) VALUES (?, 0, '1', 0, FALSE)",
-		utxoID,
+		testutil.TransactionID(t, store.writeDB, utxoID),
 	)
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(
 		"INSERT INTO utxo (tx_id, output_idx, amount, credential_tag, payment_script) VALUES (?, 0, '1', 0, FALSE)",
-		secondUtxoID,
+		testutil.TransactionID(t, store.writeDB, secondUtxoID),
 	)
 	require.NoError(t, err)
 	input, err := mockledger.NewSimpleTransactionInput(utxoID, 0)
@@ -386,7 +397,7 @@ PRIMARY KEY (utxo_id, transaction_id))`)
 	require.Equal(t, 4, count)
 	// Rollback cleanup is keyed by transaction, never by the shared UTxO.
 	_, err = store.writeDB.Exec(
-		"DELETE FROM utxo_collateral_edge WHERE transaction_id = ?", ownerA,
+		"DELETE FROM utxo_collateral_edge WHERE tx_id = ?", ownerA,
 	)
 	require.NoError(t, err)
 	got, err = store.collateralInputsBatch(t.Context(), store.writeDB, []any{ownerB})
@@ -408,11 +419,6 @@ PRIMARY KEY (utxo_id, transaction_id))`)
 	require.Len(t, references["2"], 2)
 	require.Equal(t, references["1"][0].ID, references["2"][0].ID)
 	require.Equal(t, references["1"][1].ID, references["2"][1].ID)
-	var legacy int
-	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT COUNT(*) FROM utxo WHERE collateral_by_tx_id IS NOT NULL OR referenced_by_tx_id IS NOT NULL",
-	).Scan(&legacy))
-	require.Zero(t, legacy, "the legacy single-owner columns are no longer written")
 	require.NoError(t, store.writeDB.QueryRow(
 		"SELECT COUNT(*) FROM utxo_reference_edge",
 	).Scan(&count))

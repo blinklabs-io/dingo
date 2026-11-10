@@ -18830,7 +18830,7 @@ func TestCreateGenesisBlockFileBackedNoFKError(t *testing.T) {
 			require.NoError(t, raw.QueryRow(`
 SELECT COUNT(*) FROM utxo
 WHERE spent_at_tx_id IS NOT NULL
-   OR spent_by_tx_id IS NOT NULL
+   OR spent_at_tx_id IS NOT NULL
    OR referenced_by_tx_id IS NOT NULL
    OR collateral_by_tx_id IS NOT NULL`,
 			).Scan(&nonNull))

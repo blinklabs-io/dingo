@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"bytes"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -47,7 +48,8 @@ func TestGetUtxosWithHistoryFiltersAndHydratesLifecycle(t *testing.T) {
 		bytes.Repeat([]byte{0xb2}, 32),
 	}
 	for i := range createdHashes {
-		_, err := store.writeDB.Exec(`
+		_, err := testutil.ExecTransactionInsert(store.writeDB,
+			`
 INSERT INTO "transaction" (
     id, hash, block_hash, slot, block_index, type, fee, collateral_fee,
     ttl, valid
@@ -61,7 +63,8 @@ INSERT INTO "transaction" (
 		require.NoError(t, err)
 	}
 	for i := range spentHashes {
-		_, err := store.writeDB.Exec(`
+		_, err := testutil.ExecTransactionInsert(store.writeDB,
+			`
 INSERT INTO "transaction" (
     id, hash, block_hash, slot, block_index, type, fee, collateral_fee,
     ttl, valid

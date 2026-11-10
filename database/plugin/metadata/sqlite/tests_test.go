@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"math"
 	"math/big"
 	"strings"
@@ -2487,9 +2488,16 @@ func (d *sqliteTestDB) Create(value any) sqliteTestResult {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, v.StakingKey, v.CredentialTag, v.Pool,
 			v.Drep, v.AddedSlot, v.CreatedSlot, fmt.Sprint(uint64(v.Reward)), v.Active)
 	case *models.Utxo:
+		// The output names its producer by row id: reuse the identity row of
+		// the hash or create it, as an import does.
+		if _, err = d.db.Exec(`INSERT INTO "transaction" (hash) VALUES (?)
+			ON CONFLICT (hash) DO NOTHING`, v.TxId); err != nil {
+			break
+		}
 		result, err = d.db.Exec(`INSERT INTO utxo
 			(tx_id, output_idx, staking_key, credential_tag, amount, added_slot, deleted_slot)
-			VALUES (?, ?, ?, ?, ?, ?, 0)`, v.TxId, v.OutputIdx, v.StakingKey, v.CredentialTag,
+			VALUES ((SELECT id FROM "transaction" WHERE hash = ?), ?, ?, ?, ?, ?, 0)`,
+			v.TxId, v.OutputIdx, v.StakingKey, v.CredentialTag,
 			fmt.Sprint(uint64(v.Amount)), v.AddedSlot)
 	case *models.AccountRewardDelta:
 		result, err = d.db.Exec(`INSERT INTO account_reward_delta
@@ -2557,7 +2565,7 @@ func (q *sqliteTestQuery) Updates(values map[string]any) sqliteTestResult {
 }
 
 func createTestTransaction(db *sqliteTestDB, txID uint, slot uint64) error {
-	_, err := db.db.Exec(
+	_, err := testutil.ExecTransactionInsert(db.db,
 		`INSERT INTO "transaction" (id, hash, slot, block_index, valid)
         VALUES (?, ?, ?, 0, 1)`,
 		txID,

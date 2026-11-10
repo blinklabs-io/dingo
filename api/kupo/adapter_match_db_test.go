@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -101,7 +102,8 @@ func newHistoryFixture(
 			txID := make([]byte, 32)
 			binary.BigEndian.PutUint64(txID, uint64(1_000_000-txRowID)) // #nosec G115 -- small fixture index
 			blockHash := bytes.Repeat([]byte{byte(slot)}, 32)
-			_, err := tx.Exec(`
+			_, err := testutil.ExecTransactionInsert(tx,
+				`
 INSERT INTO "transaction" (
     id, hash, block_hash, slot, block_index, type, fee, collateral_fee,
     ttl, valid

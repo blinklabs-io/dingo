@@ -235,7 +235,7 @@ func TestUtxoSpendStateKeepsNullableSlotSemantics(t *testing.T) {
 	seedUtxoLookupRows(t, store, 1)
 	id := benchmarkUtxoTxID(0)
 	_, err := store.writeDB.Exec(
-		"UPDATE utxo SET deleted_slot = NULL WHERE tx_id = ?",
+		"UPDATE utxo SET deleted_slot = NULL WHERE tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?)",
 		id,
 	)
 	require.NoError(t, err)

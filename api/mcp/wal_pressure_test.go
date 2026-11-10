@@ -17,8 +17,8 @@ package mcp
 import (
 	"bytes"
 	"context"
-	"os"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"

@@ -615,8 +615,8 @@ func ingestSameBatchProducerConsumer(
 // and could not fix this row later.
 //
 // Two passes make the simulation faithful: the first pass ingests normally
-// (creating the consumer transaction row that spent_by_tx_id references), then
-// spent_by_tx_id is cleared to mimic the partial-write state, and the second
+// (creating the consumer transaction row that spent_at_tx_id references), then
+// spent_at_tx_id is cleared to mimic the partial-write state, and the second
 // pass must repair it.
 func TestSetTransactionBatched_InFlightDoesNotSkipExistingRowRepair(
 	t *testing.T,
@@ -634,8 +634,8 @@ func TestSetTransactionBatched_InFlightDoesNotSkipExistingRowRepair(
 	// but loses its spender hash.
 	raw := rawSQLiteMetadataFixture(t, db)
 	_, err := raw.Exec(`
-UPDATE utxo SET spent_by_tx_id = NULL
-WHERE tx_id = ? AND output_idx = ?`,
+UPDATE utxo SET spent_at_tx_id = NULL
+WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
 		candidate.input.Id().Bytes(),
 		candidate.input.Index(),
 	)
@@ -1554,7 +1554,7 @@ func scanBatchedCrossBlockSpendCandidate(
 // a gap-block transaction consumes a UTxO produced by an earlier
 // gap-block transaction (both ingested through SetGapBlockTransaction),
 // the produced UTxO row is marked as spent with both deleted_slot and
-// spent_by_tx_id populated — matching the normal SetTransaction path.
+// spent_at_tx_id populated — matching the normal SetTransaction path.
 //
 // Regression test for a bug where ensureGapConsumedUtxos unconditionally
 // skipped existing UTxO rows, leaving outputs produced by earlier gap
@@ -1728,7 +1728,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 			t,
 			spenderTxHash,
 			[]byte(utxo.SpentAtTxHash),
-			"input %s spent_by_tx_id not set to consumer tx hash",
+			"input %s spent_at_tx_id not set to consumer tx hash",
 			input.String(),
 		)
 	}
