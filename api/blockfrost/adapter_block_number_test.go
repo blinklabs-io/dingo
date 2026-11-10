@@ -293,11 +293,13 @@ func seedSparseChain(
 	t.Helper()
 	blocks := make([]models.Block, 0, len(ids))
 	for i, id := range ids {
+		hash := fill32(byte(i + 1))
+		hash[0] = byte((i + 1) >> 8) // keeps hashes distinct past 255 blocks
 		block := models.Block{
 			ID:     id,
 			Number: uint64(i),
 			Slot:   uint64(i+1) * 10,
-			Hash:   fill32(byte(i + 1)),
+			Hash:   hash,
 			Cbor:   []byte{0x80},
 		}
 		require.NoError(t, db.BlockCreate(block, nil))
@@ -425,4 +427,35 @@ func TestNeighborBlocksOutOfRangePageDoesNotWalkTheIndex(t *testing.T) {
 		require.Empty(t, got, tc.name)
 		require.Less(t, calls, walked, tc.name)
 	}
+}
+
+func TestNeighborBlocksDeepPageJumpsByBlockNumber(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	ids := make([]uint64, 1200)
+	for i := range ids {
+		ids[i] = uint64(i)*3 + 1
+	}
+	blocks := seedSparseChain(t, db, ids)
+
+	run := func(hash []byte, forward bool) ([]uint64, int64) {
+		var calls atomic.Int64
+		got, _, err := adapter.neighborBlocks(
+			errCountingContext{Context: t.Context(), calls: &calls},
+			hex.EncodeToString(hash),
+			PaginationParams{Count: 5, Page: 60},
+			forward,
+		)
+		require.NoError(t, err)
+		return heightsOf(got), calls.Load()
+	}
+
+	// Page 60 of 5 starts 295 heights past the origin.
+	got, calls := run(blocks[10].Hash, true)
+	require.ElementsMatch(t, []uint64{306, 307, 308, 309, 310}, got)
+	require.Less(t, calls, int64(150), "forward deep page walked the prefix")
+
+	got, calls = run(blocks[1199].Hash, false)
+	require.ElementsMatch(t, []uint64{899, 900, 901, 902, 903}, got)
+	require.Less(t, calls, int64(150), "backward deep page walked the prefix")
 }

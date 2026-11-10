@@ -72,25 +72,28 @@ func (a *NodeAdapter) neighborBlocks(
 	if !ok {
 		return []models.Block{}, total, nil
 	}
-	// Entries on the pages before the requested one are stepped over.
-	skip := uint64(offset) // #nosec G115 -- offset is non-negative
-	// Each step consumes one distinct ID, so a page that starts at or past
-	// the last ID on this side holds nothing. Returning here keeps an
-	// out-of-range page from walking the whole index.
-	var span uint64
-	if forward {
-		if tipID > origin.ID {
-			span = tipID - origin.ID
-		}
-	} else if origin.ID > database.BlockInitialIndex {
-		span = origin.ID - database.BlockInitialIndex
-	}
-	if skip >= span {
+	// The pages before the requested one are skipped by block number, so a
+	// deep page costs a logarithmic search rather than a walk over every
+	// entry in front of it.
+	cursor := origin.ID
+	if uint64(offset) >= available { // #nosec G115 -- offset is non-negative
 		return []models.Block{}, total, nil
 	}
+	if offset > 0 {
+		// #nosec G115 -- offset is non-negative
+		start, found, err := a.neighborPageStart(
+			ctx, txn, origin, tipID, uint64(offset), forward,
+		)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !found {
+			return []models.Block{}, total, nil
+		}
+		cursor = start
+	}
 	ret := make([]models.Block, 0, params.Count)
-	cursor := origin.ID
-	for i := uint64(0); i < skip+uint64(params.Count); i++ { // #nosec G115 -- Count is non-negative
+	for i := 0; i < params.Count; i++ {
 		if err := ctx.Err(); err != nil {
 			return nil, 0, err
 		}
@@ -119,9 +122,6 @@ func (a *NodeAdapter) neighborBlocks(
 			return nil, 0, err
 		}
 		cursor = index
-		if i < skip {
-			continue
-		}
 		block, err := db.BlockByIndex(index, txn)
 		if err != nil {
 			return nil, 0, err
@@ -478,4 +478,56 @@ func transactionAddressEffects(
 		outputs = append(outputs, output.Address().String())
 	}
 	return outputs, row.Collateral
+}
+
+// neighborPageStart returns the index entry that precedes the first block of a
+// page that begins offset block numbers beyond origin, so a walk from it
+// yields that page. False means no block lies there. forward selects the
+// blocks that follow origin; otherwise the ones that precede it. tipID bounds
+// the forward search to the applied chain.
+func (a *NodeAdapter) neighborPageStart(
+	ctx context.Context,
+	txn *database.Txn,
+	origin models.Block,
+	tipID uint64,
+	offset uint64,
+	forward bool,
+) (uint64, bool, error) {
+	var (
+		target uint64
+		bound  database.BlockNumberBound
+	)
+	if forward {
+		if offset > math.MaxUint64-origin.Number-1 {
+			return 0, false, nil
+		}
+		target = origin.Number + 1 + offset
+		bound = database.BlockNumberBound{
+			HighestID: tipID, Resolved: true,
+		}
+	} else {
+		if origin.Number <= offset || origin.ID <= database.BlockInitialIndex {
+			return 0, false, nil
+		}
+		target = origin.Number - 1 - offset
+		bound = database.BlockNumberBound{
+			HighestID: origin.ID - 1, Resolved: true,
+		}
+	}
+	block, err := database.BlockNumberBoundaryTxn(
+		ctx, txn, target, bound, forward,
+	)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("resolve page start: %w", err)
+	}
+	if forward {
+		if block.ID <= origin.ID {
+			return 0, false, nil
+		}
+		return block.ID - 1, true, nil
+	}
+	return block.ID + 1, true, nil
 }
