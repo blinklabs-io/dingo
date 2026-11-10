@@ -129,7 +129,7 @@ func (a *trustedNtCActivity) updateDeadlineLocked() error {
 		return nil
 	}
 	deadline := time.Time{}
-	if a.active == 0 && len(a.pendingResponses) == 0 {
+	if a.timeout > 0 && a.active == 0 && len(a.pendingResponses) == 0 {
 		deadline = time.Now().Add(a.timeout)
 	}
 	return a.conn.setReadDeadlineCap(deadline)

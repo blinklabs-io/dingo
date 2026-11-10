@@ -466,6 +466,11 @@ var flagSpecs = []flagSpec{
 		"longest message expiry accepted, in seconds",
 	),
 	uintFlag(
+		"DMQ.MinPoolMessageInterval",
+		"dmq-min-pool-message-interval",
+		"shortest time, in seconds, between one pool's messages announced to a peer; 0 disables",
+	),
+	uintFlag(
 		"DMQ.MaxMempoolSize",
 		"dmq-max-mempool-size",
 		"DMQ message pool size limit, in megabytes",
@@ -721,6 +726,11 @@ var flagSpecs = []flagSpec{
 		"MaxTrustedLocalNtCConns",
 		"max-trusted-local-ntc-conns",
 		"max trusted local node-to-client connections",
+	),
+	durationFlag(
+		"TrustedNtCIdleTimeout",
+		"trusted-ntc-idle-timeout",
+		"close idle trusted local node-to-client connections after this duration (0 = no limit)",
 	),
 	intFlag(
 		"MaxNtCConnectionsPerIP",

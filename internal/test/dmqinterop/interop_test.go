@@ -367,6 +367,59 @@ func TestInteropDmqNodePullsAMessageFromDingo(t *testing.T) {
 	require.Equal(t, msg.Payload.MessageBody, got.Payload.MessageBody)
 }
 
+// sigTooFrequentRefusals counts the times dmq-node has refused a pool's
+// message for arriving too soon after the pool's previous one. run.sh points
+// dmq-node's output at /data/dmq.log, not the container's own log.
+func sigTooFrequentRefusals(t *testing.T, env environment) int {
+	t.Helper()
+	out, err := exec.Command(
+		"docker", "exec", env.container, "cat", "/data/dmq.log",
+	).CombinedOutput()
+	require.NoError(t, err)
+	require.NotEmpty(t, out, "dmq-node's log is empty")
+	return strings.Count(string(out), "SigTooFrequent")
+}
+
+// Dingo holds two messages signed by the same pool. It announces the second
+// only after the pool's minimum interval, so dmq-node, which pulls both from
+// it, never refuses the second as too frequent and the connection is not
+// dropped to be redialed.
+func TestInteropDmqNodeAcceptsAPoolsSecondMessageFromDingo(t *testing.T) {
+	env := loadEnvironment(t)
+	if env.listenAddr == "" {
+		t.Skip("DMQ_INTEROP_LISTEN_ADDR is not set")
+	}
+	primeNode(t, env)
+	first := signedMessage(t, env, "pool-first")
+	second := signedMessage(t, env, "pool-second")
+
+	serving := newStackWithPeers(t, &dmq.PeerConfig{
+		MaxPeers:    5,
+		ListenAddrs: []dmq.ListenAddr{{Address: env.listenAddr}},
+	})
+	for _, msg := range []ocommon.DmqMessage{first, second} {
+		added, err := serving.Mempool().Add(msg)
+		require.NoError(t, err)
+		require.True(t, added)
+	}
+	refusalsBefore := sigTooFrequentRefusals(t, env)
+
+	fetching := newStack(t)
+	dialNode(t, env, fetching)
+	waitFor(t, env.timeout, "a second Dingo fetches the first message",
+		func() bool { return fetching.Mempool().Has(first.ID()) })
+	require.False(
+		t, fetching.Mempool().Has(second.ID()),
+		"the second message of the pool must wait for the interval",
+	)
+	waitFor(t, env.timeout, "a second Dingo fetches the second message",
+		func() bool { return fetching.Mempool().Has(second.ID()) })
+	require.Equal(
+		t, refusalsBefore, sigTooFrequentRefusals(t, env),
+		"dmq-node refused a message as too frequent",
+	)
+}
+
 // Dingo's peer manager dials dmq-node from a topology, as the node does, and
 // the connection holds.
 func TestInteropPeerManagerDialsDmqNode(t *testing.T) {

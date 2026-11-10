@@ -282,6 +282,7 @@ type Config struct {
 	inboundDuplexOnlyForHot                                                             bool
 	maxConnectionsPerIP, maxInboundConns, maxNtCConns, maxNtCConnectionsPerIP           int
 	maxTrustedLocalNtCConns                                                             int
+	trustedNtCIdleTimeout                                                               time.Duration
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
 	genesisCorroborationPeers                                                           int
@@ -1003,6 +1004,7 @@ func (c *Config) syncCompatFields() {
 	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
 	c.maxNtCConns, c.maxNtCConnectionsPerIP = c.cfg.MaxNtCConns, c.cfg.MaxNtCConnectionsPerIP
 	c.maxTrustedLocalNtCConns = c.cfg.MaxTrustedLocalNtCConns
+	c.trustedNtCIdleTimeout = c.cfg.TrustedNtCIdleTimeout
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
@@ -1686,6 +1688,17 @@ func WithMaxTrustedLocalNtCConns(n int) ConfigOptionFunc {
 	return func(c *Config) {
 		if n > 0 {
 			c.cfg.MaxTrustedLocalNtCConns = n
+		}
+	}
+}
+
+// WithTrustedNtCIdleTimeout specifies how long a trusted local
+// node-to-client connection may stay idle before it is closed. Zero means no
+// limit and negative values are ignored. Default: 0.
+func WithTrustedNtCIdleTimeout(d time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		if d >= 0 {
+			c.cfg.TrustedNtCIdleTimeout = d
 		}
 	}
 }
