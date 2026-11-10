@@ -1185,6 +1185,13 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		// re-reading the tip is what clears it. The retry is only taken
 		// while nothing has been emitted, so a ledger.tx consumer is never
 		// told to undo the same block twice.
+		//
+		// This is local corrective recovery, not a peer rollback, so each
+		// step is measured from the live tip: the chain's cumulative bound
+		// would otherwise refuse every step past K of the highest tip.
+		if err := ls.chain.ResetRollbackAnchorToTip(); err != nil {
+			return committed, stepErr(err)
+		}
 		emitted, err := ls.validateAndEmitRollbackUndoEmitted(ls.lifecycleContext(), next)
 		if err != nil {
 			if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
@@ -1274,6 +1281,12 @@ func (ls *LedgerState) rollbackPrimaryChainWithinSecurityParam(
 					"%w: target slot %d, current floor slot %d",
 					errAtTipRecoveryFloorAdvanced, point.Slot, bounded.Slot,
 				)
+			}
+			// The clamp above is this path's own cumulative bound across
+			// retries, so the chain's peer-facing anchor is released only
+			// once a target inside it is known.
+			if err := ls.chain.ResetRollbackAnchorToTip(); err != nil {
+				return err
 			}
 			return ls.validateAndEmitRollbackUndo(ls.lifecycleContext(), point)
 		},

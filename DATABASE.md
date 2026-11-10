@@ -4208,8 +4208,9 @@ it, where the horizon is `min(tipSlot - retentionSlots, liveImmutableSlot)`.
 immutability bound `internal/historyexpiry` uses to expire block history),
 overridable with `sqlstore.Config.CommitteeAuthRetentionSlots`. It only
 approximates the rollback bound: Ouroboros bounds a legal rollback in *blocks*
-(`securityParam`), not slots, and `Chain.rollbackForkDepth` enforces exactly
-that block count, so a chain sparser than the 3k/f assumption — a devnet with a
+(`securityParam`), not slots, and the chain enforces exactly that block count
+(`Chain.rollbackExceedsSecurityParam`, measured from the highest block index the
+persistent chain has held, its rollback anchor), so a chain sparser than the 3k/f assumption — a devnet with a
 low active-slot coefficient, or an occasional sparse span of an otherwise
 healthy chain — can have a legal rollback target below `tipSlot -
 retentionSlots`. Pruning to that slot-only horizon
@@ -4232,11 +4233,18 @@ below the horizon.
 
 **Suspension.** A cached `liveImmutableSlot` can be safe when resolved and
 still be wrong by the time it is used, because "at most `securityParam` blocks
-behind the tip" describes one instant, not a ratchet: a rollback to depth
-`d1 <= securityParam`, a little regrowth, and a second rollback to depth
-`d2 <= securityParam` measured from the new, shorter tip can legally land
-*before* a value cached before the first rollback — ordinary chain churn near
-the tip, not an adversarial scenario. `DeleteCertificatesAfterSlot` therefore
+behind the tip" describes one instant, not a ratchet. Peer-initiated rollbacks
+are held to a ratchet: the chain measures them from its rollback anchor, the
+highest block index it has held, which it persists in the
+`chain_rollback_high_water` sync-state row before any rollback removes blocks
+and restores on load, so successive rollbacks cannot undercut the cached value.
+An operator truncate removes the blocks above its target and caps the row at the
+target's block index (`Database.LowerRollbackHighWater`) in the transaction that
+truncates metadata, so a restart does not measure rollbacks from blocks that no
+longer exist.
+Local recovery that deliberately descends past K one K-bounded step at a time
+lowers the anchor to the tip first (`Chain.ResetRollbackAnchorToTip`) and so can
+land *before* a value cached earlier. `DeleteCertificatesAfterSlot` therefore
 invalidates the cached value on every rollback, and `committeeAuthHorizon`
 treats "a live syncer is wired (`SetCommitteeAuthImmutableSlot` has been called
 at least once) but currently has no value" — bootstrap before the first
@@ -5368,11 +5376,22 @@ number is not an indexed blob key — only slot (`bp`), hash (`bh`), and the
 internal sequential ID (`bi`) are — so the lookup binary-searches the ID space
 that block numbers increase with, bounded above by the highest indexed block,
 and seeks to the next indexed entry at or after each probe so a gap left by a
-Mithril bootstrap or drain import does not end the search early. A number no
+Mithril bootstrap or drain import does not end the search early. When an EBB
+shares its parent's number, the earliest indexed match is returned. A number no
 block carries returns `models.ErrBlockNotFound`. It costs O(log n) blob reads
 where a slot or hash lookup costs one, so prefer either of those when the
 caller has one; bark's `ArchiveService.FetchBlock` uses it only for a reference
 that supplies height alone.
+
+`BlockNumberBoundaryTxn` resolves an inclusive lower or upper chain-number
+boundary using the same metadata-only sparse-ID search. A lower boundary
+selects the earliest block with a number at least the requested number; an
+upper boundary selects the latest block with a number at most it. This includes
+all blocks sharing a Byron epoch-boundary block number. The caller supplies a
+resolved `BlockNumberBound` and a read transaction; only the selected block body
+is fetched. Blockfrost transaction ranges bound both the number and internal
+ID by the applied tip, excluding prefetched blocks even when they share the
+applied tip's number.
 
 The upper bound is a separate value, `BlockNumberBound`, resolved by
 `ResolveBlockNumberBound` and passed to `BlockByNumberBounded`. Resolving it

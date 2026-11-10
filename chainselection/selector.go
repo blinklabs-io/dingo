@@ -857,6 +857,14 @@ func (cs *ChainSelector) advertisedTipStaleLocked(
 	) < wall
 }
 
+// AdvertisedTipStale reports whether a peer advertising tip is excluded by the
+// stale-tip rule (see advertisedTipStaleLocked), so it can never be selected.
+func (cs *ChainSelector) AdvertisedTipStale(tip ochainsync.Tip) bool {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	return cs.advertisedTipStaleLocked(&PeerChainTip{Tip: tip})
+}
+
 // staleTipRuleWallSlotLocked returns the wall-clock slot the stale-tip rule
 // measures against, and false while the rule cannot decide. It reports true
 // only in Genesis mode, and node composition observes tips synchronously

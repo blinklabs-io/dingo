@@ -218,6 +218,12 @@ func (n *Node) chainsyncAwaitCatchUpBand(
 	return n.chainSelector.AwaitCatchUpBand(ctx, connId, observedTip)
 }
 
+// chainsyncAdvertisedTipStale reports whether chain selection excludes a peer
+// advertising tip. With no chain selector wired no tip is stale.
+func (n *Node) chainsyncAdvertisedTipStale(tip ochainsync.Tip) bool {
+	return n.chainSelector != nil && n.chainSelector.AdvertisedTipStale(tip)
+}
+
 // chainsyncHasBestPeer reports whether chain selection has a best peer.
 func (n *Node) chainsyncHasBestPeer() bool {
 	return n.chainSelector != nil && n.chainSelector.GetBestPeer() != nil
