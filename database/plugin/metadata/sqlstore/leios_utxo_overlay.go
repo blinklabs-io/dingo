@@ -410,7 +410,7 @@ func (o *utxoOverlay) retainedUtxo(key overlayKey) (*models.Utxo, bool) {
 		model.SpentAtTxHash = state.spentBy
 		model.SpentAtTxID = nil
 		if state.spentByID.Valid {
-			spenderID := uint(state.spentByID.Int64)
+			spenderID := uint(state.spentByID.Int64) //nolint:gosec // row ids are positive
 			model.SpentAtTxID = &spenderID
 		}
 	} else {

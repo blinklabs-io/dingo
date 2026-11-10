@@ -83,24 +83,8 @@ func (s *Store) transactionIdentityIDs(
 		if err != nil {
 			return nil, err
 		}
-		for rows.Next() {
-			var (
-				id   int64
-				hash []byte
-			)
-			if err := rows.Scan(&id, &hash); err != nil {
-				_ = rows.Close()
-				return nil, err
-			}
-			ids[string(hash)] = id
-		}
-		rowsErr := rows.Err()
-		closeErr := rows.Close()
-		if rowsErr != nil {
-			return nil, rowsErr
-		}
-		if closeErr != nil {
-			return nil, closeErr
+		if err := collectIdentityRows(rows, ids); err != nil {
+			return nil, err
 		}
 	}
 	if !create {
@@ -118,6 +102,22 @@ func (s *Store) transactionIdentityIDs(
 		ids[string(hash)] = id
 	}
 	return ids, nil
+}
+
+// collectIdentityRows reads (id, hash) pairs into ids and closes rows.
+func collectIdentityRows(rows *sql.Rows, ids map[string]int64) error {
+	defer rows.Close() //nolint:errcheck
+	for rows.Next() {
+		var (
+			id   int64
+			hash []byte
+		)
+		if err := rows.Scan(&id, &hash); err != nil {
+			return err
+		}
+		ids[string(hash)] = id
+	}
+	return rows.Err()
 }
 
 // resolveUtxoIdentities sets TransactionID on every model that names its
@@ -159,7 +159,7 @@ func (s *Store) resolveUtxoIdentities(
 					utxo.TxId, utxo.OutputIdx,
 				)
 			}
-			txID := uint(id)
+			txID := uint(id) //nolint:gosec // row ids are positive
 			utxo.TransactionID = &txID
 		}
 		if utxo.SpentAtTxID == nil && len(utxo.SpentAtTxHash) != 0 {
@@ -169,7 +169,7 @@ func (s *Store) resolveUtxoIdentities(
 					"spender transaction %x not found", []byte(utxo.SpentAtTxHash),
 				)
 			}
-			spenderID := uint(id)
+			spenderID := uint(id) //nolint:gosec // row ids are positive
 			utxo.SpentAtTxID = &spenderID
 		}
 	}

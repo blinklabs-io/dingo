@@ -897,7 +897,7 @@ func (s *Store) activePoolOrNil(
 		return nil, err
 	}
 	if ok && pool.Retirement[0].Epoch <= current {
-		retired, err := latestPoolEventIsRetirement(ctx, db, s.dialect, pool.ID)
+		retired, err := latestPoolEventIsRetirement(ctx, db, pool.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -4429,7 +4429,6 @@ func queryReturnedID(
 func latestPoolEventIsRetirement(
 	ctx context.Context,
 	db queryer,
-	dialect Dialect,
 	poolID uint,
 ) (bool, error) {
 	var retirement bool

@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -204,7 +205,8 @@ func ExecTransactionInsert(
 	var identityArgs []any
 	var appliedCols, appliedVals []string
 	var appliedArgs []any
-	hashToken := "randomblob(32)"
+	const unsetHash = "randomblob(32)"
+	hashToken := unsetHash
 	var hashArgs []any
 	for i, column := range columns {
 		token, tokenArgs := take(values[i])
@@ -221,7 +223,7 @@ func ExecTransactionInsert(
 			appliedArgs = append(appliedArgs, tokenArgs...)
 		}
 	}
-	if hashToken == "randomblob(32)" {
+	if hashToken == unsetHash {
 		// A fixture without a hash needs one that stays stable between the
 		// two statements.
 		hashToken = "?"
@@ -247,7 +249,7 @@ func ExecTransactionInsert(
 		if affected, _ := result.RowsAffected(); affected == 0 {
 			queryer, ok := db.(Queryer)
 			if !ok {
-				return nil, fmt.Errorf("transaction insert conflict needs a Queryer")
+				return nil, errors.New("transaction insert conflict needs a Queryer")
 			}
 			if err := queryer.QueryRowContext(
 				context.Background(),
