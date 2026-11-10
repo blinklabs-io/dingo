@@ -207,12 +207,12 @@ WHERE epoch = 2 AND folded`,
 	require.Zero(t, otherEpochFolded)
 
 	// The account-ordered selection must drive from the account rowid range
-	// and probe the outputs by (epoch, credential): a probe that lacks the
+	// and probe the outputs by (credential, epoch): a probe that lacks the
 	// credential reads every unfolded output of the round once per account.
 	accountSeek := regexp.MustCompile(`SEARCH a USING INTEGER PRIMARY KEY \(rowid>\?\)`)
 	outputSeek := regexp.MustCompile(
-		`SEARCH o USING INDEX idx_reward_account_output_epoch_cred_pool_type ` +
-			`\(epoch=\? AND credential_tag=\? AND staking_key=\?\)`,
+		`SEARCH o USING INDEX idx_reward_account_output_credential_epoch ` +
+			`\(credential_tag=\? AND staking_key=\? AND epoch=\?\)`,
 	)
 	tableScan := regexp.MustCompile(`(?m)^SCAN (rao|o)\b`)
 	var ordered, unaccounted int

@@ -1,53 +1,20 @@
--- Stake-reward credits: one row per reward_account_output row applied to an
--- account at a boundary slot, keyed so that a round's credits are inserted in
--- account order. output_id is opaque (negative for rows migrated from
--- account_reward_delta).
-CREATE TABLE IF NOT EXISTS `reward_credit` (
-    `boundary_slot` integer NOT NULL,
-    `account_id` integer NOT NULL,
-    `output_id` integer NOT NULL,
-    `amount` text NOT NULL,
-    PRIMARY KEY (`boundary_slot`, `account_id`, `output_id`)
-) WITHOUT ROWID;
-
--- The boundary slots that hold reward_credit rows, so a reader enumerates
--- rounds without scanning the credits.
-CREATE TABLE IF NOT EXISTS `reward_credit_slot` (
-    `boundary_slot` integer PRIMARY KEY NOT NULL
-) WITHOUT ROWID;
-
-CREATE TABLE IF NOT EXISTS `reward_source` (
-    `id` integer PRIMARY KEY AUTOINCREMENT,
-    `hash` blob NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS `idx_reward_source_hash`
-    ON `reward_source`(`hash`);
-
-CREATE TABLE IF NOT EXISTS `reward_event_credit` (
-    `id` integer PRIMARY KEY AUTOINCREMENT,
-    `source_id` integer NOT NULL,
-    `account_id` integer NOT NULL,
-    `slot` integer NOT NULL,
-    `amount` text NOT NULL,
-    `post_snapshot` numeric NOT NULL DEFAULT false,
-    `after_withdrawal` numeric NOT NULL DEFAULT false
-);
-CREATE UNIQUE INDEX IF NOT EXISTS `idx_reward_event_credit_source`
-    ON `reward_event_credit`(`source_id`, `account_id`, `slot`);
-CREATE INDEX IF NOT EXISTS `idx_reward_event_credit_slot`
-    ON `reward_event_credit`(`slot`, `account_id`);
-CREATE INDEX IF NOT EXISTS `idx_reward_event_credit_account`
-    ON `reward_event_credit`(`account_id`, `slot`);
-
-CREATE TABLE IF NOT EXISTS `reward_withdrawal` (
-    `tx_id` integer NOT NULL,
-    `account_id` integer NOT NULL,
-    `slot` integer NOT NULL,
-    `amount` text NOT NULL,
-    `previous_reward` text NOT NULL,
-    PRIMARY KEY (`tx_id`, `account_id`)
-) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS `idx_reward_withdrawal_account_slot`
-    ON `reward_withdrawal`(`account_id`, `slot`);
-CREATE INDEX IF NOT EXISTS `idx_reward_withdrawal_slot`
-    ON `reward_withdrawal`(`slot`);
+-- Replace the credential-leading and epoch-leading reward_account_output
+-- indexes with one credential index and a pool-ordered unique index.
+-- The credential index serves every per-credential read; spendable, guarded
+-- and folded stay out of the keys so a fold or a flag change moves no
+-- credential-index entry. The unique index leads with (epoch, pool) so the
+-- chunked precompute, which writes one pool at a time in pool order, appends
+-- to it. boundary_slot has no reader.
+CREATE INDEX IF NOT EXISTS `idx_reward_account_output_credential_epoch`
+    ON `reward_account_output`
+       (`credential_tag`, `staking_key`, `epoch`, `pool_key_hash`,
+        `reward_type`);
+CREATE UNIQUE INDEX IF NOT EXISTS `idx_reward_account_output_epoch_pool_cred_type`
+    ON `reward_account_output`
+       (`epoch`, `pool_key_hash`, `credential_tag`, `staking_key`,
+        `reward_type`);
+DROP INDEX IF EXISTS `idx_reward_account_output_credential_pending`;
+DROP INDEX IF EXISTS `idx_reward_account_output_credential_spendable_guarded`;
+DROP INDEX IF EXISTS `idx_reward_account_output_credential_spendable`;
+DROP INDEX IF EXISTS `idx_reward_account_output_epoch_cred_pool_type`;
+DROP INDEX IF EXISTS `idx_reward_account_output_boundary_slot`;

@@ -71,6 +71,21 @@ func TestValidateDefaultsPass(t *testing.T) {
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
+func TestValidateTrustedNtCIdleTimeout(t *testing.T) {
+	cfg := validTestConfig()
+	assert.Zero(t, cfg.TrustedNtCIdleTimeout)
+
+	cfg.TrustedNtCIdleTimeout = 2 * time.Minute
+	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+
+	cfg.TrustedNtCIdleTimeout = -time.Second
+	assert.ErrorContains(
+		t,
+		cfg.validate(cfg.RunMode, minUnprivilegedPort),
+		"invalid trustedNtCIdleTimeout",
+	)
+}
+
 func TestValidateDevModeForcesStandardProductionAndAPIStorage(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.RunMode = RunModeDev
@@ -2225,6 +2240,20 @@ func TestValidateDMQBounds(t *testing.T) {
 				c.DMQ.MessageTTL = uint(maxTTL + 1)
 			},
 			wantErr: "dmq.messageTtl must be at most",
+		},
+		{
+			name: "pool message interval turned off",
+			mutate: func(c *Config) {
+				c.DMQ.MinPoolMessageInterval = 0
+			},
+		},
+		{
+			name: "pool message interval overflowing a duration",
+			wide: true,
+			mutate: func(c *Config) {
+				c.DMQ.MinPoolMessageInterval = uint(maxTTL + 1)
+			},
+			wantErr: "dmq.minPoolMessageInterval must be at most",
 		},
 		{
 			name: "largest mempool size",

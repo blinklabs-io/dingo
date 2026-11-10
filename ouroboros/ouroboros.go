@@ -451,6 +451,12 @@ type Ouroboros struct {
 	leiosAnnouncementInFlight  map[string]struct{}
 	leiosInvalidAnnouncements  *ratewindow.FixedWindow
 	leiosInvalidAnnouncementMu sync.Mutex
+	// leiosOfferBudget caps how many endorser-block offers one remote host
+	// may send per window, so a peer cannot keep the shared cache and
+	// backfill-source locks busy with arbitrary points.
+	leiosOfferBudget           *ratewindow.FixedWindow
+	leiosOfferOverflowBudget   *ratewindow.FixedWindow
+	leiosOfferBudgetMu         sync.Mutex
 	leiosDeferredMu            sync.Mutex
 	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
 	leiosAnnouncementSizes     map[string]uint64

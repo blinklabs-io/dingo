@@ -1802,8 +1802,13 @@ local restore is accepted on Unix only when the snapshot directory and its fixed
 files are owned by the current user or root, are not group- or other-writable,
 and every lexical and symlink-resolved directory ancestor, and every symlink in
 the path, is owned by the current user or root, with the sticky bit required on
-any ancestor writable by group or other. Windows local restores require the
-trust key. A restore reads the manifest first and, under a trust key, refuses
+any ancestor writable by group or other. The error names the refused ancestor;
+set its sticky bit (`chmod +t`) or remove its group and other write access.
+Group membership is not trusted: setgid does not stop another member of the
+group from renaming entries. A Kubernetes `fsGroup` volume root is group-writable
+and setgid, so the deployer or operator must set the sticky bit on it. The
+kubelet's `fsGroup` permission change keeps a sticky bit that is already set.
+Windows local restores require the trust key. A restore reads the manifest first and, under a trust key, refuses
 one whose tag is missing or wrong (`ErrManifestUnauthenticated`) or that
 declares no digests. `FormatVersion` 2 adds `id`, the snapshot ID (the snapshot
 directory name or cloud prefix segment), inside the authenticated bytes. Under a
@@ -2064,7 +2069,7 @@ which serves the per-round probes (`HasPendingRewardCreditRounds`,
 epoch). `GetPendingRewardCreditRounds` and
 `SetPendingRewardCreditRounds` read and replace the table rows.
 `ClaimUnfoldedRewardCredits` drives from `account` by `id` and probes
-`idx_reward_account_output_epoch_cred_pool_type` per account (on SQLite the
+`idx_reward_account_output_credential_epoch` per account (on SQLite the
 statement names that index so the planner cannot pick the pending-round index,
 which has no credential column), so a claim reads one round's accounts in order
 rather than every spendable, unguarded row.
@@ -2074,7 +2079,7 @@ the rollback slot and clears `folded` on its surviving outputs.
 31 imports any earlier JSON list from
 `models.PendingRewardCreditRoundsKey` into this table.
 
-**Reward journal migration (version 57).** Expand creates `reward_credit`,
+**Reward journal migration (version 58).** Expand creates `reward_credit`,
 `reward_credit_slot`, `reward_source`, `reward_event_credit` and
 `reward_withdrawal`. The backfill then copies `account_reward_delta` in batches
 of 100,000 legacy ids, one transaction per batch, with the cursor
@@ -3115,7 +3120,7 @@ manifest in the staged copy. The full rebuild after the run
 clears the marker. For the same run SQLite raises the write connection's
 `cache_size` to 200 MB and sets `temp_store = MEMORY` (`SetCatchUpPragmas`),
 leaving `synchronous` and the journal mode alone, and `RestoreNormalPragmas`
-puts them back. PostgreSQL and MySQL keep every index and their settings for
+puts them back (`temp_store` returns to the write connection's `MEMORY` default). PostgreSQL and MySQL keep every index and their settings for
 the run: they rebuild the manifest in one transaction, whose locks on the
 rebuilt tables would stall writes after the catch-up hands back to
 Ouroboros.
@@ -3729,7 +3734,7 @@ process the same pointer unless the claim expires before a result is recorded.
 | `reward_pool_input` | `id`, `epoch`, `pool_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `delegated_stake`, `owner_stake`, `cost`, `margin`, `delegator_count`, `blocks_produced`, `total_blocks_in_epoch`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Per-pool metadata captured by epoch rotation. Stake totals are aggregated from the captured `reward_stake_input` credentials, independently of leader-election Mark totals; pool parameters are selected as effective during the ended epoch. Owner stake counts captured key credentials named by the effective pool registration. Block counts are stored on the row at capture time. Pools with missing or invalid registration data are excluded from reward inputs without changing `pool_stake_snapshot` or `epoch_summary`. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward basis for any closed epoch. Logical join to `pool.pool_key_hash`. |
 | `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot`, `(credential_tag, staking_key, epoch)` (migration v47, for per-account stake history) | Per-credential positive stake frozen by either authoritative or fallback reward snapshot capture. Authoritative capture copies from `reward_live_stake` for both gate states, applying the live account-expiration filter inside the exact SNAP-point transaction. A fallback that runs after the transaction tip has passed the snapshot slot reconstructs historical stake as needed. Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
 | `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward result for any closed epoch. |
-| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot`, `folded` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; credential indexes `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)` and `(credential_tag, staking_key, spendable, guarded, epoch, pool_key_hash, reward_type)`; pending index `(spendable, guarded, folded, epoch)`; pending-credit covering index `idx_reward_account_output_credential_pending` `(credential_tag, staking_key, spendable, guarded, folded, epoch, amount)` on SQLite and PostgreSQL (migration 54; MySQL skips it because its prefix indexes on `staking_key` and `amount` cannot cover); indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. `spendable = false` records deregistration; `guarded = true` records a CIP-0163 expiry guard. `folded = true` records that a credited round's row has been written to `account.reward` (see "Credited reward rounds"). Credential reward-history reads require `spendable = true AND guarded = false`, and the guarded-aware index keeps that lookup bounded. |
+| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot`, `folded` | PK `id`; unique `idx_reward_account_output_epoch_pool_cred_type` `(epoch, pool_key_hash, credential_tag, staking_key, reward_type)`; credential index `idx_reward_account_output_credential_epoch` `(credential_tag, staking_key, epoch, pool_key_hash, reward_type)`; pending index `(spendable, guarded, folded, epoch)`; index `captured_slot` (migration 57 replaced the epoch-leading unique, the two credential indexes with `spendable`/`guarded` in the key, the credential covering index of migration 54 and the `boundary_slot` index) | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. `spendable = false` records deregistration; `guarded = true` records a CIP-0163 expiry guard. `folded = true` records that a credited round's row has been written to `account.reward` (see "Credited reward rounds"). Credential reads (reward history, count, pending credits, folds, claims) filter `spendable`, `guarded` and `folded` as boolean expressions on rows found through the credential index; written as equalities they match the pending index's flag prefix, which SQLite prefers and which walks every unfolded row. The flags are in no credential-keyed index key, so a fold or a flag change moves no entry of an index spanning the table's whole history, and the unique index is pool-ordered so the pool-at-a-time precompute appends to it. |
 | `reward_credit_round` | `snapshot_epoch`, `boundary_slot` | PK `snapshot_epoch`; index `boundary_slot` | One row for a reward round applied at an epoch boundary while its per-account credits remain in `reward_account_output`. Bounded relational membership lets balance readers include all pending rounds without generating a growing SQL parameter list. Rollback removes rows by `boundary_slot`; migration 31 imports the previous `sync_state` JSON list. `Database.DeleteRewardStateAfterSlot` removes rows the same way (unfolding any already-folded `reward_account_output` row for the removed round first), and `ledgerstate.ImportLedgerState`'s post-anchor sweep (see the `epoch` row above) calls it at the anchor before any import phase runs, so a round a prior local rollover already registered above the anchor does not block `saveStakeRewardOutputs` from recomputing it after import. |
 
 For Mithril imports, the certified `NewEpochState.SnapShots` Mark/Set/Go
@@ -3942,6 +3947,14 @@ and metadata transaction lets the SQLite WAL snapshot expire between ranges,
 so this finalizer does not hold one snapshot for the full rebuild.
 
 #### Snapshot and Reward-State Retention
+
+Reward outputs are not pruned in API storage mode or with the Koios parity
+observer enabled, because the Blockfrost account reward history and the
+parity comparison read closed epochs, so their credential index spans every
+epoch. The per-epoch write cost of that index is one WAL frame per inserted
+row; `TestRewardAccountOutputWALFrames` measures the frames per b-tree of
+the table for one epoch's precompute, credit, fold, withdrawals and flag
+changes.
 
 Every epoch transition runs `cleanupOldSnapshots`, which prunes to the four
 epochs the Shelley rotation and delayed reward model need: current, current-1,
@@ -4422,6 +4435,16 @@ on an active WAL: a transaction can grow it beyond 64 MiB, and a reader holding
 an older snapshot can prevent reset and leave the file larger. The periodic
 TRUNCATE checkpoint below remains the operation that can reduce an idle WAL to
 zero.
+
+The write connection (not the read pool) also sets `temp_store=MEMORY`
+(`sqliteWritePragmas`). Inside a write transaction, a multi-row
+`INSERT ... RETURNING` keeps a statement journal of the pages it modifies, and
+SQLite moves that journal to an anonymous temp file once it exceeds its
+64 KiB in-memory threshold; with `temp_store=MEMORY` it stays in RAM, bounded
+by the pages one statement touches. Sorter, materialised-subquery and
+index-build temporaries on that connection also stay in RAM. `synchronous` and
+`journal_mode` are unchanged, and `RestoreNormalPragmas` restores
+`temp_store=MEMORY` rather than the SQLite default.
 
 **Periodic forced WAL checkpoint (`checkpointWAL`,
 `database/plugin/metadata/sqlite/shared_sqlstore.go`).** Raising
@@ -5760,7 +5783,7 @@ portably) pushes the lookup rows into a `UNION ALL`-of-literal-selects
 derived table and inner-joins it against `reward_account_output`, rather
 than an OR-chain of five-way `(epoch = ? AND credential_tag = ? AND
 staking_key = ? AND pool_key_hash = ? AND reward_type = ?)` predicates:
-`idx_reward_account_output_epoch_cred_pool_type` exists on exactly these
+`idx_reward_account_output_epoch_pool_cred_type` exists on exactly these
 five columns, but SQLite's query planner cannot reliably compile a long
 OR-chain over it into per-term index seeks, and this runs on every epoch
 boundary for every account earning a reward. The derived-table join, by
@@ -6408,11 +6431,12 @@ count and positive reward-input set can be derived in one pass. A nonzero
 `expiryEpoch` applies the current `account.expiration_epoch` filter. Each row's
 stake is `total_stake` plus the credential's unfolded credits in credited
 rounds. A read of 64 or more pools totals those credits once per call, in one
-grouped read of every credential's unfolded outputs
-(`pendingRewardCreditTotals`) served by
-`idx_reward_account_output_credential_pending` alone, and adds the totals in
-Go; a smaller read, such as the retiring-pool capture, keeps a per-row
-subquery that visits only its own delegators' outputs. With no caller
+read of every credited round's unfolded outputs
+(`pendingRewardCreditTotals`) through the four columns of
+`idx_reward_account_output_pending_round`, in row-id order, totalled per
+credential in Go; a smaller read, such as the retiring-pool capture, keeps a
+per-row subquery driven from the credited rounds, each probing
+`idx_reward_account_output_credential_epoch` on `(credential, epoch)`. With no caller
 transaction the call opens a read transaction, so the totals and the pool reads
 share one snapshot and a fold committing between them cannot count a credit
 twice. The

@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const rewardJournalVersion = 57
+const rewardJournalVersion = 58
 
 // execAll runs statements and fails the test on the first error.
 func execAll(t *testing.T, db *sql.DB, statements ...string) {

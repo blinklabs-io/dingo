@@ -15,9 +15,12 @@
 package dingo
 
 import (
+	"context"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // midnightIndexerActive is shared by initial startup and live reconstruction.
@@ -54,6 +57,12 @@ func (n *Node) midnightIndexerConfig() midnightindexer.Config {
 				return 0, err
 			}
 			return epoch.EpochId, nil
+		},
+		BlockTransactions: func(
+			ctx context.Context,
+			block models.Block,
+		) ([]lcommon.Transaction, error) {
+			return n.ledgerState.BlockTransactions(ctx, block)
 		},
 		BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
 			return database.ForEachBlockInRangeDB(
