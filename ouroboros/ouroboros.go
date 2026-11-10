@@ -274,6 +274,10 @@ type Ouroboros struct {
 	// ledger can forecast its slot.
 	chainsyncObserverHorizonWait func(context.Context, ledger.ChainsyncEvent) error
 	chainsyncHeaderSlotTime      func(uint64) (time.Time, error)
+	// decodeLimits reports the bounds applied to peer bytes before the ledger
+	// decoder runs. Nil derives them from ledgerState. Tests override it
+	// without a LedgerState.
+	decodeLimits func(txType uint) peerDecodeLimits
 	// chainsyncLocalTipBlock returns the local tip's block number and the
 	// security parameter k. Tests override it without a LedgerState.
 	chainsyncLocalTipBlock func() (tipBlock, k uint64)
