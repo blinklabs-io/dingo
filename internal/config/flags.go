@@ -927,7 +927,7 @@ var flagSpecs = []flagSpec{
 		"ShelleyKESAgentAddress",
 		"shelley-kes-agent-address",
 		"",
-		"host:port of a bursa KES agent's remote sign listener (mutual TLS 1.3); implies sign mode",
+		"host:port of a bursa KES agent's remote sign listener; implies sign mode. TLS 1.3 by default (mutual TLS only when a client certificate is set); --shelley-kes-agent-plaintext selects plain TCP",
 	),
 	stringFlag(
 		"ShelleyKESAgentClientCertFile",
