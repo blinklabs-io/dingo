@@ -24,12 +24,12 @@ import (
 )
 
 const (
-	walWorkloadCreds     = 1500
-	walWorkloadPools     = 30
-	walWorkloadBlocks    = 30
-	walWorkloadPerBlock  = 20
-	walWorkloadBoundary1 = 100
-	walWorkloadBoundary2 = 101
+	stakeWALCreds     = 1500
+	stakeWALPools     = 30
+	stakeWALBlocks    = 30
+	stakeWALPerBlock  = 20
+	stakeWALBoundary1 = 100
+	stakeWALBoundary2 = 101
 )
 
 type stakeWALResult struct {
@@ -43,14 +43,14 @@ type stakeWALResult struct {
 func runStakeWALWorkload(t *testing.T) stakeWALResult {
 	t.Helper()
 	store, path := newWALSQLiteStore(t)
-	w := newStakeWorkload(t, store, walWorkloadCreds, walWorkloadPools)
+	w := newStakeWorkload(t, store, stakeWALCreds, stakeWALPools)
 	w.register(50)
-	w.epochBoundary(walWorkloadBoundary1)
+	w.epochBoundary(stakeWALBoundary1)
 
 	syncStart := walFrameCount(t, path)
-	redelegations := w.syncBlocks(walWorkloadBlocks, walWorkloadPerBlock)
+	redelegations := w.syncBlocks(stakeWALBlocks, stakeWALPerBlock)
 	syncEnd := walFrameCount(t, path)
-	w.epochBoundary(walWorkloadBoundary2)
+	w.epochBoundary(stakeWALBoundary2)
 	boundaryEnd := walFrameCount(t, path)
 
 	return stakeWALResult{
@@ -123,7 +123,7 @@ const stakeWorkloadDigest = "7a52891a744ae243a0c70c7e992e23da3cec1a5fe9609e54c80
 func TestStakeBookkeepingWALFrames(t *testing.T) {
 	t.Parallel()
 	res := runStakeWALWorkload(t)
-	t.Log("\n" + formatFrames("sync", res.syncFrames, walWorkloadBlocks))
+	t.Log("\n" + formatFrames("sync", res.syncFrames, stakeWALBlocks))
 	t.Log("\n" + formatFrames("boundary", res.boundaryFrames, 0))
 
 	require.Equal(t, stakeWorkloadDigest, res.digest,
@@ -157,7 +157,6 @@ func TestStakeBookkeepingWALFrames(t *testing.T) {
 		"idx_account_reward_delta_tx_hash",
 		"idx_account_reward_delta_withdrawal",
 		"idx_account_drep",
-		"idx_reward_account_output_credential_spendable",
 	}
 	for _, name := range droppedIndexes {
 		require.Zero(t, res.syncFrames[name], "%s took sync frames", name)

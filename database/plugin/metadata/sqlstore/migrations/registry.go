@@ -96,6 +96,7 @@ const (
 	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
 	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
 	blockNonceSlotIndexSchemaRelease                    = "block-nonce-slot-leading-index"
+	rewardOutputIndexReshapeSchemaRelease               = "reward-account-output-index-reshape"
 	stakeBookkeepingIndexDropSchemaRelease              = "stake-bookkeeping-index-drop"
 )
 
@@ -273,7 +274,8 @@ var schemaVersions = []struct {
 	},
 	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
 	{Version: 56, Name: blockNonceSlotIndexSchemaRelease, Dir: "v56"},
-	{Version: 57, Name: stakeBookkeepingIndexDropSchemaRelease, Dir: "v57"},
+	{Version: 57, Name: rewardOutputIndexReshapeSchemaRelease, Dir: "v57"},
+	{Version: 58, Name: stakeBookkeepingIndexDropSchemaRelease, Dir: "v58"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -2003,11 +2005,10 @@ func translateSchemaSQLInSchema(
 				"DROP INDEX `idx_asset_fingerprint` ON `asset`",
 			)
 			for index, table := range map[string]string{
-				"idx_reward_live_stake_updated_slot":             "reward_live_stake",
-				"idx_account_reward_delta_tx_hash":               "account_reward_delta",
-				"idx_account_reward_delta_withdrawal":            "account_reward_delta",
-				"idx_account_drep":                               "account",
-				"idx_reward_account_output_credential_spendable": "reward_account_output",
+				"idx_reward_live_stake_updated_slot":  "reward_live_stake",
+				"idx_account_reward_delta_tx_hash":    "account_reward_delta",
+				"idx_account_reward_delta_withdrawal": "account_reward_delta",
+				"idx_account_drep":                    "account",
 			} {
 				value = strings.ReplaceAll(
 					value,

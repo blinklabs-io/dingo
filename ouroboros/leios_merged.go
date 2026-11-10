@@ -340,6 +340,12 @@ type leiosEndorserBlockData struct {
 	// the shared bearer. Keeping one bounded source lets historical backfill
 	// try a peer known to hold the requested point first.
 	relayOfferSource string
+	// intentOwner is the connection whose offer created an intent-only entry.
+	// It bounds how many such entries one connection may hold and, unlike
+	// relayOfferSource, is never transferred by a later offer of the same
+	// point, so re-offering another peer's entry cannot change whose cap it
+	// counts against or let it be evicted on that peer's behalf.
+	intentOwner string
 	// seq is a monotonic insertion sequence assigned while leiosMu is held
 	// (see Ouroboros.leiosEndorserBlockSeq), used to order eviction instead of
 	// insertedAt. insertedAt is a wall-clock timestamp captured before the
@@ -922,6 +928,7 @@ func (o *Ouroboros) markLeiosEndorserBlockRelayOfferFrom(
 	o.pruneLeiosEndorserBlockCacheLocked(now)
 	current := o.leiosEndorserBlocks[key]
 	if current == nil {
+		o.evictLeiosIntentOnlyOverflowLocked(connectionID)
 		o.leiosEndorserBlockSeq++
 		o.leiosEndorserBlocks[key] = &leiosEndorserBlockData{
 			point: ocommon.Point{
@@ -932,6 +939,7 @@ func (o *Ouroboros) markLeiosEndorserBlockRelayOfferFrom(
 			insertedAt:          now,
 			relayOfferRequested: true,
 			relayOfferSource:    connectionID,
+			intentOwner:         connectionID,
 			seq:                 o.leiosEndorserBlockSeq,
 		}
 		o.pruneLeiosEndorserBlockCacheLocked(now)
@@ -950,6 +958,41 @@ func (o *Ouroboros) markLeiosEndorserBlockRelayOfferFrom(
 	}
 	o.leiosMu.Unlock()
 	o.enqueueLeiosRelayOffers(point, &updated)
+}
+
+// leiosMaxIntentOnlyPerConn bounds the intent-only cache entries one
+// connection may hold. Past it the connection replaces its own oldest, so
+// offers for arbitrary points cannot displace other peers' entries.
+const leiosMaxIntentOnlyPerConn = 32
+
+// evictLeiosIntentOnlyOverflowLocked drops connectionID's oldest intent-only
+// entries until it holds fewer than leiosMaxIntentOnlyPerConn. Callers hold
+// leiosMu. An empty connectionID (a local offer) is not limited.
+func (o *Ouroboros) evictLeiosIntentOnlyOverflowLocked(connectionID string) {
+	if connectionID == "" {
+		return
+	}
+	for {
+		count := 0
+		var oldest *leiosEndorserBlockData
+		for _, data := range o.leiosEndorserBlocks {
+			if data == nil || data.hasManifest() ||
+				data.intentOwner != connectionID {
+				continue
+			}
+			if oldest == nil || data.seq < oldest.seq {
+				oldest = data
+			}
+			count++
+		}
+		if count < leiosMaxIntentOnlyPerConn {
+			return
+		}
+		if oldest == nil {
+			return
+		}
+		o.deleteLeiosEndorserBlockDataLocked(oldest)
+	}
 }
 
 func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
@@ -1036,7 +1079,7 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 }
 
 // ValidateLeiosEndorserBlockForHeader waits through the configured diffusion
-// window for the exact endorser block announced by header, then validates it
+// window for an unexpired endorser-block announcement, then validates it
 // synchronously while basis is still the applied ledger tip. The ledger's
 // apply boundary passes ledger.LeiosEndorserBlockBasisHash, once the
 // announcing block is the tip and before the block that may certify it
@@ -1044,6 +1087,8 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 // ledger.LeiosValidationParentHash (see
 // ledger.LedgerState.ValidateLeiosEndorserBlockTransactions). Endorser-block
 // bodies arrive independently on asynchronous Leios fetch workers.
+// Expired missing closures return unavailable without waiting; complete cached
+// closures still undergo semantic validation.
 func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	ctx context.Context,
 	header lcommon.BlockHeader,
@@ -1090,6 +1135,25 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		header.SlotNumber(),
 	); publish != nil {
 		publish()
+	}
+	// Settled announcements are not prefetched. Waiting for their missing
+	// bodies here would delay the certified fetch that follows this callback.
+	// Complete cached closures still take the full semantic-validation path.
+	start, timeErr := o.leiosAnnouncementLedger.SlotToTime(header.SlotNumber())
+	if timeErr == nil && !start.IsZero() &&
+		time.Since(start) > leiosNotifyMaxAnnouncementAge {
+		key := leiosBlockKey(header.SlotNumber(), ebHash.Bytes())
+		o.leiosMu.RLock()
+		complete := o.leiosClosureCompleteLocked(key)
+		o.leiosMu.RUnlock()
+		if !complete {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("wait for Leios endorser closure: %w", err)
+			}
+			return errors.New(
+				"leios endorser closure unavailable for expired announcement",
+			)
+		}
 	}
 	waitCtx := ctx
 	cancel := func() {}

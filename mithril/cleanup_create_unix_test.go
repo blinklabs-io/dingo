@@ -41,6 +41,7 @@ type bootstrapAncestorInfo struct {
 	name string
 	mode fs.FileMode
 	uid  uint32
+	gid  uint32
 }
 
 func (i bootstrapAncestorInfo) Name() string       { return i.name }
@@ -48,7 +49,9 @@ func (i bootstrapAncestorInfo) Size() int64        { return 0 }
 func (i bootstrapAncestorInfo) Mode() fs.FileMode  { return i.mode }
 func (i bootstrapAncestorInfo) ModTime() time.Time { return time.Time{} }
 func (i bootstrapAncestorInfo) IsDir() bool        { return i.mode.IsDir() }
-func (i bootstrapAncestorInfo) Sys() any           { return &syscall.Stat_t{Uid: i.uid} }
+func (i bootstrapAncestorInfo) Sys() any {
+	return &syscall.Stat_t{Uid: i.uid, Gid: i.gid}
+}
 
 func bootstrapAncestorLookup(
 	t *testing.T,
@@ -120,4 +123,35 @@ func TestBootstrapParentAcceptsTrustedStickyAncestor(t *testing.T) {
 		}),
 	)
 	require.NoError(t, err)
+}
+
+// A root-owned setgid directory group-writable by a group the process belongs
+// to is still shared: every other member of that group can rename its
+// entries, and setgid gives none of the sticky bit's protection.
+func TestBootstrapParentRejectsSharedGroupDirectory(t *testing.T) {
+	t.Parallel()
+	const currentUID = 1000
+	//nolint:gosec // Unix kernel GIDs are uint32 values.
+	egid := uint32(os.Getegid())
+	err := validateBootstrapAncestorChain(
+		"/shared/private",
+		currentUID,
+		bootstrapAncestorLookup(t, map[string]bootstrapAncestorInfo{
+			"/": {
+				name: "/", mode: os.ModeDir | 0o755, uid: 0,
+			},
+			"/shared": {
+				name: "shared", mode: os.ModeDir | os.ModeSetgid | 0o770,
+				uid: 0, gid: egid,
+			},
+			"/shared/private": {
+				name: "private", mode: os.ModeDir | 0o700,
+				uid: currentUID, gid: egid,
+			},
+		}),
+	)
+	require.ErrorContains(
+		t, err, `bootstrap parent ancestor "/shared" is writable`,
+	)
+	require.ErrorContains(t, err, "set the sticky bit on it (chmod +t)")
 }

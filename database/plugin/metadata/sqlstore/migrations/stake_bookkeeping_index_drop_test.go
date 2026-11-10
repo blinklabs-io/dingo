@@ -54,24 +54,23 @@ func stakeBookkeepingRowDigest(t *testing.T, db *sql.DB) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// TestStakeBookkeepingIndexDropKeepsRows upgrades a v56 database that holds
-// rows in every table whose indexes v57 drops, and requires the rows to be
-// byte-identical afterwards, the five indexes gone, the indexes that serve
+// TestStakeBookkeepingIndexDropKeepsRows upgrades a v57 database that holds
+// rows in every table whose indexes v58 drops, and requires the rows to be
+// byte-identical afterwards, the four indexes gone, the indexes that serve
 // their readers present, and a replay of the migration to be a no-op.
 func TestStakeBookkeepingIndexDropKeepsRows(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "metadata.sqlite")
-	migrations.SeedMigratedPrefix(t, path, 56)
+	migrations.SeedMigratedPrefix(t, path, 57)
 	db, err := sql.Open("sqlite", "file:"+path+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
 	dropped := map[string]string{
-		"idx_reward_live_stake_updated_slot":             "reward_live_stake",
-		"idx_account_reward_delta_tx_hash":               "account_reward_delta",
-		"idx_account_reward_delta_withdrawal":            "account_reward_delta",
-		"idx_account_drep":                               "account",
-		"idx_reward_account_output_credential_spendable": "reward_account_output",
+		"idx_reward_live_stake_updated_slot":  "reward_live_stake",
+		"idx_account_reward_delta_tx_hash":    "account_reward_delta",
+		"idx_account_reward_delta_withdrawal": "account_reward_delta",
+		"idx_account_drep":                    "account",
 	}
 	kept := []string{
 		"idx_reward_live_stake_cred",
@@ -81,14 +80,14 @@ func TestStakeBookkeepingIndexDropKeepsRows(t *testing.T) {
 		"idx_account_reward_delta_added_slot",
 		"idx_account_drep_active_staking_key",
 		"idx_account_active_pool_staking_key",
-		"idx_reward_account_output_credential_spendable_guarded",
-		"idx_reward_account_output_credential_pending",
+		"idx_reward_account_output_credential_epoch",
+		"idx_reward_account_output_epoch_pool_cred_type",
 		"idx_reward_stake_input_epoch_pool_cred",
 		"idx_reward_stake_input_cred_epoch",
 	}
 	for name := range dropped {
 		_, ok := indexSQL(t, db, name)
-		require.True(t, ok, "v56 must still carry %s", name)
+		require.True(t, ok, "v57 must still carry %s", name)
 	}
 
 	key := func(i int) []byte {
@@ -137,17 +136,17 @@ VALUES (?, ?, ?, 0, '10', 0, 1, 90, 90)`, key(i%5), key(i), i%4)
 
 	for name := range dropped {
 		_, ok := indexSQL(t, db, name)
-		require.False(t, ok, "%s must not survive v57", name)
+		require.False(t, ok, "%s must not survive v58", name)
 	}
 	for _, name := range kept {
 		_, ok := indexSQL(t, db, name)
-		require.True(t, ok, "%s must survive v57", name)
+		require.True(t, ok, "%s must survive v58", name)
 	}
 	require.Equal(t, before, stakeBookkeepingRowDigest(t, db),
-		"v57 changed stored rows")
+		"v58 changed stored rows")
 
 	_, err = db.Exec(`UPDATE schema_migrations
-SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = 57`)
+SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = 58`)
 	require.NoError(t, err)
 	run()
 	require.Equal(t, before, stakeBookkeepingRowDigest(t, db))

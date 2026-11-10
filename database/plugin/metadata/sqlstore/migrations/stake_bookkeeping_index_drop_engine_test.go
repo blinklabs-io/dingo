@@ -32,7 +32,6 @@ var stakeBookkeepingDroppedIndexes = []string{
 	"idx_account_reward_delta_tx_hash",
 	"idx_account_reward_delta_withdrawal",
 	"idx_account_drep",
-	"idx_reward_account_output_credential_spendable",
 }
 
 var stakeBookkeepingKeptIndexes = []string{
@@ -43,25 +42,19 @@ var stakeBookkeepingKeptIndexes = []string{
 	"idx_account_reward_delta_added_slot",
 	"idx_account_drep_active_staking_key",
 	"idx_account_active_pool_staking_key",
-	"idx_reward_account_output_credential_spendable_guarded",
-	"idx_reward_account_output_credential_pending",
+	"idx_reward_account_output_credential_epoch",
+	"idx_reward_account_output_epoch_pool_cred_type",
 	"idx_reward_stake_input_epoch_pool_cred",
 	"idx_reward_stake_input_cred_epoch",
 }
 
-// mysqlSkippedIndexes are kept indexes migration 54 does not create on MySQL:
-// its prefix indexes on staking_key and amount cannot cover.
-var mysqlSkippedIndexes = map[string]bool{
-	"idx_reward_account_output_credential_pending": true,
-}
-
 // TestStakeBookkeepingIndexDropAppliesOnPostgres runs every migration against
-// a real server, requires v57's drops to have taken effect and its kept
-// indexes to remain, then replays v57's expand phase.
+// a real server, requires v58's drops to have taken effect and its kept
+// indexes to remain, then replays v58's expand phase.
 func TestStakeBookkeepingIndexDropAppliesOnPostgres(t *testing.T) {
 	t.Parallel()
 	dsn := postgresEngineTestDSN(t)
-	schema := "dingo_v56_replay"
+	schema := "dingo_v58_replay"
 	admin, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	defer admin.Close()
@@ -93,7 +86,7 @@ func TestStakeBookkeepingIndexDropAppliesOnPostgres(t *testing.T) {
 				schema,
 				name,
 			).Scan(&count))
-			require.Zero(t, count, "%s must not survive v57", name)
+			require.Zero(t, count, "%s must not survive v58", name)
 		}
 		for _, name := range stakeBookkeepingKeptIndexes {
 			var count int
@@ -102,13 +95,13 @@ func TestStakeBookkeepingIndexDropAppliesOnPostgres(t *testing.T) {
 				schema,
 				name,
 			).Scan(&count))
-			require.Equal(t, 1, count, "%s must survive v57", name)
+			require.Equal(t, 1, count, "%s must survive v58", name)
 		}
 	}
 	require.NoError(t, runner.Run(context.Background()))
 	check()
 	_, err = db.Exec(`UPDATE schema_migrations
-SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = $1`, 57)
+SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = $1`, 58)
 	require.NoError(t, err)
 	require.NoError(t, runner.Run(context.Background()))
 	check()
@@ -117,11 +110,11 @@ SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = $1`, 57)
 // TestStakeBookkeepingIndexDropAppliesOnMySQL is the MySQL half; its drops use
 // the translated "DROP INDEX <name> ON <table>" form, which is not
 // self-idempotent, so the replay exercises the runner's already-dropped guard
-// for these five names.
+// for these four names.
 func TestStakeBookkeepingIndexDropAppliesOnMySQL(t *testing.T) {
 	t.Parallel()
 	rootDSN := mysqlEngineTestRootDSN(t)
-	database := "dingo_v56_replay"
+	database := "dingo_v58_replay"
 	admin, err := sql.Open("mysql", rootDSN)
 	require.NoError(t, err)
 	defer admin.Close()
@@ -155,19 +148,16 @@ WHERE table_schema = ? AND index_name = ?`, database, name).Scan(&n))
 	}
 	check := func() {
 		for _, name := range stakeBookkeepingDroppedIndexes {
-			require.Zero(t, count(name), "%s must not survive v57", name)
+			require.Zero(t, count(name), "%s must not survive v58", name)
 		}
 		for _, name := range stakeBookkeepingKeptIndexes {
-			if mysqlSkippedIndexes[name] {
-				continue
-			}
-			require.NotZero(t, count(name), "%s must survive v57", name)
+			require.NotZero(t, count(name), "%s must survive v58", name)
 		}
 	}
 	require.NoError(t, runner.Run(context.Background()))
 	check()
 	_, err = db.Exec(`UPDATE schema_migrations
-SET phase = 'expand', dirty = 1, completed_at = NULL WHERE version = ?`, 57)
+SET phase = 'expand', dirty = 1, completed_at = NULL WHERE version = ?`, 58)
 	require.NoError(t, err)
 	require.NoError(t, runner.Run(context.Background()))
 	check()
