@@ -442,15 +442,21 @@ func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 		blockNumber = tip.BlockNumber
 		exactRequest = false
 	}
-	if blockNumber > math.MaxUint64-database.BlockInitialIndex {
-		return nil, !lower, nil
-	}
-	idx := blockNumber + database.BlockInitialIndex
 
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
-	block, err := db.BlockByIndex(idx, txn)
+	if len(tip.Point.Hash) == 0 {
+		return nil, false, nil
+	}
+	tipID, err := database.BlockIDByPointMetadataTxn(txn, tip.Point)
+	if err != nil {
+		return nil, false, fmt.Errorf("resolve block range tip: %w", err)
+	}
+	bound := database.BlockNumberBound{
+		HighestID: tipID, HighestNumber: tip.BlockNumber, Resolved: true,
+	}
+	block, err := database.BlockNumberBoundaryTxn(ctx, txn, blockNumber, bound, lower)
 	if cancelErr := ctx.Err(); cancelErr != nil {
 		return nil, false, cancelErr
 	}
@@ -460,7 +466,7 @@ func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 		if !lower {
 			txIndex = math.MaxUint32
 		}
-		if pos.Index != nil && exactRequest {
+		if pos.Index != nil && exactRequest && block.Number == blockNumber {
 			txIndex = *pos.Index
 		}
 		return &models.AddressTransactionPosition{
@@ -468,31 +474,7 @@ func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 			TxIndex: txIndex,
 		}, true, nil
 	case errors.Is(err, models.ErrBlockNotFound):
-		if !lower {
-			prev, prevErr := db.BlockAtOrBeforeIndex(ctx, idx, txn)
-			if errors.Is(prevErr, models.ErrBlockNotFound) {
-				return nil, false, nil
-			}
-			if prevErr != nil {
-				return nil, false, fmt.Errorf("resolve block at or before %d: %w", pos.Block, prevErr)
-			}
-			return &models.AddressTransactionPosition{Slot: prev.Slot, TxIndex: math.MaxUint32}, true, nil
-		}
-		next, err := db.BlockAtOrAfterIndex(idx, txn)
-		if err == nil {
-			return &models.AddressTransactionPosition{
-				Slot:    next.Slot,
-				TxIndex: 0,
-			}, true, nil
-		}
-		if errors.Is(err, models.ErrBlockNotFound) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf(
-			"resolve next block at or after %d: %w",
-			pos.Block,
-			err,
-		)
+		return nil, false, nil
 	default:
 		return nil, false, fmt.Errorf(
 			"resolve block %d: %w",
