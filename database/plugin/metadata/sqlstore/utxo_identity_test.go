@@ -216,6 +216,116 @@ func TestImportThenApplyKeepsOneRowPerOutput(t *testing.T) {
 	require.Equal(t, 1, rows, "applying must not add a second identity row")
 }
 
+// TestImportedProducerOverlayFallsBackAtEveryIndex applies, in a trusted
+// batch, the producer of an output an import stored, both at an index the
+// producer also writes and at one it does not. The producer's identity row
+// already exists, so the overlay reports a conflict and writes nothing; the
+// per-row path the ledger then takes reuses that identity, keeps the
+// imported row at a shared index and adds the others beside it.
+func TestImportedProducerOverlayFallsBackAtEveryIndex(t *testing.T) {
+	t.Parallel()
+	for name, importedIdx := range map[string]uint32{
+		"shared_index": 1, "other_index": 5,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := newMigratedSQLiteStore(t)
+			producer := bytes32(0x91)
+			require.NoError(t, store.ImportUtxos([]models.Utxo{{
+				TxId: producer, OutputIdx: importedIdx,
+				Amount: types.Uint64(3_000_000),
+			}}, nil))
+			var importedRow, identity int64
+			require.NoError(t, store.writeDB.QueryRow(
+				`SELECT u.id, u.tx_id FROM utxo AS u
+				 JOIN "transaction" AS t ON t.id = u.tx_id
+				 WHERE t.hash = ? AND u.output_idx = ?`,
+				producer, importedIdx,
+			).Scan(&importedRow, &identity))
+
+			tx := mockledger.NewTransactionBuilder()
+			tx.WithId(producer)
+			tx.WithInputs(producerTestInput(t, bytes32(0x90), 0))
+			tx.WithOutputs(
+				producerTestOutput(t, 2_000_000),
+				producerTestOutput(t, 3_000_000),
+			)
+			tx.WithValid(true)
+			point := ocommon.Point{Slot: 7, Hash: producer}
+			apply := func(overlay bool) error {
+				txn := store.Transaction(context.Background())
+				defer func() { _ = txn.Rollback() }()
+				acc := store.NewBatchAccumulator()
+				if overlay {
+					enabled, err := store.EnableBatchUtxoOverlay(
+						acc, txn, []models.UtxoId{
+							{Hash: bytes32(0x90), Idx: 0},
+						}, nil,
+					)
+					require.NoError(t, err)
+					require.True(t, enabled)
+				}
+				if err := store.SetTransactionBatched(
+					tx, point, 0, nil, true, acc, txn, 0,
+				); err != nil {
+					return err
+				}
+				if err := store.FlushBatchStakeDeltas(acc, txn); err != nil {
+					return err
+				}
+				if err := store.FlushBatch(acc, txn); err != nil {
+					return err
+				}
+				return txn.Commit()
+			}
+			require.ErrorIs(
+				t, apply(true), types.ErrBatchUtxoOverlayConflict,
+			)
+			var count int
+			require.NoError(t, store.writeDB.QueryRow(
+				"SELECT COUNT(*) FROM applied_transaction",
+			).Scan(&count))
+			require.Zero(t, count, "the failed overlay batch was written")
+
+			require.NoError(t, apply(false))
+			want := map[uint32]string{0: "2000000", 1: "3000000"}
+			if importedIdx != 1 {
+				want[importedIdx] = "3000000"
+			}
+			rows, err := store.writeDB.Query(
+				`SELECT id, tx_id, output_idx, amount FROM utxo
+				 WHERE deleted_slot = 0 ORDER BY output_idx`,
+			)
+			require.NoError(t, err)
+			defer rows.Close()
+			got := map[uint32]string{}
+			for rows.Next() {
+				var id, txID int64
+				var idx uint32
+				var amount string
+				require.NoError(t, rows.Scan(&id, &txID, &idx, &amount))
+				require.Equal(t, identity, txID, "output %d", idx)
+				if idx == importedIdx {
+					require.Equal(t, importedRow, id,
+						"the imported row was replaced at %d", idx)
+				}
+				got[idx] = amount
+			}
+			require.NoError(t, rows.Err())
+			require.Equal(t, want, got)
+			require.NoError(t, store.writeDB.QueryRow(
+				`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`, producer,
+			).Scan(&count))
+			require.Equal(t, 1, count, "a second identity row was added")
+			require.NoError(t, store.writeDB.QueryRow(
+				`SELECT COUNT(*) FROM applied_transaction WHERE tx_id = ?`,
+				identity,
+			).Scan(&count))
+			require.Equal(t, 1, count)
+		})
+	}
+}
+
 // TestOutputLookupsDoNotScan pins the plans of the reference lookups the apply
 // path, rollback and the APIs run: each reaches utxo through the producer and
 // imported indexes or the primary key, and reaches transaction through the
