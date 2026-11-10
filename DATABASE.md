@@ -4218,6 +4218,10 @@ are held to a ratchet: the chain measures them from its rollback anchor, the
 highest block index it has held, which it persists in the
 `chain_rollback_high_water` sync-state row before any rollback removes blocks
 and restores on load, so successive rollbacks cannot undercut the cached value.
+An operator truncate removes the blocks above its target and caps the row at the
+target's block index (`Database.LowerRollbackHighWater`) in the transaction that
+truncates metadata, so a restart does not measure rollbacks from blocks that no
+longer exist.
 Local recovery that deliberately descends past K one K-bounded step at a time
 lowers the anchor to the tip first (`Chain.ResetRollbackAnchorToTip`) and so can
 land *before* a value cached earlier. `DeleteCertificatesAfterSlot` therefore

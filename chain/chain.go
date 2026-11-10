@@ -52,7 +52,7 @@ const (
 	// block index the persistent chain held before its most recent
 	// rollback. The in-memory anchor is rebuilt from it on load; without it a
 	// restart would measure the next rollback from the already-lowered tip.
-	rollbackHighWaterSyncKey = "chain_rollback_high_water"
+	rollbackHighWaterSyncKey = database.RollbackHighWaterSyncKey
 )
 
 type Chain struct {

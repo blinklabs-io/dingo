@@ -2919,7 +2919,8 @@ bound and side effects with a live `Chain.Rollback` rather than deleting blocks
 directly: it is rejected outright, without touching any state, when the ancestor
 sits more than the security parameter K behind the chain's rollback anchor (the
 highest block index it has held since the last reset, persisted across
-restarts; an unbounded rollback or `Chain.ResetRollbackAnchorToTip` lowers it),
+restarts; an unbounded rollback, `Chain.ResetRollbackAnchorToTip` or an operator
+truncate lowers it),
 and a rewind it does perform publishes `ChainRollbackEvent`/`ChainForkEvent` and wakes/marks
 chain iterators exactly once — the same rollback and iterator signal NtC clients
 rely on for a live rollback, rather than truncating the chain out from under
