@@ -9712,7 +9712,9 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 	}
 	if err := timePhase(
 		currentEpoch.EpochId+1, "ratify_consume", func() error {
-			return ls.consumePendingRatification(ctx, txn)
+			return ls.consumePendingRatificationWithOptions(
+				ctx, txn, validationOnly,
+			)
 		},
 	); err != nil {
 		return nil, fmt.Errorf("apply pending ratification: %w", err)

@@ -6561,6 +6561,32 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 	bool,
 	error,
 ) {
+	return ls.prepareEraTransitionsForRolloverWithOptions(
+		ctx, txn, snapshotEpoch, snapshotEra, currentPParams,
+		transitionPath, false,
+	)
+}
+
+// prepareEraTransitionsForRolloverWithOptions is
+// prepareEraTransitionsForRollover. validationOnly keeps a tick for
+// transaction validation out of the rollover phase timings, which describe
+// real boundaries.
+func (ls *LedgerState) prepareEraTransitionsForRolloverWithOptions(
+	ctx context.Context,
+	txn *database.Txn,
+	snapshotEpoch models.Epoch,
+	snapshotEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	transitionPath []uint,
+	validationOnly bool,
+) (
+	lcommon.ProtocolParameters,
+	uint,
+	[]*EraTransitionResult,
+	[]uint,
+	bool,
+	error,
+) {
 	if len(transitionPath) == 0 {
 		return currentPParams, snapshotEra.Id, nil, nil, false, nil
 	}
@@ -6585,7 +6611,13 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 				"source-era protocol parameters are nil",
 			)
 		}
-		err = ls.timeRolloverPhase(
+		timePhase := ls.timeRolloverPhase
+		if validationOnly {
+			timePhase = func(_ uint64, _ string, fn func() error) error {
+				return fn()
+			}
+		}
+		err = timePhase(
 			snapshotEpoch.EpochId+1,
 			"pparam_updates",
 			func() error {
@@ -16161,13 +16193,14 @@ func (ls *LedgerState) tickTxValidationSnapshot(
 		)
 	}
 	workingPParams, workingEraID, transitionResults,
-		transitionHardForkMajors, plutusV2CostModelWritten, err := ls.prepareEraTransitionsForRollover(
+		transitionHardForkMajors, plutusV2CostModelWritten, err := ls.prepareEraTransitionsForRolloverWithOptions(
 		ctx,
 		txn,
 		epoch,
 		snapshot.currentEra,
 		snapshot.currentPParams,
 		transitionPath,
+		true,
 	)
 	if err != nil {
 		return err

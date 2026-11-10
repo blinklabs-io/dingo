@@ -208,6 +208,8 @@ func TestTxValidationSessionTicksTwoEraBoundary(t *testing.T) {
 		},
 	})
 	require.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id)
+	ls.metrics.init(prometheus.NewRegistry())
+	phases := testutil.CollectAndCount(ls.metrics.epochRolloverPhaseDuration)
 
 	err := ls.WithTxValidationSessionAtSlot(
 		t.Context(),
@@ -226,6 +228,9 @@ func TestTxValidationSessionTicksTwoEraBoundary(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
+	require.Equal(t, phases, testutil.CollectAndCount(
+		ls.metrics.epochRolloverPhaseDuration,
+	), "the two-era validation tick recorded rollover phase metrics")
 }
 
 // TestValidateBlockReferenceScriptsUsesEnactedProtocolVersion pins that the
