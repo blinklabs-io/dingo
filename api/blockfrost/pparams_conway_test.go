@@ -78,8 +78,8 @@ func TestBlockfrostRedeemerPurposeUsesActiveProtocolMajor(t *testing.T) {
 				major,
 			)
 			require.NoError(t, err)
-			certificateData := purpose.ToPlutusData().(*data.Constr).Fields[1].(*data.Constr)
-			require.Equal(t, tc.want, certificateData.Fields[1])
+			certificateData := purpose.ToPlutusData().(*data.Constr).Fields()[1].(*data.Constr)
+			require.Equal(t, tc.want, certificateData.Fields()[1])
 		})
 	}
 }

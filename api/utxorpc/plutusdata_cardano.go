@@ -91,8 +91,8 @@ func plutusDataToCardanoChecked(
 				v.Tag,
 			)
 		}
-		fields := make([]*cardano.PlutusData, len(v.Fields))
-		for i, f := range v.Fields {
+		fields := make([]*cardano.PlutusData, len(v.Fields()))
+		for i, f := range v.Fields() {
 			var err error
 			fields[i], err = plutusDataToCardanoChecked(f)
 			if err != nil {
@@ -123,8 +123,8 @@ func plutusDataToCardanoChecked(
 		if v == nil {
 			return nil, nil
 		}
-		pairs := make([]*cardano.PlutusDataPair, 0, len(v.Pairs))
-		for _, p := range v.Pairs {
+		pairs := make([]*cardano.PlutusDataPair, 0, len(v.Pairs()))
+		for _, p := range v.Pairs() {
 			key, err := plutusDataToCardanoChecked(p[0])
 			if err != nil {
 				return nil, err
@@ -169,8 +169,8 @@ func plutusDataToCardanoChecked(
 		if v == nil {
 			return nil, nil
 		}
-		items := make([]*cardano.PlutusData, len(v.Items))
-		for i, it := range v.Items {
+		items := make([]*cardano.PlutusData, len(v.Items()))
+		for i, it := range v.Items() {
 			var err error
 			items[i], err = plutusDataToCardanoChecked(it)
 			if err != nil {

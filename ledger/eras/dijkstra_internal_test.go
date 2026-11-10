@@ -239,11 +239,39 @@ func TestValidateTxDijkstraRequiresDeclaredValidityToMatchGuardingExecution(
 	dijkstraPhase1UtxoValidationRules = nil
 	t.Cleanup(func() { dijkstraPhase1UtxoValidationRules = originalPhase1 })
 
+	// A Plutus V1-V3 context cannot carry a script-hash guard, so a V3
+	// guard fails context construction, a phase-1 failure, whatever the
+	// declared validity and the script's outcome.
+	t.Run("Plutus V3", func(t *testing.T) {
+		for _, declaredValid := range []bool{true, false} {
+			for _, scriptFails := range []bool{true, false} {
+				tx := newDijkstraGuardingValidityOutcomeTx(
+					t,
+					declaredValid,
+					lang.LanguageVersionV3,
+					scriptFails,
+					lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+				)
+				err := ValidateTxDijkstra(
+					tx,
+					0,
+					newMockLedgerState(),
+					dijkstraValidityOutcomePParams(t),
+				)
+				var construction lcommon.ScriptContextConstructionError
+				require.ErrorAsf(
+					t, err, &construction,
+					"declared valid %t, script fails %t",
+					declaredValid, scriptFails,
+				)
+			}
+		}
+	})
+
 	for _, scriptVersion := range []struct {
 		name    string
 		version lang.LanguageVersion
 	}{
-		{name: "Plutus V3", version: lang.LanguageVersionV3},
 		{name: "Plutus V4", version: lang.LanguageVersionV4},
 	} {
 		t.Run(scriptVersion.name, func(t *testing.T) {
