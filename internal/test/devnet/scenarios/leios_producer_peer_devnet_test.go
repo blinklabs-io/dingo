@@ -74,7 +74,11 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 	group := observers.Group()
 	producerObservations := newLeiosProducerObservations()
 	producerErrors := make(chan error, len(endpoints))
-	producerMonitors := make([]*devnet.LeiosEndorserBlockOfferMonitor, 0, len(endpoints)-1)
+	producerMonitors := make(
+		[]*devnet.LeiosEndorserBlockOfferMonitor,
+		0,
+		len(endpoints)-1,
+	)
 	for _, endpoint := range endpoints {
 		if endpoint.Role != "producer" {
 			continue
@@ -95,7 +99,11 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 			producerErrors,
 		)
 	}
-	require.NotEmpty(t, producerMonitors, "no producer endpoints are configured")
+	require.NotEmpty(
+		t,
+		producerMonitors,
+		"no producer endpoints are configured",
+	)
 	defer func() {
 		for _, monitor := range producerMonitors {
 			monitor.Stop()
@@ -146,8 +154,10 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 	cancelReady()
 
 	forkSlot := cfg.EpochLength * *cfg.DijkstraHardForkAtEpoch
-	forkCtx, cancelFork := context.WithTimeout(ctx, 3*time.Minute)
-	err = group.Await(forkCtx,
+	// The first post-fork leader is probabilistic; the scenario deadline
+	// bounds both the hard fork and subsequent certification.
+	err = group.Await(
+		ctx,
 		"every node observes Conway before and Dijkstra after the scheduled hard fork",
 		func(snapshots []devnet.ChainSnapshot) bool {
 			for _, snapshot := range snapshots {
@@ -165,15 +175,18 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 				}
 			}
 			return true
-		})
-	cancelFork()
+		},
+	)
 	require.NoError(t, err,
 		"devnet did not cross the configured Conway-to-Dijkstra boundary")
 
 	var announcingHeader devnet.ObservedHeader
 	var certifyingHeader devnet.ObservedHeader
 	var offeringProducer string
-	err = awaitLeiosCanonicalTriple(ctx, group, producerErrors,
+	err = awaitLeiosCanonicalTriple(
+		ctx,
+		group,
+		producerErrors,
 		"relay adopts a certifying ranking block for an offered and voted endorser block",
 		func(snapshots []devnet.ChainSnapshot) bool {
 			var found bool
@@ -183,7 +196,8 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 					relay.Name,
 				)
 			return found
-		})
+		},
+	)
 	require.NoError(t, err,
 		"relay never adopted a CertRB for an EB offered and voted by producers")
 	require.Positive(t, announcingHeader.LeiosAnnouncementSize,
@@ -198,7 +212,11 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 
 	txOfferCtx, cancelTxOffer := context.WithTimeout(ctx, 2*time.Minute)
 	referenceCurrent := func() bool {
-		return leiosReferenceOnCanonicalChain(group.Snapshots(), relay.Name, certifyingHeader)
+		return leiosReferenceOnCanonicalChain(
+			group.Snapshots(),
+			relay.Name,
+			certifyingHeader,
+		)
 	}
 	transactionOffers := leiosTransactionOfferMatcher{}
 	err = transactionOffers.await(
@@ -269,11 +287,18 @@ func newLeiosProducerObservations() *leiosProducerObservations {
 		offers:     make(map[leiosPointKey]string),
 		offerOrder: make([]leiosPointKey, 0, leiosProducerObservationLimit),
 		votes:      make(map[lcommon.Blake2b256]map[string]struct{}),
-		voteOrder:  make([]lcommon.Blake2b256, 0, leiosProducerObservationLimit),
+		voteOrder: make(
+			[]lcommon.Blake2b256,
+			0,
+			leiosProducerObservationLimit,
+		),
 	}
 }
 
-func (o *leiosProducerObservations) addOffer(source string, point pcommon.Point) {
+func (o *leiosProducerObservations) addOffer(
+	source string,
+	point pcommon.Point,
+) {
 	if len(point.Hash) != lcommon.Blake2b256Size {
 		return
 	}
@@ -330,7 +355,9 @@ func (o *leiosProducerObservations) canonicalCertifiedTriple(
 			announcing := snapshot.Headers[certIndex-1]
 			if !bytes.Equal(certifying.PrevHash, announcing.Hash) ||
 				len(announcing.Hash) != lcommon.Blake2b256Size ||
-				len(announcing.LeiosAnnouncementHash) != lcommon.Blake2b256Size {
+				len(
+					announcing.LeiosAnnouncementHash,
+				) != lcommon.Blake2b256Size {
 				continue
 			}
 			var rbHash lcommon.Blake2b256
@@ -641,7 +668,9 @@ func (m *leiosTransactionOfferMatcher) await(
 		select {
 		case point, ok := <-offers:
 			if !ok {
-				return errors.New("relay LeiosNotify transaction offer stream closed")
+				return errors.New(
+					"relay LeiosNotify transaction offer stream closed",
+				)
 			}
 			key := leiosOfferKey{slot: point.Slot, hash: string(point.Hash)}
 			m.offers[key] = struct{}{}

@@ -300,6 +300,22 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 	"&_pragma=foreign_keys(1)" +
 	"&_pragma=mmap_size(268435456)"
 
+// sqliteWritePragmas is appended to the write pool's DSN only.
+//
+// temp_store(MEMORY) keeps SQLite's statement journals off disk. A multi-row
+// INSERT ... RETURNING inside a write transaction saves every page it
+// modifies to a statement journal so a constraint failure can undo just that
+// statement; the journal spills to an anonymous temp file once it outgrows
+// SQLite's 64 KiB in-memory threshold, which a 32-row UTxO batch spread
+// across the indexes routinely does, and with temp_store=MEMORY the journal is
+// never given a file. The journal is bounded by the pages one statement
+// touches. The same setting keeps sorter, materialised-subquery and
+// index-build temporaries in RAM, so it is applied to the single write
+// connection and not to the read pool, where many concurrent connections
+// could each hold large temporaries. synchronous and journal_mode are not
+// touched, so durability is unchanged.
+const sqliteWritePragmas = "&_pragma=temp_store(MEMORY)"
+
 // checkpointInterval is how often checkpointWAL forces a WAL checkpoint,
 // independent of the commit-triggered wal_autocheckpoint(10000) pragma above.
 //
@@ -541,6 +557,13 @@ func NewSQLStore(
 // that ordering is what excludes a data race with the readers.
 var BeforeOpenDataDir func(dataDir string) error
 
+// LazyHotStatements makes every store this package opens defer preparing its
+// hot statements to first use instead of preparing them in Start. It exists
+// for test binaries that open many short-lived stores; production code never
+// sets it. Like BeforeOpenDataDir it must be assigned only from a test
+// package's init function.
+var LazyHotStatements bool
+
 func openSQLStore(
 	config Config,
 	dependencies metadata.ProviderDependencies,
@@ -637,9 +660,10 @@ func openSQLStoreWithDialect(
 		writeDB, err = sqlstore.OpenDB(
 			"sqlite",
 			fmt.Sprintf(
-				"%s?_txlock=immediate%s",
+				"%s?_txlock=immediate%s%s",
 				databaseURI,
 				sqliteCommonPragmas,
+				sqliteWritePragmas,
 			),
 			"sqlite",
 			dependencies.TracingEnabled,
@@ -697,6 +721,7 @@ func openSQLStoreWithDialect(
 		SQLitePath:          databasePath,
 		// modernc prepares eagerly; runtime probing remains on the active Tx.
 		SQLiteOverlayInsertRows: 2047,
+		LazyHotStatements:       LazyHotStatements,
 		WriteDB:                 writeDB,
 		ReadDB:                  readDB,
 		Dialect:                 dialect,

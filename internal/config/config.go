@@ -955,6 +955,9 @@ type Config struct {
 	MaxNtCConns              int           `yaml:"maxNtCConns"              envconfig:"DINGO_MAX_NTC_CONNS"`
 	MaxNtCConnectionsPerIP   int           `yaml:"maxNtCConnectionsPerIP"   envconfig:"DINGO_MAX_NTC_CONNECTIONS_PER_IP"`
 	MaxTrustedLocalNtCConns  int           `yaml:"maxTrustedLocalNtCConns"  envconfig:"DINGO_MAX_TRUSTED_LOCAL_NTC_CONNS"`
+	// TrustedNtCIdleTimeout closes a trusted local node-to-client connection
+	// that has been idle this long. Zero, the default, means no limit.
+	TrustedNtCIdleTimeout time.Duration `yaml:"trustedNtCIdleTimeout" envconfig:"DINGO_TRUSTED_NTC_IDLE_TIMEOUT"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
