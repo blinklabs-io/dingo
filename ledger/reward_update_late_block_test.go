@@ -51,11 +51,12 @@ func lateBlockRewardNodeConfig(t *testing.T) *cardano.CardanoNodeConfig {
 // applyLateBlockRewardRound applies the newEpoch 4 reward round over the
 // retention fixture, whose ended epoch 3 starts at slot 200, after seeding
 // one block_nonce row per entry of blockSlots, and reports the owner's reward
-// before and after plus the number of pool outputs the round persisted.
+// before and after, the number of pool outputs the round persisted, and how
+// many seeded blocks sit after epochStart + 4k/f of the ended epoch.
 func applyLateBlockRewardRound(
 	t *testing.T,
 	blockSlots []uint64,
-) (before, after uint64, poolOutputs int) {
+) (before, after uint64, poolOutputs int, lateBlocks int) {
 	t.Helper()
 	fixture := seedRetentionReconstructionFixture(t)
 	ls, db := fixture.ls, fixture.db
@@ -67,6 +68,14 @@ func applyLateBlockRewardRound(
 			bytes.Repeat([]byte{byte(0xb0 + i)}, 32), slot, nil, false, nil,
 		))
 	}
+
+	const endedEpochStart, endedEpochLength = uint64(200), uint64(100)
+	late, err := db.GetBlockNoncesInSlotRange(
+		endedEpochStart+lateBlockRewardWindow+1,
+		endedEpochStart+endedEpochLength,
+		nil,
+	)
+	require.NoError(t, err)
 
 	owner, err := db.GetAccountByCredential(
 		context.Background(), 0, fixture.ownerKey, false, nil,
@@ -89,18 +98,21 @@ func applyLateBlockRewardRound(
 		retentionRewardSnapshotEpoch, nil,
 	)
 	require.NoError(t, err)
-	return uint64(owner.Reward), uint64(owner2.Reward), len(outputs)
+	return uint64(owner.Reward), uint64(owner2.Reward), len(outputs), len(late)
 }
 
 // TestRewardUpdateAppliesWithBlockAfterStabilityWindow is the control: the
 // reference applies the reward update when a block lands after
-// epochStart + 4k/f in the ended epoch.
+// epochStart + 4k/f in the ended epoch. It asserts the late block is present
+// in the fixture, but the reward round applies with or without it today, so
+// it only guards against a late-block gate that rejects the present-block case.
 func TestRewardUpdateAppliesWithBlockAfterStabilityWindow(t *testing.T) {
 	t.Parallel()
 	const endedEpochStart = uint64(200)
-	before, after, outputs := applyLateBlockRewardRound(
+	before, after, outputs, lateBlocks := applyLateBlockRewardRound(
 		t, []uint64{endedEpochStart + lateBlockRewardWindow + 10},
 	)
+	require.Equal(t, 1, lateBlocks, "fixture must hold a late-window block")
 	assert.Greater(t, after, before, "owner must be credited")
 	assert.Equal(t, 1, outputs)
 }
@@ -126,9 +138,10 @@ func TestRewardUpdateRequiresLateEpochBlock(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			before, after, outputs := applyLateBlockRewardRound(
+			before, after, outputs, lateBlocks := applyLateBlockRewardRound(
 				t, tt.blockSlots,
 			)
+			require.Zero(t, lateBlocks, "fixture must hold no late-window block")
 			assert.Equal(t, before, after,
 				"no reward may be credited without a late-window block")
 			assert.Zero(t, outputs,
