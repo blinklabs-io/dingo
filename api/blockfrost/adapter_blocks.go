@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -32,7 +33,10 @@ import (
 // up to the tip when forward is set, else the ones that precede it. Page one
 // holds the nearest blocks; within a page heights ascend, as Blockfrost lists
 // them, and a descending order reverses the page. Neighbors are the adjacent
-// indexed entries, so gaps in the internal ID space are skipped.
+// indexed entries, so gaps in the internal ID space are skipped and a Byron
+// epoch boundary block, which shares its parent's height, is a neighbor of its
+// own. Pages count entries, so the height total can fall short of them by the
+// number of boundary blocks on that side.
 func (a *NodeAdapter) neighborBlocks(
 	ctx context.Context,
 	id string,
@@ -72,11 +76,17 @@ func (a *NodeAdapter) neighborBlocks(
 	if !ok {
 		return []models.Block{}, total, nil
 	}
-	// The pages before the requested one are skipped by block number, so a
-	// deep page costs a logarithmic search rather than a walk over every
-	// entry in front of it.
+	// Distinct entries have distinct IDs, so the ID span bounds how many
+	// entries lie on this side of origin, and a page past it is empty.
 	cursor := origin.ID
-	if uint64(offset) >= available { // #nosec G115 -- offset is non-negative
+	span := origin.ID - database.BlockInitialIndex
+	if forward {
+		span = 0
+		if tipID > origin.ID {
+			span = tipID - origin.ID
+		}
+	}
+	if uint64(offset) >= span { // #nosec G115 -- offset is non-negative
 		return []models.Block{}, total, nil
 	}
 	if offset > 0 {
@@ -131,7 +141,9 @@ func (a *NodeAdapter) neighborBlocks(
 	if forward == (params.Order == PaginationOrderDesc) {
 		slices.Reverse(ret)
 	}
-	return ret, total, nil
+	// Blocks sharing a height are listed individually but add nothing to the
+	// height count, so never report fewer than the pages already reached.
+	return ret, max(total, offset+len(ret)), nil
 }
 
 func (a *NodeAdapter) blockInfos(ctx context.Context, blocks []models.Block) ([]BlockInfo, error) {
@@ -480,11 +492,64 @@ func transactionAddressEffects(
 	return outputs, row.Collateral
 }
 
+// isByronBlockType reports whether a block type belongs to the Byron era, the
+// only era whose epoch boundary blocks share their parent's block number.
+func isByronBlockType(blockType uint) bool {
+	return blockType == gledger.BlockTypeByronEbb ||
+		blockType == gledger.BlockTypeByronMain
+}
+
+// lastByronBlock returns the last indexed block of the Byron era at or below
+// highestID. Block types never return to an earlier era as the chain grows, so
+// the Byron blocks form a prefix of the index and a binary search finds its
+// end. False means no Byron block exists there.
+func lastByronBlock(
+	ctx context.Context,
+	db *database.Database,
+	txn *database.Txn,
+	highestID uint64,
+) (models.Block, bool, error) {
+	var (
+		last  models.Block
+		found bool
+	)
+	lo, hi := uint64(database.BlockInitialIndex), highestID
+	for lo <= hi {
+		if err := ctx.Err(); err != nil {
+			return models.Block{}, false, err
+		}
+		mid := lo + (hi-lo)/2
+		block, err := db.BlockAtOrAfterIndex(mid, txn)
+		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
+			return models.Block{}, false, err
+		}
+		if err != nil || block.ID > hi || !isByronBlockType(block.Type) {
+			if mid == 0 {
+				break
+			}
+			hi = mid - 1
+			continue
+		}
+		last, found = block, true
+		if block.ID == math.MaxUint64 {
+			break
+		}
+		lo = block.ID + 1
+	}
+	return last, found, nil
+}
+
 // neighborPageStart returns the index entry that precedes the first block of a
-// page that begins offset block numbers beyond origin, so a walk from it
-// yields that page. False means no block lies there. forward selects the
-// blocks that follow origin; otherwise the ones that precede it. tipID bounds
-// the forward search to the applied chain.
+// page that begins offset entries beyond origin, so a walk from it yields that
+// page. False means no block lies there. forward selects the blocks that
+// follow origin; otherwise the ones that precede it. tipID bounds the forward
+// search to the applied chain.
+//
+// Only Byron epoch boundary blocks share a block number with a neighbor, so
+// past the Byron era an entry is exactly one block number away from the next
+// and the page start is found by block number. Within the Byron era the
+// entries are counted one by one, which costs no more than the Byron entries
+// the page skips.
 func (a *NodeAdapter) neighborPageStart(
 	ctx context.Context,
 	txn *database.Txn,
@@ -493,29 +558,61 @@ func (a *NodeAdapter) neighborPageStart(
 	offset uint64,
 	forward bool,
 ) (uint64, bool, error) {
-	var (
-		target uint64
-		bound  database.BlockNumberBound
-	)
 	if forward {
-		if offset > math.MaxUint64-origin.Number-1 {
-			return 0, false, nil
+		return a.forwardPageStart(ctx, txn, origin, tipID, offset)
+	}
+	return a.backwardPageStart(ctx, txn, origin, offset)
+}
+
+func (a *NodeAdapter) forwardPageStart(
+	ctx context.Context,
+	txn *database.Txn,
+	origin models.Block,
+	tipID uint64,
+	offset uint64,
+) (uint64, bool, error) {
+	db := a.ledgerState.Database()
+	cursor := origin
+	remaining := offset
+	if isByronBlockType(origin.Type) {
+		end, _, err := lastByronBlock(ctx, db, txn, tipID)
+		if err != nil {
+			return 0, false, fmt.Errorf("find end of Byron era: %w", err)
 		}
-		target = origin.Number + 1 + offset
-		bound = database.BlockNumberBound{
-			HighestID: tipID, Resolved: true,
+		cursorID := origin.ID
+		for remaining > 0 && cursorID < end.ID {
+			if err := ctx.Err(); err != nil {
+				return 0, false, err
+			}
+			next, _, err := db.BlockPointAtOrAfterIndex(cursorID+1, txn)
+			if err != nil {
+				if errors.Is(err, models.ErrBlockNotFound) {
+					return 0, false, nil
+				}
+				return 0, false, err
+			}
+			if next > tipID {
+				return 0, false, nil
+			}
+			cursorID = next
+			remaining--
 		}
-	} else {
-		if origin.Number <= offset || origin.ID <= database.BlockInitialIndex {
-			return 0, false, nil
+		if remaining == 0 {
+			return cursorID, true, nil
 		}
-		target = origin.Number - 1 - offset
-		bound = database.BlockNumberBound{
-			HighestID: origin.ID - 1, Resolved: true,
+		if cursorID != origin.ID {
+			cursor, err = db.BlockByIndex(cursorID, txn)
+			if err != nil {
+				return 0, false, err
+			}
 		}
 	}
+	if remaining > math.MaxUint64-cursor.Number-1 {
+		return 0, false, nil
+	}
 	block, err := database.BlockNumberBoundaryTxn(
-		ctx, txn, target, bound, forward,
+		ctx, txn, cursor.Number+1+remaining,
+		database.BlockNumberBound{HighestID: tipID, Resolved: true}, true,
 	)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
@@ -523,11 +620,83 @@ func (a *NodeAdapter) neighborPageStart(
 		}
 		return 0, false, fmt.Errorf("resolve page start: %w", err)
 	}
-	if forward {
-		if block.ID <= origin.ID {
+	if block.ID <= cursor.ID {
+		return 0, false, nil
+	}
+	return block.ID - 1, true, nil
+}
+
+func (a *NodeAdapter) backwardPageStart(
+	ctx context.Context,
+	txn *database.Txn,
+	origin models.Block,
+	offset uint64,
+) (uint64, bool, error) {
+	db := a.ledgerState.Database()
+	if origin.ID <= database.BlockInitialIndex {
+		return 0, false, nil
+	}
+	cursor := origin
+	remaining := offset
+	if !isByronBlockType(origin.Type) {
+		end, hasByron, err := lastByronBlock(ctx, db, txn, origin.ID-1)
+		if err != nil {
+			return 0, false, fmt.Errorf("find end of Byron era: %w", err)
+		}
+		var first models.Block
+		if hasByron {
+			firstID, _, err := db.BlockPointAtOrAfterIndex(end.ID+1, txn)
+			if err != nil {
+				return 0, false, err
+			}
+			first, err = db.BlockByIndex(firstID, txn)
+			if err != nil {
+				return 0, false, err
+			}
+		}
+		// Every block from the first post-Byron one up to origin has its
+		// own number, so that many entries are skipped by number.
+		numeric := origin.Number
+		if hasByron {
+			numeric = origin.Number - first.Number
+		}
+		if remaining < numeric || !hasByron {
+			if origin.Number <= offset {
+				return 0, false, nil
+			}
+			block, err := database.BlockNumberBoundaryTxn(
+				ctx, txn, origin.Number-1-offset,
+				database.BlockNumberBound{
+					HighestID: origin.ID - 1, Resolved: true,
+				}, false,
+			)
+			if err != nil {
+				if errors.Is(err, models.ErrBlockNotFound) {
+					return 0, false, nil
+				}
+				return 0, false, fmt.Errorf("resolve page start: %w", err)
+			}
+			return block.ID + 1, true, nil
+		}
+		cursor = first
+		remaining -= numeric
+	}
+	cursorID := cursor.ID
+	for ; remaining > 0; remaining-- {
+		if err := ctx.Err(); err != nil {
+			return 0, false, err
+		}
+		if cursorID <= database.BlockInitialIndex {
 			return 0, false, nil
 		}
-		return block.ID - 1, true, nil
+		prev, _, err := db.BlockPointAtOrBeforeIndex(ctx, cursorID-1, txn)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return 0, false, nil
+			}
+			return 0, false, err
+		}
+		cursorID = prev
 	}
-	return block.ID + 1, true, nil
+	return cursorID, true, nil
 }

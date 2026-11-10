@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/hex"
 	"math"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -301,6 +303,7 @@ func seedSparseChain(
 			Slot:   uint64(i+1) * 10,
 			Hash:   hash,
 			Cbor:   []byte{0x80},
+			Type:   uint(gledger.BlockTypeConway),
 		}
 		require.NoError(t, db.BlockCreate(block, nil))
 		blocks = append(blocks, block)
@@ -458,4 +461,190 @@ func TestNeighborBlocksDeepPageJumpsByBlockNumber(t *testing.T) {
 	got, calls = run(blocks[1199].Hash, false)
 	require.ElementsMatch(t, []uint64{899, 900, 901, 902, 903}, got)
 	require.Less(t, calls, int64(150), "backward deep page walked the prefix")
+}
+
+type indexedBlock struct {
+	id     uint64
+	number uint64
+	typ    uint
+}
+
+// seedIndexedBlocks stores blocks with explicit IDs, numbers, and types so a
+// chain can carry Byron boundary blocks that share their parent's number.
+func seedIndexedBlocks(
+	t *testing.T,
+	db *database.Database,
+	specs []indexedBlock,
+) []models.Block {
+	t.Helper()
+	blocks := make([]models.Block, 0, len(specs))
+	for i, spec := range specs {
+		hash := fill32(byte(i + 1))
+		hash[0] = byte((i + 1) >> 8)
+		block := models.Block{
+			ID:     spec.id,
+			Number: spec.number,
+			Slot:   uint64(i+1) * 10,
+			Hash:   hash,
+			Cbor:   []byte{0x80},
+			Type:   spec.typ,
+		}
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+	last := blocks[len(blocks)-1]
+	require.NoError(
+		t,
+		db.SetTip(
+			ochainsync.Tip{
+				Point:       ocommon.NewPoint(last.Slot, last.Hash),
+				BlockNumber: last.Number,
+			},
+			nil,
+		),
+	)
+	return blocks
+}
+
+func blockHashesOf(blocks []models.Block) []string {
+	ret := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		ret = append(ret, hex.EncodeToString(block.Hash))
+	}
+	return ret
+}
+
+// assertEveryNeighborPage checks every origin, page size, and page in both
+// directions against the entries in chain order.
+func assertEveryNeighborPage(
+	t *testing.T,
+	adapter *NodeAdapter,
+	blocks []models.Block,
+) {
+	t.Helper()
+	for i, origin := range blocks {
+		hash := hex.EncodeToString(origin.Hash)
+		for _, forward := range []bool{true, false} {
+			var side []models.Block
+			if forward {
+				side = blocks[i+1:]
+			} else {
+				side = make([]models.Block, 0, i)
+				for j := i - 1; j >= 0; j-- {
+					side = append(side, blocks[j])
+				}
+			}
+			for count := 1; count <= 3; count++ {
+				for page := 1; page <= len(blocks)+1; page++ {
+					start := min((page-1)*count, len(side))
+					end := min(page*count, len(side))
+					want := blockHashesOf(side[start:end])
+					if !forward {
+						slices.Reverse(want)
+					}
+					got, _, err := adapter.neighborBlocks(
+						t.Context(),
+						hash,
+						PaginationParams{Count: count, Page: page},
+						forward,
+					)
+					require.NoError(t, err)
+					require.Equal(
+						t, want, blockHashesOf(got),
+						"origin %d forward=%v count=%d page=%d",
+						i, forward, count, page,
+					)
+				}
+			}
+		}
+	}
+}
+
+func TestNeighborBlocksCountEntriesSharingAHeight(t *testing.T) {
+	t.Parallel()
+	const (
+		ebb  = uint(gledger.BlockTypeByronEbb)
+		main = uint(gledger.BlockTypeByronMain)
+	)
+	for name, specs := range map[string][]indexedBlock{
+		"tip after the boundary block": {
+			{1, 1, main}, {2, 1, ebb}, {3, 2, main},
+		},
+		"tip beyond the next height": {
+			{1, 1, main}, {2, 1, ebb}, {3, 2, main}, {4, 3, main},
+		},
+		"boundary blocks at the start": {
+			{1, 0, ebb}, {2, 0, main}, {3, 1, main}, {4, 1, ebb},
+			{5, 2, main}, {6, 3, main},
+		},
+		"sparse IDs": {
+			{2, 0, main}, {9, 1, main}, {10, 1, ebb}, {50, 2, main},
+			{51, 3, main}, {900, 3, ebb}, {901, 4, main},
+		},
+		"byron into later eras": {
+			{1, 0, main}, {2, 1, main}, {3, 1, ebb}, {4, 2, main},
+			{5, 3, uint(gledger.BlockTypeConway)}, {6, 4, uint(gledger.BlockTypeConway)},
+			{7, 5, uint(gledger.BlockTypeConway)}, {8, 6, uint(gledger.BlockTypeConway)},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			adapter, _, db := newDBBackedAdapter(t)
+			blocks := seedIndexedBlocks(t, db, specs)
+			assertEveryNeighborPage(t, adapter, blocks)
+		})
+	}
+}
+
+func TestNeighborBlocksDeepPageAfterBoundaryBlocksStaysBounded(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	specs := []indexedBlock{
+		{1, 0, uint(gledger.BlockTypeByronMain)},
+		{2, 1, uint(gledger.BlockTypeByronMain)},
+		{3, 1, uint(gledger.BlockTypeByronEbb)},
+		{4, 2, uint(gledger.BlockTypeByronMain)},
+	}
+	for i := range 1200 {
+		specs = append(specs, indexedBlock{
+			id:     uint64(10 + i*3),
+			number: uint64(3 + i),
+			typ:    uint(gledger.BlockTypeConway),
+		})
+	}
+	blocks := seedIndexedBlocks(t, db, specs)
+
+	run := func(origin models.Block, forward bool) ([]string, int64) {
+		var calls atomic.Int64
+		got, _, err := adapter.neighborBlocks(
+			errCountingContext{Context: t.Context(), calls: &calls},
+			hex.EncodeToString(origin.Hash),
+			PaginationParams{Count: 5, Page: 60},
+			forward,
+		)
+		require.NoError(t, err)
+		return blockHashesOf(got), calls.Load()
+	}
+
+	// Page 60 skips 295 entries. From the first block the Byron entries
+	// are counted and the rest crossed by number; from the tip the
+	// post-Byron blocks are crossed by number and the Byron ones counted.
+	got, calls := run(blocks[0], true)
+	require.Equal(t, blockHashesOf(blocks[296:301]), got)
+	require.Less(t, calls, int64(150), "forward page walked the prefix")
+
+	got, calls = run(blocks[len(blocks)-1], false)
+	last := len(blocks) - 1
+	require.Equal(t, blockHashesOf(blocks[last-300:last-295]), got)
+	require.Less(t, calls, int64(150), "backward page walked the prefix")
+
+	// A page that reaches back across the Byron entries.
+	pageBack, _, err := adapter.neighborBlocks(
+		t.Context(),
+		hex.EncodeToString(blocks[5].Hash),
+		PaginationParams{Count: 2, Page: 2},
+		false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, blockHashesOf(blocks[1:3]), blockHashesOf(pageBack))
 }
