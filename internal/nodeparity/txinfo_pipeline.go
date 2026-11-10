@@ -79,6 +79,7 @@ type txInfoPipeline struct {
 	seq       uint64
 	partial   []string
 	queue     []*txInfoChunk
+	held      string
 
 	waitCount   int
 	waitElapsed time.Duration
@@ -212,6 +213,22 @@ func (p *txInfoPipeline) apply(utxoRefs UTxOSet) (failed bool, err error) {
 	return false, nil
 }
 
+// hold records that the block keyed key, whose hashes were added, will be
+// delivered again by a resumed session. Its hashes stay queued, and their
+// fetches keep running, so redelivered skips adding them a second time.
+func (p *txInfoPipeline) hold(key string) {
+	p.held = key
+}
+
+// redelivered reports whether key is the block hold recorded, whose hashes
+// are still queued, and forgets it either way: only the block delivered next
+// can be its redelivery.
+func (p *txInfoPipeline) redelivered(key string) bool {
+	held := p.held
+	p.held = ""
+	return held != "" && held == key
+}
+
 // reset discards every queued hash and cancels every fetch, for a
 // reconstruction the caller has replaced.
 func (p *txInfoPipeline) reset() {
@@ -219,6 +236,7 @@ func (p *txInfoPipeline) reset() {
 	p.genCtx, p.cancelGen = context.WithCancel(p.ctx)
 	p.queue = nil
 	p.partial = p.partial[:0]
+	p.held = ""
 }
 
 // close cancels every fetch and waits for them to return.

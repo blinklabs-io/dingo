@@ -804,6 +804,18 @@ func RunFromGenesis(
 			return fmt.Errorf("boundary capture directory: %w", err)
 		}
 		captures = newBoundaryCaptures(options.captureDir)
+		loaded, removed, err := captures.load(startPoint)
+		if err != nil {
+			return fmt.Errorf("boundary capture directory: %w", err)
+		}
+		if loaded > 0 || removed > 0 {
+			logf(
+				"nodeparity: picked up %d boundary capture(s) left by an "+
+					"earlier run; removed %d file(s) for boundaries at or "+
+					"before the start point, superseded or partly written",
+				loaded, removed,
+			)
+		}
 		followerCtx, stopFollower := context.WithCancel(ctx)
 		var followerDone sync.WaitGroup
 		defer func() {
@@ -1201,6 +1213,30 @@ func RunFromGenesis(
 						// see lastPoint's doc comment above.
 						parentPoint := lastPoint
 						lastPoint = point
+						// A boundary block whose capture, held or still
+						// being made, failed before being reported is
+						// delivered again: the capture answers only for this
+						// exact block, and the next block of its epoch would
+						// be checked live, which Dingo refuses as too old.
+						// Registered first, so it runs after the capture is
+						// handed back. This block's hashes stay queued on the
+						// pipeline, whose fetches outlive the session, and the
+						// redelivery does not queue them again, so each is
+						// fetched once.
+						blockKey := fmt.Sprintf("%d/%x", point.Slot, point.Hash)
+						ownPending := false
+						defer func() {
+							if retErr == nil {
+								return
+							}
+							if _, ok := captures.epochAt(point); !ok {
+								return
+							}
+							lastPoint = parentPoint
+							if ownPending {
+								txInfos.hold(blockKey)
+							}
+						}()
 						// Only a block whose callback succeeded counts: a
 						// failed one is delivered again by the resumed
 						// session, which must still see the crossing.
@@ -1267,10 +1303,11 @@ func RunFromGenesis(
 							// rather than in rounds between them: a
 							// round waits on its slowest request, and on
 							// any retry wait, with every other slot idle.
-							txs := block.Transactions()
-							hashes := make([]string, 0, len(txs))
-							for _, tx := range txs {
-								hashes = append(hashes, tx.Hash().String())
+							var hashes []string
+							if !txInfos.redelivered(blockKey) {
+								for _, tx := range block.Transactions() {
+									hashes = append(hashes, tx.Hash().String())
+								}
 							}
 							failed, err := txInfos.add(
 								sessionCtx, utxoRefs, hashes...,
@@ -1280,6 +1317,7 @@ func RunFromGenesis(
 									sessionCtx, point,
 								)
 							}
+							ownPending = true
 							if err != nil {
 								return callbackErr(
 									"flush tx_info at slot %d: %w",
@@ -1348,14 +1386,6 @@ func RunFromGenesis(
 						var capture *boundaryCapture
 						interrupted := func() error {
 							lastEpochInterrupted = true
-							if capture != nil {
-								// A capture answers only for this exact
-								// block, so the resumed session must deliver
-								// it again rather than resume after it.
-								// Applying its transactions a second time
-								// deletes and adds the same entries.
-								lastPoint = parentPoint
-							}
 							err := callbackErr(
 								"%w: epoch %d at slot %d: %w",
 								errEpochChecksInterrupted, epoch,
@@ -1393,7 +1423,13 @@ func RunFromGenesis(
 						result := EpochResult{Epoch: epoch}
 						captureCompared := false
 						if captures != nil {
-							capture = captures.take(epoch, point)
+							var err error
+							capture, err = captures.await(
+								sessionCtx, epoch, point, logf,
+							)
+							if err != nil {
+								return interrupted()
+							}
 						}
 						if capture != nil {
 							// A callback that ends before reporting this
@@ -1403,7 +1439,9 @@ func RunFromGenesis(
 							// for it.
 							defer func() {
 								if !captureCompared {
-									captures.put(capture)
+									if err := captures.handBack(capture); err != nil {
+										logf("nodeparity: %v", err)
+									}
 								}
 							}()
 						}
@@ -1552,15 +1590,17 @@ func RunFromGenesis(
 							result.UTxOAttempted = false
 						}
 						captureCompared = true
-						if capture != nil && capture.utxoPath != "" {
-							_ = os.Remove(capture.utxoPath)
-						}
 						result.UTxOElapsed = time.Since(utxoStart)
 						utxoTaintCause = ""
 
 						result.TxInfoFlushCount, result.TxInfoFlushElapsed = txInfos.takeWaits()
 
 						report(result)
+						// Only once reported: a process that dies first finds
+						// the capture again on restart.
+						if capture != nil {
+							capture.removeFiles()
+						}
 						return nil
 					},
 				),

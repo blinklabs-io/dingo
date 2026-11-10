@@ -2927,8 +2927,11 @@ with `ChainManager.RewindPrimaryChainToPoint`, once
 `ChainManager.SecurityParamConfigured()` reports K is set. That call shares its
 bound and side effects with a live `Chain.Rollback` rather than deleting blocks
 directly: it is rejected outright, without touching any state, when the ancestor
-sits more than the security parameter K behind the chain tip, and a rewind it
-does perform publishes `ChainRollbackEvent`/`ChainForkEvent` and wakes/marks
+sits more than the security parameter K behind the chain's rollback anchor (the
+highest block index it has held since the last reset, persisted across
+restarts; an unbounded rollback, `Chain.ResetRollbackAnchorToTip` or an operator
+truncate lowers it),
+and a rewind it does perform publishes `ChainRollbackEvent`/`ChainForkEvent` and wakes/marks
 chain iterators exactly once — the same rollback and iterator signal NtC clients
 rely on for a live rollback, rather than truncating the chain out from under
 them silently. `reconcileLivePrimaryChainLedgerDivergence` treats that rejection
@@ -4823,8 +4826,9 @@ of validating against another epoch's. The rules follow the reference
 `validateTx`, `validateTxAux` and `updateUTxOTxWitness`: inputs are a list, so a
 repeated input is valid, while balances restrict the UTxO to the input set and
 are bounded Lovelace sums; witness `i` must authorize input `i`, pairing the two
-lists as `zip` does; and a witness's address root is hashed over the canonical
-encoding of the address's decoded attributes.
+lists as `zip` does and ignoring unpaired trailing values from either list; and
+a witness's address root is hashed over the canonical encoding of the address's
+decoded attributes.
 
 Byron output indexes are Word16. The reference `txOutputUTxO` zips a
 transaction's outputs with `[0 ..] :: [Word16]`, so only outputs 0 through
@@ -8898,6 +8902,36 @@ poison. This mirrors the existing `leiosEndorserBlocks` cache's bounded,
 waiter-channel design (see Leios CertRB Serving below), applied to ordinary
 block/header decoding rather than Leios EB closures.
 
+**Oversized rational pre-check.** Peer bytes are decoded before any size or
+body-hash check, and gouroboros builds a tag-30 rational (a pool margin) with
+`big.Rat.SetFrac`, whose cost is quadratic in the size of an oversized numerator
+or denominator. `decodeBlockfetchBlock` and the transaction-submission decoder
+therefore apply the rules the ledger itself enforces, before the decode, with
+limits read from the ledger's current parameters (`peerDecodeLimits`):
+
+- From protocol version 12 the ledger requires each component of a
+  Dijkstra-format value to fit a Word64 as written, so
+  `safedecode.RejectOversizedRationals` refuses a wider one. A Conway-format
+  block or transaction gets no such limit even when the ledger reports version
+  12: a network such as Musashi schedules Dijkstra at epoch 0 yet carries
+  Conway-format blocks early, and the ledger validates those under Conway rules,
+  which accept a wide component that reduces to a valid rational. The scan is
+  linear, copies no payload (except to join the chunks of an
+  indefinite-length tag-24 wrapper), reads the rational through any tag stack,
+  head width or indefinite-length form, and follows nesting up to the decoder's
+  own limit.
+- Below version 12 the ledger bounds the reduced rational, so a component of
+  any width can be valid and the scan applies no limit. A transaction is
+  instead refused from its length when it exceeds the ledger's `MaxTxSize`,
+  which is invalid whatever it holds and which the mempool otherwise checks
+  only after the decode. A block below version 12 has no such raw bound, so a
+  valid-but-wide rational still costs the quadratic decode until the decoder
+  itself is fixed.
+
+The protocol version never decreases, so a peer block from a later epoch than
+the ledger tip is checked against a rule no stricter than its own. With no
+ledger or no parameters, no limit is applied.
+
 A decode function that panics (adversarial/malformed peer bytes could in
 principle trigger this) does not strand the key and does not crash the
 decoding goroutine either: `getOrDecode` recovers the panic, records it as an
@@ -9081,7 +9115,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
   local repair succeeds, connection-level recovery is skipped so ledger replay
   can resume from the repaired tip. If no divergence is found, or the
   divergence's common ancestor sits more than the security parameter K behind
-  the primary chain tip — a rewind that far is declined rather than forced
+  the primary chain's rollback anchor — a rewind that far is declined rather than forced
   through, per the bound below — the active chainsync connection is recycled —
   except when the primary (header) chain has already caught up to the peer and
   the gap is dominated by downloaded-but-not-yet-applied blocks
@@ -15153,7 +15187,14 @@ database reads in one transaction under the request context and a 15-second
 deadline (a disconnected client stops the scan; an overrun answers 503 with
 `Retry-After`), and the metadata store sums the holdings in SQL, reading at most
 `models.MaxAssetQuantityHoldings` (1,000,000) of them: an asset held by more
-answers 400 as exceeding the service limit. Pool and account list routes reject
+answers 400 as exceeding the service limit. `GET /metadata/txs/labels/{label}`
+and its `/cbor` form page over every transaction carrying a label, so they
+share a metadata label admission pool (4 active, 2 per client address, 429 with
+`Retry-After` when full) and run under the request context and a 15-second
+deadline (a disconnected client stops the page; an overrun answers 503 with
+`Retry-After`). The page reads the label's rows through the
+`(label, slot, transaction_id)` index, so its cost follows the page offset
+rather than the number of transactions with the label. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,
@@ -17677,6 +17718,11 @@ two already-running, already-synced NtC listeners. `watch`'s `--mode`
 defaults to `incremental`; pass `--mode full` explicitly for the
 whole-ledger-state comparison instead.
 
+Dingo's TCP node-to-client listener is disabled by default. The
+`--dingo-addr localhost:3002` examples below need `privatePort: 3002` (or
+`CARDANO_PRIVATE_PORT=3002`); otherwise pass the path of `dingo.socket` as
+`--dingo-addr`.
+
 ```shell
 # One-shot: run a single comparison cycle and exit non-zero on divergence
 # or a discarded cycle.
@@ -17943,9 +17989,9 @@ LocalStateQuery requests have a bounded process-wide footprint.
 Disabling the mux segment-read timeout is unsafe to grant unconditionally,
 though: `internal/node/node.go` builds two separate `UseNtC` listeners from
 ordinary operator config -- a Unix socket (`cfg.SocketPath`) and a TCP listener
-(`cfg.PrivateBindAddr:cfg.PrivatePort`, defaulting to `127.0.0.1:3002` but not
-code-enforced to stay there) -- and there is no authentication or identity check
-between `accept()` and these options being applied; `connmanager` only enforces
+(`cfg.PrivateBindAddr:cfg.PrivatePort`, disabled by default with `PrivatePort`
+0 and bound to `127.0.0.1` when enabled, but not code-enforced to stay there)
+-- and there is no authentication or identity check between `accept()` and these options being applied; `connmanager` only enforces
 a connection-count limit (`MaxNtCConns`/`MaxNtCConnectionsPerIP`), not who is
 connecting. Disabling the mux segment-read timeout for *any* client that
 completes an NtC handshake -- not just a trusted local tool -- would widen the
@@ -19541,7 +19587,8 @@ pprof listener therefore requires an explicit override of the dedicated setting;
 both serving modes and Mithril snapshot sync use the same resolved address. Port
 checks apply only to the listeners a given invocation actually starts, derived
 from the *effective* run mode plus the storage mode: the serving modes start the
-relay, private, metrics, debug, and bark listeners (and, under `api` storage or
+relay, metrics, debug, and bark listeners, plus the private TCP listener only
+when `privatePort` is non-zero (and, under `api` storage or
 a configured `dev` run mode — which forces `api` storage — the
 UTxORPC/Blockfrost/Mesh listeners and an explicitly enabled Midnight listener);
 the Mithril snapshot sync (`dingo sync --mithril` or `dingo mithril sync`)
@@ -19552,8 +19599,9 @@ create` and `load` start none. A port configured for an inactive listener cannot
 bind, so it is neither range-checked nor counted toward a collision; two active
 listeners are only reported as colliding when their bind addresses overlap
 (equal, or either side a wildcard) — listeners on distinct specific addresses
-may share a port. The relay, private, and metrics ports must additionally be set
-in the serving modes. Because the one-shot subcommands run a fixed operation
+may share a port. The relay and metrics ports must additionally be set in the
+serving modes; `privatePort` is optional, and 0 leaves only the Unix socket.
+Because the one-shot subcommands run a fixed operation
 regardless of the configured `runMode` (which defaults to `serve`), `cmd/dingo`
 passes `Validate()` the effective run mode derived from the invoked command, so
 listener and ImmutableDB-source requirements match what the command actually
