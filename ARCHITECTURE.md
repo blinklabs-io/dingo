@@ -793,8 +793,10 @@ the bound is parked by `markDeferredHeaderRecovery`; an invalid header is
 rejected without waiting.
 Queue admission has the same tolerance: a verdict that a tip publication expires
 between its verification and its pin (`pinHeaderVerdict`) is verified again, up
-to three times, before the header is withheld; a header that fails that
-verification is rejected and its connection recycled, as on its first. A snapshot publication or validation transition
+to three times while each new verdict expires the same way, before the header
+is withheld; a verification that defers ends those attempts and withholds the
+header, and a header that fails verification is rejected and its connection
+recycled, as on its first. A snapshot publication or validation transition
 also waits and retries a local extension: otherwise an unstamped header can
 be withheld by corroboration while its peer cursor advances past it. Other
 deferrals on local extensions are forwarded unverified at once because
