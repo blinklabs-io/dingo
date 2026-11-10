@@ -49,12 +49,12 @@ var stakeBookkeepingKeptIndexes = []string{
 }
 
 // TestStakeBookkeepingIndexDropAppliesOnPostgres runs every migration against
-// a real server, requires v58's drops to have taken effect and its kept
-// indexes to remain, then replays v58's expand phase.
+// a real server, requires v59's drops to have taken effect and its kept
+// indexes to remain, then replays v59's expand phase.
 func TestStakeBookkeepingIndexDropAppliesOnPostgres(t *testing.T) {
 	t.Parallel()
 	dsn := postgresEngineTestDSN(t)
-	schema := "dingo_v58_replay"
+	schema := "dingo_v59_replay"
 	admin, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	defer admin.Close()
@@ -86,7 +86,7 @@ func TestStakeBookkeepingIndexDropAppliesOnPostgres(t *testing.T) {
 				schema,
 				name,
 			).Scan(&count))
-			require.Zero(t, count, "%s must not survive v58", name)
+			require.Zero(t, count, "%s must not survive v59", name)
 		}
 		for _, name := range stakeBookkeepingKeptIndexes {
 			var count int
@@ -95,13 +95,13 @@ func TestStakeBookkeepingIndexDropAppliesOnPostgres(t *testing.T) {
 				schema,
 				name,
 			).Scan(&count))
-			require.Equal(t, 1, count, "%s must survive v58", name)
+			require.Equal(t, 1, count, "%s must survive v59", name)
 		}
 	}
 	require.NoError(t, runner.Run(context.Background()))
 	check()
 	_, err = db.Exec(`UPDATE schema_migrations
-SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = $1`, 58)
+SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = $1`, 59)
 	require.NoError(t, err)
 	require.NoError(t, runner.Run(context.Background()))
 	check()
@@ -114,7 +114,7 @@ SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = $1`, 58)
 func TestStakeBookkeepingIndexDropAppliesOnMySQL(t *testing.T) {
 	t.Parallel()
 	rootDSN := mysqlEngineTestRootDSN(t)
-	database := "dingo_v58_replay"
+	database := "dingo_v59_replay"
 	admin, err := sql.Open("mysql", rootDSN)
 	require.NoError(t, err)
 	defer admin.Close()
@@ -148,16 +148,16 @@ WHERE table_schema = ? AND index_name = ?`, database, name).Scan(&n))
 	}
 	check := func() {
 		for _, name := range stakeBookkeepingDroppedIndexes {
-			require.Zero(t, count(name), "%s must not survive v58", name)
+			require.Zero(t, count(name), "%s must not survive v59", name)
 		}
 		for _, name := range stakeBookkeepingKeptIndexes {
-			require.NotZero(t, count(name), "%s must survive v58", name)
+			require.NotZero(t, count(name), "%s must survive v59", name)
 		}
 	}
 	require.NoError(t, runner.Run(context.Background()))
 	check()
 	_, err = db.Exec(`UPDATE schema_migrations
-SET phase = 'expand', dirty = 1, completed_at = NULL WHERE version = ?`, 58)
+SET phase = 'expand', dirty = 1, completed_at = NULL WHERE version = ?`, 59)
 	require.NoError(t, err)
 	require.NoError(t, runner.Run(context.Background()))
 	check()

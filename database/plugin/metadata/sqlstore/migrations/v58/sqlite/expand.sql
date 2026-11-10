@@ -1,16 +1,5 @@
--- Drop four indexes that no reader needs or that another index already serves.
---
--- idx_reward_live_stake_updated_slot: updated_slot is written on every
--- refresh and never filtered, joined or ordered on, so the index only added a
--- leaf rewrite per touched credential.
---
--- idx_account_reward_delta_tx_hash and idx_account_reward_delta_withdrawal:
--- every lookup by tx_hash also names withdrawal, so the unique
--- (withdrawal, tx_hash, ...) index serves it, and a boolean-only index
--- narrows nothing.
---
--- idx_account_drep: a prefix of idx_account_drep_active_staking_key.
-DROP INDEX IF EXISTS `idx_reward_live_stake_updated_slot`;
-DROP INDEX IF EXISTS `idx_account_reward_delta_tx_hash`;
-DROP INDEX IF EXISTS `idx_account_reward_delta_withdrawal`;
-DROP INDEX IF EXISTS `idx_account_drep`;
+-- Serve the metadata label page query in slot order. The label-only index
+-- returns every transaction carrying the label in rowid order, so each page
+-- sorted all of them. With slot next in the key, a page reads its first rows
+-- in order and stops; transaction_id covers the join key.
+CREATE INDEX IF NOT EXISTS `idx_transaction_metadata_label_label_slot` ON `transaction_metadata_label`(`label`,`slot`,`transaction_id`);

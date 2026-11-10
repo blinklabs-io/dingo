@@ -54,14 +54,14 @@ func stakeBookkeepingRowDigest(t *testing.T, db *sql.DB) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// TestStakeBookkeepingIndexDropKeepsRows upgrades a v57 database that holds
-// rows in every table whose indexes v58 drops, and requires the rows to be
+// TestStakeBookkeepingIndexDropKeepsRows upgrades a v58 database that holds
+// rows in every table whose indexes v59 drops, and requires the rows to be
 // byte-identical afterwards, the four indexes gone, the indexes that serve
 // their readers present, and a replay of the migration to be a no-op.
 func TestStakeBookkeepingIndexDropKeepsRows(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "metadata.sqlite")
-	migrations.SeedMigratedPrefix(t, path, 57)
+	migrations.SeedMigratedPrefix(t, path, 58)
 	db, err := sql.Open("sqlite", "file:"+path+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -87,7 +87,7 @@ func TestStakeBookkeepingIndexDropKeepsRows(t *testing.T) {
 	}
 	for name := range dropped {
 		_, ok := indexSQL(t, db, name)
-		require.True(t, ok, "v57 must still carry %s", name)
+		require.True(t, ok, "v58 must still carry %s", name)
 	}
 
 	key := func(i int) []byte {
@@ -136,17 +136,17 @@ VALUES (?, ?, ?, 0, '10', 0, 1, 90, 90)`, key(i%5), key(i), i%4)
 
 	for name := range dropped {
 		_, ok := indexSQL(t, db, name)
-		require.False(t, ok, "%s must not survive v58", name)
+		require.False(t, ok, "%s must not survive v59", name)
 	}
 	for _, name := range kept {
 		_, ok := indexSQL(t, db, name)
-		require.True(t, ok, "%s must survive v58", name)
+		require.True(t, ok, "%s must survive v59", name)
 	}
 	require.Equal(t, before, stakeBookkeepingRowDigest(t, db),
-		"v58 changed stored rows")
+		"v59 changed stored rows")
 
 	_, err = db.Exec(`UPDATE schema_migrations
-SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = 58`)
+SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = 59`)
 	require.NoError(t, err)
 	run()
 	require.Equal(t, before, stakeBookkeepingRowDigest(t, db))
