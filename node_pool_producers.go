@@ -61,6 +61,9 @@ type poolProducer struct {
 	kesAgentClient  io.Closer
 	kesAgentCancel  context.CancelFunc
 	kesAgentMetrics *kesagent.Metrics
+	// agentOffers are this pool's own agent offers of a newer operational
+	// certificate; they reload this pool only.
+	agentOffers agentOfferState
 
 	creds    *forging.PoolCredentials
 	election interface{ Stop() error }
@@ -213,10 +216,11 @@ func (n *Node) prepareMultiPool() error {
 // keySource is this producer's poolKeySource.
 func (pp *poolProducer) keySource(n *Node) *poolKeySource {
 	return &poolKeySource{
-		n:      n,
-		keys:   pp.keys,
-		client: &pp.kesAgentClient,
-		cancel: &pp.kesAgentCancel,
+		n:             n,
+		keys:          pp.keys,
+		client:        &pp.kesAgentClient,
+		cancel:        &pp.kesAgentCancel,
+		onNewerOpCert: pp.agentOffers.offer,
 		metrics: func() *kesagent.Metrics {
 			if pp.kesAgentMetrics == nil {
 				if reg := n.poolMetricsRegistry(pp.poolID); reg != nil {

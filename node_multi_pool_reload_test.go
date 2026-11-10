@@ -17,7 +17,9 @@ package dingo
 import (
 	"errors"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/prometheus/client_golang/prometheus"
@@ -96,4 +98,74 @@ func TestReloadReportsUnchangedOnlyWhenEveryPoolIsUnchanged(t *testing.T) {
 		errCredentialsUnchanged,
 	)
 	require.Empty(t, n.first.builtClients())
+}
+
+// startLoops gives the node a ledger for the reload clock and starts its
+// reload loops.
+func (n *twoPoolSignNode) startLoops(t *testing.T) {
+	t.Helper()
+	start := time.Now().Add(-time.Minute)
+	n.first.ledgerState = newStartupCleanupProducerNodeWithGenesisStart(
+		t,
+		&start,
+	).ledgerState
+	n.first.startKeyReloadLoops()
+	t.Cleanup(n.first.stopKeyReloadLoops)
+}
+
+// waitReloaded waits for the log of a completed reload of poolID. The log is
+// written after the client swap, and reading it through the synced buffer
+// orders the test's reads of the client fields after that swap.
+func (n *twoPoolSignNode) waitReloaded(t *testing.T, poolID string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		for line := range strings.SplitSeq(n.first.logs.String(), "\n") {
+			if strings.Contains(line, "block producer credentials reloaded") &&
+				strings.Contains(line, `"pool_id":"`+poolID+`"`) {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestAgentOpCertOfferReloadsOnlyItsOwnPool(t *testing.T) {
+	t.Parallel()
+
+	t.Run("second pool", func(t *testing.T) {
+		t.Parallel()
+		n := newTwoPoolSignNode(t)
+		n.startLoops(t)
+		offer := n.pp.keySource(n.first.Node).onNewerOpCert
+		require.NotNil(t, offer, "the second pool has no newer opcert hook")
+
+		offer(n.second.opCertCBOR(t, 2))
+
+		n.waitReloaded(t, n.pp.poolID)
+		n.second.requireLiveCounter(t, 2)
+		n.first.requireLiveCounter(t, 1)
+		require.Same(t, n.first.initial, n.first.kesAgentClient)
+		require.NotSame(t, n.second.initial, n.pp.kesAgentClient)
+		require.NotContains(
+			t,
+			n.first.logs.String(),
+			"cannot change pool or VRF identity",
+		)
+	})
+
+	t.Run("first pool", func(t *testing.T) {
+		t.Parallel()
+		n := newTwoPoolSignNode(t)
+		n.startLoops(t)
+		offer := n.first.primaryKeySource().onNewerOpCert
+		require.NotNil(t, offer, "the first pool has no newer opcert hook")
+
+		offer(n.first.opCertCBOR(t, 2))
+
+		n.waitReloaded(t, n.first.live.GetPoolID().String())
+		n.first.requireLiveCounter(t, 2)
+		n.second.requireLiveCounter(t, 1)
+		require.Same(t, n.second.initial, n.pp.kesAgentClient)
+		require.NotSame(t, n.first.initial, n.first.kesAgentClient)
+	})
 }
