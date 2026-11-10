@@ -29,10 +29,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/vrf"
 )
 
-// arbiterDecisionCacheSlots is how many recent slot decisions the arbiter
-// keeps. Every pool of a node asks about the same slot within a moment of the
-// others, so a short history is enough for all of them to read the decision
-// the first one made.
+// arbiterDecisionCacheSlots is how many recent slots the arbiter keeps
+// decisions and outcomes for. Every pool of a node asks about the same slot
+// within a moment of the others, and a pool waits on a slot no longer than
+// the slot lasts, so a short history is enough.
 const arbiterDecisionCacheSlots = 64
 
 // arbiterNonceTimeout bounds the epoch nonce read behind a decision. The
@@ -99,23 +99,47 @@ func (v ledgerArbiterView) EpochNonce(
 // for two blocks in one slot (praos.GetVRFOutput), where the lower wins. Any
 // doubt -- a non-Praos schedule, no nonce, a VRF failure -- decides nothing,
 // and every pool forges, since a lost slot costs more than an extra block.
+//
+// The ranking knows nothing of the winner's later refusals or a failed build,
+// so a yielded pool waits for the slot's outcome (AwaitWinner) instead of
+// giving the slot up. Every pool reports each forge check (ReportSlot). An
+// adopted block ends the wait with a yield. A winner that adopts none
+// releases the slot: it is decided again among the leaders that have not
+// released it, so the next best pool forges and any pool behind that one
+// keeps waiting. A wait ends with a forge when its deadline passes, its
+// context ends or the members or view change.
 type poolSlotArbiter struct {
 	logger *slog.Logger
 
 	mu      sync.Mutex
 	view    arbiterChainView
 	members map[string]arbiterMember
-	// decided maps a slot to the pool that forges it, "" for no decision;
-	// order is its insertion order, for eviction.
-	decided map[uint64]string
-	order   []uint64
+	// slots holds each recent slot's decision and outcome; order is its
+	// insertion order, for eviction.
+	slots map[uint64]*arbiterSlot
+	order []uint64
+}
+
+// arbiterSlot is one slot's decision and what its pools reported.
+type arbiterSlot struct {
+	// decided is set once winner holds a final decision; winner is "" when
+	// the decision is that every leading pool forges.
+	decided bool
+	winner  string
+	// released holds the leading pools that reported a forge check without
+	// an adopted block; they are left out of any later decision.
+	released map[string]bool
+	// adopted is set once any pool reported an adopted block.
+	adopted bool
+	// changed is closed, and replaced, on every change a waiter acts on.
+	changed chan struct{}
 }
 
 func newPoolSlotArbiter(logger *slog.Logger) *poolSlotArbiter {
 	return &poolSlotArbiter{
 		logger:  logger,
 		members: make(map[string]arbiterMember),
-		decided: make(map[uint64]string),
+		slots:   make(map[uint64]*arbiterSlot),
 	}
 }
 
@@ -145,10 +169,45 @@ func (a *poolSlotArbiter) remove(poolID string) {
 }
 
 // resetLocked drops cached decisions, which a change of members or view can
-// invalidate. Callers hold a.mu.
+// invalidate, and wakes every waiting pool, which then forges: its winner
+// may be gone. Reported outcomes are facts and stay. Callers hold a.mu.
 func (a *poolSlotArbiter) resetLocked() {
-	clear(a.decided)
-	a.order = a.order[:0]
+	for _, st := range a.slots {
+		st.decided, st.winner = false, ""
+		st.notify()
+	}
+}
+
+// notify wakes the pools waiting on the slot.
+func (st *arbiterSlot) notify() {
+	close(st.changed)
+	st.changed = make(chan struct{})
+}
+
+// slotLocked returns slot's state, creating it, and evicting the oldest slot
+// past arbiterDecisionCacheSlots. A pool still waiting on an evicted slot
+// forges. Callers hold a.mu.
+func (a *poolSlotArbiter) slotLocked(slot uint64) *arbiterSlot {
+	if st, ok := a.slots[slot]; ok {
+		return st
+	}
+	st := &arbiterSlot{
+		released: make(map[string]bool),
+		changed:  make(chan struct{}),
+	}
+	a.slots[slot] = st
+	a.order = append(a.order, slot)
+	if len(a.order) > arbiterDecisionCacheSlots {
+		evict := len(a.order) - arbiterDecisionCacheSlots
+		for _, old := range a.order[:evict] {
+			if gone, ok := a.slots[old]; ok {
+				delete(a.slots, old)
+				gone.notify()
+			}
+		}
+		a.order = append(a.order[:0], a.order[evict:]...)
+	}
+	return st
 }
 
 // forPool returns the SlotArbiter the forger of poolID consults.
@@ -160,34 +219,105 @@ func (a *poolSlotArbiter) forPool(poolID string) forging.SlotArbiter {
 func (a *poolSlotArbiter) winner(slot uint64) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if w, ok := a.decided[slot]; ok {
-		return w
-	}
-	w, final := a.decideLocked(slot)
-	if !final {
-		return w
-	}
-	a.decided[slot] = w
-	a.order = append(a.order, slot)
-	if len(a.order) > arbiterDecisionCacheSlots {
-		evict := len(a.order) - arbiterDecisionCacheSlots
-		for _, old := range a.order[:evict] {
-			delete(a.decided, old)
+	st := a.slotLocked(slot)
+	if !st.decided {
+		w, final := a.decideLocked(slot, st.released)
+		if !final {
+			return w
 		}
-		a.order = append(a.order[:0], a.order[evict:]...)
+		st.decided, st.winner = true, w
 	}
-	return w
+	return st.winner
 }
 
-// decideLocked ranks the pools that lead slot by their leader VRF output. It
-// holds a.mu while it proves, so a pool asking while another's decision is
-// being made waits for that decision rather than making its own. final is
-// false when fewer than two pools lead the slot: a pool whose schedule is not
-// ready yet reads as a non-leader, so that answer is not cached, and a pool
-// asking once its schedule arrives sees every leader.
-func (a *poolSlotArbiter) decideLocked(slot uint64) (winner string, final bool) {
+// report records poolID's forge check outcome for slot. A report from a pool
+// that does not lead slot changes nothing.
+func (a *poolSlotArbiter) report(poolID string, slot uint64, adopted bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	m, ok := a.members[poolID]
+	if !ok {
+		return
+	}
+	if next, leads := m.leader.NextLeaderSlot(slot); !leads || next != slot {
+		return
+	}
+	st := a.slotLocked(slot)
+	if adopted {
+		if !st.adopted {
+			st.adopted = true
+			st.notify()
+		}
+		return
+	}
+	if st.released[poolID] {
+		return
+	}
+	st.released[poolID] = true
+	if st.decided && st.winner == poolID {
+		// Decide again without the pools that released. Fewer than two
+		// leaders left is no decision: the one left forges.
+		w, final := a.decideLocked(slot, st.released)
+		st.decided, st.winner = final, w
+		st.notify()
+	}
+}
+
+// await waits until slot's outcome settles poolID's yield, and returns true
+// only when a pool adopted a block for it. Every other end -- the slot passed
+// to poolID or left to every pool, the slot reset or evicted, ctx done, until
+// passed -- returns false, and poolID forges.
+func (a *poolSlotArbiter) await(
+	ctx context.Context,
+	poolID string,
+	slot uint64,
+	until time.Time,
+) bool {
+	timer := time.NewTimer(time.Until(until))
+	defer timer.Stop()
+	for {
+		a.mu.Lock()
+		st, ok := a.slots[slot]
+		if !ok {
+			a.mu.Unlock()
+			return false
+		}
+		if st.adopted {
+			a.mu.Unlock()
+			return true
+		}
+		if !st.decided || st.winner == "" || st.winner == poolID {
+			a.mu.Unlock()
+			return false
+		}
+		changed := st.changed
+		a.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return false
+		}
+	}
+}
+
+// decideLocked ranks the pools that lead slot by their leader VRF output,
+// leaving out the released ones. It holds a.mu while it proves, so a pool
+// asking while another's decision is being made waits for that decision
+// rather than making its own. final is false when fewer than two pools lead
+// the slot: a pool whose schedule is not ready yet reads as a non-leader, so
+// that answer is not cached, and a pool asking once its schedule arrives sees
+// every leader.
+func (a *poolSlotArbiter) decideLocked(
+	slot uint64,
+	released map[string]bool,
+) (winner string, final bool) {
 	leaders := make([]arbiterMember, 0, len(a.members))
 	for _, m := range a.members {
+		if released[m.poolID] {
+			continue
+		}
 		if next, ok := m.leader.NextLeaderSlot(slot); ok && next == slot {
 			leaders = append(leaders, m)
 		}
@@ -312,4 +442,16 @@ func (v poolArbiterView) YieldSlot(slot uint64) (bool, string) {
 		return false, ""
 	}
 	return true, w
+}
+
+func (v poolArbiterView) AwaitWinner(
+	ctx context.Context,
+	slot uint64,
+	until time.Time,
+) bool {
+	return v.arbiter.await(ctx, v.poolID, slot, until)
+}
+
+func (v poolArbiterView) ReportSlot(slot uint64, adopted bool) {
+	v.arbiter.report(v.poolID, slot, adopted)
 }

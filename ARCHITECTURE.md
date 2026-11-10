@@ -12491,14 +12491,30 @@ block per slot can stay on chain. Each forger asks the node's
 `poolSlotArbiter` after its leader check. When more than one pool leads the
 slot, the arbiter proves each one's leader VRF input (`MkInputVrf` from Babbage
 on, the `SeedL` TPraos seed before) and keeps the pool with the lowest output,
-the value chain selection compares for two blocks in one slot. The other pools
-skip the slot and count `dingo_forge_yielded_to_own_pool_total` instead of a
-missed leader slot. The decision is made once per slot and cached for the
-pools that ask after it; a slot fewer than two pools lead is not cached, since
-a pool whose schedule is not ready yet reads as a non-leader. Anything that
-leaves the decision in doubt -- a non-Praos schedule, no epoch nonce, a VRF
-failure, a panicking arbiter -- lets every leading pool forge: an extra block of the node's own costs less than a
+the value chain selection compares for two blocks in one slot. The decision is
+made once per slot and cached for the pools that ask after it; a slot fewer
+than two pools lead is not cached, since a pool whose schedule is not ready yet
+reads as a non-leader. Anything that leaves the decision in doubt -- a
+non-Praos schedule, no epoch nonce, a VRF failure, a panicking arbiter -- lets
+every leading pool forge: an extra block of the node's own costs less than a
 lost slot.
+
+The ranking is made from leader VRF alone, before the winner's own later
+refusals (operational certificate counter, stale tip, a credential change) and
+before it builds, validates and adopts its block. So a pool that loses the
+ranking does not give the slot up; it waits for the slot's outcome. Every
+forge check reports its outcome to the arbiter on every exit, an adopted block
+as soon as it is adopted. When any pool adopts a block for the slot, the
+waiting pools skip it and count `dingo_forge_yielded_to_own_pool_total`
+instead of a missed leader slot. When the winner exits without one, it
+releases the slot: the arbiter decides again among the leaders that have not
+released it, so the next best pool forges and any pool behind that one keeps
+waiting, and a winner that released before another pool asked is never
+yielded to. A wait also ends in a forge when the slot's retry deadline (the
+slot end less `ForgeSelectionRetryMargin`) passes without a report, when the
+forger's context ends, when a pool is added or removed or the ledger view
+changes, or when the wait panics. A yielded pool that forges goes through its
+own checks as any leader does.
 
 **Own blocks.** The ledger's slot battle checks and the equivocation detector
 treat every pool as the node's own: `ownForgedBlocks` answers
