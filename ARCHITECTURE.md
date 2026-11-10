@@ -17700,15 +17700,29 @@ the tool also skips blocks Dingo refuses as too old until validation starts:
 the first post-Byron block whose epoch resolves, by the era history or by
 Dingo. Any later refusal is a real failure that ends the session. Every
 query the ChainSync callbacks make -- the epoch lookup, the UTxO baseline
-captures, the `/tx_info` flushes, and the protocol-parameter, stake and UTxO
-checks -- runs under a per-session context, so its connections close when the
-session ends and the run resumes instead of waiting on a query Dingo never
-answers. The epoch lookup is also bounded at five minutes, since an idle
-session reports no error to end it; the whole-UTxO queries carry no deadline.
-An epoch whose checks a session end cuts off is not reported: buffered
-`/tx_info` hashes stay unapplied, the comparison neither taints nor
-re-baselines the reconstruction, and the checks run again at that epoch's next
-block on the resumed session.
+captures, and the protocol-parameter, stake and UTxO checks -- runs under a
+per-session context, so its connections close when the session ends and the
+run resumes instead of waiting on a query Dingo never answers. The epoch
+lookup is also bounded at five minutes, since an idle session reports no error
+to end it; the whole-UTxO queries carry no deadline.
+
+`/tx_info` is fetched by a pipeline while the chain is read. Each block's
+transaction hashes are queued in chain order and cut into chunks of
+`--koios-tx-info-batch-size`; at most `--koios-tx-info-concurrency` chunks are
+in flight, and results are applied to the reconstruction strictly in chain
+order, since an output created in one chunk may be spent in a later one.
+Reading stops only while eight rounds of chunks (eight times the concurrency)
+are unapplied, so one stalled request does not leave the other request slots
+idle. A chunk fetched again after a wait gives up its request slot while it
+waits and is granted the next free slot ahead of every later chunk, since no
+result behind it can be applied until it is. The fetches run under the run's
+context, not a session's: a session that ends leaves them fetching, and the
+next session applies their results. Only a re-baseline of the reconstruction,
+which discards every queued hash, and the end of the run cancel them; the wait
+for results is the only part bound to the session. An epoch whose checks a
+session end cuts off is not reported: hashes still queued stay unapplied, the
+comparison neither taints nor re-baselines the reconstruction, and the checks
+run again at that epoch's next block on the resumed session.
 
 `--koios-cache-path` makes those lookups cache-first against a `koios-parity`
 `cache.db`, which may be the one a dingo instance's own embedded observer is
@@ -17726,6 +17740,7 @@ internal/nodeparity/       # shared library, untagged and importable
   watch.go                  # Watcher, WatchBlocks: persistent per-node ChainSync subscription with reconnect (full mode)
   incremental.go            # IncrementalCursor, RunIncremental: sequential per-block UTxO-delta orchestration (incremental mode)
   from_genesis.go           # RunFromGenesis: reconnecting from-genesis ChainSync walk, per-epoch checks (Koios mode)
+  txinfo_pipeline.go        # txInfoPipeline: windowed /tx_info fetches applied in chain order; orderedSlots
   epoch_oracle.go           # epochOracle: slot-to-epoch resolution from Dingo's cached era history
   koios_check.go            # CheckProtocolParams/CheckStakeDistribution/UTxOChanges: the Koios-backed comparisons
 
