@@ -1257,13 +1257,14 @@ func (ls *LedgerState) verifyBlockHeaderStateWithCache(
 		epochCache,
 		allowStateDefer,
 		func(
-			_ context.Context,
+			ctx context.Context,
 			block ledger.Block,
 			epochID uint64,
 			_ []models.Epoch,
 			snap electingSnapshot,
 		) error {
 			return ls.verifyBlockLeaderEligibilityFromSnapshot(
+				ctx,
 				block,
 				epochID,
 				snap,
@@ -2311,6 +2312,7 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	epochId uint64,
 ) error {
 	return ls.verifyBlockLeaderEligibilityFromSnapshot(
+		ls.closeCtx(),
 		block,
 		epochId,
 		ls.resolveElectingSnapshotForBlock(
@@ -2320,6 +2322,7 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 }
 
 func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
+	ctx context.Context,
 	block ledger.Block,
 	epochId uint64,
 	snap electingSnapshot,
@@ -2411,7 +2414,7 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 	}
 
 	// Consensus mode determines the VRF leader-value derivation path.
-	mode, modeErr := ls.ConsensusModeForEpoch(epochId)
+	mode, modeErr := ls.consensusModeForEpoch(ctx, epochId)
 	if modeErr != nil {
 		// The mode selects both the leader-value derivation and the
 		// eligibility predicate, so without it eligibility cannot be evaluated. The era

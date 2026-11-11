@@ -217,6 +217,9 @@ func TestMidEpochEraSwitchRollsBack(t *testing.T) {
 		assert.Nil(t, conwayRow,
 			"the translated parameters must go with the rolled-back block")
 
+		// The switch queues a protocol-version evaluation that publishes
+		// snapshots; let it finish before reloading unlocked.
+		ls.protocolVersionEvalWG.Wait()
 		require.NoError(t, ls.loadEpochs(t.Context(), nil))
 		assert.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id,
 			"a reload after the rollback must not find the abandoned switch")

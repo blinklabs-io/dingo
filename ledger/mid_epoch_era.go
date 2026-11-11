@@ -290,6 +290,7 @@ func midEpochEraRefusal(
 // does not yet know the transition, as in the reference node, whose forecast
 // from the tip cannot cross an era end the tip's ledger state does not know.
 func (ls *LedgerState) midEpochEraAfterTip(
+	ctx context.Context,
 	snapshot *consensusSnapshot,
 	tip *tipSnapshot,
 ) (eras.EraDesc, bool) {
@@ -307,7 +308,7 @@ func (ls *LedgerState) midEpochEraAfterTip(
 	if gate == nil {
 		return eras.EraDesc{}, false
 	}
-	required, err := gate.requiredEra(ls.closeCtx(), ls, nil, tip.currentTip)
+	required, err := gate.requiredEra(ctx, ls, nil, tip.currentTip)
 	if err != nil || required == snapshot.currentEra.Id {
 		return eras.EraDesc{}, false
 	}

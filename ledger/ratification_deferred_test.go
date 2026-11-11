@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1104,4 +1105,67 @@ func TestDeferredRatificationMatchesBoundaryRatification(t *testing.T) {
 	require.NotZero(t, last.DRepPower)
 	require.NotEmpty(t, last.Mark)
 
+}
+
+type writeOnlySnapshot struct{}
+
+func (writeOnlySnapshot) SPOStakeRows() []*models.PoolStakeSnapshot { return nil }
+
+func (writeOnlySnapshot) Write(*database.Txn) error { return nil }
+
+// TestConsumePendingRatificationValidationOnlyKeepsStagedStakeInputs pins that
+// a validation tick consuming a pending decision does not take the staged
+// reward stake inputs, which belong to the real boundary's transaction.
+func TestConsumePendingRatificationValidationOnlyKeepsStagedStakeInputs(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, validationOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("validationOnly=%t", validationOnly), func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			ls := fixture.ls
+			rec := pendingRatificationRecord{Epoch: 1, BoundarySlot: 100, ID: 7}
+			raw, err := json.Marshal(rec)
+			require.NoError(t, err)
+			require.NoError(t, ls.db.SetSyncState(
+				pendingRatificationSyncKey, string(raw), nil,
+			))
+			job := &ratificationJob{
+				record:   rec,
+				decided:  make(chan struct{}),
+				settled:  make(chan struct{}),
+				snapshot: writeOnlySnapshot{},
+			}
+			close(job.decided)
+			ls.ratificationMu.Lock()
+			ls.ratificationJob = job
+			ls.ratificationMu.Unlock()
+			var taken int
+			ls.SetEpochBoundaryDeferredStakeInputsHook(
+				func(*database.Txn) (uint64, uint64, []*models.RewardStakeInput, bool) {
+					taken++
+					return 0, 0, nil, false
+				},
+			)
+
+			errRollBack := errors.New("roll back")
+			txn := ls.db.Transaction(t.Context(), true)
+			require.ErrorIs(t, txn.Do(func(txn *database.Txn) error {
+				require.NoError(t, ls.consumePendingRatificationWithOptions(
+					t.Context(), txn, validationOnly,
+				))
+				return errRollBack
+			}), errRollBack)
+
+			if validationOnly {
+				require.Zero(t, taken,
+					"the validation tick took the staged stake inputs")
+			} else {
+				require.Equal(t, 1, taken,
+					"a real boundary must take the staged stake inputs")
+			}
+		})
+	}
 }
