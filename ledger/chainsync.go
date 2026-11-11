@@ -4157,10 +4157,15 @@ func observedHeaderTip(e ChainsyncEvent) ochainsync.Tip {
 }
 
 // LocalTipPraosView returns the Praos tiebreaker view of the header of the
-// block at tip, and false when the block cannot be read or decoded.
+// block at tip, and false when the ledger is nil or the block cannot be read
+// or decoded. A Byron block yields true with a view carrying only its block
+// kind.
 func (ls *LedgerState) LocalTipPraosView(
 	tip ochainsync.Tip,
 ) (praos.PraosTiebreakerView, bool) {
+	if ls == nil {
+		return praos.PraosTiebreakerView{}, false
+	}
 	return ls.localTipPraosViewOK(ls.lifecycleContext(), tip)
 }
 
