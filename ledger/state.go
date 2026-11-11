@@ -1348,6 +1348,12 @@ type EndorserBlockValidationFunc func(
 // ctx bounds the whole fetch, including its per-connection failover. The caller
 // owns the budget: block application waits for this fetch, so an implementation
 // must not outlive the context it was handed.
+//
+// A connection already serving another fetch is skipped rather than waited
+// for, so a background prefetch fails over or gives up promptly. When ctx is
+// marked with WithRequiredEndorserBlockFetch and every usable connection is
+// busy, the implementation instead waits for one to become free, bounded by
+// ctx, because the caller cannot make progress without the endorser block.
 type EndorserBlockFetcherFunc func(
 	ctx context.Context,
 	ebSlot uint64,
@@ -1361,6 +1367,23 @@ type EndorserBlockFetcherFunc func(
 var ErrEndorserBlockFetchNoPeer = errors.New(
 	"no leios-fetch connection available",
 )
+
+type requiredEndorserBlockFetchKey struct{}
+
+// WithRequiredEndorserBlockFetch marks ctx as carrying a mandatory fetch: the
+// certified closure of a ranking block that block application is waiting for.
+// An EndorserBlockFetcherFunc handed such a context waits, within ctx, for a
+// busy leios-fetch connection instead of returning at once with a busy error.
+func WithRequiredEndorserBlockFetch(ctx context.Context) context.Context {
+	return context.WithValue(ctx, requiredEndorserBlockFetchKey{}, true)
+}
+
+// IsRequiredEndorserBlockFetch reports whether ctx was marked by
+// WithRequiredEndorserBlockFetch.
+func IsRequiredEndorserBlockFetch(ctx context.Context) bool {
+	required, _ := ctx.Value(requiredEndorserBlockFetchKey{}).(bool)
+	return required
+}
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a
 // blockfetch request for a range of blocks. It returns the request ID the
