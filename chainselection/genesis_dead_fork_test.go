@@ -172,16 +172,25 @@ func TestGenesisExitIgnoresStaleTipPeer(t *testing.T) {
 // exit behavior is unchanged.
 func TestGenesisExitWhenPeersAgreeOnTip(t *testing.T) {
 	t.Parallel()
+	var chain testChain
 	cs := newGenesisWallClockSelector(2000)
+	cs.config.PointOnLocalChain = chain.onChain
 	cs.SetLocalTip(genesisTip(1000, "local", 100))
+	var peers []ouroboros.ConnectionId
 	for i := range deadForkHonestPeers {
+		peers = append(peers, corrConn(10+i))
 		feedAdvertising(
-			t, cs, corrConn(10+i),
+			t, cs, peers[i],
 			genesisTip(2000, "tip", 200),
 			"c", 1000, 1900, 10,
 		)
 	}
-	cs.SetLocalTip(genesisTip(1900, "local", 190))
+	last := genesisTip(1900, "c1900", 190)
+	chain.add(last)
+	cs.SetLocalTip(last)
+	for _, peer := range peers {
+		cs.SetPeerIdling(peer, last.Point)
+	}
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode())
 }
 
@@ -194,7 +203,11 @@ const colluderTipBlock = uint64(90000)
 func newColluderSelector(
 	t *testing.T,
 	honestDeliveredTo uint64,
-) (*ChainSelector, ouroboros.ConnectionId) {
+) (
+	*ChainSelector,
+	ouroboros.ConnectionId,
+	[]ouroboros.ConnectionId,
+) {
 	t.Helper()
 	cs := newGenesisWallClockSelector(2000)
 	cs.SetLocalTip(genesisTip(1000, "local", 100))
@@ -203,21 +216,23 @@ func newColluderSelector(
 		t, cs, honest, genesisTip(2000, "tip", 200),
 		"h", 1000, honestDeliveredTo, 10,
 	)
+	var colluders []ouroboros.ConnectionId
 	for i := range 2 {
+		colluders = append(colluders, corrConn(20+i))
 		feedAdvertising(
-			t, cs, corrConn(20+i),
+			t, cs, colluders[i],
 			genesisTip(2000, "lie", colluderTipBlock),
 			"h", 1000, 1050, 10,
 		)
 	}
-	return cs, honest
+	return cs, honest, colluders
 }
 
 // Connections that advertise an inflated tip and deliver a few real headers
 // must not push the one honest peer out of selection.
 func TestGenesisSelectionKeepsHonestPeerAgainstColludingTips(t *testing.T) {
 	t.Parallel()
-	cs, honest := newColluderSelector(t, 1500)
+	cs, honest, _ := newColluderSelector(t, 1500)
 
 	best := cs.SelectBestChain()
 	require.NotNil(t, best)
@@ -225,12 +240,22 @@ func TestGenesisSelectionKeepsHonestPeerAgainstColludingTips(t *testing.T) {
 		"colluding advertised tips displaced the honest peer")
 }
 
-// The same colluders must not remove the honest peer from the Genesis exit
-// horizon: once the local tip reaches the honest peer's tip, Genesis exits.
+// Colluders advertising inflated tips must not keep Genesis from exiting once
+// every peer is idle at a delivered tip on the local chain.
 func TestGenesisExitReachedAgainstColludingTips(t *testing.T) {
 	t.Parallel()
-	cs, _ := newColluderSelector(t, 2000)
-	cs.SetLocalTip(genesisTip(1990, "local", 199))
+	var chain testChain
+	cs, honest, colluders := newColluderSelector(t, 2000)
+	cs.config.PointOnLocalChain = chain.onChain
+	for slot := uint64(1000); slot <= 2000; slot += 10 {
+		chain.add(genesisTip(slot, fmt.Sprintf("h%d", slot), slot/10))
+	}
+	local := genesisTip(2000, "h2000", 200)
+	cs.SetLocalTip(local)
+	cs.SetPeerIdling(honest, local.Point)
+	for _, colluder := range colluders {
+		cs.SetPeerIdling(colluder, genesisTip(1050, "h1050", 105).Point)
+	}
 
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode(),
 		"colluding advertised tips kept Genesis from exiting")
