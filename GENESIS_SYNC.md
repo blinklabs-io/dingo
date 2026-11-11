@@ -190,6 +190,9 @@ Snapshot relays must have a host/IP address and an explicit TCP port from 1 to
   `chainselection.genesis_mode_exited` (local slot, idle peer count, window).
   Advertised tips are not consulted. A peer whose chain does not intersect the
   local chain, or that wins the equal-height tiebreak, keeps Genesis active.
+  An observer is therefore not paused once its peer's tip is within the security
+  parameter of the local tip; it pauses only while farther behind, where the exit
+  rule cannot be met anyway.
 - **Idle at a historic tip**: an idle peer whose delivered tip is older than the
   network's stability window `3k/f` slots, converted at the Shelley slot length,
   plus one hour blocks the exit (on mainnet and preprod this is the reference's

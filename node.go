@@ -2353,11 +2353,14 @@ func (n *Node) isConfiguredRootConnection(
 }
 
 // chainsyncObserverDeliveriesUnused reports whether the headers observer
-// connections deliver are counted by nothing. Observer headers are never ingested; Genesis
-// corroboration is their only reader, counting them as witness evidence. So
-// they are unused while Genesis selection runs without a corroboration
-// threshold. Outside Genesis selection the node is at the tip, where observers
-// follow new blocks and their tips keep chain selection informed.
+// connections deliver are counted by nothing. Observer headers are never
+// ingested; Genesis corroboration counts them as witness evidence, so they are
+// unused while Genesis selection runs without a corroboration threshold.
+// Outside Genesis selection the node is at the tip, where observers follow new
+// blocks and their tips keep chain selection informed. The Genesis exit rule
+// also needs every observer to have sent MsgAwaitReply; the ouroboros package
+// therefore stops holding an observer once its peer is within the security
+// parameter of the local tip.
 func (n *Node) chainsyncObserverDeliveriesUnused() bool {
 	if n.chainSelector == nil || n.config.genesisCorroborationPeers > 0 {
 		return false

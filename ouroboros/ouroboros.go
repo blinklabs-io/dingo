@@ -711,8 +711,10 @@ type OuroborosConfig struct {
 	// observer connections are currently counted by nothing: they are not
 	// ingested, and no Genesis corroboration is reading them as witness
 	// evidence. While it reports true an observer stops reading headers
-	// instead of downloading the chain once more per connected peer. When
-	// nil, observers always read.
+	// instead of downloading the chain once more per connected peer, unless
+	// its peer's tip is within the security parameter of the local tip, where
+	// it reads so that it can reach MsgAwaitReply for the Genesis exit rule.
+	// When nil, observers always read.
 	ChainsyncObserverDeliveriesUnused func() bool
 	// ChainsyncAwaitCorroboration holds a roll-forward that ChainsyncApplyEligible
 	// denied, while the denial is only a lack of Genesis corroboration, and

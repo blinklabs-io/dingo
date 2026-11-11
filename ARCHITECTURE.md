@@ -886,16 +886,21 @@ once: a repeat on the same connection within
 backoff still applies to such a peer.
 
 While Genesis selection runs with no corroboration threshold, observer headers
-are counted by nothing, so an observer stops reading them
+are counted by nothing, so an observer whose peer is more than the security
+parameter ahead of the local tip stops reading them
 (`holdUnreadObserver`): its roll-forward callback is held, which stops further
 `MsgRequestNext` once the pipelined replies are in. The hold is bounded by
 `catchUpBandWaitTimeout`, like every roll-forward wait, to stay under the
 protocol state timers; at the bound the header is dropped and the next one is
 held, so a held observer reads one header per bound. Every
 `observerParkPoll` it tries to take an ingress slot. It is released when it
-takes one, or when deliveries are counted again
+takes one, when deliveries are counted again, or when the local tip comes
+within the security parameter of its peer's tip
 (`ChainsyncResyncReasonObserverResumed`), and re-intersects either way because
-its cursor stopped while the local chain advanced. With a corroboration
+its cursor stopped while the local chain advanced. Within the security parameter observers read
+because the Genesis exit rule needs every observer to have sent
+`MsgAwaitReply`, which a held observer never reaches; farther away the local
+chain is behind the peer and the exit rule cannot be met. With a corroboration
 threshold observers read as before, since their headers are the witness
 evidence.
 

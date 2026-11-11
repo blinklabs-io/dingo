@@ -2305,7 +2305,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.releasePromotedAheadRecycle(promotedAheadClaim)
 			promotedAheadClaim = time.Time{}
 		}
-		if !ingressEligible && o.observerDeliveriesUnused() {
+		if !ingressEligible && o.observerDeliveriesUnused(tip) {
 			return o.holdUnreadObserver(ctx, clientSession, tip)
 		}
 		observerDelivery := !ingressEligible
@@ -3638,9 +3638,25 @@ func (o *Ouroboros) updateChainsyncMetrics(
 // held observer to notice it.
 const defaultObserverParkPoll = time.Second
 
-func (o *Ouroboros) observerDeliveriesUnused() bool {
-	return o.config.ChainsyncObserverDeliveriesUnused != nil &&
-		o.config.ChainsyncObserverDeliveriesUnused()
+// observerDeliveriesUnused reports whether an observer whose peer advertises
+// peerTip may stop reading. Genesis selection is left only when every
+// ChainSync connection, observers included, has sent MsgAwaitReply, so an
+// observer must be able to reach its peer's tip before the exit rule can be
+// met. Near the local tip that is a short read, and the hold ends. Farther
+// away the local chain is behind that peer and the exit rule fails anyway, so
+// the hold saves the bandwidth. Without a local tip the observer is held, as
+// before.
+func (o *Ouroboros) observerDeliveriesUnused(peerTip ochainsync.Tip) bool {
+	if o.config.ChainsyncObserverDeliveriesUnused == nil ||
+		!o.config.ChainsyncObserverDeliveriesUnused() {
+		return false
+	}
+	if o.chainsyncLocalTipBlock == nil {
+		return true
+	}
+	localBlock, k := o.chainsyncLocalTipBlock()
+	return peerTip.BlockNumber > localBlock &&
+		peerTip.BlockNumber-localBlock > k
 }
 
 // holdUnreadObserver holds an observer's roll-forward callback while its
@@ -3650,7 +3666,9 @@ func (o *Ouroboros) observerDeliveriesUnused() bool {
 // once its pipelined replies are in, so the peer sends nothing further.
 //
 // The hold ends when the connection takes an ingress slot, when observer
-// deliveries are counted again, when the connection stops, or at
+// deliveries are counted again, when the local tip comes within the security
+// parameter of the peer's tip (see observerDeliveriesUnused), when the
+// connection stops, or at
 // catchUpBandWaitTimeout, after which the next header is held: a held
 // observer reads one header per bound. The held header is dropped as any
 // observer header is. The connection's cursor stopped at it
@@ -3698,7 +3716,7 @@ func (o *Ouroboros) holdUnreadObserver(
 			o.reconcileChainsyncIngressAdmission(ctx.ConnectionId, true) {
 			return nil
 		}
-		if !o.observerDeliveriesUnused() {
+		if !o.observerDeliveriesUnused(tip) {
 			o.scheduleHeaderResync(
 				ctx.ConnectionId,
 				time.Now(),

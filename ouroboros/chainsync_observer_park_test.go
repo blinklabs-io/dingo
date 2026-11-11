@@ -182,3 +182,92 @@ func TestObserverHoldIsBoundedBelowProtocolTimers(t *testing.T) {
 	default:
 	}
 }
+
+// setLocalTip makes f's node report a local tip at block and a security
+// parameter k, and returns the variable that moves the local tip.
+func (f *promotionGapFixture) setLocalTip(block, k uint64) *atomic.Uint64 {
+	var local atomic.Uint64
+	local.Store(block)
+	f.o.chainsyncLocalTipBlock = func() (uint64, uint64) {
+		return local.Load(), k
+	}
+	return &local
+}
+
+// Genesis selection is left only when every ChainSync connection, observers
+// included, has sent MsgAwaitReply. A held observer reads one header per bound
+// and never gets there, so an observer whose peer is within the security
+// parameter of the local tip must read instead of being held.
+func TestObserverNearLocalTipIsNotHeld(t *testing.T) {
+	t.Parallel()
+	f := newPromotionGapFixture(t)
+	var unused atomic.Bool
+	unused.Store(true)
+	parked := f.parkObservers(&unused)
+	f.o.catchUpBandWaitTimeout = 20 * time.Millisecond
+	// header(100, 1, ...) advertises block 2.
+	f.setLocalTip(2, 10)
+
+	require.NoError(t, f.header(100, 1, 0xaa))
+	select {
+	case <-parked:
+		t.Fatal("an observer whose peer is at the local tip must not be held")
+	default:
+	}
+}
+
+// A peer more than the security parameter ahead of the local tip is the
+// catch-up case the hold exists for, and the exit rule cannot be met there.
+func TestObserverFarAheadOfLocalTipIsHeld(t *testing.T) {
+	t.Parallel()
+	f := newPromotionGapFixture(t)
+	var unused atomic.Bool
+	unused.Store(true)
+	parked := f.parkObservers(&unused)
+	f.o.catchUpBandWaitTimeout = 20 * time.Millisecond
+	// header(100, 5000, ...) advertises block 5001.
+	f.setLocalTip(100, 10)
+
+	done := make(chan error, 1)
+	go func() { done <- f.header(100, 5000, 0xaa) }()
+	testutil.RequireReceive(
+		t, parked, 5*time.Second, "an observer far behind its peer must be held",
+	)
+	require.NoError(t, testutil.RequireReceive(
+		t, done, 5*time.Second, "the hold must end at its bound",
+	))
+}
+
+// A held observer is released once the local chain comes within the security
+// parameter of its peer, so that it can reach MsgAwaitReply.
+func TestHeldObserverResumesWhenLocalTipComesNear(t *testing.T) {
+	t.Parallel()
+	f := newPromotionGapFixture(t)
+	var unused atomic.Bool
+	unused.Store(true)
+	parked := f.parkObservers(&unused)
+	local := f.setLocalTip(100, 10)
+
+	done := make(chan error, 1)
+	go func() { done <- f.header(100, 5000, 0xaa) }()
+	testutil.RequireReceive(
+		t, parked, 5*time.Second, "the observer must stop reading",
+	)
+
+	local.Store(4995)
+	require.NoError(t, testutil.RequireReceive(
+		t, done, 5*time.Second, "a near local tip must release the observer",
+	))
+	timer := testutil.RequireReceive(
+		t, f.timers, 5*time.Second, "the resumed observer must re-intersect",
+	)
+	timer.fire()
+	evt := testutil.RequireReceive(
+		t, f.resyncCh, 5*time.Second, "the resumed observer must re-intersect",
+	)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonObserverResumed,
+		evt.Data.(event.ChainsyncResyncEvent).Reason,
+	)
+}
