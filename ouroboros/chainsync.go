@@ -818,13 +818,24 @@ func (o *Ouroboros) chainsyncClientAwaitReply(
 	if o.networkIngestHeld() || client.Status == chainsync.ClientStatusFailed {
 		return nil
 	}
-	if o.config.ChainsyncObserveAwaitReply != nil {
-		o.config.ChainsyncObserveAwaitReply(ctx.ConnectionId, client.Cursor)
-	}
 	// An observer's idle proof counts toward the Genesis exit, which needs
-	// every ChainSync connection idle, but it feeds no ledger ingress.
-	if client.ObservabilityOnly ||
-		!o.shouldPublishChainsyncToLedger(ctx.ConnectionId) {
+	// every ChainSync connection idle, but it feeds no ledger ingress. Its
+	// headers are dropped before they move the cursor, so its proof names the
+	// last point it sent instead.
+	observer := client.ObservabilityOnly ||
+		!o.shouldPublishChainsyncToLedger(ctx.ConnectionId)
+	if o.config.ChainsyncObserveAwaitReply != nil {
+		point := client.Cursor
+		if observer {
+			if sent, ok := o.chainsyncState.ClientProtocolPoint(
+				ctx.ConnectionId,
+			); ok {
+				point = sent
+			}
+		}
+		o.config.ChainsyncObserveAwaitReply(ctx.ConnectionId, point)
+	}
+	if observer {
 		return nil
 	}
 	if o.eventBus == nil {
@@ -1798,6 +1809,11 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 		return ochainsync.ErrStopSyncProcess
 	}
+	if o.chainsyncState != nil {
+		o.chainsyncState.RecordClientProtocolPoint(
+			ctx.ConnectionId, clientSession, point,
+		)
+	}
 	o.clearObserverHeaderGapAtRollback(ctx.ConnectionId, clientSession, point)
 	if !o.reconcileChainsyncIngressAdmission(
 		ctx.ConnectionId,
@@ -2098,6 +2114,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		}
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
+		if o.chainsyncState != nil {
+			o.chainsyncState.RecordClientProtocolPoint(
+				ctx.ConnectionId,
+				clientSession,
+				ocommon.NewPoint(blockSlot, blockHash),
+			)
+		}
 		_, span := tracing.StartHeader(
 			context.Background(),
 			tracing.StageHeaderReceived,
