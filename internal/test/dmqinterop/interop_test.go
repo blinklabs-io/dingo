@@ -236,6 +236,7 @@ func submitUntilAccepted(
 		msg := signedMessage(t, env, label)
 		verdict = submitToNode(t, env, msg, label+".cbor")
 		if verdict == "ACCEPTED" {
+			notePoolMessage()
 			return msg
 		}
 		t.Logf("dmq-node says %q; waiting for the devnet's stake", verdict)
@@ -252,18 +253,54 @@ const minSigDelay = 60 * time.Second
 
 var primeOnce sync.Once
 
+// poolMessages records when dmq-node last received a message from the devnet
+// pool. Every test signs as that one pool, so a test that starts inside
+// dmq-node's per-pool minimum after the previous test's message has its own
+// first message refused as too frequent, and dmq-node drops the connection
+// each time it redials until the minute is up.
+var poolMessages struct {
+	mu   sync.Mutex
+	last time.Time
+}
+
+// notePoolMessage records that dmq-node has just received a message from the
+// pool, or already held one when this was called.
+func notePoolMessage() {
+	poolMessages.mu.Lock()
+	defer poolMessages.mu.Unlock()
+	poolMessages.last = time.Now()
+}
+
+// waitPoolInterval blocks until dmq-node will accept another message from the
+// pool: its minimum plus a margin for the gap dmq-node times from when a
+// message reaches it, not from when it was sent.
+func waitPoolInterval(t *testing.T) {
+	t.Helper()
+	poolMessages.mu.Lock()
+	wait := time.Until(poolMessages.last.Add(minSigDelay + 2*time.Second))
+	poolMessages.mu.Unlock()
+	if wait > 0 {
+		t.Logf(
+			"waiting %s for the pool's interval at dmq-node",
+			wait.Round(time.Second),
+		)
+		time.Sleep(wait)
+	}
+}
+
 // primeNode gets a throwaway message into dmq-node first. dmq-node 0.7.2.1
 // does not announce the first message its mempool ever holds to any peer, no
 // matter whether the peer connected before or after it, so a test message sent
 // to a freshly started node would never reach Dingo. Later messages are
-// announced at once. The wait is dmq-node's per-pool minimum between messages,
-// which it would otherwise refuse the test message for.
+// announced at once. It then waits out dmq-node's per-pool minimum after the
+// pool's latest message, whether that is the primer or an earlier test's, which
+// dmq-node would otherwise refuse the test message for.
 func primeNode(t *testing.T, env environment) {
 	t.Helper()
 	primeOnce.Do(func() {
 		submitUntilAccepted(t, env, "primer")
-		time.Sleep(minSigDelay + 2*time.Second)
 	})
+	waitPoolInterval(t)
 }
 
 func dialNode(
@@ -362,6 +399,7 @@ func TestInteropDmqNodePullsAMessageFromDingo(t *testing.T) {
 	dialNode(t, env, fetching)
 	waitFor(t, env.timeout, "a second Dingo fetches it from dmq-node",
 		func() bool { return fetching.Mempool().Has(msg.ID()) })
+	notePoolMessage()
 	got, ok := fetching.Mempool().Get(msg.ID())
 	require.True(t, ok)
 	require.Equal(t, msg.Payload.MessageBody, got.Payload.MessageBody)
@@ -414,6 +452,7 @@ func TestInteropDmqNodeAcceptsAPoolsSecondMessageFromDingo(t *testing.T) {
 	)
 	waitFor(t, env.timeout, "a second Dingo fetches the second message",
 		func() bool { return fetching.Mempool().Has(second.ID()) })
+	notePoolMessage()
 	require.Equal(
 		t, refusalsBefore, sigTooFrequentRefusals(t, env),
 		"dmq-node refused a message as too frequent",

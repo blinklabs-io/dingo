@@ -46,7 +46,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
-	"golang.org/x/sync/errgroup"
 )
 
 // txInfoIndexWaits is the wait before each round that fetches again the
@@ -119,90 +118,6 @@ func keepNtCConnAlive(
 		_, _, _, _ = mon.Client.GetSizes()
 		_ = mon.Client.Release()
 	}
-}
-
-// txInfoFlushRounds is how many rounds of concurrent /tx_info requests a
-// mid-epoch flush holds. A flush waits for its slowest request before the
-// chain is read further, so with a single round one stalled request leaves
-// every other slot idle; measured on mainnet at 250 hashes and 4 requests in
-// flight, single-round flushes fetched about half of what the same Koios host
-// answered with requests kept in flight.
-const txInfoFlushRounds = 4
-
-// txInfoFlushThreshold is how many hashes accumulate before a mid-epoch
-// flush.
-func txInfoFlushThreshold(koios *koiosparity.KoiosClient) int {
-	return txInfoFlushRounds * koios.TxInfoConcurrency() * koios.TxInfoBatchSize()
-}
-
-// fetchTxInfoChunks fetches every chunk with at most concurrency requests
-// in flight, then, after each wait in waits, fetches again each
-// chunk that failed with koiosparity.ErrTxInfoMissing, or with any failure
-// that is not koiosparity.ErrKoiosPermanent when retryTransient is set. A
-// chunk is fetched whole every time, so a result is only ever a complete
-// chunk. Without retryTransient other failures are not fetched again: the
-// shared Koios client has already retried them, and a caller racing Dingo's
-// rollback window cannot wait longer. It returns ctx's error when ctx ends
-// during a fetch or a wait, and the caller must then discard results and
-// errs.
-func fetchTxInfoChunks(
-	ctx context.Context,
-	chunks [][]string,
-	concurrency int,
-	fetch func(context.Context, []string) ([]koiosparity.KoiosTxInfoItem, error),
-	waits []time.Duration,
-	retryTransient bool,
-	wait func(context.Context, time.Duration) error,
-	logf func(format string, args ...any),
-) ([][]koiosparity.KoiosTxInfoItem, []error, error) {
-	results := make([][]koiosparity.KoiosTxInfoItem, len(chunks))
-	errs := make([]error, len(chunks))
-	fetchAll := func(indexes []int) error {
-		var g errgroup.Group
-		g.SetLimit(concurrency)
-		for _, i := range indexes {
-			g.Go(func() error {
-				results[i], errs[i] = fetch(ctx, chunks[i])
-				return nil
-			})
-		}
-		_ = g.Wait() // failures are per chunk in errs
-		return ctx.Err()
-	}
-	pending := make([]int, 0, len(chunks))
-	for i := range chunks {
-		pending = append(pending, i)
-	}
-	if err := fetchAll(pending); err != nil {
-		return nil, nil, err
-	}
-	for _, d := range waits {
-		pending = pending[:0]
-		for i, err := range errs {
-			if err == nil {
-				continue
-			}
-			if errors.Is(err, koiosparity.ErrTxInfoMissing) ||
-				(retryTransient && !errors.Is(err, koiosparity.ErrKoiosPermanent)) {
-				pending = append(pending, i)
-			}
-		}
-		if len(pending) == 0 {
-			break
-		}
-		logf(
-			"nodeparity: koios has not answered every pending tx yet; "+
-				"fetching %d chunk(s) again in %s: %v",
-			len(pending), d, errs[pending[0]],
-		)
-		if err := wait(ctx, d); err != nil {
-			return nil, nil, err
-		}
-		if err := fetchAll(pending); err != nil {
-			return nil, nil, err
-		}
-	}
-	return results, errs, nil
 }
 
 var errAcquireWithoutLocalStateQuery = errors.New(
@@ -561,7 +476,9 @@ type EpochResult struct {
 	// Timing breakdown, purely diagnostic: which phase actually spent the
 	// wall-clock time this epoch. Any of the three can dominate depending on
 	// how much chain activity the epoch carried, so the split is reported
-	// every epoch rather than inferred.
+	// every epoch rather than inferred. TxInfoFlushCount and
+	// TxInfoFlushElapsed count the times, and the time in all, the chain was
+	// not read because the reconstruction waited for /tx_info results.
 	TxInfoFlushCount              int
 	TxInfoFlushElapsed            time.Duration
 	ProtocolParamsAndStakeElapsed time.Duration
@@ -780,38 +697,6 @@ func nextSessionRetryDelay(
 	return delay, min(delay*2, maxDelay)
 }
 
-// applyTxInfoResults applies each successful chunk's tx_info changes to
-// utxoRefs and reports whether any chunk failed -- pulled out of
-// flushPendingTxInfos, which threads that result straight into
-// utxoTaintCause, so a test can drive the actual failure decision
-// directly with synthetic chunks/results/errs instead of needing a real
-// Koios server: the fix for a Koios outage being reported as a false "utxo
-// set match" was pinned only at utxoVerdict, the function that reads
-// utxoTaintCause, never at anything that decides what sets it. Does
-// no network I/O itself -- chunks/results/errs are already-fetched,
-// matching the same already-fetched-input shape evaluatePoolStake uses for
-// the identical reason.
-func applyTxInfoResults(
-	utxoRefs UTxOSet,
-	chunks [][]string,
-	results [][]koiosparity.KoiosTxInfoItem,
-	errs []error,
-	logf func(format string, args ...any),
-) (anyFailed bool) {
-	for i, chunk := range chunks {
-		if err := errs[i]; err != nil {
-			logf(
-				"nodeparity: koios tx_info fetch failed for %d pending tx(es): %v",
-				len(chunk), err,
-			)
-			anyFailed = true
-			continue
-		}
-		UTxOChanges(utxoRefs, results[i])
-	}
-	return anyFailed
-}
-
 // allegraCrossing recognises the first block past the Allegra hard fork, so
 // the hard fork's redeem-UTxO removal is applied exactly once on the way
 // across. A baseline taken after the hard fork never sees the crossing and
@@ -962,14 +847,11 @@ func RunFromGenesis(
 	}
 
 	var (
-		lastEpoch          uint64
-		haveLastEpoch      bool
-		utxoRefs           UTxOSet
-		utxoAttempted      bool
-		pendingTxHashes    []string
-		crossing           allegraCrossing
-		txInfoFlushCount   int
-		txInfoFlushElapsed time.Duration
+		lastEpoch     uint64
+		haveLastEpoch bool
+		utxoRefs      UTxOSet
+		utxoAttempted bool
+		crossing      allegraCrossing
 		// lastPoint is the most recent chain point either callback below has
 		// started processing, updated before any of that point's own work
 		// runs (see the reconnect loop's doc comment further down) -- a
@@ -1064,10 +946,11 @@ func RunFromGenesis(
 	// sessionCtx is cancelled when the chainsync session calling it ends,
 	// which closes the lookup's connections, so a callback blocked in one
 	// returns: the reconnect loop waits for that callback before starting the
-	// next session. Every other query the callbacks make -- the UTxO baseline
-	// captures, the /tx_info flushes and the epoch checks -- runs under the
-	// same sessionCtx for the same reason; only the lookup carries a
-	// deadline, since a whole-UTxO reply can legitimately take minutes.
+	// next session. The UTxO baseline captures, the epoch checks and every
+	// wait for /tx_info results run under the same sessionCtx for the same
+	// reason; only the lookup carries a deadline, since a whole-UTxO reply
+	// can legitimately take minutes. The /tx_info fetches themselves run
+	// under ctx, so a session end leaves them fetching for the next session.
 	epochAt := func(
 		sessionCtx context.Context, point pcommon.Point,
 	) (epoch uint64, skip bool, err error) {
@@ -1135,107 +1018,78 @@ func RunFromGenesis(
 		return 0, false, err
 	}
 
-	// One flush always runs before each epoch-boundary comparison regardless
-	// of the threshold.
-	flushThreshold := txInfoFlushThreshold(koios)
+	txInfos := newTxInfoPipeline(
+		ctx,
+		func(
+			ctx context.Context, chunk []string,
+		) ([]koiosparity.KoiosTxInfoItem, error) {
+			return fetchTxInfosCached(ctx, koios, cache, network, chunk)
+		},
+		koios.TxInfoBatchSize(), koios.TxInfoConcurrency(),
+		txInfoWindowRounds*koios.TxInfoConcurrency(),
+		txInfoWaits, captures != nil, waitStakeRetry, logf,
+	)
+	defer txInfos.close()
 
-	// flushPendingTxInfos applies every buffered transaction hash's
-	// input/output changes to utxoRefs. Hashes accumulate across blocks
-	// rather than being fetched per block: the cost of a /tx_info lookup is
-	// dominated by the round trip to Koios, not by payload size, so one call
-	// per block with a transaction in it collapses a run's epoch cadence
-	// from seconds to tens of minutes once chain activity picks up.
+	// rebaselineAfterTxInfoFailure replaces the reconstruction after a
+	// /tx_info chunk failed for good (see txInfoPipeline): it is now missing
+	// an unknown set of spends and creates, so comparing it against Dingo
+	// could report a false divergence. Re-baselining at point, the block the
+	// caller is at -- reusing captureGenesisBaseline, the same recovery used
+	// on rollback -- discards it for Dingo's own answer, and every hash
+	// queued so far belongs to a block at or before point. The epoch is
+	// tainted, since its comparison would now check Dingo against itself.
 	//
-	// Splits pendingTxHashes into chunks of the Koios client's
-	// TxInfoBatchSize and fetches them with its TxInfoConcurrency in flight
-	// rather than one at a time: confirmed live that individual requests to
-	// this Koios mirror stall often enough that sequential batches stack
-	// their stalls additively (multiple ~20s-60s stalls in a single busy
-	// epoch, one after another). Concurrent fetching lets independent
-	// batches' stalls overlap instead.
-	//
-	// Chunk results are applied to utxoRefs in their original chunk order
-	// (not completion order) once every fetch finishes: two batches can
-	// still be causally related (a UTxO created in an earlier block and
-	// spent in a later one, both pending at flush time), so applying them
-	// out of order could silently no-op a spend against a UTxO that
-	// (out of order) looks like it doesn't exist yet.
-	//
-	// point is the chain point the caller is currently at (the block just
-	// processed), used only to re-baseline if any chunk fails: a failed
-	// chunk means the reconstruction is now missing an unknown set of
-	// spends/creates, so comparing it against Dingo's live answer could
-	// report a false divergence. Re-baselining at the current point --
-	// reusing captureGenesisBaseline, the same recovery already used on
-	// rollback -- discards the untrustworthy incremental state in favor of
-	// Dingo's own live truth, rather than silently comparing a
-	// known-incomplete set.
-	//
-	// A chunk Koios had no result for is fetched again after each wait in
-	// txInfoIndexWaits (see fetchTxInfoChunks) before it counts as failed.
-	//
-	// It returns sessionCtx's error, and changes nothing, when the session
-	// ended during the fetches or the waits between them: they failed because of the cancellation, not
-	// because of Koios, so applying the chunks that did succeed and
-	// re-baselining would discard an exact reconstruction. The hashes stay
-	// buffered and the next session fetches each one once. A session that
-	// ends during the re-baseline after a real failure leaves utxoRefs nil,
-	// as any failed re-baseline does.
+	// It returns sessionCtx's error when the session ended during the
+	// re-baseline, leaving utxoRefs nil, as any failed re-baseline does.
+	rebaselineAfterTxInfoFailure := func(
+		sessionCtx context.Context, point pcommon.Point,
+	) error {
+		txInfos.reset()
+		taint(taintCauseTxInfo)
+		refs, err := captureGenesisBaseline(
+			sessionCtx, dingoAddr, magic, point,
+		)
+		if err != nil {
+			utxoRefs = nil
+			if sessionErr := sessionCtx.Err(); sessionErr != nil {
+				return sessionErr
+			}
+			logf(
+				"nodeparity: re-baseline after tx_info failure also failed "+
+					"(UTxO comparison skipped this epoch, will retry at the "+
+					"next epoch boundary): %v",
+				err,
+			)
+			return nil
+		}
+		utxoRefs = refs
+		logf(
+			"nodeparity: re-baselined the UTxO reconstruction after a "+
+				"tx_info failure: %d refs",
+			len(refs),
+		)
+		return nil
+	}
+
+	// flushPendingTxInfos applies every queued transaction hash to
+	// utxoRefs, so the reconstruction is exact through point. It returns
+	// sessionCtx's error, having applied only what had arrived, when the
+	// session ended while it waited: the rest stays queued for the next
+	// session.
 	flushPendingTxInfos := func(
 		sessionCtx context.Context, point pcommon.Point,
 	) error {
-		if utxoRefs == nil || len(pendingTxHashes) == 0 {
+		if utxoRefs == nil {
+			txInfos.reset()
 			return nil
 		}
-		batch := koios.TxInfoBatchSize()
-		chunks := make([][]string, 0, (len(pendingTxHashes)+batch-1)/batch)
-		for start := 0; start < len(pendingTxHashes); start += batch {
-			end := min(start+batch, len(pendingTxHashes))
-			chunks = append(chunks, pendingTxHashes[start:end])
-		}
-		flushStart := time.Now()
-		results, errs, err := fetchTxInfoChunks(
-			sessionCtx, chunks, koios.TxInfoConcurrency(),
-			func(
-				ctx context.Context, chunk []string,
-			) ([]koiosparity.KoiosTxInfoItem, error) {
-				return fetchTxInfosCached(ctx, koios, cache, network, chunk)
-			},
-			txInfoWaits, captures != nil, waitStakeRetry, logf,
-		)
+		failed, err := txInfos.flush(sessionCtx, utxoRefs)
 		if err != nil {
 			return err
 		}
-		txInfoFlushCount++
-		txInfoFlushElapsed += time.Since(flushStart)
-
-		failed := applyTxInfoResults(utxoRefs, chunks, results, errs, logf)
-		pendingTxHashes = pendingTxHashes[:0]
-
 		if failed {
-			taint(taintCauseTxInfo)
-			refs, err := captureGenesisBaseline(
-				sessionCtx, dingoAddr, magic, point,
-			)
-			if err != nil {
-				utxoRefs = nil
-				if sessionErr := sessionCtx.Err(); sessionErr != nil {
-					return sessionErr
-				}
-				logf(
-					"nodeparity: re-baseline after tx_info failure also failed "+
-						"(UTxO comparison skipped this epoch, will retry at the "+
-						"next epoch boundary): %v",
-					err,
-				)
-			} else {
-				utxoRefs = refs
-				logf(
-					"nodeparity: re-baselined the UTxO reconstruction after a "+
-						"tx_info failure: %d refs",
-					len(refs),
-				)
-			}
+			return rebaselineAfterTxInfoFailure(sessionCtx, point)
 		}
 		return nil
 	}
@@ -1365,12 +1219,12 @@ func RunFromGenesis(
 						// exact block, and the next block of its epoch would
 						// be checked live, which Dingo refuses as too old.
 						// Registered first, so it runs after the capture is
-						// handed back. This block's hashes are dropped from
-						// the buffer if no flush applied them, so the
-						// redelivery fetches each once; transactions already
-						// applied are applied again, which deletes and adds
-						// the same entries.
-						ownPending := 0
+						// handed back. This block's hashes stay queued on the
+						// pipeline, whose fetches outlive the session, and the
+						// redelivery does not queue them again, so each is
+						// fetched once.
+						blockKey := fmt.Sprintf("%d/%x", point.Slot, point.Hash)
+						ownPending := false
 						defer func() {
 							if retErr == nil {
 								return
@@ -1379,8 +1233,8 @@ func RunFromGenesis(
 								return
 							}
 							lastPoint = parentPoint
-							if n := len(pendingTxHashes); ownPending > 0 && n >= ownPending {
-								pendingTxHashes = pendingTxHashes[:n-ownPending]
+							if ownPending {
+								txInfos.hold(blockKey)
 							}
 						}()
 						// Only a block whose callback succeeded counts: a
@@ -1445,21 +1299,30 @@ func RunFromGenesis(
 									)
 								}
 							}
-							for _, tx := range block.Transactions() {
-								pendingTxHashes = append(
-									pendingTxHashes, tx.Hash().String(),
+							// Fetched while later blocks are read,
+							// rather than in rounds between them: a
+							// round waits on its slowest request, and on
+							// any retry wait, with every other slot idle.
+							var hashes []string
+							if !txInfos.redelivered(blockKey) {
+								for _, tx := range block.Transactions() {
+									hashes = append(hashes, tx.Hash().String())
+								}
+							}
+							failed, err := txInfos.add(
+								sessionCtx, utxoRefs, hashes...,
+							)
+							if err == nil && failed {
+								err = rebaselineAfterTxInfoFailure(
+									sessionCtx, point,
 								)
 							}
-							ownPending = len(block.Transactions())
-							if len(pendingTxHashes) >= flushThreshold {
-								if err := flushPendingTxInfos(
-									sessionCtx, point,
-								); err != nil {
-									return callbackErr(
-										"flush tx_info at slot %d: %w",
-										point.Slot, err,
-									)
-								}
+							ownPending = true
+							if err != nil {
+								return callbackErr(
+									"flush tx_info at slot %d: %w",
+									point.Slot, err,
+								)
 							}
 						}
 
@@ -1730,10 +1593,7 @@ func RunFromGenesis(
 						result.UTxOElapsed = time.Since(utxoStart)
 						utxoTaintCause = ""
 
-						result.TxInfoFlushCount = txInfoFlushCount
-						result.TxInfoFlushElapsed = txInfoFlushElapsed
-						txInfoFlushCount = 0
-						txInfoFlushElapsed = 0
+						result.TxInfoFlushCount, result.TxInfoFlushElapsed = txInfos.takeWaits()
 
 						report(result)
 						// Only once reported: a process that dies first finds
@@ -1756,7 +1616,7 @@ func RunFromGenesis(
 						// last fully processed: the roll-forward callback
 						// buffers a block's transactions immediately after
 						// recording its point, and can fail only later, so
-						// utxoRefs plus pendingTxHashes are exact through it.
+						// utxoRefs plus the queued hashes are exact through it.
 						// ChainSync resumes after the intersection, so that
 						// block is not delivered again.
 						rollbackInvalidates := !pointsEqual(point, lastPoint)
@@ -1785,7 +1645,7 @@ func RunFromGenesis(
 						// applying them on top of the re-baselined (or
 						// disabled) reconstruction below.
 						if rollbackInvalidates {
-							pendingTxHashes = pendingTxHashes[:0]
+							txInfos.reset()
 							crossing.rollback(point.Slot)
 						}
 
