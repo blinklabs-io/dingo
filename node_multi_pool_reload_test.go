@@ -185,11 +185,17 @@ func TestKeyWatchRunsWhileAnyPoolCanReload(t *testing.T) {
 	n := newTwoPoolSignNode(t)
 	n.first.config.blockProducerPools[0].ShelleyKESAgentMode = kesagent.ModeServeKey
 	n.first.config.shelleyKeyWatchInterval = time.Millisecond
-	n.first.startKeyReloadLoops()
-	t.Cleanup(n.first.stopKeyReloadLoops)
+	n.startLoops(t)
 	require.NotContains(
 		t,
 		n.first.logs.String(),
 		"ignored in KES agent serve-key mode",
 	)
+
+	// The watch is running: a new certificate for the sign-mode pool is
+	// picked up from its file.
+	n.second.rotateTo(t, 2, nil)
+
+	n.waitReloaded(t, n.pp.poolID)
+	n.second.requireLiveCounter(t, 2)
 }
