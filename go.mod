@@ -1,6 +1,6 @@
 module github.com/blinklabs-io/dingo
 
-go 1.26.10
+go 1.26.11
 
 require (
 	cloud.google.com/go/storage v1.68.0
@@ -18,9 +18,9 @@ require (
 	github.com/aws/smithy-go v1.28.8
 	github.com/blinklabs-io/bark v0.2.0
 	github.com/blinklabs-io/bursa v0.21.1
-	github.com/blinklabs-io/gouroboros v0.218.2
+	github.com/blinklabs-io/gouroboros v0.219.0
 	github.com/blinklabs-io/ouroboros-mock v0.21.2
-	github.com/blinklabs-io/plutigo v0.11.6
+	github.com/blinklabs-io/plutigo v0.12.1
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.22.0
@@ -52,7 +52,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.47.0
 	go.uber.org/automaxprocs v1.6.0
 	go.uber.org/goleak v1.3.0
-	golang.org/x/crypto v0.58.0
+	golang.org/x/crypto v0.58.1-0.20261009181718-2f1f834330b2
 	golang.org/x/net v0.62.0
 	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.49.0

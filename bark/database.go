@@ -60,7 +60,10 @@ type catalogReconciliationRetry struct {
 	delay       time.Duration
 }
 
-func (r *catalogReconciliationRetry) allow(destination string, now time.Time) bool {
+func (r *catalogReconciliationRetry) allow(
+	destination string,
+	now time.Time,
+) bool {
 	return r.destination != destination || !now.Before(r.nextAttempt)
 }
 
@@ -149,7 +152,7 @@ type databaseServiceHandler struct {
 	busy                          bool
 	diagnostic                    chan struct{}
 	activeProgressStreams         int
-	progressStreamsByFingerprint  map[string]int
+	progressStreamsByClient       map[string]int
 	progressStreamLifetime        time.Duration
 	catalogErr                    error
 	// catalogCloudDestination is set only after this handler reconciles the
@@ -176,16 +179,10 @@ func newDatabaseServiceHandler(
 func (h *databaseServiceHandler) admitProgressStream(
 	ctx context.Context,
 ) (func(), error) {
-	id := peerIdentityFromContext(ctx)
-	if !id.Verified || id.Fingerprint == "" {
-		return nil, connect.NewError(
-			connect.CodeUnauthenticated,
-			errAnonymousDatabaseCall,
-		)
-	}
+	clientKey := requestClientFromContext(ctx)
 	h.mu.Lock()
 	global := h.activeProgressStreams
-	client := h.progressStreamsByFingerprint[id.Fingerprint]
+	client := h.progressStreamsByClient[clientKey]
 	var admissionErr error
 	switch {
 	case global >= maxProgressStreams:
@@ -195,11 +192,11 @@ func (h *databaseServiceHandler) admitProgressStream(
 			"too many active operation progress streams for client",
 		)
 	default:
-		if h.progressStreamsByFingerprint == nil {
-			h.progressStreamsByFingerprint = make(map[string]int)
+		if h.progressStreamsByClient == nil {
+			h.progressStreamsByClient = make(map[string]int)
 		}
 		h.activeProgressStreams++
-		h.progressStreamsByFingerprint[id.Fingerprint]++
+		h.progressStreamsByClient[clientKey]++
 		global++
 		client++
 	}
@@ -208,7 +205,7 @@ func (h *databaseServiceHandler) admitProgressStream(
 		h.bark.config.Logger.Warn(
 			"rejected bark operation progress stream",
 			"component", "bark",
-			"client_cert_fingerprint", id.Fingerprint,
+			"client_address", clientKey,
 			"active_streams", global,
 			"client_active_streams", client,
 		)
@@ -220,38 +217,41 @@ func (h *databaseServiceHandler) admitProgressStream(
 	h.bark.config.Logger.Debug(
 		"admitted bark operation progress stream",
 		"component", "bark",
-		"client_cert_fingerprint", id.Fingerprint,
+		"client_address", clientKey,
 		"active_streams", global,
 		"client_active_streams", client,
 	)
 	return func() {
 		h.mu.Lock()
 		h.activeProgressStreams--
-		h.progressStreamsByFingerprint[id.Fingerprint]--
-		if h.progressStreamsByFingerprint[id.Fingerprint] == 0 {
-			delete(h.progressStreamsByFingerprint, id.Fingerprint)
+		h.progressStreamsByClient[clientKey]--
+		if h.progressStreamsByClient[clientKey] == 0 {
+			delete(h.progressStreamsByClient, clientKey)
 		}
 		global := h.activeProgressStreams
-		client := h.progressStreamsByFingerprint[id.Fingerprint]
+		client := h.progressStreamsByClient[clientKey]
 		h.mu.Unlock()
 		h.bark.config.Logger.Debug(
 			"released bark operation progress stream",
 			"component", "bark",
-			"client_cert_fingerprint", id.Fingerprint,
+			"client_address", clientKey,
 			"active_streams", global,
 			"client_active_streams", client,
 		)
 	}, nil
 }
 
-func (h *databaseServiceHandler) initializeSnapshotCatalog(ctx context.Context) {
+func (h *databaseServiceHandler) initializeSnapshotCatalog(
+	ctx context.Context,
+) {
 	b := h.bark
 	if b.config.SnapshotDir != "" {
 		err := lifecycle.EnsureSnapshotCatalogContext(ctx, b.config.SnapshotDir)
 		if errors.Is(err, lifecycle.ErrSnapshotCatalogIncomplete) {
 			b.config.Logger.Warn(
 				"list snapshots: some entries could not be read, omitting them from the catalog",
-				"error", err,
+				"error",
+				err,
 			)
 		} else {
 			h.catalogErr = err
@@ -1219,7 +1219,12 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 	if !errors.Is(localErr, os.ErrNotExist) {
 		h.bark.config.Logger.Warn(
 			"local snapshot manifest is unreadable, checking the cloud destination",
-			"component", "bark", "snapshot_id", snapshotID, "error", localErr,
+			"component",
+			"bark",
+			"snapshot_id",
+			snapshotID,
+			"error",
+			localErr,
 		)
 	}
 	cloudURI, exists, cloudErr := h.cloudSnapshotExists(ctx, snapshotID)
@@ -1271,13 +1276,19 @@ func (h *databaseServiceHandler) resolveCloudAfterLocalIntegrityFailure(
 	if cloudErr == nil && exists {
 		logger.Warn(
 			"using cloud mirror of snapshot whose local copy failed verification",
-			"component", "bark", "snapshot_id", snapshotID,
+			"component",
+			"bark",
+			"snapshot_id",
+			snapshotID,
 		)
 		return cloudURI, nil
 	}
 	cloudOutcome := errors.New("no copy in the configured cloud destination")
 	if cloudErr != nil {
-		cloudOutcome = fmt.Errorf("cloud copy failed authentication or could not be read: %w", cloudErr)
+		cloudOutcome = fmt.Errorf(
+			"cloud copy failed authentication or could not be read: %w",
+			cloudErr,
+		)
 	}
 	return "", connect.NewError(
 		code,
@@ -1438,7 +1449,10 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 		); err != nil {
 			return nil, connect.NewError(
 				connect.CodeInternal,
-				fmt.Errorf("update snapshot catalog after cloud delete: %w", err),
+				fmt.Errorf(
+					"update snapshot catalog after cloud delete: %w",
+					err,
+				),
 			)
 		}
 	}
@@ -1746,7 +1760,9 @@ func (h *databaseServiceHandler) StreamOperationProgress(
 	if !ok {
 		return connect.NewError(
 			connect.CodeInternal,
-			errors.New("operation progress stream write deadline is unavailable"),
+			errors.New(
+				"operation progress stream write deadline is unavailable",
+			),
 		)
 	}
 	release, err := h.admitProgressStream(ctx)
