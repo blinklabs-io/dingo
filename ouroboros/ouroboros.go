@@ -330,6 +330,9 @@ type Ouroboros struct {
 	// chainsyncCursorEpochs counts the in-place re-intersects of each
 	// connection, guarded by chainsyncReintersectMu.
 	chainsyncCursorEpochs map[ouroboros.ConnectionId]uint64
+	// chainsyncLostCursorReintersects records when each connection was last
+	// re-intersected for a lost cursor, guarded by chainsyncReintersectMu.
+	chainsyncLostCursorReintersects map[ouroboros.ConnectionId]time.Time
 	// chainsyncReintersectReturnedHook runs once an in-place re-intersect has
 	// returned and the re-intersected sync is already running. Tests use it to
 	// hold the resync goroutine while the new cursor streams.
@@ -971,7 +974,10 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncReintersecting: make(
 			map[ouroboros.ConnectionId]*chainsyncReintersectRun,
 		),
-		chainsyncCursorEpochs:    make(map[ouroboros.ConnectionId]uint64),
+		chainsyncCursorEpochs: make(map[ouroboros.ConnectionId]uint64),
+		chainsyncLostCursorReintersects: make(
+			map[ouroboros.ConnectionId]time.Time,
+		),
 		futureHeaderResyncCtx:    futureHeaderResyncCtx,
 		futureHeaderResyncCancel: futureHeaderResyncCancel,
 		blockDecodeCache: newDecodeCacheWithByteLimit[gledger.Block](
@@ -1441,6 +1447,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.forgetServedActivity(connId)
 	o.chainsyncReintersectMu.Lock()
 	delete(o.chainsyncCursorEpochs, connId)
+	delete(o.chainsyncLostCursorReintersects, connId)
 	o.chainsyncReintersectMu.Unlock()
 
 	// Counts keep-alive pong timeouts.

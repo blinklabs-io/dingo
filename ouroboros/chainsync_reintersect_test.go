@@ -814,3 +814,51 @@ func TestDrainedRepliesOfReintersectingClientAreDropped(t *testing.T) {
 	)
 	require.NotNil(t, evt.Data.(ledger.ChainsyncEvent).BlockHeader)
 }
+
+// "Rollback point not found" means the peer's cursor and the local view of its
+// chain no longer line up: a header that does not fit and whose ancestry the
+// node does not hold, or a rollback to a point it does not hold. A fresh
+// intersection is the recovery either way, and the connection is not needed
+// for it.
+func TestChainsyncResyncRollbackNotFoundReintersectsInPlace(t *testing.T) {
+	t.Parallel()
+	f := newReintersectFixture(t, 10*time.Second)
+
+	f.publish(event.ChainsyncResyncReasonRollbackNotFound)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool { return f.findIntersects.Load() == 2 },
+		5*time.Second,
+		"a cursor that lost its place must re-intersect",
+	)
+	require.True(t, f.connected(),
+		"finding a new intersection must keep the connection")
+}
+
+// A peer whose chain the node cannot follow answers every fresh intersection
+// with headers that fail the same way. Closing the connection hands that peer
+// to the governor's reconnect backoff; re-intersecting it in place again would
+// loop with nothing to slow it.
+func TestChainsyncResyncRepeatedRollbackNotFoundCloses(t *testing.T) {
+	t.Parallel()
+	f := newReintersectFixture(t, 10*time.Second)
+	returned := make(chan struct{}, 1)
+	f.o.chainsyncReintersectReturnedHook = func() { returned <- struct{}{} }
+
+	f.publish(event.ChainsyncResyncReasonRollbackNotFound)
+	testutil.RequireReceive(
+		t, returned, 5*time.Second, "the first re-intersect must return",
+	)
+	require.True(t, f.connected())
+	f.publish(event.ChainsyncResyncReasonRollbackNotFound)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool { return !f.connected() },
+		10*time.Second,
+		"a cursor that loses its place again at once must close",
+	)
+	require.EqualValues(t, 2, f.findIntersects.Load(),
+		"the repeat must not re-intersect")
+}

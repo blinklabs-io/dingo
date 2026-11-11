@@ -3794,6 +3794,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			}
 			for _, connId := range connIds {
 				if chainsyncResyncReintersects(e.Reason) &&
+					o.claimLostCursorReintersect(connId, e.Reason) &&
 					o.startChainsyncReintersect(ctx, connId, e.Reason) {
 					continue
 				}
@@ -3815,8 +3816,49 @@ func chainsyncResyncReintersects(reason string) bool {
 		event.ChainsyncResyncReasonLocalLedgerRollback:
 		return false
 	}
+	// A cursor that lost its place is recovered by a fresh intersection too,
+	// but unlike the local reasons it can also mean a peer the node cannot
+	// follow; see claimLostCursorReintersect.
+	if reason == event.ChainsyncResyncReasonRollbackNotFound {
+		return true
+	}
 	return event.IsLocalChainsyncResyncReason(reason) &&
 		!chainsyncResyncDeniesPeer(reason)
+}
+
+// chainsyncLostCursorReintersectCooldown is how long after re-intersecting a
+// connection for a lost cursor the next such resync closes it instead.
+const chainsyncLostCursorReintersectCooldown = 30 * time.Second
+
+// claimLostCursorReintersect reports whether a resync for reason may
+// re-intersect connId in place. Every reason but "rollback point not found"
+// may. That one is raised when a header does not fit and its ancestry is
+// unknown, or a rollback names a point the node does not hold. While syncing
+// it is nearly always the local view of an honest peer's cursor gone stale,
+// which a fresh intersection repairs. A peer on a chain the node cannot follow
+// raises it again from every intersection, so a repeat within
+// chainsyncLostCursorReintersectCooldown closes the connection, as every such
+// resync used to, and the peer governor's reconnect backoff applies.
+func (o *Ouroboros) claimLostCursorReintersect(
+	connId ouroboros.ConnectionId,
+	reason string,
+) bool {
+	if reason != event.ChainsyncResyncReasonRollbackNotFound {
+		return true
+	}
+	now := time.Now()
+	o.chainsyncReintersectMu.Lock()
+	defer o.chainsyncReintersectMu.Unlock()
+	if run := o.chainsyncReintersecting[connId]; run != nil && !run.settled {
+		// The run in progress absorbs this resync.
+		return true
+	}
+	if last, ok := o.chainsyncLostCursorReintersects[connId]; ok &&
+		now.Sub(last) < chainsyncLostCursorReintersectCooldown {
+		return false
+	}
+	o.chainsyncLostCursorReintersects[connId] = now
+	return true
 }
 
 // closeConnectionForChainsyncResync drops connId's observed header history and
