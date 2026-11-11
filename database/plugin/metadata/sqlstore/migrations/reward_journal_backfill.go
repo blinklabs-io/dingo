@@ -66,7 +66,10 @@ type rewardJournalStatements struct {
 // source hash that is no transaction's hash, and credited at the first slot of
 // an epoch. A stake-reward source is derived from the reward, while a Dijkstra
 // direct deposit's source is its transaction's hash. Every other credit is an
-// event credit.
+// event credit. A pre-snapshot MIR or governance credit at an epoch's first
+// slot matches too and is stored as a round credit; that keeps its place
+// before the slot's withdrawals, because the epoch transition that applies it
+// runs before the transactions of the block at that slot.
 func legacyRoundCreditPredicate(lengthFn, tx string) string {
 	return "d.withdrawal = FALSE AND " + legacyRoundSource(lengthFn, tx)
 }

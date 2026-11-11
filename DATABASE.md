@@ -2107,7 +2107,10 @@ migration with the legacy table intact. The contract phase drops
 `account_reward_delta` with whatever indexes remain on it (migration 59 already
 dropped its `tx_hash` and `withdrawal` indexes). The migration needs the epoch table to recognise round
 credits: a credit at a slot with no `epoch` row is kept as an event credit, which
-changes only how the row is stored.
+changes only how the row is stored. A pre-snapshot MIR or governance credit at
+an epoch's first slot is stored as a round credit; like a round credit it
+precedes that slot's withdrawals, since the epoch transition that applied it
+ran before the block's transactions.
 
 **Reward eligibility recheck.** Key `dingo:reward-credit:eligibility-recheck`
 (`models.RewardEligibilityRecheckKey`) holds the JSON list of credentials whose
