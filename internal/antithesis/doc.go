@@ -12,8 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package antithesis is a thin shim over the Antithesis Go SDK. Built with the
-// "antithesis" tag it forwards to the SDK's assert and lifecycle packages;
-// without the tag every function is a no-op, so call sites need no build tags
-// and default builds carry no SDK dependency.
+// Package antithesis holds the build-tag switch for Antithesis instrumentation.
+//
+// Assertions must NOT be wrapped. The Antithesis SDK requires the message
+// argument of every assert call to be a string literal at the call site: the
+// instrumentor builds its assertion catalog from those literals, and the
+// message names the test property. A forwarding wrapper passes a variable, so
+// its callers would never be cataloged. Call sites therefore import the SDK's
+// assert package directly and gate on Enabled, which is a constant, so the
+// compiler drops the block in default builds:
+//
+//	if antithesis.Enabled {
+//		assert.Always(ok, "ledger tip never moves backwards", details)
+//	}
+//
+// Built with the "antithesis" tag, Enabled is true and SetupComplete reaches
+// the SDK's lifecycle package. Without the tag, Enabled is false and
+// SetupComplete does nothing.
 package antithesis

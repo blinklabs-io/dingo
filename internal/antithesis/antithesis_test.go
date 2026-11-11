@@ -17,19 +17,18 @@ package antithesis_test
 import (
 	"testing"
 
+	"github.com/antithesishq/antithesis-sdk-go/assert"
+
 	"github.com/blinklabs-io/dingo/internal/antithesis"
 )
 
-// TestShimAPI exercises every shim function. In the default build they are
-// no-ops; with the antithesis tag they reach the SDK, which falls back to a
-// local no-op handler outside the Antithesis environment.
-func TestShimAPI(t *testing.T) {
+// TestGatedAssertion shows the supported call-site shape: the SDK assert call
+// keeps its literal message and sits behind the Enabled constant. Outside the
+// Antithesis environment the SDK falls back to a local no-op handler.
+func TestGatedAssertion(t *testing.T) {
 	t.Parallel()
-	details := map[string]any{"k": "v"}
-	antithesis.Always(true, "shim always", details)
-	antithesis.AlwaysOrUnreachable(true, "shim always-or-unreachable", details)
-	antithesis.Sometimes(true, "shim sometimes", details)
-	antithesis.Reachable("shim reachable", details)
-	antithesis.Always(true, "shim nil details", nil)
+	if antithesis.Enabled {
+		assert.Always(true, "shim gated always", map[string]any{"k": "v"})
+	}
 	antithesis.SetupComplete(nil)
 }

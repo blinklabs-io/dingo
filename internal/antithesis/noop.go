@@ -16,23 +16,8 @@
 
 package antithesis
 
-// Enabled reports whether the Antithesis SDK is compiled in.
+// Enabled reports whether the binary was built with the antithesis tag.
 const Enabled = false
 
-// Always is a no-op without the antithesis build tag.
-func Always(_ bool, _ string, _ map[string]any) {}
-
-// AlwaysOrUnreachable is a no-op without the antithesis build tag.
-func AlwaysOrUnreachable(_ bool, _ string, _ map[string]any) {}
-
-// Sometimes is a no-op without the antithesis build tag.
-func Sometimes(_ bool, _ string, _ map[string]any) {}
-
-// Reachable is a no-op without the antithesis build tag.
-func Reachable(_ string, _ map[string]any) {}
-
-// Unreachable is a no-op without the antithesis build tag.
-func Unreachable(_ string, _ map[string]any) {}
-
-// SetupComplete is a no-op without the antithesis build tag.
+// SetupComplete does nothing without the antithesis tag.
 func SetupComplete(_ map[string]any) {}
