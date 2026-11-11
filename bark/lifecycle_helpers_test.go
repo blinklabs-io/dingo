@@ -12,28 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hardfork_test
+package bark
 
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-
-	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/plugin"
 )
 
-func TestTriggerHardFork_String(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		in   hardfork.TriggerHardFork
-		want string
-	}{
-		{hardfork.NewTriggerAtVersion(4), "AtVersion(4)"},
-		{hardfork.NewTriggerAtEpoch(123), "AtEpoch(123)"},
-		{hardfork.NewTriggerNotDuringThisExecution(), "NotDuringThisExecution"},
-		{hardfork.TriggerHardFork{Kind: 99}, "TriggerHardFork(?kind=99)"},
-	}
-	for _, tc := range cases {
-		assert.Equal(t, tc.want, tc.in.String())
-	}
+func newTestLifecycleService(t *testing.T) *dblifecycle.Service {
+	t.Helper()
+	return dblifecycle.NewService(&config.Config{
+		DatabasePath: t.TempDir(),
+		Plugins: config.PluginsConfig{
+			Storage: config.StoragePluginsConfig{
+				Blob:     plugin.Selection{Provider: "badger"},
+				Metadata: plugin.Selection{Provider: "sqlite"},
+			},
+		},
+	}, testDestinationRegistry, nil)
 }

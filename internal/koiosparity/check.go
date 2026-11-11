@@ -1043,6 +1043,19 @@ func checkEpoch(
 		}
 	}
 
+	// 1e. Compare a bounded sample of the epoch's stored transactions
+	// against the /tx_info rows the observer cached. Only a source that can
+	// report a sample takes part; the others skip it entirely.
+	if txSource, ok := dingo.(TransactionParitySource); ok {
+		txMismatches, err := checkEpochTransactions(
+			ctx, cache, txSource, network, epoch, now,
+		)
+		if err != nil {
+			return nil, err
+		}
+		allMismatches = append(allMismatches, txMismatches...)
+	}
+
 	// 5. Per-account exact parity — opt-in (accountsEnabled), and
 	// only for epochs with a valid stake epoch (mirrors the pool-comparison
 	// phases above; PreStaking epochs never reach here at all, so
@@ -1746,4 +1759,43 @@ func aggregateAccountLifecycleMismatchCount(
 		Category:   category,
 		CheckedAt:  now,
 	}
+}
+
+// checkEpochTransactions loads the sampled transactions and their cached
+// Koios rows and compares them. A failure to read the Dingo sample is a
+// recorded dingo_db_error rather than an aborted check, like the other Dingo
+// reads in checkEpoch.
+func checkEpochTransactions(
+	ctx context.Context,
+	cache *Cache,
+	source TransactionParitySource,
+	network string,
+	epoch uint64,
+	now time.Time,
+) ([]CheckMismatch, error) {
+	sample, err := source.GetEpochTransactionSample(
+		ctx, epoch, EpochTransactionSampleSize,
+	)
+	if err != nil {
+		return []CheckMismatch{{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "transaction_sample",
+			DingoValue: fmt.Sprintf("error: %v", err),
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		}}, nil
+	}
+	if len(sample) == 0 {
+		return nil, nil
+	}
+	hashes := make([]string, len(sample))
+	for i, tx := range sample {
+		hashes[i] = tx.Hash
+	}
+	koios, err := cache.GetTxInfos(network, hashes)
+	if err != nil {
+		return nil, fmt.Errorf("get koios tx_info: %w", err)
+	}
+	return CompareEpochTransactions(network, epoch, sample, koios, now), nil
 }

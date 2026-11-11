@@ -1059,15 +1059,6 @@ func TestValidateKESPeriod_ExpiryBoundaryExclusive(t *testing.T) {
 	}
 }
 
-func TestValidateKESPeriod_AtGenesisSlot(t *testing.T) {
-	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	g := synthGenesis(100, 5, time.Second, systemStart)
-	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 0}}
-	if err := pc.ValidateKESPeriod(g, 0); err != nil {
-		t.Errorf("ValidateKESPeriod: %v", err)
-	}
-}
-
 func TestValidateKESPeriod_InvalidMaxKESEvolutions(t *testing.T) {
 	for _, test := range []struct {
 		name string

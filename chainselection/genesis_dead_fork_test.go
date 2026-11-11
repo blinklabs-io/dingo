@@ -524,3 +524,27 @@ func TestGenesisPlausibilityIgnoresWallClockStaleReference(t *testing.T) {
 	require.False(t,
 		cs.updatePeerTipObserved(corrConn(2), honestTip, newcomerFirstHeader, nil))
 }
+
+func TestAdvertisedTipStaleFollowsStaleTipRule(t *testing.T) {
+	t.Parallel()
+	cs := newGenesisWallClockSelector(deadForkHonestTipSlot)
+	// The rule keeps a Genesis window of slack behind the wall clock.
+	require.True(t, cs.AdvertisedTipStale(genesisTip(
+		deadForkHonestTipSlot-cs.genesisWindowSlotsLocked()-1, "old", 1,
+	)))
+	require.False(t, cs.AdvertisedTipStale(genesisTip(
+		deadForkHonestTipSlot-cs.genesisWindowSlotsLocked(), "edge", 1,
+	)))
+	require.False(t, cs.AdvertisedTipStale(genesisTip(
+		deadForkHonestTipSlot, "fresh", 1,
+	)))
+	// Outside Genesis mode the rule is inactive.
+	praos := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 20,
+		WallClockSlot: func() (uint64, bool) {
+			return deadForkHonestTipSlot, true
+		},
+		DisableEventSubscriptions: true,
+	})
+	require.False(t, praos.AdvertisedTipStale(genesisTip(1, "old", 1)))
+}

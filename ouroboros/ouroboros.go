@@ -274,6 +274,10 @@ type Ouroboros struct {
 	// ledger can forecast its slot.
 	chainsyncObserverHorizonWait func(context.Context, ledger.ChainsyncEvent) error
 	chainsyncHeaderSlotTime      func(uint64) (time.Time, error)
+	// decodeLimits reports the bounds applied to peer bytes before the ledger
+	// decoder runs. Nil derives them from ledgerState. Tests override it
+	// without a LedgerState.
+	decodeLimits func(txType uint) peerDecodeLimits
 	// chainsyncLocalTipBlock returns the local tip's block number and the
 	// security parameter k. Tests override it without a LedgerState.
 	chainsyncLocalTipBlock func() (tipBlock, k uint64)
@@ -335,6 +339,12 @@ type Ouroboros struct {
 	// block's previous hash in the node-to-client ChainSync waiter. Tests set
 	// it to inject a lookup failure.
 	chainsyncServerPrevHashFunc func(ocommon.Point) ([]byte, error)
+	// chainsyncServerAppliedWaitHook runs when the node-to-client ChainSync
+	// waiter finds the next block ahead of the applied tip and starts waiting
+	// for the ledger. Tests use it to publish the applied tip only once the
+	// waiter has seen the tip behind the block; a tip published earlier is
+	// served directly and never reaches the wait.
+	chainsyncServerAppliedWaitHook func()
 	// chainsyncLocalChainTips returns the hashes of the local block tip and
 	// header-queue tip. Tests override it without a LedgerState.
 	chainsyncLocalChainTips func() (tipHash, headerTipHash []byte)
@@ -451,6 +461,12 @@ type Ouroboros struct {
 	leiosAnnouncementInFlight  map[string]struct{}
 	leiosInvalidAnnouncements  *ratewindow.FixedWindow
 	leiosInvalidAnnouncementMu sync.Mutex
+	// leiosOfferBudget caps how many endorser-block offers one remote host
+	// may send per window, so a peer cannot keep the shared cache and
+	// backfill-source locks busy with arbitrary points.
+	leiosOfferBudget           *ratewindow.FixedWindow
+	leiosOfferOverflowBudget   *ratewindow.FixedWindow
+	leiosOfferBudgetMu         sync.Mutex
 	leiosDeferredMu            sync.Mutex
 	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
 	leiosAnnouncementSizes     map[string]uint64

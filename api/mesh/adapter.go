@@ -43,22 +43,15 @@ func (a *meshDatabaseAdapter) BlockByHash(ctx context.Context,
 	return database.BlockByHash(ctx, a.db, hash)
 }
 
-// BlockByIndex resolves a Cardano block height, which is what the Mesh
-// API exposes as block_identifier.index. Cardano block numbers are
-// 0-based while the blob store's internal index is 1-based
-// (database.BlockInitialIndex), so translate here the same way
-// api/blockfrost's block-by-height lookup and midnight/server's
-// databaseAdapter do. Without the translation a client feeding back the
-// index from a /block response gets the block below the one it asked
-// for, and height 0 never resolves. Guard the addition first: no real
-// chain approaches math.MaxUint64, but without the check that value
-// would wrap to internal index 0 instead of failing.
+// BlockByIndex resolves the Cardano block height exposed by Mesh.
 func (a *meshDatabaseAdapter) BlockByIndex(ctx context.Context,
 	height uint64,
 ) (models.Block, error) {
-	if height > math.MaxUint64-database.BlockInitialIndex {
+	// Mesh block indexes are signed 64-bit, so a larger height cannot be
+	// represented in any response.
+	if height > math.MaxInt64 {
 		return models.Block{}, fmt.Errorf(
-			"block height %d overflows internal index: %w",
+			"block height %d exceeds the Mesh index range: %w",
 			height,
 			models.ErrBlockNotFound,
 		)
@@ -66,7 +59,7 @@ func (a *meshDatabaseAdapter) BlockByIndex(ctx context.Context,
 	if err := ctx.Err(); err != nil {
 		return models.Block{}, err
 	}
-	block, err := a.db.BlockByIndex(height+database.BlockInitialIndex, nil)
+	block, err := database.BlockByNumber(ctx, a.db, height)
 	if cancelErr := ctx.Err(); cancelErr != nil {
 		return models.Block{}, cancelErr
 	}

@@ -325,10 +325,15 @@ func SQLiteDialect() Dialect {
 		// ordinary, non-bulk chain sync, and this restore path must agree
 		// with that value rather than quietly regressing a connection back
 		// to the smaller threshold once a bulk load finishes.
+		//
+		// temp_store is restored to MEMORY for the same reason: the write
+		// connection runs with it from the DSN (sqliteWritePragmas) so
+		// statement journals never spill to a temp file, and DEFAULT here
+		// would silently bring those spills back after the first bulk load.
 		restore: execStatements(
 			"PRAGMA synchronous = NORMAL",
 			"PRAGMA cache_size = -50000",
-			"PRAGMA temp_store = DEFAULT",
+			"PRAGMA temp_store = MEMORY",
 			"PRAGMA threads = 0",
 			"PRAGMA wal_autocheckpoint = 10000",
 		),

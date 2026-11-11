@@ -544,12 +544,11 @@ func (cs *ChainSelector) clonePeerTipAdmissionFrontier(
 	result.observedTipHistory = nil
 	result.admittedTipHistory = nil
 	if cs.mode == SelectionModeGenesis {
-		result.observedSlots = append([]uint64(nil), peerTip.observedSlots...)
-		result.observedPoints = cloneObservedPoints(peerTip.observedPoints)
+		// The struct copy shares the committed frontier's windows. Points
+		// and hash bytes in a window are never written after they are
+		// appended, so both peers may keep reading and appending to them.
 	} else {
-		result.observedSlots = nil
-		result.observedPoints = nil
-		result.observedPointBaseBlock = 0
+		result.resetObservedFrontier()
 	}
 	return &result
 }
@@ -858,6 +857,14 @@ func (cs *ChainSelector) advertisedTipStaleLocked(
 	) < wall
 }
 
+// AdvertisedTipStale reports whether a peer advertising tip is excluded by the
+// stale-tip rule (see advertisedTipStaleLocked), so it can never be selected.
+func (cs *ChainSelector) AdvertisedTipStale(tip ochainsync.Tip) bool {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	return cs.advertisedTipStaleLocked(&PeerChainTip{Tip: tip})
+}
+
 // staleTipRuleWallSlotLocked returns the wall-clock slot the stale-tip rule
 // measures against, and false while the rule cannot decide. It reports true
 // only in Genesis mode, and node composition observes tips synchronously
@@ -912,8 +919,7 @@ func (cs *ChainSelector) advanceSelectionModeWithBestKnownBlockLocked(
 	// Corroboration no longer applies in Praos; drop the per-peer hash
 	// frontier so it does not linger for the full window on every tracked peer.
 	for _, peerTip := range cs.peerTips {
-		peerTip.observedPoints = nil
-		peerTip.observedPointBaseBlock = 0
+		peerTip.resetObservedPoints()
 	}
 	clear(cs.deliveredPeerTips)
 	clear(cs.eagernessDeliveries)

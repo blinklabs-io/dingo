@@ -815,3 +815,27 @@ func TestArchiveFetchBlockBoundsRepeatedMissingReferenceLookups(
 	)
 	require.Less(t, lookups.Load(), int64(requests*perBatch))
 }
+
+func TestArchiveHeightSharedByBoundaryBlockSelectsEarliest(t *testing.T) {
+	t.Parallel()
+	handler, _ := newArchiveTestHandler(t, 0)
+	db, release, err := handler.bark.Acquire()
+	require.NoError(t, err)
+	defer release()
+	var blocks []models.Block
+	for i, number := range []uint64{1, 1, 2} {
+		block := testBlock(uint64(i+1), byte(0x30+i))
+		block.ID = uint64(i + 1)
+		block.Number = number
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+	msg := fetchBlocks(t, handler, heightRef(1))
+	require.Empty(t, msg.GetNotFound())
+	require.Len(t, msg.GetBlocks(), 1)
+	require.Equal(t, hex.EncodeToString(blocks[0].Hash), msg.GetBlocks()[0].GetBlock().GetHash())
+	hash := hex.EncodeToString(blocks[1].Hash)
+	msg = fetchBlocks(t, handler, &archive.BlockRef{Hash: new(hash)})
+	require.Len(t, msg.GetBlocks(), 1)
+	require.Equal(t, hash, msg.GetBlocks()[0].GetBlock().GetHash())
+}
