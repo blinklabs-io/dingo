@@ -12177,6 +12177,12 @@ serve the certificate before the swap: a remote client is admitted, which
 checks the agent reports this certificate and its KES key; a local socket
 client, whose protocol carries neither, is only checked to answer in sign mode,
 and its signatures are still verified against the certificate on every sign.
+That agent check runs before the reload takes the lifecycle gates: it can wait
+on the network for up to the client's hello timeout, and the chainsync and
+chain-switch handlers drop their work while the gates are held. Under the
+gates a file or SIGHUP reload reads the certificate file again and refuses it
+if it no longer matches the one the agent admitted; every reload then runs the counter, signature,
+KES-window and ledger checks and the swap.
 After `ReplaceWith` the replaced client stays open for
 `retiredKESAgentClientGrace` (10s), because a forge attempt that selected its
 snapshot before the swap still signs through it. The VRF key cannot change on

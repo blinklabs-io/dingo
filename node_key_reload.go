@@ -78,22 +78,39 @@ type keyReloadState struct {
 // reloadCredentials is the one entry point every reload trigger uses: a
 // SIGHUP, a credential file change, or the KES agent presenting a newer
 // operational certificate (agentOpCert non-nil). It holds the lifecycle gates
-// for the whole reload and records the outcome.
+// while it validates and installs the new credentials, and records the
+// outcome.
+//
+// In KES agent sign mode the agent is asked to admit the new certificate
+// before the gates are taken. That check can wait on the network for up to
+// the client's hello timeout, and the chainsync and chain-switch handlers
+// drop their work while liveLifecycleMu is held (see checkSettledComponents).
+// The check only involves the agent and a client nothing else uses yet, so
+// it needs no gate; everything it was checked against is read again under
+// the gates before the swap.
 func (n *Node) reloadCredentials(trigger string, agentOpCert []byte) error {
+	var signReload *agentSignReload
+	if agentOpCert != nil || (n.kesAgentConfigured() && n.kesAgentSignMode()) {
+		r, err := n.prepareAgentSignReload(agentOpCert)
+		if err != nil {
+			return n.finishCredentialReload(trigger, err)
+		}
+		signReload = r
+		defer signReload.close()
+	}
 	release, err := n.tryLifecycleGates()
 	if err != nil {
-		n.recordCredentialReload(trigger, err)
-		return err
+		return n.finishCredentialReload(trigger, err)
 	}
 	defer release()
 	slot, supported, err := n.blockProducerStartupClock()
 	if err == nil {
-		if agentOpCert != nil {
-			err = n.reloadAgentSignCredentials(
+		if signReload != nil {
+			err = n.installAgentSignReload(
 				slot,
 				supported,
 				n.validateBlockProducerLedger,
-				agentOpCert,
+				signReload,
 			)
 		} else {
 			err = n.reloadBlockProducerCredentials(
@@ -103,6 +120,12 @@ func (n *Node) reloadCredentials(trigger string, agentOpCert []byte) error {
 			)
 		}
 	}
+	return n.finishCredentialReload(trigger, err)
+}
+
+// finishCredentialReload records a reload's outcome and reports an unchanged
+// one as success.
+func (n *Node) finishCredentialReload(trigger string, err error) error {
 	n.recordCredentialReload(trigger, err)
 	if errors.Is(err, errCredentialsUnchanged) {
 		n.config.logger.Info(
@@ -115,24 +138,101 @@ func (n *Node) reloadCredentials(trigger string, agentOpCert []byte) error {
 	return err
 }
 
+// agentSignReload is a sign-mode reload whose certificate the agent has
+// admitted, waiting to be installed under the lifecycle gates.
+type agentSignReload struct {
+	agentOpCert []byte
+	opCertKey   *bursa.LoadedKey
+	opCert      *forging.OpCert
+	client      kesAgentSignClient
+	installed   bool
+}
+
+// close closes the prepared client unless it was installed.
+func (r *agentSignReload) close() {
+	if !r.installed {
+		_ = r.client.Close()
+	}
+}
+
 // reloadAgentSignCredentials replaces the live sign-mode credentials with the
 // VRF key and an operational certificate -- the configured file, or
 // agentOpCert when the agent presented a newer one -- signed through a new
-// agent client that expects that certificate's KES key. Everything is checked
-// before the swap: the certificate's cold-key signature and KES period, the
-// ledger cross-check including the opcert counter rule, a counter above the
-// loaded one, and that the agent admits a session for this certificate. A
-// refusal leaves the live credentials and client in place.
-//
-// The VRF key cannot change here: a new VRF identity needs a new pool
-// registration and a restart. The VRF key file is compared with the loaded
-// identity first, so a changed VRF key is refused even when the certificate
-// is unchanged, and before the agent is contacted.
+// agent client that expects that certificate's KES key. It is
+// prepareAgentSignReload followed by installAgentSignReload; reloadCredentials
+// runs the two halves itself so the agent check happens outside the gates.
 func (n *Node) reloadAgentSignCredentials(
 	slot uint64,
 	supported bool,
 	ledgerCheck func(*forging.PoolCredentials) error,
 	agentOpCert []byte,
+) error {
+	r, err := n.prepareAgentSignReload(agentOpCert)
+	if err != nil {
+		return err
+	}
+	defer r.close()
+	return n.installAgentSignReload(slot, supported, ledgerCheck, r)
+}
+
+// prepareAgentSignReload reads the certificate a sign-mode reload installs,
+// refuses it early when it cannot be installed, and has the agent admit a
+// session for it through a new client. It takes no lifecycle gate: it reads
+// only the configuration, the key files and the live credentials, which are
+// safe to read concurrently.
+//
+// The VRF key cannot change here: a new VRF identity needs a new pool
+// registration and a restart. The VRF key file is compared with the loaded
+// identity first, so a changed VRF key is refused even when the certificate
+// is unchanged, and before the agent is contacted.
+func (n *Node) prepareAgentSignReload(
+	agentOpCert []byte,
+) (*agentSignReload, error) {
+	live := n.blockProducerCreds.Load()
+	if live == nil {
+		return nil, errors.New("block producer credentials are not loaded")
+	}
+	if err := checkReloadVRFKey(n.config.shelleyVRFKey, live); err != nil {
+		return nil, err
+	}
+	opCertKey, err := n.reloadOpCertKey(agentOpCert)
+	if err != nil {
+		return nil, err
+	}
+	opCert := opCertFromLoadedKey(opCertKey)
+	if err := checkReloadOpCertCounter(opCert, live.GetOpCert()); err != nil {
+		return nil, err
+	}
+	client, err := n.kesAgentSignClientFor(opCertKey)
+	if err != nil {
+		return nil, fmt.Errorf("build KES agent client: %w", err)
+	}
+	if err := checkKESAgentSignClient(client); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf(
+			"KES agent does not serve the new certificate: %w",
+			err,
+		)
+	}
+	return &agentSignReload{
+		agentOpCert: agentOpCert,
+		opCertKey:   opCertKey,
+		opCert:      opCert,
+		client:      client,
+	}, nil
+}
+
+// installAgentSignReload validates a prepared reload and swaps it in. The
+// caller holds the lifecycle gates. Everything is checked before the swap:
+// that the certificate file still holds the certificate the agent admitted,
+// the certificate's cold-key signature and KES period, the ledger
+// cross-check including the opcert counter rule, and a counter above the
+// loaded one. A refusal leaves the live credentials and client in place.
+func (n *Node) installAgentSignReload(
+	slot uint64,
+	supported bool,
+	ledgerCheck func(*forging.PoolCredentials) error,
+	r *agentSignReload,
 ) error {
 	live := n.blockProducerCreds.Load()
 	if live == nil {
@@ -143,44 +243,29 @@ func (n *Node) reloadAgentSignCredentials(
 			"credential reload requires a wall-clock slot supported by confirmed era history",
 		)
 	}
-	if err := checkReloadVRFKey(n.config.shelleyVRFKey, live); err != nil {
-		return err
-	}
-	opCertKey, err := n.reloadOpCertKey(agentOpCert)
-	if err != nil {
-		return err
-	}
-	opCert := opCertFromLoadedKey(opCertKey)
-	liveOpCert := live.GetOpCert()
-	if sameOpCert(opCert, liveOpCert) {
-		return errCredentialsUnchanged
-	}
-	if liveOpCert != nil && opCert.IssueNumber <= liveOpCert.IssueNumber {
-		return fmt.Errorf(
-			"operational certificate counter %d is not above the loaded counter %d; "+
-				"a changed certificate needs a higher counter",
-			opCert.IssueNumber,
-			liveOpCert.IssueNumber,
-		)
-	}
-	client, err := n.kesAgentSignClientFor(opCertKey)
-	if err != nil {
-		return fmt.Errorf("build KES agent client: %w", err)
-	}
-	installed := false
-	defer func() {
-		if !installed {
-			_ = client.Close()
+	if r.agentOpCert == nil {
+		current, err := n.reloadOpCertKey(nil)
+		if err != nil {
+			return err
 		}
-	}()
+		if !bytes.Equal(current.RawCBOR, r.opCertKey.RawCBOR) {
+			return errors.New(
+				"operational certificate file changed during the reload; reload again",
+			)
+		}
+	}
+	liveOpCert := live.GetOpCert()
+	if err := checkReloadOpCertCounter(r.opCert, liveOpCert); err != nil {
+		return err
+	}
 	next := forging.NewPoolCredentials()
 	// ReplaceWith empties next on success, so this only wipes a replacement
 	// that was refused.
 	defer next.Close()
 	if err := next.LoadFromAgentSignOpCert(
 		n.config.shelleyVRFKey,
-		opCert,
-		client,
+		r.opCert,
+		r.client,
 	); err != nil {
 		return fmt.Errorf("load reloaded credentials: %w", err)
 	}
@@ -197,31 +282,42 @@ func (n *Node) reloadAgentSignCredentials(
 	if err := ledgerCheck(next); err != nil {
 		return fmt.Errorf("reloaded credentials failed ledger check: %w", err)
 	}
-	if err := checkKESAgentSignClient(client); err != nil {
-		return fmt.Errorf(
-			"KES agent does not serve the new certificate: %w",
-			err,
-		)
-	}
 	oldCounter, oldKESPeriod := opCertCounterAndPeriod(liveOpCert)
 	if err := live.ReplaceWith(next); err != nil {
 		return fmt.Errorf("install reloaded credentials: %w", err)
 	}
-	installed = true
+	r.installed = true
 	n.retireKESAgentClient(n.kesAgentClient)
-	n.kesAgentClient = client
+	n.kesAgentClient = r.client
 	newCounter, newKESPeriod := opCertCounterAndPeriod(live.GetOpCert())
 	n.config.logger.Info(
 		"block producer credentials reloaded",
 		"component", "node",
 		"pool_id", live.GetPoolID().String(),
-		"source", opCertSource(agentOpCert),
+		"source", opCertSource(r.agentOpCert),
 		"old_opcert_counter", oldCounter,
 		"new_opcert_counter", newCounter,
 		"old_opcert_kes_period", oldKESPeriod,
 		"new_opcert_kes_period", newKESPeriod,
 		"opcert_expiry_period", live.OpCertExpiryPeriod(),
 	)
+	return nil
+}
+
+// checkReloadOpCertCounter reports an unchanged certificate, and refuses a
+// changed one whose counter is not above the loaded one.
+func checkReloadOpCertCounter(opCert, liveOpCert *forging.OpCert) error {
+	if sameOpCert(opCert, liveOpCert) {
+		return errCredentialsUnchanged
+	}
+	if liveOpCert != nil && opCert.IssueNumber <= liveOpCert.IssueNumber {
+		return fmt.Errorf(
+			"operational certificate counter %d is not above the loaded counter %d; "+
+				"a changed certificate needs a higher counter",
+			opCert.IssueNumber,
+			liveOpCert.IssueNumber,
+		)
+	}
 	return nil
 }
 

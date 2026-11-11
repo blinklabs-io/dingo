@@ -42,6 +42,7 @@ type fakeSignClient struct {
 	mu         sync.Mutex
 	opCert     []byte
 	prepareErr error
+	onPrepare  func()
 	prepared   bool
 	closed     bool
 }
@@ -51,6 +52,9 @@ func (f *fakeSignClient) Sign(uint64, []byte) ([]byte, error) {
 }
 
 func (f *fakeSignClient) Prepare() error {
+	if f.onPrepare != nil {
+		f.onPrepare()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.prepared = true
@@ -77,6 +81,7 @@ type signModeReloadNode struct {
 	mu         sync.Mutex
 	built      []*fakeSignClient
 	prepareErr error
+	onPrepare  func()
 	initial    *fakeSignClient
 }
 
@@ -95,6 +100,7 @@ func newSignModeReloadNode(t *testing.T, counter uint64) *signModeReloadNode {
 		c := &fakeSignClient{
 			opCert:     append([]byte(nil), key.RawCBOR...),
 			prepareErr: s.prepareErr,
+			onPrepare:  s.onPrepare,
 		}
 		s.built = append(s.built, c)
 		return c, nil
@@ -276,6 +282,34 @@ func TestAgentSignReloadRefusesAChangedVRFKey(t *testing.T) {
 		s.requireLiveCounter(t, 1)
 		require.Same(t, s.initial, s.kesAgentClient)
 	})
+}
+
+// TestAgentSignReloadContactsTheAgentOutsideTheLifecycleGates pins that the
+// agent check, which can wait on the network, does not hold liveLifecycleMu:
+// chainsync and chain-switch handlers drop their work while it is held.
+func TestAgentSignReloadContactsTheAgentOutsideTheLifecycleGates(t *testing.T) {
+	t.Parallel()
+	start := time.Now().Add(-time.Minute)
+	started := newStartupCleanupProducerNodeWithGenesisStart(t, &start)
+	s := newSignModeReloadNode(t, 1)
+	s.ledgerState = started.ledgerState
+	gateFree := false
+	s.onPrepare = func() {
+		if s.liveLifecycleMu.TryLock() {
+			gateFree = true
+			s.liveLifecycleMu.Unlock()
+		}
+	}
+	s.rotateTo(t, 2, nil)
+
+	require.NoError(t, s.reloadCredentials(reloadTriggerSignal, nil))
+
+	s.requireLiveCounter(t, 2)
+	built := s.builtClients()
+	require.Len(t, built, 1)
+	require.Same(t, built[0], s.kesAgentClient)
+	require.True(t, gateFree,
+		"the agent must be checked before the lifecycle gates are taken")
 }
 
 func TestReloadInServeKeyModeIsRefused(t *testing.T) {

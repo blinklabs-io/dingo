@@ -511,9 +511,11 @@ func (n *Node) kesAgentConfigured() bool {
 }
 
 func (n *Node) kesAgentClientMetrics() *kesagent.Metrics {
-	if n.kesAgentMetrics == nil && n.config.promRegistry != nil {
-		n.kesAgentMetrics = kesagent.NewMetrics(n.config.promRegistry)
-	}
+	n.kesAgentMetricsOnce.Do(func() {
+		if n.config.promRegistry != nil {
+			n.kesAgentMetrics = kesagent.NewMetrics(n.config.promRegistry)
+		}
+	})
 	return n.kesAgentMetrics
 }
 
