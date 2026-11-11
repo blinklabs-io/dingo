@@ -32,18 +32,19 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/bursa"
+	"github.com/blinklabs-io/bursa/kesagent/wire"
 )
 
 const (
 	// AttestedProtocolID is the protocol a bursa KES agent's remote sign
 	// listener reports in its Hello.
-	AttestedProtocolID = "bursa-attested-kes/1"
+	AttestedProtocolID = wire.AttestedProtocolID
 	// ProviderNone is the attestation provider of an agent that presents no
 	// evidence: its attestation_response carries none. A provider names the
 	// evidence, not the transport; how the link itself is authenticated (a
 	// pinned server key, a client certificate, or nothing over plain TCP) is
 	// transport configuration.
-	ProviderNone = "none"
+	ProviderNone = wire.NoEvidenceProvider
 
 	// DefaultSessionFreshFor is how long after its last frame an admitted
 	// session is reused. The agent closes a sign session that sends no new
@@ -519,25 +520,12 @@ func (c *RemoteClient) admit(ctx context.Context) (net.Conn, error) {
 	return conn, nil
 }
 
-// attestationRequest and attestationResponse mirror the attested listener's
-// admission frames in blinklabs-io/bursa internal/kesagent.
-type attestationRequest struct {
-	Type     string `json:"type"`
-	Protocol string `json:"protocol"`
-	Nonce    []byte `json:"nonce"`
-}
-
-type attestationResponse struct {
-	Type        string `json:"type"`
-	Protocol    string `json:"protocol"`
-	Nonce       []byte `json:"nonce"`
-	Provider    string `json:"provider"`
-	KESVKey     []byte `json:"kes_vkey,omitempty"`
-	OpCert      []byte `json:"opcert,omitempty"`
-	Period      uint64 `json:"period,omitempty"`
-	Attestation []byte `json:"attestation,omitempty"`
-	Error       string `json:"error,omitempty"`
-}
+// attestationRequest and attestationResponse are the attested listener's
+// admission frames, from bursa's kesagent/wire.
+type (
+	attestationRequest  = wire.AttestationRequest
+	attestationResponse = wire.AttestationResponse
+)
 
 // checkAdmission accepts a "none" attestation_response for this node's KES
 // key, whatever the transport: the echoed nonce, protocol and provider match,
