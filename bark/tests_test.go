@@ -21,6 +21,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -412,7 +413,8 @@ func testCertificateFingerprint(t *testing.T, certPath string) string {
 	require.NotNil(t, block)
 	cert, err := x509.ParseCertificate(block.Bytes)
 	require.NoError(t, err)
-	return certFingerprint(cert)
+	fingerprint := sha256.Sum256(cert.Raw)
+	return hex.EncodeToString(fingerprint[:])
 }
 
 // TestTLSServerReusesPreloadedCertAfterFilesChange guards against a real

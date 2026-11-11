@@ -793,8 +793,10 @@ the bound is parked by `markDeferredHeaderRecovery`; an invalid header is
 rejected without waiting.
 Queue admission has the same tolerance: a verdict that a tip publication expires
 between its verification and its pin (`pinHeaderVerdict`) is verified again, up
-to three times, before the header is withheld; a header that fails that
-verification is rejected and its connection recycled, as on its first. A snapshot publication or validation transition
+to three times while each new verdict expires the same way, before the header
+is withheld; a verification that defers ends those attempts and withholds the
+header, and a header that fails verification is rejected and its connection
+recycled, as on its first. A snapshot publication or validation transition
 also waits and retries a local extension: otherwise an unstamped header can
 be withheld by corroboration while its peer cursor advances past it. Other
 deferrals on local extensions are forwarded unverified at once because
@@ -2493,7 +2495,8 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chainselection.selection` | ChainSelector | Chain selection made |
 | `chainselection.peer_evicted` | ChainSelector | Peer evicted |
 | `chainselection.genesis_corroboration_failed` | ChainSelector | Densest Genesis fast source lacked corroboration and was denied selection |
-| `chainselection.genesis_mode_exited` | ChainSelector | Left Genesis mode for Praos after catching up to the best known tip |
+| `chainselection.genesis_mode_exited` | ChainSelector | Left Genesis mode for Praos: every ChainSync connection was idle and none held a chain better than the selection (`LocalSlot`, `Peers`, `GenesisWindowSlots`); the node writes the `CaughtUpMarker` |
+| `chainselection.genesis_mode_entered` | ChainSelector | Returned to Genesis mode because the selection tip became older than the maximum caught-up age, or its slot time cannot be determined (`LocalSlot`, `GenesisWindowSlots`); the node removes the `CaughtUpMarker` |
 | `chainselection.selected_none` | ChainSelector | Best-peer selection transitioned to none (selection stalled) |
 | `chainselection.peer_rollback_handler_panic` | ChainSelector | The PeerRollbackEvent handler panicked; its subscription was torn down |
 | `chainselection.evaluation_panic` | ChainSelector | A background evaluation tick or triggered evaluation panicked; the transition it would have produced was dropped |
@@ -2558,9 +2561,10 @@ cap, so on a long-running node the history fills to the cap and each added
 block scans up to 2160 entries. A competing block this node never applied,
 because it never became the chain, is not seen.
 
-The six topics the ChainSelector publishes itself —
+The seven topics the ChainSelector publishes itself —
 `chainselection.chain_switch`, `selection`, `peer_evicted`,
-`genesis_corroboration_failed`, `genesis_mode_exited` and `selected_none` —
+`genesis_corroboration_failed`, `genesis_mode_exited`, `genesis_mode_entered`
+and `selected_none` —
 go through `ChainSelector.publishSelection`, which uses `PublishOrdered` rather
 than `Publish`. The selector's producers are all goroutines that have to keep
 making progress — the EventBus dispatch goroutines for the internal
@@ -3140,9 +3144,8 @@ this admission.
 
 `Config.Database` (set to `midnightserver.NewDatabase(n.db)` — `adapter.go`'s
 `databaseAdapter`, which bridges the package-level
-`database.BlockByHash`/`BlocksRecent`/`BlockBeforeSlot` functions and the
-0-based/1-based block-number translation into `MidnightDatabase` interface
-methods, mirroring `api/mesh`'s `meshDatabaseAdapter`/`MeshDatabase`) and
+`database.BlockByHash`/`BlocksRecent`/`BlockBeforeSlot`/`BlockByNumber`
+functions into `MidnightDatabase` interface methods, mirroring `api/mesh`'s `meshDatabaseAdapter`/`MeshDatabase`) and
 `Config.SlotTimer` (set to `n.ledgerState`, satisfying `SlotToTime`/
 `TimeToSlot`) back the governance/parameters/block/epoch/stability RPCs
 implemented in `midnight/server/service.go`:
@@ -3173,8 +3176,10 @@ implemented in `midnight/server/service.go`:
   the latest block at or before that wall-clock time
   (`SlotTimer.TimeToSlot` + `database.BlockBeforeSlot`) instead of the live
   tip. `GetLatestStableBlock` looks the target block number up via
-  `Database.BlockByIndex`, translating 0-based block number to the blob
-  store's 1-based index the same way `api/blockfrost` does. A client-supplied
+  `database.BlockByNumber`, which resolves the chain block number by searching
+  block metadata and returns the earliest block carrying that number (Byron
+  epoch boundary blocks share a number with their parent), as `api/blockfrost`
+  does. A client-supplied
   `as_of_timestamp_unix_millis` above `int64` range (`resolveTipBlock`) is
   rejected with `codes.InvalidArgument` rather than being converted with
   `int64(v)`, which would silently wrap it into a negative timestamp and
@@ -4350,6 +4355,31 @@ Shelley epoch with empty blocks-made (`translateToShelleyLedgerStateFromUtxo`).
 parameters and ADA pots with no pool rewards, so with `d >= 0.8` reserves expand
 with `eta = 1` and the treasury takes its share. Later updates use the normal
 delayed E-3 snapshot, E-2 performance, and E-1 pots mapping.
+
+The exception is an epoch whose first block lands later than its start plus the
+randomness stabilisation window (4k/f). cardano-ledger's `bheadTransition`
+hands RUPD the epoch state and blocks-made from *before* NEWEPOCH ran, and the
+update NEWEPOCH leaves is empty, so that tick starts the update from the end of
+the previous epoch: the same snapshot, performance epoch, reserves and fee seed
+as the update applied at the boundary into that epoch. The boundary after it
+therefore applies the previous round again (`replaysPreviousStakeRewardRound`,
+`reward_late_first_block.go`). With X the epoch whose first block was late,
+the boundary into X+1 would normally apply the round whose performance epoch
+is X-1; that round is never built, so the performance of epoch X-1 is never
+paid. When the replayed round is the first Shelley round of a Byron-prefix
+network (X is the second Shelley epoch), it is rebuilt through
+`firstShelleyStakeRewardApplication`, since its Byron performance epoch has no
+pparams or stake snapshot. The replayed round is calculated from the previous
+round's inputs but its deltas are added to the ADA pots of the boundary it is applied at, as
+`applyRUpdFiltered` adds `deltaR`/`deltaT` to the live pots, and its `deltaF`
+removes the replayed fee seed from the fees carried into the next round:
+`saveRewardAdaPotsForEpoch` records the ended epoch's fees plus the fees
+carried at the previous boundary minus that seed, and halts the boundary if
+that would be negative. The decision reads persisted blocks (the first block of
+the ended epoch, and a block in the epoch before it, since NEWEPOCH does not run
+after an empty epoch), so a rollback re-derives it. Not mirrored: boundaries
+into epochs below 4, nonMyopic state, and nodes whose block store lacks the two
+epochs involved.
 
 Within that mapping, every protocol-parameter input to the calculation — d,
 rho, tau, and the pool-level parameters — is read from the **performance**
@@ -7551,8 +7581,8 @@ claims remain withheld from ledger ingress; rejected candidates terminate the
 protocol. The stale-tip and eagerness admission gates consult the staged
 frontier, including a new peer awaiting its first ledger admission. The ledger
 still verifies every applied header, completing deferred verification at apply
-time. Genesis exit may consult the advertised slot only through the separately
-documented delivered-frontier gate below. A RollBackward restores the delivered
+time. Genesis exit never consults the advertised tip; it follows the idle and
+delivered-frontier rule below. A RollBackward restores the delivered
 frontier from a bounded `k+1` header history; if the point is no longer
 retained, the selector uses the rollback point with a conservative zero block
 number and never promotes the accompanying advertised tip into the observed
@@ -7718,10 +7748,11 @@ peer into a different operator. Valency groups, trustable flags, remote IPs and
 peer sharing do not establish operator control.
 
 
-Genesis mode (`genesisBootstrap`, active only for from-origin sync with no
+Genesis mode (`genesisBootstrap`, active only with no
 `intersectTip`/`intersectPoints`, and never when the Cardano node configuration
 names `ConsensusMode: PraosMode`, which makes the node follow its peers by Praos
-rules as the reference node does) selects the chain by observed header *density*
+rules as the reference node does) is the Syncing state of a state machine that
+mirrors the reference's GSM (see **Genesis state machine** below). It selects the chain by observed header *density*
 within a window of `3k/f` slots rather than by longest-chain length, so a
 from-origin node can prefer the denser (honest) chain before it has the history
 to run the full Praos comparison. The window is derived from Shelley genesis
@@ -7729,7 +7760,8 @@ params (`GenesisWindowSlotsForParams`) as `ceil(3k/f)` over the exact genesis
 rational, matching the reference node's `computeStabilityWindow`, or overridden
 by `genesisWindowSlots`. Without k and a positive f,
 `GenesisWindowSlotsForParams` returns 0 and the node falls back to
-`DefaultGenesisWindowSlots` (6480) for density ranking and the exit horizon.
+`DefaultGenesisWindowSlots` (6480) for density ranking and the historicity
+cutoff.
 Each tracked peer keeps a bounded recent frontier of `(slot, hash)` points
 (`PeerChainTip.observedPoints`, in lockstep with the `observedSlots` used for
 density), trimmed to the window and on rollback. That rolling frontier ranks
@@ -7769,12 +7801,14 @@ back toward a point beyond where the node actually is. Greater density wins;
 equal density falls back to the normal Praos length/select-view comparison. Node
 composition injects an atomic Genesis-mode/window query from `ChainSelector`
 into ledger, so the same resolver automatically returns to Praos once the
-selector exits Genesis mode. While Genesis is active, chainsync and ledger raise
+selector is in Praos mode and returns to the Genesis comparison whenever it
+re-enters Genesis. While Genesis is active, chainsync and ledger raise
 their per-peer header ancestry entry bound to the candidate fragment bound,
 `chainselection.GenesisCandidateHeaderLimit`: k headers plus one header per
 window slot, because the window is measured in slots and a candidate denser than
 the active-slot coefficient holds more than 3k headers in it. They shrink back
-to their normal bounded history after exit. That entry bound is
+to their normal bounded history after exit and rebuild from new deliveries on
+re-entry; the selector's own point frontiers are kept (below). That entry bound is
 attacker-controlled in memory, so both histories are also held to byte budgets
 that apply whatever the entry bound is. Chainsync's observed-header history
 retains decoded headers; each record is charged its header CBOR plus 2 KiB for
@@ -7814,7 +7848,20 @@ headers are also not applied to the ledger (`ChainSelector.ShouldApplyIngress`,
 the apply gate in the roll-forward and roll-backward handlers): ingress is open
 to every eligible peer, not only the selected one, so headers admitted from a
 stale peer would stay in the shared header queue after selection moved to honest
-peers and make their headers look like a persistent fork. The gate reads the
+peers and make their headers look like a persistent fork. A connection whose
+latest advertised tip is stale holds no ingress slot either, and its delivered
+history still counts for corroboration. `chainsync.State` keeps each
+connection's latest advertised tip and judges it against the wall clock when a
+decision is made, through `Config.AdvertisedTipStale`: the roll-forward and
+roll-backward handlers demote a connection advertising a stale tip, and every
+promotion, including an eligibility change and a root slot handoff, is refused
+while the stored tip is stale, so a selectable observer can take the slot. An
+idle peer whose tip ages past the threshold sends no message, so the recycler
+also calls `State.DemoteStaleAdvertisingClients` on its stall-check cadence;
+such a peer can hold its slot for up to one tick after its tip goes stale.
+Staleness is judged outside the `State` lock, so a sweep demotion or a promotion
+is abandoned when the connection has advertised another tip since the verdict. A
+connection that has not yet advertised a tip is not judged. The gate reads the
 peer's tracked tip, so node composition observes tip and rollback updates
 synchronously, before the gate runs, whenever Genesis selection is active
 (`ChainSelector.GenesisSelectionState`); the rule can decide only in Genesis
@@ -7849,8 +7896,13 @@ intersection and a rival offering more than `k` later headers can coexist. Its
 entry count per peer is bounded by `GenesisWindowSlots + k + 1`, and
 `maxTrackedPeers` bounds the aggregate. A separate `observedTipHistory` stays
 bounded to `k+1` entries for rollback restoration and is trimmed on rollback
-(`PeerChainTip.ApplyRollback`). Outside Genesis hash-frontier tracking is
-disabled and fragments snapshot that short rollback history instead.
+(`PeerChainTip.ApplyRollback`). A selector that runs the Genesis state machine
+(`ChainSelectorConfig.GenesisStateMachine`, implied by `GenesisMode`) keeps this
+bounded hash frontier in Praos too, and keeps `deliveredPeerTips` and the
+eagerness delivery histories across the exit, so the Limit on Eagerness,
+density disconnection and density comparison have data when it returns to
+Genesis. A selector without the state machine (Praos overrides) tracks no hashes
+and its fragments snapshot the short rollback history instead.
 Each frontier stores its first block number; consecutive block heights align
 two chains for a binary search of their last equal point. A height gap starts a
 new frontier, leaving the comparison undecidable until continuity is rebuilt.
@@ -8399,32 +8451,91 @@ to believe are independent* from origin.
 fast source, and per-peer density/corroboration. The selector emits
 `chainselection.genesis_corroboration_failed` when the densest fast source is
 denied for lack of corroboration (deduped per source; the warning is also logged
-without an EventBus) and `chainselection.genesis_mode_exited` with the exit
-reason (local slot, best known *advertised* slot, window) when it returns to
-Praos — exit keys off the advertised network tip, not the observed frontier, so
-the gate stays active through from-origin sync until the local tip nears the
-real network tip.
+without an EventBus), `chainselection.genesis_mode_exited` (local slot, number
+of idle connections, window) when it leaves Genesis and
+`chainselection.genesis_mode_entered` (local slot, window) when it returns.
 
-The exit horizon (`bestKnownGenesisSlotLocked`) is the highest advertised tip
-slot among **corroborated (selectable)** peers that have **actually delivered
-headers up to within the window of that advertised tip**
-(`ObservedTip + window >= Tip`). The advertised tip is untrusted and unbounded;
-the implausible-tip check deliberately bounds the delivered frontier instead,
-because an honest advertisement can be far ahead during catch-up. Corroboration
-alone does not fix this, because it validates the *delivered* headers (the
-observed frontier), not the advertised claim: a peer that delivers one shared
-early header (passing corroboration) can still advertise a slot near
-`math.MaxUint64`. Binding the horizon to *delivered* data closes this: a liar
-cannot deliver headers up to a `MaxUint64` slot, and an honest peer early in
-from-origin sync has not yet delivered up to its far advertised tip, so neither
-raises the horizon prematurely; the advertised tip becomes the exit target only
-once a corroborated peer has served its chain up to (near) it, which is reached
-exactly when the local tip has caught up. This satisfies both bounds — no
-single-peer liveness pin (an unbounded slot never counts until delivered) and no
-premature exit at the start of sync (delivered headers only reach the far tip
-once caught up). A change to any tracked peer's frontier re-runs selection while
-corroboration is active, so corroboration granted or revoked takes effect
-immediately rather than on the next periodic tick.
+**Genesis state machine** (`chainselection/gsm.go`). The selector is Syncing in
+Genesis mode and CaughtUp in Praos mode, as in the reference's
+`Node/GSM.hs`. It evaluates on every selector pass, outside `cs.mutex` for the
+ledger lookups, and commits a transition only if a second snapshot under the
+lock matches the first.
+
+- *Exit (`blockUntilCaughtUp`).* Genesis ends only when at least one ChainSync
+  connection is known, **every** connection is idle, and no peer's delivered
+  chain is better than the selection. Connections come from the tracked peers
+  and `ChainSelectorConfig.ChainSyncConnections`, which the node backs with the
+  chainsync client set, so observers count. Advertised tips never influence the
+  exit. A connection is idle when its latest MsgAwaitReply
+  (`SetPeerIdling`, delivered for ingress and observer connections alike) is at
+  its delivered frontier and none of its headers awaits ledger admission. The
+  chainsync cursor moves only on ledger admission, and never for an observer,
+  so the MsgAwaitReply names the last point the peer sent
+  (`chainsync.State.ClientProtocolPoint`), falling back to the cursor before
+  the peer has sent one. The await point is kept per connection, so an await
+  that precedes admission of the header it was sent at counts once that header
+  is promoted, and one for an older point never does. Each MsgRollForward
+  revokes an await for any other point (`ClearPeerIdling`) before the header is
+  verified, so a peer is not idle while its next header waits. A connection
+  whose await matches the tip of its delivered frontier but not of its
+  admission frontier, as an admitted peer demoted to observer, is judged on the
+  delivered frontier. A peer is not better when its delivered tip is on the
+  applied chain (`PointOnLocalChain`), or its frontier intersects the applied
+  chain (a binary search over its retained points) and `ComparePraosTips` against
+  the applied tip's `PraosTiebreakerView` (`LocalTipPraosView`, read from the
+  applied block header) does not prefer it. A peer that cannot be shown to
+  intersect, or an equal-height peer when its own or the local view is
+  unavailable, blocks the exit, as the reference's
+  `CandidateDoesNotIntersect` does.
+- *Historicity.* An idle peer whose delivered tip's slot starts more than the
+  cutoff before now (`HistoricityCutoff`; the node sets the stability window
+  `3k/f` from the Shelley genesis, converted at the Shelley slot length, plus
+  one hour, independent of a configured Genesis density window) blocks the exit and is reported once to
+  `OnHistoricityDisconnect`; the node denies it for ten minutes and closes its
+  connection. The slot time is `LedgerState.SlotToTime` (the hardfork summary),
+  which is defined for Byron slots, not `WallClockSlot`, which the node
+  withholds in Byron. This is the reference's `HistoricityCheck` on
+  MsgAwaitReply. Rollbacks are not checked: the oldest rolled-back header's slot
+  is not retained.
+- *Re-entry (`blockWhileCaughtUp`).* After an exit Praos lasts at least
+  `MaxCaughtUpAge` (20 minutes). The deadline is the selection tip's slot time
+  plus `MaxCaughtUpAge` plus a bonus drawn once per Praos period in
+  [0, 300 s]; it is recomputed whenever the selection tip changes, and a tip
+  already past the age limit, at the origin, or whose slot cannot be converted
+  (`SlotTime` error, past horizon) is too old at once, without the bonus. A
+  selector started in Praos has no minimum stay.
+- *Startup (`initializationGsmState`).* The node keeps a `CaughtUpMarker` file in
+  the data directory, written on `genesis_mode_exited` and removed on
+  `genesis_mode_entered` and on live restore or truncate. With Genesis otherwise
+  enabled, no marker starts in Genesis; a marker whose tip is older than
+  `MaxCaughtUpAge` is removed and starts in Genesis; a marker with a younger tip
+  starts in Praos. The marker is removed when a live restore or truncate
+  begins and again before its rebuild steps. Marker I/O failures are logged
+  and ignored; a failed removal is not harmless, since the surviving marker
+  starts a later run in Praos once the tip is young again. The overrides that force Praos
+  (bootstrap disabled, `PraosMode`, `intersectTip`, `intersectPoints`) are
+  unchanged. Peer-snapshot loading follows the same decision.
+
+Consumers of the Genesis state now see both transitions. The Limit on Patience
+holds each bucket full while inactive and refreshes it on every recycler tick, so
+re-entry starts each peer with its whole budget. The ledger's fork resolver and
+`ObservedHeaderLimitFunc` read the state per call; thin per-peer header history
+right after re-entry resolves through the existing re-sync path. The wall-clock
+stale-tip rule and its peer demotion apply again on the next sweep.
+`corroborationIdentityForIngress` returns identities again when corroboration is
+configured. The synchronous rollback and tip observation resume, and one header
+in flight at the transition may still reach the gate through the asynchronous
+path, which the corroboration hold absorbs.
+
+The advertised tip is untrusted and unbounded, and a peer that delivers one
+shared early header (passing corroboration) can advertise any slot, so it plays
+no part in leaving Genesis; the exit rule above reads only delivered headers and
+the protocol's explicit idle signal. A peer that advertises its delivered
+position and idles cannot end Genesis while another connection is still
+delivering, and cannot end it at all once its delivered tip is historic. A
+change to any tracked peer's frontier re-runs selection while corroboration is
+active, so corroboration granted or revoked takes effect immediately rather than
+on the next periodic tick.
 
 **Deferred / not implemented**: Dingo does not yet implement **ChainSync
 Jumping** or **Devoted BlockFetch**. The corroboration gate stalls a fast source
@@ -8566,7 +8677,8 @@ header. This prevents keepalive activity from preserving an obsolete admission
 fragment as the peer's only candidate while authenticated delivery advances.
 Each fragment has the existing candidate-window bound, connections share the
 tracked-peer limit, and rollback trims it to an exact retained point or clears
-it. Disconnect, eviction and Genesis exit release the retained evidence.
+it. Disconnect and eviction release the retained evidence; Genesis exit keeps it,
+bounded by the same window.
 
 When local verification withholds an intermediate header, the next authenticated
 delivery can request a bounded continuity repair through the node composition
@@ -11335,11 +11447,34 @@ a sibling adopter.
 The default builder omits mempool transactions and Leios data from that
 alternative; the sibling adopter lets chain selection decide whether it wins.
 
-Step 5's transaction selection runs inside `LedgerState.WithTxValidationSession`
-(the same mechanism the mempool backend rebuilds use above): one pinned ledger
-generation, one validation reference slot, and one repeatable-read transaction
-cover every mempool transaction considered for the candidate block, not a
-fresh snapshot per transaction. If a block, rollback, or protocol-parameter
+Step 5's transaction selection runs inside `LedgerState.WithTxValidationSessionAtSlot`
+(the slot-ticked variant of the `WithTxValidationSession` mechanism the mempool
+backend rebuilds use above): one pinned ledger generation, one validation
+reference slot (the forge slot), and one transaction cover every mempool
+transaction considered for the candidate block, not a fresh snapshot per
+transaction. The session's view is ticked to the forge slot
+(`tickTxValidationSnapshot`): when the slot lies past the applied epoch's end,
+the epoch rollover, any era transition and the pending protocol-parameter
+updates are staged in the session's rollback-only transaction, so selection
+sees the parameters and state enacted at that boundary and nothing is
+committed. That transaction is read-only (read pool) unless the slot lies past
+the applied epoch; only a session that must tick opens a read-write
+transaction, because the tick writes the boundary into it, and on SQLite that
+holds the single write connection for the session. The snapshot is taken
+before that transaction is acquired, so the session re-checks the ledger
+generation once it holds the transaction and, if a block, rollback or rollover
+published a newer one, returns `ErrLeiosValidationParentSuperseded` instead of
+ticking over the committed state (the forged-block check treats that as a retry
+and the reference-script check drops the block unjudged). The tick runs the
+rollover in validation-only mode: it never calls the snapshot manager's
+boundary hooks (whose pending SNAP distribution, deferred captures and staged
+reward inputs are shared with the real rollover), schedules no deferred
+boundary job, skips the RATIFY marking pass, records no rollover phase or
+transition-span telemetry, and returns an unappliable reward update as an
+error that rejects the validation, without calling the node's fatal-error
+callback or counting a skipped reward round. A forge slot more than one epoch beyond the applied epoch is
+refused. A validator without the slot-ticked session falls back to the
+unticked `WithTxValidationSession`. If a block, rollback, or protocol-parameter
 change publishes a newer generation before selection finishes, the whole
 candidate is rejected (`transaction validation snapshot changed`) instead of
 being built from transactions checked against different ledger views.
@@ -12022,9 +12157,13 @@ and 7, before adoption or diffusion, via `newForgedBlockValidator`'s mandatory
 disabled in config (enabled by default, fail closed), that same call
 additionally runs full self-validation: (a) VRF proof and KES signature
 verification of the block header, (b) body-hash non-zero guard, and (c)
-per-transaction ledger rule validation against the current UTxO state with an
-intra-block overlay so outputs created by earlier transactions in the same block
-are visible to later ones. A failing block is logged, counted in
+per-transaction ledger rule validation with an intra-block overlay so outputs
+created by earlier transactions in the same block are visible to later ones.
+Both checks run in a session ticked to the block's slot, the same view
+selection used: a block forged across an epoch boundary is judged against the
+epoch rollover, era transition and pending protocol-parameter updates staged
+(rollback-only, never committed) for that slot, including the reference-script
+limits enacted there, rather than the pre-boundary parameters. A failing block is logged, counted in
 `dingo_forge_validation_failed_total`, and dropped without being adopted or
 diffused. Validation wall-clock time is recorded in the
 `dingo_forge_validation_duration_seconds` histogram. An operator may set
@@ -14461,9 +14600,8 @@ manifest entries.
 bootstrap: they produce the artifact format `dingo mithril sync` consumes (a
 Mithril Cardano database, v2) and serve it through the aggregator artifact API.
 Neither starts the node; both read the `mithril.server` configuration, and the
-server binds the shared `bindAddr`. Artifact reads are public. When the
-aggregator is enabled, signer registration and registration closure require an
-operator bearer token; non-loopback binds require TLS.
+server binds the shared `bindAddr`. All endpoints accept anonymous HTTP requests,
+including signer registration and registration closure.
 
 **Production** (`mithril.CreateSnapshot`) takes a sealed cardano-node database
 directory. Immutable file numbers must be contiguous from 0 with a chunk,
@@ -14517,8 +14655,7 @@ stored snapshot older than the newest N fails, since retention has removed it.
 /artifact/cardano-database`, `/artifact/cardano-database/{hash}`,
 `/download/{hash}/{name}` and `/certificate/{hash}` (a stored
 `certificates/{hash}.json`, if present). `mithril.server.publicBaseUrl` is the
-absolute origin used in artifact download locations; it must use HTTPS except
-for a loopback HTTP origin. Request Host and forwarded headers do not affect
+absolute HTTP(S) origin used in artifact download locations. Request Host and forwarded headers do not affect
 generated links. Archive downloads use `http.ServeContent`, giving range and
 HEAD support. From a remote store, a request naming more than one range is
 answered with the whole object instead: each range would cost a separate ranged
@@ -14555,10 +14692,7 @@ slow reader cannot retain a request slot indefinitely.
 **Aggregator** (`mithril.Aggregator`, enabled by `mithril.server.aggregator`)
 is mounted on the same handler and certifies the stored snapshots of the
 configured network. `POST /register-signer` and
-`POST /close-registrations` require the bearer token in the
-`Authorization` header, loaded from
-`mithril.server.aggregator.operatorTokenFile`; the token must contain at least
-32 random bytes, and a non-loopback bind requires server TLS. Pending reads and
+`POST /close-registrations` accept anonymous HTTP requests. Pending reads and
 signature submissions do not close registration. The operator closes it only
 after a snapshot awaits a certificate and at least one signer has registered;
 the aggregator then orders the signers as the reference key registry does,
@@ -14579,7 +14713,7 @@ certificate-chain verification of a Cardano database artifact reads. The closed
 signer set and chain head are stored in `aggregator.json` and restored on
 start; changing the epoch or parameters afterwards is refused. Signing itself is
 not part of the aggregator, and certificates carry no KES operational
-certificates. The operator supplies and authorizes the epoch's signer stakes.
+certificates. The caller supplies the epoch's signer stakes.
 
 After a completed metadata backfill,
 `internal/node.FinalizeBackfillPlannerStats` refreshes planner statistics after
@@ -14616,8 +14750,7 @@ HTTP interface here that is available in every storage mode.
 `bindAuxiliaryListener` and serving it with `serveAuxiliaryListenerOn` (bind or
 serve failures are logged, never fatal): Prometheus metrics on
 `metricsBindAddr:metricsPort` (loopback by default in the binary and container
-image; remote scraping requires setting `metricsBindAddr`; `metricsAuthToken`
-optionally requires Bearer authentication; `metricsPort` `0` disables it here
+image; remote scraping requires setting `metricsBindAddr`; `metricsPort` `0` disables it here
 and in `dingo mithril sync`), pprof on `debugPort` when enabled, and the health
 listener on `healthPort` (default `12799`, `0` disables).
 
@@ -14712,32 +14845,19 @@ introspects the same read-only SQLite pool at request time; without that pool it
 reports schema unavailability.
 
 MCP is opt-in: `plugins.api.mcp.config.port: 0` prevents node composition from
-constructing or starting the server. It does not request an ephemeral port. Set
-a positive port, such as `8088`, to enable it in either core or API storage
-mode. This keeps the SQL and node-inspection endpoint from starting
-automatically on existing nodes. Authentication is optional and unset by
-default; the listener defaults to `127.0.0.1`. Storage mode and retained
-metadata determine which queries have data available. Any non-loopback MCP bind
-additionally requires both a non-empty auth token and server TLS; unprotected
-network binds fail during provider construction and direct server construction,
-checked against the actual listen address. The canonical plugin auth-token
-environment setting overrides the compatibility `DINGO_MCP_AUTH_TOKEN` alias,
-which overrides YAML. Browser origins must be same-origin on loopback or
-explicitly listed in `corsAllowedOrigins`; the root wildcard does not grant
-access to MCP. Rejected origins receive HTTP 403 before any transport or
-preflight handling. Native clients can omit Origin. Streaming responses have no
-absolute write timeout. Streamable HTTP and legacy SSE share a 128-session
-admission budget with an eight-session limit per client address. New sessions
-fail immediately when either limit is full. Both transports close sessions after
-five idle minutes or one hour of total lifetime, and listener shutdown closes
-every admitted session. The pre-authentication rate limiter keeps at most 4096
-client identities in least-recently-used order. A single expiry timer removes
-identities after 30 idle minutes without waiting for more traffic. It runs
-before authentication, so failed credentials consume capacity; preflight and
-both health aliases bypass it. Negative or non-finite rate limits fail
-construction. Stopping MCP prevents new starts and closes its owned pool after
-listener shutdown; a timed-out start is awaited by deferred cleanup before
-closing that pool.
+constructing or starting the server; a positive port enables it. The default
+listener address is `127.0.0.1`, and every address supports plaintext HTTP.
+Storage mode and retained metadata determine which queries have data available.
+Browser origins must be same-origin on loopback or explicitly listed in
+`corsAllowedOrigins`; the root wildcard does not grant access to MCP. Native
+clients can omit Origin. Streaming responses have no absolute write timeout.
+Streamable HTTP and legacy SSE share a 128-session admission budget with an
+eight-session limit per client address. Sessions close after five idle minutes
+or one hour of total lifetime. Listener shutdown closes admitted sessions.
+The rate limiter retains at most 4096 client addresses and removes entries
+after 30 idle minutes. Preflight and both health aliases bypass it. Negative
+or non-finite rate limits fail construction. Stopping MCP prevents new starts
+and closes its owned pool after listener shutdown.
 
 SQLite-backed tools and resources enforce the configured query timeout.
 Per-table schema resources are enumerated once during server construction,
@@ -14821,14 +14941,10 @@ provider `mode: disabled` keeps that listener plaintext. Shared TLS values
 follow the normal CLI > environment > YAML > default precedence before this
 scope merge. Certificate files are loaded when the listener starts.
 
-Blockfrost read routes require no credentials. Its submission and evaluation
-routes require the provider's `authToken`; the listener cannot expose an
-authenticated mutation route on a non-loopback address without server TLS.
-Kupo, Mesh, and UTxO RPC routes require no credentials, including health and
-reflection routes. MCP supports an optional shared token through Bearer
-authentication or `X-API-Key`. Its `/healthz` route bypasses authentication and
-rate limiting; `/health` does not. Origin validation precedes both routes and
-preflight handling.
+Every API provider accepts anonymous requests, including transaction submission,
+evaluation, MCP, health, and reflection endpoints. Plaintext HTTP is supported
+on every bind address. Authentication and mandatory TLS are not API responsibilities.
+Optional TLS remains an operator-selected transport.
 
 The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
 RPC-only TLS compatibility input among these providers; Midnight also
@@ -14839,11 +14955,8 @@ defaulting to `127.0.0.1`; an explicitly empty provider host falls back to
 `bindAddr`. A non-loopback UTxO RPC listener has no built-in access policy
 and must be placed behind a protective gateway.
 `metricsBindAddr` and `debugBindAddr` separately configure Prometheus and pprof;
-both default to loopback. `metricsAuthToken` protects both the ordinary and
-Mithril-sync Prometheus listeners when configured. The listener remains plain
-HTTP, so remote Bearer authentication requires a TLS reverse proxy or an
-authenticated encrypted tunnel; network isolation is an additional access
-control. `corsAllowedOrigins` remains a shared root setting,
+both default to loopback. Both ordinary and Mithril-sync Prometheus listeners
+accept anonymous HTTP requests. `corsAllowedOrigins` remains a shared root setting,
 but MCP rejects its wildcard and applies the origin checks described above.
 
 ### API listener lifecycle (`internal/apilistener`)
@@ -15100,16 +15213,9 @@ write, and idle timeouts.
 
 The listener defaults to `127.0.0.1`. Set
 `plugins.api.blockfrost.config.host` to expose it on another interface.
-Transaction submission and evaluation require the configured
-`plugins.api.blockfrost.config.authToken`, accepted through the standard
-`project_id` header, `X-Blockfrost-Project-Id`, or Bearer authentication. A
-non-loopback listener with mutation authentication enabled also requires
-server TLS through `plugins.api.blockfrost.config.tls` so the credential is
-not sent in cleartext; `Start` enforces this for every server, including one
-built directly with `New`. When several credential headers are present, the
-request is accepted if any one of them matches. Read routes remain public.
+Transaction submission and evaluation accept anonymous requests over HTTP.
 
-Mutation admission runs after authentication and before body decoding. The
+Mutation admission runs before body decoding. The
 shared `maxConcurrentMutations` limit bounds process-wide submission and
 evaluation work, while `maxConcurrentMutationsPerClient` caps one remote address
 (it may equal the shared limit, in which case one address can use the whole
@@ -15205,7 +15311,12 @@ share a metadata label admission pool (4 active, 2 per client address, 429 with
 deadline (a disconnected client stops the page; an overrun answers 503 with
 `Retry-After`). The page reads the label's rows through the
 `(label, slot, transaction_id)` index, so its cost follows the page offset
-rather than the number of transactions with the label. Pool and account list routes reject
+rather than the number of transactions with the label. `GET /pools/{pool_id}/blocks`, `GET /epochs/{number}/blocks` and
+`GET /epochs/{number}/blocks/{pool_id}` count and page the `block_nonce` rows in
+a slot range through the `(slot, hash)` index, so they share a block list
+admission pool (4 active, 2 per client address, 429 with `Retry-After` when
+full) and run under the request context and a 15-second deadline (an overrun
+answers 503 with `Retry-After`); an offset past the total skips the page query. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,
@@ -15335,9 +15446,10 @@ out into that table), so the query pages directly against it with SQL
 `ORDER BY`/`LIMIT`/`OFFSET` and an inclusive `(slot, tx_index)` range
 predicate for `from`/`to` — no application-level fan-out or filtering
 happens after the query returns. A block number in `from`/`to` is resolved
-with bounded index lookups (`Database.BlockByIndex` and, when the exact
-block is absent, `Database.BlockAtOrAfterIndex` for `from` or
-`Database.BlockAtOrBeforeIndex` for `to`) rather than a scan. In an import
+with a bounded metadata search by chain block number
+(`database.BlockNumberBoundaryTxn`: the first indexed block numbered at least
+`from`, or the last numbered at most `to`) rather than a scan. The search
+reads block metadata only and fetches just the selected block body. In an import
 gap, `from` resolves to the next existing block and `to` resolves to the
 preceding existing block. If the needed boundary does not exist, the range
 is empty; a `to` beyond the latest block resolves to the latest block. An
@@ -15527,11 +15639,13 @@ Two contracts follow from that boundary:
 
 - **Block numbering.** `block_identifier.index` is the Cardano block height in
   both directions: `/block` reports it, and `/block` accepts it. The blob
-  store's own block index is 1-based (`database.BlockInitialIndex`), so
-  `meshDatabaseAdapter.BlockByIndex` translates height to internal index, the
-  same translation `api/blockfrost`'s block-by-height lookup and
-  `midnight/server`'s `databaseAdapter` perform. Handlers deal only in
-  consensus block numbers.
+  store's internal block index is a separate, storage-private sequence that
+  does not equal the chain block number. `meshDatabaseAdapter.BlockByIndex`
+  resolves the height through `database.BlockByNumber`, a bounded search over
+  block metadata that returns the earliest block carrying that number (Byron
+  epoch boundary blocks share a number with their parent). `api/blockfrost`'s
+  block-by-height lookup and `midnight/server`'s `databaseAdapter` resolve
+  numbers the same way. Handlers deal only in consensus block numbers.
 - **Historical balances are pinned to the requested point.**
   `/network/options` advertises `historical_balance_lookup: true`, and
   `/account/balance` honors it. A request carrying a `block_identifier`
@@ -16985,10 +17099,43 @@ never the reverse.
   a network whose `/account_list` is legitimately empty still has a reusable
   crawl. A refresh that
   fails is an error rather than a fallback to the stale set, for the same
-  reason. `GetAllAccountAddressesWithProgress` logs a line every 50 pages so a
-  long crawl is distinguishable from a stalled one; the logger is a parameter
-  rather than a client field because the same client serves the concurrent
-  chunk fetchers.
+  reason.
+
+  The crawl is durable and resumable. It pages `/account_list` by Range
+  offset over the endpoint's default order. Keyset paging (order and filter on
+  `stake_address`) was measured on a production Koios host and rejected: an
+  ordered first page took 17 s and a later keyset page 70 s, against 1-2 s for
+  an offset page, because the endpoint has no index to sort or range-scan on.
+  Each page is written to `koios_account_universe_partial` in the same
+  transaction that advances the resume point in `koios_account_universe_crawl`
+  (query, start time, next offset, last address, page and address counts).
+  After a restart, or a failed retry attempt, the crawl continues at the
+  offset without refetching persisted pages. Offset paging is only sound while
+  the list does not shift, so the first request after a resume starts one row
+  early and that row must equal the recorded last address; on a mismatch the
+  partial crawl is discarded and restarted from zero, once per call. Within a
+  walk pages are contiguous and unchecked: `grest.account_list` orders by
+  `stake_address.id`, so the list grows only at its tail and a rollback at the
+  tip moves only accounts registered after the crawl started, which the
+  universe does not vouch for. An insert and a removal that cancel out ahead of
+  the offset also pass the overlap check. A partial crawl is likewise discarded when its
+  recorded query differs from the current one or it started before the epoch
+  being checked ended (the completed universe is stamped with the crawl's
+  start). `/account_list` requests use a longer response-header and request
+  timeout than other endpoints, since a deep offset page takes seconds. Only
+  `CompleteAccountUniverseCrawl` — after a response shorter than the page
+  size — moves the rows into `koios_account_universe` and writes
+  `koios_account_universe_state`, in one transaction. `GetAccountUniverse`
+  never reads the partial tables, so a partial crawl is never a universe: the
+  resolver returns a complete universe or an error, and account-level checks
+  never start on an incomplete list, since a "no missing accounts" verdict
+  needs the whole list. A crawl is logged every 50 pages so a long one is
+  distinguishable from a stalled one. Two resolvers sharing a cache file are
+  kept apart by the recorded start time and page count: a page save must
+  follow the recorded crawl's previous page, and completion must name the
+  recorded crawl at its current page, so a crawler that was overtaken,
+  completed, or discarded by another fails with an error instead of mixing
+  its pages into the other's set or promoting it incomplete.
 - **Koios host.** `koiosBaseURLs` maps the network to the public `*.koios.rest`
   v1 root, and `KoiosParityConfig.BaseURL` (`--koios-parity-base-url`,
   `DINGO_KOIOS_PARITY_BASE_URL`, and `--koios-url` / `KOIOS_URL` on the
@@ -17056,11 +17203,11 @@ never the reverse.
   `NewObserver` because the probe needs a context and a startup the caller can
   fail — because the node's config dump names the configured value only for
   the in-process observer and says nothing on the `fetch`/`run`/`watch` paths.
-  Recording alone only invalidates the rows present when it runs, so the eight
+  Recording alone only invalidates the rows present when it runs, so the nine
   writes that carry the check verify, inside their own transaction, that the
   cache still holds the root this handle claimed: `CommitEpochData`,
   `CommitAccountRewardsForEpoch`, `SaveAccountFetchChunkProgress`,
-  `SaveAccountUniverse` and `UpsertEpochParams` on the fetch side, and
+  `SaveAccountUniverseCrawlPage`, `CompleteAccountUniverseCrawl` and `UpsertEpochParams` on the fetch side, and
   `CommitEpochMismatches`, `UpsertCheckEpochStatus` and `InsertCheckRun` on the
   check side. `UpsertEpochParams` carries it because `fetchEpochParamsOnly`
   reaches it without going through `CommitEpochData`, making the parameter
@@ -17667,15 +17814,29 @@ the tool also skips blocks Dingo refuses as too old until validation starts:
 the first post-Byron block whose epoch resolves, by the era history or by
 Dingo. Any later refusal is a real failure that ends the session. Every
 query the ChainSync callbacks make -- the epoch lookup, the UTxO baseline
-captures, the `/tx_info` flushes, and the protocol-parameter, stake and UTxO
-checks -- runs under a per-session context, so its connections close when the
-session ends and the run resumes instead of waiting on a query Dingo never
-answers. The epoch lookup is also bounded at five minutes, since an idle
-session reports no error to end it; the whole-UTxO queries carry no deadline.
-An epoch whose checks a session end cuts off is not reported: buffered
-`/tx_info` hashes stay unapplied, the comparison neither taints nor
-re-baselines the reconstruction, and the checks run again at that epoch's next
-block on the resumed session.
+captures, and the protocol-parameter, stake and UTxO checks -- runs under a
+per-session context, so its connections close when the session ends and the
+run resumes instead of waiting on a query Dingo never answers. The epoch
+lookup is also bounded at five minutes, since an idle session reports no error
+to end it; the whole-UTxO queries carry no deadline.
+
+`/tx_info` is fetched by a pipeline while the chain is read. Each block's
+transaction hashes are queued in chain order and cut into chunks of
+`--koios-tx-info-batch-size`; at most `--koios-tx-info-concurrency` chunks are
+in flight, and results are applied to the reconstruction strictly in chain
+order, since an output created in one chunk may be spent in a later one.
+Reading stops only while eight rounds of chunks (eight times the concurrency)
+are unapplied, so one stalled request does not leave the other request slots
+idle. A chunk fetched again after a wait gives up its request slot while it
+waits and is granted the next free slot ahead of every later chunk, since no
+result behind it can be applied until it is. The fetches run under the run's
+context, not a session's: a session that ends leaves them fetching, and the
+next session applies their results. Only a re-baseline of the reconstruction,
+which discards every queued hash, and the end of the run cancel them; the wait
+for results is the only part bound to the session. An epoch whose checks a
+session end cuts off is not reported: hashes still queued stay unapplied, the
+comparison neither taints nor re-baselines the reconstruction, and the checks
+run again at that epoch's next block on the resumed session.
 
 `--koios-cache-path` makes those lookups cache-first against a `koios-parity`
 `cache.db`, which may be the one a dingo instance's own embedded observer is
@@ -17693,6 +17854,7 @@ internal/nodeparity/       # shared library, untagged and importable
   watch.go                  # Watcher, WatchBlocks: persistent per-node ChainSync subscription with reconnect (full mode)
   incremental.go            # IncrementalCursor, RunIncremental: sequential per-block UTxO-delta orchestration (incremental mode)
   from_genesis.go           # RunFromGenesis: reconnecting from-genesis ChainSync walk, per-epoch checks (Koios mode)
+  txinfo_pipeline.go        # txInfoPipeline: windowed /tx_info fetches applied in chain order; orderedSlots
   epoch_oracle.go           # epochOracle: slot-to-epoch resolution from Dingo's cached era history
   koios_check.go            # CheckProtocolParams/CheckStakeDistribution/UTxOChanges: the Koios-backed comparisons
 
@@ -18654,16 +18816,9 @@ retained block contents.
 
 **LifecycleService** (`bark/lifecycle.go`) mounts bark's `LifecycleService`
 (Stop, Restart, GetStatus) when `BarkConfig.Node` is set, which `node.go`'s
-`Run()` does only when `barkLifecycleEnabled` is true. Stop and Restart use
-`barkLifecycleOperatorCertificateFingerprints`, a distinct allowlist from the
-DatabaseService operator policy, so enabling database lifecycle access grants
-no process-control privilege. Bark owns the transport,
-authentication and request validation (a negative `graceful_timeout` is
+`Run()` does only when `barkLifecycleEnabled` is true. Bark owns transport and request validation (a negative `graceful_timeout` is
 `INVALID_ARGUMENT`) and delegates to `bark.NodeControl`, implemented by
-`*dingo.Node` in `node_remote_lifecycle.go`. `Stop` and `Restart` are
-classified destructive and `GetStatus` read-only in
-`newOperatorAuthInterceptor`, so Stop and Restart need an allowlisted operator
-certificate and `GetStatus` only a verified one. `Node.RequestShutdown` accepts
+`*dingo.Node` in `node_remote_lifecycle.go`. `Node.RequestShutdown` accepts
 exactly one request (a later one gets `FAILED_PRECONDITION`), resolves the
 timeout (zero, or anything longer than `shutdownTimeout`, selects
 `shutdownTimeout`, the bound `Node.Stop` enforces), publishes
@@ -18742,58 +18897,10 @@ The HTTP server applies a 60-second request read timeout but no write timeout,
 so slow request bodies are bounded without imposing an overall deadline on
 long-lived server streams.
 
-**Authentication and authorization** (`bark/auth.go`).
-Bind address alone doesn't authenticate a caller. Every DatabaseService and
-LifecycleService RPC requires mTLS client-certificate authentication,
-independent of bind address;
-the entirely-read-only ArchiveService remains public. `BarkConfig.
-TlsClientCAFilePath` supplies a PEM CA bundle. `startServer` loads it into an
-`x509.CertPool` and sets the listener's `ClientAuth` to
-`tls.VerifyClientCertIfGiven` — "if given," not "required," because Archive is
-served on the same listener. Go's TLS stack still chain-verifies any presented
-certificate against `ClientCAs` during the handshake before request handling.
-
-Because Connect's `AnyRequest`/`StreamingHandlerConn` don't expose the
-underlying `tls.ConnectionState`, `peerCertContextMiddleware` wraps the mux
-(alongside the existing `httpcors.Handler` wrap) and stashes whether the
-connection presented a verified client certificate — plus, for audit
-logging, its Subject Common Name and a SHA-256 fingerprint — into the
-request context. `newOperatorAuthInterceptor`, wired via
-`connect.WithInterceptors` when `databaseconnect.NewDatabaseServiceHandler`
-is constructed, is deny-by-default and enforces two stages. It first rejects
-every DatabaseService request without a verified certificate with
-`connect.CodeUnauthenticated`. It then permits methods explicitly classified
-read-only, while destructive or unclassified methods additionally require the
-certificate's SHA-256 fingerprint in `BarkConfig.
-OperatorCertificateFingerprints`; a verified non-operator receives
-`connect.CodePermissionDenied`. Every non-read-only call, accepted or rejected,
-is logged with the caller's certificate identity. An unclassified procedure is
-also logged and treated as destructive. Because this all sits beneath
-`*http.Server`, one check covers
-Connect, gRPC, and gRPC-Web alike — they're just HTTP requests distinguished
-by content type once they reach the generated handler, not separate code
-paths needing separate wiring. The interceptor implements the full
-`connect.Interceptor` interface (including the no-op-today
-`WrapStreamingHandler`/`WrapStreamingClient` paths) so the same
-interceptor and destructive-procedure-set pattern can cover any other bark
-service that must refuse anonymous calls.
-
-`Start` (not `NewBark`) fails closed: mounting `Lifecycle` without
-`TlsClientCAFilePath`, at least one `OperatorCertificateFingerprint`, or
-`TlsCertFilePath`/`TlsKeyFilePath` is refused rather than silently serving
-DatabaseService with a missing authentication or authorization stage. The check
-lives at `Start`, not construction, because a `databaseServiceHandler` built
-via `newDatabaseServiceHandler` and exercised through direct in-process Go
-calls — as most of this package's own handler-level tests do — never goes
-through `Start`'s mux/interceptor wiring and so is never actually
-network-reachable in the first place; `internal/config/validate.go` also
-checks the same invariant upfront (`barkPort` + `databaseLifecycle.
-snapshotDir` set without `barkClientCaFilePath` or
-`barkOperatorCertificateFingerprints`), so a misconfigured `dingo` invocation
-fails fast at the CLI rather than deep inside `Node.Run()`.
-`dingoctl`'s existing `--client-cert`/`--client-key`/`--ca-cert` flags
-(`dingoctl/internal/client/tls.go`) are the client side of this — no new
-dingoctl plumbing was needed.
+All Bark RPCs accept requests without client certificates or operator allowlists.
+DatabaseService and LifecycleService support plaintext HTTP, as does ArchiveService.
+Request validation, lifecycle coordination, and storage integrity checks apply to
+every call independently of transport.
 
 The `snapshot_id` generated by `CreateSnapshot` is its directory name under
 `SnapshotDir`. Bark maintains a SQLite catalog of local directories and
@@ -18867,8 +18974,9 @@ terminal status is published only after the next operation can start.
 operation's in-memory state (no push notification from the goroutine to a
 concurrently open stream) — adequate given operations run for seconds to
 hours, far coarser than the poll interval. The handler admits at most 32
-progress streams globally and four for one verified client-certificate
-fingerprint. It rejects an excess stream before allocating its ticker. An
+progress streams globally and four for one remote client address (one IPv4
+address or one IPv6 /64).
+It rejects an excess stream before allocating its ticker. An
 admitted stream ends when the operation becomes terminal, its request context
 is cancelled, or its 15-minute lifetime expires; a client following a longer
 operation reconnects to renew the stream. The Bark HTTP middleware supplies a
@@ -18877,7 +18985,7 @@ handler installs the same absolute deadline before its first send. A client
 that stops reading therefore cannot keep `stream.Send` blocked beyond the
 lifetime. A missing or unsupported setter fails the stream before its first
 send, and the deadline is cleared as the handler exits. Admission, release,
-and rejection logs include the fingerprint plus the active global and
+and rejection logs include the client address plus the active global and
 per-client counts.
 
 Because `GetRestoreStatus`/`GetTruncateStatus` need to stay pollable for the
@@ -19674,7 +19782,7 @@ excluded from `FullPotRewardsStandardNetwork`.
 
 Key configuration areas:
 - Network selection (preview, preprod, mainnet, dijkstra, musashi, devnet,
-  prime-testnet). DijkstraNet uses magic 6 and the canonical `dijkstra`
+  prime-testnet, prime-mainnet). DijkstraNet uses magic 6 and the canonical `dijkstra`
   configuration bundle; it does not enable Musashi prototype trust bypasses.
 - Storage mode (`core` or `api`)
 - Database path and `plugins.storage` provider selections

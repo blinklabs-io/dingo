@@ -5377,11 +5377,22 @@ number is not an indexed blob key — only slot (`bp`), hash (`bh`), and the
 internal sequential ID (`bi`) are — so the lookup binary-searches the ID space
 that block numbers increase with, bounded above by the highest indexed block,
 and seeks to the next indexed entry at or after each probe so a gap left by a
-Mithril bootstrap or drain import does not end the search early. A number no
+Mithril bootstrap or drain import does not end the search early. When an EBB
+shares its parent's number, the earliest indexed match is returned. A number no
 block carries returns `models.ErrBlockNotFound`. It costs O(log n) blob reads
 where a slot or hash lookup costs one, so prefer either of those when the
 caller has one; bark's `ArchiveService.FetchBlock` uses it only for a reference
 that supplies height alone.
+
+`BlockNumberBoundaryTxn` resolves an inclusive lower or upper chain-number
+boundary using the same metadata-only sparse-ID search. A lower boundary
+selects the earliest block with a number at least the requested number; an
+upper boundary selects the latest block with a number at most it. This includes
+all blocks sharing a Byron epoch-boundary block number. The caller supplies a
+resolved `BlockNumberBound` and a read transaction; only the selected block body
+is fetched. Blockfrost transaction ranges bound both the number and internal
+ID by the applied tip, excluding prefetched blocks even when they share the
+applied tip's number.
 
 The upper bound is a separate value, `BlockNumberBound`, resolved by
 `ResolveBlockNumberBound` and passed to `BlockByNumberBounded`. Resolving it

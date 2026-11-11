@@ -767,14 +767,8 @@ type Config struct {
 	// all-interfaces "0.0.0.0" default; set explicitly to widen that on
 	// purpose.
 	BarkHost string `yaml:"barkHost"                            envconfig:"DINGO_BARK_HOST"`
-	// BarkClientCAFilePath is a PEM CA bundle Bark verifies client
-	// certificates (mTLS) against. Required whenever the database lifecycle
-	// service is mounted (databaseLifecycle.snapshotDir set alongside
-	// barkPort), or BarkLifecycleEnabled is true. Every DatabaseService and
-	// LifecycleService RPC requires a certificate verified against this CA.
-	// Destructive methods additionally require their service's explicit
-	// operator fingerprint match. Also requires
-	// TlsCertFilePath/TlsKeyFilePath to be set.
+	// BarkClientCAFilePath is a legacy configuration input with no effect.
+	// Dingo APIs do not authenticate or authorize callers.
 	BarkClientCAFilePath string `yaml:"barkClientCaFilePath"                envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
 	// BarkArchiveMaxConcurrentFetches bounds how many ArchiveService
 	// FetchBlock requests Bark serves at once; a request over the limit is
@@ -794,18 +788,14 @@ type Config struct {
 	// allowance. Zero selects Bark's default (50); a negative value is
 	// rejected.
 	BarkArchiveCallerLookupsPerSecond int `yaml:"barkArchiveCallerLookupsPerSecond" envconfig:"DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND"`
-	// BarkOperatorCertificateFingerprints is the explicit operator allowlist
-	// for destructive DatabaseService RPCs. Every DatabaseService caller must
-	// authenticate with BarkClientCAFilePath; only these SHA-256 certificate
-	// fingerprints may invoke destructive methods.
+	// BarkOperatorCertificateFingerprints is a legacy configuration input with no effect.
+	// Dingo APIs do not authenticate or authorize callers.
 	BarkOperatorCertificateFingerprints []string `yaml:"barkOperatorCertificateFingerprints" envconfig:"DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS"`
 	// BarkLifecycleEnabled explicitly mounts Bark's remote node lifecycle
-	// service. It defaults to false so configuring DatabaseService credentials
-	// does not also grant process-control access.
+	// service. It defaults to false.
 	BarkLifecycleEnabled bool `yaml:"barkLifecycleEnabled" envconfig:"DINGO_BARK_LIFECYCLE_ENABLED"`
-	// BarkLifecycleOperatorCertificateFingerprints is the separate operator
-	// allowlist for remote Stop and Restart. GetStatus requires only a client
-	// certificate verified through BarkClientCAFilePath.
+	// BarkLifecycleOperatorCertificateFingerprints is a legacy configuration input with no effect.
+	// Dingo APIs do not authenticate or authorize callers.
 	BarkLifecycleOperatorCertificateFingerprints []string `yaml:"barkLifecycleOperatorCertificateFingerprints" envconfig:"DINGO_BARK_LIFECYCLE_OPERATOR_CERTIFICATE_FINGERPRINTS"`
 	CORSAllowedOrigins                           []string `yaml:"corsAllowedOrigins"                  envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
 	// MetricsBindAddr is the interface used by the unauthenticated
@@ -813,11 +803,9 @@ type Config struct {
 	// BindAddr; operators must set this field explicitly to expose
 	// metrics on a wildcard or remote-scrape address.
 	MetricsBindAddr string `yaml:"metricsBindAddr" envconfig:"DINGO_METRICS_BIND_ADDR"`
-	// MetricsAuthToken enables Bearer authentication on the Prometheus
-	// listener. It has no CLI flag because process arguments are public to
-	// other users on many systems.
+	MetricsPort     uint   `yaml:"metricsPort"    split_words:"true"`
+	// MetricsAuthToken is ignored; metrics requests do not require authentication.
 	MetricsAuthToken string `yaml:"metricsAuthToken" envconfig:"DINGO_METRICS_AUTH_TOKEN"`
-	MetricsPort      uint   `yaml:"metricsPort"    split_words:"true"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
@@ -1453,13 +1441,11 @@ type MithrilConfig struct {
 }
 
 // MithrilServerConfig holds configuration for producing Mithril snapshot
-// artifacts and serving them over HTTP. Artifact reads are public; aggregator
-// signer registration and registration closure require operator credentials.
+// artifacts and serving them over HTTP. All endpoints accept anonymous requests.
 type MithrilServerConfig struct {
 	// Port is the TCP port `dingo mithril serve` listens on.
 	Port uint `yaml:"port"                    envconfig:"DINGO_MITHRIL_SERVER_PORT"`
-	// PublicBaseURL is the public HTTPS origin used in snapshot download
-	// locations. Plain HTTP is accepted only for a loopback origin.
+	// PublicBaseURL is the public HTTP(S) origin used in snapshot download locations.
 	PublicBaseURL string `yaml:"publicBaseUrl"           envconfig:"DINGO_MITHRIL_SERVER_PUBLIC_BASE_URL"`
 	// ArtifactStore is where produced artifacts are kept and served from: a
 	// filesystem directory, or an s3://bucket/prefix or gcs://bucket/prefix
@@ -1477,8 +1463,7 @@ type MithrilServerConfig struct {
 	// manifest of produced snapshots, in the Mithril JSON-hex key format.
 	AncillarySigningKeyFile string `yaml:"ancillarySigningKeyFile" envconfig:"DINGO_MITHRIL_SERVER_ANCILLARY_SIGNING_KEY_FILE"`
 	// TLSEnabled serves HTTPS using the shared tlsCertFilePath and
-	// tlsKeyFilePath. It is off by default; aggregator-enabled servers bound
-	// outside loopback require it to protect the operator bearer token.
+	// tlsKeyFilePath. It is off by default and is optional on every bind address.
 	TLSEnabled bool `yaml:"tlsEnabled"              envconfig:"DINGO_MITHRIL_SERVER_TLS_ENABLED"`
 	// Aggregator configures certificate production for the stored snapshots.
 	Aggregator MithrilAggregatorConfig `yaml:"aggregator"`
@@ -1501,8 +1486,8 @@ type MithrilAggregatorConfig struct {
 	// GenesisSigningKeyFile holds the Ed25519 genesis signing key, in the
 	// Mithril JSON-hex key format, that signs the genesis certificate.
 	GenesisSigningKeyFile string `yaml:"genesisSigningKeyFile" envconfig:"DINGO_MITHRIL_AGGREGATOR_GENESIS_SIGNING_KEY_FILE"`
-	// OperatorTokenFile holds the bearer token for signer registration and
-	// registration closure. Use a file containing at least 32 random bytes.
+	// OperatorTokenFile is a legacy configuration input with no effect.
+	// Dingo APIs do not authenticate or authorize callers.
 	OperatorTokenFile string `yaml:"operatorTokenFile" envconfig:"DINGO_MITHRIL_AGGREGATOR_OPERATOR_TOKEN_FILE"`
 }
 
@@ -1939,7 +1924,6 @@ func LoadConfig(configFile string) (*Config, error) {
 		return nil, err
 	}
 	pluginEnviron := os.Environ()
-	applyMCPAuthCompatibilityEnvironment(cfg, pluginEnviron)
 	if err := applySecretFileEnvironment(cfg); err != nil {
 		return nil, err
 	}
@@ -2363,27 +2347,4 @@ func applyTokenRegistryHeaderSecretsEnvironment(cfg *Config) error {
 	}
 	cfg.TokenRegistry.HeaderSecrets = headers
 	return nil
-}
-
-func applyMCPAuthCompatibilityEnvironment(cfg *Config, environ []string) {
-	var token string
-	var found bool
-	for _, entry := range environ {
-		name, value, ok := strings.Cut(entry, "=")
-		if !ok {
-			continue
-		}
-		if name == "DINGO_PLUGINS_API_MCP_CONFIG_AUTH_TOKEN" {
-			return
-		}
-		if name == "DINGO_MCP_AUTH_TOKEN" {
-			token, found = value, true
-		}
-	}
-	if found {
-		if cfg.Plugins.API.Mcp.Config == nil {
-			cfg.Plugins.API.Mcp.Config = make(map[string]any)
-		}
-		cfg.Plugins.API.Mcp.Config["authToken"] = token
-	}
 }
