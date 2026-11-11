@@ -8552,3 +8552,60 @@ func TestChainsyncRollBackwardTrimsIneligibleObserverDeliveredHistory(
 	require.Equal(t, f.conn, e.ConnectionId)
 	require.Equal(t, point, e.Point)
 }
+
+// The ledger rejects headers it buffered for a connection when that
+// connection is resynced. Each rejection used to park a deferred-header
+// recovery, which was harmless while the resync closed the connection. After
+// an in-place re-intersect the rejected header belongs to a cursor that no
+// longer exists and the new cursor replays it, so parking a recovery only
+// re-intersects the peer a second time.
+func TestChainsyncRejectedHeaderOfReplacedCursorParksNoRecovery(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	conn := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	state := dchainsync.NewState(bus, nil)
+	require.True(t, state.AddClientConnId(conn))
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncObservePeerTip: func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition {
+			return chainselection.PeerTipUpdateAccepted
+		},
+		ChainsyncResolvePeerTip: func(chainselection.PeerTipUpdateEvent, bool) {},
+	})
+	o.eventBus = bus
+	o.chainsyncState = state
+	o.ledgerState = newTestLedgerState(t)
+
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		0,
+		header,
+		tip,
+	))
+	evt := testutil.RequireReceive(
+		t, ledgerCh, time.Second, "header sent for ledger admission",
+	)
+	chainsyncEvent, ok := evt.Data.(ledger.ChainsyncEvent)
+	require.True(t, ok)
+	require.NotNil(t, chainsyncEvent.PeerTipAdmission)
+
+	o.settleReintersectedCursor(conn, ocommon.NewPointOrigin())
+	chainsyncEvent.PeerTipAdmission(false)
+
+	o.deferredHeaderRecoveryMu.Lock()
+	_, parked := o.deferredHeaderRecovery[conn]
+	o.deferredHeaderRecoveryMu.Unlock()
+	require.False(t, parked,
+		"a header of a replaced cursor must not park a recovery")
+}

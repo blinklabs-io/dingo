@@ -819,14 +819,7 @@ func (o *Ouroboros) chainsyncClientIntersectFound(
 	if !reintersecting {
 		return nil
 	}
-	if o.chainsyncState != nil {
-		o.chainsyncState.ClearObservedHeaderHistoryAfter(
-			ctx.ConnectionId,
-			point,
-		)
-	}
-	// The marker withholds the old cursor's headers until it is replaced.
-	o.cancelFutureHeaderResync(ctx.ConnectionId)
+	o.settleReintersectedCursor(ctx.ConnectionId, point)
 	// The peer's next message is MsgRollBackward to point. On this connection
 	// the ledger has already seen headers, so it would apply that rollback and
 	// undo blocks it holds; the marker makes it treat the rollback as a new
@@ -2121,6 +2114,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		if o.chainsyncState != nil {
 			clientSession = o.chainsyncState.ClientSession(ctx.ConnectionId)
 		}
+		cursorEpoch := o.chainsyncCursorEpoch(ctx.ConnectionId)
 		if o.config.ChainsyncRecoverDeliveredPeerTip != nil && o.chainsyncState != nil {
 			refreshCtx, cancelRefresh := chainsyncAdmissionContext(ctx)
 			stopRefresh := o.startChainsyncEagernessRecovery(refreshCtx, ctx, clientSession)
@@ -2983,7 +2977,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					delete(o.acceptedHeaderTips, ctx.ConnectionId)
 				}
 				o.acceptedHeaderMu.Unlock()
-				if o.ledgerState != nil {
+				// A re-intersect has replaced this header's cursor and
+				// replays it, so there is nothing left to recover.
+				if o.ledgerState != nil &&
+					o.chainsyncCursorEpoch(ctx.ConnectionId) == cursorEpoch {
 					o.markDeferredHeaderRecovery(
 						ctx.ConnectionId,
 						o.ledgerState.Tip(),
@@ -3589,6 +3586,52 @@ func (o *Ouroboros) updateChainsyncMetrics(
 
 	// Update peer scoring
 	o.peerGov.UpdatePeerChainSyncObservation(connId, headerRate, tipDelta)
+}
+
+// settleReintersectedCursor ends what was recorded against connId's previous
+// cursor once the peer has agreed to the new intersection at point. Closing
+// the connection used to end all of it, because the reconnect came back under
+// a new connection ID; a re-intersect keeps the ID.
+func (o *Ouroboros) settleReintersectedCursor(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	// A header the ledger still holds from the old cursor may be rejected
+	// after this point; the epoch tells its callback the cursor is gone.
+	o.chainsyncReintersectMu.Lock()
+	o.chainsyncCursorEpochs[connId]++
+	o.chainsyncReintersectMu.Unlock()
+	if o.chainsyncState != nil {
+		o.chainsyncState.ClearObservedHeaderHistoryAfter(connId, point)
+		// The intersection is on the local chain and the peer replays from
+		// it, which is the replay an observer header gap waits for. Left set,
+		// the gap arms an ingress-promotion resync on every later header.
+		o.chainsyncState.ClearClientObserverHeaderGap(
+			connId,
+			o.chainsyncState.ClientSession(connId),
+		)
+	}
+	// The marker withholds the old cursor's headers until it is replaced.
+	o.cancelFutureHeaderResync(connId)
+	// A recovery parked for a header of the old cursor would re-intersect the
+	// peer again on the next applied block, and the new cursor replays that
+	// header anyway. The once-per-applied-tip retry record is kept, so a peer
+	// that defers again at the same tip is not recycled in a loop.
+	o.deferredHeaderRecoveryMu.Lock()
+	delete(o.deferredHeaderRecovery, connId)
+	o.deferredHeaderRecoveryMu.Unlock()
+	o.forgetAcceptedHeaderTip(connId)
+}
+
+// chainsyncCursorEpoch counts connId's in-place re-intersects. A callback
+// created for a header compares it to learn whether the header's cursor has
+// since been replaced.
+func (o *Ouroboros) chainsyncCursorEpoch(
+	connId ouroboros.ConnectionId,
+) uint64 {
+	o.chainsyncReintersectMu.Lock()
+	defer o.chainsyncReintersectMu.Unlock()
+	return o.chainsyncCursorEpochs[connId]
 }
 
 // defaultChainsyncReintersectTimeout bounds an in-place re-intersect. A client

@@ -697,3 +697,54 @@ func TestChainsyncResyncReintersectOnTornDownConnectionIsNoOp(t *testing.T) {
 	require.True(t, ok,
 		"a re-intersect on a torn-down connection must not run the close fallback")
 }
+
+// Closing a connection used to end everything recorded against its cursor:
+// the observer header gap, a parked deferred-header recovery and the accepted
+// header tip all went with the connection ID. A re-intersect keeps the ID, so
+// it must end them itself. Left behind, the gap re-arms an ingress-promotion
+// resync on every later header, and the parked recovery re-intersects the peer
+// again on the next applied block for a header the new cursor replays anyway.
+func TestChainsyncResyncReintersectEndsOldCursorState(t *testing.T) {
+	t.Parallel()
+	f := newReintersectFixture(t, 10*time.Second)
+	session := f.state.ClientSession(f.connId)
+	f.state.RecordClientObserverHeaderGap(f.connId, session)
+	require.True(t, f.state.ClientObserverHeaderGap(f.connId))
+	stale := newTestBlockHeader(f.intersect.Slot+5, 4, 0xa4)
+	f.o.deferredHeaderRecoveryMu.Lock()
+	f.o.deferredHeaderRecovery = map[ouroboros.ConnectionId]deferredHeaderRecoveryState{
+		f.connId: {
+			point: ocommon.NewPoint(
+				stale.SlotNumber(), stale.Hash().Bytes(),
+			),
+			resolvable: true,
+		},
+	}
+	f.o.deferredHeaderRecoveryMu.Unlock()
+	f.o.recordAcceptedHeaderTip(f.connId, stale.Hash().Bytes())
+	epoch := f.o.chainsyncCursorEpoch(f.connId)
+	rollBackwards := f.rollBackwards.Load()
+
+	f.publish(event.ChainsyncResyncReasonIngressPromotion)
+	testutil.WaitForCondition(
+		t,
+		func() bool { return f.rollBackwards.Load() > rollBackwards },
+		5*time.Second,
+		"the re-intersected sync must roll back to the intersection",
+	)
+
+	require.False(t, f.state.ClientObserverHeaderGap(f.connId),
+		"a re-intersect replays the headers the observer skipped")
+	f.o.deferredHeaderRecoveryMu.Lock()
+	_, parked := f.o.deferredHeaderRecovery[f.connId]
+	f.o.deferredHeaderRecoveryMu.Unlock()
+	require.False(t, parked,
+		"a recovery parked for the old cursor must not re-intersect again")
+	f.o.acceptedHeaderMu.Lock()
+	_, accepted := f.o.acceptedHeaderTips[f.connId]
+	f.o.acceptedHeaderMu.Unlock()
+	require.False(t, accepted,
+		"the old cursor's accepted tip must not extend the new cursor")
+	require.Greater(t, f.o.chainsyncCursorEpoch(f.connId), epoch,
+		"the new cursor must be distinguishable from the old one")
+}

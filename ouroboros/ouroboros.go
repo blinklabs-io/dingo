@@ -327,6 +327,9 @@ type Ouroboros struct {
 	// connection, so overlapping resyncs do not stack.
 	chainsyncReintersectMu  sync.Mutex
 	chainsyncReintersecting map[ouroboros.ConnectionId]*chainsyncReintersectRun
+	// chainsyncCursorEpochs counts the in-place re-intersects of each
+	// connection, guarded by chainsyncReintersectMu.
+	chainsyncCursorEpochs map[ouroboros.ConnectionId]uint64
 	// chainsyncReintersectReturnedHook runs once an in-place re-intersect has
 	// returned and the re-intersected sync is already running. Tests use it to
 	// hold the resync goroutine while the new cursor streams.
@@ -968,6 +971,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncReintersecting: make(
 			map[ouroboros.ConnectionId]*chainsyncReintersectRun,
 		),
+		chainsyncCursorEpochs:    make(map[ouroboros.ConnectionId]uint64),
 		futureHeaderResyncCtx:    futureHeaderResyncCtx,
 		futureHeaderResyncCancel: futureHeaderResyncCancel,
 		blockDecodeCache: newDecodeCacheWithByteLimit[gledger.Block](
@@ -1435,6 +1439,9 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.clearDeferredHeaderRecovery(connId)
 	o.forgetAcceptedHeaderTip(connId)
 	o.forgetServedActivity(connId)
+	o.chainsyncReintersectMu.Lock()
+	delete(o.chainsyncCursorEpochs, connId)
+	o.chainsyncReintersectMu.Unlock()
 
 	// Counts keep-alive pong timeouts.
 	if classifyKeepaliveTimeoutClose(e.Error) {
