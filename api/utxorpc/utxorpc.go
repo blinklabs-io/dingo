@@ -45,46 +45,17 @@ import (
 	betawatchconnect "github.com/utxorpc/go-codegen/utxorpc/v1beta/watch/watchconnect"
 )
 
-// Default request size limits to prevent denial-of-service via
-// unbounded request arrays.
+// Defaults for DumpHistory pagination and shutdown. Every other bound on
+// UtxorpcConfig is unlimited unless the operator sets a positive value.
 const (
-	DefaultMaxBlockRefs    = 100
-	DefaultMaxUtxoKeys     = 1000
 	DefaultMaxHistoryItems = 10000
 	// DefaultHistoryPageItems is the DumpHistory page size when the request
-	// omits max_items; it stays well below DefaultMaxHistoryItems so an
-	// anonymous request without a limit cannot buffer the full maximum.
+	// omits max_items.
 	DefaultHistoryPageItems = 100
 	// DefaultMaxHistoryBytes bounds the serialized block data collected for
-	// one DumpHistory response.
+	// one DumpHistory page; a longer page continues from next_token.
 	DefaultMaxHistoryBytes = 8 << 20
-	DefaultMaxDataKeys     = 1000
-	DefaultMaxTxRefs       = 1000
-	// DefaultMaxRequestBody bounds each Connect message before it is decoded.
-	// Connect applies the same limit to the compressed wire
-	// message and to its decompressed form, preventing a small compressed body
-	// from expanding without bound during unary request decoding.
-	DefaultMaxRequestBody = 1 << 20 // 1 MiB
-	// DefaultMaxPoolFilter caps ReadState's pool_keyhashes filter. Matching
-	// the other key-list caps: a caller wanting every pool sends an empty
-	// filter, so a long explicit list is not the way to ask for the whole
-	// distribution.
-	DefaultMaxPoolFilter = 1000
-	// DefaultMaxMempoolItems caps the transactions ReadMempool returns.
-	DefaultMaxMempoolItems = 1000
-	// DefaultMaxResponseBytes caps the payload a single unary bulk response
-	// retains (UTxO, datum, block and mempool bodies).
-	DefaultMaxResponseBytes = 16 << 20 // 16 MiB
-	// DefaultMaxConcurrentBulkRequests caps how many bulk read handlers run
-	// at once; further requests are refused with ResourceExhausted.
-	DefaultMaxConcurrentBulkRequests = 32
-	DefaultMaxConcurrentEvalRequests = 4
-	DefaultMaxEvalRequestsPerClient  = 2
-	defaultListenHost                = "127.0.0.1"
-	// DefaultBulkResponseWriteTimeout bounds delivery of a bulk unary
-	// response without imposing a deadline on streaming RPCs.
-	DefaultBulkResponseWriteTimeout = 30 * time.Second
-	DefaultServerTimeout            = time.Hour
+	defaultListenHost      = "127.0.0.1"
 	// DefaultShutdownTimeout bounds Stop's graceful http.Server.Shutdown
 	// before it escalates to a hard Close, matching midnight/server's
 	// identical ShutdownTimeout/defaultShutdownTimeout pattern.
@@ -115,7 +86,8 @@ type UtxorpcConfig struct {
 	Host        string
 	Port        uint
 
-	// Request size limits (0 = use default)
+	// Every limit below is off (unlimited) when zero and enforced only when
+	// the operator sets a positive value, except where noted.
 	MaxBlockRefs int
 	MaxUtxoKeys  int
 	// MaxHistoryItems caps DumpHistory and SearchUtxos page size; omitted
@@ -126,68 +98,74 @@ type UtxorpcConfig struct {
 	HistoryPageItems int
 	// MaxHistoryBytes caps the serialized block bytes in one DumpHistory
 	// response; a longer page is cut short and continues from next_token
-	// (0 = use default).
+	// (0 = unlimited).
 	MaxHistoryBytes int
 	MaxDataKeys     int
 	// MaxTxRefs caps the transaction references in one WaitForTx
-	// request (0 = use default).
+	// request (0 = unlimited).
 	MaxTxRefs int
 	// MaxStreams caps concurrent FollowTip, WatchTx, WatchMempool and WaitForTx streams
 	// across all clients; MaxStreamsPerClient caps them per client, an IPv4
-	// address or IPv6 /64 (0 = use default).
+	// address or IPv6 /64 (0 = unlimited).
 	MaxStreams          int
 	MaxStreamsPerClient int
 	// MaxPredicateNodes caps the total nodes of a watch predicate
-	// (0 = use default).
+	// (0 = unlimited).
 	MaxPredicateNodes int
 	// MaxReplayBlocks caps how far behind the tip a WatchTx intersect may
-	// start, in blocks (0 = use default).
+	// start, in blocks (0 = unlimited).
 	MaxReplayBlocks int
 	// MaxWatchHistoryBytes caps the bytes one WatchTx stream retains for
 	// rollback; older blocks are evicted and rebuilt from persisted blocks if
-	// a rollback needs them (0 = use default).
+	// a rollback needs them (0 = unlimited).
 	MaxWatchHistoryBytes int64
 	// MaxWatchHistoryBytesTotal caps the bytes all WatchTx streams retain
-	// for rollback together (0 = use default).
+	// for rollback together (0 = unlimited).
 	MaxWatchHistoryBytesTotal int64
 	// MaxConcurrentReplays caps FollowTip streams that are serving blocks
 	// behind the tip at once, across all clients; a further replay is refused
-	// with ResourceExhausted (0 = use default).
+	// with ResourceExhausted (0 = unlimited).
 	MaxConcurrentReplays int
 	// MaxReplaysPerClient caps the FollowTip streams one client may have
 	// serving blocks behind the tip at once, so one client cannot hold every
-	// MaxConcurrentReplays slot (0 = use default).
+	// MaxConcurrentReplays slot (0 = unlimited).
 	MaxReplaysPerClient int
 	// ReplayBlocksPerSecond paces the historical blocks FollowTip serves to
 	// one client across all its streams; replay slows down, it does not stop
-	// (0 = use default).
+	// (0 = unlimited).
 	ReplayBlocksPerSecond int
 	// MaxReplayBlocksPerClient caps the historical blocks FollowTip serves to
 	// one client per ReplayBudgetWindow; a replay that spends it ends with
-	// ResourceExhausted (0 = use default).
+	// ResourceExhausted (0 = unlimited).
 	MaxReplayBlocksPerClient int64
 	// ReplayBudgetWindow is the period MaxReplayBlocksPerClient covers
-	// (0 = use default).
+	// (0 = unlimited).
 	ReplayBudgetWindow time.Duration
 	// MaxPoolFilter caps ReadState's pool_keyhashes filter length.
 	MaxPoolFilter int
-	// MaxMempoolItems caps ReadMempool's result size (0 = use default).
+	// MaxRequestBody caps each Connect message, compressed and decompressed
+	// (0 = unlimited).
+	MaxRequestBody int
+	// MaxMempoolWatchQueue cuts off a WatchMempool client that lets this many
+	// responses queue unread (0 = unbounded).
+	MaxMempoolWatchQueue int
+	// MaxMempoolItems caps ReadMempool's result size (0 = unlimited).
 	MaxMempoolItems int
 	// MaxResponseBytes caps the payload bytes one bulk read response may
-	// retain (0 = use default).
+	// retain (0 = unlimited).
 	MaxResponseBytes int64
 	// MaxConcurrentBulkRequests caps concurrently running bulk read handlers
-	// (0 = use default).
+	// (0 = unlimited).
 	MaxConcurrentBulkRequests int
 	// MaxConcurrentEvalRequests caps EvalTx handlers before transaction
 	// decoding; MaxEvalRequestsPerClient applies the same bound per client.
 	MaxConcurrentEvalRequests int
 	MaxEvalRequestsPerClient  int
 	// BulkResponseWriteTimeout bounds delivery of a bulk unary response
-	// (0 = use default).
+	// (0 = unlimited).
 	BulkResponseWriteTimeout time.Duration
 	// ServerTimeout bounds long-running UTxO RPC handlers server-side
-	// (0 = use default).
+	// (0 = unlimited).
 	ServerTimeout time.Duration
 	// ShutdownTimeout bounds Stop's graceful http.Server.Shutdown before it
 	// escalates to a hard Close (0 = use default). Watch* RPCs are
@@ -210,12 +188,6 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	if cfg.Port == 0 {
 		cfg.Port = 9090
 	}
-	if cfg.MaxBlockRefs <= 0 {
-		cfg.MaxBlockRefs = DefaultMaxBlockRefs
-	}
-	if cfg.MaxUtxoKeys <= 0 {
-		cfg.MaxUtxoKeys = DefaultMaxUtxoKeys
-	}
 	if cfg.MaxHistoryItems <= 0 {
 		cfg.MaxHistoryItems = DefaultMaxHistoryItems
 	}
@@ -226,75 +198,16 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	if cfg.MaxHistoryBytes <= 0 {
 		cfg.MaxHistoryBytes = DefaultMaxHistoryBytes
 	}
-	if cfg.MaxDataKeys <= 0 {
-		cfg.MaxDataKeys = DefaultMaxDataKeys
-	}
-	if cfg.MaxTxRefs <= 0 {
-		cfg.MaxTxRefs = DefaultMaxTxRefs
-	}
-	if cfg.MaxStreams <= 0 {
-		cfg.MaxStreams = DefaultMaxStreams
-	}
-	if cfg.MaxStreamsPerClient <= 0 {
-		cfg.MaxStreamsPerClient = DefaultMaxStreamsPerClient
-	}
-	if cfg.MaxPredicateNodes <= 0 {
-		cfg.MaxPredicateNodes = DefaultMaxPredicateNodes
-	}
-	if cfg.MaxReplayBlocks <= 0 {
-		cfg.MaxReplayBlocks = DefaultMaxReplayBlocks
-	}
-	if cfg.MaxWatchHistoryBytes <= 0 {
-		cfg.MaxWatchHistoryBytes = DefaultMaxWatchHistoryBytes
-	}
-	if cfg.MaxWatchHistoryBytesTotal <= 0 {
-		cfg.MaxWatchHistoryBytesTotal = DefaultMaxWatchHistoryBytesTotal
-	}
-	if cfg.MaxConcurrentReplays <= 0 {
-		cfg.MaxConcurrentReplays = DefaultMaxConcurrentReplays
-	}
-	if cfg.MaxReplaysPerClient <= 0 {
-		cfg.MaxReplaysPerClient = DefaultMaxReplaysPerClient
-	}
-	if cfg.ReplayBlocksPerSecond <= 0 {
-		cfg.ReplayBlocksPerSecond = DefaultReplayBlocksPerSecond
-	}
-	if cfg.MaxReplayBlocksPerClient <= 0 {
-		cfg.MaxReplayBlocksPerClient = DefaultMaxReplayBlocksPerClient
-	}
-	if cfg.ReplayBudgetWindow <= 0 {
-		cfg.ReplayBudgetWindow = DefaultReplayBudgetWindow
-	}
-	if cfg.MaxPoolFilter <= 0 {
-		cfg.MaxPoolFilter = DefaultMaxPoolFilter
-	}
-	if cfg.MaxMempoolItems <= 0 {
-		cfg.MaxMempoolItems = DefaultMaxMempoolItems
-	}
-	if cfg.MaxResponseBytes <= 0 {
-		cfg.MaxResponseBytes = DefaultMaxResponseBytes
-	}
-	if cfg.MaxConcurrentBulkRequests <= 0 {
-		cfg.MaxConcurrentBulkRequests = DefaultMaxConcurrentBulkRequests
-	}
-	if cfg.MaxConcurrentEvalRequests <= 0 {
-		cfg.MaxConcurrentEvalRequests = DefaultMaxConcurrentEvalRequests
-	}
-	if cfg.MaxEvalRequestsPerClient <= 0 {
-		cfg.MaxEvalRequestsPerClient = DefaultMaxEvalRequestsPerClient
-	}
-	if cfg.BulkResponseWriteTimeout <= 0 {
-		cfg.BulkResponseWriteTimeout = DefaultBulkResponseWriteTimeout
-	}
-	if cfg.ServerTimeout <= 0 {
-		cfg.ServerTimeout = DefaultServerTimeout
-	}
 	if cfg.ShutdownTimeout <= 0 {
 		cfg.ShutdownTimeout = DefaultShutdownTimeout
 	}
+	var bulkSlots chan struct{}
+	if cfg.MaxConcurrentBulkRequests > 0 {
+		bulkSlots = make(chan struct{}, cfg.MaxConcurrentBulkRequests)
+	}
 	return &Utxorpc{
 		config:    cfg,
-		bulkSlots: make(chan struct{}, cfg.MaxConcurrentBulkRequests),
+		bulkSlots: bulkSlots,
 		streams:   newStreamLimiter(cfg.MaxStreams, cfg.MaxStreamsPerClient),
 		evalRequests: newRequestLimiter(
 			cfg.MaxConcurrentEvalRequests,
@@ -405,12 +318,7 @@ func (u *Utxorpc) buildServer() *http.Server {
 				u.config.Host,
 				strconv.FormatUint(uint64(u.config.Port), 10),
 			),
-			Handler:           handler,
-			ReadHeaderTimeout: 60 * time.Second,
-			ReadTimeout:       60 * time.Second,
-			IdleTimeout:       120 * time.Second,
-			// WriteTimeout deliberately 0 for gRPC streaming
-			// endpoints (FollowTip, WatchTx, WaitForTx).
+			Handler: handler,
 		}
 	} else {
 		u.config.Logger.Info(
@@ -425,13 +333,8 @@ func (u *Utxorpc) buildServer() *http.Server {
 				u.config.Host,
 				strconv.FormatUint(uint64(u.config.Port), 10),
 			),
-			Handler:           handler,
-			Protocols:         unencryptedHTTP2Protocols(),
-			ReadHeaderTimeout: 60 * time.Second,
-			ReadTimeout:       60 * time.Second,
-			IdleTimeout:       120 * time.Second,
-			// WriteTimeout deliberately 0 for gRPC streaming
-			// endpoints (FollowTip, WatchTx, WaitForTx).
+			Handler:   handler,
+			Protocols: unencryptedHTTP2Protocols(),
 		}
 	}
 	return server
@@ -443,13 +346,19 @@ func (u *Utxorpc) buildServer() *http.Server {
 // reconstruction of them.
 func (u *Utxorpc) newServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	compress1KB := connect.WithOptions(
+	handlerOpts := []connect.Option{
 		connect.WithCompressMinBytes(1024),
-		connect.WithReadMaxBytes(DefaultMaxRequestBody),
 		connect.WithInterceptors(connect.UnaryInterceptorFunc(
 			bulkResponseWriteDeadlineInterceptor,
 		)),
-	)
+	}
+	if u.config.MaxRequestBody > 0 {
+		handlerOpts = append(
+			handlerOpts,
+			connect.WithReadMaxBytes(u.config.MaxRequestBody),
+		)
+	}
+	compress1KB := connect.WithOptions(handlerOpts...)
 	queryPath, queryHandler := queryconnect.NewQueryServiceHandler(
 		&queryServiceServer{utxorpc: u},
 		compress1KB,

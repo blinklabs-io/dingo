@@ -293,9 +293,6 @@ type Mempool struct {
 	dag               *transactionDAG
 	headroomChanged   chan struct{}
 	submissionSlots   chan struct{}
-	// apiSubmissionSlots keeps one shared validation slot available to direct
-	// network submission when Mesh or UTxO RPC saturates API admission.
-	apiSubmissionSlots chan struct{}
 
 	// rebuildMutex permits one double-buffer rebuild at a time. mutationSeq and
 	// mutationJournal are protected by mutationMutex and let that rebuild catch
@@ -640,24 +637,6 @@ var ErrNilValidator = errors.New("mempool: validator is nil")
 // ErrMempoolStopped is returned when admission is attempted after shutdown.
 var ErrMempoolStopped = errors.New("mempool: stopped")
 
-// ErrSubmissionBusy reports that API submission cannot reserve its bounded
-// share of transaction-validation capacity. AdmitSubmission returns it instead
-// of waiting, so an API request does not hold a handler goroutine while it
-// waits for a metadata read transaction.
-var ErrSubmissionBusy = errors.New("transaction submission capacity exhausted")
-
-type submissionAdmissionKey struct{}
-
-type submissionAdmission struct {
-	mempool *Mempool
-}
-
-// SubmissionAdmitter is implemented by a mempool that can reserve validation
-// capacity before an API decodes an untrusted transaction body.
-type SubmissionAdmitter interface {
-	AdmitSubmission(context.Context) (context.Context, func(), error)
-}
-
 type submissionCapacityProvider interface {
 	MempoolSubmissionCapacity() int
 }
@@ -764,10 +743,6 @@ func newMempool(
 		submissionSlots: make(
 			chan struct{},
 			submissionCapacity,
-		),
-		apiSubmissionSlots: make(
-			chan struct{},
-			max(submissionCapacity-1, 0),
 		),
 	}
 	if implementation == ImplementationDAG {
@@ -2061,13 +2036,11 @@ func (m *Mempool) AddTransaction(
 	if err := m.rejectOversizedTx(txType, txBytes); err != nil {
 		return err
 	}
-	if admission, _ := ctx.Value(submissionAdmissionKey{}).(submissionAdmission); admission.mempool != m {
-		release, err := m.waitSubmissionSlot(ctx)
-		if err != nil {
-			return err
-		}
-		defer release()
+	release, err := m.waitSubmissionSlot(ctx)
+	if err != nil {
+		return err
 	}
+	defer release()
 	// Decode transaction outside the lock (CPU-bound, no shared state)
 	tmpTx, err := safedecode.Transaction(txType, txBytes)
 	if err != nil {
@@ -2139,39 +2112,9 @@ func (m *Mempool) AddTransaction(
 	return nil
 }
 
-// AdmitSubmission reserves API and shared validation capacity without waiting
-// and marks the returned context so AddTransaction can reuse the reservation.
-// API handlers call this before decoding request data so a busy node can answer
-// the client at once; it returns ErrSubmissionBusy when either limit is held.
-func (m *Mempool) AdmitSubmission(
-	ctx context.Context,
-) (context.Context, func(), error) {
-	if err := ctx.Err(); err != nil {
-		return ctx, nil, err
-	}
-	select {
-	case m.apiSubmissionSlots <- struct{}{}:
-	default:
-		return ctx, nil, ErrSubmissionBusy
-	}
-	select {
-	case m.submissionSlots <- struct{}{}:
-		return context.WithValue(
-			ctx,
-			submissionAdmissionKey{},
-			submissionAdmission{mempool: m},
-		), m.apiSubmissionSlotRelease(), nil
-	default:
-		<-m.apiSubmissionSlots
-		return ctx, nil, ErrSubmissionBusy
-	}
-}
-
-// waitSubmissionSlot reserves a validation slot for a caller that did not
-// call AdmitSubmission. Node-to-node and node-to-client submission and
-// rolled-back transaction restoration have no client to answer with a busy
-// status, so they wait for a slot rather than drop the transaction. The wait
-// ends when ctx is done or the mempool stops.
+// waitSubmissionSlot reserves a validation slot. Submissions wait for a slot
+// rather than being refused. The wait ends when ctx is done or the mempool
+// stops.
 func (m *Mempool) waitSubmissionSlot(ctx context.Context) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -2190,16 +2133,6 @@ func (m *Mempool) submissionSlotRelease() func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() { <-m.submissionSlots })
-	}
-}
-
-func (m *Mempool) apiSubmissionSlotRelease() func() {
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			<-m.submissionSlots
-			<-m.apiSubmissionSlots
-		})
 	}
 }
 

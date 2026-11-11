@@ -560,7 +560,7 @@ func registerCardanoTools(
 				"cursor pagination requires a full address",
 			)
 		}
-		if offset > limits.maxOffset {
+		if limits.maxOffset > 0 && offset > limits.maxOffset {
 			return nil, nil, errOffsetTooLarge
 		}
 		if err := limits.admit(); err != nil {
@@ -1167,7 +1167,7 @@ func registerCardanoTools(
 			limit = 200
 		}
 		offset := max(input.Offset, 0)
-		if offset > limits.maxOffset {
+		if limits.maxOffset > 0 && offset > limits.maxOffset {
 			return nil, nil, errOffsetTooLarge
 		}
 		if err := limits.admit(); err != nil {
@@ -1403,14 +1403,14 @@ func registerCardanoTools(
 			circArgs = []any{
 				policyBytes,
 				rawName,
-				limits.maxAssetRows + 1,
+				limits.assetScanLimit(),
 			}
 		} else {
 			circQuery = `SELECT a.amount, u.id
 						 FROM asset a
 						 JOIN utxo u ON a.utxo_id = u.id
 						 WHERE a.policy_id = ? AND u.deleted_slot = 0 LIMIT ?`
-			circArgs = []any{policyBytes, limits.maxAssetRows + 1}
+			circArgs = []any{policyBytes, limits.assetScanLimit()}
 		}
 		if err := func() error {
 			rows, err := db.QueryContext(qCtx, circQuery, circArgs...)
@@ -1424,7 +1424,7 @@ func registerCardanoTools(
 				// The query reads one row past the cap so an over-cap
 				// policy is detected rather than silently truncated.
 				scanned++
-				if scanned > limits.maxAssetRows {
+				if limits.maxAssetRows > 0 && scanned > limits.maxAssetRows {
 					return errAssetInfoIncomplete
 				}
 				var amount string
@@ -2290,7 +2290,6 @@ func registerEvaluateTxTool(
 	evaluator txEvaluator,
 	queryTimeout time.Duration,
 ) {
-	evaluationGate := make(chan struct{}, 1)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "evaluate_tx",
 		Description: "Simulate and evaluate Plutus script execution units (CPU steps, Memory units) and script fees for a transaction before on-chain submission.",
@@ -2356,7 +2355,7 @@ func registerEvaluateTxTool(
 		defer cancel()
 		result, err := runBoundedEvaluation(
 			evalCtx,
-			evaluationGate,
+			nil,
 			func(ctx context.Context) (evaluationResult, error) {
 				tx, err := decodeEvaluateTransaction(txBytes)
 				if err != nil {

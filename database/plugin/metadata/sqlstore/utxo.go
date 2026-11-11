@@ -641,11 +641,6 @@ func (s *Store) GetUtxoBalanceByAddressAtSlot(
 			"UTxO address must not be empty",
 		)
 	}
-	if maxResults <= 0 || maxResults == math.MaxInt {
-		return models.AddressBalance{}, errors.New(
-			"UTxO balance result limit must be positive",
-		)
-	}
 	return s.getUtxoBalanceByPredicate(
 		"utxo_address.address = ? AND utxo.added_slot <= ? AND "+
 			"(utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)",
@@ -660,6 +655,9 @@ func (s *Store) getUtxoBalanceByPredicate(
 	txn types.Txn,
 ) (models.AddressBalance, error) {
 	var ret models.AddressBalance
+	if maxResults == math.MaxInt {
+		maxResults = 0
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return ret, fmt.Errorf("resolve DB for UTxO balance: %w", err)
@@ -2131,11 +2129,10 @@ func (s *Store) GetUtxosDeletedBeforeSlot(
 // deduplicated set, so asset-loading cost is bounded by the result size
 // rather than chunk count times candidate-set size.
 //
-// maxResults must be positive: it is an explicit, caller-supplied bound on
-// the number of candidate rows this call may materialize, since a broad
-// pattern set (or an address with an unusually large UTxO set) would
-// otherwise force an unbounded result. Exceeding it returns
-// models.ErrTooManyUtxoResults rather than silently truncating the answer.
+// maxResults is an optional, caller-supplied bound on the number of candidate
+// rows this call may materialize; zero or negative means unbounded. Exceeding
+// a positive bound returns models.ErrTooManyUtxoResults rather than silently
+// truncating the answer.
 func (s *Store) GetUtxosByAddress(
 	patterns []models.UtxoAddressPattern,
 	maxResults int,
@@ -2189,11 +2186,7 @@ func (s *Store) utxosByAddressPatterns(
 		return nil, nil
 	}
 	if maxResults <= 0 {
-		return nil, fmt.Errorf(
-			"%s: maxResults must be positive, got %d",
-			name,
-			maxResults,
-		)
+		maxResults = math.MaxInt
 	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {

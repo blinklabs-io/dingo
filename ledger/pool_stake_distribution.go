@@ -274,7 +274,7 @@ func (ls *LedgerState) PoolStakeDistribution(
 }
 
 // PoolStakeDistributionBounded reads a distribution only when it contains at
-// most maxPools entries.
+// most maxPools entries. A zero or negative maxPools means unbounded.
 func (ls *LedgerState) PoolStakeDistributionBounded(
 	ctx context.Context,
 	poolFilter []lcommon.PoolKeyHash,
@@ -282,12 +282,6 @@ func (ls *LedgerState) PoolStakeDistributionBounded(
 	txn *database.Txn,
 	maxPools int,
 ) (*PoolStakeDistribution, error) {
-	if maxPools <= 0 {
-		return nil, fmt.Errorf(
-			"%w: max pools must be positive",
-			ErrPoolStakeDistributionLimitExceeded,
-		)
-	}
 	return ls.poolStakeDistribution(ctx, poolFilter, at, txn, maxPools)
 }
 

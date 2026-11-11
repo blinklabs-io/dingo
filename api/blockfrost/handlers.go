@@ -25,7 +25,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/btcsuite/btcd/btcutil/bech32"
@@ -42,7 +41,6 @@ const (
 	// Hex encodes each byte as two characters, so a 28-byte credential
 	// hash is represented by 56 hex characters.
 	drepCredentialHexLen = drepCredentialHashLen * 2
-	maxTxBodySize        = 64 * 1024
 )
 
 // writeJSON writes a JSON response with the given status
@@ -231,40 +229,12 @@ func (b *Blockfrost) handleLatestBlockTxs(
 	writeJSON(w, http.StatusOK, page)
 }
 
-// admitChainSummary reserves one chain summary slot for the request's client.
-// When the cap is reached it writes the 429 response and reports false.
-func (b *Blockfrost) admitChainSummary(
-	w http.ResponseWriter,
-	r *http.Request,
-) (func(), bool) {
-	release, ok := b.chainSummaryAdmission.acquire(
-		r.Context(),
-		requestClient(r),
-	)
-	if !ok {
-		w.Header().Set("Retry-After", "1")
-		writeError(
-			w,
-			http.StatusTooManyRequests,
-			"Too Many Requests",
-			"chain summary capacity reached, try again later",
-		)
-		return nil, false
-	}
-	return release, true
-}
-
 // handleLatestEpoch handles GET /api/v0/epochs/latest and
 // returns the current epoch info.
 func (b *Blockfrost) handleLatestEpoch(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	release, ok := b.admitChainSummary(w, r)
-	if !ok {
-		return
-	}
-	defer release()
 	info, err := b.node.CurrentEpoch(r.Context())
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -404,11 +374,6 @@ func (b *Blockfrost) handleNetwork(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	release, ok := b.admitChainSummary(w, r)
-	if !ok {
-		return
-	}
-	defer release()
 	info, err := b.node.Network(r.Context())
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -510,36 +475,6 @@ func (b *Blockfrost) handleGenesis(
 	writeJSON(w, http.StatusOK, GenesisResponse(info))
 }
 
-// assetDetailTimeout bounds how long one asset lookup may run.
-const assetDetailTimeout = 15 * time.Second
-
-// admitAssetLookup reserves a slot in the asset lookup pool for the request's
-// client. Every route that totals the live holdings of an asset shares the
-// pool. When it is full it writes the 429 response and reports false. The
-// caller runs its lookup under context.WithTimeout(r.Context(),
-// assetDetailTimeout), so the lookup stops when the client disconnects or the
-// deadline passes.
-func (b *Blockfrost) admitAssetLookup(
-	w http.ResponseWriter,
-	r *http.Request,
-) (func(), bool) {
-	release, ok := b.assetDetailAdmission.acquire(
-		r.Context(),
-		requestClient(r),
-	)
-	if !ok {
-		w.Header().Set("Retry-After", "1")
-		writeError(
-			w,
-			http.StatusTooManyRequests,
-			"Too Many Requests",
-			"asset lookup capacity reached, try again later",
-		)
-		return nil, false
-	}
-	return release, true
-}
-
 // writeAssetLookupLimitError answers the failures an admitted asset lookup can
 // hit because of its bounds, and reports whether it did. A disconnected client
 // gets no response, a lookup past its deadline is retryable, and an asset held
@@ -551,14 +486,6 @@ func (b *Blockfrost) writeAssetLookupLimitError(
 	switch {
 	case errors.Is(err, context.Canceled):
 		// The client is gone, so there is nobody to answer.
-	case errors.Is(err, context.DeadlineExceeded):
-		w.Header().Set("Retry-After", "1")
-		writeError(
-			w,
-			http.StatusServiceUnavailable,
-			"Service Unavailable",
-			"asset lookup deadline exceeded, try again later",
-		)
 	case isUtxoQueryBudgetError(err):
 		writeError(
 			w,
@@ -591,15 +518,7 @@ func (b *Blockfrost) handleAsset(
 		return
 	}
 
-	release, ok := b.admitAssetLookup(w, r)
-	if !ok {
-		return
-	}
-	defer release()
-	ctx, cancel := context.WithTimeout(r.Context(), assetDetailTimeout)
-	defer cancel()
-
-	asset, err := b.node.Asset(ctx, policyID, assetName)
+	asset, err := b.node.Asset(r.Context(), policyID, assetName)
 	if err != nil {
 		if b.writeAssetLookupLimitError(w, err) {
 			return
@@ -827,11 +746,6 @@ func (b *Blockfrost) handlePoolsExtended(
 		return
 	}
 
-	release, ok := b.admitPoolAggregate(w, r)
-	if !ok {
-		return
-	}
-	defer release()
 	pools, totalItems, err := b.node.PoolsExtended(r.Context(), params)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -903,21 +817,7 @@ func (b *Blockfrost) handleDRep(
 		return
 	}
 
-	release, ok := b.drepAdmission.acquire(r.Context(), requestClient(r))
-	if !ok {
-		w.Header().Set("Retry-After", "1")
-		writeError(
-			w,
-			http.StatusTooManyRequests,
-			"Too Many Requests",
-			"DRep detail capacity reached, try again later",
-		)
-		return
-	}
-	defer release()
-	ctx, cancel := context.WithTimeout(r.Context(), drepRatificationWait)
-	defer cancel()
-	drep, err := b.node.DRep(ctx, credential)
+	drep, err := b.node.DRep(r.Context(), credential)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return
@@ -1058,11 +958,6 @@ func (b *Blockfrost) handleAddress(
 	r *http.Request,
 ) {
 	address := r.PathValue("address")
-	release, ok := b.admitAddressSummary(w, r)
-	if !ok {
-		return
-	}
-	defer release()
 	info, err := b.node.Address(r.Context(), address)
 	if err != nil {
 		b.writeAddressQueryError(w, err, address, "address")
@@ -1138,11 +1033,6 @@ func (b *Blockfrost) handleAddressTransactions(
 	if !ok {
 		return
 	}
-	release, ok := b.admitAddressSummary(w, r)
-	if !ok {
-		return
-	}
-	defer release()
 	address := r.PathValue("address")
 	txs, total, err := b.node.AddressTransactions(r.Context(), address, params)
 	if err != nil {
@@ -1172,59 +1062,6 @@ func (b *Blockfrost) handleAddressTransactions(
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// metadataLabelTimeout bounds how long one metadata label page may run.
-const metadataLabelTimeout = 15 * time.Second
-
-// admitMetadataLabelPage reserves a slot in the metadata label pool for the
-// request's client. When it is full it writes the 429 response and reports
-// false.
-func (b *Blockfrost) admitMetadataLabelPage(
-	w http.ResponseWriter,
-	r *http.Request,
-) (func(), bool) {
-	release, ok := b.metadataLabelAdmission.acquire(
-		r.Context(),
-		requestClient(r),
-	)
-	if !ok {
-		w.Header().Set("Retry-After", "1")
-		writeError(
-			w,
-			http.StatusTooManyRequests,
-			"Too Many Requests",
-			"metadata label capacity reached, try again later",
-		)
-		return nil, false
-	}
-	return release, true
-}
-
-// writeMetadataLabelDeadlineError answers a page that ran past its deadline
-// and reports whether it did. The overrun is logged so an operator can see a
-// label whose pages exhaust the budget.
-func (b *Blockfrost) writeMetadataLabelDeadlineError(
-	w http.ResponseWriter,
-	label uint64,
-	err error,
-) bool {
-	if !errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	b.logger.Warn(
-		"metadata label page exceeded its deadline",
-		"label", label,
-		"error", err,
-	)
-	w.Header().Set("Retry-After", "1")
-	writeError(
-		w,
-		http.StatusServiceUnavailable,
-		"Service Unavailable",
-		"metadata label deadline exceeded, try again later",
-	)
-	return true
-}
-
 // handleMetadataTransactions handles
 // GET /api/v0/metadata/txs/labels/{label} and returns metadata values for the
 // requested label in JSON form.
@@ -1241,24 +1078,13 @@ func (b *Blockfrost) handleMetadataTransactions(
 		return
 	}
 
-	release, ok := b.admitMetadataLabelPage(w, r)
-	if !ok {
-		return
-	}
-	defer release()
-	ctx, cancel := context.WithTimeout(r.Context(), metadataLabelTimeout)
-	defer cancel()
-
 	rows, total, err := b.node.MetadataTransactions(
-		ctx,
+		r.Context(),
 		label,
 		params,
 	)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			return
-		}
-		if b.writeMetadataLabelDeadlineError(w, label, err) {
 			return
 		}
 		b.logger.Error(
@@ -1299,24 +1125,13 @@ func (b *Blockfrost) handleMetadataTransactionsCBOR(
 		return
 	}
 
-	release, ok := b.admitMetadataLabelPage(w, r)
-	if !ok {
-		return
-	}
-	defer release()
-	ctx, cancel := context.WithTimeout(r.Context(), metadataLabelTimeout)
-	defer cancel()
-
 	rows, total, err := b.node.MetadataTransactionsCBOR(
-		ctx,
+		r.Context(),
 		label,
 		params,
 	)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			return
-		}
-		if b.writeMetadataLabelDeadlineError(w, label, err) {
 			return
 		}
 		b.logger.Error(
@@ -1437,7 +1252,6 @@ func (b *Blockfrost) handleTransactionSubmit(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	b.setRequestBodyDeadline(w)
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/cbor" {
 		writeError(
@@ -1449,17 +1263,8 @@ func (b *Blockfrost) handleTransactionSubmit(
 		return
 	}
 
-	txCbor, err := b.readRequestBody(w, r, maxTxBodySize)
+	txCbor, err := readRequestBody(r)
 	if err != nil {
-		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			writeError(
-				w,
-				http.StatusRequestEntityTooLarge,
-				"Request Entity Too Large",
-				"transaction body exceeds maximum allowed size",
-			)
-			return
-		}
 		b.logger.Error(
 			"failed to read transaction submit body",
 			"error", err,
@@ -2271,8 +2076,7 @@ func writeNodeQueryError(
 }
 
 func isUtxoQueryBudgetError(err error) bool {
-	return errors.Is(err, models.ErrTooManyUtxoResults) ||
-		errors.Is(err, models.ErrUtxoQueryBudgetExceeded)
+	return errors.Is(err, models.ErrTooManyUtxoResults)
 }
 
 func convertAddressAmounts(
@@ -2428,11 +2232,6 @@ func (b *Blockfrost) handleAccount(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	release, ok := b.admitAddressSummary(w, r)
-	if !ok {
-		return
-	}
-	defer release()
 	account, err := b.node.Account(r.Context(), r.PathValue("stake_address"))
 	if err != nil {
 		b.writeAccountError(w, err, "failed to retrieve account")
@@ -2477,11 +2276,6 @@ func (b *Blockfrost) handleAccountAssociatedAddresses(
 	// The page and the total each aggregate the credential's whole
 	// address_transaction history, so the route shares the whole-history scan
 	// pool. Bad pagination is rejected above so it never holds a slot.
-	release, ok := b.admitAddressSummary(w, r)
-	if !ok {
-		return
-	}
-	defer release()
 	items, total, err := b.node.AccountAssociatedAddresses(
 		r.Context(), r.PathValue("stake_address"), params,
 	)

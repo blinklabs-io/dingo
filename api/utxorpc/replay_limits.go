@@ -24,15 +24,6 @@ import (
 	"connectrpc.com/connect"
 )
 
-// Defaults for the FollowTip historical replay bounds on UtxorpcConfig.
-const (
-	DefaultMaxConcurrentReplays     = 4
-	DefaultMaxReplaysPerClient      = 1
-	DefaultReplayBlocksPerSecond    = 1000
-	DefaultMaxReplayBlocksPerClient = 20_000_000
-	DefaultReplayBudgetWindow       = 24 * time.Hour
-)
-
 // replayLimiter bounds the work FollowTip spends serving blocks that are
 // already behind the tip. Live tip following never touches it.
 //
@@ -111,7 +102,7 @@ func (l *replayLimiter) acquireSlot(peerAddr string) (func(), error) {
 	key := clientKey(peerAddr)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.active >= l.maxSlots {
+	if l.maxSlots > 0 && l.active >= l.maxSlots {
 		return nil, connect.NewError(
 			connect.CodeResourceExhausted,
 			fmt.Errorf(
@@ -120,7 +111,8 @@ func (l *replayLimiter) acquireSlot(peerAddr string) (func(), error) {
 			),
 		)
 	}
-	if l.activeByClient[key] >= l.maxSlotsPerClient {
+	if l.maxSlotsPerClient > 0 &&
+		l.activeByClient[key] >= l.maxSlotsPerClient {
 		return nil, connect.NewError(
 			connect.CodeResourceExhausted,
 			fmt.Errorf(
@@ -145,6 +137,9 @@ func (l *replayLimiter) acquireSlot(peerAddr string) (func(), error) {
 // ResourceExhausted once the client has spent its window budget, and
 // otherwise waits as long as the client's block rate requires.
 func (l *replayLimiter) charge(ctx context.Context, peerAddr string) error {
+	if l.rate <= 0 && l.budget <= 0 {
+		return nil
+	}
 	key := clientKey(peerAddr)
 	l.mu.Lock()
 	now := l.now()
@@ -154,11 +149,11 @@ func (l *replayLimiter) charge(ctx context.Context, peerAddr string) error {
 		c = &replayClient{tokens: l.burst, last: now, windowStart: now}
 		l.clients[key] = c
 	}
-	if now.Sub(c.windowStart) >= l.window {
+	if l.window > 0 && now.Sub(c.windowStart) >= l.window {
 		c.windowStart = now
 		c.used = 0
 	}
-	if c.used >= l.budget {
+	if l.budget > 0 && c.used >= l.budget {
 		l.mu.Unlock()
 		return connect.NewError(
 			connect.CodeResourceExhausted,
@@ -166,6 +161,10 @@ func (l *replayLimiter) charge(ctx context.Context, peerAddr string) error {
 		)
 	}
 	c.used++
+	if l.rate <= 0 {
+		l.mu.Unlock()
+		return nil
+	}
 	if elapsed := now.Sub(c.last); elapsed > 0 {
 		c.tokens = min(l.burst, c.tokens+elapsed.Seconds()*l.rate)
 	}
@@ -188,9 +187,10 @@ func (l *replayLimiter) sweepLocked(now time.Time) {
 	if now.Before(l.nextSweep) {
 		return
 	}
-	l.nextSweep = now.Add(l.window)
+	l.nextSweep = now.Add(max(l.window, time.Minute))
 	for key, c := range l.clients {
-		if now.Sub(c.windowStart) >= l.window &&
+		if (l.window <= 0 && l.budget <= 0 ||
+			l.window > 0 && now.Sub(c.windowStart) >= l.window) &&
 			c.tokens+now.Sub(c.last).Seconds()*l.rate >= l.burst {
 			delete(l.clients, key)
 		}

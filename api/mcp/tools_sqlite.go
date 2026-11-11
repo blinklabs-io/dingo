@@ -114,7 +114,7 @@ func registerSQLiteTools(
 		}
 		effectiveLimit = min(effectiveLimit, maxRows, 200)
 		offset := max(input.Offset, 0)
-		if offset > limits.maxOffset {
+		if limits.maxOffset > 0 && offset > limits.maxOffset {
 			return nil, nil, errOffsetTooLarge
 		}
 		q := strings.TrimRight(strings.TrimSpace(input.Query), ";")

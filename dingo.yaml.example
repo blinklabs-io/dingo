@@ -356,26 +356,23 @@
 # CLI: --bark-host
 # barkHost: ""
 
-# Maximum ArchiveService FetchBlock requests Bark serves at once. ArchiveService
-# takes no client credentials, so this and the per-request reference cap bound
-# the storage work anyone who can reach the listener can cause; a request over
-# the limit is refused rather than queued. 0 selects the default of 16.
+# Optional: maximum ArchiveService FetchBlock requests Bark serves at once. A
+# request over the limit is refused rather than queued. 0 (the default) is
+# unlimited.
 # Can be overridden with DINGO_BARK_ARCHIVE_MAX_CONCURRENT_FETCHES
 # CLI: --bark-archive-max-concurrent-fetches
 # barkArchiveMaxConcurrentFetches: 0
 
-# Sustained ArchiveService block lookups per second across all callers. A
-# reference that names no block still costs a storage lookup, so a FetchBlock
-# whose references do not fit the remaining budget is refused whole with
-# RESOURCE_EXHAUSTED. 0 selects the default of 200.
+# Optional: sustained ArchiveService block lookups per second across all
+# callers. A FetchBlock whose references do not fit the remaining budget is
+# refused whole with RESOURCE_EXHAUSTED. 0 (the default) is unlimited.
 # Can be overridden with DINGO_BARK_ARCHIVE_LOOKUPS_PER_SECOND
 # CLI: --bark-archive-lookups-per-second
 # barkArchiveLookupsPerSecond: 0
 
-# Sustained ArchiveService block lookups per second for one caller, keyed by
-# IPv4 address or IPv6 /64. Callers behind one proxy share an allowance, and
-# a Dingo node reading expired history through barkBaseUrl is one caller. 0
-# selects the default of 50.
+# Optional: sustained ArchiveService block lookups per second for one caller,
+# keyed by IPv4 address or IPv6 /64. Callers behind one proxy share an
+# allowance. 0 (the default) is unlimited.
 # Can be overridden with DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND
 # CLI: --bark-archive-caller-lookups-per-second
 # barkArchiveCallerLookupsPerSecond: 0
@@ -890,6 +887,17 @@
 # on the local protocols; a client waiting on a blocking notification request,
 # such as dmq-node, stays quiet by design. Requests in progress never count as
 # idle.
+# Optional node-to-client connection caps. 0 (the default) means unlimited.
+# CLI: --max-ntc-conns
+# Env: DINGO_MAX_NTC_CONNS
+# maxNtCConns: 0
+# CLI: --max-ntc-connections-per-ip
+# Env: DINGO_MAX_NTC_CONNECTIONS_PER_IP
+# maxNtCConnectionsPerIP: 0
+# CLI: --max-trusted-local-ntc-conns
+# Env: DINGO_MAX_TRUSTED_LOCAL_NTC_CONNS
+# maxTrustedLocalNtCConns: 0
+
 # CLI: --trusted-ntc-idle-timeout
 # Env: DINGO_TRUSTED_NTC_IDLE_TIMEOUT
 # trustedNtCIdleTimeout: 0s

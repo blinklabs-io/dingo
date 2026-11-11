@@ -63,20 +63,6 @@ func (s *submitServiceServer) SubmitTx(
 	ctx context.Context,
 	req *connect.Request[submit.SubmitTxRequest],
 ) (*connect.Response[submit.SubmitTxResponse], error) {
-	if admitter, ok := s.utxorpc.config.Mempool.(mempool.SubmissionAdmitter); ok {
-		admittedCtx, release, err := admitter.AdmitSubmission(ctx)
-		if err != nil {
-			if errors.Is(err, mempool.ErrSubmissionBusy) {
-				return nil, connect.NewError(
-					connect.CodeResourceExhausted,
-					err,
-				)
-			}
-			return nil, err
-		}
-		defer release()
-		ctx = admittedCtx
-	}
 	txRaw := req.Msg.GetTx()
 
 	s.utxorpc.config.Logger.Info("Got a SubmitTx request")
@@ -198,7 +184,7 @@ func (s *submitServiceServer) waitForTx(
 
 	// One deadline covers the durable lookups and the wait that follows.
 	serverTimeout := s.utxorpc.config.ServerTimeout
-	waitCtx, cancelWait := context.WithTimeout(ctx, serverTimeout)
+	waitCtx, cancelWait := withOptionalTimeout(ctx, serverTimeout)
 	defer cancelWait()
 
 	subId := s.utxorpc.config.EventBus.SubscribeFunc(
@@ -296,7 +282,7 @@ func (s *submitServiceServer) waitForTx(
 }
 
 func validateWaitForTxReferenceCount(count, maxRefs int) error {
-	if count <= maxRefs {
+	if maxRefs <= 0 || count <= maxRefs {
 		return nil
 	}
 	return connect.NewError(
@@ -356,7 +342,7 @@ func (s *submitServiceServer) EvalTx(
 		tx,
 	)
 	if errors.Is(err, ledger.ErrEvaluationBusy) {
-		return nil, connect.NewError(connect.CodeResourceExhausted, err)
+		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return nil, err
@@ -475,10 +461,6 @@ func (s *submitServiceServer) ReadMempool(
 	return connect.NewResponse(resp), nil
 }
 
-// watchMempoolQueueSize bounds the responses buffered for one WatchMempool
-// client before it is dropped as too slow.
-const watchMempoolQueueSize = 256
-
 // WatchMempool subscribes to mempool add-transaction events and streams
 // matching transactions to the client. It blocks until the client
 // disconnects. The event callback only decodes, matches and queues; this
@@ -505,13 +487,13 @@ func (s *submitServiceServer) WatchMempool(
 
 	var predTree *txPredicateNode
 	if predicate != nil {
-		remaining := s.utxorpc.config.MaxPredicateNodes
+		remaining := s.utxorpc.predicateNodeBudget()
 		if !predicateProtoWithinBudget(predicate, isNilPtr[submit.TxPredicate], &remaining, 0) {
 			return predicateBudgetError(s.utxorpc.config.MaxPredicateNodes)
 		}
 		predTree = txPredicateFromSubmit(predicate)
 	}
-	queue := newMempoolStreamQueue(watchMempoolQueueSize)
+	queue := newMempoolStreamQueue(s.utxorpc.config.MaxMempoolWatchQueue)
 	// Carries a slow-consumer refusal from the event handler.
 	errCh := make(chan error, 1)
 
@@ -585,12 +567,14 @@ func (s *submitServiceServer) WatchMempool(
 
 	for {
 		select {
-		case resp := <-queue.responses:
-			if err := stream.Send(resp); err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
+		case <-queue.notify:
+			for _, resp := range queue.drain() {
+				if err := stream.Send(resp); err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					return err
 				}
-				return err
 			}
 		case err := <-errCh:
 			if ctx.Err() != nil {

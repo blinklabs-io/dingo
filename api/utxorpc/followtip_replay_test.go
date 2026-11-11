@@ -330,6 +330,7 @@ func TestConnect_FollowTipReplayOneSlotPerClient(t *testing.T) {
 
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks: followTipReplayBlocks,
+		tune:      func(cfg *UtxorpcConfig) { cfg.MaxReplaysPerClient = 1 },
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()

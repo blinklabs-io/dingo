@@ -26,13 +26,11 @@ import (
 )
 
 const (
-	maxMCPSessions          = 128
-	maxMCPSessionsPerClient = 8
-	mcpSessionIdleTimeout   = 5 * time.Minute
-	mcpSessionMaxLifetime   = time.Hour
-	mcpSessionIDHeader      = "Mcp-Session-Id"
+	mcpSessionIDHeader = "Mcp-Session-Id"
 )
 
+// sessionAdmission tracks open sessions so they can be closed on shutdown.
+// Zero maxSessions, maxPerClient, idleTimeout and maxLifetime mean no limit.
 type sessionAdmission struct {
 	mu           sync.Mutex
 	closed       bool
@@ -58,13 +56,9 @@ type sessionLease struct {
 
 func newSessionAdmission() *sessionAdmission {
 	return &sessionAdmission{
-		maxSessions:  maxMCPSessions,
-		maxPerClient: maxMCPSessionsPerClient,
-		idleTimeout:  mcpSessionIdleTimeout,
-		maxLifetime:  mcpSessionMaxLifetime,
-		leases:       make(map[*sessionLease]struct{}),
-		byID:         make(map[string]*sessionLease),
-		byClient:     make(map[string]int),
+		leases:   make(map[*sessionLease]struct{}),
+		byID:     make(map[string]*sessionLease),
+		byClient: make(map[string]int),
 	}
 }
 
@@ -74,8 +68,9 @@ func (a *sessionAdmission) acquire(
 ) (*sessionLease, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed || len(a.leases) >= a.maxSessions ||
-		a.byClient[client] >= a.maxPerClient {
+	if a.closed ||
+		(a.maxSessions > 0 && len(a.leases) >= a.maxSessions) ||
+		(a.maxPerClient > 0 && a.byClient[client] >= a.maxPerClient) {
 		return nil, false
 	}
 	now := time.Now()
@@ -88,17 +83,30 @@ func (a *sessionAdmission) acquire(
 	}
 	a.leases[lease] = struct{}{}
 	a.byClient[client]++
-	lease.timer = time.AfterFunc(a.nextExpiryLocked(lease, now), lease.expire)
+	if a.expiryEnabled() {
+		lease.timer = time.AfterFunc(
+			a.nextExpiryLocked(lease, now),
+			lease.expire,
+		)
+	}
 	return lease, true
+}
+
+func (a *sessionAdmission) expiryEnabled() bool {
+	return a.idleTimeout > 0 || a.maxLifetime > 0
 }
 
 func (a *sessionAdmission) nextExpiryLocked(
 	lease *sessionLease,
 	now time.Time,
 ) time.Duration {
-	idleRemaining := lease.lastSeen.Add(a.idleTimeout).Sub(now)
-	lifetimeRemaining := lease.created.Add(a.maxLifetime).Sub(now)
-	remaining := min(idleRemaining, lifetimeRemaining)
+	remaining := time.Duration(1<<63 - 1)
+	if a.idleTimeout > 0 {
+		remaining = lease.lastSeen.Add(a.idleTimeout).Sub(now)
+	}
+	if a.maxLifetime > 0 {
+		remaining = min(remaining, lease.created.Add(a.maxLifetime).Sub(now))
+	}
 	return max(remaining, 0)
 }
 
@@ -126,7 +134,11 @@ func (a *sessionAdmission) touch(id string) {
 		return
 	}
 	now := time.Now()
-	if !now.Before(lease.created.Add(a.maxLifetime)) {
+	if !a.expiryEnabled() || lease.timer == nil {
+		return
+	}
+	if a.maxLifetime > 0 &&
+		!now.Before(lease.created.Add(a.maxLifetime)) {
 		return
 	}
 	lease.lastSeen = now
