@@ -388,6 +388,21 @@ func (s *Store) unfoldedRewardOutputsSQL() string {
 	return unfoldedRewardOutputsShared
 }
 
+// unfoldedRewardOutputsExistSQL asks the pending-round index whether a
+// credited round holds an unfolded output. The account-ordered selection
+// below walks every account row to find that a folded round holds none, and
+// compaction claims from every older round on each chunk.
+const unfoldedRewardOutputsExistSQL = `
+SELECT EXISTS (
+    SELECT 1 FROM reward_credit_round rcr
+    WHERE rcr.snapshot_epoch = ?
+      AND EXISTS (
+          SELECT 1 FROM reward_account_output rao
+          WHERE rao.spendable = TRUE AND rao.guarded = FALSE
+            AND rao.folded = FALSE AND rao.epoch = rcr.snapshot_epoch
+      )
+)`
+
 // unaccountedRewardOutputsSQL selects a round's unfolded outputs whose
 // credential has no account row. The account-ordered scan cannot reach them,
 // but a claim that skipped them would leave the round due forever; claiming
@@ -499,6 +514,15 @@ func (s *Store) ClaimUnfoldedRewardCredits(
 	}
 	var ret []*models.RewardAccountOutput
 	err = s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		var unfolded bool
+		if err := db.QueryRowContext(
+			ctx, unfoldedRewardOutputsExistSQL, epoch,
+		).Scan(&unfolded); err != nil {
+			return fmt.Errorf("check unfolded reward credits: %w", err)
+		}
+		if !unfolded {
+			return nil
+		}
 		rows, err := db.QueryContext(
 			ctx, s.unfoldedRewardOutputsSQL(), int64(fromAccountID), epoch, limit, //nolint:gosec // account ids are positive SQL integers
 		)

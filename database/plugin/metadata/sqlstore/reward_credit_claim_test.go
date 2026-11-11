@@ -215,7 +215,7 @@ WHERE epoch = 2 AND folded`,
 			`\(credential_tag=\? AND staking_key=\? AND epoch=\?\)`,
 	)
 	tableScan := regexp.MustCompile(`(?m)^SCAN (rao|o)\b`)
-	var ordered, unaccounted int
+	var ordered, unaccounted, existence int
 	for _, statement := range claimSQL {
 		if !strings.Contains(statement, "reward_account_output") ||
 			strings.HasPrefix(strings.TrimSpace(statement), "UPDATE") {
@@ -235,12 +235,19 @@ WHERE epoch = 2 AND folded`,
 			require.Regexp(t, outputSeek, plan, "statement: %s", statement)
 		case strings.Contains(statement, "GetUnaccountedRewardOutputs"):
 			unaccounted++
+		case strings.Contains(statement, "SELECT EXISTS"):
+			existence++
+			require.Contains(
+				t, plan, "idx_reward_account_output_pending_round (spendable=? AND guarded=? AND folded=? AND epoch=?)",
+				"statement: %s", statement,
+			)
 		default:
 			require.Failf(t, "unexpected claim statement", "%s", statement)
 		}
 	}
-	require.Equal(t, 3, ordered, "one account-ordered selection per claim")
-	require.Equal(t, 2, unaccounted, "a short claim also looks for outputs without an account")
+	require.Equal(t, 3, existence, "each claim first checks the round holds unfolded outputs")
+	require.Equal(t, 2, ordered, "a claim on a round with nothing unfolded selects no accounts")
+	require.Equal(t, 1, unaccounted, "a short claim also looks for outputs without an account")
 }
 
 // TestClaimUnfoldedRewardCreditsFollowsAccountOrder pins the claim order: the
@@ -362,4 +369,53 @@ func TestClaimUnfoldedRewardCreditsResumesInsideAnAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, third, 1)
 	require.Equal(t, keyB, third[0].StakingKey)
+}
+
+// TestClaimUnfoldedRewardCreditsSkipsRoundWithoutUnfoldedOutputs pins the cost
+// of claiming from a round compaction has already folded. The account-ordered
+// selection walks every account row to learn that a round holds nothing, and
+// compaction asks about every older round on each chunk, so a claim must
+// answer from the pending-round index without that walk.
+func TestClaimUnfoldedRewardCreditsSkipsRoundWithoutUnfoldedOutputs(t *testing.T) {
+	t.Parallel()
+	store, recorder := newRecordingSQLiteStore(t)
+	require.NoError(t, store.SetPendingRewardCreditRounds(
+		[]models.RewardCreditRound{{SnapshotEpoch: 1, BoundarySlot: 100}}, nil,
+	))
+	outputs := make([]*models.RewardAccountOutput, 0, 4)
+	for i := range 4 {
+		outputs = append(outputs, &models.RewardAccountOutput{
+			Epoch:        1,
+			StakingKey:   bytesRepeat(byte(0x10+i), 28),
+			PoolKeyHash:  bytesRepeat(0x31, 28),
+			RewardType:   "member",
+			Amount:       types.Uint64(uint64(i + 1)),
+			Spendable:    true,
+			BoundarySlot: 100,
+		})
+	}
+	require.NoError(t, store.SaveRewardAccountOutputs(outputs, nil))
+	for _, output := range outputs {
+		require.NoError(t, store.CreateAccount(nil, &models.Account{
+			StakingKey: output.StakingKey, Active: true,
+		}))
+	}
+	claimed, err := store.ClaimUnfoldedRewardCredits(1, 0, 10, nil)
+	require.NoError(t, err)
+	require.Len(t, claimed, 4)
+
+	mark := len(recorder.snapshot())
+	again, err := store.ClaimUnfoldedRewardCredits(1, 0, 10, nil)
+	require.NoError(t, err)
+	require.Empty(t, again)
+	for _, statement := range recorder.snapshot()[mark:] {
+		require.NotContains(
+			t, statement, "GetUnfoldedRewardOutputsInAccountOrder",
+			"a round with no unfolded outputs must not walk the accounts",
+		)
+		require.NotContains(
+			t, statement, "GetUnaccountedRewardOutputs",
+			"a round with no unfolded outputs must not scan its outputs",
+		)
+	}
 }

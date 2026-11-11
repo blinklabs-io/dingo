@@ -2072,7 +2072,11 @@ epoch). `GetPendingRewardCreditRounds` and
 `idx_reward_account_output_credential_epoch` per account (on SQLite the
 statement names that index so the planner cannot pick the pending-round index,
 which has no credential column), so a claim reads one round's accounts in order
-rather than every spendable, unguarded row.
+rather than every spendable, unguarded row. A claim first probes the pending
+index for one unfolded row of the round and returns nothing without reading
+accounts when there is none: compaction claims from every credited round older
+than the newest two on each chunk, and the account walk costs the same however
+few rows remain.
 `DeleteRewardStateAfterSlot` drops every round whose `boundary_slot` is after
 the rollback slot and clears `folded` on its surviving outputs.
 `DeleteRewardStateBeforeEpoch` keeps applied rounds' unfolded rows. Migration
