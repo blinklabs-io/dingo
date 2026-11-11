@@ -290,6 +290,10 @@ func gsmView(issueNo uint64) PraosTiebreakerView {
 	)
 }
 
+// noPeerView marks a peer header recorded without a tiebreak view, as an
+// observer's delivered header or a tip a rollback cleared is.
+const noPeerView = ^uint64(0)
+
 func TestGSMEqualHeightForkWinningTiebreakBlocksExit(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -300,6 +304,7 @@ func TestGSMEqualHeightForkWinningTiebreakBlocksExit(t *testing.T) {
 		"fork wins tiebreak":            {2, true, SelectionModeGenesis},
 		"fork loses tiebreak":           {0, true, SelectionModePraos},
 		"local view unavailable blocks": {0, false, SelectionModeGenesis},
+		"peer view unavailable blocks":  {noPeerView, true, SelectionModeGenesis},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -313,8 +318,12 @@ func TestGSMEqualHeightForkWinningTiebreakBlocksExit(t *testing.T) {
 			peer := corrConn(1)
 			f.deliver(t, peer, 1, 9)
 			fork := genesisTip(10, "fork10", 10)
+			var view PraosTiebreakerView
+			if tc.peerIssue != noPeerView {
+				view = gsmView(tc.peerIssue)
+			}
 			require.True(t, f.cs.updatePeerTipObservedPraosView(
-				peer, fork, fork, nil, gsmView(tc.peerIssue),
+				peer, fork, fork, nil, view,
 			))
 			f.idle(peer, fork)
 			assert.Equal(t, tc.want, f.mode())
@@ -624,4 +633,122 @@ func TestGSMEntryAndExitEventsAreAccurate(t *testing.T) {
 	entry := testutil.RequireReceive(t, entries, 2*time.Second, "entry event")
 	assert.Equal(t, uint64(5), entry.LocalSlot)
 	assert.Equal(t, uint64(30), entry.GenesisWindowSlots)
+}
+
+// A connection demoted to observer keeps its last admitted header while its
+// later headers reach only the delivered frontier; its await at the delivered
+// tip must count.
+func TestGSMObserverIdleBeyondAdmittedFrontierCounts(t *testing.T) {
+	t.Parallel()
+	f := newGSMFixture(t)
+	f.applyRange(1, 5)
+	peer := corrConn(1)
+	f.deliver(t, peer, 1, 3)
+	for n := uint64(1); n <= 5; n++ {
+		f.cs.RecordDeliveredPeerTip(PeerTipUpdateEvent{
+			ConnectionId:     peer,
+			Tip:              gsmTip(5),
+			ObservedTip:      gsmTip(n),
+			ObservedPrevHash: gsmTip(n - 1).Point.Hash,
+		})
+	}
+	f.idle(peer, gsmTip(5))
+	assert.Equal(t, SelectionModePraos, f.mode())
+}
+
+// A header the peer sends after its await revokes the await at once, before
+// the header reaches admission.
+func TestGSMRollForwardRevokesIdleProof(t *testing.T) {
+	t.Parallel()
+	f := newGSMFixture(t)
+	f.applyRange(1, 4)
+	peer := corrConn(1)
+	f.deliver(t, peer, 1, 5)
+	f.idle(peer, gsmTip(5))
+	require.Equal(t, SelectionModeGenesis, f.mode())
+
+	f.cs.ClearPeerIdling(peer, gsmTip(6).Point)
+	f.apply(gsmTip(5))
+
+	assert.Equal(t, SelectionModeGenesis, f.mode(),
+		"a peer sending its next header is not idle")
+}
+
+func TestGSMClearPeerIdlingKeepsAwaitAtSentPoint(t *testing.T) {
+	t.Parallel()
+	f := newGSMFixture(t)
+	f.applyRange(1, 4)
+	peer := corrConn(1)
+	f.deliver(t, peer, 1, 5)
+	f.idle(peer, gsmTip(5))
+
+	f.cs.ClearPeerIdling(peer, gsmTip(5).Point)
+	f.apply(gsmTip(5))
+
+	assert.Equal(t, SelectionModePraos, f.mode())
+}
+
+// The exit event reports the applied tip the decision used, which can be
+// ahead of the tip last passed to SetLocalTip.
+func TestGSMExitEventReportsDecisionTip(t *testing.T) {
+	t.Parallel()
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	exits := make(chan GenesisModeExitedEvent, 1)
+	bus.SubscribeFunc(GenesisModeExitedEventType, func(evt event.Event) {
+		if e, ok := evt.Data.(GenesisModeExitedEvent); ok {
+			exits <- e
+		}
+	})
+	var applied sync.Mutex
+	appliedTip := gsmTip(4)
+	f := newGSMFixture(t, func(_ *gsmFixture, cfg *ChainSelectorConfig) {
+		cfg.EventBus = bus
+		cfg.AppliedTip = func() (ochainsync.Tip, bool) {
+			applied.Lock()
+			defer applied.Unlock()
+			return appliedTip, true
+		}
+	})
+	f.applyRange(1, 4)
+	peer := corrConn(1)
+	f.deliver(t, peer, 1, 5)
+	f.putOnChain(gsmTip(5))
+	applied.Lock()
+	appliedTip = gsmTip(5)
+	applied.Unlock()
+
+	f.idle(peer, gsmTip(5))
+
+	require.Equal(t, SelectionModePraos, f.mode())
+	exit := testutil.RequireReceive(t, exits, 2*time.Second, "exit event")
+	assert.Equal(t, uint64(5), exit.LocalSlot)
+}
+
+// A re-entry decision taken for a stale tip must not commit once a fresh
+// selection was applied while its slot time was being converted.
+func TestGSMReentryRevalidatesAppliedTip(t *testing.T) {
+	t.Parallel()
+	f := newGSMFixture(t)
+	f.exitToPraos(t)
+	fresh := genesisTip(600, "h600", 6)
+	slotTime := f.cs.config.SlotTime
+	var once sync.Once
+	f.cs.config.SlotTime = func(slot uint64) (time.Time, error) {
+		once.Do(func() {
+			f.putOnChain(fresh)
+			f.cs.mutex.Lock()
+			f.cs.localTip = fresh
+			f.cs.mutex.Unlock()
+		})
+		return slotTime(slot)
+	}
+	f.setNow(gsmEpoch.Add(2*time.Minute + DefaultMaxCaughtUpAge))
+
+	require.False(t, f.cs.tryReenterGenesis())
+
+	assert.Equal(t, SelectionModePraos, f.mode())
+	f.cs.EvaluateAndSwitch()
+	assert.Equal(t, SelectionModePraos, f.mode(),
+		"the fresh selection keeps its own deadline")
 }

@@ -44,7 +44,7 @@ const (
 
 	// GenesisModeEnteredEventType is published when the selector returns from
 	// Praos to Genesis selection because the selection tip became older than
-	// the maximum caught-up age.
+	// the maximum caught-up age, or its slot time cannot be determined.
 	GenesisModeEnteredEventType event.EventType = "chainselection.genesis_mode_entered"
 
 	// ChainSelectedNoneEventType is published when the selector transitions to

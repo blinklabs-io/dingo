@@ -21,6 +21,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -97,8 +98,11 @@ type gsmPeer struct {
 	view    PraosTiebreakerView
 	// awaitingFirst marks a tip that is only the confirmed intersection.
 	awaitingFirst bool
-	await         *ocommon.Point
-	pendingCount  int
+	// delivered marks a tip taken from the delivered frontier rather than
+	// the admission frontier.
+	delivered    bool
+	await        *ocommon.Point
+	pendingCount int
 }
 
 type gsmSnapshot struct {
@@ -118,7 +122,7 @@ func (s gsmSnapshot) sameAs(o gsmSnapshot) bool {
 	for i := range s.peers {
 		a, b := s.peers[i], o.peers[i]
 		if a.connId != b.connId || a.idle != b.idle ||
-			a.haveTip != b.haveTip ||
+			a.haveTip != b.haveTip || a.delivered != b.delivered ||
 			a.tip.BlockNumber != b.tip.BlockNumber ||
 			!pointsEqual(a.tip.Point, b.tip.Point) ||
 			a.pendingCount != b.pendingCount ||
@@ -205,15 +209,10 @@ func (cs *ChainSelector) gsmSnapshotLocked() gsmSnapshot {
 			point := clonePoint(await)
 			peer.await = &point
 		}
-		tracked := cs.peerTips[connId]
-		if tracked == nil {
-			if delivered := cs.deliveredPeerTips[connId]; delivered != nil &&
-				delivered.observedTipSet {
-				tracked = delivered
-			}
-		}
+		tracked, fromDelivered := cs.gsmFrontierLocked(connId, peer.await)
 		if tracked != nil {
 			peer.haveTip = true
+			peer.delivered = fromDelivered
 			peer.tip = cloneObservedTip(tracked.SelectionTip())
 			peer.view = clonePraosTiebreakerView(tracked.PraosView)
 			peer.awaitingFirst = tracked.awaitingFirstHeader
@@ -227,6 +226,31 @@ func (cs *ChainSelector) gsmSnapshotLocked() gsmSnapshot {
 		return cmp.Compare(a.connId.String(), b.connId.String())
 	})
 	return snap
+}
+
+// gsmFrontierLocked picks the frontier a connection's idleness is judged
+// against: the admission frontier, unless the connection awaits at the tip of
+// its delivered frontier instead. A connection demoted to observer keeps its
+// last admitted header while its later headers reach only the delivered
+// frontier, so the admission frontier alone would never match its await.
+func (cs *ChainSelector) gsmFrontierLocked(
+	connId ouroboros.ConnectionId,
+	await *ocommon.Point,
+) (*PeerChainTip, bool) {
+	admitted := cs.peerTips[connId]
+	delivered := cs.deliveredPeerTips[connId]
+	if delivered == nil || !delivered.observedTipSet {
+		return admitted, false
+	}
+	if admitted == nil {
+		return delivered, true
+	}
+	if await != nil &&
+		!pointsEqual(*await, admitted.SelectionTip().Point) &&
+		pointsEqual(*await, delivered.SelectionTip().Point) {
+		return delivered, true
+	}
+	return admitted, false
 }
 
 func (p gsmPeer) idlePoint() ocommon.Point {
@@ -304,11 +328,12 @@ func (cs *ChainSelector) intersectsLocalChain(
 
 func (cs *ChainSelector) peerObservedPoints(
 	connId ouroboros.ConnectionId,
+	delivered bool,
 ) []ocommon.Point {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	tracked := cs.peerTips[connId]
-	if tracked == nil {
+	if delivered || tracked == nil {
 		tracked = cs.deliveredPeerTips[connId]
 	}
 	if tracked == nil {
@@ -337,11 +362,15 @@ func (cs *ChainSelector) candidateNotBetter(
 	if !peer.haveTip || peer.awaitingFirst {
 		return false
 	}
-	if !cs.intersectsLocalChain(cs.peerObservedPoints(peer.connId)) {
+	if !cs.intersectsLocalChain(
+		cs.peerObservedPoints(peer.connId, peer.delivered),
+	) {
 		return false
 	}
+	// An equal-height fork wins or loses on the tiebreak alone, and a side
+	// without a view compares equal, so either view missing blocks the exit.
 	if peer.tip.BlockNumber == snap.localTip.BlockNumber &&
-		!haveLocalView {
+		(!haveLocalView || !praosViewKnown(peer.view)) {
 		return false
 	}
 	return ComparePraosTips(
@@ -350,6 +379,14 @@ func (cs *ChainSelector) candidateNotBetter(
 		peer.view,
 		localView,
 	) != ChainABetter
+}
+
+// praosViewKnown reports whether a view carries any tiebreak input: a Byron
+// block kind, an issuer, or a VRF output. A view cleared by a rollback, or
+// never recorded for a delivered-only header, has none.
+func praosViewKnown(v PraosTiebreakerView) bool {
+	return v.Byron != praos.ByronBlockKindNone || len(v.Issuer) > 0 ||
+		len(v.TieBreakVRF) > 0
 }
 
 // caughtUp applies the reference's exit rule to a snapshot: at least one
@@ -378,8 +415,10 @@ func (cs *ChainSelector) caughtUp(snap gsmSnapshot) bool {
 }
 
 // advanceGenesisStateMachine runs one step of the Genesis state machine and
-// reports whether the mode changed. It takes no selector lock across the
-// ledger lookups it makes.
+// reports whether the mode changed. SlotTime, PointOnLocalChain and
+// LocalTipPraosView run without the selector lock; AppliedTip,
+// ChainSyncConnections and ConnectionLive are read under it, so none of them
+// may call back into the selector.
 func (cs *ChainSelector) advanceGenesisStateMachine() bool {
 	if !cs.genesisEnabled {
 		return false
@@ -417,7 +456,7 @@ func (cs *ChainSelector) tryLeaveGenesis() bool {
 			!snap.sameAs(cs.gsmSnapshotLocked()) {
 			return false
 		}
-		cs.leaveGenesisLocked(len(snap.peers))
+		cs.leaveGenesisLocked(snap.localTip.Point.Slot, len(snap.peers))
 		return true
 	}()
 	if left {
@@ -443,23 +482,16 @@ func (cs *ChainSelector) reportHistoric(found []HistoricityDisconnect) {
 	}
 	cs.mutex.Unlock()
 	for _, d := range fresh {
-		cs.config.Logger.Warn(
-			"peer idle at a historic tip; not caught up",
-			"connection_id", d.ConnectionId.String(),
-			"slot", d.Point.Slot,
-			"age", d.Age,
-			"cutoff", d.Cutoff,
-		)
 		cs.config.OnHistoricityDisconnect(d)
 	}
 }
 
-// leaveGenesisLocked performs the Genesis to Praos transition. Per-peer
-// frontiers are kept: they are bounded and let a later return to Genesis
-// selection start with density, eagerness and corroboration data.
-func (cs *ChainSelector) leaveGenesisLocked(peers int) {
+// leaveGenesisLocked performs the Genesis to Praos transition at the applied
+// tip slot the exit decision used. Per-peer frontiers are kept: they are
+// bounded and let a later return to Genesis selection start with density,
+// eagerness and corroboration data.
+func (cs *ChainSelector) leaveGenesisLocked(localSlot uint64, peers int) {
 	now := cs.now()
-	localSlot := cs.localTip.Point.Slot
 	window := cs.genesisWindowSlotsLocked()
 	cs.mode = SelectionModePraos
 	cs.refreshGenesisSelectionSnapshotLocked()
@@ -526,11 +558,19 @@ func (cs *ChainSelector) tryReenterGenesis() bool {
 				deadline = limit.Add(bonus)
 			}
 		}
+		// SlotTime ran unlocked: a newer selection may have recorded its own
+		// deadline meanwhile, which this stale one must not replace.
 		cs.mutex.Lock()
-		cs.reentryTip = clonePoint(tip.Point)
-		cs.reentryTipSet = true
-		cs.reentryDeadline = deadline
+		current := cs.reentryStillCurrentLocked(tip, minStayUntil, now)
+		if current {
+			cs.reentryTip = clonePoint(tip.Point)
+			cs.reentryTipSet = true
+			cs.reentryDeadline = deadline
+		}
 		cs.mutex.Unlock()
+		if !current {
+			return false
+		}
 	}
 	if now.Before(deadline) {
 		return false
@@ -539,8 +579,9 @@ func (cs *ChainSelector) tryReenterGenesis() bool {
 	entered := func() bool {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
-		if cs.mode != SelectionModePraos ||
-			!pointsEqual(cs.reentryTip, tip.Point) {
+		if !cs.reentryStillCurrentLocked(tip, minStayUntil, now) ||
+			!pointsEqual(cs.reentryTip, tip.Point) ||
+			!cs.reentryDeadline.Equal(deadline) {
 			return false
 		}
 		cs.enterGenesisLocked(tip, deadline)
@@ -550,6 +591,23 @@ func (cs *ChainSelector) tryReenterGenesis() bool {
 		cs.publishPendingGenesisModeEvents()
 	}
 	return entered
+}
+
+// reentryStillCurrentLocked reports whether a re-entry decision taken for tip
+// still describes the selector: still in the same Praos period, past its
+// minimum stay, and with tip still the applied selection.
+func (cs *ChainSelector) reentryStillCurrentLocked(
+	tip ochainsync.Tip,
+	minStayUntil time.Time,
+	now time.Time,
+) bool {
+	if cs.mode != SelectionModePraos ||
+		!cs.praosMinStayUntil.Equal(minStayUntil) ||
+		now.Before(cs.praosMinStayUntil) {
+		return false
+	}
+	live, known := cs.appliedLocalTipLocked()
+	return known && pointsEqual(live.Point, tip.Point)
 }
 
 // enterGenesisLocked performs the Praos to Genesis transition. State derived
@@ -619,6 +677,24 @@ func (cs *ChainSelector) SetPeerIdling(
 	}
 	cs.mutex.Unlock()
 	cs.EvaluateAndSwitch()
+}
+
+// ClearPeerIdling revokes a connection's idle proof when it sends a header at
+// point: the peer is no longer idle at its previous frontier, although the
+// header may take a while to reach admission. An await already recorded at
+// point is kept.
+func (cs *ChainSelector) ClearPeerIdling(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	if await, ok := cs.awaiting[connId]; ok && !pointsEqual(await, point) {
+		delete(cs.awaiting, connId)
+		if peerTip := cs.peerTips[connId]; peerTip != nil {
+			peerTip.idling = false
+		}
+	}
 }
 
 // awaitMatchesLocked reports whether the connection's await point is point.

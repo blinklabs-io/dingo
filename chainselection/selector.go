@@ -197,7 +197,10 @@ type ChainSelectorConfig struct {
 	// followed only while corroborated by independent peers. 0 disables
 	// corroboration (density-only Genesis selection, the historical default).
 	MinCorroboratingPeers int
-	ConnectionLive        func(ouroboros.ConnectionId) bool
+	// ConnectionLive reports whether a connection is still open. Some
+	// callers hold the selector lock, so it must not call back into the
+	// selector.
+	ConnectionLive func(ouroboros.ConnectionId) bool
 	// PeerIdentity maps a connection to a control identity used to
 	// de-duplicate corroborating witnesses. A connection for which it returns
 	// "" has no trustworthy independence evidence and
