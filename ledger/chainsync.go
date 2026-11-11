@@ -405,6 +405,18 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 	}
 	if e.SessionReopened {
 		ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
+		// The coalescing window assumes a resync ends the connection ID. A
+		// re-intersect keeps it, so a divergence on the new cursor would be
+		// suppressed and the peer left delivering headers nothing accepts.
+		ls.clearChainsyncResyncCoalesce(e.ConnectionId)
+		// The peer replays from the intersection. Headers buffered from the
+		// old cursor would sit ahead of that replay, and its mismatch count
+		// would be charged to the new cursor.
+		ls.rejectBufferedHeaderEvents(
+			ls.takeBufferedPeerHeaders(e.ConnectionId),
+			&pending,
+		)
+		ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
 		return
 	}
 	// Also drops an event published before the hold was taken.
@@ -3086,8 +3098,9 @@ func (ls *LedgerState) requestChainsyncResync(
 // coalesceChainsyncResync reports whether a resync request for connId repeats
 // one already published within chainsyncResyncCoalesceWindow. A single
 // divergence delivers many headers that each fail the same way, and the
-// subscriber closes the connection and denies the peer once per request, so
-// only the first request of an episode is published.
+// subscriber acts on the connection once per request, so only the first
+// request of an episode is published. An episode ends when the connection
+// closes or re-intersects.
 func (ls *LedgerState) coalesceChainsyncResync(
 	connId ouroboros.ConnectionId,
 	reason string,
