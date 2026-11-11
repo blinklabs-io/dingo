@@ -1787,11 +1787,11 @@ WHERE NOT EXISTS (
 }
 
 // retiringPoolsCTE ranks the registration and retirement certificates of the
-// pools whose latest retirement can satisfy "epoch <epochOp> ?", newest
-// first. Ranking only those pools, found through the retirement epoch index,
-// keeps the work off the registration and retirement history of every other
-// pool; a pool whose latest retirement qualifies always has a retirement row
-// that qualifies, so no result is lost. The epoch is bound once per ranked
+// pools with at least one retirement row satisfying "epoch <epochOp> ?",
+// newest first. That set is a superset of the pools whose latest retirement
+// qualifies, so no result is lost. Ranking only those pools, found through the
+// retirement epoch index, keeps the work off the history of every other pool;
+// the full history of each candidate is still ranked. The epoch is bound once per ranked
 // table ahead of the main query's own. The AtSlot form keeps only
 // certificates added at or before a slot, so the ranking reads as that slot
 // saw it.

@@ -42,13 +42,15 @@ type activePoolCache struct {
 }
 
 // get returns the active pool key hashes for key, calling load when no list
-// for key is cached. A caller that finds a load in flight waits for it, or
-// for ctx, and then rechecks the cache; a failed load is not cached. The
-// returned slice is the caller's to reorder.
+// for key is cached. load reports whether its result may be cached: a list
+// computed while the tip moved belongs to no single tip and is returned to
+// its caller only. A caller that finds a load in flight waits for it, or for
+// ctx, and then rechecks the cache; a failed or panicking load is not cached
+// and releases the waiters. The returned slice is the caller's to reorder.
 func (c *activePoolCache) get(
 	ctx context.Context,
 	key activePoolCacheKey,
-	load func() ([][]byte, error),
+	load func() ([][]byte, bool, error),
 ) ([][]byte, error) {
 	for {
 		c.mu.Lock()
@@ -70,15 +72,31 @@ func (c *activePoolCache) get(
 		c.loading = done
 		c.mu.Unlock()
 
-		hashes, err := load()
+		return c.run(key, done, load)
+	}
+}
 
+// run executes load and releases the in-flight slot in a defer, so a panic in
+// load cannot leave later callers waiting on a channel nothing will close.
+func (c *activePoolCache) run(
+	key activePoolCacheKey,
+	done chan struct{},
+	load func() ([][]byte, bool, error),
+) ([][]byte, error) {
+	var (
+		hashes    [][]byte
+		cacheable bool
+		err       error
+	)
+	defer func() {
 		c.mu.Lock()
-		if err == nil {
+		if err == nil && cacheable {
 			c.valid, c.key, c.hashes = true, key, slices.Clone(hashes)
 		}
 		c.loading = nil
 		c.mu.Unlock()
 		close(done)
-		return hashes, err
-	}
+	}()
+	hashes, cacheable, err = load()
+	return hashes, err
 }

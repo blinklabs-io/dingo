@@ -15211,8 +15211,11 @@ answers 503 with `Retry-After`); an offset past the total skips the page query. 
 retirement certificates, so they share a pool list admission pool (4 active, 2
 per client address, 429 with `Retry-After` when full) and run under the request
 context and a 15-second deadline (an overrun answers 503 with `Retry-After`);
-the retiring query ranks registrations only for pools with a qualifying
-retirement. Pool and account list routes reject
+the retiring query ranks only pools with a retirement row at a qualifying
+epoch (through the retirement epoch index), though it still ranks the full
+history of each of those pools. The pool list's active set is cached per tip
+and recomputed only when the tip changes; a list computed while the tip moved
+is not cached. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,

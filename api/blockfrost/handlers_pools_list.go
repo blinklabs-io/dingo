@@ -88,7 +88,8 @@ func (b *Blockfrost) handlePoolsList(
 	defer cancel()
 	pools, total, err := b.node.PoolsList(ctx, params)
 	if err != nil {
-		if b.writePoolListDeadlineError(w, err) {
+		if b.writePoolListDeadlineError(w, err) ||
+			errors.Is(err, context.Canceled) {
 			return
 		}
 		b.logger.Error(

@@ -17,6 +17,8 @@ package blockfrost
 import (
 	"context"
 	"errors"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,9 +32,9 @@ func TestActivePoolCacheLoadsOncePerTip(t *testing.T) {
 	t.Parallel()
 	var cache activePoolCache
 	var loads atomic.Int32
-	load := func() ([][]byte, error) {
+	load := func() ([][]byte, bool, error) {
 		loads.Add(1)
-		return [][]byte{{1}, {2}}, nil
+		return [][]byte{{1}, {2}}, true, nil
 	}
 	tipA := activePoolCacheKey{slot: 10, hash: "a"}
 
@@ -58,12 +60,12 @@ func TestActivePoolCacheDoesNotCacheFailure(t *testing.T) {
 	var cache activePoolCache
 	key := activePoolCacheKey{slot: 1, hash: "a"}
 	boom := errors.New("boom")
-	_, err := cache.get(context.Background(), key, func() ([][]byte, error) {
-		return nil, boom
+	_, err := cache.get(context.Background(), key, func() ([][]byte, bool, error) {
+		return nil, false, boom
 	})
 	require.ErrorIs(t, err, boom)
-	got, err := cache.get(context.Background(), key, func() ([][]byte, error) {
-		return [][]byte{{9}}, nil
+	got, err := cache.get(context.Background(), key, func() ([][]byte, bool, error) {
+		return [][]byte{{9}}, true, nil
 	})
 	require.NoError(t, err)
 	require.Equal(t, [][]byte{{9}}, got)
@@ -79,11 +81,11 @@ func TestActivePoolCacheSharesConcurrentLoad(t *testing.T) {
 	var loads atomic.Int32
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	load := func() ([][]byte, error) {
+	load := func() ([][]byte, bool, error) {
 		loads.Add(1)
 		close(entered)
 		<-release
-		return [][]byte{{1}}, nil
+		return [][]byte{{1}}, true, nil
 	}
 
 	var wg sync.WaitGroup
@@ -105,9 +107,54 @@ func TestActivePoolCacheSharesConcurrentLoad(t *testing.T) {
 		require.NoError(t, err)
 		results <- got
 	})
+	// Two goroutines are inside get once the waiter is parked: the loader
+	// and the waiter.
+	require.Eventually(t, func() bool {
+		buf := make([]byte, 1<<20)
+		buf = buf[:runtime.Stack(buf, true)]
+		return strings.Count(string(buf), "(*activePoolCache).get(") >= 2
+	}, 5*time.Second, 5*time.Millisecond)
 	close(release)
 	wg.Wait()
 	require.Equal(t, int32(1), loads.Load())
 	require.Equal(t, [][]byte{{1}}, <-results)
 	require.Equal(t, [][]byte{{1}}, <-results)
+}
+
+func TestActivePoolCacheSkipsUncacheableLoad(t *testing.T) {
+	t.Parallel()
+	var cache activePoolCache
+	key := activePoolCacheKey{slot: 1, hash: "a"}
+	var loads atomic.Int32
+	got, err := cache.get(context.Background(), key,
+		func() ([][]byte, bool, error) {
+			loads.Add(1)
+			return [][]byte{{1}}, false, nil
+		})
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{{1}}, got)
+	_, err = cache.get(context.Background(), key,
+		func() ([][]byte, bool, error) {
+			loads.Add(1)
+			return [][]byte{{2}}, true, nil
+		})
+	require.NoError(t, err)
+	require.Equal(t, int32(2), loads.Load())
+}
+
+func TestActivePoolCachePanicReleasesWaiters(t *testing.T) {
+	t.Parallel()
+	var cache activePoolCache
+	key := activePoolCacheKey{slot: 1, hash: "a"}
+	require.Panics(t, func() {
+		_, _ = cache.get(context.Background(), key,
+			func() ([][]byte, bool, error) { panic("boom") })
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := cache.get(ctx, key, func() ([][]byte, bool, error) {
+		return [][]byte{{3}}, true, nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{{3}}, got)
 }
