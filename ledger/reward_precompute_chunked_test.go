@@ -17,6 +17,7 @@ package ledger
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"math/big"
 	"sort"
 	"strconv"
@@ -29,6 +30,8 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -138,6 +141,7 @@ func TestApplyStakeRewardsHaltsWhenPendingInputsCannotBeReconstructed(
 		return ls.applyStakeRewards(
 			context.Background(),
 			txn, survivalNewEpoch, survivalBoundarySlot,
+			false,
 		)
 	})
 	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
@@ -149,6 +153,46 @@ func TestApplyStakeRewardsHaltsWhenPendingInputsCannotBeReconstructed(
 	require.NoError(t, err)
 	require.Len(t, pending.Entries, 1,
 		"the unrecoverable snapshot must remain marked incomplete")
+}
+
+// A validation-only boundary rejects an unappliable reward round without
+// stopping the node or counting a skipped round the chain never reached.
+func TestApplyStakeRewardsValidationOnlyDoesNotStopNode(t *testing.T) {
+	t.Parallel()
+	for _, validationOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("validationOnly=%t", validationOnly), func(t *testing.T) {
+			t.Parallel()
+			ls, db := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 7)
+			meta := db.Metadata()
+			const rewardSnapshotEpoch = uint64(1)
+			require.NoError(t, meta.DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
+			require.NoError(t, markRewardStakeInputsPending(
+				meta, nil, rewardSnapshotEpoch, 100,
+			))
+			ls.metrics.init(prometheus.NewRegistry())
+			var fatalErr error
+			ls.config.FatalErrorFunc = func(err error) { fatalErr = err }
+
+			txn := db.Transaction(context.Background(), true)
+			err := txn.Do(func(txn *database.Txn) error {
+				return ls.applyStakeRewards(
+					context.Background(),
+					txn, survivalNewEpoch, survivalBoundarySlot,
+					validationOnly,
+				)
+			})
+			require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+			require.ErrorIs(t, err, errHaltLedgerPipeline)
+			skipped := testutil.ToFloat64(ls.metrics.skippedStakeRewardRounds)
+			if validationOnly {
+				require.NoError(t, fatalErr)
+				require.Zero(t, skipped)
+			} else {
+				require.ErrorIs(t, fatalErr, errRequiredStakeRewardBasisUnavailable)
+				require.Equal(t, float64(1), skipped)
+			}
+		})
+	}
 }
 
 // seedMultiPoolRewardInputs writes seedMultiPoolRewardPrecomputeFixture's
@@ -795,7 +839,7 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 	require.True(t, cursor.Done, "a degenerate round finishes in one step")
 	writeTxn = chunkedDB.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-		return chunked.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
+		return chunked.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot, false)
 	}))
 	settleRewardCredits(t, chunked)
 	require.Equal(t, want, snapshotRewardPrecomputeOutputs(

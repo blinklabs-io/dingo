@@ -341,6 +341,9 @@ type childProdRejection struct {
 	// replayRecovers marks a verdict replay treats as deterministic: it drops
 	// the block from the chain and restarts rather than returning the error.
 	replayRecovers bool
+	// phase2ValidOnly marks a predicate the ledger checks only for a
+	// phase-2-valid transaction, so a phase-2-invalid batch is not run.
+	phase2ValidOnly bool
 }
 
 // childProdErrorAs matches an error of type T. Each call declares its own
@@ -529,6 +532,10 @@ func childProdRejections(t *testing.T) []childProdRejection {
 				return errors.As(err, &target)
 			},
 			replayRecovers: true,
+			// As in cardano-ledger's SUBUTXO rule, a phase-2-invalid
+			// transaction leaves the UTxO unchanged, so no input is seen
+			// twice across levels.
+			phase2ValidOnly: true,
 		},
 		{
 			// The child pays no fee of its own: its declared execution units
@@ -605,6 +612,9 @@ func TestDijkstraChildPredicatesRejectedOnEveryProductionPath(t *testing.T) {
 	keys := newChildProdKeys(t)
 	for _, tc := range childProdRejections(t) {
 		for _, valid := range []bool{true, false} {
+			if !valid && tc.phase2ValidOnly {
+				continue
+			}
 			name := tc.name
 			if !valid {
 				name += " in a phase-2-invalid batch"

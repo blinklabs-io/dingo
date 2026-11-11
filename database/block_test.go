@@ -1301,3 +1301,106 @@ func TestBlockByHashBlobOnlyPreservesErrorsAndRelease(t *testing.T) {
 		})
 	}
 }
+
+func TestBlockNumberBoundarySparseIDsAndSharedNumbers(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	for i, entry := range []struct{ id, number uint64 }{{2, 1}, {3, 1}, {1000, 3}, {1002, 5}} {
+		block := testIndexedBlock(uint64(i+1)*10, entry.id, byte(i+1))
+		block.Number = entry.number
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	write := db.BlobTxn(true)
+	require.NoError(t, write.Do(func(txn *Txn) error {
+		return db.Blob().Set(txn.Blob(), types.BlockBlobIndexKey(500),
+			types.BlockBlobKey(20, bytes.Repeat([]byte{2}, 32)))
+	}))
+	store := &countingBlockReadStore{BlobStore: db.Blob()}
+	db.SetBlobStore(store)
+	txn := db.Transaction(context.Background(), false)
+	defer txn.Rollback() //nolint:errcheck
+	bound, err := ResolveBlockNumberBoundTxn(txn)
+	require.NoError(t, err)
+	require.Zero(t, store.getBlockCalls)
+	first, err := BlockByNumberBoundedTxn(txn, 1, bound)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), first.ID)
+	for _, tc := range []struct {
+		number uint64
+		lower  bool
+		id     uint64
+	}{
+		{1, true, 2}, {1, false, 3}, {2, true, 1000}, {2, false, 3}, {3, true, 1000}, {3, false, 1000}, {4, true, 1002}, {4, false, 1000},
+	} {
+		before := store.getBlockCalls
+		block, err := BlockNumberBoundaryTxn(
+			context.Background(),
+			txn,
+			tc.number,
+			bound,
+			tc.lower,
+		)
+		require.NoError(t, err)
+		require.Equal(t, tc.id, block.ID)
+		require.Equal(
+			t,
+			before+1,
+			store.getBlockCalls,
+			"only the selected block body may be fetched",
+		)
+	}
+	for _, tc := range []struct {
+		number uint64
+		lower  bool
+	}{{0, false}, {6, true}} {
+		before := store.getBlockCalls
+		_, err := BlockNumberBoundaryTxn(
+			context.Background(),
+			txn,
+			tc.number,
+			bound,
+			tc.lower,
+		)
+		require.ErrorIs(t, err, models.ErrBlockNotFound)
+		require.Equal(t, before, store.getBlockCalls)
+	}
+	before := store.getBlockCalls
+	_, err = blockKeyByNumberBoundedTxn(txn, 1, bound, func() bool { return false })
+	require.ErrorIs(t, err, ErrBlockIndexBudget)
+	require.Equal(t, before, store.getBlockCalls)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = BlockNumberBoundaryTxn(ctx, txn, 1, bound, true)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestBlockPointAtIndexSkipsSparseIndexes(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := []models.Block{
+		testIndexedBlock(10, 2, 0x01),
+		testIndexedBlock(20, 1_000, 0x02),
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	id, point, err := db.BlockPointAtOrAfterIndex(3, nil)
+	require.NoError(t, err)
+	require.Equal(t, blocks[1].ID, id)
+	require.Equal(t, blocks[1].Hash, point.Hash)
+	_, _, err = db.BlockPointAtOrAfterIndex(blocks[1].ID+1, nil)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+
+	id, point, err = db.BlockPointAtOrBeforeIndex(
+		context.Background(), 999, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, blocks[0].ID, id)
+	require.Equal(t, blocks[0].Hash, point.Hash)
+	_, _, err = db.BlockPointAtOrBeforeIndex(
+		context.Background(), blocks[0].ID-1, nil,
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}

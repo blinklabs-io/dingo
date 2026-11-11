@@ -1135,3 +1135,43 @@ func TestGetPendingTruncateRejectsInvalidMarker(t *testing.T) {
 		})
 	}
 }
+
+// A truncate removes every block above the target, so a rollback high-water
+// mark above the target index is lowered to it. A node restarted on the
+// truncated chain would otherwise measure rollbacks from a block it no longer
+// holds and refuse any rollback within K of the new tip.
+func TestTruncateLowersRollbackHighWater(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		seed string
+		want string
+	}{
+		{name: "above target is lowered", seed: "5", want: "3"},
+		{name: "at target is kept", seed: "3", want: "3"},
+		{name: "below target is kept", seed: "2", want: "2"},
+		{name: "absent is kept", seed: "", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := buildTestChain(t, 5)
+			if tc.seed != "" {
+				require.NoError(t, f.db.SetSyncState(
+					database.RollbackHighWaterSyncKey, tc.seed, nil,
+				))
+			}
+
+			_, err := lifecycle.Truncate(
+				context.Background(), f.db, f.blocks[2], 0, false, 0,
+			)
+			require.NoError(t, err)
+
+			got, err := f.db.GetSyncState(
+				database.RollbackHighWaterSyncKey, nil,
+			)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}

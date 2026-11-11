@@ -1027,6 +1027,25 @@ func TestTickAdvancesProgressBaseline(t *testing.T) {
 	assert.Equal(t, 1, rotations)
 }
 
+// An idle peer sends no message when its tip ages past the stale threshold, so
+// the recycler's cadence is the only thing that re-judges it.
+func TestTickRejudgesAdvertisedTips(t *testing.T) {
+	t.Parallel()
+	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
+	state := &fakeChainsyncState{}
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, nil, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(100, now.Add(-time.Hour))
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+	}, now, 100)
+
+	assert.Equal(t, 1, state.sweepCount())
+}
+
 func TestTickPrunesExpiredCooldownEntries(t *testing.T) {
 	t.Parallel()
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}

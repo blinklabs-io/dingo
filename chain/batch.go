@@ -26,6 +26,7 @@ import (
 type chainBatchPosition struct {
 	tip              ochainsync.Tip
 	blockIndex       uint64
+	rollbackAnchor   uint64
 	generation       uint64
 	headerGeneration uint64
 }
@@ -41,6 +42,7 @@ func (c *Chain) batchPositionLocked() chainBatchPosition {
 	return chainBatchPosition{
 		tip:              c.currentTip,
 		blockIndex:       c.tipBlockIndex,
+		rollbackAnchor:   c.rollbackAnchorBlockIndex,
 		generation:       c.mutationGeneration,
 		headerGeneration: c.headerMutationGeneration,
 	}
@@ -62,6 +64,7 @@ func (c *Chain) restoreBatchBlocksLocked(snapshot chainBatchSnapshot) {
 	defer finishWithdrawal()
 	c.currentTip = snapshot.tip
 	c.tipBlockIndex = snapshot.blockIndex
+	c.rollbackAnchorBlockIndex = snapshot.rollbackAnchor
 	c.mutationGeneration = snapshot.generation
 	if !c.persistent {
 		c.blocks = snapshot.blocks

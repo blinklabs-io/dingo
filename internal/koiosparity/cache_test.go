@@ -219,6 +219,7 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 	const network = "preview"
 	const sourceURL = "https://first.example/api/v1"
 	now := time.Now().UTC()
+	saved := 0
 
 	cases := []struct {
 		name string
@@ -257,6 +258,39 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 				t.Helper()
 				_, err := c.RecordKoiosSource(network, sourceURL, now)
 				recordSnapshotBusy(t, err)
+			},
+		},
+		{
+			// The ownership check has to read the recorded crawl before it
+			// can decide whether the page may be written.
+			name:       "SaveAccountUniverseCrawlPage",
+			iterations: 1000,
+			write: func(t *testing.T, c *Cache, _ int) {
+				t.Helper()
+				saved++
+				err := c.SaveAccountUniverseCrawlPage(
+					network, accountListQuery, now, []string{"stake_test1a"},
+					saved, "stake_test1a", saved,
+				)
+				if err != nil {
+					saved--
+				}
+				recordSnapshotBusy(t, err)
+			},
+		},
+		{
+			name:       "CompleteAccountUniverseCrawl",
+			iterations: 1000,
+			write: func(t *testing.T, c *Cache, _ int) {
+				t.Helper()
+				err := c.SaveAccountUniverseCrawlPage(
+					network, accountListQuery, now, []string{"stake_test1a"},
+					1, "stake_test1a", 1,
+				)
+				recordSnapshotBusy(t, err)
+				recordSnapshotBusy(t,
+					c.CompleteAccountUniverseCrawl(network, now, 1),
+				)
 			},
 		},
 	}

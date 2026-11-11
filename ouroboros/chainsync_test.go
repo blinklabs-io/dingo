@@ -998,6 +998,52 @@ func TestChainsyncAwaitReplyPublishesDeliveredFrontier(t *testing.T) {
 	assert.Equal(t, connId, data.ConnectionId)
 }
 
+// An observer connection's await-reply must reach chain selection, because
+// the Genesis exit needs every ChainSync connection idle, and must not reach
+// the ledger.
+func TestChainsyncObserverAwaitReplyReachesSelectionOnly(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, awaitCh := bus.Subscribe(ledger.ChainsyncAwaitReplyEventType)
+	state := dchainsync.NewState(bus, nil)
+	connId := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	require.True(t, state.AddClientConnId(connId))
+	point := ocommon.NewPoint(123, []byte("delivered"))
+	require.True(t, state.UpdateClientTipWithoutDedup(
+		connId,
+		point,
+		ochainsync.Tip{Point: point, BlockNumber: 10},
+	))
+
+	var observed []ocommon.Point
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return false
+		},
+		ChainsyncObserveAwaitReply: func(
+			_ ouroboros.ConnectionId,
+			point ocommon.Point,
+		) {
+			observed = append(observed, point)
+		},
+	})
+	o.chainsyncState = state
+	require.NoError(t, o.chainsyncClientAwaitReply(
+		ochainsync.CallbackContext{ConnectionId: connId},
+	))
+
+	assert.Equal(t, []ocommon.Point{point}, observed)
+	testutil.RequireNoReceive(
+		t,
+		awaitCh,
+		50*time.Millisecond,
+		"an observer's await-reply must not reach the ledger",
+	)
+}
+
 func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
 	t.Parallel()
 
@@ -5089,10 +5135,14 @@ func TestChainsyncServerLocalClientNotServedAheadOfLedger(t *testing.T) {
 // parkOnByronBoundaryBlock serves block 1 to a local client, appends a Byron
 // epoch-boundary block and its same-slot successor, parks the client on the
 // boundary block, and then publishes the successor as the applied tip, as when
-// the ledger applies both before the waiter wakes.
+// the ledger applies both before the waiter wakes. A non-nil waiting is
+// received from before the tip is published, so the waiter is known to have
+// seen the tip behind the boundary block; otherwise the server may serve the
+// boundary block directly.
 func parkOnByronBoundaryBlock(
 	t *testing.T,
 	f *chainsyncServerFixture,
+	waiting <-chan struct{},
 ) (boundary, successor *testBlock) {
 	t.Helper()
 	block1, point1 := f.appendBlock(t, 1, 1, 0x01)
@@ -5135,6 +5185,9 @@ func parkOnByronBoundaryBlock(
 	require.NoError(t, f.h.RequestNext())
 	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
 	successor, successorPoint := appendChild(boundary, 2, 2, 0x03)
+	if waiting != nil {
+		testutil.RequireReceive(t, waiting, 10*time.Second, "waiter parks")
+	}
 	f.setTip(successor, successorPoint)
 	return boundary, successor
 }
@@ -5156,7 +5209,7 @@ func TestChainsyncServerLocalClientServedByronBoundaryBlockAppliedWithSuccessor(
 		OuroborosConfig{},
 		true,
 	)
-	boundary, successor := parkOnByronBoundaryBlock(t, f)
+	boundary, successor := parkOnByronBoundaryBlock(t, f, nil)
 
 	requireServed := func(want *testBlock) {
 		t.Helper()
@@ -5178,18 +5231,23 @@ func TestChainsyncServerLocalClientUnparkedWhenAppliedTipLookupFails(
 ) {
 	t.Parallel()
 
+	waiting := make(chan struct{})
+	var waitingOnce sync.Once
 	f := newChainsyncServerFixtureServing(
 		t,
 		csmock.ModeNtC,
 		OuroborosConfig{},
 		true,
 		func(o *Ouroboros) {
+			o.chainsyncServerAppliedWaitHook = func() {
+				waitingOnce.Do(func() { close(waiting) })
+			}
 			o.chainsyncServerPrevHashFunc = func(ocommon.Point) ([]byte, error) {
 				return nil, errors.New("injected block lookup failure")
 			}
 		},
 	)
-	parkOnByronBoundaryBlock(t, f)
+	parkOnByronBoundaryBlock(t, f, waiting)
 	f.requireClientUnparked(
 		t,
 		"a failed applied-tip lookup must release the parked client",

@@ -109,10 +109,7 @@ func newProgressStreamTestClient(
 		path,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			fingerprint := r.Header.Get(progressStreamTestFingerprintHeader)
-			ctx := withPeerIdentity(r.Context(), peerIdentity{
-				Verified:    true,
-				Fingerprint: fingerprint,
-			})
+			ctx := withRequestClient(r.Context(), fingerprint)
 			ctx = withResponseWriteDeadlineSetter(ctx, deadlines.set)
 			handler.ServeHTTP(w, r.WithContext(ctx))
 		}),
@@ -131,7 +128,7 @@ func progressStreamTestCounts(
 ) (int, int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.activeProgressStreams, h.progressStreamsByFingerprint[fingerprint]
+	return h.activeProgressStreams, h.progressStreamsByClient[fingerprint]
 }
 
 func TestResponseControllerContextMiddlewareInstallsSetter(t *testing.T) {
@@ -155,10 +152,7 @@ func TestResponseControllerContextMiddlewareInstallsSetter(t *testing.T) {
 func TestProgressStreamRequiresWriteDeadlineSetter(t *testing.T) {
 	t.Parallel()
 	handler := newProgressStreamTestHandler(streamProgressMaxLifetime)
-	ctx := withPeerIdentity(t.Context(), peerIdentity{
-		Verified:    true,
-		Fingerprint: "client-a",
-	})
+	ctx := withRequestClient(t.Context(), "client-a")
 	err := handler.StreamOperationProgress(
 		ctx,
 		connect.NewRequest(
@@ -177,10 +171,7 @@ func TestProgressStreamRequiresWriteDeadlineSetter(t *testing.T) {
 func TestProgressStreamRejectsUnsupportedWriteDeadline(t *testing.T) {
 	t.Parallel()
 	handler := newProgressStreamTestHandler(streamProgressMaxLifetime)
-	ctx := withPeerIdentity(t.Context(), peerIdentity{
-		Verified:    true,
-		Fingerprint: "client-a",
-	})
+	ctx := withRequestClient(t.Context(), "client-a")
 	ctx = withResponseWriteDeadlineSetter(ctx, func(time.Time) error {
 		return http.ErrNotSupported
 	})
@@ -253,18 +244,12 @@ func TestProgressStreamAdmissionCapsGlobalStreams(t *testing.T) {
 	handler := newProgressStreamTestHandler(streamProgressMaxLifetime)
 	releases := make([]func(), 0, maxProgressStreams)
 	for i := range maxProgressStreams {
-		ctx := withPeerIdentity(t.Context(), peerIdentity{
-			Verified:    true,
-			Fingerprint: string(rune(i + 1)),
-		})
+		ctx := withRequestClient(t.Context(), string(rune(i+1)))
 		release, err := handler.admitProgressStream(ctx)
 		require.NoError(t, err)
 		releases = append(releases, release)
 	}
-	ctx := withPeerIdentity(t.Context(), peerIdentity{
-		Verified:    true,
-		Fingerprint: "overflow",
-	})
+	ctx := withRequestClient(t.Context(), "overflow")
 	_, err := handler.admitProgressStream(ctx)
 	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
 	for _, release := range releases {

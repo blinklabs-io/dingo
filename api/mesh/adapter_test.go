@@ -145,3 +145,66 @@ func TestMeshDatabaseAdapterEmptyDatabaseLookups(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 	})
 }
+
+func TestMeshHeightWithBoundaryBlockStorageOffset(t *testing.T) {
+	t.Parallel()
+	db := newAdapterDatabase(t)
+	for i, number := range []uint64{0, 0, 1, 2} {
+		require.NoError(
+			t,
+			db.BlockCreate(
+				models.Block{
+					ID:     uint64(i) + 1,
+					Number: number,
+					Slot:   uint64(i) * 20,
+					Hash:   testHash(byte(i)),
+					Cbor:   []byte{byte(i)},
+				},
+				nil,
+			),
+		)
+	}
+	block, err := NewMeshDatabase(db).BlockByIndex(context.Background(), 2)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), block.Number)
+	require.Equal(t, testHash(3), block.Hash)
+}
+
+func TestMeshRetainsUnsupportedHeightBoundary(t *testing.T) {
+	t.Parallel()
+	db := newAdapterDatabase(t)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID: 1, Number: math.MaxUint64, Slot: 1, Hash: testHash(0xa9),
+		Cbor: []byte{0x80},
+	}, nil))
+	block, err := database.BlockByNumber(
+		context.Background(), db, math.MaxUint64,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(math.MaxUint64), block.Number)
+	_, err = NewMeshDatabase(db).BlockByIndex(
+		context.Background(), math.MaxUint64,
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+func TestMeshHeightBoundaryIsSignedInt64(t *testing.T) {
+	t.Parallel()
+	db := newAdapterDatabase(t)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID: 1, Number: math.MaxInt64, Slot: 1, Hash: testHash(0xaa),
+		Cbor: []byte{0x80},
+	}, nil))
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID: 2, Number: math.MaxInt64 + 1, Slot: 2, Hash: testHash(0xab),
+		Cbor: []byte{0x80},
+	}, nil))
+	meshDB := NewMeshDatabase(db)
+	block, err := meshDB.BlockByIndex(context.Background(), math.MaxInt64)
+	require.NoError(t, err)
+	require.Equal(t, testHash(0xaa), block.Hash)
+	_, err = meshDB.BlockByIndex(
+		context.Background(), uint64(math.MaxInt64)+1,
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
