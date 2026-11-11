@@ -998,6 +998,52 @@ func TestChainsyncAwaitReplyPublishesDeliveredFrontier(t *testing.T) {
 	assert.Equal(t, connId, data.ConnectionId)
 }
 
+// An observer connection's await-reply must reach chain selection, because
+// the Genesis exit needs every ChainSync connection idle, and must not reach
+// the ledger.
+func TestChainsyncObserverAwaitReplyReachesSelectionOnly(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, awaitCh := bus.Subscribe(ledger.ChainsyncAwaitReplyEventType)
+	state := dchainsync.NewState(bus, nil)
+	connId := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	require.True(t, state.AddClientConnId(connId))
+	point := ocommon.NewPoint(123, []byte("delivered"))
+	require.True(t, state.UpdateClientTipWithoutDedup(
+		connId,
+		point,
+		ochainsync.Tip{Point: point, BlockNumber: 10},
+	))
+
+	var observed []ocommon.Point
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return false
+		},
+		ChainsyncObserveAwaitReply: func(
+			_ ouroboros.ConnectionId,
+			point ocommon.Point,
+		) {
+			observed = append(observed, point)
+		},
+	})
+	o.chainsyncState = state
+	require.NoError(t, o.chainsyncClientAwaitReply(
+		ochainsync.CallbackContext{ConnectionId: connId},
+	))
+
+	assert.Equal(t, []ocommon.Point{point}, observed)
+	testutil.RequireNoReceive(
+		t,
+		awaitCh,
+		50*time.Millisecond,
+		"an observer's await-reply must not reach the ledger",
+	)
+}
+
 func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
 	t.Parallel()
 
