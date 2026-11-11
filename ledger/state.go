@@ -2290,10 +2290,10 @@ type LedgerState struct {
 	// at the start of a chunk's reads, before any of its outputs exist, so a
 	// test can act while the chunk is mid-read.
 	rewardPrecomputeChunkReadHook func()
-	// rewardPrecomputeReadStageHook is a test seam, nil in production. It runs
-	// between the read stages of a chunk, where no read transaction of the
-	// precompute may be open.
-	rewardPrecomputeReadStageHook func()
+	// rewardPrecomputeReadGapHook is a test seam, nil in production. It runs
+	// in the gap after a plan's read transaction ends, where none of the
+	// precompute's own read transactions may be open.
+	rewardPrecomputeReadGapHook func()
 	// rewardPrecomputeFence is bumped, under rewardPrecomputeWriteMu, before
 	// an epoch boundary applies rewards. A background chunk whose round was
 	// resolved under an older value stops instead of writing: the boundary

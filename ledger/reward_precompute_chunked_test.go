@@ -1086,7 +1086,13 @@ func TestBoundaryFinishesUnfinishedRoundOutsideRolloverTxn(t *testing.T) {
 			writeErr = err
 		}
 	}
+	gaps := 0
+	ls.rewardPrecomputeReadGapHook = func() { gaps++ }
 	ls.fenceAndCompleteRewardPrecompute(4, 1_200)
+	require.Zero(
+		t, gaps,
+		"the boundary pauses block application, so it must not pace its reads",
+	)
 	require.Equal(t, 2, reads, "the two remaining chunks run before the rollover")
 	require.NoError(
 		t, writeErr,
@@ -1175,13 +1181,13 @@ func TestChunkedRewardPrecomputePlansAheadWhileWriteTurnIsHeld(t *testing.T) {
 	)
 }
 
-// TestChunkedRewardPrecomputeReadsLeaveWALCheckpointable proves no read
-// transaction of the chunked precompute stays open across a chunk's read
-// stages. A read transaction pins the WAL snapshot it began on, so one held
-// across a plan keeps a checkpoint from draining the WAL while block
-// application appends to it. At each stage boundary a commit lands and a
-// PASSIVE checkpoint from another connection must then drain every frame.
-func TestChunkedRewardPrecomputeReadsLeaveWALCheckpointable(t *testing.T) {
+// TestChunkedRewardPrecomputeLeavesReaderFreeGapsForWAL proves the round
+// leaves a window between one plan's read transaction and the next with none
+// of its own open. A read transaction pins the WAL snapshot it began on, so
+// plans chained back to back would keep a checkpoint from draining the WAL
+// while block application appends to it. In each gap a commit lands and a
+// PASSIVE checkpoint from another connection must drain every frame.
+func TestChunkedRewardPrecomputeLeavesReaderFreeGapsForWAL(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	ls, db := newRewardCalculationTestLedgerInDir(t, dir)
@@ -1198,17 +1204,17 @@ func TestChunkedRewardPrecomputeReadsLeaveWALCheckpointable(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = probe.Close() })
 
-	stages := 0
+	gaps := 0
 	var failures []string
-	ls.rewardPrecomputeReadStageHook = func() {
-		stages++
+	ls.rewardPrecomputeReadGapHook = func() {
+		gaps++
 		// Wait out an in-flight write so the checkpoint sees a settled WAL.
 		ls.rewardPrecomputeWriteMu.Lock()
 		defer ls.rewardPrecomputeWriteMu.Unlock()
 		if err := db.Transaction(context.Background(), true).Do(
 			func(txn *database.Txn) error {
 				return db.Metadata().SetSyncState(
-					"test-wal-probe", strconv.Itoa(stages), txn.Metadata(),
+					"test-wal-probe", strconv.Itoa(gaps), txn.Metadata(),
 				)
 			},
 		); err != nil {
@@ -1224,15 +1230,18 @@ func TestChunkedRewardPrecomputeReadsLeaveWALCheckpointable(t *testing.T) {
 		}
 		if busy != 0 || walFrames != checkpointed {
 			failures = append(failures, fmt.Sprintf(
-				"stage %d: busy=%d wal_frames=%d checkpointed=%d",
-				stages, busy, walFrames, checkpointed,
+				"gap %d: busy=%d wal_frames=%d checkpointed=%d",
+				gaps, busy, walFrames, checkpointed,
 			))
 		}
 	}
 	require.NoError(t, ls.runStakeRewardPrecomputeSteps(round))
-	require.Greater(t, stages, 3, "a multi-chunk round has several read stages")
+	require.Equal(
+		t, 2, gaps,
+		"each plan after the first must be preceded by a reader-free gap",
+	)
 	require.Empty(
 		t, failures,
-		"a read transaction held the WAL snapshot across a read stage",
+		"a read transaction held the WAL snapshot across a gap",
 	)
 }

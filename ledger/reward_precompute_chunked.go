@@ -25,6 +25,7 @@ import (
 	"io"
 	"math/big"
 	"slices"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -219,6 +220,16 @@ type stakeRewardPrecomputeRound struct {
 	// later, resumed invocation -- reads reward_stake_input normally instead
 	// of special-casing reconstruction per chunk.
 	reconstructedStakeInputs []*models.RewardStakeInput
+
+	// lastPlanEnd and lastPlanTook time the most recent plan's read
+	// transaction, to size the reader-free gap before the next one. A round
+	// is driven by one runner at a time, so they need no lock.
+	lastPlanEnd  time.Time
+	lastPlanTook time.Duration
+	// skipReadGap drops the reader-free gap. Set for the boundary's own
+	// completion, where block application is paused and appends nothing to
+	// the WAL, so the gap would only delay the rollover.
+	skipReadGap bool
 }
 
 // resolveStakeRewardPrecomputeRound gathers a reward round's fixed inputs and
@@ -565,9 +576,10 @@ func (ls *LedgerState) completeRewardPrecomputeBeforeBoundary(
 			txn, newEpoch, boundarySlot, boundarySlot, false,
 		)
 		return err
-	}); err != nil || !ok {
+	}); err != nil || !ok || round == nil {
 		return err
 	}
+	round.skipReadGap = true
 	return ls.runStakeRewardPrecomputeSteps(round)
 }
 
@@ -655,23 +667,75 @@ func (ls *LedgerState) runStakeRewardPrecomputeSteps(
 	return nil
 }
 
-// planStakeRewardPrecomputeStepRead plans a step from reads that each run in
-// their own short implicit read transaction, never one transaction around the
-// whole plan. A read transaction pins the WAL snapshot it began on, and
-// planning ahead keeps one running nearly all the time, so a transaction that
-// spanned a plan would hold the WAL from restarting for the whole round while
-// block application kept appending to it. The reads need no shared snapshot:
-// the apply step discards a plan whose generation, fence, snapshot row or
-// cursor changed, and the rows a plan reads are changed only after one of
-// those does. after is the step the plan follows, or nil to plan from the
+// rewardPrecomputeReadGapDivisor sets the reader-free gap left after a plan's
+// read transaction as a fraction of how long that plan took, clamped to
+// [rewardPrecomputeReadGapMin, rewardPrecomputeReadGapMax].
+const (
+	rewardPrecomputeReadGapDivisor = 8
+	rewardPrecomputeReadGapMin     = 5 * time.Millisecond
+	rewardPrecomputeReadGapMax     = 250 * time.Millisecond
+)
+
+// waitRewardPrecomputeReadGap leaves a window after the previous plan's read
+// transaction with none of the precompute's own open. A read transaction pins
+// the WAL snapshot it began on, and checkpoints cannot restart the WAL while
+// any reader is active; planning ahead would otherwise keep one open
+// back to back for the whole round while block application keeps appending
+// to the WAL. The gap is proportional to the plan so it costs a bounded
+// fraction of the round.
+func (ls *LedgerState) waitRewardPrecomputeReadGap(
+	round *stakeRewardPrecomputeRound,
+) {
+	if round.skipReadGap || round.lastPlanEnd.IsZero() {
+		return
+	}
+	if ls.rewardPrecomputeReadGapHook != nil {
+		ls.rewardPrecomputeReadGapHook()
+	}
+	gap := min(
+		max(
+			round.lastPlanTook/rewardPrecomputeReadGapDivisor,
+			rewardPrecomputeReadGapMin,
+		),
+		rewardPrecomputeReadGapMax,
+	)
+	remaining := gap - time.Since(round.lastPlanEnd)
+	if remaining <= 0 {
+		return
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ls.lifecycleContext().Done():
+	}
+}
+
+// planStakeRewardPrecomputeStepRead plans a step in its own read transaction,
+// released as soon as the plan's reads finish and before the plan waits for
+// its write turn. after is the step the plan follows, or nil to plan from the
 // stored cursor.
 func (ls *LedgerState) planStakeRewardPrecomputeStepRead(
 	round *stakeRewardPrecomputeRound,
 	after *rewardPrecomputeStepPlan,
 ) (*rewardPrecomputeStepPlan, error) {
-	return ls.planStakeRewardPrecomputeStep(
-		ls.lifecycleContext(), round, after,
-	)
+	ls.waitRewardPrecomputeReadGap(round)
+	started := time.Now()
+	var plan *rewardPrecomputeStepPlan
+	readTxn := ls.db.Transaction(context.Background(), false)
+	err := readTxn.Do(func(txn *database.Txn) error {
+		var err error
+		plan, err = ls.planStakeRewardPrecomputeStep(
+			ls.lifecycleContext(), txn, round, after,
+		)
+		return err
+	})
+	round.lastPlanEnd = time.Now()
+	round.lastPlanTook = round.lastPlanEnd.Sub(started)
+	if err != nil {
+		return nil, err
+	}
+	return plan, nil
 }
 
 // rewardPrecomputeRoundInvalidated reports whether a rollback, a boundary
@@ -708,11 +772,12 @@ type rewardPrecomputeStepPlan struct {
 // own: those inputs must be written before a chunk can read them.
 func (ls *LedgerState) planStakeRewardPrecomputeStep(
 	ctx context.Context,
+	txn *database.Txn,
 	round *stakeRewardPrecomputeRound,
 	after *rewardPrecomputeStepPlan,
 ) (*rewardPrecomputeStepPlan, error) {
 	meta := ls.db.Metadata()
-	var metaTxn types.Txn
+	metaTxn := txn.Metadata()
 	unchanged, err := ls.rewardPrecomputeSnapshotCurrent(metaTxn, round)
 	if err != nil {
 		return nil, err
@@ -768,7 +833,7 @@ func (ls *LedgerState) planStakeRewardPrecomputeStep(
 		return plan, nil
 	}
 	plan.chunk, err = ls.computeStakeRewardPrecomputeChunk(
-		ctx, nil, round, cursor, startIndex,
+		ctx, txn, round, cursor, startIndex,
 	)
 	if err != nil {
 		return nil, err
@@ -797,13 +862,6 @@ func (ls *LedgerState) rewardPrecomputeSnapshotCurrent(
 		)
 	}
 	return rewardPrecomputeSnapshotUnchanged(round.rewardSnapshot, current), nil
-}
-
-// rewardPrecomputeReadStage runs the read-stage test seam.
-func (ls *LedgerState) rewardPrecomputeReadStage() {
-	if ls.rewardPrecomputeReadStageHook != nil {
-		ls.rewardPrecomputeReadStageHook()
-	}
 }
 
 // rewardPrecomputeApplyResult is the outcome of applying one planned step.
@@ -1103,10 +1161,7 @@ func (ls *LedgerState) computeStakeRewardPrecomputeChunk(ctx context.Context,
 	startIndex int,
 ) (*rewardPrecomputeChunkResult, error) {
 	meta := ls.db.Metadata()
-	var metaTxn types.Txn
-	if txn != nil {
-		metaTxn = txn.Metadata()
-	}
+	metaTxn := txn.Metadata()
 	var err error
 	endIndex := rewardPrecomputeChunkEnd(
 		round.poolInputs,
@@ -1119,7 +1174,6 @@ func (ls *LedgerState) computeStakeRewardPrecomputeChunk(ctx context.Context,
 	if ls.rewardPrecomputeChunkReadHook != nil {
 		ls.rewardPrecomputeChunkReadHook()
 	}
-	ls.rewardPrecomputeReadStage()
 	stakeInputs, err := meta.GetRewardStakeInputsInPoolKeyHashRange(
 		round.epochs.snapshot,
 		chunkPools[0].PoolKeyHash,
@@ -1143,14 +1197,12 @@ func (ls *LedgerState) computeStakeRewardPrecomputeChunk(ctx context.Context,
 		key := string(input.PoolKeyHash)
 		stakeByPool[key] = append(stakeByPool[key], input)
 	}
-	ls.rewardPrecomputeReadStage()
 	activeAccounts, err := rewardActiveAccounts(
 		meta, metaTxn, chunkPools, stakeInputs,
 	)
 	if err != nil {
 		return nil, err
 	}
-	ls.rewardPrecomputeReadStage()
 	prefilterAccounts, err := rewardPrefilterAccounts(
 		meta, metaTxn, chunkPools, stakeInputs,
 		round.prefilterSlot, round.params.RequiresRewardPrefilter(),
@@ -1232,7 +1284,6 @@ func (ls *LedgerState) computeStakeRewardPrecomputeChunk(ctx context.Context,
 	// witness history at the snapshot's captured slot, which no later block
 	// changes, so the flag set here holds whenever the round is applied.
 	if ls.config.DelegatorInactivityEnabled {
-		ls.rewardPrecomputeReadStage()
 		guarded, err := ls.guardedExpiredRewardCredentials(ctx,
 			txn,
 			&stakeRewardApplication{
