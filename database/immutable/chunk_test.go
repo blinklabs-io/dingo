@@ -330,6 +330,7 @@ func TestChunkNextDerivesIsEbbFromEraTag(t *testing.T) {
 		wantEbb    bool
 	}{
 		{name: "post-Byron block at slot 0", eraTag: 5, blockOrEbb: 0, wantEbb: false},
+		{name: "Byron EBB at epoch 0", eraTag: 0, blockOrEbb: 0, wantEbb: true},
 		{name: "Byron EBB epoch below 200", eraTag: 0, blockOrEbb: 5, wantEbb: true},
 		{name: "Byron EBB epoch 200 or above", eraTag: 0, blockOrEbb: 250, wantEbb: true},
 		{name: "Byron main block at small slot", eraTag: 1, blockOrEbb: 7, wantEbb: false},
