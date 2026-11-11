@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package kesagent implements a client for the bursa KES agent wire protocol
-// (blinklabs-io/bursa, internal/kesagent and docs/signer/kes-agent-protocol.md),
+// (blinklabs-io/bursa, kesagent/wire and docs/signer/kes-agent-protocol.md),
 // so a dingo block producer can source its KES signing key -- or delegate KES
 // signing entirely -- to an external agent process over a Unix-domain socket
 // instead of reading a local kes.skey file.
@@ -66,18 +66,20 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+
+	"github.com/blinklabs-io/bursa/kesagent/wire"
 )
 
 const (
 	// ProtocolID is the handshake protocol/version string a bursa KES agent
 	// reports. A client MUST verify the server's Hello carries exactly this
 	// value before trusting anything else on the connection.
-	ProtocolID = "bursa-kes-agent/1"
+	ProtocolID = wire.ProtocolID
 
 	// ModeServeKey and ModeSign name the two service-socket modes the wire
 	// protocol supports.
-	ModeServeKey = "serve-key"
-	ModeSign     = "sign"
+	ModeServeKey = wire.ModeServeKey
+	ModeSign     = wire.ModeSign
 
 	// MaxHelloFrameLen bounds the initial handshake frame. A real Hello is a
 	// few dozen bytes; this is generous headroom without trusting an
@@ -96,40 +98,22 @@ const (
 	MaxSignFrameLen = 1 << 16 // 64 KiB
 )
 
+// The frame types are bursa's own (kesagent/wire), aliased so this package's
+// API is unchanged and the two ends cannot drift apart.
+
 // Hello is the handshake frame the agent sends immediately after accept.
-type Hello struct {
-	Protocol string `json:"protocol"`
-	Mode     string `json:"mode"`
-}
+type Hello = wire.Hello
 
 // KeyPush is sent by the agent in serve-key mode to deliver the current KES
 // signing key, its verification key, its absolute KES period, and the
-// operational certificate. Field names and shapes mirror
-// blinklabs-io/bursa's internal/kesagent.KeyPush exactly: this is the same
-// wire message, not a reinterpretation of it.
-type KeyPush struct {
-	Type       string `json:"type"` // "key_push"
-	Period     uint64 `json:"period"`
-	Depth      uint64 `json:"depth"`
-	KESSignKey []byte `json:"kes_sign_key"`
-	KESVKey    []byte `json:"kes_vkey"`
-	OpCert     []byte `json:"opcert"`
-}
+// operational certificate.
+type KeyPush = wire.KeyPush
 
 // SignRequest is sent by the client in sign mode.
-type SignRequest struct {
-	Type    string `json:"type"` // "sign_request"
-	Period  uint64 `json:"period"`
-	Message []byte `json:"message"`
-}
+type SignRequest = wire.SignRequest
 
 // SignResponse is the agent's reply to a SignRequest.
-type SignResponse struct {
-	Type      string `json:"type"` // "sign_response"
-	Period    uint64 `json:"period"`
-	Signature []byte `json:"signature"`
-	Error     string `json:"error,omitempty"`
-}
+type SignResponse = wire.SignResponse
 
 // errFrameTooLarge is wrapped into every frame-size rejection so callers can
 // distinguish it from a transport or decode error with errors.Is.
@@ -165,11 +149,19 @@ func writeFrame(w io.Writer, maxSize int, v any) error {
 		hdr[:],
 		uint32(len(payload)),
 	) // #nosec G115 -- bounded by maxSize above
-	if _, err := w.Write(hdr[:]); err != nil {
+	n, err := w.Write(hdr[:])
+	if err != nil {
 		return fmt.Errorf("kesagent: write frame header: %w", err)
 	}
-	if _, err := w.Write(payload); err != nil {
+	if n != len(hdr) {
+		return fmt.Errorf("kesagent: write frame header: %w", io.ErrShortWrite)
+	}
+	n, err = w.Write(payload)
+	if err != nil {
 		return fmt.Errorf("kesagent: write frame payload: %w", err)
+	}
+	if n != len(payload) {
+		return fmt.Errorf("kesagent: write frame payload: %w", io.ErrShortWrite)
 	}
 	return nil
 }

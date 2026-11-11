@@ -12192,7 +12192,14 @@ identity. `kesagent.Client` implements the
 agent's real wire protocol (`docs/signer/kes-agent-protocol.md` in
 `blinklabs-io/bursa`: a 4-byte big-endian length prefix, then a JSON payload,
 capped per-message and bounded by an explicit handshake/sign timeout), so it
-interoperates with a real bursa agent rather than a bespoke one.
+interoperates with a real bursa agent rather than a bespoke one. The frame
+types and protocol constants come from bursa's public `kesagent/wire` package,
+so both ends share one definition. The framing stays in `kesagent/`: it caps
+each message type separately, leaves deadlines to the caller (a serve-key
+subscriber idles between pushes, and a sign keeps its own short deadline), and
+wipes every buffer that held key material. `TestWireGoldenFrames` decodes and
+re-encodes bursa's published golden frames (`kesagent/testdata/wireframes`)
+byte for byte.
 
 Two modes, `--shelley-kes-agent-mode` (default `serve-key` once a socket is
 set):
