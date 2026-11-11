@@ -2059,7 +2059,9 @@ rows claimed for the caller to write to their accounts in the same transaction.
 Each output returned by `ClaimUnfoldedRewardCredits` carries its `AccountID`; the
 cursor only avoids rereading accounts already folded, and `folded` stays the
 record of progress. Outputs whose credential has no account row follow the
-account-ordered rows, so a round never stays due on them. `FoldPendingRewardAccountOutputs` sets
+account-ordered rows with `AccountID` 0, so a round never stays due on them;
+callers resume from the last non-zero `AccountID`, since resuming from 0 would
+walk every account again. `FoldPendingRewardAccountOutputs` sets
 `folded` on one credential's rows. Lookups of one stake credential's unfolded
 rows test the flag as `NOT folded`, so SQLite reads them on the credential
 index rather than the `(spendable, guarded, folded, epoch)` pending index,

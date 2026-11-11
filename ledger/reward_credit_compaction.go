@@ -193,9 +193,18 @@ func (ls *LedgerState) compactRewardCreditChunk(
 				}
 				continue
 			}
+			// Outputs without an account carry AccountID 0 and follow the
+			// account-ordered ones, so they must not move the cursor back to
+			// the first account.
+			next := from
+			for _, output := range outputs {
+				if output.AccountID != 0 {
+					next = output.AccountID
+				}
+			}
 			*cursor = rewardCreditCursor{
 				epoch:         round.SnapshotEpoch,
-				fromAccountID: outputs[len(outputs)-1].AccountID,
+				fromAccountID: next,
 			}
 			done = false
 			if err := ls.writeClaimedRewardCredits(ctx, txn, outputs); err != nil {

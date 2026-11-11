@@ -60,8 +60,13 @@ func foldImportedRewardCredits(
 				if err := tx.Commit(); err != nil {
 					return false, err
 				}
-				if len(outputs) > 0 {
-					fromAccountID = outputs[len(outputs)-1].AccountID
+				// Outputs without an account carry AccountID 0 and follow
+				// the account-ordered ones; resuming from them would walk
+				// every account again.
+				for _, output := range outputs {
+					if output.AccountID != 0 {
+						fromAccountID = output.AccountID
+					}
 				}
 				return len(outputs) == 0, nil
 			}()

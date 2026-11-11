@@ -3220,8 +3220,10 @@ type MetadataStore interface {
 	// the account row with id fromAccountID, for the caller to write to
 	// their accounts in the same transaction, or to acknowledge a certified
 	// imported state that already covers those credits. Each output carries
-	// its AccountID; passing the last one back as fromAccountID resumes the
-	// scan, rereading that account's outputs that are not folded yet.
+	// its AccountID, which is 0 for an output whose credential has no
+	// account; those follow the account-ordered outputs. Passing the last
+	// non-zero AccountID back as fromAccountID resumes the scan, rereading
+	// that account's outputs that are not folded yet.
 	ClaimUnfoldedRewardCredits(
 		uint64, // snapshotEpoch
 		uint, // fromAccountID

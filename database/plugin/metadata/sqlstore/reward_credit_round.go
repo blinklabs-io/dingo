@@ -495,10 +495,11 @@ func (s *Store) ClaimPendingRewardCreditsForCredential(
 }
 
 // ClaimUnfoldedRewardCredits claims up to limit unfolded credits of one
-// credited round in account order, starting at account fromAccountID. A caller
-// resumes at the last returned output's AccountID: the account is read again
-// and its outputs already folded are skipped, so the folded flag, not the
-// cursor, is the record of progress.
+// credited round in account order, starting at account fromAccountID. Outputs
+// whose credential has no account follow, with AccountID 0. A caller resumes
+// at the last returned non-zero AccountID: the account is read again and its
+// outputs already folded are skipped, so the folded flag, not the cursor, is
+// the record of progress.
 func (s *Store) ClaimUnfoldedRewardCredits(
 	snapshotEpoch uint64,
 	fromAccountID uint,
