@@ -14437,6 +14437,8 @@ func TestChainPositionGaugesAbsentUntilTipLoaded(t *testing.T) {
 	)
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
+	oldestBlock := makeTestBlock(150, 2)
+	require.NoError(t, db.BlockCreate(oldestBlock, nil))
 	tipBlock := makeTestBlock(210, 5)
 	require.NoError(t, db.BlockCreate(tipBlock, nil))
 	require.NoError(
@@ -14448,8 +14450,9 @@ func TestChainPositionGaugesAbsentUntilTipLoaded(t *testing.T) {
 		BlockNumber: tipBlock.Number,
 	}, nil))
 	ls := &LedgerState{
-		db:         db,
-		currentEra: eras.ShelleyEraDesc,
+		db:           db,
+		currentEra:   eras.ShelleyEraDesc,
+		currentEpoch: models.Epoch{EpochId: 3, StartSlot: 200},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -14457,6 +14460,9 @@ func TestChainPositionGaugesAbsentUntilTipLoaded(t *testing.T) {
 	}
 	reg := prometheus.NewRegistry()
 	ls.metrics.init(reg)
+	// Start loads epochs before the tip, so the epoch gauge is set while
+	// it is still unregistered and must survive registration.
+	ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
 
 	// A scrape before the tip is loaded must not report 0 for any
 	// chain-position gauge.
@@ -14473,6 +14479,10 @@ func TestChainPositionGaugesAbsentUntilTipLoaded(t *testing.T) {
 	}
 	assert.Equal(t, float64(tipBlock.Number), after[chainPositionGaugeNames[0]])
 	assert.Equal(t, float64(tipBlock.Slot), after[chainPositionGaugeNames[1]])
+	assert.Equal(t, float64(3), after[chainPositionGaugeNames[2]])
+	assert.Equal(t, float64(10), after[chainPositionGaugeNames[3]])
+	// (5-2) blocks over (210-150) slots within the k=3 fragment.
+	assert.InDelta(t, 0.05, after[chainPositionGaugeNames[4]], 1e-9)
 }
 
 func TestChainPositionGaugesExportedAtOriginTip(t *testing.T) {
