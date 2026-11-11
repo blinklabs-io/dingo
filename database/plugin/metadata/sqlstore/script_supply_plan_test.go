@@ -86,7 +86,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				require.NoError(t, err)
 			}
 			for name, query := range queries {
-				plan := explainPlan(t, store, query)
+				plan := explainSQLPlan(t, store, query)
 				require.NotContains(
 					t,
 					plan,
@@ -99,7 +99,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	}
 }
 
-func explainPlan(t *testing.T, store *Store, query string) string {
+func explainSQLPlan(t *testing.T, store *Store, query string) string {
 	t.Helper()
 	if i := strings.Index(query, "\n"); strings.HasPrefix(query, "-- name:") &&
 		i > 0 {

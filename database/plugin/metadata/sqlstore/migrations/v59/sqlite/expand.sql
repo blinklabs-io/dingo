@@ -1,4 +1,16 @@
--- Running total of live script-locked lovelace: one row per slot whose
--- commit changed it, holding the total after that slot. The backfill seeds it
--- from a full scan; the contract drops the index the scan used to need.
-CREATE TABLE IF NOT EXISTS `script_locked_supply` (`slot` integer PRIMARY KEY,`amount` integer NOT NULL);
+-- Drop four indexes that no reader needs or that another index already serves.
+--
+-- idx_reward_live_stake_updated_slot: updated_slot is written on every
+-- refresh and never filtered, joined or ordered on, so the index only added a
+-- leaf rewrite per touched credential.
+--
+-- idx_account_reward_delta_tx_hash and idx_account_reward_delta_withdrawal:
+-- every lookup by tx_hash also names withdrawal, so the unique
+-- (withdrawal, tx_hash, ...) index serves it, and a boolean-only index
+-- narrows nothing.
+--
+-- idx_account_drep: a prefix of idx_account_drep_active_staking_key.
+DROP INDEX IF EXISTS `idx_reward_live_stake_updated_slot`;
+DROP INDEX IF EXISTS `idx_account_reward_delta_tx_hash`;
+DROP INDEX IF EXISTS `idx_account_reward_delta_withdrawal`;
+DROP INDEX IF EXISTS `idx_account_drep`;

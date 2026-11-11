@@ -38,6 +38,7 @@ var hotStatements = func() []string {
 		scriptSupplySetQuery,
 		rewardLiveStakeAccountQuery,
 		rewardLiveStakeUpsertQuery,
+		rewardLiveStakeUpsertKeepPoolQuery,
 		rewardLiveStakeUtxoStakeQuery,
 		insertUtxoQuery,
 		insertUtxoQueryIgnoreConflict,
@@ -100,6 +101,7 @@ var hotStatements = func() []string {
 		utxoStakeConsumedDeltaQuery(256),
 		utxoStakeConsumedDeltaQuery(400),
 	}
+	queries = append(queries, upsertAccountChangedSQLs[:]...)
 	for rowCount := 2; rowCount <= utxoInsertBatchSize; rowCount++ {
 		queries = append(queries, insertUtxoBatchQuery(rowCount))
 	}
