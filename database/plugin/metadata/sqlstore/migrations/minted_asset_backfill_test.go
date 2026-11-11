@@ -53,8 +53,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 59)
-	registry[58].BatchSize = 2
+	require.Len(t, registry, 60)
+	registry[59].BatchSize = 2
 	runner := migrations.Runner{
 		DB:       db,
 		Dialect:  "sqlite",
@@ -109,7 +109,7 @@ VALUES (?, ?, NULL, ?, ?, ?, ?)`,
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	registry[58].BatchSize = 2
+	registry[59].BatchSize = 2
 	runner := migrations.Runner{
 		DB:       db,
 		Dialect:  "sqlite",

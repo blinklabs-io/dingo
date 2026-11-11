@@ -1,11 +1,16 @@
--- One row per minted asset, holding the id of its first mint/burn event.
--- The asset listing pages and counts this table instead of grouping and
--- sorting the whole event history on every request.
-CREATE TABLE IF NOT EXISTS `minted_asset` (
-    `policy_id` blob NOT NULL,
-    `name` blob NOT NULL,
-    `first_event_id` integer NOT NULL,
-    PRIMARY KEY (`policy_id`, `name`)
-);
-CREATE INDEX IF NOT EXISTS `idx_minted_asset_first_event` ON `minted_asset`(`first_event_id`);
-CREATE INDEX IF NOT EXISTS `idx_minted_asset_policy_first_event` ON `minted_asset`(`policy_id`,`first_event_id`);
+-- Drop four indexes that no reader needs or that another index already serves.
+--
+-- idx_reward_live_stake_updated_slot: updated_slot is written on every
+-- refresh and never filtered, joined or ordered on, so the index only added a
+-- leaf rewrite per touched credential.
+--
+-- idx_account_reward_delta_tx_hash and idx_account_reward_delta_withdrawal:
+-- every lookup by tx_hash also names withdrawal, so the unique
+-- (withdrawal, tx_hash, ...) index serves it, and a boolean-only index
+-- narrows nothing.
+--
+-- idx_account_drep: a prefix of idx_account_drep_active_staking_key.
+DROP INDEX IF EXISTS `idx_reward_live_stake_updated_slot`;
+DROP INDEX IF EXISTS `idx_account_reward_delta_tx_hash`;
+DROP INDEX IF EXISTS `idx_account_reward_delta_withdrawal`;
+DROP INDEX IF EXISTS `idx_account_drep`;

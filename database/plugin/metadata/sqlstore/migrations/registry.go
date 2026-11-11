@@ -98,6 +98,7 @@ const (
 	blockNonceSlotIndexSchemaRelease                    = "block-nonce-slot-leading-index"
 	rewardOutputIndexReshapeSchemaRelease               = "reward-account-output-index-reshape"
 	metadataLabelSlotIndexSchemaRelease                 = "transaction-metadata-label-slot-index"
+	stakeBookkeepingIndexDropSchemaRelease              = "stake-bookkeeping-index-drop"
 	mintedAssetSchemaRelease                            = "minted-asset-first-event"
 )
 
@@ -277,7 +278,8 @@ var schemaVersions = []struct {
 	{Version: 56, Name: blockNonceSlotIndexSchemaRelease, Dir: "v56"},
 	{Version: 57, Name: rewardOutputIndexReshapeSchemaRelease, Dir: "v57"},
 	{Version: 58, Name: metadataLabelSlotIndexSchemaRelease, Dir: "v58"},
-	{Version: 59, Name: mintedAssetSchemaRelease, Dir: "v59"},
+	{Version: 59, Name: stakeBookkeepingIndexDropSchemaRelease, Dir: "v59"},
+	{Version: 60, Name: mintedAssetSchemaRelease, Dir: "v60"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -2010,6 +2012,18 @@ func translateSchemaSQLInSchema(
 				"DROP INDEX IF EXISTS `idx_asset_fingerprint`",
 				"DROP INDEX `idx_asset_fingerprint` ON `asset`",
 			)
+			for index, table := range map[string]string{
+				"idx_reward_live_stake_updated_slot":  "reward_live_stake",
+				"idx_account_reward_delta_tx_hash":    "account_reward_delta",
+				"idx_account_reward_delta_withdrawal": "account_reward_delta",
+				"idx_account_drep":                    "account",
+			} {
+				value = strings.ReplaceAll(
+					value,
+					"DROP INDEX IF EXISTS `"+index+"`",
+					"DROP INDEX `"+index+"` ON `"+table+"`",
+				)
+			}
 			if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
 				for column := range mysqlForeignKeyColumns[schemaTableName(statement)] {
 					value = replaceMySQLBlobType(value, column)
