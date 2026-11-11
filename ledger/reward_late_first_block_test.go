@@ -320,6 +320,25 @@ func TestApplyStakeRewardsReplaysRoundAfterLateFirstBlock(t *testing.T) {
 	require.Equal(t, uint64(600), uint64(pots.Fees))
 }
 
+// TestReplayedStakeRewardRoundRollsBack pins that a replayed round's credits
+// are journaled apart from its first application's, under the stored output
+// rows, so a rollback to before the replay boundary removes only the replay.
+func TestReplayedStakeRewardRoundRollsBack(t *testing.T) {
+	t.Parallel()
+	ls, db, k := setupLateFirstBlockBoundaryFive(t, 450)
+	applyBoundaryFive(t, ls)
+	require.Equal(t, 2*lateRoundOwnerReward,
+		accountRewardBalance(t, db, k.rewardAccount))
+
+	require.NoError(t, db.DeleteAccountRewardsAfterSlot(
+		context.Background(), 499, nil,
+	))
+	require.Equal(t, lateRoundOwnerReward,
+		accountRewardBalance(t, db, k.rewardAccount))
+	require.Equal(t, lateRoundMemberReward,
+		accountRewardBalance(t, db, k.member))
+}
+
 func TestApplyStakeRewardsEarlyFirstBlockAppliesOwnRound(t *testing.T) {
 	t.Parallel()
 	// 430 <= 400 + 40: the update is started later in epoch 4 from the

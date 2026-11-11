@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -206,9 +207,60 @@ func (ls *LedgerState) applyReplayedStakeRewardRound(
 			return nil
 		}
 	}
+	if err := assignStoredRewardOutputIDs(ls, txn, app); err != nil {
+		return err
+	}
 	baselineCopy := *baseline
 	app.replayBaseline = &baselineCopy
 	return ls.applyStakeRewardApplication(ctx, txn, app, boundarySlot)
+}
+
+// assignStoredRewardOutputIDs gives a replayed round's recomputed outputs the
+// row ids its first application saved. A replay does not save its outputs
+// again, and a credit is journaled under its output's row id, so without them
+// every credit would carry id zero. The replay's later boundary slot keeps its
+// journal rows apart from the first application's.
+func assignStoredRewardOutputIDs(
+	ls *LedgerState,
+	txn *database.Txn,
+	app *stakeRewardApplication,
+) error {
+	type outputKey struct {
+		pool, stakingKey, rewardType string
+		tag                          uint8
+	}
+	stored, err := ls.db.Metadata().GetRewardAccountOutputsInPoolKeyHashRange(
+		app.epochs.snapshot,
+		[]byte{},
+		bytes.Repeat([]byte{0xff}, 32),
+		txn.Metadata(),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"get reward outputs for epoch %d: %w", app.epochs.snapshot, err,
+		)
+	}
+	ids := make(map[outputKey]uint, len(stored))
+	for _, output := range stored {
+		ids[outputKey{
+			pool:       string(output.PoolKeyHash),
+			stakingKey: string(output.StakingKey),
+			rewardType: output.RewardType,
+			tag:        output.CredentialTag,
+		}] = output.ID
+	}
+	for _, output := range app.accountOutputs {
+		if output == nil || output.ID != 0 {
+			continue
+		}
+		output.ID = ids[outputKey{
+			pool:       string(output.PoolKeyHash),
+			stakingKey: string(output.StakingKey),
+			rewardType: output.RewardType,
+			tag:        output.CredentialTag,
+		}]
+	}
+	return nil
 }
 
 // carriedRewardFees returns the fee total saveRewardAdaPotsForEpoch records
