@@ -29,7 +29,7 @@ func TestPlutusDatumCBORToCardano_DeepNestingRoundTrip(t *testing.T) {
 	const depth = 500
 	var datum pdata.PlutusData = &pdata.Integer{Inner: big.NewInt(0)}
 	for range depth {
-		datum = &pdata.List{Items: []pdata.PlutusData{datum}}
+		datum = pdata.NewList(datum)
 	}
 
 	raw, err := pdata.Encode(datum)

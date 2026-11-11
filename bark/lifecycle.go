@@ -27,7 +27,7 @@ import (
 )
 
 // NodeControl is the node-side half of LifecycleService: bark owns the
-// transport, authentication and request validation, the node owns the
+// transport and request validation, the node owns the
 // shutdown itself.
 type NodeControl interface {
 	// RequestShutdown accepts a graceful stop, or a stop followed by
@@ -55,19 +55,6 @@ var (
 		"bark: restart is not supported on this platform",
 	)
 )
-
-// destructiveLifecycleProcedures can take the node offline, so they require
-// an allowlisted operator certificate. readOnlyLifecycleProcedures need only
-// a verified one. A procedure in neither is treated as destructive by
-// newOperatorAuthInterceptor.
-var destructiveLifecycleProcedures = map[string]bool{
-	lifecycleconnect.LifecycleServiceStopProcedure:    true,
-	lifecycleconnect.LifecycleServiceRestartProcedure: true,
-}
-
-var readOnlyLifecycleProcedures = map[string]bool{
-	lifecycleconnect.LifecycleServiceGetStatusProcedure: true,
-}
 
 type lifecycleServiceHandler struct{ node NodeControl }
 

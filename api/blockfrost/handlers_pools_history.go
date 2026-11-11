@@ -104,7 +104,7 @@ func (b *Blockfrost) handlePoolBlocks(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	servePage(
+	serveBlockPage(
 		b,
 		w,
 		r,
