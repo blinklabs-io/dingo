@@ -157,6 +157,7 @@ func TestLoad_CompareFullStruct(t *testing.T) {
 	unsetDebugBindAddrEnv(t)
 	unsetMetricsBindAddrEnv(t)
 	unsetForgeGateEnv(t)
+	unsetGenesisCSJEnv(t)
 	yamlContent := `
 plugins:
   mempool:
@@ -1407,10 +1408,19 @@ func TestDefaultMithrilServerPortIsUnshared(t *testing.T) {
 	}
 }
 
+// unsetGenesisCSJEnv clears both spellings envconfig reads for
+// GenesisBootstrap.ChainSyncJumping: the nested container's derived prefix
+// form, checked first, and the bare tag it falls back to.
+func unsetGenesisCSJEnv(t *testing.T) {
+	t.Helper()
+	unsetEnv(t, "CARDANO_GENESISBOOTSTRAP_DINGO_GENESIS_CSJ")
+	unsetEnv(t, "DINGO_GENESIS_CSJ")
+}
+
 func TestLoad_GenesisChainSyncJumpingEnv(t *testing.T) {
 	// Not t.Parallel: LoadConfig and resetGlobalConfig replace process-global
 	// configuration state.
-	unsetEnv(t, "DINGO_GENESIS_CSJ")
+	unsetGenesisCSJEnv(t)
 	resetGlobalConfig()
 	globalConfig.RunMode = RunModeDev
 	cfg, err := LoadConfig("")

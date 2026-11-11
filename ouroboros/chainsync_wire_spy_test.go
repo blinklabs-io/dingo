@@ -73,13 +73,11 @@ func (c *wireSpyConn) next(t *testing.T, what string) chainsyncWireMessage {
 	return testutil.RequireReceive(t, c.messages, 5*time.Second, what)
 }
 
-// requireQuiet fails when a ChainSync message was written. It is only
-// meaningful after the action that would write one has returned.
+// requireQuiet fails when a ChainSync message is written within a short
+// window. The muxer writes from its own goroutine, so a message the action
+// queued can reach the wire after the action returns.
 func (c *wireSpyConn) requireQuiet(t *testing.T) {
 	t.Helper()
-	select {
-	case msg := <-c.messages:
-		t.Fatalf("unexpected ChainSync message type %d on the wire", msg)
-	default:
-	}
+	testutil.RequireNoReceive(t, c.messages, 100*time.Millisecond,
+		"unexpected ChainSync message on the wire")
 }

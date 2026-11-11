@@ -126,11 +126,12 @@ func newCsjHarness(t *testing.T, enabled bool) *csjHarness {
 	bus := event.NewEventBus(nil, logger)
 	t.Cleanup(bus.Close)
 	o, cm, _ := newOutboundStartTestOuroboros(t, logger, bus)
-	// Registered before any peer, so it runs after their connections close:
-	// it stops the refresh loop and waits for in-flight jump work.
-	t.Cleanup(o.outboundChainsyncLifecycle.close)
 	ls, _ := newTestLedgerStateWithChain(t, 5)
 	o.ledgerState = ls
+	// Registered after the ledger and before any peer, so it runs after
+	// their connections close and before the ledger closes: it stops the
+	// refresh loop and waits for in-flight jump work, which reads the ledger.
+	t.Cleanup(o.outboundChainsyncLifecycle.close)
 	o.chainsyncState = dchainsync.NewState(bus, nil)
 	h := &csjHarness{
 		t:          t,
@@ -924,8 +925,12 @@ func TestChainsyncJumpingMetricsCountEachJumpOnce(t *testing.T) {
 	dynamo, jumpers := h.startDynamoAndJumpers(100, 100)
 	forked, failing := jumpers[0], jumpers[1]
 	metrics := h.o.csj.metrics
-	require.InDelta(t, 2, promtestutil.ToFloat64(metrics.sent), 0)
-	require.InDelta(t, 2, promtestutil.ToFloat64(metrics.agreed), 0)
+	// The harness sees an agreement inside RecordAgreement, before the
+	// worker counts it.
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(metrics.sent) == 2 &&
+			promtestutil.ToFloat64(metrics.agreed) == 2
+	}, 5*time.Second, 5*time.Millisecond, "initial jumps sent and agreed")
 
 	forked.forkBlock.Store(16)
 	failing.failIntersect.Store(true)
