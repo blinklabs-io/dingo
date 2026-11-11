@@ -1059,8 +1059,14 @@ type Config struct {
 	// BlockProducerPools lists every pool this block producer forges for,
 	// each with its own VRF key, operational certificate and KES source. It
 	// replaces the single-pool shelleyVrfKey, shelleyKesKey,
-	// shelleyOperationalCertificate and shelleyKesAgent* settings above,
-	// which stay the way to configure one pool. YAML only.
+	// shelleyOperationalCertificate, shelleyKesAgentSocket,
+	// shelleyKesAgentMode, shelleyKesAgentAddress,
+	// shelleyKesAgentClientCertFile, shelleyKesAgentClientKeyFile,
+	// shelleyKesAgentServerSpkiSha256 and shelleyKesAgentPlaintext settings
+	// above, which stay the way to configure one pool;
+	// shelleyKesAgentSignTimeout and shelleyKeyWatchInterval apply to every
+	// pool. It is set in YAML or with dingo.WithBlockProducerPools, and is not
+	// read from the environment.
 	BlockProducerPools          []BlockProducerPool `yaml:"blockProducerPools"              ignored:"true"`
 	ForgeSyncToleranceSlots     uint64              `yaml:"forgeSyncToleranceSlots"          envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
 	ForgeStaleGapThresholdSlots uint64              `yaml:"forgeStaleGapThresholdSlots"      envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
