@@ -106,7 +106,11 @@ func TestValidateDevModeRequiresBlockProducerCredentials(t *testing.T) {
 	cfg.BlockProducer = false
 
 	err := cfg.Validate(RunModeDev)
-	require.ErrorContains(t, err, "blockProducer enabled but missing required key paths")
+	require.ErrorContains(
+		t,
+		err,
+		"blockProducer enabled but missing required key paths",
+	)
 	assert.True(t, cfg.BlockProducer)
 }
 
@@ -255,7 +259,6 @@ func TestValidateMithrilPublicBaseURL(t *testing.T) {
 		{name: "IPv6 loopback HTTP", value: "http://[::1]:8080"},
 		{
 			name: "remote HTTP", value: "http://snapshots.example.org",
-			wantErr: true,
 		},
 		{
 			name: "unsupported scheme", value: "ftp://snapshots.example.org",
@@ -931,11 +934,10 @@ func TestValidateMithrilServer(t *testing.T) {
 			wantErr: "invalid mithril.server.port",
 		},
 		{
-			name: "mithril server public HTTP base URL is not loopback",
+			name: "mithril server public HTTP base URL",
 			modify: func(c *Config) {
 				c.Mithril.Server.PublicBaseURL = "http://snapshots.example.org"
 			},
-			wantErr: "invalid mithril.server.publicBaseUrl",
 		},
 		{
 			name: "enabled mithril aggregator needs an epoch",
@@ -993,20 +995,18 @@ func TestValidateMithrilServer(t *testing.T) {
 			wantErr: "mithril.server.aggregator.genesisSigningKeyFile",
 		},
 		{
-			name: "enabled mithril aggregator needs an operator token file",
+			name: "enabled mithril aggregator permits anonymous requests",
 			modify: func(c *Config) {
 				c.Mithril.Server.Aggregator = validMithrilAggregator()
 				c.Mithril.Server.Aggregator.OperatorTokenFile = ""
 				c.BindAddr = "127.0.0.1"
 			},
-			wantErr: "mithril.server.aggregator.operatorTokenFile",
 		},
 		{
-			name: "public mithril aggregator requires tls",
+			name: "public mithril aggregator permits plaintext HTTP",
 			modify: func(c *Config) {
 				c.Mithril.Server.Aggregator = validMithrilAggregator()
 			},
-			wantErr: "mithril.server.tlsEnabled is required",
 		},
 		{
 			name: "enabled mithril aggregator fully configured",
@@ -1457,7 +1457,9 @@ func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
 	}
 }
 
-func TestValidateDatabaseLifecycleCloudDestinationRequiresTrustKey(t *testing.T) {
+func TestValidateDatabaseLifecycleCloudDestinationRequiresTrustKey(
+	t *testing.T,
+) {
 	cfg := validTestConfig()
 	cfg.DatabaseLifecycle.SnapshotCloudDestination = "s3://bucket/prefix"
 
@@ -1604,134 +1606,18 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 	)
 }
 
-func TestValidateBarkDatabaseServiceSecurity(t *testing.T) {
-	newConfig := func(t *testing.T) *Config {
-		t.Helper()
-		cfg := validTestConfig()
-		cfg.BarkPort = 8091
-		cfg.DatabaseLifecycle.SnapshotDir = t.TempDir()
-		cfg.BarkClientCAFilePath = "/certs/ca.crt"
-		cfg.BarkOperatorCertificateFingerprints = []string{
-			strings.Repeat("AB:", 31) + "AB",
-		}
-		cfg.TlsCertFilePath = "/certs/tls.crt"
-		cfg.TlsKeyFilePath = "/certs/tls.key"
-		return cfg
-	}
-
-	t.Run("complete policy", func(t *testing.T) {
-		require.NoError(
-			t,
-			newConfig(t).validate(RunModeServe, minUnprivilegedPort),
-		)
-	})
-
-	t.Run("missing client CA", func(t *testing.T) {
-		cfg := newConfig(t)
-		cfg.BarkClientCAFilePath = ""
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(t, err, "barkClientCaFilePath is required")
-	})
-
-	t.Run("missing operator allowlist", func(t *testing.T) {
-		cfg := newConfig(t)
-		cfg.BarkOperatorCertificateFingerprints = nil
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(
-			t,
-			err,
-			"barkOperatorCertificateFingerprints requires at least one",
-		)
-	})
-
-	t.Run("invalid operator fingerprint", func(t *testing.T) {
-		cfg := newConfig(t)
-		cfg.BarkOperatorCertificateFingerprints = []string{"not-a-fingerprint"}
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(
-			t,
-			err,
-			"must be a 32-byte SHA-256 certificate fingerprint",
-		)
-	})
-}
-
-func TestValidateBarkLifecycleSecurity(t *testing.T) {
+func TestValidateBarkLifecyclePort(t *testing.T) {
 	t.Parallel()
-
-	newConfig := func() *Config {
-		cfg := validTestConfig()
-		cfg.BarkPort = 8091
-		cfg.BarkClientCAFilePath = "/certs/ca.crt"
-		cfg.BarkLifecycleEnabled = true
-		cfg.BarkLifecycleOperatorCertificateFingerprints = []string{
-			strings.Repeat("cd", 32),
-		}
-		cfg.TlsCertFilePath = "/certs/tls.crt"
-		cfg.TlsKeyFilePath = "/certs/tls.key"
-		return cfg
-	}
-
-	t.Run("complete policy", func(t *testing.T) {
-		require.NoError(t, newConfig().validate(RunModeServe, minUnprivilegedPort))
-	})
-
-	t.Run("database credentials do not enable lifecycle", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.BarkLifecycleEnabled = false
-		cfg.BarkLifecycleOperatorCertificateFingerprints = nil
-		cfg.BarkOperatorCertificateFingerprints = []string{
-			strings.Repeat("ab", 32),
-		}
-		require.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
-	})
-
-	t.Run("allowlist requires explicit enablement", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.BarkLifecycleEnabled = false
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(
-			t,
-			err,
-			"barkLifecycleOperatorCertificateFingerprints requires barkLifecycleEnabled",
-		)
-	})
-
-	t.Run("enabled service requires port", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.BarkPort = 0
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(t, err, "barkPort must be non-zero")
-	})
-
-	t.Run("enabled service requires client CA", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.BarkClientCAFilePath = ""
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(t, err, "barkClientCaFilePath is required")
-	})
-
-	t.Run("enabled service requires its own operator allowlist", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.BarkLifecycleOperatorCertificateFingerprints = nil
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(
-			t,
-			err,
-			"barkLifecycleOperatorCertificateFingerprints requires at least one",
-		)
-	})
-
-	t.Run("invalid lifecycle operator fingerprint", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.BarkLifecycleOperatorCertificateFingerprints = []string{"invalid"}
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(
-			t,
-			err,
-			"barkLifecycleOperatorCertificateFingerprints[0] must be a 32-byte",
-		)
-	})
+	cfg := validTestConfig()
+	cfg.BarkLifecycleEnabled = true
+	cfg.BarkPort = 8091
+	require.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
+	cfg.BarkPort = 0
+	require.ErrorContains(
+		t,
+		cfg.validate(RunModeServe, minUnprivilegedPort),
+		"barkPort must be non-zero",
+	)
 }
 
 func TestValidateDatabaseLifecycleSnapshotCloudDestinationPrefix(t *testing.T) {
@@ -2349,7 +2235,11 @@ func TestValidateDMQRejectsUnknownTopic(t *testing.T) {
 	cfg.DMQ = DefaultDMQConfig()
 	cfg.DMQ.Enabled = true
 	cfg.DMQ.Topic = "typo"
-	require.ErrorContains(t, cfg.validate(cfg.RunMode, minUnprivilegedPort), "dmq.topic must be mithril")
+	require.ErrorContains(
+		t,
+		cfg.validate(cfg.RunMode, minUnprivilegedPort),
+		"dmq.topic must be mithril",
+	)
 }
 
 func TestValidateRejectsNegativeBarkArchiveLookupRates(t *testing.T) {

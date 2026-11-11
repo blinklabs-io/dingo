@@ -158,6 +158,15 @@ type TrackedClient struct {
 	// observerHeaderGap survives role changes until a safe intersection or
 	// replacement session can replay headers skipped by this observer.
 	observerHeaderGap bool
+	// advertisedTip is the tip in the client's latest chainsync message,
+	// observers included. Whether it is stale changes as the wall clock
+	// advances, so it is judged each time a decision is made.
+	advertisedTip      ochainsync.Tip
+	advertisedTipKnown bool
+	// advertisedTipSeq counts recorded tips. A tip is judged outside the
+	// State lock, so a decision compares this under the lock and abandons a
+	// verdict about a tip that has since been replaced.
+	advertisedTipSeq uint64
 	// TODO: BytesRecv needs to be wired to the underlying
 	// connection's byte counter. Currently unused.
 	BytesRecv uint64
@@ -224,6 +233,12 @@ type Config struct {
 	// identity. It must not take locks that are held while calling into State.
 	// When nil no connection is preferred on this basis.
 	CorroborationIdentity func(ouroboros.ConnectionId) string
+	// AdvertisedTipStale reports whether chain selection will never select a
+	// peer advertising tip, so its connection must not hold an eligible slot.
+	// The answer can change between calls as the wall clock advances. It is
+	// called with no State lock held, so it may take locks that are held while
+	// calling into State. When nil no tip is stale.
+	AdvertisedTipStale func(ochainsync.Tip) bool
 }
 
 // DefaultConfig returns the default chainsync configuration.
@@ -654,16 +669,19 @@ func (s *State) promoteObservedRoot(freed ouroboros.ConnectionId) {
 		return
 	}
 	s.clientConnIdMutex.RLock()
-	var root *ouroboros.ConnectionId
+	var roots []ouroboros.ConnectionId
 	for id, tc := range s.trackedClients {
 		if id != freed && tc.ObservabilityOnly && s.config.IsRoot(id) {
-			root = &id
-			break
+			roots = append(roots, id)
 		}
 	}
 	s.clientConnIdMutex.RUnlock()
-	if root != nil {
-		s.SetClientObservabilityOnly(*root, false)
+	// A root advertising a stale tip refuses the promotion; the slot must
+	// reach the next root rather than stay free.
+	for _, root := range roots {
+		if s.SetClientObservabilityOnly(root, false) {
+			return
+		}
 	}
 }
 
@@ -997,15 +1015,112 @@ func (s *State) SetClientStartedAsOutbound(
 	return true
 }
 
+// RecordClientAdvertisedTip stores the tip in a client's latest chainsync
+// message and reports whether that tip is stale now.
+func (s *State) RecordClientAdvertisedTip(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+) bool {
+	s.clientConnIdMutex.Lock()
+	if tc, exists := s.trackedClients[connId]; exists {
+		tc.advertisedTip = tip
+		tc.advertisedTipKnown = true
+		tc.advertisedTipSeq++
+	}
+	s.clientConnIdMutex.Unlock()
+	return s.advertisedTipStale(tip)
+}
+
+func (s *State) advertisedTipStale(tip ochainsync.Tip) bool {
+	return s.config.AdvertisedTipStale != nil &&
+		s.config.AdvertisedTipStale(tip)
+}
+
+// clientAdvertisedTipStale judges a client's latest advertised tip now and
+// returns the sequence number of the tip it judged. A client that has
+// advertised nothing yet is not stale.
+func (s *State) clientAdvertisedTipStale(
+	connId ouroboros.ConnectionId,
+) (bool, uint64) {
+	var tip ochainsync.Tip
+	var seq uint64
+	known := false
+	s.clientConnIdMutex.RLock()
+	if tc, exists := s.trackedClients[connId]; exists && tc != nil {
+		tip, known = tc.advertisedTip, tc.advertisedTipKnown
+		seq = tc.advertisedTipSeq
+	}
+	s.clientConnIdMutex.RUnlock()
+	return known && s.advertisedTipStale(tip), seq
+}
+
+// DemoteStaleAdvertisingClients moves every eligible client whose latest
+// advertised tip is stale to observation, and returns those clients. A peer
+// idle at its own tip sends no message when the wall clock carries that tip
+// past the threshold, so without this sweep it would keep its slot. A client
+// that advertises a new tip while the sweep is judging its old one is left for
+// the handler of that message to decide.
+func (s *State) DemoteStaleAdvertisingClients() []ouroboros.ConnectionId {
+	if s.config.AdvertisedTipStale == nil {
+		return nil
+	}
+	type candidate struct {
+		connId ouroboros.ConnectionId
+		tip    ochainsync.Tip
+		seq    uint64
+	}
+	s.clientConnIdMutex.RLock()
+	candidates := make([]candidate, 0, len(s.trackedClients))
+	for id, tc := range s.trackedClients {
+		if !tc.ObservabilityOnly && tc.advertisedTipKnown {
+			candidates = append(
+				candidates,
+				candidate{id, tc.advertisedTip, tc.advertisedTipSeq},
+			)
+		}
+	}
+	s.clientConnIdMutex.RUnlock()
+	var demoted []ouroboros.ConnectionId
+	for _, c := range candidates {
+		if s.advertisedTipStale(c.tip) &&
+			s.setClientObservabilityOnly(c.connId, true, &c.seq) {
+			demoted = append(demoted, c.connId)
+		}
+	}
+	return demoted
+}
+
 // SetClientObservabilityOnly toggles whether a tracked client participates in
 // the eligible chainsync pool. Promoting an observability-only client back into
 // the eligible pool respects MaxClients: when the pool is full a configured
 // root displaces a non-root client, and any other client remains
-// observability-only and this method returns false. Demoting an eligible
-// client hands the freed slot to another connected root that is observing.
+// observability-only and this method returns false. A client whose latest
+// advertised tip is stale also remains observability-only and returns false.
+// Demoting an eligible client hands the freed slot to another connected root
+// that is observing.
 func (s *State) SetClientObservabilityOnly(
 	connId ouroboros.ConnectionId,
 	observabilityOnly bool,
+) bool {
+	var judgedTipSeq *uint64
+	if !observabilityOnly && s.config.AdvertisedTipStale != nil {
+		stale, seq := s.clientAdvertisedTipStale(connId)
+		if stale {
+			return false
+		}
+		judgedTipSeq = &seq
+	}
+	return s.setClientObservabilityOnly(connId, observabilityOnly, judgedTipSeq)
+}
+
+// setClientObservabilityOnly applies a role change. A non-nil judgedTipSeq
+// names the advertised tip the change was decided on, and the change is refused
+// if the client has since advertised another: the staleness judgement runs
+// outside clientConnIdMutex, so the tip can be replaced after the verdict.
+func (s *State) setClientObservabilityOnly(
+	connId ouroboros.ConnectionId,
+	observabilityOnly bool,
+	judgedTipSeq *uint64,
 ) bool {
 	var notifyType event.EventType
 	var notify *event.Event
@@ -1024,6 +1139,9 @@ func (s *State) SetClientObservabilityOnly(
 		}
 		if tc.ObservabilityOnly == observabilityOnly {
 			return true
+		}
+		if judgedTipSeq != nil && tc.advertisedTipSeq != *judgedTipSeq {
+			return false
 		}
 		if !observabilityOnly &&
 			s.config.MaxClients > 0 &&

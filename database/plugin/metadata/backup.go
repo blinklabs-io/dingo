@@ -69,8 +69,9 @@ type resetPopulatedTargetContextKey struct{}
 // via a reused or misconfigured DSN) does not apply. Restore is inherently
 // destructive to its target by design, and a live node restoring itself
 // from its own earlier snapshot -- Bark's DatabaseService.Restore RPC,
-// gated on its own explicit mTLS-authenticated caller plus dingoctl's own
-// "this will replace the node's current database" confirmation prompt --
+// reachable only where Bark's listener is exposed (loopback by default)
+// and confirmed by dingoctl's own "this will replace the node's current
+// database" prompt --
 // always targets the exact database that node is already configured for,
 // never an independently-resolved one a misconfigured DSN could point
 // elsewhere. Call this only from that call path. The offline `dingo

@@ -30,6 +30,6 @@
 //   - Official agent workflows via MCP prompts (diagnose_node_health, simulate_and_diagnose_tx,
 //     audit_pool_rewards, track_asset_portfolio, conway_governance_brief, investigate_address)
 //   - Transport support for Streamable HTTP (/mcp) and Server-Sent Events (/sse)
-//   - Security middleware with token-bucket rate limiting, optional Bearer auth,
+//   - Security middleware with token-bucket rate limiting,
 //     and input/output sanitization against prompt injection attacks.
 package mcp
