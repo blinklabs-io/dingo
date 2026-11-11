@@ -1127,11 +1127,10 @@ func (o *Ouroboros) csjStartStreaming(
 			!o.outboundChainsyncWanted(connId) {
 			return
 		}
+		resume = o.csjResumeOnLocalChain(ctx, resume)
 		points, err := o.buildDefaultChainsyncIntersectPoints(ctx, connId)
 		if err != nil {
 			points = nil
-		} else {
-			resume = o.csjResumeOnLocalChain(ctx, resume)
 		}
 		points = append(slices.Clone(resume), points...)
 		if err := o.syncChainsyncClient(connId, points); err != nil {
