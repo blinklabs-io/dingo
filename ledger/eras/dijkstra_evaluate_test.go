@@ -144,12 +144,6 @@ func TestEvaluateTxDijkstraEvaluatesEveryLevel(t *testing.T) {
 			key:     &lcommon.RedeemerKey{Tag: lcommon.RedeemerTagMint},
 		},
 		{
-			name:    "top-level Plutus V3 guard",
-			level:   v4TopLevel,
-			version: lang.LanguageVersionV3,
-			key:     &lcommon.RedeemerKey{Tag: lcommon.RedeemerTagGuarding},
-		},
-		{
 			name:    "top-level Plutus V3 mint",
 			level:   v4TopLevelMint,
 			version: lang.LanguageVersionV3,
@@ -187,6 +181,33 @@ func TestEvaluateTxDijkstraEvaluatesEveryLevel(t *testing.T) {
 			declareDijkstraRedeemerUnits(t, tx, short)
 			var failed conway.PlutusScriptFailedError
 			require.ErrorAs(t, ValidateTxDijkstra(tx, 0, ls, params), &failed)
+		})
+	}
+}
+
+// A Plutus V1-V3 context cannot carry a script-hash guard, so a top-level
+// guard backed by a V1, V2, or V3 script fails to build its context, as in
+// the reference ledger.
+func TestEvaluateTxDijkstraRejectsPlutusV1ToV3Guard(t *testing.T) {
+	// Not t.Parallel: withoutDijkstraPhase1 replaces a package-level rule list.
+	withoutDijkstraPhase1(t)
+	params := dijkstraEvaluateTestParams(t)
+	plain := plutusProgramBytes(t, v4PlainProgram)
+	for _, tc := range []struct {
+		name   string
+		script lcommon.Script
+	}{
+		{"Plutus V1", lcommon.PlutusV1Script(plain)},
+		{"Plutus V2", lcommon.PlutusV2Script(plain)},
+		{"Plutus V3", lcommon.PlutusV3Script(plain)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := newDijkstraPlutusLevelTx(
+				t, v4TopLevel, tc.script, lcommon.ExUnits{},
+			)
+			_, _, _, err := EvaluateTxDijkstra(tx, newMockLedgerState(), params)
+			var construction lcommon.ScriptContextConstructionError
+			require.ErrorAs(t, err, &construction)
 		})
 	}
 }
