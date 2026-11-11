@@ -2310,7 +2310,8 @@ SELECT 1 FROM sync_state WHERE sync_key = ?`), deferred.SyncStateKey).Scan(&pend
 }
 
 // mintedAssetBackfill records the first mint/burn event of every asset that
-// has history but no minted_asset row. It walks asset_mint_burn by id, so a
+// has history but no minted_asset row, first storing NULL asset names as the
+// empty name. It walks asset_mint_burn by id, so a
 // batch reads one id range and the primary key of minted_asset; it does not
 // depend on the lookup index, which a pending deferred-index rebuild may not
 // have restored yet. Ranges ascend, so an asset first seen in an earlier
@@ -2339,6 +2340,19 @@ SELECT MAX(id) FROM (
 	}
 	if !upper.Valid {
 		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	// Earlier releases bound the empty asset name as NULL. Store it as the
+	// empty name the writer now uses, so the asset is indexed below and its
+	// events match name lookups. The writer never produced both forms for one
+	// (tx_hash, policy_id), so this cannot collide on the unique key.
+	if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
+UPDATE asset_mint_burn SET name = ?
+WHERE id > ? AND id <= ? AND name IS NULL`),
+		[]byte{}, lastID, upper.Int64); err != nil {
+		return BatchResult{}, fmt.Errorf(
+			"normalize empty minted asset names: %w",
+			err,
+		)
 	}
 	result, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
 INSERT INTO minted_asset (policy_id, name, first_event_id)

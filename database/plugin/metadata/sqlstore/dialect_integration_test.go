@@ -136,6 +136,22 @@ func TestMySQLUtxoOrderingAssetFilter(t *testing.T) {
 	)
 }
 
+func TestPostgresMintedAssetIndexLifecycle(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testMintedAssetIndexLifecycle(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLMintedAssetIndexLifecycle(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testMintedAssetIndexLifecycle(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
 func TestPostgresAccountAggregateLimits(t *testing.T) {
 	dsn, schema := newPostgresIntegrationSchema(t)
 	testAccountAggregateLimits(

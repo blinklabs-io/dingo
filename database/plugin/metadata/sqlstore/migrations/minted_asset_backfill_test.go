@@ -83,3 +83,54 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 	require.Equal(t, map[string]int64{"A": 1, "B": 2, "C": 4, "": 7}, got)
 	require.Equal(t, []string{"A", "B", "C", ""}, order)
 }
+
+// Releases before this migration stored the empty asset name as NULL. The
+// backfill must turn those events into empty-name events and index the asset,
+// so it is listed and found by name like one written after the upgrade.
+func TestMintedAssetBackfillNormalizesNullNames(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 58)
+	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	policy := bytes.Repeat([]byte{0x02}, 28)
+	for i := range 3 {
+		_, err := db.Exec(`
+INSERT INTO asset_mint_burn (tx_hash, policy_id, name, fingerprint, slot, quantity, tx_index)
+VALUES (?, ?, NULL, ?, ?, ?, ?)`,
+			bytes.Repeat([]byte{byte(i + 1)}, 32), policy,
+			[]byte("fp"), 10+i, "1", 0,
+		)
+		require.NoError(t, err)
+	}
+
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	registry[58].BatchSize = 2
+	runner := migrations.Runner{
+		DB:       db,
+		Dialect:  "sqlite",
+		Registry: registry,
+		Locker: migrations.NewFileLocker(
+			databasePath + ".migrate.lock",
+		),
+	}
+	require.NoError(t, runner.Run(ctx))
+
+	var nullNames int
+	require.NoError(t, db.QueryRow(
+		`SELECT COUNT(*) FROM asset_mint_burn WHERE name IS NULL`,
+	).Scan(&nullNames))
+	require.Zero(t, nullNames)
+	var name []byte
+	var first int64
+	require.NoError(t, db.QueryRow(
+		`SELECT name, first_event_id FROM minted_asset WHERE policy_id = ?`,
+		policy,
+	).Scan(&name, &first))
+	require.Empty(t, name)
+	require.Equal(t, int64(1), first)
+}

@@ -3467,3 +3467,44 @@ func TestWriteConnectionKeepsTempStoreInMemory(t *testing.T) {
 	require.Equal(t, tempStoreMemory, tempStore(writeDB),
 		"RestoreNormalPragmas must keep the steady-state temp_store")
 }
+
+// An asset with the empty name is a legal, common asset. Its mint must reach
+// the asset listing and its own mint/burn lookup like any other asset.
+func TestSharedSQLStoreIndexesEmptyAssetNameMint(t *testing.T) {
+	t.Parallel()
+	store, _ := newAPIModeSQLStore(t)
+	policy := lcommon.Blake2b224{0x6a}
+	mint := lcommon.NewMultiAsset[lcommon.MultiAssetTypeMint](
+		map[lcommon.Blake2b224]map[gcbor.ByteString]lcommon.MultiAssetTypeMint{
+			policy: {
+				gcbor.NewByteString(nil):         big.NewInt(5),
+				gcbor.NewByteString([]byte("t")): big.NewInt(1),
+			},
+		},
+	)
+	require.NoError(t, store.SetTransaction(
+		&mockTransaction{
+			hash:    lcommon.Blake2b256{0x6b},
+			isValid: true,
+			mint:    &mint,
+		},
+		ocommon.Point{Slot: 9, Hash: bytes.Repeat([]byte{0x6c}, 32)},
+		0, nil, false, nil, 0,
+	))
+
+	assets, err := store.ListMintedAssets(policy.Bytes(), 0, 0, false, nil)
+	require.NoError(t, err)
+	names := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		names = append(names, string(asset.Name))
+	}
+	require.ElementsMatch(t, []string{"", "t"}, names)
+	total, err := store.CountMintedAssets(policy.Bytes(), nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+
+	initialTx, events, err := store.GetAssetMintBurnInfo(policy, []byte{}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, events)
+	require.Equal(t, lcommon.Blake2b256{0x6b}.Bytes(), initialTx)
+}

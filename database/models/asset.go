@@ -96,9 +96,11 @@ func ConvertMintToAssetMintBurnModels(
 				assetNameBytes,
 			)
 			rows = append(rows, AssetMintBurn{
-				TxHash:      append([]byte(nil), txHash...),
-				PolicyId:    policyIdBytes,
-				Name:        append([]byte(nil), assetNameBytes...),
+				TxHash:   append([]byte(nil), txHash...),
+				PolicyId: policyIdBytes,
+				// A nil slice binds as NULL, which no name lookup or
+				// minted_asset key matches; the empty name is a real name.
+				Name:        append([]byte{}, assetNameBytes...),
 				Fingerprint: []byte(fingerprint.String()),
 				Slot:        slot,
 				Quantity:    amount.String(),
