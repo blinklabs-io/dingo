@@ -615,8 +615,8 @@ func TestHistoricalPointOnPrimaryChainExpiredSkipsArchive(t *testing.T) {
 }
 
 // The rejection below the prune floor is logged at WARN when the target is on
-// the local chain, expired CBOR and an unreachable archive included, and at
-// ERROR when the target is off it.
+// the local chain, origin and expired CBOR with an unreachable archive
+// included, and at ERROR when the target is off it.
 func TestHandleEventChainsyncRollbackPruneFloorLogLevel(t *testing.T) {
 	t.Parallel()
 	const rejection = "chainsync rollback is below the consumed UTxO prune floor, rejecting peer chain"
@@ -624,9 +624,11 @@ func TestHandleEventChainsyncRollbackPruneFloorLogLevel(t *testing.T) {
 		name        string
 		expire      bool
 		offChain    bool
+		origin      bool
 		expectLevel string
 	}{
 		{name: "on chain", expectLevel: "WARN"},
+		{name: "origin", origin: true, expectLevel: "WARN"},
 		{name: "expired on chain with archive down", expire: true, expectLevel: "WARN"},
 		{name: "off chain", offChain: true, expectLevel: "ERROR"},
 	}
@@ -647,6 +649,9 @@ func TestHandleEventChainsyncRollbackPruneFloorLogLevel(t *testing.T) {
 			target := fixture.ancestorTip.Point
 			if tc.offChain {
 				target = ocommon.NewPoint(target.Slot, testHashBytes("prune-floor-off-chain"))
+			}
+			if tc.origin {
+				target = ocommon.NewPointOrigin()
 			}
 			if tc.expire {
 				expirePrimaryChainBlock(t, fixture.ls, target)
