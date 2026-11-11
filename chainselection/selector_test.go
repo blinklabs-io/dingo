@@ -3888,74 +3888,91 @@ func (h *panicLogHandler) WithGroup(name string) slog.Handler {
 	return &panicLogHandler{inner: h.inner.WithGroup(name)}
 }
 
-// TestChainSelectorSetLocalTipUnlocksOnPanic is a regression test for a bug
+// TestChainSelectorGenesisExitUnlocksOnPanic is a regression test for a bug
 // where SetLocalTip (and SetSecurityParam, HandlePeerRollbackEvent) took
 // cs.mutex.Lock() and called cs.mutex.Unlock() as a bare statement after the
-// locked work instead of via defer. leaveGenesisLocked logs on a
-// Genesis-mode exit while the lock is held; if that log call panics (a
-// misbehaving Logger, but the same failure mode as any other panic in code
-// reachable from inside the lock), the bare Unlock() was skipped and
-// cs.mutex stayed locked forever -- deadlocking every future ChainSelector
-// call, not just dropping the one event. This test drives a real Genesis
-// exit with a Logger that panics on every Handle call and then verifies
-// cs.mutex is still acquirable afterward.
-func TestChainSelectorSetLocalTipUnlocksOnPanic(t *testing.T) {
+// locked work instead of via defer. leaveGenesisLocked logs on a Genesis-mode
+// exit while the lock is held; if that log call panics (a misbehaving Logger,
+// but the same failure mode as any other panic in code reachable from inside
+// the lock), a bare Unlock() is skipped and cs.mutex stays locked forever --
+// deadlocking every future ChainSelector call, not just dropping the one
+// event. The test drives a real Genesis exit from each caller that can end
+// Genesis, a peer reporting idle and the local tip catching up, with a Logger
+// that panics on every Handle call, and then verifies cs.mutex is still
+// acquirable.
+func TestChainSelectorGenesisExitUnlocksOnPanic(t *testing.T) {
 	t.Parallel()
-
-	var chain testChain
-	cs := NewChainSelector(ChainSelectorConfig{
-		GenesisMode:       true,
-		SecurityParam:     10,
-		PointOnLocalChain: chain.onChain,
-	})
-
-	connId := newTestConnectionId(1)
 	peerTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 100, Hash: []byte("peer-100")},
 		BlockNumber: 100,
 	}
-	cs.UpdatePeerTip(connId, peerTip, nil)
-	chain.add(peerTip)
-	cs.SetLocalTip(peerTip)
-	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
+	for name, tc := range map[string]struct {
+		// idleFirst reports idle before the panicking logger is installed,
+		// so the local tip reaching the peer's tip triggers the exit.
+		idleFirst bool
+	}{
+		"SetPeerIdling": {idleFirst: false},
+		"SetLocalTip":   {idleFirst: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var chain testChain
+			cs := NewChainSelector(ChainSelectorConfig{
+				GenesisMode:       true,
+				SecurityParam:     10,
+				PointOnLocalChain: chain.onChain,
+			})
+			connId := newTestConnectionId(1)
+			cs.UpdatePeerTip(connId, peerTip, nil)
+			chain.add(peerTip)
+			if tc.idleFirst {
+				cs.SetPeerIdling(connId, peerTip.Point)
+			} else {
+				cs.SetLocalTip(peerTip)
+			}
+			require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
 
-	// Installed under cs.mutex, after the setup UpdatePeerTip call above
-	// (which itself logs), matching how every production read of
-	// cs.config.Logger is itself guarded by cs.mutex.
-	cs.mutex.Lock()
-	cs.config.Logger = slog.New(
-		&panicLogHandler{inner: slog.NewTextHandler(io.Discard, nil)},
-	)
-	cs.mutex.Unlock()
-
-	func() {
-		defer func() {
-			require.NotNil(
-				t,
-				recover(),
-				"expected the Genesis-exit log call to panic",
+			// Installed under cs.mutex, after the setup calls above (which
+			// themselves log), matching how every production read of
+			// cs.config.Logger is itself guarded by cs.mutex.
+			cs.mutex.Lock()
+			cs.config.Logger = slog.New(
+				&panicLogHandler{inner: slog.NewTextHandler(io.Discard, nil)},
 			)
-		}()
-		// The peer reports idle at the local tip, triggering the Genesis-exit
-		// log call while cs.mutex is held.
-		cs.SetPeerIdling(connId, peerTip.Point)
-	}()
+			cs.mutex.Unlock()
 
-	// If SetLocalTip's locked section left cs.mutex locked, this blocks
-	// forever instead of closing unlocked.
-	unlocked := make(chan struct{})
-	go func() {
-		cs.mutex.Lock()
-		cs.mutex.Unlock()
-		close(unlocked)
-	}()
-	select {
-	case <-unlocked:
-	case <-time.After(2 * time.Second):
-		t.Fatal(
-			"cs.mutex is still locked after the panic; " +
-				"SetLocalTip must unlock via defer",
-		)
+			func() {
+				defer func() {
+					require.NotNil(
+						t,
+						recover(),
+						"expected the Genesis-exit log call to panic",
+					)
+				}()
+				if tc.idleFirst {
+					cs.SetLocalTip(peerTip)
+				} else {
+					cs.SetPeerIdling(connId, peerTip.Point)
+				}
+			}()
+
+			// If the exit's locked section left cs.mutex locked, this blocks
+			// forever instead of closing unlocked.
+			unlocked := make(chan struct{})
+			go func() {
+				cs.mutex.Lock()
+				cs.mutex.Unlock()
+				close(unlocked)
+			}()
+			select {
+			case <-unlocked:
+			case <-time.After(2 * time.Second):
+				t.Fatal(
+					"cs.mutex is still locked after the panic; " +
+						"the Genesis exit must unlock via defer",
+				)
+			}
+		})
 	}
 }
 

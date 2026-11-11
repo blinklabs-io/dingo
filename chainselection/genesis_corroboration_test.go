@@ -1489,8 +1489,9 @@ func TestGenesisDoesNotExitOnEarlyObservedHeaders(t *testing.T) {
 // A corroborated peer can still lie about its advertised tip: it delivers a
 // shared early header (passing corroboration) but advertises a slot near
 // MaxUint64 it has not delivered. That undelivered advertised slot must not pin
-// Genesis mode — the exit horizon is bound to delivered headers, so the node
-// still exits once the local tip catches up to the delivered/corroborated tip.
+// Genesis mode: the exit compares delivered headers, never advertised tips, so
+// the node still exits once both peers are idle at the delivered tip the local
+// chain has reached.
 func TestGenesisExitNotPinnedByCorroboratedLiarAdvertisingFarTip(t *testing.T) {
 	t.Parallel()
 
@@ -1551,13 +1552,12 @@ func TestGenesisExitNotPinnedByCorroboratedLiarAdvertisingFarTip(t *testing.T) {
 	)
 }
 
-// The Genesis exit horizon must be bounded so a single uncorroborated peer
-// cannot pin Genesis mode indefinitely. The advertised slot is untrusted and the
-// implausible-tip check bounds only the advertised block number, so a peer can
-// advertise a plausible block with a near-MaxUint64 slot. Because the horizon is
-// built from corroborated peers only, that extreme slot is ignored and the node
-// still exits once the local tip catches up to the corroborated network tip.
-func TestGenesisExitNotPinnedByUncorroboratedExtremeSlot(t *testing.T) {
+// An uncorroborated peer that delivered a header at a near-MaxUint64 slot,
+// off the local chain, holds Genesis selection only while it is connected and
+// has not reported idle, as any streaming peer does. The extreme slot itself
+// does not: once that peer is gone, the honest peers idle at the local tip end
+// Genesis.
+func TestGenesisExitHeldOnlyByConnectedExtremeSlotPeer(t *testing.T) {
 	t.Parallel()
 
 	var chain testChain
@@ -1613,21 +1613,19 @@ func TestGenesisExitNotPinnedByUncorroboratedExtremeSlot(t *testing.T) {
 		nil,
 	))
 
-	// Local tip catches up to the corroborated honest tip (slot 200); the
-	// honest peers and the liar, whose delivered header is its own, report idle.
+	// Local tip catches up to the corroborated honest tip (slot 200) and the
+	// honest peers report idle there; the liar does not.
 	chain.add(honestObs)
 	cs.SetLocalTip(honestObs)
 	cs.SetPeerIdling(honestA, honestObs.Point)
 	cs.SetPeerIdling(honestB, honestObs.Point)
 
-	// The liar delivered a header at the extreme slot that is not on the local
-	// chain, so it blocks the exit while it stays connected. Its advertised
-	// tip is not what blocks: once it is gone the honest peers end Genesis.
+	// The liar has not reported idle, so it blocks the exit while it stays
+	// connected.
 	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
 	cs.RemovePeer(liar)
-	// The liar's extreme advertised slot must NOT pin Genesis mode.
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode(),
-		"an uncorroborated extreme advertised slot must not pin Genesis mode")
+		"a disconnected peer's extreme slot must not pin Genesis mode")
 }
 
 // With no corroborating peers available, a fast source stalls: the selector
