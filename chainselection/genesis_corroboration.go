@@ -216,16 +216,20 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 			!cs.peerCanCorroborateLocked(connId, peerTip) {
 			return
 		}
-		confirms := func(witness *PeerChainTip) bool {
-			return candidateTip.confirmsRecentChainWithin(
+		confirms := func(witness *PeerChainTip, verified bool) bool {
+			return cs.witnessMatches.confirms(
+				witnessMatchKey{
+					candidate: candidate, witness: connId, verified: verified,
+				},
+				candidateTip,
 				witness,
 				cs.genesisWindowSlotsLocked(),
 			) && cs.witnessSupportsSuffixLocked(candidateTip, witness)
 		}
-		if !confirms(peerTip) &&
+		if !confirms(peerTip, false) &&
 			!confirms(cs.verifiedCorroborationWitnessLocked(
 				connId, peerTip, candidateTip,
-			)) {
+			), true) {
 			return
 		}
 		identity, ok := cs.corroboratorIdentity(connId)

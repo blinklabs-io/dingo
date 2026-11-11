@@ -7832,7 +7832,22 @@ peers before a fork is available locally; it is not the authoritative
 fork-choice measurement. Both views live in append-only windows
 (`frontierWindow`) whose written prefix is never modified, so a staged
 admission frontier shares the committed peer's history and costs O(1) per
-header; the Limit on Eagerness delivery entries keep private copies. When an incoming header conflicts with the primary
+header; the Limit on Eagerness delivery entries keep private copies. The
+selector compares these frontiers for every delivered header: a delivery entry
+against its connection's admitted frontier (`extendsFragment`), an entry's
+proof range against the committed frontier (`fragmentsOverlapExactly`), and a
+witness against a candidate (`confirmsRecentChainFrom`). A frontier holds up
+to a Genesis window of points, and a connection that stays open fills it, so
+each comparison remembers how far it got by the addresses of the last points
+it compared (`chainselection/frontier_match.go`). Because a window's written
+prefix is never modified, a view that still has the remembered address at the
+remembered position holds below it what it held before, and only the newer
+points are compared. A rollback continues on a new array, fails the address
+test and is compared in full, as is the first comparison after a window is
+replaced on filling. The remembered state sits behind its own locks, since
+these comparisons run under the selector's read lock, and is dropped with
+the delivery entry or the peer. Frontier arrays must therefore never be
+rewritten in place. When an incoming header conflicts with the primary
 chain, the handler discards it through the in-memory duplicate and stale-header
 checks first, then asks whether the header point is still on the authoritative
 primary chain (`headerAlreadyOnPrimaryChain`). A historical replay can be behind

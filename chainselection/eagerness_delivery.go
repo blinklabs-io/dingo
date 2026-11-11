@@ -51,6 +51,34 @@ type eagernessDelivery struct {
 type eagernessJoin struct {
 	mu       sync.Mutex
 	fragment CandidateFragment
+	// match is how far the entry's window was last found to extend the
+	// admitted frontier.
+	match fragmentMatch
+	// proofMatch is how far the entry's proof range was last found equal to
+	// the connection's committed frontier.
+	proofMatch fragmentMatch
+}
+
+// proofOverlaps reports whether proof, a range of the entry's window, equals
+// legacy where they overlap, as fragmentsOverlapExactly does.
+func (e *eagernessDelivery) proofOverlaps(proof, legacy CandidateFragment) bool {
+	if e.join == nil {
+		return fragmentsOverlapExactly(proof, legacy)
+	}
+	e.join.mu.Lock()
+	defer e.join.mu.Unlock()
+	return fragmentsOverlapExactlyFrom(proof, legacy, &e.join.proofMatch)
+}
+
+// extends reports whether the entry's window extends base, as extendsFragment
+// does, comparing only what was not compared before.
+func (e *eagernessDelivery) extends(base CandidateFragment) bool {
+	if e.join == nil {
+		return extendsFragment(e.fragment, base)
+	}
+	e.join.mu.Lock()
+	defer e.join.mu.Unlock()
+	return extendsFragmentFrom(e.fragment, base, &e.join.match)
 }
 
 // joined returns the points of base below extension followed by extension's.
@@ -164,7 +192,7 @@ func (cs *ChainSelector) recordEagernessDeliveryLocked(
 		delete(cs.eagernessDeliveries, update.ConnectionId)
 		entry, exists = eagernessDelivery{}, false
 	}
-	if !exists || !extendsFragment(entry.fragment, base) {
+	if !exists || !entry.extends(base) {
 		entry = rebuildEagernessDelivery(entry.fragment, entry.fragmentRef, base)
 	}
 	fragment := entry.fragment
@@ -260,7 +288,7 @@ func (cs *ChainSelector) eagernessFragmentLocked(
 		!cs.peerTipAdmissionGenerationCurrent(PeerTipUpdateEvent{
 			HeaderCryptoVerificationGeneration: entry.generation,
 		}) ||
-		!extendsFragment(entry.fragment, base) {
+		!entry.extends(base) {
 		return base
 	}
 	extension := entry.fragment
@@ -302,6 +330,9 @@ func (cs *ChainSelector) rollbackEagernessDeliveryLocked(
 	}
 	entry.fragment.points = windowTruncate(entry.fragment.points, index+1)
 	entry.trimProof()
+	if entry.join == nil {
+		entry.join = &eagernessJoin{}
+	}
 	cs.eagernessDeliveries[connId] = entry
 }
 
