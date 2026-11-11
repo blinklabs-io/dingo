@@ -12421,7 +12421,9 @@ choice of key source is never silently overridden; `shelleyKesAgentAddress`
 is likewise exclusive with both and accepts only sign mode. Its server pin is
 optional but must be 64 hex characters when set, the client certificate and
 key are optional but set as a pair, and `shelleyKesAgentPlaintext` takes
-neither, since both need TLS.
+neither, since both need TLS. None of these four is accepted without
+`shelleyKesAgentAddress`, so a mistyped remote configuration is refused rather
+than falling back to local-file or Unix-socket signing.
 `Config.Validate` no longer requires a local `shelleyKesKey` when a KES agent
 socket or address is configured — an agent-only configuration must be able to
 start.
