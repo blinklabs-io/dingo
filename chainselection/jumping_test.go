@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -148,6 +149,39 @@ func TestChainSyncJumpingRecordOutlivesStaleTipThreshold(t *testing.T) {
 		cs.ShouldApplyIngress(dynamo),
 		"jump records past the stale-tip threshold must still vouch",
 	)
+}
+
+// An agreement that raced its connection's removal can store a record after
+// the removal dropped it. The stale-peer sweep removes the record of a
+// connection that is no longer live, so it stops vouching and bounding the
+// Limit on Eagerness.
+func TestChainSyncJumpingSweepsRecordOfDeadConnection(t *testing.T) {
+	t.Parallel()
+	dynamo := corrConn(1)
+	jumperA := corrConn(2)
+	jumperB := corrConn(3)
+	cs := newJumpingSelector(true, dynamo)
+	var dead atomic.Pointer[ouroboros.ConnectionId]
+	cs.config.ConnectionLive = func(connId ouroboros.ConnectionId) bool {
+		gone := dead.Load()
+		return gone == nil || *gone != connId
+	}
+	feedLoEChainFrom(cs, dynamo, "c", 1, 12)
+	require.True(t, jumpTo(cs, jumperA, dynamo, 10))
+	require.True(t, jumpTo(cs, jumperB, dynamo, 10))
+	require.True(t, cs.ShouldApplyIngress(dynamo))
+
+	dead.Store(&jumperA)
+	cs.cleanupStalePeers()
+
+	cs.mutex.RLock()
+	_, kept := cs.jumpRecords[jumperA]
+	_, keptLive := cs.jumpRecords[jumperB]
+	cs.mutex.RUnlock()
+	require.False(t, kept, "a dead connection's jump record was kept")
+	require.True(t, keptLive, "a live connection's jump record was swept")
+	require.False(t, cs.ShouldApplyIngress(dynamo),
+		"a dead connection's jump record still vouched for the dynamo")
 }
 
 // Jump records keep the identity policy: connections under one identity, or

@@ -20,6 +20,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net"
 	"slices"
@@ -5239,8 +5240,47 @@ func (cs *ChainSelector) sweepDeadDeliveredPeerTips() {
 	}
 }
 
+// sweepDeadJumpRecords removes the jump records of connections that are no
+// longer live. RecordJumpAgreement probes liveness before taking cs.mutex, so
+// an agreement racing the connection's removal can store a record after
+// deletePeerLocked dropped it. Nothing else would remove that record, and as a
+// Limit on Eagerness candidate exempt from the stale-tip rule it would hold
+// the limit at its frozen point. ConnectionLive is probed outside cs.mutex, as
+// in sweepDeadDeliveredPeerTips.
+func (cs *ChainSelector) sweepDeadJumpRecords() {
+	if cs.config.ConnectionLive == nil {
+		return
+	}
+	cs.mutex.RLock()
+	candidates := maps.Clone(cs.jumpRecords)
+	cs.mutex.RUnlock()
+	var dead []ouroboros.ConnectionId
+	for connId := range candidates {
+		if !cs.config.ConnectionLive(connId) {
+			dead = append(dead, connId)
+		}
+	}
+	if len(dead) == 0 {
+		return
+	}
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	removed := false
+	for _, connId := range dead {
+		// A record replaced meanwhile belongs to a reconnect reusing the id.
+		if cs.jumpRecords[connId] == candidates[connId] {
+			delete(cs.jumpRecords, connId)
+			removed = true
+		}
+	}
+	if removed {
+		cs.signalIngressChange()
+	}
+}
+
 func (cs *ChainSelector) cleanupStalePeers() {
 	cs.sweepDeadDeliveredPeerTips()
+	cs.sweepDeadJumpRecords()
 	var switchEvent *event.Event
 
 	func() {
