@@ -2452,8 +2452,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// through this verifier. A header past the forecast horizon cannot
 		// reach blockfetch yet and is re-intersected separately. A header whose
 		// fork ancestry cannot be authenticated is also excluded from
-		// observation, but the connection keeps it for later ancestry lookups
-		// and neither resyncs nor recycles. A definite crypto/eligibility failure
+		// observation; unless its parent is this connection's accepted chain
+		// (pending ledger enqueue, handled as deferred above), the connection
+		// is re-intersected from the local chain above the applied tip by
+		// recoverWithheldHeaderAncestry. A definite crypto/eligibility failure
 		// excludes the header and recycles the connection.
 		selectionEligible := ingressEligible
 		withheldAncestry := false
@@ -2516,7 +2518,23 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				return nil
 			}
 			if verifyErr != nil {
-				if ledger.IsHeaderVerificationWithheld(verifyErr) {
+				if ledger.IsHeaderVerificationWithheld(verifyErr) &&
+					o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, v) {
+					// The ledger queues accepted headers asynchronously, so
+					// a child can be verified while its parent, accepted on
+					// this connection, is not queued yet. That parent is
+					// the ancestry the verifier could not see; the header
+					// follows the deferred path and the ledger queue
+					// remains the authority.
+					selectionEligible = false
+					deferredVerification = true
+					o.config.Logger.Debug(
+						"chainsync: header ancestry pending ledger enqueue",
+						"component", "ouroboros",
+						"slot", blockSlot,
+						"connection_id", ctx.ConnectionId.String(),
+					)
+				} else if ledger.IsHeaderVerificationWithheld(verifyErr) {
 					selectionEligible = false
 					withheldAncestry = true
 				} else if ledger.IsHeaderVerificationDeferred(verifyErr) {
