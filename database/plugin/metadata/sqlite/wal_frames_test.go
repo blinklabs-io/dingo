@@ -332,7 +332,7 @@ func runWALWorkload(t *testing.T, w walWorkload) walFrameResult {
 					}
 				}
 			}
-			enabled, err := store.EnableBatchUtxoOverlay(acc, txn, inputs, nil)
+			enabled, err := store.EnableBatchUtxoOverlay(acc, txn, inputs, nil, nil)
 			require.NoError(t, err)
 			require.True(t, enabled)
 		}

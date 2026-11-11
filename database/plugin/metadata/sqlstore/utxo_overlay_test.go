@@ -160,7 +160,7 @@ func applyOverlayChain(
 	acc := store.NewBatchAccumulator()
 	if overlay {
 		enabled, err := store.EnableBatchUtxoOverlay(
-			acc, txn, chain.inputs, nil,
+			acc, txn, chain.inputs, nil, nil,
 		)
 		require.NoError(t, err)
 		require.True(t, enabled)
@@ -500,7 +500,7 @@ func TestBatchUtxoOverlayReadBarrier(t *testing.T) {
 	seedOverlayChain(t, store, chain)
 	txn := store.Transaction(context.Background())
 	acc := store.NewBatchAccumulator()
-	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil)
+	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil, nil)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	tx := chain.batch[0]
@@ -557,7 +557,7 @@ func TestBatchUtxoOverlayTransactionBarrier(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewBatchAccumulator()
-	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil)
+	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil, nil)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	tx := chain.batch[0]
@@ -603,7 +603,7 @@ func TestBatchUtxoOverlayReportsTransactionConflict(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewBatchAccumulator()
-	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil)
+	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil, nil)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	for i, tx := range chain.batch {
@@ -712,7 +712,7 @@ func TestBatchUtxoOverlaySavepointRollbackFailsClosed(t *testing.T) {
 			defer func() { _ = txn.Rollback() }()
 			acc := store.NewBatchAccumulator()
 			enabled, err := store.EnableBatchUtxoOverlay(
-				acc, txn, chain.inputs, nil,
+				acc, txn, chain.inputs, nil, nil,
 			)
 			require.NoError(t, err)
 			require.True(t, enabled)
@@ -747,7 +747,7 @@ func TestBatchUtxoOverlayReportsConflict(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewBatchAccumulator()
-	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil)
+	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil, nil)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	for i, tx := range chain.batch {
@@ -859,6 +859,25 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 			"SEARCH u USING INDEX idx_utxo_tx_id_output_idx (tx_id=? AND output_idx=?)",
 			stage.name+": "+prefetch)
 		require.NotContains(t, prefetch, "SCAN u", stage.name+": "+prefetch)
+		producerArgs := make([]any, 0, keys)
+		identityArgs := make([]any, 0, keys)
+		for i := range keys {
+			producerArgs = append(producerArgs, skewedUtxoTxID(i*7))
+			identityArgs = append(identityArgs, int64(i+1))
+		}
+		producers := connQueryPlan(
+			t, conn, overlayProducerQuery(keys), producerArgs...,
+		)
+		require.Contains(t, producers,
+			"SEARCH t USING COVERING INDEX idx_transaction_hash (hash=?)",
+			stage.name+": "+producers)
+		require.NotContains(t, producers, "SCAN a", stage.name+": "+producers)
+		imported := connQueryPlan(
+			t, conn, overlayImportedOutputsQuery(keys), identityArgs...,
+		)
+		require.Contains(t, imported,
+			"USING COVERING INDEX idx_utxo_tx_id_output_idx (tx_id=?)",
+			stage.name+": "+imported)
 		mark := connQueryPlan(t, conn, overlayMarkQuery(keys), markArgs...)
 		require.Contains(t, mark, "USING INTEGER PRIMARY KEY (rowid=?)",
 			stage.name+": "+mark)
@@ -880,7 +899,8 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 				"(credential_tag=? AND staking_key=?)",
 			stage.name+": "+stakeAccounts)
 		for name, plan := range map[string]string{
-			"prefetch": prefetch, "mark": mark, "delete": del,
+			"prefetch": prefetch, "producers": producers,
+			"imported_outputs": imported, "mark": mark, "delete": del,
 			"stake_rows": stakeRows, "stake_accounts": stakeAccounts,
 		} {
 			t.Logf("%s/%s:\n%s", stage.name, name, plan)
@@ -969,7 +989,7 @@ func TestBatchUtxoOverlayRefusesAccountDelete(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewBatchAccumulator()
-	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil)
+	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil, nil)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	db, ctx, err := store.dbFromTxn(txn)

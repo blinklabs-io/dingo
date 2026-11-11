@@ -63,7 +63,7 @@ func TestSpendStoresSpenderTransactionID(t *testing.T) {
 			if overlay {
 				enabled, err := store.EnableBatchUtxoOverlay(
 					acc, txn,
-					[]models.UtxoId{{Hash: fx.consumedTxID, Idx: 0}}, nil,
+					[]models.UtxoId{{Hash: fx.consumedTxID, Idx: 0}}, nil, nil,
 				)
 				require.NoError(t, err)
 				require.True(t, enabled)

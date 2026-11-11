@@ -145,6 +145,9 @@ type overlayStats struct {
 type overlayTransaction struct {
 	id     int64
 	values []any
+	// reused marks a row whose identity an import already stored, so only
+	// its applied_transaction row is written.
+	reused bool
 }
 
 type utxoOverlay struct {
@@ -169,10 +172,20 @@ type utxoOverlay struct {
 	writtenUpTo int
 
 	// txSeq is the last "transaction" id handed out; txPending holds the
-	// staged rows not yet written, in id order.
+	// staged rows not yet written, in id order. txWritten is the highest id
+	// written, below txSeq when the last ids were reserved by a reuse.
 	txSeq     int64
+	txWritten int64
 	txPending []overlayTransaction
 	txHashes  map[string]struct{}
+	// importedTx maps the hash of a producer the batch applies to the
+	// identity row an import stored for it, and appliedTx names producers
+	// that already have an application row. importedOutputs holds every
+	// stored output of an importedTx producer: the per-row path keeps
+	// those rows, so producing one again cannot be staged.
+	importedTx      map[string]int64
+	appliedTx       map[string]struct{}
+	importedOutputs map[overlayKey]struct{}
 	// txChildren names the tables with a foreign key to "transaction".
 	txChildren []string
 
@@ -231,12 +244,15 @@ var errOverlaySavepoint = errors.New(
 // of txn's block-apply batch and reads the pre-batch rows of inputs, the
 // inputs the batch consumes that it does not itself produce. deleteOnSpend
 // names inputs an earlier transaction of the same trusted batch committed.
-// It reports false, and changes nothing, outside SQLite core storage mode.
+// producers are the hashes of the transactions the batch applies; an
+// identity row stored for one of them is reused rather than reported as a
+// conflict. It reports false, and changes nothing, outside SQLite core storage mode.
 func (s *Store) EnableBatchUtxoOverlay(
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
 	inputs []models.UtxoId,
 	deleteOnSpend []models.UtxoId,
+	producers [][]byte,
 ) (bool, error) {
 	batched, ok := accumulator.(*transactionBatchAccumulator)
 	if !ok || s.dialect.Name() != "sqlite" ||
@@ -259,6 +275,10 @@ func (s *Store) EnableBatchUtxoOverlay(
 		absent:   make(map[overlayKey]struct{}),
 		deleteOn: make(map[overlayKey]struct{}, len(deleteOnSpend)),
 		txHashes: make(map[string]struct{}),
+
+		importedTx:      make(map[string]int64),
+		appliedTx:       make(map[string]struct{}),
+		importedOutputs: make(map[overlayKey]struct{}),
 	}
 	for _, id := range deleteOnSpend {
 		overlay.deleteOn[newOverlayKey(id.Hash, id.Idx)] = struct{}{}
@@ -286,8 +306,14 @@ func (s *Store) EnableBatchUtxoOverlay(
 			).Scan(&overlay.txSeq); err != nil {
 				return fmt.Errorf("read transaction id: %w", err)
 			}
+			overlay.txWritten = overlay.txSeq
 			overlay.txChildren, err = transactionChildTables(ctx, db)
 			if err != nil {
+				return err
+			}
+			if err := prefetchOverlayProducers(
+				ctx, db, overlay, producers,
+			); err != nil {
 				return err
 			}
 			return prefetchOverlayInputs(ctx, db, overlay, inputs)
@@ -364,10 +390,13 @@ func transactionChildTables(
 // to the highest id as that insert would. hash and rest are the per-row
 // insert's arguments.
 //
-// A hash that already has an identity row, which an import leaves for the
-// producer of an imported output, makes the identity insert fail its unique
-// index at write time. That is an overlay conflict like any other: the batch
-// is applied again on the per-row path, which reuses the existing row.
+// An import stores an identity row, and no application row, for the
+// producer of each imported output. The per-row insert reuses that row, and
+// its ON CONFLICT DO NOTHING still consumes an AUTOINCREMENT value, so a
+// prefetched one is reused here and an id is reserved and left unused.
+// A hash that already has an application row, or an identity row the
+// prefetch did not read, is an overlay conflict: the first is reported
+// here, the second fails the identity insert's unique index at write time.
 func (o *utxoOverlay) stageTransaction(
 	hash []byte,
 	rest ...any,
@@ -378,8 +407,22 @@ func (o *utxoOverlay) stageTransaction(
 			types.ErrBatchUtxoOverlayConflict, hash,
 		)
 	}
+	if _, ok := o.appliedTx[string(hash)]; ok {
+		return 0, fmt.Errorf(
+			"%w: transaction %x is already applied",
+			types.ErrBatchUtxoOverlayConflict, hash,
+		)
+	}
 	o.mutations++
 	o.txHashes[string(hash)] = struct{}{}
+	if id, ok := o.importedTx[string(hash)]; ok {
+		o.txSeq++
+		o.txPending = append(o.txPending, overlayTransaction{
+			id: id, values: append([]any{hash}, rest...), reused: true,
+		})
+		o.stats.Transactions++
+		return id, nil
+	}
 	o.txSeq++
 	o.txPending = append(o.txPending, overlayTransaction{
 		id: o.txSeq, values: append([]any{hash}, rest...),
@@ -418,7 +461,10 @@ func writeOverlayTransactions(
 	o.stats.TransactionWrites++
 	var identities, applied []any
 	for _, row := range o.txPending {
-		identities = append(identities, row.id, row.values[0])
+		if !row.reused {
+			identities = append(identities, row.id, row.values[0])
+			o.txWritten = max(o.txWritten, row.id)
+		}
 		applied = append(applied, row.id)
 		applied = append(applied, row.values[1:]...)
 	}
@@ -487,6 +533,107 @@ SELECT u.id, t.hash, u.output_idx, u.credential_tag,
 FROM (VALUES ` + values + `) AS k
 CROSS JOIN "transaction" AS t ON t.hash = k.column1
 CROSS JOIN utxo AS u ON u.tx_id = t.id AND u.output_idx = k.column2`
+}
+
+// overlayProducerQuery reads the identity rows of the batch's producers and
+// whether each already has an application row.
+func overlayProducerQuery(keys int) string {
+	values := strings.TrimSuffix(strings.Repeat("(?), ", keys), ", ")
+	return `-- name: BatchOverlayPrefetchProducers :many
+SELECT t.id, t.hash, a.tx_id IS NOT NULL
+FROM (VALUES ` + values + `) AS k
+CROSS JOIN "transaction" AS t ON t.hash = k.column1
+LEFT JOIN applied_transaction AS a ON a.tx_id = t.id`
+}
+
+// overlayImportedOutputsQuery reads every stored output of the given
+// producer identity rows, live or not: the unique output index covers both.
+func overlayImportedOutputsQuery(keys int) string {
+	values := strings.TrimSuffix(strings.Repeat("?, ", keys), ", ")
+	return `-- name: BatchOverlayPrefetchImportedOutputs :many
+SELECT u.tx_id, u.output_idx FROM utxo AS u
+WHERE u.tx_id IN (` + values + `)`
+}
+
+// prefetchOverlayProducers reads which of producers already have an
+// identity row, and the stored outputs of those with no application row.
+func prefetchOverlayProducers(
+	ctx context.Context,
+	db queryer,
+	overlay *utxoOverlay,
+	producers [][]byte,
+) error {
+	seen := make(map[string]struct{}, len(producers))
+	keys := make([]any, 0, len(producers))
+	for _, hash := range producers {
+		if _, ok := seen[string(hash)]; ok {
+			continue
+		}
+		seen[string(hash)] = struct{}{}
+		keys = append(keys, hash)
+	}
+	var imported []any
+	hashes := make(map[int64][]byte)
+	for start := 0; start < len(keys); start += overlayPrefetchChunk {
+		end := min(start+overlayPrefetchChunk, len(keys))
+		rows, err := db.QueryContext(
+			ctx, overlayProducerQuery(end-start), keys[start:end]...,
+		)
+		if err != nil {
+			return fmt.Errorf("read batch producers: %w", err)
+		}
+		err = func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var (
+					id      int64
+					hash    []byte
+					applied bool
+				)
+				if err := rows.Scan(&id, &hash, &applied); err != nil {
+					return err
+				}
+				if applied {
+					overlay.appliedTx[string(hash)] = struct{}{}
+					continue
+				}
+				overlay.importedTx[string(hash)] = id
+				hashes[id] = hash
+				imported = append(imported, id)
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return fmt.Errorf("read batch producers: %w", err)
+		}
+	}
+	for start := 0; start < len(imported); start += overlayPrefetchChunk {
+		end := min(start+overlayPrefetchChunk, len(imported))
+		rows, err := db.QueryContext(
+			ctx, overlayImportedOutputsQuery(end-start),
+			imported[start:end]...,
+		)
+		if err != nil {
+			return fmt.Errorf("read imported producer outputs: %w", err)
+		}
+		err = func() error {
+			defer rows.Close()
+			for rows.Next() {
+				var id, idx int64
+				if err := rows.Scan(&id, &idx); err != nil {
+					return err
+				}
+				overlay.importedOutputs[newOverlayKey(
+					hashes[id], uint32(idx),
+				)] = struct{}{}
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return fmt.Errorf("read imported producer outputs: %w", err)
+		}
+	}
+	return nil
 }
 
 func prefetchOverlayInputs(
@@ -620,6 +767,12 @@ func (o *utxoOverlay) create(
 		if _, exists := o.created[key]; exists {
 			return nil, fmt.Errorf(
 				"%w: output %x#%d produced twice in one batch",
+				types.ErrBatchUtxoOverlayConflict, model.TxId, model.OutputIdx,
+			)
+		}
+		if _, exists := o.importedOutputs[key]; exists {
+			return nil, fmt.Errorf(
+				"%w: output %x#%d is already stored by an import",
 				types.ErrBatchUtxoOverlayConflict, model.TxId, model.OutputIdx,
 			)
 		}
@@ -1065,6 +1218,13 @@ func restoreOverlaySequences(
 ) error {
 	if err := restoreSQLiteSequence(
 		ctx, db, "utxo", o.utxoSeq, o.utxoWritten, o.utxoSeqRow,
+	); err != nil {
+		return err
+	}
+	// Only a reused identity reserves an id it does not write, and the
+	// import that stored that identity created the sequence row.
+	if err := restoreSQLiteSequence(
+		ctx, db, "transaction", o.txSeq, o.txWritten, true,
 	); err != nil {
 		return err
 	}

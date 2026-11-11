@@ -264,10 +264,12 @@ only the identity row of a producer they have to name (`transactionIdentityIDs`
 in `utxo_identity.go`) and never an application row. An output an import stored
 before its producer was applied is one row under the producer's id; applying
 the producer repairs only the collateral-return marker. The trusted-batch
-overlay writes identity and application rows with explicit ids; a producer that
-already has an identity row fails the unique `hash` index, which is a
-`types.ErrBatchUtxoOverlayConflict` the ledger answers by applying the batch on
-the per-row path.
+overlay writes identity and application rows with explicit ids. It reads the
+identity rows of the batch's producers when it is enabled: an imported
+producer's row is reused and only its application row is written, as the
+per-row path does. A producer that is already applied, or that produces an
+index an import already stored, is a `types.ErrBatchUtxoOverlayConflict` the
+ledger answers by applying the batch on the per-row path.
 
 `"transaction".id` is `AUTOINCREMENT` on SQLite (an identity sequence on
 PostgreSQL and MySQL) and that is load-bearing: `utxo.tx_id`,
@@ -8170,9 +8172,13 @@ PostgreSQL and MySQL keep the per-row writes described above.
   Foreign keys therefore stay immediate and are checked against a parent
   that exists; `defer_foreign_keys` is not used, because while deferred
   violations are outstanding SQLite scans each child table on every parent
-  insert, and the child-side indexes are dropped during catch-up. A hash
-  that already has a row fails the insert with a `UNIQUE` error, which is an
-  overlay conflict: the per-row retry's `ON CONFLICT` branch reuses that row.
+  insert, and the child-side indexes are dropped during catch-up. The
+  identity rows of the batch's producers are read when the overlay is
+  enabled; an imported one is reused, and its id is still reserved from the
+  sequence because the per-row insert's `ON CONFLICT DO NOTHING` consumes
+  one. A hash with a row the overlay did not read fails the insert with a
+  `UNIQUE` error, which is an overlay conflict: the per-row retry's
+  `ON CONFLICT` branch reuses that row.
 - **Read barrier.** While the overlay holds unwritten rows, spend marks or
   closed stake segments, the transaction's handle is a `barrierQueryer`:
   before any statement that names `utxo`, `utxo_pointer` or
