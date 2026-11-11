@@ -626,12 +626,16 @@ func (cs *ChainSelector) applyPeerTipAdmissionUpdateLocked(
 		update.PraosView,
 	)
 	trackHashes := cs.trackHashesLocked()
-	peerTip.recordObservedPoint(
+	peerTip.recordObservedLinkedPoint(
 		update.ObservedTip.Point,
 		update.ObservedTip.BlockNumber,
 		cs.genesisWindowSlotsLocked(),
 		cs.candidatePointCapacityLocked(trackHashes),
 		trackHashes,
+		deliveredLink{
+			prevHash: update.ObservedPrevHash,
+			boundary: update.ObservedBoundary,
+		},
 	)
 	peerTip.recordObservedTipHistory(
 		update.ObservedTip,
@@ -1032,12 +1036,13 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 				vrfOutput,
 				praosView,
 			)
-			peerTip.recordObservedPoint(
+			peerTip.recordObservedLinkedPoint(
 				observedTip.Point,
 				observedTip.BlockNumber,
 				cs.genesisWindowSlotsLocked(),
 				cs.candidatePointCapacityLocked(cs.trackHashesLocked()),
 				cs.trackHashesLocked(),
+				link,
 			)
 			peerTip.recordObservedTipHistory(
 				observedTip,
@@ -1060,12 +1065,13 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 				nowFn:          cs.nowFn,
 				LastUpdated:    cs.now(),
 			}
-			peerTip.recordObservedPoint(
+			peerTip.recordObservedLinkedPoint(
 				observedTip.Point,
 				observedTip.BlockNumber,
 				cs.genesisWindowSlotsLocked(),
 				cs.candidatePointCapacityLocked(cs.trackHashesLocked()),
 				cs.trackHashesLocked(),
+				link,
 			)
 			peerTip.recordObservedTipHistory(
 				observedTip,
