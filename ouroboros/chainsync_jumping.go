@@ -973,11 +973,9 @@ func (o *Ouroboros) csjJumpRound(
 	j.mu.Unlock()
 	var wg sync.WaitGroup
 	for _, jb := range jobs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			o.csjJump(jb.connId, dynamo, jb.points)
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -1190,20 +1188,6 @@ func (o *Ouroboros) csjResumeOnLocalChain(
 		}
 	}
 	return kept
-}
-
-func firstConnId(
-	set map[ouroboros.ConnectionId]struct{},
-) (ouroboros.ConnectionId, bool) {
-	if len(set) == 0 {
-		return ouroboros.ConnectionId{}, false
-	}
-	ids := make([]ouroboros.ConnectionId, 0, len(set))
-	for id := range set {
-		ids = append(ids, id)
-	}
-	slices.SortFunc(ids, compareConnIds)
-	return ids[0], true
 }
 
 func compareConnIds(a, b ouroboros.ConnectionId) int {
