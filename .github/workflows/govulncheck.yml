@@ -1,0 +1,51 @@
+name: govulncheck
+
+# A scheduled report, never a gate. A Go standard-library or dependency advisory
+# published upstream must not fail pull requests, merges or releases that did
+# not cause it, so this workflow has no pull_request, push or tag trigger and
+# nothing depends on it.
+
+on:
+  schedule:
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          # This job runs a checksum-pinned third-party scanner in
+          # the workspace. Do not leave GITHUB_TOKEN in the local git config.
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-build-
+      - name: govulncheck
+        # govulncheck exits non-zero only for vulnerabilities this module
+        # actually calls, so the unreachable findings it also prints (currently
+        # GO-2026-5932, an unmaintained golang.org/x/crypto package with no
+        # fixed version) do not fail the job.
+        # The scanner binary is pinned while its vulnerability database remains
+        # live. Run through the Makefile so this CI check and `make
+        # govulncheck` cannot drift apart.
+        run: make govulncheck
