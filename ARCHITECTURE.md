@@ -760,6 +760,11 @@ ordinary header path and its fork resolution; either way the rollback only
 moved the peer's cursor and is dropped. A rollback from a session that has
 delivered a header is applied immediately. The deferred state is per
 connection, held under `chainsyncMutex`, and cleared on `ledger.conn_closed`.
+An in-place re-intersect opens a new session on a live connection, so its
+`IntersectFoundFunc` publishes a `ChainsyncEvent` with `SessionReopened` on the
+same ordered stream before the peer's opening rollback. The ledger then clears
+the connection's session state, and that rollback is deferred and resolved
+exactly as on a fresh connection instead of undoing applied blocks.
 
 Peer-fork header verification follows the candidate's retained ancestry from its
 intersection instead of reusing the applied tip's epoch nonce. The ledger folds

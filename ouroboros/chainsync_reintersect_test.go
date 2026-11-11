@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -60,6 +61,9 @@ type reintersectFixture struct {
 	mu           sync.Mutex
 	offered      [][]ocommon.Point
 	needRollback bool
+	// ledgerEvents records the rollback and session-reopen events reaching
+	// the ledger's chainsync stream, in order: "rollback" or "reopened".
+	ledgerEvents []string
 }
 
 func newReintersectFixture(
@@ -94,6 +98,20 @@ func newReintersectFixture(
 	f.o.connManager = cm
 	f.o.ledgerState = ls
 	f.o.chainsyncReintersectTimeout = timeout
+	bus.SubscribeFunc(ledger.ChainsyncEventType, func(evt event.Event) {
+		e, ok := evt.Data.(ledger.ChainsyncEvent)
+		if !ok {
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch {
+		case e.SessionReopened:
+			f.ledgerEvents = append(f.ledgerEvents, "reopened")
+		case e.Rollback:
+			f.ledgerEvents = append(f.ledgerEvents, "rollback")
+		}
+	})
 
 	client := f.dial(t)
 	f.connId = client.Id()
@@ -170,13 +188,26 @@ func (f *reintersectFixture) dial(t *testing.T) *ouroboros.Connection {
 			f.rollForwards.Add(1)
 			return nil
 		}),
+		// Publishes the rollback to the ledger stream as the production
+		// callback does, so its order against the reopen marker is visible.
 		ochainsync.WithRollBackwardFunc(func(
-			ochainsync.CallbackContext,
-			ocommon.Point,
-			ochainsync.Tip,
+			cb ochainsync.CallbackContext,
+			point ocommon.Point,
+			tip ochainsync.Tip,
 		) error {
 			f.rollBackwards.Add(1)
-			return nil
+			return f.o.eventBus.PublishBlocking(
+				ledger.ChainsyncEventType,
+				event.NewEvent(
+					ledger.ChainsyncEventType,
+					ledger.ChainsyncEvent{
+						ConnectionId: cb.ConnectionId,
+						Rollback:     true,
+						Point:        point,
+						Tip:          tip,
+					},
+				),
+			)
 		}),
 	)
 	client, err := ouroboros.New(
@@ -566,6 +597,103 @@ func TestChainsyncResyncReintersectIgnoresReplacedConnection(t *testing.T) {
 		5*time.Second,
 		"both re-intersects must return",
 	)
+	// The close fallback runs after the returned hook.
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			f.o.chainsyncReintersectMu.Lock()
+			defer f.o.chainsyncReintersectMu.Unlock()
+			return len(f.o.chainsyncReintersecting) == 0
+		},
+		5*time.Second,
+		"both re-intersects must finish",
+	)
 	require.Same(t, replacement, f.cm.GetConnectionById(f.connId),
 		"the stale re-intersect must not close the replacement")
+}
+
+// The rollback a peer sends right after a re-intersect is the opening of a new
+// session, not the peer leaving a chain it showed us. The ledger learns that
+// from a reopen marker ahead of the rollback on the same ordered stream; an
+// initial intersect sends none.
+func TestChainsyncResyncReintersectReopensLedgerSession(t *testing.T) {
+	t.Parallel()
+	f := newReintersectFixture(t, 10*time.Second)
+
+	f.publish(event.ChainsyncResyncReasonBehindLocalTip)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			return len(f.ledgerEvents) >= 3
+		},
+		5*time.Second,
+		"the re-intersect's rollback must reach the ledger stream",
+	)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	require.Equal(t, []string{"rollback", "reopened", "rollback"},
+		f.ledgerEvents,
+		"the reopen marker must precede the re-intersect's opening rollback")
+	require.True(t, f.connected())
+}
+
+// A re-intersect whose connection is torn down under it has nothing left to
+// recover: it returns without the close fallback, which would otherwise drop
+// the connection's history as a fresh resync does.
+func TestChainsyncResyncReintersectOnTornDownConnectionIsNoOp(t *testing.T) {
+	t.Parallel()
+	f := newReintersectFixture(t, 10*time.Second)
+	below := newTestBlockHeader(f.intersect.Slot-1, 2, 0xb1)
+	f.state.RecordObservedHeader(dchainsync.ObservedHeader{
+		ConnectionId: f.connId,
+		BlockHeader:  below,
+		Point: ocommon.NewPoint(
+			below.SlotNumber(), below.Hash().Bytes(),
+		),
+	})
+	building := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	f.o.config.ChainsyncIntersectAtLedgerTip = func() bool {
+		close(building)
+		<-release
+		return false
+	}
+	f.publish(event.ChainsyncResyncReasonIngressPromotion)
+	testutil.RequireReceive(
+		t, building, 5*time.Second, "the re-intersect must start",
+	)
+	conn := f.cm.GetConnectionById(f.connId)
+	require.NotNil(t, conn)
+	require.NoError(t, conn.Close())
+	testutil.WaitForCondition(
+		t,
+		func() bool { return !f.connected() },
+		5*time.Second,
+		"the connection must be removed",
+	)
+	close(release)
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			f.o.chainsyncReintersectMu.Lock()
+			defer f.o.chainsyncReintersectMu.Unlock()
+			return len(f.o.chainsyncReintersecting) == 0
+		},
+		5*time.Second,
+		"the re-intersect must finish",
+	)
+
+	_, _, ok := f.state.LookupObservedHeader(f.connId, below.Hash().Bytes())
+	require.True(t, ok,
+		"a re-intersect on a torn-down connection must not run the close fallback")
 }

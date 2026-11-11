@@ -243,3 +243,52 @@ func TestOpeningRollbackStateClearedOnConnectionClose(t *testing.T) {
 	assert.Empty(t, f.ls.chainsyncOpeningRollbacks)
 	assert.Empty(t, f.ls.chainsyncHeaderSessions)
 }
+
+// An in-place re-intersect opens a new session on a connection that has
+// already streamed headers. Its opening rollback to a point behind our tip on
+// our chain must move only the peer's cursor, exactly as on a fresh
+// connection: applying it undid blocks already applied and published a
+// local-rollback recovery that closed every connection.
+func TestReintersectOpeningRollbackBehindOurTipKeepsOurChain(t *testing.T) {
+	t.Parallel()
+
+	f := newBehindPeerFixture(t)
+	localTip := f.ls.chain.Tip()
+	f.sendHeader(1, "")
+
+	f.sendChainsync(ChainsyncEvent{SessionReopened: true})
+	f.sendOpeningRollback(3)
+	require.Equal(
+		t,
+		localTip,
+		f.ls.chain.Tip(),
+		"a re-intersect's opening rollback must not roll our chain back",
+	)
+	f.sendHeader(3, "")
+
+	assert.Equal(
+		t,
+		localTip,
+		f.ls.chain.Tip(),
+		"a re-intersected peer replaying our chain must not roll it back",
+	)
+	assert.Empty(t, f.ls.chainsyncOpeningRollbacks)
+	f.requireNoResyncEvent(t)
+}
+
+// A re-intersected peer whose first header leaves our chain at the
+// intersection still gets the rollback it asked for.
+func TestReintersectOpeningRollbackAppliedWhenPeerLeavesOurChain(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newBehindPeerFixture(t)
+	f.sendHeader(1, "")
+
+	f.sendChainsync(ChainsyncEvent{SessionReopened: true})
+	f.sendOpeningRollback(2)
+	f.sendHeader(2, "reintersect-fork-block")
+
+	assert.Equal(t, f.pointAtDepth(2), f.ls.chain.Tip().Point)
+}

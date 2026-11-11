@@ -403,6 +403,10 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 		ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
 		return
 	}
+	if e.SessionReopened {
+		ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
+		return
+	}
 	// Also drops an event published before the hold was taken.
 	if ls.connectionIngestHeld(e.ConnectionId) {
 		queuePeerTipAdmission(&pending, e, false)

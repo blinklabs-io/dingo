@@ -801,7 +801,8 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 // re-intersect at the new intersection. It runs on the protocol goroutine
 // before Reintersect sends the first MsgRequestNext of the new cursor, so no
 // header of that cursor can be trimmed from the peer's observed history or
-// withheld by the old cursor's resync marker. An initial intersect is left
+// withheld by the old cursor's resync marker, and the ledger learns of the new
+// session before the rollback that opens it. An initial intersect is left
 // alone.
 func (o *Ouroboros) chainsyncClientIntersectFound(
 	ctx ochainsync.CallbackContext,
@@ -826,6 +827,26 @@ func (o *Ouroboros) chainsyncClientIntersectFound(
 	}
 	// The marker withholds the old cursor's headers until it is replaced.
 	o.cancelFutureHeaderResync(ctx.ConnectionId)
+	// The peer's next message is MsgRollBackward to point. On this connection
+	// the ledger has already seen headers, so it would apply that rollback and
+	// undo blocks it holds; the marker makes it treat the rollback as a new
+	// session's opening one, as for a fresh connection. It shares the ordered
+	// stream with the rollback, so it is handled after every header of the old
+	// cursor and before the rollback.
+	if o.eventBus != nil {
+		if err := o.eventBus.PublishBlocking(
+			ledger.ChainsyncEventType,
+			event.NewEvent(
+				ledger.ChainsyncEventType,
+				ledger.ChainsyncEvent{
+					ConnectionId:    ctx.ConnectionId,
+					SessionReopened: true,
+				},
+			),
+		); err != nil {
+			return fmt.Errorf("chainsync: publish session reopen: %w", err)
+		}
+	}
 	return nil
 }
 
