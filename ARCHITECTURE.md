@@ -12355,11 +12355,17 @@ inside a slot. The agent closes a session idle for its 10s frame bound, so the
 client treats a session idle for `SessionFreshFor` (8s) as stale and redials
 before signing on it. The forger opens the session ahead of time: on each slot
 it asks the leader schedule (`LeaderChecker.NextLeaderSlot`) for the next
-leader slot, and when that slot is within `remoteSignerPrepareLead` (3s) it
-calls `PoolCredentials.PrepareRemoteSigner` once for that slot, on its own
+leader slot, and when that slot is within the prepare lead it calls
+`PoolCredentials.PrepareRemoteSigner` once for that slot, on its own
 goroutine, which reaches the client's `Prepare` through the optional
-`forging.RemoteKESPreparer` interface. A failed prepare only logs a warning a
-few seconds before the slot; the sign at the slot dials again if it must.
+`forging.RemoteKESPreparer` interface. The lead is counted in whole slots,
+because the check runs once per slot: `remoteSignerPrepareLead` (3s) divided
+by the slot length, rounded up, and at least one slot. With 1s slots that is
+three slots; with slots of 3s or longer it is one whole slot, so the prepare
+runs one slot length ahead. With slots longer than `SessionFreshFor`, the
+prepared session is stale by the leader slot and the sign redials. A failed
+prepare only logs a warning ahead of the slot; the sign at the slot dials
+again if it must.
 
 One caller at a time uses the connection: a sign, or a dial and admission.
 The client mutex is never held across network I/O, so `Close` and
@@ -12488,7 +12494,9 @@ choice of key source is never silently overridden; `shelleyKesAgentAddress`
 is likewise exclusive with both and accepts only sign mode. Its server pin is
 optional but must be 64 hex characters when set, the client certificate and
 key are optional but set as a pair, and `shelleyKesAgentPlaintext` takes
-neither, since both need TLS.
+neither, since both need TLS. None of these four is accepted without
+`shelleyKesAgentAddress`, so a mistyped remote configuration is refused rather
+than falling back to local-file or Unix-socket signing.
 `Config.Validate` no longer requires a local `shelleyKesKey` when a KES agent
 socket or address is configured — an agent-only configuration must be able to
 start.

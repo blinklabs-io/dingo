@@ -77,15 +77,38 @@ func validateHostPort(addr string) error {
 // validateRemoteKESAgent checks a remote KES agent configuration: one KES
 // source only, sign mode, and a transport that can work: the server pin and
 // the client certificate are optional, but need TLS, so plain TCP takes
-// neither, and a client certificate is set as a pair.
+// neither, and a client certificate is set as a pair. Without an address,
+// any remote transport option is refused, so a mistyped remote
+// configuration cannot fall back to local or Unix-socket signing.
 func (c *Config) validateRemoteKESAgent() []error {
 	if c.ShelleyKESAgentAddress == "" {
-		if c.ShelleyKESAgentPlaintext {
-			return []error{errors.New(
-				"shelleyKesAgentPlaintext requires shelleyKesAgentAddress",
-			)}
+		var errs []error
+		for _, opt := range []struct {
+			name string
+			set  bool
+		}{
+			{"shelleyKesAgentPlaintext", c.ShelleyKESAgentPlaintext},
+			{
+				"shelleyKesAgentClientCertFile",
+				c.ShelleyKESAgentClientCertFile != "",
+			},
+			{
+				"shelleyKesAgentClientKeyFile",
+				c.ShelleyKESAgentClientKeyFile != "",
+			},
+			{
+				"shelleyKesAgentServerSpkiSha256",
+				strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256) != "",
+			},
+		} {
+			if opt.set {
+				errs = append(errs, fmt.Errorf(
+					"%s requires shelleyKesAgentAddress",
+					opt.name,
+				))
+			}
 		}
-		return nil
+		return errs
 	}
 	var errs []error
 	if c.ShelleyKESKey != "" || c.ShelleyKESAgentSocket != "" {
