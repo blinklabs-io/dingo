@@ -190,6 +190,7 @@ until activated:
 
 | Metric | Activates when |
 |--------|---------------|
+| `cardano_node_metrics_blockNum_int`, `cardano_node_metrics_slotNum_int`, `cardano_node_metrics_epoch_int`, `cardano_node_metrics_slotInEpoch_int`, `cardano_node_metrics_density_real` | The ledger has loaded its tip at startup; absent rather than 0 before then, so `deriv()` and `rate()` over a restart do not see a drop to 0 |
 | `cardano_node_metrics_Forge_node_is_leader_int` | Forging is enabled |
 | `cardano_node_metrics_Forge_adopted_int` | Block is forged and adopted |
 | `dingo_metrics_blockForgingLatency_seconds_bucket` | Block is forged |

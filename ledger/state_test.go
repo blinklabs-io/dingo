@@ -14399,6 +14399,7 @@ var chainPositionGaugeNames = []string{
 	"cardano_node_metrics_slotNum_int",
 	"cardano_node_metrics_epoch_int",
 	"cardano_node_metrics_slotInEpoch_int",
+	"cardano_node_metrics_density_real",
 }
 
 func gatherGaugeValues(
