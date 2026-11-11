@@ -51,6 +51,7 @@ func hotStatementsFor(u *utxoSQL) []string {
 		sumCredentialUtxoStakeQuery,
 		rewardLiveStakeAccountQuery,
 		rewardLiveStakeUpsertQuery,
+		rewardLiveStakeUpsertKeepPoolQuery,
 		rewardLiveStakeUtxoStakeQuery,
 		insertUtxoQuery,
 		u.insertIgnore,
@@ -105,6 +106,7 @@ func hotStatementsFor(u *utxoSQL) []string {
 		sqlitequery.SetTipQuery,
 		sqlitequery.SetBlockNonceQuery,
 	}
+	queries = append(queries, upsertAccountChangedSQLs[:]...)
 	for _, size := range sqliteInListSizes {
 		queries = append(queries, u.stakeConsumedDeltaQuery(size))
 	}

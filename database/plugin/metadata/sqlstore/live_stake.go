@@ -72,6 +72,29 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
     updated_slot = excluded.updated_slot,
     calculation_version = excluded.calculation_version`
 
+// rewardLiveStakeUpsertKeepPoolQuery is the upsert for a refresh that leaves
+// a stored row's pool unchanged: its conflict branch does not name
+// pool_key_hash. It stays an INSERT ... ON CONFLICT so that, like the full
+// upsert, every call reserves an autoincrement id; the batch overlay replays
+// those reservations and the stored sequence must match.
+const rewardLiveStakeUpsertKeepPoolQuery = `-- name: UpsertRewardLiveStakeKeepPool :exec
+INSERT INTO reward_live_stake (
+    credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
+    total_stake, registered, pool_delegation_slot,
+    pool_delegation_block_index, pool_delegation_cert_index, updated_slot,
+    calculation_version
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
+    utxo_stake = excluded.utxo_stake,
+    reward_stake = excluded.reward_stake,
+    total_stake = excluded.total_stake,
+    registered = excluded.registered,
+    pool_delegation_slot = excluded.pool_delegation_slot,
+    pool_delegation_block_index = excluded.pool_delegation_block_index,
+    pool_delegation_cert_index = excluded.pool_delegation_cert_index,
+    updated_slot = excluded.updated_slot,
+    calculation_version = excluded.calculation_version`
+
 func (s *Store) refreshRewardLiveStakeAggregate(
 	ctx context.Context,
 	db queryer,
@@ -153,45 +176,63 @@ func pendingUtxoStakeDelta(
 	return total, nil
 }
 
-// rewardLiveStakeUtxoStakeQuery reads the running live-UTxO total
-// refreshRewardLiveStakeAggregateDelta trusts instead of recomputing it with
-// sumCredentialUtxoStake's full scan. It is the same (credential_tag,
-// staking_key) point lookup the upsert's conflict target already indexes
-// (idx_reward_live_stake_cred), so this is an indexed single-row read, not a
-// scan.
+// rewardLiveStakeUtxoStakeQuery reads the credential's stored row through
+// the unique (credential_tag, staking_key) index: one point lookup, not a
+// scan. It returns the running live-UTxO total refreshRewardLiveStakeAggregateDelta
+// trusts instead of recomputing it with sumCredentialUtxoStake's full scan,
+// and the stored pool, which decides how applyRewardLiveStakeAggregate writes.
 const rewardLiveStakeUtxoStakeQuery = `-- name: GetRewardLiveStakeUtxoStake :one
-SELECT utxo_stake FROM reward_live_stake
+SELECT utxo_stake, pool_key_hash FROM reward_live_stake
 WHERE credential_tag = ? AND staking_key = ?`
 
-// currentCredentialUtxoStake reads a credential's currently stored running
-// UTxO total. The bool return distinguishes "no row yet" (a brand new
-// credential, or one whose row was deleted after its stake dropped to zero --
-// see applyRewardLiveStakeAggregate's delete branch) from "row exists with
-// stake 0", since only the latter is a trustworthy baseline to apply a delta
-// against.
-func (s *Store) currentCredentialUtxoStake(
+// liveStakePrior is a credential's stored reward_live_stake row as the next
+// refresh finds it.
+type liveStakePrior struct {
+	// exists is false when the credential has no row: a brand new
+	// credential, or one whose row was deleted after its stake dropped to
+	// zero (see applyRewardLiveStakeAggregate's delete branch).
+	exists bool
+	// hasTotal distinguishes "row exists with stake 0", a trustworthy
+	// baseline to apply a delta against, from a row with no recorded total.
+	hasTotal bool
+	utxo     uint64
+	pool     []byte
+}
+
+func (s *Store) priorLiveStake(
 	ctx context.Context,
 	db queryer,
 	ref models.StakeCredentialRef,
-) (uint64, bool, error) {
-	var raw sql.NullString
+) (liveStakePrior, error) {
+	var (
+		raw  sql.NullString
+		pool []byte
+	)
 	err := s.queryRowCached(
 		ctx, db, rewardLiveStakeUtxoStakeQuery, ref.Tag, ref.Key,
-	).Scan(&raw)
+	).Scan(&raw, &pool)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
+		return liveStakePrior{}, nil
 	}
 	if err != nil {
-		return 0, false, err
+		return liveStakePrior{}, err
 	}
+	prior := liveStakePrior{exists: true, pool: pool}
 	if !raw.Valid || raw.String == "" {
-		return 0, false, nil
+		return prior, nil
 	}
-	value, err := parseUint64("reward live stake UTxO total", raw.String)
+	prior.utxo, err = parseUint64("reward live stake UTxO total", raw.String)
 	if err != nil {
-		return 0, false, err
+		return liveStakePrior{}, err
 	}
-	return value, true, nil
+	prior.hasTotal = true
+	return prior, nil
+}
+
+// samePool reports whether writing next over stored leaves the pool column
+// byte-identical, NULL included.
+func samePool(stored, next []byte) bool {
+	return (stored == nil) == (next == nil) && bytes.Equal(stored, next)
 }
 
 // applyUtxoStakeDelta adjusts a credential's running UTxO total by delta,
@@ -282,13 +323,13 @@ func (s *Store) refreshRewardLiveStakeAggregateDelta(
 	if len(ref.Key) == 0 {
 		return nil
 	}
-	current, ok, err := s.currentCredentialUtxoStake(ctx, db, ref)
+	prior, err := s.priorLiveStake(ctx, db, ref)
 	if err != nil {
 		return fmt.Errorf("read running reward live stake UTxO total: %w", err)
 	}
 	var utxoStake uint64
-	if ok {
-		utxoStake, err = applyUtxoStakeDelta(current, delta, ref)
+	if prior.hasTotal {
+		utxoStake, err = applyUtxoStakeDelta(prior.utxo, delta, ref)
 		if err != nil {
 			return err
 		}
@@ -298,7 +339,9 @@ func (s *Store) refreshRewardLiveStakeAggregateDelta(
 			return fmt.Errorf("sum reward live stake UTxOs: %w", err)
 		}
 	}
-	return s.applyRewardLiveStakeAggregate(ctx, db, ref, slot, utxoStake)
+	return s.applyRewardLiveStakeAggregateWithPrior(
+		ctx, db, ref, slot, utxoStake, &prior,
+	)
 }
 
 // applyRewardLiveStakeAggregate is refreshRewardLiveStakeAggregate and
@@ -312,6 +355,25 @@ func (s *Store) applyRewardLiveStakeAggregate(
 	ref models.StakeCredentialRef,
 	slot uint64,
 	utxoStake uint64,
+) error {
+	return s.applyRewardLiveStakeAggregateWithPrior(
+		ctx, db, ref, slot, utxoStake, nil,
+	)
+}
+
+// applyRewardLiveStakeAggregateWithPrior is applyRewardLiveStakeAggregate
+// for a caller that already read the credential's stored row. An update that
+// leaves pool_key_hash unchanged omits it from the SET list: SQLite rewrites
+// every index over a column named in SET whether or not its value changed,
+// and idx_reward_live_stake_pool_order leads with a random pool hash, so a
+// touch that only moved stake would otherwise dirty a random leaf there.
+func (s *Store) applyRewardLiveStakeAggregateWithPrior(
+	ctx context.Context,
+	db queryer,
+	ref models.StakeCredentialRef,
+	slot uint64,
+	utxoStake uint64,
+	prior *liveStakePrior,
 ) error {
 	var account liveStakeAccount
 	err := s.queryRowCached(
@@ -334,8 +396,19 @@ WHERE credential_tag = ? AND staking_key = ?`,
 		)
 		return err
 	}
+	if prior == nil {
+		read, err := s.priorLiveStake(ctx, db, ref)
+		if err != nil {
+			return fmt.Errorf("read reward live stake row: %w", err)
+		}
+		prior = &read
+	}
+	upsert := rewardLiveStakeUpsertQuery
+	if prior.exists && samePool(prior.pool, row.pool) {
+		upsert = rewardLiveStakeUpsertKeepPoolQuery
+	}
 	_, err = s.execCached(
-		ctx, db, rewardLiveStakeUpsertQuery,
+		ctx, db, upsert,
 		ref.Tag,
 		ref.Key,
 		row.pool,

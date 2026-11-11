@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
@@ -796,6 +797,10 @@ func (s *Store) updateCertificateAccount(
 		tag,
 		key,
 	).Scan(&active, &pool, &drep, &drepType)
+	exists := err == nil
+	stored := certificateAccountStored{
+		active: active, pool: pool, drep: drep, drepType: drepType,
+	}
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		active = true
@@ -822,6 +827,14 @@ func (s *Store) updateCertificateAccount(
 		drep = next.drep
 		drepType = next.drepType
 	}
+	if exists {
+		return s.updateCertificateAccountRow(
+			ctx, db, tag, key, slot, stored,
+			certificateAccountStored{
+				active: next.active, pool: pool, drep: drep, drepType: drepType,
+			},
+		)
+	}
 	_, err = s.execCached(ctx, db, upsertAccountSQL,
 		key,
 		tag,
@@ -830,6 +843,58 @@ func (s *Store) updateCertificateAccount(
 		slot,
 		slot,
 		drepType,
+		next.active,
+	)
+	return err
+}
+
+// certificateAccountStored is the certificate-driven part of an account row.
+type certificateAccountStored struct {
+	active   bool
+	pool     []byte
+	drep     []byte
+	drepType uint64
+}
+
+// updateCertificateAccountRow upserts over an existing account row, naming in
+// the conflict branch only the columns whose stored value changes. It stays an
+// INSERT ... ON CONFLICT so each call reserves an autoincrement id as the full
+// upsert does. SQLite rewrites every index over a
+// column in the SET list whether or not its value changed, and the drep,
+// drep_type and active indexes sort by random credential hashes, so an
+// upsert that restated them dirtied a leaf in each on every delegation.
+// added_slot is always restated and created_slot keeps the earlier of the
+// two slots, as the full upsert does.
+func (s *Store) updateCertificateAccountRow(
+	ctx context.Context,
+	db queryer,
+	tag uint8,
+	key []byte,
+	slot uint64,
+	stored certificateAccountStored,
+	next certificateAccountStored,
+) error {
+	changed := 0
+	if !samePool(stored.pool, next.pool) {
+		changed |= accountChangedPool
+	}
+	if !samePool(stored.drep, next.drep) {
+		changed |= accountChangedDrep
+	}
+	if stored.drepType != next.drepType {
+		changed |= accountChangedDrepType
+	}
+	if stored.active != next.active {
+		changed |= accountChangedActive
+	}
+	_, err := s.execCached(ctx, db, upsertAccountChangedSQLs[changed],
+		key,
+		tag,
+		next.pool,
+		next.drep,
+		slot,
+		slot,
+		next.drepType,
 		next.active,
 	)
 	return err
@@ -1346,18 +1411,60 @@ SELECT active, pool, drep, drep_type
 FROM account
 WHERE credential_tag = ? AND staking_key = ?`
 
-const upsertAccountSQL = `-- name: UpsertAccount :exec
+const upsertAccountInsertSQL = `-- name: UpsertAccount :exec
 INSERT INTO account (
     staking_key, credential_tag, pool, drep, added_slot, created_slot,
     reward, drep_type, active, expiration_epoch
 ) VALUES (?, ?, ?, ?, ?, ?, '0', ?, ?, 0)
 ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
-    pool = excluded.pool,
-    drep = excluded.drep,
-    added_slot = excluded.added_slot,
-    created_slot = CASE
+    `
+
+const accountCreatedSlotAssignment = `created_slot = CASE
         WHEN account.created_slot <= excluded.created_slot THEN account.created_slot
         ELSE excluded.created_slot
-    END,
+    END`
+
+// Bits of an upsertAccountChangedSQLs index: the certificate columns whose
+// stored value an update changes.
+const (
+	accountChangedPool = 1 << iota
+	accountChangedDrep
+	accountChangedDrepType
+	accountChangedActive
+	accountChangedVariants = 1 << iota
+)
+
+// upsertAccountChangedSQLs holds every statement updateCertificateAccountRow
+// issues, indexed by accountChanged* bits. The set is finite so each variant
+// is a fixed text that Start prepares (see hotStatements); a text built per
+// call would miss the prepared-statement cache on every update.
+var upsertAccountChangedSQLs = func() [accountChangedVariants]string {
+	var out [accountChangedVariants]string
+	for changed := range out {
+		assignments := []string{"added_slot = excluded.added_slot"}
+		if changed&accountChangedPool != 0 {
+			assignments = append(assignments, "pool = excluded.pool")
+		}
+		if changed&accountChangedDrep != 0 {
+			assignments = append(assignments, "drep = excluded.drep")
+		}
+		if changed&accountChangedDrepType != 0 {
+			assignments = append(assignments, "drep_type = excluded.drep_type")
+		}
+		if changed&accountChangedActive != 0 {
+			assignments = append(assignments, "active = excluded.active")
+		}
+		assignments = append(assignments, accountCreatedSlotAssignment)
+		out[changed] = upsertAccountInsertSQL +
+			strings.Join(assignments, ",\n    ")
+	}
+	return out
+}()
+
+const upsertAccountSQL = upsertAccountInsertSQL +
+	`pool = excluded.pool,
+    drep = excluded.drep,
+    added_slot = excluded.added_slot,
+    ` + accountCreatedSlotAssignment + `,
     drep_type = excluded.drep_type,
     active = excluded.active`
