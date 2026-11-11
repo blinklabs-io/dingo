@@ -286,10 +286,7 @@ func (h *csjHarness) promote(peer *csjPeer) {
 	h.t.Helper()
 	conn := h.cm.GetConnectionById(peer.connId)
 	require.NotNil(h.t, conn)
-	mu := h.o.outboundChainsyncLocks.lock(peer.connId)
-	mu.Lock()
-	defer mu.Unlock()
-	require.True(h.t, h.o.startOutboundChainsync(peer.connId, conn))
+	require.True(h.t, h.o.startOutboundChainsyncLocked(peer.connId, conn))
 }
 
 // deliver reports a header delivered by connId at block, as the roll-forward

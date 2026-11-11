@@ -1447,7 +1447,6 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.clearDeferredHeaderRecovery(connId)
 	o.forgetAcceptedHeaderTip(connId)
 	o.forgetServedActivity(connId)
-	o.outboundChainsyncLocks.forget(connId)
 
 	// Counts keep-alive pong timeouts.
 	if classifyKeepaliveTimeoutClose(e.Error) {
@@ -1609,7 +1608,7 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 		// one, not a reconnect that reused the id meanwhile.
 		startedConn := o.connManager.GetConnectionById(connId)
 		if startedConn != nil &&
-			!o.startOutboundChainsync(connId, startedConn) {
+			!o.startOutboundChainsyncLocked(connId, startedConn) {
 			return
 		}
 	}

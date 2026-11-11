@@ -843,9 +843,7 @@ func (o *Ouroboros) csjRestartAsJumper(
 	ctx context.Context,
 	connId ouroboros.ConnectionId,
 ) {
-	mu := o.outboundChainsyncLocks.lock(connId)
-	mu.Lock()
-	defer mu.Unlock()
+	defer o.outboundChainsyncLocks.acquire(connId)()
 	if ctx.Err() != nil {
 		return
 	}
@@ -1014,19 +1012,18 @@ func (o *Ouroboros) csjJump(
 		}
 		j.mu.Unlock()
 	}()
-	mu := o.outboundChainsyncLocks.lock(jumper)
-	mu.Lock()
+	unlock := o.outboundChainsyncLocks.acquire(jumper)
 	// The role may have changed while the jump waited for the lock: a
 	// former jumper streams and must not be asked to jump.
 	j.mu.Lock()
 	_, isJumper := j.jumpers[jumper]
 	j.mu.Unlock()
 	if !isJumper {
-		mu.Unlock()
+		unlock()
 		return
 	}
 	point, tip, found, err := o.csjSendJump(jumper, points)
-	mu.Unlock()
+	unlock()
 	if !errors.Is(err, errCsjNoClient) &&
 		!errors.Is(err, ochainsync.ErrSyncInProgress) {
 		j.count(func(m *csjMetrics) prometheus.Counter { return m.sent })
@@ -1123,9 +1120,7 @@ func (o *Ouroboros) csjStartStreaming(
 		if ctx.Err() != nil {
 			return
 		}
-		mu := o.outboundChainsyncLocks.lock(connId)
-		mu.Lock()
-		defer mu.Unlock()
+		defer o.outboundChainsyncLocks.acquire(connId)()
 		conn := o.connManager.GetConnectionById(connId)
 		if conn == nil || o.chainsyncState == nil ||
 			!o.chainsyncState.HasClientConnId(connId) ||

@@ -24,18 +24,45 @@ import (
 
 // outboundChainsyncLocks serializes the start, stop and ChainSync Jumping
 // jumps of one connection's client, so a jump never reaches a client that a
-// restart is replacing.
+// restart is replacing. An entry lives exactly as long as some caller holds or
+// waits for it: dropping it while in use would hand a reconnect reusing the
+// ConnectionId a second mutex, and keeping it forever would grow the map by
+// one entry per connection ever made.
 type outboundChainsyncLocks struct {
-	locks sync.Map // ouroboros.ConnectionId -> *sync.Mutex
+	mu    sync.Mutex
+	locks map[ouroboros.ConnectionId]*outboundChainsyncLock
 }
 
-func (l *outboundChainsyncLocks) lock(connId ouroboros.ConnectionId) *sync.Mutex {
-	mu, _ := l.locks.LoadOrStore(connId, &sync.Mutex{})
-	return mu.(*sync.Mutex)
+type outboundChainsyncLock struct {
+	sync.Mutex
+	users int
 }
 
-func (l *outboundChainsyncLocks) forget(connId ouroboros.ConnectionId) {
-	l.locks.Delete(connId)
+// acquire locks connId's client and returns the function that unlocks it.
+func (l *outboundChainsyncLocks) acquire(
+	connId ouroboros.ConnectionId,
+) func() {
+	l.mu.Lock()
+	if l.locks == nil {
+		l.locks = make(map[ouroboros.ConnectionId]*outboundChainsyncLock)
+	}
+	entry := l.locks[connId]
+	if entry == nil {
+		entry = &outboundChainsyncLock{}
+		l.locks[connId] = entry
+	}
+	entry.users++
+	l.mu.Unlock()
+	entry.Lock()
+	return func() {
+		entry.Unlock()
+		l.mu.Lock()
+		entry.users--
+		if entry.users == 0 {
+			delete(l.locks, connId)
+		}
+		l.mu.Unlock()
+	}
 }
 
 // outboundChainsyncLifecycle fences the ChainSync Jumping driver's
@@ -89,13 +116,27 @@ func (o *Ouroboros) outboundChainsyncWanted(
 		o.connManager.GetConnectionById(connId) != nil
 }
 
+// startOutboundChainsyncLocked is startOutboundChainsync under the
+// connection's outboundChainsyncLocks lock, for a caller that does not hold
+// it: ChainSync Jumping restarts a client under that lock, and a start that
+// ran beside one could leave the role table and the running client
+// disagreeing.
+func (o *Ouroboros) startOutboundChainsyncLocked(
+	connId ouroboros.ConnectionId,
+	conn *ouroboros.Connection,
+) bool {
+	defer o.outboundChainsyncLocks.acquire(connId)()
+	return o.startOutboundChainsync(connId, conn)
+}
+
 // startOutboundChainsync registers and starts the client unless it is already
 // tracked, or starts it as a ChainSync Jumping jumper. It returns false only
 // when the start failed and the connection was closed. conn is the
 // connection the start runs on: the failure path must close that connection,
 // not whatever holds the id by the time the start returns, because a
 // reconnect can reuse the same local/remote address pair and ConnectionId is
-// exactly that pair.
+// exactly that pair. The caller holds the connection's outboundChainsyncLocks
+// lock.
 func (o *Ouroboros) startOutboundChainsync(
 	connId ouroboros.ConnectionId,
 	conn *ouroboros.Connection,
