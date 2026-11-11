@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -42,6 +43,7 @@ type reintersectFixture struct {
 	state     *dchainsync.State
 	connId    ouroboros.ConnectionId
 	intersect ocommon.Point
+	logger    *slog.Logger
 
 	findIntersects atomic.Int32
 	rollForwards   atomic.Int32
@@ -52,6 +54,8 @@ type reintersectFixture struct {
 	// refuseIntersect makes the peer answer every later FindIntersect with
 	// IntersectNotFound.
 	refuseIntersect atomic.Bool
+	// awaitReplies counts the AwaitReply answers the peer has sent.
+	awaitReplies atomic.Int32
 
 	mu           sync.Mutex
 	offered      [][]ocommon.Point
@@ -69,18 +73,44 @@ func newReintersectFixture(
 	cm := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{EventBus: bus, Logger: logger},
 	)
+	// t.Context is already cancelled when cleanups run.
 	t.Cleanup(func() {
-		_ = cm.Stop(t.Context())
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+		_ = cm.Stop(stopCtx)
 	})
 
 	ls, _ := newTestLedgerStateWithChain(t, 3)
-	chainTip := ls.PrimaryChainTip()
 	f := &reintersectFixture{
 		cm:        cm,
-		intersect: chainTip.Point,
+		intersect: ls.PrimaryChainTip().Point,
+		logger:    logger,
 	}
-	tip := chainTip
+	f.o = newOuroboros(OuroborosConfig{EventBus: bus, Logger: logger})
+	f.o.eventBus = bus
+	f.o.connManager = cm
+	f.o.ledgerState = ls
+	f.o.chainsyncReintersectTimeout = timeout
 
+	client := f.dial(t)
+	f.connId = client.Id()
+	f.state = dchainsync.NewState(bus, nil)
+	require.True(t, f.state.AddClientConnId(f.connId))
+	f.o.chainsyncState = f.state
+	f.o.SubscribeChainsyncResync(t.Context())
+	f.startSync(t, client)
+	return f
+}
+
+// dial connects a new client to a new peer over a pipe and registers it with
+// the connection manager. Every pipe connection has the same ID, so a second
+// dial replaces the first connection under its ID.
+func (f *reintersectFixture) dial(t *testing.T) *ouroboros.Connection {
+	t.Helper()
+	tip := f.o.ledgerState.PrimaryChainTip()
 	serverPipe, clientPipe := net.Pipe()
 	t.Cleanup(func() { _ = serverPipe.Close(); _ = clientPipe.Close() })
 	serverConfig := ochainsync.NewConfig(
@@ -100,6 +130,7 @@ func newReintersectFixture(
 		}),
 		ochainsync.WithRequestNextFunc(func(cb ochainsync.CallbackContext) error {
 			if f.await.Load() {
+				f.awaitReplies.Add(1)
 				return cb.Server.AwaitReply()
 			}
 			f.mu.Lock()
@@ -122,12 +153,11 @@ func newReintersectFixture(
 			ouroboros.WithNodeToNode(false),
 			ouroboros.WithNetworkMagic(42),
 			ouroboros.WithDelayProtocolStart(true),
-			ouroboros.WithLogger(logger),
+			ouroboros.WithLogger(f.logger),
 			ouroboros.WithChainSyncConfig(serverConfig),
 		)
 		serverReady <- err
 	}()
-	f.o = newOuroboros(OuroborosConfig{EventBus: bus, Logger: logger})
 	clientConfig := ochainsync.NewConfig(
 		ochainsync.WithPipelineLimit(4),
 		ochainsync.WithIntersectFoundFunc(f.o.chainsyncClientIntersectFound),
@@ -154,7 +184,7 @@ func newReintersectFixture(
 		ouroboros.WithNodeToNode(false),
 		ouroboros.WithNetworkMagic(42),
 		ouroboros.WithDelayProtocolStart(true),
-		ouroboros.WithLogger(logger),
+		ouroboros.WithLogger(f.logger),
 		ouroboros.WithChainSyncConfig(clientConfig),
 	)
 	require.NoError(t, err)
@@ -162,28 +192,29 @@ func newReintersectFixture(
 		t, serverReady, 5*time.Second, "server handshake",
 	))
 	t.Cleanup(func() { _ = client.Close(); _ = serverConn.Close() })
-	require.True(t, cm.AddConnection(client, false, "127.0.0.1:3001"))
-
-	f.connId = client.Id()
-	f.state = dchainsync.NewState(bus, nil)
-	require.True(t, f.state.AddClientConnId(f.connId))
-	f.o.eventBus = bus
-	f.o.connManager = cm
-	f.o.chainsyncState = f.state
-	f.o.ledgerState = ls
-	f.o.chainsyncReintersectTimeout = timeout
-	f.o.SubscribeChainsyncResync(t.Context())
-
+	require.True(t, f.cm.AddConnection(client, false, "127.0.0.1:3001"))
 	serverConn.ChainSync().Server.Start()
+	return client
+}
+
+// startSync starts client's sync at the fixture's intersection and waits for
+// the peer to stream.
+func (f *reintersectFixture) startSync(
+	t *testing.T,
+	client *ouroboros.Connection,
+) {
+	t.Helper()
+	forwards := f.rollForwards.Load()
 	client.ChainSync().Client.Start()
-	require.NoError(t, client.ChainSync().Client.Sync([]ocommon.Point{f.intersect}))
+	require.NoError(t, client.ChainSync().Client.Sync(
+		[]ocommon.Point{f.intersect},
+	))
 	testutil.WaitForCondition(
 		t,
-		func() bool { return f.rollForwards.Load() > 0 },
+		func() bool { return f.rollForwards.Load() > forwards },
 		5*time.Second,
 		"peer never started streaming",
 	)
-	return f
 }
 
 func (f *reintersectFixture) publish(reason string) {
@@ -290,6 +321,14 @@ func TestChainsyncResyncReintersectWatchdogFallsBackToClose(t *testing.T) {
 	t.Parallel()
 	f := newReintersectFixture(t, 300*time.Millisecond)
 	f.await.Store(true)
+	// A request answered with AwaitReply stays outstanding, so Reintersect
+	// cannot drain before the watchdog expires.
+	testutil.WaitForCondition(
+		t,
+		func() bool { return f.awaitReplies.Load() > 0 },
+		5*time.Second,
+		"the peer never parked the client in MustReply",
+	)
 
 	f.publish(event.ChainsyncResyncReasonIngressPromotion)
 
@@ -399,4 +438,134 @@ func TestChainsyncResyncReintersectSettlesStateBeforeSyncResumes(
 	require.False(t, ok,
 		"history above the intersection must be gone before the new cursor")
 	close(release)
+}
+
+// The watchdog bounds building the intersect points as well as Reintersect: a
+// ledger read that never returns still falls back to the close.
+func TestChainsyncResyncReintersectWatchdogBoundsPointBuild(t *testing.T) {
+	t.Parallel()
+	f := newReintersectFixture(t, 300*time.Millisecond)
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	f.o.config.ChainsyncIntersectAtLedgerTip = func() bool {
+		<-block
+		return false
+	}
+
+	f.publish(event.ChainsyncResyncReasonIngressPromotion)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool { return !f.connected() },
+		10*time.Second,
+		"a re-intersect whose points never build must close the connection",
+	)
+	require.EqualValues(t, 1, f.findIntersects.Load())
+}
+
+// A resync that arrives after the running re-intersect found its intersection
+// is not absorbed by it: that run has already settled its state, so the later
+// resync re-intersects again.
+func TestChainsyncResyncAfterIntersectFoundReintersectsAgain(t *testing.T) {
+	t.Parallel()
+	f := newReintersectFixture(t, 10*time.Second)
+	var returns atomic.Int32
+	first := make(chan struct{})
+	release := make(chan struct{})
+	f.o.chainsyncReintersectReturnedHook = func() {
+		if returns.Add(1) == 1 {
+			close(first)
+			<-release
+		}
+	}
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	f.publish(event.ChainsyncResyncReasonIngressPromotion)
+	testutil.RequireReceive(
+		t, first, 5*time.Second, "the first re-intersect must return",
+	)
+	f.publish(event.ChainsyncResyncReasonIngressPromotion)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool { return f.findIntersects.Load() == 3 },
+		5*time.Second,
+		"a resync after IntersectFound must re-intersect again",
+	)
+	close(release)
+	testutil.WaitForCondition(
+		t,
+		func() bool { return returns.Load() == 2 },
+		5*time.Second,
+		"both re-intersects must return",
+	)
+	require.True(t, f.connected())
+}
+
+// A re-intersect still running for a closed connection neither absorbs a
+// resync of the connection that replaced it under the same ID nor closes that
+// replacement when it fails.
+func TestChainsyncResyncReintersectIgnoresReplacedConnection(t *testing.T) {
+	t.Parallel()
+	f := newReintersectFixture(t, 10*time.Second)
+	var builds atomic.Int32
+	building := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	f.o.config.ChainsyncIntersectAtLedgerTip = func() bool {
+		if builds.Add(1) == 1 {
+			close(building)
+			<-release
+		}
+		return false
+	}
+	var returns atomic.Int32
+	f.o.chainsyncReintersectReturnedHook = func() { returns.Add(1) }
+
+	f.publish(event.ChainsyncResyncReasonIngressPromotion)
+	testutil.RequireReceive(
+		t, building, 5*time.Second, "the first re-intersect must start",
+	)
+	old := f.cm.GetConnectionById(f.connId)
+	require.NotNil(t, old)
+	require.NoError(t, old.Close())
+	testutil.WaitForCondition(
+		t,
+		func() bool { return !f.connected() },
+		5*time.Second,
+		"the old connection must be removed",
+	)
+	replacement := f.dial(t)
+	require.Equal(t, f.connId, replacement.Id())
+	f.startSync(t, replacement)
+	findsBefore := f.findIntersects.Load()
+
+	f.publish(event.ChainsyncResyncReasonIngressPromotion)
+	testutil.WaitForCondition(
+		t,
+		func() bool { return f.findIntersects.Load() == findsBefore+1 },
+		5*time.Second,
+		"the replacement's resync must re-intersect it",
+	)
+	close(release)
+	testutil.WaitForCondition(
+		t,
+		func() bool { return returns.Load() == 2 },
+		5*time.Second,
+		"both re-intersects must return",
+	)
+	require.Same(t, replacement, f.cm.GetConnectionById(f.connId),
+		"the stale re-intersect must not close the replacement")
 }

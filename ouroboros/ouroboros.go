@@ -323,10 +323,10 @@ type Ouroboros struct {
 	// chainsyncReintersectTimeout bounds how long a resync waits for a client
 	// to drain and re-intersect in place before the connection is closed.
 	chainsyncReintersectTimeout time.Duration
-	// chainsyncReintersecting holds the connections with an in-place
-	// re-intersect running, so overlapping resyncs do not stack.
+	// chainsyncReintersecting holds the latest in-place re-intersect of each
+	// connection, so overlapping resyncs do not stack.
 	chainsyncReintersectMu  sync.Mutex
-	chainsyncReintersecting map[ouroboros.ConnectionId]struct{}
+	chainsyncReintersecting map[ouroboros.ConnectionId]*chainsyncReintersectRun
 	// chainsyncReintersectReturnedHook runs once an in-place re-intersect has
 	// returned and the re-intersected sync is already running. Tests use it to
 	// hold the resync goroutine while the new cursor streams.
@@ -966,7 +966,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		),
 		chainsyncReintersectTimeout: defaultChainsyncReintersectTimeout,
 		chainsyncReintersecting: make(
-			map[ouroboros.ConnectionId]struct{},
+			map[ouroboros.ConnectionId]*chainsyncReintersectRun,
 		),
 		futureHeaderResyncCtx:    futureHeaderResyncCtx,
 		futureHeaderResyncCancel: futureHeaderResyncCancel,

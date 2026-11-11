@@ -833,19 +833,23 @@ events dropped because the subscriber's context is done.
 (`event.IsLocalChainsyncResyncReason`, except `LocalLedgerRollback` and
 `NetworkIngestReleased`) by calling `Client.Reintersect` on the live connection
 instead of closing it. `Reintersect` drains every outstanding `MsgRequestNext`
-reply before sending `MsgFindIntersect`, so it runs on its own goroutine, once
-per connection at a time, and is bounded by `chainsyncReintersectTimeout`: a
-client parked at the peer's tip drains only when the next block arrives. When
-the peer answers `IntersectFound`, the client's `IntersectFoundFunc` trims the
+reply before sending `MsgFindIntersect`, so it runs on its own goroutine. A
+resync that arrives before that run's `IntersectFound` is absorbed by it; one
+that arrives later starts another run. Building the intersect points and
+`Reintersect` are both bounded by `chainsyncReintersectTimeout`: a client
+parked at the peer's tip drains only when the next block arrives. When the
+peer answers `IntersectFound`, the client's `IntersectFoundFunc` trims the
 peer's observed header history to the new intersection
 (`State.ClearObservedHeaderHistoryAfter`) rather than clearing it and drops the
 withheld-header marker, before the first `MsgRequestNext` of the new cursor is
 sent, so no header of that cursor is trimmed or withheld. The delivered-tip
 history in chain selection stays, so a Genesis corroborating peer keeps its
-density evidence; the first `RollBackward` after the intersect trims it. The connection is closed instead, as for every
-reason that blames the peer, when the client is absent, the watchdog expires,
-the ledger cannot supply intersect points, or the peer answers
-`IntersectNotFound`.
+density evidence; the first `RollBackward` after the intersect trims it. The
+connection is closed instead, as for every reason that blames the peer, when
+the client is absent, the watchdog expires, the ledger cannot supply intersect
+points, or the peer answers `IntersectNotFound`. A run is tied to the client it
+started on, so a run outliving its connection neither absorbs a resync of the
+connection that replaces it under the same ID nor closes that replacement.
 
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
