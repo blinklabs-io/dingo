@@ -48,7 +48,7 @@ func resetGlobalConfig() {
 		DebugBindAddr:                    DefaultDebugBindAddr,
 		MetricsBindAddr:                  DefaultMetricsBindAddr,
 		PrivateBindAddr:                  "127.0.0.1",
-		PrivatePort:                      3002,
+		PrivatePort:                      0,
 		RelayPort:                        3001,
 		CORSAllowedOrigins:               []string{"*"},
 		Topology:                         "",
@@ -380,6 +380,15 @@ func TestStartEra_Validation(t *testing.T) {
 				tt.valid,
 			)
 		}
+	}
+}
+
+// The NtC TCP listener is opt-in: resetGlobalConfig is a hand-kept fixture, so
+// the default is pinned on the constructor itself.
+func TestDefaultConfigDisablesNtCTCPListener(t *testing.T) {
+	t.Parallel()
+	if port := newDefaultConfig().PrivatePort; port != 0 {
+		t.Fatalf("expected PrivatePort 0 by default, got %d", port)
 	}
 }
 

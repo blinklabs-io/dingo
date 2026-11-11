@@ -654,27 +654,26 @@ func (ls *LedgerState) advanceByronPBFTState(
 	if err != nil {
 		return byronPBFTState{}, err
 	}
+	config, err := ls.byronPBFTConfig()
+	if err != nil {
+		return byronPBFTState{}, err
+	}
+	flatSlot, err := byronFlatSlot(block, config.SecurityParam)
+	if err != nil {
+		return byronPBFTState{}, err
+	}
 	state.delegationState = state.delegationState.Tick(
 		epoch,
-		block.SlotNumber(),
+		flatSlot,
 	)
 	var updateConfig byronupdate.Config
-	var updateSlot uint64
 	if state.update.Initialized() {
-		config, err := ls.byronPBFTConfig()
-		if err != nil {
-			return byronPBFTState{}, err
-		}
 		updateConfig = byronupdate.Config{
 			ProtocolMagic:  config.ProtocolMagic,
 			K:              config.SecurityParam,
 			NumGenesisKeys: config.NumGenesisKeys,
 		}
-		updateSlot, err = byronFlatSlot(block, config.SecurityParam)
-		if err != nil {
-			return byronPBFTState{}, err
-		}
-		state.update = state.update.Tick(updateConfig, updateSlot)
+		state.update = state.update.Tick(updateConfig, flatSlot)
 	}
 	if shouldValidate {
 		issuer, err := ls.validateByronPBFTHeader(
@@ -696,7 +695,7 @@ func (ls *LedgerState) advanceByronPBFTState(
 	}
 	if block.Type() == ledgerbyron.BlockTypeByronEbb {
 		if state.update.Initialized() {
-			state.update = state.update.Advance(updateSlot, block.BlockNumber())
+			state.update = state.update.Advance(flatSlot, block.BlockNumber())
 		}
 		return state, nil
 	}
@@ -748,7 +747,7 @@ func (ls *LedgerState) advanceByronPBFTState(
 	}
 	state.delegationState, err = state.delegationState.ApplyPayloadCbor(
 		epoch,
-		block.SlotNumber(),
+		flatSlot,
 		dlgPayload,
 	)
 	if err != nil {
@@ -769,7 +768,7 @@ func (ls *LedgerState) advanceByronPBFTState(
 		},
 		mainBlock,
 		header,
-		updateSlot,
+		flatSlot,
 	)
 	if err != nil {
 		// Only a state built from the first block knows every registered
@@ -792,7 +791,7 @@ func (ls *LedgerState) advanceByronPBFTState(
 				"error", err,
 			)
 		}
-		nextUpdate = state.update.Advance(updateSlot, block.BlockNumber())
+		nextUpdate = state.update.Advance(flatSlot, block.BlockNumber())
 	}
 	state.update = nextUpdate
 	return state, nil

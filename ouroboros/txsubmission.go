@@ -102,7 +102,7 @@ func txsubmissionWireSize(eraId uint16, bodyLen int) uint64 {
 // txsubmissionTxDecoder decodes one MsgReplyTxs body. validateTxsubmissionReply
 // receives it rather than naming the ledger decoder directly, so the panic
 // containment wrapped around the call can be driven by a decoder that really
-// panics; production always supplies ledger.NewTransactionFromCbor.
+// panics; production always supplies Ouroboros.decodeTxsubmissionTx.
 type txsubmissionTxDecoder func(txType uint, txCbor []byte) (ledger.Transaction, error)
 
 type validatedTxsubmissionBody struct {
@@ -665,7 +665,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 				validatedTxs, err := validateTxsubmissionReply(
 					requestedTxs,
 					txs,
-					ledger.NewTransactionFromCbor,
+					o.decodeTxsubmissionTx,
 				)
 				o.recordTxsubmissionReplyOutcome(
 					validatedTxs,

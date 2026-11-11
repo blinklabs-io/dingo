@@ -102,32 +102,34 @@ func TestDensityFromIntersection(t *testing.T) {
 
 // The cached snapshot GenesisSelectionState reads is only correct if
 // every site that mutates cs.mode refreshes it. Drive the real one-way
-// Genesis-to-Praos transition through SetLocalTip rather than by writing
+// Genesis-to-Praos transition through the real exit rule rather than by writing
 // cs.mode directly, and assert the lock-free reader observes it: without the
-// refresh in advanceSelectionModeLocked the snapshot reports Genesis forever
-// while SelectionMode() correctly reports Praos.
+// refresh in leaveGenesisLocked the snapshot reports Genesis forever while
+// SelectionMode() correctly reports Praos.
 func TestGenesisSelectionStateFollowsRealModeTransition(t *testing.T) {
 	t.Parallel()
 
+	var chain testChain
 	cs := NewChainSelector(ChainSelectorConfig{
-		GenesisMode:   true,
-		SecurityParam: 10, // window = 3k = 30
+		GenesisMode:       true,
+		SecurityParam:     10, // window = 3k = 30
+		PointOnLocalChain: chain.onChain,
 	})
 
 	connId := newTestConnectionId(1)
-	cs.UpdatePeerTip(connId, ochainsync.Tip{
+	peerTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 100, Hash: []byte("peer")},
 		BlockNumber: 100,
-	}, nil)
+	}
+	cs.UpdatePeerTip(connId, peerTip, nil)
 	active, window := cs.GenesisSelectionState()
 	require.True(t, active)
 	require.Equal(t, uint64(30), window)
 
-	// A local tip inside the window (100 - 30) exits Genesis mode.
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 75, Hash: []byte("local-75")},
-		BlockNumber: 75,
-	})
+	// The local chain reaches the idle peer's tip: Genesis mode exits.
+	chain.add(peerTip)
+	cs.SetLocalTip(peerTip)
+	cs.SetPeerIdling(connId, peerTip.Point)
 	require.Equal(t, SelectionModePraos, cs.SelectionMode())
 
 	active, window = cs.GenesisSelectionState()
@@ -312,29 +314,31 @@ func TestChainSelectorGenesisPrefersObservedDensity(t *testing.T) {
 func TestChainSelectorGenesisTransitionsBackToPraos(t *testing.T) {
 	t.Parallel()
 
+	var chain testChain
 	cs := NewChainSelector(ChainSelectorConfig{
-		GenesisMode:   true,
-		SecurityParam: 10,
+		GenesisMode:       true,
+		SecurityParam:     10,
+		PointOnLocalChain: chain.onChain,
 	})
 
 	connId := newTestConnectionId(1)
-	cs.UpdatePeerTip(connId, ochainsync.Tip{
+	peerTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 100, Hash: []byte("peer")},
 		BlockNumber: 100,
-	}, nil)
+	}
+	cs.UpdatePeerTip(connId, peerTip, nil)
+	cs.SetPeerIdling(connId, peerTip.Point)
 
 	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
 
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 60, Hash: []byte("local-60")},
-		BlockNumber: 60,
-	})
+	// An idle peer ahead of the local chain keeps Genesis selection.
+	chain.add(genesisTip(60, "local-60", 60))
+	cs.SetLocalTip(genesisTip(60, "local-60", 60))
 	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
 
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 75, Hash: []byte("local-75")},
-		BlockNumber: 75,
-	})
+	// Once the local chain reaches the idle peer's tip, Genesis ends.
+	chain.add(peerTip)
+	cs.SetLocalTip(peerTip)
 	require.Equal(t, SelectionModePraos, cs.SelectionMode())
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, connId, *cs.GetBestPeer())

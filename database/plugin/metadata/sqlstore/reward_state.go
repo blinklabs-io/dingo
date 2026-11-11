@@ -1211,7 +1211,7 @@ boundary_slot = excluded.boundary_slot`
 	// (epoch, credential_tag, staking_key, pool_key_hash, reward_type) rows,
 	// not an OR-chain of five-way equality predicates -- the same
 	// GetAccountsByCredential planner limitation applies here:
-	// idx_reward_account_output_epoch_cred_pool_type exists on exactly these
+	// idx_reward_account_output_epoch_pool_cred_type exists on exactly these
 	// five columns, but a long OR-chain over it is not reliably compiled into
 	// per-term index seeks, and this runs on every epoch boundary for every
 	// account earning a reward.
@@ -1351,7 +1351,7 @@ SELECT staking_key, pool_key_hash, reward_type, id, epoch, credential_tag,
        amount, spendable, guarded, captured_slot, boundary_slot
 FROM reward_account_output
 WHERE credential_tag = ? AND staking_key = ?
-  AND spendable = TRUE AND guarded = FALSE`
+  AND spendable AND NOT guarded`
 	if strings.EqualFold(order, "desc") {
 		query += " ORDER BY epoch DESC, pool_key_hash ASC, reward_type ASC"
 	} else {
@@ -1433,7 +1433,7 @@ func (s *Store) CountRewardAccountOutputsByCredential(
 SELECT COUNT(*)
 FROM reward_account_output
 WHERE credential_tag = ? AND staking_key = ?
-  AND spendable = TRUE AND guarded = FALSE`),
+  AND spendable AND NOT guarded`),
 		credentialTag,
 		stakingKey,
 	).Scan(&count)

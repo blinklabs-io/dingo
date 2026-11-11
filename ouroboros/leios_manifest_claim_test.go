@@ -711,28 +711,33 @@ func TestLeiosTxsOfferDeadlineHandsDribblingOwnerToHealthyWaiter(t *testing.T) {
 
 func TestLeiosTxsOfferDeadlineWithoutWaiterReleasesClaim(t *testing.T) {
 	t.Parallel()
-	o, point, txs := testLeiosTxOfferDeadlineFixture(t, 466)
-	o.leiosTxFetchAttemptTimeoutOverride = 40 * time.Millisecond
-	owner := &leiosTxOfferTestRequester{
-		txs: txs, perRound: time.Second, immediateFirst: true,
-	}
-	guard := &leiosFetchGuard{}
-	guard.inflight.Store(1)
-	o.dispatchLeiosTxOfferFetch(
-		guard, owner, namedConnId("lone-dribble-owner"),
-		"lone-dribble-owner", point, nil,
-	)
-	key := leiosBlockKey(point.Slot, point.Hash)
-	testutil.WaitForCondition(t, func() bool {
-		o.leiosTxFetchClaimsMu.Lock()
-		defer o.leiosTxFetchClaimsMu.Unlock()
-		return guard.inflight.Load() == 0 && o.leiosTxFetchClaims[key] == nil
-	}, 5*time.Second, "deadline without a waiter retained the global claim")
-	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
-	require.True(t, ok)
-	require.False(t, data.completeTxCache())
-	require.Positive(t, data.partialTxCount(),
-		"progress before the deadline must remain cached")
+	// The attempt budget is wall-clock time: on a starved runner it can elapse
+	// before the first answer is processed. A synctest bubble advances the
+	// clock only once every goroutine is blocked.
+	synctest.Test(t, func(t *testing.T) {
+		o, point, txs := testLeiosTxOfferDeadlineFixture(t, 466)
+		o.leiosTxFetchAttemptTimeoutOverride = 40 * time.Millisecond
+		owner := &leiosTxOfferTestRequester{
+			txs: txs, perRound: time.Second, immediateFirst: true,
+		}
+		guard := &leiosFetchGuard{}
+		guard.inflight.Store(1)
+		o.dispatchLeiosTxOfferFetch(
+			guard, owner, namedConnId("lone-dribble-owner"),
+			"lone-dribble-owner", point, nil,
+		)
+		key := leiosBlockKey(point.Slot, point.Hash)
+		testutil.WaitForCondition(t, func() bool {
+			o.leiosTxFetchClaimsMu.Lock()
+			defer o.leiosTxFetchClaimsMu.Unlock()
+			return guard.inflight.Load() == 0 && o.leiosTxFetchClaims[key] == nil
+		}, 5*time.Second, "deadline without a waiter retained the global claim")
+		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		require.True(t, ok)
+		require.False(t, data.completeTxCache())
+		require.Positive(t, data.partialTxCount(),
+			"progress before the deadline must remain cached")
+	})
 }
 
 func TestLeiosTxsOfferHandsOffAcrossMultipleFailingPeers(t *testing.T) {
@@ -843,7 +848,7 @@ func TestLeiosTxsOfferCancellationBeforeWorkerLaunch(t *testing.T) {
 		close(entered)
 		<-release
 	}
-	point := ocommon.NewPoint(462, []byte{0x46, 0x47})
+	point := ocommon.NewPoint(462, bytes.Repeat([]byte{0x46}, 32))
 	done := make(chan any)
 	result := make(chan error, 1)
 	go func() {
@@ -877,7 +882,7 @@ func TestLeiosTxFetchLaunchChecksConnectionBeforeDispatch(t *testing.T) {
 	guard := &leiosFetchGuard{}
 	guard.inflight.Store(1)
 	guard.mu.Lock()
-	point := ocommon.NewPoint(463, []byte{0x47, 0x48})
+	point := ocommon.NewPoint(463, bytes.Repeat([]byte{0x47}, 32))
 	candidate := newLeiosTxFetchCandidate(
 		gouroboros.ConnectionId{}, "", guard, nil, point, done,
 	)
@@ -1491,7 +1496,7 @@ func TestLeiosTxsOfferDisconnectedWaiterIsRemoved(t *testing.T) {
 			<-release
 		})
 	}
-	point := ocommon.NewPoint(463, []byte{0x47, 0x48})
+	point := ocommon.NewPoint(463, bytes.Repeat([]byte{0x47}, 32))
 	firstDone := make(chan any)
 	secondDone := make(chan any)
 	result := make(chan error, 1)

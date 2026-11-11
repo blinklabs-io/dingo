@@ -797,7 +797,9 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 }
 
 // chainsyncClientAwaitReply publishes the protocol's explicit idle proof after
-// gouroboros has fenced every preceding pipelined chain update.
+// gouroboros has fenced every preceding pipelined chain update. Every
+// connection's proof reaches chain selection; only an ingress connection's
+// reaches the ledger.
 func (o *Ouroboros) chainsyncClientAwaitReply(
 	ctx ochainsync.CallbackContext,
 ) error {
@@ -811,12 +813,29 @@ func (o *Ouroboros) chainsyncClientAwaitReply(
 	o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
 	// While held the cursor is not the point the peer awaits at, so it must
 	// not reach chain selection or the ledger.
-	if client.ObservabilityOnly || o.networkIngestHeld() ||
-		!o.shouldPublishChainsyncToLedger(ctx.ConnectionId) {
+	// A failed connection is being recycled and its cursor is not a delivered
+	// frontier, so its await proves nothing.
+	if o.networkIngestHeld() || client.Status == chainsync.ClientStatusFailed {
 		return nil
 	}
+	// An observer's idle proof counts toward the Genesis exit, which needs
+	// every ChainSync connection idle, but it feeds no ledger ingress.
+	observer := client.ObservabilityOnly ||
+		!o.shouldPublishChainsyncToLedger(ctx.ConnectionId)
 	if o.config.ChainsyncObserveAwaitReply != nil {
-		o.config.ChainsyncObserveAwaitReply(ctx.ConnectionId, client.Cursor)
+		// The cursor moves only when the ledger admits a header, and never
+		// for an observer, so it can still name the header before the one the
+		// peer sent; the proof names the last point the peer sent instead.
+		point := client.Cursor
+		if sent, ok := o.chainsyncState.ClientProtocolPoint(
+			ctx.ConnectionId,
+		); ok {
+			point = sent
+		}
+		o.config.ChainsyncObserveAwaitReply(ctx.ConnectionId, point)
+	}
+	if observer {
+		return nil
 	}
 	if o.eventBus == nil {
 		return nil
@@ -1464,6 +1483,9 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 	}
 	if nextErr == nil && next != nil && waitForLedger &&
 		o.chainsyncServerAheadOfLedger(next) {
+		if o.chainsyncServerAppliedWaitHook != nil {
+			o.chainsyncServerAppliedWaitHook()
+		}
 		waitCtx, cancel := context.WithCancel(context.Background())
 		applied := make(chan error, 1)
 		go func() {
@@ -1786,10 +1808,15 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 		return ochainsync.ErrStopSyncProcess
 	}
+	if o.chainsyncState != nil {
+		o.chainsyncState.RecordClientProtocolPoint(
+			ctx.ConnectionId, clientSession, point,
+		)
+	}
 	o.clearObserverHeaderGapAtRollback(ctx.ConnectionId, clientSession, point)
 	if !o.reconcileChainsyncIngressAdmission(
 		ctx.ConnectionId,
-		o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
+		o.chainsyncIngressDesired(ctx.ConnectionId, tip),
 	) {
 		return nil
 	}
@@ -2086,6 +2113,19 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		}
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
+		if o.chainsyncState != nil {
+			o.chainsyncState.RecordClientProtocolPoint(
+				ctx.ConnectionId,
+				clientSession,
+				ocommon.NewPoint(blockSlot, blockHash),
+			)
+		}
+		if o.config.ChainsyncObserveRollForward != nil {
+			o.config.ChainsyncObserveRollForward(
+				ctx.ConnectionId,
+				ocommon.NewPoint(blockSlot, blockHash),
+			)
+		}
 		_, span := tracing.StartHeader(
 			context.Background(),
 			tracing.StageHeaderReceived,
@@ -2181,7 +2221,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ctx.ConnectionId,
 			)
 		}
-		desiredEligible := o.shouldPublishChainsyncToLedger(ctx.ConnectionId)
+		desiredEligible := o.chainsyncIngressDesired(ctx.ConnectionId, tip)
 		// A promoted observer above the local tip is re-synced below, at most
 		// one per window. While another one holds the window, promoting this
 		// observer would only be undone, so it stays an observer; promoting
@@ -3311,6 +3351,21 @@ func (o *Ouroboros) shouldPublishChainsyncToLedger(
 	}
 	outbound, exists := o.chainsyncState.ClientStartedAsOutbound(connId)
 	return exists && outbound
+}
+
+// chainsyncIngressDesired decides whether a peer that just advertised tip
+// should hold an ingress slot. A tip chain selection will never select cannot
+// feed the ledger, so its peer must not hold one of the few slots while
+// selectable peers wait as observers.
+func (o *Ouroboros) chainsyncIngressDesired(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+) bool {
+	if o.chainsyncState != nil &&
+		o.chainsyncState.RecordClientAdvertisedTip(connId, tip) {
+		return false
+	}
+	return o.shouldPublishChainsyncToLedger(connId)
 }
 
 // shouldApplyChainsyncToLedger reports whether an ingress-eligible peer's

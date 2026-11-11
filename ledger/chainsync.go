@@ -4156,11 +4156,31 @@ func observedHeaderTip(e ChainsyncEvent) ochainsync.Tip {
 	}
 }
 
+// LocalTipPraosView returns the Praos tiebreaker view of the header of the
+// block at tip, and false when the ledger is nil or the block cannot be read
+// or decoded. A Byron block yields true with a view carrying only its block
+// kind.
+func (ls *LedgerState) LocalTipPraosView(
+	tip ochainsync.Tip,
+) (praos.PraosTiebreakerView, bool) {
+	if ls == nil {
+		return praos.PraosTiebreakerView{}, false
+	}
+	return ls.localTipPraosViewOK(ls.lifecycleContext(), tip)
+}
+
 func (ls *LedgerState) localTipPraosView(ctx context.Context,
 	localTip ochainsync.Tip,
 ) praos.PraosTiebreakerView {
+	view, _ := ls.localTipPraosViewOK(ctx, localTip)
+	return view
+}
+
+func (ls *LedgerState) localTipPraosViewOK(ctx context.Context,
+	localTip ochainsync.Tip,
+) (praos.PraosTiebreakerView, bool) {
 	if ls == nil || ls.db == nil || len(localTip.Point.Hash) == 0 {
-		return praos.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}, false
 	}
 	block, err := database.BlockByHash(
 		ctx,
@@ -4177,7 +4197,7 @@ func (ls *LedgerState) localTipPraosView(ctx context.Context,
 				"error", err,
 			)
 		}
-		return praos.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}, false
 	}
 	decoded, err := block.Decode()
 	if err != nil {
@@ -4190,13 +4210,13 @@ func (ls *LedgerState) localTipPraosView(ctx context.Context,
 				"error", err,
 			)
 		}
-		return praos.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}, false
 	}
 	if decoded == nil {
-		return praos.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}, false
 	}
 	view, _ := praos.GetPraosTiebreakerView(decoded.Header())
-	return view
+	return view, true
 }
 
 func (ls *LedgerState) incomingHeaderTipComparison(
@@ -4802,6 +4822,65 @@ func queuePeerHeaderHistoryInvalidation(
 	pending.addAfterUnlock(e.InvalidatePeerHeaderHistory)
 }
 
+// pinChainsyncHeaderVerdict pins generation for admitting e, verifying the
+// header again when the verdict expired first. It returns a nil release and a
+// nil error when the header is withheld, and an error, after queueing the
+// connection for recycling, when the header fails verification again: a
+// verdict that expired says nothing about the header, but a fresh failure is
+// the same rejection as the first verification's.
+func (ls *LedgerState) pinChainsyncHeaderVerdict(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+	generation uint64,
+	reverify func() (uint64, error),
+) (uint64, func(), error) {
+	pinned, release, err := ls.pinHeaderVerdict(generation, reverify)
+	if err != nil && !IsHeaderVerificationDeferred(err) {
+		return 0, nil, ls.rejectChainsyncHeaderVerification(e, pending, err)
+	}
+	if release == nil {
+		ls.config.Logger.Debug(
+			"withholding chainsync header after producer authorization changed before admission",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"error", err,
+		)
+		return generation, nil, nil
+	}
+	return pinned, release, nil
+}
+
+// rejectChainsyncHeaderVerification queues a recycle of the connection that
+// sent a header failing crypto verification and returns the failure.
+func (ls *LedgerState) rejectChainsyncHeaderVerification(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+	err error,
+) error {
+	if ls.config.EventBus != nil {
+		ls.config.Logger.Warn(
+			"recycling connection after header verification failure",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+		)
+		pending.add(
+			ls.config.EventBus,
+			ConnectionRecycleRequestedEventType,
+			event.NewEvent(
+				ConnectionRecycleRequestedEventType,
+				ConnectionRecycleRequestedEvent{
+					ConnectionId: e.ConnectionId,
+					Reason:       "header_verification_failure",
+				},
+			),
+		)
+	}
+	return fmt.Errorf("block header crypto verification failed: %w", err)
+}
+
 func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
@@ -4882,50 +4961,40 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			producerAuthorizationGeneration = 0
 			clearChainsyncHeaderAuthorization(&e)
 		default:
-			{
-				if ls.config.EventBus != nil {
-					ls.config.Logger.Warn(
-						"recycling connection after header verification failure",
-						"component", "ledger",
-						"connection_id", e.ConnectionId.String(),
-						"slot", e.Point.Slot,
-						"hash", hex.EncodeToString(e.Point.Hash),
-					)
-					pending.add(
-						ls.config.EventBus,
-						ConnectionRecycleRequestedEventType,
-						event.NewEvent(
-							ConnectionRecycleRequestedEventType,
-							ConnectionRecycleRequestedEvent{
-								ConnectionId: e.ConnectionId,
-								Reason:       "header_verification_failure",
-							},
-						),
-					)
-				}
-				return fmt.Errorf(
-					"block header crypto verification failed: %w",
-					err,
-				)
-			}
+			return ls.rejectChainsyncHeaderVerification(e, pending, err)
 		}
 	}
 	var releaseVerificationGeneration func()
 	verificationGenerationReleased := false
 	if headerCryptoVerificationGeneration != 0 {
-		var generationCurrent bool
-		releaseVerificationGeneration, generationCurrent = ls.
-			PinHeaderCryptoVerificationGeneration(
-				headerCryptoVerificationGeneration,
-			)
-		if !generationCurrent {
-			ls.config.Logger.Debug(
-				"withholding chainsync header after producer authorization changed before admission",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-			)
+		var reverify func() (uint64, error)
+		if headerValidationRequired {
+			reverify = func() (uint64, error) {
+				return ls.ValidateChainSelectionHeaderCryptoWithGeneration(
+					e.BlockHeader,
+				)
+			}
+		}
+		pinnedGeneration, release, err := ls.pinChainsyncHeaderVerdict(
+			e,
+			pending,
+			headerCryptoVerificationGeneration,
+			reverify,
+		)
+		if err != nil {
+			return err
+		}
+		if release == nil {
 			return nil
+		}
+		releaseVerificationGeneration = release
+		if pinnedGeneration != headerCryptoVerificationGeneration {
+			headerCryptoVerificationGeneration = pinnedGeneration
+			producerAuthorizationGeneration = pinnedGeneration
+			e.HeaderCryptoVerificationGeneration = pinnedGeneration
+			if e.PeerTipUpdate != nil {
+				e.PeerTipUpdate.HeaderCryptoVerificationGeneration = pinnedGeneration
+			}
 		}
 		defer func() {
 			if releaseVerificationGeneration != nil {
@@ -10237,6 +10306,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithClassicPParamsContext(
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "save_pots", func() error {
 			return ls.saveRewardAdaPotsForEpoch(
+				ctx,
 				txn,
 				currentEpoch.EpochId+1,
 				currentEpoch,
