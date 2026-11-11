@@ -82,6 +82,7 @@ func TestApplyStakeRewardsAppliesFirstShelleyRoundOnByronStart(t *testing.T) {
 		return ls.applyStakeRewards(
 			context.Background(), txn, firstShelley+1,
 			(firstShelley+1)*epochLength,
+			false,
 		)
 	}))
 	settleRewardCredits(t, ls)

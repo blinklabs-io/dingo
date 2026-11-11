@@ -894,6 +894,9 @@ func finishPendingTruncate(
 				err,
 			)
 		}
+		if err := db.LowerRollbackHighWater(pending.TargetID, txn); err != nil {
+			return fmt.Errorf("truncate: %w", err)
+		}
 		if err := db.DeleteSyncState(pendingTruncateSyncKey, txn); err != nil {
 			return fmt.Errorf("clear pending truncate marker: %w", err)
 		}

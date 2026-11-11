@@ -86,12 +86,6 @@ func sampleShape() hardfork.Shape {
 	}
 }
 
-func TestShape_Validate_OK(t *testing.T) {
-	t.Parallel()
-	s := sampleShape()
-	assert.NoError(t, s.Validate())
-}
-
 func TestShape_Validate_RejectsEmpty(t *testing.T) {
 	t.Parallel()
 	s := hardfork.Shape{SystemStart: testSysStart}

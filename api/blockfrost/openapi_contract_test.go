@@ -351,7 +351,6 @@ func TestPinnedOpenAPIResponseContracts(t *testing.T) {
 				operation.validSamplePath(t),
 				strings.NewReader(""),
 			)
-			request.Header.Set("Authorization", "Bearer "+testMutationAuthToken)
 			request.Header.Set(
 				"Content-Type",
 				operationRequestContentType(operation),

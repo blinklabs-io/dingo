@@ -59,7 +59,6 @@ func postEvaluate(
 	b := newTestBlockfrost(node)
 	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
 	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("project_id", testMutationAuthToken)
 	w := httptest.NewRecorder()
 	b.handler().ServeHTTP(w, req)
 	return w
@@ -527,7 +526,10 @@ func TestTransactionEvaluateStorageFailureIsNotAnEvaluationFailure(
 			}
 			adapter := &NodeAdapter{evaluator: evaluator}
 
-			result, err := adapter.TransactionEvaluate(t.Context(), submitTestTxCbor(t))
+			result, err := adapter.TransactionEvaluate(
+				t.Context(),
+				submitTestTxCbor(t),
+			)
 
 			require.Error(t, err)
 			assert.Nil(t, result)

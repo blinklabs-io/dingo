@@ -33,9 +33,9 @@
 <text x="86" y="360.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Claude Code · Cursor</text>
 <text x="86" y="382.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Codex</text>
 <text x="378" y="326.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#152238">Security middleware</text>
-<text x="378" y="358.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Origin · bearer auth</text>
+<text x="378" y="358.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Origin validation</text>
 <text x="378" y="380.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Rate limit</text>
-<text x="378" y="403.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Public bind: TLS + auth</text>
+<text x="378" y="403.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Anonymous HTTP</text>
 <text x="378" y="536.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#152238">HTTP transports</text>
 <text x="378" y="568.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Streamable HTTP · SSE</text>
 <text x="378" y="590.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Health endpoints</text>

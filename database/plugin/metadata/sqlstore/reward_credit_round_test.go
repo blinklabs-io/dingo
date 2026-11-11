@@ -194,8 +194,8 @@ func bytesRepeat(value byte, count int) []byte {
 func TestRollbackRewardCreditUnfoldUsesEpochIndex(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
-	plan := queryPlan(t, store.writeDB, rollbackUnfoldRewardAccountOutputsSQL, 100)
-	require.Contains(t, plan, "idx_reward_account_output_epoch_cred_pool_type")
+	plan := queryPlan(t, store.writeDB, store.rollbackUnfoldRewardAccountOutputsSQL(), 100)
+	require.Contains(t, plan, "idx_reward_account_output_epoch_pool_cred_type")
 	require.NotContains(t, plan, "SCAN reward_account_output")
 	require.True(t, strings.Contains(plan, "SEARCH reward_account_output"), plan)
 }

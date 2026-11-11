@@ -4199,11 +4199,31 @@ func observedHeaderTip(e ChainsyncEvent) ochainsync.Tip {
 	}
 }
 
+// LocalTipPraosView returns the Praos tiebreaker view of the header of the
+// block at tip, and false when the ledger is nil or the block cannot be read
+// or decoded. A Byron block yields true with a view carrying only its block
+// kind.
+func (ls *LedgerState) LocalTipPraosView(
+	tip ochainsync.Tip,
+) (praos.PraosTiebreakerView, bool) {
+	if ls == nil {
+		return praos.PraosTiebreakerView{}, false
+	}
+	return ls.localTipPraosViewOK(ls.lifecycleContext(), tip)
+}
+
 func (ls *LedgerState) localTipPraosView(ctx context.Context,
 	localTip ochainsync.Tip,
 ) praos.PraosTiebreakerView {
+	view, _ := ls.localTipPraosViewOK(ctx, localTip)
+	return view
+}
+
+func (ls *LedgerState) localTipPraosViewOK(ctx context.Context,
+	localTip ochainsync.Tip,
+) (praos.PraosTiebreakerView, bool) {
 	if ls == nil || ls.db == nil || len(localTip.Point.Hash) == 0 {
-		return praos.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}, false
 	}
 	block, err := database.BlockByHash(
 		ctx,
@@ -4220,7 +4240,7 @@ func (ls *LedgerState) localTipPraosView(ctx context.Context,
 				"error", err,
 			)
 		}
-		return praos.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}, false
 	}
 	decoded, err := block.Decode()
 	if err != nil {
@@ -4233,13 +4253,13 @@ func (ls *LedgerState) localTipPraosView(ctx context.Context,
 				"error", err,
 			)
 		}
-		return praos.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}, false
 	}
 	if decoded == nil {
-		return praos.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}, false
 	}
 	view, _ := praos.GetPraosTiebreakerView(decoded.Header())
-	return view
+	return view, true
 }
 
 func (ls *LedgerState) incomingHeaderTipComparison(
@@ -4845,6 +4865,65 @@ func queuePeerHeaderHistoryInvalidation(
 	pending.addAfterUnlock(e.InvalidatePeerHeaderHistory)
 }
 
+// pinChainsyncHeaderVerdict pins generation for admitting e, verifying the
+// header again when the verdict expired first. It returns a nil release and a
+// nil error when the header is withheld, and an error, after queueing the
+// connection for recycling, when the header fails verification again: a
+// verdict that expired says nothing about the header, but a fresh failure is
+// the same rejection as the first verification's.
+func (ls *LedgerState) pinChainsyncHeaderVerdict(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+	generation uint64,
+	reverify func() (uint64, error),
+) (uint64, func(), error) {
+	pinned, release, err := ls.pinHeaderVerdict(generation, reverify)
+	if err != nil && !IsHeaderVerificationDeferred(err) {
+		return 0, nil, ls.rejectChainsyncHeaderVerification(e, pending, err)
+	}
+	if release == nil {
+		ls.config.Logger.Debug(
+			"withholding chainsync header after producer authorization changed before admission",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"error", err,
+		)
+		return generation, nil, nil
+	}
+	return pinned, release, nil
+}
+
+// rejectChainsyncHeaderVerification queues a recycle of the connection that
+// sent a header failing crypto verification and returns the failure.
+func (ls *LedgerState) rejectChainsyncHeaderVerification(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+	err error,
+) error {
+	if ls.config.EventBus != nil {
+		ls.config.Logger.Warn(
+			"recycling connection after header verification failure",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+		)
+		pending.add(
+			ls.config.EventBus,
+			ConnectionRecycleRequestedEventType,
+			event.NewEvent(
+				ConnectionRecycleRequestedEventType,
+				ConnectionRecycleRequestedEvent{
+					ConnectionId: e.ConnectionId,
+					Reason:       "header_verification_failure",
+				},
+			),
+		)
+	}
+	return fmt.Errorf("block header crypto verification failed: %w", err)
+}
+
 func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
@@ -4925,50 +5004,40 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			producerAuthorizationGeneration = 0
 			clearChainsyncHeaderAuthorization(&e)
 		default:
-			{
-				if ls.config.EventBus != nil {
-					ls.config.Logger.Warn(
-						"recycling connection after header verification failure",
-						"component", "ledger",
-						"connection_id", e.ConnectionId.String(),
-						"slot", e.Point.Slot,
-						"hash", hex.EncodeToString(e.Point.Hash),
-					)
-					pending.add(
-						ls.config.EventBus,
-						ConnectionRecycleRequestedEventType,
-						event.NewEvent(
-							ConnectionRecycleRequestedEventType,
-							ConnectionRecycleRequestedEvent{
-								ConnectionId: e.ConnectionId,
-								Reason:       "header_verification_failure",
-							},
-						),
-					)
-				}
-				return fmt.Errorf(
-					"block header crypto verification failed: %w",
-					err,
-				)
-			}
+			return ls.rejectChainsyncHeaderVerification(e, pending, err)
 		}
 	}
 	var releaseVerificationGeneration func()
 	verificationGenerationReleased := false
 	if headerCryptoVerificationGeneration != 0 {
-		var generationCurrent bool
-		releaseVerificationGeneration, generationCurrent = ls.
-			PinHeaderCryptoVerificationGeneration(
-				headerCryptoVerificationGeneration,
-			)
-		if !generationCurrent {
-			ls.config.Logger.Debug(
-				"withholding chainsync header after producer authorization changed before admission",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-			)
+		var reverify func() (uint64, error)
+		if headerValidationRequired {
+			reverify = func() (uint64, error) {
+				return ls.ValidateChainSelectionHeaderCryptoWithGeneration(
+					e.BlockHeader,
+				)
+			}
+		}
+		pinnedGeneration, release, err := ls.pinChainsyncHeaderVerdict(
+			e,
+			pending,
+			headerCryptoVerificationGeneration,
+			reverify,
+		)
+		if err != nil {
+			return err
+		}
+		if release == nil {
 			return nil
+		}
+		releaseVerificationGeneration = release
+		if pinnedGeneration != headerCryptoVerificationGeneration {
+			headerCryptoVerificationGeneration = pinnedGeneration
+			producerAuthorizationGeneration = pinnedGeneration
+			e.HeaderCryptoVerificationGeneration = pinnedGeneration
+			if e.PeerTipUpdate != nil {
+				e.PeerTipUpdate.HeaderCryptoVerificationGeneration = pinnedGeneration
+			}
 		}
 		defer func() {
 			if releaseVerificationGeneration != nil {
@@ -9539,13 +9608,53 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	classicPParamsApplied bool,
 	plutusV2CostModelWritten bool,
 	transitionHardForkMajors []uint,
-) (result *EpochRolloverResult, err error) {
-	_, span := tracing.Start(
-		ls.catchupContext(ctx),
-		"ledger.epoch_transition",
-		tracing.Uint64("epoch", currentEpoch.EpochId),
+) (*EpochRolloverResult, error) {
+	return ls.processEpochRolloverWithOptions(
+		ctx,
+		txn,
+		currentEpoch,
+		currentEra,
+		currentPParams,
+		classicPParamsApplied,
+		plutusV2CostModelWritten,
+		transitionHardForkMajors,
+		false,
 	)
-	defer func() { tracing.End(span, err) }()
+}
+
+// processEpochRolloverWithOptions is the epoch rollover. validationOnly marks
+// a rollover that only derives the next epoch's state inside a transaction the
+// caller rolls back, to validate against it. It must leave no trace outside
+// that transaction, so it skips every rule that calls into the snapshot
+// manager (its shared pending SNAP distribution, deferred captures and staged
+// reward inputs), schedules no background boundary job, and records no phase
+// metrics. It also skips RATIFY, which only marks proposals for the next
+// boundary's enactment, because that needs the boundary's mark snapshot.
+func (ls *LedgerState) processEpochRolloverWithOptions(
+	ctx context.Context,
+	txn *database.Txn,
+	currentEpoch models.Epoch,
+	currentEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	classicPParamsApplied bool,
+	plutusV2CostModelWritten bool,
+	transitionHardForkMajors []uint,
+	validationOnly bool,
+) (result *EpochRolloverResult, err error) {
+	timePhase := ls.timeRolloverPhase
+	if validationOnly {
+		timePhase = func(_ uint64, _ string, fn func() error) error {
+			return fn()
+		}
+	}
+	if !validationOnly {
+		_, span := tracing.Start(
+			ls.catchupContext(ctx),
+			"ledger.epoch_transition",
+			tracing.Uint64("epoch", currentEpoch.EpochId),
+		)
+		defer func() { tracing.End(span, err) }()
+	}
 	// Fail closed at the top of the production rollover path rather than
 	// letting a nil config reach one of the several unchecked
 	// ls.config.CardanoNodeConfig dereferences below (e.g. the
@@ -9701,7 +9810,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// body issues SQL within `txn` that may join against `pparams` rows.
 	if currentEpoch.EraId == eras.ByronEraDesc.Id &&
 		currentEra.Id != eras.ByronEraDesc.Id {
-		if err := ls.timeRolloverPhase(
+		if err := timePhase(
 			currentEpoch.EpochId+1, "byron_translation", func() error {
 				return ls.applyByronTranslationReserves(
 					txn,
@@ -9715,18 +9824,21 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 			)
 		}
 	}
-	if err := ls.timeRolloverPhase(
+	if err := timePhase(
 		currentEpoch.EpochId+1, "ratify_consume", func() error {
-			return ls.consumePendingRatification(ctx, txn)
+			return ls.consumePendingRatificationWithOptions(
+				ctx, txn, validationOnly,
+			)
 		},
 	); err != nil {
 		return nil, fmt.Errorf("apply pending ratification: %w", err)
 	}
 
-	if err := ls.timeRolloverPhase(
+	if err := timePhase(
 		currentEpoch.EpochId+1, "reward_apply", func() error {
 			return ls.applyStakeRewards(ctx,
 				txn, currentEpoch.EpochId+1, epochStartSlot,
+				validationOnly,
 			)
 		},
 	); err != nil {
@@ -9743,7 +9855,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// precedes both SNAP and POOLREAP: its credits are part of the mark snapshot
 	// and its pot movements are visible to POOLREAP, governance and the ADA-pot
 	// capture below.
-	if err := ls.timeRolloverPhase(
+	if err := timePhase(
 		currentEpoch.EpochId+1, "mir", func() error {
 			return ls.applyMIRCerts(ctx,
 				txn, currentEpoch.StartSlot, epochStartSlot, currentEpoch.EraId,
@@ -9768,16 +9880,20 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// the live read's hook the boundary keeps its own capture. HARDFORK and era transitions rewrite state the
 	// reconstruction reads, and CIP-0163 activation restamps expiries after
 	// SNAP, so those boundaries capture it here.
-	snapDeferred := ls.deferredBoundarySnapshotHook.Load() != nil &&
+	snapDeferred := !validationOnly &&
+		ls.deferredBoundarySnapshotHook.Load() != nil &&
 		ls.epochBoundarySnapshotStakeHook() != nil &&
 		ls.epochBoundarySnapshotHook() != nil &&
 		!ls.ratifyAtBoundary &&
 		currentEra.Id == eras.ConwayEraDesc.Id &&
 		!ls.config.DelegatorInactivityEnabled
-	if currentEra.Id >= eras.DijkstraEraDesc.Id {
+	if validationOnly {
+		// No SNAP read: it only feeds the mark snapshot a validation-only
+		// rollover never writes.
+	} else if currentEra.Id >= eras.DijkstraEraDesc.Id {
 		// Dijkstra captures SNAP after enactment below.
 	} else if snapDeferred {
-		if err := ls.timeRolloverPhase(
+		if err := timePhase(
 			currentEpoch.EpochId+1, "snap_capture", func() error {
 				return ls.captureDeferredBoundarySnapshot(
 					txn, currentEpoch.EpochId, epochStartSlot,
@@ -9786,7 +9902,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 		); err != nil {
 			return nil, fmt.Errorf("capture SNAP-point pool retirements: %w", err)
 		}
-	} else if err := ls.timeRolloverPhase(
+	} else if err := timePhase(
 		currentEpoch.EpochId+1, "snap", func() error {
 			return ls.captureEpochBoundarySnapshotStake(
 				txn, currentEpoch, epochStartSlot, 0,
@@ -9809,8 +9925,9 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// governance silently fall back to reading the not-yet-written row and
 	// see zero SPO stake for every gated action at every boundary.
 	var currentBoundarySPOState *governance.SPOVotingState
-	if !snapDeferred && currentEra.Id < eras.DijkstraEraDesc.Id {
-		if err := ls.timeRolloverPhase(
+	if !validationOnly && !snapDeferred &&
+		currentEra.Id < eras.DijkstraEraDesc.Id {
+		if err := timePhase(
 			currentEpoch.EpochId+1, "spo_state_resolve", func() error {
 				var err error
 				currentBoundarySPOState, err = ls.currentBoundarySPOStakeState(
@@ -9831,7 +9948,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 		if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 			updateQuorum = shelleyGenesis.UpdateQuorum
 		}
-		if err := ls.timeRolloverPhase(
+		if err := timePhase(
 			currentEpoch.EpochId+1, "pparam_updates", func() error {
 				var err error
 				newPParams, plutusV2CostModelWritten, err = ls.db.ComputeAndApplyPParamUpdates(
@@ -9874,7 +9991,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// any deposit that lands in the treasury (unregistered/inactive reward
 	// account) is visible to the withdrawals checked in
 	// governance.ProcessEpoch below.
-	if err := ls.timeRolloverPhase(
+	if err := timePhase(
 		currentEpoch.EpochId+1, "pool_reap", func() error {
 			return ls.applyPoolRetirements(ctx,
 				txn, currentEpoch.EpochId+1, epochStartSlot,
@@ -9889,7 +10006,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// receives the same full window starting at the activation boundary. The
 	// new epoch row is persisted later in this transaction; the stamp and
 	// durable marker still commit or roll back atomically with it.
-	if err := ls.timeRolloverPhase(
+	if err := timePhase(
 		currentEpoch.EpochId+1, "inactivity_activation", func() error {
 			return ls.activateDelegatorInactivityIfNeeded(ctx,
 				txn, currentEpoch.EpochId+1,
@@ -9919,24 +10036,25 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 		)
 	}
 	var govOut *governance.EpochOutput
-	if err := ls.timeRolloverPhase(
+	if err := timePhase(
 		currentEpoch.EpochId+1, "governance", func() error {
 			var err error
 			govOut, err = governance.ProcessEpoch(ctx, &governance.EpochInput{
-				DB:                       ls.db,
-				Txn:                      txn,
-				Logger:                   ls.config.Logger,
-				PrevEpoch:                currentEpoch.EpochId,
-				NewEpoch:                 currentEpoch.EpochId + 1,
-				BoundarySlot:             epochStartSlot,
-				PrevEpochStartSlot:       currentEpoch.StartSlot,
-				PParams:                  newPParams,
-				UpdateFn:                 currentEra.PParamsUpdateFunc,
-				ConwayGenesis:            conwayGenesis,
-				DelegatorInactivityOn:    ls.config.DelegatorInactivityEnabled,
-				CurrentBoundarySPOState:  currentBoundarySPOState,
-				DeferRatification:        true,
-				BoundarySPOStateDeferred: snapDeferred || currentEra.Id >= eras.DijkstraEraDesc.Id,
+				DB:                      ls.db,
+				Txn:                     txn,
+				Logger:                  ls.config.Logger,
+				PrevEpoch:               currentEpoch.EpochId,
+				NewEpoch:                currentEpoch.EpochId + 1,
+				BoundarySlot:            epochStartSlot,
+				PrevEpochStartSlot:      currentEpoch.StartSlot,
+				PParams:                 newPParams,
+				UpdateFn:                currentEra.PParamsUpdateFunc,
+				ConwayGenesis:           conwayGenesis,
+				DelegatorInactivityOn:   ls.config.DelegatorInactivityEnabled,
+				CurrentBoundarySPOState: currentBoundarySPOState,
+				DeferRatification:       true,
+				BoundarySPOStateDeferred: snapDeferred || validationOnly ||
+					currentEra.Id >= eras.DijkstraEraDesc.Id,
 				PendingTreasuryDonations: pendingDonations,
 			})
 			return err
@@ -9961,8 +10079,11 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	}
 	var deferredPlan *governance.RatificationPlan
 	applyRatification := func() error {
+		if validationOnly {
+			return nil
+		}
 		if plan := govOut.Ratification; plan != nil {
-			if err := ls.timeRolloverPhase(
+			if err := timePhase(
 				currentEpoch.EpochId+1, "ratify", func() error {
 					if ls.ratifyAtBoundary ||
 						hardForkHere {
@@ -10010,7 +10131,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// treasury withdrawals (handled in governance.ProcessEpoch above), so an
 	// enacted withdrawal is checked against the pre-donation treasury, while
 	// the RATIFY pass already counted them through PendingTreasuryDonations.
-	if err := ls.timeRolloverPhase(
+	if err := timePhase(
 		currentEpoch.EpochId+1, "donations", func() error {
 			return ls.applyEpochDonations(
 				txn, currentEpoch.EpochId, epochStartSlot,
@@ -10120,7 +10241,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// the HARDFORK point, after reward and governance pot changes, so a later
 	// rule cannot overwrite the transition's reserve or treasury updates.
 	if len(transitionHardForkMajors) > 0 {
-		if err := ls.timeRolloverPhase(
+		if err := timePhase(
 			currentEpoch.EpochId+1,
 			"hardfork",
 			func() error {
@@ -10141,7 +10262,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// Conway pv9→pv10. Inter-era transition rules above use the same HARDFORK
 	// point in the EPOCH sequence.
 	if oldErr == nil && newErr == nil && oldVer.Major != newVer.Major {
-		if err := ls.timeRolloverPhase(
+		if err := timePhase(
 			currentEpoch.EpochId+1, "hardfork", func() error {
 				return ls.applyIntraEraHardForkRule(
 					ctx,
@@ -10162,9 +10283,10 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// AVVM-removal reserves top-up).
 	// This row seeds the delayed reward calculation for a later epoch, so it
 	// must observe the fully settled pots for the ended epoch.
-	if err := ls.timeRolloverPhase(
+	if err := timePhase(
 		currentEpoch.EpochId+1, "save_pots", func() error {
 			return ls.saveRewardAdaPotsForEpoch(
+				ctx,
 				txn,
 				currentEpoch.EpochId+1,
 				currentEpoch,
@@ -10237,12 +10359,14 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 		"epoch", fmt.Sprintf("%+v", result.NewCurrentEpoch),
 		"component", "ledger",
 	)
-	ls.observeRolloverPhase(
-		currentEpoch.EpochId+1, "epoch_record", time.Since(epochRecordStart),
-		nil,
-	)
+	if !validationOnly {
+		ls.observeRolloverPhase(
+			currentEpoch.EpochId+1, "epoch_record",
+			time.Since(epochRecordStart), nil,
+		)
+	}
 
-	if snapshotAfterEnactment {
+	if snapshotAfterEnactment && !validationOnly {
 		// Dijkstra EPOCH moves SNAP after POOLREAP, enactment and HARDFORK.
 		// RATIFY must use this same mark distribution for its next pulser.
 		if err := ls.captureEpochBoundarySnapshotStake(
@@ -10273,11 +10397,12 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// CaptureGenesisSnapshot at startup.
 	var snapshotEvt *event.EpochTransitionEvent
 	switch {
+	case validationOnly:
 	case snapDeferred:
 		evt := ls.boundarySnapshotEvent(currentEpoch, result)
 		snapshotEvt = &evt
 	default:
-		if err := ls.timeRolloverPhase(
+		if err := timePhase(
 			currentEpoch.EpochId+1, "snap_persist", func() error {
 				return ls.captureEpochBoundarySnapshot(ctx,
 					txn, currentEpoch, result,
@@ -10288,7 +10413,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 		}
 	}
 	if deferredPlan != nil || snapshotEvt != nil {
-		if err := ls.timeRolloverPhase(
+		if err := timePhase(
 			currentEpoch.EpochId+1, "defer", func() error {
 				return ls.deferBoundaryJob(ctx,
 					txn, currentEpoch.EpochId+1, epochStartSlot,

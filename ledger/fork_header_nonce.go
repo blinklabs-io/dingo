@@ -46,6 +46,7 @@ type peerForkPathPrefix struct {
 	ancestorCrypto peerForkAncestorPrefix
 	ancestorState  peerForkAncestorPrefix
 	ancestor       models.Block
+	unresolved     bool
 	headers        []gledger.BlockHeader
 	generation     uint64
 	opCertLastHash []byte
@@ -917,12 +918,13 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 	)
 	validCached := cachedOK && headerVerdictInContext(
 		cached.generation, contextGeneration, verificationGeneration,
-	) && ls.peerForkAncestorOnChain(ctx, cachedAncestor)
+	) && (cached.unresolved ||
+		ls.peerForkAncestorOnChain(ctx, cachedAncestor))
 	// A cancelled membership read reports the cached anchor absent.
 	if err := ctx.Err(); err != nil {
 		return ocommon.Point{}, nil, false, err
 	}
-	if validCached {
+	if validCached && !cached.unresolved {
 		var err error
 		cached, err = ls.trimPeerForkPathAtAppliedTip(
 			ctx,
@@ -940,7 +942,8 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 	}
 	if validCached && len(cached.headers) > 0 {
 		lastHeader := cached.headers[len(cached.headers)-1]
-		if bytes.Equal(lastHeader.Hash().Bytes(), header.Hash().Bytes()) {
+		if !cached.unresolved &&
+			bytes.Equal(lastHeader.Hash().Bytes(), header.Hash().Bytes()) {
 			tipOnCachedPath := false
 			if tip := ls.loadTipSnapshot(); tip != nil {
 				point := tip.currentTip.Point
@@ -967,6 +970,21 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 		// cached header. While the chain tip is below all of them the walk
 		// would read every ancestor and defer, so defer without the walk.
 		if limit := ls.peerHeaderHistoryLimit(); len(cached.headers) > limit {
+			//nolint:gosec // G115: the history limit is never negative
+			walkSpan := uint64(limit)
+			if cached.unresolved &&
+				(bytes.Equal(lastHeader.Hash().Bytes(), header.Hash().Bytes()) ||
+					bytes.Equal(cached.overflowTail, header.Hash().Bytes())) &&
+				header.BlockNumber() > 0 &&
+				ls.chain.Tip().BlockNumber+walkSpan <
+					header.BlockNumber()-1 {
+				if contextChanged() {
+					return ocommon.Point{}, nil, false,
+						errHeaderVerificationContextChanged
+				}
+				return ocommon.Point{}, nil, false,
+					errHeaderVerificationDeferred
+			}
 			prevHash := header.PrevHash().Bytes()
 			parentDepth, extends := uint64(0), false
 			switch {
@@ -978,8 +996,6 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 			}
 			// The lowest ancestor the walk reads is at parentNumber-limit.
 			parentNumber := lastHeader.BlockNumber() + parentDepth
-			//nolint:gosec // G115: the history limit is never negative
-			walkSpan := uint64(limit)
 			if extends && ls.chain.Tip().BlockNumber+walkSpan < parentNumber {
 				ls.markPeerForkPathOverflow(
 					key,
@@ -988,6 +1004,10 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 					parentDepth,
 					header,
 				)
+				if contextChanged() {
+					return ocommon.Point{}, nil, false,
+						errHeaderVerificationContextChanged
+				}
 				return ocommon.Point{}, nil, false,
 					errHeaderVerificationDeferred
 			}
@@ -1128,12 +1148,22 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				err,
 			)
 		}
-		key := string(prevHash)
-		if _, ok := visited[key]; ok {
+		hashKey := string(prevHash)
+		if _, ok := visited[hashKey]; ok {
 			return ocommon.Point{}, nil, false, nil
 		}
-		visited[key] = struct{}{}
+		visited[hashKey] = struct{}{}
 		if remaining == 0 {
+			slices.Reverse(pathReversed)
+			if contextChanged() {
+				return ocommon.Point{}, nil, false,
+					errHeaderVerificationContextChanged
+			}
+			ls.storeDeferredPeerForkPathPrefix(
+				key,
+				pathReversed,
+				verificationGeneration,
+			)
 			return ocommon.Point{}, nil, false, errHeaderVerificationDeferred
 		}
 		event, nextPrevHash, ok := ls.config.PeerHeaderLookupFunc(
@@ -1163,6 +1193,26 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 		}
 		pathReversed = append(pathReversed, event.BlockHeader)
 		prevHash = append(prevHash[:0], nextPrevHash...)
+	}
+}
+
+// storeDeferredPeerForkPathPrefix retains a bounded peer path whose ancestry
+// walk did not reach the primary chain. It can only suppress another walk while
+// the local tip is still below every ancestor that walk could reach.
+func (ls *LedgerState) storeDeferredPeerForkPathPrefix(
+	key string,
+	headers []gledger.BlockHeader,
+	generation uint64,
+) {
+	ls.forkHeaderNonceCacheMutex.Lock()
+	defer ls.forkHeaderNonceCacheMutex.Unlock()
+	if ls.forkHeaderPathCache == nil {
+		ls.forkHeaderPathCache = make(map[string]peerForkPathPrefix)
+	}
+	ls.forkHeaderPathCache[key] = peerForkPathPrefix{
+		unresolved: true,
+		headers:    slices.Clone(headers),
+		generation: generation,
 	}
 }
 

@@ -752,7 +752,9 @@ func TestPeerNetworkLeavesNoGoroutinesBehind(t *testing.T) {
 			SocketPath:     shortSocketPath(t),
 			Authenticator:  newTestAuthenticator(),
 			MessageBodyMin: 1,
-			Peers:          &cfg,
+			// Both messages share one fixture key and must cross together.
+			MinPoolMessageInterval: -1,
+			Peers:                  &cfg,
 		})
 		require.NoError(t, err)
 		require.NoError(t, s.Start(t.Context()))
