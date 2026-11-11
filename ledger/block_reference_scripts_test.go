@@ -107,11 +107,18 @@ func additionalReferenceLedger(
 		activeEras:     []eras.EraDesc{era},
 		currentEra:     era,
 		currentPParams: pp,
+		currentEpoch: models.Epoch{
+			StartSlot:     0,
+			LengthInSlots: 100_000,
+			SlotLength:    1_000,
+			EraId:         era.Id,
+		},
 		config: LedgerStateConfig{
 			Logger:            testLogger(),
 			CardanoNodeConfig: cfg,
 		},
 	}
+	ls.epochCache = []models.Epoch{ls.currentEpoch}
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 	return ls, sentinel
@@ -475,10 +482,19 @@ func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
 				db:             db,
 				currentEra:     eras.ConwayEraDesc,
 				currentPParams: pp,
+				currentEpoch: models.Epoch{
+					StartSlot:     0,
+					LengthInSlots: 100_000,
+					SlotLength:    1_000,
+					EraId:         eras.ConwayEraDesc.Id,
+				},
 				config: LedgerStateConfig{
+					Logger:                   testLogger(),
 					SkipDijkstraTxValidation: tc.prototype,
 				},
 			}
+			ls.epochCache = []models.Epoch{ls.currentEpoch}
+			ls.metrics.init(prometheus.NewRegistry())
 			if tc.previous {
 				ls.activeEras = eras.ErasWithDijkstra
 				ls.currentEra = eras.DijkstraEraDesc
@@ -499,6 +515,18 @@ func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
 						context.Background(),
 						block,
 					),
+				)
+				// Full forged validation reaches the same aggregate check
+				// through its session and must honor the same bypass.
+				var forgedErr error
+				require.NotPanics(t, func() {
+					forgedErr = ls.validateForgedTxs(context.Background(), block)
+				})
+				require.NotContains(
+					t,
+					fmt.Sprint(forgedErr),
+					"resolve consumed reference-script input",
+					"forged validation must not apply the aggregate rule under the bypass",
 				)
 				return
 			}
