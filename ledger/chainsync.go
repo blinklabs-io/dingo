@@ -4821,19 +4821,37 @@ func queuePeerHeaderHistoryInvalidation(
 
 // pinChainsyncHeaderVerdict pins generation for admitting e, verifying the
 // header again when the verdict expired first. It returns a nil release and a
-// nil error when the header is withheld, and an error, after queueing the
+// nil error when no verdict could be pinned, and an error, after queueing the
 // connection for recycling, when the header fails verification again: a
 // verdict that expired says nothing about the header, but a fresh failure is
 // the same rejection as the first verification's.
+//
+// With no verdict pinned, a header that mustAuthorize is withheld and the
+// expired generation is returned. Any other header is queued without producer
+// authorization and zero is returned, as for a verdict that had expired
+// before admission began. Withholding it would leave a hole in the
+// connection's headers: the next one does not fit the queue, which is then
+// discarded and the peer re-intersected. A block publication waiting on the
+// pin's lock expires the verdict between the currency check and the pin.
 func (ls *LedgerState) pinChainsyncHeaderVerdict(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
 	generation uint64,
 	reverify func() (uint64, error),
+	mustAuthorize bool,
 ) (uint64, func(), error) {
 	pinned, release, err := ls.pinHeaderVerdict(generation, reverify)
 	if err != nil && !IsHeaderVerificationDeferred(err) {
 		return 0, nil, ls.rejectChainsyncHeaderVerification(e, pending, err)
+	}
+	if release == nil && !mustAuthorize {
+		ls.config.Logger.Debug(
+			"queueing chainsync header without producer authorization after it expired before admission",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+		)
+		return 0, nil, nil
 	}
 	if release == nil {
 		ls.config.Logger.Debug(
@@ -4977,12 +4995,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			pending,
 			headerCryptoVerificationGeneration,
 			reverify,
+			headerValidationRequired || headerTrusted,
 		)
 		if err != nil {
 			return err
 		}
-		if release == nil {
+		if release == nil && pinnedGeneration != 0 {
 			return nil
+		}
+		if release == nil {
+			headerCryptoVerified = false
 		}
 		releaseVerificationGeneration = release
 		if pinnedGeneration != headerCryptoVerificationGeneration {
