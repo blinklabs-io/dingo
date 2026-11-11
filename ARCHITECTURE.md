@@ -801,8 +801,20 @@ between its verification and its pin (`pinHeaderVerdict`) is verified again, up
 to three times while each new verdict expires the same way, before the header
 is withheld; a verification that defers ends those attempts and withholds the
 header, and a header that fails verification is rejected and its connection
-recycled, as on its first. A snapshot publication or validation transition
-also waits and retries a local extension: otherwise an unstamped header can
+recycled, as on its first. A header that queue admission does not have to
+authorize, because its epoch nonce is not cached and it is not covered by a
+Mithril certificate, has nothing to verify again there: when a publication
+expires its verdict before the pin it is queued without producer
+authorization, as it is when the verdict had expired on arrival. Withholding
+it would leave a hole in the connection's headers, so the next one would not
+fit and the header queue would be discarded. The deferred selector callback
+(`pinSettledHeaderAdmission`) runs after queue admission releases its pin, so
+a publication waiting on that pin expires the verdict first. It verifies a
+header that is still queued against the current publication, through the
+connection's own verifier and up to four times, and keeps the admission;
+a header that left the queue or fails that verification loses it, which
+discards the queue and re-intersects the peer. A snapshot publication or
+validation transition also waits and retries a local extension: otherwise an unstamped header can
 be withheld by corroboration while its peer cursor advances past it. Other
 deferrals on local extensions are forwarded unverified at once because
 missing epoch data may require applying that header's own block to settle.
@@ -2821,7 +2833,11 @@ paths, where the point is to report before the goroutine unwinds.
   pre-queued request reserved, so a same-connection redispatch waits for its
   terminal event. A request a teardown released is remembered by ID; its late
   terminal event releases nothing, and consumes the latch only when the latch
-  was armed for it.
+  was armed for it. Until that event arrives its blocks are dropped by
+  request ID: a resync that re-intersects in place keeps the connection, the
+  next request is dispatched on it while the peer still streams the released
+  one, and the connection alone no longer says which request a block belongs
+  to.
 - The blast radius of such a stall is not local.
   `LedgerState.handleConnectionClosedEvent` takes `chainsyncMutex`, so a stall
   there stops `ledger.conn_closed` draining; the `node.go` handler translating
