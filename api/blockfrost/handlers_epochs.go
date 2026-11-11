@@ -254,7 +254,7 @@ func (b *Blockfrost) handleEpochBlocks(
 	if !ok {
 		return
 	}
-	servePage(
+	serveBlockPage(
 		b,
 		w,
 		r,
@@ -276,7 +276,7 @@ func (b *Blockfrost) handleEpochPoolBlocks(
 	if !ok {
 		return
 	}
-	servePage(
+	serveBlockPage(
 		b,
 		w,
 		r,
