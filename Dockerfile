@@ -1,4 +1,4 @@
-FROM ghcr.io/blinklabs-io/go:1.27.3-1@sha256:3e5e8c2d5b52421d1d54d49a607463deca214b27fb1b0378b1aa883d1e6cfe1e AS build
+FROM ghcr.io/blinklabs-io/go:1.27.4-1@sha256:53a984fecb32c7da136bf0a9cf1d36f4cb4ee45f928cfb61bc9ef8623728537f AS build
 
 ARG VERSION
 ARG COMMIT_HASH

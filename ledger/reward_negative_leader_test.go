@@ -203,6 +203,7 @@ func TestApplyStakeRewardsNegativeLeaderRewardUnregisteredAccount(t *testing.T) 
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			return ls.applyStakeRewards(context.Background(),
 				txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
+				false,
 			)
 		}))
 		state, err := meta.GetNetworkState(nil)
@@ -240,6 +241,7 @@ func TestApplyStakeRewardsNegativeLeaderRewardRegisteredAccountStops(t *testing.
 	err := txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
+			false,
 		)
 	})
 	require.ErrorIs(t, err, rewards.ErrNegativeLeaderReward)
@@ -331,6 +333,7 @@ func TestNegativeLeaderRewardExpiredRewardAccountIsGuarded(t *testing.T) {
 	require.NoError(t, applyTxn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
+			false,
 		)
 	}))
 	outputs, err := db.Metadata().GetRewardAccountOutputs(
@@ -353,6 +356,7 @@ func TestApplyStakeRewardsPersistsNegativeLeaderRewardDeficit(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
+			false,
 		)
 	}))
 	outputs, err := db.Metadata().GetRewardPoolOutputs(
