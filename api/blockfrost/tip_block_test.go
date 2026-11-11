@@ -93,11 +93,13 @@ func TestLatestBlockTipUnavailableIs503(t *testing.T) {
 	for _, path := range []string{
 		"/api/v0/blocks/latest",
 		"/api/v0/blocks/latest/txs",
+		"/api/v0/blocks/latest/txs/cbor",
 	} {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()
 			err := fmt.Errorf("get latest block: %w", ErrTipBlockUnavailable)
 			node := &mockNode{blockErr: err, txHashesErr: err}
+			node.navErr = err
 			b := newTestBlockfrost(node)
 			w := httptest.NewRecorder()
 			b.handler().ServeHTTP(
