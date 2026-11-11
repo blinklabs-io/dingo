@@ -6743,9 +6743,19 @@ func newRewardCalculationTestLedger(
 	t testing.TB,
 ) (*LedgerState, *database.Database) {
 	t.Helper()
+	return newRewardCalculationTestLedgerInDir(t, t.TempDir())
+}
+
+// newRewardCalculationTestLedgerInDir is newRewardCalculationTestLedger over
+// a caller-chosen data directory, for tests that inspect the database files.
+func newRewardCalculationTestLedgerInDir(
+	t testing.TB,
+	dataDir string,
+) (*LedgerState, *database.Database) {
+	t.Helper()
 	cfg := newRewardCalculationTestNodeConfig(t)
 	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: t.TempDir(),
+		DataDir: dataDir,
 	})
 	require.NoError(t, err)
 	ls := &LedgerState{

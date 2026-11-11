@@ -16,9 +16,12 @@ package ledger
 
 import (
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"math/big"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"testing"
@@ -1169,5 +1172,67 @@ func TestChunkedRewardPrecomputePlansAheadWhileWriteTurnIsHeld(t *testing.T) {
 		t,
 		snapshotRewardPrecomputeOutputs(t, serialDB, snapshotEpoch, potsEpoch),
 		pipelined,
+	)
+}
+
+// TestChunkedRewardPrecomputeReadsLeaveWALCheckpointable proves no read
+// transaction of the chunked precompute stays open across a chunk's read
+// stages. A read transaction pins the WAL snapshot it began on, so one held
+// across a plan keeps a checkpoint from draining the WAL while block
+// application appends to it. At each stage boundary a commit lands and a
+// PASSIVE checkpoint from another connection must then drain every frame.
+func TestChunkedRewardPrecomputeReadsLeaveWALCheckpointable(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ls, db := newRewardCalculationTestLedgerInDir(t, dir)
+	seedMultiPoolRewardInputs(t, db, 6, 2, 7)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(4, 200, 1_200)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	dbPath := filepath.Join(dir, "metadata.sqlite")
+	_, err = os.Stat(dbPath)
+	require.NoError(t, err)
+	probe, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(0)")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = probe.Close() })
+
+	stages := 0
+	var failures []string
+	ls.rewardPrecomputeReadStageHook = func() {
+		stages++
+		// Wait out an in-flight write so the checkpoint sees a settled WAL.
+		ls.rewardPrecomputeWriteMu.Lock()
+		defer ls.rewardPrecomputeWriteMu.Unlock()
+		if err := db.Transaction(context.Background(), true).Do(
+			func(txn *database.Txn) error {
+				return db.Metadata().SetSyncState(
+					"test-wal-probe", strconv.Itoa(stages), txn.Metadata(),
+				)
+			},
+		); err != nil {
+			failures = append(failures, err.Error())
+			return
+		}
+		var busy, walFrames, checkpointed int
+		if err := probe.QueryRow(
+			"PRAGMA wal_checkpoint(PASSIVE)",
+		).Scan(&busy, &walFrames, &checkpointed); err != nil {
+			failures = append(failures, err.Error())
+			return
+		}
+		if busy != 0 || walFrames != checkpointed {
+			failures = append(failures, fmt.Sprintf(
+				"stage %d: busy=%d wal_frames=%d checkpointed=%d",
+				stages, busy, walFrames, checkpointed,
+			))
+		}
+	}
+	require.NoError(t, ls.runStakeRewardPrecomputeSteps(round))
+	require.Greater(t, stages, 3, "a multi-chunk round has several read stages")
+	require.Empty(
+		t, failures,
+		"a read transaction held the WAL snapshot across a read stage",
 	)
 }
