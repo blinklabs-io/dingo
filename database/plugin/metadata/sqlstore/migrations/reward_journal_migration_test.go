@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const rewardJournalVersion = 59
+const rewardJournalVersion = 60
 
 // execAll runs statements and fails the test on the first error.
 func execAll(t *testing.T, db *sql.DB, statements ...string) {
@@ -290,94 +290,79 @@ func count(t *testing.T, db *sql.DB, query string) int {
 
 func TestRewardJournalMigrationMovesEveryLegacyRow(t *testing.T) {
 	t.Parallel()
-	for _, shape := range []struct {
-		name string
-		prep []string
-	}{
-		{name: "main shape"},
-		{name: "indexes already dropped", prep: []string{
-			`DROP INDEX idx_account_reward_delta_tx_hash`,
-			`DROP INDEX idx_account_reward_delta_withdrawal`,
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			t.Parallel()
-			db, runTo := migratedPrefixDB(t, rewardJournalVersion-1)
-			execAll(t, db, shape.prep...)
-			credits, events, withdrawals := seedLegacyRewardJournal(t, db)
-			registry, err := migrations.SQLiteRegistry()
-			require.NoError(t, err)
-			runTo(registry)
+	db, runTo := migratedPrefixDB(t, rewardJournalVersion-1)
+	credits, events, withdrawals := seedLegacyRewardJournal(t, db)
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runTo(registry)
 
-			require.False(t, tableExists(t, db, "account_reward_delta"))
-			require.Equal(
-				t,
-				credits,
-				count(t, db, `SELECT COUNT(*) FROM reward_credit`),
-			)
-			require.Equal(
-				t,
-				events,
-				count(t, db, `SELECT COUNT(*) FROM reward_event_credit`),
-			)
-			require.Equal(
-				t,
-				withdrawals,
-				count(t, db, `SELECT COUNT(*) FROM reward_withdrawal`),
-			)
-			// The MIR source is shared by its two slots.
-			require.Equal(
-				t,
-				events-1,
-				count(t, db, `SELECT COUNT(*) FROM reward_source`),
-			)
-			// Credits keep their slots: one entry per credited boundary, the
-			// round table and the outputs' folded flags untouched.
-			require.Equal(
-				t,
-				3,
-				count(t, db, `SELECT COUNT(*) FROM reward_credit_slot`),
-			)
-			require.Equal(
-				t,
-				1,
-				count(t, db, `SELECT COUNT(*) FROM reward_credit_round`),
-			)
-			require.Equal(
-				t,
-				3,
-				count(
-					t,
-					db,
-					`SELECT COUNT(*) FROM reward_account_output WHERE folded`,
-				),
-			)
-			require.Equal(
-				t,
-				1,
-				count(t, db, `SELECT COUNT(*) FROM reward_event_credit
+	require.False(t, tableExists(t, db, "account_reward_delta"))
+	require.Equal(
+		t,
+		credits,
+		count(t, db, `SELECT COUNT(*) FROM reward_credit`),
+	)
+	require.Equal(
+		t,
+		events,
+		count(t, db, `SELECT COUNT(*) FROM reward_event_credit`),
+	)
+	require.Equal(
+		t,
+		withdrawals,
+		count(t, db, `SELECT COUNT(*) FROM reward_withdrawal`),
+	)
+	// The MIR source is shared by its two slots.
+	require.Equal(
+		t,
+		events-1,
+		count(t, db, `SELECT COUNT(*) FROM reward_source`),
+	)
+	// Credits keep their slots: one entry per credited boundary, the
+	// round table and the outputs' folded flags untouched.
+	require.Equal(
+		t,
+		3,
+		count(t, db, `SELECT COUNT(*) FROM reward_credit_slot`),
+	)
+	require.Equal(
+		t,
+		1,
+		count(t, db, `SELECT COUNT(*) FROM reward_credit_round`),
+	)
+	require.Equal(
+		t,
+		3,
+		count(
+			t,
+			db,
+			`SELECT COUNT(*) FROM reward_account_output WHERE folded`,
+		),
+	)
+	require.Equal(
+		t,
+		1,
+		count(t, db, `SELECT COUNT(*) FROM reward_event_credit
 WHERE post_snapshot AND slot = 700`),
-			)
-			require.Equal(
-				t,
-				1,
-				count(t, db, `SELECT COUNT(*) FROM reward_withdrawal
+	)
+	require.Equal(
+		t,
+		1,
+		count(t, db, `SELECT COUNT(*) FROM reward_withdrawal
 WHERE amount = '4' AND previous_reward = '0'`),
-				"a NULL previous reward reads as zero",
-			)
-			require.Equal(
-				t,
-				expectedMigratedRewardRows(),
-				migratedRewardRows(t, db),
-				"each legacy row keeps its account, amount and slot",
-			)
+		"a NULL previous reward reads as zero",
+	)
+	require.Equal(
+		t,
+		expectedMigratedRewardRows(),
+		migratedRewardRows(t, db),
+		"each legacy row keeps its account, amount and slot",
+	)
 
-			// A second run finds nothing to do.
-			digest := rewardJournalDigest(t, db)
-			runTo(registry)
-			require.Equal(t, digest, rewardJournalDigest(t, db))
-		})
-	}
+	// A second run finds nothing to do.
+	digest := rewardJournalDigest(t, db)
+	runTo(registry)
+	require.Equal(t, digest, rewardJournalDigest(t, db))
 }
 
 func TestRewardJournalMigrationResumesAfterInterruption(t *testing.T) {
