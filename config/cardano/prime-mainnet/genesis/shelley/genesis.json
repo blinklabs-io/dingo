@@ -1,0 +1,89 @@
+{
+  "systemStart": "2024-05-13T17:40:00.000000000Z",
+  "networkMagic": 764824073,
+  "networkId": "Mainnet",
+  "activeSlotsCoeff": 0.05,
+  "securityParam": 2160,
+  "epochLength": 432000,
+  "slotsPerKESPeriod": 129600,
+  "maxKESEvolutions": 60,
+  "slotLength": 1,
+  "updateQuorum": 5,
+  "maxLovelaceSupply": 3000000000000000,
+  "protocolParams": {
+    "minFeeA": 47,
+    "minFeeB": 158298,
+    "maxBlockBodySize": 65536,
+    "maxTxSize": 16384,
+    "maxBlockHeaderSize": 1100,
+    "keyDeposit": 0,
+    "poolDeposit": 0,
+    "eMax": 18,
+    "nOpt": 100,
+    "a0": 0.0,
+    "rho": 0.00001,
+    "tau": 0.000001,
+    "minPoolCost": 0,
+    "decentralisationParam": 0.7,
+    "extraEntropy": {
+      "tag": "NeutralNonce"
+    },
+    "protocolVersion": {
+      "major": 2,
+      "minor": 0
+    },
+    "minUTxOValue": 1000000
+  },
+  "genDelegs": {
+    "04a4e34121a35c2e76879a4d2511c9d5d15a0b1da0ac1fa5c6ed96bb": {
+      "delegate": "ffcea81631e52237760987ee18352dfa4dd553c06a806de8dee8763e",
+      "vrf": "8c25295d1546f76e12d4e024399ed1b1f06bf29d3013b03f6c57b27519836503"
+    },
+    "26b8bb44c08cc7aa00282568820cae48aaa0de8a298a4b414f9013b1": {
+      "delegate": "e4d8fd0b11d7837a4cc9b54e5d8ff4d3535040197b84dc0ccf6dffa8",
+      "vrf": "54e0f46a811af3120ff4f1e72ebb5f1ad35a522506e05628b4a904a4a8ef92ed"
+    },
+    "3411f361d3f370c9cce5d0b5abf5b6e43e1deb035717468ecbe0a81f": {
+      "delegate": "6a60e1245178c13fde1be2641ef7878f32dd01849505ddbbdf6685e1",
+      "vrf": "1dd5104a668b74c2b48d5b7079ccf9fdeb1125878f4f09a7d1d37617d194fa7d"
+    },
+    "3f74d9970202b3cf5172f8007f416bf6846f7421ce7065c7f906ac03": {
+      "delegate": "84453d46086af9f9a21662762cca5f0535edd78191881b0cb7fbc2bf",
+      "vrf": "e56f93ac5be83c3f1434a54c18d2a8ac1a38cffcfeafe93ecc6eae3d8efc4416"
+    },
+    "79ce1f810589492dc305b3167b8ccb85633f93b3f961393c12fb4309": {
+      "delegate": "ad6742466e23f69e66b6fb65ab94e985910a7059cde550311a5365d1",
+      "vrf": "07d47b244a6895e6623c4635b16ca4d57e60445a9e767dfa17669248e728faa3"
+    },
+    "7aae13dff62f4adacc12fd228bc6b9ed14345483e54871cad565d1be": {
+      "delegate": "3afb0cccf6f92b25282a6c66f52f29091f402b42a26e006d2e02cb2a",
+      "vrf": "0520ddf47bdb86e5709f360d948f9244a5755951538fe3d8cd5641f3e80c3d20"
+    },
+    "810a49895f6e487bfd68519f490550f0aa4d3ec5cf8a7818c35b6e27": {
+      "delegate": "83ef7e2bb3cb34c1b2cfc0a96b7bb0d22e245e7a797e6e66b447dacc",
+      "vrf": "71152aab4af93ca87e2e9bb4096e5a565020810cd011544e27bbbea0622d5849"
+    },
+    "c26e28891a47d8f4bd670cd907dba34a459fcbe9645bd34a173b3d67": {
+      "delegate": "31bf5ed2f3b9119f59661d7e23c8a124c71fa347cb6010805e7e4274",
+      "vrf": "43d925cb093d453e3b0a2742ada09d3f33098afb4925c7726a43ea8714a7ecc3"
+    },
+    "c4b2e5a017a9169b0915647df4273be6e3f225c78be1b5c765832f67": {
+      "delegate": "b8907401ad2a8f64b4d317e1a30af094e5c46439a1599922ddbffa9b",
+      "vrf": "5d8258dc93b626d990991c374f575b1606351574cd99d6396514ea222aa49832"
+    },
+    "ce645435300d43db32989bdf0885a19fa21bb71ec59e18e468ef6d86": {
+      "delegate": "6bdc4c1b694ff6977a5547db026306a2be5c3a232fa9f91a10c63ec3",
+      "vrf": "3f142501b26f04e44b8783d7576b6dbaa65b4f0d84b244d37a44c31fc962aa60"
+    },
+    "eb0459a6aa04513ae329944a21ede08c23ae21a90a0529fc446aa06c": {
+      "delegate": "2c27bc469244214567da09fca419bf067e85adb3aaf1cbd719112e8e",
+      "vrf": "af25f54ae478f5e88712260f89a1fed101f91843a6d53ca82f8a27e083d0ee34"
+    },
+    "fb98baf3ec1a2e84240b70b1735aec5afd2971d659b7b5edab5739d8": {
+      "delegate": "abfdc102299916d63da0474f719b49f285be91089e3234470bfce911",
+      "vrf": "49651f86a43b576bd2cfec2f6908afd24e8039aafd968d88395131dc08ffeb5d"
+    }
+  },
+  "initialFunds": {
+  }
+}

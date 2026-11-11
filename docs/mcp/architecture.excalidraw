@@ -813,11 +813,11 @@
       "locked": false,
       "fontSize": 18,
       "fontFamily": 2,
-      "text": "Origin \u00b7 bearer auth\nRate limit\nPublic bind: TLS + auth",
+      "text": "Origin validation\nRate limit\nAnonymous HTTP",
       "textAlign": "left",
       "verticalAlign": "middle",
       "containerId": null,
-      "originalText": "Origin \u00b7 bearer auth\nRate limit\nPublic bind: TLS + auth",
+      "originalText": "Origin validation\nRate limit\nAnonymous HTTP",
       "autoResize": false,
       "lineHeight": 1.25
     },

@@ -499,35 +499,6 @@ func TestRegisterProvider(t *testing.T) {
 	require.Error(t, RegisterProvider(nil))
 }
 
-func TestValidateListenSecurity(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name      string
-		host      string
-		token     string
-		tls       bool
-		wantError bool
-	}{
-		{name: "ipv4 loopback", host: "127.0.0.1"},
-		{name: "ipv6 loopback", host: "::1"},
-		{name: "localhost", host: "localhost"},
-		{name: "public without protection", host: "0.0.0.0", wantError: true},
-		{name: "public without TLS", host: "192.0.2.1", token: "secret", wantError: true},
-		{name: "public without token", host: "192.0.2.1", tls: true, wantError: true},
-		{name: "public protected", host: "192.0.2.1", token: "secret", tls: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := validateListenSecurity(tc.host, tc.token, tc.tls)
-			if tc.wantError {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-		})
-	}
-}
-
 func TestServerHealthEndpoint(t *testing.T) {
 	t.Parallel()
 
