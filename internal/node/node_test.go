@@ -41,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/health"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
+	"github.com/stretchr/testify/require"
 )
 
 // sentinelConfig builds a config whose every secret-bearing field carries a
@@ -706,6 +707,24 @@ func TestMetricsServerUsesDedicatedBindAddress(t *testing.T) {
 	}
 }
 
+// TestMetricsServerIgnoresLegacyAuthToken proves a configured, now-ignored
+// MetricsAuthToken does not gate /metrics: an anonymous request succeeds.
+func TestMetricsServerIgnoresLegacyAuthToken(t *testing.T) {
+	t.Parallel()
+
+	srv := newMetricsServer(&config.Config{
+		MetricsPort:      12798,
+		MetricsAuthToken: "legacy-secret",
+	})
+	require.NotNil(t, srv)
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(
+		rec,
+		httptest.NewRequest(http.MethodGet, "/metrics", nil),
+	)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
 func TestMetricsServerDisabledByZeroPort(t *testing.T) {
 	t.Parallel()
 
@@ -715,48 +734,6 @@ func TestMetricsServerDisabledByZeroPort(t *testing.T) {
 	})
 	if srv != nil {
 		t.Fatalf("metricsPort 0 must start no listener, got %q", srv.Addr)
-	}
-}
-
-func TestMetricsServerAuthenticatesRemoteListener(t *testing.T) {
-	t.Parallel()
-
-	const token = "metrics-secret"
-	srv := newMetricsServer(&config.Config{
-		MetricsBindAddr:  "192.0.2.10",
-		MetricsAuthToken: token,
-		MetricsPort:      12798,
-	})
-	if srv.Addr != "192.0.2.10:12798" {
-		t.Fatalf("metrics address = %q", srv.Addr)
-	}
-
-	for _, tc := range []struct {
-		name   string
-		header string
-		want   int
-	}{
-		{name: "missing token", want: http.StatusUnauthorized},
-		{name: "wrong token", header: "Bearer wrong", want: http.StatusUnauthorized},
-		{name: "authenticated", header: "Bearer " + token, want: http.StatusOK},
-		{name: "lowercase scheme", header: "bearer " + token, want: http.StatusOK},
-		{name: "multiple spaces", header: "Bearer   " + token, want: http.StatusOK},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-			if tc.header != "" {
-				req.Header.Set("Authorization", tc.header)
-			}
-			resp := httptest.NewRecorder()
-			srv.Handler.ServeHTTP(resp, req)
-			if resp.Code != tc.want {
-				t.Fatalf("status = %d, want %d", resp.Code, tc.want)
-			}
-			if strings.Contains(resp.Body.String(), token) {
-				t.Fatal("response disclosed the metrics token")
-			}
-		})
 	}
 }
 

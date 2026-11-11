@@ -274,6 +274,10 @@ type Ouroboros struct {
 	// ledger can forecast its slot.
 	chainsyncObserverHorizonWait func(context.Context, ledger.ChainsyncEvent) error
 	chainsyncHeaderSlotTime      func(uint64) (time.Time, error)
+	// decodeLimits reports the bounds applied to peer bytes before the ledger
+	// decoder runs. Nil derives them from ledgerState. Tests override it
+	// without a LedgerState.
+	decodeLimits func(txType uint) peerDecodeLimits
 	// chainsyncLocalTipBlock returns the local tip's block number and the
 	// security parameter k. Tests override it without a LedgerState.
 	chainsyncLocalTipBlock func() (tipBlock, k uint64)
@@ -701,6 +705,10 @@ type OuroborosConfig struct {
 	// ChainsyncObserveAwaitReply records the peer's explicit protocol-idle
 	// frontier. It runs after gouroboros fences preceding pipelined updates.
 	ChainsyncObserveAwaitReply func(ouroboros.ConnectionId, ocommon.Point)
+	// ChainsyncObserveRollForward is called with the point of every header a
+	// peer sends, before the header is verified or queued for admission, so
+	// the peer's previous idle proof stops counting at once.
+	ChainsyncObserveRollForward func(ouroboros.ConnectionId, ocommon.Point)
 	// ChainsyncSyncTarget snapshots the policy-bounded target for one observed
 	// peer-tip event. Its result is carried with that event into ledger
 	// admission; ledger must not reread mutable selector state.

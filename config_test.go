@@ -1214,7 +1214,7 @@ func TestNewConfigPlannerStatsRefreshDefaultsOnAndCanBeDisabled(t *testing.T) {
 }
 
 // TestGenesisSelectionModeHonorsConsensusMode pins the rule that the node
-// configuration's ConsensusMode decides whether Genesis chain selection runs,
+// configuration's ConsensusMode decides whether the Genesis state machine runs,
 // as it does for the reference node: PraosMode never selects by Genesis
 // density or demands corroboration, whatever genesisBootstrap says.
 func TestGenesisSelectionModeHonorsConsensusMode(t *testing.T) {
@@ -1250,7 +1250,7 @@ func TestGenesisSelectionModeHonorsConsensusMode(t *testing.T) {
 				intersectTip:      tt.intersectTip,
 				intersectPoints:   tt.intersectPnts,
 			}
-			assert.Equal(t, tt.want, cfg.GenesisSelectionMode())
+			assert.Equal(t, tt.want, cfg.genesisSelectionEligible())
 		})
 	}
 }

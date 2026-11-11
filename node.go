@@ -591,10 +591,9 @@ func (n *Node) apiPluginSelection(
 // ("0.0.0.0") expose them on every interface; with no lifecycle service
 // mounted, "" is returned unchanged so bark's own existing default behavior
 // (all interfaces) is preserved for deployments only using it for the read-only
-// Archive service. Bind address is a network control, independent of the mTLS
-// client-certificate authentication and operator-fingerprint authorization
-// checks Bark.Start enforces whenever lifecycleEnabled -- this default narrows
-// exposure as defense in depth, it is not what makes those RPCs safe to reach.
+// Archive service. Bark serves every RPC to anonymous callers, so the bind
+// address is the only exposure control: a caller that can reach the listener
+// can invoke the lifecycle RPCs, which is why they default to loopback.
 func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	if configuredHost != "" {
 		return configuredHost
@@ -669,6 +668,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncRemoveForecastWitness:       n.chainsyncRemoveForecastWitness,
 		ChainsyncResolvePeerTip:              n.chainsyncResolvePeerTip,
 		ChainsyncObserveAwaitReply:           n.chainsyncObserveAwaitReply,
+		ChainsyncObserveRollForward:          n.chainsyncObserveRollForward,
 		ChainsyncSyncTarget:                  n.chainsyncSyncTarget,
 		ChainsyncObservePeerRollback:         n.chainsyncObservePeerRollback,
 		// On the Musashi prototype network every mini-protocol shares one muxer
@@ -1325,7 +1325,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		chainSelectorSecurityParam,
 		n.ledgerState.ActiveSlotCoeffRat(),
 	)
-	genesisSelectionMode := n.config.GenesisSelectionMode()
+	genesisSelectionMode := n.initialGenesisSelectionMode()
 	chainSelectorConfig := n.buildChainSelectorConfig(
 		chainSelectorSecurityParam,
 		genesisSelectionMode,
@@ -1356,6 +1356,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	n.startChainSelectedNoneWorker(n.ctx)
 	started = append(started, n.waitChainSelectedNoneWorker)
 	n.subscribeChainSelectorEvents()
+	n.subscribeCaughtUpMarkerEvents()
 	n.subscribeEquivocationDetector()
 	// Start the chain selector
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -1557,13 +1558,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			n.config.barkHost,
 			lifecycleEnabled || remoteLifecycleEnabled,
 		)
-		if barkHost != n.config.barkHost {
-			n.config.logger.Warn(
-				"bark database lifecycle and remote Stop/Restart services default to a loopback-only bind since no --bark-host was set; every DatabaseService RPC requires a verified mTLS client certificate (--bark-client-ca-file-path), and destructive RPCs require an allowlisted certificate fingerprint (--bark-operator-certificate-fingerprints), independent of bind address; widen this bind only behind your own trusted network controls",
-				"component",
-				"bark",
-			)
-		}
 		barkConfig := bark.BarkConfig{
 			Logger:                                   n.config.logger,
 			DB:                                       db,
@@ -1846,7 +1840,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 	// Node-managed Mithril starts last, once Ouroboros and the ledger it
 	// holds off and hands back to are running.
-	started = append(started, n.startMithrilCoordinator(n.ctx)) //nolint:contextcheck
+	started = append(
+		started,
+		//nolint:contextcheck // n.ctx owns the node lifecycle.
+		n.startMithrilCoordinator(n.ctx),
+	)
 
 	// All components started successfully
 	n.startupLifecycleMu.Unlock()
@@ -2225,6 +2223,18 @@ func (n *Node) buildChainSelectorConfig(
 		GenesisMode:           genesisMode,
 		GenesisWindowSlots:    genesisWindowSlots,
 		MinCorroboratingPeers: n.config.genesisCorroborationPeers,
+		GenesisStateMachine:   n.config.genesisSelectionEligible(),
+		SlotTime:              n.selectorSlotTime,
+		LocalTipPraosView:     n.selectorLocalTipPraosView,
+		HistoricityCutoff:     n.genesisHistoricityCutoff(),
+		ChainSyncConnections: func() []ouroboros.ConnectionId {
+			state := n.selectorChainsyncState.Load()
+			if state == nil {
+				return nil
+			}
+			return state.GetClientConnIds()
+		},
+		OnHistoricityDisconnect: n.onHistoricityDisconnect,
 		ConnectionLive: func(connId ouroboros.ConnectionId) bool {
 			return n.connManager != nil &&
 				n.connManager.GetConnectionById(connId) != nil
@@ -2894,6 +2904,7 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 	}
 	chainsyncCfg.IsRoot = n.isConfiguredRootConnection
 	chainsyncCfg.CorroborationIdentity = n.corroborationIdentityForIngress
+	chainsyncCfg.AdvertisedTipStale = n.chainsyncAdvertisedTipStale
 	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
 		if n.chainSelector == nil {
 			return 0

@@ -4417,6 +4417,33 @@ func TestNewOuroborosConfigReportsChainSelectionBestPeer(t *testing.T) {
 	assert.True(t, cfg.ChainsyncHasBestPeer(), "a selected best peer")
 }
 
+// Ingress slots depend on the stale-tip verdict; a config that drops the hook
+// leaves stale peers holding every slot.
+func TestChainsyncConfigReportsAdvertisedTipStale(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: NewConfig()}
+	cfg := n.chainsyncConfig()
+	require.NotNil(t, cfg.AdvertisedTipStale)
+	staleTip := ochainsync.Tip{Point: ocommon.NewPoint(10, []byte("stale"))}
+	freshTip := ochainsync.Tip{Point: ocommon.NewPoint(5000, []byte("fresh"))}
+	assert.False(t, cfg.AdvertisedTipStale(staleTip), "no chain selector")
+
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:        true,
+			SecurityParam:      20,
+			GenesisWindowSlots: 100,
+			WallClockSlot: func() (uint64, bool) {
+				return 5000, true
+			},
+			DisableEventSubscriptions: true,
+		},
+	)
+	assert.True(t, cfg.AdvertisedTipStale(staleTip), "older than the window")
+	assert.False(t, cfg.AdvertisedTipStale(freshTip), "at the wall clock")
+}
+
 // Not t.Parallel: swaps the package-level closeOuroborosInstance seam.
 func TestRunKeepsStorageOpenWhenLeiosPersistenceDrainIsUnconfirmed(
 	t *testing.T,
