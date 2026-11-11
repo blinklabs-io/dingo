@@ -619,10 +619,11 @@ var (
 	// goVersionKeyRe captures actions/setup-go pins, either a scalar
 	// (`go-version: 1.26.x`) or a matrix list (`go-version: [1.26.x]`).
 	goVersionKeyRe = regexp.MustCompile(`(?m)^\s*go-version:\s*(.+?)\s*$`)
-	// goVersionFileRe matches a setup-go step that takes its version from a
-	// go.mod file.
+	// goVersionFileRe matches a setup-go step that takes its version from the
+	// root go.mod, the only file moduleGoRelease reads. A nested module's
+	// go.mod can carry a different directive, so it does not count.
 	goVersionFileRe = regexp.MustCompile(
-		`^\s*go-version-file:\s*(?:\S*/)?go\.mod\s*$`,
+		`^\s*go-version-file:\s*(?:\./)?go\.mod\s*$`,
 	)
 	// goImageRe captures the Blink Labs Go builder image and its full tag.
 	goImageRe = regexp.MustCompile(
@@ -728,6 +729,23 @@ func TestDocumentedGoVersionMatchesGoMod(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+}
+
+func TestGoVersionFileMustNameRootGoMod(t *testing.T) {
+	t.Parallel()
+	for line, want := range map[string]bool{
+		"          go-version-file: go.mod":        true,
+		"          go-version-file: ./go.mod":      true,
+		"          go-version-file: sub/go.mod":    false,
+		"          go-version-file: ../go.mod":     false,
+		"          go-version-file: /x/go.mod":     false,
+		"          go-version-file: go.modx":       false,
+		"          go-version-file: nested/go.mod": false,
+	} {
+		if got := goVersionFileRe.MatchString(line); got != want {
+			t.Errorf("%q: matched %v, want %v", line, got, want)
 		}
 	}
 }
