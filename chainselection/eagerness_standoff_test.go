@@ -91,6 +91,37 @@ func feedStandoff(
 	}
 }
 
+// feedStandoffLinked is feedStandoff for a fork after parent, each header
+// naming the previous one as its parent.
+func feedStandoffLinked(
+	t *testing.T,
+	cs *ChainSelector,
+	connId ouroboros.ConnectionId,
+	parent ochainsync.Tip,
+	prefix string,
+	to uint64,
+	slot func(block uint64) uint64,
+) {
+	t.Helper()
+	prevHash := parent.Point.Hash
+	for block := parent.BlockNumber + 1; block <= to; block++ {
+		tip := standoffTip(prefix, block, slot(block))
+		require.True(t, cs.updatePeerTipObservedLinked(
+			connId,
+			tip,
+			tip,
+			nil,
+			PraosTiebreakerViewFromTip(
+				tip,
+				nil,
+				PraosTiebreakerConfigUnknown(),
+			),
+			deliveredLink{prevHash: prevHash},
+		))
+		prevHash = tip.Point.Hash
+	}
+}
+
 // sharedSlot places the common prefix, which ends at block 10.
 func sharedSlot(block uint64) uint64 { return standoffBaseSlot + block*100 }
 
@@ -170,11 +201,11 @@ func TestLimitOnEagernessStandoffRemovesSparserForkAtSessionIntersection(
 	advertised := standoffTip("adv", 1_000, sharedSlot(1_000))
 	intersectSession(f.cs, sparse, intersection, advertised)
 	intersectSession(f.cs, dense, intersection, advertised)
-	feedStandoff(f.cs, sparse, "s", 11, 16, sparseSlot)
+	feedStandoffLinked(t, f.cs, sparse, intersection, "s", 16, sparseSlot)
 	f.evaluate()
 	require.Equal(t, sparse, *f.cs.GetBestPeer())
 
-	feedStandoff(f.cs, dense, "d", 11, 16, denseSlot)
+	feedStandoffLinked(t, f.cs, dense, intersection, "d", 16, denseSlot)
 	require.Equal(t, uint64(10+loeTestK), f.cs.EagernessLimit().BlockNumber)
 	hold(t, f.cs, sparse)
 	hold(t, f.cs, dense)

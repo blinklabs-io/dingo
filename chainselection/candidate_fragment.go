@@ -87,7 +87,7 @@ func (f CandidateFragment) Points() []ocommon.Point {
 
 // Intersect returns the highest point present in both fragments, comparing
 // by (slot, hash). Both fragments must already be in ascending slot order,
-// which recordObservedPoint guarantees. This is the primitive the Limit
+// which recordObservedLinkedPoint guarantees. This is the primitive the Limit
 // on Eagerness and the Genesis Density Disconnector need to compute the
 // intersection across candidate fragments (see ARCHITECTURE.md); it does not
 // itself implement either.

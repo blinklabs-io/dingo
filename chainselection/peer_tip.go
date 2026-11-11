@@ -72,11 +72,11 @@ type PeerChainTip struct {
 	observedPointBaseBlock uint64
 	// sessionAnchor is the point the peer's chainsync last rolled back to when
 	// the retained frontier did not hold it, including the rollback that
-	// opens a session at its FindIntersect point. The next header extends it,
-	// so recordObservedPoint places it one block below that header as the
-	// frontier's first point. Without it, two peers whose forks branch at the
-	// point their sessions intersected share no frontier point, and density
-	// comparison cannot find their common intersection.
+	// opens a session at its FindIntersect point. When the next header names
+	// it as its parent, recordObservedLinkedPoint places it one block below
+	// that header as the frontier's first point. Without it, two peers whose
+	// forks branch at the point their sessions intersected share no frontier
+	// point, and density comparison cannot find their common intersection.
 	sessionAnchor      ocommon.Point
 	sessionAnchorSet   bool
 	observedTipHistory []ochainsync.Tip
@@ -385,8 +385,8 @@ func (p *PeerChainTip) recordObservedTipHistory(
 // last delivered header.
 func (p *PeerChainTip) isIdling() bool { return p != nil && p.idling }
 
-// recordObservedPoint records a (slot, hash) point into the observed frontier
-// used for Genesis density (observedSlots) and corroboration/GDD
+// recordObservedLinkedPoint records a (slot, hash) point into the observed
+// frontier used for Genesis density (observedSlots) and corroboration/GDD
 // (observedPoints). Slots are bounded by the density window; hash-bearing
 // points are independently bounded by entry count so sparse candidates retain
 // their common intersection. The point frontier keeps consecutive block
@@ -396,12 +396,19 @@ func (p *PeerChainTip) isIdling() bool { return p != nil && p.idling }
 // trackHashes gates the hash frontier: it is stored only in Genesis mode.
 // When false the hash frontier is dropped, so normal
 // Praos operation does not retain per-peer window-length hash history.
-func (p *PeerChainTip) recordObservedPoint(
+//
+// link is the delivered header's parent link. The session anchor is placed one
+// block below the header, so it is recorded only when the header names it as
+// its parent and is not a boundary block, which repeats its parent's block
+// number. A header whose parent was withheld from selection, or an unknown
+// link, would otherwise misnumber it.
+func (p *PeerChainTip) recordObservedLinkedPoint(
 	point ocommon.Point,
 	blockNumber uint64,
 	window uint64,
 	maxPoints uint64,
 	trackHashes bool,
+	link deliveredLink,
 ) {
 	if p == nil {
 		return
@@ -448,9 +455,9 @@ func (p *PeerChainTip) recordObservedPoint(
 		}
 		switch {
 		case len(p.observedPoints) == 0 && p.sessionAnchorSet &&
-			blockNumber > 0 && p.sessionAnchor.Slot < slot:
-			// Chainsync delivers the header after a rollback as the child of
-			// the rollback point, so the anchor is the block below it.
+			blockNumber > 0 && p.sessionAnchor.Slot < slot &&
+			!link.boundary && len(link.prevHash) > 0 &&
+			bytes.Equal(link.prevHash, p.sessionAnchor.Hash):
 			p.observedPointBaseBlock = blockNumber - 1
 			p.observedPoints = windowAppend(
 				&p.observedPointsRef,

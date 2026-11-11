@@ -7896,11 +7896,13 @@ Each frontier stores its first block number; consecutive block heights align
 two chains for a binary search of their last equal point. A height gap starts a
 new frontier, leaving the comparison undecidable until continuity is rebuilt.
 A frontier emptied by a chainsync rollback, including the rollback that opens a
-session at its `FindIntersect` point, starts from the rollback point, recorded
-one block below the next delivered header because chainsync delivers that
-header as the point's child. Two peers whose forks branch exactly where their
-sessions intersected therefore still share a frontier point, as upstream
-anchors every candidate fragment at its intersection with the selected chain.
+session at its `FindIntersect` point, starts from the rollback point when the
+next delivered header names it as its parent; the point is recorded one block
+below that header. A boundary block, which repeats its parent's block number,
+or a header whose parent was withheld from selection, starts the frontier
+without it. Two peers whose forks branch exactly where their sessions
+intersected therefore still share a frontier point, as upstream anchors every
+candidate fragment at its intersection with the selected chain.
 Window density and suffix counts use binary searches over ordered slots, so a
 density pass is logarithmic in retained points per peer pair while holding the
 selector lock.
@@ -8265,7 +8267,7 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   history is retained in Genesis and dropped in Praos.
 - **Header-crypto verification gates observation, independent of
   corroboration.** Density and the corroboration hash frontier are both
-  populated from `recordObservedPoint`, driven by `PeerTipUpdateEvent`
+  populated from `recordObservedLinkedPoint`, driven by `PeerTipUpdateEvent`
   observation in the roll-forward handler — so with `corroborationPeers = 0` (or
   before any corroboration state exists), density alone previously came from
   peer-reported headers that had not passed any check. The roll-forward handler

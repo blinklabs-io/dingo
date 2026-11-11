@@ -138,18 +138,33 @@ func intersectSession(
 	))
 }
 
-// deliverFrom feeds one header per slot starting at block number first.
+// deliverFrom feeds one header per slot starting at block number first, each
+// naming the previous one as its parent and the first naming parent.
 func (f *gddFixture) deliverFrom(
 	t *testing.T,
 	connId ouroboros.ConnectionId,
-	first uint64,
+	parent ochainsync.Tip,
 	slots ...uint64,
 ) {
 	t.Helper()
+	first := parent.BlockNumber + 1
 	adv := genesisTip(1_000_000, "adv", first+uint64(len(slots)))
+	prevHash := parent.Point.Hash
 	for i, slot := range slots {
 		obs := genesisTip(slot, fmt.Sprintf("h%d", slot), first+uint64(i))
-		require.True(t, f.cs.updatePeerTipObserved(connId, adv, obs, nil))
+		require.True(t, f.cs.updatePeerTipObservedLinked(
+			connId,
+			adv,
+			obs,
+			nil,
+			PraosTiebreakerViewFromTip(
+				obs,
+				nil,
+				PraosTiebreakerConfigUnknown(),
+			),
+			deliveredLink{prevHash: prevHash},
+		))
+		prevHash = obs.Point.Hash
 	}
 }
 
@@ -187,12 +202,85 @@ func TestGDDDisconnectsSparserForkBranchingAtSessionIntersection(t *testing.T) {
 	advertised := genesisTip(1_000_000, "adv", 1_000)
 	intersectSession(f.cs, dense, intersection, advertised)
 	intersectSession(f.cs, sparse, intersection, advertised)
-	f.deliverFrom(t, dense, 11, slotRange(11, 50)...)
-	f.deliverFrom(t, sparse, 11, 60, 100, 200)
+	f.deliverFrom(t, dense, intersection, slotRange(11, 50)...)
+	f.deliverFrom(t, sparse, intersection, 60, 100, 200)
 
 	f.evaluate()
 
 	assert.Equal(t, []ouroboros.ConnectionId{sparse}, f.disconnected())
+}
+
+// The session intersection is placed one block below the first header, so it
+// anchors the frontier only when that header names it as its parent. A header
+// whose parent was withheld from selection, or a boundary block that repeats
+// its parent's block number, would misnumber it.
+func TestSessionAnchorRequiresFirstHeaderToNameIt(t *testing.T) {
+	t.Parallel()
+	intersection := genesisTip(10, "h10", 10)
+	tests := []struct {
+		name      string
+		observed  ochainsync.Tip
+		link      deliveredLink
+		wantBase  uint64
+		wantFirst string
+	}{
+		{
+			name:      "child",
+			observed:  genesisTip(11, "h11", 11),
+			link:      deliveredLink{prevHash: []byte("h10")},
+			wantBase:  10,
+			wantFirst: "h10",
+		},
+		{
+			name:      "grandchild",
+			observed:  genesisTip(12, "h12", 12),
+			link:      deliveredLink{prevHash: []byte("h11")},
+			wantBase:  12,
+			wantFirst: "h12",
+		},
+		{
+			name:     "boundary",
+			observed: genesisTip(11, "ebb", 10),
+			link: deliveredLink{
+				prevHash: []byte("h10"),
+				boundary: true,
+			},
+			wantBase:  10,
+			wantFirst: "ebb",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newGDDFixture(t, true)
+			conn := corrConn(1)
+			advertised := genesisTip(1_000_000, "adv", 1_000)
+			intersectSession(f.cs, conn, intersection, advertised)
+			require.True(t, f.cs.updatePeerTipObservedLinked(
+				conn,
+				advertised,
+				tc.observed,
+				nil,
+				PraosTiebreakerViewFromTip(
+					tc.observed,
+					nil,
+					PraosTiebreakerConfigUnknown(),
+				),
+				tc.link,
+			))
+			f.cs.mutex.RLock()
+			defer f.cs.mutex.RUnlock()
+			peerTip := f.cs.peerTips[conn]
+			require.NotNil(t, peerTip)
+			require.NotEmpty(t, peerTip.observedPoints)
+			assert.Equal(t, tc.wantBase, peerTip.observedPointBaseBlock)
+			assert.Equal(
+				t,
+				tc.wantFirst,
+				string(peerTip.observedPoints[0].Hash),
+			)
+		})
+	}
 }
 
 func TestGDDKeepsPeerWithIncompleteWindow(t *testing.T) {
