@@ -108,9 +108,6 @@ func (f CandidateFragment) Intersect(
 	return clonePoint(point), true
 }
 
-// intersectTip is Intersect with the common point's block number. Candidate
-// fragments store consecutive block heights, so the common point's offset in
-// either aligned frontier determines its height without scanning the fragment.
 // pointBlock returns the block number of point when the fragment retains it.
 func (f CandidateFragment) pointBlock(point ocommon.Point) (uint64, bool) {
 	i, found := slices.BinarySearchFunc(
@@ -127,6 +124,9 @@ func (f CandidateFragment) pointBlock(point ocommon.Point) (uint64, bool) {
 	return f.baseBlock + uint64(i), true
 }
 
+// intersectTip is Intersect with the common point's block number. Candidate
+// fragments store consecutive block heights, so the common point's offset in
+// either aligned frontier determines its height without scanning the fragment.
 func (f CandidateFragment) intersectTip(
 	other CandidateFragment,
 ) (ochainsync.Tip, bool) {

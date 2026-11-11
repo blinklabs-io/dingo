@@ -360,10 +360,11 @@ type GenesisBootstrapConfig struct {
 	// selects the default of 5.
 	LimitOnPatienceRate uint64 `yaml:"limitOnPatienceRate"         envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE"`
 	// ChainSyncJumping turns on ChainSync Jumping while Genesis selection is
-	// active: one identified hot peer streams headers and every other hot
-	// peer answers a periodic MsgFindIntersect for the streamed chain instead
-	// of streaming it, vouching for it in the Limit on Eagerness. On by
-	// default.
+	// active: one identified outbound hot peer streams headers and every
+	// other outbound hot peer answers a periodic MsgFindIntersect for the
+	// streamed chain instead of streaming it, an identified peer's answer
+	// vouching for it in the Limit on Eagerness. Inbound peers take no
+	// CSJ role. On by default.
 	ChainSyncJumping bool `yaml:"chainSyncJumping"            envconfig:"DINGO_GENESIS_CSJ"`
 }
 

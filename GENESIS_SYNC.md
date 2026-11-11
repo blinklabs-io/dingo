@@ -72,9 +72,10 @@ genesisBootstrap:
   limitOnPatienceEnabled: true
   limitOnPatienceCapacity: 0
   limitOnPatienceRate: 0
-  # ChainSync Jumping: one identified hot peer streams headers; the other hot
-  # peers vouch for its chain by MsgFindIntersect every k/2 blocks instead of
-  # streaming it. On by default.
+  # ChainSync Jumping: one identified outbound hot peer streams headers; the
+  # other outbound hot peers answer a MsgFindIntersect for its chain every k/2
+  # blocks instead of streaming it, and an identified peer's answer vouches
+  # for it. Inbound peers take no CSJ role. On by default.
   chainSyncJumping: true
 ```
 

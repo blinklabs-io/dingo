@@ -935,10 +935,11 @@
   # limitOnPatienceEnabled: true
   # limitOnPatienceCapacity: 0
   # limitOnPatienceRate: 0
-  # ChainSync Jumping: while Genesis selection is active, one identified hot
-  # peer streams headers and every other hot peer answers a MsgFindIntersect
-  # for the streamed chain every k/2 blocks instead of streaming it; an
-  # identified peer's answer vouches for the chain in the Limit on Eagerness.
+  # ChainSync Jumping: while Genesis selection is active, one identified
+  # outbound hot peer streams headers and every other outbound hot peer
+  # answers a MsgFindIntersect for the streamed chain every k/2 blocks instead
+  # of streaming it; an identified peer's answer vouches for the chain in the
+  # Limit on Eagerness. Inbound peers take no CSJ role.
   # A peer that refuses a jump streams from the last point it agreed to.
   # On by default.
   # chainSyncJumping: true

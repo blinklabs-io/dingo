@@ -813,7 +813,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"GenesisBootstrap.ChainSyncJumping",
 		"genesis-csj",
-		"use ChainSync Jumping while Genesis selection is active: one identified hot peer streams headers and the others vouch for it by MsgFindIntersect",
+		"use ChainSync Jumping while Genesis selection is active: one identified outbound hot peer streams headers and the other outbound hot peers vouch for it by MsgFindIntersect",
 	),
 	boolFlag(
 		"GenesisBootstrap.LimitOnPatienceEnabled",

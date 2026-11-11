@@ -8812,8 +8812,8 @@ past the common point, so a dynamo is apply-eligible up to `k` past the last
 point `MinCorroboratingPeers` other identities agreed to. A record is refused
 while the selector is outside Genesis mode, for a point the dynamo's candidate
 fragment does not retain, and for a connection that has delivered headers
-itself. `ChainSelector.RecordJumpRejection` records an `IntersectNotFound`
-answer: the jumper becomes an objector and its record stays at the last point it
+itself. `ChainSelector.RecordJumpRejection` records a rejected jump answer,
+`IntersectNotFound` or an intersection below the offered point: the jumper becomes an objector and its record stays at the last point it
 agreed to, so the limit cannot pass `k` beyond that point until the objector's
 own stream supersedes the record; its fork is then bounded like any other
 candidate's. The stream supersedes it only once it delivers a header: the record

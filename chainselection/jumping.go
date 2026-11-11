@@ -119,8 +119,9 @@ func (cs *ChainSelector) RecordJumpAgreement(
 	return recorded
 }
 
-// RecordJumpRejection records that jumper answered a jump with
-// IntersectNotFound, making it an objector. Its record stays at the last
+// RecordJumpRejection records that jumper rejected a jump, answering
+// IntersectNotFound or IntersectFound at a point other than the one offered,
+// making it an objector. Its record stays at the last
 // point it agreed to, so the Limit on Eagerness cannot pass k beyond that
 // point while the disagreement is unresolved; once the objector streams, its
 // streamed record replaces the frozen one. It returns false when ChainSync
