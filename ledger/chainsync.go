@@ -3725,7 +3725,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 		// (slot battles), not a pathological loop.
 		skipRollback := true
 		if checker := ls.loadForgedBlockChecker(); checker != nil {
-			if _, forged := checker.WasForgedByUs(e.Point.Slot); forged {
+			if len(checker.ForgedBlockHashes(e.Point.Slot)) > 0 {
 				ls.config.Logger.Info(
 					"allowing rollback on forged slot (slot battle resolution)",
 					"component", "ledger",
@@ -4802,6 +4802,65 @@ func queuePeerHeaderHistoryInvalidation(
 	pending.addAfterUnlock(e.InvalidatePeerHeaderHistory)
 }
 
+// pinChainsyncHeaderVerdict pins generation for admitting e, verifying the
+// header again when the verdict expired first. It returns a nil release and a
+// nil error when the header is withheld, and an error, after queueing the
+// connection for recycling, when the header fails verification again: a
+// verdict that expired says nothing about the header, but a fresh failure is
+// the same rejection as the first verification's.
+func (ls *LedgerState) pinChainsyncHeaderVerdict(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+	generation uint64,
+	reverify func() (uint64, error),
+) (uint64, func(), error) {
+	pinned, release, err := ls.pinHeaderVerdict(generation, reverify)
+	if err != nil && !IsHeaderVerificationDeferred(err) {
+		return 0, nil, ls.rejectChainsyncHeaderVerification(e, pending, err)
+	}
+	if release == nil {
+		ls.config.Logger.Debug(
+			"withholding chainsync header after producer authorization changed before admission",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"error", err,
+		)
+		return generation, nil, nil
+	}
+	return pinned, release, nil
+}
+
+// rejectChainsyncHeaderVerification queues a recycle of the connection that
+// sent a header failing crypto verification and returns the failure.
+func (ls *LedgerState) rejectChainsyncHeaderVerification(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+	err error,
+) error {
+	if ls.config.EventBus != nil {
+		ls.config.Logger.Warn(
+			"recycling connection after header verification failure",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+		)
+		pending.add(
+			ls.config.EventBus,
+			ConnectionRecycleRequestedEventType,
+			event.NewEvent(
+				ConnectionRecycleRequestedEventType,
+				ConnectionRecycleRequestedEvent{
+					ConnectionId: e.ConnectionId,
+					Reason:       "header_verification_failure",
+				},
+			),
+		)
+	}
+	return fmt.Errorf("block header crypto verification failed: %w", err)
+}
+
 func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
@@ -4882,50 +4941,40 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			producerAuthorizationGeneration = 0
 			clearChainsyncHeaderAuthorization(&e)
 		default:
-			{
-				if ls.config.EventBus != nil {
-					ls.config.Logger.Warn(
-						"recycling connection after header verification failure",
-						"component", "ledger",
-						"connection_id", e.ConnectionId.String(),
-						"slot", e.Point.Slot,
-						"hash", hex.EncodeToString(e.Point.Hash),
-					)
-					pending.add(
-						ls.config.EventBus,
-						ConnectionRecycleRequestedEventType,
-						event.NewEvent(
-							ConnectionRecycleRequestedEventType,
-							ConnectionRecycleRequestedEvent{
-								ConnectionId: e.ConnectionId,
-								Reason:       "header_verification_failure",
-							},
-						),
-					)
-				}
-				return fmt.Errorf(
-					"block header crypto verification failed: %w",
-					err,
-				)
-			}
+			return ls.rejectChainsyncHeaderVerification(e, pending, err)
 		}
 	}
 	var releaseVerificationGeneration func()
 	verificationGenerationReleased := false
 	if headerCryptoVerificationGeneration != 0 {
-		var generationCurrent bool
-		releaseVerificationGeneration, generationCurrent = ls.
-			PinHeaderCryptoVerificationGeneration(
-				headerCryptoVerificationGeneration,
-			)
-		if !generationCurrent {
-			ls.config.Logger.Debug(
-				"withholding chainsync header after producer authorization changed before admission",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-			)
+		var reverify func() (uint64, error)
+		if headerValidationRequired {
+			reverify = func() (uint64, error) {
+				return ls.ValidateChainSelectionHeaderCryptoWithGeneration(
+					e.BlockHeader,
+				)
+			}
+		}
+		pinnedGeneration, release, err := ls.pinChainsyncHeaderVerdict(
+			e,
+			pending,
+			headerCryptoVerificationGeneration,
+			reverify,
+		)
+		if err != nil {
+			return err
+		}
+		if release == nil {
 			return nil
+		}
+		releaseVerificationGeneration = release
+		if pinnedGeneration != headerCryptoVerificationGeneration {
+			headerCryptoVerificationGeneration = pinnedGeneration
+			producerAuthorizationGeneration = pinnedGeneration
+			e.HeaderCryptoVerificationGeneration = pinnedGeneration
+			if e.PeerTipUpdate != nil {
+				e.PeerTipUpdate.HeaderCryptoVerificationGeneration = pinnedGeneration
+			}
 		}
 		defer func() {
 			if releaseVerificationGeneration != nil {
@@ -10122,6 +10171,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "save_pots", func() error {
 			return ls.saveRewardAdaPotsForEpoch(
+				ctx,
 				txn,
 				currentEpoch.EpochId+1,
 				currentEpoch,
@@ -10518,19 +10568,20 @@ func (ls *LedgerState) checkSlotBattle(e BlockfetchEvent) {
 	}
 
 	incomingSlot := e.Point.Slot
-	localHash, forged := checker.WasForgedByUs(incomingSlot)
-	if !forged {
+	localHashes := checker.ForgedBlockHashes(incomingSlot)
+	if len(localHashes) == 0 {
 		return
 	}
 
 	remoteHash := e.Point.Hash
 
-	// Same hash means same block -- not a battle
-	if bytes.Equal(localHash, remoteHash) {
+	// A hash of our own means our own block -- not a battle. With several
+	// pools, two of them can forge the slot, and either block is ours.
+	if forgedByUs(checker, incomingSlot, remoteHash) {
 		return
 	}
 
-	ls.recordSlotBattle(incomingSlot, localHash, incomingSlot, remoteHash)
+	ls.recordSlotBattle(incomingSlot, localHashes[0], incomingSlot, remoteHash)
 }
 
 func (ls *LedgerState) checkComparedTipSlotBattle(
@@ -10557,15 +10608,14 @@ func (ls *LedgerState) checkComparedTipSlotBattle(
 	if checker == nil {
 		return
 	}
-	localHash, forged := checker.WasForgedByUs(localTip.Point.Slot)
-	if !forged || !bytes.Equal(localHash, localTip.Point.Hash) ||
-		bytes.Equal(localHash, incomingTip.Point.Hash) {
+	if !forgedByUs(checker, localTip.Point.Slot, localTip.Point.Hash) ||
+		bytes.Equal(localTip.Point.Hash, incomingTip.Point.Hash) {
 		return
 	}
 
 	ls.recordSlotBattle(
 		localTip.Point.Slot,
-		localHash,
+		localTip.Point.Hash,
 		incomingTip.Point.Slot,
 		incomingTip.Point.Hash,
 	)

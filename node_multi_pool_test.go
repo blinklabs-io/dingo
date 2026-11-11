@@ -20,10 +20,12 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -290,14 +292,38 @@ func TestOwnForgedBlocksAnswersForEveryPool(t *testing.T) {
 	own := &ownForgedBlocks{}
 	own.set([]*forging.BlockForger{first, second})
 
-	hash, ok := own.WasForgedByUs(20)
-	require.True(t, ok, "a block of the second pool is the node's own")
-	require.Equal(t, []byte{0x14}, hash)
-	_, ok = own.WasForgedByUs(30)
-	require.False(t, ok)
-	hash, ok = own.WasForgedByUs(10)
-	require.True(t, ok)
-	require.Equal(t, []byte{0x0a}, hash)
+	require.Equal(t, [][]byte{{0x14}}, own.ForgedBlockHashes(20),
+		"a block of the second pool is the node's own")
+	require.Empty(t, own.ForgedBlockHashes(30))
+	require.Equal(t, [][]byte{{0x0a}}, own.ForgedBlockHashes(10))
+}
+
+// When the slot arbiter fails open, two pools that lead one slot both forge
+// it, and the two blocks differ. Either one is the node's own: the ledger
+// must not count a battle against the second, nor treat it as a peer's block
+// when its header fails.
+func TestOwnForgedBlocksAnswersBothBlocksOfASlotTwoPoolsForged(t *testing.T) {
+	t.Parallel()
+	newForger := func() *forging.BlockForger {
+		f, err := forging.NewBlockForger(forging.ForgerConfig{
+			Mode:   forging.ModeDev,
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		})
+		require.NoError(t, err)
+		return f
+	}
+	first, second := newForger(), newForger()
+	first.SlotTracker().RecordForgedBlock(10, []byte{0x0a})
+	second.SlotTracker().RecordForgedBlock(10, []byte{0x0b})
+
+	own := &ownForgedBlocks{}
+	own.set([]*forging.BlockForger{first, second})
+
+	require.ElementsMatch(t,
+		[][]byte{{0x0a}, {0x0b}},
+		own.ForgedBlockHashes(10),
+		"both pools' blocks for the slot are the node's own",
+	)
 }
 
 func TestPoolMetricsRegistryKeepsPoolsApart(t *testing.T) {
@@ -507,4 +533,168 @@ func TestInitMultiPoolRefusesOnePoolListedTwice(t *testing.T) {
 		n.initMultiPool(),
 		"blockProducerPools[0] and blockProducerPools[1] are both pool",
 	)
+}
+
+// newRankedArbiter returns an arbiter whose pools, one per seed, all lead
+// slot, and the pool IDs ordered as the chain ranks their blocks, best first.
+func newRankedArbiter(
+	t *testing.T,
+	slot int64,
+	seeds ...byte,
+) (*poolSlotArbiter, []string) {
+	t.Helper()
+	nonce := bytes.Repeat([]byte{0x42}, 32)
+	a := newTestArbiter(testArbiterView{era: conway.EraIdConway, nonce: nonce})
+	alpha, err := vrf.MkInputVrf(slot, nonce)
+	require.NoError(t, err)
+	type ranked struct {
+		id  string
+		out []byte
+	}
+	rs := make([]ranked, 0, len(seeds))
+	for i, seed := range seeds {
+		p := newTestVRFPool(t, seed)
+		id := fmt.Sprintf("pool-%d", i)
+		a.add(arbiterMember{id, p, testLeader{uint64(slot): true}, true})
+		rs = append(rs, ranked{id, p.output(t, alpha)})
+	}
+	slices.SortFunc(rs, func(x, y ranked) int {
+		return bytes.Compare(x.out, y.out)
+	})
+	ids := make([]string, len(rs))
+	for i, r := range rs {
+		ids[i] = r.id
+	}
+	return a, ids
+}
+
+// awaitAsync starts pool's wait for slot and returns where its answer lands.
+func awaitAsync(
+	a *poolSlotArbiter,
+	pool string,
+	slot uint64,
+	until time.Time,
+) <-chan bool {
+	done := make(chan bool, 1)
+	go func() {
+		done <- a.forPool(pool).AwaitWinner(context.Background(), slot, until)
+	}()
+	return done
+}
+
+func requireStillWaiting(t *testing.T, done <-chan bool) {
+	t.Helper()
+	select {
+	case got := <-done:
+		t.Fatalf("the wait returned %v before the winner's outcome", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func requireAwaitResult(t *testing.T, done <-chan bool, want bool) {
+	t.Helper()
+	select {
+	case got := <-done:
+		require.Equal(t, want, got)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait did not return")
+	}
+}
+
+// The winner is picked from leader VRF alone, before its own later refusals.
+// A winner that then adopts no block releases the slot, and the pool that
+// yielded to it forges.
+func TestSlotArbiterReleasesASlotTheWinnerDoesNotAdopt(t *testing.T) {
+	t.Parallel()
+	const slot = 1000
+	a, ids := newRankedArbiter(t, slot, 1, 2)
+	winner, loser := ids[0], ids[1]
+
+	yield, got := a.forPool(loser).YieldSlot(slot)
+	require.True(t, yield)
+	require.Equal(t, winner, got)
+	done := awaitAsync(a, loser, slot, time.Now().Add(time.Minute))
+	requireStillWaiting(t, done)
+
+	a.forPool(winner).ReportSlot(slot, false)
+	requireAwaitResult(t, done, false)
+}
+
+func TestSlotArbiterKeepsTheYieldOnceTheWinnerAdopts(t *testing.T) {
+	t.Parallel()
+	const slot = 1000
+	a, ids := newRankedArbiter(t, slot, 1, 2)
+	winner, loser := ids[0], ids[1]
+
+	yield, _ := a.forPool(loser).YieldSlot(slot)
+	require.True(t, yield)
+	done := awaitAsync(a, loser, slot, time.Now().Add(time.Minute))
+	requireStillWaiting(t, done)
+
+	a.forPool(winner).ReportSlot(slot, true)
+	requireAwaitResult(t, done, true)
+}
+
+func TestSlotArbiterForgesAYieldedSlotAtTheDeadline(t *testing.T) {
+	t.Parallel()
+	const slot = 1000
+	a, ids := newRankedArbiter(t, slot, 1, 2)
+	loser := ids[1]
+
+	yield, _ := a.forPool(loser).YieldSlot(slot)
+	require.True(t, yield)
+	start := time.Now()
+	done := awaitAsync(a, loser, slot, start.Add(100*time.Millisecond))
+	requireAwaitResult(t, done, false)
+	require.GreaterOrEqual(t, time.Since(start), 100*time.Millisecond)
+}
+
+func TestSlotArbiterReleasesAWaitWhenTheWinnerIsRemoved(t *testing.T) {
+	t.Parallel()
+	const slot = 1000
+	a, ids := newRankedArbiter(t, slot, 1, 2)
+	winner, loser := ids[0], ids[1]
+
+	yield, _ := a.forPool(loser).YieldSlot(slot)
+	require.True(t, yield)
+	done := awaitAsync(a, loser, slot, time.Now().Add(time.Minute))
+	requireStillWaiting(t, done)
+
+	a.remove(winner)
+	requireAwaitResult(t, done, false)
+}
+
+// A winner can refuse before the other pool asks, at the KES gate for one.
+// The other pool then never yields to it.
+func TestSlotArbiterNeverYieldsToAWinnerThatAlreadyReleased(t *testing.T) {
+	t.Parallel()
+	const slot = 1000
+	a, ids := newRankedArbiter(t, slot, 1, 2)
+	winner, loser := ids[0], ids[1]
+
+	a.forPool(winner).ReportSlot(slot, false)
+	yield, _ := a.forPool(loser).YieldSlot(slot)
+	require.False(t, yield)
+}
+
+// With three pools leading one slot, a released slot passes to the next best
+// pool, and the third keeps waiting on it.
+func TestSlotArbiterPassesAReleasedSlotToTheNextBestPool(t *testing.T) {
+	t.Parallel()
+	const slot = 1000
+	a, ids := newRankedArbiter(t, slot, 1, 2, 3)
+	best, second, third := ids[0], ids[1], ids[2]
+
+	yield, got := a.forPool(third).YieldSlot(slot)
+	require.True(t, yield)
+	require.Equal(t, best, got)
+	done := awaitAsync(a, third, slot, time.Now().Add(time.Minute))
+
+	a.forPool(best).ReportSlot(slot, false)
+	requireStillWaiting(t, done)
+	yield, _ = a.forPool(second).YieldSlot(slot)
+	require.False(t, yield, "the next best pool forges the released slot")
+
+	a.forPool(second).ReportSlot(slot, true)
+	requireAwaitResult(t, done, true)
 }

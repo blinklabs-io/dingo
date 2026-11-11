@@ -25,10 +25,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/bursa"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -106,6 +110,37 @@ type fakeRemoteAgent struct {
 	// malformedRefusal answers a sign request with an error on a frame of
 	// the wrong type.
 	malformedRefusal atomic.Bool
+	// dropRequests is how many of the next sign requests are read and
+	// left unanswered, with the connection closed.
+	dropRequests atomic.Int32
+	// refuseRequests is how many of the next sign requests are refused
+	// with refusal on a well-formed sign_response.
+	refuseRequests atomic.Int32
+	refusal        string
+
+	mu sync.Mutex
+	// messages is every sign request's message, in arrival order.
+	messages [][]byte
+}
+
+// received returns the message of every sign request the agent read.
+func (a *fakeRemoteAgent) received() [][]byte {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([][]byte(nil), a.messages...)
+}
+
+// take decrements n when it is positive and reports whether it was.
+func take(n *atomic.Int32) bool {
+	for {
+		v := n.Load()
+		if v <= 0 {
+			return false
+		}
+		if n.CompareAndSwap(v, v-1) {
+			return true
+		}
+	}
 }
 
 // fakeTransport is the listener a fakeRemoteAgent runs.
@@ -206,8 +241,20 @@ func (a *fakeRemoteAgent) serve(conn net.Conn, skeyData, vkey, opCert []byte) {
 		if err := readFrame(conn, MaxSignFrameLen, &sreq); err != nil {
 			return
 		}
-		if a.dropAfterRequest.Load() {
+		a.mu.Lock()
+		a.messages = append(a.messages, append([]byte(nil), sreq.Message...))
+		a.mu.Unlock()
+		if a.dropAfterRequest.Load() || take(&a.dropRequests) {
 			return
+		}
+		if take(&a.refuseRequests) {
+			if err := writeFrame(conn, MaxSignFrameLen, SignResponse{
+				Type: "sign_response", Period: sreq.Period,
+				Error: a.refusal,
+			}); err != nil {
+				return
+			}
+			continue
 		}
 		if a.refuse.Load() {
 			if err := writeFrame(conn, MaxSignFrameLen, SignResponse{
@@ -453,7 +500,31 @@ func TestRemoteClientAdmissionChecks(t *testing.T) {
 	}
 }
 
-func TestRemoteClientDoesNotResendAfterADroppedRequest(t *testing.T) {
+// A reply lost with its session is answered by resending the identical body
+// on a new session: the agent may already have recorded the slot, and only
+// the same body is signed again for it.
+func TestRemoteClientResendsTheIdenticalBodyAfterALostReply(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+
+	require.NoError(t, c.Prepare())
+	a.dropRequests.Store(1)
+	sig, err := c.Sign(0, []byte("header"))
+	require.NoError(t, err)
+	require.True(t, kes.VerifySignedKES(vkey, 0, []byte("header"), sig))
+	require.Equal(t, int32(2), a.accepts.Load(),
+		"the resend must run on a newly admitted session")
+	require.Equal(t,
+		[][]byte{[]byte("header"), []byte("header")}, a.received(),
+		"the resend must carry the identical body")
+}
+
+// A session that never answers is resent to once, then the failure is
+// returned; the next sign opens a new session.
+func TestRemoteClientStopsResendingAfterOneLostReply(t *testing.T) {
 	t.Parallel()
 	skeyData, vkey, opCert := testKESMaterial(t)
 	client := newTestCert(t, "node")
@@ -464,15 +535,62 @@ func TestRemoteClientDoesNotResendAfterADroppedRequest(t *testing.T) {
 	a.dropAfterRequest.Store(true)
 	_, err := c.Sign(0, []byte("header"))
 	require.Error(t, err)
-	require.Equal(t, int32(1), a.accepts.Load(),
-		"a request that may have reached the agent must not be resent")
+	require.Len(t, a.received(), 2)
 
-	// The next call opens a new session: Sign dials through the reconnect
-	// backoff, so one call must succeed.
 	a.dropAfterRequest.Store(false)
 	_, err = c.Sign(0, []byte("next-header"))
 	require.NoError(t, err)
-	require.Equal(t, int32(2), a.accepts.Load())
+}
+
+// A refusal for a slot the agent already signed, an older slot, a period the
+// key has passed, or a request the agent can never sign is final: it is
+// returned with the agent's reason, never resent, and the session is kept.
+func TestRemoteClientDoesNotResendAFinalRefusal(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	for _, refusal := range []string{
+		"kesagent: a different header was already signed for this slot",
+		"kesagent: header slot below the last signed slot refused",
+		"kesagent: requested KES period is in the past for the active key: requested 4, key at 5",
+		"kesagent: KES period rollback refused (period below monotonic floor)",
+		"kesagent: active KES key has exhausted its evolutions: cannot reach period 70 (key ends at 69)",
+		"kesagent: sign request is not a matching Praos header body: issuer key is not this pool's cold key",
+	} {
+		t.Run(refusal, func(t *testing.T) {
+			t.Parallel()
+			client := newTestCert(t, "node")
+			a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+			c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+			require.NoError(t, c.Prepare())
+			a.refusal = refusal
+			a.refuseRequests.Store(1)
+			_, err := c.Sign(0, []byte("header"))
+			require.ErrorContains(t, err, refusal)
+			require.Len(t, a.received(), 1, "a final refusal must not be resent")
+			require.Equal(t, int32(1), a.accepts.Load())
+		})
+	}
+}
+
+// Any other agent error, such as a slot store that is briefly unavailable,
+// is answered by resending the identical body on the same session.
+func TestRemoteClientResendsAfterANonRefusalError(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+
+	require.NoError(t, c.Prepare())
+	a.refusal = "kesagent: record signed slot: connection refused"
+	a.refuseRequests.Store(1)
+	sig, err := c.Sign(0, []byte("header"))
+	require.NoError(t, err)
+	require.True(t, kes.VerifySignedKES(vkey, 0, []byte("header"), sig))
+	require.Equal(t,
+		[][]byte{[]byte("header"), []byte("header")}, a.received())
+	require.Equal(t, int32(1), a.accepts.Load(),
+		"a well-formed agent error keeps the session")
 }
 
 func TestRemoteClientDropsSessionOnMalformedRefusal(t *testing.T) {
@@ -629,6 +747,7 @@ func TestRemoteClientSignDialsThroughTheBackoff(t *testing.T) {
 	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
 	other := newTestCert(t, "impostor")
 	certFile, keyFile := client.writePEM(t)
+	metrics := NewMetrics(prometheus.NewRegistry())
 	c, err := NewRemoteClient(RemoteConfig{
 		Address:          a.addr,
 		ClientCertFile:   certFile,
@@ -637,6 +756,7 @@ func TestRemoteClientSignDialsThroughTheBackoff(t *testing.T) {
 		KESVKey:          vkey,
 		OpCert:           opCert,
 		SignTimeout:      2 * time.Second,
+		Metrics:          metrics,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
@@ -644,11 +764,162 @@ func TestRemoteClientSignDialsThroughTheBackoff(t *testing.T) {
 	// Fail one dial to arm the backoff: a wrong pin, then the right one.
 	c.pin, _ = parseSPKIPin(other.spki)
 	require.ErrorIs(t, c.Prepare(), ErrServerPinMismatch)
+	require.InDelta(t, 1, promtestutil.ToFloat64(metrics.reconnectFailures), 0,
+		"a failed dial counts as a reconnect failure")
 	c.pin, _ = parseSPKIPin(a.server.spki)
 	require.ErrorContains(t, c.Prepare(), "backoff active")
+	require.InDelta(t, 1, promtestutil.ToFloat64(metrics.reconnectFailures), 0,
+		"a refusal inside the backoff is not a dial")
 	require.Error(t, c.CheckReady(), "CheckReady reports the last failure")
 
 	_, err = c.Sign(0, []byte("header"))
 	require.NoError(t, err)
 	require.NoError(t, c.CheckReady())
+}
+
+// opCertVariant re-encodes the test certificate with another issue number,
+// KES period or cold key. The cold signature is left as it was: the client
+// only recognises a candidate here, and the node validates it fully.
+func opCertVariant(
+	t *testing.T,
+	opCert []byte,
+	issue, period uint64,
+	coldVKey []byte,
+) []byte {
+	t.Helper()
+	dec, err := bursa.DecodeOpCert(opCert)
+	require.NoError(t, err)
+	if coldVKey == nil {
+		coldVKey = dec.ColdVKey
+	}
+	out, err := cbor.Encode([]any{
+		[]any{dec.KESVKey, issue, period, dec.ColdSig},
+		coldVKey,
+	})
+	require.NoError(t, err)
+	return out
+}
+
+func TestRemoteClientOffersANewerOpCertForTheSamePool(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	local, err := bursa.DecodeOpCert(opCert)
+	require.NoError(t, err)
+	otherCold := make([]byte, 32)
+	otherCold[0] = 1
+	newer := opCertVariant(t, opCert, local.IssueNumber+1, local.KESPeriod, nil)
+	for _, tc := range []struct {
+		name    string
+		agent   []byte
+		offered bool
+	}{
+		{"higher counter, same pool", newer, true},
+		{
+			"same counter, other bytes",
+			opCertVariant(t, opCert, local.IssueNumber, local.KESPeriod+1, nil),
+			false,
+		},
+		{
+			"higher counter, other pool",
+			opCertVariant(
+				t, opCert, local.IssueNumber+1, local.KESPeriod, otherCold,
+			),
+			false,
+		},
+		{"not a certificate", []byte{0x01, 0x02}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client := newTestCert(t, "node")
+			a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+			a.admitFix = func(r *attestationResponse) { r.OpCert = tc.agent }
+			certFile, keyFile := client.writePEM(t)
+			offers := make(chan []byte, 1)
+			c, err := NewRemoteClient(RemoteConfig{
+				Address:          a.addr,
+				ClientCertFile:   certFile,
+				ClientKeyFile:    keyFile,
+				ServerSPKISHA256: a.server.spki,
+				KESVKey:          vkey,
+				OpCert:           opCert,
+				OnNewerOpCert:    func(b []byte) { offers <- b },
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = c.Close() })
+
+			// The session is refused either way: signatures are verified
+			// against the local certificate until the node reloads.
+			require.ErrorIs(t, c.Prepare(), ErrRemoteAdmission)
+			if tc.offered {
+				require.Equal(t, tc.agent, testutil.RequireReceive(
+					t, offers, time.Second, "newer certificate offered",
+				))
+				return
+			}
+			testutil.RequireNoReceive(t, offers, 20*time.Millisecond,
+				"a mismatch that cannot be a rotation is not offered")
+		})
+	}
+}
+
+// A refusal saying the header carries another operational certificate than
+// the agent has installed means the agents key was rotated after admission.
+
+// A refusal saying the header carries another operational certificate than
+// the agent has installed means the agent's key was rotated after admission.
+// The session is dropped, so the next Prepare re-admits and offers the
+// agent's newer certificate instead of reusing a session that can no longer
+// sign.
+func TestRemoteClientDropsSessionOnAnOpCertMismatchRefusal(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	local, err := bursa.DecodeOpCert(opCert)
+	require.NoError(t, err)
+	newer := opCertVariant(t, opCert, local.IssueNumber+1, local.KESPeriod, nil)
+	for _, refusal := range []string{
+		"kesagent: sign request is not a matching Praos header body: operational certificate names a different KES key",
+		"kesagent: sign request is not a matching Praos header body: operational certificate counter/period do not match the installed one",
+		"kesagent: sign request is not a matching Praos header body: operational certificate cold signature is not the installed one",
+	} {
+		t.Run(refusal, func(t *testing.T) {
+			t.Parallel()
+			client := newTestCert(t, "node")
+			a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+			var rotated atomic.Bool
+			a.admitFix = func(r *attestationResponse) {
+				if rotated.Load() {
+					r.OpCert = newer
+				}
+			}
+			certFile, keyFile := client.writePEM(t)
+			offers := make(chan []byte, 1)
+			c, err := NewRemoteClient(RemoteConfig{
+				Address:          a.addr,
+				ClientCertFile:   certFile,
+				ClientKeyFile:    keyFile,
+				ServerSPKISHA256: a.server.spki,
+				KESVKey:          vkey,
+				OpCert:           opCert,
+				SignTimeout:      2 * time.Second,
+				OnNewerOpCert:    func(b []byte) { offers <- b },
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = c.Close() })
+
+			require.NoError(t, c.Prepare())
+			rotated.Store(true)
+			a.refusal = refusal
+			a.refuseRequests.Store(1)
+			_, err = c.Sign(0, []byte("header"))
+			require.ErrorContains(t, err, refusal)
+			require.Len(t, a.received(), 1, "a final refusal must not be resent")
+
+			require.ErrorIs(t, c.Prepare(), ErrRemoteAdmission)
+			require.Equal(t, int32(2), a.accepts.Load(),
+				"an operational certificate mismatch must not keep the session")
+			require.Equal(t, newer, testutil.RequireReceive(
+				t, offers, time.Second, "newer certificate offered",
+			))
+		})
+	}
 }

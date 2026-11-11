@@ -200,7 +200,7 @@ func newLeiosRecoveryLedgerState(
 		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
 		EndorserBlockProvider: probe.provider,
 		EndorserBlockFetcher:  probe.fetch,
-		// A zero wait disables the best-effort announcement window; the
+		// A zero wait disables the near-head diffusion wait; the
 		// mandatory certified closure must still be fetched.
 		EndorserBlockWaitSlots: 0,
 	}

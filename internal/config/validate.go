@@ -74,10 +74,32 @@ func validateHostPort(addr string) error {
 	return nil
 }
 
+// kesAgentAddressKey returns the listener a remote KES agent address names,
+// for spotting two pools that share one: the host lower-cased and the port as
+// a number, so a zero-padded port that validateHostPort accepts, a host typed
+// in another case and the bracketed IPv6 form all compare equal. An address
+// that does not parse returns "", since validateHostPort reports it already.
+func kesAgentAddressKey(addr string) string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil || host == "" {
+		return ""
+	}
+	p, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || p == 0 {
+		return ""
+	}
+	return net.JoinHostPort(
+		strings.ToLower(host),
+		strconv.FormatUint(p, 10),
+	)
+}
+
 // validateRemoteKESAgent checks a pool's remote KES agent configuration: one
 // KES source only, sign mode, every address host:port, and a transport that
 // can work: the server pin and the client certificate are optional, but need
 // TLS, so plain TCP takes neither, and a client certificate is set as a pair.
+// Without an address, any remote transport option is refused, so a mistyped
+// remote configuration cannot fall back to local or Unix-socket signing.
 // prefix is prepended to every setting name, so errors name the list entry
 // they came from.
 func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
@@ -92,13 +114,32 @@ func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
 	}
 	addresses := p.RemoteAgentAddresses()
 	if len(addresses) == 0 {
-		if p.ShelleyKESAgentPlaintext {
-			errs = append(errs, fmt.Errorf(
-				"%s requires %s or %s",
-				field("shelleyKesAgentPlaintext"),
-				field("shelleyKesAgentAddress"),
-				field("shelleyKesAgentAddresses"),
-			))
+		for _, opt := range []struct {
+			name string
+			set  bool
+		}{
+			{"shelleyKesAgentPlaintext", p.ShelleyKESAgentPlaintext},
+			{
+				"shelleyKesAgentClientCertFile",
+				p.ShelleyKESAgentClientCertFile != "",
+			},
+			{
+				"shelleyKesAgentClientKeyFile",
+				p.ShelleyKESAgentClientKeyFile != "",
+			},
+			{
+				"shelleyKesAgentServerSpkiSha256",
+				strings.TrimSpace(p.ShelleyKESAgentServerSPKISHA256) != "",
+			},
+		} {
+			if opt.set {
+				errs = append(errs, fmt.Errorf(
+					"%s requires %s or %s",
+					field(opt.name),
+					field("shelleyKesAgentAddress"),
+					field("shelleyKesAgentAddresses"),
+				))
+			}
 		}
 		return errs
 	}
@@ -219,17 +260,43 @@ func (c *Config) validateBlockProducerPools() []error {
 		return validateBlockProducerPool(c.singlePool(), "")
 	}
 	var errs []error
-	if single := c.singlePool(); !single.isZero() {
+	if c.HasSinglePoolKeys() {
 		errs = append(errs, errors.New(
 			"blockProducerPools replaces shelleyVrfKey, shelleyKesKey, "+
-				"shelleyOperationalCertificate and the shelleyKesAgent* "+
-				"settings; set them in each pool",
+				"shelleyOperationalCertificate, shelleyKesAgentSocket, "+
+				"shelleyKesAgentMode, shelleyKesAgentAddress, "+
+				"shelleyKesAgentClientCertFile, shelleyKesAgentClientKeyFile, "+
+				"shelleyKesAgentServerSpkiSha256 and shelleyKesAgentPlaintext; "+
+				"set them in each pool",
 		))
 	}
 	opCerts := make(map[string]int, len(c.BlockProducerPools))
+	agentAddresses := make(map[string]int, len(c.BlockProducerPools))
 	for i, p := range c.BlockProducerPools {
 		prefix := fmt.Sprintf("blockProducerPools[%d].", i)
 		errs = append(errs, validateBlockProducerPool(p, prefix)...)
+		// A remote KES agent session cannot name a profile yet, and bursa
+		// refuses more than one profile per attested listener, so a remote
+		// agent address can serve one pool only. A local socket is not
+		// limited: it serves several pools through its profiles.
+		for _, address := range p.RemoteAgentAddresses() {
+			addr := kesAgentAddressKey(address)
+			if addr == "" {
+				continue
+			}
+			if j, dup := agentAddresses[addr]; dup && j != i {
+				errs = append(errs, fmt.Errorf(
+					"blockProducerPools[%d] and blockProducerPools[%d] use the same shelleyKesAgentAddress %q: "+
+						"a remote KES agent session cannot name a profile yet and bursa refuses more than one "+
+						"profile per attested listener (blinklabs-io/bursa#1276), so each pool needs its own agent address",
+					j,
+					i,
+					address,
+				))
+			} else if !dup {
+				agentAddresses[addr] = i
+			}
+		}
 		if p.ShelleyKESAgentMode != "" &&
 			p.ShelleyKESAgentMode != "serve-key" &&
 			p.ShelleyKESAgentMode != "sign" {
@@ -257,30 +324,6 @@ func (c *Config) validateBlockProducerPools() []error {
 	return errs
 }
 
-func validateCertificateFingerprints(field string, values []string) []error {
-	var errs []error
-	for idx, fingerprint := range values {
-		normalized := strings.ReplaceAll(
-			strings.TrimSpace(fingerprint),
-			":",
-			"",
-		)
-		decoded, err := hex.DecodeString(normalized)
-		if err != nil || len(decoded) != sha256.Size {
-			errs = append(errs, fmt.Errorf(
-				"%s[%d] must be a %d-byte SHA-256 certificate fingerprint "+
-					"encoded as hexadecimal",
-				field,
-				idx,
-				sha256.Size,
-			))
-		}
-	}
-	return errs
-}
-
-// ValidateKESAgentSignTimeout accepts zero as the documented default
-// selector, or an explicit positive timeout shorter than one mainnet slot.
 func ValidateKESAgentSignTimeout(timeout time.Duration) error {
 	if timeout < 0 || timeout >= maxKESAgentSignTimeout {
 		return fmt.Errorf(
@@ -292,9 +335,24 @@ func ValidateKESAgentSignTimeout(timeout time.Duration) error {
 	return nil
 }
 
-// ValidateMithrilPublicBaseURL accepts an absolute public origin. Plain HTTP
-// is restricted to loopback so artifact locations are HTTPS for normal
-// bootstrap clients.
+// minKeyWatchInterval keeps the credential file watch from reading the key
+// files many times a second.
+const minKeyWatchInterval = time.Second
+
+// ValidateKeyWatchInterval accepts zero (watch disabled) or an interval of at
+// least a second.
+func ValidateKeyWatchInterval(interval time.Duration) error {
+	if interval != 0 && interval < minKeyWatchInterval {
+		return fmt.Errorf(
+			"shelleyKeyWatchInterval (%s) must be zero (disabled) or at least %s",
+			interval,
+			minKeyWatchInterval,
+		)
+	}
+	return nil
+}
+
+// ValidateMithrilPublicBaseURL accepts an absolute HTTP(S) origin.
 func ValidateMithrilPublicBaseURL(value string) error {
 	u, err := url.Parse(value)
 	if err != nil {
@@ -302,7 +360,7 @@ func ValidateMithrilPublicBaseURL(value string) error {
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "https" && scheme != "http" {
-		return errors.New("must use HTTPS (HTTP is allowed only on loopback)")
+		return errors.New("must use HTTP or HTTPS")
 	}
 	if u.Host == "" || u.Hostname() == "" || u.User != nil || u.Opaque != "" ||
 		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery ||
@@ -310,16 +368,6 @@ func ValidateMithrilPublicBaseURL(value string) error {
 		return errors.New(
 			"must be an origin without credentials, a path, query, or fragment",
 		)
-	}
-	if scheme == "http" {
-		host := strings.ToLower(u.Hostname())
-		addr, parseErr := netip.ParseAddr(host)
-		if host != "localhost" &&
-			(parseErr != nil || !addr.Unmap().IsLoopback()) {
-			return errors.New(
-				"plain HTTP public URL is allowed only on loopback",
-			)
-		}
 	}
 	return nil
 }
@@ -530,6 +578,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if c.TrustedNtCIdleTimeout < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid trustedNtCIdleTimeout: %s (must be zero or positive)",
+			c.TrustedNtCIdleTimeout,
+		))
+	}
+
 	for _, pool := range c.TracingAlwaysSamplePools {
 		if _, err := ParsePoolKeyHash(pool); err != nil {
 			errs = append(errs, fmt.Errorf(
@@ -572,7 +627,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// cannot bind and so cannot conflict. The active set is derived from
 	// the effective run mode plus the storage mode, mirroring the gating in
 	// (*dingo.Node).Start and cmd/dingo's node.Run/mithril paths:
-	//   - relay, private: serving modes only (required there);
+	//   - relay: serving modes only (required there);
+	//   - private: serving modes only (optional: port 0 disables the TCP
+	//     node-to-client listener);
 	//   - metrics, debug: serving modes and the Mithril sync operation
 	//     (RunModeSync); the read-only Mithril subcommands start neither;
 	//   - health: serving modes and the Mithril sync operation
@@ -650,7 +707,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 	ports := slices.Concat([]portSpec{
 		{"port (relay/NtN)", c.BindAddr, c.RelayPort, serving, serving},
-		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
+		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, false},
 		{
 			"metricsPort",
 			c.MetricsBindAddr,
@@ -800,72 +857,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
-	// Bark's DatabaseService is mounted whenever bark is enabled with a snapshot
-	// directory configured. Every method must authenticate its caller, and its
-	// destructive methods additionally require explicit operator authorization.
-	// Validate both policies here rather than failing deep in Bark.Start.
-	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
-		c.BarkClientCAFilePath == "" {
-		errs = append(errs, errors.New(
-			"barkClientCaFilePath is required when bark is enabled "+
-				"(barkPort) alongside databaseLifecycle.snapshotDir: its "+
-				"DatabaseService RPCs must not be mounted without a way to "+
-				"authenticate callers",
-		))
-	}
-	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
-		len(c.BarkOperatorCertificateFingerprints) == 0 {
-		errs = append(errs, errors.New(
-			"barkOperatorCertificateFingerprints requires at least one SHA-256 "+
-				"client certificate fingerprint when bark is enabled (barkPort) "+
-				"alongside databaseLifecycle.snapshotDir: verified identity alone "+
-				"does not authorize destructive DatabaseService RPCs",
-		))
-	}
-	errs = append(errs, validateCertificateFingerprints(
-		"barkOperatorCertificateFingerprints",
-		c.BarkOperatorCertificateFingerprints,
-	)...)
-	if len(c.BarkLifecycleOperatorCertificateFingerprints) > 0 &&
-		!c.BarkLifecycleEnabled {
-		errs = append(errs, errors.New(
-			"barkLifecycleOperatorCertificateFingerprints requires "+
-				"barkLifecycleEnabled",
-		))
-	}
 	if serving && c.BarkLifecycleEnabled && c.BarkPort == 0 {
-		errs = append(errs, errors.New(
-			"barkPort must be non-zero when barkLifecycleEnabled is true",
-		))
-	}
-	if serving && c.BarkLifecycleEnabled && c.BarkClientCAFilePath == "" {
-		errs = append(errs, errors.New(
-			"barkClientCaFilePath is required when barkLifecycleEnabled is true",
-		))
-	}
-	if serving && c.BarkLifecycleEnabled &&
-		len(c.BarkLifecycleOperatorCertificateFingerprints) == 0 {
-		errs = append(errs, errors.New(
-			"barkLifecycleOperatorCertificateFingerprints requires at least one "+
-				"SHA-256 client certificate fingerprint when barkLifecycleEnabled is true",
-		))
-	}
-	errs = append(errs, validateCertificateFingerprints(
-		"barkLifecycleOperatorCertificateFingerprints",
-		c.BarkLifecycleOperatorCertificateFingerprints,
-	)...)
-	// mTLS client verification also needs the server's own TLS pair --
-	// without it, bark.Bark.Start's own equivalent check (independent of
-	// Lifecycle, since it applies to any TlsClientCAFilePath) would fail
-	// deep inside node startup instead of here. Checked independently of
-	// the barkPort/snapshotDir gate above so a barkClientCaFilePath set by
-	// mistake without barkPort/snapshotDir still gets flagged.
-	if serving && c.BarkClientCAFilePath != "" &&
-		(c.TlsCertFilePath == "" || c.TlsKeyFilePath == "") {
-		errs = append(errs, errors.New(
-			"barkClientCaFilePath requires tlsCertFilePath and tlsKeyFilePath "+
-				"to also be set for mTLS client verification",
-		))
+		errs = append(
+			errs,
+			errors.New(
+				"barkPort must be non-zero when barkLifecycleEnabled is true",
+			),
+		)
 	}
 
 	// Mempool
@@ -1016,6 +1014,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	if err := ValidateKESAgentSignTimeout(
 		c.ShelleyKESAgentSignTimeout,
 	); err != nil {
+		errs = append(errs, err)
+	}
+	if err := ValidateKeyWatchInterval(c.ShelleyKeyWatchInterval); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -1219,19 +1220,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 						"when the aggregator is enabled",
 				))
 			}
-			if agg.OperatorTokenFile == "" {
-				errs = append(errs, errors.New(
-					"mithril.server.aggregator.operatorTokenFile is required "+
-						"when the aggregator is enabled",
-				))
-			}
-			if !isLoopbackListenHost(c.BindAddr) &&
-				!c.Mithril.Server.TLSEnabled {
-				errs = append(errs, errors.New(
-					"mithril.server.tlsEnabled is required when the aggregator "+
-						"uses a non-loopback bindAddr",
-				))
-			}
 		}
 	}
 	// Node-managed Mithril sync runs only inside a serving node, so the
@@ -1351,6 +1339,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		case uint64(c.DMQ.MessageTTL) > maxMessageTTL:
 			errs = append(errs, fmt.Errorf(
 				"dmq.messageTtl must be at most %d seconds",
+				maxMessageTTL,
+			))
+		}
+		if uint64(c.DMQ.MinPoolMessageInterval) > maxMessageTTL {
+			errs = append(errs, fmt.Errorf(
+				"dmq.minPoolMessageInterval must be at most %d seconds",
 				maxMessageTTL,
 			))
 		}
@@ -1556,12 +1550,6 @@ func normalizeBindAddr(addr string) string {
 		return addr
 	}
 	return parsed.Unmap().String()
-}
-
-func isLoopbackListenHost(host string) bool {
-	literal := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-	addr, err := netip.ParseAddr(literal)
-	return err == nil && addr.Unmap().IsLoopback()
 }
 
 // isWildcardAddr reports whether a bind address selects all interfaces. The

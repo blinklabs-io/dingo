@@ -83,3 +83,42 @@ func (ls *LedgerState) pinSettledHeaderAdmission(
 	}
 	return nil, false
 }
+
+// maxHeaderAdmissionVerifyAttempts bounds how often a header whose verdict
+// expired before it could be pinned is verified again.
+const maxHeaderAdmissionVerifyAttempts = 3
+
+// pinHeaderVerdict pins generation for header admission. Blocks applied during
+// catch-up publish a tip every few milliseconds, so a verdict can expire
+// between its verification and its pin even though nothing about the header
+// changed; verifying again yields a verdict for the current publication.
+// verify is nil when no fresh verdict can be produced. It returns a nil
+// release and a nil error once every attempt expired, and the verification
+// error unchanged when one fails.
+func (ls *LedgerState) pinHeaderVerdict(
+	generation uint64,
+	verify func() (uint64, error),
+) (uint64, func(), error) {
+	if generation != 0 {
+		if release, current := ls.PinHeaderCryptoVerificationGeneration(
+			generation,
+		); current {
+			return generation, release, nil
+		}
+	}
+	if verify == nil {
+		return generation, nil, nil
+	}
+	for range maxHeaderAdmissionVerifyAttempts {
+		fresh, err := verify()
+		if err != nil {
+			return 0, nil, err
+		}
+		if release, current := ls.PinHeaderCryptoVerificationGeneration(
+			fresh,
+		); current {
+			return fresh, release, nil
+		}
+	}
+	return generation, nil, nil
+}

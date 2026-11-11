@@ -30,18 +30,21 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blinklabs-io/bursa"
+	"github.com/blinklabs-io/bursa/kesagent/wire"
 )
 
 const (
 	// AttestedProtocolID is the protocol a bursa KES agent's remote sign
 	// listener reports in its Hello.
-	AttestedProtocolID = "bursa-attested-kes/1"
+	AttestedProtocolID = wire.AttestedProtocolID
 	// ProviderNone is the attestation provider of an agent that presents no
 	// evidence: its attestation_response carries none. A provider names the
 	// evidence, not the transport; how the link itself is authenticated (a
 	// pinned server key, a client certificate, or nothing over plain TCP) is
 	// transport configuration.
-	ProviderNone = "none"
+	ProviderNone = wire.NoEvidenceProvider
 
 	// DefaultSessionFreshFor is how long after its last frame an admitted
 	// session is reused. The agent closes a sign session that sends no new
@@ -99,6 +102,14 @@ type RemoteConfig struct {
 	// report this exact certificate at admission; the node has already
 	// validated its cold-key signature.
 	OpCert []byte
+	// OnNewerOpCert, when set, is called with the agent's operational
+	// certificate when admission finds one for the same cold key with a
+	// higher issue counter than OpCert: the agent's key was rotated and this
+	// node's copy of the certificate is behind. Admission still fails, since
+	// every signature is verified against OpCert; the caller decides whether
+	// to validate the newer certificate and reload with it. It runs on the
+	// admitting goroutine and must not block.
+	OnNewerOpCert func(opCert []byte)
 	// HelloTimeout bounds the dial, TLS handshake and admission. Zero uses
 	// DefaultHelloTimeout.
 	HelloTimeout time.Duration
@@ -121,9 +132,9 @@ type RemoteConfig struct {
 // forger calls Prepare shortly before each leader slot, so the dial, the TLS
 // handshake and the admission exchange happen before the slot and Sign finds
 // an admitted session; Sign reuses a session while it is fresh and otherwise
-// opens one itself. A sign request is sent at most once per Sign call: a
-// failure after it may have reached the agent is returned, never resent on a
-// new session. It is safe for concurrent use.
+// opens one itself. A Sign that gets no signature back sends the identical
+// body once more, never a different one, and never after a final refusal.
+// It is safe for concurrent use.
 type RemoteClient struct {
 	cfg    RemoteConfig
 	logger *slog.Logger
@@ -136,6 +147,9 @@ type RemoteClient struct {
 	// its own deadline. mu guards the fields below and is held only briefly,
 	// never across network I/O.
 	turn chan struct{}
+	// localOpCert is cfg.OpCert decoded, to recognise a newer certificate
+	// for the same pool at admission; nil when it does not decode.
+	localOpCert *bursa.DecodedOpCert
 
 	mu       sync.Mutex
 	conn     net.Conn
@@ -229,6 +243,9 @@ func NewRemoteClient(cfg RemoteConfig) (*RemoteClient, error) {
 		logger: cfg.Logger,
 		pin:    pin,
 		turn:   make(chan struct{}, 1),
+	}
+	if dec, err := bursa.DecodeOpCert(cfg.OpCert); err == nil {
+		c.localOpCert = dec
 	}
 	cfg.Logger.Info(
 		"KES agent link: "+remoteTransportName(cfg, pin),
@@ -503,25 +520,12 @@ func (c *RemoteClient) admit(ctx context.Context) (net.Conn, error) {
 	return conn, nil
 }
 
-// attestationRequest and attestationResponse mirror the attested listener's
-// admission frames in blinklabs-io/bursa internal/kesagent.
-type attestationRequest struct {
-	Type     string `json:"type"`
-	Protocol string `json:"protocol"`
-	Nonce    []byte `json:"nonce"`
-}
-
-type attestationResponse struct {
-	Type        string `json:"type"`
-	Protocol    string `json:"protocol"`
-	Nonce       []byte `json:"nonce"`
-	Provider    string `json:"provider"`
-	KESVKey     []byte `json:"kes_vkey,omitempty"`
-	OpCert      []byte `json:"opcert,omitempty"`
-	Period      uint64 `json:"period,omitempty"`
-	Attestation []byte `json:"attestation,omitempty"`
-	Error       string `json:"error,omitempty"`
-}
+// attestationRequest and attestationResponse are the attested listener's
+// admission frames, from bursa's kesagent/wire.
+type (
+	attestationRequest  = wire.AttestationRequest
+	attestationResponse = wire.AttestationResponse
+)
 
 // checkAdmission accepts a "none" attestation_response for this node's KES
 // key, whatever the transport: the echoed nonce, protocol and provider match,
@@ -553,6 +557,7 @@ func (c *RemoteClient) checkAdmission(
 		return fmt.Errorf("%w: unexpected evidence for provider %q",
 			ErrRemoteAdmission, c.cfg.Provider)
 	case !bytes.Equal(resp.OpCert, c.cfg.OpCert):
+		c.offerNewerOpCert(resp.OpCert)
 		return fmt.Errorf(
 			"%w: agent's operational certificate is not the local one",
 			ErrRemoteAdmission,
@@ -571,11 +576,94 @@ func (c *RemoteClient) checkAdmission(
 	return nil
 }
 
+// offerNewerOpCert passes the agent's certificate to OnNewerOpCert when it is
+// for the same cold key as the local one and carries a higher issue counter.
+// Anything else -- another pool's certificate, an older or equal counter, or
+// bytes that do not decode -- is only an admission failure. The caller
+// validates the certificate fully before using it; this filter only keeps a
+// mismatch that cannot be a rotation from reaching it.
+func (c *RemoteClient) offerNewerOpCert(agentOpCert []byte) {
+	if c.cfg.OnNewerOpCert == nil || c.localOpCert == nil {
+		return
+	}
+	dec, err := bursa.DecodeOpCert(agentOpCert)
+	if err != nil ||
+		!bytes.Equal(dec.ColdVKey, c.localOpCert.ColdVKey) ||
+		dec.IssueNumber <= c.localOpCert.IssueNumber {
+		return
+	}
+	c.cfg.OnNewerOpCert(append([]byte(nil), agentOpCert...))
+}
+
+// maxSignSends bounds how often one Sign sends its request: once, and once
+// more with the identical body after a lost reply or an agent error that is
+// not a final refusal.
+const maxSignSends = 2
+
+// finalSignRefusals are the agent's reasons, as blinklabs-io/bursa words them
+// in internal/kesagent, for refusing a request that the identical body cannot
+// get past on a resend: a second header for a slot it already signed, an
+// older slot, a period its key has passed, a period below its floor, an
+// exhausted key, and a message that is not a header for its key. The wire
+// protocol carries no error code, so the reason text is all a client has.
+var finalSignRefusals = []string{
+	"a different header was already signed for this slot",
+	"header slot below the last signed slot",
+	"requested KES period is in the past for the active key",
+	"KES period rollback refused",
+	"active KES key has exhausted its evolutions",
+	"sign request is not a matching Praos header body",
+}
+
+// opCertMismatchRefusals are the agent reasons, as blinklabs-io/bursa words
+// them in internal/kesagent, for a header that carries another operational
+// certificate than the one the agent has installed: its key was rotated after
+// this session was admitted. They are final refusals, and the session is
+// dropped too, so the next Prepare or Sign re-admits and offers the agent's
+// newer certificate to OnNewerOpCert.
+var opCertMismatchRefusals = []string{
+	"operational certificate names a different KES key",
+	"operational certificate counter/period do not match the installed one",
+	"operational certificate cold signature is not the installed one",
+}
+
+// isOpCertMismatchRefusal reports whether an agent's refusal reason says the
+// header's operational certificate is not the one the agent has installed.
+func isOpCertMismatchRefusal(reason string) bool {
+	for _, mismatch := range opCertMismatchRefusals {
+		if strings.Contains(reason, mismatch) {
+			return true
+		}
+	}
+	return false
+}
+
+// isFinalSignRefusal reports whether an agent's refusal reason is one a
+// resend of the same body cannot change.
+func isFinalSignRefusal(reason string) bool {
+	for _, final := range finalSignRefusals {
+		if strings.Contains(reason, final) {
+			return true
+		}
+	}
+	return false
+}
+
 // Sign implements ledger/forging.RemoteKESSigner over the remote session. It
 // reuses the open session, or opens one within SignTimeout, sends the request
-// once and verifies the signature against the local operational
-// certificate's KES key. A transport or verification failure drops the
-// session, and the next Prepare or Sign redials; an agent refusal keeps it.
+// and verifies the signature against the local operational certificate's KES
+// key. A transport or verification failure drops the session, and the next
+// Prepare or Sign redials; an agent refusal keeps it, except one saying the
+// header's operational certificate is not the agent's installed one, which
+// drops it so the redial can offer the agent's newer certificate.
+//
+// A request that got no signature back, because the reply was lost with the
+// session or the agent returned an error that is not a final refusal, is
+// sent once more with the identical body while SignTimeout allows: the agent
+// may already have recorded the slot, and it signs a recorded slot again
+// only for the same body. A final refusal, such as a different header
+// already signed for the slot, is returned at once, and so is a signature
+// that fails verification.
 func (c *RemoteClient) Sign(
 	period uint64,
 	message []byte,
@@ -603,30 +691,57 @@ func (c *RemoteClient) Sign(
 		return nil, err
 	}
 	defer c.release()
+	req := SignRequest{Type: "sign_request", Period: period, Message: message}
+	for sends := 1; ; sends++ {
+		sig, resend, err := c.signOnce(ctx, req)
+		if err == nil {
+			c.cfg.Metrics.observeSignLatency(time.Since(start))
+			c.cfg.Metrics.incSignSuccess()
+			return sig, nil
+		}
+		if !resend || sends >= maxSignSends || ctx.Err() != nil {
+			return nil, err
+		}
+		c.logger.Warn(
+			"KES agent returned no signature, resending the identical header body",
+			"component", "kesagent",
+			"period", period,
+			"error", err,
+		)
+	}
+}
+
+// signOnce sends req on the session, opening one if needed, and verifies the
+// reply. resend reports whether the identical request may be sent again: the
+// reply was lost, or the agent answered with an error that is not a final
+// refusal. The caller holds the turn.
+func (c *RemoteClient) signOnce(
+	ctx context.Context,
+	req SignRequest,
+) (_ []byte, resend bool, _ error) {
 	// A sign ignores the reconnect backoff: a leader slot is worth a dial.
 	if err := c.ensureSession(ctx, false); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
 	if conn == nil {
-		return nil, ErrClosed
+		return nil, false, ErrClosed
 	}
 	deadline, _ := ctx.Deadline()
 	if err := conn.SetDeadline(deadline); err != nil {
 		c.dropConn(conn)
-		return nil, fmt.Errorf("kesagent: set sign deadline: %w", err)
+		return nil, true, fmt.Errorf("kesagent: set sign deadline: %w", err)
 	}
-	req := SignRequest{Type: "sign_request", Period: period, Message: message}
 	if err := writeFrame(conn, MaxSignFrameLen, req); err != nil {
 		c.dropConn(conn)
-		return nil, fmt.Errorf("kesagent: send sign request: %w", err)
+		return nil, true, fmt.Errorf("kesagent: send sign request: %w", err)
 	}
 	var resp SignResponse
 	if err := readFrame(conn, MaxSignFrameLen, &resp); err != nil {
 		c.dropConn(conn)
-		return nil, fmt.Errorf("kesagent: read sign response: %w", err)
+		return nil, true, fmt.Errorf("kesagent: read sign response: %w", err)
 	}
 	c.mu.Lock()
 	if c.conn == conn {
@@ -636,22 +751,22 @@ func (c *RemoteClient) Sign(
 	if err := validateSignResponse(
 		c.cfg.KESVKey,
 		c.cfg.OpCertStartPeriod,
-		period,
-		message,
+		req.Period,
+		req.Message,
 		resp,
 	); err != nil {
-		// A well-formed refusal leaves the session usable; anything else,
-		// including an error on a frame of the wrong type or period, means
-		// the agent cannot be trusted on this session.
-		if resp.Error == "" || resp.Type != "sign_response" ||
-			resp.Period != period {
+		// A well-formed refusal leaves the session usable, unless it says
+		// the agent now holds another operational certificate; anything
+		// else, including an error on a frame of the wrong type or period,
+		// means the agent cannot be trusted on this session.
+		refusal := resp.Error != "" && resp.Type == "sign_response" &&
+			resp.Period == req.Period
+		if !refusal || isOpCertMismatchRefusal(resp.Error) {
 			c.dropConn(conn)
 		}
-		return nil, err
+		return nil, refusal && !isFinalSignRefusal(resp.Error), err
 	}
-	c.cfg.Metrics.observeSignLatency(time.Since(start))
-	c.cfg.Metrics.incSignSuccess()
-	return resp.Signature, nil
+	return resp.Signature, false, nil
 }
 
 // Close closes the session. It is safe to call more than once.
@@ -687,4 +802,5 @@ func (c *RemoteClient) recordDialFailureLocked() {
 		c.backoff = min(c.backoff*2, maxReconnectBackoff)
 	}
 	c.nextDialAfter = time.Now().Add(c.backoff)
+	c.cfg.Metrics.incReconnectFailures()
 }

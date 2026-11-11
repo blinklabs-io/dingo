@@ -958,9 +958,21 @@ type ConnectionLiveFunc func(ouroboros.ConnectionId) bool
 // recently forged a block for a given slot. Chainsync uses it to attribute the
 // local side of same-slot and restricted-window Praos battles.
 type ForgedBlockChecker interface {
-	// WasForgedByUs returns the block hash and true if the local node
-	// forged a block for the given slot, or nil and false otherwise.
-	WasForgedByUs(slot uint64) (blockHash []byte, ok bool)
+	// ForgedBlockHashes returns the hash of every block the local node
+	// forged for the given slot, or nil when it forged none. A node forging
+	// for several pools can hold more than one: two of its pools may lead
+	// the same slot and both forge when the slot arbiter cannot decide.
+	ForgedBlockHashes(slot uint64) [][]byte
+}
+
+// forgedByUs reports whether hash is one of the blocks the local node forged
+// for slot. Every own hash counts, so a second own block in a slot is never
+// taken for a peer's.
+func forgedByUs(checker ForgedBlockChecker, slot uint64, hash []byte) bool {
+	return slices.ContainsFunc(
+		checker.ForgedBlockHashes(slot),
+		func(own []byte) bool { return bytes.Equal(own, hash) },
+	)
 }
 
 // SlotBattleRecorder records slot battle events for metrics.
@@ -1074,7 +1086,7 @@ type LedgerStateConfig struct {
 	// block that block has already been certified, so the certify-by deadline
 	// is the bound for when it is actually available to fetch) rather than a
 	// hardcoded duration; the ledger converts it to wall-clock using the
-	// Shelley slot length. Zero disables best-effort announcement waiting, but
+	// Shelley slot length. Zero disables the near-head diffusion wait, but
 	// does not permit a certifying ranking block to commit without its
 	// certified closure.
 	EndorserBlockWaitSlots uint64
@@ -1797,6 +1809,10 @@ type LedgerState struct {
 	// headerVerificationEpochWithCache, before the snapshot is re-read, so a
 	// test can publish a new snapshot mid-lookup.
 	headerVerificationEpochLookupHook func()
+	// peerForkOpCertCheckedHook is a test seam, nil in production. It runs
+	// after a candidate's opcert counters are checked and before they are
+	// committed, so a test can publish a snapshot mid-check.
+	peerForkOpCertCheckedHook func()
 	// blockfetchContinuationPending prevents a chainsync handler from starting
 	// a competing batch in the short interval after the blockfetch subscriber
 	// schedules its next request on a worker. The worker must run outside the
@@ -2684,16 +2700,30 @@ func sameHeaderVerificationContext(a, b *consensusSnapshot) bool {
 	return reflect.DeepEqual(a.epochCache, b.epochCache)
 }
 
-// sameProtocolParameters compares parameter sets by identity. Writers install
-// a new value when parameters change; a replacement with equal content is
-// treated as a change, which only costs a re-verification.
+// sameProtocolParameters reports whether two parameter sets have the same
+// content. Rollbacks and epoch reloads rebuild parameters from the database as
+// a new pointer with identical values, so identity alone would invalidate every
+// header verdict after each local rollback. Header verification depends only on
+// parameter values, so value equality is the correct test. The same pointer
+// short-circuits the comparison; types that cannot be compared (for example
+// holding a func) compare unequal, which only costs a re-verification.
 func sameProtocolParameters(a, b lcommon.ProtocolParameters) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
 	av, bv := reflect.ValueOf(a), reflect.ValueOf(b)
-	return av.Type() == bv.Type() && av.Kind() == reflect.Pointer &&
-		av.Pointer() == bv.Pointer()
+	if av.Type() != bv.Type() {
+		return false
+	}
+	if av.Kind() == reflect.Pointer {
+		if av.IsNil() || bv.IsNil() {
+			return av.IsNil() && bv.IsNil()
+		}
+		if av.Pointer() == bv.Pointer() {
+			return true
+		}
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // snapshotPublishedChan returns a channel closed by the next snapshot
@@ -10339,10 +10369,11 @@ func (ls *LedgerState) processBlocksFromSource(
 					// The tracker is keyed by slot, so a block that won a
 					// slot battle against ours shares the slot; only an
 					// equal hash makes the tip our block.
-					if forgedHash, forged := checker.WasForgedByUs(
+					if forgedByUs(
+						checker,
 						tipForLog.Point.Slot,
-					); forged &&
-						bytes.Equal(forgedHash, tipForLog.Point.Hash) {
+						tipForLog.Point.Hash,
+					) {
 						source = "forged"
 					}
 				}

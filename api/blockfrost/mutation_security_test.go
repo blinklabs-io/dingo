@@ -25,81 +25,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-func TestBlockfrostMutationRoutesRequireAuthentication(t *testing.T) {
-	t.Parallel()
-
-	for _, route := range []struct {
-		path        string
-		contentType string
-		body        string
-	}{
-		{"/api/v0/tx/submit", "application/cbor", ""},
-		{"/api/v0/utils/txs/evaluate", "application/cbor", ""},
-		{"/api/v0/utils/txs/evaluate/utxos", "application/json", `{}`},
-	} {
-		t.Run(route.path, func(t *testing.T) {
-			t.Parallel()
-			b := New(BlockfrostConfig{AuthToken: "secret"}, &mockNode{}, nil)
-			handler := b.handler()
-
-			for _, auth := range []struct {
-				name   string
-				header string
-				value  string
-				extra  string
-				want   int
-			}{
-				{name: "missing", want: http.StatusUnauthorized},
-				{name: "wrong", header: "project_id", value: "wrong", want: http.StatusUnauthorized},
-				{name: "project id", header: "project_id", value: "secret", want: http.StatusBadRequest},
-				{name: "project id alias", header: "X-Blockfrost-Project-Id", value: "secret", want: http.StatusBadRequest},
-				{name: "bearer", header: "Authorization", value: "Bearer secret", want: http.StatusBadRequest},
-				{name: "wrong project id with valid bearer", header: "project_id", value: "wrong", extra: "Bearer secret", want: http.StatusBadRequest},
-			} {
-				t.Run(auth.name, func(t *testing.T) {
-					req := httptest.NewRequest(
-						http.MethodPost,
-						route.path,
-						strings.NewReader(route.body),
-					)
-					req.Header.Set("Content-Type", route.contentType)
-					if auth.header != "" {
-						req.Header.Set(auth.header, auth.value)
-					}
-					if auth.extra != "" {
-						req.Header.Set("Authorization", auth.extra)
-					}
-					w := httptest.NewRecorder()
-					handler.ServeHTTP(w, req)
-					assert.Equal(t, auth.want, w.Code)
-					assert.NotContains(t, w.Body.String(), "secret")
-				})
-			}
-		})
-	}
-}
-
-func TestBlockfrostMutationRoutesStayClosedWithoutConfiguredToken(t *testing.T) {
-	t.Parallel()
-
-	b := New(BlockfrostConfig{}, &mockNode{}, nil)
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v0/tx/submit",
-		strings.NewReader("\x80"),
-	)
-	req.Header.Set("Content-Type", "application/cbor")
-	req.Header.Set("project_id", "any-value")
-	w := httptest.NewRecorder()
-	b.handler().ServeHTTP(w, req)
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
-}
 
 type blockingMutationNode struct {
 	*mockNode
@@ -142,7 +70,6 @@ func TestBlockfrostMutationAdmissionPrecedesBodyRead(t *testing.T) {
 		release:  make(chan struct{}),
 	}
 	b := New(BlockfrostConfig{
-		AuthToken:                       "secret",
 		MaxConcurrentMutations:          2,
 		MaxConcurrentMutationsPerClient: 1,
 	}, node, nil)
@@ -159,7 +86,6 @@ func TestBlockfrostMutationAdmissionPrecedesBodyRead(t *testing.T) {
 			)
 			req.RemoteAddr = remoteAddr
 			req.Header.Set("Content-Type", "application/cbor")
-			req.Header.Set("project_id", "secret")
 			handler.ServeHTTP(httptest.NewRecorder(), req)
 		}()
 		return done
@@ -174,7 +100,6 @@ func TestBlockfrostMutationAdmissionPrecedesBodyRead(t *testing.T) {
 		)
 		req.RemoteAddr = remoteAddr
 		req.Header.Set("Content-Type", "application/cbor")
-		req.Header.Set("project_id", "secret")
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusTooManyRequests, w.Code)
@@ -182,11 +107,21 @@ func TestBlockfrostMutationAdmissionPrecedesBodyRead(t *testing.T) {
 	}
 
 	firstDone := startRequest("192.0.2.1:1000")
-	testutil.RequireReceive(t, node.started, 5*time.Second, "mutation did not start")
+	testutil.RequireReceive(
+		t,
+		node.started,
+		5*time.Second,
+		"mutation did not start",
+	)
 	assertRejectedWithoutRead("192.0.2.1:1001")
 
 	secondDone := startRequest("192.0.2.2:1000")
-	testutil.RequireReceive(t, node.started, 5*time.Second, "mutation did not start")
+	testutil.RequireReceive(
+		t,
+		node.started,
+		5*time.Second,
+		"mutation did not start",
+	)
 	assertRejectedWithoutRead("192.0.2.3:1000")
 
 	close(node.release)
@@ -217,47 +152,6 @@ func TestBlockfrostProviderSecurityDefaults(t *testing.T) {
 		cfg.MaxConcurrentMutationsPerClient,
 		cfg.MaxConcurrentMutations,
 	)
-}
-
-func TestBlockfrostRemoteMutationAuthenticationRequiresTLS(t *testing.T) {
-	t.Parallel()
-
-	require.ErrorContains(
-		t,
-		validateListenSecurity(
-			"0.0.0.0",
-			"secret",
-			apiconfig.EffectiveTLS{},
-		),
-		"requires server TLS",
-	)
-	assert.NoError(t, validateListenSecurity(
-		"0.0.0.0",
-		"secret",
-		apiconfig.EffectiveTLS{Enabled: true},
-	))
-	assert.NoError(t, validateListenSecurity(
-		"127.0.0.1",
-		"secret",
-		apiconfig.EffectiveTLS{},
-	))
-	assert.NoError(t, validateListenSecurity(
-		"0.0.0.0",
-		"",
-		apiconfig.EffectiveTLS{},
-	))
-}
-
-func TestBlockfrostStartRejectsRemoteMutationAuthWithoutTLS(t *testing.T) {
-	t.Parallel()
-
-	b := New(BlockfrostConfig{
-		ListenAddress: "0.0.0.0:0",
-		AuthToken:     "secret",
-	}, &mockNode{}, nil)
-	err := b.Start(t.Context())
-	require.ErrorContains(t, err, "requires server TLS")
-	assert.Nil(t, b.listener.Server())
 }
 
 func TestNormalizeListenHostStripsOneBracketPair(t *testing.T) {

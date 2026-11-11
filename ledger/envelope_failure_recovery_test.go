@@ -152,8 +152,11 @@ func processEnvelopeBlock(
 
 type envelopeForgedChecker struct{ hash []byte }
 
-func (c envelopeForgedChecker) WasForgedByUs(uint64) ([]byte, bool) {
-	return c.hash, c.hash != nil
+func (c envelopeForgedChecker) ForgedBlockHashes(uint64) [][]byte {
+	if c.hash == nil {
+		return nil
+	}
+	return [][]byte{c.hash}
 }
 
 // A peer block that fails the inbound envelope is a deterministic verdict on a

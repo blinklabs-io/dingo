@@ -282,6 +282,7 @@ type Config struct {
 	inboundDuplexOnlyForHot                                                             bool
 	maxConnectionsPerIP, maxInboundConns, maxNtCConns, maxNtCConnectionsPerIP           int
 	maxTrustedLocalNtCConns                                                             int
+	trustedNtCIdleTimeout                                                               time.Duration
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
 	genesisCorroborationPeers                                                           int
@@ -289,6 +290,7 @@ type Config struct {
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
 	shelleyKESAgentSignTimeout                                                          time.Duration
+	shelleyKeyWatchInterval                                                             time.Duration
 	shelleyKESAgentAddress, shelleyKESAgentClientCertFile, shelleyKESAgentClientKeyFile string
 	shelleyKESAgentServerSPKISHA256                                                     string
 	blockProducerPools                                                                  []BlockProducerPool
@@ -616,6 +618,16 @@ func (n *Node) configValidate() error {
 			"invalid start era %q: must be empty or %q",
 			n.config.cfg.StartEra,
 			internalconfig.StartEraDijkstra,
+		)
+	}
+	if len(n.config.cfg.BlockProducerPools) > 0 &&
+		n.config.cfg.HasSinglePoolKeys() {
+		return errors.New(
+			"WithBlockProducerPools replaces WithShelleyVRFKey, " +
+				"WithShelleyKESKey, WithShelleyOperationalCertificate, " +
+				"WithShelleyKESAgentSocket, WithShelleyKESAgentMode, " +
+				"WithShelleyKESAgentRemote and WithShelleyKESAgentPlaintext; " +
+				"set them in each pool",
 		)
 	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
@@ -1005,11 +1017,13 @@ func (c *Config) syncCompatFields() {
 	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
 	c.maxNtCConns, c.maxNtCConnectionsPerIP = c.cfg.MaxNtCConns, c.cfg.MaxNtCConnectionsPerIP
 	c.maxTrustedLocalNtCConns = c.cfg.MaxTrustedLocalNtCConns
+	c.trustedNtCIdleTimeout = c.cfg.TrustedNtCIdleTimeout
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.shelleyKESAgentAddress, c.shelleyKESAgentClientCertFile, c.shelleyKESAgentClientKeyFile = c.cfg.ShelleyKESAgentAddress, c.cfg.ShelleyKESAgentClientCertFile, c.cfg.ShelleyKESAgentClientKeyFile
 	c.shelleyKESAgentServerSPKISHA256 = c.cfg.ShelleyKESAgentServerSPKISHA256
+	c.shelleyKeyWatchInterval = c.cfg.ShelleyKeyWatchInterval
 	c.blockProducerPools = slices.Clone(c.cfg.BlockProducerPools)
 	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
 	c.shelleyKESAgentAddresses = slices.Clone(c.cfg.ShelleyKESAgentAddresses)
@@ -1694,6 +1708,17 @@ func WithMaxTrustedLocalNtCConns(n int) ConfigOptionFunc {
 	}
 }
 
+// WithTrustedNtCIdleTimeout specifies how long a trusted local
+// node-to-client connection may stay idle before it is closed. Zero means no
+// limit and negative values are ignored. Default: 0.
+func WithTrustedNtCIdleTimeout(d time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		if d >= 0 {
+			c.cfg.TrustedNtCIdleTimeout = d
+		}
+	}
+}
+
 // WithSkipRewardLiveStakeBackfillCheck skips the startup scan that verifies
 // reward live-stake rows against the full UTxO table.
 func WithSkipRewardLiveStakeBackfillCheck(skip bool) ConfigOptionFunc {
@@ -1785,6 +1810,20 @@ func WithShelleyKESAgentSignTimeout(timeout time.Duration) ConfigOptionFunc {
 	}
 }
 
+// WithShelleyKeyWatchInterval makes a block producer poll its credential
+// files (CARDANO_SHELLEY_KEY_WATCH_INTERVAL) and reload them in place, as on
+// SIGHUP, once a change has held for two polls. It lets a mounted Secret be
+// rotated without a restart. 0, the default, disables the watch; the dingo
+// command's config validation refuses a non-zero value below 1s, which this
+// option does not check. The watch runs with local key files and with a
+// KES agent in sign mode. In KES agent serve-key mode, where the agent pushes
+// key rotations, it is ignored and a warning is logged.
+func WithShelleyKeyWatchInterval(interval time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKeyWatchInterval = interval
+	}
+}
+
 // WithShelleyKESAgentRemote signs block headers through a bursa KES agent's
 // remote sign listener at address (host:port)
 // (CARDANO_SHELLEY_KES_AGENT_ADDRESS) over TLS 1.3. serverSPKISHA256 is the
@@ -1811,8 +1850,11 @@ type BlockProducerPool = internalconfig.BlockProducerPool
 // WithBlockProducerPools lists every pool this block producer forges for, each
 // with its own VRF key, operational certificate and KES source. It replaces
 // the single-pool WithShelleyVRFKey, WithShelleyKESKey,
-// WithShelleyOperationalCertificate and WithShelleyKESAgent* options, which
-// must then be left unset.
+// WithShelleyOperationalCertificate, WithShelleyKESAgentSocket,
+// WithShelleyKESAgentMode, WithShelleyKESAgentRemote and
+// WithShelleyKESAgentPlaintext options; New refuses a config that sets any of
+// them beside the pools. WithShelleyKESAgentSignTimeout and
+// WithShelleyKeyWatchInterval apply to every pool.
 func WithBlockProducerPools(pools ...BlockProducerPool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BlockProducerPools = slices.Clone(pools)
@@ -2095,9 +2137,8 @@ func WithBarkHost(host string) ConfigOptionFunc {
 	}
 }
 
-// WithBarkClientCAFilePath sets the PEM CA bundle Bark uses to authenticate
-// every DatabaseService and LifecycleService caller. Destructive methods
-// additionally require their service's operator allowlist.
+// WithBarkClientCAFilePath retains the legacy input.
+// It does not enable authentication or authorization.
 func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkClientCAFilePath = path
@@ -2134,8 +2175,8 @@ func WithBarkArchiveCallerLookupsPerSecond(rate int) ConfigOptionFunc {
 	}
 }
 
-// WithBarkOperatorCertificateFingerprints sets the SHA-256 client certificate
-// fingerprints authorized to invoke destructive DatabaseService RPCs.
+// WithBarkOperatorCertificateFingerprints retains the legacy input.
+// It does not enable authentication or authorization.
 func WithBarkOperatorCertificateFingerprints(
 	fingerprints []string,
 ) ConfigOptionFunc {
@@ -2154,8 +2195,8 @@ func WithBarkLifecycleEnabled(enabled bool) ConfigOptionFunc {
 	}
 }
 
-// WithBarkLifecycleOperatorCertificateFingerprints sets the SHA-256 client
-// certificate fingerprints authorized to invoke Bark Stop and Restart RPCs.
+// WithBarkLifecycleOperatorCertificateFingerprints retains the legacy input.
+// It does not enable authentication or authorization.
 func WithBarkLifecycleOperatorCertificateFingerprints(
 	fingerprints []string,
 ) ConfigOptionFunc {
@@ -2528,8 +2569,8 @@ func (c *Config) BarkBlockDownloadAllowPrivateAddresses() bool {
 	return c.cfg.BarkBlockDownloadAllowPrivateAddresses
 }
 
-// BarkOperatorCertificateFingerprints returns the SHA-256 client certificate
-// fingerprints authorized to invoke destructive Bark DatabaseService RPCs.
+// BarkOperatorCertificateFingerprints retains the legacy input.
+// It does not enable authentication or authorization.
 func (c *Config) BarkOperatorCertificateFingerprints() []string {
 	return slices.Clone(c.cfg.BarkOperatorCertificateFingerprints)
 }
@@ -2552,8 +2593,8 @@ func (c *Config) BarkLifecycleEnabled() bool {
 	return c.cfg.BarkLifecycleEnabled
 }
 
-// BarkLifecycleOperatorCertificateFingerprints returns the distinct operator
-// allowlist for Bark Stop and Restart RPCs.
+// BarkLifecycleOperatorCertificateFingerprints retains the legacy input.
+// It does not enable authentication or authorization.
 func (c *Config) BarkLifecycleOperatorCertificateFingerprints() []string {
 	return slices.Clone(c.cfg.BarkLifecycleOperatorCertificateFingerprints)
 }

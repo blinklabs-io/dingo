@@ -30,11 +30,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func (m *mockForgedBlockChecker) WasForgedByUs(
-	slot uint64,
-) ([]byte, bool) {
-	hash, ok := m.forgedSlots[slot]
-	return hash, ok
+func (m *mockForgedBlockChecker) ForgedBlockHashes(slot uint64) [][]byte {
+	if hash, ok := m.forgedSlots[slot]; ok {
+		return [][]byte{hash}
+	}
+	return nil
 }
 
 // TestTimeToSlot_FutureTimeWithEmptyCacheReturnsError pins that when the

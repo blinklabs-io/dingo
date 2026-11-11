@@ -1036,6 +1036,184 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 	)
 }
 
+func TestAdvanceByronPBFTStateUsesNetworkSlotForDelegationActivation(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		protocolMagic = uint32(44)
+		securityParam = uint64(10)
+	)
+	template := loadRealByronMainBlock(t)
+	issuer := newByronPBFTTestKey(0x64)
+	initialDelegate := newByronPBFTTestKey(0x65)
+	replacementDelegate := newByronPBFTTestKey(0x66)
+	genesisCertificate := newSignedByronPBFTDelegationCertificate(
+		t,
+		protocolMagic,
+		0,
+		issuer,
+		initialDelegate,
+	)
+	activationCertificate := newSignedByronPBFTDelegationCertificate(
+		t,
+		protocolMagic,
+		1,
+		issuer,
+		replacementDelegate,
+	)
+	ls := &LedgerState{config: LedgerStateConfig{
+		CardanoNodeConfig: newGeneratedByronPBFTTestNodeConfig(
+			t,
+			protocolMagic,
+			securityParam,
+			issuer,
+			initialDelegate,
+			genesisCertificate,
+		),
+	}}
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(
+			time.Now().Add(-50_000*time.Second),
+			time.Second,
+			1_000,
+		),
+		DefaultSlotClockConfig(),
+	)
+	config, err := ls.byronPBFTConfig()
+	require.NoError(t, err)
+
+	var origin lcommon.Blake2b256
+	scheduleActivation := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		0,
+		95,
+		1,
+		origin,
+		issuer,
+		initialDelegate,
+		genesisCertificate,
+		[]any{activationCertificate},
+	)
+	newScheduledState := func() byronPBFTState {
+		state, err := newByronPBFTState(config, nil)
+		require.NoError(t, err)
+		state, err = ls.advanceByronPBFTState(
+			context.Background(),
+			state,
+			scheduleActivation,
+			true,
+		)
+		require.NoError(t, err)
+		return state
+	}
+	newBlock := func(
+		slot uint64,
+		delegate byronPBFTTestKey,
+		certificate []any,
+	) *byron.ByronMainBlock {
+		return newSignedByronPBFTBlock(
+			t,
+			template,
+			protocolMagic,
+			1,
+			slot,
+			2,
+			scheduleActivation.Hash(),
+			issuer,
+			delegate,
+			certificate,
+			nil,
+		)
+	}
+
+	beforeActivation := newBlock(0, initialDelegate, genesisCertificate)
+	_, err = ls.advanceByronPBFTState(
+		context.Background(),
+		newScheduledState(),
+		beforeActivation,
+		true,
+	)
+	require.NoError(t, err)
+
+	replacementBeforeActivation := newBlock(
+		0,
+		replacementDelegate,
+		activationCertificate,
+	)
+	_, err = ls.advanceByronPBFTState(
+		context.Background(),
+		newScheduledState(),
+		replacementBeforeActivation,
+		true,
+	)
+	require.ErrorContains(t, err, "does not authorize delegate")
+
+	atActivation := newBlock(15, replacementDelegate, activationCertificate)
+	_, err = ls.advanceByronPBFTState(
+		context.Background(),
+		newScheduledState(),
+		atActivation,
+		true,
+	)
+	require.NoError(t, err)
+
+	initialAtActivation := newBlock(15, initialDelegate, genesisCertificate)
+	_, err = ls.advanceByronPBFTState(
+		context.Background(),
+		newScheduledState(),
+		initialAtActivation,
+		true,
+	)
+	require.ErrorContains(t, err, "does not authorize delegate")
+
+	scheduleFromEpochOne := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		1,
+		95,
+		1,
+		origin,
+		issuer,
+		initialDelegate,
+		genesisCertificate,
+		[]any{activationCertificate},
+	)
+	state, err := newByronPBFTState(config, nil)
+	require.NoError(t, err)
+	state, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		scheduleFromEpochOne,
+		false,
+	)
+	require.NoError(t, err)
+	atNextEpochActivation := newSignedByronPBFTBlock(
+		t,
+		template,
+		protocolMagic,
+		2,
+		15,
+		2,
+		scheduleFromEpochOne.Hash(),
+		issuer,
+		replacementDelegate,
+		activationCertificate,
+		nil,
+	)
+	_, err = ls.advanceByronPBFTState(
+		context.Background(),
+		state,
+		atNextEpochActivation,
+		true,
+	)
+	require.NoError(t, err)
+}
+
 func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 	t *testing.T,
 ) {

@@ -286,7 +286,7 @@ CREATE TABLE reward_account_output (
     boundary_slot INTEGER NOT NULL,
     folded BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE (
-        epoch, credential_tag, staking_key, pool_key_hash, reward_type
+        epoch, pool_key_hash, credential_tag, staking_key, reward_type
     )
 );
 

@@ -61,6 +61,12 @@ type poolProducer struct {
 	kesAgentClient  io.Closer
 	kesAgentCancel  context.CancelFunc
 	kesAgentMetrics *kesagent.Metrics
+	// kesAgentMetricsMu guards kesAgentMetrics' lazy creation: a sign-mode
+	// reload builds its client outside the lifecycle gates.
+	kesAgentMetricsMu sync.Mutex
+	// agentOffers are this pool's own agent offers of a newer operational
+	// certificate; they reload this pool only.
+	agentOffers agentOfferState
 
 	creds    *forging.PoolCredentials
 	election interface{ Stop() error }
@@ -213,11 +219,14 @@ func (n *Node) prepareMultiPool() error {
 // keySource is this producer's poolKeySource.
 func (pp *poolProducer) keySource(n *Node) *poolKeySource {
 	return &poolKeySource{
-		n:      n,
-		keys:   pp.keys,
-		client: &pp.kesAgentClient,
-		cancel: &pp.kesAgentCancel,
+		n:             n,
+		keys:          pp.keys,
+		client:        &pp.kesAgentClient,
+		cancel:        &pp.kesAgentCancel,
+		onNewerOpCert: pp.agentOffers.offer,
 		metrics: func() *kesagent.Metrics {
+			pp.kesAgentMetricsMu.Lock()
+			defer pp.kesAgentMetricsMu.Unlock()
 			if pp.kesAgentMetrics == nil {
 				if reg := n.poolMetricsRegistry(pp.poolID); reg != nil {
 					pp.kesAgentMetrics = kesagent.NewMetrics(reg)
@@ -488,9 +497,10 @@ func (n *Node) wireForgedBlockTracking() {
 type ownForgedBlocks struct {
 	mu      sync.RWMutex
 	forgers []*forging.BlockForger
-	// last is the forger whose block WasForgedByUs last matched. The ledger
-	// records a slot battle right after asking about the slot, so the battle
-	// is counted against the pool whose block fought it.
+	// last is the first forger with a block in the slot ForgedBlockHashes
+	// last found one in. The ledger records a slot battle right after asking
+	// about the slot, so the battle is counted against a pool whose block
+	// fought it.
 	last *forging.BlockForger
 }
 
@@ -501,19 +511,30 @@ func (o *ownForgedBlocks) set(forgers []*forging.BlockForger) {
 	o.last = nil
 }
 
-func (o *ownForgedBlocks) WasForgedByUs(slot uint64) ([]byte, bool) {
+// ForgedBlockHashes returns every pool's block for slot. Two pools that both
+// lead the slot forge it when the slot arbiter fails open, so the slot can
+// hold two blocks of the node's own, with different hashes, and the ledger
+// must recognise either one.
+func (o *ownForgedBlocks) ForgedBlockHashes(slot uint64) [][]byte {
 	o.mu.RLock()
 	forgers := o.forgers
 	o.mu.RUnlock()
+	var hashes [][]byte
+	var first *forging.BlockForger
 	for _, f := range forgers {
 		if hash, ok := f.SlotTracker().WasForgedByUs(slot); ok {
-			o.mu.Lock()
-			o.last = f
-			o.mu.Unlock()
-			return hash, true
+			if first == nil {
+				first = f
+			}
+			hashes = append(hashes, hash)
 		}
 	}
-	return nil, false
+	if first != nil {
+		o.mu.Lock()
+		o.last = first
+		o.mu.Unlock()
+	}
+	return hashes
 }
 
 func (o *ownForgedBlocks) RecordSlotBattle() {
@@ -550,39 +571,61 @@ func (n *Node) poolProducersReady() error {
 	return errors.Join(errs...)
 }
 
+// runningPool is a pool after the first that is forging, and its live
+// credentials.
+type runningPool struct {
+	pp   *poolProducer
+	live *forging.PoolCredentials
+}
+
+// runningPoolProducers lists the pools after the first that are forging.
+func (n *Node) runningPoolProducers() []runningPool {
+	n.multiPool.mu.Lock()
+	defer n.multiPool.mu.Unlock()
+	var pools []runningPool
+	for _, pp := range n.multiPool.producers {
+		if pp.creds != nil {
+			pools = append(pools, runningPool{pp: pp, live: pp.creds})
+		}
+	}
+	return pools
+}
+
 // reloadPoolProducerCredentials reloads every running pool after the first
-// through its own key source. A pool that fails keeps its credentials and is
-// counted; the others still reload.
+// through its own key source and returns one result per pool, each error
+// naming its pool. A sign-mode pool installs the reload preps holds for it. A
+// pool that fails keeps its credentials and is counted; the others still
+// reload. With skipServeKey a serve-key pool is not reloaded and reports
+// itself unchanged.
 func (n *Node) reloadPoolProducerCredentials(
 	slot uint64,
 	supported bool,
 	ledgerCheck func(*forging.PoolCredentials) error,
-) error {
-	n.multiPool.mu.Lock()
-	type target struct {
-		pp   *poolProducer
-		live *forging.PoolCredentials
-	}
-	var targets []target
-	for _, pp := range n.multiPool.producers {
-		if pp.creds != nil {
-			targets = append(targets, target{pp: pp, live: pp.creds})
+	skipServeKey bool,
+	preps *signReloadPreps,
+) []error {
+	pools := n.runningPoolProducers()
+	results := make([]error, 0, len(pools))
+	for _, t := range pools {
+		ks := t.pp.keySource(n)
+		if skipServeKey && ks.servesKeys() {
+			results = append(results, errCredentialsUnchanged)
+			continue
 		}
-	}
-	n.multiPool.mu.Unlock()
-	var errs []error
-	for _, t := range targets {
-		if err := n.reloadPoolCredentials(
-			t.pp.keySource(n),
+		err := n.reloadPoolCredentials(
+			ks,
 			t.live,
 			slot,
 			supported,
 			ledgerCheck,
-		); err != nil {
-			errs = append(errs, fmt.Errorf("pool %s: %w", t.pp.poolID, err))
+			preps.pool(t.pp),
+		)
+		if err != nil {
+			err = fmt.Errorf("pool %s: %w", t.pp.poolID, err)
 		}
+		results = append(results, err)
 	}
-	return errors.Join(errs...)
+	return results
 }
 
 // countReloadFailure counts a credential reload that left poolID's keys as
