@@ -2154,6 +2154,11 @@ func TestImportUtxosDeferredSQLiteDoesNotMutateInput(t *testing.T) {
 	for i := range utxos {
 		require.Zero(t, utxos[i].ID)
 	}
+	require.Len(t, utxos[0].Assets, 1)
+	require.Equal(t, []byte("token"), utxos[0].Assets[0].Name)
+	require.Equal(t, bytes.Repeat([]byte{0xab}, 28), utxos[0].Assets[0].PolicyId)
+	require.Equal(t, types.Uint64(9), utxos[0].Assets[0].Amount)
+	require.Empty(t, utxos[1].Assets)
 }
 
 // TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction exercises

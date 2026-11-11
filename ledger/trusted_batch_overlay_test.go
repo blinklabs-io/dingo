@@ -40,9 +40,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// overlayStrictDigest is rowBatchingDigest with every surrogate id kept and
-// every sqlite_sequence row added: the batch UTxO overlay assigns the
-// per-row path's ids itself, so they must match exactly.
+// overlayStrictDigest is rowBatchingDigest with surrogate ids kept and
+// sqlite_sequence rows added: the batch UTxO overlay assigns the per-row
+// path's ids itself, so they must match exactly. asset_identity ids are the
+// exception: they are node-local, so digestTableQuery drops them from the
+// table digest and the asset_identity sqlite_sequence row is excluded here.
 func overlayStrictDigest(t testing.TB, db *database.Database) string {
 	t.Helper()
 	raw, err := dbtest.RawSQLiteMetadata(t, db)

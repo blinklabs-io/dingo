@@ -866,7 +866,7 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 	require.NoError(t, txn.Commit())
 
 	// insertUtxoModel here consults exactly three distinct cached queries --
-	// insertUtxoQueryIgnoreConflict, insertAssetHoldingQuery, and
+	// insertUtxoResultIgnoreConflictQuery, insertAssetHoldingQuery, and
 	// insertAssetIdentityQuery (the first holding creates the identity) --
 	// so 3 is the exact bound, not just an upper one.
 	require.Equal(

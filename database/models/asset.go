@@ -129,7 +129,7 @@ func CheckedUint64FromBigInt(amount *big.Int) (uint64, error) {
 }
 
 // ConvertMultiAssetToModels converts a MultiAsset structure into a slice of Asset models.
-// Each asset is populated with its name, policy ID, fingerprint, and amount.
+// Each asset is populated with its name, policy ID, and amount.
 // Returns an empty slice if multiAsset is nil or contains no assets.
 func ConvertMultiAssetToModels(
 	multiAsset *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput],

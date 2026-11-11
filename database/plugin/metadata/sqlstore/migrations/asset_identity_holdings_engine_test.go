@@ -175,25 +175,29 @@ VALUES (?, ?, 0, 1, 0, '1')`), id, txID)
 		require.NoError(t, err)
 	}
 	shared, other := assetSplitPolicy(0x01), assetSplitPolicy(0x02)
-	for _, row := range []legacyAssetRow{
-		{1, shared, []byte("tok"), "5"},
-		{2, shared, []byte("tok"), "6"},
-		{1, shared, []byte{}, "1"},
-		{2, other, nil, "2"},
-		{3, nil, []byte("tok"), "007"},
-		{3, shared, []byte("dup"), "9"},
-		{3, shared, []byte("dup"), "9"},
-	} {
+	insertLegacy := func(row legacyAssetRow) error {
 		_, err := e.db.Exec(e.query(`
 INSERT INTO asset (name, policy_id, fingerprint, utxo_id, amount)
 VALUES (?, ?, ?, ?, ?)`), row.name, row.policy, []byte("fp"), row.utxo,
 			row.amount)
-		if err != nil {
-			// The legacy unique key rejects an exact duplicate on the
-			// engines that enforce it; the merge path is covered on SQLite.
-			continue
-		}
+		return err
 	}
+	for _, row := range []legacyAssetRow{
+		{1, shared, []byte("tok"), "5"},
+		{2, shared, []byte("tok"), "6"},
+		{1, shared, []byte{}, "1"},
+		// A NULL name is a distinct key to the legacy unique index but
+		// the same asset as the empty name, so the split merges it into
+		// the row above.
+		{1, shared, nil, "1"},
+		{2, other, nil, "2"},
+		{3, nil, []byte("tok"), "007"},
+		{3, shared, []byte("dup"), "9"},
+	} {
+		require.NoError(t, insertLegacy(row))
+	}
+	// The legacy unique key rejects an exact duplicate on both engines.
+	require.Error(t, insertLegacy(legacyAssetRow{3, shared, []byte("dup"), "9"}))
 
 	e.run(t, e.registry)
 	require.False(t, e.tableExists(t, "asset"), "the legacy table is dropped")

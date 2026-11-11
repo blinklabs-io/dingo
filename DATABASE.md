@@ -780,7 +780,8 @@ and `idx_asset_utxo_id`, never drops a source that was not fully copied.
   identically, so responses do not change, but a MemPack-imported output whose
   asset name was stored as `NULL` now matches an empty-name lookup.
 - A legacy row whose `utxo_id` is `NULL` or names no `utxo` row is dropped and
-  counted in `orphans`, as a foreign key would have refused it.
+  counted in `orphans`: the new table's `NOT NULL` constraint would refuse a
+  `NULL` `utxo_id`, and its foreign key a dangling one.
 - Rows that land on one `(utxo, policy, name)` (a `NULL` name and an empty name
   of one asset on one output) merge when their amount text is identical, and
   fail the migration when it differs.
@@ -6158,7 +6159,7 @@ WHERE u.deleted_slot = 0
 
 ```sql
 -- Total live quantity for a policy/name pair
-SELECT COALESCE(SUM(h.amount), 0) AS quantity
+SELECT COALESCE(SUM(CAST(h.amount AS DECIMAL(20, 0))), 0) AS quantity
 FROM asset_identity i
 JOIN asset_holding h ON h.asset_id = i.id
 JOIN utxo u ON u.id = h.utxo_id

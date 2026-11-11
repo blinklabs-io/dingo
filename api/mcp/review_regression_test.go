@@ -522,6 +522,10 @@ func TestReviewPolicyOnlyPagination(t *testing.T) {
 		`CREATE INDEX reverse_asset_order ON asset_holding(utxo_id, asset_id DESC)`,
 	)
 	require.NoError(t, err)
+	_, err = db.Exec(
+		`CREATE INDEX reverse_identity_order ON asset_identity(policy_id, id ASC)`,
+	)
+	require.NoError(t, err)
 	require.Equal(t, first, page(0))
 	require.Equal(t, second, page(1))
 }

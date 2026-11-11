@@ -75,6 +75,7 @@ CREATE INDEX idx_asset_control_policy_id ON asset_control (policy_id)`)
 	}
 	seed, err := store.writeDB.Begin()
 	require.NoError(t, err)
+	defer func() { _ = seed.Rollback() }()
 	for asset := range uint64(assets) {
 		_, err := seed.Exec(
 			`INSERT INTO asset_identity (policy_id, name) VALUES (?, ?)`,
@@ -122,6 +123,7 @@ VALUES (?, ?, ?, '1')`,
 		for range batches {
 			tx, err := store.writeDB.Begin()
 			require.NoError(t, err)
+			defer func() { _ = tx.Rollback() }()
 			for range batchUtxos {
 				write(tx, next)
 				next++

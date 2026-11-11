@@ -565,8 +565,9 @@ func stripTransactions(snapshot string) string {
 	return out.String()
 }
 
-// TestAssetReadsAgreeAfterRollback removes the slot-101 outputs on every
-// write path and requires the reads to agree and to forget their holdings.
+// TestAssetReadsAgreeAfterRollback rolls every write path back to slot 100,
+// removing the later outputs and restoring the output spent at slot 102, and
+// requires the reads to agree and to forget the removed holdings.
 func TestAssetReadsAgreeAfterRollback(t *testing.T) {
 	t.Parallel()
 	var reference string
@@ -574,6 +575,7 @@ func TestAssetReadsAgreeAfterRollback(t *testing.T) {
 		store := newForeignKeySQLiteStore(t)
 		path.apply(t, store, false)
 		require.NoError(t, store.DeleteUtxosAfterSlot(100, nil))
+		require.NoError(t, store.SetUtxosNotDeletedAfterSlot(100, nil))
 		snapshot := stripTransactions(paritySnapshot(t, store, false, false))
 		if reference == "" {
 			reference = snapshot
@@ -583,8 +585,11 @@ func TestAssetReadsAgreeAfterRollback(t *testing.T) {
 	}
 	require.Contains(t, reference, "## quantity 1/\"\"\n1\nok",
 		"only the slot-100 empty-name holding survives")
-	require.Contains(t, reference, "## quantity 1/\"tok\"\n2\nok",
-		"only the slot-100 tok holdings survive, the spent one excluded")
+	require.Contains(t, reference, "## quantity 1/\"tok\"\n5\nok",
+		"only the slot-100 tok holdings survive, the restored one included")
+	require.Contains(t, reference,
+		fmt.Sprintf("## quantity 3/\"big\"\n%d\nok", uint64(math.MaxUint64)),
+		"the holding spent at slot 102 is live again")
 }
 
 // TestCreateUtxoAssetsReadBack covers the model-level insert path.
