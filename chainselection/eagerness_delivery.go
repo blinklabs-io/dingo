@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"math"
 	"slices"
+	"sync"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -37,6 +38,56 @@ type eagernessDelivery struct {
 	proofBase       uint64
 	proofHead       uint64
 	proofGeneration uint64
+	// join holds the read view eagernessFragmentLocked returns once this
+	// window starts above the admitted frontier's. It is shared by copies of
+	// the entry and nil until the entry is first recorded.
+	join *eagernessJoin
+}
+
+// eagernessJoin caches one connection's joined read view. The limit is
+// recomputed on every delivered header under the selector's read lock, and a
+// connection that stays open fills both bounded windows, so building the view
+// afresh copied two windows of points per header.
+type eagernessJoin struct {
+	mu       sync.Mutex
+	fragment CandidateFragment
+}
+
+// joined returns the points of base below extension followed by extension's.
+// The view of the previous call is reused when it still describes this chain:
+// points are consecutive block hashes, so a view whose head point is the
+// point this chain has at that height agrees with it at every height below.
+// Only the newer points are then appended. A returned view is never written
+// again: later calls append past its length or move to a new array.
+func (j *eagernessJoin) joined(base, extension CandidateFragment) CandidateFragment {
+	at := func(number uint64) ocommon.Point {
+		if number < extension.baseBlock {
+			return base.points[number-base.baseBlock]
+		}
+		return extension.points[number-extension.baseBlock]
+	}
+	// #nosec G115 -- slice lengths are nonnegative and fit in uint64.
+	head := extension.baseBlock + uint64(len(extension.points)) - 1
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	cached := j.fragment
+	cachedHead, ok := eagernessFragmentHead(cached)
+	if ok && cached.baseBlock <= base.baseBlock &&
+		cachedHead >= base.baseBlock && cachedHead <= head &&
+		pointsEqual(cached.points[len(cached.points)-1], at(cachedHead)) {
+		points := cached.points[base.baseBlock-cached.baseBlock:]
+		for number := cachedHead + 1; number <= head; number++ {
+			points = append(points, at(number))
+		}
+		j.fragment = CandidateFragment{points: points, baseBlock: base.baseBlock}
+		return j.fragment
+	}
+	prefix := base.points[:extension.baseBlock-base.baseBlock]
+	points := make([]ocommon.Point, len(prefix)+len(extension.points))
+	copy(points, prefix)
+	copy(points[len(prefix):], extension.points)
+	j.fragment = CandidateFragment{points: points, baseBlock: base.baseBlock}
+	return j.fragment
 }
 
 func eagernessFragmentHead(fragment CandidateFragment) (uint64, bool) {
@@ -158,6 +209,9 @@ func (cs *ChainSelector) recordEagernessDeliveryLocked(
 	entry.fragment = fragment
 	entry.generation = update.HeaderCryptoVerificationGeneration
 	entry.trimProof()
+	if entry.join == nil {
+		entry.join = &eagernessJoin{}
+	}
 	cs.eagernessDeliveries[update.ConnectionId] = entry
 }
 
@@ -219,6 +273,9 @@ func (cs *ChainSelector) eagernessFragmentLocked(
 	prefix := base.points[:extension.baseBlock-base.baseBlock]
 	if len(prefix) > math.MaxInt-len(extension.points) {
 		return base
+	}
+	if entry.join != nil {
+		return entry.join.joined(base, extension)
 	}
 	joined := make([]ocommon.Point, len(prefix)+len(extension.points))
 	copy(joined, prefix)
