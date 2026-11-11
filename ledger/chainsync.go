@@ -7106,6 +7106,15 @@ func (ls *LedgerState) blockfetchEventCurrent(e BlockfetchEvent) bool {
 		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
 		return false
 	}
+	// A request released while still outstanding keeps streaming until its
+	// terminal event. The connection can be the active one again by then, so
+	// the connection alone does not say which request an event belongs to.
+	if e.RequestId != 0 {
+		released := ls.blockfetchReleasedRequestIds[connIdKey(e.ConnectionId)]
+		if _, ok := released[e.RequestId]; ok {
+			return false
+		}
+	}
 	return sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId) ||
 		(connIdKey(ls.shadowBlockfetchConnId) != "" &&
 			sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId))
