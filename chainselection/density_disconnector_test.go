@@ -283,6 +283,54 @@ func TestSessionAnchorRequiresFirstHeaderToNameIt(t *testing.T) {
 	}
 }
 
+// A rollback of a tracked peer past its retained frontier empties it, and the
+// rollback point anchors the frontier the next header starts.
+func TestSessionAnchorAfterTrackedRollbackOutsideFrontier(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	conn := corrConn(1)
+	intersection := genesisTip(10, "h10", 10)
+	advertised := genesisTip(1_000_000, "adv", 1_000)
+	intersectSession(f.cs, conn, intersection, advertised)
+	f.deliverFrom(t, conn, intersection, slotRange(11, 20)...)
+
+	rollback := genesisTip(5, "h5", 5)
+	intersectSession(f.cs, conn, rollback, advertised)
+	f.deliverFrom(t, conn, rollback, 6)
+
+	f.cs.mutex.RLock()
+	defer f.cs.mutex.RUnlock()
+	peerTip := f.cs.peerTips[conn]
+	require.NotNil(t, peerTip)
+	require.Len(t, peerTip.observedPoints, 2)
+	assert.Equal(t, uint64(5), peerTip.observedPointBaseBlock)
+	assert.Equal(t, "h5", string(peerTip.observedPoints[0].Hash))
+	assert.Equal(t, "h6", string(peerTip.observedPoints[1].Hash))
+}
+
+// The origin carries no hash, so a session that intersects there has no
+// anchor and its frontier starts at the first delivered header.
+func TestSessionAnchorSkipsOrigin(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	conn := corrConn(1)
+	advertised := genesisTip(1_000_000, "adv", 1_000)
+	intersectSession(f.cs, conn, ochainsync.Tip{}, advertised)
+	f.cs.mutex.RLock()
+	peerTip := f.cs.peerTips[conn]
+	require.NotNil(t, peerTip)
+	assert.False(t, peerTip.sessionAnchorSet)
+	f.cs.mutex.RUnlock()
+
+	f.deliverFrom(t, conn, genesisTip(0, "genesis", 0), 1)
+
+	f.cs.mutex.RLock()
+	defer f.cs.mutex.RUnlock()
+	require.Len(t, peerTip.observedPoints, 1)
+	assert.Equal(t, uint64(1), peerTip.observedPointBaseBlock)
+	assert.Equal(t, "h1", string(peerTip.observedPoints[0].Hash))
+}
+
 func TestGDDKeepsPeerWithIncompleteWindow(t *testing.T) {
 	t.Parallel()
 	f := newGDDFixture(t, true)

@@ -7899,8 +7899,9 @@ A frontier emptied by a chainsync rollback, including the rollback that opens a
 session at its `FindIntersect` point, starts from the rollback point when the
 next delivered header names it as its parent; the point is recorded one block
 below that header. A boundary block, which repeats its parent's block number,
-or a header whose parent was withheld from selection, starts the frontier
-without it. Two peers whose forks branch exactly where their sessions
+or a header that does not carry the rollback point's hash as its parent hash
+(for example because its parent was withheld from selection), starts the
+frontier without it. Two peers whose forks branch exactly where their sessions
 intersected therefore still share a frontier point, as upstream anchors every
 candidate fragment at its intersection with the selected chain.
 Window density and suffix counts use binary searches over ordered slots, so a
