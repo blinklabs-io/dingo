@@ -76,7 +76,7 @@ func (cs *ChainSelector) RecordDeliveredPeerTip(update PeerTipUpdateEvent) {
 	}
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
-	if cs.mode != SelectionModeGenesis {
+	if !cs.genesisEnabled && cs.mode != SelectionModeGenesis {
 		return
 	}
 	peerTip := cs.deliveredPeerTips[update.ConnectionId]
@@ -101,6 +101,7 @@ func (cs *ChainSelector) RecordDeliveredPeerTip(update PeerTipUpdateEvent) {
 func (cs *ChainSelector) RecordDeliveredPeerRollback(e PeerRollbackEvent) {
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
+	delete(cs.awaiting, e.ConnectionId)
 	cs.rollbackEagernessDeliveryLocked(e.ConnectionId, e.Point)
 	deliveredTip := cs.deliveredPeerTips[e.ConnectionId]
 	if deliveredTip == nil {

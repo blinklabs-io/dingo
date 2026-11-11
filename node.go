@@ -669,6 +669,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncRemoveForecastWitness:       n.chainsyncRemoveForecastWitness,
 		ChainsyncResolvePeerTip:              n.chainsyncResolvePeerTip,
 		ChainsyncObserveAwaitReply:           n.chainsyncObserveAwaitReply,
+		ChainsyncObserveRollForward:          n.chainsyncObserveRollForward,
 		ChainsyncSyncTarget:                  n.chainsyncSyncTarget,
 		ChainsyncObservePeerRollback:         n.chainsyncObservePeerRollback,
 		// On the Musashi prototype network every mini-protocol shares one muxer
@@ -1398,7 +1399,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		chainSelectorSecurityParam,
 		n.ledgerState.ActiveSlotCoeffRat(),
 	)
-	genesisSelectionMode := n.config.genesisSelectionMode()
+	genesisSelectionMode := n.initialGenesisSelectionMode()
 	chainSelectorConfig := n.buildChainSelectorConfig(
 		chainSelectorSecurityParam,
 		genesisSelectionMode,
@@ -1429,6 +1430,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	n.startChainSelectedNoneWorker(n.ctx)
 	started = append(started, n.waitChainSelectedNoneWorker)
 	n.subscribeChainSelectorEvents()
+	n.subscribeCaughtUpMarkerEvents()
 	n.subscribeEquivocationDetector()
 	// Start the chain selector
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -2296,6 +2298,18 @@ func (n *Node) buildChainSelectorConfig(
 		GenesisWindowSlots:    genesisWindowSlots,
 		MinCorroboratingPeers: n.config.genesisCorroborationPeers,
 		ChainSyncJumping:      n.config.genesisChainSyncJumping,
+		GenesisStateMachine:   n.config.genesisSelectionEligible(),
+		SlotTime:              n.selectorSlotTime,
+		LocalTipPraosView:     n.selectorLocalTipPraosView,
+		HistoricityCutoff:     n.genesisHistoricityCutoff(),
+		ChainSyncConnections: func() []ouroboros.ConnectionId {
+			state := n.selectorChainsyncState.Load()
+			if state == nil {
+				return nil
+			}
+			return state.GetClientConnIds()
+		},
+		OnHistoricityDisconnect: n.onHistoricityDisconnect,
 		ConnectionLive: func(connId ouroboros.ConnectionId) bool {
 			return n.connManager != nil &&
 				n.connManager.GetConnectionById(connId) != nil

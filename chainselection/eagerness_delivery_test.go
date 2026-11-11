@@ -463,7 +463,7 @@ func TestEagernessAuthenticatedDeliveryOwnsDeliveredPoint(t *testing.T) {
 	}
 }
 
-func TestEagernessAuthenticatedDeliveryBoundedAndClearedOnExit(t *testing.T) {
+func TestEagernessAuthenticatedDeliveryBoundedAndKeptOnExit(t *testing.T) {
 	t.Parallel()
 	for _, quorum := range []int{0, 1} {
 		t.Run(fmt.Sprintf("quorum=%d", quorum), func(t *testing.T) {
@@ -484,21 +484,40 @@ func TestEagernessAuthenticatedDeliveryBoundedAndClearedOnExit(t *testing.T) {
 				uint64(f.selector.eagernessDeliveries[peer].fragment.Len()),
 				"the continuity proof must retain only the configured candidate window",
 			)
+			var observers []ouroboros.ConnectionId
 			for index := range 20 {
-				f.selector.RecordDeliveredPeerTip(
-					f.update(corrConn(150+index), 250),
-				)
+				observer := corrConn(150 + index)
+				observers = append(observers, observer)
+				f.selector.RecordDeliveredPeerTip(f.update(observer, 250))
 			}
 			require.Len(t, f.selector.eagernessDeliveries, 1,
 				"untracked observers cannot allocate LoE proofs")
+			var chain testChain
+			for number := uint64(1); number <= 251; number++ {
+				chain.add(loeTip("c", number))
+			}
+			f.selector.config.PointOnLocalChain = chain.onChain
 			f.selector.UpdatePeerTip(peer, loeTip("c", 250), nil)
-			f.selector.UpdatePeerTip(corrConn(130), loeTip("c", 250), nil)
+			second := corrConn(130)
+			f.selector.UpdatePeerTip(second, loeTip("c", 250), nil)
 			f.selector.SetLocalTip(loeTip("c", 250))
+			f.selector.SetPeerIdling(peer, loeTip("c", 250).Point)
+			f.selector.SetPeerIdling(second, loeTip("c", 250).Point)
+			for _, observer := range observers {
+				f.selector.SetPeerIdling(observer, loeTip("c", 250).Point)
+			}
+			require.Equal(t, SelectionModePraos, f.selector.SelectionMode())
 			require.False(t, f.selector.EagernessLimit().Active)
-			require.Empty(t, f.selector.eagernessDeliveries,
-				"Genesis exit must release continuity histories")
+			require.Len(t, f.selector.eagernessDeliveries, 1,
+				"the bounded continuity history is kept across the exit")
 			f.selector.RecordDeliveredPeerTip(f.update(peer, 251))
-			assert.Empty(t, f.selector.eagernessDeliveries)
+			require.Len(t, f.selector.eagernessDeliveries, 1)
+			assert.LessOrEqual(
+				t,
+				uint64(f.selector.eagernessDeliveries[peer].fragment.Len()),
+				capacity,
+				"the history stays bounded in Praos",
+			)
 		})
 	}
 }
