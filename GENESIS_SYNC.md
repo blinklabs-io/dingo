@@ -1,6 +1,6 @@
-# Ouroboros Genesis from-origin sync (operator guide)
+# Ouroboros Genesis sync (operator guide)
 
-This guide covers Dingo's from-origin sync using Genesis density selection,
+This guide covers Dingo's sync using Genesis density selection,
 Limit on Eagerness, density disconnection, patience and authenticated headers.
 The default uses the network's published topology without adding operator roots
 or requiring a corroboration quorum. A configured peer snapshot can supply
@@ -12,16 +12,25 @@ Genesis trust model**.
 
 ## When this applies
 
-Genesis mode is used only when **all** of these hold:
+The Genesis state machine runs only when **all** of these hold:
 
 - `genesisBootstrap.enabled: true` (the default), and
 - no `intersectTip` or explicit intersect points are configured, and
 - the network configuration does not select Praos consensus mode.
 
-This decision does not inspect database contents. A resumed database with the
-same configuration can enter Genesis mode at its persisted tip and rebuild
-its peer candidate histories. Explicit intersection options select normal
-Praos chain selection.
+Explicit intersection options select normal Praos chain selection.
+
+The node starts in Genesis mode unless a `CaughtUpMarker` file in the data
+directory records that the previous run left Genesis and the database tip is
+younger than 20 minutes (the reference's `maxCaughtUpAge`). The marker is
+written when Genesis selection ends and removed when it is re-entered, and on a
+live restore or truncate. A marker whose tip is older than 20 minutes, or whose
+tip time cannot be determined, is removed and the node starts in Genesis. A
+failed marker write or removal is logged and ignored; the tip-age check makes a
+stale marker harmless. Each node therefore starts once in Genesis mode after
+upgrading, until it first reaches the exit condition below. Peer-snapshot
+loading follows the same startup decision, so a node that starts in Praos does
+not load the snapshot peers.
 
 ## Trust model at a glance
 
@@ -172,11 +181,25 @@ Snapshot relays must have a host/IP address and an explicit TCP port from 1 to
   `genesis_patience_exhausted`. A peer that goes silent is instead reported as
   `chainsync.client_stalled` by the two-minute stall watchdog. A caught-up peer
   waiting for new blocks is not charged.
-- **Exit to Praos**: once the local tip catches up to within the Genesis window
-  of the best corroborated peer's *advertised* tip (the network tip — not the
-  headers delivered so far), the node logs `exiting Genesis selection mode` and
-  emits `chainselection.genesis_mode_exited` (local slot, best known slot,
-  window). Normal Praos selection takes over from there.
+- **Exit to Praos**: when at least one ChainSync connection exists, every
+  ChainSync connection (ingress peers and observers) has sent MsgAwaitReply at
+  its delivered position, and no peer's delivered chain is better than the local
+  chain, the node logs `exiting Genesis selection mode` and emits
+  `chainselection.genesis_mode_exited` (local slot, idle peer count, window).
+  Advertised tips are not consulted. A peer whose chain does not intersect the
+  local chain, or that wins the equal-height tiebreak, keeps Genesis active.
+- **Idle at a historic tip**: an idle peer whose delivered tip is older than the
+  Genesis window in seconds plus one hour (the reference's `3k/f + 3600`) blocks
+  the exit, is logged as `disconnecting peer idle at a historic tip`, denied for
+  ten minutes and disconnected. The age uses the era-aware slot time, so it also
+  applies while the ledger is in Byron.
+- **Return to Genesis**: Praos lasts at least 20 minutes after an exit. After
+  that, when the selection tip is older than 20 minutes plus a random 0 to 300
+  second delay drawn once per Praos period (recomputed when the tip changes), or
+  its time cannot be determined, the node logs `entering Genesis selection mode`
+  and emits `chainselection.genesis_mode_entered`. Limit on Eagerness, density
+  disconnection, density comparison and the Limit on Patience apply again from
+  that point; per-peer recent points kept through Praos give them data at once.
 
 `GenesisStatus()` on the chain selector exposes the live mode, window, selected
 fast source, and per-peer density/corroboration for metrics or debugging.
@@ -216,6 +239,20 @@ unchanged, and no density or admission credit is added by reconstruction.
 
 Dingo implements intersection-anchored density for authoritative local fork
 choice, but not every optimization in the reference implementation.
+Known differences from the reference's Genesis State Machine:
+
+- **No PreSyncing state.** The reference waits in PreSyncing for the Honest
+  Availability Assumption before Syncing. Dingo has Syncing and CaughtUp only.
+- **No peer-governance switch on re-entry.** The reference returns to
+  bootstrap or ledger peers when it re-enters Syncing. Dingo keeps its current
+  peers.
+- **Rollback historicity is not checked.** The reference also judges the oldest
+  rolled-back header on MsgRollBackward; Dingo checks the delivered tip at idle
+  only.
+- **ChainSync Jumping's idle disengagement.** With Jumping the reference counts
+  a jumper as idle when disengaged; Dingo has no Jumping, so every connection
+  must itself report idle.
+
 Specifically **not** implemented:
 
 - **ChainSync Jumping** and **Devoted BlockFetch** (a

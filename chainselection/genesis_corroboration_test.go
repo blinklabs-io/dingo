@@ -1408,18 +1408,19 @@ func TestGenesisDivergentFastSourceNotSelected(t *testing.T) {
 }
 
 // In a realistic from-origin ChainSync flow a peer advertises a far-ahead tip
-// (slot 100000) but has only delivered early headers (slot 1). Genesis-mode exit
-// must key off the advertised network tip, not the observed frontier: otherwise
-// the node leaves Genesis mode — and disables the corroboration gate — as soon
-// as two peers corroborate an early header, long before the local tip is near
-// the network tip.
+// (slot 100000) but has only delivered early headers (slot 1) and keeps
+// delivering. Genesis-mode exit needs every peer idle, so the node stays in
+// Genesis — keeping the corroboration gate — however far the local tip follows
+// the delivered frontier, and leaves only once the peers stop delivering.
 func TestGenesisDoesNotExitOnEarlyObservedHeaders(t *testing.T) {
 	t.Parallel()
 
+	var chain testChain
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         10, // window = 30
 		MinCorroboratingPeers: 1,
+		PointOnLocalChain:     chain.onChain,
 	})
 	require.Equal(t, uint64(30), cs.GenesisWindowSlots())
 
@@ -1454,6 +1455,7 @@ func TestGenesisDoesNotExitOnEarlyObservedHeaders(t *testing.T) {
 				obs,
 				nil,
 			))
+			chain.add(obs)
 			cs.SetLocalTip(obs)
 			delivered = next
 		}
@@ -1471,10 +1473,16 @@ func TestGenesisDoesNotExitOnEarlyObservedHeaders(t *testing.T) {
 	deliverThrough(50000)
 	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode())
 
-	// Only once the peers have DELIVERED headers up to within the window (30) of
-	// their advertised tip — and the local tip has caught up — does the node
-	// exit to Praos.
+	// Delivering up to the advertised tip does not end Genesis either.
 	deliverThrough(99990)
+	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
+
+	// Only once both peers report idle at the delivered tip the local chain
+	// has reached does the node exit to Praos.
+	last := ocommon.Point{Slot: 99990, Hash: []byte("h99990")}
+	cs.SetPeerIdling(peerA, last)
+	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
+	cs.SetPeerIdling(peerB, last)
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode())
 }
 
@@ -1486,10 +1494,12 @@ func TestGenesisDoesNotExitOnEarlyObservedHeaders(t *testing.T) {
 func TestGenesisExitNotPinnedByCorroboratedLiarAdvertisingFarTip(t *testing.T) {
 	t.Parallel()
 
+	var chain testChain
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         10, // window = 30
 		MinCorroboratingPeers: 1,
+		PointOnLocalChain:     chain.onChain,
 	})
 
 	honest := corrConn(1)
@@ -1525,11 +1535,12 @@ func TestGenesisExitNotPinnedByCorroboratedLiarAdvertisingFarTip(t *testing.T) {
 		nil,
 	))
 
-	// Local catches up to the delivered/corroborated tip (slot 100).
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-100")},
-		BlockNumber: 100,
-	})
+	// Local catches up to the delivered/corroborated tip (slot 100) and both
+	// peers report idle there.
+	chain.add(sharedObs)
+	cs.SetLocalTip(sharedObs)
+	cs.SetPeerIdling(honest, sharedObs.Point)
+	cs.SetPeerIdling(liar, sharedObs.Point)
 
 	// The liar's undelivered extreme advertised slot must not pin Genesis mode.
 	assert.Equal(
@@ -1549,10 +1560,12 @@ func TestGenesisExitNotPinnedByCorroboratedLiarAdvertisingFarTip(t *testing.T) {
 func TestGenesisExitNotPinnedByUncorroboratedExtremeSlot(t *testing.T) {
 	t.Parallel()
 
+	var chain testChain
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         10, // window = 30
 		MinCorroboratingPeers: 1,
+		PointOnLocalChain:     chain.onChain,
 	})
 
 	honestA := corrConn(1)
@@ -1600,14 +1613,19 @@ func TestGenesisExitNotPinnedByUncorroboratedExtremeSlot(t *testing.T) {
 		nil,
 	))
 
-	// Local tip catches up to the corroborated honest tip (slot 200).
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 200, Hash: []byte("local-200")},
-		BlockNumber: 200,
-	})
+	// Local tip catches up to the corroborated honest tip (slot 200); the
+	// honest peers and the liar, whose delivered header is its own, report idle.
+	chain.add(honestObs)
+	cs.SetLocalTip(honestObs)
+	cs.SetPeerIdling(honestA, honestObs.Point)
+	cs.SetPeerIdling(honestB, honestObs.Point)
 
-	// The liar's extreme advertised slot must NOT pin Genesis mode: the horizon
-	// is the corroborated tip (200), so the node exits to Praos.
+	// The liar delivered a header at the extreme slot that is not on the local
+	// chain, so it blocks the exit while it stays connected. Its advertised
+	// tip is not what blocks: once it is gone the honest peers end Genesis.
+	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
+	cs.RemovePeer(liar)
+	// The liar's extreme advertised slot must NOT pin Genesis mode.
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode(),
 		"an uncorroborated extreme advertised slot must not pin Genesis mode")
 }
@@ -1824,9 +1842,9 @@ func TestGenesisStatusObservability(t *testing.T) {
 	assert.True(t, byConn[*status.BestSource].Corroborated)
 }
 
-// When the local tip catches up into the Genesis window of the best known
-// peer, the selector exits Genesis mode and publishes an exit event carrying
-// the reason (local/best slots and window).
+// When every connection is idle and none holds a chain better than the
+// selection, the selector exits Genesis mode and publishes an exit event
+// carrying the local slot, the idle peer count and the window.
 func TestGenesisModeExitEmitsEvent(t *testing.T) {
 	t.Parallel()
 
@@ -1848,18 +1866,23 @@ func TestGenesisModeExitEmitsEvent(t *testing.T) {
 		},
 	)
 
+	var chain testChain
 	cs := NewChainSelector(ChainSelectorConfig{
-		GenesisMode:   true,
-		SecurityParam: 10, // window = 30
-		EventBus:      bus,
+		GenesisMode:       true,
+		SecurityParam:     10, // window = 30
+		EventBus:          bus,
+		PointOnLocalChain: chain.onChain,
 	})
 
 	connId := newTestConnectionId(1)
-	cs.UpdatePeerTip(connId, genesisTip(100, "peer", 100), nil)
+	peerTip := genesisTip(100, "peer", 100)
+	cs.UpdatePeerTip(connId, peerTip, nil)
 	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
 
-	// Local tip within window (100 - 30 = 70) triggers exit.
-	cs.SetLocalTip(genesisTip(75, "local-75", 75))
+	// The local chain reaches the idle peer's tip.
+	chain.add(peerTip)
+	cs.SetLocalTip(peerTip)
+	cs.SetPeerIdling(connId, peerTip.Point)
 	require.Equal(t, SelectionModePraos, cs.SelectionMode())
 
 	require.Eventually(t, func() bool {
@@ -1873,8 +1896,8 @@ func TestGenesisModeExitEmitsEvent(t *testing.T) {
 	if len(exits) == 0 {
 		t.Fatal("expected genesis mode exit event")
 	}
-	assert.Equal(t, uint64(75), exits[0].LocalSlot)
-	assert.Equal(t, uint64(100), exits[0].BestKnownSlot)
+	assert.Equal(t, uint64(100), exits[0].LocalSlot)
+	assert.Equal(t, 1, exits[0].Peers)
 	assert.Equal(t, uint64(30), exits[0].GenesisWindowSlots)
 }
 

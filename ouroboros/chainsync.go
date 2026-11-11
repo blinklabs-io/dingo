@@ -797,7 +797,9 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 }
 
 // chainsyncClientAwaitReply publishes the protocol's explicit idle proof after
-// gouroboros has fenced every preceding pipelined chain update.
+// gouroboros has fenced every preceding pipelined chain update. Every
+// connection's proof reaches chain selection; only an ingress connection's
+// reaches the ledger.
 func (o *Ouroboros) chainsyncClientAwaitReply(
 	ctx ochainsync.CallbackContext,
 ) error {
@@ -811,12 +813,19 @@ func (o *Ouroboros) chainsyncClientAwaitReply(
 	o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
 	// While held the cursor is not the point the peer awaits at, so it must
 	// not reach chain selection or the ledger.
-	if client.ObservabilityOnly || o.networkIngestHeld() ||
-		!o.shouldPublishChainsyncToLedger(ctx.ConnectionId) {
+	// A failed connection is being recycled and its cursor is not a delivered
+	// frontier, so its await proves nothing.
+	if o.networkIngestHeld() || client.Status == chainsync.ClientStatusFailed {
 		return nil
 	}
 	if o.config.ChainsyncObserveAwaitReply != nil {
 		o.config.ChainsyncObserveAwaitReply(ctx.ConnectionId, client.Cursor)
+	}
+	// An observer's idle proof counts toward the Genesis exit, which needs
+	// every ChainSync connection idle, but it feeds no ledger ingress.
+	if client.ObservabilityOnly ||
+		!o.shouldPublishChainsyncToLedger(ctx.ConnectionId) {
+		return nil
 	}
 	if o.eventBus == nil {
 		return nil

@@ -4156,11 +4156,26 @@ func observedHeaderTip(e ChainsyncEvent) ochainsync.Tip {
 	}
 }
 
+// LocalTipPraosView returns the Praos tiebreaker view of the header of the
+// block at tip, and false when the block cannot be read or decoded.
+func (ls *LedgerState) LocalTipPraosView(
+	tip ochainsync.Tip,
+) (praos.PraosTiebreakerView, bool) {
+	return ls.localTipPraosViewOK(ls.lifecycleContext(), tip)
+}
+
 func (ls *LedgerState) localTipPraosView(ctx context.Context,
 	localTip ochainsync.Tip,
 ) praos.PraosTiebreakerView {
+	view, _ := ls.localTipPraosViewOK(ctx, localTip)
+	return view
+}
+
+func (ls *LedgerState) localTipPraosViewOK(ctx context.Context,
+	localTip ochainsync.Tip,
+) (praos.PraosTiebreakerView, bool) {
 	if ls == nil || ls.db == nil || len(localTip.Point.Hash) == 0 {
-		return praos.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}, false
 	}
 	block, err := database.BlockByHash(
 		ctx,
@@ -4177,7 +4192,7 @@ func (ls *LedgerState) localTipPraosView(ctx context.Context,
 				"error", err,
 			)
 		}
-		return praos.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}, false
 	}
 	decoded, err := block.Decode()
 	if err != nil {
@@ -4190,13 +4205,13 @@ func (ls *LedgerState) localTipPraosView(ctx context.Context,
 				"error", err,
 			)
 		}
-		return praos.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}, false
 	}
 	if decoded == nil {
-		return praos.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}, false
 	}
 	view, _ := praos.GetPraosTiebreakerView(decoded.Header())
-	return view
+	return view, true
 }
 
 func (ls *LedgerState) incomingHeaderTipComparison(

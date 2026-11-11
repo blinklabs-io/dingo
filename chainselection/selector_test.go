@@ -940,23 +940,26 @@ func TestRollbackRegisteredPeerIsNotAPlausibilityReference(t *testing.T) {
 	assert.False(t, peerTip.awaitingFirstHeader)
 }
 
-// A peer registered from a rollback has delivered no header, so it must not
-// raise the Genesis exit horizon: its ObservedTip is the intersection point the
-// node itself proposed, and crediting that as delivered evidence would let any
-// peer that re-intersects at the local tip and advertises a tip within the
-// Genesis window force an immediate Genesis-to-Praos transition, dropping the
-// density protection that mode exists to provide.
+// A peer registered from a rollback has delivered no header and has not
+// reported idle, so its advertised tip must not end Genesis selection: any peer
+// that re-intersects at the local tip and advertises a tip within the Genesis
+// window would otherwise force an immediate Genesis-to-Praos transition,
+// dropping the density protection that mode exists to provide. Only the peer
+// reporting itself idle at a delivered tip on the local chain does.
 func TestRollbackRegisteredPeerDoesNotForceGenesisExit(t *testing.T) {
 	t.Parallel()
 
 	connId := newTestConnectionId(1)
+	var chain testChain
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam:             100,
 		GenesisMode:               true,
 		GenesisWindowSlots:        300,
 		DisableEventSubscriptions: true,
+		PointOnLocalChain:         chain.onChain,
 	})
 	localPoint := ocommon.Point{Slot: 5000, Hash: []byte("local")}
+	chain.add(ochainsync.Tip{Point: localPoint})
 	cs.SetLocalTip(ochainsync.Tip{Point: localPoint, BlockNumber: 5000})
 	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
 
@@ -972,13 +975,18 @@ func TestRollbackRegisteredPeerDoesNotForceGenesisExit(t *testing.T) {
 
 	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode())
 
-	// Once the peer actually delivers headers up to its advertisement, the
-	// horizon is real and the node exits Genesis as before.
+	// Delivering headers up to its advertisement does not end Genesis either.
 	deliveredTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 5100, Hash: []byte("advertised")},
 		BlockNumber: 5100,
 	}
 	require.True(t, cs.UpdatePeerTip(connId, deliveredTip, nil))
+	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode())
+
+	// Idle at a delivered tip the local chain has reached, it does.
+	chain.add(deliveredTip)
+	cs.SetLocalTip(deliveredTip)
+	cs.SetPeerIdling(connId, deliveredTip.Point)
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode())
 }
 
@@ -3883,7 +3891,7 @@ func (h *panicLogHandler) WithGroup(name string) slog.Handler {
 // TestChainSelectorSetLocalTipUnlocksOnPanic is a regression test for a bug
 // where SetLocalTip (and SetSecurityParam, HandlePeerRollbackEvent) took
 // cs.mutex.Lock() and called cs.mutex.Unlock() as a bare statement after the
-// locked work instead of via defer. advanceSelectionModeLocked logs on a
+// locked work instead of via defer. leaveGenesisLocked logs on a
 // Genesis-mode exit while the lock is held; if that log call panics (a
 // misbehaving Logger, but the same failure mode as any other panic in code
 // reachable from inside the lock), the bare Unlock() was skipped and
@@ -3894,16 +3902,21 @@ func (h *panicLogHandler) WithGroup(name string) slog.Handler {
 func TestChainSelectorSetLocalTipUnlocksOnPanic(t *testing.T) {
 	t.Parallel()
 
+	var chain testChain
 	cs := NewChainSelector(ChainSelectorConfig{
-		GenesisMode:   true,
-		SecurityParam: 10,
+		GenesisMode:       true,
+		SecurityParam:     10,
+		PointOnLocalChain: chain.onChain,
 	})
 
 	connId := newTestConnectionId(1)
-	cs.UpdatePeerTip(connId, ochainsync.Tip{
+	peerTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 100, Hash: []byte("peer-100")},
 		BlockNumber: 100,
-	}, nil)
+	}
+	cs.UpdatePeerTip(connId, peerTip, nil)
+	chain.add(peerTip)
+	cs.SetLocalTip(peerTip)
 	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
 
 	// Installed under cs.mutex, after the setup UpdatePeerTip call above
@@ -3923,13 +3936,9 @@ func TestChainSelectorSetLocalTipUnlocksOnPanic(t *testing.T) {
 				"expected the Genesis-exit log call to panic",
 			)
 		}()
-		// Drives the local tip to within the Genesis window of the peer's
-		// advertised tip (100), triggering advanceSelectionModeLocked's
-		// Genesis-exit log call while cs.mutex is held.
-		cs.SetLocalTip(ochainsync.Tip{
-			Point:       ocommon.Point{Slot: 75, Hash: []byte("local-75")},
-			BlockNumber: 75,
-		})
+		// The peer reports idle at the local tip, triggering the Genesis-exit
+		// log call while cs.mutex is held.
+		cs.SetPeerIdling(connId, peerTip.Point)
 	}()
 
 	// If SetLocalTip's locked section left cs.mutex locked, this blocks

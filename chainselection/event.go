@@ -37,10 +37,15 @@ const (
 	GenesisCorroborationFailedEventType event.EventType = "chainselection.genesis_corroboration_failed"
 
 	// GenesisModeExitedEventType is published when the selector transitions
-	// from Genesis density-based selection back to Praos selection because the
-	// local tip has caught up to within the Genesis window of the best known
-	// peer tip.
+	// from Genesis density-based selection to Praos selection because every
+	// ChainSync connection is idle and none holds a chain better than the
+	// selection.
 	GenesisModeExitedEventType event.EventType = "chainselection.genesis_mode_exited"
+
+	// GenesisModeEnteredEventType is published when the selector returns from
+	// Praos to Genesis selection because the selection tip became older than
+	// the maximum caught-up age.
+	GenesisModeEnteredEventType event.EventType = "chainselection.genesis_mode_entered"
 
 	// ChainSelectedNoneEventType is published when the selector transitions to
 	// having no selectable best peer (e.g. an uncorroborated Genesis fast source
@@ -219,11 +224,22 @@ type ChainSelectedNoneEvent struct {
 //
 // Fields:
 //   - LocalSlot: the local tip slot at the time of exit.
-//   - BestKnownSlot: the best known selectable peer tip slot.
+//   - Peers: the number of idle ChainSync connections that allowed the exit.
 //   - GenesisWindowSlots: the active Genesis density window in slots.
 type GenesisModeExitedEvent struct {
 	LocalSlot          uint64
-	BestKnownSlot      uint64
+	Peers              int
+	GenesisWindowSlots uint64
+}
+
+// GenesisModeEnteredEvent is published when the selector returns to Genesis
+// mode.
+//
+// Fields:
+//   - LocalSlot: the local tip slot at the time of entry.
+//   - GenesisWindowSlots: the active Genesis density window in slots.
+type GenesisModeEnteredEvent struct {
+	LocalSlot          uint64
 	GenesisWindowSlots uint64
 }
 

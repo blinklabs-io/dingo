@@ -1004,7 +1004,10 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// disabled. This matches Run's own long-lived subscription.
 	n.ouroboros().SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
 
-	genesisSelectionMode := n.config.genesisSelectionMode()
+	// A live restore or truncate changes the chain the marker vouched for, so
+	// the marker goes and the Genesis decision is taken afresh.
+	n.removeCaughtUpMarker()
+	genesisSelectionMode := n.config.genesisSelectionEligible()
 	if n.config.topologyConfig != nil {
 		topologyConfig := n.config.topologyConfig
 		usePeerSnapshot := genesisSelectionMode &&
