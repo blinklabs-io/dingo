@@ -99,6 +99,7 @@ var chainsyncResyncReasons = map[string]struct{}{
 	event.ChainsyncResyncReasonLocalLedgerRollback:               {},
 	event.ChainsyncResyncReasonLocalTipPlateau:                   {},
 	event.ChainsyncResyncReasonNetworkIngestReleased:             {},
+	event.ChainsyncResyncReasonObserverResumed:                   {},
 	event.ChainsyncResyncReasonPeerTipBehindMithril:              {},
 	event.ChainsyncResyncReasonPersistentFork:                    {},
 	event.ChainsyncResyncReasonPostPlateauRealign:                {},

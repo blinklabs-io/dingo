@@ -191,3 +191,17 @@ func TestChainsyncResyncsCountedByReason(t *testing.T) {
 		}
 	}
 }
+
+// A resumed observer's re-intersect is a fixed reason and is counted under
+// it, not folded into "other" with the formatted ones.
+func TestChainsyncResyncObserverResumedKeepsItsReasonLabel(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonObserverResumed,
+		chainsyncResyncReasonLabel(
+			event.ChainsyncResyncReasonObserverResumed,
+		),
+	)
+}
