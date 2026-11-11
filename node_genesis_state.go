@@ -64,9 +64,9 @@ func (n *Node) initialGenesisSelectionMode() bool {
 
 // decideInitialGenesisMode is the startup decision of the Genesis state
 // machine. A stale marker is removed, and a marker that cannot be read or
-// removed is logged and otherwise ignored: the tip-age check makes a marker
-// that outlived its truth harmless, so no failure here can start the node in
-// Praos wrongly.
+// removed is logged and otherwise ignored: this start is in Genesis either
+// way. A marker that could not be removed survives, though, and starts a later
+// run in Praos if the tip is young again by then.
 func decideInitialGenesisMode(
 	eligible bool,
 	markerPath string,
@@ -148,9 +148,10 @@ func createCaughtUpMarkerFile(path string, logger *slog.Logger) {
 }
 
 // subscribeCaughtUpMarkerEvents keeps the marker in step with the selector:
-// written when it leaves Genesis, removed when it returns. A missed event
-// leaves a marker the tip-age check at startup treats as stale, or none, which
-// starts in Genesis; both fail safe.
+// written when it leaves Genesis, removed when it returns. A missed exit only
+// costs a start in Genesis. A missed entry leaves a marker the tip-age check
+// treats as stale only while the tip stays old, so both events are required
+// subscriptions.
 func (n *Node) subscribeCaughtUpMarkerEvents() {
 	n.subscribeRequiredEvent(
 		chainselection.GenesisModeExitedEventType,
@@ -185,8 +186,9 @@ func (n *Node) selectorLocalTipPraosView(
 // genesisHistoricityCutoff returns the age beyond which an idle peer's tip is
 // too old for an honest caught-up peer: the network's stability window 3k/f,
 // in time, plus one hour. A configured Genesis density window does not move
-// it. It is zero, selecting the selector's default, while the Shelley genesis
-// parameters are unknown.
+// it while the Shelley genesis parameters are known. Otherwise it is zero,
+// and the selector's default, derived from the Genesis window it was given,
+// applies.
 func (n *Node) genesisHistoricityCutoff() time.Duration {
 	if n.config.cardanoNodeConfig == nil {
 		return 0

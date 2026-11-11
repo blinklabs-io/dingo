@@ -19,6 +19,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -172,6 +174,35 @@ func TestLiveTruncateRemovesCaughtUpMarker(t *testing.T) {
 
 	_, err = os.Stat(path)
 	assert.True(t, os.IsNotExist(err), "truncate must remove the marker")
+}
+
+// A live rebuild that fails before the networking core still drops the
+// marker: the chain it vouched for has changed whether or not the rebuild
+// finishes.
+func TestFailedLiveRebuildRemovesCaughtUpMarker(t *testing.T) {
+	t.Parallel()
+	n, _ := newLiveLifecycleTestNode(t, 4)
+	path := filepath.Join(n.config.dataDir, caughtUpMarkerName)
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+
+	ctx := context.Background()
+	n.liveLifecycleMu.Lock()
+	defer n.liveLifecycleMu.Unlock()
+	require.NoError(t, n.quiesceForLiveLifecycleOp(ctx))
+	require.NoError(t, n.closeStorageForLiveLifecycleOp(ctx))
+	selections := maps.Clone(n.config.pluginSelections)
+	if selections == nil {
+		selections = make(map[hostplugin.Capability]hostplugin.Selection)
+	}
+	selections[hostplugin.CapabilityStorageBlob] = hostplugin.Selection{
+		Provider: "no-such-storage-plugin",
+	}
+	n.config.pluginSelections = selections
+
+	require.Error(t, n.reinitializeAndResume(ctx))
+
+	_, err := os.Stat(path)
+	assert.True(t, os.IsNotExist(err), "a failed rebuild must remove the marker")
 }
 
 // The historicity cutoff is the stability window 3k/f of the network plus one
