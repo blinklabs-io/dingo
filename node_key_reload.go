@@ -128,7 +128,8 @@ func (a *agentOfferState) shouldTry(opCert []byte, now time.Time) bool {
 
 // reloadCredentials is the one entry point every reload trigger uses: a
 // SIGHUP, a credential file change, or the first pool's KES agent presenting
-// a newer operational certificate (agentOpCert non-nil).
+// a newer operational certificate (agentOpCert non-nil). A file change skips
+// serve-key pools, which cannot reload; a SIGHUP reports their refusal.
 func (n *Node) reloadCredentials(trigger string, agentOpCert []byte) error {
 	return n.reloadCredentialsWith(
 		trigger,
@@ -138,6 +139,7 @@ func (n *Node) reloadCredentials(trigger string, agentOpCert []byte) error {
 					slot,
 					supported,
 					n.validateBlockProducerLedger,
+					trigger == reloadTriggerFile,
 				)
 			}
 			err := n.reloadAgentSignCredentials(
@@ -229,13 +231,22 @@ func (n *Node) reloadCredentialsWith(
 // reloadEveryPool reloads the first pool and, when the node forges for
 // several, every other running pool. Each pool reloads on its own: one whose
 // replacement is refused keeps forging with what it had and does not hold
-// back the others.
+// back the others. With skipServeKey a serve-key pool is not reloaded and
+// reports itself unchanged instead of refused.
 func (n *Node) reloadEveryPool(
 	slot uint64,
 	supported bool,
 	ledgerCheck func(*forging.PoolCredentials) error,
+	skipServeKey bool,
 ) error {
-	primaryErr := n.reloadBlockProducerCredentials(slot, supported, ledgerCheck)
+	primaryErr := errCredentialsUnchanged
+	if !skipServeKey || !n.primaryKeySource().servesKeys() {
+		primaryErr = n.reloadBlockProducerCredentials(
+			slot,
+			supported,
+			ledgerCheck,
+		)
+	}
 	if n.producerPoolCount() <= 1 {
 		return primaryErr
 	}
@@ -248,7 +259,12 @@ func (n *Node) reloadEveryPool(
 	}
 	return joinPoolReloads(append(
 		[]error{primaryErr},
-		n.reloadPoolProducerCredentials(slot, supported, ledgerCheck)...,
+		n.reloadPoolProducerCredentials(
+			slot,
+			supported,
+			ledgerCheck,
+			skipServeKey,
+		)...,
 	))
 }
 
@@ -627,12 +643,17 @@ func (n *Node) shouldTryAgentOpCert(opCert []byte, now time.Time) bool {
 }
 
 // watchedCredentialFiles lists the files a reload reads in the configured
-// mode, for every pool: the VRF key and operational certificate, and the KES
-// key when it is a local file. A change to any of them reloads every pool;
-// a pool whose files did not change reports itself unchanged.
+// mode, for every pool that can reload: the VRF key and operational
+// certificate, and the KES key when it is a local file. A serve-key pool's
+// files are left out, since its reload is always refused. A change to any of
+// them reloads every pool but the serve-key ones; a pool whose files did not
+// change reports itself unchanged.
 func (n *Node) watchedCredentialFiles() []string {
 	var files []string
 	for _, ks := range n.configuredPoolKeySources() {
+		if ks.servesKeys() {
+			continue
+		}
 		files = append(files, ks.keys.vrfKey, ks.keys.opCert)
 		if !ks.kesAgentConfigured() {
 			files = append(files, ks.keys.kesKey)
@@ -645,11 +666,17 @@ func (n *Node) watchedCredentialFiles() []string {
 // agent in serve-key mode, where a reload is always refused.
 func (n *Node) everyPoolServesKeys() bool {
 	for _, ks := range n.configuredPoolKeySources() {
-		if !ks.kesAgentConfigured() || ks.kesAgentSignMode() {
+		if !ks.servesKeys() {
 			return false
 		}
 	}
 	return true
+}
+
+// servesKeys reports whether the pool's KES key comes from an agent in
+// serve-key mode, where a reload is always refused.
+func (ks *poolKeySource) servesKeys() bool {
+	return ks.kesAgentConfigured() && !ks.kesAgentSignMode()
 }
 
 // configuredPoolKeySources is a key source per configured pool, the first

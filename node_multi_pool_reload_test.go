@@ -72,7 +72,7 @@ func TestReloadKeepsAnotherPoolsFailureBesideAnUnchangedPool(t *testing.T) {
 	// broken, so its reload fails.
 	require.NoError(t, os.WriteFile(n.second.opcertPath, []byte("{"), 0o644))
 
-	err := n.first.reloadEveryPool(0, true, noLedgerCheck)
+	err := n.first.reloadEveryPool(0, true, noLedgerCheck, false)
 	require.Error(t, err)
 	require.False(
 		t,
@@ -94,7 +94,7 @@ func TestReloadReportsUnchangedOnlyWhenEveryPoolIsUnchanged(t *testing.T) {
 	n := newTwoPoolSignNode(t)
 	require.ErrorIs(
 		t,
-		n.first.reloadEveryPool(0, true, noLedgerCheck),
+		n.first.reloadEveryPool(0, true, noLedgerCheck, false),
 		errCredentialsUnchanged,
 	)
 	require.Empty(t, n.first.builtClients())
@@ -198,4 +198,68 @@ func TestKeyWatchRunsWhileAnyPoolCanReload(t *testing.T) {
 
 	n.waitReloaded(t, n.pp.poolID)
 	n.second.requireLiveCounter(t, 2)
+}
+
+// newServeKeyAndSignPoolNode is a twoPoolSignNode whose first pool takes its
+// KES key from an agent in serve-key mode, where a reload is always refused.
+func newServeKeyAndSignPoolNode(t *testing.T) *twoPoolSignNode {
+	t.Helper()
+	n := newTwoPoolSignNode(t)
+	n.first.config.blockProducerPools[0].ShelleyKESAgentMode = kesagent.ModeServeKey
+	return n
+}
+
+func TestKeyWatchSkipsServeKeyPools(t *testing.T) {
+	t.Parallel()
+	n := newServeKeyAndSignPoolNode(t)
+	files := n.first.watchedCredentialFiles()
+	require.NotContains(t, files, n.first.opcertPath,
+		"a serve-key pool cannot reload, so its files are not watched")
+	require.Contains(t, files, n.first.config.blockProducerPools[1].ShelleyOperationalCertificate)
+}
+
+func TestKeyWatchReloadDoesNotFailServeKeyPools(t *testing.T) {
+	t.Parallel()
+	n := newServeKeyAndSignPoolNode(t)
+	firstID := n.first.live.GetPoolID().String()
+	require.NotNil(t, n.first.reloadFailureCounter())
+	n.first.config.shelleyKeyWatchInterval = time.Millisecond
+	n.startLoops(t)
+
+	n.second.rotateTo(t, 2, nil)
+
+	// The first pool is reloaded, or refused, before the second, so its
+	// count is final once the second pool has reloaded.
+	n.waitReloaded(t, n.pp.poolID)
+	n.second.requireLiveCounter(t, 2)
+	require.Equal(t, 0.0, testutil.ToFloat64(
+		n.first.multiPool.reloadFailures.WithLabelValues(firstID),
+	), "a file change is not a failed reload of a serve-key pool")
+}
+
+func TestReloadSkipsServeKeyPoolsOnlyForTheFileWatch(t *testing.T) {
+	t.Parallel()
+	n := newServeKeyAndSignPoolNode(t)
+	firstID := n.first.live.GetPoolID().String()
+	require.NotNil(t, n.first.reloadFailureCounter())
+	failures := func() float64 {
+		return testutil.ToFloat64(
+			n.first.multiPool.reloadFailures.WithLabelValues(firstID),
+		)
+	}
+
+	// The file watch skips the serve-key pool: with the sign-mode pool
+	// unchanged, the whole reload is unchanged.
+	require.ErrorIs(
+		t,
+		n.first.reloadEveryPool(0, true, noLedgerCheck, true),
+		errCredentialsUnchanged,
+	)
+	require.Equal(t, 0.0, failures())
+
+	// A SIGHUP still reports and counts the serve-key pool's refusal.
+	err := n.first.reloadEveryPool(0, true, noLedgerCheck, false)
+	require.ErrorContains(t, err, "serve-key mode")
+	require.ErrorContains(t, err, "pool "+firstID)
+	require.Equal(t, 1.0, failures())
 }

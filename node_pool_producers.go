@@ -569,11 +569,13 @@ func (n *Node) poolProducersReady() error {
 // reloadPoolProducerCredentials reloads every running pool after the first
 // through its own key source and returns one result per pool, each error
 // naming its pool. A pool that fails keeps its credentials and is counted;
-// the others still reload.
+// the others still reload. With skipServeKey a serve-key pool is not
+// reloaded and reports itself unchanged.
 func (n *Node) reloadPoolProducerCredentials(
 	slot uint64,
 	supported bool,
 	ledgerCheck func(*forging.PoolCredentials) error,
+	skipServeKey bool,
 ) []error {
 	n.multiPool.mu.Lock()
 	type target struct {
@@ -589,8 +591,13 @@ func (n *Node) reloadPoolProducerCredentials(
 	n.multiPool.mu.Unlock()
 	results := make([]error, 0, len(targets))
 	for _, t := range targets {
+		ks := t.pp.keySource(n)
+		if skipServeKey && ks.servesKeys() {
+			results = append(results, errCredentialsUnchanged)
+			continue
+		}
 		err := n.reloadPoolCredentials(
-			t.pp.keySource(n),
+			ks,
 			t.live,
 			slot,
 			supported,
