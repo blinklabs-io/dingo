@@ -2225,7 +2225,7 @@ func (n *Node) buildChainSelectorConfig(
 		GenesisStateMachine:   n.config.genesisSelectionEligible(),
 		SlotTime:              n.selectorSlotTime,
 		LocalTipPraosView:     n.selectorLocalTipPraosView,
-		HistoricityCutoff:     n.genesisHistoricityCutoff(genesisWindowSlots),
+		HistoricityCutoff:     n.genesisHistoricityCutoff(),
 		ChainSyncConnections: func() []ouroboros.ConnectionId {
 			state := n.selectorChainsyncState.Load()
 			if state == nil {

@@ -17,6 +17,8 @@ package dingo
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -170,4 +172,27 @@ func TestLiveTruncateRemovesCaughtUpMarker(t *testing.T) {
 
 	_, err = os.Stat(path)
 	assert.True(t, os.IsNotExist(err), "truncate must remove the marker")
+}
+
+// The historicity cutoff is the stability window 3k/f of the network plus one
+// hour. A configured Genesis density window changes how density is compared,
+// not how old an honest caught-up peer's tip may be, so it must not move the
+// cutoff.
+func TestHistoricityCutoffIgnoresConfiguredGenesisWindow(t *testing.T) {
+	t.Parallel()
+	n := &Node{config: Config{
+		logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		cardanoNodeConfig: shelleyGenesisCfgForBP(t, time.Now()),
+	}}
+	// The fixture genesis has k = 10, f = 1/2 and one-second slots: 3k/f is
+	// 60 slots.
+	want := 60*time.Second + time.Hour
+	for _, configured := range []uint64{0, 6, 5000} {
+		assert.Equal(
+			t,
+			want,
+			n.buildChainSelectorConfig(10, true, configured).HistoricityCutoff,
+			"configured window %d", configured,
+		)
+	}
 }

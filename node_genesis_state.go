@@ -183,15 +183,24 @@ func (n *Node) selectorLocalTipPraosView(
 }
 
 // genesisHistoricityCutoff returns the age beyond which an idle peer's tip is
-// too old for an honest caught-up peer: the Genesis window in seconds plus one
-// hour. It is zero, selecting the selector's default, while the slot length is
-// unknown.
-func (n *Node) genesisHistoricityCutoff(windowSlots uint64) time.Duration {
-	if n.config.cardanoNodeConfig == nil || windowSlots == 0 {
+// too old for an honest caught-up peer: the network's stability window 3k/f,
+// in time, plus one hour. A configured Genesis density window does not move
+// it. It is zero, selecting the selector's default, while the Shelley genesis
+// parameters are unknown.
+func (n *Node) genesisHistoricityCutoff() time.Duration {
+	if n.config.cardanoNodeConfig == nil {
 		return 0
 	}
 	sg := n.config.cardanoNodeConfig.ShelleyGenesis()
-	if sg == nil || sg.SlotLength.Rat == nil || sg.SlotLength.Sign() <= 0 {
+	if sg == nil || sg.SlotLength.Rat == nil || sg.SlotLength.Sign() <= 0 ||
+		sg.SecurityParam <= 0 {
+		return 0
+	}
+	windowSlots := chainselection.GenesisWindowSlotsForParams(
+		uint64(sg.SecurityParam),
+		sg.ActiveSlotsCoeff.Rat,
+	)
+	if windowSlots == 0 {
 		return 0
 	}
 	return historicityCutoffFor(windowSlots, sg.SlotLength.Rat)
