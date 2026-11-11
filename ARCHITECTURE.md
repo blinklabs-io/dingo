@@ -12180,7 +12180,10 @@ and its signatures are still verified against the certificate on every sign.
 After `ReplaceWith` the replaced client stays open for
 `retiredKESAgentClientGrace` (10s), because a forge attempt that selected its
 snapshot before the swap still signs through it. The VRF key cannot change on
-reload; a new VRF key is a new pool registration and needs a restart.
+reload; a new VRF key is a new pool registration and needs a restart. The
+reload compares the VRF key file with the loaded VRF key first and refuses a
+change, even when the certificate is unchanged and the reload would otherwise
+report nothing to do.
 
 A rotation done at the agent reaches a remote-agent node without any file
 change. Admission compares the agent's certificate with the node's byte for

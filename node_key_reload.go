@@ -124,8 +124,10 @@ func (n *Node) reloadCredentials(trigger string, agentOpCert []byte) error {
 // loaded one, and that the agent admits a session for this certificate. A
 // refusal leaves the live credentials and client in place.
 //
-// The VRF key cannot change here: ReplaceWith refuses a new pool or VRF
-// identity, which needs a new pool registration and a restart.
+// The VRF key cannot change here: a new VRF identity needs a new pool
+// registration and a restart. The VRF key file is compared with the loaded
+// identity first, so a changed VRF key is refused even when the certificate
+// is unchanged, and before the agent is contacted.
 func (n *Node) reloadAgentSignCredentials(
 	slot uint64,
 	supported bool,
@@ -140,6 +142,9 @@ func (n *Node) reloadAgentSignCredentials(
 		return errors.New(
 			"credential reload requires a wall-clock slot supported by confirmed era history",
 		)
+	}
+	if err := checkReloadVRFKey(n.config.shelleyVRFKey, live); err != nil {
+		return err
 	}
 	opCertKey, err := n.reloadOpCertKey(agentOpCert)
 	if err != nil {
@@ -217,6 +222,23 @@ func (n *Node) reloadAgentSignCredentials(
 		"new_opcert_kes_period", newKESPeriod,
 		"opcert_expiry_period", live.OpCertExpiryPeriod(),
 	)
+	return nil
+}
+
+// checkReloadVRFKey refuses a VRF key file that no longer matches the loaded
+// VRF identity. A sign-mode reload otherwise reads the VRF key only once the
+// certificate has changed, so a VRF change alone would pass as unchanged.
+func checkReloadVRFKey(path string, live *forging.PoolCredentials) error {
+	vkey, err := forging.LoadVRFVerificationKeyFile(path)
+	if err != nil {
+		return fmt.Errorf("load VRF key: %w", err)
+	}
+	if !bytes.Equal(vkey, live.GetVRFVKey()) {
+		return errors.New(
+			"VRF key file no longer matches the loaded VRF key; " +
+				"a VRF key change needs a new pool registration and a restart",
+		)
+	}
 	return nil
 }
 

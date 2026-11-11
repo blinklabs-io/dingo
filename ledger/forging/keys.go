@@ -238,6 +238,19 @@ func LoadOperationalCertificateFile(path string) (*bursa.LoadedKey, error) {
 	return key, nil
 }
 
+// LoadVRFVerificationKeyFile loads a VRF signing key file the way a
+// credential load does and returns only the verification key derived from
+// its seed, which it wipes. A reload uses it to compare the file with the
+// loaded identity before anything else is read.
+func LoadVRFVerificationKeyFile(path string) ([]byte, error) {
+	skey, vkey, err := loadVRFKeyFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	wipeCredentialBytes(skey)
+	return vkey, nil
+}
+
 func loadPoolCredentialsFromFiles(
 	vrfSKeyPath string,
 	kesSKeyPath string,
