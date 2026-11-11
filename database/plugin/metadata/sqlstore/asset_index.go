@@ -15,8 +15,10 @@
 package sqlstore
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -39,6 +41,114 @@ func nonNilName(name []byte) []byte {
 	return name
 }
 
+// mintedAssetsQuery builds the asset listing statement with `?` placeholders.
+// minted_asset holds one row per asset keyed by its first event id, so a page
+// reads limit+offset index entries in order and never sorts.
+func mintedAssetsQuery(
+	policyID []byte,
+	limit int,
+	offset int,
+	descending bool,
+) (string, []any) {
+	query := `SELECT policy_id, name FROM minted_asset`
+	args := []any{}
+	if policyID != nil {
+		query += ` WHERE policy_id = ?`
+		args = append(args, policyID)
+	}
+	query += ` ORDER BY first_event_id ` + orderDirection(descending)
+	return addLimitOffset(query, args, limit, offset)
+}
+
+// mintedAssetsCountQuery builds the asset count statement with `?`
+// placeholders.
+func mintedAssetsCountQuery(policyID []byte) (string, []any) {
+	query := `SELECT COUNT(*) FROM minted_asset`
+	args := []any{}
+	if policyID != nil {
+		query += ` WHERE policy_id = ?`
+		args = append(args, policyID)
+	}
+	return query, args
+}
+
+// indexMintedAssets records, for every asset among the just-inserted
+// asset_mint_burn rows, its first event in minted_asset. rows are
+// assetMintBurnShape rows. An asset that already has a row keeps it: later
+// events carry larger ids, so its first event cannot change on insert.
+// Events are located through the unique (tx_hash, policy_id, name) key, which
+// stays in place during bulk import while the lookup index may be deferred.
+func indexMintedAssets(
+	ctx context.Context,
+	db queryer,
+	parameterLimit int,
+	rows [][]any,
+) error {
+	const keyWidth = 3
+	perStatement := max(1, parameterLimit/keyWidth)
+	for start := 0; start < len(rows); start += perStatement {
+		end := min(start+perStatement, len(rows))
+		args := make([]any, 0, (end-start)*keyWidth)
+		for _, row := range rows[start:end] {
+			// assetMintBurnShape columns: tx_hash, policy_id, name, ...
+			args = append(args, row[0], row[1], row[2])
+		}
+		query := `-- name: IndexMintedAssets :exec
+INSERT INTO minted_asset (policy_id, name, first_event_id)
+SELECT e.policy_id, e.name, MIN(e.id)
+FROM asset_mint_burn AS e
+WHERE (e.tx_hash, e.policy_id, e.name) IN (` +
+			strings.TrimSuffix(
+				strings.Repeat("(?, ?, ?), ", end-start), ", ",
+			) + `)
+  AND NOT EXISTS (
+      SELECT 1 FROM minted_asset AS m
+      WHERE m.policy_id = e.policy_id AND m.name = e.name
+  )
+GROUP BY e.policy_id, e.name`
+		if _, err := db.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("index minted assets: %w", err)
+		}
+	}
+	return nil
+}
+
+// rollbackMintedAssets removes the effect of asset_mint_burn rows past slot
+// on minted_asset. It must run before those rows are deleted, because it
+// finds the assets whose first event is going away. An asset left with no
+// event disappears; one that keeps older events takes the smallest remaining
+// id as its first event.
+func rollbackMintedAssets(
+	ctx context.Context,
+	db queryer,
+	slot uint64,
+) error {
+	if _, err := db.ExecContext(ctx, `-- name: DeleteRolledBackMintedAssets :exec
+DELETE FROM minted_asset
+WHERE first_event_id IN (SELECT id FROM asset_mint_burn WHERE slot > ?)
+  AND NOT EXISTS (
+      SELECT 1 FROM asset_mint_burn AS e
+      WHERE e.policy_id = minted_asset.policy_id
+        AND e.name = minted_asset.name
+        AND e.slot <= ?
+  )`, slot, slot); err != nil {
+		return fmt.Errorf("delete rolled back minted assets: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `-- name: RepairRolledBackMintedAssets :exec
+UPDATE minted_asset
+SET first_event_id = (
+    SELECT MIN(e.id) FROM asset_mint_burn AS e
+    WHERE e.policy_id = minted_asset.policy_id
+      AND e.name = minted_asset.name
+      AND e.slot <= ?
+)
+WHERE first_event_id IN (SELECT id FROM asset_mint_burn WHERE slot > ?)`,
+		slot, slot); err != nil {
+		return fmt.Errorf("repair rolled back minted assets: %w", err)
+	}
+	return nil
+}
+
 // ListMintedAssets implements metadata.MetadataStore. Assets are ordered by
 // the smallest mint/burn row id they own: ids follow application order, so
 // that is the position of the asset's first recorded event.
@@ -53,15 +163,7 @@ func (s *Store) ListMintedAssets(
 	if err != nil {
 		return nil, err
 	}
-	query := `SELECT policy_id, name FROM asset_mint_burn`
-	args := []any{}
-	if policyID != nil {
-		query += ` WHERE policy_id = ?`
-		args = append(args, policyID)
-	}
-	query += ` GROUP BY policy_id, name ORDER BY MIN(id) ` +
-		orderDirection(descending)
-	query, args = addLimitOffset(query, args, limit, offset)
+	query, args := mintedAssetsQuery(policyID, limit, offset, descending)
 	rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
 	if err != nil {
 		return nil, fmt.Errorf("list minted assets: %w", err)
@@ -90,13 +192,7 @@ func (s *Store) CountMintedAssets(
 	if err != nil {
 		return 0, err
 	}
-	query := `SELECT COUNT(*) FROM (SELECT 1 FROM asset_mint_burn`
-	args := []any{}
-	if policyID != nil {
-		query += ` WHERE policy_id = ?`
-		args = append(args, policyID)
-	}
-	query += ` GROUP BY policy_id, name) AS minted`
+	query, args := mintedAssetsCountQuery(policyID)
 	var count int
 	if err := db.QueryRowContext(
 		ctx, s.dialect.Rebind(query), args...,

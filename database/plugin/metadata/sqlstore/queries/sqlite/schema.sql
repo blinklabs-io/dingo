@@ -483,6 +483,17 @@ CREATE TABLE asset_mint_burn (
     UNIQUE (tx_hash, policy_id, name)
 );
 
+CREATE TABLE minted_asset (
+    policy_id BLOB NOT NULL,
+    name BLOB NOT NULL,
+    first_event_id INTEGER NOT NULL,
+    PRIMARY KEY (policy_id, name)
+);
+
+CREATE INDEX idx_minted_asset_first_event ON minted_asset(first_event_id);
+CREATE INDEX idx_minted_asset_policy_first_event
+    ON minted_asset(policy_id, first_event_id);
+
 CREATE TABLE account (
     staking_key BLOB,
     credential_tag INTEGER NOT NULL DEFAULT 0,

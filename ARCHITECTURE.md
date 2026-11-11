@@ -15498,7 +15498,10 @@ oldest-first sequence against the same fixture.
 `GET /assets/{asset}` derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from
 `tx.AssetMint()` (recorded in `SetTransaction`, `SetTransactionBatched`, and
-`SetGapBlockTransaction`; removed on rollback). `initial_mint_tx_hash` and
+`SetGapBlockTransaction`; removed on rollback). `GET /assets` pages and counts
+the `minted_asset` index (one row per asset keyed by its first event), which the
+same row-batch flush maintains and rollback repairs, so a listing request never
+groups the event history. `initial_mint_tx_hash` and
 `mint_or_burn_count` come from `MetadataStore.GetAssetMintBurnInfo`. On-chain
 metadata (`onchain_metadata`/`onchain_metadata_standard`) is resolved lazily in
 the adapter by loading the initial mint transaction's stored metadata and

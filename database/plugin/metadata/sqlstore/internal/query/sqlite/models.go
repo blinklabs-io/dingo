@@ -314,6 +314,12 @@ type MidnightRegistration struct {
 	BlockTimestampMs int64
 }
 
+type MintedAsset struct {
+	PolicyID     []byte
+	Name         []byte
+	FirstEventID int64
+}
+
 type NetworkDonation struct {
 	ID     int64
 	Slot   int64

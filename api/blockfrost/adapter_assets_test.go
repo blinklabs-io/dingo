@@ -51,6 +51,17 @@ VALUES (?, ?, ?, ?, ?, ?, 0)`,
 		txHash, policy, []byte(name), []byte("fp"), slot, quantity,
 	)
 	require.NoError(t, err)
+	// The indexer records each asset's first event in minted_asset as it
+	// inserts event rows; the asset listing reads that index.
+	_, err = raw.Exec(`
+INSERT INTO minted_asset (policy_id, name, first_event_id)
+SELECT policy_id, name, MIN(id) FROM asset_mint_burn
+WHERE policy_id = ? AND name = ?
+GROUP BY policy_id, name
+ON CONFLICT (policy_id, name) DO NOTHING`,
+		policy, []byte(name),
+	)
+	require.NoError(t, err)
 }
 
 func assetUnit(policy []byte, name string) string {

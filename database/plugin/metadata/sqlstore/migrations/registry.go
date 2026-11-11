@@ -98,6 +98,7 @@ const (
 	blockNonceSlotIndexSchemaRelease                    = "block-nonce-slot-leading-index"
 	rewardOutputIndexReshapeSchemaRelease               = "reward-account-output-index-reshape"
 	metadataLabelSlotIndexSchemaRelease                 = "transaction-metadata-label-slot-index"
+	mintedAssetSchemaRelease                            = "minted-asset-first-event"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -276,6 +277,7 @@ var schemaVersions = []struct {
 	{Version: 56, Name: blockNonceSlotIndexSchemaRelease, Dir: "v56"},
 	{Version: 57, Name: rewardOutputIndexReshapeSchemaRelease, Dir: "v57"},
 	{Version: 58, Name: metadataLabelSlotIndexSchemaRelease, Dir: "v58"},
+	{Version: 59, Name: mintedAssetSchemaRelease, Dir: "v59"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -394,6 +396,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			dialect != "mysql" {
 			migration.BackfillRevision = "1"
 			migration.Backfill = utxoStakingPartialIndexBackfill
+		}
+		if version.Name == mintedAssetSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = mintedAssetBackfill
 		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
@@ -2301,4 +2307,60 @@ SELECT 1 FROM sync_state WHERE sync_key = ?`), deferred.SyncStateKey).Scan(&pend
 		}
 	}
 	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+}
+
+// mintedAssetBackfill records the first mint/burn event of every asset that
+// has history but no minted_asset row. It walks asset_mint_burn by id, so a
+// batch reads one id range and the primary key of minted_asset; it does not
+// depend on the lookup index, which a pending deferred-index rebuild may not
+// have restored yet. Ranges ascend, so an asset first seen in an earlier
+// range is already present and keeps its earlier id.
+func mintedAssetBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"parse minted asset cursor: %w",
+				err,
+			)
+		}
+		lastID = parsed
+	}
+	var upper sql.NullInt64
+	if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT MAX(id) FROM (
+    SELECT id FROM asset_mint_burn WHERE id > ? ORDER BY id LIMIT ?
+) AS page`), lastID, batch.Limit).Scan(&upper); err != nil {
+		return BatchResult{}, fmt.Errorf("read minted asset range: %w", err)
+	}
+	if !upper.Valid {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	result, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
+INSERT INTO minted_asset (policy_id, name, first_event_id)
+SELECT e.policy_id, e.name, MIN(e.id)
+FROM asset_mint_burn AS e
+WHERE e.id > ? AND e.id <= ?
+  AND e.policy_id IS NOT NULL AND e.name IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM minted_asset AS m
+      WHERE m.policy_id = e.policy_id AND m.name = e.name
+  )
+GROUP BY e.policy_id, e.name`), lastID, upper.Int64)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("backfill minted assets: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		rows = 0
+	}
+	return BatchResult{
+		Cursor: strconv.FormatInt(upper.Int64, 10),
+		Rows:   rows,
+		Done:   false,
+	}, nil
 }

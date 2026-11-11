@@ -40,6 +40,11 @@ type rowShape struct {
 	table   string
 	columns []string
 	suffix  string
+	// afterInsert runs once per flush, after all of the shape's rows are
+	// inserted and in the same transaction.
+	afterInsert func(
+		ctx context.Context, db queryer, parameterLimit int, rows [][]any,
+	) error
 }
 
 var (
@@ -128,7 +133,8 @@ var (
 			"tx_hash", "policy_id", "name", "fingerprint", "slot",
 			"quantity", "tx_index",
 		},
-		suffix: "ON CONFLICT (tx_hash, policy_id, name) DO NOTHING",
+		suffix:      "ON CONFLICT (tx_hash, policy_id, name) DO NOTHING",
+		afterInsert: indexMintedAssets,
 	}
 )
 
@@ -391,6 +397,13 @@ func (b *rowBatch) flush(
 				return fmt.Errorf(
 					"insert %s rows: %w", entry.shape.table, err,
 				)
+			}
+		}
+		if entry.shape.afterInsert != nil {
+			if err := entry.shape.afterInsert(
+				ctx, db, parameterLimit, entry.rows,
+			); err != nil {
+				return err
 			}
 		}
 	}

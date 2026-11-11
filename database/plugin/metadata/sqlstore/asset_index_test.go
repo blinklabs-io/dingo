@@ -16,7 +16,9 @@ package sqlstore
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -43,6 +45,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		txHash, policy, []byte(name), []byte("fp"), slot, quantity, txIndex,
 	)
 	require.NoError(t, err)
+	// The production writer records the asset in minted_asset right after
+	// inserting its event rows; rows added directly need the same step.
+	require.NoError(t, indexMintedAssets(
+		context.Background(), db, SQLiteDialect().ParameterLimit(),
+		[][]any{{txHash, policy, []byte(name)}},
+	))
 }
 
 func TestListMintedAssetsOrdersByFirstEvent(t *testing.T) {
@@ -409,4 +417,178 @@ VALUES (?, ?, ?, ?, '1')`, f.name, f.policy, []byte("fp"), secondUtxo)
 	)
 	require.NoError(t, err)
 	require.Zero(t, total)
+}
+
+// queryPlanDetails returns the detail column of every EXPLAIN QUERY PLAN row.
+func queryPlanDetails(
+	t *testing.T,
+	db *sql.DB,
+	query string,
+	args []any,
+) []string {
+	t.Helper()
+	rows, err := db.Query("EXPLAIN QUERY PLAN "+query, args...)
+	require.NoError(t, err)
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+		details = append(details, detail)
+	}
+	require.NoError(t, rows.Err())
+	return details
+}
+
+func TestMintedAssetQueriesDoNotGroupMintBurnHistory(t *testing.T) {
+	t.Parallel()
+	_, db := newManagementTestStoreWithRawDB(t)
+	policy := assetPolicy(0x01)
+	for i := range 5 {
+		insertMintBurn(
+			t, db, credentialHash(byte(0x40+i)), policy,
+			string([]byte{byte('a' + i)}), uint64(10+i), 0, "1",
+		)
+	}
+
+	type statement struct {
+		name  string
+		query string
+		args  []any
+	}
+	var statements []statement
+	for _, filter := range [][]byte{nil, policy} {
+		for _, descending := range []bool{false, true} {
+			query, args := mintedAssetsQuery(filter, 2, 1, descending)
+			statements = append(statements, statement{
+				name:  "list",
+				query: query,
+				args:  args,
+			})
+		}
+		query, args := mintedAssetsCountQuery(filter)
+		statements = append(statements, statement{
+			name:  "count",
+			query: query,
+			args:  args,
+		})
+	}
+	for _, stmt := range statements {
+		// Grouping the event history walks every distinct asset and sorts
+		// the groups, so a page costs the size of the whole table.
+		plan := strings.Join(
+			queryPlanDetails(t, db, stmt.query, stmt.args), "\n",
+		)
+		require.NotContains(t, plan, "TEMP B-TREE", "%s: %s", stmt.name, stmt.query)
+		require.NotContains(t, plan, "asset_mint_burn", "%s: %s", stmt.name, stmt.query)
+	}
+}
+
+func mintedAssetNames(t *testing.T, store *Store, descending bool) []string {
+	t.Helper()
+	assets, err := store.ListMintedAssets(nil, 0, 0, descending, nil)
+	require.NoError(t, err)
+	names := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		names = append(names, string(asset.Name))
+	}
+	return names
+}
+
+func TestMintedAssetsFollowRollback(t *testing.T) {
+	t.Parallel()
+	store, db := newManagementTestStoreWithRawDB(t)
+	policy := assetPolicy(0x31)
+	// D's first event (slot 50) is rolled back while an older-slot event
+	// recorded later (slot 15) survives, so D must move behind E. F has
+	// nothing left once slot 60 is gone.
+	insertMintBurn(t, db, credentialHash(0x51), policy, "D", 50, 0, "1")
+	insertMintBurn(t, db, credentialHash(0x52), policy, "E", 20, 0, "1")
+	insertMintBurn(t, db, credentialHash(0x53), policy, "D", 15, 0, "1")
+	insertMintBurn(t, db, credentialHash(0x54), policy, "F", 60, 0, "1")
+	require.Equal(t, []string{"D", "E", "F"}, mintedAssetNames(t, store, false))
+
+	require.NoError(t, store.DeleteTransactionsAfterSlot(30, nil))
+
+	require.Equal(t, []string{"E", "D"}, mintedAssetNames(t, store, false))
+	require.Equal(t, []string{"D", "E"}, mintedAssetNames(t, store, true))
+	total, err := store.CountMintedAssets(nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+	total, err = store.CountMintedAssets(policy, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+
+	require.NoError(t, store.DeleteTransactionsAfterSlot(10, nil))
+
+	require.Empty(t, mintedAssetNames(t, store, false))
+	total, err = store.CountMintedAssets(nil, nil)
+	require.NoError(t, err)
+	require.Zero(t, total)
+
+	// A replay after the rollback re-adds the asset at its new position.
+	insertMintBurn(t, db, credentialHash(0x55), policy, "F", 12, 0, "1")
+	require.Equal(t, []string{"F"}, mintedAssetNames(t, store, false))
+}
+
+func TestRowBatchFlushIndexesMintedAssets(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	txn := store.Transaction(context.Background())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	db, ctx, err := store.dbFromTxn(txn)
+	require.NoError(t, err)
+
+	policy := assetPolicy(0x41)
+	add := func(rows *rowBatch, tx byte, name string, slot uint64) {
+		rows.add(
+			assetMintBurnShape, credentialHash(tx), policy, []byte(name),
+			[]byte("fp"), slot, "1", uint32(0),
+		)
+	}
+	first := rowBatch{}
+	add(&first, 0x61, "X", 10)
+	add(&first, 0x61, "Y", 10)
+	add(&first, 0x62, "X", 11)
+	require.NoError(t, first.flush(ctx, db, store.dialect.ParameterLimit()))
+	// A later batch repeats X and adds Z: X keeps its first event.
+	second := rowBatch{}
+	add(&second, 0x63, "X", 12)
+	add(&second, 0x63, "Z", 12)
+	require.NoError(t, second.flush(ctx, db, store.dialect.ParameterLimit()))
+
+	assets, err := store.ListMintedAssets(nil, 0, 0, false, txn)
+	require.NoError(t, err)
+	names := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		names = append(names, string(asset.Name))
+	}
+	require.Equal(t, []string{"X", "Y", "Z"}, names)
+	total, err := store.CountMintedAssets(nil, txn)
+	require.NoError(t, err)
+	require.Equal(t, 3, total)
+}
+
+func TestIndexMintedAssetsLocatesEventsByUniqueKey(t *testing.T) {
+	t.Parallel()
+	_, db := newManagementTestStoreWithRawDB(t)
+	policy := assetPolicy(0x01)
+	insertMintBurn(t, db, credentialHash(0x71), policy, "A", 10, 0, "1")
+	query := `INSERT INTO minted_asset (policy_id, name, first_event_id)
+SELECT e.policy_id, e.name, MIN(e.id)
+FROM asset_mint_burn AS e
+WHERE (e.tx_hash, e.policy_id, e.name) IN ((?, ?, ?))
+  AND NOT EXISTS (
+      SELECT 1 FROM minted_asset AS m
+      WHERE m.policy_id = e.policy_id AND m.name = e.name
+  )
+GROUP BY e.policy_id, e.name`
+	plan := strings.Join(queryPlanDetails(
+		t, db, query,
+		[]any{credentialHash(0x71), policy, []byte("A")},
+	), "\n")
+	// A scan of the event table per flush would make bulk import quadratic.
+	require.NotContains(t, plan, "SCAN e")
+	require.Contains(t, plan, "idx_asset_mint_burn_unique")
 }

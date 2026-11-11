@@ -2024,6 +2024,9 @@ DELETE FROM transaction_metadata_label WHERE slot > ?`,
 			); err != nil {
 				return err
 			}
+			if err := rollbackMintedAssets(ctx, db, slot); err != nil {
+				return err
+			}
 			if _, err := db.ExecContext(ctx, `
 DELETE FROM asset_mint_burn WHERE slot > ?`,
 				slot,
