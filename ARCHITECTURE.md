@@ -801,11 +801,11 @@ between its verification and its pin (`pinHeaderVerdict`) is verified again, up
 to three times while each new verdict expires the same way, before the header
 is withheld; a verification that defers ends those attempts and withholds the
 header, and a header that fails verification is rejected and its connection
-recycled, as on its first. A header that queue admission does not have to
-authorize, because its epoch nonce is not cached and it is not covered by a
-Mithril certificate, has nothing to verify again there: when a publication
-expires its verdict before the pin it is queued without producer
-authorization, as it is when the verdict had expired on arrival. Withholding
+recycled, as on its first. A header whose producer queue admission does not
+have to check, because its epoch nonce is not cached and it is not covered by
+a Mithril certificate, has nothing to verify again there: when a publication
+expires its verdict before the pin it is queued without the producer check,
+as it is when the verdict had expired on arrival. Withholding
 it would leave a hole in the connection's headers, so the next one would not
 fit and the header queue would be discarded. The deferred selector callback
 (`pinSettledHeaderAdmission`) runs after queue admission releases its pin, so
