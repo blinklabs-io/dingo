@@ -668,6 +668,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncRemoveForecastWitness:       n.chainsyncRemoveForecastWitness,
 		ChainsyncResolvePeerTip:              n.chainsyncResolvePeerTip,
 		ChainsyncObserveAwaitReply:           n.chainsyncObserveAwaitReply,
+		ChainsyncObserveRollForward:          n.chainsyncObserveRollForward,
 		ChainsyncSyncTarget:                  n.chainsyncSyncTarget,
 		ChainsyncObservePeerRollback:         n.chainsyncObservePeerRollback,
 		// On the Musashi prototype network every mini-protocol shares one muxer

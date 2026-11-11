@@ -819,19 +819,18 @@ func (o *Ouroboros) chainsyncClientAwaitReply(
 		return nil
 	}
 	// An observer's idle proof counts toward the Genesis exit, which needs
-	// every ChainSync connection idle, but it feeds no ledger ingress. Its
-	// headers are dropped before they move the cursor, so its proof names the
-	// last point it sent instead.
+	// every ChainSync connection idle, but it feeds no ledger ingress.
 	observer := client.ObservabilityOnly ||
 		!o.shouldPublishChainsyncToLedger(ctx.ConnectionId)
 	if o.config.ChainsyncObserveAwaitReply != nil {
+		// The cursor moves only when the ledger admits a header, and never
+		// for an observer, so it can still name the header before the one the
+		// peer sent; the proof names the last point the peer sent instead.
 		point := client.Cursor
-		if observer {
-			if sent, ok := o.chainsyncState.ClientProtocolPoint(
-				ctx.ConnectionId,
-			); ok {
-				point = sent
-			}
+		if sent, ok := o.chainsyncState.ClientProtocolPoint(
+			ctx.ConnectionId,
+		); ok {
+			point = sent
 		}
 		o.config.ChainsyncObserveAwaitReply(ctx.ConnectionId, point)
 	}
@@ -2118,6 +2117,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.chainsyncState.RecordClientProtocolPoint(
 				ctx.ConnectionId,
 				clientSession,
+				ocommon.NewPoint(blockSlot, blockHash),
+			)
+		}
+		if o.config.ChainsyncObserveRollForward != nil {
+			o.config.ChainsyncObserveRollForward(
+				ctx.ConnectionId,
 				ocommon.NewPoint(blockSlot, blockHash),
 			)
 		}

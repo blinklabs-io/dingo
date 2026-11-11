@@ -22,6 +22,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,4 +61,67 @@ func TestChainsyncObserverAwaitReplyNamesDeliveredHeader(t *testing.T) {
 	require.Equal(t, []ocommon.Point{
 		ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes()),
 	}, observed)
+}
+
+// An ingress connection's cursor moves only when the ledger admits a header,
+// so an await that outruns admission must still name the header the peer
+// sent; the cursor would name the previous one, which never matches the
+// frontier once that header is admitted.
+func TestChainsyncIngressAwaitReplyNamesSentHeader(t *testing.T) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, true)
+	var observed []ocommon.Point
+	f.o.config.ChainsyncObserveAwaitReply = func(
+		_ ouroboros.ConnectionId,
+		point ocommon.Point,
+	) {
+		observed = append(observed, point)
+	}
+	header := newTestBlockHeader(100, 1, 0xaa)
+
+	f.rollForward(t, header)
+	require.NoError(t, f.o.chainsyncClientAwaitReply(
+		ochainsync.CallbackContext{ConnectionId: f.conn},
+	))
+
+	require.Equal(t, []ocommon.Point{
+		ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes()),
+	}, observed)
+}
+
+// A roll-forward revokes the connection's previous idle proof before the
+// header is verified or queued for admission.
+func TestChainsyncRollForwardRevokesIdleProofFirst(t *testing.T) {
+	t.Parallel()
+	for name, eligible := range map[string]bool{
+		"ingress":  true,
+		"observer": false,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newPatienceRollForwardFixture(t, eligible)
+			var revoked []ocommon.Point
+			f.o.config.ChainsyncObserveRollForward = func(
+				_ ouroboros.ConnectionId,
+				point ocommon.Point,
+			) {
+				revoked = append(revoked, point)
+			}
+			verified := false
+			f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool {
+				require.Len(t, revoked, 1,
+					"the idle proof must be revoked before verification")
+				verified = true
+				return false
+			}
+			header := newTestBlockHeader(100, 1, 0xaa)
+
+			f.rollForward(t, header)
+
+			assert.True(t, verified)
+			assert.Equal(t, []ocommon.Point{
+				ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes()),
+			}, revoked)
+		})
+	}
 }
