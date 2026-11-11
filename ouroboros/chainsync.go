@@ -2453,10 +2453,11 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// reach blockfetch yet and is re-intersected separately. A header whose
 		// fork ancestry cannot be authenticated is also excluded from
 		// observation; unless its parent is this connection's accepted chain
-		// (pending ledger enqueue, handled as deferred above), the connection
-		// is re-intersected from the local chain above the applied tip by
-		// recoverWithheldHeaderAncestry. A definite crypto/eligibility failure
-		// excludes the header and recycles the connection.
+		// (pending ledger enqueue, handled as deferred above), a header above
+		// the applied tip re-intersects the connection from the local chain
+		// once per connection and applied tip (recoverWithheldHeaderAncestry).
+		// A definite crypto/eligibility failure excludes the header and
+		// recycles the connection.
 		selectionEligible := ingressEligible
 		withheldAncestry := false
 		deferredVerification := false
