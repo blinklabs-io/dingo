@@ -5092,6 +5092,12 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 						ls.lifecycleContext(),
 						&e,
 						headerCryptoVerificationGeneration,
+						func() (uint64, error) {
+							return ls.ValidatePeerChainSelectionHeaderCryptoWithGeneration(
+								e.ConnectionId,
+								e.BlockHeader,
+							)
+						},
 					)
 					if !current {
 						cleanup := ls.invalidateChainsyncHeaderAdmission(e)
