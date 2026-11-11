@@ -140,6 +140,17 @@ type TxValidationSessionProvider interface {
 	) error) error
 }
 
+// SlotTxValidationSessionProvider pins validation to the ledger state ticked
+// to slot. LedgerState implements it for block construction, where the forge
+// slot may be in the epoch after the latest applied block.
+type SlotTxValidationSessionProvider interface {
+	WithTxValidationSessionAtSlot(context.Context, uint64, func(
+		validate TxValidationFunc,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+	) error) error
+}
+
 var errTxValidationSnapshotChanged = errors.New(
 	"transaction validation snapshot changed",
 )
@@ -240,6 +251,27 @@ func withTxValidationSession(ctx context.Context,
 		})
 	}
 	return fn(validator.ValidateTxWithOverlay, func() bool { return true })
+}
+
+func withTxValidationSessionAtSlot(
+	ctx context.Context,
+	validator TxValidator,
+	slot uint64,
+	fn func(TxValidationFunc, func() bool) error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if provider, ok := validator.(SlotTxValidationSessionProvider); ok {
+		return provider.WithTxValidationSessionAtSlot(ctx, slot, func(
+			validate TxValidationFunc,
+			stillCurrent func() bool,
+			_ func(func() error) (bool, error),
+		) error {
+			return fn(validate, stillCurrent)
+		})
+	}
+	return withTxValidationSession(ctx, validator, fn)
 }
 
 // DefaultBlockBuilder implements BlockBuilder using LedgerState components.
@@ -1070,9 +1102,10 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 		// on the empty-body fallback path and on genuinely idle
 		// producers.
 	case b.txValidator != nil:
-		selectErr = withTxValidationSession(
+		selectErr = withTxValidationSessionAtSlot(
 			ctx,
 			b.txValidator,
+			slot,
 			selectTransactions,
 		)
 	default:

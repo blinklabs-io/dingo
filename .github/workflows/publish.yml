@@ -73,7 +73,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version-file: go.mod
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -246,7 +246,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version-file: go.mod
           cache: false
       # Module downloads do not depend on -race, so one entry per OS serves
       # every job on it instead of a copy inside each build cache. The
@@ -261,9 +261,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-build-
       - name: Build binaries
         env:
           BUILD_TARGETS: linux/amd64 linux/arm64 freebsd/amd64 freebsd/arm64
@@ -327,7 +327,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version-file: go.mod
           cache: false
       # Module downloads do not depend on -race, so one entry per OS serves
       # every job on it instead of a copy inside each build cache. The
@@ -342,9 +342,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/Library/Caches/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-build-
       - name: Build binaries
         env:
           BUILD_TARGETS: darwin/amd64 darwin/arm64
