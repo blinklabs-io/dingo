@@ -128,3 +128,35 @@ func TestHandlePoolListAdmission(t *testing.T) {
 	release()
 	wg.Wait()
 }
+
+// TestHandlePoolListClientDisconnectWritesNoError covers a client that leaves
+// mid-query on either route: the handler logs and answers nothing, not a 500.
+func TestHandlePoolListClientDisconnectWritesNoError(t *testing.T) {
+	t.Parallel()
+	node := &poolListCanceledNode{mockNode: &mockNode{}}
+	b := newTestBlockfrost(node)
+	for _, path := range poolListTestPaths {
+		w := httptest.NewRecorder()
+		b.handler().ServeHTTP(
+			w, addressSummaryRequest(context.Background(), path),
+		)
+		require.NotEqual(t, http.StatusInternalServerError, w.Code, path)
+		require.Empty(t, w.Body.String(), path)
+	}
+}
+
+type poolListCanceledNode struct {
+	*mockNode
+}
+
+func (poolListCanceledNode) PoolsList(
+	context.Context, PaginationParams,
+) ([]string, int, error) {
+	return nil, 0, context.Canceled
+}
+
+func (poolListCanceledNode) PoolsRetiring(
+	context.Context, PaginationParams,
+) ([]PoolRetiringInfo, int, error) {
+	return nil, 0, context.Canceled
+}

@@ -740,7 +740,7 @@ func (b *Blockfrost) handlePoolsRetiring(
 	defer cancel()
 	pools, total, err := b.node.PoolsRetiring(ctx, params)
 	if err != nil {
-		if b.writePoolListDeadlineError(w, err) {
+		if b.writePoolListEndedError(w, err) {
 			return
 		}
 		b.logger.Error(

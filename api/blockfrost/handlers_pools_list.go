@@ -45,12 +45,16 @@ func (b *Blockfrost) admitPoolList(
 	return release, true
 }
 
-// writePoolListDeadlineError answers a request that ran past its deadline
-// and reports whether it did.
-func (b *Blockfrost) writePoolListDeadlineError(
+// writePoolListEndedError handles a pool list request whose context ended and
+// reports whether it did. A deadline overrun answers 503 with Retry-After; a
+// client disconnect writes nothing, since nobody reads the response.
+func (b *Blockfrost) writePoolListEndedError(
 	w http.ResponseWriter,
 	err error,
 ) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
@@ -88,8 +92,7 @@ func (b *Blockfrost) handlePoolsList(
 	defer cancel()
 	pools, total, err := b.node.PoolsList(ctx, params)
 	if err != nil {
-		if b.writePoolListDeadlineError(w, err) ||
-			errors.Is(err, context.Canceled) {
+		if b.writePoolListEndedError(w, err) {
 			return
 		}
 		b.logger.Error(
