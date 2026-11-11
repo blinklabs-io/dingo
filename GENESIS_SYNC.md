@@ -26,11 +26,13 @@ younger than 20 minutes (the reference's `maxCaughtUpAge`). The marker is
 written when Genesis selection ends and removed when it is re-entered, and on a
 live restore or truncate. A marker whose tip is older than 20 minutes, or whose
 tip time cannot be determined, is removed and the node starts in Genesis. A
-failed marker write or removal is logged and ignored; the tip-age check makes a
-stale marker harmless. Each node therefore starts once in Genesis mode after
-upgrading, until it first reaches the exit condition below. Peer-snapshot
-loading follows the same startup decision, so a node that starts in Praos does
-not load the snapshot peers.
+failed marker write is logged and costs only a start in Genesis. A failed
+removal is logged too, but it is not harmless: if the tip becomes younger than
+20 minutes again before the next start, for example by syncing in Genesis, the
+surviving marker starts the node in Praos without an exit decision. Each node
+therefore starts once in Genesis mode after upgrading, until it first reaches
+the exit condition below. Peer-snapshot loading follows the same startup
+decision, so a node that starts in Praos does not load the snapshot peers.
 
 ## Trust model at a glance
 

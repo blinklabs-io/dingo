@@ -2485,7 +2485,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chainselection.peer_evicted` | ChainSelector | Peer evicted |
 | `chainselection.genesis_corroboration_failed` | ChainSelector | Densest Genesis fast source lacked corroboration and was denied selection |
 | `chainselection.genesis_mode_exited` | ChainSelector | Left Genesis mode for Praos: every ChainSync connection was idle and none held a chain better than the selection (`LocalSlot`, `Peers`, `GenesisWindowSlots`); the node writes the `CaughtUpMarker` |
-| `chainselection.genesis_mode_entered` | ChainSelector | Returned to Genesis mode because the selection tip became older than the maximum caught-up age (`LocalSlot`, `GenesisWindowSlots`); the node removes the `CaughtUpMarker` |
+| `chainselection.genesis_mode_entered` | ChainSelector | Returned to Genesis mode because the selection tip became older than the maximum caught-up age, or its slot time cannot be determined (`LocalSlot`, `GenesisWindowSlots`); the node removes the `CaughtUpMarker` |
 | `chainselection.selected_none` | ChainSelector | Best-peer selection transitioned to none (selection stalled) |
 | `chainselection.peer_rollback_handler_panic` | ChainSelector | The PeerRollbackEvent handler panicked; its subscription was torn down |
 | `chainselection.evaluation_panic` | ChainSelector | A background evaluation tick or triggered evaluation panicked; the transition it would have produced was dropped |
@@ -8457,18 +8457,25 @@ lock matches the first.
   chainsync client set, so observers count. Advertised tips never influence the
   exit. A connection is idle when its latest MsgAwaitReply
   (`SetPeerIdling`, delivered for ingress and observer connections alike) is at
-  its delivered frontier and none of its headers awaits ledger admission. An
-  observer's headers never move its chainsync cursor, so its MsgAwaitReply
-  names the last point it sent (`chainsync.State.ClientProtocolPoint`) rather
-  than the cursor. The await point is kept per connection, so an await that
-  precedes admission of the header it was sent at counts once that header is
-  promoted, and one for an older point never does. A peer is not better when its delivered tip is on the
+  its delivered frontier and none of its headers awaits ledger admission. The
+  chainsync cursor moves only on ledger admission, and never for an observer,
+  so the MsgAwaitReply names the last point the peer sent
+  (`chainsync.State.ClientProtocolPoint`), falling back to the cursor before
+  the peer has sent one. The await point is kept per connection, so an await
+  that precedes admission of the header it was sent at counts once that header
+  is promoted, and one for an older point never does. Each MsgRollForward
+  revokes an await for any other point (`ClearPeerIdling`) before the header is
+  verified, so a peer is not idle while its next header waits. A connection
+  whose await matches the tip of its delivered frontier but not of its
+  admission frontier, as an admitted peer demoted to observer, is judged on the
+  delivered frontier. A peer is not better when its delivered tip is on the
   applied chain (`PointOnLocalChain`), or its frontier intersects the applied
   chain (a binary search over its retained points) and `ComparePraosTips` against
   the applied tip's `PraosTiebreakerView` (`LocalTipPraosView`, read from the
   applied block header) does not prefer it. A peer that cannot be shown to
-  intersect, or an equal-height peer when the local view is unavailable, blocks
-  the exit, as the reference's `CandidateDoesNotIntersect` does.
+  intersect, or an equal-height peer when its own or the local view is
+  unavailable, blocks the exit, as the reference's
+  `CandidateDoesNotIntersect` does.
 - *Historicity.* An idle peer whose delivered tip's slot starts more than the
   cutoff before now (`HistoricityCutoff`; the node sets the stability window
   `3k/f` from the Shelley genesis, converted at the Shelley slot length, plus
@@ -8491,8 +8498,10 @@ lock matches the first.
   `genesis_mode_entered` and on live restore or truncate. With Genesis otherwise
   enabled, no marker starts in Genesis; a marker whose tip is older than
   `MaxCaughtUpAge` is removed and starts in Genesis; a marker with a younger tip
-  starts in Praos. Marker I/O failures are logged and ignored because the
-  tip-age check makes a stale marker harmless. The overrides that force Praos
+  starts in Praos. The marker is removed when a live restore or truncate
+  begins and again before its rebuild steps. Marker I/O failures are logged
+  and ignored; a failed removal is not harmless, since the surviving marker
+  starts a later run in Praos once the tip is young again. The overrides that force Praos
   (bootstrap disabled, `PraosMode`, `intersectTip`, `intersectPoints`) are
   unchanged. Peer-snapshot loading follows the same decision.
 
