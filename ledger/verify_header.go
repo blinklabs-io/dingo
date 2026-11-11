@@ -201,9 +201,7 @@ func IsHeaderVerificationContextTransient(err error) bool {
 
 // IsHeaderVerificationWithheld reports that a header lacks enough
 // chain-dependent context to be authenticated for chain selection. Callers
-// retain its ancestry for later headers without observing or applying it,
-// unless its parent is a local-chain header still pending enqueue; the
-// header queue then re-verifies it before it is accepted.
+// retain its ancestry for later headers without observing or applying it.
 func IsHeaderVerificationWithheld(err error) bool {
 	return errors.Is(err, ErrHeaderVerificationWithheld)
 }
