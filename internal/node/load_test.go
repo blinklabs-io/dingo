@@ -564,7 +564,7 @@ func TestCborArrayHeaderLen(t *testing.T) {
 	}
 }
 
-func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
+func TestCopyBlocksRaw_PreservesLinkageAtOrigin(t *testing.T) {
 	t.Parallel()
 
 	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
@@ -577,7 +577,9 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 	ebbBlock, err := iter.Next()
 	require.NoError(t, err)
 	require.NotNil(t, ebbBlock)
-	require.True(t, ebbBlock.IsEbb)
+	// The fixture is Preview, whose first block is a post-Byron block at
+	// slot 0, not an EBB.
+	require.False(t, ebbBlock.IsEbb)
 
 	nextBlock, err := iter.Next()
 	require.NoError(t, err)
