@@ -251,6 +251,9 @@ func (b *Blockfrost) handleLatestBlockTransactionsCBOR(
 	}
 	rows, err := b.node.LatestBlockTransactionCBOR(r.Context())
 	if err != nil {
+		if b.writeTipUnavailable(w, err) {
+			return
+		}
 		b.logger.Error(
 			"failed to get latest block transaction CBOR",
 			"error", err,

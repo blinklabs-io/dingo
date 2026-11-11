@@ -15207,7 +15207,7 @@ rather than the number of transactions with the label. `GET /pools/{pool_id}/blo
 a slot range through the `(slot, hash)` index, so they share a block list
 admission pool (4 active, 2 per client address, 429 with `Retry-After` when
 full) and run under the request context and a 15-second deadline (an overrun
-answers 503 with `Retry-After`); an offset past the total skips the page query. Pool and account list routes reject
+answers 503 with `Retry-After`); an offset past the total skips the page query. The latest block routes resolve the ledger tip's block; a rollback deletes blocks before the ledger publishes the lower tip, so a tip block that is not stored is retried against a reread tip and, if it never resolves, answers 503 with `Retry-After`. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,
