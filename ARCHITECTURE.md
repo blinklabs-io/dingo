@@ -15276,7 +15276,12 @@ share a metadata label admission pool (4 active, 2 per client address, 429 with
 deadline (a disconnected client stops the page; an overrun answers 503 with
 `Retry-After`). The page reads the label's rows through the
 `(label, slot, transaction_id)` index, so its cost follows the page offset
-rather than the number of transactions with the label. Pool and account list routes reject
+rather than the number of transactions with the label. `GET /pools/{pool_id}/blocks`, `GET /epochs/{number}/blocks` and
+`GET /epochs/{number}/blocks/{pool_id}` count and page the `block_nonce` rows in
+a slot range through the `(slot, hash)` index, so they share a block list
+admission pool (4 active, 2 per client address, 429 with `Retry-After` when
+full) and run under the request context and a 15-second deadline (an overrun
+answers 503 with `Retry-After`); an offset past the total skips the page query. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,
@@ -19742,7 +19747,7 @@ excluded from `FullPotRewardsStandardNetwork`.
 
 Key configuration areas:
 - Network selection (preview, preprod, mainnet, dijkstra, musashi, devnet,
-  prime-testnet). DijkstraNet uses magic 6 and the canonical `dijkstra`
+  prime-testnet, prime-mainnet). DijkstraNet uses magic 6 and the canonical `dijkstra`
   configuration bundle; it does not enable Musashi prototype trust bypasses.
 - Storage mode (`core` or `api`)
 - Database path and `plugins.storage` provider selections

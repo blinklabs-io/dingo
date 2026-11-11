@@ -616,8 +616,8 @@ func TestConwayScriptPurposeUsesActiveProtocolMajor(t *testing.T) {
 				protocolMajorVersion(pp),
 			)
 			require.True(t, ok)
-			fields := purpose.ToPlutusData().(*data.Constr).Fields
-			certificateData := fields[1].(*data.Constr).Fields
+			fields := purpose.ToPlutusData().(*data.Constr).Fields()
+			certificateData := fields[1].(*data.Constr).Fields()
 			require.Equal(t, tc.want, certificateData[1])
 		})
 	}
