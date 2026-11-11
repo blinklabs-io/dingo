@@ -88,6 +88,16 @@ func walFramesByBTree(
 	return counts, frames
 }
 
+// walSalt returns the log header's salts, which every checkpoint that resets
+// the log changes.
+func walSalt(t *testing.T, walPath string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(walPath)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(data), 32)
+	return data[16:24]
+}
+
 func btreePages(t *testing.T, db *sql.DB) map[string][2]int64 {
 	t.Helper()
 	rows, err := db.Query(
@@ -354,6 +364,7 @@ VALUES (?, ?, 'member', ?, 0, '1234567', TRUE, FALSE, ?, ?)`,
 	}
 	measured := uint64(walFoldedRounds)
 	_, framesBefore := walFramesByBTree(t, db, walPath, 1<<30)
+	salt := walSalt(t, walPath)
 	credits := 0
 	for {
 		claimed := driver.foldChunk(t, measured, walChunk)
@@ -364,10 +375,13 @@ VALUES (?, ?, 'member', ?, 0, '1234567', TRUE, FALSE, ?, ?)`,
 	}
 	require.Equal(t, walAccounts, credits)
 	fold, _ := walFramesByBTree(t, db, walPath, framesBefore)
+	require.Equal(t, salt, walSalt(t, walPath),
+		"a checkpoint reset the log during the fold")
 	pages := btreePages(t, db)
 	reportWAL(t, "fold of one round", fold, credits, pages)
 
 	_, framesBefore = walFramesByBTree(t, db, walPath, 1<<30)
+	salt = walSalt(t, walPath)
 	for batch := range walWithdrawals / 20 {
 		txn := store.Transaction(context.Background())
 		for i := range 20 {
@@ -403,6 +417,8 @@ VALUES (?, ?, 'member', ?, 0, '1234567', TRUE, FALSE, ?, ?)`,
 		require.NoError(t, txn.Commit())
 	}
 	withdrawals, _ := walFramesByBTree(t, db, walPath, framesBefore)
+	require.Equal(t, salt, walSalt(t, walPath),
+		"a checkpoint reset the log during the withdrawals")
 	reportWAL(t, "withdrawals", withdrawals, walWithdrawals, btreePages(t, db))
 
 	reportJournalSizes(t, btreePages(t, db))

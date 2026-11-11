@@ -547,17 +547,19 @@ func (r *rewardJournalRun) rollback() {
 	if r.rng.Intn(100) < 30 && len(r.rounds) > 0 {
 		// Land exactly on a boundary slot, which keeps that boundary's credits.
 		target = r.rounds[r.rng.Intn(len(r.rounds))].slot
-		r.cov.rollbackAtBoundary++
 		if r.rng.Intn(2) == 0 {
 			// Just below the boundary: the round goes, its outputs stay and
 			// are unfolded.
 			target--
+		} else {
+			r.cov.rollbackAtBoundary++
 		}
 	}
 	for _, round := range r.rounds {
 		if round.slot > target {
 			r.cov.rollbackAcrossRound++
-			if round.partial {
+			// A later withdrawal can fold the rest of a partial round.
+			if round.partial && r.roundHasUnfolded(round.epoch) {
 				r.cov.rollbackMidCompact++
 			}
 		}
