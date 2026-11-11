@@ -1028,7 +1028,10 @@ type Config struct {
 	// ShelleyKeyWatchInterval, when set, makes a block producer poll its
 	// credential files at this interval and reload them in place, as on
 	// SIGHUP, once a change has held for two polls -- so a rotated
-	// Kubernetes Secret takes effect without a restart. Zero disables it.
+	// Kubernetes Secret takes effect without a restart. Zero disables it; a
+	// non-zero value must be at least 1s. It applies with local key files
+	// and with a KES agent in sign mode. In KES agent serve-key mode, where
+	// the agent pushes key rotations, it is ignored and a warning is logged.
 	ShelleyKeyWatchInterval time.Duration `yaml:"shelleyKeyWatchInterval"          envconfig:"SHELLEY_KEY_WATCH_INTERVAL"`
 	// ShelleyKESAgentAddress, when set, signs block headers through a bursa
 	// KES agent's remote sign listener (host:port) instead of a local socket.

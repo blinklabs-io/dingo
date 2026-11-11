@@ -955,7 +955,7 @@ var flagSpecs = []flagSpec{
 	durationFlag(
 		"ShelleyKeyWatchInterval",
 		"shelley-key-watch-interval",
-		"poll the block producer credential files at this interval and reload them in place on a change (0 disables)",
+		"poll the block producer credential files at this interval and reload them in place on a change; applies with local key files or a KES agent in sign mode, ignored in serve-key mode (0 disables; otherwise at least 1s)",
 	),
 	durationFlag(
 		"ShelleyKESAgentSignTimeout",

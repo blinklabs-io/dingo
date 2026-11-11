@@ -1799,7 +1799,11 @@ func WithShelleyKESAgentSignTimeout(timeout time.Duration) ConfigOptionFunc {
 // WithShelleyKeyWatchInterval makes a block producer poll its credential
 // files (CARDANO_SHELLEY_KEY_WATCH_INTERVAL) and reload them in place, as on
 // SIGHUP, once a change has held for two polls. It lets a mounted Secret be
-// rotated without a restart. 0, the default, disables the watch.
+// rotated without a restart. 0, the default, disables the watch; the dingo
+// command's config validation refuses a non-zero value below 1s, which this
+// option does not check. The watch runs with local key files and with a
+// KES agent in sign mode. In KES agent serve-key mode, where the agent pushes
+// key rotations, it is ignored and a warning is logged.
 func WithShelleyKeyWatchInterval(interval time.Duration) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ShelleyKeyWatchInterval = interval
