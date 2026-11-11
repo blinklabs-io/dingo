@@ -117,7 +117,7 @@ jobs:
           rm -rf .trusted-ci
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version: 1.26.11
           cache: false
       # Module downloads do not depend on -race, so one entry per OS serves
       # every job on it instead of a copy inside each build cache. The
@@ -132,9 +132,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.11-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-1.26.11-
       # These two run on documentation-only changes too.
       - name: docs-parity
         run: make docs-parity
@@ -267,7 +267,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version: 1.26.11
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -278,9 +278,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.11-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-1.26.11-
       - name: govulncheck
         # govulncheck exits non-zero only for vulnerabilities this module
         # actually calls, so the unreachable findings it also prints (currently
@@ -333,7 +333,7 @@ jobs:
         run: python3 .github/scripts/runner-probe.py start
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version: 1.26.11
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -344,9 +344,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-race-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-race-1.26.11-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-race-1.26.10-
+            ${{ runner.os }}-go-race-1.26.11-
       - name: go-test-race
         # -timeout stays at 60m so a hang is still named by the per-package
         # panic before the job backstop above fires.
@@ -468,7 +468,7 @@ jobs:
         run: aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version: 1.26.11
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -479,9 +479,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.11-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-1.26.11-
       - name: install-mariadb-client
         # database/plugin/metadata/mysql's backup/restore CLI arg mapping
         # (mysqlSSLArgs) targets the mysqldump/mysql client this repo's own
@@ -587,7 +587,7 @@ jobs:
         run: python3 .github/scripts/runner-probe.py start
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version: 1.26.11
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -598,9 +598,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/Library/Caches/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.11-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-1.26.11-
       - name: go-test
         run: go test -v -ldflags="-s -w" -timeout 30m ./...
       - name: runner-probe-end
@@ -647,7 +647,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version: 1.26.11
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -658,9 +658,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-1.26.11-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-1.26.11-
       - name: build
         env:
           BUILD_TARGETS: linux/amd64 linux/arm64 freebsd/amd64 freebsd/arm64 darwin/amd64 darwin/arm64
