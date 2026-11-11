@@ -125,24 +125,23 @@ func (ls *LedgerState) applyStakeRewardUpdate(ctx context.Context,
 			return nil
 		}
 	}
-	if rewardEpochs, ok := stakeRewardEpochsForApplication(newEpoch); ok {
-		performanceEpoch, err := ls.db.Metadata().GetEpoch(
-			rewardEpochs.performance,
-			txn.Metadata(),
+	replay, err := ls.replaysPreviousStakeRewardRound(ctx, txn, newEpoch)
+	if err != nil {
+		return err
+	}
+	if replay {
+		return ls.applyReplayedStakeRewardRound(
+			ctx, txn, newEpoch, boundarySlot,
 		)
-		if err != nil {
-			return fmt.Errorf(
-				"get reward performance epoch %d: %w",
-				rewardEpochs.performance,
-				err,
-			)
-		}
-		if performanceEpoch != nil &&
-			performanceEpoch.EraId == eras.ByronEraDesc.Id {
-			return ls.applyFirstShelleyStakeRewardRound(
-				ctx, txn, newEpoch, boundarySlot,
-			)
-		}
+	}
+	byronPerformance, err := ls.rewardPerformanceEpochIsByron(txn, newEpoch)
+	if err != nil {
+		return err
+	}
+	if byronPerformance {
+		return ls.applyFirstShelleyStakeRewardRound(
+			ctx, txn, newEpoch, boundarySlot,
+		)
 	}
 	app, ok, err := ls.boundaryStakeRewardApplication(ctx,
 		txn, newEpoch, boundarySlot,
@@ -164,37 +163,83 @@ func (ls *LedgerState) applyStakeRewardUpdate(ctx context.Context,
 	return ls.applyStakeRewardApplication(ctx, txn, app, boundarySlot)
 }
 
+// rewardPerformanceEpochIsByron reports whether the round applied at the
+// boundary into newEpoch has a Byron performance epoch, which has no pparams
+// or stake snapshot. Only the round of the first Shelley epoch does.
+func (ls *LedgerState) rewardPerformanceEpochIsByron(
+	txn *database.Txn,
+	newEpoch uint64,
+) (bool, error) {
+	rewardEpochs, ok := stakeRewardEpochsForApplication(newEpoch)
+	if !ok {
+		return false, nil
+	}
+	performanceEpoch, err := ls.db.Metadata().GetEpoch(
+		rewardEpochs.performance,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return false, fmt.Errorf(
+			"get reward performance epoch %d: %w",
+			rewardEpochs.performance,
+			err,
+		)
+	}
+	return performanceEpoch != nil &&
+		performanceEpoch.EraId == eras.ByronEraDesc.Id, nil
+}
+
 // applyFirstShelleyStakeRewardRound applies the update built during the first
-// Shelley epoch of a network that starts in Byron. Its performance epoch is
-// still Byron, so no pparams or stake snapshot exist for it; cardano-ledger
-// starts Shelley with empty blocks-made (translateToShelleyLedgerStateFromUtxo),
-// so the round has no pool performance and, under d >= 0.8, expands reserves
-// with eta = 1. Parameters come from the first Shelley epoch, the one whose
-// prevPParams the update was built under.
+// Shelley epoch of a network that starts in Byron at the boundary into
+// newEpoch.
 func (ls *LedgerState) applyFirstShelleyStakeRewardRound(ctx context.Context,
 	txn *database.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
+	app, err := ls.firstShelleyStakeRewardApplication(txn, newEpoch)
+	if err != nil {
+		return err
+	}
+	return ls.applyStakeRewardApplication(ctx, txn, app, boundarySlot)
+}
+
+// firstShelleyStakeRewardApplication builds the round of the boundary into
+// newEpoch when its performance epoch is still Byron, so no pparams or stake
+// snapshot exist for it. cardano-ledger starts Shelley with empty
+// blocks-made (translateToShelleyLedgerStateFromUtxo), so the round has no
+// pool performance and, under d >= 0.8, expands reserves with eta = 1.
+// Parameters come from the first Shelley epoch, the one whose prevPParams the
+// update was built under.
+func (ls *LedgerState) firstShelleyStakeRewardApplication(
+	txn *database.Txn,
+	newEpoch uint64,
+) (*stakeRewardApplication, error) {
 	firstShelley := newEpoch - 1
 	pots, err := ls.db.Metadata().GetRewardAdaPots(
 		firstShelley, txn.Metadata(),
 	)
 	if err != nil {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"get reward ADA pots for epoch %d: %w", firstShelley, err,
 		)
 	}
 	if pots == nil {
-		return ls.requiredStakeRewardBasisUnavailable(
+		if err := ls.requiredStakeRewardBasisUnavailable(
 			true, newEpoch, "missing ADA pots", "pots_epoch", firstShelley,
+		); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf(
+			"first Shelley reward round for epoch %d: missing ADA pots",
+			newEpoch,
 		)
 	}
 	pparams, params, _, err := ls.rewardParameters(
 		txn, firstShelley, firstShelley, pots,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	result, err := rewards.Calculate(
 		rewards.Pots{
@@ -206,13 +251,13 @@ func (ls *LedgerState) applyFirstShelleyStakeRewardRound(ctx context.Context,
 		params,
 	)
 	if err != nil {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"calculate first Shelley stake rewards for epoch %d: %w",
 			newEpoch, err,
 		)
 	}
 	suppressBootstrapStakeRewards(result)
-	return ls.applyStakeRewardApplication(ctx, txn, &stakeRewardApplication{
+	return &stakeRewardApplication{
 		epochs: stakeRewardEpochs{
 			snapshot:    firstShelley,
 			performance: firstShelley,
@@ -228,7 +273,7 @@ func (ls *LedgerState) applyFirstShelleyStakeRewardRound(ctx context.Context,
 		totalCirculation: result.TotalCirculation,
 		totalBlocks:      result.TotalBlocks,
 		rewardEfficiency: result.Efficiency,
-	}, boundarySlot)
+	}, nil
 }
 
 // boundaryStakeRewardApplication resolves the reward round a boundary
@@ -504,9 +549,13 @@ func (ls *LedgerState) recheckRoundEligibility(
 }
 
 type stakeRewardApplication struct {
-	pparams        lcommon.ProtocolParameters
-	params         rewards.Parameters
-	pots           *models.RewardAdaPots
+	pparams lcommon.ProtocolParameters
+	params  rewards.Parameters
+	pots    *models.RewardAdaPots
+	// replayBaseline marks a round replayed at a later boundary (see
+	// reward_late_first_block.go). The round's inputs come from pots; its
+	// deltas apply to replayBaseline, the pots at that boundary.
+	replayBaseline *models.RewardAdaPots
 	poolOutputs    []*models.RewardPoolOutput
 	accountOutputs []*models.RewardAccountOutput
 	// reconstructedStakeInputs carries retention-pruned per-credential rows
@@ -975,7 +1024,7 @@ func (ls *LedgerState) applyStakeRewardApplication(ctx context.Context,
 		)
 	}
 
-	if !app.precomputed || app.outputsUpdated {
+	if app.replayBaseline == nil && (!app.precomputed || app.outputsUpdated) {
 		if err := saveStakeRewardOutputs(meta, metaTxn, app); err != nil {
 			return err
 		}
@@ -1019,8 +1068,12 @@ func (ls *LedgerState) applyStakeRewardApplication(ctx context.Context,
 	); err != nil {
 		return fmt.Errorf("set network state after stake rewards: %w", err)
 	}
-	app.pots.Rewards = types.Uint64(app.totalRewardPot)
-	if err := meta.SaveRewardAdaPots(app.pots, metaTxn); err != nil {
+	rewardPots := app.pots
+	if app.replayBaseline != nil {
+		rewardPots = app.replayBaseline
+	}
+	rewardPots.Rewards = types.Uint64(app.totalRewardPot)
+	if err := meta.SaveRewardAdaPots(rewardPots, metaTxn); err != nil {
 		return fmt.Errorf("update reward ADA pots: %w", err)
 	}
 
@@ -3123,7 +3176,18 @@ func stakeRewardUpdatedPots(
 			app.pots.Reserves,
 		)
 	}
-	reserves := uint64(app.pots.Reserves) - incentives
+	basePots := app.pots
+	if app.replayBaseline != nil {
+		basePots = app.replayBaseline
+	}
+	if uint64(basePots.Reserves) < incentives {
+		return 0, 0, fmt.Errorf(
+			"stake reward incentives %d exceed reserves %d",
+			incentives,
+			basePots.Reserves,
+		)
+	}
+	reserves := uint64(basePots.Reserves) - incentives
 	var overflow bool
 	reserves, overflow = addRewardUint64(reserves, app.undistributed)
 	if overflow {
@@ -3137,7 +3201,7 @@ func stakeRewardUpdatedPots(
 		return 0, 0, fmt.Errorf("stake reward treasury tax: %w", err)
 	}
 	treasury, overflow := addRewardUint64(
-		uint64(app.pots.Treasury),
+		uint64(basePots.Treasury),
 		treasuryTax,
 	)
 	if overflow {
@@ -3853,6 +3917,7 @@ func stakeRewardEpochsForNewEpoch(newEpoch uint64) (stakeRewardEpochs, bool) {
 }
 
 func (ls *LedgerState) saveRewardAdaPotsForEpoch(
+	ctx context.Context,
 	txn *database.Txn,
 	newEpoch uint64,
 	endedEpoch models.Epoch,
@@ -3876,6 +3941,10 @@ func (ls *LedgerState) saveRewardAdaPotsForEpoch(
 	if state != nil {
 		treasury = uint64(state.Treasury)
 		reserves = uint64(state.Reserves)
+	}
+	fees, err = ls.carriedRewardFees(ctx, txn, newEpoch, fees)
+	if err != nil {
+		return err
 	}
 	if err := meta.SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        newEpoch,

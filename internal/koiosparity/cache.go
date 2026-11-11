@@ -837,7 +837,10 @@ func (c *Cache) GetAllPoolsForEpoch(
 // reading one back would report a phase-2-invalid transaction as having
 // applied its body -- the bug the new fields exist to fix. They are
 // re-fetched instead.
-const koiosTxInfoPayloadVersion = 2
+//
+// Version 3 added ReferenceInputs, so version 2 rows would read back as a
+// transaction that references nothing.
+const koiosTxInfoPayloadVersion = 3
 
 // txInfoLookupChunk bounds how many hashes go into one
 // "SELECT ... WHERE tx_hash IN (?, ?, ...)" so a caller that hands GetTxInfos
@@ -2239,43 +2242,245 @@ func (c *Cache) GetStatusSummary(network string) ([]CheckEpochStatus, error) {
 	return ret, rows.Err()
 }
 
-// SaveAccountUniverse replaces the cached Koios /account_list crawl for
-// network with addrs, stamped fetchedAt. Written in one transaction so a
-// failure part-way cannot leave a half-replaced set that a later read would
-// treat as a complete universe.
-func (c *Cache) SaveAccountUniverse(
+// AccountCrawlProgress is a persisted, unfinished /account_list crawl.
+type AccountCrawlProgress struct {
+	// Query is the request the cursor was taken against.
+	Query string
+	// StartedAt is when the crawl began; it becomes the completed
+	// universe's fetched_at, because only accounts that existed then are
+	// guaranteed to have been seen.
+	StartedAt time.Time
+	// Offset is the number of /account_list rows persisted, and
+	// LastAddress the address of the last of them; a resumed request
+	// refetches that row to confirm the list has not shifted.
+	Offset      int
+	LastAddress string
+	Pages       int
+	Addresses   int
+}
+
+// GetAccountUniverseCrawl returns network's unfinished crawl, or nil when
+// there is none.
+func (c *Cache) GetAccountUniverseCrawl(
 	network string,
+) (*AccountCrawlProgress, error) {
+	var p AccountCrawlProgress
+	err := c.db.QueryRow(`
+SELECT query, started_at, next_offset, cursor, pages, address_count
+FROM koios_account_universe_crawl WHERE network = ?`, network,
+	).Scan(
+		&p.Query, &p.StartedAt, &p.Offset, &p.LastAddress,
+		&p.Pages, &p.Addresses,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get account universe crawl: %w", err)
+	}
+	return &p, nil
+}
+
+// DiscardAccountUniverseCrawl drops network's unfinished crawl and its rows.
+func (c *Cache) DiscardAccountUniverseCrawl(network string) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return fmt.Errorf("discard account universe crawl: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := discardAccountUniverseCrawl(tx, network); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func discardAccountUniverseCrawl(tx *sql.Tx, network string) error {
+	for _, stmt := range []string{
+		`DELETE FROM koios_account_universe_partial WHERE network = ?`,
+		`DELETE FROM koios_account_universe_crawl WHERE network = ?`,
+	} {
+		if _, err := tx.Exec(stmt, network); err != nil {
+			return fmt.Errorf("discard account universe crawl: %w", err)
+		}
+	}
+	return nil
+}
+
+// errAccountUniverseCrawlSuperseded reports a crawl write that does not follow
+// the crawl the cache records: another crawler sharing the cache started,
+// advanced, completed, or discarded it first. The write is refused so neither
+// crawler's rows are mixed into the other's or promoted incomplete.
+var errAccountUniverseCrawlSuperseded = errors.New(
+	"koios account universe crawl superseded by another crawler",
+)
+
+// readAccountUniverseCrawlOwner returns the recorded crawl's start time and
+// page count, and whether one is recorded. Claims the writer slot first, since
+// the caller's writes depend on this read and so cannot precede it; see
+// withClaimedSource for why upgrading a read snapshot is the failure.
+func readAccountUniverseCrawlOwner(
+	tx *sql.Tx,
+	network string,
+) (time.Time, int, bool, error) {
+	if _, err := tx.Exec(
+		`UPDATE koios_account_universe_crawl SET network = network WHERE network = ?`,
+		network,
+	); err != nil {
+		return time.Time{}, 0, false, fmt.Errorf(
+			"claim account universe crawl write: %w", err,
+		)
+	}
+	var recStart time.Time
+	var recPages int
+	err := tx.QueryRow(
+		`SELECT started_at, pages FROM koios_account_universe_crawl WHERE network = ?`,
+		network,
+	).Scan(&recStart, &recPages)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, 0, false, nil
+	}
+	if err != nil {
+		return time.Time{}, 0, false, fmt.Errorf(
+			"read account universe crawl: %w", err,
+		)
+	}
+	return recStart, recPages, true, nil
+}
+
+// checkAccountUniverseCrawlOwner fails unless a write of page number pages
+// follows the recorded crawl for network: one that started at startedAt and
+// has recorded pages-1 pages. With no recorded crawl only a first page, pages
+// of zero or one, may be written, since that write starts the crawl.
+func checkAccountUniverseCrawlOwner(
+	tx *sql.Tx,
+	network string,
+	startedAt time.Time,
+	pages int,
+) error {
+	recStart, recPages, found, err := readAccountUniverseCrawlOwner(tx, network)
+	if err != nil {
+		return err
+	}
+	if !found {
+		if pages <= 1 {
+			return nil
+		}
+		return errAccountUniverseCrawlSuperseded
+	}
+	if !recStart.Equal(startedAt) || recPages != pages-1 {
+		return errAccountUniverseCrawlSuperseded
+	}
+	return nil
+}
+
+// SaveAccountUniverseCrawlPage persists one fetched page and advances the
+// crawl's resume point to nextOffset, whose last row is lastAddress, in a
+// single transaction, so the offset never covers a page whose rows are not
+// stored and a stored page is never past the offset. pages is the crawl's
+// page count including this one. The first page, pages of zero or one, starts
+// a crawl and records query and startedAt; every later page must follow the
+// recorded crawl's previous page under the same startedAt, or the write
+// returns errAccountUniverseCrawlSuperseded.
+func (c *Cache) SaveAccountUniverseCrawlPage(
+	network, query string,
+	startedAt time.Time,
 	addrs []string,
-	fetchedAt time.Time,
+	nextOffset int,
+	lastAddress string,
+	pages int,
 ) error {
 	tx, err := c.db.Begin()
 	if err != nil {
-		return fmt.Errorf("save account universe: begin: %w", err)
+		return fmt.Errorf("save account universe page: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(
-		`DELETE FROM koios_account_universe WHERE network = ?`,
-		network,
+	if err := checkAccountUniverseCrawlOwner(
+		tx, network, startedAt.UTC(), pages,
 	); err != nil {
-		return fmt.Errorf("save account universe: clear: %w", err)
+		return err
 	}
 	stmt, err := tx.Prepare(`
-INSERT INTO koios_account_universe (network, stake_address, fetched_at)
-VALUES (?, ?, ?)
-ON CONFLICT (network, stake_address) DO UPDATE SET fetched_at = excluded.fetched_at`)
+INSERT INTO koios_account_universe_partial (network, stake_address)
+VALUES (?, ?) ON CONFLICT (network, stake_address) DO NOTHING`)
 	if err != nil {
-		return fmt.Errorf("save account universe: prepare: %w", err)
+		return fmt.Errorf("save account universe page: prepare: %w", err)
 	}
 	defer stmt.Close() //nolint:errcheck
-	saved := 0
 	for _, addr := range addrs {
 		if addr == "" {
 			continue
 		}
-		if _, err := stmt.Exec(network, addr, fetchedAt.UTC()); err != nil {
-			return fmt.Errorf("save account universe: insert: %w", err)
+		if _, err := stmt.Exec(network, addr); err != nil {
+			return fmt.Errorf("save account universe page: insert: %w", err)
 		}
-		saved++
+	}
+	if _, err := tx.Exec(`
+INSERT INTO koios_account_universe_crawl
+    (network, query, started_at, cursor, next_offset, pages, address_count)
+VALUES (?, ?, ?, ?, ?, ?, (SELECT COUNT(*) FROM koios_account_universe_partial WHERE network = ?))
+ON CONFLICT (network) DO UPDATE SET
+    cursor = excluded.cursor,
+    next_offset = excluded.next_offset,
+    pages = excluded.pages,
+    address_count = excluded.address_count`,
+		network, query, startedAt.UTC(), lastAddress, nextOffset, pages, network,
+	); err != nil {
+		return fmt.Errorf("save account universe page: cursor: %w", err)
+	}
+	if err := c.assertClaimedSource(tx, network); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("save account universe page: commit: %w", err)
+	}
+	return nil
+}
+
+// CompleteAccountUniverseCrawl promotes network's unfinished crawl to the
+// cached universe, stamped with the crawl's start time, and clears the crawl.
+// It is the only path that makes a crawl visible to GetAccountUniverse, and
+// runs in one transaction so a failure leaves the previous universe, if any,
+// and the unfinished crawl as they were. startedAt and pages identify the
+// caller's crawl; when the recorded crawl is another one, or has moved past
+// pages, it returns errAccountUniverseCrawlSuperseded and promotes nothing.
+func (c *Cache) CompleteAccountUniverseCrawl(
+	network string,
+	startedAt time.Time,
+	pages int,
+) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return fmt.Errorf("complete account universe: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	recStart, recPages, found, err := readAccountUniverseCrawlOwner(tx, network)
+	if err != nil {
+		return fmt.Errorf("complete account universe: %w", err)
+	}
+	if !found {
+		return fmt.Errorf(
+			"complete account universe: no crawl for %q: %w",
+			network, errAccountUniverseCrawlSuperseded,
+		)
+	}
+	if !recStart.Equal(startedAt) || recPages != pages {
+		return errAccountUniverseCrawlSuperseded
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM koios_account_universe WHERE network = ?`, network,
+	); err != nil {
+		return fmt.Errorf("complete account universe: clear: %w", err)
+	}
+	res, err := tx.Exec(`
+INSERT INTO koios_account_universe (network, stake_address, fetched_at)
+SELECT network, stake_address, ? FROM koios_account_universe_partial
+WHERE network = ?`, startedAt.UTC(), network)
+	if err != nil {
+		return fmt.Errorf("complete account universe: promote: %w", err)
+	}
+	saved, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("complete account universe: count: %w", err)
 	}
 	if _, err := tx.Exec(`
 INSERT INTO koios_account_universe_state (network, fetched_at, address_count)
@@ -2283,17 +2488,18 @@ VALUES (?, ?, ?)
 ON CONFLICT (network) DO UPDATE SET
     fetched_at = excluded.fetched_at,
     address_count = excluded.address_count`,
-		network, fetchedAt.UTC(), saved,
+		network, startedAt.UTC(), saved,
 	); err != nil {
-		return fmt.Errorf("save account universe: state: %w", err)
+		return fmt.Errorf("complete account universe: state: %w", err)
 	}
-	// Verified last so the writes above take SQLite's writer slot first;
-	// see withClaimedSource. A refusal rolls them back.
+	if err := discardAccountUniverseCrawl(tx, network); err != nil {
+		return err
+	}
 	if err := c.assertClaimedSource(tx, network); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("save account universe: commit: %w", err)
+		return fmt.Errorf("complete account universe: commit: %w", err)
 	}
 	return nil
 }
@@ -2368,6 +2574,8 @@ var koiosSourcedTables = []string{
 	"koios_account_checked",
 	"koios_account_universe",
 	"koios_account_universe_state",
+	"koios_account_universe_crawl",
+	"koios_account_universe_partial",
 	"check_epoch_status",
 	"check_runs",
 	"check_mismatches",
@@ -2777,6 +2985,20 @@ func createCacheSchema(db *sql.DB) error {
 			network TEXT PRIMARY KEY, fetched_at DATETIME NOT NULL,
 			address_count INTEGER NOT NULL)`,
 
+		// An in-progress /account_list crawl. Rows land here page by page, in
+		// the same transaction that advances the resume cursor, and move into
+		// koios_account_universe only when the last page has been read.
+		// GetAccountUniverse never reads these tables, so a partial crawl
+		// cannot be mistaken for a complete universe.
+		`CREATE TABLE IF NOT EXISTS koios_account_universe_crawl (
+			network TEXT PRIMARY KEY, query TEXT NOT NULL,
+			started_at DATETIME NOT NULL, cursor TEXT NOT NULL,
+			next_offset INTEGER NOT NULL DEFAULT 0,
+			pages INTEGER NOT NULL, address_count INTEGER NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS koios_account_universe_partial (
+			network TEXT NOT NULL, stake_address TEXT NOT NULL,
+			PRIMARY KEY (network, stake_address)) WITHOUT ROWID`,
+
 		// The oracle this cache's Koios rows came from. Every other table is
 		// keyed by (network, epoch) and says nothing about which deployment
 		// answered, so rows fetched from a self-hosted mirror and rows fetched
@@ -2814,6 +3036,16 @@ FROM koios_account_universe
 WHERE network NOT IN (SELECT network FROM koios_account_universe_state)
 GROUP BY network`); err != nil {
 		return fmt.Errorf("migrate koios_account_universe_state: %w", err)
+	}
+
+	// A crawl row written before the resume point was an offset has no
+	// next_offset and a cursor that means something else; its query no longer
+	// matches, so it is discarded on first use rather than resumed.
+	if err := addColumnIfMissing(
+		db, "koios_account_universe_crawl", "next_offset",
+		"INTEGER NOT NULL DEFAULT 0",
+	); err != nil {
+		return fmt.Errorf("migrate koios_account_universe_crawl: %w", err)
 	}
 
 	// Older cache files created before per-account parity have a

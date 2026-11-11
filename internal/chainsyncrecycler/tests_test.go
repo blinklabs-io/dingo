@@ -197,6 +197,9 @@ type fakeChainsyncState struct {
 	activeConn    *ouroboros.ConnectionId
 	stalledChecks int
 	rotationCalls int
+	// staleDemotions is returned, once, by the next stale sweep.
+	staleDemotions []ouroboros.ConnectionId
+	staleSweeps    int
 	// impatient is returned, once, by the next CheckPatienceExhausted.
 	impatient []ouroboros.ConnectionId
 }
@@ -207,6 +210,21 @@ func (f *fakeChainsyncState) CheckPatienceExhausted() []ouroboros.ConnectionId {
 	ret := f.impatient
 	f.impatient = nil
 	return ret
+}
+
+func (f *fakeChainsyncState) DemoteStaleAdvertisingClients() []ouroboros.ConnectionId {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.staleSweeps++
+	ret := f.staleDemotions
+	f.staleDemotions = nil
+	return ret
+}
+
+func (f *fakeChainsyncState) sweepCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.staleSweeps
 }
 
 func (f *fakeChainsyncState) CheckStalledClients() []ouroboros.ConnectionId {

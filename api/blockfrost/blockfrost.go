@@ -16,15 +16,12 @@ package blockfrost
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +47,10 @@ const (
 	defaultMaxMempoolAddressesPerClient         = 1
 	defaultMaxPoolAggregates               uint = 4
 	defaultMaxPoolAggregatesPerClient           = 2
+	defaultMaxMetadataLabelPages           uint = 4
+	defaultMaxMetadataLabelPagesPerClient       = 2
+	defaultMaxBlockLists                   uint = 4
+	defaultMaxBlockListsPerClient               = 2
 )
 
 // Blockfrost is the Blockfrost-compatible REST API server.
@@ -58,7 +59,6 @@ type Blockfrost struct {
 	logger             *slog.Logger
 	requestBodyTimeout time.Duration
 	node               BlockfrostNode
-	mutationAuth       mutationAuth
 	mutationAdmission  *requestAdmission
 	drepAdmission      *requestAdmission
 	// addressSummaryAdmission is shared by every route that scans a whole
@@ -80,6 +80,13 @@ type Blockfrost struct {
 	// poolAggregateAdmission is shared by the pool detail and the extended
 	// pool list, whose live stake is aggregated over the pool's delegators.
 	poolAggregateAdmission *requestAdmission
+	// metadataLabelAdmission is shared by the metadata label transaction
+	// pages, whose cost scales with the page offset into a label that can
+	// cover most of the chain.
+	metadataLabelAdmission *requestAdmission
+	// blockListAdmission is shared by the pool and epoch block lists, whose
+	// count and page read every block in the pool's or epoch's slot range.
+	blockListAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -112,9 +119,6 @@ func New(
 		requestBodyTimeout: defaultRequestBodyTimeout,
 		logger:             logger,
 		node:               node,
-		mutationAuth: newMutationAuth(
-			cfg.AuthToken,
-		),
 		mutationAdmission: newRequestAdmission(
 			cfg.MaxConcurrentMutations,
 			cfg.MaxConcurrentMutationsPerClient,
@@ -143,45 +147,16 @@ func New(
 			defaultMaxPoolAggregates,
 			defaultMaxPoolAggregatesPerClient,
 		),
+		metadataLabelAdmission: newRequestAdmission(
+			defaultMaxMetadataLabelPages,
+			defaultMaxMetadataLabelPagesPerClient,
+		),
+		blockListAdmission: newRequestAdmission(
+			defaultMaxBlockLists,
+			defaultMaxBlockListsPerClient,
+		),
 		listener: apilistener.New("Blockfrost API", logger),
 	}
-}
-
-type mutationAuth struct {
-	enabled   bool
-	tokenHash [sha256.Size]byte
-}
-
-func newMutationAuth(token string) mutationAuth {
-	return mutationAuth{
-		enabled:   token != "",
-		tokenHash: sha256.Sum256([]byte(token)),
-	}
-}
-
-func (a mutationAuth) authorized(r *http.Request) bool {
-	if !a.enabled {
-		return false
-	}
-	candidates := []string{
-		r.Header.Get("project_id"),
-		r.Header.Get("X-Blockfrost-Project-Id"),
-	}
-	scheme, value, ok := strings.Cut(r.Header.Get("Authorization"), " ")
-	if ok && strings.EqualFold(scheme, "Bearer") {
-		candidates = append(candidates, strings.TrimLeft(value, " "))
-	}
-	// Every credential is compared so a stale value in one header cannot mask
-	// a valid one in another, and the work does not depend on which matched.
-	matched := 0
-	for _, provided := range candidates {
-		providedHash := sha256.Sum256([]byte(provided))
-		matched |= subtle.ConstantTimeCompare(
-			providedHash[:],
-			a.tokenHash[:],
-		)
-	}
-	return matched == 1
 }
 
 type requestAdmission struct {
@@ -240,16 +215,6 @@ func requestClient(r *http.Request) string {
 
 func (b *Blockfrost) mutationHandler(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !b.mutationAuth.authorized(r) {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(
-				w,
-				http.StatusUnauthorized,
-				"Unauthorized",
-				"missing or invalid authentication token",
-			)
-			return
-		}
 		release, ok := b.mutationAdmission.acquire(
 			r.Context(),
 			requestClient(r),
@@ -648,16 +613,8 @@ func (b *Blockfrost) Start(
 	}
 	defer b.listener.EndStart(startDone)
 
-	host, _, err := net.SplitHostPort(b.config.ListenAddress)
-	if err != nil {
+	if _, _, err := net.SplitHostPort(b.config.ListenAddress); err != nil {
 		return fmt.Errorf("blockfrost: invalid listen address: %w", err)
-	}
-	if err := validateListenSecurity(
-		host,
-		b.config.AuthToken,
-		b.config.TLS,
-	); err != nil {
-		return fmt.Errorf("blockfrost: %w", err)
 	}
 
 	server, bindDone, err := b.listener.Publish(func() *http.Server {

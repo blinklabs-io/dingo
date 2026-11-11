@@ -8,6 +8,7 @@
   "ConwayGenesisHash": "7e237f0c935539f5571297e3171946dd83929719496cbf51d0dab814a47ae0de",
   "DijkstraGenesisFile": "dijkstra-genesis.json",
   "DijkstraGenesisHash": "868a465b7115ae653ec532f46eca1a31a89211a96e810d78f82d6e60e3cdca87",
+  "EgressBudgetMbps": 250,
   "ExperimentalHardForksEnabled": true,
   "ExperimentalProtocolsEnabled": true,
   "LastKnownBlockVersion-Alt": 0,
@@ -24,11 +25,14 @@
       "SnapshotInterval": 4320
     }
   },
+  "LeiosAdaptiveEndorsements": {
+    "Enabled": true
+  },
   "LeiosDbConfig": {
     "Backend": "SQLite"
   },
   "LeiosMinOfferLead": 1200,
-  "MinNodeVersion": "11.1.0.164-prototype-2026w42",
+  "MinNodeVersion": "11.2.0.164-rc-2026w44",
   "Protocol": "Cardano",
   "RequiresNetworkMagic": "RequiresMagic",
   "ShelleyGenesisFile": "shelley-genesis.json",
@@ -142,6 +146,9 @@
     "Net.Mux.Remote": {
       "severity": "Info"
     },
+    "Net.Mux.Remote.Bearer": {
+      "severity": "Silence"
+    },
     "Net.PeerSelection": {
       "severity": "Info"
     },
@@ -152,5 +159,5 @@
       "severity": "Info"
     }
   },
-  "TxSubmissionLogicVersion": "TxSubmissionLogicV1"
+  "TxSubmissionLogicVersion": "TxSubmissionLogicV2"
 }
