@@ -1705,9 +1705,12 @@ func (k *KoiosClient) GetPoolEpochHistory(
 // /pool_updates for that single pool, so unlike the bulk first-active map it
 // does not depend on a multi-page scan seeing every row.
 //
-// Among the certificates already effective at epoch (a registration by its
-// active_epoch_no, a deregistration by its retiring_epoch), the most recent
-// by block_time decides. A pool with none effective yet is not registered.
+// Among the certificates already effective at epoch, the most recent by
+// block_time decides. A registration is effective from its active_epoch_no.
+// A retirement is effective only once retiring_epoch+1 < epoch: the
+// /pool_history row for epoch K is the stake snapshot taken one epoch earlier
+// (see koiosStakeEpoch), so a pool retiring at e still has rows at e and e+1.
+// A pool with none effective yet is not registered.
 func (k *KoiosClient) GetPoolRegisteredAtEpoch(
 	ctx context.Context,
 	poolBech32 string,
@@ -1744,7 +1747,7 @@ func (k *KoiosClient) GetPoolRegisteredAtEpoch(
 		switch {
 		case item.ActiveEpochNo != nil && *item.ActiveEpochNo <= epoch:
 			isRegistration = true
-		case item.RetiringEpoch != nil && *item.RetiringEpoch <= epoch:
+		case item.RetiringEpoch != nil && *item.RetiringEpoch+1 < epoch:
 			isRegistration = false
 		default:
 			continue

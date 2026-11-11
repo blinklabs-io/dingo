@@ -16632,8 +16632,11 @@ lacks a pool. Before the in-process observer compares an epoch, it re-requests
 `/pool_history` for each pool Dingo has in the epoch's stake basis that the
 cached reference lacks, bypassing the skip, and caches any row Koios returns. A
 pool still empty is checked against its own `/pool_updates` certificates
-(`GetPoolRegisteredAtEpoch`): unregistered, not yet effective or already retired
-at the epoch stays `pool_only_dingo`; registered with persistently empty history
+(`GetPoolRegisteredAtEpoch`): unregistered, not yet effective, or retired more
+than one epoch before the epoch stays `pool_only_dingo`, since the
+`/pool_history` row for an epoch is the stake snapshot taken one epoch earlier
+and a pool retiring at e still has rows at e and e+1; registered with
+persistently empty history
 leaves the reference incomplete, so the epoch is recorded `ERROR` and retried
 without calling `FatalFunc`. The standalone `check` command reads only the cache
 and does not do this reconciliation.

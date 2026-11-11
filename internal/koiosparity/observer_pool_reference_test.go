@@ -274,6 +274,35 @@ func TestObserverPersistentlyEmptyPoolHistoryIsNonFatalReferenceError(
 	require.Zero(t, out.fatal, "an incomplete reference must not halt strict mode")
 }
 
+// Koios's /pool_history row for epoch K is the stake snapshot taken one epoch
+// earlier, so a pool retiring at epoch e still has rows at e and e+1. A pool
+// retiring at or one epoch before the checked epoch (5) is still registered
+// for that row, and an empty answer for it is an incomplete reference rather
+// than pool_only_dingo.
+func TestObserverPoolRetiringAtCheckedEpochIsNotAbsent(t *testing.T) {
+	t.Parallel()
+	for _, retiring := range []int{4, 5} {
+		t.Run(fmt.Sprintf("retiring %d", retiring), func(t *testing.T) {
+			t.Parallel()
+			out := runPoolRefScenario(t, poolRefScenario{
+				historyA: func(int32) bool { return false },
+				updatesA: fmt.Sprintf(
+					`[{"active_epoch_no":1,"retiring_epoch":null,"block_time":100},`+
+						`{"active_epoch_no":null,"retiring_epoch":%d,"block_time":200}]`,
+					retiring,
+				),
+			})
+			require.False(
+				t,
+				hasCategory(out.result, "pool_presence", CategoryPoolOnlyDingo),
+				"%+v", out.result.Mismatches,
+			)
+			require.Equal(t, StatusError, out.result.Status)
+			require.Zero(t, out.fatal)
+		})
+	}
+}
+
 // The bulk /pool_updates scan can miss a pool's earliest certificate, which
 // makes the fetch skip a pool Koios has history for. The comparison must not
 // report that skipped pool as pool_only_dingo.
