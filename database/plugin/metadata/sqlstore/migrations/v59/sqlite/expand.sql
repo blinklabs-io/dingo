@@ -1,6 +1,16 @@
--- Serve the epoch stakes count and page. `registered` was not in any index,
--- so the count read every stake row of the epoch. With it after epoch and
--- before the page order, the count reads only matching entries and, outside
--- MySQL, a page needs no sort. MySQL keys the blob columns by prefix, which
--- it cannot use for ORDER BY.
-CREATE INDEX IF NOT EXISTS `idx_reward_stake_input_epoch_registered_pool_cred` ON `reward_stake_input`(`epoch`,`registered`,`pool_key_hash`,`credential_tag`,`staking_key`);
+-- Drop four indexes that no reader needs or that another index already serves.
+--
+-- idx_reward_live_stake_updated_slot: updated_slot is written on every
+-- refresh and never filtered, joined or ordered on, so the index only added a
+-- leaf rewrite per touched credential.
+--
+-- idx_account_reward_delta_tx_hash and idx_account_reward_delta_withdrawal:
+-- every lookup by tx_hash also names withdrawal, so the unique
+-- (withdrawal, tx_hash, ...) index serves it, and a boolean-only index
+-- narrows nothing.
+--
+-- idx_account_drep: a prefix of idx_account_drep_active_staking_key.
+DROP INDEX IF EXISTS `idx_reward_live_stake_updated_slot`;
+DROP INDEX IF EXISTS `idx_account_reward_delta_tx_hash`;
+DROP INDEX IF EXISTS `idx_account_reward_delta_withdrawal`;
+DROP INDEX IF EXISTS `idx_account_drep`;
