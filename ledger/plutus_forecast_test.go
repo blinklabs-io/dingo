@@ -529,13 +529,13 @@ func TestAlonzoPlutusValidityRangeMilliseconds(t *testing.T) {
 		}
 		rng, ok := info.ValidRange.ToPlutusData().(*data.Constr)
 		require.True(t, ok)
-		require.Len(t, rng.Fields, 2)
-		upper, ok := rng.Fields[1].(*data.Constr)
+		require.Len(t, rng.Fields(), 2)
+		upper, ok := rng.Fields()[1].(*data.Constr)
 		require.True(t, ok)
-		finite, ok := upper.Fields[0].(*data.Constr)
+		finite, ok := upper.Fields()[0].(*data.Constr)
 		require.True(t, ok)
 		require.Zero(t, finite.Tag.Cmp(big.NewInt(1)), "finite upper bound")
-		ms, ok := finite.Fields[0].(*data.Integer)
+		ms, ok := finite.Fields()[0].(*data.Integer)
 		require.True(t, ok)
 		return ms.Inner, nil
 	}

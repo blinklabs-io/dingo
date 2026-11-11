@@ -53,16 +53,6 @@ func TestMithrilSecretFilesRejectInsecureMode(t *testing.T) {
 				return err
 			},
 		},
-		{
-			name: "operator token",
-			path: func(cfg *config.Config) string {
-				return cfg.Mithril.Server.Aggregator.OperatorTokenFile
-			},
-			run: func(t *testing.T, cfg *config.Config) error {
-				_, err := newMithrilServer(t.Context(), cfg, discardLogger)
-				return err
-			},
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

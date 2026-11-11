@@ -1,4 +1,4 @@
-FROM ghcr.io/blinklabs-io/go:1.27.3-1@sha256:3e5e8c2d5b52421d1d54d49a607463deca214b27fb1b0378b1aa883d1e6cfe1e AS build
+FROM ghcr.io/blinklabs-io/go:1.27.4-1@sha256:53a984fecb32c7da136bf0a9cf1d36f4cb4ee45f928cfb61bc9ef8623728537f AS build
 
 ARG VERSION
 ARG COMMIT_HASH
@@ -35,7 +35,7 @@ WORKDIR /antithesis/customer
 RUN make CGO_ENABLED=1 build
 
 FROM ghcr.io/blinklabs-io/cardano-cli:11.4.0.0-2@sha256:a406a55bb9bbf730879c97e2bc8bfe66fbc531afea86115850a7102bb2d46c88 AS cardano-cli
-FROM ghcr.io/blinklabs-io/cardano-configs:20261027-1@sha256:f111e6bfd0d0332fa73d3aee857d13f32247a8e7cd8655df624f70e8b832ad0b AS cardano-configs
+FROM ghcr.io/blinklabs-io/cardano-configs:20261107-1@sha256:0ea3741c1fcef50c320c5696f2a0c70feb071855365c20f03088f4aae6e4c2fb AS cardano-configs
 FROM ghcr.io/blinklabs-io/nview:0.17.0@sha256:9b3c78702d3074cae7fe410e8594d98dbac7414ffb5512b00877558964a956b8 AS nview
 FROM ghcr.io/blinklabs-io/txtop:0.17.0@sha256:ac64eec8467f579d01a7cf070e9d006b7b509e31cd1d701b5882933f3b8f7b42 AS txtop
 

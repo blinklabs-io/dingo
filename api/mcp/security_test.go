@@ -32,55 +32,6 @@ import (
 	"golang.org/x/time/rate"
 )
 
-func TestSecurityMiddlewareAuth(t *testing.T) {
-	t.Parallel()
-
-	nextHandler := http.HandlerFunc(
-		func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
-		},
-	)
-
-	// Case 1: No auth required
-	unprotected := SecurityMiddleware("", 0, 0, nil, nextHandler)
-	req := httptest.NewRequest("GET", "/mcp", nil)
-	rec := httptest.NewRecorder()
-	unprotected.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code)
-
-	// Case 2: Auth required
-	token := "my-secret-test-token"
-	protected := SecurityMiddleware(token, 0, 0, nil, nextHandler)
-
-	// Request with missing token
-	req = httptest.NewRequest("GET", "/mcp", nil)
-	rec = httptest.NewRecorder()
-	protected.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-
-	// Request with wrong token
-	req = httptest.NewRequest("GET", "/mcp", nil)
-	req.Header.Set("Authorization", "Bearer wrong-token")
-	rec = httptest.NewRecorder()
-	protected.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-
-	// Request with correct Bearer token
-	req = httptest.NewRequest("GET", "/mcp", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	rec = httptest.NewRecorder()
-	protected.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code)
-
-	// Request with correct X-API-Key token
-	req = httptest.NewRequest("GET", "/mcp", nil)
-	req.Header.Set("X-API-Key", token)
-	rec = httptest.NewRecorder()
-	protected.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code)
-}
-
 func TestSecurityMiddlewareRateLimiting(t *testing.T) {
 	t.Parallel()
 
@@ -91,7 +42,7 @@ func TestSecurityMiddlewareRateLimiting(t *testing.T) {
 	)
 
 	// Rate limit: 1 rps, burst: 2
-	limited := SecurityMiddleware("", 1.0, 2, nil, nextHandler)
+	limited := SecurityMiddleware(1.0, 2, nil, nextHandler)
 
 	// First 2 requests (within burst) should succeed
 	for range 2 {
@@ -121,7 +72,6 @@ func TestSecurityMiddlewareCORS(t *testing.T) {
 	)
 
 	handler := SecurityMiddleware(
-		"",
 		0,
 		0,
 		[]string{"http://localhost:5173"},
@@ -151,7 +101,6 @@ func TestSecurityMiddlewareBrowserOrigins(t *testing.T) {
 				for _, origin := range []string{"https://evil.example", "null", "", "http://trusted.example/", "http://trusted.example https://evil.example"} {
 					invoked := false
 					handler := SecurityMiddleware(
-						"",
 						0,
 						0,
 						allowed,
@@ -187,7 +136,6 @@ func TestSecurityMiddlewareBrowserOrigins(t *testing.T) {
 	}
 	for _, origin := range []string{"", "http://localhost:8088", "http://trusted.example"} {
 		handler := SecurityMiddleware(
-			"secret",
 			0,
 			0,
 			[]string{"http://trusted.example"},
@@ -200,10 +148,6 @@ func TestSecurityMiddlewareBrowserOrigins(t *testing.T) {
 			req.Header.Set("Origin", origin)
 		}
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		require.Equal(t, 401, rec.Code)
-		req.Header.Set("Authorization", "Bearer secret")
-		rec = httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		require.Equal(t, 200, rec.Code)
 		req.Header.Add("Origin", "http://trusted.example")
@@ -219,7 +163,6 @@ func TestServerRejectsReboundOrigin(t *testing.T) {
 	t.Parallel()
 	for _, path := range []string{"/mcp", "/sse", "/"} {
 		cfg := DefaultProviderConfig()
-		cfg.AuthToken = "test-secret"
 		server, err := NewServer(
 			t.Context(),
 			cfg,
@@ -307,7 +250,6 @@ func TestHTTPServerShutdownClosesClientLimiter(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			handler := newSecurityMiddleware(
-				"",
 				1,
 				1,
 				nil,

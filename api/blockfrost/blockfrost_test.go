@@ -41,8 +41,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const testMutationAuthToken = "test-blockfrost-auth-token"
-
 // TestCompatBlockResponse verifies that our BlockResponse
 // round-trips through blockfrost-go's Block type.
 func TestCompatBlockResponse(t *testing.T) {
@@ -1638,7 +1636,6 @@ func newTestBlockfrost(
 	return New(
 		BlockfrostConfig{
 			ListenAddress: "127.0.0.1:0",
-			AuthToken:     testMutationAuthToken,
 		},
 		node,
 		slog.Default(),
