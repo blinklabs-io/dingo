@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -38,6 +39,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	omockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/blinklabs-io/plutigo/data"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -578,6 +580,110 @@ func TestAlonzoPlutusValidityRangeMilliseconds(t *testing.T) {
 			assert.Zero(t, test.wantMs.Cmp(got),
 				"script POSIX upper bound: want %s, got %s",
 				test.wantMs, got)
+		})
+	}
+}
+
+// TestTxValidationExtendsAlonzoPlutusForecastFromTip drives the mainnet
+// Alonzo transaction through every mempool and block-builder validation entry
+// point and probes the view each hands to the era rules. The ledger's tip is
+// block 6400998's predecessor, so the transaction's upper bound lies past the
+// forecast horizon measured from it. The reference Alonzo mempool extends the
+// epoch info linearly from the ledger it validates against, so the bound must
+// translate and the OutsideForecast rule must accept it.
+func TestTxValidationExtendsAlonzoPlutusForecastFromTip(t *testing.T) {
+	t.Parallel()
+
+	tx := mainnetForecastTx(t)
+	tests := []struct {
+		name     string
+		validate func(ls *LedgerState) error
+	}{
+		{
+			name: "ValidateTx",
+			validate: func(ls *LedgerState) error {
+				return ls.ValidateTx(tx)
+			},
+		},
+		{
+			name: "ValidateTxWithOverlay",
+			validate: func(ls *LedgerState) error {
+				return ls.ValidateTxWithOverlay(tx, nil, nil, nil)
+			},
+		},
+		{
+			name: "WithResolvingTxValidationSession",
+			validate: func(ls *LedgerState) error {
+				return ls.WithResolvingTxValidationSession(
+					context.Background(),
+					func(
+						validate func(
+							lcommon.Transaction,
+							map[utxoref.Key]struct{},
+							map[utxoref.Key]lcommon.Utxo,
+							*utxoref.StateOverlay,
+						) error,
+						_ func() bool,
+						_ func(func() error) (bool, error),
+						_ func([]models.UtxoId) ([]models.Utxo, error),
+					) error {
+						return validate(tx, nil, nil, nil)
+					},
+				)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			ls := mainnetForecastLedgerState(t, eras.AlonzoEraDesc)
+			ls.db = newTestDB(t)
+			ls.metrics.init(prometheus.NewRegistry())
+			ls.currentEpoch = ls.epochCache[297]
+			ls.currentPParams = &alonzo.AlonzoProtocolParameters{
+				ProtocolMajor: 6,
+			}
+
+			var (
+				probed    bool
+				upperTime time.Time
+				upperErr  error
+				ruleErr   error
+			)
+			testEra := eras.AlonzoEraDesc
+			testEra.ValidateTxFunc = func(
+				_ lcommon.Transaction,
+				slot uint64,
+				view lcommon.LedgerState,
+				pp lcommon.ProtocolParameters,
+			) error {
+				probed = true
+				upperTime, upperErr = view.SlotToTime(mainnetForecastUpperBound)
+				ruleErr = lcommon.UtxoValidateOutsideForecast(
+					tx, slot, view, pp,
+				)
+				return errHorizonProbeDone
+			}
+			ls.currentEra = testEra
+			ls.activeEras = []eras.EraDesc{testEra}
+			ls.publishSnapshotsLocked()
+
+			// Premise: measured from the tip, the bound is past the horizon.
+			_, err := ls.SlotToTime(mainnetForecastUpperBound)
+			require.ErrorIs(t, err, hardfork.ErrPastHorizon)
+
+			require.ErrorIs(t, test.validate(ls), errHorizonProbeDone)
+			require.True(t, probed)
+			require.NoError(t, upperErr,
+				"an Alonzo Plutus validity bound past the horizon must "+
+					"translate linearly from the tip")
+			assert.Equal(t,
+				int64(mainnetForecastUpperBoundUnix),
+				upperTime.Unix(),
+			)
+			assert.NoError(t, ruleErr,
+				"OutsideForecast must accept the canonical transaction")
 		})
 	}
 }
