@@ -41,12 +41,16 @@ import (
 // applied to the live-stake aggregate rebuild.
 const rewardPrecomputeChunkPools = 100
 
-// rewardPrecomputeChunkDelegators bounds the delegators processed per chunk
-// transaction. The transaction holds the only write connection while it
-// writes one reward_account_output row per delegator into a table with
-// several random-keyed indexes, so a 100-pool chunk of large mainnet pools
-// held block application off for 30-45 seconds at a time.
-const rewardPrecomputeChunkDelegators = 5000
+// rewardPrecomputeChunkDelegators bounds the delegators processed per chunk.
+// A chunk's write transaction holds the only write connection while it writes
+// one reward_account_output row per delegator into a table with several
+// random-keyed indexes, and that hold grows linearly with the cap: measured on
+// SQLite at roughly 12 ms per 1,000 delegators (about 0.23 s at this size).
+// Each chunk also waits for a writer turn behind block commits, a fixed cost
+// per chunk, so a larger cap finishes the round in fewer waits. The reads for
+// one chunk are planned ahead of the previous chunk's write, so two chunks'
+// rows are held in memory at once.
+const rewardPrecomputeChunkDelegators = 20000
 
 // rewardPrecomputeChunkEnd returns the end of the chunk of pools starting at
 // start: at most maxPools pools, ending at the first pool that brings the
@@ -516,6 +520,57 @@ func (ls *LedgerState) fenceRewardPrecompute() {
 	ls.rewardPrecomputeWriteMu.Unlock()
 }
 
+// fenceAndCompleteRewardPrecompute fences background chunks, then finishes
+// the reward round the boundary into newEpoch will apply, step by step, before
+// the rollover transaction opens. The rollover would otherwise run every
+// remaining chunk's reads inside its write transaction. This is best effort:
+// the rollover re-resolves the round and accepts the finished cursor only
+// while its input fingerprint still matches, and completes it inline
+// otherwise, so a round this leaves unfinished or stale costs time, not
+// correctness.
+func (ls *LedgerState) fenceAndCompleteRewardPrecompute(
+	newEpoch uint64,
+	boundarySlot uint64,
+) {
+	ls.fenceRewardPrecompute()
+	if err := ls.completeRewardPrecomputeBeforeBoundary(
+		newEpoch, boundarySlot,
+	); err != nil {
+		ls.config.Logger.Warn(
+			"could not finish stake reward precompute before the boundary",
+			"component", "ledger",
+			"new_epoch", newEpoch,
+			"error", err,
+		)
+	}
+}
+
+func (ls *LedgerState) completeRewardPrecomputeBeforeBoundary(
+	newEpoch uint64,
+	boundarySlot uint64,
+) error {
+	credited, err := ls.rewardRoundCredited(nil, newEpoch)
+	if err != nil || credited {
+		return err
+	}
+	if err := ls.completePendingRewardStakeInputs(newEpoch); err != nil {
+		return err
+	}
+	var round *stakeRewardPrecomputeRound
+	var ok bool
+	readTxn := ls.db.Transaction(context.Background(), false)
+	if err := readTxn.Do(func(txn *database.Txn) error {
+		var err error
+		round, ok, err = ls.resolveStakeRewardPrecomputeRoundInTxn(
+			txn, newEpoch, boundarySlot, boundarySlot, false,
+		)
+		return err
+	}); err != nil || !ok {
+		return err
+	}
+	return ls.runStakeRewardPrecomputeSteps(round)
+}
+
 // runChunkedStakeRewardPrecomputeRound drives Pass 2 (the per-pool member
 // split) to completion for one reward round, one bounded chunk of pools per
 // short write transaction, persisting a resumable cursor with every chunk. It
@@ -538,18 +593,86 @@ func (ls *LedgerState) runChunkedStakeRewardPrecomputeRound(
 	if err != nil || !ok {
 		return false, err
 	}
-	for {
-		if ls.closed.Load() {
-			return true, nil
-		}
-		done, err := ls.stakeRewardPrecomputeChunkStep(round)
-		if err != nil {
-			return true, err
-		}
-		if done {
-			return true, nil
-		}
+	if err := ls.runStakeRewardPrecomputeSteps(round); err != nil {
+		return true, err
 	}
+	return true, nil
+}
+
+// runStakeRewardPrecomputeSteps drives round's steps until it completes, is
+// invalidated, or the ledger closes. The next step is planned from reads while
+// the current one waits for and takes its write turn, so a busy writer does
+// not serialize every chunk behind it. A planned-ahead step is applied only
+// once the step before it has committed, and its write phase re-validates the
+// stored cursor, so it never lands on a different state than it was read for.
+func (ls *LedgerState) runStakeRewardPrecomputeSteps(
+	round *stakeRewardPrecomputeRound,
+) error {
+	if round == nil || ls.rewardPrecomputeRoundInvalidated(round) {
+		return nil
+	}
+	plan, err := ls.planStakeRewardPrecomputeStepRead(round, nil)
+	if err != nil {
+		return err
+	}
+	for plan != nil && !plan.done {
+		if ls.closed.Load() {
+			return nil
+		}
+		applyCh := make(chan rewardPrecomputeApplyResult, 1)
+		go func(plan *rewardPrecomputeStepPlan) {
+			applyCh <- ls.applyStakeRewardPrecomputeStep(round, plan)
+		}(plan)
+		var next *rewardPrecomputeStepPlan
+		var nextErr error
+		// A restart that only saves reconstructed stake inputs writes what the
+		// following reads depend on, so those reads wait for it.
+		if !plan.finish && plan.chunk != nil {
+			next, nextErr = ls.planStakeRewardPrecomputeStepRead(round, plan)
+		}
+		result := <-applyCh
+		if result.err != nil {
+			return result.err
+		}
+		if result.done {
+			return nil
+		}
+		if result.midRound && ls.rewardPrecomputeChunkHook != nil {
+			ls.rewardPrecomputeChunkHook(
+				plan.cursor.CompletedPools, len(round.poolInputs),
+			)
+		}
+		if !result.applied || next == nil {
+			// Nothing was written, or nothing was planned ahead: plan from
+			// the stored state.
+			next, nextErr = ls.planStakeRewardPrecomputeStepRead(round, nil)
+		}
+		if nextErr != nil {
+			return nextErr
+		}
+		plan = next
+	}
+	return nil
+}
+
+// planStakeRewardPrecomputeStepRead plans a step in its own read transaction.
+// after is the step the plan follows, or nil to plan from the stored cursor.
+func (ls *LedgerState) planStakeRewardPrecomputeStepRead(
+	round *stakeRewardPrecomputeRound,
+	after *rewardPrecomputeStepPlan,
+) (*rewardPrecomputeStepPlan, error) {
+	var plan *rewardPrecomputeStepPlan
+	readTxn := ls.db.Transaction(context.Background(), false)
+	if err := readTxn.Do(func(txn *database.Txn) error {
+		var err error
+		plan, err = ls.planStakeRewardPrecomputeStep(
+			ls.lifecycleContext(), txn, round, after,
+		)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return plan, nil
 }
 
 // rewardPrecomputeRoundInvalidated reports whether a rollback, a boundary
@@ -588,6 +711,7 @@ func (ls *LedgerState) planStakeRewardPrecomputeStep(
 	ctx context.Context,
 	txn *database.Txn,
 	round *stakeRewardPrecomputeRound,
+	after *rewardPrecomputeStepPlan,
 ) (*rewardPrecomputeStepPlan, error) {
 	meta := ls.db.Metadata()
 	metaTxn := txn.Metadata()
@@ -598,17 +722,29 @@ func (ls *LedgerState) planStakeRewardPrecomputeStep(
 	if !unchanged {
 		return &rewardPrecomputeStepPlan{done: true}, nil
 	}
-	persisted, err := loadRewardPrecomputeCursor(
-		meta, metaTxn, round.epochs.snapshot,
-	)
-	if err != nil {
-		return nil, err
-	}
-	cursor, startIndex, err := ls.resumableRewardPrecomputeCursor(
-		meta, metaTxn, round,
-	)
-	if err != nil {
-		return nil, err
+	var persisted, cursor *rewardPrecomputeCursor
+	var startIndex int
+	if after != nil {
+		// The state the step before it leaves behind, which the write phase
+		// verifies against the stored cursor.
+		saved := *after.cursor
+		persisted = &saved
+		next := *after.cursor
+		cursor = &next
+		startIndex = next.CompletedPools
+	} else {
+		persisted, err = loadRewardPrecomputeCursor(
+			meta, metaTxn, round.epochs.snapshot,
+		)
+		if err != nil {
+			return nil, err
+		}
+		cursor, startIndex, err = ls.resumableRewardPrecomputeCursor(
+			meta, metaTxn, round,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if cursor != nil && cursor.Done {
 		return &rewardPrecomputeStepPlan{done: true}, nil
@@ -665,47 +801,16 @@ func (ls *LedgerState) rewardPrecomputeSnapshotCurrent(
 	return rewardPrecomputeSnapshotUnchanged(round.rewardSnapshot, current), nil
 }
 
-// stakeRewardPrecomputeChunkStep processes at most one chunk of pools. The
-// chunk's reads run in a read transaction, outside rewardPrecomputeWriteMu and
-// without the metadata write connection, so block application is not held off
-// while they run. Only the writes -- outputs, cursor, completion -- run in a
-// short write transaction, which first re-validates under the write mutex
-// everything the reads relied on: the rollback generation, the boundary fence,
-// the snapshot row, and the stored cursor. A step whose validation fails
-// writes nothing. done is true once nothing further should be attempted for
-// this round: Pass 2 is complete, or the round was invalidated by a rollback
-// or claimed by a boundary and the caller must stop.
-func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
-	round *stakeRewardPrecomputeRound,
-) (bool, error) {
-	if round == nil || ls.rewardPrecomputeRoundInvalidated(round) {
-		return true, nil
-	}
-	var plan *rewardPrecomputeStepPlan
-	readTxn := ls.db.Transaction(context.Background(), false)
-	if err := readTxn.Do(func(txn *database.Txn) error {
-		var err error
-		plan, err = ls.planStakeRewardPrecomputeStep(
-			ls.lifecycleContext(), txn, round,
-		)
-		return err
-	}); err != nil {
-		return false, err
-	}
-	if plan == nil || plan.done {
-		return true, nil
-	}
-
-	done, midRound, err := ls.applyStakeRewardPrecomputeStep(round, plan)
-	if err != nil {
-		return false, err
-	}
-	if midRound && ls.rewardPrecomputeChunkHook != nil {
-		ls.rewardPrecomputeChunkHook(
-			plan.cursor.CompletedPools, len(round.poolInputs),
-		)
-	}
-	return done, nil
+// rewardPrecomputeApplyResult is the outcome of applying one planned step.
+type rewardPrecomputeApplyResult struct {
+	// done: nothing further should be attempted for the round.
+	done bool
+	// applied: the step's writes committed. False when the stored cursor had
+	// moved, which needs a fresh plan.
+	applied bool
+	// midRound: a non-final chunk was committed.
+	midRound bool
+	err      error
 }
 
 // applyStakeRewardPrecomputeStep writes plan in one short write transaction
@@ -714,12 +819,13 @@ func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
 func (ls *LedgerState) applyStakeRewardPrecomputeStep(
 	round *stakeRewardPrecomputeRound,
 	plan *rewardPrecomputeStepPlan,
-) (done bool, midRound bool, err error) {
+) rewardPrecomputeApplyResult {
+	var done, applied, midRound bool
 	ls.rewardPrecomputeWriteMu.Lock()
 	defer ls.rewardPrecomputeWriteMu.Unlock()
 
 	writeTxn := ls.db.Transaction(context.Background(), true)
-	err = writeTxn.Do(func(txn *database.Txn) error {
+	err := writeTxn.Do(func(txn *database.Txn) error {
 		if ls.rewardPrecomputeRoundInvalidated(round) {
 			done = true
 			return nil
@@ -745,6 +851,7 @@ func (ls *LedgerState) applyStakeRewardPrecomputeStep(
 			// again from the stored state rather than overwrite it.
 			return nil
 		}
+		applied = true
 		if plan.reset {
 			if err := meta.DeleteRewardOutputsForEpoch(
 				round.epochs.snapshot, metaTxn,
@@ -786,9 +893,13 @@ func (ls *LedgerState) applyStakeRewardPrecomputeStep(
 		return saveRewardPrecomputeCursor(meta, metaTxn, plan.cursor)
 	})
 	if err != nil {
-		return false, false, err
+		return rewardPrecomputeApplyResult{err: err}
 	}
-	return done, midRound && !done, nil
+	return rewardPrecomputeApplyResult{
+		done:     done,
+		applied:  applied,
+		midRound: midRound && !done,
+	}
 }
 
 // sameRewardPrecomputeCursor reports whether two stored cursor rows are

@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dtestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -39,6 +40,42 @@ import (
 // chunkedFixtureCredential deterministically derives a unique 28-byte
 // credential or pool-key hash from a domain tag and index, so a multi-pool
 // fixture can mint as many distinct hashes as it needs without collisions.
+// stakeRewardPrecomputeChunkStep processes at most one chunk of pools, as a
+// test driver for the step the background run pipelines. The
+// chunk's reads run in a read transaction, outside rewardPrecomputeWriteMu and
+// without the metadata write connection, so block application is not held off
+// while they run. Only the writes -- outputs, cursor, completion -- run in a
+// short write transaction, which first re-validates under the write mutex
+// everything the reads relied on: the rollback generation, the boundary fence,
+// the snapshot row, and the stored cursor. A step whose validation fails
+// writes nothing. done is true once nothing further should be attempted for
+// this round: Pass 2 is complete, or the round was invalidated by a rollback
+// or claimed by a boundary and the caller must stop.
+func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
+	round *stakeRewardPrecomputeRound,
+) (bool, error) {
+	if round == nil || ls.rewardPrecomputeRoundInvalidated(round) {
+		return true, nil
+	}
+	plan, err := ls.planStakeRewardPrecomputeStepRead(round, nil)
+	if err != nil {
+		return false, err
+	}
+	if plan == nil || plan.done {
+		return true, nil
+	}
+	result := ls.applyStakeRewardPrecomputeStep(round, plan)
+	if result.err != nil {
+		return false, result.err
+	}
+	if result.midRound && ls.rewardPrecomputeChunkHook != nil {
+		ls.rewardPrecomputeChunkHook(
+			plan.cursor.CompletedPools, len(round.poolInputs),
+		)
+	}
+	return result.done, nil
+}
+
 // runChunkedStakeRewardPrecompute runs the chunked precompute for one round
 // and drops the handled flag.
 func (ls *LedgerState) runChunkedStakeRewardPrecompute(
@@ -1014,4 +1051,123 @@ func TestChunkedRewardPrecomputeSkipsWriteWhenCursorMovedDuringRead(
 	stored, err := loadRewardPrecomputeCursor(db.Metadata(), nil, 1)
 	require.NoError(t, err)
 	require.Equal(t, moved, stored)
+}
+
+// TestBoundaryFinishesUnfinishedRoundOutsideRolloverTxn proves the work
+// before the rollover transaction finishes a round the background run left
+// unfinished without holding the write connection across its reads, so the
+// rollover transaction finds a completed round and runs no chunk reads.
+func TestBoundaryFinishesUnfinishedRoundOutsideRolloverTxn(t *testing.T) {
+	t.Parallel()
+	const poolCount = 6
+	ls, db := seedMultiPoolRewardPrecomputeFixture(t, poolCount, 2, 7)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(4, 200, 1_200)
+	require.NoError(t, err)
+	require.True(t, ok)
+	done, err := ls.stakeRewardPrecomputeChunkStep(round)
+	require.NoError(t, err)
+	require.False(t, done)
+
+	reads := 0
+	var writeErr error
+	ls.rewardPrecomputeChunkReadHook = func() {
+		reads++
+		ctx, cancel := context.WithTimeout(
+			context.Background(), 2*time.Second,
+		)
+		defer cancel()
+		if err := ls.db.Transaction(ctx, true).Do(
+			func(*database.Txn) error { return nil },
+		); err != nil && writeErr == nil {
+			writeErr = err
+		}
+	}
+	ls.fenceAndCompleteRewardPrecompute(4, 1_200)
+	require.Equal(t, 2, reads, "the two remaining chunks run before the rollover")
+	require.NoError(
+		t, writeErr,
+		"the write connection must stay free while the chunks read",
+	)
+	cursor, err := loadRewardPrecomputeCursor(db.Metadata(), nil, 1)
+	require.NoError(t, err)
+	require.NotNil(t, cursor)
+	require.True(t, cursor.Done)
+	outputs, err := db.Metadata().GetRewardPoolOutputs(1, nil)
+	require.NoError(t, err)
+	require.Len(t, outputs, poolCount)
+
+	reads = 0
+	ls.rewardPrecomputeChunkReadHook = func() { reads++ }
+	require.NoError(t, ls.db.Transaction(context.Background(), true).Do(
+		func(txn *database.Txn) error {
+			app, ok, err := ls.boundaryStakeRewardApplication(
+				context.Background(), txn, 4, 1_200,
+			)
+			if err != nil {
+				return err
+			}
+			require.True(t, ok)
+			require.NotNil(t, app)
+			return nil
+		},
+	))
+	require.Zero(t, reads, "the rollover must not run chunk reads in its transaction")
+}
+
+// TestChunkedRewardPrecomputePlansAheadWhileWriteTurnIsHeld proves the next
+// chunk is read while the current one waits for its write turn, and that the
+// pipelined run yields the same outputs as stepping one chunk at a time.
+func TestChunkedRewardPrecomputePlansAheadWhileWriteTurnIsHeld(t *testing.T) {
+	t.Parallel()
+	const (
+		snapshotEpoch = uint64(1)
+		potsEpoch     = uint64(3)
+	)
+	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 6, 2, 7)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(4, 200, 1_200)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	reads := make(chan struct{}, 16)
+	ls.rewardPrecomputeChunkReadHook = func() { reads <- struct{}{} }
+	ls.rewardPrecomputeWriteMu.Lock()
+	unlocked := false
+	unlock := func() {
+		if !unlocked {
+			unlocked = true
+			ls.rewardPrecomputeWriteMu.Unlock()
+		}
+	}
+	defer unlock()
+	finished := make(chan error, 1)
+	go func() { finished <- ls.runStakeRewardPrecomputeSteps(round) }()
+	dtestutil.RequireReceive(t, reads, 10*time.Second, "first chunk read")
+	dtestutil.RequireReceive(
+		t, reads, 10*time.Second,
+		"second chunk must be read while the first waits for the writer",
+	)
+	unlock()
+	require.NoError(t, <-finished)
+	pipelined := snapshotRewardPrecomputeOutputs(t, db, snapshotEpoch, potsEpoch)
+	require.Len(t, pipelined.poolOutputs, 6)
+
+	serial, serialDB := seedMultiPoolRewardPrecomputeFixture(t, 6, 2, 7)
+	serial.rewardPrecomputeChunkPoolsOverride = 2
+	serialRound, ok, err := serial.resolveStakeRewardPrecomputeRound(4, 200, 1_200)
+	require.NoError(t, err)
+	require.True(t, ok)
+	for {
+		done, err := serial.stakeRewardPrecomputeChunkStep(serialRound)
+		require.NoError(t, err)
+		if done {
+			break
+		}
+	}
+	require.Equal(
+		t,
+		snapshotRewardPrecomputeOutputs(t, serialDB, snapshotEpoch, potsEpoch),
+		pipelined,
+	)
 }

@@ -8999,7 +8999,11 @@ func (ls *LedgerState) processBlocksFromSource(
 			// including reward application and the governance tally, so
 			// it is timed as its own stage whether it commits or fails.
 			rolloverStart := time.Now()
-			ls.fenceRewardPrecompute()
+			//nolint:contextcheck // reward precompute reads run on the ledger lifecycle context, not the block context
+			ls.fenceAndCompleteRewardPrecompute(
+				snapshotEpoch.EpochId+1,
+				snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
+			)
 			submitRollover := func(op func(*database.Txn) error) error {
 				if untickedClosure != nil {
 					return ls.submitBlockApplyDBTxn(
