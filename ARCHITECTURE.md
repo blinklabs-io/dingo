@@ -8978,17 +8978,29 @@ extends its grace during catch-up, so it does not bound a dynamo that stops
 delivering. When no jumper can be
 elected, no dynamo is elected until a refresh or an admission retries. When
 Genesis selection ends, the next delivered header or refresh disengages CSJ and
-every jumper streams from its last agreed point. The reference's objector
-bisection and its limit of one objector at a time are not implemented: every
-objector streams.
+every jumper streams from its last agreed point. A peer that streams to its
+tip and receives MsgAwaitReply (`csjOnAwaitReply`) is disengaged: it is no
+longer elected dynamo, is not jumped, and keeps streaming as an ordinary
+client, and if it was the dynamo the next one is elected as above. A jumper
+sends no RequestNext and so never awaits; without this rotation it would never
+be idle and the Genesis exit, which needs every ChainSync connection idle,
+could not happen while one was connected. The disengaged peer's await is its
+idle proof; the driver holds no idle notion of its own. The dynamo watchdog
+does not apply to a disengaged peer, and the refresh does not restart one
+without an identity as a jumper. When no candidate can claim an ingress slot
+because every slot is taken, a disengaged peer yields its slot and stays
+connected as an observer, whose await still counts as idle; otherwise a jumper
+that cannot be elected would never stream and Genesis would never end. The
+reference's objector bisection and its limit of one objector at a time are not
+implemented: every objector streams.
 
 Metrics: `dingo_chainsync_csj_jumps_sent_total` (every jump sent, answered or
 not), `dingo_chainsync_csj_jumps_agreed_total` (answers at the jump point the
 selector recorded), `dingo_chainsync_csj_jumps_rejected_total` (every other
 answer; an answer is counted as agreed or rejected, never both), and
-`dingo_chainsync_csj_peers` by `role` (`dynamo`, `jumper`, `objector`). A jump
-whose connection stopped being a jumper while it waited for the connection's
-lock is not sent.
+`dingo_chainsync_csj_peers` by `role` (`dynamo`, `jumper`, `objector`,
+`disengaged`). A jump whose connection stopped being a jumper while it waited
+for the connection's lock is not sent.
 
 #### Anti-flap incumbent pin
 

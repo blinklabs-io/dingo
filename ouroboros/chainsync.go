@@ -834,6 +834,7 @@ func (o *Ouroboros) chainsyncClientAwaitReply(
 		}
 		o.config.ChainsyncObserveAwaitReply(ctx.ConnectionId, point)
 	}
+	o.csjOnAwaitReply(ctx.ConnectionId)
 	if observer {
 		return nil
 	}

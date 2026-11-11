@@ -167,6 +167,13 @@ type chainsyncJumping struct {
 	// without a protocol transition.
 	streamers map[ouroboros.ConnectionId]struct{}
 	objectors map[ouroboros.ConnectionId]struct{}
+	// disengaged holds peers that sent MsgAwaitReply while streaming: they
+	// reached the tip of their chain. They stay connected and stream as any
+	// client does, but are never elected dynamo again and are not jumped.
+	// Each one's await is also its idle proof for the Genesis exit, which
+	// is why a jumper, that sends no RequestNext and so is never answered
+	// with one, is elected dynamo in turn until it too reaches its tip.
+	disengaged map[ouroboros.ConnectionId]struct{}
 
 	// progressAt is when the dynamo last delivered a header, or the local
 	// chain last advanced, or the dynamo was elected. progressMark is the
@@ -192,11 +199,12 @@ func newChainsyncJumping(
 	registerer prometheus.Registerer,
 ) *chainsyncJumping {
 	j := &chainsyncJumping{
-		cfg:       cfg,
-		jumpers:   make(map[ouroboros.ConnectionId]*csjJumper),
-		streamers: make(map[ouroboros.ConnectionId]struct{}),
-		objectors: make(map[ouroboros.ConnectionId]struct{}),
-		now:       time.Now,
+		cfg:        cfg,
+		jumpers:    make(map[ouroboros.ConnectionId]*csjJumper),
+		streamers:  make(map[ouroboros.ConnectionId]struct{}),
+		objectors:  make(map[ouroboros.ConnectionId]struct{}),
+		disengaged: make(map[ouroboros.ConnectionId]struct{}),
+		now:        time.Now,
 	}
 	if registerer != nil {
 		factory := promauto.With(registerer)
@@ -215,7 +223,7 @@ func newChainsyncJumping(
 			}),
 			peers: factory.NewGaugeVec(prometheus.GaugeOpts{
 				Name: "dingo_chainsync_csj_peers",
-				Help: "ChainSync Jumping peers by role: dynamo, jumper, objector",
+				Help: "ChainSync Jumping peers by role: dynamo, jumper, objector, disengaged",
 			}, []string{"role"}),
 		}
 	}
@@ -261,6 +269,7 @@ func (j *chainsyncJumping) publishGaugesLocked() {
 	j.metrics.peers.WithLabelValues("dynamo").Set(dynamo)
 	j.metrics.peers.WithLabelValues("jumper").Set(float64(len(j.jumpers)))
 	j.metrics.peers.WithLabelValues("objector").Set(float64(len(j.objectors)))
+	j.metrics.peers.WithLabelValues("disengaged").Set(float64(len(j.disengaged)))
 }
 
 func (j *chainsyncJumping) count(c func(*csjMetrics) prometheus.Counter) {
@@ -411,6 +420,7 @@ func (o *Ouroboros) csjForget(connId ouroboros.ConnectionId) {
 	delete(j.jumpers, connId)
 	delete(j.streamers, connId)
 	delete(j.objectors, connId)
+	delete(j.disengaged, connId)
 	wasDynamo := j.hasDynamo && j.dynamo == connId
 	if wasDynamo {
 		j.hasDynamo = false
@@ -505,6 +515,7 @@ func (o *Ouroboros) csjRotateDynamo() {
 	}
 	candidates := j.csjElectionOrderLocked(best)
 	j.mu.Unlock()
+	starved := false
 	for _, c := range candidates {
 		if !j.identified(c.connId) ||
 			!o.shouldPublishChainsyncToLedger(c.connId) {
@@ -515,17 +526,64 @@ func (o *Ouroboros) csjRotateDynamo() {
 				o.csjLogRotation(c.connId, false)
 				return
 			}
+			starved = true
 			continue
 		}
 		resume, ok := o.csjPromoteJumper(c.connId)
 		if !ok {
+			starved = true
 			continue
 		}
 		o.csjLogRotation(c.connId, true)
 		o.csjStartStreaming(c.connId, resume, "dynamo")
 		return
 	}
+	if starved && o.csjYieldDisengagedSlot() {
+		o.csjRotateDynamo()
+		return
+	}
 	o.csjReleaseUnidentified()
+}
+
+// csjYieldDisengagedSlot moves one disengaged peer that holds an ingress slot
+// to observer, so an elected dynamo can claim the slot, and reports whether
+// it did. A disengaged peer has streamed to its tip, and an observer's await
+// still counts as idle for the Genesis exit; but a jumper that cannot claim a
+// slot is never elected, never streams, and so never becomes idle. Each call
+// demotes at most one peer, so the retry that follows is bounded by their
+// number.
+func (o *Ouroboros) csjYieldDisengagedSlot() bool {
+	j := o.csj
+	if o.chainsyncState == nil {
+		return false
+	}
+	j.mu.Lock()
+	if j.hasDynamo {
+		j.mu.Unlock()
+		return false
+	}
+	ids := make([]ouroboros.ConnectionId, 0, len(j.disengaged))
+	for id := range j.disengaged {
+		ids = append(ids, id)
+	}
+	j.mu.Unlock()
+	slices.SortFunc(ids, compareConnIds)
+	for _, id := range ids {
+		observer, tracked := o.chainsyncState.ClientObservabilityOnly(id)
+		if !tracked || observer {
+			continue
+		}
+		if !o.chainsyncState.SetClientObservabilityOnly(id, true) {
+			continue
+		}
+		o.config.Logger.Info(
+			"chainsync jumping: disengaged peer yielded its ingress slot",
+			"component", "ouroboros",
+			"connection_id", id.String(),
+		)
+		return true
+	}
+	return false
 }
 
 // csjPromoteStreamer makes streamer the dynamo and claims it an ingress slot.
@@ -670,6 +728,7 @@ func (o *Ouroboros) csjDisengage() {
 	clear(j.jumpers)
 	clear(j.streamers)
 	clear(j.objectors)
+	clear(j.disengaged)
 	j.hasDynamo = false
 	j.publishGaugesLocked()
 	j.mu.Unlock()
@@ -682,6 +741,47 @@ func (o *Ouroboros) csjDisengage() {
 	}
 	for _, r := range resumes {
 		o.csjStartStreaming(r.connId, r.points, "disengage")
+	}
+}
+
+// csjOnAwaitReply runs when a streaming client received MsgAwaitReply: the
+// peer has sent every header up to its tip. As in the reference's
+// onAwaitReply, a dynamo that did so is disengaged and the next dynamo is
+// elected, so that every peer streams to its tip in turn; a streamer, an
+// objector included, is disengaged without an election. The peer's idle
+// proof reaches chain selection separately. Without this a jumper would
+// never become idle, and the Genesis exit, which needs every ChainSync
+// connection idle, could never happen while one was connected.
+func (o *Ouroboros) csjOnAwaitReply(connId ouroboros.ConnectionId) {
+	j := o.csj
+	if j == nil || !j.cfg.Active() {
+		return
+	}
+	j.mu.Lock()
+	wasDynamo := j.hasDynamo && j.dynamo == connId
+	_, streamer := j.streamers[connId]
+	if !wasDynamo && !streamer {
+		j.mu.Unlock()
+		return
+	}
+	if wasDynamo {
+		j.hasDynamo = false
+	}
+	delete(j.streamers, connId)
+	delete(j.objectors, connId)
+	j.disengaged[connId] = struct{}{}
+	j.publishGaugesLocked()
+	j.mu.Unlock()
+	o.config.Logger.Info(
+		"chainsync jumping: peer reached its tip, disengaged",
+		"component", "ouroboros",
+		"connection_id", connId.String(),
+		"was_dynamo", wasDynamo,
+	)
+	if wasDynamo {
+		// An election claims an ingress slot and signals the new dynamo's
+		// client, which a protocol callback must not wait for.
+		o.csjGoRound(o.csjRotateDynamo)
 	}
 }
 
@@ -807,7 +907,9 @@ func (o *Ouroboros) csjRefresh() {
 // do: no witness can vouch for their headers, so streaming them only
 // downloads headers to hold. Each is stopped, which drains its session or
 // closes the connection, and started again, as a jumper while a dynamo
-// exists. An objector streams on purpose and is left alone.
+// exists. An objector streams on purpose and is left alone, and so is a
+// disengaged peer, which awaited at its tip and would never await again as a
+// jumper.
 func (o *Ouroboros) csjAdoptUnidentified() {
 	j := o.csj
 	if o.chainsyncState == nil || o.connManager == nil {
@@ -822,12 +924,13 @@ func (o *Ouroboros) csjAdoptUnidentified() {
 		_, jumper := j.jumpers[id]
 		_, streamer := j.streamers[id]
 		_, objector := j.objectors[id]
+		_, disengaged := j.disengaged[id]
 		dynamo := hasDynamo && j.dynamo == id
 		j.mu.Unlock()
 		if !hasDynamo {
 			return
 		}
-		if jumper || streamer || objector || dynamo {
+		if jumper || streamer || objector || disengaged || dynamo {
 			continue
 		}
 		o.csjGo(func(ctx context.Context) {

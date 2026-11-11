@@ -263,9 +263,14 @@ Known differences from the reference's Genesis State Machine:
 - **Rollback historicity is not checked.** The reference also judges the oldest
   rolled-back header on MsgRollBackward; Dingo checks the delivered tip at idle
   only.
-- **ChainSync Jumping's idle disengagement.** With Jumping the reference counts
-  a jumper as idle when disengaged; Dingo has no Jumping, so every connection
-  must itself report idle.
+- **ChainSync Jumping's idle disengagement.** A jumper sends no RequestNext, so
+  it never receives MsgAwaitReply and never reports idle. As in the reference's
+  `onAwaitReply`, a dynamo that receives MsgAwaitReply is disengaged and the
+  next dynamo is elected, so every jumper streams to its tip in turn and
+  reports idle itself; the exit needs the dynamo and every jumper each to have
+  awaited. A disengaged peer yields its ingress slot to the next dynamo when
+  every slot is taken. The reference's earlier trigger, a header equal to the
+  peer's tip (`onTipIsHeader`), is not implemented; the exit is unaffected.
 
 Specifically **not** implemented:
 

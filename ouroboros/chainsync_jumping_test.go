@@ -77,6 +77,22 @@ type csjPeer struct {
 	// intersects receives the points of every FindIntersect the peer
 	// answered.
 	intersects chan []ocommon.Point
+	// requestNexts receives the server handle of every RequestNext the peer
+	// has not answered.
+	requestNexts chan *ochainsync.Server
+}
+
+// awaitReply makes the peer answer its pending RequestNext with MsgAwaitReply,
+// as a server does once it has sent every header up to its tip.
+func (p *csjPeer) awaitReply(t *testing.T) {
+	t.Helper()
+	server := testutil.RequireReceive(
+		t,
+		p.requestNexts,
+		5*time.Second,
+		"pending RequestNext",
+	)
+	require.NoError(t, server.AwaitReply())
 }
 
 func (p *csjPeer) holds(point ocommon.Point) bool {
@@ -193,12 +209,15 @@ func newCsjHarness(t *testing.T, enabled bool) *csjHarness {
 }
 
 // addPeer connects an outbound peer whose server answers FindIntersect from
-// its own chain and parks RequestNext.
+// its own chain and leaves RequestNext unanswered until awaitReply.
 func (h *csjHarness) addPeer(name string, tipBlock uint64) *csjPeer {
 	t := h.t
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	peer := &csjPeer{intersects: make(chan []ocommon.Point, 64)}
+	peer := &csjPeer{
+		intersects:   make(chan []ocommon.Point, 64),
+		requestNexts: make(chan *ochainsync.Server, 64),
+	}
 	peer.tipBlock.Store(tipBlock)
 	serverCfg := ochainsync.NewConfig(
 		ochainsync.WithFindIntersectFunc(
@@ -227,9 +246,12 @@ func (h *csjHarness) addPeer(name string, tipBlock uint64) *csjPeer {
 				return best, tip, nil
 			},
 		),
+		// A peer behind its tip is still streaming headers and has no
+		// AwaitReply to send; one that reached it replies on awaitReply.
 		ochainsync.WithRequestNextFunc(
 			func(ctx ochainsync.CallbackContext) error {
-				return ctx.Server.AwaitReply()
+				peer.requestNexts <- ctx.Server
+				return nil
 			},
 		),
 	)
