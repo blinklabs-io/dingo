@@ -748,3 +748,69 @@ func TestChainsyncResyncReintersectEndsOldCursorState(t *testing.T) {
 	require.Greater(t, f.o.chainsyncCursorEpoch(f.connId), epoch,
 		"the new cursor must be distinguishable from the old one")
 }
+
+// A resync condemns the client's cursor, but the replies to requests already
+// pipelined still arrive while the re-intersect drains them. A close used to
+// discard them with the connection. Processed instead, each one is verified
+// and fails in the ledger the way the header that triggered the resync did,
+// under the ledger's chainsync lock, and a rollback among them would be
+// applied to the chain before the new session opens.
+func TestDrainedRepliesOfReintersectingClientAreDropped(t *testing.T) {
+	t.Parallel()
+	f := newPromotionGapFixture(t)
+	f.o.chainsyncState.RemoveClientConnId(f.fillers[0])
+	f.rollback(t, ocommon.Point{})
+	for {
+		select {
+		case <-f.ledgerCh:
+			continue
+		default:
+		}
+		break
+	}
+	client := &ochainsync.Client{}
+	cb := ochainsync.CallbackContext{ConnectionId: f.conn, Client: client}
+	f.o.chainsyncReintersectMu.Lock()
+	f.o.chainsyncReintersecting[f.conn] = &chainsyncReintersectRun{
+		client: client,
+	}
+	f.o.chainsyncReintersectMu.Unlock()
+
+	require.NoError(t, f.o.chainsyncClientRollForwardAt(
+		cb, 0, newTestBlockHeader(100, 1, 0xaa), ochainsync.Tip{
+			Point:       ocommon.NewPoint(200, []byte("advertised")),
+			BlockNumber: 2,
+		}, time.Now(),
+	))
+	require.NoError(t, f.o.chainsyncClientRollBackward(
+		cb, ocommon.NewPoint(50, []byte("old-cursor")), ochainsync.Tip{
+			Point:       ocommon.NewPoint(200, []byte("advertised")),
+			BlockNumber: 2,
+		},
+	))
+
+	require.EqualValues(t, 0, f.verified.Load(),
+		"a reply of the condemned cursor must not be verified")
+	select {
+	case evt := <-f.ledgerCh:
+		t.Fatalf("a reply of the condemned cursor reached the ledger: %+v",
+			evt.Data)
+	default:
+	}
+
+	// Once the peer has agreed to the new intersection the client's replies
+	// belong to the new cursor.
+	f.o.chainsyncReintersectMu.Lock()
+	f.o.chainsyncReintersecting[f.conn].settled = true
+	f.o.chainsyncReintersectMu.Unlock()
+	require.NoError(t, f.o.chainsyncClientRollForwardAt(
+		cb, 0, newTestBlockHeader(100, 1, 0xaa), ochainsync.Tip{
+			Point:       ocommon.NewPoint(200, []byte("advertised")),
+			BlockNumber: 2,
+		}, time.Now(),
+	))
+	evt := testutil.RequireReceive(
+		t, f.ledgerCh, 5*time.Second, "the new cursor's header must be ingested",
+	)
+	require.NotNil(t, evt.Data.(ledger.ChainsyncEvent).BlockHeader)
+}

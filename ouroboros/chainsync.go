@@ -1814,6 +1814,9 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) (err error) {
+	if o.chainsyncCursorCondemned(ctx) {
+		return nil
+	}
 	var clientSession chainsync.ClientSessionToken
 	if o.chainsyncState != nil {
 		clientSession = o.chainsyncState.ClientSession(ctx.ConnectionId)
@@ -2110,6 +2113,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 ) (err error) {
 	switch v := blockData.(type) {
 	case gledger.BlockHeader:
+		if o.chainsyncCursorCondemned(ctx) {
+			return nil
+		}
 		var clientSession chainsync.ClientSessionToken
 		if o.chainsyncState != nil {
 			clientSession = o.chainsyncState.ClientSession(ctx.ConnectionId)
@@ -3621,6 +3627,24 @@ func (o *Ouroboros) settleReintersectedCursor(
 	delete(o.deferredHeaderRecovery, connId)
 	o.deferredHeaderRecoveryMu.Unlock()
 	o.forgetAcceptedHeaderTip(connId)
+}
+
+// chainsyncCursorCondemned reports whether the client that delivered a reply
+// is being re-intersected and has not yet agreed to the new intersection. Its
+// replies until then answer requests pipelined on the cursor the resync gave
+// up. Closing the connection used to discard them; they are dropped here
+// before any verification or ledger work, and a rollback among them is not
+// applied.
+func (o *Ouroboros) chainsyncCursorCondemned(
+	ctx ochainsync.CallbackContext,
+) bool {
+	if ctx.Client == nil {
+		return false
+	}
+	o.chainsyncReintersectMu.Lock()
+	defer o.chainsyncReintersectMu.Unlock()
+	run := o.chainsyncReintersecting[ctx.ConnectionId]
+	return run != nil && run.client == ctx.Client && !run.settled
 }
 
 // chainsyncCursorEpoch counts connId's in-place re-intersects. A callback
