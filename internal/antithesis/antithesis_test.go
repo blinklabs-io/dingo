@@ -17,18 +17,12 @@ package antithesis_test
 import (
 	"testing"
 
-	"github.com/antithesishq/antithesis-sdk-go/assert"
-
 	"github.com/blinklabs-io/dingo/internal/antithesis"
 )
 
-// TestGatedAssertion shows the supported call-site shape: the SDK assert call
-// keeps its literal message and sits behind the Enabled constant. Outside the
-// Antithesis environment the SDK falls back to a local no-op handler.
-func TestGatedAssertion(t *testing.T) {
+// TestSetupCompleteIsSafeToCall covers both builds: without the tag it is a
+// no-op, with the tag the SDK falls back to a local handler outside Antithesis.
+func TestSetupCompleteIsSafeToCall(t *testing.T) {
 	t.Parallel()
-	if antithesis.Enabled {
-		assert.Always(true, "shim gated always", map[string]any{"k": "v"})
-	}
 	antithesis.SetupComplete(nil)
 }

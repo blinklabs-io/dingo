@@ -18,15 +18,26 @@
 // argument of every assert call to be a string literal at the call site: the
 // instrumentor builds its assertion catalog from those literals, and the
 // message names the test property. A forwarding wrapper passes a variable, so
-// its callers would never be cataloged. Call sites therefore import the SDK's
-// assert package directly and gate on Enabled, which is a constant, so the
-// compiler drops the block in default builds:
+// its callers would never be cataloged.
 //
-//	if antithesis.Enabled {
-//		assert.Always(ok, "ledger tip never moves backwards", details)
+// Importing the SDK also initializes it, and that must not happen in default
+// builds. Put each assertion in a small file that carries the antithesis build
+// tag and calls the SDK assert package directly with a literal message, and
+// give it a counterpart with the opposite tag that does nothing:
+//
+//	// tip_antithesis.go
+//	//go:build antithesis
+//
+//	func assertTipMonotonic(ok bool, d map[string]any) {
+//		assert.Always(ok, "ledger tip never moves backwards", d)
 //	}
 //
+//	// tip_noop.go
+//	//go:build !antithesis
+//
+//	func assertTipMonotonic(bool, map[string]any) {}
+//
 // Built with the "antithesis" tag, Enabled is true and SetupComplete reaches
-// the SDK's lifecycle package. Without the tag, Enabled is false and
-// SetupComplete does nothing.
+// the SDK's lifecycle package. Without the tag, Enabled is false, SetupComplete
+// does nothing, and the SDK is not imported.
 package antithesis

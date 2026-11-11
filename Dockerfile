@@ -30,7 +30,8 @@ RUN version=v0.8.0 && \
 RUN make mod-tidy
 RUN mkdir -p /antithesis
 # Create instrumented code in /antithesis
-RUN `go env GOPATH`/bin/antithesis-go-instrumentor /code /antithesis
+# Scan with the same tags as the build so tag-selected assertions are cataloged
+RUN GOFLAGS="-tags=dingo_extra_plugins,antithesis" `go env GOPATH`/bin/antithesis-go-instrumentor /code /antithesis
 WORKDIR /antithesis/customer
 RUN make CGO_ENABLED=1 BUILD_TAGS="dingo_extra_plugins antithesis" build
 
