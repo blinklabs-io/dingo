@@ -1259,6 +1259,8 @@ type stakeRowState struct {
 	ref models.StakeCredentialRef
 	// dbID is the row's id in the table, 0 when there is none.
 	dbID int64
+	// dbPool is the row's pool_key_hash as stored, nil for NULL.
+	dbPool []byte
 	// id is the row's id after the replayed blocks, 0 when they deleted it.
 	id       int64
 	hasTotal bool
@@ -1422,7 +1424,7 @@ func stakeKeyValues(n int) string {
 // or dropped for catch-up. TestBatchUtxoOverlayStatementPlans pins both.
 func overlayStakeRowsQuery(n int) string {
 	return `-- name: BatchOverlayRewardLiveStakeRows :many
-SELECT r.credential_tag, r.staking_key, r.id, r.utxo_stake
+SELECT r.credential_tag, r.staking_key, r.id, r.utxo_stake, r.pool_key_hash
 FROM (VALUES ` + stakeKeyValues(n) + `) AS k
 CROSS JOIN reward_live_stake AS r INDEXED BY idx_reward_live_stake_cred
   ON r.credential_tag = k.column1 AND r.staking_key = k.column2`
@@ -1478,12 +1480,13 @@ func scanStakeRows(
 	defer rows.Close()
 	for rows.Next() {
 		var (
-			tag int64
-			key []byte
-			id  int64
-			raw sql.NullString
+			tag  int64
+			key  []byte
+			id   int64
+			raw  sql.NullString
+			pool []byte
 		)
-		if err := rows.Scan(&tag, &key, &id, &raw); err != nil {
+		if err := rows.Scan(&tag, &key, &id, &raw, &pool); err != nil {
 			return err
 		}
 		st, ok := states[models.NewStakeCredentialRef(uint8(tag), key).MapKey()]
@@ -1491,8 +1494,9 @@ func scanStakeRows(
 			continue
 		}
 		st.dbID = id
+		st.dbPool = pool
 		st.id = id
-		// An empty total is no baseline, as in currentCredentialUtxoStake:
+		// An empty total is no baseline, as in priorLiveStake:
 		// the per-row path re-sums it but keeps the row.
 		if raw.Valid && raw.String != "" {
 			st.utxo, err = parseUint64(
@@ -1546,6 +1550,8 @@ const (
 	// reward_live_stake row; stakeRowUpdateColumns of one in-place update.
 	stakeRowInsertColumns = 11
 	stakeRowUpdateColumns = 9
+	// stakeRowKeptPoolColumns is stakeRowUpdateColumns without the pool.
+	stakeRowKeptPoolColumns = 8
 )
 
 // writeStakeRowStates writes each credential's replayed row: rows the
@@ -1561,7 +1567,11 @@ func writeStakeRowStates(
 		deletes []any
 		inserts []any
 		updates []any
-		written int64
+		// keptPool holds in-place updates whose pool_key_hash is unchanged.
+		// They leave it out of the SET list so idx_reward_live_stake_pool_order
+		// is not rewritten; see applyRewardLiveStakeAggregateWithPrior.
+		keptPool []any
+		written  int64
 	)
 	for _, st := range ordered {
 		replaced := st.id == 0 || st.id != st.dbID
@@ -1594,6 +1604,10 @@ func writeStakeRowStates(
 			models.RewardStakeCalculationVersion,
 		}
 		if !replaced {
+			if samePool(st.dbPool, row.pool) {
+				keptPool = append(append(keptPool, st.id), values[1:]...)
+				continue
+			}
 			updates = append(append(updates, st.id), values...)
 			continue
 		}
@@ -1635,6 +1649,22 @@ UPDATE reward_live_stake SET
     updated_slot = v.column8, calculation_version = v.column9
 FROM (VALUES ` + strings.TrimSuffix(strings.Repeat(
 				"(?, ?, ?, ?, ?, ?, ?, ?, ?), ", rows), ", ") + `) AS v
+WHERE reward_live_stake.id = v.column1`
+		},
+	); err != nil {
+		return 0, overlayWriteError("update reward live stake rows", err)
+	}
+	if err := execChunked(
+		ctx, db, keptPool, stakeRowKeptPoolColumns, func(rows int) string {
+			return `-- name: BatchOverlayUpdateRewardLiveStakeKeepPool :exec
+UPDATE reward_live_stake SET
+    utxo_stake = v.column2,
+    reward_stake = v.column3, total_stake = v.column4,
+    registered = v.column5, pool_delegation_slot = v.column6,
+    pool_delegation_block_index = 0, pool_delegation_cert_index = 0,
+    updated_slot = v.column7, calculation_version = v.column8
+FROM (VALUES ` + strings.TrimSuffix(strings.Repeat(
+				"(?, ?, ?, ?, ?, ?, ?, ?), ", rows), ", ") + `) AS v
 WHERE reward_live_stake.id = v.column1`
 		},
 	); err != nil {
