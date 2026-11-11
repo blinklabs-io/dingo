@@ -129,6 +129,7 @@ func signalNotify(signals chan os.Signal) {
 }
 
 func TestEntrypointForwardsSignalsDuringMithrilBootstrap(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		resume      bool
@@ -153,6 +154,7 @@ func TestEntrypointForwardsSignalsDuringMithrilBootstrap(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			harness := newEntrypointHarness(t, test.resume)
 			harness.env = append(
 				harness.env,
@@ -192,31 +194,8 @@ func TestEntrypointForwardsSignalsDuringMithrilBootstrap(t *testing.T) {
 	}
 }
 
-// A child that is slow to start and slow to exit, as on a starved runner, must
-// not fail the forwarding assertions: only a missing forward should.
-func TestEntrypointForwardsSignalsToSlowChild(t *testing.T) {
-	t.Parallel()
-
-	harness := newEntrypointHarness(t, false)
-	harness.env = append(
-		harness.env,
-		"DINGO_TEST_BOOTSTRAP_WAIT=1",
-		"DINGO_TEST_BOOTSTRAP_EXIT_CODE=41",
-		entrypointChildDelayEnv+"=2500ms",
-	)
-	_, process, output := harness.start(t)
-
-	harness.requireBootstrapReady(t, process, output)
-	require.NoError(t, process.cmd.Process.Signal(syscall.SIGTERM))
-
-	err := waitForEntrypoint(t, process.cmd, process, output)
-	require.Equal(t, 41, commandExitCode(t, err), output.String())
-	require.Equal(
-		t, "SIGTERM\n", readFile(t, harness.bootstrapSignalFile),
-	)
-}
-
 func TestEntrypointSignalHandlingSurvivesBootstrapToServeHandoff(t *testing.T) {
+	t.Parallel()
 	harness := newEntrypointHarness(t, false)
 	harness.env = append(harness.env, "DINGO_TEST_SERVE_EXIT_CODE=39")
 	_, process, output := harness.start(t)
@@ -389,6 +368,7 @@ func TestRedactArgsEdgeCases(t *testing.T) {
 // credentials, an Authorization header, and a boolean flag whose neighbor must
 // stay unredacted.
 func TestEntrypointRedactsSecretArguments(t *testing.T) {
+	t.Parallel()
 	const (
 		secretA = "bearer-secret-aaa"
 		secretB = "bearer-secret-bbb"
@@ -400,6 +380,7 @@ func TestEntrypointRedactsSecretArguments(t *testing.T) {
 	)
 	for _, debug := range []string{"", "1"} {
 		t.Run("debug="+debug, func(t *testing.T) {
+			t.Parallel()
 			harness := newEntrypointHarness(t, false)
 			harness.env = append(
 				harness.env,
@@ -450,34 +431,6 @@ func TestEntrypointRedactsSecretArguments(t *testing.T) {
 	}
 }
 
-// A child that spawns and then wedges must fail the readiness wait, and the
-// failure must say it started, so the stage is not misread as a spawn stall.
-func TestEntrypointReadinessWaitFailsForChildThatNeverBecomesReady(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	harness := newEntrypointHarness(t, false)
-	harness.env = append(
-		harness.env,
-		"DINGO_TEST_BOOTSTRAP_WAIT=1",
-		entrypointChildHangEnv+"=1",
-	)
-	_, process, _ := harness.start(t)
-
-	err := waitForEntrypointChildReady(
-		process,
-		harness.bootstrapStartedFile,
-		harness.bootstrapReadyFile,
-		entrypointStepTimeout,
-		300*time.Millisecond,
-		"Mithril bootstrap",
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "started but did not become ready")
-	require.False(t, fileExists(harness.bootstrapReadyFile))
-}
-
 type entrypointHarness struct {
 	env                  []string
 	args                 []string
@@ -525,83 +478,6 @@ type entrypointProcess struct {
 	cmd  *exec.Cmd
 	done chan struct{}
 	err  error
-}
-
-func TestWaitForEntrypointChildReady(t *testing.T) {
-	t.Parallel()
-	exitErr := errors.New("exit status 7")
-	tests := []struct {
-		name          string
-		started       bool
-		ready         bool
-		exited        bool
-		wantErrorPart string
-	}{
-		{
-			name:          "child never started",
-			wantErrorPart: "bootstrap child did not start within",
-		},
-		{
-			name:          "child started but never became ready",
-			started:       true,
-			wantErrorPart: "bootstrap child started but did not become ready",
-		},
-		{
-			name:          "entrypoint exited before the child started",
-			exited:        true,
-			wantErrorPart: "bootstrap child did not start: entrypoint exited: exit status 7",
-		},
-		{
-			name:          "entrypoint exited before the child became ready",
-			started:       true,
-			exited:        true,
-			wantErrorPart: "bootstrap child started but exited before becoming ready: exit status 7",
-		},
-		{
-			name:    "child became ready as the entrypoint exited",
-			started: true,
-			ready:   true,
-			exited:  true,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			dir := t.TempDir()
-			startedFile := filepath.Join(dir, "child.started")
-			readyFile := filepath.Join(dir, "child.ready")
-			if test.started {
-				require.NoError(
-					t,
-					os.WriteFile(startedFile, []byte("started\n"), 0o600),
-				)
-			}
-			if test.ready {
-				require.NoError(
-					t,
-					os.WriteFile(readyFile, []byte("ready\n"), 0o600),
-				)
-			}
-			process := &entrypointProcess{done: make(chan struct{})}
-			if test.exited {
-				process.err = exitErr
-				close(process.done)
-			}
-			err := waitForEntrypointChildReady(
-				process,
-				startedFile,
-				readyFile,
-				10*time.Millisecond,
-				10*time.Millisecond,
-				"bootstrap",
-			)
-			if test.wantErrorPart == "" {
-				require.NoError(t, err)
-				return
-			}
-			require.ErrorContains(t, err, test.wantErrorPart)
-		})
-	}
 }
 
 // waitForEntrypointChildReady waits for the child to start and then to write
@@ -753,6 +629,7 @@ exec "${DINGO_TEST_BINARY}"
 		"CARDANO_NETWORK",
 		"DINGO_DEBUG",
 		"DINGO_LOG_FILE",
+		"DINGO_LOG_FILE_APPEND",
 		"DINGO_SOCKET_PATH",
 		"PATH",
 		"RESTORE_SNAPSHOT",

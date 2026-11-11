@@ -130,6 +130,7 @@ func TestLatestLedgerPrimaryChainAncestorFindsNilNonceAppliedPoint(
 		t.Context(),
 		diverged,
 		false,
+		true,
 	)
 	require.NoError(t, err)
 	require.True(t, ok)

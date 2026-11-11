@@ -24,6 +24,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 const (
@@ -71,6 +73,7 @@ type BlobBlockIterator struct {
 	batchIdx          int
 	currentSlot       uint64
 	lastCanonicalSlot uint64
+	lastCanonicalHash []byte
 	hasCanonicalSlot  bool
 	exhausted         bool
 	closed            bool
@@ -102,13 +105,15 @@ func (d *Database) BlocksFromSlot(startSlot uint64) *BlobBlockIterator {
 }
 
 // CanonicalBlocksFromIndex returns an iterator over the primary-chain block
-// index starting at startIndex. previousSlot seeds strict slot ordering for a
-// resumed traversal. When endSlot is set, entries above it are audited without
+// index starting at startIndex. previous, the last block a resumed traversal
+// processed, seeds slot ordering: each block's slot must exceed the previous
+// block's, except that a Byron epoch boundary block shares its slot with the
+// block that follows it. When endSlot is set, entries above it are audited without
 // fetching their block bodies; iteration still continues through index EOF.
 func (d *Database) CanonicalBlocksFromIndex(
 	ctx context.Context,
 	startIndex uint64,
-	previousSlot *uint64,
+	previous *ocommon.Point,
 	endSlot *uint64,
 ) (*BlobBlockIterator, error) {
 	ctx = nonNilContext(ctx)
@@ -121,12 +126,9 @@ func (d *Database) CanonicalBlocksFromIndex(
 		canonical:  true,
 		startIndex: startIndex,
 	}
-	if previousSlot != nil {
-		if *previousSlot == ^uint64(0) {
-			return nil, errors.New("previous canonical slot overflows resume position")
-		}
-		ret.startSlot = *previousSlot + 1
-		ret.lastCanonicalSlot = *previousSlot
+	if previous != nil {
+		ret.lastCanonicalSlot = previous.Slot
+		ret.lastCanonicalHash = append([]byte(nil), previous.Hash...)
 		ret.hasCanonicalSlot = true
 	}
 	if endSlot != nil {
@@ -549,12 +551,21 @@ func (it *BlobBlockIterator) fetchCanonicalBlock(
 	entry.slot = point.Slot
 	entry.hash = point.Hash
 	if it.hasCanonicalSlot && entry.slot <= it.lastCanonicalSlot {
-		return entry, nil, types.BlockMetadata{}, false, fmt.Errorf(
-			"canonical block index %d points to non-increasing slot %d after slot %d",
-			entry.index, entry.slot, it.lastCanonicalSlot,
-		)
+		follows, err := it.followsBoundaryBlock(ctx, store, txn, entry)
+		if err != nil {
+			return entry, nil, types.BlockMetadata{}, false, fmt.Errorf(
+				"canonical block index %d: %w", entry.index, err,
+			)
+		}
+		if !follows {
+			return entry, nil, types.BlockMetadata{}, false, fmt.Errorf(
+				"canonical block index %d points to non-increasing slot %d after slot %d",
+				entry.index, entry.slot, it.lastCanonicalSlot,
+			)
+		}
 	}
 	it.lastCanonicalSlot = entry.slot
+	it.lastCanonicalHash = entry.hash
 	it.hasCanonicalSlot = true
 	if it.hasEndSlot && entry.slot > it.endSlot {
 		return entry, nil, types.BlockMetadata{}, false, nil
@@ -566,6 +577,66 @@ func (it *BlobBlockIterator) fetchCanonicalBlock(
 		)
 	}
 	return entry, cbor, meta, true, nil
+}
+
+// followsBoundaryBlock reports whether entry legitimately shares the previous
+// canonical block's slot: the previous block is a Byron epoch boundary block
+// and entry is a different block that is not one. Only the two metadata
+// values are read, so an audited tail entry above endSlot is checked without
+// fetching its body.
+func (it *BlobBlockIterator) followsBoundaryBlock(
+	ctx context.Context,
+	store blob.BlobStore,
+	txn types.Txn,
+	entry blobBlockEntry,
+) (bool, error) {
+	if entry.slot != it.lastCanonicalSlot ||
+		bytes.Equal(entry.hash, it.lastCanonicalHash) {
+		return false, nil
+	}
+	previousType, err := canonicalBlockType(
+		ctx, store, txn, it.lastCanonicalSlot, it.lastCanonicalHash,
+	)
+	if err != nil || previousType != byron.BlockTypeByronEbb {
+		return false, err
+	}
+	entryType, err := canonicalBlockType(
+		ctx, store, txn, entry.slot, entry.hash,
+	)
+	if err != nil {
+		return false, err
+	}
+	return entryType != byron.BlockTypeByronEbb, nil
+}
+
+// maxCanonicalBlockMetadataSize bounds a block metadata read during the
+// boundary-block check. Both encodings hold four integers and a previous hash
+// of at most types.BlockMetadataPrevHashMaxLen bytes, well under this.
+const maxCanonicalBlockMetadataSize = 256
+
+func canonicalBlockType(
+	ctx context.Context,
+	store blob.BlobStore,
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) (uint, error) {
+	key := types.BlockBlobMetadataKey(types.BlockBlobKey(slot, hash))
+	value, err := getBlobContext(
+		ctx, store, txn, key, maxCanonicalBlockMetadataSize,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"reading metadata for block at slot %d: %w", slot, err,
+		)
+	}
+	meta, err := types.UnmarshalBlockMetadata(value)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"decoding metadata for block at slot %d: %w", slot, err,
+		)
+	}
+	return meta.Type, nil
 }
 
 // fetchBlock retrieves the raw CBOR bytes and metadata for a block.

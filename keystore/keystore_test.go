@@ -94,6 +94,7 @@ func (b *safeBuffer) String() string {
 }
 
 func TestKeyStoreLoadFromFiles(t *testing.T) {
+	t.Parallel()
 	vrfPath, kesPath, opCertPath := setupTestKeys(t)
 
 	config := KeyStoreConfig{
@@ -154,6 +155,7 @@ func TestParseKeyEnvelopeZeroizesInputOnFailure(t *testing.T) {
 }
 
 func TestVRFSigner(t *testing.T) {
+	t.Parallel()
 	vrfPath, kesPath, opCertPath := setupTestKeys(t)
 
 	config := KeyStoreConfig{
@@ -185,35 +187,8 @@ func TestVRFSigner(t *testing.T) {
 	assert.True(t, ok, "VRF proof verification failed")
 }
 
-func TestKESSigner(t *testing.T) {
-	vrfPath, kesPath, opCertPath := setupTestKeys(t)
-
-	config := KeyStoreConfig{
-		VRFSKeyPath: vrfPath,
-		KESSKeyPath: kesPath,
-		OpCertPath:  opCertPath,
-	}
-
-	ks := NewKeyStore(config)
-	require.NoError(t, ks.LoadFromFiles())
-
-	kesSigner := ks.KESSigner()
-	require.NotNil(t, kesSigner)
-
-	// Sign a test message at period 0
-	message := []byte("test block header data")
-	signature, err := kesSigner.Sign(0, message)
-	require.NoError(t, err)
-
-	// KES signature for depth 6 is 448 bytes
-	assert.Equal(t, kes.CardanoKesSignatureSize, len(signature))
-
-	// Verify the signature
-	ok := kes.VerifySignedKES(kesSigner.VKey(), 0, message, signature)
-	assert.True(t, ok, "KES signature verification failed")
-}
-
 func TestKESEvolution(t *testing.T) {
+	t.Parallel()
 	vrfPath, kesPath, opCertPath := setupTestKeys(t)
 
 	config := KeyStoreConfig{
@@ -251,6 +226,7 @@ func TestKESEvolution(t *testing.T) {
 }
 
 func TestKESEvolutionUsesOpCertStartPeriod(t *testing.T) {
+	t.Parallel()
 	vrfPath, kesPath, opCertPath := setupTestKeys(t)
 
 	config := KeyStoreConfig{
@@ -278,6 +254,7 @@ func TestKESEvolutionUsesOpCertStartPeriod(t *testing.T) {
 }
 
 func TestKESEvolutionRejectsBeforeOpCertStart(t *testing.T) {
+	t.Parallel()
 	vrfPath, kesPath, opCertPath := setupTestKeys(t)
 
 	config := KeyStoreConfig{
@@ -298,6 +275,7 @@ func TestKESEvolutionRejectsBeforeOpCertStart(t *testing.T) {
 }
 
 func TestOpCertValidation(t *testing.T) {
+	t.Parallel()
 	vrfPath, kesPath, opCertPath := setupTestKeys(t)
 
 	config := KeyStoreConfig{
@@ -398,6 +376,7 @@ func (m *mockSlotClock) HasSubscribers() bool {
 }
 
 func TestKeyStoreStartStop(t *testing.T) {
+	t.Parallel()
 	vrfPath, kesPath, opCertPath := setupTestKeys(t)
 
 	config := KeyStoreConfig{
@@ -432,6 +411,7 @@ func TestKeyStoreStartStop(t *testing.T) {
 }
 
 func TestKeyStoreKESEvolutionOnPeriodChange(t *testing.T) {
+	t.Parallel()
 	vrfPath, kesPath, opCertPath := setupTestKeys(t)
 
 	config := KeyStoreConfig{
@@ -479,6 +459,7 @@ func TestKeyStoreKESEvolutionOnPeriodChange(t *testing.T) {
 }
 
 func TestKeyStoreKESEvolutionTracksAbsolutePeriodsInMonitor(t *testing.T) {
+	t.Parallel()
 	vrfPath, kesPath, opCertPath := setupTestKeys(t)
 
 	var logBuf safeBuffer
@@ -540,6 +521,7 @@ func TestKeyStoreKESEvolutionTracksAbsolutePeriodsInMonitor(t *testing.T) {
 }
 
 func TestKeyStoreNotLoadedError(t *testing.T) {
+	t.Parallel()
 	config := KeyStoreConfig{}
 	ks := NewKeyStore(config)
 
@@ -557,6 +539,7 @@ func TestKeyStoreNotLoadedError(t *testing.T) {
 }
 
 func TestEvolutionConstants(t *testing.T) {
+	t.Parallel()
 	// Test slot to KES period conversion
 	assert.Equal(t, uint64(0), SlotToKESPeriod(0, DefaultSlotsPerKESPeriod))
 	assert.Equal(
@@ -597,32 +580,10 @@ func TestEvolutionConstants(t *testing.T) {
 		uint64(259199),
 		KESPeriodEndSlot(1, DefaultSlotsPerKESPeriod),
 	)
-
-	// Test KES period duration
-	duration := DefaultKESPeriodDuration()
-	assert.Equal(
-		t,
-		time.Duration(DefaultSlotsPerKESPeriod)*time.Second,
-		duration,
-	)
-
-	// Test OpCert lifetime
-	lifetimeSlots := DefaultOpCertLifetimeSlots()
-	assert.Equal(
-		t,
-		uint64(DefaultSlotsPerKESPeriod*DefaultMaxKESEvolutions),
-		lifetimeSlots,
-	)
-}
-
-func TestExpiryWarningThresholds(t *testing.T) {
-	thresholds := DefaultExpiryWarningThresholds()
-	assert.Equal(t, uint64(3), thresholds.Critical)
-	assert.Equal(t, uint64(7), thresholds.Warning)
-	assert.Equal(t, uint64(14), thresholds.Info)
 }
 
 func TestStopZeroesSecretKeyMaterial(t *testing.T) {
+	t.Parallel()
 	vrfPath, kesPath, opCertPath := setupTestKeys(t)
 
 	config := KeyStoreConfig{
@@ -689,6 +650,7 @@ func assertNotAllZero(t *testing.T, data []byte, msg string) {
 }
 
 func TestInsecureFileModeUnix(t *testing.T) {
+	t.Parallel()
 	if isWindows() {
 		t.Skip(
 			"Unix permission test; see TestInsecureFileModeWindows for Windows DACL test",

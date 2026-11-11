@@ -32,6 +32,8 @@ import (
 )
 
 func TestNtCAdmissionSlotReleasedBeforeCloseCallback(t *testing.T) {
+	t.Parallel()
+
 	closeErr := errors.New("closed")
 	callbackEntered := make(chan struct{})
 	releaseCallback := make(chan struct{})
@@ -161,8 +163,8 @@ func TestTrustedLocalNtCIdleAfterHandshakeReleasesAdmissionSlot(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 	manager := startNtCAdmissionManager(t, ConnectionManagerConfig{
-		MaxTrustedLocalNtCConns:        1,
-		trustedNtCPostHandshakeTimeout: 50 * time.Millisecond,
+		MaxTrustedLocalNtCConns: 1,
+		TrustedNtCIdleTimeout:   50 * time.Millisecond,
 		Listeners: []ListenerConfig{{
 			Listener:     listener,
 			UseNtC:       true,
@@ -191,8 +193,8 @@ func TestTrustedLocalNtCIdleAfterProtocolActivityReleasesAdmissionSlot(
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 	manager := startNtCAdmissionManager(t, ConnectionManagerConfig{
-		MaxTrustedLocalNtCConns:        1,
-		trustedNtCPostHandshakeTimeout: 50 * time.Millisecond,
+		MaxTrustedLocalNtCConns: 1,
+		TrustedNtCIdleTimeout:   50 * time.Millisecond,
 		Listeners: []ListenerConfig{{
 			Listener:     listener,
 			UseNtC:       true,
@@ -317,6 +319,8 @@ func TestTrustedLocalFlagIsSetBeforeConnectionRegistration(t *testing.T) {
 }
 
 func TestNtCAdmissionPendingAndEstablished(t *testing.T) {
+	t.Parallel()
+
 	for _, testCase := range []struct {
 		name  string
 		total int
@@ -391,6 +395,8 @@ func TestNtCAdmissionPendingAndEstablished(t *testing.T) {
 }
 
 func TestNtCAdmissionUnix(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-domain sockets are not the Windows NtC transport")
 	}
@@ -417,6 +423,8 @@ func TestNtCAdmissionUnix(t *testing.T) {
 }
 
 func TestNtCAdmissionConcurrentReservations(t *testing.T) {
+	t.Parallel()
+
 	for _, testCase := range []struct {
 		name        string
 		total       int
@@ -427,6 +435,7 @@ func TestNtCAdmissionConcurrentReservations(t *testing.T) {
 		{name: "per_ip_limit", total: 3, perIP: 2, addressByte: 15},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			manager := NewConnectionManager(ConnectionManagerConfig{
 				MaxNtCConns: testCase.total, MaxNtCConnectionsPerIP: testCase.perIP,
 			})
@@ -468,4 +477,55 @@ func TestNtCAdmissionConcurrentReservations(t *testing.T) {
 			require.Zero(t, sources)
 		})
 	}
+}
+
+func TestTrustedLocalNtCIdleTimeoutDisabledKeepsIdleClient(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	manager := startNtCAdmissionManager(t, ConnectionManagerConfig{
+		MaxTrustedLocalNtCConns: 1,
+		Listeners: []ListenerConfig{{
+			Listener:     listener,
+			UseNtC:       true,
+			TrustedLocal: true,
+			ConnectionOpts: []ouroboros.ConnectionOptionFunc{
+				ouroboros.WithNetworkMagic(1),
+				ouroboros.WithMuxerSegmentReadTimeout(0),
+			},
+		}},
+	})
+
+	connectNtCAdmissionClient(t, listener)
+	requireTrustedNtCAdmissionCount(t, manager, 1)
+	require.Eventually(t, func() bool {
+		manager.trustedNtCActivityMutex.Lock()
+		defer manager.trustedNtCActivityMutex.Unlock()
+		if len(manager.trustedNtCActivities) != 1 {
+			return false
+		}
+		for _, activity := range manager.trustedNtCActivities {
+			activity.mu.Lock()
+			conn := activity.conn
+			timeout := activity.timeout
+			activity.mu.Unlock()
+			if conn == nil {
+				return false
+			}
+			conn.mu.Lock()
+			capped := !conn.deadline.IsZero()
+			conn.mu.Unlock()
+			return timeout == 0 && !capped
+		}
+		return false
+	}, 2*time.Second, 5*time.Millisecond,
+		"trusted NtC activity registered with an idle timeout or read deadline cap")
+	require.Never(t, func() bool {
+		manager.ntcAdmissionMutex.Lock()
+		defer manager.ntcAdmissionMutex.Unlock()
+		return manager.trustedLocalNtCCount != 1
+	}, 300*time.Millisecond, 5*time.Millisecond,
+		"idle trusted NtC client was closed with the idle timeout disabled")
 }

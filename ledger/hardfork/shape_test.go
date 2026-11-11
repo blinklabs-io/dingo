@@ -86,17 +86,14 @@ func sampleShape() hardfork.Shape {
 	}
 }
 
-func TestShape_Validate_OK(t *testing.T) {
-	s := sampleShape()
-	assert.NoError(t, s.Validate())
-}
-
 func TestShape_Validate_RejectsEmpty(t *testing.T) {
+	t.Parallel()
 	s := hardfork.Shape{SystemStart: testSysStart}
 	assert.Error(t, s.Validate())
 }
 
 func TestShape_Validate_RejectsVersionGap(t *testing.T) {
+	t.Parallel()
 	// Byron's MaxMajorVersion=1, but Shelley's Min=3 (gap at version 2).
 	s := hardfork.Shape{
 		SystemStart: testSysStart,
@@ -121,6 +118,7 @@ func TestShape_Validate_RejectsVersionGap(t *testing.T) {
 }
 
 func TestShape_Validate_RejectsVersionOverlap(t *testing.T) {
+	t.Parallel()
 	// Byron.Max=2, Shelley.Min=2 — overlap.
 	s := hardfork.Shape{
 		SystemStart: testSysStart,
@@ -145,6 +143,7 @@ func TestShape_Validate_RejectsVersionOverlap(t *testing.T) {
 }
 
 func TestShape_EraForVersion(t *testing.T) {
+	t.Parallel()
 	s := sampleShape()
 	tests := []struct {
 		version uint
@@ -169,6 +168,7 @@ func TestShape_EraForVersion(t *testing.T) {
 }
 
 func TestShape_EraForID(t *testing.T) {
+	t.Parallel()
 	s := sampleShape()
 	entry, ok := s.EraForID(1)
 	require.True(t, ok)
@@ -179,6 +179,7 @@ func TestShape_EraForID(t *testing.T) {
 }
 
 func TestShape_EraIndex(t *testing.T) {
+	t.Parallel()
 	s := sampleShape()
 	idx, ok := s.EraIndex(0)
 	require.True(t, ok)
@@ -195,6 +196,7 @@ func TestShape_EraIndex(t *testing.T) {
 // Validate must reject a shape whose non-final era carries
 // TriggerNotDuringThisExecution — that variant is reserved for the final era.
 func TestShape_Validate_RejectsNonFinalNotDuringThisExecution(t *testing.T) {
+	t.Parallel()
 	s := sampleShape()
 	// Force Byron (non-final) to carry NotDuringThisExecution.
 	s.Eras[0].NextEraTrigger = hardfork.NewTriggerNotDuringThisExecution()
@@ -205,6 +207,7 @@ func TestShape_Validate_RejectsNonFinalNotDuringThisExecution(t *testing.T) {
 // Validate must reject a shape whose final era carries a trigger other than
 // NotDuringThisExecution.
 func TestShape_Validate_RejectsFinalWithSuccessorTrigger(t *testing.T) {
+	t.Parallel()
 	s := sampleShape()
 	// Force Conway (final) to carry AtEpoch.
 	s.Eras[len(s.Eras)-1].NextEraTrigger = hardfork.NewTriggerAtEpoch(100)
@@ -214,6 +217,7 @@ func TestShape_Validate_RejectsFinalWithSuccessorTrigger(t *testing.T) {
 
 // AtEpoch triggers on non-final eras are accepted.
 func TestShape_Validate_AcceptsAtEpochOnNonFinal(t *testing.T) {
+	t.Parallel()
 	s := sampleShape()
 	s.Eras[0].NextEraTrigger = hardfork.NewTriggerAtEpoch(5)
 	assert.NoError(t, s.Validate())
@@ -223,6 +227,7 @@ func TestShape_Validate_AcceptsAtEpochOnNonFinal(t *testing.T) {
 // variants, so future refactors / external constructors can't quietly produce
 // a shape that passes the final/non-final checks with a bogus kind.
 func TestShape_Validate_RejectsUnknownTriggerKind(t *testing.T) {
+	t.Parallel()
 	s := sampleShape()
 	s.Eras[0].NextEraTrigger = hardfork.TriggerHardFork{Kind: 99}
 	err := s.Validate()

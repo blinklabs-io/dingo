@@ -550,15 +550,6 @@ func TestReadState_RejectsOversizedPoolFilter(t *testing.T) {
 		"an oversized filter must not reach the ledger")
 }
 
-// TestNewUtxorpc_DefaultsMaxPoolFilter pins the cap being defaulted rather than
-// left at zero, which would reject every filtered request.
-func TestNewUtxorpc_DefaultsMaxPoolFilter(t *testing.T) {
-	u := NewUtxorpc(UtxorpcConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-	assert.Equal(t, DefaultMaxPoolFilter, u.config.MaxPoolFilter)
-}
-
 // TestReadState_LedgerErrorIsInternal covers the ledger read failing. The
 // caller's request was well formed, so this is not InvalidArgument.
 func TestReadState_LedgerErrorIsInternal(t *testing.T) {

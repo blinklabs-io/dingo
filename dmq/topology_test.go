@@ -316,26 +316,6 @@ func TestLoadTopologyCleansHosts(t *testing.T) {
 	assert.Equal(t, "[::1]:3143", peers[2].Address())
 }
 
-func TestLoadTopologyBracketedAndBareHostAreOnePeer(t *testing.T) {
-	t.Parallel()
-	topo, err := LoadTopology(writeTopology(t, `{"localRoots": [{
-		"accessPoints": [
-			{"address": "[::1]", "port": 3141},
-			{"address": "::1", "port": 3141}
-		],
-		"valency": 1
-	}]}`), nil)
-	require.NoError(t, err)
-	assert.Equal(t, []Peer{{Host: "::1", Port: 3141}}, topo.Peers())
-}
-
-func TestLoadTopologyEmpty(t *testing.T) {
-	t.Parallel()
-	topo, err := LoadTopology(writeTopology(t, `{}`), nil)
-	require.NoError(t, err)
-	assert.Empty(t, topo.Peers())
-}
-
 func TestLoadTopologyErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

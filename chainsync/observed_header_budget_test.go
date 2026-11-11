@@ -128,13 +128,16 @@ func retainedObservedHeaderBytes(
 }
 
 func TestObservedHeaderHistoryBoundedByBytesPerConnection(t *testing.T) {
+	t.Parallel()
 	s := newObservedBudgetState(t)
 	conn := observedBudgetConnId(4001)
 	require.True(t, s.AddClientConnId(conn))
 
-	const cborLen = 4096
+	// Large records reach the byte budget with a few dozen headers instead of
+	// thousands; the budget arithmetic is the same at any record size.
+	const cborLen = 1 << 20
 	perRecord := observedHeaderRecordOverhead + cborLen
-	count := maxObservedHeaderBytesPerConn/perRecord + 2000
+	count := maxObservedHeaderBytesPerConn/perRecord + 20
 	hashes := recordDenseObservedHeaders(t, s, conn, count, cborLen)
 
 	retained, records := retainedObservedHeaderBytes(s, conn)
@@ -152,14 +155,17 @@ func TestObservedHeaderHistoryBoundedByBytesPerConnection(t *testing.T) {
 }
 
 func TestObservedHeaderHistoryBoundedByBytesAcrossConnections(t *testing.T) {
+	t.Parallel()
 	s := newObservedBudgetState(t)
-	const cborLen = 4096
+	// Large records fill each connection's budget with a few dozen headers.
+	const cborLen = 1 << 20
+	const smallCborLen = 4096
 	perRecord := observedHeaderRecordOverhead + cborLen
 	perConn := maxObservedHeaderBytesPerConn / perRecord
 
 	small := observedBudgetConnId(5000)
 	require.True(t, s.AddClientConnId(small))
-	smallHashes := recordDenseObservedHeaders(t, s, small, 256, cborLen)
+	smallHashes := recordDenseObservedHeaders(t, s, small, 256, smallCborLen)
 
 	// ConnectionId holds address pointers, so each identifier is built once
 	// and reused for every lookup.
@@ -196,6 +202,7 @@ func TestObservedHeaderHistoryBoundedByBytesAcrossConnections(t *testing.T) {
 }
 
 func TestObservedHeaderHistoryKeepsDenseCandidateWithinBudget(t *testing.T) {
+	t.Parallel()
 	s := newObservedBudgetState(t)
 	conn := observedBudgetConnId(6001)
 	require.True(t, s.AddClientConnId(conn))
@@ -212,6 +219,7 @@ func TestObservedHeaderHistoryKeepsDenseCandidateWithinBudget(t *testing.T) {
 }
 
 func TestObservedHeaderHistoryReleasesBytesOnClear(t *testing.T) {
+	t.Parallel()
 	s := newObservedBudgetState(t)
 	conn := observedBudgetConnId(7001)
 	require.True(t, s.AddClientConnId(conn))

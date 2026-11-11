@@ -32,26 +32,23 @@ import (
 
 var lotteryParams = ProtocolParameters{K: 5, M: 40, PhiF: 0.5}
 
-const testAggregatorOperatorToken = "aggregator-test-operator-token-0123456789"
-
 // aggregatorFixture is an aggregator and artifact server over one store,
 // reachable over HTTP. Snapshots are produced into the same store.
 type aggregatorFixture struct {
-	t             *testing.T
-	store         ArtifactStore
-	dir           string
-	aggregator    *Aggregator
-	url           string
-	client        *Client
-	genesisPub    ed25519.PublicKey
-	genesisKey    ed25519.PrivateKey
-	ancPub        ed25519.PublicKey
-	ancKey        ed25519.PrivateKey
-	params        ProtocolParameters
-	epoch         uint64
-	network       string
-	operatorToken string
-	created       int
+	t          *testing.T
+	store      ArtifactStore
+	dir        string
+	aggregator *Aggregator
+	url        string
+	client     *Client
+	genesisPub ed25519.PublicKey
+	genesisKey ed25519.PrivateKey
+	ancPub     ed25519.PublicKey
+	ancKey     ed25519.PrivateKey
+	params     ProtocolParameters
+	epoch      uint64
+	network    string
+	created    int
 }
 
 func newAggregatorFixture(
@@ -63,17 +60,16 @@ func newAggregatorFixture(
 	ancPub, ancKey := newSigningKey(t)
 	store, dir := newLocalStore(t)
 	f := &aggregatorFixture{
-		t:             t,
-		store:         store,
-		dir:           dir,
-		genesisPub:    genesisPub,
-		genesisKey:    genesisKey,
-		ancPub:        ancPub,
-		ancKey:        ancKey,
-		params:        params,
-		epoch:         10,
-		network:       "preprod",
-		operatorToken: testAggregatorOperatorToken,
+		t:          t,
+		store:      store,
+		dir:        dir,
+		genesisPub: genesisPub,
+		genesisKey: genesisKey,
+		ancPub:     ancPub,
+		ancKey:     ancKey,
+		params:     params,
+		epoch:      10,
+		network:    "preprod",
 	}
 	f.start()
 	return f
@@ -88,7 +84,6 @@ func (f *aggregatorFixture) start() {
 		Parameters:        f.params,
 		GenesisSigningKey: f.genesisKey,
 		Store:             f.store,
-		OperatorToken:     f.operatorToken,
 	})
 	require.NoError(f.t, err)
 	f.aggregator = agg
@@ -120,21 +115,6 @@ func (f *aggregatorFixture) snapshotOf(db string) *CardanoDatabaseSnapshot {
 }
 
 func (f *aggregatorFixture) post(path string, body any) (int, string) {
-	return f.postWithOperatorToken(path, body, f.operatorToken)
-}
-
-func (f *aggregatorFixture) postUnauthenticated(
-	path string,
-	body any,
-) (int, string) {
-	return f.postWithOperatorToken(path, body, "")
-}
-
-func (f *aggregatorFixture) postWithOperatorToken(
-	path string,
-	body any,
-	token string,
-) (int, string) {
 	f.t.Helper()
 	data, err := json.Marshal(body)
 	require.NoError(f.t, err)
@@ -144,9 +124,6 @@ func (f *aggregatorFixture) postWithOperatorToken(
 	)
 	require.NoError(f.t, err)
 	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(f.t, err)
 	t := f.t
@@ -160,28 +137,15 @@ func (f *aggregatorFixture) closeRegistrations() (int, string) {
 }
 
 func (f *aggregatorFixture) register(s *testSTMSigner) (int, string) {
-	return f.registerWithToken(s, f.operatorToken)
-}
-
-func (f *aggregatorFixture) registerUnauthenticated(
-	s *testSTMSigner,
-) (int, string) {
-	return f.registerWithToken(s, "")
-}
-
-func (f *aggregatorFixture) registerWithToken(
-	s *testSTMSigner,
-	token string,
-) (int, string) {
 	reg := s.registration()
-	return f.postWithOperatorToken("/register-signer", registerSignerRequest{
+	return f.post("/register-signer", registerSignerRequest{
 		Epoch:   f.epoch,
 		PartyID: reg.PartyID,
 		VerificationKey: hex.EncodeToString(
 			append(bytes.Clone(reg.VerificationKey), reg.ProofOfPossession...),
 		),
 		Stake: reg.Stake,
-	}, token)
+	})
 }
 
 func (f *aggregatorFixture) registerAll(signers []*testSTMSigner) {
@@ -464,27 +428,6 @@ func TestAggregatorRegistrationValidation(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, code)
 }
 
-func TestAggregatorReRegistrationRequiresOperator(t *testing.T) {
-	t.Parallel()
-	f := newAggregatorFixture(t, lotteryParams)
-	f.newSnapshot(2)
-	s := newTestSTMSigner(1, 100)
-	code, body := f.register(s)
-	require.Equal(t, http.StatusCreated, code, body)
-	s.stake = 250
-	code, body = f.registerUnauthenticated(s)
-	require.Equal(t, http.StatusUnauthorized, code, body)
-	code, body = f.registerWithToken(s, f.operatorToken+"wrong")
-	require.Equal(t, http.StatusUnauthorized, code, body)
-	code, body = f.closeRegistrations()
-	require.Equal(t, http.StatusNoContent, code, body)
-	status, pc := f.pending()
-	require.Equal(t, http.StatusOK, status)
-	require.NotNil(t, pc)
-	require.Len(t, pc.Signers, 1)
-	require.Equal(t, uint64(100), pc.Signers[0].Stake)
-}
-
 func TestAggregatorOperatorCanUpdateRegistration(t *testing.T) {
 	t.Parallel()
 	f := newAggregatorFixture(t, lotteryParams)
@@ -555,7 +498,7 @@ func TestAggregatorInvalidSignatureDoesNotCloseRegistration(t *testing.T) {
 	f.newSnapshot(2)
 	code, body := f.register(newTestSTMSigner(1, 100))
 	require.Equal(t, http.StatusCreated, code, body)
-	code, body = f.postUnauthenticated(
+	code, body = f.post(
 		"/register-signatures", registerSignatureRequest{},
 	)
 	require.Equal(t, http.StatusBadRequest, code, body)
@@ -565,23 +508,22 @@ func TestAggregatorInvalidSignatureDoesNotCloseRegistration(t *testing.T) {
 		"invalid signature request must leave registration open")
 }
 
-func TestAggregatorRegistrationClosureRequiresOperator(t *testing.T) {
+func TestAggregatorRegistrationClosure(t *testing.T) {
 	t.Parallel()
 	f := newAggregatorFixture(t, lotteryParams)
 	f.newSnapshot(2)
 	code, body := f.register(newTestSTMSigner(1, 100))
 	require.Equal(t, http.StatusCreated, code, body)
-	code, body = f.postUnauthenticated("/close-registrations", nil)
-	require.Equal(t, http.StatusUnauthorized, code, body)
+	code, body = f.post("/close-registrations", nil)
+	require.Equal(t, http.StatusNoContent, code, body)
 	code, body = f.register(newTestSTMSigner(2, 100))
-	require.Equal(t, http.StatusCreated, code, body,
-		"unauthorized closure must leave registration open")
+	require.Equal(t, http.StatusConflict, code, body)
 	code, body = f.closeRegistrations()
 	require.Equal(t, http.StatusNoContent, code, body)
 
 	status, pending := f.pending()
 	require.Equal(t, http.StatusOK, status)
-	require.Len(t, pending.Signers, 2)
+	require.Len(t, pending.Signers, 1)
 }
 
 func TestAggregatorRefusesRegistrationOnceClosed(t *testing.T) {
@@ -777,7 +719,6 @@ func TestNewAggregatorRejectsChangedParametersAfterClose(t *testing.T) {
 		Parameters:        ProtocolParameters{K: 1, M: 2, PhiF: 1},
 		GenesisSigningKey: f.genesisKey,
 		Store:             f.store,
-		OperatorToken:     f.operatorToken,
 	})
 	require.ErrorContains(t, err, "parameters")
 }
@@ -793,7 +734,6 @@ func TestNewAggregatorValidatesConfig(t *testing.T) {
 			Parameters:        lotteryParams,
 			GenesisSigningKey: priv,
 			Store:             store,
-			OperatorToken:     testAggregatorOperatorToken,
 		}
 	}
 	_, err := NewAggregator(context.Background(), newBase())
@@ -810,9 +750,6 @@ func TestNewAggregatorValidatesConfig(t *testing.T) {
 		},
 		"bad phi":  func(c *AggregatorConfig) { c.Parameters.PhiF = 1.5 },
 		"no store": func(c *AggregatorConfig) { c.Store = nil },
-		"short operator token": func(c *AggregatorConfig) {
-			c.OperatorToken = "short"
-		},
 	} {
 		cfg := newBase()
 		mutate(&cfg)
@@ -876,11 +813,12 @@ func TestAggregatorServesTheCertifiedStakeDistribution(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
-// TestAggregatorCertifiedSnapshotVerifiesAndSyncs runs an aggregator, signers
-// and a syncing client against one server: the snapshot is certified by the
-// signers, a bootstrap that verifies the certificate chain and the signed
-// ancillary manifest accepts it, and Sync imports it.
-func TestAggregatorCertifiedSnapshotVerifiesAndSyncs(t *testing.T) {
+// TestAggregatorCertifiedSnapshotVerifiesAndBootstraps runs an aggregator,
+// signers and a bootstrapping client against one server: the snapshot is
+// certified by the signers and a bootstrap that verifies the certificate chain
+// and the signed ancillary manifest accepts it. Importing a served snapshot
+// is covered by TestServerSnapshotSyncsEndToEnd.
+func TestAggregatorCertifiedSnapshotVerifiesAndBootstraps(t *testing.T) {
 	t.Parallel()
 	f := newAggregatorFixture(t, lotteryParams)
 	snap := f.snapshotOf(newSyncableDB(t))
@@ -904,19 +842,6 @@ func TestAggregatorCertifiedSnapshotVerifiesAndSyncs(t *testing.T) {
 	require.Equal(t, snap.Hash, result.Snapshot.Digest)
 	require.Equal(t, certHash, result.Snapshot.CertificateHash)
 	require.True(t, result.AncillaryVerified)
-
-	synced, err := Sync(context.Background(), SyncConfig{
-		Network:           f.network,
-		DataDir:           t.TempDir(),
-		StorageMode:       "core",
-		Backend:           BackendV2,
-		AggregatorURL:     f.url,
-		AllowInsecureHTTP: true,
-		VerifyCertChain:   false,
-		Logger:            slog.New(slog.DiscardHandler),
-	})
-	require.NoError(t, err)
-	require.Equal(t, uint64(1000), synced.LedgerSlot)
 }
 
 func TestBootstrapRejectsSnapshotCertifiedByAnotherGenesisKey(t *testing.T) {

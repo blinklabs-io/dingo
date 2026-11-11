@@ -23,6 +23,7 @@ import (
 )
 
 func TestCalculateMatchesShelleyPoolRewardFormula(t *testing.T) {
+	t.Parallel()
 	poolID := testPoolID(1)
 	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
@@ -158,6 +159,7 @@ func TestCalculateScriptCredentialWithOwnerHashStillEarnsMemberReward(
 }
 
 func TestCalculatePledgeFailureZerosPoolReward(t *testing.T) {
+	t.Parallel()
 	poolID := testPoolID(1)
 	owner := testCredential(0, 2)
 
@@ -202,6 +204,7 @@ func TestCalculatePledgeFailureZerosPoolReward(t *testing.T) {
 }
 
 func TestCalculatePoolRewardAtOrBelowCostPaysOnlyLeader(t *testing.T) {
+	t.Parallel()
 	poolID := testPoolID(1)
 	leader := testCredential(0, 2)
 	member := testCredential(0, 3)
@@ -261,6 +264,7 @@ func TestCalculatePoolRewardAtOrBelowCostPaysOnlyLeader(t *testing.T) {
 }
 
 func TestCalculateNoActiveStakeReturnsAvailableRewardsToReserves(t *testing.T) {
+	t.Parallel()
 	params := testParams()
 	params.TreasuryExpansion = big.NewRat(1, 5)
 
@@ -286,6 +290,7 @@ func TestCalculateNoActiveStakeReturnsAvailableRewardsToReserves(t *testing.T) {
 }
 
 func TestCalculateTreasuryTaxUsesIncentivesAndFees(t *testing.T) {
+	t.Parallel()
 	poolID := testPoolID(1)
 	owner := testCredential(0, 2)
 	params := testParams()
@@ -338,6 +343,7 @@ func TestCalculateTreasuryTaxUsesIncentivesAndFees(t *testing.T) {
 }
 
 func TestCalculateNetworkEfficiencyIncludesDecentralization(t *testing.T) {
+	t.Parallel()
 	poolID := testPoolID(1)
 	owner := testCredential(0, 2)
 	params := testParams()
@@ -447,6 +453,7 @@ func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(
 }
 
 func TestCalculateRoutesUnspendableRewardsToTreasury(t *testing.T) {
+	t.Parallel()
 	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
@@ -510,6 +517,7 @@ func TestCalculateRoutesUnspendableRewardsToTreasury(t *testing.T) {
 }
 
 func TestCalculatePotDeltasMatchReferenceSemantics(t *testing.T) {
+	t.Parallel()
 	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
@@ -579,6 +587,7 @@ func TestCalculatePotDeltasMatchReferenceSemantics(t *testing.T) {
 }
 
 func TestCalculateRejectsRewardsAboveAvailablePot(t *testing.T) {
+	t.Parallel()
 	poolID := testPoolID(1)
 	params := babbageParams()
 	params.MaxLovelaceSupply = 1_000
@@ -616,6 +625,7 @@ func TestCalculateRejectsRewardsAboveAvailablePot(t *testing.T) {
 }
 
 func TestCalculatePreBabbageFilteredRewardsReturnToReserves(t *testing.T) {
+	t.Parallel()
 	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
@@ -673,6 +683,7 @@ func TestCalculatePreBabbageFilteredRewardsReturnToReserves(t *testing.T) {
 }
 
 func TestCalculatePreBabbageFinalUnregisteredRewardsGoToTreasury(t *testing.T) {
+	t.Parallel()
 	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
@@ -790,6 +801,7 @@ func TestCalculatePreBabbagePrefilteredRewardsIgnoreCurrentRegistration(
 }
 
 func TestCalculateShelleyFiltersMultipleRewardsForSameCredential(t *testing.T) {
+	t.Parallel()
 	owner := testCredential(0, 2)
 	shared := testCredential(0, 3)
 	poolID := testPoolID(1)
@@ -848,6 +860,7 @@ func TestCalculateShelleyFiltersMultipleRewardsForSameCredential(t *testing.T) {
 }
 
 func TestCalculateShelleyFiltersLeaderRewardsByPoolOrder(t *testing.T) {
+	t.Parallel()
 	shared := testCredential(0, 3)
 	ownerA := testCredential(0, 1)
 	ownerB := testCredential(0, 2)
@@ -1165,6 +1178,7 @@ func TestCalculateAllegraAggregatesMultipleRewardsForSameCredential(
 }
 
 func TestCalculateAllegraKeepsSameCredentialRewardsAcrossPools(t *testing.T) {
+	t.Parallel()
 	shared := testCredential(0, 3)
 	ownerA := testCredential(0, 1)
 	ownerB := testCredential(0, 2)
@@ -1245,6 +1259,7 @@ func TestCalculateAllegraKeepsSameCredentialRewardsAcrossPools(t *testing.T) {
 }
 
 func TestCalculateUsesGlobalBlockTotalWhenPoolTotalsAbsent(t *testing.T) {
+	t.Parallel()
 	shared := testCredential(0, 3)
 	ownerA := testCredential(0, 1)
 	ownerB := testCredential(0, 2)
@@ -1321,6 +1336,7 @@ func TestCalculateUsesGlobalBlockTotalWhenPoolTotalsAbsent(t *testing.T) {
 }
 
 func TestApparentPerformanceHonorsDecentralizationThreshold(t *testing.T) {
+	t.Parallel()
 	require.Equal(
 		t,
 		big.NewRat(1, 1),
@@ -1411,6 +1427,7 @@ func TestCalculatePoolRewardZeroBlocksEarnsNothing(t *testing.T) {
 }
 
 func TestRewardEfficiencyHonorsDecentralizationThreshold(t *testing.T) {
+	t.Parallel()
 	// Mirrors cardano-ledger's eta shortcut in PulsingReward.startStep:
 	// when d >= 0.8, the reward pot is not reduced by observed block count.
 	require.Equal(
@@ -1431,6 +1448,7 @@ func TestRewardEfficiencyHonorsDecentralizationThreshold(t *testing.T) {
 }
 
 func TestCalculateRewardPotMatchesCFCalculatorEtaFloorVectors(t *testing.T) {
+	t.Parallel()
 	params := testParams()
 	params.MonetaryExpansion = big.NewRat(3, 1000)
 	params.TreasuryExpansion = big.NewRat(0, 1)
@@ -1483,6 +1501,7 @@ func TestCalculateRewardPotMatchesCFCalculatorEtaFloorVectors(t *testing.T) {
 }
 
 func TestCalculateRewardPotMatchesCFCalculatorEtaBoundaryVectors(t *testing.T) {
+	t.Parallel()
 	snapshot := Snapshot{
 		TotalActiveStake: 0,
 		Pools: []Pool{
@@ -1562,6 +1581,7 @@ func TestCalculateRewardPotMatchesCFCalculatorEtaBoundaryVectors(t *testing.T) {
 }
 
 func TestCalculateFloorsExpectedBlocksPerShelleySpec(t *testing.T) {
+	t.Parallel()
 	params := testParams()
 	params.EpochLength = 10
 	params.ActiveSlotsCoeff = big.NewRat(1, 3)
@@ -1583,6 +1603,7 @@ func TestCalculateFloorsExpectedBlocksPerShelleySpec(t *testing.T) {
 }
 
 func TestCalculateRejectsExpectedBlocksThatFloorToZero(t *testing.T) {
+	t.Parallel()
 	params := testParams()
 	params.EpochLength = 1
 	params.ActiveSlotsCoeff = big.NewRat(1, 2)
@@ -1592,6 +1613,7 @@ func TestCalculateRejectsExpectedBlocksThatFloorToZero(t *testing.T) {
 }
 
 func TestCalculateRejectsInvalidUnitIntervals(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		mutate func(*Parameters)
@@ -1639,6 +1661,7 @@ func TestCalculateRejectsInvalidUnitIntervals(t *testing.T) {
 }
 
 func TestCalculatePoolRewardRejectsInvalidParameters(t *testing.T) {
+	t.Parallel()
 	// A pool that reaches the reward arithmetic: non-zero delegated stake and
 	// pledge within owner stake, so calculatePoolRewards does not early-return
 	// and dereferences params.Decentralization and params.PledgeInfluence.
@@ -1702,6 +1725,7 @@ func TestCalculatePoolRewardRejectsInvalidParameters(t *testing.T) {
 }
 
 func TestCalculateRejectsInvalidPoolMargins(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		margin *big.Rat
@@ -1730,6 +1754,7 @@ func TestCalculateRejectsInvalidPoolMargins(t *testing.T) {
 }
 
 func TestCalculateRejectsOwnerStakeAboveDelegatedStake(t *testing.T) {
+	t.Parallel()
 	_, err := Calculate(
 		Pots{},
 		Snapshot{
@@ -1749,6 +1774,7 @@ func TestCalculateRejectsOwnerStakeAboveDelegatedStake(t *testing.T) {
 }
 
 func TestCalculateRejectsOwnerMissingFromDelegators(t *testing.T) {
+	t.Parallel()
 	owner := testCredential(0, 2)
 	_, err := Calculate(
 		Pots{},
@@ -1772,6 +1798,7 @@ func TestCalculateRejectsOwnerMissingFromDelegators(t *testing.T) {
 }
 
 func TestCalculateRejectsIncorrectOwnerStake(t *testing.T) {
+	t.Parallel()
 	owner := testCredential(0, 2)
 	_, err := Calculate(
 		Pots{},
@@ -1799,6 +1826,7 @@ func TestCalculateRejectsIncorrectOwnerStake(t *testing.T) {
 }
 
 func TestCalculateRejectsConflictingCredentialEligibility(t *testing.T) {
+	t.Parallel()
 	shared := testCredential(0, 3)
 	_, err := Calculate(
 		Pots{},
@@ -1823,6 +1851,7 @@ func TestCalculateRejectsConflictingCredentialEligibility(t *testing.T) {
 }
 
 func TestCalculateRejectsScriptPoolOwner(t *testing.T) {
+	t.Parallel()
 	scriptOwner := testCredential(1, 2)
 	_, err := Calculate(
 		Pots{},
@@ -1843,6 +1872,7 @@ func TestCalculateRejectsScriptPoolOwner(t *testing.T) {
 }
 
 func TestCalculateRejectsInvalidRewardAccountCredentialTag(t *testing.T) {
+	t.Parallel()
 	_, err := Calculate(
 		Pots{},
 		Snapshot{
@@ -1861,6 +1891,7 @@ func TestCalculateRejectsInvalidRewardAccountCredentialTag(t *testing.T) {
 }
 
 func TestCalculateRejectsInvalidDelegatorCredentialTag(t *testing.T) {
+	t.Parallel()
 	_, err := Calculate(
 		Pots{},
 		Snapshot{
@@ -1884,6 +1915,7 @@ func TestCalculateRejectsInvalidDelegatorCredentialTag(t *testing.T) {
 }
 
 func TestCalculateRejectsDuplicatePoolSnapshotRows(t *testing.T) {
+	t.Parallel()
 	_, err := Calculate(
 		Pots{},
 		Snapshot{
@@ -1905,6 +1937,7 @@ func TestCalculateRejectsDuplicatePoolSnapshotRows(t *testing.T) {
 // to more: that means the pool set and the declared active stake describe
 // different boundaries.
 func TestCalculateRejectsPoolStakeAboveActiveStake(t *testing.T) {
+	t.Parallel()
 	_, err := Calculate(
 		Pots{},
 		Snapshot{
@@ -1927,6 +1960,7 @@ func TestCalculateRejectsPoolStakeAboveActiveStake(t *testing.T) {
 }
 
 func TestCalculateRejectsTotalBlocksOverflow(t *testing.T) {
+	t.Parallel()
 	_, err := Calculate(
 		Pots{},
 		Snapshot{
@@ -1951,6 +1985,7 @@ func TestCalculateRejectsTotalBlocksOverflow(t *testing.T) {
 }
 
 func TestCalculateRejectsInconsistentExplicitTotalBlocks(t *testing.T) {
+	t.Parallel()
 	_, err := Calculate(
 		Pots{},
 		Snapshot{
@@ -1975,6 +2010,7 @@ func TestCalculateRejectsInconsistentExplicitTotalBlocks(t *testing.T) {
 }
 
 func TestCalculateRejectsDuplicatePoolDelegators(t *testing.T) {
+	t.Parallel()
 	credential := testCredential(0, 2)
 	_, err := Calculate(
 		Pots{},
@@ -1998,6 +2034,7 @@ func TestCalculateRejectsDuplicatePoolDelegators(t *testing.T) {
 }
 
 func TestCalculateRejectsDelegatorInMultiplePools(t *testing.T) {
+	t.Parallel()
 	credential := testCredential(0, 2)
 	_, err := Calculate(
 		Pots{},
@@ -2028,6 +2065,7 @@ func TestCalculateRejectsDelegatorInMultiplePools(t *testing.T) {
 }
 
 func TestCalculateRejectsDelegatorStakeAbovePoolStake(t *testing.T) {
+	t.Parallel()
 	_, err := Calculate(
 		Pots{},
 		Snapshot{
@@ -2053,6 +2091,7 @@ func TestCalculateRejectsDelegatorStakeAbovePoolStake(t *testing.T) {
 }
 
 func TestCalculateRejectsReservesAboveMaxSupply(t *testing.T) {
+	t.Parallel()
 	params := testParams()
 	params.MaxLovelaceSupply = 1_000
 
@@ -2068,6 +2107,7 @@ func TestCalculateRejectsReservesAboveMaxSupply(t *testing.T) {
 }
 
 func TestCalculateRejectsTreasuryTaxOverflow(t *testing.T) {
+	t.Parallel()
 	params := testParams()
 	params.MonetaryExpansion = big.NewRat(0, 1)
 	params.TreasuryExpansion = big.NewRat(1, 1)
@@ -2085,6 +2125,7 @@ func TestCalculateRejectsTreasuryTaxOverflow(t *testing.T) {
 }
 
 func TestCalculateRejectsReserveRefundOverflow(t *testing.T) {
+	t.Parallel()
 	params := testParams()
 	params.MonetaryExpansion = big.NewRat(0, 1)
 	params.MaxLovelaceSupply = math.MaxUint64
@@ -2102,6 +2143,7 @@ func TestCalculateRejectsReserveRefundOverflow(t *testing.T) {
 }
 
 func TestCalculateRejectsUnspendableTreasuryOverflow(t *testing.T) {
+	t.Parallel()
 	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
@@ -2154,6 +2196,7 @@ func TestCalculateRejectsUnspendableTreasuryOverflow(t *testing.T) {
 }
 
 func TestFloorRatCheckedRejectsUint64Overflow(t *testing.T) {
+	t.Parallel()
 	tooLarge := new(big.Rat).SetInt(
 		new(big.Int).Add(
 			new(big.Int).SetUint64(math.MaxUint64),
@@ -2267,6 +2310,7 @@ func minMarginMemberReward(
 
 // effectiveMargin: max(margin, floor); margin when floor nil; nil margin == 0.
 func TestEffectiveMargin(t *testing.T) {
+	t.Parallel()
 	margin := big.NewRat(1, 50) // 2%
 	floor := big.NewRat(1, 10)  // 10%
 	require.Zero(t, margin.Cmp(Parameters{}.effectiveMargin(margin)))
@@ -2284,6 +2328,7 @@ func TestEffectiveMargin(t *testing.T) {
 // A below-floor pool with the feature on splits exactly like an at-floor pool
 // with the feature off: the clamp makes it behave as if registered at the floor.
 func TestCalculateMinPoolMarginBelowFloorEqualsAtFloor(t *testing.T) {
+	t.Parallel()
 	floor := big.NewRat(1, 10)
 	below := big.NewRat(1, 50)
 	member := testCredential(0, 3)
@@ -2303,6 +2348,7 @@ func TestCalculateMinPoolMarginBelowFloorEqualsAtFloor(t *testing.T) {
 // The clamp shifts the split toward the operator: same total pool reward, higher
 // leader share, lower member share than the unfloored baseline.
 func TestCalculateMinPoolMarginShiftsSplitTowardOperator(t *testing.T) {
+	t.Parallel()
 	floor := big.NewRat(1, 10)
 	below := big.NewRat(1, 50)
 	member := testCredential(0, 3)
@@ -2323,6 +2369,7 @@ func TestCalculateMinPoolMarginShiftsSplitTowardOperator(t *testing.T) {
 
 // A floor at or below the pool's registered margin is a parity no-op.
 func TestCalculateMinPoolMarginBelowMarginIsParity(t *testing.T) {
+	t.Parallel()
 	member := testCredential(0, 3)
 	base, err := minMarginCalc(big.NewRat(1, 10), nil)
 	require.NoError(t, err)
@@ -2337,6 +2384,7 @@ func TestCalculateMinPoolMarginBelowMarginIsParity(t *testing.T) {
 
 // A MinPoolMargin outside [0,1] is rejected; the inclusive bounds are accepted.
 func TestCalculateMinPoolMarginRange(t *testing.T) {
+	t.Parallel()
 	_, err := minMarginCalc(big.NewRat(1, 50), big.NewRat(3, 2))
 	require.ErrorIs(t, err, ErrInvalidParameters)
 	_, err = minMarginCalc(big.NewRat(1, 50), big.NewRat(-1, 2))
@@ -2424,6 +2472,7 @@ func leverageCalc(
 // L*p = 1/20 is below min(sigma, z0) = 1/10, so eligible stake sigma' is
 // capped at 1/20 (halved), reducing the optimal reward from 70_000 to 34_833.
 func TestCalculatePledgeLeverageCapsEligibleStake(t *testing.T) {
+	t.Parallel()
 	result := leveragePoolResult(t, 100, 100, true, big.NewRat(5, 1))
 	require.Equal(t, uint64(34_833), result.PoolRewards[0].OptimalReward)
 	require.Equal(t, uint64(34_833), result.PoolRewards[0].PoolReward)
@@ -2432,6 +2481,7 @@ func TestCalculatePledgeLeverageCapsEligibleStake(t *testing.T) {
 // Disabled is the regression guard: the eligible stake and reward match the
 // current (pre-CIP-50) formula exactly.
 func TestCalculatePledgeLeverageDisabledMatchesBaseline(t *testing.T) {
+	t.Parallel()
 	result := leveragePoolResult(t, 100, 100, false, nil)
 	require.Equal(t, uint64(70_000), result.PoolRewards[0].OptimalReward)
 	require.Equal(t, uint64(70_000), result.PoolRewards[0].PoolReward)
@@ -2440,6 +2490,7 @@ func TestCalculatePledgeLeverageDisabledMatchesBaseline(t *testing.T) {
 // A well-pledged pool (here L=100 => L*p = 1, far above z0=1/10) is unaffected
 // by the cap and earns the same reward as with the feature disabled.
 func TestCalculatePledgeLeverageWellPledgedUnaffected(t *testing.T) {
+	t.Parallel()
 	result := leveragePoolResult(t, 100, 100, true, big.NewRat(100, 1))
 	require.Equal(t, uint64(70_000), result.PoolRewards[0].OptimalReward)
 	require.Equal(t, uint64(70_000), result.PoolRewards[0].PoolReward)
@@ -2448,6 +2499,7 @@ func TestCalculatePledgeLeverageWellPledgedUnaffected(t *testing.T) {
 // A zero-pledge pool earns zero rewards under CIP-50 (L*p = 0 => sigma' = 0),
 // a break from the current formula where it would earn 66_666.
 func TestCalculatePledgeLeverageZeroPledgeZerosPoolReward(t *testing.T) {
+	t.Parallel()
 	result := leveragePoolResult(t, 0, 0, true, big.NewRat(5, 1))
 	require.Equal(t, uint64(0), result.PoolRewards[0].OptimalReward)
 	require.Equal(t, uint64(0), result.PoolRewards[0].PoolReward)
@@ -2455,6 +2507,7 @@ func TestCalculatePledgeLeverageZeroPledgeZerosPoolReward(t *testing.T) {
 }
 
 func TestCalculateAllowsPledgeLeverageAcrossReferenceDomain(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		leverage    *big.Rat
 		wantDeficit bool
@@ -2476,6 +2529,7 @@ func TestCalculateAllowsPledgeLeverageAcrossReferenceDomain(t *testing.T) {
 }
 
 func TestCalculatePledgeLeverageBelowOne(t *testing.T) {
+	t.Parallel()
 	pots, snapshot, params := negativeLeaderRewardSnapshot(true)
 	result, err := Calculate(pots, snapshot, params)
 	require.NoError(t, err)
@@ -2489,6 +2543,7 @@ func TestCalculatePledgeLeverageBelowOne(t *testing.T) {
 }
 
 func TestCalculateRejectsNegativePledgeLeverage(t *testing.T) {
+	t.Parallel()
 	_, err := leverageCalc(100, 100, true, big.NewRat(-1, 2))
 	require.ErrorIs(t, err, ErrInvalidParameters)
 }
@@ -2496,6 +2551,7 @@ func TestCalculateRejectsNegativePledgeLeverage(t *testing.T) {
 // Enabling the feature without supplying L is rejected rather than silently
 // treated as disabled.
 func TestCalculateRejectsPledgeLeverageEnabledWithoutValue(t *testing.T) {
+	t.Parallel()
 	_, err := leverageCalc(100, 100, true, nil)
 	require.ErrorIs(t, err, ErrInvalidParameters)
 }
@@ -2507,6 +2563,7 @@ func TestCalculateRejectsPledgeLeverageEnabledWithoutValue(t *testing.T) {
 // for each (sum 9), leaving D=1 lovelace; the remainders are all equal, so the
 // tie breaks to the lowest index.
 func TestApportionFullPotSumsToTotal(t *testing.T) {
+	t.Parallel()
 	require.Equal(t, []uint64{4, 3, 3}, ApportionFullPot([]uint64{1, 1, 1}, 10))
 }
 
@@ -2514,12 +2571,14 @@ func TestApportionFullPotSumsToTotal(t *testing.T) {
 // floors [5,2,2] (sum 9, D=1). Remainders are [0,2,2]; the +1 lovelace lands on
 // the largest remainder, and the tie between indices 1 and 2 breaks to 1.
 func TestApportionFullPotLargestRemainderWins(t *testing.T) {
+	t.Parallel()
 	require.Equal(t, []uint64{5, 3, 2}, ApportionFullPot([]uint64{2, 1, 1}, 10))
 }
 
 // TestApportionFullPotNoRemainder: when R divides exactly by W there is no
 // leftover lovelace to allocate.
 func TestApportionFullPotNoRemainder(t *testing.T) {
+	t.Parallel()
 	require.Equal(t, []uint64{10}, ApportionFullPot([]uint64{3}, 10))
 	require.Equal(t, []uint64{4, 6}, ApportionFullPot([]uint64{2, 3}, 10))
 }
@@ -2527,12 +2586,14 @@ func TestApportionFullPotNoRemainder(t *testing.T) {
 // TestApportionFullPotZeroWeightUnchanged: W==0 returns the base rewards
 // unchanged (all zero); the caller returns the pot to reserves.
 func TestApportionFullPotZeroWeightUnchanged(t *testing.T) {
+	t.Parallel()
 	require.Equal(t, []uint64{0, 0}, ApportionFullPot([]uint64{0, 0}, 10))
 }
 
 // TestApportionFullPotBigProductNoOverflow: B_i*R overflows uint64 (~1.8e19);
 // the big.Int arithmetic keeps it exact.
 func TestApportionFullPotBigProductNoOverflow(t *testing.T) {
+	t.Parallel()
 	const b = uint64(10_000_000_000_000_000) // 1e16
 	require.Equal(
 		t,
@@ -2625,6 +2686,7 @@ func fullPotCalc(t *testing.T, enabled bool) *Result {
 // TestCalculateFullPotDisabledMatchesBaseTotals anchors the shared two-pool
 // scenario: with the gate off each pool earns its pre-CIP-0163 base reward.
 func TestCalculateFullPotDisabledMatchesBaseTotals(t *testing.T) {
+	t.Parallel()
 	off := fullPotCalc(t, false)
 	require.Equal(t, uint64(41_866), off.PoolRewards[0].PoolReward)
 	require.Equal(t, uint64(27_283), off.PoolRewards[1].PoolReward)
@@ -2635,6 +2697,7 @@ func TestCalculateFullPotDisabledMatchesBaseTotals(t *testing.T) {
 // reduce a pool below its base, and sum to the entire available pot, whereas the
 // disabled path leaves a large pot-scaling residual.
 func TestCalculateFullPotDistributesEntirePot(t *testing.T) {
+	t.Parallel()
 	off := fullPotCalc(t, false)
 	on := fullPotCalc(t, true)
 	require.Equal(t, off.AvailableRewards, on.AvailableRewards)
@@ -2664,6 +2727,7 @@ func TestCalculateFullPotDistributesEntirePot(t *testing.T) {
 // inflow left under full pot is the per-pool leader/member split rounding, far
 // below the disabled path's pot-scaling residual.
 func TestCalculateFullPotResidualIsOnlySplitRounding(t *testing.T) {
+	t.Parallel()
 	off := fullPotCalc(t, false)
 	on := fullPotCalc(t, true)
 	accounted := on.EffectiveRewards + on.Unspendable
@@ -2676,6 +2740,7 @@ func TestCalculateFullPotResidualIsOnlySplitRounding(t *testing.T) {
 // base reward (pledge exceeds owner stake => disqualified, W==0), the gate-on
 // result is identical to the disabled path — the whole pot returns to reserves.
 func TestCalculateFullPotNoBaseRewardFallsBackToReserves(t *testing.T) {
+	t.Parallel()
 	owner := testCredential(0, 0x11)
 	snap := Snapshot{
 		TotalActiveStake: 600,
@@ -2766,6 +2831,7 @@ func TestCalculateFullPotExcludesZeroBlockPool(t *testing.T) {
 // composition of the two independent reward features (a below-floor pool must
 // have its scaled leader split shifted toward the operator by the floor).
 func TestCalculateFullPotComposesWithMinPoolMargin(t *testing.T) {
+	t.Parallel()
 	snap := fullPotTwoPoolSnapshot() // pools register margin 1/10, IDs 0x01 < 0x02
 	params := testParams()
 	params.FullPotRewardsEnabled = true

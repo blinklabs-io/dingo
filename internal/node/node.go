@@ -16,8 +16,6 @@ package node
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,7 +25,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -284,38 +281,11 @@ func newMetricsServer(cfg *config.Config) *http.Server {
 	metricsMux.Handle("/metrics", promhttp.Handler())
 	return &http.Server{
 		Addr:              cfg.MetricsListenAddress(),
-		Handler:           MetricsAuthHandler(cfg.MetricsAuthToken, metricsMux),
+		Handler:           metricsMux,
 		ReadHeaderTimeout: 60 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-}
-
-// MetricsAuthHandler requires a configured Bearer token before serving
-// Prometheus metrics. An empty token preserves unauthenticated loopback and
-// externally protected deployments.
-func MetricsAuthHandler(token string, next http.Handler) http.Handler {
-	if token == "" {
-		return next
-	}
-	tokenHash := sha256.Sum256([]byte(token))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		scheme, provided, ok := strings.Cut(
-			r.Header.Get("Authorization"), " ",
-		)
-		ok = ok && strings.EqualFold(scheme, "Bearer")
-		provided = strings.TrimLeft(provided, " ")
-		providedHash := sha256.Sum256([]byte(provided))
-		if !ok || subtle.ConstantTimeCompare(
-			providedHash[:],
-			tokenHash[:],
-		) != 1 {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func newPprofDebugServer(cfg *config.Config) *http.Server {
@@ -1036,6 +1006,7 @@ func buildDingoConfig(
 		dingo.WithMaxNtCConns(cfg.MaxNtCConns),
 		dingo.WithMaxNtCConnectionsPerIP(cfg.MaxNtCConnectionsPerIP),
 		dingo.WithMaxTrustedLocalNtCConns(cfg.MaxTrustedLocalNtCConns),
+		dingo.WithTrustedNtCIdleTimeout(cfg.TrustedNtCIdleTimeout),
 		dingo.WithSkipRewardLiveStakeBackfillCheck(
 			cfg.SkipRewardLiveStakeBackfillCheck,
 		),

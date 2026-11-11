@@ -32,13 +32,14 @@ import (
 )
 
 func TestSnapshotDurabilityBeforeManifest(t *testing.T) {
+	// Snapshot only reads the database, so every injected failure shares one.
+	db := newRestoreInternalTestDB(t)
+	require.NoError(
+		t,
+		db.BlockCreate(newRestoreInternalTestBlock(), nil),
+	)
 	for _, failAt := range []string{"", BlobBackupFileName, MetadataBackupFileName, "directory", "parent"} {
 		t.Run("failure_"+failAt, func(t *testing.T) {
-			db := newRestoreInternalTestDB(t)
-			require.NoError(
-				t,
-				db.BlockCreate(newRestoreInternalTestBlock(), nil),
-			)
 			base := snapshotTestParent(t)
 			dir := filepath.Join(base, "snapshot")
 			originalFileSync, originalDirSync := syncSnapshotFile, syncDir
@@ -350,9 +351,9 @@ func TestSnapshotRepairsCatalogAfterDurableManifestWrite(t *testing.T) {
 }
 
 func TestSnapshotDurableAncestors(t *testing.T) {
+	db := newRestoreInternalTestDB(t)
 	for _, failAt := range []string{"", "outer", "base"} {
 		t.Run("failure_"+failAt, func(t *testing.T) {
-			db := newRestoreInternalTestDB(t)
 			base := snapshotTestParent(t)
 			outer := filepath.Join(base, "outer")
 			parent := filepath.Join(outer, "inner")

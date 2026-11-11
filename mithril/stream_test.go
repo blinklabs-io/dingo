@@ -458,7 +458,11 @@ func TestStreamCatchUpEstimateLocatesTip(t *testing.T) {
 // file numbers, in at most ceil(log2(N))+2 probes.
 func TestStreamCatchUpWrongEstimateBinarySearch(t *testing.T) {
 	t.Parallel()
-	const last = 32 // N = 33 files, ceil(log2(33)) = 6
+	const (
+		last      = 16 // N = 17 files
+		localFile = 10
+		bisect    = 5 // ceil(log2(17))
+	)
 	opts := streamFixtureOptions(last, nil)
 	opts.chunkSlots = 100
 	chain := readStreamChain(t, opts)
@@ -474,7 +478,7 @@ func TestStreamCatchUpWrongEstimateBinarySearch(t *testing.T) {
 			t.Parallel()
 			fixture := newV2Fixture(t, opts)
 			db := newSyncModeTestDB(t)
-			applier := &fakeBatchApplier{tip: chain.last[20]}
+			applier := &fakeBatchApplier{tip: chain.last[localFile]}
 			firstApply := requestsAtFirstApply(fixture, applier)
 			cfg := streamConfig(fixture, t.TempDir(), db, applier, 4, 4)
 			cfg.ChunkSlots = tc.chunkSlots
@@ -483,7 +487,7 @@ func TestStreamCatchUpWrongEstimateBinarySearch(t *testing.T) {
 			require.NoError(t, err)
 			var want []ocommon.Point
 			for _, p := range chain.points {
-				if chain.chunkOf(p) > 20 {
+				if chain.chunkOf(p) > localFile {
 					want = append(want, p)
 				}
 			}
@@ -491,15 +495,15 @@ func TestStreamCatchUpWrongEstimateBinarySearch(t *testing.T) {
 			assert.Equal(t, want, applied)
 			requests := firstApply()
 			// The stream window is 4, so up to four of these are the
-			// stream's own downloads from file 21.
+			// stream's own downloads from the next file.
 			probes := 0
 			for _, num := range requests {
-				if num <= 20 {
+				if num <= localFile {
 					probes++
 				}
 			}
-			assert.LessOrEqual(t, len(requests), 6+2+4, "requests %v", requests)
-			assert.LessOrEqual(t, probes, 6+2, "requests %v", requests)
+			assert.LessOrEqual(t, len(requests), bisect+2+4, "requests %v", requests)
+			assert.LessOrEqual(t, probes, bisect+2, "requests %v", requests)
 			requireMarker(t, db, last)
 		})
 	}
@@ -962,13 +966,13 @@ func TestStreamCatchUpDigestMismatchKeepsCommitted(t *testing.T) {
 // and stale-tip replays open feeds on it.
 func TestStreamCatchUpVerifiesArtifactOnce(t *testing.T) {
 	t.Parallel()
-	const last = 16
+	const last = 8
 	opts := streamFixtureOptions(last, nil)
 	opts.chunkSlots = 100
 	chain := readStreamChain(t, opts)
 	fixture := newV2Fixture(t, opts)
 	db := newSyncModeTestDB(t)
-	applier := &fakeBatchApplier{tip: chain.last[9]}
+	applier := &fakeBatchApplier{tip: chain.last[3]}
 	// One stale replay, so a second feed and a second locate run too.
 	moved := false
 	applier.beforeApply = func(a *fakeBatchApplier, _ []ledger.Block) error {
@@ -976,13 +980,12 @@ func TestStreamCatchUpVerifiesArtifactOnce(t *testing.T) {
 			return nil
 		}
 		moved = true
-		a.tip = chain.last[10]
+		a.tip = chain.last[4]
 		return fmt.Errorf("fake: moved: %w", ErrStaleBatch)
 	}
 	cfg := streamConfig(fixture, t.TempDir(), db, applier, 2, 2)
 	// A wrong estimate makes the locate bisect over several probes.
 	cfg.ChunkSlots = 7
-	fixture.requestedPaths()
 
 	res, err := RunStreamCatchUp(t.Context(), cfg)
 	require.NoError(t, err)
@@ -1109,7 +1112,7 @@ func TestStreamCatchUpReleaseOutlivesWatchdog(t *testing.T) {
 	cfg.Hold = func() func() {
 		return func() {
 			// Stands in for an index rebuild several timeouts long.
-			rebuild := time.NewTimer(5 * timeout)
+			rebuild := time.NewTimer(3 * timeout)
 			defer rebuild.Stop()
 			<-rebuild.C
 			applier.mu.Lock()

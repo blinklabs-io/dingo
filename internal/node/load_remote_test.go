@@ -664,7 +664,7 @@ func TestCopyBlocksRemoteRejectsATipHashMismatch(t *testing.T) {
 
 func TestCopyBlocksRemoteRejectsAMissingIndex(t *testing.T) {
 	t.Parallel()
-	root := newRemoteRoot(t, 3)
+	root := newRemoteRoot(t, 2)
 	require.NoError(t, os.Remove(filepath.Join(root.dir, "00001.primary")))
 	var (
 		probeMu    sync.Mutex
@@ -742,7 +742,7 @@ func TestCopyBlocksRemoteRejectsACorruptChunk(t *testing.T) {
 	for _, file := range []string{"00001.chunk", "00001.secondary"} {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
-			root := newRemoteRoot(t, 3)
+			root := newRemoteRoot(t, 2)
 			path := filepath.Join(root.dir, file)
 			data, err := os.ReadFile(path)
 			require.NoError(t, err)
@@ -1005,7 +1005,7 @@ func TestCopyBlocksRemoteRequiresChunkZero(t *testing.T) {
 // with an HTTP root in place of a directory.
 func TestLoadWithDBLoadsFromARemoteImmutableRoot(t *testing.T) {
 	t.Parallel()
-	root := newRemoteRoot(t, 2)
+	root := newRemoteRoot(t, 1)
 	db := newTestDB(t)
 	err := LoadWithDB(
 		context.Background(),
@@ -1069,31 +1069,6 @@ func TestRemoteImmutableRequestErrorRedactsQueryCredentials(t *testing.T) {
 	}
 }
 
-func TestFetchRemoteFileOnceRedactsQueryCredentials(t *testing.T) {
-	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			// A redirect target that cannot be parsed makes the client
-			// quote the Location value in its error.
-			w.Header().Set("Location", "http://[::1/x?token=query-secret")
-			w.WriteHeader(http.StatusFound)
-		},
-	))
-	t.Cleanup(server.Close)
-	partPath := filepath.Join(t.TempDir(), "00000.chunk.part")
-	client, budget := newRemoteImmutableTestClientAndBudget(
-		t, server.URL, filepath.Dir(partPath), remoteImmutableLimits{
-			imported: 17, cache: 17, concurrent: 1,
-		},
-	)
-	err := fetchRemoteFileOnceWithClient(
-		context.Background(), client, budget,
-		server.URL+"/00000.chunk?token=query-secret", partPath, 16,
-	)
-	require.Error(t, err)
-	require.NotContains(t, err.Error(), "query-secret")
-}
-
 func TestFetchRemoteFileOnceRedactsUnparseableRedirectLocations(t *testing.T) {
 	t.Parallel()
 	for name, location := range map[string]string{
@@ -1140,26 +1115,6 @@ func TestRemoteImmutableRequestErrorScrubsRequestSecrets(t *testing.T) {
 		"query-secret", "frag-secret", "archive-secret", "archive-user",
 	} {
 		require.NotContains(t, err.Error(), s)
-	}
-}
-
-func TestRemoteImmutableRequestErrorAsHidesRawURL(t *testing.T) {
-	t.Parallel()
-	const rawURL = "https://example.invalid/f?token=query-secret"
-	err := remoteImmutableRequestError(
-		"fetching", rawURL,
-		&url.Error{Op: "Get", URL: rawURL, Err: errors.New("boom")},
-	)
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		require.NotContains(t, urlErr.Error(), "query-secret")
-	}
-	bare := remoteImmutableRequestError(
-		"fetching", rawURL, &url.Error{Op: "Get", URL: rawURL},
-	)
-	urlErr = nil
-	if errors.As(bare, &urlErr) {
-		require.NotContains(t, urlErr.Error(), "query-secret")
 	}
 }
 

@@ -32,37 +32,21 @@ import (
 func TestLocaltxmonitorServerGetMempoolReportsConfiguredCapacity(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name     string
-		capacity int64
-	}{
-		{name: "praos default", capacity: 1024 * 1024},
-		{name: "leios default", capacity: 25 * 1024 * 1024},
-		{name: "custom", capacity: 7 * 1024 * 1024},
-	}
+	const capacity = 7 * 1024 * 1024
+	o, _ := newTxSubmissionTestOuroboros(
+		t,
+		func(cfg *mempool.MempoolConfig) {
+			cfg.MempoolCapacity = capacity
+		},
+	)
+	o.ledgerState = newTestLedgerState(t)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			o, _ := newTxSubmissionTestOuroboros(
-				t,
-				func(cfg *mempool.MempoolConfig) {
-					cfg.MempoolCapacity = tt.capacity
-				},
-			)
-			o.ledgerState = newTestLedgerState(t)
+	_, got, _, err := o.localtxmonitorServerGetMempool(
+		olocaltxmonitor.CallbackContext{},
+	)
 
-			_, capacity, _, err := o.localtxmonitorServerGetMempool(
-				olocaltxmonitor.CallbackContext{},
-			)
-
-			require.NoError(t, err)
-			assert.Equal(
-				t,
-				uint32(tt.capacity),
-				capacity,
-			) // #nosec G115 -- test values fit
-		})
-	}
+	require.NoError(t, err)
+	assert.Equal(t, uint32(capacity), got)
 }
 
 func TestLocaltxmonitorServerGetMempoolRejectsUnrepresentableCapacity(

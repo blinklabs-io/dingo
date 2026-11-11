@@ -16,10 +16,16 @@ package chainsync_test
 
 import (
 	"net"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -213,4 +219,252 @@ func TestDemotedRootIsNotRepromoted(t *testing.T) {
 		observabilityOnly(t, state, root),
 		"a demoted root must stay an observer",
 	)
+}
+
+// newStaleTipState returns a root-capacity State in which a tip below the
+// returned threshold is stale. Raising it models the wall clock advancing.
+func newStaleTipState(t *testing.T) (*chainsync.State, *atomic.Uint64) {
+	t.Helper()
+	threshold := &atomic.Uint64{}
+	state := chainsync.NewStateWithConfig(nil, nil, chainsync.Config{
+		MaxClients:   rootTestSlots,
+		StallTimeout: chainsync.DefaultStallTimeout,
+		IsRoot: func(connId ouroboros.ConnectionId) bool {
+			return connId.RemoteAddr.(*net.TCPAddr).Port >= 100
+		},
+		AdvertisedTipStale: func(tip ochainsync.Tip) bool {
+			return tip.Point.Slot < threshold.Load()
+		},
+	})
+	return state, threshold
+}
+
+func addEligible(
+	t *testing.T,
+	state *chainsync.State,
+	connId ouroboros.ConnectionId,
+) {
+	t.Helper()
+	require.True(t, state.TryAddClientConnIdWithDirection(
+		connId, rootTestSlots, true,
+	))
+}
+
+func addObserved(
+	t *testing.T,
+	state *chainsync.State,
+	connId ouroboros.ConnectionId,
+) {
+	t.Helper()
+	require.True(t, state.TryAddObservedClientConnIdWithDirection(connId, true))
+}
+
+func requireObserving(
+	t *testing.T,
+	state *chainsync.State,
+	connId ouroboros.ConnectionId,
+	want bool,
+	msg string,
+) {
+	t.Helper()
+	observing, exists := state.ClientObservabilityOnly(connId)
+	require.True(t, exists)
+	require.Equal(t, want, observing, msg)
+}
+
+func staleTestTip(slot uint64) ochainsync.Tip {
+	return ochainsync.Tip{Point: ocommon.NewPoint(slot, []byte("tip"))}
+}
+
+// A freed slot must not go to a root advertising a stale tip: idle at that tip
+// it may never send the message that would demote it again.
+func TestFreedSlotSkipsStaleAdvertisingRoot(t *testing.T) {
+	t.Parallel()
+	state, threshold := newStaleTipState(t)
+	holder := newTestConnId(1)
+	staleRoot := newTestConnId(100)
+	addEligible(t, state, holder)
+	addObserved(t, state, staleRoot)
+	threshold.Store(100)
+	require.True(
+		t,
+		state.RecordClientAdvertisedTip(staleRoot, staleTestTip(10)),
+	)
+
+	require.True(t, state.SetClientObservabilityOnly(holder, true))
+	requireObserving(t, state, staleRoot, true,
+		"a stale-advertising root must not take the freed slot")
+	require.False(t, state.SetClientObservabilityOnly(staleRoot, false),
+		"a stale-advertising root must refuse direct promotion")
+
+	// The rule can lift with no message from the peer, as on Genesis exit.
+	threshold.Store(0)
+	require.True(t, state.SetClientObservabilityOnly(staleRoot, false),
+		"a tip no longer stale must be promotable")
+}
+
+// A stale-advertising root must not consume the handoff. Map iteration picks
+// the candidate, so one round would pass by chance half the time.
+func TestFreedSlotReachesFreshRootPastStaleRoot(t *testing.T) {
+	t.Parallel()
+	for range 64 {
+		state, threshold := newStaleTipState(t)
+		holder := newTestConnId(1)
+		staleRoot := newTestConnId(100)
+		freshRoot := newTestConnId(101)
+		addEligible(t, state, holder)
+		addObserved(t, state, staleRoot)
+		addObserved(t, state, freshRoot)
+		threshold.Store(100)
+		state.RecordClientAdvertisedTip(staleRoot, staleTestTip(10))
+		state.RecordClientAdvertisedTip(freshRoot, staleTestTip(500))
+
+		require.True(t, state.SetClientObservabilityOnly(holder, true))
+		requireObserving(t, state, freshRoot, false,
+			"the freed slot must reach the fresh root")
+	}
+}
+
+// Promotion judges the stored tip when it is decided: a tip fresh when the
+// peer last spoke can go stale while the peer stays silent.
+func TestObserverTipAgingStaleRefusesPromotion(t *testing.T) {
+	t.Parallel()
+	state, threshold := newStaleTipState(t)
+	observer := newTestConnId(1)
+	addObserved(t, state, observer)
+	require.False(
+		t,
+		state.RecordClientAdvertisedTip(observer, staleTestTip(50)),
+	)
+
+	threshold.Store(100)
+	require.False(t, state.SetClientObservabilityOnly(observer, false),
+		"a tip that aged past the threshold must refuse promotion")
+	requireObserving(t, state, observer, true,
+		"the observer must keep waiting")
+}
+
+// An eligible peer sends nothing when its tip ages past the threshold, so the
+// sweep demotes it. A client with no advertised tip is left alone.
+func TestDemoteStaleAdvertisingClientsAgesOutIdleClient(t *testing.T) {
+	t.Parallel()
+	state, threshold := newStaleTipState(t)
+	idle := newTestConnId(1)
+	unknown := newTestConnId(2)
+	addEligible(t, state, idle)
+	addEligible(t, state, unknown)
+	require.False(t, state.RecordClientAdvertisedTip(idle, staleTestTip(50)))
+	require.Empty(t, state.DemoteStaleAdvertisingClients(),
+		"a fresh tip must not be demoted")
+
+	threshold.Store(100)
+	require.Equal(
+		t,
+		[]ouroboros.ConnectionId{idle},
+		state.DemoteStaleAdvertisingClients(),
+	)
+	requireObserving(t, state, idle, true,
+		"an idle peer whose tip aged out must lose its slot")
+	requireObserving(t, state, unknown, false,
+		"a client with no advertised tip must keep its slot")
+	require.Empty(t, state.DemoteStaleAdvertisingClients(),
+		"a demoted client must not be demoted again")
+}
+
+// newPausableStaleTipState is newStaleTipState with a pause: after the returned
+// arm is called, the next staleness judgement closes judging and then blocks
+// until release, holding the decision between its verdict and its effect.
+func newPausableStaleTipState(t *testing.T) (
+	state *chainsync.State,
+	threshold *atomic.Uint64,
+	arm func(),
+	judging <-chan struct{},
+	release func(),
+) {
+	t.Helper()
+	threshold = &atomic.Uint64{}
+	judged := make(chan struct{})
+	released := make(chan struct{})
+	var armed atomic.Bool
+	var releaseOnce sync.Once
+	release = func() { releaseOnce.Do(func() { close(released) }) }
+	// A failing assertion must not leave the decision goroutine blocked.
+	t.Cleanup(release)
+	state = chainsync.NewStateWithConfig(nil, nil, chainsync.Config{
+		MaxClients:   rootTestSlots,
+		StallTimeout: chainsync.DefaultStallTimeout,
+		AdvertisedTipStale: func(tip ochainsync.Tip) bool {
+			stale := tip.Point.Slot < threshold.Load()
+			if armed.CompareAndSwap(true, false) {
+				close(judged)
+				<-released
+			}
+			return stale
+		},
+	})
+	return state, threshold, func() { armed.Store(true) }, judged, release
+}
+
+// A peer that advertises a fresh tip after the sweep judged its old one must
+// keep its slot: the verdict is about a tip the peer no longer advertises.
+func TestDemoteStaleAdvertisingClientsKeepsRefreshedClient(t *testing.T) {
+	t.Parallel()
+	state, threshold, arm, judging, release := newPausableStaleTipState(t)
+	client := newTestConnId(1)
+	addEligible(t, state, client)
+	require.False(t, state.RecordClientAdvertisedTip(client, staleTestTip(50)))
+	threshold.Store(100)
+
+	arm()
+	demoted := make(chan []ouroboros.ConnectionId, 1)
+	go func() { demoted <- state.DemoteStaleAdvertisingClients() }()
+	testutil.RequireReceive(t, judging, 5*time.Second, "sweep judged the tip")
+	require.False(t, state.RecordClientAdvertisedTip(client, staleTestTip(500)))
+	release()
+
+	got := testutil.RequireReceive(t, demoted, 5*time.Second, "sweep finished")
+	require.Empty(t, got, "a refreshed client must not be reported demoted")
+	requireObserving(t, state, client, false,
+		"a client that refreshed its tip must keep its slot")
+}
+
+// A peer that advertises a stale tip after promotion judged its old one must
+// not take the slot: idle at that tip it would hold it until the next sweep.
+func TestPromotionRefusedWhenTipGoesStaleWhileJudging(t *testing.T) {
+	t.Parallel()
+	state, threshold, arm, judging, release := newPausableStaleTipState(t)
+	observer := newTestConnId(1)
+	addObserved(t, state, observer)
+	threshold.Store(100)
+	require.False(
+		t,
+		state.RecordClientAdvertisedTip(observer, staleTestTip(500)),
+	)
+
+	arm()
+	promoted := make(chan bool, 1)
+	go func() {
+		promoted <- state.SetClientObservabilityOnly(observer, false)
+	}()
+	testutil.RequireReceive(
+		t,
+		judging,
+		5*time.Second,
+		"promotion judged the tip",
+	)
+	require.True(t, state.RecordClientAdvertisedTip(observer, staleTestTip(10)))
+	release()
+
+	require.False(
+		t,
+		testutil.RequireReceive(
+			t,
+			promoted,
+			5*time.Second,
+			"promotion finished",
+		),
+		"a promotion judged on a replaced tip must be refused",
+	)
+	requireObserving(t, state, observer, true,
+		"a client now advertising a stale tip must stay an observer")
 }

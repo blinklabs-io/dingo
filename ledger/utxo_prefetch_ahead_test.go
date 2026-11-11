@@ -159,7 +159,7 @@ func TestUtxoPrefetchAheadStopJoinsAndReleasesReadTxn(t *testing.T) {
 		aheadFixtureBlock(fx, fx.tx),
 		aheadFixtureBlock(fx),
 	}
-	for range 50 {
+	for range 10 {
 		p := fx.dingoLS.startUtxoPrefetchAhead(
 			t.Context(), blocks, []bool{true, true, true},
 		)

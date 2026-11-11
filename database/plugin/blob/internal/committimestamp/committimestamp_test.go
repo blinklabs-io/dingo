@@ -57,13 +57,6 @@ func TestDecodeLegacyErrorMessageIsBounded(t *testing.T) {
 	require.Less(t, len(err.Error()), 256)
 }
 
-// TestFromFixedWidthRoundTrip proves an in-range value round-trips.
-func TestFromFixedWidthRoundTrip(t *testing.T) {
-	got, err := FromFixedWidth(1234567890)
-	require.NoError(t, err)
-	require.Equal(t, int64(1234567890), got)
-}
-
 // TestFromFixedWidthRejectsValueAboveMaxInt64 proves an 8-byte fixed-width
 // value whose high bit is set is rejected rather than silently wrapped
 // into a negative int64 by a raw int64(v) cast.

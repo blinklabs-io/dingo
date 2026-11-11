@@ -96,11 +96,6 @@ func TestNodeAdapterScripts(t *testing.T) {
 	require.Equal(t, 5, total)
 	require.Equal(
 		t,
-		[]string{hex.EncodeToString(v1), hex.EncodeToString(v2)}[:0],
-		hashes[:0],
-	)
-	require.Equal(
-		t,
 		[]string{hex.EncodeToString(v2), hex.EncodeToString(v3)},
 		hashes,
 	)

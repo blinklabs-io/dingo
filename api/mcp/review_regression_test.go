@@ -52,10 +52,9 @@ func reviewSession(t *testing.T, server *mcp.Server) *mcp.ClientSession {
 	return cs
 }
 
-func TestReviewAuthenticationAttemptsAreLimited(t *testing.T) {
+func TestReviewRequestsAreLimited(t *testing.T) {
 	t.Parallel()
 	handler := SecurityMiddleware(
-		"secret",
 		0.001,
 		1,
 		nil,
@@ -63,7 +62,7 @@ func TestReviewAuthenticationAttemptsAreLimited(t *testing.T) {
 			func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) },
 		),
 	)
-	for _, want := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
+	for _, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest("GET", "/mcp", nil))
 		require.Equal(t, want, rec.Code)
@@ -472,30 +471,6 @@ func TestReviewTipAndLookupFailures(t *testing.T) {
 	require.NotContains(t, failed, "Transaction not found")
 	tip = callTool(t, cs, "get_cardano_tip", map[string]any{}, true)
 	require.Contains(t, tip, "database is closed")
-}
-
-func TestReviewResourceDiscoveryUsesDefaultTimeout(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	require.NoError(t, err)
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { _ = db.Close() })
-	_, err = db.Exec(`CREATE TABLE "transaction"(slot INTEGER, block_hash BLOB)`)
-	require.NoError(t, err)
-
-	cfg := DefaultProviderConfig()
-	cfg.QueryTimeout = time.Nanosecond
-	server, _, err := NewMCPServer(t.Context(), cfg, ProviderDependencies{SQLDB: db, Network: "preview"})
-	require.NoError(t, err)
-	cs := reviewSession(t, server)
-
-	resources, err := cs.ListResources(t.Context(), nil)
-	require.NoError(t, err)
-	for _, resource := range resources.Resources {
-		if resource.URI == "dingo://schema/table/transaction" {
-			return
-		}
-	}
-	t.Fatal("table schema resource was omitted during server setup")
 }
 
 func TestReviewResourceTimeout(t *testing.T) {

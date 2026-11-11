@@ -66,8 +66,8 @@ type stateMetrics struct {
 	// on the single ledger pipeline, so it is time every block queued behind
 	// the batch also spends waiting.
 	// Only references ledger application actually reads are waited on (see
-	// splitTipWaitByApplyDependency); the rest are prefetched in the
-	// background and never observed here.
+	// splitTipWaitByApplyDependency); the rest are left to leios-notify offers
+	// and never observed here.
 	leiosEbWaitSeconds *prometheus.HistogramVec
 	// Pre-materialized observers for the outcome label values, so the apply
 	// path does not resolve a label on every wait.

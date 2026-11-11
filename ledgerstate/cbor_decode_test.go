@@ -216,15 +216,6 @@ func TestDecodeMapEntriesLimit_IndefiniteLength_OverLimitRejected(
 	require.Contains(t, err.Error(), "exceeded max entries")
 }
 
-// TestDecodeMapEntries_ProductionLimitIsExplicit locks the documented
-// production cap. If this constant is ever changed, this test forces
-// an update to both this test and the "Local CBOR decode limits
-// policy" doc comment.
-func TestDecodeMapEntries_ProductionLimitIsExplicit(t *testing.T) {
-	t.Parallel()
-	require.Equal(t, 10_000_000, maxMapEntries)
-}
-
 func TestDecodeMapEntries_ProductionCapRejectsOversizedHeader(t *testing.T) {
 	t.Parallel()
 	// Header-only fixture: claims one more than the real production

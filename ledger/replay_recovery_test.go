@@ -79,6 +79,7 @@ func newReplayRecoveryLedgerState(
 // in the opposite order, so this test fails against the unfixed code instead
 // of merely checking that both mutexes appear somewhere in the function.
 func TestReplayRecoveryRollbackLockOrder(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(
 		fset,
@@ -2242,7 +2243,7 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	// This recovery test uses a synthetic Shelley-only cache. Keep the config
 	// Shelley-only so the forecast shape does not alter recovery semantics.
 	recoveryCfg := &nodeconfig.CardanoNodeConfig{}
-	err = recoveryCfg.LoadShelleyGenesisFromReader(
+	err = completeTestShelleyGenesis(recoveryCfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(
 			`{"activeSlotsCoeff":0.05,"securityParam":432,"slotsPerKESPeriod":129600,"systemStart":"2022-10-25T00:00:00Z"}`,
 		),
@@ -2818,6 +2819,7 @@ func TestReplayRecoveryKeepsPrimaryRewindForDeeperKnownProducer(
 }
 
 func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
+	t.Parallel()
 	ls := newReplayRecoveryAuditLedger(t, true)
 	const pruneFloorSyncKey = database.ConsumedUtxoPruneFloorSyncKey
 	require.NoError(t, ls.db.SetSyncState(pruneFloorSyncKey, "120", nil))
@@ -4708,7 +4710,7 @@ func newTestShelleyGenesisCfgWithK(
 	cfg := &configcardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 	return cfg
 }

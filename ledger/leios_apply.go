@@ -191,7 +191,16 @@ func (ls *LedgerState) applyEndorserBlock(
 	rawTxs []cbor.RawMessage,
 ) (int, uint64, error) {
 	ls.publishUntickedClosureAfterCommit(ctx, txn, rbPoint)
-	return ls.applyEndorserBlockInContext(ctx, txn, rbPoint, rbBlockNumber, ebSlot, ebHashBytes, rawTxs, nil)
+	return ls.applyEndorserBlockInContext(
+		ctx,
+		txn,
+		rbPoint,
+		rbBlockNumber,
+		ebSlot,
+		ebHashBytes,
+		rawTxs,
+		nil,
+	)
 }
 
 func (ls *LedgerState) applyEndorserBlockInContext(
@@ -399,7 +408,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				err,
 			)
 		}
-		validationEra, err := resolveValidationEra(
+		validationEra, err := resolveBlockValidationEra(
 			tx,
 			snapshot.currentEra,
 			snapshot.eraList,
@@ -666,7 +675,10 @@ func buildEndorserBlockBlob(
 	ebHash [lcommon.Blake2b256Size]byte,
 ) ([]byte, *database.BlockIngestionResult, error) {
 	if err := validateTransactionOutputIndexes(txs); err != nil {
-		return nil, nil, fmt.Errorf("validate endorser block output indexes: %w", err)
+		return nil, nil, fmt.Errorf(
+			"validate endorser block output indexes: %w",
+			err,
+		)
 	}
 	var buf bytes.Buffer
 	result := &database.BlockIngestionResult{
@@ -761,7 +773,9 @@ func buildEndorserBlockBlob(
 //     diffuses the endorser block with its ranking block, so it is already
 //     being pushed. Only the references that applying THIS batch actually
 //     reads are waited for (see splitTipWaitByApplyDependency); the rest
-//     are dispatched as background prefetch and never block the pipeline.
+//     are neither fetched nor waited for here: leios-notify offers drive
+//     their prefetch, since an announcement alone does not show that its
+//     sender holds the endorser block.
 //     The waits that remain run concurrently under one shared window and
 //     dispatch an active by-point fetch up front, so a batch costs at most
 //     one diffusion window rather than one per missing endorser block.
@@ -779,6 +793,15 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	ctx context.Context,
 	blocks []ledger.Block,
 ) error {
+	_, err := ls.ensureReadyEndorserPrefix(ctx, blocks, false)
+	return err
+}
+
+func (ls *LedgerState) ensureReadyEndorserPrefix(
+	ctx context.Context,
+	blocks []ledger.Block,
+	allowReadyPrefix bool,
+) (int, error) {
 	// Index each block's announced endorser block by the block's own hash so a
 	// certifying ranking block can resolve the endorser block its parent
 	// announced without a store round-trip (the parent is normally in the same
@@ -800,7 +823,12 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// parent announcement from this batch before falling back to persisted data.
 	for _, block := range blocks {
 		if err := ls.validateDijkstraLeiosCertificate(ctx, block, annByHash); err != nil {
-			return fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
+			return len(
+					blocks,
+				), fmt.Errorf(
+					"validate Dijkstra Leios certificate: %w",
+					err,
+				)
 		}
 	}
 	// Resolve CertRB parents that fall outside this batch from the block
@@ -829,13 +857,13 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	}
 	required, err := requiredCertifiedEndorserBlocks(infos, annByHash)
 	if err != nil {
-		return err
+		return len(blocks), err
 	}
 	if ls.config.EndorserBlockProvider == nil {
 		if len(required) == 0 {
-			return nil
+			return len(blocks), nil
 		}
-		return fmt.Errorf(
+		return len(blocks), fmt.Errorf(
 			"%w: no endorser block provider configured",
 			errCertifiedEndorserBlockUnavailable,
 		)
@@ -878,13 +906,14 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// mandatory certified endorser block that is still unavailable. It is the
 	// last-resort recovery step on every path that can reach
 	// ensureRequiredAvailable, including the two early returns below: a
-	// certified closure is mandatory whether or not the best-effort
-	// announcement window is configured, and returning "unavailable" without
+	// certified closure is mandatory whether or not the near-head diffusion
+	// wait is configured, and returning "unavailable" without
 	// having tried to fetch it is what left the pipeline restarting on an
 	// endorser block it had not fetched from any peer.
-	fetchMissingRequired := func(poll time.Duration) {
+	prefixAllowed := false
+	fetchMissingRequired := func(poll time.Duration) int {
 		if ls.leiosBackfill == nil {
-			return
+			return len(blocks)
 		}
 		batchCtx, cancel := context.WithTimeout(ctx, leiosBackfillMaxWait)
 		defer cancel()
@@ -896,27 +925,40 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			) {
 				continue
 			}
+			if prefixAllowed {
+				ready := leiosReadyApplyPrefix(
+					infos,
+					annByHash,
+					ls.config.EndorserBlockProvider,
+				)
+				// A half-full prefix bounds extra commits and certificate
+				// rechecks while the remaining closures fetch in the background.
+				if ready >= len(infos)-len(infos)/2 && ready < len(infos) {
+					return ready
+				}
+			}
 			if err := ls.leiosBackfill.fetchRequired(batchCtx, r, poll); err != nil {
 				fetchErrs[string(r.hash.Bytes())] = err
-				return
+				return len(blocks)
 			}
 		}
+		return len(blocks)
 	}
 
-	// A zero wait disables best-effort announcement waiting, but a certified
+	// A zero wait disables the near-head diffusion wait, but a certified
 	// closure remains mandatory: committing its CertRB without the closure
 	// would permanently omit transaction and certificate effects.
 	if ls.config.EndorserBlockWaitSlots == 0 {
 		fetchMissingRequired(leiosCertifiedFetchPoll)
-		return ensureRequiredAvailable()
+		return len(blocks), ensureRequiredAvailable()
 	}
 	slotLen := ls.shelleySlotLength()
 	if slotLen <= 0 {
 		// Without a known slot length the slot-denominated diffusion window
-		// cannot be converted to wall-clock. Best-effort announcements may
-		// still be skipped, but a certified closure must not be.
+		// cannot be converted to wall-clock. The diffusion wait is skipped,
+		// but a certified closure must not be.
 		fetchMissingRequired(leiosCertifiedFetchPoll)
-		return ensureRequiredAvailable()
+		return len(blocks), ensureRequiredAvailable()
 	}
 	//nolint:gosec // EndorserBlockWaitSlots is a small protocol window
 	timeout := time.Duration(ls.config.EndorserBlockWaitSlots) * slotLen
@@ -942,6 +984,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 		ls.config.EndorserBlockWaitSlots,
 		cached,
 	)
+	prefixAllowed = allowReadyPrefix && len(tipWait) == 0
 	// Historical backlog: start a by-point fetch for each certified closure.
 	// The fetches run concurrently in the background pool; the mandatory ones
 	// are completed by fetchMissingRequired below.
@@ -952,17 +995,11 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	}
 	// Near the head: block only on the references applying THIS batch reads.
 	// See splitTipWaitByApplyDependency for the contract.
-	blockingWait, prefetch := splitTipWaitByApplyDependency(tipWait, required)
-	// Best-effort references: never block the ledger pipeline on them. The
-	// fetch is dispatched in the background (deduped and concurrency-bounded by
-	// the backfiller) so the endorser block is in cache by the time something
-	// does depend on it, and this batch is delivered to ledgerProcessBlock
-	// immediately.
-	if ls.leiosBackfill != nil {
-		for _, r := range prefetch {
-			ls.leiosBackfill.spawn(ctx, r)
-		}
-	}
+	blockingWait, _ := splitTipWaitByApplyDependency(tipWait, required)
+	// An announcement does not promise that its sender holds the EB body.
+	// Fetching that best-effort reference before a notify offer can disconnect
+	// the shared peer. Leave these references to offer-driven prefetch;
+	// certified dependencies below still receive an active by-point fetch.
 	// Blocking references: one shared diffusion window for the whole batch,
 	// with an active by-point fetch dispatched up front for each one.
 	ls.awaitEndorserBlocks(ctx, blockingWait, timeout, poll)
@@ -973,13 +1010,24 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// skipped as "connection busy" does within microseconds, so one attempt per
 	// restart made at most one endorser block of progress per restart, or none
 	// at all when every connection was unusable.
-	fetchMissingRequired(poll)
-	return ensureRequiredAvailable()
+	ready := fetchMissingRequired(poll)
+	if ready < len(blocks) {
+		if err := ctx.Err(); err != nil {
+			return 0, fmt.Errorf(
+				"%w: prepare ready prefix: %w",
+				errCertifiedEndorserBlockUnavailable,
+				err,
+			)
+		}
+		return ready, nil
+	}
+	return len(blocks), ensureRequiredAvailable()
 }
 
 // splitTipWaitByApplyDependency partitions the near-head references into the
 // ones ledger application of this batch depends on (blocking) and the ones it
-// does not (prefetch, dispatched in the background and never waited on).
+// does not (left to leios-notify offers; the ledger neither fetches nor waits
+// for them).
 //
 // Application reads only certified closures: the endorser block announced by a
 // certifying ranking block's PARENT. A block's own announcement is never read
@@ -1105,8 +1153,9 @@ type leiosBlockInfo struct {
 }
 
 // requiredCertifiedEndorserBlocks returns the certified parent EBs whose
-// transactions are consensus ledger effects. Current announcements remain
-// best-effort until a later block certifies them. A certifying block whose
+// transactions are consensus ledger effects. A current announcement is not
+// required until a later block certifies it; until then the ledger does not
+// fetch it (leios-notify offers do). A certifying block whose
 // parent announcement cannot be resolved is not committed: proceeding would
 // commit a ledger state known to be incomplete.
 // Deduped by leiosEbRefKey (slot, hash), not hash alone: two certifying
@@ -1185,7 +1234,9 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 		if certificate != nil {
 			return ls.rejectLeiosCertifyingBlock(
 				block,
-				errors.New("certificate body is present without a certified header flag"),
+				errors.New(
+					"certificate body is present without a certified header flag",
+				),
 			)
 		}
 		return nil
@@ -1279,10 +1330,13 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 // classifyEndorserBlockFetches decides which endorser blocks to fetch for a
 // batch of ranking blocks, by where each block sits relative to the live head:
 //
-//   - Near the head (within waitSlots of wallSlot): current announcements are
-//     fetched, since a descendant may certify them and voting needs them, and
-//     so is a certifying block's parent announcement, because one ranking
-//     block may certify its parent's EB and announce a new EB.
+//   - Near the head (within waitSlots of wallSlot): current announcements and
+//     a certifying block's parent announcement are returned as tipWait, since
+//     one ranking block may certify its parent's EB and announce a new EB.
+//     The caller waits for and fetches only those apply reads (the certified
+//     closures, see splitTipWaitByApplyDependency); the other announcements
+//     are left to leios-notify offers, because an announcement alone does not
+//     show that its sender holds the endorser block.
 //   - Settled backlog (more than waitSlots below the head): certificate-driven.
 //     A settled endorser block is fetched only once a certifying ranking block
 //     certifies it -- the one announced by the CertRB's parent (prevHash).
@@ -1300,8 +1354,8 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 // can legitimately require the same hash at different slots, and a
 // hash-only dedup would drop the second requirement's fetch entirely. When
 // the wall-clock slot is unknown (wallKnown=false) every block is treated as
-// near-head, preserving announcement-driven behavior rather than silently
-// dropping fetches.
+// near-head, so a certified closure gets the diffusion wait and an active
+// fetch rather than being dropped.
 func classifyEndorserBlockFetches(
 	infos []leiosBlockInfo,
 	annByHash map[string]leiosEbRef,
@@ -1361,11 +1415,13 @@ func leiosAnnouncementFromBlockCbor(
 	if err != nil || len(top) == 0 {
 		return lcommon.Blake2b256{}, false
 	}
-	header, err := safedecode.Guard(func() (dijkstra.DijkstraBlockHeader, error) {
-		var header dijkstra.DijkstraBlockHeader
-		_, err := cbor.Decode(top[0], &header)
-		return header, err
-	})
+	header, err := safedecode.Guard(
+		func() (dijkstra.DijkstraBlockHeader, error) {
+			var header dijkstra.DijkstraBlockHeader
+			_, err := cbor.Decode(top[0], &header)
+			return header, err
+		},
+	)
 	if err != nil {
 		return lcommon.Blake2b256{}, false
 	}
@@ -1468,15 +1524,14 @@ func leiosStoredBlockDecodes(blockCbor []byte) error {
 // empty manifests when hammered, so the backfill must not flood it.
 const leiosBackfillConcurrency = 8
 
-// leiosRequiredConcurrency is a SEPARATE budget for mandatory certified
-// fetches, so a best-effort fetch can never starve one.
+// leiosRequiredConcurrency is a SEPARATE budget for the retried fetchRequired
+// path, so a background spawn can never starve it.
 //
-// spawn and fetchRequired used to share leiosBackfillConcurrency. A
-// best-effort spawn holds its slot for up to leiosBackfillMaxWait, so eight
-// slow ones could block a mandatory certified closure for two minutes and fail
-// the chunk -- and this path now dispatches near-head prefetches through spawn
-// as well, which makes that far more reachable than when only historical
-// backfill used it. Mandatory fetches are few (one certified closure per
+// spawn and fetchRequired used to share leiosBackfillConcurrency. A spawn
+// holds its slot for up to leiosBackfillMaxWait, so eight slow ones could
+// block a mandatory certified closure for two minutes and fail the chunk;
+// spawn serves both historical backfill and the near-head wait for certified
+// closures, so that is reachable at the head too. Mandatory fetches are few (one certified closure per
 // certifying block) so a small dedicated budget is enough, and it is separate
 // rather than carved out of the same channel because reserving inside one
 // semaphore needs two acquisitions and can deadlock.
@@ -1520,9 +1575,9 @@ func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
 
 // spawn starts a background by-point fetch of the endorser block referenced by
 // r unless it is already cached or a fetch is already in flight. It returns
-// immediately. Deduping by leiosEbRefKey (slot, hash) means the read-batch
-// prefetch and the per-chunk gate never fetch the same endorser-block
-// requirement twice, while two different slots requiring the same hash are
+// immediately. Deduping by leiosEbRefKey (slot, hash) means the historical
+// backfill, the near-head wait and fetchRequired never fetch the same
+// endorser-block requirement twice, while two different slots requiring the same hash are
 // still dispatched independently: a hash-only key would let the second
 // requirement's spawn find the first already in flight and silently no-op,
 // and then let awaitFetch's "not in flight" skip-fast fire the moment the
@@ -1588,8 +1643,8 @@ const (
 )
 
 // leiosCertifiedFetchPoll is the cache re-check cadence used when no
-// slot-derived polling granularity is available (the best-effort announcement
-// window is disabled, or the Shelley slot length is unknown). It only affects
+// slot-derived polling granularity is available (the near-head diffusion wait
+// is disabled, or the Shelley slot length is unknown). It only affects
 // how quickly a fetch already in flight for the same endorser block is noticed
 // to have landed.
 const leiosCertifiedFetchPoll = 10 * time.Millisecond
@@ -1709,8 +1764,8 @@ func (b *leiosBackfiller) fetchRequired(
 // fetchOnce runs one by-point fetch attempt for r, or waits for an equivalent
 // fetch another caller already has in flight. Deduping by leiosEbRefKey (slot,
 // hash) keeps a single fetch per endorser-block requirement; the waiting branch
-// is why a required endorser block already being fetched by the best-effort
-// spawn above is not fetched twice.
+// is why a required endorser block already being fetched by spawn is not
+// fetched twice.
 func (b *leiosBackfiller) fetchOnce(
 	ctx context.Context,
 	r leiosEbRef,
@@ -1725,7 +1780,7 @@ func (b *leiosBackfiller) fetchOnce(
 	}
 	defer b.inflight.Delete(key)
 	// Reserved budget: a mandatory certified fetch must never queue behind
-	// best-effort spawns, which can hold their slots for leiosBackfillMaxWait.
+	// background spawns, which can hold their slots for leiosBackfillMaxWait.
 	select {
 	case b.reqSem <- struct{}{}:
 	case <-ctx.Done():
@@ -1791,9 +1846,8 @@ func (ls *LedgerState) waitForEndorserBlock(
 			// so: this function returns, and ensureReferencedEndorserBlocks
 			// then runs its mandatory-closure fetch and availability check as
 			// usual, so a cancelled pass still fails the chunk when a certified
-			// closure is missing and still proceeds when every reference was
-			// best-effort. That is what the code did before the wait was
-			// instrumented; only the classification is new.
+			// closure is missing. That is what the code did before the wait
+			// was instrumented; only the classification is new.
 			if !errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
 				ls.metrics.observeLeiosEbWait(
 					time.Since(start),
@@ -1870,9 +1924,9 @@ const (
 // peers. If it cached the block, the referencing ranking block can apply it.
 // If it finished without caching (every peer's response was flaky/incomplete,
 // e.g. a single connection that cannot serve a large endorser block's tail),
-// return promptly. The caller distinguishes best-effort announcements from
-// mandatory certified closures: the former may advance, while the
-// latter abort the chunk and are retried by the ledger pipeline.
+// return promptly. The referenced endorser block is a certified closure, so
+// the caller aborts the chunk when it stays unavailable and the ledger
+// pipeline retries it.
 // leiosBackfillMaxWait is a backstop against a fetch that neither caches nor
 // clears (the fetch itself is bounded by the leios-fetch timeout, so this is
 // rarely reached).
@@ -1933,7 +1987,10 @@ func (ls *LedgerState) applyUntickedBoundaryClosure(
 		return err
 	}
 	if !bytes.Equal(block.PrevHash().Bytes(), parentPoint.Hash) {
-		return fmt.Errorf("%w: boundary closure does not extend the ledger tip", errStaleChainIterator)
+		return fmt.Errorf(
+			"%w: boundary closure does not extend the ledger tip",
+			errStaleChainIterator,
+		)
 	}
 	if err := ls.validateDijkstraLeiosCertificate(ctx, block, nil); err != nil {
 		return err
@@ -1953,7 +2010,16 @@ func (ls *LedgerState) applyUntickedBoundaryClosure(
 		return errCertifiedEndorserBlockUnavailable
 	}
 	point := ocommon.Point{Slot: block.SlotNumber(), Hash: block.Hash().Bytes()}
-	_, donation, err := ls.applyEndorserBlockInContext(ctx, txn, point, block.BlockNumber(), slot, hash.Bytes(), txs, &parentPoint.Slot)
+	_, donation, err := ls.applyEndorserBlockInContext(
+		ctx,
+		txn,
+		point,
+		block.BlockNumber(),
+		slot,
+		hash.Bytes(),
+		txs,
+		&parentPoint.Slot,
+	)
 	if err != nil {
 		if validationErr, ok := errors.AsType[*leiosEndorserBlockValidationError](err); ok {
 			return ls.rejectLeiosCertifyingBlock(block, validationErr)
@@ -1978,7 +2044,11 @@ type pendingLeiosClosure struct {
 
 // publishUntickedClosureAfterCommit keeps transaction Apply notifications with
 // the certifying RB's commit, including when a failed body is retried.
-func (ls *LedgerState) publishUntickedClosureAfterCommit(ctx context.Context, txn *database.Txn, point ocommon.Point) {
+func (ls *LedgerState) publishUntickedClosureAfterCommit(
+	ctx context.Context,
+	txn *database.Txn,
+	point ocommon.Point,
+) {
 	ls.RLock()
 	pending := ls.untickedClosure
 	ls.RUnlock()

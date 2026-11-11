@@ -20,7 +20,9 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 
+	"github.com/blinklabs-io/dingo/internal/txsize"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
@@ -679,18 +681,6 @@ func txHasRedeemers(tx lcommon.Transaction) bool {
 	return false
 }
 
-func buildIndexedUtxoValidationRules(
-	descriptors []lcommon.UtxoValidationRuleDescriptor,
-	rules []lcommon.UtxoValidationRuleFunc,
-	skipRuleId lcommon.UtxoValidationRuleId,
-) []indexedUtxoValidationRule {
-	return buildIndexedUtxoValidationRulesWithSkips(
-		descriptors,
-		rules,
-		[]lcommon.UtxoValidationRuleId{skipRuleId},
-	)
-}
-
 func buildIndexedUtxoValidationRulesWithSkips(
 	descriptors []lcommon.UtxoValidationRuleDescriptor,
 	rules []lcommon.UtxoValidationRuleFunc,
@@ -718,6 +708,45 @@ func buildIndexedUtxoValidationRulesWithSkips(
 			validationFunc: validationFunc,
 		})
 	}
+	return ret
+}
+
+// buildSizeFeeValidationRules builds an era's rule list with the upstream
+// max-size and minimum-fee rules replaced by local ones. The upstream rules
+// size a transaction with common.TxSize, which discounts the IsValid byte only
+// for a definite-length four-element envelope, so an indefinite-length or
+// wide-header envelope is sized by its wire length. The replacements sit at
+// the upstream rules' positions so error ordering is unchanged.
+func buildSizeFeeValidationRules(
+	descriptors []lcommon.UtxoValidationRuleDescriptor,
+	rules []lcommon.UtxoValidationRuleFunc,
+	skipRuleIds []lcommon.UtxoValidationRuleId,
+	maxSize lcommon.UtxoValidationRuleFunc,
+	minFee lcommon.UtxoValidationRuleFunc,
+) []indexedUtxoValidationRule {
+	skips := append(
+		slices.Clone(skipRuleIds),
+		lcommon.UtxoValidationRuleMaxTxSize,
+		lcommon.UtxoValidationRuleFeeTooSmall,
+	)
+	ret := buildIndexedUtxoValidationRulesWithSkips(descriptors, rules, skips)
+	ret = append(ret,
+		indexedUtxoValidationRule{
+			index: resolveUtxoValidationSkipIndex(
+				descriptors, rules, lcommon.UtxoValidationRuleMaxTxSize,
+			),
+			validationFunc: maxSize,
+		},
+		indexedUtxoValidationRule{
+			index: resolveUtxoValidationSkipIndex(
+				descriptors, rules, lcommon.UtxoValidationRuleFeeTooSmall,
+			),
+			validationFunc: minFee,
+		},
+	)
+	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
+		return a.index - b.index
+	})
 	return ret
 }
 
@@ -839,32 +868,25 @@ func SafeAddExUnits(
 	}, nil
 }
 
-// txTypeAlonzo is the first era whose on-wire CBOR
-// includes the 1-byte IsValid boolean field.
-const txTypeAlonzo = 4
-
-// TxSizeForFee computes the transaction size used in the
-// Cardano fee formula. Per the Haskell ledger's
-// toCBORForSizeComputation, this is the 3-element CBOR
-// encoding [body, witnesses, auxiliary_data] — the
-// IsValid boolean is excluded for backward compatibility
-// with Mary-era transaction sizes. Since both 0x83 and
-// 0x84 are 1-byte CBOR headers, the difference from the
-// on-wire 4-element format is exactly the 1-byte IsValid
-// field. Pre-Alonzo transactions (Byron through Mary) do
-// not contain an IsValid byte, so their full CBOR length
-// is the fee-relevant size — except when the transaction
-// was rebuilt from block components, which
-// preAlonzoRebuiltWireSize handles.
+// TxSizeForFee computes the transaction size used in the Cardano fee formula.
+// For Alonzo through Conway, toCBORForSizeComputation uses a canonical
+// three-element array [body, witnesses, auxiliary_data]. The retained
+// components keep their exact bytes while non-canonical outer framing and an
+// optional IsValid component do not contribute. Pre-Alonzo transactions use
+// their full CBOR length except when preAlonzoRebuiltWireSize reconstructs a
+// transaction assembled from block components. Dijkstra retains its own
+// three-component envelope behavior.
 func TxSizeForFee(tx lcommon.Transaction) uint64 {
 	if size, ok := preAlonzoRebuiltWireSize(tx); ok {
 		return size
 	}
-	fullSize := uint64(len(tx.Cbor()))
-	if fullSize > 0 && tx.Type() >= txTypeAlonzo {
-		return fullSize - 1
+	if tx.Type() < 0 {
+		return uint64(len(tx.Cbor()))
 	}
-	return fullSize
+	return txsize.FromCBOR(
+		uint(tx.Type()), // #nosec G115 -- transaction era IDs are non-negative
+		tx.Cbor(),
+	)
 }
 
 // preAlonzoRebuiltWireSize returns the wire size of a Shelley or Allegra
@@ -967,13 +989,75 @@ func ValidateTxSize(
 ) error {
 	size := TxSizeForFee(tx)
 	if size > uint64(maxTxSize) {
-		return fmt.Errorf(
-			"transaction size %d exceeds maximum %d",
-			size,
-			maxTxSize,
-		)
+		return validationErrorWithCause{
+			message: fmt.Sprintf(
+				"transaction size %d exceeds maximum %d",
+				size,
+				maxTxSize,
+			),
+			cause: shelley.MaxTxSizeUtxoError{
+				TxSize:    uint(size), // #nosec G115 -- size is compared against a uint above
+				MaxTxSize: maxTxSize,
+			},
+		}
 	}
 	return nil
+}
+
+// maxTxSizeRule adapts ValidateTxSize to a UTxO validation rule so an era can
+// replace the upstream max-size rule, which measures the wire length of the
+// transaction rather than TxSizeForFee. maxTxSize extracts the limit from the
+// era's protocol parameters.
+func maxTxSizeRule(
+	maxTxSize func(lcommon.ProtocolParameters) (uint, bool),
+) lcommon.UtxoValidationRuleFunc {
+	return func(
+		tx lcommon.Transaction,
+		_ uint64,
+		_ lcommon.LedgerState,
+		pp lcommon.ProtocolParameters,
+	) error {
+		limit, ok := maxTxSize(pp)
+		if !ok {
+			return ErrIncompatibleProtocolParams
+		}
+		return ValidateTxSize(tx, limit)
+	}
+}
+
+// feeParams are the protocol parameters the Alonzo-family minimum-fee rule
+// reads.
+type feeParams struct {
+	minFeeA uint
+	minFeeB uint
+	costs   lcommon.ExUnitPrice
+}
+
+// minFeeRule adapts ValidateTxFee to a UTxO validation rule so an era can
+// replace the upstream fee rule, which sizes the transaction by its wire
+// length rather than TxSizeForFee.
+func minFeeRule(
+	params func(lcommon.ProtocolParameters) (feeParams, bool),
+) lcommon.UtxoValidationRuleFunc {
+	return func(
+		tx lcommon.Transaction,
+		_ uint64,
+		_ lcommon.LedgerState,
+		pp lcommon.ProtocolParameters,
+	) error {
+		fp, ok := params(pp)
+		if !ok {
+			return ErrIncompatibleProtocolParams
+		}
+		var pricesMem, pricesSteps *big.Rat
+		if fp.costs.MemPrice != nil {
+			pricesMem = fp.costs.MemPrice.ToBigRat()
+		}
+		if fp.costs.StepPrice != nil {
+			pricesSteps = fp.costs.StepPrice.ToBigRat()
+		}
+		return ValidateTxFee(tx, fp.minFeeA, fp.minFeeB, pricesMem, pricesSteps)
+	}
 }
 
 // ValidateTxExUnits checks that total execution units
@@ -1391,10 +1475,16 @@ func ValidateTxFee(
 	if txFee.Cmp(minFeeBig) >= 0 {
 		return nil
 	}
-	return fmt.Errorf(
-		"transaction fee %d is less than the calculated "+
-			"minimum fee %d",
-		txFee,
-		minFeeBig,
-	)
+	return validationErrorWithCause{
+		message: fmt.Sprintf(
+			"transaction fee %d is less than the calculated "+
+				"minimum fee %d",
+			txFee,
+			minFeeBig,
+		),
+		cause: shelley.FeeTooSmallUtxoError{
+			Provided: txFee,
+			Min:      minFeeBig,
+		},
+	}
 }

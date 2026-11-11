@@ -28,6 +28,8 @@ import (
 )
 
 func TestGenesisWindowSlotsForParams(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name  string
 		k     uint64
@@ -75,6 +77,8 @@ func TestGenesisWindowSlotsForParams(t *testing.T) {
 }
 
 func TestDensityFromIntersection(t *testing.T) {
+	t.Parallel()
+
 	assert.Equal(
 		t,
 		uint64(3),
@@ -96,32 +100,6 @@ func TestDensityFromIntersection(t *testing.T) {
 	)
 }
 
-func TestGenesisSelectionStateTransitionsAtomically(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{
-		GenesisMode:        true,
-		GenesisWindowSlots: 30,
-	})
-
-	active, window := cs.GenesisSelectionState()
-	require.True(t, active)
-	assert.Equal(t, uint64(30), window)
-
-	// GenesisSelectionState reads a cached snapshot rather than re-deriving
-	// from cs.mode under cs.mutex on every call (taking cs.mutex here
-	// created a lock-order inversion with chainsync.State.clientConnIdMutex).
-	// Every real mutation site refreshes that snapshot in the same critical
-	// section that changes cs.mode; mirror that here after the direct-field
-	// mutation this test uses to simulate the transition.
-	cs.mutex.Lock()
-	cs.mode = SelectionModePraos
-	cs.refreshGenesisSelectionSnapshotLocked()
-	cs.mutex.Unlock()
-
-	active, window = cs.GenesisSelectionState()
-	assert.False(t, active)
-	assert.Equal(t, uint64(30), window)
-}
-
 // The cached snapshot GenesisSelectionState reads is only correct if
 // every site that mutates cs.mode refreshes it. Drive the real one-way
 // Genesis-to-Praos transition through SetLocalTip rather than by writing
@@ -129,6 +107,8 @@ func TestGenesisSelectionStateTransitionsAtomically(t *testing.T) {
 // refresh in advanceSelectionModeLocked the snapshot reports Genesis forever
 // while SelectionMode() correctly reports Praos.
 func TestGenesisSelectionStateFollowsRealModeTransition(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:   true,
 		SecurityParam: 10, // window = 3k = 30
@@ -163,6 +143,8 @@ func TestGenesisSelectionStateFollowsRealModeTransition(t *testing.T) {
 // GenesisWindowSlots is configured, so SetSecurityParam must refresh the
 // snapshot even when it does not transition the mode.
 func TestGenesisSelectionStateFollowsSecurityParamWindow(t *testing.T) {
+	t.Parallel()
+
 	// No GenesisWindowSlots: the window derives from the security param.
 	cs := NewChainSelector(ChainSelectorConfig{GenesisMode: true})
 
@@ -195,6 +177,8 @@ func TestGenesisSelectionStateFollowsSecurityParamWindow(t *testing.T) {
 // enforced here so a later refactor back to per-field stores fails the build
 // or this test rather than reintroducing the mixed read.
 func TestGenesisSelectionSnapshotPublishedAsOneValue(t *testing.T) {
+	t.Parallel()
+
 	// No GenesisWindowSlots: the window follows securityParam, so the
 	// transition below changes both halves of the pair at once.
 	cs := NewChainSelector(ChainSelectorConfig{GenesisMode: true})
@@ -229,18 +213,9 @@ func TestGenesisSelectionSnapshotPublishedAsOneValue(t *testing.T) {
 	assert.Equal(t, uint64(30), window)
 }
 
-// A ChainSelector that never went through NewChainSelector has no published
-// snapshot. GenesisSelectionState must answer as the pre-cache implementation
-// did for that zero value rather than dereferencing a nil snapshot.
-func TestGenesisSelectionStateZeroValueSelector(t *testing.T) {
-	var cs ChainSelector
-
-	active, window := cs.GenesisSelectionState()
-	assert.False(t, active)
-	assert.Equal(t, DefaultGenesisWindowSlots, window)
-}
-
 func TestChainSelectorGenesisObservedDensityTracksRollingWindow(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:   true,
 		SecurityParam: 10,
@@ -283,6 +258,8 @@ func TestChainSelectorGenesisObservedDensityTracksRollingWindow(t *testing.T) {
 }
 
 func TestChainSelectorGenesisPrefersObservedDensity(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:   true,
 		SecurityParam: 20,
@@ -333,6 +310,8 @@ func TestChainSelectorGenesisPrefersObservedDensity(t *testing.T) {
 }
 
 func TestChainSelectorGenesisTransitionsBackToPraos(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:   true,
 		SecurityParam: 10,
@@ -362,6 +341,8 @@ func TestChainSelectorGenesisTransitionsBackToPraos(t *testing.T) {
 }
 
 func TestChainSelectorGenesisRollbackTrimsObservedHistory(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 

@@ -3396,6 +3396,11 @@ type MetadataStore interface {
 	// Pseudo-DRep delegations are preserved. Returns the cleared account count.
 	ClearDanglingDRepDelegations(atSlot uint64, txn types.Txn) (int, error)
 
+	// ReconcileImportedDRepDelegations rejects dangling forward targets for
+	// authoritative baselines at exactly atSlot, then performs the PV10
+	// dangling-target cleanup and reverse-index reconciliation atomically.
+	ReconcileImportedDRepDelegations(atSlot uint64, txn types.Txn) error
+
 	// DeletePParamsAfterSlot removes protocol parameter records added after
 	// the given slot.
 	DeletePParamsAfterSlot(uint64, types.Txn) error
@@ -3536,6 +3541,14 @@ type AddressTransactionIndexRebuilder interface {
 		context.Context,
 		func(context.Context, models.Transaction) ([]models.AddressTransaction, error),
 	) error
+}
+
+// UtxoSpendStateReader optionally narrows consumed-input recovery reads. A nil
+// result means the reference is absent, including from any pending UTxO overlay.
+// Providers must observe the same transaction and overlay visibility as
+// GetUtxoIncludingSpent. Providers without this capability keep the full lookup.
+type UtxoSpendStateReader interface {
+	GetUtxoSpendState([]byte, uint32, types.Txn) (*models.UtxoSpendState, error)
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

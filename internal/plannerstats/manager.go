@@ -35,10 +35,10 @@ import (
 )
 
 // DefaultRefreshInterval is how often the worker re-runs the incremental
-// maintenance between epoch rollovers. A run that finds no table grown
-// roughly 25-fold since its statistics were recorded changes nothing, so a
-// short interval costs little; one that does find growth is what keeps the
-// planner from treating a table filled since startup as nearly empty.
+// maintenance between epoch rollovers. SQLite selects tables whose
+// statistics are absent or stale and samples their indexes with a temporary
+// analysis limit, so a table filled since startup need not wait until the
+// next epoch to have useful planner statistics.
 const DefaultRefreshInterval = time.Minute
 
 // shelleyProtocolMajor is the first protocol major version with an epoch

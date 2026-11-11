@@ -79,6 +79,9 @@ func rawInvalidTxTestBlock(
 func TestStoreRawBlockUtxoOffsetsAlignsInvalidTransactionIndexes(t *testing.T) {
 	t.Parallel()
 
+	// One database serves every case: each case writes in its own
+	// transaction and rolls it back, so no case sees another's rows.
+	db := newTestDB(t)
 	for _, tc := range []struct {
 		name    string
 		indexes []uint
@@ -94,7 +97,6 @@ func TestStoreRawBlockUtxoOffsetsAlignsInvalidTransactionIndexes(t *testing.T) {
 				rawInvalidTxTestBody(t, 1),
 				rawInvalidTxTestBody(t, 2),
 			}
-			db := newTestDB(t)
 			txn := db.BlobTxn(true)
 			defer txn.Rollback() //nolint:errcheck
 

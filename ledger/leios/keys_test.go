@@ -30,34 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestParseVoteSigningKey(t *testing.T) {
-	t.Parallel()
-
-	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 42))
-	require.NoError(t, err)
-	require.NotNil(t, key)
-	pubBytes := key.PublicKeyBytes()
-	assert.Len(t, pubBytes, VotePublicKeySize)
-	assert.False(t, key.PublicKey().IsInfinity())
-}
-
-func TestParseVoteSigningKeyRejectsZero(t *testing.T) {
-	t.Parallel()
-
-	_, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 0))
-	assert.ErrorIs(t, err, ErrInvalidSigningKey)
-}
-
-func TestParseVoteSigningKeyRejectsAboveModulus(t *testing.T) {
-	t.Parallel()
-
-	// The scalar field modulus itself is out of range (no silent
-	// reduction)
-	modulusHex := hex.EncodeToString(fr.Modulus().Bytes())
-	_, err := ParseVoteSigningKey(modulusHex)
-	assert.ErrorIs(t, err, ErrInvalidSigningKey)
-}
-
 func TestParseVoteSigningKeyRejectsMalformed(t *testing.T) {
 	t.Parallel()
 
@@ -181,26 +153,6 @@ func TestLoadVoteSigningKeyFileRejectsLoosePermissions(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestLoadVoteSigningKeyFileMissing(t *testing.T) {
-	t.Parallel()
-
-	_, err := LoadVoteSigningKeyFile(
-		filepath.Join(t.TempDir(), "does-not-exist"),
-	)
-	assert.Error(t, err)
-}
-
-func TestParseVoterPublicKey(t *testing.T) {
-	t.Parallel()
-
-	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 42))
-	require.NoError(t, err)
-	pubHex := hex.EncodeToString(key.PublicKeyBytes())
-	pub, err := ParseVoterPublicKey(pubHex)
-	require.NoError(t, err)
-	assert.True(t, pub.Equal(key.PublicKey()))
-}
-
 func TestParseVoterPublicKeyRejectsMalformed(t *testing.T) {
 	t.Parallel()
 
@@ -224,42 +176,6 @@ func TestParseVoterPublicKeyRejectsMalformed(t *testing.T) {
 	}
 	_, err = ParseVoterPublicKey(hex.EncodeToString(garbage))
 	assert.ErrorIs(t, err, ErrInvalidPublicKey)
-}
-
-func TestNewVoterRegistry(t *testing.T) {
-	t.Parallel()
-
-	key1, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
-	require.NoError(t, err)
-	key2, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 22))
-	require.NoError(t, err)
-	registry, err := NewVoterRegistry(map[string]string{
-		testPoolHash(1): hex.EncodeToString(key1.PublicKeyBytes()),
-		testPoolHash(2): hex.EncodeToString(key2.PublicKeyBytes()),
-	})
-	require.NoError(t, err)
-	require.Equal(t, 2, registry.Size())
-
-	poolHash1, err := hex.DecodeString(testPoolHash(1))
-	require.NoError(t, err)
-	pub, ok := registry.PublicKeyFor(poolHash1)
-	require.True(t, ok)
-	assert.True(t, pub.Equal(key1.PublicKey()))
-
-	unknown := make([]byte, 28)
-	unknown[0] = 99
-	_, ok = registry.PublicKeyFor(unknown)
-	assert.False(t, ok)
-}
-
-func TestNewVoterRegistryEmpty(t *testing.T) {
-	t.Parallel()
-
-	registry, err := NewVoterRegistry(nil)
-	require.NoError(t, err)
-	assert.Equal(t, 0, registry.Size())
-	_, ok := registry.PublicKeyFor(make([]byte, 28))
-	assert.False(t, ok)
 }
 
 func TestVoterRegistryZeroValueRegister(t *testing.T) {

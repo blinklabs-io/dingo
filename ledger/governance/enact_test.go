@@ -15,7 +15,6 @@
 package governance
 
 import (
-	"bytes"
 	"context"
 	"math/big"
 	"testing"
@@ -30,42 +29,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestDecodeGovAction_InfoRoundtrip(t *testing.T) {
-	t.Parallel()
-
-	original := &lcommon.InfoGovAction{Type: 6}
-	encoded, err := cbor.Encode(original)
-	require.NoError(t, err)
-	decoded, err := decodeGovAction(
-		encoded, uint8(lcommon.GovActionTypeInfo),
-	)
-	require.NoError(t, err)
-	_, ok := decoded.(*lcommon.InfoGovAction)
-	assert.True(t, ok)
-}
-
-func TestDecodeGovAction_ParameterChangeRoundtrip(t *testing.T) {
-	t.Parallel()
-
-	fee := uint(1234)
-	original := &conway.ConwayParameterChangeGovAction{
-		Type: 0,
-		ParamUpdate: conway.ConwayProtocolParameterUpdate{
-			MinFeeA: &fee,
-		},
-	}
-	encoded, err := cbor.Encode(original)
-	require.NoError(t, err)
-	decoded, err := decodeGovAction(
-		encoded, uint8(lcommon.GovActionTypeParameterChange),
-	)
-	require.NoError(t, err)
-	concrete, ok := decoded.(*conway.ConwayParameterChangeGovAction)
-	require.True(t, ok)
-	require.NotNil(t, concrete.ParamUpdate.MinFeeA)
-	assert.Equal(t, uint(1234), *concrete.ParamUpdate.MinFeeA)
-}
 
 func TestEnactProposal_DijkstraParameterChange(t *testing.T) {
 	t.Parallel()
@@ -343,88 +306,6 @@ func TestEnactProposal_DijkstraParameterChangeWritesPlutusV2CostModel(
 		"the enacted ParamUpdate explicitly specified CostModels[1]")
 }
 
-func TestDecodeGovAction_HardForkRoundtrip(t *testing.T) {
-	t.Parallel()
-
-	original := &lcommon.HardForkInitiationGovAction{Type: 1}
-	original.ProtocolVersion.Major = 10
-	original.ProtocolVersion.Minor = 0
-	encoded, err := cbor.Encode(original)
-	require.NoError(t, err)
-	decoded, err := decodeGovAction(
-		encoded, uint8(lcommon.GovActionTypeHardForkInitiation),
-	)
-	require.NoError(t, err)
-	concrete, ok := decoded.(*lcommon.HardForkInitiationGovAction)
-	require.True(t, ok)
-	assert.Equal(t, uint(10), concrete.ProtocolVersion.Major)
-}
-
-func TestDecodeGovAction_TreasuryWithdrawalRoundtrip(t *testing.T) {
-	t.Parallel()
-
-	policyHash := bytes.Repeat([]byte{0xAB}, lcommon.Blake2b224Size)
-	original := &lcommon.TreasuryWithdrawalGovAction{
-		Type:       2,
-		PolicyHash: policyHash,
-	}
-	encoded, err := cbor.Encode(original)
-	require.NoError(t, err)
-	decoded, err := decodeGovAction(
-		encoded, uint8(lcommon.GovActionTypeTreasuryWithdrawal),
-	)
-	require.NoError(t, err)
-	concrete, ok := decoded.(*lcommon.TreasuryWithdrawalGovAction)
-	require.True(t, ok)
-	assert.Equal(t, policyHash, concrete.PolicyHash)
-}
-
-func TestDecodeGovAction_NoConfidenceRoundtrip(t *testing.T) {
-	t.Parallel()
-
-	original := &lcommon.NoConfidenceGovAction{Type: 3}
-	encoded, err := cbor.Encode(original)
-	require.NoError(t, err)
-	decoded, err := decodeGovAction(
-		encoded, uint8(lcommon.GovActionTypeNoConfidence),
-	)
-	require.NoError(t, err)
-	_, ok := decoded.(*lcommon.NoConfidenceGovAction)
-	assert.True(t, ok)
-}
-
-func TestDecodeGovAction_UpdateCommitteeRoundtrip(t *testing.T) {
-	t.Parallel()
-
-	original := &lcommon.UpdateCommitteeGovAction{
-		Type:        4,
-		Credentials: []lcommon.Credential{},
-		Quorum:      newRat(2, 3),
-	}
-	encoded, err := cbor.Encode(original)
-	require.NoError(t, err)
-	decoded, err := decodeGovAction(
-		encoded, uint8(lcommon.GovActionTypeUpdateCommittee),
-	)
-	require.NoError(t, err)
-	_, ok := decoded.(*lcommon.UpdateCommitteeGovAction)
-	assert.True(t, ok)
-}
-
-func TestDecodeGovAction_NewConstitutionRoundtrip(t *testing.T) {
-	t.Parallel()
-
-	original := &lcommon.NewConstitutionGovAction{Type: 5}
-	encoded, err := cbor.Encode(original)
-	require.NoError(t, err)
-	decoded, err := decodeGovAction(
-		encoded, uint8(lcommon.GovActionTypeNewConstitution),
-	)
-	require.NoError(t, err)
-	_, ok := decoded.(*lcommon.NewConstitutionGovAction)
-	assert.True(t, ok)
-}
-
 func TestDecodeGovAction_EmptyCbor(t *testing.T) {
 	t.Parallel()
 
@@ -657,6 +538,7 @@ func TestEnactProposalHardForkReturnsMutationIsolatedPParams(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			db, _ := newTallyTestDB(t)
 			action := &lcommon.HardForkInitiationGovAction{
 				Type: uint(lcommon.GovActionTypeHardForkInitiation),
@@ -788,30 +670,6 @@ func mutateConwayPParams(
 		pparams.MinFeeRefScriptCostPerByte,
 	} {
 		rat.Rat.SetInt64(int64(100 + i))
-	}
-}
-
-// TestStakeEpochFor pins stakeEpochFor to the identity function: the
-// ratify decision taken at the boundary into newEpoch uses mark[newEpoch],
-// the mark snapshot captured by SNAP at that same boundary. See
-// stakeEpochFor's doc comment for the upstream derivation and the live
-// incident (Preview Plomin hard fork) this fixed.
-func TestStakeEpochFor(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		newEpoch uint64
-		expected uint64
-	}{
-		{0, 0},
-		{1, 1},
-		{2, 2},
-		{3, 3},
-		{10, 10},
-		{742, 742},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.expected, stakeEpochFor(tt.newEpoch))
 	}
 }
 

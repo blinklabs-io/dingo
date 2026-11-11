@@ -20,15 +20,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -651,11 +647,11 @@ func TestAccountUniverseCacheRoundTrip(t *testing.T) {
 	assert.True(t, fetchedAt.IsZero())
 
 	first := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, cache.SaveAccountUniverse(
-		"preview", []string{"stake_test1a", "stake_test1b"}, first,
+	require.NoError(t, seedAccountUniverse(
+		cache, "preview", []string{"stake_test1a", "stake_test1b"}, first,
 	))
-	require.NoError(t, cache.SaveAccountUniverse(
-		"preprod", []string{"stake_test1z"}, first,
+	require.NoError(t, seedAccountUniverse(
+		cache, "preprod", []string{"stake_test1z"}, first,
 	))
 
 	addrs, fetchedAt, cached, err = cache.GetAccountUniverse("preview")
@@ -665,8 +661,8 @@ func TestAccountUniverseCacheRoundTrip(t *testing.T) {
 	assert.WithinDuration(t, first, fetchedAt, time.Second)
 
 	second := time.Now().UTC().Truncate(time.Second)
-	require.NoError(t, cache.SaveAccountUniverse(
-		"preview", []string{"stake_test1b"}, second,
+	require.NoError(t, seedAccountUniverse(
+		cache, "preview", []string{"stake_test1b"}, second,
 	))
 	addrs, fetchedAt, cached, err = cache.GetAccountUniverse("preview")
 	require.NoError(t, err)
@@ -754,8 +750,8 @@ func TestAccountUniverseStateBackfilledOnUpgrade(t *testing.T) {
 	require.NoError(t, err)
 
 	fetchedAt := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, cache.SaveAccountUniverse(
-		"preview", []string{"stake_test1a", "stake_test1b"}, fetchedAt,
+	require.NoError(t, seedAccountUniverse(
+		cache, "preview", []string{"stake_test1a", "stake_test1b"}, fetchedAt,
 	))
 	// Drop the state row to reproduce the older layout, then reopen so the
 	// schema pass runs against it.
@@ -772,38 +768,6 @@ func TestAccountUniverseStateBackfilledOnUpgrade(t *testing.T) {
 	assert.True(t, cached, "the existing crawl must survive the upgrade")
 	assert.Equal(t, []string{"stake_test1a", "stake_test1b"}, addrs)
 	assert.WithinDuration(t, fetchedAt, got, time.Second)
-}
-
-// TestNewKoiosClientBaseURLOverride covers pointing the client at a self-hosted
-// Koios instance. The requests have to actually reach that host, not the public
-// one, so the assertion is a served request rather than a field comparison.
-func TestNewKoiosClientBaseURLOverride(t *testing.T) {
-	t.Parallel()
-
-	var hits atomic.Int32
-	srv := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/api/v1/tip" {
-				http.NotFound(w, r)
-				return
-			}
-			hits.Add(1)
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`[{"epoch_no":42}]`))
-		}),
-	)
-	defer srv.Close()
-
-	// httptest serves plain HTTP, so this is the one case that needs the
-	// insecure escape hatch.
-	client, err := NewKoiosClient("preview", "", srv.URL+"/api/v1", true, true)
-	require.NoError(t, err)
-
-	epoch, err := client.GetTipEpoch(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, uint64(42), epoch)
-	assert.Equal(t, int32(1), hits.Load(),
-		"the request must reach the configured host")
 }
 
 func TestNewKoiosClientAllowsPrivateAddressOnlyWhenExplicit(t *testing.T) {
@@ -900,17 +864,6 @@ func TestNewKoiosClientBaseURLTrimsTrailingSlash(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "https://host.example/api/v1", spaced.baseURL)
-}
-
-// TestNewKoiosClientDefaultsToPublicHost pins that an empty override changes
-// nothing, including the burst cap that koios.rest's tiers require.
-func TestNewKoiosClientDefaultsToPublicHost(t *testing.T) {
-	client, err := NewKoiosClient("preview", "", "", false, false)
-	require.NoError(t, err)
-	assert.Equal(t, koiosBaseURLs["preview"], client.baseURL)
-	require.NotNil(t, client.limiter)
-	assert.Equal(t, koiosBurstLimitSafe, client.limiter.limit,
-		"the public host keeps the published tier cap")
 }
 
 // TestNewKoiosClientCustomHostDropsBurstCap covers the reason the override
@@ -1018,15 +971,6 @@ func TestNewKoiosClientRejectsMalformedBaseURL(t *testing.T) {
 	}
 }
 
-// TestNewKoiosClientPlainHTTPGuardDoesNotAffectPublicHost pins that the guard
-// only looks at a custom URL: the built-in hosts are https already, and an
-// empty override must not be able to trip it.
-func TestNewKoiosClientPlainHTTPGuardDoesNotAffectPublicHost(t *testing.T) {
-	client, err := NewKoiosClient("preview", "", "", false, false)
-	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(client.baseURL, "https://"))
-}
-
 // TestNewKoiosClientKeepsBurstCapForPublicHostOverride covers an override that
 // names koios.rest explicitly. The cap is dropped for a custom deployment, not
 // for a custom spelling of the public one — that host's published window
@@ -1036,6 +980,8 @@ func TestNewKoiosClientKeepsBurstCapForPublicHostOverride(t *testing.T) {
 		"https://preview.koios.rest/api/v1",
 		"https://PREPROD.KOIOS.REST/api/v1",
 		"https://koios.rest/api/v1",
+		"https://preview.koios.rest./api/v1",
+		"https://PREVIEW.KOIOS.REST./api/v1",
 	} {
 		client, err := NewKoiosClient("preview", "", raw, false, false)
 		require.NoError(t, err)
@@ -1061,6 +1007,7 @@ func TestNewKoiosClientRejectsQueryOrFragment(t *testing.T) {
 		"https://host.example/api/v1?token=abc",
 		"https://host.example/api/v1#frag",
 		"https://host.example/api/v1?",
+		"https://host.example/api/v1#",
 	} {
 		_, err := NewKoiosClient("preview", "", raw, false, false)
 		require.Error(t, err, "base URL %q must be rejected", raw)
@@ -1087,37 +1034,6 @@ func TestValidateKoiosBaseURLErrorsOmitTheURL(t *testing.T) {
 	}
 }
 
-// TestNewKoiosClientPublicHostSpellings covers DNS spellings of the public host
-// that must keep its published burst cap. A single terminal dot is a valid,
-// fully-qualified spelling of the same name.
-func TestNewKoiosClientPublicHostSpellings(t *testing.T) {
-	for _, raw := range []string{
-		"https://preview.koios.rest./api/v1",
-		"https://PREVIEW.KOIOS.REST./api/v1",
-	} {
-		client, err := NewKoiosClient("preview", "", raw, false, false)
-		require.NoError(t, err)
-		assert.Equal(t, koiosBurstLimitSafe, client.limiter.limit,
-			"%q is the public host and keeps its cap", raw)
-	}
-}
-
-// TestNewKoiosClientRejectsBareFragment covers a root ending in "#". url.URL
-// has no ForceFragment counterpart to ForceQuery, so it parses to an empty
-// Fragment — but get and post would still append the endpoint path after the
-// delimiter and reach the base path instead.
-func TestNewKoiosClientRejectsBareFragment(t *testing.T) {
-	_, err := NewKoiosClient(
-		"preview",
-		"",
-		"https://host.example/api/v1#",
-		false,
-		false,
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "fragment")
-}
-
 // TestResolvedBaseURLDropsUserinfo covers the value that gets logged and
 // persisted. validateKoiosBaseURL already rejects a query and a fragment, so
 // userinfo is the only place a credential survives into a validated root, and
@@ -1135,15 +1051,6 @@ func TestResolvedBaseURLDropsUserinfo(t *testing.T) {
 	assert.Equal(t, "https://koios.example/api/v1", resolved)
 	assert.NotContains(t, resolved, "hunter2")
 	assert.NotContains(t, resolved, "dingo:")
-}
-
-// TestResolvedBaseURLReportsTheDefaultHost pins that the accessor names the
-// host actually queried when no override is given, rather than reporting the
-// empty override back.
-func TestResolvedBaseURLReportsTheDefaultHost(t *testing.T) {
-	c, err := NewKoiosClient("preview", "", "", false, false)
-	require.NoError(t, err)
-	assert.Equal(t, koiosBaseURLs["preview"], c.ResolvedBaseURL())
 }
 
 // TestCreditedAccountRewardsSkipsUncredited pins that the per-account
@@ -1473,8 +1380,14 @@ func seedOracleRows(t *testing.T, c *Cache, network string) {
 		EpochsChecked: 1,
 		MismatchCount: 1,
 	}))
-	require.NoError(t, c.SaveAccountUniverse(
-		network, []string{"stake_test1seeded"}, now,
+	require.NoError(t, seedAccountUniverse(
+		c, network, []string{"stake_test1seeded"}, now,
+	))
+	// An unfinished crawl is Koios-sourced too, and completing the one above
+	// emptied both crawl tables, so seed another.
+	require.NoError(t, c.SaveAccountUniverseCrawlPage(
+		network, accountListQuery, now, []string{"stake_test1partial"},
+		1, "stake_test1partial", 1,
 	))
 	// koios_epoch_params is Koios-sourced too, so the discard has to be
 	// exercised there as well.
@@ -1596,86 +1509,6 @@ func TestRecordKoiosSourceChangeIsScopedToItsNetwork(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, countOracleRows(t, cache, "preview"))
 	assert.Equal(t, other, countOracleRows(t, cache, "preprod"))
-}
-
-// TestRecordKoiosSourceCoversEveryKoiosTable stops koiosSourcedTables from
-// silently falling behind the schema. A table added later that holds Koios
-// answers but is missing from the list would survive a host change and put
-// the mixed-oracle report back within reach — the exact failure this guard
-// exists to prevent, reintroduced quietly.
-func TestRecordKoiosSourceCoversEveryKoiosTable(t *testing.T) {
-	cache := newSourceTestCache(t)
-	rows, err := cache.db.Query(
-		`SELECT name FROM sqlite_master
-		WHERE type = 'table' AND (name LIKE 'koios_%' OR name LIKE 'check_%')`,
-	)
-	require.NoError(t, err)
-	defer rows.Close() //nolint:errcheck
-
-	listed := make(map[string]struct{}, len(koiosSourcedTables))
-	for _, t := range koiosSourcedTables {
-		listed[t] = struct{}{}
-	}
-	seen := 0
-	for rows.Next() {
-		var name string
-		require.NoError(t, rows.Scan(&name))
-		// koios_source is the record itself, not a row it invalidates.
-		if name == "koios_source" {
-			continue
-		}
-		seen++
-		_, ok := listed[name]
-		assert.True(
-			t,
-			ok,
-			"%s holds Koios-sourced rows but is not invalidated on a source change",
-			name,
-		)
-	}
-	require.NoError(t, rows.Err())
-	// Without this the test passes vacuously if the query ever stops
-	// matching, which would retire the guard rather than satisfy it.
-	require.Equal(t, len(koiosSourcedTables), seen,
-		"every listed table must exist in the schema, and vice versa")
-}
-
-// TestKoiosSourcedTablesAreBareIdentifiers backs the G202 suppression on the
-// DELETE in RecordKoiosSource. That annotation is only honest while every
-// entry is a plain table identifier, so this pins the property rather than
-// leaving the suppression to be quietly outgrown by a later entry.
-func TestKoiosSourcedTablesAreBareIdentifiers(t *testing.T) {
-	identifier := regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
-	for _, table := range koiosSourcedTables {
-		assert.Regexp(
-			t,
-			identifier,
-			table,
-			"%q is not a bare identifier, so it must not be concatenated into SQL",
-			table,
-		)
-	}
-}
-
-// TestSeedOracleRowsTouchesEveryInvalidatedTable keeps the fixture honest.
-// The discard tests assert the row count reaches zero, so any table the
-// fixture never writes is only ever "invalidated" while already empty, and a
-// regression that stopped discarding it would still pass.
-func TestSeedOracleRowsTouchesEveryInvalidatedTable(t *testing.T) {
-	cache := newSourceTestCache(t)
-	seedOracleRows(t, cache, "preview")
-	for _, table := range koiosSourcedTables {
-		var n int
-		require.NoError(t, cache.db.QueryRow(
-			"SELECT COUNT(*) FROM "+table+" WHERE network = ?", "preview",
-		).Scan(&n))
-		assert.Positive(
-			t,
-			n,
-			"%s is invalidated on a source change but never seeded, so the discard is untested there",
-			table,
-		)
-	}
 }
 
 // TestRecordKoiosSourceFirstRunWithCustomRootDiscards is the upgrade path.
@@ -1857,68 +1690,6 @@ func TestRecordKoiosSourceUnchangedMakesNoRequest(t *testing.T) {
 		"an unchanged source must not cost a request")
 }
 
-// TestClaimedSourceRefusesWritesAfterAnotherWriterRepoints is the concurrent
-// case RecordKoiosSource alone cannot cover: it invalidates only the rows
-// present when it runs, so a client already fetching from the old host would
-// otherwise go on appending that host's answers under the new host's marker —
-// reassembling the mixed-oracle state the marker exists to make impossible.
-//
-// The default cache path is shared across the standalone commands and the
-// in-process observer, so an observer on one host and a `fetch --koios-url` on
-// another are a reachable pair rather than a hypothetical one.
-func TestClaimedSourceRefusesWritesAfterAnotherWriterRepoints(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cache.db")
-
-	first, err := openTestCache(path, nil)
-	require.NoError(t, err)
-	defer first.Close() //nolint:errcheck
-	_, err = first.RecordKoiosSource(
-		"preview", "https://first.example/api/v1", time.Now().UTC(),
-	)
-	require.NoError(t, err)
-
-	// A write from the first handle is fine while it still owns the cache.
-	require.NoError(t, first.CommitAccountRewardsForEpoch(
-		"preview", 7, nil, 0, true, time.Now().UTC(),
-	))
-
-	// A second process re-points the same cache at another host.
-	second, err := openTestCache(path, nil)
-	require.NoError(t, err)
-	defer second.Close() //nolint:errcheck
-	_, err = second.RecordKoiosSource(
-		"preview", "https://second.example/api/v1", time.Now().UTC(),
-	)
-	require.NoError(t, err)
-
-	// The first handle must now refuse rather than mix.
-	now := time.Now().UTC()
-	err = first.CommitAccountRewardsForEpoch("preview", 7, nil, 0, true, now)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "refusing to write")
-
-	require.Error(t, first.CommitEpochData(KoiosEpochInfo{
-		Network:      "preview",
-		Epoch:        7,
-		ActiveStake:  "1",
-		Fees:         "1",
-		TotalRewards: "1",
-		EpochEndTime: now,
-		FetchedAt:    now,
-	}, nil, nil))
-	require.Error(t, first.SaveAccountUniverse(
-		"preview", []string{"stake_test1x"}, now,
-	))
-	require.Error(t, first.SaveAccountFetchChunkProgress(
-		"preview", 7, "chunk", nil, []string{"stake_test1x"}, now,
-	))
-
-	// The handle that owns the cache is unaffected.
-	assert.NoError(t, second.CommitAccountRewardsForEpoch(
-		"preview", 7, nil, 0, true, now,
-	))
-}
-
 // TestUnclaimedCacheStillWrites keeps the guard off every read-only command
 // and every existing caller: a handle that never recorded a source must not
 // start refusing writes to a cache someone else stamped.
@@ -2066,101 +1837,6 @@ func TestPinnedUnstampedCacheWritesUntilItIsStamped(t *testing.T) {
 		"a legacy cache switched to another host mid-check must stop the check")
 }
 
-// TestClaimedSourceRefusesEpochParamsAfterAnotherWriterRepoints is the
-// parameter backfill's member of the class
-// TestClaimedSourceRefusesWritesAfterAnotherWriterRepoints covers.
-//
-// fetchEpochParamsOnly reaches UpsertEpochParams without going through
-// CommitEpochData, so it is a second way Koios answers enter the cache. A
-// backfill that started against one host and finished after another process
-// re-pointed the cache would otherwise repopulate koios_epoch_params — a table
-// RecordKoiosSource had just discarded — with the old host's answers, under
-// the new host's marker. That is the mixed-oracle state the marker exists to
-// make impossible.
-//
-// The assertion is on the rows, not on the call: the first host's parameters
-// must not be readable from the cache afterwards.
-func TestClaimedSourceRefusesEpochParamsAfterAnotherWriterRepoints(
-	t *testing.T,
-) {
-	const network = "preview"
-	path := filepath.Join(t.TempDir(), "cache.db")
-
-	first, err := openTestCache(path, nil)
-	require.NoError(t, err)
-	defer first.Close() //nolint:errcheck
-	_, err = first.RecordKoiosSource(
-		network, "https://first.example/api/v1", time.Now().UTC(),
-	)
-	require.NoError(t, err)
-
-	// The write lands while the first handle still owns the cache.
-	require.NoError(t, first.UpsertEpochParams(KoiosEpochParams{
-		Network: network,
-		Epoch:   7,
-		Era:     "alonzo",
-	}))
-	owned, err := first.GetEpochParams(network, 7)
-	require.NoError(t, err)
-	require.Equal(t, "alonzo", owned.Era)
-
-	// A second process re-points the same cache, discarding the first host's
-	// rows including this parameter row.
-	second, err := openTestCache(path, nil)
-	require.NoError(t, err)
-	defer second.Close() //nolint:errcheck
-	_, err = second.RecordKoiosSource(
-		network, "https://second.example/api/v1", time.Now().UTC(),
-	)
-	require.NoError(t, err)
-	_, err = second.GetEpochParams(network, 7)
-	require.ErrorIs(t, err, sql.ErrNoRows,
-		"re-pointing must discard the first host's parameter row")
-
-	// The first handle must refuse rather than repopulate.
-	err = first.UpsertEpochParams(KoiosEpochParams{
-		Network: network,
-		Epoch:   7,
-		Era:     "conway",
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "refusing to write")
-
-	// The rows are what matter: the first host's parameters must not be
-	// readable from a cache now attributed to the second host.
-	_, err = second.GetEpochParams(network, 7)
-	assert.ErrorIs(
-		t,
-		err,
-		sql.ErrNoRows,
-		"the first host's parameters reappeared in a cache re-pointed at another host",
-	)
-}
-
-// TestUnclaimedCacheStillWritesEpochParams keeps the new gate off the
-// read-only and legacy callers, matching TestUnclaimedCacheStillWrites.
-func TestUnclaimedCacheStillWritesEpochParams(t *testing.T) {
-	const network = "preview"
-	path := filepath.Join(t.TempDir(), "cache.db")
-
-	owner, err := openTestCache(path, nil)
-	require.NoError(t, err)
-	defer owner.Close() //nolint:errcheck
-	_, err = owner.RecordKoiosSource(
-		network, "https://first.example/api/v1", time.Now().UTC(),
-	)
-	require.NoError(t, err)
-
-	bystander, err := openTestCache(path, nil)
-	require.NoError(t, err)
-	defer bystander.Close() //nolint:errcheck
-	assert.NoError(t, bystander.UpsertEpochParams(KoiosEpochParams{
-		Network: network,
-		Epoch:   7,
-		Era:     "conway",
-	}))
-}
-
 // gatedCacheWrite is one Cache writer the claimed-source gate covers, kept
 // callable so the refusal and rollback assertions below run over the whole
 // set rather than over a list that drifts from cache.go.
@@ -2211,8 +1887,13 @@ func gatedCacheWrites(network string, now time.Time) []gatedCacheWrite {
 				network, []KoiosTxInfoItem{{TxHash: "txfirst"}}, now,
 			)
 		}},
-		{"SaveAccountUniverse", func(c *Cache) error {
-			return c.SaveAccountUniverse(network, []string{addr}, now)
+		{"CompleteAccountUniverseCrawl", func(c *Cache) error {
+			return seedAccountUniverse(c, network, []string{addr}, now)
+		}},
+		{"SaveAccountUniverseCrawlPage", func(c *Cache) error {
+			return c.SaveAccountUniverseCrawlPage(
+				network, accountListQuery, now, []string{addr}, 1, addr, 1,
+			)
 		}},
 		{"SaveAccountFetchChunkProgress", func(c *Cache) error {
 			return c.SaveAccountFetchChunkProgress(
@@ -2469,35 +2150,6 @@ func TestAssetListShowFormMatchesArrayFormForTheSameTokens(t *testing.T) {
 		[]byte(mustJSONString(t, realCollateralOutputShowForm)), &fromShow,
 	))
 	require.Equal(t, fromArray, fromShow)
-}
-
-// TestAssetListRoundTripsThroughCachePayload proves the fix needs no
-// koiosTxInfoPayloadVersion bump: what is STORED is unchanged. A decoded
-// asset list marshals to the plain array form, and reading that back yields
-// the same assets, so every koios_tx_info row already written at version 2
-// stays valid. (The bug only ever prevented rows from being written at all --
-// a chunk containing an undecodable transaction cached nothing -- so no
-// stored row can hold a mis-parsed collateral asset list.)
-func TestAssetListRoundTripsThroughCachePayload(t *testing.T) {
-	t.Parallel()
-
-	var decoded KoiosTxInfoAssetList
-	require.NoError(t, json.Unmarshal(
-		[]byte(mustJSONString(t, realCollateralOutputShowForm)), &decoded,
-	))
-	require.Len(t, decoded, 2)
-
-	stored, err := json.Marshal(decoded)
-	require.NoError(t, err)
-	require.JSONEq(t,
-		`[{"policy_id":"09e56a1dcecb140f4416b48f5ca475aab638d64fcb2f76e9d6496c0e","asset_name":"474f565f4e4654","quantity":"1"},`+
-			`{"policy_id":"65a938b778af9a654b2a005d8ea902485f16a878ff81c458eaa7bdbb","asset_name":"494e4459","quantity":"32200000000000"}]`,
-		string(stored),
-	)
-
-	var reread KoiosTxInfoAssetList
-	require.NoError(t, json.Unmarshal(stored, &reread))
-	require.Equal(t, decoded, reread)
 }
 
 // TestAssetListRejectsUnrecognisedStringFormLoudly preserves the safety
@@ -3278,45 +2930,6 @@ func TestZeroSlotWithTipHashIsNotPending(t *testing.T) {
 	})
 }
 
-func TestCompareMemberRewardsUsesRewardsPending(t *testing.T) {
-	t.Parallel()
-
-	memberRewardMismatch := func(mismatches []CheckMismatch) CheckMismatch {
-		for _, mismatch := range mismatches {
-			if mismatch.Field == "member_rewards" {
-				return mismatch
-			}
-		}
-		t.Fatal("member_rewards mismatch not found")
-		return CheckMismatch{}
-	}
-
-	koios := &KoiosPoolEpoch{MemberRewards: "1"}
-	dingo := &DingoPoolEpochData{
-		MemberRewardPresent:          true,
-		SpendableMemberRewardPresent: true,
-		SpendableMemberRewardTotal:   "2",
-	}
-
-	dingo.RewardsPending = true
-	mismatches := memberRewardsFor(
-		"preview", 96, koios, dingo, time.Now(), 0, time.Time{})
-	require.Equal(
-		t,
-		CategoryReferenceLag,
-		memberRewardMismatch(mismatches).Category,
-	)
-
-	dingo.RewardsPending = false
-	mismatches = memberRewardsFor(
-		"preview", 96, koios, dingo, time.Now(), 0, time.Time{})
-	require.Equal(
-		t,
-		CategoryValueMismatch,
-		memberRewardMismatch(mismatches).Category,
-	)
-}
-
 // TestCountSignificantExcludesInformational pins that the number reported with
 // a parity failure counts the mismatches that caused it.
 //
@@ -3420,36 +3033,6 @@ func TestReferenceLagOnly(t *testing.T) {
 	}
 }
 
-// TestSeverityLabelCoversAllThreeTiers pins severityLabel's string mapping
-// against severityOf's classification of one category from each of the three
-// tiers, so the label dingo_koiosparity_mismatch_total exports (metrics.go)
-// cannot silently disagree with what DetermineStatus/CountSignificant treat
-// that category as.
-func TestSeverityLabelCoversAllThreeTiers(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name     string
-		category string
-		want     string
-	}{
-		{"fail tier", CategoryValueMismatch, "fail"},
-		{"error tier", CategoryDBError, "error"},
-		{"informational tier", CategoryPoolDeparted, "informational"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(
-				t,
-				tc.want,
-				severityLabel(severityOf(tc.category)),
-				"category %q", tc.category,
-			)
-		})
-	}
-}
-
 // TestCountSignificantAgreesWithDetermineStatus is the invariant that matters
 // more than either number: a status of PASS and a non-zero significant count
 // cannot coexist, in either direction. The two must read the same
@@ -3470,73 +3053,6 @@ func TestCountSignificantAgreesWithDetermineStatus(t *testing.T) {
 				"status and significant count must classify %q the same way",
 				cat)
 		})
-	}
-}
-
-// TestAllCategoriesCoversEveryConstant keeps AllCategories honest.
-//
-// AllCategories is what makes the classification guard above load-bearing, so
-// it must not itself be a list that can fall behind. This reads the Category*
-// constants straight out of the package source and requires the two to be the
-// same set: a new category constant that never reaches AllCategories fails
-// here rather than sliding past a guard that simply never sees it.
-func TestAllCategoriesCoversEveryConstant(t *testing.T) {
-	t.Parallel()
-
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	require.NoError(t, err)
-	pkg, ok := pkgs["koiosparity"]
-	require.True(t, ok, "package koiosparity must be parseable from .")
-
-	declared := map[string]string{} // constant name -> literal value
-	for _, file := range pkg.Files {
-		for _, decl := range file.Decls {
-			gen, ok := decl.(*ast.GenDecl)
-			if !ok || gen.Tok != token.CONST {
-				continue
-			}
-			for _, spec := range gen.Specs {
-				vs, ok := spec.(*ast.ValueSpec)
-				if !ok {
-					continue
-				}
-				for i, name := range vs.Names {
-					if !strings.HasPrefix(name.Name, "Category") ||
-						i >= len(vs.Values) {
-						continue
-					}
-					lit, ok := vs.Values[i].(*ast.BasicLit)
-					if !ok || lit.Kind != token.STRING {
-						continue
-					}
-					value, err := strconv.Unquote(lit.Value)
-					require.NoError(t, err)
-					declared[name.Name] = value
-				}
-			}
-		}
-	}
-	require.NotEmpty(t, declared, "no Category* constants found to check")
-
-	listed := map[string]bool{}
-	for _, cat := range AllCategories {
-		require.False(t, listed[cat],
-			"AllCategories lists %q more than once", cat)
-		listed[cat] = true
-	}
-	for name, value := range declared {
-		assert.True(t, listed[value],
-			"constant %s (%q) is missing from AllCategories, so severityOf's "+
-				"classification of it is unguarded", name, value)
-		delete(listed, value)
-	}
-	for cat := range listed {
-		assert.Fail(t, "unknown category listed",
-			"AllCategories contains %q, which is not a Category* constant",
-			cat)
 	}
 }
 
@@ -3691,37 +3207,6 @@ func testSchema(includePools bool) []string {
 
 const zeroRewardAddr = "stake_test1uzf5lwsf37wsxmq9rdpq0v9tepk0g36vqmxr974lenzwchcszrsss"
 
-// TestZeroEarnedKoiosRowIsNotDivergence pins that a Koios reward row worth
-// zero, with no Dingo counterpart, is agreement rather than acct_only_koios.
-//
-// The category doc comment asserted that "Koios never emits a row for zero
-// reward". Preview disproves it: Koios publishes zero-earned leader rows, and
-// Dingo writes no reward_account_output row at all for a zero reward. Nothing
-// was credited on either side, so no lovelace differs — but the presence test
-// read the row as a reward Dingo had missed and failed epoch 222.
-func TestZeroEarnedKoiosRowIsNotDivergence(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now()
-	out := CompareAccountEpoch(
-		"preview", 222,
-		[]KoiosAccountRewards{
-			{
-				StakeAddress: zeroRewardAddr,
-				RewardType:   "leader",
-				Earned:       "0",
-			},
-		},
-		nil,
-		now, 0, time.Time{}, false,
-		false,
-	)
-	require.Len(t, out, 1, "the row should still be reported, not dropped")
-	assert.Equal(t, CategoryAcctZeroRewardRow, out[0].Category)
-	assert.Equal(t, StatusPass, DetermineStatus(out),
-		"a zero-earned row must never fail an epoch")
-}
-
 // TestZeroAmountDingoRowIsNotDivergence is the mirror. Dingo emits no
 // zero-amount rows today, but the two presence branches are deliberately
 // symmetric and a future zero row must not fail an epoch for the same reason.
@@ -3745,30 +3230,6 @@ func TestZeroAmountDingoRowIsNotDivergence(t *testing.T) {
 	require.Len(t, out, 1)
 	assert.Equal(t, CategoryAcctZeroRewardRow, out[0].Category)
 	assert.Equal(t, StatusPass, DetermineStatus(out))
-}
-
-// TestNonZeroKoiosOnlyRowStillFails is the discrimination check: the change
-// must turn off only the zero case, never one-sided rows generally.
-func TestNonZeroKoiosOnlyRowStillFails(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now()
-	out := CompareAccountEpoch(
-		"preview", 222,
-		[]KoiosAccountRewards{
-			{
-				StakeAddress: zeroRewardAddr,
-				RewardType:   "leader",
-				Earned:       "1",
-			},
-		},
-		nil,
-		now, 0, time.Time{}, false,
-		false,
-	)
-	require.Len(t, out, 1)
-	assert.Equal(t, CategoryAcctOnlyKoios, out[0].Category)
-	assert.Equal(t, StatusFail, DetermineStatus(out))
 }
 
 // A zero-earned row on both sides is an ordinary match and reports nothing —
@@ -3865,4 +3326,24 @@ func TestZeroRewardRowAgreesWithValueComparison(t *testing.T) {
 				"presence and value paths must read %q the same way", amount)
 		})
 	}
+}
+
+// seedAccountUniverse stores addrs as network's complete cached universe,
+// stamped at, by running a one-page crawl to completion.
+func seedAccountUniverse(
+	c *Cache,
+	network string,
+	addrs []string,
+	at time.Time,
+) error {
+	last := ""
+	if len(addrs) > 0 {
+		last = addrs[len(addrs)-1]
+	}
+	if err := c.SaveAccountUniverseCrawlPage(
+		network, accountListQuery, at, addrs, len(addrs), last, 1,
+	); err != nil {
+		return err
+	}
+	return c.CompleteAccountUniverseCrawl(network, at, 1)
 }

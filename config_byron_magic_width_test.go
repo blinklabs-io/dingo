@@ -47,14 +47,7 @@ func TestConfigValidateRejectsByronMagicAboveUint32(t *testing.T) {
 			}
 			nodeCfg := &cardano.CardanoNodeConfig{}
 			require.NoError(t, nodeCfg.LoadShelleyGenesisFromReader(
-				strings.NewReader(`{
-					"networkMagic": 42,
-					"activeSlotsCoeff": 0.05,
-					"securityParam": 432,
-					"slotsPerKESPeriod": 129600,
-					"maxKESEvolutions": 62,
-					"systemStart": "2022-10-25T00:00:00Z"
-				}`),
+				strings.NewReader(testShelleyGenesisJSON(42)),
 			))
 			require.NoError(t, nodeCfg.LoadByronGenesisFromReader(
 				strings.NewReader(

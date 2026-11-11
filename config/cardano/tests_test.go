@@ -148,7 +148,7 @@ func TestConwayGenesisAcceptsLegacyCommitteeQuorum(t *testing.T) {
 	require.NotNil(t, c.ConwayGenesis())
 }
 
-func TestConwayGenesisStillRejectsUnknownFields(t *testing.T) {
+func TestConwayGenesisAcceptsUnknownFields(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join(testDataDir, "conway-genesis.json"))
 	require.NoError(t, err)
@@ -158,7 +158,7 @@ func TestConwayGenesisStillRejectsUnknownFields(t *testing.T) {
 	out, err := json.Marshal(doc)
 	require.NoError(t, err)
 	var c CardanoNodeConfig
-	require.Error(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
+	require.NoError(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
 
 	doc["committee"] = json.RawMessage(
 		`{"members":{},"threshold":0,"notACommitteeField":1}`,
@@ -166,7 +166,7 @@ func TestConwayGenesisStillRejectsUnknownFields(t *testing.T) {
 	delete(doc, "notAConwayField")
 	out, err = json.Marshal(doc)
 	require.NoError(t, err)
-	require.Error(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
+	require.NoError(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
 }
 
 // TestConwayGenesisRejectsQuorumWithoutThreshold pins that the legacy quorum
@@ -328,6 +328,12 @@ var pinnedEmbeddedGenesisHashes = map[string]embeddedGenesisHashes{
 		conway:   "7e237f0c935539f5571297e3171946dd83929719496cbf51d0dab814a47ae0de",
 		dijkstra: "868a465b7115ae653ec532f46eca1a31a89211a96e810d78f82d6e60e3cdca87",
 	},
+	"prime-mainnet": {
+		byron:   "6b91f3c3d68ebeaa8dede86ba371a56ae60547dec6a8713d1fca6e403caa4605",
+		shelley: "4fad52e08057e9cbfe71411719205c14c2e61e4dd4123541d0b6fa92971c89b0",
+		alonzo:  "1cd94b66eade0670885744a858accdb2c3249e43e247db2c66b158050ec6a3e4",
+		conway:  "01649daebfc1ae5646c6aab2bf07533cdf626fd49e270ac4258be7fe253c3cc1",
+	},
 	"prime-testnet": {
 		byron:   "acd3e7c4cc071ae176fa253e654f0dd4e759892b16e958d8bd3c393f5c6c66d2",
 		shelley: "0b67b0cb16e973478888efb1c7f69fca8e80489369afed94624a588e94a94f2b",
@@ -377,8 +383,7 @@ func computedEmbeddedHashes(c *CardanoNodeConfig) map[string]string {
 //
 // Nothing else does this. loadGenesisConfigsFromEmbed compares the computed
 // hash against the one in the same directory's config.json, so the two move
-// together; TestEmbedFS_AllNetworks and
-// TestEmbeddedConfigsPassGenesisConsistency load the configs but assert
+// together; TestEmbedFS_AllNetworks loads the configs but asserts
 // nothing about the hashes. A change to the embedded bytes accompanied by a
 // matching config.json edit therefore changed the chain constant with the
 // whole suite green.

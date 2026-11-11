@@ -466,6 +466,11 @@ var flagSpecs = []flagSpec{
 		"longest message expiry accepted, in seconds",
 	),
 	uintFlag(
+		"DMQ.MinPoolMessageInterval",
+		"dmq-min-pool-message-interval",
+		"shortest time, in seconds, between one pool's messages announced to a peer; 0 disables",
+	),
+	uintFlag(
 		"DMQ.MaxMempoolSize",
 		"dmq-max-mempool-size",
 		"DMQ message pool size limit, in megabytes",
@@ -519,7 +524,7 @@ var flagSpecs = []flagSpec{
 		"BarkClientCAFilePath",
 		"bark-client-ca-file-path",
 		"",
-		"path to a PEM CA bundle; client certs verified against it authenticate every Bark DatabaseService RPC (required whenever the database lifecycle service is enabled)",
+		"legacy compatibility setting; ignored",
 	),
 	intFlag(
 		"BarkArchiveMaxConcurrentFetches",
@@ -539,7 +544,7 @@ var flagSpecs = []flagSpec{
 	stringSliceFlag(
 		"BarkOperatorCertificateFingerprints",
 		"bark-operator-certificate-fingerprints",
-		"SHA-256 client certificate fingerprints authorized for destructive Bark DatabaseService RPCs",
+		"legacy compatibility setting; ignored",
 	),
 	boolFlag(
 		"BarkLifecycleEnabled",
@@ -549,7 +554,7 @@ var flagSpecs = []flagSpec{
 	stringSliceFlag(
 		"BarkLifecycleOperatorCertificateFingerprints",
 		"bark-lifecycle-operator-certificate-fingerprints",
-		"SHA-256 client certificate fingerprints authorized for Bark Stop and Restart RPCs",
+		"legacy compatibility setting; ignored",
 	),
 
 	// History expiry
@@ -721,6 +726,11 @@ var flagSpecs = []flagSpec{
 		"MaxTrustedLocalNtCConns",
 		"max-trusted-local-ntc-conns",
 		"max trusted local node-to-client connections",
+	),
+	durationFlag(
+		"TrustedNtCIdleTimeout",
+		"trusted-ntc-idle-timeout",
+		"close idle trusted local node-to-client connections after this duration (0 = no limit)",
 	),
 	intFlag(
 		"MaxNtCConnectionsPerIP",
@@ -1205,7 +1215,7 @@ var flagSpecs = []flagSpec{
 		"Mithril.Server.Aggregator.OperatorTokenFile",
 		"mithril-aggregator-operator-token-file",
 		"",
-		"file holding the bearer token for aggregator signer registration",
+		"legacy compatibility setting; ignored",
 	),
 
 	// Database lifecycle (snapshot/restore/truncate)

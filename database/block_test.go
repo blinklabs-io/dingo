@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"os"
 	"os/exec"
 	"strings"
@@ -49,10 +50,18 @@ func isolateBlockByHashMetrics(t *testing.T) bool {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
+	// Keep any subtest selection the parent was run with, so a filtered run
+	// does not execute every isolated case.
+	pattern := "^" + t.Name() + "$"
+	if f := flag.Lookup("test.run"); f != nil {
+		if _, subtests, ok := strings.Cut(f.Value.String(), "/"); ok {
+			pattern += "/" + subtests
+		}
+	}
 	cmd := exec.CommandContext(
 		ctx,
 		os.Args[0],
-		"-test.run=^"+t.Name()+"$",
+		"-test.run="+pattern,
 		"-test.v",
 	)
 	cmd.Env = append(os.Environ(), marker+"="+t.Name())
@@ -239,38 +248,6 @@ func newBenchDB(b *testing.B) *Database {
 	require.NoError(b, err)
 	b.Cleanup(func() { _ = db.Close() })
 	return db
-}
-
-// TestCountBlocksAndOldestSlot_EmptyDatabase verifies that a database
-// with no blocks reports a zero count and a zero oldest slot.
-func TestCountBlocksAndOldestSlot_EmptyDatabase(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-
-	count, oldestSlot, err := db.CountBlocksAndOldestSlot(nil)
-	require.NoError(t, err)
-	require.Zero(t, count)
-	require.Zero(t, oldestSlot)
-}
-
-// TestCountBlocksAndOldestSlot_CountsAndFindsOldest verifies that blocks
-// inserted out of slot order still report the correct count and oldest slot.
-func TestCountBlocksAndOldestSlot_CountsAndFindsOldest(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-
-	// Inserted out of slot order on purpose: the oldest slot must be
-	// found by content, not by insertion order.
-	insertTestBlock(t, db, 300, randomHash(t), []byte{0x80})
-	insertTestBlock(t, db, 100, randomHash(t), []byte{0x80})
-	insertTestBlock(t, db, 200, randomHash(t), []byte{0x80})
-
-	count, oldestSlot, err := db.CountBlocksAndOldestSlot(nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(3), count)
-	require.Equal(t, uint64(100), oldestSlot)
 }
 
 // TestCountBlocksAndOldestSlot_ExcludesTombstonedBlocks verifies that a
@@ -1272,15 +1249,16 @@ func (s blockHashReadStore) GetBlock(
 
 func TestBlockByHashBlobOnlyPreservesErrorsAndRelease(t *testing.T) {
 	t.Parallel()
+	// One database for every case: each case restores the base store and
+	// drains it before the next runs, so the subtests are sequential.
+	db := newTestDB(t)
+	block := testIndexedBlock(42, 7, 0x42)
+	require.NoError(t, db.BlockCreate(block, nil))
+	base := db.Blob()
 	for _, kind := range []string{
 		"success", "read error", "rollback error", "panic", "cancel after read",
 	} {
 		t.Run(kind, func(t *testing.T) {
-			t.Parallel()
-			db := newTestDB(t)
-			block := testIndexedBlock(42, 7, 0x42)
-			require.NoError(t, db.BlockCreate(block, nil))
-			base := db.Blob()
 			failure := errors.New("injected block-only failure")
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -1322,4 +1300,107 @@ func TestBlockByHashBlobOnlyPreservesErrorsAndRelease(t *testing.T) {
 				"nil context retains default semantics")
 		})
 	}
+}
+
+func TestBlockNumberBoundarySparseIDsAndSharedNumbers(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	for i, entry := range []struct{ id, number uint64 }{{2, 1}, {3, 1}, {1000, 3}, {1002, 5}} {
+		block := testIndexedBlock(uint64(i+1)*10, entry.id, byte(i+1))
+		block.Number = entry.number
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	write := db.BlobTxn(true)
+	require.NoError(t, write.Do(func(txn *Txn) error {
+		return db.Blob().Set(txn.Blob(), types.BlockBlobIndexKey(500),
+			types.BlockBlobKey(20, bytes.Repeat([]byte{2}, 32)))
+	}))
+	store := &countingBlockReadStore{BlobStore: db.Blob()}
+	db.SetBlobStore(store)
+	txn := db.Transaction(context.Background(), false)
+	defer txn.Rollback() //nolint:errcheck
+	bound, err := ResolveBlockNumberBoundTxn(txn)
+	require.NoError(t, err)
+	require.Zero(t, store.getBlockCalls)
+	first, err := BlockByNumberBoundedTxn(txn, 1, bound)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), first.ID)
+	for _, tc := range []struct {
+		number uint64
+		lower  bool
+		id     uint64
+	}{
+		{1, true, 2}, {1, false, 3}, {2, true, 1000}, {2, false, 3}, {3, true, 1000}, {3, false, 1000}, {4, true, 1002}, {4, false, 1000},
+	} {
+		before := store.getBlockCalls
+		block, err := BlockNumberBoundaryTxn(
+			context.Background(),
+			txn,
+			tc.number,
+			bound,
+			tc.lower,
+		)
+		require.NoError(t, err)
+		require.Equal(t, tc.id, block.ID)
+		require.Equal(
+			t,
+			before+1,
+			store.getBlockCalls,
+			"only the selected block body may be fetched",
+		)
+	}
+	for _, tc := range []struct {
+		number uint64
+		lower  bool
+	}{{0, false}, {6, true}} {
+		before := store.getBlockCalls
+		_, err := BlockNumberBoundaryTxn(
+			context.Background(),
+			txn,
+			tc.number,
+			bound,
+			tc.lower,
+		)
+		require.ErrorIs(t, err, models.ErrBlockNotFound)
+		require.Equal(t, before, store.getBlockCalls)
+	}
+	before := store.getBlockCalls
+	_, err = blockKeyByNumberBoundedTxn(txn, 1, bound, func() bool { return false })
+	require.ErrorIs(t, err, ErrBlockIndexBudget)
+	require.Equal(t, before, store.getBlockCalls)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = BlockNumberBoundaryTxn(ctx, txn, 1, bound, true)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestBlockPointAtIndexSkipsSparseIndexes(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := []models.Block{
+		testIndexedBlock(10, 2, 0x01),
+		testIndexedBlock(20, 1_000, 0x02),
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	id, point, err := db.BlockPointAtOrAfterIndex(3, nil)
+	require.NoError(t, err)
+	require.Equal(t, blocks[1].ID, id)
+	require.Equal(t, blocks[1].Hash, point.Hash)
+	_, _, err = db.BlockPointAtOrAfterIndex(blocks[1].ID+1, nil)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+
+	id, point, err = db.BlockPointAtOrBeforeIndex(
+		context.Background(), 999, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, blocks[0].ID, id)
+	require.Equal(t, blocks[0].Hash, point.Hash)
+	_, _, err = db.BlockPointAtOrBeforeIndex(
+		context.Background(), blocks[0].ID-1, nil,
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }

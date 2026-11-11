@@ -151,10 +151,11 @@ var sentinelSecrets = []string{
 func sentinelSecretConfig() *Config {
 	certPath := "/etc/dingo/api.crt"
 	return &Config{
-		Network:      "preview",
-		DatabasePath: "/var/lib/dingo",
-		StorageMode:  "api",
-		Logging:      LoggingConfig{Format: "json", Level: "debug"},
+		Network:          "preview",
+		MetricsAuthToken: "SENTINEL-METRICS-AUTH-TOKEN",
+		DatabasePath:     "/var/lib/dingo",
+		StorageMode:      "api",
+		Logging:          LoggingConfig{Format: "json", Level: "debug"},
 		API: APIConfig{
 			TLS: apiconfig.TLSPolicy{CertFilePath: &certPath},
 		},
@@ -162,8 +163,7 @@ func sentinelSecretConfig() *Config {
 			Enabled: true,
 			APIKey:  "SENTINEL-KOIOS-API-KEY",
 		},
-		MetricsAuthToken: "SENTINEL-METRICS-AUTH-TOKEN",
-		BarkBaseUrl:      "https://bark:SENTINEL-BARK-PASSWORD@bark.example/api",
+		BarkBaseUrl: "https://bark:SENTINEL-BARK-PASSWORD@bark.example/api",
 		BarkBlockDownloadHosts: []string{
 			"https://blocks:SENTINEL-BARK-HOST-PASSWORD@blocks.example",
 			"https://plain.example",
@@ -364,17 +364,6 @@ func TestRedactURLToHost(t *testing.T) {
 				t.Errorf("redactURLToHost(%q) leaks: %q", tc.in, got)
 			}
 		})
-	}
-}
-
-// TestConfigLogValueNil covers a nil receiver, which slog resolves the same
-// way as any other LogValuer.
-func TestConfigLogValueNil(t *testing.T) {
-	t.Parallel()
-
-	var cfg *Config
-	if got := cfg.LogValue().String(); got != "<nil>" {
-		t.Errorf("nil Config LogValue = %q, want <nil>", got)
 	}
 }
 

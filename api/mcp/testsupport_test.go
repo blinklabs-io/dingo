@@ -129,14 +129,25 @@ func newToolSessionWithTimeout(
 	nodeDB ...*database.Database,
 ) *mcp.ClientSession {
 	t.Helper()
-	server := mcp.NewServer(
-		&mcp.Implementation{Name: "test", Version: "1"},
-		nil,
-	)
 	var lookup utxoAddressLookup
 	if len(nodeDB) > 0 && nodeDB[0] != nil {
 		lookup = nodeDB[0].UtxosByAddressPage
 	}
+	return newToolSessionWithLookup(t, db, maxRows, timeout, lookup)
+}
+
+func newToolSessionWithLookup(
+	t *testing.T,
+	db *sql.DB,
+	maxRows int,
+	timeout time.Duration,
+	lookup utxoAddressLookup,
+) *mcp.ClientSession {
+	t.Helper()
+	server := mcp.NewServer(
+		&mcp.Implementation{Name: "test", Version: "1"},
+		nil,
+	)
 	RegisterCardanoTools(
 		server,
 		db,

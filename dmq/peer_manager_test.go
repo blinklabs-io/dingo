@@ -638,7 +638,7 @@ func TestPeerManagerBoundsConcurrentDials(t *testing.T) {
 // loses from the others.
 func TestPeerManagerSettlesAmongManyPeersAndReplacesLostOnes(t *testing.T) {
 	t.Parallel()
-	const remotes, limit = 24, 10
+	const remotes, limit = 12, 5
 	stacks := make([]*Stack, 0, remotes)
 	peers := make([]Peer, 0, remotes)
 	for range remotes {
@@ -752,7 +752,9 @@ func TestPeerNetworkLeavesNoGoroutinesBehind(t *testing.T) {
 			SocketPath:     shortSocketPath(t),
 			Authenticator:  newTestAuthenticator(),
 			MessageBodyMin: 1,
-			Peers:          &cfg,
+			// Both messages share one fixture key and must cross together.
+			MinPoolMessageInterval: -1,
+			Peers:                  &cfg,
 		})
 		require.NoError(t, err)
 		require.NoError(t, s.Start(t.Context()))

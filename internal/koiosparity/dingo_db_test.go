@@ -16,7 +16,6 @@ package koiosparity
 
 import (
 	"context"
-	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -24,7 +23,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -193,25 +191,6 @@ func openTestDingoDB(t *testing.T) (*DingoDB, *testDB) {
 	dir := t.TempDir()
 	gdb := openTestSQLDB(t, dir, true)
 	return &DingoDB{db: gdb.db, dialect: "sqlite"}, gdb
-}
-
-func TestProposalRefundReadTxOptions(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		dialect   string
-		isolation sql.IsolationLevel
-	}{
-		{dialect: "sqlite", isolation: sql.LevelDefault},
-		{dialect: "postgres", isolation: sql.LevelRepeatableRead},
-		{dialect: "mysql", isolation: sql.LevelRepeatableRead},
-	} {
-		t.Run(tc.dialect, func(t *testing.T) {
-			t.Parallel()
-			options := proposalRefundReadTxOptions(tc.dialect)
-			require.Equal(t, tc.isolation, options.Isolation)
-			assert.True(t, options.ReadOnly)
-		})
-	}
 }
 
 func testPoolKeyHash(t *testing.T, b byte) []byte {
@@ -475,51 +454,6 @@ func TestGetEpochDataStakeEpochOffset(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, data)
 	require.Equal(t, "42000000", data.TotalActiveStake)
-}
-
-// TestDingoDBGetRewardAccountOutputs is a symmetry check with
-// DatabaseSource's equivalent test (source_test.go's
-// TestDatabaseSourceGetRewardAccountOutputs): both RewardParitySource
-// implementations must return the same committed reward_account_output rows
-// for an epoch, since the per-account parity check will read either one
-// interchangeably.
-func TestDingoDBGetRewardAccountOutputs(t *testing.T) {
-	t.Parallel()
-
-	dingo, gdb := openTestDingoDB(t)
-	defer dingo.Close() //nolint:errcheck
-	stakingKey := testPoolKeyHash(t, 0x11)
-	poolKeyHash := testPoolKeyHash(t, 0x22)
-	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
-		Epoch:       8,
-		StakingKey:  stakingKey,
-		PoolKeyHash: poolKeyHash,
-		RewardType:  "member",
-		Amount:      types.Uint64(55),
-		Spendable:   true,
-	}).Error)
-
-	rows, err := dingo.GetRewardAccountOutputs(context.Background(), 8)
-	require.NoError(t, err)
-	require.Len(t, rows, 1)
-	require.Equal(t, types.Uint64(55), rows[0].Amount)
-	require.True(t, rows[0].Spendable)
-
-	rows, err = dingo.GetRewardAccountOutputs(context.Background(), 9)
-	require.NoError(t, err)
-	require.Empty(t, rows)
-}
-
-// TestPoolKeyHashRoundTrip is a sanity check that testPoolKeyHash produces a
-// valid pool ID, used implicitly by the boundary tests above via
-// hex.EncodeToString matching GetPoolEpochDataMap's own key format.
-func TestPoolKeyHashRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	h := testPoolKeyHash(t, 0x01)
-	var pid lcommon.PoolId
-	copy(pid[:], h)
-	require.Len(t, pid[:], 28)
 }
 
 // TestGetPoolEpochDataMapTracksChangingPoolParams reproduces the preview

@@ -40,6 +40,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,35 +75,39 @@ func seedStakeCredentialUtxos(
 		),
 	)
 
-	for i := range numUtxos {
-		payment := make([]byte, lcommon.AddressHashSize)
-		binary.BigEndian.PutUint32(payment, uint32(i)+1)
-		txHash := make([]byte, 32)
-		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
-		slot := uint64(i) + 1
-		amount := (uint64(i) + 1) * 1_000_000
-		insertAdapterTransaction(t, raw, &models.Transaction{
-			Hash:       txHash,
-			Slot:       slot,
-			BlockIndex: 0,
-			Outputs: []models.Utxo{{
-				TxId:       txHash,
-				OutputIdx:  0,
-				PaymentKey: payment,
-				StakingKey: stakeKey,
-				AddedSlot:  slot,
-				Amount:     types.Uint64(amount),
-			}},
-		})
-		addr, err := lcommon.NewAddressFromParts(
-			lcommon.AddressTypeKeyKey,
-			lcommon.AddressNetworkTestnet,
-			payment,
-			stakeKey,
-		)
-		require.NoError(t, err)
-		storePointerOutputCbor(t, db, txHash, 0, addr, amount)
-	}
+	outs := make([]pointerOutput, 0, numUtxos)
+	inSQLTransaction(t, raw, func(tx *sql.Tx) {
+		for i := range numUtxos {
+			payment := make([]byte, lcommon.AddressHashSize)
+			binary.BigEndian.PutUint32(payment, uint32(i)+1)
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+			slot := uint64(i) + 1
+			amount := (uint64(i) + 1) * 1_000_000
+			insertAdapterTransaction(t, tx, &models.Transaction{
+				Hash:       txHash,
+				Slot:       slot,
+				BlockIndex: 0,
+				Outputs: []models.Utxo{{
+					TxId:       txHash,
+					OutputIdx:  0,
+					PaymentKey: payment,
+					StakingKey: stakeKey,
+					AddedSlot:  slot,
+					Amount:     types.Uint64(amount),
+				}},
+			})
+			addr, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeKeyKey,
+				lcommon.AddressNetworkTestnet,
+				payment,
+				stakeKey,
+			)
+			require.NoError(t, err)
+			outs = append(outs, pointerOutput{txHash, 0, addr, amount})
+		}
+	})
+	storePointerOutputsCbor(t, db, outs)
 	return stakeAddr.String(), stakeKey
 }
 
@@ -217,26 +222,30 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	require.NoError(t, err)
 
 	const total = database.ExactAddressCandidateScanLimit + 1
-	for i := range total {
-		txHash := make([]byte, 32)
-		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
-		slot := uint64(i) + 1
-		amount := (uint64(i) + 1) * 1_000_000
-		insertAdapterTransaction(t, raw, &models.Transaction{
-			Hash:       txHash,
-			Slot:       slot,
-			BlockIndex: 0,
-			Outputs: []models.Utxo{{
-				TxId:       txHash,
-				OutputIdx:  0,
-				PaymentKey: payment,
-				Address:    []byte(addr.String()),
-				AddedSlot:  slot,
-				Amount:     types.Uint64(amount),
-			}},
-		})
-		storePointerOutputCbor(t, db, txHash, 0, addr, amount)
-	}
+	outs := make([]pointerOutput, 0, total)
+	inSQLTransaction(t, raw, func(tx *sql.Tx) {
+		for i := range total {
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+			slot := uint64(i) + 1
+			amount := (uint64(i) + 1) * 1_000_000
+			insertAdapterTransaction(t, tx, &models.Transaction{
+				Hash:       txHash,
+				Slot:       slot,
+				BlockIndex: 0,
+				Outputs: []models.Utxo{{
+					TxId:       txHash,
+					OutputIdx:  0,
+					PaymentKey: payment,
+					Address:    []byte(addr.String()),
+					AddedSlot:  slot,
+					Amount:     types.Uint64(amount),
+				}},
+			})
+			outs = append(outs, pointerOutput{txHash, 0, addr, amount})
+		}
+	})
+	storePointerOutputsCbor(t, db, outs)
 
 	t.Run("ascending page stops at the requested window", func(t *testing.T) {
 		items, gotTotal, err := adapter.AddressUTXOs(
@@ -518,21 +527,23 @@ func TestNodeAdapterAssetAddressesStreamsWidelyHeldAsset(t *testing.T) {
 			}},
 		}
 	}
-	insertAdapterTransaction(t, store, &models.Transaction{
-		Hash:    txHash,
-		Slot:    1,
-		Outputs: outputs,
+	inSQLTransaction(t, store, func(tx *sql.Tx) {
+		insertAdapterTransaction(t, tx, &models.Transaction{
+			Hash:    txHash,
+			Slot:    1,
+			Outputs: outputs,
+		})
 	})
+	outs := make([]pointerOutput, len(outputs))
 	for i := range outputs {
-		storePointerOutputCbor(
-			t,
-			db,
+		outs[i] = pointerOutput{
 			txHash,
 			uint32(i), //nolint:gosec // bounded test fixture
 			addr,
 			1_000_000,
-		)
+		}
 	}
+	storePointerOutputsCbor(t, db, outs)
 
 	holders, total, err := adapter.AssetAddresses(
 		context.Background(),
@@ -865,9 +876,16 @@ func newDBBackedAdapterWithStorageMode(
 	return adapter, raw, db
 }
 
+// sqlExecer is satisfied by both *sql.DB and *sql.Tx, so a fixture that
+// inserts thousands of rows can run them in one transaction instead of one
+// autocommit per statement.
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 func insertAdapterUtxo(
 	t *testing.T,
-	raw *sql.DB,
+	raw sqlExecer,
 	utxo *models.Utxo,
 ) {
 	t.Helper()
@@ -917,7 +935,7 @@ VALUES (?, ?, ?, ?, ?)`,
 
 func insertAdapterTransaction(
 	t *testing.T,
-	raw *sql.DB,
+	raw sqlExecer,
 	tx *models.Transaction,
 ) {
 	t.Helper()
@@ -998,6 +1016,54 @@ func storePointerOutputCbor(
 	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
 		return db.Blob().SetUtxo(txn.Blob(), txID, outputIdx, raw)
 	}))
+}
+
+// pointerOutput is one output whose CBOR storePointerOutputsCbor writes.
+type pointerOutput struct {
+	txID   []byte
+	idx    uint32
+	addr   lcommon.Address
+	amount uint64
+}
+
+// storePointerOutputsCbor writes the CBOR of every output in one blob
+// transaction.
+func storePointerOutputsCbor(
+	t *testing.T,
+	db *database.Database,
+	outs []pointerOutput,
+) {
+	t.Helper()
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+		for _, out := range outs {
+			raw, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+				OutputAddress: out.addr,
+				OutputAmount:  out.amount,
+			})
+			if err != nil {
+				return err
+			}
+			if err := db.Blob().SetUtxo(
+				txn.Blob(), out.txID, out.idx, raw,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+}
+
+// inSQLTransaction runs seed against one transaction on raw and commits it.
+func inSQLTransaction(t *testing.T, raw *sql.DB, seed func(tx *sql.Tx)) {
+	t.Helper()
+	tx, err := raw.Begin()
+	require.NoError(t, err)
+	// A failed require inside seed ends the test before Commit; roll back so
+	// the connection is not left holding the transaction. After a successful
+	// Commit the rollback is a no-op.
+	t.Cleanup(func() { _ = tx.Rollback() })
+	seed(tx)
+	require.NoError(t, tx.Commit())
 }
 
 func TestNodeAdapterAddressPointerIncludesSnapshotUtxos(t *testing.T) {
@@ -1297,31 +1363,37 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 		}, nil))
 	}
 
-	const tipHeight = uint64(2)
+	tipPoint := ocommon.NewPoint(20, hashes[2])
 
 	// Middle block (height 0) -> successor at height 1.
-	next, err := adapter.nextBlockHash(0, tipHeight)
+	next, err := adapter.nextBlockHash(context.Background(), 1, tipPoint)
 	require.NoError(t, err)
 	require.NotNil(t, next)
 	assert.Equal(t, hex.EncodeToString(hashes[1]), *next)
 
 	// Height 1 -> successor at height 2.
-	next, err = adapter.nextBlockHash(1, tipHeight)
+	next, err = adapter.nextBlockHash(context.Background(), 2, tipPoint)
 	require.NoError(t, err)
 	require.NotNil(t, next)
 	assert.Equal(t, hex.EncodeToString(hashes[2]), *next)
 
-	// Tip block (height == tipHeight) has no successor: short-circuit to nil
-	// without a DB lookup.
-	next, err = adapter.nextBlockHash(tipHeight, tipHeight)
+	// A tip has no successor even when higher index entries are absent.
+	next, err = adapter.nextBlockHash(context.Background(), 3, tipPoint)
 	require.NoError(t, err)
 	assert.Nil(t, next)
 
-	// A non-tip height whose successor index is absent (gap in storage) must
-	// resolve to nil via the ErrBlockNotFound path, not surface an error.
-	next, err = adapter.nextBlockHash(50, 100)
+	// A successor after a gap in the ID space is the next indexed block.
+	require.NoError(t, db.BlockCreate(models.Block{
+		Hash: fill32(0x18), Slot: 80, Number: 8, ID: 8, Cbor: []byte{8},
+	}, nil))
+	next, err = adapter.nextBlockHash(
+		context.Background(),
+		6,
+		ocommon.NewPoint(80, fill32(0x18)),
+	)
 	require.NoError(t, err)
-	assert.Nil(t, next)
+	require.NotNil(t, next)
+	assert.Equal(t, hex.EncodeToString(fill32(0x18)), *next)
 }
 
 func TestResolveBlockRangeUpperBoundInSparseChain(t *testing.T) {
@@ -1330,11 +1402,20 @@ func TestResolveBlockRangeUpperBoundInSparseChain(t *testing.T) {
 	for _, block := range []struct{ height, slot uint64 }{{1, 10}, {3, 30}} {
 		require.NoError(t, db.BlockCreate(models.Block{
 			Hash: fill32(byte(block.height)), Slot: block.slot,
-			Number: block.height, ID: block.height + database.BlockInitialIndex,
+			Number: block.height, ID: block.height * 10,
 			Type: 0, Cbor: []byte{byte(block.height)},
 		}, nil))
 	}
-	require.NoError(t, db.SetTip(ochainsync.Tip{BlockNumber: 3}, nil))
+	require.NoError(
+		t,
+		db.SetTip(
+			ochainsync.Tip{
+				Point:       ocommon.NewPoint(30, fill32(3)),
+				BlockNumber: 3,
+			},
+			nil,
+		),
+	)
 
 	bound, ok, err := adapter.resolveBlockRangeBound(
 		context.Background(), &BlockRangePosition{Block: 2}, false,
@@ -1406,7 +1487,11 @@ INSERT INTO address_transaction (
 		require.NoError(t, err)
 		if i == len(blocks)-1 {
 			require.NoError(t, db.SetTip(
-				ochainsync.Tip{BlockNumber: block.height}, nil,
+				ochainsync.Tip{
+					Point:       ocommon.NewPoint(block.slot, block.hash),
+					BlockNumber: block.height,
+				},
+				nil,
 			))
 		}
 	}

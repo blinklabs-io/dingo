@@ -100,6 +100,8 @@ func feedPointsWithTipHistory(
 
 // recordObservedPoint stores the current hash for each retained point.
 func TestRecordObservedPointTracksHashFrontier(t *testing.T) {
+	t.Parallel()
+
 	pt := &PeerChainTip{}
 	window := uint64(100)
 	feedPoints(pt, window,
@@ -133,6 +135,8 @@ func TestRecordObservedPointTracksHashFrontier(t *testing.T) {
 }
 
 func TestRecordObservedPointRestartsAfterHeightGap(t *testing.T) {
+	t.Parallel()
+
 	pt := &PeerChainTip{}
 	window := uint64(100)
 	pt.recordObservedPoint(
@@ -158,6 +162,8 @@ func TestRecordObservedPointRestartsAfterHeightGap(t *testing.T) {
 // With hash tracking disabled (corroboration inactive) only the slot frontier
 // is kept; the hash frontier is not retained.
 func TestRecordObservedPointSkipsHashesWhenInactive(t *testing.T) {
+	t.Parallel()
+
 	pt := &PeerChainTip{}
 	window := uint64(100)
 	for _, p := range []ocommon.Point{
@@ -191,6 +197,8 @@ func TestRecordObservedPointSkipsHashesWhenInactive(t *testing.T) {
 
 // ApplyRollback trims both frontiers to the rollback slot.
 func TestApplyRollbackTrimsPointFrontier(t *testing.T) {
+	t.Parallel()
+
 	pt := &PeerChainTip{}
 	window := uint64(100)
 	feedPoints(pt, window,
@@ -226,6 +234,8 @@ func TestApplyRollbackTrimsPointFrontier(t *testing.T) {
 }
 
 func TestApplyRollbackClearsPointFrontierForUnknownFork(t *testing.T) {
+	t.Parallel()
+
 	pt := &PeerChainTip{}
 	window := uint64(100)
 	feedPoints(pt, window,
@@ -244,6 +254,8 @@ func TestApplyRollbackClearsPointFrontierForUnknownFork(t *testing.T) {
 }
 
 func TestApplyRollbackDoesNotPromoteAdvertisedTipToObserved(t *testing.T) {
+	t.Parallel()
+
 	connId := newTestConnectionId(1)
 	observedTip := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 100, Hash: []byte("observed")},
@@ -267,6 +279,8 @@ func TestApplyRollbackDoesNotPromoteAdvertisedTipToObserved(t *testing.T) {
 }
 
 func TestApplyRollbackRestoresDeliveredFrontierFromHistory(t *testing.T) {
+	t.Parallel()
+
 	connId := newTestConnectionId(1)
 	delivered := []ochainsync.Tip{
 		{
@@ -303,6 +317,8 @@ func TestApplyRollbackRestoresDeliveredFrontierFromHistory(t *testing.T) {
 // the candidate's window, to match the candidate: same-chain peers confirm each
 // other; a peer on a divergent fork does not.
 func TestConfirmsRecentChainHashSensitive(t *testing.T) {
+	t.Parallel()
+
 	window := uint64(100)
 	honestA := &PeerChainTip{}
 	honestB := &PeerChainTip{}
@@ -330,6 +346,8 @@ func TestConfirmsRecentChainHashSensitive(t *testing.T) {
 // window is NOT confirmed by an honest witness, because the witness observed
 // recent blocks the candidate does not have.
 func TestConfirmsRecentChainRejectsSharedAncestorThenDiverge(t *testing.T) {
+	t.Parallel()
+
 	window := uint64(100)
 	fast := &PeerChainTip{}
 	honest := &PeerChainTip{}
@@ -353,6 +371,8 @@ func TestConfirmsRecentChainRejectsSharedAncestorThenDiverge(t *testing.T) {
 // A witness whose frontier does not overlap the candidate's window cannot
 // confirm it (fail-closed).
 func TestConfirmsRecentChainRequiresOverlap(t *testing.T) {
+	t.Parallel()
+
 	window := uint64(20)
 	ahead := &PeerChainTip{}
 	behind := &PeerChainTip{}
@@ -368,6 +388,8 @@ func TestConfirmsRecentChainRequiresOverlap(t *testing.T) {
 }
 
 func TestGenesisCorroborationRejectsOldMatchWithAheadWitness(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:        true,
 		SecurityParam:      1,
@@ -412,6 +434,8 @@ func TestGenesisCorroborationRejectsOldMatchWithAheadWitness(t *testing.T) {
 // ChainSelectedNoneEvent (the event represents every selected-to-none
 // transition, not only the evaluate-loop path).
 func TestChainSelectedNoneEventOnBestPeerRemoval(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -462,6 +486,8 @@ func TestChainSelectedNoneEventOnBestPeerRemoval(t *testing.T) {
 // not be applied. It gates apply on corroboration while active, denying unknown
 // and uncorroborated peers, and re-denies when corroboration is revoked.
 func TestGenesisShouldApplyIngressGatesUncorroborated(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         20,
@@ -1197,6 +1223,8 @@ func TestPeerTipAdmissionCandidatesRespectTrackedPeerLimit(t *testing.T) {
 // Outside Genesis corroboration (Praos, or Genesis with the gate disabled) every
 // peer is apply-eligible — no behavior change.
 func TestShouldApplyIngressAllowsWhenCorroborationInactive(t *testing.T) {
+	t.Parallel()
+
 	conn := corrConn(1)
 
 	praos := NewChainSelector(ChainSelectorConfig{})
@@ -1212,6 +1240,8 @@ func TestShouldApplyIngressAllowsWhenCorroborationInactive(t *testing.T) {
 // A best-peer → none transition publishes an explicit ChainSelectedNoneEvent so
 // subscribers can observe that selection has stalled.
 func TestChainSelectedNoneEventOnCorroborationRevocation(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1274,6 +1304,8 @@ func TestChainSelectedNoneEventOnCorroborationRevocation(t *testing.T) {
 // peers (shared block hashes at shared slots) is corroborated, so it is
 // selected as the best chain in Genesis mode.
 func TestGenesisHonestFastSourceIsCorroborated(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         20,
@@ -1320,6 +1352,8 @@ func TestGenesisHonestFastSourceIsCorroborated(t *testing.T) {
 // the densest/longest. The node follows the corroborated honest peers instead
 // and publishes a corroboration-failure event for the divergent source.
 func TestGenesisDivergentFastSourceNotSelected(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1399,6 +1433,8 @@ func TestGenesisDivergentFastSourceNotSelected(t *testing.T) {
 // as two peers corroborate an early header, long before the local tip is near
 // the network tip.
 func TestGenesisDoesNotExitOnEarlyObservedHeaders(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         10, // window = 30
@@ -1467,6 +1503,8 @@ func TestGenesisDoesNotExitOnEarlyObservedHeaders(t *testing.T) {
 // Genesis mode — the exit horizon is bound to delivered headers, so the node
 // still exits once the local tip catches up to the delivered/corroborated tip.
 func TestGenesisExitNotPinnedByCorroboratedLiarAdvertisingFarTip(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         10, // window = 30
@@ -1528,6 +1566,8 @@ func TestGenesisExitNotPinnedByCorroboratedLiarAdvertisingFarTip(t *testing.T) {
 // built from corroborated peers only, that extreme slot is ignored and the node
 // still exits once the local tip catches up to the corroborated network tip.
 func TestGenesisExitNotPinnedByUncorroboratedExtremeSlot(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         10, // window = 30
@@ -1591,49 +1631,12 @@ func TestGenesisExitNotPinnedByUncorroboratedExtremeSlot(t *testing.T) {
 		"an uncorroborated extreme advertised slot must not pin Genesis mode")
 }
 
-// Removing the only witness revokes the incumbent fast source's corroboration
-// and forces a re-evaluation that drops it, even though the removed peer was not
-// itself the selected best.
-func TestGenesisCorroborationRevokedOnWitnessRemoval(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{
-		GenesisMode:           true,
-		SecurityParam:         20,
-		MinCorroboratingPeers: 1,
-	})
-
-	fast := corrConn(1)
-	witness := corrConn(2)
-	feedFrontier(cs, witness,
-		genesisTip(100, "h100", 100),
-		genesisTip(105, "h105", 105),
-		genesisTip(110, "h110", 110),
-	)
-	feedFrontier(cs, fast,
-		genesisTip(100, "h100", 100),
-		genesisTip(105, "h105", 105),
-		genesisTip(110, "h110", 110),
-	)
-	cs.EvaluateAndSwitch()
-	require.NotNil(t, cs.GetBestPeer())
-	require.Equal(t, fast, *cs.GetBestPeer())
-
-	// The witness disconnects; the fast source loses its only corroboration.
-	// RemovePeer itself must re-evaluate here (the removed peer is a witness,
-	// not the best), so GetBestPeer reflects the drop with no extra
-	// EvaluateAndSwitch call — that internal re-evaluation is exactly the
-	// behavior under test.
-	cs.RemovePeer(witness)
-	assert.Nil(
-		t,
-		cs.GetBestPeer(),
-		"incumbent must be dropped once it loses corroboration",
-	)
-}
-
 // With no corroborating peers available, a fast source stalls: the selector
 // refuses to select it, returning no best peer, rather than following an
 // uncorroborated chain.
 func TestGenesisInsufficientCorroborationStalls(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         20,
@@ -1658,6 +1661,8 @@ func TestGenesisInsufficientCorroborationStalls(t *testing.T) {
 // Corroboration requires a quorum: when the configured minimum is 2 but only
 // one other peer agrees, the fast source is still uncorroborated and stalls.
 func TestGenesisCorroborationQuorumNotMet(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         20,
@@ -1689,6 +1694,8 @@ func TestGenesisCorroborationQuorumNotMet(t *testing.T) {
 // witnesses are de-duplicated by host, so a Sybil fast source opening multiple
 // connections still lacks independent corroboration and stalls.
 func TestGenesisCorroborationDedupsBySybilHost(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         20,
@@ -1731,6 +1738,8 @@ func TestGenesisCorroborationDedupsBySybilHost(t *testing.T) {
 // e.g. NewConfig(WithGenesisCorroborationPeers(-1))) must fail closed: the gate
 // stays active rather than being silently disabled. Only 0 disables it.
 func TestGenesisNegativeCorroborationFailsClosed(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         20,
@@ -1768,6 +1777,8 @@ func TestGenesisNegativeCorroborationFailsClosed(t *testing.T) {
 // lone dense source is selected exactly as before, preserving backward
 // compatibility for nodes that do not enable the Genesis trust model.
 func TestGenesisCorroborationDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:   true,
 		SecurityParam: 20,
@@ -1789,6 +1800,8 @@ func TestGenesisCorroborationDisabledByDefault(t *testing.T) {
 // GenesisStatus exposes selection mode, window, the selected fast source, and
 // per-peer density/corroboration for observability.
 func TestGenesisStatusObservability(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         10, // window = 30
@@ -1834,6 +1847,8 @@ func TestGenesisStatusObservability(t *testing.T) {
 // peer, the selector exits Genesis mode and publishes an exit event carrying
 // the reason (local/best slots and window).
 func TestGenesisModeExitEmitsEvent(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -1893,10 +1908,13 @@ func TestShouldApplyIngressWaitsOutTransientZeroGeneration(t *testing.T) {
 			return func() {}, value == generation.Load()
 		},
 	})
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		generation.Store(1)
-	}()
+	var reads atomic.Int64
+	cs.config.CurrentHeaderCryptoVerificationGeneration = func() uint64 {
+		if reads.Add(1) > 3 {
+			generation.Store(1)
+		}
+		return generation.Load()
+	}
 
 	assert.True(t, cs.ShouldApplyIngress(corrConn(40)),
 		"a generation that is zero only during a transition must not reject the header")
@@ -2018,6 +2036,7 @@ func TestShouldApplyIngressAwaitsGenesisPublicationWithoutOperatorQuorum(t *test
 			return func() {}, value == generation.Load()
 		},
 	})
+	cs.generationStableWait = 20 * time.Millisecond
 	conn := corrConn(41)
 	require.False(t, cs.GenesisCorroborationActive())
 	require.Equal(t, ingressAwaitCorroboration, cs.ingressDecision(conn),

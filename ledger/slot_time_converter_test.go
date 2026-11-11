@@ -715,7 +715,7 @@ func futureSystemStartCfg(
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(sb.String())),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(sb.String())),
 	)
 	return cfg
 }

@@ -250,6 +250,8 @@ func TestMetadataStoreBadCredentialsFailsCleanly(t *testing.T) {
 		storagetest.EscapeLibpqValue(database),
 	)
 
+	storagetest.SkipIfPostgresIgnoresPassword(t, dsn)
+
 	store, err := openStore(
 		Config{DSN: dsn},
 		metadata.ProviderDependencies{},
@@ -299,13 +301,6 @@ poolConnMaxLifetime: 1h30m
 	require.Equal(t, 250, cfg.PoolMaxOpenConns)
 	require.Equal(t, 25, cfg.PoolMaxIdleConns)
 	require.Equal(t, 90*time.Minute, cfg.PoolConnMaxLifetime)
-}
-
-func TestDefaultConfigLeavesTimeoutsUnset(t *testing.T) {
-	cfg := defaultConfig()
-
-	require.Zero(t, cfg.StatementTimeout)
-	require.Zero(t, cfg.LockTimeout)
 }
 
 func TestAssembledDSNSetsStatementAndLockTimeoutInMilliseconds(t *testing.T) {

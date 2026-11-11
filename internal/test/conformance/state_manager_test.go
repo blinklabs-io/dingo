@@ -189,6 +189,7 @@ func TestDRepDeregistrationPreservesOtherCredentialType(t *testing.T) {
 }
 
 func TestPersistRatificationStoresEpochAndBoundarySlot(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -239,6 +240,7 @@ func TestPersistRatificationStoresEpochAndBoundarySlot(t *testing.T) {
 }
 
 func TestProposalToModelStoresRatificationPair(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -282,6 +284,7 @@ func testHash32(seed byte) []byte {
 // manager is closed and a new one is opened against the same on-disk data
 // directory -- not just visible within the process that wrote it.
 func TestDingoStateManagerRestartSurvivesReopen(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 
 	m1, err := newDingoStateManagerAt(dataDir)
@@ -326,6 +329,7 @@ func TestDingoStateManagerRestartSurvivesReopen(t *testing.T) {
 // TestDingoStateManagerRollbackDiscardsWrites verifies that rolled-back
 // writes are not visible to later reads.
 func TestDingoStateManagerRollbackDiscardsWrites(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -362,6 +366,7 @@ func TestDingoStateManagerRollbackDiscardsWrites(t *testing.T) {
 // (the mirror) and a different delegation only in the real backend, then
 // asserts DRepDelegation returns the backend's value.
 func TestDRepDelegationReadsRealBackendNotGovStateMirror(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -419,6 +424,7 @@ func TestDRepDelegationReadsRealBackendNotGovStateMirror(t *testing.T) {
 // backend that dropped it -- and asserts CommitteeMember reports it absent
 // and CommitteeMembers excludes it, rather than serving the mirror's copy.
 func TestCommitteeMemberReadsRealBackendNotGovStateMirror(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -452,6 +458,7 @@ func TestCommitteeMemberReadsRealBackendNotGovStateMirror(t *testing.T) {
 }
 
 func TestCommitteeMemberReadsPendingUpdateCommitteeProposal(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -504,6 +511,7 @@ func TestCommitteeMemberReadsPendingUpdateCommitteeProposal(t *testing.T) {
 // committee-member provider method. A still-later authorization cannot clear
 // the permanent resignation.
 func TestCommitteeMemberResignationPermanentlyClearsHotKey(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -567,6 +575,7 @@ func TestCommitteeMemberResignationPermanentlyClearsHotKey(t *testing.T) {
 }
 
 func TestCommitteeHotCredentialSelectionUsesActiveMember(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		expiries   []uint64
@@ -650,6 +659,7 @@ func TestCommitteeHotCredentialSelectionUsesActiveMember(t *testing.T) {
 // ledger.LedgerView.PoolCurrentState's own fix for the same defect (see
 // ledger/view_test.go's TestLedgerViewPoolCurrentStatePendingRetirement).
 func TestPoolCurrentStatePendingRetirement(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -718,6 +728,7 @@ func TestPoolCurrentStatePendingRetirement(t *testing.T) {
 // vector could pass by having every backend failure look identical to "no
 // DRep."
 func TestDRepRegistrationPropagatesBackendErrors(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	require.NoError(t, m.Close())
@@ -743,6 +754,7 @@ func TestDRepRegistrationPropagatesBackendErrors(t *testing.T) {
 // itself does not). It asserts the resulting stake-snapshot row exists via
 // a real metadata.StakeSnapshotStore read.
 func TestProcessEpochAgainstRealBackend(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -892,6 +904,7 @@ func noConfidenceCommitteeParams() *conway.ConwayProtocolParameters {
 func TestCommitteeActionRatifiedNoConfidenceUsesMotionThresholdAndImplicitYes(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -940,6 +953,7 @@ func TestCommitteeActionRatifiedNoConfidenceUsesMotionThresholdAndImplicitYes(
 func TestCommitteeActionRatifiedUpdateCommitteeKeepsNoConfidenceDenominatorOnly(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -990,6 +1004,7 @@ func TestCommitteeActionRatifiedUpdateCommitteeKeepsNoConfidenceDenominatorOnly(
 func TestCommitteeActionRatifiedUpdateCommitteeUsesAbsentCommitteeThreshold(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -1049,6 +1064,7 @@ func TestCommitteeActionRatifiedUpdateCommitteeUsesAbsentCommitteeThreshold(
 func TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -1133,6 +1149,7 @@ func TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote(
 func TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -1216,6 +1233,7 @@ func TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote(
 func TestProcessEpochBoundaryRatifiesNoConfidenceWithNoExplicitVotes(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -1262,6 +1280,7 @@ func TestProcessEpochBoundaryRatifiesNoConfidenceWithNoExplicitVotes(
 // gate was added without any test pinning it: deleting it left every
 // existing test green.
 func TestCommitteeActionRatifiedRefusesDuringConwayBootstrap(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -1330,6 +1349,7 @@ func TestCommitteeActionRatifiedRefusesDuringConwayBootstrap(t *testing.T) {
 func TestRatifyProposalsGatesTreasuryWithdrawalDuringConwayBootstrap(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -1387,6 +1407,7 @@ func TestRatifyProposalsGatesTreasuryWithdrawalDuringConwayBootstrap(
 func TestCommitteeActionRatifiedRefusesUpdateCommitteeOverTermLimit(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -1444,6 +1465,7 @@ func TestCommitteeActionRatifiedRefusesUpdateCommitteeOverTermLimit(
 // the proposal's only vote is gone and ratification must fail; using
 // m.currentEpoch would wrongly count it as still active and ratify.
 func TestCommitteeActionRatifiedUsesPassedEpochNotManagerField(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -1522,6 +1544,7 @@ func formatVoteKey(voterType uint8, credential common.Blake2b224) string {
 func TestCommitteeActionRatifiedIncludesProposalDepositInSPOStake(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -1625,6 +1648,7 @@ func TestCommitteeActionRatifiedIncludesProposalDepositInSPOStake(
 func TestCommitteeHotCredentialColdCredentialsIncludesUnseatedAuthorization(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -1713,6 +1737,7 @@ func TestCommitteeHotCredentialColdCredentialsIncludesUnseatedAuthorization(
 func TestCommitteeHotCredentialMemberDropsUnseatedAuthorizationAtBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()

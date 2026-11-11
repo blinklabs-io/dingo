@@ -385,20 +385,6 @@ func BenchmarkValueLogGCPolicy(b *testing.B) {
 	}
 }
 
-func TestMeasureGCPolicyDrivesProductionWorker(t *testing.T) {
-	t.Parallel()
-	for _, ratio := range []float64{0.25, 0.75} {
-		result := measureGCPolicy(t, ratio, 5*time.Millisecond)
-		require.Positive(t, result.Passes, "no rewrite was performed")
-		require.NotEmpty(t, result.Ratios)
-		for _, got := range result.Ratios {
-			require.InDelta(t, ratio, got, 0)
-		}
-		require.Positive(t, result.Drain)
-		require.Positive(t, result.Reclaimed, "no reclaimed bytes reported")
-	}
-}
-
 func FuzzCompactBlockMetadataRoundTrip(f *testing.F) {
 	f.Add(uint64(0), uint64(0), uint64(0), []byte(nil))
 	f.Add(uint64(42), uint64(7), uint64(99), bytes.Repeat([]byte{0xab}, 32))

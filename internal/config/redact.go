@@ -70,7 +70,7 @@ const (
 var logSecretConfigFields = []string{
 	// Koios Bearer token.
 	"KoiosParity.APIKey",
-	// Prometheus listener Bearer token.
+	// Legacy Prometheus authentication input.
 	"MetricsAuthToken",
 	// Outbound registry headers, typically Authorization.
 	"TokenRegistry.HeaderSecrets",
@@ -231,6 +231,7 @@ var logPlainConfigFields = []string{
 	"MaxInboundConns",
 	"MaxNtCConns",
 	"MaxTrustedLocalNtCConns",
+	"TrustedNtCIdleTimeout",
 	"MaxNtCConnectionsPerIP",
 	"MaxKESEvolutions",
 	"MetricsBindAddr",
@@ -242,6 +243,7 @@ var logPlainConfigFields = []string{
 	"DMQ.MaxPeers",
 	"DMQ.MessageTTL",
 	"DMQ.MinPeers",
+	"DMQ.MinPoolMessageInterval",
 	"DMQ.N2NPort",
 	"DMQ.NetworkMagic",
 	"DMQ.SocketPath",

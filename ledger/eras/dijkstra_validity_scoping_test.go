@@ -174,8 +174,8 @@ func dijkstraScopingProposal(
 
 // TestValidateTxDijkstraScopesSemanticRulesToDeclaredValidity drives the
 // production entry point with the same semantic defect declared valid and
-// declared invalid. Governance and entity predicates must reject only the
-// valid declaration; the invalid one applies the collateral path alone.
+// declared invalid. Governance and entity predicates reject only the valid
+// declaration; batch-wide treasury checks run for both declarations.
 func TestValidateTxDijkstraScopesSemanticRulesToDeclaredValidity(t *testing.T) {
 	t.Parallel()
 	hardFork := func(major, minor uint) lcommon.GovAction {
@@ -190,9 +190,10 @@ func TestValidateTxDijkstraScopesSemanticRulesToDeclaredValidity(t *testing.T) {
 	// the voter and pool operator use the fixture's signing key.
 	signer := dijkstraScopingSignerHash()
 	for _, tc := range []struct {
-		name   string
-		mutate func(*testing.T, *gdijkstra.DijkstraTransactionBody)
-		check  func(*testing.T, error)
+		name     string
+		mutate   func(*testing.T, *gdijkstra.DijkstraTransactionBody)
+		check    func(*testing.T, error)
+		anyPhase bool
 	}{
 		{
 			name: "hard fork that cannot follow",
@@ -262,9 +263,8 @@ func TestValidateTxDijkstraScopesSemanticRulesToDeclaredValidity(t *testing.T) {
 			},
 		},
 		{
-			// The reference checks the declared treasury value inside the
-			// phase-2-valid branch of LEDGER. Upstream lists the rule as
-			// always-run and gates it internally, so only behaviour pins it.
+			// Dijkstra checks the declared treasury value before branching on
+			// Phase2Valid, so the mismatch applies to both declarations.
 			name: "current treasury value mismatch",
 			mutate: func(t *testing.T, b *gdijkstra.DijkstraTransactionBody) {
 				b.TxCurrentTreasuryValue = 5
@@ -273,6 +273,7 @@ func TestValidateTxDijkstraScopesSemanticRulesToDeclaredValidity(t *testing.T) {
 				var e lcommon.CurrentTreasuryValueMismatchError
 				require.ErrorAs(t, err, &e)
 			},
+			anyPhase: true,
 		},
 		{
 			name: "pool registration below the margin floor",
@@ -326,12 +327,50 @@ func TestValidateTxDijkstraScopesSemanticRulesToDeclaredValidity(t *testing.T) {
 			invalidTx, invalidState, invalidParams := newDijkstraScopingTx(
 				t, false, apply,
 			)
-			require.NoError(
-				t,
-				ValidateTxDijkstra(invalidTx, 0, invalidState, invalidParams),
+			invalidErr := ValidateTxDijkstra(
+				invalidTx, 0, invalidState, invalidParams,
 			)
+			if tc.anyPhase {
+				tc.check(t, invalidErr)
+			} else {
+				require.NoError(t, invalidErr)
+			}
 		})
 	}
+}
+
+func TestValidateTxDijkstraChecksReferenceScriptSizeWhenDeclaredInvalid(
+	t *testing.T,
+) {
+	t.Parallel()
+	tx, state, params := newDijkstraScopingTx(
+		t,
+		false,
+		func(*gdijkstra.DijkstraTransactionBody) {},
+	)
+	referenceInput := shelley.MustNewShelleyTransactionInput(
+		"f228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
+		0,
+	)
+	scopingState := state.(*dijkstraScopingState)
+	scopingState.mockLedgerState.addUtxo(
+		referenceInput,
+		testAddressScriptOutput{
+			testOutput: newTestOutput(1_000_000),
+			addr:       newTestKeyAddress(t),
+			scriptRef:  lcommon.PlutusV3Script{0x01, 0x02},
+		},
+	)
+	tx.Body.TxReferenceInputs = cbor.NewSetType(
+		[]shelley.ShelleyTransactionInput{referenceInput},
+		false,
+	)
+	params.MaxRefScriptSizePerTx = 1
+	refreshDijkstraTransactionBodyAndSignature(t, tx)
+
+	err := ValidateTxDijkstra(tx, 0, state, params)
+	var limitErr lcommon.RefScriptSizePerTxTooLargeError
+	require.ErrorAs(t, err, &limitErr)
 }
 
 // TestValidateTxDijkstraInvalidTransactionStillFailsAlwaysRunRules proves the
@@ -477,7 +516,7 @@ var dijkstraRulePhases = map[lcommon.UtxoValidationRuleId]dijkstraRulePhase{
 	lcommon.UtxoValidationRuleOutsideValidityInterval:      dijkstraRuleAlways,
 	lcommon.UtxoValidationRuleOutsideForecast:              dijkstraRuleAlways,
 	lcommon.UtxoValidationRuleInputSetEmpty:                dijkstraRuleAlways,
-	lcommon.UtxoValidationRuleNoDuplicateInputs:            dijkstraRuleAlways,
+	lcommon.UtxoValidationRuleNoDuplicateInputs:            dijkstraRulePhase2Valid,
 	lcommon.UtxoValidationRuleFeeTooSmall:                  dijkstraRuleAlways,
 	lcommon.UtxoValidationRuleInsufficientCollateral:       dijkstraRuleAlways,
 	lcommon.UtxoValidationRuleCollateralContainsNonAda:     dijkstraRuleAlways,
@@ -489,7 +528,8 @@ var dijkstraRulePhases = map[lcommon.UtxoValidationRuleId]dijkstraRulePhase{
 	lcommon.UtxoValidationRuleRequiredRedeemers:            dijkstraRuleAlways,
 	lcommon.UtxoValidationRuleBatchWithdrawals:             dijkstraRulePhase2Valid,
 	lcommon.UtxoValidationRuleAccountBalanceIntervals:      dijkstraRulePhase2Valid,
-	lcommon.UtxoValidationRuleValueNotConserved:            dijkstraRuleAlways,
+	lcommon.UtxoValidationRuleTreasuryDonationScripts:      dijkstraRuleAlways,
+	lcommon.UtxoValidationRuleValueNotConserved:            dijkstraRulePhase2Valid,
 	lcommon.UtxoValidationRuleOutputTooSmall:               dijkstraRuleAlways,
 	lcommon.UtxoValidationRuleOutputTooBig:                 dijkstraRuleAlways,
 	lcommon.UtxoValidationRuleOutputBootAddrAttrsTooBig:    dijkstraRuleAlways,
@@ -515,7 +555,7 @@ var dijkstraRulePhases = map[lcommon.UtxoValidationRuleId]dijkstraRulePhase{
 	lcommon.UtxoValidationRuleStakePoolVotingRestrictions:  dijkstraRulePhase2Valid,
 	lcommon.UtxoValidationRuleCCVotingRestrictions:         dijkstraRulePhase2Valid,
 	lcommon.UtxoValidationRuleUnelectedCommitteeVoters:     dijkstraRulePhase2Valid,
-	lcommon.UtxoValidationRuleRefScriptSizePerTx:           dijkstraRulePhase2Valid,
+	lcommon.UtxoValidationRuleRefScriptSizePerTx:           dijkstraRuleAlways,
 	lcommon.UtxoValidationRulePoolCertificates:             dijkstraRulePhase2Valid,
 }
 

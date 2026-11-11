@@ -153,6 +153,8 @@ func TestLeiosPersistQueueAdmitsEntryWithinByteBudget(t *testing.T) {
 // dropped, and the already-queued entry it did not fit alongside is left
 // untouched. Before the budget existed, leiosPersistMaxPending alone would
 // have admitted both.
+// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
+// leiosPersistMaxQueueBytes.
 func TestLeiosPersistQueueRejectsEntryOverByteBudget(t *testing.T) {
 	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
 	firstPoint, firstRaw, firstData, firstSize := leiosPersistTestEntry(
@@ -186,6 +188,8 @@ func TestLeiosPersistQueueRejectsEntryOverByteBudget(t *testing.T) {
 // gives its reservation back -- an oversize entry that leaked its reservation
 // would permanently consume the capacity it was refused, so a few of them
 // would close the queue to legitimate writes.
+// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
+// leiosPersistMaxQueueBytes.
 func TestLeiosPersistQueueRejectsOversizeEntriesConcurrently(t *testing.T) {
 	const enqueuers = 16
 	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
@@ -238,6 +242,8 @@ func TestLeiosPersistQueueRejectsOversizeEntriesConcurrently(t *testing.T) {
 // costs no manifest copy and no transaction-body copies. With 64 transaction
 // bodies per entry, cloning would allocate at least 65 times per rejected
 // enqueue; admission-first allocates only the pending-map lookup key.
+// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
+// leiosPersistMaxQueueBytes, and testing.AllocsPerRun panics in a parallel test.
 func TestLeiosPersistQueueDoesNotCopyRejectedEntry(t *testing.T) {
 	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
 	point, blockRaw, data, _ := leiosPersistTestEntry(t, 60, 64, 256)
@@ -264,6 +270,8 @@ func TestLeiosPersistQueueDoesNotCopyRejectedEntry(t *testing.T) {
 // budget is a steady-state limit rather than a one-shot allowance. Without
 // the release on pop, the queue would refuse every write for the rest of the
 // process lifetime once the budget had been reached even once.
+// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
+// leiosPersistMaxQueueBytes.
 func TestLeiosPersistQueueReleasesReservationOnPop(t *testing.T) {
 	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
 	firstPoint, firstRaw, firstData, firstSize := leiosPersistTestEntry(
@@ -307,6 +315,8 @@ func TestLeiosPersistQueueReleasesReservationOnPop(t *testing.T) {
 // same endorser block takes over the queue slot and releases the incumbent's
 // reservation, so the queue holds one reservation for one entry rather than
 // accumulating both.
+// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
+// leiosPersistMaxQueueBytes.
 func TestLeiosPersistQueueReleasesReservationOnReplace(t *testing.T) {
 	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
 	point, blockRaw, data, completeSize := leiosPersistTestEntry(
@@ -346,6 +356,8 @@ func TestLeiosPersistQueueReleasesReservationOnReplace(t *testing.T) {
 // The reverse ordering -- a manifest-only store arriving behind an already
 // queued complete job -- is refused before it reserves anything, so it
 // neither displaces the complete job nor charges the budget.
+// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
+// leiosPersistMaxQueueBytes.
 func TestLeiosPersistQueueManifestBehindCompleteReservesNothing(t *testing.T) {
 	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
 	point, blockRaw, data, completeSize := leiosPersistTestEntry(
@@ -382,6 +394,8 @@ func TestLeiosPersistQueueManifestBehindCompleteReservesNothing(t *testing.T) {
 // land in the window between them -- the window in which enqueueLeiosPersist
 // is copying the payload -- and that window cannot be hit deterministically
 // from outside.
+// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
+// leiosPersistMaxQueueBytes.
 func TestLeiosPersistQueueReleasesReservationWhenStopRacesInstall(
 	t *testing.T,
 ) {
@@ -421,6 +435,8 @@ func TestLeiosPersistQueueReleasesReservationWhenStopRacesInstall(
 // A live Restore/Truncate rebuilds the pending map, and the accounting is
 // reset with it. Carrying the old map's byte total onto the new one would be a
 // permanent reduction in queue capacity after every live lifecycle operation.
+// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
+// leiosPersistMaxQueueBytes.
 func TestLeiosPersistWriterRestartResetsQueueAccounting(t *testing.T) {
 	o := newTestOuroborosWithLeiosDB(t)
 	point, blockRaw, data, size := leiosPersistTestEntry(t, 48, 4, 512)
@@ -838,6 +854,8 @@ func TestLeiosPersistenceWriterRunsDuringSlowGCScan(t *testing.T) {
 }
 
 func TestLeiosPersistenceWriterDoesNotRestorePrunedSlots(t *testing.T) {
+	t.Parallel()
+
 	o := newTestOuroborosWithLeiosDB(t)
 	o.config.LeiosPersistenceRetentionSlots = 10
 	db := o.leiosDatabase()
@@ -864,6 +882,8 @@ func TestLeiosPersistenceWriterDoesNotRestorePrunedSlots(t *testing.T) {
 func TestLeiosPersistenceGCRetriesAfterStartupWatermarkScanFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := newTestOuroborosWithLeiosDB(t)
 	o.config.LeiosPersistenceRetentionSlots = 10
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
@@ -885,6 +905,8 @@ func TestLeiosPersistenceGCRetriesAfterStartupWatermarkScanFailure(
 func TestWaitForLeiosPersistWorkerPrefersCompletedWorkerAtExpiredDeadline(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	done := make(chan struct{})
 	close(done)
 	for range 100 {
@@ -961,19 +983,6 @@ func TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently(
 	require.Equal(t, txs2, gotTxs2)
 }
 
-// TestLeiosPersistWriterStopIsSafeWithoutStart verifies StopLeiosPersistWriter
-// is a no-op when no endorser block was ever fetched (the writer never started)
-// and is safe to call more than once.
-func TestLeiosPersistWriterStopIsSafeWithoutStart(t *testing.T) {
-	t.Parallel()
-
-	o := newTestOuroborosWithLeiosDB(t)
-	require.NotPanics(t, func() {
-		o.StopLeiosPersistWriter()
-		o.StopLeiosPersistWriter()
-	})
-}
-
 // Not t.Parallel: swaps the package-global leiosPersistShutdownDrainTimeout.
 func TestCloseReportsUnconfirmedLeiosPersistenceGCDrain(t *testing.T) {
 	o := newTestOuroborosWithLeiosDB(t)
@@ -994,6 +1003,8 @@ func TestCloseReportsUnconfirmedLeiosPersistenceGCDrain(t *testing.T) {
 }
 
 func TestClosePreventsLeiosPersistenceFromStartingOrInstalling(t *testing.T) {
+	t.Parallel()
+
 	t.Run("close before first enqueue", func(t *testing.T) {
 		o := newTestOuroborosWithLeiosDB(t)
 		o.config.LeiosPersistenceRetentionSlots = 100
@@ -1049,6 +1060,8 @@ func TestClosePreventsLeiosPersistenceFromStartingOrInstalling(t *testing.T) {
 }
 
 func TestLeiosPersistenceLifecycleOperationsSerialize(t *testing.T) {
+	t.Parallel()
+
 	o := newTestOuroborosWithLeiosDB(t)
 	o.leiosPersistLifecycleMu.Lock()
 	locked := true

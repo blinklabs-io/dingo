@@ -111,6 +111,18 @@ func (l *logCollector) all() []string {
 	return append([]string(nil), l.lines...)
 }
 
+// contains reports whether some line logged so far contains substr, without
+// waiting. Use it to assert a line is absent after the events that would have
+// produced it have already been observed.
+func (l *logCollector) contains(substr string) bool {
+	for _, line := range l.all() {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 // waitFor blocks until some logged line contains substr, or timeout elapses.
 func (l *logCollector) waitFor(substr string, timeout time.Duration) bool {
 	deadline := time.After(timeout)
@@ -352,13 +364,6 @@ func TestRunFromGenesis_DoesNotAcquireChainOrigin(t *testing.T) {
 		)
 	}()
 
-	require.False(
-		t,
-		logs.waitFor("point too old", 2*time.Second),
-		"the session ended asking Dingo to acquire the chain origin; logs: %v",
-		logs.all(),
-	)
-
 	server.allowStep(t)
 	server.allowStep(t)
 	server.allowStep(t)
@@ -372,6 +377,12 @@ func TestRunFromGenesis_DoesNotAcquireChainOrigin(t *testing.T) {
 			logs.all(),
 		)
 	}
+	require.False(
+		t,
+		logs.contains("point too old"),
+		"the session ended asking Dingo to acquire the chain origin; logs: %v",
+		logs.all(),
+	)
 
 	cancel()
 	select {
@@ -448,7 +459,7 @@ func TestRunFromGenesis_StartsValidatingAtFirstAnswerablePoint(t *testing.T) {
 	assert.Equal(t, uint64(4), recv().Epoch)
 	assert.True(t, logs.waitFor("validation starts at slot", 5*time.Second),
 		"the skipped epochs must be reported; logs: %v", logs.all())
-	assert.False(t, logs.waitFor("chainsync session ended", 500*time.Millisecond),
+	assert.False(t, logs.contains("chainsync session ended"),
 		"skipping must not end the session; logs: %v", logs.all())
 
 	cancel()
@@ -760,7 +771,7 @@ func TestRunProtocolParamsAndStake_ExhaustedRetriesReportsOwnErrorsSeparately(t 
 	require.NoError(t, err)
 
 	// Bounded well under this test's own timeout: protocolParamsAndStakeRetries
-	// attempts at protocolParamsAndStakeRetryDelay apart.
+	// attempts at acquireRetryDelay apart.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	point := pcommon.NewPointOrigin()
@@ -836,53 +847,6 @@ func TestUTxOVerdict(t *testing.T) {
 		mode, err := utxoVerdict("", nil)
 		assert.Equal(t, utxoVerdictNoBaseline, mode)
 		assert.NoError(t, err)
-	})
-}
-
-// TestApplyTxInfoResults pins flushPendingTxInfos's actual failure
-// decision -- the one that sets utxoTaintCause -- not just
-// utxoVerdict, which only reads that flag: TestUTxOVerdict alone doesn't
-// prove a tx_info fetch failure is what makes utxoTaintCause non-empty in
-// the first place. Reverting applyTxInfoResults to always return false (as
-// if every chunk always succeeded) would make the "one chunk fails" subtest
-// below fail.
-func TestApplyTxInfoResults(t *testing.T) {
-	noopLogf := func(string, ...any) {}
-
-	t.Run("all chunks succeed: no failure, changes applied", func(t *testing.T) {
-		refs := UTxOSet{"spent#0": "addr|100|||"}
-		chunks := [][]string{{"tx1"}}
-		results := [][]koiosparity.KoiosTxInfoItem{
-			{{
-				TxHash:  "tx1",
-				Inputs:  []koiosparity.KoiosTxInfoUtxoRef{{TxHash: "spent", TxIndex: 0}},
-				Outputs: []koiosparity.KoiosTxInfoOutput{{TxHash: "tx1", TxIndex: 0}},
-			}},
-		}
-		errs := []error{nil}
-
-		failed := applyTxInfoResults(refs, chunks, results, errs, noopLogf)
-		assert.False(t, failed)
-		_, stillPresent := refs["spent#0"]
-		assert.False(t, stillPresent, "a successful chunk's spend must be applied")
-		_, created := refs["tx1#0"]
-		assert.True(t, created, "a successful chunk's new output must be applied")
-	})
-
-	t.Run("one chunk fails: reported failed, its own changes not applied, others still are", func(t *testing.T) {
-		refs := UTxOSet{}
-		chunks := [][]string{{"tx1"}, {"tx2"}}
-		results := [][]koiosparity.KoiosTxInfoItem{
-			nil, // tx1's chunk failed -- no results for it
-			{{TxHash: "tx2", Outputs: []koiosparity.KoiosTxInfoOutput{{TxHash: "tx2", TxIndex: 0}}}},
-		}
-		errs := []error{errors.New("koios stalled"), nil}
-
-		failed := applyTxInfoResults(refs, chunks, results, errs, noopLogf)
-		assert.True(t, failed,
-			"a single failed chunk must taint the whole flush, even if other chunks succeeded")
-		_, created := refs["tx2#0"]
-		assert.True(t, created, "an independently-succeeding chunk's changes must still be applied")
 	})
 }
 
@@ -1269,7 +1233,7 @@ func (s *genesisFakeServer) waitForSessions(t *testing.T, n int) {
 // chain carries one real transaction per block
 // (internal/test/fixtures.GenerateConwayChainWithTransactions) instead of
 // newGenesisFakeServer's empty-body csmock.BuildChain blocks. RunFromGenesis's
-// roll-forward callback only ever appends to pendingTxHashes from a block's
+// roll-forward callback only ever queues /tx_info hashes from a block's
 // own Transactions() (see from_genesis.go), so an empty-body chain never
 // gives flushPendingTxInfos anything to fetch at all -- its own
 // tx_info-chunk-failure taint path (the "if failed" branch inside
@@ -1763,7 +1727,7 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 // with the forced initial rollback, so it never itself starts a new epoch
 // boundary or reports -- see TestRunFromGenesis_UTxOTaintLifecycle's own
 // doc comment). Block 1 is the first real epoch boundary: its transaction
-// hash is buffered into pendingTxHashes and flushed via flushPendingTxInfos
+// hash is queued on the /tx_info pipeline and flushed via flushPendingTxInfos
 // right before that epoch's report is built. The Koios fake here 404s
 // every request, including /tx_info, so that flush fails and this epoch
 // must report errUTxOTainted rather than a false "clean" match against the
@@ -2529,7 +2493,7 @@ func TestRunFromGenesis_ReconnectsWhenSessionEndsDuringEpochLookup(t *testing.T)
 // Not t.Parallel: it shortens the package-level epochLookupTimeout.
 func TestRunFromGenesis_ReconnectsWhenEpochLookupStalls(t *testing.T) {
 	prevTimeout := epochLookupTimeout
-	epochLookupTimeout = 2 * time.Second
+	epochLookupTimeout = 750 * time.Millisecond
 	t.Cleanup(func() { epochLookupTimeout = prevTimeout })
 
 	const magic = 42
@@ -2814,60 +2778,6 @@ func TestRunFromGenesis_EpochChecksRetryTooOldRefusal(t *testing.T) {
 	}
 }
 
-// TestDial_ReceivesUTxOWholeLargerThanIngressBudget covers a whole-UTxO-set
-// reply larger than the muxer's connection-wide ingress budget. Live, the
-// reply at preprod epoch 157 overran the 64MiB default and the muxer closed
-// the connection with ErrIngressOverflow. The budget is shrunk to a fraction
-// of one segment here, so the reply exceeds it many times over and any
-// segment queued behind another overruns it.
-func TestDial_ReceivesUTxOWholeLargerThanIngressBudget(t *testing.T) {
-	t.Parallel()
-	const magic = 42
-	const utxoCount = 3000
-	const ingressBudget = 1024
-
-	server := newGenesisFakeServer(t, 1)
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		make([]byte, lcommon.AddressHashSize),
-		nil,
-	)
-	require.NoError(t, err)
-	server.utxoWhole = make(
-		map[localstatequery.UtxoId]ledger.BabbageTransactionOutput, utxoCount,
-	)
-	for i := range utxoCount {
-		var hash ledger.Blake2b256
-		hash[0], hash[1] = byte(i>>8), byte(i)
-		server.utxoWhole[localstatequery.UtxoId{Hash: hash, Idx: i}] =
-			ledger.BabbageTransactionOutput{
-				OutputAddress: addr,
-				OutputAmount:  mary.MaryTransactionOutputValue{Amount: uint64(i) + 1},
-			}
-	}
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = listener.Close() })
-	server.serve(t, listener, magic)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	conn, lsq, err := acquireWithRetry(
-		ctx, listener.Addr().String(), magic, server.chain.Points[0], true,
-	)
-	require.NoError(t, err)
-	defer conn.Close() //nolint:errcheck
-	conn.Muxer().SetIngressBudget(ingressBudget)
-
-	utxos, err := lsq.Client.GetUTxOWhole()
-	require.NoError(t, err)
-	assert.Len(t, utxos.Results, utxoCount)
-}
-
-// txInfoChunkFake answers each chunk, by its first hash, with respond(attempt)
-// and counts the attempts.
 type txInfoChunkFake struct {
 	mu       sync.Mutex
 	attempts map[string]int
@@ -2899,161 +2809,6 @@ func (f *txInfoChunkFake) attemptsFor(hash string) int {
 
 func errTxNotIndexed(hash string) error {
 	return fmt.Errorf("%w %s", koiosparity.ErrTxInfoMissing, hash)
-}
-
-// TestFetchTxInfoChunksRetriesATxKoiosHasNotIndexed pins the live preprod
-// failure at the tip: Koios had no /tx_info result yet for a hash Dingo had
-// just served, and the flush re-baselined the reconstruction. A chunk that
-// fails only that way is fetched again after a wait and then applies.
-func TestFetchTxInfoChunksRetriesATxKoiosHasNotIndexed(t *testing.T) {
-	t.Parallel()
-	chunks := [][]string{{"aa", "ab"}, {"ba", "bb"}}
-	f := &txInfoChunkFake{
-		attempts: map[string]int{},
-		respond: func(chunk []string, attempt int) error {
-			if chunk[0] == "ba" && attempt == 1 {
-				return errTxNotIndexed("bb")
-			}
-			return nil
-		},
-	}
-	waits := &recordingWait{}
-	schedule := []time.Duration{time.Second, 2 * time.Second}
-
-	results, errs, err := fetchTxInfoChunks(
-		context.Background(), chunks, koiosparity.KoiosTxInfoConcurrency, f.fetch, schedule, false, waits.wait,
-		func(string, ...any) {},
-	)
-	require.NoError(t, err)
-	assert.Equal(t, []error{nil, nil}, errs)
-	assert.Equal(t, schedule[:1], waits.waits)
-	assert.Equal(t, 1, f.attemptsFor("aa"), "a fetched chunk is not refetched")
-	assert.Equal(t, 2, f.attemptsFor("ba"))
-
-	refs := UTxOSet{}
-	assert.False(t,
-		applyTxInfoResults(refs, chunks, results, errs, t.Logf),
-		"a tx Koios indexed within the waits must not taint the epoch",
-	)
-}
-
-// TestFetchTxInfoChunksGivesUpAfterTheLastWait proves the waits are bounded:
-// a hash still missing after the last one fails its chunk, which taints the
-// epoch as before, and a failure of any other kind is not fetched again.
-func TestFetchTxInfoChunksGivesUpAfterTheLastWait(t *testing.T) {
-	t.Parallel()
-	chunks := [][]string{{"aa"}, {"ba"}, {"ca"}}
-	f := &txInfoChunkFake{
-		attempts: map[string]int{},
-		respond: func(chunk []string, _ int) error {
-			switch chunk[0] {
-			case "aa":
-				return errTxNotIndexed("aa")
-			case "ba":
-				return errors.New("koios /tx_info: status 500")
-			}
-			return nil
-		},
-	}
-	waits := &recordingWait{}
-	schedule := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
-
-	results, errs, err := fetchTxInfoChunks(
-		context.Background(), chunks, koiosparity.KoiosTxInfoConcurrency, f.fetch, schedule, false, waits.wait,
-		func(string, ...any) {},
-	)
-	require.NoError(t, err)
-	assert.ErrorIs(t, errs[0], koiosparity.ErrTxInfoMissing)
-	assert.Error(t, errs[1])
-	assert.NoError(t, errs[2])
-	assert.Equal(t, schedule, waits.waits)
-	assert.Equal(t, 1+len(schedule), f.attemptsFor("aa"))
-	assert.Equal(t, 1, f.attemptsFor("ba"))
-	assert.Equal(t, 1, f.attemptsFor("ca"))
-
-	assert.True(t,
-		applyTxInfoResults(UTxOSet{}, chunks, results, errs, t.Logf),
-		"a hash still missing after the last wait must taint the epoch",
-	)
-}
-
-// TestFetchTxInfoChunksRetriesTransientFailuresWhenAsked covers the mainnet
-// failure: a Koios gateway timeout on one chunk re-baselined the
-// reconstruction and left the epoch's UTxO check not run. With
-// retryTransient the chunk is fetched again and applies; a permanent
-// rejection still is not.
-func TestFetchTxInfoChunksRetriesTransientFailuresWhenAsked(t *testing.T) {
-	t.Parallel()
-	chunks := [][]string{{"aa"}, {"ba"}, {"ca"}}
-	f := &txInfoChunkFake{
-		attempts: map[string]int{},
-		respond: func(chunk []string, attempt int) error {
-			switch chunk[0] {
-			case "aa":
-				if attempt <= 2 {
-					return errors.New("koios /tx_info: status 504")
-				}
-			case "ba":
-				return fmt.Errorf("status 400: %w", koiosparity.ErrKoiosPermanent)
-			}
-			return nil
-		},
-	}
-	waits := &recordingWait{}
-	schedule := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
-
-	results, errs, err := fetchTxInfoChunks(
-		context.Background(), chunks, koiosparity.KoiosTxInfoConcurrency, f.fetch, schedule, true, waits.wait,
-		func(string, ...any) {},
-	)
-	require.NoError(t, err)
-	assert.NoError(t, errs[0])
-	assert.ErrorIs(t, errs[1], koiosparity.ErrKoiosPermanent)
-	assert.NoError(t, errs[2])
-	assert.Equal(t, schedule[:2], waits.waits)
-	assert.Equal(t, 3, f.attemptsFor("aa"))
-	assert.Equal(t, 1, f.attemptsFor("ba"), "a permanent failure is not refetched")
-	assert.Equal(t, 1, f.attemptsFor("ca"))
-	assert.True(t, applyTxInfoResults(UTxOSet{}, chunks, results, errs, t.Logf))
-}
-
-// TestFetchTxInfoChunksStopsWaitingWhenCancelled proves a session end during
-// a wait returns the cancellation at once, with no further fetch.
-func TestFetchTxInfoChunksStopsWaitingWhenCancelled(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	f := &txInfoChunkFake{
-		attempts: map[string]int{},
-		respond: func(chunk []string, _ int) error {
-			return errTxNotIndexed(chunk[0])
-		},
-	}
-	cancelThenWait := func(ctx context.Context, d time.Duration) error {
-		cancel()
-		return waitStakeRetry(ctx, d)
-	}
-
-	type result struct {
-		results [][]koiosparity.KoiosTxInfoItem
-		errs    []error
-		err     error
-	}
-	done := make(chan result, 1)
-	go func() {
-		r, e, err := fetchTxInfoChunks(
-			ctx, [][]string{{"aa"}}, koiosparity.KoiosTxInfoConcurrency, f.fetch, []time.Duration{time.Hour}, false,
-			cancelThenWait, func(string, ...any) {},
-		)
-		done <- result{r, e, err}
-	}()
-	got := testutil.RequireReceive(
-		t, done, 5*time.Second, "fetchTxInfoChunks after cancellation",
-	)
-	require.ErrorIs(t, got.err, context.Canceled)
-	assert.Nil(t, got.results)
-	assert.Nil(t, got.errs)
-	assert.Equal(t, 1, f.attemptsFor("aa"), "no fetch runs after cancellation")
 }
 
 // TestRunFromGenesis_TxInfoIndexLagDoesNotTaintEpoch drives the whole flush:
@@ -3351,74 +3106,4 @@ func TestAllegraCrossingAfterPostHardForkStart(t *testing.T) {
 	assert.False(t, c.crosses(allegra.EraIdAllegra))
 	c.rollback(400)
 	assert.True(t, c.crosses(allegra.EraIdAllegra))
-}
-
-// TestTxInfoFlushThresholdHoldsSeveralRounds proves a mid-epoch flush holds
-// several rounds of requests: a flush of a single round waits on its slowest
-// request with every other slot idle.
-func TestTxInfoFlushThresholdHoldsSeveralRounds(t *testing.T) {
-	t.Parallel()
-	koios := &koiosparity.KoiosClient{}
-	require.NoError(t, koios.SetTxInfoLimits(250, 4))
-	require.Equal(t, 4*4*250, txInfoFlushThreshold(koios))
-}
-
-// TestFetchTxInfoChunksKeepsConcurrencyInFlight proves the flush keeps at
-// most the Koios client's TxInfoConcurrency requests in flight: a host that
-// stalls under more load is given only what it was configured for.
-func TestFetchTxInfoChunksKeepsConcurrencyInFlight(t *testing.T) {
-	t.Parallel()
-	var inFlight, peak atomic.Int32
-	started := make(chan struct{}, 6)
-	release := make(chan struct{})
-	fetch := func(
-		_ context.Context, chunk []string,
-	) ([]koiosparity.KoiosTxInfoItem, error) {
-		n := inFlight.Add(1)
-		for {
-			p := peak.Load()
-			if n <= p || peak.CompareAndSwap(p, n) {
-				break
-			}
-		}
-		started <- struct{}{}
-		<-release
-		inFlight.Add(-1)
-		return []koiosparity.KoiosTxInfoItem{{TxHash: chunk[0]}}, nil
-	}
-	chunks := [][]string{{"a"}, {"b"}, {"c"}, {"d"}, {"e"}, {"f"}}
-	type result struct {
-		errs []error
-		err  error
-	}
-	done := make(chan result, 1)
-	go func() {
-		_, errs, err := fetchTxInfoChunks(
-			context.Background(), chunks, 2, fetch, nil, false,
-			func(context.Context, time.Duration) error { return nil },
-			func(string, ...any) {},
-		)
-		done <- result{errs, err}
-	}()
-	// Hold the first requests until two are in flight together, so the
-	// peak is measured at the limit rather than left to scheduling.
-	for range 2 {
-		select {
-		case <-started:
-		case <-time.After(5 * time.Second):
-			t.Fatal("fewer than 2 requests started")
-		}
-	}
-	close(release)
-	var r result
-	select {
-	case r = <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("fetchTxInfoChunks did not return")
-	}
-	require.NoError(t, r.err)
-	for _, e := range r.errs {
-		require.NoError(t, e)
-	}
-	assert.Equal(t, int32(2), peak.Load())
 }

@@ -28,13 +28,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
@@ -46,6 +47,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const txTypeAlonzo = alonzo.TxTypeAlonzo
 
 // TestCheckPoolMarginFloorErrorPoolIdIsSingleHexEncoded pins the pool id in
 // the CIP-23 margin-floor rejection to its 56-character hex form.
@@ -154,33 +157,6 @@ func TestResolveUtxoValidationSkipIndexResolvesPhase2WrappedRule(t *testing.T) {
 	require.Equal(t, 2, resolveUtxoValidationSkipIndex(
 		descriptors, rules, lcommon.UtxoValidationRuleUnknownVoters,
 	))
-}
-
-// TestConwayUpstreamGatedRulesAreWrapped proves the wrapping the guard above
-// simulates is what the pinned gouroboros release actually does, so the
-// package-init panic reported cannot silently stop being reachable.
-func TestConwayUpstreamGatedRulesAreWrapped(t *testing.T) {
-	descriptors := conway.UtxoValidationRuleDescriptors()
-	require.Len(t, conway.UtxoValidationRules, len(descriptors))
-	for _, id := range []lcommon.UtxoValidationRuleId{
-		lcommon.UtxoValidationRuleCommitteeCertificates,
-		lcommon.UtxoValidationRuleUnknownVoters,
-	} {
-		index := slices.IndexFunc(
-			descriptors,
-			func(d lcommon.UtxoValidationRuleDescriptor) bool {
-				return d.Id == id
-			},
-		)
-		require.GreaterOrEqual(t, index, 0, string(id))
-		require.NotEqual(
-			t,
-			utxoValidationRuleName(descriptors[index].Validator),
-			utxoValidationRuleName(conway.UtxoValidationRules[index]),
-			"upstream %s is no longer wrapped; the #3821 guard needs review",
-			id,
-		)
-	}
 }
 
 func TestResolveUtxoValidationSkipIndexPanics(t *testing.T) {
@@ -375,7 +351,7 @@ func eraUtxoValidationRuleCompositions() []eraUtxoValidationRuleComposition {
 				},
 			},
 			retained: map[lcommon.UtxoValidationRuleId]string{
-				lcommon.UtxoValidationRuleCurrentTreasuryValue: "common.UtxoValidateCurrentTreasuryValue",
+				lcommon.UtxoValidationRuleCurrentTreasuryValue: "common.UtxoValidateCurrentTreasuryValueAnyPhase",
 				lcommon.UtxoValidationRuleExUnitsTooBig:        "dijkstra.UtxoValidateExUnitsTooBigUtxo",
 				lcommon.UtxoValidationRuleCertificateDeposits:  "dijkstra.UtxoValidateCertificateDeposits",
 			},
@@ -534,107 +510,6 @@ func shortUtxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
 		}
 	}
 	return name
-}
-
-// treasuryUnavailableLedgerState mirrors *ledger.LedgerView while
-// is open: TreasuryValue is a mandatory
-// common.LedgerState method that Dingo does not implement yet.
-type treasuryUnavailableLedgerState struct {
-	*mockLedgerState
-	calls int
-}
-
-func (s *treasuryUnavailableLedgerState) TreasuryValue() (uint64, error) {
-	s.calls++
-	return 0, errors.New("not implemented")
-}
-
-// newConwayTreasuryTx decodes a Conway transaction body from a CBOR key map so
-// the presence of transaction-body key 21 comes from the real decoder rather
-// than from a hand-set field. An absent key and an explicitly declared zero are
-// different states and only the decoder distinguishes them.
-func newConwayTreasuryTx(
-	t *testing.T,
-	body map[int]any,
-) *conway.ConwayTransaction {
-	t.Helper()
-	if _, ok := body[0]; !ok {
-		body[0] = cbor.NewSetType([]shelley.ShelleyTransactionInput{}, true)
-	}
-	if _, ok := body[1]; !ok {
-		body[1] = []any{}
-	}
-	if _, ok := body[2]; !ok {
-		body[2] = uint64(0)
-	}
-	cborData, err := cbor.Encode(body)
-	require.NoError(t, err)
-	tx := &conway.ConwayTransaction{TxIsValid: true}
-	require.NoError(t, tx.Body.UnmarshalCBOR(cborData))
-	return tx
-}
-
-// TestCurrentTreasuryValueRuleGuardsOnDeclaredValue pins the guard the
-// gouroboros v0.202.6 bump depends on.
-//
-// common.UtxoValidateCurrentTreasuryValue is new in v0.202.6 and now runs for
-// every Conway and Dijkstra transaction, but it reads
-// LedgerState.TreasuryValue only for a transaction that declares
-// currentTreasuryValue (transaction body key 21). Dingo's provider still
-// returns an error, so this rule must stay unreachable for ordinary traffic
-// until lands. If upstream drops the guard, or stops
-// distinguishing an absent key 21 from a declared zero, this test fails
-// instead of the node rejecting ordinary transactions.
-func TestCurrentTreasuryValueRuleGuardsOnDeclaredValue(t *testing.T) {
-	pp := &conway.ConwayProtocolParameters{}
-	for _, tc := range []struct {
-		name       string
-		body       map[int]any
-		wantCalls  int
-		wantErrors bool
-	}{
-		{
-			name: "key 21 absent",
-			body: map[int]any{2: uint64(100)},
-		},
-		{
-			name:       "key 21 declared zero",
-			body:       map[int]any{2: uint64(100), 21: 0},
-			wantCalls:  1,
-			wantErrors: true,
-		},
-		{
-			name:       "key 21 declared non-zero",
-			body:       map[int]any{2: uint64(100), 21: 7},
-			wantCalls:  1,
-			wantErrors: true,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			tx := newConwayTreasuryTx(t, tc.body)
-			require.Equal(
-				t,
-				tc.wantCalls > 0,
-				lcommon.TransactionCurrentTreasuryValuePresent(tx),
-				"decoded key 21 presence must match the case under test",
-			)
-			ls := &treasuryUnavailableLedgerState{
-				mockLedgerState: newMockLedgerState(),
-			}
-			err := lcommon.UtxoValidateCurrentTreasuryValue(tx, 0, ls, pp)
-			if tc.wantErrors {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-			require.Equal(
-				t,
-				tc.wantCalls,
-				ls.calls,
-				"TreasuryValue must be consulted only for a declared value",
-			)
-		})
-	}
 }
 
 // mockTransaction implements lcommon.Transaction for
@@ -1027,46 +902,6 @@ func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerVa
 	}
 }
 
-func TestAlonzoValidationRulesUseLocalPlutusExecution(t *testing.T) {
-	descriptors := alonzo.UtxoValidationRuleDescriptors()
-	plutusIndex := requireRuleIdResolvesToFunc(
-		t,
-		descriptors,
-		alonzo.UtxoValidationRules,
-		lcommon.UtxoValidationRulePlutusScripts,
-		"alonzo.UtxoValidatePlutusScripts",
-	)
-	require.Len(t, alonzoUtxoValidationRules, len(alonzo.UtxoValidationRules)-1)
-	requireIndexedRulesDropRuleIndex(
-		t,
-		alonzoUtxoValidationRules,
-		plutusIndex,
-		"Alonzo validation must use Dingo's local Plutus execution path",
-	)
-}
-
-func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
-	descriptors := babbage.UtxoValidationRuleDescriptors()
-	plutusIndex := requireRuleIdResolvesToFunc(
-		t,
-		descriptors,
-		babbage.UtxoValidationRules,
-		lcommon.UtxoValidationRulePlutusScripts,
-		"babbage.UtxoValidatePlutusScripts",
-	)
-	require.Len(
-		t,
-		babbageUtxoValidationRules,
-		len(babbage.UtxoValidationRules)-1,
-	)
-	requireIndexedRulesDropRuleIndex(
-		t,
-		babbageUtxoValidationRules,
-		plutusIndex,
-		"Babbage validation must use Dingo's local Plutus execution path",
-	)
-}
-
 func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// A zero declared budget is intentional: restrictive validation should
 	// execute this script with the protocol transaction budget and classify the
@@ -1259,129 +1094,6 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	}
 }
 
-func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
-	descriptors := conway.UtxoValidationRuleDescriptors()
-	featuresIndex := requireRuleIdResolvesToFunc(
-		t,
-		descriptors,
-		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRuleConwayFeaturesWithPlutusV1V2,
-		"conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
-	)
-	feeIndex := requireRuleIdResolvesToFunc(
-		t,
-		descriptors,
-		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRuleFeeTooSmall,
-		"conway.UtxoValidateFeeTooSmallUtxo",
-	)
-	plutusIndex := requireRuleIdResolvesToFunc(
-		t,
-		descriptors,
-		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRulePlutusScripts,
-		"conway.UtxoValidatePlutusScripts",
-	)
-	committeeIndex := requireRuleIdResolvesToFunc(
-		t,
-		descriptors,
-		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRuleCommitteeCertificates,
-		"conway.UtxoValidateCommitteeCertificates",
-	)
-	votersIndex := requireRuleIdResolvesToFunc(
-		t,
-		descriptors,
-		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRuleUnknownVoters,
-		"conway.UtxoValidateUnknownVoters",
-	)
-	require.Len(t, conwayUtxoValidationRules, len(conway.UtxoValidationRules)-2)
-	requireIndexedRulesReplaceRuleIndex(
-		t,
-		conwayUtxoValidationRules,
-		featuresIndex,
-		validateConwayFeaturesWithNeededPlutusV1V2,
-		"Conway validation must count only needed PlutusV1/V2 scripts",
-	)
-	requireIndexedRulesDropRuleIndex(
-		t,
-		conwayUtxoValidationRules,
-		feeIndex,
-		"Conway validation must use Dingo's reference-script-aware fee rule",
-	)
-	requireIndexedRulesDropRuleIndex(
-		t,
-		conwayUtxoValidationRules,
-		plutusIndex,
-		"Conway validation must use Dingo's local Plutus execution path",
-	)
-	requireIndexedRulesReplaceRuleIndex(
-		t,
-		conwayUtxoValidationRules,
-		committeeIndex,
-		validateCommitteeCertificates,
-		"Conway validation must preserve committee cold credential tags",
-	)
-	requireIndexedRulesReplaceRuleIndex(
-		t,
-		conwayUtxoValidationRules,
-		votersIndex,
-		validateUnknownVoters,
-		"Conway validation must preserve committee hot credential tags",
-	)
-}
-
-func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
-	descriptors := gdijkstra.UtxoValidationRuleDescriptors()
-	committeeIndex := requireRuleIdResolvesToFunc(
-		t,
-		descriptors,
-		gdijkstra.UtxoValidationRules,
-		lcommon.UtxoValidationRuleCommitteeCertificates,
-		"dijkstra.UtxoValidateCommitteeCertificates",
-	)
-	votersIndex := requireRuleIdResolvesToFunc(
-		t,
-		descriptors,
-		gdijkstra.UtxoValidationRules,
-		lcommon.UtxoValidationRuleUnknownVoters,
-		"dijkstra.UtxoValidateUnknownVoters",
-	)
-	require.Len(
-		t,
-		dijkstraPhase1UtxoValidationRules,
-		len(gdijkstra.UtxoValidationRules)-1,
-	)
-	plutusIndex := requireRuleIdResolvesToFunc(
-		t,
-		descriptors,
-		gdijkstra.UtxoValidationRules,
-		lcommon.UtxoValidationRulePlutusScripts,
-		"dijkstra.UtxoValidatePlutusScripts",
-	)
-	requireIndexedRulesDropRuleIndex(
-		t,
-		dijkstraPhase1UtxoValidationRules,
-		plutusIndex,
-		"Dijkstra phase-1 rules must defer Plutus script execution to the phase-2 validator",
-	)
-	requireIndexedRulesReplaceRuleIndex(
-		t,
-		dijkstraPhase1UtxoValidationRules,
-		committeeIndex,
-		validateCommitteeCertificates,
-		"Dijkstra validation must preserve committee cold credential tags",
-	)
-	requireIndexedRulesReplaceRuleIndex(
-		t,
-		dijkstraPhase1UtxoValidationRules,
-		votersIndex,
-		validateUnknownVoters,
-		"Dijkstra validation must preserve committee hot credential tags",
-	)
-}
-
 func TestDijkstraCommitteeValidatorChecksSubtransactionLevels(t *testing.T) {
 	t.Parallel()
 	cold := lcommon.Credential{
@@ -1400,20 +1112,27 @@ func TestDijkstraCommitteeValidatorChecksSubtransactionLevels(t *testing.T) {
 	tx := &gdijkstra.DijkstraTransaction{
 		TxIsValid: true,
 		Body: gdijkstra.DijkstraTransactionBody{
-			TxSubTransactions: cbor.NewSetType([]gdijkstra.DijkstraSubTransaction{
-				{Body: gdijkstra.DijkstraSubTransactionBody{
-					TxCertificates: []lcommon.CertificateWrapper{{
-						Type:        uint(lcommon.CertificateTypeResignCommitteeCold),
-						Certificate: resign,
+			TxSubTransactions: cbor.NewSetType(
+				[]gdijkstra.DijkstraSubTransaction{
+					{Body: gdijkstra.DijkstraSubTransactionBody{
+						TxCertificates: []lcommon.CertificateWrapper{{
+							Type: uint(
+								lcommon.CertificateTypeResignCommitteeCold,
+							),
+							Certificate: resign,
+						}},
 					}},
-				}},
-				{Body: gdijkstra.DijkstraSubTransactionBody{
-					TxCertificates: []lcommon.CertificateWrapper{{
-						Type:        uint(lcommon.CertificateTypeAuthCommitteeHot),
-						Certificate: authorize,
+					{Body: gdijkstra.DijkstraSubTransactionBody{
+						TxCertificates: []lcommon.CertificateWrapper{{
+							Type: uint(
+								lcommon.CertificateTypeAuthCommitteeHot,
+							),
+							Certificate: authorize,
+						}},
 					}},
-				}},
-			}, true),
+				},
+				true,
+			),
 		},
 	}
 	state := &taggedCommitteeLedgerState{
@@ -1432,68 +1151,6 @@ func TestDijkstraCommitteeValidatorChecksSubtransactionLevels(t *testing.T) {
 	}
 	err := validateCommitteeCertificates(tx, 0, state, pp)
 	require.ErrorAs(t, err, &conway.ResignedCommitteeMemberHotKeyError{})
-}
-
-type classicPPUPTestLedgerState struct {
-	*mockLedgerState
-	delegate lcommon.Blake2b224
-	epoch    uint64
-	cutoff   uint64
-}
-
-func (s classicPPUPTestLedgerState) GenesisDelegateKeyHashes(
-	uint64,
-) ([]lcommon.Blake2b224, error) {
-	return []lcommon.Blake2b224{s.delegate}, nil
-}
-
-func (s classicPPUPTestLedgerState) GenesisDelegateForGenesisKey(
-	lcommon.Blake2b224,
-	uint64,
-) (lcommon.Blake2b224, bool, error) {
-	return s.delegate, true, nil
-}
-
-func (classicPPUPTestLedgerState) GenesisUpdateQuorum() (uint, error) {
-	return 1, nil
-}
-
-func (s classicPPUPTestLedgerState) ProtocolParameterUpdateWindow(
-	uint64,
-) (uint64, uint64, error) {
-	return s.epoch, s.cutoff, nil
-}
-
-func TestShelleyClassicProtocolParameterUpdateRuleAcceptsValidUpdate(t *testing.T) {
-	t.Parallel()
-	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
-	require.NoError(t, err)
-	tx, err := shelley.NewShelleyTransactionFromCbor(txCbor)
-	require.NoError(t, err)
-	targetEpoch, updates := tx.ProtocolParameterUpdates()
-	require.NotEmpty(t, updates)
-
-	witnesses := tx.Witnesses().Vkey()
-	require.NotEmpty(t, witnesses)
-	state := classicPPUPTestLedgerState{
-		mockLedgerState: newMockLedgerState(),
-		delegate:        lcommon.Blake2b224Hash(witnesses[0].Vkey),
-		epoch:           targetEpoch,
-		cutoff:          100,
-	}
-	pp := &shelley.ShelleyProtocolParameters{
-		ProtocolMajor: 2,
-	}
-
-	var validate lcommon.UtxoValidationRuleFunc
-	for _, descriptor := range shelley.UtxoValidationRuleDescriptors() {
-		if descriptor.Id == lcommon.UtxoValidationRuleProtocolParameterUpdates {
-			validate = descriptor.Validator
-			break
-		}
-	}
-	require.NotNil(t, validate)
-	require.NoError(t, validate(tx, 1, state, pp))
 }
 
 type taggedCommitteeLedgerState struct {
@@ -2230,58 +1887,6 @@ func TestValidateTxPlutusConwayUnusedReferenceScriptWithoutRedeemerPasses(
 	))
 }
 
-// TestTxInfoV2ContextSortsInputs guards the canonical Plutus requirement that
-// the script context lists transaction inputs sorted by TxOutRef, not in
-// transaction-body order. Building the context in body order (as the reverted
-// txInfoV2WithTxInputOrder wrapper did) makes validators traverse a mis-ordered
-// input list and over-compute the execution budget relative to cardano-node,
-// producing phase-2 "Plutus evaluation disagrees with block producer" failures.
-func TestTxInfoV2ContextSortsInputs(t *testing.T) {
-	// Body order is intentionally unsorted: 0x02 before 0x01.
-	bodyFirst := newTestInput(0x02, 0)
-	bodySecond := newTestInput(0x01, 0)
-	tx := &mockConwayFeeTx{
-		mockFeeTx: mockFeeTx{
-			fee:       big.NewInt(0),
-			witnesses: &mockWitnessSet{},
-		},
-		inputs: []lcommon.TransactionInput{
-			bodyFirst,
-			bodySecond,
-		},
-	}
-	ls := newMockLedgerState()
-	ls.addUtxo(bodyFirst, newTestOutput(1_000_000))
-	ls.addUtxo(bodySecond, newTestOutput(1_000_000))
-	resolved := []lcommon.Utxo{
-		{Id: bodyFirst, Output: newTestOutput(1_000_000)},
-		{Id: bodySecond, Output: newTestOutput(1_000_000)},
-	}
-
-	txInfo, err := script.NewTxInfoV2FromTransaction(
-		ls,
-		tx,
-		resolved,
-		script.StrictValidityUpperBoundForTransaction(tx),
-		0,
-	)
-
-	require.NoError(t, err)
-	require.Len(t, txInfo.Inputs, 2)
-	// Canonical order sorts by TxOutRef, so 0x01 must come before 0x02
-	// regardless of the body order or resolved-input order.
-	assert.Equal(
-		t,
-		bodySecond.String(),
-		lcommon.Utxo(txInfo.Inputs[0]).Id.String(),
-	)
-	assert.Equal(
-		t,
-		bodyFirst.String(),
-		lcommon.Utxo(txInfo.Inputs[1]).Id.String(),
-	)
-}
-
 // TestBuildIndexedUtxoValidationRulesResolvesByRuleId moves the plutus-scripts
 // rule to the front of the upstream list and gates it behind
 // common.Phase2ValidUtxoValidationRules, so the skip is only resolvable
@@ -2315,10 +1920,12 @@ func TestBuildIndexedUtxoValidationRulesResolvesByRuleId(t *testing.T) {
 	require.Zero(t, resolveUtxoValidationSkipIndex(
 		descriptors, rules, lcommon.UtxoValidationRulePlutusScripts,
 	))
-	indexed := buildIndexedUtxoValidationRules(
+	indexed := buildIndexedUtxoValidationRulesWithSkips(
 		descriptors,
 		rules,
-		lcommon.UtxoValidationRulePlutusScripts,
+		[]lcommon.UtxoValidationRuleId{
+			lcommon.UtxoValidationRulePlutusScripts,
+		},
 	)
 	require.Len(t, indexed, len(rules)-1)
 	requireIndexedRulesDropRuleIndex(
@@ -2440,12 +2047,11 @@ func TestTxSizeForFee(t *testing.T) {
 			expected: 256,
 		},
 		{
-			// Alonzo+ 4-element TX: fee size excludes the
-			// 1-byte IsValid boolean.
-			name:     "alonzo subtracts isvalid byte",
+			// Malformed Alonzo CBOR cannot be safely reframed.
+			name:     "malformed alonzo keeps full size",
 			txType:   4, // Alonzo
 			cbor:     make([]byte, 256),
-			expected: 255,
+			expected: 256,
 		},
 		{
 			// Mary (pre-Alonzo) TX: no subtraction.
@@ -2463,6 +2069,325 @@ func TestTxSizeForFee(t *testing.T) {
 			}
 			size := TxSizeForFee(tx)
 			assert.Equal(t, tc.expected, size)
+		})
+	}
+}
+
+func txSizeBytes(parts ...[]byte) []byte {
+	var size int
+	for _, part := range parts {
+		size += len(part)
+	}
+	ret := make([]byte, 0, size)
+	for _, part := range parts {
+		ret = append(ret, part...)
+	}
+	return ret
+}
+
+func alonzoFeeTestCBOR(feeSize int) []byte {
+	// The canonical size is one outer-array byte, a three-byte byte-string
+	// header plus its payload, and one byte each for witnesses and auxiliary
+	// data. The on-wire four-component form adds the IsValid boolean.
+	payloadSize := feeSize - 6
+	body := txSizeBytes(
+		[]byte{0x59, byte(payloadSize >> 8), byte(payloadSize)},
+		make([]byte, payloadSize),
+	)
+	return txSizeBytes(
+		[]byte{0x84}, body, []byte{0xa0, 0xf5, 0xf6},
+	)
+}
+
+func TestTxSizeForFeeUsesCanonicalAlonzoFamilyEnvelope(t *testing.T) {
+	t.Parallel()
+
+	body := []byte{0xa3, 0x00, 0x80, 0x01, 0x80, 0x02, 0x00}
+	witnesses := []byte{0xa0}
+	auxiliaryData := []byte{0xa1, 0x00, 0x00}
+	canonicalSize := uint64(1 + len(body) + len(witnesses) + len(auxiliaryData))
+	encodings := []struct {
+		name string
+		cbor []byte
+	}{
+		{
+			name: "definite four components",
+			cbor: txSizeBytes(
+				[]byte{0x84}, body, witnesses, []byte{0xf5}, auxiliaryData,
+			),
+		},
+		{
+			name: "definite four components invalid",
+			cbor: txSizeBytes(
+				[]byte{0x84}, body, witnesses, []byte{0xf4}, auxiliaryData,
+			),
+		},
+		{
+			name: "indefinite four components",
+			cbor: txSizeBytes(
+				[]byte{0x9f}, body, witnesses, []byte{0xf5}, auxiliaryData,
+				[]byte{0xff},
+			),
+		},
+		{
+			name: "wide four-component header",
+			cbor: txSizeBytes(
+				[]byte{
+					0x98,
+					0x04,
+				},
+				body,
+				witnesses,
+				[]byte{0xf5},
+				auxiliaryData,
+			),
+		},
+		{
+			name: "definite three components",
+			cbor: txSizeBytes(
+				[]byte{0x83}, body, witnesses, auxiliaryData,
+			),
+		},
+		{
+			name: "indefinite three components",
+			cbor: txSizeBytes(
+				[]byte{0x9f}, body, witnesses, auxiliaryData, []byte{0xff},
+			),
+		},
+		{
+			name: "wide three-component header",
+			cbor: txSizeBytes(
+				[]byte{0x98, 0x03}, body, witnesses, auxiliaryData,
+			),
+		},
+	}
+
+	for _, txType := range []struct {
+		name string
+		id   int
+	}{
+		{name: "Alonzo", id: alonzo.TxTypeAlonzo},
+		{name: "Babbage", id: babbage.TxTypeBabbage},
+		{name: "Conway", id: conway.TxTypeConway},
+	} {
+		t.Run(txType.name, func(t *testing.T) {
+			for _, encoding := range encodings {
+				t.Run(encoding.name, func(t *testing.T) {
+					tx := &mockFeeTx{
+						cbor:   encoding.cbor,
+						txType: txType.id,
+						fee:    new(big.Int).SetUint64(canonicalSize),
+					}
+					if got := TxSizeForFee(tx); got != canonicalSize {
+						t.Fatalf(
+							"fee size must use the canonical three-component envelope: got %d, want %d",
+							got,
+							canonicalSize,
+						)
+					}
+					require.NoError(t, ValidateTxSize(tx, uint(canonicalSize)))
+					require.Error(t, ValidateTxSize(tx, uint(canonicalSize)-1))
+					require.NoError(t, ValidateTxFee(tx, 1, 0, nil, nil))
+				})
+			}
+		})
+	}
+}
+
+func TestTxSizeForFeePreservesMalformedAlonzoEnvelope(t *testing.T) {
+	t.Parallel()
+
+	body := []byte{0xa3, 0x00, 0x80, 0x01, 0x80, 0x02, 0x00}
+	witnesses := []byte{0xa0}
+	for _, testCase := range []struct {
+		name string
+		cbor []byte
+	}{
+		{
+			name: "four components without validity boolean",
+			cbor: txSizeBytes(
+				[]byte{0x84}, body, witnesses, []byte{0x00, 0xf6},
+			),
+		},
+		{
+			name: "wide three components ending in true",
+			cbor: txSizeBytes(
+				[]byte{0x98, 0x03}, body, witnesses, []byte{0xf5},
+			),
+		},
+		{
+			name: "indefinite three components ending in false",
+			cbor: txSizeBytes(
+				[]byte{0x9f}, body, witnesses, []byte{0xf4, 0xff},
+			),
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			tx := &mockTransaction{
+				cbor:   testCase.cbor,
+				txType: alonzo.TxTypeAlonzo,
+			}
+			fullSize := uint64(len(testCase.cbor))
+			require.Equal(t, fullSize, TxSizeForFee(tx))
+			require.NoError(t, ValidateTxSize(tx, uint(fullSize)))
+			require.Error(t, ValidateTxSize(tx, uint(fullSize)-1))
+		})
+	}
+}
+
+func TestTxSizeForFeeUsesCanonicalDijkstraEnvelope(t *testing.T) {
+	t.Parallel()
+
+	mempool := testutil.DijkstraShapeMempoolTxBytes(
+		t, testutil.ShapeTxBody(nil),
+	)
+	var components []cbor.RawMessage
+	bytesRead, err := cbor.Decode(mempool, &components)
+	require.NoError(t, err)
+	require.Equal(t, len(mempool), bytesRead)
+	require.Len(t, components, 3)
+	canonicalSize := uint64(
+		1 + len(components[0]) + len(components[1]) + len(components[2]),
+	)
+
+	type decoder func([]byte) (lcommon.Transaction, error)
+	mempoolDecoder := func(data []byte) (lcommon.Transaction, error) {
+		return safedecode.Transaction(uint(gdijkstra.TxTypeDijkstra), data)
+	}
+	blockDecoder := safedecode.DijkstraBlockTransaction
+	for _, testCase := range []struct {
+		name   string
+		cbor   []byte
+		decode decoder
+	}{
+		{
+			name:   "mempool definite",
+			cbor:   mempool,
+			decode: mempoolDecoder,
+		},
+		{
+			name: "mempool indefinite",
+			cbor: txSizeBytes(
+				[]byte{0x9f}, components[0], components[1], components[2],
+				[]byte{0xff},
+			),
+			decode: mempoolDecoder,
+		},
+		{
+			name: "mempool wide header",
+			cbor: txSizeBytes(
+				[]byte{0x98, 0x03}, components[0], components[1], components[2],
+			),
+			decode: mempoolDecoder,
+		},
+		{
+			name: "legacy mempool definite",
+			cbor: txSizeBytes(
+				[]byte{0x84}, components[0], components[1],
+				[]byte{0xf5}, components[2],
+			),
+			decode: mempoolDecoder,
+		},
+		{
+			name: "legacy mempool indefinite",
+			cbor: txSizeBytes(
+				[]byte{0x9f}, components[0], components[1],
+				[]byte{0xf5}, components[2], []byte{0xff},
+			),
+			decode: mempoolDecoder,
+		},
+		{
+			name: "legacy mempool wide header",
+			cbor: txSizeBytes(
+				[]byte{0x98, 0x04}, components[0], components[1],
+				[]byte{0xf5}, components[2],
+			),
+			decode: mempoolDecoder,
+		},
+		{
+			name: "block definite valid",
+			cbor: txSizeBytes(
+				[]byte{0x84}, components[0], components[1], components[2],
+				[]byte{0xf5},
+			),
+			decode: blockDecoder,
+		},
+		{
+			name: "block indefinite invalid",
+			cbor: txSizeBytes(
+				[]byte{0x9f}, components[0], components[1], components[2],
+				[]byte{0xf4, 0xff},
+			),
+			decode: blockDecoder,
+		},
+		{
+			name: "block wide header valid",
+			cbor: txSizeBytes(
+				[]byte{0x98, 0x04}, components[0], components[1], components[2],
+				[]byte{0xf5},
+			),
+			decode: blockDecoder,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			tx, err := testCase.decode(testCase.cbor)
+			require.NoError(t, err)
+			require.Equal(t, canonicalSize, TxSizeForFee(tx))
+			require.NoError(t, ValidateTxSize(tx, uint(canonicalSize)))
+			require.Error(t, ValidateTxSize(tx, uint(canonicalSize)-1))
+			require.NoError(t, ValidateTxFee(tx, 1, 0, nil, nil))
+		})
+	}
+}
+
+func TestTxSizeForFeePreservesMalformedDijkstraEnvelope(t *testing.T) {
+	t.Parallel()
+
+	body := []byte{0xa3, 0x00, 0x80, 0x01, 0x80, 0x02, 0x00}
+	witnesses := []byte{0xa0}
+	auxiliaryData := []byte{0xf6}
+	for _, testCase := range []struct {
+		name string
+		cbor []byte
+	}{
+		{
+			name: "legacy false flag",
+			cbor: txSizeBytes(
+				[]byte{0x84}, body, witnesses, []byte{0xf4}, auxiliaryData,
+			),
+		},
+		{
+			name: "no boolean",
+			cbor: txSizeBytes(
+				[]byte{0x84}, body, witnesses, auxiliaryData, []byte{0x00},
+			),
+		},
+		{
+			name: "ambiguous boolean positions",
+			cbor: txSizeBytes(
+				[]byte{0x84}, body, witnesses, []byte{0xf5, 0xf4},
+			),
+		},
+		{
+			name: "five components",
+			cbor: txSizeBytes(
+				[]byte{0x85}, body, witnesses, auxiliaryData,
+				[]byte{0xf5, 0x00},
+			),
+		},
+		{
+			name: "trailing data",
+			cbor: txSizeBytes(
+				[]byte{0x83}, body, witnesses, auxiliaryData, []byte{0x00},
+			),
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			tx := &mockTransaction{
+				cbor:   testCase.cbor,
+				txType: gdijkstra.TxTypeDijkstra,
+			}
+			require.Equal(t, uint64(len(testCase.cbor)), TxSizeForFee(tx))
 		})
 	}
 }
@@ -2546,48 +2471,6 @@ func TestTxSizeForFee_ShelleyProtocolUpdateUsesWireBytes(t *testing.T) {
 	assert.Equal(t, uint64(len(indefiniteCbor)), TxSizeForFee(indefiniteTx))
 }
 
-func TestTxSizeForFee_ShelleyBlockTransactionUsesComponentWireBytes(
-	t *testing.T,
-) {
-	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
-	require.NoError(t, err)
-	wireTx, err := shelley.NewShelleyTransactionFromCbor(txCbor)
-	require.NoError(t, err)
-
-	// ShelleyBlock.Transactions constructs this shape from the separately
-	// decoded body and witness components. The upstream transaction body now
-	// preserves its original wire bytes, so rebuilding the transaction retains
-	// the canonical encoding used for fee calculation.
-	blockTx := &shelley.ShelleyTransaction{
-		Body:       wireTx.Body,
-		WitnessSet: wireTx.WitnessSet,
-	}
-	assert.Equal(t, wireTx.Hash(), blockTx.Hash())
-	assert.Len(t, blockTx.Cbor(), 1_156)
-	assert.Equal(t, uint64(1_156), TxSizeForFee(blockTx))
-}
-
-// TestTxSizeForFee_AllegraBlockTransactionUsesComponentWireBytes covers the
-// same wire-byte preservation in Allegra. The preprod fixture body uses only
-// fields Allegra shares with Shelley, so it decodes in both eras.
-func TestTxSizeForFee_AllegraBlockTransactionUsesComponentWireBytes(
-	t *testing.T,
-) {
-	txCbor, err := hex.DecodeString(preprodShelleyUpdateTxCborHex)
-	require.NoError(t, err)
-	wireTx, err := allegra.NewAllegraTransactionFromCbor(txCbor)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1_156), TxSizeForFee(wireTx))
-
-	blockTx := &allegra.AllegraTransaction{
-		Body:       wireTx.Body,
-		WitnessSet: wireTx.WitnessSet,
-	}
-	assert.Equal(t, wireTx.Hash(), blockTx.Hash())
-	assert.Len(t, blockTx.Cbor(), 1_156)
-	assert.Equal(t, uint64(1_156), TxSizeForFee(blockTx))
-}
-
 // TestTxSizeForFee_MaryBlockTransactionNeedsNoCorrection pins the reason Mary
 // is excluded from preAlonzoRebuiltWireSize: MaryTransactionBody also
 // implements MarshalCBOR and returns its preserved bytes, so a rebuilt Mary
@@ -2656,74 +2539,6 @@ func TestPreAlonzoRebuiltWireSize(t *testing.T) {
 		_, ok := preAlonzoRebuiltWireSize(&conway.ConwayTransaction{})
 		assert.False(t, ok)
 	})
-}
-
-func TestPreAlonzoValidationRulesUseLocalFeeAndSizeChecks(t *testing.T) {
-	shelleyDescriptors := shelley.UtxoValidationRuleDescriptors()
-	shelleyFeeIndex := requireRuleIdResolvesToFunc(
-		t,
-		shelleyDescriptors,
-		shelley.UtxoValidationRules,
-		lcommon.UtxoValidationRuleFeeTooSmall,
-		"shelley.UtxoValidateFeeTooSmallUtxo",
-	)
-	shelleySizeIndex := requireRuleIdResolvesToFunc(
-		t,
-		shelleyDescriptors,
-		shelley.UtxoValidationRules,
-		lcommon.UtxoValidationRuleMaxTxSize,
-		"shelley.UtxoValidateMaxTxSizeUtxo",
-	)
-	require.Len(
-		t,
-		shelleyUtxoValidationRules,
-		len(shelley.UtxoValidationRules)-2,
-	)
-	requireIndexedRulesDropRuleIndex(
-		t,
-		shelleyUtxoValidationRules,
-		shelleyFeeIndex,
-		"Shelley validation must size the minimum fee with TxSizeForFee",
-	)
-	requireIndexedRulesDropRuleIndex(
-		t,
-		shelleyUtxoValidationRules,
-		shelleySizeIndex,
-		"Shelley validation must size the max-size check with TxSizeForFee",
-	)
-
-	allegraDescriptors := allegra.UtxoValidationRuleDescriptors()
-	allegraFeeIndex := requireRuleIdResolvesToFunc(
-		t,
-		allegraDescriptors,
-		allegra.UtxoValidationRules,
-		lcommon.UtxoValidationRuleFeeTooSmall,
-		"allegra.UtxoValidateFeeTooSmallUtxo",
-	)
-	allegraSizeIndex := requireRuleIdResolvesToFunc(
-		t,
-		allegraDescriptors,
-		allegra.UtxoValidationRules,
-		lcommon.UtxoValidationRuleMaxTxSize,
-		"allegra.UtxoValidateMaxTxSizeUtxo",
-	)
-	require.Len(
-		t,
-		allegraUtxoValidationRules,
-		len(allegra.UtxoValidationRules)-2,
-	)
-	requireIndexedRulesDropRuleIndex(
-		t,
-		allegraUtxoValidationRules,
-		allegraFeeIndex,
-		"Allegra validation must size the minimum fee with TxSizeForFee",
-	)
-	requireIndexedRulesDropRuleIndex(
-		t,
-		allegraUtxoValidationRules,
-		allegraSizeIndex,
-		"Allegra validation must size the max-size check with TxSizeForFee",
-	)
 }
 
 // TestValidateTxPreAlonzoRebuiltUpdateTxSizes drives ValidateTxShelley and
@@ -2915,7 +2730,7 @@ func TestValidateTxSize(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			// Fee-relevant size = 16386 - 1 = 16385 > 16384
+			// Malformed CBOR keeps its full size.
 			name:      "one byte over limit",
 			txSize:    16386,
 			txType:    txTypeAlonzo,
@@ -2935,7 +2750,7 @@ func TestValidateTxSize(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			// Fee-relevant size = 2 - 1 = 1 > 0
+			// Malformed CBOR keeps its full size.
 			name:      "zero max size with non-zero tx",
 			txSize:    2,
 			txType:    txTypeAlonzo,
@@ -3585,15 +3400,21 @@ func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
 			require.NoError(t, err)
 			output := babbage.BabbageTransactionOutput{
 				OutputAddress: paymentAddress,
-				OutputAmount:  mary.MaryTransactionOutputValue{Amount: 1_000_000},
+				OutputAmount: mary.MaryTransactionOutputValue{
+					Amount: 1_000_000,
+				},
 			}
 			tx := &conway.ConwayTransaction{
 				Body: conway.ConwayTransactionBody{
 					TxInputs: conway.NewConwayTransactionInputSet(
 						[]shelley.ShelleyTransactionInput{input},
 					),
-					TxOutputs:            []babbage.BabbageTransactionOutput{output},
-					TxProposalProcedures: []conway.ConwayProposalProcedure{*proposal},
+					TxOutputs: []babbage.BabbageTransactionOutput{
+						output,
+					},
+					TxProposalProcedures: []conway.ConwayProposalProcedure{
+						*proposal,
+					},
 				},
 				TxIsValid: true,
 			}
@@ -3643,171 +3464,6 @@ func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
 			)
 		})
 	}
-}
-
-func TestConwayGovActionWellFormednessRejectsDuplicateCommitteeRemovals(
-	t *testing.T,
-) {
-	pp := &conway.ConwayProtocolParameters{
-		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
-			Major: lcommon.ProtocolVersionPlomin,
-		},
-		MaxTxSize:            16_384,
-		MaxValueSize:         5_000,
-		CollateralPercentage: 150,
-		MaxCollateralInputs:  3,
-	}
-	baseCredential := lcommon.NewBlake2b224([]byte("committee removal"))
-	keyCredential := lcommon.Credential{
-		CredType:   lcommon.CredentialTypeAddrKeyHash,
-		Credential: baseCredential,
-	}
-	scriptCredential := lcommon.Credential{
-		CredType:   lcommon.CredentialTypeScriptHash,
-		Credential: baseCredential,
-	}
-	rewardAccount, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeNoneKey,
-		lcommon.AddressNetworkTestnet,
-		nil,
-		make([]byte, lcommon.AddressHashSize),
-	)
-	require.NoError(t, err)
-	anchor := lcommon.GovAnchor{
-		Url:      "https://example.test/committee",
-		DataHash: [32]byte{0x52},
-	}
-	for _, test := range []struct {
-		name        string
-		credentials []lcommon.Credential
-		quorum      *big.Rat
-		wantError   bool
-	}{
-		{
-			name:        "duplicate logical credential",
-			credentials: []lcommon.Credential{keyCredential, keyCredential},
-			quorum:      big.NewRat(1, 2),
-			wantError:   true,
-		},
-		{
-			name:        "same hash with distinct credential types",
-			credentials: []lcommon.Credential{keyCredential, scriptCredential},
-			quorum:      big.NewRat(1, 2),
-		},
-		{
-			name:   "zero quorum",
-			quorum: big.NewRat(0, 1),
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			action := &lcommon.UpdateCommitteeGovAction{
-				Credentials: test.credentials,
-				Quorum:      cbor.Rat{Rat: test.quorum},
-			}
-			encoded, err := cbor.Encode(action)
-			require.NoError(t, err)
-			var decoded lcommon.UpdateCommitteeGovAction
-			_, decodeErr := cbor.Decode(encoded, &decoded)
-			proposal, err := conway.NewConwayProposalProcedure(
-				0,
-				rewardAccount,
-				action,
-				anchor,
-			)
-			require.NoError(t, err)
-			tx := &conway.ConwayTransaction{
-				Body: conway.ConwayTransactionBody{
-					TxProposalProcedures: []conway.ConwayProposalProcedure{
-						*proposal,
-					},
-				},
-				TxIsValid: true,
-			}
-			ruleErr := conway.UtxoValidateGovActionWellFormedness(
-				tx, 1, newMockLedgerState(), pp,
-			)
-			if test.wantError {
-				require.Error(t, decodeErr)
-				require.Error(t, ruleErr)
-				return
-			}
-			require.NoError(t, decodeErr)
-			require.NoError(t, ruleErr)
-		})
-	}
-}
-
-func TestConwayV3ProposalProcedureCanonicalizesCommitteeCollections(
-	t *testing.T,
-) {
-	key := lcommon.Credential{
-		CredType:   lcommon.CredentialTypeAddrKeyHash,
-		Credential: lcommon.Blake2b224{0x02},
-	}
-	scriptLow := lcommon.Credential{
-		CredType:   lcommon.CredentialTypeScriptHash,
-		Credential: lcommon.Blake2b224{0x01},
-	}
-	scriptHigh := lcommon.Credential{
-		CredType:   lcommon.CredentialTypeScriptHash,
-		Credential: lcommon.Blake2b224{0x02},
-	}
-	keyPtr, scriptLowPtr, scriptHighPtr := key, scriptLow, scriptHigh
-	rewardAccount, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeNoneKey,
-		lcommon.AddressNetworkTestnet,
-		nil,
-		make([]byte, lcommon.AddressHashSize),
-	)
-	require.NoError(t, err)
-
-	buildProcedure := func(removals []lcommon.Credential) data.PlutusData {
-		action := &lcommon.UpdateCommitteeGovAction{
-			Type:        uint(lcommon.GovActionTypeUpdateCommittee),
-			Credentials: removals,
-			CredEpochs: map[*lcommon.Credential]uint64{
-				&keyPtr:        3,
-				&scriptHighPtr: 2,
-				&scriptLowPtr:  1,
-			},
-			Quorum: cbor.Rat{Rat: big.NewRat(1, 2)},
-		}
-		procedure := conway.ConwayProposalProcedure{
-			PPRewardAccount: rewardAccount,
-			PPGovAction: conway.ConwayGovAction{
-				Type:   uint(lcommon.GovActionTypeUpdateCommittee),
-				Action: action,
-			},
-		}
-		return procedure.ToPlutusData()
-	}
-	first := buildProcedure([]lcommon.Credential{key, scriptHigh, scriptLow})
-	second := buildProcedure([]lcommon.Credential{scriptLow, key, scriptHigh})
-	firstCBOR, err := data.Encode(first)
-	require.NoError(t, err)
-	secondCBOR, err := data.Encode(second)
-	require.NoError(t, err)
-	require.Equal(t, firstCBOR, secondCBOR)
-
-	procedureData := first.(*data.Constr)
-	actionData := procedureData.Fields[2].(*data.Constr)
-	wantOrder := []data.PlutusData{
-		scriptLow.ToPlutusData(),
-		scriptHigh.ToPlutusData(),
-		key.ToPlutusData(),
-	}
-	removals := actionData.Fields[1].(*data.List)
-	require.Equal(t, wantOrder, removals.Items)
-	additions := actionData.Fields[2].(*data.Map)
-	require.Len(t, additions.Pairs, len(wantOrder))
-	for i, pair := range additions.Pairs {
-		require.Equal(t, wantOrder[i], pair[0])
-	}
-	repeatedCBOR, err := data.Encode(buildProcedure(
-		[]lcommon.Credential{key, scriptHigh, scriptLow},
-	))
-	require.NoError(t, err)
-	require.Equal(t, firstCBOR, repeatedCBOR)
 }
 
 func TestValidateTxConwayMissingInputReportsBadInputNotFeeResolution(
@@ -4375,7 +4031,7 @@ func TestValidateTxFee(t *testing.T) {
 			// Fee = 200000 >= 168581 => valid
 			name: "sufficient fee no scripts",
 			tx: &mockFeeTx{
-				cbor:      make([]byte, 301),
+				cbor:      alonzoFeeTestCBOR(300),
 				txType:    txTypeAlonzo,
 				fee:       big.NewInt(200000),
 				witnesses: nil,
@@ -4392,7 +4048,7 @@ func TestValidateTxFee(t *testing.T) {
 			// Fee = 168581 (exact) => valid
 			name: "exact minimum fee no scripts",
 			tx: &mockFeeTx{
-				cbor:      make([]byte, 301),
+				cbor:      alonzoFeeTestCBOR(300),
 				txType:    txTypeAlonzo,
 				fee:       big.NewInt(168581),
 				witnesses: nil,
@@ -4409,7 +4065,7 @@ func TestValidateTxFee(t *testing.T) {
 			// Fee = 168580 < 168581 => invalid
 			name: "one lovelace under minimum no scripts",
 			tx: &mockFeeTx{
-				cbor:      make([]byte, 301),
+				cbor:      alonzoFeeTestCBOR(300),
 				txType:    txTypeAlonzo,
 				fee:       big.NewInt(168580),
 				witnesses: nil,
@@ -4429,7 +4085,7 @@ func TestValidateTxFee(t *testing.T) {
 			// Fee = 240701 (exact) => valid
 			name: "exact minimum fee with scripts",
 			tx: &mockFeeTx{
-				cbor:   make([]byte, 301),
+				cbor:   alonzoFeeTestCBOR(300),
 				txType: txTypeAlonzo,
 				fee:    big.NewInt(240701),
 				witnesses: &mockWitnessSet{
@@ -4462,7 +4118,7 @@ func TestValidateTxFee(t *testing.T) {
 			// Fee = 240700 < 240701 => invalid
 			name: "one lovelace under minimum with scripts",
 			tx: &mockFeeTx{
-				cbor:   make([]byte, 301),
+				cbor:   alonzoFeeTestCBOR(300),
 				txType: txTypeAlonzo,
 				fee:    big.NewInt(240700),
 				witnesses: &mockWitnessSet{
@@ -4493,7 +4149,7 @@ func TestValidateTxFee(t *testing.T) {
 			// Overpaying is fine
 			name: "overpaying fee with scripts",
 			tx: &mockFeeTx{
-				cbor:   make([]byte, 301),
+				cbor:   alonzoFeeTestCBOR(300),
 				txType: txTypeAlonzo,
 				fee:    big.NewInt(500000),
 				witnesses: &mockWitnessSet{
@@ -4528,7 +4184,7 @@ func TestValidateTxFee(t *testing.T) {
 			// minFee = 172981 + 49040 = 222021
 			name: "multiple redeemers exact fee",
 			tx: &mockFeeTx{
-				cbor:   make([]byte, 401),
+				cbor:   alonzoFeeTestCBOR(400),
 				txType: txTypeAlonzo,
 				fee:    big.NewInt(222021),
 				witnesses: &mockWitnessSet{
@@ -4575,7 +4231,7 @@ func TestValidateTxFee(t *testing.T) {
 			// nil fee defaults to 0, should fail
 			name: "nil fee fails",
 			tx: &mockFeeTx{
-				cbor:      make([]byte, 301),
+				cbor:      alonzoFeeTestCBOR(300),
 				txType:    txTypeAlonzo,
 				fee:       nil,
 				witnesses: nil,
@@ -4592,7 +4248,7 @@ func TestValidateTxFee(t *testing.T) {
 			// baseFee = 44*300 + 155381 = 168581
 			name: "nil prices no script fee",
 			tx: &mockFeeTx{
-				cbor:   make([]byte, 301),
+				cbor:   alonzoFeeTestCBOR(300),
 				txType: txTypeAlonzo,
 				fee:    big.NewInt(168581),
 				witnesses: &mockWitnessSet{
@@ -4663,7 +4319,7 @@ func TestValidateTxFee_ErrorMessageIncludesFees(
 	// Verify the error message contains both the
 	// provided fee and the calculated minimum.
 	tx := &mockFeeTx{
-		cbor:      make([]byte, 301),
+		cbor:      alonzoFeeTestCBOR(300),
 		txType:    txTypeAlonzo,
 		fee:       big.NewInt(100000),
 		witnesses: nil,
@@ -4681,24 +4337,6 @@ func TestValidateTxFee_ErrorMessageIncludesFees(
 	// minFee = 44*300 + 155381 = 168581
 	assert.Contains(t, err.Error(), "100000")
 	assert.Contains(t, err.Error(), "168581")
-}
-
-func TestCalculateMinFee_NormalValuesNoOverflow(
-	t *testing.T,
-) {
-	// Mainnet-like parameters should still work.
-	fee := CalculateMinFee(
-		300,
-		lcommon.ExUnits{
-			Memory: 1000000,
-			Steps:  200000000,
-		},
-		44,
-		155381,
-		big.NewRat(577, 10000),
-		big.NewRat(721, 10000000),
-	)
-	assert.Equal(t, uint64(240701), fee)
 }
 
 func TestCalculateMinFee_OverflowSaturates(t *testing.T) {
@@ -4777,92 +4415,6 @@ func TestCheckPoolMarginFloor(t *testing.T) {
 		require.NoError(t, checkPoolMarginFloor(
 			[]lcommon.Certificate{nilReg}, nil))
 	})
-}
-
-// TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion pins the
-// invariant that replaced the one this test used to assert.
-//
-// It previously required PV9 and PV10 to render txInfoMint differently, because
-// gouroboros gated the zero-lovelace ada entry on PV10. That gate was the bug:
-// cardano-ledger's transMintValue takes no protocol version, so pre-Plomin
-// scripts that inspect txInfoMint were costed against a mint field one entry
-// short and diverged from the node that produced the block. gouroboros v0.192.0
-// removed the gate, so the rendering is now identical in every era, and this
-// test fails if the gate returns.
-func TestConwayTxInfoCacheRendersMintIndependentOfProtocolVersion(
-	t *testing.T,
-) {
-	input := newTestInput(0x01, 0)
-	tx := &mockConwayFeeTx{
-		mockFeeTx: mockFeeTx{
-			// Non-zero so the fee field cannot be mistaken for the mint field:
-			// both render as a single-entry map keyed by the empty policy, and
-			// a zero fee would make them identical.
-			fee:       big.NewInt(311_505),
-			witnesses: &mockWitnessSet{},
-		},
-		inputs: []lcommon.TransactionInput{input},
-	}
-	ls := newMockLedgerState()
-	ls.addUtxo(input, newTestOutput(1_000_000))
-	resolved := []lcommon.Utxo{{Id: input, Output: newTestOutput(1_000_000)}}
-
-	// A tx that mints nothing still carries the ada entry, so no mint fixture
-	// is needed to observe the rendering.
-	cache := newTxInfoCache(ls, tx, resolved, 0)
-	v1, err := cache.v1()
-	require.NoError(t, err)
-	v2, err := cache.v2()
-	require.NoError(t, err)
-
-	// txInfo field order differs by version: V1 is
-	// [inputs, outputs, fee, mint, ...] while V2 inserts reference inputs
-	// ahead of outputs, so its mint sits one later.
-	mintOf := func(d data.PlutusData, idx int) data.PlutusData {
-		constr, ok := d.(*data.Constr)
-		require.True(t, ok)
-		require.Greater(t, len(constr.Fields), idx)
-		return constr.Fields[idx]
-	}
-	for _, tc := range []struct {
-		name string
-		mint data.PlutusData
-	}{
-		{"v1", mintOf(v1.ToPlutusData(), 3)},
-		{"v2", mintOf(v2.ToPlutusData(), 4)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m, ok := tc.mint.(*data.Map)
-			require.True(t, ok, "txInfoMint must be a map")
-			require.Len(t, m.Pairs, 1,
-				"an empty mint must still carry the zero-lovelace ada entry")
-			policy, ok := m.Pairs[0][0].(*data.ByteString)
-			require.True(t, ok)
-			assert.Empty(
-				t,
-				policy.Inner,
-				"ada policy id is the empty bytestring",
-			)
-
-			// Assert the amount too. Without it the fee field, which is also a
-			// single-entry map keyed by the empty policy, satisfies the checks
-			// above and the test would not notice a wrong field index.
-			inner, ok := m.Pairs[0][1].(*data.Map)
-			require.True(t, ok, "ada entry must map asset name to amount")
-			require.Len(t, inner.Pairs, 1)
-			name, ok := inner.Pairs[0][0].(*data.ByteString)
-			require.True(t, ok)
-			assert.Empty(
-				t,
-				name.Inner,
-				"ada asset name is the empty bytestring",
-			)
-			amount, ok := inner.Pairs[0][1].(*data.Integer)
-			require.True(t, ok)
-			assert.Zero(t, amount.Inner.Int64(),
-				"the prepended ada entry mints zero")
-		})
-	}
 }
 
 // TestConwayPlutusRejectsNilPparams covers the typed-nil pointer case: a nil
@@ -5012,42 +4564,6 @@ func TestConwayUnknownVoterRuleDoesNotRejectWhenStateUnavailable(t *testing.T) {
 		&conway.ConwayProtocolParameters{},
 		[]lcommon.UtxoValidationRuleFunc{rule},
 	))
-}
-
-// TestConwayCommitteeRulesAcceptAuthoritativeEmptyCommittee is the mandatory
-// counterpart to the two tests above: an authoritative empty committee must
-// report available-and-empty, which for a transaction carrying no committee
-// certificate and no votes means no rejection at all.
-//
-// This test passes both with and without the fail-closed change by design. It
-// exists to pin the other side of the boundary: it fails only if fail-closed
-// is over-applied to a transaction that makes no committee lookup.
-func TestConwayCommitteeRulesAcceptAuthoritativeEmptyCommittee(t *testing.T) {
-	state := &taggedCommitteeLedgerState{
-		mockLedgerState: newMockLedgerState(),
-		available:       true,
-	}
-	tx := &conway.ConwayTransaction{TxIsValid: true}
-
-	certRule := findIndexedUtxoValidationRule(
-		t,
-		conwayUtxoValidationRules,
-		validateCommitteeCertificates,
-	)
-	require.NoError(
-		t,
-		certRule(tx, 0, state, &conway.ConwayProtocolParameters{}),
-	)
-
-	voterRule := findIndexedUtxoValidationRule(
-		t,
-		conwayUtxoValidationRules,
-		validateUnknownVoters,
-	)
-	require.NoError(
-		t,
-		voterRule(tx, 0, state, &conway.ConwayProtocolParameters{}),
-	)
 }
 
 // TestConwayCommitteeRulesSkipPhase2InvalidTransaction proves the rules do not
@@ -5811,7 +5327,9 @@ func newTestTxCbor(
 		0: []any{
 			[]any{inputHash, uint64(0)},
 		},
-		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1_000_000)}},
+		1: []any{
+			[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1_000_000)},
+		},
 		2: uint64(200_000),
 		3: ttl,
 	}

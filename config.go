@@ -282,6 +282,7 @@ type Config struct {
 	inboundDuplexOnlyForHot                                                             bool
 	maxConnectionsPerIP, maxInboundConns, maxNtCConns, maxNtCConnectionsPerIP           int
 	maxTrustedLocalNtCConns                                                             int
+	trustedNtCIdleTimeout                                                               time.Duration
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
 	genesisCorroborationPeers                                                           int
@@ -1001,6 +1002,7 @@ func (c *Config) syncCompatFields() {
 	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
 	c.maxNtCConns, c.maxNtCConnectionsPerIP = c.cfg.MaxNtCConns, c.cfg.MaxNtCConnectionsPerIP
 	c.maxTrustedLocalNtCConns = c.cfg.MaxTrustedLocalNtCConns
+	c.trustedNtCIdleTimeout = c.cfg.TrustedNtCIdleTimeout
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.genesisChainSyncJumping = c.cfg.GenesisBootstrap.ChainSyncJumping
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
@@ -1692,6 +1694,17 @@ func WithMaxTrustedLocalNtCConns(n int) ConfigOptionFunc {
 	}
 }
 
+// WithTrustedNtCIdleTimeout specifies how long a trusted local
+// node-to-client connection may stay idle before it is closed. Zero means no
+// limit and negative values are ignored. Default: 0.
+func WithTrustedNtCIdleTimeout(d time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		if d >= 0 {
+			c.cfg.TrustedNtCIdleTimeout = d
+		}
+	}
+}
+
 // WithSkipRewardLiveStakeBackfillCheck skips the startup scan that verifies
 // reward live-stake rows against the full UTxO table.
 func WithSkipRewardLiveStakeBackfillCheck(skip bool) ConfigOptionFunc {
@@ -2037,9 +2050,8 @@ func WithBarkHost(host string) ConfigOptionFunc {
 	}
 }
 
-// WithBarkClientCAFilePath sets the PEM CA bundle Bark uses to authenticate
-// every DatabaseService and LifecycleService caller. Destructive methods
-// additionally require their service's operator allowlist.
+// WithBarkClientCAFilePath retains the legacy input.
+// It does not enable authentication or authorization.
 func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkClientCAFilePath = path
@@ -2076,8 +2088,8 @@ func WithBarkArchiveCallerLookupsPerSecond(rate int) ConfigOptionFunc {
 	}
 }
 
-// WithBarkOperatorCertificateFingerprints sets the SHA-256 client certificate
-// fingerprints authorized to invoke destructive DatabaseService RPCs.
+// WithBarkOperatorCertificateFingerprints retains the legacy input.
+// It does not enable authentication or authorization.
 func WithBarkOperatorCertificateFingerprints(
 	fingerprints []string,
 ) ConfigOptionFunc {
@@ -2096,8 +2108,8 @@ func WithBarkLifecycleEnabled(enabled bool) ConfigOptionFunc {
 	}
 }
 
-// WithBarkLifecycleOperatorCertificateFingerprints sets the SHA-256 client
-// certificate fingerprints authorized to invoke Bark Stop and Restart RPCs.
+// WithBarkLifecycleOperatorCertificateFingerprints retains the legacy input.
+// It does not enable authentication or authorization.
 func WithBarkLifecycleOperatorCertificateFingerprints(
 	fingerprints []string,
 ) ConfigOptionFunc {
@@ -2470,8 +2482,8 @@ func (c *Config) BarkBlockDownloadAllowPrivateAddresses() bool {
 	return c.cfg.BarkBlockDownloadAllowPrivateAddresses
 }
 
-// BarkOperatorCertificateFingerprints returns the SHA-256 client certificate
-// fingerprints authorized to invoke destructive Bark DatabaseService RPCs.
+// BarkOperatorCertificateFingerprints retains the legacy input.
+// It does not enable authentication or authorization.
 func (c *Config) BarkOperatorCertificateFingerprints() []string {
 	return slices.Clone(c.cfg.BarkOperatorCertificateFingerprints)
 }
@@ -2494,8 +2506,8 @@ func (c *Config) BarkLifecycleEnabled() bool {
 	return c.cfg.BarkLifecycleEnabled
 }
 
-// BarkLifecycleOperatorCertificateFingerprints returns the distinct operator
-// allowlist for Bark Stop and Restart RPCs.
+// BarkLifecycleOperatorCertificateFingerprints retains the legacy input.
+// It does not enable authentication or authorization.
 func (c *Config) BarkLifecycleOperatorCertificateFingerprints() []string {
 	return slices.Clone(c.cfg.BarkLifecycleOperatorCertificateFingerprints)
 }

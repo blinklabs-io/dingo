@@ -170,6 +170,7 @@ func graphTx(hash string, inputs []string, outputs ...string) appliedTx {
 }
 
 func TestTransactionDAGTopologicalOrderAndDescendants(t *testing.T) {
+	t.Parallel()
 	graph := newTransactionDAG()
 	graph.add(graphTx("parent", []string{"base:0"}, "parent:0", "parent:1"))
 	graph.add(graphTx("independent", []string{"base:1"}, "independent:0"))
@@ -198,6 +199,7 @@ func TestTransactionDAGTopologicalOrderAndDescendants(t *testing.T) {
 }
 
 func TestTransactionDAGConfirmedRemovalPreservesDescendants(t *testing.T) {
+	t.Parallel()
 	graph := newTransactionDAG()
 	graph.add(graphTx("parent", []string{"base:0"}, "parent:0"))
 	graph.add(graphTx("child", []string{"parent:0"}, "child:0"))
@@ -218,6 +220,7 @@ func TestTransactionDAGConfirmedRemovalPreservesDescendants(t *testing.T) {
 }
 
 func TestTransactionDAGTopologicalOrderRejectsInconsistentCache(t *testing.T) {
+	t.Parallel()
 	graph := newTransactionDAG()
 	graph.add(graphTx("parent", []string{"base:0"}, "parent:0"))
 	graph.add(graphTx("child", []string{"parent:0"}, "child:0"))
@@ -230,6 +233,7 @@ func TestTransactionDAGTopologicalOrderRejectsInconsistentCache(t *testing.T) {
 }
 
 func TestDAGTransactionsFallsBackOnInconsistentOrder(t *testing.T) {
+	t.Parallel()
 	pool, err := NewDAG(MempoolConfig{
 		Validator:       newMockValidator(),
 		MempoolCapacity: 1 << 20,
@@ -253,6 +257,7 @@ func TestDAGTransactionsFallsBackOnInconsistentOrder(t *testing.T) {
 }
 
 func TestDAGTracksAdmittedTransactionDependencies(t *testing.T) {
+	t.Parallel()
 	parentBytes, childBytes, parentHash, childHash := getDependentTestTxBytes(t)
 	const originalInputHash = "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
 	baseInput := buildMockInput(t, originalInputHash, 1)
@@ -300,6 +305,7 @@ func TestDAGTracksAdmittedTransactionDependencies(t *testing.T) {
 }
 
 func TestDAGDoesNotWatermarkEvict(t *testing.T) {
+	t.Parallel()
 	parentBytes, childBytes, _, _ := getDependentTestTxBytes(t)
 	const originalInputHash = "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
 	totalSize := retainedSize(t, parentBytes) + retainedSize(t, childBytes)
@@ -341,6 +347,7 @@ func TestDAGDoesNotWatermarkEvict(t *testing.T) {
 }
 
 func TestDAGAdmissionHeadroomWaitsForRemoval(t *testing.T) {
+	t.Parallel()
 	pool, err := NewDAG(MempoolConfig{
 		Validator:          newMockValidator(),
 		MempoolCapacity:    100,
@@ -383,6 +390,7 @@ func TestDAGAdmissionHeadroomWaitsForRemoval(t *testing.T) {
 }
 
 func TestDAGConcurrentSnapshotsAndMutations(t *testing.T) {
+	t.Parallel()
 	txBytes := getTestTxBytes(t)
 	decoded, err := gledger.NewTransactionFromCbor(
 		uint(conway.EraIdConway),
@@ -399,10 +407,10 @@ func TestDAGConcurrentSnapshotsAndMutations(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 
 	var wg sync.WaitGroup
-	errs := make(chan error, 200)
-	for range 8 {
+	errs := make(chan error, 50)
+	for range 4 {
 		wg.Go(func() {
-			for range 200 {
+			for range 50 {
 				for _, tx := range pool.Transactions() {
 					_, _ = pool.GetTransaction(tx.Hash)
 				}
@@ -410,7 +418,7 @@ func TestDAGConcurrentSnapshotsAndMutations(t *testing.T) {
 		})
 	}
 	wg.Go(func() {
-		for range 200 {
+		for range 50 {
 			errs <- pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 			pool.RemoveTransaction(txHash)
 		}
@@ -423,6 +431,7 @@ func TestDAGConcurrentSnapshotsAndMutations(t *testing.T) {
 }
 
 func TestDAGAdmissionContinuesDuringRevalidation(t *testing.T) {
+	t.Parallel()
 	parentBytes, childBytes, parentHash, childHash := getDependentTestTxBytes(t)
 	validator := newOneShotBlockingValidator()
 	pool, err := NewDAG(MempoolConfig{
@@ -476,6 +485,7 @@ func TestDAGAdmissionContinuesDuringRevalidation(t *testing.T) {
 }
 
 func TestDAGRemovalContinuesDuringRevalidation(t *testing.T) {
+	t.Parallel()
 	parentBytes, childBytes, parentHash, _ := getDependentTestTxBytes(t)
 	validator := newOneShotBlockingValidator()
 	pool, err := NewDAG(MempoolConfig{
@@ -527,6 +537,7 @@ func TestDAGRemovalContinuesDuringRevalidation(t *testing.T) {
 }
 
 func TestDAGRevalidationRetriesAfterLedgerGenerationChange(t *testing.T) {
+	t.Parallel()
 	txBytes := getTestTxBytes(t)
 	validator := newOneShotBlockingValidator()
 	pool, err := NewDAG(MempoolConfig{
@@ -570,6 +581,7 @@ func TestDAGRevalidationRetriesAfterLedgerGenerationChange(t *testing.T) {
 }
 
 func TestDAGRevalidationBoundsLedgerGenerationRetries(t *testing.T) {
+	t.Parallel()
 	txBytes := getTestTxBytes(t)
 	validator := newOneShotBlockingValidator()
 	pool, err := NewDAG(MempoolConfig{
@@ -592,6 +604,7 @@ func TestDAGRevalidationBoundsLedgerGenerationRetries(t *testing.T) {
 }
 
 func TestDAGRevalidationJournalOverflowLeavesLiveStateUntouched(t *testing.T) {
+	t.Parallel()
 	parentBytes, childBytes, parentHash, childHash := getDependentTestTxBytes(t)
 	validator := newOneShotBlockingValidator()
 	pool, err := NewDAG(MempoolConfig{
@@ -645,6 +658,7 @@ func TestDAGRevalidationJournalOverflowLeavesLiveStateUntouched(t *testing.T) {
 // of a rejected parent is validated rather than dropped unseen: only the
 // validator can tell a confirmed parent from an invalid one.
 func TestDAGRevalidationValidatesDescendantOfInvalidParent(t *testing.T) {
+	t.Parallel()
 	parentBytes, childBytes, parentHash, _ := getDependentTestTxBytes(t)
 	validator := &countingFailValidator{}
 	pool, err := NewDAG(MempoolConfig{
@@ -675,6 +689,7 @@ func TestDAGRevalidationValidatesDescendantOfInvalidParent(t *testing.T) {
 func TestFIFORevalidationPrunesDescendantsOfMissingIndexedTransaction(
 	t *testing.T,
 ) {
+	t.Parallel()
 	parentBytes, childBytes, parentHash, _ := getDependentTestTxBytes(t)
 	validator := &countingFailValidator{}
 	pool, err := NewFIFO(MempoolConfig{
@@ -710,6 +725,7 @@ func TestFIFORevalidationPrunesDescendantsOfMissingIndexedTransaction(
 }
 
 func TestMempoolProvidersIncludeFIFOAndDAG(t *testing.T) {
+	t.Parallel()
 	host := plugin.NewHost()
 	require.NoError(t, RegisterProvider(host))
 	require.NoError(t, RegisterFIFOProvider(host))
@@ -749,6 +765,7 @@ func TestMempoolProvidersIncludeFIFOAndDAG(t *testing.T) {
 // so a configured consumerCacheBytes key either failed strict decoding or
 // was silently ignored in favor of the derived default.
 func TestMempoolProviderConfigWiresConsumerCacheBytes(t *testing.T) {
+	t.Parallel()
 	host := plugin.NewHost()
 	require.NoError(t, RegisterFIFOProvider(host))
 

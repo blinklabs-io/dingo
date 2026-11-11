@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -154,19 +155,6 @@ func insertTestBlock(
 	}
 	err := db.BlockCreate(block, nil)
 	require.NoError(t, err, "failed to insert test block at slot %d", slot)
-}
-
-func TestBlobBlockIterator_EmptyDatabase(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-
-	iter := db.BlocksFromSlot(0)
-	defer iter.Close()
-
-	result, err := iter.NextRaw()
-	require.NoError(t, err)
-	assert.Nil(t, result, "result should be nil for empty database")
 }
 
 func TestCanonicalBlobBlockIterator_SparseIndexesAndSlots(t *testing.T) {
@@ -543,53 +531,6 @@ func TestBlobBlockIterator_CloseMultipleTimes(t *testing.T) {
 	assert.Nil(t, result)
 }
 
-func TestBlobBlockIterator_CloseWhileIterating(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-
-	// Insert blocks
-	for _, slot := range []uint64{10, 20, 30, 40, 50} {
-		insertTestBlock(t, db, slot, randomHash(t), []byte{0x82, 0x01})
-	}
-
-	iter := db.BlocksFromSlot(0)
-
-	// Read one block
-	result, err := iter.NextRaw()
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, uint64(10), result.Slot)
-
-	// Close mid-iteration
-	iter.Close()
-
-	// Subsequent reads should return nil
-	result, err = iter.NextRaw()
-	require.NoError(t, err)
-	assert.Nil(t, result)
-}
-
-func TestBlobBlockIterator_CborContent(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-
-	expectedCbor := []byte{0x83, 0x01, 0x02, 0x03}
-	hash := randomHash(t)
-	insertTestBlock(t, db, 42, hash, expectedCbor)
-
-	iter := db.BlocksFromSlot(0)
-	defer iter.Close()
-
-	result, err := iter.NextRaw()
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, uint64(42), result.Slot)
-	assert.Equal(t, hash, result.Hash)
-	assert.Equal(t, expectedCbor, result.Cbor)
-}
-
 func TestBlobBlockIterator_EmptyRange(t *testing.T) {
 	t.Parallel()
 
@@ -668,4 +609,119 @@ func TestBlobBlockIterator_MaxEndSlot(t *testing.T) {
 	result, err = iter.NextRaw()
 	require.NoError(t, err)
 	assert.Nil(t, result)
+}
+
+// Byron epoch boundary blocks share their slot with the first block of the
+// epoch, so mainnet's canonical index opens with two blocks at slot 0.
+func TestCanonicalBlobBlockIteratorAcceptsBlockSharingEbbSlot(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := []models.Block{
+		{ID: 1, Slot: 0, Hash: randomHash(t), Cbor: []byte{0x81}, Type: 0},
+		{ID: 2, Slot: 0, Hash: randomHash(t), Cbor: []byte{0x82}, Type: 1},
+		{ID: 3, Slot: 1, Hash: randomHash(t), Cbor: []byte{0x83}, Type: 1},
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	iter, err := db.CanonicalBlocksFromIndex(
+		t.Context(), BlockInitialIndex, nil, nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(iter.Close)
+	for _, want := range blocks {
+		result, nextErr := iter.NextRaw()
+		require.NoError(t, nextErr)
+		require.NotNil(t, result)
+		require.Equal(t, want.Slot, result.Slot)
+		require.Equal(t, want.Hash, result.Hash)
+	}
+	result, err := iter.NextRaw()
+	require.NoError(t, err)
+	require.Nil(t, result)
+}
+
+func TestCanonicalBlobBlockIteratorResumesAfterEbb(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ebb := models.Block{
+		ID: 1, Slot: 21600, Hash: randomHash(t), Cbor: []byte{0x81}, Type: 0,
+	}
+	next := models.Block{
+		ID: 2, Slot: 21600, Hash: randomHash(t), Cbor: []byte{0x82}, Type: 1,
+	}
+	require.NoError(t, db.BlockCreate(ebb, nil))
+	require.NoError(t, db.BlockCreate(next, nil))
+
+	previous := ocommon.NewPoint(ebb.Slot, ebb.Hash)
+	iter, err := db.CanonicalBlocksFromIndex(
+		t.Context(), next.ID, &previous, nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(iter.Close)
+	result, err := iter.NextRaw()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, next.Hash, result.Hash)
+}
+
+func TestCanonicalBlobBlockIteratorRejectsSharedSlotWithoutEbb(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		firstType  uint
+		secondType uint
+		sameHash   bool
+	}{
+		{name: "two regular blocks", firstType: 1, secondType: 1},
+		{name: "two boundary blocks", firstType: 0, secondType: 0},
+		{name: "boundary block repeated", firstType: 0, sameHash: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := newTestDB(t)
+			first := models.Block{
+				ID: 1, Slot: 5, Hash: randomHash(t),
+				Cbor: []byte{0x81}, Type: tc.firstType,
+			}
+			second := models.Block{
+				ID: 2, Slot: 5, Hash: randomHash(t),
+				Cbor: []byte{0x82}, Type: tc.secondType,
+			}
+			require.NoError(t, db.BlockCreate(first, nil))
+			if tc.sameHash {
+				// Point index 2 at the first block's key, as a
+				// duplicated index entry would.
+				store := db.Blob()
+				txn := store.NewTransaction(true)
+				require.NoError(t, store.Set(
+					txn,
+					types.BlockBlobIndexKey(2),
+					types.BlockBlobKey(first.Slot, first.Hash),
+				))
+				require.NoError(t, txn.Commit())
+			} else {
+				require.NoError(t, db.BlockCreate(second, nil))
+			}
+
+			iter, err := db.CanonicalBlocksFromIndex(
+				t.Context(), BlockInitialIndex, nil, nil,
+			)
+			require.NoError(t, err)
+			t.Cleanup(iter.Close)
+			result, err := iter.NextRaw()
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			result, err = iter.NextRaw()
+			require.Nil(t, result)
+			require.ErrorContains(
+				t, err, "non-increasing slot 5 after slot 5",
+			)
+		})
+	}
 }

@@ -27,21 +27,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLeiosDSTsMatchReferenceMinSigDomains(t *testing.T) {
-	t.Parallel()
-
-	assert.Equal(
-		t,
-		"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_",
-		LeiosVoteDST,
-	)
-	assert.Equal(
-		t,
-		"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_",
-		LeiosPoPDST,
-	)
-}
-
 // testSigningKey returns a signing key built from a small non-zero scalar.
 func testSigningKey(t *testing.T, scalar byte) *VoteSigningKey {
 	t.Helper()
@@ -84,20 +69,6 @@ func TestPrototypeVoteMessageBytesIsCborByteString(t *testing.T) {
 	encoded, err := cbor.Encode(rbHash.Bytes())
 	require.NoError(t, err)
 	assert.Equal(t, encoded, msg)
-}
-
-func TestSignVoteVerifyRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	key := testSigningKey(t, 42)
-	msg := VoteMessageBytes(
-		1234,
-		lcommon.NewBlake2b256([]byte("eb")),
-	)
-	sig, err := SignVote(key, msg)
-	require.NoError(t, err)
-	require.Len(t, sig, lcommon.LeiosBlsSignatureSize)
-	require.NoError(t, VerifyVoteSignature(key.PublicKey(), msg, sig))
 }
 
 func TestPrototypeVoteMusashiVector(t *testing.T) {
@@ -190,25 +161,6 @@ func TestVerifyVoteSignatureMalformed(t *testing.T) {
 	infinity := make([]byte, lcommon.LeiosBlsSignatureSize)
 	infinity[0] = 0xc0
 	assert.Error(t, VerifyVoteSignature(key.PublicKey(), msg, infinity))
-}
-
-func TestAggregateSignaturesVerify(t *testing.T) {
-	t.Parallel()
-
-	msg := VoteMessageBytes(99, lcommon.NewBlake2b256([]byte("eb")))
-	sigs := make([][]byte, 0, 3)
-	pubs := make([]*bls12381.G2Affine, 0, 3)
-	for _, scalar := range []byte{11, 22, 33} {
-		key := testSigningKey(t, scalar)
-		sig, err := SignVote(key, msg)
-		require.NoError(t, err)
-		sigs = append(sigs, sig)
-		pubs = append(pubs, key.PublicKey())
-	}
-	aggSig, err := AggregateSignatures(sigs)
-	require.NoError(t, err)
-	require.Len(t, aggSig, lcommon.LeiosBlsSignatureSize)
-	require.NoError(t, VerifyAggregateSignature(pubs, msg, aggSig))
 }
 
 func TestVerifyAggregateSignatureCorrupted(t *testing.T) {

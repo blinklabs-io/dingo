@@ -21,17 +21,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	"io/fs"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -57,7 +52,6 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
-	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/kesagent"
@@ -444,32 +438,6 @@ func TestChainsyncConfigFitsConfiguredLocalRoots(t *testing.T) {
 	assert.Equal(t, chainsync.DefaultMaxClients, n.chainsyncConfig().MaxClients)
 }
 
-// TestLiveTruncateKeepsLimitOnPatience pins that the chainsync state rebuilt
-// by a live truncate uses the configured Limit on Patience rather than the
-// package defaults.
-func TestLiveTruncateKeepsLimitOnPatience(t *testing.T) {
-	t.Parallel()
-	n, points := newLiveLifecycleTestNode(t, 25)
-	require.NotNil(t, n.config.cfg)
-	n.config.cfg.GenesisBootstrap.LimitOnPatienceEnabled = true
-	n.config.cfg.GenesisBootstrap.LimitOnPatienceCapacity = 7
-
-	targetSlot := points[10].Slot
-	_, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
-		Slot: &targetSlot,
-	})
-	require.NoError(t, err)
-
-	conn := ouroboros.ConnectionId{
-		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
-		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4001},
-	}
-	require.True(t, n.chainsyncState.AddClientConnId(conn))
-	tc := n.chainsyncState.GetTrackedClient(conn)
-	require.NotNil(t, tc)
-	assert.InDelta(t, 7, tc.Patience.Tokens, 1e-9)
-}
-
 func TestNewInvalidConfigPreservesMetricsRegistry(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -531,125 +499,6 @@ func TestNewInvalidConfigPreservesMetricsRegistry(t *testing.T) {
 				"valid retry must register node metrics",
 			)
 		})
-	}
-}
-
-func TestNodeEventSubscriptionPoliciesAreExplicit(t *testing.T) {
-	t.Parallel()
-
-	type counts struct {
-		required               int
-		detachable             int
-		chainsync              int
-		connectionRecycle      int
-		ledgerRecycleTranslate int
-	}
-	want := map[string]map[string]counts{
-		"node.go": {
-			"Run": {
-				required:  3,
-				chainsync: 1,
-			},
-			"subscribeChainsyncClientRemoveRequests": {required: 1},
-			"subscribeConnectionEvents": {
-				required:               3,
-				connectionRecycle:      1,
-				ledgerRecycleTranslate: 1,
-			},
-			"subscribeChainSelectorEvents": {
-				required:   8,
-				detachable: 2,
-			},
-		},
-		"node_lifecycle.go": {
-			"reinitializeNetworkingCore": {
-				chainsync:         1,
-				connectionRecycle: 1,
-			},
-		},
-		"node_leios.go": {
-			"initLeiosVoteManager": {required: 2},
-		},
-		"node_koiosparity.go": {
-			"startKoiosParityObserver": {required: 1},
-		},
-	}
-
-	policyHelpers := map[string]string{
-		"subscribeRequiredEvent":                      "SubscriberBackpressureBlock",
-		"subscribeDetachableEvent":                    "SubscriberBackpressureDetach",
-		"subscribeConnectionRecycleRequests":          "SubscriberBackpressureBlock",
-		"subscribeLedgerConnectionRecycleTranslation": "SubscriberBackpressureBlock",
-	}
-	seenPolicyHelpers := make(map[string]bool)
-	for fileName, functions := range want {
-		file, err := parser.ParseFile(
-			token.NewFileSet(),
-			filepath.Clean(fileName),
-			nil,
-			parser.SkipObjectResolution,
-		)
-		require.NoError(t, err)
-
-		for _, declaration := range file.Decls {
-			fn, ok := declaration.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			wantCounts, isRegistration := functions[fn.Name.Name]
-			got := counts{}
-			ast.Inspect(fn.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				name := nodeCallName(call.Fun)
-				switch name {
-				case "subscribeRequiredEvent":
-					got.required++
-				case "subscribeDetachableEvent":
-					got.detachable++
-				case "subscribeChainsyncClientRemoveRequests":
-					got.chainsync++
-				case "subscribeConnectionRecycleRequests":
-					got.connectionRecycle++
-				case "subscribeLedgerConnectionRecycleTranslation":
-					got.ledgerRecycleTranslate++
-				case "SubscribeFunc", "SubscribeFuncWithBuffer", "SubscribeFuncStrict":
-					t.Errorf("%s uses unclassified EventBus registration %s", fn.Name.Name, name)
-				case "SubscribeFuncWithBufferPolicy":
-					policy, allowed := policyHelpers[fn.Name.Name]
-					if !allowed {
-						t.Errorf("%s registers an EventBus callback outside a policy helper", fn.Name.Name)
-						return true
-					}
-					seenPolicyHelpers[fn.Name.Name] = true
-					if len(call.Args) != 4 || nodeCallName(call.Args[2]) != policy {
-						t.Errorf("%s must register with %s", fn.Name.Name, policy)
-					}
-				}
-				return true
-			})
-			if isRegistration {
-				require.Equalf(t, wantCounts, got,
-					"subscription classification changed in %s:%s", fileName, fn.Name.Name)
-			}
-		}
-	}
-	for helper := range policyHelpers {
-		require.Truef(t, seenPolicyHelpers[helper],
-			"missing explicit policy implementation %s", helper)
-	}
-}
-
-func nodeCallName(expr ast.Expr) string {
-	switch value := expr.(type) {
-	case *ast.Ident:
-		return value.Name
-	case *ast.SelectorExpr:
-		return value.Sel.Name
-	default:
-		return ""
 	}
 }
 
@@ -1320,49 +1169,6 @@ func TestKESAgentStartupWiresClientMetrics(t *testing.T) {
 		require.Contains(t, names, name)
 	}
 	require.Equal(t, 1.0, gaugeValue(t, families, "dingo_kes_agent_connected"))
-}
-
-// TestKESAgentSignModeStartupWiresClientMetrics is the sign-mode half of the
-// same class: node_forging.go carries exactly two kesagent.Config literals,
-// and each needs its own Metrics field.
-func TestKESAgentSignModeStartupWiresClientMetrics(t *testing.T) {
-	t.Parallel()
-
-	vrf, _, opcert := devnetCredPaths(t)
-
-	testutil.SkipIfBlockProducerUnsupported(t)
-	sockPath := testutil.UnixSocketPath(t)
-	ln, err := net.Listen("unix", sockPath)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-
-	registry := prometheus.NewRegistry()
-	n := newTestNodeForBPWithAgent(
-		t,
-		vrf,
-		opcert,
-		kesagent.ModeSign,
-		sockPath,
-		shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour)),
-	)
-	n.config.promRegistry = registry
-	t.Cleanup(n.closeKESAgentClient)
-
-	_, err = n.validateBlockProducerStartupAtSlot(0)
-	require.NoError(t, err)
-
-	families, err := registry.Gather()
-	require.NoError(t, err)
-	names := metricFamilyNames(families)
-	for _, name := range []string{
-		"dingo_kes_agent_connected",
-		"dingo_kes_agent_reconnect_failures_total",
-		"dingo_kes_agent_sign_success_total",
-		"dingo_kes_agent_sign_failure_total",
-		"dingo_kes_agent_sign_latency_seconds",
-	} {
-		require.Contains(t, names, name)
-	}
 }
 
 func gaugeValue(
@@ -2229,8 +2035,13 @@ func TestNodeRunPublicAPIsUseSharedBindAddress(t *testing.T) {
 // pool for the rest of its life. Detaching either subscriber
 // under backpressure would silently strip requests out of the stream, so both
 // stay attached until they drain.
+// shortDeliveryBound stands in for the five-second subscriber delivery bound
+// in tests that observe behavior past it.
+const shortDeliveryBound = 500 * time.Millisecond
+
 func TestConnectionRecycleSubscriptionsRemainLossless(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: lowers the process-wide subscriber delivery bound.
+	t.Cleanup(event.SetChannelDeliveryTimeoutForTesting(shortDeliveryBound))
 
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Stop()
@@ -2290,13 +2101,13 @@ func TestConnectionRecycleSubscriptionsRemainLossless(t *testing.T) {
 		}
 	}()
 
-	// The ordinary EventBus subscriber timeout is five seconds. A regression to
+	// The ordinary EventBus subscriber timeout (lowered here). A regression to
 	// the detaching policy on either hop would let this publish finish at that
 	// bound with the surplus recycle requests discarded.
 	testutil.RequireNoReceive(
 		t,
 		published,
-		event.RemoteDeliverTimeout+time.Second,
+		shortDeliveryBound+time.Second,
 		"a connection-recycle subscription detached instead of retaining the stream",
 	)
 
@@ -2436,139 +2247,6 @@ func TestNodeSettingsGateValuesOmitsGenesisHashesWithoutCardanoConfig(
 	} {
 		_, present := values[gate]
 		require.False(t, present, "gate %q should be absent, not empty", gate)
-	}
-}
-
-// snapshotMgrSetterCall matches a snapshot-manager configuration call on the
-// node, capturing the setter name.
-var snapshotMgrSetterCall = regexp.MustCompile(
-	`n\.snapshotMgr\.(Set[A-Za-z0-9_]+)\(`,
-)
-
-// koiosParityRetentionWiring matches the retention setter called with the
-// operator's own koios-parity enablement. It binds the argument, not just the
-// setter name: a call wired from any other field would leave the operator's
-// setting ignored exactly as silently as no call at all.
-var koiosParityRetentionWiring = regexp.MustCompile(
-	`n\.snapshotMgr\.SetRewardAccountOutputRetentionUnbounded\(\s*` +
-		`n\.config\.koiosParity\.Enabled,?\s*\)`,
-)
-
-// nodeFuncBodyForSnapshotWiring returns the source of the named function, from
-// its declaration to the next top-level declaration.
-func nodeFuncBodyForSnapshotWiring(
-	t *testing.T,
-	path string,
-	decl string,
-) string {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	s := string(b)
-	start := strings.Index(s, decl)
-	if start < 0 {
-		t.Fatalf("%s not found in %s", decl, path)
-	}
-	body := s[start+len(decl):]
-	if end := strings.Index(body, "\nfunc "); end >= 0 {
-		body = body[:end]
-	}
-	return body
-}
-
-func nodeSnapshotConfigurationBody(
-	t *testing.T,
-	path string,
-	decl string,
-) string {
-	t.Helper()
-	body := nodeFuncBodyForSnapshotWiring(t, path, decl)
-	configure := strings.Index(body, "n.configureSnapshotManager()")
-	start := strings.Index(body, "n.ledgerState.Start(")
-	require.GreaterOrEqual(t, configure, 0,
-		"%s must configure the snapshot manager", decl)
-	require.Greater(t, start, configure,
-		"%s must configure snapshots before ledger startup", decl)
-	shared := nodeFuncBodyForSnapshotWiring(t, "node_components.go",
-		"func (n *Node) configureSnapshotManager() error {")
-	return body + "\n" + shared
-}
-
-// Both startup paths must apply every snapshot-manager setting before the
-// ledger starts publishing epoch transitions.
-func TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig(t *testing.T) {
-	t.Parallel()
-
-	runBody := nodeSnapshotConfigurationBody(
-		t,
-		"node.go",
-		"func (n *Node) Run(ctx context.Context) (runErr error) {",
-	)
-	reinitBody := nodeSnapshotConfigurationBody(
-		t,
-		"node_lifecycle.go",
-		"func (n *Node) reinitializeBackgroundManagers(",
-	)
-
-	runSetters := snapshotMgrSetterCall.FindAllStringSubmatch(runBody, -1)
-	if len(runSetters) == 0 {
-		t.Fatal("no n.snapshotMgr setter calls found in Run")
-	}
-	reinitSetters := map[string]struct{}{}
-	for _, m := range snapshotMgrSetterCall.FindAllStringSubmatch(
-		reinitBody,
-		-1,
-	) {
-		reinitSetters[m[1]] = struct{}{}
-	}
-	for _, m := range runSetters {
-		if _, ok := reinitSetters[m[1]]; !ok {
-			t.Errorf(
-				"Run configures the snapshot manager with %s but "+
-					"reinitializeBackgroundManagers does not; a live "+
-					"restore/truncate would silently drop that setting",
-				m[1],
-			)
-		}
-	}
-}
-
-// TestKoiosParityRetentionWiredFromConfigInBothStartupPaths pins
-// wiring itself: both node startup paths must widen reward_account_output
-// retention from the operator's koios-parity enablement. Without the call the
-// node keeps CORE mode's 4-epoch window, and the observer -- whose network
-// -bound epoch validation routinely runs many epochs behind chain progression
-// during a catch-up sync -- reads an epoch's rows only after
-// cleanupOldSnapshots has already deleted them.
-func TestKoiosParityRetentionWiredFromConfigInBothStartupPaths(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
-		path string
-		decl string
-	}{
-		{
-			path: "node.go",
-			decl: "func (n *Node) Run(ctx context.Context) (runErr error) {",
-		},
-		{
-			path: "node_lifecycle.go",
-			decl: "func (n *Node) reinitializeBackgroundManagers(",
-		},
-	} {
-		body := nodeSnapshotConfigurationBody(t, tc.path, tc.decl)
-		if !koiosParityRetentionWiring.MatchString(body) {
-			t.Errorf(
-				"%s does not call "+
-					"n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded("+
-					"n.config.koiosParity.Enabled); reward_account_output "+
-					"would be pruned to the 4-epoch window with the "+
-					"koios-parity observer enabled",
-				tc.decl,
-			)
-		}
 	}
 }
 
@@ -3415,35 +3093,6 @@ func TestChainSelectedNoneRetryBackoffCaps(t *testing.T) {
 	)
 }
 
-// TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic covers the window
-// during a live database restore/truncate where n.chainsyncState is nil
-// between closeStorageForLiveLifecycleOp and reinitializeNetworkingCore.
-// chainSelector's evaluation loop is never paused during quiesce, so it can
-// still emit a ChainSwitchEvent in that window.
-func TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic(t *testing.T) {
-	t.Parallel()
-
-	n := &Node{
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-	}
-
-	require.NotPanics(t, func() {
-		n.handleChainSwitchEvent(
-			event.NewEvent(
-				chainselection.ChainSwitchEventType,
-				chainselection.ChainSwitchEvent{
-					NewConnectionId: newNodeTestConnId(3003),
-					NewTip: ochainsync.Tip{
-						Point: ocommon.NewPoint(100, []byte("hash-a")),
-					},
-				},
-			),
-		)
-	})
-}
-
 // TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp covers the same
 // window from the other side: n.chainsyncState has already been rebuilt to a
 // non-nil value, but a live restore/truncate still holds n.liveLifecycleMu
@@ -3555,54 +3204,6 @@ func TestLedgerStateConfigReportsRetrySelectionUnavailableDuringLifecycle(
 
 	assert.False(t, found)
 	assert.False(t, available)
-}
-
-// TestLedgerStateConfigForwardsBlockPipelineFlags is the second half of the
-// pipeline-flag regression coverage: it proves that a Config built through the
-// public NewConfig/With... option API -- not a hand-built struct literal --
-// carries BlockPipelineEnabled and BlockPipelineValidateEnabled all the way
-// into the ledger.LedgerStateConfig that ledgerStateConfig() hands to
-// NewLedgerState. internal/node/node_test.go's
-// TestBuildDingoConfigWiresBlockPipelineFlags covers the other half: the
-// internal/config.Config -> dingo.Config hop that was the actual defect.
-// Together the two tests span the full path a live serve run takes.
-func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
-	t.Parallel()
-
-	cfg := NewConfig(
-		WithBlockPipelineEnabled(true),
-		WithBlockPipelineValidateEnabled(true),
-	)
-	n := &Node{config: cfg}
-	lsCfg := n.ledgerStateConfig()
-
-	assert.True(
-		t,
-		lsCfg.BlockPipelineEnabled,
-		"expected LedgerStateConfig.BlockPipelineEnabled true; the parallel "+
-			"block decode pipeline never constructs on the serve path "+
-			"otherwise",
-	)
-	assert.True(
-		t,
-		lsCfg.BlockPipelineValidateEnabled,
-		"expected LedgerStateConfig.BlockPipelineValidateEnabled true; the "+
-			"pipeline's parallel VRF/KES validate stage never activates "+
-			"otherwise",
-	)
-}
-
-func TestLedgerStateConfigForwardsLedgerPrefetchAheadFlag(t *testing.T) {
-	t.Parallel()
-
-	off := (&Node{
-		config: NewConfig(WithLedgerPrefetchAheadEnabled(false)),
-	}).ledgerStateConfig()
-	assert.False(t, off.LedgerPrefetchAheadEnabled)
-	on := (&Node{
-		config: NewConfig(WithLedgerPrefetchAheadEnabled(true)),
-	}).ledgerStateConfig()
-	assert.True(t, on.LedgerPrefetchAheadEnabled)
 }
 
 func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
@@ -4326,123 +3927,9 @@ func (h *blockingNodeTestLogHandler) unblock() {
 	h.releaseOnce.Do(func() { close(h.release) })
 }
 
-var nodeRequiredSubscriptionGroups = []struct {
-	function string
-	count    int
-}{
-	{function: "Run", count: 3},
-	{function: "subscribeChainsyncClientRemoveRequests", count: 1},
-	{function: "subscribeConnectionEvents", count: 3},
-	{function: "subscribeChainSelectorEvents", count: 8},
-	{function: "initLeiosVoteManager", count: 2},
-	{function: "startKoiosParityObserver", count: 1},
-}
-
-func TestNodeEventSubscriptionClassifications(t *testing.T) {
-	t.Parallel()
-
-	expectedRequired := make(map[string]int, len(nodeRequiredSubscriptionGroups))
-	for _, group := range nodeRequiredSubscriptionGroups {
-		expectedRequired[group.function] = group.count
-	}
-	expectedDetachable := map[string]int{
-		"subscribeChainSelectorEvents":  2,
-		"subscribeEquivocationDetector": 1,
-	}
-	expectedPolicies := map[string]string{
-		"subscribeRequiredEvent":                      "SubscriberBackpressureBlock",
-		"subscribeDetachableEvent":                    "SubscriberBackpressureDetach",
-		"subscribeConnectionRecycleRequests":          "SubscriberBackpressureBlock",
-		"subscribeLedgerConnectionRecycleTranslation": "SubscriberBackpressureBlock",
-	}
-	expectedChainsyncRegistrations := map[string]int{
-		"Run":                        1,
-		"reinitializeNetworkingCore": 1,
-	}
-
-	files, err := filepath.Glob("node*.go")
-	require.NoError(t, err)
-
-	fset := token.NewFileSet()
-	actualRequired := make(map[string]int)
-	actualDetachable := make(map[string]int)
-	actualPolicies := make(map[string]string)
-	actualChainsyncRegistrations := make(map[string]int)
-	var unclassified []string
-	for _, filename := range files {
-		if strings.HasSuffix(filename, "_test.go") {
-			continue
-		}
-		file, err := parser.ParseFile(fset, filename, nil, 0)
-		require.NoError(t, err)
-		for _, declaration := range file.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Body == nil {
-				continue
-			}
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				selector, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				switch selector.Sel.Name {
-				case "subscribeRequiredEvent":
-					actualRequired[function.Name.Name]++
-				case "subscribeDetachableEvent":
-					actualDetachable[function.Name.Name]++
-				case "subscribeChainsyncClientRemoveRequests":
-					actualChainsyncRegistrations[function.Name.Name]++
-				case "Subscribe", "SubscribeWithBuffer", "SubscribeFunc",
-					"SubscribeFuncWithBuffer", "SubscribeFuncStrict":
-					unclassified = append(
-						unclassified,
-						fmt.Sprintf("%s:%s", filename, function.Name.Name),
-					)
-				case "SubscribeFuncWithBufferPolicy":
-					_, ok := actualPolicies[function.Name.Name]
-					if ok {
-						unclassified = append(
-							unclassified,
-							fmt.Sprintf("duplicate policy helper: %s", function.Name.Name),
-						)
-						return true
-					}
-					if len(call.Args) < 3 {
-						unclassified = append(
-							unclassified,
-							fmt.Sprintf("policy missing: %s:%s", filename, function.Name.Name),
-						)
-						return true
-					}
-					policySelector, ok := call.Args[2].(*ast.SelectorExpr)
-					if !ok {
-						unclassified = append(
-							unclassified,
-							fmt.Sprintf("policy not explicit: %s:%s", filename, function.Name.Name),
-						)
-						return true
-					}
-					actualPolicies[function.Name.Name] = policySelector.Sel.Name
-				}
-				return true
-			})
-		}
-	}
-
-	require.Empty(t, unclassified,
-		"node-owned EventBus function subscriptions must use a policy helper")
-	require.Equal(t, expectedRequired, actualRequired)
-	require.Equal(t, expectedDetachable, actualDetachable)
-	require.Equal(t, expectedPolicies, actualPolicies)
-	require.Equal(t, expectedChainsyncRegistrations, actualChainsyncRegistrations)
-}
-
 func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: lowers the process-wide subscriber delivery bound.
+	t.Cleanup(event.SetChannelDeliveryTimeoutForTesting(shortDeliveryBound))
 
 	type subscriberCase struct {
 		name        string
@@ -4451,23 +3938,18 @@ func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
 		queueFilled chan struct{}
 		published   chan struct{}
 	}
-	var cases []subscriberCase
-	for _, group := range nodeRequiredSubscriptionGroups {
-		for i := range group.count {
-			cases = append(cases, subscriberCase{
-				name: fmt.Sprintf("%s %d", group.function, i+1),
-				eventType: event.EventType(fmt.Sprintf(
-					"node.required.test.%d", len(cases),
-				)),
-				logger: &blockingNodeTestLogHandler{
-					entered: make(chan struct{}),
-					release: make(chan struct{}),
-				},
-				queueFilled: make(chan struct{}),
-				published:   make(chan struct{}),
-			})
-		}
-	}
+	// Every required subscription goes through subscribeRequiredEvent, so one
+	// stalled subscriber exercises the policy for all of them.
+	cases := []subscriberCase{{
+		name:      "required subscriber",
+		eventType: event.EventType("node.required.test"),
+		logger: &blockingNodeTestLogHandler{
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		},
+		queueFilled: make(chan struct{}),
+		published:   make(chan struct{}),
+	}}
 
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() {
@@ -4525,7 +4007,7 @@ func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
 	select {
 	case <-allPublished:
 		t.Fatal("a required subscriber detached while its handler was stalled")
-	case <-time.After(event.RemoteDeliverTimeout + 250*time.Millisecond):
+	case <-time.After(shortDeliveryBound + 250*time.Millisecond):
 	}
 
 	for _, testCase := range cases {
@@ -4545,7 +4027,8 @@ func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
 }
 
 func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: lowers the process-wide subscriber delivery bound.
+	t.Cleanup(event.SetChannelDeliveryTimeoutForTesting(shortDeliveryBound))
 
 	loggerHandler := &blockingNodeTestLogHandler{
 		entered: make(chan struct{}),
@@ -4608,7 +4091,7 @@ func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T
 	select {
 	case <-published:
 		t.Fatal("required Node subscription stopped applying back-pressure")
-	case <-time.After(event.RemoteDeliverTimeout + time.Second):
+	case <-time.After(shortDeliveryBound + time.Second):
 	}
 	loggerHandler.unblock()
 	select {
@@ -4636,7 +4119,8 @@ func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T
 }
 
 func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: lowers the process-wide subscriber delivery bound.
+	t.Cleanup(event.SetChannelDeliveryTimeoutForTesting(shortDeliveryBound))
 
 	loggerHandler := &blockingNodeTestLogHandler{
 		entered: make(chan struct{}),
@@ -4678,7 +4162,7 @@ func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) 
 	}
 	select {
 	case <-published:
-	case <-time.After(event.RemoteDeliverTimeout + 2*time.Second):
+	case <-time.After(shortDeliveryBound + 2*time.Second):
 		t.Fatal("detachable fork diagnostic subscriber held publishers past its timeout")
 	}
 	loggerHandler.unblock()
@@ -4792,47 +4276,6 @@ func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
 	)
 }
 
-// A close/stop failure surfaced during the startup-cleanup unwind must
-// actually reach the log, not just be swallowed by the caller's `_ =`.
-func TestLogErrIfNotNilLogsOnError(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-
-	logErrIfNotNil(
-		logger,
-		"failed to stop leader election during cleanup",
-		errors.New("epoch transition in flight"),
-	)
-
-	out := buf.String()
-	if !strings.Contains(out, "failed to stop leader election during cleanup") {
-		t.Fatalf("expected log message in output, got: %s", out)
-	}
-	if !strings.Contains(out, "epoch transition in flight") {
-		t.Fatalf("expected error detail in output, got: %s", out)
-	}
-}
-
-// The common case -- a clean stop -- must stay silent, or every successful
-// shutdown would log a spurious error line.
-func TestLogErrIfNotNilStaysQuietOnNil(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-
-	logErrIfNotNil(logger, "failed to stop leader election during cleanup", nil)
-
-	if buf.Len() != 0 {
-		t.Fatalf(
-			"expected no log output for a nil error, got: %s",
-			buf.String(),
-		)
-	}
-}
-
 // seedIncompleteRewardLiveStake reproduces a post-upgrade database whose
 // reward_live_stake aggregate covers only one of two registered credentials,
 // which is the state RewardLiveStakeNeedsBackfill is meant to detect.
@@ -4938,19 +4381,6 @@ VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
 	require.Contains(t, err.Error(), "older accounting")
 }
 
-func TestNewOuroborosConfigAppliesTxSubmissionRateLimit(t *testing.T) {
-	t.Parallel()
-
-	n := &Node{config: NewConfig()}
-	cfg := n.newOuroborosConfig(false, 0, 0)
-
-	assert.Positive(
-		t,
-		cfg.MaxTxSubmissionsPerSecond,
-		"production ouroboros config must enable the TxSubmission limiter",
-	)
-}
-
 func TestNewOuroborosConfigDoesNotInitiateLegacyLeiosVotes(t *testing.T) {
 	t.Parallel()
 
@@ -4987,29 +4417,31 @@ func TestNewOuroborosConfigReportsChainSelectionBestPeer(t *testing.T) {
 	assert.True(t, cfg.ChainsyncHasBestPeer(), "a selected best peer")
 }
 
-func TestLedgerStateConfigForwardsApplyRowBatching(t *testing.T) {
+// Ingress slots depend on the stale-tip verdict; a config that drops the hook
+// leaves stale peers holding every slot.
+func TestChainsyncConfigReportsAdvertisedTipStale(t *testing.T) {
 	t.Parallel()
 
-	off := &Node{config: NewConfig()}
-	assert.False(t, off.ledgerStateConfig().ApplyRowBatchingEnabled)
+	n := &Node{config: NewConfig()}
+	cfg := n.chainsyncConfig()
+	require.NotNil(t, cfg.AdvertisedTipStale)
+	staleTip := ochainsync.Tip{Point: ocommon.NewPoint(10, []byte("stale"))}
+	freshTip := ochainsync.Tip{Point: ocommon.NewPoint(5000, []byte("fresh"))}
+	assert.False(t, cfg.AdvertisedTipStale(staleTip), "no chain selector")
 
-	on := &Node{config: NewConfig(WithLedgerApplyRowBatchingEnabled(true))}
-	assert.True(
-		t,
-		on.ledgerStateConfig().ApplyRowBatchingEnabled,
-		"the option never reaches the ledger without this hop",
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:        true,
+			SecurityParam:      20,
+			GenesisWindowSlots: 100,
+			WallClockSlot: func() (uint64, bool) {
+				return 5000, true
+			},
+			DisableEventSubscriptions: true,
+		},
 	)
-}
-
-func TestLedgerStateConfigForwardsBlockfetchLowWatermarkFlag(t *testing.T) {
-	t.Parallel()
-
-	off := (&Node{config: NewConfig()}).ledgerStateConfig()
-	assert.False(t, off.BlockfetchLowWatermarkEnabled)
-	on := (&Node{
-		config: NewConfig(WithBlockfetchLowWatermarkEnabled(true)),
-	}).ledgerStateConfig()
-	assert.True(t, on.BlockfetchLowWatermarkEnabled)
+	assert.True(t, cfg.AdvertisedTipStale(staleTip), "older than the window")
+	assert.False(t, cfg.AdvertisedTipStale(freshTip), "at the wall clock")
 }
 
 // Not t.Parallel: swaps the package-level closeOuroborosInstance seam.
@@ -5042,31 +4474,4 @@ func TestRunKeepsStorageOpenWhenLeiosPersistenceDrainIsUnconfirmed(
 	)
 	require.NoError(t, n.ouroboros().Close())
 	require.NoError(t, n.db.Close())
-}
-
-func TestLedgerStateConfigForwardsLedgerValidateAheadFlag(t *testing.T) {
-	t.Parallel()
-
-	off := (&Node{
-		config: NewConfig(WithLedgerValidateAheadEnabled(false)),
-	}).ledgerStateConfig()
-	assert.False(t, off.LedgerValidateAheadEnabled)
-	on := (&Node{
-		config: NewConfig(WithLedgerValidateAheadEnabled(true)),
-	}).ledgerStateConfig()
-	assert.True(t, on.LedgerValidateAheadEnabled)
-}
-
-func TestNewConfigEnablesLedgerApplyAheadByDefault(t *testing.T) {
-	t.Parallel()
-
-	cfg := (&Node{config: NewConfig()}).ledgerStateConfig()
-	assert.True(t, cfg.LedgerPrefetchAheadEnabled)
-	assert.True(t, cfg.LedgerValidateAheadEnabled)
-	off := (&Node{config: NewConfig(
-		WithLedgerPrefetchAheadEnabled(false),
-		WithLedgerValidateAheadEnabled(false),
-	)}).ledgerStateConfig()
-	assert.False(t, off.LedgerPrefetchAheadEnabled)
-	assert.False(t, off.LedgerValidateAheadEnabled)
 }

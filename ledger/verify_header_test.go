@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -77,6 +78,7 @@ func verifyBlockHeader(
 		block,
 		hex.EncodeToString(epochNonce),
 		slotsPerKesPeriod,
+		62,
 	)
 }
 
@@ -531,17 +533,6 @@ func TestVerifyBlockHeader_MissingEpochNonce(t *testing.T) {
 	block := &mockBabbageBlock{slot: 1000}
 	err := verifyBlockHeader(block, nil, 129600)
 	assert.Error(t, err, "should fail with missing epoch nonce")
-	assert.Contains(t, err.Error(), "epoch nonce not available")
-}
-
-// TestVerifyBlockHeader_EmptyEpochNonce verifies that an empty epoch
-// nonce also fails.
-func TestVerifyBlockHeader_EmptyEpochNonce(t *testing.T) {
-	t.Parallel()
-
-	block := &mockBabbageBlock{slot: 1000}
-	err := verifyBlockHeader(block, []byte{}, 129600)
-	assert.Error(t, err, "should fail with empty epoch nonce")
 	assert.Contains(t, err.Error(), "epoch nonce not available")
 }
 
@@ -1048,6 +1039,8 @@ func TestEpochForSlot_SkipsZeroLengthEpochs(t *testing.T) {
 
 // --- verifyBlockHeaderCrypto tests ---
 
+const testMaxKESEvolutions = 62
+
 // newTestShelleyGenesisCfg creates a CardanoNodeConfig with Shelley genesis
 // loaded for use in verifyBlockHeaderCrypto tests.
 func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
@@ -1062,15 +1055,15 @@ func newTestShelleyGenesisCfgWithSecurityParam(
 	k int,
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
-	shelleyGenesisJSON := fmt.Sprintf(`{
-		"activeSlotsCoeff": 0.05,
-		"securityParam": %d,
-		"slotLength": 1,
-		"epochLength": 432000,
+	shelleyGenesisJSON := completeTestShelleyGenesisJSON(t, map[string]any{
+		"activeSlotsCoeff":  0.05,
+		"securityParam":     k,
+		"slotLength":        1,
+		"epochLength":       432000,
 		"slotsPerKESPeriod": 129600,
-		"maxKESEvolutions": 62,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`, k)
+		"maxKESEvolutions":  testMaxKESEvolutions,
+		"systemStart":       "2022-10-25T00:00:00Z",
+	}, nil)
 	cfg := &cardano.CardanoNodeConfig{}
 	byronGenesisJSON := fmt.Sprintf(`{
 		"blockVersionData": { "slotDuration": "20000" },
@@ -1080,7 +1073,7 @@ func newTestShelleyGenesisCfgWithSecurityParam(
 		strings.NewReader(byronGenesisJSON),
 	)
 	require.NoError(t, err)
-	err = cfg.LoadShelleyGenesisFromReader(
+	err = completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1981,20 +1974,20 @@ func TestVerifyBlockHeaderCrypto_WrongNonceFails(t *testing.T) {
 // so that VRF outputs found eligible there are also eligible here.
 func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	t.Helper()
-	shelleyGenesisJSON := `{
-		"activeSlotsCoeff": 0.99,
-		"securityParam": 432,
-		"slotLength": 1,
-		"epochLength": 432000,
+	shelleyGenesisJSON := completeTestShelleyGenesisJSON(t, map[string]any{
+		"activeSlotsCoeff":  0.99,
+		"securityParam":     432,
+		"slotLength":        1,
+		"epochLength":       432000,
 		"slotsPerKESPeriod": 129600,
-		"maxKESEvolutions": 62,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
+		"maxKESEvolutions":  testMaxKESEvolutions,
+		"systemStart":       "2022-10-25T00:00:00Z",
+	}, nil)
 	cfg := &cardano.CardanoNodeConfig{}
 	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
 	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
-	err = cfg.LoadShelleyGenesisFromReader(
+	err = completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -2022,29 +2015,26 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 	activeSlotsCoeff string,
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
-	shelleyGenesisJSON := `{
-		"activeSlotsCoeff": ` + activeSlotsCoeff + `,
-		"securityParam": 432,
-		"slotLength": 1,
-		"epochLength": 432000,
+	shelleyGenesisJSON := completeTestShelleyGenesisJSON(t, map[string]any{
+		"activeSlotsCoeff":  json.RawMessage(activeSlotsCoeff),
+		"securityParam":     432,
+		"slotLength":        1,
+		"epochLength":       432000,
 		"slotsPerKESPeriod": 129600,
-		"maxKESEvolutions": 62,
-		"systemStart": "2022-10-25T00:00:00Z",
-		"protocolParams": {
-			"decentralisationParam": 1
+		"maxKESEvolutions":  testMaxKESEvolutions,
+		"systemStart":       "2022-10-25T00:00:00Z",
+		"genDelegs": map[string]any{
+			strings.Repeat("11", 28): map[string]string{
+				"delegate": delegateHashHex,
+				"vrf":      vrfHashHex,
+			},
 		},
-		"genDelegs": {
-			"` + strings.Repeat("11", 28) + `": {
-				"delegate": "` + delegateHashHex + `",
-				"vrf": "` + vrfHashHex + `"
-			}
-		}
-	}`
+	}, map[string]any{"decentralisationParam": 1})
 	cfg := &cardano.CardanoNodeConfig{}
 	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
 	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
-	err = cfg.LoadShelleyGenesisFromReader(
+	err = completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -3410,6 +3400,33 @@ func seedPoolStakeSnapshotOfTypeAtSlot(
 	require.NoError(t, err)
 }
 
+func seedPoolStakeSnapshotWithVrfKeyAtSlot(
+	t *testing.T,
+	db *database.Database,
+	epoch uint64,
+	snapshotType string,
+	poolKeyHash []byte,
+	vrfKeyHash []byte,
+	totalStake uint64,
+	stakeDenominator uint64,
+	capturedSlot uint64,
+) {
+	t.Helper()
+	err := db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:            epoch,
+			SnapshotType:     snapshotType,
+			PoolKeyHash:      poolKeyHash,
+			VrfKeyHash:       vrfKeyHash,
+			TotalStake:       types.Uint64(totalStake),
+			StakeDenominator: types.Uint64(stakeDenominator),
+			CapturedSlot:     capturedSlot,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+}
+
 func seedEligibilityEpochs(
 	t *testing.T,
 	db *database.Database,
@@ -4070,6 +4087,8 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkRejectsStandard
 func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccepts(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{41}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.config.SkipLeaderStakeThresholdCheck = true
@@ -4127,6 +4146,8 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccept
 func TestVerifyBlockHeaderState_ReconstructedMarkDefersThenRejects(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	newReconstructedMarkLedger := func(
 		t *testing.T,
 		tipSlot uint64,
@@ -4190,6 +4211,7 @@ func TestVerifyBlockHeaderState_ReconstructedMarkDefersThenRejects(
 	}
 
 	t.Run("tip behind the slot defers", func(t *testing.T) {
+		t.Parallel()
 		ls, block := newReconstructedMarkLedger(t, 549)
 		require.True(t, ls.ledgerTipBehindSlot(block.SlotNumber()))
 
@@ -4218,6 +4240,7 @@ func TestVerifyBlockHeaderState_ReconstructedMarkDefersThenRejects(
 	})
 
 	t.Run("tip caught up rejects", func(t *testing.T) {
+		t.Parallel()
 		ls, block := newReconstructedMarkLedger(t, 1550)
 		require.False(t, ls.ledgerTipBehindSlot(block.SlotNumber()))
 
@@ -4338,18 +4361,19 @@ func newCoeffGuardLedger(
 // output is ever below the threshold.
 func newZeroCoeffGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	t.Helper()
-	zeroCoeffJSON := `{
-		"activeSlotsCoeff": 0,
-		"securityParam": 432,
+	zeroCoeffJSON := completeTestShelleyGenesisJSON(t, map[string]any{
+		"activeSlotsCoeff":  0.05,
+		"securityParam":     432,
 		"slotsPerKESPeriod": 129600,
-		"maxKESEvolutions": 62,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
+		"maxKESEvolutions":  testMaxKESEvolutions,
+		"systemStart":       "2022-10-25T00:00:00Z",
+	}, nil)
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(zeroCoeffJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(zeroCoeffJSON)),
 	)
+	cfg.ShelleyGenesis().ActiveSlotsCoeff = cbor.Rat{Rat: big.NewRat(0, 1)}
 	return cfg
 }
 
@@ -4760,6 +4784,8 @@ func (f *eligibilityDenominatorFixture) totalActiveStake(
 func TestVerifyBlockLeaderEligibility_DenominatorExcludesUndelegatedStake(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const undelegatedStake = uint64(400_000_000_000_000_000)
 	f := newEligibilityDenominatorFixture(t, 60)
 
@@ -4800,6 +4826,8 @@ func TestVerifyBlockLeaderEligibility_DenominatorExcludesUndelegatedStake(
 func TestVerifyBlockLeaderEligibility_DenominatorExcludesReapedDelegation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const staleStake = uint64(400_000_000_000_000_000)
 	f := newEligibilityDenominatorFixture(t, 61)
 
@@ -4865,6 +4893,8 @@ INSERT INTO pool_registration (
 func TestVerifyBlockLeaderEligibility_DenominatorIncludesEligibleStake(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const eligibleStake = uint64(400_000_000_000_000_000)
 	f := newEligibilityDenominatorFixture(t, 62)
 

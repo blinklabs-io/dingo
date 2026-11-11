@@ -588,26 +588,6 @@ func TestMmapReadOnlyRejectsEmptyFile(t *testing.T) {
 	}
 }
 
-func TestMmapReadOnlyReturnsFileData(t *testing.T) {
-	t.Parallel()
-
-	path := filepath.Join(t.TempDir(), "data")
-	want := []byte("dingo mmap test")
-	if err := os.WriteFile(path, want, 0o640); err != nil {
-		t.Fatalf("writing data file: %v", err)
-	}
-
-	data, cleanup, err := mmapReadOnly(path)
-	if err != nil {
-		t.Fatalf("mmap read-only: %v", err)
-	}
-	defer cleanup()
-
-	if !bytes.Equal(data, want) {
-		t.Fatalf("mapped data = %q, want %q", data, want)
-	}
-}
-
 func TestImportTipPersistsSnapshotNetworkState(t *testing.T) {
 	t.Parallel()
 

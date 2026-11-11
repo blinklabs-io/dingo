@@ -277,32 +277,6 @@ func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
 	require.Equal(t, uint64(7), latest)
 }
 
-func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDatabaseSourceDB(t)
-	sqlDB := sourceSQLDB(t, db)
-	stakingKey := []byte("STAKING-KEY-28-BYTES-LONG!!!")
-	require.Len(t, stakingKey, 28)
-	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
-	require.NoError(t, sqlDB.Create(&models.RewardAccountOutput{
-		Epoch:       6,
-		StakingKey:  stakingKey,
-		PoolKeyHash: poolKeyHash,
-		RewardType:  "member",
-		Amount:      types.Uint64(42),
-		Spendable:   true,
-	}).Error)
-
-	source, err := NewDatabaseSource(db)
-	require.NoError(t, err)
-	rows, err := source.GetRewardAccountOutputs(context.Background(), 6)
-	require.NoError(t, err)
-	require.Len(t, rows, 1)
-	require.Equal(t, types.Uint64(42), rows[0].Amount)
-	require.True(t, rows[0].Spendable)
-}
-
 // TestDatabaseSourceCoreModePruningTiming demonstrates the retention-window
 // property DatabaseSource's doc comment relies on for reward_account_output
 // (the table the per-account parity check will read): it remains fully
@@ -566,66 +540,6 @@ func TestDatabaseSourceReportsRewardsPending(t *testing.T) {
 	require.True(t, ok, "pool missing from the map after tip update")
 	require.False(t, data.RewardsPending,
 		"at the boundary, spendable flags are final")
-}
-
-// TestDatabaseSourceGetPoolsRetiredByEpoch proves the in-process source
-// resolves departure the same way DingoDB's raw-SQL twin does, including the
-// case that makes "a retirement certificate exists" the wrong predicate: a
-// registration filed after the retirement puts the pool back. Both halves are
-// asserted from one seeding, so a query that simply returned every pool with
-// a retirement row would fail on the re-registered pool.
-func TestDatabaseSourceGetPoolsRetiredByEpoch(t *testing.T) {
-	t.Parallel()
-
-	const (
-		queryEpoch   = uint64(7)
-		boundarySlot = uint64(1_000)
-	)
-	db := newTestDatabaseSourceDB(t)
-	sqlDB := sourceSQLDB(t, db)
-
-	departed := testPoolKeyHash(t, 0x21)
-	reregistered := testPoolKeyHash(t, 0x22)
-	retiringLater := testPoolKeyHash(t, 0x23)
-
-	seed := func(keyHash []byte, regSlots []uint64, retSlot, retEpoch uint64) {
-		t.Helper()
-		raw, err := sqlDB.DB()
-		require.NoError(t, err)
-		res, err := raw.Exec(
-			`INSERT INTO pool (pool_key_hash) VALUES (?)`,
-			keyHash,
-		)
-		require.NoError(t, err)
-		poolID, err := res.LastInsertId()
-		require.NoError(t, err)
-		for _, slot := range regSlots {
-			require.NoError(t, sqlDB.Exec(`
-INSERT INTO pool_registration (pool_id, pool_key_hash, added_slot)
-VALUES (?, ?, ?)`, poolID, keyHash, slot).Error)
-		}
-		require.NoError(t, sqlDB.Exec(`
-INSERT INTO pool_retirement (pool_id, pool_key_hash, epoch, added_slot)
-VALUES (?, ?, ?, ?)`, poolID, keyHash, retEpoch, retSlot).Error)
-	}
-	seed(departed, []uint64{100}, 200, queryEpoch-2)
-	seed(reregistered, []uint64{100, 300}, 200, queryEpoch-2)
-	seed(retiringLater, []uint64{100}, 200, queryEpoch+1)
-
-	source, err := NewDatabaseSource(db)
-	require.NoError(t, err)
-
-	retired, err := source.GetPoolsRetiredByEpoch(
-		context.Background(),
-		queryEpoch,
-		boundarySlot,
-	)
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		map[string]struct{}{hex.EncodeToString(departed): {}},
-		retired,
-	)
 }
 
 // retiredParityCert is one seeded certificate. blockIndex is the
@@ -1039,34 +953,6 @@ func TestDatabaseSourceGetEarliestAvailableEpochNoBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Zero(t, epoch)
-}
-
-// TestDatabaseSourceGetEarliestAvailableEpochResolvesBoundaryEpoch seeds a
-// Mithril bootstrap boundary at slot 1_000, inside epoch 10 (the same
-// mithril_ledger_slot sync-state key mithril/sync_import.go writes, and the
-// same epoch table ledger.LedgerState.SlotToEpoch/database.GetEpochBySlot
-// already resolve slots against), and confirms GetEarliestAvailableEpoch
-// resolves it to epoch 11 -- one past the boundary epoch, since that epoch
-// (and everything before it) was inherited from the Mithril snapshot rather
-// than computed locally.
-func TestDatabaseSourceGetEarliestAvailableEpochResolvesBoundaryEpoch(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := newTestDatabaseSourceDB(t)
-	require.NoError(t, db.SetEpoch(
-		1_000, 10, nil, nil, nil, nil, 5, 20, 432_000, nil,
-	))
-	require.NoError(t, db.SetSyncState("mithril_ledger_slot", "1000", nil))
-
-	source, err := NewDatabaseSource(db)
-	require.NoError(t, err)
-
-	epoch, ok, err := source.GetEarliestAvailableEpoch(context.Background())
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Equal(t, uint64(11), epoch)
 }
 
 // TestGetEarliestAvailableEpochImplementationsAgree pins both

@@ -120,7 +120,14 @@ func TestHardForkDijkstraKeepsAlonzoExtraConfigCostModels(t *testing.T) {
 func TestHardForkConwayWithoutExtraConfigKeepsGenesisCostModels(
 	t *testing.T,
 ) {
-	cfg := extraConfigNodeConfig(t, `{"costModels":{}}`)
+	raw, err := os.ReadFile("../../config/cardano/musashi/alonzo-genesis.json")
+	require.NoError(t, err)
+	var genesis map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &genesis))
+	delete(genesis, "extraConfig")
+	raw, err = json.Marshal(genesis)
+	require.NoError(t, err)
+	cfg := extraConfigNodeConfig(t, string(raw))
 	require.Nil(t, cfg.AlonzoGenesis().ExtraConfig)
 
 	pp := hardForkToConway(t, cfg)

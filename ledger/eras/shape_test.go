@@ -15,6 +15,7 @@
 package eras_test
 
 import (
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -36,7 +38,7 @@ import (
 // regression.
 func TestStabilityWindowForEra_RejectsActiveSlotsCoeffAbove1(t *testing.T) {
 	shelley := `{
-		"activeSlotsCoeff": 2.0,
+		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
 		"slotLength": 1,
 		"epochLength": 432000,
@@ -45,8 +47,9 @@ func TestStabilityWindowForEra_RejectsActiveSlotsCoeffAbove1(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
 	)
+	cfg.ShelleyGenesis().ActiveSlotsCoeff = cbor.Rat{Rat: big.NewRat(2, 1)}
 	_, err := eras.StabilityWindowForEra(cfg, eras.ShelleyEraDesc.Id)
 	assert.Error(
 		t,
@@ -75,7 +78,7 @@ func newTestCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(byron)))
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
 	)
 	return cfg
 }
@@ -93,7 +96,7 @@ func newShelleyOnlyCfg(t *testing.T) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelley)),
 	)
 	return cfg
 }
@@ -108,20 +111,15 @@ func TestStabilityWindowForEra_Byron(t *testing.T) {
 	assert.Equal(t, uint64(864), w)
 }
 
-// Shelley: window = ceil(3k/f) = ceil(3*432/0.05) = 25_920.
+// Shelley: window = ceil(3k/f) = ceil(3*432/0.05) = 25_920. Post-Shelley eras
+// use the same computation.
 func TestStabilityWindowForEra_Shelley(t *testing.T) {
 	cfg := newTestCfg(t)
-	w, err := eras.StabilityWindowForEra(cfg, eras.ShelleyEraDesc.Id)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(25_920), w)
-}
-
-// Post-Shelley eras use the same computation.
-func TestStabilityWindowForEra_Conway(t *testing.T) {
-	cfg := newTestCfg(t)
-	w, err := eras.StabilityWindowForEra(cfg, eras.ConwayEraDesc.Id)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(25_920), w)
+	for _, era := range []eras.EraDesc{eras.ShelleyEraDesc, eras.ConwayEraDesc} {
+		w, err := eras.StabilityWindowForEra(cfg, era.Id)
+		require.NoError(t, err, era.Name)
+		assert.Equal(t, uint64(25_920), w, era.Name)
+	}
 }
 
 // Byron era but no Byron genesis in config — error.

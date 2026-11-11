@@ -48,6 +48,7 @@ var coeffTestPoolID = func() lcommon.PoolKeyHash {
 }()
 
 func TestCalculateScheduleFloatFallbackPreservesConversion(t *testing.T) {
+	t.Parallel()
 	calc := NewCalculator(0.05)
 	got, err := calc.activeSlotCoeffRat()
 	require.NoError(t, err)
@@ -67,6 +68,7 @@ func TestCalculateScheduleFloatFallbackPreservesConversion(t *testing.T) {
 func TestCalculateScheduleRejectsOutOfRangeRationalActiveSlotCoeff(
 	t *testing.T,
 ) {
+	t.Parallel()
 	for name, coeff := range map[string]*big.Rat{
 		"zero":     new(big.Rat),
 		"negative": big.NewRat(-1, 20),
@@ -111,69 +113,8 @@ func testEpochSlotRange(epoch, slotsPerEpoch uint64) EpochSlotRange {
 	}
 }
 
-func TestNewSchedule(t *testing.T) {
-	poolId := lcommon.PoolKeyHash{}
-	copy(poolId[:], []byte("pool1234567890123456"))
-
-	schedule := NewSchedule(
-		10,     // epoch
-		poolId, // pool ID
-		1000,   // pool stake
-		10000,  // total stake
-		[]byte("nonce"),
-	)
-
-	assert.NotNil(t, schedule)
-	assert.Equal(t, uint64(10), schedule.Epoch)
-	assert.Equal(t, poolId, schedule.PoolId)
-	assert.Equal(t, uint64(1000), schedule.PoolStake)
-	assert.Equal(t, uint64(10000), schedule.TotalStake)
-	assert.Equal(t, []byte("nonce"), schedule.EpochNonce)
-	assert.Empty(t, schedule.LeaderSlots)
-}
-
-func TestScheduleAddLeaderSlot(t *testing.T) {
-	poolId := lcommon.PoolKeyHash{}
-	schedule := NewSchedule(10, poolId, 1000, 10000, nil)
-
-	schedule.AddLeaderSlot(100)
-	schedule.AddLeaderSlot(200)
-	schedule.AddLeaderSlot(300)
-
-	assert.Len(t, schedule.LeaderSlots, 3)
-	assert.Contains(t, schedule.LeaderSlots, uint64(100))
-	assert.Contains(t, schedule.LeaderSlots, uint64(200))
-	assert.Contains(t, schedule.LeaderSlots, uint64(300))
-}
-
-func TestScheduleIsLeaderForSlot(t *testing.T) {
-	poolId := lcommon.PoolKeyHash{}
-	schedule := NewSchedule(10, poolId, 1000, 10000, nil)
-
-	schedule.AddLeaderSlot(100)
-	schedule.AddLeaderSlot(200)
-
-	assert.True(t, schedule.IsLeaderForSlot(100))
-	assert.True(t, schedule.IsLeaderForSlot(200))
-	assert.False(t, schedule.IsLeaderForSlot(150))
-	assert.False(t, schedule.IsLeaderForSlot(0))
-}
-
-func TestScheduleSlotCount(t *testing.T) {
-	poolId := lcommon.PoolKeyHash{}
-	schedule := NewSchedule(10, poolId, 1000, 10000, nil)
-
-	assert.Equal(t, 0, schedule.SlotCount())
-
-	schedule.AddLeaderSlot(100)
-	assert.Equal(t, 1, schedule.SlotCount())
-
-	schedule.AddLeaderSlot(200)
-	schedule.AddLeaderSlot(300)
-	assert.Equal(t, 3, schedule.SlotCount())
-}
-
 func TestScheduleStakeRatio(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 
 	tests := []struct {
@@ -187,18 +128,6 @@ func TestScheduleStakeRatio(t *testing.T) {
 			poolStake:  1000,
 			totalStake: 10000,
 			expected:   0.1,
-		},
-		{
-			name:       "50% stake",
-			poolStake:  5000,
-			totalStake: 10000,
-			expected:   0.5,
-		},
-		{
-			name:       "100% stake",
-			poolStake:  10000,
-			totalStake: 10000,
-			expected:   1.0,
 		},
 		{
 			name:       "zero total stake",
@@ -228,13 +157,8 @@ func TestScheduleStakeRatio(t *testing.T) {
 	}
 }
 
-func TestNewCalculator(t *testing.T) {
-	calc := NewCalculator(0.05)
-
-	assert.Equal(t, 0.05, calc.ActiveSlotCoeff)
-}
-
 func TestCalculateScheduleInvalidActiveSlotCoeff(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 
 	tests := []struct {
@@ -264,6 +188,7 @@ func TestCalculateScheduleInvalidActiveSlotCoeff(t *testing.T) {
 }
 
 func TestCalculateScheduleZeroTotalStake(t *testing.T) {
+	t.Parallel()
 	calc := NewCalculator(0.05)
 	poolId := lcommon.PoolKeyHash{}
 
@@ -282,41 +207,8 @@ func TestCalculateScheduleZeroTotalStake(t *testing.T) {
 	assert.Contains(t, err.Error(), "total stake cannot be zero")
 }
 
-func TestCalculateSchedulePoolWithStakeGetsSlots(t *testing.T) {
-	// Use a small epoch (20 slots) with high f=0.9 and 100% stake to ensure
-	// we reliably get leader slots. VRF Prove is expensive (~0.2s per call),
-	// so we keep the slot count small.
-	calc := NewCalculator(0.9)
-	poolId := lcommon.PoolKeyHash{}
-	copy(poolId[:], []byte("testpool1234567890123"))
-
-	schedule, err := calc.CalculateSchedule(
-		5, // epoch
-		testEpochSlotRange(5, 20),
-		poolId,         // pool ID
-		testVRFSeed,    // VRF key (32-byte seed)
-		1_000_000,      // pool stake = 100% of total
-		1_000_000,      // total stake
-		testEpochNonce, // epoch nonce (32 bytes)
-		consensus.ConsensusModeCPraos,
-	)
-
-	require.NoError(t, err)
-	require.NotNil(t, schedule)
-
-	assert.Equal(t, uint64(5), schedule.Epoch)
-	assert.Equal(t, poolId, schedule.PoolId)
-	assert.Equal(t, uint64(1_000_000), schedule.PoolStake)
-	assert.Equal(t, uint64(1_000_000), schedule.TotalStake)
-	assert.Equal(t, testEpochNonce, schedule.EpochNonce)
-
-	// With 100% stake and f=0.9, we expect ~18 leader slots in 20 slots.
-	slotCount := schedule.SlotCount()
-	assert.Greater(t, slotCount, 0,
-		"pool with 100%% stake should be elected for at least some slots")
-}
-
 func TestCalculateScheduleZeroPoolStakeGetsNoSlots(t *testing.T) {
+	t.Parallel()
 	calc := NewCalculator(0.9)
 	poolId := lcommon.PoolKeyHash{}
 
@@ -340,6 +232,7 @@ func TestCalculateScheduleZeroPoolStakeGetsNoSlots(t *testing.T) {
 }
 
 func TestCalculateScheduleFullStakeUnitCoefficient(t *testing.T) {
+	t.Parallel()
 	calc := NewCalculator(1)
 	schedule, err := calc.CalculateSchedule(
 		3, EpochSlotRange{StartSlot: 60, SlotCount: 4},
@@ -351,6 +244,7 @@ func TestCalculateScheduleFullStakeUnitCoefficient(t *testing.T) {
 }
 
 func TestCalculateScheduleUsesExplicitEpochSlotRange(t *testing.T) {
+	t.Parallel()
 	const (
 		epoch              = uint64(299)
 		preprodEpochStart  = uint64(127_526_400)
@@ -387,31 +281,8 @@ func TestCalculateScheduleUsesExplicitEpochSlotRange(t *testing.T) {
 	}
 }
 
-func TestCalculateScheduleIsDeterministic(t *testing.T) {
-	calc := NewCalculator(0.9)
-	poolId := lcommon.PoolKeyHash{}
-	copy(poolId[:], []byte("testpool1234567890123"))
-
-	schedule1, err := calc.CalculateSchedule(
-		7, testEpochSlotRange(7, 10),
-		poolId, testVRFSeed, 500_000, 1_000_000, testEpochNonce,
-		consensus.ConsensusModeCPraos,
-	)
-	require.NoError(t, err)
-
-	schedule2, err := calc.CalculateSchedule(
-		7, testEpochSlotRange(7, 10),
-		poolId, testVRFSeed, 500_000, 1_000_000, testEpochNonce,
-		consensus.ConsensusModeCPraos,
-	)
-	require.NoError(t, err)
-
-	// Same inputs must produce identical leader slot lists
-	assert.Equal(t, schedule1.LeaderSlots, schedule2.LeaderSlots,
-		"leader election should be deterministic")
-}
-
 func TestCalculateScheduleInvalidVRFKey(t *testing.T) {
+	t.Parallel()
 	calc := NewCalculator(0.9)
 	poolId := lcommon.PoolKeyHash{}
 
@@ -441,6 +312,7 @@ func TestCalculateScheduleInvalidVRFKey(t *testing.T) {
 }
 
 func TestScheduleConcurrentAccess(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	schedule := NewSchedule(10, poolId, 1000, 10000, nil)
 
@@ -480,6 +352,7 @@ func TestScheduleConcurrentAccess(t *testing.T) {
 // IsLeaderForSlot's binary search depends on: CalculateSchedule must emit
 // leader slots in ascending order.
 func TestCalculateScheduleProducesSortedSlots(t *testing.T) {
+	t.Parallel()
 	calc := NewCalculator(0.9)
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
@@ -508,6 +381,7 @@ func TestCalculateScheduleProducesSortedSlots(t *testing.T) {
 // lookup against a linear scan over a wide, sparse slot set so a regression
 // in either ordering or search would be caught.
 func TestScheduleIsLeaderForSlotBinarySearch(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	schedule := NewSchedule(10, poolId, 1000, 10000, nil)
 

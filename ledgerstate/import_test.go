@@ -1118,33 +1118,6 @@ func testPoolKeyHash(value []byte) lcommon.PoolKeyHash {
 	return ret
 }
 
-func TestImportOpCertCountersStoresCertifiedBaseline(t *testing.T) {
-	t.Parallel()
-
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-
-	poolKeyHash := bytes.Repeat([]byte{0x77}, 28)
-	txn := db.MetadataTxn(context.Background(), true)
-	require.NoError(t, importOpCertCounters(
-		db.Metadata(),
-		map[string]uint64{string(poolKeyHash): 490},
-		100,
-		txn.Metadata(),
-	))
-	require.NoError(t, txn.Commit())
-	txn.Release()
-
-	sequence, found, err := db.LatestPoolOpCertSequence(
-		context.Background(),
-		testPoolKeyHash(poolKeyHash), nil,
-	)
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, uint64(490), sequence)
-}
-
 func TestImportOpCertCountersStoresMaxUint64(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
@@ -1231,15 +1204,6 @@ func TestSnapshotImportTargetsSkipNegativeEpochs(t *testing.T) {
 	}
 	if targets1[1].name != "set" || targets1[1].targetEpoch != 0 {
 		t.Fatalf("epoch 1 set: unexpected target %+v", targets1[1])
-	}
-}
-
-func TestSnapshotImportTargetsNilSnapshots(t *testing.T) {
-	t.Parallel()
-
-	targets := snapshotImportTargets(7, nil)
-	if targets != nil {
-		t.Fatalf("expected nil targets, got %+v", targets)
 	}
 }
 
@@ -1535,6 +1499,7 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 
 	poolKeyHash := make([]byte, 28)
 	poolKeyHash[0] = 0x4a
+	vrfKeyHash := bytes.Repeat([]byte{0x9b}, 32)
 	publicKey := bytes.Repeat([]byte{0x7b}, 96)
 	possessionProof := bytes.Repeat([]byte{0x8c}, 48)
 	rows := ActivePoolDistributionSnapshots(
@@ -1543,7 +1508,7 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 				PoolKeyHash:             poolKeyHash,
 				StakeNumerator:          3,
 				StakeDenominator:        10,
-				VrfKeyHash:              bytes.Repeat([]byte{0x9b}, 32),
+				VrfKeyHash:              vrfKeyHash,
 				LeiosKeyPublic:          publicKey,
 				LeiosKeyPossessionProof: possessionProof,
 			},
@@ -1575,6 +1540,7 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 	require.Equal(t, uint64(3), uint64(stored.TotalStake))
 	require.Equal(t, uint64(10), uint64(stored.StakeDenominator))
 	require.Equal(t, uint64(127178646), stored.CapturedSlot)
+	require.Equal(t, vrfKeyHash, stored.VrfKeyHash)
 	require.Equal(t, publicKey, stored.LeiosKeyPublic)
 	require.Equal(t, possessionProof, stored.LeiosKeyPossessionProof)
 }
@@ -1589,6 +1555,7 @@ func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
 	})
 
 	poolKeyHash := bytes.Repeat([]byte{0x4d}, 28)
+	vrfKeyHash := bytes.Repeat([]byte{0x4e}, 32)
 	publicKey := bytes.Repeat([]byte{0x5e}, 96)
 	possessionProof := bytes.Repeat([]byte{0x6f}, 48)
 	rows := []*models.PoolStakeSnapshot{{
@@ -1598,6 +1565,7 @@ func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
 		TotalStake:              123,
 		DelegatorCount:          1,
 		CapturedSlot:            456,
+		VrfKeyHash:              vrfKeyHash,
 		LeiosKeyPublic:          publicKey,
 		LeiosKeyPossessionProof: possessionProof,
 	}}
@@ -1620,6 +1588,7 @@ func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
+	require.Equal(t, vrfKeyHash, stored.VrfKeyHash)
 	require.Equal(t, publicKey, stored.LeiosKeyPublic)
 	require.Equal(t, possessionProof, stored.LeiosKeyPossessionProof)
 

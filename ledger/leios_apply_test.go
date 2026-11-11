@@ -27,6 +27,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -1205,7 +1206,7 @@ func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(
 			) ([]cbor.RawMessage, bool) {
 				return nil, available && bytes.Equal(hash, ebHash.Bytes())
 			},
-			// A zero wait disables best-effort announcement waiting. It must
+			// A zero wait disables the near-head diffusion wait. It must
 			// not disable the certified-closure consistency check.
 			EndorserBlockWaitSlots: 0,
 		},
@@ -1544,10 +1545,12 @@ func TestClassifyEndorserBlockFetchesKeepsDistinctSlotsOfSameHash(
 	}, backfill)
 }
 
-// TestClassifyEndorserBlockFetches verifies the fetch policy: near the head,
-// current announcements and certified parent announcements are both fetched;
-// in the settled backlog only certified parent announcements are fetched and
-// uncertified historical announcements are skipped.
+// TestClassifyEndorserBlockFetches verifies the classification: near the head,
+// current announcements and certified parent announcements are both returned
+// as tip references (splitTipWaitByApplyDependency then keeps only the
+// certified closures for the ledger to wait on and fetch); in the settled
+// backlog only certified parent announcements are fetched and uncertified
+// historical announcements are skipped.
 func TestClassifyEndorserBlockFetches(t *testing.T) {
 	t.Parallel()
 
@@ -1588,13 +1591,13 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	require.Len(t, backfill, 1)
 	require.Equal(t, ebA, backfill[0].hash)
 	require.Equal(t, uint64(100), backfill[0].slot)
-	// Only the near-head announcement (ebB) is fetched on announcement.
+	// Only the near-head announcement (ebB) is a tip reference.
 	require.Len(t, tipWait, 1)
 	require.Equal(t, ebB, tipWait[0].hash)
 
 	// One near-head block may certify its parent's EB and announce a new EB.
-	// Both references are fetched, but only the parent's EB is applied by the
-	// certifying block.
+	// Both are returned as tip references, but only the parent's EB is read
+	// when the certifying block is applied.
 	nearParentHash := leiosTestHash(0xF1)
 	nearCombinedHash := leiosTestHash(0xF2)
 	nearParentEb := lcommon.NewBlake2b256(leiosTestHash(0x1F))
@@ -1635,7 +1638,7 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	require.Empty(t, backfill)
 
 	// With an unknown wall-clock slot every block is treated as near-head, so
-	// all announcements fetch on announcement and none go to backfill.
+	// every announcement is a tip reference and none go to backfill.
 	backfill, tipWait = classifyEndorserBlockFetches(
 		infos, annByHash, 0, false, 100, neverCached,
 	)
@@ -1756,89 +1759,80 @@ func leiosWaitTestAnnouncingBlock(
 	}
 }
 
-// TestEnsureReferencedEndorserBlocksDoesNotBlockOnUnreadAnnouncement is the
-// apply-lag regression. On the Haskell-conformant (Musashi) path, ledger
-// application of a ranking block reads only the certified closure announced by
-// a certifying block's PARENT; a block's own announcement is never read when
-// that block is applied. Blocking the single ledger pipeline on it stalled
-// every block queued behind it for a whole diffusion window and then applied
-// the block unchanged anyway, which is where the multi-second apply lag and
-// the resulting stale-tip forge came from.
-//
-// Before the fix this returns after the full window; after it, immediately.
+// An announcing block does not read its own EB during application, and its
+// peer may not have the body yet. It must neither block application nor trigger
+// a by-point request before offer-driven prefetch can supply the content.
 func TestEnsureReferencedEndorserBlocksDoesNotBlockOnUnreadAnnouncement(
 	t *testing.T,
 ) {
-	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xA1))
-	block := leiosWaitTestAnnouncingBlock(t, 1, 100, ebHash)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ebHash := lcommon.NewBlake2b256(leiosTestHash(0xA1))
+		block := leiosWaitTestAnnouncingBlock(t, 1, 100, ebHash)
 
-	var fetched, waitPolls atomic.Int64
-	fetchedCh := make(chan struct{}, 1)
-	cfg := LedgerStateConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
-			// Counting polls that come from INSIDE waitForEndorserBlock is
-			// what makes this test's verdict event-driven: a gate that
-			// blocked on this announcement must poll from there, and one
-			// that correctly skips it never can.
-			if leiosWaitTestPolledFromWait() {
-				waitPolls.Add(1)
-			}
-			// The endorser block never arrives.
-			return nil, false
-		},
-		EndorserBlockFetcher: func(
-			_ context.Context,
-			_ uint64,
-			_ []byte,
-		) error {
-			fetched.Add(1)
-			select {
-			case fetchedCh <- struct{}{}:
-			default:
-			}
-			return nil
-		},
-		EndorserBlockWaitSlots: leiosWaitTestWaitSlots,
-	}
-	ls := &LedgerState{config: cfg}
-	ls.leiosBackfill = newLeiosBackfiller(cfg)
-	withLeiosWaitTestSlotLength(t, ls)
-	require.Equal(t, leiosWaitTestSlotLen, ls.shelleySlotLength())
+		var fetched, waitPolls atomic.Int64
+		cfg := LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+				// Counting polls that come from INSIDE waitForEndorserBlock is
+				// what makes this test's verdict event-driven: a gate that
+				// blocked on this announcement must poll from there, and one
+				// that correctly skips it never can.
+				if leiosWaitTestPolledFromWait() {
+					waitPolls.Add(1)
+				}
+				// The endorser block never arrives.
+				return nil, false
+			},
+			EndorserBlockFetcher: func(
+				_ context.Context,
+				_ uint64,
+				_ []byte,
+			) error {
+				fetched.Add(1)
+				return nil
+			},
+			EndorserBlockWaitSlots: leiosWaitTestWaitSlots,
+		}
+		ls := &LedgerState{config: cfg}
+		ls.leiosBackfill = newLeiosBackfiller(cfg)
+		withLeiosWaitTestSlotLength(t, ls)
+		require.Equal(t, leiosWaitTestSlotLen, ls.shelleySlotLength())
 
-	start := time.Now()
-	require.NoError(t, ls.ensureReferencedEndorserBlocks(
-		t.Context(),
-		[]gledger.Block{block},
-	))
-	elapsed := time.Since(start)
-	// The load-bearing assertion is event-driven, not a stopwatch: if the gate
-	// blocked on this announcement it would have polled from inside
-	// waitForEndorserBlock. Asserting that directly cannot flake on a loaded
-	// runner, whereas a short wall-clock budget has to cover goroutine
-	// scheduling as well as the absence of a window.
-	require.Zero(
-		t,
-		waitPolls.Load(),
-		"apply gate blocked on an announcement ledger application never reads",
-	)
-	// Clock kept only as a loose backstop against a full window being spent
-	// somewhere the poll counter cannot see. Generous on purpose.
-	require.Less(
-		t,
-		elapsed,
-		leiosWaitTestWindow,
-		"apply gate spent a whole diffusion window",
-	)
+		start := time.Now()
+		require.NoError(t, ls.ensureReferencedEndorserBlocks(
+			t.Context(),
+			[]gledger.Block{block},
+		))
+		elapsed := time.Since(start)
+		// The load-bearing assertion is event-driven, not a stopwatch: if the gate
+		// blocked on this announcement it would have polled from inside
+		// waitForEndorserBlock. Asserting that directly cannot flake on a loaded
+		// runner, whereas a short wall-clock budget has to cover goroutine
+		// scheduling as well as the absence of a window.
+		require.Zero(
+			t,
+			waitPolls.Load(),
+			"apply gate blocked on an announcement ledger application never reads",
+		)
+		// Clock kept only as a loose backstop against a full window being spent
+		// somewhere the poll counter cannot see. Generous on purpose.
+		require.Less(
+			t,
+			elapsed,
+			leiosWaitTestWindow,
+			"apply gate spent a whole diffusion window",
+		)
 
-	// The announcement is prefetched in the background rather than dropped, so
-	// it is cached before anything actually depends on it.
-	select {
-	case <-fetchedCh:
-	case <-time.After(testutil.AsyncWait):
-		t.Fatal("background by-point fetch was never dispatched")
-	}
-	require.Positive(t, fetched.Load())
+		// Drain background work: announcing a header does not mean this peer
+		// has its EB body. Notify offers drive that best-effort prefetch.
+		synctest.Wait()
+		require.Zero(
+			t,
+			fetched.Load(),
+			"unoffered announcement triggered a by-point fetch",
+		)
+	})
 }
 
 // leiosWaitTestPolledFromWait reports whether the current call stack passes
@@ -1965,49 +1959,53 @@ func TestEnsureReferencedEndorserBlocksWaitsForCertifiedClosureArrivingLate(
 func TestEnsureReferencedEndorserBlocksSharesOneWindowAcrossMissingBlocks(
 	t *testing.T,
 ) {
-	const missing = 3
-	cfg := LedgerStateConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
-			return nil, false
-		},
-		EndorserBlockWaitSlots: leiosWaitTestWaitSlots,
-	}
-	ls := &LedgerState{config: cfg}
-	blocks := make([]gledger.Block, 0, 2*missing)
-	for i := range missing {
-		parent, certifier, _ := leiosTestCertifiedBlockPairAt(
-			t,
-			byte(0xB0+i),
-			uint64(100+20*i),
-		)
-		leiosTestEnableCertifiedBlock(t, ls, certifier)
-		blocks = append(blocks, parent, certifier)
-	}
-	withLeiosWaitTestSlotLength(t, ls)
+	// Virtual time: the diffusion window elapses instantly, so the assertions
+	// on its length stay exact without waiting it out.
+	synctest.Test(t, func(t *testing.T) {
+		const missing = 3
+		cfg := LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+				return nil, false
+			},
+			EndorserBlockWaitSlots: leiosWaitTestWaitSlots,
+		}
+		ls := &LedgerState{config: cfg}
+		blocks := make([]gledger.Block, 0, 2*missing)
+		for i := range missing {
+			parent, certifier, _ := leiosTestCertifiedBlockPairAt(
+				t,
+				byte(0xB0+i),
+				uint64(100+20*i),
+			)
+			leiosTestEnableCertifiedBlock(t, ls, certifier)
+			blocks = append(blocks, parent, certifier)
+		}
+		withLeiosWaitTestSlotLength(t, ls)
 
-	start := time.Now()
-	err := ls.ensureReferencedEndorserBlocks(t.Context(), blocks)
-	elapsed := time.Since(start)
-	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
-	require.GreaterOrEqual(
-		t,
-		elapsed,
-		leiosWaitTestWindow,
-		"the window must still be honoured for references application reads",
-	)
-	require.Less(
-		t,
-		elapsed,
-		2*leiosWaitTestWindow,
-		"per-endorser-block waits stacked serially instead of sharing a window",
-	)
+		start := time.Now()
+		err := ls.ensureReferencedEndorserBlocks(t.Context(), blocks)
+		elapsed := time.Since(start)
+		require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+		require.GreaterOrEqual(
+			t,
+			elapsed,
+			leiosWaitTestWindow,
+			"the window must still be honoured for references application reads",
+		)
+		require.Less(
+			t,
+			elapsed,
+			2*leiosWaitTestWindow,
+			"per-endorser-block waits stacked serially instead of sharing a window",
+		)
+
+	})
 }
 
 // TestSplitTipWaitByApplyDependency pins the apply-path contract itself,
 // independently of timing: only the mandatory certified closures are read at
-// apply time, and a block's own announcement is demoted to background
-// prefetch.
+// apply time, and a block's own announcement is left to leios-notify offers.
 func TestSplitTipWaitByApplyDependency(t *testing.T) {
 	certified := leiosEbRef{
 		slot: 100,
@@ -2137,69 +2135,72 @@ func leiosWaitTestHistogram(
 // monitoring. Both outcomes are recorded, and both label values exist before
 // any wait happens so a dashboard is not looking at an absent series.
 func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	var available atomic.Bool
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-			EndorserBlockProvider: func(
-				[]byte,
-				uint64,
-			) ([]cbor.RawMessage, bool) {
-				return nil, available.Load()
+	// Virtual time: the diffusion-window expiry elapses instantly.
+	synctest.Test(t, func(t *testing.T) {
+		reg := prometheus.NewRegistry()
+		var available atomic.Bool
+		ls := &LedgerState{
+			config: LedgerStateConfig{
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				EndorserBlockProvider: func(
+					[]byte,
+					uint64,
+				) ([]cbor.RawMessage, bool) {
+					return nil, available.Load()
+				},
 			},
-		},
-	}
-	ls.metrics.init(reg)
+		}
+		ls.metrics.init(reg)
 
-	// Every outcome series is pre-materialized at init, before any wait.
-	require.Equal(
-		t,
-		3,
-		promtestutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
-	)
-	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
-	require.Zero(t, leiosWaitTestHistogram(t, reg, "timeout"))
-	require.Zero(t, leiosWaitTestHistogram(t, reg, "cancelled"))
-	require.Zero(t, promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts))
+		// Every outcome series is pre-materialized at init, before any wait.
+		require.Equal(
+			t,
+			3,
+			promtestutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
+		)
+		require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
+		require.Zero(t, leiosWaitTestHistogram(t, reg, "timeout"))
+		require.Zero(t, leiosWaitTestHistogram(t, reg, "cancelled"))
+		require.Zero(t, promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts))
 
-	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE7))
+		ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE7))
 
-	// Expiry: recorded as a timeout, on both the histogram and the counter.
-	ls.waitForEndorserBlock(
-		t.Context(),
-		100,
-		ebHash,
-		leiosWaitTestWindow,
-		time.Millisecond,
-	)
-	require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "timeout"))
-	require.Equal(
-		t,
-		float64(1),
-		promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
-	)
-	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
+		// Expiry: recorded as a timeout, on both the histogram and the counter.
+		ls.waitForEndorserBlock(
+			t.Context(),
+			100,
+			ebHash,
+			leiosWaitTestWindow,
+			time.Millisecond,
+		)
+		require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "timeout"))
+		require.Equal(
+			t,
+			float64(1),
+			promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+		)
+		require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
 
-	// Arrival: recorded as arrived, and does not increment the timeout
-	// counter. The endorser block is made available by the provider's own
-	// second call rather than by a timer racing the deadline, and the window
-	// is long enough that the deadline cannot fire first regardless of load.
-	available.Store(true)
-	ls.waitForEndorserBlock(
-		t.Context(),
-		100,
-		ebHash,
-		leiosWaitTestLongWindow,
-		time.Millisecond,
-	)
-	require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "arrived"))
-	require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "timeout"))
-	require.Equal(
-		t,
-		float64(1),
-		promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
-	)
+		// Arrival: recorded as arrived, and does not increment the timeout
+		// counter. The endorser block is made available by the provider's own
+		// second call rather than by a timer racing the deadline, and the window
+		// is long enough that the deadline cannot fire first regardless of load.
+		available.Store(true)
+		ls.waitForEndorserBlock(
+			t.Context(),
+			100,
+			ebHash,
+			leiosWaitTestLongWindow,
+			time.Millisecond,
+		)
+		require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "arrived"))
+		require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "timeout"))
+		require.Equal(
+			t,
+			float64(1),
+			promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+		)
+	})
 }
 
 // TestLeiosEbWaitCancellationIsNotCountedAsTimeout covers the review finding:
@@ -2402,9 +2403,8 @@ func TestFetchRequiredReportsCancellationNotBudgetExpiry(t *testing.T) {
 // spawn (best-effort) and fetchRequired (mandatory certified closure) used to
 // share one semaphore. A best-effort fetch holds its slot for up to
 // leiosBackfillMaxWait, so filling the semaphore with slow ones blocked a
-// mandatory fetch behind them -- and this path now dispatches near-head
-// prefetches through spawn as well, so that is far more reachable than when
-// only historical backfill used it. A mandatory fetch must proceed regardless.
+// mandatory fetch behind them, which is reachable whenever historical
+// backfill fills the semaphore. A mandatory fetch must proceed regardless.
 func TestMandatoryFetchIsNotStarvedByBestEffortSpawns(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })

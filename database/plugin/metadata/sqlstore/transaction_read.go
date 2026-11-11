@@ -132,8 +132,7 @@ func (s *Store) SumTransactionFeesInSlotRange(
 	if err != nil {
 		return 0, err
 	}
-	total, err := sumUint64Rows(ctx, db, s.dialect.Rebind(`
-SELECT CASE WHEN tx.valid THEN tx.fee ELSE tx.collateral_fee END
+	query := `SELECT CASE WHEN tx.valid THEN tx.fee ELSE tx.collateral_fee END AS amount
 FROM "transaction" tx
 WHERE tx.slot >= ? AND tx.slot <= ?
   AND NOT EXISTS (SELECT 1 FROM leios_transaction_context context WHERE context.transaction_id = tx.id)
@@ -141,7 +140,17 @@ UNION ALL
 SELECT CASE WHEN tx.valid THEN tx.fee ELSE tx.collateral_fee END
 FROM leios_transaction_context context
 JOIN "transaction" tx ON tx.id = context.transaction_id
-WHERE context.slot >= ? AND context.slot <= ?`), validInt64(start), validInt64(end), validInt64(start), validInt64(end))
+WHERE context.slot >= ? AND context.slot <= ?`
+	if s.dialect.Name() == "sqlite" {
+		// Check each coin before summing; signed aggregation could hide a
+		// corrupt negative row behind another transaction's positive fee.
+		query = `-- name: SumTransactionFeesInSlotRangeAggregate :one
+SELECT dingo_coin_sum(amount) FROM (` + query + `) AS fees`
+	} else {
+		query = "-- name: SumTransactionFeesInSlotRangeRows :many\n" + query
+	}
+	total, err := sumUint64Rows(ctx, db, s.dialect.Rebind(query),
+		validInt64(start), validInt64(end), validInt64(start), validInt64(end))
 	if err != nil {
 		return 0, fmt.Errorf("sum transaction fees in slot range: %w", err)
 	}
@@ -555,6 +564,22 @@ ORDER BY slot ` + direction + `, block_index ` + direction + `,
 	return s.queryTransactions(ctx, db, query, args)
 }
 
+// metadataLabelPageQuery drives from the label rows so the
+// (label, slot, transaction_id) index supplies slot order and the page stops
+// early. Ordering by the transaction's own slot instead would sort every
+// transaction with the label. A label row's slot equals its transaction's
+// slot, and (transaction_id, label) is unique, so this returns the same rows
+// as an IN subquery.
+func metadataLabelPageQuery(direction string) string {
+	return `SELECT t.hash, t.block_hash, t.metadata, t.slot, t.type, t.id,
+       t.fee, t.collateral_fee, t.ttl, t.block_index, t.valid
+FROM transaction_metadata_label AS ml
+JOIN "transaction" AS t ON t.id = ml.transaction_id
+WHERE ml.label = ?
+ORDER BY ml.slot ` + direction + `, t.block_index ` + direction + `,
+         t.id ` + direction
+}
+
 func (s *Store) GetTransactionsByMetadataLabel(
 	label uint64,
 	limit int,
@@ -570,13 +595,7 @@ func (s *Store) GetTransactionsByMetadataLabel(
 	if descending {
 		direction = "DESC"
 	}
-	query := `SELECT ` + sqliteTransactionColumns + `
-FROM "transaction"
-WHERE id IN (
-    SELECT transaction_id FROM transaction_metadata_label WHERE label = ?
-)
-ORDER BY slot ` + direction + `, block_index ` + direction + `,
-         id ` + direction
+	query := metadataLabelPageQuery(direction)
 	args := []any{strconv.FormatUint(label, 10)}
 	query, args = addLimitOffset(query, args, limit, offset)
 	ret, err := s.queryTransactions(ctx, db, query, args)

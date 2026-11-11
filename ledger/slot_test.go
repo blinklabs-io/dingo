@@ -49,7 +49,7 @@ func TestTimeToSlot_FutureTimeWithEmptyCacheReturnsError(t *testing.T) {
 	t.Parallel()
 
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
 		"slotLength": 1,
