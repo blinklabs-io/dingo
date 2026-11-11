@@ -2134,6 +2134,49 @@ func TestAwaitObserverHeaderHorizonHonorsCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+// A header queued on the local chain moves the header tip without publishing a
+// snapshot, and an observer it brings within k blocks stops waiting.
+func TestAwaitObserverHeaderHorizonWakesWhenHeaderTipAdvances(t *testing.T) {
+	t.Parallel()
+	ls, primary, blocks, _, _ := newObserverForkTestLedger(t)
+	k := ls.shelleySecurityParam()
+	require.NotZero(t, k)
+	tip := primary.HeaderTip()
+	header := mockHeader{
+		hash: lcommon.Blake2b256Hash(
+			fmt.Appendf(nil, "observer %d", tip.BlockNumber+k+1),
+		),
+		prevHash:    blocks[1].Hash(),
+		blockNumber: tip.BlockNumber + k + 1,
+		slot:        302_500,
+	}
+	observed := ChainsyncEvent{
+		BlockHeader: header,
+		Point:       ocommon.NewPoint(header.slot, header.Hash().Bytes()),
+	}
+	results := make(chan error, 1)
+	go func() {
+		results <- ls.AwaitObserverHeaderHorizon(t.Context(), observed)
+	}()
+	testutil.RequireNoReceive(
+		t, results, 100*time.Millisecond,
+		"a header more than k blocks above the header tip must wait",
+	)
+	next, err := fixtures.GenerateConwayChain(
+		tip.BlockNumber+1,
+		blocks[1].Hash(),
+		tip.Point.Slot+1_000,
+		1_000,
+		1,
+	)
+	require.NoError(t, err)
+	require.NoError(t, primary.AddBlockHeader(t.Context(), next[0].Header()))
+	require.NoError(t, testutil.RequireReceive(
+		t, results, 5*time.Second,
+		"an observer brought within k of the header tip stayed parked",
+	))
+}
+
 // newObserverForkTestLedger returns a ledger whose tip lies above blocks[0] of
 // its primary chain, and an observer header at slot 500_000 built on
 // blocks[0]: a fork whose intersection's forecast does not cover the header,

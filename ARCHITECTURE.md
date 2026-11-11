@@ -8150,8 +8150,9 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   `3k` blocks past the ledger tip, fetches headers that the observed header
   history cannot retain once several observers share its budget, so they are
   evicted unused and every re-intersection or promotion from the local tip
-  fetches them again. The
-  wait resolves the header's fork anchor once and reuses it until a withdrawal
+  fetches them again. The wait wakes on a ledger snapshot publication and on a
+  header tip change (`Chain.HeaderTipChanged`), since queued ingress headers
+  move the header tip without publishing a snapshot. The wait resolves the header's fork anchor once and reuses it until a withdrawal
   from the local chain or a ledger tip at the anchor. A membership read that a
   chain mutation overlapped, or that a cancelled context cut short
   (`Chain.HoldsPointSettled` reports it unsettled), is repeated up to three

@@ -5558,6 +5558,12 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 	}()
 	for {
 		published := ls.snapshotPublishedChan()
+		// The read-ahead cap is measured from the header tip, which ingress
+		// headers move without publishing a snapshot.
+		var headerTipChanged <-chan struct{}
+		if ls.chain != nil {
+			headerTipChanged = ls.chain.HeaderTipChanged()
+		}
 		// An unsettled walk releases the header, as the wait's bound would:
 		// an observer only streams, and holding it on an unknown anchor
 		// could park it until that bound.
@@ -5582,6 +5588,7 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 		}
 		select {
 		case <-published:
+		case <-headerTipChanged:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
