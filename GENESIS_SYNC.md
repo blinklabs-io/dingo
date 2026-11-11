@@ -189,8 +189,10 @@ Snapshot relays must have a host/IP address and an explicit TCP port from 1 to
   Advertised tips are not consulted. A peer whose chain does not intersect the
   local chain, or that wins the equal-height tiebreak, keeps Genesis active.
 - **Idle at a historic tip**: an idle peer whose delivered tip is older than the
-  Genesis window in seconds plus one hour (the reference's `3k/f + 3600`) blocks
-  the exit, is logged as `disconnecting peer idle at a historic tip`, denied for
+  network's stability window `3k/f` slots, converted at the Shelley slot length,
+  plus one hour blocks the exit (on mainnet and preprod this is the reference's
+  `3k/f + 3600` seconds; a configured `windowSlots` does not change it). It
+  is logged as `disconnecting peer idle at a historic tip`, denied for
   ten minutes and disconnected. The age uses the era-aware slot time, so it also
   applies while the ledger is in Byron.
 - **Return to Genesis**: Praos lasts at least 20 minutes after an exit. After
@@ -246,6 +248,10 @@ Known differences from the reference's Genesis State Machine:
 - **No peer-governance switch on re-entry.** The reference returns to
   bootstrap or ledger peers when it re-enters Syncing. Dingo keeps its current
   peers.
+- **Historicity cutoff per network.** The reference uses mainnet's
+  `3 * 2160 * 20 + 3600` seconds on every network; Dingo computes `3k/f` from
+  each network's Shelley genesis, so the cutoff is shorter where k is smaller,
+  such as preview.
 - **Rollback historicity is not checked.** The reference also judges the oldest
   rolled-back header on MsgRollBackward; Dingo checks the delivered tip at idle
   only.

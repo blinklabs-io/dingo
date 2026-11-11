@@ -2550,9 +2550,10 @@ cap, so on a long-running node the history fills to the cap and each added
 block scans up to 2160 entries. A competing block this node never applied,
 because it never became the chain, is not seen.
 
-The six topics the ChainSelector publishes itself —
+The seven topics the ChainSelector publishes itself —
 `chainselection.chain_switch`, `selection`, `peer_evicted`,
-`genesis_corroboration_failed`, `genesis_mode_exited` and `selected_none` —
+`genesis_corroboration_failed`, `genesis_mode_exited`, `genesis_mode_entered`
+and `selected_none` —
 go through `ChainSelector.publishSelection`, which uses `PublishOrdered` rather
 than `Publish`. The selector's producers are all goroutines that have to keep
 making progress — the EventBus dispatch goroutines for the internal
@@ -8456,10 +8457,12 @@ lock matches the first.
   chainsync client set, so observers count. Advertised tips never influence the
   exit. A connection is idle when its latest MsgAwaitReply
   (`SetPeerIdling`, delivered for ingress and observer connections alike) is at
-  its delivered frontier and none of its headers awaits ledger admission. The
-  await point is kept per connection, so an await that precedes admission of the
-  header it was sent at counts once that header is promoted, and one for an
-  older point never does. A peer is not better when its delivered tip is on the
+  its delivered frontier and none of its headers awaits ledger admission. An
+  observer's headers never move its chainsync cursor, so its MsgAwaitReply
+  names the last point it sent (`chainsync.State.ClientProtocolPoint`) rather
+  than the cursor. The await point is kept per connection, so an await that
+  precedes admission of the header it was sent at counts once that header is
+  promoted, and one for an older point never does. A peer is not better when its delivered tip is on the
   applied chain (`PointOnLocalChain`), or its frontier intersects the applied
   chain (a binary search over its retained points) and `ComparePraosTips` against
   the applied tip's `PraosTiebreakerView` (`LocalTipPraosView`, read from the
@@ -8467,8 +8470,9 @@ lock matches the first.
   intersect, or an equal-height peer when the local view is unavailable, blocks
   the exit, as the reference's `CandidateDoesNotIntersect` does.
 - *Historicity.* An idle peer whose delivered tip's slot starts more than the
-  cutoff before now (`HistoricityCutoff`, default Genesis window seconds plus one
-  hour, the reference's `3k/f + 3600`) blocks the exit and is reported once to
+  cutoff before now (`HistoricityCutoff`; the node sets the stability window
+  `3k/f` from the Shelley genesis, converted at the Shelley slot length, plus
+  one hour, independent of a configured Genesis density window) blocks the exit and is reported once to
   `OnHistoricityDisconnect`; the node denies it for ten minutes and closes its
   connection. The slot time is `LedgerState.SlotToTime` (the hardfork summary),
   which is defined for Byron slots, not `WallClockSlot`, which the node

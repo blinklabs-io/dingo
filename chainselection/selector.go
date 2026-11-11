@@ -806,8 +806,6 @@ func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
 	return DefaultGenesisWindowSlots
 }
 
-// candidatePointCapacityLocked retains enough delivered points for a complete
-// Genesis window and a k+1-header eagerness suffix without duplicating hashes.
 // trackHashesLocked reports whether per-peer point frontiers are recorded. A
 // selector that can return to Genesis selection records them in Praos too, so
 // density, eagerness and corroboration have data when it does.
@@ -815,6 +813,8 @@ func (cs *ChainSelector) trackHashesLocked() bool {
 	return cs.genesisEnabled || cs.mode == SelectionModeGenesis
 }
 
+// candidatePointCapacityLocked retains enough delivered points for a complete
+// Genesis window and a k+1-header eagerness suffix without duplicating hashes.
 func (cs *ChainSelector) candidatePointCapacityLocked(trackHashes bool) uint64 {
 	window := cs.genesisWindowSlotsLocked()
 	if !trackHashes {
