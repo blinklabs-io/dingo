@@ -157,6 +157,9 @@ type Node struct {
 	kesAgentClient  io.Closer
 	kesAgentCancel  context.CancelFunc
 	kesAgentMetrics *kesagent.Metrics
+	// kesAgentMetricsMu guards kesAgentMetrics' lazy creation: a sign-mode
+	// reload builds its client outside the lifecycle gates.
+	kesAgentMetricsMu sync.Mutex
 	// keyReload is the in-place credential reload's state: the agent's
 	// newer-certificate offers, the file watch and the reload metrics.
 	keyReload      keyReloadState

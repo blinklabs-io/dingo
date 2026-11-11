@@ -743,6 +743,39 @@ func TestValidate(t *testing.T) {
 			wantErr: "shelleyKesAgentPlaintext requires shelleyKesAgentAddress",
 		},
 		{
+			name: "client certificate without a remote KES agent",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESKey = "/keys/kes.skey"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+				c.ShelleyKESAgentClientCertFile = "/keys/client.crt"
+			},
+			wantErr: "shelleyKesAgentClientCertFile requires shelleyKesAgentAddress",
+		},
+		{
+			name: "client key without a remote KES agent",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+				c.ShelleyKESAgentClientKeyFile = "/keys/client.key"
+			},
+			wantErr: "shelleyKesAgentClientKeyFile requires shelleyKesAgentAddress",
+		},
+		{
+			name: "server pin without a remote KES agent",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+				c.ShelleyKESAgentServerSPKISHA256 = strings.Repeat("ab", 32)
+			},
+			wantErr: "shelleyKesAgentServerSpkiSha256 requires shelleyKesAgentAddress",
+		},
+		{
 			name: "remote KES agent with an empty host",
 			modify: func(c *Config) {
 				setRemoteKESAgent(c)

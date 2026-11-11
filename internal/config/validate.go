@@ -97,18 +97,42 @@ func kesAgentAddressKey(addr string) string {
 // validateRemoteKESAgent checks a pool's remote KES agent configuration: one
 // KES source only, sign mode, and a transport that can work: the server pin
 // and the client certificate are optional, but need TLS, so plain TCP takes
-// neither, and a client certificate is set as a pair. prefix is prepended to
-// every setting name, so errors name the list entry they came from.
+// neither, and a client certificate is set as a pair. Without an address,
+// any remote transport option is refused, so a mistyped remote
+// configuration cannot fall back to local or Unix-socket signing. prefix is
+// prepended to every setting name, so errors name the list entry they came
+// from.
 func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
 	if p.ShelleyKESAgentAddress == "" {
-		if p.ShelleyKESAgentPlaintext {
-			return []error{fmt.Errorf(
-				"%sshelleyKesAgentPlaintext requires %sshelleyKesAgentAddress",
-				prefix,
-				prefix,
-			)}
+		var errs []error
+		for _, opt := range []struct {
+			name string
+			set  bool
+		}{
+			{"shelleyKesAgentPlaintext", p.ShelleyKESAgentPlaintext},
+			{
+				"shelleyKesAgentClientCertFile",
+				p.ShelleyKESAgentClientCertFile != "",
+			},
+			{
+				"shelleyKesAgentClientKeyFile",
+				p.ShelleyKESAgentClientKeyFile != "",
+			},
+			{
+				"shelleyKesAgentServerSpkiSha256",
+				strings.TrimSpace(p.ShelleyKESAgentServerSPKISHA256) != "",
+			},
+		} {
+			if opt.set {
+				errs = append(errs, fmt.Errorf(
+					"%s%s requires %sshelleyKesAgentAddress",
+					prefix,
+					opt.name,
+					prefix,
+				))
+			}
 		}
-		return nil
+		return errs
 	}
 	field := func(name string) string { return prefix + name }
 	var errs []error

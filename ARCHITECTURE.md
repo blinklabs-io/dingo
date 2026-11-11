@@ -12191,10 +12191,24 @@ serve the certificate before the swap: a remote client is admitted, which
 checks the agent reports this certificate and its KES key; a local socket
 client, whose protocol carries neither, is only checked to answer in sign mode,
 and its signatures are still verified against the certificate on every sign.
+That agent check runs before the reload takes the lifecycle gates: it can wait
+on the network for up to the client's hello timeout, and the chainsync and
+chain-switch handlers drop their work while the gates are held. Under the
+gates a file or SIGHUP reload reads the certificate file again and refuses it
+if it no longer matches the one the agent admitted; every reload then runs the
+counter, signature, KES-window and ledger checks and the swap into that pool's
+client slot. With several pools every sign-mode pool is checked with its own
+agent this way before the gates are taken, each on its own: a pool whose check
+is refused, a changed VRF key included, reports and counts that refusal
+without holding back the others, and a pool that starts forging between the
+check and the gates is left to the next reload.
 After `ReplaceWith` the replaced client stays open for
 `retiredKESAgentClientGrace` (10s), because a forge attempt that selected its
 snapshot before the swap still signs through it. The VRF key cannot change on
-reload; a new VRF key is a new pool registration and needs a restart.
+reload; a new VRF key is a new pool registration and needs a restart. The
+reload compares the VRF key file with the loaded VRF key first and refuses a
+change, even when the certificate is unchanged and the reload would otherwise
+report nothing to do.
 
 A rotation done at the agent reaches a remote-agent node without any file
 change. Admission compares the agent's certificate with the node's byte for
@@ -12365,11 +12379,17 @@ inside a slot. The agent closes a session idle for its 10s frame bound, so the
 client treats a session idle for `SessionFreshFor` (8s) as stale and redials
 before signing on it. The forger opens the session ahead of time: on each slot
 it asks the leader schedule (`LeaderChecker.NextLeaderSlot`) for the next
-leader slot, and when that slot is within `remoteSignerPrepareLead` (3s) it
-calls `PoolCredentials.PrepareRemoteSigner` once for that slot, on its own
+leader slot, and when that slot is within the prepare lead it calls
+`PoolCredentials.PrepareRemoteSigner` once for that slot, on its own
 goroutine, which reaches the client's `Prepare` through the optional
-`forging.RemoteKESPreparer` interface. A failed prepare only logs a warning a
-few seconds before the slot; the sign at the slot dials again if it must.
+`forging.RemoteKESPreparer` interface. The lead is counted in whole slots,
+because the check runs once per slot: `remoteSignerPrepareLead` (3s) divided
+by the slot length, rounded up, and at least one slot. With 1s slots that is
+three slots; with slots of 3s or longer it is one whole slot, so the prepare
+runs one slot length ahead. With slots longer than `SessionFreshFor`, the
+prepared session is stale by the leader slot and the sign redials. A failed
+prepare only logs a warning ahead of the slot; the sign at the slot dials
+again if it must.
 
 One caller at a time uses the connection: a sign, or a dial and admission.
 The client mutex is never held across network I/O, so `Close` and
@@ -12498,7 +12518,9 @@ choice of key source is never silently overridden; `shelleyKesAgentAddress`
 is likewise exclusive with both and accepts only sign mode. Its server pin is
 optional but must be 64 hex characters when set, the client certificate and
 key are optional but set as a pair, and `shelleyKesAgentPlaintext` takes
-neither, since both need TLS.
+neither, since both need TLS. None of these four is accepted without
+`shelleyKesAgentAddress`, so a mistyped remote configuration is refused rather
+than falling back to local-file or Unix-socket signing.
 `Config.Validate` no longer requires a local `shelleyKesKey` when a KES agent
 socket or address is configured — an agent-only configuration must be able to
 start.

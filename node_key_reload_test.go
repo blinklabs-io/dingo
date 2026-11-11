@@ -16,7 +16,10 @@ package dingo
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger/forging"
+	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -38,6 +42,7 @@ type fakeSignClient struct {
 	mu         sync.Mutex
 	opCert     []byte
 	prepareErr error
+	onPrepare  func()
 	prepared   bool
 	closed     bool
 }
@@ -47,6 +52,9 @@ func (f *fakeSignClient) Sign(uint64, []byte) ([]byte, error) {
 }
 
 func (f *fakeSignClient) Prepare() error {
+	if f.onPrepare != nil {
+		f.onPrepare()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.prepared = true
@@ -73,6 +81,7 @@ type signModeReloadNode struct {
 	mu         sync.Mutex
 	built      []*fakeSignClient
 	prepareErr error
+	onPrepare  func()
 	initial    *fakeSignClient
 }
 
@@ -91,6 +100,7 @@ func newSignModeReloadNode(t *testing.T, counter uint64) *signModeReloadNode {
 		c := &fakeSignClient{
 			opCert:     append([]byte(nil), key.RawCBOR...),
 			prepareErr: s.prepareErr,
+			onPrepare:  s.onPrepare,
 		}
 		s.built = append(s.built, c)
 		return c, nil
@@ -227,6 +237,79 @@ func TestAgentSignReloadLeavesTheLiveCredentialsOnRefusal(t *testing.T) {
 		s.requireLiveCounter(t, 1)
 		require.Same(t, s.initial, s.kesAgentClient)
 	})
+}
+
+// writeFreshVRFKey replaces the configured VRF key file with a new, valid
+// key, as an operator rotating it by mistake would.
+func writeFreshVRFKey(t *testing.T, path string) {
+	t.Helper()
+	seed := make([]byte, vrf.SeedSize)
+	_, err := rand.Read(seed)
+	require.NoError(t, err)
+	vkey, _, err := vrf.KeyGen(seed)
+	require.NoError(t, err)
+	envelope := fmt.Sprintf(
+		`{"type":"VrfSigningKey_PraosVRF","description":"VRF Signing Key","cborHex":"5840%s%s"}`,
+		hex.EncodeToString(seed),
+		hex.EncodeToString(vkey),
+	)
+	require.NoError(t, os.WriteFile(path, []byte(envelope), 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
+}
+
+func TestAgentSignReloadRefusesAChangedVRFKey(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unchanged certificate", func(t *testing.T) {
+		t.Parallel()
+		s := newSignModeReloadNode(t, 1)
+		writeFreshVRFKey(t, s.config.shelleyVRFKey)
+		err := s.reloadAgentSignCredentials(0, true, noLedgerCheck, nil)
+		require.ErrorContains(t, err, "VRF key file no longer matches")
+		require.NotErrorIs(t, err, errCredentialsUnchanged)
+		require.Empty(t, s.builtClients())
+		s.requireLiveCounter(t, 1)
+	})
+
+	t.Run("changed certificate", func(t *testing.T) {
+		t.Parallel()
+		s := newSignModeReloadNode(t, 1)
+		s.rotateTo(t, 2, nil)
+		writeFreshVRFKey(t, s.config.shelleyVRFKey)
+		require.ErrorContains(t, s.reload(nil), "VRF key file no longer matches")
+		require.Empty(t, s.builtClients(),
+			"a VRF change must be refused before the agent is contacted")
+		s.requireLiveCounter(t, 1)
+		require.Same(t, s.initial, s.kesAgentClient)
+	})
+}
+
+// TestAgentSignReloadContactsTheAgentOutsideTheLifecycleGates pins that the
+// agent check, which can wait on the network, does not hold liveLifecycleMu:
+// chainsync and chain-switch handlers drop their work while it is held.
+func TestAgentSignReloadContactsTheAgentOutsideTheLifecycleGates(t *testing.T) {
+	t.Parallel()
+	start := time.Now().Add(-time.Minute)
+	started := newStartupCleanupProducerNodeWithGenesisStart(t, &start)
+	s := newSignModeReloadNode(t, 1)
+	s.ledgerState = started.ledgerState
+	gateFree := false
+	s.onPrepare = func() {
+		if s.liveLifecycleMu.TryLock() {
+			gateFree = true
+			s.liveLifecycleMu.Unlock()
+		}
+	}
+	s.rotateTo(t, 2, nil)
+
+	require.NoError(t, s.reloadCredentials(reloadTriggerSignal, nil))
+
+	s.requireLiveCounter(t, 2)
+	built := s.builtClients()
+	require.Len(t, built, 1)
+	require.Same(t, built[0], s.kesAgentClient)
+	require.True(t, gateFree,
+		"the agent must be checked before the lifecycle gates are taken")
 }
 
 func TestReloadInServeKeyModeIsRefused(t *testing.T) {

@@ -3821,10 +3821,13 @@ func (f *BlockForger) logGateSkipScheduled(
 	f.logger.Debug(msg, attrs...)
 }
 
-// remoteSignerPrepareLead is how far ahead of a scheduled leader slot the
-// forger asks a remote KES signer to open its session. It is kept well
-// inside the bursa agent's 10s idle bound on an admitted session, so the
-// session prepared here is still open when the slot's header is signed.
+// remoteSignerPrepareLead is the minimum time ahead of a scheduled leader
+// slot that the forger asks a remote KES signer to open its session. The
+// check runs once per slot, so the lead is this rounded up to whole slots,
+// and is one whole slot when slots are 3s or longer. With 1s slots it is
+// well inside the bursa agent's 10s idle bound on an admitted session, so
+// the session prepared here is still open when the slot's header is signed;
+// with slots longer than the client's session freshness the sign redials.
 const remoteSignerPrepareLead = 3 * time.Second
 
 // prepareRemoteSignerForUpcomingLeaderSlot opens the remote KES signer's

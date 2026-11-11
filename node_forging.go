@@ -127,11 +127,15 @@ type kesAgentSignClient interface {
 }
 
 func (n *Node) kesAgentClientMetrics() *kesagent.Metrics {
+	n.kesAgentMetricsMu.Lock()
+	defer n.kesAgentMetricsMu.Unlock()
 	if n.kesAgentMetrics == nil && n.config.promRegistry != nil {
 		reg := n.config.promRegistry
 		if n.producerPoolCount() > 1 {
 			// The other pools register the same series with their pool_id,
 			// so the first pool's must carry its own or the names collide.
+			// A pool ID that cannot be read is not cached: the next client
+			// built tries again.
 			poolID, err := poolIDFromOpCertFile(
 				n.primaryKeySource().keys.opCert,
 			)
@@ -198,11 +202,30 @@ func (n *Node) ReloadBlockProducerCredentials() error {
 }
 
 // reloadBlockProducerCredentials is ReloadBlockProducerCredentials with the
-// clock and the ledger cross-check supplied, for the first pool.
+// clock and the ledger cross-check supplied, for the first pool. In sign mode
+// it prepares the reload with the agent and installs it in one go.
 func (n *Node) reloadBlockProducerCredentials(
 	slot uint64,
 	supported bool,
 	ledgerCheck func(*forging.PoolCredentials) error,
+) error {
+	var prep signReloadPrep
+	if ks := n.primaryKeySource(); ks.signsThroughAgent() {
+		if live := n.blockProducerCreds.Load(); live != nil {
+			prep = n.prepareSignReload(ks, live, nil)
+			defer prep.close()
+		}
+	}
+	return n.reloadPrimaryCredentials(slot, supported, ledgerCheck, prep)
+}
+
+// reloadPrimaryCredentials reloads the first pool, installing prep when it
+// is in sign mode.
+func (n *Node) reloadPrimaryCredentials(
+	slot uint64,
+	supported bool,
+	ledgerCheck func(*forging.PoolCredentials) error,
+	prep signReloadPrep,
 ) error {
 	live := n.blockProducerCreds.Load()
 	if live == nil {
@@ -214,6 +237,7 @@ func (n *Node) reloadBlockProducerCredentials(
 		slot,
 		supported,
 		ledgerCheck,
+		prep,
 	)
 }
 
@@ -222,13 +246,15 @@ func (n *Node) reloadBlockProducerCredentials(
 // into the live set once every check has passed, because loading into the live
 // set fails closed on error, which would stop a healthy producer. A failure is
 // counted against the pool when the node forges for several; credentials
-// found already loaded are not a failure.
+// found already loaded are not a failure. A sign-mode pool installs prep, the
+// reload its agent admitted before the lifecycle gates were taken.
 func (n *Node) reloadPoolCredentials(
 	ks *poolKeySource,
 	live *forging.PoolCredentials,
 	slot uint64,
 	supported bool,
 	ledgerCheck func(*forging.PoolCredentials) error,
+	prep signReloadPrep,
 ) (retErr error) {
 	if n.producerPoolCount() > 1 {
 		defer func() {
@@ -244,13 +270,13 @@ func (n *Node) reloadPoolCredentials(
 				"block producer credentials come from a KES agent in serve-key mode; rotate the key through the agent, which pushes each new key",
 			)
 		}
-		return n.reloadPoolAgentSignCredentials(
+		return n.installSignReload(
 			ks,
 			live,
 			slot,
 			supported,
 			ledgerCheck,
-			nil,
+			prep,
 		)
 	}
 	if !supported {

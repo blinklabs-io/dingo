@@ -263,3 +263,118 @@ func TestReloadSkipsServeKeyPoolsOnlyForTheFileWatch(t *testing.T) {
 	require.ErrorContains(t, err, "pool "+firstID)
 	require.Equal(t, 1.0, failures())
 }
+
+// TestAgentSignReloadOfAnotherPoolContactsTheAgentOutsideTheLifecycleGates
+// pins that a pool after the first is checked with its agent, which can wait
+// on the network, without holding liveLifecycleMu, whether a SIGHUP or its
+// agent's offer reloads it.
+func TestAgentSignReloadOfAnotherPoolContactsTheAgentOutsideTheLifecycleGates(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		reload func(t *testing.T, n *twoPoolSignNode) error
+	}{
+		{
+			name: "signal",
+			reload: func(t *testing.T, n *twoPoolSignNode) error {
+				n.second.rotateTo(t, 2, nil)
+				return n.first.reloadCredentials(reloadTriggerSignal, nil)
+			},
+		},
+		{
+			name: "agent offer",
+			reload: func(t *testing.T, n *twoPoolSignNode) error {
+				return n.first.reloadPoolProducerAgentOpCert(
+					n.pp,
+					n.second.opCertCBOR(t, 2),
+				)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			n := newTwoPoolSignNode(t)
+			start := time.Now().Add(-time.Minute)
+			n.first.ledgerState = newStartupCleanupProducerNodeWithGenesisStart(
+				t,
+				&start,
+			).ledgerState
+			gateFree := false
+			n.first.onPrepare = func() {
+				if n.first.liveLifecycleMu.TryLock() {
+					gateFree = true
+					n.first.liveLifecycleMu.Unlock()
+				}
+			}
+
+			require.NoError(t, tc.reload(t, n))
+
+			n.second.requireLiveCounter(t, 2)
+			n.first.requireLiveCounter(t, 1)
+			built := n.first.builtClients()
+			require.Len(t, built, 1)
+			require.Same(t, built[0], n.pp.kesAgentClient)
+			require.Same(t, n.first.initial, n.first.kesAgentClient)
+			require.True(t, gateFree,
+				"the agent must be checked before the lifecycle gates are taken")
+		})
+	}
+}
+
+func TestAgentSignReloadRefusesAnotherPoolsChangedVRFKey(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		reload func(t *testing.T, n *twoPoolSignNode) error
+	}{
+		{
+			name: "unchanged certificate",
+			reload: func(t *testing.T, n *twoPoolSignNode) error {
+				return n.first.reloadEveryPool(0, true, noLedgerCheck, false)
+			},
+		},
+		{
+			name: "changed certificate",
+			reload: func(t *testing.T, n *twoPoolSignNode) error {
+				n.second.rotateTo(t, 2, nil)
+				return n.first.reloadEveryPool(0, true, noLedgerCheck, false)
+			},
+		},
+		{
+			name: "agent offer",
+			reload: func(t *testing.T, n *twoPoolSignNode) error {
+				return n.first.reloadPoolProducerAgentOpCert(
+					n.pp,
+					n.second.opCertCBOR(t, 2),
+				)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			n := newTwoPoolSignNode(t)
+			firstID := n.first.live.GetPoolID().String()
+			require.NotNil(t, n.first.reloadFailureCounter())
+			writeFreshVRFKey(t, n.second.config.shelleyVRFKey)
+
+			err := tc.reload(t, n)
+
+			require.ErrorContains(t, err, "pool "+n.pp.poolID)
+			require.ErrorContains(t, err, "VRF key file no longer matches")
+			require.NotErrorIs(t, err, errCredentialsUnchanged)
+			require.Empty(t, n.first.builtClients(),
+				"a VRF change must be refused before the agent is contacted")
+			n.second.requireLiveCounter(t, 1)
+			n.first.requireLiveCounter(t, 1)
+			require.Same(t, n.second.initial, n.pp.kesAgentClient)
+			require.Equal(t, 1.0, testutil.ToFloat64(
+				n.first.multiPool.reloadFailures.WithLabelValues(n.pp.poolID),
+			))
+			require.Equal(t, 0.0, testutil.ToFloat64(
+				n.first.multiPool.reloadFailures.WithLabelValues(firstID),
+			))
+		})
+	}
+}

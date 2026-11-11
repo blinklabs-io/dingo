@@ -61,6 +61,9 @@ type poolProducer struct {
 	kesAgentClient  io.Closer
 	kesAgentCancel  context.CancelFunc
 	kesAgentMetrics *kesagent.Metrics
+	// kesAgentMetricsMu guards kesAgentMetrics' lazy creation: a sign-mode
+	// reload builds its client outside the lifecycle gates.
+	kesAgentMetricsMu sync.Mutex
 	// agentOffers are this pool's own agent offers of a newer operational
 	// certificate; they reload this pool only.
 	agentOffers agentOfferState
@@ -222,6 +225,8 @@ func (pp *poolProducer) keySource(n *Node) *poolKeySource {
 		cancel:        &pp.kesAgentCancel,
 		onNewerOpCert: pp.agentOffers.offer,
 		metrics: func() *kesagent.Metrics {
+			pp.kesAgentMetricsMu.Lock()
+			defer pp.kesAgentMetricsMu.Unlock()
 			if pp.kesAgentMetrics == nil {
 				if reg := n.poolMetricsRegistry(pp.poolID); reg != nil {
 					pp.kesAgentMetrics = kesagent.NewMetrics(reg)
@@ -566,31 +571,42 @@ func (n *Node) poolProducersReady() error {
 	return errors.Join(errs...)
 }
 
+// runningPool is a pool after the first that is forging, and its live
+// credentials.
+type runningPool struct {
+	pp   *poolProducer
+	live *forging.PoolCredentials
+}
+
+// runningPoolProducers lists the pools after the first that are forging.
+func (n *Node) runningPoolProducers() []runningPool {
+	n.multiPool.mu.Lock()
+	defer n.multiPool.mu.Unlock()
+	var pools []runningPool
+	for _, pp := range n.multiPool.producers {
+		if pp.creds != nil {
+			pools = append(pools, runningPool{pp: pp, live: pp.creds})
+		}
+	}
+	return pools
+}
+
 // reloadPoolProducerCredentials reloads every running pool after the first
 // through its own key source and returns one result per pool, each error
-// naming its pool. A pool that fails keeps its credentials and is counted;
-// the others still reload. With skipServeKey a serve-key pool is not
-// reloaded and reports itself unchanged.
+// naming its pool. A sign-mode pool installs the reload preps holds for it. A
+// pool that fails keeps its credentials and is counted; the others still
+// reload. With skipServeKey a serve-key pool is not reloaded and reports
+// itself unchanged.
 func (n *Node) reloadPoolProducerCredentials(
 	slot uint64,
 	supported bool,
 	ledgerCheck func(*forging.PoolCredentials) error,
 	skipServeKey bool,
+	preps *signReloadPreps,
 ) []error {
-	n.multiPool.mu.Lock()
-	type target struct {
-		pp   *poolProducer
-		live *forging.PoolCredentials
-	}
-	var targets []target
-	for _, pp := range n.multiPool.producers {
-		if pp.creds != nil {
-			targets = append(targets, target{pp: pp, live: pp.creds})
-		}
-	}
-	n.multiPool.mu.Unlock()
-	results := make([]error, 0, len(targets))
-	for _, t := range targets {
+	pools := n.runningPoolProducers()
+	results := make([]error, 0, len(pools))
+	for _, t := range pools {
 		ks := t.pp.keySource(n)
 		if skipServeKey && ks.servesKeys() {
 			results = append(results, errCredentialsUnchanged)
@@ -602,6 +618,7 @@ func (n *Node) reloadPoolProducerCredentials(
 			slot,
 			supported,
 			ledgerCheck,
+			preps.pool(t.pp),
 		)
 		if err != nil {
 			err = fmt.Errorf("pool %s: %w", t.pp.poolID, err)

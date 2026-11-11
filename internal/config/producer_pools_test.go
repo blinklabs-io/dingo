@@ -103,6 +103,48 @@ func TestValidateBlockProducerPools(t *testing.T) {
 			wantErr: "blockProducerPools[0].shelleyKesAgentPlaintext requires blockProducerPools[0].shelleyKesAgentAddress",
 		},
 		{
+			name: "client certificate entry without an address",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyKESAgentAddress = ""
+				b.ShelleyKESAgentClientCertFile = ""
+				b.ShelleyKESAgentClientKeyFile = ""
+				b.ShelleyKESAgentServerSPKISHA256 = ""
+				b.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				b.ShelleyKESAgentClientCertFile = "/keys/kes-client.crt"
+				c.BlockProducerPools = []BlockProducerPool{remotePool("a"), b}
+			},
+			wantErr: "blockProducerPools[1].shelleyKesAgentClientCertFile requires blockProducerPools[1].shelleyKesAgentAddress",
+		},
+		{
+			name: "client key entry without an address",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyKESAgentAddress = ""
+				b.ShelleyKESAgentClientCertFile = ""
+				b.ShelleyKESAgentClientKeyFile = ""
+				b.ShelleyKESAgentServerSPKISHA256 = ""
+				b.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				b.ShelleyKESAgentClientKeyFile = "/keys/kes-client.key"
+				c.BlockProducerPools = []BlockProducerPool{remotePool("a"), b}
+			},
+			wantErr: "blockProducerPools[1].shelleyKesAgentClientKeyFile requires blockProducerPools[1].shelleyKesAgentAddress",
+		},
+		{
+			name: "pinned entry without an address",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyKESAgentAddress = ""
+				b.ShelleyKESAgentClientCertFile = ""
+				b.ShelleyKESAgentClientKeyFile = ""
+				b.ShelleyKESAgentServerSPKISHA256 = ""
+				b.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				b.ShelleyKESAgentServerSPKISHA256 = strings.Repeat("ab", 32)
+				c.BlockProducerPools = []BlockProducerPool{remotePool("a"), b}
+			},
+			wantErr: "blockProducerPools[1].shelleyKesAgentServerSpkiSha256 requires blockProducerPools[1].shelleyKesAgentAddress",
+		},
+		{
 			name: "entry with an out-of-range port",
 			modify: func(c *Config) {
 				b := remotePool("b")
