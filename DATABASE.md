@@ -6572,11 +6572,15 @@ GROUP BY pool_key_hash;
 
 Blockfrost list endpoints count and select their requested page in the
 metadata store. `GetActivePoolKeyHashesPage`, `GetRetiringPoolsPage`, and
-`GetDrepsPage` apply their ordering and filters before returning rows,
-short-circuit offsets beyond the matching total, and inherit cancellation from
-the request-backed read transaction. Amount ordering reads the maintained
-`reward_live_stake` aggregate and falls back to an indexed per-account UTxO sum
-only when that account has no current aggregate row. The adapter enriches only
+`GetDrepsPage` apply their ordering and filters before returning rows and
+inherit cancellation from the request-backed read transaction. The pool pages
+count first and short-circuit offsets beyond the matching total.
+`GetDrepsPage` instead returns the matching total from the page statement
+(`COUNT(*) OVER ()`), so a non-empty page aggregates the delegation tables
+once; only an empty page past offset 0 issues a separate count. Amount
+ordering reads the maintained `reward_live_stake` aggregate and falls back to
+an indexed per-account UTxO sum only when that account has no current
+aggregate row. The adapter enriches only
 those rows.
 
 Full DRep listing (including deregistered rows) ordered by the
