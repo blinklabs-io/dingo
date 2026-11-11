@@ -833,10 +833,14 @@ func (n *Node) startKeyReloadLoops() {
 			)
 			return
 		}
+		// The baseline is read here, before the goroutine starts, so a
+		// change landing before it first runs is seen as a change.
+		files := n.watchedCredentialFiles()
 		go n.credentialFileWatchLoop(
 			ctx,
 			interval,
-			n.watchedCredentialFiles(),
+			files,
+			credentialFilesDigest(files),
 			func() error {
 				return n.reloadCredentials(reloadTriggerFile, nil)
 			},
@@ -976,16 +980,18 @@ func (n *Node) configuredPoolKeySources() []*poolKeySource {
 // keeps a file still being written by hand from being read half done; a
 // reload validates everything anyway and refuses a broken set. A failed
 // reload stays pending and is retried once per interval until it succeeds or
-// the files change.
+// the files change. loaded is the files' digest as the loaded credentials
+// were read, which the caller takes before starting the loop: one taken
+// inside the goroutine would absorb a change made before it first runs.
 func (n *Node) credentialFileWatchLoop(
 	ctx context.Context,
 	interval time.Duration,
 	files []string,
+	loaded [sha256.Size]byte,
 	reload func() error,
 ) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	loaded := credentialFilesDigest(files)
 	var pending [sha256.Size]byte
 	havePending := false
 	for {
