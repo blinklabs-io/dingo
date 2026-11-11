@@ -98,8 +98,12 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 		}
 		// A deferred header remains in per-connection history with generation
 		// zero. Its child extends a local queued parent, so the local verifier
-		// checks it instead of withholding it as a competing candidate.
-		if ls.chain.HoldsQueuedHeaderHash(header.PrevHash().Bytes()) {
+		// checks it instead of withholding it as a competing candidate. The
+		// parent may itself still be on its way to the queue, because queueing
+		// is asynchronous; the retained history then links the header to a
+		// queued ancestor.
+		if ls.chain.HoldsQueuedHeaderHash(header.PrevHash().Bytes()) ||
+			ls.peerHistoryReachesQueuedHeader(connId, header) {
 			return nil, models.Epoch{}, false, nil
 		}
 		return nil, models.Epoch{}, false, fmt.Errorf(
@@ -1222,6 +1226,35 @@ func (ls *LedgerState) storeDeferredPeerForkPathPrefix(
 		headers:    slices.Clone(headers),
 		generation: generation,
 	}
+}
+
+// peerHistoryReachesQueuedHeader reports whether the connection's retained
+// headers link header, through consecutive parents, to a header queued on the
+// local chain.
+func (ls *LedgerState) peerHistoryReachesQueuedHeader(
+	connId ouroboros.ConnectionId,
+	header gledger.BlockHeader,
+) bool {
+	prevHash := header.PrevHash().Bytes()
+	for range ls.peerHeaderHistoryLimit() {
+		event, nextPrevHash, ok := ls.config.PeerHeaderLookupFunc(
+			connId,
+			prevHash,
+		)
+		if !ok || event.BlockHeader == nil ||
+			!bytes.Equal(event.BlockHeader.Hash().Bytes(), prevHash) ||
+			!bytes.Equal(
+				event.BlockHeader.PrevHash().Bytes(),
+				nextPrevHash,
+			) {
+			return false
+		}
+		if ls.chain.HoldsQueuedHeaderHash(prevHash) {
+			return true
+		}
+		prevHash = nextPrevHash
+	}
+	return false
 }
 
 // markPeerForkPathOverflow records header as the deferred tail of the cached
