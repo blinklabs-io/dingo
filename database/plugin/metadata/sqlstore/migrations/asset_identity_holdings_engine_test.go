@@ -59,7 +59,7 @@ func (e *assetSplitEngine) query(q string) string {
 func newPostgresAssetSplitEngine(t *testing.T) *assetSplitEngine {
 	t.Helper()
 	dsn := postgresEngineTestDSN(t)
-	schema := "dingo_v59_split"
+	schema := "dingo_v60_split"
 	admin, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = admin.Close() })
@@ -105,7 +105,7 @@ WHERE schemaname = $1 AND tablename = $2 AND indexname = $3`,
 func newMySQLAssetSplitEngine(t *testing.T) *assetSplitEngine {
 	t.Helper()
 	rootDSN := mysqlEngineTestRootDSN(t)
-	database := "dingo_v59_split"
+	database := "dingo_v60_split"
 	admin, err := sql.Open("mysql", rootDSN)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = admin.Close() })
