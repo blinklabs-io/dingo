@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -887,4 +888,130 @@ func TestRewardPrecomputeChunkEndBoundsDelegators(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestChunkedRewardPrecomputeChunkReadsLeaveWriteConnectionFree proves a
+// chunk's reads do not hold the metadata write connection: a write
+// transaction opened while the chunk is mid-read must begin and commit.
+func TestChunkedRewardPrecomputeChunkReadsLeaveWriteConnectionFree(
+	t *testing.T,
+) {
+	t.Parallel()
+	ls, _ := seedMultiPoolRewardPrecomputeFixture(t, 4, 2, 7)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+		4, 200, 1_200,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	hookRuns := 0
+	var writeErr error
+	ls.rewardPrecomputeChunkReadHook = func() {
+		hookRuns++
+		ctx, cancel := context.WithTimeout(
+			context.Background(), 2*time.Second,
+		)
+		defer cancel()
+		writeErr = ls.db.Transaction(ctx, true).Do(
+			func(*database.Txn) error { return nil },
+		)
+	}
+	done, err := ls.stakeRewardPrecomputeChunkStep(round)
+	require.NoError(t, err)
+	require.False(t, done)
+	require.Equal(t, 1, hookRuns)
+	require.NoError(
+		t, writeErr,
+		"a write transaction must be able to begin while a chunk reads",
+	)
+}
+
+// TestChunkedRewardPrecomputeDiscardsChunkOnInputChangeDuringRead proves
+// that a chunk computed from reads taken outside the write transaction is
+// discarded, not persisted, when the round is invalidated before it commits.
+func TestChunkedRewardPrecomputeDiscardsChunkOnInputChangeDuringRead(
+	t *testing.T,
+) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		change func(ls *LedgerState)
+	}{
+		{"generation", func(ls *LedgerState) {
+			ls.rewardInputGeneration.Add(1)
+		}},
+		{"fence", func(ls *LedgerState) {
+			ls.rewardPrecomputeFence.Add(1)
+		}},
+		{"rollback active", func(ls *LedgerState) {
+			ls.rewardInputRollbackActive.Add(1)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ls, db := seedMultiPoolRewardPrecomputeFixture(t, 4, 2, 7)
+			ls.rewardPrecomputeChunkPoolsOverride = 2
+			round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+				4, 200, 1_200,
+			)
+			require.NoError(t, err)
+			require.True(t, ok)
+			ls.rewardPrecomputeChunkReadHook = func() { test.change(ls) }
+
+			done, err := ls.stakeRewardPrecomputeChunkStep(round)
+			require.NoError(t, err)
+			require.True(t, done, "an invalidated round must stop")
+			outputs, err := db.Metadata().GetRewardPoolOutputs(1, nil)
+			require.NoError(t, err)
+			require.Empty(t, outputs, "a stale chunk must not be persisted")
+			cursor, err := loadRewardPrecomputeCursor(db.Metadata(), nil, 1)
+			require.NoError(t, err)
+			require.Nil(t, cursor)
+		})
+	}
+}
+
+// TestChunkedRewardPrecomputeSkipsWriteWhenCursorMovedDuringRead proves a
+// step planned from a cursor that changed before its write phase writes
+// nothing and is retried rather than overwriting the newer cursor.
+func TestChunkedRewardPrecomputeSkipsWriteWhenCursorMovedDuringRead(
+	t *testing.T,
+) {
+	t.Parallel()
+	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 4, 2, 7)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+		4, 200, 1_200,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	moved := &rewardPrecomputeCursor{
+		FormatVersion:    rewardPrecomputeCursorFormatVersion,
+		SnapshotEpoch:    1,
+		Generation:       round.generation,
+		InputFingerprint: "other",
+	}
+	var hookErr error
+	ls.rewardPrecomputeChunkReadHook = func() {
+		hookErr = db.Transaction(context.Background(), true).Do(
+			func(txn *database.Txn) error {
+				return saveRewardPrecomputeCursor(
+					db.Metadata(), txn.Metadata(), moved,
+				)
+			},
+		)
+	}
+	done, err := ls.stakeRewardPrecomputeChunkStep(round)
+	require.NoError(t, hookErr)
+	require.NoError(t, err)
+	require.False(t, done, "a moved cursor must be re-planned, not abandoned")
+	outputs, err := db.Metadata().GetRewardPoolOutputs(1, nil)
+	require.NoError(t, err)
+	require.Empty(t, outputs)
+	stored, err := loadRewardPrecomputeCursor(db.Metadata(), nil, 1)
+	require.NoError(t, err)
+	require.Equal(t, moved, stored)
 }

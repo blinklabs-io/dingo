@@ -2286,6 +2286,10 @@ type LedgerState struct {
 	// so far and the round's total pool count -- e.g. to stop a test's
 	// precompute mid-round and simulate a restart from the persisted cursor.
 	rewardPrecomputeChunkHook func(processed, total int)
+	// rewardPrecomputeChunkReadHook is a test seam, nil in production. It runs
+	// at the start of a chunk's reads, before any of its outputs exist, so a
+	// test can act while the chunk is mid-read.
+	rewardPrecomputeChunkReadHook func()
 	// rewardPrecomputeFence is bumped, under rewardPrecomputeWriteMu, before
 	// an epoch boundary applies rewards. A background chunk whose round was
 	// resolved under an older value stops instead of writing: the boundary

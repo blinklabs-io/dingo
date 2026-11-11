@@ -2039,6 +2039,13 @@ outputs (`DeleteRewardOutputsForEpoch`) and starts over. A finished cursor whose
 output fingerprint matches the stored pool outputs is the precompute's
 completion record.
 
+A chunk's reads (stake inputs, account and certificate-position lookups)
+run in a read transaction outside the metadata write connection. Only its
+writes -- pool and account outputs and the cursor, or completion -- run in a
+short write transaction that first re-checks the rollback generation, the
+boundary fence, the reward snapshot row and the stored cursor, and writes
+nothing when any changed.
+
 **Credited reward rounds.** Table `reward_credit_round` holds one
 `{snapshot_epoch, boundary_slot}` (`models.RewardCreditRound`) row for each
 reward round an epoch boundary applied without writing account rows. The row
