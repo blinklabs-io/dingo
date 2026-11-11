@@ -77,3 +77,39 @@ func exerciseSameSlotCreditOrder(
 		})
 	}
 }
+
+// A Leios closure transaction executes at its context slot but is journaled at
+// the certifying block's later slot, so its direct deposit follows every
+// withdrawal journaled between the two. The historical read must order the
+// deposit by its journal slot, as rollback does, and leave it out of the
+// balance such a withdrawal recorded.
+func TestClosureCreditFollowsWithdrawalAtItsContextSlot(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := bytesRepeat(0x68, 28)
+	rollbackAccount(t, store, key, 100)
+	withdrawal := bytesRepeat(0x43, 32)
+	seedWithdrawingTransaction(t, store, withdrawal)
+	require.NoError(t, store.ApplyAccountRewardWithdrawal(
+		0, key, 100, 200, withdrawal, nil))
+	closure := bytesRepeat(0x44, 32)
+	seedWithdrawingTransaction(t, store, closure)
+	_, err := store.writeDB.Exec(`INSERT INTO leios_transaction_context
+(transaction_id, slot) SELECT id, 200 FROM "transaction" WHERE hash = ?`,
+		closure)
+	require.NoError(t, err)
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, key, 30, 400, closure, nil))
+
+	ref := historicalRewardKey{tag: 0, key: string(key)}
+	db, ctx, err := store.readDBFromTxn(nil)
+	require.NoError(t, err)
+	historical, err := store.historicalRewards(
+		ctx, db, 199, map[historicalRewardKey]struct{}{ref: {}},
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(100), historical[ref])
+
+	require.NoError(t, store.DeleteAccountRewardsAfterSlot(199, nil))
+	require.Equal(t, uint64(100), rewardOf(t, store, key))
+}

@@ -6455,9 +6455,12 @@ and transaction id anchors the reconstruction. Event credits and withdrawals
 resolve the Leios context slot (`COALESCE(lc.slot, ...)`) through `LEFT JOIN`s on
 the unique `transaction.hash` (event credits whose source is a transaction hash)
 or the withdrawing `transaction.id`, and `leios_transaction_context`'s primary
-key. A credit counts before the first later withdrawal when its slot is below
-the withdrawal's, or equal to it and the credit is not an `after_withdrawal`
-event credit. No plan depends on `sqlite_stat1`.
+key. The context slot only decides which rows are later than the requested
+slot; a credit counts before the first later withdrawal when its journal slot
+is below the withdrawal's, or equal to it and the credit is not an
+`after_withdrawal` event credit. A closure transaction's credit is journaled at
+the certifying block's slot, so it follows every withdrawal journaled at or
+after its earlier context slot, as it does in rollback. No plan depends on `sqlite_stat1`.
 
 `utxo.amount`, `account.reward`, and the reward journal amounts are stored as text
 (`types.Uint64`) on postgres and mysql, so each is cast to the backend's native

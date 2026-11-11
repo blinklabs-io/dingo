@@ -90,12 +90,6 @@ type historicalRewardKey struct {
 	key string
 }
 
-type historicalWithdrawal struct {
-	slot     int64
-	id       int64
-	previous uint64
-}
-
 // historicalRewards evaluates future reward credits only for the selected
 // credentials.  Filters are split into bounded batches so the generated
 // predicate stays below SQLite/PostgreSQL/MySQL parameter limits.
@@ -230,7 +224,7 @@ func historicalRewardsBatch(
 		return nil, err
 	}
 	base := make(map[historicalRewardKey]uint64)
-	withdrawals := make(map[historicalRewardKey]historicalWithdrawal)
+	withdrawals := make(map[historicalRewardKey]uint64)
 	total := make(map[historicalRewardKey]uint64)
 	beforeWithdrawal := make(map[historicalRewardKey]uint64)
 	for _, ref := range keys {
@@ -256,11 +250,7 @@ func historicalRewardsBatch(
 					return nil, err
 				}
 			}
-			withdrawals[ref] = historicalWithdrawal{
-				slot:     entries.withdrawalSlot,
-				id:       entries.withdrawalTx,
-				previous: previous,
-			}
+			withdrawals[ref] = previous
 		}
 		for _, credit := range entries.credits {
 			if !credit.amount.Valid || credit.amount.String == "" {
@@ -275,7 +265,7 @@ func historicalRewardsBatch(
 			}
 			total[ref] += value
 			if hasWithdrawal && creditPrecedesWithdrawal(
-				credit.slot, credit.afterWithdrawal, entries.withdrawalSlot,
+				credit.slot, credit.afterWithdrawal, entries.anchorSlot,
 			) {
 				if ^uint64(0)-beforeWithdrawal[ref] < value {
 					return nil, errors.New("historical reward credit overflow")
@@ -287,11 +277,11 @@ func historicalRewardsBatch(
 
 	ret := make(map[historicalRewardKey]uint64, len(base)+len(total))
 	maps.Copy(ret, base)
-	for ref, withdrawal := range withdrawals {
-		if beforeWithdrawal[ref] > withdrawal.previous {
+	for ref, previous := range withdrawals {
+		if beforeWithdrawal[ref] > previous {
 			return nil, errors.New("historical reward underflow")
 		}
-		ret[ref] = withdrawal.previous - beforeWithdrawal[ref]
+		ret[ref] = previous - beforeWithdrawal[ref]
 	}
 	for ref, credits := range total {
 		if _, hasWithdrawal := withdrawals[ref]; hasWithdrawal {
@@ -354,7 +344,7 @@ WHERE c.account_id IN (` + rewardHistoryPlaceholders() + `)
 
 func rewardHistoryWithdrawalsQuery(op string) string {
 	return `-- name: GetRewardHistoryWithdrawals :many
-SELECT w.account_id, COALESCE(lc.slot, w.slot), w.previous_reward, w.tx_id, w.slot
+SELECT w.account_id, w.previous_reward, w.tx_id, w.slot
 FROM reward_withdrawal w
 LEFT JOIN leios_transaction_context lc ON lc.transaction_id = w.tx_id
 WHERE w.account_id IN (` + rewardHistoryPlaceholders() + `)
@@ -368,7 +358,7 @@ func rewardHistoryEventsQuery(includePostSnapshot bool) string {
 		filter = "(" + slot + " > ? OR (" + slot + " = ? AND e.post_snapshot = TRUE))"
 	}
 	return `-- name: GetRewardHistoryEvents :many
-SELECT e.account_id, ` + slot + `, e.amount, e.after_withdrawal
+SELECT e.account_id, e.slot, e.amount, e.after_withdrawal
 FROM reward_event_credit e
 LEFT JOIN reward_source s ON s.id = e.source_id
 LEFT JOIN "transaction" tx ON tx.hash = s.hash
@@ -376,6 +366,11 @@ LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id
 WHERE e.account_id IN (` + rewardHistoryPlaceholders() + `) AND ` + filter
 }
 
+// rewardHistoryCredit is one later credit. slot is the journal slot it was
+// applied at, not its effective (Leios context) slot: the query filters on the
+// effective slot, but a closure transaction's credit is journaled at the
+// certifying block's slot, after withdrawals at its earlier context slot, so
+// only the journal slot orders it against the anchoring withdrawal.
 type rewardHistoryCredit struct {
 	slot            int64
 	amount          sql.NullString
@@ -383,13 +378,12 @@ type rewardHistoryCredit struct {
 }
 
 type rewardHistory struct {
-	reward         sql.NullString
-	hasWithdrawal  bool
-	withdrawalSlot int64
-	withdrawalTx   int64
-	anchorSlot     int64
-	previous       sql.NullString
-	credits        []rewardHistoryCredit
+	reward        sql.NullString
+	hasWithdrawal bool
+	withdrawalTx  int64
+	anchorSlot    int64
+	previous      sql.NullString
+	credits       []rewardHistoryCredit
 }
 
 func idArgs(ids []int64, trailing ...any) []any {
@@ -456,9 +450,9 @@ func readRewardHistories(
 			ctx, db, rewardHistoryWithdrawalsSQL[atBoundary],
 			idArgs(batch, threshold),
 			func(rows *sql.Rows) error {
-				var id, effective, tx, raw int64
+				var id, tx, raw int64
 				var previous sql.NullString
-				if err := rows.Scan(&id, &effective, &previous, &tx, &raw); err != nil {
+				if err := rows.Scan(&id, &previous, &tx, &raw); err != nil {
 					return err
 				}
 				entry := owner[id]
@@ -466,7 +460,6 @@ func readRewardHistories(
 					(raw == entry.anchorSlot && tx < entry.withdrawalTx) {
 					entry.hasWithdrawal = true
 					entry.anchorSlot = raw
-					entry.withdrawalSlot = effective
 					entry.withdrawalTx = tx
 					entry.previous = previous
 				}
