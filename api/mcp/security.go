@@ -16,7 +16,6 @@ package mcp
 
 import (
 	"container/list"
-	"crypto/subtle"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -170,19 +169,17 @@ func (cl *clientLimiter) expireIdle() {
 	cl.scheduleExpiryLocked(now)
 }
 
-// SecurityMiddleware wraps an HTTP handler with optional authentication, rate limiting, and CORS.
+// SecurityMiddleware wraps an HTTP handler with rate limiting and CORS.
 func SecurityMiddleware(
-	authToken string,
 	reqPerSec float64,
 	burst int,
 	allowedOrigins []string,
 	next http.Handler,
 ) http.Handler {
-	return newSecurityMiddleware(authToken, reqPerSec, burst, allowedOrigins, next)
+	return newSecurityMiddleware(reqPerSec, burst, allowedOrigins, next)
 }
 
 func newSecurityMiddleware(
-	authToken string,
 	reqPerSec float64,
 	burst int,
 	allowedOrigins []string,
@@ -218,7 +215,7 @@ func newSecurityMiddleware(
 			return
 		}
 
-		// Health endpoint bypasses auth and rate limiting
+		// Health endpoint bypasses rate limiting
 		if r.URL.Path == "/healthz" || r.URL.Path == "/health" {
 			next.ServeHTTP(w, r)
 			return
@@ -232,32 +229,6 @@ func newSecurityMiddleware(
 				w.WriteHeader(http.StatusTooManyRequests)
 				if err := json.NewEncoder(w).Encode(map[string]string{
 					"error": "too many requests: rate limit exceeded",
-				}); err != nil {
-					return
-				}
-				return
-			}
-		}
-
-		// Authentication check
-		if authToken != "" {
-			var token string
-			authHeader := r.Header.Get("Authorization")
-			if after, ok := strings.CutPrefix(authHeader, "Bearer "); ok {
-				token = after
-			} else if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
-				token = apiKey
-			}
-
-			// Constant time comparison to prevent timing attacks
-			if subtle.ConstantTimeCompare(
-				[]byte(token),
-				[]byte(authToken),
-			) != 1 {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				if err := json.NewEncoder(w).Encode(map[string]string{
-					"error": "unauthorized: missing or invalid authentication token",
 				}); err != nil {
 					return
 				}

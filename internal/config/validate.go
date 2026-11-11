@@ -272,30 +272,6 @@ func (c *Config) validateBlockProducerPools() []error {
 	return errs
 }
 
-func validateCertificateFingerprints(field string, values []string) []error {
-	var errs []error
-	for idx, fingerprint := range values {
-		normalized := strings.ReplaceAll(
-			strings.TrimSpace(fingerprint),
-			":",
-			"",
-		)
-		decoded, err := hex.DecodeString(normalized)
-		if err != nil || len(decoded) != sha256.Size {
-			errs = append(errs, fmt.Errorf(
-				"%s[%d] must be a %d-byte SHA-256 certificate fingerprint "+
-					"encoded as hexadecimal",
-				field,
-				idx,
-				sha256.Size,
-			))
-		}
-	}
-	return errs
-}
-
-// ValidateKESAgentSignTimeout accepts zero as the documented default
-// selector, or an explicit positive timeout shorter than one mainnet slot.
 func ValidateKESAgentSignTimeout(timeout time.Duration) error {
 	if timeout < 0 || timeout >= maxKESAgentSignTimeout {
 		return fmt.Errorf(
@@ -324,9 +300,7 @@ func ValidateKeyWatchInterval(interval time.Duration) error {
 	return nil
 }
 
-// ValidateMithrilPublicBaseURL accepts an absolute public origin. Plain HTTP
-// is restricted to loopback so artifact locations are HTTPS for normal
-// bootstrap clients.
+// ValidateMithrilPublicBaseURL accepts an absolute HTTP(S) origin.
 func ValidateMithrilPublicBaseURL(value string) error {
 	u, err := url.Parse(value)
 	if err != nil {
@@ -334,7 +308,7 @@ func ValidateMithrilPublicBaseURL(value string) error {
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "https" && scheme != "http" {
-		return errors.New("must use HTTPS (HTTP is allowed only on loopback)")
+		return errors.New("must use HTTP or HTTPS")
 	}
 	if u.Host == "" || u.Hostname() == "" || u.User != nil || u.Opaque != "" ||
 		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery ||
@@ -342,16 +316,6 @@ func ValidateMithrilPublicBaseURL(value string) error {
 		return errors.New(
 			"must be an origin without credentials, a path, query, or fragment",
 		)
-	}
-	if scheme == "http" {
-		host := strings.ToLower(u.Hostname())
-		addr, parseErr := netip.ParseAddr(host)
-		if host != "localhost" &&
-			(parseErr != nil || !addr.Unmap().IsLoopback()) {
-			return errors.New(
-				"plain HTTP public URL is allowed only on loopback",
-			)
-		}
 	}
 	return nil
 }
@@ -611,7 +575,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// cannot bind and so cannot conflict. The active set is derived from
 	// the effective run mode plus the storage mode, mirroring the gating in
 	// (*dingo.Node).Start and cmd/dingo's node.Run/mithril paths:
-	//   - relay, private: serving modes only (required there);
+	//   - relay: serving modes only (required there);
+	//   - private: serving modes only (optional: port 0 disables the TCP
+	//     node-to-client listener);
 	//   - metrics, debug: serving modes and the Mithril sync operation
 	//     (RunModeSync); the read-only Mithril subcommands start neither;
 	//   - health: serving modes and the Mithril sync operation
@@ -689,7 +655,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 	ports := slices.Concat([]portSpec{
 		{"port (relay/NtN)", c.BindAddr, c.RelayPort, serving, serving},
-		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
+		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, false},
 		{
 			"metricsPort",
 			c.MetricsBindAddr,
@@ -839,72 +805,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
-	// Bark's DatabaseService is mounted whenever bark is enabled with a snapshot
-	// directory configured. Every method must authenticate its caller, and its
-	// destructive methods additionally require explicit operator authorization.
-	// Validate both policies here rather than failing deep in Bark.Start.
-	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
-		c.BarkClientCAFilePath == "" {
-		errs = append(errs, errors.New(
-			"barkClientCaFilePath is required when bark is enabled "+
-				"(barkPort) alongside databaseLifecycle.snapshotDir: its "+
-				"DatabaseService RPCs must not be mounted without a way to "+
-				"authenticate callers",
-		))
-	}
-	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
-		len(c.BarkOperatorCertificateFingerprints) == 0 {
-		errs = append(errs, errors.New(
-			"barkOperatorCertificateFingerprints requires at least one SHA-256 "+
-				"client certificate fingerprint when bark is enabled (barkPort) "+
-				"alongside databaseLifecycle.snapshotDir: verified identity alone "+
-				"does not authorize destructive DatabaseService RPCs",
-		))
-	}
-	errs = append(errs, validateCertificateFingerprints(
-		"barkOperatorCertificateFingerprints",
-		c.BarkOperatorCertificateFingerprints,
-	)...)
-	if len(c.BarkLifecycleOperatorCertificateFingerprints) > 0 &&
-		!c.BarkLifecycleEnabled {
-		errs = append(errs, errors.New(
-			"barkLifecycleOperatorCertificateFingerprints requires "+
-				"barkLifecycleEnabled",
-		))
-	}
 	if serving && c.BarkLifecycleEnabled && c.BarkPort == 0 {
-		errs = append(errs, errors.New(
-			"barkPort must be non-zero when barkLifecycleEnabled is true",
-		))
-	}
-	if serving && c.BarkLifecycleEnabled && c.BarkClientCAFilePath == "" {
-		errs = append(errs, errors.New(
-			"barkClientCaFilePath is required when barkLifecycleEnabled is true",
-		))
-	}
-	if serving && c.BarkLifecycleEnabled &&
-		len(c.BarkLifecycleOperatorCertificateFingerprints) == 0 {
-		errs = append(errs, errors.New(
-			"barkLifecycleOperatorCertificateFingerprints requires at least one "+
-				"SHA-256 client certificate fingerprint when barkLifecycleEnabled is true",
-		))
-	}
-	errs = append(errs, validateCertificateFingerprints(
-		"barkLifecycleOperatorCertificateFingerprints",
-		c.BarkLifecycleOperatorCertificateFingerprints,
-	)...)
-	// mTLS client verification also needs the server's own TLS pair --
-	// without it, bark.Bark.Start's own equivalent check (independent of
-	// Lifecycle, since it applies to any TlsClientCAFilePath) would fail
-	// deep inside node startup instead of here. Checked independently of
-	// the barkPort/snapshotDir gate above so a barkClientCaFilePath set by
-	// mistake without barkPort/snapshotDir still gets flagged.
-	if serving && c.BarkClientCAFilePath != "" &&
-		(c.TlsCertFilePath == "" || c.TlsKeyFilePath == "") {
-		errs = append(errs, errors.New(
-			"barkClientCaFilePath requires tlsCertFilePath and tlsKeyFilePath "+
-				"to also be set for mTLS client verification",
-		))
+		errs = append(
+			errs,
+			errors.New(
+				"barkPort must be non-zero when barkLifecycleEnabled is true",
+			),
+		)
 	}
 
 	// Mempool
@@ -1261,19 +1168,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 						"when the aggregator is enabled",
 				))
 			}
-			if agg.OperatorTokenFile == "" {
-				errs = append(errs, errors.New(
-					"mithril.server.aggregator.operatorTokenFile is required "+
-						"when the aggregator is enabled",
-				))
-			}
-			if !isLoopbackListenHost(c.BindAddr) &&
-				!c.Mithril.Server.TLSEnabled {
-				errs = append(errs, errors.New(
-					"mithril.server.tlsEnabled is required when the aggregator "+
-						"uses a non-loopback bindAddr",
-				))
-			}
 		}
 	}
 	// Node-managed Mithril sync runs only inside a serving node, so the
@@ -1604,12 +1498,6 @@ func normalizeBindAddr(addr string) string {
 		return addr
 	}
 	return parsed.Unmap().String()
-}
-
-func isLoopbackListenHost(host string) bool {
-	literal := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-	addr, err := netip.ParseAddr(literal)
-	return err == nil && addr.Unmap().IsLoopback()
 }
 
 // isWildcardAddr reports whether a bind address selects all interfaces. The

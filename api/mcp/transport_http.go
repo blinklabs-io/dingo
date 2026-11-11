@@ -54,12 +54,8 @@ func NewServer(
 	resolvedTLS apiconfig.EffectiveTLS,
 	listenAddress string,
 ) (*Server, error) {
-	host, _, err := net.SplitHostPort(listenAddress)
-	if err != nil {
+	if _, _, err := net.SplitHostPort(listenAddress); err != nil {
 		return nil, fmt.Errorf("MCP listen address: %w", err)
-	}
-	if err := validateListenSecurity(host, cfg.AuthToken, resolvedTLS.Enabled); err != nil {
-		return nil, err
 	}
 	mcpServer, openedDB, err := NewMCPServer(ctx, cfg, deps)
 	if err != nil {
@@ -139,9 +135,8 @@ func (s *Server) handler() http.Handler {
 		http.NotFound(w, r)
 	})
 
-	// Wrap mux with security middleware (auth, rate limiting, and CORS)
+	// Wrap mux with middleware (rate limiting and CORS)
 	handler := newSecurityMiddleware(
-		s.config.AuthToken,
 		s.config.RateLimit,
 		s.config.Burst,
 		s.allowedOrigin,
@@ -202,26 +197,28 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.lifecycleMu.Unlock()
 	err := s.listener.Stop(ctx, stopHTTPServer)
 	if err != nil {
-		s.cleanupOnce.Do(func() { //nolint:contextcheck // Deferred shutdown cleanup must outlive the caller's timed-out ctx.
-			// A timed-out Start still owns publication; wait for it before closing
-			// the database, and prevent any later Start with the stopped gate.
-			go func() {
-				if cleanupErr := s.listener.Stop(
-					context.WithoutCancel(ctx),
-					closeHTTPServer,
-				); cleanupErr != nil {
-					s.logger.Error(
-						"MCP deferred shutdown failed",
-						"error",
-						cleanupErr,
-					)
-					return
-				}
-				if s.openedDB != nil {
-					_ = s.openedDB.Close()
-				}
-			}()
-		})
+		s.cleanupOnce.Do(
+			func() { //nolint:contextcheck // Deferred shutdown cleanup must outlive the caller's timed-out ctx.
+				// A timed-out Start still owns publication; wait for it before closing
+				// the database, and prevent any later Start with the stopped gate.
+				go func() {
+					if cleanupErr := s.listener.Stop(
+						context.WithoutCancel(ctx),
+						closeHTTPServer,
+					); cleanupErr != nil {
+						s.logger.Error(
+							"MCP deferred shutdown failed",
+							"error",
+							cleanupErr,
+						)
+						return
+					}
+					if s.openedDB != nil {
+						_ = s.openedDB.Close()
+					}
+				}()
+			},
+		)
 		return err
 	}
 	if s.openedDB != nil {

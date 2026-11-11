@@ -368,3 +368,37 @@ func TestCredentialFileWatchSeesASymlinkSwap(t *testing.T) {
 	require.NoError(t, os.Rename(tmp, data))
 	testutil.RequireReceive(t, reloads, 2*time.Second, "reload after the swap")
 }
+
+func TestCredentialFileWatchRetriesAFailedReload(t *testing.T) {
+	t.Parallel()
+	n := newTestNodeForBP(t, false, "", "", "", nil)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "opcert.cert")
+	require.NoError(t, os.WriteFile(file, []byte("counter 1"), 0o600))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	reloads := make(chan error, 4)
+	var calls int
+	go n.credentialFileWatchLoop(ctx, 5*time.Millisecond, []string{file},
+		func() error {
+			calls++
+			var err error
+			if calls == 1 {
+				err = errors.New("lifecycle busy")
+			}
+			reloads <- err
+			return err
+		},
+	)
+
+	testutil.RequireNoReceive(t, reloads, 50*time.Millisecond, "no change yet")
+	require.NoError(t, os.WriteFile(file, []byte("counter 2"), 0o600))
+	require.Error(t,
+		testutil.RequireReceive(t, reloads, 2*time.Second, "first reload"))
+	// The files do not change again; the failed reload is retried anyway.
+	require.NoError(t,
+		testutil.RequireReceive(t, reloads, 2*time.Second, "retried reload"))
+	testutil.RequireNoReceive(t, reloads, 50*time.Millisecond,
+		"a successful reload is not repeated")
+}

@@ -675,7 +675,9 @@ func (n *Node) configuredPoolKeySources() []*poolKeySource {
 // replaced, including the atomic symlink swap Kubernetes uses to update a
 // mounted Secret, and needs no file notification support. Waiting a poll
 // keeps a file still being written by hand from being read half done; a
-// reload validates everything anyway and refuses a broken set.
+// reload validates everything anyway and refuses a broken set. A failed
+// reload stays pending and is retried once per interval until it succeeds or
+// the files change.
 func (n *Node) credentialFileWatchLoop(
 	ctx context.Context,
 	interval time.Duration,
@@ -703,19 +705,21 @@ func (n *Node) credentialFileWatchLoop(
 			havePending = true
 			continue
 		}
-		havePending = false
-		loaded = current
 		n.config.logger.Info(
 			"block producer credential files changed; reloading",
 			"component", "node",
 		)
 		if err := reload(); err != nil {
+			// Keep the change pending so the next poll retries it.
 			n.config.logger.Error(
-				"block producer credential reload failed; keeping the loaded credentials",
+				"block producer credential reload failed; keeping the loaded credentials and retrying at the next poll",
 				"component", "node",
 				"error", err,
 			)
+			continue
 		}
+		havePending = false
+		loaded = current
 	}
 }
 

@@ -737,6 +737,7 @@ func TestRemoteClientSignDialsThroughTheBackoff(t *testing.T) {
 	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
 	other := newTestCert(t, "impostor")
 	certFile, keyFile := client.writePEM(t)
+	metrics := NewMetrics(prometheus.NewRegistry())
 	c, err := NewRemoteClient(RemoteConfig{
 		Address:          a.addr,
 		ClientCertFile:   certFile,
@@ -745,6 +746,7 @@ func TestRemoteClientSignDialsThroughTheBackoff(t *testing.T) {
 		KESVKey:          vkey,
 		OpCert:           opCert,
 		SignTimeout:      2 * time.Second,
+		Metrics:          metrics,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
@@ -752,8 +754,12 @@ func TestRemoteClientSignDialsThroughTheBackoff(t *testing.T) {
 	// Fail one dial to arm the backoff: a wrong pin, then the right one.
 	c.pin, _ = parseSPKIPin(other.spki)
 	require.ErrorIs(t, c.Prepare(), ErrServerPinMismatch)
+	require.InDelta(t, 1, promtestutil.ToFloat64(metrics.reconnectFailures), 0,
+		"a failed dial counts as a reconnect failure")
 	c.pin, _ = parseSPKIPin(a.server.spki)
 	require.ErrorContains(t, c.Prepare(), "backoff active")
+	require.InDelta(t, 1, promtestutil.ToFloat64(metrics.reconnectFailures), 0,
+		"a refusal inside the backoff is not a dial")
 	require.Error(t, c.CheckReady(), "CheckReady reports the last failure")
 
 	_, err = c.Sign(0, []byte("header"))
