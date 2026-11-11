@@ -8884,13 +8884,25 @@ move the dynamo's cursor past a header no other peer streams. When the budget
 runs out the header is not withheld either; the connection is resynced from the
 local chain (`ChainsyncResyncReasonGenesisCorroborationHoldExpired`).
 
-When the dynamo's connection closes, the driver elects the selector's best peer
-if it is an identified streaming peer, else another identified streaming peer,
-else a jumper: the best peer first, then those that agreed to a jump, which
-stream from their last agreed point. A jumper holds no ingress slot, so only an
-ingress-eligible one is elected, and it claims a slot as it is elected, before
-anything else can take the one its predecessor freed; the closed connection's
-client is removed first so that its slot is free. When no jumper can be
+When the dynamo's connection closes, the driver elects, in order, the
+selector's best peer if it is an identified CSJ peer; identified streaming peers
+that are not objectors; jumpers that agreed to a jump, which stream from their
+last agreed point; jumpers that did not; and last the objectors, which refused a
+jump and hold no ingress slot. A jumper holds no ingress slot, and neither does
+an objector until a header of its is admitted, so the elected peer claims a slot
+as it is elected, before anything else can take the one its predecessor freed;
+the closed connection's client is removed first so that its slot is free. A
+claim that promotes an observer also wakes a roll-forward callback the
+connection parked as an observer (`observerWakes`), which drops its header and
+lets the observer header gap re-intersect the connection as an ingress header;
+otherwise the callback would wait for a ledger snapshot publication or
+`catchUpBandWaitTimeout`. A dynamo that delivers no header (`DynamoStallTimeout`,
+30 seconds by default) while the local chain makes no progress
+(`LocalProgress`), and that the selector does not hold at the Limit on
+Eagerness (`Held`), is recycled with reason
+`chainsync_jumping_dynamo_stall`: the node's stall recycler skips observers and
+extends its grace during catch-up, so it does not bound a dynamo that stops
+delivering. When no jumper can be
 elected, no dynamo is elected until a refresh or an admission retries. When
 Genesis selection ends, the next delivered header or refresh disengages CSJ and
 every jumper streams from its last agreed point. The reference's objector

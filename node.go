@@ -741,6 +741,19 @@ func (n *Node) chainsyncJumpingConfig() ouroborosPkg.ChainsyncJumpingConfig {
 		JumpBlocks: func() uint64 {
 			return max(n.shelleySecurityParam()/2, 1)
 		},
+		// Either moves whenever the local chain does: the applied tip, or
+		// the downloaded primary chain ahead of it.
+		LocalProgress: func() uint64 {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return 0
+			}
+			return ls.Tip().Point.Slot + ls.PrimaryChainTipSlot()
+		},
+		Held: func(connId ouroboros.ConnectionId) bool {
+			return n.chainSelector != nil &&
+				n.chainSelector.EagernessPaused(connId)
+		},
 	}
 }
 

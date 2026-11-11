@@ -339,6 +339,9 @@ type Ouroboros struct {
 	// catchUpBandWaitTimeout bounds how long a roll-forward callback waits
 	// in ChainsyncAwaitCatchUpBand.
 	catchUpBandWaitTimeout time.Duration
+	// observerWakes releases a callback parked as an observer when its
+	// connection is promoted to ingress.
+	observerWakes observerWakes
 	// eagernessWaitTimeout bounds how long a roll-forward callback waits in
 	// ChainsyncAwaitEagerness.
 	eagernessWaitTimeout time.Duration

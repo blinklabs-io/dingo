@@ -2351,6 +2351,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// like an ingress connection; its delivered history is kept.
 		if !ingressEligible && o.chainsyncObserverHorizonWait != nil {
 			if err := o.awaitObserverHorizon(ctx, chainsyncEvent); err != nil {
+				if errors.Is(err, errObserverPromoted) {
+					return o.dropPromotedObserverHeader(ctx, clientSession, tip)
+				}
 				return err
 			}
 			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
@@ -2508,6 +2511,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				!ledger.IsHeaderVerificationWithheld(verifyErr) &&
 				!errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
 				patienceResume = false
+				o.config.Logger.Warn(
+					"chainsync: recycling connection after observer header verification failure",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+					"error", verifyErr,
+				)
 				o.eventBus.Publish(
 					ledger.ConnectionRecycleRequestedEventType,
 					event.NewEvent(
@@ -3180,19 +3190,44 @@ func (o *Ouroboros) awaitCatchUpBand(
 // the ledger's forecast horizon. Like awaitCatchUpBand, a wait that reaches
 // its bound is not an error: the header then takes the ordinary observer path,
 // so the bound limits how long a promotion can go unnoticed. Cancellation is
-// returned.
+// returned. A promotion of the connection to ingress ends the wait with
+// errObserverPromoted: the ledger's wait ends only when a snapshot is
+// published, and a promoted connection may be the only one that can feed it.
 func (o *Ouroboros) awaitObserverHorizon(
 	ctx ochainsync.CallbackContext,
 	e ledger.ChainsyncEvent,
 ) error {
 	admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 	defer cancelAdmission()
+	wake, unregister := o.observerWakes.register(ctx.ConnectionId)
+	defer unregister()
+	// A promotion between the callback's role decision and the registration
+	// has nothing to wake.
+	if o.chainsyncState != nil {
+		if observer, tracked := o.chainsyncState.ClientObservabilityOnly(
+			ctx.ConnectionId,
+		); tracked && !observer {
+			return errObserverPromoted
+		}
+	}
 	waitCtx, cancelWait := context.WithTimeout(
 		admissionCtx,
 		o.catchUpBandWaitTimeout,
 	)
 	defer cancelWait()
+	waitCtx, cancelCause := context.WithCancelCause(waitCtx)
+	defer cancelCause(nil)
+	go func() {
+		select {
+		case <-wake:
+			cancelCause(errObserverPromoted)
+		case <-waitCtx.Done():
+		}
+	}()
 	err := o.chainsyncObserverHorizonWait(waitCtx, e)
+	if errors.Is(context.Cause(waitCtx), errObserverPromoted) {
+		return errObserverPromoted
+	}
 	if err == nil {
 		return nil
 	}
@@ -3200,6 +3235,35 @@ func (o *Ouroboros) awaitObserverHorizon(
 		return nil
 	}
 	return fmt.Errorf("chainsync: await observer forecast horizon: %w", err)
+}
+
+// dropPromotedObserverHeader drops a header whose callback was parked as an
+// observer's and whose connection has since been promoted. The header was never
+// authenticated or retained, and the connection's cursor stands at it while the
+// local chain moved on, so the observer header gap makes the promotion
+// re-intersect and deliver it again as an ingress header.
+func (o *Ouroboros) dropPromotedObserverHeader(
+	ctx ochainsync.CallbackContext,
+	session chainsync.ClientSessionToken,
+	tip ochainsync.Tip,
+) error {
+	if o.chainsyncState != nil &&
+		o.chainsyncState.RecordClientObserverHeaderGap(
+			ctx.ConnectionId,
+			session,
+		) {
+		o.reconcileChainsyncIngressAdmission(
+			ctx.ConnectionId,
+			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
+		)
+	}
+	o.config.Logger.Debug(
+		"chainsync: observer header dropped, connection promoted while it waited",
+		"component", "ouroboros",
+		"connection_id", ctx.ConnectionId.String(),
+	)
+	o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+	return nil
 }
 
 // admitChainsyncHeader runs the future-header admission for one delivered
@@ -3481,6 +3545,7 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 			if !exists || observabilityOnly {
 				return false
 			}
+			o.observerWakes.wake(connId)
 		}
 		if o.chainsyncState.ClientObserverHeaderGap(connId) {
 			// Let the promoting header's stale-cursor check install its more

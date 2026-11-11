@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -58,6 +60,17 @@ const csjMaxJumpPoints = 8
 // timeout (ochainsync.IdleTimeout).
 const csjDefaultRefreshInterval = (time.Duration(okeepalive.DefaultKeepAlivePeriod)*time.Second +
 	okeepalive.ServerTimeout) / 4
+
+// csjDefaultDynamoStallTimeout is how long a dynamo may deliver no header while
+// the local chain makes no progress before it is replaced. The dynamo is the
+// only peer that feeds the jump records, and the node's own stall recycler
+// neither watches an observer nor acts within a catch-up's grace period, so
+// this bound is the one that keeps Genesis sync moving.
+const csjDefaultDynamoStallTimeout = 30 * time.Second
+
+// csjDynamoStallReason is the reason of the recycle request for a stalled
+// dynamo.
+const csjDynamoStallReason = "chainsync_jumping_dynamo_stall"
 
 // ChainsyncJumpingConfig wires ChainSync Jumping to chain selection. CSJ runs
 // only when Enabled is set and every hook is non-nil.
@@ -98,6 +111,16 @@ type ChainsyncJumpingConfig struct {
 	// candidate head whether or not the dynamo progressed. Zero selects
 	// csjDefaultRefreshInterval.
 	RefreshInterval time.Duration
+	// DynamoStallTimeout is how long a dynamo may deliver no header, and the
+	// local chain make no progress, before it is recycled. Zero selects
+	// csjDefaultDynamoStallTimeout.
+	DynamoStallTimeout time.Duration
+	// LocalProgress returns a value that changes whenever the local chain
+	// advances. Optional.
+	LocalProgress func() uint64
+	// Held reports whether the selector holds the connection's header stream
+	// on purpose (the Limit on Eagerness). Optional.
+	Held func(ouroboros.ConnectionId) bool
 }
 
 func (c ChainsyncJumpingConfig) usable() bool {
@@ -145,6 +168,15 @@ type chainsyncJumping struct {
 	streamers map[ouroboros.ConnectionId]struct{}
 	objectors map[ouroboros.ConnectionId]struct{}
 
+	// progressAt is when the dynamo last delivered a header, or the local
+	// chain last advanced, or the dynamo was elected. progressMark is the
+	// last LocalProgress value seen, valid once markSeen is set.
+	progressAt   time.Time
+	progressMark uint64
+	markSeen     bool
+
+	now func() time.Time
+
 	metrics *csjMetrics
 }
 
@@ -164,6 +196,7 @@ func newChainsyncJumping(
 		jumpers:   make(map[ouroboros.ConnectionId]*csjJumper),
 		streamers: make(map[ouroboros.ConnectionId]struct{}),
 		objectors: make(map[ouroboros.ConnectionId]struct{}),
+		now:       time.Now,
 	}
 	if registerer != nil {
 		factory := promauto.With(registerer)
@@ -362,6 +395,7 @@ func (j *chainsyncJumping) setDynamoLocked(connId ouroboros.ConnectionId) {
 	j.lastJumpBlock = 0
 	j.streamBlock = 0
 	j.restartBlock = 0
+	j.progressAt = j.now()
 	delete(j.streamers, connId)
 	delete(j.jumpers, connId)
 }
@@ -388,13 +422,72 @@ func (o *Ouroboros) csjForget(connId ouroboros.ConnectionId) {
 	}
 }
 
-// csjRotateDynamo elects a new dynamo: the selector's best peer when it is a
-// CSJ peer, else a streaming peer, else a jumper, which then streams from
-// the last point it agreed to. A jumper holds no ingress slot, and jumps name
+// csjCandidate is a peer that can be elected dynamo.
+type csjCandidate struct {
+	connId ouroboros.ConnectionId
+	// jumper is set for a peer that sends no RequestNext and so is started
+	// streaming when elected.
+	jumper bool
+}
+
+// csjElectionOrderLocked ranks the peers that can replace a dynamo: the
+// selector's best peer; streamers that are not objectors, which stream already
+// and need no protocol transition; jumpers that agreed to a jump, then those
+// that did not, which resume from a dynamo point; and last the objectors,
+// which refused a jump, so they follow another chain or lag the dynamo, and
+// hold no ingress slot. It must be called with j.mu held.
+func (j *chainsyncJumping) csjElectionOrderLocked(
+	best *ouroboros.ConnectionId,
+) []csjCandidate {
+	var streamers, agreed, unagreed, objectors []ouroboros.ConnectionId
+	for id := range j.streamers {
+		if best != nil && id == *best {
+			continue
+		}
+		if _, objector := j.objectors[id]; objector {
+			objectors = append(objectors, id)
+		} else {
+			streamers = append(streamers, id)
+		}
+	}
+	for id, jumper := range j.jumpers {
+		switch {
+		case best != nil && id == *best:
+		case jumper.agreed:
+			agreed = append(agreed, id)
+		default:
+			unagreed = append(unagreed, id)
+		}
+	}
+	candidates := make([]csjCandidate, 0, len(j.streamers)+len(j.jumpers))
+	if best != nil {
+		if _, ok := j.streamers[*best]; ok {
+			candidates = append(candidates, csjCandidate{connId: *best})
+		} else if _, ok := j.jumpers[*best]; ok {
+			candidates = append(
+				candidates,
+				csjCandidate{connId: *best, jumper: true},
+			)
+		}
+	}
+	appendAll := func(ids []ouroboros.ConnectionId, jumper bool) {
+		slices.SortFunc(ids, compareConnIds)
+		for _, id := range ids {
+			candidates = append(candidates, csjCandidate{connId: id, jumper: jumper})
+		}
+	}
+	appendAll(streamers, false)
+	appendAll(agreed, true)
+	appendAll(unagreed, true)
+	appendAll(objectors, false)
+	return candidates
+}
+
+// csjRotateDynamo elects a new dynamo from csjElectionOrderLocked's ranking.
+// The elected peer holds an ingress slot, claimed as it is elected: jumps name
 // points of the dynamo's candidate fragment, which only ingress deliveries
-// extend, so a jumper is elected only if it is ingress-eligible and claims a
-// slot as it is elected. When none can, no dynamo is elected; the refresh
-// loop and the next admission retry.
+// extend, so a peer that cannot claim one is passed over. When none can, no
+// dynamo is elected; the refresh loop and the next admission retry.
 func (o *Ouroboros) csjRotateDynamo() {
 	j := o.csj
 	if j == nil {
@@ -410,57 +503,59 @@ func (o *Ouroboros) csjRotateDynamo() {
 		j.mu.Unlock()
 		return
 	}
-	streamer, found := ouroboros.ConnectionId{}, false
-	if best != nil {
-		if _, ok := j.streamers[*best]; ok {
-			streamer, found = *best, true
-		}
-	}
-	if !found {
-		streamer, found = firstConnId(j.streamers)
-	}
-	if found {
-		j.setDynamoLocked(streamer)
-		delete(j.objectors, streamer)
-		j.publishGaugesLocked()
-		j.mu.Unlock()
-		o.csjLogRotation(streamer, false)
-		return
-	}
-	// Prefer the best peer, then jumpers that agreed to a jump: they can
-	// resume streaming from a dynamo point.
-	var candidates, unagreed []ouroboros.ConnectionId
-	for id, jumper := range j.jumpers {
-		switch {
-		case best != nil && id == *best:
-		case jumper.agreed:
-			candidates = append(candidates, id)
-		default:
-			unagreed = append(unagreed, id)
-		}
-	}
-	slices.SortFunc(candidates, compareConnIds)
-	slices.SortFunc(unagreed, compareConnIds)
-	candidates = append(candidates, unagreed...)
-	if best != nil {
-		if _, ok := j.jumpers[*best]; ok {
-			candidates = append([]ouroboros.ConnectionId{*best}, candidates...)
-		}
-	}
+	candidates := j.csjElectionOrderLocked(best)
 	j.mu.Unlock()
-	for _, id := range candidates {
-		if !j.identified(id) || !o.shouldPublishChainsyncToLedger(id) {
+	for _, c := range candidates {
+		if !j.identified(c.connId) ||
+			!o.shouldPublishChainsyncToLedger(c.connId) {
 			continue
 		}
-		resume, ok := o.csjPromoteJumper(id)
+		if !c.jumper {
+			if o.csjPromoteStreamer(c.connId) {
+				o.csjLogRotation(c.connId, false)
+				return
+			}
+			continue
+		}
+		resume, ok := o.csjPromoteJumper(c.connId)
 		if !ok {
 			continue
 		}
-		o.csjLogRotation(id, true)
-		o.csjStartStreaming(id, resume, "dynamo")
+		o.csjLogRotation(c.connId, true)
+		o.csjStartStreaming(c.connId, resume, "dynamo")
 		return
 	}
 	o.csjReleaseUnidentified()
+}
+
+// csjPromoteStreamer makes streamer the dynamo and claims it an ingress slot.
+// A streamer that was an objector holds none. It restores the streamer and
+// returns false when it is no longer one, a dynamo was elected meanwhile, or no
+// slot is free. Claiming the slot wakes a callback the connection parked as an
+// observer.
+func (o *Ouroboros) csjPromoteStreamer(connId ouroboros.ConnectionId) bool {
+	j := o.csj
+	j.mu.Lock()
+	if _, ok := j.streamers[connId]; !ok || j.hasDynamo {
+		j.mu.Unlock()
+		return false
+	}
+	j.setDynamoLocked(connId)
+	j.mu.Unlock()
+	claimed := o.reconcileChainsyncIngressAdmission(connId, true)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	defer j.publishGaugesLocked()
+	elected := j.hasDynamo && j.dynamo == connId
+	if !claimed && elected {
+		j.hasDynamo = false
+		j.streamers[connId] = struct{}{}
+	}
+	if !claimed || !elected {
+		return false
+	}
+	delete(j.objectors, connId)
+	return true
 }
 
 // csjReleaseUnidentified returns jumpers without a corroboration identity to
@@ -603,6 +698,7 @@ func (o *Ouroboros) csjObserveDelivery(
 	j.mu.Lock()
 	isDynamo := j.hasDynamo && j.dynamo == connId
 	if isDynamo {
+		j.progressAt = j.now()
 		// A header at or below the last one starts a new stream.
 		if j.streamBlock != 0 && blockNumber <= j.streamBlock {
 			j.restartBlock = blockNumber
@@ -653,15 +749,25 @@ func (o *Ouroboros) csjStartRefresh() {
 	if interval <= 0 {
 		interval = csjDefaultRefreshInterval
 	}
+	stallTimeout := j.cfg.DynamoStallTimeout
+	if stallTimeout <= 0 {
+		stallTimeout = csjDefaultDynamoStallTimeout
+	}
 	o.csjGo(func(ctx context.Context) {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		// Checked several times per timeout, so a stall is acted on well
+		// within the refresh interval.
+		stallTicker := time.NewTicker(max(stallTimeout/3, time.Millisecond))
+		defer stallTicker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				o.csjRefresh() //nolint:contextcheck // Its goroutines run under the same lifecycle context.
+			case <-stallTicker.C:
+				o.csjCheckDynamoStall(j.now())
 			}
 		}
 	})
@@ -1109,4 +1215,73 @@ func compareConnIds(a, b ouroboros.ConnectionId) int {
 		return 1
 	}
 	return 0
+}
+
+// csjCheckDynamoStall recycles the dynamo when it has delivered no header for
+// the stall timeout while the local chain made no progress either. The dynamo
+// feeds the jump records, so a dynamo that delivers nothing, parked in a wait
+// that nothing releases, idle in its protocol loop, or demoted to an observer,
+// stops all of Genesis sync. The node's stall recycler does not catch it:
+// it skips observers and delays recycling while a catch-up is under way. A
+// dynamo the selector holds at the Limit on Eagerness is waiting on purpose
+// and restarts the clock.
+func (o *Ouroboros) csjCheckDynamoStall(now time.Time) {
+	j := o.csj
+	if j == nil {
+		return
+	}
+	var mark uint64
+	if j.cfg.LocalProgress != nil {
+		mark = j.cfg.LocalProgress()
+	}
+	j.mu.Lock()
+	if !j.hasDynamo {
+		j.mu.Unlock()
+		return
+	}
+	dynamo := j.dynamo
+	j.mu.Unlock()
+	held := j.cfg.Held != nil && j.cfg.Held(dynamo)
+	timeout := j.cfg.DynamoStallTimeout
+	if timeout <= 0 {
+		timeout = csjDefaultDynamoStallTimeout
+	}
+	j.mu.Lock()
+	if !j.hasDynamo || j.dynamo != dynamo {
+		j.mu.Unlock()
+		return
+	}
+	if held || (j.markSeen && mark != j.progressMark) {
+		j.progressAt = now
+	}
+	j.markSeen = true
+	j.progressMark = mark
+	stalled := now.Sub(j.progressAt) > timeout
+	idle := now.Sub(j.progressAt)
+	if stalled {
+		// The close that follows the recycle elects the replacement; until
+		// it lands, do not request the recycle again.
+		j.progressAt = now
+	}
+	j.mu.Unlock()
+	if !stalled || o.eventBus == nil {
+		return
+	}
+	o.config.Logger.Warn(
+		"chainsync jumping: dynamo delivered no header, recycling it",
+		"component", "ouroboros",
+		"connection_id", dynamo.String(),
+		"idle", idle,
+		"stall_timeout", timeout,
+	)
+	o.eventBus.Publish(
+		ledger.ConnectionRecycleRequestedEventType,
+		event.NewEvent(
+			ledger.ConnectionRecycleRequestedEventType,
+			ledger.ConnectionRecycleRequestedEvent{
+				ConnectionId: dynamo,
+				Reason:       csjDynamoStallReason,
+			},
+		),
+	)
 }
