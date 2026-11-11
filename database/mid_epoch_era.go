@@ -49,7 +49,12 @@ func parseMidEpochEraSwitch(value string) (MidEpochEraSwitch, error) {
 	}
 	var nums [4]uint64
 	for i, part := range parts {
-		n, err := strconv.ParseUint(part, 10, 64)
+		// Era fields are stored as uint, so bound them to its width.
+		bits := 64
+		if i >= 2 {
+			bits = strconv.IntSize
+		}
+		n, err := strconv.ParseUint(part, 10, bits)
 		if err != nil {
 			return MidEpochEraSwitch{}, fmt.Errorf(
 				"malformed mid-epoch era switch %q: %w", value, err,
