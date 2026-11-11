@@ -129,6 +129,16 @@ func (n *Node) chainsyncObserveAwaitReply(
 	n.chainSelector.SetPeerIdling(connId, point)
 }
 
+func (n *Node) chainsyncObserveRollForward(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	if n.chainSelector == nil {
+		return
+	}
+	n.chainSelector.ClearPeerIdling(connId, point)
+}
+
 // chainsyncApplyEligible gates whether a peer's headers/rollbacks are APPLIED to
 // the ledger, on top of ingress eligibility. It defers to the chain selector's
 // corroboration decision so an uncorroborated Genesis fast source is observed
@@ -216,6 +226,12 @@ func (n *Node) chainsyncAwaitCatchUpBand(
 		return nil
 	}
 	return n.chainSelector.AwaitCatchUpBand(ctx, connId, observedTip)
+}
+
+// chainsyncAdvertisedTipStale reports whether chain selection excludes a peer
+// advertising tip. With no chain selector wired no tip is stale.
+func (n *Node) chainsyncAdvertisedTipStale(tip ochainsync.Tip) bool {
+	return n.chainSelector != nil && n.chainSelector.AdvertisedTipStale(tip)
 }
 
 // chainsyncHasBestPeer reports whether chain selection has a best peer.

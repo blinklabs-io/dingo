@@ -106,10 +106,9 @@ func TestEmbedFS_AllNetworks(t *testing.T) {
 	}
 }
 
-func TestEmbedFS_PrimeTestnet(t *testing.T) {
+func TestEmbedFS_PrimeNetworks(t *testing.T) {
 	t.Parallel()
 
-	const network = "prime-testnet"
 	expectedFiles := []string{
 		"configuration.yaml",
 		"topology.json",
@@ -119,30 +118,36 @@ func TestEmbedFS_PrimeTestnet(t *testing.T) {
 		"genesis/shelley/genesis.conway.json",
 	}
 
-	for _, file := range expectedFiles {
-		if _, err := EmbeddedConfigFS.Open(network + "/" + file); err != nil {
-			t.Errorf("expected to find %s/%s: %v", network, file, err)
-		}
-	}
+	for _, network := range []string{"prime-testnet", "prime-mainnet"} {
+		t.Run(network, func(t *testing.T) {
+			t.Parallel()
 
-	cfg, err := NewCardanoNodeConfigFromEmbedFS(
-		EmbeddedConfigFS,
-		network+"/configuration.yaml",
-	)
-	if err != nil {
-		t.Fatalf("failed to load %s config: %v", network, err)
-	}
-	if cfg.ShelleyGenesis() == nil {
-		t.Fatal("expected ShelleyGenesis to be loaded")
-	}
-	if cfg.ByronGenesis() == nil {
-		t.Fatal("expected ByronGenesis to be loaded")
+			for _, file := range expectedFiles {
+				if _, err := EmbeddedConfigFS.Open(network + "/" + file); err != nil {
+					t.Errorf("expected to find %s/%s: %v", network, file, err)
+				}
+			}
+
+			cfg, err := NewCardanoNodeConfigFromEmbedFS(
+				EmbeddedConfigFS,
+				network+"/configuration.yaml",
+			)
+			if err != nil {
+				t.Fatalf("failed to load %s config: %v", network, err)
+			}
+			if cfg.ShelleyGenesis() == nil {
+				t.Fatal("expected ShelleyGenesis to be loaded")
+			}
+			if cfg.ByronGenesis() == nil {
+				t.Fatal("expected ByronGenesis to be loaded")
+			}
+		})
 	}
 }
 
 // TestEmbeddedConfigPathReachesEveryNetwork is the defect the helper exists
 // for: every caller that has only a network name derived the config path by
-// appending "/config.json", and prime-testnet's upstream config is named
+// appending "/config.json", and the prime networks' upstream config is named
 // configuration.yaml, so that network could not be started from the embedded
 // filesystem at all.
 //

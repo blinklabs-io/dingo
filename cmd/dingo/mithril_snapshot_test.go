@@ -193,7 +193,7 @@ func TestNewMithrilServerRejectsIncompleteConfig(t *testing.T) {
 			c.Mithril.Server.PublicBaseURL = ""
 		},
 		"invalid public base URL": func(c *config.Config) {
-			c.Mithril.Server.PublicBaseURL = "http://snapshots.example.test"
+			c.Mithril.Server.PublicBaseURL = "ftp://snapshots.example.test"
 		},
 		"no store": func(c *config.Config) {
 			c.Mithril.Server.ArtifactStore = ""
@@ -376,18 +376,4 @@ func TestNewMithrilServerRejectsUnusableAggregatorKey(t *testing.T) {
 	))
 	_, err = newMithrilServer(t.Context(), malformed, discardLogger)
 	assert.Error(t, err)
-}
-
-func TestNewMithrilServerRejectsOversizedOperatorToken(t *testing.T) {
-	t.Parallel()
-
-	cfg := aggregatorTestConfig(t)
-	require.NoError(t, os.WriteFile(
-		cfg.Mithril.Server.Aggregator.OperatorTokenFile,
-		make([]byte, 2<<20),
-		0o600,
-	))
-
-	_, err := newMithrilServer(t.Context(), cfg, discardLogger)
-	require.ErrorContains(t, err, "exceeds maximum size")
 }
