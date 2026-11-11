@@ -3199,11 +3199,15 @@ func (o *Ouroboros) awaitObserverHorizon(
 ) error {
 	admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 	defer cancelAdmission()
-	wake, unregister := o.observerWakes.register(ctx.ConnectionId)
-	defer unregister()
-	// A promotion between the callback's role decision and the registration
-	// has nothing to wake.
+	var wake <-chan struct{}
 	if o.chainsyncState != nil {
+		var unregister func()
+		wake, unregister = o.chainsyncState.AwaitClientPromotion(
+			ctx.ConnectionId,
+		)
+		defer unregister()
+		// A promotion between the callback's role decision and the
+		// registration has nothing to wake.
 		if observer, tracked := o.chainsyncState.ClientObservabilityOnly(
 			ctx.ConnectionId,
 		); tracked && !observer {
@@ -3236,6 +3240,10 @@ func (o *Ouroboros) awaitObserverHorizon(
 	}
 	return fmt.Errorf("chainsync: await observer forecast horizon: %w", err)
 }
+
+// errObserverPromoted ends a wait a connection's callback entered as an
+// observer once the connection holds an ingress slot.
+var errObserverPromoted = errors.New("observer promoted to ingress")
 
 // dropPromotedObserverHeader drops a header whose callback was parked as an
 // observer's and whose connection has since been promoted. The header was never
@@ -3545,7 +3553,6 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 			if !exists || observabilityOnly {
 				return false
 			}
-			o.observerWakes.wake(connId)
 		}
 		if o.chainsyncState.ClientObserverHeaderGap(connId) {
 			// Let the promoting header's stale-cursor check install its more

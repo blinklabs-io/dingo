@@ -12,33 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ouroboros
+package chainsync
 
 import (
-	"errors"
 	"sync"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
-// errObserverPromoted ends a wait a connection's callback entered as an
-// observer once the connection holds an ingress slot.
-var errObserverPromoted = errors.New("observer promoted to ingress")
-
-// observerWakes lets a promotion reach the roll-forward callback its
-// connection parked as an observer. Such a callback is held on something that
-// has nothing to do with the connection's role, so without the wake it would
-// keep waiting on the connection's behalf after the connection became the
-// header source.
-type observerWakes struct {
+// promotionWaits releases waits registered for a tracked client when it moves
+// from observability-only to an eligible slot. State fires it from the one
+// method every promotion goes through, so a promotion no caller of the
+// ouroboros package made, such as a root handed a slot another client freed,
+// still reaches a roll-forward callback the connection parked as an observer.
+type promotionWaits struct {
 	mu    sync.Mutex
 	waits map[ouroboros.ConnectionId]chan struct{}
 }
 
-// register returns a channel closed by wake(connId), and the function that
-// releases the registration. A connection runs one callback at a time, so a
-// later registration replaces an earlier one.
-func (w *observerWakes) register(
+func (w *promotionWaits) register(
 	connId ouroboros.ConnectionId,
 ) (<-chan struct{}, func()) {
 	ch := make(chan struct{})
@@ -57,8 +49,7 @@ func (w *observerWakes) register(
 	}
 }
 
-// wake releases the wait registered for connId, if any.
-func (w *observerWakes) wake(connId ouroboros.ConnectionId) {
+func (w *promotionWaits) wake(connId ouroboros.ConnectionId) {
 	w.mu.Lock()
 	ch, ok := w.waits[connId]
 	delete(w.waits, connId)
@@ -66,4 +57,16 @@ func (w *observerWakes) wake(connId ouroboros.ConnectionId) {
 	if ok {
 		close(ch)
 	}
+}
+
+// AwaitClientPromotion returns a channel that is closed when connId moves
+// from observability-only to an eligible slot, and the function that releases
+// the registration. A connection runs one roll-forward callback at a time, so
+// a later registration replaces an earlier one. The caller must check the
+// client's role after registering: a promotion that landed before the
+// registration closes nothing.
+func (s *State) AwaitClientPromotion(
+	connId ouroboros.ConnectionId,
+) (<-chan struct{}, func()) {
+	return s.promotionWaits.register(connId)
 }

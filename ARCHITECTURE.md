@@ -8892,9 +8892,10 @@ jump and hold no ingress slot. A jumper holds no ingress slot, and neither does
 an objector until a header of its is admitted, so the elected peer claims a slot
 as it is elected, before anything else can take the one its predecessor freed;
 the closed connection's client is removed first so that its slot is free. A
-claim that promotes an observer also wakes a roll-forward callback the
-connection parked as an observer (`observerWakes`), which drops its header and
-lets the observer header gap re-intersect the connection as an ingress header;
+promotion of an observer, by such a claim or by a root handed a freed slot,
+wakes a roll-forward callback the connection parked as an observer
+(`chainsync.State.AwaitClientPromotion`), which drops its header and lets the
+observer header gap re-intersect the connection as an ingress header;
 otherwise the callback would wait for a ledger snapshot publication or
 `catchUpBandWaitTimeout`. A dynamo that delivers no header (`DynamoStallTimeout`,
 30 seconds by default) while the local chain makes no progress
