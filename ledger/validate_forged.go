@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -162,10 +161,6 @@ func (ls *LedgerState) validateForgedTxs(
 	txs := block.Transactions()
 	if len(txs) == 0 {
 		return nil
-	}
-
-	if err := ls.ValidateBlockReferenceScripts(ctx, block); err != nil {
-		return err
 	}
 
 	parentHash := LeiosValidationParentHash(block.Header())
@@ -318,6 +313,7 @@ func (ls *LedgerState) validateForgedTxsOnce(
 	}
 	// Non-nil even at origin, so the session always checks its tip.
 	sessionTip := append(make([]byte, 0, len(tip.Hash)), tip.Hash...)
+	slot := block.SlotNumber()
 	// consumedUtxos: inputs spent within this block (prevents intra-block
 	// double-spend).
 	// createdUtxos: outputs produced within this block and not yet in the
@@ -325,9 +321,10 @@ func (ls *LedgerState) validateForgedTxsOnce(
 	err := ls.withTxValidationSession(
 		ctx,
 		sessionTip,
-		nil,
+		&slot,
 		false,
 		false,
+		block,
 		func(
 			validate func(
 				ledger.Transaction,
@@ -402,6 +399,9 @@ func (ls *LedgerState) validateForgedTxsOnce(
 // ValidateBlockReferenceScripts checks a locally built block's aggregate
 // reference-script budget before adoption. It does not run header crypto or
 // transaction scripts, and is required even when full self-validation is off.
+// The limits are those of the ledger view ticked to the block's slot, the same
+// view full forged validation uses, so a block built across an epoch boundary
+// is judged under the parameters enacted there.
 func (ls *LedgerState) ValidateBlockReferenceScripts(
 	ctx context.Context,
 	block ledger.Block,
@@ -415,21 +415,32 @@ func (ls *LedgerState) ValidateBlockReferenceScripts(
 	if block.Era().Id < conway.EraIdConway || len(block.Transactions()) == 0 {
 		return nil
 	}
-	snapshot := ls.loadConsensusSnapshot()
-	if ls.skipDijkstraTxValidation(snapshot.currentEra.Id) {
-		return nil
-	}
-
-	pp := referenceScriptParams(
+	slot := block.SlotNumber()
+	err := ls.withTxValidationSession(
+		ctx,
+		nil,
+		&slot,
+		false,
+		false,
 		block,
-		snapshot.currentEra,
-		ls.eraList(),
-		snapshot.currentPParams,
-		snapshot.prevEraPParams,
+		func(
+			_ func(
+				ledger.Transaction,
+				map[utxoref.Key]struct{},
+				map[utxoref.Key]lcommon.Utxo,
+				*utxoref.StateOverlay,
+			) error,
+			_ func() bool,
+			_ func(func() error) (bool, error),
+			_ txValidationApplyFunc,
+		) error {
+			return nil
+		},
 	)
-	return ls.db.Transaction(ctx, false).Do(func(txn *database.Txn) error {
-		lv := &LedgerView{txn: txn, ls: ls}
-		err := validateBlockReferenceScripts(block, pp, lv)
-		return storageFaultOrErr(lv, err)
-	})
+	if errors.Is(err, ErrLeiosValidationParentSuperseded) {
+		// The ledger moved while the session took its snapshot; the block
+		// was not judged.
+		return fmt.Errorf("%w: %w", forging.ErrForgedBlockStateChanged, err)
+	}
+	return err
 }

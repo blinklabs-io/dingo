@@ -129,6 +129,16 @@ func (n *Node) chainsyncObserveAwaitReply(
 	n.chainSelector.SetPeerIdling(connId, point)
 }
 
+func (n *Node) chainsyncObserveRollForward(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	if n.chainSelector == nil {
+		return
+	}
+	n.chainSelector.ClearPeerIdling(connId, point)
+}
+
 // chainsyncApplyEligible gates whether a peer's headers/rollbacks are APPLIED to
 // the ledger, on top of ingress eligibility. It defers to the chain selector's
 // corroboration decision so an uncorroborated Genesis fast source is observed
