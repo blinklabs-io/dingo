@@ -70,8 +70,17 @@ type PeerChainTip struct {
 	// remaining entries are consecutive block numbers, which lets density
 	// comparisons align two frontiers without scanning a full Genesis window.
 	observedPointBaseBlock uint64
-	observedTipHistory     []ochainsync.Tip
-	idling                 bool
+	// sessionAnchor is the point the peer's chainsync last rolled back to when
+	// the retained frontier did not hold it, including the rollback that
+	// opens a session at its FindIntersect point. The next header extends it,
+	// so recordObservedPoint places it one block below that header as the
+	// frontier's first point. Without it, two peers whose forks branch at the
+	// point their sessions intersected share no frontier point, and density
+	// comparison cannot find their common intersection.
+	sessionAnchor      ocommon.Point
+	sessionAnchorSet   bool
+	observedTipHistory []ochainsync.Tip
+	idling             bool
 	// admittedTipHistory retains only points a ledger admission explicitly
 	// accepted. It is separate from observedTipHistory because legacy rollback
 	// and recovery observations are not proof of ledger admission.
@@ -136,7 +145,7 @@ func newPeerChainTipFromRollback(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) *PeerChainTip {
-	return &PeerChainTip{
+	peerTip := &PeerChainTip{
 		ConnectionId:        connId,
 		Tip:                 tip,
 		ObservedTip:         ochainsync.Tip{Point: clonePoint(point)},
@@ -144,6 +153,18 @@ func newPeerChainTipFromRollback(
 		awaitingFirstHeader: true,
 		LastUpdated:         time.Now(),
 	}
+	peerTip.setSessionAnchor(point)
+	return peerTip
+}
+
+// setSessionAnchor records point as the anchor for the next delivered header.
+// The origin carries no hash and cannot anchor a frontier.
+func (p *PeerChainTip) setSessionAnchor(point ocommon.Point) {
+	if len(point.Hash) == 0 {
+		return
+	}
+	p.sessionAnchor = clonePoint(point)
+	p.sessionAnchorSet = true
 }
 
 // UpdateTip updates the peer's chain tip, VRF output, and last updated timestamp.
@@ -267,6 +288,7 @@ func (p *PeerChainTip) ApplyRollback(
 	}
 	if keepPoints == 0 {
 		p.resetObservedPoints()
+		p.setSessionAnchor(point)
 	}
 }
 
@@ -274,6 +296,8 @@ func (p *PeerChainTip) resetObservedPoints() {
 	p.observedPoints = nil
 	p.observedPointsRef = windowRef[ocommon.Point]{}
 	p.observedPointBaseBlock = 0
+	p.sessionAnchor = ocommon.Point{}
+	p.sessionAnchorSet = false
 }
 
 func (p *PeerChainTip) resetObservedFrontier() {
@@ -423,6 +447,23 @@ func (p *PeerChainTip) recordObservedPoint(
 				uint64(len(p.observedPoints)-1)
 		}
 		switch {
+		case len(p.observedPoints) == 0 && p.sessionAnchorSet &&
+			blockNumber > 0 && p.sessionAnchor.Slot < slot:
+			// Chainsync delivers the header after a rollback as the child of
+			// the rollback point, so the anchor is the block below it.
+			p.observedPointBaseBlock = blockNumber - 1
+			p.observedPoints = windowAppend(
+				&p.observedPointsRef,
+				p.observedPoints,
+				p.sessionAnchor,
+				pointsEqual,
+			)
+			p.observedPoints = windowAppend(
+				&p.observedPointsRef,
+				p.observedPoints,
+				clonePoint(point),
+				pointsEqual,
+			)
 		case len(p.observedPoints) == 0:
 			p.observedPointBaseBlock = blockNumber
 			p.observedPoints = windowAppend(
@@ -462,6 +503,8 @@ func (p *PeerChainTip) recordObservedPoint(
 				pointsEqual,
 			)
 		}
+		p.sessionAnchor = ocommon.Point{}
+		p.sessionAnchorSet = false
 		if uint64(len(p.observedPoints)) > maxPoints {
 			excess := uint64(len(p.observedPoints)) - maxPoints
 			// #nosec G115 -- excess is at most the retained slice length.

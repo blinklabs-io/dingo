@@ -157,6 +157,35 @@ func TestLimitOnEagernessStandoffRemovesSparserFork(t *testing.T) {
 	assert.Empty(t, f.evaluate(), "the surviving fork is never removed")
 }
 
+// Forks that branch exactly at each peer's session intersection share no
+// delivered header, yet the standoff must still compare them from that point.
+func TestLimitOnEagernessStandoffRemovesSparserForkAtSessionIntersection(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newStandoffFixture()
+	sparse := newTestConnectionId(1)
+	dense := newTestConnectionId(2)
+	intersection := standoffTip("c", 10, sharedSlot(10))
+	advertised := standoffTip("adv", 1_000, sharedSlot(1_000))
+	intersectSession(f.cs, sparse, intersection, advertised)
+	intersectSession(f.cs, dense, intersection, advertised)
+	feedStandoff(f.cs, sparse, "s", 11, 16, sparseSlot)
+	f.evaluate()
+	require.Equal(t, sparse, *f.cs.GetBestPeer())
+
+	feedStandoff(f.cs, dense, "d", 11, 16, denseSlot)
+	require.Equal(t, uint64(10+loeTestK), f.cs.EagernessLimit().BlockNumber)
+	hold(t, f.cs, sparse)
+	hold(t, f.cs, dense)
+
+	got := f.evaluate()
+	require.Len(t, got, 1, "the standoff must remove exactly one fork")
+	assert.Equal(t, sparse, got[0].ConnectionId)
+	assert.Equal(t, dense, got[0].DominatingConnectionId)
+	assert.Equal(t, intersection.Point, got[0].Intersection)
+}
+
 // A fork still streaming below the limit may yet be denser, so the other
 // fork's pause alone decides nothing.
 func TestLimitOnEagernessStandoffWaitsForEveryCandidateToPause(t *testing.T) {

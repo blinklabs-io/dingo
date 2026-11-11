@@ -21,7 +21,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -118,6 +120,39 @@ func (f *gddFixture) deliver(
 	}
 }
 
+// intersectSession registers a peer the way a new chainsync session does: the
+// MsgRollBackward to the point FindIntersect agreed on, before any header.
+func intersectSession(
+	cs *ChainSelector,
+	connId ouroboros.ConnectionId,
+	intersection ochainsync.Tip,
+	advertised ochainsync.Tip,
+) {
+	cs.HandlePeerRollbackEvent(event.NewEvent(
+		PeerRollbackEventType,
+		PeerRollbackEvent{
+			ConnectionId: connId,
+			Point:        intersection.Point,
+			Tip:          advertised,
+		},
+	))
+}
+
+// deliverFrom feeds one header per slot starting at block number first.
+func (f *gddFixture) deliverFrom(
+	t *testing.T,
+	connId ouroboros.ConnectionId,
+	first uint64,
+	slots ...uint64,
+) {
+	t.Helper()
+	adv := genesisTip(1_000_000, "adv", first+uint64(len(slots)))
+	for i, slot := range slots {
+		obs := genesisTip(slot, fmt.Sprintf("h%d", slot), first+uint64(i))
+		require.True(t, f.cs.updatePeerTipObserved(connId, adv, obs, nil))
+	}
+}
+
 func slotRange(from, to uint64) []uint64 {
 	out := make([]uint64, 0, to-from+1)
 	for s := from; s <= to; s++ {
@@ -135,6 +170,25 @@ func TestGDDDisconnectsProvablySparserPeer(t *testing.T) {
 	// window is complete and cannot gain density. Its blocks sit after the
 	// dense peer's, so the intersection stays at slot 10.
 	f.deliver(t, sparse, 0, 10, 60, 100, 200)
+
+	f.evaluate()
+
+	assert.Equal(t, []ouroboros.ConnectionId{sparse}, f.disconnected())
+}
+
+// Forks that branch exactly where each peer's chainsync session intersected
+// share no delivered header. The intersection still anchors both candidate
+// fragments, so the sparser fork is provably sparser.
+func TestGDDDisconnectsSparserForkBranchingAtSessionIntersection(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	dense, sparse := corrConn(1), corrConn(2)
+	intersection := genesisTip(10, "h10", 10)
+	advertised := genesisTip(1_000_000, "adv", 1_000)
+	intersectSession(f.cs, dense, intersection, advertised)
+	intersectSession(f.cs, sparse, intersection, advertised)
+	f.deliverFrom(t, dense, 11, slotRange(11, 50)...)
+	f.deliverFrom(t, sparse, 11, 60, 100, 200)
 
 	f.evaluate()
 
