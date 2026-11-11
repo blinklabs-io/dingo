@@ -65,6 +65,7 @@ type LedgerSource interface {
 
 // ChainsyncState is the chainsync client tracking the recycler drives.
 type ChainsyncState interface {
+	DemoteStaleAdvertisingClients() []ouroboros.ConnectionId
 	CheckStalledClients() []ouroboros.ConnectionId
 	CheckPatienceExhausted() []ouroboros.ConnectionId
 	AdvanceHeaderSyncRotation()
@@ -496,6 +497,13 @@ func (r *Recycler) tick(
 	effectivePlateau := r.plateauRecovery
 	effectiveCooldown := time.Duration(multiplier) * r.config.Cooldown
 	r.disconnectImpatientClients(live)
+	for _, connId := range live.ChainsyncState.DemoteStaleAdvertisingClients() {
+		r.logger.Info(
+			"chainsync client advertising a stale tip moved to observation",
+			"connection_id",
+			connId.String(),
+		)
+	}
 	live.ChainsyncState.CheckStalledClients()
 	// Rotate the round-robin header-ingress driver on the stall-check
 	// cadence. No-op under the primary/parallel strategies.

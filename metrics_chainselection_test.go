@@ -519,8 +519,7 @@ func TestGenesisDensityDisconnectStandoffDoesNotDenyPeer(t *testing.T) {
 }
 
 // Without k and a positive f the node keeps the selector's long-standing
-// 6480-slot window for the exit horizon but must not run the Genesis Density
-// Disconnector over it.
+// 6480-slot window but must not run the Genesis Density Disconnector over it.
 func TestChainSelectorGenesisWindow(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

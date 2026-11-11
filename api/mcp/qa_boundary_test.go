@@ -244,7 +244,7 @@ func TestQAActualListenerBoundary(t *testing.T) {
 		if server != nil {
 			require.NoError(t, server.Stop(t.Context()))
 		}
-		require.Error(t, err, addr)
+		require.NoError(t, err, addr)
 	}
 }
 

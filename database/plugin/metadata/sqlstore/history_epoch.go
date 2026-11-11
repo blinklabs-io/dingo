@@ -222,6 +222,9 @@ func (s *Store) blockHashesInSlotRange(
 	if total == 0 {
 		return ret, 0, nil
 	}
+	if offset >= total {
+		return ret, total, nil
+	}
 	dir := orderDirectionFromString(order)
 	query, queryArgs := addLimitOffset(
 		"SELECT bn.hash"+from+" ORDER BY bn.slot "+dir+", bn.id "+dir,

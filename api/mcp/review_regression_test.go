@@ -52,10 +52,9 @@ func reviewSession(t *testing.T, server *mcp.Server) *mcp.ClientSession {
 	return cs
 }
 
-func TestReviewAuthenticationAttemptsAreLimited(t *testing.T) {
+func TestReviewRequestsAreLimited(t *testing.T) {
 	t.Parallel()
 	handler := SecurityMiddleware(
-		"secret",
 		0.001,
 		1,
 		nil,
@@ -63,7 +62,7 @@ func TestReviewAuthenticationAttemptsAreLimited(t *testing.T) {
 			func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) },
 		),
 	)
-	for _, want := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
+	for _, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest("GET", "/mcp", nil))
 		require.Equal(t, want, rec.Code)

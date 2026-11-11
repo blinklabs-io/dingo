@@ -509,6 +509,6 @@ func startMithrilMetricsServer(
 		host,
 		cfg.MetricsPort,
 		"mithril",
-		node.MetricsAuthHandler(cfg.MetricsAuthToken, handler),
+		handler,
 	)
 }

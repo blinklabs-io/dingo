@@ -647,11 +647,11 @@ func TestAccountUniverseCacheRoundTrip(t *testing.T) {
 	assert.True(t, fetchedAt.IsZero())
 
 	first := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, cache.SaveAccountUniverse(
-		"preview", []string{"stake_test1a", "stake_test1b"}, first,
+	require.NoError(t, seedAccountUniverse(
+		cache, "preview", []string{"stake_test1a", "stake_test1b"}, first,
 	))
-	require.NoError(t, cache.SaveAccountUniverse(
-		"preprod", []string{"stake_test1z"}, first,
+	require.NoError(t, seedAccountUniverse(
+		cache, "preprod", []string{"stake_test1z"}, first,
 	))
 
 	addrs, fetchedAt, cached, err = cache.GetAccountUniverse("preview")
@@ -661,8 +661,8 @@ func TestAccountUniverseCacheRoundTrip(t *testing.T) {
 	assert.WithinDuration(t, first, fetchedAt, time.Second)
 
 	second := time.Now().UTC().Truncate(time.Second)
-	require.NoError(t, cache.SaveAccountUniverse(
-		"preview", []string{"stake_test1b"}, second,
+	require.NoError(t, seedAccountUniverse(
+		cache, "preview", []string{"stake_test1b"}, second,
 	))
 	addrs, fetchedAt, cached, err = cache.GetAccountUniverse("preview")
 	require.NoError(t, err)
@@ -750,8 +750,8 @@ func TestAccountUniverseStateBackfilledOnUpgrade(t *testing.T) {
 	require.NoError(t, err)
 
 	fetchedAt := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
-	require.NoError(t, cache.SaveAccountUniverse(
-		"preview", []string{"stake_test1a", "stake_test1b"}, fetchedAt,
+	require.NoError(t, seedAccountUniverse(
+		cache, "preview", []string{"stake_test1a", "stake_test1b"}, fetchedAt,
 	))
 	// Drop the state row to reproduce the older layout, then reopen so the
 	// schema pass runs against it.
@@ -1380,8 +1380,14 @@ func seedOracleRows(t *testing.T, c *Cache, network string) {
 		EpochsChecked: 1,
 		MismatchCount: 1,
 	}))
-	require.NoError(t, c.SaveAccountUniverse(
-		network, []string{"stake_test1seeded"}, now,
+	require.NoError(t, seedAccountUniverse(
+		c, network, []string{"stake_test1seeded"}, now,
+	))
+	// An unfinished crawl is Koios-sourced too, and completing the one above
+	// emptied both crawl tables, so seed another.
+	require.NoError(t, c.SaveAccountUniverseCrawlPage(
+		network, accountListQuery, now, []string{"stake_test1partial"},
+		1, "stake_test1partial", 1,
 	))
 	// koios_epoch_params is Koios-sourced too, so the discard has to be
 	// exercised there as well.
@@ -1881,8 +1887,13 @@ func gatedCacheWrites(network string, now time.Time) []gatedCacheWrite {
 				network, []KoiosTxInfoItem{{TxHash: "txfirst"}}, now,
 			)
 		}},
-		{"SaveAccountUniverse", func(c *Cache) error {
-			return c.SaveAccountUniverse(network, []string{addr}, now)
+		{"CompleteAccountUniverseCrawl", func(c *Cache) error {
+			return seedAccountUniverse(c, network, []string{addr}, now)
+		}},
+		{"SaveAccountUniverseCrawlPage", func(c *Cache) error {
+			return c.SaveAccountUniverseCrawlPage(
+				network, accountListQuery, now, []string{addr}, 1, addr, 1,
+			)
 		}},
 		{"SaveAccountFetchChunkProgress", func(c *Cache) error {
 			return c.SaveAccountFetchChunkProgress(
@@ -3318,4 +3329,24 @@ func TestZeroRewardRowAgreesWithValueComparison(t *testing.T) {
 				"presence and value paths must read %q the same way", amount)
 		})
 	}
+}
+
+// seedAccountUniverse stores addrs as network's complete cached universe,
+// stamped at, by running a one-page crawl to completion.
+func seedAccountUniverse(
+	c *Cache,
+	network string,
+	addrs []string,
+	at time.Time,
+) error {
+	last := ""
+	if len(addrs) > 0 {
+		last = addrs[len(addrs)-1]
+	}
+	if err := c.SaveAccountUniverseCrawlPage(
+		network, accountListQuery, at, addrs, len(addrs), last, 1,
+	); err != nil {
+		return err
+	}
+	return c.CompleteAccountUniverseCrawl(network, at, 1)
 }
