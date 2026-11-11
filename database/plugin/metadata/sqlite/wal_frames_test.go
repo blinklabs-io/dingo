@@ -195,7 +195,13 @@ func (g *walGen) next(warm bool) walTx {
 	b.WithValid(!invalid)
 	if script && len(g.hotRefs) > 0 && len(g.hotCol) > 0 {
 		b.WithReferenceInputs(mustInput(g.hotRefs[g.rng.IntN(len(g.hotRefs))]))
-		b.WithCollateral(mustInput(g.hotCol[g.rng.IntN(len(g.hotCol))]))
+		j := g.rng.IntN(len(g.hotCol))
+		b.WithCollateral(mustInput(g.hotCol[j]))
+		if invalid {
+			// An invalid transaction consumes its collateral.
+			g.hotCol[j] = g.hotCol[len(g.hotCol)-1]
+			g.hotCol = g.hotCol[:len(g.hotCol)-1]
+		}
 	}
 	if invalid {
 		b.WithCollateralReturn(mustOutput(g.pickAddr(), 1_000_000))
