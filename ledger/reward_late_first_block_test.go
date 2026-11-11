@@ -240,7 +240,7 @@ func setupLateFirstBlockBoundaryFive(
 	}, nil))
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 4, 400)
+		return ls.applyStakeRewards(context.Background(), txn, 4, 400, false)
 	}))
 	settleRewardCredits(t, ls)
 	state, err := meta.GetNetworkState(nil)
@@ -275,7 +275,7 @@ func applyBoundaryFive(t *testing.T, ls *LedgerState) {
 	t.Helper()
 	txn := ls.db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 5, 500)
+		return ls.applyStakeRewards(context.Background(), txn, 5, 500, false)
 	}))
 	settleRewardCredits(t, ls)
 }
@@ -439,7 +439,7 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 5, 500)
+		return ls.applyStakeRewards(context.Background(), txn, 5, 500, false)
 	}))
 	state, err := meta.GetNetworkState(nil)
 	require.NoError(t, err)
@@ -471,7 +471,7 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 
 	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(context.Background(), txn, 6, 600)
+		return ls.applyStakeRewards(context.Background(), txn, 6, 600, false)
 	}))
 	state, err = meta.GetNetworkState(nil)
 	require.NoError(t, err)

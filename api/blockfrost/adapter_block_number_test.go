@@ -401,7 +401,12 @@ func (c errCountingContext) Err() error {
 func TestNeighborBlocksOutOfRangePageDoesNotWalkTheIndex(t *testing.T) {
 	t.Parallel()
 	adapter, _, db := newDBBackedAdapter(t)
-	blocks := seedSparseChain(t, db, []uint64{2, 1000, 1005, 2000})
+	const wide = 100
+	ids := make([]uint64, wide+10)
+	for i := range ids {
+		ids[i] = uint64(i) + 1
+	}
+	blocks := seedSparseChain(t, db, ids)
 
 	steps := func(hash []byte, page, count int, forward bool) ([]models.Block, int64) {
 		var calls atomic.Int64
@@ -415,20 +420,22 @@ func TestNeighborBlocksOutOfRangePageDoesNotWalkTheIndex(t *testing.T) {
 		return got, calls.Load()
 	}
 
-	// A one-entry page checks for cancellation at least once more than the
-	// fixed cost of a lookup; an out-of-range page must cost less than it.
+	// A full page checks for cancellation once per block it reads, on top of
+	// a fixed lookup cost that varies between runs. An out-of-range page reads
+	// no blocks, so it must cost well under half of the full page.
 	for _, tc := range []struct {
 		name    string
 		hash    []byte
 		forward bool
 	}{
 		{"forward", blocks[0].Hash, true},
-		{"backward", blocks[3].Hash, false},
+		{"backward", blocks[len(blocks)-1].Hash, false},
 	} {
-		_, walked := steps(tc.hash, 1, 1, tc.forward)
-		got, calls := steps(tc.hash, 21474836, 100, tc.forward)
+		full, walked := steps(tc.hash, 1, wide, tc.forward)
+		require.Len(t, full, wide, tc.name)
+		got, calls := steps(tc.hash, 21474836, wide, tc.forward)
 		require.Empty(t, got, tc.name)
-		require.Less(t, calls, walked, tc.name)
+		require.Less(t, calls, walked/2, tc.name)
 	}
 }
 
