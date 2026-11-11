@@ -201,24 +201,6 @@ func (n *Node) ReloadBlockProducerCredentials() error {
 	return n.reloadCredentials(reloadTriggerSignal, nil)
 }
 
-// reloadBlockProducerCredentials is ReloadBlockProducerCredentials with the
-// clock and the ledger cross-check supplied, for the first pool. In sign mode
-// it prepares the reload with the agent and installs it in one go.
-func (n *Node) reloadBlockProducerCredentials(
-	slot uint64,
-	supported bool,
-	ledgerCheck func(*forging.PoolCredentials) error,
-) error {
-	var prep signReloadPrep
-	if ks := n.primaryKeySource(); ks.signsThroughAgent() {
-		if live := n.blockProducerCreds.Load(); live != nil {
-			prep = n.prepareSignReload(ks, live, nil)
-			defer prep.close()
-		}
-	}
-	return n.reloadPrimaryCredentials(slot, supported, ledgerCheck, prep)
-}
-
 // reloadPrimaryCredentials reloads the first pool, installing prep when it
 // is in sign mode.
 func (n *Node) reloadPrimaryCredentials(

@@ -304,21 +304,6 @@ func (n *Node) finishCredentialReload(trigger string, err error) error {
 	return err
 }
 
-// reloadEveryPool reloads the first pool and, when the node forges for
-// several, every other running pool, preparing the sign-mode pools' reloads
-// and installing them in one go. reloadCredentials runs the two halves itself
-// so the agents are checked outside the lifecycle gates.
-func (n *Node) reloadEveryPool(
-	slot uint64,
-	supported bool,
-	ledgerCheck func(*forging.PoolCredentials) error,
-	skipServeKey bool,
-) error {
-	preps := n.prepareSignReloads()
-	defer preps.close()
-	return n.installEveryPool(slot, supported, ledgerCheck, skipServeKey, preps)
-}
-
 // installEveryPool reloads the first pool and, when the node forges for
 // several, every other running pool, installing the sign-mode reloads preps
 // holds. The caller holds the lifecycle gates. Each pool reloads on its own:
@@ -460,28 +445,6 @@ func (r *agentSignReload) close() {
 	if !r.installed {
 		_ = r.client.Close()
 	}
-}
-
-// reloadAgentSignCredentials replaces the first pool's live sign-mode
-// credentials with the VRF key and an operational certificate -- the
-// configured file, or agentOpCert when the agent presented a newer one --
-// signed through a new agent client that expects that certificate's KES key.
-// It is prepareSignReload followed by installSignReload; the reload triggers
-// run the two halves themselves so the agent check happens outside the gates.
-func (n *Node) reloadAgentSignCredentials(
-	slot uint64,
-	supported bool,
-	ledgerCheck func(*forging.PoolCredentials) error,
-	agentOpCert []byte,
-) error {
-	live := n.blockProducerCreds.Load()
-	if live == nil {
-		return errors.New("block producer credentials are not loaded")
-	}
-	ks := n.primaryKeySource()
-	prep := n.prepareSignReload(ks, live, agentOpCert)
-	defer prep.close()
-	return n.installSignReload(ks, live, slot, supported, ledgerCheck, prep)
 }
 
 // prepareSignReload is prepareAgentSignReload as a signReloadPrep.
