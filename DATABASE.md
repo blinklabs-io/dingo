@@ -6236,7 +6236,8 @@ predicate), `MatchingUtxoRefsByAddressWithOrderingBounded` scans coarse
 candidates in the requested order in keyset batches with `SkipAssets` set,
 CBOR-decodes each only to confirm the match, and returns bare
 `(TxId, OutputIdx)` references. The scan has no candidate or CBOR-byte budget
-unless the caller passes a positive candidate bound. A page that ends before the
+unless the caller passes a positive candidate bound, which limits the number of
+candidates examined and not the CBOR bytes read. A page that ends before the
 scan is exhausted is served without a total. Full rows (with assets) are fetched for just the
 page via `GetUtxosByRefs`.
 

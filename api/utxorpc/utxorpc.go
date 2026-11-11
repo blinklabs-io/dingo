@@ -98,7 +98,7 @@ type UtxorpcConfig struct {
 	HistoryPageItems int
 	// MaxHistoryBytes caps the serialized block bytes in one DumpHistory
 	// response; a longer page is cut short and continues from next_token
-	// (0 = unlimited).
+	// (0 = use DefaultMaxHistoryBytes).
 	MaxHistoryBytes int
 	MaxDataKeys     int
 	// MaxTxRefs caps the transaction references in one WaitForTx

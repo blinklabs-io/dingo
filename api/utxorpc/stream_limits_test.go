@@ -225,6 +225,9 @@ func TestMempoolStreamQueueRefusesSlowConsumer(t *testing.T) {
 	err := q.offer(&submit.WatchMempoolResponse{})
 	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
 
-	require.Len(t, q.drain(), 2)
+	require.NotNil(t, q.pop())
 	require.NoError(t, q.offer(&submit.WatchMempoolResponse{}))
+	require.NotNil(t, q.pop())
+	require.NotNil(t, q.pop())
+	require.Nil(t, q.pop())
 }

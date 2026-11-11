@@ -71,6 +71,11 @@ func newReplayLimiter(
 	budget int64,
 	window time.Duration,
 ) *replayLimiter {
+	// A budget needs a window to reset in; without one it would permanently
+	// refuse a client that is meant to be unlimited.
+	if window <= 0 {
+		budget = 0
+	}
 	return &replayLimiter{
 		maxSlots:          maxConcurrent,
 		maxSlotsPerClient: maxPerClient,

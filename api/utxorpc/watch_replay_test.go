@@ -66,6 +66,7 @@ func TestConnect_WatchTxReplayStopsAtClientBudget(t *testing.T) {
 		numBlocks: followTipReplayBlocks,
 		tune: func(cfg *UtxorpcConfig) {
 			cfg.MaxReplayBlocksPerClient = budget
+			cfg.ReplayBudgetWindow = time.Hour
 		},
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)

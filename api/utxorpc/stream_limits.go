@@ -137,13 +137,19 @@ func (q *mempoolStreamQueue) offer(resp *submit.WatchMempoolResponse) error {
 	return nil
 }
 
-// drain returns every queued response in arrival order.
-func (q *mempoolStreamQueue) drain() []*submit.WatchMempoolResponse {
+// pop removes and returns the oldest queued response, or nil when none is
+// queued. The sender takes one response per Send so that everything still
+// waiting stays counted against the limit while a Send blocks on a slow client.
+func (q *mempoolStreamQueue) pop() *submit.WatchMempoolResponse {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	out := q.pending
-	q.pending = nil
-	return out
+	if len(q.pending) == 0 {
+		return nil
+	}
+	resp := q.pending[0]
+	q.pending[0] = nil
+	q.pending = q.pending[1:]
+	return resp
 }
 
 // admitStream reserves a stream slot for the calling client; the returned

@@ -24,8 +24,9 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
-// UtxosByAddressPage scans at most maxCandidates outputs in ascending ledger
-// order, checking exact addresses against CBOR. Native assets are not loaded.
+// UtxosByAddressPage scans outputs in ascending ledger order, examining at
+// most maxCandidates of them when that is positive (zero or negative leaves the
+// scan unbounded), checking exact addresses against CBOR. Native assets are not loaded.
 // On cancellation the partial page and last fully examined candidate accompany
 // the error. A candidate that failed to load or decode is never skipped.
 // SQL uses ctx; blob reads have no context parameter, so cancellation is checked

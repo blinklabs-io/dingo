@@ -321,7 +321,7 @@ func requireOgmiosVersion(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// readEvaluationBody reads a size-limited evaluation request body, writing
+// readEvaluationBody reads the whole evaluation request body without a size cap, writing
 // the error response itself when the body cannot be used.
 func (b *Blockfrost) readEvaluationBody(
 	w http.ResponseWriter,

@@ -67,8 +67,10 @@ Ask your AI assistant:
   connectivity.
 
 Both session transports have no session cap, per-client cap, idle timeout or
-lifetime limit. A session closes when the client disconnects or the server
-stops.
+lifetime limit. An SSE session closes when the client disconnects. A
+Streamable HTTP session is not closed by an ordinary request ending; it closes
+when the client sends an MCP `DELETE` or the server stops, so abandoned
+sessions remain until then.
 
 ### 21 Registered Tools
 Dingo registers 21 typed, read-only tools:
@@ -357,7 +359,7 @@ You can configure MCP via canonical plugin environment variables:
 | --- | --- | --- |
 | `DINGO_PLUGINS_API_MCP_CONFIG_PORT` | `0` (disabled) | Port for the MCP HTTP/SSE listener (also accepts legacy `DINGO_MCP_PORT`) |
 | `DINGO_PLUGINS_API_MCP_CONFIG_RATE_LIMIT` | `0` (unlimited) | Optional sustained requests per second per IP |
-| `DINGO_PLUGINS_API_MCP_CONFIG_BURST` | `0` | Optional burst requests per IP; used only with a rate limit |
+| `DINGO_PLUGINS_API_MCP_CONFIG_BURST` | `0` (10 when a rate limit is set) | Optional burst requests per IP; used only with a rate limit, and 10 when omitted |
 | `DINGO_PLUGINS_API_MCP_CONFIG_QUERY_TIMEOUT` | `5s` | Maximum execution timeout for SQLite queries |
 | `DINGO_PLUGINS_API_MCP_CONFIG_MAX_ROWS` | `100` | Maximum rows returned per query by default |
 

@@ -568,7 +568,10 @@ func (s *submitServiceServer) WatchMempool(
 	for {
 		select {
 		case <-queue.notify:
-			for _, resp := range queue.drain() {
+			for resp := queue.pop(); resp != nil; resp = queue.pop() {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				if err := stream.Send(resp); err != nil {
 					if ctx.Err() != nil {
 						return ctx.Err()
