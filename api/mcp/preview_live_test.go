@@ -96,7 +96,7 @@ FROM utxo u
 WHERE deleted_slot=0 AND payment_script=0 AND length(payment_key)=28
   AND (datum_hash IS NULL OR length(datum_hash)=0)
   AND CAST(amount AS INTEGER)>5000000
-  AND NOT EXISTS (SELECT 1 FROM asset WHERE utxo_id=u.id)
+  AND NOT EXISTS (SELECT 1 FROM asset_holding WHERE utxo_id=u.id)
 LIMIT 1`).Scan(&hash, &idx, &payment, &amount)
 	if errors.Is(err, sql.ErrNoRows) {
 		t.Skip(
