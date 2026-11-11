@@ -574,24 +574,24 @@ func TestCopyBlocksRaw_PreservesLinkageAtOrigin(t *testing.T) {
 	require.NoError(t, err)
 	defer iter.Close()
 
-	ebbBlock, err := iter.Next()
+	firstBlock, err := iter.Next()
 	require.NoError(t, err)
-	require.NotNil(t, ebbBlock)
+	require.NotNil(t, firstBlock)
 	// The fixture is Preview, whose first block is a post-Byron block at
 	// slot 0, not an EBB.
-	require.False(t, ebbBlock.IsEbb)
+	require.False(t, firstBlock.IsEbb)
 
 	nextBlock, err := iter.Next()
 	require.NoError(t, err)
 	require.NotNil(t, nextBlock)
 
-	ebbHeader, err := decodeImmutableBlockHeader(ebbBlock)
+	firstHeader, err := decodeImmutableBlockHeader(firstBlock)
 	require.NoError(t, err)
 	nextHeader, err := decodeImmutableBlockHeader(nextBlock)
 	require.NoError(t, err)
 	require.Equal(
 		t,
-		ebbHeader.Hash().Bytes(),
+		firstHeader.Hash().Bytes(),
 		nextHeader.PrevHash().Bytes(),
 	)
 
@@ -612,14 +612,14 @@ func TestCopyBlocksRaw_PreservesLinkageAtOrigin(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, blocksCopied, 1)
 
-	ebbPoint := ocommon.NewPoint(
-		ebbHeader.SlotNumber(),
-		ebbHeader.Hash().Bytes(),
+	firstPoint := ocommon.NewPoint(
+		firstHeader.SlotNumber(),
+		firstHeader.Hash().Bytes(),
 	)
-	importedEbb, err := cm.BlockByPoint(context.Background(), ebbPoint, nil)
+	importedFirst, err := cm.BlockByPoint(context.Background(), firstPoint, nil)
 	require.NoError(t, err)
-	require.NotNil(t, importedEbb)
-	assert.Equal(t, ebbPoint.Hash, importedEbb.Hash)
+	require.NotNil(t, importedFirst)
+	assert.Equal(t, firstPoint.Hash, importedFirst.Hash)
 
 	nextPoint := ocommon.NewPoint(
 		nextHeader.SlotNumber(),
@@ -628,7 +628,7 @@ func TestCopyBlocksRaw_PreservesLinkageAtOrigin(t *testing.T) {
 	importedNext, err := cm.BlockByPoint(context.Background(), nextPoint, nil)
 	require.NoError(t, err)
 	require.NotNil(t, importedNext)
-	assert.Equal(t, ebbPoint.Hash, importedNext.PrevHash)
+	assert.Equal(t, firstPoint.Hash, importedNext.PrevHash)
 }
 
 func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
