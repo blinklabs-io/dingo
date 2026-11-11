@@ -85,17 +85,17 @@ const (
 	// few dozen bytes; this is generous headroom without trusting an
 	// unbounded length prefix from an unauthenticated-by-transport peer (P1:
 	// "unbounded Hello handshake").
-	MaxHelloFrameLen = 1 << 12 // 4 KiB
+	MaxHelloFrameLen = wire.MaxHelloFrameLen // 4 KiB
 
 	// MaxKeyPushFrameLen bounds a serve-key push: a 608-byte KES secret key,
 	// a 32-byte verification key, and a CBOR operational certificate
 	// (a few hundred bytes), all base64-encoded in JSON (~1.4x expansion).
-	MaxKeyPushFrameLen = 1 << 13 // 8 KiB
+	MaxKeyPushFrameLen = wire.MaxKeyPushFrameLen // 8 KiB
 
 	// MaxSignFrameLen bounds a sign-mode request or response: a Cardano
 	// block header body (at most a few KiB, even with Leios extensions) plus
 	// a fixed 448-byte signature.
-	MaxSignFrameLen = 1 << 16 // 64 KiB
+	MaxSignFrameLen = wire.MaxSignFrameLen // 64 KiB
 )
 
 // The frame types are bursa's own (kesagent/wire), aliased so this package's
@@ -179,48 +179,80 @@ func readFrame(r io.Reader, maxSize int, v any) error {
 // on the body. A nil bodyGuard means the caller has already bounded the whole
 // read (Client.connectLocked and Client.Sign each set a whole-operation conn
 // deadline) or is reading from something that cannot stall (a test buffer).
+//
+// The framing is bursa's wire.ReadFrameLimit, which sets no deadlines and
+// reads the body into one exact-size buffer it wipes. This wrapper counts the
+// bytes it hands over, so it can still tell a declared length over maxSize
+// (errFrameTooLarge) and a body that stopped arriving (errFrameBodyStalled)
+// apart from other failures.
 func readFrameGuarded(
 	r io.Reader,
 	maxSize int,
 	bodyGuard func() error,
 	v any,
 ) error {
-	var hdr [4]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return err // may be io.EOF; callers distinguish
-	}
-	n := binary.BigEndian.Uint32(hdr[:])
-	if n == 0 {
-		return errors.New("kesagent: zero-length frame")
-	}
-	// Widened to int64 rather than narrowing maxSize to uint32: both sides
-	// convert losslessly, so the bound is exact for any maxSize.
-	if int64(n) > int64(maxSize) {
-		return fmt.Errorf(
-			"%w: declared %d bytes > %d",
-			errFrameTooLarge,
-			n,
-			maxSize,
-		)
-	}
-	if bodyGuard != nil {
+	cr := &frameCountingReader{r: r}
+	guard := func() error {
+		cr.headerDone = true
+		if bodyGuard == nil {
+			return nil
+		}
 		if err := bodyGuard(); err != nil {
+			cr.guardFailed = true
 			return fmt.Errorf("kesagent: bound frame body read: %w", err)
 		}
+		return nil
 	}
-	// Sized exactly once from the already-bounds-checked length, so the
-	// payload lands in a single backing array this function can wipe --
-	// letting a bytes.Buffer grow into it instead would strand copies of
-	// pushed key material in unreachable intermediate arrays.
-	buf := make([]byte, n)
-	defer wipeBytes(buf)
-	if _, err := io.ReadFull(r, buf); err != nil {
+	err := wire.ReadFrameLimit(cr, maxSize, guard, v)
+	if err == nil {
+		return nil
+	}
+	if !cr.headerDone {
+		// The header arrived but no body read began: wire refused the
+		// declared length.
+		if cr.read == len(cr.hdr) {
+			n := binary.BigEndian.Uint32(cr.hdr[:])
+			if n != 0 && int64(n) > int64(maxSize) {
+				return fmt.Errorf(
+					"%w: declared %d bytes > %d",
+					errFrameTooLarge,
+					n,
+					maxSize,
+				)
+			}
+		}
+		return err
+	}
+	if cr.guardFailed {
+		return err
+	}
+	// The body is short of its declared length: it stalled or the
+	// connection ended. A complete body that failed to decode is not.
+	declared := int64(binary.BigEndian.Uint32(cr.hdr[:]))
+	if int64(cr.read) < int64(len(cr.hdr))+declared {
 		return fmt.Errorf("%w: %w", errFrameBodyStalled, err)
 	}
-	if err := json.Unmarshal(buf, v); err != nil {
-		return fmt.Errorf("kesagent: unmarshal frame: %w", err)
+	return err
+}
+
+// frameCountingReader passes reads through to r, keeping the frame's 4-byte
+// length header and a count of the bytes delivered, so readFrameGuarded can
+// tell where in a frame wire.ReadFrameLimit stopped.
+type frameCountingReader struct {
+	r           io.Reader
+	hdr         [4]byte
+	read        int
+	headerDone  bool
+	guardFailed bool
+}
+
+func (c *frameCountingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if c.read < len(c.hdr) {
+		copy(c.hdr[c.read:], p[:n])
 	}
-	return nil
+	c.read += n
+	return n, err
 }
 
 // wipeBytes zeroes b in place. It is used on every buffer that has held KES

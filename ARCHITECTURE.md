@@ -12194,10 +12194,12 @@ agent's real wire protocol (`docs/signer/kes-agent-protocol.md` in
 capped per-message and bounded by an explicit handshake/sign timeout), so it
 interoperates with a real bursa agent rather than a bespoke one. The frame
 types and protocol constants come from bursa's public `kesagent/wire` package,
-so both ends share one definition. The framing stays in `kesagent/`: it caps
-each message type separately, leaves deadlines to the caller (a serve-key
-subscriber idles between pushes, and a sign keeps its own short deadline), and
-wipes every buffer that held key material. `TestWireGoldenFrames` decodes and
+so both ends share one definition. Frames are read with
+`wire.ReadFrameLimit`, which caps each message type separately, leaves
+deadlines to the caller (a serve-key subscriber idles between pushes, and a
+sign keeps its own short deadline), and wipes the body buffer; a thin wrapper
+keeps an oversized frame (`errFrameTooLarge`) and a body that stopped arriving
+(`errFrameBodyStalled`) distinguishable. `TestWireGoldenFrames` decodes and
 re-encodes bursa's published golden frames (`kesagent/testdata/wireframes`)
 byte for byte.
 
