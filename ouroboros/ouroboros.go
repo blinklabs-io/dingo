@@ -327,6 +327,10 @@ type Ouroboros struct {
 	// re-intersect running, so overlapping resyncs do not stack.
 	chainsyncReintersectMu  sync.Mutex
 	chainsyncReintersecting map[ouroboros.ConnectionId]struct{}
+	// chainsyncReintersectReturnedHook runs once an in-place re-intersect has
+	// returned and the re-intersected sync is already running. Tests use it to
+	// hold the resync goroutine while the new cursor streams.
+	chainsyncReintersectReturnedHook func()
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
 	chainsyncArrivalNow      func() time.Time
@@ -949,20 +953,20 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncStats: make(
 			map[ouroboros.ConnectionId]*chainsyncPeerStats,
 		),
-		chainsyncScheduleAt:         defaultChainsyncScheduleAt,
-		corroborationHoldTimeout:    defaultCorroborationHoldTimeout,
-		catchUpBandWaitTimeout:      catchUpBandWait,
-		eagernessWaitTimeout:        catchUpBandWait,
-		chainsyncReintersectTimeout: defaultChainsyncReintersectTimeout,
-		chainsyncReintersecting: make(
-			map[ouroboros.ConnectionId]struct{},
-		),
-		chainsyncArrivalNow: time.Now,
+		chainsyncScheduleAt:      defaultChainsyncScheduleAt,
+		corroborationHoldTimeout: defaultCorroborationHoldTimeout,
+		catchUpBandWaitTimeout:   catchUpBandWait,
+		eagernessWaitTimeout:     catchUpBandWait,
+		chainsyncArrivalNow:      time.Now,
 		futureHeaderResyncs: make(
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
 		),
 		deferredHeaderRecovery: make(
 			map[ouroboros.ConnectionId]deferredHeaderRecoveryState,
+		),
+		chainsyncReintersectTimeout: defaultChainsyncReintersectTimeout,
+		chainsyncReintersecting: make(
+			map[ouroboros.ConnectionId]struct{},
 		),
 		futureHeaderResyncCtx:    futureHeaderResyncCtx,
 		futureHeaderResyncCancel: futureHeaderResyncCancel,

@@ -127,8 +127,10 @@ func newReintersectFixture(
 		)
 		serverReady <- err
 	}()
+	f.o = newOuroboros(OuroborosConfig{EventBus: bus, Logger: logger})
 	clientConfig := ochainsync.NewConfig(
 		ochainsync.WithPipelineLimit(4),
+		ochainsync.WithIntersectFoundFunc(f.o.chainsyncClientIntersectFound),
 		ochainsync.WithRollForwardRawFunc(func(
 			ochainsync.CallbackContext,
 			uint,
@@ -165,7 +167,6 @@ func newReintersectFixture(
 	f.connId = client.Id()
 	f.state = dchainsync.NewState(bus, nil)
 	require.True(t, f.state.AddClientConnId(f.connId))
-	f.o = newOuroboros(OuroborosConfig{EventBus: bus, Logger: logger})
 	f.o.eventBus = bus
 	f.o.connManager = cm
 	f.o.chainsyncState = f.state
@@ -335,4 +336,67 @@ func TestChainsyncResyncPeerFaultReasonStillCloses(t *testing.T) {
 	)
 	require.EqualValues(t, 1, f.findIntersects.Load(),
 		"a peer-fault resync must not re-intersect")
+}
+
+// The re-intersected sync resumes as soon as Reintersect returns, so the
+// history trim and the withheld-header marker must be settled before the first
+// reply of the new cursor, not after Reintersect returns: a header of the new
+// cursor delivered in between would be withheld or trimmed.
+func TestChainsyncResyncReintersectSettlesStateBeforeSyncResumes(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newReintersectFixture(t, 10*time.Second)
+	cfg := ochainsync.NewConfig(f.o.chainsyncClientConnOpts()...)
+	require.NotNil(t, cfg.IntersectFoundFunc,
+		"production clients must settle a re-intersect on IntersectFound")
+	above := newTestBlockHeader(f.intersect.Slot+5, 4, 0xa3)
+	f.state.RecordObservedHeader(dchainsync.ObservedHeader{
+		ConnectionId: f.connId,
+		BlockHeader:  above,
+		Point: ocommon.NewPoint(
+			above.SlotNumber(), above.Hash().Bytes(),
+		),
+	})
+	f.o.futureHeaderResyncMu.Lock()
+	f.o.futureHeaderResyncs[f.connId] = &scheduledChainsyncResync{
+		fired:  true,
+		reason: event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
+		cancel: func() {},
+	}
+	f.o.futureHeaderResyncMu.Unlock()
+	returned := make(chan struct{})
+	release := make(chan struct{})
+	f.o.chainsyncReintersectReturnedHook = func() {
+		close(returned)
+		<-release
+	}
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	f.publish(event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery)
+	testutil.RequireReceive(
+		t, returned, 5*time.Second, "Reintersect must return",
+	)
+	forwardsAtReturn := f.rollForwards.Load()
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return f.rollBackwards.Load() >= 1 &&
+				f.rollForwards.Load() > forwardsAtReturn
+		},
+		5*time.Second,
+		"the re-intersected sync must stream on",
+	)
+	require.False(t, f.o.futureHeaderResyncPending(f.connId),
+		"the new cursor's headers must not be withheld")
+	_, _, ok := f.state.LookupObservedHeader(f.connId, above.Hash().Bytes())
+	require.False(t, ok,
+		"history above the intersection must be gone before the new cursor")
+	close(release)
 }

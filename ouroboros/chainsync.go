@@ -783,6 +783,7 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		ochainsync.WithRollBackwardFunc(
 			o.instrumentChainsyncRollBackward(o.chainsyncClientRollBackward),
 		),
+		ochainsync.WithIntersectFoundFunc(o.chainsyncClientIntersectFound),
 		// Keep the request window large enough to cover network latency. The
 		// ledger's header-capacity gate bounds admission and verification work.
 		ochainsync.WithPipelineLimit(ochainsync.DefaultPipelineLimit),
@@ -794,6 +795,34 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		ochainsync.WithIntersectTimeout(30 * time.Second),
 		ochainsync.WithBlockTimeout(o.config.ChainsyncBlockTimeout),
 	}
+}
+
+// chainsyncClientIntersectFound settles the state of an in-place
+// re-intersect at the new intersection. It runs on the protocol goroutine
+// before Reintersect sends the first MsgRequestNext of the new cursor, so no
+// header of that cursor can be trimmed from the peer's observed history or
+// withheld by the old cursor's resync marker. An initial intersect is left
+// alone.
+func (o *Ouroboros) chainsyncClientIntersectFound(
+	ctx ochainsync.CallbackContext,
+	point ocommon.Point,
+	_ ochainsync.Tip,
+) error {
+	o.chainsyncReintersectMu.Lock()
+	_, reintersecting := o.chainsyncReintersecting[ctx.ConnectionId]
+	o.chainsyncReintersectMu.Unlock()
+	if !reintersecting {
+		return nil
+	}
+	if o.chainsyncState != nil {
+		o.chainsyncState.ClearObservedHeaderHistoryAfter(
+			ctx.ConnectionId,
+			point,
+		)
+	}
+	// The marker withholds the old cursor's headers until it is replaced.
+	o.cancelFutureHeaderResync(ctx.ConnectionId)
+	return nil
 }
 
 // chainsyncClientAwaitReply publishes the protocol's explicit idle proof after
@@ -3779,16 +3808,12 @@ func (o *Ouroboros) reintersectChainsyncClient(
 	reason string,
 ) {
 	point, err := o.reintersectWithWatchdog(ctx, connId)
+	if o.chainsyncReintersectReturnedHook != nil {
+		o.chainsyncReintersectReturnedHook()
+	}
 	if err == nil {
-		if o.chainsyncState != nil {
-			o.chainsyncState.ClearObservedHeaderHistoryAfter(connId, point)
-		}
-		// The marker withholds headers until the old cursor is replaced.
-		// The peer's first reply after IntersectFound is the rollback to
-		// point, and RollForwards follow it only after a further request
-		// round trip, so clearing here cannot drop a header of the new
-		// cursor.
-		o.cancelFutureHeaderResync(connId)
+		// chainsyncClientIntersectFound has already trimmed the history and
+		// dropped the resync marker.
 		o.config.Logger.Info(
 			"re-intersected chainsync in place",
 			"connection_id", connId.String(),

@@ -835,12 +835,14 @@ events dropped because the subscriber's context is done.
 instead of closing it. `Reintersect` drains every outstanding `MsgRequestNext`
 reply before sending `MsgFindIntersect`, so it runs on its own goroutine, once
 per connection at a time, and is bounded by `chainsyncReintersectTimeout`: a
-client parked at the peer's tip drains only when the next block arrives. On
-success the peer's observed header history is trimmed to the new intersection
-(`State.ClearObservedHeaderHistoryAfter`) rather than cleared, the withheld-header
-marker is dropped, and the delivered-tip history in chain selection stays, so a
-Genesis corroborating peer keeps its density evidence; the first `RollBackward`
-after the intersect trims it. The connection is closed instead, as for every
+client parked at the peer's tip drains only when the next block arrives. When
+the peer answers `IntersectFound`, the client's `IntersectFoundFunc` trims the
+peer's observed header history to the new intersection
+(`State.ClearObservedHeaderHistoryAfter`) rather than clearing it and drops the
+withheld-header marker, before the first `MsgRequestNext` of the new cursor is
+sent, so no header of that cursor is trimmed or withheld. The delivered-tip
+history in chain selection stays, so a Genesis corroborating peer keeps its
+density evidence; the first `RollBackward` after the intersect trims it. The connection is closed instead, as for every
 reason that blames the peer, when the client is absent, the watchdog expires,
 the ledger cannot supply intersect points, or the peer answers
 `IntersectNotFound`.
