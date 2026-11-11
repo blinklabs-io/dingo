@@ -2427,6 +2427,13 @@ func (p *BlockProducerPool) applyDefaults() {
 	}
 }
 
+// HasSinglePoolKeys reports whether any top-level key setting that
+// BlockProducerPools replaces is set. The KES agent sign timeout and the key
+// watch interval apply to every pool and are not among them.
+func (c *Config) HasSinglePoolKeys() bool {
+	return c.singlePool() != (BlockProducerPool{})
+}
+
 // singlePool is the pool the top-level key settings describe.
 func (c *Config) singlePool() BlockProducerPool {
 	return BlockProducerPool{

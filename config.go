@@ -619,6 +619,16 @@ func (n *Node) configValidate() error {
 			internalconfig.StartEraDijkstra,
 		)
 	}
+	if len(n.config.cfg.BlockProducerPools) > 0 &&
+		n.config.cfg.HasSinglePoolKeys() {
+		return errors.New(
+			"WithBlockProducerPools replaces WithShelleyVRFKey, " +
+				"WithShelleyKESKey, WithShelleyOperationalCertificate, " +
+				"WithShelleyKESAgentSocket, WithShelleyKESAgentMode, " +
+				"WithShelleyKESAgentRemote and WithShelleyKESAgentPlaintext; " +
+				"set them in each pool",
+		)
+	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
 		return fmt.Errorf(
 			"min pool margin (%d) must be in [0, 10000] basis points",
@@ -1844,8 +1854,11 @@ type BlockProducerPool = internalconfig.BlockProducerPool
 // WithBlockProducerPools lists every pool this block producer forges for, each
 // with its own VRF key, operational certificate and KES source. It replaces
 // the single-pool WithShelleyVRFKey, WithShelleyKESKey,
-// WithShelleyOperationalCertificate and WithShelleyKESAgent* options, which
-// must then be left unset.
+// WithShelleyOperationalCertificate, WithShelleyKESAgentSocket,
+// WithShelleyKESAgentMode, WithShelleyKESAgentRemote and
+// WithShelleyKESAgentPlaintext options; New refuses a config that sets any of
+// them beside the pools. WithShelleyKESAgentSignTimeout and
+// WithShelleyKeyWatchInterval apply to every pool.
 func WithBlockProducerPools(pools ...BlockProducerPool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BlockProducerPools = slices.Clone(pools)

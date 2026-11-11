@@ -12521,9 +12521,12 @@ attempt) deadlocks `Close` behind the very read only it can unblock.
 `blockProducerPools` lists every pool a producer forges for, each with its own
 VRF key, operational certificate and one KES source: a local key file, a local
 KES agent socket in serve-key or sign mode, or a remote agent. The list
-replaces the single-pool `shelley*` settings, and configuration validation
-refuses the two together, two entries sharing an opcert or a remote agent
-address, and more than one pool
+replaces the single-pool `shelley*` key and KES source settings (the KES
+agent sign timeout and key watch interval apply to every pool). Configuration
+validation refuses the two together, in YAML and when a library caller mixes
+`WithBlockProducerPools` with the single-pool options in `New`, and also
+refuses two entries sharing an opcert or a remote agent address, and more than
+one pool
 with Leios forging or voting, whose pipeline and vote key are wired for one.
 
 The first pool keeps the node's own forging fields (`blockForger`,

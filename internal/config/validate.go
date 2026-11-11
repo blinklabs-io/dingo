@@ -215,11 +215,14 @@ func (c *Config) validateBlockProducerPools() []error {
 		return validateBlockProducerPool(c.singlePool(), "")
 	}
 	var errs []error
-	if c.singlePool() != (BlockProducerPool{}) {
+	if c.HasSinglePoolKeys() {
 		errs = append(errs, errors.New(
 			"blockProducerPools replaces shelleyVrfKey, shelleyKesKey, "+
-				"shelleyOperationalCertificate and the shelleyKesAgent* "+
-				"settings; set them in each pool",
+				"shelleyOperationalCertificate, shelleyKesAgentSocket, "+
+				"shelleyKesAgentMode, shelleyKesAgentAddress, "+
+				"shelleyKesAgentClientCertFile, shelleyKesAgentClientKeyFile, "+
+				"shelleyKesAgentServerSpkiSha256 and shelleyKesAgentPlaintext; "+
+				"set them in each pool",
 		))
 	}
 	opCerts := make(map[string]int, len(c.BlockProducerPools))
