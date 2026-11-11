@@ -1835,6 +1835,16 @@ func (s *State) ClearObservedHeaderHistoryFrom(
 			return
 		}
 	}
+	s.trimObservedHeaderHistoryLocked(connId, chainHistory, index)
+}
+
+// trimObservedHeaderHistoryLocked removes the retained headers of connId from
+// order index onward. Caller must hold observedHeadersMutex for writing.
+func (s *State) trimObservedHeaderHistoryLocked(
+	connId ouroboros.ConnectionId,
+	chainHistory *observedHeaderChain,
+	index int,
+) {
 	for _, hashKey := range chainHistory.order[index:] {
 		if record, ok := chainHistory.byHash[hashKey]; ok {
 			chainHistory.retainedBytes -= record.bytes
@@ -1856,6 +1866,37 @@ func (s *State) ClearObservedHeaderHistoryFrom(
 			}
 		}
 	}
+}
+
+// ClearObservedHeaderHistoryAfter removes every header observed after point
+// while retaining point itself and its ancestry, as a peer that re-intersects
+// at point rolls back to it. When point's hash is not retained, removal starts
+// at the first retained header above its slot. Retained headers keep their
+// verification generations: they are unchanged ancestry, not new evidence.
+func (s *State) ClearObservedHeaderHistoryAfter(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	s.observedHeadersMutex.Lock()
+	defer s.observedHeadersMutex.Unlock()
+
+	chainHistory := s.observedHeaders[connId]
+	if chainHistory == nil {
+		return
+	}
+	index := slices.Index(chainHistory.order, hex.EncodeToString(point.Hash))
+	if index >= 0 {
+		index++
+	} else {
+		index = slices.IndexFunc(chainHistory.order, func(hashKey string) bool {
+			record, ok := chainHistory.byHash[hashKey]
+			return ok && record.header.Point.Slot > point.Slot
+		})
+	}
+	if index < 0 || index >= len(chainHistory.order) {
+		return
+	}
+	s.trimObservedHeaderHistoryLocked(connId, chainHistory, index)
 }
 
 func (s *State) updateTrackedClientTip(

@@ -320,6 +320,13 @@ type Ouroboros struct {
 	// eagernessWaitTimeout bounds how long a roll-forward callback waits in
 	// ChainsyncAwaitEagerness.
 	eagernessWaitTimeout time.Duration
+	// chainsyncReintersectTimeout bounds how long a resync waits for a client
+	// to drain and re-intersect in place before the connection is closed.
+	chainsyncReintersectTimeout time.Duration
+	// chainsyncReintersecting holds the connections with an in-place
+	// re-intersect running, so overlapping resyncs do not stack.
+	chainsyncReintersectMu  sync.Mutex
+	chainsyncReintersecting map[ouroboros.ConnectionId]struct{}
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
 	chainsyncArrivalNow      func() time.Time
@@ -942,11 +949,15 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncStats: make(
 			map[ouroboros.ConnectionId]*chainsyncPeerStats,
 		),
-		chainsyncScheduleAt:      defaultChainsyncScheduleAt,
-		corroborationHoldTimeout: defaultCorroborationHoldTimeout,
-		catchUpBandWaitTimeout:   catchUpBandWait,
-		eagernessWaitTimeout:     catchUpBandWait,
-		chainsyncArrivalNow:      time.Now,
+		chainsyncScheduleAt:         defaultChainsyncScheduleAt,
+		corroborationHoldTimeout:    defaultCorroborationHoldTimeout,
+		catchUpBandWaitTimeout:      catchUpBandWait,
+		eagernessWaitTimeout:        catchUpBandWait,
+		chainsyncReintersectTimeout: defaultChainsyncReintersectTimeout,
+		chainsyncReintersecting: make(
+			map[ouroboros.ConnectionId]struct{},
+		),
+		chainsyncArrivalNow: time.Now,
 		futureHeaderResyncs: make(
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
 		),

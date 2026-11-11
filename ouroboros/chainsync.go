@@ -3537,10 +3537,16 @@ func (o *Ouroboros) updateChainsyncMetrics(
 	o.peerGov.UpdatePeerChainSyncObservation(connId, headerRate, tipDelta)
 }
 
+// defaultChainsyncReintersectTimeout bounds an in-place re-intersect. A client
+// parked at the peer's tip drains only when the next block arrives, so the
+// bound must stay well below the MustReply timer the protocol enforces.
+const defaultChainsyncReintersectTimeout = 5 * time.Second
+
 // SubscribeChainsyncResync registers an EventBus subscriber that
-// handles chainsync re-sync events. Resyncs close the affected
-// connections after resetting local dedup state so peer governance
-// reconnects with fresh intersect points. Local authoritative
+// handles chainsync re-sync events. Local cursor recoveries re-intersect the
+// affected clients in place; every other resync closes the connection after
+// resetting local dedup state so peer governance reconnects with fresh
+// intersect points. Local authoritative
 // rollbacks additionally rewind tracked client cursors and attempt
 // ledger-side recovery before recycling affected connections as a
 // fallback.
@@ -3665,37 +3671,187 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			if len(connIds) == 0 {
 				return
 			}
-			// Close the connection rather than re-intersecting in place.
-			// A live client always has RequestNext replies in flight, and
-			// MsgFindIntersect sent over them leaves the protocol in
-			// Intersect when those replies arrive, which tears the
-			// connection down anyway. Closing lets peer governance
-			// reconnect with a fresh bearer and updated intersect points.
 			for _, connId := range connIds {
+				if chainsyncResyncReintersects(e.Reason) &&
+					o.startChainsyncReintersect(ctx, connId, e.Reason) {
+					continue
+				}
 				//nolint:contextcheck // address normalization bounds its own DNS lookup
-				o.denyDivergentChainsyncPeer(
-					connId,
-					e.Reason,
-				)
-				if o.chainsyncState != nil {
-					o.chainsyncState.ClearObservedHeaderHistory(connId)
-				}
-				if o.connManager == nil {
-					continue
-				}
-				conn := o.connManager.GetConnectionById(connId)
-				if conn == nil {
-					continue
-				}
-				o.config.Logger.Info(
-					"closing connection for fresh chainsync",
-					"connection_id", connId.String(),
-					"reason", e.Reason,
-				)
-				_ = o.connManager.CloseConnectionWithReason(conn, e.Reason)
+				o.closeConnectionForChainsyncResync(connId, e.Reason)
 			}
 		},
 	)
+}
+
+// chainsyncResyncReintersects reports whether a re-sync reason is recovered by
+// re-intersecting the live client in place. Local cursor recoveries qualify.
+// A reason that blames the peer closes the connection and denies the peer, and
+// the ingest release closes every tracked client because their cursors froze
+// with the hold.
+func chainsyncResyncReintersects(reason string) bool {
+	switch reason {
+	case event.ChainsyncResyncReasonNetworkIngestReleased,
+		event.ChainsyncResyncReasonLocalLedgerRollback:
+		return false
+	}
+	return event.IsLocalChainsyncResyncReason(reason) &&
+		!chainsyncResyncDeniesPeer(reason)
+}
+
+// closeConnectionForChainsyncResync drops connId's observed header history and
+// closes the connection so peer governance reconnects with fresh intersect
+// points. It is the outcome of every re-sync that is not recovered in place.
+func (o *Ouroboros) closeConnectionForChainsyncResync(
+	connId ouroboros.ConnectionId,
+	reason string,
+) {
+	o.denyDivergentChainsyncPeer(connId, reason)
+	if o.chainsyncState != nil {
+		o.chainsyncState.ClearObservedHeaderHistory(connId)
+	}
+	if o.connManager == nil {
+		return
+	}
+	conn := o.connManager.GetConnectionById(connId)
+	if conn == nil {
+		return
+	}
+	o.config.Logger.Info(
+		"closing connection for fresh chainsync",
+		"connection_id", connId.String(),
+		"reason", reason,
+	)
+	_ = o.connManager.CloseConnectionWithReason(conn, reason)
+}
+
+// startChainsyncReintersect re-intersects connId's chainsync client in the
+// background and reports whether it took ownership of the resync. It returns
+// false when the connection has no running client to re-intersect, so the
+// caller closes instead. A resync that arrives while one is already running
+// for the connection is absorbed by it.
+//
+// Reintersect drains every reply already requested before it sends
+// FindIntersect, and callbacks keep running meanwhile, so it must not run on
+// the event bus goroutine or a chainsync callback.
+func (o *Ouroboros) startChainsyncReintersect(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	reason string,
+) bool {
+	if o.connManager == nil {
+		return false
+	}
+	conn := o.connManager.GetConnectionById(connId)
+	if conn == nil || conn.ChainSync() == nil ||
+		conn.ChainSync().Client == nil {
+		return false
+	}
+	o.chainsyncReintersectMu.Lock()
+	if _, running := o.chainsyncReintersecting[connId]; running {
+		o.chainsyncReintersectMu.Unlock()
+		o.config.Logger.Debug(
+			"chainsync re-intersect already running",
+			"connection_id", connId.String(),
+			"reason", reason,
+		)
+		return true
+	}
+	o.chainsyncReintersecting[connId] = struct{}{}
+	o.chainsyncReintersectMu.Unlock()
+	go func() {
+		defer func() {
+			o.chainsyncReintersectMu.Lock()
+			delete(o.chainsyncReintersecting, connId)
+			o.chainsyncReintersectMu.Unlock()
+		}()
+		o.reintersectChainsyncClient(ctx, connId, reason)
+	}()
+	return true
+}
+
+// reintersectChainsyncClient moves connId's running client to the ledger's
+// current intersect points, keeping the connection and the evidence the peer
+// delivered at or below the new intersection. Any failure, including the
+// watchdog expiring, falls back to closing the connection.
+func (o *Ouroboros) reintersectChainsyncClient(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	reason string,
+) {
+	point, err := o.reintersectWithWatchdog(ctx, connId)
+	if err == nil {
+		if o.chainsyncState != nil {
+			o.chainsyncState.ClearObservedHeaderHistoryAfter(connId, point)
+		}
+		// The marker withholds headers until the old cursor is replaced.
+		// The peer's first reply after IntersectFound is the rollback to
+		// point, and RollForwards follow it only after a further request
+		// round trip, so clearing here cannot drop a header of the new
+		// cursor.
+		o.cancelFutureHeaderResync(connId)
+		o.config.Logger.Info(
+			"re-intersected chainsync in place",
+			"connection_id", connId.String(),
+			"reason", reason,
+			"slot", point.Slot,
+		)
+		return
+	}
+	if errors.Is(err, ochainsync.ErrStopSyncProcess) {
+		// A callback stopped the sync on purpose, as a network ingest hold
+		// does; the owner of that decision restarts it.
+		return
+	}
+	o.config.Logger.Warn(
+		"chainsync re-intersect failed, closing connection",
+		"connection_id", connId.String(),
+		"reason", reason,
+		"error", err,
+	)
+	//nolint:contextcheck // address normalization bounds its own DNS lookup
+	o.closeConnectionForChainsyncResync(connId, reason)
+}
+
+// reintersectWithWatchdog runs Client.Reintersect for connId and returns its
+// intersection point. A client parked in MustReply drains only when the peer
+// sends the next block, so the wait is bounded by chainsyncReintersectTimeout.
+// On expiry the abandoned call returns once the caller closes the connection.
+func (o *Ouroboros) reintersectWithWatchdog(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+) (ocommon.Point, error) {
+	points, err := o.buildDefaultChainsyncIntersectPoints(ctx, connId)
+	if err != nil {
+		return ocommon.Point{}, err
+	}
+	conn := o.connManager.GetConnectionById(connId)
+	if conn == nil || conn.ChainSync() == nil ||
+		conn.ChainSync().Client == nil {
+		return ocommon.Point{}, fmt.Errorf(
+			"ChainSync client not available on connection: %s",
+			connId.String(),
+		)
+	}
+	client := conn.ChainSync().Client
+	type result struct {
+		point ocommon.Point
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		point, _, err := client.Reintersect(points)
+		done <- result{point: point, err: err}
+	}()
+	timer := time.NewTimer(o.chainsyncReintersectTimeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.point, r.err
+	case <-timer.C:
+		return ocommon.Point{}, errors.New("re-intersect timed out")
+	case <-ctx.Done():
+		return ocommon.Point{}, ctx.Err()
+	}
 }
 
 func (o *Ouroboros) instrumentChainsyncFindIntersect(

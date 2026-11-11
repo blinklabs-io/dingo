@@ -7322,9 +7322,8 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
 		event.ChainsyncResyncReasonReplayRecoveryNonConverging,
 		event.ChainsyncResyncReasonChainSwitchCursorAhead,
-		// Every re-sync reason replaces the connection: an in-place
-		// re-intersect sends FindIntersect while RequestNext replies are
-		// still in flight, which the peer's replies then violate.
+		// This connection runs no chainsync client, so the local reasons
+		// below have nothing to re-intersect in place and replace it.
 		event.ChainsyncResyncReasonRollbackAhead,
 		event.ChainsyncResyncReasonHeaderValidationRecovery,
 		event.ChainsyncResyncReasonForecastCorroborationRecovery,

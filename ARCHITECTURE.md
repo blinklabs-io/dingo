@@ -829,6 +829,22 @@ this keeps the label set bounded; the full reason stays in the logs. Resyncs
 coalesced by the ledger before publication are not counted, and neither are
 events dropped because the subscriber's context is done.
 
+`SubscribeChainsyncResync` recovers a local cursor reason
+(`event.IsLocalChainsyncResyncReason`, except `LocalLedgerRollback` and
+`NetworkIngestReleased`) by calling `Client.Reintersect` on the live connection
+instead of closing it. `Reintersect` drains every outstanding `MsgRequestNext`
+reply before sending `MsgFindIntersect`, so it runs on its own goroutine, once
+per connection at a time, and is bounded by `chainsyncReintersectTimeout`: a
+client parked at the peer's tip drains only when the next block arrives. On
+success the peer's observed header history is trimmed to the new intersection
+(`State.ClearObservedHeaderHistoryAfter`) rather than cleared, the withheld-header
+marker is dropped, and the delivered-tip history in chain selection stays, so a
+Genesis corroborating peer keeps its density evidence; the first `RollBackward`
+after the intersect trims it. The connection is closed instead, as for every
+reason that blames the peer, when the client is absent, the watchdog expires,
+the ledger cannot supply intersect points, or the peer answers
+`IntersectNotFound`.
+
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
 and sees a rollback's undo events (`Rollback: true`) before any transaction
