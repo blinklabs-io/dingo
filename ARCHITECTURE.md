@@ -856,6 +856,37 @@ points, or the peer answers `IntersectNotFound`. A run is tied to the client it
 started on, so a run outliving its connection neither absorbs a resync of the
 connection that replaces it under the same ID nor closes that replacement.
 
+Closing a connection ended everything keyed by its connection ID; a
+re-intersect keeps the ID, so it ends that state itself. On `IntersectFound`,
+`settleReintersectedCursor` clears the observer header gap, the parked
+deferred-header recovery and the accepted header tip, and advances the
+connection's cursor epoch so a header the ledger rejects afterwards parks no
+new recovery. On `SessionReopened` the ledger also ends the connection's resync
+coalescing episode, rejects the headers it buffered from the old cursor and
+resets the mismatch count. Until `IntersectFound`, replies to requests
+pipelined on the old cursor are dropped before verification
+(`chainsyncCursorCondemned`), a rollback among them included.
+
+`ChainsyncResyncReasonRollbackNotFound` is not a local cursor reason, since it
+can also mean a peer the node cannot follow, but it re-intersects in place
+once: a repeat on the same connection within
+`chainsyncLostCursorReintersectCooldown` closes it, so the governor's reconnect
+backoff still applies to such a peer.
+
+While Genesis selection runs with no corroboration threshold, observer headers
+are counted by nothing, so an observer stops reading them
+(`holdUnreadObserver`): its roll-forward callback is held, which stops further
+`MsgRequestNext` once the pipelined replies are in. The hold is bounded by
+`catchUpBandWaitTimeout`, like every roll-forward wait, to stay under the
+protocol state timers; at the bound the header is dropped and the next one is
+held, so a held observer reads one header per bound. Every
+`observerParkPoll` it tries to take an ingress slot. It is released when it
+takes one, or when deliveries are counted again
+(`ChainsyncResyncReasonObserverResumed`), and re-intersects either way because
+its cursor stopped while the local chain advanced. With a corroboration
+threshold observers read as before, since their headers are the witness
+evidence.
+
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
 and sees a rollback's undo events (`Rollback: true`) before any transaction

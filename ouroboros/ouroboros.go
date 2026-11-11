@@ -333,6 +333,12 @@ type Ouroboros struct {
 	// chainsyncLostCursorReintersects records when each connection was last
 	// re-intersected for a lost cursor, guarded by chainsyncReintersectMu.
 	chainsyncLostCursorReintersects map[ouroboros.ConnectionId]time.Time
+	// observerParkPoll is how often a held observer checks whether it may
+	// take an ingress slot or resume reading.
+	observerParkPoll time.Duration
+	// observerParkedHook runs when an observer's callback starts to be held.
+	// Tests use it to wait for the hold.
+	observerParkedHook func()
 	// chainsyncReintersectReturnedHook runs once an in-place re-intersect has
 	// returned and the re-intersected sync is already running. Tests use it to
 	// hold the resync goroutine while the new cursor streams.
@@ -701,6 +707,13 @@ type OuroborosConfig struct {
 	// each attempt and waits on it, bounded, before verifying the header
 	// again. When nil, a deferred header is parked at once.
 	ChainsyncHeaderVerificationSettled func() <-chan struct{}
+	// ChainsyncObserverDeliveriesUnused reports whether headers delivered by
+	// observer connections are currently counted by nothing: they are not
+	// ingested, and no Genesis corroboration is reading them as witness
+	// evidence. While it reports true an observer stops reading headers
+	// instead of downloading the chain once more per connected peer. When
+	// nil, observers always read.
+	ChainsyncObserverDeliveriesUnused func() bool
 	// ChainsyncAwaitCorroboration holds a roll-forward that ChainsyncApplyEligible
 	// denied, while the denial is only a lack of Genesis corroboration, and
 	// reports whether the header may then be applied. The peer's cursor stays
@@ -971,6 +984,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			map[ouroboros.ConnectionId]deferredHeaderRecoveryState,
 		),
 		chainsyncReintersectTimeout: defaultChainsyncReintersectTimeout,
+		observerParkPoll:            defaultObserverParkPoll,
 		chainsyncReintersecting: make(
 			map[ouroboros.ConnectionId]*chainsyncReintersectRun,
 		),

@@ -2268,6 +2268,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.releasePromotedAheadRecycle(promotedAheadClaim)
 			promotedAheadClaim = time.Time{}
 		}
+		if !ingressEligible && o.observerDeliveriesUnused() {
+			return o.holdUnreadObserver(ctx, clientSession, tip)
+		}
 		observerDelivery := !ingressEligible
 		patienceResume = ingressEligible
 		// A promoting header that continues the local chain needs no fresh
@@ -3592,6 +3595,81 @@ func (o *Ouroboros) updateChainsyncMetrics(
 
 	// Update peer scoring
 	o.peerGov.UpdatePeerChainSyncObservation(connId, headerRate, tipDelta)
+}
+
+// defaultObserverParkPoll bounds how long a freed ingress slot waits for a
+// held observer to notice it.
+const defaultObserverParkPoll = time.Second
+
+func (o *Ouroboros) observerDeliveriesUnused() bool {
+	return o.config.ChainsyncObserverDeliveriesUnused != nil &&
+		o.config.ChainsyncObserverDeliveriesUnused()
+}
+
+// holdUnreadObserver holds an observer's roll-forward callback while its
+// headers would be dropped uncounted. Every connected peer otherwise streams
+// the whole chain to a syncing node, of which only the ingress connections'
+// copies are used. Holding the callback stops the client from requesting more
+// once its pipelined replies are in, so the peer sends nothing further.
+//
+// The hold ends when the connection takes an ingress slot, when observer
+// deliveries are counted again, when the connection stops, or at
+// catchUpBandWaitTimeout, after which the next header is held: a held
+// observer reads one header per bound. The held header is dropped as any
+// observer header is. The connection's cursor stopped at it
+// while the local chain moved on, so it replays from a fresh intersection:
+// the observer header gap makes a promotion re-intersect, and a connection
+// that resumes as an observer is re-intersected here.
+func (o *Ouroboros) holdUnreadObserver(
+	ctx ochainsync.CallbackContext,
+	session chainsync.ClientSessionToken,
+	tip ochainsync.Tip,
+) error {
+	if o.chainsyncState != nil {
+		o.chainsyncState.RecordClientObserverHeaderGap(
+			ctx.ConnectionId,
+			session,
+		)
+	}
+	holdCtx, cancel := chainsyncAdmissionContext(ctx)
+	defer cancel()
+	// A held callback stops the protocol's receive loop, so the hold stays
+	// under the protocol state timers like the other roll-forward waits. At
+	// the bound this header is dropped and the next one is held.
+	bound := time.NewTimer(o.catchUpBandWaitTimeout)
+	defer bound.Stop()
+	if o.observerParkedHook != nil {
+		o.observerParkedHook()
+	}
+	ticker := time.NewTicker(o.observerParkPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-holdCtx.Done():
+			return fmt.Errorf(
+				"chainsync: observer hold: %w",
+				holdCtx.Err(),
+			)
+		case <-bound.C:
+			return nil
+		case <-ticker.C:
+		}
+		if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+			return ochainsync.ErrStopSyncProcess
+		}
+		if o.chainsyncIngressDesired(ctx.ConnectionId, tip) &&
+			o.reconcileChainsyncIngressAdmission(ctx.ConnectionId, true) {
+			return nil
+		}
+		if !o.observerDeliveriesUnused() {
+			o.scheduleHeaderResync(
+				ctx.ConnectionId,
+				time.Now(),
+				event.ChainsyncResyncReasonObserverResumed,
+			)
+			return nil
+		}
+	}
 }
 
 // settleReintersectedCursor ends what was recorded against connId's previous

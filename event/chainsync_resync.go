@@ -121,6 +121,12 @@ const (
 	// with its headers dropped. It carries no ConnectionId, is not a
 	// peer-fault signal and does not impose a peer cooldown.
 	ChainsyncResyncReasonNetworkIngestReleased = "network ingest released"
+	// ChainsyncResyncReasonObserverResumed re-intersects an observer
+	// connection that stopped reading headers while nothing counted them and
+	// now reads again. Its cursor stayed where it stopped while the local
+	// chain moved on. It is not a peer-fault signal and does not impose a
+	// peer cooldown.
+	ChainsyncResyncReasonObserverResumed = "observer resumed"
 )
 
 // ChainsyncResyncEvent carries the connection ID that should
@@ -150,6 +156,7 @@ func IsLocalChainsyncResyncReason(reason string) bool {
 		ChainsyncResyncReasonHeaderPastForecastHorizon,
 		ChainsyncResyncReasonBufferedHeaderLimitExceeded,
 		ChainsyncResyncReasonBehindLocalTip,
+		ChainsyncResyncReasonObserverResumed,
 		ChainsyncResyncReasonNetworkIngestReleased,
 		ChainsyncResyncReasonLocalLedgerRollback:
 		return true
