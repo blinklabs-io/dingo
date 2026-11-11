@@ -14393,3 +14393,112 @@ func TestCleanupBlockNoncesRetainsHistoryInAPIMode(t *testing.T) {
 		})
 	}
 }
+
+var chainPositionGaugeNames = []string{
+	"cardano_node_metrics_blockNum_int",
+	"cardano_node_metrics_slotNum_int",
+	"cardano_node_metrics_epoch_int",
+	"cardano_node_metrics_slotInEpoch_int",
+}
+
+func gatherGaugeValues(
+	t *testing.T,
+	reg *prometheus.Registry,
+) map[string]float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	out := make(map[string]float64)
+	for _, mf := range families {
+		if len(mf.GetMetric()) == 1 && mf.GetMetric()[0].GetGauge() != nil {
+			out[mf.GetName()] = mf.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	return out
+}
+
+func TestChainPositionGaugesAbsentUntilTipLoaded(t *testing.T) {
+	t.Parallel()
+
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
+			strings.NewReader(`{"activeSlotsCoeff": 0.05, "securityParam": 3}`),
+		),
+	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	tipBlock := makeTestBlock(210, 5)
+	require.NoError(t, db.BlockCreate(tipBlock, nil))
+	require.NoError(
+		t,
+		db.SetBlockNonce(tipBlock.Hash, tipBlock.Slot, []byte{1}, false, nil),
+	)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       makeTestPoint(tipBlock),
+		BlockNumber: tipBlock.Number,
+	}, nil))
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	reg := prometheus.NewRegistry()
+	ls.metrics.init(reg)
+
+	// A scrape before the tip is loaded must not report 0 for any
+	// chain-position gauge.
+	before := gatherGaugeValues(t, reg)
+	for _, name := range chainPositionGaugeNames {
+		assert.NotContains(t, before, name)
+	}
+
+	require.NoError(t, ls.loadTip(context.Background()))
+
+	after := gatherGaugeValues(t, reg)
+	for _, name := range chainPositionGaugeNames {
+		assert.Contains(t, after, name)
+	}
+	assert.Equal(t, float64(tipBlock.Number), after[chainPositionGaugeNames[0]])
+	assert.Equal(t, float64(tipBlock.Slot), after[chainPositionGaugeNames[1]])
+}
+
+func TestChainPositionGaugesExportedAtOriginTip(t *testing.T) {
+	t.Parallel()
+
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
+			strings.NewReader(`{"activeSlotsCoeff": 0.05, "securityParam": 3}`),
+		),
+	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	reg := prometheus.NewRegistry()
+	ls.metrics.init(reg)
+	for _, name := range chainPositionGaugeNames {
+		assert.NotContains(t, gatherGaugeValues(t, reg), name)
+	}
+
+	require.NoError(t, ls.loadTip(context.Background()))
+
+	// A genuinely empty chain has its tip at origin, so 0 is the loaded value.
+	got := gatherGaugeValues(t, reg)
+	for _, name := range chainPositionGaugeNames {
+		assert.Contains(t, got, name)
+		assert.Zero(t, got[name])
+	}
+}

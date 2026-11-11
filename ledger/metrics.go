@@ -42,21 +42,26 @@ type stateMetrics struct {
 	blockfetchEventMu        sync.Mutex
 	blockfetchEventStarts    map[uint64]time.Time
 	blockfetchEventNextID    uint64
-	blockNum                 prometheus.Gauge
-	density                  prometheus.Gauge
-	epochNum                 prometheus.Gauge
-	slotInEpoch              prometheus.Gauge
-	slotNum                  prometheus.Gauge
-	forks                    prometheus.Gauge
-	slotClockFallbacks       prometheus.Counter
-	blocksForgedTotal        prometheus.Counter
-	blockForgingLatency      prometheus.Histogram
-	forgingEnabled           prometheus.Gauge
-	nodeStartTime            prometheus.Gauge
-	tipGapSlots              prometheus.Gauge
-	shelleyStartTime         prometheus.Gauge
-	epochLengthSlots         prometheus.Gauge
-	shadowGateDecisions      *prometheus.CounterVec
+	// Chain-position gauges are created unregistered and registered by
+	// registerChainPositionGauges once a ledger tip has been loaded, so a
+	// scrape never reports 0 for a position the node has already passed.
+	chainPositionRegisterer prometheus.Registerer
+	chainPositionOnce       sync.Once
+	blockNum                prometheus.Gauge
+	density                 prometheus.Gauge
+	epochNum                prometheus.Gauge
+	slotInEpoch             prometheus.Gauge
+	slotNum                 prometheus.Gauge
+	forks                   prometheus.Gauge
+	slotClockFallbacks      prometheus.Counter
+	blocksForgedTotal       prometheus.Counter
+	blockForgingLatency     prometheus.Histogram
+	forgingEnabled          prometheus.Gauge
+	nodeStartTime           prometheus.Gauge
+	tipGapSlots             prometheus.Gauge
+	shelleyStartTime        prometheus.Gauge
+	epochLengthSlots        prometheus.Gauge
+	shadowGateDecisions     *prometheus.CounterVec
 	// Wall-clock time the ledger apply path spent waiting for a referenced
 	// Leios endorser block, by outcome ("arrived", "timeout", "cancelled" or
 	// "unavailable"). It covers both waits the apply path can take: the
@@ -910,7 +915,28 @@ func (m *stateMetrics) updateBlockPipelineStats(stats pipeline.PipelineStats) {
 	}
 }
 
+// registerChainPositionGauges exposes the chain-position gauges. It runs
+// once, after the first tip load: before then the gauges are absent from
+// scrapes rather than 0, because rate() and deriv() over a 0 followed by the
+// real tip read as an enormous block rate. A fresh start whose tip is genuinely
+// origin registers them at 0.
+func (m *stateMetrics) registerChainPositionGauges() {
+	m.chainPositionOnce.Do(func() {
+		if m.chainPositionRegisterer == nil {
+			return
+		}
+		m.chainPositionRegisterer.MustRegister(
+			m.blockNum,
+			m.slotNum,
+			m.epochNum,
+			m.slotInEpoch,
+			m.density,
+		)
+	})
+}
+
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
+	m.chainPositionRegisterer = promRegistry
 	promautoFactory := promauto.With(promRegistry)
 	promautoFactory.NewGaugeFunc(
 		prometheus.GaugeOpts{
@@ -935,23 +961,23 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		Name: "dingo_ledger_fork_anchor_membership_retries_total",
 		Help: "fork-anchor chain membership reads repeated because a block mutation overlapped them",
 	})
-	m.blockNum = promautoFactory.NewGauge(prometheus.GaugeOpts{
+	m.blockNum = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_blockNum_int",
 		Help: "current block number",
 	})
-	m.density = promautoFactory.NewGauge(prometheus.GaugeOpts{
+	m.density = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_density_real",
 		Help: "chain density",
 	})
-	m.epochNum = promautoFactory.NewGauge(prometheus.GaugeOpts{
+	m.epochNum = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_epoch_int",
 		Help: "current epoch number",
 	})
-	m.slotInEpoch = promautoFactory.NewGauge(prometheus.GaugeOpts{
+	m.slotInEpoch = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_slotInEpoch_int",
 		Help: "current relative slot number in epoch",
 	})
-	m.slotNum = promautoFactory.NewGauge(prometheus.GaugeOpts{
+	m.slotNum = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_slotNum_int",
 		Help: "current slot number",
 	})
