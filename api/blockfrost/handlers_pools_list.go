@@ -14,7 +14,56 @@
 
 package blockfrost
 
-import "net/http"
+import (
+	"context"
+	"errors"
+	"net/http"
+	"time"
+)
+
+// poolListTimeout bounds how long one pool list request may run.
+const poolListTimeout = 15 * time.Second
+
+// admitPoolList reserves a slot in the pool list pool for the request's
+// client. When the pool is full it writes the 429 response and reports
+// false.
+func (b *Blockfrost) admitPoolList(
+	w http.ResponseWriter,
+	r *http.Request,
+) (func(), bool) {
+	release, ok := b.poolListAdmission.acquire(r.Context(), requestClient(r))
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			"Too Many Requests",
+			"pool list capacity reached, try again later",
+		)
+		return nil, false
+	}
+	return release, true
+}
+
+// writePoolListDeadlineError answers a request that ran past its deadline
+// and reports whether it did.
+func (b *Blockfrost) writePoolListDeadlineError(
+	w http.ResponseWriter,
+	err error,
+) bool {
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	b.logger.Warn("pool list exceeded its deadline", "error", err)
+	w.Header().Set("Retry-After", "1")
+	writeError(
+		w,
+		http.StatusServiceUnavailable,
+		"Service Unavailable",
+		"pool list deadline exceeded, try again later",
+	)
+	return true
+}
 
 // handlePoolsList handles GET /api/v0/pools and returns the paginated
 // list of registered stake pool IDs (pool_list): a flat array of bech32
@@ -30,8 +79,18 @@ func (b *Blockfrost) handlePoolsList(
 		return
 	}
 
-	pools, total, err := b.node.PoolsList(r.Context(), params)
+	release, ok := b.admitPoolList(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(r.Context(), poolListTimeout)
+	defer cancel()
+	pools, total, err := b.node.PoolsList(ctx, params)
 	if err != nil {
+		if b.writePoolListDeadlineError(w, err) {
+			return
+		}
 		b.logger.Error(
 			"failed to list pools",
 			"error", err,

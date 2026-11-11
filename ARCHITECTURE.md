@@ -15235,7 +15235,12 @@ share a metadata label admission pool (4 active, 2 per client address, 429 with
 deadline (a disconnected client stops the page; an overrun answers 503 with
 `Retry-After`). The page reads the label's rows through the
 `(label, slot, transaction_id)` index, so its cost follows the page offset
-rather than the number of transactions with the label. Pool and account list routes reject
+rather than the number of transactions with the label. `GET /pools` and `GET /pools/retiring` rank the pool registration and
+retirement certificates, so they share a pool list admission pool (4 active, 2
+per client address, 429 with `Retry-After` when full) and run under the request
+context and a 15-second deadline (an overrun answers 503 with `Retry-After`);
+the retiring query ranks registrations only for pools with a qualifying
+retirement. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,
@@ -15451,6 +15456,18 @@ usage per backend (verified with real Postgres 16 and MySQL 8.4 containers at
 mainnet-comparable scale, not assumed from sqlite) and for the cross-backend
 behavioral tests confirming sqlite, postgres, and mysql return the identical
 oldest-first sequence against the same fixture.
+
+The ordered list depends only on chain state, so the adapter caches it for the
+tip point it was computed at (`activePoolCache`): requests at one tip share a
+single computation, a request that arrives during it waits for it or for its
+own deadline, a failed computation is not cached, and a new block or rollback
+moves the tip and so replaces the list. `GET /pools` and `GET /pools/retiring`
+also share a pool list admission pool (4 active, 2 per client address, 429
+with `Retry-After` when full) and run under the request context and a
+15-second deadline (an overrun answers 503 with `Retry-After`). The retiring
+and retired lists find their candidate pools through the `pool_retirement`
+epoch index and rank certificates only for those pools, so a page does not
+read every registration and retirement ever recorded.
 
 `GET /assets/{asset}` derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from

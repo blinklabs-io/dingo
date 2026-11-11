@@ -170,6 +170,8 @@ type NodeAdapter struct {
 	// summaryLimits overrides the address summary read budget. The zero
 	// value selects the defaults.
 	summaryLimits addressSummaryLimits
+	// activePools caches the ordered active pool list per tip point.
+	activePools activePoolCache
 }
 
 // ErrAddressSummaryTooLarge reports an address summary whose read work

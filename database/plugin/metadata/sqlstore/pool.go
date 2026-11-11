@@ -1786,17 +1786,28 @@ WHERE NOT EXISTS (
 	)
 }
 
-// retiringPoolsCTE ranks every pool's registration and retirement
-// certificates, newest first. The AtSlot form keeps only certificates added
-// at or before a slot, so the ranking reads as that slot saw it.
-var retiringPoolsCTE = retiringPoolsCTEWhere("", "")
+// retiringPoolsCTE ranks the registration and retirement certificates of the
+// pools whose latest retirement can satisfy "epoch <epochOp> ?", newest
+// first. Ranking only those pools, found through the retirement epoch index,
+// keeps the work off the registration and retirement history of every other
+// pool; a pool whose latest retirement qualifies always has a retirement row
+// that qualifies, so no result is lost. The epoch is bound once per ranked
+// table ahead of the main query's own. The AtSlot form keeps only
+// certificates added at or before a slot, so the ranking reads as that slot
+// saw it.
+func retiringPoolsCTE(epochOp string) string {
+	return retiringPoolsCTEWhere("WHERE", "WHERE", epochOp)
+}
 
-var retiringPoolsCTEAtSlot = retiringPoolsCTEWhere(
-	"WHERE pr.added_slot <= ?",
-	"WHERE pt.added_slot <= ?",
-)
+func retiringPoolsCTEAtSlot(epochOp string) string {
+	return retiringPoolsCTEWhere(
+		"WHERE pr.added_slot <= ? AND",
+		"WHERE pt.added_slot <= ? AND",
+		epochOp,
+	)
+}
 
-func retiringPoolsCTEWhere(regWhere, retWhere string) string {
+func retiringPoolsCTEWhere(regWhere, retWhere, epochOp string) string {
 	return `
 WITH latest_reg AS (
     SELECT pr.pool_key_hash, pr.added_slot,
@@ -1814,7 +1825,10 @@ WITH latest_reg AS (
     FROM pool_registration pr
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    ` + regWhere + `
+    ` + regWhere + ` pr.pool_key_hash IN (
+        SELECT pq.pool_key_hash FROM pool_retirement pq
+        WHERE pq.epoch ` + epochOp + ` ?
+    )
 ),
 latest_ret AS (
     SELECT pt.pool_key_hash, pt.epoch, pt.added_slot,
@@ -1831,7 +1845,10 @@ latest_ret AS (
     FROM pool_retirement pt
     LEFT JOIN certs c ON c.id = pt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    ` + retWhere + `
+    ` + retWhere + ` pt.pool_key_hash IN (
+        SELECT pq.pool_key_hash FROM pool_retirement pq
+        WHERE pq.epoch ` + epochOp + ` ?
+    )
 )
 `
 }
@@ -1883,9 +1900,9 @@ func (s *Store) GetRetiringPools(
 	}
 	rows, err := db.QueryContext(
 		ctx,
-		s.dialect.Rebind(retiringPoolsCTE+"SELECT r.pool_key_hash, r.epoch"+
+		s.dialect.Rebind(retiringPoolsCTE(">")+"SELECT r.pool_key_hash, r.epoch"+
 			retiringPoolsFrom(">")+retiringPoolsOrder),
-		currentEpoch,
+		currentEpoch, currentEpoch, currentEpoch,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get retiring pools: %w", err)
@@ -1907,9 +1924,9 @@ func (s *Store) GetRetiringPoolsAtSlot(
 	}
 	rows, err := db.QueryContext(
 		ctx,
-		s.dialect.Rebind(retiringPoolsCTEAtSlot+"SELECT r.pool_key_hash, r.epoch"+
+		s.dialect.Rebind(retiringPoolsCTEAtSlot(">")+"SELECT r.pool_key_hash, r.epoch"+
 			retiringPoolsFrom(">")+retiringPoolsOrder),
-		slot, slot, currentEpoch,
+		slot, currentEpoch, slot, currentEpoch, currentEpoch,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get retiring pools at slot: %w", err)
@@ -1958,8 +1975,8 @@ func (s *Store) poolsByRetirementPage(
 	var total int
 	if err := db.QueryRowContext(
 		ctx,
-		s.dialect.Rebind(retiringPoolsCTE+"SELECT COUNT(*)"+retiringPoolsFrom(epochOp)),
-		currentEpoch,
+		s.dialect.Rebind(retiringPoolsCTE(epochOp)+"SELECT COUNT(*)"+retiringPoolsFrom(epochOp)),
+		currentEpoch, currentEpoch, currentEpoch,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count retiring pools: %w", err)
 	}
@@ -1974,10 +1991,10 @@ ORDER BY r.epoch DESC, r.added_slot DESC,
 	}
 	rows, err := db.QueryContext(
 		ctx,
-		s.dialect.Rebind(retiringPoolsCTE+
+		s.dialect.Rebind(retiringPoolsCTE(epochOp)+
 			"SELECT r.pool_key_hash, r.epoch"+retiringPoolsFrom(epochOp)+order+
 			" LIMIT ? OFFSET ?"),
-		currentEpoch, limit, offset,
+		currentEpoch, currentEpoch, currentEpoch, limit, offset,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("get retiring pool page: %w", err)

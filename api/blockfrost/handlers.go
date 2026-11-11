@@ -731,8 +731,18 @@ func (b *Blockfrost) handlePoolsRetiring(
 		writeError(w, http.StatusBadRequest, "Bad Request", errMsg)
 		return
 	}
-	pools, total, err := b.node.PoolsRetiring(r.Context(), params)
+	release, ok := b.admitPoolList(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(r.Context(), poolListTimeout)
+	defer cancel()
+	pools, total, err := b.node.PoolsRetiring(ctx, params)
 	if err != nil {
+		if b.writePoolListDeadlineError(w, err) {
+			return
+		}
 		b.logger.Error(
 			"failed to list retiring pools",
 			"error", err,
