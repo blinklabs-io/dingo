@@ -619,6 +619,11 @@ var (
 	// goVersionKeyRe captures actions/setup-go pins, either a scalar
 	// (`go-version: 1.26.x`) or a matrix list (`go-version: [1.26.x]`).
 	goVersionKeyRe = regexp.MustCompile(`(?m)^\s*go-version:\s*(.+?)\s*$`)
+	// goVersionFileRe matches a setup-go step that takes its version from a
+	// go.mod file.
+	goVersionFileRe = regexp.MustCompile(
+		`^\s*go-version-file:\s*(?:\S*/)?go\.mod\s*$`,
+	)
 	// goImageRe captures the Blink Labs Go builder image and its full tag.
 	goImageRe = regexp.MustCompile(
 		"ghcr\\.io/blinklabs-io/go:([0-9][0-9A-Za-z.-]*)",
@@ -728,7 +733,9 @@ func TestDocumentedGoVersionMatchesGoMod(t *testing.T) {
 }
 
 // TestWorkflowGoVersionCoversGoMod checks every actions/setup-go pin can
-// actually build the module. A pin may lead go.mod, but never trail it.
+// actually build the module. A pin may lead go.mod, but never trail it. A job
+// that reads its version from go.mod through go-version-file cannot trail it,
+// so it counts as covered without a pin.
 func TestWorkflowGoVersionCoversGoMod(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
@@ -738,6 +745,10 @@ func TestWorkflowGoVersionCoversGoMod(t *testing.T) {
 	for _, rel := range workflowFiles(t, root) {
 		workflow := readRepoFile(t, root, rel)
 		for i, line := range strings.Split(workflow, "\n") {
+			if goVersionFileRe.MatchString(line) {
+				checked++
+				continue
+			}
 			match := goVersionKeyRe.FindStringSubmatch(line)
 			if match == nil {
 				continue
@@ -785,7 +796,7 @@ func TestWorkflowGoVersionCoversGoMod(t *testing.T) {
 		}
 	}
 	if checked == 0 {
-		t.Error("no concrete go-version pin found in .github/workflows")
+		t.Error("no go-version or go-version-file found in .github/workflows")
 	}
 }
 
