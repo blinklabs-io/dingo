@@ -16,16 +16,21 @@ package ledger
 
 import (
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"math/big"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dtestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -38,6 +43,42 @@ import (
 // chunkedFixtureCredential deterministically derives a unique 28-byte
 // credential or pool-key hash from a domain tag and index, so a multi-pool
 // fixture can mint as many distinct hashes as it needs without collisions.
+// stakeRewardPrecomputeChunkStep processes at most one chunk of pools, as a
+// test driver for the step the background run pipelines. The
+// chunk's reads run in a read transaction, outside rewardPrecomputeWriteMu and
+// without the metadata write connection, so block application is not held off
+// while they run. Only the writes -- outputs, cursor, completion -- run in a
+// short write transaction, which first re-validates under the write mutex
+// everything the reads relied on: the rollback generation, the boundary fence,
+// the snapshot row, and the stored cursor. A step whose validation fails
+// writes nothing. done is true once nothing further should be attempted for
+// this round: Pass 2 is complete, or the round was invalidated by a rollback
+// or claimed by a boundary and the caller must stop.
+func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
+	round *stakeRewardPrecomputeRound,
+) (bool, error) {
+	if round == nil || ls.rewardPrecomputeRoundInvalidated(round) {
+		return true, nil
+	}
+	plan, err := ls.planStakeRewardPrecomputeStepRead(round, nil)
+	if err != nil {
+		return false, err
+	}
+	if plan == nil || plan.done {
+		return true, nil
+	}
+	result := ls.applyStakeRewardPrecomputeStep(round, plan)
+	if result.err != nil {
+		return false, result.err
+	}
+	if result.midRound && ls.rewardPrecomputeChunkHook != nil {
+		ls.rewardPrecomputeChunkHook(
+			plan.cursor.CompletedPools, len(round.poolInputs),
+		)
+	}
+	return result.done, nil
+}
+
 // runChunkedStakeRewardPrecompute runs the chunked precompute for one round
 // and drops the handled flag.
 func (ls *LedgerState) runChunkedStakeRewardPrecompute(
@@ -887,4 +928,320 @@ func TestRewardPrecomputeChunkEndBoundsDelegators(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestChunkedRewardPrecomputeChunkReadsLeaveWriteConnectionFree proves a
+// chunk's reads do not hold the metadata write connection: a write
+// transaction opened while the chunk is mid-read must begin and commit.
+func TestChunkedRewardPrecomputeChunkReadsLeaveWriteConnectionFree(
+	t *testing.T,
+) {
+	t.Parallel()
+	ls, _ := seedMultiPoolRewardPrecomputeFixture(t, 4, 2, 7)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+		4, 200, 1_200,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	hookRuns := 0
+	var writeErr error
+	ls.rewardPrecomputeChunkReadHook = func() {
+		hookRuns++
+		ctx, cancel := context.WithTimeout(
+			context.Background(), 2*time.Second,
+		)
+		defer cancel()
+		writeErr = ls.db.Transaction(ctx, true).Do(
+			func(*database.Txn) error { return nil },
+		)
+	}
+	done, err := ls.stakeRewardPrecomputeChunkStep(round)
+	require.NoError(t, err)
+	require.False(t, done)
+	require.Equal(t, 1, hookRuns)
+	require.NoError(
+		t, writeErr,
+		"a write transaction must be able to begin while a chunk reads",
+	)
+}
+
+// TestChunkedRewardPrecomputeDiscardsChunkOnInputChangeDuringRead proves
+// that a chunk computed from reads taken outside the write transaction is
+// discarded, not persisted, when the round is invalidated before it commits.
+func TestChunkedRewardPrecomputeDiscardsChunkOnInputChangeDuringRead(
+	t *testing.T,
+) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		change func(ls *LedgerState)
+	}{
+		{"generation", func(ls *LedgerState) {
+			ls.rewardInputGeneration.Add(1)
+		}},
+		{"fence", func(ls *LedgerState) {
+			ls.rewardPrecomputeFence.Add(1)
+		}},
+		{"rollback active", func(ls *LedgerState) {
+			ls.rewardInputRollbackActive.Add(1)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ls, db := seedMultiPoolRewardPrecomputeFixture(t, 4, 2, 7)
+			ls.rewardPrecomputeChunkPoolsOverride = 2
+			round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+				4, 200, 1_200,
+			)
+			require.NoError(t, err)
+			require.True(t, ok)
+			ls.rewardPrecomputeChunkReadHook = func() { test.change(ls) }
+
+			done, err := ls.stakeRewardPrecomputeChunkStep(round)
+			require.NoError(t, err)
+			require.True(t, done, "an invalidated round must stop")
+			outputs, err := db.Metadata().GetRewardPoolOutputs(1, nil)
+			require.NoError(t, err)
+			require.Empty(t, outputs, "a stale chunk must not be persisted")
+			cursor, err := loadRewardPrecomputeCursor(db.Metadata(), nil, 1)
+			require.NoError(t, err)
+			require.Nil(t, cursor)
+		})
+	}
+}
+
+// TestChunkedRewardPrecomputeSkipsWriteWhenCursorMovedDuringRead proves a
+// step planned from a cursor that changed before its write phase writes
+// nothing and is retried rather than overwriting the newer cursor.
+func TestChunkedRewardPrecomputeSkipsWriteWhenCursorMovedDuringRead(
+	t *testing.T,
+) {
+	t.Parallel()
+	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 4, 2, 7)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(
+		4, 200, 1_200,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	moved := &rewardPrecomputeCursor{
+		FormatVersion:    rewardPrecomputeCursorFormatVersion,
+		SnapshotEpoch:    1,
+		Generation:       round.generation,
+		InputFingerprint: "other",
+	}
+	var hookErr error
+	ls.rewardPrecomputeChunkReadHook = func() {
+		hookErr = db.Transaction(context.Background(), true).Do(
+			func(txn *database.Txn) error {
+				return saveRewardPrecomputeCursor(
+					db.Metadata(), txn.Metadata(), moved,
+				)
+			},
+		)
+	}
+	done, err := ls.stakeRewardPrecomputeChunkStep(round)
+	require.NoError(t, hookErr)
+	require.NoError(t, err)
+	require.False(t, done, "a moved cursor must be re-planned, not abandoned")
+	outputs, err := db.Metadata().GetRewardPoolOutputs(1, nil)
+	require.NoError(t, err)
+	require.Empty(t, outputs)
+	stored, err := loadRewardPrecomputeCursor(db.Metadata(), nil, 1)
+	require.NoError(t, err)
+	require.Equal(t, moved, stored)
+}
+
+// TestBoundaryFinishesUnfinishedRoundOutsideRolloverTxn proves the work
+// before the rollover transaction finishes a round the background run left
+// unfinished without holding the write connection across its reads, so the
+// rollover transaction finds a completed round and runs no chunk reads.
+func TestBoundaryFinishesUnfinishedRoundOutsideRolloverTxn(t *testing.T) {
+	t.Parallel()
+	const poolCount = 6
+	ls, db := seedMultiPoolRewardPrecomputeFixture(t, poolCount, 2, 7)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(4, 200, 1_200)
+	require.NoError(t, err)
+	require.True(t, ok)
+	done, err := ls.stakeRewardPrecomputeChunkStep(round)
+	require.NoError(t, err)
+	require.False(t, done)
+
+	reads := 0
+	var writeErr error
+	ls.rewardPrecomputeChunkReadHook = func() {
+		reads++
+		ctx, cancel := context.WithTimeout(
+			context.Background(), 2*time.Second,
+		)
+		defer cancel()
+		if err := ls.db.Transaction(ctx, true).Do(
+			func(*database.Txn) error { return nil },
+		); err != nil && writeErr == nil {
+			writeErr = err
+		}
+	}
+	gaps := 0
+	ls.rewardPrecomputeReadGapHook = func() { gaps++ }
+	ls.fenceAndCompleteRewardPrecompute(4, 1_200)
+	require.Zero(
+		t, gaps,
+		"the boundary pauses block application, so it must not pace its reads",
+	)
+	require.Equal(t, 2, reads, "the two remaining chunks run before the rollover")
+	require.NoError(
+		t, writeErr,
+		"the write connection must stay free while the chunks read",
+	)
+	cursor, err := loadRewardPrecomputeCursor(db.Metadata(), nil, 1)
+	require.NoError(t, err)
+	require.NotNil(t, cursor)
+	require.True(t, cursor.Done)
+	outputs, err := db.Metadata().GetRewardPoolOutputs(1, nil)
+	require.NoError(t, err)
+	require.Len(t, outputs, poolCount)
+
+	reads = 0
+	ls.rewardPrecomputeChunkReadHook = func() { reads++ }
+	require.NoError(t, ls.db.Transaction(context.Background(), true).Do(
+		func(txn *database.Txn) error {
+			app, ok, err := ls.boundaryStakeRewardApplication(
+				context.Background(), txn, 4, 1_200,
+			)
+			if err != nil {
+				return err
+			}
+			require.True(t, ok)
+			require.NotNil(t, app)
+			return nil
+		},
+	))
+	require.Zero(t, reads, "the rollover must not run chunk reads in its transaction")
+}
+
+// TestChunkedRewardPrecomputePlansAheadWhileWriteTurnIsHeld proves the next
+// chunk is read while the current one waits for its write turn, and that the
+// pipelined run yields the same outputs as stepping one chunk at a time.
+func TestChunkedRewardPrecomputePlansAheadWhileWriteTurnIsHeld(t *testing.T) {
+	t.Parallel()
+	const (
+		snapshotEpoch = uint64(1)
+		potsEpoch     = uint64(3)
+	)
+	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 6, 2, 7)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(4, 200, 1_200)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	reads := make(chan struct{}, 16)
+	ls.rewardPrecomputeChunkReadHook = func() { reads <- struct{}{} }
+	ls.rewardPrecomputeWriteMu.Lock()
+	unlocked := false
+	unlock := func() {
+		if !unlocked {
+			unlocked = true
+			ls.rewardPrecomputeWriteMu.Unlock()
+		}
+	}
+	defer unlock()
+	finished := make(chan error, 1)
+	go func() { finished <- ls.runStakeRewardPrecomputeSteps(round) }()
+	dtestutil.RequireReceive(t, reads, 10*time.Second, "first chunk read")
+	dtestutil.RequireReceive(
+		t, reads, 10*time.Second,
+		"second chunk must be read while the first waits for the writer",
+	)
+	unlock()
+	require.NoError(t, <-finished)
+	pipelined := snapshotRewardPrecomputeOutputs(t, db, snapshotEpoch, potsEpoch)
+	require.Len(t, pipelined.poolOutputs, 6)
+
+	serial, serialDB := seedMultiPoolRewardPrecomputeFixture(t, 6, 2, 7)
+	serial.rewardPrecomputeChunkPoolsOverride = 2
+	serialRound, ok, err := serial.resolveStakeRewardPrecomputeRound(4, 200, 1_200)
+	require.NoError(t, err)
+	require.True(t, ok)
+	for {
+		done, err := serial.stakeRewardPrecomputeChunkStep(serialRound)
+		require.NoError(t, err)
+		if done {
+			break
+		}
+	}
+	require.Equal(
+		t,
+		snapshotRewardPrecomputeOutputs(t, serialDB, snapshotEpoch, potsEpoch),
+		pipelined,
+	)
+}
+
+// TestChunkedRewardPrecomputeLeavesReaderFreeGapsForWAL proves the round
+// leaves a window between one plan's read transaction and the next with none
+// of its own open. A read transaction pins the WAL snapshot it began on, so
+// plans chained back to back would keep a checkpoint from draining the WAL
+// while block application appends to it. In each gap a commit lands and a
+// PASSIVE checkpoint from another connection must drain every frame.
+func TestChunkedRewardPrecomputeLeavesReaderFreeGapsForWAL(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ls, db := newRewardCalculationTestLedgerInDir(t, dir)
+	seedMultiPoolRewardInputs(t, db, 6, 2, 7)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+	round, ok, err := ls.resolveStakeRewardPrecomputeRound(4, 200, 1_200)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	dbPath := filepath.Join(dir, "metadata.sqlite")
+	_, err = os.Stat(dbPath)
+	require.NoError(t, err)
+	probe, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(0)")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = probe.Close() })
+
+	gaps := 0
+	var failures []string
+	ls.rewardPrecomputeReadGapHook = func() {
+		gaps++
+		// Wait out an in-flight write so the checkpoint sees a settled WAL.
+		ls.rewardPrecomputeWriteMu.Lock()
+		defer ls.rewardPrecomputeWriteMu.Unlock()
+		if err := db.Transaction(context.Background(), true).Do(
+			func(txn *database.Txn) error {
+				return db.Metadata().SetSyncState(
+					"test-wal-probe", strconv.Itoa(gaps), txn.Metadata(),
+				)
+			},
+		); err != nil {
+			failures = append(failures, err.Error())
+			return
+		}
+		var busy, walFrames, checkpointed int
+		if err := probe.QueryRow(
+			"PRAGMA wal_checkpoint(PASSIVE)",
+		).Scan(&busy, &walFrames, &checkpointed); err != nil {
+			failures = append(failures, err.Error())
+			return
+		}
+		if busy != 0 || walFrames != checkpointed {
+			failures = append(failures, fmt.Sprintf(
+				"gap %d: busy=%d wal_frames=%d checkpointed=%d",
+				gaps, busy, walFrames, checkpointed,
+			))
+		}
+	}
+	require.NoError(t, ls.runStakeRewardPrecomputeSteps(round))
+	require.Equal(
+		t, 2, gaps,
+		"each plan after the first must be preceded by a reader-free gap",
+	)
+	require.Empty(
+		t, failures,
+		"a read transaction held the WAL snapshot across a gap",
+	)
 }

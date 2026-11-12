@@ -2286,6 +2286,14 @@ type LedgerState struct {
 	// so far and the round's total pool count -- e.g. to stop a test's
 	// precompute mid-round and simulate a restart from the persisted cursor.
 	rewardPrecomputeChunkHook func(processed, total int)
+	// rewardPrecomputeChunkReadHook is a test seam, nil in production. It runs
+	// at the start of a chunk's reads, before any of its outputs exist, so a
+	// test can act while the chunk is mid-read.
+	rewardPrecomputeChunkReadHook func()
+	// rewardPrecomputeReadGapHook is a test seam, nil in production. It runs
+	// in the gap after a plan's read transaction ends, where none of the
+	// precompute's own read transactions may be open.
+	rewardPrecomputeReadGapHook func()
 	// rewardPrecomputeFence is bumped, under rewardPrecomputeWriteMu, before
 	// an epoch boundary applies rewards. A background chunk whose round was
 	// resolved under an older value stops instead of writing: the boundary
@@ -8995,7 +9003,11 @@ func (ls *LedgerState) processBlocksFromSource(
 			// including reward application and the governance tally, so
 			// it is timed as its own stage whether it commits or fails.
 			rolloverStart := time.Now()
-			ls.fenceRewardPrecompute()
+			//nolint:contextcheck // reward precompute reads run on the ledger lifecycle context, not the block context
+			ls.fenceAndCompleteRewardPrecompute(
+				snapshotEpoch.EpochId+1,
+				snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
+			)
 			submitRollover := func(op func(*database.Txn) error) error {
 				if untickedClosure != nil {
 					return ls.submitBlockApplyDBTxn(

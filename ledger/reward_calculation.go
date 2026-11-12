@@ -2898,7 +2898,7 @@ func stakeRewardPrecomputeSnapshotGuardOK(
 // writes and is safe to run inside a read-only transaction. Called by
 // precomputeStakeRewards (the single-transaction variant) and its tests; the
 // production chunked path computes the same shape per pool batch instead
-// (resolveStakeRewardPrecomputeRound, stakeRewardPrecomputeChunkStep).
+// (resolveStakeRewardPrecomputeRound, runStakeRewardPrecomputeSteps).
 //
 //nolint:unused // Used by tests
 func (ls *LedgerState) precomputeStakeRewardsCalculate(
@@ -2951,7 +2951,7 @@ func (ls *LedgerState) precomputeStakeRewardsCalculate(
 // rewards total. Callers must run it inside a write transaction. Called by
 // precomputeStakeRewards and its tests; the production chunked path persists
 // the same two things per pool batch instead
-// (stakeRewardPrecomputeChunkStep, finishStakeRewardPrecomputeLocked).
+// (runStakeRewardPrecomputeSteps, finishStakeRewardPrecomputeLocked).
 //
 //nolint:unused // Used by tests
 func (ls *LedgerState) saveStakeRewardPrecompute(
@@ -3020,7 +3020,7 @@ func saveReconstructedRewardStakeInputs(
 // (precomputeStakeRewardsAfterEpochTransition) instead runs
 // runChunkedStakeRewardPrecomputeRound, which chunks the same read-then-guarded-
 // write shape across many short transactions (see
-// stakeRewardPrecomputeChunkStep) rather than one of each.
+// runStakeRewardPrecomputeSteps) rather than one of each.
 //
 //nolint:unused // Used by tests
 func (ls *LedgerState) precomputeStakeRewards(
