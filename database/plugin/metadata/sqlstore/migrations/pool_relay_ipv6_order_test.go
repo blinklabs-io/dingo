@@ -36,7 +36,10 @@ func TestPoolRelayIPv6NetworkOrderMigration(t *testing.T) {
 	wire := lcommon.PoolRelayIpv6WireOrder(standard)
 	require.NotEqual(t, []byte(standard), []byte(wire))
 
-	_, err := db.ExecContext(ctx, `INSERT INTO pool (id, pool_key_hash) VALUES (1, X'01')`)
+	_, err := db.ExecContext(
+		ctx,
+		`INSERT INTO pool (id, pool_key_hash) VALUES (1, X'01')`,
+	)
 	require.NoError(t, err)
 	type registration struct {
 		id            int
@@ -90,6 +93,10 @@ SELECT ipv4, ipv6 FROM pool_registration_relay WHERE id = ?`, id,
 	require.Nil(t, got)
 	require.Equal(t, ipv4, got4, "IPv4 is never reordered")
 	var dirty bool
-	require.NoError(t, db.QueryRowContext(ctx, `SELECT dirty FROM schema_migrations WHERE version = 60`).Scan(&dirty))
+	require.NoError(
+		t,
+		db.QueryRowContext(ctx, `SELECT dirty FROM schema_migrations WHERE version = 60`).
+			Scan(&dirty),
+	)
 	require.False(t, dirty)
 }
