@@ -330,6 +330,7 @@ var logPlainConfigFields = []string{
 	"ShelleyKESAgentPlaintext",
 	"ShelleyKESAgentServerSPKISHA256",
 	"ShelleyKESAgentSignTimeout",
+	"ShelleyKeyWatchInterval",
 	"ShelleyKESAgentSocket",
 	"ShelleyKESKey",
 	"ShelleyOperationalCertificate",

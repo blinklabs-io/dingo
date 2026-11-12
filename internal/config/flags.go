@@ -953,6 +953,11 @@ var flagSpecs = []flagSpec{
 		"run the remote KES agent link over plain TCP",
 	),
 	durationFlag(
+		"ShelleyKeyWatchInterval",
+		"shelley-key-watch-interval",
+		"poll the block producer credential files at this interval and reload them in place on a change; applies with local key files or a KES agent in sign mode, ignored in serve-key mode (0 disables; otherwise at least 1s)",
+	),
+	durationFlag(
 		"ShelleyKESAgentSignTimeout",
 		"shelley-kes-agent-sign-timeout",
 		"timeout for one sign-mode KES agent round trip; must stay below a slot (0 uses the 500ms default)",

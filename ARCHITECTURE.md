@@ -12296,12 +12296,75 @@ another pool or VRF key, or whose counter is **below** the loaded one, and every
 refusal leaves the loaded credentials untouched: loading into the live set
 instead would fail closed on a bad file and stop a healthy producer. A
 successful reload logs the old and new counter and certificate KES period.
-Credentials sourced from a KES agent are rotated through the agent, and a
-reload against them is refused. A reload is also refused while startup,
+A reload is also refused while startup,
 shutdown, or a live restore or truncate holds the lifecycle gates, since those
 replace the ledger state and the live credentials the reload reads. Unlike
 initial startup, reload refuses a wall-clock slot outside confirmed era history:
 it cannot replace working keys without verifying the replacement's KES window.
+
+**Reload with a KES agent.** In serve-key mode the agent pushes each new key
+and the node installs it as it arrives, so a reload is refused. In sign mode
+(`node_key_reload.go`) a reload re-reads the VRF key and operational
+certificate and moves signing to a new agent client that expects the new
+certificate's KES key. The certificate must differ from the loaded one and
+carry a **higher** counter: an equal counter with different bytes, or a lower
+one, is refused before any client is built. The new credentials pass the same
+signature, KES-window and ledger checks, the ledger check enforcing the
+on-chain counter rule (rejecting a stale counter and, where the era's rule
+applies, one more than one above the last seen), and the agent must
+serve the certificate before the swap: a remote client is admitted, which
+checks the agent reports this certificate and its KES key; a local socket
+client, whose protocol carries neither, is only checked to answer in sign mode,
+and its signatures are still verified against the certificate on every sign.
+That agent check runs before the reload takes the lifecycle gates: it can wait
+on the network for up to the client's hello timeout, and the chainsync and
+chain-switch handlers drop their work while the gates are held. Under the
+gates a file or SIGHUP reload reads the certificate file again and refuses it
+if it no longer matches the one the agent admitted; every reload then runs the counter, signature,
+KES-window and ledger checks and the swap.
+After `ReplaceWith` the replaced client stays open for
+`retiredKESAgentClientGrace` (10s), because a forge attempt that selected its
+snapshot before the swap still signs through it. The VRF key cannot change on
+reload; a new VRF key is a new pool registration and needs a restart. The
+reload compares the VRF key file with the loaded VRF key first and refuses a
+change, even when the certificate is unchanged and the reload would otherwise
+report nothing to do.
+
+A rotation done at the agent reaches a remote-agent node without any file
+change. Admission compares the agent's certificate with the node's byte for
+byte; when the agent's carries the same cold key and a higher counter, the
+client hands it to `RemoteConfig.OnNewerOpCert` and still refuses the session.
+The node runs a reload with that certificate in place of the file
+(`Node.agentOpCertLoop`), keeping only the newest offer and retrying the same
+certificate at most once a minute after a refusal. The reloaded certificate
+lives in memory only; after a restart the node loads its file again and the
+agent's newer certificate is picked up the same way. A rotation that lands
+after admission, between the pre-connect and the sign, is refused by the
+agent as a header for another certificate; that refusal drops the session,
+so the next prepare or sign re-admits and the offer follows.
+
+With several agent replicas sharing one key store, Bursa installs a new key
+on one replica and the others load it within their `key_poll_interval`
+(default 10s); until then a replica keeps serving the previous certificate.
+In that window admission fails wherever the node's certificate and the
+replica's differ: after a reload, at a replica that has not polled yet, and
+before it, at one that has. A leader slot whose sign reaches such a replica
+is missed. The reload's own admission can also reach a replica that has not
+polled; the reload is then refused, and an offered certificate is retried
+only after `agentOpCertRetryInterval` (one minute), so on that path the
+window lasts up to a minute.
+
+`shelleyKeyWatchInterval` (off by default) makes the node poll the credential
+files and reload once a changed content has held for two polls. Polling
+content rather than file events sees the atomic `..data` symlink swap
+Kubernetes uses for a mounted Secret and needs no notification support. The
+two-poll wait reduces reloads during short writes; credential validation still
+rejects an incomplete credential set. In serve-key mode, where a reload is
+always refused, the watch is not started and a warning says so.
+`dingo_forge_credential_reloads_total{trigger,result}` counts reloads by
+trigger (`signal`, `file`, `agent`) and result (`success`, `unchanged`,
+`failure`), and `dingo_forge_opcert_counter_loaded` reports the counter the
+forger is using, so an operator can confirm a rotation took effect.
 
 `ReplaceWith` deliberately does not advance the credential generation. A forge
 attempt that already holds a snapshot owns a private copy of the outgoing
@@ -12465,7 +12528,11 @@ pre-connect is required, not an optimisation: at about 95ms round trip, a
 dial and admission take about 400ms and a redial inside a sign about 520ms,
 beyond the 500ms default `shelleyKesAgentSignTimeout`, while a sign on an
 open session takes about one round trip. A transport or verification failure
-drops the session; an agent refusal (`error` in the response) keeps it. A
+drops the session; an agent refusal (`error` in the response) keeps it,
+except a refusal saying the header's operational certificate is not the one
+the agent has installed (`opCertMismatchRefusals`), which drops it: the
+agent's key was rotated after admission, and the redial lets admission offer
+the newer certificate. A
 sign that gets no signature back sends the identical header body once more
 (`maxSignSends`), on a new session after a lost reply or on the same session
 after an agent error, while its `SignTimeout` lasts. The agent may already
