@@ -526,12 +526,33 @@ func (cs *ChainSelector) AwaitEagernessLimit(
 func (cs *ChainSelector) pauseEagerness(
 	connId ouroboros.ConnectionId,
 ) func() {
+	return cs.pauseStream(connId, func(p *PeerChainTip) *int {
+		return &p.eagernessPaused
+	})
+}
+
+// pauseCatchUpBand records that connId's header stream is parked by the
+// catch-up band and returns the function that ends the pause. It exempts the
+// peer from staleness as pauseEagerness does, but does not make it a held
+// peer for the eagerness standoff.
+func (cs *ChainSelector) pauseCatchUpBand(
+	connId ouroboros.ConnectionId,
+) func() {
+	return cs.pauseStream(connId, func(p *PeerChainTip) *int {
+		return &p.catchUpPaused
+	})
+}
+
+func (cs *ChainSelector) pauseStream(
+	connId ouroboros.ConnectionId,
+	counter func(*PeerChainTip) *int,
+) func() {
 	cs.mutex.Lock()
 	peerTip, ok := cs.admissionPeerTipLocked(connId)
 	if ok && peerTip != nil {
-		peerTip.eagernessPaused++
+		*counter(peerTip)++
 		if committed := cs.peerTips[connId]; committed != nil && committed != peerTip {
-			committed.eagernessPaused++
+			*counter(committed)++
 		}
 	}
 	cs.mutex.Unlock()
@@ -540,23 +561,24 @@ func (cs *ChainSelector) pauseEagerness(
 	}
 	return func() {
 		cs.mutex.Lock()
-		if current, exists := cs.admissionPeerTipLocked(connId); exists && current.eagernessPaused > 0 {
-			current.eagernessPaused--
-			if committed := cs.peerTips[connId]; committed != nil && committed != current && committed.eagernessPaused > 0 {
-				committed.eagernessPaused--
+		if current, exists := cs.admissionPeerTipLocked(connId); exists && *counter(current) > 0 {
+			*counter(current)--
+			if committed := cs.peerTips[connId]; committed != nil && committed != current && *counter(committed) > 0 {
+				*counter(committed)--
 			}
 		}
 		cs.mutex.Unlock()
 	}
 }
 
-// EagernessPaused reports whether connId's header stream is currently held at
-// the Limit on Eagerness.
+// EagernessPaused reports whether connId's header stream is currently held by
+// the selector, at the Limit on Eagerness or in the catch-up band. A held
+// stream delivers no headers, so its silence is not a stall.
 func (cs *ChainSelector) EagernessPaused(connId ouroboros.ConnectionId) bool {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	peerTip, ok := cs.admissionPeerTipLocked(connId)
-	return ok && peerTip != nil && peerTip.eagernessPaused > 0
+	return ok && peerTip.streamPaused()
 }
 
 func (cs *ChainSelector) eagernessAdmissionStatus(

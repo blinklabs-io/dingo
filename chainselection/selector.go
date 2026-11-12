@@ -1452,6 +1452,7 @@ func (cs *ChainSelector) rebuildPeerTipAdmissionFrontierLocked(
 	}
 	if previous := cs.pendingPeerTipFrontiers[connId]; previous != nil {
 		frontier.eagernessPaused = previous.eagernessPaused
+		frontier.catchUpPaused = previous.catchUpPaused
 	}
 	cs.pendingPeerTipFrontiers[connId] = frontier
 }
@@ -1561,6 +1562,7 @@ func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 		cs.applyPeerTipAdmissionUpdateLocked(frontier, update)
 		if previous := previousFrontiers[update.ConnectionId]; previous != nil {
 			frontier.eagernessPaused = previous.eagernessPaused
+			frontier.catchUpPaused = previous.catchUpPaused
 			*previous = *frontier
 			frontier = previous
 		}
@@ -3935,9 +3937,9 @@ func (cs *ChainSelector) connectionPriority(
 }
 
 func (cs *ChainSelector) isPeerTipStale(peerTip *PeerChainTip) bool {
-	// A peer held at the Limit on Eagerness sends no tips because the pause
-	// stops them, so the silence is not evidence that it is gone.
-	return peerTip != nil && peerTip.eagernessPaused == 0 &&
+	// A held peer sends no tips because the pause stops them, so the silence
+	// is not evidence that it is gone.
+	return peerTip != nil && !peerTip.streamPaused() &&
 		peerTip.IsStale(cs.config.StaleTipThreshold)
 }
 
@@ -5174,7 +5176,7 @@ func (cs *ChainSelector) cleanupStalePeers() {
 			// skipped from selection after StaleTipThreshold, but we keep them
 			// tracked for an additional period in case they reconnect or update.
 			// After 2x the threshold, we consider them truly gone and remove them.
-			if peerTip.eagernessPaused == 0 &&
+			if !peerTip.streamPaused() &&
 				peerTip.IsStale(cs.config.StaleTipThreshold*2) {
 				cs.config.Logger.Debug(
 					"removing very stale peer",

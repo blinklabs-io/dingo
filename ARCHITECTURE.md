@@ -7548,8 +7548,13 @@ later header's verification. The reference node's ChainSync client likewise
 waits when a header is beyond its ledger view forecast range, and other peers'
 claims do not extend that forecast. The wait records no
 frontier, claim or witness, so a waiting connection can neither be selected
-nor corroborate another, and a header no chain could have reached from the
-local tip is not held and is still rejected. It ends on connection close or
+nor corroborate another. It records a pause of its own, apart from the Limit
+on Eagerness pause: like that one it exempts the silent connection from
+staleness, stale-peer cleanup and the stall recycler, but the connection is
+not held at the limit and never enters the eagerness standoff, whose one-sided
+comparison would otherwise decide on an unverified header and a fork as
+little as one block deep. A header no chain could have reached from the local
+tip is not held and is still rejected. It ends on connection close or
 node shutdown (the
 admission context), and after 60 seconds, or half the operator's chainsync
 stall timeout if that is lower (`catchUpBandWaitTimeoutFor`), below the 135 to

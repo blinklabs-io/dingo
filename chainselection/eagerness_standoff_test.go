@@ -532,3 +532,25 @@ func TestLimitOnEagernessEquallyDenseIdleForkIsRemovedWhenHeldWindowIncomplete(
 		"explicit idling is classified by the provable rule")
 	assert.Equal(t, got[0].DominatingDensity, got[0].MaxDensity)
 }
+
+// A connection parked by the catch-up band is waiting for the ledger, not held
+// at the Limit on Eagerness, and its paused header was never verified. Its
+// fork, here one block deep, must not enter the standoff comparison, though
+// the pause still keeps it from being aged out as stale.
+func TestCatchUpBandPauseDoesNotEnterEagernessStandoff(t *testing.T) {
+	t.Parallel()
+	f := newStandoffFixture()
+	held := newTestConnectionId(1)
+	parked := newTestConnectionId(2)
+	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, held, "h", 11, 11, denseSlot)
+	feedStandoff(f.cs, parked, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, parked, "p", 11, 11, sparseSlot)
+	hold(t, f.cs, held)
+	t.Cleanup(f.cs.pauseCatchUpBand(parked))
+
+	assert.Empty(t, f.evaluate(),
+		"a catch-up band pause is not a standoff at the limit")
+	assert.True(t, f.cs.EagernessPaused(parked),
+		"a parked connection is still exempt from staleness and recycling")
+}
