@@ -16,7 +16,11 @@ package migrations_test
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"net"
+	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
@@ -98,5 +102,102 @@ SELECT ipv4, ipv6 FROM pool_registration_relay WHERE id = ?`, id,
 		db.QueryRowContext(ctx, `SELECT dirty FROM schema_migrations WHERE version = 60`).
 			Scan(&dirty),
 	)
+	require.False(t, dirty)
+}
+
+// The swap is its own inverse, so a batch whose rows commit without its cursor,
+// or a cursor that commits behind its rows, swaps a relay back on resume. One
+// row per batch and a fault after the third batch's update pins that the
+// failed batch rolls back whole and the resumed run converts each row once.
+func TestPoolRelayIPv6NetworkOrderBackfillResumesAfterFailedBatch(
+	t *testing.T,
+) {
+	t.Parallel()
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 59)
+	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	standard := net.ParseIP("2001:db8::1")
+	wire := lcommon.PoolRelayIpv6WireOrder(standard)
+	_, err = db.ExecContext(ctx, `
+INSERT INTO pool (id, pool_key_hash) VALUES (1, X'01')`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+INSERT INTO pool_registration (id, pool_id, pool_key_hash, certificate_id, added_slot, registration_index)
+VALUES (1, 1, X'01', 7, 100, 1), (2, 1, X'01', 0, 0, 2)`)
+	require.NoError(t, err)
+	const chainRelays = 4
+	for id := 1; id <= chainRelays; id++ {
+		_, err := db.ExecContext(ctx, `
+INSERT INTO pool_registration_relay (id, pool_registration_id, pool_id, ipv6, port)
+VALUES (?, 1, 1, ?, 3001)`, id, []byte(wire))
+		require.NoError(t, err)
+	}
+	_, err = db.ExecContext(ctx, `
+INSERT INTO pool_registration_relay (id, pool_registration_id, pool_id, ipv6, port)
+VALUES (?, 2, 1, ?, 3001)`, chainRelays+1, []byte(standard))
+	require.NoError(t, err)
+
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	index := slices.IndexFunc(registry, func(m migrations.Migration) bool {
+		return m.Version == 60
+	})
+	require.GreaterOrEqual(t, index, 0)
+	registry[index].BatchSize = 1
+	backfill := registry[index].Backfill
+	fault := errors.New("injected batch failure")
+	calls := 0
+	registry[index].Backfill = func(
+		ctx context.Context,
+		batch migrations.Batch,
+	) (migrations.BatchResult, error) {
+		result, err := backfill(ctx, batch)
+		calls++
+		if err == nil && calls == 3 {
+			return result, fault
+		}
+		return result, err
+	}
+	runner := migrations.Runner{
+		DB:       db,
+		Dialect:  "sqlite",
+		Registry: registry,
+		Locker:   migrations.NewFileLocker(databasePath + ".migrate.lock"),
+	}
+	require.ErrorIs(t, runner.Run(ctx), fault)
+
+	read := func(id int) []byte {
+		t.Helper()
+		var got []byte
+		require.NoError(t, db.QueryRowContext(ctx, `
+SELECT ipv6 FROM pool_registration_relay WHERE id = ?`, id).Scan(&got))
+		return got
+	}
+	var cursor string
+	var dirty bool
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT cursor, dirty FROM schema_migrations WHERE version = 60`,
+	).Scan(&cursor, &dirty))
+	require.Equal(t, "2", cursor)
+	require.True(t, dirty)
+	for id := 1; id <= chainRelays; id++ {
+		want := []byte(wire)
+		if id <= 2 {
+			want = []byte(standard)
+		}
+		require.Equal(t, want, read(id), "relay %d after failed batch", id)
+	}
+
+	registry[index].Backfill = backfill
+	require.NoError(t, runner.Run(ctx))
+	for id := 1; id <= chainRelays+1; id++ {
+		require.Equal(t, []byte(standard), read(id), "relay %d", id)
+	}
+	require.NoError(t, db.QueryRowContext(ctx, `
+SELECT dirty FROM schema_migrations WHERE version = 60`).Scan(&dirty))
 	require.False(t, dirty)
 }
