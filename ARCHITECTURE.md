@@ -7814,12 +7814,12 @@ that chain's tip while the applied ledger catches up after a restart; it is
 treated as a duplicate and does not contribute to mismatch or resync state. Only
 a point confirmed as present in the current primary-chain index bypasses fork
 resolution: a lookup failure is logged and treated as a non-match, so it
-proceeds through normal fork handling. An O(1) local hash-index prefilter
-handles current databases. On a miss, an exact local point probe preserves
-compatibility with blocks written before the hash index existed; that bounded
-probe bypasses Bark's remote archive fallback, so an unknown fork still returns
-immediately. On a hit, the block ID's current `bi` value is parsed directly into
-its slot and hash, avoiding a second block-CBOR read. The lookup runs while
+proceeds through normal fork handling. An exact local point probe answers the
+question for blocks written before and after the hash index existed; it bypasses
+Bark's remote archive fallback, so an unknown fork still returns immediately and
+an expired block never reaches the archive. The block ID's current `bi` value
+is parsed directly into its slot and hash, avoiding a second block-CBOR read.
+The lookup runs while
 `chainsyncMutex` is held, so it is skipped for the origin point and for a header
 beyond the `localTip` snapshot taken by the handler; the latter is not observed
 in that snapshot even though concurrent blockfetch may advance the primary-chain
@@ -9330,6 +9330,28 @@ and still has the same file identity when rechecked. Regular files, symlinks,
 directories, live sockets, ambiguous probe failures, and removal errors all
 fail startup without removing the path.
 
+Node-owned Cardano and DMQ Unix sockets default to mode `0600`. An operator may
+select another octal mode, including `0660` for group sharing, but a mode that
+allows writes by other users is rejected. The connection manager binds these
+sockets in a private staging directory, applies the mode, and publishes them
+with an atomic no-replace rename, so neither the process umask nor a connection
+between bind and permission enforcement can widen access. Caller-supplied
+listeners retain their creator's permission policy, and Windows named pipes
+retain their platform ACL policy. Managed socket parents must be owned by the
+process user or root and must not be writable by group or other users; a `0660`
+socket remains shareable from a group-searchable directory. Linux abstract
+Unix sockets retain their kernel-namespace behavior and have no pathname mode.
+A managed socket address must name a file, not end in a path separator, and fit
+in the platform's socket path limit as written. Accepted connections report the
+published path as their local address, never the staging path.
+
+Closing a published Unix listener removes only the socket that listener
+published. Teardown renames the entry into a private directory under the
+socket's parent, checks that the moved entry is still the same socket, and
+unlinks it only then. If something else replaced the path in the meantime, the
+replacement is renamed back without overwriting anything and is never removed;
+a failed restore is reported along with where the entry was kept.
+
 Accepted TCP connections and local Unix node-to-client connections bound each
 socket write to two minutes. Unix sockets receive that wrapper after their
 per-connection remote address is established. The ten-second handshake
@@ -10223,12 +10245,18 @@ node in this state cannot self-recover and needs operator intervention
 (e.g. re-bootstrapping from a Mithril snapshot). Local-tip progress discards
 the point's accumulated failures for every rollback reason, so a canonical
 node continuing to advance does not emit a false divergence diagnosis for a
-peer's fork. Without progress, protocol-constrained failures (exceeding K, the
-Mithril boundary, or the UTxO prune floor) escalate at the recurrence
-threshold. Peer-fork failures use the bounded local primary-chain membership
-check also used for historical headers: an absent point can advance the
-diagnosis immediately, while an on-chain point waits for the full tracking
-window. Unavailable chain state or a lookup error cannot produce a diagnosis.
+peer's fork. Without progress, every reason, including the protocol-constrained
+ones (exceeding K, the Mithril boundary, or the UTxO prune floor), uses the bounded
+local primary-chain membership check also used for historical headers: an
+absent point escalates at the recurrence threshold, while an on-chain point
+waits for the full tracking window, since a refused rollback to our own chain
+means the peer is behind or forked. Origin is on every chain and never
+escalates. A prune-floor rejection whose target is on the local chain is
+logged at WARN rather than ERROR. Unavailable chain state or a lookup error
+cannot produce a diagnosis. History expiry removes only a block's CBOR, so the
+membership check, like the behind-peer check on these rejection paths, reads
+the retained local block metadata and block index: an expired point on the
+primary chain stays on-chain and never needs an archive read.
 The membership result is cached for the unchanged local tip, avoiding repeated
 storage reads on the rollback-failure path.
 When the per-connection loop

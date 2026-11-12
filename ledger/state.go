@@ -2348,7 +2348,12 @@ type LedgerState struct {
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
 	dropRollbackCount   int64     // count of suppressed drop rollbacks since last log
 
-	rollbackHistory []rollbackRecord // bounded recent rollback records
+	// rollbackHistoryMu guards rollbackHistory and rollbackCounts. The
+	// rollback handler works under chainsyncMutex, but blockfetch paths clear
+	// both through requestChainsyncResync holding only
+	// chainsyncBlockfetchMutex. It is a leaf lock.
+	rollbackHistoryMu sync.Mutex
+	rollbackHistory   []rollbackRecord // bounded recent rollback records
 	// rollbackCounts preserves exact per-connection/point loop counts across
 	// rollbackHistory's event cap. Each entry keeps only the two timestamps
 	// needed by the loop threshold and is pruned by rollbackLoopWindow.
@@ -2397,9 +2402,16 @@ type LedgerState struct {
 	// headerMismatchMu guards headerMismatchCounts. The header handler
 	// counts under chainsyncMutex, but blockfetch paths reset a count through
 	// requestChainsyncResync holding only chainsyncBlockfetchMutex.
-	headerMismatchMu          sync.Mutex
-	headerMismatchCounts      map[string]int // consecutive header mismatches keyed by connIdKey
-	bufferedHeaderEvents      map[string][]ChainsyncEvent
+	headerMismatchMu     sync.Mutex
+	headerMismatchCounts map[string]int // consecutive header mismatches keyed by connIdKey
+	bufferedHeaderEvents map[string][]ChainsyncEvent
+	// peerHeaderHistoryMu guards peerHeaderHistory, the chains it holds,
+	// peerHeaderHistoryBytes and peerHeaderHistorySequence. The header
+	// handler works under chainsyncMutex, but blockfetch paths drop a
+	// connection's buffered headers from its history through
+	// requestChainsyncResync holding only chainsyncBlockfetchMutex. It is a
+	// leaf lock: nothing is called under it that takes either of those.
+	peerHeaderHistoryMu       sync.Mutex
 	peerHeaderHistory         map[string]*peerHeaderChain
 	peerHeaderHistoryBytes    int
 	peerHeaderHistorySequence uint64
@@ -11939,6 +11951,7 @@ func (ls *LedgerState) updateTipMetrics(density float64) {
 		float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot),
 	)
 	ls.metrics.density.Set(density)
+	ls.metrics.registerChainPositionGauges()
 }
 
 // chainFragmentDensity matches cardano-node's ChainDB fragment density:
