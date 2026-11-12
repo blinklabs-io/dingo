@@ -1607,9 +1607,9 @@ type StakeSnapshotStore interface {
 	DeletePoolStakeSnapshotsBeforeEpoch(uint64, types.Txn) error
 
 	// DeleteEpochSummariesAfterEpoch deletes all epoch summaries after a given
-	// epoch, for discarding boundaries that a rollback rewound. Rollback does
-	// not currently call it: epoch numbering is slot-derived, so the boundary is
-	// re-crossed on the selected chain and SaveEpochSummary upserts the row.
+	// epoch, for discarding boundaries that a rollback rewound. Rollback calls
+	// it with the newest surviving epoch so a summary for an epoch the chain no
+	// longer reached cannot be served.
 	//
 	// There is deliberately no before-epoch counterpart. epoch_summary is one
 	// small row per epoch and is retained for the life of the database, unlike

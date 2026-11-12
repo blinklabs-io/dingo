@@ -628,6 +628,7 @@ sequenceDiagram
     LS->>LS: validate transactions (Phase 1 + Phase 2)
     LS->>LS: update UTXO set, process certs & governance
     LS->>LS: compute epoch nonce contributions
+    LS->>LS: when a block jumps over empty epochs, tick consensus once at the target; NEWEPOCH effects and the Praos nonce run only for an immediate successor of the ledger epoch label (which a rollback rewinds to the surviving epoch rows), and the block-based epoch-transition event is published only when the target is the immediate successor of the consensus epoch
     LS->>LS: at an era boundary, enact source-era pparams, then translate before successor-era epoch rules and SNAP
     LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block, never ahead of a configured TriggerAtEpoch
     LS->>LS: before translating, decide the era the ledger enters from its own state, and refuse a validated boundary block encoded in any other era, in either direction
@@ -4784,7 +4785,31 @@ ENACT applies at the boundary itself, so the decision forecasts it without
 writing: `governance.ForecastHardForkInitiations` applies the
 `HardForkInitiation` proposals marked ratified and not yet enacted, and those
 the previous boundary's deferred RATIFY has decided but not yet written, in the
-order ENACT would. A refusal releases the rollover's transaction-validation
+order ENACT would. The decision reads the parameters pending for the successor
+of the ledger epoch label, so a block beyond an empty epoch is judged by the same
+forecast as one that opens the successor: NEWEPOCH enacts nothing for it, but the
+transition the pending update names stands, and `ProtocolParamsForSlot` returns
+the parameters in force rather than the pending ones for such a slot. Inside an epoch that follows an empty epoch the label stays behind, so the
+hard-fork combinator also decides the era block by block from the state before
+the block: once k blocks of that epoch lie at or past its voting deadline and the
+pending update names the next era's major, the next block must be in the next era
+and a block in the source era is refused. The block-apply loop stops its batch at
+that block, translates the frozen ledger without enacting the update, keys the
+translation at the block's slot, and records it (`mid_epoch_era_switch`) so a
+rollback restores the source era. Only classic (pre-Conway) eras are covered.
+Everything that decides the era of a block before it is applied follows the same
+decision from the applied tip: `ProtocolParamsForSlot` returns the translated
+parameters for the slot after the tip, so the forger builds the block the ledger
+will accept, and `EraIDForEpoch` (hence the consensus mode of the leader schedule
+and the leader check) names the later era. A tip that does not yet know the
+transition decides nothing for later slots, and a rollback below the block that
+made it known withdraws it. A Conway ledger translated this way keeps the old
+major and ignores the classic proposals left in the database, which Conway's
+translation drops. The epoch record carries the era after the switch for the
+whole epoch, so a competing header from before the switch slot is still judged
+in the later era's consensus mode; the modes differ only for a switch out of
+Alonzo.
+A refusal releases the rollover's transaction-validation
 transition before the block is rewound as a rejected header, and the ledger
 stays in its source era. The block's body era still selects the transition path:
 a header elevation is a header-carried protocol version, which outside mainnet
@@ -6915,6 +6940,9 @@ for each requested pool and the corresponding totals. For protocol version 11
 and later, requested pools whose mark, set, and go stake are all zero are
 omitted; without a pool filter, the result contains the union of pools present
 in those snapshots and the corresponding totals.
+The snapshots are those of the ledger epoch label (`ledgerEpochLabelInCache`), so
+after an empty epoch, which no boundary captured, the reply stays at the label's
+mark/set/go as the reference ledger state does.
 
 **Acquiring a specific historical point.** A real
 NtC client can `Acquire` LocalStateQuery at a specific past point, not just
@@ -11396,7 +11424,15 @@ era, provider identity, and full-distribution commitment.
 The stake distribution is the reference node's active `set`/`nesPd`
 distribution, as of the end of E-2. Dingo captures `mark[K]` at the boundary
 into K, holding stake as of the end of K-1; the electing row is therefore
-Mark E-1 (`praos.StakeSnapshotEpoch(E)`). Header validation uses the same
+Mark E-1 (`praos.StakeSnapshotEpoch(E)`). The reference `nesPd` is rewritten
+only when NEWEPOCH runs for the successor of the ledger epoch label, so once
+an epoch is empty the label stops advancing and every later epoch is elected
+by the distribution frozen at the label, `StakeSnapshotEpoch(label)`
+(`praos.LeaderStakeSnapshotEpoch`, resolved from the epoch cache by
+`LedgerState.LeaderStakeSnapshotEpoch`). Header validation, the forging
+schedule, Tachys, the pool-distribution queries, the retention pins and the
+Leios voting committee (fixed at the epoch boundary from the same
+distribution) all use that resolution. Header validation uses the same
 row except in the imported Mithril epoch, which uses the imported active
 `pool-distr` stake fraction. Boundary snapshots use slot-aware delegation
 and UTxO state. An absent pool is rejected, while an entirely empty Mark
@@ -21347,10 +21383,13 @@ POOLREAP precedes SNAP.
    update derived from the mark snapshot three epochs back — credit spendable
    rewards through `account_reward_delta`, return undistributed rewards to
    reserves, and route unspendable rewards to the treasury before governance
-   reads it. No round runs at epoch 0 or at a boundary whose ended or
-   performance epoch is Byron. Any other boundary whose required inputs are
-   absent (ADA pots, mark snapshot, reward stake inputs, or performance-epoch
-   block counts) fails with `errRequiredStakeRewardBasisUnavailable`, which
+   reads it. RUPD starts only when a block ticks the ledger after the ended
+   epoch's `start + 4k/f` slot. When no block lands after that point, NEWEPOCH
+   sees no reward update and the boundary skips the round. No round runs at
+   epoch 0 or at a boundary whose ended or performance epoch is Byron. Any
+   triggered boundary whose required inputs are absent (ADA pots, mark
+   snapshot, reward stake inputs, or performance-epoch block counts) fails
+   with `errRequiredStakeRewardBasisUnavailable`, which
    names the new epoch and the missing input and points the operator at
    re-running Mithril sync or ledger-state import. `applyStakeRewards` wraps it
    in an `errHaltLedgerPipeline` error and calls `FatalErrorFunc`, so the

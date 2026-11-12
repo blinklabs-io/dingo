@@ -275,7 +275,10 @@ func TestAdvanceEpochCachePreservesPublishedSnapshot(t *testing.T) {
 
 	// Exercise the real header-verification writer rather than reproducing its
 	// copy-on-write logic inside this test.
-	require.NoError(t, ls.advanceEpochCache(context.Background()))
+	require.NoError(t, ls.advanceEpochCacheToSlot(
+		context.Background(),
+		ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots),
+	))
 
 	// The current view must advance, while the retained view must remain on the
 	// original cache and epoch values.
@@ -7741,12 +7744,22 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 		t.Fatal("epoch rollover returned no result")
 	}
 	require.Len(t, captures, 1)
+	// Dingo's Shelley-to-Allegra translation raises the major to Allegra's:
+	// the AVVM return (hardfork_rule.go) and the forger's Shelley/Allegra
+	// split are keyed on it. The reference ledger copies the version there too,
+	// so this is a known divergence for a chain that reaches Allegra by trigger
+	// epoch. The Mary translation carries the major over unchanged, as
+	// upgradePParams does. The snapshot records the major the new epoch runs
+	// at, which is no longer the source era's major.
 	require.Equal(
 		t,
-		uint(mary.MinProtocolVersionMary),
+		uint(allegra.MinProtocolVersionAllegra),
 		captures[0].ProtocolVersion,
-		"the mark snapshot must record the protocol major of the era the "+
-			"new epoch runs at, not the era the rollover started in",
+		"the mark snapshot must record the protocol major the new epoch "+
+			"runs at, not the one the rollover started with",
+	)
+	require.NotEqual(
+		t, uint(shelley.MinProtocolVersionShelley), captures[0].ProtocolVersion,
 	)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEra.Id)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEpoch.EraId)
@@ -7831,6 +7844,139 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 	require.NotNil(t, persistedEpoch)
 	require.Equal(t, wantSlotLength, persistedEpoch.SlotLength)
 	require.Equal(t, wantEpochLength, persistedEpoch.LengthInSlots)
+}
+
+func TestEpochRolloverJumpSkipsNewEpochEffects(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newBoundaryRolloverLedger(t)
+	var captures []event.EpochTransitionEvent
+	ls.SetEpochBoundarySnapshotHook(
+		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+			captures = append(captures, evt)
+			return nil
+		},
+	)
+	beforeEpochs, err := db.GetEpochs(nil)
+	require.NoError(t, err)
+
+	targetEpoch, err := epochAtSlot(
+		ls.currentEpoch,
+		ls.currentEpoch.StartSlot+
+			3*uint64(ls.currentEpoch.LengthInSlots),
+	)
+	require.NoError(t, err)
+
+	var result *EpochRolloverResult
+	txn := db.Transaction(t.Context(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var rolloverErr error
+		result, rolloverErr = ls.processEpochRolloverForTargetWithClassicPParamsContext(
+			t.Context(),
+			txn,
+			ls.currentEpoch,
+			targetEpoch,
+			targetEpoch,
+			ls.currentEpoch.EpochId,
+			ls.currentEra,
+			ls.currentPParams,
+			false,
+			false,
+			nil,
+		)
+		return rolloverErr
+	}))
+	require.NotNil(t, result)
+	require.Equal(t, targetEpoch.EpochId, result.NewCurrentEpoch.EpochId)
+	require.Equal(t, targetEpoch.StartSlot, result.NewCurrentEpoch.StartSlot)
+	require.Empty(t, captures,
+		"a non-successor NEWEPOCH signal must not run SNAP or other EPOCH effects")
+	require.Len(t, result.NewEpochCache, len(beforeEpochs)+1)
+	require.Equal(t, targetEpoch.EpochId,
+		result.NewEpochCache[len(result.NewEpochCache)-1].EpochId)
+	for _, epoch := range result.NewEpochCache {
+		require.NotEqual(t, uint64(6), epoch.EpochId)
+		require.NotEqual(t, uint64(7), epoch.EpochId)
+	}
+	require.Equal(t, ls.currentEpoch.EpochId,
+		ledgerEpochFromCache(result.NewEpochCache))
+
+	// A later block in the immediately following consensus epoch must not
+	// restart NEWEPOCH effects. The ledger epoch label remains at the last
+	// sequential transition until a signal is its immediate successor.
+	nextTarget, err := epochAtSlot(
+		result.NewCurrentEpoch,
+		result.NewCurrentEpoch.StartSlot+
+			uint64(result.NewCurrentEpoch.LengthInSlots),
+	)
+	require.NoError(t, err)
+	var nextResult *EpochRolloverResult
+	txn = db.Transaction(t.Context(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var rolloverErr error
+		nextResult, rolloverErr = ls.processEpochRolloverForTargetWithClassicPParamsContext(
+			t.Context(),
+			txn,
+			result.NewCurrentEpoch,
+			nextTarget,
+			nextTarget,
+			ls.currentEpoch.EpochId,
+			ls.currentEra,
+			ls.currentPParams,
+			false,
+			false,
+			nil,
+		)
+		return rolloverErr
+	}))
+	require.Equal(t, nextTarget.EpochId, nextResult.NewCurrentEpoch.EpochId)
+	require.Empty(t, captures,
+		"a later epoch must not resume effects after the ledger label was skipped")
+	require.Equal(t, ls.currentEpoch.EpochId,
+		ledgerEpochFromCache(nextResult.NewEpochCache))
+}
+
+func TestLedgerEpochFromSparseCache(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		epochs []models.Epoch
+		want   uint64
+	}{
+		{
+			name: "gap from epoch zero",
+			epochs: []models.Epoch{
+				{EpochId: 0, EraId: eras.ShelleyEraDesc.Id},
+				{EpochId: 3, EraId: eras.ShelleyEraDesc.Id},
+			},
+			want: 0,
+		},
+		{
+			name: "consecutive prefix before gap",
+			epochs: []models.Epoch{
+				{EpochId: 4, EraId: eras.ConwayEraDesc.Id},
+				{EpochId: 5, EraId: eras.ConwayEraDesc.Id},
+				{EpochId: 8, EraId: eras.ConwayEraDesc.Id},
+			},
+			want: 5,
+		},
+		{
+			name: "Byron translation resets the label",
+			epochs: []models.Epoch{
+				{EpochId: 206, EraId: eras.ByronEraDesc.Id},
+				{EpochId: 208, EraId: eras.ShelleyEraDesc.Id},
+				{EpochId: 210, EraId: eras.ShelleyEraDesc.Id},
+			},
+			want: 208,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, test.want, ledgerEpochFromCache(test.epochs))
+		})
+	}
 }
 
 // TestSingleEraBoundaryRolloverCapturesSnapshotInRollover covers the common
@@ -12743,6 +12889,7 @@ func stabilityFixtureLedgerState(
 			stabilityFixtureEpochLen,
 			eras.ConwayEraDesc.Id,
 		),
+		ledgerEpoch:    stabilityFixtureEpochID,
 		currentPParams: &pparams,
 		transitionInfo: hardfork.NewTransitionUnknown(),
 		config: LedgerStateConfig{
@@ -14399,4 +14546,35 @@ func TestCleanupBlockNoncesRetainsHistoryInAPIMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// prepareEraTransitionsForRollover runs the era-transition preparation for the
+// epoch that follows snapshotEpoch, as the rollover does once it has resolved
+// its target epoch.
+func (ls *LedgerState) prepareEraTransitionsForRollover(
+	ctx context.Context,
+	txn *database.Txn,
+	snapshotEpoch models.Epoch,
+	snapshotEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	transitionPath []uint,
+) (
+	lcommon.ProtocolParameters,
+	uint,
+	[]*EraTransitionResult,
+	[]uint,
+	bool,
+	error,
+) {
+	targetEpoch, err := epochAtSlot(
+		snapshotEpoch,
+		snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
+	)
+	if err != nil {
+		return nil, 0, nil, nil, false, err
+	}
+	return ls.prepareEraTransitionsForEpoch(
+		ctx, txn, targetEpoch, snapshotEra,
+		currentPParams, transitionPath, true,
+	)
 }
