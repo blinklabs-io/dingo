@@ -1451,8 +1451,8 @@ WHERE credential_tag = ? AND staking_key = ?
 // its pots epoch (stakeRewardEpochsForNewEpoch); the bootstrap rounds below
 // that mapping are always recalculated and keep their pot.
 const rewardPotWithoutOutputsResetQuery = `UPDATE reward_ada_pots
-SET rewards = 0
-WHERE rewards <> 0
+SET rewards = '0'
+WHERE rewards <> '0'
   AND epoch >= 2
   AND NOT EXISTS (
       SELECT 1 FROM reward_pool_output
