@@ -107,11 +107,10 @@ func applyLateBlockRewardRound(
 // applies when a block landed in the late window of the ended epoch and does
 // not apply when the epoch had no blocks or only early ones. The applying
 // case is the control for the other two, so the cases only mean something
-// together; the test is skipped until the reward update is gated on a
-// late-window block, because the round applies in every case today.
+// together. The two non-applying cases are skipped until the reward update is
+// gated on a late-window block, because the round applies in every case today.
 func TestRewardUpdateRequiresLateEpochBlock(t *testing.T) {
 	t.Parallel()
-	t.Skip("reward update is not yet gated on a late-window block")
 	const endedEpochStart = uint64(200)
 	tests := []struct {
 		name       string
@@ -134,6 +133,11 @@ func TestRewardUpdateRequiresLateEpochBlock(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			if !tt.wantReward {
+				// The round applies unconditionally today, so these cases
+				// would fail until the late-window gate exists.
+				t.Skip("reward update is not yet gated on a late-window block")
+			}
 			before, after, outputs, lateBlocks := applyLateBlockRewardRound(
 				t, tt.blockSlots,
 			)
