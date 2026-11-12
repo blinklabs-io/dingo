@@ -2333,7 +2333,12 @@ type LedgerState struct {
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
 	dropRollbackCount   int64     // count of suppressed drop rollbacks since last log
 
-	rollbackHistory []rollbackRecord // bounded recent rollback records
+	// rollbackHistoryMu guards rollbackHistory and rollbackCounts. The
+	// rollback handler works under chainsyncMutex, but blockfetch paths clear
+	// both through requestChainsyncResync holding only
+	// chainsyncBlockfetchMutex. It is a leaf lock.
+	rollbackHistoryMu sync.Mutex
+	rollbackHistory   []rollbackRecord // bounded recent rollback records
 	// rollbackCounts preserves exact per-connection/point loop counts across
 	// rollbackHistory's event cap. Each entry keeps only the two timestamps
 	// needed by the loop threshold and is pruned by rollbackLoopWindow.

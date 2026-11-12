@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -83,4 +84,44 @@ func TestBlockfetchResyncAndHeaderHistoryDoNotRace(t *testing.T) {
 	require.Nil(t, ls.peerHeaderHistory[connIdKey(resynced)],
 		"the rejected headers must leave the resynced connection's history")
 	require.Len(t, ls.peerHeaderHistory[connIdKey(recording)].order, 20)
+}
+
+// The same blockfetch-path resync clears the rollback loop history, a slice
+// and a map of counts, while the chainsync handler records a rollback under
+// chainsyncMutex. Run with -race.
+func TestBlockfetchResyncAndRollbackHistoryDoNotRace(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	rollingBack := testChainsyncConnId(6412, 3001)
+	resynced := testChainsyncConnId(6413, 3001)
+	point := ocommon.NewPoint(7, testHashBytes("rollback-point"))
+	now := time.Now()
+	require.Equal(t, 1, ls.recordRollback(connIdKey(rollingBack), point, now))
+
+	for range 20 {
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			ls.chainsyncMutex.Lock()
+			defer ls.chainsyncMutex.Unlock()
+			ls.recordRollback(connIdKey(rollingBack), point, now)
+			ls.clearRollbackHistoryForPoint(point)
+		})
+		wg.Go(func() {
+			ls.chainsyncBlockfetchMutex.Lock()
+			defer ls.chainsyncBlockfetchMutex.Unlock()
+			ls.requestChainsyncResync(resynced, "blockfetch restart failed", nil)
+		})
+		wg.Wait()
+	}
+
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
+	ls.clearRollbackHistory()
+	require.Equal(t, 1, ls.recordRollback(connIdKey(rollingBack), point, now),
+		"a cleared history must count the next rollback as the first")
 }

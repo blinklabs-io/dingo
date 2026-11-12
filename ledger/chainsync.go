@@ -3604,6 +3604,8 @@ func (ls *LedgerState) recordRollback(
 	point ocommon.Point,
 	now time.Time,
 ) int {
+	ls.rollbackHistoryMu.Lock()
+	defer ls.rollbackHistoryMu.Unlock()
 	if ls.rollbackCounts == nil && len(ls.rollbackHistory) > 0 {
 		ls.rollbackCounts = make(map[rollbackCountKey]rollbackCountRecord)
 		for _, r := range ls.rollbackHistory {
@@ -3683,6 +3685,8 @@ func addRollbackOccurrence(
 }
 
 func (ls *LedgerState) clearRollbackHistory() {
+	ls.rollbackHistoryMu.Lock()
+	defer ls.rollbackHistoryMu.Unlock()
 	ls.rollbackHistory = nil
 	ls.rollbackCounts = nil
 }
@@ -4131,6 +4135,8 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 //
 // Callers must hold chainsyncMutex.
 func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
+	ls.rollbackHistoryMu.Lock()
+	defer ls.rollbackHistoryMu.Unlock()
 	filtered := ls.rollbackHistory[:0]
 	for _, r := range ls.rollbackHistory {
 		if pointMatches(r.point, point) {
