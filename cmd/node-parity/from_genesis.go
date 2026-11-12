@@ -380,7 +380,7 @@ of re-deriving them from scratch.`,
 	)
 	cmd.Flags().StringVar(
 		&koiosFlags.captureDir, "boundary-capture-dir", "",
-		"directory for Dingo's whole UTxO set at each epoch boundary, read as Dingo crosses it, so the UTxO comparison still runs when the reconstruction reaches the boundary after Dingo has moved past its rollback window (optional; each file is removed once compared; default: query Dingo live at the boundary)",
+		"directory for Dingo's side of each epoch boundary's checks (its whole UTxO set plus its protocol-parameter and stake results; ignored with --skip-utxo), read as Dingo crosses it, so the checks still run when the reconstruction reaches the boundary after Dingo has moved past its rollback window (optional; captures survive a restart on the same directory and are removed once compared; default: query Dingo live at the boundary)",
 	)
 	cmd.Flags().StringVar(
 		&koiosFlags.cachePath, "koios-cache-path", "",

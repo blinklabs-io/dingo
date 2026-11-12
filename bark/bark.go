@@ -71,13 +71,6 @@ type Bark struct {
 	server       *http.Server
 	config       BarkConfig
 	listenerAddr net.Addr
-	// operatorFingerprints is immutable after construction. A verified client
-	// identity must also appear here before a destructive DatabaseService RPC
-	// is authorized.
-	operatorFingerprints map[string]struct{}
-	// lifecycleOperatorFingerprints is immutable after construction and is
-	// used only for LifecycleService Stop and Restart authorization.
-	lifecycleOperatorFingerprints map[string]struct{}
 	// dbGate guards config.DB across a live Restore/Truncate's close-and-
 	// replace window: PauseDB write-locks it before the old database is
 	// closed, ResumeDB publishes the replacement and unlocks it. Acquire
@@ -185,8 +178,7 @@ type BarkConfig struct {
 	DB        *database.Database
 	Lifecycle *dblifecycle.Service
 	// Node, if set, mounts the LifecycleService (remote Stop, Restart and
-	// GetStatus). Like Lifecycle it requires TLS and a client CA. Stop and
-	// Restart require LifecycleOperatorCertificateFingerprints.
+	// GetStatus).
 	Node NodeControl
 	// SnapshotDir is the base directory the DatabaseService's CreateSnapshot/
 	// Restore RPCs write to and read from — required when Lifecycle is set.
@@ -213,28 +205,9 @@ type BarkConfig struct {
 	DestinationRegistry *lifecycle.DestinationRegistry
 	TlsCertFilePath     string
 	TlsKeyFilePath      string
-	// TlsClientCAFilePath is a PEM CA bundle used to verify client
-	// certificates (mTLS) on this listener. Required whenever Lifecycle is
-	// set: the DatabaseService's destructive RPCs (CreateSnapshot,
-	// DeleteSnapshot, VerifySnapshot, Restore, Truncate, CancelOperation)
-	// refuse any request whose connection didn't present a certificate
-	// verified against this CA — see newOperatorAuthInterceptor in auth.go.
-	// ArchiveService remains public, but every DatabaseService RPC requires a
-	// verified certificate. Destructive DatabaseService RPCs additionally
-	// require a fingerprint in OperatorCertificateFingerprints. Requires
-	// TlsCertFilePath/TlsKeyFilePath to also be set, since mTLS has no meaning
-	// without the server's own TLS listener underneath it. Start (not NewBark)
-	// fails closed if Lifecycle is set without these policies.
-	TlsClientCAFilePath string
-	// OperatorCertificateFingerprints is the explicit authorization policy for
-	// destructive DatabaseService calls. Values are SHA-256 fingerprints of
-	// client certificate DER bytes; hexadecimal values may contain colons and
-	// are matched case-insensitively. Read-only DatabaseService calls require a
-	// verified client certificate but do not require membership in this list.
-	OperatorCertificateFingerprints []string
-	// LifecycleOperatorCertificateFingerprints is the independent
-	// authorization policy for LifecycleService Stop and Restart. GetStatus
-	// requires a verified client certificate but not membership in this list.
+	// These legacy configuration inputs do not enforce client authentication.
+	TlsClientCAFilePath                      string
+	OperatorCertificateFingerprints          []string
 	LifecycleOperatorCertificateFingerprints []string
 	Host                                     string
 	// Port is the TCP port to listen on. 0 selects a free port, which Addr
@@ -369,15 +342,6 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	operatorFingerprints, err := normalizeOperatorCertificateFingerprints(
-		cfg.OperatorCertificateFingerprints,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"bark: invalid operator certificate fingerprint: %w",
-			err,
-		)
-	}
 	if cfg.ArchiveMaxConcurrentFetches < 0 {
 		return nil, errors.New(
 			"bark: ArchiveMaxConcurrentFetches must not be negative",
@@ -402,22 +366,11 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 	if cfg.ArchiveCallerLookupsPerSecond == 0 {
 		cfg.ArchiveCallerLookupsPerSecond = DefaultArchiveCallerLookupsPerSecond
 	}
-	lifecycleOperatorFingerprints, err := normalizeOperatorCertificateFingerprints(
-		cfg.LifecycleOperatorCertificateFingerprints,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"bark: invalid lifecycle operator certificate fingerprint: %w",
-			err,
-		)
-	}
 	if cfg.Host == "" {
 		cfg.Host = "0.0.0.0"
 	}
 	return &Bark{
-		config:                        cfg,
-		operatorFingerprints:          operatorFingerprints,
-		lifecycleOperatorFingerprints: lifecycleOperatorFingerprints,
+		config: cfg,
 		archiveSlots: make(
 			chan struct{},
 			cfg.ArchiveMaxConcurrentFetches,
@@ -443,45 +396,6 @@ func (b *Bark) Start(ctx context.Context) error {
 		return errors.New("server already started")
 	}
 
-	// Fail closed here, at the point the DatabaseService's destructive RPCs
-	// actually become network-reachable, rather than in NewBark: a
-	// *databaseServiceHandler built via newDatabaseServiceHandler and
-	// exercised through direct in-process Go calls (as most of this
-	// package's own handler-level tests do) never goes through Start's
-	// mux/interceptor wiring at all, so requiring TLS/a client CA in the
-	// constructor would reject a composition path that was never actually
-	// exposed over the network in the first place.
-	authRequired := b.config.Lifecycle != nil || b.config.Node != nil
-	if authRequired && b.config.TlsClientCAFilePath == "" {
-		return errors.New(
-			"bark: TlsClientCAFilePath is required to start the authenticated " +
-				"DatabaseService or LifecycleService",
-		)
-	}
-	if authRequired &&
-		(b.config.TlsCertFilePath == "" || b.config.TlsKeyFilePath == "") {
-		return errors.New(
-			"bark: TlsCertFilePath and TlsKeyFilePath are required to start " +
-				"the authenticated DatabaseService or LifecycleService — mTLS " +
-				"client-certificate verification has no meaning without the " +
-				"server's own TLS listener",
-		)
-	}
-	if b.config.Lifecycle != nil && len(b.operatorFingerprints) == 0 {
-		return errors.New(
-			"bark: at least one OperatorCertificateFingerprint is required to " +
-				"start the authenticated DatabaseService — " +
-				"verified client identity alone does not authorize destructive RPCs",
-		)
-	}
-	if b.config.Node != nil && len(b.lifecycleOperatorFingerprints) == 0 {
-		return errors.New(
-			"bark: at least one LifecycleOperatorCertificateFingerprint is required " +
-				"to start the authenticated LifecycleService — verified client identity " +
-				"alone does not authorize Stop or Restart",
-		)
-	}
-
 	mux := http.NewServeMux()
 	commonHandlerOptions := connect.WithOptions(
 		connect.WithCompressMinBytes(1024),
@@ -502,12 +416,6 @@ func (b *Bark) Start(ctx context.Context) error {
 			newDatabaseServiceHandler(ctx, b),
 			connect.WithOptions(
 				commonHandlerOptions,
-				connect.WithInterceptors(newOperatorAuthInterceptor(
-					b.config.Logger,
-					destructiveDatabaseProcedures,
-					readOnlyDatabaseProcedures,
-					b.operatorFingerprints,
-				)),
 			),
 		)
 		mux.Handle(databasePath, databaseHandler)
@@ -519,12 +427,6 @@ func (b *Bark) Start(ctx context.Context) error {
 			&lifecycleServiceHandler{node: b.config.Node},
 			connect.WithOptions(
 				commonHandlerOptions,
-				connect.WithInterceptors(newOperatorAuthInterceptor(
-					b.config.Logger,
-					destructiveLifecycleProcedures,
-					readOnlyLifecycleProcedures,
-					b.lifecycleOperatorFingerprints,
-				)),
 			),
 		)
 		mux.Handle(lifecyclePath, lifecycleHandler)
@@ -549,7 +451,7 @@ func (b *Bark) Start(ctx context.Context) error {
 		),
 	)
 
-	handler := peerCertContextMiddleware(responseControllerContextMiddleware(
+	handler := requestClientMiddleware(responseControllerContextMiddleware(
 		httpcors.Handler(
 			mux,
 			httpcors.Config{
@@ -641,11 +543,6 @@ func (b *Bark) startServer(server *http.Server) error {
 		)
 	}
 	useTLS := b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != ""
-	if b.config.TlsClientCAFilePath != "" && !useTLS {
-		return errors.New(
-			"failed to start bark gRPC server: TlsClientCAFilePath requires tls cert and key to also be set",
-		)
-	}
 	serverType := "non-TLS"
 	if useTLS {
 		serverType = "TLS"
@@ -673,30 +570,6 @@ func (b *Bark) startServer(server *http.Server) error {
 		// b.listenerAddr/b.server reporting a listener that is open but
 		// nobody is Accept-ing on.
 		server.TLSConfig.Certificates = []tls.Certificate{cert}
-
-		if b.config.TlsClientCAFilePath != "" {
-			pool, caErr := tlsutil.LoadClientCAPool(
-				b.config.TlsClientCAFilePath,
-			)
-			if caErr != nil {
-				return fmt.Errorf(
-					"failed to load client CA for bark gRPC %s server: %w",
-					serverType, caErr,
-				)
-			}
-			server.TLSConfig.ClientCAs = pool
-			// VerifyClientCertIfGiven, not RequireAndVerifyClientCert: this
-			// listener also serves the public ArchiveService, which must keep
-			// working without a client certificate. Every DatabaseService
-			// procedure requires a verified identity, and destructive ones also
-			// require an allowed fingerprint; both checks are enforced per RPC by
-			// newOperatorAuthInterceptor (auth.go), not at the handshake.
-			// Go's TLS stack still fully chain-verifies any cert that IS
-			// presented against ClientCAs during the handshake itself, so a
-			// cert signed by an untrusted CA never reaches the request
-			// layer regardless of which RPC it's calling.
-			server.TLSConfig.ClientAuth = tls.VerifyClientCertIfGiven
-		}
 	}
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {

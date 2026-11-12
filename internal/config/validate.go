@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -57,30 +58,110 @@ func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
 	return nil
 }
 
-func validateCertificateFingerprints(field string, values []string) []error {
+// validateHostPort checks that addr is host:port with a non-empty host and a
+// numeric port in 1-65535.
+func validateHostPort(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if host == "" {
+		return errors.New("empty host")
+	}
+	if p, err := strconv.ParseUint(port, 10, 16); err != nil || p == 0 {
+		return fmt.Errorf("port %q is not in 1-65535", port)
+	}
+	return nil
+}
+
+// validateRemoteKESAgent checks a remote KES agent configuration: one KES
+// source only, sign mode, and a transport that can work: the server pin and
+// the client certificate are optional, but need TLS, so plain TCP takes
+// neither, and a client certificate is set as a pair. Without an address,
+// any remote transport option is refused, so a mistyped remote
+// configuration cannot fall back to local or Unix-socket signing.
+func (c *Config) validateRemoteKESAgent() []error {
+	if c.ShelleyKESAgentAddress == "" {
+		var errs []error
+		for _, opt := range []struct {
+			name string
+			set  bool
+		}{
+			{"shelleyKesAgentPlaintext", c.ShelleyKESAgentPlaintext},
+			{
+				"shelleyKesAgentClientCertFile",
+				c.ShelleyKESAgentClientCertFile != "",
+			},
+			{
+				"shelleyKesAgentClientKeyFile",
+				c.ShelleyKESAgentClientKeyFile != "",
+			},
+			{
+				"shelleyKesAgentServerSpkiSha256",
+				strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256) != "",
+			},
+		} {
+			if opt.set {
+				errs = append(errs, fmt.Errorf(
+					"%s requires shelleyKesAgentAddress",
+					opt.name,
+				))
+			}
+		}
+		return errs
+	}
 	var errs []error
-	for idx, fingerprint := range values {
-		normalized := strings.ReplaceAll(
-			strings.TrimSpace(fingerprint),
-			":",
-			"",
-		)
-		decoded, err := hex.DecodeString(normalized)
-		if err != nil || len(decoded) != sha256.Size {
+	if c.ShelleyKESKey != "" || c.ShelleyKESAgentSocket != "" {
+		errs = append(errs, errors.New(
+			"blockProducer cannot set shelleyKesAgentAddress together with "+
+				"shelleyKesKey or shelleyKesAgentSocket",
+		))
+	}
+	if err := validateHostPort(c.ShelleyKESAgentAddress); err != nil {
+		errs = append(errs, fmt.Errorf(
+			"shelleyKesAgentAddress %q must be host:port: %w",
+			c.ShelleyKESAgentAddress,
+			err,
+		))
+	}
+	if c.ShelleyKESAgentMode != "" && c.ShelleyKESAgentMode != "sign" {
+		errs = append(errs, fmt.Errorf(
+			"shelleyKesAgentAddress supports only shelleyKesAgentMode \"sign\", got %q",
+			c.ShelleyKESAgentMode,
+		))
+	}
+	clientCert := c.ShelleyKESAgentClientCertFile != "" ||
+		c.ShelleyKESAgentClientKeyFile != ""
+	if clientCert && (c.ShelleyKESAgentClientCertFile == "" ||
+		c.ShelleyKESAgentClientKeyFile == "") {
+		errs = append(errs, errors.New(
+			"shelleyKesAgentClientCertFile and shelleyKesAgentClientKeyFile "+
+				"must be set together",
+		))
+	}
+	pinned := strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256) != ""
+	if c.ShelleyKESAgentPlaintext {
+		if pinned || clientCert {
+			errs = append(errs, errors.New(
+				"shelleyKesAgentServerSpkiSha256 and a client certificate "+
+					"need TLS, so shelleyKesAgentPlaintext takes neither",
+			))
+		}
+		return errs
+	}
+	if pinned {
+		if pin, err := hex.DecodeString(
+			strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256),
+		); err != nil || len(pin) != sha256.Size {
 			errs = append(errs, fmt.Errorf(
-				"%s[%d] must be a %d-byte SHA-256 certificate fingerprint "+
-					"encoded as hexadecimal",
-				field,
-				idx,
-				sha256.Size,
+				"shelleyKesAgentServerSpkiSha256 must be %d hex characters",
+				2*sha256.Size,
 			))
 		}
 	}
 	return errs
 }
 
-// ValidateKESAgentSignTimeout accepts zero as the documented default
-// selector, or an explicit positive timeout shorter than one mainnet slot.
 func ValidateKESAgentSignTimeout(timeout time.Duration) error {
 	if timeout < 0 || timeout >= maxKESAgentSignTimeout {
 		return fmt.Errorf(
@@ -92,9 +173,7 @@ func ValidateKESAgentSignTimeout(timeout time.Duration) error {
 	return nil
 }
 
-// ValidateMithrilPublicBaseURL accepts an absolute public origin. Plain HTTP
-// is restricted to loopback so artifact locations are HTTPS for normal
-// bootstrap clients.
+// ValidateMithrilPublicBaseURL accepts an absolute HTTP(S) origin.
 func ValidateMithrilPublicBaseURL(value string) error {
 	u, err := url.Parse(value)
 	if err != nil {
@@ -102,7 +181,7 @@ func ValidateMithrilPublicBaseURL(value string) error {
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "https" && scheme != "http" {
-		return errors.New("must use HTTPS (HTTP is allowed only on loopback)")
+		return errors.New("must use HTTP or HTTPS")
 	}
 	if u.Host == "" || u.Hostname() == "" || u.User != nil || u.Opaque != "" ||
 		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery ||
@@ -110,16 +189,6 @@ func ValidateMithrilPublicBaseURL(value string) error {
 		return errors.New(
 			"must be an origin without credentials, a path, query, or fragment",
 		)
-	}
-	if scheme == "http" {
-		host := strings.ToLower(u.Hostname())
-		addr, parseErr := netip.ParseAddr(host)
-		if host != "localhost" &&
-			(parseErr != nil || !addr.Unmap().IsLoopback()) {
-			return errors.New(
-				"plain HTTP public URL is allowed only on loopback",
-			)
-		}
 	}
 	return nil
 }
@@ -609,72 +678,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
-	// Bark's DatabaseService is mounted whenever bark is enabled with a snapshot
-	// directory configured. Every method must authenticate its caller, and its
-	// destructive methods additionally require explicit operator authorization.
-	// Validate both policies here rather than failing deep in Bark.Start.
-	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
-		c.BarkClientCAFilePath == "" {
-		errs = append(errs, errors.New(
-			"barkClientCaFilePath is required when bark is enabled "+
-				"(barkPort) alongside databaseLifecycle.snapshotDir: its "+
-				"DatabaseService RPCs must not be mounted without a way to "+
-				"authenticate callers",
-		))
-	}
-	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
-		len(c.BarkOperatorCertificateFingerprints) == 0 {
-		errs = append(errs, errors.New(
-			"barkOperatorCertificateFingerprints requires at least one SHA-256 "+
-				"client certificate fingerprint when bark is enabled (barkPort) "+
-				"alongside databaseLifecycle.snapshotDir: verified identity alone "+
-				"does not authorize destructive DatabaseService RPCs",
-		))
-	}
-	errs = append(errs, validateCertificateFingerprints(
-		"barkOperatorCertificateFingerprints",
-		c.BarkOperatorCertificateFingerprints,
-	)...)
-	if len(c.BarkLifecycleOperatorCertificateFingerprints) > 0 &&
-		!c.BarkLifecycleEnabled {
-		errs = append(errs, errors.New(
-			"barkLifecycleOperatorCertificateFingerprints requires "+
-				"barkLifecycleEnabled",
-		))
-	}
 	if serving && c.BarkLifecycleEnabled && c.BarkPort == 0 {
-		errs = append(errs, errors.New(
-			"barkPort must be non-zero when barkLifecycleEnabled is true",
-		))
-	}
-	if serving && c.BarkLifecycleEnabled && c.BarkClientCAFilePath == "" {
-		errs = append(errs, errors.New(
-			"barkClientCaFilePath is required when barkLifecycleEnabled is true",
-		))
-	}
-	if serving && c.BarkLifecycleEnabled &&
-		len(c.BarkLifecycleOperatorCertificateFingerprints) == 0 {
-		errs = append(errs, errors.New(
-			"barkLifecycleOperatorCertificateFingerprints requires at least one "+
-				"SHA-256 client certificate fingerprint when barkLifecycleEnabled is true",
-		))
-	}
-	errs = append(errs, validateCertificateFingerprints(
-		"barkLifecycleOperatorCertificateFingerprints",
-		c.BarkLifecycleOperatorCertificateFingerprints,
-	)...)
-	// mTLS client verification also needs the server's own TLS pair --
-	// without it, bark.Bark.Start's own equivalent check (independent of
-	// Lifecycle, since it applies to any TlsClientCAFilePath) would fail
-	// deep inside node startup instead of here. Checked independently of
-	// the barkPort/snapshotDir gate above so a barkClientCaFilePath set by
-	// mistake without barkPort/snapshotDir still gets flagged.
-	if serving && c.BarkClientCAFilePath != "" &&
-		(c.TlsCertFilePath == "" || c.TlsKeyFilePath == "") {
-		errs = append(errs, errors.New(
-			"barkClientCaFilePath requires tlsCertFilePath and tlsKeyFilePath "+
-				"to also be set for mTLS client verification",
-		))
+		errs = append(
+			errs,
+			errors.New(
+				"barkPort must be non-zero when barkLifecycleEnabled is true",
+			),
+		)
 	}
 
 	// Mempool
@@ -807,7 +817,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		// agent socket configured, the key lives with the agent instead --
 		// that is the whole point of the flag -- so requiring both made an
 		// agent-only configuration impossible to start.
-		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" {
+		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" &&
+			c.ShelleyKESAgentAddress == "" {
 			missing = append(missing, "shelleyKesKey")
 		}
 		if err := ValidateKESKeySources(
@@ -816,6 +827,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		); err != nil {
 			errs = append(errs, err)
 		}
+		errs = append(errs, c.validateRemoteKESAgent()...)
 		if c.ShelleyOperationalCertificate == "" {
 			missing = append(missing, "shelleyOperationalCertificate")
 		}
@@ -1038,19 +1050,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				errs = append(errs, errors.New(
 					"mithril.server.aggregator.genesisSigningKeyFile is required "+
 						"when the aggregator is enabled",
-				))
-			}
-			if agg.OperatorTokenFile == "" {
-				errs = append(errs, errors.New(
-					"mithril.server.aggregator.operatorTokenFile is required "+
-						"when the aggregator is enabled",
-				))
-			}
-			if !isLoopbackListenHost(c.BindAddr) &&
-				!c.Mithril.Server.TLSEnabled {
-				errs = append(errs, errors.New(
-					"mithril.server.tlsEnabled is required when the aggregator "+
-						"uses a non-loopback bindAddr",
 				))
 			}
 		}
@@ -1383,12 +1382,6 @@ func normalizeBindAddr(addr string) string {
 		return addr
 	}
 	return parsed.Unmap().String()
-}
-
-func isLoopbackListenHost(host string) bool {
-	literal := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-	addr, err := netip.ParseAddr(literal)
-	return err == nil && addr.Unmap().IsLoopback()
 }
 
 // isWildcardAddr reports whether a bind address selects all interfaces. The

@@ -21,7 +21,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -118,6 +120,54 @@ func (f *gddFixture) deliver(
 	}
 }
 
+// intersectSession registers a peer the way a new chainsync session does: the
+// MsgRollBackward to the point FindIntersect agreed on, before any header.
+func intersectSession(
+	cs *ChainSelector,
+	connId ouroboros.ConnectionId,
+	intersection ochainsync.Tip,
+	advertised ochainsync.Tip,
+) {
+	cs.HandlePeerRollbackEvent(event.NewEvent(
+		PeerRollbackEventType,
+		PeerRollbackEvent{
+			ConnectionId: connId,
+			Point:        intersection.Point,
+			Tip:          advertised,
+		},
+	))
+}
+
+// deliverFrom feeds one header per slot starting at block number first, each
+// naming the previous one as its parent and the first naming parent.
+func (f *gddFixture) deliverFrom(
+	t *testing.T,
+	connId ouroboros.ConnectionId,
+	parent ochainsync.Tip,
+	slots ...uint64,
+) {
+	t.Helper()
+	first := parent.BlockNumber + 1
+	adv := genesisTip(1_000_000, "adv", first+uint64(len(slots)))
+	prevHash := parent.Point.Hash
+	for i, slot := range slots {
+		obs := genesisTip(slot, fmt.Sprintf("h%d", slot), first+uint64(i))
+		require.True(t, f.cs.updatePeerTipObservedLinked(
+			connId,
+			adv,
+			obs,
+			nil,
+			PraosTiebreakerViewFromTip(
+				obs,
+				nil,
+				PraosTiebreakerConfigUnknown(),
+			),
+			deliveredLink{prevHash: prevHash},
+		))
+		prevHash = obs.Point.Hash
+	}
+}
+
 func slotRange(from, to uint64) []uint64 {
 	out := make([]uint64, 0, to-from+1)
 	for s := from; s <= to; s++ {
@@ -139,6 +189,146 @@ func TestGDDDisconnectsProvablySparserPeer(t *testing.T) {
 	f.evaluate()
 
 	assert.Equal(t, []ouroboros.ConnectionId{sparse}, f.disconnected())
+}
+
+// Forks that branch exactly where each peer's chainsync session intersected
+// share no delivered header. The intersection still anchors both candidate
+// fragments, so the sparser fork is provably sparser.
+func TestGDDDisconnectsSparserForkBranchingAtSessionIntersection(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	dense, sparse := corrConn(1), corrConn(2)
+	intersection := genesisTip(10, "h10", 10)
+	advertised := genesisTip(1_000_000, "adv", 1_000)
+	intersectSession(f.cs, dense, intersection, advertised)
+	intersectSession(f.cs, sparse, intersection, advertised)
+	f.deliverFrom(t, dense, intersection, slotRange(11, 50)...)
+	f.deliverFrom(t, sparse, intersection, 60, 100, 200)
+
+	f.evaluate()
+
+	assert.Equal(t, []ouroboros.ConnectionId{sparse}, f.disconnected())
+}
+
+// The session intersection is placed one block below the first header, so it
+// anchors the frontier only when that header names it as its parent. A header
+// whose parent was withheld from selection, or a boundary block that repeats
+// its parent's block number, would misnumber it.
+func TestSessionAnchorRequiresFirstHeaderToNameIt(t *testing.T) {
+	t.Parallel()
+	intersection := genesisTip(10, "h10", 10)
+	tests := []struct {
+		name      string
+		observed  ochainsync.Tip
+		link      deliveredLink
+		wantBase  uint64
+		wantFirst string
+	}{
+		{
+			name:      "child",
+			observed:  genesisTip(11, "h11", 11),
+			link:      deliveredLink{prevHash: []byte("h10")},
+			wantBase:  10,
+			wantFirst: "h10",
+		},
+		{
+			name:      "grandchild",
+			observed:  genesisTip(12, "h12", 12),
+			link:      deliveredLink{prevHash: []byte("h11")},
+			wantBase:  12,
+			wantFirst: "h12",
+		},
+		{
+			name:     "boundary",
+			observed: genesisTip(11, "ebb", 10),
+			link: deliveredLink{
+				prevHash: []byte("h10"),
+				boundary: true,
+			},
+			wantBase:  10,
+			wantFirst: "ebb",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newGDDFixture(t, true)
+			conn := corrConn(1)
+			advertised := genesisTip(1_000_000, "adv", 1_000)
+			intersectSession(f.cs, conn, intersection, advertised)
+			require.True(t, f.cs.updatePeerTipObservedLinked(
+				conn,
+				advertised,
+				tc.observed,
+				nil,
+				PraosTiebreakerViewFromTip(
+					tc.observed,
+					nil,
+					PraosTiebreakerConfigUnknown(),
+				),
+				tc.link,
+			))
+			f.cs.mutex.RLock()
+			defer f.cs.mutex.RUnlock()
+			peerTip := f.cs.peerTips[conn]
+			require.NotNil(t, peerTip)
+			require.NotEmpty(t, peerTip.observedPoints)
+			assert.Equal(t, tc.wantBase, peerTip.observedPointBaseBlock)
+			assert.Equal(
+				t,
+				tc.wantFirst,
+				string(peerTip.observedPoints[0].Hash),
+			)
+		})
+	}
+}
+
+// A rollback of a tracked peer past its retained frontier empties it, and the
+// rollback point anchors the frontier the next header starts.
+func TestSessionAnchorAfterTrackedRollbackOutsideFrontier(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	conn := corrConn(1)
+	intersection := genesisTip(10, "h10", 10)
+	advertised := genesisTip(1_000_000, "adv", 1_000)
+	intersectSession(f.cs, conn, intersection, advertised)
+	f.deliverFrom(t, conn, intersection, slotRange(11, 20)...)
+
+	rollback := genesisTip(5, "h5", 5)
+	intersectSession(f.cs, conn, rollback, advertised)
+	f.deliverFrom(t, conn, rollback, 6)
+
+	f.cs.mutex.RLock()
+	defer f.cs.mutex.RUnlock()
+	peerTip := f.cs.peerTips[conn]
+	require.NotNil(t, peerTip)
+	require.Len(t, peerTip.observedPoints, 2)
+	assert.Equal(t, uint64(5), peerTip.observedPointBaseBlock)
+	assert.Equal(t, "h5", string(peerTip.observedPoints[0].Hash))
+	assert.Equal(t, "h6", string(peerTip.observedPoints[1].Hash))
+}
+
+// The origin carries no hash, so a session that intersects there has no
+// anchor and its frontier starts at the first delivered header.
+func TestSessionAnchorSkipsOrigin(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	conn := corrConn(1)
+	advertised := genesisTip(1_000_000, "adv", 1_000)
+	intersectSession(f.cs, conn, ochainsync.Tip{}, advertised)
+	f.cs.mutex.RLock()
+	peerTip := f.cs.peerTips[conn]
+	require.NotNil(t, peerTip)
+	assert.False(t, peerTip.sessionAnchorSet)
+	f.cs.mutex.RUnlock()
+
+	f.deliverFrom(t, conn, genesisTip(0, "genesis", 0), 1)
+
+	f.cs.mutex.RLock()
+	defer f.cs.mutex.RUnlock()
+	require.Len(t, peerTip.observedPoints, 1)
+	assert.Equal(t, uint64(1), peerTip.observedPointBaseBlock)
+	assert.Equal(t, "h1", string(peerTip.observedPoints[0].Hash))
 }
 
 func TestGDDKeepsPeerWithIncompleteWindow(t *testing.T) {

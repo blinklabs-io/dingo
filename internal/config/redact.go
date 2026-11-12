@@ -70,7 +70,7 @@ const (
 var logSecretConfigFields = []string{
 	// Koios Bearer token.
 	"KoiosParity.APIKey",
-	// Prometheus listener Bearer token.
+	// Legacy Prometheus authentication input.
 	"MetricsAuthToken",
 	// Outbound registry headers, typically Authorization.
 	"TokenRegistry.HeaderSecrets",
@@ -323,7 +323,12 @@ var logPlainConfigFields = []string{
 	// key and certificate paths below it: the path is not the secret, the
 	// material behind it is, and an operator diagnosing a misconfigured
 	// socket needs to see which path failed.
+	"ShelleyKESAgentAddress",
+	"ShelleyKESAgentClientCertFile",
+	"ShelleyKESAgentClientKeyFile",
 	"ShelleyKESAgentMode",
+	"ShelleyKESAgentPlaintext",
+	"ShelleyKESAgentServerSPKISHA256",
 	"ShelleyKESAgentSignTimeout",
 	"ShelleyKESAgentSocket",
 	"ShelleyKESKey",

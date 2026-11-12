@@ -765,6 +765,32 @@ func TestValidateBlockProducerStartup_KESAgentSignMode(t *testing.T) {
 	require.NotNil(t, n.kesAgentClient)
 }
 
+// TestValidateBlockProducerStartup_RemoteKESAgentRefusesServeKeyMode covers a
+// library caller that skips config validation: an explicit serve-key mode
+// with a remote agent address is refused, not silently replaced by sign mode.
+func TestValidateBlockProducerStartup_RemoteKESAgentRefusesServeKeyMode(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	testutil.SkipIfBlockProducerUnsupported(t)
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeServeKey,
+		"",
+		cardanoCfg,
+	)
+	n.config.shelleyKESAgentAddress = "127.0.0.1:1"
+	t.Cleanup(n.closeKESAgentClient)
+
+	_, err := n.validateBlockProducerStartupAtSlot(0)
+	require.ErrorContains(t, err, "remote KES agent supports only mode")
+}
+
 // TestValidateBlockProducerStartup_KESAgentServeKeyRotationStaysValidated
 // covers the KES rotation the serve-key background loop exists to handle.
 //
@@ -4415,6 +4441,33 @@ func TestNewOuroborosConfigReportsChainSelectionBestPeer(t *testing.T) {
 	))
 	require.NotNil(t, n.chainSelector.GetBestPeer())
 	assert.True(t, cfg.ChainsyncHasBestPeer(), "a selected best peer")
+}
+
+// Ingress slots depend on the stale-tip verdict; a config that drops the hook
+// leaves stale peers holding every slot.
+func TestChainsyncConfigReportsAdvertisedTipStale(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: NewConfig()}
+	cfg := n.chainsyncConfig()
+	require.NotNil(t, cfg.AdvertisedTipStale)
+	staleTip := ochainsync.Tip{Point: ocommon.NewPoint(10, []byte("stale"))}
+	freshTip := ochainsync.Tip{Point: ocommon.NewPoint(5000, []byte("fresh"))}
+	assert.False(t, cfg.AdvertisedTipStale(staleTip), "no chain selector")
+
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:        true,
+			SecurityParam:      20,
+			GenesisWindowSlots: 100,
+			WallClockSlot: func() (uint64, bool) {
+				return 5000, true
+			},
+			DisableEventSubscriptions: true,
+		},
+	)
+	assert.True(t, cfg.AdvertisedTipStale(staleTip), "older than the window")
+	assert.False(t, cfg.AdvertisedTipStale(freshTip), "at the wall clock")
 }
 
 // Not t.Parallel: swaps the package-level closeOuroborosInstance seam.
