@@ -224,6 +224,16 @@ func TestQuiesceBoundsDMQStakeDetach(t *testing.T) {
 	require.ErrorContains(t, err, "dmq stake lookups")
 }
 
+// shortDMQSocketPath is a Unix socket path short enough for macOS, whose limit
+// the long t.TempDir names of these tests can exceed.
+func shortDMQSocketPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dmq")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "dmq.sock")
+}
+
 // Run starts the DMQ stack before the API providers, so a provider starting
 // can submit through the socket the running node serves and see the node's
 // own admission checks answer.
@@ -231,7 +241,7 @@ func TestNodeRunServesDMQSubmission(t *testing.T) {
 	t.Parallel()
 	n := newAPIPluginRuntimeNode(t)
 	const magic = 42
-	socket := filepath.Join(t.TempDir(), "dmq.sock")
+	socket := shortDMQSocketPath(t)
 	dmqCfg := internalconfig.DefaultDMQConfig()
 	dmqCfg.Enabled = true
 	dmqCfg.NetworkMagic = magic
@@ -309,7 +319,7 @@ func TestNodeRunRejectsBadDMQTopology(t *testing.T) {
 			t.Parallel()
 			n := newAPIPluginRuntimeNode(t)
 			dir := t.TempDir()
-			socket := filepath.Join(dir, "dmq.sock")
+			socket := shortDMQSocketPath(t)
 			dmqCfg := internalconfig.DefaultDMQConfig()
 			dmqCfg.Enabled = true
 			dmqCfg.NetworkMagic = 42
