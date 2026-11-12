@@ -382,6 +382,30 @@ func TestShelleyTransitionEpoch(t *testing.T) {
 	assert.False(t, known)
 }
 
+// TestShelleyTransitionEpochMatchesTickAtExactBoundary pins the exact-boundary
+// case: a candidate whose slot plus 4k lands on an epoch's first slot is
+// adopted by Tick at that epoch, so the reported transition epoch must be that
+// epoch rather than the next one.
+func TestShelleyTransitionEpochMatchesTickAtExactBoundary(t *testing.T) {
+	t.Parallel()
+	delegates := newDelegates(t, 7)
+	env := testEnv(delegates)
+	state, _ := newCandidateState(t, delegates, env)
+	const major = 1
+	epochSlots := testConfig.epochSlots()
+	boundary := epochSlots
+	state.candidates[0].Slot = boundary - 4*testConfig.K
+	state.lastSlot = state.candidates[0].Slot + 2*testConfig.K
+
+	epoch, known := state.ShelleyTransitionEpoch(testConfig, major)
+	require.True(t, known)
+	assert.Equal(t, uint64(1), epoch)
+
+	ticked := state.Tick(testConfig, boundary)
+	assert.Equal(t, state.candidates[0].Version, ticked.adoptedVersion,
+		"Tick adopts the candidate at the exact boundary epoch")
+}
+
 func TestComplete(t *testing.T) {
 	t.Parallel()
 	fromGenesis := NewState(testGenesisParams()).Advance(0, 0)
@@ -424,11 +448,11 @@ func TestCheckTransition(t *testing.T) {
 	require.NoError(t, err)
 	const major = 1
 
-	// Leaving Byron in the adoption epoch is allowed; in any other epoch,
-	// or with no stable candidate, it is not.
+	// Leaving Byron in or after the adoption epoch is allowed. The hard-fork
+	// combinator translates at the adoption epoch before ticking to a later
+	// first Shelley block.
 	require.NoError(t, stable.CheckTransition(testConfig, major, 1, true))
-	require.ErrorAs(t, stable.CheckTransition(testConfig, major, 2, true),
-		&TransitionNotAdoptedError{})
+	require.NoError(t, stable.CheckTransition(testConfig, major, 2, true))
 	require.ErrorAs(t, candidate.CheckTransition(testConfig, major, 1, true),
 		&TransitionNotAdoptedError{})
 	none := NewState(testGenesisParams()).Advance(0, 0)

@@ -834,6 +834,7 @@ func (o *Ouroboros) chainsyncClientAwaitReply(
 		}
 		o.config.ChainsyncObserveAwaitReply(ctx.ConnectionId, point)
 	}
+	o.csjOnAwaitReply(ctx.ConnectionId)
 	if observer {
 		return nil
 	}
@@ -2388,6 +2389,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// like an ingress connection; its delivered history is kept.
 		if !ingressEligible && o.chainsyncObserverHorizonWait != nil {
 			if err := o.awaitObserverHorizon(ctx, chainsyncEvent); err != nil {
+				if errors.Is(err, errObserverPromoted) {
+					return o.dropPromotedObserverHeader(ctx, clientSession, tip)
+				}
 				return err
 			}
 			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
@@ -2545,6 +2549,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				!ledger.IsHeaderVerificationWithheld(verifyErr) &&
 				!errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
 				patienceResume = false
+				o.config.Logger.Warn(
+					"chainsync: recycling connection after observer header verification failure",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+					"error", verifyErr,
+				)
 				o.eventBus.Publish(
 					ledger.ConnectionRecycleRequestedEventType,
 					event.NewEvent(
@@ -2691,53 +2702,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				return fmt.Errorf("invalid peer tip disposition: %d", disposition)
 			}
 		}
-		// Apply-eligibility, evaluated after observation so it reflects this
-		// header. A peer can be ingress-eligible yet not apply-eligible (an
-		// uncorroborated Genesis fast source): its tips are observed but its
-		// blocks are withheld from the ledger.
-		applyEligible := selectionEligible &&
-			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
-		// A header withheld here is lost to the ledger: the peer's cursor moves
-		// past it. Hold only a selection-eligible header denied by Genesis
-		// corroboration; corroboration cannot override failed authentication.
-		// A header at or below the applied tip cannot reach the ledger, so
-		// waiting for witnesses only stalls the peer.
-		if selectionEligible && ingressEligible && !applyEligible &&
-			o.config.ChainsyncAwaitCorroboration != nil &&
-			!o.headerAtOrBelowLocalTip(v) {
-			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
-			holdCtx, cancelHold := context.WithTimeout(
-				admissionCtx,
-				o.corroborationHoldTimeout,
-			)
-			eligible, err := o.config.ChainsyncAwaitCorroboration(
-				holdCtx,
-				ctx.ConnectionId,
-			)
-			holdExpired := errors.Is(err, context.DeadlineExceeded) &&
-				admissionCtx.Err() == nil
-			cancelHold()
-			cancelAdmission()
-			switch {
-			case holdExpired:
-				// Keep the chainsync cursor. Re-intersecting immediately from
-				// the applied tip discards this peer's candidate history and
-				// repeats the same hold; another peer needs that history to
-				// corroborate the withheld header when it catches up.
-			case err != nil:
-				return fmt.Errorf("wait for genesis corroboration: %w", err)
-			}
-			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
-				return ochainsync.ErrStopSyncProcess
-			}
-			applyEligible = eligible
-		}
 		// Limit on Eagerness: the tip was observed above, so the limit already
-		// accounts for this header. Wait before recording cross-peer dedup state:
-		// if the connection closes while held, another peer must still be able
-		// to deliver the same header to the ledger. Uncorroborated ingress also
-		// advances observed history, so it must not run past the shared overlap
-		// while its blocks remain withheld from application.
+		// accounts for this header. Wait before the apply gate, which admits a
+		// header the limit vouches for, and before recording cross-peer dedup
+		// state: if the connection closes while held, another peer must still
+		// be able to deliver the same header to the ledger. Ingress that is
+		// not corroborated in lockstep also advances observed history, so it
+		// must not run past the shared overlap.
 		if selectionEligible && ingressEligible && o.config.ChainsyncAwaitEagerness != nil {
 			var appliedTip func() ochainsync.Tip
 			if o.ledgerState != nil {
@@ -2789,6 +2760,73 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				tipAccepted = false
 				return ochainsync.ErrStopSyncProcess
 			}
+		}
+		// Apply-eligibility, evaluated after observation and after the Limit
+		// on Eagerness wait, so it reflects this header and sees it within
+		// the limit: a peer that is not corroborated in lockstep is still
+		// apply-eligible while its header is at most k past a prefix other
+		// identities retain, as the reference node's LoE admits candidates.
+		// A peer can be ingress-eligible yet not apply-eligible (a lone or
+		// Sybil Genesis fast source): its tips are observed but its blocks
+		// are withheld from the ledger.
+		applyEligible := selectionEligible &&
+			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
+		// A header withheld here is lost to the ledger: the peer's cursor moves
+		// past it. Hold only a selection-eligible header denied by Genesis
+		// corroboration; corroboration cannot override failed authentication.
+		// A header at or below the applied tip cannot reach the ledger, so
+		// waiting for witnesses only stalls the peer.
+		if selectionEligible && ingressEligible && !applyEligible &&
+			o.config.ChainsyncAwaitCorroboration != nil &&
+			!o.headerAtOrBelowLocalTip(v) {
+			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+			holdStart := time.Now()
+			var eligible, holdExpired bool
+			var err error
+			for {
+				holdCtx, cancelHold := context.WithTimeout(
+					admissionCtx,
+					o.corroborationHoldTimeout,
+				)
+				eligible, err = o.config.ChainsyncAwaitCorroboration(
+					holdCtx,
+					ctx.ConnectionId,
+				)
+				holdExpired = errors.Is(err, context.DeadlineExceeded) &&
+					admissionCtx.Err() == nil
+				cancelHold()
+				// The dynamo is the only identified peer streaming, so its
+				// header is held again rather than withheld; a connection
+				// rotated away from the role falls back to the single hold.
+				if !holdExpired || !o.csjIsDynamo(ctx.ConnectionId) ||
+					time.Since(holdStart) >= o.dynamoCorroborationHoldBudget {
+					break
+				}
+			}
+			cancelAdmission()
+			switch {
+			case holdExpired && o.csjIsDynamo(ctx.ConnectionId):
+				// Re-intersect in place from the local chain rather than move
+				// the dynamo's cursor past a header the ledger never receives.
+				tipAccepted = false
+				o.scheduleHeaderResync(
+					ctx.ConnectionId,
+					time.Now(),
+					event.ChainsyncResyncReasonGenesisCorroborationHoldExpired,
+				)
+				return nil
+			case holdExpired:
+				// Keep the chainsync cursor. Re-intersecting immediately from
+				// the applied tip discards this peer's candidate history and
+				// repeats the same hold; another peer needs that history to
+				// corroborate the withheld header when it catches up.
+			case err != nil:
+				return fmt.Errorf("wait for genesis corroboration: %w", err)
+			}
+			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+				return ochainsync.ErrStopSyncProcess
+			}
+			applyEligible = eligible
 		}
 		patienceGrant = selectionEligible && ingressEligible
 		// Header arrival against slot time, for headers that passed (or
@@ -3190,19 +3228,48 @@ func (o *Ouroboros) awaitCatchUpBand(
 // the ledger's forecast horizon. Like awaitCatchUpBand, a wait that reaches
 // its bound is not an error: the header then takes the ordinary observer path,
 // so the bound limits how long a promotion can go unnoticed. Cancellation is
-// returned.
+// returned. A promotion of the connection to ingress ends the wait with
+// errObserverPromoted: the ledger's wait ends only when a snapshot is
+// published, and a promoted connection may be the only one that can feed it.
 func (o *Ouroboros) awaitObserverHorizon(
 	ctx ochainsync.CallbackContext,
 	e ledger.ChainsyncEvent,
 ) error {
 	admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 	defer cancelAdmission()
+	var wake <-chan struct{}
+	if o.chainsyncState != nil {
+		var unregister func()
+		wake, unregister = o.chainsyncState.AwaitClientPromotion(
+			ctx.ConnectionId,
+		)
+		defer unregister()
+		// A promotion between the callback's role decision and the
+		// registration has nothing to wake.
+		if observer, tracked := o.chainsyncState.ClientObservabilityOnly(
+			ctx.ConnectionId,
+		); tracked && !observer {
+			return errObserverPromoted
+		}
+	}
 	waitCtx, cancelWait := context.WithTimeout(
 		admissionCtx,
 		o.catchUpBandWaitTimeout,
 	)
 	defer cancelWait()
+	waitCtx, cancelCause := context.WithCancelCause(waitCtx)
+	defer cancelCause(nil)
+	go func() {
+		select {
+		case <-wake:
+			cancelCause(errObserverPromoted)
+		case <-waitCtx.Done():
+		}
+	}()
 	err := o.chainsyncObserverHorizonWait(waitCtx, e)
+	if errors.Is(context.Cause(waitCtx), errObserverPromoted) {
+		return errObserverPromoted
+	}
 	if err == nil {
 		return nil
 	}
@@ -3210,6 +3277,39 @@ func (o *Ouroboros) awaitObserverHorizon(
 		return nil
 	}
 	return fmt.Errorf("chainsync: await observer forecast horizon: %w", err)
+}
+
+// errObserverPromoted ends a wait a connection's callback entered as an
+// observer once the connection holds an ingress slot.
+var errObserverPromoted = errors.New("observer promoted to ingress")
+
+// dropPromotedObserverHeader drops a header whose callback was parked as an
+// observer's and whose connection has since been promoted. The header was never
+// authenticated or retained, and the connection's cursor stands at it while the
+// local chain moved on, so the observer header gap makes the promotion
+// re-intersect and deliver it again as an ingress header.
+func (o *Ouroboros) dropPromotedObserverHeader(
+	ctx ochainsync.CallbackContext,
+	session chainsync.ClientSessionToken,
+	tip ochainsync.Tip,
+) error {
+	if o.chainsyncState != nil &&
+		o.chainsyncState.RecordClientObserverHeaderGap(
+			ctx.ConnectionId,
+			session,
+		) {
+		o.reconcileChainsyncIngressAdmission(
+			ctx.ConnectionId,
+			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
+		)
+	}
+	o.config.Logger.Debug(
+		"chainsync: observer header dropped, connection promoted while it waited",
+		"component", "ouroboros",
+		"connection_id", ctx.ConnectionId.String(),
+	)
+	o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+	return nil
 }
 
 // admitChainsyncHeader runs the future-header admission for one delivered
@@ -3474,6 +3574,11 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 	)
 	if !exists {
 		return false
+	}
+	// A jumper streams nothing, so an ingress slot would only expose it to
+	// the stall recycler.
+	if desiredEligible && o.csjIsJumper(connId) {
+		desiredEligible = false
 	}
 	if desiredEligible {
 		if observabilityOnly {

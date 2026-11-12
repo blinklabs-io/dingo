@@ -90,11 +90,8 @@ func TestUncorroboratedIngressWaitsForEagernessAfterObservation(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("uncorroborated ingress did not reach the eagerness gate")
 			}
-			want := []string{"authenticate", "observe", "apply gate", "eagerness"}
-			if mode != "no corroboration hook" {
-				want = []string{"authenticate", "observe", "apply gate", "corroboration", "eagerness"}
-			}
-			require.Equal(t, want, order, "observe authenticated candidates before applying either wait")
+			require.Equal(t, []string{"authenticate", "observe", "eagerness"}, order,
+				"observe authenticated candidates before the eagerness wait")
 			select {
 			case err := <-done:
 				t.Fatalf("uncorroborated stream advanced while held at LoE: %v", err)
@@ -102,6 +99,12 @@ func TestUncorroboratedIngressWaitsForEagernessAfterObservation(t *testing.T) {
 			}
 			unblock()
 			require.NoError(t, testutil.RequireReceive(t, done, time.Second, "released LoE callback"))
+			want := []string{"authenticate", "observe", "eagerness", "apply gate"}
+			if mode != "no corroboration hook" {
+				want = append(want, "corroboration")
+			}
+			require.Equal(t, want, order,
+				"gate application once the header is within the limit")
 			select {
 			case <-ledgerCh:
 				t.Fatal("eagerness admission cannot grant corroboration or ledger ingress")

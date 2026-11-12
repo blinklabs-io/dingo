@@ -244,6 +244,7 @@ func TestLeaderEligibilityInboundReferenceSchedules(t *testing.T) {
 						},
 					}
 					err = ls.verifyBlockLeaderEligibilityFromSnapshot(
+						t.Context(),
 						block,
 						5,
 						snap,
@@ -255,7 +256,7 @@ func TestLeaderEligibilityInboundReferenceSchedules(t *testing.T) {
 						require.Error(t, err)
 						require.Equal(t, float64(1), testutil.ToFloat64(counter))
 						ls.config.SkipLeaderStakeThresholdCheck = true
-						require.NoError(t, ls.verifyBlockLeaderEligibilityFromSnapshot(block, 5, snap))
+						require.NoError(t, ls.verifyBlockLeaderEligibilityFromSnapshot(t.Context(), block, 5, snap))
 						require.Equal(t, float64(1), testutil.ToFloat64(counter), "prototype acceptance is not a rejection")
 					}
 				})

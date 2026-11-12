@@ -38,6 +38,7 @@ type stateMetrics struct {
 	// metrics_sync.go.
 	observerHorizonParked    atomic.Int64
 	observerHorizonOvershoot prometheus.Histogram
+	observerReadAheadParks   prometheus.Counter
 	holdsPointRetries        prometheus.Counter
 	blockfetchEventMu        sync.Mutex
 	blockfetchEventStarts    map[uint64]time.Time
@@ -930,6 +931,10 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			0, 1_000, 5_000, 20_000, 50_000, 100_000, 250_000, 500_000,
 			1_000_000, 5_000_000,
 		},
+	})
+	m.observerReadAheadParks = promautoFactory.NewCounter(prometheus.CounterOpts{
+		Name: "dingo_ledger_observer_readahead_parks_total",
+		Help: "observer chainsync callbacks parked because the header lay more than k blocks above the header tip",
 	})
 	m.holdsPointRetries = promautoFactory.NewCounter(prometheus.CounterOpts{
 		Name: "dingo_ledger_fork_anchor_membership_retries_total",

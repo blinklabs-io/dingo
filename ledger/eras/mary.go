@@ -92,13 +92,9 @@ func HardForkMary(
 		)
 	}
 	ret := mary.UpgradePParams(*allegraPParams)
-	// Bump ProtocolMajor to Mary's range when entering the era.
-	// gouroboros's UpgradePParams carries the prior major forward
-	// unchanged; without this bump, schedule-driven transitions
-	// reach Mary with major still at Allegra's value.
-	if ret.ProtocolMajor < mary.MinProtocolVersionMary {
-		ret.ProtocolMajor = mary.MinProtocolVersionMary
-	}
+	// The protocol version is carried over unchanged, as the reference
+	// ledger's translateEra does: a ledger translated before the pending major is
+	// enacted keeps the old major.
 	return &ret, nil
 }
 

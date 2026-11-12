@@ -67,7 +67,7 @@ func TestUtxoStakingIndexesUpgrade(t *testing.T) {
 					)
 					require.NoError(t, err)
 				}
-				run(registry)
+				run(registry[:53])
 				for _, name := range []string{"idx_utxo_staking_key", "idx_utxo_staking_deleted_amount"} {
 					definition, ok := indexSQL(t, db, name)
 					if pending && name == "idx_utxo_staking_key" {
