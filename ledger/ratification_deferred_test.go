@@ -422,6 +422,14 @@ type govDiffScenario struct {
 	credentials [][]byte
 	drep        []byte
 	snapshotMgr *snapshot.Manager
+	// returnAddr is the reward address deposits are returned to, and
+	// hotCredential the authorized hot key of the seeded committee member.
+	returnAddr    []byte
+	hotCredential []byte
+	coldCred      []byte
+	payeeAddr     lcommon.Address
+	// tb is the test that owns the scenario, set by the cycle harness.
+	tb *testing.T
 }
 
 const govDiffEpochLength = 100
@@ -431,6 +439,21 @@ const govDiffEpochLength = 100
 // an action about to expire with a child. The committee update is a delaying
 // action, so the three ratify and enact across different boundaries.
 func newGovDiffScenario(t *testing.T) *govDiffScenario {
+	t.Helper()
+	return newGovDiffScenarioWithOptions(t, govDiffScenarioOptions{})
+}
+
+// govDiffScenarioOptions varies the seeded ledger for tests that add their
+// own governance actions: the default proposals would serialize against them
+// (delaying actions enact one per boundary) and orphan competing roots.
+type govDiffScenarioOptions struct {
+	noProposals bool
+}
+
+func newGovDiffScenarioWithOptions(
+	t *testing.T,
+	opts govDiffScenarioOptions,
+) *govDiffScenario {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
@@ -579,79 +602,50 @@ INSERT INTO auth_committee_hot (
 			MinFeeA: &expiringFee,
 		},
 	}
-	addProposal := func(
-		marker byte,
-		actionType lcommon.GovActionType,
-		action any,
-		expires uint64,
-		parent *models.GovernanceProposal,
-	) *models.GovernanceProposal {
-		encoded, err := cbor.Encode(action)
-		require.NoError(t, err)
-		proposal := &models.GovernanceProposal{
-			TxHash:        repeatByte(32, marker),
-			ActionType:    uint8(actionType),
-			ProposedEpoch: startEpoch - 1,
-			ExpiresEpoch:  expires,
-			AnchorURL:     "https://example.invalid/diff",
-			AnchorHash:    repeatByte(32, marker+1),
-			Deposit:       100,
-			ReturnAddress: returnAddr,
-			GovActionCbor: encoded,
-			AddedSlot:     epoch.StartSlot - 10 + uint64(len(s.proposals)),
+	s.returnAddr = returnAddr
+	s.hotCredential = hotCredential
+	s.coldCred = coldCredential
+	s.payeeAddr = payeeAddr
+	if !opts.noProposals {
+		addProposal := func(
+			marker byte,
+			actionType lcommon.GovActionType,
+			action any,
+			expires uint64,
+			parent *models.GovernanceProposal,
+		) *models.GovernanceProposal {
+			return s.addProposal(
+				t, marker, actionType, action, startEpoch-1, expires, parent,
+				epoch.StartSlot-10+uint64(len(s.proposals)),
+			)
 		}
-		if parent != nil {
-			idx := parent.ActionIndex
-			proposal.ParentTxHash = parent.TxHash
-			proposal.ParentActionIdx = &idx
+		vote := func(
+			p *models.GovernanceProposal,
+			voterType uint8,
+			credential []byte,
+		) {
+			s.castVote(
+				t, p, voterType, credential, models.VoteYes, epoch.StartSlot-5,
+			)
 		}
-		require.NoError(
-			t,
-			db.SetGovernanceProposal(context.Background(), proposal, nil),
-		)
-		loaded, err := db.GetGovernanceProposal(
-			context.Background(),
-			proposal.TxHash,
-			0,
-			nil,
-		)
-		require.NoError(t, err)
-		s.proposals = append(s.proposals, loaded)
-		return loaded
+		update := addProposal(0x71, lcommon.GovActionTypeUpdateCommittee,
+			committeeUpdate, startEpoch+10, nil)
+		vote(update, models.VoterTypeDRep, s.drep)
+		vote(update, models.VoterTypeSPO, []byte(hfrLiveYesPool))
+		change := addProposal(0x73, lcommon.GovActionTypeParameterChange,
+			parameterChange, startEpoch+10, nil)
+		vote(change, models.VoterTypeCC, hotCredential)
+		vote(change, models.VoterTypeDRep, s.drep)
+		vote(change, models.VoterTypeSPO, []byte(hfrLiveYesPool))
+		payout := addProposal(0x75, lcommon.GovActionTypeTreasuryWithdrawal,
+			withdrawal, startEpoch+10, nil)
+		vote(payout, models.VoterTypeCC, hotCredential)
+		vote(payout, models.VoterTypeDRep, s.drep)
+		lapsing := addProposal(0x77, lcommon.GovActionTypeParameterChange,
+			expiring, startEpoch, nil)
+		addProposal(0x79, lcommon.GovActionTypeParameterChange,
+			expiring, startEpoch+10, lapsing)
 	}
-	vote := func(
-		p *models.GovernanceProposal,
-		voterType uint8,
-		credential []byte,
-	) {
-		require.NoError(
-			t,
-			db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
-				ProposalID:      p.ID,
-				VoterType:       voterType,
-				VoterCredential: credential,
-				Vote:            models.VoteYes,
-				AddedSlot:       epoch.StartSlot - 5,
-			}, nil),
-		)
-	}
-	update := addProposal(0x71, lcommon.GovActionTypeUpdateCommittee,
-		committeeUpdate, startEpoch+10, nil)
-	vote(update, models.VoterTypeDRep, s.drep)
-	vote(update, models.VoterTypeSPO, []byte(hfrLiveYesPool))
-	change := addProposal(0x73, lcommon.GovActionTypeParameterChange,
-		parameterChange, startEpoch+10, nil)
-	vote(change, models.VoterTypeCC, hotCredential)
-	vote(change, models.VoterTypeDRep, s.drep)
-	vote(change, models.VoterTypeSPO, []byte(hfrLiveYesPool))
-	payout := addProposal(0x75, lcommon.GovActionTypeTreasuryWithdrawal,
-		withdrawal, startEpoch+10, nil)
-	vote(payout, models.VoterTypeCC, hotCredential)
-	vote(payout, models.VoterTypeDRep, s.drep)
-	lapsing := addProposal(0x77, lcommon.GovActionTypeParameterChange,
-		expiring, startEpoch, nil)
-	addProposal(0x79, lcommon.GovActionTypeParameterChange,
-		expiring, startEpoch+10, lapsing)
 
 	cfg := epochBoundaryBenchNodeConfig(t)
 	s.ls = &LedgerState{
@@ -664,8 +658,16 @@ INSERT INTO auth_committee_hot (
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	snapshotMgr := snapshot.NewManager(db, newTestEventBus(t, nil), nil)
-	s.snapshotMgr = snapshotMgr
+	s.snapshotMgr = snapshot.NewManager(db, newTestEventBus(t, nil), nil)
+	s.wireSnapshotHooks()
+	seedEmptyRewardBasisForRollover(t, db, epoch, pparams)
+	return s
+}
+
+// wireSnapshotHooks connects the scenario's ledger to the production snapshot
+// manager the way the node wires its epoch-boundary hooks.
+func (s *govDiffScenario) wireSnapshotHooks() {
+	snapshotMgr := s.snapshotMgr
 	// Production reads the SNAP-point stake inside the boundary.
 	s.ls.SetEpochBoundarySnapshotStakeHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
@@ -692,8 +694,74 @@ INSERT INTO auth_committee_hot (
 			)
 		},
 	)
-	seedEmptyRewardBasisForRollover(t, db, epoch, pparams)
-	return s
+}
+
+// addProposal stores a governance proposal returning to the scenario's return
+// address and tracks it for the per-epoch dumps.
+func (s *govDiffScenario) addProposal(
+	t *testing.T,
+	marker byte,
+	actionType lcommon.GovActionType,
+	action any,
+	proposedEpoch uint64,
+	expires uint64,
+	parent *models.GovernanceProposal,
+	addedSlot uint64,
+) *models.GovernanceProposal {
+	t.Helper()
+	encoded, err := cbor.Encode(action)
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
+		TxHash:        repeatByte(32, marker),
+		ActionType:    uint8(actionType),
+		ProposedEpoch: proposedEpoch,
+		ExpiresEpoch:  expires,
+		AnchorURL:     "https://example.invalid/diff",
+		AnchorHash:    repeatByte(32, marker+1),
+		Deposit:       100,
+		ReturnAddress: s.returnAddr,
+		GovActionCbor: encoded,
+		AddedSlot:     addedSlot,
+	}
+	if parent != nil {
+		idx := parent.ActionIndex
+		proposal.ParentTxHash = parent.TxHash
+		proposal.ParentActionIdx = &idx
+	}
+	require.NoError(
+		t,
+		s.db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
+	loaded, err := s.db.GetGovernanceProposal(
+		context.Background(),
+		proposal.TxHash,
+		0,
+		nil,
+	)
+	require.NoError(t, err)
+	s.proposals = append(s.proposals, loaded)
+	return loaded
+}
+
+func (s *govDiffScenario) castVote(
+	t *testing.T,
+	p *models.GovernanceProposal,
+	voterType uint8,
+	credential []byte,
+	vote uint8,
+	slot uint64,
+) {
+	t.Helper()
+	require.NoError(
+		t,
+		s.db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+			ProposalID:      p.ID,
+			VoterType:       voterType,
+			VoterCredential: credential,
+			Vote:            vote,
+			AddedSlot:       slot,
+		}, nil),
+	)
 }
 
 // run rolls the scenario over boundaries boundaries, calling settle after
@@ -705,42 +773,77 @@ func (s *govDiffScenario) run(
 ) []govDiffEpochDump {
 	t.Helper()
 	dumps := make([]govDiffEpochDump, 0, boundaries)
-	epoch, pparams := s.epoch, s.pparams
 	for range boundaries {
-		seedEmptyRewardBasisForRollover(t, s.db, epoch, pparams)
-		// The reward application reads the performance epoch's parameters
-		// from the table a real node writes every boundary.
-		stored, err := s.db.GetPParams(
-			epoch.EpochId, eras.ConwayEraDesc.Id,
-			eras.ConwayEraDesc.DecodePParamsFunc, nil,
-		)
-		require.NoError(t, err)
-		if stored == nil {
-			encoded, err := cbor.Encode(&pparams)
-			require.NoError(t, err)
-			require.NoError(t, s.db.SetPParams(
-				encoded, epoch.StartSlot, epoch.EpochId,
-				eras.ConwayEraDesc.Id, nil,
-			))
-		}
-		var result *EpochRolloverResult
-		txn := s.db.Transaction(context.Background(), true)
-		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			var err error
-			result, err = s.ls.processEpochRollover(context.Background(),
-				txn, epoch, eras.ConwayEraDesc, pparams,
-			)
-			return err
-		}))
-		require.NotNil(t, result)
-		settle(s.ls)
-		epoch, pparams = result.NewCurrentEpoch, result.NewCurrentPParams
+		epoch, pparams := s.rollover(t, s.epoch, s.pparams, settle)
+		s.epoch, s.pparams = epoch, pparams
 		s.ls.currentEpoch = epoch
 		s.ls.currentPParams = pparams
 		dumps = append(dumps, s.dump(t, epoch.EpochId, pparams))
 	}
-	s.epoch, s.pparams = epoch, pparams
 	return dumps
+}
+
+// rollover commits one epoch rollover from the given ledger state and returns
+// the epoch and parameters it produced. It leaves the scenario's own cursor
+// alone so a caller can roll the same boundary over again after a rollback.
+func (s *govDiffScenario) rollover(
+	t *testing.T,
+	epoch models.Epoch,
+	pparams lcommon.ProtocolParameters,
+	settle func(*LedgerState),
+) (models.Epoch, lcommon.ProtocolParameters) {
+	t.Helper()
+	s.prepareRollover(t, epoch, pparams)
+	return s.commitRollover(t, epoch, pparams, settle)
+}
+
+// commitRollover is rollover without the preparation, for a caller that
+// applies one boundary more than once.
+func (s *govDiffScenario) commitRollover(
+	t *testing.T,
+	epoch models.Epoch,
+	pparams lcommon.ProtocolParameters,
+	settle func(*LedgerState),
+) (models.Epoch, lcommon.ProtocolParameters) {
+	t.Helper()
+	var result *EpochRolloverResult
+	txn := s.db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		result, err = s.ls.processEpochRollover(context.Background(),
+			txn, epoch, eras.ConwayEraDesc, pparams,
+		)
+		return err
+	}))
+	require.NotNil(t, result)
+	settle(s.ls)
+	return result.NewCurrentEpoch, result.NewCurrentPParams
+}
+
+// prepareRollover writes the rows a real node has already stored by the time
+// an epoch ends. Call it once per boundary.
+func (s *govDiffScenario) prepareRollover(
+	t *testing.T,
+	epoch models.Epoch,
+	pparams lcommon.ProtocolParameters,
+) {
+	t.Helper()
+	seedEmptyRewardBasisForRollover(t, s.db, epoch, pparams)
+	// The reward application reads the performance epoch's parameters
+	// from the table a real node writes every boundary.
+	stored, err := s.db.GetPParams(
+		epoch.EpochId, eras.ConwayEraDesc.Id,
+		eras.ConwayEraDesc.DecodePParamsFunc, nil,
+	)
+	require.NoError(t, err)
+	if stored == nil {
+		encoded, err := cbor.Encode(&pparams)
+		require.NoError(t, err)
+		require.NoError(t, s.db.SetPParams(
+			encoded, epoch.StartSlot, epoch.EpochId,
+			eras.ConwayEraDesc.Id, nil,
+		))
+	}
 }
 
 func (s *govDiffScenario) dump(
