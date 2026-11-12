@@ -4862,9 +4862,41 @@ func (ls *LedgerState) cleanupConsumedUtxos(ctx context.Context) {
 	if stabilityWindow == 0 || tipSlot <= stabilityWindow {
 		return
 	}
-	_, _, _ = ls.pruneConsumedUtxosUpTo(
+	// The slot window alone is not a safe floor. k is a count of blocks, so on a
+	// chain sparser than the active-slot coefficient assumes, the block k deep
+	// can sit below tip-3k/f, and a rollback of at most k blocks (which the
+	// chain accepts) would then be refused as below the floor. Cap the target at
+	// that block's slot. A chain not yet k blocks deep may be replaced whole, so
+	// no spent row is safe to delete yet. The depth is read under
+	// consumedUtxoPruneMutex, which every chain truncation also holds, so a
+	// rollback cannot lower the k-deep point between the lookup and the delete.
+	ls.consumedUtxoPruneMutex.Lock()
+	defer ls.consumedUtxoPruneMutex.Unlock()
+	pruneTarget := tipSlot - stabilityWindow
+	if ls.chain != nil {
+		// The chain manager may retain a k larger than the fallback default,
+		// so an unknown k must skip the prune rather than guess a depth.
+		k, ok := ls.securityParamForEra(eraId)
+		if !ok {
+			return
+		}
+		depthPoint, found, err := ls.chain.PointAtDepth(ctx, k)
+		if err != nil {
+			ls.config.Logger.Error(
+				"failed to locate security-parameter depth; skipping consumed UTxO prune",
+				"component", "ledger",
+				"error", err,
+			)
+			return
+		}
+		if !found {
+			return
+		}
+		pruneTarget = min(pruneTarget, depthPoint.Slot)
+	}
+	_, _, _ = ls.pruneConsumedUtxosLocked(
 		ctx,
-		tipSlot-stabilityWindow,
+		pruneTarget,
 		stabilityWindow,
 		ls.cleanupConsumedUtxoBatchLimit(),
 	)
@@ -4890,6 +4922,16 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 ) (int, uint64, error) {
 	ls.consumedUtxoPruneMutex.Lock()
 	defer ls.consumedUtxoPruneMutex.Unlock()
+	return ls.pruneConsumedUtxosLocked(ctx, target, stabilityWindow, limit)
+}
+
+// pruneConsumedUtxosLocked is pruneConsumedUtxosUpTo for a caller that already
+// holds consumedUtxoPruneMutex.
+func (ls *LedgerState) pruneConsumedUtxosLocked(
+	ctx context.Context,
+	target, stabilityWindow uint64,
+	limit int,
+) (int, uint64, error) {
 	guardTxn := ls.db.Metadata().ReadTransaction(ctx)
 	pendingFloor, protected, err := pendingRewardStakeInputHistoryFloor(
 		ls.db.Metadata(),

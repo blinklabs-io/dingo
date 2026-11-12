@@ -13247,9 +13247,10 @@ func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(
 }
 
 // Slot grid for the prune-floor fixture. The Shelley genesis used here
-// (k=432, f=0.05) gives a stability window W of 3k/f = 25920 slots, so with a
-// tip at pruneFixtureTipSlot the consumed-UTxO sweep prunes everything with
-// deleted_slot <= pruneFixtureFloorSlot (140000-W).
+// (k=432, f=0.05) gives a stability window W of 3k/f = 25920 slots. The
+// consumed-UTxO sweep prunes up to the lower of tip-W and the slot of the block
+// k deep; the fixture places that block at pruneFixtureFloorSlot, so everything
+// with deleted_slot <= pruneFixtureFloorSlot is pruned.
 //
 // The at-tip rewind schedule then steps the ledger tip 140000 -> 114080 ->
 // 88160. Attempt 2 asks for W/2 below the tip (127040) and findRewindPoint
@@ -13266,6 +13267,9 @@ const (
 	pruneFixtureFloorSlot       = 114_080
 	pruneFixtureRetainedSlot    = 120_000
 	pruneFixtureTipSlot         = 140_000
+	// pruneFixtureDepthFillers puts the floor block exactly k=432 blocks
+	// behind the tip: 431 fillers, the tip, and the floor block itself.
+	pruneFixtureDepthFillers = 431
 )
 
 type prunedUtxoFixture struct {
@@ -13281,6 +13285,36 @@ type prunedUtxoFixture struct {
 }
 
 func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFixture {
+	t.Helper()
+	return newPrunedUtxoFixtureWithFillers(t, mithrilLedgerSlot, 0, false)
+}
+
+// newDeepPrunedUtxoFixture is the prune-floor fixture for tests that run the
+// consumed-UTxO sweep: it adds the filler blocks that make the chain k blocks
+// deep so the sweep prunes at pruneFixtureFloorSlot.
+func newDeepPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFixture {
+	t.Helper()
+	return newPrunedUtxoFixtureWithFillers(
+		t,
+		mithrilLedgerSlot,
+		pruneFixtureDepthFillers,
+		false,
+	)
+}
+
+// newPrunedUtxoFixtureWithFillers builds the prune-floor fixture with filler
+// blocks so the chain is at least k (=432) blocks deep, which the sweep needs
+// before it will delete anything. With the default placement the fillers sit
+// between the floor block and the tip, so the block exactly k deep is the
+// floor block and the sweep floor stays at pruneFixtureFloorSlot. With
+// sparseTail the fillers instead sit one slot apart just above the consumer
+// block, which leaves the block k deep far below tip-3k/f.
+func newPrunedUtxoFixtureWithFillers(
+	t *testing.T,
+	mithrilLedgerSlot uint64,
+	fillers int,
+	sparseTail bool,
+) *prunedUtxoFixture {
 	t.Helper()
 
 	db := newTestDB(t)
@@ -13301,9 +13335,28 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 		{pruneFixtureProducerSlot, 2, testHashBytes("3766-producer")},
 		{pruneFixtureDeepRewindSlot, 3, testHashBytes("3766-deep")},
 		{pruneFixtureConsumerSlot, 4, testHashBytes("3766-consumer")},
-		{pruneFixtureFloorSlot, 5, testHashBytes("3766-floor")},
-		{pruneFixtureTipSlot, 6, testHashBytes("3766-tip")},
 	}
+	addFillers := func(firstSlot, step uint64) {
+		for i := range fillers {
+			blocks = append(blocks, fixtureBlock{
+				firstSlot + uint64(i)*step, //nolint:gosec
+				uint64(len(blocks)) + 1,
+				testHashBytes(fmt.Sprintf("3766-filler-%d", i)),
+			})
+		}
+	}
+	if sparseTail {
+		addFillers(pruneFixtureConsumerSlot+1, 1)
+	}
+	blocks = append(blocks, fixtureBlock{
+		pruneFixtureFloorSlot, uint64(len(blocks)) + 1, testHashBytes("3766-floor"),
+	})
+	if !sparseTail {
+		addFillers(pruneFixtureFloorSlot+1, 60)
+	}
+	blocks = append(blocks, fixtureBlock{
+		pruneFixtureTipSlot, uint64(len(blocks)) + 1, testHashBytes("3766-tip"),
+	})
 	rawBlocks := make([]chain.RawBlock, 0, len(blocks))
 	for i, b := range blocks {
 		var prevHash []byte
@@ -13506,7 +13559,7 @@ func (f *prunedUtxoFixture) assertLiveSetConsistentAtTip(t *testing.T) {
 func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 
 	require.Equal(
 		t,
@@ -13558,7 +13611,7 @@ func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos(context.Background())
 	tipBefore := f.ls.currentTip
 
@@ -13607,7 +13660,7 @@ func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
 func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 
 	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
 	require.NoError(t, err)
@@ -13670,7 +13723,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos(context.Background())
 
 	// Put the applied ledger tip on a same-slot competitor at the floor, with

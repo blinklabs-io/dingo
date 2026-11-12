@@ -11799,6 +11799,19 @@ blocks refuses forging even when the slot gap is within
 tolerance for bulk catch-up. Both limits use full tip snapshots, including
 block numbers.
 
+A live upstream whose target is not yet published (the window after an
+active-connection switch, before the new peer's first admitted trusted header)
+is not evidence that the node is behind, so `forgeSyncToleranceSlots` does not
+apply to it. The reference node forges on its selected tip whatever the
+wall-clock lag and refuses only when the ledger view for the slot cannot be
+forecast from that tip, a stability window past it. The forger applies that
+same bound, taking the window from the ledger through the optional
+`ForgeForecastHorizonProvider`. A node whose tip lags the clock by more than
+the tolerance but less than the window therefore still forges, and the header
+it produces ends the window. Without this, every producer restarted at the same
+tip refused to forge, so no header was produced and no target was published.
+Without a provider the bound is not evaluated and the node forges.
+
 The slot prefilter still measures a local delay in slots, so its effective
 headroom depends on block density. The independent two-block limit bounds how
 many unapplied blocks can separate the builder's parent from ledger state; the
@@ -11856,10 +11869,10 @@ policy-approved upstream target:
   There is deliberately no fallback for a live upstream that has not published
   a target -- `(0, true)` from `UpstreamSyncStatus`, the window between an
   active-connection switch and the new peer's first admitted trusted header.
-  That state *does* reach this gate: the sync gate bounds the local tip's lag
-  instead of refusing outright on `upstreamActive && upstreamTip == 0`, so a
-  node at tip passes it and forges, and the header it produces
-  is what ends the window. What keeps this bound quiet there is its own
+  That state *does* reach this gate: the sync gate bounds the local tip's lag by
+  the forecast horizon instead of refusing outright on
+  `upstreamActive && upstreamTip == 0`, so a node at tip passes it and forges,
+  and the header it produces is what ends the window. What keeps this bound quiet there is its own
   `upstreamTarget > newestKnown` term, which a zero target cannot satisfy.
   Filling the zero from another source would turn absent target evidence into
   a synthetic network position and can recreate the all-producer wedge: no
