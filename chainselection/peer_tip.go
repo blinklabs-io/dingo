@@ -56,9 +56,12 @@ type PeerChainTip struct {
 	// the peer is not at the limit, so it must not enter the eagerness
 	// standoff. Guarded by the selector mutex.
 	catchUpPaused int
-	VRFOutput     []byte // VRF output from tip block for tie-breaking
-	PraosView     PraosTiebreakerView
-	LastUpdated   time.Time
+	// jumpRecord marks a ChainSync Jumping record. A jumper sends no headers
+	// by design, so its age says nothing about whether it is still there.
+	jumpRecord  bool
+	VRFOutput   []byte // VRF output from tip block for tie-breaking
+	PraosView   PraosTiebreakerView
+	LastUpdated time.Time
 	// observedSlots is the recent slot-window frontier used for Genesis
 	// density. observedPoints is the entry-bounded hash frontier used for
 	// corroboration and GDD; it may retain older sparse points so a common

@@ -665,6 +665,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncHasBestPeer:                 n.chainsyncHasBestPeer,
 		ChainsyncApplyEligible:               n.chainsyncApplyEligible,
 		ChainsyncAwaitEagerness:              n.chainsyncAwaitEagerness,
+		ChainsyncJumping:                     n.chainsyncJumpingConfig(),
 		ChainsyncAwaitCatchUpBand:            n.chainsyncAwaitCatchUpBand,
 		ChainsyncHeaderVerificationSettled:   n.chainsyncHeaderVerificationSettled,
 		ChainsyncAwaitCorroboration:          n.chainsyncAwaitCorroboration,
@@ -690,6 +691,79 @@ func (n *Node) newOuroborosConfig(
 		// Production bound on peer TxSubmission work. The ouroboros package
 		// leaves the limiter off at zero, so the node must set it.
 		MaxTxSubmissionsPerSecond: defaultMaxTxSubmissionsPerSecond,
+	}
+}
+
+// chainsyncJumpingConfig connects ChainSync Jumping to the chain selector.
+// It is off when the operator disables it.
+func (n *Node) chainsyncJumpingConfig() ouroborosPkg.ChainsyncJumpingConfig {
+	if !n.config.genesisChainSyncJumping {
+		return ouroborosPkg.ChainsyncJumpingConfig{}
+	}
+	return ouroborosPkg.ChainsyncJumpingConfig{
+		Enabled: true,
+		Active: func() bool {
+			if n.chainSelector == nil {
+				return false
+			}
+			active, _ := n.chainSelector.GenesisSelectionState()
+			return active
+		},
+		PeerIdentity: n.peerCorroborationIdentityByConnId,
+		BestPeer: func() *ouroboros.ConnectionId {
+			if n.chainSelector == nil {
+				return nil
+			}
+			return n.chainSelector.GetBestPeer()
+		},
+		DynamoFragment: func(
+			connId ouroboros.ConnectionId,
+		) ([]ocommon.Point, uint64, bool) {
+			if n.chainSelector == nil {
+				return nil, 0, false
+			}
+			return n.chainSelector.JumpFragment(connId)
+		},
+		RecordAgreement: func(
+			jumper ouroboros.ConnectionId,
+			dynamo ouroboros.ConnectionId,
+			point ocommon.Point,
+			jumperTip ochainsync.Tip,
+		) bool {
+			if n.chainSelector == nil {
+				return false
+			}
+			return n.chainSelector.RecordJumpAgreement(
+				jumper,
+				dynamo,
+				point,
+				jumperTip,
+			)
+		},
+		RecordRejection: func(jumper ouroboros.ConnectionId) bool {
+			if n.chainSelector == nil {
+				return false
+			}
+			return n.chainSelector.RecordJumpRejection(jumper)
+		},
+		// Half of k: the selector holds the dynamo k blocks past the
+		// common point, which the jumpers' last agreement bounds.
+		JumpBlocks: func() uint64 {
+			return max(n.shelleySecurityParam()/2, 1)
+		},
+		// Either moves whenever the local chain does: the applied tip, or
+		// the downloaded primary chain ahead of it.
+		LocalProgress: func() uint64 {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return 0
+			}
+			return ls.Tip().Point.Slot + ls.PrimaryChainTipSlot()
+		},
+		Held: func(connId ouroboros.ConnectionId) bool {
+			return n.chainSelector != nil &&
+				n.chainSelector.EagernessPaused(connId)
+		},
 	}
 }
 
@@ -2232,6 +2306,7 @@ func (n *Node) buildChainSelectorConfig(
 		GenesisMode:           genesisMode,
 		GenesisWindowSlots:    genesisWindowSlots,
 		MinCorroboratingPeers: n.config.genesisCorroborationPeers,
+		ChainSyncJumping:      n.config.genesisChainSyncJumping,
 		GenesisStateMachine:   n.config.genesisSelectionEligible(),
 		SlotTime:              n.selectorSlotTime,
 		LocalTipPraosView:     n.selectorLocalTipPraosView,

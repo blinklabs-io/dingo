@@ -606,7 +606,11 @@ func (s *Store) HasDeferredIndexesPending() (bool, error) {
 // deferredIndexCreateSQL builds the CREATE INDEX for a manifest or retained
 // entry, keeping a partial entry partial on the engines that support it.
 func deferredIndexCreateSQL(d Dialect, index deferred.Index) string {
-	statement := d.CreateIndexSQL(index.Name, index.Table, index.Columns)
+	columns := index.Columns
+	if d.Name() == "mysql" && len(index.MySQLColumns) > 0 {
+		columns = index.MySQLColumns
+	}
+	statement := d.CreateIndexSQL(index.Name, index.Table, columns)
 	if index.Where == "" || d.Name() == "mysql" {
 		return statement
 	}
