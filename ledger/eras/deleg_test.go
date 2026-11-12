@@ -598,3 +598,51 @@ func TestValidateTxShelleyFamily_RejectsUnregisteredDeregistration(
 	var notConserved shelley.ValueNotConservedUtxoError
 	assert.ErrorAs(t, err, &notConserved)
 }
+
+// TestValidateTxAlonzoFamily_Phase2InvalidSkipsDeleg proves a phase-2-invalid
+// Alonzo or Babbage transaction is not rejected by a DELEG predicate: the
+// reference applies only its collateral and never runs DELEGS for it.
+func TestValidateTxAlonzoFamily_Phase2InvalidSkipsDeleg(t *testing.T) {
+	t.Parallel()
+	certs := []lcommon.CertificateWrapper{{
+		Type:        uint(lcommon.CertificateTypeStakeDeregistration),
+		Certificate: stakeDereg(mirCredential(0x71)),
+	}}
+	cases := []struct {
+		name     string
+		validate func(valid bool) error
+	}{
+		{"Alonzo", func(valid bool) error {
+			pp := alonzo.AlonzoProtocolParameters{
+				KeyDeposit:    2_000_000,
+				ProtocolMajor: lcommon.ProtocolVersionAlonzo,
+			}
+			tx := &alonzo.AlonzoTransaction{
+				TxIsValid: valid,
+				Body:      alonzo.AlonzoTransactionBody{TxCertificates: certs},
+			}
+			return ValidateTxAlonzo(tx, 100, newMockLedgerState(), &pp)
+		}},
+		{"Babbage", func(valid bool) error {
+			pp := babbage.BabbageProtocolParameters{
+				KeyDeposit:    2_000_000,
+				ProtocolMajor: lcommon.ProtocolVersionBabbage,
+			}
+			tx := &babbage.BabbageTransaction{
+				TxIsValid: valid,
+				Body: babbage.BabbageTransactionBody{
+					TxCertificates: certs,
+				},
+			}
+			return ValidateTxBabbage(tx, 100, newMockLedgerState(), &pp)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var notRegistered shelley.StakeKeyNotRegisteredError
+			require.ErrorAs(t, tc.validate(true), &notRegistered)
+			require.NotErrorAs(t, tc.validate(false), &notRegistered)
+		})
+	}
+}
