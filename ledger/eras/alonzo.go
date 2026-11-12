@@ -195,9 +195,6 @@ func ValidateTxAlonzo(
 			)
 		}
 	}
-	if err := validateShelleyDelegCerts(tx, slot, ls, pp); err != nil {
-		errs = append(errs, err)
-	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

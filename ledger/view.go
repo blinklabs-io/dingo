@@ -353,93 +353,6 @@ func (lv *LedgerView) Phase2ResultCache() *eras.Phase2ResultCache {
 
 var _ eras.Phase2ResultCacheProvider = (*LedgerView)(nil)
 
-// MIRDelegState returns the move instantaneous rewards DELEG state that a
-// certificate at slot is checked against: the chain account pots, the
-// distributions and pot transfers committed this epoch at or before slot, and
-// the epoch's too-late cutoff. additive selects how repeated distributions to
-// one credential fold, per eras.MIRDelegState.Pending.
-//
-// Every transaction's certificates are written to the database immediately
-// after that transaction validates (see ledgerProcessBlock), before the next
-// transaction in the same block validates, so this already reflects every
-// prior transaction's MIR certificates this epoch, same block or earlier.
-// Certificates within the transaction being validated are folded in memory by
-// the eras package as it walks the certificate list.
-//
-// The epoch start slot comes from lv.epochStartSlot, pinned from the same
-// snapshot pp was captured from (see its field doc comment), never a fresh
-// read of LedgerState.currentEpoch, which a concurrent writer could advance
-// mid-validation.
-func (lv *LedgerView) MIRDelegState(
-	slot uint64,
-	additive bool,
-) (eras.MIRDelegState, error) {
-	ret := eras.MIRDelegState{
-		DeltaReserves: new(big.Int),
-		DeltaTreasury: new(big.Int),
-		Pending:       make(map[eras.MIRCredentialKey]*big.Int),
-	}
-	cutoff, err := lv.ls.mirCertificateCutoff(slot)
-	if err != nil {
-		return ret, err
-	}
-	ret.Cutoff = cutoff
-	ret.Treasury, ret.Reserves, err = lv.ls.readNetworkState(lv.txn)
-	if err != nil {
-		return ret, err
-	}
-	epochStartSlot := lv.epochStartSlot
-	if slot < epochStartSlot {
-		return ret, nil
-	}
-	effects, err := lv.ls.db.GetMIRCertsInSlotRange(
-		lv.EvaluationContext(),
-		epochStartSlot, slot+1, lv.txn,
-	)
-	if err != nil {
-		return ret, lv.storageFault("get MIR certs in slot range: %w", err)
-	}
-	for _, effect := range effects {
-		if effect.OtherPot > 0 {
-			amount := new(big.Int).SetUint64(effect.OtherPot)
-			source, target := ret.DeltaReserves, ret.DeltaTreasury
-			if effect.Pot == mirPotTreasury {
-				source, target = target, source
-			}
-			source.Sub(source, amount)
-			target.Add(target, amount)
-			continue
-		}
-		for _, reward := range effect.Rewards {
-			if reward.Amount == nil {
-				continue
-			}
-			credential, err := lcommon.NewBlake2b224Checked(
-				reward.Credential,
-			)
-			if err != nil {
-				return ret, fmt.Errorf("MIR reward credential: %w", err)
-			}
-			key := eras.MIRCredentialKey{
-				Tag:        reward.CredentialTag,
-				Credential: credential,
-				Pot:        effect.Pot,
-			}
-			if existing, ok := ret.Pending[key]; ok && additive {
-				ret.Pending[key] = new(big.Int).Add(existing, reward.Amount)
-			} else {
-				ret.Pending[key] = new(big.Int).Set(reward.Amount)
-			}
-		}
-	}
-	return ret, nil
-}
-
-// var _ eras.MIRDelegStateProvider = (*LedgerView)(nil) makes any future
-// drift in the MIRDelegStateProvider method signature a compile error instead
-// of a silent runtime no-op for every MIR DELEG predicate that reads it.
-var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
-
 // mirPendingState is the move instantaneous rewards state the stored
 // certificates of the current epoch have accumulated.
 type mirPendingState struct {
@@ -536,20 +449,24 @@ func (lv *LedgerView) mirPendingState() (*mirPendingState, error) {
 // credential adds to the pending amount (from Alonzo, Map.unionWith (<>))
 // rather than replacing it (before, Map.union). The protocol parameters the
 // view was pinned with decide it; a view without them falls back to the era
-// of the current epoch, the same gate the epoch boundary applies, and then to
-// the current behavior, which is additive.
-func (lv *LedgerView) mirRewardsAdditive() bool {
+// of the epoch the view was pinned to, the same gate the epoch boundary
+// applies. A view with neither fails closed: folding the wrong way accepts or
+// rejects certificates the reference does not, so no default is assumed.
+func (lv *LedgerView) mirRewardsAdditive() (bool, error) {
 	if versioned, ok := lv.committeePParams.(interface {
 		ProtocolMajorVersion() uint
 	}); ok {
-		return lcommon.MirTransferAllowed(versioned.ProtocolMajorVersion())
+		return lcommon.MirTransferAllowed(versioned.ProtocolMajorVersion()), nil
 	}
 	if lv.ls != nil {
 		if epoch, err := lv.ls.epochForSlot(lv.epochStartSlot); err == nil {
-			return epoch.EraId >= alonzo.EraIdAlonzo
+			return epoch.EraId >= alonzo.EraIdAlonzo, nil
 		}
 	}
-	return true
+	return false, errors.New(
+		"MIR rewards fold is unknown: the view has no pinned protocol " +
+			"parameters or epoch era",
+	)
 }
 
 // loadMIRPending reads the MIR certificates stored in the current epoch once
@@ -566,7 +483,10 @@ func (lv *LedgerView) loadMIRPending() (*mirPendingState, error) {
 	if err != nil {
 		return nil, lv.storageFault("get MIR certs in slot range: %w", err)
 	}
-	additive := lv.mirRewardsAdditive()
+	additive, err := lv.mirRewardsAdditive()
+	if err != nil {
+		return nil, err
+	}
 	state := &mirPendingState{
 		credits: make(map[mirPendingKey]*big.Int),
 		totals:  [2]*big.Int{new(big.Int), new(big.Int)},
@@ -589,6 +509,11 @@ func (lv *LedgerView) loadMIRPending() (*mirPendingState, error) {
 		for _, reward := range effect.Rewards {
 			if reward.Amount == nil {
 				continue
+			}
+			if _, err := lcommon.NewBlake2b224Checked(
+				reward.Credential,
+			); err != nil {
+				return nil, fmt.Errorf("MIR reward credential: %w", err)
 			}
 			key := mirPendingKey{
 				pot:        effect.Pot,
@@ -623,11 +548,6 @@ func (lv *LedgerView) loadMIRPending() (*mirPendingState, error) {
 // assertion and, without it, rejects a negative delta an earlier transaction
 // covers, so signature drift must fail to build.
 var _ lcommon.PendingInstantaneousRewardsState = (*LedgerView)(nil)
-
-// The genesis key delegation predicates discover this capability with a
-// runtime type assertion and skip when it misses, so signature drift would
-// silently disable them rather than fail to build.
-var _ eras.GenesisDelegStateProvider = (*LedgerView)(nil)
 
 // The Conway committee certificate and voter rules discover this capability
 // with a runtime type assertion and fail closed when it misses, so signature
@@ -1171,13 +1091,6 @@ func (lv *LedgerView) GenesisDelegateKeyHashes(
 	return lv.ls.genesisDelegateKeyHashes(slot, lv.metadataTxn())
 }
 
-// GenesisDelegState implements eras.GenesisDelegStateProvider.
-func (lv *LedgerView) GenesisDelegState(
-	slot uint64,
-) (eras.GenesisDelegState, error) {
-	return lv.ls.genesisDelegState(slot, lv.metadataTxn())
-}
-
 func (lv *LedgerView) GenesisDelegateForGenesisKey(
 	genesisKeyHash lcommon.Blake2b224,
 	slot uint64,
@@ -1199,7 +1112,7 @@ var _ lcommon.GenesisDelegationRegistryState = (*LedgerView)(nil)
 func (lv *LedgerView) CurrentGenesisDelegations(
 	slot uint64,
 ) ([]lcommon.GenesisDelegation, error) {
-	state, err := lv.GenesisDelegState(slot)
+	state, err := lv.ls.genesisDelegState(slot, lv.metadataTxn())
 	if err != nil {
 		return nil, err
 	}
@@ -1224,15 +1137,15 @@ func (lv *LedgerView) CurrentGenesisDelegations(
 func (lv *LedgerView) FutureGenesisDelegations(
 	slot uint64,
 ) ([]lcommon.GenesisDelegation, error) {
-	state, err := lv.GenesisDelegState(slot)
+	state, err := lv.ls.genesisDelegState(slot, lv.metadataTxn())
 	if err != nil {
 		return nil, err
 	}
-	keys := make([]eras.FutureGenesisDelegKey, 0, len(state.Future))
+	keys := make([]futureGenesisDelegKey, 0, len(state.Future))
 	for key := range state.Future {
 		keys = append(keys, key)
 	}
-	slices.SortFunc(keys, func(a, b eras.FutureGenesisDelegKey) int {
+	slices.SortFunc(keys, func(a, b futureGenesisDelegKey) int {
 		if c := cmp.Compare(a.Slot, b.Slot); c != 0 {
 			return c
 		}

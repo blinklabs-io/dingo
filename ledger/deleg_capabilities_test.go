@@ -18,11 +18,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
@@ -191,12 +193,10 @@ func TestLedgerViewStabilityWindowState(t *testing.T) {
 	_, err = lv.NextEpochFirstSlot(453_600)
 	require.Error(t, err, "a slot past the known epochs is not guessed")
 
-	// The pair reproduces the cutoff the MIR timing check uses.
+	// The MIR timing check rejects a slot at or after this cutoff.
 	next, err := lv.NextEpochFirstSlot(100_000)
 	require.NoError(t, err)
-	cutoff, err := ls.mirCertificateCutoff(100_000)
-	require.NoError(t, err)
-	require.Equal(t, cutoff, next-window)
+	require.Equal(t, uint64(453_600-129_600), next-window)
 }
 
 func TestLedgerViewGenesisDelegationRegistry(t *testing.T) {
@@ -306,6 +306,101 @@ func TestLedgerViewAdaPotsReportReservesAndTreasury(t *testing.T) {
 		require.Equal(t, uint64(5_000), pots.Reserves)
 		require.Equal(t, uint64(1_000), pots.Treasury)
 		require.Equal(t, pots, lv.GetAdaPots())
+		return nil
+	}))
+}
+
+// With 60 pending for a credential in a pot of 100, a further distribution of
+// 90 to it replaces the pending amount before Alonzo (Map.union) and fits the
+// pot, and adds to it from Alonzo (Map.unionWith (<>)) and overdraws it. The
+// view is built by NewView, as production validation builds it, so the era
+// comes from the protocol parameters it pins. The fold of the stored
+// distributions themselves is pinned by TestLedgerViewInstantaneousRewardsTotals:
+// the verdict is the same under either fold because the rule cancels the
+// credential's pending amount against the total.
+func TestMIRRepeatedDistributionFoldsByEraThroughValidation(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		major        uint
+		wantOverdraw bool
+	}{
+		{"Mary replaces", lcommon.ProtocolVersionMary, false},
+		{"Alonzo adds", lcommon.ProtocolVersionAlonzo, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ls, db, gdb := newMIRTestLedger(t)
+			withMIRCutoffEpoch(t, ls, models.Epoch{
+				EpochId: 1, StartSlot: 100, LengthInSlots: 432_000,
+			})
+			pp := &shelley.ShelleyProtocolParameters{ProtocolMajor: tc.major}
+			ls.Lock()
+			ls.currentPParams = pp
+			ls.publishSnapshotsLocked()
+			ls.Unlock()
+			require.NoError(t, db.Metadata().SetNetworkState(0, 100, 100, nil))
+			// 60 is pending for the credential from an earlier transaction.
+			seedMIRDistribution(t, gdb, mirPotReserves, 150,
+				[]models.MoveInstantaneousRewardsReward{
+					{Credential: mirCred28(0x31), Amount: big.NewInt(60)},
+				})
+			cred := mirTestCredential(0, 0x31)
+			cert := &lcommon.MoveInstantaneousRewardsCertificate{
+				Reward: lcommon.MoveInstantaneousRewardsCertificateReward{
+					Source: mirPotReserves,
+					Rewards: map[*lcommon.Credential]*big.Int{
+						&cred: big.NewInt(90),
+					},
+				},
+			}
+			tx := &shelley.ShelleyTransaction{
+				Body: shelley.ShelleyTransactionBody{
+					TxCertificates: []lcommon.CertificateWrapper{{
+						Type: uint(
+							lcommon.CertificateTypeMoveInstantaneousRewards,
+						),
+						Certificate: cert,
+					}},
+				},
+			}
+
+			var err error
+			txn := db.Transaction(context.Background(), false)
+			require.NoError(t, txn.Do(func(txn *database.Txn) error {
+				err = eras.ValidateTxShelley(tx, 200, ls.NewView(txn), pp)
+				return nil
+			}))
+			var overdraw shelley.InsufficientForInstantaneousRewardsError
+			if tc.wantOverdraw {
+				require.ErrorAs(t, err, &overdraw)
+				require.Equal(t, "150", overdraw.Required.String())
+				return
+			}
+			require.False(
+				t,
+				errors.As(err, &overdraw),
+				"replacement fits the pot: %v",
+				err,
+			)
+		})
+	}
+}
+
+// A view with no pinned protocol parameters and no epoch era cannot tell which
+// way to fold, so it refuses to answer.
+func TestLedgerViewMIRFoldFailsClosedWithoutEra(t *testing.T) {
+	t.Parallel()
+	ls, db, _ := newMIRTestLedger(t)
+	txn := db.Transaction(context.Background(), false)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
+		_, err := lv.InstantaneousRewardsTotal(mirPotReserves)
+		require.ErrorContains(t, err, "MIR rewards fold is unknown")
+		_, err = lv.PendingInstantaneousRewards(
+			mirPotReserves, mirTestCredential(0, 1),
+		)
+		require.ErrorContains(t, err, "MIR rewards fold is unknown")
 		return nil
 	}))
 }

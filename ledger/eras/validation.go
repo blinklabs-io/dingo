@@ -975,7 +975,6 @@ func validatePreAlonzoTx(
 	for _, rule := range rules {
 		errs = append(errs, rule.validationFunc(tx, slot, ls, pp))
 	}
-	errs = append(errs, validateShelleyDelegCerts(tx, slot, ls, pp))
 	errs = append(errs, ValidateTxSize(tx, maxTxSize))
 	errs = append(errs, ValidateTxFee(tx, minFeeA, minFeeB, nil, nil))
 	return errors.Join(errs...)
