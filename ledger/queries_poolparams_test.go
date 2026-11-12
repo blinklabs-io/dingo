@@ -539,7 +539,8 @@ func TestQueryProposedProtocolParamsUpdatesPinnedBeforeConway(t *testing.T) {
 
 // TestWireOrderRelays checks the byte order of genesis-declared relay
 // addresses against the ledger's queryStakePoolRelays golden, where 10.0.0.5
-// is 0500000a and 2001:db8::1 is b80d0120 00000000 00000000 01000000.
+// is 0500000a and 2001:db8::1 is b80d0120 00000000 00000000 01000000. The
+// IPv4 swap is applied here; the IPv6 swap happens when the relay is encoded.
 func TestWireOrderRelays(t *testing.T) {
 	t.Parallel()
 
@@ -554,9 +555,15 @@ func TestWireOrderRelays(t *testing.T) {
 	require.Equal(t, "0500000a", hex.EncodeToString(*out[0].Ipv4))
 	require.Equal(
 		t,
-		"b80d012000000000000000000100"+"0000",
+		hex.EncodeToString(v6),
 		hex.EncodeToString(*out[0].Ipv6),
+		"IPv6 stays in network order until the relay is encoded",
 	)
+	port := uint32(3001)
+	out[0].Port = &port
+	encoded, err := out[0].MarshalCBOR()
+	require.NoError(t, err)
+	require.Contains(t, hex.EncodeToString(encoded), "50b80d0120000000000000000001000000")
 	require.Equal(t, &host, out[1].Hostname)
 	require.Equal(t, "10.0.0.5", in[0].Ipv4.String(), "input is not modified")
 }

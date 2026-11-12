@@ -74,19 +74,17 @@ func (p stakePoolParams) MarshalCBOR() ([]byte, error) {
 	return cbor.Encode(fields)
 }
 
-// wireOrderRelays returns relays with their IP addresses in the ledger's
+// wireOrderRelays returns relays with their IPv4 addresses in the ledger's
 // wire order: each 32-bit word of an address is little-endian, so an IPv4
-// address is byte-reversed and an IPv6 address is reversed within each
-// four-byte group. Relays read back from chain data already hold wire
-// order; only addresses parsed from text, as in genesis, need this.
+// address is byte-reversed. IPv6 addresses stay in network order because
+// encoding a PoolRelay applies the word swap itself. Relays read back from
+// chain data already hold wire order; only addresses parsed from text, as in
+// genesis, need this.
 func wireOrderRelays(relays []lcommon.PoolRelay) []lcommon.PoolRelay {
 	out := slices.Clone(relays)
 	for i := range out {
 		if out[i].Ipv4 != nil {
 			out[i].Ipv4 = reverseIPWords(*out[i].Ipv4)
-		}
-		if out[i].Ipv6 != nil {
-			out[i].Ipv6 = reverseIPWords(*out[i].Ipv6)
 		}
 	}
 	return out
