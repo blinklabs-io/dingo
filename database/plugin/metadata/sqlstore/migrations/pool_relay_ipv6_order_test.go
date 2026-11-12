@@ -35,7 +35,7 @@ import (
 func TestPoolRelayIPv6NetworkOrderMigration(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	db, runTo := migratedPrefixDB(t, 59)
+	db, runTo := migratedPrefixDB(t, 60)
 	standard := net.ParseIP("2001:db8::1")
 	wire := lcommon.PoolRelayIpv6WireOrder(standard)
 	require.NotEqual(t, []byte(standard), []byte(wire))
@@ -99,7 +99,7 @@ SELECT ipv4, ipv6 FROM pool_registration_relay WHERE id = ?`, id,
 	var dirty bool
 	require.NoError(
 		t,
-		db.QueryRowContext(ctx, `SELECT dirty FROM schema_migrations WHERE version = 60`).
+		db.QueryRowContext(ctx, `SELECT dirty FROM schema_migrations WHERE version = 61`).
 			Scan(&dirty),
 	)
 	require.False(t, dirty)
@@ -115,7 +115,7 @@ func TestPoolRelayIPv6NetworkOrderBackfillResumesAfterFailedBatch(
 	t.Parallel()
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	migrations.SeedMigratedPrefix(t, databasePath, 59)
+	migrations.SeedMigratedPrefix(t, databasePath, 60)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -144,7 +144,7 @@ VALUES (?, 2, 1, ?, 3001)`, chainRelays+1, []byte(standard))
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	index := slices.IndexFunc(registry, func(m migrations.Migration) bool {
-		return m.Version == 60
+		return m.Version == 61
 	})
 	require.GreaterOrEqual(t, index, 0)
 	registry[index].BatchSize = 1
@@ -180,7 +180,7 @@ SELECT ipv6 FROM pool_registration_relay WHERE id = ?`, id).Scan(&got))
 	var cursor string
 	var dirty bool
 	require.NoError(t, db.QueryRowContext(ctx, `
-SELECT cursor, dirty FROM schema_migrations WHERE version = 60`,
+SELECT cursor, dirty FROM schema_migrations WHERE version = 61`,
 	).Scan(&cursor, &dirty))
 	require.Equal(t, "2", cursor)
 	require.True(t, dirty)
@@ -198,6 +198,6 @@ SELECT cursor, dirty FROM schema_migrations WHERE version = 60`,
 		require.Equal(t, []byte(standard), read(id), "relay %d", id)
 	}
 	require.NoError(t, db.QueryRowContext(ctx, `
-SELECT dirty FROM schema_migrations WHERE version = 60`).Scan(&dirty))
+SELECT dirty FROM schema_migrations WHERE version = 61`).Scan(&dirty))
 	require.False(t, dirty)
 }

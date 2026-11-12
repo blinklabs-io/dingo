@@ -472,6 +472,26 @@ func TestBlockApplyRejectsRolledBackCandidate(t *testing.T) {
 	require.False(t, operationCalled)
 }
 
+func TestBlockApplyRejectsDurablyRolledBackTipBeforeCacheReload(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
+
+	operationCalled := false
+	err := fixture.ls.submitBlockApplyDBTxn(
+		context.Background(),
+		fixture.currentTip,
+		fixture.currentTip.Point,
+		func(*database.Txn) error {
+			operationCalled = true
+			return nil
+		},
+	)
+	require.ErrorIs(t, err, errStaleChainIterator)
+	require.False(t, operationCalled)
+}
+
 // TestRollbackAndForwardTxEventsStayOrderedAcrossRepeatedCycles guards the
 // mechanism rather than one lucky interleaving. Reintroducing a detached
 // goroutine for the rollback emission can win a single race by chance; it

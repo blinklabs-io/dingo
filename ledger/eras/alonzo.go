@@ -111,13 +111,9 @@ func HardForkAlonzo(
 	if err := ret.UpdateFromGenesis(alonzoGenesis); err != nil {
 		return nil, err
 	}
-	// Bump ProtocolMajor to Alonzo's range when entering the era.
-	// gouroboros's UpgradePParams carries the prior major forward
-	// unchanged; schedule-driven transitions would otherwise reach
-	// Alonzo with major still at Mary's value.
-	if ret.ProtocolMajor < alonzo.MinProtocolVersionAlonzo {
-		ret.ProtocolMajor = alonzo.MinProtocolVersionAlonzo
-	}
+	// The protocol version is carried over unchanged, as the reference
+	// ledger's upgradePParams does: a ledger translated before the pending major is
+	// enacted keeps the old major.
 	return &ret, nil
 }
 

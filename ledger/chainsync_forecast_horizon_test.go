@@ -2134,6 +2134,49 @@ func TestAwaitObserverHeaderHorizonHonorsCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+// A header queued on the local chain moves the header tip without publishing a
+// snapshot, and an observer it brings within k blocks stops waiting.
+func TestAwaitObserverHeaderHorizonWakesWhenHeaderTipAdvances(t *testing.T) {
+	t.Parallel()
+	ls, primary, blocks, _, _ := newObserverForkTestLedger(t)
+	k := ls.shelleySecurityParam()
+	require.NotZero(t, k)
+	tip := primary.HeaderTip()
+	header := mockHeader{
+		hash: lcommon.Blake2b256Hash(
+			fmt.Appendf(nil, "observer %d", tip.BlockNumber+k+1),
+		),
+		prevHash:    blocks[1].Hash(),
+		blockNumber: tip.BlockNumber + k + 1,
+		slot:        302_500,
+	}
+	observed := ChainsyncEvent{
+		BlockHeader: header,
+		Point:       ocommon.NewPoint(header.slot, header.Hash().Bytes()),
+	}
+	results := make(chan error, 1)
+	go func() {
+		results <- ls.AwaitObserverHeaderHorizon(t.Context(), observed)
+	}()
+	testutil.RequireNoReceive(
+		t, results, 100*time.Millisecond,
+		"a header more than k blocks above the header tip must wait",
+	)
+	next, err := fixtures.GenerateConwayChain(
+		tip.BlockNumber+1,
+		blocks[1].Hash(),
+		tip.Point.Slot+1_000,
+		1_000,
+		1,
+	)
+	require.NoError(t, err)
+	require.NoError(t, primary.AddBlockHeader(t.Context(), next[0].Header()))
+	require.NoError(t, testutil.RequireReceive(
+		t, results, 5*time.Second,
+		"an observer brought within k of the header tip stayed parked",
+	))
+}
+
 // newObserverForkTestLedger returns a ledger whose tip lies above blocks[0] of
 // its primary chain, and an observer header at slot 500_000 built on
 // blocks[0]: a fork whose intersection's forecast does not cover the header,
@@ -2384,7 +2427,7 @@ func TestAwaitObserverHeaderHorizonHoldsUnresolvedAncestry(t *testing.T) {
 func TestAwaitObserverHeaderHorizonReleasesExhaustedAncestry(t *testing.T) {
 	t.Parallel()
 
-	ls, _, _, _, _ := newObserverForkTestLedger(t)
+	ls, primary, _, _, _ := newObserverForkTestLedger(t)
 	chainHash := func(i int) lcommon.Blake2b256 {
 		return lcommon.Blake2b256Hash([]byte(fmt.Sprintf("read-ahead %d", i)))
 	}
@@ -2414,7 +2457,7 @@ func TestAwaitObserverHeaderHorizonReleasesExhaustedAncestry(t *testing.T) {
 	header := mockHeader{
 		hash:        lcommon.Blake2b256Hash([]byte("read-ahead tip")),
 		prevHash:    chainHash(0),
-		blockNumber: 1001,
+		blockNumber: primary.HeaderTip().BlockNumber + 1,
 		slot:        320_000,
 	}
 	e := ChainsyncEvent{
@@ -2645,4 +2688,50 @@ func TestAwaitChainsyncHeaderAdmissionCancelledDuringRecheck(t *testing.T) {
 			require.ErrorIs(t, err, context.Canceled)
 		})
 	}
+}
+
+// An observer header the ledger can forecast is still held while it lies more
+// than k blocks above the header tip.
+func TestAwaitObserverHeaderHorizonHoldsReadAheadPastHeaderTip(t *testing.T) {
+	t.Parallel()
+	ls, primary, blocks, _, _ := newObserverForkTestLedger(t)
+	k := ls.shelleySecurityParam()
+	require.NotZero(t, k)
+	headerTip := primary.HeaderTip().BlockNumber
+	event := func(blockNumber uint64) ChainsyncEvent {
+		header := mockHeader{
+			hash: lcommon.Blake2b256Hash(
+				fmt.Appendf(nil, "observer %d", blockNumber),
+			),
+			prevHash:    blocks[1].Hash(),
+			blockNumber: blockNumber,
+			slot:        302_500,
+		}
+		return ChainsyncEvent{
+			BlockHeader: header,
+			Point:       ocommon.NewPoint(header.slot, header.Hash().Bytes()),
+		}
+	}
+	require.NoError(t, ls.AwaitObserverHeaderHorizon(
+		t.Context(), event(headerTip+k),
+	), "a header k blocks above the header tip is not held")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	results := make(chan error, 1)
+	go func() {
+		results <- ls.AwaitObserverHeaderHorizon(ctx, event(headerTip+k+1))
+	}()
+	testutil.RequireNoReceive(
+		t, results, 100*time.Millisecond,
+		"a header more than k blocks above the header tip must wait",
+	)
+	ls.notifySnapshotPublished()
+	testutil.RequireNoReceive(
+		t, results, 100*time.Millisecond,
+		"a publication that leaves the header tip behind must keep it waiting",
+	)
+	cancel()
+	require.ErrorIs(t, testutil.RequireReceive(
+		t, results, testutil.AsyncWait, "cancellation must end the wait",
+	), context.Canceled)
 }

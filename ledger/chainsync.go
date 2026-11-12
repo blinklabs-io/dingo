@@ -5578,6 +5578,12 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 	}()
 	for {
 		published := ls.snapshotPublishedChan()
+		// The read-ahead cap is measured from the header tip, which ingress
+		// headers move without publishing a snapshot.
+		var headerTipChanged <-chan struct{}
+		if ls.chain != nil {
+			headerTipChanged = ls.chain.HeaderTipChanged()
+		}
 		// An unsettled walk releases the header, as the wait's bound would:
 		// an observer only streams, and holding it on an unknown anchor
 		// could park it until that bound.
@@ -5585,19 +5591,24 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 		// A header whose ancestry reaches no local block is held as well: its
 		// peer's chain leaves the local chain at an unknown point, so the
 		// ledger tip's horizon does not show it forecastable.
+		ahead := ls.observerAheadOfHeaderTip(e)
 		if beyond, _ := ls.headerBeyondForecastHorizonFrom(
 			ctx, e, &anchor,
-		); !beyond && !anchor.disconnected {
+		); !beyond && !anchor.disconnected && !ahead {
 			return ctx.Err()
 		}
 		if !parked {
 			parked = true
+			if ahead {
+				ls.metrics.incObserverReadAheadPark()
+			}
 			ls.metrics.observerHorizonParkStart(
 				ls.observerHorizonOvershoot(e, &anchor),
 			)
 		}
 		select {
 		case <-published:
+		case <-headerTipChanged:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -5932,6 +5943,27 @@ func (ls *LedgerState) holdsPointSettled(
 		}
 	}
 	return false, false
+}
+
+// observerAheadOfHeaderTip reports whether e's header is more than the
+// security parameter's blocks above the header tip. An observer is read only
+// to corroborate the ingress candidate, which extends the header tip, and a
+// witness within k blocks of it supports its suffix. Reading on to the
+// forecast horizon fetches about 3k headers per observer that the observed
+// header history cannot retain once several observers share its budget, so
+// they are evicted unused, and every re-intersection or promotion from the
+// local tip fetches them again.
+func (ls *LedgerState) observerAheadOfHeaderTip(e ChainsyncEvent) bool {
+	if ls.chain == nil || e.BlockHeader == nil {
+		return false
+	}
+	k := ls.shelleySecurityParam()
+	if k == 0 {
+		return false
+	}
+	blockNumber := e.BlockHeader.BlockNumber()
+	headerTip := ls.chain.HeaderTip().BlockNumber
+	return blockNumber > headerTip && blockNumber-headerTip > k
 }
 
 // observerHorizonOvershoot returns how many slots e's header lies past the
@@ -9579,6 +9611,35 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	)
 }
 
+func (ls *LedgerState) processEpochRolloverForTargetWithClassicPParamsContext(
+	ctx context.Context,
+	txn *database.Txn,
+	currentEpoch models.Epoch,
+	targetEpoch models.Epoch,
+	transitionEpoch models.Epoch,
+	ledgerEpoch uint64,
+	currentEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	classicPParamsApplied bool,
+	plutusV2CostModelWritten bool,
+	transitionHardForkMajors []uint,
+) (*EpochRolloverResult, error) {
+	return ls.processEpochRolloverForTargetWithOptions(
+		ctx,
+		txn,
+		currentEpoch,
+		targetEpoch,
+		transitionEpoch,
+		ledgerEpoch,
+		currentEra,
+		currentPParams,
+		classicPParamsApplied,
+		plutusV2CostModelWritten,
+		transitionHardForkMajors,
+		false,
+	)
+}
+
 // processEpochRolloverWithOptions is the epoch rollover. validationOnly marks
 // a rollover that only derives the next epoch's state inside a transaction the
 // caller rolls back, to validate against it. It must leave no trace outside
@@ -9591,6 +9652,47 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 	ctx context.Context,
 	txn *database.Txn,
 	currentEpoch models.Epoch,
+	currentEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	classicPParamsApplied bool,
+	plutusV2CostModelWritten bool,
+	transitionHardForkMajors []uint,
+	validationOnly bool,
+) (*EpochRolloverResult, error) {
+	targetEpoch, err := epochAtSlot(
+		currentEpoch,
+		currentEpoch.StartSlot+uint64(currentEpoch.LengthInSlots),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return ls.processEpochRolloverForTargetWithOptions(
+		ctx,
+		txn,
+		currentEpoch,
+		targetEpoch,
+		targetEpoch,
+		currentEpoch.EpochId,
+		currentEra,
+		currentPParams,
+		classicPParamsApplied,
+		plutusV2CostModelWritten,
+		transitionHardForkMajors,
+		validationOnly,
+	)
+}
+
+// processEpochRolloverForTargetWithOptions rolls currentEpoch forward to
+// targetEpoch, which may lie beyond the next epoch for a sparse empty-epoch
+// jump. validationOnly has the meaning documented on
+// processEpochRolloverWithOptions.
+func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
+	ctx context.Context,
+	txn *database.Txn,
+	currentEpoch models.Epoch,
+	targetEpoch models.Epoch,
+	transitionEpoch models.Epoch,
+	ledgerEpoch uint64,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
 	classicPParamsApplied bool,
@@ -9623,9 +9725,7 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 			"process epoch rollover: CardanoNodeConfig is nil",
 		)
 	}
-	epochStartSlot := currentEpoch.StartSlot + uint64(
-		currentEpoch.LengthInSlots,
-	)
+	epochStartSlot := targetEpoch.StartSlot
 	// Era update functions mutate their concrete protocol-parameter pointer.
 	// Give the transaction an independently owned value so a failed or
 	// in-flight rollover cannot modify parameters retained by an older snapshot.
@@ -9641,6 +9741,7 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 		NewCurrentEra:             currentEra,
 		NewCurrentPParams:         ownedPParams,
 		RealV2CostModelObserved:   plutusV2CostModelWritten,
+		newLedgerEpoch:            ledgerEpoch,
 	}
 
 	// Create initial epoch
@@ -9685,6 +9786,7 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 		result.NewEpochCache = epochs
 		if len(epochs) > 0 {
 			result.NewCurrentEpoch = epochs[len(epochs)-1]
+			result.newLedgerEpoch = result.NewCurrentEpoch.EpochId
 			eraDesc, ok := ls.eraById(result.NewCurrentEpoch.EraId)
 			if !ok || eraDesc == nil {
 				return nil, fmt.Errorf(
@@ -9700,6 +9802,100 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 			"epoch", fmt.Sprintf("%+v", result.NewCurrentEpoch),
 			"component", "ledger",
 		)
+		return result, nil
+	}
+
+	byronTranslated := currentEpoch.EraId == eras.ByronEraDesc.Id &&
+		currentEra.Id != eras.ByronEraDesc.Id
+	if byronTranslated {
+		if err := timePhase(
+			transitionEpoch.EpochId, "byron_translation", func() error {
+				return ls.applyByronTranslationReserves(
+					txn,
+					transitionEpoch.EpochId,
+					transitionEpoch.StartSlot,
+				)
+			},
+		); err != nil {
+			return nil, fmt.Errorf(
+				"apply Byron-to-Shelley reserves: %w", err,
+			)
+		}
+		result.newLedgerEpoch = transitionEpoch.EpochId
+		if targetEpoch.EpochId > transitionEpoch.EpochId {
+			transitionEpoch.Nonce = cloneNonce(currentEpoch.Nonce)
+			transitionEpoch.EvolvingNonce = cloneNonce(currentEpoch.EvolvingNonce)
+			transitionEpoch.CandidateNonce = cloneNonce(currentEpoch.CandidateNonce)
+			transitionEpoch.LastEpochBlockNonce = cloneNonce(
+				currentEpoch.LastEpochBlockNonce,
+			)
+			currentEpoch = transitionEpoch
+			ledgerEpoch = transitionEpoch.EpochId
+		}
+	}
+
+	// cardano-ledger's NEWEPOCH rule runs its boundary effects only when the
+	// signalled epoch is exactly the successor of the ledger state's epoch
+	// label. A later signal leaves that label and all EPOCH effects unchanged.
+	// Consensus still ticks once to the target epoch, so persist one sparse
+	// target row with nonce state computed from the last applied epoch.
+	if targetEpoch.EpochId != ledgerEpoch+1 {
+		epochSlotLength, epochLength, err := currentEra.EpochLengthFunc(
+			ls.config.CardanoNodeConfig,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("calculate jumped epoch length: %w", err)
+		}
+		nonce, evolvingNonce, candidateNonce, labNonce, err := ls.calculateEpochNonce(
+			ctx,
+			txn,
+			epochStartSlot,
+			currentEra,
+			currentEpoch,
+			ownedPParams,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("calculate jumped epoch nonce: %w", err)
+		}
+		if err := ls.db.SetEpoch(
+			epochStartSlot,
+			targetEpoch.EpochId,
+			nonce,
+			evolvingNonce,
+			candidateNonce,
+			labNonce,
+			currentEra.Id,
+			epochSlotLength,
+			epochLength,
+			txn,
+		); err != nil {
+			return nil, fmt.Errorf("set jumped epoch: %w", err)
+		}
+		if byronTranslated && targetEpoch.EpochId > transitionEpoch.EpochId+1 {
+			if err := ls.db.SetEpoch(
+				transitionEpoch.StartSlot,
+				transitionEpoch.EpochId,
+				nonce,
+				evolvingNonce,
+				candidateNonce,
+				labNonce,
+				currentEra.Id,
+				transitionEpoch.SlotLength,
+				transitionEpoch.LengthInSlots,
+				txn,
+			); err != nil {
+				return nil, fmt.Errorf("set translated epoch: %w", err)
+			}
+		}
+		epochs, err := ls.db.GetEpochs(txn)
+		if err != nil {
+			return nil, fmt.Errorf("load jumped epochs: %w", err)
+		}
+		result.NewEpochCache = epochs
+		result.NewCurrentEpoch = epochs[len(epochs)-1]
+		result.NewCurrentEra = currentEra
+		result.NewEpochNum = float64(targetEpoch.EpochId)
+		result.SchedulerIntervalMs = epochSlotLength
 		return result, nil
 	}
 	// EPOCH→HARDFORK ordering invariant.
@@ -9765,22 +9961,6 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 	// Steps 7 and 8 must observe the post-enactment major version. Step 9 must
 	// observe the persisted pparams (not just the in-memory ones) because its
 	// body issues SQL within `txn` that may join against `pparams` rows.
-	if currentEpoch.EraId == eras.ByronEraDesc.Id &&
-		currentEra.Id != eras.ByronEraDesc.Id {
-		if err := timePhase(
-			currentEpoch.EpochId+1, "byron_translation", func() error {
-				return ls.applyByronTranslationReserves(
-					txn,
-					currentEpoch.EpochId+1,
-					epochStartSlot,
-				)
-			},
-		); err != nil {
-			return nil, fmt.Errorf(
-				"apply Byron-to-Shelley reserves: %w", err,
-			)
-		}
-	}
 	if err := timePhase(
 		currentEpoch.EpochId+1, "ratify_consume", func() error {
 			return ls.consumePendingRatificationWithOptions(
@@ -9793,6 +9973,12 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 
 	if err := timePhase(
 		currentEpoch.EpochId+1, "reward_apply", func() error {
+			applyUpdate, err := ls.shouldApplyStakeRewardUpdate(
+				txn, currentEpoch,
+			)
+			if err != nil || !applyUpdate {
+				return err
+			}
 			return ls.applyStakeRewards(ctx,
 				txn, currentEpoch.EpochId+1, epochStartSlot,
 				validationOnly,
@@ -10299,6 +10485,7 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 	result.NewEpochCache = epochs
 	if len(epochs) > 0 {
 		result.NewCurrentEpoch = epochs[len(epochs)-1]
+		result.newLedgerEpoch = result.NewCurrentEpoch.EpochId
 		eraDesc, ok := ls.eraById(result.NewCurrentEpoch.EraId)
 		if !ok || eraDesc == nil {
 			return nil, fmt.Errorf(

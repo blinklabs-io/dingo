@@ -130,13 +130,11 @@ func HardForkConway(
 		return nil, err
 	}
 	ret.CostModels = models
-	// Bump ProtocolVersion.Major to Conway's range when entering the
-	// era. gouroboros's UpgradePParams carries the prior major
-	// forward unchanged; schedule-driven transitions would otherwise
-	// reach Conway with major still at Babbage's value.
-	if ret.ProtocolVersion.Major < conway.MinProtocolVersionConway {
-		ret.ProtocolVersion.Major = conway.MinProtocolVersionConway
-	}
+	// The protocol version is carried over unchanged, as
+	// Conway/PParams.hs upgradeConwayPParams does. Raising it here would put
+	// a ledger translated before the pending major is enacted into the
+	// bootstrap phase (Conway/Era.hs hardforkConwayBootstrapPhase, major 9)
+	// that the reference ledger does not enter.
 	return &ret, nil
 }
 

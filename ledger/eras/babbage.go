@@ -145,13 +145,9 @@ func HardForkBabbage(
 	if _, hasV2 := ret.CostModels[1]; !hasV2 {
 		ret.CostModels[1] = DefaultPlutusV2CostModel
 	}
-	// Bump ProtocolMajor to Babbage's range when entering the era.
-	// gouroboros's UpgradePParams carries the prior major forward
-	// unchanged; schedule-driven transitions would otherwise reach
-	// Babbage with major still at Alonzo's value.
-	if ret.ProtocolMajor < babbage.MinProtocolVersionBabbage {
-		ret.ProtocolMajor = babbage.MinProtocolVersionBabbage
-	}
+	// The protocol version is carried over unchanged, as the reference
+	// ledger's upgradePParams does: a ledger translated before the pending major is
+	// enacted keeps the old major.
 	return &ret, nil
 }
 
