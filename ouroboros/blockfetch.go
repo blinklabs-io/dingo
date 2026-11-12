@@ -482,7 +482,40 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		)
 		return nil
 	}
+	appliedTip := o.ledgerState.Tip()
+	tipIter, tipErr := o.ledgerState.GetChainFromPoint(appliedTip.Point, true)
+	if tipErr == nil {
+		tipIter.Cancel()
+	}
+	endApplied := tipErr == nil && blockfetchEndAtOrBeforeAppliedTip(
+		endIter,
+		end,
+		appliedTip.Point,
+	)
 	endIter.Cancel()
+	if !endApplied {
+		o.config.Logger.Debug(
+			"blockfetch: end point is ahead of the applied ledger tip, sending NoBlocks",
+			"connection_id", ctx.ConnectionId.String(),
+			"end_slot", end.Slot,
+			"applied_tip_slot", appliedTip.Point.Slot,
+			"error", tipErr,
+		)
+		chainIter.Cancel()
+		if err := ctx.Server.NoBlocks(); err != nil {
+			return fmt.Errorf(
+				"blockfetch NoBlocks after unapplied end point: %w",
+				err,
+			)
+		}
+		o.blockfetchRecordNoBlocksAndMaybeClose(
+			ctx.ConnectionId,
+			start,
+			"blockfetch: closing stuck peer after repeated unapplied range requests",
+			"blockfetch: peer stuck on unapplied range",
+		)
+		return nil
+	}
 	maxBlocks := maxBlockFetchBlocksForSecurityParam(
 		o.ledgerState.SecurityParam(),
 	)
@@ -567,6 +600,36 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		}
 	}()
 	return nil
+}
+
+// blockfetchEndAtOrBeforeAppliedTip reports whether an end point on the
+// primary chain is at or before the applied tip. Equal-slot points need an
+// iterator-order check because a Byron main block can share its slot and block
+// number with the epoch-boundary block immediately before it.
+func blockfetchEndAtOrBeforeAppliedTip(
+	endIter blockfetchRangeIterator,
+	end ocommon.Point,
+	appliedTip ocommon.Point,
+) bool {
+	if len(appliedTip.Hash) == 0 {
+		return false
+	}
+	if end.Slot < appliedTip.Slot {
+		return true
+	}
+	if end.Slot > appliedTip.Slot {
+		return false
+	}
+	for {
+		next, err := endIter.Next(false)
+		if err != nil || next == nil || next.Rollback ||
+			next.Point.Slot != appliedTip.Slot {
+			return false
+		}
+		if bytes.Equal(next.Point.Hash, appliedTip.Hash) {
+			return true
+		}
+	}
 }
 
 // blockfetchRejectSaturated answers a range request that exceeded the

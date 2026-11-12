@@ -797,8 +797,9 @@ func (o *Ouroboros) chainsyncConnectionConfigOption(
 	}
 }
 
-// waitForLedger is set for node-to-client connections: see
-// chainsyncServerRequestNext.
+// waitForLedger selects the local-client wrapper. Both local clients and peers
+// wait for ledger application before a roll-forward is served; the wrappers
+// differ only in whether trusted local activity is tracked.
 func (o *Ouroboros) chainsyncServerConnOpts(
 	ctx context.Context,
 	limiter *chainsyncFindIntersectRateLimiter,
@@ -1369,7 +1370,7 @@ func (o *Ouroboros) chainsyncServerAheadOfLedger(
 func (o *Ouroboros) chainsyncServerRequestNextPeer(
 	ctx ochainsync.CallbackContext,
 ) error {
-	return o.chainsyncServerRequestNext(ctx, false, false)
+	return o.chainsyncServerRequestNext(ctx, true, false)
 }
 
 func (o *Ouroboros) chainsyncServerRequestNextLocal(
@@ -1387,14 +1388,15 @@ func (o *Ouroboros) chainsyncServerRequestNextTrustedLocal(
 // chainsyncServerRequestNext serves the next chain event to a downstream
 // client.
 //
-// With waitForLedger set (node-to-client connections) a roll-forward is held
+// With waitForLedger set a roll-forward is held
 // until the ledger has applied the block. A local client follows chainsync to
 // read ledger state at the points it receives, and cardano-node serves its
 // local clients only blocks on its selected chain, which it adopts after
 // validating them against the ledger, so every point it delivers can be
 // acquired by LocalStateQuery. Serving a block the ledger has not reached yet
 // makes Acquire of that point fail with AcquireFailurePointNotOnChain.
-// Peers (node-to-node) are still served ahead of the ledger.
+// Node-to-node peers use the same gate because they must only receive blocks
+// on the validated selected chain.
 func (o *Ouroboros) chainsyncServerRequestNext(
 	ctx ochainsync.CallbackContext,
 	waitForLedger bool,

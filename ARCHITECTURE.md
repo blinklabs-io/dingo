@@ -1149,11 +1149,16 @@ answers `NoBlocks` before another database transaction is opened.
 
 When a peer requests a range, `ouroboros/blockfetch.go` opens chain iterators
 at the requested start and end points to validate both endpoints against the
-serving chain, then sends `StartBatch`. A persistent-chain iterator first
-checks local point metadata, so a missing point cannot fall through to a remote
-archive. It resolves the block index before taking the chain lock and verifies
-the chain mutation generation after acquiring it, keeping remote reads outside
-the lock without accepting an index invalidated by a concurrent rollback.
+serving chain. It also verifies that the applied ledger tip is on that chain
+and that the requested end is no later than the applied tip before sending
+`StartBatch`; ranges into fetched but unapplied blocks receive `NoBlocks`.
+Equal-slot ordering is checked with the iterator because a Byron main block can
+share a slot and block number with its epoch-boundary parent. A persistent-chain
+iterator first checks local point metadata, so a missing point cannot fall
+through to a remote archive. It resolves the block index before taking the
+chain lock and verifies the chain mutation generation after acquiring it,
+keeping remote reads outside the lock without accepting an index invalidated
+by a concurrent rollback.
 Checking only
 the end slot let a peer name an end point the server does not hold and receive
 a slot-bounded prefix of the server's own chain in its place. An end point
@@ -7283,12 +7288,13 @@ snapshot closed by the lifetime bound above reproduces this connection-teardown
 behavior.
 
 "Ahead of the tip" means ahead of the applied ledger tip, and the chain
-iterator runs ahead of it during sync. So the node-to-client ChainSync server
-(`chainsyncServerRequestNext` with `waitForLedger`) holds a roll-forward
+iterator runs ahead of it during sync. ChainSync servers hold a roll-forward
+(`chainsyncServerRequestNext` with `waitForLedger`)
 behind `MsgAwaitReply` until `LedgerState.AwaitAppliedSlot` sees the ledger
-reach the block, as cardano-node serves local clients only blocks it has
-already validated. A local client can therefore Acquire every point ChainSync
-delivers to it. Node-to-node peers are still served ahead of the ledger.
+reach the block, as cardano-node serves downstream clients and peers only
+blocks on its validated selected chain. A local client can therefore Acquire
+every point ChainSync delivers to it, and a peer cannot fetch or propagate a
+block before its ledger application succeeds.
 When the applied tip reaches the held block's slot with a different hash, the
 server waits for the iterator's rollback instead, unless the held block is the
 tip's parent: a Byron epoch-boundary block shares its slot with the block after

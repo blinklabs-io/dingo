@@ -4655,6 +4655,7 @@ func TestChainsyncServerRequestNextEmitsRollForwardWithExactBlock(
 	f.drainInitialRollback(t, csmock.OriginPoint())
 
 	block, point := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block, point)
 
 	require.NoError(t, f.h.RequestNext())
 
@@ -4688,7 +4689,8 @@ func TestChainsyncServerRequestNextEmitsRollBackwardOnChainRollback(
 
 	// Serve one block so the iterator is past origin, then roll the chain
 	// back so the next synchronous iterator result is a rollback event.
-	f.appendBlock(t, 1, 1, 0x01)
+	block, point := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block, point)
 	require.NoError(t, f.h.RequestNext())
 	require.True(t, f.observe(t).IsRollForward())
 
@@ -4915,6 +4917,7 @@ func TestChainsyncServerRequestNextEmitsAwaitReplyThenAsyncRollForward(
 
 	// A block arriving after the park must be served by the async goroutine.
 	block, point := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block, point)
 
 	msg := f.observe(t)
 	require.True(t, msg.IsRollForward(), "expected async RollForward")
@@ -4940,7 +4943,8 @@ func TestChainsyncServerRequestNextEmitsAsyncRollBackward(t *testing.T) {
 	f.drainInitialRollback(t, csmock.OriginPoint())
 
 	// Serve one block so the iterator is past origin.
-	f.appendBlock(t, 1, 1, 0x01)
+	block, point := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block, point)
 	require.NoError(t, f.h.RequestNext())
 	require.True(t, f.observe(t).IsRollForward())
 
@@ -4980,7 +4984,8 @@ func TestChainsyncServerRequestNextAsyncRollForwardFailureClosesConnection(
 
 	// Stop the protocol so the async send fails, then wake the iterator.
 	f.h.Server().Stop()
-	f.appendBlock(t, 1, 1, 0x01)
+	block, point := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block, point)
 
 	f.requireConnectionClosed(
 		t,
@@ -4999,7 +5004,8 @@ func TestChainsyncServerRequestNextAsyncRollBackwardFailureClosesConnection(
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.drainInitialRollback(t, csmock.OriginPoint())
 
-	f.appendBlock(t, 1, 1, 0x01)
+	block, point := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block, point)
 	require.NoError(t, f.h.RequestNext())
 	require.True(t, f.observe(t).IsRollForward())
 
@@ -5130,6 +5136,50 @@ func TestChainsyncServerLocalClientNotServedAheadOfLedger(t *testing.T) {
 	rollbackPoint, ok := rollback.Point()
 	require.True(t, ok)
 	require.Equal(t, point3, rollbackPoint)
+}
+
+func TestChainsyncServerPeerNotServedAheadOfLedger(t *testing.T) {
+	t.Parallel()
+
+	// The harness uses node-to-client framing so its synthetic full block is
+	// observable, while waitForLedger=false selects the production
+	// node-to-node chainsyncServerRequestNextPeer callback.
+	f := newChainsyncServerFixtureServing(
+		t,
+		csmock.ModeNtC,
+		OuroborosConfig{},
+		false,
+	)
+	block1, point1 := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block1, point1)
+	f.drainInitialRollback(t, csmock.OriginPoint())
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsRollForward(), "applied block is served")
+
+	header, ok := newTestBlockHeader(2, 2, 0x02).(*testBlockHeader)
+	require.True(t, ok)
+	header.prevHash = block1.Hash()
+	block2 := &testBlock{
+		BlockHeader: header,
+		blockType:   1,
+		cbor:        []byte{0x80},
+	}
+	require.NoError(
+		t,
+		f.o.ledgerState.Chain().AddBlock(t.Context(), block2, nil),
+	)
+	point2 := ocommon.NewPoint(block2.SlotNumber(), block2.Hash().Bytes())
+
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+	testutil.RequireNoReceive(
+		t,
+		f.h.Observed(),
+		100*time.Millisecond,
+		"a peer must not receive a block the ledger has not applied",
+	)
+	f.setTip(block2, point2)
+	require.True(t, f.observe(t).IsRollForward(), "expected RollForward")
 }
 
 // parkOnByronBoundaryBlock serves block 1 to a local client, appends a Byron

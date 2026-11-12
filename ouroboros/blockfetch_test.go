@@ -43,6 +43,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
@@ -671,6 +672,11 @@ func newBlockfetchRangeFixtureWithSlotsAndConfig(
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
+	lastBlock := blocks[len(blocks)-1]
+	ls.SetTipForTesting(ochainsync.Tip{
+		Point:       ocommon.NewPoint(lastBlock.Slot, lastBlock.Hash),
+		BlockNumber: lastBlock.BlockNumber,
+	})
 
 	bus := event.NewEventBus(nil, logger)
 	t.Cleanup(bus.Close)
@@ -726,6 +732,103 @@ func newBlockfetchRangeFixtureWithSlotsAndConfig(
 		peer:   peer,
 		blocks: blocks,
 		connID: conn.Id(),
+	}
+}
+
+func TestBlockfetchServerRequestRange_RejectsUnappliedEndPoint(t *testing.T) {
+	t.Parallel()
+
+	f := newBlockfetchRangeFixture(t)
+	applied := f.blocks[0]
+	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{
+		Point:       ocommon.NewPoint(applied.Slot, applied.Hash),
+		BlockNumber: applied.BlockNumber,
+	})
+
+	f.requestRange(t, f.point(0), f.point(2))
+
+	assert.Equal(
+		t,
+		[]byte{blockfetch.MessageTypeNoBlocks},
+		f.readMessageTypes(t, 1),
+		"a peer must not fetch blocks the ledger has not applied",
+	)
+}
+
+func TestBlockfetchEndAtOrBeforeAppliedTip(t *testing.T) {
+	t.Parallel()
+
+	hash := func(value byte) []byte {
+		return bytes.Repeat([]byte{value}, lcommon.Blake2b256Size)
+	}
+	boundary := ocommon.NewPoint(100, hash(0x01))
+	mainBlock := ocommon.NewPoint(100, hash(0x02))
+
+	tests := []struct {
+		name       string
+		end        ocommon.Point
+		appliedTip ocommon.Point
+		steps      []blockfetchIteratorStep
+		want       bool
+	}{
+		{
+			name:       "end before applied slot",
+			end:        ocommon.NewPoint(99, hash(0x03)),
+			appliedTip: mainBlock,
+			want:       true,
+		},
+		{
+			name:       "end after applied slot",
+			end:        ocommon.NewPoint(101, hash(0x04)),
+			appliedTip: mainBlock,
+		},
+		{
+			name:       "end is applied tip",
+			end:        mainBlock,
+			appliedTip: mainBlock,
+			steps: []blockfetchIteratorStep{{
+				result: &chain.ChainIteratorResult{Point: mainBlock},
+			}},
+			want: true,
+		},
+		{
+			name:       "boundary end precedes same-slot applied main block",
+			end:        boundary,
+			appliedTip: mainBlock,
+			steps: []blockfetchIteratorStep{
+				{result: &chain.ChainIteratorResult{Point: boundary}},
+				{result: &chain.ChainIteratorResult{Point: mainBlock}},
+			},
+			want: true,
+		},
+		{
+			name:       "main block follows same-slot applied boundary",
+			end:        mainBlock,
+			appliedTip: boundary,
+			steps: []blockfetchIteratorStep{{
+				result: &chain.ChainIteratorResult{Point: mainBlock},
+			}},
+		},
+		{
+			name: "origin is not an applied block",
+			end:  boundary,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			iter := &stubBlockfetchIterator{steps: test.steps}
+			assert.Equal(
+				t,
+				test.want,
+				blockfetchEndAtOrBeforeAppliedTip(
+					iter,
+					test.end,
+					test.appliedTip,
+				),
+			)
+		})
 	}
 }
 
