@@ -5859,21 +5859,22 @@ error and terminates the requesting connection. If the optional vote manager
 is absent, requests still receive the empty `MsgVotes` response. The limit is
 per request, not a per-peer rate limit or a decoder allocation bound.
 
-Before header cryptography or body deltas run, the inbound consensus-envelope
-validator enforces the era's block body/header limits and, for Alonzo and later,
-the aggregate `MaxBlockExUnits` budget. The aggregate contains every declared
-redeemer budget in every transaction, including both the outer Dijkstra witness
-set and all Dijkstra subtransaction witness sets; phase-2-invalid transactions
-remain included because the block budget constrains declared execution, not the
-UTxO outcome. Negative values and checked-add overflow fail closed. The forging
-selector uses the same transaction-wide declared-budget helper, so it cannot
-construct a candidate that inbound envelope validation would reject on that
-block-wide budget. A block that skips the envelope validator because
-`ValidateHistorical: false` places it below the stability cutoff still has the
-aggregate `MaxBlockExUnits` budget enforced in `ledgerProcessBlock`, since
-per-transaction validation never checks the block-wide sum. `TrustedReplay`
-input and blocks inside an imported Mithril snapshot's certified range are
-exempt.
+Before body deltas run, the inbound consensus-envelope validator enforces the
+era's block number and slot order and body/header limits.
+Peer-sourced blocks pass this validator whether or not full historical
+transaction validation is enabled; trusted replay and blocks inside an imported
+Mithril snapshot's certified range are exempt. For Alonzo and later the apply
+path also enforces the aggregate `MaxBlockExUnits` budget. The aggregate
+contains every declared redeemer budget in every transaction, including both
+the outer Dijkstra witness set and all Dijkstra subtransaction witness sets;
+phase-2-invalid transactions remain included because the block budget
+constrains declared execution, not the UTxO outcome. Negative values and
+checked-add overflow fail closed. The forging selector uses the same
+transaction-wide declared-budget helper, so it cannot construct a candidate
+that inbound envelope validation would reject on that block-wide budget. A
+historical peer block below the stability cutoff still has the aggregate budget
+enforced in `ledgerProcessBlock`, since per-transaction validation never checks
+the block-wide sum.
 
 Header protocol-version validation has a separate compatibility ceiling
 derived from the node's active era table. Headers above that configured maximum
@@ -6559,16 +6560,18 @@ dependency across two points in the pipeline:
   an imported Mithril snapshot already covers. A coarse
   historical-sync toggle no longer skips them.
 - **Counter monotonicity at block apply** (`validateOpCertCounter`, invoked from
-  `ledgerProcessBlock` under `shouldValidate`, before the block's transactions
-  are validated): a read-before-write of the pool's stored opcert counter inside
+  `ledgerProcessBlock` before the block's transactions are applied): a
+  read-before-write of the pool's stored opcert counter inside
   the validation transaction. A backward counter (below the last seen —
   stale/stolen hot key) is rejected in every era. A gapped counter (more than
   one past the last seen) is the Praos over-increment case and is rejected only
   for Praos eras (Babbage onward, via `opCertNoGapRuleApplies`); TPraos eras
   (Shelley–Alonzo) enforce only monotonicity, so the gap rule is scoped by era
-  rather than by validation mode (`shouldValidate` can be true for historical or
-  near-tip TPraos blocks). A pool with no recorded counter is judged against
-  zero, the reference's baseline for a pool in the stake distribution
+  rather than by validation mode. Historical peer blocks run this check even
+  when full historical transaction validation is disabled; trusted replay and
+  Mithril-certified history retain their explicit exemptions. A pool with no
+  recorded counter is judged against zero, the reference's baseline for a pool
+  in the stake distribution
   (ouroboros-consensus Praos `currentIssueNo`, cardano-ledger TPraos
   `currentIssueNo`): its first Praos counter must be 0 or 1, while TPraos
   accepts any first counter. Producer eligibility is not decided here: header
@@ -14923,8 +14926,9 @@ one block can make the transaction exceed the 32 MiB estimate.
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay
 validates the complete from-origin replay. Setting it to `false` is an explicit
-operator choice to trust the selected peer/intersection for older blocks, apart
-from the aggregate `MaxBlockExUnits` budget, which is still enforced;
+operator choice to skip the expensive transaction rule set for older blocks.
+Peer-sourced blocks still pass the consensus-envelope, enabled-era ceiling,
+aggregate `MaxBlockExUnits`, and operational-certificate counter checks;
 certificate verification of a Mithril artifact is not a substitute for future
 network-block validation.
 

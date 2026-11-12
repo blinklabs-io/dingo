@@ -186,6 +186,13 @@ func rowBatchingBlockWithInvalid(
 	require.NoError(t, err)
 	decoded, err := gledger.NewBlockFromCbor(gledger.BlockTypeConway, encoded)
 	require.NoError(t, err)
+	bodySize, err := serializedBlockBodySize(decoded)
+	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodySize = bodySize
+	encoded, err = cbor.Encode(block)
+	require.NoError(t, err)
+	decoded, err = gledger.NewBlockFromCbor(gledger.BlockTypeConway, encoded)
+	require.NoError(t, err)
 	return decoded
 }
 
@@ -370,6 +377,7 @@ func runRowBatchingScenario(
 		Logger:                  testLogger(),
 		PromRegistry:            prometheus.NewRegistry(),
 		ManualBlockProcessing:   true,
+		TrustedReplay:           true,
 		ApplyRowBatchingEnabled: batching,
 	})
 	require.NoError(t, err)
