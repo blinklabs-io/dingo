@@ -61,7 +61,10 @@ var (
 	ErrAddressNotFound = errors.New("address not found")
 	ErrInvalidBlockID  = errors.New("invalid block id")
 	ErrBlockNotFound   = errors.New("block not found")
-	ErrEpochNotFound   = errors.New("epoch not found")
+	// ErrTipBlockUnavailable reports that the block the ledger tip names was
+	// not stored on any of several rereads of the tip.
+	ErrTipBlockUnavailable = errors.New("chain tip block unavailable")
+	ErrEpochNotFound       = errors.New("epoch not found")
 	// ErrHistoryNotRetained reports a historical query whose source rows
 	// this node no longer holds, as opposed to a query whose answer is
 	// genuinely empty.
@@ -312,15 +315,10 @@ func (a *NodeAdapter) ChainTip() (
 	}, nil
 }
 
-// LatestBlock returns information about the latest block.
 func (a *NodeAdapter) LatestBlock(ctx context.Context) (
 	BlockInfo, error,
 ) {
-	tip := a.ledgerState.Tip()
-	block, err := a.ledgerState.BlockByHash(
-		ctx,
-		tip.Point.Hash,
-	)
+	block, err := a.tipBlock(ctx)
 	if err != nil {
 		return BlockInfo{}, err
 	}
@@ -614,8 +612,7 @@ func bech32EncodeData(hrp string, data []byte) (string, error) {
 func (a *NodeAdapter) LatestBlockTxHashes(ctx context.Context) (
 	[]string, error,
 ) {
-	tip := a.ledgerState.Tip()
-	block, err := a.ledgerState.BlockByHash(ctx, tip.Point.Hash)
+	block, err := a.tipBlock(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get latest block: %w", err)
 	}

@@ -130,6 +130,9 @@ func (b *Blockfrost) handleLatestBlock(
 ) {
 	info, err := b.node.LatestBlock(r.Context())
 	if err != nil {
+		if b.writeTipUnavailable(w, err) {
+			return
+		}
 		b.logger.Error(
 			"failed to get latest block",
 			"error", err,
@@ -143,6 +146,27 @@ func (b *Blockfrost) handleLatestBlock(
 		return
 	}
 	writeJSON(w, http.StatusOK, blockResponse(info))
+}
+
+// writeTipUnavailable answers a latest-block request whose tip block was not
+// stored, which a rollback in progress causes, with a retryable 503. It reports
+// whether it wrote the response.
+func (b *Blockfrost) writeTipUnavailable(
+	w http.ResponseWriter,
+	err error,
+) bool {
+	if !errors.Is(err, ErrTipBlockUnavailable) {
+		return false
+	}
+	b.logger.Warn("chain tip block unavailable", "error", err)
+	w.Header().Set("Retry-After", "1")
+	writeError(
+		w,
+		http.StatusServiceUnavailable,
+		"Service Unavailable",
+		"chain tip is changing, try again",
+	)
+	return true
 }
 
 // handleBlock handles GET /api/v0/blocks/{hash_or_number}.
@@ -202,6 +226,9 @@ func (b *Blockfrost) handleLatestBlockTxs(
 	}
 	hashes, err := b.node.LatestBlockTxHashes(r.Context())
 	if err != nil {
+		if b.writeTipUnavailable(w, err) {
+			return
+		}
 		b.logger.Error(
 			"failed to get latest block txs",
 			"error", err,

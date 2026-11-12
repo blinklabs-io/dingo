@@ -5965,10 +5965,11 @@ was therefore rejected during replay whenever its TTL reached past the current
 era's safe zone, and the tx-validation recovery path read that as inconsistent
 local ledger state. cardano-ledger performs the translation only while
 assembling the context for the Plutus scripts a transaction actually needs
-(`collectPlutusScriptsWithContext`). The horizon itself is unchanged: a
-transaction that does carry redeemers still translates its validity interval per
-redeemer language and still fails past the horizon, matching cardano-ledger's
-`TimeTranslationPastHorizon`.
+(`collectPlutusScriptsWithContext`). The horizon itself is unchanged from
+Babbage on: a transaction that does carry redeemers still translates its
+validity interval per redeemer language and still fails past the horizon,
+matching cardano-ledger's `TimeTranslationPastHorizon`. Alonzo extends it
+instead, as described below.
 
 Dijkstra's phase-2 success cache admits only transactions with redeemers at
 some witness level. Script-free transactions still run the structural phase-2
@@ -6008,6 +6009,37 @@ the anchor at zero and stay on the published tip. Unlike the operational slot
 clock, this path never extrapolates in-era past its bound: a bound past the
 anchored horizon is a translation failure, and converting it anyway would accept
 blocks the network rejects.
+
+Alonzo is the exception to that bound. cardano-ledger's Alonzo `LEDGERS` rule
+and Alonzo mempool build the script context of every transaction that needs one
+through `unsafeLinearExtendEpochInfo slot ei` (cardano-slotting
+`Cardano.Slotting.EpochInfo.Extend`), with the slot being validated as the
+basis: a slot at or before the basis is answered by the HFC epoch info, and a
+later one is the basis time plus one basis slot length per slot, however far
+past the horizon. Babbage's `LEDGERS` rule, which Conway and Dijkstra reuse, and
+the shared mempool `defaultApplyTxWithValidation` pass the bounded epoch info,
+so the bound holds there. Mainnet block 6400998 (slot 43287653, epoch 297)
+carries a Plutus transaction whose `invalidHereafter` is 44287078, past the
+epoch 299 boundary at which the horizon measured from its predecessor ends; the
+reference node accepted it, and a bounded view rejected it with
+`OutsideForecast` and wedged replay on the missing outputs.
+`LedgerView.extendForecastFrom` therefore sets a forecast basis when the
+ledger's era is Alonzo: the block's slot in `ledgerProcessBlock`, and the
+published tip in mempool and block-builder validation, where the wall-clock
+reference slot can itself be past the horizon during catch-up.
+`LedgerView.SlotToTime` then routes through
+`SlotTimeConverter.SlotToTimeExtendedFrom`, which computes the extension with
+exact arithmetic and fails only when the basis cannot be translated or the
+result's POSIX milliseconds do not fit in an `int64`. The reference's
+`POSIXTime` is an unbounded `Integer`, but the gouroboros script context takes
+the bound as `time.Time.UnixMilli` and stores it in a fixed-width field, so a
+larger value would reach the script wrapped around to an unrelated time;
+refusing it rejects the transaction instead, which diverges from the reference
+only for a validity bound hundreds of millions of years out. In cardano-ledger
+the UTXO rule's own `OutsideForecast` check extends in every era
+(`validateOutsideForecast`), while Dingo extends only Alonzo views; from Babbage
+on Dingo reports a past-horizon bound as `OutsideForecast` where cardano-ledger
+reports the script-context translation failure, and both reject the transaction.
 
 `hardForkSummaryAnchoredAt` (`ledger/hardfork_summary.go`) walks the full epoch
 cache on every call -- one row per epoch since genesis, not per era -- so its
@@ -7895,6 +7927,15 @@ and its fragments snapshot the short rollback history instead.
 Each frontier stores its first block number; consecutive block heights align
 two chains for a binary search of their last equal point. A height gap starts a
 new frontier, leaving the comparison undecidable until continuity is rebuilt.
+A frontier emptied by a chainsync rollback, including the rollback that opens a
+session at its `FindIntersect` point, starts from the rollback point when the
+next delivered header names it as its parent; the point is recorded one block
+below that header. A boundary block, which repeats its parent's block number,
+or a header that does not carry the rollback point's hash as its parent hash
+(for example because its parent was withheld from selection), starts the
+frontier without it. Two peers whose forks branch exactly where their sessions
+intersected therefore still share a frontier point, as upstream anchors every
+candidate fragment at its intersection with the selected chain.
 Window density and suffix counts use binary searches over ordered slots, so a
 density pass is logarithmic in retained points per peer pair while holding the
 selector lock.
@@ -8259,7 +8300,7 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   history is retained in Genesis and dropped in Praos.
 - **Header-crypto verification gates observation, independent of
   corroboration.** Density and the corroboration hash frontier are both
-  populated from `recordObservedPoint`, driven by `PeerTipUpdateEvent`
+  populated from `recordObservedLinkedPoint`, driven by `PeerTipUpdateEvent`
   observation in the roll-forward handler — so with `corroborationPeers = 0` (or
   before any corroboration state exists), density alone previously came from
   peer-reported headers that had not passed any check. The roll-forward handler
@@ -12290,7 +12331,16 @@ identity. `kesagent.Client` implements the
 agent's real wire protocol (`docs/signer/kes-agent-protocol.md` in
 `blinklabs-io/bursa`: a 4-byte big-endian length prefix, then a JSON payload,
 capped per-message and bounded by an explicit handshake/sign timeout), so it
-interoperates with a real bursa agent rather than a bespoke one.
+interoperates with a real bursa agent rather than a bespoke one. The frame
+types and protocol constants come from bursa's public `kesagent/wire` package,
+so both ends share one definition. Frames are read with
+`wire.ReadFrameLimit`, which caps each message type separately, leaves
+deadlines to the caller (a serve-key subscriber idles between pushes, and a
+sign keeps its own short deadline), and wipes the body buffer; a thin wrapper
+keeps an oversized frame (`errFrameTooLarge`) and a body that stopped arriving
+(`errFrameBodyStalled`) distinguishable. `TestWireGoldenFrames` decodes and
+re-encodes bursa's published golden frames (`kesagent/testdata/wireframes`)
+byte for byte.
 
 Two modes, `--shelley-kes-agent-mode` (default `serve-key` once a socket is
 set):
@@ -12347,6 +12397,90 @@ set):
   may have gone stale between leader slots, and never retries a request that
   may already have reached the agent. Serve-key subscriptions continue to
   reuse their connection so later key pushes arrive on the same stream.
+
+**Remote sign agent** (`kesagent.RemoteClient`). `--shelley-kes-agent-address`
+(`host:port`) signs through a bursa agent's remote sign listener
+(`bursa-attested-kes/1`) instead of a local socket, so the KES key never has
+to be on the producer's host and several producers can share one agent;
+sharing is safe only with an agent that refuses a second header body for a
+slot it has already signed, since one without that guard signs both. It
+implies sign mode and is exclusive with `--shelley-kes-agent-socket` and
+`--shelley-kes-key`. The transport is configuration, and the client logs
+which one it uses at startup (`KES agent link: TLS, pinned server key`,
+`TLS, verified by CA`, or `plain TCP`):
+
+- TLS 1.3 (the default). With `--shelley-kes-agent-server-spki-sha256`, the
+  hex SHA-256 of the agent's server SubjectPublicKeyInfo, the agent is
+  authenticated by that pin, compared in constant time during the handshake,
+  instead of a certificate authority or host name. Without a pin, the agent's
+  certificate gets standard x509 verification against the system roots for
+  the address's host name; on Unix, `SSL_CERT_FILE` and `SSL_CERT_DIR` point
+  those roots at a private CA. A client certificate and key
+  (`--shelley-kes-agent-client-cert-file`,
+  `--shelley-kes-agent-client-key-file`) are optional and set as a pair;
+  without them none is sent and the agent decides whether to accept.
+- Plain TCP (`--shelley-kes-agent-plaintext`), for setups where something
+  else secures the link, such as a service mesh sidecar. The agent's
+  counterpart is `kes_agent.attested_plaintext`. A pin and a client
+  certificate need TLS, so they cannot be combined with it.
+
+The exchange is the same on every transport. After the agent's `Hello` the
+client sends an `attestation_request` carrying a fresh 32-byte nonce, and
+admits the session only if the response echoes the nonce and protocol, names
+the `none` provider (a provider names the attestation evidence, not the
+transport; `none` carries no evidence), carries no evidence, and reports
+exactly the local operational certificate's CBOR, its KES verification key,
+and a period no earlier than the certificate's start. No sign request is sent
+on a session that was not admitted, and every signature is verified against
+the local operational certificate whatever the transport.
+
+The admitted session is kept for the next sign, unlike the local socket's
+connection per request, because a remote handshake costs a network round trip
+inside a slot. The agent closes a session idle for its 10s frame bound, so the
+client treats a session idle for `SessionFreshFor` (8s) as stale and redials
+before signing on it. The forger opens the session ahead of time: on each slot
+it asks the leader schedule (`LeaderChecker.NextLeaderSlot`) for the next
+leader slot, and when that slot is within the prepare lead it calls
+`PoolCredentials.PrepareRemoteSigner` once for that slot, on its own
+goroutine, which reaches the client's `Prepare` through the optional
+`forging.RemoteKESPreparer` interface. The lead is counted in whole slots,
+because the check runs once per slot: `remoteSignerPrepareLead` (3s) divided
+by the slot length, rounded up, and at least one slot. With 1s slots that is
+three slots; with slots of 3s or longer it is one whole slot, so the prepare
+runs one slot length ahead. With slots longer than `SessionFreshFor`, the
+prepared session is stale by the leader slot and the sign redials. A failed
+prepare only logs a warning ahead of the slot; the sign at the slot dials
+again if it must.
+
+One caller at a time uses the connection: a sign, or a dial and admission.
+The client mutex is never held across network I/O, so `Close` and
+`CheckReady` never wait on a dial. A sign's `SignTimeout` covers its wait for
+the connection as well, so a prepare stuck dialing cannot hold a leader slot
+past the timeout. Prepare honours the reconnect backoff, but a sign never
+does: a leader slot is worth a dial. The readiness probe and the
+`dingo_forge_credentials_valid` scrape call `CheckReady`, which reports the
+last dial's result and, when no fresh session is open, starts a background
+prepare at most every 30s. It never dials in the caller. On a WAN link the
+pre-connect is required, not an optimisation: at about 95ms round trip, a
+dial and admission take about 400ms and a redial inside a sign about 520ms,
+beyond the 500ms default `shelleyKesAgentSignTimeout`, while a sign on an
+open session takes about one round trip. A transport or verification failure
+drops the session; an agent refusal (`error` in the response) keeps it. A
+sign that gets no signature back sends the identical header body once more
+(`maxSignSends`), on a new session after a lost reply or on the same session
+after an agent error, while its `SignTimeout` lasts. The agent may already
+have recorded the slot, and it signs a recorded slot again only for the same
+body, so a resend is never a different header. A final refusal
+(`finalSignRefusals`: a different header already signed for the slot, an
+older slot, a period the key has passed or a period below its floor, an
+exhausted key, a message that is not a header for its key) is returned at
+once, and so is a signature that fails verification. The wire protocol
+carries no error code, so the client matches the agent's reason text. A
+resend after a lost reply needs a redial inside the same `SignTimeout`, which
+at the WAN round trip above does not fit the 500ms default. A failed dial or admission backs off before the
+next attempt. Each signature is
+verified against the local operational certificate's KES key by the same
+`validateSignResponse` the local client uses.
 
 **The non-negotiable invariant**: whichever source supplies the key, KES
 signing goes through the same `credentialGeneration.kesSign`, and that method
@@ -12437,9 +12571,16 @@ error that states the length and the limit.
 
 `internal/config.ValidateKESKeySources` rejects a block producer that sets
 both `shelleyKesKey` and `shelleyKesAgentSocket`, so an operator's explicit
-choice of key source is never silently overridden. `Config.Validate` no
-longer requires a local `shelleyKesKey` when a KES agent socket is
-configured — an agent-only configuration must be able to start.
+choice of key source is never silently overridden; `shelleyKesAgentAddress`
+is likewise exclusive with both and accepts only sign mode. Its server pin is
+optional but must be 64 hex characters when set, the client certificate and
+key are optional but set as a pair, and `shelleyKesAgentPlaintext` takes
+neither, since both need TLS. None of these four is accepted without
+`shelleyKesAgentAddress`, so a mistyped remote configuration is refused rather
+than falling back to local-file or Unix-socket signing.
+`Config.Validate` no longer requires a local `shelleyKesKey` when a KES agent
+socket or address is configured — an agent-only configuration must be able to
+start.
 
 Pushed KES signing key material is zeroed as soon as each holder is done with
 it: the frame buffer it was decoded from (sized exactly once from the
@@ -15313,7 +15454,7 @@ the retiring query ranks only pools with a retirement row at a qualifying
 epoch (through the retirement epoch index), though it still ranks the full
 history of each of those pools. The pool list's active set is cached per tip
 and recomputed only when the tip changes; a list computed while the tip moved
-is not cached. Pool and account list routes reject
+is not cached. The latest block routes resolve the ledger tip's block; a rollback deletes blocks before the ledger publishes the lower tip, so a tip block that is not stored is retried against a reread tip and, if it never resolves, answers 503 with `Retry-After`. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,
