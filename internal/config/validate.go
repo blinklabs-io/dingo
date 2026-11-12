@@ -175,6 +175,23 @@ func ValidateKESAgentSignTimeout(timeout time.Duration) error {
 	return nil
 }
 
+// minKeyWatchInterval keeps the credential file watch from reading the key
+// files many times a second.
+const minKeyWatchInterval = time.Second
+
+// ValidateKeyWatchInterval accepts zero (watch disabled) or an interval of at
+// least a second.
+func ValidateKeyWatchInterval(interval time.Duration) error {
+	if interval != 0 && interval < minKeyWatchInterval {
+		return fmt.Errorf(
+			"shelleyKeyWatchInterval (%s) must be zero (disabled) or at least %s",
+			interval,
+			minKeyWatchInterval,
+		)
+	}
+	return nil
+}
+
 // ValidateMithrilPublicBaseURL accepts an absolute HTTP(S) origin.
 func ValidateMithrilPublicBaseURL(value string) error {
 	u, err := url.Parse(value)
@@ -878,6 +895,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	if err := ValidateKESAgentSignTimeout(
 		c.ShelleyKESAgentSignTimeout,
 	); err != nil {
+		errs = append(errs, err)
+	}
+	if err := ValidateKeyWatchInterval(c.ShelleyKeyWatchInterval); err != nil {
 		errs = append(errs, err)
 	}
 
