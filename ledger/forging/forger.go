@@ -263,6 +263,10 @@ type BlockForger struct {
 	lastForgedSlot uint64
 	fenceLoaded    bool
 
+	// remoteSignerPreparedSlot is the last leader slot the remote KES
+	// signer was asked to prepare for. Forge loop goroutine only.
+	remoteSignerPreparedSlot uint64
+
 	// Optional Leios EB forging (nil = relay or pre-Dijkstra era)
 	leiosChecker               LeiosProduceChecker
 	leiosEBCaster              EndorserBlockBroadcaster
@@ -1193,6 +1197,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to get current slot: %w", err)
 	}
+	f.prepareRemoteSignerForUpcomingLeaderSlot(currentSlot)
 
 	// Advance the KES state on every wall-clock slot, before any chain gate or
 	// leader selection can return early. This is the forward-security
@@ -3768,6 +3773,80 @@ func (f *BlockForger) logGateSkipScheduled(
 		return
 	}
 	f.logger.Debug(msg, attrs...)
+}
+
+// remoteSignerPrepareLead is the minimum time ahead of a scheduled leader
+// slot that the forger asks a remote KES signer to open its session. The
+// check runs once per slot, so the lead is this rounded up to whole slots,
+// and is one whole slot when slots are 3s or longer. With 1s slots it is
+// well inside the bursa agent's 10s idle bound on an admitted session, so
+// the session prepared here is still open when the slot's header is signed;
+// with slots longer than the client's session freshness the sign redials.
+const remoteSignerPrepareLead = 3 * time.Second
+
+// prepareRemoteSignerForUpcomingLeaderSlot opens the remote KES signer's
+// session in the background when this pool leads a slot within
+// remoteSignerPrepareLead of currentSlot, once per leader slot. Failing here
+// changes nothing about forging -- Sign reconnects on its own -- but logs an
+// unreachable agent seconds before the slot instead of at it.
+func (f *BlockForger) prepareRemoteSignerForUpcomingLeaderSlot(
+	currentSlot uint64,
+) {
+	if f.creds == nil || f.leaderChecker == nil {
+		return
+	}
+	leadSlots := uint64(1)
+	if f.slotDuration > 0 && f.slotDuration < remoteSignerPrepareLead {
+		// Both durations are positive, so the quotient is too.
+		leadSlots = uint64( //nolint:gosec
+			(remoteSignerPrepareLead + f.slotDuration - 1) / f.slotDuration,
+		)
+	}
+	next, ok := f.nextLeaderSlotSafe(currentSlot + 1)
+	if !ok || next > currentSlot+leadSlots ||
+		next == f.remoteSignerPreparedSlot {
+		return
+	}
+	f.remoteSignerPreparedSlot = next
+	creds, logger := f.creds, f.logger
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				f.reportForgeCallbackPanic("prepare_remote_signer", r)
+			}
+		}()
+		prepared, err := creds.PrepareRemoteSigner()
+		if err != nil {
+			logger.Warn(
+				"remote KES signer not ready ahead of leader slot",
+				"leader_slot", next,
+				"current_slot", currentSlot,
+				"error", err,
+			)
+			return
+		}
+		if prepared {
+			logger.Debug(
+				"remote KES signer session ready for leader slot",
+				"leader_slot", next,
+			)
+		}
+	}()
+}
+
+// nextLeaderSlotSafe calls the pluggable leader checker, recovering a panic
+// for the same reason isScheduledLeaderSlot does.
+func (f *BlockForger) nextLeaderSlotSafe(fromSlot uint64) (
+	next uint64,
+	ok bool,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			next, ok = 0, false
+			f.reportForgeCallbackPanic("schedule", r)
+		}
+	}()
+	return f.leaderChecker.NextLeaderSlot(fromSlot)
 }
 
 // isScheduledLeaderSlot reports whether slot is one this node is
