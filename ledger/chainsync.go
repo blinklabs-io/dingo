@@ -2367,6 +2367,8 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 	if e.BlockHeader == nil || len(e.Point.Hash) == 0 {
 		return
 	}
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
 	if ls.peerHeaderHistory == nil {
 		ls.peerHeaderHistory = make(map[string]*peerHeaderChain)
 	}
@@ -2490,6 +2492,8 @@ func (ls *LedgerState) peerHeaderHistoryByteBudget(
 	return maxPeerHeaderHistoryBytesPerConn
 }
 
+// evictOldestPeerHeaderRecord drops historyKey's oldest record. The caller
+// holds peerHeaderHistoryMu.
 func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
 	history := ls.peerHeaderHistory[historyKey]
 	if history == nil || len(history.order) == 0 {
@@ -2508,6 +2512,14 @@ func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
 }
 
 func (ls *LedgerState) removePeerHeaderHistory(historyKey string) {
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
+	ls.removePeerHeaderHistoryLocked(historyKey)
+}
+
+// removePeerHeaderHistoryLocked is removePeerHeaderHistory for a caller that
+// holds peerHeaderHistoryMu.
+func (ls *LedgerState) removePeerHeaderHistoryLocked(historyKey string) {
 	ls.removePeerForkNoncePrefix(historyKey)
 	history := ls.peerHeaderHistory[historyKey]
 	if history == nil {
@@ -2521,6 +2533,8 @@ func (ls *LedgerState) removePeerHeaderHistoryFrom(
 	historyKey string,
 	point ocommon.Point,
 ) {
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
 	history := ls.peerHeaderHistory[historyKey]
 	if history == nil {
 		return
@@ -2551,6 +2565,28 @@ func (ls *LedgerState) removePeerHeaderHistoryFrom(
 	}
 }
 
+// peerHeaderHistorySnapshot returns a copy of historyKey's chain, or nil. A
+// reader that walks a chain across storage lookups works on the copy, so it
+// neither holds peerHeaderHistoryMu that long nor sees a concurrent removal
+// half done. Records are shared: they are not modified once stored.
+func (ls *LedgerState) peerHeaderHistorySnapshot(
+	historyKey string,
+) *peerHeaderChain {
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
+	history := ls.peerHeaderHistory[historyKey]
+	if history == nil {
+		return nil
+	}
+	return &peerHeaderChain{
+		order:         slices.Clone(history.order),
+		byHash:        maps.Clone(history.byHash),
+		retainedBytes: history.retainedBytes,
+	}
+}
+
+// makePeerHeaderHistoryRoom evicts until recordBytes fits the total budget.
+// The caller holds peerHeaderHistoryMu.
 func (ls *LedgerState) makePeerHeaderHistoryRoom(
 	recordBytes int,
 	protectedKey string,
@@ -2615,7 +2651,7 @@ func (ls *LedgerState) makePeerHeaderHistoryRoom(
 		}
 		candidate := heap.Pop(&retirable).(*peerHeaderHistoryCandidate) //nolint:forcetypeassert
 		delete(retirableByKey, candidate.historyKey)
-		ls.removePeerHeaderHistory(candidate.historyKey)
+		ls.removePeerHeaderHistoryLocked(candidate.historyKey)
 	}
 	return true
 }
@@ -2695,6 +2731,8 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 		return false
 	}
 	tipHashKey := hex.EncodeToString(headerTip.Point.Hash)
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
 	for _, history := range ls.peerHeaderHistory {
 		tipRecord, ok := history.byHash[tipHashKey]
 		if ok && bytes.Equal(tipRecord.prevHash, e.Point.Hash) {
@@ -2818,7 +2856,7 @@ func (ls *LedgerState) findPeerForkPath(
 	localTipSlot uint64,
 ) (*ocommon.Point, []ChainsyncEvent, error) {
 	prevHash := append([]byte(nil), initialPrevHash...)
-	history := ls.peerHeaderHistory[connIdKey(e.ConnectionId)]
+	history := ls.peerHeaderHistorySnapshot(connIdKey(e.ConnectionId))
 	pathReversed := []ChainsyncEvent{e}
 	visited := map[string]struct{}{
 		hex.EncodeToString(e.Point.Hash): {},
@@ -3601,6 +3639,8 @@ func (ls *LedgerState) recordRollback(
 	point ocommon.Point,
 	now time.Time,
 ) int {
+	ls.rollbackHistoryMu.Lock()
+	defer ls.rollbackHistoryMu.Unlock()
 	if ls.rollbackCounts == nil && len(ls.rollbackHistory) > 0 {
 		ls.rollbackCounts = make(map[rollbackCountKey]rollbackCountRecord)
 		for _, r := range ls.rollbackHistory {
@@ -3680,6 +3720,8 @@ func addRollbackOccurrence(
 }
 
 func (ls *LedgerState) clearRollbackHistory() {
+	ls.rollbackHistoryMu.Lock()
+	defer ls.rollbackHistoryMu.Unlock()
 	ls.rollbackHistory = nil
 	ls.rollbackCounts = nil
 }
@@ -4136,6 +4178,8 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 //
 // Callers must hold chainsyncMutex.
 func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
+	ls.rollbackHistoryMu.Lock()
+	defer ls.rollbackHistoryMu.Unlock()
 	filtered := ls.rollbackHistory[:0]
 	for _, r := range ls.rollbackHistory {
 		if pointMatches(r.point, point) {
@@ -4532,7 +4576,7 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 ) (int, error) {
-	history := ls.peerHeaderHistory[connIdKey(connId)]
+	history := ls.peerHeaderHistorySnapshot(connIdKey(connId))
 	if history == nil || len(history.order) == 0 {
 		return 0, nil
 	}
