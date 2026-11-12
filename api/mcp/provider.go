@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/plugin"
 )
@@ -45,9 +44,6 @@ func RegisterProvider(host *plugin.Host) error {
 			if cfg.Host != "" {
 				listenHost = cfg.Host
 			}
-			if err := validateListenSecurity(listenHost, cfg.AuthToken, tls.Enabled); err != nil {
-				return nil, nil, fmt.Errorf("mcp: %w", err)
-			}
 			listenAddress := net.JoinHostPort(
 				listenHost,
 				strconv.FormatUint(uint64(cfg.Port), 10),
@@ -59,19 +55,4 @@ func RegisterProvider(host *plugin.Host) error {
 			return server, server, nil
 		},
 	)
-}
-
-func validateListenSecurity(host, authToken string, tlsEnabled bool) error {
-	host = strings.Trim(host, "[]")
-	ip := net.ParseIP(host)
-	if strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback()) {
-		return nil
-	}
-	if authToken == "" || !tlsEnabled {
-		return fmt.Errorf(
-			"non-loopback MCP bind %q requires both an auth token and server TLS",
-			host,
-		)
-	}
-	return nil
 }

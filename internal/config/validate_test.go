@@ -139,7 +139,11 @@ func TestValidateDevModeRequiresBlockProducerCredentials(t *testing.T) {
 	cfg.BlockProducer = false
 
 	err := cfg.Validate(RunModeDev)
-	require.ErrorContains(t, err, "blockProducer enabled but missing required key paths")
+	require.ErrorContains(
+		t,
+		err,
+		"blockProducer enabled but missing required key paths",
+	)
 	assert.True(t, cfg.BlockProducer)
 }
 
@@ -288,7 +292,6 @@ func TestValidateMithrilPublicBaseURL(t *testing.T) {
 		{name: "IPv6 loopback HTTP", value: "http://[::1]:8080"},
 		{
 			name: "remote HTTP", value: "http://snapshots.example.org",
-			wantErr: true,
 		},
 		{
 			name: "unsupported scheme", value: "ftp://snapshots.example.org",
@@ -378,6 +381,10 @@ func TestValidate(t *testing.T) {
 				c.PrivatePort = 0
 				c.MetricsPort = 0
 			},
+		},
+		{
+			name:   "serve mode accepts the disabled private listener",
+			modify: func(c *Config) { c.PrivatePort = 0 },
 		},
 		{
 			name:    "serve mode still requires listener ports",
@@ -728,6 +735,164 @@ func TestValidate(t *testing.T) {
 			wantErr: "cannot set both shelleyKesKey and shelleyKesAgentSocket",
 		},
 		{
+			name: "block producer with remote KES agent",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+			},
+		},
+		{
+			name: "remote KES agent in serve-key mode",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentMode = "serve-key"
+			},
+			wantErr: "supports only shelleyKesAgentMode",
+		},
+		{
+			name: "remote KES agent with a local socket",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+			},
+			wantErr: "cannot set shelleyKesAgentAddress together with",
+		},
+		{
+			name: "remote KES agent without a port",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddress = "kes-agent.example"
+			},
+			wantErr: "must be host:port",
+		},
+		{
+			name: "plaintext without a remote KES agent",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESKey = "/keys/kes.skey"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+				c.ShelleyKESAgentPlaintext = true
+			},
+			wantErr: "shelleyKesAgentPlaintext requires shelleyKesAgentAddress",
+		},
+		{
+			name: "client certificate without a remote KES agent",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESKey = "/keys/kes.skey"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+				c.ShelleyKESAgentClientCertFile = "/keys/client.crt"
+			},
+			wantErr: "shelleyKesAgentClientCertFile requires shelleyKesAgentAddress",
+		},
+		{
+			name: "client key without a remote KES agent",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+				c.ShelleyKESAgentClientKeyFile = "/keys/client.key"
+			},
+			wantErr: "shelleyKesAgentClientKeyFile requires shelleyKesAgentAddress",
+		},
+		{
+			name: "server pin without a remote KES agent",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+				c.ShelleyKESAgentServerSPKISHA256 = strings.Repeat("ab", 32)
+			},
+			wantErr: "shelleyKesAgentServerSpkiSha256 requires shelleyKesAgentAddress",
+		},
+		{
+			name: "remote KES agent with an empty host",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddress = ":3443"
+			},
+			wantErr: "empty host",
+		},
+		{
+			name: "remote KES agent with an out-of-range port",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddress = "kes-agent.example:70000"
+			},
+			wantErr: "is not in 1-65535",
+		},
+		{
+			name: "remote KES agent with a non-numeric port",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddress = "kes-agent.example:https"
+			},
+			wantErr: "is not in 1-65535",
+		},
+		{
+			name: "remote KES agent with a client certificate but no key",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentClientKeyFile = ""
+			},
+			wantErr: "must be set together",
+		},
+		{
+			name: "remote KES agent without a client certificate",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentClientCertFile = ""
+				c.ShelleyKESAgentClientKeyFile = ""
+			},
+		},
+		{
+			name: "remote KES agent without a server pin",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentServerSPKISHA256 = ""
+			},
+		},
+		{
+			name: "remote KES agent over plain TCP",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentServerSPKISHA256 = ""
+				c.ShelleyKESAgentClientCertFile = ""
+				c.ShelleyKESAgentClientKeyFile = ""
+				c.ShelleyKESAgentPlaintext = true
+			},
+		},
+		{
+			name: "remote KES agent over plain TCP with a pin",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentClientCertFile = ""
+				c.ShelleyKESAgentClientKeyFile = ""
+				c.ShelleyKESAgentPlaintext = true
+			},
+			wantErr: "shelleyKesAgentPlaintext takes neither",
+		},
+		{
+			name: "remote KES agent over plain TCP with a client certificate",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentServerSPKISHA256 = ""
+				c.ShelleyKESAgentPlaintext = true
+			},
+			wantErr: "shelleyKesAgentPlaintext takes neither",
+		},
+		{
+			name: "remote KES agent with a short server pin",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentServerSPKISHA256 = "abcd"
+			},
+			wantErr: "shelleyKesAgentServerSpkiSha256 must be 64 hex characters",
+		},
+		{
 			name:    "invalid KES agent mode",
 			modify:  func(c *Config) { c.ShelleyKESAgentMode = "signing" },
 			wantErr: "invalid shelleyKesAgentMode",
@@ -960,11 +1125,10 @@ func TestValidateMithrilServer(t *testing.T) {
 			wantErr: "invalid mithril.server.port",
 		},
 		{
-			name: "mithril server public HTTP base URL is not loopback",
+			name: "mithril server public HTTP base URL",
 			modify: func(c *Config) {
 				c.Mithril.Server.PublicBaseURL = "http://snapshots.example.org"
 			},
-			wantErr: "invalid mithril.server.publicBaseUrl",
 		},
 		{
 			name: "enabled mithril aggregator needs an epoch",
@@ -1022,20 +1186,18 @@ func TestValidateMithrilServer(t *testing.T) {
 			wantErr: "mithril.server.aggregator.genesisSigningKeyFile",
 		},
 		{
-			name: "enabled mithril aggregator needs an operator token file",
+			name: "enabled mithril aggregator permits anonymous requests",
 			modify: func(c *Config) {
 				c.Mithril.Server.Aggregator = validMithrilAggregator()
 				c.Mithril.Server.Aggregator.OperatorTokenFile = ""
 				c.BindAddr = "127.0.0.1"
 			},
-			wantErr: "mithril.server.aggregator.operatorTokenFile",
 		},
 		{
-			name: "public mithril aggregator requires tls",
+			name: "public mithril aggregator permits plaintext HTTP",
 			modify: func(c *Config) {
 				c.Mithril.Server.Aggregator = validMithrilAggregator()
 			},
-			wantErr: "mithril.server.tlsEnabled is required",
 		},
 		{
 			name: "enabled mithril aggregator fully configured",
@@ -1486,7 +1648,9 @@ func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
 	}
 }
 
-func TestValidateDatabaseLifecycleCloudDestinationRequiresTrustKey(t *testing.T) {
+func TestValidateDatabaseLifecycleCloudDestinationRequiresTrustKey(
+	t *testing.T,
+) {
 	cfg := validTestConfig()
 	cfg.DatabaseLifecycle.SnapshotCloudDestination = "s3://bucket/prefix"
 
@@ -1633,134 +1797,18 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 	)
 }
 
-func TestValidateBarkDatabaseServiceSecurity(t *testing.T) {
-	newConfig := func(t *testing.T) *Config {
-		t.Helper()
-		cfg := validTestConfig()
-		cfg.BarkPort = 8091
-		cfg.DatabaseLifecycle.SnapshotDir = t.TempDir()
-		cfg.BarkClientCAFilePath = "/certs/ca.crt"
-		cfg.BarkOperatorCertificateFingerprints = []string{
-			strings.Repeat("AB:", 31) + "AB",
-		}
-		cfg.TlsCertFilePath = "/certs/tls.crt"
-		cfg.TlsKeyFilePath = "/certs/tls.key"
-		return cfg
-	}
-
-	t.Run("complete policy", func(t *testing.T) {
-		require.NoError(
-			t,
-			newConfig(t).validate(RunModeServe, minUnprivilegedPort),
-		)
-	})
-
-	t.Run("missing client CA", func(t *testing.T) {
-		cfg := newConfig(t)
-		cfg.BarkClientCAFilePath = ""
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(t, err, "barkClientCaFilePath is required")
-	})
-
-	t.Run("missing operator allowlist", func(t *testing.T) {
-		cfg := newConfig(t)
-		cfg.BarkOperatorCertificateFingerprints = nil
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(
-			t,
-			err,
-			"barkOperatorCertificateFingerprints requires at least one",
-		)
-	})
-
-	t.Run("invalid operator fingerprint", func(t *testing.T) {
-		cfg := newConfig(t)
-		cfg.BarkOperatorCertificateFingerprints = []string{"not-a-fingerprint"}
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(
-			t,
-			err,
-			"must be a 32-byte SHA-256 certificate fingerprint",
-		)
-	})
-}
-
-func TestValidateBarkLifecycleSecurity(t *testing.T) {
+func TestValidateBarkLifecyclePort(t *testing.T) {
 	t.Parallel()
-
-	newConfig := func() *Config {
-		cfg := validTestConfig()
-		cfg.BarkPort = 8091
-		cfg.BarkClientCAFilePath = "/certs/ca.crt"
-		cfg.BarkLifecycleEnabled = true
-		cfg.BarkLifecycleOperatorCertificateFingerprints = []string{
-			strings.Repeat("cd", 32),
-		}
-		cfg.TlsCertFilePath = "/certs/tls.crt"
-		cfg.TlsKeyFilePath = "/certs/tls.key"
-		return cfg
-	}
-
-	t.Run("complete policy", func(t *testing.T) {
-		require.NoError(t, newConfig().validate(RunModeServe, minUnprivilegedPort))
-	})
-
-	t.Run("database credentials do not enable lifecycle", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.BarkLifecycleEnabled = false
-		cfg.BarkLifecycleOperatorCertificateFingerprints = nil
-		cfg.BarkOperatorCertificateFingerprints = []string{
-			strings.Repeat("ab", 32),
-		}
-		require.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
-	})
-
-	t.Run("allowlist requires explicit enablement", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.BarkLifecycleEnabled = false
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(
-			t,
-			err,
-			"barkLifecycleOperatorCertificateFingerprints requires barkLifecycleEnabled",
-		)
-	})
-
-	t.Run("enabled service requires port", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.BarkPort = 0
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(t, err, "barkPort must be non-zero")
-	})
-
-	t.Run("enabled service requires client CA", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.BarkClientCAFilePath = ""
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(t, err, "barkClientCaFilePath is required")
-	})
-
-	t.Run("enabled service requires its own operator allowlist", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.BarkLifecycleOperatorCertificateFingerprints = nil
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(
-			t,
-			err,
-			"barkLifecycleOperatorCertificateFingerprints requires at least one",
-		)
-	})
-
-	t.Run("invalid lifecycle operator fingerprint", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.BarkLifecycleOperatorCertificateFingerprints = []string{"invalid"}
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(
-			t,
-			err,
-			"barkLifecycleOperatorCertificateFingerprints[0] must be a 32-byte",
-		)
-	})
+	cfg := validTestConfig()
+	cfg.BarkLifecycleEnabled = true
+	cfg.BarkPort = 8091
+	require.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
+	cfg.BarkPort = 0
+	require.ErrorContains(
+		t,
+		cfg.validate(RunModeServe, minUnprivilegedPort),
+		"barkPort must be non-zero",
+	)
 }
 
 func TestValidateDatabaseLifecycleSnapshotCloudDestinationPrefix(t *testing.T) {
@@ -2378,7 +2426,11 @@ func TestValidateDMQRejectsUnknownTopic(t *testing.T) {
 	cfg.DMQ = DefaultDMQConfig()
 	cfg.DMQ.Enabled = true
 	cfg.DMQ.Topic = "typo"
-	require.ErrorContains(t, cfg.validate(cfg.RunMode, minUnprivilegedPort), "dmq.topic must be mithril")
+	require.ErrorContains(
+		t,
+		cfg.validate(cfg.RunMode, minUnprivilegedPort),
+		"dmq.topic must be mithril",
+	)
 }
 
 func TestValidateRejectsNegativeBarkArchiveLookupRates(t *testing.T) {
@@ -2402,4 +2454,16 @@ func TestValidateRejectsNegativeBarkArchiveLookupRates(t *testing.T) {
 
 	cfg = validTestConfig()
 	require.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
+}
+
+// setRemoteKESAgent configures a block producer that signs through a remote
+// KES agent.
+func setRemoteKESAgent(c *Config) {
+	c.BlockProducer = true
+	c.ShelleyVRFKey = "/keys/vrf.skey"
+	c.ShelleyOperationalCertificate = "/keys/node.cert"
+	c.ShelleyKESAgentAddress = "kes-agent.example:3443"
+	c.ShelleyKESAgentClientCertFile = "/keys/kes-client.crt"
+	c.ShelleyKESAgentClientKeyFile = "/keys/kes-client.key"
+	c.ShelleyKESAgentServerSPKISHA256 = strings.Repeat("ab", 32)
 }

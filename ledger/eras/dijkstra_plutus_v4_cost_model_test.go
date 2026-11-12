@@ -100,6 +100,16 @@ func witnessSetWithScript(
 			[]lcommon.PlutusV3Script{s},
 			false,
 		)
+	case lcommon.PlutusV2Script:
+		ws.WsPlutusV2Scripts = cbor.NewSetType(
+			[]lcommon.PlutusV2Script{s},
+			false,
+		)
+	case lcommon.PlutusV1Script:
+		ws.WsPlutusV1Scripts = cbor.NewSetType(
+			[]lcommon.PlutusV1Script{s},
+			false,
+		)
 	}
 	return ws
 }

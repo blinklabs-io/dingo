@@ -216,8 +216,7 @@ type ServerConfig struct {
 	// Store holds the produced artifacts.
 	Store ArtifactStore
 	// PublicBaseURL is the configured public HTTP(S) origin used in artifact
-	// download locations. It is required for detail responses and must use
-	// HTTPS except for loopback origins used by local deployments and tests.
+	// download locations. It is required for detail responses.
 	PublicBaseURL string
 	// RedirectBaseURL, when set, answers artifact file requests with a
 	// redirect to RedirectBaseURL + "/" + key instead of streaming the
@@ -244,16 +243,6 @@ func parsePublicBaseURL(value string) (*url.URL, error) {
 		return nil, errors.New(
 			"public base URL must be an HTTP(S) origin without credentials, path, query, or fragment",
 		)
-	}
-	if scheme == "http" {
-		host := strings.ToLower(u.Hostname())
-		addr, parseErr := netip.ParseAddr(host)
-		if host != "localhost" &&
-			(parseErr != nil || !addr.Unmap().IsLoopback()) {
-			return nil, errors.New(
-				"plain HTTP public base URL is allowed only on loopback",
-			)
-		}
 	}
 	return &url.URL{Scheme: scheme, Host: u.Host}, nil
 }

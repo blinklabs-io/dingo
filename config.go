@@ -290,6 +290,9 @@ type Config struct {
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
 	shelleyKESAgentSignTimeout                                                          time.Duration
+	shelleyKESAgentAddress, shelleyKESAgentClientCertFile, shelleyKESAgentClientKeyFile string
+	shelleyKESAgentServerSPKISHA256                                                     string
+	shelleyKESAgentPlaintext                                                            bool
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
 	forgeEndorserBlockStalenessSlots                                                    uint64
@@ -1005,6 +1008,9 @@ func (c *Config) syncCompatFields() {
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
+	c.shelleyKESAgentAddress, c.shelleyKESAgentClientCertFile, c.shelleyKESAgentClientKeyFile = c.cfg.ShelleyKESAgentAddress, c.cfg.ShelleyKESAgentClientCertFile, c.cfg.ShelleyKESAgentClientKeyFile
+	c.shelleyKESAgentServerSPKISHA256 = c.cfg.ShelleyKESAgentServerSPKISHA256
+	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
 	c.forgeEndorserBlockStalenessSlots = c.cfg.ForgeEndorserBlockStalenessSlots
@@ -1788,6 +1794,35 @@ func WithShelleyKESAgentSignTimeout(timeout time.Duration) ConfigOptionFunc {
 	}
 }
 
+// WithShelleyKESAgentRemote signs block headers through a bursa KES agent's
+// remote sign listener at address (host:port)
+// (CARDANO_SHELLEY_KES_AGENT_ADDRESS) over TLS 1.3. serverSPKISHA256 is the
+// optional hex SHA-256 of the agent's server SubjectPublicKeyInfo, which pins
+// the agent; without it the agent's certificate is verified with standard
+// x509. certFile and keyFile are this node's optional PEM client certificate
+// and key, set as a pair. It replaces WithShelleyKESAgentSocket and implies
+// sign mode; WithShelleyKESAgentPlaintext selects plain TCP instead of TLS.
+func WithShelleyKESAgentRemote(
+	address, certFile, keyFile, serverSPKISHA256 string,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentAddress = address
+		c.cfg.ShelleyKESAgentClientCertFile = certFile
+		c.cfg.ShelleyKESAgentClientKeyFile = keyFile
+		c.cfg.ShelleyKESAgentServerSPKISHA256 = serverSPKISHA256
+	}
+}
+
+// WithShelleyKESAgentPlaintext runs the remote KES agent link over plain TCP
+// (CARDANO_SHELLEY_KES_AGENT_PLAINTEXT), for setups where something else
+// secures it, such as a service mesh sidecar. A server pin and a client
+// certificate need TLS, so it takes neither.
+func WithShelleyKESAgentPlaintext(plaintext bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentPlaintext = plaintext
+	}
+}
+
 // WithLeiosVoteSigningKeyFile specifies the path to a hex-encoded BLS12-381
 // Leios vote signing key (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE). When set on a
 // block producer whose pool is a Leios committee member, the node emits
@@ -2042,9 +2077,8 @@ func WithBarkHost(host string) ConfigOptionFunc {
 	}
 }
 
-// WithBarkClientCAFilePath sets the PEM CA bundle Bark uses to authenticate
-// every DatabaseService and LifecycleService caller. Destructive methods
-// additionally require their service's operator allowlist.
+// WithBarkClientCAFilePath retains the legacy input.
+// It does not enable authentication or authorization.
 func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkClientCAFilePath = path
@@ -2081,8 +2115,8 @@ func WithBarkArchiveCallerLookupsPerSecond(rate int) ConfigOptionFunc {
 	}
 }
 
-// WithBarkOperatorCertificateFingerprints sets the SHA-256 client certificate
-// fingerprints authorized to invoke destructive DatabaseService RPCs.
+// WithBarkOperatorCertificateFingerprints retains the legacy input.
+// It does not enable authentication or authorization.
 func WithBarkOperatorCertificateFingerprints(
 	fingerprints []string,
 ) ConfigOptionFunc {
@@ -2101,8 +2135,8 @@ func WithBarkLifecycleEnabled(enabled bool) ConfigOptionFunc {
 	}
 }
 
-// WithBarkLifecycleOperatorCertificateFingerprints sets the SHA-256 client
-// certificate fingerprints authorized to invoke Bark Stop and Restart RPCs.
+// WithBarkLifecycleOperatorCertificateFingerprints retains the legacy input.
+// It does not enable authentication or authorization.
 func WithBarkLifecycleOperatorCertificateFingerprints(
 	fingerprints []string,
 ) ConfigOptionFunc {
@@ -2475,8 +2509,8 @@ func (c *Config) BarkBlockDownloadAllowPrivateAddresses() bool {
 	return c.cfg.BarkBlockDownloadAllowPrivateAddresses
 }
 
-// BarkOperatorCertificateFingerprints returns the SHA-256 client certificate
-// fingerprints authorized to invoke destructive Bark DatabaseService RPCs.
+// BarkOperatorCertificateFingerprints retains the legacy input.
+// It does not enable authentication or authorization.
 func (c *Config) BarkOperatorCertificateFingerprints() []string {
 	return slices.Clone(c.cfg.BarkOperatorCertificateFingerprints)
 }
@@ -2499,8 +2533,8 @@ func (c *Config) BarkLifecycleEnabled() bool {
 	return c.cfg.BarkLifecycleEnabled
 }
 
-// BarkLifecycleOperatorCertificateFingerprints returns the distinct operator
-// allowlist for Bark Stop and Restart RPCs.
+// BarkLifecycleOperatorCertificateFingerprints retains the legacy input.
+// It does not enable authentication or authorization.
 func (c *Config) BarkLifecycleOperatorCertificateFingerprints() []string {
 	return slices.Clone(c.cfg.BarkLifecycleOperatorCertificateFingerprints)
 }
@@ -3013,10 +3047,12 @@ func (c *Config) CardanoNodeConfig() *cardano.CardanoNodeConfig {
 	return c.cardanoNodeConfig
 }
 
-// genesisSelectionMode reports whether the chain selector starts in Genesis
-// mode: Genesis bootstrap is enabled, the sync starts from origin, and the
-// Cardano node configuration does not name PraosMode.
-func (c *Config) genesisSelectionMode() bool {
+// genesisSelectionEligible reports whether the Genesis state machine runs at
+// all: Genesis bootstrap is enabled, no explicit intersection is configured,
+// and the Cardano node configuration does not name PraosMode. Whether the
+// selector starts in Genesis mode additionally depends on the caught-up marker
+// (see initialGenesisSelectionMode).
+func (c *Config) genesisSelectionEligible() bool {
 	return c.genesisBootstrap &&
 		!c.intersectTip &&
 		len(c.intersectPoints) == 0 &&

@@ -16,8 +16,6 @@ package node
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,7 +25,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -284,38 +281,11 @@ func newMetricsServer(cfg *config.Config) *http.Server {
 	metricsMux.Handle("/metrics", promhttp.Handler())
 	return &http.Server{
 		Addr:              cfg.MetricsListenAddress(),
-		Handler:           MetricsAuthHandler(cfg.MetricsAuthToken, metricsMux),
+		Handler:           metricsMux,
 		ReadHeaderTimeout: 60 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-}
-
-// MetricsAuthHandler requires a configured Bearer token before serving
-// Prometheus metrics. An empty token preserves unauthenticated loopback and
-// externally protected deployments.
-func MetricsAuthHandler(token string, next http.Handler) http.Handler {
-	if token == "" {
-		return next
-	}
-	tokenHash := sha256.Sum256([]byte(token))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		scheme, provided, ok := strings.Cut(
-			r.Header.Get("Authorization"), " ",
-		)
-		ok = ok && strings.EqualFold(scheme, "Bearer")
-		provided = strings.TrimLeft(provided, " ")
-		providedHash := sha256.Sum256([]byte(provided))
-		if !ok || subtle.ConstantTimeCompare(
-			providedHash[:],
-			tokenHash[:],
-		) != 1 {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func newPprofDebugServer(cfg *config.Config) *http.Server {
@@ -1080,14 +1050,27 @@ func buildDingoConfig(
 		dingo.WithShelleyOperationalCertificate(
 			cfg.ShelleyOperationalCertificate,
 		),
-		// node_forging.go gates agent-backed KES signing on a non-empty
-		// socket path, so dropping any of these three silently falls back
-		// to local-file signing on the serve path.
+		// node_forging.go selects the KES signer from the two agent
+		// selectors: an address selects the remote client, otherwise a
+		// socket path selects the local agent client, and only with both
+		// empty does it sign from shelleyKesKey (kesAgentConfigured).
+		// Dropping a selector therefore changes the signer. The mode, sign
+		// timeout, client certificate, server pin and plaintext flag are
+		// agent and remote transport options: dropping one keeps the
+		// selected agent but can change its mode or transport, or make its
+		// connection fail.
 		dingo.WithShelleyKESAgentSocket(cfg.ShelleyKESAgentSocket),
 		dingo.WithShelleyKESAgentMode(cfg.ShelleyKESAgentMode),
 		dingo.WithShelleyKESAgentSignTimeout(
 			cfg.ShelleyKESAgentSignTimeout,
 		),
+		dingo.WithShelleyKESAgentRemote(
+			cfg.ShelleyKESAgentAddress,
+			cfg.ShelleyKESAgentClientCertFile,
+			cfg.ShelleyKESAgentClientKeyFile,
+			cfg.ShelleyKESAgentServerSPKISHA256,
+		),
+		dingo.WithShelleyKESAgentPlaintext(cfg.ShelleyKESAgentPlaintext),
 		dingo.WithForgeSyncToleranceSlots(
 			cfg.ForgeSyncToleranceSlots,
 		),

@@ -425,11 +425,18 @@ func newIntraBlockDoubleSpendFixture(
 		activeEras:     []eras.EraDesc{testEra},
 		currentEra:     testEra,
 		currentPParams: pparams,
+		currentEpoch: models.Epoch{
+			StartSlot:     0,
+			LengthInSlots: 100_000,
+			SlotLength:    1_000,
+			EraId:         testEra.Id,
+		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: nodeConfig,
 			Logger:            testLogger(),
 		},
 	}
+	ls.epochCache = []models.Epoch{ls.currentEpoch}
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 	block := &validityOutcomeTestBlock{
