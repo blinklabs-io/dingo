@@ -812,6 +812,15 @@ type Config struct {
 	// pprof on a wildcard or management-network address.
 	DebugBindAddr string `yaml:"debugBindAddr"                       envconfig:"DINGO_DEBUG_BIND_ADDR"`
 	DebugPort     uint   `yaml:"debugPort"                           envconfig:"DINGO_DEBUG_PORT"`
+	// DebugMutexProfileFraction samples on average 1 in N contended mutex
+	// events for the pprof mutex profile. 0 leaves mutex profiling off.
+	// It only takes effect while DebugPort is non-zero.
+	DebugMutexProfileFraction uint `yaml:"debugMutexProfileFraction"           envconfig:"DINGO_DEBUG_MUTEX_PROFILE_FRACTION"`
+	// DebugBlockProfileRate samples one blocking event per N nanoseconds
+	// spent blocked for the pprof block profile. 0 leaves block profiling
+	// off; 1 records every event. It only takes effect while DebugPort is
+	// non-zero.
+	DebugBlockProfileRate uint `yaml:"debugBlockProfileRate"               envconfig:"DINGO_DEBUG_BLOCK_PROFILE_RATE"`
 	// HealthPort serves the liveness (/health, /healthz) and readiness
 	// (/readyz) probes on a listener of their own, so an operator can
 	// expose them to an orchestrator or load balancer without also
@@ -1605,6 +1614,8 @@ func newDefaultConfig() *Config {
 		DebugBindAddr:                       DefaultDebugBindAddr,
 		MetricsBindAddr:                     DefaultMetricsBindAddr,
 		DebugPort:                           0,
+		DebugMutexProfileFraction:           0,
+		DebugBlockProfileRate:               0,
 		HealthPort:                          DefaultHealthPort,
 		HealthReadyGapSlots:                 DefaultHealthReadyGapSlots,
 		PrivateBindAddr:                     "127.0.0.1",

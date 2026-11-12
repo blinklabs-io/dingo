@@ -17,11 +17,14 @@ package chainselection
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"math/rand/v2"
+	rtrace "runtime/trace"
 	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/consensus/praos"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -433,6 +436,9 @@ func (cs *ChainSelector) advanceGenesisStateMachine() bool {
 }
 
 func (cs *ChainSelector) tryLeaveGenesis() bool {
+	defer rtrace.StartRegion(
+		context.Background(), tracing.RegionChainSelectionGSMStep,
+	).End()
 	cs.mutex.RLock()
 	if cs.mode != SelectionModeGenesis {
 		cs.mutex.RUnlock()

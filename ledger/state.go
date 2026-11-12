@@ -32,6 +32,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	rtrace "runtime/trace"
 	"slices"
 	"strconv"
 	"strings"
@@ -9775,6 +9776,9 @@ func (ls *LedgerState) processBlocksFromSource(
 			// the commit stage.
 			var bodyElapsed time.Duration
 			var tracedBlocks []ledger.Block
+			batchRegion := rtrace.StartRegion(
+				ctx, tracing.RegionLedgerBatchApplyCommit,
+			)
 			err = ls.submitBlockApplyDBTxn(
 				ctx,
 				snapshotTip,
@@ -10224,6 +10228,7 @@ func (ls *LedgerState) processBlocksFromSource(
 					return nil
 				},
 			)
+			batchRegion.End()
 			commitElapsed := max(time.Since(submitStart)-bodyElapsed, 0)
 			if err != nil {
 				clear(trustedReplayUtxos)

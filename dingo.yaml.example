@@ -252,6 +252,18 @@
 # CLI: --debug-bind-addr  Env: DINGO_DEBUG_BIND_ADDR
 # debugBindAddr: "127.0.0.1"
 
+# Mutex and block profiles served at /debug/pprof/mutex and /debug/pprof/block
+# stay empty until a sampling rate is set. Both are off at 0 and only apply
+# while debugPort is non-zero; they add overhead, so enable them for a
+# diagnosis rather than permanently.
+# debugMutexProfileFraction samples on average 1 in N contended mutex events.
+# CLI: --debug-mutex-profile-fraction  Env: DINGO_DEBUG_MUTEX_PROFILE_FRACTION
+# debugMutexProfileFraction: 0
+# debugBlockProfileRate records one blocking event per N nanoseconds spent
+# blocked (1 records every event).
+# CLI: --debug-block-profile-rate  Env: DINGO_DEBUG_BLOCK_PROFILE_RATE
+# debugBlockProfileRate: 0
+
 # Enable OpenTelemetry tracing. Disabled by default: with no collector
 # listening, the OTLP exporter logs noisy connection errors. When enabled
 # without tracingEndpoint, the standard OTEL_TRACES_EXPORTER (default otlp)
