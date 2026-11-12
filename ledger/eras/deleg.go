@@ -76,9 +76,11 @@ func (e StakeKeyNonZeroAccountBalanceError) Error() string {
 }
 
 // validateShelleyDelegCerts enforces the Shelley-through-Babbage DELEG
-// predicates that the upstream gouroboros rules leave out, walking the
-// certificates in order the way DELEGS does so each one sees the state its
-// predecessors left.
+// predicates, walking the certificates in order the way DELEGS does so each
+// one sees the state its predecessors left. The upstream gouroboros delegation
+// rule enforces the same predicates when the ledger state provides the
+// capabilities it reads, so a rejection is reported by both with different
+// error types.
 //
 // It covers stake registration and deregistration, delegation from a
 // credential deregistered earlier in the transaction, the move
