@@ -158,6 +158,12 @@ type TrackedClient struct {
 	// observerHeaderGap survives role changes until a safe intersection or
 	// replacement session can replay headers skipped by this observer.
 	observerHeaderGap bool
+	// protocolPoint is the point of the client's latest roll-forward or
+	// rollback, whether or not the header was admitted. An observer's
+	// headers never move Cursor, so this is the point its MsgAwaitReply
+	// refers to.
+	protocolPoint    ocommon.Point
+	protocolPointSet bool
 	// advertisedTip is the tip in the client's latest chainsync message,
 	// observers included. Whether it is stale changes as the wall clock
 	// advances, so it is judged each time a decision is made.
@@ -942,6 +948,43 @@ func (s *State) RecordClientObserverHeaderGap(
 	}
 	tc.observerHeaderGap = true
 	return !tc.ObservabilityOnly
+}
+
+// RecordClientProtocolPoint records point as the latest roll-forward or
+// rollback point of session.
+func (s *State) RecordClientProtocolPoint(
+	connId ouroboros.ConnectionId,
+	session ClientSessionToken,
+	point ocommon.Point,
+) {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc := s.trackedClients[connId]
+	if tc == nil || tc != session.client {
+		return
+	}
+	tc.protocolPoint = ocommon.Point{
+		Slot: point.Slot,
+		Hash: cloneBytes(point.Hash),
+	}
+	tc.protocolPointSet = true
+}
+
+// ClientProtocolPoint returns the latest roll-forward or rollback point of a
+// tracked client, and false before the client has sent either.
+func (s *State) ClientProtocolPoint(
+	connId ouroboros.ConnectionId,
+) (ocommon.Point, bool) {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	tc := s.trackedClients[connId]
+	if tc == nil || !tc.protocolPointSet {
+		return ocommon.Point{}, false
+	}
+	return ocommon.Point{
+		Slot: tc.protocolPoint.Slot,
+		Hash: cloneBytes(tc.protocolPoint.Hash),
+	}, true
 }
 
 // ClientObserverHeaderGap reports whether this session skipped observer headers.
@@ -2089,6 +2132,7 @@ func (s *State) GetTrackedClient(
 	result.Cursor.Hash = cloneBytes(tc.Cursor.Hash)
 	result.Tip.Point.Hash = cloneBytes(tc.Tip.Point.Hash)
 	result.deliveryWatermark.Hash = cloneBytes(tc.deliveryWatermark.Hash)
+	result.protocolPoint.Hash = cloneBytes(tc.protocolPoint.Hash)
 	return &result
 }
 
@@ -2103,6 +2147,7 @@ func (s *State) GetTrackedClients() []TrackedClient {
 		cpy.Cursor.Hash = cloneBytes(tc.Cursor.Hash)
 		cpy.Tip.Point.Hash = cloneBytes(tc.Tip.Point.Hash)
 		cpy.deliveryWatermark.Hash = cloneBytes(tc.deliveryWatermark.Hash)
+		cpy.protocolPoint.Hash = cloneBytes(tc.protocolPoint.Hash)
 		result = append(result, cpy)
 	}
 	return result

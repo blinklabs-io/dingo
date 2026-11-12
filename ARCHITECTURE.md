@@ -2484,7 +2484,8 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chainselection.selection` | ChainSelector | Chain selection made |
 | `chainselection.peer_evicted` | ChainSelector | Peer evicted |
 | `chainselection.genesis_corroboration_failed` | ChainSelector | Densest Genesis fast source lacked corroboration and was denied selection |
-| `chainselection.genesis_mode_exited` | ChainSelector | Left Genesis mode for Praos after catching up to the best known tip |
+| `chainselection.genesis_mode_exited` | ChainSelector | Left Genesis mode for Praos: every ChainSync connection was idle and none held a chain better than the selection (`LocalSlot`, `Peers`, `GenesisWindowSlots`); the node writes the `CaughtUpMarker` |
+| `chainselection.genesis_mode_entered` | ChainSelector | Returned to Genesis mode because the selection tip became older than the maximum caught-up age, or its slot time cannot be determined (`LocalSlot`, `GenesisWindowSlots`); the node removes the `CaughtUpMarker` |
 | `chainselection.selected_none` | ChainSelector | Best-peer selection transitioned to none (selection stalled) |
 | `chainselection.peer_rollback_handler_panic` | ChainSelector | The PeerRollbackEvent handler panicked; its subscription was torn down |
 | `chainselection.evaluation_panic` | ChainSelector | A background evaluation tick or triggered evaluation panicked; the transition it would have produced was dropped |
@@ -2549,9 +2550,10 @@ cap, so on a long-running node the history fills to the cap and each added
 block scans up to 2160 entries. A competing block this node never applied,
 because it never became the chain, is not seen.
 
-The six topics the ChainSelector publishes itself —
+The seven topics the ChainSelector publishes itself —
 `chainselection.chain_switch`, `selection`, `peer_evicted`,
-`genesis_corroboration_failed`, `genesis_mode_exited` and `selected_none` —
+`genesis_corroboration_failed`, `genesis_mode_exited`, `genesis_mode_entered`
+and `selected_none` —
 go through `ChainSelector.publishSelection`, which uses `PublishOrdered` rather
 than `Publish`. The selector's producers are all goroutines that have to keep
 making progress — the EventBus dispatch goroutines for the internal
@@ -7568,8 +7570,8 @@ claims remain withheld from ledger ingress; rejected candidates terminate the
 protocol. The stale-tip and eagerness admission gates consult the staged
 frontier, including a new peer awaiting its first ledger admission. The ledger
 still verifies every applied header, completing deferred verification at apply
-time. Genesis exit may consult the advertised slot only through the separately
-documented delivered-frontier gate below. A RollBackward restores the delivered
+time. Genesis exit never consults the advertised tip; it follows the idle and
+delivered-frontier rule below. A RollBackward restores the delivered
 frontier from a bounded `k+1` header history; if the point is no longer
 retained, the selector uses the rollback point with a conservative zero block
 number and never promotes the accompanying advertised tip into the observed
@@ -7735,10 +7737,11 @@ peer into a different operator. Valency groups, trustable flags, remote IPs and
 peer sharing do not establish operator control.
 
 
-Genesis mode (`genesisBootstrap`, active only for from-origin sync with no
+Genesis mode (`genesisBootstrap`, active only with no
 `intersectTip`/`intersectPoints`, and never when the Cardano node configuration
 names `ConsensusMode: PraosMode`, which makes the node follow its peers by Praos
-rules as the reference node does) selects the chain by observed header *density*
+rules as the reference node does) is the Syncing state of a state machine that
+mirrors the reference's GSM (see **Genesis state machine** below). It selects the chain by observed header *density*
 within a window of `3k/f` slots rather than by longest-chain length, so a
 from-origin node can prefer the denser (honest) chain before it has the history
 to run the full Praos comparison. The window is derived from Shelley genesis
@@ -7746,7 +7749,8 @@ params (`GenesisWindowSlotsForParams`) as `ceil(3k/f)` over the exact genesis
 rational, matching the reference node's `computeStabilityWindow`, or overridden
 by `genesisWindowSlots`. Without k and a positive f,
 `GenesisWindowSlotsForParams` returns 0 and the node falls back to
-`DefaultGenesisWindowSlots` (6480) for density ranking and the exit horizon.
+`DefaultGenesisWindowSlots` (6480) for density ranking and the historicity
+cutoff.
 Each tracked peer keeps a bounded recent frontier of `(slot, hash)` points
 (`PeerChainTip.observedPoints`, in lockstep with the `observedSlots` used for
 density), trimmed to the window and on rollback. That rolling frontier ranks
@@ -7786,12 +7790,14 @@ back toward a point beyond where the node actually is. Greater density wins;
 equal density falls back to the normal Praos length/select-view comparison. Node
 composition injects an atomic Genesis-mode/window query from `ChainSelector`
 into ledger, so the same resolver automatically returns to Praos once the
-selector exits Genesis mode. While Genesis is active, chainsync and ledger raise
+selector is in Praos mode and returns to the Genesis comparison whenever it
+re-enters Genesis. While Genesis is active, chainsync and ledger raise
 their per-peer header ancestry entry bound to the candidate fragment bound,
 `chainselection.GenesisCandidateHeaderLimit`: k headers plus one header per
 window slot, because the window is measured in slots and a candidate denser than
 the active-slot coefficient holds more than 3k headers in it. They shrink back
-to their normal bounded history after exit. That entry bound is
+to their normal bounded history after exit and rebuild from new deliveries on
+re-entry; the selector's own point frontiers are kept (below). That entry bound is
 attacker-controlled in memory, so both histories are also held to byte budgets
 that apply whatever the entry bound is. Chainsync's observed-header history
 retains decoded headers; each record is charged its header CBOR plus 2 KiB for
@@ -7879,11 +7885,25 @@ intersection and a rival offering more than `k` later headers can coexist. Its
 entry count per peer is bounded by `GenesisWindowSlots + k + 1`, and
 `maxTrackedPeers` bounds the aggregate. A separate `observedTipHistory` stays
 bounded to `k+1` entries for rollback restoration and is trimmed on rollback
-(`PeerChainTip.ApplyRollback`). Outside Genesis hash-frontier tracking is
-disabled and fragments snapshot that short rollback history instead.
+(`PeerChainTip.ApplyRollback`). A selector that runs the Genesis state machine
+(`ChainSelectorConfig.GenesisStateMachine`, implied by `GenesisMode`) keeps this
+bounded hash frontier in Praos too, and keeps `deliveredPeerTips` and the
+eagerness delivery histories across the exit, so the Limit on Eagerness,
+density disconnection and density comparison have data when it returns to
+Genesis. A selector without the state machine (Praos overrides) tracks no hashes
+and its fragments snapshot the short rollback history instead.
 Each frontier stores its first block number; consecutive block heights align
 two chains for a binary search of their last equal point. A height gap starts a
 new frontier, leaving the comparison undecidable until continuity is rebuilt.
+A frontier emptied by a chainsync rollback, including the rollback that opens a
+session at its `FindIntersect` point, starts from the rollback point when the
+next delivered header names it as its parent; the point is recorded one block
+below that header. A boundary block, which repeats its parent's block number,
+or a header that does not carry the rollback point's hash as its parent hash
+(for example because its parent was withheld from selection), starts the
+frontier without it. Two peers whose forks branch exactly where their sessions
+intersected therefore still share a frontier point, as upstream anchors every
+candidate fragment at its intersection with the selected chain.
 Window density and suffix counts use binary searches over ordered slots, so a
 density pass is logarithmic in retained points per peer pair while holding the
 selector lock.
@@ -8248,7 +8268,7 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   history is retained in Genesis and dropped in Praos.
 - **Header-crypto verification gates observation, independent of
   corroboration.** Density and the corroboration hash frontier are both
-  populated from `recordObservedPoint`, driven by `PeerTipUpdateEvent`
+  populated from `recordObservedLinkedPoint`, driven by `PeerTipUpdateEvent`
   observation in the roll-forward handler — so with `corroborationPeers = 0` (or
   before any corroboration state exists), density alone previously came from
   peer-reported headers that had not passed any check. The roll-forward handler
@@ -8429,32 +8449,91 @@ to believe are independent* from origin.
 fast source, and per-peer density/corroboration. The selector emits
 `chainselection.genesis_corroboration_failed` when the densest fast source is
 denied for lack of corroboration (deduped per source; the warning is also logged
-without an EventBus) and `chainselection.genesis_mode_exited` with the exit
-reason (local slot, best known *advertised* slot, window) when it returns to
-Praos — exit keys off the advertised network tip, not the observed frontier, so
-the gate stays active through from-origin sync until the local tip nears the
-real network tip.
+without an EventBus), `chainselection.genesis_mode_exited` (local slot, number
+of idle connections, window) when it leaves Genesis and
+`chainselection.genesis_mode_entered` (local slot, window) when it returns.
 
-The exit horizon (`bestKnownGenesisSlotLocked`) is the highest advertised tip
-slot among **corroborated (selectable)** peers that have **actually delivered
-headers up to within the window of that advertised tip**
-(`ObservedTip + window >= Tip`). The advertised tip is untrusted and unbounded;
-the implausible-tip check deliberately bounds the delivered frontier instead,
-because an honest advertisement can be far ahead during catch-up. Corroboration
-alone does not fix this, because it validates the *delivered* headers (the
-observed frontier), not the advertised claim: a peer that delivers one shared
-early header (passing corroboration) can still advertise a slot near
-`math.MaxUint64`. Binding the horizon to *delivered* data closes this: a liar
-cannot deliver headers up to a `MaxUint64` slot, and an honest peer early in
-from-origin sync has not yet delivered up to its far advertised tip, so neither
-raises the horizon prematurely; the advertised tip becomes the exit target only
-once a corroborated peer has served its chain up to (near) it, which is reached
-exactly when the local tip has caught up. This satisfies both bounds — no
-single-peer liveness pin (an unbounded slot never counts until delivered) and no
-premature exit at the start of sync (delivered headers only reach the far tip
-once caught up). A change to any tracked peer's frontier re-runs selection while
-corroboration is active, so corroboration granted or revoked takes effect
-immediately rather than on the next periodic tick.
+**Genesis state machine** (`chainselection/gsm.go`). The selector is Syncing in
+Genesis mode and CaughtUp in Praos mode, as in the reference's
+`Node/GSM.hs`. It evaluates on every selector pass, outside `cs.mutex` for the
+ledger lookups, and commits a transition only if a second snapshot under the
+lock matches the first.
+
+- *Exit (`blockUntilCaughtUp`).* Genesis ends only when at least one ChainSync
+  connection is known, **every** connection is idle, and no peer's delivered
+  chain is better than the selection. Connections come from the tracked peers
+  and `ChainSelectorConfig.ChainSyncConnections`, which the node backs with the
+  chainsync client set, so observers count. Advertised tips never influence the
+  exit. A connection is idle when its latest MsgAwaitReply
+  (`SetPeerIdling`, delivered for ingress and observer connections alike) is at
+  its delivered frontier and none of its headers awaits ledger admission. The
+  chainsync cursor moves only on ledger admission, and never for an observer,
+  so the MsgAwaitReply names the last point the peer sent
+  (`chainsync.State.ClientProtocolPoint`), falling back to the cursor before
+  the peer has sent one. The await point is kept per connection, so an await
+  that precedes admission of the header it was sent at counts once that header
+  is promoted, and one for an older point never does. Each MsgRollForward
+  revokes an await for any other point (`ClearPeerIdling`) before the header is
+  verified, so a peer is not idle while its next header waits. A connection
+  whose await matches the tip of its delivered frontier but not of its
+  admission frontier, as an admitted peer demoted to observer, is judged on the
+  delivered frontier. A peer is not better when its delivered tip is on the
+  applied chain (`PointOnLocalChain`), or its frontier intersects the applied
+  chain (a binary search over its retained points) and `ComparePraosTips` against
+  the applied tip's `PraosTiebreakerView` (`LocalTipPraosView`, read from the
+  applied block header) does not prefer it. A peer that cannot be shown to
+  intersect, or an equal-height peer when its own or the local view is
+  unavailable, blocks the exit, as the reference's
+  `CandidateDoesNotIntersect` does.
+- *Historicity.* An idle peer whose delivered tip's slot starts more than the
+  cutoff before now (`HistoricityCutoff`; the node sets the stability window
+  `3k/f` from the Shelley genesis, converted at the Shelley slot length, plus
+  one hour, independent of a configured Genesis density window) blocks the exit and is reported once to
+  `OnHistoricityDisconnect`; the node denies it for ten minutes and closes its
+  connection. The slot time is `LedgerState.SlotToTime` (the hardfork summary),
+  which is defined for Byron slots, not `WallClockSlot`, which the node
+  withholds in Byron. This is the reference's `HistoricityCheck` on
+  MsgAwaitReply. Rollbacks are not checked: the oldest rolled-back header's slot
+  is not retained.
+- *Re-entry (`blockWhileCaughtUp`).* After an exit Praos lasts at least
+  `MaxCaughtUpAge` (20 minutes). The deadline is the selection tip's slot time
+  plus `MaxCaughtUpAge` plus a bonus drawn once per Praos period in
+  [0, 300 s]; it is recomputed whenever the selection tip changes, and a tip
+  already past the age limit, at the origin, or whose slot cannot be converted
+  (`SlotTime` error, past horizon) is too old at once, without the bonus. A
+  selector started in Praos has no minimum stay.
+- *Startup (`initializationGsmState`).* The node keeps a `CaughtUpMarker` file in
+  the data directory, written on `genesis_mode_exited` and removed on
+  `genesis_mode_entered` and on live restore or truncate. With Genesis otherwise
+  enabled, no marker starts in Genesis; a marker whose tip is older than
+  `MaxCaughtUpAge` is removed and starts in Genesis; a marker with a younger tip
+  starts in Praos. The marker is removed when a live restore or truncate
+  begins and again before its rebuild steps. Marker I/O failures are logged
+  and ignored; a failed removal is not harmless, since the surviving marker
+  starts a later run in Praos once the tip is young again. The overrides that force Praos
+  (bootstrap disabled, `PraosMode`, `intersectTip`, `intersectPoints`) are
+  unchanged. Peer-snapshot loading follows the same decision.
+
+Consumers of the Genesis state now see both transitions. The Limit on Patience
+holds each bucket full while inactive and refreshes it on every recycler tick, so
+re-entry starts each peer with its whole budget. The ledger's fork resolver and
+`ObservedHeaderLimitFunc` read the state per call; thin per-peer header history
+right after re-entry resolves through the existing re-sync path. The wall-clock
+stale-tip rule and its peer demotion apply again on the next sweep.
+`corroborationIdentityForIngress` returns identities again when corroboration is
+configured. The synchronous rollback and tip observation resume, and one header
+in flight at the transition may still reach the gate through the asynchronous
+path, which the corroboration hold absorbs.
+
+The advertised tip is untrusted and unbounded, and a peer that delivers one
+shared early header (passing corroboration) can advertise any slot, so it plays
+no part in leaving Genesis; the exit rule above reads only delivered headers and
+the protocol's explicit idle signal. A peer that advertises its delivered
+position and idles cannot end Genesis while another connection is still
+delivering, and cannot end it at all once its delivered tip is historic. A
+change to any tracked peer's frontier re-runs selection while corroboration is
+active, so corroboration granted or revoked takes effect immediately rather than
+on the next periodic tick.
 
 **Deferred / not implemented**: Dingo does not yet implement **ChainSync
 Jumping** or **Devoted BlockFetch**. The corroboration gate stalls a fast source
@@ -8596,7 +8675,8 @@ header. This prevents keepalive activity from preserving an obsolete admission
 fragment as the peer's only candidate while authenticated delivery advances.
 Each fragment has the existing candidate-window bound, connections share the
 tracked-peer limit, and rollback trims it to an exact retained point or clears
-it. Disconnect, eviction and Genesis exit release the retained evidence.
+it. Disconnect and eviction release the retained evidence; Genesis exit keeps it,
+bounded by the same window.
 
 When local verification withholds an intermediate header, the next authenticated
 delivery can request a bounded continuity repair through the node composition
@@ -11365,11 +11445,34 @@ a sibling adopter.
 The default builder omits mempool transactions and Leios data from that
 alternative; the sibling adopter lets chain selection decide whether it wins.
 
-Step 5's transaction selection runs inside `LedgerState.WithTxValidationSession`
-(the same mechanism the mempool backend rebuilds use above): one pinned ledger
-generation, one validation reference slot, and one repeatable-read transaction
-cover every mempool transaction considered for the candidate block, not a
-fresh snapshot per transaction. If a block, rollback, or protocol-parameter
+Step 5's transaction selection runs inside `LedgerState.WithTxValidationSessionAtSlot`
+(the slot-ticked variant of the `WithTxValidationSession` mechanism the mempool
+backend rebuilds use above): one pinned ledger generation, one validation
+reference slot (the forge slot), and one transaction cover every mempool
+transaction considered for the candidate block, not a fresh snapshot per
+transaction. The session's view is ticked to the forge slot
+(`tickTxValidationSnapshot`): when the slot lies past the applied epoch's end,
+the epoch rollover, any era transition and the pending protocol-parameter
+updates are staged in the session's rollback-only transaction, so selection
+sees the parameters and state enacted at that boundary and nothing is
+committed. That transaction is read-only (read pool) unless the slot lies past
+the applied epoch; only a session that must tick opens a read-write
+transaction, because the tick writes the boundary into it, and on SQLite that
+holds the single write connection for the session. The snapshot is taken
+before that transaction is acquired, so the session re-checks the ledger
+generation once it holds the transaction and, if a block, rollback or rollover
+published a newer one, returns `ErrLeiosValidationParentSuperseded` instead of
+ticking over the committed state (the forged-block check treats that as a retry
+and the reference-script check drops the block unjudged). The tick runs the
+rollover in validation-only mode: it never calls the snapshot manager's
+boundary hooks (whose pending SNAP distribution, deferred captures and staged
+reward inputs are shared with the real rollover), schedules no deferred
+boundary job, skips the RATIFY marking pass, records no rollover phase or
+transition-span telemetry, and returns an unappliable reward update as an
+error that rejects the validation, without calling the node's fatal-error
+callback or counting a skipped reward round. A forge slot more than one epoch beyond the applied epoch is
+refused. A validator without the slot-ticked session falls back to the
+unticked `WithTxValidationSession`. If a block, rollback, or protocol-parameter
 change publishes a newer generation before selection finishes, the whole
 candidate is rejected (`transaction validation snapshot changed`) instead of
 being built from transactions checked against different ledger views.
@@ -12052,9 +12155,13 @@ and 7, before adoption or diffusion, via `newForgedBlockValidator`'s mandatory
 disabled in config (enabled by default, fail closed), that same call
 additionally runs full self-validation: (a) VRF proof and KES signature
 verification of the block header, (b) body-hash non-zero guard, and (c)
-per-transaction ledger rule validation against the current UTxO state with an
-intra-block overlay so outputs created by earlier transactions in the same block
-are visible to later ones. A failing block is logged, counted in
+per-transaction ledger rule validation with an intra-block overlay so outputs
+created by earlier transactions in the same block are visible to later ones.
+Both checks run in a session ticked to the block's slot, the same view
+selection used: a block forged across an epoch boundary is judged against the
+epoch rollover, era transition and pending protocol-parameter updates staged
+(rollback-only, never committed) for that slot, including the reference-script
+limits enacted there, rather than the pre-boundary parameters. A failing block is logged, counted in
 `dingo_forge_validation_failed_total`, and dropped without being adopted or
 diffused. Validation wall-clock time is recorded in the
 `dingo_forge_validation_duration_seconds` histogram. An operator may set
@@ -15484,7 +15591,7 @@ rather than the number of transactions with the label. `GET /pools/{pool_id}/blo
 a slot range through the `(slot, hash)` index, so they share a block list
 admission pool (4 active, 2 per client address, 429 with `Retry-After` when
 full) and run under the request context and a 15-second deadline (an overrun
-answers 503 with `Retry-After`); an offset past the total skips the page query. Pool and account list routes reject
+answers 503 with `Retry-After`); an offset past the total skips the page query. The latest block routes resolve the ledger tip's block; a rollback deletes blocks before the ledger publishes the lower tip, so a tip block that is not stored is retried against a reread tip and, if it never resolves, answers 503 with `Retry-After`. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,

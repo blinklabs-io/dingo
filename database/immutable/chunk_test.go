@@ -319,3 +319,47 @@ func TestChunkNextReadsDistinctCBORAtNonzeroOffset(t *testing.T) {
 		})
 	}
 }
+
+func TestChunkNextDerivesIsEbbFromEraTag(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		eraTag     uint64
+		blockOrEbb uint64
+		wantEbb    bool
+	}{
+		{name: "post-Byron block at slot 0", eraTag: 5, blockOrEbb: 0, wantEbb: false},
+		{name: "Byron EBB at epoch 0", eraTag: 0, blockOrEbb: 0, wantEbb: true},
+		{name: "Byron EBB epoch below 200", eraTag: 0, blockOrEbb: 5, wantEbb: true},
+		{name: "Byron EBB epoch 200 or above", eraTag: 0, blockOrEbb: 250, wantEbb: true},
+		{name: "Byron main block at small slot", eraTag: 1, blockOrEbb: 7, wantEbb: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			chunkData, err := cbor.Encode(
+				[]any{test.eraTag, cbor.RawMessage([]byte{0x80})},
+			)
+			require.NoError(t, err)
+			primaryData := make([]byte, 1+4)
+			primaryData[0] = primaryIndexVersion
+			secondaryData := make([]byte, secondaryIndexEntrySize)
+			binary.BigEndian.PutUint64(secondaryData[48:], test.blockOrEbb)
+
+			primary := newPrimaryIndex()
+			require.NoError(t, primary.Open(newBytesEntry(primaryData)))
+			secondary := newSecondaryIndex()
+			require.NoError(t, secondary.Open(newBytesEntry(secondaryData), primary))
+			chunk := newChunk()
+			require.NoError(t, chunk.Open(newBytesEntry(chunkData), secondary))
+			t.Cleanup(func() { require.NoError(t, chunk.Close()) })
+
+			block, err := chunk.Next()
+			require.NoError(t, err)
+			require.NotNil(t, block)
+			require.Equal(t, uint(test.eraTag), block.Type)
+			require.Equal(t, test.wantEbb, block.IsEbb)
+		})
+	}
+}

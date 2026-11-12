@@ -3931,15 +3931,16 @@ func TestBuildBlockExUnitsLimit(t *testing.T) {
 	)
 }
 
-// sessionMockTxValidator implements both TxValidator and
-// TxValidationSessionProvider, so it exercises the same
-// withTxValidationSession path DefaultBlockBuilder.buildBlock uses with a
+// sessionMockTxValidator implements TxValidator and both validation-session
+// providers, so it exercises the same slot-pinned session path
+// DefaultBlockBuilder.buildBlock uses with a
 // real LedgerState. It lets tests observe how many sessions were opened for
 // one BuildBlock call, and lets a hook run synchronously inside a validate
 // call to simulate a concurrent ledger or chain-tip mutation landing
 // mid-selection.
 type sessionMockTxValidator struct {
 	sessionContext context.Context
+	sessionSlot    uint64
 	sessions       int
 	validateCalls  int
 	// staleAfterCalls, when non-zero, makes stillCurrent() report false
@@ -3964,6 +3965,19 @@ type sessionMockTxValidator struct {
 	// validatedHashes records the hash of every transaction actually
 	// re-validated, so a test can prove which candidates paid for it.
 	validatedHashes []string
+}
+
+func (v *sessionMockTxValidator) WithTxValidationSessionAtSlot(
+	ctx context.Context,
+	slot uint64,
+	fn func(
+		validate TxValidationFunc,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+	) error,
+) error {
+	v.sessionSlot = slot
+	return v.WithTxValidationSession(ctx, fn)
 }
 
 func (v *sessionMockTxValidator) ValidateTx(tx ledger.Transaction) error {
@@ -4033,8 +4047,9 @@ func (v *sessionMockTxValidator) WithTxValidationSession(ctx context.Context,
 }
 
 var (
-	_ TxValidator                 = (*sessionMockTxValidator)(nil)
-	_ TxValidationSessionProvider = (*sessionMockTxValidator)(nil)
+	_ TxValidator                     = (*sessionMockTxValidator)(nil)
+	_ TxValidationSessionProvider     = (*sessionMockTxValidator)(nil)
+	_ SlotTxValidationSessionProvider = (*sessionMockTxValidator)(nil)
 )
 
 func threeTxMempoolForSelection(t *testing.T) *mockMempool {
@@ -4128,6 +4143,7 @@ func TestBuildBlockPinsOneValidationSessionPerBlock(t *testing.T) {
 		"all transactions in one block must share a single pinned validation session",
 	)
 	require.Equal(t, 3, validator.validateCalls)
+	require.Equal(t, uint64(1001), validator.sessionSlot)
 }
 
 // TestBuildBlockRejectsWhenSnapshotGoesStaleOnTheFinalCandidate covers the

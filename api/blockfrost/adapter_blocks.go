@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -28,6 +29,58 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
+
+const (
+	tipBlockAttempts = 5
+	tipBlockBackoff  = 20 * time.Millisecond
+)
+
+// tipBlock returns the block the ledger tip names.
+//
+// A rollback truncates the chain, which deletes the rolled-back blocks, before
+// the ledger publishes the lower tip, so for a short window the tip names a
+// block that is no longer stored. The tip is reread on each attempt, which
+// finds the new tip once it is published; if it never resolves the error wraps
+// ErrTipBlockUnavailable, a transient condition, not a missing block.
+func (a *NodeAdapter) tipBlock(ctx context.Context) (models.Block, error) {
+	return retryTipBlock(
+		ctx,
+		tipBlockBackoff,
+		func() []byte { return a.ledgerState.Tip().Point.Hash },
+		func(hash []byte) (models.Block, error) {
+			return a.ledgerState.BlockByHash(ctx, hash)
+		},
+	)
+}
+
+func retryTipBlock(
+	ctx context.Context,
+	backoff time.Duration,
+	tipHash func() []byte,
+	get func(hash []byte) (models.Block, error),
+) (models.Block, error) {
+	var lastErr error
+	for attempt := range tipBlockAttempts {
+		if attempt > 0 {
+			timer := time.NewTimer(backoff)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return models.Block{}, ctx.Err()
+			}
+		}
+		block, err := get(tipHash())
+		if err == nil {
+			return block, nil
+		}
+		if !errors.Is(err, models.ErrBlockNotFound) {
+			return models.Block{}, err
+		}
+		lastErr = err
+	}
+	return models.Block{}, fmt.Errorf("%w: %w", ErrTipBlockUnavailable, lastErr)
+}
 
 // neighborBlocks returns the page of blocks adjacent to the identified block
 // and the number of block heights on that side of it: the ones that follow it
@@ -332,11 +385,7 @@ func (a *NodeAdapter) BlockTransactionCBOR(
 func (a *NodeAdapter) LatestBlockTransactionCBOR(
 	ctx context.Context,
 ) ([]BlockTransactionCBORInfo, error) {
-	tip := a.ledgerState.Tip()
-	block, err := a.blockByID(
-		ctx,
-		hex.EncodeToString(tip.Point.Hash),
-	)
+	block, err := a.tipBlock(ctx)
 	if err != nil {
 		return nil, err
 	}
