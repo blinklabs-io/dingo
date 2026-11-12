@@ -25,7 +25,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -448,7 +447,7 @@ func (ls *LedgerState) checkAnnouncedPruneFloors(
 		if !found {
 			return errEpochNotResolved(at)
 		}
-		if snap := praos.StakeSnapshotEpoch(targetEpoch); snap < poolFloor {
+		if snap := ls.LeaderStakeSnapshotEpoch(targetEpoch); snap < poolFloor {
 			return fmt.Errorf(
 				"%w: pinned slot %d needs the mark snapshot from epoch %d, "+
 					"below the pool-snapshot prune floor (epoch %d) a "+
@@ -911,12 +910,26 @@ func (ls *LedgerState) queryHardForkEraHistory(
 	perEra := make([]eraBoundData, perEraLen)
 	timespan := big.NewInt(0)
 
+	// The rows are sparse across an empty epoch, so an era's epochs are
+	// counted from its bounds and not from the rows alone: epochs between two
+	// rows are priced at their era's geometry, and the boundary between eras is
+	// the transition epoch, so that every End equals the next era's Start.
+	allEpochs, dbErr := ls.db.GetEpochs(txn)
+	if dbErr != nil {
+		return nil, dbErr
+	}
+	eraEpochs := make([][]models.Epoch, currentIdx+1)
 	for i, entry := range shape.Eras[:currentIdx+1] {
-		eraDesc := activeEras[i]
 		epochs, dbErr := ls.db.GetEpochsByEra(entry.EraID, txn)
 		if dbErr != nil {
 			return nil, dbErr
 		}
+		eraEpochs[i] = epochs
+	}
+	var gapStart []any
+	for i, entry := range shape.Eras[:currentIdx+1] {
+		eraDesc := activeEras[i]
+		epochs := eraEpochs[i]
 		perEra[i].epochs = epochs
 		if len(epochs) == 0 {
 			continue
@@ -928,11 +941,21 @@ func (ls *LedgerState) queryHardForkEraHistory(
 			firstEp.StartSlot,
 			firstEp.EpochId,
 		}
+		nextEpoch := firstEp.EpochId
+		if gapStart != nil {
+			perEra[i].start = gapStart
+			nextEpoch = gapStart[2].(uint64)
+			gapStart = nil
+		}
 		for _, ep := range epochs {
-			timespan.Add(
-				timespan,
-				epochPicoseconds(ep.SlotLength, ep.LengthInSlots),
-			)
+			epPc := epochPicoseconds(ep.SlotLength, ep.LengthInSlots)
+			if ep.EpochId > nextEpoch {
+				timespan.Add(timespan, new(big.Int).Mul(
+					epPc, new(big.Int).SetUint64(ep.EpochId-nextEpoch),
+				))
+			}
+			timespan.Add(timespan, epPc)
+			nextEpoch = ep.EpochId + 1
 		}
 
 		if i == currentIdx {
@@ -956,6 +979,34 @@ func (ls *LedgerState) queryHardForkEraHistory(
 			new(big.Int).Set(timespan),
 			endSlot,
 			lastEp.EpochId + 1,
+		}
+		// The next era's first row is not the epoch after this era's last, so
+		// an epoch lies between them, and the boundary is the transition epoch.
+		if next := firstNonEmptyAfter(eraEpochs, i); next != nil &&
+			next[0].EpochId != lastEp.EpochId+1 {
+			before := make([]models.Epoch, 0, len(allEpochs))
+			for _, ep := range allEpochs {
+				if ep.EpochId <= lastEp.EpochId {
+					before = append(before, ep)
+				}
+			}
+			transition, tErr := eraTransitionEpoch(shape, nil, before, next[0])
+			if tErr != nil {
+				return nil, tErr
+			}
+			epPc := epochPicoseconds(lastEp.SlotLength, lastEp.LengthInSlots)
+			timespan.Add(timespan, new(big.Int).Mul(
+				epPc, new(big.Int).SetUint64(transition-lastEp.EpochId-1),
+			))
+			boundSlot := lastEp.StartSlot +
+				(transition-lastEp.EpochId)*uint64(lastEp.LengthInSlots)
+			perEra[i].end = []any{
+				new(big.Int).Set(timespan), boundSlot, transition,
+			}
+			gapStart = []any{
+				new(big.Int).Set(timespan), boundSlot, transition,
+			}
+			continue
 		}
 
 		// Transition-epoch detection: a past era whose last epoch's pparams
@@ -1053,6 +1104,16 @@ func (ls *LedgerState) queryHardForkEraHistory(
 
 // currentEraEnd computes the open era's End tuple (picosecondRelTime, slot,
 // epoch) from the HFC Summary.
+// firstNonEmptyAfter returns the first non-empty era's rows after index i.
+func firstNonEmptyAfter(eraEpochs [][]models.Epoch, i int) []models.Epoch {
+	for _, rows := range eraEpochs[i+1:] {
+		if len(rows) > 0 {
+			return rows
+		}
+	}
+	return nil
+}
+
 func (ls *LedgerState) currentEraEnd(
 	shape hardfork.Shape,
 	era eraBoundData,
@@ -1072,13 +1133,6 @@ func (ls *LedgerState) currentEraEnd(
 	// end for the era reached so far.
 	if ti.State == hardfork.TransitionImpossible &&
 		shape.Eras[idx].Params.SafeZoneSlots == 0 {
-		endRel := new(big.Int).Set(startRel)
-		for _, ep := range era.epochs {
-			endRel.Add(
-				endRel,
-				epochPicoseconds(ep.SlotLength, ep.LengthInSlots),
-			)
-		}
 		lastEp := era.epochs[len(era.epochs)-1]
 		endSlot, err := checkedSlotAdd(
 			lastEp.StartSlot,
@@ -1090,6 +1144,17 @@ func (ls *LedgerState) currentEraEnd(
 				lastEp.EpochId, lastEp.StartSlot, lastEp.LengthInSlots, err,
 			)
 		}
+		// Priced from the slots the era spans rather than from its rows, which
+		// omit any epoch that was empty.
+		startSlot, _ := era.start[1].(uint64)
+		endRel := new(big.Int).Mul(
+			new(big.Int).SetUint64(endSlot-startSlot),
+			new(big.Int).Mul(
+				new(big.Int).SetUint64(uint64(lastEp.SlotLength)),
+				big.NewInt(1_000_000_000),
+			),
+		)
+		endRel.Add(endRel, startRel)
 		return []any{endRel, endSlot, lastEp.EpochId + 1}, nil
 	}
 
@@ -1527,6 +1592,10 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 			epoch = row.EpochId
 		}
 	}
+	// The reference answers from the ledger state's own snapshots, which an
+	// empty epoch leaves at the ledger epoch label: its mark is the one
+	// captured at the label's boundary, however far the tip's epoch is past it.
+	epoch = ledgerEpochLabelInCache(epoch, consensus.epochCache)
 	setEpoch, hasSet := priorEpoch(epoch, 1)
 	goEpoch, hasGo := priorEpoch(epoch, 2)
 

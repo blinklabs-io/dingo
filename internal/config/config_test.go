@@ -157,6 +157,7 @@ func TestLoad_CompareFullStruct(t *testing.T) {
 	unsetDebugBindAddrEnv(t)
 	unsetMetricsBindAddrEnv(t)
 	unsetForgeGateEnv(t)
+	unsetGenesisCSJEnv(t)
 	yamlContent := `
 plugins:
   mempool:
@@ -274,6 +275,7 @@ mithril:
 			CorroborationPeers:          0,
 			// Unset in the file, so the defaults survive.
 			LimitOnPatienceEnabled: true,
+			ChainSyncJumping:       true,
 		},
 		HistoryExpiry: DefaultHistoryExpiryConfig(),
 		KoiosParity:   DefaultKoiosParityConfig(),
@@ -1404,4 +1406,31 @@ func TestDefaultMithrilServerPortIsUnshared(t *testing.T) {
 	} {
 		assert.NotEqual(t, port, cfg.Mithril.Server.Port, name)
 	}
+}
+
+// unsetGenesisCSJEnv clears both spellings envconfig reads for
+// GenesisBootstrap.ChainSyncJumping: the nested container's derived prefix
+// form, checked first, and the bare tag it falls back to.
+func unsetGenesisCSJEnv(t *testing.T) {
+	t.Helper()
+	unsetEnv(t, "CARDANO_GENESISBOOTSTRAP_DINGO_GENESIS_CSJ")
+	unsetEnv(t, "DINGO_GENESIS_CSJ")
+}
+
+func TestLoad_GenesisChainSyncJumpingEnv(t *testing.T) {
+	// Not t.Parallel: LoadConfig and resetGlobalConfig replace process-global
+	// configuration state.
+	unsetGenesisCSJEnv(t)
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.True(t, cfg.GenesisBootstrap.ChainSyncJumping, "on by default")
+
+	t.Setenv("DINGO_GENESIS_CSJ", "false")
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+	cfg, err = LoadConfig("")
+	require.NoError(t, err)
+	require.False(t, cfg.GenesisBootstrap.ChainSyncJumping)
 }

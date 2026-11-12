@@ -19,6 +19,8 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -869,4 +871,74 @@ func TestAcquireQueryViewBoundaryJobWaitNamesStage(t *testing.T) {
 	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
 	require.NoError(t, err)
 	view.Close()
+}
+
+// TestQueryViewAcquireReleaseFloodDoesNotStallCommits models an untrusted NtC
+// client loop of LocalStateQuery Acquire/Release (up to 5 per IP, here
+// concurrent flooders) while block-apply style read-write transactions commit.
+// Opening a view takes the exclusive side of the commit-phase barrier briefly,
+// so a flood must slow commits at most, never starve them: every commit
+// completes inside a bounded deadline and the tip each one wrote is the tip
+// the database ends on. Only completion is asserted, not latency.
+func TestQueryViewAcquireReleaseFloodDoesNotStallCommits(t *testing.T) {
+	t.Parallel()
+
+	const (
+		flooders = 5
+		commits  = 40
+	)
+	ls, db := newDiskTestLedger(t)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1_000, repeatedBytes(32, 0x01)),
+	}, nil))
+
+	floodCtx, stopFlood := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	var acquired atomic.Int64
+	for range flooders {
+		wg.Go(func() {
+			for floodCtx.Err() == nil {
+				view, err := ls.AcquireQueryView(floodCtx, QueryPoint{})
+				if err != nil {
+					continue
+				}
+				acquired.Add(1)
+				view.Close()
+			}
+		})
+	}
+	t.Cleanup(func() {
+		stopFlood()
+		wg.Wait()
+	})
+
+	commitCtx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	for i := range commits {
+		slot := uint64(2_000 + i) //nolint:gosec // bounded loop counter
+		txn := db.TransactionContext(commitCtx, true)
+		require.NoError(t, db.SetTip(ochainsync.Tip{
+			Point: ocommon.NewPoint(slot, repeatedBytes(32, 0x02)),
+		}, txn))
+		require.NoError(
+			t,
+			txn.Commit(),
+			"commit %d stalled or failed under an Acquire/Release flood",
+			i,
+		)
+	}
+
+	// The flood must actually have been running against the commits, or the
+	// test proves nothing: wait for at least one completed Acquire/Release.
+	require.Eventually(t, func() bool {
+		return acquired.Load() > 0
+	}, 5*time.Second, 5*time.Millisecond, "flooders never opened a view")
+
+	stopFlood()
+	wg.Wait()
+	readTxn := db.Transaction(t.Context(), false)
+	defer readTxn.Release()
+	tip, err := db.GetTip(readTxn)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2_000+commits-1), tip.Point.Slot)
 }

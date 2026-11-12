@@ -140,6 +140,9 @@ func (o *Ouroboros) Close() error {
 }
 
 func (o *Ouroboros) close() error {
+	// The ChainSync Jumping driver's goroutines read the dependencies a
+	// live restore closes next.
+	o.outboundChainsyncLifecycle.close()
 	o.leiosPersistLifecycleMu.Lock()
 	defer o.leiosPersistLifecycleMu.Unlock()
 
