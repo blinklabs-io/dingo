@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -37,6 +38,80 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersAtSnapshotWindow(
 	t *testing.T,
 ) {
 	t.Parallel()
+
+	ls, db, snapshotEpoch, capturedOwner := captureOwnerWindowRewardInputs(t)
+	meta := db.Metadata()
+	rewardSnapshot, err := meta.GetRewardSnapshot(snapshotEpoch, "mark", nil)
+	require.NoError(t, err)
+	require.NotNil(t, rewardSnapshot)
+	poolInputs, err := meta.GetRewardPoolInputs(snapshotEpoch, nil)
+	require.NoError(t, err)
+	require.Len(t, poolInputs, 1)
+	require.NoError(t, meta.DeleteRewardStakeInputBeforeEpoch(
+		context.Background(), snapshotEpoch+1, nil,
+	))
+
+	rebuilt, err := ls.rebuildPrunedRewardStakeInputs(
+		meta, nil, snapshotEpoch, rewardSnapshot, poolInputs,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, rebuilt,
+		"the rebuild must reconcile with the retained owner stake instead "+
+			"of discarding the epoch",
+	)
+	rebuiltOwner := make(map[string]bool, len(rebuilt))
+	for _, input := range rebuilt {
+		rebuiltOwner[string(input.StakingKey)] = input.Owner
+	}
+	require.Equal(t, capturedOwner, rebuiltOwner,
+		"the rebuild must resolve owners exactly as the live capture did",
+	)
+}
+
+// A pending epoch whose rebuilt rows fail reconciliation is reported as a
+// rejected reconstruction, not as a rebuild that returned no rows.
+func TestEnsureRewardStakeInputsReadyReportsRejectedReconstruction(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, db, snapshotEpoch, _ := captureOwnerWindowRewardInputs(t)
+	meta := db.Metadata()
+	rewardSnapshot, err := meta.GetRewardSnapshot(snapshotEpoch, "mark", nil)
+	require.NoError(t, err)
+	require.NotNil(t, rewardSnapshot)
+	require.Positive(t, rewardSnapshot.TotalDelegators)
+	poolInputs, err := meta.GetRewardPoolInputs(snapshotEpoch, nil)
+	require.NoError(t, err)
+	require.Len(t, poolInputs, 1)
+	// Far beyond the reconstruction tolerance, so the rebuilt rows cannot be
+	// folded into the retained total.
+	poolInputs[0].DelegatedStake += types.Uint64(1_000_000_000_000)
+	require.NoError(t, meta.SaveRewardPoolInputs(poolInputs, nil))
+	require.NoError(t, meta.DeleteRewardStakeInputBeforeEpoch(
+		context.Background(), snapshotEpoch+1, nil,
+	))
+	require.NoError(t, markRewardStakeInputsPending(
+		meta, nil, snapshotEpoch, rewardSnapshot.BoundarySlot,
+	))
+
+	txn := db.Transaction(context.Background(), true)
+	defer func() { _ = txn.Rollback() }()
+	err = ls.ensureRewardStakeInputsReady(txn, snapshotEpoch)
+	require.ErrorIs(t, err, errRewardStakeInputsUnrecoverable)
+	require.ErrorContains(t, err,
+		"reconstruction disagrees with the retained reward_pool_input totals",
+	)
+	require.NotContains(t, err.Error(), "returned no rows")
+}
+
+// captureOwnerWindowRewardInputs captures a reward snapshot for a pool that
+// re-registered with an added owner inside the ended epoch, and returns the
+// owner flags the live capture assigned.
+func captureOwnerWindowRewardInputs(
+	t *testing.T,
+) (*LedgerState, *database.Database, uint64, map[string]bool) {
+	t.Helper()
 
 	const (
 		endedEpoch     = uint64(1)
@@ -153,32 +228,7 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersAtSnapshotWindow(
 		"the live capture must resolve owners from the registration "+
 			"effective before the ended epoch",
 	)
-
-	rewardSnapshot, err := meta.GetRewardSnapshot(snapshotEpoch, "mark", nil)
-	require.NoError(t, err)
-	require.NotNil(t, rewardSnapshot)
-	poolInputs, err := meta.GetRewardPoolInputs(snapshotEpoch, nil)
-	require.NoError(t, err)
-	require.Len(t, poolInputs, 1)
-	require.NoError(t, meta.DeleteRewardStakeInputBeforeEpoch(
-		context.Background(), snapshotEpoch+1, nil,
-	))
-
-	rebuilt, err := ls.rebuildPrunedRewardStakeInputs(
-		meta, nil, snapshotEpoch, rewardSnapshot, poolInputs,
-	)
-	require.NoError(t, err)
-	require.NotEmpty(t, rebuilt,
-		"the rebuild must reconcile with the retained owner stake instead "+
-			"of discarding the epoch",
-	)
-	rebuiltOwner := make(map[string]bool, len(rebuilt))
-	for _, input := range rebuilt {
-		rebuiltOwner[string(input.StakingKey)] = input.Owner
-	}
-	require.Equal(t, capturedOwner, rebuiltOwner,
-		"the rebuild must resolve owners exactly as the live capture did",
-	)
+	return ls, db, snapshotEpoch, capturedOwner
 }
 
 // Epoch 0 has no ended epoch before it, so the rebuild must still resolve its
