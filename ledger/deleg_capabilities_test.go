@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"errors"
 	"math/big"
 	"testing"
 
@@ -371,15 +370,26 @@ func TestMIRRepeatedDistributionFoldsByEraThroughValidation(t *testing.T) {
 				err = eras.ValidateTxShelley(tx, 200, ls.NewView(txn), pp)
 				return nil
 			}))
+			// The bare transaction also fails the TTL and empty-input
+			// rules; anything beyond those must be the overdraw, so an
+			// unrelated MIR error cannot pass as a replacement that fits.
+			var joined interface{ Unwrap() []error }
+			require.ErrorAs(t, err, &joined)
+			var expired shelley.ExpiredUtxoError
+			require.ErrorAs(t, err, &expired)
+			var noInputs shelley.InputSetEmptyUtxoError
+			require.ErrorAs(t, err, &noInputs)
 			var overdraw shelley.InsufficientForInstantaneousRewardsError
 			if tc.wantOverdraw {
+				require.Len(t, joined.Unwrap(), 3, "%v", err)
 				require.ErrorAs(t, err, &overdraw)
 				require.Equal(t, "150", overdraw.Required.String())
 				return
 			}
-			require.False(
+			require.Len(
 				t,
-				errors.As(err, &overdraw),
+				joined.Unwrap(),
+				2,
 				"replacement fits the pot: %v",
 				err,
 			)
