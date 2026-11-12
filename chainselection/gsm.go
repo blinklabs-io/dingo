@@ -426,6 +426,9 @@ func (cs *ChainSelector) advanceGenesisStateMachine() bool {
 	if !cs.genesisEnabled {
 		return false
 	}
+	defer rtrace.StartRegion(
+		context.Background(), tracing.RegionChainSelectionGSMStep,
+	).End()
 	cs.mutex.RLock()
 	mode := cs.mode
 	cs.mutex.RUnlock()
@@ -436,9 +439,6 @@ func (cs *ChainSelector) advanceGenesisStateMachine() bool {
 }
 
 func (cs *ChainSelector) tryLeaveGenesis() bool {
-	defer rtrace.StartRegion(
-		context.Background(), tracing.RegionChainSelectionGSMStep,
-	).End()
 	cs.mutex.RLock()
 	if cs.mode != SelectionModeGenesis {
 		cs.mutex.RUnlock()

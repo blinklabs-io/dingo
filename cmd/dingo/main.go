@@ -88,7 +88,6 @@ func commonRun(
 		os.Stderr,
 	)
 	slog.SetDefault(logger)
-	applyDebugProfilingRates(logger, cfg)
 	// Config-validation warnings go to stderr, not the logger: a high
 	// configured level (e.g. error) would otherwise suppress them, leaving the
 	// operator with no feedback that their value was ignored.

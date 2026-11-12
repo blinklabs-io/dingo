@@ -16,33 +16,53 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
-	"runtime"
 	"testing"
-	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/internal/config"
 )
 
-// Not t.Parallel: the runtime mutex and block profile rates are process-global.
-func TestApplyDebugProfilingRates(t *testing.T) {
-	// SetMutexProfileFraction(-1) reads the current value without changing it.
-	// The block rate has no getter, so the test observes it through recorded
-	// block events and restores it to 0, the process default.
-	origMutex := runtime.SetMutexProfileFraction(-1)
-	t.Cleanup(func() {
-		runtime.SetMutexProfileFraction(origMutex)
-		runtime.SetBlockProfileRate(0)
-	})
+// profilingSetterCalls records the rates passed to the runtime profile
+// setters; nil means the setter was not called.
+type profilingSetterCalls struct {
+	mutex *int
+	block *int
+}
 
+// recordProfilingSetters replaces the runtime profile setters for the test.
+// Callers must not use t.Parallel: the setters are package globals.
+func recordProfilingSetters(t *testing.T) *profilingSetterCalls {
+	t.Helper()
+	calls := &profilingSetterCalls{}
+	origMutex, origBlock := setMutexProfileFraction, setBlockProfileRate
+	t.Cleanup(func() {
+		setMutexProfileFraction, setBlockProfileRate = origMutex, origBlock
+	})
+	setMutexProfileFraction = func(rate int) int {
+		calls.mutex = &rate
+		return 0
+	}
+	setBlockProfileRate = func(rate int) {
+		calls.block = &rate
+	}
+	return calls
+}
+
+func intPtr(v int) *int { return &v }
+
+// Not t.Parallel: recordProfilingSetters swaps package-level seams.
+func TestApplyDebugProfilingRates(t *testing.T) {
 	tests := []struct {
-		name      string
-		cfg       config.Config
-		wantMutex int
-		wantBlock bool
-		wantLog   bool
+		name       string
+		cfg        config.Config
+		wantMutex  *int
+		wantBlock  *int
+		wantLog    bool
+		wantStderr bool
 	}{
 		{
 			name: "default leaves profiling off",
@@ -54,7 +74,7 @@ func TestApplyDebugProfilingRates(t *testing.T) {
 				DebugMutexProfileFraction: 5,
 				DebugBlockProfileRate:     1000,
 			},
-			wantLog: true,
+			wantStderr: true,
 		},
 		{
 			name: "mutex only",
@@ -62,7 +82,7 @@ func TestApplyDebugProfilingRates(t *testing.T) {
 				DebugPort:                 6060,
 				DebugMutexProfileFraction: 5,
 			},
-			wantMutex: 5,
+			wantMutex: intPtr(5),
 			wantLog:   true,
 		},
 		{
@@ -71,43 +91,81 @@ func TestApplyDebugProfilingRates(t *testing.T) {
 				DebugPort:             6060,
 				DebugBlockProfileRate: 1000,
 			},
-			wantBlock: true,
+			wantBlock: intPtr(1000),
 			wantLog:   true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runtime.SetMutexProfileFraction(0)
-			runtime.SetBlockProfileRate(0)
-			var buf bytes.Buffer
-			logger := slog.New(slog.NewTextHandler(&buf, nil))
-			applyDebugProfilingRates(logger, &tc.cfg)
-			require.Equal(
-				t, tc.wantMutex, runtime.SetMutexProfileFraction(-1),
-			)
-			require.Equal(t, tc.wantLog, buf.Len() > 0, buf.String())
-			// A blocked receive far longer than the 1000 ns rate is always
-			// recorded once the rate is set, and never at rate 0.
-			before := blockProfileEvents()
-			<-time.After(5 * time.Millisecond)
-			require.Equal(t, tc.wantBlock, blockProfileEvents() > before)
+			calls := recordProfilingSetters(t)
+			var logBuf, stderr bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+			applyDebugProfilingRates(logger, &stderr, &tc.cfg)
+			require.Equal(t, tc.wantMutex, calls.mutex)
+			require.Equal(t, tc.wantBlock, calls.block)
+			require.Equal(t, tc.wantLog, logBuf.Len() > 0, logBuf.String())
+			require.Equal(t, tc.wantStderr, stderr.Len() > 0, stderr.String())
 		})
 	}
 }
 
-// blockProfileEvents sums event counts across every block profile record, so
-// it grows even when the blocking stack was already recorded.
-func blockProfileEvents() int64 {
-	n, _ := runtime.BlockProfile(nil)
-	records := make([]runtime.BlockProfileRecord, n+16)
-	n, ok := runtime.BlockProfile(records)
-	for !ok {
-		records = make([]runtime.BlockProfileRecord, n+16)
-		n, ok = runtime.BlockProfile(records)
+// The ignored-rates warning must survive a logger configured above warn,
+// as the config-validation warnings in commonRun do.
+// Not t.Parallel: recordProfilingSetters swaps package-level seams.
+func TestApplyDebugProfilingRatesWarningIgnoresLogLevel(t *testing.T) {
+	recordProfilingSetters(t)
+	var logBuf, stderr bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(
+		&logBuf, &slog.HandlerOptions{Level: slog.LevelError},
+	))
+	applyDebugProfilingRates(logger, &stderr, &config.Config{
+		DebugMutexProfileFraction: 5,
+	})
+	require.Contains(t, stderr.String(), "profile rates ignored")
+	require.Empty(t, logBuf.String())
+}
+
+// commonRun also serves load, database and mithril snapshot, which never
+// start the pprof listener, so it must not apply the rates. Not t.Parallel:
+// it swaps package-level seams and replaces the slog default.
+func TestCommonRunLeavesProfilingRatesUnset(t *testing.T) {
+	calls := recordProfilingSetters(t)
+	origDefault := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(origDefault) })
+	_, err := commonRun(context.Background(), &config.Config{
+		DebugPort:                 6060,
+		DebugMutexProfileFraction: 5,
+		DebugBlockProfileRate:     1000,
+	})
+	require.NoError(t, err)
+	require.Nil(t, calls.mutex)
+	require.Nil(t, calls.block)
+}
+
+// mithril sync starts the pprof listener, so it applies the rates before the
+// sync runs. Not t.Parallel: it swaps package-level seams and replaces the
+// slog default.
+func TestMithrilSyncAppliesProfilingRates(t *testing.T) {
+	calls := recordProfilingSetters(t)
+	origDefault := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(origDefault) })
+	origRun := runMithrilSyncForCommand
+	t.Cleanup(func() { runMithrilSyncForCommand = origRun })
+	var atRun profilingSetterCalls
+	runMithrilSyncForCommand = func(
+		context.Context, *config.Config, *slog.Logger, string,
+		*boundHealthProbe,
+	) error {
+		atRun = *calls
+		return nil
 	}
-	var total int64
-	for _, r := range records[:n] {
-		total += r.Count
-	}
-	return total
+	cmd := &cobra.Command{}
+	cmd.SetContext(config.WithContext(context.Background(), &config.Config{
+		DebugPort:                 6060,
+		DebugMutexProfileFraction: 5,
+		DebugBlockProfileRate:     1000,
+	}))
+	require.NoError(t, mithrilSyncRunE(cmd, nil))
+	require.Equal(t, intPtr(5), atRun.mutex)
+	require.Equal(t, intPtr(1000), atRun.block)
 }

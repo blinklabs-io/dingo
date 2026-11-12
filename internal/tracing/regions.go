@@ -27,12 +27,14 @@ const (
 	// holds the selector mutex: recording an observed tip and committing a
 	// staged admission.
 	RegionChainSelectionAdmission = "dingo.chainselection.admission"
-	// RegionChainSelectionGSMStep covers one Genesis state machine step.
+	// RegionChainSelectionGSMStep covers one Genesis state machine step,
+	// whether it tries to leave or to re-enter Genesis mode.
 	RegionChainSelectionGSMStep = "dingo.chainselection.gsm_step"
 	// RegionChainsyncHeaderSettleWait covers a chainsync header waiting for
 	// the ledger to settle header verification context.
 	RegionChainsyncHeaderSettleWait = "dingo.chainsync.header_settle_wait"
 	// RegionLedgerBatchApplyCommit covers one ledger block batch: delta
-	// apply and database commit.
+	// apply and database commit, on the database worker goroutine that runs
+	// them.
 	RegionLedgerBatchApplyCommit = "dingo.ledger.batch_apply_commit"
 )

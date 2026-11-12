@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net"
@@ -104,28 +105,43 @@ func (s *debugPprofServer) Err() <-chan error {
 	return s.errCh
 }
 
+// Swapped by tests: the block profile rate has no getter, so the applied
+// rates are observed through these rather than through the runtime.
+var (
+	setMutexProfileFraction = runtime.SetMutexProfileFraction
+	setBlockProfileRate     = runtime.SetBlockProfileRate
+)
+
 // applyDebugProfilingRates enables the runtime mutex and block profiles served
-// by the debug listener. A rate is applied only when the listener is enabled
-// and the rate is non-zero, so the runtime setters are never called with
-// profiling off.
-func applyDebugProfilingRates(logger *slog.Logger, cfg *config.Config) {
+// by the debug listener. Only commands that start the listener call it. A rate
+// is applied only when the listener is enabled and the rate is non-zero, so the
+// runtime setters are never called with profiling off. The ignored-rates
+// warning goes to stderr, not the logger, so a high configured log level cannot
+// suppress it.
+func applyDebugProfilingRates(
+	logger *slog.Logger,
+	stderr io.Writer,
+	cfg *config.Config,
+) {
 	mutexFraction := cfg.DebugMutexProfileFraction
 	blockRate := cfg.DebugBlockProfileRate
 	if mutexFraction == 0 && blockRate == 0 {
 		return
 	}
 	if cfg.DebugPort == 0 {
-		logger.Warn(
-			"mutex/block profile rates ignored: they are only readable " +
-				"through the pprof listener, which is disabled (debugPort is 0)",
+		fmt.Fprintf(
+			stderr,
+			"%s: mutex/block profile rates ignored: they are only readable "+
+				"through the pprof listener, which is disabled (debugPort is 0)\n",
+			programName,
 		)
 		return
 	}
 	if mutexFraction != 0 {
-		runtime.SetMutexProfileFraction(clampToInt(mutexFraction))
+		setMutexProfileFraction(clampToInt(mutexFraction))
 	}
 	if blockRate != 0 {
-		runtime.SetBlockProfileRate(clampToInt(blockRate))
+		setBlockProfileRate(clampToInt(blockRate))
 	}
 	logger.Info(
 		"pprof mutex/block profiling enabled",

@@ -1120,10 +1120,17 @@ func TestCIP0203ConfigPrecedence(t *testing.T) {
 func TestDebugProfileRatesPrecedence(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("DINGO_DEBUG_MUTEX_PROFILE_FRACTION", "")
-	t.Setenv("DINGO_DEBUG_BLOCK_PROFILE_RATE", "")
-	require.NoError(t, os.Unsetenv("DINGO_DEBUG_MUTEX_PROFILE_FRACTION"))
-	require.NoError(t, os.Unsetenv("DINGO_DEBUG_BLOCK_PROFILE_RATE"))
+	// envconfig.Process("cardano", ...) reads the CARDANO_-prefixed name
+	// first, so an ambient value under either spelling would leak in.
+	for _, name := range []string{
+		"DINGO_DEBUG_MUTEX_PROFILE_FRACTION",
+		"DINGO_DEBUG_BLOCK_PROFILE_RATE",
+		"CARDANO_DINGO_DEBUG_MUTEX_PROFILE_FRACTION",
+		"CARDANO_DINGO_DEBUG_BLOCK_PROFILE_RATE",
+	} {
+		t.Setenv(name, "")
+		require.NoError(t, os.Unsetenv(name))
+	}
 
 	cfg, err := LoadConfig("")
 	require.NoError(t, err)
