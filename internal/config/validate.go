@@ -254,16 +254,16 @@ func (c *Config) validateBlockProducerPools() []error {
 	for i, p := range c.BlockProducerPools {
 		prefix := fmt.Sprintf("blockProducerPools[%d].", i)
 		errs = append(errs, validateBlockProducerPool(p, prefix)...)
-		// A remote KES agent session cannot name a profile yet, and bursa
-		// refuses more than one profile per attested listener, so a remote
-		// agent address can serve one pool only. A local socket is not
+		// An attested KES agent session cannot name a profile, so Bursa
+		// allows one profile per attested listener and a remote agent
+		// address can serve one pool only. A local socket is not
 		// limited: it serves several pools through its profiles.
 		if addr := kesAgentAddressKey(p.ShelleyKESAgentAddress); addr != "" {
 			if j, dup := agentAddresses[addr]; dup {
 				errs = append(errs, fmt.Errorf(
 					"blockProducerPools[%d] and blockProducerPools[%d] use the same shelleyKesAgentAddress %q: "+
-						"a remote KES agent session cannot name a profile yet and bursa refuses more than one "+
-						"profile per attested listener (blinklabs-io/bursa#1276), so each pool needs its own agent address",
+						"an attested KES agent session cannot name a profile, so Bursa allows one profile "+
+						"per attested listener and each pool needs its own agent address",
 					j,
 					i,
 					p.ShelleyKESAgentAddress,

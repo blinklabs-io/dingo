@@ -246,7 +246,12 @@ func TestValidateBlockProducerPoolsRefusesASharedKESAgentAddress(t *testing.T) {
 		err,
 		"blockProducerPools[0] and blockProducerPools[1] use the same shelleyKesAgentAddress",
 	)
-	require.ErrorContains(t, err, "bursa#1276")
+	require.ErrorContains(
+		t,
+		err,
+		"an attested KES agent session cannot name a profile, so Bursa allows one profile per attested listener",
+	)
+	require.NotContains(t, err.Error(), "bursa#")
 
 	// The port is compared as a number: validateHostPort accepts a
 	// zero-padded port, which names the same listener.

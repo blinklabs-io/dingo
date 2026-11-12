@@ -12680,9 +12680,8 @@ pool) and `BlockForger`. Each pool's key source (`poolKeySource`) loads and
 validates its credentials exactly as the first pool's does, with one KES
 agent client per pool. Over a local agent socket one agent can serve every
 pool through its profiles. Over the remote listener it cannot: an attested
-session cannot name a profile yet and Bursa refuses more than one profile per
-attested listener (blinklabs-io/bursa#1276), so each pool signing remotely
-needs its own agent and address, and configuration validation refuses two
+session cannot name a profile, so Bursa allows one profile per attested
+listener, and each pool signing remotely needs its own agent and address, and configuration validation refuses two
 pools with the same `shelleyKesAgentAddress`.
 
 **Startup and isolation.** The other pools start after the first. A pool whose
