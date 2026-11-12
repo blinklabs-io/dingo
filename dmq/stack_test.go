@@ -562,9 +562,8 @@ func TestStackStartFailureStopsPool(t *testing.T) {
 func TestStackShutdownBoundsBlockedEventHandler(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
 	s, err := NewStack(StackConfig{
-		SocketPath:    filepath.Join(dir, "dmq.sock"),
+		SocketPath:    shortSocketPath(t),
 		NetworkMagic:  testDMQMagic,
 		Authenticator: ocommon.NewNoOpAuthenticator(nil),
 	})
