@@ -639,6 +639,9 @@ func TestDijkstraChildPredicatesRejectedOnEveryProductionPath(t *testing.T) {
 				require.True(t, f.live(t, childProdTopInput, 0))
 				require.True(t, f.live(t, childProdChildInput, 0))
 
+				// The replay ledger starts at the origin, so the durable tip
+				// must match it or block applies are rejected as stale.
+				require.NoError(t, f.db.SetTip(ochainsync.Tip{}, nil))
 				replay := newReplayTestLedger(
 					t, f.db, f.block, uint(gledger.BlockTypeDijkstra),
 					eras.DijkstraEraDesc, childProdParams(),

@@ -74,8 +74,13 @@ type Index struct {
 	Columns []string
 	// Where, when set, makes the index partial: a predicate over plain
 	// column names that the rebuild appends as the index's WHERE clause.
-	// MySQL has no partial indexes and builds the full index instead.
+	// MySQL has no partial indexes and builds the full index instead, over
+	// MySQLColumns when that is set.
 	Where string
+	// MySQLColumns, when set, replaces Columns on MySQL. It is for an entry
+	// whose partial form MySQL cannot hold and whose full multi-column form
+	// would cost every live row an unrelated leaf.
+	MySQLColumns []string
 	// Notes documents why this index is safe to defer. Surfaces
 	// in the manifest test failure message when the
 	// classification is questioned.
@@ -222,7 +227,18 @@ var Manifest = []Index{
 			"staking_key",
 			"amount",
 		},
-		Notes: "Primary UTxO RPC search path", Critical: true,
+		// Spent rows only: a live output at deleted_slot = 0 would sit at a
+		// random position, ordered by credential and amount, and every
+		// created and spent output would dirty an unrelated leaf. Nothing
+		// reads the live region through this index.
+		Where: "deleted_slot > 0",
+		// MySQL has no partial indexes. InnoDB appends the primary key to
+		// each secondary entry, so (deleted_slot) alone clusters live rows at
+		// deleted_slot = 0 in id order, which grows, and a spend lands under
+		// the spend slot.
+		MySQLColumns: []string{"deleted_slot"},
+		Notes:        "Rollback un-spend and stake-credential sweep, spent-UTxO prune",
+		Critical:     true,
 	},
 	// idx_utxo_staking_deleted_amount is deliberately NOT deferred.
 	// FlushBatch -> refreshRewardLiveStakeAggregates runs a per-credential

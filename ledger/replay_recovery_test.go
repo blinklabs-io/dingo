@@ -5214,7 +5214,7 @@ func TestDeterministicTxRecoveryDeclinesAtSameSlotSameHash(t *testing.T) {
 // way down.
 func TestAtTipRecoveryPruneFloorBindsAboveMithrilAnchor(t *testing.T) {
 	const mithrilAnchorSlot = pruneFixtureRootSlot
-	f := newPrunedUtxoFixture(t, mithrilAnchorSlot)
+	f := newDeepPrunedUtxoFixture(t, mithrilAnchorSlot)
 
 	f.ls.cleanupConsumedUtxos(context.Background())
 	floor, err := f.db.ConsumedUtxoPruneFloor(nil)

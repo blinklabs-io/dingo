@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"math/big"
@@ -146,15 +147,23 @@ type Node struct {
 	// path stops. An atomic pointer because the reload trigger runs on its
 	// own goroutine, concurrently with a live lifecycle teardown.
 	blockProducerCreds atomic.Pointer[forging.PoolCredentials]
-	// kesAgentClient is set when shelleyKESAgentSocket is configured, in
-	// either serve-key or sign mode. validateBlockProducerStartup owns
-	// dialing/closing it (closing the prior one before replacing it, so a
-	// live-lifecycle rebuild via reinitializeBlockProducer cannot leak a
-	// connection); node_shutdown.go closes it during graceful shutdown.
-	kesAgentClient  *kesagent.Client
+	// kesAgentClient is set when a KES agent is configured: a local socket
+	// client (shelleyKESAgentSocket) in either serve-key or sign mode, or a
+	// remote sign client (shelleyKESAgentAddress).
+	// validateBlockProducerStartup owns dialing/closing it (closing the prior
+	// one before replacing it, so a live-lifecycle rebuild via
+	// reinitializeBlockProducer cannot leak a connection); node_shutdown.go
+	// closes it during graceful shutdown.
+	kesAgentClient  io.Closer
 	kesAgentCancel  context.CancelFunc
 	kesAgentMetrics *kesagent.Metrics
-	leaderElection  nodeconsensus.LeaderScheduler
+	// kesAgentMetricsOnce guards kesAgentMetrics' lazy creation: a sign-mode
+	// reload builds its client outside the lifecycle gates.
+	kesAgentMetricsOnce sync.Once
+	// keyReload is the in-place credential reload's state: the agent's
+	// newer-certificate offers, the file watch and the reload metrics.
+	keyReload      keyReloadState
+	leaderElection nodeconsensus.LeaderScheduler
 	// leaderSchedulerRef mirrors leaderElection for readers outside the
 	// node lifecycle goroutine, such as the ledger rollback callback.
 	leaderSchedulerRef atomic.Pointer[leaderSchedulerRef]
@@ -656,6 +665,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncHasBestPeer:                 n.chainsyncHasBestPeer,
 		ChainsyncApplyEligible:               n.chainsyncApplyEligible,
 		ChainsyncAwaitEagerness:              n.chainsyncAwaitEagerness,
+		ChainsyncJumping:                     n.chainsyncJumpingConfig(),
 		ChainsyncAwaitCatchUpBand:            n.chainsyncAwaitCatchUpBand,
 		ChainsyncHeaderVerificationSettled:   n.chainsyncHeaderVerificationSettled,
 		ChainsyncAwaitCorroboration:          n.chainsyncAwaitCorroboration,
@@ -681,6 +691,79 @@ func (n *Node) newOuroborosConfig(
 		// Production bound on peer TxSubmission work. The ouroboros package
 		// leaves the limiter off at zero, so the node must set it.
 		MaxTxSubmissionsPerSecond: defaultMaxTxSubmissionsPerSecond,
+	}
+}
+
+// chainsyncJumpingConfig connects ChainSync Jumping to the chain selector.
+// It is off when the operator disables it.
+func (n *Node) chainsyncJumpingConfig() ouroborosPkg.ChainsyncJumpingConfig {
+	if !n.config.genesisChainSyncJumping {
+		return ouroborosPkg.ChainsyncJumpingConfig{}
+	}
+	return ouroborosPkg.ChainsyncJumpingConfig{
+		Enabled: true,
+		Active: func() bool {
+			if n.chainSelector == nil {
+				return false
+			}
+			active, _ := n.chainSelector.GenesisSelectionState()
+			return active
+		},
+		PeerIdentity: n.peerCorroborationIdentityByConnId,
+		BestPeer: func() *ouroboros.ConnectionId {
+			if n.chainSelector == nil {
+				return nil
+			}
+			return n.chainSelector.GetBestPeer()
+		},
+		DynamoFragment: func(
+			connId ouroboros.ConnectionId,
+		) ([]ocommon.Point, uint64, bool) {
+			if n.chainSelector == nil {
+				return nil, 0, false
+			}
+			return n.chainSelector.JumpFragment(connId)
+		},
+		RecordAgreement: func(
+			jumper ouroboros.ConnectionId,
+			dynamo ouroboros.ConnectionId,
+			point ocommon.Point,
+			jumperTip ochainsync.Tip,
+		) bool {
+			if n.chainSelector == nil {
+				return false
+			}
+			return n.chainSelector.RecordJumpAgreement(
+				jumper,
+				dynamo,
+				point,
+				jumperTip,
+			)
+		},
+		RecordRejection: func(jumper ouroboros.ConnectionId) bool {
+			if n.chainSelector == nil {
+				return false
+			}
+			return n.chainSelector.RecordJumpRejection(jumper)
+		},
+		// Half of k: the selector holds the dynamo k blocks past the
+		// common point, which the jumpers' last agreement bounds.
+		JumpBlocks: func() uint64 {
+			return max(n.shelleySecurityParam()/2, 1)
+		},
+		// Either moves whenever the local chain does: the applied tip, or
+		// the downloaded primary chain ahead of it.
+		LocalProgress: func() uint64 {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return 0
+			}
+			return ls.Tip().Point.Slot + ls.PrimaryChainTipSlot()
+		},
+		Held: func(connId ouroboros.ConnectionId) bool {
+			return n.chainSelector != nil &&
+				n.chainSelector.EagernessPaused(connId)
+		},
 	}
 }
 
@@ -2223,6 +2306,7 @@ func (n *Node) buildChainSelectorConfig(
 		GenesisMode:           genesisMode,
 		GenesisWindowSlots:    genesisWindowSlots,
 		MinCorroboratingPeers: n.config.genesisCorroborationPeers,
+		ChainSyncJumping:      n.config.genesisChainSyncJumping,
 		GenesisStateMachine:   n.config.genesisSelectionEligible(),
 		SlotTime:              n.selectorSlotTime,
 		LocalTipPraosView:     n.selectorLocalTipPraosView,

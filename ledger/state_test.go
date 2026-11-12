@@ -275,7 +275,10 @@ func TestAdvanceEpochCachePreservesPublishedSnapshot(t *testing.T) {
 
 	// Exercise the real header-verification writer rather than reproducing its
 	// copy-on-write logic inside this test.
-	require.NoError(t, ls.advanceEpochCache(context.Background()))
+	require.NoError(t, ls.advanceEpochCacheToSlot(
+		context.Background(),
+		ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots),
+	))
 
 	// The current view must advance, while the retained view must remain on the
 	// original cache and epoch values.
@@ -7740,12 +7743,22 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 		t.Fatal("epoch rollover returned no result")
 	}
 	require.Len(t, captures, 1)
+	// Dingo's Shelley-to-Allegra translation raises the major to Allegra's:
+	// the AVVM return (hardfork_rule.go) and the forger's Shelley/Allegra
+	// split are keyed on it. The reference ledger copies the version there too,
+	// so this is a known divergence for a chain that reaches Allegra by trigger
+	// epoch. The Mary translation carries the major over unchanged, as
+	// upgradePParams does. The snapshot records the major the new epoch runs
+	// at, which is no longer the source era's major.
 	require.Equal(
 		t,
-		uint(mary.MinProtocolVersionMary),
+		uint(allegra.MinProtocolVersionAllegra),
 		captures[0].ProtocolVersion,
-		"the mark snapshot must record the protocol major of the era the "+
-			"new epoch runs at, not the era the rollover started in",
+		"the mark snapshot must record the protocol major the new epoch "+
+			"runs at, not the one the rollover started with",
+	)
+	require.NotEqual(
+		t, uint(shelley.MinProtocolVersionShelley), captures[0].ProtocolVersion,
 	)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEra.Id)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEpoch.EraId)
@@ -7830,6 +7843,139 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 	require.NotNil(t, persistedEpoch)
 	require.Equal(t, wantSlotLength, persistedEpoch.SlotLength)
 	require.Equal(t, wantEpochLength, persistedEpoch.LengthInSlots)
+}
+
+func TestEpochRolloverJumpSkipsNewEpochEffects(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newBoundaryRolloverLedger(t)
+	var captures []event.EpochTransitionEvent
+	ls.SetEpochBoundarySnapshotHook(
+		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+			captures = append(captures, evt)
+			return nil
+		},
+	)
+	beforeEpochs, err := db.GetEpochs(nil)
+	require.NoError(t, err)
+
+	targetEpoch, err := epochAtSlot(
+		ls.currentEpoch,
+		ls.currentEpoch.StartSlot+
+			3*uint64(ls.currentEpoch.LengthInSlots),
+	)
+	require.NoError(t, err)
+
+	var result *EpochRolloverResult
+	txn := db.Transaction(t.Context(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var rolloverErr error
+		result, rolloverErr = ls.processEpochRolloverForTargetWithClassicPParamsContext(
+			t.Context(),
+			txn,
+			ls.currentEpoch,
+			targetEpoch,
+			targetEpoch,
+			ls.currentEpoch.EpochId,
+			ls.currentEra,
+			ls.currentPParams,
+			false,
+			false,
+			nil,
+		)
+		return rolloverErr
+	}))
+	require.NotNil(t, result)
+	require.Equal(t, targetEpoch.EpochId, result.NewCurrentEpoch.EpochId)
+	require.Equal(t, targetEpoch.StartSlot, result.NewCurrentEpoch.StartSlot)
+	require.Empty(t, captures,
+		"a non-successor NEWEPOCH signal must not run SNAP or other EPOCH effects")
+	require.Len(t, result.NewEpochCache, len(beforeEpochs)+1)
+	require.Equal(t, targetEpoch.EpochId,
+		result.NewEpochCache[len(result.NewEpochCache)-1].EpochId)
+	for _, epoch := range result.NewEpochCache {
+		require.NotEqual(t, uint64(6), epoch.EpochId)
+		require.NotEqual(t, uint64(7), epoch.EpochId)
+	}
+	require.Equal(t, ls.currentEpoch.EpochId,
+		ledgerEpochFromCache(result.NewEpochCache))
+
+	// A later block in the immediately following consensus epoch must not
+	// restart NEWEPOCH effects. The ledger epoch label remains at the last
+	// sequential transition until a signal is its immediate successor.
+	nextTarget, err := epochAtSlot(
+		result.NewCurrentEpoch,
+		result.NewCurrentEpoch.StartSlot+
+			uint64(result.NewCurrentEpoch.LengthInSlots),
+	)
+	require.NoError(t, err)
+	var nextResult *EpochRolloverResult
+	txn = db.Transaction(t.Context(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var rolloverErr error
+		nextResult, rolloverErr = ls.processEpochRolloverForTargetWithClassicPParamsContext(
+			t.Context(),
+			txn,
+			result.NewCurrentEpoch,
+			nextTarget,
+			nextTarget,
+			ls.currentEpoch.EpochId,
+			ls.currentEra,
+			ls.currentPParams,
+			false,
+			false,
+			nil,
+		)
+		return rolloverErr
+	}))
+	require.Equal(t, nextTarget.EpochId, nextResult.NewCurrentEpoch.EpochId)
+	require.Empty(t, captures,
+		"a later epoch must not resume effects after the ledger label was skipped")
+	require.Equal(t, ls.currentEpoch.EpochId,
+		ledgerEpochFromCache(nextResult.NewEpochCache))
+}
+
+func TestLedgerEpochFromSparseCache(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		epochs []models.Epoch
+		want   uint64
+	}{
+		{
+			name: "gap from epoch zero",
+			epochs: []models.Epoch{
+				{EpochId: 0, EraId: eras.ShelleyEraDesc.Id},
+				{EpochId: 3, EraId: eras.ShelleyEraDesc.Id},
+			},
+			want: 0,
+		},
+		{
+			name: "consecutive prefix before gap",
+			epochs: []models.Epoch{
+				{EpochId: 4, EraId: eras.ConwayEraDesc.Id},
+				{EpochId: 5, EraId: eras.ConwayEraDesc.Id},
+				{EpochId: 8, EraId: eras.ConwayEraDesc.Id},
+			},
+			want: 5,
+		},
+		{
+			name: "Byron translation resets the label",
+			epochs: []models.Epoch{
+				{EpochId: 206, EraId: eras.ByronEraDesc.Id},
+				{EpochId: 208, EraId: eras.ShelleyEraDesc.Id},
+				{EpochId: 210, EraId: eras.ShelleyEraDesc.Id},
+			},
+			want: 208,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, test.want, ledgerEpochFromCache(test.epochs))
+		})
+	}
 }
 
 // TestSingleEraBoundaryRolloverCapturesSnapshotInRollover covers the common
@@ -12748,6 +12894,7 @@ func stabilityFixtureLedgerState(
 			stabilityFixtureEpochLen,
 			eras.ConwayEraDesc.Id,
 		),
+		ledgerEpoch:    stabilityFixtureEpochID,
 		currentPParams: &pparams,
 		transitionInfo: hardfork.NewTransitionUnknown(),
 		config: LedgerStateConfig{
@@ -13105,9 +13252,10 @@ func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(
 }
 
 // Slot grid for the prune-floor fixture. The Shelley genesis used here
-// (k=432, f=0.05) gives a stability window W of 3k/f = 25920 slots, so with a
-// tip at pruneFixtureTipSlot the consumed-UTxO sweep prunes everything with
-// deleted_slot <= pruneFixtureFloorSlot (140000-W).
+// (k=432, f=0.05) gives a stability window W of 3k/f = 25920 slots. The
+// consumed-UTxO sweep prunes up to the lower of tip-W and the slot of the block
+// k deep; the fixture places that block at pruneFixtureFloorSlot, so everything
+// with deleted_slot <= pruneFixtureFloorSlot is pruned.
 //
 // The at-tip rewind schedule then steps the ledger tip 140000 -> 114080 ->
 // 88160. Attempt 2 asks for W/2 below the tip (127040) and findRewindPoint
@@ -13124,6 +13272,9 @@ const (
 	pruneFixtureFloorSlot       = 114_080
 	pruneFixtureRetainedSlot    = 120_000
 	pruneFixtureTipSlot         = 140_000
+	// pruneFixtureDepthFillers puts the floor block exactly k=432 blocks
+	// behind the tip: 431 fillers, the tip, and the floor block itself.
+	pruneFixtureDepthFillers = 431
 )
 
 type prunedUtxoFixture struct {
@@ -13139,6 +13290,36 @@ type prunedUtxoFixture struct {
 }
 
 func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFixture {
+	t.Helper()
+	return newPrunedUtxoFixtureWithFillers(t, mithrilLedgerSlot, 0, false)
+}
+
+// newDeepPrunedUtxoFixture is the prune-floor fixture for tests that run the
+// consumed-UTxO sweep: it adds the filler blocks that make the chain k blocks
+// deep so the sweep prunes at pruneFixtureFloorSlot.
+func newDeepPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFixture {
+	t.Helper()
+	return newPrunedUtxoFixtureWithFillers(
+		t,
+		mithrilLedgerSlot,
+		pruneFixtureDepthFillers,
+		false,
+	)
+}
+
+// newPrunedUtxoFixtureWithFillers builds the prune-floor fixture with filler
+// blocks so the chain is at least k (=432) blocks deep, which the sweep needs
+// before it will delete anything. With the default placement the fillers sit
+// between the floor block and the tip, so the block exactly k deep is the
+// floor block and the sweep floor stays at pruneFixtureFloorSlot. With
+// sparseTail the fillers instead sit one slot apart just above the consumer
+// block, which leaves the block k deep far below tip-3k/f.
+func newPrunedUtxoFixtureWithFillers(
+	t *testing.T,
+	mithrilLedgerSlot uint64,
+	fillers int,
+	sparseTail bool,
+) *prunedUtxoFixture {
 	t.Helper()
 
 	db := newTestDB(t)
@@ -13159,9 +13340,28 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 		{pruneFixtureProducerSlot, 2, testHashBytes("3766-producer")},
 		{pruneFixtureDeepRewindSlot, 3, testHashBytes("3766-deep")},
 		{pruneFixtureConsumerSlot, 4, testHashBytes("3766-consumer")},
-		{pruneFixtureFloorSlot, 5, testHashBytes("3766-floor")},
-		{pruneFixtureTipSlot, 6, testHashBytes("3766-tip")},
 	}
+	addFillers := func(firstSlot, step uint64) {
+		for i := range fillers {
+			blocks = append(blocks, fixtureBlock{
+				firstSlot + uint64(i)*step, //nolint:gosec
+				uint64(len(blocks)) + 1,
+				testHashBytes(fmt.Sprintf("3766-filler-%d", i)),
+			})
+		}
+	}
+	if sparseTail {
+		addFillers(pruneFixtureConsumerSlot+1, 1)
+	}
+	blocks = append(blocks, fixtureBlock{
+		pruneFixtureFloorSlot, uint64(len(blocks)) + 1, testHashBytes("3766-floor"),
+	})
+	if !sparseTail {
+		addFillers(pruneFixtureFloorSlot+1, 60)
+	}
+	blocks = append(blocks, fixtureBlock{
+		pruneFixtureTipSlot, uint64(len(blocks)) + 1, testHashBytes("3766-tip"),
+	})
 	rawBlocks := make([]chain.RawBlock, 0, len(blocks))
 	for i, b := range blocks {
 		var prevHash []byte
@@ -13364,7 +13564,7 @@ func (f *prunedUtxoFixture) assertLiveSetConsistentAtTip(t *testing.T) {
 func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 
 	require.Equal(
 		t,
@@ -13416,7 +13616,7 @@ func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos(context.Background())
 	tipBefore := f.ls.currentTip
 
@@ -13465,7 +13665,7 @@ func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
 func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 
 	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
 	require.NoError(t, err)
@@ -13528,7 +13728,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos(context.Background())
 
 	// Put the applied ledger tip on a same-slot competitor at the floor, with
@@ -14404,4 +14604,155 @@ func TestCleanupBlockNoncesRetainsHistoryInAPIMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+var chainPositionGaugeNames = []string{
+	"cardano_node_metrics_blockNum_int",
+	"cardano_node_metrics_slotNum_int",
+	"cardano_node_metrics_epoch_int",
+	"cardano_node_metrics_slotInEpoch_int",
+	"cardano_node_metrics_density_real",
+}
+
+func gatherGaugeValues(
+	t *testing.T,
+	reg *prometheus.Registry,
+) map[string]float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	out := make(map[string]float64)
+	for _, mf := range families {
+		if len(mf.GetMetric()) == 1 && mf.GetMetric()[0].GetGauge() != nil {
+			out[mf.GetName()] = mf.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	return out
+}
+
+func TestChainPositionGaugesAbsentUntilTipLoaded(t *testing.T) {
+	t.Parallel()
+
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
+			strings.NewReader(`{"activeSlotsCoeff": 0.05, "securityParam": 3}`),
+		),
+	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	oldestBlock := makeTestBlock(150, 2)
+	require.NoError(t, db.BlockCreate(oldestBlock, nil))
+	tipBlock := makeTestBlock(210, 5)
+	require.NoError(t, db.BlockCreate(tipBlock, nil))
+	require.NoError(
+		t,
+		db.SetBlockNonce(tipBlock.Hash, tipBlock.Slot, []byte{1}, false, nil),
+	)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       makeTestPoint(tipBlock),
+		BlockNumber: tipBlock.Number,
+	}, nil))
+	ls := &LedgerState{
+		db:           db,
+		currentEra:   eras.ShelleyEraDesc,
+		currentEpoch: models.Epoch{EpochId: 3, StartSlot: 200},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	reg := prometheus.NewRegistry()
+	ls.metrics.init(reg)
+	// Start loads epochs before the tip, so the epoch gauge is set while
+	// it is still unregistered and must survive registration.
+	ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
+
+	// A scrape before the tip is loaded must not report 0 for any
+	// chain-position gauge.
+	before := gatherGaugeValues(t, reg)
+	for _, name := range chainPositionGaugeNames {
+		assert.NotContains(t, before, name)
+	}
+
+	require.NoError(t, ls.loadTip(context.Background()))
+
+	after := gatherGaugeValues(t, reg)
+	for _, name := range chainPositionGaugeNames {
+		assert.Contains(t, after, name)
+	}
+	assert.Equal(t, float64(tipBlock.Number), after[chainPositionGaugeNames[0]])
+	assert.Equal(t, float64(tipBlock.Slot), after[chainPositionGaugeNames[1]])
+	assert.Equal(t, float64(3), after[chainPositionGaugeNames[2]])
+	assert.Equal(t, float64(10), after[chainPositionGaugeNames[3]])
+	// (5-2) blocks over (210-150) slots within the k=3 fragment.
+	assert.InDelta(t, 0.05, after[chainPositionGaugeNames[4]], 1e-9)
+}
+
+func TestChainPositionGaugesExportedAtOriginTip(t *testing.T) {
+	t.Parallel()
+
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
+			strings.NewReader(`{"activeSlotsCoeff": 0.05, "securityParam": 3}`),
+		),
+	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	reg := prometheus.NewRegistry()
+	ls.metrics.init(reg)
+	for _, name := range chainPositionGaugeNames {
+		assert.NotContains(t, gatherGaugeValues(t, reg), name)
+	}
+
+	require.NoError(t, ls.loadTip(context.Background()))
+
+	// A genuinely empty chain has its tip at origin, so 0 is the loaded value.
+	got := gatherGaugeValues(t, reg)
+	for _, name := range chainPositionGaugeNames {
+		assert.Contains(t, got, name)
+		assert.Zero(t, got[name])
+	}
+}
+
+// prepareEraTransitionsForRollover runs the era-transition preparation for the
+// epoch that follows snapshotEpoch, as the rollover does once it has resolved
+// its target epoch.
+func (ls *LedgerState) prepareEraTransitionsForRollover(
+	ctx context.Context,
+	txn *database.Txn,
+	snapshotEpoch models.Epoch,
+	snapshotEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	transitionPath []uint,
+) (
+	lcommon.ProtocolParameters,
+	uint,
+	[]*EraTransitionResult,
+	[]uint,
+	bool,
+	error,
+) {
+	targetEpoch, err := epochAtSlot(
+		snapshotEpoch,
+		snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
+	)
+	if err != nil {
+		return nil, 0, nil, nil, false, err
+	}
+	return ls.prepareEraTransitionsForEpoch(
+		ctx, txn, targetEpoch, snapshotEra,
+		currentPParams, transitionPath, true,
+	)
 }

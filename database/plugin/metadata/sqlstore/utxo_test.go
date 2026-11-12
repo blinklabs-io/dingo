@@ -1410,6 +1410,7 @@ func TestQueryUtxoStakeRefsUsesTxIDIndex(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
+	useFullSpentStakingIndex(t, store)
 	seedStakeRefLookupUtxos(t, store, 2_000, 256)
 
 	for _, nTerms := range []int{2, 4, 8, 64, 400} {

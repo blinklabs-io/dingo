@@ -20,10 +20,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"time"
 
+	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/chain"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
@@ -103,7 +105,7 @@ func (n *Node) setEquivocationSelfPoolID(creds *forging.PoolCredentials) {
 func (n *Node) validateBlockProducerStartupAtSlot(
 	currentSlot uint64,
 ) (creds *forging.PoolCredentials, retErr error) {
-	agentBacked := n.config.shelleyKESAgentSocket != ""
+	agentBacked := n.kesAgentConfigured()
 	if agentBacked {
 		// Agent startup installs the client before the remaining credential
 		// validation below. Do not leave that client and its serve-key loop
@@ -171,7 +173,7 @@ func (n *Node) validateBlockProducerStartupForClock(
 	if supported {
 		return n.validateBlockProducerStartupAtSlot(slot)
 	}
-	if n.config.shelleyKESAgentSocket != "" {
+	if n.kesAgentConfigured() {
 		defer func() {
 			if retErr != nil {
 				n.closeKESAgentClient()
@@ -224,7 +226,7 @@ func (n *Node) validateBlockProducerCredentialMaterial(
 	currentSlot uint64,
 ) (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
-	if n.config.shelleyKESAgentSocket != "" {
+	if n.kesAgentConfigured() {
 		if err := n.loadBlockProducerCredentialsFromAgent(creds,
 			currentSlot,
 		); err != nil {
@@ -263,6 +265,18 @@ func (n *Node) loadBlockProducerCredentialsFromAgent(
 	n.closeKESAgentClient()
 
 	mode := n.config.shelleyKESAgentMode
+	if n.config.shelleyKESAgentAddress != "" {
+		// A remote agent serves only sign mode. Config validation rejects
+		// any other mode with an address, but a library caller can skip it.
+		if mode != "" && mode != kesagent.ModeSign {
+			return fmt.Errorf(
+				"remote KES agent supports only mode %q, got %q",
+				kesagent.ModeSign,
+				mode,
+			)
+		}
+		mode = kesagent.ModeSign
+	}
 	if mode == "" {
 		mode = kesagent.ModeServeKey
 	}
@@ -428,15 +442,7 @@ func (n *Node) startKESAgentSign(creds *forging.PoolCredentials) error {
 			err,
 		)
 	}
-	client, err := kesagent.NewClient(kesagent.Config{
-		SocketPath:        n.config.shelleyKESAgentSocket,
-		Mode:              kesagent.ModeSign,
-		SignTimeout:       n.config.shelleyKESAgentSignTimeout,
-		KESVKey:           opCertKey.VKey,
-		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
-		Logger:            n.config.logger,
-		Metrics:           n.kesAgentClientMetrics(),
-	})
+	client, err := n.newKESAgentSignClient(opCertKey)
 	if err != nil {
 		return err
 	}
@@ -452,10 +458,64 @@ func (n *Node) startKESAgentSign(creds *forging.PoolCredentials) error {
 	return nil
 }
 
-func (n *Node) kesAgentClientMetrics() *kesagent.Metrics {
-	if n.kesAgentMetrics == nil && n.config.promRegistry != nil {
-		n.kesAgentMetrics = kesagent.NewMetrics(n.config.promRegistry)
+// kesAgentSignClient is a sign-mode KES agent client, local or remote.
+type kesAgentSignClient interface {
+	forging.RemoteKESSigner
+	io.Closer
+}
+
+// newKESAgentSignClient dials nothing yet: it builds the remote client when
+// shelleyKESAgentAddress is set, otherwise the local socket client.
+func (n *Node) newKESAgentSignClient(
+	opCertKey *bursa.LoadedKey,
+) (kesAgentSignClient, error) {
+	if n.config.shelleyKESAgentAddress == "" {
+		return kesagent.NewClient(kesagent.Config{
+			SocketPath:        n.config.shelleyKESAgentSocket,
+			Mode:              kesagent.ModeSign,
+			SignTimeout:       n.config.shelleyKESAgentSignTimeout,
+			KESVKey:           opCertKey.VKey,
+			OpCertStartPeriod: opCertKey.OpCertKesPeriod,
+			Logger:            n.config.logger,
+			Metrics:           n.kesAgentClientMetrics(),
+		})
 	}
+	return kesagent.NewRemoteClient(kesagent.RemoteConfig{
+		OnNewerOpCert:     n.offerAgentOpCert,
+		Address:           n.config.shelleyKESAgentAddress,
+		ClientCertFile:    n.config.shelleyKESAgentClientCertFile,
+		ClientKeyFile:     n.config.shelleyKESAgentClientKeyFile,
+		ServerSPKISHA256:  n.config.shelleyKESAgentServerSPKISHA256,
+		Plaintext:         n.config.shelleyKESAgentPlaintext,
+		KESVKey:           opCertKey.VKey,
+		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
+		OpCert:            opCertKey.RawCBOR,
+		SignTimeout:       n.config.shelleyKESAgentSignTimeout,
+		Logger:            n.config.logger,
+		Metrics:           n.kesAgentClientMetrics(),
+	})
+}
+
+// kesAgentSignMode reports whether a configured KES agent signs headers
+// (sign mode, local or remote) rather than pushing the key (serve-key).
+func (n *Node) kesAgentSignMode() bool {
+	return n.config.shelleyKESAgentAddress != "" ||
+		n.config.shelleyKESAgentMode == kesagent.ModeSign
+}
+
+// kesAgentConfigured reports whether KES signing goes through an agent,
+// local or remote, rather than a local key file.
+func (n *Node) kesAgentConfigured() bool {
+	return n.config.shelleyKESAgentSocket != "" ||
+		n.config.shelleyKESAgentAddress != ""
+}
+
+func (n *Node) kesAgentClientMetrics() *kesagent.Metrics {
+	n.kesAgentMetricsOnce.Do(func() {
+		if n.config.promRegistry != nil {
+			n.kesAgentMetrics = kesagent.NewMetrics(n.config.promRegistry)
+		}
+	})
 	return n.kesAgentMetrics
 }
 
@@ -497,25 +557,16 @@ func (n *Node) blockProducerContext() context.Context {
 // into the running block producer. Any failure leaves the loaded credentials
 // in place and forging uninterrupted. It is refused while startup, shutdown,
 // or a live restore or truncate is in progress.
+//
+// In KES agent sign mode it re-reads the VRF key and the operational
+// certificate and moves signing to a client for the new certificate; in
+// serve-key mode it is refused, since the agent pushes each new key itself.
 func (n *Node) ReloadBlockProducerCredentials() error {
 	// The reload reads n.ledgerState and the live credentials, both of which
 	// those operations replace, from its own goroutine. Holding the gates for
 	// the whole reload is acceptable where a probe's would not be: it runs
 	// once per operator-initiated rotation, not on every probe interval.
-	release, err := n.tryLifecycleGates()
-	if err != nil {
-		return err
-	}
-	defer release()
-	slot, supported, err := n.blockProducerStartupClock()
-	if err != nil {
-		return err
-	}
-	return n.reloadBlockProducerCredentials(
-		slot,
-		supported,
-		n.validateBlockProducerLedger,
-	)
+	return n.reloadCredentials(reloadTriggerSignal, nil)
 }
 
 // reloadBlockProducerCredentials is ReloadBlockProducerCredentials with the
@@ -532,10 +583,13 @@ func (n *Node) reloadBlockProducerCredentials(
 	if live == nil {
 		return errors.New("block producer credentials are not loaded")
 	}
-	if n.config.shelleyKESAgentSocket != "" {
-		return errors.New(
-			"block producer credentials come from a KES agent; rotate the key through the agent",
-		)
+	if n.kesAgentConfigured() {
+		if !n.kesAgentSignMode() {
+			return errors.New(
+				"block producer credentials come from a KES agent in serve-key mode; rotate the key through the agent, which pushes each new key",
+			)
+		}
+		return n.reloadAgentSignCredentials(slot, supported, ledgerCheck, nil)
 	}
 	if !supported {
 		return errors.New(
@@ -840,7 +894,10 @@ func (n *Node) startBlockProducer(
 	}
 	n.blockProducerCreds.Store(creds)
 	n.setEquivocationSelfPoolID(creds)
+	//nolint:contextcheck // the reload loops are bound to the node lifecycle context, not this call
+	n.startKeyReloadLoops()
 	started = append(started, func() {
+		n.stopKeyReloadLoops()
 		if n.blockForger != nil {
 			n.blockForger.Stop()
 		}
@@ -1518,6 +1575,14 @@ func (a *epochInfoAdapter) ConsensusModeForEpoch(
 	return a.ledgerState.ConsensusModeForEpoch(epoch)
 }
 
+// LeaderStakeSnapshotEpoch satisfies leader.LeaderStakeSnapshotProvider so the
+// schedule is elected by the same distribution header validation uses.
+func (a *epochInfoAdapter) LeaderStakeSnapshotEpoch(epoch uint64) uint64 {
+	return a.ledgerState.LeaderStakeSnapshotEpoch(epoch)
+}
+
+var _ leader.LeaderStakeSnapshotProvider = (*epochInfoAdapter)(nil)
+
 func (a *epochInfoAdapter) EraIDForEpoch(epoch uint64) (uint, error) {
 	return a.ledgerState.EraIDForEpoch(epoch)
 }
@@ -1543,6 +1608,11 @@ func (a *slotClockAdapter) ChainTip() ocommon.Point {
 
 func (a *slotClockAdapter) ChainTipSnapshot() ochainsync.Tip {
 	return a.ledgerState.Tip()
+}
+
+// StabilityWindow returns the ledger's stability window in slots.
+func (a *slotClockAdapter) StabilityWindow() uint64 {
+	return a.ledgerState.StabilityWindow()
 }
 
 func (a *slotClockAdapter) ForgeTipSnapshot() (ochainsync.Tip, int) {

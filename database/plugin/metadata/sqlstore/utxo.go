@@ -227,11 +227,20 @@ func (s *Store) sweepOrphanTransactionIdentities(
 // using the index that answers the slot predicate; see
 // queryStakeRefsDeduped. TestRollbackStakeRefQueriesUseSlotIndexes pins the
 // resulting SQLite query plans.
+//
+// Statements that read spent rows by deleted_slot also state "deleted_slot > 0".
+// idx_utxo_deleted_staking_amount holds only those rows, and a planner can use
+// a partial index only when the statement itself implies its predicate: it
+// cannot infer positivity from a bound parameter.
 const (
+	utxoUnspendAfterSlotQuery = `
+UPDATE utxo
+SET deleted_slot = 0, spent_at_tx_id = NULL
+WHERE deleted_slot > ? AND deleted_slot > 0`
 	utxoStakeRefsAddedAfterSlotQuery = "SELECT credential_tag, staking_key " +
 		"FROM utxo WHERE added_slot > ?"
 	utxoStakeRefsDeletedAfterSlotQuery = "SELECT credential_tag, staking_key " +
-		"FROM utxo WHERE deleted_slot > ?"
+		"FROM utxo WHERE deleted_slot > ? AND deleted_slot > 0"
 )
 
 func (s *Store) DeleteUtxosAfterSlot(
@@ -392,7 +401,7 @@ func spentUtxosMissingAddressAfterSlotSQL(dialect string) string {
 	}
 	return `-- name: GetSpentUtxosMissingAddressAfterSlot
 SELECT ` + utxoRowColumns + ` FROM utxo
-WHERE utxo.deleted_slot > ?
+WHERE utxo.deleted_slot > ? AND utxo.deleted_slot > 0
   AND ` + id + ` > ?
   AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
 ORDER BY ` + id + ` LIMIT ?`
@@ -421,10 +430,9 @@ func (s *Store) SetUtxosNotDeletedAfterSlot(
 			if err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(ctx, `
-UPDATE utxo
-SET deleted_slot = 0, spent_at_tx_id = NULL
-WHERE deleted_slot > ?`,
+			if _, err := db.ExecContext(
+				ctx,
+				utxoUnspendAfterSlotQuery,
 				slotValue,
 			); err != nil {
 				return err
@@ -2500,7 +2508,7 @@ func (s *Store) GetUtxosWithHistory(
 	case models.UtxoHistoryStatusUnspent:
 		predicate += " AND utxo.deleted_slot = 0"
 	case models.UtxoHistoryStatusSpent:
-		predicate += " AND utxo.deleted_slot != 0"
+		predicate += " AND utxo.deleted_slot > 0"
 	}
 	if query.FilterByAsset {
 		if len(query.AssetPolicyID) == 0 {
@@ -2549,7 +2557,7 @@ func (s *Store) GetUtxosWithHistory(
 	if query.SpentAfter != nil || query.SpentBefore != nil {
 		// deleted_slot = 0 is the live sentinel and must not match an
 		// inclusive spent bound at slot zero.
-		predicate += " AND utxo.deleted_slot != 0"
+		predicate += " AND utxo.deleted_slot > 0"
 	}
 	if query.SpentAfter != nil {
 		predicate += " AND utxo.deleted_slot >= ?"

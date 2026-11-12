@@ -185,6 +185,7 @@ var logPlainConfigFields = []string{
 	"ForgeSyncToleranceSlots",
 	"ForgeUpstreamStalenessSlots",
 	"FullPotRewardsEnabled",
+	"GenesisBootstrap.ChainSyncJumping",
 	"GenesisBootstrap.ControlGroups",
 	"GenesisBootstrap.CorroborationPeers",
 	"GenesisBootstrap.Enabled",
@@ -246,6 +247,7 @@ var logPlainConfigFields = []string{
 	"DMQ.N2NPort",
 	"DMQ.NetworkMagic",
 	"DMQ.SocketPath",
+	"DMQ.SocketMode",
 	"DMQ.Topic",
 	"DMQ.TopologyFile",
 	"Midnight.AuthTokenAssetName",
@@ -323,8 +325,14 @@ var logPlainConfigFields = []string{
 	// key and certificate paths below it: the path is not the secret, the
 	// material behind it is, and an operator diagnosing a misconfigured
 	// socket needs to see which path failed.
+	"ShelleyKESAgentAddress",
+	"ShelleyKESAgentClientCertFile",
+	"ShelleyKESAgentClientKeyFile",
 	"ShelleyKESAgentMode",
+	"ShelleyKESAgentPlaintext",
+	"ShelleyKESAgentServerSPKISHA256",
 	"ShelleyKESAgentSignTimeout",
+	"ShelleyKeyWatchInterval",
 	"ShelleyKESAgentSocket",
 	"ShelleyKESKey",
 	"ShelleyOperationalCertificate",
@@ -332,6 +340,7 @@ var logPlainConfigFields = []string{
 	"ShutdownTimeout",
 	"SlotsPerKESPeriod",
 	"SocketPath",
+	"SocketMode",
 	"StartEra",
 	"StorageMode",
 	"SkipRewardLiveStakeBackfillCheck",
