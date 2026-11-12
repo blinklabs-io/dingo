@@ -302,6 +302,9 @@ func (h *boundaryReplayHarness) readEffects() boundaryReplayEffects {
 	if e.rewardMark != nil {
 		e.rewardMark.ID = 0
 	}
+	// The boundary stages these rows for a background writer that starts
+	// after commit; reading before it finishes sees an empty set.
+	h.ls.deferredStakeInputsWG.Wait()
 	inputs, err := meta.GetRewardStakeInputs(replayBoundaryNewEpoch, nil)
 	require.NoError(h.t, err)
 	e.stakeInputs = normalizeReplayStakeInputs(inputs)
