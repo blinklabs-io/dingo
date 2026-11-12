@@ -3142,6 +3142,18 @@ func TestOldestRequiredSnapshotEpoch(t *testing.T) {
 			Nonce:         tb.epochNonce,
 		},
 		{
+			EpochId:       12,
+			StartSlot:     1_200,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       13,
+			StartSlot:     1_300,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
 			EpochId:       14,
 			StartSlot:     1_400,
 			LengthInSlots: 100,
@@ -3662,6 +3674,55 @@ func TestVerifyBlockLeaderEligibility_EligiblePoolPasses(t *testing.T) {
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err, "eligible pool with full stake should pass")
+}
+
+// TestVerifyBlockLeaderEligibility_AfterEmptyEpochGapUsesFrozenDistribution
+// pins the leader distribution across a skipped boundary. cardano-ledger
+// rewrites nesPd only when NEWEPOCH runs for the successor of its epoch label,
+// so once an entire epoch is empty the label stays put and every later block is
+// elected by the distribution that was in force before the gap: the mark
+// snapshot of StakeSnapshotEpoch(label), not of the block's own epoch.
+func TestVerifyBlockLeaderEligibility_AfterEmptyEpochGapUsesFrozenDistribution(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		label    = uint64(5)
+		jumpedTo = uint64(9)
+	)
+	tb := createTestBlock(t, [32]byte{31}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	row := func(id uint64) models.Epoch {
+		return models.Epoch{
+			EpochId:       id,
+			StartSlot:     id * 1_000_000,
+			SlotLength:    1000,
+			LengthInSlots: 1_000_000,
+			EraId:         eras.ShelleyEraDesc.Id,
+			Nonce:         tb.epochNonce,
+		}
+	}
+	// Epochs 6-8 are empty: the first block after the gap is in epoch 9, and
+	// the row for epoch 10 follows it. Neither is the successor of label 5.
+	ls.epochCache = []models.Epoch{row(label), row(jumpedTo), row(jumpedTo + 1)}
+	ls.publishSnapshotsLocked()
+
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	other := bytes.Repeat([]byte{0x77}, 28)
+	// The distribution nesPd holds: captured at the boundary into the label.
+	seedPoolStakeSnapshot(t, db, label-1, poolKeyHash[:], 1_000_000_000)
+	// A decoy under the block's own epoch, which a per-epoch lookup would read
+	// and which never existed in cardano-ledger.
+	seedPoolStakeSnapshot(t, db, jumpedTo-1, other, 1_000_000_000)
+
+	for _, epoch := range []uint64{jumpedTo, jumpedTo + 1} {
+		require.NoError(t,
+			ls.verifyBlockLeaderEligibility(tb.block, epoch),
+			"epoch %d is elected by the distribution frozen at the label",
+			epoch,
+		)
+	}
 }
 
 // TestVerifyBlockLeaderEligibility_Issue2876RewardInclusiveStake is a golden
@@ -4962,6 +5023,18 @@ func TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic(
 			Nonce:         tb.epochNonce,
 		},
 		{
+			EpochId:       12,
+			StartSlot:     1_200,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       13,
+			StartSlot:     1_300,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
 			EpochId:       14,
 			StartSlot:     1_400,
 			LengthInSlots: 100,
@@ -5071,6 +5144,18 @@ func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
 		{
 			EpochId:       11,
 			StartSlot:     1_100,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       12,
+			StartSlot:     1_200,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       13,
+			StartSlot:     1_300,
 			LengthInSlots: 100,
 			Nonce:         tb.epochNonce,
 		},
@@ -5209,20 +5294,28 @@ func TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll(
 
 	// Publish an epoch mapping so the deferred slot resolves to epoch 22
 	// (snapshot 21). Normal floor pruning resumes.
-	ls.epochCache = []models.Epoch{
-		{
-			EpochId:       5,
-			StartSlot:     0,
+	// Contiguous rows: a numeric gap would be an empty-epoch jump, whose
+	// blocks are elected by the distribution frozen before it.
+	ls.epochCache = []models.Epoch{{
+		EpochId:       5,
+		StartSlot:     0,
+		LengthInSlots: 1_000_000,
+		Nonce:         tb.epochNonce,
+	}}
+	for id := uint64(6); id < 22; id++ {
+		ls.epochCache = append(ls.epochCache, models.Epoch{
+			EpochId:       id,
+			StartSlot:     id * 1_000_000,
 			LengthInSlots: 1_000_000,
 			Nonce:         tb.epochNonce,
-		},
-		{
-			EpochId:       22,
-			StartSlot:     49_000_000,
-			LengthInSlots: 2_000_000,
-			Nonce:         tb.epochNonce,
-		},
+		})
 	}
+	ls.epochCache = append(ls.epochCache, models.Epoch{
+		EpochId:       22,
+		StartSlot:     49_000_000,
+		LengthInSlots: 2_000_000,
+		Nonce:         tb.epochNonce,
+	})
 	ls.publishSnapshotsLocked()
 
 	require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(
@@ -5530,6 +5623,18 @@ func TestRepopulateDeferredHeaderValidation(t *testing.T) {
 			Nonce:         tb.epochNonce,
 		},
 		{
+			EpochId:       12,
+			StartSlot:     1_200,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       13,
+			StartSlot:     1_300,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
 			EpochId:       14,
 			StartSlot:     1_400,
 			LengthInSlots: 100,
@@ -5701,6 +5806,18 @@ func TestPrunePoolSnapshotsWithRetentionFloor_ResolveReleasesPin(
 		{
 			EpochId:       11,
 			StartSlot:     1_100,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       12,
+			StartSlot:     1_200,
+			LengthInSlots: 100,
+			Nonce:         tb.epochNonce,
+		},
+		{
+			EpochId:       13,
+			StartSlot:     1_300,
 			LengthInSlots: 100,
 			Nonce:         tb.epochNonce,
 		},
@@ -6324,7 +6441,10 @@ func TestAdvanceEpochCacheRejectsHardForkBoundary(t *testing.T) {
 				t, lastByronEpoch, tc.transition, tc.configuredBoundary,
 			)
 
-			err := ls.advanceEpochCache(context.Background())
+			err := ls.advanceEpochCacheToSlot(
+				context.Background(),
+				lastByronEpoch.StartSlot+uint64(lastByronEpoch.LengthInSlots),
+			)
 			require.ErrorContains(t, err, "hard-fork boundary")
 			require.ErrorIs(t, err, errEpochCacheForecastBoundary)
 			require.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
@@ -6356,7 +6476,10 @@ func TestAdvanceEpochCachePreservesWithinEraForecast(t *testing.T) {
 		true,
 	)
 
-	require.NoError(t, ls.advanceEpochCache(context.Background()))
+	require.NoError(t, ls.advanceEpochCacheToSlot(
+		context.Background(),
+		lastByronEpoch.StartSlot+uint64(lastByronEpoch.LengthInSlots),
+	))
 	cache := ls.loadConsensusSnapshot().epochCache
 	require.Len(t, cache, 2)
 	forecast := cache[1]
@@ -6367,6 +6490,133 @@ func TestAdvanceEpochCachePreservesWithinEraForecast(t *testing.T) {
 	got, err := ls.epochForSlot(forecast.StartSlot)
 	require.NoError(t, err)
 	require.Equal(t, forecast, got)
+}
+
+func TestEnsureEpochForSlotJumpsEmptyEpochsOnce(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	const (
+		epochID     uint64 = 100
+		epochStart  uint64 = 1_000
+		epochLength uint64 = 75
+		emptyEpochs uint64 = 8
+	)
+	candidate := bytes.Repeat([]byte{0xbb}, lcommon.Blake2b256Size)
+	evolving := bytes.Repeat([]byte{0xaa}, lcommon.Blake2b256Size)
+	carriedLab := bytes.Repeat([]byte{0xfa}, lcommon.Blake2b256Size)
+	previousNonce := bytes.Repeat([]byte{0xee}, lcommon.Blake2b256Size)
+	source := models.Epoch{
+		EpochId:             epochID,
+		StartSlot:           epochStart,
+		LengthInSlots:       uint(epochLength),
+		SlotLength:          1_000,
+		EraId:               eras.ConwayEraDesc.Id,
+		Nonce:               previousNonce,
+		EvolvingNonce:       evolving,
+		CandidateNonce:      candidate,
+		LastEpochBlockNonce: carriedLab,
+	}
+	ls := &LedgerState{
+		db:             db,
+		currentEpoch:   source,
+		currentEra:     eras.ConwayEraDesc,
+		epochCache:     []models.Epoch{source},
+		transitionInfo: hardfork.NewTransitionUnknown(),
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newConwayBootstrapStabilityCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	targetSlot := epochStart + emptyEpochs*epochLength + 1
+	target, err := ls.ensureEpochForSlot(t.Context(), targetSlot)
+	require.NoError(t, err)
+	require.Equal(t, epochID+emptyEpochs, target.EpochId)
+	require.Equal(t, epochStart+emptyEpochs*epochLength, target.StartSlot)
+	require.Equal(t, evolving, target.EvolvingNonce)
+	require.Equal(t, candidate, target.CandidateNonce)
+	require.Equal(t, carriedLab, target.LastEpochBlockNonce)
+
+	expectedNonce, err := assembleEpochNonce(candidate, carriedLab, nil)
+	require.NoError(t, err)
+	require.Equal(t, expectedNonce, target.Nonce)
+	require.Len(t, ls.loadConsensusSnapshot().epochCache, 2,
+		"an empty-epoch jump ticks consensus once at the target")
+}
+
+// TestComputeEpochNonceAfterSparseJumpKeepsPublishedExtraEntropy covers the
+// epoch directly after a jump target. Its predecessor row is adjacent, but the
+// ledger epoch label still trails it because NEWEPOCH was skipped, so no
+// pending update was enacted and the forecast must not replace the published
+// extraEntropy.
+func TestComputeEpochNonceAfterSparseJumpKeepsPublishedExtraEntropy(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	const (
+		epochLength uint64 = 75
+		firstEpoch  uint64 = 100
+		jumpEpoch   uint64 = 108
+	)
+	entropy := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
+	published, _ := maryPParamsWithExtraEntropy(t, entropy)
+	_, neutralCbor := maryPParamsWithExtraEntropy(t, nil)
+	require.NoError(t, db.SetPParams(
+		neutralCbor, 1, firstEpoch, eras.MaryEraDesc.Id, nil,
+	))
+
+	candidate := bytes.Repeat([]byte{0xbb}, lcommon.Blake2b256Size)
+	evolving := bytes.Repeat([]byte{0xaa}, lcommon.Blake2b256Size)
+	lab := bytes.Repeat([]byte{0xfa}, lcommon.Blake2b256Size)
+	nonce := bytes.Repeat([]byte{0xee}, lcommon.Blake2b256Size)
+	row := func(id uint64) models.Epoch {
+		return models.Epoch{
+			EpochId:             id,
+			StartSlot:           id * epochLength,
+			LengthInSlots:       uint(epochLength),
+			SlotLength:          1_000,
+			EraId:               eras.MaryEraDesc.Id,
+			Nonce:               nonce,
+			EvolvingNonce:       evolving,
+			CandidateNonce:      candidate,
+			LastEpochBlockNonce: lab,
+		}
+	}
+	cache := []models.Epoch{row(firstEpoch), row(jumpEpoch)}
+	ls := &LedgerState{
+		db:             db,
+		currentEpoch:   cache[1],
+		currentEra:     eras.MaryEraDesc,
+		currentPParams: published,
+		epochCache:     cache,
+		transitionInfo: hardfork.NewTransitionUnknown(),
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newConwayBootstrapStabilityCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	got, _, _, _, err := ls.computeEpochNonceForSlot(
+		t.Context(),
+		(jumpEpoch+1)*epochLength,
+		cache[1],
+	)
+	require.NoError(t, err)
+	want, err := assembleEpochNonce(candidate, lab, entropy)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }
 
 func TestHeaderVerificationEpochDefersAtHardForkBoundary(t *testing.T) {
@@ -9311,6 +9561,76 @@ func TestGenesisOverlayForecastsNextEpochInEraUpdate(t *testing.T) {
 	assert.Equal(t, genesisOverlayNone, status)
 }
 
+// TestGenesisOverlayKeepsFrozenParametersAfterEmptyEpoch pins that a TPraos
+// block in the epoch after a tip beyond an empty epoch is led under the
+// parameters in force at the ledger epoch label. NEWEPOCH enacts only for the
+// successor of the label, so the pending decentralization update does not apply
+// to this boundary.
+func TestGenesisOverlayKeepsFrozenParametersAfterEmptyEpoch(t *testing.T) {
+	t.Parallel()
+
+	genesisCfg := newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
+		t,
+		strings.Repeat("00", lcommon.Blake2b224Size),
+		strings.Repeat("00", lcommon.Blake2b256Size),
+		"0.05",
+	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	epoch := func(id uint64) models.Epoch {
+		return models.Epoch{
+			EpochId:       id,
+			StartSlot:     id * 86_400,
+			LengthInSlots: 86_400,
+			SlotLength:    1,
+			EraId:         eras.AlonzoEraDesc.Id,
+		}
+	}
+	initialPParams := &alonzo.AlonzoProtocolParameters{
+		MaxBlockBodySize:   65_536,
+		MaxTxSize:          16_384,
+		MaxBlockHeaderSize: 1_100,
+		Decentralization:   &cbor.Rat{Rat: big.NewRat(1, 1)},
+	}
+	initialCbor, err := cbor.Encode(initialPParams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		initialCbor, 0, 0, eras.AlonzoEraDesc.Id, nil,
+	))
+	// {12: 0/1}, submitted in epoch 2 for the boundary into epoch 3.
+	update, err := hex.DecodeString("a10cd81e820001")
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size),
+		update, 2*86_400+200, 2, nil,
+	))
+
+	ls := &LedgerState{
+		db:             db,
+		currentEpoch:   epoch(2),
+		currentEra:     eras.AlonzoEraDesc,
+		currentPParams: initialPParams,
+		// Epoch 1 was empty, so the label stayed at 0 and epoch 3 is not the
+		// successor of the label.
+		epochCache: []models.Epoch{epoch(0), epoch(2), epoch(3)},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: genesisCfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	block := &mockBoundaryAlonzoBlock{
+		Block: &mockBabbageBlock{slot: 3*86_400 + 36},
+		slot:  3*86_400 + 36,
+	}
+	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
+	require.NotNil(t, pparams)
+	require.Equal(t, big.NewRat(1, 1), decentralizationParamRat(pparams))
+}
+
 func TestValidatePeerChainSelectionHeaderCryptoUsesCandidateOpCertState(
 	t *testing.T,
 ) {
@@ -9577,4 +9897,76 @@ func TestValidatePeerForkOpCertCountersAllowsQueuedLinearChild(
 		ouroboros.ConnectionId{},
 		child.block.Header(),
 	))
+}
+
+func TestLeaderStakeSnapshotEpochInCacheFollowsTheLedgerLabel(t *testing.T) {
+	t.Parallel()
+
+	rows := func(ids ...uint64) []models.Epoch {
+		out := make([]models.Epoch, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, models.Epoch{EpochId: id})
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name  string
+		cache []models.Epoch
+		epoch uint64
+		want  uint64
+	}{
+		{name: "contiguous", cache: rows(3, 4, 5), epoch: 5, want: 4},
+		{name: "successor not yet cached", cache: rows(3, 4, 5), epoch: 6, want: 5},
+		{name: "jump target", cache: rows(3, 4, 5, 9), epoch: 9, want: 4},
+		{name: "row after jump target", cache: rows(3, 4, 5, 9, 10), epoch: 10, want: 4},
+		{name: "past a jump not yet cached", cache: rows(3, 4, 5, 9), epoch: 11, want: 4},
+		{name: "before the gap", cache: rows(3, 4, 5, 9), epoch: 4, want: 3},
+		{name: "no cached row", cache: nil, epoch: 7, want: 6},
+	} {
+		assert.Equal(t, tc.want,
+			leaderStakeSnapshotEpochInCache(tc.epoch, tc.cache), tc.name)
+	}
+}
+
+// TestPrunePoolSnapshotsWithRetentionFloor_KeepsDistributionFrozenByAnEmptyEpoch
+// pins that cleanup after an empty epoch leaves the snapshot nesPd still
+// corresponds to. The ledger epoch label stops advancing, so no later epoch
+// ever captures a replacement and every block is elected by the one row
+// captured before the gap, which the default window and the depth backstop
+// would otherwise reach.
+func TestPrunePoolSnapshotsWithRetentionFloor_KeepsDistributionFrozenByAnEmptyEpoch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{74}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	row := func(id uint64) models.Epoch {
+		return models.Epoch{
+			EpochId:       id,
+			StartSlot:     id * 1_000,
+			LengthInSlots: 1_000,
+			Nonce:         tb.epochNonce,
+		}
+	}
+	// Label 40, then a jump to 60: epochs 41-59 are empty.
+	ls.epochCache = []models.Epoch{row(40), row(60), row(61)}
+	ls.publishSnapshotsLocked()
+
+	for _, tc := range []struct {
+		name         string
+		defaultFloor uint64
+		minFloor     uint64
+	}{
+		{name: "default window", defaultFloor: 58, minFloor: 37},
+		{name: "depth backstop", defaultFloor: 58, minFloor: 57},
+	} {
+		var seenBefore uint64
+		require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(
+			tc.defaultFloor, tc.minFloor,
+			func(before uint64) error { seenBefore = before; return nil },
+		), tc.name)
+		assert.LessOrEqual(t, seenBefore, uint64(39),
+			"%s: mark[39], the frozen distribution, must be retained", tc.name)
+	}
 }

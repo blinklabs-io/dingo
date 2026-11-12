@@ -2873,7 +2873,7 @@ const (
 )
 
 // tier1Jobs run on a pull request and report as skipped in the merge queue.
-var tier1Jobs = []string{"check", "govulncheck"}
+var tier1Jobs = []string{"check"}
 
 // tier1Condition is the job condition every tier-1 job carries.
 const tier1Condition = "github.event_name != 'merge_group'"
@@ -3133,20 +3133,11 @@ func TestPipelineTiers(t *testing.T) {
 	}
 }
 
-// TestReleaseGatesOnGovulncheck checks that a tag cannot publish while
-// govulncheck is failing or before verify-tested has confirmed the commit
-// passed every merge-queue gate.
-//
-// This was lost once already. `make govulncheck` was the last step of
-// publish.yml's `ci` job and create-draft-release needed `[ci]`, so the gate
-// was implicit in the job boundary. Splitting those steps into separate jobs
-// dropped it, and nothing failed, because a missing edge in a dependency graph
-// looks exactly like a graph that never had one.
-//
-// go-test.yml is deliberately not checked here. Its govulncheck job gates
-// nothing, so a new upstream advisory fails the run without blocking every
-// merge in the repository while it is triaged.
-func TestReleaseGatesOnGovulncheck(t *testing.T) {
+// TestReleaseRequiresTestedCommit checks that a tag cannot publish before
+// verify-tested has confirmed the commit passed every merge-queue gate.
+// govulncheck is deliberately not a gate: a new upstream advisory must not block
+// pull requests, merges or releases that did not cause it.
+func TestReleaseRequiresTestedCommit(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	jobs := pipelineJobs(t, root, publishPipeline)
@@ -3160,14 +3151,6 @@ func TestReleaseGatesOnGovulncheck(t *testing.T) {
 		t.Errorf(
 			"%s: create-draft-release does not need verify-tested; "+
 				"a tag could publish a commit no gate covered",
-			publishPipeline,
-		)
-	}
-	if !contains(needs, "govulncheck") {
-		t.Errorf(
-			"%s: create-draft-release does not need govulncheck; a tag could "+
-				"upload binaries and publish a release with a reachable "+
-				"vulnerability",
 			publishPipeline,
 		)
 	}
