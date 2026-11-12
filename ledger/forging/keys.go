@@ -1126,6 +1126,25 @@ func (g *credentialGeneration) validatedKESProtocolLifetime() (
 		nil
 }
 
+// PrepareRemoteSigner asks a remote KES signer that implements
+// RemoteKESPreparer to open its session ahead of a leader slot. It reports
+// false when there is nothing to prepare: local KES keys, or a signer that
+// connects per request.
+func (pc *PoolCredentials) PrepareRemoteSigner() (bool, error) {
+	pc.mu.RLock()
+	pc.kesMu.RLock()
+	signer := pc.remoteSigner
+	pc.kesMu.RUnlock()
+	pc.mu.RUnlock()
+	preparer, ok := signer.(RemoteKESPreparer)
+	if !ok {
+		return false, nil
+	}
+	// Called without locks: the dial and handshake must not hold locks
+	// needed to sign or evolve keys.
+	return true, preparer.Prepare()
+}
+
 // usableAtKESPeriod reports why the credentials could not sign at period, from
 // the validated lifetime alone. Unlike a snapshot it copies no key material,
 // which matters for a check that runs on every probe and scrape.
