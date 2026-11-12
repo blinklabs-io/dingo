@@ -23,6 +23,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// recordObservedPoint records a point whose parent link is unknown, as
+// fixtures that build a frontier directly do. Such a point never takes the
+// session anchor.
+func (p *PeerChainTip) recordObservedPoint(
+	point ocommon.Point,
+	blockNumber uint64,
+	window uint64,
+	maxPoints uint64,
+	trackHashes bool,
+) {
+	p.recordObservedLinkedPoint(
+		point, blockNumber, window, maxPoints, trackHashes, deliveredLink{},
+	)
+}
+
 // TestAwaitingFirstHeaderAfterPostIntersectRollback covers the state a peer is
 // in for the whole window between reconnecting and its first RollForward: chain
 // selection registered it from its post-FindIntersect rollback, so the

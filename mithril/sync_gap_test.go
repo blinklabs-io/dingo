@@ -1437,9 +1437,11 @@ func TestLoadGapBlocksFromBlob(t *testing.T) {
 		}
 		break
 	}
-	require.NotZero(
+	// The Preview testdata starts with a post-Byron block at slot 0, so a
+	// zero slot is a valid result; the hash is what shows a block was found.
+	require.NotEmpty(
 		t,
-		expected.Slot,
+		expected.Hash,
 		"no non-EBB block found within the %d-iteration scan bound",
 		maxIterations,
 	)
