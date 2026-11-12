@@ -14506,6 +14506,26 @@ func TestConsumedUtxoSweepWaitsForKBlocks(t *testing.T) {
 	require.Zero(t, floor)
 }
 
+// TestConsumedUtxoSweepSkipsWhenSecurityParamUnavailable pins that an unknown
+// k skips the prune instead of substituting the 50000 fallback depth. The
+// chain is deeper than the fallback, so a sweep that used it would find a
+// k-deep point and raise the prune floor, which could refuse a rollback the
+// chain manager still accepts.
+func TestConsumedUtxoSweepSkipsWhenSecurityParamUnavailable(t *testing.T) {
+	t.Parallel()
+
+	f := newPrunedUtxoFixtureWithFillers(
+		t, 0, blockfetchBatchSlotThresholdDefault+10, false,
+	)
+	f.ls.config.CardanoNodeConfig = nil
+	_, ok := f.ls.securityParamForEra(eras.ConwayEraDesc.Id)
+	require.False(t, ok, "fixture must have no security parameter")
+	f.ls.cleanupConsumedUtxos(context.Background())
+	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	require.Zero(t, floor)
+}
+
 // TestConsumedUtxoSweepReadsDepthAfterRollbackSerializes holds the prune
 // boundary the way a rolling-back caller does, truncates the chain below the
 // point k blocks deep, and then lets a sweep that started earlier run. The

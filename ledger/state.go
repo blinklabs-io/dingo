@@ -4853,10 +4853,13 @@ func (ls *LedgerState) cleanupConsumedUtxos(ctx context.Context) {
 	defer ls.consumedUtxoPruneMutex.Unlock()
 	pruneTarget := tipSlot - stabilityWindow
 	if ls.chain != nil {
-		depthPoint, found, err := ls.chain.PointAtDepth(
-			ctx,
-			uint64(ls.securityParamForEraOrDefault(eraId)), //nolint:gosec
-		)
+		// The chain manager may retain a k larger than the fallback default,
+		// so an unknown k must skip the prune rather than guess a depth.
+		k, ok := ls.securityParamForEra(eraId)
+		if !ok {
+			return
+		}
+		depthPoint, found, err := ls.chain.PointAtDepth(ctx, k)
 		if err != nil {
 			ls.config.Logger.Error(
 				"failed to locate security-parameter depth; skipping consumed UTxO prune",
