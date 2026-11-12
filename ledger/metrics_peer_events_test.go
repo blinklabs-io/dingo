@@ -18,8 +18,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -59,6 +62,68 @@ func TestPeerRollbackAppliedObservesDepth(t *testing.T) {
 	snap := histogramSnapshot(t, hist)
 	require.Equal(t, uint64(1), snap.GetSampleCount())
 	require.Equal(t, float64(2), snap.GetSampleSum())
+}
+
+// rollbackHook runs fn once, when the handler logs that it is about to roll
+// back, which is after the pre-rollback tip sample and before the chain
+// mutation.
+type rollbackHook struct {
+	slog.Handler
+	fn   func()
+	done bool
+}
+
+func (h *rollbackHook) Handle(ctx context.Context, r slog.Record) error {
+	if !h.done && strings.HasPrefix(r.Message, "ledger: rolling back to") {
+		h.done = true
+		h.fn()
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+// The observed depth is the number of blocks the chain rollback removed, even
+// when a concurrent add advances the tip between the handler's tip sample and
+// the rollback.
+func TestPeerRollbackDepthCountsBlocksRemovedUnderChainLock(t *testing.T) {
+	t.Parallel()
+
+	f := newBehindPeerFixture(t)
+	tip := f.blocks[len(f.blocks)-1]
+	hook := &rollbackHook{
+		Handler: f.ls.config.Logger.Handler(),
+		fn: func() {
+			require.NoError(t, f.ls.chain.AddRawBlocks(
+				context.Background(),
+				[]chain.RawBlock{{
+					Slot:        tip.Slot + 10,
+					Hash:        testHashBytes("concurrent-add"),
+					BlockNumber: tip.BlockNumber + 1,
+					Type:        1,
+					PrevHash:    tip.Hash,
+					Cbor:        []byte{0x80},
+				}},
+			))
+		},
+	}
+	f.ls.config.Logger = slog.New(hook)
+
+	f.sendHeader(1, "")
+	f.sendChainsync(ChainsyncEvent{
+		Rollback: true,
+		Point:    f.pointAtDepth(0),
+		Tip:      f.peerTipAhead(),
+	})
+	f.sendChainsync(ChainsyncEvent{
+		Rollback: true,
+		Point:    f.pointAtDepth(2),
+		Tip:      f.peerTipAhead(),
+	})
+
+	require.True(t, hook.done)
+	snap := histogramSnapshot(t, f.ls.metrics.peerRollbackDepthBlocks)
+	require.Equal(t, f.pointAtDepth(2), f.ls.chain.Tip().Point)
+	require.Equal(t, uint64(1), snap.GetSampleCount())
+	require.Equal(t, float64(3), snap.GetSampleSum())
 }
 
 // A rollback the node refuses (here: past K from a divergent peer) applies
