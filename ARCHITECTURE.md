@@ -807,7 +807,12 @@ Missing retained predecessor data is classified as
 `ledger.ErrHeaderAncestryUnavailable`. It remains a deferred result, but
 bypasses the publication wait so `markDeferredHeaderRecovery` can re-intersect
 an idle connection or retry after queued blocks apply. A publication without
-local progress cannot reconstruct discarded peer history. Competing candidates
+local progress cannot reconstruct discarded peer history. The connection's
+observed-header history is bounded and trimmed independently of the ledger
+header queue, so an unapplied ancestor missing from it but still held by the
+queue does not make the path unavailable: the verifier treats it as a retained
+header without a verdict and checks its crypto and state against the candidate
+epoch nonce. Only an ancestor held by neither is unavailable. Competing candidates
 remain withheld from selection and blockfetch until the ordinary verifier
 accepts them; local extensions retain the deferred block-validation path
 described above. Other non-transient deferrals also bypass the wait when the
@@ -815,6 +820,19 @@ stored block tip, header tip and applied ledger tip are equal: no queued header
 or unapplied block can produce the required publication. Unknown tips, queued
 headers, fetched blocks ahead of the ledger, and transient publication changes
 retain the wait.
+
+A header above the applied tip whose ancestry reaches neither the peer's
+retained history nor the local chain is withheld
+(`ledger.ErrHeaderVerificationWithheld`), but the peer's cursor is already past
+it, so every descendant is withheld the same way and the header queue never
+fills. `Ouroboros.recoverWithheldHeaderAncestry` re-intersects such a
+connection from the local chain (`ChainsyncResyncReasonWithheldCandidateAncestry`,
+logged at INFO) when it may feed the ledger. It acts once
+per connection and applied tip and shares the per-address window of deferred
+recovery, so the two recoveries cannot re-intersect the same address back to
+back. A withheld header does not call `RecordClientDelivery`: counting it would
+refresh the stall clock of a peer that streams only unlinkable headers, which
+would keep every watchdog silent.
 
 Header parking and resyncs are exported as metrics.
 `dingo_chainsync_deferred_headers_total` counts each header
