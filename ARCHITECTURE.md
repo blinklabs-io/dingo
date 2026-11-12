@@ -5965,10 +5965,11 @@ was therefore rejected during replay whenever its TTL reached past the current
 era's safe zone, and the tx-validation recovery path read that as inconsistent
 local ledger state. cardano-ledger performs the translation only while
 assembling the context for the Plutus scripts a transaction actually needs
-(`collectPlutusScriptsWithContext`). The horizon itself is unchanged: a
-transaction that does carry redeemers still translates its validity interval per
-redeemer language and still fails past the horizon, matching cardano-ledger's
-`TimeTranslationPastHorizon`.
+(`collectPlutusScriptsWithContext`). The horizon itself is unchanged from
+Babbage on: a transaction that does carry redeemers still translates its
+validity interval per redeemer language and still fails past the horizon,
+matching cardano-ledger's `TimeTranslationPastHorizon`. Alonzo extends it
+instead, as described below.
 
 Dijkstra's phase-2 success cache admits only transactions with redeemers at
 some witness level. Script-free transactions still run the structural phase-2
@@ -6008,6 +6009,37 @@ the anchor at zero and stay on the published tip. Unlike the operational slot
 clock, this path never extrapolates in-era past its bound: a bound past the
 anchored horizon is a translation failure, and converting it anyway would accept
 blocks the network rejects.
+
+Alonzo is the exception to that bound. cardano-ledger's Alonzo `LEDGERS` rule
+and Alonzo mempool build the script context of every transaction that needs one
+through `unsafeLinearExtendEpochInfo slot ei` (cardano-slotting
+`Cardano.Slotting.EpochInfo.Extend`), with the slot being validated as the
+basis: a slot at or before the basis is answered by the HFC epoch info, and a
+later one is the basis time plus one basis slot length per slot, however far
+past the horizon. Babbage's `LEDGERS` rule, which Conway and Dijkstra reuse, and
+the shared mempool `defaultApplyTxWithValidation` pass the bounded epoch info,
+so the bound holds there. Mainnet block 6400998 (slot 43287653, epoch 297)
+carries a Plutus transaction whose `invalidHereafter` is 44287078, past the
+epoch 299 boundary at which the horizon measured from its predecessor ends; the
+reference node accepted it, and a bounded view rejected it with
+`OutsideForecast` and wedged replay on the missing outputs.
+`LedgerView.extendForecastFrom` therefore sets a forecast basis when the
+ledger's era is Alonzo: the block's slot in `ledgerProcessBlock`, and the
+published tip in mempool and block-builder validation, where the wall-clock
+reference slot can itself be past the horizon during catch-up.
+`LedgerView.SlotToTime` then routes through
+`SlotTimeConverter.SlotToTimeExtendedFrom`, which computes the extension with
+exact arithmetic and fails only when the basis cannot be translated or the
+result's POSIX milliseconds do not fit in an `int64`. The reference's
+`POSIXTime` is an unbounded `Integer`, but the gouroboros script context takes
+the bound as `time.Time.UnixMilli` and stores it in a fixed-width field, so a
+larger value would reach the script wrapped around to an unrelated time;
+refusing it rejects the transaction instead, which diverges from the reference
+only for a validity bound hundreds of millions of years out. In cardano-ledger
+the UTXO rule's own `OutsideForecast` check extends in every era
+(`validateOutsideForecast`), while Dingo extends only Alonzo views; from Babbage
+on Dingo reports a past-horizon bound as `OutsideForecast` where cardano-ledger
+reports the script-context translation failure, and both reject the transaction.
 
 `hardForkSummaryAnchoredAt` (`ledger/hardfork_summary.go`) walks the full epoch
 cache on every call -- one row per epoch since genesis, not per era -- so its
