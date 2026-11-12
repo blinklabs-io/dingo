@@ -1045,14 +1045,28 @@ func buildDingoConfig(
 		dingo.WithShelleyOperationalCertificate(
 			cfg.ShelleyOperationalCertificate,
 		),
-		// node_forging.go gates agent-backed KES signing on a non-empty
-		// socket path, so dropping any of these three silently falls back
-		// to local-file signing on the serve path.
+		// node_forging.go selects the KES signer from the two agent
+		// selectors: an address selects the remote client, otherwise a
+		// socket path selects the local agent client, and only with both
+		// empty does it sign from shelleyKesKey (kesAgentConfigured).
+		// Dropping a selector therefore changes the signer. The mode, sign
+		// timeout, client certificate, server pin and plaintext flag are
+		// agent and remote transport options: dropping one keeps the
+		// selected agent but can change its mode or transport, or make its
+		// connection fail.
 		dingo.WithShelleyKESAgentSocket(cfg.ShelleyKESAgentSocket),
 		dingo.WithShelleyKESAgentMode(cfg.ShelleyKESAgentMode),
 		dingo.WithShelleyKESAgentSignTimeout(
 			cfg.ShelleyKESAgentSignTimeout,
 		),
+		dingo.WithShelleyKeyWatchInterval(cfg.ShelleyKeyWatchInterval),
+		dingo.WithShelleyKESAgentRemote(
+			cfg.ShelleyKESAgentAddress,
+			cfg.ShelleyKESAgentClientCertFile,
+			cfg.ShelleyKESAgentClientKeyFile,
+			cfg.ShelleyKESAgentServerSPKISHA256,
+		),
+		dingo.WithShelleyKESAgentPlaintext(cfg.ShelleyKESAgentPlaintext),
 		dingo.WithForgeSyncToleranceSlots(
 			cfg.ForgeSyncToleranceSlots,
 		),

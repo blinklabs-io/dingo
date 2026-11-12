@@ -81,6 +81,14 @@ type pparamsLimits struct {
 	protoMinor   uint64
 }
 
+// headerMajorAtLeast returns the protocol major a forged header announces: the
+// ledger's own, but never below the first major of the era the block is built
+// in. A ledger translated into an era before its first major is enacted keeps
+// the previous era's major, which a header of the new era must not announce.
+func headerMajorAtLeast(ledgerMajor, eraMin uint) uint64 {
+	return uint64(max(ledgerMajor, eraMin))
+}
+
 // extractPParamsLimits returns the BuildBlock-relevant fields from any
 // era's protocol parameters. Returns an error if pparams is nil (including
 // a typed-nil pointer of a known era's type stored in the interface, which
@@ -114,7 +122,7 @@ func extractPParamsLimits(p lcommon.ProtocolParameters) (pparamsLimits, error) {
 			maxTxSize:    uint64(pp.MaxTxSize),
 			maxBlockSize: uint64(pp.MaxBlockBodySize),
 			maxExUnits:   pp.MaxBlockExUnits,
-			protoMajor:   uint64(pp.ProtocolVersion.Major),
+			protoMajor:   headerMajorAtLeast(pp.ProtocolVersion.Major, conway.MinProtocolVersionConway),
 			protoMinor:   uint64(pp.ProtocolVersion.Minor),
 		}, nil
 	case *babbage.BabbageProtocolParameters:
@@ -123,7 +131,7 @@ func extractPParamsLimits(p lcommon.ProtocolParameters) (pparamsLimits, error) {
 			maxTxSize:    uint64(pp.MaxTxSize),
 			maxBlockSize: uint64(pp.MaxBlockBodySize),
 			maxExUnits:   pp.MaxBlockExUnits,
-			protoMajor:   uint64(pp.ProtocolMajor),
+			protoMajor:   headerMajorAtLeast(pp.ProtocolMajor, babbage.MinProtocolVersionBabbage),
 			protoMinor:   uint64(pp.ProtocolMinor),
 		}, nil
 	case *alonzo.AlonzoProtocolParameters:

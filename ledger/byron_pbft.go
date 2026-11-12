@@ -972,46 +972,57 @@ func byronBlockEpoch(block ledger.Block) (uint64, error) {
 
 // validateByronShelleyTransition gates the move from Byron to the next era
 // under a version trigger (TriggerAtVersion). ouroboros-consensus decides that
-// transition from the Byron update state alone: it happens in the epoch a
-// stable candidate for the trigger's major version is adopted in, and in no
-// other epoch, whatever the next block's shape claims. A boundary block that
-// leaves Byron without such a candidate is rejected, and so is a Byron block
-// in or after the epoch the candidate takes effect. An epoch trigger
+// transition from the Byron update state alone: translation happens in the
+// epoch a stable candidate for the trigger's major version is adopted, even
+// when the first Shelley block lands in a later epoch. A boundary block that
+// leaves Byron before or without such a candidate is rejected, and so is a
+// Byron block in or after the epoch the candidate takes effect. An epoch trigger
 // (TestShelleyHardForkAtEpoch) is left to the era schedule.
 func (ls *LedgerState) validateByronShelleyTransition(
 	ctx context.Context,
 	newEpoch uint64,
 	blockEraID uint,
-) error {
+) (uint64, bool, error) {
 	entry, ok := ls.eraShape().EraForID(ledgerbyron.EraIdByron)
 	if !ok || entry.NextEraTrigger.Kind != hardfork.TriggerAtVersion {
-		return nil
+		return newEpoch, false, nil
 	}
 	state, err := ls.byronPBFTStateAtTip(ctx, ls.Tip())
 	if err != nil {
-		return fmt.Errorf("check Byron transition: %w", err)
+		return 0, false, fmt.Errorf("check Byron transition: %w", err)
 	}
 	// A state rebuilt from a trusted start after genesis cannot see the
 	// candidate that start inherited, so it has no basis to refuse.
 	if !state.update.Initialized() || !state.update.Complete() {
-		return nil
+		return newEpoch, false, nil
 	}
 	config, err := ls.byronPBFTConfig()
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 	//nolint:gosec // a Byron protocol major version is a Word16
 	major := uint16(entry.NextEraTrigger.Version)
-	return state.update.CheckTransition(
-		byronupdate.Config{
-			ProtocolMagic:  config.ProtocolMagic,
-			K:              config.SecurityParam,
-			NumGenesisKeys: config.NumGenesisKeys,
-		},
+	updateConfig := byronupdate.Config{
+		ProtocolMagic:  config.ProtocolMagic,
+		K:              config.SecurityParam,
+		NumGenesisKeys: config.NumGenesisKeys,
+	}
+	if err := state.update.CheckTransition(
+		updateConfig,
 		major,
 		newEpoch,
 		blockEraID != ledgerbyron.EraIdByron,
+	); err != nil {
+		return 0, false, err
+	}
+	transitionEpoch, known := state.update.ShelleyTransitionEpoch(
+		updateConfig,
+		major,
 	)
+	if !known {
+		return newEpoch, false, nil
+	}
+	return transitionEpoch, true, nil
 }
 
 // byronBlockPParams returns the protocol parameters a block validates

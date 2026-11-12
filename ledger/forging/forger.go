@@ -263,6 +263,10 @@ type BlockForger struct {
 	lastForgedSlot uint64
 	fenceLoaded    bool
 
+	// remoteSignerPreparedSlot is the last leader slot the remote KES
+	// signer was asked to prepare for. Forge loop goroutine only.
+	remoteSignerPreparedSlot uint64
+
 	// Optional Leios EB forging (nil = relay or pre-Dijkstra era)
 	leiosChecker               LeiosProduceChecker
 	leiosEBCaster              EndorserBlockBroadcaster
@@ -1193,6 +1197,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to get current slot: %w", err)
 	}
+	f.prepareRemoteSignerForUpcomingLeaderSlot(currentSlot)
 
 	// Advance the KES state on every wall-clock slot, before any chain gate or
 	// leader selection can return early. This is the forward-security
@@ -2691,7 +2696,7 @@ func (f *BlockForger) evaluateTipGates(r forgeTipReading) forgeTipGates {
 	//
 	// That state REACHES this gate. The sync gate once refused every
 	// slot with upstreamActive && upstreamTip == 0, so it could not; it now
-	// bounds that branch by the local tip's lag instead, precisely so a
+	// bounds that branch by the forecast horizon instead, precisely so a
 	// node at tip forges and its header ends the window. A node at tip
 	// therefore arrives here with a live upstream and a zero target, and
 	// what keeps this bound quiet is the upstreamTarget > newestKnown term
@@ -2744,7 +2749,12 @@ func (f *BlockForger) evaluateTipGates(r forgeTipReading) forgeTipGates {
 	// a reading that trips this and a positional gate is still counted the
 	// way entry counts it.
 	g.syncSkip = r.upstreamLive &&
-		f.upstreamSyncSkipsForge(r.currentSlot, g.tipSlot, r.upstreamTarget)
+		f.upstreamSyncSkipsForge(
+			r.currentSlot,
+			g.tipSlot,
+			r.upstreamTarget,
+			f.forecastHorizonSlots(),
+		)
 
 	switch {
 	case g.primaryTipBehind:
@@ -3716,11 +3726,19 @@ func (f *BlockForger) checkOpCertSequence(
 // that suppressed forging prevented its own exit, and every node reported
 // healthy and connected throughout.
 //
-// The only evidence available in that window is our own tip's lag behind the
-// wall clock, so the same tolerance is applied to it. A node whose tip is
-// stale still waits, which is the protection this gate exists for -- a node
-// that has just switched peers does not forge on a stale view. A node at tip
-// forges, and the header it produces is what ends the window.
+// The reference node has no wall-clock lag gate at all. Its forge step builds
+// on the selected chain tip whatever the lag and refuses only when the ledger
+// view for the slot cannot be forecast from that tip (TraceNoLedgerView in
+// NodeKernel/Forge.hs), which happens once the slot is a full stability
+// window past the tip (maxFor in Shelley/Ledger/SupportsProtocol.hs). That
+// same bound is the only thing applied to an unpublished target:
+// forgeSyncToleranceSlots is a bulk-sync heuristic for a KNOWN target and must
+// not be reused as a lag bound here: after a restart or an ordinary network
+// gap every producer's tip can be further behind the clock than the
+// tolerance, and then no node forges the header that would end the window.
+//
+// window is the stability window in slots, 0 when unknown, in which case the
+// forecast bound cannot be evaluated and the node forges.
 //
 // tipSlot is the LEDGER-APPLIED tip, not the primary chain tip, on both
 // branches. That is the conservative reading of "our view": it is the state
@@ -3728,14 +3746,11 @@ func (f *BlockForger) checkOpCertSequence(
 // lower of the two, so a node whose pipeline is behind is measured as behind
 // rather than credited with headers it has admitted but not applied.
 func (f *BlockForger) upstreamSyncSkipsForge(
-	_, tipSlot, upstreamTip uint64,
+	currentSlot, tipSlot, upstreamTip, window uint64,
 ) bool {
 	if upstreamTip == 0 {
-		// An unpublished target is not evidence that a peer is ahead. The
-		// wall-clock slot can be arbitrarily far past our tip during an
-		// ordinary network gap, so comparing it with tipSlot would reject
-		// valid leader slots on an otherwise current node.
-		return false
+		return window > 0 && currentSlot > tipSlot &&
+			currentSlot-tipSlot > window
 	}
 	return upstreamTip > tipSlot &&
 		upstreamTip-tipSlot > f.forgeSyncToleranceSlots
@@ -3768,6 +3783,80 @@ func (f *BlockForger) logGateSkipScheduled(
 		return
 	}
 	f.logger.Debug(msg, attrs...)
+}
+
+// remoteSignerPrepareLead is the minimum time ahead of a scheduled leader
+// slot that the forger asks a remote KES signer to open its session. The
+// check runs once per slot, so the lead is this rounded up to whole slots,
+// and is one whole slot when slots are 3s or longer. With 1s slots it is
+// well inside the bursa agent's 10s idle bound on an admitted session, so
+// the session prepared here is still open when the slot's header is signed;
+// with slots longer than the client's session freshness the sign redials.
+const remoteSignerPrepareLead = 3 * time.Second
+
+// prepareRemoteSignerForUpcomingLeaderSlot opens the remote KES signer's
+// session in the background when this pool leads a slot within
+// remoteSignerPrepareLead of currentSlot, once per leader slot. Failing here
+// changes nothing about forging -- Sign reconnects on its own -- but logs an
+// unreachable agent seconds before the slot instead of at it.
+func (f *BlockForger) prepareRemoteSignerForUpcomingLeaderSlot(
+	currentSlot uint64,
+) {
+	if f.creds == nil || f.leaderChecker == nil {
+		return
+	}
+	leadSlots := uint64(1)
+	if f.slotDuration > 0 && f.slotDuration < remoteSignerPrepareLead {
+		// Both durations are positive, so the quotient is too.
+		leadSlots = uint64( //nolint:gosec
+			(remoteSignerPrepareLead + f.slotDuration - 1) / f.slotDuration,
+		)
+	}
+	next, ok := f.nextLeaderSlotSafe(currentSlot + 1)
+	if !ok || next > currentSlot+leadSlots ||
+		next == f.remoteSignerPreparedSlot {
+		return
+	}
+	f.remoteSignerPreparedSlot = next
+	creds, logger := f.creds, f.logger
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				f.reportForgeCallbackPanic("prepare_remote_signer", r)
+			}
+		}()
+		prepared, err := creds.PrepareRemoteSigner()
+		if err != nil {
+			logger.Warn(
+				"remote KES signer not ready ahead of leader slot",
+				"leader_slot", next,
+				"current_slot", currentSlot,
+				"error", err,
+			)
+			return
+		}
+		if prepared {
+			logger.Debug(
+				"remote KES signer session ready for leader slot",
+				"leader_slot", next,
+			)
+		}
+	}()
+}
+
+// nextLeaderSlotSafe calls the pluggable leader checker, recovering a panic
+// for the same reason isScheduledLeaderSlot does.
+func (f *BlockForger) nextLeaderSlotSafe(fromSlot uint64) (
+	next uint64,
+	ok bool,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			next, ok = 0, false
+			f.reportForgeCallbackPanic("schedule", r)
+		}
+	}()
+	return f.leaderChecker.NextLeaderSlot(fromSlot)
 }
 
 // isScheduledLeaderSlot reports whether slot is one this node is
@@ -4798,4 +4887,22 @@ func (f *BlockForger) modeString() string {
 	default:
 		return "unknown"
 	}
+}
+
+// ForgeForecastHorizonProvider is an optional extension of SlotClockProvider
+// that supplies the stability window in slots: how far past the applied tip a
+// ledger view can still be forecast. A slot clock without it leaves the
+// forecast bound unevaluated.
+type ForgeForecastHorizonProvider interface {
+	StabilityWindow() uint64
+}
+
+// forecastHorizonSlots returns the stability window, or 0 when the slot clock
+// does not supply one.
+func (f *BlockForger) forecastHorizonSlots() uint64 {
+	p, ok := f.slotClock.(ForgeForecastHorizonProvider)
+	if !ok {
+		return 0
+	}
+	return p.StabilityWindow()
 }
