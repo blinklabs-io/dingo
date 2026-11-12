@@ -336,7 +336,9 @@ func TestRemoteClientRefusesWrongOrMissingPin(t *testing.T) {
 	require.Zero(t, a.signs.Load())
 
 	// Without a pin the agent's self-signed certificate is verified against
-	// the system roots, which do not hold it.
+	// the system roots, which do not hold it. The reason differs by platform:
+	// Go's verifier reports an unknown authority, while the macOS verifier
+	// rejects the Ed25519 key first. Both fail certificate verification.
 	certFile, keyFile := client.writePEM(t)
 	unpinned, err := NewRemoteClient(RemoteConfig{
 		Address:        a.addr,
@@ -347,8 +349,8 @@ func TestRemoteClientRefusesWrongOrMissingPin(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = unpinned.Close() })
-	var unknownAuthority x509.UnknownAuthorityError
-	require.ErrorAs(t, unpinned.Prepare(), &unknownAuthority)
+	var verifyErr *tls.CertificateVerificationError
+	require.ErrorAs(t, unpinned.Prepare(), &verifyErr)
 	require.Zero(t, a.signs.Load())
 }
 

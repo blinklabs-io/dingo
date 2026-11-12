@@ -10937,7 +10937,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 					byronParamsFromBlock:  true,
 					preverifiedSignatures: txSignatures,
 				}).pinCommitteeState(committeeEpoch, pp).
-					pinSyntheticV2CostModel(synthetic)
+					pinSyntheticV2CostModel(synthetic).
+					extendForecastFrom(currentEra.Id, point.Slot)
 				validateStart := time.Now()
 				err := validationEra.ValidateTxFunc(
 					tx,
@@ -16432,6 +16433,11 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 				true,
 				snapshot.syntheticV2CostModelInEffect,
 			)
+			// The forecast extends from the tip, as the reference Alonzo
+			// mempool extends from the ledger ticked just past it. The
+			// wall-clock reference slot can be past the horizon during
+			// catch-up, while the tip always translates, and within one era
+			// both give the same times.
 			lv := (&LedgerView{
 				ctx:             ctx,
 				txn:             txn,
@@ -16441,7 +16447,11 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 				pendingState:    accounts,
 				epochStartSlot:  snapshot.currentEpochStartSlot,
 			}).pinCommitteeState(snapshot.currentEpoch, pp).
-				pinSyntheticV2CostModel(synthetic)
+				pinSyntheticV2CostModel(synthetic).
+				extendForecastFrom(
+					snapshot.currentEra.Id,
+					snapshot.tipPoint.Slot,
+				)
 			state, err := lv.validationState(
 				snapshot.protocolParameters,
 				snapshot.generation,
@@ -16718,8 +16728,13 @@ func (ls *LedgerState) validateTxCore(
 		err := txn.Do(func(txn *database.Txn) error {
 			lv = buildLV(txn)
 			lv.epochStartSlot = snapshot.currentEpochStartSlot
+			// Forecast basis as in withResolvingTxValidationSession.
 			lv = lv.pinCommitteeState(snapshot.currentEpoch, pp).
-				pinSyntheticV2CostModel(synthetic)
+				pinSyntheticV2CostModel(synthetic).
+				extendForecastFrom(
+					snapshot.currentEra.Id,
+					snapshot.tipPoint.Slot,
+				)
 			state, err := lv.validationState(
 				snapshot.protocolParameters,
 				snapshot.generation,
