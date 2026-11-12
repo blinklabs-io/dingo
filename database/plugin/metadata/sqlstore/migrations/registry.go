@@ -990,11 +990,6 @@ func poolDepositPositionBeforeOrEqual(a, b poolDepositPosition) bool {
 	return a.certIndex <= b.certIndex
 }
 
-// poolDepositHeldBackfill reconstructs psDeposits from the persisted
-// registration and retirement history. A registration after a completed reap
-// starts a new deposit cycle; all other registrations carry the preceding
-// cycle's held amount. The pool ID cursor makes each batch independently
-// resumable, and the NULL predicate makes replay non-destructive.
 // poolRelayIPv6NetworkOrderBackfill swaps the bytes of each 32-bit word of
 // every stored IPv6 relay address that was written in the ledger's wire
 // order. The migration version, not the bytes, decides which rows are old: the
@@ -1074,6 +1069,11 @@ LIMIT ?`), lastID, batch.Limit)
 	}, nil
 }
 
+// poolDepositHeldBackfill reconstructs psDeposits from the persisted
+// registration and retirement history. A registration after a completed reap
+// starts a new deposit cycle; all other registrations carry the preceding
+// cycle's held amount. The pool ID cursor makes each batch independently
+// resumable, and the NULL predicate makes replay non-destructive.
 func poolDepositHeldBackfill(
 	ctx context.Context,
 	batch Batch,
