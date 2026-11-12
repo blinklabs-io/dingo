@@ -119,9 +119,22 @@ func buildCommittee(
 }
 
 // CommitteeSnapshotEpoch returns the epoch whose mark stake snapshot is active
-// for the given epoch. This must stay in lockstep with Praos leader election.
+// for the given epoch when the ledger has crossed every epoch boundary. A
+// VoteManager asks its epoch provider first (see CommitteeSnapshotProvider),
+// because across an empty epoch the distribution is the one frozen at the
+// ledger epoch label.
 func CommitteeSnapshotEpoch(epoch uint64) uint64 {
 	return praos.StakeSnapshotEpoch(epoch)
+}
+
+// CommitteeSnapshotProvider resolves the mark snapshot epoch whose stake
+// distribution seats the committee of an epoch. The committee is fixed at the
+// epoch boundary from the same distribution that elects Praos leaders, so an
+// epoch provider that also implements leader.LeaderStakeSnapshotProvider
+// answers with that distribution, which a skipped boundary leaves frozen at
+// the ledger epoch label.
+type CommitteeSnapshotProvider interface {
+	LeaderStakeSnapshotEpoch(epoch uint64) uint64
 }
 
 // ComputeCommittee selects the first committeeSize pools from the snapshot,

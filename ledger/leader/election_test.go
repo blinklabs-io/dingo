@@ -338,7 +338,7 @@ func (p *sigmaAuditEpochProvider) ActiveSlotCoeffRat() *big.Rat {
 
 func newSigmaAuditElection(
 	stake StakeDistributionProvider,
-	epochs *sigmaAuditEpochProvider,
+	epochs EpochInfoProvider,
 	logger *slog.Logger,
 ) *Election {
 	return NewElection(
@@ -380,6 +380,40 @@ func TestComputeScheduleDrawsSigmaInputsFromSameSnapshotEpoch(t *testing.T) {
 	require.Equal(t, []uint64{wantSnapshotEpoch}, stake.totalStakeEpochs)
 	require.Equal(t, sigmaAuditPoolStake, schedule.PoolStake)
 	require.Equal(t, sigmaAuditTotalStake, schedule.TotalStake)
+}
+
+// gapEpochProvider reports a ledger whose epoch label froze before the
+// scheduled epoch, as it does once a whole epoch has been empty.
+type gapEpochProvider struct {
+	sigmaAuditEpochProvider
+	snapshotEpoch uint64
+}
+
+func (p *gapEpochProvider) LeaderStakeSnapshotEpoch(uint64) uint64 {
+	return p.snapshotEpoch
+}
+
+// TestComputeScheduleUsesProviderLeaderSnapshotEpoch proves the forging
+// schedule reads the distribution header validation elects with, which after an
+// empty-epoch gap is the one frozen at the ledger label.
+func TestComputeScheduleUsesProviderLeaderSnapshotEpoch(t *testing.T) {
+	t.Parallel()
+	stake := &recordingStakeProvider{
+		poolStake:  sigmaAuditPoolStake,
+		totalStake: sigmaAuditTotalStake,
+	}
+	const frozen = uint64(3)
+	election := newSigmaAuditElection(
+		stake,
+		&gapEpochProvider{
+			sigmaAuditEpochProvider: sigmaAuditEpochProvider{floatCoeff: 0.05},
+			snapshotEpoch:           frozen,
+		},
+		slog.New(slog.DiscardHandler),
+	)
+	_, err := election.computeSchedule(context.Background(), sigmaAuditEpoch)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{frozen}, stake.poolStakeEpochs)
 }
 
 // TestComputeScheduleWipesTheSeedItTook proves the election holds the VRF seed

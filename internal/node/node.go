@@ -493,13 +493,19 @@ func Run(
 		)
 	}
 	if cfg.SocketPath != "" {
+		socketMode, err := config.ParseUnixSocketMode(cfg.SocketMode)
+		if err != nil {
+			return fmt.Errorf("invalid socket mode: %w", err)
+		}
 		// Private UNIX socket (node-to-client)
 		listeners = append(
 			listeners,
 			dingo.ListenerConfig{
-				ListenNetwork: "unix",
-				ListenAddress: cfg.SocketPath,
-				UseNtC:        true,
+				ListenNetwork:     "unix",
+				ListenAddress:     cfg.SocketPath,
+				UnixSocketMode:    socketMode,
+				UnixSocketModeSet: true,
+				UseNtC:            true,
 			},
 		)
 	}
@@ -973,6 +979,9 @@ func buildDingoConfig(
 		dingo.WithGenesisCorroborationPeers(
 			cfg.GenesisBootstrap.CorroborationPeers,
 		),
+		dingo.WithGenesisChainSyncJumping(
+			cfg.GenesisBootstrap.ChainSyncJumping,
+		),
 		dingo.WithGenesisLimitOnPatience(
 			cfg.GenesisBootstrap.LimitOnPatienceEnabled,
 			cfg.GenesisBootstrap.LimitOnPatienceCapacity,
@@ -1058,6 +1067,7 @@ func buildDingoConfig(
 		dingo.WithShelleyKESAgentSignTimeout(
 			cfg.ShelleyKESAgentSignTimeout,
 		),
+		dingo.WithShelleyKeyWatchInterval(cfg.ShelleyKeyWatchInterval),
 		dingo.WithShelleyKESAgentRemote(
 			cfg.ShelleyKESAgentAddress,
 			cfg.ShelleyKESAgentClientCertFile,

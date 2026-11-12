@@ -359,6 +359,13 @@ type GenesisBootstrapConfig struct {
 	// LimitOnPatienceRate is the bucket leak rate in tokens per second. 0
 	// selects the default of 5.
 	LimitOnPatienceRate uint64 `yaml:"limitOnPatienceRate"         envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE"`
+	// ChainSyncJumping turns on ChainSync Jumping while Genesis selection is
+	// active: one identified outbound hot peer streams headers and every
+	// other outbound hot peer answers a periodic MsgFindIntersect for the
+	// streamed chain instead of streaming it, an identified peer's answer
+	// vouching for it in the Limit on Eagerness. Inbound peers take no
+	// CSJ role. On by default.
+	ChainSyncJumping bool `yaml:"chainSyncJumping"            envconfig:"DINGO_GENESIS_CSJ"`
 }
 
 // HistoryExpiryConfig controls local expiry of immutable block history.
@@ -554,6 +561,7 @@ func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 		Enabled:                true,
 		CorroborationPeers:     0,
 		LimitOnPatienceEnabled: true,
+		ChainSyncJumping:       true,
 	}
 }
 
@@ -669,6 +677,8 @@ type DMQConfig struct {
 	// SocketPath is the Unix socket serving local message submission and
 	// notification. It must differ from the Cardano SocketPath.
 	SocketPath string `yaml:"socketPath"   envconfig:"DINGO_DMQ_SOCKET_PATH"`
+	// SocketMode is the octal permission mode for SocketPath.
+	SocketMode string `yaml:"socketMode"   envconfig:"DINGO_DMQ_SOCKET_MODE"`
 	// MessageTTL is the longest expiry, in seconds, a submitted message may
 	// claim.
 	MessageTTL uint `yaml:"messageTtl"   envconfig:"DINGO_DMQ_MESSAGE_TTL"`
@@ -720,6 +730,7 @@ func DefaultDMQConfig() DMQConfig {
 	return DMQConfig{
 		Topic:                  "mithril",
 		SocketPath:             "dingo-dmq.socket",
+		SocketMode:             DefaultUnixSocketMode,
 		MessageTTL:             1800,
 		MinPoolMessageInterval: 60,
 		MaxMempoolSize:         128,
@@ -740,6 +751,7 @@ type Config struct {
 	CardanoConfig          string    `yaml:"cardanoConfig"                       envconfig:"config"`
 	DatabasePath           string    `yaml:"databasePath"                                                                                 split_words:"true"`
 	SocketPath             string    `yaml:"socketPath"                                                                                   split_words:"true"`
+	SocketMode             string    `yaml:"socketMode"                                                                                   split_words:"true"`
 	TlsCertFilePath        string    `yaml:"tlsCertFilePath"                     envconfig:"TLS_CERT_FILE_PATH"`
 	BindAddr               string    `yaml:"bindAddr"                                                                                     split_words:"true"`
 	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                                              split_words:"true"`
@@ -1025,6 +1037,14 @@ type Config struct {
 	// forging for several slots when the agent stops answering. Zero uses
 	// the client default (500ms).
 	ShelleyKESAgentSignTimeout time.Duration `yaml:"shelleyKesAgentSignTimeout"       envconfig:"SHELLEY_KES_AGENT_SIGN_TIMEOUT"`
+	// ShelleyKeyWatchInterval, when set, makes a block producer poll its
+	// credential files at this interval and reload them in place, as on
+	// SIGHUP, once a change has held for two polls -- so a rotated
+	// Kubernetes Secret takes effect without a restart. Zero disables it; a
+	// non-zero value must be at least 1s. It applies with local key files
+	// and with a KES agent in sign mode. In KES agent serve-key mode, where
+	// the agent pushes key rotations, it is ignored and a warning is logged.
+	ShelleyKeyWatchInterval time.Duration `yaml:"shelleyKeyWatchInterval"          envconfig:"SHELLEY_KEY_WATCH_INTERVAL"`
 	// ShelleyKESAgentAddress, when set, signs block headers through a bursa
 	// KES agent's remote sign listener (host:port) instead of a local socket.
 	// It implies sign mode. The link is TLS 1.3, with the agent authenticated
@@ -1619,6 +1639,7 @@ func newDefaultConfig() *Config {
 		CardanoConfig:                       "", // Will be set dynamically based on network
 		DatabasePath:                        ".dingo",
 		SocketPath:                          "dingo.socket",
+		SocketMode:                          DefaultUnixSocketMode,
 		IntersectTip:                        false,
 		ValidateHistorical:                  true,
 		StrictUtxoValidation:                true,

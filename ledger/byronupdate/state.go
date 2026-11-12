@@ -296,8 +296,8 @@ func (s State) Advance(slot, blockNo uint64) State {
 // protocol major version shelleyMajor, if a candidate for it is known and
 // stable (byronTransition in ouroboros-consensus). A candidate is stable when
 // the tip is at least 2k slots past it, or at least k blocks past the block
-// that made it a candidate. It takes effect in the epoch after the one
-// containing its slot plus 4k.
+// that made it a candidate. It takes effect in the first epoch starting at or
+// after its slot plus 4k, the same epoch Tick adopts it in.
 func (s State) ShelleyTransitionEpoch(
 	config Config,
 	shelleyMajor uint16,
@@ -310,7 +310,7 @@ func (s State) ShelleyTransitionEpoch(
 		if candidate.Version.Major != shelleyMajor {
 			continue
 		}
-		adoptedIn := (candidate.Slot+4*config.K)/epochSlots + 1
+		adoptedIn := (candidate.Slot + 4*config.K + epochSlots - 1) / epochSlots
 		if s.lastSlot >= candidate.Slot &&
 			s.lastSlot-candidate.Slot >= 2*config.K {
 			return adoptedIn, true
@@ -324,10 +324,11 @@ func (s State) ShelleyTransitionEpoch(
 	return 0, false
 }
 
-// CheckTransition decides whether the block opening newEpoch may leave or
-// must leave Byron under a version trigger for shelleyMajor. Byron may be
-// left only in the epoch a stable candidate for that version is adopted in,
-// and a Byron block is invalid from that epoch on.
+// CheckTransition decides whether a block at newEpoch may leave or must have
+// left Byron under a version trigger for shelleyMajor. The hard-fork
+// combinator translates at the adoption epoch before ticking to the block's
+// slot, so the first Shelley block may arrive in that epoch or any later one.
+// A Byron block is invalid from the adoption epoch on.
 func (s State) CheckTransition(
 	config Config,
 	shelleyMajor uint16,
@@ -336,7 +337,7 @@ func (s State) CheckTransition(
 ) error {
 	transitionEpoch, known := s.ShelleyTransitionEpoch(config, shelleyMajor)
 	switch {
-	case leaving && (!known || transitionEpoch != newEpoch):
+	case leaving && (!known || transitionEpoch > newEpoch):
 		return TransitionNotAdoptedError{Epoch: newEpoch, Major: shelleyMajor}
 	case !leaving && known && transitionEpoch <= newEpoch:
 		return TransitionMissedError{

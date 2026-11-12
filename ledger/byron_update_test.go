@@ -298,6 +298,64 @@ func TestByronShelleyTransitionErrorIdentifiesBoundaryBlock(t *testing.T) {
 	)
 }
 
+func TestByronShelleyTransitionValidatesJumpTargetEpoch(t *testing.T) {
+	t.Parallel()
+
+	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	genesisParams, err := ls.byronGenesisProtocolParameters()
+	require.NoError(t, err)
+	config, err := ls.byronPBFTConfig()
+	require.NoError(t, err)
+	state, err := newByronPBFTState(config, genesisParams)
+	require.NoError(t, err)
+	state.update = state.update.Advance(0, 0)
+
+	// Model a trusted snapshot whose last applied block is followed by an
+	// entirely empty epoch before the Byron-to-Shelley boundary block. The
+	// version-trigger gate must validate the actual target epoch, not merely
+	// current+1.
+	const (
+		sourceEpoch      uint64 = 206
+		sourceEpochStart uint64 = 4_449_600
+		epochLength      uint   = 21_600
+	)
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{
+		EpochId:       sourceEpoch,
+		StartSlot:     sourceEpochStart,
+		SlotLength:    20_000,
+		LengthInSlots: epochLength,
+		EraId:         eras.ByronEraDesc.Id,
+	}
+	ls.epochCache = []models.Epoch{ls.currentEpoch}
+	ls.ledgerEpoch = sourceEpoch
+	ls.byronPBFT.state = state
+	ls.byronPBFT.tip = ls.currentTip.Point
+	ls.byronPBFT.initialized = true
+	// Keep the deterministic rejection visible instead of rewinding it.
+	ls.config.ChainManager = nil
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	done := make(chan struct{})
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{
+		blocks: []gledger.Block{firstShelley},
+		done:   done,
+	}
+	close(results)
+	err = ls.ledgerProcessBlocksFromSource(context.Background(), results)
+	var notAdopted byronupdate.TransitionNotAdoptedError
+	require.ErrorAs(t, err, &notAdopted)
+	require.Equal(t, uint64(208), notAdopted.Epoch)
+	testutil.RequireReceive(
+		t,
+		done,
+		2*time.Second,
+		"the reader must be signalled when the transition is rejected",
+	)
+}
+
 func byronTestEbbHeader(
 	t *testing.T,
 	epoch uint64,
