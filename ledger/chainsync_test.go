@@ -16869,7 +16869,10 @@ func TestCheckComparedTipSlotBattleRestrictedWindow(t *testing.T) {
 		comparison   praos.ChainComparisonResult
 		incomingView praos.PraosTiebreakerView
 		trackedHash  []byte
-		wantBattles  int64
+		// remoteOurs marks the incoming tip as forged by another of this
+		// node's pools.
+		remoteOurs  bool
+		wantBattles int64
 	}{
 		{
 			name:         "remote wins below boundary",
@@ -16922,6 +16925,15 @@ func TestCheckComparedTipSlotBattleRestrictedWindow(t *testing.T) {
 			trackedHash:  bytes.Repeat([]byte{0x33}, 32),
 		},
 		{
+			name:         "incoming tip forged by another own pool",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainABetter,
+			incomingView: restricted,
+			trackedHash:  localHash,
+			remoteOurs:   true,
+		},
+		{
 			name:         "unrestricted era stays on body detection",
 			remoteSlot:   localSlot + 4,
 			remoteBlock:  localBlockNumber,
@@ -16936,8 +16948,12 @@ func TestCheckComparedTipSlotBattleRestrictedWindow(t *testing.T) {
 			f := newSiblingFixture(t)
 			recorder := &countingSlotBattleRecorder{}
 			f.ls.SetSlotBattleRecorder(recorder)
+			forged := map[uint64][]byte{localSlot: tc.trackedHash}
+			if tc.remoteOurs {
+				forged[tc.remoteSlot] = remoteHash
+			}
 			f.ls.SetForgedBlockChecker(&mockForgedBlockChecker{
-				forgedSlots: map[uint64][]byte{localSlot: tc.trackedHash},
+				forgedSlots: forged,
 			})
 			f.ls.checkComparedTipSlotBattle(
 				ochainsync.Tip{

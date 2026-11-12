@@ -10683,8 +10683,11 @@ func (ls *LedgerState) checkComparedTipSlotBattle(
 	if checker == nil {
 		return
 	}
+	// Both tips ours is not a battle: with several pools, two of them can
+	// forge blocks the restricted window compares.
 	if !forgedByUs(checker, localTip.Point.Slot, localTip.Point.Hash) ||
-		bytes.Equal(localTip.Point.Hash, incomingTip.Point.Hash) {
+		bytes.Equal(localTip.Point.Hash, incomingTip.Point.Hash) ||
+		forgedByUs(checker, incomingTip.Point.Slot, incomingTip.Point.Hash) {
 		return
 	}
 

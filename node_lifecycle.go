@@ -1264,6 +1264,7 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	if err := n.prepareMultiPool(); err != nil {
 		return fmt.Errorf("block producer pools: %w", err)
 	}
+	watchBaseline := n.credentialWatchBaseline()
 	creds, err := n.validateBlockProducerStartup()
 	if err != nil {
 		return fmt.Errorf("block producer startup validation failed: %w", err)
@@ -1301,6 +1302,10 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 		return fmt.Errorf("failed to restart block producer pools: %w", err)
 	}
 	n.wireForgedBlockTracking()
+	// The rebuild replaced every pool producer, so the reload loops started
+	// at Run still hold the old ones and their offer channels. Restarting
+	// them replaces those loops; it runs after the last step that can fail.
+	n.startKeyReloadLoops(watchBaseline)
 	return nil
 }
 

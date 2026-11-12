@@ -4005,9 +4005,16 @@ func (f *BlockForger) yieldSlotSafe(slot uint64) (yield bool, winner string) {
 // yieldWaitDeadline bounds how long a pool that yielded slot waits for the
 // winner's outcome: the slot's retry deadline, so the pool still has the rest
 // of the slot to forge if the winner adopts nothing, and the forge loop wakes
-// for the next slot on time. Without a slot clock answer it waits one slot.
+// for the next slot on time. A slot shorter than the retry margin has that
+// deadline behind it already, and would not wait at all, so both pools would
+// forge; it waits half of what remains of the slot instead. Without a slot
+// clock answer it waits one slot.
 func (f *BlockForger) yieldWaitDeadline(slot uint64) time.Time {
-	if deadline, ok := f.slotRetryDeadline(slot); ok {
+	if end, ok := f.slotEnd(slot); ok {
+		deadline := end.Add(-f.forgeSelectionRetryMargin)
+		if now := time.Now(); !deadline.After(now) {
+			deadline = now.Add(end.Sub(now) / 2)
+		}
 		return deadline
 	}
 	wait := f.slotDuration

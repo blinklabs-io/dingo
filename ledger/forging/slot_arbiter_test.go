@@ -242,3 +242,33 @@ func TestForgerYieldsASlotTheWinnerAdopts(t *testing.T) {
 	require.Equal(t, float64(1),
 		testutil.ToFloat64(loser.metrics.forgeYieldedToOwnPool))
 }
+
+func TestYieldWaitDeadlineStaysInsideTheSlot(t *testing.T) {
+	t.Parallel()
+	const margin = 250 * time.Millisecond
+
+	t.Run("slot longer than the retry margin", func(t *testing.T) {
+		t.Parallel()
+		end := time.Now().Add(time.Second)
+		f := &BlockForger{
+			slotClock:                 &retryTestSlotClock{currentSlot: 7, slotEnd: end},
+			forgeSelectionRetryMargin: margin,
+		}
+		require.Equal(t, end.Add(-margin), f.yieldWaitDeadline(7))
+	})
+
+	t.Run("slot shorter than the retry margin", func(t *testing.T) {
+		t.Parallel()
+		before := time.Now()
+		end := before.Add(100 * time.Millisecond)
+		f := &BlockForger{
+			slotClock:                 &retryTestSlotClock{currentSlot: 7, slotEnd: end},
+			forgeSelectionRetryMargin: margin,
+		}
+		deadline := f.yieldWaitDeadline(7)
+		require.True(t, deadline.After(before),
+			"a short slot still waits for the winner")
+		require.True(t, deadline.Before(end),
+			"the wait leaves part of the slot to forge in")
+	})
+}

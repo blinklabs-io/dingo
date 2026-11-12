@@ -270,6 +270,23 @@ func TestValidateBlockProducerPoolsRefusesASharedKESAgentAddress(t *testing.T) {
 		validate(a, b),
 		"blockProducerPools[0] and blockProducerPools[1] use the same shelleyKesAgentAddress",
 	)
+
+	// Two spellings of one IPv6 address name the same listener, as does an
+	// IPv4-mapped IPv6 address and its IPv4 form.
+	a.ShelleyKESAgentAddress = "[2001:db8::1]:3443"
+	b.ShelleyKESAgentAddress = "[2001:0db8:0:0:0:0:0:1]:3443"
+	require.ErrorContains(
+		t,
+		validate(a, b),
+		"blockProducerPools[0] and blockProducerPools[1] use the same shelleyKesAgentAddress",
+	)
+	a.ShelleyKESAgentAddress = "192.0.2.1:3443"
+	b.ShelleyKESAgentAddress = "[::ffff:192.0.2.1]:3443"
+	require.ErrorContains(
+		t,
+		validate(a, b),
+		"blockProducerPools[0] and blockProducerPools[1] use the same shelleyKesAgentAddress",
+	)
 	a = remotePool("a")
 
 	b.ShelleyKESAgentAddress = "kes-agent-b.example:3443"
