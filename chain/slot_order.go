@@ -48,7 +48,10 @@ type SlotParent struct {
 //     ledger's envelope check orders that boundary with the network's own
 //     Byron epoch length.
 //
-// A parent whose era and kind are unknown gets the plain later-slot rule.
+// A parent whose era and kind are unknown, such as a ChainSync rollback point,
+// may be an epoch boundary block, so a Byron main block may share its slot;
+// any other block must be at a later slot. That parent's slot must therefore
+// be an absolute slot, as a ChainSync point carries.
 func SlotFollowsParent(
 	eraId uint8,
 	boundary bool,
@@ -59,7 +62,7 @@ func SlotFollowsParent(
 		return true
 	}
 	if !parent.Known {
-		return false
+		return eraId == byron.EraIdByron && !boundary && slot == parent.Slot
 	}
 	if parent.EraId == byron.EraIdByron && eraId != byron.EraIdByron {
 		return true

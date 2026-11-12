@@ -91,6 +91,10 @@ const defaultCorroborationHoldTimeout = 5 * time.Second
 // under the same protocol reply timers as a single hold.
 const defaultDynamoCorroborationHoldBudget = 60 * time.Second
 
+// defaultChainsyncHeaderHistoryLimit is chainsyncHeaderHistoryLimit when the
+// security parameter is unknown: mainnet's, plus one.
+const defaultChainsyncHeaderHistoryLimit = 2161
+
 // Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
 // this interface local prevents networking from depending on FIFO internals.
 type Mempool interface {
@@ -330,6 +334,12 @@ type Ouroboros struct {
 	// height whose hash differs from the configured checkpoint. It is nil
 	// when no ledger state is attached.
 	chainsyncHeaderCheckpoint func(gledger.BlockHeader) error
+	// chainsyncHeaderHistoryLimit bounds the delivered headers a ChainSync
+	// session keeps to check slot order after a rollback: the security
+	// parameter plus one, the depth the chain selector keeps a peer's
+	// delivered tips to, read once since a lookup per header would take the
+	// ledger lock.
+	chainsyncHeaderHistoryLimit int
 	// dynamoCorroborationHoldBudget bounds the total hold of one dynamo
 	// header (defaultDynamoCorroborationHoldBudget).
 	dynamoCorroborationHoldBudget time.Duration
@@ -972,6 +982,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			map[ouroboros.ConnectionId]*chainsyncPeerStats,
 		),
 		chainsyncScheduleAt:           defaultChainsyncScheduleAt,
+		chainsyncHeaderHistoryLimit:   defaultChainsyncHeaderHistoryLimit,
 		corroborationHoldTimeout:      defaultCorroborationHoldTimeout,
 		dynamoCorroborationHoldBudget: defaultDynamoCorroborationHoldBudget,
 		catchUpBandWaitTimeout:        catchUpBandWait,
@@ -1033,6 +1044,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			return o.ledgerState.Tip().BlockNumber, uint64(k)
 		}
 		o.chainsyncHeaderCheckpoint = o.ledgerState.ValidateHeaderCheckpoint
+		if k := o.ledgerState.SecurityParam(); k > 0 {
+			o.chainsyncHeaderHistoryLimit = k + 1
+		}
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
 		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidatePeerChainSelectionHeaderCryptoWithGeneration
 		o.chainsyncLocalChainTips = func() ([]byte, []byte) {

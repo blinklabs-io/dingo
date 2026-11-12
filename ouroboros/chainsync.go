@@ -2080,16 +2080,16 @@ func (o *Ouroboros) releasePromotedAheadRecycle(now time.Time) {
 }
 
 // chainsyncHeaderSlotOrderError returns a chain.SlotNotAfterParentError when
-// header names session's previous roll-forward header as its parent without
-// following it in slot order. A header after a rollback is not checked here:
-// the rollback point's era and kind are unknown, and the chain checks the
-// header against its own parent when it is queued.
+// header names the point session stands at, its previous roll-forward header
+// or the point it rolled back to, as its parent without following it in slot
+// order. Checking after a rollback as well matters: a peer may roll back to
+// the point it already stands at before every header.
 func (o *Ouroboros) chainsyncHeaderSlotOrderError(
 	connId ouroboros.ConnectionId,
 	session chainsync.ClientSessionToken,
 	header gledger.BlockHeader,
 ) error {
-	prev, prevEra, prevBoundary, ok := o.chainsyncState.ClientRollForwardHeader(
+	parentHash, parent, ok := o.chainsyncState.ClientRollForwardParent(
 		connId,
 		session,
 	)
@@ -2097,7 +2097,7 @@ func (o *Ouroboros) chainsyncHeaderSlotOrderError(
 		return nil
 	}
 	prevHash := header.PrevHash()
-	if !bytes.Equal(prevHash.Bytes(), prev.Hash) {
+	if !bytes.Equal(prevHash.Bytes(), parentHash) {
 		return nil
 	}
 	slot := header.SlotNumber()
@@ -2105,19 +2105,14 @@ func (o *Ouroboros) chainsyncHeaderSlotOrderError(
 		header.Era().Id,
 		chain.IsByronBoundaryHeader(header),
 		slot,
-		chain.SlotParent{
-			Slot:     prev.Slot,
-			EraId:    prevEra,
-			Boundary: prevBoundary,
-			Known:    true,
-		},
+		parent,
 	) {
 		return nil
 	}
 	return chain.NewSlotNotAfterParentError(
 		header.Hash().String(),
 		slot,
-		prev.Slot,
+		parent.Slot,
 	)
 }
 
@@ -2213,6 +2208,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ocommon.NewPoint(blockSlot, blockHash),
 				v.Era().Id,
 				chain.IsByronBoundaryHeader(v),
+				o.chainsyncHeaderHistoryLimit,
 			)
 		}
 		if o.config.ChainsyncObserveRollForward != nil {

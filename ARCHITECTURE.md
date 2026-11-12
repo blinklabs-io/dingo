@@ -5916,21 +5916,32 @@ sits at the first slot of its epoch. A later-era block on a Byron parent is
 left to `validateBlockOrder`, because a Byron slot number is derived with a
 fixed epoch length that matches the absolute slot only on networks whose Byron
 epochs have that length. Three places apply the rule. The ChainSync
-roll-forward handler checks a header against the previous header the same
-session delivered (`chainsync.State.ClientRollForwardHeader`), before chain
-selection or the ledger queue sees it, and recycles the connection on a
-violation; a header after a rollback is left to the chain. `Chain.AddBlockHeader`
-checks against the header tip it extends, and `Chain.AddBlock` and its variants
-against the tip block, which covers a locally forged block. Raw imports of
-local blocks (`Chain.AddRawBlocks`) are not ordered here.
+roll-forward handler checks each header against the point its session stands
+at (`chainsync.State.ClientRollForwardParent`), before chain selection or the
+ledger queue sees it, and recycles the connection on a violation. That point is
+the previous roll-forward header or, after a rollback, the rollback point. The
+session keeps its delivered headers, up to the security parameter plus one,
+with their era and kind, so a rollback to one of them restores what the next
+header must follow. This matters because chain selection keeps a peer's
+candidate length across such a rollback, so a peer could otherwise roll back to
+the point it stands at before every header. A rollback point outside those
+headers keeps only its slot, which the next header must exceed unless it is a
+Byron main block, since the point may be an epoch-boundary block.
+`Chain.AddBlockHeader` checks against the header tip it extends, and
+`Chain.AddBlock` and its variants against the tip block, which covers a locally
+forged block. Raw imports (`Chain.AddRawBlocks`), which copy a local
+ImmutableDB, are not ordered here.
 
-Together with the refusal to roll the primary chain back below the Mithril trust
-boundary, these checks mean that once the primary chain holds the trust
-boundary block, no block at or below the boundary can join it. That is why
-block application and the block pipeline may still treat a block on the primary
-chain as Mithril-covered by slot. A header or block a peer offers is covered
-only by point (`LedgerState.pointCoveredByMithril`): at or below the boundary
-slot and already on the primary chain together with the boundary block.
+A header or block a peer offers is Mithril-covered only by point
+(`LedgerState.pointCoveredByMithril`): at or below the boundary slot and already
+on the primary chain together with the boundary block. Block application and
+the block pipeline still decide coverage of a block on the primary chain by
+slot. That is sound because the boundary block is never a Byron block (the
+import refuses a Byron ledger state, `ledgerstate.ErrByronSnapshotUnsupported`),
+so the Byron exception above never applies to it, and the primary chain is not
+rolled back below the boundary. Every block that joins the primary chain after
+the boundary block through the checks above therefore sits above the boundary
+slot.
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1
 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution now

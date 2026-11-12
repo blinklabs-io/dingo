@@ -164,13 +164,12 @@ type TrackedClient struct {
 	// refers to.
 	protocolPoint    ocommon.Point
 	protocolPointSet bool
-	// protocolHeaderEra and protocolHeaderBoundary describe the header at
-	// protocolPoint when a roll-forward recorded it, which the next header
-	// must follow in slot order. A rollback point carries neither, so
-	// protocolHeaderSet is false after one.
-	protocolHeaderEra      uint8
-	protocolHeaderBoundary bool
-	protocolHeaderSet      bool
+	// protocolHeaders is the session's delivered header chain as its
+	// roll-forwards and rollbacks leave it, newest last and bounded by the
+	// caller. The last entry is the parent the next roll-forward header must
+	// follow in slot order. A rollback to a point outside it leaves a single
+	// entry of unknown era and kind, and a rollback to the origin leaves none.
+	protocolHeaders []protocolHeader
 	// advertisedTip is the tip in the client's latest chainsync message,
 	// observers included. Whether it is stale changes as the wall clock
 	// advances, so it is judged each time a decision is made.
@@ -976,18 +975,47 @@ func (s *State) RecordClientProtocolPoint(
 		Hash: cloneBytes(point.Hash),
 	}
 	tc.protocolPointSet = true
-	tc.protocolHeaderSet = false
+	tc.rollBackProtocolHeaders(tc.protocolPoint)
+}
+
+// protocolHeader is one header of a session's delivered header chain, as
+// SlotFollowsParent needs it.
+type protocolHeader struct {
+	hash   []byte
+	parent chain.SlotParent
+}
+
+// rollBackProtocolHeaders truncates the delivered header chain at point. A
+// point the chain no longer holds keeps only its slot: a peer chooses the
+// point it rolls back to, but the next header must still follow that slot.
+func (tc *TrackedClient) rollBackProtocolHeaders(point ocommon.Point) {
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		tc.protocolHeaders = nil
+		return
+	}
+	for i, h := range slices.Backward(tc.protocolHeaders) {
+		if h.parent.Slot == point.Slot && bytes.Equal(h.hash, point.Hash) {
+			tc.protocolHeaders = tc.protocolHeaders[:i+1]
+			return
+		}
+	}
+	tc.protocolHeaders = append(tc.protocolHeaders[:0], protocolHeader{
+		hash:   point.Hash,
+		parent: chain.SlotParent{Slot: point.Slot},
+	})
 }
 
 // RecordClientRollForward records the point of a roll-forward header as the
-// latest protocol point of session, together with the header's era and
-// whether it is a Byron epoch boundary block.
+// latest protocol point of session and appends the header, with its era and
+// whether it is a Byron epoch boundary block, to the session's delivered
+// header chain, keeping at most limit headers.
 func (s *State) RecordClientRollForward(
 	connId ouroboros.ConnectionId,
 	session ClientSessionToken,
 	point ocommon.Point,
 	eraId uint8,
 	boundary bool,
+	limit int,
 ) {
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
@@ -995,33 +1023,40 @@ func (s *State) RecordClientRollForward(
 	if tc == nil || tc != session.client {
 		return
 	}
-	tc.protocolPoint = ocommon.Point{
-		Slot: point.Slot,
-		Hash: cloneBytes(point.Hash),
-	}
+	hash := cloneBytes(point.Hash)
+	tc.protocolPoint = ocommon.Point{Slot: point.Slot, Hash: hash}
 	tc.protocolPointSet = true
-	tc.protocolHeaderEra = eraId
-	tc.protocolHeaderBoundary = boundary
-	tc.protocolHeaderSet = true
+	tc.protocolHeaders = append(tc.protocolHeaders, protocolHeader{
+		hash: hash,
+		parent: chain.SlotParent{
+			Slot:     point.Slot,
+			EraId:    eraId,
+			Boundary: boundary,
+			Known:    true,
+		},
+	})
+	limit = max(limit, 1)
+	if excess := len(tc.protocolHeaders) - limit; excess > 0 {
+		tc.protocolHeaders = tc.protocolHeaders[excess:]
+	}
 }
 
-// ClientRollForwardHeader returns the point, era and Byron boundary flag of
-// session's latest roll-forward header. ok is false before the first
-// roll-forward and after a rollback.
-func (s *State) ClientRollForwardHeader(
+// ClientRollForwardParent returns the hash of the header or rollback point
+// session's next roll-forward header extends, and that parent as
+// SlotFollowsParent needs it. ok is false before the first roll-forward or
+// rollback and after a rollback to the origin.
+func (s *State) ClientRollForwardParent(
 	connId ouroboros.ConnectionId,
 	session ClientSessionToken,
-) (point ocommon.Point, eraId uint8, boundary bool, ok bool) {
+) (hash []byte, parent chain.SlotParent, ok bool) {
 	s.clientConnIdMutex.RLock()
 	defer s.clientConnIdMutex.RUnlock()
 	tc := s.trackedClients[connId]
-	if tc == nil || tc != session.client || !tc.protocolHeaderSet {
-		return ocommon.Point{}, 0, false, false
+	if tc == nil || tc != session.client || len(tc.protocolHeaders) == 0 {
+		return nil, chain.SlotParent{}, false
 	}
-	return ocommon.Point{
-		Slot: tc.protocolPoint.Slot,
-		Hash: cloneBytes(tc.protocolPoint.Hash),
-	}, tc.protocolHeaderEra, tc.protocolHeaderBoundary, true
+	last := tc.protocolHeaders[len(tc.protocolHeaders)-1]
+	return cloneBytes(last.hash), last.parent, true
 }
 
 // ClientProtocolPoint returns the latest roll-forward or rollback point of a
@@ -2191,6 +2226,7 @@ func (s *State) GetTrackedClient(
 	result.Tip.Point.Hash = cloneBytes(tc.Tip.Point.Hash)
 	result.deliveryWatermark.Hash = cloneBytes(tc.deliveryWatermark.Hash)
 	result.protocolPoint.Hash = cloneBytes(tc.protocolPoint.Hash)
+	result.protocolHeaders = nil
 	return &result
 }
 
@@ -2206,6 +2242,7 @@ func (s *State) GetTrackedClients() []TrackedClient {
 		cpy.Tip.Point.Hash = cloneBytes(tc.Tip.Point.Hash)
 		cpy.deliveryWatermark.Hash = cloneBytes(tc.deliveryWatermark.Hash)
 		cpy.protocolPoint.Hash = cloneBytes(tc.protocolPoint.Hash)
+		cpy.protocolHeaders = nil
 		result = append(result, cpy)
 	}
 	return result

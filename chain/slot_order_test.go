@@ -83,6 +83,27 @@ func TestSlotFollowsParent(t *testing.T) {
 			parent: chain.SlotParent{Slot: parentSlot},
 		},
 		{
+			name:   "earlier slot, unknown parent",
+			eraId:  conwayEra,
+			slot:   parentSlot - 1,
+			parent: chain.SlotParent{Slot: parentSlot},
+		},
+		{
+			// The unknown parent may be an epoch boundary block.
+			name:   "Byron main block at an unknown parent's slot",
+			eraId:  byronEra,
+			slot:   parentSlot,
+			parent: chain.SlotParent{Slot: parentSlot},
+			want:   true,
+		},
+		{
+			name:     "Byron boundary block at an unknown parent's slot",
+			eraId:    byronEra,
+			boundary: true,
+			slot:     parentSlot,
+			parent:   chain.SlotParent{Slot: parentSlot},
+		},
+		{
 			name:  "Byron main block at its boundary parent's slot",
 			eraId: byronEra,
 			slot:  parentSlot,
