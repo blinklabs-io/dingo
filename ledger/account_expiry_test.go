@@ -361,6 +361,7 @@ func runDelegatorInactivityLifecycleScenario(
 			txn,
 			delegatorInactivityE2ERewardNewEpoch,
 			delegatorInactivityE2EBoundarySlot,
+			false,
 		)
 	}))
 	settleRewardCredits(t, ls)

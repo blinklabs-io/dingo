@@ -5720,7 +5720,7 @@ func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
 	}
 	publishGovernanceTestEpoch(ls, 0, eras.ConwayEraDesc)
 
-	err = ls.withTxValidationSession(context.Background(), nil, nil, true, false, func(
+	err = ls.withTxValidationSession(context.Background(), nil, nil, true, false, nil, func(
 		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		_ func() bool,
 		_ func(func() error) (bool, error),
@@ -6509,11 +6509,18 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 				activeEras:     []eras.EraDesc{era, eras.DijkstraEraDesc},
 				currentEra:     era,
 				currentPParams: pp,
+				currentEpoch: models.Epoch{
+					StartSlot:     0,
+					LengthInSlots: 100_000,
+					SlotLength:    1_000,
+					EraId:         era.Id,
+				},
 				config: LedgerStateConfig{
 					Logger:            testLogger(),
 					CardanoNodeConfig: nodeConfig,
 				},
 			}
+			ls.epochCache = []models.Epoch{ls.currentEpoch}
 			ls.metrics.init(prometheus.NewRegistry())
 			ls.publishSnapshotsLocked()
 			for path, run := range map[string]func() error{
