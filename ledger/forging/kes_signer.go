@@ -29,7 +29,9 @@ package forging
 // implementation can never be handed a period the operational certificate has
 // not authorized, regardless of what its caller already checked.
 // Remote providers used by readiness also implement CheckReady() error, which
-// must check availability without signing or evolving KES material.
+// must check availability without signing or evolving KES material. A signer
+// reached over the network may also implement RemoteKESPreparer, which the
+// forger calls shortly before a leader slot.
 type RemoteKESSigner interface {
 	// Sign returns the KES signature for message at the given ABSOLUTE KES
 	// period. The implementation is responsible for translating to whatever
@@ -37,6 +39,14 @@ type RemoteKESSigner interface {
 	// wire protocol also takes an absolute period, so a direct client
 	// implementation needs no translation at all).
 	Sign(period uint64, message []byte) ([]byte, error)
+}
+
+// RemoteKESPreparer is optionally implemented by a RemoteKESSigner reached
+// over the network. Prepare opens and authenticates a session ahead of a
+// leader slot, so the Sign at that slot does not pay for a connection and
+// handshake. It must not sign or evolve KES material.
+type RemoteKESPreparer interface {
+	Prepare() error
 }
 
 // AgentKESMaterial is validated serve-key material a KES agent client
