@@ -50,6 +50,12 @@ type PeerChainTip struct {
 	// eagernessPaused counts AwaitEagernessLimit calls holding this peer's
 	// header stream at the Limit on Eagerness. Guarded by the selector mutex.
 	eagernessPaused int
+	// catchUpPaused counts AwaitCatchUpBand calls parking this peer's header
+	// stream until the ledger catches up. It is kept apart from
+	// eagernessPaused because that parked header has not been verified and
+	// the peer is not at the limit, so it must not enter the eagerness
+	// standoff. Guarded by the selector mutex.
+	catchUpPaused int
 	// jumpRecord marks a ChainSync Jumping record. A jumper sends no headers
 	// by design, so its age says nothing about whether it is still there.
 	jumpRecord  bool
@@ -387,6 +393,13 @@ func (p *PeerChainTip) recordObservedTipHistory(
 // isIdling reports whether this peer explicitly sent MsgAwaitReply after its
 // last delivered header.
 func (p *PeerChainTip) isIdling() bool { return p != nil && p.idling }
+
+// streamPaused reports whether the selector is holding this peer's header
+// stream for either reason. A paused peer sends no tips, so its silence is not
+// evidence that it is gone.
+func (p *PeerChainTip) streamPaused() bool {
+	return p != nil && (p.eagernessPaused > 0 || p.catchUpPaused > 0)
+}
 
 // recordObservedLinkedPoint records a (slot, hash) point into the observed
 // frontier used for Genesis density (observedSlots) and corroboration/GDD
