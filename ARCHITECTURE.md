@@ -5939,9 +5939,12 @@ the block pipeline still decide coverage of a block on the primary chain by
 slot. That is sound because the boundary block is never a Byron block (the
 import refuses a Byron ledger state, `ledgerstate.ErrByronSnapshotUnsupported`),
 so the Byron exception above never applies to it, and the primary chain is not
-rolled back below the boundary. Every block that joins the primary chain after
-the boundary block through the checks above therefore sits above the boundary
-slot.
+rolled back below the boundary. Every block that extends the boundary block, or
+any block after it, through the checks above therefore sits above the boundary
+slot. This says nothing about blocks at or below the boundary, where a Byron
+main block may share the slot of an epoch boundary block, or about raw imports,
+which are not ordered; the point test, not the slot, keeps those from being
+treated as covered when a peer offers them.
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1
 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution now
