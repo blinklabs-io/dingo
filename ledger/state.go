@@ -2382,9 +2382,16 @@ type LedgerState struct {
 	// headerMismatchMu guards headerMismatchCounts. The header handler
 	// counts under chainsyncMutex, but blockfetch paths reset a count through
 	// requestChainsyncResync holding only chainsyncBlockfetchMutex.
-	headerMismatchMu          sync.Mutex
-	headerMismatchCounts      map[string]int // consecutive header mismatches keyed by connIdKey
-	bufferedHeaderEvents      map[string][]ChainsyncEvent
+	headerMismatchMu     sync.Mutex
+	headerMismatchCounts map[string]int // consecutive header mismatches keyed by connIdKey
+	bufferedHeaderEvents map[string][]ChainsyncEvent
+	// peerHeaderHistoryMu guards peerHeaderHistory, the chains it holds,
+	// peerHeaderHistoryBytes and peerHeaderHistorySequence. The header
+	// handler works under chainsyncMutex, but blockfetch paths drop a
+	// connection's buffered headers from its history through
+	// requestChainsyncResync holding only chainsyncBlockfetchMutex. It is a
+	// leaf lock: nothing is called under it that takes either of those.
+	peerHeaderHistoryMu       sync.Mutex
 	peerHeaderHistory         map[string]*peerHeaderChain
 	peerHeaderHistoryBytes    int
 	peerHeaderHistorySequence uint64
