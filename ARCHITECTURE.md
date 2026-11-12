@@ -14888,9 +14888,10 @@ APIs as a defect, and must not "fix" it by enabling a default limit. A finding
 that asks for a default-on limit is a false positive.
 
 Servers set no HTTP read, header, write or idle timeouts by default
-(Blockfrost, Kupo, Mesh, UTxO RPC, Bark, MCP, Midnight and the Mithril server)
+(Blockfrost, Mesh, UTxO RPC, Bark, MCP, Midnight and the Mithril server)
 and no request-size caps (all of those except MCP, which keeps the
-tool-validation bounds below); Connect per-message limits, match-stream lifetimes and
+tool-validation bounds below); Kupo is the exception and keeps generous
+connection deadlines and a request-body cap (see the Kupo section); Connect per-message limits, match-stream lifetimes and
 transaction body caps are likewise unset. A client that holds a connection or
 sends a large body is not refused by Dingo. The ledger's transaction size
 validation, the connection manager's write-idle deadline, the metrics, pprof
@@ -15122,8 +15123,12 @@ reserves a metadata read connection before briefly taking the commit barriers,
 keeping an exhausted-pool wait outside them. Admission remains held for the
 snapshot's lifetime and is capped at one below the provider's read-pool size,
 so client-paced responses cannot consume the connection destructive rollback
-needs for operational reads. Kupo applies no stream count, per-client limit,
-stream lifetime, request-body cap, write deadline or server timeout. For an
+needs for operational reads. Kupo applies no stream count, per-client limit or
+stream lifetime. It does keep generous connection hygiene: 60-second read-header
+and read timeouts, a 120-second idle timeout, a 4 MiB request-body cap, and a
+write deadline re-armed before every body write (2 minutes), so a stream of any
+length is unaffected while a client that stops reading releases its snapshot.
+These are not rate limits. For an
 origin allowed by `corsAllowedOrigins`, `Access-Control-Expose-Headers` also
 names `ETag`, `Retry-After`, `X-Block-Header-Hash` and
 `X-Most-Recent-Checkpoint`, the non-safelisted headers Kupo sets, which
@@ -15877,7 +15882,12 @@ exposes one. This is a correctness bound on read connections, not an API limit:
 `AddTransaction` waits for a slot until its context ends or the mempool stops,
 so contention delays a submission instead of refusing it, for Mesh, UTxO RPC,
 Blockfrost, node-to-node and node-to-client submission and rolled-back
-transaction restoration alike. Node-to-node and node-to-client validation
+transaction restoration alike. Transactions submitted through Mesh, UTxO RPC
+and Blockfrost are marked with `mempool.WithAPISubmission` and wait in their own
+slot pool, sized by `MempoolConfig.MaxAPISubmissions` (`maxApiSubmissions` in
+the mempool plugin config; zero, the default, matches the peer pool), so API
+load never takes validation capacity from peer relay and peer relay never
+delays API submission. Node-to-node and node-to-client validation
 inherit connection cancellation, so a disconnected peer cannot retain a slot, a
 wait, or a ledger snapshot. API handlers return no busy status for submission.
 

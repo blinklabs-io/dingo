@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -967,7 +968,7 @@ func (s *Server) handleConstructionSubmit(
 	}
 
 	if err := s.config.Mempool.AddTransaction(
-		ctx, txType, txBytes,
+		mempool.WithAPISubmission(ctx), txType, txBytes,
 	); err != nil {
 		writeError(w, wrapErr(
 			ErrSubmitFailed,

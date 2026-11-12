@@ -16,20 +16,33 @@ package kupo
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 )
 
+const (
+	// responseWriteTimeout bounds how long one response write may block on a
+	// client that has stopped reading. It is refreshed before every write, so
+	// a steadily read stream of any length is unaffected.
+	responseWriteTimeout = 2 * time.Minute
+	// maxRequestBodyBytes bounds a request body; pattern-mutation bodies are
+	// far smaller.
+	maxRequestBodyBytes int64 = 4 << 20
+)
+
 // Server is a Kupo-compatible HTTP API backed by Dingo's complete index.
 type Server struct {
-	config   Config
-	logger   *slog.Logger
-	node     KupoNode
-	listener *apilistener.Listener
+	config               Config
+	logger               *slog.Logger
+	node                 KupoNode
+	listener             *apilistener.Listener
+	responseWriteTimeout time.Duration
 }
 
 // New creates a Kupo-compatible server.
@@ -42,10 +55,11 @@ func New(cfg Config, node KupoNode, logger *slog.Logger) *Server {
 	}
 	logger = logger.With("component", "kupo")
 	return &Server{
-		config:   cfg,
-		logger:   logger,
-		node:     node,
-		listener: apilistener.New("Kupo API", logger),
+		config:               cfg,
+		logger:               logger,
+		node:                 node,
+		listener:             apilistener.New("Kupo API", logger),
+		responseWriteTimeout: responseWriteTimeout,
 	}
 }
 
@@ -67,10 +81,49 @@ func (s *Server) handler() http.Handler {
 	}
 	mux.HandleFunc("/", s.handleNotFound)
 
-	return httpcors.Handler(mux, httpcors.Config{
+	limited := http.MaxBytesHandler(s.boundWrites(mux), maxRequestBodyBytes)
+	return httpcors.Handler(limited, httpcors.Config{
 		AllowedOrigins: s.config.CORSAllowedOrigins,
 		ExposeHeaders:  corsExposeHeaders,
 	})
+}
+
+func (s *Server) boundWrites(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(&progressResponseWriter{
+			ResponseWriter: w,
+			controller:     http.NewResponseController(w),
+			timeout:        s.responseWriteTimeout,
+			logger:         s.logger,
+		}, r)
+	})
+}
+
+// progressResponseWriter refreshes the connection write deadline before each
+// body write. A response holds its read snapshot until the handler returns,
+// and a client that stops reading would otherwise block a write, and keep
+// that snapshot, for as long as the connection stays open. Re-arming per write
+// instead of using a server WriteTimeout keeps arbitrarily long streams
+// intact. The last deadline stays armed while net/http flushes after the
+// handler returns; net/http clears it before reusing the connection.
+type progressResponseWriter struct {
+	http.ResponseWriter
+	controller *http.ResponseController
+	timeout    time.Duration
+	logger     *slog.Logger
+}
+
+func (w *progressResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *progressResponseWriter) Write(p []byte) (int, error) {
+	if err := w.controller.SetWriteDeadline(
+		time.Now().Add(w.timeout),
+	); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		w.logger.Debug("could not bound Kupo response write", "error", err)
+	}
+	return w.ResponseWriter.Write(p)
 }
 
 func registerRoutes(mux interface {
@@ -133,8 +186,15 @@ func (s *Server) Start(ctx context.Context) error {
 
 	server, bindDone, err := s.listener.Publish(func() *http.Server {
 		return &http.Server{
-			Addr:    s.config.ListenAddress,
-			Handler: s.handler(),
+			Addr:              s.config.ListenAddress,
+			Handler:           s.handler(),
+			ReadHeaderTimeout: 60 * time.Second,
+			ReadTimeout:       60 * time.Second,
+			// WriteTimeout is deliberately 0: /matches streams an unbounded
+			// result set, so a fixed deadline would truncate a large
+			// response. boundWrites re-arms a per-write deadline instead.
+			WriteTimeout: 0,
+			IdleTimeout:  120 * time.Second,
 		}
 	})
 	if err != nil {

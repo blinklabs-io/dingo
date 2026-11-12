@@ -103,6 +103,11 @@
       # TxSubmission backpressure as it approaches rejectionWatermark.
       # evictionWatermark: 0
       # rejectionWatermark: 1.0
+      # Size of the validation-slot pool used by transactions submitted through
+      # an API (Mesh, UTxO RPC, Blockfrost). It is separate from the pool used
+      # by peer relay, so API load never delays relay. Submissions wait for a
+      # slot rather than being refused. 0 uses the peer pool's size.
+      # maxApiSubmissions: 0
   # api:
     # blockfrost:
       # provider: "builtin"

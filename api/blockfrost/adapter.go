@@ -4098,7 +4098,9 @@ func (a *NodeAdapter) TransactionSubmit(
 			ErrInvalidTransaction,
 		)
 	}
-	if err := a.submitter.AddTransaction(ctx, txType, txCbor); err != nil {
+	if err := a.submitter.AddTransaction(
+		mempool.WithAPISubmission(ctx), txType, txCbor,
+	); err != nil {
 		if _, ok := errors.AsType[*mempool.MempoolFullError](err); ok {
 			return "", fmt.Errorf(
 				"submit transaction to mempool: %w: %w",

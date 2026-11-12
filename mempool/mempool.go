@@ -228,6 +228,11 @@ type MempoolConfig struct {
 	// Zero uses one quarter of MempoolCapacity.
 	ConsumerCacheBytes int64
 	CurrentSlotFunc    func() uint64 // returns current slot for early TX rejection
+	// MaxAPISubmissions sizes the validation-slot pool reserved for
+	// transactions submitted through an API (see WithAPISubmission). It is
+	// separate from the pool used by peer relay, so API load never takes
+	// capacity from relay. Zero uses the size of the peer pool.
+	MaxAPISubmissions int
 }
 
 type Mempool struct {
@@ -293,6 +298,9 @@ type Mempool struct {
 	dag               *transactionDAG
 	headroomChanged   chan struct{}
 	submissionSlots   chan struct{}
+	// apiSubmissionSlots is the validation-slot pool for API submissions,
+	// kept apart from submissionSlots so API load cannot delay peer relay.
+	apiSubmissionSlots chan struct{}
 
 	// rebuildMutex permits one double-buffer rebuild at a time. mutationSeq and
 	// mutationJournal are protected by mutationMutex and let that rebuild catch
@@ -637,6 +645,20 @@ var ErrNilValidator = errors.New("mempool: validator is nil")
 // ErrMempoolStopped is returned when admission is attempted after shutdown.
 var ErrMempoolStopped = errors.New("mempool: stopped")
 
+type apiSubmissionKey struct{}
+
+// WithAPISubmission marks ctx as belonging to a transaction submitted through
+// an API. AddTransaction validates such a transaction in the API slot pool
+// instead of the pool shared by peer relay and local submission.
+func WithAPISubmission(ctx context.Context) context.Context {
+	return context.WithValue(ctx, apiSubmissionKey{}, struct{}{})
+}
+
+func isAPISubmission(ctx context.Context) bool {
+	_, ok := ctx.Value(apiSubmissionKey{}).(struct{})
+	return ok
+}
+
 type submissionCapacityProvider interface {
 	MempoolSubmissionCapacity() int
 }
@@ -675,6 +697,16 @@ func newMempool(
 		if limit := provider.MempoolSubmissionCapacity(); limit > 0 {
 			submissionCapacity = min(submissionCapacity, limit)
 		}
+	}
+	apiSubmissionCapacity := config.MaxAPISubmissions
+	if apiSubmissionCapacity < 0 {
+		return nil, fmt.Errorf(
+			"invalid API submission capacity: %d (must not be negative)",
+			apiSubmissionCapacity,
+		)
+	}
+	if apiSubmissionCapacity == 0 {
+		apiSubmissionCapacity = submissionCapacity
 	}
 	if !implementation.Valid() {
 		return nil, fmt.Errorf(
@@ -743,6 +775,10 @@ func newMempool(
 		submissionSlots: make(
 			chan struct{},
 			submissionCapacity,
+		),
+		apiSubmissionSlots: make(
+			chan struct{},
+			apiSubmissionCapacity,
 		),
 	}
 	if implementation == ImplementationDAG {
@@ -1043,6 +1079,10 @@ type ProviderConfig struct {
 	// consumer. Zero uses one quarter of Capacity; see
 	// MempoolConfig.ConsumerCacheBytes.
 	ConsumerCacheBytes int64 `yaml:"consumerCacheBytes"`
+	// MaxAPISubmissions sizes the validation-slot pool for transactions
+	// submitted through an API, separate from the pool used by peer relay.
+	// Zero uses the size of the peer pool; see MempoolConfig.MaxAPISubmissions.
+	MaxAPISubmissions int `yaml:"maxApiSubmissions"`
 }
 
 // ProviderDependencies are runtime dependencies assembled after ledger and
@@ -1101,6 +1141,7 @@ func registerProvider(
 				RejectionWatermark:   cfg.RejectionWatermark,
 				RevalidationDeltaCap: cfg.RevalidationDeltaCap,
 				ConsumerCacheBytes:   cfg.ConsumerCacheBytes,
+				MaxAPISubmissions:    cfg.MaxAPISubmissions,
 				CurrentSlotFunc:      deps.CurrentSlotFunc,
 			}
 			var (
@@ -2036,7 +2077,11 @@ func (m *Mempool) AddTransaction(
 	if err := m.rejectOversizedTx(txType, txBytes); err != nil {
 		return err
 	}
-	release, err := m.waitSubmissionSlot(ctx)
+	slots := m.submissionSlots
+	if isAPISubmission(ctx) {
+		slots = m.apiSubmissionSlots
+	}
+	release, err := m.waitSubmissionSlot(ctx, slots)
 	if err != nil {
 		return err
 	}
@@ -2112,27 +2157,24 @@ func (m *Mempool) AddTransaction(
 	return nil
 }
 
-// waitSubmissionSlot reserves a validation slot. Submissions wait for a slot
-// rather than being refused. The wait ends when ctx is done or the mempool
-// stops.
-func (m *Mempool) waitSubmissionSlot(ctx context.Context) (func(), error) {
+// waitSubmissionSlot reserves a validation slot from slots. Submissions wait
+// for a slot rather than being refused. The wait ends when ctx is done or the
+// mempool stops.
+func (m *Mempool) waitSubmissionSlot(
+	ctx context.Context,
+	slots chan struct{},
+) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	select {
-	case m.submissionSlots <- struct{}{}:
-		return m.submissionSlotRelease(), nil
+	case slots <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-slots }) }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-m.done:
 		return nil, ErrMempoolStopped
-	}
-}
-
-func (m *Mempool) submissionSlotRelease() func() {
-	var once sync.Once
-	return func() {
-		once.Do(func() { <-m.submissionSlots })
 	}
 }
 
