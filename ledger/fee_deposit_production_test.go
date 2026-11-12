@@ -782,12 +782,18 @@ func TestDijkstraBatchFeeOnProductionPaths(t *testing.T) {
 		if shape.topScript {
 			budgets = append(budgets, feeProdBudget)
 		}
+		// Each child references its own copy of the script, and the minimum
+		// fee charges sub-transaction reference scripts like top-level ones.
+		// The total stays below the tier stride, so the price is flat.
+		childRefScriptFee := uint64(shape.children) *
+			uint64(len(feeProdScriptBytes(t, false))) * 15
 		build := func(t *testing.T, offset int64) feeProdCase {
 			probe := dijkstraFeeProdBatch(
 				t, newFeeProdFixture(t), pparams, 1<<20,
 				shape.topScript, shape.children,
 			)
-			minFee := feeProdSizeFee(t, probe) + feeProdExecFee(budgets...)
+			minFee := feeProdSizeFee(t, probe) + feeProdExecFee(budgets...) +
+				childRefScriptFee
 			fx := newFeeProdFixture(t)
 			// #nosec G115 -- offset is -1 or 0
 			tx := dijkstraFeeProdBatch(
