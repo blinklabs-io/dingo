@@ -328,6 +328,19 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid historyExpiry.frequency",
 		},
 		{
+			name: "negative koios parity unavailable retry limit",
+			modify: func(c *Config) {
+				c.KoiosParity.UnavailableRetryLimit = -1
+			},
+			wantErr: "invalid koiosParity.unavailableRetryLimit",
+		},
+		{
+			name: "zero koios parity unavailable retry limit selects default",
+			modify: func(c *Config) {
+				c.KoiosParity.UnavailableRetryLimit = 0
+			},
+		},
+		{
 			name:    "load mode without immutable db path",
 			modify:  func(c *Config) { c.RunMode = RunModeLoad },
 			wantErr: "requires immutableDbPath",

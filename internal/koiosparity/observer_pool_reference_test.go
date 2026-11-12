@@ -73,6 +73,13 @@ type poolRefScenario struct {
 	bulkUpdates string
 	// accounts drives processAccountEpoch instead of processEpoch.
 	accounts bool
+	// runs is how many times the epoch is processed; 0 means once.
+	runs int
+	// historyDownA, when set, receives the 1-based run number and reports
+	// whether pool A's /pool_history answers 503 for that whole run.
+	historyDownA func(run int) bool
+	// unavailableRetryLimit sets ObserverConfig.UnavailableRetryLimit.
+	unavailableRetryLimit int
 }
 
 type poolRefOutcome struct {
@@ -89,7 +96,7 @@ func runPoolRefScenario(t *testing.T, sc poolRefScenario) poolRefOutcome {
 	bechB, err := PoolKeyHashHexToBech32(refPoolKeyB)
 	require.NoError(t, err)
 
-	var callsA atomic.Int32
+	var callsA, run atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			q := r.URL.Query()
@@ -118,6 +125,11 @@ func runPoolRefScenario(t *testing.T, sc poolRefScenario) poolRefOutcome {
 				_, _ = fmt.Fprintf(w, validTotalsTmpl, q.Get("_epoch_no"))
 			case "/pool_history":
 				if q.Get("_pool_bech32") == bechA {
+					if sc.historyDownA != nil &&
+						sc.historyDownA(int(run.Load())) {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
 					if !sc.historyA(callsA.Add(1)) {
 						_, _ = w.Write([]byte(`[]`))
 						return
@@ -164,6 +176,7 @@ func runPoolRefScenario(t *testing.T, sc poolRefScenario) poolRefOutcome {
 		Logger:                slog.New(slog.DiscardHandler),
 		FetchRetryAttempts:    3,
 		FetchRetryDelay:       5 * time.Millisecond,
+		UnavailableRetryLimit: sc.unavailableRetryLimit,
 		FatalFunc:             func(error) { fatal.Add(1) },
 		OnResult: func(res *EpochCompareResult) {
 			mu.Lock()
@@ -174,10 +187,13 @@ func runPoolRefScenario(t *testing.T, sc poolRefScenario) poolRefOutcome {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = o.Stop(context.Background()) })
 
-	if sc.accounts {
-		o.processAccountEpoch(context.Background(), 5)
-	} else {
-		o.processEpoch(context.Background(), 5)
+	for range max(sc.runs, 1) {
+		run.Add(1)
+		if sc.accounts {
+			o.processAccountEpoch(context.Background(), 5)
+		} else {
+			o.processEpoch(context.Background(), 5)
+		}
 	}
 
 	pools, err := o.cache.GetAllPoolsForEpoch("preview", 5)

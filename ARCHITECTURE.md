@@ -16790,7 +16790,21 @@ second sync:
     with `errKoiosRequest`, and the last two also with `errKoiosUnavailable`.
     An unreachable reference says nothing about whether Dingo's state agrees
     with it, so the error is persisted and the epoch is retried, but the node
-    keeps running. A local cache or database error during the fetch, any
+    keeps running until the outage outlasts `UnavailableRetryLimit`
+    (`koiosParity.unavailableRetryLimit`). Each check (one epoch on one queue)
+    counts its consecutive unavailable attempts in memory, and any attempt
+    that gets an answer from Koios, reference lag included, resets the count.
+    The attempt that reaches the limit is fatal-eligible, with an error naming
+    the attempt count and the elapsed time, so a lasting outage cannot leave
+    strict mode checking nothing while blocks apply. In non-strict mode it is
+    logged at ERROR and the check stays queued for retry, like every other
+    non-strict failure. `runQueue` re-runs a failed check on the first
+    `ErrorRetryDelay` tick at or after its due time, which is one
+    `ErrorRetryDelay` after the attempt ended, so consecutive attempts start at
+    least two ticks (ten minutes by default) apart and the default limit of
+    144 spans at least about 24 hours; an attempt that waits out the client's
+    own retries (up to an hour for an exhausted 408 budget) stretches it. The
+    count is not persisted, so a restart starts it again. A local cache or database error during the fetch, any
     other `ErrKoiosPermanent` failure (a 401, 403, 400, 404 or 422 status,
     an oversized response) and a response that fails to decode stay fatal-eligible, and a
     failure to persist the retry (`RecordObserverError`) makes any reported
@@ -16847,7 +16861,8 @@ second sync:
     is held in memory, so a restart allows one immediate refetch. A refetch
     failure goes through `reportFetchError` like any other fetch failure, so
     it is classified by provenance: an unavailable Koios is retried without
-    firing `FatalFunc`, and a local cache error stays fatal in strict mode.
+    firing `FatalFunc` until `UnavailableRetryLimit` consecutive attempts
+    fail, and a local cache error stays fatal in strict mode.
   - **Decoupled aggregate/account queues.** Two independent background
     goroutines, each with their own pending set and wake channel, drain
     `Observer.pending`/`wake` (`run`, always started) and

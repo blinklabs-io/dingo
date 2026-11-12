@@ -1187,6 +1187,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.KoiosParity.GraceHours,
 		))
 	}
+	if c.KoiosParity.UnavailableRetryLimit < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid koiosParity.unavailableRetryLimit: %d (must not be negative; 0 selects the default of 144)",
+			c.KoiosParity.UnavailableRetryLimit,
+		))
+	}
 
 	return errors.Join(errs...)
 }

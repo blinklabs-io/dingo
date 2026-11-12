@@ -868,6 +868,7 @@ func buildDingoConfig(
 			AllowInsecureHTTP:     cfg.KoiosParity.AllowInsecureHTTP,
 			AllowPrivateAddresses: cfg.KoiosParity.AllowPrivateAddresses,
 			Strict:                cfg.KoiosParity.Strict,
+			UnavailableRetryLimit: cfg.KoiosParity.UnavailableRetryLimit,
 			GraceHours:            cfg.KoiosParity.GraceHours,
 			Accounts:              &cfg.KoiosParity.Accounts,
 			// AccountChunkSize and AccountChunkMaxBytes were omitted here

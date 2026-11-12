@@ -40,6 +40,15 @@ const (
 	defaultFetchRetryAttempts = 5
 	// defaultFetchRetryDelay is the pause between fetch retry attempts.
 	defaultFetchRetryDelay = 30 * time.Second
+	// defaultUnavailableRetryLimit bounds how many consecutive attempts at
+	// one check may fail because Koios is unavailable before strict mode
+	// gives up on it. runQueue re-runs a failed check on the first
+	// ErrorRetryDelay tick at or after its due time, which a failure sets
+	// one ErrorRetryDelay after the attempt ends, so consecutive attempts
+	// start at least two ticks (ten minutes at the default five-minute
+	// delay) apart. 144 attempts therefore span at least about 24 hours,
+	// and longer when an attempt itself waits out the client's retries.
+	defaultUnavailableRetryLimit = 144
 	// defaultQueueBuffer sizes the "an epoch.transition fired" wake channel.
 	// Only ever needs 1 slot of headroom in practice (see run's pending-set
 	// design below); sized slightly larger purely so a handler is never
@@ -80,7 +89,8 @@ type ObserverConfig struct {
 	// Koios's own data had not caught up, so that result is logged and
 	// recorded but never triggers FatalFunc (see Observer.fail). A Koios
 	// request that fails because Koios is unavailable is likewise retried
-	// rather than fatal (see Observer.reportFetchError). When
+	// rather than fatal, up to UnavailableRetryLimit consecutive attempts
+	// (see Observer.reportFetchError). When
 	// Strict is false, every failure is logged and recorded in the cache,
 	// and the observer keeps validating subsequent epochs — an explicit,
 	// non-default choice for advisory/observability-only use, since the
@@ -132,6 +142,15 @@ type ObserverConfig struct {
 	// not pool_history). Each refetch costs one /pool_history request per
 	// pool. Zero uses one hour.
 	PoolHistoryRefetchDelay time.Duration
+	// UnavailableRetryLimit is the number of consecutive attempts at one
+	// check (one epoch on one queue) that may fail because Koios is
+	// unavailable (see koiosUnavailable). In strict mode the attempt that
+	// reaches it is fatal; in non-strict mode it is logged and the check
+	// keeps retrying. A Koios answer of any kind, including reference lag,
+	// resets the count, and the count is not persisted across restarts.
+	// Zero or negative uses defaultUnavailableRetryLimit (144, at least about
+	// 24 hours at the default ErrorRetryDelay).
+	UnavailableRetryLimit int
 	// OnResult, if set, is called after every epoch this observer validates
 	// (pass, fail, or error), for tests/observability. Never called
 	// concurrently with itself.
@@ -194,6 +213,9 @@ type Observer struct {
 	// poolHistoryRefetchAt holds the earliest time each epoch cached with an
 	// unpublished pool_history may be fetched again. Guarded by mu.
 	poolHistoryRefetchAt map[uint64]time.Time
+	// koiosOutages holds each check's current run of consecutive attempts
+	// that failed because Koios was unavailable. Guarded by mu.
+	koiosOutages map[koiosCheckKey]koiosOutage
 
 	// pendingAccounts is pending's twin for the slow per-account queue (see
 	// the Observer doc comment). Guarded by the same mu as pending: both are
@@ -266,6 +288,9 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 	if cfg.PoolHistoryRefetchDelay <= 0 {
 		cfg.PoolHistoryRefetchDelay = time.Hour
 	}
+	if cfg.UnavailableRetryLimit <= 0 {
+		cfg.UnavailableRetryLimit = defaultUnavailableRetryLimit
+	}
 
 	cache, err := OpenCache(cfg.CachePath, cfg.Logger)
 	if err != nil {
@@ -293,6 +318,7 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 		retry:                make(map[uint64]time.Time),
 		retryAccounts:        make(map[uint64]time.Time),
 		poolHistoryRefetchAt: make(map[uint64]time.Time),
+		koiosOutages:         make(map[koiosCheckKey]koiosOutage),
 		wake:                 make(chan struct{}, defaultQueueBuffer),
 		wakeAccounts:         make(chan struct{}, defaultQueueBuffer),
 	}, nil
@@ -950,9 +976,12 @@ func (o *Observer) reportError(
 // reportFetchError reports a failure to fetch an epoch's Koios reference. The
 // fetch both requests Koios and reads and writes the local cache, so the error
 // is classified by where it came from. A Koios request that failed in a way a
-// later attempt can fix (koiosUnavailable) is never fatal: an unreachable
+// later attempt can fix (koiosUnavailable) is not fatal: an unreachable
 // reference says nothing about whether Dingo's state agrees with it, and the
-// epoch is retried. Every other failure, including any local cache or database
+// epoch is retried. That holds until the check has failed this way
+// UnavailableRetryLimit consecutive times; the attempt that reaches the limit
+// is fatal in strict mode, so a lasting outage cannot leave strict mode
+// checking nothing. Every other failure, including any local cache or database
 // error and a permanent Koios error, stays fatal in strict mode, and so does
 // an unavailable Koios when the retry itself cannot be recorded.
 func (o *Observer) reportFetchError(
@@ -960,12 +989,63 @@ func (o *Observer) reportFetchError(
 	accountsChecked bool,
 	err error,
 ) {
-	o.reportErrorFatal(
-		epoch,
-		accountsChecked,
-		fmt.Errorf("fetch koios reference: %w", err),
-		!koiosUnavailable(err),
-	)
+	err = fmt.Errorf("fetch koios reference: %w", err)
+	if !koiosUnavailable(err) {
+		o.endKoiosOutage(epoch, accountsChecked)
+		o.reportErrorFatal(epoch, accountsChecked, err, true)
+		return
+	}
+	attempts, elapsed := o.recordKoiosOutage(epoch, accountsChecked)
+	fatal := false
+	if attempts >= o.cfg.UnavailableRetryLimit {
+		err = fmt.Errorf(
+			"koios unreachable for %d consecutive attempts over %s: %w",
+			attempts, elapsed.Round(time.Second), err,
+		)
+		fatal = true
+	}
+	o.reportErrorFatal(epoch, accountsChecked, err, fatal)
+}
+
+// koiosCheckKey identifies one check: an epoch on one of the two queues.
+type koiosCheckKey struct {
+	epoch    uint64
+	accounts bool
+}
+
+// koiosOutage is one check's run of consecutive attempts that failed because
+// Koios was unavailable, and when the first of them was reported.
+type koiosOutage struct {
+	attempts int
+	since    time.Time
+}
+
+// recordKoiosOutage counts one more unavailable attempt for the check and
+// returns the run's length and how long ago it started.
+func (o *Observer) recordKoiosOutage(
+	epoch uint64,
+	accounts bool,
+) (int, time.Duration) {
+	now := time.Now()
+	key := koiosCheckKey{epoch: epoch, accounts: accounts}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	outage, ok := o.koiosOutages[key]
+	if !ok {
+		outage.since = now
+	}
+	outage.attempts++
+	o.koiosOutages[key] = outage
+	return outage.attempts, now.Sub(outage.since)
+}
+
+// endKoiosOutage resets the check's count when an attempt ends any way other
+// than in Koios unavailability, including reference lag, so only consecutive
+// unavailability reaches the limit.
+func (o *Observer) endKoiosOutage(epoch uint64, accounts bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.koiosOutages, koiosCheckKey{epoch: epoch, accounts: accounts})
 }
 
 // koiosUnavailable reports whether err is a failed Koios request that a later
@@ -1099,9 +1179,13 @@ func (o *Observer) reconcilePoolReferenceOrReport(
 	err := o.reconcilePoolReference(ctx, epoch)
 	switch {
 	case err == nil:
+		o.endKoiosOutage(epoch, accountsChecked)
 		return true
 	case cancelled(ctx, err):
 	case errors.Is(err, errPoolHistoryUnpublished):
+		// Koios answered without the history: reference lag, which can last
+		// for days and never counts toward UnavailableRetryLimit.
+		o.endKoiosOutage(epoch, accountsChecked)
 		o.reportErrorFatal(epoch, accountsChecked, err, false)
 	default:
 		o.reportFetchError(epoch, accountsChecked, err)
@@ -1555,7 +1639,8 @@ func (o *Observer) fetchAccountsIfNeeded(
 // the result, but it never reaches FatalFunc and never sets fatalFired, so
 // run/runAccounts keep processing later epochs. reportFetchError also passes
 // false for a Koios request that failed transiently (see koiosUnavailable),
-// unless the epoch's retry could not be persisted (see reportErrorFatal).
+// unless the epoch's retry could not be persisted (see reportErrorFatal) or
+// the check has reached UnavailableRetryLimit consecutive such failures.
 // Every other non-pass result, including dingo_db_missing and dingo_db_error,
 // and every reportError call stays fatal in strict mode.
 //

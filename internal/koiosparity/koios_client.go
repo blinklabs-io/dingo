@@ -98,8 +98,9 @@ const (
 	// this 60-minute budget into a five-hour stall. ErrKoiosPermanent caps
 	// the total wait at one budget. The exhausted 408 error also carries
 	// errKoiosUnavailable, so in strict mode Observer.reportFetchError treats
-	// it like an exhausted 5xx budget: the epoch is retried later and
-	// FatalFunc is not fired.
+	// it like an exhausted 5xx budget: the epoch is retried later, and
+	// FatalFunc fires only once the check reaches
+	// ObserverConfig.UnavailableRetryLimit consecutive unavailable attempts.
 	//
 	// Exposed as KoiosClient fields (koios408MaxRetries/
 	// koios408InitialBackoff/koios408MaxBackoff) defaulted from these

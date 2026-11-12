@@ -112,8 +112,19 @@ type KoiosParityConfig struct {
 	// never stop the node: an epoch whose only significant mismatches are
 	// reference_lag (Koios's data has not caught up yet), and a Koios
 	// request that failed because Koios is unavailable (a transport error,
-	// timeout, 5xx, exhausted 408 budget or daily-quota exhaustion).
+	// timeout, 5xx, exhausted 408 budget or daily-quota exhaustion), up to
+	// UnavailableRetryLimit consecutive attempts.
 	Strict bool
+	// UnavailableRetryLimit bounds how many consecutive attempts at one
+	// epoch's check may fail because Koios is unavailable (a transport
+	// error, timeout, 5xx, exhausted 408 budget or daily-quota exhaustion).
+	// In strict mode the attempt that reaches it stops the node; in
+	// non-strict mode it is logged at ERROR and the check keeps retrying. A
+	// Koios answer, including one that is still reference lag, resets the
+	// count. A failed check is retried every ten minutes at the fastest, so
+	// the default of 144 is at least about 24 hours of continuous
+	// unavailability. 0 selects the default.
+	UnavailableRetryLimit int
 	// GraceHours is the window after an epoch closes during which a missing
 	// Dingo-side row is treated as reference/sync lag rather than a
 	// failure. 0 selects the default (24).
@@ -934,6 +945,7 @@ func (c *Config) syncCompatFields() {
 		AllowInsecureHTTP:     c.cfg.KoiosParity.AllowInsecureHTTP,
 		AllowPrivateAddresses: c.cfg.KoiosParity.AllowPrivateAddresses,
 		Strict:                c.cfg.KoiosParity.Strict,
+		UnavailableRetryLimit: c.cfg.KoiosParity.UnavailableRetryLimit,
 		GraceHours:            c.cfg.KoiosParity.GraceHours,
 		Accounts:              &koiosParityAccounts,
 		AccountChunkSize:      c.cfg.KoiosParity.AccountChunkSize,
@@ -2172,6 +2184,7 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			AllowInsecureHTTP:     cfg.AllowInsecureHTTP,
 			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
 			Strict:                cfg.Strict,
+			UnavailableRetryLimit: cfg.UnavailableRetryLimit,
 			GraceHours:            cfg.GraceHours,
 			Accounts:              accounts,
 			AccountChunkSize:      cfg.AccountChunkSize,
