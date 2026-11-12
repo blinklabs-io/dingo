@@ -116,6 +116,49 @@ func newLiveLifecycleTestNodeWithGenesis(
 	)
 }
 
+// seedLedgerEpochsForLoadedBlocks gives the ledger the epoch rows it would hold
+// had it applied the seed blocks. The fixture writes blocks and the tip
+// directly, and a ledger whose tip is ahead of its epoch rows is a state the
+// reference node cannot be in: its first applied block would look like a jump
+// over every epoch the seed blocks span. A short-lived ledger materializes the
+// genesis epoch row, which the rows for each later epoch the blocks reach are
+// then derived from.
+func seedLedgerEpochsForLoadedBlocks(
+	t *testing.T,
+	n *Node,
+	points []ocommon.Point,
+) {
+	t.Helper()
+	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
+	require.NotNil(t, genesis)
+	lastEpoch := points[len(points)-1].Slot / uint64(genesis.EpochLength)
+	if lastEpoch == 0 {
+		return
+	}
+	seedLedger, err := ledger.NewLedgerState(n.ledgerStateConfig())
+	require.NoError(t, err)
+	require.NoError(t, seedLedger.Start(context.Background()))
+	require.NoError(t, seedLedger.Close())
+	epochs, err := n.db.GetEpochs(nil)
+	require.NoError(t, err)
+	require.Len(t, epochs, 1)
+	first := epochs[0]
+	for id := uint64(1); id <= lastEpoch; id++ {
+		require.NoError(t, n.db.SetEpoch(
+			first.StartSlot+id*uint64(first.LengthInSlots),
+			id,
+			first.Nonce,
+			first.EvolvingNonce,
+			first.CandidateNonce,
+			first.LastEpochBlockNonce,
+			first.EraId,
+			first.SlotLength,
+			first.LengthInSlots,
+			nil,
+		))
+	}
+}
+
 // newLiveLifecycleTestNodeWithStorageMode is newLiveLifecycleTestNodeWithGenesis
 // with the storage mode chosen up front. The mode is persisted with the
 // database and a live restore or truncate refuses to reopen it under another,
@@ -231,6 +274,7 @@ func newLiveLifecycleTestNodeWithStorageModeAtBlock(
 	// restore/truncate is compared against identical production wiring on
 	// both sides rather than against a harness config that happens to omit
 	// the field under test.
+	seedLedgerEpochsForLoadedBlocks(t, n, points)
 	ledgerState, err := ledger.NewLedgerState(n.ledgerStateConfig())
 	require.NoError(t, err)
 	n.setLedgerState(ledgerState)

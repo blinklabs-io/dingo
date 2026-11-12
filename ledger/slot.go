@@ -63,6 +63,21 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	return ls.timeConv().SlotToTime(slot)
 }
 
+// SlotToTimeExtendedFrom returns the wall-clock start time of the given slot
+// as the ledger rules see it when validating at basisSlot. See
+// SlotTimeConverter.SlotToTimeExtendedFrom.
+func (ls *LedgerState) SlotToTimeExtendedFrom(
+	horizonAnchorSlot uint64,
+	basisSlot uint64,
+	slot uint64,
+) (time.Time, error) {
+	return ls.timeConv().SlotToTimeExtendedFrom(
+		horizonAnchorSlot,
+		basisSlot,
+		slot,
+	)
+}
+
 // SlotToTimeWithHorizonFrom returns the wall-clock start time of the given
 // slot with the forecast horizon measured from horizonAnchorSlot. See
 // SlotTimeConverter.SlotToTimeWithHorizonFrom.

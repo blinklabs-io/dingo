@@ -773,55 +773,15 @@ func (c *Client) Sign(period uint64, message []byte) (_ []byte, err error) {
 		c.recordDialFailureLocked()
 		return nil, fmt.Errorf("kesagent: read sign response: %w", err)
 	}
-	if resp.Type != "sign_response" {
-		c.recordDialFailureLocked()
-		return nil, fmt.Errorf(
-			"kesagent: expected sign_response frame, got type %q",
-			resp.Type,
-		)
-	}
-	if resp.Period != period {
-		c.recordDialFailureLocked()
-		return nil, fmt.Errorf(
-			"kesagent: sign response period %d does not match requested period %d",
-			resp.Period,
-			period,
-		)
-	}
-	if resp.Error != "" {
-		c.recordDialFailureLocked()
-		return nil, fmt.Errorf(
-			"kesagent: agent refused to sign: %s",
-			resp.Error,
-		)
-	}
-	if len(resp.Signature) != kes.CardanoKesSignatureSize {
-		c.recordDialFailureLocked()
-		return nil, fmt.Errorf(
-			"kesagent: sign response signature is %d bytes, want %d",
-			len(resp.Signature),
-			kes.CardanoKesSignatureSize,
-		)
-	}
-	if period < c.cfg.OpCertStartPeriod {
-		c.recordDialFailureLocked()
-		return nil, fmt.Errorf(
-			"kesagent: sign period %d precedes configured opcert start period %d",
-			period,
-			c.cfg.OpCertStartPeriod,
-		)
-	}
-	relativePeriod := period - c.cfg.OpCertStartPeriod
-	if !kes.VerifySignedKES(
+	if err := validateSignResponse(
 		c.cfg.KESVKey,
-		relativePeriod,
+		c.cfg.OpCertStartPeriod,
+		period,
 		message,
-		resp.Signature,
-	) {
+		resp,
+	); err != nil {
 		c.recordDialFailureLocked()
-		return nil, errors.New(
-			"kesagent: sign response failed KES signature verification",
-		)
+		return nil, err
 	}
 
 	// A verified signature is the sign-mode equivalent of Run's completed
@@ -831,4 +791,57 @@ func (c *Client) Sign(period uint64, message []byte) (_ []byte, err error) {
 	c.cfg.Metrics.observeSignLatency(time.Since(start))
 	c.cfg.Metrics.incSignSuccess()
 	return resp.Signature, nil
+}
+
+// validateSignResponse checks a sign_response for message at the absolute
+// period: its type and echoed period, that the agent did not refuse, the
+// signature size, and the signature itself against kesVKey at the period
+// relative to the operational certificate's start.
+func validateSignResponse(
+	kesVKey []byte,
+	opCertStartPeriod uint64,
+	period uint64,
+	message []byte,
+	resp SignResponse,
+) error {
+	if resp.Type != "sign_response" {
+		return fmt.Errorf(
+			"kesagent: expected sign_response frame, got type %q",
+			resp.Type,
+		)
+	}
+	if resp.Period != period {
+		return fmt.Errorf(
+			"kesagent: sign response period %d does not match requested period %d",
+			resp.Period,
+			period,
+		)
+	}
+	if resp.Error != "" {
+		return fmt.Errorf(
+			"kesagent: agent refused to sign: %s",
+			resp.Error,
+		)
+	}
+	if len(resp.Signature) != kes.CardanoKesSignatureSize {
+		return fmt.Errorf(
+			"kesagent: sign response signature is %d bytes, want %d",
+			len(resp.Signature),
+			kes.CardanoKesSignatureSize,
+		)
+	}
+	if period < opCertStartPeriod {
+		return fmt.Errorf(
+			"kesagent: sign period %d precedes configured opcert start period %d",
+			period,
+			opCertStartPeriod,
+		)
+	}
+	relativePeriod := period - opCertStartPeriod
+	if !kes.VerifySignedKES(kesVKey, relativePeriod, message, resp.Signature) {
+		return errors.New(
+			"kesagent: sign response failed KES signature verification",
+		)
+	}
+	return nil
 }
