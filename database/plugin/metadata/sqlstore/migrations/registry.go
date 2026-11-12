@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -99,6 +100,7 @@ const (
 	rewardOutputIndexReshapeSchemaRelease               = "reward-account-output-index-reshape"
 	metadataLabelSlotIndexSchemaRelease                 = "transaction-metadata-label-slot-index"
 	stakeBookkeepingIndexDropSchemaRelease              = "stake-bookkeeping-index-drop"
+	poolRelayIPv6NetworkOrderSchemaRelease              = "pool-relay-ipv6-network-order"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -278,6 +280,7 @@ var schemaVersions = []struct {
 	{Version: 57, Name: rewardOutputIndexReshapeSchemaRelease, Dir: "v57"},
 	{Version: 58, Name: metadataLabelSlotIndexSchemaRelease, Dir: "v58"},
 	{Version: 59, Name: stakeBookkeepingIndexDropSchemaRelease, Dir: "v59"},
+	{Version: 60, Name: poolRelayIPv6NetworkOrderSchemaRelease, Dir: "v60"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -396,6 +399,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			dialect != "mysql" {
 			migration.BackfillRevision = "1"
 			migration.Backfill = utxoStakingPartialIndexBackfill
+		}
+		if version.Name == poolRelayIPv6NetworkOrderSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = poolRelayIPv6NetworkOrderBackfill
 		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
@@ -988,6 +995,85 @@ func poolDepositPositionBeforeOrEqual(a, b poolDepositPosition) bool {
 // starts a new deposit cycle; all other registrations carry the preceding
 // cycle's held amount. The pool ID cursor makes each batch independently
 // resumable, and the NULL predicate makes replay non-destructive.
+// poolRelayIPv6NetworkOrderBackfill swaps the bytes of each 32-bit word of
+// every stored IPv6 relay address that was written in the ledger's wire
+// order. The migration version, not the bytes, decides which rows are old: the
+// runner applies it once per database. Genesis relays are excluded because
+// they were parsed from text and already hold network order; a genesis
+// registration is the one with no certificate and slot zero.
+func poolRelayIPv6NetworkOrderBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"parse pool relay IPv6 cursor: %w",
+				err,
+			)
+		}
+		lastID = parsed
+	}
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT r.id, r.ipv6
+FROM pool_registration_relay r
+JOIN pool_registration p ON p.id = r.pool_registration_id
+WHERE r.id > ?
+  AND r.ipv6 IS NOT NULL
+  AND NOT (p.added_slot = 0 AND COALESCE(p.certificate_id, 0) = 0)
+ORDER BY r.id
+LIMIT ?`), lastID, batch.Limit)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("read pool relay IPv6 rows: %w", err)
+	}
+	defer rows.Close()
+	type relayRow struct {
+		id   int64
+		ipv6 []byte
+	}
+	var batchRows []relayRow
+	for rows.Next() {
+		var row relayRow
+		if err := rows.Scan(&row.id, &row.ipv6); err != nil {
+			return BatchResult{}, err
+		}
+		batchRows = append(batchRows, row)
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if len(batchRows) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	for _, row := range batchRows {
+		if len(row.ipv6) != net.IPv6len {
+			continue
+		}
+		swapped := common.PoolRelayIpv6WireOrder(net.IP(row.ipv6))
+		if _, err := batch.Tx.ExecContext(
+			ctx,
+			batch.Rebind(
+				"UPDATE pool_registration_relay SET ipv6 = ? WHERE id = ?",
+			),
+			[]byte(swapped),
+			row.id,
+		); err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"rewrite pool relay %d IPv6: %w",
+				row.id,
+				err,
+			)
+		}
+	}
+	return BatchResult{
+		Cursor: strconv.FormatInt(batchRows[len(batchRows)-1].id, 10),
+		Rows:   int64(len(batchRows)),
+		Done:   len(batchRows) < batch.Limit,
+	}, nil
+}
+
 func poolDepositHeldBackfill(
 	ctx context.Context,
 	batch Batch,

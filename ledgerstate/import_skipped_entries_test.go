@@ -17,8 +17,10 @@ package ledgerstate
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"io"
 	"log/slog"
+	"net"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -427,4 +429,24 @@ func TestParseRelayDecodesStrictly(t *testing.T) {
 			require.ErrorContains(t, err, tc.want)
 		})
 	}
+}
+
+// The ledger encodes a relay's IPv4 address in network order and its IPv6
+// address as four little-endian 32-bit words (ipv4ToBytes and ipv6ToBytes in
+// Cardano.Ledger.Binary.Encoding.Encoder). A snapshot carries those bytes;
+// imported relays hold the standard network order that gouroboros decodes
+// chain relays to.
+func TestParseRelayStoresNetworkOrderAddresses(t *testing.T) {
+	t.Parallel()
+	ipv6Wire, err := hex.DecodeString("b80d0120000000000000000001000000")
+	require.NoError(t, err)
+	data, err := cbor.Encode([]any{
+		uint64(0), uint64(3001), []byte{192, 168, 1, 1}, ipv6Wire,
+	})
+	require.NoError(t, err)
+
+	relay, err := parseRelay(data)
+	require.NoError(t, err)
+	require.Equal(t, net.ParseIP("192.168.1.1").To4(), net.IP(relay.IPv4))
+	require.Equal(t, net.ParseIP("2001:db8::1"), net.IP(relay.IPv6))
 }
