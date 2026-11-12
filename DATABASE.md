@@ -235,6 +235,10 @@ user-visible change for anyone reading the metadata database with SQL:
   `ON DELETE CASCADE` and an index on `tx_id`. The hash-keyed
   `utxo_reference_input` and `utxo_collateral_input` are dropped.
 
+The rebuild recreates `idx_utxo_deleted_staking_amount` in its version 60
+shape: spent rows only (`WHERE deleted_slot > 0`) on SQLite and PostgreSQL, and
+`deleted_slot` alone on MySQL.
+
 One unique index, `idx_utxo_tx_id_output_idx` over `(tx_id, output_idx)`,
 identifies an output whichever way it arrived. It is integer-keyed, so inserts
 append (transaction ids grow with apply order) instead of landing at a random

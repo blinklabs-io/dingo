@@ -53,8 +53,11 @@ type utxoIdentityIndex struct {
 	columns []string
 	unique  bool
 	// where is the predicate of a partial index. MySQL has no partial
-	// indexes and builds the full index instead.
+	// indexes and builds the full index instead, over mysqlColumns when set.
 	where string
+	// mysqlColumns replaces columns on MySQL, mirroring the deferred
+	// manifest entry of the same name.
+	mysqlColumns []string
 }
 
 // utxoIdentityIndexes lists the indexes built after the swap, in build order.
@@ -97,6 +100,8 @@ var utxoIdentityIndexes = []utxoIdentityIndex{
 		columns: []string{
 			"deleted_slot", "credential_tag", "staking_key", "amount",
 		},
+		where:        "deleted_slot > 0",
+		mysqlColumns: []string{"deleted_slot"},
 	},
 	{
 		name: "idx_utxo_deleted_payment_script", table: "utxo",
@@ -139,7 +144,11 @@ func (i utxoIdentityIndex) createSQL(dialect string) string {
 	}
 	b.WriteString(identityQuote(dialect, i.name) + " ON " +
 		identityQuote(dialect, i.table) + " (")
-	for n, column := range i.columns {
+	columns := i.columns
+	if dialect == "mysql" && len(i.mysqlColumns) > 0 {
+		columns = i.mysqlColumns
+	}
+	for n, column := range columns {
 		if n > 0 {
 			b.WriteString(", ")
 		}

@@ -204,6 +204,9 @@ ON t.id = e.tx_id WHERE t.hash = ?`, identityHash(2)))
 		_, ok := indexSQL(t, db, name)
 		require.True(t, ok, name)
 	}
+	spent, _ := indexSQL(t, db, "idx_utxo_deleted_staking_amount")
+	require.Contains(t, spent, "WHERE deleted_slot > 0",
+		"the rebuild keeps the spent-rows-only index partial")
 	_, err := db.Exec("PRAGMA foreign_keys = ON")
 	require.NoError(t, err)
 	require.Equal(t, 0, queryInt(t, db,
