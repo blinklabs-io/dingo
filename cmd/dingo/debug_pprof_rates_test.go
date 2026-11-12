@@ -52,8 +52,6 @@ func recordProfilingSetters(t *testing.T) *profilingSetterCalls {
 	return calls
 }
 
-func intPtr(v int) *int { return &v }
-
 // Not t.Parallel: recordProfilingSetters swaps package-level seams.
 func TestApplyDebugProfilingRates(t *testing.T) {
 	tests := []struct {
@@ -82,7 +80,7 @@ func TestApplyDebugProfilingRates(t *testing.T) {
 				DebugPort:                 6060,
 				DebugMutexProfileFraction: 5,
 			},
-			wantMutex: intPtr(5),
+			wantMutex: new(5),
 			wantLog:   true,
 		},
 		{
@@ -91,7 +89,7 @@ func TestApplyDebugProfilingRates(t *testing.T) {
 				DebugPort:             6060,
 				DebugBlockProfileRate: 1000,
 			},
-			wantBlock: intPtr(1000),
+			wantBlock: new(1000),
 			wantLog:   true,
 		},
 	}
@@ -166,6 +164,6 @@ func TestMithrilSyncAppliesProfilingRates(t *testing.T) {
 		DebugBlockProfileRate:     1000,
 	}))
 	require.NoError(t, mithrilSyncRunE(cmd, nil))
-	require.Equal(t, intPtr(5), atRun.mutex)
-	require.Equal(t, intPtr(1000), atRun.block)
+	require.Equal(t, new(5), atRun.mutex)
+	require.Equal(t, new(1000), atRun.block)
 }
