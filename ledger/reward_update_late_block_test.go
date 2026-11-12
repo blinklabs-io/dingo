@@ -86,6 +86,7 @@ func applyLateBlockRewardRound(
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(
 			context.Background(), txn, retentionNewEpoch, retentionBoundarySlot,
+			false,
 		)
 	}))
 	settleRewardCredits(t, ls)
