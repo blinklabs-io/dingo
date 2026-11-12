@@ -259,3 +259,35 @@ func TestRollbackAnchorsOnEarliestWithdrawal(t *testing.T) {
 	require.NoError(t, store.DeleteAccountRewardsAfterSlot(150, nil))
 	require.Equal(t, uint64(52), rewardOf(t, store, key))
 }
+
+// A rollback removes the reward_source rows whose every credit it removed, and
+// keeps a source a surviving credit still names: the rollback restores the
+// tables to their state before the rolled-back slots.
+func TestRollbackDeletesUnreferencedRewardSources(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	key := bytesRepeat(0x66, 28)
+	rollbackAccount(t, store, key, 0)
+	shared := bytesRepeat(0x31, 32)
+	later := bytesRepeat(0x32, 32)
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, key, 5, 100, shared, nil))
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, key, 6, 300, shared, nil))
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, key, 7, 300, later, nil))
+	require.NoError(t, store.DeleteAccountRewardsAfterSlot(200, nil))
+	db := newDialectExecer(store)
+	sourceExists := func(hash []byte) bool {
+		var count int
+		require.NoError(t, db.QueryRow(
+			`SELECT COUNT(*) FROM reward_source WHERE hash = ?`, hash,
+		).Scan(&count))
+		return count == 1
+	}
+	require.True(t, sourceExists(shared),
+		"a source with a surviving credit must remain")
+	require.False(t, sourceExists(later),
+		"a source whose credits all rolled back must be removed")
+	require.Equal(t, uint64(5), rewardOf(t, store, key))
+}

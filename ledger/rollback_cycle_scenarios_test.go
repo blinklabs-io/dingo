@@ -683,7 +683,7 @@ func TestRollbackAcrossRewardPayoutRestoresEveryTable(t *testing.T) {
 				"reward_pool_output",
 				"reward_account_output",
 				"reward_credit_round",
-				"account_reward_delta",
+				"reward_event_credit",
 			)
 		})
 	}

@@ -120,6 +120,16 @@ WHERE boundary_slot > ? ORDER BY boundary_slot`
 
 	deleteRewardCreditSlotsAfterSlotSQL = `DELETE FROM reward_credit_slot WHERE boundary_slot > ?`
 
+	// deleteRolledBackRewardSourcesSQL runs before the event credits above
+	// the slot are deleted: it removes each source those credits name that no
+	// credit at or below the slot also names.
+	deleteRolledBackRewardSourcesSQL = `DELETE FROM reward_source
+WHERE id IN (SELECT source_id FROM reward_event_credit WHERE slot > ?)
+  AND NOT EXISTS (
+      SELECT 1 FROM reward_event_credit e
+      WHERE e.source_id = reward_source.id AND e.slot <= ?
+  )`
+
 	deleteRewardEventCreditsAfterSlotSQL = `DELETE FROM reward_event_credit WHERE slot > ?`
 
 	deleteRewardWithdrawalsAfterSlotSQL = `DELETE FROM reward_withdrawal WHERE slot > ?`
@@ -616,6 +626,11 @@ func (s *Store) DeleteAccountRewardsAfterSlot(
 				); err != nil {
 					return err
 				}
+			}
+			if _, err := db.ExecContext(
+				ctx, deleteRolledBackRewardSourcesSQL, slotValue, slotValue,
+			); err != nil {
+				return err
 			}
 			for _, statement := range []string{
 				deleteRewardCreditSlotsAfterSlotSQL,
