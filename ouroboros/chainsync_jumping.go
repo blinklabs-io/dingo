@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
@@ -159,6 +160,10 @@ type chainsyncJumping struct {
 	// Limit on Eagerness cannot be measured from them.
 	streamBlock  uint64
 	restartBlock uint64
+	// streamPoint is the dynamo's last delivered header. The same header
+	// is recorded again when its admission is retried, and that repeat is
+	// not a stream restart.
+	streamPoint ocommon.Point
 	// refreshStarted is set once the refresh loop runs.
 	refreshStarted bool
 	jumpers        map[ouroboros.ConnectionId]*csjJumper
@@ -253,6 +258,7 @@ func (o *Ouroboros) initChainsyncJumping() {
 		o.csjObserveDelivery(
 			update.ConnectionId,
 			update.ObservedTip.BlockNumber,
+			update.ObservedTip.Point,
 		)
 	}
 }
@@ -404,6 +410,7 @@ func (j *chainsyncJumping) setDynamoLocked(connId ouroboros.ConnectionId) {
 	j.lastJumpBlock = 0
 	j.streamBlock = 0
 	j.restartBlock = 0
+	j.streamPoint = ocommon.Point{}
 	j.progressAt = j.now()
 	delete(j.streamers, connId)
 	delete(j.jumpers, connId)
@@ -790,6 +797,7 @@ func (o *Ouroboros) csjOnAwaitReply(connId ouroboros.ConnectionId) {
 func (o *Ouroboros) csjObserveDelivery(
 	connId ouroboros.ConnectionId,
 	blockNumber uint64,
+	point ocommon.Point,
 ) {
 	j := o.csj
 	if j == nil || o.csjDisengageIfInactive() {
@@ -799,11 +807,16 @@ func (o *Ouroboros) csjObserveDelivery(
 	isDynamo := j.hasDynamo && j.dynamo == connId
 	if isDynamo {
 		j.progressAt = j.now()
-		// A header at or below the last one starts a new stream.
-		if j.streamBlock != 0 && blockNumber <= j.streamBlock {
+		// A different header at or below the last one starts a new
+		// stream; the last header delivered again does not.
+		sameHeader := point.Slot == j.streamPoint.Slot &&
+			bytes.Equal(point.Hash, j.streamPoint.Hash)
+		if j.streamBlock != 0 && blockNumber <= j.streamBlock &&
+			!sameHeader {
 			j.restartBlock = blockNumber
 		}
 		j.streamBlock = blockNumber
+		j.streamPoint = point
 	}
 	due := isDynamo && !j.roundInFlight && len(j.jumpers) > 0 &&
 		(!j.jumped || j.restartBlock != 0 ||

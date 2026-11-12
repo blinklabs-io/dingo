@@ -315,11 +315,20 @@ func (h *csjHarness) promote(peer *csjPeer) {
 // deliver reports a header delivered by connId at block, as the roll-forward
 // handler does after verification.
 func (h *csjHarness) deliver(connId ouroboros.ConnectionId, block uint64) {
+	h.deliverPoint(connId, block, csjPoint(block))
+}
+
+// deliverPoint reports a header delivered by connId at block with point.
+func (h *csjHarness) deliverPoint(
+	connId ouroboros.ConnectionId,
+	block uint64,
+	point ocommon.Point,
+) {
 	h.o.config.ChainsyncRecordDeliveredPeerTip(
 		chainselection.PeerTipUpdateEvent{
 			ConnectionId: connId,
 			ObservedTip: ochainsync.Tip{
-				Point:       csjPoint(block),
+				Point:       point,
 				BlockNumber: block,
 			},
 		},
@@ -993,4 +1002,42 @@ func TestChainsyncJumpingDynamoRestartJumpsAtOnce(t *testing.T) {
 	require.Equal(t, csjPoint(12), points[0],
 		"the jump names the restarted stream's head")
 	h.requireAgreement(jumper.connId, dynamo.connId, csjPoint(12))
+}
+
+// The retry path records a deferred header again after it was delivered. The
+// same header is not a stream restart, so it must not force a jump round
+// before the interval is due.
+func TestChainsyncJumpingRedeliveredHeaderIsNotARestart(t *testing.T) {
+	t.Parallel()
+	h := newCsjHarness(t, true)
+	dynamo, _ := h.startDynamoAndJumpers(100)
+
+	h.fragment.Store(15)
+	h.deliver(dynamo.connId, 15)
+	h.awaitRound()
+	h.deliver(dynamo.connId, 15)
+
+	h.o.csj.mu.Lock()
+	defer h.o.csj.mu.Unlock()
+	require.Zero(t, h.o.csj.restartBlock,
+		"the same header delivered again was read as a restart")
+	require.False(t, h.o.csj.roundInFlight,
+		"the same header delivered again forced a jump round")
+}
+
+// A different header at or below the last one is still a restart.
+func TestChainsyncJumpingDifferentHeaderAtSameBlockIsARestart(t *testing.T) {
+	t.Parallel()
+	h := newCsjHarness(t, true)
+	dynamo, _ := h.startDynamoAndJumpers(100)
+
+	h.fragment.Store(15)
+	h.deliver(dynamo.connId, 15)
+	h.awaitRound()
+	h.deliverPoint(dynamo.connId, 15, ocommon.NewPoint(151, []byte("forked")))
+
+	h.o.csj.mu.Lock()
+	defer h.o.csj.mu.Unlock()
+	require.Equal(t, uint64(15), h.o.csj.restartBlock)
+	require.True(t, h.o.csj.roundInFlight)
 }
