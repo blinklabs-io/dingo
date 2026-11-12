@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"reflect"
 	"slices"
 	"sync"
 	"time"
@@ -450,12 +451,14 @@ func (lv *LedgerView) mirPendingState() (*mirPendingState, error) {
 // rather than replacing it (before, Map.union). The protocol parameters the
 // view was pinned with decide it; a view without them falls back to the era
 // of the epoch the view was pinned to, the same gate the epoch boundary
-// applies. A view with neither fails closed: folding the wrong way accepts or
-// rejects certificates the reference does not, so no default is assumed.
+// applies. A typed-nil parameter pointer counts as absent: the era types'
+// ProtocolMajorVersion dereferences its receiver. A view with neither fails
+// closed: folding the wrong way accepts or rejects certificates the reference
+// does not, so no default is assumed.
 func (lv *LedgerView) mirRewardsAdditive() (bool, error) {
 	if versioned, ok := lv.committeePParams.(interface {
 		ProtocolMajorVersion() uint
-	}); ok {
+	}); ok && !isNilPointer(versioned) {
 		return lcommon.MirTransferAllowed(versioned.ProtocolMajorVersion()), nil
 	}
 	if lv.ls != nil {
@@ -467,6 +470,11 @@ func (lv *LedgerView) mirRewardsAdditive() (bool, error) {
 		"MIR rewards fold is unknown: the view has no pinned protocol " +
 			"parameters or epoch era",
 	)
+}
+
+func isNilPointer(v any) bool {
+	value := reflect.ValueOf(v)
+	return value.Kind() == reflect.Pointer && value.IsNil()
 }
 
 // loadMIRPending reads the MIR certificates stored in the current epoch once

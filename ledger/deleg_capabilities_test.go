@@ -404,3 +404,19 @@ func TestLedgerViewMIRFoldFailsClosedWithoutEra(t *testing.T) {
 		return nil
 	}))
 }
+
+// A view pinned with a typed-nil parameter pointer has no parameters to read
+// the protocol version from, so it falls back like an unpinned view instead of
+// dereferencing the nil receiver.
+func TestLedgerViewMIRFoldTypedNilPParamsFailsClosed(t *testing.T) {
+	t.Parallel()
+	ls, db, _ := newMIRTestLedger(t)
+	txn := db.Transaction(context.Background(), false)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		lv := (&LedgerView{ls: ls, txn: txn, epochStartSlot: 100}).
+			pinCommitteeState(0, (*shelley.ShelleyProtocolParameters)(nil))
+		_, err := lv.InstantaneousRewardsTotal(mirPotReserves)
+		require.ErrorContains(t, err, "MIR rewards fold is unknown")
+		return nil
+	}))
+}
