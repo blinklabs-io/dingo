@@ -923,6 +923,35 @@ var flagSpecs = []flagSpec{
 		"",
 		"KES agent service mode: serve-key (default) or sign",
 	),
+	stringFlag(
+		"ShelleyKESAgentAddress",
+		"shelley-kes-agent-address",
+		"",
+		"host:port of a bursa KES agent's remote sign listener; implies sign mode. TLS 1.3 by default (mutual TLS only when a client certificate is set); --shelley-kes-agent-plaintext selects plain TCP",
+	),
+	stringFlag(
+		"ShelleyKESAgentClientCertFile",
+		"shelley-kes-agent-client-cert-file",
+		"",
+		"path to this node's PEM TLS client certificate for the remote KES agent",
+	),
+	stringFlag(
+		"ShelleyKESAgentClientKeyFile",
+		"shelley-kes-agent-client-key-file",
+		"",
+		"path to this node's PEM TLS client key for the remote KES agent",
+	),
+	stringFlag(
+		"ShelleyKESAgentServerSPKISHA256",
+		"shelley-kes-agent-server-spki-sha256",
+		"",
+		"hex SHA-256 of the remote KES agent's TLS server key (SubjectPublicKeyInfo), logged by the agent as server_spki_sha256",
+	),
+	boolFlag(
+		"ShelleyKESAgentPlaintext",
+		"shelley-kes-agent-plaintext",
+		"run the remote KES agent link over plain TCP",
+	),
 	durationFlag(
 		"ShelleyKESAgentSignTimeout",
 		"shelley-kes-agent-sign-timeout",

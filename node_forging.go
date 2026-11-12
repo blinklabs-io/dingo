@@ -20,10 +20,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"time"
 
+	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/chain"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
@@ -103,7 +105,7 @@ func (n *Node) setEquivocationSelfPoolID(creds *forging.PoolCredentials) {
 func (n *Node) validateBlockProducerStartupAtSlot(
 	currentSlot uint64,
 ) (creds *forging.PoolCredentials, retErr error) {
-	agentBacked := n.config.shelleyKESAgentSocket != ""
+	agentBacked := n.kesAgentConfigured()
 	if agentBacked {
 		// Agent startup installs the client before the remaining credential
 		// validation below. Do not leave that client and its serve-key loop
@@ -171,7 +173,7 @@ func (n *Node) validateBlockProducerStartupForClock(
 	if supported {
 		return n.validateBlockProducerStartupAtSlot(slot)
 	}
-	if n.config.shelleyKESAgentSocket != "" {
+	if n.kesAgentConfigured() {
 		defer func() {
 			if retErr != nil {
 				n.closeKESAgentClient()
@@ -224,7 +226,7 @@ func (n *Node) validateBlockProducerCredentialMaterial(
 	currentSlot uint64,
 ) (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
-	if n.config.shelleyKESAgentSocket != "" {
+	if n.kesAgentConfigured() {
 		if err := n.loadBlockProducerCredentialsFromAgent(creds,
 			currentSlot,
 		); err != nil {
@@ -263,6 +265,18 @@ func (n *Node) loadBlockProducerCredentialsFromAgent(
 	n.closeKESAgentClient()
 
 	mode := n.config.shelleyKESAgentMode
+	if n.config.shelleyKESAgentAddress != "" {
+		// A remote agent serves only sign mode. Config validation rejects
+		// any other mode with an address, but a library caller can skip it.
+		if mode != "" && mode != kesagent.ModeSign {
+			return fmt.Errorf(
+				"remote KES agent supports only mode %q, got %q",
+				kesagent.ModeSign,
+				mode,
+			)
+		}
+		mode = kesagent.ModeSign
+	}
 	if mode == "" {
 		mode = kesagent.ModeServeKey
 	}
@@ -428,15 +442,7 @@ func (n *Node) startKESAgentSign(creds *forging.PoolCredentials) error {
 			err,
 		)
 	}
-	client, err := kesagent.NewClient(kesagent.Config{
-		SocketPath:        n.config.shelleyKESAgentSocket,
-		Mode:              kesagent.ModeSign,
-		SignTimeout:       n.config.shelleyKESAgentSignTimeout,
-		KESVKey:           opCertKey.VKey,
-		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
-		Logger:            n.config.logger,
-		Metrics:           n.kesAgentClientMetrics(),
-	})
+	client, err := n.newKESAgentSignClient(opCertKey)
 	if err != nil {
 		return err
 	}
@@ -450,6 +456,50 @@ func (n *Node) startKESAgentSign(creds *forging.PoolCredentials) error {
 	}
 	n.kesAgentClient = client
 	return nil
+}
+
+// kesAgentSignClient is a sign-mode KES agent client, local or remote.
+type kesAgentSignClient interface {
+	forging.RemoteKESSigner
+	io.Closer
+}
+
+// newKESAgentSignClient dials nothing yet: it builds the remote client when
+// shelleyKESAgentAddress is set, otherwise the local socket client.
+func (n *Node) newKESAgentSignClient(
+	opCertKey *bursa.LoadedKey,
+) (kesAgentSignClient, error) {
+	if n.config.shelleyKESAgentAddress == "" {
+		return kesagent.NewClient(kesagent.Config{
+			SocketPath:        n.config.shelleyKESAgentSocket,
+			Mode:              kesagent.ModeSign,
+			SignTimeout:       n.config.shelleyKESAgentSignTimeout,
+			KESVKey:           opCertKey.VKey,
+			OpCertStartPeriod: opCertKey.OpCertKesPeriod,
+			Logger:            n.config.logger,
+			Metrics:           n.kesAgentClientMetrics(),
+		})
+	}
+	return kesagent.NewRemoteClient(kesagent.RemoteConfig{
+		Address:           n.config.shelleyKESAgentAddress,
+		ClientCertFile:    n.config.shelleyKESAgentClientCertFile,
+		ClientKeyFile:     n.config.shelleyKESAgentClientKeyFile,
+		ServerSPKISHA256:  n.config.shelleyKESAgentServerSPKISHA256,
+		Plaintext:         n.config.shelleyKESAgentPlaintext,
+		KESVKey:           opCertKey.VKey,
+		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
+		OpCert:            opCertKey.RawCBOR,
+		SignTimeout:       n.config.shelleyKESAgentSignTimeout,
+		Logger:            n.config.logger,
+		Metrics:           n.kesAgentClientMetrics(),
+	})
+}
+
+// kesAgentConfigured reports whether KES signing goes through an agent,
+// local or remote, rather than a local key file.
+func (n *Node) kesAgentConfigured() bool {
+	return n.config.shelleyKESAgentSocket != "" ||
+		n.config.shelleyKESAgentAddress != ""
 }
 
 func (n *Node) kesAgentClientMetrics() *kesagent.Metrics {
@@ -532,7 +582,7 @@ func (n *Node) reloadBlockProducerCredentials(
 	if live == nil {
 		return errors.New("block producer credentials are not loaded")
 	}
-	if n.config.shelleyKESAgentSocket != "" {
+	if n.kesAgentConfigured() {
 		return errors.New(
 			"block producer credentials come from a KES agent; rotate the key through the agent",
 		)
