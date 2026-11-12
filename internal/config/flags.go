@@ -811,6 +811,11 @@ var flagSpecs = []flagSpec{
 		"independent peers that must corroborate a fast source before it drives Genesis selection (default 0, which disables the gate)",
 	),
 	boolFlag(
+		"GenesisBootstrap.ChainSyncJumping",
+		"genesis-csj",
+		"use ChainSync Jumping while Genesis selection is active: one identified outbound hot peer streams headers and the other outbound hot peers vouch for it by MsgFindIntersect",
+	),
+	boolFlag(
 		"GenesisBootstrap.LimitOnPatienceEnabled",
 		"genesis-bootstrap-limit-on-patience-enabled",
 		"disconnect ChainSync peers that deliver advertised progress too slowly during Genesis sync",
@@ -951,6 +956,11 @@ var flagSpecs = []flagSpec{
 		"ShelleyKESAgentPlaintext",
 		"shelley-kes-agent-plaintext",
 		"run the remote KES agent link over plain TCP",
+	),
+	durationFlag(
+		"ShelleyKeyWatchInterval",
+		"shelley-key-watch-interval",
+		"poll the block producer credential files at this interval and reload them in place on a change; applies with local key files or a KES agent in sign mode, ignored in serve-key mode (0 disables; otherwise at least 1s)",
 	),
 	durationFlag(
 		"ShelleyKESAgentSignTimeout",

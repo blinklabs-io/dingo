@@ -109,6 +109,12 @@ type Chain struct {
 	waitingChanMutex     sync.Mutex
 	persistent           bool
 
+	// headerTipChange is closed and cleared whenever the header tip may have
+	// moved. headerTipMutex guards it and is taken under c.mutex, never around
+	// it.
+	headerTipChange chan struct{}
+	headerTipMutex  sync.Mutex
+
 	// pendingUpdates is the chain-level sequencer for deferred chain.update
 	// / chain.fork publication. The mutex-holding ledger paths (blockfetch
 	// add under chainsyncBlockfetchMutex, rollback under chainsyncMutex) must
@@ -776,6 +782,7 @@ func (c *Chain) addBlockHeader(
 	// Add header
 	c.headers = append(c.headers, queued)
 	c.headerMutationGeneration++
+	c.notifyHeaderTipChanged()
 	// Surface a Leios endorser-block announcement the moment its ranking
 	// block's header enters the queue. The apply-driven ChainUpdateEventType
 	// cannot serve this: applying an EB-announcing ranking block waits on
@@ -1840,7 +1847,29 @@ func (c *Chain) addRawBlocks(
 	return nil
 }
 
+// HeaderTipChanged returns a channel that is closed the next time the header
+// tip may have moved: a header is queued, or a block is added or rolled back.
+// A wake can be spurious, so the waiter re-reads the tip.
+func (c *Chain) HeaderTipChanged() <-chan struct{} {
+	c.headerTipMutex.Lock()
+	defer c.headerTipMutex.Unlock()
+	if c.headerTipChange == nil {
+		c.headerTipChange = make(chan struct{})
+	}
+	return c.headerTipChange
+}
+
+func (c *Chain) notifyHeaderTipChanged() {
+	c.headerTipMutex.Lock()
+	defer c.headerTipMutex.Unlock()
+	if c.headerTipChange != nil {
+		close(c.headerTipChange)
+		c.headerTipChange = nil
+	}
+}
+
 func (c *Chain) notifyWaitingIterators() {
+	c.notifyHeaderTipChanged()
 	c.waitingChanMutex.Lock()
 	defer c.waitingChanMutex.Unlock()
 	if c.waitingChan != nil {

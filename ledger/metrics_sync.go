@@ -89,6 +89,15 @@ func (m *stateMetrics) observerHorizonParkEnd() {
 	m.observerHorizonParked.Add(-1)
 }
 
+// incObserverReadAheadPark counts an observer callback parking because its
+// header is too far above the header tip.
+func (m *stateMetrics) incObserverReadAheadPark() {
+	if m == nil || m.observerReadAheadParks == nil {
+		return
+	}
+	m.observerReadAheadParks.Inc()
+}
+
 // incHoldsPointRetry counts a fork-anchor membership read repeated because a
 // block mutation overlapped it.
 func (m *stateMetrics) incHoldsPointRetry() {

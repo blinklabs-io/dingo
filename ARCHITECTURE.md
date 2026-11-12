@@ -628,6 +628,7 @@ sequenceDiagram
     LS->>LS: validate transactions (Phase 1 + Phase 2)
     LS->>LS: update UTXO set, process certs & governance
     LS->>LS: compute epoch nonce contributions
+    LS->>LS: when a block jumps over empty epochs, tick consensus once at the target; NEWEPOCH effects and the Praos nonce run only for an immediate successor of the ledger epoch label (which a rollback rewinds to the surviving epoch rows), and the block-based epoch-transition event is published only when the target is the immediate successor of the consensus epoch
     LS->>LS: at an era boundary, enact source-era pparams, then translate before successor-era epoch rules and SNAP
     LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block, never ahead of a configured TriggerAtEpoch
     LS->>LS: before translating, decide the era the ledger enters from its own state, and refuse a validated boundary block encoded in any other era, in either direction
@@ -1217,6 +1218,8 @@ these series carries a connection or peer label.
   chainsync callbacks currently parked in `AwaitObserverHeaderHorizon`.
   `dingo_ledger_observer_horizon_overshoot_slots` observes, once per parked
   header, how many slots it lies past the end of the forecast it is held on,
+  `dingo_ledger_observer_readahead_parks_total` counts headers parked for
+  lying more than `k` blocks above the header tip,
   and `dingo_ledger_fork_anchor_membership_retries_total` counts fork-anchor
   membership reads repeated because a block mutation overlapped them. None
   carries a connection or peer label.
@@ -4784,7 +4787,31 @@ ENACT applies at the boundary itself, so the decision forecasts it without
 writing: `governance.ForecastHardForkInitiations` applies the
 `HardForkInitiation` proposals marked ratified and not yet enacted, and those
 the previous boundary's deferred RATIFY has decided but not yet written, in the
-order ENACT would. A refusal releases the rollover's transaction-validation
+order ENACT would. The decision reads the parameters pending for the successor
+of the ledger epoch label, so a block beyond an empty epoch is judged by the same
+forecast as one that opens the successor: NEWEPOCH enacts nothing for it, but the
+transition the pending update names stands, and `ProtocolParamsForSlot` returns
+the parameters in force rather than the pending ones for such a slot. Inside an epoch that follows an empty epoch the label stays behind, so the
+hard-fork combinator also decides the era block by block from the state before
+the block: once k blocks of that epoch lie at or past its voting deadline and the
+pending update names the next era's major, the next block must be in the next era
+and a block in the source era is refused. The block-apply loop stops its batch at
+that block, translates the frozen ledger without enacting the update, keys the
+translation at the block's slot, and records it (`mid_epoch_era_switch`) so a
+rollback restores the source era. Only classic (pre-Conway) eras are covered.
+Everything that decides the era of a block before it is applied follows the same
+decision from the applied tip: `ProtocolParamsForSlot` returns the translated
+parameters for the slot after the tip, so the forger builds the block the ledger
+will accept, and `EraIDForEpoch` (hence the consensus mode of the leader schedule
+and the leader check) names the later era. A tip that does not yet know the
+transition decides nothing for later slots, and a rollback below the block that
+made it known withdraws it. A Conway ledger translated this way keeps the old
+major and ignores the classic proposals left in the database, which Conway's
+translation drops. The epoch record carries the era after the switch for the
+whole epoch, so a competing header from before the switch slot is still judged
+in the later era's consensus mode; the modes differ only for a switch out of
+Alonzo.
+A refusal releases the rollover's transaction-validation
 transition before the block is rewound as a rejected header, and the ledger
 stays in its source era. The block's body era still selects the transition path:
 a header elevation is a header-carried protocol version, which outside mainnet
@@ -6915,6 +6942,9 @@ for each requested pool and the corresponding totals. For protocol version 11
 and later, requested pools whose mark, set, and go stake are all zero are
 omitted; without a pool filter, the result contains the union of pools present
 in those snapshots and the corresponding totals.
+The snapshots are those of the ledger epoch label (`ledgerEpochLabelInCache`), so
+after an empty epoch, which no boundary captured, the reply stays at the label's
+mark/set/go as the reference ledger state does.
 
 **Acquiring a specific historical point.** A real
 NtC client can `Acquire` LocalStateQuery at a specific past point, not just
@@ -8135,7 +8165,18 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   **not** by itself stop it feeding the ledger. The real stall is enforced by
   `ChainSelector.ShouldApplyIngress`, wired to
   `OuroborosConfig.ChainsyncApplyEligible` (`ouroboros/chainsync.go`): while
-  Genesis corroboration is active, only corroborated peers are *apply-eligible*.
+  Genesis corroboration is active, only peers that are corroborated, or whose
+  header the Limit on Eagerness vouches for, are *apply-eligible*. The limit
+  vouches for a header at or below it when the limit's intersection point is
+  retained by at least `MinCorroboratingPeers` identities other than the
+  sender's (`eagernessVouchesLocked`), the reference node's LoE rule
+  (`Ouroboros/Consensus/Genesis/Governor.hs` `sharedCandidatePrefix`):
+  selection cannot pass the limit, so such a header extends the witnessed
+  prefix by at most `k` blocks. Genesis selection accepts the same two routes
+  (`selectionCorroboratedLocked`), without requiring the frontier to be within
+  the limit, since selection is truncated there. The roll-forward evaluates the
+  gate after the Limit on Eagerness wait, so a header past the limit waits and
+  the gate then sees it within the limit.
   An uncorroborated peer is still **observed** — its `PeerTipUpdateEvent` tips
   feed corroboration — but its `ledger.ChainsyncEvent` (and therefore
   blockfetch) is held, so it cannot steer the ledger. The roll-forward callback
@@ -8182,7 +8223,16 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   retention, bounded by `catchUpBandWaitTimeout`, so an observer does not read
   ahead of what the ledger can forecast; the wait fetches nothing and requests
   no re-sync, and a header it releases is handled as any observer header. The
-  wait resolves the header's fork anchor once and reuses it until a withdrawal
+  same wait also parks an observer header more than `k` blocks above the header
+  tip (`observerAheadOfHeaderTip`): an observer is read to corroborate the
+  ingress candidate, which extends the header tip, and a witness within `k`
+  blocks of it supports its suffix. Reading on to the forecast horizon, about
+  `3k` blocks past the ledger tip, fetches headers that the observed header
+  history cannot retain once several observers share its budget, so they are
+  evicted unused and every re-intersection or promotion from the local tip
+  fetches them again. The wait wakes on a ledger snapshot publication and on a
+  header tip change (`Chain.HeaderTipChanged`), since queued ingress headers
+  move the header tip without publishing a snapshot. The wait resolves the header's fork anchor once and reuses it until a withdrawal
   from the local chain or a ledger tip at the anchor. A membership read that a
   chain mutation overlapped, or that a cancelled context cut short
   (`Chain.HoldsPointSettled` reports it unsettled), is repeated up to three
@@ -8567,10 +8617,12 @@ change to any tracked peer's frontier re-runs selection while corroboration is
 active, so corroboration granted or revoked takes effect immediately rather than
 on the next periodic tick.
 
-**Deferred / not implemented**: Dingo does not yet implement **ChainSync
-Jumping** or **Devoted BlockFetch**. The corroboration gate stalls a fast source
-until independent witnesses deliver its current point; it does not buffer and
-apply only the confirmed prefix of a source that runs ahead. Wiring
+**Deferred / not implemented**: Dingo does not implement **Devoted
+BlockFetch**, or ChainSync Jumping's objector bisection (see ChainSync Jumping
+driver). The corroboration gate stalls a fast source until independent
+witnesses deliver its current point or the Limit on Eagerness vouches for it;
+it does not buffer and apply only the confirmed prefix of a source that runs
+ahead. Wiring
 peer-governance demotion to the corroboration-failure event is likewise
 deferred. Density-at-intersection can compare an unseen suffix with the local
 candidate, but does not independently corroborate that suffix.
@@ -8869,6 +8921,155 @@ one, the gauges report the last value computed outside a transition. The
 slot gauge reports the point the limit is measured from: the common point, or
 the last one the candidates shared once they stop overlapping, and 0 while the
 limit is measured from the local tip.
+
+#### ChainSync Jumping records
+
+`ChainSelectorConfig.ChainSyncJumping` enables the selector half of ChainSync
+Jumping, the reference node's
+`Ouroboros/Consensus/MiniProtocol/ChainSync/Client/Jumping.hs`: one peer (the
+dynamo) streams headers, and other peers (jumpers) are asked at intervals
+whether they hold a point on the dynamo's fragment with `MsgFindIntersect`
+instead of streaming. `ChainSelector.RecordJumpAgreement` records an
+`IntersectFound` answer: the jumper's candidate fragment becomes the dynamo's
+candidate fragment (`ChainSelector.JumpFragment`) truncated at the agreed
+point, held under the jumper's own connection and therefore its own
+corroboration identity. The server proved that its chain holds the point, and
+header hashes chain, so it holds every point of the fragment below it. The
+dynamo's candidate fragment is its admission frontier with its staged headers,
+extended by its delivery continuity fragment (`eagernessFragmentLocked`), as
+the reference jumps to the dynamo's `csCandidate`, not to a selected chain:
+jump agreements are the dynamo's witnesses, so a fragment of committed headers
+alone would leave a dynamo with no other witness held at corroboration with no
+jump ever sent. Such a record is a Limit on Eagerness candidate and witness and
+nothing else: it enters only the candidate and witness set of the limit
+(`peerTipsIncludingCandidatesLocked`), counts there although the connection is
+not ingress-eligible, and is never selectable, compared by the density
+disconnector, or ranked. A jumper sends no headers by design, so its record is
+exempt from the stale-tip rule (`isPeerTipStale`); the driver's refresh keeps
+the record current while the connection is live. Witnesses are still counted by
+distinct identity with the candidate's own excluded, and the limit is still `k`
+past the common point, so a dynamo is apply-eligible up to `k` past the last
+point `MinCorroboratingPeers` other identities agreed to. A record is refused
+while the selector is outside Genesis mode, for a point the dynamo's candidate
+fragment does not retain, and for a connection that has delivered headers
+itself. `ChainSelector.RecordJumpRejection` records a rejected jump answer,
+`IntersectNotFound` or an intersection below the offered point: the jumper becomes an objector and its record stays at the last point it
+agreed to, so the limit cannot pass `k` beyond that point until the objector's
+own stream supersedes the record; its fork is then bounded like any other
+candidate's. The stream supersedes it only once it delivers a header: the record
+its opening `MsgRollBackward` registers holds no fragment and proves nothing, so
+the frozen record keeps bounding the limit and counting as a witness until then.
+Records are removed with the connection.
+
+While Genesis corroboration is active, a connection without a corroboration
+identity does not bound the Limit on Eagerness (`loeIdentifiedLocked`): it can
+never witness or be selected, so its fragment would only hold back the
+identified candidates.
+
+#### ChainSync Jumping driver
+
+`genesisBootstrap.chainSyncJumping` (`DINGO_GENESIS_CSJ`, `--genesis-csj`, on
+by default) enables the selector records above and the driver in
+`ouroboros/chainsync_jumping.go`, which assigns roles to outbound connections
+as the outbound connection handler starts their ChainSync clients
+(`startOutboundChainsync`, `ouroboros/chainsync_outbound.go`). While Genesis
+selection is active, the first ingress-eligible connection with a corroboration
+identity becomes the dynamo and streams as any client does. It needs an ingress
+slot because jumps name points of its candidate fragment, which only ingress
+deliveries extend, so a dynamo that registers as an observer because every slot
+is taken is replaced. Every later connection becomes a jumper: its client is
+started but never synced, it is tracked as an observer because it needs no
+ingress slot (the ingress reconcile refuses to promote it), and it sends only
+`Client.Jump`, one `MsgFindIntersect` from `StIdle`, never `MsgRequestNext`.
+A connection without a corroboration identity is jumped too, because streaming
+its headers would only download them: its record cannot vouch for the dynamo,
+it is never elected dynamo, and when no identified peer can take that role the
+unidentified jumpers stream again. Each refresh restarts an unidentified
+connection that streams outside the role table as a jumper while a dynamo
+exists (`csjAdoptUnidentified`): its client is drained with
+`Client.StopAfterDrain` and started again under the connection's start/stop
+lock.
+
+A jumper jumps once on admission and then once per jump round. A round starts
+when a header the dynamo delivered is `k/2` blocks past the head of the last
+jump, and jumps to the head of the dynamo's candidate fragment (the fragment
+`RecordJumpAgreement` truncates), offering earlier points at doubling distances
+and the jumper's last agreed point after it. The interval stays below `k`
+because `AwaitEagernessLimit` holds the dynamo's header stream `k` past the
+common point, which the jumpers' last agreements bound. Jumps run in their own
+goroutines under the connection's start/stop lock, never from a ChainSync
+callback, and `Close` cancels and waits for them. Only an answer at the head is
+an agreement. Any other answer is a rejection, as in the reference's
+`processJumpResult`, whether the jumper forks from the dynamo after the point it
+returned or is merely behind the head: an earlier point is still recorded as an
+agreement at that point, and the jumper, like one that answers
+`IntersectNotFound`, becomes an objector. `RecordJumpRejection` freezes its
+record and it streams from its last agreed point, where the Limit on Patience
+and the density disconnector apply to it; left a jumper, it would hold the Limit
+on Eagerness `k` past its last agreement while escaping both.
+
+Rounds also run once per refresh interval (`RefreshInterval`, 30 seconds by
+default: a quarter of the selector's default stale-tip threshold), whether or
+not the dynamo progressed, and then jump every jumper to the dynamo's candidate
+head even when it has not moved. A dynamo that is quiet, or parked by the Limit
+on Eagerness, delivers nothing that could start a round, and a round a delivery
+started does nothing while the candidate fragment still lags the delivered
+header. Without the refresh the jumpers would sit silent in `StIdle` towards
+the server's idle timeout (about an hour). A refresh also elects a dynamo when
+there is none.
+
+The dynamo is the only identified peer streaming, so a header of its that the
+corroboration hold expires on is held again rather than withheld, up to
+`defaultDynamoCorroborationHoldBudget` (60 seconds) in all: withholding it would
+move the dynamo's cursor past a header no other peer streams. When the budget
+runs out the header is not withheld either; the connection is resynced from the
+local chain (`ChainsyncResyncReasonGenesisCorroborationHoldExpired`).
+
+When the dynamo's connection closes, the driver elects, in order, the
+selector's best peer if it is an identified CSJ peer; identified streaming peers
+that are not objectors; jumpers that agreed to a jump, which stream from their
+last agreed point; jumpers that did not; and last the objectors, which refused a
+jump and hold no ingress slot. A jumper holds no ingress slot, and neither does
+an objector until a header of its is admitted, so the elected peer claims a slot
+as it is elected, before anything else can take the one its predecessor freed;
+the closed connection's client is removed first so that its slot is free. A
+promotion of an observer, by such a claim or by a root handed a freed slot,
+wakes a roll-forward callback the connection parked as an observer
+(`chainsync.State.AwaitClientPromotion`), which drops its header and lets the
+observer header gap re-intersect the connection as an ingress header;
+otherwise the callback would wait for a ledger snapshot publication or
+`catchUpBandWaitTimeout`. A dynamo that delivers no header (`DynamoStallTimeout`,
+30 seconds by default) while the local chain makes no progress
+(`LocalProgress`), and that the selector does not hold at the Limit on
+Eagerness (`Held`), is recycled with reason
+`chainsync_jumping_dynamo_stall`: the node's stall recycler skips observers and
+extends its grace during catch-up, so it does not bound a dynamo that stops
+delivering. When no jumper can be
+elected, no dynamo is elected until a refresh or an admission retries. When
+Genesis selection ends, the next delivered header or refresh disengages CSJ and
+every jumper streams from its last agreed point. A peer that streams to its
+tip and receives MsgAwaitReply (`csjOnAwaitReply`) is disengaged: it is no
+longer elected dynamo, is not jumped, and keeps streaming as an ordinary
+client, and if it was the dynamo the next one is elected as above. A jumper
+sends no RequestNext and so never awaits; without this rotation it would never
+be idle and the Genesis exit, which needs every ChainSync connection idle,
+could not happen while one was connected. The disengaged peer's await is its
+idle proof; the driver holds no idle notion of its own. The dynamo watchdog
+does not apply to a disengaged peer, and the refresh does not restart one
+without an identity as a jumper. When no candidate can claim an ingress slot
+because every slot is taken, a disengaged peer yields its slot and stays
+connected as an observer, whose await still counts as idle; otherwise a jumper
+that cannot be elected would never stream and Genesis would never end. The
+reference's objector bisection and its limit of one objector at a time are not
+implemented: every objector streams.
+
+Metrics: `dingo_chainsync_csj_jumps_sent_total` (every jump sent, answered or
+not), `dingo_chainsync_csj_jumps_agreed_total` (answers at the jump point the
+selector recorded), `dingo_chainsync_csj_jumps_rejected_total` (every other
+answer; an answer is counted as agreed or rejected, never both), and
+`dingo_chainsync_csj_peers` by `role` (`dynamo`, `jumper`, `objector`,
+`disengaged`). A jump whose connection stopped being a jumper while it waited
+for the connection's lock is not sent.
 
 #### Anti-flap incumbent pin
 
@@ -11396,7 +11597,15 @@ era, provider identity, and full-distribution commitment.
 The stake distribution is the reference node's active `set`/`nesPd`
 distribution, as of the end of E-2. Dingo captures `mark[K]` at the boundary
 into K, holding stake as of the end of K-1; the electing row is therefore
-Mark E-1 (`praos.StakeSnapshotEpoch(E)`). Header validation uses the same
+Mark E-1 (`praos.StakeSnapshotEpoch(E)`). The reference `nesPd` is rewritten
+only when NEWEPOCH runs for the successor of the ledger epoch label, so once
+an epoch is empty the label stops advancing and every later epoch is elected
+by the distribution frozen at the label, `StakeSnapshotEpoch(label)`
+(`praos.LeaderStakeSnapshotEpoch`, resolved from the epoch cache by
+`LedgerState.LeaderStakeSnapshotEpoch`). Header validation, the forging
+schedule, Tachys, the pool-distribution queries, the retention pins and the
+Leios voting committee (fixed at the epoch boundary from the same
+distribution) all use that resolution. Header validation uses the same
 row except in the imported Mithril epoch, which uses the imported active
 `pool-distr` stake fraction. Boundary snapshots use slot-aware delegation
 and UTxO state. An absent pool is rejected, while an entirely empty Mark
@@ -11763,6 +11972,19 @@ blocks refuses forging even when the slot gap is within
 tolerance for bulk catch-up. Both limits use full tip snapshots, including
 block numbers.
 
+A live upstream whose target is not yet published (the window after an
+active-connection switch, before the new peer's first admitted trusted header)
+is not evidence that the node is behind, so `forgeSyncToleranceSlots` does not
+apply to it. The reference node forges on its selected tip whatever the
+wall-clock lag and refuses only when the ledger view for the slot cannot be
+forecast from that tip, a stability window past it. The forger applies that
+same bound, taking the window from the ledger through the optional
+`ForgeForecastHorizonProvider`. A node whose tip lags the clock by more than
+the tolerance but less than the window therefore still forges, and the header
+it produces ends the window. Without this, every producer restarted at the same
+tip refused to forge, so no header was produced and no target was published.
+Without a provider the bound is not evaluated and the node forges.
+
 The slot prefilter still measures a local delay in slots, so its effective
 headroom depends on block density. The independent two-block limit bounds how
 many unapplied blocks can separate the builder's parent from ledger state; the
@@ -11820,10 +12042,10 @@ policy-approved upstream target:
   There is deliberately no fallback for a live upstream that has not published
   a target -- `(0, true)` from `UpstreamSyncStatus`, the window between an
   active-connection switch and the new peer's first admitted trusted header.
-  That state *does* reach this gate: the sync gate bounds the local tip's lag
-  instead of refusing outright on `upstreamActive && upstreamTip == 0`, so a
-  node at tip passes it and forges, and the header it produces
-  is what ends the window. What keeps this bound quiet there is its own
+  That state *does* reach this gate: the sync gate bounds the local tip's lag by
+  the forecast horizon instead of refusing outright on
+  `upstreamActive && upstreamTip == 0`, so a node at tip passes it and forges,
+  and the header it produces is what ends the window. What keeps this bound quiet there is its own
   `upstreamTarget > newestKnown` term, which a zero target cannot satisfy.
   Filling the zero from another source would turn absent target evidence into
   a synthetic network position and can recreate the all-producer wedge: no
@@ -12296,12 +12518,75 @@ another pool or VRF key, or whose counter is **below** the loaded one, and every
 refusal leaves the loaded credentials untouched: loading into the live set
 instead would fail closed on a bad file and stop a healthy producer. A
 successful reload logs the old and new counter and certificate KES period.
-Credentials sourced from a KES agent are rotated through the agent, and a
-reload against them is refused. A reload is also refused while startup,
+A reload is also refused while startup,
 shutdown, or a live restore or truncate holds the lifecycle gates, since those
 replace the ledger state and the live credentials the reload reads. Unlike
 initial startup, reload refuses a wall-clock slot outside confirmed era history:
 it cannot replace working keys without verifying the replacement's KES window.
+
+**Reload with a KES agent.** In serve-key mode the agent pushes each new key
+and the node installs it as it arrives, so a reload is refused. In sign mode
+(`node_key_reload.go`) a reload re-reads the VRF key and operational
+certificate and moves signing to a new agent client that expects the new
+certificate's KES key. The certificate must differ from the loaded one and
+carry a **higher** counter: an equal counter with different bytes, or a lower
+one, is refused before any client is built. The new credentials pass the same
+signature, KES-window and ledger checks, the ledger check enforcing the
+on-chain counter rule (rejecting a stale counter and, where the era's rule
+applies, one more than one above the last seen), and the agent must
+serve the certificate before the swap: a remote client is admitted, which
+checks the agent reports this certificate and its KES key; a local socket
+client, whose protocol carries neither, is only checked to answer in sign mode,
+and its signatures are still verified against the certificate on every sign.
+That agent check runs before the reload takes the lifecycle gates: it can wait
+on the network for up to the client's hello timeout, and the chainsync and
+chain-switch handlers drop their work while the gates are held. Under the
+gates a file or SIGHUP reload reads the certificate file again and refuses it
+if it no longer matches the one the agent admitted; every reload then runs the counter, signature,
+KES-window and ledger checks and the swap.
+After `ReplaceWith` the replaced client stays open for
+`retiredKESAgentClientGrace` (10s), because a forge attempt that selected its
+snapshot before the swap still signs through it. The VRF key cannot change on
+reload; a new VRF key is a new pool registration and needs a restart. The
+reload compares the VRF key file with the loaded VRF key first and refuses a
+change, even when the certificate is unchanged and the reload would otherwise
+report nothing to do.
+
+A rotation done at the agent reaches a remote-agent node without any file
+change. Admission compares the agent's certificate with the node's byte for
+byte; when the agent's carries the same cold key and a higher counter, the
+client hands it to `RemoteConfig.OnNewerOpCert` and still refuses the session.
+The node runs a reload with that certificate in place of the file
+(`Node.agentOpCertLoop`), keeping only the newest offer and retrying the same
+certificate at most once a minute after a refusal. The reloaded certificate
+lives in memory only; after a restart the node loads its file again and the
+agent's newer certificate is picked up the same way. A rotation that lands
+after admission, between the pre-connect and the sign, is refused by the
+agent as a header for another certificate; that refusal drops the session,
+so the next prepare or sign re-admits and the offer follows.
+
+With several agent replicas sharing one key store, Bursa installs a new key
+on one replica and the others load it within their `key_poll_interval`
+(default 10s); until then a replica keeps serving the previous certificate.
+In that window admission fails wherever the node's certificate and the
+replica's differ: after a reload, at a replica that has not polled yet, and
+before it, at one that has. A leader slot whose sign reaches such a replica
+is missed. The reload's own admission can also reach a replica that has not
+polled; the reload is then refused, and an offered certificate is retried
+only after `agentOpCertRetryInterval` (one minute), so on that path the
+window lasts up to a minute.
+
+`shelleyKeyWatchInterval` (off by default) makes the node poll the credential
+files and reload once a changed content has held for two polls. Polling
+content rather than file events sees the atomic `..data` symlink swap
+Kubernetes uses for a mounted Secret and needs no notification support. The
+two-poll wait reduces reloads during short writes; credential validation still
+rejects an incomplete credential set. In serve-key mode, where a reload is
+always refused, the watch is not started and a warning says so.
+`dingo_forge_credential_reloads_total{trigger,result}` counts reloads by
+trigger (`signal`, `file`, `agent`) and result (`success`, `unchanged`,
+`failure`), and `dingo_forge_opcert_counter_loaded` reports the counter the
+forger is using, so an operator can confirm a rotation took effect.
 
 `ReplaceWith` deliberately does not advance the credential generation. A forge
 attempt that already holds a snapshot owns a private copy of the outgoing
@@ -12465,7 +12750,11 @@ pre-connect is required, not an optimisation: at about 95ms round trip, a
 dial and admission take about 400ms and a redial inside a sign about 520ms,
 beyond the 500ms default `shelleyKesAgentSignTimeout`, while a sign on an
 open session takes about one round trip. A transport or verification failure
-drops the session; an agent refusal (`error` in the response) keeps it. A
+drops the session; an agent refusal (`error` in the response) keeps it,
+except a refusal saying the header's operational certificate is not the one
+the agent has installed (`opCertMismatchRefusals`), which drops it: the
+agent's key was rotated after admission, and the redial lets admission offer
+the newer certificate. A
 sign that gets no signature back sends the identical header body once more
 (`maxSignSends`), on a new session after a lost reply or on the same session
 after an agent error, while its `SignTimeout` lasts. The agent may already
@@ -21300,10 +21589,13 @@ POOLREAP precedes SNAP.
    update derived from the mark snapshot three epochs back — credit spendable
    rewards through `account_reward_delta`, return undistributed rewards to
    reserves, and route unspendable rewards to the treasury before governance
-   reads it. No round runs at epoch 0 or at a boundary whose ended or
-   performance epoch is Byron. Any other boundary whose required inputs are
-   absent (ADA pots, mark snapshot, reward stake inputs, or performance-epoch
-   block counts) fails with `errRequiredStakeRewardBasisUnavailable`, which
+   reads it. RUPD starts only when a block ticks the ledger after the ended
+   epoch's `start + 4k/f` slot. When no block lands after that point, NEWEPOCH
+   sees no reward update and the boundary skips the round. No round runs at
+   epoch 0 or at a boundary whose ended or performance epoch is Byron. Any
+   triggered boundary whose required inputs are absent (ADA pots, mark
+   snapshot, reward stake inputs, or performance-epoch block counts) fails
+   with `errRequiredStakeRewardBasisUnavailable`, which
    names the new epoch and the missing input and points the operator at
    re-running Mithril sync or ledger-state import. `applyStakeRewards` wraps it
    in an `errHaltLedgerPipeline` error and calls `FatalErrorFunc`, so the

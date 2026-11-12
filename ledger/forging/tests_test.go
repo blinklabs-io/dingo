@@ -1535,11 +1535,11 @@ func TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip(
 	}
 }
 
-// TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale verifies that a
-// quiet network is not mistaken for an upstream peer being ahead. The target
-// is unknown, so the forge gate has no peer-relative evidence that this node
-// is behind.
-func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
+// TestForgeRefusesUnknownUpstreamTargetPastForecastHorizon verifies that a
+// live upstream with an unpublished target does not license forging once the
+// slot is past the ledger-view forecast horizon from the applied tip, which is
+// where the reference node stops forging.
+func TestForgeRefusesUnknownUpstreamTargetPastForecastHorizon(
 	t *testing.T,
 ) {
 	leader := &forgerCountingLeader{}
@@ -1560,6 +1560,7 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 			chainTipSlot:      9,
 			upstreamTipSlot:   0,
 			upstreamActive:    true,
+			stabilityWindow:   500,
 			slotsPerKESPeriod: 100000,
 		},
 		ForgeSyncToleranceSlots: 100,
@@ -1569,12 +1570,11 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
-	assert.Equal(t, 1, leader.callCount())
-	assert.Equal(t, 1, builder.calls)
-	assert.Equal(t, 1, broadcaster.calls)
+	assert.Zero(t, builder.calls)
+	assert.Zero(t, broadcaster.calls)
 	assert.Equal(
 		t,
-		float64(0),
+		float64(1),
 		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 	)
 	assert.Equal(
@@ -1604,6 +1604,147 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 		"dingo_forge_tip_gap_slots reports the ledger-apply backlog, "+
 			"not the wall-clock lag",
 	)
+}
+
+// TestForgeUnpublishedUpstreamTargetFollowsForecastHorizon pins the lag bound
+// for a live upstream whose target is not yet published. The reference node
+// forges on its selected tip whatever the wall-clock lag and refuses only when
+// the slot is past the ledger-view forecast horizon, a stability window beyond
+// the tip. A tip lagging by more than forgeSyncToleranceSlots but inside the
+// window must forge: otherwise every producer restarted at the same tip
+// refuses, no header is produced, and no target is ever published. Past the
+// window the node must not forge. A solo producer is covered by
+// TestSoloProducerForgesWithStaleTipAndNoUpstream.
+func TestForgeUnpublishedUpstreamTargetFollowsForecastHorizon(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		clock      forgerTestSlotClock
+		wantForged int
+	}{
+		{
+			name: "lag beyond tolerance but inside the horizon forges",
+			clock: forgerTestSlotClock{
+				currentSlot:       1000,
+				chainTipSlot:      9,
+				upstreamActive:    true,
+				stabilityWindow:   2000,
+				slotsPerKESPeriod: 100000,
+			},
+			wantForged: 1,
+		},
+		{
+			name: "lag exactly one stability window forges",
+			clock: forgerTestSlotClock{
+				currentSlot:       1009,
+				chainTipSlot:      9,
+				upstreamActive:    true,
+				stabilityWindow:   1000,
+				slotsPerKESPeriod: 100000,
+			},
+			wantForged: 1,
+		},
+		{
+			name: "lag past the horizon does not forge",
+			clock: forgerTestSlotClock{
+				currentSlot:       1010,
+				chainTipSlot:      9,
+				upstreamActive:    true,
+				stabilityWindow:   1000,
+				slotsPerKESPeriod: 100000,
+			},
+			wantForged: 0,
+		},
+		{
+			// Control: a known target far ahead is still refused by the
+			// bulk-sync gate.
+			name: "known target far ahead does not forge",
+			clock: forgerTestSlotClock{
+				currentSlot:            1000,
+				chainTipSlot:           9,
+				upstreamActive:         true,
+				upstreamTipSlot:        990,
+				upstreamTipBlockNumber: 50,
+				stabilityWindow:        2000,
+				slotsPerKESPeriod:      100000,
+			},
+			wantForged: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			leader := &forgerCountingLeader{}
+			block := newForgerTestBlock(1000, 9)
+			builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+			broadcaster := &forgerTestBroadcaster{}
+			forger, err := NewBlockForger(ForgerConfig{
+				Mode: ModeProduction,
+				Logger: slog.New(
+					slog.NewJSONHandler(io.Discard, nil),
+				),
+				Credentials:             setupTestCredentials(t),
+				LeaderChecker:           leader,
+				BlockBuilder:            builder,
+				BlockBroadcaster:        broadcaster,
+				SlotClock:               tc.clock,
+				ForgeSyncToleranceSlots: 100,
+				PromRegistry:            prometheus.NewRegistry(),
+			})
+			require.NoError(t, err)
+
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+			)
+
+			assert.Equal(
+				t,
+				tc.wantForged,
+				builder.calls,
+				"parent at slot %d, wall clock at slot %d, window %d",
+				tc.clock.chainTipSlot,
+				tc.clock.currentSlot,
+				tc.clock.stabilityWindow,
+			)
+			assert.Equal(t, tc.wantForged, broadcaster.calls)
+		})
+	}
+}
+
+// TestSoloProducerForgesWithStaleTipAndNoUpstream is the control for the
+// stale-parent fix: with no live upstream there is no peer evidence to wait
+// for, so a solo producer restarting behind the wall clock must still forge.
+func TestSoloProducerForgesWithStaleTipAndNoUpstream(t *testing.T) {
+	t.Parallel()
+
+	leader := &forgerCountingLeader{}
+	block := newForgerTestBlock(1000, 9)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    leader,
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       1000,
+			chainTipSlot:      9,
+			upstreamActive:    false,
+			slotsPerKESPeriod: 100000,
+		},
+		ForgeSyncToleranceSlots: 100,
+		PromRegistry:            prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	assert.Equal(t, 1, builder.calls)
+	assert.Equal(t, 1, broadcaster.calls)
 }
 
 // forgerScheduleAwareLeader reports a fixed set of scheduled leader

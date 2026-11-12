@@ -1660,3 +1660,38 @@ func TestQuery_PinnedPointReachesDRepStateAndProposals(t *testing.T) {
 	require.True(t, ok)
 	require.Empty(t, proposals)
 }
+
+// TestQueryShelleyStakeSnapshots_EmptyEpochKeepsLabelSnapshots pins that the
+// answer after an empty epoch is the snapshots of the ledger state, frozen at
+// the ledger epoch label, not rows of the tip's own epoch, which no boundary
+// ever captured.
+func TestQueryShelleyStakeSnapshots_EmptyEpochKeepsLabelSnapshots(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	pool := repeatedBytes(28, 0x25)
+	ls := newStakeSnapshotsLedger(t, pool, 10, 10)
+	conwayEraId := uint(eras.ConwayEraDesc.Id)
+	// Epoch 6 is empty: the next block is in epoch 7 and rows for 6 stay
+	// absent, so the label stays at 5.
+	ls.epochCache = []models.Epoch{
+		{EpochId: 3, EraId: conwayEraId},
+		{EpochId: 4, EraId: conwayEraId},
+		{EpochId: 5, EraId: conwayEraId},
+		{EpochId: 7, EraId: conwayEraId},
+	}
+	ls.currentEpoch = models.Epoch{EpochId: 7}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.queryShelleyStakeSnapshots(
+		t.Context(), stakeSnapshotsQuery(), QueryPoint{}, nil,
+	)
+	require.NoError(t, err)
+	got := stakeSnapshotsResult(t, result)
+	snapshot := got.PoolSnapshots[lcommon.NewBlake2b224(pool)]
+	require.NotNil(t, snapshot)
+	require.Equal(t, uint64(500), snapshot.StakeMark)
+	require.Equal(t, uint64(400), snapshot.StakeSet)
+	require.Equal(t, uint64(300), snapshot.StakeGo)
+}

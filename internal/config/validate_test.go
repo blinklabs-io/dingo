@@ -898,6 +898,32 @@ func TestValidate(t *testing.T) {
 			wantErr: "shelleyKesAgentSignTimeout",
 		},
 		{
+			name: "key watch disabled at zero",
+			modify: func(c *Config) {
+				c.ShelleyKeyWatchInterval = 0
+			},
+		},
+		{
+			name: "key watch interval of ten seconds",
+			modify: func(c *Config) {
+				c.ShelleyKeyWatchInterval = 10 * time.Second
+			},
+		},
+		{
+			name: "key watch interval below a second",
+			modify: func(c *Config) {
+				c.ShelleyKeyWatchInterval = 500 * time.Millisecond
+			},
+			wantErr: "shelleyKeyWatchInterval",
+		},
+		{
+			name: "negative key watch interval",
+			modify: func(c *Config) {
+				c.ShelleyKeyWatchInterval = -time.Second
+			},
+			wantErr: "shelleyKeyWatchInterval",
+		},
+		{
 			name: "no network and no magic",
 			modify: func(c *Config) {
 				c.Network = ""

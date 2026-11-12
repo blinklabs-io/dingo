@@ -45,8 +45,11 @@ type getEpochsFailingMetadataStore struct {
 }
 
 func (s getEpochsFailingMetadataStore) GetEpochs(
-	_ dbtypes.Txn,
+	txn dbtypes.Txn,
 ) ([]models.Epoch, error) {
+	if txn != nil {
+		return s.MetadataStore.GetEpochs(txn)
+	}
 	return nil, s.err
 }
 
@@ -420,4 +423,40 @@ func TestRollbackWithResyncFailsFastOnEachPostCommitReloadFailure(
 			require.Equal(t, fixture.ancestorTip.Point, ls.currentTip.Point)
 		})
 	}
+}
+
+// A rollback that deletes an epoch row must also rewind the ledger epoch
+// label. Otherwise the first block re-applied in the deleted epoch is seen as
+// a non-successor signal, and the epoch's boundary effects never run.
+func TestRollbackRewindsLedgerEpochLabel(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	for _, epochID := range []uint64{0, 1} {
+		require.NoError(t, ls.db.SetEpoch(
+			epochID*15, epochID, nil, nil, nil, nil,
+			eras.ShelleyEraDesc.Id, 1000, 15, nil,
+		))
+	}
+	epochs, err := ls.db.GetEpochs(nil)
+	require.NoError(t, err)
+	require.Len(t, epochs, 2)
+	ls.epochCache = epochs
+	ls.currentEpoch = epochs[1]
+	ls.currentEra = eras.ShelleyEraDesc
+	ls.ledgerEpoch = 1
+
+	require.NoError(t, ls.rollbackWithBlocksAndIntent(
+		context.Background(),
+		fixture.ancestorTip.Point,
+		nil,
+		false,
+		false,
+		false,
+	))
+
+	require.Equal(t, uint64(0), ls.currentEpoch.EpochId)
+	require.Equal(t, uint64(0), ls.ledgerEpoch,
+		"the label must follow the epoch cache so epoch 1 re-runs its boundary effects")
 }
