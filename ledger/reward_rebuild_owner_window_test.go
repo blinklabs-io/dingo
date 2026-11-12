@@ -180,3 +180,121 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersAtSnapshotWindow(
 		"the rebuild must resolve owners exactly as the live capture did",
 	)
 }
+
+// Epoch 0 has no ended epoch before it, so the rebuild must still resolve its
+// owners from epoch 0's own registrations rather than leave every row
+// non-owner, which would fail reconciliation against a nonzero OwnerStake.
+func TestRebuildPrunedRewardStakeInputsResolvesOwnersForEpochZero(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		snapshotEpoch = uint64(0)
+		epochLength   = uint64(100)
+	)
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+	poolHash := bytes.Repeat([]byte{0xd3}, 28)
+	ownerKey := bytes.Repeat([]byte{0x91}, 28)
+	delegatorKey := bytes.Repeat([]byte{0x92}, 28)
+
+	require.NoError(t, db.ImportPool(
+		context.Background(), nil,
+		&models.Pool{
+			PoolKeyHash:   poolHash,
+			VrfKeyHash:    make([]byte, 32),
+			Pledge:        5_000_000,
+			Cost:          340_000_000,
+			Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+			RewardAccount: ownerKey,
+		},
+		&models.PoolRegistration{
+			PoolKeyHash:   poolHash,
+			AddedSlot:     0,
+			Pledge:        5_000_000,
+			Cost:          340_000_000,
+			Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+			VrfKeyHash:    make([]byte, 32),
+			RewardAccount: ownerKey,
+			Owners: []models.PoolRegistrationOwner{
+				{KeyHash: append([]byte(nil), ownerKey...)},
+			},
+		},
+	))
+	for i, key := range [][]byte{ownerKey, delegatorKey} {
+		require.NoError(t, db.CreateAccount(
+			context.Background(), nil, &models.Account{
+				StakingKey: key,
+				Pool:       poolHash,
+				AddedSlot:  0,
+				Active:     true,
+			},
+		))
+		require.NoError(t, db.CreateUtxo(
+			context.Background(), nil, &models.Utxo{
+				TxId:       bytes.Repeat([]byte{byte(0x40 + i)}, 32),
+				OutputIdx:  0,
+				StakingKey: key,
+				Amount:     types.Uint64(50_000_000),
+				AddedSlot:  0,
+			},
+		))
+	}
+	require.NoError(t, meta.SetEpoch(
+		0, snapshotEpoch, nil, nil, nil, nil,
+		eras.ShelleyEraDesc.Id, 1, uint(epochLength), nil,
+	))
+
+	mgr := snapshot.NewManager(db, newTestEventBus(t, nil), nil)
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch:   snapshotEpoch,
+		NewEpoch:        snapshotEpoch,
+		BoundarySlot:    0,
+		EpochNonce:      []byte{0x0a, 0x0b},
+		ProtocolVersion: 7,
+		SnapshotSlot:    0,
+	}
+	captureTxn := db.Transaction(context.Background(), true)
+	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
+		context.Background(), captureTxn, evt,
+	))
+	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
+		context.Background(), captureTxn, evt,
+	))
+	require.NoError(t, captureTxn.Commit())
+
+	captured, err := meta.GetRewardStakeInputs(snapshotEpoch, nil)
+	require.NoError(t, err)
+	capturedOwner := make(map[string]bool, len(captured))
+	for _, input := range captured {
+		capturedOwner[string(input.StakingKey)] = input.Owner
+	}
+	require.Equal(t, map[string]bool{
+		string(ownerKey):     true,
+		string(delegatorKey): false,
+	}, capturedOwner)
+
+	rewardSnapshot, err := meta.GetRewardSnapshot(snapshotEpoch, "mark", nil)
+	require.NoError(t, err)
+	require.NotNil(t, rewardSnapshot)
+	poolInputs, err := meta.GetRewardPoolInputs(snapshotEpoch, nil)
+	require.NoError(t, err)
+	require.Len(t, poolInputs, 1)
+	require.NoError(t, meta.DeleteRewardStakeInputBeforeEpoch(
+		context.Background(), snapshotEpoch+1, nil,
+	))
+
+	rebuilt, err := ls.rebuildPrunedRewardStakeInputs(
+		meta, nil, snapshotEpoch, rewardSnapshot, poolInputs,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, rebuilt,
+		"the epoch 0 rebuild must reconcile with the retained owner stake",
+	)
+	rebuiltOwner := make(map[string]bool, len(rebuilt))
+	for _, input := range rebuilt {
+		rebuiltOwner[string(input.StakingKey)] = input.Owner
+	}
+	require.Equal(t, capturedOwner, rebuiltOwner)
+}

@@ -3566,21 +3566,24 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputsDetailed(
 	// re-registration submitted during the ended epoch, which only takes
 	// effect after this snapshot, and its new owners' stake then fails the
 	// owner-stake reconciliation against the retained OwnerStake.
-	var endedEpoch *models.Epoch
-	if rewardSnapshotEpoch > 0 {
-		endedEpoch, err = meta.GetEpoch(rewardSnapshotEpoch-1, metaTxn)
-		if err != nil {
-			return nil, false, fmt.Errorf(
-				"get ended epoch %d for owner resolution: %w",
-				rewardSnapshotEpoch-1, err,
-			)
-		}
+	// Epoch 0 has no ended epoch before it, so its owners resolve from its
+	// own start, as they did before the window was introduced.
+	previousEpoch := rewardSnapshotEpoch
+	if previousEpoch > 0 {
+		previousEpoch--
+	}
+	endedEpoch, err := meta.GetEpoch(previousEpoch, metaTxn)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"get ended epoch %d for owner resolution: %w",
+			previousEpoch, err,
+		)
 	}
 	if endedEpoch != nil {
 		registrationStartSlot, registrationEpoch := snapshot.PoolRegistrationSnapshotWindow(
 			event.EpochTransitionEvent{
 				NewEpoch:        rewardSnapshotEpoch,
-				PreviousEpoch:   rewardSnapshotEpoch - 1,
+				PreviousEpoch:   previousEpoch,
 				BoundarySlot:    rewardSnapshot.BoundarySlot,
 				ProtocolVersion: rewardSnapshot.ProtocolVersion,
 			},
