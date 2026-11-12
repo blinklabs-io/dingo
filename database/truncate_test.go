@@ -781,3 +781,70 @@ func TestTruncateAfterSlotOriginClearsNonce(t *testing.T) {
 	require.Zero(t, tip.BlockNumber)
 	require.Empty(t, tip.Point.Hash)
 }
+
+// TestRolledBackUtxoIsNotLiveThroughHotCborCache pins that liveness comes from
+// the metadata row, not from a hot UTxO CBOR cache hit. The hot tier is keyed
+// by txid+index and is never invalidated, so after a rollback the rolled-back
+// output's CBOR can still be resident; no lookup may treat that as proof the
+// output exists.
+func TestRolledBackUtxoIsNotLiveThroughHotCborCache(t *testing.T) {
+	t.Parallel()
+
+	db := newOnDiskTestDB(t)
+
+	const rollbackSlot = uint64(1_500)
+	targetBlock := testIndexedBlock(rollbackSlot, 1, 0x15)
+	require.NoError(t, db.BlockCreate(targetBlock, nil))
+
+	// The output is created by a block above the rollback point.
+	utxos := seedRollbackUtxos(t, db, rollbackSlot)
+	utxo := utxos[0]
+	ref := []models.UtxoId{{Hash: utxo.TxId, Idx: utxo.OutputIdx}}
+
+	// Warm the hot cache through the production lookup while the output is
+	// still live.
+	live, err := db.UtxoByRef(
+		context.Background(),
+		utxo.TxId,
+		utxo.OutputIdx,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte("utxo-cbor"), live.Cbor)
+	_, hot := db.CborCache().hotUtxo.Get(makeUtxoKey(utxo.TxId, utxo.OutputIdx))
+	require.True(t, hot, "fixture must have the output resident in the hot cache")
+
+	point := ocommon.Point{Slot: rollbackSlot, Hash: targetBlock.Hash}
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		_, _, err := db.TruncateAfterSlot(context.Background(), point, 0, txn)
+		return err
+	}))
+
+	// Every consumer must now report the output as absent, whatever the
+	// cache still holds.
+	_, err = db.UtxoByRef(context.Background(), utxo.TxId, utxo.OutputIdx, nil)
+	require.ErrorIs(t, err, ErrUtxoNotFound)
+
+	exists, err := db.UtxoExists(
+		context.Background(),
+		utxo.TxId,
+		utxo.OutputIdx,
+		nil,
+	)
+	require.NoError(t, err)
+	require.False(t, exists)
+
+	byRefs, err := db.UtxosByRefs(context.Background(), ref, nil)
+	require.NoError(t, err)
+	require.Empty(t, byRefs)
+
+	spentOrLive, err := db.UtxoByRefIncludingSpent(
+		context.Background(),
+		utxo.TxId,
+		utxo.OutputIdx,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, spentOrLive)
+}

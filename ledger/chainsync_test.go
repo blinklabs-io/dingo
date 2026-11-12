@@ -11724,16 +11724,13 @@ func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
 	))
 }
 
-func TestHeaderAlreadyOnPrimaryChainUsesHashIndexPrefilter(t *testing.T) {
+func TestHeaderAlreadyOnPrimaryChainProbesUnknownForkLocally(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
 	localTip := fixture.ls.chain.Tip()
-	lookupCalls := 0
-	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
-		lookupCalls++
-		return models.Block{}, models.ErrBlockNotFound
-	}
+	store := &remoteCountingBlobStore{BlobStore: fixture.ls.db.Blob()}
+	fixture.ls.db.SetBlobStore(store)
 
 	assert.False(t, fixture.ls.headerAlreadyOnPrimaryChain(
 		ChainsyncEvent{
@@ -11744,7 +11741,8 @@ func TestHeaderAlreadyOnPrimaryChainUsesHashIndexPrefilter(t *testing.T) {
 		},
 		localTip,
 	))
-	assert.Equal(t, 1, lookupCalls)
+	assert.Equal(t, int64(1), store.getBlockLocalCalls.Load())
+	assert.Zero(t, store.getBlockCalls.Load())
 }
 
 func TestHeaderAlreadyOnPrimaryChainSupportsLegacyHashIndexMiss(t *testing.T) {
@@ -11772,11 +11770,8 @@ func TestHeaderAlreadyOnPrimaryChainSkipsLookupBeyondLocalTip(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	localTip := fixture.ls.chain.Tip()
-	lookupCalled := false
-	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
-		lookupCalled = true
-		return models.Block{}, errors.New("unexpected lookup")
-	}
+	store := &remoteCountingBlobStore{BlobStore: fixture.ls.db.Blob()}
+	fixture.ls.db.SetBlobStore(store)
 
 	assert.False(t, fixture.ls.headerAlreadyOnPrimaryChain(
 		ChainsyncEvent{
@@ -11787,13 +11782,20 @@ func TestHeaderAlreadyOnPrimaryChainSkipsLookupBeyondLocalTip(t *testing.T) {
 		},
 		localTip,
 	))
-	assert.False(t, lookupCalled)
+	assert.Zero(t, store.getBlockLocalCalls.Load())
+	assert.Zero(t, store.getBlockCalls.Load())
 }
 
 func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 	t.Helper()
+	return newChainsyncRollbackFixtureWithDB(t, newTestDB(t))
+}
 
-	db := newTestDB(t)
+func newChainsyncRollbackFixtureWithDB(
+	t *testing.T,
+	db *database.Database,
+) *chainsyncRollbackFixture {
+	t.Helper()
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
@@ -20352,7 +20354,7 @@ func TestEpochDonationWithdrawalRollback(t *testing.T) {
 func TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor(t *testing.T) {
 	t.Parallel()
 
-	f := newPrunedUtxoFixture(t, 0)
+	f := newDeepPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos(context.Background())
 
 	require.True(

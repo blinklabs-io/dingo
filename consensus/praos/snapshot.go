@@ -34,3 +34,19 @@ func StakeSnapshotEpoch(epoch uint64) uint64 {
 	}
 	return 0
 }
+
+// LeaderStakeSnapshotEpoch returns the epoch whose mark stake snapshot elects
+// leaders for a block in the given epoch when the ledger state's epoch label
+// (cardano-ledger's nesEL) is ledgerEpoch.
+//
+// nesPd is rewritten only when NEWEPOCH runs for the successor of the label.
+// A block more than one epoch past the label therefore sees the distribution
+// that was in force at the label, StakeSnapshotEpoch(ledgerEpoch), however far
+// the block's own epoch has advanced past an empty gap. A block in the label's
+// own epoch or its successor behaves as StakeSnapshotEpoch(epoch).
+func LeaderStakeSnapshotEpoch(epoch, ledgerEpoch uint64) uint64 {
+	if epoch > ledgerEpoch && epoch-ledgerEpoch > 1 {
+		return StakeSnapshotEpoch(ledgerEpoch)
+	}
+	return StakeSnapshotEpoch(epoch)
+}

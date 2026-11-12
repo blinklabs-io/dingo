@@ -1599,6 +1599,16 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 	return result.entry, result.err
 }
 
+// committeeSnapshotEpoch returns the snapshot epoch seating the committee of
+// epoch, following the epoch provider's election distribution when it names
+// one.
+func (m *VoteManager) committeeSnapshotEpoch(epoch uint64) uint64 {
+	if p, ok := m.epochProvider.(CommitteeSnapshotProvider); ok {
+		return p.LeaderStakeSnapshotEpoch(epoch)
+	}
+	return CommitteeSnapshotEpoch(epoch)
+}
+
 // computeCommitteeEntry builds an epoch's entry from the stake snapshot. It
 // touches no VoteManager state and holds no lock: the parameter lookup, the
 // stake-distribution read, and the proof-of-possession verifications all
@@ -1607,7 +1617,7 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 func (m *VoteManager) computeCommitteeEntry(
 	epoch uint64,
 ) (*epochEntry, uint64, error) {
-	snapshotEpoch := CommitteeSnapshotEpoch(epoch)
+	snapshotEpoch := m.committeeSnapshotEpoch(epoch)
 	committeeSize, tau, err := m.paramsProvider.LeiosCommitteeParameters(
 		snapshotEpoch,
 	)
@@ -1803,7 +1813,7 @@ func (m *VoteManager) resolveOnChainKeyForPoolAtEpoch(
 	currentEpoch uint64,
 ) (*bls12381.G2Affine, bool, error) {
 	poolHashHex := hex.EncodeToString(poolKeyHash)
-	snapshotEpoch := CommitteeSnapshotEpoch(currentEpoch)
+	snapshotEpoch := m.committeeSnapshotEpoch(currentEpoch)
 	keys, err := m.resolveOnChainKeys(snapshotEpoch, []string{poolHashHex})
 	if err != nil {
 		return nil, false, err

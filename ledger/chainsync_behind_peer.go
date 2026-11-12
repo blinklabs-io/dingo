@@ -72,7 +72,7 @@ func (ls *LedgerState) chainsyncPeerBehindOnOurChain(
 	if e.Point.Slot > peerTip.Slot {
 		return 0, false
 	}
-	peerBlock, onChain, err := ls.primaryChainBlockAtPoint(peerTip)
+	peerBlockNumber, onChain, err := ls.primaryChainBlockNumberAtPoint(peerTip)
 	if err != nil {
 		ls.logChainsyncBehindLookupError(e, "peer tip", err)
 		return 0, false
@@ -80,7 +80,7 @@ func (ls *LedgerState) chainsyncPeerBehindOnOurChain(
 	if !onChain {
 		return 0, false
 	}
-	onChain, err = ls.primaryChainContainsPoint(ls.lifecycleContext(), e.Point)
+	onChain, err = ls.historicalPointOnPrimaryChain(e.Point, localTip)
 	if err != nil {
 		ls.logChainsyncBehindLookupError(e, "rollback point", err)
 		return 0, false
@@ -93,34 +93,37 @@ func (ls *LedgerState) chainsyncPeerBehindOnOurChain(
 	// on our chain, but the block number riding along with it is not, and this
 	// value is what the operator reads.
 	var depth uint64
-	if localTip.BlockNumber > peerBlock.Number {
-		depth = localTip.BlockNumber - peerBlock.Number
+	if localTip.BlockNumber > peerBlockNumber {
+		depth = localTip.BlockNumber - peerBlockNumber
 	}
 	return depth, true
 }
 
-// primaryChainBlockAtPoint returns the block our primary chain currently holds
-// at point. Blob presence alone is not authoritative — abandoned-fork blocks
-// stay in the append-only store — so membership is confirmed the same way
-// primaryChainContainsPoint confirms it.
-func (ls *LedgerState) primaryChainBlockAtPoint(
+// primaryChainBlockNumberAtPoint returns the block number our primary chain
+// records at point. Blob presence alone is not authoritative — abandoned-fork
+// blocks stay in the append-only store — so membership is confirmed against
+// the block index. It reads only the retained local metadata, which survives
+// history expiry of the block's CBOR and never falls through to an archive.
+func (ls *LedgerState) primaryChainBlockNumberAtPoint(
 	point ocommon.Point,
-) (models.Block, bool, error) {
+) (uint64, bool, error) {
 	if ls.db == nil {
-		return models.Block{}, false, nil
+		return 0, false, nil
 	}
-	block, err := database.BlockByPoint(ls.lifecycleContext(), ls.db, point)
+	txn := ls.db.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	metadata, err := database.BlockMetadataByPointLocalTxn(txn, point)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
-			return models.Block{}, false, nil
+			return 0, false, nil
 		}
-		return models.Block{}, false, err
+		return 0, false, err
 	}
-	onChain, err := ls.primaryChainContainsBlock(block, point)
+	onChain, err := ls.primaryChainContainsBlockID(metadata.ID, point)
 	if err != nil {
-		return models.Block{}, false, err
+		return 0, false, err
 	}
-	return block, onChain, nil
+	return metadata.Height, onChain, nil
 }
 
 // logChainsyncBehindLookupError records a failed primary-chain membership

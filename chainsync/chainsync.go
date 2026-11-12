@@ -298,6 +298,7 @@ type State struct {
 	trackedClients     map[ouroboros.ConnectionId]*TrackedClient
 	activeClientConnId *ouroboros.ConnectionId
 	clientConnIdMutex  sync.RWMutex
+	promotionWaits     promotionWaits
 	// roundRobinIndex is the rotation cursor for the round-robin header-sync
 	// strategy. Guarded by clientConnIdMutex.
 	roundRobinIndex uint64
@@ -1168,7 +1169,7 @@ func (s *State) setClientObservabilityOnly(
 	var notifyType event.EventType
 	var notify *event.Event
 	var preempted *ClientRemovedEvent
-	var freedSlot bool
+	var freedSlot, promoted bool
 	ok := func() bool {
 		s.clientConnIdMutex.Lock()
 		defer s.clientConnIdMutex.Unlock()
@@ -1200,6 +1201,7 @@ func (s *State) setClientObservabilityOnly(
 		wasEligible := !tc.ObservabilityOnly
 		tc.ObservabilityOnly = observabilityOnly
 		freedSlot = wasEligible && observabilityOnly
+		promoted = !wasEligible && !observabilityOnly
 		if wasPrimary && observabilityOnly {
 			s.activeClientConnId = nil
 		}
@@ -1226,6 +1228,9 @@ func (s *State) setClientObservabilityOnly(
 	s.publishClientRemoved(preempted)
 	if notify != nil {
 		s.publishAsyncDetached(notifyType, *notify)
+	}
+	if promoted {
+		s.promotionWaits.wake(connId)
 	}
 	if freedSlot {
 		s.promoteObservedRoot(connId)

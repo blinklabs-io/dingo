@@ -82,6 +82,12 @@ const (
 	// wait. The header was withheld, so the fresh intersection delivers it
 	// again. It is not a peer-fault signal.
 	ChainsyncResyncReasonEagernessWaitExpired = "eagerness wait expired"
+	// ChainsyncResyncReasonWithheldCandidateAncestry re-intersects a connection
+	// whose header above the applied tip could not be linked to the peer's
+	// retained history or the local chain. The header was withheld, so the
+	// fresh intersection redelivers the headers that link it. It is not a
+	// peer-fault signal.
+	ChainsyncResyncReasonWithheldCandidateAncestry = "withheld candidate ancestry"
 	// ChainsyncResyncReasonIngressPromotion re-intersects an ingress-eligible
 	// client that skipped headers while observing, so normal admission can
 	// replay its complete chain from a safe local intersection.
@@ -152,6 +158,7 @@ func IsLocalChainsyncResyncReason(reason string) bool {
 		ChainsyncResyncReasonDisconnectedHeaderAdmission,
 		ChainsyncResyncReasonGenesisCorroborationHoldExpired,
 		ChainsyncResyncReasonEagernessWaitExpired,
+		ChainsyncResyncReasonWithheldCandidateAncestry,
 		ChainsyncResyncReasonForecastHorizonNoWork,
 		ChainsyncResyncReasonHeaderPastForecastHorizon,
 		ChainsyncResyncReasonBufferedHeaderLimitExceeded,

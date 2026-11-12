@@ -2383,6 +2383,8 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 	if e.BlockHeader == nil || len(e.Point.Hash) == 0 {
 		return
 	}
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
 	if ls.peerHeaderHistory == nil {
 		ls.peerHeaderHistory = make(map[string]*peerHeaderChain)
 	}
@@ -2506,6 +2508,8 @@ func (ls *LedgerState) peerHeaderHistoryByteBudget(
 	return maxPeerHeaderHistoryBytesPerConn
 }
 
+// evictOldestPeerHeaderRecord drops historyKey's oldest record. The caller
+// holds peerHeaderHistoryMu.
 func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
 	history := ls.peerHeaderHistory[historyKey]
 	if history == nil || len(history.order) == 0 {
@@ -2524,6 +2528,14 @@ func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
 }
 
 func (ls *LedgerState) removePeerHeaderHistory(historyKey string) {
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
+	ls.removePeerHeaderHistoryLocked(historyKey)
+}
+
+// removePeerHeaderHistoryLocked is removePeerHeaderHistory for a caller that
+// holds peerHeaderHistoryMu.
+func (ls *LedgerState) removePeerHeaderHistoryLocked(historyKey string) {
 	ls.removePeerForkNoncePrefix(historyKey)
 	history := ls.peerHeaderHistory[historyKey]
 	if history == nil {
@@ -2537,6 +2549,8 @@ func (ls *LedgerState) removePeerHeaderHistoryFrom(
 	historyKey string,
 	point ocommon.Point,
 ) {
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
 	history := ls.peerHeaderHistory[historyKey]
 	if history == nil {
 		return
@@ -2567,6 +2581,28 @@ func (ls *LedgerState) removePeerHeaderHistoryFrom(
 	}
 }
 
+// peerHeaderHistorySnapshot returns a copy of historyKey's chain, or nil. A
+// reader that walks a chain across storage lookups works on the copy, so it
+// neither holds peerHeaderHistoryMu that long nor sees a concurrent removal
+// half done. Records are shared: they are not modified once stored.
+func (ls *LedgerState) peerHeaderHistorySnapshot(
+	historyKey string,
+) *peerHeaderChain {
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
+	history := ls.peerHeaderHistory[historyKey]
+	if history == nil {
+		return nil
+	}
+	return &peerHeaderChain{
+		order:         slices.Clone(history.order),
+		byHash:        maps.Clone(history.byHash),
+		retainedBytes: history.retainedBytes,
+	}
+}
+
+// makePeerHeaderHistoryRoom evicts until recordBytes fits the total budget.
+// The caller holds peerHeaderHistoryMu.
 func (ls *LedgerState) makePeerHeaderHistoryRoom(
 	recordBytes int,
 	protectedKey string,
@@ -2631,7 +2667,7 @@ func (ls *LedgerState) makePeerHeaderHistoryRoom(
 		}
 		candidate := heap.Pop(&retirable).(*peerHeaderHistoryCandidate) //nolint:forcetypeassert
 		delete(retirableByKey, candidate.historyKey)
-		ls.removePeerHeaderHistory(candidate.historyKey)
+		ls.removePeerHeaderHistoryLocked(candidate.historyKey)
 	}
 	return true
 }
@@ -2711,6 +2747,8 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 		return false
 	}
 	tipHashKey := hex.EncodeToString(headerTip.Point.Hash)
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
 	for _, history := range ls.peerHeaderHistory {
 		tipRecord, ok := history.byHash[tipHashKey]
 		if ok && bytes.Equal(tipRecord.prevHash, e.Point.Hash) {
@@ -2734,12 +2772,10 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 // The caller holds chainsyncMutex, so the guards below keep storage reads off
 // paths that cannot need them. The origin point carries no hash, and a header
 // beyond the localTip snapshot is not observed in the primary-chain index at
-// handler entry. The O(1) local hash index then rejects an unknown fork header
-// before a point lookup could fall through to a configured Bark archive. On a
-// hash-index hit, the returned block ID is checked through the point-only
-// primary-chain index path, avoiding a second block-CBOR read. A hash-index
-// miss also probes the exact local point key for pre-index databases, but that
-// bounded compatibility lookup cannot fall through to Bark's archive.
+// handler entry. The exact local point key then answers the question without
+// falling through to a configured Bark archive, and its block ID is checked
+// through the point-only primary-chain index path, avoiding a second
+// block-CBOR read.
 func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	e ChainsyncEvent,
 	localTip ochainsync.Tip,
@@ -2757,10 +2793,54 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	return contains
 }
 
+// rollbackTargetOnLocalChain reports whether a peer-requested rollback target
+// is origin or a block on the local primary chain. It shares the membership
+// result cached in the point's unrecoverableRollbacks record for the unchanged
+// local tip with reportUnrecoverableRollbackIfStuck, reading it when present
+// and filling it otherwise, so a repeated rejection costs one storage read. A
+// lookup error reports false so the caller keeps the more severe
+// classification.
+//
+// Callers must hold chainsyncMutex.
+func (ls *LedgerState) rollbackTargetOnLocalChain(
+	point ocommon.Point,
+) bool {
+	if len(point.Hash) == 0 {
+		return point.Slot == 0
+	}
+	if ls.chain == nil {
+		return false
+	}
+	localTip := ls.chain.HeaderTip()
+	key := unrecoverableRollbackKey(point)
+	rec, ok := ls.unrecoverableRollbacks[key]
+	cacheable := ok && pointMatches(rec.localTip, localTip.Point)
+	if cacheable && rec.primaryChainChecked {
+		return rec.onPrimaryChain
+	}
+	onPrimary, err := ls.historicalPointOnPrimaryChain(point, localTip)
+	if err != nil {
+		ls.config.Logger.Debug(
+			"could not classify rollback target against primary chain",
+			"component", "ledger",
+			"slot", point.Slot,
+			"hash", hex.EncodeToString(point.Hash),
+			"error", err,
+		)
+		return false
+	}
+	if cacheable {
+		rec.primaryChainChecked = true
+		rec.onPrimaryChain = onPrimary
+		ls.unrecoverableRollbacks[key] = rec
+	}
+	return onPrimary
+}
+
 // historicalPointOnPrimaryChain performs the bounded local membership check
 // shared by historical-header filtering and rollback diagnosis. It never
 // treats append-only blob presence as primary-chain membership and never
-// falls through to a configured archive for a legacy point lookup.
+// falls through to a configured archive.
 func (ls *LedgerState) historicalPointOnPrimaryChain(
 	point ocommon.Point,
 	localTip ochainsync.Tip,
@@ -2769,24 +2849,17 @@ func (ls *LedgerState) historicalPointOnPrimaryChain(
 		point.Slot > localTip.Point.Slot {
 		return false, nil
 	}
-	block, err := ls.blockByHash(ls.lifecycleContext(), point.Hash)
+	// Only the local point key can answer this. A block read through the hash
+	// index lets Bark turn expired CBOR into an archive fetch, while expiry
+	// keeps the metadata and block index that record membership.
+	blockID, err := database.BlockIDByPointLocal(ls.db, point)
 	if errors.Is(err, models.ErrBlockNotFound) {
-		// Blocks written before the hash index was introduced still have an
-		// exact point key and metadata. Probe that local path without allowing
-		// Bark to fall through to its archive on an unknown fork hash.
-		blockID, localErr := database.BlockIDByPointLocal(ls.db, point)
-		if errors.Is(localErr, models.ErrBlockNotFound) {
-			return false, nil
-		}
-		if localErr != nil {
-			return false, localErr
-		}
-		return ls.primaryChainContainsBlockID(blockID, point)
+		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return ls.primaryChainContainsBlock(block, point)
+	return ls.primaryChainContainsBlockID(blockID, point)
 }
 
 var errPeerForkAuthorizationChanged = errors.New(
@@ -2799,7 +2872,7 @@ func (ls *LedgerState) findPeerForkPath(
 	localTipSlot uint64,
 ) (*ocommon.Point, []ChainsyncEvent, error) {
 	prevHash := append([]byte(nil), initialPrevHash...)
-	history := ls.peerHeaderHistory[connIdKey(e.ConnectionId)]
+	history := ls.peerHeaderHistorySnapshot(connIdKey(e.ConnectionId))
 	pathReversed := []ChainsyncEvent{e}
 	visited := map[string]struct{}{
 		hex.EncodeToString(e.Point.Hash): {},
@@ -3583,6 +3656,8 @@ func (ls *LedgerState) recordRollback(
 	point ocommon.Point,
 	now time.Time,
 ) int {
+	ls.rollbackHistoryMu.Lock()
+	defer ls.rollbackHistoryMu.Unlock()
 	if ls.rollbackCounts == nil && len(ls.rollbackHistory) > 0 {
 		ls.rollbackCounts = make(map[rollbackCountKey]rollbackCountRecord)
 		for _, r := range ls.rollbackHistory {
@@ -3662,6 +3737,8 @@ func addRollbackOccurrence(
 }
 
 func (ls *LedgerState) clearRollbackHistory() {
+	ls.rollbackHistoryMu.Lock()
+	defer ls.rollbackHistoryMu.Unlock()
 	ls.rollbackHistory = nil
 	ls.rollbackCounts = nil
 }
@@ -4005,7 +4082,20 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			// boundary does. Returning the error instead would reach
 			// handleEventChainsync's fatal path and terminate the node on a
 			// rollback a peer chose.
-			ls.config.Logger.Error(
+			// The tracker runs first so the log level below reuses its cached
+			// membership result. A target on our own chain (origin included)
+			// means the peer is behind or forked, so it is not a local fault
+			// worth ERROR.
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+				e.ConnectionId,
+			)
+			logRejection := ls.config.Logger.Error
+			if ls.rollbackTargetOnLocalChain(e.Point) {
+				logRejection = ls.config.Logger.Warn
+			}
+			logRejection(
 				"chainsync rollback is below the consumed UTxO prune floor, rejecting peer chain",
 				"component",
 				"ledger",
@@ -4019,11 +4109,6 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				err,
 				"hint",
 				"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
-			)
-			ls.reportUnrecoverableRollbackIfStuck(
-				e.Point,
-				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
-				e.ConnectionId,
 			)
 			ls.resetChainsyncResyncState(pending)
 			ls.setChainsyncState(SyncingChainsyncState)
@@ -4110,6 +4195,8 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 //
 // Callers must hold chainsyncMutex.
 func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
+	ls.rollbackHistoryMu.Lock()
+	defer ls.rollbackHistoryMu.Unlock()
 	filtered := ls.rollbackHistory[:0]
 	for _, r := range ls.rollbackHistory {
 		if pointMatches(r.point, point) {
@@ -4506,7 +4593,7 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 ) (int, error) {
-	history := ls.peerHeaderHistory[connIdKey(connId)]
+	history := ls.peerHeaderHistorySnapshot(connIdKey(connId))
 	if history == nil || len(history.order) == 0 {
 		return 0, nil
 	}
@@ -5623,6 +5710,12 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 	}()
 	for {
 		published := ls.snapshotPublishedChan()
+		// The read-ahead cap is measured from the header tip, which ingress
+		// headers move without publishing a snapshot.
+		var headerTipChanged <-chan struct{}
+		if ls.chain != nil {
+			headerTipChanged = ls.chain.HeaderTipChanged()
+		}
 		// An unsettled walk releases the header, as the wait's bound would:
 		// an observer only streams, and holding it on an unknown anchor
 		// could park it until that bound.
@@ -5630,19 +5723,24 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 		// A header whose ancestry reaches no local block is held as well: its
 		// peer's chain leaves the local chain at an unknown point, so the
 		// ledger tip's horizon does not show it forecastable.
+		ahead := ls.observerAheadOfHeaderTip(e)
 		if beyond, _ := ls.headerBeyondForecastHorizonFrom(
 			ctx, e, &anchor,
-		); !beyond && !anchor.disconnected {
+		); !beyond && !anchor.disconnected && !ahead {
 			return ctx.Err()
 		}
 		if !parked {
 			parked = true
+			if ahead {
+				ls.metrics.incObserverReadAheadPark()
+			}
 			ls.metrics.observerHorizonParkStart(
 				ls.observerHorizonOvershoot(e, &anchor),
 			)
 		}
 		select {
 		case <-published:
+		case <-headerTipChanged:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -5977,6 +6075,27 @@ func (ls *LedgerState) holdsPointSettled(
 		}
 	}
 	return false, false
+}
+
+// observerAheadOfHeaderTip reports whether e's header is more than the
+// security parameter's blocks above the header tip. An observer is read only
+// to corroborate the ingress candidate, which extends the header tip, and a
+// witness within k blocks of it supports its suffix. Reading on to the
+// forecast horizon fetches about 3k headers per observer that the observed
+// header history cannot retain once several observers share its budget, so
+// they are evicted unused, and every re-intersection or promotion from the
+// local tip fetches them again.
+func (ls *LedgerState) observerAheadOfHeaderTip(e ChainsyncEvent) bool {
+	if ls.chain == nil || e.BlockHeader == nil {
+		return false
+	}
+	k := ls.shelleySecurityParam()
+	if k == 0 {
+		return false
+	}
+	blockNumber := e.BlockHeader.BlockNumber()
+	headerTip := ls.chain.HeaderTip().BlockNumber
+	return blockNumber > headerTip && blockNumber-headerTip > k
 }
 
 // observerHorizonOvershoot returns how many slots e's header lies past the
@@ -9633,6 +9752,35 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	)
 }
 
+func (ls *LedgerState) processEpochRolloverForTargetWithClassicPParamsContext(
+	ctx context.Context,
+	txn *database.Txn,
+	currentEpoch models.Epoch,
+	targetEpoch models.Epoch,
+	transitionEpoch models.Epoch,
+	ledgerEpoch uint64,
+	currentEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	classicPParamsApplied bool,
+	plutusV2CostModelWritten bool,
+	transitionHardForkMajors []uint,
+) (*EpochRolloverResult, error) {
+	return ls.processEpochRolloverForTargetWithOptions(
+		ctx,
+		txn,
+		currentEpoch,
+		targetEpoch,
+		transitionEpoch,
+		ledgerEpoch,
+		currentEra,
+		currentPParams,
+		classicPParamsApplied,
+		plutusV2CostModelWritten,
+		transitionHardForkMajors,
+		false,
+	)
+}
+
 // processEpochRolloverWithOptions is the epoch rollover. validationOnly marks
 // a rollover that only derives the next epoch's state inside a transaction the
 // caller rolls back, to validate against it. It must leave no trace outside
@@ -9645,6 +9793,47 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 	ctx context.Context,
 	txn *database.Txn,
 	currentEpoch models.Epoch,
+	currentEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	classicPParamsApplied bool,
+	plutusV2CostModelWritten bool,
+	transitionHardForkMajors []uint,
+	validationOnly bool,
+) (*EpochRolloverResult, error) {
+	targetEpoch, err := epochAtSlot(
+		currentEpoch,
+		currentEpoch.StartSlot+uint64(currentEpoch.LengthInSlots),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return ls.processEpochRolloverForTargetWithOptions(
+		ctx,
+		txn,
+		currentEpoch,
+		targetEpoch,
+		targetEpoch,
+		currentEpoch.EpochId,
+		currentEra,
+		currentPParams,
+		classicPParamsApplied,
+		plutusV2CostModelWritten,
+		transitionHardForkMajors,
+		validationOnly,
+	)
+}
+
+// processEpochRolloverForTargetWithOptions rolls currentEpoch forward to
+// targetEpoch, which may lie beyond the next epoch for a sparse empty-epoch
+// jump. validationOnly has the meaning documented on
+// processEpochRolloverWithOptions.
+func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
+	ctx context.Context,
+	txn *database.Txn,
+	currentEpoch models.Epoch,
+	targetEpoch models.Epoch,
+	transitionEpoch models.Epoch,
+	ledgerEpoch uint64,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
 	classicPParamsApplied bool,
@@ -9677,9 +9866,7 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 			"process epoch rollover: CardanoNodeConfig is nil",
 		)
 	}
-	epochStartSlot := currentEpoch.StartSlot + uint64(
-		currentEpoch.LengthInSlots,
-	)
+	epochStartSlot := targetEpoch.StartSlot
 	// Era update functions mutate their concrete protocol-parameter pointer.
 	// Give the transaction an independently owned value so a failed or
 	// in-flight rollover cannot modify parameters retained by an older snapshot.
@@ -9695,6 +9882,7 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 		NewCurrentEra:             currentEra,
 		NewCurrentPParams:         ownedPParams,
 		RealV2CostModelObserved:   plutusV2CostModelWritten,
+		newLedgerEpoch:            ledgerEpoch,
 	}
 
 	// Create initial epoch
@@ -9739,6 +9927,7 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 		result.NewEpochCache = epochs
 		if len(epochs) > 0 {
 			result.NewCurrentEpoch = epochs[len(epochs)-1]
+			result.newLedgerEpoch = result.NewCurrentEpoch.EpochId
 			eraDesc, ok := ls.eraById(result.NewCurrentEpoch.EraId)
 			if !ok || eraDesc == nil {
 				return nil, fmt.Errorf(
@@ -9754,6 +9943,100 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 			"epoch", fmt.Sprintf("%+v", result.NewCurrentEpoch),
 			"component", "ledger",
 		)
+		return result, nil
+	}
+
+	byronTranslated := currentEpoch.EraId == eras.ByronEraDesc.Id &&
+		currentEra.Id != eras.ByronEraDesc.Id
+	if byronTranslated {
+		if err := timePhase(
+			transitionEpoch.EpochId, "byron_translation", func() error {
+				return ls.applyByronTranslationReserves(
+					txn,
+					transitionEpoch.EpochId,
+					transitionEpoch.StartSlot,
+				)
+			},
+		); err != nil {
+			return nil, fmt.Errorf(
+				"apply Byron-to-Shelley reserves: %w", err,
+			)
+		}
+		result.newLedgerEpoch = transitionEpoch.EpochId
+		if targetEpoch.EpochId > transitionEpoch.EpochId {
+			transitionEpoch.Nonce = cloneNonce(currentEpoch.Nonce)
+			transitionEpoch.EvolvingNonce = cloneNonce(currentEpoch.EvolvingNonce)
+			transitionEpoch.CandidateNonce = cloneNonce(currentEpoch.CandidateNonce)
+			transitionEpoch.LastEpochBlockNonce = cloneNonce(
+				currentEpoch.LastEpochBlockNonce,
+			)
+			currentEpoch = transitionEpoch
+			ledgerEpoch = transitionEpoch.EpochId
+		}
+	}
+
+	// cardano-ledger's NEWEPOCH rule runs its boundary effects only when the
+	// signalled epoch is exactly the successor of the ledger state's epoch
+	// label. A later signal leaves that label and all EPOCH effects unchanged.
+	// Consensus still ticks once to the target epoch, so persist one sparse
+	// target row with nonce state computed from the last applied epoch.
+	if targetEpoch.EpochId != ledgerEpoch+1 {
+		epochSlotLength, epochLength, err := currentEra.EpochLengthFunc(
+			ls.config.CardanoNodeConfig,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("calculate jumped epoch length: %w", err)
+		}
+		nonce, evolvingNonce, candidateNonce, labNonce, err := ls.calculateEpochNonce(
+			ctx,
+			txn,
+			epochStartSlot,
+			currentEra,
+			currentEpoch,
+			ownedPParams,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("calculate jumped epoch nonce: %w", err)
+		}
+		if err := ls.db.SetEpoch(
+			epochStartSlot,
+			targetEpoch.EpochId,
+			nonce,
+			evolvingNonce,
+			candidateNonce,
+			labNonce,
+			currentEra.Id,
+			epochSlotLength,
+			epochLength,
+			txn,
+		); err != nil {
+			return nil, fmt.Errorf("set jumped epoch: %w", err)
+		}
+		if byronTranslated && targetEpoch.EpochId > transitionEpoch.EpochId+1 {
+			if err := ls.db.SetEpoch(
+				transitionEpoch.StartSlot,
+				transitionEpoch.EpochId,
+				nonce,
+				evolvingNonce,
+				candidateNonce,
+				labNonce,
+				currentEra.Id,
+				transitionEpoch.SlotLength,
+				transitionEpoch.LengthInSlots,
+				txn,
+			); err != nil {
+				return nil, fmt.Errorf("set translated epoch: %w", err)
+			}
+		}
+		epochs, err := ls.db.GetEpochs(txn)
+		if err != nil {
+			return nil, fmt.Errorf("load jumped epochs: %w", err)
+		}
+		result.NewEpochCache = epochs
+		result.NewCurrentEpoch = epochs[len(epochs)-1]
+		result.NewCurrentEra = currentEra
+		result.NewEpochNum = float64(targetEpoch.EpochId)
+		result.SchedulerIntervalMs = epochSlotLength
 		return result, nil
 	}
 	// EPOCH→HARDFORK ordering invariant.
@@ -9819,22 +10102,6 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 	// Steps 7 and 8 must observe the post-enactment major version. Step 9 must
 	// observe the persisted pparams (not just the in-memory ones) because its
 	// body issues SQL within `txn` that may join against `pparams` rows.
-	if currentEpoch.EraId == eras.ByronEraDesc.Id &&
-		currentEra.Id != eras.ByronEraDesc.Id {
-		if err := timePhase(
-			currentEpoch.EpochId+1, "byron_translation", func() error {
-				return ls.applyByronTranslationReserves(
-					txn,
-					currentEpoch.EpochId+1,
-					epochStartSlot,
-				)
-			},
-		); err != nil {
-			return nil, fmt.Errorf(
-				"apply Byron-to-Shelley reserves: %w", err,
-			)
-		}
-	}
 	if err := timePhase(
 		currentEpoch.EpochId+1, "ratify_consume", func() error {
 			return ls.consumePendingRatificationWithOptions(
@@ -9847,6 +10114,12 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 
 	if err := timePhase(
 		currentEpoch.EpochId+1, "reward_apply", func() error {
+			applyUpdate, err := ls.shouldApplyStakeRewardUpdate(
+				txn, currentEpoch,
+			)
+			if err != nil || !applyUpdate {
+				return err
+			}
 			return ls.applyStakeRewards(ctx,
 				txn, currentEpoch.EpochId+1, epochStartSlot,
 				validationOnly,
@@ -10353,6 +10626,7 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 	result.NewEpochCache = epochs
 	if len(epochs) > 0 {
 		result.NewCurrentEpoch = epochs[len(epochs)-1]
+		result.newLedgerEpoch = result.NewCurrentEpoch.EpochId
 		eraDesc, ok := ls.eraById(result.NewCurrentEpoch.EraId)
 		if !ok || eraDesc == nil {
 			return nil, fmt.Errorf(

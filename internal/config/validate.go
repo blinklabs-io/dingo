@@ -16,10 +16,12 @@ package config
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -38,6 +40,8 @@ import (
 const (
 	minUnprivilegedPort = 1024
 	maxPort             = 65535
+	// DefaultUnixSocketMode restricts pathname sockets to their owner.
+	DefaultUnixSocketMode = "0600"
 	// maxKESAgentSignTimeout is exclusive. A sign-mode request blocks the
 	// slot-aligned forging loop, so it must finish before the next mainnet
 	// slot.
@@ -56,12 +60,133 @@ func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
 	return nil
 }
 
+// validateHostPort checks that addr is host:port with a non-empty host and a
+// numeric port in 1-65535.
+func validateHostPort(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if host == "" {
+		return errors.New("empty host")
+	}
+	if p, err := strconv.ParseUint(port, 10, 16); err != nil || p == 0 {
+		return fmt.Errorf("port %q is not in 1-65535", port)
+	}
+	return nil
+}
+
+// validateRemoteKESAgent checks a remote KES agent configuration: one KES
+// source only, sign mode, and a transport that can work: the server pin and
+// the client certificate are optional, but need TLS, so plain TCP takes
+// neither, and a client certificate is set as a pair. Without an address,
+// any remote transport option is refused, so a mistyped remote
+// configuration cannot fall back to local or Unix-socket signing.
+func (c *Config) validateRemoteKESAgent() []error {
+	if c.ShelleyKESAgentAddress == "" {
+		var errs []error
+		for _, opt := range []struct {
+			name string
+			set  bool
+		}{
+			{"shelleyKesAgentPlaintext", c.ShelleyKESAgentPlaintext},
+			{
+				"shelleyKesAgentClientCertFile",
+				c.ShelleyKESAgentClientCertFile != "",
+			},
+			{
+				"shelleyKesAgentClientKeyFile",
+				c.ShelleyKESAgentClientKeyFile != "",
+			},
+			{
+				"shelleyKesAgentServerSpkiSha256",
+				strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256) != "",
+			},
+		} {
+			if opt.set {
+				errs = append(errs, fmt.Errorf(
+					"%s requires shelleyKesAgentAddress",
+					opt.name,
+				))
+			}
+		}
+		return errs
+	}
+	var errs []error
+	if c.ShelleyKESKey != "" || c.ShelleyKESAgentSocket != "" {
+		errs = append(errs, errors.New(
+			"blockProducer cannot set shelleyKesAgentAddress together with "+
+				"shelleyKesKey or shelleyKesAgentSocket",
+		))
+	}
+	if err := validateHostPort(c.ShelleyKESAgentAddress); err != nil {
+		errs = append(errs, fmt.Errorf(
+			"shelleyKesAgentAddress %q must be host:port: %w",
+			c.ShelleyKESAgentAddress,
+			err,
+		))
+	}
+	if c.ShelleyKESAgentMode != "" && c.ShelleyKESAgentMode != "sign" {
+		errs = append(errs, fmt.Errorf(
+			"shelleyKesAgentAddress supports only shelleyKesAgentMode \"sign\", got %q",
+			c.ShelleyKESAgentMode,
+		))
+	}
+	clientCert := c.ShelleyKESAgentClientCertFile != "" ||
+		c.ShelleyKESAgentClientKeyFile != ""
+	if clientCert && (c.ShelleyKESAgentClientCertFile == "" ||
+		c.ShelleyKESAgentClientKeyFile == "") {
+		errs = append(errs, errors.New(
+			"shelleyKesAgentClientCertFile and shelleyKesAgentClientKeyFile "+
+				"must be set together",
+		))
+	}
+	pinned := strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256) != ""
+	if c.ShelleyKESAgentPlaintext {
+		if pinned || clientCert {
+			errs = append(errs, errors.New(
+				"shelleyKesAgentServerSpkiSha256 and a client certificate "+
+					"need TLS, so shelleyKesAgentPlaintext takes neither",
+			))
+		}
+		return errs
+	}
+	if pinned {
+		if pin, err := hex.DecodeString(
+			strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256),
+		); err != nil || len(pin) != sha256.Size {
+			errs = append(errs, fmt.Errorf(
+				"shelleyKesAgentServerSpkiSha256 must be %d hex characters",
+				2*sha256.Size,
+			))
+		}
+	}
+	return errs
+}
+
 func ValidateKESAgentSignTimeout(timeout time.Duration) error {
 	if timeout < 0 || timeout >= maxKESAgentSignTimeout {
 		return fmt.Errorf(
 			"shelleyKesAgentSignTimeout (%s) must be zero (use default) or positive and less than %s",
 			timeout,
 			maxKESAgentSignTimeout,
+		)
+	}
+	return nil
+}
+
+// minKeyWatchInterval keeps the credential file watch from reading the key
+// files many times a second.
+const minKeyWatchInterval = time.Second
+
+// ValidateKeyWatchInterval accepts zero (watch disabled) or an interval of at
+// least a second.
+func ValidateKeyWatchInterval(interval time.Duration) error {
+	if interval != 0 && interval < minKeyWatchInterval {
+		return fmt.Errorf(
+			"shelleyKeyWatchInterval (%s) must be zero (disabled) or at least %s",
+			interval,
+			minKeyWatchInterval,
 		)
 	}
 	return nil
@@ -199,6 +324,23 @@ func (c *Config) Validate(effectiveMode RunMode) error {
 	return c.validate(effectiveMode, minBindablePort())
 }
 
+// ParseUnixSocketMode parses an octal pathname-socket mode and rejects modes
+// that allow users outside the owner or group to connect.
+func ParseUnixSocketMode(value string) (os.FileMode, error) {
+	if value == "" {
+		value = DefaultUnixSocketMode
+	}
+	parsed, err := strconv.ParseUint(value, 8, 9)
+	if err != nil {
+		return 0, fmt.Errorf("must be an octal permission mode: %w", err)
+	}
+	mode := os.FileMode(parsed)
+	if runtime.GOOS != "windows" && mode&0o002 != 0 {
+		return 0, errors.New("must not permit writes by other users")
+	}
+	return mode, nil
+}
+
 // minBindablePort returns the lowest TCP port this process may bind;
 // configured ports below it are privileged and rejected. Root (euid 0)
 // may bind any port, and Windows has no privileged-port restriction
@@ -267,6 +409,16 @@ func hasCapNetBindService() bool {
 // depend on the effective UID or kernel settings of the test runner.
 func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	var errs []error
+	if _, err := ParseUnixSocketMode(c.SocketMode); err != nil {
+		errs = append(errs, fmt.Errorf("socketMode %q %w", c.SocketMode, err))
+	}
+	if _, err := ParseUnixSocketMode(c.DMQ.SocketMode); err != nil {
+		errs = append(errs, fmt.Errorf(
+			"dmq.socketMode %q %w",
+			c.DMQ.SocketMode,
+			err,
+		))
+	}
 	if _, err := dingoversion.HeaderProtocolMinor(c.CIP0203Enabled); err != nil {
 		errs = append(errs, err)
 	}
@@ -711,7 +863,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		// agent socket configured, the key lives with the agent instead --
 		// that is the whole point of the flag -- so requiring both made an
 		// agent-only configuration impossible to start.
-		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" {
+		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" &&
+			c.ShelleyKESAgentAddress == "" {
 			missing = append(missing, "shelleyKesKey")
 		}
 		if err := ValidateKESKeySources(
@@ -720,6 +873,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		); err != nil {
 			errs = append(errs, err)
 		}
+		errs = append(errs, c.validateRemoteKESAgent()...)
 		if c.ShelleyOperationalCertificate == "" {
 			missing = append(missing, "shelleyOperationalCertificate")
 		}
@@ -741,6 +895,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	if err := ValidateKESAgentSignTimeout(
 		c.ShelleyKESAgentSignTimeout,
 	); err != nil {
+		errs = append(errs, err)
+	}
+	if err := ValidateKeyWatchInterval(c.ShelleyKeyWatchInterval); err != nil {
 		errs = append(errs, err)
 	}
 

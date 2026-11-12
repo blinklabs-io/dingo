@@ -83,6 +83,11 @@ genesisBootstrap:
   limitOnPatienceEnabled: true
   limitOnPatienceCapacity: 0
   limitOnPatienceRate: 0
+  # ChainSync Jumping: one identified outbound hot peer streams headers; the
+  # other outbound hot peers answer a MsgFindIntersect for its chain every k/2
+  # blocks instead of streaming it, and an identified peer's answer vouches
+  # for it. Inbound peers take no CSJ role. On by default.
+  chainSyncJumping: true
 ```
 
 Equivalent CLI flags / environment variables:
@@ -97,6 +102,7 @@ Equivalent CLI flags / environment variables:
   `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_CAPACITY`
 - `--genesis-bootstrap-limit-on-patience-rate` /
   `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE`
+- `--genesis-csj` / `DINGO_GENESIS_CSJ`
 
 ## Optional topology: fast source + corroborating snapshot
 
@@ -260,14 +266,20 @@ Known differences from the reference's Genesis State Machine:
 - **Rollback historicity is not checked.** The reference also judges the oldest
   rolled-back header on MsgRollBackward; Dingo checks the delivered tip at idle
   only.
-- **ChainSync Jumping's idle disengagement.** With Jumping the reference counts
-  a jumper as idle when disengaged; Dingo has no Jumping, so every connection
-  must itself report idle.
+- **ChainSync Jumping's idle disengagement.** A jumper sends no RequestNext, so
+  it never receives MsgAwaitReply and never reports idle. As in the reference's
+  `onAwaitReply`, a dynamo that receives MsgAwaitReply is disengaged and the
+  next dynamo is elected, so every jumper streams to its tip in turn and
+  reports idle itself; the exit needs the dynamo and every jumper each to have
+  awaited. A disengaged peer yields its ingress slot to the next dynamo when
+  every slot is taken. The reference's earlier trigger, a header equal to the
+  peer's tip (`onTipIsHeader`), is not implemented; the exit is unaffected.
 
 Specifically **not** implemented:
 
-- **ChainSync Jumping** and **Devoted BlockFetch** (a
-  performance/robustness optimization for downloading across many peers).
+- **Devoted BlockFetch** (a performance/robustness optimization for
+  downloading across many peers), and ChainSync Jumping's objector bisection
+  and its limit of one objector at a time: every objector streams.
 - **Independent testimony beyond every witness frontier.** The corroboration
   gate confirms a witness's chain within their overlap, but cannot testify about
   a not-yet-witnessed suffix. A fast source that forks only after every honest
