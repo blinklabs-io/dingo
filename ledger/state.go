@@ -11938,6 +11938,7 @@ func (ls *LedgerState) updateTipMetrics(density float64) {
 		float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot),
 	)
 	ls.metrics.density.Set(density)
+	ls.metrics.registerChainPositionGauges()
 }
 
 // chainFragmentDensity matches cardano-node's ChainDB fragment density:
