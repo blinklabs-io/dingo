@@ -1058,6 +1058,7 @@ func buildDingoConfig(
 		dingo.WithShelleyKESAgentSignTimeout(
 			cfg.ShelleyKESAgentSignTimeout,
 		),
+		dingo.WithShelleyKeyWatchInterval(cfg.ShelleyKeyWatchInterval),
 		dingo.WithShelleyKESAgentRemote(
 			cfg.ShelleyKESAgentAddress,
 			cfg.ShelleyKESAgentClientCertFile,

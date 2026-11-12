@@ -628,6 +628,7 @@ sequenceDiagram
     LS->>LS: validate transactions (Phase 1 + Phase 2)
     LS->>LS: update UTXO set, process certs & governance
     LS->>LS: compute epoch nonce contributions
+    LS->>LS: when a block jumps over empty epochs, tick consensus once at the target; NEWEPOCH effects and the Praos nonce run only for an immediate successor of the ledger epoch label (which a rollback rewinds to the surviving epoch rows), and the block-based epoch-transition event is published only when the target is the immediate successor of the consensus epoch
     LS->>LS: at an era boundary, enact source-era pparams, then translate before successor-era epoch rules and SNAP
     LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block, never ahead of a configured TriggerAtEpoch
     LS->>LS: before translating, decide the era the ledger enters from its own state, and refuse a validated boundary block encoded in any other era, in either direction
@@ -4784,7 +4785,31 @@ ENACT applies at the boundary itself, so the decision forecasts it without
 writing: `governance.ForecastHardForkInitiations` applies the
 `HardForkInitiation` proposals marked ratified and not yet enacted, and those
 the previous boundary's deferred RATIFY has decided but not yet written, in the
-order ENACT would. A refusal releases the rollover's transaction-validation
+order ENACT would. The decision reads the parameters pending for the successor
+of the ledger epoch label, so a block beyond an empty epoch is judged by the same
+forecast as one that opens the successor: NEWEPOCH enacts nothing for it, but the
+transition the pending update names stands, and `ProtocolParamsForSlot` returns
+the parameters in force rather than the pending ones for such a slot. Inside an epoch that follows an empty epoch the label stays behind, so the
+hard-fork combinator also decides the era block by block from the state before
+the block: once k blocks of that epoch lie at or past its voting deadline and the
+pending update names the next era's major, the next block must be in the next era
+and a block in the source era is refused. The block-apply loop stops its batch at
+that block, translates the frozen ledger without enacting the update, keys the
+translation at the block's slot, and records it (`mid_epoch_era_switch`) so a
+rollback restores the source era. Only classic (pre-Conway) eras are covered.
+Everything that decides the era of a block before it is applied follows the same
+decision from the applied tip: `ProtocolParamsForSlot` returns the translated
+parameters for the slot after the tip, so the forger builds the block the ledger
+will accept, and `EraIDForEpoch` (hence the consensus mode of the leader schedule
+and the leader check) names the later era. A tip that does not yet know the
+transition decides nothing for later slots, and a rollback below the block that
+made it known withdraws it. A Conway ledger translated this way keeps the old
+major and ignores the classic proposals left in the database, which Conway's
+translation drops. The epoch record carries the era after the switch for the
+whole epoch, so a competing header from before the switch slot is still judged
+in the later era's consensus mode; the modes differ only for a switch out of
+Alonzo.
+A refusal releases the rollover's transaction-validation
 transition before the block is rewound as a rejected header, and the ledger
 stays in its source era. The block's body era still selects the transition path:
 a header elevation is a header-carried protocol version, which outside mainnet
@@ -6915,6 +6940,9 @@ for each requested pool and the corresponding totals. For protocol version 11
 and later, requested pools whose mark, set, and go stake are all zero are
 omitted; without a pool filter, the result contains the union of pools present
 in those snapshots and the corresponding totals.
+The snapshots are those of the ledger epoch label (`ledgerEpochLabelInCache`), so
+after an empty epoch, which no boundary captured, the reply stays at the label's
+mark/set/go as the reference ledger state does.
 
 **Acquiring a specific historical point.** A real
 NtC client can `Acquire` LocalStateQuery at a specific past point, not just
@@ -11401,7 +11429,15 @@ era, provider identity, and full-distribution commitment.
 The stake distribution is the reference node's active `set`/`nesPd`
 distribution, as of the end of E-2. Dingo captures `mark[K]` at the boundary
 into K, holding stake as of the end of K-1; the electing row is therefore
-Mark E-1 (`praos.StakeSnapshotEpoch(E)`). Header validation uses the same
+Mark E-1 (`praos.StakeSnapshotEpoch(E)`). The reference `nesPd` is rewritten
+only when NEWEPOCH runs for the successor of the ledger epoch label, so once
+an epoch is empty the label stops advancing and every later epoch is elected
+by the distribution frozen at the label, `StakeSnapshotEpoch(label)`
+(`praos.LeaderStakeSnapshotEpoch`, resolved from the epoch cache by
+`LedgerState.LeaderStakeSnapshotEpoch`). Header validation, the forging
+schedule, Tachys, the pool-distribution queries, the retention pins and the
+Leios voting committee (fixed at the epoch boundary from the same
+distribution) all use that resolution. Header validation uses the same
 row except in the imported Mithril epoch, which uses the imported active
 `pool-distr` stake fraction. Boundary snapshots use slot-aware delegation
 and UTxO state. An absent pool is rejected, while an entirely empty Mark
@@ -11768,6 +11804,19 @@ blocks refuses forging even when the slot gap is within
 tolerance for bulk catch-up. Both limits use full tip snapshots, including
 block numbers.
 
+A live upstream whose target is not yet published (the window after an
+active-connection switch, before the new peer's first admitted trusted header)
+is not evidence that the node is behind, so `forgeSyncToleranceSlots` does not
+apply to it. The reference node forges on its selected tip whatever the
+wall-clock lag and refuses only when the ledger view for the slot cannot be
+forecast from that tip, a stability window past it. The forger applies that
+same bound, taking the window from the ledger through the optional
+`ForgeForecastHorizonProvider`. A node whose tip lags the clock by more than
+the tolerance but less than the window therefore still forges, and the header
+it produces ends the window. Without this, every producer restarted at the same
+tip refused to forge, so no header was produced and no target was published.
+Without a provider the bound is not evaluated and the node forges.
+
 The slot prefilter still measures a local delay in slots, so its effective
 headroom depends on block density. The independent two-block limit bounds how
 many unapplied blocks can separate the builder's parent from ledger state; the
@@ -11825,10 +11874,10 @@ policy-approved upstream target:
   There is deliberately no fallback for a live upstream that has not published
   a target -- `(0, true)` from `UpstreamSyncStatus`, the window between an
   active-connection switch and the new peer's first admitted trusted header.
-  That state *does* reach this gate: the sync gate bounds the local tip's lag
-  instead of refusing outright on `upstreamActive && upstreamTip == 0`, so a
-  node at tip passes it and forges, and the header it produces
-  is what ends the window. What keeps this bound quiet there is its own
+  That state *does* reach this gate: the sync gate bounds the local tip's lag by
+  the forecast horizon instead of refusing outright on
+  `upstreamActive && upstreamTip == 0`, so a node at tip passes it and forges,
+  and the header it produces is what ends the window. What keeps this bound quiet there is its own
   `upstreamTarget > newestKnown` term, which a zero target cannot satisfy.
   Filling the zero from another source would turn absent target evidence into
   a synthetic network position and can recreate the all-producer wedge: no
@@ -12301,12 +12350,75 @@ another pool or VRF key, or whose counter is **below** the loaded one, and every
 refusal leaves the loaded credentials untouched: loading into the live set
 instead would fail closed on a bad file and stop a healthy producer. A
 successful reload logs the old and new counter and certificate KES period.
-Credentials sourced from a KES agent are rotated through the agent, and a
-reload against them is refused. A reload is also refused while startup,
+A reload is also refused while startup,
 shutdown, or a live restore or truncate holds the lifecycle gates, since those
 replace the ledger state and the live credentials the reload reads. Unlike
 initial startup, reload refuses a wall-clock slot outside confirmed era history:
 it cannot replace working keys without verifying the replacement's KES window.
+
+**Reload with a KES agent.** In serve-key mode the agent pushes each new key
+and the node installs it as it arrives, so a reload is refused. In sign mode
+(`node_key_reload.go`) a reload re-reads the VRF key and operational
+certificate and moves signing to a new agent client that expects the new
+certificate's KES key. The certificate must differ from the loaded one and
+carry a **higher** counter: an equal counter with different bytes, or a lower
+one, is refused before any client is built. The new credentials pass the same
+signature, KES-window and ledger checks, the ledger check enforcing the
+on-chain counter rule (rejecting a stale counter and, where the era's rule
+applies, one more than one above the last seen), and the agent must
+serve the certificate before the swap: a remote client is admitted, which
+checks the agent reports this certificate and its KES key; a local socket
+client, whose protocol carries neither, is only checked to answer in sign mode,
+and its signatures are still verified against the certificate on every sign.
+That agent check runs before the reload takes the lifecycle gates: it can wait
+on the network for up to the client's hello timeout, and the chainsync and
+chain-switch handlers drop their work while the gates are held. Under the
+gates a file or SIGHUP reload reads the certificate file again and refuses it
+if it no longer matches the one the agent admitted; every reload then runs the counter, signature,
+KES-window and ledger checks and the swap.
+After `ReplaceWith` the replaced client stays open for
+`retiredKESAgentClientGrace` (10s), because a forge attempt that selected its
+snapshot before the swap still signs through it. The VRF key cannot change on
+reload; a new VRF key is a new pool registration and needs a restart. The
+reload compares the VRF key file with the loaded VRF key first and refuses a
+change, even when the certificate is unchanged and the reload would otherwise
+report nothing to do.
+
+A rotation done at the agent reaches a remote-agent node without any file
+change. Admission compares the agent's certificate with the node's byte for
+byte; when the agent's carries the same cold key and a higher counter, the
+client hands it to `RemoteConfig.OnNewerOpCert` and still refuses the session.
+The node runs a reload with that certificate in place of the file
+(`Node.agentOpCertLoop`), keeping only the newest offer and retrying the same
+certificate at most once a minute after a refusal. The reloaded certificate
+lives in memory only; after a restart the node loads its file again and the
+agent's newer certificate is picked up the same way. A rotation that lands
+after admission, between the pre-connect and the sign, is refused by the
+agent as a header for another certificate; that refusal drops the session,
+so the next prepare or sign re-admits and the offer follows.
+
+With several agent replicas sharing one key store, Bursa installs a new key
+on one replica and the others load it within their `key_poll_interval`
+(default 10s); until then a replica keeps serving the previous certificate.
+In that window admission fails wherever the node's certificate and the
+replica's differ: after a reload, at a replica that has not polled yet, and
+before it, at one that has. A leader slot whose sign reaches such a replica
+is missed. The reload's own admission can also reach a replica that has not
+polled; the reload is then refused, and an offered certificate is retried
+only after `agentOpCertRetryInterval` (one minute), so on that path the
+window lasts up to a minute.
+
+`shelleyKeyWatchInterval` (off by default) makes the node poll the credential
+files and reload once a changed content has held for two polls. Polling
+content rather than file events sees the atomic `..data` symlink swap
+Kubernetes uses for a mounted Secret and needs no notification support. The
+two-poll wait reduces reloads during short writes; credential validation still
+rejects an incomplete credential set. In serve-key mode, where a reload is
+always refused, the watch is not started and a warning says so.
+`dingo_forge_credential_reloads_total{trigger,result}` counts reloads by
+trigger (`signal`, `file`, `agent`) and result (`success`, `unchanged`,
+`failure`), and `dingo_forge_opcert_counter_loaded` reports the counter the
+forger is using, so an operator can confirm a rotation took effect.
 
 `ReplaceWith` deliberately does not advance the credential generation. A forge
 attempt that already holds a snapshot owns a private copy of the outgoing
@@ -12470,7 +12582,11 @@ pre-connect is required, not an optimisation: at about 95ms round trip, a
 dial and admission take about 400ms and a redial inside a sign about 520ms,
 beyond the 500ms default `shelleyKesAgentSignTimeout`, while a sign on an
 open session takes about one round trip. A transport or verification failure
-drops the session; an agent refusal (`error` in the response) keeps it. A
+drops the session; an agent refusal (`error` in the response) keeps it,
+except a refusal saying the header's operational certificate is not the one
+the agent has installed (`opCertMismatchRefusals`), which drops it: the
+agent's key was rotated after admission, and the redial lets admission offer
+the newer certificate. A
 sign that gets no signature back sends the identical header body once more
 (`maxSignSends`), on a new session after a lost reply or on the same session
 after an agent error, while its `SignTimeout` lasts. The agent may already
@@ -21285,10 +21401,13 @@ POOLREAP precedes SNAP.
    update derived from the mark snapshot three epochs back — credit spendable
    rewards through `account_reward_delta`, return undistributed rewards to
    reserves, and route unspendable rewards to the treasury before governance
-   reads it. No round runs at epoch 0 or at a boundary whose ended or
-   performance epoch is Byron. Any other boundary whose required inputs are
-   absent (ADA pots, mark snapshot, reward stake inputs, or performance-epoch
-   block counts) fails with `errRequiredStakeRewardBasisUnavailable`, which
+   reads it. RUPD starts only when a block ticks the ledger after the ended
+   epoch's `start + 4k/f` slot. When no block lands after that point, NEWEPOCH
+   sees no reward update and the boundary skips the round. No round runs at
+   epoch 0 or at a boundary whose ended or performance epoch is Byron. Any
+   triggered boundary whose required inputs are absent (ADA pots, mark
+   snapshot, reward stake inputs, or performance-epoch block counts) fails
+   with `errRequiredStakeRewardBasisUnavailable`, which
    names the new epoch and the missing input and points the operator at
    re-running Mithril sync or ledger-state import. `applyStakeRewards` wraps it
    in an `errHaltLedgerPipeline` error and calls `FatalErrorFunc`, so the

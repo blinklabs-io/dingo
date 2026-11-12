@@ -16,8 +16,6 @@ package ledger
 
 import (
 	"sync"
-
-	"github.com/blinklabs-io/dingo/consensus/praos"
 )
 
 // acquiredPointMaxUtxoHoldWindows bounds how far an acquired point may hold
@@ -135,15 +133,17 @@ func (ls *LedgerState) announcedUtxoPruneFloor() uint64 {
 	return p.utxoFloorSlot
 }
 
-// capPoolSnapshotPruneBefore lowers before -- the epoch below which pool-stake
+// capPoolSnapshotPruneBeforeWith lowers before -- the epoch below which pool-stake
 // snapshots are pruned -- so no acquired point loses the mark snapshot its
 // stake distribution is computed from, clamps it back up to minBefore, and
-// announces the result. epochOf maps an acquired slot to its epoch; a slot it
+// announces the result. epochOf maps an acquired slot to its epoch and snapshotOf
+// an epoch to the mark snapshot that elects it; a slot epochOf
 // cannot map retains everything, the same conservative answer the deferred
 // header pin gives an unmappable slot.
-func (ls *LedgerState) capPoolSnapshotPruneBefore(
+func (ls *LedgerState) capPoolSnapshotPruneBeforeWith(
 	before, minBefore uint64,
 	epochOf func(slot uint64) (uint64, bool),
+	snapshotOf func(epoch uint64) uint64,
 ) uint64 {
 	p := &ls.acquiredPins
 	p.mu.Lock()
@@ -154,7 +154,7 @@ func (ls *LedgerState) capPoolSnapshotPruneBefore(
 			before = 0
 			break
 		}
-		if snap := praos.StakeSnapshotEpoch(epoch); snap < before {
+		if snap := snapshotOf(epoch); snap < before {
 			before = snap
 		}
 	}

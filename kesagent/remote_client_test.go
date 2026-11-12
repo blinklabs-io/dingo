@@ -30,6 +30,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/bursa"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -764,4 +767,151 @@ func TestRemoteClientSignDialsThroughTheBackoff(t *testing.T) {
 	_, err = c.Sign(0, []byte("header"))
 	require.NoError(t, err)
 	require.NoError(t, c.CheckReady())
+}
+
+// opCertVariant re-encodes the test certificate with another issue number,
+// KES period or cold key. The cold signature is left as it was: the client
+// only recognises a candidate here, and the node validates it fully.
+func opCertVariant(
+	t *testing.T,
+	opCert []byte,
+	issue, period uint64,
+	coldVKey []byte,
+) []byte {
+	t.Helper()
+	dec, err := bursa.DecodeOpCert(opCert)
+	require.NoError(t, err)
+	if coldVKey == nil {
+		coldVKey = dec.ColdVKey
+	}
+	out, err := cbor.Encode([]any{
+		[]any{dec.KESVKey, issue, period, dec.ColdSig},
+		coldVKey,
+	})
+	require.NoError(t, err)
+	return out
+}
+
+func TestRemoteClientOffersANewerOpCertForTheSamePool(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	local, err := bursa.DecodeOpCert(opCert)
+	require.NoError(t, err)
+	otherCold := make([]byte, 32)
+	otherCold[0] = 1
+	newer := opCertVariant(t, opCert, local.IssueNumber+1, local.KESPeriod, nil)
+	for _, tc := range []struct {
+		name    string
+		agent   []byte
+		offered bool
+	}{
+		{"higher counter, same pool", newer, true},
+		{
+			"same counter, other bytes",
+			opCertVariant(t, opCert, local.IssueNumber, local.KESPeriod+1, nil),
+			false,
+		},
+		{
+			"higher counter, other pool",
+			opCertVariant(
+				t, opCert, local.IssueNumber+1, local.KESPeriod, otherCold,
+			),
+			false,
+		},
+		{"not a certificate", []byte{0x01, 0x02}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client := newTestCert(t, "node")
+			a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+			a.admitFix = func(r *attestationResponse) { r.OpCert = tc.agent }
+			certFile, keyFile := client.writePEM(t)
+			offers := make(chan []byte, 1)
+			c, err := NewRemoteClient(RemoteConfig{
+				Address:          a.addr,
+				ClientCertFile:   certFile,
+				ClientKeyFile:    keyFile,
+				ServerSPKISHA256: a.server.spki,
+				KESVKey:          vkey,
+				OpCert:           opCert,
+				OnNewerOpCert:    func(b []byte) { offers <- b },
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = c.Close() })
+
+			// The session is refused either way: signatures are verified
+			// against the local certificate until the node reloads.
+			require.ErrorIs(t, c.Prepare(), ErrRemoteAdmission)
+			if tc.offered {
+				require.Equal(t, tc.agent, testutil.RequireReceive(
+					t, offers, time.Second, "newer certificate offered",
+				))
+				return
+			}
+			testutil.RequireNoReceive(t, offers, 20*time.Millisecond,
+				"a mismatch that cannot be a rotation is not offered")
+		})
+	}
+}
+
+// A refusal saying the header carries another operational certificate than
+// the agent has installed means the agents key was rotated after admission.
+
+// A refusal saying the header carries another operational certificate than
+// the agent has installed means the agent's key was rotated after admission.
+// The session is dropped, so the next Prepare re-admits and offers the
+// agent's newer certificate instead of reusing a session that can no longer
+// sign.
+func TestRemoteClientDropsSessionOnAnOpCertMismatchRefusal(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	local, err := bursa.DecodeOpCert(opCert)
+	require.NoError(t, err)
+	newer := opCertVariant(t, opCert, local.IssueNumber+1, local.KESPeriod, nil)
+	for _, refusal := range []string{
+		"kesagent: sign request is not a matching Praos header body: operational certificate names a different KES key",
+		"kesagent: sign request is not a matching Praos header body: operational certificate counter/period do not match the installed one",
+		"kesagent: sign request is not a matching Praos header body: operational certificate cold signature is not the installed one",
+	} {
+		t.Run(refusal, func(t *testing.T) {
+			t.Parallel()
+			client := newTestCert(t, "node")
+			a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+			var rotated atomic.Bool
+			a.admitFix = func(r *attestationResponse) {
+				if rotated.Load() {
+					r.OpCert = newer
+				}
+			}
+			certFile, keyFile := client.writePEM(t)
+			offers := make(chan []byte, 1)
+			c, err := NewRemoteClient(RemoteConfig{
+				Address:          a.addr,
+				ClientCertFile:   certFile,
+				ClientKeyFile:    keyFile,
+				ServerSPKISHA256: a.server.spki,
+				KESVKey:          vkey,
+				OpCert:           opCert,
+				SignTimeout:      2 * time.Second,
+				OnNewerOpCert:    func(b []byte) { offers <- b },
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = c.Close() })
+
+			require.NoError(t, c.Prepare())
+			rotated.Store(true)
+			a.refusal = refusal
+			a.refuseRequests.Store(1)
+			_, err = c.Sign(0, []byte("header"))
+			require.ErrorContains(t, err, refusal)
+			require.Len(t, a.received(), 1, "a final refusal must not be resent")
+
+			require.ErrorIs(t, c.Prepare(), ErrRemoteAdmission)
+			require.Equal(t, int32(2), a.accepts.Load(),
+				"an operational certificate mismatch must not keep the session")
+			require.Equal(t, newer, testutil.RequireReceive(
+				t, offers, time.Second, "newer certificate offered",
+			))
+		})
+	}
 }
