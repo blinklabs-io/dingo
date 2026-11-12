@@ -552,5 +552,17 @@ func TestCatchUpBandPauseDoesNotEnterEagernessStandoff(t *testing.T) {
 	assert.Empty(t, f.evaluate(),
 		"a catch-up band pause is not a standoff at the limit")
 	assert.True(t, f.cs.EagernessPaused(parked),
-		"a parked connection is still exempt from staleness and recycling")
+		"a parked connection is still exempt from the stall recycler")
+
+	f.mu.Lock()
+	f.now = f.now.Add(3 * f.cs.config.StaleTipThreshold)
+	f.mu.Unlock()
+	f.cs.mutex.RLock()
+	stale := f.cs.isPeerTipStale(f.cs.peerTips[parked])
+	f.cs.mutex.RUnlock()
+	assert.False(t, stale,
+		"a parked connection sends no tips, so its silence is not staleness")
+	f.cs.cleanupStalePeers()
+	assert.NotNil(t, f.cs.GetPeerTip(parked),
+		"a parked connection is not removed as very stale")
 }
