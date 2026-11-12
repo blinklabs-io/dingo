@@ -16,6 +16,8 @@ package chainselection
 
 import (
 	"bytes"
+	"cmp"
+	"slices"
 	"sort"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -104,6 +106,22 @@ func (f CandidateFragment) Intersect(
 		return ocommon.Point{}, false
 	}
 	return clonePoint(point), true
+}
+
+// pointBlock returns the block number of point when the fragment retains it.
+func (f CandidateFragment) pointBlock(point ocommon.Point) (uint64, bool) {
+	i, found := slices.BinarySearchFunc(
+		f.points,
+		point.Slot,
+		func(entry ocommon.Point, slot uint64) int {
+			return cmp.Compare(entry.Slot, slot)
+		},
+	)
+	if !found || !bytes.Equal(f.points[i].Hash, point.Hash) {
+		return 0, false
+	}
+	// #nosec G115 -- the index is bounded by the retained fragment length.
+	return f.baseBlock + uint64(i), true
 }
 
 // intersectTip is Intersect with the common point's block number. Candidate

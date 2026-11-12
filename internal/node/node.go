@@ -973,6 +973,9 @@ func buildDingoConfig(
 		dingo.WithGenesisCorroborationPeers(
 			cfg.GenesisBootstrap.CorroborationPeers,
 		),
+		dingo.WithGenesisChainSyncJumping(
+			cfg.GenesisBootstrap.ChainSyncJumping,
+		),
 		dingo.WithGenesisLimitOnPatience(
 			cfg.GenesisBootstrap.LimitOnPatienceEnabled,
 			cfg.GenesisBootstrap.LimitOnPatienceCapacity,
