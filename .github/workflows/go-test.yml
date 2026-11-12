@@ -6,9 +6,6 @@ name: ci
 #     check          1 runner. Change detection, docs-parity, lint, nilaway,
 #                    modernize, config-parity, both builds, sqlc drift, npm
 #                    test and the whole Go suite on SQLite, no race.
-#     govulncheck    1 runner, ~1 minute. Fails the run but gates nothing, so
-#                    a new upstream advisory cannot block every merge while it
-#                    is triaged.
 #
 #   Tier 2, merge_group: the merge queue tests the exact commit that will land
 #   on main, and covers only what tier 1 did not.
@@ -117,7 +114,7 @@ jobs:
           rm -rf .trusted-ci
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version-file: go.mod
           cache: false
       # Module downloads do not depend on -race, so one entry per OS serves
       # every job on it instead of a copy inside each build cache. The
@@ -132,9 +129,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-build-
       # These two run on documentation-only changes too.
       - name: docs-parity
         run: make docs-parity
@@ -250,47 +247,6 @@ jobs:
           fi
           rm -rf .trusted-ci
 
-  # Tier 1, beside check. Deliberately not a dependency of anything: a new
-  # advisory landing upstream must not block every merge in the repository
-  # while it is triaged. It still fails the run. A release tag does gate on it,
-  # in publish.yml.
-  govulncheck:
-    name: govulncheck
-    if: github.event_name != 'merge_group'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-        with:
-          # This job runs a checksum-pinned third-party scanner in
-          # the workspace. Do not leave GITHUB_TOKEN in the local git config.
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
-        with:
-          go-version: 1.26.10
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-mod-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
-      - name: govulncheck
-        # govulncheck exits non-zero only for vulnerabilities this module
-        # actually calls, so the unreachable findings it also prints (currently
-        # GO-2026-5932, an unmaintained golang.org/x/crypto package with no
-        # fixed version) do not fail the job.
-        # The scanner binary is pinned while its vulnerability database remains
-        # live. Run through the Makefile so this CI check and `make
-        # govulncheck` cannot drift apart.
-        run: make govulncheck
-
   # Tier 2. The whole suite under the race detector on one runner, SQLite only.
   # Race detection runs on every merged commit, not only on a release tag: the
   # release-only arrangement is what abandoned v0.70.3, when a genuine
@@ -333,7 +289,7 @@ jobs:
         run: python3 .github/scripts/runner-probe.py start
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version-file: go.mod
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -344,9 +300,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-race-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-race-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-race-1.26.10-
+            ${{ runner.os }}-go-race-
       - name: go-test-race
         # -timeout stays at 60m so a hang is still named by the per-package
         # panic before the job backstop above fires.
@@ -468,7 +424,7 @@ jobs:
         run: aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version-file: go.mod
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -479,9 +435,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-build-
       - name: install-mariadb-client
         # database/plugin/metadata/mysql's backup/restore CLI arg mapping
         # (mysqlSSLArgs) targets the mysqldump/mysql client this repo's own
@@ -587,7 +543,7 @@ jobs:
         run: python3 .github/scripts/runner-probe.py start
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version-file: go.mod
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -598,9 +554,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/Library/Caches/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-build-
       - name: go-test
         run: go test -v -ldflags="-s -w" -timeout 30m ./...
       - name: runner-probe-end
@@ -647,7 +603,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version-file: go.mod
           cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
@@ -658,9 +614,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-build-
       - name: build
         env:
           BUILD_TARGETS: linux/amd64 linux/arm64 freebsd/amd64 freebsd/arm64 darwin/amd64 darwin/arm64

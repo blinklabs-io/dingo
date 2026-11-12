@@ -20,6 +20,7 @@ import (
 	"math"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 )
 
@@ -105,10 +106,13 @@ func (c *chunk) Next() (*Block, error) {
 		return nil, err
 	}
 	ret := &Block{
-		Type:  blkType,
-		Slot:  c.currentEntry.BlockOrEbb,
-		Hash:  c.currentEntry.HeaderHash[:],
-		IsEbb: c.currentEntry.IsEbb,
+		Type: blkType,
+		Slot: c.currentEntry.BlockOrEbb,
+		Hash: c.currentEntry.HeaderHash[:],
+		// The era tag identifies an EBB exactly. The index position and
+		// BlockOrEbb cannot: the first entry of every chunk is occupied at
+		// relative slot 0, and an EBB's BlockOrEbb is its epoch number.
+		IsEbb: blkType == byron.BlockTypeByronEbb,
 		Cbor:  blkBytes,
 	}
 	if last {

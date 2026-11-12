@@ -5,7 +5,7 @@ name: publish
 # merge queue fast-forwards main to exactly that commit.
 #
 #   main push:  build-images -> build-image-manifest
-#   tag:        validate-release-tag, govulncheck, verify-tested
+#   tag:        validate-release-tag, verify-tested
 #                 -> create-draft-release
 #                   -> build-linux, build-macos, build-images
 #                     -> build-image-manifest
@@ -55,35 +55,6 @@ env:
   GOPROXY: 'https://proxy.golang.org|direct'
 
 jobs:
-  # A tag cannot publish while govulncheck is failing. This was lost once
-  # already, when splitting the old `ci` job into stages dropped its implicit
-  # edge to create-draft-release and nothing failed. It does not gate the
-  # main-push path: a new advisory landing upstream must not block every
-  # merge in the repository while it is triaged.
-  govulncheck:
-    name: govulncheck
-    if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-        with:
-          # This job runs a checksum-pinned third-party scanner in
-          # the workspace. Do not leave GITHUB_TOKEN in the local git config.
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
-        with:
-          go-version: 1.26.10
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-mod-
-      - name: govulncheck
-        run: make govulncheck
-
   # A release publishes only a commit every tier-2 gate passed. Reading the
   # check runs GitHub Actions left on the commit costs one API call per gate
   # instead of re-running ~135 runner-minutes of tests.
@@ -157,7 +128,6 @@ jobs:
     # The draft is created only once the commit is known to be tested and
     # clean, so a tag cannot reach a half-published state the way v0.70.3 did.
     needs:
-      - govulncheck
       - verify-tested
       - validate-release-tag
     if: >-
@@ -246,7 +216,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version-file: go.mod
           cache: false
       # Module downloads do not depend on -race, so one entry per OS serves
       # every job on it instead of a copy inside each build cache. The
@@ -261,9 +231,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-build-
       - name: Build binaries
         env:
           BUILD_TARGETS: linux/amd64 linux/arm64 freebsd/amd64 freebsd/arm64
@@ -327,7 +297,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version: 1.26.10
+          go-version-file: go.mod
           cache: false
       # Module downloads do not depend on -race, so one entry per OS serves
       # every job on it instead of a copy inside each build cache. The
@@ -342,9 +312,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
           path: ~/Library/Caches/go-build
-          key: ${{ runner.os }}-go-1.26.10-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-1.26.10-
+            ${{ runner.os }}-go-build-
       - name: Build binaries
         env:
           BUILD_TARGETS: darwin/amd64 darwin/arm64

@@ -41,7 +41,6 @@ type secondaryIndexEntryInner struct {
 
 type secondaryIndexEntry struct {
 	secondaryIndexEntryInner
-	IsEbb bool
 }
 
 func newSecondaryIndex() *secondaryIndex {
@@ -105,11 +104,6 @@ func (s *secondaryIndex) Next() (*secondaryIndexEntry, error) {
 	}
 	ret := &secondaryIndexEntry{
 		secondaryIndexEntryInner: tmpEntryInner,
-	}
-	// Check for EBB
-	// A block with its secondary index in the first slot with a small BlockOrEbb value is *probably* an EBB
-	if nextOccupied.RelativeSlot == 0 && ret.BlockOrEbb < 200 {
-		ret.IsEbb = true
 	}
 	return ret, nil
 }
