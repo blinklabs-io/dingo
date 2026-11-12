@@ -1114,3 +1114,54 @@ func TestCIP0203ConfigPrecedence(t *testing.T) {
 	require.NoError(t, ApplyFlags(cmd, cfg))
 	require.True(t, cfg.CIP0203Enabled)
 }
+
+// Not t.Parallel: LoadConfig reads and resets the process-global config and
+// environment.
+func TestDebugProfileRatesPrecedence(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	// envconfig.Process("cardano", ...) reads the CARDANO_-prefixed name
+	// first, so an ambient value under either spelling would leak in.
+	for _, name := range []string{
+		"DINGO_DEBUG_MUTEX_PROFILE_FRACTION",
+		"DINGO_DEBUG_BLOCK_PROFILE_RATE",
+		"CARDANO_DINGO_DEBUG_MUTEX_PROFILE_FRACTION",
+		"CARDANO_DINGO_DEBUG_BLOCK_PROFILE_RATE",
+	} {
+		t.Setenv(name, "")
+		require.NoError(t, os.Unsetenv(name))
+	}
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.Zero(t, cfg.DebugMutexProfileFraction)
+	require.Zero(t, cfg.DebugBlockProfileRate)
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte("debugMutexProfileFraction: 10\ndebugBlockProfileRate: 2000\n"),
+		0o600,
+	))
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, uint(10), cfg.DebugMutexProfileFraction)
+	require.Equal(t, uint(2000), cfg.DebugBlockProfileRate)
+
+	t.Setenv("DINGO_DEBUG_MUTEX_PROFILE_FRACTION", "20")
+	t.Setenv("DINGO_DEBUG_BLOCK_PROFILE_RATE", "3000")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, uint(20), cfg.DebugMutexProfileFraction)
+	require.Equal(t, uint(3000), cfg.DebugBlockProfileRate)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--debug-mutex-profile-fraction=30",
+		"--debug-block-profile-rate=4000",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, uint(30), cfg.DebugMutexProfileFraction)
+	require.Equal(t, uint(4000), cfg.DebugBlockProfileRate)
+}

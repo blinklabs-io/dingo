@@ -23,6 +23,7 @@ import (
 	"maps"
 	"math"
 	"net"
+	rtrace "runtime/trace"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ import (
 
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -1004,6 +1006,9 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		defer rtrace.StartRegion(
+			context.Background(), tracing.RegionChainSelectionAdmission,
+		).End()
 
 		if cs.loneFrontierBrokenLocked(
 			connId, observedTip, link, cs.farTipClaims,
@@ -1814,6 +1819,9 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		defer rtrace.StartRegion(
+			context.Background(), tracing.RegionChainSelectionAdmission,
+		).End()
 		if witness != nil && !cs.admittedPeerTipPointLocked(*witness) {
 			return
 		}
@@ -4735,6 +4743,9 @@ func (cs *ChainSelector) evaluateAndSwitch(generationPinned bool) bool {
 		defer releaseGeneration()
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		defer rtrace.StartRegion(
+			context.Background(), tracing.RegionChainSelectionEvaluate,
+		).End()
 		switchOccurred, switchEvent, selectionEvent, corroborationEvent = cs.evaluateBestPeerLocked()
 		sparse = cs.genesisDensityDisconnectsLocked()
 	}()

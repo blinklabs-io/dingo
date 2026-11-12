@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	rtrace "runtime/trace"
 	"slices"
 	"time"
 
@@ -3212,7 +3213,12 @@ func (o *Ouroboros) verifyHeaderAwaitingLedger(
 					o.chainsyncLedgerIdleAt(*baseline))) {
 			return generation, err
 		}
-		if !wait.await(ctx, o.catchUpBandWaitTimeout, settled) {
+		region := rtrace.StartRegion(
+			context.Background(), tracing.RegionChainsyncHeaderSettleWait,
+		)
+		awaited := wait.await(ctx, o.catchUpBandWaitTimeout, settled)
+		region.End()
+		if !awaited {
 			return generation, err
 		}
 	}

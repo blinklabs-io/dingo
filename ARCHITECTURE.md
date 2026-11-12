@@ -15224,6 +15224,19 @@ image; remote scraping requires setting `metricsBindAddr`; `metricsPort` `0` dis
 and in `dingo mithril sync`), pprof on `debugPort` when enabled, and the health
 listener on `healthPort` (default `12799`, `0` disables).
 
+The pprof mutex and block profiles stay empty unless `debugMutexProfileFraction`
+or `debugBlockProfileRate` is non-zero. Only the commands that start the
+listener, `dingo serve` and `dingo mithril sync`, apply them, before any node
+component starts and only while `debugPort` is non-zero, since the listener is
+the only reader; `load`, `database` and `mithril snapshot` never set them. With
+both at `0` the runtime setters are not called. Rates set with `debugPort` at
+`0` are ignored with a warning on stderr, which no logging level suppresses.
+`internal/tracing/regions.go` names the `runtime/trace` user regions (selector
+evaluation and admission under the selector mutex, the Genesis state machine
+step, the header-verification settle wait, and ledger batch apply/commit on
+the database worker goroutine that runs it) that let an execution trace
+attribute holder time; they record only while a trace is being captured.
+
 The health listener is **not** gated on storage mode. The four API
 listeners start only when `storageMode.IsAPI()`, so a probe wired the same
 way would be inert in the default `core` mode — the mode the shipped

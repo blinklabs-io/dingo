@@ -32,6 +32,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	rtrace "runtime/trace"
 	"slices"
 	"strconv"
 	"strings"
@@ -374,16 +375,25 @@ func (ls *LedgerState) SubmitAsyncDBTxn(
 	opFunc func(txn *database.Txn) error,
 	readWrite bool,
 ) error {
-	err := ls.submitDBTxnOperation(ctx, opFunc, readWrite)
+	err := ls.submitDBTxnOperation(ctx, opFunc, readWrite, "")
 	return ls.handleDBTxnResult(ctx, err)
 }
 
+// submitDBTxnOperation runs opFunc in a transaction on the database worker.
+// A non-empty region names a runtime/trace region around the transaction body
+// and commit; it is started inside the worker closure because a region belongs
+// to the goroutine that starts it, and the pool runs the closure on a worker
+// goroutine rather than the caller's.
 func (ls *LedgerState) submitDBTxnOperation(
 	ctx context.Context,
 	opFunc func(txn *database.Txn) error,
 	readWrite bool,
+	region string,
 ) error {
 	return ls.SubmitAsyncDBOperation(func(db *database.Database) error {
+		if region != "" {
+			defer rtrace.StartRegion(ctx, region).End()
+		}
 		txn := db.Transaction(ctx, readWrite)
 		if err := txn.Do(opFunc); err != nil {
 			return err
@@ -780,6 +790,7 @@ func (ls *LedgerState) submitBlockApplyDBTxn(
 	ctx context.Context,
 	expectedTip ochainsync.Tip,
 	candidateTip ocommon.Point,
+	region string,
 	opFunc func(txn *database.Txn) error,
 ) error {
 	err := func() error {
@@ -809,7 +820,7 @@ func (ls *LedgerState) submitBlockApplyDBTxn(
 				return errStaleChainIterator
 			}
 			return opFunc(txn)
-		}, true)
+		}, true, region)
 	}()
 	// Partial-commit recovery can itself rewind the primary chain, so it must
 	// run after releasing transactionEventMutex rather than recursively trying
@@ -9416,6 +9427,7 @@ func (ls *LedgerState) processBlocksFromSource(
 						ctx,
 						snapshotTip,
 						snapshotTip.Point,
+						"",
 						op,
 					)
 				}
@@ -10226,6 +10238,7 @@ func (ls *LedgerState) processBlocksFromSource(
 				ctx,
 				snapshotTip,
 				candidateTip,
+				tracing.RegionLedgerBatchApplyCommit,
 				func(txn *database.Txn) error { //nolint:contextcheck
 					bodyStart := time.Now()
 					defer func() { bodyElapsed = time.Since(bodyStart) }()
