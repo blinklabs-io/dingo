@@ -164,6 +164,13 @@ type TrackedClient struct {
 	// refers to.
 	protocolPoint    ocommon.Point
 	protocolPointSet bool
+	// protocolHeaderEra and protocolHeaderBoundary describe the header at
+	// protocolPoint when a roll-forward recorded it, which the next header
+	// must follow in slot order. A rollback point carries neither, so
+	// protocolHeaderSet is false after one.
+	protocolHeaderEra      uint8
+	protocolHeaderBoundary bool
+	protocolHeaderSet      bool
 	// advertisedTip is the tip in the client's latest chainsync message,
 	// observers included. Whether it is stale changes as the wall clock
 	// advances, so it is judged each time a decision is made.
@@ -969,6 +976,52 @@ func (s *State) RecordClientProtocolPoint(
 		Hash: cloneBytes(point.Hash),
 	}
 	tc.protocolPointSet = true
+	tc.protocolHeaderSet = false
+}
+
+// RecordClientRollForward records the point of a roll-forward header as the
+// latest protocol point of session, together with the header's era and
+// whether it is a Byron epoch boundary block.
+func (s *State) RecordClientRollForward(
+	connId ouroboros.ConnectionId,
+	session ClientSessionToken,
+	point ocommon.Point,
+	eraId uint8,
+	boundary bool,
+) {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc := s.trackedClients[connId]
+	if tc == nil || tc != session.client {
+		return
+	}
+	tc.protocolPoint = ocommon.Point{
+		Slot: point.Slot,
+		Hash: cloneBytes(point.Hash),
+	}
+	tc.protocolPointSet = true
+	tc.protocolHeaderEra = eraId
+	tc.protocolHeaderBoundary = boundary
+	tc.protocolHeaderSet = true
+}
+
+// ClientRollForwardHeader returns the point, era and Byron boundary flag of
+// session's latest roll-forward header. ok is false before the first
+// roll-forward and after a rollback.
+func (s *State) ClientRollForwardHeader(
+	connId ouroboros.ConnectionId,
+	session ClientSessionToken,
+) (point ocommon.Point, eraId uint8, boundary bool, ok bool) {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	tc := s.trackedClients[connId]
+	if tc == nil || tc != session.client || !tc.protocolHeaderSet {
+		return ocommon.Point{}, 0, false, false
+	}
+	return ocommon.Point{
+		Slot: tc.protocolPoint.Slot,
+		Hash: cloneBytes(tc.protocolPoint.Hash),
+	}, tc.protocolHeaderEra, tc.protocolHeaderBoundary, true
 }
 
 // ClientProtocolPoint returns the latest roll-forward or rollback point of a

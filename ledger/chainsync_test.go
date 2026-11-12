@@ -3617,13 +3617,10 @@ func TestRestartQueuedBlockfetchAfterForkPreservesInFlightBatchFromOtherConnecti
 	ls.chainsyncBlockfetchReadyChan = inFlight
 	ls.activeBlockfetchConnId = otherConn
 	ls.selectedBlockfetchConnId = otherConn
-	// Slot 1 is Mithril-covered so handleEventBlockfetchBlockDeferred skips
-	// header crypto verification below: that machinery is orthogonal to what
-	// this test proves (acceptance is gated on activeBlockfetchConnId, not on
-	// whether a restart was attempted), matching the same setup
-	// TestBlockfetchHeaderVerificationSkippedForMithrilCoveredSlot uses.
-	ls.mithrilLedgerSlot = 1
-	ls.publishSnapshotsLocked()
+	// Header verification is orthogonal to what this test proves (acceptance
+	// is gated on activeBlockfetchConnId, not on whether a restart was
+	// attempted), so the block delivered below has it deferred.
+	cacheEpochWithoutNonce(t, ls, 1)
 
 	requestCount := 0
 	ls.config.BlockfetchRequestRangeFunc = func(
@@ -5623,8 +5620,8 @@ func TestShouldVerifyChainsyncHeaderCryptoKeepsAdmissionGate(
 	ls.validationEnabled = true
 	ls.publishSnapshotsLocked()
 
-	slot := tb.block.SlotNumber()
-	verifyNow, _ := ls.chainsyncHeaderCryptoPolicy(slot)
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	verifyNow, _ := ls.chainsyncHeaderCryptoPolicy(point)
 	require.True(
 		t,
 		verifyNow,
@@ -5633,7 +5630,7 @@ func TestShouldVerifyChainsyncHeaderCryptoKeepsAdmissionGate(
 
 	ls.blockPipeline = pipeline.NewBlockPipeline()
 	ls.config.BlockPipelineValidateEnabled = true
-	verifyNow, _ = ls.chainsyncHeaderCryptoPolicy(slot)
+	verifyNow, _ = ls.chainsyncHeaderCryptoPolicy(point)
 	assert.True(
 		t,
 		verifyNow,
@@ -6338,6 +6335,12 @@ func TestChainsyncHeaderVerificationRejectsStaleIngressVerdict(t *testing.T) {
 	require.Equal(t, 2, ls.chain.HeaderCount())
 }
 
+// TestBufferedHeaderReplayRemovesHistoryWhenAdmissionBecomesStale replays a
+// buffered header whose verification stamp went stale during a transaction
+// validation transition. The header is one the Mithril import certified, so
+// it is trusted without verification and keeps the stale stamp to the pin,
+// which withholds it. Its admission is never resolved, so the replay must
+// remove the peer history it recorded.
 func TestBufferedHeaderReplayRemovesHistoryWhenAdmissionBecomesStale(
 	t *testing.T,
 ) {
@@ -6345,16 +6348,20 @@ func TestBufferedHeaderReplayRemovesHistoryWhenAdmissionBecomesStale(
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	parentHash := lcommon.NewBlake2b256([]byte("detached-replay-parent"))
+	parentHash := lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash)
 	parent := mockHeader{
 		hash:        parentHash,
-		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
-		blockNumber: fixture.currentTip.BlockNumber + 1,
-		slot:        fixture.currentTip.Point.Slot + 10,
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: fixture.ancestorTip.BlockNumber,
+		slot:        fixture.ancestorTip.Point.Slot,
 	}
-	parentPoint := ocommon.NewPoint(parent.slot, parent.hash.Bytes())
-	ls.mithrilLedgerSlot = parent.slot + 10
+	parentPoint := fixture.ancestorTip.Point
+	ls.Lock()
+	ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
+	ls.mithrilLedgerHash = fixture.currentTip.Point.Hash
 	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	require.True(t, ls.pointCoveredByMithril(parentPoint))
 	generation := ls.loadConsensusSnapshot().generation
 	parentEvent := ChainsyncEvent{
 		ConnectionId:                       fixture.connId,
@@ -6386,7 +6393,7 @@ func TestBufferedHeaderReplayRemovesHistoryWhenAdmissionBecomesStale(
 		hash:        childHash,
 		prevHash:    parentHash,
 		blockNumber: parent.blockNumber + 1,
-		slot:        parent.slot + 10,
+		slot:        parent.slot + 5,
 	}
 	childPoint := ocommon.NewPoint(child.slot, child.hash.Bytes())
 	childAdmitted := true
@@ -7199,7 +7206,12 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 	assert.Zero(t, ls.syncUpstreamTipSlot.Load())
 }
 
-func TestChainsyncHeaderVerificationMithrilCoverageAdvancesFrontier(
+// TestChainsyncHeaderAtMithrilSlotOffCertifiedChainDoesNotAdvanceFrontier
+// covers a header whose slot the Mithril trust boundary covers but which is
+// not on the certified chain. A peer chooses that slot, so it earns no Mithril
+// trust: like a header deferred for a missing nonce, it is queued unverified
+// and does not advance the admitted frontier.
+func TestChainsyncHeaderAtMithrilSlotOffCertifiedChainDoesNotAdvanceFrontier(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -7230,7 +7242,7 @@ func TestChainsyncHeaderVerificationMithrilCoverageAdvancesFrontier(
 
 	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
 	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
-	assert.Equal(t, point.Slot, ls.syncUpstreamTipSlot.Load())
+	assert.Zero(t, ls.syncUpstreamTipSlot.Load())
 }
 
 // TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent verifies that
@@ -7326,13 +7338,11 @@ func TestBlockfetchHeaderVerificationRunsRegardlessOfValidationEnabled(
 	assert.Contains(t, err.Error(), "block header crypto verification failed")
 }
 
-// TestBlockfetchHeaderVerificationSkippedForMithrilCoveredSlot is the
-// companion regression test to the one above: verification must still be
-// skipped for a slot an imported Mithril snapshot already covers,
-// regardless of validationEnabled -- that is the one exemption
-// slotCoveredByMithril preserves. A block with unverifiable header crypto
-// at a Mithril-covered slot must be accepted without error.
-func TestBlockfetchHeaderVerificationSkippedForMithrilCoveredSlot(
+// TestBlockfetchHeaderVerificationRunsAtMithrilSlotOffCertifiedChain is the
+// companion to the test above: a fetched block whose slot the Mithril trust
+// boundary covers, but which is not on the certified chain, is verified like
+// any other. Its slot is the peer's choice, so it earns no exemption.
+func TestBlockfetchHeaderVerificationRunsAtMithrilSlotOffCertifiedChain(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -7360,8 +7370,10 @@ func TestBlockfetchHeaderVerificationSkippedForMithrilCoveredSlot(
 		},
 	}, nil)
 
-	require.NoError(t, err)
-	require.Len(t, ls.pendingBlockfetchEvents, 1)
+	require.Error(t, err)
+	assert.False(t, IsHeaderVerificationDeferred(err))
+	assert.Contains(t, err.Error(), "block header crypto verification failed")
+	assert.Empty(t, ls.pendingBlockfetchEvents)
 }
 
 func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
@@ -12504,7 +12516,9 @@ func TestChainsyncValidationStateConcurrentAccess(t *testing.T) {
 	for range 2 {
 		wg.Go(func() {
 			for slot := range iterations {
-				_, _ = ls.chainsyncHeaderCryptoPolicy(uint64(slot))
+				_, _ = ls.chainsyncHeaderCryptoPolicy(
+					ocommon.NewPoint(uint64(slot), nil),
+				)
 				_, _ = ls.validationStateSnapshot()
 				_ = ls.mithrilLedgerSlotSnapshot()
 			}
@@ -14451,18 +14465,18 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 1,
 	}
-	// mockHeader carries no real VRF/KES material to verify. Mark its slot
-	// Mithril-covered so the header crypto gate (: required by
-	// default, exempt only for a Mithril-certified slot) exempts it, letting
-	// this test isolate frontier-tracking from crypto verification.
-	ls.mithrilLedgerSlot = accepted.slot
-	ls.publishSnapshotsLocked()
+	// mockHeader carries no real VRF/KES material to verify. Stamp each
+	// header with the current verification generation, as the ChainSync
+	// handler does for a header it verified, so this test isolates
+	// frontier-tracking from crypto verification.
 	advertisedSlot := ^uint64(0)
 	var acceptedAdmission *bool
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connID,
 		BlockHeader:  accepted,
-		Point:        ocommon.NewPoint(accepted.slot, accepted.hash.Bytes()),
+		HeaderCryptoVerificationGeneration: ls.
+			CurrentHeaderCryptoVerificationGeneration(),
+		Point: ocommon.NewPoint(accepted.slot, accepted.hash.Bytes()),
 		Tip: ochainsync.Tip{
 			Point: ocommon.NewPoint(
 				advertisedSlot,
@@ -14509,7 +14523,9 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connID,
 		BlockHeader:  rejected,
-		Point:        ocommon.NewPoint(rejected.slot, rejected.hash.Bytes()),
+		HeaderCryptoVerificationGeneration: ls.
+			CurrentHeaderCryptoVerificationGeneration(),
+		Point: ocommon.NewPoint(rejected.slot, rejected.hash.Bytes()),
 		Tip: ochainsync.Tip{
 			Point: ocommon.NewPoint(
 				advertisedSlot-1,
@@ -14685,17 +14701,18 @@ func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	// mockHeader carries no real VRF/KES material to verify. Mark its slot
-	// Mithril-covered so the header crypto gate (: required by
-	// default, exempt only for a Mithril-certified slot) exempts it, letting
-	// this test isolate connection-buffering from crypto verification.
-	ls.mithrilLedgerSlot = header1.slot
+	// mockHeader carries no real VRF/KES material to verify. Stamp each
+	// header with the current verification generation, as the ChainSync
+	// handler does for a header it verified, so this test isolates
+	// connection-buffering from crypto verification.
 	ls.publishSnapshotsLocked()
 
 	err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connId1,
 		BlockHeader:  header1,
-		Point:        ocommon.NewPoint(header1.slot, header1.hash.Bytes()),
+		HeaderCryptoVerificationGeneration: ls.
+			CurrentHeaderCryptoVerificationGeneration(),
+		Point: ocommon.NewPoint(header1.slot, header1.hash.Bytes()),
 		Tip: ochainsync.Tip{
 			Point:       ocommon.NewPoint(60001, []byte("tip-1")),
 			BlockNumber: 60001,
@@ -15239,12 +15256,14 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	// mockHeader carries no real VRF/KES material to verify. Mark its slot
-	// Mithril-covered so the header crypto gate (: required by
-	// default, exempt only for a Mithril-certified slot) exempts it, letting
-	// this test isolate buffered-header replay from crypto verification.
-	ls.mithrilLedgerSlot = 1
+	// mockHeader carries no real VRF/KES material to verify. Stamp the
+	// buffered header with the current verification generation, as the
+	// ChainSync handler does for a header it verified, so this test isolates
+	// buffered-header replay from crypto verification.
 	ls.publishSnapshotsLocked()
+	ls.bufferedHeaderEvents[connIdKey(connId2)][0].
+		HeaderCryptoVerificationGeneration = ls.
+		CurrentHeaderCryptoVerificationGeneration()
 
 	err := handleEventBlockfetchBatchDoneForTest(ls, BlockfetchEvent{
 		ConnectionId: connId1,
@@ -19768,7 +19787,7 @@ func announcingHeader(
 // half of the crypto gate on the header stream.
 //
 // chainsyncHeaderCryptoPolicy admits a roll-forward header without verifying
-// its VRF/KES on two paths: a slot covered by an imported Mithril snapshot and
+// its VRF/KES on two paths: a block an imported Mithril snapshot certified and
 // no cached epoch nonce for the slot (verification deferred to blockfetch).
 // Both reach
 // chain.AddBlockHeader, not AddVerifiedBlockHeader. Announcing such a header
@@ -19786,17 +19805,19 @@ func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 	)
 	point := ocommon.NewPoint(header.slot, header.hash.Bytes())
 
-	// The Mithril-covered fixture bypasses per-header verification because its
-	// certificate authenticated the history. That trusted path may queue the
-	// header, but it does not mark the queued header cryptographically verified.
-	t.Run("Mithril-covered admission is queued, not announced", func(t *testing.T) {
+	// A header at a slot the Mithril trust boundary covers, but which is not
+	// on the certified chain, earns no Mithril trust. With no cached nonce it
+	// is queued unverified, and must not arm a vote either.
+	t.Run("covered slot off the certified chain is not announced", func(
+		t *testing.T,
+	) {
 		fixture := newHeaderStreamLedger(t)
 		fixture.ls.mithrilLedgerSlot = header.slot
-		verifyNow, trusted := fixture.ls.chainsyncHeaderCryptoPolicy(
-			header.slot,
+		verifyNow, trusted := fixture.ls.chainsyncHeaderCryptoPolicy(point)
+		require.False(t, verifyNow, "fixture must exercise the unverified path")
+		require.False(
+			t, trusted, "a slot alone must not establish Mithril coverage",
 		)
-		require.False(t, verifyNow, "fixture must exercise the trusted path")
-		require.True(t, trusted)
 
 		require.NoError(
 			t,

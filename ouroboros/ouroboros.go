@@ -320,7 +320,7 @@ type Ouroboros struct {
 	// Derived from ledgerState the same way chainsyncHeaderAdmission is, so
 	// tests exercising a single protocol handler can override either seam
 	// directly instead of standing up a full LedgerState.
-	chainSelectionShouldVerifyHeaderCrypto func(slot uint64) bool
+	chainSelectionShouldVerifyHeaderCrypto func(point ocommon.Point) bool
 	chainSelectionVerifyHeaderCrypto       func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,

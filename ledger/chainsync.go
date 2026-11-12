@@ -498,12 +498,36 @@ func (ls *LedgerState) mithrilLedgerSlotSnapshot() uint64 {
 }
 
 // slotCoveredByMithril reports whether slot falls within an imported
-// Mithril snapshot's certified range -- the single exemption shared by
-// ShouldVerifyChainSelectionHeaderCrypto, shouldEnforceBlockPipelineCrypto,
-// and handleEventBlockfetchBlockDeferred's header-crypto gate.
+// Mithril snapshot's certified range. It is sound only for a block already
+// on the primary chain: once that chain holds the trust boundary block it
+// cannot gain a block at or below the boundary, because every add must
+// follow its parent's slot and no rollback goes below the boundary. A header
+// or block offered by a peer uses pointCoveredByMithril instead.
 func (ls *LedgerState) slotCoveredByMithril(slot uint64) bool {
 	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
 	return mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot
+}
+
+// pointCoveredByMithril reports whether point names a block the Mithril
+// import certified: at or below the trust boundary slot and on the primary
+// chain, which also holds the trust boundary block. A peer chooses the slot
+// a header carries, so the slot alone does not establish that coverage.
+func (ls *LedgerState) pointCoveredByMithril(point ocommon.Point) bool {
+	if !ls.slotCoveredByMithril(point.Slot) {
+		return false
+	}
+	ctx := ls.lifecycleContext()
+	boundary, ok := ls.mithrilTrustBoundaryPoint(ctx)
+	if !ok {
+		return false
+	}
+	for _, p := range []ocommon.Point{point, boundary} {
+		onChain, err := ls.primaryChainContainsPoint(ctx, p)
+		if err != nil || !onChain {
+			return false
+		}
+	}
+	return true
 }
 
 func headerValidationPointKey(point ocommon.Point) string {
@@ -4923,7 +4947,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			headerCryptoVerificationGeneration,
 		)
 	headerValidationRequired, headerTrusted := ls.chainsyncHeaderCryptoPolicy(
-		e.Point.Slot,
+		e.Point,
 	)
 	if headerCryptoVerificationGeneration != 0 &&
 		!headerCryptoVerified && !headerTrusted && !headerValidationRequired {
@@ -6196,22 +6220,22 @@ func localForkAnchor(intersectionSlot, tipSlot uint64) (uint64, bool) {
 // re-deriving the UTxO set for blocks the network already delivered, this is
 // not gated on ValidateHistorical/validationEnabled: a coarse
 // historical-sync toggle must not disable this entire group of checks.
-// Mithril-covered slots are trusted because their certificate chain was
-// verified during import; the restored database intentionally does not
-// retain every historical epoch nonce needed to re-verify them. Other
-// missing nonces defer authorization to block-fetch, which verifies the body
-// before applying it.
+// A header the Mithril import certified is trusted because its certificate
+// chain was verified during import; the restored database intentionally does
+// not retain every historical epoch nonce needed to re-verify it. Coverage is
+// decided by point, not slot (see pointCoveredByMithril). Other missing
+// nonces defer authorization to block-fetch, which verifies the body before
+// applying it.
 func (ls *LedgerState) chainsyncHeaderCryptoPolicy(
-	slot uint64,
+	point ocommon.Point,
 ) (verifyNow bool, trustedWithoutVerification bool) {
-	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
-	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
+	if ls.pointCoveredByMithril(point) {
 		return false, true
 	}
 	// Queue admission can safely defer producer authorization to block-fetch,
 	// which verifies the body before application. Chain selection has a
 	// separate strict gate and must not treat a deferred header as eligible.
-	if !ls.hasCachedEpochNonceForSlot(slot) {
+	if !ls.hasCachedEpochNonceForSlot(point.Slot) {
 		return false, false
 	}
 	return true, false
@@ -6975,11 +6999,11 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 	}
 
 	// Verify block header cryptographic proofs (VRF, KES). Required for
-	// every slot except one a Mithril certificate already covers -- see
+	// every block except one the Mithril import certified -- see
 	// chainsyncHeaderCryptoPolicy's doc comment. A coarse
 	// ValidateHistorical=false historical-sync toggle must not disable
 	// this entire group of checks.
-	if !ls.slotCoveredByMithril(e.Point.Slot) {
+	if !ls.pointCoveredByMithril(e.Point) {
 		// Chainsync may already have verified this block's queued header.
 		// Fetched blocks wait in pendingBlockfetchEvents before insertion, so
 		// that header is usually behind the queue head; match it by point

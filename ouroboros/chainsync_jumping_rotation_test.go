@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -128,7 +129,7 @@ func TestChainsyncPromotionWakesObserverHorizonWait(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	var verifyCalls atomic.Int32
 	f.o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId, gledger.BlockHeader,

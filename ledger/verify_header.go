@@ -260,12 +260,13 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 	)
 }
 
-// ShouldVerifyChainSelectionHeaderCrypto reports whether a header at the
-// given slot is eligible to have its cryptography verified right now via
-// ValidateChainSelectionHeaderCrypto. Verification is skipped only for
-// slots already covered by an imported Mithril snapshot, since those slots
-// were authenticated by the certificate chain during import and the
-// restored database does not retain every historical epoch nonce. It is not
+// ShouldVerifyChainSelectionHeaderCrypto reports whether the header at point
+// is eligible to have its cryptography verified right now via
+// ValidateChainSelectionHeaderCrypto. Verification is skipped only for a
+// block an imported Mithril snapshot certified, since it was authenticated
+// by the certificate chain during import and the restored database does not
+// retain every historical epoch nonce. Coverage is decided by point, not
+// slot: a peer chooses the slot its header carries. It is not
 // exempted merely because bulk historical/catch-up loading has not yet
 // enabled live validation. A caller that skips verification because this
 // returns false must still treat the header as eligible, not reject it -- the
@@ -281,9 +282,9 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 // safe to attempt verification here and let the verifier decide. A deferred
 // result must remain outside chain selection until a later header verifies.
 func (ls *LedgerState) ShouldVerifyChainSelectionHeaderCrypto(
-	slot uint64,
+	point ocommon.Point,
 ) bool {
-	return !ls.slotCoveredByMithril(slot)
+	return !ls.pointCoveredByMithril(point)
 }
 
 // ValidateChainSelectionHeaderCrypto verifies a header's VRF/KES cryptography
