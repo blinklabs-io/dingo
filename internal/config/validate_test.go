@@ -71,6 +71,39 @@ func TestValidateDefaultsPass(t *testing.T) {
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
+func TestValidateUnixSocketModes(t *testing.T) {
+	t.Parallel()
+
+	cfg := validTestConfig()
+	cfg.SocketMode = "0660"
+	cfg.DMQ.SocketMode = "0600"
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+
+	cfg.SocketMode = "0666"
+	if runtime.GOOS == "windows" {
+		// Windows has no group or other permission bits to restrict.
+		require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+	} else {
+		require.ErrorContains(
+			t,
+			cfg.validate(cfg.RunMode, minUnprivilegedPort),
+			"socketMode \"0666\" must not permit writes by other users",
+		)
+	}
+
+	cfg = validTestConfig()
+	cfg.SocketMode = "0000"
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
+func TestDefaultUnixSocketModes(t *testing.T) {
+	t.Parallel()
+
+	cfg := newDefaultConfig()
+	require.Equal(t, DefaultUnixSocketMode, cfg.SocketMode)
+	require.Equal(t, DefaultUnixSocketMode, cfg.DMQ.SocketMode)
+}
+
 func TestValidateTrustedNtCIdleTimeout(t *testing.T) {
 	cfg := validTestConfig()
 	assert.Zero(t, cfg.TrustedNtCIdleTimeout)
@@ -896,6 +929,32 @@ func TestValidate(t *testing.T) {
 				c.ShelleyKESAgentSignTimeout = time.Second + time.Nanosecond
 			},
 			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
+			name: "key watch disabled at zero",
+			modify: func(c *Config) {
+				c.ShelleyKeyWatchInterval = 0
+			},
+		},
+		{
+			name: "key watch interval of ten seconds",
+			modify: func(c *Config) {
+				c.ShelleyKeyWatchInterval = 10 * time.Second
+			},
+		},
+		{
+			name: "key watch interval below a second",
+			modify: func(c *Config) {
+				c.ShelleyKeyWatchInterval = 500 * time.Millisecond
+			},
+			wantErr: "shelleyKeyWatchInterval",
+		},
+		{
+			name: "negative key watch interval",
+			modify: func(c *Config) {
+				c.ShelleyKeyWatchInterval = -time.Second
+			},
+			wantErr: "shelleyKeyWatchInterval",
 		},
 		{
 			name: "no network and no magic",

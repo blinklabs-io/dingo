@@ -40,6 +40,8 @@ import (
 const (
 	minUnprivilegedPort = 1024
 	maxPort             = 65535
+	// DefaultUnixSocketMode restricts pathname sockets to their owner.
+	DefaultUnixSocketMode = "0600"
 	// maxKESAgentSignTimeout is exclusive. A sign-mode request blocks the
 	// slot-aligned forging loop, so it must finish before the next mainnet
 	// slot.
@@ -168,6 +170,23 @@ func ValidateKESAgentSignTimeout(timeout time.Duration) error {
 			"shelleyKesAgentSignTimeout (%s) must be zero (use default) or positive and less than %s",
 			timeout,
 			maxKESAgentSignTimeout,
+		)
+	}
+	return nil
+}
+
+// minKeyWatchInterval keeps the credential file watch from reading the key
+// files many times a second.
+const minKeyWatchInterval = time.Second
+
+// ValidateKeyWatchInterval accepts zero (watch disabled) or an interval of at
+// least a second.
+func ValidateKeyWatchInterval(interval time.Duration) error {
+	if interval != 0 && interval < minKeyWatchInterval {
+		return fmt.Errorf(
+			"shelleyKeyWatchInterval (%s) must be zero (disabled) or at least %s",
+			interval,
+			minKeyWatchInterval,
 		)
 	}
 	return nil
@@ -305,6 +324,23 @@ func (c *Config) Validate(effectiveMode RunMode) error {
 	return c.validate(effectiveMode, minBindablePort())
 }
 
+// ParseUnixSocketMode parses an octal pathname-socket mode and rejects modes
+// that allow users outside the owner or group to connect.
+func ParseUnixSocketMode(value string) (os.FileMode, error) {
+	if value == "" {
+		value = DefaultUnixSocketMode
+	}
+	parsed, err := strconv.ParseUint(value, 8, 9)
+	if err != nil {
+		return 0, fmt.Errorf("must be an octal permission mode: %w", err)
+	}
+	mode := os.FileMode(parsed)
+	if runtime.GOOS != "windows" && mode&0o002 != 0 {
+		return 0, errors.New("must not permit writes by other users")
+	}
+	return mode, nil
+}
+
 // minBindablePort returns the lowest TCP port this process may bind;
 // configured ports below it are privileged and rejected. Root (euid 0)
 // may bind any port, and Windows has no privileged-port restriction
@@ -373,6 +409,16 @@ func hasCapNetBindService() bool {
 // depend on the effective UID or kernel settings of the test runner.
 func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	var errs []error
+	if _, err := ParseUnixSocketMode(c.SocketMode); err != nil {
+		errs = append(errs, fmt.Errorf("socketMode %q %w", c.SocketMode, err))
+	}
+	if _, err := ParseUnixSocketMode(c.DMQ.SocketMode); err != nil {
+		errs = append(errs, fmt.Errorf(
+			"dmq.socketMode %q %w",
+			c.DMQ.SocketMode,
+			err,
+		))
+	}
 	if _, err := dingoversion.HeaderProtocolMinor(c.CIP0203Enabled); err != nil {
 		errs = append(errs, err)
 	}
@@ -849,6 +895,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	if err := ValidateKESAgentSignTimeout(
 		c.ShelleyKESAgentSignTimeout,
 	); err != nil {
+		errs = append(errs, err)
+	}
+	if err := ValidateKeyWatchInterval(c.ShelleyKeyWatchInterval); err != nil {
 		errs = append(errs, err)
 	}
 

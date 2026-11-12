@@ -1042,6 +1042,49 @@ func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(
 	)
 }
 
+// TestQueryShelleyDebugChainDepState_PreviousEpochNonceAcrossSparseRows covers
+// a current epoch whose numeric predecessor has no row because an empty-epoch
+// jump skipped it: the previous-epoch nonce is the nearest earlier row's.
+func TestQueryShelleyDebugChainDepState_PreviousEpochNonceAcrossSparseRows(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	previousNonce := bytes.Repeat([]byte{0x55}, 32)
+	currentNonce := bytes.Repeat([]byte{0x66}, 32)
+
+	db := newTestDB(t)
+	for _, row := range []struct {
+		slot, epoch uint64
+		nonce       []byte
+	}{{0, 0, previousNonce}, {5000, 5, currentNonce}} {
+		require.NoError(t, db.Metadata().SetEpoch(
+			row.slot, row.epoch, row.nonce, nil, nil, nil, 0, 1, 1000, nil,
+		))
+	}
+	require.NoError(t, db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(5500, []byte("tip"))},
+		nil,
+	))
+
+	ls := newChainDepStateLedger(t, db)
+	result, err := ls.Query(t.Context(), chainDepStateQuery(), QueryPoint{})
+	require.NoError(t, err)
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, arr, 1)
+
+	encoded, err := cbor.Encode(arr[0])
+	require.NoError(t, err)
+	var decoded olocalstatequery.DebugChainDepStateResult
+	require.NoError(t, decoded.UnmarshalCBOR(encoded))
+	require.NotNil(t, decoded.PreviousEpochNonce)
+	assert.Equal(t, lcommon.Nonce{
+		Type:  lcommon.NonceTypeNonce,
+		Value: [32]byte(previousNonce),
+	}, *decoded.PreviousEpochNonce)
+}
+
 // TestQueryShelleyDebugChainDepState_ReportsOpCertCounters covers the other
 // half of the reply: the operational-certificate counters the chain has
 // accepted, keyed by each pool's cold-key hash.

@@ -287,10 +287,12 @@ type Config struct {
 	genesisWindowSlots                                                                  uint64
 	onGenesisSelectionResolved                                                          func(genesisSelectionMode bool)
 	genesisCorroborationPeers                                                           int
+	genesisChainSyncJumping                                                             bool
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
 	shelleyKESAgentSignTimeout                                                          time.Duration
+	shelleyKeyWatchInterval                                                             time.Duration
 	shelleyKESAgentAddress, shelleyKESAgentClientCertFile, shelleyKESAgentClientKeyFile string
 	shelleyKESAgentServerSPKISHA256                                                     string
 	shelleyKESAgentPlaintext                                                            bool
@@ -1007,10 +1009,12 @@ func (c *Config) syncCompatFields() {
 	c.maxTrustedLocalNtCConns = c.cfg.MaxTrustedLocalNtCConns
 	c.trustedNtCIdleTimeout = c.cfg.TrustedNtCIdleTimeout
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
+	c.genesisChainSyncJumping = c.cfg.GenesisBootstrap.ChainSyncJumping
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.shelleyKESAgentAddress, c.shelleyKESAgentClientCertFile, c.shelleyKESAgentClientKeyFile = c.cfg.ShelleyKESAgentAddress, c.cfg.ShelleyKESAgentClientCertFile, c.cfg.ShelleyKESAgentClientKeyFile
 	c.shelleyKESAgentServerSPKISHA256 = c.cfg.ShelleyKESAgentServerSPKISHA256
+	c.shelleyKeyWatchInterval = c.cfg.ShelleyKeyWatchInterval
 	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
@@ -1121,6 +1125,12 @@ func WithGenesisControlGroups(
 
 func WithGenesisCorroborationPeers(peers int) ConfigOptionFunc {
 	return func(c *Config) { c.cfg.GenesisBootstrap.CorroborationPeers = peers }
+}
+
+// WithGenesisChainSyncJumping turns ChainSync Jumping on or off for Genesis
+// selection.
+func WithGenesisChainSyncJumping(enabled bool) ConfigOptionFunc {
+	return func(c *Config) { c.cfg.GenesisBootstrap.ChainSyncJumping = enabled }
 }
 
 // WithGenesisLimitOnPatience configures the Genesis Limit on Patience for
@@ -1792,6 +1802,20 @@ func WithShelleyKESAgentMode(mode string) ConfigOptionFunc {
 func WithShelleyKESAgentSignTimeout(timeout time.Duration) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ShelleyKESAgentSignTimeout = timeout
+	}
+}
+
+// WithShelleyKeyWatchInterval makes a block producer poll its credential
+// files (CARDANO_SHELLEY_KEY_WATCH_INTERVAL) and reload them in place, as on
+// SIGHUP, once a change has held for two polls. It lets a mounted Secret be
+// rotated without a restart. 0, the default, disables the watch; the dingo
+// command's config validation refuses a non-zero value below 1s, which this
+// option does not check. The watch runs with local key files and with a
+// KES agent in sign mode. In KES agent serve-key mode, where the agent pushes
+// key rotations, it is ignored and a warning is logged.
+func WithShelleyKeyWatchInterval(interval time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKeyWatchInterval = interval
 	}
 }
 

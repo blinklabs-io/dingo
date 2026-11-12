@@ -44,3 +44,26 @@ func TestStakeSnapshotEpochUsesPraosRotation(t *testing.T) {
 		)
 	}
 }
+
+func TestLeaderStakeSnapshotEpochFreezesAtTheLedgerLabel(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		epoch       uint64
+		ledgerEpoch uint64
+		want        uint64
+	}{
+		{name: "label epoch", epoch: 7, ledgerEpoch: 7, want: 6},
+		{name: "successor of label", epoch: 8, ledgerEpoch: 7, want: 7},
+		{name: "first epoch past a gap", epoch: 9, ledgerEpoch: 7, want: 6},
+		{name: "second epoch past a gap", epoch: 10, ledgerEpoch: 7, want: 6},
+		{name: "label zero", epoch: 5, ledgerEpoch: 0, want: 0},
+		{name: "epoch behind label", epoch: 3, ledgerEpoch: 7, want: 2},
+	} {
+		assert.Equal(
+			t,
+			tc.want,
+			LeaderStakeSnapshotEpoch(tc.epoch, tc.ledgerEpoch),
+			tc.name,
+		)
+	}
+}

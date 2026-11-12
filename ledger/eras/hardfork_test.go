@@ -35,25 +35,20 @@ import (
 )
 
 // HardForkFunc is invoked when the chain crosses an era boundary. Its
-// postcondition must be: the returned pparams reflect the new era,
-// including ProtocolMajor at or above the new era's MinMajorVersion.
+// postcondition is that the returned pparams carry the previous era's
+// protocol version unchanged, as the reference ledger's era translations do
+// (upgradePParams in each era's PParams module). The major is raised only by
+// enacting a parameter update, so a ledger translated before the pending major
+// is enacted keeps the old one, and the era's version-gated rules (for Conway,
+// the bootstrap phase at major 9) follow it.
 //
-// Without this guarantee, schedule-driven era transitions
-// (Test*HardForkAtEpoch overrides, HardForkInitiation gov actions)
-// leave the major version stale at the prior era's value, and
-// downstream consumers that disambiguate eras by ProtocolMajor (e.g.
-// ledger/forging/eras.go extractPParamsLimits) treat the post-fork
-// pparams as belonging to the prior era. The chain then never
-// advances.
+// Allegra is the exception: its pparams are the Shelley type, which the forger
+// distinguishes from Shelley by major, so its translation still raises it.
 //
-// The version-bump tests below cover the era transitions whose HardForkFunc
-// takes no genesis configuration. Shelley, Alonzo, and Conway are excluded
-// from those because they require ShelleyGenesis / AlonzoGenesis /
-// ConwayGenesis respectively to produce a valid result; their version-bump
-// postcondition is identical and is verified end-to-end by the eras
-// integration test.
+// The tests below cover the era transitions that need no genesis
+// configuration.
 
-func TestHardForkBumpsProtocolMajor(t *testing.T) {
+func TestHardForkProtocolMajor(t *testing.T) {
 	// Allegra pparams are a type alias of Shelley pparams, so Mary's
 	// predecessor is passed as the underlying Shelley type too.
 	tests := []struct {
@@ -67,6 +62,9 @@ func TestHardForkBumpsProtocolMajor(t *testing.T) {
 		major     func(lcommon.ProtocolParameters) (uint, bool)
 	}{
 		{
+			// Allegra shares Shelley's pparams type, and the forger tells
+			// the two eras apart by major, so this one translation still
+			// raises it.
 			name:      "Allegra",
 			prev:      &shelley.ShelleyProtocolParameters{ProtocolMajor: 2},
 			fork:      eras.HardForkAllegra,
@@ -81,9 +79,9 @@ func TestHardForkBumpsProtocolMajor(t *testing.T) {
 		},
 		{
 			name:      "Mary",
-			prev:      &shelley.ShelleyProtocolParameters{ProtocolMajor: 3},
+			prev:      &shelley.ShelleyProtocolParameters{ProtocolMajor: 2},
 			fork:      eras.HardForkMary,
-			wantMajor: eras.MaryEraDesc.MinMajorVersion,
+			wantMajor: 2,
 			major: func(pp lcommon.ProtocolParameters) (uint, bool) {
 				p, ok := pp.(*mary.MaryProtocolParameters)
 				if !ok {
@@ -93,17 +91,34 @@ func TestHardForkBumpsProtocolMajor(t *testing.T) {
 			},
 		},
 		{
-			// Alonzo ProtocolMajor 6 is the top of Alonzo's range.
 			name:      "Babbage",
-			prev:      &alonzo.AlonzoProtocolParameters{ProtocolMajor: 6},
+			prev:      &alonzo.AlonzoProtocolParameters{ProtocolMajor: 5},
 			fork:      eras.HardForkBabbage,
-			wantMajor: eras.BabbageEraDesc.MinMajorVersion,
+			wantMajor: 5,
 			major: func(pp lcommon.ProtocolParameters) (uint, bool) {
 				p, ok := pp.(*babbage.BabbageProtocolParameters)
 				if !ok {
 					return 0, false
 				}
 				return p.ProtocolMajor, true
+			},
+		},
+		{
+			name: "Conway",
+			prev: &babbage.BabbageProtocolParameters{ProtocolMajor: 8},
+			fork: func(
+				_ *cardano.CardanoNodeConfig,
+				prev lcommon.ProtocolParameters,
+			) (lcommon.ProtocolParameters, error) {
+				return eras.HardForkConway(&cardano.CardanoNodeConfig{}, prev)
+			},
+			wantMajor: 8,
+			major: func(pp lcommon.ProtocolParameters) (uint, bool) {
+				p, ok := pp.(*conway.ConwayProtocolParameters)
+				if !ok {
+					return 0, false
+				}
+				return p.ProtocolVersion.Major, true
 			},
 		},
 	}
@@ -117,7 +132,7 @@ func TestHardForkBumpsProtocolMajor(t *testing.T) {
 				t,
 				tc.wantMajor,
 				major,
-				"HardFork%s must bump ProtocolMajor to the era's MinMajorVersion",
+				"HardFork%s protocol major",
 				tc.name,
 			)
 		})

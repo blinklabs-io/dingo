@@ -850,7 +850,11 @@ func TestRunFromGenesis_WaitsForACaptureStillBeingMade(t *testing.T) {
 // the resumed session must deliver it again: resuming after it would check
 // the epoch live at a later block, which Dingo refuses as too old. The
 // block's own hash must also not be buffered twice.
+// Not t.Parallel: it shortens the package-level txInfoIndexWaits.
 func TestRunFromGenesis_RedeliversACapturedBoundaryAfterAFailedFlush(t *testing.T) {
+	prevWaits := txInfoIndexWaits
+	txInfoIndexWaits = []time.Duration{10 * time.Millisecond}
+	t.Cleanup(func() { txInfoIndexWaits = prevWaits })
 	for _, tc := range []struct {
 		name string
 		// epochs gives each block's epoch; the last block of epoch 1 is
@@ -917,7 +921,7 @@ func TestRunFromGenesis_RedeliversACapturedBoundaryAfterAFailedFlush(t *testing.
 						}
 						select {
 						case <-r.Context().Done():
-						case <-time.After(10 * time.Second):
+						case <-time.After(time.Second):
 						}
 						return
 					}
