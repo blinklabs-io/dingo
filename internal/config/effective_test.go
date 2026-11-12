@@ -217,3 +217,36 @@ func TestEffectiveLogAttrsReadOnlyListedFields(t *testing.T) {
 		}
 	}
 }
+
+// The logging attributes report what the logger resolves, so an unknown or
+// differently spelled value is not echoed back as configured.
+func TestEffectiveLogAttrsReportResolvedLogging(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		level, format string
+		wantLevel     string
+		wantFormat    string
+	}{
+		{"bogus", "yaml", "info", "text"},
+		{"", "", "info", "text"},
+		{"WARNING", " JSON ", "warn", "json"},
+		{"debug", "text", "debug", "text"},
+	}
+	for _, c := range cases {
+		cfg := &Config{Logging: LoggingConfig{Level: c.level, Format: c.format}}
+		got := map[string]string{}
+		for _, a := range cfg.EffectiveLogAttrs(false) {
+			got[a.Key] = a.Value.String()
+		}
+		if got["logging_level"] != c.wantLevel ||
+			got["logging_format"] != c.wantFormat {
+			t.Errorf(
+				"level=%q format=%q: got %q/%q, want %q/%q",
+				c.level, c.format,
+				got["logging_level"], got["logging_format"],
+				c.wantLevel, c.wantFormat,
+			)
+		}
+	}
+}

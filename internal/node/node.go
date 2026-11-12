@@ -610,7 +610,11 @@ func Run(
 	for _, opt := range opts {
 		opt(&dingoCfg)
 	}
-	logEffectiveConfig(logger, cfg, dingoCfg.GenesisSelectionMode())
+	// The selector's starting mode depends on the caught-up marker and the
+	// ledger tip, so the line is logged once the node has resolved it.
+	dingo.WithGenesisSelectionResolved(func(genesisSelectionMode bool) {
+		logEffectiveConfig(logger, cfg, genesisSelectionMode)
+	})(&dingoCfg)
 	d, err := dingo.New(dingoCfg) //nolint:contextcheck
 	if err != nil {
 		return err

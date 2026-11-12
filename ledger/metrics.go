@@ -824,6 +824,27 @@ func (m *stateMetrics) observeConsumedUtxoSweep(floor uint64, rows int) {
 	}
 }
 
+// observeConsumedUtxoSweepAt exports a sweep's rows and, when the durable
+// floor was read back (floorErr nil), the floor gauge. A failed read leaves
+// the gauge as it was: the sweep's candidate can sit below the durable floor,
+// and the gauge must never report a lower rollback boundary.
+func (m *stateMetrics) observeConsumedUtxoSweepAt(
+	floor uint64,
+	floorErr error,
+	rows int,
+) {
+	if m == nil {
+		return
+	}
+	if floorErr == nil {
+		m.observeConsumedUtxoSweep(floor, rows)
+		return
+	}
+	if m.consumedUtxoSweepRowsDeleted != nil && rows > 0 {
+		m.consumedUtxoSweepRowsDeleted.Add(float64(rows))
+	}
+}
+
 func (m *stateMetrics) incLeaderThresholdRejections() {
 	if m == nil || m.leaderThresholdRejections == nil {
 		return

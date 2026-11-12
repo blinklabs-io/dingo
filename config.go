@@ -285,6 +285,7 @@ type Config struct {
 	trustedNtCIdleTimeout                                                               time.Duration
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
+	onGenesisSelectionResolved                                                          func(genesisSelectionMode bool)
 	genesisCorroborationPeers                                                           int
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
@@ -3024,11 +3025,12 @@ func (c *Config) genesisSelectionEligible() bool {
 		!c.cardanoNodeConfig.PraosConsensusMode()
 }
 
-// GenesisSelectionMode reports whether the Genesis state machine is eligible
-// to run for this configuration. It does not consult the caught-up marker, so
-// a node with a recent marker still starts in Praos mode.
-func (c *Config) GenesisSelectionMode() bool {
-	return c.genesisSelectionEligible()
+// WithGenesisSelectionResolved registers fn to receive the mode the chain
+// selector actually starts in, once the node has resolved it from the
+// configuration and the caught-up marker. It is called once per node start,
+// before the selector is built.
+func WithGenesisSelectionResolved(fn func(genesisSelectionMode bool)) ConfigOptionFunc {
+	return func(c *Config) { c.onGenesisSelectionResolved = fn }
 }
 
 // TopologyConfig returns the loaded topology configuration.

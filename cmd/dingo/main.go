@@ -88,7 +88,6 @@ func commonRun(
 		os.Stderr,
 	)
 	slog.SetDefault(logger)
-	applyDebugLevelOverride(cfg, globalFlags.debug)
 	// Config-validation warnings go to stderr, not the logger: a high
 	// configured level (e.g. error) would otherwise suppress them, leaving the
 	// operator with no feedback that their value was ignored.
@@ -106,6 +105,8 @@ func commonRun(
 			programName, cfg.Logging.Format,
 		)
 	}
+	// After the warnings above, which name the value the operator configured.
+	applyDebugLevelOverride(cfg, globalFlags.debug)
 	// Configure max processes with our logger wrapper, toss undo func
 	_, err := maxprocs.Set(maxprocs.Logger(slogPrintf))
 	if err != nil {
@@ -146,10 +147,9 @@ func newLogger(
 		AddSource: addSource,
 		Level:     logLevel,
 	}
-	f := strings.ToLower(strings.TrimSpace(format))
-	formatOK := f == "" || f == "text" || f == "json"
+	resolvedFormat, formatOK := config.ResolveLogFormat(format)
 	var handler slog.Handler
-	if f == "json" {
+	if resolvedFormat == "json" {
 		handler = slog.NewJSONHandler(w, opts)
 	} else {
 		handler = slog.NewTextHandler(w, opts)
@@ -161,17 +161,16 @@ func newLogger(
 // ok=false for an unrecognized value so the caller can warn; an empty value
 // is treated as the default ("info").
 func parseLogLevel(level string) (slog.Level, bool) {
-	switch strings.ToLower(strings.TrimSpace(level)) {
+	name, ok := config.ResolveLogLevel(level)
+	switch name {
 	case "debug":
-		return slog.LevelDebug, true
-	case "", "info":
-		return slog.LevelInfo, true
-	case "warn", "warning":
-		return slog.LevelWarn, true
+		return slog.LevelDebug, ok
+	case "warn":
+		return slog.LevelWarn, ok
 	case "error":
-		return slog.LevelError, true
+		return slog.LevelError, ok
 	default:
-		return slog.LevelInfo, false
+		return slog.LevelInfo, ok
 	}
 }
 

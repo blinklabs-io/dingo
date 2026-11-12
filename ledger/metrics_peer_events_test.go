@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/types"
@@ -151,5 +152,35 @@ func TestConsumedUtxoSweepMetricsExportDurableFloor(t *testing.T) {
 		t,
 		float64(5000),
 		promtestutil.ToFloat64(fixture.ls.metrics.consumedUtxoPruneFloorSlot),
+	)
+}
+
+// A sweep that could not read the durable floor back must leave the floor
+// gauge untouched while still counting its deleted rows.
+func TestConsumedUtxoSweepFloorReadFailureKeepsGauge(t *testing.T) {
+	t.Parallel()
+
+	m := &stateMetrics{}
+	m.init(prometheus.NewRegistry())
+	m.observeConsumedUtxoSweepAt(5000, nil, 0)
+
+	m.observeConsumedUtxoSweepAt(150, errors.New("read failed"), 3)
+	require.Equal(
+		t, float64(5000),
+		promtestutil.ToFloat64(m.consumedUtxoPruneFloorSlot),
+	)
+	require.Equal(
+		t, float64(3),
+		promtestutil.ToFloat64(m.consumedUtxoSweepRowsDeleted),
+	)
+
+	m.observeConsumedUtxoSweepAt(6000, nil, 2)
+	require.Equal(
+		t, float64(6000),
+		promtestutil.ToFloat64(m.consumedUtxoPruneFloorSlot),
+	)
+	require.Equal(
+		t, float64(5),
+		promtestutil.ToFloat64(m.consumedUtxoSweepRowsDeleted),
 	)
 }
