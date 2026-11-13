@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -158,7 +160,7 @@ func applyOverlayChain(
 	acc := store.NewBatchAccumulator()
 	if overlay {
 		enabled, err := store.EnableBatchUtxoOverlay(
-			acc, txn, chain.inputs, nil,
+			acc, txn, chain.inputs, nil, nil,
 		)
 		require.NoError(t, err)
 		require.True(t, enabled)
@@ -498,7 +500,7 @@ func TestBatchUtxoOverlayReadBarrier(t *testing.T) {
 	seedOverlayChain(t, store, chain)
 	txn := store.Transaction(context.Background())
 	acc := store.NewBatchAccumulator()
-	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil)
+	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil, nil)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	tx := chain.batch[0]
@@ -555,7 +557,7 @@ func TestBatchUtxoOverlayTransactionBarrier(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewBatchAccumulator()
-	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil)
+	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil, nil)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	tx := chain.batch[0]
@@ -594,14 +596,14 @@ func TestBatchUtxoOverlayReportsTransactionConflict(t *testing.T) {
 	chain := buildOverlayChain(t, 2)
 	store := newMigratedSQLiteStore(t)
 	seedOverlayChain(t, store, chain)
-	_, err := store.writeDB.ExecContext(context.Background(),
+	_, err := testutil.ExecTransactionInsert(store.writeDB,
 		`INSERT INTO "transaction" (hash, slot, valid) VALUES (?, 5, 1)`,
 		chain.batch[1].Hash().Bytes())
 	require.NoError(t, err)
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewBatchAccumulator()
-	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil)
+	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil, nil)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	for i, tx := range chain.batch {
@@ -625,8 +627,7 @@ func TestBatchUtxoOverlayTransactionIDsAfterRollback(t *testing.T) {
 		store := newForeignKeySQLiteStore(t)
 		chain := buildOverlayChain(t, 4)
 		seedOverlayChain(t, store, chain)
-		_, err := store.writeDB.ExecContext(
-			context.Background(),
+		_, err := testutil.ExecTransactionInsert(store.writeDB,
 			`INSERT INTO "transaction" (hash, slot, valid) VALUES (X'AA', 900, 1)`,
 		)
 		require.NoError(t, err)
@@ -711,7 +712,7 @@ func TestBatchUtxoOverlaySavepointRollbackFailsClosed(t *testing.T) {
 			defer func() { _ = txn.Rollback() }()
 			acc := store.NewBatchAccumulator()
 			enabled, err := store.EnableBatchUtxoOverlay(
-				acc, txn, chain.inputs, nil,
+				acc, txn, chain.inputs, nil, nil,
 			)
 			require.NoError(t, err)
 			require.True(t, enabled)
@@ -740,12 +741,13 @@ func TestBatchUtxoOverlayReportsConflict(t *testing.T) {
 	_, err := store.writeDB.ExecContext(context.Background(),
 		`INSERT INTO utxo (tx_id, output_idx, credential_tag, added_slot,
 		   deleted_slot, amount, payment_script)
-		 VALUES (?, 0, 0, 5, 0, '1', 0)`, overlayTxID(0x02, 1))
+		 VALUES (?, 0, 0, 5, 0, '1', 0)`,
+		testutil.TransactionID(t, store.writeDB, overlayTxID(0x02, 1)))
 	require.NoError(t, err)
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewBatchAccumulator()
-	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil)
+	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil, nil)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	for i, tx := range chain.batch {
@@ -770,7 +772,7 @@ func TestReadsOverlayTables(t *testing.T) {
 		"SELECT value FROM sync_state WHERE sync_key = ?":          false,
 		"SELECT 'consumed_utxo_prune_floor'":                       false,
 		`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`: false,
-		"SELECT * FROM utxo_reference_input":                       false,
+		"SELECT * FROM utxo_reference_edge":                        false,
 	} {
 		require.Equal(t, want, readsOverlayTables(query), query)
 	}
@@ -778,7 +780,7 @@ func TestReadsOverlayTables(t *testing.T) {
 
 // TestBatchUtxoOverlayStatementPlans pins the plans of the overlay's bulk
 // statements against a skewed utxo table: the prefetch probes
-// tx_id_output_idx once per key, the spend mark and the delete find rows by
+// the output indexes once per key, the spend mark and the delete find rows by
 // primary key, and the live-stake prefetches probe the unique credential
 // indexes of reward_live_stake and account. No plan may use a deleted_slot
 // index or scan utxo, with no statistics, with statistics, and with the
@@ -827,7 +829,10 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 	for _, stage := range stages {
 		stage.setup()
 		for _, returnStake := range []bool{false, true} {
-			args := append([]any{int64(1), make([]byte, 32)}, prefetchArgs...)
+			args := []any{int64(1), int64(1)}
+			for i := range keys {
+				args = sqliteUtxoSQL.bindRef(args, skewedUtxoTxID(i*7), i%4)
+			}
 			spend := connQueryPlan(
 				t, conn, consumeUtxosBatchQuery(keys, returnStake), args...,
 			)
@@ -840,15 +845,39 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 			require.NotContains(t, spend, "SCAN utxo", stage.name+": "+spend)
 			require.Equal(t, keys, strings.Count(
 				spend,
-				"USING INDEX tx_id_output_idx (tx_id=? AND output_idx=?)",
+				"USING INDEX idx_utxo_tx_id_output_idx (tx_id=? AND output_idx=?)",
 			), stage.name+": "+spend)
 		}
 		prefetch := connQueryPlan(
-			t, conn, overlayPrefetchQuery(keys), prefetchArgs...,
+			t, conn, overlayPrefetchQuery(keys),
+			slices.Clone(prefetchArgs)...,
 		)
 		require.Contains(t, prefetch,
-			"SEARCH u USING INDEX tx_id_output_idx (tx_id=? AND output_idx=?)",
+			"SEARCH t USING COVERING INDEX idx_transaction_hash (hash=?)",
 			stage.name+": "+prefetch)
+		require.Contains(t, prefetch,
+			"SEARCH u USING INDEX idx_utxo_tx_id_output_idx (tx_id=? AND output_idx=?)",
+			stage.name+": "+prefetch)
+		require.NotContains(t, prefetch, "SCAN u", stage.name+": "+prefetch)
+		producerArgs := make([]any, 0, keys)
+		identityArgs := make([]any, 0, keys)
+		for i := range keys {
+			producerArgs = append(producerArgs, skewedUtxoTxID(i*7))
+			identityArgs = append(identityArgs, int64(i+1))
+		}
+		producers := connQueryPlan(
+			t, conn, overlayProducerQuery(keys), producerArgs...,
+		)
+		require.Contains(t, producers,
+			"SEARCH t USING COVERING INDEX idx_transaction_hash (hash=?)",
+			stage.name+": "+producers)
+		require.NotContains(t, producers, "SCAN a", stage.name+": "+producers)
+		imported := connQueryPlan(
+			t, conn, overlayImportedOutputsQuery(keys), identityArgs...,
+		)
+		require.Contains(t, imported,
+			"USING COVERING INDEX idx_utxo_tx_id_output_idx (tx_id=?)",
+			stage.name+": "+imported)
 		mark := connQueryPlan(t, conn, overlayMarkQuery(keys), markArgs...)
 		require.Contains(t, mark, "USING INTEGER PRIMARY KEY (rowid=?)",
 			stage.name+": "+mark)
@@ -870,7 +899,8 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 				"(credential_tag=? AND staking_key=?)",
 			stage.name+": "+stakeAccounts)
 		for name, plan := range map[string]string{
-			"prefetch": prefetch, "mark": mark, "delete": del,
+			"prefetch": prefetch, "producers": producers,
+			"imported_outputs": imported, "mark": mark, "delete": del,
 			"stake_rows": stakeRows, "stake_accounts": stakeAccounts,
 		} {
 			t.Logf("%s/%s:\n%s", stage.name, name, plan)
@@ -959,7 +989,7 @@ func TestBatchUtxoOverlayRefusesAccountDelete(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewBatchAccumulator()
-	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil)
+	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil, nil)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	db, ctx, err := store.dbFromTxn(txn)

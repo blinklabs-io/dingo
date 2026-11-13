@@ -823,10 +823,10 @@ type UtxoStore interface {
 	// GetUtxosByAddressWithOrdering). The database layer performs full
 	// exact-address CBOR filtering when ExactAddress is set. An empty
 	// patterns slice returns (nil, nil), matching the coordinated
-	// Database.UtxosByAddress's empty-input handling. maxResults is a
-	// required, positive bound on the number of candidate rows returned;
-	// exceeding it yields models.ErrTooManyUtxoResults instead of an
-	// unbounded or silently truncated result.
+	// Database.UtxosByAddress's empty-input handling. maxResults is an
+	// optional bound on the number of candidate rows returned; zero or
+	// negative means unbounded, and exceeding a positive bound yields
+	// models.ErrTooManyUtxoResults instead of a silently truncated result.
 	GetUtxosByAddress(
 		[]models.UtxoAddressPattern,
 		int,
@@ -3594,14 +3594,17 @@ type LeiosClosureBatchPreparer interface {
 // support the overlay. inputs are the batch's consumed inputs that it does
 // not itself produce, and deleteOnSpend the subset of them an earlier
 // transaction of the same trusted batch committed, whose rows are deleted
-// when spent. A write the overlay cannot apply without a conflict fails with
-// types.ErrBatchUtxoOverlayConflict.
+// when spent. producers are the hashes of the transactions the batch
+// applies, read up front so that a producer an import already stored an
+// identity row for is not reported as a conflict. A write the overlay cannot
+// apply without a conflict fails with types.ErrBatchUtxoOverlayConflict.
 type BatchUtxoOverlay interface {
 	EnableBatchUtxoOverlay(
 		accumulator types.MetadataBatchAccumulator,
 		txn types.Txn,
 		inputs []models.UtxoId,
 		deleteOnSpend []models.UtxoId,
+		producers [][]byte,
 	) (bool, error)
 }
 

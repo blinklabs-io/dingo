@@ -396,8 +396,7 @@ func (o *Ouroboros) startLeiosPersistenceGC(
 	initialMaxSlot uint64,
 	initialMaxKnown bool,
 ) {
-	if o.config.LeiosPersistenceRetentionSlots == 0 ||
-		o.leiosDatabase() == nil {
+	if o.leiosPersistenceGCDisabled() || o.leiosDatabase() == nil {
 		return
 	}
 	o.leiosPersistGCOnce.Do(func() {
@@ -423,6 +422,14 @@ func (o *Ouroboros) startLeiosPersistenceGC(
 			initialMaxKnown,
 		)
 	})
+}
+
+// leiosPersistenceGCDisabled reports whether no retention rule can apply. A
+// zero retention means the default, which prunes behind the immutable point and
+// so needs a ledger to supply it.
+func (o *Ouroboros) leiosPersistenceGCDisabled() bool {
+	return o.config.LeiosPersistenceRetentionSlots == 0 &&
+		o.leiosImmutableSlot == nil
 }
 
 func (o *Ouroboros) leiosPersistGCLoop(
@@ -470,35 +477,75 @@ func (o *Ouroboros) runLeiosPersistenceGC(
 	knownMaxSlot *uint64,
 ) {
 	retention := o.config.LeiosPersistenceRetentionSlots
-	if retention == 0 || ctx.Err() != nil {
+	if o.leiosPersistenceGCDisabled() || ctx.Err() != nil {
 		return
 	}
 	db := o.leiosDatabase()
 	if db == nil {
 		return
 	}
-	var maxSlot uint64
-	if knownMaxSlot != nil {
-		maxSlot = *knownMaxSlot
-	} else {
+	// An uncertified endorser block at or after the immutable point can still
+	// be certified, so no retention setting prunes past it, and nothing is
+	// pruned while the ledger reports none. Below the immutable point the
+	// certifying ranking block has applied and written the marker, so the
+	// writer may drop an uncertified job there. A failed lookup, or no ledger
+	// at all, leaves the configured window, at least the stability window.
+	var (
+		immutableSlot  uint64
+		immutableKnown bool
+	)
+	if o.leiosImmutableSlot != nil {
 		var err error
-		maxSlot, err = db.MaxLeiosEBSlotContext(ctx)
-		if err != nil {
+		immutableSlot, immutableKnown, err = o.leiosImmutableSlot(ctx)
+		switch {
+		case err != nil:
 			if !errors.Is(err, context.Canceled) {
 				o.config.Logger.Warn(
-					"failed to scan persisted leios endorser blocks for pruning",
+					"failed to resolve immutable point for leios pruning",
 					"error", err,
 				)
 			}
+			// The default has no window to fall back on.
+			if retention == 0 {
+				return
+			}
+			immutableSlot, immutableKnown = 0, false
+		case !immutableKnown:
 			return
+		}
+	}
+	var candidateBeforeSlot uint64
+	if retention == 0 {
+		if !immutableKnown {
+			return
+		}
+		candidateBeforeSlot = immutableSlot
+	} else {
+		var maxSlot uint64
+		if knownMaxSlot != nil {
+			maxSlot = *knownMaxSlot
+		} else {
+			var err error
+			maxSlot, err = db.MaxLeiosEBSlotContext(ctx)
+			if err != nil {
+				if !errors.Is(err, context.Canceled) {
+					o.config.Logger.Warn(
+						"failed to scan persisted leios endorser blocks for pruning",
+						"error", err,
+					)
+				}
+				return
+			}
+		}
+		if maxSlot > retention {
+			candidateBeforeSlot = maxSlot - retention
+		}
+		if immutableKnown {
+			candidateBeforeSlot = min(candidateBeforeSlot, immutableSlot)
 		}
 	}
 	if ctx.Err() != nil {
 		return
-	}
-	var candidateBeforeSlot uint64
-	if maxSlot > retention {
-		candidateBeforeSlot = maxSlot - retention
 	}
 	// Writers hold this lock for SetLeiosEB. Publishing the cutoff after the
 	// scan means an in-flight write completes before the sweep, while later
@@ -581,9 +628,16 @@ func (o *Ouroboros) drainLeiosPersist() {
 			continue
 		}
 		o.leiosPersistStoreMu.Lock()
+		// A certified endorser block below the frontier is still persisted:
+		// replaying the ranking block that certified it needs the closure.
 		if job.slot < o.leiosPersistPruneBeforeSlot {
-			o.leiosPersistStoreMu.Unlock()
-			continue
+			certified, err := db.IsLeiosEBCertified(job.slot, job.hash)
+			// A failed lookup persists: an extra record is pruned later,
+			// a missing certified one is not recoverable.
+			if err == nil && !certified {
+				o.leiosPersistStoreMu.Unlock()
+				continue
+			}
 		}
 		err := db.SetLeiosEB(job.slot, job.hash, job.manifestRaw, job.txsRaw)
 		o.leiosPersistStoreMu.Unlock()

@@ -152,8 +152,11 @@ func processEnvelopeBlock(
 
 type envelopeForgedChecker struct{ hash []byte }
 
-func (c envelopeForgedChecker) WasForgedByUs(uint64) ([]byte, bool) {
-	return c.hash, c.hash != nil
+func (c envelopeForgedChecker) ForgedBlockHashes(uint64) [][]byte {
+	if c.hash == nil {
+		return nil
+	}
+	return [][]byte{c.hash}
 }
 
 // A peer block that fails the inbound envelope is a deterministic verdict on a
@@ -199,6 +202,46 @@ func TestLedgerProcessBlockClassifiesEnvelopeFailure(t *testing.T) {
 				require.NotErrorAs(t, err, &rejected)
 				return
 			}
+			require.ErrorAs(t, err, &rejected)
+			require.Equal(
+				t,
+				ocommon.NewPoint(slot, block.Hash().Bytes()),
+				rejected.BlockPoint,
+			)
+		})
+	}
+}
+
+func TestLedgerProcessBlockEnvelopeAppliesToHistoricalPeers(t *testing.T) {
+	t.Parallel()
+
+	const slot = uint64(10)
+	for _, tc := range []struct {
+		name          string
+		trustedReplay bool
+		mithrilSlot   uint64
+		wantError     bool
+	}{
+		{name: "historical peer block", wantError: true},
+		{name: "trusted replay retains its exemption", trustedReplay: true},
+		{name: "Mithril history retains its exemption", mithrilSlot: slot},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			block := conwayEmptyBlock(t, slot)
+			block.(*conway.ConwayBlock).BlockHeader.Body.BlockBodySize++
+			ls := newRequiredDatumLedger(t, newTestDB(t), eras.ConwayEraDesc)
+			ls.config.TrustedReplay = tc.trustedReplay
+			ls.mithrilLedgerSlot = tc.mithrilSlot
+
+			err := processEnvelopeBlock(t, ls, slot, false, block)
+			if !tc.wantError {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, "block body size mismatch")
+			var rejected *headerValidationError
 			require.ErrorAs(t, err, &rejected)
 			require.Equal(
 				t,

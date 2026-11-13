@@ -48,10 +48,8 @@ type ProviderDependencies struct {
 // Blockfrost provider.
 func DefaultProviderConfig() ProviderConfig {
 	return ProviderConfig{
-		Port:                            3000,
-		Host:                            defaultListenHost,
-		MaxConcurrentMutations:          defaultMaxConcurrentMutations,
-		MaxConcurrentMutationsPerClient: defaultMaxConcurrentMutationsPerClient,
+		Port: 3000,
+		Host: defaultListenHost,
 	}
 }
 
@@ -74,15 +72,11 @@ func RegisterProvider(host *plugin.Host) error {
 				listenHost = deps.Host
 			}
 			listenHost = normalizeListenHost(listenHost)
-			if cfg.MaxConcurrentMutations == 0 {
+			if cfg.MaxConcurrentMutations > 0 &&
+				cfg.MaxConcurrentMutationsPerClient >
+					cfg.MaxConcurrentMutations {
 				return nil, nil, errors.New(
-					"blockfrost: maxConcurrentMutations must be positive",
-				)
-			}
-			if cfg.MaxConcurrentMutationsPerClient == 0 ||
-				cfg.MaxConcurrentMutationsPerClient > cfg.MaxConcurrentMutations {
-				return nil, nil, errors.New(
-					"blockfrost: maxConcurrentMutationsPerClient must be positive and no greater than maxConcurrentMutations",
+					"blockfrost: maxConcurrentMutationsPerClient must not exceed maxConcurrentMutations",
 				)
 			}
 			server := New(BlockfrostConfig{

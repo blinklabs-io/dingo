@@ -157,13 +157,20 @@ type Node struct {
 	kesAgentClient  io.Closer
 	kesAgentCancel  context.CancelFunc
 	kesAgentMetrics *kesagent.Metrics
-	// kesAgentMetricsOnce guards kesAgentMetrics' lazy creation: a sign-mode
+	// kesAgentMetricsMu guards kesAgentMetrics' lazy creation: a sign-mode
 	// reload builds its client outside the lifecycle gates.
-	kesAgentMetricsOnce sync.Once
+	kesAgentMetricsMu sync.Mutex
 	// keyReload is the in-place credential reload's state: the agent's
 	// newer-certificate offers, the file watch and the reload metrics.
 	keyReload      keyReloadState
 	leaderElection nodeconsensus.LeaderScheduler
+	// multiPool holds what forging for more than one pool adds: the other
+	// pools' producers, the slot arbiter and the shared tracking of this
+	// node's own blocks. Its zero value serves a single-pool node.
+	multiPool multiPoolState
+	// scheduleComputeGate bounds how many pools compute a leader schedule
+	// at once; nil for a single pool.
+	scheduleComputeGate chan struct{}
 	// leaderSchedulerRef mirrors leaderElection for readers outside the
 	// node lifecycle goroutine, such as the ledger rollback callback.
 	leaderSchedulerRef atomic.Pointer[leaderSchedulerRef]
@@ -669,6 +676,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncAwaitCatchUpBand:            n.chainsyncAwaitCatchUpBand,
 		ChainsyncHeaderVerificationSettled:   n.chainsyncHeaderVerificationSettled,
 		ChainsyncAwaitCorroboration:          n.chainsyncAwaitCorroboration,
+		ChainsyncObserverDeliveriesUnused:    n.chainsyncObserverDeliveriesUnused,
 		ChainsyncIntersectAtLedgerTip:        n.chainsyncIntersectAtLedgerTip,
 		ChainsyncObservePeerTip:              n.chainsyncObservePeerTip,
 		ChainsyncRecordDeliveredPeerTip:      n.chainsyncRecordDeliveredPeerTip,
@@ -1409,6 +1417,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		n.ledgerState.ActiveSlotCoeffRat(),
 	)
 	genesisSelectionMode := n.initialGenesisSelectionMode()
+	if n.config.onGenesisSelectionResolved != nil {
+		n.config.onGenesisSelectionResolved(genesisSelectionMode)
+	}
 	chainSelectorConfig := n.buildChainSelectorConfig(
 		chainSelectorSecurityParam,
 		genesisSelectionMode,
@@ -2433,6 +2444,23 @@ func (n *Node) isConfiguredRootConnection(
 	n.peerGovMu.RLock()
 	defer n.peerGovMu.RUnlock()
 	return n.peerGov != nil && n.peerGov.IsConfiguredRootConnection(connId)
+}
+
+// chainsyncObserverDeliveriesUnused reports whether the headers observer
+// connections deliver are counted by nothing. Observer headers are never
+// ingested; Genesis corroboration counts them as witness evidence, so they are
+// unused while Genesis selection runs without a corroboration threshold.
+// Outside Genesis selection the node is at the tip, where observers follow new
+// blocks and their tips keep chain selection informed. The Genesis exit rule
+// also needs every observer to have sent MsgAwaitReply; the ouroboros package
+// therefore stops holding an observer once its peer is within the security
+// parameter of the local tip.
+func (n *Node) chainsyncObserverDeliveriesUnused() bool {
+	if n.chainSelector == nil || n.config.genesisCorroborationPeers > 0 {
+		return false
+	}
+	active, _ := n.chainSelector.GenesisSelectionState()
+	return active
 }
 
 // corroborationIdentityForIngress returns connId's Genesis corroboration

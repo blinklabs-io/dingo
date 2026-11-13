@@ -71,6 +71,12 @@ var flagSpecs = []flagSpec{
 	),
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
+	stringFlag(
+		"SocketMode",
+		"socket-mode",
+		"",
+		"octal permissions for the UNIX socket file",
+	),
 	transformStringFlag(
 		"RunMode",
 		"run-mode",
@@ -223,6 +229,16 @@ var flagSpecs = []flagSpec{
 		"pprof bind address (wildcard exposure requires an explicit override)",
 	),
 	uintFlag("DebugPort", "debug-port", "debug pprof port (0 = disabled)"),
+	uintFlag(
+		"DebugMutexProfileFraction",
+		"debug-mutex-profile-fraction",
+		"sample 1 in N mutex contention events for the pprof mutex profile (0 = off; needs --debug-port)",
+	),
+	uintFlag(
+		"DebugBlockProfileRate",
+		"debug-block-profile-rate",
+		"pprof block profile rate in ns blocked per sample (0 = off, 1 = every event; needs --debug-port)",
+	),
 	uintFlag(
 		"HealthPort",
 		"health-port",
@@ -460,6 +476,12 @@ var flagSpecs = []flagSpec{
 		"",
 		"Unix socket for local DMQ message submission and notification",
 	),
+	stringFlag(
+		"DMQ.SocketMode",
+		"dmq-socket-mode",
+		"",
+		"octal permissions for the local DMQ Unix socket",
+	),
 	uintFlag(
 		"DMQ.MessageTTL",
 		"dmq-message-ttl",
@@ -529,17 +551,17 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"BarkArchiveMaxConcurrentFetches",
 		"bark-archive-max-concurrent-fetches",
-		"maximum concurrent Bark ArchiveService FetchBlock requests; requests over the limit are refused (0 = default of 16)",
+		"maximum concurrent Bark ArchiveService FetchBlock requests; requests over the limit are refused (0 = unlimited)",
 	),
 	intFlag(
 		"BarkArchiveLookupsPerSecond",
 		"bark-archive-lookups-per-second",
-		"sustained Bark ArchiveService block lookups per second across all callers; a FetchBlock over budget is refused (0 = default of 200)",
+		"sustained Bark ArchiveService block lookups per second across all callers; a FetchBlock over budget is refused (0 = unlimited)",
 	),
 	intFlag(
 		"BarkArchiveCallerLookupsPerSecond",
 		"bark-archive-caller-lookups-per-second",
-		"sustained Bark ArchiveService block lookups per second for one caller address or IPv6 /64 (0 = default of 50)",
+		"sustained Bark ArchiveService block lookups per second for one caller address or IPv6 /64 (0 = unlimited)",
 	),
 	stringSliceFlag(
 		"BarkOperatorCertificateFingerprints",
@@ -721,11 +743,11 @@ var flagSpecs = []flagSpec{
 		"max simultaneous connections per IP",
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
-	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections"),
+	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections (0 = unlimited)"),
 	intFlag(
 		"MaxTrustedLocalNtCConns",
 		"max-trusted-local-ntc-conns",
-		"max trusted local node-to-client connections",
+		"max trusted local node-to-client connections (0 = unlimited)",
 	),
 	durationFlag(
 		"TrustedNtCIdleTimeout",
@@ -735,7 +757,7 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"MaxNtCConnectionsPerIP",
 		"max-ntc-connections-per-ip",
-		"max node-to-client connections per IP",
+		"max node-to-client connections per IP (0 = unlimited)",
 	),
 
 	// Cache
@@ -1075,7 +1097,7 @@ var flagSpecs = []flagSpec{
 	uint64Flag(
 		"LeiosPersistenceRetentionSlots",
 		"leios-persistence-retention-slots",
-		"number of slots of Leios persistence to retain (0 keeps all history)",
+		"slots of uncertified Leios persistence to retain (0 prunes behind the immutable tip)",
 	),
 	stringFlag(
 		"LeiosVoteSigningKeyFile",

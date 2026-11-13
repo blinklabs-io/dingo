@@ -137,11 +137,9 @@ VALUES (?, 0, ?, ?, ?, ?, ?, ?)`, key, h, amount, previous, slot, withdrawal, po
 	)
 	for i := range 2 {
 		h := hash(byte(0x30 + i))
-		exec(
-			`INSERT INTO `+tx+` (hash, slot, block_index) VALUES (?, ?, 0)`,
-			h,
-			720+i,
-		)
+		exec(`INSERT INTO `+tx+` (hash) VALUES (?)`, h)
+		exec(`INSERT INTO applied_transaction (tx_id, slot, block_index, valid)
+SELECT id, ?, 0, TRUE FROM `+tx+` WHERE hash = ?`, 720+i, h)
 		legacy(keys[i], h, "4", "50", int64(720+i), true, false)
 	}
 	runTo(registry[:index+1])

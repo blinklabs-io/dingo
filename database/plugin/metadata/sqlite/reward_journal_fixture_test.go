@@ -19,7 +19,7 @@ import (
 )
 
 // insertRewardJournalRow files a journal row, written in the shape the
-// removed account_reward_delta table had, as a withdrawal (owned by a bare
+// removed account_reward_delta table had, as a withdrawal (owned by an applied
 // transaction row for hash) or an event credit (sourced by hash). The account
 // row is created when it does not exist.
 func insertRewardJournalRow(
@@ -48,14 +48,19 @@ WHERE NOT EXISTS (
 	}
 	if withdrawal {
 		if _, err := db.Exec(
-			`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, 0)
-ON CONFLICT (hash) DO NOTHING`, hash, slot); err != nil {
+			`INSERT INTO "transaction" (hash) VALUES (?)
+ON CONFLICT (hash) DO NOTHING`, hash); err != nil {
 			return err
 		}
 		var txID int64
 		if err := db.QueryRow(
 			`SELECT id FROM "transaction" WHERE hash = ?`, hash,
 		).Scan(&txID); err != nil {
+			return err
+		}
+		if _, err := db.Exec(
+			`INSERT INTO applied_transaction (tx_id, slot, block_index, valid)
+VALUES (?, ?, 0, TRUE) ON CONFLICT (tx_id) DO NOTHING`, txID, slot); err != nil {
 			return err
 		}
 		if previous == "" {

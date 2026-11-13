@@ -19,9 +19,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -277,14 +279,17 @@ func TestCardanoToolsTransactionFallback(t *testing.T) {
 	defer db.Close()
 
 	_, err = db.Exec(`
-		CREATE TABLE "transaction" (id INTEGER PRIMARY KEY, hash BLOB, block_hash BLOB, slot INTEGER, fee INTEGER, block_index INTEGER);
-		INSERT INTO "transaction" VALUES (1, X'1111111111111111111111111111111111111111111111111111111111111111', X'1111111111111111111111111111111111111111111111111111111111111111', 777, 190000, 3);
+		CREATE TABLE "transaction" (id INTEGER PRIMARY KEY, hash BLOB);
+		INSERT INTO "transaction" VALUES (1, X'1111111111111111111111111111111111111111111111111111111111111111');
+		CREATE TABLE applied_transaction (tx_id INTEGER PRIMARY KEY, block_hash BLOB, slot INTEGER, fee INTEGER, block_index INTEGER);
+		INSERT INTO applied_transaction VALUES (1, X'1111111111111111111111111111111111111111111111111111111111111111', 777, 190000, 3);
 
 		CREATE TABLE account (staking_key BLOB, credential_tag INTEGER, balance INTEGER);
  INSERT INTO account VALUES (X'99999999999999999999999999999999999999999999999999999999', 0, 12345);
 
-		CREATE TABLE utxo (tx_hash TEXT, transaction_id INTEGER, address TEXT, amount TEXT, tx_id BLOB);
-		INSERT INTO utxo VALUES ('1111111111111111111111111111111111111111111111111111111111111111', 1, 'addr_test_paging', '5000000', X'1111111111111111111111111111111111111111111111111111111111111111');
+		CREATE TABLE utxo (tx_hash TEXT, address TEXT, amount TEXT, tx_id INTEGER, collateral_return_for_tx_id INTEGER, output_idx INTEGER);
+		CREATE UNIQUE INDEX idx_utxo_tx_id_output_idx ON utxo (tx_id, output_idx);
+		INSERT INTO utxo (tx_hash, address, amount, tx_id) VALUES ('1111111111111111111111111111111111111111111111111111111111111111', 'addr_test_paging', '5000000', 1);
 	`)
 	require.NoError(t, err)
 
@@ -407,16 +412,14 @@ func TestCardanoToolsWithMetadataSchema(t *testing.T) {
 		[]byte{0x22},
 		32,
 	)
-	_, err := db.Exec(
+	_, err := testutil.ExecTransactionInsert(db,
 		`INSERT INTO "transaction" (id, hash, block_hash, slot, fee, block_index) VALUES (7, ?, ?, 101, '123', 0)`,
 		txHash,
 		blockHash,
 	)
 	require.NoError(t, err)
 	_, err = db.Exec(
-		`INSERT INTO utxo (transaction_id, tx_id, output_idx, amount) VALUES (7, ?, 0, '5000001'), (7, ?, 1, '7000002')`,
-		txHash,
-		txHash,
+		`INSERT INTO utxo (tx_id, output_idx, amount) VALUES (7, 0, '5000001'), (7, 1, '7000002')`,
 	)
 	require.NoError(t, err)
 	_, err = db.Exec(
@@ -534,4 +537,61 @@ func TestParseAddressOrCredential(t *testing.T) {
 	// Invalid format
 	_, _, err = parseAddressOrCredential("invalid_addr_format!")
 	assert.Error(t, err)
+}
+
+// get_transaction totals a transaction's outputs, its collateral return
+// included, through the unique (tx_id, output_idx) index, which leads with
+// the producer's row id.
+func TestTransactionOutputTotalsSearchProducerIndex(t *testing.T) {
+	t.Parallel()
+	db := newSchemaDB(t)
+	_, err := testutil.ExecTransactionInsert(db,
+		`INSERT INTO "transaction" (id, hash, slot, block_index) VALUES (7, X'11', 1, 0)`,
+	)
+	require.NoError(t, err)
+	_, err = testutil.ExecTransactionInsert(db,
+		`INSERT INTO "transaction" (id, hash, slot, block_index) VALUES (8, X'22', 2, 0)`,
+	)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+INSERT INTO "transaction" (id, hash) VALUES (9, X'33');
+INSERT INTO utxo (tx_id, output_idx, amount) VALUES (7, 0, '5'), (7, 1, '7'), (7, 2, '17');
+INSERT INTO utxo (tx_id, collateral_return_for_tx_id, output_idx, amount) VALUES (8, 8, 0, '11');
+INSERT INTO utxo (tx_id, output_idx, amount) VALUES (9, 0, '13')`)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		id   int
+		want [2]uint64
+	}{
+		{7, [2]uint64{3, 29}},
+		{8, [2]uint64{1, 11}},
+		{9, [2]uint64{1, 13}},
+		{10, [2]uint64{0, 0}},
+	} {
+		var count int
+		var total uint64
+		require.NoError(t, db.QueryRow(
+			transactionOutputTotalsSQL, tc.id,
+		).Scan(&count, &total))
+		require.Equal(t, int(tc.want[0]), count, "tx %d count", tc.id)
+		require.Equal(t, tc.want[1], total, "tx %d total", tc.id)
+	}
+
+	rows, err := db.Query(
+		"EXPLAIN QUERY PLAN "+transactionOutputTotalsSQL, 7,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+		plan = append(plan, detail)
+	}
+	require.NoError(t, rows.Err())
+	joined := strings.Join(plan, "\n")
+	require.NotContains(t, joined, "SCAN utxo", "plan:\n%s", joined)
+	require.Regexp(t, `idx_utxo_tx_id_output_idx|sqlite_autoindex_utxo_1 \(tx_id=\?\)`, joined, "plan:\n%s", joined)
 }

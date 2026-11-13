@@ -25,10 +25,11 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
-const rewardJournalVersion = 60
+const rewardJournalVersion = 65
 
 // execAll runs statements and fails the test on the first error.
 func execAll(t *testing.T, db *sql.DB, statements ...string) {
@@ -37,6 +38,14 @@ func execAll(t *testing.T, db *sql.DB, statements ...string) {
 		_, err := db.ExecContext(context.Background(), statement)
 		require.NoError(t, err, statement)
 	}
+}
+
+// execTransactionInsert writes a transaction fixture as its identity row and
+// its application row.
+func execTransactionInsert(t *testing.T, db *sql.DB, statement string) {
+	t.Helper()
+	_, err := testutil.ExecTransactionInsert(db, statement)
+	require.NoError(t, err, statement)
 }
 
 func hexBlob(b []byte) string { return fmt.Sprintf("x'%x'", b) }
@@ -147,7 +156,7 @@ VALUES (%s, %s, 'member', %d, %d, '10', TRUE, FALSE, %d, %d, %v)`,
 	// Withdrawals: owned by transaction rows; one with a NULL previous.
 	for i := 1; i <= 4; i++ {
 		txHash := bytes.Repeat([]byte{byte(0xe0 + i)}, 32)
-		execAll(t, db, fmt.Sprintf(
+		execTransactionInsert(t, db, fmt.Sprintf(
 			`INSERT INTO "transaction" (hash, slot, block_index) VALUES (%s, %d, 0)`,
 			hexBlob(txHash),
 			640+i,

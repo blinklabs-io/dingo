@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -112,8 +111,9 @@ func (ls *LedgerState) clearUnrecoverableRollbacks() {
 // operator-facing error plus a metric, rather than only the per-attempt
 // WARN that otherwise repeats indefinitely with zero forward progress.
 // Any local-tip progress discards the point's accumulated failures. For
-// peer-fork failures, a point retained on the local primary chain is only
-// diagnosed as stuck when the local tip remains unchanged for the full window.
+// every reason, including the protocol-constrained ones, a point retained on
+// the local primary chain (origin included) is only diagnosed as stuck when
+// the local tip remains unchanged for the full window; origin never is.
 //
 // Callers must hold chainsyncMutex.
 func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(
@@ -146,13 +146,8 @@ func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(
 	if !stuck {
 		return
 	}
-	protocolConstrained := reason == event.ChainsyncResyncReasonRollbackExceedsK ||
-		reason == event.ChainsyncResyncReasonRollbackExceedsMithril ||
-		reason == event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor
-	if protocolConstrained {
-		ls.emitUnrecoverableRollback(point, reason, connId, count)
-		return
-	}
+	// Origin lies on every chain, so a refusal to cross to it indicts the
+	// peer (behind or freshly syncing), never the local chain.
 	if len(point.Hash) == 0 {
 		return
 	}

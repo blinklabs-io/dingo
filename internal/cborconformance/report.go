@@ -67,7 +67,7 @@ type Report struct {
 	Scenario        string             `json:"scenario"`
 	GeneratedAt     time.Time          `json:"generated_at"`
 	Corpus          string             `json:"corpus"`
-	CorpusRevision  string             `json:"corpus_revision"`
+	DatasetCommit   string             `json:"dataset_commit"`
 	ProtocolVersion string             `json:"protocol_version"`
 	Successful      bool               `json:"successful"`
 	Totals          Outcome            `json:"totals"`
@@ -195,7 +195,7 @@ func generateReport(datasetDir, corpusRevision, expectedInventory string) (Repor
 		Scenario:        scenario,
 		GeneratedAt:     time.Now().UTC(),
 		Corpus:          filepath.Base(root),
-		CorpusRevision:  corpusRevision,
+		DatasetCommit:   corpusRevision,
 		ProtocolVersion: protocolVersion,
 		Rules:           make(map[string]Outcome, len(entries)),
 		Failures:        []Failure{},

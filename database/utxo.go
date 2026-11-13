@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -43,23 +44,6 @@ var ErrUtxoHistoryCandidateLimit = errors.New(
 	"utxo history candidate limit exceeded",
 )
 
-// MaxUtxosByAddressResults is the default bound passed to UtxosByAddress
-// for callers with no more specific limit of their own. It caps how many
-// candidate rows a broad multi-address query (or a single address with an
-// unusually large UTxO set) may force the database layer to materialize.
-const (
-	MaxUtxosByAddressResults = 100_000
-	// DefaultPublicUtxoResultLimit matches the public UTxORPC key-list
-	// limit. It bounds endpoints that must aggregate a complete UTxO set.
-	DefaultPublicUtxoResultLimit = 1000
-	// DefaultPublicUtxoCborBudget allows one current mainnet maximum-size
-	// transaction per result. An output is only one part of that transaction.
-	DefaultPublicUtxoCborBudget = DefaultPublicUtxoResultLimit * (16 << 10)
-	// ExactAddressCandidateScanLimit is the existing cap used when a coarse
-	// credential match must be confirmed from output CBOR.
-	ExactAddressCandidateScanLimit = 10_000
-)
-
 // ErrUtxoCborUnavailable signals that the metadata row for a UTxO
 // exists but its CBOR could not be loaded from the blob store and
 // could not be recovered from any indexed block — typically because
@@ -69,12 +53,6 @@ const (
 // live UTxO set; only the on-the-wire bytes are unrecoverable. Callers
 // that only need indexed metadata fields can ignore this error.
 var ErrUtxoCborUnavailable = errors.New("utxo cbor unavailable")
-
-const exactAddressCandidateScanLimit = ExactAddressCandidateScanLimit
-
-var errExactAddressCandidateScanLimit = errors.New(
-	"exact address candidate scan limit reached",
-)
 
 const utxoAddressBackfillSyncKey = "dingo:utxo-addresses:backfilled"
 
@@ -884,10 +862,9 @@ func (d *Database) UtxoByRefIncludingSpent(
 }
 
 // UtxosByAddress returns all UTxOs belonging to any of the given addresses.
-// maxResults is a required, positive bound on the number of candidate rows
-// the query may materialize; callers with no more specific limit of their
-// own should pass MaxUtxosByAddressResults. Exceeding the bound returns
-// models.ErrTooManyUtxoResults.
+// maxResults is an optional bound on the number of candidate rows
+// the query may materialize; zero or negative means unbounded. Exceeding a
+// positive bound returns models.ErrTooManyUtxoResults.
 func (d *Database) UtxosByAddress(
 	ctx context.Context,
 	addrs []ledger.Address,
@@ -1209,14 +1186,7 @@ func (d *Database) UtxosByAddressWithOrdering(
 	scanQuery := *q
 	scanQuery.Limit = max(q.Limit, 128)
 	ret := make([]models.UtxoWithOrdering, 0, q.Limit)
-	candidatesProcessed := 0
 	for len(ret) < q.Limit {
-		remainingCandidates := exactAddressCandidateScanLimit -
-			candidatesProcessed
-		if remainingCandidates <= 0 {
-			return ret, errExactAddressCandidateScanLimit
-		}
-		scanQuery.Limit = min(scanQuery.Limit, remainingCandidates)
 		batch, err := d.utxoStore().GetUtxosByAddressWithOrdering(
 			&scanQuery,
 			txn.Metadata(),
@@ -1224,7 +1194,6 @@ func (d *Database) UtxosByAddressWithOrdering(
 		if err != nil {
 			return nil, err
 		}
-		candidatesProcessed += len(batch)
 		filtered, err := d.loadAndFilterOrderedUtxos(
 			ctx,
 			batch,
@@ -1242,10 +1211,6 @@ func (d *Database) UtxosByAddressWithOrdering(
 		if len(batch) < scanQuery.Limit || len(batch) == 0 {
 			break
 		}
-		if len(ret) < q.Limit &&
-			candidatesProcessed >= exactAddressCandidateScanLimit {
-			return ret, errExactAddressCandidateScanLimit
-		}
 		last := batch[len(batch)-1]
 		scanQuery.After = &models.UtxoOrderingCursor{
 			Slot:       last.TxSlot,
@@ -1261,14 +1226,13 @@ const matchingUtxoRefBatchSize = 128
 
 // MatchingUtxoRefsByAddressWithOrderingBounded scans exact-address candidates
 // in one transaction until it has q.Limit matches, exhausts the result set, or
-// reaches either work budget. exhausted reports whether the exact total is
+// reaches maxCandidates (zero or negative means unbounded). exhausted reports whether the exact total is
 // known from this scan.
 func (d *Database) MatchingUtxoRefsByAddressWithOrderingBounded(
 	ctx context.Context,
 	q *models.UtxoWithOrderingQuery,
 	txn *Txn,
 	maxCandidates int,
-	maxCborBytes int,
 ) ([]models.UtxoId, bool, error) {
 	if ctx == nil {
 		return nil, false, errors.New("bounded reference scan context is nil")
@@ -1276,18 +1240,20 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrderingBounded(
 	if q == nil {
 		return nil, false, models.ErrNilUtxoWithOrderingQuery
 	}
-	if txn == nil || q.Limit <= 0 || maxCandidates <= 0 || maxCborBytes <= 0 ||
+	if txn == nil || q.Limit <= 0 ||
 		q.MatchAllAddresses ||
 		!models.RequiresExactAddressFilter(q.AddressPatterns) {
 		return nil, false, errors.New("bounded reference scan requires an exact-address query and transaction")
+	}
+	if maxCandidates <= 0 {
+		maxCandidates = math.MaxInt
 	}
 	scanQuery := *q
 	scanQuery.Limit = min(matchingUtxoRefBatchSize, maxCandidates)
 	scanQuery.SkipAssets = true
 	scanQuery.Offset = 0
-	refs := make([]models.UtxoId, 0, min(q.Limit, maxCandidates))
+	refs := make([]models.UtxoId, 0, min(q.Limit, matchingUtxoRefBatchSize))
 	candidates := 0
-	cborBytes := 0
 	for candidates < maxCandidates && len(refs) < q.Limit {
 		if err := ctx.Err(); err != nil {
 			return nil, false, err
@@ -1309,10 +1275,6 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrderingBounded(
 			}
 			if err := ctx.Err(); err != nil {
 				return nil, false, err
-			}
-			cborBytes += len(batch[i].Cbor)
-			if cborBytes > maxCborBytes {
-				return nil, false, models.ErrUtxoQueryBudgetExceeded
 			}
 			output, err := batch[i].Decode()
 			if err != nil {
@@ -1489,7 +1451,7 @@ func (d *Database) UtxoBalanceByAddressAtSlot(
 		)
 	}
 	return d.utxoStore().GetUtxoBalanceByAddressAtSlot(
-		[]byte(address.String()), slot, ExactAddressCandidateScanLimit,
+		[]byte(address.String()), slot, 0,
 		txn.Metadata(),
 	)
 }

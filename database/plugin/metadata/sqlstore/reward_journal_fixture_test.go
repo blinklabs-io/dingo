@@ -84,16 +84,22 @@ WHERE NOT EXISTS (
 	).Scan(&accountID))
 	if row.withdrawal {
 		_, err = db.Exec(
-			`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, 0)
+			`INSERT INTO "transaction" (hash) VALUES (?)
 ON CONFLICT (hash) DO NOTHING`,
 			row.hash,
-			row.slot,
 		)
 		require.NoError(t, err)
 		var txID int64
 		require.NoError(t, db.QueryRow(
 			`SELECT id FROM "transaction" WHERE hash = ?`, row.hash,
 		).Scan(&txID))
+		_, err = db.Exec(
+			`INSERT INTO applied_transaction (tx_id, slot, block_index, valid)
+VALUES (?, ?, 0, TRUE) ON CONFLICT (tx_id) DO NOTHING`,
+			txID,
+			row.slot,
+		)
+		require.NoError(t, err)
 		previous := row.previous
 		if previous == "" {
 			previous = "0"

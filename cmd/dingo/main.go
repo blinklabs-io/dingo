@@ -105,6 +105,8 @@ func commonRun(
 			programName, cfg.Logging.Format,
 		)
 	}
+	// After the warnings above, which name the value the operator configured.
+	applyDebugLevelOverride(cfg, globalFlags.debug)
 	// Configure max processes with our logger wrapper, toss undo func
 	_, err := maxprocs.Set(maxprocs.Logger(slogPrintf))
 	if err != nil {
@@ -115,6 +117,15 @@ func commonRun(
 		"component", programName,
 	)
 	return logger, nil
+}
+
+// applyDebugLevelOverride records the --debug override in cfg so anything that
+// reports the configured level, such as the startup effective-configuration
+// line, matches the level the logger actually uses.
+func applyDebugLevelOverride(cfg *config.Config, debug bool) {
+	if debug {
+		cfg.Logging.Level = "debug"
+	}
 }
 
 // newLogger builds a slog.Logger writing to w. format selects the handler
@@ -136,10 +147,9 @@ func newLogger(
 		AddSource: addSource,
 		Level:     logLevel,
 	}
-	f := strings.ToLower(strings.TrimSpace(format))
-	formatOK := f == "" || f == "text" || f == "json"
+	resolvedFormat, formatOK := config.ResolveLogFormat(format)
 	var handler slog.Handler
-	if f == "json" {
+	if resolvedFormat == "json" {
 		handler = slog.NewJSONHandler(w, opts)
 	} else {
 		handler = slog.NewTextHandler(w, opts)
@@ -151,17 +161,16 @@ func newLogger(
 // ok=false for an unrecognized value so the caller can warn; an empty value
 // is treated as the default ("info").
 func parseLogLevel(level string) (slog.Level, bool) {
-	switch strings.ToLower(strings.TrimSpace(level)) {
+	name, ok := config.ResolveLogLevel(level)
+	switch name {
 	case "debug":
-		return slog.LevelDebug, true
-	case "", "info":
-		return slog.LevelInfo, true
-	case "warn", "warning":
-		return slog.LevelWarn, true
+		return slog.LevelDebug, ok
+	case "warn":
+		return slog.LevelWarn, ok
 	case "error":
-		return slog.LevelError, true
+		return slog.LevelError, ok
 	default:
-		return slog.LevelInfo, false
+		return slog.LevelInfo, ok
 	}
 }
 

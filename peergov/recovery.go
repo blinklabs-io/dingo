@@ -94,7 +94,7 @@ func (p *PeerGovernor) redialCandidatesLocked() []*Peer {
 		if peer == nil || peer.Connection != nil || peer.Reconnecting {
 			continue
 		}
-		if p.isPeerDeniedLocked(peer) {
+		if p.isPeerDeniedLocked(peer) || chainsyncDemoted(peer, time.Now()) {
 			continue
 		}
 		switch peer.Source {

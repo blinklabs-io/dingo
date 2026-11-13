@@ -24,7 +24,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -32,11 +31,10 @@ import (
 )
 
 // BenchmarkInsertUtxoModel is the before/after timing counterpart:
-// legacyInsertUtxo reproduces insertUtxoModel's pre-cache one-shot
-// QueryRowContext call (the exact query text and argument order that used
-// to be inlined directly in insertUtxoModel), run against the same migrated
-// schema and connection insertUtxoModel itself uses via the hot-statement
-// cache.
+// legacyInsertUtxo runs insertUtxoModel's insert uncached through the same
+// statement and Exec result path insertUtxoModel uses via the hot-statement
+// cache, against the same migrated schema and connection, so the delta is
+// statement preparation alone.
 func legacyInsertUtxo(
 	ctx context.Context,
 	db queryer,
@@ -46,25 +44,13 @@ func legacyInsertUtxo(
 	if err != nil {
 		return 0, err
 	}
-	var id int64
-	err = db.QueryRowContext(ctx, insertUtxoQueryIgnoreConflict,
-		params.TransactionID,
-		params.CollateralReturnForTxID,
-		params.TxID,
-		params.PaymentKey,
-		params.StakingKey,
-		params.CredentialTag,
-		params.DatumHash,
-		nullBytes(params.SpentAtTxID),
-		nullBytes(params.ReferencedByTxID),
-		nullBytes(params.CollateralByTxID),
-		params.AddedSlot,
-		params.DeletedSlot,
-		params.Amount,
-		params.OutputIdx,
-		params.PaymentScript,
-	).Scan(&id)
-	return id, err
+	result, err := db.ExecContext(
+		ctx, sqliteUtxoSQL.insertResultIgnore, params.args()...,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return insertedRowID(result)
 }
 
 // utxoForBenchmarkIteration builds a UTxO with a unique tx_id per i, so each
@@ -110,7 +96,7 @@ func BenchmarkInsertUtxoModel(b *testing.B) {
 	})
 }
 
-// legacyImportUtxoStatement reproduces importUtxos' former generated sqlc
+// legacyImportUtxoStatement reproduces importUtxos' former unprepared
 // call. The benchmark keeps both paths in one transaction so the measured
 // difference is statement preparation/reuse, not transaction setup.
 func legacyImportUtxoStatement(
@@ -122,10 +108,11 @@ func legacyImportUtxoStatement(
 	if err != nil {
 		return 0, err
 	}
-	return sqlitequery.New(db).CreateUtxoIfAbsent(
-		ctx,
-		sqlitequery.CreateUtxoIfAbsentParams(params),
-	)
+	var id int64
+	err = db.QueryRowContext(
+		ctx, sqliteUtxoSQL.insertIgnore, params.args()...,
+	).Scan(&id)
+	return id, err
 }
 
 func cachedImportUtxoStatement(
@@ -139,22 +126,8 @@ func cachedImportUtxoStatement(
 		return 0, err
 	}
 	var id int64
-	err = store.queryRowCached(ctx, db, insertUtxoQueryIgnoreConflict,
-		params.TransactionID,
-		params.CollateralReturnForTxID,
-		params.TxID,
-		params.PaymentKey,
-		params.StakingKey,
-		params.CredentialTag,
-		params.DatumHash,
-		nullBytes(params.SpentAtTxID),
-		nullBytes(params.ReferencedByTxID),
-		nullBytes(params.CollateralByTxID),
-		params.AddedSlot,
-		params.DeletedSlot,
-		params.Amount,
-		params.OutputIdx,
-		params.PaymentScript,
+	err = store.queryRowCached(
+		ctx, db, sqliteUtxoSQL.insertIgnore, params.args()...,
 	).Scan(&id)
 	return id, err
 }

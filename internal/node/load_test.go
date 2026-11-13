@@ -608,6 +608,7 @@ func TestCopyBlocksRaw_PreservesLinkageAtOrigin(t *testing.T) {
 		cm.PrimaryChain(),
 		nil,
 		nil,
+		nil,
 	)
 	require.NoError(t, err)
 	require.Greater(t, blocksCopied, 1)
@@ -709,6 +710,7 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 			_, err := storeRawBlockUtxoOffsets(txn, rb)
 			return err
 		},
+		nil,
 		nil,
 	)
 	require.NoError(t, err)
@@ -888,6 +890,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 		cm.PrimaryChain(),
 		nil,
 		nil,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -921,6 +924,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 			offsetsStored += stored
 			return err
 		},
+		nil,
 		nil,
 	)
 	require.NoError(t, err)
@@ -1941,4 +1945,107 @@ func TestCopyImmutableBlocksStoresUtxoOffsetsOnlyInAPIMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadBlobsWithDBRetiresCommittedChunks(t *testing.T) {
+	t.Parallel()
+
+	const chunks = 3
+	dir := copyImmutableChunkPrefix(t, chunks)
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var recorded []uint64
+	result, err := LoadBlobsWithDB(
+		context.Background(), &config.Config{}, logger, dir, db,
+		WithChunkRetirement(func(firstKept uint64) error {
+			// The kept chunk is on disk when the hook runs, and the hook
+			// runs before anything below it is deleted.
+			_, statErr := os.Stat(filepath.Join(
+				dir, immutable.ChunkName(firstKept)+".chunk",
+			))
+			require.NoError(t, statErr)
+			recorded = append(recorded, firstKept)
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+	assert.Positive(t, result.BlocksCopied)
+	require.NotEmpty(t, recorded)
+	last := recorded[len(recorded)-1]
+	assert.Equal(t, uint64(chunks-1), last)
+
+	for n := range uint64(chunks) {
+		for _, ext := range []string{"chunk", "primary", "secondary"} {
+			_, statErr := os.Stat(filepath.Join(
+				dir, immutable.ChunkName(n)+"."+ext,
+			))
+			if n < last {
+				require.ErrorIs(t, statErr, os.ErrNotExist, "chunk %d", n)
+			} else {
+				require.NoError(t, statErr, "chunk %d", n)
+			}
+		}
+	}
+}
+
+func TestLoadBlobsWithDBKeepsChunksWhenRetirementHookFails(t *testing.T) {
+	t.Parallel()
+
+	dir := copyImmutableChunkPrefix(t, 3)
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	hookErr := errors.New("marker write failed")
+	_, err := LoadBlobsWithDB(
+		context.Background(), &config.Config{}, logger, dir, db,
+		WithChunkRetirement(func(uint64) error { return hookErr }),
+	)
+	require.ErrorIs(t, err, hookErr)
+	_, statErr := os.Stat(filepath.Join(dir, "00000.chunk"))
+	require.NoError(t, statErr)
+}
+
+// An interrupted load that has already deleted its early chunks must resume
+// from the chain tip using only what is left, and end on the immutable tip.
+func TestLoadBlobsWithDBResumesAfterRetiredChunksWereDeleted(t *testing.T) {
+	t.Parallel()
+
+	const chunks = 3
+	dir := copyImmutableChunkPrefix(t, chunks)
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	wantTip, err := mustOpenImmutable(t, dir).GetTip()
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = LoadBlobsWithDB(
+		ctx, &config.Config{}, logger, dir, db,
+		WithChunkRetirement(func(firstKept uint64) error {
+			if firstKept >= 1 {
+				cancel() // interrupt right after chunk 0 is retired
+			}
+			return nil
+		}),
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	_, statErr := os.Stat(filepath.Join(dir, "00000.chunk"))
+	require.ErrorIs(t, statErr, os.ErrNotExist, "chunk 0 should be retired")
+	partial, err := database.BlocksRecent(context.Background(), db, 1)
+	require.NoError(t, err)
+	require.Len(t, partial, 1)
+	require.Less(t, partial[0].Slot, wantTip.Slot, "load must be partial")
+
+	result, err := LoadBlobsWithDB(
+		context.Background(), &config.Config{}, logger, dir, db,
+		WithChunkRetirement(nil),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, wantTip.Slot, result.ImmutableTipSlot)
+	final, err := database.BlocksRecent(context.Background(), db, 1)
+	require.NoError(t, err)
+	require.Len(t, final, 1)
+	assert.Equal(t, wantTip.Slot, final[0].Slot)
+	assert.Equal(t, wantTip.Hash, final[0].Hash)
 }

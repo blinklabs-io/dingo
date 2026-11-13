@@ -130,28 +130,13 @@ func TestBlockfrostMutationAdmissionPrecedesBodyRead(t *testing.T) {
 	assert.Equal(t, int32(2), node.calls.Load())
 }
 
-func TestBlockfrostMutationAdmissionHonorsCancelledContext(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	release, ok := newRequestAdmission(1, 1).acquire(ctx, "client")
-	assert.False(t, ok)
-	assert.Nil(t, release)
-}
-
 func TestBlockfrostProviderSecurityDefaults(t *testing.T) {
 	t.Parallel()
 
 	cfg := DefaultProviderConfig()
 	assert.Equal(t, "127.0.0.1", cfg.Host)
-	assert.Positive(t, cfg.MaxConcurrentMutations)
-	assert.Positive(t, cfg.MaxConcurrentMutationsPerClient)
-	assert.LessOrEqual(
-		t,
-		cfg.MaxConcurrentMutationsPerClient,
-		cfg.MaxConcurrentMutations,
-	)
+	assert.Zero(t, cfg.MaxConcurrentMutations)
+	assert.Zero(t, cfg.MaxConcurrentMutationsPerClient)
 }
 
 func TestNormalizeListenHostStripsOneBracketPair(t *testing.T) {

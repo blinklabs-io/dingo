@@ -62,6 +62,17 @@ var errCertifiedEndorserBlockUnavailable = errors.New(
 	"certified Leios endorser block unavailable",
 )
 
+// errEndorserBlockValidationPending marks a certified endorser block whose
+// background semantic validation has not finished. It wraps
+// errCertifiedEndorserBlockUnavailable so the block is retried, and the
+// pipeline does not count the wait toward the stuck-pipeline halt: the verdict
+// is outstanding, not a failure, and a validation queued behind a long database
+// writer can outlast any fixed restart budget.
+var errEndorserBlockValidationPending = fmt.Errorf(
+	"%w: endorser block semantic validation is pending",
+	errCertifiedEndorserBlockUnavailable,
+)
+
 // errLeiosCertificateWithoutAnnouncement is the verdict on a certifying ranking
 // block whose parent announced no endorser block. There is nothing for the
 // certificate to certify, so the block is invalid, as in the reference
@@ -1285,10 +1296,7 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 	if ls.config.EndorserBlockValidation != nil {
 		switch ls.config.EndorserBlockValidation(ebHash.Bytes(), ebSlot) {
 		case EndorserBlockValidationPending:
-			return fmt.Errorf(
-				"%w: endorser block semantic validation is pending",
-				errCertifiedEndorserBlockUnavailable,
-			)
+			return errEndorserBlockValidationPending
 		case EndorserBlockValidationInvalid:
 			return ls.rejectLeiosCertifyingBlock(
 				block,

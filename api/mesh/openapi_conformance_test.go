@@ -147,13 +147,6 @@ func assertMeshErrorResponses(
 	deps := newTestDeps()
 	handler := newTestHandler(t, deps)
 
-	busy := newTestServer(t, newTestDeps())
-	for range cap(busy.bulkSlots) {
-		busy.bulkSlots <- struct{}{}
-	}
-	busyMux := http.NewServeMux()
-	busy.registerRoutes(busyMux)
-
 	cases := []struct {
 		name      string
 		handler   http.Handler
@@ -181,13 +174,6 @@ func assertMeshErrorResponses(
 			operation: operation(http.MethodPost, "/account/coins"),
 			body:      mustJSON(t, coinsRequest("")),
 			want:      ErrInvalidRequest,
-		},
-		{
-			name:      "busy account coins",
-			handler:   busyMux,
-			operation: operation(http.MethodPost, "/account/coins"),
-			body:      mustJSON(t, coinsRequest(addr)),
-			want:      ErrUnavailable,
 		},
 	}
 	for _, tc := range cases {

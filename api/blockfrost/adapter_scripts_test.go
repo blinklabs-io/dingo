@@ -352,14 +352,14 @@ func TestNodeAdapterScriptUTXOs(t *testing.T) {
 		if tx == firstTx {
 			// insertAdapterUtxo has no datum hash column.
 			_, err := raw.Exec(
-				`UPDATE utxo SET datum_hash = ? WHERE tx_id = ?`,
+				`UPDATE utxo SET datum_hash = ? WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 				datumHash, tx.Hash,
 			)
 			require.NoError(t, err)
 		}
 		var utxoID int64
 		require.NoError(t, raw.QueryRow(
-			`SELECT id FROM utxo WHERE tx_id = ?`, tx.Hash,
+			`SELECT id FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, tx.Hash,
 		).Scan(&utxoID))
 		holds := script
 		if tx == otherTx {
@@ -373,7 +373,7 @@ func TestNodeAdapterScriptUTXOs(t *testing.T) {
 		require.NoError(t, err)
 		if tx == spentTx {
 			_, err := raw.Exec(
-				`UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = 51 WHERE id = ?`,
+				`UPDATE utxo SET spent_at_tx_id = (SELECT id FROM "transaction" WHERE hash = ?), deleted_slot = 51 WHERE id = ?`,
 				spender.Hash,
 				utxoID,
 			)

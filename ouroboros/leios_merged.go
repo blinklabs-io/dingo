@@ -1541,6 +1541,13 @@ func (o *Ouroboros) updateLeiosEndorserBlockValidation(
 	return &updated
 }
 
+// LeiosValidationRetryRequestsForTesting returns how many endorser-block
+// validation retries have been requested, so the root package can prove the
+// ledger's at-tip notification reaches this retry path.
+func (o *Ouroboros) LeiosValidationRetryRequestsForTesting() uint64 {
+	return o.leiosValidationRetryGen.Load()
+}
+
 // RetryLeiosEndorserBlockValidations schedules background validation of every
 // cached endorser block whose last attempt found its basis block not yet the
 // ledger tip. A block whose attempt is still running is retried when that

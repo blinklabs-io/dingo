@@ -30,21 +30,21 @@ var _ metadata.BlockTransactionTotalsStore = (*Store)(nil)
 // transactions instead of allowing a join order that scans all output history.
 const blockTransactionAmountRows = `-- name: ProjectBlockTransactionAmountRows
 SELECT 0 AS is_output, tx.fee AS amount
-FROM "transaction" tx
+FROM applied_transaction tx
 WHERE tx.block_hash = ?
 UNION ALL
 SELECT 1 AS is_output, u.amount
-FROM "transaction" tx
-LEFT JOIN utxo u ON u.transaction_id = tx.id
+FROM applied_transaction tx
+LEFT JOIN utxo u ON u.tx_id = tx.tx_id AND u.collateral_return_for_tx_id IS NULL
 WHERE tx.block_hash = ?
   AND (COALESCE(tx.valid, FALSE) OR NOT EXISTS (
-    SELECT 1 FROM utxo cr WHERE cr.collateral_return_for_tx_id = tx.id
+    SELECT 1 FROM utxo cr WHERE cr.collateral_return_for_tx_id = tx.tx_id
   ))
 UNION ALL
 SELECT 1 AS is_output, (
-  SELECT cr.amount FROM utxo cr WHERE cr.collateral_return_for_tx_id = tx.id
+  SELECT cr.amount FROM utxo cr WHERE cr.collateral_return_for_tx_id = tx.tx_id
 ) AS amount
-FROM "transaction" tx
+FROM applied_transaction tx
 WHERE tx.block_hash = ? AND NOT COALESCE(tx.valid, FALSE)`
 
 // GetBlockTransactionTotals projects recorded fees and effective outputs.

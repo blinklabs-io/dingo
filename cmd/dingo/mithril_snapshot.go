@@ -249,8 +249,6 @@ func newMithrilServer(
 			Aggregator:      aggregator,
 			Logger:          logger,
 		}),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
 	}, nil
 }
 

@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -146,15 +147,15 @@ func TestValidateShelleyDelegCertsMIR_SingleTxSequential(t *testing.T) {
 					majorPParams{major: era.major},
 				)
 				require.Error(t, err)
-				var negErr MIRProducesNegativeUpdateError
+				var negErr shelley.MIRProducesNegativeUpdateError
 				require.True(
 					t,
 					errors.As(err, &negErr),
-					"expected MIRProducesNegativeUpdateError, got %T: %v",
+					"expected shelley.MIRProducesNegativeUpdateError, got %T: %v",
 					err,
 					err,
 				)
-				assert.Equal(t, big.NewInt(10), negErr.Existing)
+				assert.Equal(t, big.NewInt(10), negErr.Pending)
 				assert.Equal(t, big.NewInt(-11), negErr.Delta)
 			})
 
@@ -231,11 +232,11 @@ func TestValidateShelleyDelegCertsMIR_CrossTxSameEpoch(t *testing.T) {
 					majorPParams{major: era.major},
 				)
 				require.Error(t, err)
-				var negErr MIRProducesNegativeUpdateError
+				var negErr shelley.MIRProducesNegativeUpdateError
 				require.True(
 					t,
 					errors.As(err, &negErr),
-					"expected MIRProducesNegativeUpdateError, got %T: %v",
+					"expected shelley.MIRProducesNegativeUpdateError, got %T: %v",
 					err,
 					err,
 				)
@@ -297,16 +298,16 @@ func TestValidateShelleyDelegCertsMIR_CrossPotIsolation(t *testing.T) {
 					)
 					require.Error(t, err,
 						"a reserves surplus must not offset a treasury deficit")
-					var negErr MIRProducesNegativeUpdateError
+					var negErr shelley.MIRProducesNegativeUpdateError
 					require.True(
 						t,
 						errors.As(err, &negErr),
-						"expected MIRProducesNegativeUpdateError, got %T: %v",
+						"expected shelley.MIRProducesNegativeUpdateError, got %T: %v",
 						err,
 						err,
 					)
-					assert.Equal(t, uint(1), negErr.Pot)
-					assert.Equal(t, big.NewInt(0), negErr.Existing)
+					assert.Equal(t, uint(1), negErr.Source)
+					assert.Equal(t, big.NewInt(0), negErr.Pending)
 					assert.Equal(t, big.NewInt(-50), negErr.Delta)
 				},
 			)
@@ -358,13 +359,10 @@ func TestValidateShelleyDelegCertsMIR_CrossPotIsolation(t *testing.T) {
 	}
 }
 
-// TestValidateShelleyDelegCertsMIR_PreAlonzoNoOp confirms this check does not
-// fire below protocol version 5: a bare negative delta there is
-// MIRNegativesNotCurrentlyAllowedError's job (enforced upstream by
-// gouroboros's shelley.validateMirDeltaSigns via the Shelley/Allegra/Mary
-// UtxoValidateDelegation rule already wired into alonzoUtxoValidationRules'
-// predecessors), not this function's.
-func TestValidateShelleyDelegCertsMIR_PreAlonzoNoOp(t *testing.T) {
+// TestValidateShelleyDelegCertsMIR_PreAlonzoNegative confirms that below
+// protocol version 5 a negative delta is MIRNegativesNotCurrentlyAllowed, not
+// MIRProducesNegativeUpdate.
+func TestValidateShelleyDelegCertsMIR_PreAlonzoNegative(t *testing.T) {
 	t.Parallel()
 
 	cred := mirCredential(0x03)
@@ -385,27 +383,23 @@ func TestValidateShelleyDelegCertsMIR_PreAlonzoNoOp(t *testing.T) {
 			ls,
 			majorPParams{major: major},
 		)
-		require.NoError(
-			t,
-			err,
-			"protocol version %d must not trigger MIRProducesNegativeUpdate",
-			major,
-		)
+		var negative shelley.MIRNegativesNotCurrentlyAllowedError
+		require.ErrorAs(t, err, &negative, "protocol version %d", major)
+		var update shelley.MIRProducesNegativeUpdateError
+		require.False(t, errors.As(err, &update), "protocol version %d", major)
 	}
 }
 
 // noMIRProviderLedgerState implements lcommon.LedgerState (via the embedded
-// nil interface) but not MIRDelegStateProvider, so it is never called: the
-// type assertion in validateShelleyDelegCerts must fail closed (no-op)
-// rather than panic when the ledger state doesn't expose the capability.
+// nil interface) but none of the MIR capabilities.
 type noMIRProviderLedgerState struct {
 	lcommon.LedgerState
 }
 
-// TestValidateShelleyDelegCertsMIR_NoProvider confirms the check is a no-op,
-// not a panic, when the ledger state does not implement
-// MIRDelegStateProvider (every production *ledger.LedgerView does; this
-// only guards the type assertion itself).
+// TestValidateShelleyDelegCertsMIR_NoProvider confirms a ledger state without
+// the stability-window capability rejects a MIR certificate as undecidable
+// rather than skipping the check (every production *ledger.LedgerView
+// implements it).
 func TestValidateShelleyDelegCertsMIR_NoProvider(t *testing.T) {
 	t.Parallel()
 	cred := mirCredential(0x05)
@@ -419,5 +413,6 @@ func TestValidateShelleyDelegCertsMIR_NoProvider(t *testing.T) {
 		noMIRProviderLedgerState{},
 		majorPParams{major: lcommon.ProtocolVersionAlonzo},
 	)
-	require.NoError(t, err)
+	var unavailable lcommon.StabilityWindowStateUnavailableError
+	require.ErrorAs(t, err, &unavailable)
 }

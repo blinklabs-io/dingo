@@ -1284,3 +1284,66 @@ func TestLedgerStateConfigWarmsGenesisStakeOnPrototypeNetworks(t *testing.T) {
 		})
 	}
 }
+
+func TestBlockProducerPoolsIsNilForAnEmptyList(t *testing.T) {
+	t.Parallel()
+	cfg := NewConfig(WithBlockProducerPools([]BlockProducerPool{}...))
+	require.Nil(t, cfg.BlockProducerPools())
+}
+
+func TestConfigValidateRejectsSinglePoolKeysWithBlockProducerPools(t *testing.T) {
+	t.Parallel()
+
+	pool := BlockProducerPool{
+		ShelleyVRFKey:                 "/keys/a/vrf.skey",
+		ShelleyKESKey:                 "/keys/a/kes.skey",
+		ShelleyOperationalCertificate: "/keys/a/opcert.cert",
+	}
+	tests := []struct {
+		name    string
+		opts    []ConfigOptionFunc
+		wantErr bool
+	}{
+		{name: "pools alone"},
+		{
+			name: "pools with the shared sign timeout",
+			opts: []ConfigOptionFunc{
+				WithShelleyKESAgentSignTimeout(2 * time.Second),
+			},
+		},
+		{
+			name:    "pools with a top-level VRF key",
+			opts:    []ConfigOptionFunc{WithShelleyVRFKey("/keys/vrf.skey")},
+			wantErr: true,
+		},
+		{
+			name: "pools with a top-level remote KES agent",
+			opts: []ConfigOptionFunc{
+				WithShelleyKESAgentRemote("agent:3100", "c.pem", "k.pem", ""),
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			opts := append([]ConfigOptionFunc{
+				WithNetworkMagic(1),
+				WithPrometheusRegistry(prometheus.NewRegistry()),
+				WithListeners(ListenerConfig{
+					ListenNetwork: "tcp",
+					ListenAddress: "127.0.0.1:0",
+				}),
+				WithBlockProducerPools(pool),
+			}, tt.opts...)
+			n, err := New(NewConfig(opts...))
+			if tt.wantErr {
+				require.ErrorContains(t, err, "WithBlockProducerPools replaces")
+				return
+			}
+			require.NoError(t, err)
+			// New starts the event bus goroutines; Stop releases them.
+			t.Cleanup(func() { _ = n.Stop() })
+		})
+	}
+}

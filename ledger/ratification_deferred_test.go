@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -997,7 +998,7 @@ func (s *govDiffScenario) seedRetiringPool(t *testing.T, retireEpoch uint64) {
 	require.NoError(t, raw.QueryRow(
 		`SELECT id FROM pool WHERE pool_key_hash = ?`, pool,
 	).Scan(&poolID))
-	res, err := raw.Exec(
+	res, err := testutil.ExecTransactionInsert(raw,
 		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, ?)`,
 		repeatByte(32, 0xb5), s.epoch.StartSlot+1, 0,
 	)
@@ -1104,7 +1105,6 @@ func TestDeferredRatificationMatchesBoundaryRatification(t *testing.T) {
 	require.NotEqual(t, got[0].Treasury, last.Treasury)
 	require.NotZero(t, last.DRepPower)
 	require.NotEmpty(t, last.Mark)
-
 }
 
 type writeOnlySnapshot struct{}

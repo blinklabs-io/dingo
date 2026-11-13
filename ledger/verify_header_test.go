@@ -8852,25 +8852,25 @@ func TestValidateChainSelectionHeaderCryptoDefersOnUnpublishedNonce(
 }
 
 // TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate proves that
-// ShouldVerifyChainSelectionHeaderCrypto shares the same Mithril exemption as
-// the ledger's own chainsync header-queue gate (shouldEnforceBlockPipelineCrypto),
-// so a competing peer's header is exempt under exactly the same condition the
-// applied chain already is.: a coarse ValidateHistorical=false
-// historical-sync toggle must not exempt header crypto -- only a slot a
-// Mithril certificate already covers may skip it, regardless of
-// validationEnabled.
+// ShouldVerifyChainSelectionHeaderCrypto shares the Mithril exemption of the
+// ledger's own chainsync header-queue gate: a coarse ValidateHistorical=false
+// historical-sync toggle must not exempt header crypto, and only a block the
+// Mithril import certified may skip it, regardless of validationEnabled. A
+// peer chooses the slot its header carries, so a covered slot alone is not
+// enough: the block must be on the primary chain with the trust boundary.
 func TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate(
 	t *testing.T,
 ) {
 	t.Parallel()
 
 	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
-	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	slot := tb.block.SlotNumber()
+	point := ocommon.NewPoint(slot, tb.block.Hash().Bytes())
 
 	assert.True(
 		t,
-		ls.ShouldVerifyChainSelectionHeaderCrypto(slot),
+		ls.ShouldVerifyChainSelectionHeaderCrypto(point),
 		"verification must run once the epoch nonce is cached, "+
 			"independent of validationEnabled",
 	)
@@ -8879,18 +8879,40 @@ func TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate(
 	ls.publishSnapshotsLocked()
 	assert.True(
 		t,
-		ls.ShouldVerifyChainSelectionHeaderCrypto(slot),
+		ls.ShouldVerifyChainSelectionHeaderCrypto(point),
 		"verification must still run once live validation is enabled and the "+
 			"epoch nonce is cached",
 	)
 
 	ls.mithrilLedgerSlot = slot
 	ls.publishSnapshotsLocked()
+	assert.True(
+		t,
+		ls.ShouldVerifyChainSelectionHeaderCrypto(point),
+		"a header at a covered slot off the certified chain must be verified",
+	)
+	verifyNow, trusted := ls.chainsyncHeaderCryptoPolicy(point)
+	assert.True(t, verifyNow)
+	assert.False(t, trusted)
+
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:       1,
+		Slot:     slot,
+		Hash:     point.Hash,
+		PrevHash: tb.block.PrevHash().Bytes(),
+		Cbor:     tb.block.Cbor(),
+		Number:   tb.block.BlockNumber(),
+		Type:     uint(tb.block.Type()), //nolint:gosec
+	}, nil))
+	ls.mithrilLedgerHash = point.Hash
 	assert.False(
 		t,
-		ls.ShouldVerifyChainSelectionHeaderCrypto(slot),
-		"a Mithril-covered slot must be exempt, matching the applied-chain gate",
+		ls.ShouldVerifyChainSelectionHeaderCrypto(point),
+		"the certified block must be exempt, matching the applied-chain gate",
 	)
+	verifyNow, trusted = ls.chainsyncHeaderCryptoPolicy(point)
+	assert.False(t, verifyNow)
+	assert.True(t, trusted)
 }
 
 // TestShouldVerifyChainSelectionHeaderCryptoIgnoresMissingNonce is a
@@ -8924,7 +8946,9 @@ func TestShouldVerifyChainSelectionHeaderCryptoIgnoresMissingNonce(
 	)
 	assert.True(
 		t,
-		ls.ShouldVerifyChainSelectionHeaderCrypto(futureSlot),
+		ls.ShouldVerifyChainSelectionHeaderCrypto(
+			ocommon.NewPoint(futureSlot, nil),
+		),
 		"a missing epoch nonce must not exempt a non-Mithril slot from "+
 			"verification -- ValidateChainSelectionHeaderCrypto must be given "+
 			"the chance to return a deferred error instead",

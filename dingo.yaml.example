@@ -103,6 +103,11 @@
       # TxSubmission backpressure as it approaches rejectionWatermark.
       # evictionWatermark: 0
       # rejectionWatermark: 1.0
+      # Size of the validation-slot pool used by transactions submitted through
+      # an API (Mesh, UTxO RPC, Blockfrost). It is separate from the pool used
+      # by peer relay, so API load never delays relay. Submissions wait for a
+      # slot rather than being refused. 0 uses the peer pool's size.
+      # maxApiSubmissions: 0
   # api:
     # blockfrost:
       # provider: "builtin"
@@ -154,6 +159,12 @@
 # Path to the UNIX domain socket file used by the server
 # CLI: --socket-path
 # socketPath: "dingo.socket"
+# Octal permissions for socketPath. 0600 is owner-only; use 0660 to share with
+# the socket's group. Modes writable by other users are rejected. The parent
+# directory must be owned by this user or root and not be group/world-writable.
+# CLI: --socket-mode
+# Env: CARDANO_SOCKET_MODE
+# socketMode: "0600"
 
 # Name of the Cardano network
 # CLI: --network
@@ -251,6 +262,18 @@
 # Set a wildcard address only when an external network control protects it.
 # CLI: --debug-bind-addr  Env: DINGO_DEBUG_BIND_ADDR
 # debugBindAddr: "127.0.0.1"
+
+# Mutex and block profiles served at /debug/pprof/mutex and /debug/pprof/block
+# stay empty until a sampling rate is set. Both are off at 0 and only apply
+# while debugPort is non-zero; they add overhead, so enable them for a
+# diagnosis rather than permanently.
+# debugMutexProfileFraction samples on average 1 in N contended mutex events.
+# CLI: --debug-mutex-profile-fraction  Env: DINGO_DEBUG_MUTEX_PROFILE_FRACTION
+# debugMutexProfileFraction: 0
+# debugBlockProfileRate records one blocking event per N nanoseconds spent
+# blocked (1 records every event).
+# CLI: --debug-block-profile-rate  Env: DINGO_DEBUG_BLOCK_PROFILE_RATE
+# debugBlockProfileRate: 0
 
 # Enable OpenTelemetry tracing. Disabled by default: with no collector
 # listening, the OTLP exporter logs noisy connection errors. When enabled
@@ -356,26 +379,23 @@
 # CLI: --bark-host
 # barkHost: ""
 
-# Maximum ArchiveService FetchBlock requests Bark serves at once. ArchiveService
-# takes no client credentials, so this and the per-request reference cap bound
-# the storage work anyone who can reach the listener can cause; a request over
-# the limit is refused rather than queued. 0 selects the default of 16.
+# Optional: maximum ArchiveService FetchBlock requests Bark serves at once. A
+# request over the limit is refused rather than queued. 0 (the default) is
+# unlimited.
 # Can be overridden with DINGO_BARK_ARCHIVE_MAX_CONCURRENT_FETCHES
 # CLI: --bark-archive-max-concurrent-fetches
 # barkArchiveMaxConcurrentFetches: 0
 
-# Sustained ArchiveService block lookups per second across all callers. A
-# reference that names no block still costs a storage lookup, so a FetchBlock
-# whose references do not fit the remaining budget is refused whole with
-# RESOURCE_EXHAUSTED. 0 selects the default of 200.
+# Optional: sustained ArchiveService block lookups per second across all
+# callers. A FetchBlock whose references do not fit the remaining budget is
+# refused whole with RESOURCE_EXHAUSTED. 0 (the default) is unlimited.
 # Can be overridden with DINGO_BARK_ARCHIVE_LOOKUPS_PER_SECOND
 # CLI: --bark-archive-lookups-per-second
 # barkArchiveLookupsPerSecond: 0
 
-# Sustained ArchiveService block lookups per second for one caller, keyed by
-# IPv4 address or IPv6 /64. Callers behind one proxy share an allowance, and
-# a Dingo node reading expired history through barkBaseUrl is one caller. 0
-# selects the default of 50.
+# Optional: sustained ArchiveService block lookups per second for one caller,
+# keyed by IPv4 address or IPv6 /64. Callers behind one proxy share an
+# allowance. 0 (the default) is unlimited.
 # Can be overridden with DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND
 # CLI: --bark-archive-caller-lookups-per-second
 # barkArchiveCallerLookupsPerSecond: 0
@@ -594,6 +614,19 @@
 #   # Or plain TCP, taking no pin or client certificate (the agent's
 #   # counterpart is kes_agent.attested_plaintext):
 #   # shelleyKesAgentPlaintext: true
+#   # Or forge for several pools, each with its own keys and KES source
+#   # (replaces the shelley* settings above; YAML only, not with Leios):
+#   # A remote shelleyKesAgentAddress serves one pool only, so each pool
+#   # signing remotely needs its own agent address; a local socket can
+#   # serve several pools through its profiles.
+#   # blockProducerPools:
+#   #   - shelleyVrfKey: "/keys/pool-a/vrf.skey"
+#   #     shelleyOperationalCertificate: "/keys/pool-a/opcert.cert"
+#   #     shelleyKesAgentSocket: "/run/kes-agent/service.sock"
+#   #     shelleyKesAgentMode: "sign"
+#   #   - shelleyVrfKey: "/keys/pool-b/vrf.skey"
+#   #     shelleyKesKey: "/keys/pool-b/kes.skey"
+#   #     shelleyOperationalCertificate: "/keys/pool-b/opcert.cert"
 #   # With storageMode: "core", Badger blob defaults switch to mmap-only:
 #   #   blockCacheSize: 0
 #   #   indexCacheSize: 0
@@ -710,17 +743,21 @@
 # Can be overridden with DINGO_LEIOS_VOTE_SIGNING_KEY_FILE.
 # leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
 
-# Optional retention for persisted Leios endorser-block history used by
-# leios-fetch to serve historical blocks after the in-memory cache expires.
-# Zero or unset retains all history. Positive values must be at least the
-# network stability window, ceil(3k/f) slots. A positive value keeps records from the
-# highest persisted endorser-block slot back through this many slots; older
-# manifests and transaction bodies are pruned at startup and hourly. This does
-# not remove already-applied ledger state, but historical serving and a later
-# rollback/replay that needs pruned data then depend on a connected peer.
-# Hourly sweeps list manifests to find the highest persisted slot, then scan
-# the shared Leios prefix for deletion candidates. Object stores pay both
-# listing costs plus per-key delete requests.
+# Retention for persisted Leios endorser-block history used by leios-fetch to
+# serve historical blocks after the in-memory cache expires. Endorser blocks
+# certified by a ranking block and their transactions are never pruned.
+# Uncertified endorser blocks are pruned once the immutable point (k blocks
+# behind the tip) passes their slot, and leios-fetch refuses requests for one
+# behind it. Zero or unset uses that default. A positive value keeps
+# uncertified records from the highest persisted endorser-block slot back
+# through this many slots, but never past the immutable point, and must be at
+# least the network stability window, ceil(3k/f) slots. Older manifests and
+# transaction bodies are pruned at startup and hourly. This does not remove
+# already-applied ledger state.
+# Hourly sweeps scan the shared Leios prefix for deletion candidates and probe
+# each candidate's certification. Object stores pay the listing costs plus
+# per-key delete requests; a positive value also lists manifests to find the
+# highest persisted slot.
 # Can be overridden with DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS.
 # leiosPersistenceRetentionSlots: 0
 
@@ -901,6 +938,17 @@
 # on the local protocols; a client waiting on a blocking notification request,
 # such as dmq-node, stays quiet by design. Requests in progress never count as
 # idle.
+# Optional node-to-client connection caps. 0 (the default) means unlimited.
+# CLI: --max-ntc-conns
+# Env: DINGO_MAX_NTC_CONNS
+# maxNtCConns: 0
+# CLI: --max-ntc-connections-per-ip
+# Env: DINGO_MAX_NTC_CONNECTIONS_PER_IP
+# maxNtCConnectionsPerIP: 0
+# CLI: --max-trusted-local-ntc-conns
+# Env: DINGO_MAX_TRUSTED_LOCAL_NTC_CONNS
+# maxTrustedLocalNtCConns: 0
+
 # CLI: --trusted-ntc-idle-timeout
 # Env: DINGO_TRUSTED_NTC_IDLE_TIMEOUT
 # trustedNtCIdleTimeout: 0s
@@ -962,12 +1010,12 @@
 # topologyFile, then ledger peers found through the topic's SRV records, to
 # keep minPeers connections. DMQ peers are independent of Cardano peers.
 # CLI: --dmq-enabled, --dmq-topic, --dmq-network-magic, --dmq-socket-path,
-#   --dmq-message-ttl, --dmq-min-pool-message-interval,
+#   --dmq-socket-mode, --dmq-message-ttl, --dmq-min-pool-message-interval,
 #   --dmq-max-mempool-size, --dmq-n2n-port,
 #   --dmq-listen-address, --dmq-listen-ipv6-address, --dmq-topology-file,
 #   --dmq-min-peers, --dmq-max-peers
 # Env: DINGO_DMQ_ENABLED, DINGO_DMQ_TOPIC, DINGO_DMQ_NETWORK_MAGIC,
-#   DINGO_DMQ_SOCKET_PATH, DINGO_DMQ_MESSAGE_TTL,
+#   DINGO_DMQ_SOCKET_PATH, DINGO_DMQ_SOCKET_MODE, DINGO_DMQ_MESSAGE_TTL,
 #   DINGO_DMQ_MIN_POOL_MESSAGE_INTERVAL, DINGO_DMQ_MAX_MEMPOOL_SIZE,
 #   DINGO_DMQ_N2N_PORT, DINGO_DMQ_LISTEN_ADDRESS,
 #   DINGO_DMQ_LISTEN_IPV6_ADDRESS, DINGO_DMQ_TOPOLOGY_FILE,
@@ -983,6 +1031,10 @@
   # Unix socket for local submission and notification. Must differ from
   # socketPath. Default: "dingo-dmq.socket".
   # socketPath: "dingo-dmq.socket"
+  # Octal permissions for socketPath. Default: "0600". Use "0660" for
+  # group sharing; modes writable by other users are rejected. The parent
+  # directory must be owned by this user or root and not be group/world-writable.
+  # socketMode: "0600"
   # Longest expiry, in seconds, a submitted message may claim. Default: 1800.
   # messageTtl: 1800
   # Shortest time, in seconds, between two messages of one pool that are

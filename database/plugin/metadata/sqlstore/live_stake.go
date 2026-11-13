@@ -689,10 +689,14 @@ func (s *Store) refreshRewardLiveStakePlannerStats(
 	if s.dialect.Name() != "sqlite" {
 		return nil
 	}
-	// Historical replay grows this table after the bulk-load ANALYZE. Refresh
-	// its estimates before the finalizer joins certificates to transactions.
-	if _, err := db.ExecContext(ctx, `ANALYZE "transaction"`); err != nil {
-		return fmt.Errorf("analyze transaction before reward live stake rebuild: %w", err)
+	// Historical replay grows these tables after the bulk-load ANALYZE. Refresh
+	// their estimates before the finalizer joins certificates to transactions.
+	for _, table := range []string{`"transaction"`, "applied_transaction"} {
+		if _, err := db.ExecContext(ctx, "ANALYZE "+table); err != nil {
+			return fmt.Errorf(
+				"analyze %s before reward live stake rebuild: %w", table, err,
+			)
+		}
 	}
 	return nil
 }
@@ -916,7 +920,7 @@ func rewardLiveStakeCredentialQuery(
               ON ` + alias + `.credential_tag = a.credential_tag
              AND ` + alias + `.staking_key = a.staking_key
             LEFT JOIN certs c ON c.id = ` + alias + `.certificate_id
-            LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
+            LEFT JOIN applied_transaction tx ON tx.tx_id = c.transaction_id
             WHERE a.active = TRUE
               AND a.pool IS NOT NULL
               AND ` + inRange("a.credential_tag", "a.staking_key")

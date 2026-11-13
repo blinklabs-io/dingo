@@ -141,9 +141,10 @@ func TestHotStatementsAreRecordedUnderTheirName(t *testing.T) {
 		))
 	}
 	for _, want := range []struct{ op, name string }{
-		{"insert", "InsertTransactionIfAbsentResult"},
-		{"update", "UpdateTransactionOnConflict"},
-		{"select", "GetTransactionIDOnConflict"},
+		{"insert", "InsertTransactionIdentity"},
+		{"insert", "InsertAppliedTransaction"},
+		{"update", "UpdateAppliedTransactionOnConflict"},
+		{"select", "GetTransactionIdentityID"},
 		{"update", "ConsumeUtxoReturningStake"},
 		{"select", "GetUtxoSpendState"},
 		{"select", "SumCredentialUtxoStake"},
@@ -192,7 +193,7 @@ func newlyPreparedHotStatements() map[string]string {
 		"RewardWithdrawalExists":             rewardWithdrawalExistsSQL,
 		"UpdateAccountReward":                updateAccountRewardSQL,
 		"InsertRewardWithdrawal":             insertRewardWithdrawalSQL,
-		"GetSpendScriptHashByOutput":         spendScriptHashQuery,
+		"GetSpendScriptHashByOutput":         sqliteUtxoSQL.spendScriptHash,
 		"DeleteRedeemerScriptsByTransaction": deleteRedeemerScriptsSQL,
 		"UpsertUtxoReferenceScript":          upsertUtxoReferenceScriptQuery,
 		"GovernanceVoteCastExists":           governanceVoteCastExistsQuery,

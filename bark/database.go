@@ -45,13 +45,11 @@ var _ databaseconnect.DatabaseServiceHandler = &databaseServiceHandler{}
 // leaves page_size unset (0), matching the proto's documented "0 means
 // server default".
 const (
-	defaultCatalogPageSize   = 50
-	defaultHistoryPageSize   = 50
-	maxCatalogPageSize       = lifecycle.SnapshotCatalogPageLimit
-	maxProgressStreams       = 32
-	maxClientProgressStreams = 4
-	initialCatalogRetry      = 30 * time.Second
-	maxCatalogRetry          = 5 * time.Minute
+	defaultCatalogPageSize = 50
+	defaultHistoryPageSize = 50
+	maxCatalogPageSize     = lifecycle.SnapshotCatalogPageLimit
+	initialCatalogRetry    = 30 * time.Second
+	maxCatalogRetry        = 5 * time.Minute
 )
 
 type catalogReconciliationRetry struct {
@@ -95,7 +93,6 @@ func (r *catalogReconciliationRetry) succeeded() {
 // finer-grained than actually needed for a useful progress stream.
 const (
 	streamProgressPollInterval = 250 * time.Millisecond
-	streamProgressMaxLifetime  = 15 * time.Minute
 )
 
 // databaseServiceHandler implements bark's full DatabaseService: async
@@ -150,10 +147,6 @@ type databaseServiceHandler struct {
 	catalogReconciliationGateOnce sync.Once
 	operations                    map[string]*operation
 	busy                          bool
-	diagnostic                    chan struct{}
-	activeProgressStreams         int
-	progressStreamsByClient       map[string]int
-	progressStreamLifetime        time.Duration
 	catalogErr                    error
 	// catalogCloudDestination is set only after this handler reconciles the
 	// configured provider into the catalog. An empty value restricts available
@@ -167,78 +160,11 @@ func newDatabaseServiceHandler(
 	b *Bark,
 ) *databaseServiceHandler {
 	h := &databaseServiceHandler{
-		bark:                   b,
-		operations:             make(map[string]*operation),
-		diagnostic:             make(chan struct{}, 1),
-		progressStreamLifetime: streamProgressMaxLifetime,
+		bark:       b,
+		operations: make(map[string]*operation),
 	}
 	h.initializeSnapshotCatalog(ctx)
 	return h
-}
-
-func (h *databaseServiceHandler) admitProgressStream(
-	ctx context.Context,
-) (func(), error) {
-	clientKey := requestClientFromContext(ctx)
-	h.mu.Lock()
-	global := h.activeProgressStreams
-	client := h.progressStreamsByClient[clientKey]
-	var admissionErr error
-	switch {
-	case global >= maxProgressStreams:
-		admissionErr = errors.New("too many active operation progress streams")
-	case client >= maxClientProgressStreams:
-		admissionErr = errors.New(
-			"too many active operation progress streams for client",
-		)
-	default:
-		if h.progressStreamsByClient == nil {
-			h.progressStreamsByClient = make(map[string]int)
-		}
-		h.activeProgressStreams++
-		h.progressStreamsByClient[clientKey]++
-		global++
-		client++
-	}
-	h.mu.Unlock()
-	if admissionErr != nil {
-		h.bark.config.Logger.Warn(
-			"rejected bark operation progress stream",
-			"component", "bark",
-			"client_address", clientKey,
-			"active_streams", global,
-			"client_active_streams", client,
-		)
-		return nil, connect.NewError(
-			connect.CodeResourceExhausted,
-			admissionErr,
-		)
-	}
-	h.bark.config.Logger.Debug(
-		"admitted bark operation progress stream",
-		"component", "bark",
-		"client_address", clientKey,
-		"active_streams", global,
-		"client_active_streams", client,
-	)
-	return func() {
-		h.mu.Lock()
-		h.activeProgressStreams--
-		h.progressStreamsByClient[clientKey]--
-		if h.progressStreamsByClient[clientKey] == 0 {
-			delete(h.progressStreamsByClient, clientKey)
-		}
-		global := h.activeProgressStreams
-		client := h.progressStreamsByClient[clientKey]
-		h.mu.Unlock()
-		h.bark.config.Logger.Debug(
-			"released bark operation progress stream",
-			"component", "bark",
-			"client_address", clientKey,
-			"active_streams", global,
-			"client_active_streams", client,
-		)
-	}, nil
 }
 
 func (h *databaseServiceHandler) initializeSnapshotCatalog(
@@ -365,18 +291,6 @@ func (h *databaseServiceHandler) reconcileCloudSnapshotCatalogLocked(
 	h.catalogCloudDestination = destination
 	h.catalogRetry.succeeded()
 	return nil
-}
-
-func (h *databaseServiceHandler) beginDiagnostic() (func(), error) {
-	select {
-	case h.diagnostic <- struct{}{}:
-		return func() { <-h.diagnostic }, nil
-	default:
-		return nil, connect.NewError(
-			connect.CodeResourceExhausted,
-			errors.New("another database diagnostic is already running"),
-		)
-	}
 }
 
 // operation tracks one async CreateSnapshot/Restore/Truncate/
@@ -948,11 +862,6 @@ func (h *databaseServiceHandler) ListSnapshots(
 	ctx context.Context,
 	req *connect.Request[databasev1alpha1.ListSnapshotsRequest],
 ) (*connect.Response[databasev1alpha1.ListSnapshotsResponse], error) {
-	release, err := h.beginDiagnostic()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
 	infos, nextToken, err := h.snapshotCatalogPage(
 		ctx,
 		req.Msg.GetPageSize(),
@@ -1078,11 +987,6 @@ func (h *databaseServiceHandler) ListAvailableSnapshots(
 	ctx context.Context,
 	req *connect.Request[databasev1alpha1.ListAvailableSnapshotsRequest],
 ) (*connect.Response[databasev1alpha1.ListAvailableSnapshotsResponse], error) {
-	release, err := h.beginDiagnostic()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
 	infos, nextToken, err := h.mergedSnapshotCatalogPage(
 		ctx,
 		req.Msg.GetPageSize(),
@@ -1756,42 +1660,6 @@ func (h *databaseServiceHandler) StreamOperationProgress(
 	if err != nil {
 		return err
 	}
-	setWriteDeadline, ok := responseWriteDeadlineSetterFromContext(ctx)
-	if !ok {
-		return connect.NewError(
-			connect.CodeInternal,
-			errors.New(
-				"operation progress stream write deadline is unavailable",
-			),
-		)
-	}
-	release, err := h.admitProgressStream(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
-	lifetime := h.progressStreamLifetime
-	if lifetime <= 0 {
-		lifetime = streamProgressMaxLifetime
-	}
-	deadline := time.Now().Add(lifetime)
-	if err := setWriteDeadline(deadline); err != nil {
-		return connect.NewError(
-			connect.CodeInternal,
-			fmt.Errorf("set operation progress stream write deadline: %w", err),
-		)
-	}
-	defer func() {
-		if err := setWriteDeadline(time.Time{}); err != nil {
-			h.bark.config.Logger.Warn(
-				"failed to clear bark operation progress stream write deadline",
-				"component", "bark",
-				"error", err,
-			)
-		}
-	}()
-	lifetimeTimer := time.NewTimer(time.Until(deadline))
-	defer lifetimeTimer.Stop()
 	ticker := time.NewTicker(streamProgressPollInterval)
 	defer ticker.Stop()
 	for {
@@ -1810,11 +1678,6 @@ func (h *databaseServiceHandler) StreamOperationProgress(
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-lifetimeTimer.C:
-			return connect.NewError(
-				connect.CodeDeadlineExceeded,
-				errors.New("operation progress stream lifetime exceeded"),
-			)
 		case <-ticker.C:
 		}
 	}
@@ -1879,11 +1742,6 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 	_ context.Context,
 	_ *connect.Request[databasev1alpha1.GetDatabaseInfoRequest],
 ) (*connect.Response[databasev1alpha1.GetDatabaseInfoResponse], error) {
-	releaseDiagnostic, err := h.beginDiagnostic()
-	if err != nil {
-		return nil, err
-	}
-	defer releaseDiagnostic()
 	db, release, err := h.bark.Acquire()
 	if err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, err)

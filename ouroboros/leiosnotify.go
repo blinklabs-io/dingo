@@ -2992,15 +2992,9 @@ func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
 	o.subscribeTracked(chain.ChainUpdateEventType, retry)
 	o.subscribeTracked(event.EpochTransitionEventType, retry)
 	// An endorser block validates once its announcing block is the applied
-	// ledger tip, which the chain update above can precede. The ledger
-	// publishes this event with PublishBlocking, so the handler only
-	// schedules work.
-	o.subscribeTracked(ledger.BlockEventType, func(evt event.Event) {
-		if blockEvt, ok := evt.Data.(ledger.BlockEvent); ok &&
-			blockEvt.Action == ledger.BlockActionApply {
-			o.retryLeiosEndorserBlockValidations()
-		}
-	})
+	// ledger tip, which these triggers can precede. The ledger notifies
+	// through LedgerStateConfig.LeiosAnnouncementAtTip after that apply
+	// commits, and the node routes it to RetryLeiosEndorserBlockValidations.
 }
 
 // pruneLeiosAnnouncements bounds announcement deduplication state to the

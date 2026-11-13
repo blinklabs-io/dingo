@@ -22,14 +22,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
 // legacyConsumeUtxosBatchQuery is the row-value IN form consumeUtxosBatchQuery
 // used before it was rewritten to one point lookup per input.
 func legacyConsumeUtxosBatchQuery(rowCount int, returnStake bool) string {
-	values := strings.TrimSuffix(strings.Repeat("(?,?),", rowCount), ",")
-	returning := "tx_id, output_idx"
+	values := strings.TrimSuffix(strings.Repeat(
+		`((SELECT id FROM "transaction" WHERE hash = ?),?),`, rowCount,
+	), ",")
+	returning := utxoConsumedHash + ", output_idx"
 	if returnStake {
 		returning += ", credential_tag, staking_key, amount"
 	}
@@ -58,6 +61,7 @@ func seedSkewedUtxos(tb testing.TB, store *Store, n int) {
 	tb.Helper()
 	tx, err := store.writeDB.Begin()
 	require.NoError(tb, err)
+	ids := testutil.NewTransactionIDs(tb, tx)
 	stmt, err := tx.Prepare(
 		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
 			"added_slot, deleted_slot, spent_at_tx_id, amount, " +
@@ -66,14 +70,13 @@ func seedSkewedUtxos(tb testing.TB, store *Store, n int) {
 	require.NoError(tb, err)
 	for i := range n {
 		var deletedSlot int64
-		var spentBy []byte
+		var spentBy any
 		if i%10 != 0 {
 			deletedSlot = int64(1_000 + i)
-			spentBy = skewedUtxoTxID(i)
-			spentBy[31] = 1
+			spentBy = int64(i + 1)
 		}
 		_, err := stmt.Exec(
-			skewedUtxoTxID(i), i%4, make([]byte, 28), int64(i%2),
+			ids.ID(skewedUtxoTxID(i)), i%4, make([]byte, 28), int64(i%2),
 			int64(i), deletedSlot, spentBy, "1000000", i%2,
 		)
 		require.NoError(tb, err)
@@ -134,14 +137,14 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 	_, err = store.writeDB.Exec(
 		"UPDATE utxo SET deleted_slot = 0, spent_at_tx_id = ? "+
 			"WHERE added_slot = 9",
-		skewedUtxoTxID(9),
+		int64(9),
 	)
 	require.NoError(t, err)
 
 	_, err = store.writeDB.Exec(
 		"UPDATE utxo SET deleted_slot = 77, spent_at_tx_id = ? "+
 			"WHERE added_slot = 19",
-		skewedUtxoTxID(5_000_000),
+		int64(5_000_000),
 	)
 	require.NoError(t, err)
 
@@ -153,26 +156,40 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 	cases := map[string][]input{
 		"all_live": {live(1), live(2), live(3)},
 		"mixed": {
-			live(4), {skewedUtxoTxID(1), 1}, live(5),
-			{skewedUtxoTxID(7), 3}, {skewedUtxoTxID(9), 1},
-			{skewedUtxoTxID(999_999), 0}, live(6), live(7),
+			live(4),
+			{skewedUtxoTxID(1), 1},
+			live(5),
+			{skewedUtxoTxID(7), 3},
+			{skewedUtxoTxID(9), 1},
+			{skewedUtxoTxID(999_999), 0},
+			live(6), live(7),
 		},
 		"wrong_output_idx_of_live_tx": {live(8), {skewedUtxoTxID(80), 3}},
 		"none_live": {
-			{skewedUtxoTxID(1), 1}, {skewedUtxoTxID(2), 2},
-			{skewedUtxoTxID(19), 3}, {skewedUtxoTxID(999_998), 0},
+			{skewedUtxoTxID(1), 1},
+			{skewedUtxoTxID(2), 2},
+			{skewedUtxoTxID(19), 3},
+			{skewedUtxoTxID(999_998), 0},
 		},
 	}
-	run := func(query string, returnStake bool, in []input) (
+	legacyBind := func(args []any, hash, idx any) []any {
+		return append(args, hash, idx)
+	}
+	run := func(
+		query string,
+		returnStake bool,
+		bind func([]any, any, any) []any,
+		in []input,
+	) (
 		[]consumedRow, []string,
 	) {
 		t.Helper()
 		tx, err := store.writeDB.BeginTx(ctx, nil)
 		require.NoError(t, err)
 		defer func() { require.NoError(t, tx.Rollback()) }()
-		args := []any{int64(77), skewedUtxoTxID(5_000_000)}
+		args := []any{int64(77), int64(5_000_000)}
 		for _, in := range in {
-			args = append(args, in.txID, in.idx)
+			args = bind(args, in.txID, in.idx)
 		}
 		rows, err := tx.QueryContext(ctx, query, args...)
 		require.NoError(t, err)
@@ -204,17 +221,18 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 
 		var state []string
 		srows, err := tx.QueryContext(ctx,
-			"SELECT tx_id, output_idx, deleted_slot, spent_at_tx_id "+
+			"SELECT "+utxoConsumedHash+", output_idx, deleted_slot, spent_at_tx_id "+
 				"FROM utxo ORDER BY id",
 		)
 		require.NoError(t, err)
 		for srows.Next() {
-			var txID, spentBy []byte
+			var txID []byte
+			var spentBy sql.NullInt64
 			var idx, deleted int64
 			require.NoError(t, srows.Scan(&txID, &idx, &deleted, &spentBy))
 			state = append(
 				state,
-				fmt.Sprintf("%x:%d:%d:%x", txID, idx, deleted, spentBy),
+				fmt.Sprintf("%x:%d:%d:%v", txID, idx, deleted, spentBy),
 			)
 		}
 		require.NoError(t, srows.Err())
@@ -229,11 +247,11 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 				func(t *testing.T) {
 					wantRows, wantState := run(
 						legacyConsumeUtxosBatchQuery(len(in), returnStake),
-						returnStake, in,
+						returnStake, legacyBind, in,
 					)
 					gotRows, gotState := run(
 						consumeUtxosBatchQuery(len(in), returnStake),
-						returnStake, in,
+						returnStake, sqliteUtxoSQL.bindRef, in,
 					)
 					require.Equal(t, wantRows, gotRows)
 					require.Equal(t, wantState, gotState)
@@ -245,7 +263,8 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 	// Guard against a vacuous comparison: of the eight mixed inputs only the
 	// four live ones are spent.
 	rows, _ := run(
-		consumeUtxosBatchQuery(len(cases["mixed"]), true), true, cases["mixed"],
+		consumeUtxosBatchQuery(len(cases["mixed"]), true), true,
+		sqliteUtxoSQL.bindRef, cases["mixed"],
 	)
 	require.Len(t, rows, 4)
 }

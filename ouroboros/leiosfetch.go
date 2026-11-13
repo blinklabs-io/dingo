@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -133,18 +134,45 @@ func (o *Ouroboros) instrumentLeiosfetchBlockRangeRequest(
 	}
 }
 
+// leiosServingRefused reports whether point names an uncertified endorser
+// block behind the immutable point. The reference node garbage-collects such a
+// block with the volatile database, so it is answered as unknown even while
+// it is still cached or persisted. An unresolvable immutable point or
+// certification lookup refuses nothing: serving an extra block is harmless.
+func (o *Ouroboros) leiosServingRefused(point ocommon.Point) bool {
+	if o.leiosImmutableSlot == nil {
+		return false
+	}
+	immutableSlot, found, err := o.leiosImmutableSlot(context.Background())
+	if err != nil || !found || point.Slot >= immutableSlot {
+		return false
+	}
+	db := o.leiosDatabase()
+	if db == nil {
+		return false
+	}
+	certified, err := db.IsLeiosEBCertified(point.Slot, point.Hash)
+	return err == nil && !certified
+}
+
 func (o *Ouroboros) leiosfetchServerBlockRequest(
 	ctx oleiosfetch.CallbackContext,
 	point ocommon.Point,
 ) (protocol.Message, error) {
-	data, ok := o.lookupLeiosFetchServingData(ctx, point, nil)
-	if !ok {
-		return nil, fmt.Errorf(
+	notFound := func() error {
+		return fmt.Errorf(
 			"leios endorser block not found: %d.%x: %w",
 			point.Slot,
 			point.Hash,
 			oleiosfetch.ErrBlockNotFound,
 		)
+	}
+	if o.leiosServingRefused(point) {
+		return nil, notFound()
+	}
+	data, ok := o.lookupLeiosFetchServingData(ctx, point, nil)
+	if !ok {
+		return nil, notFound()
 	}
 	return oleiosfetch.NewMsgBlock(cbor.RawMessage(data.blockRaw)), nil
 }
@@ -154,16 +182,22 @@ func (o *Ouroboros) leiosfetchServerBlockTxsRequest(
 	point ocommon.Point,
 	txBitmap map[uint16]uint64,
 ) (protocol.Message, error) {
-	data, ok := o.lookupLeiosFetchServingData(ctx, point, func(data *leiosEndorserBlockData) bool {
-		return leiosRequestedTxsAvailable(data, txBitmap)
-	})
-	if !ok {
-		return nil, fmt.Errorf(
+	notAvailable := func() error {
+		return fmt.Errorf(
 			"leios endorser block not available: %d.%x: %w",
 			point.Slot,
 			point.Hash,
 			oleiosfetch.ErrBlockTxsNotFound,
 		)
+	}
+	if o.leiosServingRefused(point) {
+		return nil, notAvailable()
+	}
+	data, ok := o.lookupLeiosFetchServingData(ctx, point, func(data *leiosEndorserBlockData) bool {
+		return leiosRequestedTxsAvailable(data, txBitmap)
+	})
+	if !ok {
+		return nil, notAvailable()
 	}
 	if err := validateLeiosTxBitmap(data.txCount, txBitmap); err != nil {
 		return nil, err

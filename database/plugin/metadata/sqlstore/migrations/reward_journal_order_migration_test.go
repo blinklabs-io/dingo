@@ -42,7 +42,7 @@ func TestRewardJournalMigrationKeepsSameSlotOrder(t *testing.T) {
 VALUES (%s, 0, 1, 1, TRUE, '0')`, hexBlob(k)))
 			}
 			withdrawal := bytes.Repeat([]byte{0xf1}, 32)
-			execAll(t, db, fmt.Sprintf(
+			execTransactionInsert(t, db, fmt.Sprintf(
 				`INSERT INTO "transaction" (hash, slot, block_index) VALUES (%s, 900, 0)`,
 				hexBlob(withdrawal),
 			))
@@ -98,11 +98,11 @@ VALUES (%s, 0, 1, 1, TRUE, '0')`, hexBlob(key)),
 		`INSERT INTO epoch (epoch_id, start_slot) VALUES (9, 900)`,
 	)
 	withdrawal := bytes.Repeat([]byte{0xf5}, 32)
+	execTransactionInsert(t, db, fmt.Sprintf(
+		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (%s, 900, 0)`,
+		hexBlob(withdrawal),
+	))
 	execAll(t, db,
-		fmt.Sprintf(
-			`INSERT INTO "transaction" (hash, slot, block_index) VALUES (%s, 900, 0)`,
-			hexBlob(withdrawal),
-		),
 		fmt.Sprintf(`INSERT INTO account_reward_delta
 (staking_key, credential_tag, tx_hash, amount, previous_reward, added_slot,
  withdrawal, post_snapshot)

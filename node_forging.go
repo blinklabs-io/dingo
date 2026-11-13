@@ -15,7 +15,6 @@
 package dingo
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -25,7 +24,6 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/chain"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
@@ -47,6 +45,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) {
@@ -102,313 +101,6 @@ func (n *Node) setEquivocationSelfPoolID(creds *forging.PoolCredentials) {
 	}
 }
 
-func (n *Node) validateBlockProducerStartupAtSlot(
-	currentSlot uint64,
-) (creds *forging.PoolCredentials, retErr error) {
-	agentBacked := n.kesAgentConfigured()
-	if agentBacked {
-		// Agent startup installs the client before the remaining credential
-		// validation below. Do not leave that client and its serve-key loop
-		// running when a later validation step rejects the credentials.
-		defer func() {
-			if retErr != nil {
-				n.closeKESAgentClient()
-			}
-		}()
-	}
-	creds, err := n.validateBlockProducerCredentialMaterial(currentSlot)
-	if err != nil {
-		return nil, err
-	}
-	genesis, err := n.blockProducerShelleyGenesis()
-	if err != nil {
-		return nil, err
-	}
-	if err := creds.ValidateKESPeriod(genesis, currentSlot); err != nil {
-		return nil, fmt.Errorf("validate KES period: %w", err)
-	}
-	currentPeriod, err := forging.CurrentKESPeriodFromGenesis(
-		genesis,
-		currentSlot,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("compute current KES period: %w", err)
-	}
-	opCert := creds.GetOpCert()
-	if opCert == nil {
-		return nil, errors.New("block producer operational certificate is nil")
-	}
-	n.config.logger.Info(
-		"block producer credentials validated",
-		"component", "node",
-		"pool_id", creds.GetPoolID().String(),
-		"current_slot", currentSlot,
-		"current_kes_period", currentPeriod,
-		"opcert_kes_period", opCert.KESPeriod,
-		"opcert_counter", opCert.IssueNumber,
-		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
-	)
-	return creds, nil
-}
-
-// validateBlockProducerStartupForClock decides how to judge the operational
-// certificate given a wall-clock slot and whether the confirmed era history
-// actually supports it.
-//
-// When supported, this is the strict historical preflight: a certificate
-// staged for the future or already expired fails startup here. When not
-// supported, the KES-period plausibility check is deferred rather than
-// skipped — credential material is still validated and the protocol lifetime
-// is still armed, so the forger's per-slot gate has the data it needs to
-// reject the certificate before Praos leader selection.
-//
-// Split out from validateBlockProducerStartup so both branches are reachable
-// without a live LedgerState, the same reason
-// validateBlockProducerStartupAtSlot and validateBlockProducerLedgerWithView
-// exist separately.
-func (n *Node) validateBlockProducerStartupForClock(
-	slot uint64,
-	supported bool,
-) (creds *forging.PoolCredentials, retErr error) {
-	if supported {
-		return n.validateBlockProducerStartupAtSlot(slot)
-	}
-	if n.kesAgentConfigured() {
-		defer func() {
-			if retErr != nil {
-				n.closeKESAgentClient()
-			}
-		}()
-	}
-	creds, err := n.validateBlockProducerCredentialMaterial(slot)
-	if err != nil {
-		return nil, err
-	}
-	genesis, err := n.blockProducerShelleyGenesis()
-	if err != nil {
-		return nil, err
-	}
-	if err := creds.ArmKesProtocolLifetime(genesis); err != nil {
-		return nil, fmt.Errorf("arm KES protocol lifetime: %w", err)
-	}
-	opCert := creds.GetOpCert()
-	if opCert == nil {
-		return nil, errors.New("block producer operational certificate is nil")
-	}
-	var tipSlot uint64
-	if n.ledgerState != nil {
-		tipSlot = n.ledgerState.ChainTipSlot()
-	}
-	n.config.logger.Warn(
-		"block producer startup: confirmed era history does not span the current wall-clock slot yet; "+
-			"deferring the operational-certificate KES-period plausibility check until the ledger catches up. "+
-			"The opcert KES lifetime is re-checked per slot and forging cannot proceed while it fails; "+
-			"sync progress additionally gates forging whenever an upstream peer is active.",
-		"component",
-		"node",
-		"tip_slot",
-		tipSlot,
-		"opcert_kes_period",
-		opCert.KESPeriod,
-		"opcert_expiry_period",
-		creds.OpCertExpiryPeriod(),
-	)
-	return creds, nil
-}
-
-// validateBlockProducerCredentialMaterial loads the pool credentials and
-// validates the operational certificate's structure and cold-key signature,
-// without judging it against any slot. The slot-dependent KES-period
-// plausibility check lives in validateBlockProducerStartupAtSlot; callers
-// needing the certificate armed but not yet placed in time combine this with
-// PoolCredentials.ArmKesProtocolLifetime.
-func (n *Node) validateBlockProducerCredentialMaterial(
-	currentSlot uint64,
-) (*forging.PoolCredentials, error) {
-	creds := forging.NewPoolCredentials()
-	if n.kesAgentConfigured() {
-		if err := n.loadBlockProducerCredentialsFromAgent(creds,
-			currentSlot,
-		); err != nil {
-			return nil, fmt.Errorf(
-				"load pool credentials from KES agent: %w",
-				err,
-			)
-		}
-	} else if err := creds.LoadFromFiles(
-		n.config.shelleyVRFKey,
-		n.config.shelleyKESKey,
-		n.config.shelleyOperationalCertificate,
-	); err != nil {
-		return nil, fmt.Errorf("load pool credentials: %w", err)
-	}
-	if err := creds.ValidateOpCert(); err != nil {
-		return nil, fmt.Errorf("validate operational certificate: %w", err)
-	}
-	return creds, nil
-}
-
-// loadBlockProducerCredentialsFromAgent dials the configured KES agent and
-// installs its material into creds, in either serve-key or sign mode. VRF and
-// the operational certificate are always still read from local files; the
-// KES agent protocol carries only the KES signing key (and, in serve-key
-// mode, the opcert alongside it).
-//
-// It closes and replaces any previously dialed agent client first: this
-// method also runs on a live-lifecycle rebuild
-// (reinitializeBlockProducer -> validateBlockProducerStartup), and must not
-// leak the prior connection or its background goroutine.
-func (n *Node) loadBlockProducerCredentialsFromAgent(
-	creds *forging.PoolCredentials,
-	currentSlot uint64,
-) error {
-	n.closeKESAgentClient()
-
-	mode := n.config.shelleyKESAgentMode
-	if n.config.shelleyKESAgentAddress != "" {
-		// A remote agent serves only sign mode. Config validation rejects
-		// any other mode with an address, but a library caller can skip it.
-		if mode != "" && mode != kesagent.ModeSign {
-			return fmt.Errorf(
-				"remote KES agent supports only mode %q, got %q",
-				kesagent.ModeSign,
-				mode,
-			)
-		}
-		mode = kesagent.ModeSign
-	}
-	if mode == "" {
-		mode = kesagent.ModeServeKey
-	}
-
-	switch mode {
-	case kesagent.ModeServeKey:
-		return n.startKESAgentServeKey(creds, currentSlot)
-	case kesagent.ModeSign:
-		return n.startKESAgentSign(creds)
-	default:
-		return fmt.Errorf("unknown KES agent mode %q", mode)
-	}
-}
-
-// startKESAgentServeKey blocks for the agent's initial key push, installs it,
-// and starts a background loop that installs every subsequent push (a KES
-// key rotation) for as long as the node runs.
-func (n *Node) startKESAgentServeKey(
-	creds *forging.PoolCredentials,
-	startupSlot uint64,
-) error {
-	opCertKey, err := forging.LoadOperationalCertificateFile(
-		n.config.shelleyOperationalCertificate,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"failed to load operational certificate for KES agent serve-key mode: %w",
-			err,
-		)
-	}
-	client, err := kesagent.NewClient(kesagent.Config{
-		SocketPath: n.config.shelleyKESAgentSocket,
-		Mode:       kesagent.ModeServeKey,
-		Logger:     n.config.logger,
-		Metrics:    n.kesAgentClientMetrics(),
-	})
-	if err != nil {
-		return err
-	}
-
-	install := func(pk kesagent.PushedKey) error {
-		if pk.OpCert == nil || !bytes.Equal(
-			pk.OpCert.ColdVKey,
-			opCertKey.OpCertColdVKey,
-		) {
-			return errors.New(
-				"KES agent operational certificate cold key does not match local operational certificate",
-			)
-		}
-		return creds.LoadFromAgentServeKey(
-			n.config.shelleyVRFKey,
-			agentMaterialFromPushedKey(pk),
-		)
-	}
-	// Installing a push clears the validated KES protocol lifetime, exactly
-	// as LoadFromFiles does, so no credential can inherit a policy that was
-	// never checked against the material now installed. The initial push is
-	// followed by validateBlockProducerStartupAtSlot's own ValidateOpCert /
-	// ValidateKESPeriod, which re-establishes it; a push arriving later --
-	// a KES evolution, an opcert rotation, or a re-push after a reconnect --
-	// is not, so the loop must re-establish it itself. Without this,
-	// credentialGeneration.kesSign refuses every signature after the first
-	// mid-run push with "operational certificate is not validated" and the
-	// node stops forging until it is restarted.
-	//
-	// Installed and validated in one call rather than two: as two, the
-	// credentials are published with their lifetime cleared for the duration
-	// of the validation, and a leader slot landing in that window is refused
-	// for exactly the reason this callback exists to prevent. Every rotation
-	// crosses it.
-	loopInstall := func(pk kesagent.PushedKey) error {
-		if pk.OpCert == nil || !bytes.Equal(
-			pk.OpCert.ColdVKey,
-			opCertKey.OpCertColdVKey,
-		) {
-			return errors.New(
-				"KES agent operational certificate cold key does not match local operational certificate",
-			)
-		}
-		genesis, err := n.blockProducerShelleyGenesis()
-		if err != nil {
-			return err
-		}
-		return creds.LoadFromAgentServeKeyValidated(
-			n.config.shelleyVRFKey,
-			agentMaterialFromPushedKey(pk),
-			genesis,
-			n.agentInstallSlot(startupSlot),
-		)
-	}
-
-	// The initial push must succeed before startup can proceed -- the same
-	// contract LoadFromFiles has (a load failure fails block-producer
-	// startup outright) -- bounded so a dead agent fails startup rather than
-	// hanging it.
-	//nolint:contextcheck // n.ctx is the node's lifecycle context; startup itself is bounded here
-	ctx, cancel := context.WithTimeout(
-		n.blockProducerContext(),
-		kesagent.DefaultHelloTimeout*2,
-	)
-	defer cancel()
-	pk, err := client.AwaitPushedKey(ctx)
-	if err != nil {
-		_ = client.Close()
-		return fmt.Errorf("await initial KES agent key push: %w", err)
-	}
-	// ledger/forging copies the key bytes it keeps, so this copy is dead as
-	// soon as the install returns; Client.Run does the same for every later
-	// push.
-	installErr := install(pk)
-	pk.Wipe()
-	if installErr != nil {
-		_ = client.Close()
-		return installErr
-	}
-
-	n.kesAgentClient = client
-	//nolint:contextcheck // background loop is bound to the node's lifecycle, not this call
-	runCtx, runCancel := context.WithCancel(n.blockProducerContext())
-	n.kesAgentCancel = runCancel
-	go func() {
-		if err := client.Run(runCtx, loopInstall); err != nil &&
-			!errors.Is(err, context.Canceled) {
-			n.config.logger.Error(
-				"kes agent serve-key loop exited",
-				"error", err,
-			)
-		}
-	}()
-	return nil
-}
-
 // agentInstallSlot returns the slot an agent key install is validated
 // against: the node's current slot, or fallbackSlot when no ledger state is
 // wired or the slot clock cannot answer. Production block-producer startup
@@ -428,94 +120,32 @@ func (n *Node) agentInstallSlot(fallbackSlot uint64) uint64 {
 	return currentSlot
 }
 
-// startKESAgentSign installs sign-mode credentials: VRF and the operational
-// certificate from local files, KES signing delegated to the agent for the
-// lifetime of the client. There is no background loop in this mode -- the
-// agent evolves its own key internally on every Sign call.
-func (n *Node) startKESAgentSign(creds *forging.PoolCredentials) error {
-	opCertKey, err := forging.LoadOperationalCertificateFile(
-		n.config.shelleyOperationalCertificate,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"failed to load operational certificate for KES agent sign mode: %w",
-			err,
-		)
-	}
-	client, err := n.newKESAgentSignClient(opCertKey)
-	if err != nil {
-		return err
-	}
-	if err := creds.LoadFromAgentSign(
-		n.config.shelleyVRFKey,
-		n.config.shelleyOperationalCertificate,
-		client,
-	); err != nil {
-		_ = client.Close()
-		return err
-	}
-	n.kesAgentClient = client
-	return nil
-}
-
 // kesAgentSignClient is a sign-mode KES agent client, local or remote.
 type kesAgentSignClient interface {
 	forging.RemoteKESSigner
 	io.Closer
 }
 
-// newKESAgentSignClient dials nothing yet: it builds the remote client when
-// shelleyKESAgentAddress is set, otherwise the local socket client.
-func (n *Node) newKESAgentSignClient(
-	opCertKey *bursa.LoadedKey,
-) (kesAgentSignClient, error) {
-	if n.config.shelleyKESAgentAddress == "" {
-		return kesagent.NewClient(kesagent.Config{
-			SocketPath:        n.config.shelleyKESAgentSocket,
-			Mode:              kesagent.ModeSign,
-			SignTimeout:       n.config.shelleyKESAgentSignTimeout,
-			KESVKey:           opCertKey.VKey,
-			OpCertStartPeriod: opCertKey.OpCertKesPeriod,
-			Logger:            n.config.logger,
-			Metrics:           n.kesAgentClientMetrics(),
-		})
-	}
-	return kesagent.NewRemoteClient(kesagent.RemoteConfig{
-		OnNewerOpCert:     n.offerAgentOpCert,
-		Address:           n.config.shelleyKESAgentAddress,
-		ClientCertFile:    n.config.shelleyKESAgentClientCertFile,
-		ClientKeyFile:     n.config.shelleyKESAgentClientKeyFile,
-		ServerSPKISHA256:  n.config.shelleyKESAgentServerSPKISHA256,
-		Plaintext:         n.config.shelleyKESAgentPlaintext,
-		KESVKey:           opCertKey.VKey,
-		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
-		OpCert:            opCertKey.RawCBOR,
-		SignTimeout:       n.config.shelleyKESAgentSignTimeout,
-		Logger:            n.config.logger,
-		Metrics:           n.kesAgentClientMetrics(),
-	})
-}
-
-// kesAgentSignMode reports whether a configured KES agent signs headers
-// (sign mode, local or remote) rather than pushing the key (serve-key).
-func (n *Node) kesAgentSignMode() bool {
-	return n.config.shelleyKESAgentAddress != "" ||
-		n.config.shelleyKESAgentMode == kesagent.ModeSign
-}
-
-// kesAgentConfigured reports whether KES signing goes through an agent,
-// local or remote, rather than a local key file.
-func (n *Node) kesAgentConfigured() bool {
-	return n.config.shelleyKESAgentSocket != "" ||
-		n.config.shelleyKESAgentAddress != ""
-}
-
 func (n *Node) kesAgentClientMetrics() *kesagent.Metrics {
-	n.kesAgentMetricsOnce.Do(func() {
-		if n.config.promRegistry != nil {
-			n.kesAgentMetrics = kesagent.NewMetrics(n.config.promRegistry)
+	n.kesAgentMetricsMu.Lock()
+	defer n.kesAgentMetricsMu.Unlock()
+	if n.kesAgentMetrics == nil && n.config.promRegistry != nil {
+		reg := n.config.promRegistry
+		if n.producerPoolCount() > 1 {
+			// The other pools register the same series with their pool_id,
+			// so the first pool's must carry its own or the names collide.
+			// A pool ID that cannot be read is not cached: the next client
+			// built tries again.
+			poolID, err := poolIDFromOpCertFile(
+				n.primaryKeySource().keys.opCert,
+			)
+			if err != nil {
+				return nil
+			}
+			reg = n.poolMetricsRegistry(poolID)
 		}
-	})
+		n.kesAgentMetrics = kesagent.NewMetrics(reg)
+	}
 	return n.kesAgentMetrics
 }
 
@@ -555,8 +185,10 @@ func (n *Node) blockProducerContext() context.Context {
 // ReloadBlockProducerCredentials re-reads the VRF, KES and operational
 // certificate files, validates them exactly as startup does, and swaps them
 // into the running block producer. Any failure leaves the loaded credentials
-// in place and forging uninterrupted. It is refused while startup, shutdown,
-// or a live restore or truncate is in progress.
+// in place and forging uninterrupted. With several pools each reloads through
+// its own key source, and a pool that fails does not stop the others. It is
+// refused while startup, shutdown, or a live restore or truncate is in
+// progress.
 //
 // In KES agent sign mode it re-reads the VRF key and the operational
 // certificate and moves signing to a client for the new certificate; in
@@ -569,34 +201,72 @@ func (n *Node) ReloadBlockProducerCredentials() error {
 	return n.reloadCredentials(reloadTriggerSignal, nil)
 }
 
-// reloadBlockProducerCredentials is ReloadBlockProducerCredentials with the
-// clock and the ledger cross-check supplied. The replacement is loaded into
-// credentials of its own and only moved into the live set once every check has
-// passed, because loading into the live set fails closed on error, which would
-// stop a healthy producer.
-func (n *Node) reloadBlockProducerCredentials(
+// reloadPrimaryCredentials reloads the first pool, installing prep when it
+// is in sign mode.
+func (n *Node) reloadPrimaryCredentials(
 	slot uint64,
 	supported bool,
 	ledgerCheck func(*forging.PoolCredentials) error,
+	prep signReloadPrep,
 ) error {
 	live := n.blockProducerCreds.Load()
 	if live == nil {
 		return errors.New("block producer credentials are not loaded")
 	}
-	if n.kesAgentConfigured() {
-		if !n.kesAgentSignMode() {
+	return n.reloadPoolCredentials(
+		n.primaryKeySource(),
+		live,
+		slot,
+		supported,
+		ledgerCheck,
+		prep,
+	)
+}
+
+// reloadPoolCredentials reloads one pool's credentials through its key
+// source. The replacement is loaded into credentials of its own and only moved
+// into the live set once every check has passed, because loading into the live
+// set fails closed on error, which would stop a healthy producer. A failure is
+// counted against the pool when the node forges for several; credentials
+// found already loaded are not a failure. A sign-mode pool installs prep, the
+// reload its agent admitted before the lifecycle gates were taken.
+func (n *Node) reloadPoolCredentials(
+	ks *poolKeySource,
+	live *forging.PoolCredentials,
+	slot uint64,
+	supported bool,
+	ledgerCheck func(*forging.PoolCredentials) error,
+	prep signReloadPrep,
+) (retErr error) {
+	if n.producerPoolCount() > 1 {
+		defer func() {
+			if retErr != nil &&
+				!errors.Is(retErr, errCredentialsUnchanged) {
+				n.countReloadFailure(live.GetPoolID().String())
+			}
+		}()
+	}
+	if ks.kesAgentConfigured() {
+		if !ks.kesAgentSignMode() {
 			return errors.New(
 				"block producer credentials come from a KES agent in serve-key mode; rotate the key through the agent, which pushes each new key",
 			)
 		}
-		return n.reloadAgentSignCredentials(slot, supported, ledgerCheck, nil)
+		return n.installSignReload(
+			ks,
+			live,
+			slot,
+			supported,
+			ledgerCheck,
+			prep,
+		)
 	}
 	if !supported {
 		return errors.New(
 			"credential reload requires a wall-clock slot supported by confirmed era history",
 		)
 	}
-	next, err := n.validateBlockProducerStartupForClock(slot, supported)
+	next, err := ks.validateBlockProducerStartupForClock(slot, supported)
 	if err != nil {
 		return fmt.Errorf("validate reloaded credentials: %w", err)
 	}
@@ -639,24 +309,6 @@ func opCertCounterAndPeriod(opCert *forging.OpCert) (uint64, uint64) {
 func (n *Node) closeBlockProducerCredentials() {
 	if creds := n.blockProducerCreds.Swap(nil); creds != nil {
 		creds.Close()
-	}
-}
-
-// closeKESAgentClient stops the serve-key background loop (if any) and
-// closes the agent connection. Safe to call when neither exists.
-func (n *Node) closeKESAgentClient() {
-	if n.kesAgentCancel != nil {
-		n.kesAgentCancel()
-		n.kesAgentCancel = nil
-	}
-	if n.kesAgentClient != nil {
-		if err := n.kesAgentClient.Close(); err != nil {
-			n.config.logger.Warn(
-				"failed to close KES agent client",
-				"error", err,
-			)
-		}
-		n.kesAgentClient = nil
 	}
 }
 
@@ -884,6 +536,10 @@ func (n *Node) startBlockProducer(
 	ctx context.Context,
 	started []func(),
 ) ([]func(), error) {
+	if err := n.prepareMultiPool(); err != nil {
+		return started, fmt.Errorf("block producer pools: %w", err)
+	}
+	watchBaseline := n.credentialWatchBaseline()
 	//nolint:contextcheck // the KES agent loop is bound to the node lifecycle context, not this call
 	creds, err := n.validateBlockProducerStartup()
 	if err != nil {
@@ -895,9 +551,14 @@ func (n *Node) startBlockProducer(
 	n.blockProducerCreds.Store(creds)
 	n.setEquivocationSelfPoolID(creds)
 	//nolint:contextcheck // the reload loops are bound to the node lifecycle context, not this call
-	n.startKeyReloadLoops()
+	n.startKeyReloadLoops(watchBaseline)
 	started = append(started, func() {
 		n.stopKeyReloadLoops()
+		logErrIfNotNil(
+			n.config.logger,
+			"failed to stop the other block producer pools during cleanup",
+			n.stopPoolProducers(),
+		)
 		if n.blockForger != nil {
 			n.blockForger.Stop()
 		}
@@ -932,18 +593,17 @@ func (n *Node) startBlockProducer(
 	if err := n.enableLeiosVoting(creds); err != nil {
 		return started, fmt.Errorf("failed to enable leios voting: %w", err)
 	}
-	// Wire forger's slot tracker into ledger state for slot
-	// battle detection. The forger is created after the ledger
-	// state, so we use the late-binding setter.
-	if n.blockForger != nil {
-		n.ledgerState.SetForgedBlockChecker(
-			n.blockForger.SlotTracker(),
-		)
-		n.ledgerState.SetForgingEnabled(true)
-		n.ledgerState.SetSlotBattleRecorder(
-			n.blockForger,
+	// Start every other pool this node forges for.
+	if err := n.startPoolProducers(ctx); err != nil {
+		return started, fmt.Errorf(
+			"failed to start block producer pools: %w",
+			err,
 		)
 	}
+	// Wire the forgers' slot trackers into ledger state for slot
+	// battle detection. The forgers are created after the ledger
+	// state, so we use the late-binding setter.
+	n.wireForgedBlockTracking()
 	return started, nil
 }
 
@@ -955,6 +615,52 @@ func (n *Node) initBlockForger(
 ) error {
 	if creds == nil {
 		return errors.New("nil pool credentials")
+	}
+	poolID := creds.GetPoolID().String()
+	built, err := n.newPoolForger(
+		ctx,
+		creds,
+		n.poolMetricsRegistry(poolID),
+		n.slotArbiterFor(poolID),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Store election for cleanup during shutdown only after the forger is
+	// fully created and running.
+	n.setLeaderElection(built.election)
+	n.blockForger = built.forger
+	n.addArbiterMember(poolID, creds, built)
+	n.config.logger.Info(
+		"block forger started in production mode with leader election",
+		"pool_id", poolID,
+	)
+
+	return nil
+}
+
+// poolForging is one pool's running leader election and block forger.
+type poolForging struct {
+	election nodeconsensus.LeaderScheduler
+	forger   *forging.BlockForger
+	// praos is true when the election draws a Praos VRF schedule, the only
+	// kind whose leader slots a SlotArbiter can rank by VRF output.
+	praos bool
+}
+
+// newPoolForger builds and starts one pool's leader election and block
+// forger. reg is where both register their metrics and arbiter decides slots
+// this pool leads together with another pool of the node; either may be nil.
+// The caller owns stopping what it returns.
+func (n *Node) newPoolForger(
+	ctx context.Context,
+	creds *forging.PoolCredentials,
+	reg prometheus.Registerer,
+	arbiter forging.SlotArbiter,
+) (poolForging, error) {
+	if creds == nil {
+		return poolForging{}, errors.New("nil pool credentials")
 	}
 	// Create mempool adapter for the forging package.
 	mempoolAdapter := &forgingMempoolAdapter{source: n.mempool}
@@ -976,7 +682,7 @@ func (n *Node) initBlockForger(
 		LeiosHeaderExtension: n.config.leiosForgingEnabled(),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create block builder: %w", err)
+		return poolForging{}, fmt.Errorf("failed to create block builder: %w", err)
 	}
 
 	// Create block broadcaster for synchronous local chain adoption.
@@ -1006,6 +712,7 @@ func (n *Node) initBlockForger(
 	// The selected provider owns production scheduling. It receives the same
 	// ledger views used by header validation, while credentials remain owned by
 	// the existing block producer.
+	var praosSchedule bool
 	election, err := n.selectedConsensusProvider().NewLeaderScheduler(
 		func(
 			scheduleIdentity string,
@@ -1037,8 +744,12 @@ func (n *Node) initBlockForger(
 					kind,
 				)
 			}
+			praosSchedule = kind == nodeconsensus.LeaderSchedulePraos
 			election.SetConsensusIdentity(scheduleIdentity)
-			election.SetPromRegistry(n.config.promRegistry)
+			election.SetPromRegistry(reg)
+			if n.scheduleComputeGate != nil {
+				election.SetComputeGate(n.scheduleComputeGate)
+			}
 			if scheduleStore != nil {
 				election.SetScheduleStore(scheduleStore)
 			}
@@ -1046,12 +757,12 @@ func (n *Node) initBlockForger(
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("create consensus leader scheduler: %w", err)
+		return poolForging{}, fmt.Errorf("create consensus leader scheduler: %w", err)
 	}
 
 	// Start leader election (subscribes to epoch transitions)
 	if err := election.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start leader election: %w", err)
+		return poolForging{}, fmt.Errorf("failed to start leader election: %w", err)
 	}
 
 	// Create slot clock adapter for the forger
@@ -1108,7 +819,7 @@ func (n *Node) initBlockForger(
 	}
 	if forgeFence == nil {
 		_ = election.Stop()
-		return errors.New(
+		return poolForging{}, errors.New(
 			"block producer requires a metadata store for the forge fence",
 		)
 	}
@@ -1149,7 +860,8 @@ func (n *Node) initBlockForger(
 		},
 		BlockValidator:      blockValidator,
 		ForgeFence:          forgeFence,
-		PromRegistry:        n.config.promRegistry,
+		PromRegistry:        reg,
+		SlotArbiter:         arbiter,
 		LeiosProduceChecker: leiosChecker,
 		LeiosEBBroadcaster:  leiosEBCaster,
 		LeiosMempool:        leiosMempool,
@@ -1190,26 +902,21 @@ func (n *Node) initBlockForger(
 	if err != nil {
 		// Stop election to prevent goroutine leak
 		_ = election.Stop()
-		return fmt.Errorf("failed to create block forger: %w", err)
+		return poolForging{}, fmt.Errorf("failed to create block forger: %w", err)
 	}
 
 	// Start the forger with the passed context
 	if err := forger.Start(ctx); err != nil {
 		// Stop election to prevent goroutine leak
 		_ = election.Stop()
-		return fmt.Errorf("failed to start block forger: %w", err)
+		return poolForging{}, fmt.Errorf("failed to start block forger: %w", err)
 	}
 
-	// Store election for cleanup during shutdown only after the forger is
-	// fully created and running.
-	n.setLeaderElection(election)
-	n.blockForger = forger
-	n.config.logger.Info(
-		"block forger started in production mode with leader election",
-		"pool_id", poolID.String(),
-	)
-
-	return nil
+	return poolForging{
+		election: election,
+		forger:   forger,
+		praos:    praosSchedule,
+	}, nil
 }
 
 func classifyLeiosAnnouncementValidationError(err error) error {

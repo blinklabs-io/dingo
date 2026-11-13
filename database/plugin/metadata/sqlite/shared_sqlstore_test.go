@@ -269,7 +269,8 @@ func TestSharedStoreDeferredIndexLifecycle(t *testing.T) {
 
 func sqliteIndexExists(t *testing.T, db interface {
 	QueryRow(string, ...any) *sql.Row
-}, name string) bool {
+}, name string,
+) bool {
 	t.Helper()
 	var count int
 	require.NoError(t, db.QueryRow(
@@ -828,8 +829,8 @@ func requireCascadeChildColumnsIndexed(
 // children cascade. A cascading child column left without an index at that
 // point turns each deleted parent row into a full scan of the child table:
 // measured on a preview relay, one 1,001-transaction rollback against a 3.2M
-// row utxo table took 556s with idx_utxo_transaction_id absent and 0.095s with
-// it present.
+// row utxo table took 556s with its transaction-id index absent and 0.095s
+// with it present.
 //
 // The invariant is asserted over the schema's own foreign keys rather than
 // over the one index that motivated it, so a new cascading foreign key whose
@@ -842,12 +843,13 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 		t,
 		fks,
 		cascadeForeignKey{
-			table:  "utxo",
+			table:  "certs",
 			column: "transaction_id",
 			parent: "transaction",
 		},
 		"the rollback's DELETE FROM \"transaction\" must still cascade "+
-			"into utxo for this test to cover the sweep it describes",
+			"into its detail tables for this test to cover the sweep it "+
+			"describes",
 	)
 	requireCascadeChildColumnsIndexed(t, db, fks, "before deferring indexes")
 
@@ -866,6 +868,76 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 		fks,
 		"after BuildCriticalDeferredIndexes",
 	)
+}
+
+// TestTransactionForeignKeyChildColumnsAreIndexed requires every column that
+// names a transaction row id to be answerable by an index, so deleting or
+// checking one parent row never scans a child table: the foreign keys the
+// schema declares to "transaction"(id), and the columns that name one without
+// declaring it. The check holds again after the deferred-index drop and the
+// critical rebuild a bulk load performs.
+func TestTransactionForeignKeyChildColumnsAreIndexed(t *testing.T) {
+	t.Parallel()
+	store, db := newCoreModeSQLStore(t)
+	type child struct{ table, column string }
+	named := []child{
+		{"applied_transaction", "tx_id"},
+		{"utxo", "tx_id"},
+		{"utxo", "spent_at_tx_id"},
+		{"utxo", "collateral_return_for_tx_id"},
+		{"utxo_reference_edge", "tx_id"},
+		{"utxo_collateral_edge", "tx_id"},
+		{"address_transaction", "transaction_id"},
+		{"certs", "transaction_id"},
+		{"key_witness", "transaction_id"},
+		{"plutus_data", "transaction_id"},
+		{"redeemer", "transaction_id"},
+		{"redeemer_script", "transaction_id"},
+		{"witness_scripts", "transaction_id"},
+		{"transaction_metadata_label", "transaction_id"},
+		{"leios_transaction_context", "transaction_id"},
+		{"address_transaction_rebuild_source", "transaction_id"},
+	}
+	declared := func() []child {
+		rows, err := db.Query(`
+SELECT m.name, fk."from"
+FROM sqlite_master m
+JOIN pragma_foreign_key_list(m.name) fk
+WHERE m.type = 'table' AND fk."table" = 'transaction'
+ORDER BY m.name, fk."from"`)
+		require.NoError(t, err)
+		defer rows.Close()
+		var out []child
+		for rows.Next() {
+			var c child
+			require.NoError(t, rows.Scan(&c.table, &c.column))
+			out = append(out, c)
+		}
+		require.NoError(t, rows.Err())
+		return out
+	}
+	check := func(when string) {
+		t.Helper()
+		for _, c := range append(declared(), named...) {
+			require.True(
+				t,
+				cascadeChildLookupIsIndexed(t, db, c.table, c.column),
+				"%s: %s.%s names a transaction row id with no index "+
+					"leading with it",
+				when, c.table, c.column,
+			)
+		}
+	}
+	require.Subset(t, declared(), []child{
+		{"utxo", "tx_id"},
+		{"utxo", "spent_at_tx_id"},
+		{"utxo", "collateral_return_for_tx_id"},
+		{"applied_transaction", "tx_id"},
+	}, "the schema must declare the utxo foreign keys to transaction(id)")
+	check("before deferring indexes")
+	require.NoError(t, store.DropDeferredIndexes())
+	require.NoError(t, store.BuildCriticalDeferredIndexes())
+	check("after BuildCriticalDeferredIndexes")
 }
 
 // consumeTx builds a transaction with the given hash byte that consumes the one
@@ -945,7 +1017,7 @@ func TestSharedSQLStoreLeiosClosureTolerateDoubleConsume(t *testing.T) {
 		require.NotNil(t, spent)
 		require.True(
 			t,
-			bytes.Equal(txA.hash.Bytes(), spent.SpentAtTxId[:]),
+			bytes.Equal(txA.hash.Bytes(), spent.SpentAtTxHash[:]),
 			"producer input must remain spent by the first certified tx",
 		)
 
@@ -1079,12 +1151,11 @@ func TestSharedSQLStoreRewardStateParity(t *testing.T) {
 		nil,
 	))
 	provisionalTxn := store.Transaction(t.Context())
-	provisionalGuard, _, err :=
-		store.ClaimFallbackRewardSnapshotGuard(
-			8,
-			"mark",
-			provisionalTxn,
-		)
+	provisionalGuard, _, err := store.ClaimFallbackRewardSnapshotGuard(
+		8,
+		"mark",
+		provisionalTxn,
+	)
 	require.NoError(t, err)
 	require.NoError(t, provisionalTxn.Commit())
 
@@ -1793,23 +1864,26 @@ WITH RECURSIVE seq(n) AS (
     UNION ALL
     SELECT n + 1 FROM seq WHERE n + 1 < ?
 )
-INSERT INTO "transaction" (
-    hash, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid
+INSERT INTO "transaction" (id, hash) SELECT n, CAST(n AS BLOB) FROM seq`, from, to)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+INSERT INTO applied_transaction (
+    tx_id, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid
 )
-SELECT CAST(n AS BLOB), CAST(n AS BLOB), n, 0, '0', '0', '0', 0, TRUE
-FROM seq`, from, to)
+SELECT id, hash, id, 0, '0', '0', '0', 0, TRUE FROM "transaction"
+WHERE id >= ? AND id < ?`, from, to)
 	require.NoError(t, err)
 	for _, statement := range []string{
 		`INSERT INTO key_witness (vkey, signature, transaction_id, type)
-SELECT hash, hash, id, 0 FROM "transaction" WHERE slot >= ? AND slot < ?`,
+SELECT hash, hash, id, 0 FROM "transaction" WHERE id >= ? AND id < ?`,
 		`INSERT INTO witness_scripts (script_hash, transaction_id, type)
-SELECT hash, id, 0 FROM "transaction" WHERE slot >= ? AND slot < ?`,
+SELECT hash, id, 0 FROM "transaction" WHERE id >= ? AND id < ?`,
 		`INSERT INTO redeemer (
     data, transaction_id, ex_units_memory, ex_units_cpu, "index", tag
 )
-SELECT hash, id, 0, 0, 0, 0 FROM "transaction" WHERE slot >= ? AND slot < ?`,
+SELECT hash, id, 0, 0, 0, 0 FROM "transaction" WHERE id >= ? AND id < ?`,
 		`INSERT INTO plutus_data (data, transaction_id)
-SELECT hash, id FROM "transaction" WHERE slot >= ? AND slot < ?`,
+SELECT hash, id FROM "transaction" WHERE id >= ? AND id < ?`,
 	} {
 		_, err := db.Exec(statement, from, to)
 		require.NoError(t, err)
@@ -2029,9 +2103,11 @@ func (m *mockTransaction) Inputs() []lcommon.TransactionInput { return m.inputs 
 func (m *mockTransaction) Collateral() []lcommon.TransactionInput {
 	return m.collateral
 }
+
 func (m *mockTransaction) Certificates() []lcommon.Certificate {
 	return m.certificates
 }
+
 func (m *mockTransaction) ProtocolParameterUpdates() (
 	uint64,
 	map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
@@ -2054,9 +2130,11 @@ func (m *mockTransaction) ValidityIntervalStart() uint64            { return 0 }
 func (m *mockTransaction) ReferenceInputs() []lcommon.TransactionInput {
 	return m.refInputs
 }
+
 func (m *mockTransaction) TotalCollateral() *big.Int {
 	return big.NewInt(0)
 }
+
 func (m *mockTransaction) Withdrawals() map[*lcommon.Address]*big.Int {
 	return m.withdrawals
 }
@@ -2065,6 +2143,7 @@ func (m *mockTransaction) ScriptDataHash() *lcommon.Blake2b256   { return nil }
 func (m *mockTransaction) VotingProcedures() lcommon.VotingProcedures {
 	return lcommon.VotingProcedures{}
 }
+
 func (m *mockTransaction) ProposalProcedures() []lcommon.ProposalProcedure {
 	return nil
 }
@@ -3041,7 +3120,7 @@ func exerciseTransactionWriteStore(
 		Fee:              uint64(stored.Fee),
 		Valid:            stored.Valid,
 		InputDeletedSlot: spent.DeletedSlot,
-		InputSpentBy:     spent.SpentAtTxId,
+		InputSpentBy:     spent.SpentAtTxHash,
 		OutputAmount:     uint64(produced.Amount),
 		AccountReward:    uint64(account.Reward),
 		WithdrawalDeltas: deltas,
@@ -3339,18 +3418,16 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 	require.NoError(t, err)
 	gotLatestAriadne, err := store.GetLatestMidnightAriadneParams(nil)
 	require.NoError(t, err)
-	gotHistoricalAriadne, err :=
-		store.GetMidnightAriadneParamsAtOrBeforeEpoch(1, nil)
+	gotHistoricalAriadne, err := store.GetMidnightAriadneParamsAtOrBeforeEpoch(1, nil)
 	require.NoError(t, err)
 	gotRollbacks, err := store.FindMidnightAriadneRollbacksByBlock(nil, 12)
 	require.NoError(t, err)
 	gotCandidates, err := store.GetMidnightEpochCandidatesByEpoch(2, nil)
 	require.NoError(t, err)
-	gotRegistrations, err :=
-		store.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
-			[][]byte{[]byte("candidate-a"), []byte("missing")},
-			nil,
-		)
+	gotRegistrations, err := store.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+		[][]byte{[]byte("candidate-a"), []byte("missing")},
+		nil,
+	)
 	require.NoError(t, err)
 
 	rollback := store.Transaction(t.Context())
@@ -3369,8 +3446,7 @@ func TestSharedSQLStoreMidnightParity(t *testing.T) {
 		11,
 	)
 	require.NoError(t, err)
-	_, err =
-		store.DeleteMidnightDeregistrationsByBlock(rollback, 12)
+	_, err = store.DeleteMidnightDeregistrationsByBlock(rollback, 12)
 	require.NoError(t, err)
 	require.NoError(t, rollback.Commit())
 	assetTxHashes := make([]string, len(gotUnspentAssets))

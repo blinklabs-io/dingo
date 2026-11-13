@@ -632,19 +632,6 @@ func (d *DingoDB) GetPoolStakeSnapshotMembers(
 	return members, rows.Err()
 }
 
-// quoteTransactionTable renders the reserved "transaction" identifier for
-// dialect. SQLite and PostgreSQL both accept the double-quoted spelling,
-// while MySQL reads double quotes as string delimiters unless ANSI_QUOTES is
-// enabled — the same split sqlstore handles centrally in
-// translateMySQLReservedIdentifiers. DingoDB's own rebind only rewrites
-// placeholders, so the one query that joins that table spells it itself.
-func quoteTransactionTable(dialect string) string {
-	if dialect == "mysql" {
-		return "`transaction`"
-	}
-	return `"transaction"`
-}
-
 // GetPoolsRetiredByEpoch implements RewardParitySource against the pool
 // certificate tables. It is the standalone-CLI twin of
 // MetadataStore.GetPoolKeyHashesRetiredByEpoch and must resolve departure
@@ -660,7 +647,6 @@ func (d *DingoDB) GetPoolsRetiredByEpoch(
 	epoch uint64,
 	boundarySlot uint64,
 ) (map[string]struct{}, error) {
-	txTable := quoteTransactionTable(d.dialect)
 	rows, err := d.query(
 		ctx,
 		`
@@ -676,7 +662,7 @@ WITH latest_reg AS (
            ) rn
     FROM pool_registration pr
     LEFT JOIN certs c ON c.id = pr.certificate_id
-    LEFT JOIN `+txTable+` t ON t.id = c.transaction_id
+    LEFT JOIN applied_transaction t ON t.tx_id = c.transaction_id
     WHERE pr.added_slot < ?
 ),
 latest_ret AS (
@@ -693,7 +679,7 @@ latest_ret AS (
            ) rn
     FROM pool_retirement rt
     LEFT JOIN certs c ON c.id = rt.certificate_id
-    LEFT JOIN `+txTable+` t ON t.id = c.transaction_id
+    LEFT JOIN applied_transaction t ON t.tx_id = c.transaction_id
     WHERE rt.added_slot < ?
 )
 SELECT p.pool_key_hash

@@ -141,6 +141,10 @@ CMD ["serve"]
 
 FROM dingo AS antithesis
 USER root
+# This stage runs as root, but the base image chowned /data/db and /ipc to
+# dingo. The listener refuses a socket directory owned by neither the current
+# user nor root, so hand both directories to root to match the user.
+RUN chown -R root:root /data/db /ipc
 RUN apt-get update -y && \
   apt-get install -y \
     curl \

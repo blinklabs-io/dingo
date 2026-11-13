@@ -1099,8 +1099,8 @@ active_delegator_stake AS (
  LEFT JOIN utxo
    ON utxo.credential_tag = active_delegation.credential_tag
   AND utxo.staking_key = active_delegation.staking_key
-  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)), utxo.added_slot) <= ?
-  AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" spent_tx ON spent_tx.id = lc.transaction_id WHERE spent_tx.hash = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
+  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.tx_id), utxo.added_slot) <= ?
+  AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
  WHERE ` + expiryPredicate + predicate
 	args = append(args, slot, slot)
 	if expiryEpoch > 0 {
@@ -1124,8 +1124,8 @@ active_delegator_stake AS (
   AND pointer_resolution.staking_key = active_delegation.staking_key
  JOIN utxo
    ON utxo.id = pointer_resolution.utxo_id
-  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)), utxo.added_slot) <= ?
-  AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" spent_tx ON spent_tx.id = lc.transaction_id WHERE spent_tx.hash = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
+  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.tx_id), utxo.added_slot) <= ?
+  AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
  WHERE ` + expiryPredicate + predicate
 		args = append(args, slot, slot)
 		if expiryEpoch > 0 {
@@ -1235,10 +1235,10 @@ WITH `
 	for _, source := range historicalDelegationSources {
 		delegationParts = append(delegationParts, fmt.Sprintf(`
 SELECT event.credential_tag, event.staking_key, event.pool_key_hash,
-       COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.id), event.added_slot) AS added_slot, event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), event.added_slot) AS added_slot, event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
 %[2]s
 JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
-JOIN "transaction" tx ON tx.id = certs.transaction_id
+JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
 WHERE %[3]sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`, source.table, scopedFrom(source.table, "event"), scopedWhere("event")))
 		args = append(args, source.certType, slot)
 	}
@@ -1272,11 +1272,11 @@ WHERE `+scopedWhere("account")+`account.added_slot <= ? AND account.active = TRU
 	)
 	for _, source := range historicalRegistrationSources {
 		registrationParts = append(registrationParts, fmt.Sprintf(`
-SELECT event.credential_tag, event.staking_key, %d AS registered, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.id), event.added_slot) AS added_slot,
+SELECT event.credential_tag, event.staking_key, %d AS registered, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), event.added_slot) AS added_slot,
        event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
 %s
 JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
-JOIN "transaction" tx ON tx.id = certs.transaction_id
+JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
 WHERE %sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`,
 			source.registered,
 			scopedFrom(source.table, "event"),
@@ -1343,7 +1343,7 @@ WHERE `+scopedWhere("account")+`account.created_slot <= ?`+
        JOIN pool p ON p.id = rt.pool_id
        JOIN epoch e ON e.epoch_id = rt.epoch
        LEFT JOIN certs c ON c.id = rt.certificate_id
-       LEFT JOIN "transaction" t ON t.id = c.transaction_id
+       LEFT JOIN applied_transaction t ON t.tx_id = c.transaction_id
        WHERE p.pool_key_hash = delegation.pool_key_hash
          AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = rt.certificate_id), rt.added_slot) <= ?
          AND e.start_slot > delegation.added_slot
@@ -1352,7 +1352,7 @@ WHERE `+scopedWhere("account")+`account.created_slot <= ?`+
              SELECT 1
              FROM pool_registration pr
              LEFT JOIN certs c2 ON c2.id = pr.certificate_id
-             LEFT JOIN "transaction" t2 ON t2.id = c2.transaction_id
+             LEFT JOIN applied_transaction t2 ON t2.tx_id = c2.transaction_id
              WHERE pr.pool_id = rt.pool_id
                AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) < e.start_slot
                AND (
@@ -1368,7 +1368,7 @@ WHERE `+scopedWhere("account")+`account.created_slot <= ?`+
              SELECT 1
              FROM pool_retirement rt2
              LEFT JOIN certs c3 ON c3.id = rt2.certificate_id
-             LEFT JOIN "transaction" t3 ON t3.id = c3.transaction_id
+             LEFT JOIN applied_transaction t3 ON t3.tx_id = c3.transaction_id
              WHERE rt2.pool_id = rt.pool_id
                AND rt2.id <> rt.id
                AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = rt2.certificate_id), rt2.added_slot) < e.start_slot

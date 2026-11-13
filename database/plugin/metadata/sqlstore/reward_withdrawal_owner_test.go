@@ -57,7 +57,7 @@ func TestApplyAccountRewardWithdrawalRequiresTransactionRow(t *testing.T) {
 	require.Equal(t, uint64(0), rewardOf(t, store, key))
 	var incomplete, owned int
 	require.NoError(t, raw.QueryRow(`
-SELECT COUNT(*) FROM "transaction"
+SELECT COUNT(*) FROM applied_transaction
 WHERE type IS NULL OR fee IS NULL OR valid IS NULL OR block_hash IS NULL`,
 	).Scan(&incomplete))
 	require.NoError(t, raw.QueryRow(`

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -56,16 +57,14 @@ const agentOpCertRetryInterval = time.Minute
 var errCredentialsUnchanged = errors.New("block producer credentials unchanged")
 
 // keyReloadState carries the in-place credential reload's own state: the
-// agent's offers of a newer operational certificate, the background loops and
-// the reload metrics.
+// first pool's agent offers of a newer operational certificate, the
+// background loops and the reload metrics. Every other pool keeps its offers
+// in its poolProducer.
 type keyReloadState struct {
-	offersOnce sync.Once
-	offers     chan []byte
+	agentOffers agentOfferState
 
 	mu          sync.Mutex
 	loopsCancel context.CancelFunc
-	lastOffer   [sha256.Size]byte
-	lastOfferAt time.Time
 
 	metricsOnce sync.Once
 	reloads     *prometheus.CounterVec
@@ -75,29 +74,209 @@ type keyReloadState struct {
 	signClientFactory func(*bursa.LoadedKey) (kesAgentSignClient, error)
 }
 
-// reloadCredentials is the one entry point every reload trigger uses: a
-// SIGHUP, a credential file change, or the KES agent presenting a newer
-// operational certificate (agentOpCert non-nil). It holds the lifecycle gates
-// while it validates and installs the new credentials, and records the
-// outcome.
-//
-// In KES agent sign mode the agent is asked to admit the new certificate
-// before the gates are taken. That check can wait on the network for up to
-// the client's hello timeout, and the chainsync and chain-switch handlers
-// drop their work while liveLifecycleMu is held (see checkSettledComponents).
-// The check only involves the agent and a client nothing else uses yet, so
-// it needs no gate; everything it was checked against is read again under
-// the gates before the swap.
-func (n *Node) reloadCredentials(trigger string, agentOpCert []byte) error {
-	var signReload *agentSignReload
-	if agentOpCert != nil || (n.kesAgentConfigured() && n.kesAgentSignMode()) {
-		r, err := n.prepareAgentSignReload(agentOpCert)
-		if err != nil {
-			return n.finishCredentialReload(trigger, err)
+// agentOfferState is one pool's offers of a newer operational certificate
+// from its KES agent, and the certificate last tried, so a refused one is not
+// retried more than once per agentOpCertRetryInterval.
+type agentOfferState struct {
+	once   sync.Once
+	offers chan []byte
+
+	mu          sync.Mutex
+	lastOffer   [sha256.Size]byte
+	lastOfferAt time.Time
+}
+
+// offer is a remote client's OnNewerOpCert hook. It hands the certificate to
+// the pool's agent reload loop without blocking the admission, keeping only
+// the newest offer.
+func (a *agentOfferState) offer(opCert []byte) {
+	ch := a.channel()
+	for {
+		select {
+		case ch <- opCert:
+			return
+		default:
 		}
-		signReload = r
-		defer signReload.close()
+		select {
+		case <-ch:
+		default:
+		}
 	}
+}
+
+func (a *agentOfferState) channel() chan []byte {
+	a.once.Do(func() {
+		a.offers = make(chan []byte, 1)
+	})
+	return a.offers
+}
+
+// shouldTry reports whether an offered certificate is new, or the same one
+// last tried more than agentOpCertRetryInterval ago.
+func (a *agentOfferState) shouldTry(opCert []byte, now time.Time) bool {
+	sum := sha256.Sum256(opCert)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if sum == a.lastOffer &&
+		now.Sub(a.lastOfferAt) < agentOpCertRetryInterval {
+		return false
+	}
+	a.lastOffer = sum
+	a.lastOfferAt = now
+	return true
+}
+
+// reloadCredentials is the one entry point every reload trigger uses: a
+// SIGHUP, a credential file change, or the first pool's KES agent presenting
+// a newer operational certificate (agentOpCert non-nil). A file change skips
+// serve-key pools, which cannot reload; a SIGHUP reports their refusal.
+//
+// Each sign-mode pool's KES agent is asked to admit that pool's new
+// certificate before the lifecycle gates are taken. That check can wait on
+// the network for up to the client's hello timeout, and the chainsync and
+// chain-switch handlers drop their work while liveLifecycleMu is held (see
+// checkSettledComponents). The check only involves the agent and a client
+// nothing else uses yet, so it needs no gate; everything it was checked
+// against is read again under the gates before the swap.
+func (n *Node) reloadCredentials(trigger string, agentOpCert []byte) error {
+	if agentOpCert != nil {
+		return n.reloadAgentOpCert(n.primaryReloadTarget(), agentOpCert)
+	}
+	preps := n.prepareSignReloads()
+	defer preps.close()
+	return n.reloadCredentialsWith(
+		trigger,
+		func(slot uint64, supported bool) error {
+			return n.installEveryPool(
+				slot,
+				supported,
+				n.validateBlockProducerLedger,
+				trigger == reloadTriggerFile,
+				preps,
+			)
+		},
+	)
+}
+
+// reloadPoolProducerAgentOpCert reloads one pool after the first with the
+// newer operational certificate its own KES agent presented. No other pool is
+// touched.
+func (n *Node) reloadPoolProducerAgentOpCert(
+	pp *poolProducer,
+	agentOpCert []byte,
+) error {
+	return n.reloadAgentOpCert(n.poolProducerReloadTarget(pp), agentOpCert)
+}
+
+// reloadTarget is the one pool an agent-offered reload replaces the
+// credentials of: its key source, which also names the slot its KES agent
+// client lives in, and its live credentials.
+type reloadTarget struct {
+	ks *poolKeySource
+	// poolID names the pool in errors; it is empty for the first pool,
+	// whose errors are reported as they are.
+	poolID string
+	// live returns the pool's live credentials, or why the pool cannot
+	// reload now.
+	live func() (*forging.PoolCredentials, error)
+}
+
+func (n *Node) primaryReloadTarget() reloadTarget {
+	return reloadTarget{
+		ks: n.primaryKeySource(),
+		live: func() (*forging.PoolCredentials, error) {
+			live := n.blockProducerCreds.Load()
+			if live == nil {
+				return nil, errors.New(
+					"block producer credentials are not loaded",
+				)
+			}
+			return live, nil
+		},
+	}
+}
+
+// poolProducerReloadTarget is pp's reloadTarget. pp must still be one of the
+// node's producers and forging: a live rebuild replaces the producers, and a
+// client installed into a replaced one would never be used or closed.
+func (n *Node) poolProducerReloadTarget(pp *poolProducer) reloadTarget {
+	return reloadTarget{
+		ks:     pp.keySource(n),
+		poolID: pp.poolID,
+		live: func() (*forging.PoolCredentials, error) {
+			n.multiPool.mu.Lock()
+			defer n.multiPool.mu.Unlock()
+			if pp.creds == nil || !slices.Contains(n.multiPool.producers, pp) {
+				return nil, errors.New("the pool is not forging")
+			}
+			return pp.creds, nil
+		},
+	}
+}
+
+func (t reloadTarget) wrap(err error) error {
+	if err == nil || t.poolID == "" {
+		return err
+	}
+	return fmt.Errorf("pool %s: %w", t.poolID, err)
+}
+
+// reloadAgentOpCert reloads t with the operational certificate its KES agent
+// offered: the agent admits it before the lifecycle gates are taken, and it
+// is installed under them. A refusal is counted against the pool when the
+// node forges for several.
+func (n *Node) reloadAgentOpCert(t reloadTarget, agentOpCert []byte) error {
+	live, err := t.live()
+	if err != nil {
+		return n.finishCredentialReload(reloadTriggerAgent, t.wrap(err))
+	}
+	prep := n.prepareSignReload(t.ks, live, agentOpCert)
+	defer prep.close()
+	if prep.err != nil {
+		n.countAgentReloadFailure(live, prep.err)
+		return n.finishCredentialReload(reloadTriggerAgent, t.wrap(prep.err))
+	}
+	return n.reloadCredentialsWith(
+		reloadTriggerAgent,
+		func(slot uint64, supported bool) error {
+			live, err := t.live()
+			if err != nil {
+				return t.wrap(err)
+			}
+			err = n.installSignReload(
+				t.ks,
+				live,
+				slot,
+				supported,
+				n.validateBlockProducerLedger,
+				prep,
+			)
+			n.countAgentReloadFailure(live, err)
+			return t.wrap(err)
+		},
+	)
+}
+
+// countAgentReloadFailure counts a refused agent-offered reload against its
+// pool when the node forges for several.
+func (n *Node) countAgentReloadFailure(
+	live *forging.PoolCredentials,
+	err error,
+) {
+	if err == nil || errors.Is(err, errCredentialsUnchanged) ||
+		live == nil || n.producerPoolCount() <= 1 {
+		return
+	}
+	n.countReloadFailure(live.GetPoolID().String())
+}
+
+// reloadCredentialsWith holds the lifecycle gates while reload validates and
+// installs the new credentials, passes it the reload clock and records the
+// outcome under trigger.
+func (n *Node) reloadCredentialsWith(
+	trigger string,
+	reload func(slot uint64, supported bool) error,
+) error {
 	release, err := n.tryLifecycleGates()
 	if err != nil {
 		return n.finishCredentialReload(trigger, err)
@@ -105,20 +284,7 @@ func (n *Node) reloadCredentials(trigger string, agentOpCert []byte) error {
 	defer release()
 	slot, supported, err := n.blockProducerStartupClock()
 	if err == nil {
-		if signReload != nil {
-			err = n.installAgentSignReload(
-				slot,
-				supported,
-				n.validateBlockProducerLedger,
-				signReload,
-			)
-		} else {
-			err = n.reloadBlockProducerCredentials(
-				slot,
-				supported,
-				n.validateBlockProducerLedger,
-			)
-		}
+		err = reload(slot, supported)
 	}
 	return n.finishCredentialReload(trigger, err)
 }
@@ -138,6 +304,132 @@ func (n *Node) finishCredentialReload(trigger string, err error) error {
 	return err
 }
 
+// installEveryPool reloads the first pool and, when the node forges for
+// several, every other running pool, installing the sign-mode reloads preps
+// holds. The caller holds the lifecycle gates. Each pool reloads on its own:
+// one whose replacement is refused keeps forging with what it had and does
+// not hold back the others. With skipServeKey a serve-key pool is not
+// reloaded and reports itself unchanged instead of refused.
+func (n *Node) installEveryPool(
+	slot uint64,
+	supported bool,
+	ledgerCheck func(*forging.PoolCredentials) error,
+	skipServeKey bool,
+	preps *signReloadPreps,
+) error {
+	primaryErr := errCredentialsUnchanged
+	if !skipServeKey || !n.primaryKeySource().servesKeys() {
+		primaryErr = n.reloadPrimaryCredentials(
+			slot,
+			supported,
+			ledgerCheck,
+			preps.primary,
+		)
+	}
+	if n.producerPoolCount() <= 1 {
+		return primaryErr
+	}
+	if live := n.blockProducerCreds.Load(); primaryErr != nil && live != nil {
+		primaryErr = fmt.Errorf(
+			"pool %s: %w",
+			live.GetPoolID().String(),
+			primaryErr,
+		)
+	}
+	return joinPoolReloads(append(
+		[]error{primaryErr},
+		n.reloadPoolProducerCredentials(
+			slot,
+			supported,
+			ledgerCheck,
+			skipServeKey,
+			preps,
+		)...,
+	))
+}
+
+// joinPoolReloads combines one reload result per pool. A pool whose
+// credentials were already loaded is not a failure: the result is the other
+// pools' failures, errCredentialsUnchanged when every pool was unchanged, and
+// nil otherwise.
+func joinPoolReloads(results []error) error {
+	var errs []error
+	unchanged := 0
+	for _, err := range results {
+		switch {
+		case errors.Is(err, errCredentialsUnchanged):
+			unchanged++
+		case err != nil:
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	if unchanged == len(results) {
+		return errCredentialsUnchanged
+	}
+	return nil
+}
+
+// signReloadPrep is one sign-mode pool's reload as prepared before the
+// lifecycle gates: the reload its agent admitted, or why there is none.
+type signReloadPrep struct {
+	reload *agentSignReload
+	err    error
+}
+
+// close closes the prepared client unless it was installed.
+func (p signReloadPrep) close() {
+	if p.reload != nil {
+		p.reload.close()
+	}
+}
+
+// signReloadPreps is a reload's sign-mode pools prepared before the lifecycle
+// gates: the first pool's, and each running pool's after it, by producer. A
+// pool that is not in sign mode has none.
+type signReloadPreps struct {
+	primary signReloadPrep
+	pools   map[*poolProducer]signReloadPrep
+}
+
+// prepareSignReloads prepares the reload of every sign-mode pool that is
+// forging. Each pool is prepared on its own: one whose agent refuses does not
+// keep the others from preparing.
+func (n *Node) prepareSignReloads() *signReloadPreps {
+	preps := &signReloadPreps{}
+	if ks := n.primaryKeySource(); ks.signsThroughAgent() {
+		if live := n.blockProducerCreds.Load(); live != nil {
+			preps.primary = n.prepareSignReload(ks, live, nil)
+		}
+	}
+	for _, t := range n.runningPoolProducers() {
+		ks := t.pp.keySource(n)
+		if !ks.signsThroughAgent() {
+			continue
+		}
+		if preps.pools == nil {
+			preps.pools = make(map[*poolProducer]signReloadPrep)
+		}
+		preps.pools[t.pp] = n.prepareSignReload(ks, t.live, nil)
+	}
+	return preps
+}
+
+// close closes every prepared client that was not installed.
+func (p *signReloadPreps) close() {
+	p.primary.close()
+	for _, prep := range p.pools {
+		prep.close()
+	}
+}
+
+// pool returns pp's prepared reload; the zero value when pp had none.
+func (p *signReloadPreps) pool(pp *poolProducer) signReloadPrep {
+	return p.pools[pp]
+}
+
 // agentSignReload is a sign-mode reload whose certificate the agent has
 // admitted, waiting to be installed under the lifecycle gates.
 type agentSignReload struct {
@@ -155,47 +447,64 @@ func (r *agentSignReload) close() {
 	}
 }
 
-// reloadAgentSignCredentials replaces the live sign-mode credentials with the
-// VRF key and an operational certificate -- the configured file, or
-// agentOpCert when the agent presented a newer one -- signed through a new
-// agent client that expects that certificate's KES key. It is
-// prepareAgentSignReload followed by installAgentSignReload; reloadCredentials
-// runs the two halves itself so the agent check happens outside the gates.
-func (n *Node) reloadAgentSignCredentials(
+// prepareSignReload is prepareAgentSignReload as a signReloadPrep.
+func (n *Node) prepareSignReload(
+	ks *poolKeySource,
+	live *forging.PoolCredentials,
+	agentOpCert []byte,
+) signReloadPrep {
+	r, err := n.prepareAgentSignReload(ks, live, agentOpCert)
+	return signReloadPrep{reload: r, err: err}
+}
+
+// installSignReload installs a prepared reload into ks's pool, or reports
+// why it could not be prepared. A sign-mode pool with nothing prepared
+// started forging after the reload was prepared, and is left to the next one.
+func (n *Node) installSignReload(
+	ks *poolKeySource,
+	live *forging.PoolCredentials,
 	slot uint64,
 	supported bool,
 	ledgerCheck func(*forging.PoolCredentials) error,
-	agentOpCert []byte,
+	prep signReloadPrep,
 ) error {
-	r, err := n.prepareAgentSignReload(agentOpCert)
-	if err != nil {
-		return err
+	if prep.err != nil {
+		return prep.err
 	}
-	defer r.close()
-	return n.installAgentSignReload(slot, supported, ledgerCheck, r)
+	if prep.reload == nil {
+		return errors.New(
+			"the pool started forging while the reload was prepared; reload again",
+		)
+	}
+	return n.installAgentSignReload(
+		ks,
+		live,
+		slot,
+		supported,
+		ledgerCheck,
+		prep.reload,
+	)
 }
 
-// prepareAgentSignReload reads the certificate a sign-mode reload installs,
-// refuses it early when it cannot be installed, and has the agent admit a
-// session for it through a new client. It takes no lifecycle gate: it reads
-// only the configuration, the key files and the live credentials, which are
-// safe to read concurrently.
+// prepareAgentSignReload reads the certificate a sign-mode reload of ks's
+// pool installs, refuses it early when it cannot be installed, and has the
+// pool's agent admit a session for it through a new client. It takes no
+// lifecycle gate: it reads only the configuration, the key files and the
+// live credentials, which are safe to read concurrently.
 //
 // The VRF key cannot change here: a new VRF identity needs a new pool
 // registration and a restart. The VRF key file is compared with the loaded
 // identity first, so a changed VRF key is refused even when the certificate
 // is unchanged, and before the agent is contacted.
 func (n *Node) prepareAgentSignReload(
+	ks *poolKeySource,
+	live *forging.PoolCredentials,
 	agentOpCert []byte,
 ) (*agentSignReload, error) {
-	live := n.blockProducerCreds.Load()
-	if live == nil {
-		return nil, errors.New("block producer credentials are not loaded")
-	}
-	if err := checkReloadVRFKey(n.config.shelleyVRFKey, live); err != nil {
+	if err := checkReloadVRFKey(ks.keys.vrfKey, live); err != nil {
 		return nil, err
 	}
-	opCertKey, err := n.reloadOpCertKey(agentOpCert)
+	opCertKey, err := ks.reloadOpCertKey(agentOpCert)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +512,7 @@ func (n *Node) prepareAgentSignReload(
 	if err := checkReloadOpCertCounter(opCert, live.GetOpCert()); err != nil {
 		return nil, err
 	}
-	client, err := n.kesAgentSignClientFor(opCertKey)
+	client, err := n.kesAgentSignClientFor(ks, opCertKey)
 	if err != nil {
 		return nil, fmt.Errorf("build KES agent client: %w", err)
 	}
@@ -222,29 +531,28 @@ func (n *Node) prepareAgentSignReload(
 	}, nil
 }
 
-// installAgentSignReload validates a prepared reload and swaps it in. The
-// caller holds the lifecycle gates. Everything is checked before the swap:
-// that the certificate file still holds the certificate the agent admitted,
-// the certificate's cold-key signature and KES period, the ledger
-// cross-check including the opcert counter rule, and a counter above the
-// loaded one. A refusal leaves the live credentials and client in place.
+// installAgentSignReload validates a prepared reload of ks's pool and swaps
+// it into live and the pool's client slot. The caller holds the lifecycle
+// gates. Everything is checked before the swap: that the certificate file
+// still holds the certificate the agent admitted, the certificate's cold-key
+// signature and KES period, the ledger cross-check including the opcert
+// counter rule, and a counter above the loaded one. A refusal leaves the live
+// credentials and client in place.
 func (n *Node) installAgentSignReload(
+	ks *poolKeySource,
+	live *forging.PoolCredentials,
 	slot uint64,
 	supported bool,
 	ledgerCheck func(*forging.PoolCredentials) error,
 	r *agentSignReload,
 ) error {
-	live := n.blockProducerCreds.Load()
-	if live == nil {
-		return errors.New("block producer credentials are not loaded")
-	}
 	if !supported {
 		return errors.New(
 			"credential reload requires a wall-clock slot supported by confirmed era history",
 		)
 	}
 	if r.agentOpCert == nil {
-		current, err := n.reloadOpCertKey(nil)
+		current, err := ks.reloadOpCertKey(nil)
 		if err != nil {
 			return err
 		}
@@ -263,7 +571,7 @@ func (n *Node) installAgentSignReload(
 	// that was refused.
 	defer next.Close()
 	if err := next.LoadFromAgentSignOpCert(
-		n.config.shelleyVRFKey,
+		ks.keys.vrfKey,
 		r.opCert,
 		r.client,
 	); err != nil {
@@ -287,8 +595,8 @@ func (n *Node) installAgentSignReload(
 		return fmt.Errorf("install reloaded credentials: %w", err)
 	}
 	r.installed = true
-	n.retireKESAgentClient(n.kesAgentClient)
-	n.kesAgentClient = r.client
+	n.retireKESAgentClient(*ks.client)
+	*ks.client = r.client
 	newCounter, newKESPeriod := opCertCounterAndPeriod(live.GetOpCert())
 	n.config.logger.Info(
 		"block producer credentials reloaded",
@@ -340,11 +648,11 @@ func checkReloadVRFKey(path string, live *forging.PoolCredentials) error {
 
 // reloadOpCertKey reads the operational certificate a sign-mode reload
 // installs: the agent's, when it offered one, or the configured file.
-func (n *Node) reloadOpCertKey(agentOpCert []byte) (*bursa.LoadedKey, error) {
+func (ks *poolKeySource) reloadOpCertKey(
+	agentOpCert []byte,
+) (*bursa.LoadedKey, error) {
 	if agentOpCert == nil {
-		key, err := forging.LoadOperationalCertificateFile(
-			n.config.shelleyOperationalCertificate,
-		)
+		key, err := forging.LoadOperationalCertificateFile(ks.keys.opCert)
 		if err != nil {
 			return nil, fmt.Errorf("load operational certificate: %w", err)
 		}
@@ -398,12 +706,13 @@ func sameOpCert(a, b *forging.OpCert) bool {
 // kesAgentSignClientFor builds the sign client a reload installs. Tests
 // replace it through keyReloadState.signClientFactory.
 func (n *Node) kesAgentSignClientFor(
+	ks *poolKeySource,
 	opCertKey *bursa.LoadedKey,
 ) (kesAgentSignClient, error) {
 	if n.keyReload.signClientFactory != nil {
 		return n.keyReload.signClientFactory(opCertKey)
 	}
-	return n.newKESAgentSignClient(opCertKey)
+	return ks.newKESAgentSignClient(opCertKey)
 }
 
 // checkKESAgentSignClient confirms the agent behind a new sign client serves
@@ -438,36 +747,28 @@ func (n *Node) retireKESAgentClient(old io.Closer) {
 	})
 }
 
-// offerAgentOpCert is the remote client's OnNewerOpCert hook. It hands the
-// certificate to the agent reload loop without blocking the admission, keeping
-// only the newest offer.
+// offerAgentOpCert is the first pool's OnNewerOpCert hook.
 func (n *Node) offerAgentOpCert(opCert []byte) {
-	ch := n.agentOpCertOffers()
-	for {
-		select {
-		case ch <- opCert:
-			return
-		default:
-		}
-		select {
-		case <-ch:
-		default:
-		}
-	}
+	n.keyReload.agentOffers.offer(opCert)
 }
 
 func (n *Node) agentOpCertOffers() chan []byte {
-	n.keyReload.offersOnce.Do(func() {
-		n.keyReload.offers = make(chan []byte, 1)
-	})
-	return n.keyReload.offers
+	return n.keyReload.agentOffers.channel()
+}
+
+// credentialWatchBaseline digests the watched credential files. Startup takes
+// it before it reads the credentials, so a rotation landing between that read
+// and the watch loop's start differs from the baseline and is reloaded.
+func (n *Node) credentialWatchBaseline() [sha256.Size]byte {
+	return credentialFilesDigest(n.watchedCredentialFiles())
 }
 
 // startKeyReloadLoops starts the background reload triggers for the running
-// block producer: the agent's newer-certificate offers, and the credential
-// file watch when shelleyKeyWatchInterval is set. A second call replaces the
-// loops of the first, so a live-lifecycle rebuild does not run two.
-func (n *Node) startKeyReloadLoops() {
+// block producer: each pool's agent newer-certificate offers, and the credential
+// file watch when shelleyKeyWatchInterval is set, compared against baseline. A
+// second call replaces the loops of the first, so a live-lifecycle rebuild does
+// not run two.
+func (n *Node) startKeyReloadLoops(baseline [sha256.Size]byte) {
 	ctx, cancel := context.WithCancel(n.blockProducerContext())
 	n.keyReload.mu.Lock()
 	if n.keyReload.loopsCancel != nil {
@@ -479,8 +780,22 @@ func (n *Node) startKeyReloadLoops() {
 	go n.agentOpCertLoop(ctx, func(opCert []byte) error {
 		return n.reloadCredentials(reloadTriggerAgent, opCert)
 	})
+	n.multiPool.mu.Lock()
+	producers := slices.Clone(n.multiPool.producers)
+	n.multiPool.mu.Unlock()
+	for _, pp := range producers {
+		go n.agentOfferLoop(
+			ctx,
+			pp.agentOffers.channel(),
+			pp.agentOffers.shouldTry,
+			func(opCert []byte) error {
+				return n.reloadPoolProducerAgentOpCert(pp, opCert)
+			},
+			"pool_id", pp.poolID,
+		)
+	}
 	if interval := n.config.shelleyKeyWatchInterval; interval > 0 {
-		if n.kesAgentConfigured() && !n.kesAgentSignMode() {
+		if n.everyPoolServesKeys() {
 			// A serve-key reload is always refused, so every file change
 			// would only log and count a failure.
 			n.config.logger.Warn(
@@ -493,6 +808,7 @@ func (n *Node) startKeyReloadLoops() {
 			ctx,
 			interval,
 			n.watchedCredentialFiles(),
+			baseline,
 			func() error {
 				return n.reloadCredentials(reloadTriggerFile, nil)
 			},
@@ -510,63 +826,118 @@ func (n *Node) stopKeyReloadLoops() {
 	}
 }
 
-// agentOpCertLoop runs reload for each certificate the agent offers, skipping
-// one tried within agentOpCertRetryInterval.
+// agentOpCertLoop runs reload for each certificate the first pool's agent
+// offers.
 func (n *Node) agentOpCertLoop(
 	ctx context.Context,
 	reload func(opCert []byte) error,
 ) {
-	offers := n.agentOpCertOffers()
+	n.agentOfferLoop(
+		ctx,
+		n.agentOpCertOffers(),
+		n.shouldTryAgentOpCert,
+		reload,
+	)
+}
+
+// agentOfferLoop runs reload for each certificate one pool's agent offers on
+// offers, skipping one shouldTry rejects. logAttrs name the pool in its log
+// lines.
+func (n *Node) agentOfferLoop(
+	ctx context.Context,
+	offers <-chan []byte,
+	shouldTry func(opCert []byte, now time.Time) bool,
+	reload func(opCert []byte) error,
+	logAttrs ...any,
+) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case opCert := <-offers:
-			if !n.shouldTryAgentOpCert(opCert, time.Now()) {
+			if !shouldTry(opCert, time.Now()) {
 				continue
 			}
 			n.config.logger.Info(
 				"KES agent presented a newer operational certificate; reloading",
-				"component", "node",
+				append([]any{"component", "node"}, logAttrs...)...,
 			)
 			if err := reload(opCert); err != nil {
 				n.config.logger.Error(
 					"reload with the KES agent's operational certificate failed; keeping the loaded credentials",
-					"component", "node",
-					"error", err,
+					append(
+						[]any{"component", "node", "error", err},
+						logAttrs...,
+					)...,
 				)
 			}
 		}
 	}
 }
 
-// shouldTryAgentOpCert reports whether an offered certificate is new, or the
-// same one last tried more than agentOpCertRetryInterval ago.
+// shouldTryAgentOpCert is agentOfferState.shouldTry for the first pool.
 func (n *Node) shouldTryAgentOpCert(opCert []byte, now time.Time) bool {
-	sum := sha256.Sum256(opCert)
-	n.keyReload.mu.Lock()
-	defer n.keyReload.mu.Unlock()
-	if sum == n.keyReload.lastOffer &&
-		now.Sub(n.keyReload.lastOfferAt) < agentOpCertRetryInterval {
-		return false
-	}
-	n.keyReload.lastOffer = sum
-	n.keyReload.lastOfferAt = now
-	return true
+	return n.keyReload.agentOffers.shouldTry(opCert, now)
 }
 
 // watchedCredentialFiles lists the files a reload reads in the configured
-// mode: the VRF key and operational certificate, and the KES key when it is a
-// local file.
+// mode, for every pool that can reload: the VRF key and operational
+// certificate, and the KES key when it is a local file. A serve-key pool's
+// files are left out, since its reload is always refused. A change to any of
+// them reloads every pool but the serve-key ones; a pool whose files did not
+// change reports itself unchanged.
 func (n *Node) watchedCredentialFiles() []string {
-	files := []string{
-		n.config.shelleyVRFKey,
-		n.config.shelleyOperationalCertificate,
-	}
-	if !n.kesAgentConfigured() {
-		files = append(files, n.config.shelleyKESKey)
+	var files []string
+	for _, ks := range n.configuredPoolKeySources() {
+		if ks.servesKeys() {
+			continue
+		}
+		files = append(files, ks.keys.vrfKey, ks.keys.opCert)
+		if !ks.kesAgentConfigured() {
+			files = append(files, ks.keys.kesKey)
+		}
 	}
 	return files
+}
+
+// everyPoolServesKeys reports whether every pool's KES key comes from an
+// agent in serve-key mode, where a reload is always refused.
+func (n *Node) everyPoolServesKeys() bool {
+	for _, ks := range n.configuredPoolKeySources() {
+		if !ks.servesKeys() {
+			return false
+		}
+	}
+	return true
+}
+
+// servesKeys reports whether the pool's KES key comes from an agent in
+// serve-key mode, where a reload is always refused.
+func (ks *poolKeySource) servesKeys() bool {
+	return ks.kesAgentConfigured() && !ks.kesAgentSignMode()
+}
+
+// signsThroughAgent reports whether the pool's KES agent signs in sign mode,
+// where a reload checks the new certificate with the agent first.
+func (ks *poolKeySource) signsThroughAgent() bool {
+	return ks.kesAgentConfigured() && ks.kesAgentSignMode()
+}
+
+// configuredPoolKeySources is a key source per configured pool, the first
+// pool's first, for reading their settings only.
+func (n *Node) configuredPoolKeySources() []*poolKeySource {
+	pools := n.config.blockProducerPools
+	if len(pools) == 0 {
+		return []*poolKeySource{n.primaryKeySource()}
+	}
+	sources := make([]*poolKeySource, 0, len(pools))
+	for _, p := range pools {
+		sources = append(sources, &poolKeySource{
+			n:    n,
+			keys: producerKeysFromPool(p),
+		})
+	}
+	return sources
 }
 
 // credentialFileWatchLoop polls the credential files every interval and
@@ -577,16 +948,18 @@ func (n *Node) watchedCredentialFiles() []string {
 // keeps a file still being written by hand from being read half done; a
 // reload validates everything anyway and refuses a broken set. A failed
 // reload stays pending and is retried once per interval until it succeeds or
-// the files change.
+// the files change. loaded is the files' digest as the loaded credentials
+// were read, which the caller takes before starting the loop: one taken
+// inside the goroutine would absorb a change made before it first runs.
 func (n *Node) credentialFileWatchLoop(
 	ctx context.Context,
 	interval time.Duration,
 	files []string,
+	loaded [sha256.Size]byte,
 	reload func() error,
 ) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	loaded := credentialFilesDigest(files)
 	var pending [sha256.Size]byte
 	havePending := false
 	for {

@@ -84,6 +84,7 @@ func registeredLedgerState(
 	balance uint64,
 ) *mockLedgerState {
 	ls := newMockLedgerState()
+	ls.poolsRegistered = true
 	ls.stakeRegistered = map[lcommon.Blake2b224]bool{cred.Credential: true}
 	ls.rewardBalances = map[lcommon.Blake2b224]uint64{cred.Credential: balance}
 	return ls
@@ -103,6 +104,45 @@ func rewardAddress(t *testing.T, cred lcommon.Credential) *lcommon.Address {
 	)
 	require.NoError(t, err)
 	return &addr
+}
+
+const (
+	mirPotReserves = uint(0)
+	mirPotTreasury = uint(1)
+)
+
+// MIRCredentialKey identifies one stake credential within one source pot in
+// the state a test seeds.
+type MIRCredentialKey struct {
+	Tag        uint8
+	Credential lcommon.Blake2b224
+	Pot        uint
+}
+
+// MIRDelegState is the move instantaneous rewards state a mock ledger state
+// reports through the gouroboros capability interfaces.
+type MIRDelegState struct {
+	Reserves      uint64
+	Treasury      uint64
+	DeltaReserves *big.Int
+	DeltaTreasury *big.Int
+	Pending       map[MIRCredentialKey]*big.Int
+	// Cutoff is the first slot at which a MIR certificate is too late.
+	Cutoff uint64
+}
+
+// validateShelleyDelegCerts runs the gouroboros delegation rule the way the
+// era rule lists do: a phase-2-invalid transaction runs no DELEGS transition.
+func validateShelleyDelegCerts(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	if !tx.IsValid() {
+		return nil
+	}
+	return shelley.UtxoValidateDelegation(tx, slot, ls, pp)
 }
 
 func validateCerts(
@@ -128,7 +168,7 @@ func TestValidateShelleyDelegCerts_Deregistration(t *testing.T) {
 			newLS := func() *mockLedgerState {
 				return registeredLedgerState(registered, 0)
 			}
-			var notRegistered StakeKeyNotRegisteredError
+			var notRegistered shelley.StakeKeyNotRegisteredError
 
 			err := validateCerts(newLS(), era.major, stakeDereg(fresh))
 			require.ErrorAs(t, err, &notRegistered)
@@ -183,7 +223,7 @@ func TestValidateShelleyDelegCerts_NonZeroBalance(t *testing.T) {
 				mirCredential(0x20), scriptCredential(0x21),
 			} {
 				ls := registeredLedgerState(cred, 50_000_000)
-				var nonZero StakeKeyNonZeroAccountBalanceError
+				var nonZero shelley.StakeKeyNonZeroAccountBalanceError
 				err := validateCerts(ls, era.major, stakeDereg(cred))
 				require.ErrorAs(t, err, &nonZero)
 				assert.Equal(t, uint64(50_000_000), nonZero.Balance)
@@ -218,7 +258,7 @@ func TestValidateShelleyDelegCerts_Registration(t *testing.T) {
 				newLS := func() *mockLedgerState {
 					return registeredLedgerState(pair.registered, 0)
 				}
-				var already StakeKeyAlreadyRegisteredError
+				var already shelley.StakeKeyAlreadyRegisteredError
 
 				err := validateCerts(
 					newLS(),
@@ -279,7 +319,7 @@ func TestValidateShelleyDelegCerts_MIRCutoff(t *testing.T) {
 					require.NoError(t, err, "slot %d", tc.slot)
 					continue
 				}
-				var tooLate MIRCertificateTooLateError
+				var tooLate shelley.MIRCertificateTooLateinEpochError
 				require.ErrorAs(t, err, &tooLate, "slot %d", tc.slot)
 				assert.Equal(t, uint64(cutoff), tooLate.Cutoff)
 			}
@@ -300,21 +340,20 @@ func TestValidateShelleyDelegCerts_MIRTransferVersion(t *testing.T) {
 					require.NoError(t, err)
 					continue
 				}
-				var notAllowed MIRTransferNotCurrentlyAllowedError
+				var notAllowed shelley.MIRTransferNotCurrentlyAllowedError
 				require.ErrorAs(t, err, &notAllowed)
-				assert.Equal(t, pot, notAllowed.Pot)
+				assert.Equal(t, pot, notAllowed.Source)
 			}
 		})
 	}
-	// Needing nothing but the protocol version, the predicate holds even
-	// when the ledger state cannot report MIR state.
-	var notAllowed MIRTransferNotCurrentlyAllowedError
-	require.ErrorAs(t, validateCerts(
-		noMIRProviderLedgerState{}, 4, mirTransfer(mirPotReserves, 1),
-	), &notAllowed)
-	require.NoError(t, validateCerts(
-		noMIRProviderLedgerState{}, 5, mirTransfer(mirPotReserves, 1),
-	))
+	// A ledger state that cannot report the stability window rejects the
+	// certificate as undecidable, whatever the protocol version.
+	var unavailable lcommon.StabilityWindowStateUnavailableError
+	for _, major := range []uint{4, 5} {
+		require.ErrorAs(t, validateCerts(
+			noMIRProviderLedgerState{}, major, mirTransfer(mirPotReserves, 1),
+		), &unavailable)
+	}
 }
 
 // TestValidateShelleyDelegCerts_MIRCapacity pins: every distribution
@@ -334,18 +373,18 @@ func TestValidateShelleyDelegCerts_MIRCapacity(t *testing.T) {
 		}
 		return ls
 	}
-	var insufficient InsufficientForInstantaneousRewardsError
-	var noTransfer InsufficientForTransferError
+	var insufficient shelley.InsufficientForInstantaneousRewardsError
+	var noTransfer shelley.InsufficientForTransferError
 
 	for _, era := range shelleyFamilyMajors {
 		t.Run(era.name, func(t *testing.T) {
 			t.Parallel()
-			var insufficient InsufficientForInstantaneousRewardsError
+			var insufficient shelley.InsufficientForInstantaneousRewardsError
 			for _, pot := range []uint{mirPotReserves, mirPotTreasury} {
 				require.ErrorAs(t, validateCerts(
 					pots(nil), era.major, mirCertFromPot(a, pot, 110*ada),
 				), &insufficient)
-				assert.Equal(t, pot, insufficient.Pot)
+				assert.Equal(t, pot, insufficient.Source)
 				require.NoError(t, validateCerts(
 					pots(nil), era.major, mirCertFromPot(a, pot, 100*ada),
 				))
@@ -398,7 +437,7 @@ func TestValidateShelleyDelegCerts_MIRCapacity(t *testing.T) {
 			require.ErrorAs(t, validateCerts(
 				pots(nil), major, mirTransfer(pot, 100*ada+1),
 			), &noTransfer)
-			assert.Equal(t, pot, noTransfer.Pot)
+			assert.Equal(t, pot, noTransfer.Source)
 			require.ErrorAs(t, validateCerts(
 				pots(nil), major,
 				mirTransfer(pot, 101*ada),
@@ -544,7 +583,7 @@ func TestValidateTxShelleyFamily_RejectsUnregisteredDeregistration(
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var notRegistered StakeKeyNotRegisteredError
+			var notRegistered shelley.StakeKeyNotRegisteredError
 			require.ErrorAs(t, tc.validate(), &notRegistered)
 		})
 	}
@@ -558,4 +597,52 @@ func TestValidateTxShelleyFamily_RejectsUnregisteredDeregistration(
 	)
 	var notConserved shelley.ValueNotConservedUtxoError
 	assert.ErrorAs(t, err, &notConserved)
+}
+
+// TestValidateTxAlonzoFamily_Phase2InvalidSkipsDeleg proves a phase-2-invalid
+// Alonzo or Babbage transaction is not rejected by a DELEG predicate: the
+// reference applies only its collateral and never runs DELEGS for it.
+func TestValidateTxAlonzoFamily_Phase2InvalidSkipsDeleg(t *testing.T) {
+	t.Parallel()
+	certs := []lcommon.CertificateWrapper{{
+		Type:        uint(lcommon.CertificateTypeStakeDeregistration),
+		Certificate: stakeDereg(mirCredential(0x71)),
+	}}
+	cases := []struct {
+		name     string
+		validate func(valid bool) error
+	}{
+		{"Alonzo", func(valid bool) error {
+			pp := alonzo.AlonzoProtocolParameters{
+				KeyDeposit:    2_000_000,
+				ProtocolMajor: lcommon.ProtocolVersionAlonzo,
+			}
+			tx := &alonzo.AlonzoTransaction{
+				TxIsValid: valid,
+				Body:      alonzo.AlonzoTransactionBody{TxCertificates: certs},
+			}
+			return ValidateTxAlonzo(tx, 100, newMockLedgerState(), &pp)
+		}},
+		{"Babbage", func(valid bool) error {
+			pp := babbage.BabbageProtocolParameters{
+				KeyDeposit:    2_000_000,
+				ProtocolMajor: lcommon.ProtocolVersionBabbage,
+			}
+			tx := &babbage.BabbageTransaction{
+				TxIsValid: valid,
+				Body: babbage.BabbageTransactionBody{
+					TxCertificates: certs,
+				},
+			}
+			return ValidateTxBabbage(tx, 100, newMockLedgerState(), &pp)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var notRegistered shelley.StakeKeyNotRegisteredError
+			require.ErrorAs(t, tc.validate(true), &notRegistered)
+			require.NotErrorAs(t, tc.validate(false), &notRegistered)
+		})
+	}
 }
