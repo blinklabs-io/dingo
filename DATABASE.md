@@ -3209,7 +3209,7 @@ the stored blocks as they age past the window, as it does on any node.
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. The type index is deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
 | `redeemer_script` | `transaction_id`, `tag`, `index`, `script_hash`, `slot`, `tx_index` | PK (`transaction_id`, `tag`, `index`); FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_redeemer_script_position` (`script_hash`, `slot`, `tx_index`, `tag`, `index`) | API-mode index of the script each redeemer executes, one row per attributed redeemer pointer, written by `storeRedeemerScripts` next to the `redeemer` rows. A redeemer pointer does not name its script: it resolves through the transaction body -- the spent input's address for a spend (the index points into the inputs sorted by transaction id and output index, not their body order; the address is read from the stored output's `payment_key` and `payment_script`), the sorted mint policy for a mint, the certificate or withdrawal credential, the voter, the proposal guardrail. A pointer that cannot be resolved (an input the index never saw, a spend of an output no script locks) has no row rather than failing the block; a guarding redeemer has none either, because no script purpose is built for it. `slot` and `tx_index` repeat the transaction position so a script's redeemers page in chain order straight off the index; replaying a transaction deletes and rewrites its rows, and the cascade is how rollback reaches them. |
 | `witness_scripts` | `id`, `transaction_id`, `script_hash`, `type` | PK `id`; indexes `transaction_id`, `script_hash`, `type` | API-mode witness-script references. Join `script_hash = script.hash`. The script-hash and type indexes are deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
-| `script` | `id`, `hash`, `content`, `created_slot`, `type` | PK `id`; unique/index `hash`; index `type` | API-mode de-duplicated script content by hash. The type index is unused by live query predicates and is rebuilt by background maintenance. |
+| `script` | `id`, `hash`, `content`, `created_slot`, `type` | PK `id`; unique `hash` (`uni_script_hash`, which serves hash lookups and is the `ON CONFLICT (hash)` target); index `type` | API-mode de-duplicated script content by hash. The type index is unused by live query predicates and is rebuilt by background maintenance. |
 | `plutus_data` | `id`, `transaction_id`, `data` | PK `id`; index `transaction_id` | API-mode Plutus data from witness sets. Join to `transaction.id`. Its transaction-id index remains resident because SetTransaction clears Plutus data on replays. |
 | `redeemer` | `id`, `transaction_id`, `tag`, `index`, `data`, `ex_units_memory`, `ex_units_cpu` | PK `id`; indexes `transaction_id`, `tag`, `index` | API-mode redeemers. Join to `transaction.id`. The tag and index filters are deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears redeemers on replays. |
 | `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique `hash` (`uni_datum_hash`, which serves hash lookups and is the `ON CONFLICT (hash)` target); index `added_slot` | API-mode datum hash index. UTxOs can reference it with `utxo.datum_hash = datum.hash`. The `added_slot` index is deferred and rebuilt by background maintenance. |
@@ -4101,6 +4101,18 @@ without it. MySQL uses the translated `DROP INDEX <name> ON <table>` form, which
 the runner's already-applied guard makes replay-safe.
 `TestDatumHashDuplicateIndexDrop` upgrades a v62 database, plans the hash
 lookups on the unique index and replays the migration; the PostgreSQL and MySQL
+engine tests check the drop against a real server when one is configured.
+
+Migration `v65` (`script-hash-duplicate-index-drop`, integer version 65) drops
+`idx_script_hash` on SQLite, PostgreSQL and MySQL. It indexed `script.hash`,
+which `uni_script_hash` already indexes; the unique index serves every lookup by
+hash and is the `ON CONFLICT (hash)` target of the script insert, so the
+duplicate only added a random-position write per insert. Nothing names it
+(`INDEXED BY`), and a fresh database, which replays every migration, ends
+without it. MySQL uses the translated `DROP INDEX <name> ON <table>` form, which
+the runner's already-applied guard makes replay-safe.
+`TestScriptHashDuplicateIndexDrop` upgrades a v64 database, plans the hash
+lookup on the unique index and replays the migration; the PostgreSQL and MySQL
 engine tests check the drop against a real server when one is configured.
 
 #### Mithril API reward-live-stake finalization
