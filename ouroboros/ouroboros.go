@@ -383,6 +383,11 @@ type Ouroboros struct {
 	// deferredHeaderIdleRetry records, per connection, the applied tip at
 	// which a deferred header last forced an immediate re-intersection.
 	deferredHeaderIdleRetry map[ouroboros.ConnectionId][]byte
+	// withheldAncestryRetry records, per connection, the applied tip at which
+	// a header withheld for unavailable ancestry last forced a
+	// re-intersection. Guarded by deferredHeaderRecoveryMu and cleared when the
+	// connection closes.
+	withheldAncestryRetry map[ouroboros.ConnectionId][]byte
 	// acceptedHeaderMu guards acceptedHeaderTips, the hash of the last header
 	// from each connection that extended the local chain and that chain
 	// selection accepted; any other outcome clears the entry. Ledger
@@ -1463,6 +1468,9 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	connId := e.ConnectionId
 	o.cancelFutureHeaderResync(connId)
 	o.clearDeferredHeaderRecovery(connId)
+	o.deferredHeaderRecoveryMu.Lock()
+	delete(o.withheldAncestryRetry, connId)
+	o.deferredHeaderRecoveryMu.Unlock()
 	o.forgetAcceptedHeaderTip(connId)
 	o.forgetServedActivity(connId)
 

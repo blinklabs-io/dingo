@@ -120,7 +120,7 @@ type ChainsyncJumpingConfig struct {
 	// advances. Optional.
 	LocalProgress func() uint64
 	// Held reports whether the selector holds the connection's header stream
-	// on purpose (the Limit on Eagerness). Optional.
+	// on purpose (the Limit on Eagerness or the catch-up band). Optional.
 	Held func(ouroboros.ConnectionId) bool
 }
 
@@ -1317,8 +1317,8 @@ func compareConnIds(a, b ouroboros.ConnectionId) int {
 // that nothing releases, idle in its protocol loop, or demoted to an observer,
 // stops all of Genesis sync. The node's stall recycler does not catch it:
 // it skips observers and delays recycling while a catch-up is under way. A
-// dynamo the selector holds at the Limit on Eagerness is waiting on purpose
-// and restarts the clock.
+// dynamo the selector holds, at the Limit on Eagerness or in the catch-up
+// band, is waiting on purpose and restarts the clock.
 func (o *Ouroboros) csjCheckDynamoStall(now time.Time) {
 	j := o.csj
 	if j == nil {
