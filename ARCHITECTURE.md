@@ -10621,6 +10621,13 @@ yields no candidate and the branch is rejected instead. Presence is asked of
 `Database.UtxoExists`, which does not materialize the output's CBOR: `UtxoByRef`
 reconstructs it by decoding the producing block on a blob miss, which turned a
 UTxO that demonstrably exists into a hard error out of recovery.
+A failing input whose UTxO row was spent at or below the applied ledger tip,
+bounded by the durable applied floor, is also reported as present: the block
+spends an input the local chain already consumed, and no rollback makes it
+spendable. The failing batch's metadata transaction is discarded before
+recovery runs, so a row marked spent above that ceiling is a stale write and
+still resolves to its producer, as does a missing or pruned row. Inputs of a
+resolved producer skip this check, because that producer consumed them.
 
 A retention-pruned prefix or a Mithril bootstrap leaves the transaction index
 pointing at blocks the block store no longer holds. Three lookups on the
