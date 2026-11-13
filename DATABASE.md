@@ -3064,6 +3064,20 @@ fresh database, which has no post-anchor rows. An unspent post-anchor row is
 rolled back the same way as a spent one: left live, it would be counted toward
 any mark snapshot taken before replay reaches its creation slot.
 
+An imported output carries the anchor slot as `added_slot`, so a rollback
+deletes it like any row created at the anchor and keeps no import-time state
+of its own. Nothing can delete one that the producer's replay would not: a
+replayed producer links an already-stored row without restamping it
+(`repairConflictedUtxo` writes only the collateral-return marker), and
+`hydrateImportedUtxo`, reached through `ImportUtxos` for a producer recovered
+from the block store, restamps it with the producer's block slot, which is at
+or before the anchor, so it only lowers `added_slot`. A row recovered from the
+block store already carries that slot. Every rollback entry point keeps its
+deletion slot at or above the anchor -- `ledger.LedgerState.rollback` refuses
+a target below `mithril_ledger_slot`, and `Database.TruncateAfterSlot` floors
+the slot it deletes at -- so an imported output, linked or not, and its
+assets survive a rollback of a block that replayed or re-confirmed it.
+
 `database.Config` carries the gate values a bare database open can supply,
 independently of any parsed cardano config: `NetworkMagic`, `StartEra`,
 `BlobPlugin`, and `MetadataPlugin`, alongside the pre-existing `StorageMode`
