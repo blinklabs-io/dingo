@@ -951,3 +951,52 @@ func TestLeiosRollbackSkipsUndoForEndorserTransactionRecordedElsewhere(
 		t, txCh, 250*time.Millisecond, "undo for a transaction applied elsewhere",
 	)
 }
+
+// When the certified endorser block cannot be resolved during rollback, the
+// ledger reports a LedgerErrorEvent at the ranking block's point instead of
+// silently dropping the endorser transactions' undo events.
+func TestLeiosRollbackReportsUnavailableEndorserBlock(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	parent := f.announce()
+	certifier, offsets, envParent := f.certifyingChild(parent)
+	require.NoError(t, f.ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	))
+	require.NoError(t, f.process(certifier, offsets, envParent))
+	f.ebAvailable = false
+
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 8)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+	f.ls.config.EventBus = bus
+	f.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	f.ls.emitRollbackTransactionEvents(t.Context(), []models.Block{{
+		Slot:     certifier.SlotNumber(),
+		Hash:     certifier.Hash().Bytes(),
+		PrevHash: certifier.PrevHash().Bytes(),
+		Number:   certifier.BlockNumber(),
+		Type:     gledger.BlockTypeDijkstra,
+		Cbor:     certifier.Cbor(),
+	}})
+
+	evt := testutil.RequireReceive(
+		t, errCh, testutil.AsyncWait, "endorser block resolution error",
+	)
+	le, ok := evt.Data.(LedgerErrorEvent)
+	require.True(t, ok, "unexpected payload %T", evt.Data)
+	require.Equal(t, "rollback_tx_undo_endorser_block", le.Operation)
+	require.Error(t, le.Error)
+	require.Equal(t, certifier.Hash().Bytes(), le.Point.Hash)
+	require.Equal(t, certifier.SlotNumber(), le.Point.Slot)
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond, "undo for an unresolved endorser block",
+	)
+}
