@@ -59,5 +59,10 @@ type ConnectionClosedEvent struct {
 type ConnectionRecycleRequestedEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	ConnKey      string
-	Reason       string
+	// Reason describes the request for logs.
+	Reason string
+	// LocalCloseReason, when set, is published as the closed connection's
+	// ConnectionClosedEvent.LocalCloseReason. The connection manager does not
+	// interpret it.
+	LocalCloseReason string
 }
