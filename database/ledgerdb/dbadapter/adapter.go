@@ -65,6 +65,7 @@ func (a Adapter) BeginLedgerOnly(
 func (a Adapter) Run(txn ledgerdb.Txn, fn func(ledgerdb.Txn) error) error {
 	t := dbTxn(txn)
 	if t == nil {
+		// Run takes no context; a caller that has one passes Begin(ctx).
 		t = a.db.Transaction(context.Background(), true)
 	}
 	return t.Do(func(t *database.Txn) error { return fn(t) })

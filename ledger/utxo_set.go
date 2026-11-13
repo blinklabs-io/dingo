@@ -234,10 +234,7 @@ func (ls *LedgerState) stagedStake(
 // took for startup to resume from.
 func (ls *LedgerState) applyUtxoSet(batch *utxoSetBatch) {
 	if rolledBack := ls.applyAndForgetUtxoSet(batch); rolledBack != nil {
-		ls.publishUtxoEvent(
-			ls.lifecycleContext(),
-			*rolledBack,
-		) //nolint:contextcheck // the ledger lifecycle bounds an after-commit publish
+		ls.publishUtxoEvent(ls.lifecycleContext(), *rolledBack) //nolint:contextcheck // the ledger lifecycle bounds an after-commit publish
 	}
 }
 
@@ -454,9 +451,7 @@ func (b *utxoSetBatch) addStake(cbor []byte, sign int64) {
 	if b.stake == nil {
 		b.stake = make(map[string]int64)
 	}
-	b.stake[string(key)] += sign * int64(
-		lovelace,
-	) //nolint:gosec // lovelace fits in int64
+	b.stake[string(key)] += sign * int64(lovelace) //nolint:gosec // lovelace fits in int64
 }
 
 // CredentialUtxoStake returns the lovelace in live outputs naming the stake
@@ -1198,9 +1193,7 @@ func (ls *LedgerState) LivePointerStakes(
 	)
 	err := sums.EachSum(func(key []byte, n uint64) error {
 		if isPointer(key) {
-			totals[string(key)] += int64(
-				n,
-			) //nolint:gosec // lovelace fits in int64
+			totals[string(key)] += int64(n) //nolint:gosec // lovelace fits in int64
 		}
 		return nil
 	})

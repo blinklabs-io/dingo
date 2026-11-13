@@ -398,6 +398,7 @@ func (ls *LedgerState) submitDBTxnOperation(
 			defer rtrace.StartRegion(ctx, region).End()
 		}
 		ldb := dbadapter.New(db)
+		//nolint:contextcheck // the transaction is opened with ctx; only a nil txn makes Run open one
 		if err := ldb.Run(ldb.Begin(ctx, readWrite), opFunc); err != nil {
 			return err
 		}
@@ -10841,10 +10842,7 @@ func (ls *LedgerState) processBlocksFromSource(
 						if err := ls.ledgerDB().SetTip(pendingTip, txn); err != nil {
 							return fmt.Errorf("failed to set tip: %w", err)
 						}
-						ls.stageUtxoSet(
-							txn,
-							&pendingTip.Point,
-						) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+						ls.stageUtxoSet(txn, &pendingTip.Point) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 					}
 					// Header verification must settle before beforeCommit
 					// records this batch as committed.
