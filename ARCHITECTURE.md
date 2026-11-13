@@ -1153,7 +1153,7 @@ serving chain. It also verifies that the applied ledger tip is on that chain
 and that the requested end is no later than the applied tip before sending
 `StartBatch`; ranges into fetched but unapplied blocks receive `NoBlocks`.
 Equal-slot ordering is checked with the iterator because a Byron main block can
-share a slot and block number with its epoch-boundary parent. A persistent-chain
+share a slot with its epoch-boundary parent. A persistent-chain
 iterator first checks local point metadata, so a missing point cannot fall
 through to a remote archive. It resolves the block index before taking the
 chain lock and verifies the chain mutation generation after acquiring it,

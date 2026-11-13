@@ -755,6 +755,31 @@ func TestBlockfetchServerRequestRange_RejectsUnappliedEndPoint(t *testing.T) {
 	)
 }
 
+func TestBlockfetchServerRequestRange_RepeatedUnappliedEndPointClosesPeer(
+	t *testing.T,
+) {
+	f := newBlockfetchRangeFixture(t)
+	applied := f.blocks[0]
+	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{
+		Point:       ocommon.NewPoint(applied.Slot, applied.Hash),
+		BlockNumber: applied.BlockNumber,
+	})
+
+	for i := 1; i <= blockfetchMaxConsecutiveNoBlocks; i++ {
+		f.requestRange(t, f.point(0), f.point(2))
+		assert.Equal(
+			t,
+			[]byte{blockfetch.MessageTypeNoBlocks},
+			f.readMessageTypes(t, 1),
+			"request %d should be answered with NoBlocks",
+			i,
+		)
+	}
+	testutil.WaitForCondition(t, func() bool {
+		return f.o.connManager.GetConnectionById(f.connID) == nil
+	}, 10*time.Second, "threshold must close the peer")
+}
+
 func TestBlockfetchEndAtOrBeforeAppliedTip(t *testing.T) {
 	t.Parallel()
 

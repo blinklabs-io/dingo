@@ -5142,8 +5142,7 @@ func TestChainsyncServerPeerNotServedAheadOfLedger(t *testing.T) {
 	t.Parallel()
 
 	// The harness uses node-to-client framing so its synthetic full block is
-	// observable, while waitForLedger=false selects the production
-	// node-to-node chainsyncServerRequestNextPeer callback.
+	// observable while exercising the production node-to-node callback.
 	f := newChainsyncServerFixtureServing(
 		t,
 		csmock.ModeNtC,
@@ -5179,6 +5178,59 @@ func TestChainsyncServerPeerNotServedAheadOfLedger(t *testing.T) {
 		"a peer must not receive a block the ledger has not applied",
 	)
 	f.setTip(block2, point2)
+	require.True(t, f.observe(t).IsRollForward(), "expected RollForward")
+}
+
+func TestChainsyncServerPeerNotServedEqualSlotSuccessorAheadOfLedger(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newChainsyncServerFixtureServing(
+		t,
+		csmock.ModeNtC,
+		OuroborosConfig{},
+		false,
+	)
+	block1, point1 := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block1, point1)
+	f.drainInitialRollback(t, csmock.OriginPoint())
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsRollForward(), "applied block is served")
+
+	appendChild := func(
+		parent *testBlock,
+		slot, blockNumber uint64,
+		hashByte byte,
+	) (*testBlock, ocommon.Point) {
+		t.Helper()
+		header, ok := newTestBlockHeader(slot, blockNumber, hashByte).(*testBlockHeader)
+		require.True(t, ok)
+		header.prevHash = parent.Hash()
+		block := &testBlock{
+			BlockHeader: header,
+			blockType:   1,
+			cbor:        []byte{0x81, hashByte},
+		}
+		require.NoError(t, f.o.ledgerState.Chain().AddBlock(t.Context(), block, nil))
+		return block, ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
+	}
+
+	boundary, boundaryPoint := appendChild(block1, 2, 1, 0x02)
+	successor, successorPoint := appendChild(boundary, 2, 2, 0x03)
+	f.setTip(boundary, boundaryPoint)
+
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsRollForward(), "applied boundary block is served")
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+	testutil.RequireNoReceive(
+		t,
+		f.h.Observed(),
+		100*time.Millisecond,
+		"an equal-slot successor must wait for its own application",
+	)
+	f.setTip(successor, successorPoint)
 	require.True(t, f.observe(t).IsRollForward(), "expected RollForward")
 }
 

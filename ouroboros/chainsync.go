@@ -1363,8 +1363,18 @@ func (o *Ouroboros) refreshTip(next *chain.ChainIteratorResult) ochainsync.Tip {
 func (o *Ouroboros) chainsyncServerAheadOfLedger(
 	next *chain.ChainIteratorResult,
 ) bool {
-	return next != nil && !next.Rollback &&
-		next.Point.Slot > o.ledgerState.Tip().Point.Slot
+	if next == nil || next.Rollback {
+		return false
+	}
+	appliedTip := o.ledgerState.Tip().Point
+	if next.Point.Slot != appliedTip.Slot {
+		return next.Point.Slot > appliedTip.Slot
+	}
+	if bytes.Equal(next.Point.Hash, appliedTip.Hash) {
+		return false
+	}
+	isParent, err := o.chainsyncServerAppliedParent(appliedTip, next.Point)
+	return err != nil || !isParent
 }
 
 func (o *Ouroboros) chainsyncServerRequestNextPeer(
@@ -1580,6 +1590,11 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 				if clientState.ChainIter.HasPendingRollback() {
 					cancel()
 					next, nextErr = clientState.ChainIter.Next(false)
+					o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
+					return
+				}
+				if !o.chainsyncServerAheadOfLedger(next) {
+					cancel()
 					o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
 					return
 				}
