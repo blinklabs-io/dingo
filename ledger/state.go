@@ -3393,7 +3393,7 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 			// memory. Force the metadata repair when the selected ancestor is
 			// already the in-memory tip (notably origin).
 			err = ls.withConsumedUtxoPruneBoundary(func() error {
-				return ls.rollbackWithBlocks(ctx, ancestor, nil, true)
+				return ls.rollbackAppliedStateWithUndo(ctx, ancestor, true)
 			})
 		} else {
 			err = ls.rollback(ctx, ancestor)
@@ -5301,7 +5301,7 @@ func (ls *LedgerState) rollback(
 	point ocommon.Point,
 ) error {
 	return ls.withConsumedUtxoPruneBoundary(func() error {
-		return ls.rollbackWithBlocks(ctx, point, nil, false)
+		return ls.rollbackAppliedStateWithUndo(ctx, point, false)
 	})
 }
 
@@ -5379,6 +5379,26 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	repairSameTip bool,
 	publishResync bool,
 	retainIntent bool,
+) error {
+	return ls.rollbackWithBlocksAndIntentOptions(
+		ctx,
+		point,
+		rollbackBlocks,
+		repairSameTip,
+		publishResync,
+		retainIntent,
+		false,
+	)
+}
+
+func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
+	ctx context.Context,
+	point ocommon.Point,
+	rollbackBlocks []models.Block,
+	repairSameTip bool,
+	publishResync bool,
+	retainIntent bool,
+	emitUndo bool,
 ) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
@@ -5708,6 +5728,9 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	}, true)
 	if err != nil {
 		return err
+	}
+	if emitUndo {
+		ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
 	}
 	// The blocks are gone from the ledger from here on, whichever path
 	// returns, including a rollbackCommittedError.
@@ -6539,6 +6562,7 @@ func (ls *LedgerState) processChainIteratorRollback(
 	rollback := func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
+		ctx := withTransactionEventMutexHeld(ctx)
 		err := ls.rollbackWithBlocksRetainingIntent(
 			ctx,
 			point,
@@ -13663,6 +13687,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 		if err := func() error {
 			ls.transactionEventMutex.Lock()
 			defer ls.transactionEventMutex.Unlock()
+			ctx := withTransactionEventMutexHeld(ctx)
 			ls.RLock()
 			currentLedgerTip := ls.currentTip
 			mithrilLedgerSlot := ls.mithrilLedgerSlot
@@ -13788,6 +13813,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 	if err := func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
+		ctx := withTransactionEventMutexHeld(ctx)
 		// Resolve the ledger's own applied blocks between the ancestor
 		// and the CURRENT applied tip only now, holding
 		// transactionEventMutex: submitBlockApplyDBTxn's forward-apply

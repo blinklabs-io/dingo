@@ -362,15 +362,16 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		}
 		return ls.withDestructiveDatabaseTransition(ls.closeCtx(), func() error {
 			if rewindPrimaryChain && !primaryChainAlreadyHeld {
-				if err := ls.rewindPrimaryChainForRecovery(
+				var rewindErr error
+				primaryChainRewound, rewindErr = ls.rewindPrimaryChainForRecoveryResult(
 					rewindPoint,
-				); err != nil {
+				)
+				if rewindErr != nil {
 					return fmt.Errorf(
 						"rewind primary chain for replay recovery: %w",
-						err,
+						rewindErr,
 					)
 				}
-				primaryChainRewound = true
 			}
 			// The chain moves first while the rollback anchor is guaranteed to
 			// remain available. If metadata synchronization fails, the primary
@@ -378,16 +379,30 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 			// The cycle that first starts holding at an unchanged tip repairs the
 			// metadata the failed block left above it; the cycles that keep
 			// holding at that same tip reuse what it restored.
-			if err := ls.rollbackWithBlocks(
-				context.Background(),
-				rewindPoint,
-				nil,
-				replayHolding && !wasReplayHolding &&
-					pointMatches(rewindPoint, ledgerTip.Point),
-			); err != nil {
+			repairSameTip := replayHolding && !wasReplayHolding &&
+				pointMatches(rewindPoint, ledgerTip.Point)
+			var rollbackErr error
+			if primaryChainRewound {
+				// The primary-chain rewind already published undo events before
+				// removing its blocks. Do not publish them a second time while
+				// synchronizing metadata.
+				rollbackErr = ls.rollbackWithBlocks(
+					context.Background(),
+					rewindPoint,
+					nil,
+					repairSameTip,
+				)
+			} else {
+				rollbackErr = ls.rollbackAppliedStateWithUndo(
+					context.Background(),
+					rewindPoint,
+					repairSameTip,
+				)
+			}
+			if rollbackErr != nil {
 				return fmt.Errorf(
 					"rollback ledger state for replay recovery: %w",
-					err,
+					rollbackErr,
 				)
 			}
 			return nil
@@ -1390,6 +1405,13 @@ func (ls *LedgerState) resetRecoveryRewindRejections(newTipSlot uint64) {
 func (ls *LedgerState) rewindPrimaryChainForRecovery(
 	point ocommon.Point,
 ) error {
+	_, err := ls.rewindPrimaryChainForRecoveryResult(point)
+	return err
+}
+
+func (ls *LedgerState) rewindPrimaryChainForRecoveryResult(
+	point ocommon.Point,
+) (bool, error) {
 	return ls.rewindPrimaryChainForRecoveryWithRollback(
 		point, ls.rollbackPrimaryChainInSecurityParamWindows,
 	)
@@ -1398,15 +1420,16 @@ func (ls *LedgerState) rewindPrimaryChainForRecovery(
 func (ls *LedgerState) rewindPrimaryChainAtTipForRecovery(
 	point ocommon.Point,
 ) error {
-	return ls.rewindPrimaryChainForRecoveryWithRollback(
+	_, err := ls.rewindPrimaryChainForRecoveryWithRollback(
 		point, ls.rollbackPrimaryChainWithinSecurityParam,
 	)
+	return err
 }
 
 func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 	point ocommon.Point,
 	rollback func(ocommon.Point) (bool, error),
-) error {
+) (bool, error) {
 	// This is the funnel every recovery truncation of the primary chain
 	// passes through, and it runs outside the rollback path that arms and
 	// disarms the continuation audit. A window armed before it describes
@@ -1439,7 +1462,7 @@ func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 	if err == nil ||
 		(!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
 			!errors.Is(err, errRecoveryRewindNotConverging)) {
-		return err
+		return committed, err
 	}
 	ls.RLock()
 	tipSlot := ls.currentTip.Point.Slot
@@ -1463,7 +1486,7 @@ func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 				err,
 			)
 		}
-		return err
+		return committed, err
 	}
 	if ls.config.Logger != nil {
 		ls.config.Logger.Error(
@@ -1484,7 +1507,7 @@ func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 			"the node has stopped following the chain; the rewind recovery needs is deeper than the security parameter allows, so restarting the pipeline reproduces it -- investigate the rejected block or resync the node",
 		)
 	}
-	return fmt.Errorf("%w (%w)", errHaltLedgerPipeline, err)
+	return committed, fmt.Errorf("%w (%w)", errHaltLedgerPipeline, err)
 }
 
 // takeContinuationAuditForRewind clears the audit window and returns what it

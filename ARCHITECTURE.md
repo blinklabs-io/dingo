@@ -948,6 +948,15 @@ be read from the committed state. If rollback wins, truncation and the ledger
 rewind make the waiting block batch stale, and the tip recheck rejects it
 instead of publishing Apply after Undo.
 
+Replay recovery with a resolved producer and runtime partial-commit recovery
+can rewind ledger metadata without first rewinding the primary chain. Those
+paths use the ledger's applied-point record, bounded by the published ledger
+tip, to resolve the blocks being discarded; the active chain suffix may be
+ahead or may already belong to a replacement fork. They hold the same
+`transactionEventMutex` while capturing that applied range, enqueueing its
+Undo events, and committing the metadata truncation. An unapplied chain block
+therefore produces no Undo, and a later Apply cannot overtake the recovery.
+
 Both mutation paths stage their in-memory state against the durable commit.
 `Chain.AddBlocks` and `Chain.addRawBlocks` advance `currentTip`,
 `tipBlockIndex`, the queued headers, and the ephemeral block buffer per block
@@ -1137,13 +1146,13 @@ parameter, but it refuses to cross the consumed-UTxO prune floor because the
 deleted rows cannot be reconstructed.
 
 Getting this wrong is subtle, so the constraint is worth stating plainly:
-**the undo events must be emitted before the truncation, by the rollback
-path.** `handleEventChainUpdate` deliberately does *not* emit them, even
-though it receives `ChainRollbackEvent` with the rolled-back blocks. It is a
-`SubscribeFunc` dispatch reached only after `chain.Rollback` has published and
-returned, by which point the apply goroutine is already free to publish
-forward events — emitting there loses the race reproducibly. It still emits
-the `ledger.block` undo events, which are a different event type and so a
+**primary-chain undo events must be emitted before primary-chain truncation,
+by the rollback path.** `handleEventChainUpdate` deliberately does *not* emit
+them, even though it receives `ChainRollbackEvent` with the rolled-back blocks.
+It is a `SubscribeFunc` dispatch reached only after `chain.Rollback` has
+published and returned, by which point the apply goroutine is already free to
+publish forward events — emitting there loses the race reproducibly. It still
+emits the `ledger.block` undo events, which are a different event type and so a
 different lane. Emitting the undo events from a `go` statement onto the
 reordering shared pool loses the same race twice over.
 
@@ -1155,9 +1164,13 @@ because the latter deletes the block bodies. Success clears the record only
 after metadata truncation, cache reload, durable-floor enforcement, and an
 ordered-lane delivery barrier. Startup replays the stored payload while holding
 the transaction-event mutex, finishes the chain rewind if necessary, and then
-completes metadata truncation. This is an at-least-once outbox: an interruption
-after delivery and before clearing may replay an undo, so consumers must
-tolerate duplicate rollback notifications.
+completes metadata truncation. A payload successfully captured in the outbox is
+delivered at least once: an interruption after delivery and before clearing may
+replay an undo, so consumers must tolerate duplicate rollback notifications.
+An applied point whose block body was removed before a restart and is absent
+from the retained block cache cannot be added to that payload; the reconciler
+logs and counts the notification gap rather than using the replacement chain's
+block at the same slot.
 
 The record is bounded to 4096 blocks and 64 MiB of raw block fields. A larger
 rollback continues with live ordered delivery and logs that crash recovery is
