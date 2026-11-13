@@ -1,6 +1,5 @@
--- Serve the epoch stakes count and page. `registered` was not in any index,
--- so the count read every stake row of the epoch. With it after epoch and
--- before the page order, the count reads only matching entries and, outside
--- MySQL, a page needs no sort. MySQL keys the blob columns by prefix, which
--- it cannot use for ORDER BY.
-CREATE INDEX IF NOT EXISTS `idx_reward_stake_input_epoch_registered_pool_cred` ON `reward_stake_input`(`epoch`,`registered`,`pool_key_hash`,`credential_tag`,`staking_key`);
+-- Pool relay IPv6 addresses decoded from chain certificates and ledger-state
+-- snapshots were stored in the ledger's wire order (each 32-bit word
+-- little-endian). They are now stored in network order, as gouroboros decodes
+-- them. The word swap runs as a backfill because it rewrites blob contents.
+-- Genesis relays were parsed from text and already hold network order.

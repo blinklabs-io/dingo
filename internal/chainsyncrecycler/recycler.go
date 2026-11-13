@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
@@ -928,8 +929,19 @@ func (r *Recycler) disconnectImpatientClients(live LiveComponents) {
 }
 
 // ReasonPatienceExhausted is the ConnectionRecycleRequestedEvent reason for a
-// peer disconnected by the Genesis Limit on Patience.
-const ReasonPatienceExhausted = "genesis_patience_exhausted"
+// peer disconnected by the Genesis Limit on Patience. It is also the close's
+// local reason, which peer governance reads to delay the redial.
+const ReasonPatienceExhausted = peergov.CloseReasonPatienceExhausted
+
+// localCloseReason returns the reason to record on the close, which only a
+// chainsync demotion carries: a stall recycle keeps the peer governor's
+// ordinary session accounting.
+func localCloseReason(reason string) string {
+	if peergov.IsChainsyncDemotionReason(reason) {
+		return reason
+	}
+	return ""
+}
 
 func (r *Recycler) publishConnectionRecycle(
 	connId ouroboros.ConnectionId,
@@ -941,9 +953,10 @@ func (r *Recycler) publishConnectionRecycle(
 		event.NewEvent(
 			connmanager.ConnectionRecycleRequestedEventType,
 			connmanager.ConnectionRecycleRequestedEvent{
-				ConnectionId: connId,
-				ConnKey:      connKey,
-				Reason:       reason,
+				ConnectionId:     connId,
+				ConnKey:          connKey,
+				Reason:           reason,
+				LocalCloseReason: localCloseReason(reason),
 			},
 		),
 	)

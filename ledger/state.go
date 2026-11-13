@@ -979,9 +979,21 @@ type ConnectionLiveFunc func(ouroboros.ConnectionId) bool
 // recently forged a block for a given slot. Chainsync uses it to attribute the
 // local side of same-slot and restricted-window Praos battles.
 type ForgedBlockChecker interface {
-	// WasForgedByUs returns the block hash and true if the local node
-	// forged a block for the given slot, or nil and false otherwise.
-	WasForgedByUs(slot uint64) (blockHash []byte, ok bool)
+	// ForgedBlockHashes returns the hash of every block the local node
+	// forged for the given slot, or nil when it forged none. A node forging
+	// for several pools can hold more than one: two of its pools may lead
+	// the same slot and both forge when the slot arbiter cannot decide.
+	ForgedBlockHashes(slot uint64) [][]byte
+}
+
+// forgedByUs reports whether hash is one of the blocks the local node forged
+// for slot. Every own hash counts, so a second own block in a slot is never
+// taken for a peer's.
+func forgedByUs(checker ForgedBlockChecker, slot uint64, hash []byte) bool {
+	return slices.ContainsFunc(
+		checker.ForgedBlockHashes(slot),
+		func(own []byte) bool { return bytes.Equal(own, hash) },
+	)
 }
 
 // SlotBattleRecorder records slot battle events for metrics.
@@ -3393,7 +3405,7 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 			// memory. Force the metadata repair when the selected ancestor is
 			// already the in-memory tip (notably origin).
 			err = ls.withConsumedUtxoPruneBoundary(func() error {
-				return ls.rollbackWithBlocks(ctx, ancestor, nil, true)
+				return ls.rollbackAppliedStateWithUndo(ctx, ancestor, true)
 			})
 		} else {
 			err = ls.rollback(ctx, ancestor)
@@ -5301,7 +5313,7 @@ func (ls *LedgerState) rollback(
 	point ocommon.Point,
 ) error {
 	return ls.withConsumedUtxoPruneBoundary(func() error {
-		return ls.rollbackWithBlocks(ctx, point, nil, false)
+		return ls.rollbackAppliedStateWithUndo(ctx, point, false)
 	})
 }
 
@@ -5379,6 +5391,26 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	repairSameTip bool,
 	publishResync bool,
 	retainIntent bool,
+) error {
+	return ls.rollbackWithBlocksAndIntentOptions(
+		ctx,
+		point,
+		rollbackBlocks,
+		repairSameTip,
+		publishResync,
+		retainIntent,
+		false,
+	)
+}
+
+func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
+	ctx context.Context,
+	point ocommon.Point,
+	rollbackBlocks []models.Block,
+	repairSameTip bool,
+	publishResync bool,
+	retainIntent bool,
+	emitUndo bool,
 ) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
@@ -5708,6 +5740,9 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	}, true)
 	if err != nil {
 		return err
+	}
+	if emitUndo {
+		ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
 	}
 	// The blocks are gone from the ledger from here on, whichever path
 	// returns, including a rollbackCommittedError.
@@ -6539,6 +6574,7 @@ func (ls *LedgerState) processChainIteratorRollback(
 	rollback := func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
+		ctx := withTransactionEventMutexHeld(ctx)
 		err := ls.rollbackWithBlocksRetainingIntent(
 			ctx,
 			point,
@@ -10917,10 +10953,11 @@ func (ls *LedgerState) processBlocksFromSource(
 					// The tracker is keyed by slot, so a block that won a
 					// slot battle against ours shares the slot; only an
 					// equal hash makes the tip our block.
-					if forgedHash, forged := checker.WasForgedByUs(
+					if forgedByUs(
+						checker,
 						tipForLog.Point.Slot,
-					); forged &&
-						bytes.Equal(forgedHash, tipForLog.Point.Hash) {
+						tipForLog.Point.Hash,
+					) {
 						source = "forged"
 					}
 				}
@@ -11073,11 +11110,19 @@ func (ls *LedgerState) ledgerProcessBlock(
 			err,
 		)
 	}
+	// Peer-sourced blocks always require the inexpensive block-envelope and
+	// stateful opcert-counter checks, even when full historical validation is
+	// disabled. Trusted replay and Mithril-certified history are the only
+	// inputs allowed to skip them.
+	trustedReplay := ls.config.TrustedReplay ||
+		trustedReplayOpCertCounterCacheFrom(ctx) != nil
+	validateInboundBasics := shouldValidate ||
+		(!trustedReplay && !ls.slotCoveredByMithril(point.Slot))
 	// Full validation applies both the node's enabled-era ceiling and the BBODY
 	// current-version-plus-one rule. Historical peer blocks still apply the
 	// enabled-era ceiling below; only trusted replay and Mithril-certified
 	// history skip it.
-	if shouldValidate {
+	if validateInboundBasics {
 		if err := validateInboundBlockEnvelope(
 			block,
 			pparams,
@@ -11086,24 +11131,18 @@ func (ls *LedgerState) ledgerProcessBlock(
 		); err != nil {
 			return nil, ls.rejectInboundEnvelopeFailure(point, err)
 		}
-		if err := ls.validateBlockHeaderProtocolVersion(
-			block.Header(), pparams,
-		); err != nil {
-			return nil, ls.rejectInboundEnvelopeFailure(point, err)
-		}
-	} else if !ls.config.TrustedReplay && !ls.slotCoveredByMithril(point.Slot) {
-		if err := ls.validateSupportedHeaderProtocolVersion(
-			block.Header(),
-		); err != nil {
-			return nil, ls.rejectInboundEnvelopeFailure(point, err)
-		}
-		// The aggregate maxBlockExUnits bound is a block-level ledger rule
-		// that per-transaction validation never repeats, so a peer-sourced
-		// block must meet it even when ValidateHistorical=false skips the
-		// rest of validation. Mithril-certified and TrustedReplay blocks are
-		// trusted input and keep skipping it.
-		if err := validateBlockExUnits(block, pparams); err != nil {
-			return nil, ls.rejectInboundEnvelopeFailure(point, err)
+		if shouldValidate {
+			if err := ls.validateBlockHeaderProtocolVersion(
+				block.Header(), pparams,
+			); err != nil {
+				return nil, ls.rejectInboundEnvelopeFailure(point, err)
+			}
+		} else {
+			if err := ls.validateSupportedHeaderProtocolVersion(
+				block.Header(),
+			); err != nil {
+				return nil, ls.rejectInboundEnvelopeFailure(point, err)
+			}
 		}
 	}
 	// Validate the operational certificate counter before processing the
@@ -11135,7 +11174,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		// transactions are processed (below); rollback safety is inherited from
 		// the per-(pool,slot) PoolOpCertSequence store, which drops rows past
 		// the rollback slot and recomputes the latest counter.
-		if shouldValidate {
+		if validateInboundBasics {
 			stored, found, err := ls.latestOpCertCounterForValidation(
 				ctx,
 				opCertPoolKeyHash,
@@ -13663,6 +13702,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 		if err := func() error {
 			ls.transactionEventMutex.Lock()
 			defer ls.transactionEventMutex.Unlock()
+			ctx := withTransactionEventMutexHeld(ctx)
 			ls.RLock()
 			currentLedgerTip := ls.currentTip
 			mithrilLedgerSlot := ls.mithrilLedgerSlot
@@ -13788,6 +13828,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 	if err := func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
+		ctx := withTransactionEventMutexHeld(ctx)
 		// Resolve the ledger's own applied blocks between the ancestor
 		// and the CURRENT applied tip only now, holding
 		// transactionEventMutex: submitBlockApplyDBTxn's forward-apply

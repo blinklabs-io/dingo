@@ -15,7 +15,6 @@
 package chain
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -82,20 +81,9 @@ func (c *Chain) parentEraLocked(
 	ctx context.Context,
 	prevHash []byte,
 ) (uint8, bool, error) {
-	if n := len(c.headers); n > 0 &&
-		bytes.Equal(c.headers[n-1].point.Hash, prevHash) {
-		return c.headers[n-1].header.Era().Id, true, nil
+	parent, found, err := c.parentLinkLocked(ctx, prevHash)
+	if err != nil || !found {
+		return 0, false, err
 	}
-	if c.tipBlockIndex < initialBlockIndex ||
-		!bytes.Equal(c.currentTip.Point.Hash, prevHash) {
-		return 0, false, nil
-	}
-	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
-	defer unlockBlockIndexReadLocks()
-	tipBlock, err := c.blockByIndexLocked(ctx, c.tipBlockIndex)
-	if err != nil {
-		return 0, false, fmt.Errorf("load chain tip block: %w", err)
-	}
-	eraId, ok := EraIdForBlockType(tipBlock.Type)
-	return eraId, ok, nil
+	return parent.EraId, parent.Known, nil
 }

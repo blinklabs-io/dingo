@@ -37,7 +37,12 @@ func TestLedgerProcessBlockRecordsCounterAboveMaxInt64(
 	t.Parallel()
 
 	db := newTestDB(t)
-	ls := &LedgerState{db: db}
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			TrustedReplay: true,
+		},
+	}
 
 	var issuerVkey lcommon.IssuerVkey
 	for i := range issuerVkey {

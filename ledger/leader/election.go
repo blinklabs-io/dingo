@@ -289,6 +289,10 @@ type Election struct {
 	metrics            *electionMetrics
 	consensusIdentity  string
 	tachysProvider     TachysDistributionProvider
+	// computeGate, when set, is a semaphore shared with the elections of the
+	// node's other pools, so an epoch boundary does not run every pool's
+	// schedule computation at once.
+	computeGate chan struct{}
 
 	// wg owns only the worker loops. The cancellation coordinator joins
 	// them before closing lifecycleDone; it must never join itself. Start
@@ -358,6 +362,16 @@ func (e *Election) SetScheduleStore(store ScheduleStore) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.scheduleStore = store
+}
+
+// SetComputeGate bounds schedule computation with gate, a semaphore whose
+// capacity is the number of computations that may run at once across every
+// election sharing it. Nil, the default, leaves computation unbounded. It must
+// be called before Start.
+func (e *Election) SetComputeGate(gate chan struct{}) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.computeGate = gate
 }
 
 // SetPromRegistry enables leader election metrics.
@@ -812,18 +826,64 @@ func (e *Election) RefreshScheduleForEpoch(
 		}
 	}
 
-	schedule, err := e.computeSchedule(ctx, epoch)
+	release, gated, err := e.acquireComputeGate(ctx)
 	if err != nil {
 		return err
 	}
+	// Another caller for this epoch may have stored its schedule while this
+	// one waited for the gate. Every invalidation bumps the generation, so a
+	// schedule stored at this generation is current, and computing it again
+	// would only hold a gate slot other pools are waiting for.
+	if gated && e.hasSchedule(epoch, generation) {
+		release()
+		return nil
+	}
+	schedule, err := e.computeSchedule(ctx, epoch)
+	if err != nil {
+		release()
+		return err
+	}
 	if schedule == nil {
+		release()
 		return nil // no stake or nonce not available
 	}
-	if !e.storeSchedule(epoch, schedule, generation) {
+	// The gate is released after the store, so a caller that acquires it
+	// next sees this schedule.
+	stored := e.storeSchedule(epoch, schedule, generation)
+	release()
+	if !stored {
 		return nil
 	}
 	e.persistSchedule(schedule)
 	return nil
+}
+
+// hasSchedule reports whether a schedule for epoch is cached at generation.
+func (e *Election) hasSchedule(epoch, generation uint64) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.running &&
+		generation == e.scheduleGeneration &&
+		e.schedules[epoch] != nil
+}
+
+// acquireComputeGate waits for a slot in the shared compute gate, or returns
+// at once when there is none. gated reports whether there is a gate.
+func (e *Election) acquireComputeGate(
+	ctx context.Context,
+) (release func(), gated bool, err error) {
+	e.mu.RLock()
+	gate := e.computeGate
+	e.mu.RUnlock()
+	if gate == nil {
+		return func() {}, false, nil
+	}
+	select {
+	case gate <- struct{}{}:
+		return func() { <-gate }, true, nil
+	case <-ctx.Done():
+		return nil, true, ctx.Err()
+	}
 }
 
 func (e *Election) loadPersistedSchedule(

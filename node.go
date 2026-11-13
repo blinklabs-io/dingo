@@ -157,13 +157,20 @@ type Node struct {
 	kesAgentClient  io.Closer
 	kesAgentCancel  context.CancelFunc
 	kesAgentMetrics *kesagent.Metrics
-	// kesAgentMetricsOnce guards kesAgentMetrics' lazy creation: a sign-mode
+	// kesAgentMetricsMu guards kesAgentMetrics' lazy creation: a sign-mode
 	// reload builds its client outside the lifecycle gates.
-	kesAgentMetricsOnce sync.Once
+	kesAgentMetricsMu sync.Mutex
 	// keyReload is the in-place credential reload's state: the agent's
 	// newer-certificate offers, the file watch and the reload metrics.
 	keyReload      keyReloadState
 	leaderElection nodeconsensus.LeaderScheduler
+	// multiPool holds what forging for more than one pool adds: the other
+	// pools' producers, the slot arbiter and the shared tracking of this
+	// node's own blocks. Its zero value serves a single-pool node.
+	multiPool multiPoolState
+	// scheduleComputeGate bounds how many pools compute a leader schedule
+	// at once; nil for a single pool.
+	scheduleComputeGate chan struct{}
 	// leaderSchedulerRef mirrors leaderElection for readers outside the
 	// node lifecycle goroutine, such as the ledger rollback callback.
 	leaderSchedulerRef atomic.Pointer[leaderSchedulerRef]

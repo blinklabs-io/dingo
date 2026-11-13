@@ -574,7 +574,7 @@ func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database: db, ChainManager: cm, CardanoNodeConfig: cfg,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), PromRegistry: prometheus.NewRegistry(),
-		EnableDijkstra: true, ManualBlockProcessing: true,
+		EnableDijkstra: true, ManualBlockProcessing: true, TrustedReplay: true,
 		EndorserBlockProvider: func(hash []byte, _ uint64) ([]cbor.RawMessage, bool) {
 			return []cbor.RawMessage{spenderRaw}, bytes.Equal(hash, ebHash)
 		},
