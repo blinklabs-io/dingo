@@ -1506,6 +1506,69 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersMissingPoolState(
 	assert.ErrorIs(t, err, models.ErrPoolNotFound)
 }
 
+func TestVerifyBlockHeaderCryptoBeforeApplyRejectsPoolAbsentFromPopulatedSnapshot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{47}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
+	ls.publishSnapshotsLocked()
+	// The electing mark snapshot exists and holds another pool only.
+	otherPool := bytes.Repeat([]byte{0xAB}, 28)
+	seedPoolStakeSnapshot(t, db, 4, otherPool, 1_000_000_000)
+
+	err := ls.verifyBlockHeaderCryptoBeforeApply(tb.block)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, errHeaderVerificationDeferred)
+	assert.False(t, IsHeaderVerificationDeferred(err))
+	assert.ErrorIs(t, err, models.ErrPoolNotFound)
+}
+
+func TestVerifyBlockHeaderStateImportedActivePoolAbsenceAheadOfApply(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		populated bool
+	}{
+		{name: "populated distribution rejects", populated: true},
+		{name: "empty distribution defers", populated: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := createTestBlock(t, [32]byte{48}, 0, tamperNone)
+			ls, db := newImportedActiveLedger(t, tb)
+			ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
+			ls.publishSnapshotsLocked()
+			if tc.populated {
+				seedPoolStakeSnapshotOfType(
+					t,
+					db,
+					5,
+					models.PoolStakeSnapshotTypeActive,
+					bytes.Repeat([]byte{0xAB}, 28),
+					1_000_000_000,
+					1_000_000_000,
+				)
+			}
+
+			err := ls.verifyBlockHeaderState(tb.block, 5, true)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, models.ErrPoolNotFound)
+			assert.Equal(
+				t,
+				!tc.populated,
+				IsHeaderVerificationDeferred(err),
+			)
+		})
+	}
+}
+
 func TestVerifyBlockHeaderCryptoBeforeApplyDefersEmptyMarkSnapshot(
 	t *testing.T,
 ) {
@@ -7977,6 +8040,16 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		db,
 		5,
 		withheldDescendantPool[:],
+		1_000_000_000_000_000,
+	)
+	// The withheld ancestor has a snapshot row but no registration to resolve
+	// its VRF key from, so its pool state is unavailable rather than absent.
+	withheldAncestorPool := withheldAncestor.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(
+		t,
+		db,
+		5,
+		withheldAncestorPool[:],
 		1_000_000_000_000_000,
 	)
 	ls.removePeerHeaderHistory(connIdKey(ouroboros.ConnectionId{}))

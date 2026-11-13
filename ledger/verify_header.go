@@ -1345,7 +1345,15 @@ func (ls *LedgerState) verifyBlockHeaderStateWithAuthorization(
 	if err := ls.verifyRegisteredVrfKeyFromSnapshot(
 		ctx, block, epochCache, snap,
 	); err != nil {
+		// ErrPoolNotFound comes from the live pool table, so it only
+		// reflects the electing snapshot when that snapshot has no row for
+		// the pool and already holds other pools: that is an authoritative
+		// absence, whatever the apply cursor. An empty snapshot, or a row
+		// whose registration cannot be resolved, can still be filled in.
+		poolAbsentFromSnapshot := errors.Is(err, models.ErrPoolNotFound) &&
+			ls.poolAbsentFromPopulatedSnapshot(snap)
 		if allowStateDefer &&
+			!poolAbsentFromSnapshot &&
 			(errors.Is(err, models.ErrPoolNotFound) ||
 				errors.Is(err, errVrfKeyRegistrationHistoryUnavailable)) &&
 			ls.ledgerTipBehindSlot(block.SlotNumber()) {
@@ -1392,6 +1400,23 @@ func (ls *LedgerState) verifyBlockHeaderStateWithAuthorization(
 		return err
 	}
 	return nil
+}
+
+// poolAbsentFromPopulatedSnapshot reports whether the electing snapshot was
+// read successfully, holds stake, and has no row for the producer. Any failed
+// read reports false, which keeps the header deferrable.
+func (ls *LedgerState) poolAbsentFromPopulatedSnapshot(
+	snap electingSnapshot,
+) bool {
+	if snap.selErr != nil || snap.rowErr != nil || snap.row != nil {
+		return false
+	}
+	total, err := ls.db.Metadata().GetTotalActiveStake(
+		snap.epoch,
+		snap.kind,
+		nil,
+	)
+	return err == nil && total > 0
 }
 
 // verifyHeaderSizeLimits rejects a Shelley-and-later header that declares a
