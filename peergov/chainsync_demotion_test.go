@@ -18,11 +18,13 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -83,9 +85,9 @@ func TestHandleConnectionClosedEvent_ChainsyncDemotionDelaysRedial(
 			stalledAt := peer.LastChainsyncStall
 			pg.mu.Unlock()
 			assert.GreaterOrEqual(t, got,
-				chainsyncDemotionReconnectDelay+chainsyncDemotionMinJitter)
+				chainsyncDemotionReconnectDelay-chainsyncDemotionJitter)
 			assert.Less(t, got,
-				chainsyncDemotionReconnectDelay+chainsyncDemotionMaxJitter)
+				chainsyncDemotionReconnectDelay+chainsyncDemotionJitter)
 			assert.False(t, stalledAt.IsZero(),
 				"the demoted peer must rank behind alternates")
 		})
@@ -177,4 +179,107 @@ func TestHandleConnectionClosedEvent_ChainsyncDemotionDialsColdAlternate(
 		10*time.Millisecond,
 		"a cold alternate must be dialed when the hot peer is demoted",
 	)
+}
+
+func newDemotionTestGovernor(t *testing.T) (*PeerGovernor, *Peer) {
+	t.Helper()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus: newMockEventBus(),
+	})
+	seedTopologyPeer(
+		pg,
+		"44.0.0.1:3001",
+		"44.0.0.1:3001",
+		"local-root-0",
+		PeerSourceTopologyLocalRoot,
+	)
+	pg.mu.Lock()
+	peer := pg.peers[0]
+	// Suppress the reconnect goroutine; only the accounting is checked.
+	peer.Reconnecting = true
+	pg.mu.Unlock()
+	return pg, peer
+}
+
+func publishInboundFrom(pg *PeerGovernor, addr string) {
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", addr)
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr:  localAddr,
+				RemoteAddr: remoteAddr,
+			},
+			LocalAddr:            localAddr,
+			RemoteAddr:           remoteAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(addr),
+		},
+	})
+}
+
+// A demoted peer that dials this node back proves only that it is reachable,
+// which is not why it was demoted, so the inbound arrival keeps the delay.
+func TestInboundArrivalKeepsChainsyncDemotionBackoff(t *testing.T) {
+	t.Parallel()
+	pg, peer := newDemotionTestGovernor(t)
+	pg.afterFunc = func(time.Duration, func()) {}
+	closePeerWithReason(
+		pg,
+		peer,
+		event.ConnectionCloseReasonEagernessStandoffLost,
+	)
+
+	publishInboundFrom(pg, "44.0.0.1:3001")
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	assert.GreaterOrEqual(t, peer.ReconnectDelay,
+		chainsyncDemotionReconnectDelay-chainsyncDemotionJitter)
+}
+
+// A connection a demoted peer opens during its demotion stays open but is
+// withheld from chain selection, and is released when the demotion ends:
+// otherwise its first fork header pins the Limit on Eagerness again.
+func TestChainsyncDemotionWithholdsUpstreamUntilItEnds(t *testing.T) {
+	t.Parallel()
+	pg, peer := newDemotionTestGovernor(t)
+	var release func()
+	var releaseAfter time.Duration
+	pg.afterFunc = func(d time.Duration, f func()) {
+		releaseAfter, release = d, f
+	}
+	closePeerWithReason(
+		pg,
+		peer,
+		event.ConnectionCloseReasonPatienceExhausted,
+	)
+	require.NotNil(t, release, "the end of the demotion must be scheduled")
+
+	pg.mu.Lock()
+	assert.Equal(t, peer.ReconnectDelay, releaseAfter)
+	peer.Connection = &PeerConnection{
+		Id:       outboundTestConnId(),
+		IsClient: true,
+	}
+	pg.withholdDeniedUpstreamLocked(peer)
+	assert.True(t, peer.Connection.UpstreamWithheld)
+	assert.False(t, chainSelectionEligible(
+		peer.Source,
+		pg.selectionConnLocked(peer),
+	))
+	// The demotion has ended by the time the timer fires.
+	peer.ChainsyncDemotedUntil = time.Now().Add(-time.Second)
+	pg.mu.Unlock()
+
+	release()
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	assert.False(t, peer.Connection.UpstreamWithheld)
+	assert.True(t, chainSelectionEligible(
+		peer.Source,
+		pg.selectionConnLocked(peer),
+	))
 }

@@ -114,6 +114,10 @@ type Peer struct {
 	// ChainSync stall timeout. Redial ranking puts recently stalled peers
 	// behind every alternate.
 	LastChainsyncStall time.Time
+	// ChainsyncDemotedUntil is when a chainsync demotion of this peer ends.
+	// Until then the peer is not redialed, and a connection it opens is
+	// withheld from chain selection.
+	ChainsyncDemotedUntil time.Time
 	// EverConnected records whether this peer has ever established a
 	// client-capable connection. Discovered (peer-share/ledger) and
 	// public-root peers that have never connected are dropped after a failed
@@ -236,8 +240,8 @@ type PeerConnection struct {
 	VersionData     oprotocol.VersionData
 	ProtocolVersion uint
 	IsClient        bool
-	// UpstreamWithheld marks a connection from a peer under a denial. The
-	// connection stays open so the peer can still use this node as a
-	// downstream, but it is never a chain selection source.
+	// UpstreamWithheld marks a connection from a peer under a denial or a
+	// chainsync demotion. The connection stays open so the peer can still use
+	// this node as a downstream, but it is never a chain selection source.
 	UpstreamWithheld bool
 }

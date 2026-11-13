@@ -1235,25 +1235,49 @@ func (p *PeerGovernor) IsConfiguredRootConnection(
 }
 
 // withholdDeniedUpstreamLocked keeps the peer's new inbound connection open
-// but out of chain selection while the peer is denied. A denial on a stable
-// identity (a diverged topology peer reconnecting from a new source port) is
-// a verdict on the peer as an upstream; closing the connection would also cut
-// off a full-duplex peer that only consumes from this node. Must be called
-// with p.mu held.
+// but out of chain selection while the peer is denied or demoted. A denial on
+// a stable identity (a diverged topology peer reconnecting from a new source
+// port) is a verdict on the peer as an upstream; closing the connection would
+// also cut off a full-duplex peer that only consumes from this node. Must be
+// called with p.mu held.
 func (p *PeerGovernor) withholdDeniedUpstreamLocked(peer *Peer) {
 	if peer == nil || peer.Connection == nil ||
 		peer.Source == PeerSourceInboundConn {
 		return
 	}
-	peer.Connection.UpstreamWithheld = p.isPeerDeniedLocked(peer)
+	peer.Connection.UpstreamWithheld = p.upstreamWithheldLocked(peer)
 }
 
 // upstreamWithheldLocked reports whether peer's open connection is denied
-// for upstream use right now. Eligibility follows the live denial state even
-// before syncUpstreamWithholdLocked updates the stored transition flag. Must
-// be called with p.mu held.
+// for upstream use right now, by a denial or a chainsync demotion. Eligibility
+// follows the live state even before syncUpstreamWithholdLocked updates the
+// stored transition flag. Must be called with p.mu held.
 func (p *PeerGovernor) upstreamWithheldLocked(peer *Peer) bool {
-	return peer != nil && peer.Connection != nil && p.isPeerDeniedLocked(peer)
+	return peer != nil && peer.Connection != nil &&
+		(p.isPeerDeniedLocked(peer) || chainsyncDemoted(peer, time.Now()))
+}
+
+func chainsyncDemoted(peer *Peer, now time.Time) bool {
+	return now.Before(peer.ChainsyncDemotedUntil)
+}
+
+// after runs f once d has elapsed.
+func (p *PeerGovernor) after(d time.Duration, f func()) {
+	if p.afterFunc != nil {
+		p.afterFunc(d, f)
+		return
+	}
+	time.AfterFunc(d, f)
+}
+
+// endChainsyncDemotion releases connections withheld by a chainsync demotion
+// that has ended. The periodic reconcile would release them too, but minutes
+// later.
+func (p *PeerGovernor) endChainsyncDemotion() {
+	p.mu.Lock()
+	events := p.syncUpstreamWithholdLocked(nil)
+	p.mu.Unlock()
+	p.publishPendingEvents(events)
 }
 
 // usableClientLocked reports whether peer has a client-capable connection
@@ -1275,7 +1299,7 @@ func (p *PeerGovernor) selectionConnLocked(peer *Peer) *PeerConnection {
 }
 
 // syncUpstreamWithholdLocked aligns each open connection's withhold with the
-// current denial state and appends the resulting chain selection events. A
+// current denial and demotion state and appends the resulting chain selection events. A
 // denial that starts or expires while a connection is open changes whether
 // that connection may feed chainsync. Must be called with p.mu held.
 func (p *PeerGovernor) syncUpstreamWithholdLocked(
@@ -1286,12 +1310,12 @@ func (p *PeerGovernor) syncUpstreamWithholdLocked(
 			peer.Source == PeerSourceInboundConn {
 			continue
 		}
-		denied := p.isPeerDeniedLocked(peer)
-		if denied == peer.Connection.UpstreamWithheld {
+		withheld := p.upstreamWithheldLocked(peer)
+		if withheld == peer.Connection.UpstreamWithheld {
 			continue
 		}
 		oldConn := clonePeerConnection(peer.Connection)
-		peer.Connection.UpstreamWithheld = denied
+		peer.Connection.UpstreamWithheld = withheld
 		events = p.appendChainSelectionEventsLocked(
 			events,
 			p.bootstrapExited,

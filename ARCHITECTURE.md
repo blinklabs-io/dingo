@@ -10215,11 +10215,17 @@ A clean close whose local reason is a chainsync demotion
 (`event.IsChainsyncDemotionReason`: `genesis_patience_exhausted` from the Limit
 on Patience, recorded through the recycle request's `LocalCloseReason`, or
 `eagerness_standoff_lost` from the node's standoff close) is handled like a
-stall, and its delay is at least ten seconds plus a jitter of 0.1s to 4s, even
-when hot peers are critically low. A redialed peer starts with a full patience
-bucket and nothing remembered by chain selection, so without the delay a peer
-that keeps pinning the Limit on Eagerness regains it as soon as it reconnects.
-The connection manager only records the reason; it does not interpret it.
+stall and demotes the peer for at least ten seconds, jittered by two seconds
+either way, even when hot peers are critically low. That matches the
+reference's `repromoteErrorDelay` after a ChainSync error. Until the demotion
+ends (`ChainsyncDemotedUntil`) the peer is not redialed, and a connection it
+opens to this node is kept open but withheld from chain selection, like one
+from a denied peer; its arrival does not reset the backoff either. A timer
+re-syncs the withhold when the demotion ends instead of waiting for the next
+reconcile. A reconnected peer starts with a full patience bucket and nothing
+remembered by chain selection, so without the demotion a peer that keeps
+pinning the Limit on Eagerness regains it as soon as it reconnects. The
+connection manager only records the reason; it does not interpret it.
 
 Arbitrary inbound peers are identified by their transport tuple. A source host
 alone is insufficient because unrelated peers can arrive through the same NAT

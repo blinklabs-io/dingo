@@ -924,8 +924,10 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	// Reset outbound backoff when an inbound connection from a
 	// topology peer succeeds. The inbound proves the peer is
 	// reachable, so if it drops later, the outbound should retry
-	// immediately rather than waiting on accumulated backoff.
-	if tmpPeer.Source != PeerSourceInboundConn {
+	// immediately rather than waiting on accumulated backoff. A chainsync
+	// demotion is not about reachability, so it keeps its delay.
+	if tmpPeer.Source != PeerSourceInboundConn &&
+		!chainsyncDemoted(tmpPeer, now) {
 		tmpPeer.ReconnectDelay = 0
 		tmpPeer.ReconnectCount = 0
 		tmpPeer.OutboundShortLivedCount = 0
@@ -1117,13 +1119,16 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 					}
 				}
 				if demoted {
-					floor := chainsyncDemotionReconnectDelay +
-						chainsyncDemotionMinJitter +
+					floor := chainsyncDemotionReconnectDelay -
+						chainsyncDemotionJitter +
 						rand.N( //nolint:gosec // redial spread, not security-sensitive
-							chainsyncDemotionMaxJitter-
-								chainsyncDemotionMinJitter,
+							2*chainsyncDemotionJitter,
 						)
 					peer.ReconnectDelay = max(peer.ReconnectDelay, floor)
+					peer.ChainsyncDemotedUntil = connClosedAt.Add(
+						peer.ReconnectDelay,
+					)
+					p.after(peer.ReconnectDelay, p.endChainsyncDemotion)
 				}
 			}
 			peer.ConnectedAt = time.Time{} // Reset for next connection
