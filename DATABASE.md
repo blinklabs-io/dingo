@@ -827,13 +827,18 @@ authoritative. An explicitly empty genesis committee is also authoritative,
 without requiring a sentinel row. Certificate and voter membership checks
 remain enforced in both empty states. No rows without an empty genesis
 declaration do not establish authority; validation cannot infer non-membership
-from missing state. A completed Mithril import whose current tip is in Conway
-or later makes its current committee set authoritative for startup genesis
-reseeding at `mithril_ledger_slot`: startup does not seed a genesis member
-missing from that set, because the member may have been removed before the
-snapshot. A pre-Conway imported tip retains the genesis members for the later
-hard fork. A failed database lookup still fails closed, even with an empty
-genesis committee.
+from missing state. A completed Mithril import whose snapshot slot
+(`mithril_ledger_slot`) is in Conway or later makes its committee set
+authoritative: startup does not seat a genesis member missing from that set,
+because the member was removed before the snapshot. It records the member as
+soft-deleted at slot 0, so committee history is non-empty even when the
+snapshot has no committee (NoConfidence), and no rollback restores it. When
+the snapshot epoch starts after slot 0, a live slot-0 row for a genesis
+credential can only be a seat an earlier startup inferred, so startup
+soft-deletes it at slot 0 as well. The era is read at the snapshot slot, not
+the current tip, so a pre-Conway snapshot retains the genesis members for the
+later hard fork even after the node has synced into Conway. A failed database
+lookup still fails closed, even with an empty genesis committee.
 
 Migration `v9` (`committee-term-start-presence`, integer version 9) adds
 `committee_member.term_start_slot_set`. Existing rows are marked present
