@@ -82,16 +82,16 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 		return
 	}
 
-	for _, block := range blocks {
-		blk, err := block.Decode()
-		if err != nil {
-			blockPoint := ocommon.Point{
-				Slot: block.Slot,
-				Hash: block.Hash,
-			}
+	for _, u := range ls.rollbackUndoBlocks(ctx, blocks) {
+		block := u.block
+		blockPoint := ocommon.Point{
+			Slot: block.Slot,
+			Hash: block.Hash,
+		}
+		if u.decodeErr != nil {
 			decodeErr := fmt.Errorf(
 				"decode rolled-back block for tx undo events: %w",
-				err,
+				u.decodeErr,
 			)
 			ls.config.Logger.Error(
 				"failed to decode block for rollback tx undo events",
@@ -115,12 +115,7 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 			continue
 		}
 
-		blockPoint := ocommon.Point{
-			Slot: block.Slot,
-			Hash: block.Hash,
-		}
-
-		txs := blk.Transactions()
+		txs := u.blk.Transactions()
 		for i, tx := range slices.Backward(txs) {
 			ls.publishTransactionEvent(ctx, TransactionEvent{
 				Transaction: tx,
@@ -132,11 +127,10 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 		}
 		// A certifying block applied its endorser block's transactions
 		// before its own, so they are undone after them.
-		ebTxs, err := ls.certifiedEndorserTransactions(ctx, blk, block.Hash)
-		if err != nil {
+		if u.endorserErr != nil {
 			undoErr := fmt.Errorf(
 				"resolve certified endorser block for tx undo events: %w",
-				err,
+				u.endorserErr,
 			)
 			ls.config.Logger.Error(
 				"failed to resolve endorser block for rollback tx undo events",
@@ -159,7 +153,7 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 			)
 			continue
 		}
-		for _, ebTx := range slices.Backward(ebTxs) {
+		for _, ebTx := range slices.Backward(u.endorserTxs) {
 			ls.publishTransactionEvent(ctx, TransactionEvent{
 				Transaction: ebTx.tx,
 				Point:       blockPoint,
@@ -176,17 +170,76 @@ type endorserTransaction struct {
 	index int
 }
 
+type rollbackUndoBlock struct {
+	block       models.Block
+	blk         ledger.Block
+	decodeErr   error
+	endorserTxs []endorserTransaction
+	endorserErr error
+}
+
+// rollbackUndoBlocks decodes blocks, newest first, and resolves the
+// endorser-block transactions each certifying block applied.
+//
+// Resolution walks the set oldest first, in application order, recording
+// every transaction an older block applied. A replayed rollback runs after
+// the metadata dropped the rolled-back blocks' transaction rows, so the set
+// itself is then the only record that an older block already applied a
+// transaction a newer endorser block repeats; without it the repeat would be
+// undone twice.
+func (ls *LedgerState) rollbackUndoBlocks(
+	ctx context.Context,
+	blocks []models.Block,
+) []rollbackUndoBlock {
+	undo := make([]rollbackUndoBlock, len(blocks))
+	rolledBack := make(map[string]models.Block, len(blocks))
+	for i, block := range blocks {
+		undo[i].block = block
+		undo[i].blk, undo[i].decodeErr = block.Decode()
+		rolledBack[string(block.Hash)] = block
+	}
+	applied := make(map[string]struct{})
+	for i := len(undo) - 1; i >= 0; i-- {
+		u := &undo[i]
+		if u.decodeErr != nil {
+			continue
+		}
+		u.endorserTxs, u.endorserErr = ls.certifiedEndorserTransactions(
+			ctx,
+			u.blk,
+			u.block.Hash,
+			rolledBack,
+			applied,
+		)
+		for _, ebTx := range u.endorserTxs {
+			applied[string(ebTx.tx.Hash().Bytes())] = struct{}{}
+		}
+		for _, tx := range u.blk.Transactions() {
+			applied[string(tx.Hash().Bytes())] = struct{}{}
+		}
+	}
+	return undo
+}
+
 // certifiedEndorserTransactions returns the endorser-block transactions a
 // ranking block applied, in application order. Apply records a transaction
-// once, so an occurrence repeated within the endorser block, or one already
-// recorded by another block, is omitted. A transaction with no recorded row
-// is kept, so an undo replayed after its row was rolled back is still emitted.
+// once, so an occurrence repeated within the endorser block, one already
+// recorded by another block, or one in applied (recorded by an older block of
+// the same rollback) is omitted. A transaction with no recorded row is
+// otherwise kept, so an undo replayed after its row was rolled back is still
+// emitted.
 func (ls *LedgerState) certifiedEndorserTransactions(
 	ctx context.Context,
 	blk ledger.Block,
 	blockHash []byte,
+	rolledBack map[string]models.Block,
+	applied map[string]struct{},
 ) ([]endorserTransaction, error) {
-	ebHash, ebSlot, referenced, err := ls.leiosEndorserBlockForApply(ctx, blk)
+	ebHash, ebSlot, referenced, err := ls.leiosEndorserBlockForRollback(
+		ctx,
+		blk,
+		rolledBack,
+	)
 	if err != nil || !referenced {
 		return nil, err
 	}
@@ -212,6 +265,9 @@ func (ls *LedgerState) certifiedEndorserTransactions(
 			continue
 		}
 		seen[string(tx.Hash().Bytes())] = struct{}{}
+		if _, older := applied[string(tx.Hash().Bytes())]; older {
+			continue
+		}
 		txs = append(txs, endorserTransaction{tx: tx, index: i})
 	}
 	if len(txs) == 0 {
@@ -235,6 +291,39 @@ func (ls *LedgerState) certifiedEndorserTransactions(
 		_, skip := elsewhere[string(ebTx.tx.Hash().Bytes())]
 		return skip
 	}), nil
+}
+
+// leiosEndorserBlockForRollback is leiosEndorserBlockForApply for a block
+// being rolled back. The parent that announced the endorser block may be in
+// the same rollback, and a replayed rollback runs after the chain dropped it
+// from the store, so the rolled-back blocks are consulted first. Only an entry
+// at an earlier slot can be the parent.
+func (ls *LedgerState) leiosEndorserBlockForRollback(
+	ctx context.Context,
+	blk ledger.Block,
+	rolledBack map[string]models.Block,
+) (hash lcommon.Blake2b256, expectedSlot uint64, announced bool, err error) {
+	certifier, ok := blk.Header().(leiosEndorserBlockCertifier)
+	if !ok {
+		return lcommon.Blake2b256{}, 0, false, nil
+	}
+	certified, present := certifier.LeiosCertified()
+	if !present || !certified {
+		return lcommon.Blake2b256{}, 0, false, nil
+	}
+	prevHash := blk.PrevHash().Bytes()
+	parent, ok := rolledBack[string(prevHash)]
+	if !ok || parent.Slot >= blk.SlotNumber() {
+		return ls.leiosCertifiedAnnouncementFromParent(ctx, prevHash)
+	}
+	if err := leiosStoredBlockDecodes(parent.Cbor); err != nil {
+		return lcommon.Blake2b256{}, 0, false, fmt.Errorf(
+			"resolve certifying block parent: decode rolled-back block: %w",
+			err,
+		)
+	}
+	hash, announced = leiosAnnouncementFromBlockCbor(parent.Cbor)
+	return hash, parent.Slot, announced, nil
 }
 
 // publishTransactionEvent publishes a TransactionEvent on the ledger.tx

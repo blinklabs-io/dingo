@@ -1000,3 +1000,97 @@ func TestLeiosRollbackReportsUnavailableEndorserBlock(t *testing.T) {
 		t, txCh, 250*time.Millisecond, "undo for an unresolved endorser block",
 	)
 }
+
+// A replayed rollback runs after the chain dropped the rolled-back blocks and
+// the metadata dropped their transaction rows. The certifying block's parent
+// is then resolvable only from the rollback set itself, and an endorser
+// transaction two rolled-back endorser blocks share must still be undone
+// once, at the older block that applied it.
+func TestLeiosRollbackReplayResolvesRolledBackParentAndUndoesSharedTxOnce(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	announcer := f.announce()
+	// Fixture blocks built in memory share one header hash, so take each
+	// rolled-back block's identity from its decoded CBOR: the newer block
+	// must name the older one, not the stored announcer, as its parent.
+	decoded := func(blk *dijkstra.DijkstraBlock) models.Block {
+		t.Helper()
+		dec, err := models.DecodeBlockCbor(
+			gledger.BlockTypeDijkstra,
+			blk.Cbor(),
+		)
+		require.NoError(t, err)
+		return models.Block{
+			Slot:     dec.SlotNumber(),
+			Hash:     dec.Hash().Bytes(),
+			PrevHash: dec.PrevHash().Bytes(),
+			Number:   dec.BlockNumber(),
+			Type:     gledger.BlockTypeDijkstra,
+			Cbor:     blk.Cbor(),
+		}
+	}
+	olderBlk, _ := f.block(
+		2,
+		leiosCertApplyCertifyingSlot,
+		announcer.Hash().Bytes(),
+		true,
+		true,
+	)
+	older := decoded(olderBlk)
+	newerBlk, _ := f.block(
+		3,
+		leiosCertApplyCertifyingSlot+1,
+		older.Hash,
+		true,
+		false,
+	)
+	newer := decoded(newerBlk)
+	require.Equal(t, older.Hash, newer.PrevHash)
+	// Both announcements name the fixture's endorser block, so both
+	// certifying blocks carry the same transactions.
+	f.ls.config.EndorserBlockProvider = func(
+		hash []byte,
+		slot uint64,
+	) ([]cbor.RawMessage, bool) {
+		if !bytes.Equal(hash, f.ebHash.Bytes()) ||
+			(slot != announcer.SlotNumber() && slot != older.Slot) {
+			return nil, false
+		}
+		return f.ebTxs, true
+	}
+	_, err := f.ls.BlockByHash(t.Context(), older.Hash)
+	require.Error(t, err, "rolled-back parent must be absent from the store")
+
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 8)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+	f.ls.config.EventBus = bus
+	f.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	f.ls.emitRollbackTransactionEvents(
+		t.Context(),
+		[]models.Block{newer, older},
+	)
+
+	testutil.RequireNoReceive(
+		t, errCh, 250*time.Millisecond, "endorser block resolution error",
+	)
+	evt := testutil.RequireReceive(
+		t, txCh, testutil.AsyncWait, "endorser transaction undo event",
+	)
+	te, ok := evt.Data.(TransactionEvent)
+	require.True(t, ok, "unexpected payload %T", evt.Data)
+	require.True(t, te.Rollback)
+	require.Equal(t, f.ebTx.Hash().Bytes(), te.Transaction.Hash().Bytes())
+	require.Equal(t, older.Hash, te.Point.Hash)
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond, "second undo for the shared transaction",
+	)
+}

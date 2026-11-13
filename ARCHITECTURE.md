@@ -938,8 +938,12 @@ certified endorser block applied, after the block's own and in reverse
 application order, at the ranking block's point. An endorser transaction that
 apply skipped, because it repeats within the endorser block or is already
 recorded by another block, gets no undo event, matching the forward events.
-When the endorser block cannot be resolved, the ledger logs the failure and
-publishes a `LedgerErrorEvent` instead of those undo events.
+The rollback set itself counts as that record: a transaction an older
+rolled-back block applied is undone only at that block, and a certifying
+block's parent is resolved from the set before the block store, so a rollback
+replayed after the chain and metadata dropped those blocks undoes the same
+transactions once. When the endorser block cannot be resolved, the ledger logs
+the failure and publishes a `LedgerErrorEvent` instead of those undo events.
 
 Two producers feed that lane, on different goroutines: `LedgerDelta.apply`
 (`ledger/delta.go`) registers forward events on the database transaction's
