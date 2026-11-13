@@ -184,6 +184,26 @@ func requireRecoveryRollbackEvents(
 	)
 }
 
+func replaceRecoveryPrimaryChain(
+	t *testing.T,
+	f *recoveryRollbackEventFixture,
+	name string,
+) {
+	t.Helper()
+
+	require.NoError(t, f.ls.chain.Rollback(t.Context(), f.ancestorTip.Point))
+	fork := chain.RawBlock{
+		Slot:        f.ancestorTip.Point.Slot + 1,
+		Hash:        testHashBytes(name),
+		BlockNumber: f.ancestorTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    slices.Clone(f.ancestorTip.Point.Hash),
+		Cbor:        []byte{0x80},
+	}
+	require.NoError(t, f.ls.chain.AddRawBlocks(t.Context(), []chain.RawBlock{fork}))
+	f.unappliedPoint = ocommon.NewPoint(fork.Slot, fork.Hash)
+}
+
 func TestReplayRecoveryPublishesAppliedTransactionUndoEvents(t *testing.T) {
 	t.Parallel()
 
@@ -232,23 +252,69 @@ func TestReplayRecoveryWithoutRollbackPublishesNoUndoEvents(t *testing.T) {
 	)
 }
 
+func TestReplayRecoveryPublishesUndoWhenPrimaryChainNeedsNoRewind(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newRecoveryRollbackEventFixture(t)
+	f.ls.currentEra.Id = 1
+	f.ls.config.CardanoNodeConfig.ShelleyGenesis().SecurityParam = 1
+	producerTxHash := testHashBytes("recovery-held-primary-producer")
+	seedReplayRecoveryTransaction(
+		t,
+		f.ls.db,
+		producerTxHash,
+		f.blocks[1].Hash,
+		f.blocks[1].Slot,
+	)
+	failure := &txValidationError{
+		BlockPoint: f.currentTip.Point,
+		TxHash:     testHashBytes("recovery-held-primary-failing"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: producerTxHash, index: 0},
+			&replayRecoveryInput{
+				txId:  testHashBytes("recovery-held-primary-unresolved"),
+				index: 0,
+			},
+		},
+		Cause: errors.New("bad input"),
+	}
+	candidate, err := f.ls.findReplayRecoveryCandidate(failure)
+	require.NoError(t, err)
+	require.NotNil(t, candidate)
+	require.True(t, candidate.ProducerUnresolved)
+	require.Equal(t, f.ancestorTip.Point, candidate.RollbackPoint)
+	removed := make([]models.Block, 0, len(f.blocks)-1)
+	for _, block := range f.blocks[1:] {
+		stored, lookupErr := database.BlockByPoint(
+			t.Context(),
+			f.ls.db,
+			ocommon.NewPoint(block.Slot, block.Hash),
+		)
+		require.NoError(t, lookupErr)
+		removed = append(removed, stored)
+	}
+	require.NoError(t, f.ls.chain.Rollback(t.Context(), candidate.RollbackPoint))
+	for _, block := range removed {
+		require.NoError(t, f.ls.db.BlockCreate(block, nil))
+	}
+
+	recovered, err := f.ls.tryRecoverFromTxValidationError(failure)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Equal(t, f.ancestorTip, f.ls.currentTip)
+	require.Equal(t, f.ancestorTip.Point, f.ls.chain.Tip().Point)
+	requireRecoveryRollbackEvents(t, f)
+}
+
 func TestPartialCommitRecoveryPublishesAppliedTransactionUndoEvents(
 	t *testing.T,
 ) {
 	t.Parallel()
 
 	f := newRecoveryRollbackEventFixture(t)
-	require.NoError(t, f.ls.chain.Rollback(t.Context(), f.ancestorTip.Point))
-	fork := chain.RawBlock{
-		Slot:        f.ancestorTip.Point.Slot + 1,
-		Hash:        testHashBytes("partial-commit-recovery-fork"),
-		BlockNumber: f.ancestorTip.BlockNumber + 1,
-		Type:        1,
-		PrevHash:    slices.Clone(f.ancestorTip.Point.Hash),
-		Cbor:        []byte{0x80},
-	}
-	require.NoError(t, f.ls.chain.AddRawBlocks(t.Context(), []chain.RawBlock{fork}))
-	f.unappliedPoint = ocommon.NewPoint(fork.Slot, fork.Hash)
+	replaceRecoveryPrimaryChain(t, f, "partial-commit-recovery-fork")
 
 	metadataErr := errors.New("metadata commit failed")
 	err := f.ls.handleDBTxnResult(t.Context(), database.PartialCommitError{
@@ -259,6 +325,46 @@ func TestPartialCommitRecoveryPublishesAppliedTransactionUndoEvents(
 	require.NotErrorIs(t, err, dbtypes.ErrPartialCommit)
 	require.Equal(t, f.ancestorTip, f.ls.currentTip)
 	requireRecoveryRollbackEvents(t, f)
+}
+
+func TestPartialCommitRecoveryTruncationFailurePublishesNoUndoEvents(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newRecoveryRollbackEventFixture(t)
+	replaceRecoveryPrimaryChain(t, f, "partial-commit-failure-fork")
+	injected := errors.New("injected metadata truncation failure")
+	f.ls.rollbackTruncateAfterSlotFunc = func(
+		ocommon.Point,
+		uint64,
+		*database.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		return ochainsync.Tip{}, nil, injected
+	}
+	metadataErr := errors.New("metadata commit failed")
+	err := f.ls.handleDBTxnResult(t.Context(), database.PartialCommitError{
+		MetadataErr:     metadataErr,
+		CommitTimestamp: 1,
+	})
+	require.ErrorIs(t, err, injected)
+	require.ErrorIs(t, err, metadataErr)
+	require.Equal(t, f.currentTip, f.ls.currentTip)
+	durableTip, err := f.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.currentTip, durableTip)
+	require.True(t, f.bus.FlushOrderedContext(t.Context(), TransactionEventType))
+	testutil.RequireNoReceive(
+		t,
+		f.events,
+		250*time.Millisecond,
+		"failed metadata truncation must not publish undo events",
+	)
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(f.ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, f.ancestorTip.Point, intentPoint)
+	require.Len(t, intentBlocks, len(f.blocks)-1)
 }
 
 func TestPartialCommitRecoveryWithoutAppliedRollbackPublishesNoUndoEvents(

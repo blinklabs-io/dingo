@@ -2004,22 +2004,26 @@ iterator reports a rollback after the chain has already removed them, it
 persists the iterator's captured `RollbackBlocks` payload before metadata
 truncation. Metadata-only replay and partial-commit recovery resolve the payload
 from the ledger's applied `block_nonce` points through the published ledger tip,
-not from the primary chain suffix, before enqueueing Undo and truncating
-metadata. A deeper multi-window rollback merges its blocks into the pending
-record rather than replacing an earlier payload. If a reconciliation rewind is
-refused before changing the chain, the prior point and payload are restored; a
-newly created intent is cleared. A matching record is cleared only after
-metadata rollback and ordered undo delivery complete. Recovery is at-least-once
-and consumers must tolerate a duplicate undo after a crash. The durable payload
-is limited to 4096 blocks
-and 64 MiB of raw block fields; a larger rollback logs a degraded-recovery
-warning and continues with live delivery rather than writing an unbounded
-value. A record recovery cannot replay as a truncation -- its point leads the
-applied ledger tip, or has left the primary chain -- still has its captured
-undo delivered before the record is removed. Malformed or unsupported records
-are logged and removed so one damaged notification record cannot permanently
-prevent startup. Recovery applies the writer's limits to the stored value
-before replay. The record is read with `MetadataStore.GetSyncStateBounded`,
+not from the primary chain suffix, and persist it before truncating metadata.
+They enqueue Undo only after that truncation commits, while the transaction
+event mutex still excludes a later Apply. A deeper multi-window rollback merges
+its blocks into the pending record rather than replacing an earlier payload. If
+a reconciliation rewind is refused before changing the chain, the prior point
+and payload are restored; a newly created intent is cleared. A matching record
+is cleared only after metadata rollback and ordered undo delivery complete.
+Recovery of a payload captured in the record is at-least-once, and consumers
+must tolerate a duplicate undo after a crash. An applied point whose block body
+was already removed and is no longer present in the retained block cache cannot
+be captured after a restart; recovery logs and counts that notification gap
+instead of substituting a block from the replacement chain. The durable payload
+is limited to 4096 blocks and 64 MiB of raw block fields; a larger rollback
+logs a degraded-recovery warning and continues with live delivery rather than
+writing an unbounded value. A record recovery cannot replay as a truncation --
+its point leads the applied ledger tip, or has left the primary chain -- still
+has its captured undo delivered before the record is removed. Malformed or
+unsupported records are logged and removed so one damaged notification record
+cannot permanently prevent startup. Recovery applies the writer's limits to
+the stored value before replay. The record is read with `MetadataStore.GetSyncStateBounded`,
 which sizes the `sync_state` value in bytes inside the database and returns
 `metadata.ErrSyncStateTooLarge` without transferring a value above the cap;
 the cap is the base64 size of a full payload plus per-block and envelope

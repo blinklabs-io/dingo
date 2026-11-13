@@ -5542,9 +5542,6 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 			err,
 		)
 	}
-	if emitUndo {
-		ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
-	}
 	// Bracket every rollback mutation so split reward precomputation cannot
 	// persist results that mixed pre- and post-rollback blocks, pots, protocol
 	// state, or account history. The active count also keeps overlapping
@@ -5731,6 +5728,9 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 	}, true)
 	if err != nil {
 		return err
+	}
+	if emitUndo {
+		ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
 	}
 	// The blocks are gone from the ledger from here on, whichever path
 	// returns, including a rollbackCommittedError.
