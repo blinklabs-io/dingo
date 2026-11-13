@@ -2276,8 +2276,9 @@ journal and replayed in bounded batches before the candidate is published. A
 busy pass that cannot catch up leaves the live pool unchanged and is retried
 after a later chain update; it is not a failed admission or a partial swap.
 
-The chain-update worker coalesces confirmed-transaction removals and
-rolled-back transaction restores before rebuilding. Rollback events list blocks
+The chain-update worker evicts confirmed transactions as each chain update
+arrives and coalesces rolled-back transaction restores until the next
+successful rebuild. Rollback events list blocks
 newest first, so each event is traversed oldest first; if more rollback events
 arrive before the rebuild, their older transactions are placed ahead of the
 already queued restores. Revalidation therefore sees transactions in ledger
@@ -5906,8 +5907,9 @@ selection, full block fetch and admission to the ledger apply stream; an apply
 chunk ends with its first live announcing block, and the next chunk's
 preparation validates that block's endorser block while it is the published
 tip and before any later block applies. The background validator in
-`ouroboros` uses the same state. The ledger's `ledger.block` apply event and
-`chain.update` can both precede the apply, so the ledger also notifies the
+`ouroboros` uses the same state. The `ledger.block` apply event (a
+republished chain update) and `chain.update` can both precede the apply, so
+`ledger.block` does not trigger a retry, and the ledger also notifies the
 node (`LedgerStateConfig.LeiosAnnouncementAtTip`) as soon as the chunk ending
 with the live announcing block commits, which retries the background
 validation. Without that notification a voter would vote only when the next
@@ -11242,10 +11244,12 @@ on both the submit endpoint and the evaluation endpoints, where
 an open per-era set of gouroboros types with no shared marker, so the
 complement cannot be enumerated: an unrecognized error stays a rejection.
 
-Each rebuild first evicts (`RemoveTxsByHash`) the transactions of blocks added
-since the previous rebuild, on every node, so a block produced elsewhere is not
-reported as invalid transactions dropped by revalidation. A rollback forgets
-the transactions of the blocks it removes before they are evicted.
+Every chain update evicts (`RemoveTxsByHash`) the transactions of added blocks,
+on every node, so a block produced elsewhere is not reported as invalid
+transactions dropped by revalidation. Eviction does not wait for the rebuild,
+which the chain-update worker skips while draining a backlog or while a failed
+rebuild waits out its retry interval. A rollback queues the transactions of the
+blocks it removes for readmission after the next successful rebuild.
 
 A block's transactions are every transaction the ledger applies with it. A
 Leios certifying ranking block carries none of its own: it applies the
@@ -11321,10 +11325,11 @@ chain, which the `BlockBroadcaster` the forger holds calls
 `ChainUpdateEvent` is published inside that call, before it returns. The forger
 then runs its `blockForged` observer, and only after that — and only if
 admission succeeded — synchronously removes the block's transaction hashes
-through the backend-neutral `RemoveTxsByHash` adapter. The chain-update rebuild
-remains responsible for transactions confirmed by peer blocks. This local fast
-path prevents confirmed transactions from accumulating when sustained admissions
-make a long rebuild repeatedly lose its pinned ledger generation.
+through the backend-neutral `RemoveTxsByHash` adapter. Transactions confirmed
+by peer blocks are evicted by the chain-update worker as each chain update
+arrives, independent of whether the rebuild runs. This local path removes a
+forged block's transactions without waiting for that worker to reach its
+`ChainUpdateEvent`.
 
 ## DMQ Message Pool
 

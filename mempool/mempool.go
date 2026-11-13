@@ -1188,6 +1188,9 @@ func (m *Mempool) processChainEvents(
 		30*time.Second,
 		func(evt event.Event) {
 			m.noteChainUpdateContext(ctx, evt)
+			// Eviction does not depend on the overlay rebuild, which may be
+			// skipped while a failed rebuild waits for its retry.
+			m.evictConfirmed()
 		},
 		func() error {
 			return m.rebuildAfterChainUpdate(ctx)
@@ -1334,23 +1337,32 @@ func standaloneTransactionCbor(txCbor []byte) []byte {
 	return out
 }
 
+// evictConfirmed removes the transactions recorded as confirmed by added
+// blocks.
+func (m *Mempool) evictConfirmed() {
+	m.confirmedMu.Lock()
+	pending := m.pendingConfirmed
+	m.pendingConfirmed = nil
+	m.confirmedMu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+	hashes := make([]string, 0, len(pending))
+	for h := range pending {
+		hashes = append(hashes, h)
+	}
+	m.RemoveTxsByHash(hashes)
+}
+
 // rebuildAfterChainUpdate evicts confirmed transactions, rebuilds the pool,
 // then revalidates transactions recovered from rolled-back blocks. Descendants
 // of confirmed transactions stay and are judged against the selected chain.
 func (m *Mempool) rebuildAfterChainUpdate(ctx context.Context) error {
+	m.evictConfirmed()
 	m.confirmedMu.Lock()
-	pending := m.pendingConfirmed
 	rolledBack := m.pendingRolledBack
 	rolledBackOrder := m.pendingRolledBackOrder
-	m.pendingConfirmed = nil
 	m.confirmedMu.Unlock()
-	if len(pending) > 0 {
-		hashes := make([]string, 0, len(pending))
-		for h := range pending {
-			hashes = append(hashes, h)
-		}
-		m.RemoveTxsByHash(hashes)
-	}
 	if err := m.rebuildOverlay(ctx); err != nil {
 		return err
 	}

@@ -100,6 +100,7 @@ const (
 	rewardOutputIndexReshapeSchemaRelease               = "reward-account-output-index-reshape"
 	metadataLabelSlotIndexSchemaRelease                 = "transaction-metadata-label-slot-index"
 	stakeBookkeepingIndexDropSchemaRelease              = "stake-bookkeeping-index-drop"
+	datumHashIndexDropSchemaRelease                     = "datum-hash-duplicate-index-drop"
 	utxoSpentStakingIndexSchemaRelease                  = "utxo-spent-staking-index"
 	utxoTransactionIdentitySchemaRelease                = "utxo-transaction-identity"
 	poolRelayIPv6NetworkOrderSchemaRelease              = "pool-relay-ipv6-network-order"
@@ -286,7 +287,8 @@ var schemaVersions = []struct {
 	{Version: 60, Name: utxoSpentStakingIndexSchemaRelease, Dir: "v60"},
 	{Version: 61, Name: utxoTransactionIdentitySchemaRelease, Dir: "v61"},
 	{Version: 62, Name: poolRelayIPv6NetworkOrderSchemaRelease, Dir: "v62"},
-	{Version: 63, Name: poolRetirementEpochIndexSchemaRelease, Dir: "v63"},
+	{Version: 63, Name: datumHashIndexDropSchemaRelease, Dir: "v63"},
+	{Version: 64, Name: poolRetirementEpochIndexSchemaRelease, Dir: "v64"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -2115,6 +2117,7 @@ func translateSchemaSQLInSchema(
 				"idx_account_reward_delta_tx_hash":    "account_reward_delta",
 				"idx_account_reward_delta_withdrawal": "account_reward_delta",
 				"idx_account_drep":                    "account",
+				"idx_datum_hash":                      "datum",
 			} {
 				value = strings.ReplaceAll(
 					value,
