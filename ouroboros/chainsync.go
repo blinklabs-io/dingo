@@ -1416,13 +1416,40 @@ func (o *Ouroboros) chainsyncServerAheadOfLedger(
 	}
 	appliedTip := o.ledgerState.Tip().Point
 	if next.Point.Slot != appliedTip.Slot {
-		return next.Point.Slot > appliedTip.Slot
+		if next.Point.Slot > appliedTip.Slot {
+			return true
+		}
+		return o.chainsyncServerAppliedTipRolledBack(appliedTip)
 	}
 	if bytes.Equal(next.Point.Hash, appliedTip.Hash) {
 		return false
 	}
 	isParent, err := o.chainsyncServerAppliedParent(appliedTip, next.Point)
 	return err != nil || !isParent
+}
+
+func (o *Ouroboros) chainsyncServerAppliedTipRolledBack(
+	appliedTip ocommon.Point,
+) bool {
+	if len(appliedTip.Hash) == 0 {
+		return false
+	}
+	held, settled := o.ledgerState.Chain().HoldsPointSettled(
+		context.Background(),
+		appliedTip,
+	)
+	if !settled {
+		return true
+	}
+	if held {
+		return false
+	}
+	_, err := o.ledgerState.Chain().BlockByPoint(
+		context.Background(),
+		appliedTip,
+		nil,
+	)
+	return err == nil
 }
 
 func (o *Ouroboros) chainsyncServerRequestNextPeer(
@@ -1659,6 +1686,10 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 					return
 				}
 				appliedTip := o.ledgerState.Tip().Point
+				if appliedTip.Slot > next.Point.Slot &&
+					o.chainsyncServerAppliedTipRolledBack(appliedTip) {
+					continue
+				}
 				if appliedTip.Slot == next.Point.Slot &&
 					!bytes.Equal(appliedTip.Hash, next.Point.Hash) {
 					isParent, err := o.chainsyncServerAppliedParent(

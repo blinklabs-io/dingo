@@ -7361,6 +7361,9 @@ reach the block, as cardano-node serves downstream clients and peers only
 blocks on its validated selected chain. A local client can therefore Acquire
 every point ChainSync delivers to it, and a peer cannot fetch or propagate a
 block before its ledger application succeeds.
+When the selected chain rolls back before the ledger follows, the old applied
+tip no longer bounds the replacement branch: serving waits until the applied
+tip belongs to the selected chain again.
 When the applied tip reaches the held block's slot with a different hash, the
 server waits for the iterator's rollback instead, unless the held block is the
 tip's parent: a Byron epoch-boundary block shares its slot with the block after
