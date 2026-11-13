@@ -447,6 +447,9 @@ func (s *Set) UtxoSetAt(point ocommon.Point) (ledger.UtxoSetView, error) {
 	if errors.Is(err, badgerutxo.ErrRollbackBeyondJournal) {
 		return nil, fmt.Errorf("%w: %w", ledger.ErrUtxoAsOfUnavailable, err)
 	}
+	if errors.Is(err, badgerutxo.ErrPointNotInJournal) {
+		return nil, fmt.Errorf("%w: %w", ledger.ErrPointNotOnChain, err)
+	}
 	if err != nil {
 		return nil, err
 	}

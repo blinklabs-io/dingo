@@ -365,18 +365,24 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(ctx context.Context,
 	if err != nil {
 		return false, fmt.Errorf("read durable ledger tip: %w", err)
 	}
-	if point.Slot > durableTip.Point.Slot {
+	if resolved.Slot > durableTip.Point.Slot {
 		return false, nil
 	}
-	blocks, err := ls.readBlocksAboveSlot(ctx, point.Slot)
+	if !ls.hasRollbackUndoSubscribers() {
+		return false, nil
+	}
+	blocks, err := ls.readAppliedBlocksBetween(
+		ctx,
+		durableTip.Point,
+		resolved,
+	)
 	if err != nil {
 		return false, fmt.Errorf("read rollback undo blocks: %w", err)
 	}
-	blocks = blocksAppliedUpTo(blocks, durableTip.Point)
 	if len(blocks) == 0 {
 		return false, nil
 	}
-	if err := ls.ensureRollbackIntent(ctx, point, blocks); err != nil {
+	if err := ls.ensureRollbackIntent(ctx, resolved, blocks); err != nil {
 		if !errors.Is(err, errRollbackIntentTooLarge) {
 			return false, err
 		}
@@ -388,6 +394,48 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(ctx context.Context,
 	}
 	ls.emitRollbackTransactionEvents(ctx, blocks)
 	return len(blocks) > 0, nil
+}
+
+func (ls *LedgerState) hasRollbackUndoSubscribers() bool {
+	return ls.config.EventBus != nil &&
+		(ls.config.EventBus.HasSubscribers(TransactionEventType) ||
+			ls.config.EventBus.HasSubscribers(LedgerErrorEventType))
+}
+
+// readAppliedBlocksBetween reads the applied ancestry from one blob snapshot,
+// newest first. Hash ancestry selection avoids admitting retained competing
+// branches and includes a real slot-zero block when target is origin.
+func (ls *LedgerState) readAppliedBlocksBetween(
+	ctx context.Context,
+	tip ocommon.Point,
+	target ocommon.Point,
+) ([]models.Block, error) {
+	return ls.readAppliedBlocksBetweenIncluding(ctx, tip, target, nil)
+}
+
+func (ls *LedgerState) readAppliedBlocksBetweenIncluding(
+	ctx context.Context,
+	tip ocommon.Point,
+	target ocommon.Point,
+	captured []models.Block,
+) ([]models.Block, error) {
+	var candidates []models.Block
+	txn := ls.ledgerDB().Begin(ctx, false)
+	err := ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
+		stored, err := database.BlocksAtOrAfterSlotTxn(
+			dbadapter.Unwrap(txn),
+			target.Slot,
+		)
+		if err != nil {
+			return err
+		}
+		candidates = append(stored, captured...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return blocksAppliedBetween(candidates, tip, target)
 }
 
 // readBlocksAboveSlot returns the blocks a rollback to slot would discard,
@@ -413,8 +461,7 @@ func (ls *LedgerState) readBlocksAboveSlot(
 	// LedgerErrorEventType counts too: a decode failure while building the
 	// undo events is reported there, and a consumer subscribed only to
 	// ledger.error would otherwise stop seeing rollback decode failures.
-	if !ls.config.EventBus.HasSubscribers(TransactionEventType) &&
-		!ls.config.EventBus.HasSubscribers(LedgerErrorEventType) {
+	if !ls.hasRollbackUndoSubscribers() {
 		return nil, nil
 	}
 	var blocks []models.Block
@@ -431,21 +478,92 @@ func (ls *LedgerState) readBlocksAboveSlot(
 	return blocks, nil
 }
 
-// blocksAppliedUpTo keeps the blocks the ledger applied: those below tip's
-// slot and the block at that slot that is tip itself. The primary chain can
-// hold blocks the ledger has not applied yet, including a competing block at
-// tip's slot, and a rollback must not undo what no consumer was ever told was
-// applied.
-func blocksAppliedUpTo(
+var errRollbackUndoAncestry = errors.New("rollback undo blocks do not contain the applied ancestry")
+
+// blocksAppliedBetween returns the exact applied ancestry from tip down to,
+// but excluding, target. The blob store can retain competing branches at any
+// slot, so slot bounds alone cannot identify blocks whose transaction effects
+// consumers were previously told to apply.
+func blocksAppliedBetween(
 	blocks []models.Block,
 	tip ocommon.Point,
-) []models.Block {
-	return slices.DeleteFunc(slices.Clone(blocks), func(b models.Block) bool {
-		if b.Slot != tip.Slot || len(tip.Hash) == 0 {
-			return b.Slot > tip.Slot
+	target ocommon.Point,
+) ([]models.Block, error) {
+	byHash := make(map[string]models.Block, len(blocks))
+	for _, block := range blocks {
+		if block.Slot >= target.Slot && block.Slot <= tip.Slot {
+			byHash[string(block.Hash)] = block
 		}
-		return !bytes.Equal(b.Hash, tip.Hash)
-	})
+	}
+	return walkAppliedBlocks(
+		tip,
+		target,
+		func(hash []byte) (models.Block, error) {
+			block, ok := byHash[string(hash)]
+			if !ok {
+				return models.Block{}, models.ErrBlockNotFound
+			}
+			return block, nil
+		},
+	)
+}
+
+func walkAppliedBlocks(
+	tip ocommon.Point,
+	target ocommon.Point,
+	lookup func([]byte) (models.Block, error),
+) ([]models.Block, error) {
+	if pointMatches(tip, target) {
+		return nil, nil
+	}
+	if len(tip.Hash) == 0 || target.Slot > tip.Slot {
+		return nil, fmt.Errorf(
+			"%w: target %d is after tip %d",
+			errRollbackUndoAncestry,
+			target.Slot,
+			tip.Slot,
+		)
+	}
+
+	ret := make([]models.Block, 0)
+	seen := make(map[string]struct{})
+	expectedHash := tip.Hash
+	previousSlot := tip.Slot
+	for {
+		key := string(expectedHash)
+		if _, ok := seen[key]; ok {
+			return nil, fmt.Errorf(
+				"%w: cycle at hash %x",
+				errRollbackUndoAncestry,
+				expectedHash,
+			)
+		}
+		seen[key] = struct{}{}
+		block, err := lookup(expectedHash)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"%w: resolve block %x: %w",
+				errRollbackUndoAncestry,
+				expectedHash,
+				err,
+			)
+		}
+		if !bytes.Equal(block.Hash, expectedHash) ||
+			block.Slot > previousSlot || block.Slot < target.Slot {
+			return nil, fmt.Errorf(
+				"%w: invalid block %d/%x",
+				errRollbackUndoAncestry,
+				block.Slot,
+				block.Hash,
+			)
+		}
+		ret = append(ret, block)
+		if bytes.Equal(block.PrevHash, target.Hash) {
+			return ret, nil
+		}
+		expectedHash = block.PrevHash
+		previousSlot = block.Slot
+	}
 }
 
 // reconciliationUndoBlocks returns the blocks the ledger itself applied

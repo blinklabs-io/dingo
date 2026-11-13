@@ -6643,10 +6643,30 @@ func (ls *LedgerState) processChainIteratorRollback(
 		if err != nil {
 			return fmt.Errorf("read durable ledger tip: %w", err)
 		}
-		rollbackBlocks := blocksAppliedUpTo(rollbackBlocks, durableTip.Point)
+		ls.RLock()
+		currentTip := ls.currentTip
+		ls.RUnlock()
+		resolved, err := ls.resolveRollbackTarget(ctx, point, currentTip)
+		if err != nil {
+			return err
+		}
+		switch {
+		case resolved.Slot > durableTip.Point.Slot:
+			rollbackBlocks = nil
+		case len(rollbackBlocks) > 0 || ls.hasRollbackUndoSubscribers():
+			rollbackBlocks, err = ls.readAppliedBlocksBetweenIncluding(
+				ctx,
+				durableTip.Point,
+				resolved,
+				rollbackBlocks,
+			)
+			if err != nil {
+				return fmt.Errorf("select applied rollback undo blocks: %w", err)
+			}
+		}
 		err = ls.rollbackWithBlocksRetainingIntent(
 			ctx,
-			point,
+			resolved,
 			rollbackBlocks,
 			false,
 		)
@@ -6655,10 +6675,10 @@ func (ls *LedgerState) processChainIteratorRollback(
 				return err
 			}
 			ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
-			return errors.Join(err, ls.finishRollbackIntentForPoint(ctx, point))
+			return errors.Join(err, ls.finishRollbackIntentForPoint(ctx, resolved))
 		}
 		ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
-		return ls.finishRollbackIntentForPoint(ctx, point)
+		return ls.finishRollbackIntentForPoint(ctx, resolved)
 	}
 	chainTip := ls.chain.Tip()
 	stale := chainTip.Point.Slot != point.Slot ||

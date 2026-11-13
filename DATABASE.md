@@ -2731,13 +2731,14 @@ first, one Badger transaction per record, each also moving `mtip` back to the
 tip before that record, so a crash part way leaves the set at a point it
 held. It returns the net change. Records older than one Shelley stability
 window behind the tip are pruned every 1,000 commits, and a rebuild or a
-Mithril load drops the journal. The journal reaches back to the tip before its
-oldest record, or only to the tip when it holds none; a rollback past that
-returns `ErrRollbackBeyondJournal` and changes nothing. `Store.AsOf(point)` opens a
-read-only view of the set as of a point the journal reaches: one Badger
-snapshot, with each output changed after the point read at its state before
-the oldest such change. It answers pinned LocalStateQuery UTxO queries when
-the set is the only copy.
+Mithril load drops the journal. The journal reaches back through the exact
+full-point lineage to the tip before its oldest record, or only to the tip when
+it holds none; a rollback past that returns `ErrRollbackBeyondJournal` and
+changes nothing. A slot with a different hash is not part of that lineage.
+`Store.AsOf(point)` opens a read-only view of the set only after the same
+Badger snapshot proves that exact point is retained, with each output changed
+after the point read at its state before the oldest such change. It answers
+pinned LocalStateQuery UTxO queries when the set is the only copy.
 
 `GetUtxosRestoredByRollback(slot)` returns the UTxOs created at or before
 `slot` and spent after it, the outputs a rollback to `slot` makes live again.

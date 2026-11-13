@@ -2234,6 +2234,23 @@ func FirstBlockAtOrAfterSlot(
 
 // BlocksAfterSlotTxn returns all blocks after the specified slot; keep txn valid until results are consumed.
 func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
+	return blocksAtOrAfterSlotTxn(txn, slotNumber, false)
+}
+
+// BlocksAtOrAfterSlotTxn returns all blocks at or after the specified slot;
+// keep txn valid until results are consumed.
+func BlocksAtOrAfterSlotTxn(
+	txn *Txn,
+	slotNumber uint64,
+) ([]models.Block, error) {
+	return blocksAtOrAfterSlotTxn(txn, slotNumber, true)
+}
+
+func blocksAtOrAfterSlotTxn(
+	txn *Txn,
+	slotNumber uint64,
+	inclusive bool,
+) ([]models.Block, error) {
 	if txn == nil {
 		return nil, types.ErrNilTxn
 	}
@@ -2263,7 +2280,7 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 	var tmpBlock models.Block
 	for it.Seek(keyPrefix); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
 		// Skip the start slot
-		if it.ValidForPrefix(keyPrefix) {
+		if !inclusive && it.ValidForPrefix(keyPrefix) {
 			continue
 		}
 		item := it.Item()

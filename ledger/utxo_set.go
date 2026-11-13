@@ -1230,7 +1230,7 @@ var ErrUtxoAsOfUnavailable = errors.New(
 // UtxoSetHistory opens views of a live UTxO set as it was at an earlier
 // point, for LedgerStateConfig.UtxoSetOnly. UtxoSetAt returns an error
 // wrapping ErrUtxoAsOfUnavailable when its history does not reach point, and
-// a view of the set as it is for a point at or past its tip.
+// ErrPointNotOnChain when point is not in its retained full-point lineage.
 type UtxoSetHistory interface {
 	UtxoSetAt(point ocommon.Point) (UtxoSetView, error)
 }

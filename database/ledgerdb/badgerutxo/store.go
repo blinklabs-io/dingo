@@ -339,6 +339,8 @@ func (s *Store) ApplyBatch(
 		if rec.prevTip, rec.hadTip, err = readTip(txn); err != nil {
 			return err
 		}
+		baseline := tip == nil && !rec.hadTip
+		rec.baseline = baseline
 		open := false
 		var segment ocommon.Point
 		seen := make(map[Ref]struct{})
@@ -349,12 +351,18 @@ func (s *Store) ApplyBatch(
 				if err := appendJournal(txn, rec); err != nil {
 					return err
 				}
-				rec = journalRecord{prevTip: segment, hadTip: true}
+				rec = journalRecord{
+					prevTip:     segment,
+					hadTip:      true,
+					advancesTip: tip != nil,
+					baseline:    baseline,
+				}
 				seen = make(map[Ref]struct{})
 			}
 			open = true
 			segment = point
-			rec.slot = point.Slot
+			rec.point = point
+			rec.advancesTip = tip != nil
 			return nil
 		}
 		sums := aggDeltas{}

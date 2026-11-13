@@ -277,3 +277,113 @@ func TestNothingBeforeABootstrapIsRestored(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, before, contents(t, s))
 }
+
+func TestAsOfRejectsPointOutsideJournalLineage(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	defer s.Close()
+	bootstrap(t, s, point(10, 1), out(1, 0))
+	tip := point(20, 2)
+	_, err := s.ApplyBatch(&tip, []badgerutxo.Change{
+		{Point: tip, Added: []badgerutxo.Output{out(2, 0)}},
+	})
+	require.NoError(t, err)
+
+	for _, at := range []ocommon.Point{
+		point(20, 3),
+		point(10, 4),
+		point(30, 5),
+	} {
+		view, err := s.AsOf(at)
+		if view != nil {
+			view.Close()
+		}
+		require.Error(t, err, "point %d.%x", at.Slot, at.Hash)
+	}
+
+	requireAsOf(t, s, point(10, 1), map[badgerutxo.Ref]string{
+		ref(1, 0): string(out(1, 0).Cbor),
+	})
+	requireAsOf(t, s, tip, map[badgerutxo.Ref]string{
+		ref(1, 0): string(out(1, 0).Cbor),
+		ref(2, 0): string(out(2, 0).Cbor),
+	})
+}
+
+func TestRollbackFromSlotZeroBlockToOrigin(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	defer s.Close()
+	genesisPoint := point(0, 9)
+	_, err := s.ApplyBatch(nil, []badgerutxo.Change{
+		{Point: genesisPoint, Added: []badgerutxo.Output{out(9, 0)}},
+	})
+	require.NoError(t, err)
+	tip := point(0, 1)
+	_, err = s.ApplyBatch(&tip, []badgerutxo.Change{
+		{Point: tip, Added: []badgerutxo.Output{out(1, 0)}},
+	})
+	require.NoError(t, err)
+
+	requireAsOf(
+		t,
+		s,
+		ocommon.NewPointOrigin(),
+		map[badgerutxo.Ref]string{ref(9, 0): string(out(9, 0).Cbor)},
+	)
+	result, err := s.Rollback(ocommon.NewPointOrigin())
+	require.NoError(t, err)
+	require.Equal(t, []badgerutxo.Ref{ref(1, 0)}, result.Removed)
+	requireLive(t, s, false, ref(1, 0))
+	requireLive(t, s, true, ref(9, 0))
+	requireTip(t, s, ocommon.NewPointOrigin())
+}
+
+func TestAsOfAndRollbackUndoAuxiliaryChangesAfterTip(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	defer s.Close()
+	tip := point(10, 1)
+	bootstrap(t, s, tip, out(1, 0))
+	auxPoint := point(20, 2)
+	_, err := s.ApplyBatch(nil, []badgerutxo.Change{
+		{Point: auxPoint, Added: []badgerutxo.Output{out(2, 0)}},
+	})
+	require.NoError(t, err)
+
+	want := map[badgerutxo.Ref]string{ref(1, 0): string(out(1, 0).Cbor)}
+	requireAsOf(t, s, tip, want)
+	preview, err := s.RollbackPreview(tip)
+	require.NoError(t, err)
+	require.Equal(t, []badgerutxo.Ref{ref(2, 0)}, preview.Removed)
+	result, err := s.Rollback(tip)
+	require.NoError(t, err)
+	require.Equal(t, preview, result)
+	require.Equal(t, want, contents(t, s))
+}
+
+func TestAsOfAndRollbackReachSameSlotPredecessor(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	defer s.Close()
+	bootstrap(t, s, point(1, 1), out(1, 0))
+	target := point(10, 2)
+	_, err := s.ApplyBatch(&target, []badgerutxo.Change{
+		{Point: target, Added: []badgerutxo.Output{out(2, 0)}},
+	})
+	require.NoError(t, err)
+	successor := point(10, 3)
+	_, err = s.ApplyBatch(&successor, []badgerutxo.Change{
+		{Point: successor, Added: []badgerutxo.Output{out(3, 0)}},
+	})
+	require.NoError(t, err)
+
+	want := map[badgerutxo.Ref]string{
+		ref(1, 0): string(out(1, 0).Cbor),
+		ref(2, 0): string(out(2, 0).Cbor),
+	}
+	requireAsOf(t, s, target, want)
+	_, err = s.Rollback(target)
+	require.NoError(t, err)
+	require.Equal(t, want, contents(t, s))
+}

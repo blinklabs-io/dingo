@@ -933,11 +933,13 @@ subscriber deriving state from it sees a block's transactions in index order
 and sees a rollback's undo events (`Rollback: true`) before any transaction
 event the ledger emits afterwards.
 
-A rollback undoes only blocks the ledger applied: blocks the primary chain
-holds above the durable ledger tip are skipped. Each block's undo covers its
-own transactions in reverse order and then, for a ranking block that applied a
-certified endorser block, the endorser transactions in reverse order, since
-apply ran them first. The endorser transactions come from the rollback
+A rollback undoes only blocks the ledger applied: it walks backward by block
+hash from the durable ledger tip to the rollback point, excluding competing
+blob-store branches and blocks the primary chain holds above the durable tip.
+Each block's undo covers its own transactions in reverse order and then, for a
+ranking block that applied a certified endorser block, the endorser
+transactions in reverse order, since apply ran them first. The endorser
+transactions come from the rollback
 outbox (see `DATABASE.md`), which records them before the truncation removes
 the rows that name the ranking block. Rollbacks that leave the primary chain
 in place, replay recovery's metadata rewind and partial-commit recovery,
@@ -3146,8 +3148,10 @@ produced it, as the metadata store records outputs: a valid transaction's
 outputs, or an invalid one's collateral return. LocalStateQuery UTxO queries
 (`GetUTxOByAddress`, `GetUTxOByTxIn`, `GetUTxOWhole`) pinned to a point are
 answered from a view of the set as of that point (`UtxoSetHistory`): one
-Badger snapshot read through the journal's prior states of every output
-changed after the point, so a commit during the reply cannot mix two states.
+Badger snapshot first verifies the point's exact slot and hash against the
+journal lineage and then reads the journal's prior states of every output
+changed after it, so a commit during the reply cannot mix two states or change
+which fork the point names.
 The journal reaches back one stability window; a point older than it fails
 with `ledger.ErrUtxoAsOfUnavailable`.
 

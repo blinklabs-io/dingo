@@ -30,13 +30,22 @@ var ErrRollbackBeyondJournal = errors.New(
 	"badgerutxo: rollback point is older than the journal",
 )
 
-// journalRecord is one ApplyBatch: the slot its changes belong to, the tip
-// before it, and the state before it of every output it touched.
+// ErrPointNotInJournal reports a point that is not the tip or an exact
+// predecessor retained by the journal.
+var ErrPointNotInJournal = errors.New(
+	"badgerutxo: point is not in the journal history",
+)
+
+// journalRecord is one ApplyBatch segment: its exact point, whether it
+// advanced the tip, the tip before it, and the prior state of every output it
+// touched.
 type journalRecord struct {
-	slot    uint64
-	prevTip ocommon.Point
-	hadTip  bool
-	ops     []journalOp
+	point       ocommon.Point
+	prevTip     ocommon.Point
+	hadTip      bool
+	advancesTip bool
+	baseline    bool
+	ops         []journalOp
 }
 
 // journalOp is one output's state before a batch: absent, or live with cbor.
@@ -61,12 +70,22 @@ func journalKey(seq uint64) []byte {
 }
 
 func encodeRecord(rec journalRecord) []byte {
-	size := 8 + 1 + 1 + 8 + len(rec.prevTip.Hash) + 4
+	size := 8 + 1 + len(rec.point.Hash) + 1 + 1 + 8 + len(rec.prevTip.Hash) + 4
 	for _, op := range rec.ops {
 		size += refLen + 1 + 4 + len(op.cbor)
 	}
 	b := make([]byte, 0, size)
-	b = binary.BigEndian.AppendUint64(b, rec.slot)
+	b = binary.BigEndian.AppendUint64(b, rec.point.Slot)
+	b = append(b, byte(len(rec.point.Hash))) //nolint:gosec // a block hash is 32 bytes
+	b = append(b, rec.point.Hash...)
+	flags := byte(0)
+	if rec.advancesTip {
+		flags |= 1
+	}
+	if rec.baseline {
+		flags |= 2
+	}
+	b = append(b, flags)
 	if rec.hadTip {
 		b = append(b, 1, byte(len(rec.prevTip.Hash))) //nolint:gosec // a block hash is 32 bytes
 		b = binary.BigEndian.AppendUint64(b, rec.prevTip.Slot)
@@ -92,12 +111,25 @@ func decodeRecord(b []byte) (journalRecord, error) {
 	var rec journalRecord
 	bad := errors.New("badgerutxo: truncated journal record")
 	need := func(n int) bool { return len(b) >= n }
-	if !need(9) {
+	if !need(10) {
 		return rec, bad
 	}
-	rec.slot = binary.BigEndian.Uint64(b)
-	rec.hadTip = b[8] == 1
+	rec.point.Slot = binary.BigEndian.Uint64(b)
+	pointHashLen := int(b[8])
 	b = b[9:]
+	if !need(pointHashLen + 1) {
+		return rec, bad
+	}
+	rec.point.Hash = append([]byte(nil), b[:pointHashLen]...)
+	flags := b[pointHashLen]
+	rec.advancesTip = flags&1 != 0
+	rec.baseline = flags&2 != 0
+	b = b[pointHashLen+1:]
+	if !need(1) {
+		return rec, bad
+	}
+	rec.hadTip = b[0] == 1
+	b = b[1:]
 	if rec.hadTip {
 		if !need(1) {
 			return rec, bad
@@ -210,61 +242,101 @@ func latestRecord(txn *badger.Txn) ([]byte, journalRecord, bool, error) {
 	return item.KeyCopy(nil), rec, true, nil
 }
 
-// journalReaches returns ErrRollbackBeyondJournal unless the set's state at
-// point can be restored: point is at or past the tip, or the journal holds
-// every change after it. Records cover the tip's history from the oldest
-// record's previous tip, so a journal with no records, as after a bootstrap,
-// covers only the tip itself.
+// journalReaches returns nil only when point is the exact tip or an exact
+// predecessor retained by the journal.
 func journalReaches(txn *badger.Txn, point ocommon.Point) error {
-	item, err := txn.Get(tipKey)
-	if errors.Is(err, badger.ErrKeyNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	var tip ocommon.Point
-	if err := item.Value(func(v []byte) error {
-		tip = decodePoint(v)
-		return nil
-	}); err != nil {
-		return err
-	}
-	if point.Slot >= tip.Slot {
-		return nil
-	}
-	oldest, ok, err := oldestRecord(txn)
-	if err != nil {
-		return err
-	}
-	if !ok || (oldest.slot > point.Slot &&
-		(!oldest.hadTip || oldest.prevTip.Slot > point.Slot)) {
-		return ErrRollbackBeyondJournal
-	}
-	return nil
+	return visitJournalAfter(txn, point, nil)
 }
 
-// oldestRecord returns the oldest journal record.
-func oldestRecord(txn *badger.Txn) (journalRecord, bool, error) {
+// visitJournalAfter visits records after point, newest first, while proving
+// from the same snapshot that point is in the retained full-point lineage.
+func visitJournalAfter(
+	txn *badger.Txn,
+	point ocommon.Point,
+	visit func(journalRecord) error,
+) error {
+	tip, ok, err := readTip(txn)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		if point.Slot == 0 && len(point.Hash) == 0 {
+			return nil
+		}
+		return ErrPointNotInJournal
+	}
+	if point.Slot > tip.Slot {
+		return ErrPointNotInJournal
+	}
+	targetIsTip := samePoint(tip, point)
+
 	opts := badger.DefaultIteratorOptions
+	opts.Reverse = true
 	opts.Prefix = []byte{journalTag}
 	it := txn.NewIterator(opts)
 	defer it.Close()
-	it.Rewind()
-	if !it.Valid() {
-		return journalRecord{}, false, nil
+	it.Seek(
+		append(
+			[]byte{journalTag},
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+		),
+	)
+	oldestBoundary := tip
+	foundPredecessor := false
+	for ; it.Valid(); it.Next() {
+		v, err := it.Item().ValueCopy(nil)
+		if err != nil {
+			return err
+		}
+		rec, err := decodeRecord(v)
+		if err != nil {
+			return err
+		}
+		if rec.advancesTip && samePoint(rec.point, point) {
+			return nil
+		}
+		if rec.baseline {
+			if point.Slot == 0 && len(point.Hash) == 0 {
+				return nil
+			}
+			break
+		}
+		if visit != nil {
+			if err := visit(rec); err != nil {
+				return err
+			}
+		}
+		if rec.advancesTip {
+			if rec.hadTip {
+				oldestBoundary = rec.prevTip
+				foundPredecessor = foundPredecessor ||
+					samePoint(rec.prevTip, point)
+			} else {
+				oldestBoundary = ocommon.Point{}
+				foundPredecessor = foundPredecessor ||
+					(point.Slot == 0 && len(point.Hash) == 0)
+			}
+		}
 	}
-	v, err := it.Item().ValueCopy(nil)
-	if err != nil {
-		return journalRecord{}, false, err
+	if targetIsTip || foundPredecessor {
+		return nil
 	}
-	rec, err := decodeRecord(v)
-	return rec, true, err
+	if point.Slot < oldestBoundary.Slot {
+		return ErrRollbackBeyondJournal
+	}
+	return ErrPointNotInJournal
 }
 
-// Rollback undoes, newest first, every journaled batch whose slot is after
-// point's, then records point as the tip, and returns the net change. Each
-// batch is undone in its own transaction that also moves the tip back to the
+// Rollback undoes, newest first, every journaled batch after point in the
+// retained lineage, then records point as the tip, and returns the net change.
+// Each batch is undone in its own transaction that also moves the tip back to the
 // tip before that batch, so a crash part way leaves the set at a point it
 // really held. It returns ErrRollbackBeyondJournal, changing nothing, when
 // the journal does not reach back to point.
@@ -286,13 +358,26 @@ func (s *Store) Rollback(point ocommon.Point) (RollbackResult, error) {
 	for {
 		done := false
 		err := s.db.Update(func(txn *badger.Txn) error {
+			current, hasTip, err := readTip(txn)
+			if err != nil {
+				return err
+			}
 			key, rec, ok, err := latestRecord(txn)
 			if err != nil {
 				return err
 			}
-			if !ok || rec.slot <= point.Slot {
+			atPoint := (!hasTip && point.Slot == 0 && len(point.Hash) == 0) ||
+				(hasTip && samePoint(current, point))
+			atRetainedRecord := ok && rec.advancesTip &&
+				samePoint(rec.point, point)
+			atBaseline := ok && rec.baseline &&
+				point.Slot == 0 && len(point.Hash) == 0
+			if atRetainedRecord || atBaseline || (!ok && atPoint) {
 				done = true
-				return txn.Set(tipKey, encodePoint(point))
+				return nil
+			}
+			if !ok {
+				return ErrPointNotInJournal
 			}
 			count, err := readCount(txn)
 			if err != nil {
@@ -349,10 +434,13 @@ func (s *Store) Rollback(point ocommon.Point) (RollbackResult, error) {
 			if err := txn.Delete(key); err != nil {
 				return err
 			}
+			if !rec.advancesTip {
+				return nil
+			}
 			if rec.hadTip {
 				return txn.Set(tipKey, encodePoint(rec.prevTip))
 			}
-			return nil
+			return txn.Set(tipKey, encodePoint(ocommon.Point{}))
 		})
 		if err != nil {
 			return RollbackResult{}, fmt.Errorf(
@@ -429,11 +517,6 @@ func (s *Store) RollbackPreview(point ocommon.Point) (RollbackResult, error) {
 // previewIn is RollbackPreview as txn sees the store.
 func previewIn(txn *badger.Txn, point ocommon.Point) (RollbackResult, error) {
 	var res RollbackResult
-	opts := badger.DefaultIteratorOptions
-	opts.Reverse = true
-	opts.Prefix = []byte{journalTag}
-	it := txn.NewIterator(opts)
-	defer it.Close()
 	// final is each touched output's state before the oldest undone
 	// record that touched it: its state once rolled back.
 	type state struct {
@@ -442,40 +525,17 @@ func previewIn(txn *badger.Txn, point ocommon.Point) (RollbackResult, error) {
 	}
 	final := make(map[Ref]state)
 	var order []Ref
-	if err := journalReaches(txn, point); err != nil {
-		return res, err
-	}
-	it.Seek(
-		append(
-			[]byte{journalTag},
-			0xff,
-			0xff,
-			0xff,
-			0xff,
-			0xff,
-			0xff,
-			0xff,
-			0xff,
-		),
-	)
-	for ; it.Valid(); it.Next() {
-		v, err := it.Item().ValueCopy(nil)
-		if err != nil {
-			return res, err
-		}
-		rec, err := decodeRecord(v)
-		if err != nil {
-			return res, err
-		}
-		if rec.slot <= point.Slot {
-			break
-		}
+	err := visitJournalAfter(txn, point, func(rec journalRecord) error {
 		for _, op := range rec.ops {
 			if _, ok := final[op.ref]; !ok {
 				order = append(order, op.ref)
 			}
 			final[op.ref] = state{live: op.present, cbor: op.cbor}
 		}
+		return nil
+	})
+	if err != nil {
+		return res, err
 	}
 	for _, r := range order {
 		f := final[r]

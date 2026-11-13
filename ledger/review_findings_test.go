@@ -36,20 +36,42 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestBlocksAppliedUpToDropsCompetingBlockAtTipSlot(t *testing.T) {
+func TestBlocksAppliedBetweenFollowsTipAncestry(t *testing.T) {
 	t.Parallel()
 
+	target := ocommon.NewPoint(8, bytes.Repeat([]byte{0x08}, 32))
 	tip := ocommon.NewPoint(10, bytes.Repeat([]byte{0x0A}, 32))
-	applied := models.Block{Slot: 10, Hash: tip.Hash}
-	competing := models.Block{Slot: 10, Hash: bytes.Repeat([]byte{0x0B}, 32)}
-	below := models.Block{Slot: 9, Hash: bytes.Repeat([]byte{0x09}, 32)}
-	above := models.Block{Slot: 11, Hash: bytes.Repeat([]byte{0x0C}, 32)}
+	below := models.Block{
+		Slot: 9, Hash: bytes.Repeat([]byte{0x09}, 32), PrevHash: target.Hash,
+	}
+	applied := models.Block{Slot: 10, Hash: tip.Hash, PrevHash: below.Hash}
+	competingBelow := models.Block{
+		Slot: 9, Hash: bytes.Repeat([]byte{0x19}, 32), PrevHash: target.Hash,
+	}
+	competingTip := models.Block{
+		Slot: 10, Hash: bytes.Repeat([]byte{0x1A}, 32), PrevHash: competingBelow.Hash,
+	}
+	above := models.Block{
+		Slot: 11, Hash: bytes.Repeat([]byte{0x0B}, 32), PrevHash: tip.Hash,
+	}
 
-	got := blocksAppliedUpTo(
-		[]models.Block{above, competing, applied, below},
+	got, err := blocksAppliedBetween(
+		[]models.Block{above, competingTip, applied, competingBelow, below},
 		tip,
+		target,
 	)
+	require.NoError(t, err)
 	require.Equal(t, []models.Block{applied, below}, got)
+
+	_, err = blocksAppliedBetween(
+		[]models.Block{applied, competingBelow},
+		tip,
+		target,
+	)
+	require.ErrorIs(t, err, errRollbackUndoAncestry)
+
+	_, err = blocksAppliedBetween(nil, tip, target)
+	require.ErrorIs(t, err, errRollbackUndoAncestry)
 }
 
 func TestUtxoWholeDetachedPointOffChainIsRejectedInSetOnlyMode(t *testing.T) {

@@ -133,6 +133,22 @@ func TestSetPrunesItsJournalBehindTheHistoryWindow(t *testing.T) {
 	require.Equal(t, uint64(1150), n)
 }
 
+func TestUtxoSetAtRejectsPointOutsideJournalLineage(t *testing.T) {
+	t.Parallel()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	tip := ocommon.NewPoint(10, bytes.Repeat([]byte{1}, 32))
+	require.NoError(t, set.ApplyUtxoChanges(&tip, nil))
+
+	view, err := set.UtxoSetAt(
+		ocommon.NewPoint(tip.Slot, bytes.Repeat([]byte{2}, 32)),
+	)
+	require.Nil(t, view)
+	require.ErrorIs(t, err, ledger.ErrPointNotOnChain)
+	require.ErrorIs(t, err, badgerutxo.ErrPointNotInJournal)
+}
+
 // TestReconcileWithoutAMetadataUtxoSetRefusesToRebuild: when the set is the
 // only copy, a set that cannot be resumed is an error, not an empty rebuild.
 func TestReconcileWithoutAMetadataUtxoSetRefusesToRebuild(t *testing.T) {
