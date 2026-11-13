@@ -8919,6 +8919,29 @@ func (ls *LedgerState) ensureGenesisCommittee(
 	if len(conwayGenesis.Committee.Members) == 0 {
 		return nil
 	}
+	genesisMembers := make(
+		[]*models.CommitteeMember,
+		0,
+		len(conwayGenesis.Committee.Members),
+	)
+	for raw, expiry := range conwayGenesis.Committee.Members {
+		tag, hash, err := parseGenesisCommitteeCredential(raw)
+		if err != nil {
+			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
+		}
+		expiresEpoch, err := genesisCommitteeExpiryEpoch(expiry)
+		if err != nil {
+			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
+		}
+		genesisMembers = append(genesisMembers, &models.CommitteeMember{
+			ColdCredentialTag: tag,
+			ColdCredHash:      hash,
+			ExpiresEpoch:      expiresEpoch,
+			TermStartSlot:     0,
+			TermStartSlotSet:  true,
+			AddedSlot:         0,
+		})
+	}
 	mithrilBoundary, err := ls.db.MithrilTrustBoundarySlotStrict(txn)
 	if err != nil {
 		return fmt.Errorf(
@@ -8943,37 +8966,17 @@ func (ls *LedgerState) ensureGenesisCommittee(
 	newMembers := make(
 		[]*models.CommitteeMember,
 		0,
-		len(conwayGenesis.Committee.Members),
+		len(genesisMembers),
 	)
-	for raw, expiry := range conwayGenesis.Committee.Members {
-		tag, hash, err := parseGenesisCommitteeCredential(raw)
-		if err != nil {
-			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
-		}
-		// Validate the whole genesis entry before the already-seeded check, so
-		// a malformed expiry fails closed the same way on a fresh database and
-		// on one that already holds a row for this credential. Validating
-		// after the check would accept a genesis this function itself declares
-		// malformed, purely because some earlier startup got there first.
-		expiresEpoch, err := genesisCommitteeExpiryEpoch(expiry)
-		if err != nil {
-			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
-		}
+	for _, member := range genesisMembers {
 		key := (models.CommitteeCredential{
-			CredentialTag: tag,
-			Credential:    hash,
+			CredentialTag: member.ColdCredentialTag,
+			Credential:    member.ColdCredHash,
 		}).Key()
 		if _, ok := seen[key]; ok {
 			continue
 		}
-		newMembers = append(newMembers, &models.CommitteeMember{
-			ColdCredentialTag: tag,
-			ColdCredHash:      hash,
-			ExpiresEpoch:      expiresEpoch,
-			TermStartSlot:     0,
-			TermStartSlotSet:  true,
-			AddedSlot:         0,
-		})
+		newMembers = append(newMembers, member)
 	}
 	if len(newMembers) == 0 {
 		return nil

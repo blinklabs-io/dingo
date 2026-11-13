@@ -19212,6 +19212,29 @@ func TestEnsureGenesisCommitteeRejectsNegativeExpiryWhenAlreadySeeded(
 	)
 }
 
+// TestEnsureGenesisCommitteeRejectsNegativeExpiryAfterImport proves a
+// completed Mithril import does not bypass validation of the configured
+// genesis committee.
+func TestEnsureGenesisCommitteeRejectsNegativeExpiryAfterImport(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	members := ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members
+	rawKey := "keyHash-" + musashiGenesisCommitteeColdKeys[0]
+	require.Contains(t, members, rawKey)
+	members[rawKey] = -11
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		"1000000",
+		nil,
+	))
+
+	err := ls.ensureGenesisCommittee(context.Background(), nil)
+	require.ErrorContains(t, err, "negative expiry epoch -11")
+	require.ErrorContains(t, err, musashiGenesisCommitteeColdKeys[0])
+	require.Equal(t, 0, committeeMemberRowCount(t, db))
+}
+
 // TestGenesisCommitteeExpiryEpoch covers the signed-to-unsigned conversion
 // directly, including the most negative int, which is the value a straight
 // conversion wraps furthest.
