@@ -2189,9 +2189,11 @@ When `Node.Run()` is called, components are initialized in this order:
     is likewise an existing chain point rather than origin, so restart takes
     this preservation path instead of reapplying genesis declarations. The
     durable `mithril_ledger_slot` also makes a Conway-or-later imported
-    Constitutional Committee authoritative: startup never fills an absent
+    Constitutional Committee authoritative: startup never seats an absent
     imported member from Conway genesis, because absence can represent a
-    pre-snapshot removal. A pre-Conway imported tip has no committee state yet,
+    pre-snapshot removal; it records the member as removed (soft-deleted at
+    slot 0) so committee state stays available even for a snapshot with no
+    committee. A pre-Conway imported tip has no committee state yet,
     so startup retains the genesis members for the later hard fork.
     For networks with a real Byron genesis, an empty database retains a Byron
     epoch cache until the on-chain Shelley boundary is observed. A configured

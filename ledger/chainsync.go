@@ -8941,8 +8941,9 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 // genesis state. A Mithril import whose current tip is in Conway or later is
 // different. Its committee is an authoritative current-state snapshot, so an
 // absent genesis credential means it is not seated and must not be inferred
-// from missing local history. A pre-Conway import has no committee state yet,
-// so it retains the genesis members for the later hard fork.
+// from missing local history: it is recorded as removed (soft-deleted at slot
+// 0) rather than seated. A pre-Conway import has no committee state yet, so it
+// retains the genesis members for the later hard fork.
 func (ls *LedgerState) ensureGenesisCommittee(
 	ctx context.Context,
 	txn *database.Txn,
@@ -8984,6 +8985,7 @@ func (ls *LedgerState) ensureGenesisCommittee(
 			AddedSlot:         0,
 		})
 	}
+	var removedSlot *uint64
 	mithrilBoundary, err := ls.db.MithrilTrustBoundarySlotStrict(txn)
 	if err != nil {
 		return fmt.Errorf(
@@ -8992,21 +8994,30 @@ func (ls *LedgerState) ensureGenesisCommittee(
 		)
 	}
 	if mithrilBoundary > 0 {
-		tipEpoch, err := ls.db.GetEpochBySlot(ls.currentTip.Point.Slot, txn)
+		// The era is the snapshot's, not the tip's: a node that imported a
+		// pre-Conway snapshot and has since synced into Conway holds no
+		// imported committee to treat as authoritative.
+		boundaryEpoch, err := ls.db.GetEpochBySlot(mithrilBoundary, txn)
 		if err != nil {
 			return fmt.Errorf(
-				"read current epoch before seeding genesis committee: %w",
+				"read snapshot epoch before seeding genesis committee: %w",
 				err,
 			)
 		}
-		if tipEpoch == nil {
+		if boundaryEpoch == nil {
 			return fmt.Errorf(
-				"current tip slot %d has no persisted epoch",
-				ls.currentTip.Point.Slot,
+				"snapshot boundary slot %d has no persisted epoch",
+				mithrilBoundary,
 			)
 		}
-		if tipEpoch.EraId >= eras.ConwayEraDesc.Id {
-			return nil
+		// A Conway-or-later snapshot's committee is authoritative, so a
+		// genesis member without a row was removed before it. Recording
+		// that removal at slot 0 keeps include-deleted history non-empty
+		// (a NoConfidence snapshot has no committee rows at all) and
+		// survives any rollback, which only restores rows deleted after
+		// the rollback slot.
+		if boundaryEpoch.EraId >= eras.ConwayEraDesc.Id {
+			removedSlot = new(uint64)
 		}
 	}
 	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(ctx, txn)
@@ -9033,6 +9044,7 @@ func (ls *LedgerState) ensureGenesisCommittee(
 		if _, ok := seen[key]; ok {
 			continue
 		}
+		member.DeletedSlot = removedSlot
 		newMembers = append(newMembers, member)
 	}
 	if len(newMembers) == 0 {
@@ -9054,6 +9066,7 @@ func (ls *LedgerState) ensureGenesisCommittee(
 			"recorded %d Conway genesis committee member(s)",
 			len(newMembers),
 		),
+		"removed", removedSlot != nil,
 		"component", "ledger",
 	)
 	return nil
