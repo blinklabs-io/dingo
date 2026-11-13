@@ -8943,8 +8943,8 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 // absent genesis credential means it is not seated and must not be inferred
 // from missing local history: it is recorded as removed (soft-deleted at slot
 // 0) rather than seated, and a live slot-0 seat an earlier startup inferred
-// for it is recorded the same way. A pre-Conway import has no committee state yet, so it
-// retains the genesis members for the later hard fork.
+// for it is recorded the same way. A pre-Conway import has no committee state
+// yet, so it retains the genesis members for the later hard fork.
 func (ls *LedgerState) ensureGenesisCommittee(
 	ctx context.Context,
 	txn *database.Txn,
