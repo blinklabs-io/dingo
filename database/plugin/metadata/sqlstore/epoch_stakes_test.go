@@ -97,3 +97,38 @@ func TestGetEpochStakesPastTheEndSkipsPageQuery(t *testing.T) {
 		require.Empty(t, rows, offset)
 	}
 }
+
+// TestGetEpochStakesOrder covers the two page orders: every pool in the order
+// the snapshot was stored, and a single pool by credential.
+func TestGetEpochStakesOrder(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	pool := bytesRepeat(0xe4, 28)
+	var inputs []*models.RewardStakeInput
+	// Stored with descending credentials so neither order is the insert
+	// order by accident.
+	for _, b := range []byte{9, 5, 7} {
+		key := bytesRepeat(0xe5, 28)
+		key[27] = b
+		inputs = append(inputs, &models.RewardStakeInput{
+			Epoch: 7, StakingKey: key, PoolKeyHash: pool,
+			Stake: types.Uint64(uint64(b)), Registered: true,
+		})
+	}
+	require.NoError(t, store.SaveRewardStakeInputs(inputs, nil))
+	last := func(rows []models.EpochStakeRow) []byte {
+		var ret []byte
+		for _, row := range rows {
+			ret = append(ret, row.StakingKey[27])
+		}
+		return ret
+	}
+
+	rows, _, err := store.GetEpochStakes(7, nil, 10, 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, []byte{9, 5, 7}, last(rows))
+
+	rows, _, err = store.GetEpochStakes(7, pool, 10, 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, []byte{5, 7, 9}, last(rows))
+}

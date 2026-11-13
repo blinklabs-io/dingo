@@ -248,10 +248,14 @@ func (s *Store) blockHashesInSlotRange(
 	return ret, total, nil
 }
 
-// The epoch stake queries are served by
-// idx_reward_stake_input_epoch_registered_pool_cred, whose key leads with their
+// The epoch-wide count and page are served by
+// idx_reward_stake_input_epoch_registered_id, whose key leads with their
 // equality terms and ends in the page order, so the count reads only matching
-// index entries and a page needs no sort.
+// index entries and a page needs no sort. That order is the primary key, not
+// the credential, because MySQL keys the blob columns by prefix and could not
+// order by them. A single pool's rows are bounded by its delegators, so that
+// route keeps the credential order and is served by the unique
+// (epoch, pool_key_hash, credential_tag, staking_key) index.
 const epochStakesFrom = " FROM reward_stake_input" +
 	" WHERE epoch = ? AND registered = TRUE"
 
@@ -267,9 +271,12 @@ func epochStakesCountQuery(withPool bool) string {
 }
 
 func epochStakesPageQuery(withPool bool) string {
+	order := " ORDER BY id ASC"
+	if withPool {
+		order = " ORDER BY credential_tag ASC, staking_key ASC"
+	}
 	return "SELECT pool_key_hash, credential_tag, staking_key, stake" +
-		epochStakesWhere(withPool) +
-		" ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC"
+		epochStakesWhere(withPool) + order
 }
 
 func (s *Store) GetEpochStakes(
