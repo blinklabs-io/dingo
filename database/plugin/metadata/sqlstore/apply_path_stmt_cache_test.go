@@ -16,12 +16,15 @@ package sqlstore
 
 import (
 	"context"
+	"maps"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -38,8 +41,9 @@ func TestApplyPathStatementsArePreparedOnce(t *testing.T) {
 	store, recorder := newRecordingSQLiteStore(t)
 
 	hot := []struct{ name, query string }{
-		{"transaction insert", transactionInsertSQL},
-		{"utxo spend state", getUtxoSpendStateQuery},
+		{"transaction identity insert", transactionIdentityInsertSQL},
+		{"applied transaction insert", appliedTransactionInsertSQL},
+		{"utxo spend state", sqliteUtxoSQL.getSpendState},
 		{"pool by key hash", poolByKeyHashQuery},
 		{"account by credential", sqlitequery.GetAccountByCredentialQuery},
 		{"active account", sqlitequery.GetActiveAccountByCredentialQuery},
@@ -52,10 +56,10 @@ func TestApplyPathStatementsArePreparedOnce(t *testing.T) {
 		prepared[q] = true
 	}
 	for _, h := range hot {
-		name, query := h.name, h.query
+		name := h.name
 		require.True(
 			t,
-			prepared[query],
+			prepared[h.query],
 			"expected Start to prepare %s", name,
 		)
 	}
@@ -156,7 +160,7 @@ func TestQueryRowsCachedFallsBackWhenTxScopedStmtClosed(t *testing.T) {
 	t.Cleanup(func() { _ = txn.Rollback() })
 	sqlTransaction, ok := txn.(*sqlTxn)
 	require.True(t, ok)
-	cached, ok := store.lookupCachedStmt(getUtxoSpendStateQuery)
+	cached, ok := store.lookupCachedStmt(sqliteUtxoSQL.getSpendState)
 	require.True(t, ok)
 
 	query := func() error {
@@ -164,7 +168,8 @@ func TestQueryRowsCachedFallsBackWhenTxScopedStmtClosed(t *testing.T) {
 			txn,
 			func(db queryer, ctx context.Context) error {
 				rows, err := store.queryRowsCached(
-					ctx, db, getUtxoSpendStateQuery, []byte{0x01}, 0,
+					ctx, db, sqliteUtxoSQL.getSpendState,
+					sqliteUtxoSQL.refArgs([]byte{0x01}, 0)...,
 				)
 				if err != nil {
 					return err
@@ -243,5 +248,143 @@ func BenchmarkGetSyncStateInTransaction(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// cachedStatementHits returns how many times each cached statement has been
+// borrowed since the store started.
+func (s *Store) cachedStatementHits() map[string]uint64 {
+	s.stmtMu.Lock()
+	defer s.stmtMu.Unlock()
+	hits := make(map[string]uint64, len(s.stmtHits))
+	maps.Copy(hits, s.stmtHits)
+	return hits
+}
+
+// TestApplyPathUtxoStatementsComeFromThePreparedCache drives input
+// resolution, spend marking (single and batched), output insert (single and
+// batched), and the un-spend of a stale spend, and requires that each
+// statement was prepared at Start, was served from the cache at least once,
+// and was never prepared or run uncached afterwards. The cache's own hit
+// counter is the positive evidence: the driver's record shows only that no
+// uncached call happened, which a statement that never ran satisfies too.
+func TestApplyPathUtxoStatementsComeFromThePreparedCache(t *testing.T) {
+	t.Parallel()
+	store, recorder := newRecordingSQLiteStore(t)
+	u := sqliteUtxoSQL
+
+	statements := []struct{ name, query string }{
+		{"input resolution (live)", u.getLiveByRef},
+		{"input resolution (including spent)", u.getIncludingSpent},
+		{"spend marking", consumeUtxoSQLiteReturningSQL},
+		{"spend marking (batch)", consumeUtxosBatchQuery(2, true)},
+		{"spend state", u.getSpendState},
+		{"output insert", u.insertResultIgnore},
+		{"output insert (batch)", insertUtxoBatchQuery(2)},
+		{"un-spend of a stale spend", u.clearStaleSpend},
+		{"imported row id", u.idByRef},
+		{"imported row insert", u.insertIgnore},
+	}
+	prepared := map[string]bool{}
+	for _, q := range recorder.snapshot() {
+		prepared[q] = true
+	}
+	for _, s := range statements {
+		require.True(t, prepared[s.query], "expected Start to prepare %s", s.name)
+	}
+	mark := len(recorder.snapshot())
+
+	// Spend marking and output insert: a one-input one-output transaction,
+	// applied twice for the already-spent branch, then a transaction with two
+	// inputs and two outputs for the batched forms.
+	fx := buildSharedCredentialTx(t, 0x31)
+	seedConsumedUtxo(t, store, fx)
+	for range 2 {
+		require.NoError(t, store.SetTransaction(
+			fx.tx, fx.point, 0, fx.certDeposits, false, nil, 0,
+		))
+	}
+	two := buildTwoInputTwoOutputTx(t, store, 0x32)
+	require.NoError(t, store.SetTransaction(
+		two.tx, two.point, 0, nil, false, nil, 0,
+	))
+
+	// Input resolution of a produced output and of an imported one.
+	produced, err := store.GetUtxo(two.producedTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, produced)
+	_, err = store.GetUtxoIncludingSpent(fx.consumedTxID, 0, nil)
+	require.NoError(t, err)
+
+	// Un-spend: a live re-import of an output spent after the anchor.
+	imported := importConflictHash32(0x33)
+	spender := importConflictHash32(0x34)
+	live := []models.Utxo{{
+		TxId: imported, OutputIdx: 0, AddedSlot: 100, Amount: 5_000_000,
+	}}
+	require.NoError(t, store.ImportUtxos(live, nil))
+	markUtxoSpentDirect(t, store, imported, 0, spender, 150)
+	require.NoError(t, store.ImportUtxos(live, nil))
+	deleted, _ := utxoDeletedAndSpender(t, store, imported, 0)
+	require.Zero(t, deleted, "the re-import must clear the stale spend")
+
+	hits := store.cachedStatementHits()
+	after := recorder.snapshot()[mark:]
+	for _, s := range statements {
+		require.NotZero(
+			t, hits[s.query], "%s was never served from the cache", s.name,
+		)
+		uncached := 0
+		for _, q := range after {
+			if q == s.query {
+				uncached++
+			}
+		}
+		require.Zero(t, uncached, "%s was prepared or run uncached %d times after Start", s.name, uncached)
+	}
+}
+
+type twoInputTwoOutputTx struct {
+	tx           lcommon.Transaction
+	point        ocommon.Point
+	producedTxID []byte
+}
+
+// buildTwoInputTwoOutputTx seeds two live outputs and returns a transaction
+// that spends both and produces two outputs, so block apply takes the batched
+// spend and batched insert statements.
+func buildTwoInputTwoOutputTx(
+	t *testing.T,
+	store *Store,
+	seed byte,
+) twoInputTwoOutputTx {
+	t.Helper()
+	fx := buildSharedCredentialTx(t, seed)
+	inputs := make([]lcommon.TransactionInput, 0, 2)
+	for i := range byte(2) {
+		hash := make([]byte, 32)
+		hash[0], hash[1], hash[2] = seed, 0xcc, i
+		_, err := store.writeDB.Exec(
+			`INSERT INTO utxo (tx_id, output_idx, credential_tag, added_slot, deleted_slot, amount)
+VALUES (?, 0, 0, 1, 0, '1000000')`, hash,
+		)
+		require.NoError(t, err)
+		input, err := mockledger.NewTransactionInputBuilder().
+			WithTxId(hash).WithIndex(0).Build()
+		require.NoError(t, err)
+		inputs = append(inputs, input)
+	}
+	outputs := fx.tx.Outputs()
+	txID := make([]byte, 32)
+	txID[0], txID[1], txID[2] = seed, 0xdd, 0x01
+	builder := mockledger.NewTransactionBuilder().
+		WithId(txID).WithInputs(inputs...).
+		WithOutputs(outputs[0], outputs[0]).WithValid(true)
+	tx, err := builder.Build()
+	require.NoError(t, err)
+	return twoInputTwoOutputTx{
+		tx:           tx,
+		point:        ocommon.Point{Slot: 2000 + uint64(seed), Hash: txID},
+		producedTxID: txID,
 	}
 }

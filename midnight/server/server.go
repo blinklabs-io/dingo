@@ -115,7 +115,7 @@ type Config struct {
 	Metadata eventStore
 	// BlockNumberByHash resolves a Cardano block hash to its block number.
 	// It receives the RPC's context and must stop when it is done, so a
-	// canceled or timed-out request does not hold its admission slot.
+	// canceled or timed-out request stops promptly.
 	// It backs GetUtxoEvents' end_block_hash boundary so that boundary is
 	// honored even when the target block has no Midnight events of its
 	// own (found=false for an unknown hash, not an error). Nil causes
@@ -151,12 +151,11 @@ type Config struct {
 
 // Server runs the MidnightState gRPC service over its own listener.
 type Server struct {
-	mu           sync.Mutex // protects grpcServer and health
-	config       Config
-	grpcServer   *grpc.Server
-	health       *health.Server
-	metrics      *serverMetrics
-	rpcAdmission chan struct{}
+	mu         sync.Mutex // protects grpcServer and health
+	config     Config
+	grpcServer *grpc.Server
+	health     *health.Server
+	metrics    *serverMetrics
 }
 
 // New validates cfg and returns a Server. It does not bind or serve; call
@@ -181,9 +180,8 @@ func New(cfg Config) (*Server, error) {
 		)
 	}
 	return &Server{
-		config:       cfg,
-		metrics:      newServerMetrics(cfg.PromRegistry),
-		rpcAdmission: make(chan struct{}, maxConcurrentMidnightRPCs),
+		config:  cfg,
+		metrics: newServerMetrics(cfg.PromRegistry),
 	}, nil
 }
 
@@ -197,7 +195,6 @@ func (s *Server) Start(ctx context.Context) error {
 
 	opts := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(
-			s.admissionInterceptor,
 			s.metrics.unaryInterceptor,
 		),
 	}

@@ -34,10 +34,9 @@ import (
 )
 
 const (
-	aggregatorStateKey        = "aggregator.json"
-	certificateVersion        = "0.1.0"
-	maxAggregatorRequestBytes = 1 << 20
-	stmVerificationKeyBytes   = 96
+	aggregatorStateKey      = "aggregator.json"
+	certificateVersion      = "0.1.0"
+	stmVerificationKeyBytes = 96
 )
 
 var (
@@ -259,8 +258,7 @@ func writeAPIError(w http.ResponseWriter, err error) {
 	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
-func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxAggregatorRequestBytes)
+func decodeJSONBody(r *http.Request, v any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
@@ -324,7 +322,7 @@ func (a *Aggregator) handleRegisterSigner(
 	r *http.Request,
 ) {
 	var req registerSignerRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		writeAPIError(w, err)
 		return
 	}

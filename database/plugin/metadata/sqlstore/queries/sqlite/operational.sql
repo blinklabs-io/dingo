@@ -988,98 +988,31 @@ SELECT fetched_at, next_fetch_after, created_at, updated_at, url,
 FROM offchain_metadata
 WHERE source_type = ? AND url = ? AND hash = ?;
 
--- name: GetLiveUtxo :one
-SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-       staking_key, credential_tag, datum_hash, spent_at_tx_id,
-       referenced_by_tx_id, collateral_by_tx_id, id, added_slot,
-       deleted_slot, amount, output_idx, payment_script
-FROM utxo
-WHERE tx_id = ? AND output_idx = ? AND deleted_slot = 0;
-
--- name: GetUtxoIncludingSpent :one
-SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-       staking_key, credential_tag, datum_hash, spent_at_tx_id,
-       referenced_by_tx_id, collateral_by_tx_id, id, added_slot,
-       deleted_slot, amount, output_idx, payment_script
-FROM utxo
-WHERE tx_id = ? AND output_idx = ?;
-
 -- name: GetAssetsByUtxoID :many
 SELECT name, policy_id, fingerprint, id, utxo_id, amount
 FROM asset
 WHERE utxo_id = ?
 ORDER BY id;
 
--- Order by added_slot before id so the sort is the reverse of
--- idx_utxo_added_slot's own order; ordering by id alone costs a full table
--- scan. See the Store wrapper for the full rationale.
--- name: GetUtxosAddedAfterSlot :many
-SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-       staking_key, credential_tag, datum_hash, spent_at_tx_id,
-       referenced_by_tx_id, collateral_by_tx_id, id, added_slot,
-       deleted_slot, amount, output_idx, payment_script
-FROM utxo
-WHERE added_slot > ?
-ORDER BY added_slot DESC, id DESC;
-
 -- name: GetLiveUtxoRefsBySlot :many
-SELECT tx_id, output_idx
-FROM utxo
-WHERE deleted_slot = 0 AND added_slot = ?
-ORDER BY id;
+SELECT t.hash AS tx_hash, u.output_idx
+FROM utxo AS u
+JOIN "transaction" AS t ON t.id = u.tx_id
+WHERE u.deleted_slot = 0 AND u.added_slot = ?
+ORDER BY u.id;
 
 -- name: GetUtxoRefsBySlot :many
-SELECT tx_id, output_idx
-FROM utxo
-WHERE added_slot = ?
-ORDER BY id;
-
--- name: GetUtxosDeletedBeforeSlot :many
-SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-       staking_key, credential_tag, datum_hash, spent_at_tx_id,
-       referenced_by_tx_id, collateral_by_tx_id, id, added_slot,
-       deleted_slot, amount, output_idx, payment_script
-FROM utxo
-WHERE deleted_slot > 0 AND deleted_slot <= ?
-LIMIT ?;
+SELECT t.hash AS tx_hash, u.output_idx
+FROM utxo AS u
+JOIN "transaction" AS t ON t.id = u.tx_id
+WHERE u.added_slot = ?
+ORDER BY u.id;
 
 -- name: GetControlledAmountByCredential :many
 SELECT amount
 FROM utxo
 WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0;
 
--- name: GetLiveUtxosByAssetPolicy :many
-SELECT u.transaction_id, u.collateral_return_for_tx_id, u.tx_id,
-       u.payment_key, u.staking_key, u.credential_tag, u.datum_hash,
-       u.spent_at_tx_id, u.referenced_by_tx_id, u.collateral_by_tx_id,
-       u.id, u.added_slot, u.deleted_slot, u.amount, u.output_idx,
-       u.payment_script
-FROM utxo u
-WHERE u.deleted_slot = 0
-  AND u.id IN (SELECT utxo_id FROM asset WHERE policy_id = ?)
-ORDER BY u.id;
-
--- name: GetLiveUtxosByAsset :many
-SELECT u.transaction_id, u.collateral_return_for_tx_id, u.tx_id,
-       u.payment_key, u.staking_key, u.credential_tag, u.datum_hash,
-       u.spent_at_tx_id, u.referenced_by_tx_id, u.collateral_by_tx_id,
-       u.id, u.added_slot, u.deleted_slot, u.amount, u.output_idx,
-       u.payment_script
-FROM utxo u
-WHERE u.deleted_slot = 0
-  AND u.id IN (
-      SELECT utxo_id FROM asset WHERE policy_id = ? AND name = ?
-  )
-ORDER BY u.id;
-
--- name: CreateUtxo :one
-INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_at_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id;
 
 -- name: CreateAsset :one
 INSERT INTO asset (
@@ -1153,24 +1086,11 @@ INSERT INTO drep (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
 
--- name: CreateUtxoIfAbsent :one
-INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_at_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (tx_id, output_idx) DO NOTHING
-RETURNING id;
-
 -- name: ImportAsset :exec
 INSERT INTO asset (
     name, policy_id, fingerprint, utxo_id, amount
 ) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (name, policy_id, utxo_id) DO NOTHING;
-
--- name: GetUtxoIDByRef :one
-SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?;
 
 -- name: ImportDrep :one
 INSERT INTO drep (
@@ -1297,34 +1217,48 @@ JOIN registration_drep r
 WHERE d.active = TRUE;
 
 -- name: GetTransactionByHash :one
-SELECT hash, block_hash, metadata, slot, type, id, fee, collateral_fee,
-       ttl, block_index, valid
-FROM "transaction"
-WHERE hash = ?;
+SELECT t.hash, a.block_hash, a.metadata, a.slot, a.type, t.id, a.fee,
+       a.collateral_fee, a.ttl, a.block_index, a.valid
+FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE t.hash = ?;
 
 -- name: GetTransactionSlotByHash :one
-SELECT slot FROM "transaction" WHERE hash = ?;
+SELECT a.slot
+FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE t.hash = ?;
 
 -- name: GetTransactionIDByHash :one
-SELECT id FROM "transaction" WHERE hash = ?;
+SELECT t.id
+FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE t.hash = ?;
 
 -- name: GetTransactionMetadataByHash :one
-SELECT metadata FROM "transaction" WHERE hash = ?;
+SELECT a.metadata
+FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE t.hash = ?;
 
 -- name: GetTransactionsByBlockHash :many
-SELECT hash, block_hash, metadata, slot, type, id, fee, collateral_fee,
-       ttl, block_index, valid
-FROM "transaction"
-WHERE block_hash = ?
-ORDER BY block_index ASC;
+SELECT t.hash, a.block_hash, a.metadata, a.slot, a.type, t.id, a.fee,
+       a.collateral_fee, a.ttl, a.block_index, a.valid
+FROM applied_transaction AS a
+JOIN "transaction" AS t ON t.id = a.tx_id
+WHERE a.block_hash = ?
+ORDER BY a.block_index ASC;
 
 -- name: SumTransactionFeesInSlotRange :many
 SELECT CASE WHEN valid THEN fee ELSE collateral_fee END
-FROM "transaction"
+FROM applied_transaction
 WHERE slot >= ? AND slot <= ?;
 
 -- name: GetTransactionHashesAfterSlot :many
-SELECT hash FROM "transaction" WHERE slot > ?;
+SELECT t.hash
+FROM applied_transaction AS a
+JOIN "transaction" AS t ON t.id = a.tx_id
+WHERE a.slot > ?;
 
 -- name: DeleteAddressTransactionsAfterSlot :exec
 DELETE FROM address_transaction WHERE slot > ?;
@@ -1342,7 +1276,7 @@ SELECT COUNT(*) FROM transaction_metadata_label WHERE label = ?;
 
 -- name: CountTransactionsInSlotRange :one
 SELECT COUNT(*)
-FROM "transaction"
+FROM applied_transaction
 WHERE slot >= ? AND slot <= ?;
 
 -- name: GetBlockSlotRangeStats :one

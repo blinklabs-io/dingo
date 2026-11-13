@@ -109,24 +109,3 @@ func TestGetAssetQuantityByPolicyAndNameStopsWithItsContext(t *testing.T) {
 	)
 	require.ErrorIs(t, err, context.Canceled)
 }
-
-// TestAssetQuantityStopsAtItsHoldingCap covers the scan bound: an asset held
-// by exactly the cap still totals, and one holding more fails with the query
-// budget error instead of reading the rest.
-func TestAssetQuantityStopsAtItsHoldingCap(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	policyID := bytes.Repeat([]byte{0x54}, 28)
-	assetName := []byte("capped")
-	policy := lcommon.NewBlake2b224(policyID)
-	for i := range 3 {
-		insertAssetHolding(t, store, byte(70+i), policyID, assetName, 4, 0)
-	}
-
-	got, err := store.assetQuantity(policy, assetName, 3, nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(12), got)
-
-	_, err = store.assetQuantity(policy, assetName, 2, nil)
-	require.ErrorIs(t, err, models.ErrUtxoQueryBudgetExceeded)
-}

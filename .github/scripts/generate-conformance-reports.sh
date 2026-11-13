@@ -101,7 +101,7 @@ valid_report() {
       else
         ($report | if $scenario == "cbor-decoding" then
           (.corpus | type == "string" and length > 0) and
-          (.corpus_revision | type == "string" and length > 0) and
+          (.dataset_commit | type == "string" and length > 0) and
           (.protocol_version | type == "string" and length > 0) and
           (.successful | type == "boolean") and
           (.totals | type == "object") and

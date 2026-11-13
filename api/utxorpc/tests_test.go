@@ -624,7 +624,7 @@ func sendHealthRequest(
 }
 
 func TestConnectRequestBodyLimitPreservesValidMessages(t *testing.T) {
-	u := NewUtxorpc(UtxorpcConfig{})
+	u := NewUtxorpc(UtxorpcConfig{MaxRequestBody: testRequestBodyLimit})
 	handler := u.newServeMux()
 
 	for _, compressed := range []bool{false, true} {
@@ -643,10 +643,12 @@ func TestConnectRequestBodyLimitPreservesValidMessages(t *testing.T) {
 	}
 }
 
+const testRequestBodyLimit = 1 << 20
+
 func TestConnectRequestBodyLimitRejectsOversizedCompressedMessage(
 	t *testing.T,
 ) {
-	u := NewUtxorpc(UtxorpcConfig{})
+	u := NewUtxorpc(UtxorpcConfig{MaxRequestBody: testRequestBodyLimit})
 	handler := u.newServeMux()
 
 	// Keep the wire body small while making the decoded protobuf message exceed
@@ -656,10 +658,10 @@ func TestConnectRequestBodyLimitRejectsOversizedCompressedMessage(
 	body := protowire.AppendTag(nil, 100, protowire.BytesType)
 	body = protowire.AppendBytes(
 		body,
-		bytes.Repeat([]byte{'a'}, DefaultMaxRequestBody),
+		bytes.Repeat([]byte{'a'}, testRequestBodyLimit),
 	)
 	compressed := gzipRequestBody(t, body)
-	require.Less(t, len(compressed), DefaultMaxRequestBody)
+	require.Less(t, len(compressed), testRequestBodyLimit)
 
 	req, err := http.NewRequestWithContext(
 		t.Context(),
@@ -679,23 +681,23 @@ func TestConnectRequestBodyLimitRejectsOversizedCompressedMessage(
 func TestConnectRequestBodyLimitRejectsOversizedCompressedWireBody(
 	t *testing.T,
 ) {
-	u := NewUtxorpc(UtxorpcConfig{})
+	u := NewUtxorpc(UtxorpcConfig{MaxRequestBody: testRequestBodyLimit})
 	handler := u.newServeMux()
 
 	// Connect bounds the raw request bytes before it decompresses them, which
 	// is a separate limit from the decompressed-size check above. Random
 	// payload bytes do not compress, so gzip expands the message: the decoded
-	// body stays within DefaultMaxRequestBody while the compressed wire body
+	// body stays within testRequestBodyLimit while the compressed wire body
 	// exceeds it. Only the pre-decompression limit can reject this request.
 	// The tag and length prefix for a bytes field this size occupy five bytes.
-	payload := make([]byte, DefaultMaxRequestBody-5)
+	payload := make([]byte, testRequestBodyLimit-5)
 	_, err := rand.Read(payload)
 	require.NoError(t, err)
 	body := protowire.AppendTag(nil, 100, protowire.BytesType)
 	body = protowire.AppendBytes(body, payload)
 	compressed := gzipRequestBody(t, body)
-	require.LessOrEqual(t, len(body), DefaultMaxRequestBody)
-	require.Greater(t, len(compressed), DefaultMaxRequestBody)
+	require.LessOrEqual(t, len(body), testRequestBodyLimit)
+	require.Greater(t, len(compressed), testRequestBodyLimit)
 
 	req, err := http.NewRequestWithContext(
 		t.Context(),

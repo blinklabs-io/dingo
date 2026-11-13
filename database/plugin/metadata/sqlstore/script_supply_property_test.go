@@ -312,7 +312,7 @@ func (s *supplySim) applyBatch(mode applyMode, blocks []simBlock) {
 				}
 			}
 		}
-		enabled, err := s.store.EnableBatchUtxoOverlay(acc, txn, prebatch, nil)
+		enabled, err := s.store.EnableBatchUtxoOverlay(acc, txn, prebatch, nil, nil)
 		require.NoError(s.t, err)
 		require.True(s.t, enabled)
 	}

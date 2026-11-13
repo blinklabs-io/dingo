@@ -252,7 +252,7 @@ func insertSpentAdapterUtxo(
 	t.Helper()
 	insertAdapterUtxo(t, raw, utxo)
 	_, err := raw.Exec(
-		`UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = ? WHERE tx_id = ? AND output_idx = ?`,
+		`UPDATE utxo SET spent_at_tx_id = (SELECT id FROM "transaction" WHERE hash = ?), deleted_slot = ? WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
 		spentBy,
 		utxo.AddedSlot+1,
 		utxo.TxId,

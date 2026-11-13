@@ -19,19 +19,55 @@ import (
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
-// genesisDelegLedgerState adds the genesis delegation state to the mock.
-type genesisDelegLedgerState struct {
-	*mockLedgerState
-	state GenesisDelegState
+type genesisDelegPair struct {
+	Delegate lcommon.Blake2b224
+	Vrf      lcommon.Blake2b256
 }
 
-func (g genesisDelegLedgerState) GenesisDelegState(
+type futureGenesisDelegKey struct {
+	Slot    uint64
+	Genesis lcommon.Blake2b224
+}
+
+type genesisDelegState struct {
+	Current map[lcommon.Blake2b224]genesisDelegPair
+	Future  map[futureGenesisDelegKey]genesisDelegPair
+}
+
+// genesisDelegLedgerState adds the genesis delegation registry to the mock.
+type genesisDelegLedgerState struct {
+	*mockLedgerState
+	state genesisDelegState
+}
+
+func (g genesisDelegLedgerState) CurrentGenesisDelegations(
 	_ uint64,
-) (GenesisDelegState, error) {
-	return g.state, nil
+) ([]lcommon.GenesisDelegation, error) {
+	var ret []lcommon.GenesisDelegation
+	for genesis, pair := range g.state.Current {
+		ret = append(ret, lcommon.GenesisDelegation{
+			GenesisKeyHash: genesis, DelegateKeyHash: pair.Delegate,
+			VrfKeyHash: pair.Vrf,
+		})
+	}
+	return ret, nil
+}
+
+func (g genesisDelegLedgerState) FutureGenesisDelegations(
+	_ uint64,
+) ([]lcommon.GenesisDelegation, error) {
+	var ret []lcommon.GenesisDelegation
+	for key, pair := range g.state.Future {
+		ret = append(ret, lcommon.GenesisDelegation{
+			GenesisKeyHash: key.Genesis, DelegateKeyHash: pair.Delegate,
+			VrfKeyHash: pair.Vrf,
+		})
+	}
+	return ret, nil
 }
 
 func gdHash224(seed byte) lcommon.Blake2b224 {
@@ -59,9 +95,8 @@ func genesisKeyDelegation(
 func genesisDelegFixture() genesisDelegLedgerState {
 	return genesisDelegLedgerState{
 		mockLedgerState: newMockLedgerState(),
-		state: GenesisDelegState{
-			StabilityWindow: 400,
-			Current: map[lcommon.Blake2b224]GenesisDelegPair{
+		state: genesisDelegState{
+			Current: map[lcommon.Blake2b224]genesisDelegPair{
 				gdHash224(0x01): {
 					Delegate: gdHash224(0xd1),
 					Vrf:      gdHash256(0xe1),
@@ -71,7 +106,7 @@ func genesisDelegFixture() genesisDelegLedgerState {
 					Vrf:      gdHash256(0xe2),
 				},
 			},
-			Future: map[FutureGenesisDelegKey]GenesisDelegPair{
+			Future: map[futureGenesisDelegKey]genesisDelegPair{
 				{Slot: 500, Genesis: gdHash224(0x02)}: {
 					Delegate: gdHash224(0xd3), Vrf: gdHash256(0xe3),
 				},
@@ -114,35 +149,35 @@ func TestValidateShelleyDelegCerts_GenesisKeyDelegation(t *testing.T) {
 					gdHash224(0x09), gdHash224(0xd9), gdHash256(0xe9),
 				),
 			},
-			wantErr: GenesisKeyNotInMappingError{},
+			wantErr: shelley.GenesisKeyNotInMappingError{},
 		},
 		{
 			name: "delegate in force for another genesis key",
 			certs: []lcommon.Certificate{
 				genesisKeyDelegation(g1, gdHash224(0xd2), gdHash256(0xe9)),
 			},
-			wantErr: DuplicateGenesisDelegateError{},
+			wantErr: shelley.DuplicateGenesisDelegateError{},
 		},
 		{
 			name: "delegate pending for another genesis key",
 			certs: []lcommon.Certificate{
 				genesisKeyDelegation(g1, gdHash224(0xd3), gdHash256(0xe9)),
 			},
-			wantErr: DuplicateGenesisDelegateError{},
+			wantErr: shelley.DuplicateGenesisDelegateError{},
 		},
 		{
 			name: "VRF key in force for another genesis key",
 			certs: []lcommon.Certificate{
 				genesisKeyDelegation(g1, gdHash224(0xd9), gdHash256(0xe2)),
 			},
-			wantErr: DuplicateGenesisVRFError{},
+			wantErr: shelley.DuplicateGenesisVRFError{},
 		},
 		{
 			name: "VRF key pending for another genesis key",
 			certs: []lcommon.Certificate{
 				genesisKeyDelegation(g1, gdHash224(0xd9), gdHash256(0xe3)),
 			},
-			wantErr: DuplicateGenesisVRFError{},
+			wantErr: shelley.DuplicateGenesisVRFError{},
 		},
 		{
 			name: "delegate taken by an earlier certificate of the transaction",
@@ -150,7 +185,7 @@ func TestValidateShelleyDelegCerts_GenesisKeyDelegation(t *testing.T) {
 				genesisKeyDelegation(g1, gdHash224(0xd9), gdHash256(0xe9)),
 				genesisKeyDelegation(g2, gdHash224(0xd9), gdHash256(0xe8)),
 			},
-			wantErr: DuplicateGenesisDelegateError{},
+			wantErr: shelley.DuplicateGenesisDelegateError{},
 		},
 		{
 			name: "same genesis key redelegated within the transaction",
@@ -171,27 +206,28 @@ func TestValidateShelleyDelegCerts_GenesisKeyDelegation(t *testing.T) {
 			switch tc.wantErr.(type) {
 			case nil:
 				require.NoError(t, err)
-			case GenesisKeyNotInMappingError:
-				require.ErrorAs(t, err, &GenesisKeyNotInMappingError{})
-			case DuplicateGenesisDelegateError:
-				require.ErrorAs(t, err, &DuplicateGenesisDelegateError{})
-			case DuplicateGenesisVRFError:
-				require.ErrorAs(t, err, &DuplicateGenesisVRFError{})
+			case shelley.GenesisKeyNotInMappingError:
+				require.ErrorAs(t, err, &shelley.GenesisKeyNotInMappingError{})
+			case shelley.DuplicateGenesisDelegateError:
+				require.ErrorAs(t, err, &shelley.DuplicateGenesisDelegateError{})
+			case shelley.DuplicateGenesisVRFError:
+				require.ErrorAs(t, err, &shelley.DuplicateGenesisVRFError{})
 			}
 		})
 	}
 }
 
-// A ledger state that cannot report genesis delegation state skips the
-// stateful predicates rather than rejecting every certificate.
+// A ledger state that cannot report the genesis delegation registry rejects
+// the certificate as undecidable.
 func TestValidateShelleyDelegCerts_GenesisKeyDelegationWithoutProvider(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	require.NoError(t, validateCerts(
-		newMockLedgerState(),
+	var unavailable lcommon.GenesisDelegationRegistryStateUnavailableError
+	require.ErrorAs(t, validateCerts(
+		noMIRProviderLedgerState{},
 		lcommon.ProtocolVersionShelley,
 		genesisKeyDelegation(gdHash224(0x09), gdHash224(0xd9), gdHash256(0xe9)),
-	))
+	), &unavailable)
 }

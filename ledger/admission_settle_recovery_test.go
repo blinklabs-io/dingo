@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -230,7 +231,7 @@ func TestAppliedHeaderAdmissionTransitionWaitCancels(t *testing.T) {
 	}
 	release, ok := f.ls.pinSettledHeaderAdmission(ctx, &ChainsyncEvent{
 		BlockHeader: header, Point: f.currentTip.Point, PeerTipUpdate: f.update,
-	}, f.update.HeaderCryptoVerificationGeneration)
+	}, f.update.HeaderCryptoVerificationGeneration, nil)
 	if release != nil {
 		release()
 	}
@@ -261,6 +262,7 @@ func TestAppliedHeaderAdmissionDoesNotRefreshQueuedHeader(t *testing.T) {
 		context.Background(),
 		&e,
 		generation,
+		nil,
 	)
 	if release != nil {
 		release()
@@ -292,6 +294,7 @@ func TestAppliedHeaderAdmissionBindsEventPointToHeader(t *testing.T) {
 		context.Background(),
 		&e,
 		generation,
+		nil,
 	)
 	if release != nil {
 		release()
@@ -413,7 +416,7 @@ func TestAppliedHeaderAdmissionRetriesUnsettledMembership(t *testing.T) {
 	drain()
 	t.Cleanup(func() { _, drain := f.ls.db.SetBlobStore(base); drain() })
 	e := ChainsyncEvent{Point: f.currentTip.Point, BlockHeader: mockHeader{hash: lcommon.NewBlake2b256(f.currentTip.Point.Hash), slot: f.currentTip.Point.Slot, blockNumber: f.currentTip.BlockNumber}}
-	release, ok := f.ls.pinSettledHeaderAdmission(t.Context(), &e, old)
+	release, ok := f.ls.pinSettledHeaderAdmission(t.Context(), &e, old, nil)
 	if release != nil {
 		defer release()
 	}
@@ -422,4 +425,112 @@ func TestAppliedHeaderAdmissionRetriesUnsettledMembership(t *testing.T) {
 	require.True(t, ok, "unknown membership during an append must be read again before rejecting admission")
 	require.Equal(t, current, e.HeaderCryptoVerificationGeneration)
 	require.GreaterOrEqual(t, store.reads.Load(), int32(4), "both membership reads must reach persistent indexes")
+}
+
+// queuedChildAdmission returns the event of the fixture's queued, unapplied
+// child header, stamped with a verdict that a publication has since expired.
+func queuedChildAdmission(
+	f *appliedAdmissionFixture,
+) (ChainsyncEvent, *chainselection.PeerTipUpdateEvent, uint64) {
+	stale := f.update.HeaderCryptoVerificationGeneration
+	f.ls.publishSnapshotsLocked()
+	update := *f.update
+	update.ObservedTip.Point = ocommon.NewPoint(
+		f.child.slot,
+		f.child.hash.Bytes(),
+	)
+	update.ObservedTip.BlockNumber = f.child.blockNumber
+	update.Tip = update.ObservedTip
+	return ChainsyncEvent{
+		BlockHeader: f.child, Point: update.ObservedTip.Point,
+		HeaderCryptoVerificationGeneration: stale, PeerTipUpdate: &update,
+	}, &update, stale
+}
+
+// Queue admission releases its pin just before the selector callback runs,
+// and a block applied in between publishes a tip that expires the verdict
+// though nothing about the header changed. Verifying the still-queued header
+// again yields a verdict for the current publication, so admission stands
+// instead of the header queue being discarded and the peer re-intersected.
+func TestQueuedHeaderAdmissionReverifiesExpiredVerdict(t *testing.T) {
+	t.Parallel()
+	f := newAppliedAdmissionFixture(t)
+	e, update, stale := queuedChildAdmission(f)
+	calls := 0
+	release, ok := f.ls.pinSettledHeaderAdmission(
+		context.Background(), &e, stale,
+		func() (uint64, error) {
+			calls++
+			return f.ls.CurrentHeaderCryptoVerificationGeneration(), nil
+		},
+	)
+	require.True(t, ok, "a fresh verdict must keep the queued header admitted")
+	require.NotNil(t, release)
+	release()
+	require.Equal(t, 1, calls)
+	current := f.ls.CurrentHeaderCryptoVerificationGeneration()
+	require.NotEqual(t, stale, current)
+	require.Equal(t, current, e.HeaderCryptoVerificationGeneration)
+	require.Equal(t, current, update.HeaderCryptoVerificationGeneration,
+		"selector admission must receive the fresh pinned generation")
+}
+
+// A verdict that expires again while it is being replaced is verified again.
+func TestQueuedHeaderAdmissionReverifiesAgainAfterPublication(t *testing.T) {
+	t.Parallel()
+	f := newAppliedAdmissionFixture(t)
+	e, _, stale := queuedChildAdmission(f)
+	calls := 0
+	release, ok := f.ls.pinSettledHeaderAdmission(
+		context.Background(), &e, stale,
+		func() (uint64, error) {
+			calls++
+			generation := f.ls.CurrentHeaderCryptoVerificationGeneration()
+			if calls == 1 {
+				f.ls.publishSnapshotsLocked()
+			}
+			return generation, nil
+		},
+	)
+	require.True(t, ok)
+	require.NotNil(t, release)
+	release()
+	require.Equal(t, 2, calls)
+	require.Equal(t, f.ls.CurrentHeaderCryptoVerificationGeneration(),
+		e.HeaderCryptoVerificationGeneration)
+}
+
+// A header that fails verification against the current publication loses its
+// admission, as one with an expired verdict did before.
+func TestQueuedHeaderAdmissionRejectsFailedReverification(t *testing.T) {
+	t.Parallel()
+	f := newAppliedAdmissionFixture(t)
+	e, update, stale := queuedChildAdmission(f)
+	release, ok := f.ls.pinSettledHeaderAdmission(
+		context.Background(), &e, stale,
+		func() (uint64, error) { return 0, errors.New("invalid header") },
+	)
+	require.Nil(t, release)
+	require.False(t, ok)
+	require.Equal(t, stale, e.HeaderCryptoVerificationGeneration)
+	require.Equal(t, stale, update.HeaderCryptoVerificationGeneration)
+}
+
+// Only a header still in the queue is verified again. One that a rollback or
+// a resync removed is neither applied nor queued, and a fresh verdict for it
+// would re-admit a header the queue no longer holds.
+func TestUnqueuedHeaderAdmissionIsNotReverified(t *testing.T) {
+	t.Parallel()
+	f := newAppliedAdmissionFixture(t)
+	e, _, stale := queuedChildAdmission(f)
+	f.ls.chain.ClearHeaders()
+	release, ok := f.ls.pinSettledHeaderAdmission(
+		context.Background(), &e, stale,
+		func() (uint64, error) {
+			t.Error("a header that left the queue must not be verified again")
+			return f.ls.CurrentHeaderCryptoVerificationGeneration(), nil
+		},
+	)
+	require.Nil(t, release)
+	require.False(t, ok)
 }

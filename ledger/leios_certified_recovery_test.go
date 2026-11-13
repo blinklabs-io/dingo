@@ -552,3 +552,46 @@ func TestLedgerProcessBlocksHaltsOnUnavailableEndorserBlockAcrossPeerGap(
 		})
 	}
 }
+
+// A certified endorser block whose semantic validation is still pending is
+// not a failure to advance: the verdict arrives when the background validation
+// finishes, however long it waits on the database writer. Those restarts must
+// not count toward the deterministic-halt threshold.
+func TestLedgerProcessBlocksWaitsOutPendingEndorserBlockValidation(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	f.ls.config.EndorserBlockValidation = func(
+		[]byte,
+		uint64,
+	) EndorserBlockValidationStatus {
+		return EndorserBlockValidationPending
+	}
+	parent := f.announce()
+	certifier, offsets, envParent := f.certifyingChild(parent)
+	pendingErr := f.process(certifier, offsets, envParent)
+	require.ErrorIs(t, pendingErr, errCertifiedEndorserBlockUnavailable)
+
+	synctest.Test(t, func(t *testing.T) {
+		ls := newPipelineLoopLedger(t)
+		pendingWait := 3 * noProgressStuckThreshold
+		attempts := 0
+		ls.ledgerProcessBlocksWithAttempt(
+			t.Context(),
+			func(context.Context) error {
+				attempts++
+				if attempts <= pendingWait {
+					return pendingErr
+				}
+				return nil
+			},
+		)
+		require.Equal(t, pendingWait+1, attempts)
+		require.Zero(
+			t,
+			promtestutil.ToFloat64(ls.metrics.pipelineHalted),
+			"a pending validation must not halt the pipeline",
+		)
+	})
+}

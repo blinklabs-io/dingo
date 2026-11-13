@@ -765,6 +765,32 @@ func TestValidateBlockProducerStartup_KESAgentSignMode(t *testing.T) {
 	require.NotNil(t, n.kesAgentClient)
 }
 
+// TestValidateBlockProducerStartup_RemoteKESAgentRefusesServeKeyMode covers a
+// library caller that skips config validation: an explicit serve-key mode
+// with a remote agent address is refused, not silently replaced by sign mode.
+func TestValidateBlockProducerStartup_RemoteKESAgentRefusesServeKeyMode(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	testutil.SkipIfBlockProducerUnsupported(t)
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeServeKey,
+		"",
+		cardanoCfg,
+	)
+	n.config.shelleyKESAgentAddress = "127.0.0.1:1"
+	t.Cleanup(n.closeKESAgentClient)
+
+	_, err := n.validateBlockProducerStartupAtSlot(0)
+	require.ErrorContains(t, err, "remote KES agent supports only mode")
+}
+
 // TestValidateBlockProducerStartup_KESAgentServeKeyRotationStaysValidated
 // covers the KES rotation the serve-key background loop exists to handle.
 //

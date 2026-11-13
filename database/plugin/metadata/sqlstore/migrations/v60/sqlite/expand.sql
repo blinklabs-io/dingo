@@ -1,4 +1,2 @@
--- Running total of live script-locked lovelace: one row per slot whose
--- commit changed it, holding the total after that slot. The backfill seeds it
--- from a full scan; the contract drops the index the scan used to need.
-CREATE TABLE IF NOT EXISTS `script_locked_supply` (`slot` integer PRIMARY KEY,`amount` integer NOT NULL);
+-- The backfill makes idx_utxo_deleted_staking_amount partial on SQLite and
+-- PostgreSQL. MySQL replaces it from v60/mysql/expand.sql.

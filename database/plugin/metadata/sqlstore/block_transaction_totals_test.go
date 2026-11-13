@@ -31,23 +31,28 @@ func seedBlockAmountRows(tb testing.TB, store *Store, count int) []byte {
 	txn, err := store.writeDB.BeginTx(tb.Context(), nil)
 	require.NoError(tb, err)
 	tb.Cleanup(func() { _ = txn.Rollback() })
-	insertTx, err := txn.Prepare(`INSERT INTO "transaction"
-(hash, block_hash, fee, block_index, valid) VALUES (?, ?, '7', ?, TRUE)`)
+	insertTx, err := txn.Prepare(`INSERT INTO "transaction" (hash) VALUES (?)`)
 	require.NoError(tb, err)
 	defer insertTx.Close()
+	insertApplied, err := txn.Prepare(`INSERT INTO applied_transaction
+(tx_id, block_hash, fee, block_index, valid) VALUES (?, ?, '7', ?, TRUE)`)
+	require.NoError(tb, err)
+	defer insertApplied.Close()
 	insertOutput, err := txn.Prepare(`INSERT INTO utxo
-(transaction_id, tx_id, output_idx, amount) VALUES (?, ?, ?, '1000')`)
+(tx_id, output_idx, amount) VALUES (?, ?, '1000')`)
 	require.NoError(tb, err)
 	defer insertOutput.Close()
 	for i := range count {
 		txHash := make([]byte, 32)
 		binary.BigEndian.PutUint64(txHash[24:], uint64(i+1))
-		result, err := insertTx.Exec(txHash, hash, i)
+		result, err := insertTx.Exec(txHash)
 		require.NoError(tb, err)
 		id, err := result.LastInsertId()
 		require.NoError(tb, err)
+		_, err = insertApplied.Exec(id, hash, i)
+		require.NoError(tb, err)
 		for out := range 2 {
-			_, err := insertOutput.Exec(id, txHash, out)
+			_, err := insertOutput.Exec(id, out)
 			require.NoError(tb, err)
 		}
 	}
@@ -86,8 +91,8 @@ func TestBlockTransactionTotalsQueryIsIndexBacked(t *testing.T) {
 		plan.WriteString(detail + "\n")
 	}
 	require.NoError(t, rows.Err())
-	require.Contains(t, plan.String(), "idx_transaction_block_hash")
-	require.Contains(t, plan.String(), "idx_utxo_transaction_id")
+	require.Contains(t, plan.String(), "idx_applied_transaction_block_hash")
+	require.Contains(t, plan.String(), "idx_utxo_tx_id_output_idx")
 	require.Contains(t, plan.String(), "idx_utxo_collateral_return_for_tx_id")
 	require.NotContains(t, plan.String(), "SCAN utxo")
 	require.NotContains(t, plan.String(), "SCAN u\n")

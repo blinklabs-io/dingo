@@ -35,8 +35,8 @@ func newEpochFeeStore(t testing.TB) *Store {
 	require.NoError(t, store.Start(context.Background()))
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	_, err = db.Exec(
-		`CREATE TABLE "transaction" (id INTEGER PRIMARY KEY, slot INTEGER, valid BOOLEAN, fee TEXT, collateral_fee TEXT);
-CREATE INDEX fee_slot ON "transaction"(slot);
+		`CREATE TABLE applied_transaction (tx_id INTEGER PRIMARY KEY, slot INTEGER, valid BOOLEAN, fee TEXT, collateral_fee TEXT);
+CREATE INDEX fee_slot ON applied_transaction(slot);
 CREATE TABLE leios_transaction_context (transaction_id INTEGER PRIMARY KEY, slot INTEGER);
 CREATE INDEX fee_context_slot ON leios_transaction_context(slot);`,
 	)
@@ -47,7 +47,7 @@ CREATE INDEX fee_context_slot ON leios_transaction_context(slot);`,
 func TestEpochFeeSumPreservesExecutionSlotAndDomain(t *testing.T) {
 	t.Parallel()
 	store := newEpochFeeStore(t)
-	_, err := store.writeDB.Exec(`INSERT INTO "transaction" VALUES
+	_, err := store.writeDB.Exec(`INSERT INTO applied_transaction VALUES
 (1,10,TRUE,'5','bad'), (2,11,FALSE,'bad','7'),
 (3,90,TRUE,'13','bad'), (4,11,TRUE,'17','bad'),
 (5,80,FALSE,'bad','29'), (6,11,TRUE,NULL,'bad'),
@@ -92,7 +92,7 @@ func TestEpochFeeSumRejectsInvalidRowsAndOverflow(t *testing.T) {
 			store := newEpochFeeStore(t)
 			for i, value := range tc.values {
 				_, err := store.writeDB.Exec(
-					`INSERT INTO "transaction" VALUES (?,10,TRUE,?,'0')`,
+					`INSERT INTO applied_transaction VALUES (?,10,TRUE,?,'0')`,
 					i+1,
 					value,
 				)
@@ -100,7 +100,7 @@ func TestEpochFeeSumRejectsInvalidRowsAndOverflow(t *testing.T) {
 			}
 			got, err := store.SumTransactionFeesInSlotRange(10, 10, nil)
 			baseline, baselineErr := sumUint64Rows(t.Context(), store.writeDB,
-				`SELECT fee FROM "transaction" WHERE slot=10`)
+				`SELECT fee FROM applied_transaction WHERE slot=10`)
 			if !tc.valid {
 				require.Error(t, baselineErr)
 				require.Error(t, err)
@@ -121,12 +121,12 @@ func BenchmarkEpochFeeSum(b *testing.B) {
 			require.NoError(b, err)
 			_, err = txn.Exec(
 				`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<?)
-INSERT INTO "transaction" SELECT i,i,TRUE,'1234','0' FROM n`,
+INSERT INTO applied_transaction SELECT i,i,TRUE,'1234','0' FROM n`,
 				count,
 			)
 			require.NoError(b, err)
 			_, err = txn.Exec(
-				`INSERT INTO leios_transaction_context SELECT id,slot FROM "transaction" WHERE id%5=0`,
+				`INSERT INTO leios_transaction_context SELECT tx_id,slot FROM applied_transaction WHERE tx_id%5=0`,
 			)
 			require.NoError(b, err)
 			require.NoError(b, txn.Commit())
@@ -155,7 +155,7 @@ func TestEpochFeeSumUsesCallerTransaction(t *testing.T) {
 	require.NoError(t, err)
 	_, err = db.ExecContext(
 		ctx,
-		`INSERT INTO "transaction" VALUES (1,10,TRUE,'13','0')`,
+		`INSERT INTO applied_transaction VALUES (1,10,TRUE,'13','0')`,
 	)
 	require.NoError(t, err)
 	got, err := store.SumTransactionFeesInSlotRange(10, 10, txn)

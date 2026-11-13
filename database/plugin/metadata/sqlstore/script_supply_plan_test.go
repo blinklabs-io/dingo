@@ -27,6 +27,11 @@ import (
 // deleted_slot-leading index with payment_script in it; every other query that
 // the planner could send through it must still seek an index, with and without
 // planner statistics, and none may name the dropped index.
+//
+// GetLiveUtxoLovelace and iterateLiveUtxos are left out: each reads every
+// live row, the first once at the Byron-to-Shelley boundary, and with
+// idx_utxo_deleted_staking_amount holding spent rows only no index leads with
+// the live region, so both scan utxo.
 func TestDroppedPaymentScriptIndexLeavesNoQueryOnAScan(t *testing.T) {
 	t.Parallel()
 	ids := "(?,?,?,?,?,?,?,?)"
@@ -36,18 +41,17 @@ func TestDroppedPaymentScriptIndexLeavesNoQueryOnAScan(t *testing.T) {
 		false,
 	)
 	queries := map[string]string{
-		"live lovelace sum":      `SELECT SUM(CAST(amount AS INTEGER)) FROM utxo WHERE deleted_slot = 0`,
-		"live row iteration":     `SELECT tx_id FROM utxo WHERE deleted_slot = 0`,
 		"consumed prune":         `SELECT id, tx_id, amount FROM utxo WHERE deleted_slot > 0 AND deleted_slot <= ? LIMIT ?`,
-		"rollback unspend":       `UPDATE utxo SET deleted_slot = 0, spent_at_tx_id = NULL WHERE deleted_slot > ?`,
+		"rollback unspend":       utxoUnspendAfterSlotQuery,
 		"rollback stake refs":    utxoStakeRefsDeletedAfterSlotQuery,
 		"bulk mark spent":        markQuery,
 		"credential live sum":    `SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
 		"batched spend":          consumeUtxosBatchQuery(4, true),
-		"spend state by ref":     getUtxoSpendStateQuery,
-		"live by ref":            getLiveUtxoByRefQuery,
+		"spend state by ref":     sqliteUtxoSQL.getSpendState,
+		"script supply by ref":   sqliteUtxoSQL.scriptSupplyState,
+		"live by ref":            sqliteUtxoSQL.getLiveByRef,
 		"delete by id":           `DELETE FROM utxo WHERE id IN ` + ids,
-		"missing address repair": `SELECT id FROM utxo WHERE deleted_slot > ? AND id > ? ORDER BY id LIMIT ?`,
+		"missing address repair": spentUtxosMissingAddressAfterSlotSQL("sqlite"),
 	}
 	for _, analyzed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("analyzed=%v", analyzed), func(t *testing.T) {

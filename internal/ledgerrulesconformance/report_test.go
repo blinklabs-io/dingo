@@ -40,11 +40,11 @@ func TestApplyFixtureReferenceScriptLimit(t *testing.T) {
 	limit := uint64(50)
 
 	for _, tc := range []struct {
-		name       string
-		tx         *conway.ConwayTransaction
-		limit      *uint64
-		priorError error
-		wantLimit  bool
+		name        string
+		tx          *conway.ConwayTransaction
+		limit       *uint64
+		priorError  error
+		wantLimit   bool
 		wantHarness bool
 	}{
 		{

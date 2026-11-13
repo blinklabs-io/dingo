@@ -50,9 +50,18 @@ type PeerChainTip struct {
 	// eagernessPaused counts AwaitEagernessLimit calls holding this peer's
 	// header stream at the Limit on Eagerness. Guarded by the selector mutex.
 	eagernessPaused int
-	VRFOutput       []byte // VRF output from tip block for tie-breaking
-	PraosView       PraosTiebreakerView
-	LastUpdated     time.Time
+	// catchUpPaused counts AwaitCatchUpBand calls parking this peer's header
+	// stream until the ledger catches up. It is kept apart from
+	// eagernessPaused because that parked header has not been verified and
+	// the peer is not at the limit, so it must not enter the eagerness
+	// standoff. Guarded by the selector mutex.
+	catchUpPaused int
+	// jumpRecord marks a ChainSync Jumping record. A jumper sends no headers
+	// by design, so its age says nothing about whether it is still there.
+	jumpRecord  bool
+	VRFOutput   []byte // VRF output from tip block for tie-breaking
+	PraosView   PraosTiebreakerView
+	LastUpdated time.Time
 	// observedSlots is the recent slot-window frontier used for Genesis
 	// density. observedPoints is the entry-bounded hash frontier used for
 	// corroboration and GDD; it may retain older sparse points so a common
@@ -70,8 +79,17 @@ type PeerChainTip struct {
 	// remaining entries are consecutive block numbers, which lets density
 	// comparisons align two frontiers without scanning a full Genesis window.
 	observedPointBaseBlock uint64
-	observedTipHistory     []ochainsync.Tip
-	idling                 bool
+	// sessionAnchor is the point the peer's chainsync last rolled back to when
+	// the retained frontier did not hold it, including the rollback that
+	// opens a session at its FindIntersect point. When the next header names
+	// it as its parent, recordObservedLinkedPoint places it one block below
+	// that header as the frontier's first point. Without it, two peers whose
+	// forks branch at the point their sessions intersected share no frontier
+	// point, and density comparison cannot find their common intersection.
+	sessionAnchor      ocommon.Point
+	sessionAnchorSet   bool
+	observedTipHistory []ochainsync.Tip
+	idling             bool
 	// admittedTipHistory retains only points a ledger admission explicitly
 	// accepted. It is separate from observedTipHistory because legacy rollback
 	// and recovery observations are not proof of ledger admission.
@@ -136,7 +154,7 @@ func newPeerChainTipFromRollback(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) *PeerChainTip {
-	return &PeerChainTip{
+	peerTip := &PeerChainTip{
 		ConnectionId:        connId,
 		Tip:                 tip,
 		ObservedTip:         ochainsync.Tip{Point: clonePoint(point)},
@@ -144,6 +162,18 @@ func newPeerChainTipFromRollback(
 		awaitingFirstHeader: true,
 		LastUpdated:         time.Now(),
 	}
+	peerTip.setSessionAnchor(point)
+	return peerTip
+}
+
+// setSessionAnchor records point as the anchor for the next delivered header.
+// The origin carries no hash and cannot anchor a frontier.
+func (p *PeerChainTip) setSessionAnchor(point ocommon.Point) {
+	if len(point.Hash) == 0 {
+		return
+	}
+	p.sessionAnchor = clonePoint(point)
+	p.sessionAnchorSet = true
 }
 
 // UpdateTip updates the peer's chain tip, VRF output, and last updated timestamp.
@@ -267,6 +297,7 @@ func (p *PeerChainTip) ApplyRollback(
 	}
 	if keepPoints == 0 {
 		p.resetObservedPoints()
+		p.setSessionAnchor(point)
 	}
 }
 
@@ -274,6 +305,8 @@ func (p *PeerChainTip) resetObservedPoints() {
 	p.observedPoints = nil
 	p.observedPointsRef = windowRef[ocommon.Point]{}
 	p.observedPointBaseBlock = 0
+	p.sessionAnchor = ocommon.Point{}
+	p.sessionAnchorSet = false
 }
 
 func (p *PeerChainTip) resetObservedFrontier() {
@@ -361,8 +394,15 @@ func (p *PeerChainTip) recordObservedTipHistory(
 // last delivered header.
 func (p *PeerChainTip) isIdling() bool { return p != nil && p.idling }
 
-// recordObservedPoint records a (slot, hash) point into the observed frontier
-// used for Genesis density (observedSlots) and corroboration/GDD
+// streamPaused reports whether the selector is holding this peer's header
+// stream for either reason. A paused peer sends no tips, so its silence is not
+// evidence that it is gone.
+func (p *PeerChainTip) streamPaused() bool {
+	return p != nil && (p.eagernessPaused > 0 || p.catchUpPaused > 0)
+}
+
+// recordObservedLinkedPoint records a (slot, hash) point into the observed
+// frontier used for Genesis density (observedSlots) and corroboration/GDD
 // (observedPoints). Slots are bounded by the density window; hash-bearing
 // points are independently bounded by entry count so sparse candidates retain
 // their common intersection. The point frontier keeps consecutive block
@@ -372,12 +412,19 @@ func (p *PeerChainTip) isIdling() bool { return p != nil && p.idling }
 // trackHashes gates the hash frontier: it is stored only in Genesis mode.
 // When false the hash frontier is dropped, so normal
 // Praos operation does not retain per-peer window-length hash history.
-func (p *PeerChainTip) recordObservedPoint(
+//
+// link is the delivered header's parent link. The session anchor is placed one
+// block below the header, so it is recorded only when the header names it as
+// its parent and is not a boundary block, which repeats its parent's block
+// number. A header whose parent was withheld from selection, or an unknown
+// link, would otherwise misnumber it.
+func (p *PeerChainTip) recordObservedLinkedPoint(
 	point ocommon.Point,
 	blockNumber uint64,
 	window uint64,
 	maxPoints uint64,
 	trackHashes bool,
+	link deliveredLink,
 ) {
 	if p == nil {
 		return
@@ -423,6 +470,23 @@ func (p *PeerChainTip) recordObservedPoint(
 				uint64(len(p.observedPoints)-1)
 		}
 		switch {
+		case len(p.observedPoints) == 0 && p.sessionAnchorSet &&
+			blockNumber > 0 && p.sessionAnchor.Slot < slot &&
+			!link.boundary && len(link.prevHash) > 0 &&
+			bytes.Equal(link.prevHash, p.sessionAnchor.Hash):
+			p.observedPointBaseBlock = blockNumber - 1
+			p.observedPoints = windowAppend(
+				&p.observedPointsRef,
+				p.observedPoints,
+				p.sessionAnchor,
+				pointsEqual,
+			)
+			p.observedPoints = windowAppend(
+				&p.observedPointsRef,
+				p.observedPoints,
+				clonePoint(point),
+				pointsEqual,
+			)
 		case len(p.observedPoints) == 0:
 			p.observedPointBaseBlock = blockNumber
 			p.observedPoints = windowAppend(
@@ -462,6 +526,8 @@ func (p *PeerChainTip) recordObservedPoint(
 				pointsEqual,
 			)
 		}
+		p.sessionAnchor = ocommon.Point{}
+		p.sessionAnchorSet = false
 		if uint64(len(p.observedPoints)) > maxPoints {
 			excess := uint64(len(p.observedPoints)) - maxPoints
 			// #nosec G115 -- excess is at most the retained slice length.
@@ -556,73 +622,6 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 	return false
 }
 
-// confirmsRecentChain reports whether witness confirms this peer's (candidate's)
-// chain. Within the slot range of the candidate's observed frontier, every
-// witness-observed point must match the candidate, and the witness must have
-// independently delivered the candidate's current point.
-//
-// This is deliberately stronger than "share any common point": a fast source
-// that shares only an old ancestor and then diverges for every later block is
-// NOT confirmed, because the witness observed recent blocks the candidate did
-// not (or a conflicting hash at the same slot). A witness whose frontier does
-// not overlap the candidate's window at all cannot confirm it (returns false),
-// so corroboration fails closed — the candidate then stalls rather than being
-// followed uncorroborated. Requiring the current point is what keeps a match
-// in older candidate history, however recent, from authorizing candidate
-// blocks the witness has never observed.
-//
-// Both frontiers are kept in strictly-ascending slot order; this is a
-// two-pointer scan that starts the witness at the candidate's first slot. It
-// relies on the observed frontier being populated per header (dense) during
-// chainsync, so two peers on the same chain share every block in their
-// overlap.
-func (p *PeerChainTip) confirmsRecentChainWithin(
-	witness *PeerChainTip,
-	window uint64,
-) bool {
-	if p == nil || witness == nil ||
-		len(p.observedPoints) == 0 || len(witness.observedPoints) == 0 {
-		return false
-	}
-	candidate := p.observedPoints
-	if window > 0 {
-		hi := candidate[len(candidate)-1].Slot
-		var cutoff uint64
-		if hi >= window {
-			cutoff = hi - window + 1
-		}
-		candidate = candidate[sort.Search(len(candidate), func(i int) bool {
-			return candidate[i].Slot >= cutoff
-		}):]
-	}
-	lo := candidate[0].Slot
-	hi := candidate[len(candidate)-1].Slot
-	witnessPoints := witness.observedPoints
-	witnessPoints = witnessPoints[sort.Search(len(witnessPoints), func(i int) bool {
-		return witnessPoints[i].Slot >= lo
-	}):]
-	i := 0
-	tipMatched := false
-	for _, w := range witnessPoints {
-		if w.Slot > hi {
-			break
-		}
-		for i < len(candidate) && candidate[i].Slot < w.Slot {
-			i++
-		}
-		if i < len(candidate) && candidate[i].Slot == w.Slot &&
-			len(w.Hash) > 0 && bytes.Equal(candidate[i].Hash, w.Hash) {
-			tipMatched = i == len(candidate)-1
-			continue
-		}
-		// The witness observed a block within the candidate's range that the
-		// candidate does not have (or a conflicting hash at the same slot):
-		// they are on different chains, so this witness does not confirm.
-		return false
-	}
-	return tipMatched
-}
-
 func (p *PeerChainTip) observedDensity(window uint64) uint64 {
 	if p == nil || len(p.observedSlots) == 0 {
 		return 0
@@ -638,13 +637,12 @@ func (p *PeerChainTip) observedDensity(window uint64) uint64 {
 	} else {
 		cutoff = 1
 	}
-	for i, slot := range p.observedSlots {
-		if slot >= cutoff {
-			// #nosec G115 -- i < len(p.observedSlots), difference is non-negative
-			return uint64(len(p.observedSlots) - i)
-		}
-	}
-	return 0
+	// Slots are in strictly ascending order.
+	i := sort.Search(len(p.observedSlots), func(i int) bool {
+		return p.observedSlots[i] >= cutoff
+	})
+	// #nosec G115 -- i <= len(p.observedSlots), difference is non-negative
+	return uint64(len(p.observedSlots) - i)
 }
 
 // SelectionTip returns the best locally observed frontier for this peer.

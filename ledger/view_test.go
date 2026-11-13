@@ -8844,12 +8844,18 @@ func TestGenesisKeyDelegationThroughEraValidation(t *testing.T) {
 		)
 	}
 
-	var notInMapping eras.GenesisKeyNotInMappingError
-	var duplicateDelegate eras.DuplicateGenesisDelegateError
-	var duplicateVRF eras.DuplicateGenesisVRFError
+	var notInMapping shelley.GenesisKeyNotInMappingError
+	var duplicateDelegate shelley.DuplicateGenesisDelegateError
+	var duplicateVRF shelley.DuplicateGenesisVRFError
 
 	err := validate(genesisKey(0x44), delegateOf(3), 0xf9)
 	require.ErrorAs(t, err, &notInMapping)
+	require.Equal(
+		t,
+		1,
+		strings.Count(err.Error(), "genesis key not in"),
+		"the predicate is reported once: %v", err,
+	)
 
 	err = validate(genesisKey(0x22), delegateOf(2), 0xf9)
 	require.ErrorAs(t, err, &duplicateDelegate, "delegate in force")

@@ -540,7 +540,7 @@ SELECT event.added_slot, COALESCE(tx.block_index, 0),
        COALESCE(certs.cert_index, 0), `+anchorColumns+`
 FROM `+table+` event
 LEFT JOIN certs ON certs.id = event.certificate_id
-LEFT JOIN "transaction" tx ON tx.id = certs.transaction_id
+LEFT JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
 WHERE event.credential_tag = ? AND event.`+credentialColumn+` = ?
   AND event.added_slot <= ?
 ORDER BY event.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
@@ -1462,18 +1462,7 @@ classified AS (
 		where += " AND expired = ?"
 		whereArgs = append(whereArgs, *page.Expired)
 	}
-	var total int
-	if err := db.QueryRowContext(
-		ctx,
-		s.dialect.Rebind(ctes+" SELECT COUNT(*) FROM classified"+where),
-		append(append([]any{}, baseArgs...), whereArgs...)...,
-	).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("count DRep list: %w", err)
-	}
-	if page.Offset >= total {
-		return []models.DrepListRow{}, total, nil
-	}
-
+	countCTEs := ctes
 	amountSelect := ", 0 amount"
 	var amountArgs, adjustmentArgs []any
 	order := " ORDER BY first_seen_slot, id, predefined"
@@ -1585,7 +1574,7 @@ ranked AS (
 SELECT anchor_url, credential, anchor_hash, id, added_slot,
        credential_tag, last_activity_epoch, expiry_epoch, active,
        first_seen_slot, last_registration_slot, registration_epoch,
-       predefined`+amountSelect+`
+       predefined`+amountSelect+`, COUNT(*) OVER () total_count
 FROM `+from+where+order+" LIMIT ? OFFSET ?"),
 		pageArgs...,
 	)
@@ -1593,7 +1582,8 @@ FROM `+from+where+order+" LIMIT ? OFFSET ?"),
 		return nil, 0, fmt.Errorf("get DRep page: %w", err)
 	}
 	defer rows.Close()
-	ret := make([]models.DrepListRow, 0, min(page.Limit, total-page.Offset))
+	ret := make([]models.DrepListRow, 0, min(page.Limit, 1024))
+	var total int
 	for rows.Next() {
 		var (
 			row        models.DrepListRow
@@ -1615,6 +1605,7 @@ FROM `+from+where+order+" LIMIT ? OFFSET ?"),
 			&row.RegistrationEpoch,
 			&predefined,
 			&amount,
+			&total,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -1628,7 +1619,25 @@ FROM `+from+where+order+" LIMIT ? OFFSET ?"),
 		}
 		ret = append(ret, row)
 	}
-	return ret, total, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	if len(ret) > 0 || page.Offset == 0 {
+		// An empty first page means nothing matched, so total stays 0.
+		return ret, total, nil
+	}
+	// A page past the end carries no row to read the window total from.
+	if err := rows.Close(); err != nil {
+		return nil, 0, err
+	}
+	if err := db.QueryRowContext(
+		ctx,
+		s.dialect.Rebind(countCTEs+" SELECT COUNT(*) FROM classified"+where),
+		append(append([]any{}, baseArgs...), whereArgs...)...,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count DRep list: %w", err)
+	}
+	return ret, total, nil
 }
 
 func (s *Store) GetPredefinedDrepFirstSeenSlots(

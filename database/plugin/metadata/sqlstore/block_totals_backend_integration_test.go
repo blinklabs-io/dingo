@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"math"
 	"math/big"
-	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -53,23 +52,27 @@ func testBlockTotalsBackend(t *testing.T, s *Store) {
 		if i >= 2 {
 			amount, fee = "11", "7"
 		}
-		_, err := s.writeDB.ExecContext(t.Context(), s.dialect.Rebind(strings.ReplaceAll(`
-INSERT INTO "transaction" (id,hash,block_hash,fee,block_index,valid)
-VALUES (?,?,?,?,?,?)`, `"transaction"`, s.dialect.QuoteIdentifier("transaction"))), i+1, h, block, fee, i, valid)
+		table := s.dialect.QuoteIdentifier("transaction")
+		_, err := s.writeDB.ExecContext(t.Context(), s.dialect.Rebind(
+			"INSERT INTO "+table+" (id,hash) VALUES (?,?)"), i+1, h)
 		require.NoError(t, err)
 		_, err = s.writeDB.ExecContext(t.Context(), s.dialect.Rebind(`
-INSERT INTO utxo (id,transaction_id,tx_id,output_idx,amount,deleted_slot)
-VALUES (?,?,?,?,?,?)`), i+101, i+1, h, 0, amount, 100)
+INSERT INTO applied_transaction (tx_id,block_hash,slot,fee,block_index,valid)
+VALUES (?,?,?,?,?,?)`), i+1, block, 1, fee, i, valid)
+		require.NoError(t, err)
+		_, err = s.writeDB.ExecContext(t.Context(), s.dialect.Rebind(`
+INSERT INTO utxo (id,tx_id,output_idx,amount,deleted_slot)
+VALUES (?,?,?,?,?)`), i+101, i+1, 0, amount, 100)
 		require.NoError(t, err)
 	}
 	_, err := s.writeDB.ExecContext(t.Context(), s.dialect.Rebind(`
 INSERT INTO utxo (id,collateral_return_for_tx_id,tx_id,output_idx,amount)
-VALUES (?,?,?,?,?)`), 201, 3, bytes.Repeat([]byte{23}, 32), 0, "19")
+VALUES (?,?,?,?,?)`), 201, 3, 3, 1, "19")
 	require.NoError(t, err)
 	// A valid transaction ignores an otherwise retained collateral return.
 	_, err = s.writeDB.ExecContext(t.Context(), s.dialect.Rebind(`
 INSERT INTO utxo (id,collateral_return_for_tx_id,tx_id,output_idx,amount)
-VALUES (?,?,?,?,?)`), 202, 1, bytes.Repeat([]byte{24}, 32), 0, "99")
+VALUES (?,?,?,?,?)`), 202, 1, 1, 1, "99")
 	require.NoError(t, err)
 	twiceMax := new(big.Int).Mul(new(big.Int).SetUint64(math.MaxUint64), big.NewInt(2))
 	want := models.BlockTransactionTotals{

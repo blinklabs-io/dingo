@@ -247,6 +247,39 @@ func bindAuxiliaryListener(
 	return listener
 }
 
+// logAuxiliaryListenerBound logs "serving <what> on <addr>" once the
+// listener is actually bound, with the resolved address, so the line is
+// evidence of a successful bind rather than of an attempt.
+func logAuxiliaryListenerBound(
+	logger *slog.Logger,
+	what string,
+	listener net.Listener,
+) {
+	logger.Info(
+		"serving "+what+" on "+listener.Addr().String(),
+		"component", "node",
+	)
+}
+
+// logEffectiveConfig logs one Info line with the post-default, non-secret
+// settings that matter to operators and test harnesses. Config.LogValue only
+// reaches the Debug "config" line; this allowlist
+// (Config.EffectiveLogAttrs) is restricted to fields classified plain by the
+// redaction table.
+func logEffectiveConfig(
+	logger *slog.Logger,
+	cfg *config.Config,
+	genesisSelectionMode bool,
+) {
+	attrs := cfg.EffectiveLogAttrs(genesisSelectionMode)
+	args := make([]any, 0, len(attrs)+2)
+	args = append(args, "component", "node")
+	for _, attr := range attrs {
+		args = append(args, attr)
+	}
+	logger.Info("effective configuration", args...)
+}
+
 // serveAuxiliaryListenerOn serves a non-essential observability HTTP server
 // on a socket the caller has already bound. Binding is separated from
 // serving so the caller owns the listener rather than naming a port: a port
@@ -361,10 +394,7 @@ func NewHealthServer(
 	if cfg.HealthPort == 0 {
 		return nil
 	}
-	readyTipGapSlots := uint64(cfg.HealthReadyGapSlots)
-	if readyTipGapSlots == 0 {
-		readyTipGapSlots = config.DefaultHealthReadyGapSlots
-	}
+	readyTipGapSlots := cfg.EffectiveHealthReadyGapSlots()
 	return &http.Server{
 		// JoinHostPort, not "%s:%d": an IPv6 bindAddr such as "::" has to
 		// be bracketed or net.Listen rejects the address.
@@ -493,13 +523,19 @@ func Run(
 		)
 	}
 	if cfg.SocketPath != "" {
+		socketMode, err := config.ParseUnixSocketMode(cfg.SocketMode)
+		if err != nil {
+			return fmt.Errorf("invalid socket mode: %w", err)
+		}
 		// Private UNIX socket (node-to-client)
 		listeners = append(
 			listeners,
 			dingo.ListenerConfig{
-				ListenNetwork: "unix",
-				ListenAddress: cfg.SocketPath,
-				UseNtC:        true,
+				ListenNetwork:     "unix",
+				ListenAddress:     cfg.SocketPath,
+				UnixSocketMode:    socketMode,
+				UnixSocketModeSet: true,
+				UseNtC:            true,
 			},
 		)
 	}
@@ -580,39 +616,25 @@ func Run(
 	for _, opt := range opts {
 		opt(&dingoCfg)
 	}
+	// The selector's starting mode depends on the caught-up marker and the
+	// ledger tip, so the line is logged once the node has resolved it.
+	dingo.WithGenesisSelectionResolved(func(genesisSelectionMode bool) {
+		logEffectiveConfig(logger, cfg, genesisSelectionMode)
+	})(&dingoCfg)
 	d, err := dingo.New(dingoCfg) //nolint:contextcheck
 	if err != nil {
 		return err
 	}
 	metricsServer := newMetricsServer(cfg)
-	if metricsServer != nil {
-		logger.Info(
-			"serving prometheus metrics on "+metricsServer.Addr,
-			"component",
-			"node",
-		)
-	}
 	// Optional debug listener with pprof handlers, on a separate port from
 	// metrics so monitoring scrapers never see profiling endpoints.
 	debugServer := newPprofDebugServer(cfg)
-	if debugServer != nil {
-		logger.Info(
-			"serving pprof debug endpoints on "+debugServer.Addr,
-			"component", "node",
-		)
-	}
 	// Liveness/readiness listener, on a port of its own so an orchestrator
 	// or load balancer can probe the node without being handed the metrics
 	// or pprof surface. Started for every storage mode.
 	healthServer := NewHealthServer(
 		cfg, d.TipGapSlots, logger, nodeHealthChecks(d)...,
 	)
-	if healthServer != nil {
-		logger.Info(
-			"serving health probes on "+healthServer.Addr,
-			"component", "node",
-		)
-	}
 	// Keep a child cancel function so a remote lifecycle request can stop the
 	// same command-owned context used by startup and the running node.
 	signalCtx, signalCtxStop := context.WithCancel(ctx)
@@ -637,6 +659,9 @@ func Run(
 		if listener := bindAuxiliaryListener(
 			"metrics", metricsServer, logger,
 		); listener != nil {
+			logAuxiliaryListenerBound(
+				logger, "prometheus metrics", listener,
+			)
 			go serveAuxiliaryListenerOn(
 				"metrics", metricsServer, listener, logger,
 			)
@@ -646,6 +671,9 @@ func Run(
 		if listener := bindAuxiliaryListener(
 			"pprof debug", debugServer, logger,
 		); listener != nil {
+			logAuxiliaryListenerBound(
+				logger, "pprof debug endpoints", listener,
+			)
 			go serveAuxiliaryListenerOn(
 				"pprof debug", debugServer, listener, logger,
 			)
@@ -655,6 +683,7 @@ func Run(
 		if listener := bindAuxiliaryListener(
 			"health", healthServer, logger,
 		); listener != nil {
+			logAuxiliaryListenerBound(logger, "health probes", listener)
 			go serveAuxiliaryListenerOn(
 				"health",
 				healthServer,
@@ -973,6 +1002,9 @@ func buildDingoConfig(
 		dingo.WithGenesisCorroborationPeers(
 			cfg.GenesisBootstrap.CorroborationPeers,
 		),
+		dingo.WithGenesisChainSyncJumping(
+			cfg.GenesisBootstrap.ChainSyncJumping,
+		),
 		dingo.WithGenesisLimitOnPatience(
 			cfg.GenesisBootstrap.LimitOnPatienceEnabled,
 			cfg.GenesisBootstrap.LimitOnPatienceCapacity,
@@ -1044,14 +1076,31 @@ func buildDingoConfig(
 		dingo.WithShelleyOperationalCertificate(
 			cfg.ShelleyOperationalCertificate,
 		),
-		// node_forging.go gates agent-backed KES signing on a non-empty
-		// socket path, so dropping any of these three silently falls back
-		// to local-file signing on the serve path.
+		// node_forging.go selects the KES signer from the two agent
+		// selectors: an address selects the remote client, otherwise a
+		// socket path selects the local agent client, and only with both
+		// empty does it sign from shelleyKesKey (kesAgentConfigured).
+		// Dropping a selector therefore changes the signer. The mode, sign
+		// timeout, client certificate, server pin and plaintext flag are
+		// agent and remote transport options: dropping one keeps the
+		// selected agent but can change its mode or transport, or make its
+		// connection fail.
 		dingo.WithShelleyKESAgentSocket(cfg.ShelleyKESAgentSocket),
 		dingo.WithShelleyKESAgentMode(cfg.ShelleyKESAgentMode),
 		dingo.WithShelleyKESAgentSignTimeout(
 			cfg.ShelleyKESAgentSignTimeout,
 		),
+		dingo.WithShelleyKeyWatchInterval(cfg.ShelleyKeyWatchInterval),
+		dingo.WithShelleyKESAgentRemote(
+			cfg.ShelleyKESAgentAddress,
+			cfg.ShelleyKESAgentClientCertFile,
+			cfg.ShelleyKESAgentClientKeyFile,
+			cfg.ShelleyKESAgentServerSPKISHA256,
+		),
+		dingo.WithShelleyKESAgentPlaintext(cfg.ShelleyKESAgentPlaintext),
+		// A slice of structs, so the scalar forwarding test cannot see it;
+		// TestBuildDingoConfigForwardsBlockProducerPools covers it.
+		dingo.WithBlockProducerPools(cfg.BlockProducerPools...),
 		dingo.WithForgeSyncToleranceSlots(
 			cfg.ForgeSyncToleranceSlots,
 		),

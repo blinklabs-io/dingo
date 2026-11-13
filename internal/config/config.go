@@ -359,6 +359,13 @@ type GenesisBootstrapConfig struct {
 	// LimitOnPatienceRate is the bucket leak rate in tokens per second. 0
 	// selects the default of 5.
 	LimitOnPatienceRate uint64 `yaml:"limitOnPatienceRate"         envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE"`
+	// ChainSyncJumping turns on ChainSync Jumping while Genesis selection is
+	// active: one identified outbound hot peer streams headers and every
+	// other outbound hot peer answers a periodic MsgFindIntersect for the
+	// streamed chain instead of streaming it, an identified peer's answer
+	// vouching for it in the Limit on Eagerness. Inbound peers take no
+	// CSJ role. On by default.
+	ChainSyncJumping bool `yaml:"chainSyncJumping"            envconfig:"DINGO_GENESIS_CSJ"`
 }
 
 // HistoryExpiryConfig controls local expiry of immutable block history.
@@ -554,6 +561,7 @@ func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 		Enabled:                true,
 		CorroborationPeers:     0,
 		LimitOnPatienceEnabled: true,
+		ChainSyncJumping:       true,
 	}
 }
 
@@ -669,6 +677,8 @@ type DMQConfig struct {
 	// SocketPath is the Unix socket serving local message submission and
 	// notification. It must differ from the Cardano SocketPath.
 	SocketPath string `yaml:"socketPath"   envconfig:"DINGO_DMQ_SOCKET_PATH"`
+	// SocketMode is the octal permission mode for SocketPath.
+	SocketMode string `yaml:"socketMode"   envconfig:"DINGO_DMQ_SOCKET_MODE"`
 	// MessageTTL is the longest expiry, in seconds, a submitted message may
 	// claim.
 	MessageTTL uint `yaml:"messageTtl"   envconfig:"DINGO_DMQ_MESSAGE_TTL"`
@@ -720,6 +730,7 @@ func DefaultDMQConfig() DMQConfig {
 	return DMQConfig{
 		Topic:                  "mithril",
 		SocketPath:             "dingo-dmq.socket",
+		SocketMode:             DefaultUnixSocketMode,
 		MessageTTL:             1800,
 		MinPoolMessageInterval: 60,
 		MaxMempoolSize:         128,
@@ -740,6 +751,7 @@ type Config struct {
 	CardanoConfig          string    `yaml:"cardanoConfig"                       envconfig:"config"`
 	DatabasePath           string    `yaml:"databasePath"                                                                                 split_words:"true"`
 	SocketPath             string    `yaml:"socketPath"                                                                                   split_words:"true"`
+	SocketMode             string    `yaml:"socketMode"                                                                                   split_words:"true"`
 	TlsCertFilePath        string    `yaml:"tlsCertFilePath"                     envconfig:"TLS_CERT_FILE_PATH"`
 	BindAddr               string    `yaml:"bindAddr"                                                                                     split_words:"true"`
 	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                                              split_words:"true"`
@@ -770,22 +782,21 @@ type Config struct {
 	// BarkClientCAFilePath is a legacy configuration input with no effect.
 	// Dingo APIs do not authenticate or authorize callers.
 	BarkClientCAFilePath string `yaml:"barkClientCaFilePath"                envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
-	// BarkArchiveMaxConcurrentFetches bounds how many ArchiveService
-	// FetchBlock requests Bark serves at once; a request over the limit is
-	// refused rather than queued. ArchiveService takes no client credentials,
-	// so this is what bounds the storage work an anonymous caller can cause.
-	// Zero selects Bark's default (16); a negative value is rejected.
+	// BarkArchiveMaxConcurrentFetches optionally bounds how many
+	// ArchiveService FetchBlock requests Bark serves at once; a request over
+	// the limit is refused rather than queued. Zero (the default) is
+	// unlimited; a negative value is rejected.
 	BarkArchiveMaxConcurrentFetches int `yaml:"barkArchiveMaxConcurrentFetches"     envconfig:"DINGO_BARK_ARCHIVE_MAX_CONCURRENT_FETCHES"`
 	// BarkArchiveLookupsPerSecond is the sustained rate of block lookups
 	// ArchiveService serves across all callers combined. Each lookup can cost
 	// a cloud storage request whether or not the block exists, so a FetchBlock
 	// whose references do not fit the remaining budget is refused whole. Zero
-	// selects Bark's default (200); a negative value is rejected.
+	// (the default) is unlimited; a negative value is rejected.
 	BarkArchiveLookupsPerSecond int `yaml:"barkArchiveLookupsPerSecond" envconfig:"DINGO_BARK_ARCHIVE_LOOKUPS_PER_SECOND"`
 	// BarkArchiveCallerLookupsPerSecond is the same rate for one caller
 	// address (one IPv4 address or one IPv6 /64), so a single client cannot
 	// spend the whole global budget. Callers behind one proxy share an
-	// allowance. Zero selects Bark's default (50); a negative value is
+	// allowance. Zero (the default) is unlimited; a negative value is
 	// rejected.
 	BarkArchiveCallerLookupsPerSecond int `yaml:"barkArchiveCallerLookupsPerSecond" envconfig:"DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND"`
 	// BarkOperatorCertificateFingerprints is a legacy configuration input with no effect.
@@ -812,6 +823,15 @@ type Config struct {
 	// pprof on a wildcard or management-network address.
 	DebugBindAddr string `yaml:"debugBindAddr"                       envconfig:"DINGO_DEBUG_BIND_ADDR"`
 	DebugPort     uint   `yaml:"debugPort"                           envconfig:"DINGO_DEBUG_PORT"`
+	// DebugMutexProfileFraction samples on average 1 in N contended mutex
+	// events for the pprof mutex profile. 0 leaves mutex profiling off.
+	// It only takes effect while DebugPort is non-zero.
+	DebugMutexProfileFraction uint `yaml:"debugMutexProfileFraction"           envconfig:"DINGO_DEBUG_MUTEX_PROFILE_FRACTION"`
+	// DebugBlockProfileRate samples one blocking event per N nanoseconds
+	// spent blocked for the pprof block profile. 0 leaves block profiling
+	// off; 1 records every event. It only takes effect while DebugPort is
+	// non-zero.
+	DebugBlockProfileRate uint `yaml:"debugBlockProfileRate"               envconfig:"DINGO_DEBUG_BLOCK_PROFILE_RATE"`
 	// HealthPort serves the liveness (/health, /healthz) and readiness
 	// (/readyz) probes on a listener of their own, so an operator can
 	// expose them to an orchestrator or load balancer without also
@@ -1024,9 +1044,55 @@ type Config struct {
 	// synchronously on the slot-aligned loop, so a longer timeout parks
 	// forging for several slots when the agent stops answering. Zero uses
 	// the client default (500ms).
-	ShelleyKESAgentSignTimeout  time.Duration `yaml:"shelleyKesAgentSignTimeout"       envconfig:"SHELLEY_KES_AGENT_SIGN_TIMEOUT"`
-	ForgeSyncToleranceSlots     uint64        `yaml:"forgeSyncToleranceSlots"          envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
-	ForgeStaleGapThresholdSlots uint64        `yaml:"forgeStaleGapThresholdSlots"      envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	ShelleyKESAgentSignTimeout time.Duration `yaml:"shelleyKesAgentSignTimeout"       envconfig:"SHELLEY_KES_AGENT_SIGN_TIMEOUT"`
+	// ShelleyKeyWatchInterval, when set, makes a block producer poll its
+	// credential files at this interval and reload them in place, as on
+	// SIGHUP, once a change has held for two polls -- so a rotated
+	// Kubernetes Secret takes effect without a restart. Zero disables it; a
+	// non-zero value must be at least 1s. It applies with local key files
+	// and with a KES agent in sign mode. In KES agent serve-key mode, where
+	// the agent pushes key rotations, it is ignored and a warning is logged.
+	ShelleyKeyWatchInterval time.Duration `yaml:"shelleyKeyWatchInterval"          envconfig:"SHELLEY_KEY_WATCH_INTERVAL"`
+	// ShelleyKESAgentAddress, when set, signs block headers through a bursa
+	// KES agent's remote sign listener (host:port) instead of a local socket.
+	// It implies sign mode. The link is TLS 1.3, with the agent authenticated
+	// by the server key pin below or, without one, by x509 verification; the
+	// client certificate is optional. ShelleyKESAgentPlaintext selects plain
+	// TCP instead.
+	ShelleyKESAgentAddress string `yaml:"shelleyKesAgentAddress"          envconfig:"SHELLEY_KES_AGENT_ADDRESS"`
+	// ShelleyKESAgentClientCertFile and ShelleyKESAgentClientKeyFile are
+	// this node's PEM TLS client certificate and key for the remote agent.
+	// They are optional and set as a pair; without them no client
+	// certificate is sent.
+	ShelleyKESAgentClientCertFile string `yaml:"shelleyKesAgentClientCertFile"       envconfig:"SHELLEY_KES_AGENT_CLIENT_CERT_FILE"`
+	ShelleyKESAgentClientKeyFile  string `yaml:"shelleyKesAgentClientKeyFile"        envconfig:"SHELLEY_KES_AGENT_CLIENT_KEY_FILE"`
+	// ShelleyKESAgentServerSPKISHA256 pins the remote agent's TLS server key:
+	// the hex SHA-256 of its certificate's SubjectPublicKeyInfo, which the
+	// agent logs at startup as server_spki_sha256. The agent is authenticated
+	// by this pin alone, not by a certificate authority. It is optional:
+	// without it the agent's certificate is verified with standard x509
+	// against the system roots for the address's host name (SSL_CERT_FILE
+	// and SSL_CERT_DIR select a private CA on Unix).
+	ShelleyKESAgentServerSPKISHA256 string `yaml:"shelleyKesAgentServerSpkiSha256" envconfig:"SHELLEY_KES_AGENT_SERVER_SPKI_SHA256"`
+	// ShelleyKESAgentPlaintext runs the remote agent link over plain TCP,
+	// for setups where something else secures it, such as a service mesh
+	// sidecar. The agent's counterpart is kes_agent.attested_plaintext. A
+	// server pin and a client certificate need TLS, so it takes neither.
+	ShelleyKESAgentPlaintext bool `yaml:"shelleyKesAgentPlaintext" envconfig:"SHELLEY_KES_AGENT_PLAINTEXT"`
+	// BlockProducerPools lists every pool this block producer forges for,
+	// each with its own VRF key, operational certificate and KES source. It
+	// replaces the single-pool shelleyVrfKey, shelleyKesKey,
+	// shelleyOperationalCertificate, shelleyKesAgentSocket,
+	// shelleyKesAgentMode, shelleyKesAgentAddress,
+	// shelleyKesAgentClientCertFile, shelleyKesAgentClientKeyFile,
+	// shelleyKesAgentServerSpkiSha256 and shelleyKesAgentPlaintext settings
+	// above, which stay the way to configure one pool;
+	// shelleyKesAgentSignTimeout and shelleyKeyWatchInterval apply to every
+	// pool. It is set in YAML or with dingo.WithBlockProducerPools, and is not
+	// read from the environment.
+	BlockProducerPools          []BlockProducerPool `yaml:"blockProducerPools"              ignored:"true"`
+	ForgeSyncToleranceSlots     uint64              `yaml:"forgeSyncToleranceSlots"          envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots uint64              `yaml:"forgeStaleGapThresholdSlots"      envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 	// ForgeUpstreamStalenessSlots bounds how far the newest block this node
 	// holds may trail the corroborated upstream sync target before forging is
 	// skipped. 0 (the default) disables it.
@@ -1096,8 +1162,11 @@ type Config struct {
 
 	// Leios persistence retention (experimental, leios runMode only).
 	// LeiosPersistenceRetentionSlots bounds how far behind the highest
-	// persisted Leios endorser block historical-serving records are kept.
-	// Zero retains all history; positive values must cover the stability window.
+	// persisted Leios endorser block uncertified historical-serving records are
+	// kept. Zero uses the default: uncertified records are pruned once the
+	// immutable point passes their slot. A positive value must cover the
+	// stability window and never prunes past the immutable point. Certified
+	// endorser blocks are never pruned.
 	LeiosPersistenceRetentionSlots uint64 `yaml:"leiosPersistenceRetentionSlots" envconfig:"DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS"`
 
 	// Leios voting configuration (experimental, leios runMode only).
@@ -1593,6 +1662,7 @@ func newDefaultConfig() *Config {
 		CardanoConfig:                       "", // Will be set dynamically based on network
 		DatabasePath:                        ".dingo",
 		SocketPath:                          "dingo.socket",
+		SocketMode:                          DefaultUnixSocketMode,
 		IntersectTip:                        false,
 		ValidateHistorical:                  true,
 		StrictUtxoValidation:                true,
@@ -1605,6 +1675,8 @@ func newDefaultConfig() *Config {
 		DebugBindAddr:                       DefaultDebugBindAddr,
 		MetricsBindAddr:                     DefaultMetricsBindAddr,
 		DebugPort:                           0,
+		DebugMutexProfileFraction:           0,
+		DebugBlockProfileRate:               0,
 		HealthPort:                          DefaultHealthPort,
 		HealthReadyGapSlots:                 DefaultHealthReadyGapSlots,
 		PrivateBindAddr:                     "127.0.0.1",
@@ -1790,6 +1862,10 @@ func cloneConfig(cfg *Config) *Config {
 		cfg.BarkLifecycleOperatorCertificateFingerprints...,
 	)
 	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
+	clone.BlockProducerPools = append(
+		[]BlockProducerPool(nil),
+		cfg.BlockProducerPools...,
+	)
 	clone.TracingAlwaysSamplePools = append(
 		[]string(nil),
 		cfg.TracingAlwaysSamplePools...,
@@ -2064,6 +2140,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.ShelleyKESAgentSocket != "" && c.ShelleyKESAgentMode == "" {
 		c.ShelleyKESAgentMode = "serve-key"
+	}
+	if c.ShelleyKESAgentAddress != "" && c.ShelleyKESAgentMode == "" {
+		c.ShelleyKESAgentMode = "sign"
+	}
+	for i := range c.BlockProducerPools {
+		c.BlockProducerPools[i].applyDefaults()
 	}
 	// Match the Midnight server's default for explicitly empty YAML or
 	// environment values.
@@ -2347,4 +2429,56 @@ func applyTokenRegistryHeaderSecretsEnvironment(cfg *Config) error {
 	}
 	cfg.TokenRegistry.HeaderSecrets = headers
 	return nil
+}
+
+// BlockProducerPool is one pool a block producer forges for: its VRF key,
+// its operational certificate, and one KES source -- a local key file, a
+// local KES agent socket, or a remote KES agent. The fields mean what the
+// top-level settings of the same name mean.
+type BlockProducerPool struct {
+	ShelleyVRFKey                   string `yaml:"shelleyVrfKey"`
+	ShelleyKESKey                   string `yaml:"shelleyKesKey"`
+	ShelleyOperationalCertificate   string `yaml:"shelleyOperationalCertificate"`
+	ShelleyKESAgentSocket           string `yaml:"shelleyKesAgentSocket"`
+	ShelleyKESAgentMode             string `yaml:"shelleyKesAgentMode"`
+	ShelleyKESAgentAddress          string `yaml:"shelleyKesAgentAddress"`
+	ShelleyKESAgentClientCertFile   string `yaml:"shelleyKesAgentClientCertFile"`
+	ShelleyKESAgentClientKeyFile    string `yaml:"shelleyKesAgentClientKeyFile"`
+	ShelleyKESAgentServerSPKISHA256 string `yaml:"shelleyKesAgentServerSpkiSha256"`
+	ShelleyKESAgentPlaintext        bool   `yaml:"shelleyKesAgentPlaintext"`
+}
+
+func (p *BlockProducerPool) applyDefaults() {
+	if p.ShelleyKESAgentMode != "" {
+		return
+	}
+	switch {
+	case p.ShelleyKESAgentAddress != "":
+		p.ShelleyKESAgentMode = "sign"
+	case p.ShelleyKESAgentSocket != "":
+		p.ShelleyKESAgentMode = "serve-key"
+	}
+}
+
+// HasSinglePoolKeys reports whether any top-level key setting that
+// BlockProducerPools replaces is set. The KES agent sign timeout and the key
+// watch interval apply to every pool and are not among them.
+func (c *Config) HasSinglePoolKeys() bool {
+	return c.singlePool() != (BlockProducerPool{})
+}
+
+// singlePool is the pool the top-level key settings describe.
+func (c *Config) singlePool() BlockProducerPool {
+	return BlockProducerPool{
+		ShelleyVRFKey:                   c.ShelleyVRFKey,
+		ShelleyKESKey:                   c.ShelleyKESKey,
+		ShelleyOperationalCertificate:   c.ShelleyOperationalCertificate,
+		ShelleyKESAgentSocket:           c.ShelleyKESAgentSocket,
+		ShelleyKESAgentMode:             c.ShelleyKESAgentMode,
+		ShelleyKESAgentAddress:          c.ShelleyKESAgentAddress,
+		ShelleyKESAgentClientCertFile:   c.ShelleyKESAgentClientCertFile,
+		ShelleyKESAgentClientKeyFile:    c.ShelleyKESAgentClientKeyFile,
+		ShelleyKESAgentServerSPKISHA256: c.ShelleyKESAgentServerSPKISHA256,
+		ShelleyKESAgentPlaintext:        c.ShelleyKESAgentPlaintext,
+	}
 }

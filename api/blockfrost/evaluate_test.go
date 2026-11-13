@@ -655,7 +655,7 @@ func TestTransactionEvaluateOverloadIsReportedAsOverload(t *testing.T) {
 	assert.NotErrorIs(t, err, ErrTransactionEvaluation)
 }
 
-func TestHandleTransactionEvaluateOverloadReturns429(t *testing.T) {
+func TestHandleTransactionEvaluateOverloadReturns503(t *testing.T) {
 	t.Parallel()
 
 	node := &mockNode{transactionEvaluationErr: ErrEvaluationOverloaded}
@@ -667,5 +667,5 @@ func TestHandleTransactionEvaluateOverloadReturns429(t *testing.T) {
 		hex.EncodeToString(rawEvaluateTxCbor),
 	)
 
-	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 }

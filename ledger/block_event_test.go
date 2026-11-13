@@ -318,6 +318,7 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 			context.Background(),
 			fixture.currentTip,
 			fixture.currentTip.Point,
+			"",
 			func(txn *database.Txn) error {
 				return delta.apply(context.Background(), ls, txn)
 			},
@@ -463,6 +464,28 @@ func TestBlockApplyRejectsRolledBackCandidate(t *testing.T) {
 		context.Background(),
 		fixture.ancestorTip,
 		rolledBackCandidate,
+		"",
+		func(*database.Txn) error {
+			operationCalled = true
+			return nil
+		},
+	)
+	require.ErrorIs(t, err, errStaleChainIterator)
+	require.False(t, operationCalled)
+}
+
+func TestBlockApplyRejectsDurablyRolledBackTipBeforeCacheReload(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
+
+	operationCalled := false
+	err := fixture.ls.submitBlockApplyDBTxn(
+		context.Background(),
+		fixture.currentTip,
+		fixture.currentTip.Point,
+		"",
 		func(*database.Txn) error {
 			operationCalled = true
 			return nil

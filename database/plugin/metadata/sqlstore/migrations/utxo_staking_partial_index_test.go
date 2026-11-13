@@ -67,7 +67,7 @@ func TestUtxoStakingIndexesUpgrade(t *testing.T) {
 					)
 					require.NoError(t, err)
 				}
-				run(registry)
+				run(registry[:53])
 				for _, name := range []string{"idx_utxo_staking_key", "idx_utxo_staking_deleted_amount"} {
 					definition, ok := indexSQL(t, db, name)
 					if pending && name == "idx_utxo_staking_key" {
@@ -81,13 +81,12 @@ func TestUtxoStakingIndexesUpgrade(t *testing.T) {
 						"WHERE staking_key IS NOT NULL",
 					)
 				}
-				definition, ok := indexSQL(t, db, "idx_utxo_deleted_staking_amount")
-				require.True(t, ok)
-				require.NotContains(t, definition, "WHERE")
-				// The running script-locked aggregate replaced this index.
-				_, ok = indexSQL(t, db, "idx_utxo_deleted_payment_script")
-				require.False(t, ok)
-				run(registry)
+				for _, name := range []string{"idx_utxo_deleted_staking_amount", "idx_utxo_deleted_payment_script"} {
+					definition, ok := indexSQL(t, db, name)
+					require.True(t, ok)
+					require.NotContains(t, definition, "WHERE")
+				}
+				run(registry[:53])
 			},
 		)
 	}

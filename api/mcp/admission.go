@@ -29,10 +29,6 @@ import (
 // what a caller can make the node decode small.
 const maxCardanoPayloadBytes = 128 << 10
 
-// maxConcurrentPayloadParses bounds the output CBOR decodes that may run at
-// once on one server.
-const maxConcurrentPayloadParses = 4
-
 var errParseBusy = errors.New(
 	"too many concurrent payload parses; retry after one completes",
 )
@@ -85,10 +81,12 @@ func runAdmitted[T any](
 	if err := ctx.Err(); err != nil {
 		return zero, err
 	}
-	select {
-	case gate <- struct{}{}:
-	default:
-		return zero, busy
+	if gate != nil {
+		select {
+		case gate <- struct{}{}:
+		default:
+			return zero, busy
+		}
 	}
 	type response struct {
 		value T
@@ -98,7 +96,9 @@ func runAdmitted[T any](
 	go func() {
 		var res response
 		defer func() {
-			<-gate
+			if gate != nil {
+				<-gate
+			}
 			if recovered := recover(); recovered != nil {
 				res.err = fmt.Errorf("%s panicked: %v", label, recovered)
 			}

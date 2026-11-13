@@ -23,7 +23,6 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
-	"sync"
 	"testing"
 	"time"
 
@@ -790,81 +789,6 @@ func TestLocalTxSubmissionServerSubmitTx_CancelsOnConnectionClose(
 	var reason cborRejectReason
 	require.NotErrorAs(t, err, &reason,
 		"a cancelled validation is not a ledger rejection")
-}
-
-// Closing connections must not free validation slots while their callbacks are
-// still running: reconnecting cannot multiply concurrent validations.
-func TestLocalTxSubmissionServerSubmitTx_BudgetSurvivesDisconnect(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	o := newOuroboros(OuroborosConfig{})
-	pool := newBlockingLocalTxMempool()
-	pool.holdThroughCancel = true
-	o.mempool = pool
-	closed := make(chan struct{})
-	close(closed)
-	o.localTxSubmissionConnDoneFunc = func(
-		connection.ConnectionId,
-	) <-chan struct{} {
-		// Every connection is already closed; the blocking mempool still
-		// holds its call.
-		return closed
-	}
-	results := make(chan error, localTxSubmissionMaxInFlight)
-	for i := range localTxSubmissionMaxInFlight {
-		go func() {
-			results <- o.localtxsubmissionServerSubmitTx(
-				olocaltxsubmission.CallbackContext{
-					ConnectionId: localTxSubmissionTestConnId(i),
-				},
-				localTxSubmissionTestMsg([]byte{0x80}),
-			)
-		}()
-	}
-	for range localTxSubmissionMaxInFlight {
-		testutil.RequireReceive(
-			t, pool.entered, 5*time.Second, "validation start",
-		)
-	}
-
-	// Run beyond the budget on its own goroutine: if the budget leaks, this
-	// call parks in the mempool and the test must fail rather than hang.
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(pool.release) }) }
-	defer release()
-	extra := make(chan error, 1)
-	go func() {
-		extra <- o.localtxsubmissionServerSubmitTx(
-			olocaltxsubmission.CallbackContext{
-				ConnectionId: localTxSubmissionTestConnId(1000),
-			},
-			localTxSubmissionTestMsg([]byte{0x80}),
-		)
-	}()
-	var err error
-	select {
-	case err = <-extra:
-	case <-pool.entered:
-		t.Fatal("a call beyond the budget reached the mempool")
-	case <-time.After(5 * time.Second):
-		t.Fatal("call beyond the budget neither rejected nor admitted")
-	}
-	require.EqualError(t, err, "local transaction submission unavailable")
-	var reason cborRejectReason
-	require.NotErrorAs(t, err, &reason,
-		"an exhausted budget is a node condition, not a ledger rejection")
-	release()
-	for range localTxSubmissionMaxInFlight {
-		testutil.RequireReceive(
-			t, results, 5*time.Second, "callback return",
-		)
-	}
-	require.NoError(t, o.localtxsubmissionServerSubmitTx(
-		localTxSubmissionTestCtx(),
-		localTxSubmissionTestMsg([]byte{0x80}),
-	), "slots must be released once callbacks return")
 }
 
 // The listener starts an NtC connection's protocols before registering it with

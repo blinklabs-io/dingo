@@ -71,6 +71,12 @@ var flagSpecs = []flagSpec{
 	),
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
+	stringFlag(
+		"SocketMode",
+		"socket-mode",
+		"",
+		"octal permissions for the UNIX socket file",
+	),
 	transformStringFlag(
 		"RunMode",
 		"run-mode",
@@ -223,6 +229,16 @@ var flagSpecs = []flagSpec{
 		"pprof bind address (wildcard exposure requires an explicit override)",
 	),
 	uintFlag("DebugPort", "debug-port", "debug pprof port (0 = disabled)"),
+	uintFlag(
+		"DebugMutexProfileFraction",
+		"debug-mutex-profile-fraction",
+		"sample 1 in N mutex contention events for the pprof mutex profile (0 = off; needs --debug-port)",
+	),
+	uintFlag(
+		"DebugBlockProfileRate",
+		"debug-block-profile-rate",
+		"pprof block profile rate in ns blocked per sample (0 = off, 1 = every event; needs --debug-port)",
+	),
 	uintFlag(
 		"HealthPort",
 		"health-port",
@@ -460,6 +476,12 @@ var flagSpecs = []flagSpec{
 		"",
 		"Unix socket for local DMQ message submission and notification",
 	),
+	stringFlag(
+		"DMQ.SocketMode",
+		"dmq-socket-mode",
+		"",
+		"octal permissions for the local DMQ Unix socket",
+	),
 	uintFlag(
 		"DMQ.MessageTTL",
 		"dmq-message-ttl",
@@ -529,17 +551,17 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"BarkArchiveMaxConcurrentFetches",
 		"bark-archive-max-concurrent-fetches",
-		"maximum concurrent Bark ArchiveService FetchBlock requests; requests over the limit are refused (0 = default of 16)",
+		"maximum concurrent Bark ArchiveService FetchBlock requests; requests over the limit are refused (0 = unlimited)",
 	),
 	intFlag(
 		"BarkArchiveLookupsPerSecond",
 		"bark-archive-lookups-per-second",
-		"sustained Bark ArchiveService block lookups per second across all callers; a FetchBlock over budget is refused (0 = default of 200)",
+		"sustained Bark ArchiveService block lookups per second across all callers; a FetchBlock over budget is refused (0 = unlimited)",
 	),
 	intFlag(
 		"BarkArchiveCallerLookupsPerSecond",
 		"bark-archive-caller-lookups-per-second",
-		"sustained Bark ArchiveService block lookups per second for one caller address or IPv6 /64 (0 = default of 50)",
+		"sustained Bark ArchiveService block lookups per second for one caller address or IPv6 /64 (0 = unlimited)",
 	),
 	stringSliceFlag(
 		"BarkOperatorCertificateFingerprints",
@@ -721,11 +743,11 @@ var flagSpecs = []flagSpec{
 		"max simultaneous connections per IP",
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
-	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections"),
+	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections (0 = unlimited)"),
 	intFlag(
 		"MaxTrustedLocalNtCConns",
 		"max-trusted-local-ntc-conns",
-		"max trusted local node-to-client connections",
+		"max trusted local node-to-client connections (0 = unlimited)",
 	),
 	durationFlag(
 		"TrustedNtCIdleTimeout",
@@ -735,7 +757,7 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"MaxNtCConnectionsPerIP",
 		"max-ntc-connections-per-ip",
-		"max node-to-client connections per IP",
+		"max node-to-client connections per IP (0 = unlimited)",
 	),
 
 	// Cache
@@ -809,6 +831,11 @@ var flagSpecs = []flagSpec{
 		"GenesisBootstrap.CorroborationPeers",
 		"genesis-bootstrap-corroboration-peers",
 		"independent peers that must corroborate a fast source before it drives Genesis selection (default 0, which disables the gate)",
+	),
+	boolFlag(
+		"GenesisBootstrap.ChainSyncJumping",
+		"genesis-csj",
+		"use ChainSync Jumping while Genesis selection is active: one identified outbound hot peer streams headers and the other outbound hot peers vouch for it by MsgFindIntersect",
 	),
 	boolFlag(
 		"GenesisBootstrap.LimitOnPatienceEnabled",
@@ -923,6 +950,40 @@ var flagSpecs = []flagSpec{
 		"",
 		"KES agent service mode: serve-key (default) or sign",
 	),
+	stringFlag(
+		"ShelleyKESAgentAddress",
+		"shelley-kes-agent-address",
+		"",
+		"host:port of a bursa KES agent's remote sign listener; implies sign mode. TLS 1.3 by default (mutual TLS only when a client certificate is set); --shelley-kes-agent-plaintext selects plain TCP",
+	),
+	stringFlag(
+		"ShelleyKESAgentClientCertFile",
+		"shelley-kes-agent-client-cert-file",
+		"",
+		"path to this node's PEM TLS client certificate for the remote KES agent",
+	),
+	stringFlag(
+		"ShelleyKESAgentClientKeyFile",
+		"shelley-kes-agent-client-key-file",
+		"",
+		"path to this node's PEM TLS client key for the remote KES agent",
+	),
+	stringFlag(
+		"ShelleyKESAgentServerSPKISHA256",
+		"shelley-kes-agent-server-spki-sha256",
+		"",
+		"hex SHA-256 of the remote KES agent's TLS server key (SubjectPublicKeyInfo), logged by the agent as server_spki_sha256",
+	),
+	boolFlag(
+		"ShelleyKESAgentPlaintext",
+		"shelley-kes-agent-plaintext",
+		"run the remote KES agent link over plain TCP",
+	),
+	durationFlag(
+		"ShelleyKeyWatchInterval",
+		"shelley-key-watch-interval",
+		"poll the block producer credential files at this interval and reload them in place on a change; applies with local key files or a KES agent in sign mode, ignored in serve-key mode (0 disables; otherwise at least 1s)",
+	),
 	durationFlag(
 		"ShelleyKESAgentSignTimeout",
 		"shelley-kes-agent-sign-timeout",
@@ -1036,7 +1097,7 @@ var flagSpecs = []flagSpec{
 	uint64Flag(
 		"LeiosPersistenceRetentionSlots",
 		"leios-persistence-retention-slots",
-		"number of slots of Leios persistence to retain (0 keeps all history)",
+		"slots of uncertified Leios persistence to retain (0 prunes behind the immutable tip)",
 	),
 	stringFlag(
 		"LeiosVoteSigningKeyFile",

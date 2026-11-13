@@ -161,7 +161,8 @@ func TestDRepVotingPowerFromLiveStakeMatchesDefinition(t *testing.T) {
 INSERT INTO utxo (tx_id, output_idx, payment_key, staking_key, credential_tag,
     added_slot, deleted_slot, amount, payment_script)
 VALUES (?, 0, ?, ?, 0, 1, ?, ?, FALSE)`),
-						txID, rewardBatchKey(0x51, i*3+u), account.StakingKey,
+						backendTransactionID(t, raw, backend.name, txID),
+						rewardBatchKey(0x51, i*3+u), account.StakingKey,
 						deleted, strconv.Itoa(10_000_000+i*17+u),
 					)
 					require.NoError(t, err)
@@ -270,6 +271,30 @@ VALUES (?, 0, ?, ?, 0, 1, ?, ?, FALSE)`),
 			}
 		})
 	}
+}
+
+// backendTransactionID inserts the identity row of hash and returns its id on
+// whichever engine the backend runs.
+func backendTransactionID(
+	t *testing.T,
+	raw *sql.DB,
+	name string,
+	hash []byte,
+) int64 {
+	t.Helper()
+	table := `"transaction"`
+	if name == "mysql" {
+		table = "`transaction`"
+	}
+	_, err := raw.Exec(
+		backendRebind(name, "INSERT INTO "+table+" (hash) VALUES (?)"), hash,
+	)
+	require.NoError(t, err)
+	var id int64
+	require.NoError(t, raw.QueryRow(
+		backendRebind(name, "SELECT id FROM "+table+" WHERE hash = ?"), hash,
+	).Scan(&id))
+	return id
 }
 
 func backendRebind(name, query string) string {
@@ -1121,9 +1146,15 @@ func seedRewardRaceStakeCert(
 	hash := make([]byte, 32)
 	binary.BigEndian.PutUint64(hash[24:], uint64(id))
 	_, err := raw.Exec(fmt.Sprintf(
-		"INSERT INTO %s (id, hash, slot, block_index) VALUES (%s, %s, %s, 0)",
-		table, bind(1), bind(2), bind(3),
-	), id, hash, slot)
+		"INSERT INTO %s (id, hash) VALUES (%s, %s)",
+		table, bind(1), bind(2),
+	), id, hash)
+	require.NoError(t, err)
+	_, err = raw.Exec(fmt.Sprintf(
+		"INSERT INTO applied_transaction (tx_id, slot, block_index) "+
+			"VALUES (%s, %s, 0)",
+		bind(1), bind(2),
+	), id, slot)
 	require.NoError(t, err)
 	_, err = raw.Exec(fmt.Sprintf(
 		"INSERT INTO certs (id, transaction_id, cert_index, slot, cert_type) "+

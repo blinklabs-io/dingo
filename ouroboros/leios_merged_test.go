@@ -130,8 +130,9 @@ func newTestOuroborosWithLeiosDB(t *testing.T) *Ouroboros {
 	)
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:     db,
-		ChainManager: cm,
+		Database:       db,
+		ChainManager:   cm,
+		EnableDijkstra: true,
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
 		),

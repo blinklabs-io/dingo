@@ -1892,6 +1892,12 @@ func parseRelay(data []byte) (*ParsedRelay, error) {
 		if len(relay.IPv6) != 0 && len(relay.IPv6) != 16 {
 			return nil, fmt.Errorf("relay ipv6 is %d bytes", len(relay.IPv6))
 		}
+		// The ledger writes an IPv6 address as four little-endian 32-bit
+		// words; store it in network order, as gouroboros decodes chain
+		// relays.
+		if len(relay.IPv6) == 16 {
+			relay.IPv6 = lcommon.PoolRelayIpv6WireOrder(relay.IPv6)
+		}
 	case 1: // SingleHostName: [1, port, hostname]
 		if err := decodeField(1, &relay.Port, "port"); err != nil {
 			return nil, err
