@@ -11164,10 +11164,12 @@ on both the submit endpoint and the evaluation endpoints, where
 an open per-era set of gouroboros types with no shared marker, so the
 complement cannot be enumerated: an unrecognized error stays a rejection.
 
-Each rebuild first evicts (`RemoveTxsByHash`) the transactions of blocks added
-since the previous rebuild, on every node, so a block produced elsewhere is not
-reported as invalid transactions dropped by revalidation. A rollback forgets
-the transactions of the blocks it removes before they are evicted.
+Every chain update evicts (`RemoveTxsByHash`) the transactions of added blocks,
+on every node, so a block produced elsewhere is not reported as invalid
+transactions dropped by revalidation. Eviction does not wait for the rebuild,
+which the chain-update worker skips while draining a backlog or while a failed
+rebuild waits out its retry interval. A rollback queues the transactions of the
+blocks it removes for readmission after the next successful rebuild.
 
 A block's transactions are every transaction the ledger applies with it. A
 Leios certifying ranking block carries none of its own: it applies the
