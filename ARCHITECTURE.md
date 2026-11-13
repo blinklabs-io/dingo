@@ -2203,7 +2203,12 @@ When `Node.Run()` is called, components are initialized in this order:
     function has no way to tell a still-live genesis declaration from one
     already spent/retired/changed since. A slot-zero tip with a non-empty hash
     is likewise an existing chain point rather than origin, so restart takes
-    this preservation path instead of reapplying genesis declarations.
+    this preservation path instead of reapplying genesis declarations. The
+    durable `mithril_ledger_slot` also makes a Conway-or-later imported
+    Constitutional Committee authoritative: startup never fills an absent
+    imported member from Conway genesis, because absence can represent a
+    pre-snapshot removal. A pre-Conway imported tip has no committee state yet,
+    so startup retains the genesis members for the later hard fork.
     For networks with a real Byron genesis, an empty database retains a Byron
     epoch cache until the on-chain Shelley boundary is observed. A configured
     experimental Shelley hard-fork epoch is the explicit exception used by
@@ -2287,8 +2292,9 @@ journal and replayed in bounded batches before the candidate is published. A
 busy pass that cannot catch up leaves the live pool unchanged and is retried
 after a later chain update; it is not a failed admission or a partial swap.
 
-The chain-update worker coalesces confirmed-transaction removals and
-rolled-back transaction restores before rebuilding. Rollback events list blocks
+The chain-update worker evicts confirmed transactions as each chain update
+arrives and coalesces rolled-back transaction restores until the next
+successful rebuild. Rollback events list blocks
 newest first, so each event is traversed oldest first; if more rollback events
 arrive before the rebuild, their older transactions are placed ahead of the
 already queued restores. Revalidation therefore sees transactions in ledger
@@ -5608,8 +5614,11 @@ When a certified endorser-block fetch has no connected leios-fetch peer, or
 startup replay reaches it before Ouroboros networking is initialized, the fetch
 is retried without increasing the deterministic-halt count. The count is
 preserved while the ledger tip is unchanged, and normal progress tracking resets
-it if the tip advances. A block that connected peers cannot serve continues to
-count toward the halt threshold.
+it if the tip advances. A certified endorser block whose semantic validation
+is still pending is retried the same way: the verdict is outstanding, and a
+validation queued behind a long database writer can outlast any fixed restart
+budget. A block that connected peers cannot serve continues to count toward
+the halt threshold.
 
 Certified closure application preverifies selected transactions' witness
 signatures with bounded parallel workers. Results bind to the full transaction;
@@ -6064,8 +6073,9 @@ selection, full block fetch and admission to the ledger apply stream; an apply
 chunk ends with its first live announcing block, and the next chunk's
 preparation validates that block's endorser block while it is the published
 tip and before any later block applies. The background validator in
-`ouroboros` uses the same state. The ledger's `ledger.block` apply event and
-`chain.update` can both precede the apply, so the ledger also notifies the
+`ouroboros` uses the same state. The `ledger.block` apply event (a
+republished chain update) and `chain.update` can both precede the apply, so
+`ledger.block` does not trigger a retry, and the ledger also notifies the
 node (`LedgerStateConfig.LeiosAnnouncementAtTip`) as soon as the chunk ending
 with the live announcing block commits, which retries the background
 validation. Without that notification a voter would vote only when the next
@@ -6134,21 +6144,22 @@ error and terminates the requesting connection. If the optional vote manager
 is absent, requests still receive the empty `MsgVotes` response. The limit is
 per request, not a per-peer rate limit or a decoder allocation bound.
 
-Before header cryptography or body deltas run, the inbound consensus-envelope
-validator enforces the era's block body/header limits and, for Alonzo and later,
-the aggregate `MaxBlockExUnits` budget. The aggregate contains every declared
-redeemer budget in every transaction, including both the outer Dijkstra witness
-set and all Dijkstra subtransaction witness sets; phase-2-invalid transactions
-remain included because the block budget constrains declared execution, not the
-UTxO outcome. Negative values and checked-add overflow fail closed. The forging
-selector uses the same transaction-wide declared-budget helper, so it cannot
-construct a candidate that inbound envelope validation would reject on that
-block-wide budget. A block that skips the envelope validator because
-`ValidateHistorical: false` places it below the stability cutoff still has the
-aggregate `MaxBlockExUnits` budget enforced in `ledgerProcessBlock`, since
-per-transaction validation never checks the block-wide sum. `TrustedReplay`
-input and blocks inside an imported Mithril snapshot's certified range are
-exempt.
+Before body deltas run, the inbound consensus-envelope validator enforces the
+era's block number and slot order and body/header limits.
+Peer-sourced blocks pass this validator whether or not full historical
+transaction validation is enabled; trusted replay and blocks inside an imported
+Mithril snapshot's certified range are exempt. For Alonzo and later the apply
+path also enforces the aggregate `MaxBlockExUnits` budget. The aggregate
+contains every declared redeemer budget in every transaction, including both
+the outer Dijkstra witness set and all Dijkstra subtransaction witness sets;
+phase-2-invalid transactions remain included because the block budget
+constrains declared execution, not the UTxO outcome. Negative values and
+checked-add overflow fail closed. The forging selector uses the same
+transaction-wide declared-budget helper, so it cannot construct a candidate
+that inbound envelope validation would reject on that block-wide budget. A
+historical peer block below the stability cutoff still has the aggregate budget
+enforced in `ledgerProcessBlock`, since per-transaction validation never checks
+the block-wide sum.
 
 Header protocol-version validation has a separate compatibility ceiling
 derived from the node's active era table. Headers above that configured maximum
@@ -6180,6 +6191,46 @@ its parent; and the inbound envelope's
 the batch. Without them a Byron epoch-boundary header, which carries no
 signature and may share its parent's block number, could extend a post-Byron
 block on any network.
+
+A header or block that extends its parent must also sit at a later slot
+(`chain.SlotNotAfterParentError`), as ouroboros-consensus requires of every
+header's envelope. Otherwise one leader slot signs a chain of any length, each
+header passing VRF, KES and the opcert counter check for the same slot, and
+that candidate wins the length comparison. `chain.SlotFollowsParent` holds the
+rule. A Byron main block may share the slot of an epoch-boundary parent, which
+sits at the first slot of its epoch. A later-era block on a Byron parent is
+left to `validateBlockOrder`, because a Byron slot number is derived with a
+fixed epoch length that matches the absolute slot only on networks whose Byron
+epochs have that length. Three places apply the rule. The ChainSync
+roll-forward handler checks each header against the point its session stands
+at (`chainsync.State.ClientRollForwardParent`), before chain selection or the
+ledger queue sees it, and recycles the connection on a violation. That point is
+the previous roll-forward header or, after a rollback, the rollback point. The
+session keeps its delivered headers, up to the security parameter plus one,
+with their era and kind, so a rollback to one of them restores what the next
+header must follow. This matters because chain selection keeps a peer's
+candidate length across such a rollback, so a peer could otherwise roll back to
+the point it stands at before every header. A rollback point outside those
+headers keeps only its slot, which the next header must exceed unless it is a
+Byron main block, since the point may be an epoch-boundary block.
+`Chain.AddBlockHeader` checks against the header tip it extends, and
+`Chain.AddBlock` and its variants against the tip block, which covers a locally
+forged block. Raw imports (`Chain.AddRawBlocks`), which copy a local
+ImmutableDB, are not ordered here.
+
+A header or block a peer offers is Mithril-covered only by point
+(`LedgerState.pointCoveredByMithril`): at or below the boundary slot and already
+on the primary chain together with the boundary block. Block application and
+the block pipeline still decide coverage of a block on the primary chain by
+slot. That is sound because the boundary block is never a Byron block (the
+import refuses a Byron ledger state, `ledgerstate.ErrByronSnapshotUnsupported`),
+so the Byron exception above never applies to it, and the primary chain is not
+rolled back below the boundary. Every block that extends the boundary block, or
+any block after it, through the checks above therefore sits above the boundary
+slot. This says nothing about blocks at or below the boundary, where a Byron
+main block may share the slot of an epoch boundary block, or about raw imports,
+which are not ordered; the point test, not the slot, keeps those from being
+treated as covered when a peer offers them.
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1
 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution now
@@ -6834,16 +6885,18 @@ dependency across two points in the pipeline:
   an imported Mithril snapshot already covers. A coarse
   historical-sync toggle no longer skips them.
 - **Counter monotonicity at block apply** (`validateOpCertCounter`, invoked from
-  `ledgerProcessBlock` under `shouldValidate`, before the block's transactions
-  are validated): a read-before-write of the pool's stored opcert counter inside
+  `ledgerProcessBlock` before the block's transactions are applied): a
+  read-before-write of the pool's stored opcert counter inside
   the validation transaction. A backward counter (below the last seen —
   stale/stolen hot key) is rejected in every era. A gapped counter (more than
   one past the last seen) is the Praos over-increment case and is rejected only
   for Praos eras (Babbage onward, via `opCertNoGapRuleApplies`); TPraos eras
   (Shelley–Alonzo) enforce only monotonicity, so the gap rule is scoped by era
-  rather than by validation mode (`shouldValidate` can be true for historical or
-  near-tip TPraos blocks). A pool with no recorded counter is judged against
-  zero, the reference's baseline for a pool in the stake distribution
+  rather than by validation mode. Historical peer blocks run this check even
+  when full historical transaction validation is disabled; trusted replay and
+  Mithril-certified history retain their explicit exemptions. A pool with no
+  recorded counter is judged against zero, the reference's baseline for a pool
+  in the stake distribution
   (ouroboros-consensus Praos `currentIssueNo`, cardano-ledger TPraos
   `currentIssueNo`): its first Praos counter must be 0 or 1, while TPraos
   accepts any first counter. Producer eligibility is not decided here: header
@@ -8690,8 +8743,11 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   ChainSync client, which validates each candidate header once against the
   candidate's own header state and only trims the candidate when the local
   selection advances. Peer rollbacks and disconnects also clear the cache.
-  Verification is skipped only for a slot an imported Mithril snapshot already
-  covers, the same exemption the ledger's own header-queue path applies. A
+  Verification is skipped only for a block an imported Mithril snapshot
+  certified: one at or below the trust boundary slot and on the primary chain,
+  which also holds the trust boundary block. This is the same exemption the
+  ledger's own header-queue and block-fetch paths apply. A covered slot alone
+  earns nothing, because a peer chooses the slot its header carries. A
   result showing local state has not caught up to the header's slot
   (`IsHeaderVerificationDeferred`) never enters the observed ancestry used by
   fork resolution or rollback replay, and never penalizes the peer. A deferred
@@ -10826,6 +10882,17 @@ yields no candidate and the branch is rejected instead. Presence is asked of
 `Database.UtxoExists`, which does not materialize the output's CBOR: `UtxoByRef`
 reconstructs it by decoding the producing block on a blob miss, which turned a
 UTxO that demonstrably exists into a hard error out of recovery.
+A failing input whose UTxO row was spent at or below the applied ledger tip,
+bounded by the durable applied floor, is also reported as present: the block
+spends an input the local chain already consumed, and no rollback makes it
+spendable. The failing batch's metadata transaction is discarded before
+recovery runs, so a row marked spent above that ceiling is a stale write and
+still resolves to its producer, as does a missing or pruned row. The check
+applies only to the failing transaction's own inputs. The inputs, collateral,
+and reference inputs walked from a resolved producer are provenance
+dependencies and skip it: their spend state says nothing about whether the
+failing block carries a bad input. The check reads only the row's spend state
+where the metadata store supports it, so the output's assets are not loaded.
 
 A retention-pruned prefix or a Mithril bootstrap leaves the transaction index
 pointing at blocks the block store no longer holds. Three lookups on the
@@ -11343,10 +11410,12 @@ on both the submit endpoint and the evaluation endpoints, where
 an open per-era set of gouroboros types with no shared marker, so the
 complement cannot be enumerated: an unrecognized error stays a rejection.
 
-Each rebuild first evicts (`RemoveTxsByHash`) the transactions of blocks added
-since the previous rebuild, on every node, so a block produced elsewhere is not
-reported as invalid transactions dropped by revalidation. A rollback forgets
-the transactions of the blocks it removes before they are evicted.
+Every chain update evicts (`RemoveTxsByHash`) the transactions of added blocks,
+on every node, so a block produced elsewhere is not reported as invalid
+transactions dropped by revalidation. Eviction does not wait for the rebuild,
+which the chain-update worker skips while draining a backlog or while a failed
+rebuild waits out its retry interval. A rollback queues the transactions of the
+blocks it removes for readmission after the next successful rebuild.
 
 A block's transactions are every transaction the ledger applies with it. A
 Leios certifying ranking block carries none of its own: it applies the
@@ -11422,10 +11491,11 @@ chain, which the `BlockBroadcaster` the forger holds calls
 `ChainUpdateEvent` is published inside that call, before it returns. The forger
 then runs its `blockForged` observer, and only after that — and only if
 admission succeeded — synchronously removes the block's transaction hashes
-through the backend-neutral `RemoveTxsByHash` adapter. The chain-update rebuild
-remains responsible for transactions confirmed by peer blocks. This local fast
-path prevents confirmed transactions from accumulating when sustained admissions
-make a long rebuild repeatedly lose its pinned ledger generation.
+through the backend-neutral `RemoveTxsByHash` adapter. Transactions confirmed
+by peer blocks are evicted by the chain-update worker as each chain update
+arrives, independent of whether the rebuild runs. This local path removes a
+forged block's transactions without waiting for that worker to reach its
+`ChainUpdateEvent`.
 
 ## DMQ Message Pool
 
@@ -12131,11 +12201,8 @@ reading, which are network evidence taken once per forge cycle and carried to
 each attempt; the sync gate and the staleness bounds are still re-decided
 against that carried pair and each attempt's freshly read tip. Without the
 re-check the forger would compute a VRF proof and KES-sign a block whose parent
-slot is not below its own, and nothing local rejects that before diffusion:
-`Chain.AddLocalBlock` checks only prev-hash and block-number contiguity, so the
-block is admitted and broadcast to peers, and the slot-order check
-(`ledger.validateBlockOrder`) runs only later, from `ledgerProcessBlock`, when
-the ledger applies the block.
+slot is not below its own, which `Chain.AddLocalBlock` then refuses
+(`chain.SlotNotAfterParentError`), losing the slot.
 
 `dingo_forge_selection_fallback_total` reports how slots whose selection was
 aborted ended, by `result`: `retried` when a later attempt in the same slot
@@ -12865,6 +12932,20 @@ replace the ledger state and the live credentials the reload reads. Unlike
 initial startup, reload refuses a wall-clock slot outside confirmed era history:
 it cannot replace working keys without verifying the replacement's KES window.
 
+A node that forges for several pools (`blockProducerPools`) reloads each
+running pool through its own key source on the same `SIGHUP`: every pool's
+replacement is validated in full and swapped on its own, and a pool whose
+replacement is refused keeps its loaded credentials without holding back the
+others. Each successful swap logs its `pool_id` with the old and new counter,
+each refusal is named in the returned error and counted on
+`dingo_block_producer_credential_reload_failures_total{pool_id}`. A pool whose
+credentials were already loaded reports itself unchanged, which is not a
+failure; the reload as a whole reads `unchanged` only when every pool did.
+The credential file watch covers the files of every pool that can reload. A
+serve-key pool's files are not watched, and a reload the watch triggers skips
+that pool, so a file change neither logs its refusal nor counts it as a
+failure; a `SIGHUP` still reports and counts it.
+
 **Reload with a KES agent.** In serve-key mode the agent pushes each new key
 and the node installs it as it arrives, so a reload is refused. In sign mode
 (`node_key_reload.go`) a reload re-reads the VRF key and operational
@@ -12883,8 +12964,13 @@ That agent check runs before the reload takes the lifecycle gates: it can wait
 on the network for up to the client's hello timeout, and the chainsync and
 chain-switch handlers drop their work while the gates are held. Under the
 gates a file or SIGHUP reload reads the certificate file again and refuses it
-if it no longer matches the one the agent admitted; every reload then runs the counter, signature,
-KES-window and ledger checks and the swap.
+if it no longer matches the one the agent admitted; every reload then runs the
+counter, signature, KES-window and ledger checks and the swap into that pool's
+client slot. With several pools every sign-mode pool is checked with its own
+agent this way before the gates are taken, each on its own: a pool whose check
+is refused, a changed VRF key included, reports and counts that refusal
+without holding back the others, and a pool that starts forging between the
+check and the gates is left to the next reload.
 After `ReplaceWith` the replaced client stays open for
 `retiredKESAgentClientGrace` (10s), because a forge attempt that selected its
 snapshot before the swap still signs through it. The VRF key cannot change on
@@ -12899,7 +12985,10 @@ byte; when the agent's carries the same cold key and a higher counter, the
 client hands it to `RemoteConfig.OnNewerOpCert` and still refuses the session.
 The node runs a reload with that certificate in place of the file
 (`Node.agentOpCertLoop`), keeping only the newest offer and retrying the same
-certificate at most once a minute after a refusal. The reloaded certificate
+certificate at most once a minute after a refusal. With several pools each
+pool's remote client offers to that pool's own queue (`agentOfferState`) and
+loop, so a newer certificate from pool A's agent reloads pool A only, and a
+refusal counts against that pool. The reloaded certificate
 lives in memory only; after a restart the node loads its file again and the
 agent's newer certificate is picked up the same way. A rotation that lands
 after admission, between the pre-connect and the sign, is refused by the
@@ -12923,7 +13012,9 @@ content rather than file events sees the atomic `..data` symlink swap
 Kubernetes uses for a mounted Secret and needs no notification support. The
 two-poll wait reduces reloads during short writes; credential validation still
 rejects an incomplete credential set. In serve-key mode, where a reload is
-always refused, the watch is not started and a warning says so.
+always refused, the watch is not started and a warning says so. With several
+pools the watch is skipped only when every pool is serve-key; otherwise it
+runs for the pools that can reload and leaves the serve-key pools out.
 `dingo_forge_credential_reloads_total{trigger,result}` counts reloads by
 trigger (`signal`, `file`, `agent`) and result (`success`, `unchanged`,
 `failure`), and `dingo_forge_opcert_counter_loaded` reports the counter the
@@ -13229,6 +13320,92 @@ outside the lock. That is what lets it interrupt a goroutine parked in
 `Client.Run`'s background loop spends nearly all its time in — during
 shutdown; holding the lock across that read instead (the natural first
 attempt) deadlocks `Close` behind the very read only it can unblock.
+
+### Several Pools on One Node (`node_pool_producers.go`, `node_slot_arbiter.go`)
+
+`blockProducerPools` lists every pool a producer forges for, each with its own
+VRF key, operational certificate and one KES source: a local key file, a local
+KES agent socket in serve-key or sign mode, or a remote agent. The list
+replaces the single-pool `shelley*` key and KES source settings (the KES
+agent sign timeout and key watch interval apply to every pool). Configuration
+validation refuses the two together, in YAML and when a library caller mixes
+`WithBlockProducerPools` with the single-pool options in `New`, and also
+refuses two entries sharing an opcert or a remote agent address, and more than
+one pool
+with Leios forging or voting, whose pipeline and vote key are wired for one.
+
+The first pool keeps the node's own forging fields (`blockForger`,
+`leaderElection`, `blockProducerCreds`, `kesAgentClient`), so a single-pool node
+runs exactly as before. Every other pool is a `poolProducer` with its own
+credentials, KES agent client, leader election, durable forge fence (keyed by
+pool) and `BlockForger`. Each pool's key source (`poolKeySource`) loads and
+validates its credentials exactly as the first pool's does, with one KES
+agent client per pool. Over a local agent socket one agent can serve every
+pool through its profiles. Over the remote listener it cannot: an attested
+session cannot name a profile, so Bursa allows one profile per attested
+listener, and each pool signing remotely needs its own agent and address.
+Configuration validation refuses two pools with the same
+`shelleyKesAgentAddress`.
+
+**Startup and isolation.** The other pools start after the first. A pool whose
+serve-key KES source cannot be reached -- an agent that never pushes its key --
+is skipped, logged, reported by `BlockProducerReady`, and retried every 30
+seconds until it starts; a sign-mode client dials nothing at startup, so its
+pool starts and an unreachable agent shows in its readiness check instead. The
+retry takes the lifecycle gates, so it never races a restore, truncate or
+shutdown. Keys that do not validate and a ledger
+mismatch against the pool's registration stop startup, as they do for one
+pool. Stops run the other pools first, each in the first pool's order: forger,
+agent client, election, then the keys.
+
+**Metrics.** With more than one pool, each pool's forging, leader-election and
+KES agent client series carry a `pool_id` label (`prometheus.WrapRegistererWith`);
+the pool ID comes from the opcert's cold key, which is a local file in every KES
+mode. One pool keeps its unlabelled series.
+
+**Schedules.** Every pool computes its own Praos leader schedule. A semaphore
+shared by all the pools' elections (`Election.SetComputeGate`, half the CPUs)
+bounds how many compute at once, so an epoch boundary does not run every
+pool's proofs together.
+
+**Shared slots.** Two pools of one node can lead the same slot, and only one
+block per slot can stay on chain. Each forger asks the node's
+`poolSlotArbiter` after its leader check. When more than one pool leads the
+slot, the arbiter proves each one's leader VRF input (`MkInputVrf` from Babbage
+on, the `SeedL` TPraos seed before) and keeps the pool with the lowest output,
+the value chain selection compares for two blocks in one slot. The decision is
+made once per slot and cached for the pools that ask after it; a slot fewer
+than two pools lead is not cached, since a pool whose schedule is not ready yet
+reads as a non-leader. Anything that leaves the decision in doubt -- a
+non-Praos schedule, no epoch nonce, a VRF failure, a panicking arbiter -- lets
+every leading pool forge: an extra block of the node's own costs less than a
+lost slot.
+
+The ranking is made from leader VRF alone, before the winner's own later
+refusals (operational certificate counter, stale tip, a credential change) and
+before it builds, validates and adopts its block. So a pool that loses the
+ranking does not give the slot up; it waits for the slot's outcome. Every
+forge check reports its outcome to the arbiter on every exit, an adopted block
+as soon as it is adopted. When any pool adopts a block for the slot, the
+waiting pools skip it and count `dingo_forge_yielded_to_own_pool_total`
+instead of a missed leader slot. When the winner exits without one, it
+releases the slot: the arbiter decides again among the leaders that have not
+released it, so the next best pool forges and any pool behind that one keeps
+waiting, and a winner that released before another pool asked is never
+yielded to. A wait also ends in a forge when the slot's retry deadline (the
+slot end less `ForgeSelectionRetryMargin`) passes without a report, when the
+forger's context ends, when a pool is added or removed or the ledger view
+changes, or when the wait panics. A yielded pool that forges goes through its
+own checks as any leader does.
+
+**Own blocks.** The ledger's slot battle checks and the equivocation detector
+treat every pool as the node's own: `ownForgedBlocks` answers
+`ForgedBlockHashes` with every forger's block for the slot and counts a battle
+against the first forger with one, and every pool ID is labelled
+`self_key="true"`. A slot can hold two blocks of the node's own when the
+arbiter fails open, so the ledger compares a block against every own hash for
+its slot: the second own block is neither a slot battle nor a peer block for
+the header-failure path to rewind past.
 
 ### Leios Announcement Admission (`ouroboros/`)
 
@@ -15258,8 +15435,9 @@ one block can make the transaction exceed the 32 MiB estimate.
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay
 validates the complete from-origin replay. Setting it to `false` is an explicit
-operator choice to trust the selected peer/intersection for older blocks, apart
-from the aggregate `MaxBlockExUnits` budget, which is still enforced;
+operator choice to skip the expensive transaction rule set for older blocks.
+Peer-sourced blocks still pass the consensus-envelope, enabled-era ceiling,
+aggregate `MaxBlockExUnits`, and operational-certificate counter checks;
 certificate verification of a Mithril artifact is not a substitute for future
 network-block validation.
 
@@ -22841,8 +23019,12 @@ ledger reader reaches the replay header check, and `ls.chain` is consumed by the
 downstream blockfetch server and UTxO RPC sync/watch readers. A block that has
 not passed admission crypto must therefore never enter that chain.
 
-ChainSync admission also enforces the Ouroboros future-header rule before a
-header enters that queue. The raw network callback records `ChainsyncEvent`'s
+ChainSync admission also rejects a header whose protocol major version exceeds
+the eras enabled by the node before the header can enter chain selection or the
+ledger queue. This applies to ingress and observer connections, including
+Mithril-covered slots that do not need their header cryptography rechecked.
+Admission then enforces the Ouroboros future-header rule before a header enters
+that queue. The raw network callback records `ChainsyncEvent`'s
 `ArrivalTime` immediately, before header decoding, chain-selection, and EventBus
 work can delay delivery. The per-peer protocol callback asks ledger admission to
 convert the header slot to its wall-clock onset using the active hard-fork

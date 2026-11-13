@@ -121,7 +121,7 @@ func newCatchUpBandFixture(t *testing.T) *catchUpBandFixture {
 		ChainsyncObservePeerTip:   f.selector.PreparePeerTipAdmissionDisposition,
 		ChainsyncAwaitCatchUpBand: f.selector.AwaitCatchUpBand,
 	})
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	f.o.chainSelectionVerifyHeaderCrypto = func(
 		conn ouroboros.ConnectionId,
 		header gledger.BlockHeader,

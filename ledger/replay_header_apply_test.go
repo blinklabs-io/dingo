@@ -86,6 +86,7 @@ func newReplayHeaderApplyLedger(
 		Logger:                testLogger(),
 		PromRegistry:          prometheus.NewRegistry(),
 		ManualBlockProcessing: true,
+		TrustedReplay:         true,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })

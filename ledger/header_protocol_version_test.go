@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -696,5 +697,105 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraMaximum(
 	require.Error(t, err)
 	var typed *UnsupportedHeaderProtocolVersionError
 	require.True(t, errors.As(err, &typed))
+	assert.Equal(t, maxMajor, typed.Maximum)
+}
+
+func TestChainsyncHeaderAdmissionEnforcesSupportedProtocolVersion(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newLedgerStateForNetwork(t, "Testnet", 42)
+	ls.activeEras = eras.Eras
+	maxMajor := eras.ConwayEraDesc.MaxMajorVersion
+	supported := &conway.ConwayBlockHeader{
+		BabbageBlockHeader: *babbageHeaderWithMajor(t, uint64(maxMajor)),
+	}
+	accepted, err := ls.AwaitChainsyncHeaderAdmission(
+		t.Context(),
+		ChainsyncEvent{BlockHeader: supported},
+	)
+	require.NoError(t, err)
+	require.True(t, accepted)
+
+	unsupported := &conway.ConwayBlockHeader{
+		BabbageBlockHeader: *babbageHeaderWithMajor(
+			t,
+			uint64(maxMajor+1),
+		),
+	}
+
+	accepted, err = ls.AwaitChainsyncHeaderAdmission(
+		t.Context(),
+		ChainsyncEvent{BlockHeader: unsupported},
+	)
+	require.False(t, accepted)
+	var typed *UnsupportedHeaderProtocolVersionError
+	require.ErrorAs(t, err, &typed)
+	assert.Equal(t, maxMajor, typed.Maximum)
+}
+
+func TestObserverHeaderAdmissionEnforcesSupportedProtocolVersion(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newLedgerStateForNetwork(t, "Testnet", 42)
+	ls.activeEras = eras.Eras
+	maxMajor := eras.ConwayEraDesc.MaxMajorVersion
+	supported := &conway.ConwayBlockHeader{
+		BabbageBlockHeader: *babbageHeaderWithMajor(t, uint64(maxMajor)),
+	}
+	require.NoError(t, ls.AwaitObserverHeaderHorizon(
+		t.Context(),
+		ChainsyncEvent{BlockHeader: supported},
+	))
+
+	unsupported := &conway.ConwayBlockHeader{
+		BabbageBlockHeader: *babbageHeaderWithMajor(
+			t,
+			uint64(maxMajor+1),
+		),
+	}
+
+	err := ls.AwaitObserverHeaderHorizon(
+		t.Context(),
+		ChainsyncEvent{BlockHeader: unsupported},
+	)
+	var typed *UnsupportedHeaderProtocolVersionError
+	require.ErrorAs(t, err, &typed)
+	assert.Equal(t, maxMajor, typed.Maximum)
+}
+
+func TestChainSelectionEnforcesSupportedProtocolVersion(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newLedgerStateForNetwork(t, "Testnet", 42)
+	ls.activeEras = eras.Eras
+	maxMajor := eras.ConwayEraDesc.MaxMajorVersion
+	supported := &conway.ConwayBlockHeader{
+		BabbageBlockHeader: *babbageHeaderWithMajor(t, uint64(maxMajor)),
+	}
+	supportedErr := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		supported,
+	)
+	require.ErrorIs(t, supportedErr, errHeaderVerificationContextUnavailable)
+
+	unsupported := &conway.ConwayBlockHeader{
+		BabbageBlockHeader: *babbageHeaderWithMajor(
+			t,
+			uint64(maxMajor+1),
+		),
+	}
+
+	err := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		unsupported,
+	)
+	var typed *UnsupportedHeaderProtocolVersionError
+	require.ErrorAs(t, err, &typed)
 	assert.Equal(t, maxMajor, typed.Maximum)
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -179,6 +180,13 @@ type replayRecoveryCandidate struct {
 type replayRecoveryPendingInput struct {
 	Input   lcommon.TransactionInput
 	MaxSlot uint64
+	// SpentCeiling is the highest slot whose spend counts as applied ledger
+	// history. Zero disables the spent-row check. Only the failing
+	// transaction's own inputs carry a ceiling: the inputs, collateral, and
+	// reference inputs walked from a resolved producer are provenance
+	// dependencies, and their spend state says nothing about whether the
+	// failing block carries a bad input.
+	SpentCeiling uint64
 }
 
 type replayRecoveryResolvedProducer struct {
@@ -2369,10 +2377,36 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 		0,
 		len(validationErr.Inputs),
 	)
+	// The failing batch's transaction is discarded before recovery runs, so
+	// only spends at or below the applied ledger tip are committed history. A
+	// row marked spent above it is a stale write that a rollback repairs. The
+	// durable floor bounds it too: a slot-based rollback can leave currentTip
+	// above the state that was durably applied.
+	ls.RLock()
+	spentCeiling := ls.currentTip.Point.Slot
+	ls.RUnlock()
+	floor, ok, err := ls.durableAppliedFloor()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"determine durable applied floor for replay recovery: %w",
+			err,
+		)
+	}
+	if ok {
+		spentCeiling = min(spentCeiling, floor.Slot)
+	}
+	failingSlot := validationErr.BlockPoint.Slot
+	if spentCeiling >= failingSlot {
+		spentCeiling = 0
+		if failingSlot > 0 {
+			spentCeiling = failingSlot - 1
+		}
+	}
 	for _, input := range validationErr.Inputs {
 		pendingInputs = append(pendingInputs, replayRecoveryPendingInput{
-			Input:   input,
-			MaxSlot: validationErr.BlockPoint.Slot,
+			Input:        input,
+			MaxSlot:      validationErr.BlockPoint.Slot,
+			SpentCeiling: spentCeiling,
 		})
 	}
 	seenInputs := make(map[string]struct{})
@@ -2562,12 +2596,42 @@ func (ls *LedgerState) buildReplayRecoveryChainIndex(
 	return index, nil
 }
 
+// replayRecoveryDeletedSlot returns the slot at which input's UTxO row was
+// spent, or zero when the row is live or absent. It reads only the spend state
+// where the store supports it, so the output's assets are never loaded.
+func (ls *LedgerState) replayRecoveryDeletedSlot(
+	input lcommon.TransactionInput,
+) (uint64, error) {
+	store := ls.db.Metadata()
+	if reader, ok := store.(metadata.UtxoSpendStateReader); ok {
+		state, err := reader.GetUtxoSpendState(
+			input.Id().Bytes(),
+			input.Index(),
+			nil,
+		)
+		if err != nil || state == nil {
+			return 0, err
+		}
+		return state.DeletedSlot, nil
+	}
+	utxo, err := store.GetUtxoIncludingSpent(
+		input.Id().Bytes(),
+		input.Index(),
+		nil,
+	)
+	if err != nil || utxo == nil {
+		return 0, err
+	}
+	return utxo.DeletedSlot, nil
+}
+
 // resolveReplayRecoveryProducer locates the block that produced pending.Input.
 //
-// The bool reports that the input is present in the UTxO set, which is a
-// different answer from a nil producer: present means nothing about this input
-// needs repairing, while a nil producer with present false means the input is
-// missing and its producer could not be found either.
+// The bool reports that the input is present in the UTxO set or was consumed
+// by applied ledger history, which is a different answer from a nil producer:
+// present means nothing about this input needs repairing, while a nil producer
+// with present false means the input is missing and its producer could not be
+// found either.
 func (ls *LedgerState) resolveReplayRecoveryProducer(
 	pending replayRecoveryPendingInput,
 	chainIndex *replayRecoveryChainIndex,
@@ -2592,6 +2656,22 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 		// -- a script data hash mismatch, say -- drive a rewind that could
 		// never fix it.
 		return nil, true, nil
+	}
+	if pending.SpentCeiling != 0 {
+		// A row consumed at or below SpentCeiling was spent by a block the
+		// ledger has applied. Rolling back to its producer cannot make it
+		// spendable, so it is a bad input, not a provenance gap.
+		deletedSlot, err := ls.replayRecoveryDeletedSlot(pending.Input)
+		if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
+			return nil, false, fmt.Errorf(
+				"lookup spent validation input %s: %w",
+				pending.Input.String(),
+				err,
+			)
+		}
+		if deletedSlot != 0 && deletedSlot <= pending.SpentCeiling {
+			return nil, true, nil
+		}
 	}
 	producerTx, err := ls.ledgerDB().GetTransactionByHash(
 		context.Background(),

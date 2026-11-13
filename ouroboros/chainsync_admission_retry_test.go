@@ -45,7 +45,7 @@ func TestChainsyncAdmissionExpiryReverifiesBeforeStaging(t *testing.T) {
 		},
 	)
 	header := newTestBlockHeader(100, 1, 0xaa)
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	var verifications atomic.Uint64
 	f.o.chainSelectionVerifyHeaderCrypto = func(_ ouroboros.ConnectionId, h gledger.BlockHeader) (uint64, error) {
 		require.Equal(
@@ -112,7 +112,7 @@ func TestChainsyncAdmissionExpiryRetainsFailureBoundaries(t *testing.T) {
 			f := newPatienceRollForwardFixture(t, true)
 			f.state.SetClientConnId(f.conn)
 			_, ledgerCh := f.o.eventBus.Subscribe(ledger.ChainsyncEventType)
-			f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+			f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 			verifications, observations, delivered := 0, 0, 0
 			f.o.config.ChainsyncRecordDeliveredPeerTip = func(chainselection.PeerTipUpdateEvent) { delivered++ }
 			cryptoErr := errors.New("bad KES signature on renewed verdict")

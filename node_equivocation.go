@@ -62,7 +62,7 @@ type equivocationPair [2]string
 type equivocationDetector struct {
 	logger        *slog.Logger
 	counter       *prometheus.CounterVec
-	selfPoolID    string
+	selfPoolIDs   map[string]struct{}
 	rolledBack    []rolledBackBlock
 	reported      map[equivocationPair]struct{}
 	reportedOrder []equivocationPair
@@ -92,12 +92,25 @@ func newEquivocationDetector(
 // setSelfPoolID records this node's own pool ID so its equivocations are
 // labelled self_key="true".
 func (d *equivocationDetector) setSelfPoolID(poolID string) {
+	d.setSelfPoolIDs(poolID)
+}
+
+// setSelfPoolIDs records every pool this node forges for, replacing any set
+// recorded before, so an equivocation by any of them is labelled
+// self_key="true".
+func (d *equivocationDetector) setSelfPoolIDs(poolIDs ...string) {
 	if d == nil {
 		return
 	}
+	ids := make(map[string]struct{}, len(poolIDs))
+	for _, id := range poolIDs {
+		if id != "" {
+			ids[id] = struct{}{}
+		}
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.selfPoolID = poolID
+	d.selfPoolIDs = ids
 }
 
 // handleChainUpdate processes a chain.update event.
@@ -200,7 +213,7 @@ func (d *equivocationDetector) report(
 	block models.Block,
 	rival rolledBackBlock,
 ) {
-	self := d.selfPoolID != "" && d.selfPoolID == pool
+	_, self := d.selfPoolIDs[pool]
 	d.logger.Warn(
 		"equivocation detected: competing blocks from one pool",
 		"pool_id", pool,

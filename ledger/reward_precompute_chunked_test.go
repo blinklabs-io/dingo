@@ -891,3 +891,74 @@ func TestRewardPrecomputeChunkEndBoundsDelegators(t *testing.T) {
 		})
 	}
 }
+
+// TestChunkedRewardPrecomputeLeavesCreditedRoundOutputs reproduces a retry
+// precompute resolved before its boundary committed whose first chunk runs
+// after the boundary credited the round. Its fence and snapshot still match,
+// and its inputs differ from the completed cursor's, so without the credited
+// check it would clear the credited outputs and rewrite one chunk.
+func TestChunkedRewardPrecomputeLeavesCreditedRoundOutputs(t *testing.T) {
+	t.Parallel()
+	const (
+		rewardSnapshotEpoch = uint64(1)
+		newEpoch            = rewardSnapshotEpoch + 3
+		potsEpoch           = uint64(3)
+		capturedSlot        = uint64(200)
+		boundarySlot        = uint64(1_200)
+		poolCount           = 6
+		delegatorsPerPool   = 3
+	)
+	ls, db := seedMultiPoolRewardPrecomputeFixture(
+		t, poolCount, delegatorsPerPool, 7,
+	)
+	ls.rewardPrecomputeChunkPoolsOverride = 2
+	require.NoError(t, ls.runChunkedStakeRewardPrecompute(
+		newEpoch, capturedSlot, boundarySlot,
+	))
+	credited := snapshotRewardPrecomputeOutputs(
+		t, db, rewardSnapshotEpoch, potsEpoch,
+	)
+	require.Len(t, credited.poolOutputs, poolCount)
+
+	inputs, err := db.Metadata().GetRewardPoolInputs(rewardSnapshotEpoch, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, inputs)
+	inputs[0].Margin = &types.Rat{Rat: big.NewRat(1, 5)}
+	require.NoError(t, db.Metadata().SaveRewardPoolInputs(inputs, nil))
+	retry, ok, err := ls.resolveStakeRewardPrecomputeRound(
+		newEpoch, capturedSlot+500, boundarySlot,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	require.NoError(t, db.Metadata().AddAppliedRewardCreditRound(
+		models.RewardCreditRound{
+			SnapshotEpoch: rewardSnapshotEpoch,
+			BoundarySlot:  boundarySlot,
+		}, nil,
+	))
+
+	done, err := ls.stakeRewardPrecomputeChunkStep(retry)
+	require.NoError(t, err)
+	after := snapshotRewardPrecomputeOutputs(
+		t, db, rewardSnapshotEpoch, potsEpoch,
+	)
+	require.Len(t, after.poolOutputs, poolCount,
+		"a credited round's pool outputs must survive a late retry chunk")
+	require.Equal(t, credited, after)
+	require.True(t, done, "a credited round must stop the retry")
+
+	txn := db.Transaction(context.Background(), true)
+	err = txn.Do(func(txn *database.Txn) error {
+		_, err := ls.stakeRewardPrecomputeChunksInTxn(
+			context.Background(), txn, retry, 1,
+		)
+		return err
+	})
+	require.ErrorContains(t, err, "credited round")
+	require.Equal(
+		t,
+		credited,
+		snapshotRewardPrecomputeOutputs(t, db, rewardSnapshotEpoch, potsEpoch),
+	)
+}

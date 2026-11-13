@@ -827,8 +827,13 @@ authoritative. An explicitly empty genesis committee is also authoritative,
 without requiring a sentinel row. Certificate and voter membership checks
 remain enforced in both empty states. No rows without an empty genesis
 declaration do not establish authority; validation cannot infer non-membership
-from missing state. A failed database lookup still fails closed, even with an
-empty genesis committee.
+from missing state. A completed Mithril import whose current tip is in Conway
+or later makes its current committee set authoritative for startup genesis
+reseeding at `mithril_ledger_slot`: startup does not seed a genesis member
+missing from that set, because the member may have been removed before the
+snapshot. A pre-Conway imported tip retains the genesis members for the later
+hard fork. A failed database lookup still fails closed, even with an empty
+genesis committee.
 
 Migration `v9` (`committee-term-start-presence`, integer version 9) adds
 `committee_member.term_start_slot_set`. Existing rows are marked present
@@ -3346,7 +3351,7 @@ the stored blocks as they age past the window, as it does on any node.
 | `script` | `id`, `hash`, `content`, `created_slot`, `type` | PK `id`; unique/index `hash`; index `type` | API-mode de-duplicated script content by hash. The type index is unused by live query predicates and is rebuilt by background maintenance. |
 | `plutus_data` | `id`, `transaction_id`, `data` | PK `id`; index `transaction_id` | API-mode Plutus data from witness sets. Join to `transaction.id`. Its transaction-id index remains resident because SetTransaction clears Plutus data on replays. |
 | `redeemer` | `id`, `transaction_id`, `tag`, `index`, `data`, `ex_units_memory`, `ex_units_cpu` | PK `id`; indexes `transaction_id`, `tag`, `index` | API-mode redeemers. Join to `transaction.id`. The tag and index filters are deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears redeemers on replays. |
-| `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique/index `hash`; index `added_slot` | API-mode datum hash index. UTxOs can reference it with `utxo.datum_hash = datum.hash`. The `added_slot` index is deferred and rebuilt by background maintenance. |
+| `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique `hash` (`uni_datum_hash`, which serves hash lookups and is the `ON CONFLICT (hash)` target); index `added_slot` | API-mode datum hash index. UTxOs can reference it with `utxo.datum_hash = datum.hash`. The `added_slot` index is deferred and rebuilt by background maintenance. |
 | `certs` | `id`, `transaction_id`, `cert_index`, `cert_type`, `certificate_id`, `slot`, `block_hash` | PK `id`; unique `(transaction_id, cert_index)`; indexes `transaction_id`, `certificate_id`, `cert_type`, `slot`, `block_hash` | Unified certificate index. `certificate_id` points to one specialized certificate table according to `cert_type`; this is logical, not DB-enforced. Normal and Mithril gap-closure transaction writes use the same idempotent certificate upsert, preserving `slot`, `block_hash`, `block_index` (through the transaction), and `cert_index` for position-ordered readers. The transaction-id index remains resident for import cleanup. The slot index is rebuilt before rollback; block-hash, certificate-id, and certificate-type indexes are rebuilt by background maintenance. |
 
 Deferred-index bulk mode is shared by SQLite, PostgreSQL, and MySQL. InnoDB
@@ -4224,6 +4229,18 @@ rows, ids and `sqlite_sequence` are identical to the full upsert.
 `dbstat`, `TestStakeBookkeepingReadersUseAnIndex` plans every reader before and
 after `ANALYZE`, and `TestStakeBookkeepingIndexDropKeepsRows` upgrades a v58
 database.
+
+Migration `v63` (`datum-hash-duplicate-index-drop`, integer version 63) drops
+`idx_datum_hash` on SQLite, PostgreSQL and MySQL. It indexed `datum.hash`, which
+`uni_datum_hash` already indexes; the unique index serves every lookup by hash
+and is the `ON CONFLICT (hash)` target of the datum insert, so the duplicate
+only added a random-position write per insert. Nothing names it
+(`INDEXED BY`), and a fresh database, which replays every migration, ends
+without it. MySQL uses the translated `DROP INDEX <name> ON <table>` form, which
+the runner's already-applied guard makes replay-safe.
+`TestDatumHashDuplicateIndexDrop` upgrades a v62 database, plans the hash
+lookups on the unique index and replays the migration; the PostgreSQL and MySQL
+engine tests check the drop against a real server when one is configured.
 
 #### Mithril API reward-live-stake finalization
 

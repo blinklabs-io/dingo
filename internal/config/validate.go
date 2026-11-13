@@ -76,90 +76,229 @@ func validateHostPort(addr string) error {
 	return nil
 }
 
-// validateRemoteKESAgent checks a remote KES agent configuration: one KES
-// source only, sign mode, and a transport that can work: the server pin and
-// the client certificate are optional, but need TLS, so plain TCP takes
+// kesAgentAddressKey returns the listener a remote KES agent address names,
+// for spotting two pools that share one: an IP literal in its canonical form,
+// any other host lower-cased, and the port as a number, so a zero-padded port
+// that validateHostPort accepts, a host typed in another case and the
+// different spellings of one IPv6 address all compare equal. An address that
+// does not parse returns "", since validateHostPort reports it already.
+func kesAgentAddressKey(addr string) string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil || host == "" {
+		return ""
+	}
+	p, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || p == 0 {
+		return ""
+	}
+	host = strings.ToLower(host)
+	if ip, err := netip.ParseAddr(host); err == nil {
+		host = ip.Unmap().String()
+	}
+	return net.JoinHostPort(host, strconv.FormatUint(p, 10))
+}
+
+// validateRemoteKESAgent checks a pool's remote KES agent configuration: one
+// KES source only, sign mode, and a transport that can work: the server pin
+// and the client certificate are optional, but need TLS, so plain TCP takes
 // neither, and a client certificate is set as a pair. Without an address,
 // any remote transport option is refused, so a mistyped remote
-// configuration cannot fall back to local or Unix-socket signing.
-func (c *Config) validateRemoteKESAgent() []error {
-	if c.ShelleyKESAgentAddress == "" {
+// configuration cannot fall back to local or Unix-socket signing. prefix is
+// prepended to every setting name, so errors name the list entry they came
+// from.
+func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
+	if p.ShelleyKESAgentAddress == "" {
 		var errs []error
 		for _, opt := range []struct {
 			name string
 			set  bool
 		}{
-			{"shelleyKesAgentPlaintext", c.ShelleyKESAgentPlaintext},
+			{"shelleyKesAgentPlaintext", p.ShelleyKESAgentPlaintext},
 			{
 				"shelleyKesAgentClientCertFile",
-				c.ShelleyKESAgentClientCertFile != "",
+				p.ShelleyKESAgentClientCertFile != "",
 			},
 			{
 				"shelleyKesAgentClientKeyFile",
-				c.ShelleyKESAgentClientKeyFile != "",
+				p.ShelleyKESAgentClientKeyFile != "",
 			},
 			{
 				"shelleyKesAgentServerSpkiSha256",
-				strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256) != "",
+				strings.TrimSpace(p.ShelleyKESAgentServerSPKISHA256) != "",
 			},
 		} {
 			if opt.set {
 				errs = append(errs, fmt.Errorf(
-					"%s requires shelleyKesAgentAddress",
+					"%s%s requires %sshelleyKesAgentAddress",
+					prefix,
 					opt.name,
+					prefix,
 				))
 			}
 		}
 		return errs
 	}
+	field := func(name string) string { return prefix + name }
 	var errs []error
-	if c.ShelleyKESKey != "" || c.ShelleyKESAgentSocket != "" {
-		errs = append(errs, errors.New(
-			"blockProducer cannot set shelleyKesAgentAddress together with "+
-				"shelleyKesKey or shelleyKesAgentSocket",
+	if p.ShelleyKESKey != "" || p.ShelleyKESAgentSocket != "" {
+		errs = append(errs, fmt.Errorf(
+			"blockProducer cannot set %s together with %s or %s",
+			field("shelleyKesAgentAddress"),
+			field("shelleyKesKey"),
+			field("shelleyKesAgentSocket"),
 		))
 	}
-	if err := validateHostPort(c.ShelleyKESAgentAddress); err != nil {
+	if err := validateHostPort(p.ShelleyKESAgentAddress); err != nil {
 		errs = append(errs, fmt.Errorf(
-			"shelleyKesAgentAddress %q must be host:port: %w",
-			c.ShelleyKESAgentAddress,
+			"%s %q must be host:port: %w",
+			field("shelleyKesAgentAddress"),
+			p.ShelleyKESAgentAddress,
 			err,
 		))
 	}
-	if c.ShelleyKESAgentMode != "" && c.ShelleyKESAgentMode != "sign" {
+	if p.ShelleyKESAgentMode != "" && p.ShelleyKESAgentMode != "sign" {
 		errs = append(errs, fmt.Errorf(
-			"shelleyKesAgentAddress supports only shelleyKesAgentMode \"sign\", got %q",
-			c.ShelleyKESAgentMode,
+			"%s supports only shelleyKesAgentMode \"sign\", got %q",
+			field("shelleyKesAgentAddress"),
+			p.ShelleyKESAgentMode,
 		))
 	}
-	clientCert := c.ShelleyKESAgentClientCertFile != "" ||
-		c.ShelleyKESAgentClientKeyFile != ""
-	if clientCert && (c.ShelleyKESAgentClientCertFile == "" ||
-		c.ShelleyKESAgentClientKeyFile == "") {
-		errs = append(errs, errors.New(
-			"shelleyKesAgentClientCertFile and shelleyKesAgentClientKeyFile "+
-				"must be set together",
+	clientCert := p.ShelleyKESAgentClientCertFile != "" ||
+		p.ShelleyKESAgentClientKeyFile != ""
+	if clientCert && (p.ShelleyKESAgentClientCertFile == "" ||
+		p.ShelleyKESAgentClientKeyFile == "") {
+		errs = append(errs, fmt.Errorf(
+			"%s and %s must be set together",
+			field("shelleyKesAgentClientCertFile"),
+			field("shelleyKesAgentClientKeyFile"),
 		))
 	}
-	pinned := strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256) != ""
-	if c.ShelleyKESAgentPlaintext {
+	pinned := strings.TrimSpace(p.ShelleyKESAgentServerSPKISHA256) != ""
+	if p.ShelleyKESAgentPlaintext {
 		if pinned || clientCert {
-			errs = append(errs, errors.New(
-				"shelleyKesAgentServerSpkiSha256 and a client certificate "+
-					"need TLS, so shelleyKesAgentPlaintext takes neither",
+			errs = append(errs, fmt.Errorf(
+				"%s and a client certificate need TLS, so %s takes neither",
+				field("shelleyKesAgentServerSpkiSha256"),
+				field("shelleyKesAgentPlaintext"),
 			))
 		}
 		return errs
 	}
 	if pinned {
 		if pin, err := hex.DecodeString(
-			strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256),
+			strings.TrimSpace(p.ShelleyKESAgentServerSPKISHA256),
 		); err != nil || len(pin) != sha256.Size {
 			errs = append(errs, fmt.Errorf(
-				"shelleyKesAgentServerSpkiSha256 must be %d hex characters",
+				"%s must be %d hex characters",
+				field("shelleyKesAgentServerSpkiSha256"),
 				2*sha256.Size,
 			))
 		}
+	}
+	return errs
+}
+
+// validateBlockProducerPool checks one pool's key settings. prefix is empty
+// for the top-level settings and "blockProducerPools[i]." for a list entry.
+func validateBlockProducerPool(p BlockProducerPool, prefix string) []error {
+	var errs []error
+	var missing []string
+	if p.ShelleyVRFKey == "" {
+		missing = append(missing, prefix+"shelleyVrfKey")
+	}
+	// The KES signing key is only required when it is local. With a KES
+	// agent configured, the key lives with the agent instead -- that is the
+	// whole point of the agent -- so requiring both made an agent-only
+	// configuration impossible to start.
+	if p.ShelleyKESKey == "" && p.ShelleyKESAgentSocket == "" &&
+		p.ShelleyKESAgentAddress == "" {
+		missing = append(missing, prefix+"shelleyKesKey")
+	}
+	if err := ValidateKESKeySources(
+		p.ShelleyKESKey,
+		p.ShelleyKESAgentSocket,
+	); err != nil {
+		if prefix != "" {
+			err = fmt.Errorf("%s: %w", strings.TrimSuffix(prefix, "."), err)
+		}
+		errs = append(errs, err)
+	}
+	errs = append(errs, validateRemoteKESAgent(p, prefix)...)
+	if p.ShelleyOperationalCertificate == "" {
+		missing = append(missing, prefix+"shelleyOperationalCertificate")
+	}
+	if len(missing) > 0 {
+		errs = append(errs, fmt.Errorf(
+			"blockProducer enabled but missing required key paths: %v",
+			missing,
+		))
+	}
+	return errs
+}
+
+// validateBlockProducerPools checks the pools a block producer forges for:
+// the top-level key settings, or the blockProducerPools list, never both.
+func (c *Config) validateBlockProducerPools() []error {
+	if len(c.BlockProducerPools) == 0 {
+		return validateBlockProducerPool(c.singlePool(), "")
+	}
+	var errs []error
+	if c.HasSinglePoolKeys() {
+		errs = append(errs, errors.New(
+			"blockProducerPools replaces shelleyVrfKey, shelleyKesKey, "+
+				"shelleyOperationalCertificate, shelleyKesAgentSocket, "+
+				"shelleyKesAgentMode, shelleyKesAgentAddress, "+
+				"shelleyKesAgentClientCertFile, shelleyKesAgentClientKeyFile, "+
+				"shelleyKesAgentServerSpkiSha256 and shelleyKesAgentPlaintext; "+
+				"set them in each pool",
+		))
+	}
+	opCerts := make(map[string]int, len(c.BlockProducerPools))
+	agentAddresses := make(map[string]int, len(c.BlockProducerPools))
+	for i, p := range c.BlockProducerPools {
+		prefix := fmt.Sprintf("blockProducerPools[%d].", i)
+		errs = append(errs, validateBlockProducerPool(p, prefix)...)
+		// An attested KES agent session cannot name a profile, so Bursa
+		// allows one profile per attested listener and a remote agent
+		// address can serve one pool only. A local socket is not
+		// limited: it serves several pools through its profiles.
+		if addr := kesAgentAddressKey(p.ShelleyKESAgentAddress); addr != "" {
+			if j, dup := agentAddresses[addr]; dup {
+				errs = append(errs, fmt.Errorf(
+					"blockProducerPools[%d] and blockProducerPools[%d] use the same shelleyKesAgentAddress %q: "+
+						"an attested KES agent session cannot name a profile, so Bursa allows one profile "+
+						"per attested listener and each pool needs its own agent address",
+					j,
+					i,
+					p.ShelleyKESAgentAddress,
+				))
+			} else {
+				agentAddresses[addr] = i
+			}
+		}
+		if p.ShelleyKESAgentMode != "" &&
+			p.ShelleyKESAgentMode != "serve-key" &&
+			p.ShelleyKESAgentMode != "sign" {
+			errs = append(errs, fmt.Errorf(
+				"invalid %sshelleyKesAgentMode %q: must be \"serve-key\" or \"sign\"",
+				prefix,
+				p.ShelleyKESAgentMode,
+			))
+		}
+		if p.ShelleyOperationalCertificate == "" {
+			continue
+		}
+		path := filepath.Clean(p.ShelleyOperationalCertificate)
+		if j, dup := opCerts[path]; dup {
+			errs = append(errs, fmt.Errorf(
+				"blockProducerPools[%d] and blockProducerPools[%d] use the same operational certificate %q",
+				j,
+				i,
+				p.ShelleyOperationalCertificate,
+			))
+			continue
+		}
+		opCerts[path] = i
 	}
 	return errs
 }
@@ -909,32 +1048,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 
 	// Block production needs all three credential paths
 	if c.BlockProducer {
-		var missing []string
-		if c.ShelleyVRFKey == "" {
-			missing = append(missing, "shelleyVrfKey")
-		}
-		// The KES signing key is only required when it is local. With a KES
-		// agent socket configured, the key lives with the agent instead --
-		// that is the whole point of the flag -- so requiring both made an
-		// agent-only configuration impossible to start.
-		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" &&
-			c.ShelleyKESAgentAddress == "" {
-			missing = append(missing, "shelleyKesKey")
-		}
-		if err := ValidateKESKeySources(
-			c.ShelleyKESKey,
-			c.ShelleyKESAgentSocket,
-		); err != nil {
-			errs = append(errs, err)
-		}
-		errs = append(errs, c.validateRemoteKESAgent()...)
-		if c.ShelleyOperationalCertificate == "" {
-			missing = append(missing, "shelleyOperationalCertificate")
-		}
-		if len(missing) > 0 {
-			errs = append(errs, fmt.Errorf(
-				"blockProducer enabled but missing required key paths: %v",
-				missing,
+		errs = append(errs, c.validateBlockProducerPools()...)
+		// Leios voting and endorser-block production are wired for one pool:
+		// one vote key, one pipeline. A second pool would forge ranking
+		// blocks with no Leios support of its own. Musashi forges Leios
+		// headers whatever the run mode.
+		isMusashi := c.Network == ouroboros.NetworkCardanoMusashi.Name ||
+			c.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
+		if len(c.BlockProducerPools) > 1 &&
+			(effectiveMode == RunModeLeios || isMusashi ||
+				c.LeiosVoteSigningKeyFile != "") {
+			errs = append(errs, errors.New(
+				"blockProducerPools lists more than one pool, which Leios forging and voting do not support",
 			))
 		}
 	}

@@ -1098,6 +1098,9 @@ func buildDingoConfig(
 			cfg.ShelleyKESAgentServerSPKISHA256,
 		),
 		dingo.WithShelleyKESAgentPlaintext(cfg.ShelleyKESAgentPlaintext),
+		// A slice of structs, so the scalar forwarding test cannot see it;
+		// TestBuildDingoConfigForwardsBlockProducerPools covers it.
+		dingo.WithBlockProducerPools(cfg.BlockProducerPools...),
 		dingo.WithForgeSyncToleranceSlots(
 			cfg.ForgeSyncToleranceSlots,
 		),

@@ -6338,10 +6338,18 @@ func TestProcessEpochRolloverRequiresPostRUPDBlockForRewardUpdate(
 	const rupdStartAfterSlot = uint64(34_560)
 	for _, tc := range []struct {
 		name          string
+		endedEpoch    uint64
 		lastBlockSlot uint64
 		wantTreasury  uint64
 		wantReserves  uint64
 	}{
+		{
+			name:          "tip in the previous epoch",
+			endedEpoch:    1,
+			lastBlockSlot: previewEpochLength - 1,
+			wantTreasury:  0,
+			wantReserves:  previewGenesisReserves,
+		},
 		{
 			name:          "no block after window",
 			lastBlockSlot: rupdStartAfterSlot,
@@ -6368,16 +6376,16 @@ func TestProcessEpochRolloverRequiresPostRUPDBlockForRewardUpdate(
 				0, previewGenesisReserves, 0, nil,
 			))
 			require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
-				Epoch:        0,
+				Epoch:        tc.endedEpoch,
 				Reserves:     types.Uint64(previewGenesisReserves),
-				CapturedSlot: 0,
+				CapturedSlot: tc.endedEpoch * previewEpochLength,
 			}, nil))
 
 			blockHash := bytes.Repeat([]byte{byte(tc.lastBlockSlot)}, 32)
 			require.NoError(t, db.SetTip(ochainsync.Tip{
 				Point: ocommon.NewPoint(tc.lastBlockSlot, blockHash),
 			}, nil))
-			currentEpoch, err := meta.GetEpoch(0, nil)
+			currentEpoch, err := meta.GetEpoch(tc.endedEpoch, nil)
 			require.NoError(t, err)
 			require.NotNil(t, currentEpoch)
 			pparams := &alonzo.AlonzoProtocolParameters{

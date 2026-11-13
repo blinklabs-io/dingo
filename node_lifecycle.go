@@ -143,6 +143,14 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: func() error { n.dmqStake.setLedgerState(nil); return nil },
 		})
 	}
+	// The other pools first: each stops its own forger, agent client,
+	// election and keys, in the order the first pool's stops below use.
+	if n.multiPool.arbiter != nil {
+		stops = append(stops, namedStop{
+			name: "other block producer pools",
+			stop: n.stopPoolProducers,
+		})
+	}
 	if n.blockForger != nil {
 		stops = append(stops, namedStop{
 			name: "block forger",
@@ -1271,6 +1279,10 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	if !n.config.blockProducer {
 		return nil
 	}
+	if err := n.prepareMultiPool(); err != nil {
+		return fmt.Errorf("block producer pools: %w", err)
+	}
+	watchBaseline := n.credentialWatchBaseline()
 	creds, err := n.validateBlockProducerStartup()
 	if err != nil {
 		return fmt.Errorf("block producer startup validation failed: %w", err)
@@ -1303,11 +1315,15 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	if err := n.enableLeiosVoting(creds); err != nil {
 		return fmt.Errorf("failed to enable leios voting: %w", err)
 	}
-	if n.blockForger != nil {
-		n.ledgerState.SetForgedBlockChecker(n.blockForger.SlotTracker())
-		n.ledgerState.SetForgingEnabled(true)
-		n.ledgerState.SetSlotBattleRecorder(n.blockForger)
+	//nolint:contextcheck // n.ctx is the node's lifecycle context, the forgers' parent
+	if err := n.startPoolProducers(n.ctx); err != nil {
+		return fmt.Errorf("failed to restart block producer pools: %w", err)
 	}
+	n.wireForgedBlockTracking()
+	// The rebuild replaced every pool producer, so the reload loops started
+	// at Run still hold the old ones and their offer channels. Restarting
+	// them replaces those loops; it runs after the last step that can fail.
+	n.startKeyReloadLoops(watchBaseline)
 	return nil
 }
 

@@ -590,6 +590,17 @@ func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
 			done = true
 			return nil
 		}
+		// A round resolved before its boundary committed can reach this step
+		// after the boundary credited it: the fence and snapshot still match,
+		// but the outputs are now account balances.
+		credited, err := ls.rewardRoundCredited(txn, round.newEpoch)
+		if err != nil {
+			return err
+		}
+		if credited {
+			done = true
+			return nil
+		}
 		done, err = ls.stakeRewardPrecomputeChunksInTxn(ls.lifecycleContext(), txn, round, 1)
 		return err
 	})
@@ -616,8 +627,8 @@ func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(ctx context.Context,
 		return true, nil
 	}
 	if cursor == nil {
-		if err := ldb.DeleteRewardOutputsForEpoch(
-			round.epochs.snapshot, txn,
+		if err := deleteUncreditedRewardOutputs(
+			ldb, txn, round.epochs.snapshot,
 		); err != nil {
 			return false, fmt.Errorf(
 				"clear reward outputs for epoch %d: %w",

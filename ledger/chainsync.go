@@ -515,12 +515,36 @@ func (ls *LedgerState) mithrilLedgerSlotSnapshot() uint64 {
 }
 
 // slotCoveredByMithril reports whether slot falls within an imported
-// Mithril snapshot's certified range -- the single exemption shared by
-// ShouldVerifyChainSelectionHeaderCrypto, shouldEnforceBlockPipelineCrypto,
-// and handleEventBlockfetchBlockDeferred's header-crypto gate.
+// Mithril snapshot's certified range. It is sound only for a block already
+// on the primary chain: once that chain holds the trust boundary block it
+// cannot gain a block at or below the boundary, because every add must
+// follow its parent's slot and no rollback goes below the boundary. A header
+// or block offered by a peer uses pointCoveredByMithril instead.
 func (ls *LedgerState) slotCoveredByMithril(slot uint64) bool {
 	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
 	return mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot
+}
+
+// pointCoveredByMithril reports whether point names a block the Mithril
+// import certified: at or below the trust boundary slot and on the primary
+// chain, which also holds the trust boundary block. A peer chooses the slot
+// a header carries, so the slot alone does not establish that coverage.
+func (ls *LedgerState) pointCoveredByMithril(point ocommon.Point) bool {
+	if !ls.slotCoveredByMithril(point.Slot) {
+		return false
+	}
+	ctx := ls.lifecycleContext()
+	boundary, ok := ls.mithrilTrustBoundaryPoint(ctx)
+	if !ok {
+		return false
+	}
+	for _, p := range []ocommon.Point{point, boundary} {
+		onChain, err := ls.primaryChainContainsPoint(ctx, p)
+		if err != nil || !onChain {
+			return false
+		}
+	}
+	return true
 }
 
 func headerValidationPointKey(point ocommon.Point) string {
@@ -3820,7 +3844,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 		// (slot battles), not a pathological loop.
 		skipRollback := true
 		if checker := ls.loadForgedBlockChecker(); checker != nil {
-			if _, forged := checker.WasForgedByUs(e.Point.Slot); forged {
+			if len(checker.ForgedBlockHashes(e.Point.Slot)) > 0 {
 				ls.config.Logger.Info(
 					"allowing rollback on forged slot (slot battle resolution)",
 					"component", "ledger",
@@ -5057,7 +5081,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			headerCryptoVerificationGeneration,
 		)
 	headerValidationRequired, headerTrusted := ls.chainsyncHeaderCryptoPolicy(
-		e.Point.Slot,
+		e.Point,
 	)
 	if headerCryptoVerificationGeneration != 0 &&
 		!headerCryptoVerified && !headerTrusted && !headerValidationRequired {
@@ -5631,6 +5655,14 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	ctx context.Context,
 	e ChainsyncEvent,
 ) (bool, error) {
+	if e.BlockHeader != nil {
+		if err := ls.validateSupportedHeaderProtocolVersion(e.BlockHeader); err != nil {
+			return false, fmt.Errorf(
+				"validate chainsync header protocol version: %w",
+				err,
+			)
+		}
+	}
 	if e.ArrivalTime.IsZero() || ls.slotClock == nil || e.BlockHeader == nil {
 		return true, nil
 	}
@@ -5713,6 +5745,14 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 	ctx context.Context,
 	e ChainsyncEvent,
 ) error {
+	if e.BlockHeader != nil {
+		if err := ls.validateSupportedHeaderProtocolVersion(e.BlockHeader); err != nil {
+			return fmt.Errorf(
+				"validate observer header protocol version: %w",
+				err,
+			)
+		}
+	}
 	var anchor heldForkAnchor
 	parked := false
 	defer func() {
@@ -6340,22 +6380,22 @@ func localForkAnchor(intersectionSlot, tipSlot uint64) (uint64, bool) {
 // re-deriving the UTxO set for blocks the network already delivered, this is
 // not gated on ValidateHistorical/validationEnabled: a coarse
 // historical-sync toggle must not disable this entire group of checks.
-// Mithril-covered slots are trusted because their certificate chain was
-// verified during import; the restored database intentionally does not
-// retain every historical epoch nonce needed to re-verify them. Other
-// missing nonces defer authorization to block-fetch, which verifies the body
-// before applying it.
+// A header the Mithril import certified is trusted because its certificate
+// chain was verified during import; the restored database intentionally does
+// not retain every historical epoch nonce needed to re-verify it. Coverage is
+// decided by point, not slot (see pointCoveredByMithril). Other missing
+// nonces defer authorization to block-fetch, which verifies the body before
+// applying it.
 func (ls *LedgerState) chainsyncHeaderCryptoPolicy(
-	slot uint64,
+	point ocommon.Point,
 ) (verifyNow bool, trustedWithoutVerification bool) {
-	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
-	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
+	if ls.pointCoveredByMithril(point) {
 		return false, true
 	}
 	// Queue admission can safely defer producer authorization to block-fetch,
 	// which verifies the body before application. Chain selection has a
 	// separate strict gate and must not treat a deferred header as eligible.
-	if !ls.hasCachedEpochNonceForSlot(slot) {
+	if !ls.hasCachedEpochNonceForSlot(point.Slot) {
 		return false, false
 	}
 	return true, false
@@ -7119,11 +7159,11 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 	}
 
 	// Verify block header cryptographic proofs (VRF, KES). Required for
-	// every slot except one a Mithril certificate already covers -- see
+	// every block except one the Mithril import certified -- see
 	// chainsyncHeaderCryptoPolicy's doc comment. A coarse
 	// ValidateHistorical=false historical-sync toggle must not disable
 	// this entire group of checks.
-	if !ls.slotCoveredByMithril(e.Point.Slot) {
+	if !ls.pointCoveredByMithril(e.Point) {
 		// Chainsync may already have verified this block's queued header.
 		// Fetched blocks wait in pendingBlockfetchEvents before insertion, so
 		// that header is usually behind the queue head; match it by point
@@ -8925,9 +8965,14 @@ func (ls *LedgerState) ensureGenesisConstitution(txn ledgerdb.Txn) error {
 // it since genesis.
 //
 // Checking each credential against the existing (including soft-deleted) set
-// before inserting makes this safe to call on every startup: a credential a
-// later UpdateCommittee has since re-elected or removed already has a row, so
-// its real history is left alone instead of being reverted to genesis state.
+// before inserting makes this safe for a chain replayed from genesis: a
+// credential a later UpdateCommittee has since re-elected or removed already
+// has a row, so its real history is left alone instead of being reverted to
+// genesis state. A Mithril import whose current tip is in Conway or later is
+// different. Its committee is an authoritative current-state snapshot, so an
+// absent genesis credential means it is not seated and must not be inferred
+// from missing local history. A pre-Conway import has no committee state yet,
+// so it retains the genesis members for the later hard fork.
 func (ls *LedgerState) ensureGenesisCommittee(
 	ctx context.Context,
 	txn ledgerdb.Txn,
@@ -8946,6 +8991,57 @@ func (ls *LedgerState) ensureGenesisCommittee(
 	if len(conwayGenesis.Committee.Members) == 0 {
 		return nil
 	}
+	genesisMembers := make(
+		[]*models.CommitteeMember,
+		0,
+		len(conwayGenesis.Committee.Members),
+	)
+	for raw, expiry := range conwayGenesis.Committee.Members {
+		tag, hash, err := parseGenesisCommitteeCredential(raw)
+		if err != nil {
+			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
+		}
+		expiresEpoch, err := genesisCommitteeExpiryEpoch(expiry)
+		if err != nil {
+			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
+		}
+		genesisMembers = append(genesisMembers, &models.CommitteeMember{
+			ColdCredentialTag: tag,
+			ColdCredHash:      hash,
+			ExpiresEpoch:      expiresEpoch,
+			TermStartSlot:     0,
+			TermStartSlotSet:  true,
+			AddedSlot:         0,
+		})
+	}
+	mithrilBoundary, err := ls.ledgerDB().MithrilTrustBoundarySlotStrict(txn)
+	if err != nil {
+		return fmt.Errorf(
+			"read Mithril boundary before seeding genesis committee: %w",
+			err,
+		)
+	}
+	if mithrilBoundary > 0 {
+		tipEpoch, err := ls.ledgerDB().GetEpochBySlot(
+			ls.currentTip.Point.Slot,
+			txn,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"read current epoch before seeding genesis committee: %w",
+				err,
+			)
+		}
+		if tipEpoch == nil {
+			return fmt.Errorf(
+				"current tip slot %d has no persisted epoch",
+				ls.currentTip.Point.Slot,
+			)
+		}
+		if tipEpoch.EraId >= eras.ConwayEraDesc.Id {
+			return nil
+		}
+	}
 	existing, err := ls.ledgerDB().GetCommitteeMembersIncludeDeleted(ctx, txn)
 	if err != nil {
 		return fmt.Errorf("get existing committee members: %w", err)
@@ -8960,37 +9056,17 @@ func (ls *LedgerState) ensureGenesisCommittee(
 	newMembers := make(
 		[]*models.CommitteeMember,
 		0,
-		len(conwayGenesis.Committee.Members),
+		len(genesisMembers),
 	)
-	for raw, expiry := range conwayGenesis.Committee.Members {
-		tag, hash, err := parseGenesisCommitteeCredential(raw)
-		if err != nil {
-			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
-		}
-		// Validate the whole genesis entry before the already-seeded check, so
-		// a malformed expiry fails closed the same way on a fresh database and
-		// on one that already holds a row for this credential. Validating
-		// after the check would accept a genesis this function itself declares
-		// malformed, purely because some earlier startup got there first.
-		expiresEpoch, err := genesisCommitteeExpiryEpoch(expiry)
-		if err != nil {
-			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
-		}
+	for _, member := range genesisMembers {
 		key := (models.CommitteeCredential{
-			CredentialTag: tag,
-			Credential:    hash,
+			CredentialTag: member.ColdCredentialTag,
+			Credential:    member.ColdCredHash,
 		}).Key()
 		if _, ok := seen[key]; ok {
 			continue
 		}
-		newMembers = append(newMembers, &models.CommitteeMember{
-			ColdCredentialTag: tag,
-			ColdCredHash:      hash,
-			ExpiresEpoch:      expiresEpoch,
-			TermStartSlot:     0,
-			TermStartSlotSet:  true,
-			AddedSlot:         0,
-		})
+		newMembers = append(newMembers, member)
 	}
 	if len(newMembers) == 0 {
 		return nil
@@ -11014,19 +11090,20 @@ func (ls *LedgerState) checkSlotBattle(e BlockfetchEvent) {
 	}
 
 	incomingSlot := e.Point.Slot
-	localHash, forged := checker.WasForgedByUs(incomingSlot)
-	if !forged {
+	localHashes := checker.ForgedBlockHashes(incomingSlot)
+	if len(localHashes) == 0 {
 		return
 	}
 
 	remoteHash := e.Point.Hash
 
-	// Same hash means same block -- not a battle
-	if bytes.Equal(localHash, remoteHash) {
+	// A hash of our own means our own block -- not a battle. With several
+	// pools, two of them can forge the slot, and either block is ours.
+	if forgedByUs(checker, incomingSlot, remoteHash) {
 		return
 	}
 
-	ls.recordSlotBattle(incomingSlot, localHash, incomingSlot, remoteHash)
+	ls.recordSlotBattle(incomingSlot, localHashes[0], incomingSlot, remoteHash)
 }
 
 func (ls *LedgerState) checkComparedTipSlotBattle(
@@ -11053,15 +11130,17 @@ func (ls *LedgerState) checkComparedTipSlotBattle(
 	if checker == nil {
 		return
 	}
-	localHash, forged := checker.WasForgedByUs(localTip.Point.Slot)
-	if !forged || !bytes.Equal(localHash, localTip.Point.Hash) ||
-		bytes.Equal(localHash, incomingTip.Point.Hash) {
+	// Both tips ours is not a battle: with several pools, two of them can
+	// forge blocks the restricted window compares.
+	if !forgedByUs(checker, localTip.Point.Slot, localTip.Point.Hash) ||
+		bytes.Equal(localTip.Point.Hash, incomingTip.Point.Hash) ||
+		forgedByUs(checker, incomingTip.Point.Slot, incomingTip.Point.Hash) {
 		return
 	}
 
 	ls.recordSlotBattle(
 		localTip.Point.Slot,
-		localHash,
+		localTip.Point.Hash,
 		incomingTip.Point.Slot,
 		incomingTip.Point.Hash,
 	)
