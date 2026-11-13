@@ -378,16 +378,30 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 			// The cycle that first starts holding at an unchanged tip repairs the
 			// metadata the failed block left above it; the cycles that keep
 			// holding at that same tip reuse what it restored.
-			if err := ls.rollbackWithBlocks(
-				context.Background(),
-				rewindPoint,
-				nil,
-				replayHolding && !wasReplayHolding &&
-					pointMatches(rewindPoint, ledgerTip.Point),
-			); err != nil {
+			repairSameTip := replayHolding && !wasReplayHolding &&
+				pointMatches(rewindPoint, ledgerTip.Point)
+			var rollbackErr error
+			if rewindPrimaryChain {
+				// The primary-chain rewind already published undo events before
+				// removing its blocks. Do not publish them a second time while
+				// synchronizing metadata.
+				rollbackErr = ls.rollbackWithBlocks(
+					context.Background(),
+					rewindPoint,
+					nil,
+					repairSameTip,
+				)
+			} else {
+				rollbackErr = ls.rollbackAppliedStateWithUndo(
+					context.Background(),
+					rewindPoint,
+					repairSameTip,
+				)
+			}
+			if rollbackErr != nil {
 				return fmt.Errorf(
 					"rollback ledger state for replay recovery: %w",
-					err,
+					rollbackErr,
 				)
 			}
 			return nil

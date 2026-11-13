@@ -2002,7 +2002,10 @@ the Go storage model's field names. Peer-driven rollback records are written
 before chain truncation removes those block bodies. When the lagging ledger
 iterator reports a rollback after the chain has already removed them, it
 persists the iterator's captured `RollbackBlocks` payload before metadata
-truncation. A deeper multi-window rollback merges its blocks into the pending
+truncation. Metadata-only replay and partial-commit recovery resolve the payload
+from the ledger's applied `block_nonce` points through the published ledger tip,
+not from the primary chain suffix, before enqueueing Undo and truncating
+metadata. A deeper multi-window rollback merges its blocks into the pending
 record rather than replacing an earlier payload. If a reconciliation rewind is
 refused before changing the chain, the prior point and payload are restored; a
 newly created intent is cleared. A matching record is cleared only after

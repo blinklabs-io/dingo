@@ -943,6 +943,15 @@ be read from the committed state. If rollback wins, truncation and the ledger
 rewind make the waiting block batch stale, and the tip recheck rejects it
 instead of publishing Apply after Undo.
 
+Replay recovery with a resolved producer and runtime partial-commit recovery
+can rewind ledger metadata without first rewinding the primary chain. Those
+paths use the ledger's applied-point record, bounded by the published ledger
+tip, to resolve the blocks being discarded; the active chain suffix may be
+ahead or may already belong to a replacement fork. They hold the same
+`transactionEventMutex` while capturing that applied range, enqueueing its
+Undo events, and committing the metadata truncation. An unapplied chain block
+therefore produces no Undo, and a later Apply cannot overtake the recovery.
+
 Both mutation paths stage their in-memory state against the durable commit.
 `Chain.AddBlocks` and `Chain.addRawBlocks` advance `currentTip`,
 `tipBlockIndex`, the queued headers, and the ephemeral block buffer per block
