@@ -2384,7 +2384,7 @@ outlive it:
   on its own behalf. A leaked one would be handled once per restore cycle,
   forever.
 - **Leios persistence workers.** `Close` stops the historical-serving writer
-  and optional retention GC before storage closes. An unconfirmed worker drain
+  and retention GC before storage closes. An unconfirmed worker drain
   prevents normal shutdown and live restore from closing storage underneath it.
 
 `Close` is idempotent, so `Node.Stop` and an explicit restore teardown can both
@@ -5310,6 +5310,17 @@ install a job — an unwinding clone, a stopped writer, a complete job that land
 for the same occurrence meanwhile — and an installed job's reservation is
 released when it is superseded by a replacement or popped by the drain, so the
 budget is a steady-state limit rather than a one-shot allowance.
+Retention follows the reference node: the retention GC (`runLeiosPersistenceGC`)
+prunes an uncertified endorser block once the immutable point
+(`LedgerState.ImmutablePoint`, `k` blocks behind the applied tip) passes its
+slot, while a certified one (`Database.IsLeiosEBCertified`; the ledger stages
+the marker in the certifying ranking block's apply transaction, so it commits
+only with that block, and a rollback removes it) is kept permanently. A positive
+`leiosPersistenceRetentionSlots` only widens the window and never prunes past
+the immutable point, and the writer still persists a certified block below the
+cutoff. The leios-fetch server answers an uncertified block behind the
+immutable point as unknown, the same absence reply as any other missing block,
+whether it is still cached or persisted.
 `startLeiosPersistWriter` resets the accounting with the pending map, so a live
 Restore/Truncate restart does not carry the old queue's reservations onto the
 new one; the writer is drained and stopped at shutdown via
@@ -5424,19 +5435,21 @@ Positive retention values must cover at least the network stability window,
 from the ledger's genesis parameters. Startup rejects a smaller value or unknown
 parameters before constructing the persistence workers.
 
-Leios historical-serving records are kept indefinitely unless an operator sets
-`leiosPersistenceRetentionSlots` (or
-`DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) to a positive value. The separate
-GC worker prunes `em`/`et` manifests and transaction bodies strictly older
-than the highest persisted Leios EB slot minus that window, first after startup
-restores the watermark and then hourly. It uses the blob namespace only;
+Leios historical-serving records follow the reference node's retention: the
+`em`/`et` records of a certified endorser block are kept, and an uncertified
+one is pruned once the immutable point passes its slot. A positive
+`leiosPersistenceRetentionSlots` (or `DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`)
+keeps uncertified records back to the highest persisted Leios EB slot minus
+that window, never past the immutable point; `DATABASE.md` gives the full rule.
+The separate GC worker runs first after startup restores the watermark and
+then hourly. It uses the blob namespace only;
 ordinary ledger block history and already-applied UTxO effects are unaffected.
 The Ouroboros provider also reloads EBs from these keys on a cache miss, so a
 later rollback/replay that needs pruned data must refetch it from a Leios peer;
-downstream requests outside the configured window have the same peer
-dependency. Hourly sweeps list manifests to find the highest persisted slot,
-then scan the shared Leios prefix for deletion candidates. On object stores
-this means two paginated listings plus per-key deletes, so the cost is opt-in.
+downstream requests for pruned records have the same peer dependency. A sweep
+with a positive window lists manifests to find the highest persisted slot; every
+sweep scans the shared Leios prefix for deletion candidates. On object stores
+this means paginated listings plus per-key deletes.
 The GC worker does not share the persistence writer's queue and cannot stall
 its write drain. Live Restore/Truncate stops
 and joins both workers before storage replacement; if either worker cannot

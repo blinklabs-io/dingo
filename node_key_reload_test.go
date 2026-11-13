@@ -390,6 +390,16 @@ func TestAgentOpCertLoopReloadsEachNewOffer(t *testing.T) {
 		testutil.RequireReceive(t, reloads, time.Second, "a different offer"))
 }
 
+// replaceFileAtomically swaps in new content with a rename, as a credential
+// rotation does. Rewriting in place truncates first, and a poll that lands
+// between the truncate and the write sees an empty file.
+func replaceFileAtomically(t *testing.T, path string, data []byte) {
+	t.Helper()
+	tmp := path + ".tmp"
+	require.NoError(t, os.WriteFile(tmp, data, 0o600))
+	require.NoError(t, os.Rename(tmp, path))
+}
+
 func TestCredentialFileWatchReloadsOnceAfterAStableChange(t *testing.T) {
 	t.Parallel()
 	n := newTestNodeForBP(t, false, "", "", "", nil)
@@ -410,7 +420,7 @@ func TestCredentialFileWatchReloadsOnceAfterAStableChange(t *testing.T) {
 
 	testutil.RequireNoReceive(t, reloads, 50*time.Millisecond,
 		"unchanged files must not reload")
-	require.NoError(t, os.WriteFile(file, []byte("counter 2"), 0o600))
+	replaceFileAtomically(t, file, []byte("counter 2"))
 	testutil.RequireReceive(t, reloads, 2*time.Second, "reload after a change")
 	testutil.RequireNoReceive(t, reloads, 50*time.Millisecond,
 		"one change reloads once")
@@ -480,7 +490,7 @@ func TestCredentialFileWatchRetriesAFailedReload(t *testing.T) {
 	)
 
 	testutil.RequireNoReceive(t, reloads, 50*time.Millisecond, "no change yet")
-	require.NoError(t, os.WriteFile(file, []byte("counter 2"), 0o600))
+	replaceFileAtomically(t, file, []byte("counter 2"))
 	require.Error(t,
 		testutil.RequireReceive(t, reloads, 2*time.Second, "first reload"))
 	// The files do not change again; the failed reload is retried anyway.
