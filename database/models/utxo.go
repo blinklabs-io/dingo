@@ -48,15 +48,7 @@ var (
 	ErrTooManyUtxoResults = errors.New(
 		"utxo query exceeded the requested maxResults bound",
 	)
-	ErrUtxoQueryBudgetExceeded = errors.New(
-		"utxo query exceeded its work budget",
-	)
 )
-
-// MaxAssetQuantityHoldings is the most live holdings one asset quantity total
-// reads. An asset held by more UTxOs fails with ErrUtxoQueryBudgetExceeded
-// rather than scanning without a limit.
-const MaxAssetQuantityHoldings = 1_000_000
 
 // UtxoAddressPattern carries explicit address-match intent through the shared
 // query API. Fields within one pattern are ANDed; multiple patterns are ORed.

@@ -823,10 +823,10 @@ type UtxoStore interface {
 	// GetUtxosByAddressWithOrdering). The database layer performs full
 	// exact-address CBOR filtering when ExactAddress is set. An empty
 	// patterns slice returns (nil, nil), matching the coordinated
-	// Database.UtxosByAddress's empty-input handling. maxResults is a
-	// required, positive bound on the number of candidate rows returned;
-	// exceeding it yields models.ErrTooManyUtxoResults instead of an
-	// unbounded or silently truncated result.
+	// Database.UtxosByAddress's empty-input handling. maxResults is an
+	// optional bound on the number of candidate rows returned; zero or
+	// negative means unbounded, and exceeding a positive bound yields
+	// models.ErrTooManyUtxoResults instead of a silently truncated result.
 	GetUtxosByAddress(
 		[]models.UtxoAddressPattern,
 		int,

@@ -790,7 +790,7 @@ func TestArchiveServiceClientBoundsDecodedResponse(t *testing.T) {
 		connect.WithCompressMinBytes(1),
 	)
 	archiveServer.downloadURL = "https://archive.example/" +
-		strings.Repeat("a", DefaultMaxResponseBody)
+		strings.Repeat("a", archiveClientMaxResponseBody)
 	db := newTestDB(t)
 	store, err := NewBarkBlobStore(BlobStoreBarkConfig{
 		BaseUrl:                            baseURL,

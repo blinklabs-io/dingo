@@ -380,29 +380,17 @@ provider's resolved file location, exposed through the optional
 `sqlstore.Store.SQLitePath()` capability. A metadata provider `dataDir` override
 therefore also controls MCP's read target. Other backends and in-memory SQLite
 return no file location. MCP owns the extra connection pool and closes it when
-the API stops; it never borrows or closes the provider's pools. At most four
-calls to the SQL tools, `get_asset_info`, `get_utxos_by_asset`, and
-raw-credential `get_utxos` execute concurrently; excess calls fail immediately.
-`sqlite_query` and `sqlite_explain`, which run caller-supplied SQL, may hold at
-most two of those slots. While the metadata `-wal` file exceeds 128 MiB, twice
-the `journal_size_limit`, every MCP tool call and resource read is refused: at
-that size the WAL has been neither reset nor truncated since it grew past the
-limit, and an open reader prevents both. The in-flight reads finish within the
-query timeout, which gives the periodic TRUNCATE checkpoint a reader-free
-interval from MCP; requests are admitted again once the file is back under the
-limit. The probe is a `stat` of the `-wal` file next to `SQLitePath()`: a
-missing file reads as empty, and any other stat error counts as pressure and is
-logged at most once a minute. Callers that inject their own SQLite pool without
-a metadata store get no WAL check. SQL row limits are enforced during iteration,
+the API stops; it never borrows or closes the provider's pools. The SQL tools,
+`get_asset_info`, `get_utxos_by_asset`, and raw-credential `get_utxos` have no
+concurrency limit, asset-row scan cap or offset ceiling, and MCP does not refuse
+reads based on the metadata `-wal` size. SQL row limits are enforced during iteration,
 including PRAGMA results. Arbitrary queries and EXPLAIN use a dedicated borrowed
 connection with `query_only` and SQLite limits: 64 KiB per value or encoded row,
 64 KiB SQL, and 32 result columns. `sqlite_query` also rejects a response after
 1 MiB of decoded cell data. Settings are restored before returning injected
 connections to their pool. The SQL byte limit is also checked before
 tokenization. Schema inspection binds table names through SQLite table-valued
-PRAGMAs, including reserved identifiers such as `transaction`. Query, asset, and
-raw-credential UTxO offsets are capped at 10,000; a full page whose next offset
-would exceed the cap says the result is truncated. UTxO and asset queries use
+PRAGMAs, including reserved identifiers such as `transaction`. UTxO and asset queries use
 `deleted_slot = 0`; native-asset supply is summed from decimal quantities with
 arbitrary precision. Asset pages order by UTxO ID and asset ID so policy-only
 queries have a stable order even when one UTxO holds multiple matching assets.
@@ -530,10 +518,9 @@ and historical Mesh balances aggregate address balances without materializing
 the matching UTxOs. Blockfrost address-list pages use the exact address index
 for SQL ordering, offset, and total count after API-mode startup backfill,
 avoiding CBOR scans of earlier outputs on deep pages. If that index is not
-available, address listing retains the bounded CBOR candidate scan. Historical
-balance queries scan at most
-`ExactAddressCandidateScanLimit + 1` matching rows and return
-`ErrTooManyUtxoResults` when the address exceeds that bound. `utxo_address`
+available, address listing retains the CBOR candidate scan. Historical
+balance queries sum every matching row; they return `ErrTooManyUtxoResults`
+only when the caller passes a positive row bound and the address exceeds it. `utxo_address`
 keeps each UTxO's canonical rendered address as bytes so exact pointer and
 bootstrap identities are available to both queries. Migration v42 adds the
 table; API-mode startup backfills all retained
@@ -6080,8 +6067,9 @@ that dimension unbounded.
   the ordering sorts at most that many rows.
 - `MaxAssets` fails the read at the first distinct asset past the bound.
 
-The Blockfrost adapter passes 100,000 UTxO rows, 200,000 asset holdings and
-5,000 distinct assets, and reports the sentinel as `ErrAddressSummaryTooLarge`.
+The Blockfrost adapter passes no bounds by default (its `addressSummaryLimits`
+field is zero), so these queries read the whole credential; a caller that sets
+them sees the sentinel as `ErrAddressSummaryTooLarge`.
 
 ### `GetUtxoBalanceByAddress`
 
@@ -6090,9 +6078,9 @@ Reads live-UTxO balances for an address (used by the Blockfrost
 needs the exact-address CBOR comparison, so its summary instead reads keyset
 pages of coarse credential candidates through
 `Database.UtxosByAddressWithOrdering`, keeps outputs whose decoded address
-matches, folds them into big-integer sums, and fails with
-`ErrAddressSummaryTooLarge` past 50,000 candidates read or 5,000 distinct
-assets). Amounts are stored as text, so the store sums them in Go rather than
+matches, folds them into big-integer sums, and reads
+every candidate; an in-process limit fails with `ErrAddressSummaryTooLarge`).
+Amounts are stored as text, so the store sums them in Go rather than
 with SQL `SUM`, checking for `uint64` overflow.
 
 `models.AddressBalanceLimits` bounds the read: `MaxUtxos` adds a `LIMIT` of one
@@ -6101,8 +6089,8 @@ at the first distinct asset past the limit, which the `(policy id, name)`
 ordering makes the point the distinct count first exceeds it. Either returns
 `models.ErrAddressBalanceLimit` before the rest of the set is read. A zero
 field leaves that dimension unbounded. Both queries run under the read
-transaction's context, so cancellation stops them. The summary passes 50,000
-outputs and 5,000 assets. Lovelace and count:
+transaction's context, so cancellation stops them. The summary passes no
+bounds. Lovelace and count:
 
 ```sql
 SELECT amount
@@ -6174,9 +6162,9 @@ most `maxResults` of a chunk's returned rows can already be seen, so
 whenever a chunk's true match count exceeds `maxResults+1`, at least one
 returned row is guaranteed new, which is what actually proves the
 overflow -- detected rather than silently truncated into a partial (and
-therefore wrong) answer; exceeding the bound returns
-`models.ErrTooManyUtxoResults`. Callers with no more specific limit of
-their own use `database.MaxUtxosByAddressResults`. This is unrelated to
+therefore wrong) answer; exceeding a positive bound returns
+`models.ErrTooManyUtxoResults`. A zero or negative `maxResults` leaves the
+query unbounded, and the shipped API servers pass none. This is unrelated to
 `GetUtxosByAddressWithOrdering`'s own `Limit`/`Offset` pagination, which
 remains the mechanism for a caller that wants a bounded page rather than an
 error on overflow.
@@ -6299,11 +6287,8 @@ WHERE a.policy_id = decode($1, 'hex')
 is computed by the database and no row per holding crosses the driver (SQLite
 uses `dingo_uint64_sum`, which refuses a total past 64 bits; other backends
 sum `DECIMAL(20, 0)` and the store rejects a total past 64 bits). The holdings
-are read through an inner `LIMIT models.MaxAssetQuantityHoldings + 1`
-(1,000,000); an asset held by more fails with `ErrUtxoQueryBudgetExceeded`
-instead of scanning without limit. The scan runs under the caller's
-transaction context and stops when that context ends. The Blockfrost asset
-routes add a request deadline and an admission pool.
+are all read, with no holding cap. The scan runs under the caller's
+transaction context and stops when that context ends.
 
 `GetAssetMintBurnInfo` (Blockfrost `/assets/{asset}` `initial_mint_tx_hash` and
 `mint_or_burn_count`) reads the mint/burn history rather than live holdings:
@@ -6461,12 +6446,10 @@ Without a completed index, or with an asset filter (the index carries no asset
 predicate), `MatchingUtxoRefsByAddressWithOrderingBounded` scans coarse
 candidates in the requested order in keyset batches with `SkipAssets` set,
 CBOR-decodes each only to confirm the match, and returns bare
-`(TxId, OutputIdx)` references. The scan stops after
-`ExactAddressCandidateScanLimit` candidates, and loading more than
-`DefaultPublicUtxoCborBudget` bytes of output CBOR returns
-`ErrUtxoQueryBudgetExceeded`. A page that ends before the scan is exhausted is
-served without a total, and a page the candidate budget cannot reach returns
-`ErrUtxoQueryBudgetExceeded`. Full rows (with assets) are fetched for just the
+`(TxId, OutputIdx)` references. The scan has no candidate or CBOR-byte budget
+unless the caller passes a positive candidate bound, which limits the number of
+candidates examined and not the CBOR bytes read. A page that ends before the
+scan is exhausted is served without a total. Full rows (with assets) are fetched for just the
 page via `GetUtxosByRefs`.
 
 Both `AccountUTXOs` and `AddressUTXOs` open one read `Txn`

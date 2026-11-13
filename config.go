@@ -285,6 +285,7 @@ type Config struct {
 	trustedNtCIdleTimeout                                                               time.Duration
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
+	onGenesisSelectionResolved                                                          func(genesisSelectionMode bool)
 	genesisCorroborationPeers                                                           int
 	genesisChainSyncJumping                                                             bool
 	blockProducer                                                                       bool
@@ -3081,6 +3082,14 @@ func (c *Config) genesisSelectionEligible() bool {
 		!c.intersectTip &&
 		len(c.intersectPoints) == 0 &&
 		!c.cardanoNodeConfig.PraosConsensusMode()
+}
+
+// WithGenesisSelectionResolved registers fn to receive the mode the chain
+// selector actually starts in, once the node has resolved it from the
+// configuration and the caught-up marker. It is called once per node start,
+// before the selector is built.
+func WithGenesisSelectionResolved(fn func(genesisSelectionMode bool)) ConfigOptionFunc {
+	return func(c *Config) { c.onGenesisSelectionResolved = fn }
 }
 
 // TopologyConfig returns the loaded topology configuration.

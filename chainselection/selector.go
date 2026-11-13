@@ -23,6 +23,7 @@ import (
 	"maps"
 	"math"
 	"net"
+	rtrace "runtime/trace"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ import (
 
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -481,7 +483,10 @@ type ChainSelector struct {
 	// chain the limit bounds. It has its own mutex because the limit is
 	// computed under the read lock.
 	eagernessAnchorMu sync.Mutex
-	eagernessAnchor   *eagernessAnchor
+	// witnessMatches remembers how far each corroboration comparison got. It
+	// has its own lock: the comparisons run under the selector's read lock.
+	witnessMatches  witnessMatches
+	eagernessAnchor *eagernessAnchor
 
 	// jumpRecords holds the candidate fragments ChainSync Jumping assigns to
 	// peers that do not stream (see jumping.go). Guarded by mutex.
@@ -1004,6 +1009,9 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		defer rtrace.StartRegion(
+			context.Background(), tracing.RegionChainSelectionAdmission,
+		).End()
 
 		if cs.loneFrontierBrokenLocked(
 			connId, observedTip, link, cs.farTipClaims,
@@ -1814,6 +1822,9 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		defer rtrace.StartRegion(
+			context.Background(), tracing.RegionChainSelectionAdmission,
+		).End()
 		if witness != nil && !cs.admittedPeerTipPointLocked(*witness) {
 			return
 		}
@@ -3175,6 +3186,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.peerTips, connId)
 	delete(cs.deliveredPeerTips, connId)
 	delete(cs.eagernessDeliveries, connId)
+	cs.witnessMatches.forget(connId)
 	delete(cs.pendingPeerTips, connId)
 	delete(cs.pendingPeerTipFrontiers, connId)
 	delete(cs.forecastHorizonWitnesses, connId)
@@ -4735,6 +4747,9 @@ func (cs *ChainSelector) evaluateAndSwitch(generationPinned bool) bool {
 		defer releaseGeneration()
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		defer rtrace.StartRegion(
+			context.Background(), tracing.RegionChainSelectionEvaluate,
+		).End()
 		switchOccurred, switchEvent, selectionEvent, corroborationEvent = cs.evaluateBestPeerLocked()
 		sparse = cs.genesisDensityDisconnectsLocked()
 	}()
@@ -5174,6 +5189,7 @@ func (cs *ChainSelector) sweepDeadDeliveredPeerTips() {
 		if _, tracked := cs.peerTips[connId]; !tracked {
 			delete(cs.deliveredPeerTips, connId)
 			delete(cs.eagernessDeliveries, connId)
+			cs.witnessMatches.forget(connId)
 		}
 	}
 }

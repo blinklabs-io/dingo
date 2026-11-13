@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	gosync "sync"
 	"time"
@@ -51,7 +52,7 @@ func (h *bulkSlotHolder) add(release func()) {
 func (h *bulkSlotHolder) armWriteDeadline() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(h.releases) == 0 || h.writeDeadlineSet {
+	if len(h.releases) == 0 || h.writeDeadlineSet || h.writeTimeout <= 0 {
 		return nil
 	}
 	err := h.responseController.SetWriteDeadline(
@@ -119,7 +120,8 @@ func bulkResponseWriteDeadlineInterceptor(next connect.UnaryFunc) connect.UnaryF
 	}
 }
 
-// acquireBulk reserves one of the MaxConcurrentBulkRequests slots shared by
+// acquireBulk reserves one of the MaxConcurrentBulkRequests slots (none when
+// it is unset) shared by
 // every unary handler whose cost scales with the size of its result. It never
 // waits: a caller that cannot get a slot is refused immediately, because a
 // queue of blocked handlers would hold the very memory the budget bounds.
@@ -127,6 +129,9 @@ func bulkResponseWriteDeadlineInterceptor(next connect.UnaryFunc) connect.UnaryF
 // response is written and the returned function does nothing; otherwise the
 // returned function frees it. Either way the caller defers it.
 func (u *Utxorpc) acquireBulk(ctx context.Context) (func(), error) {
+	if u.bulkSlots == nil {
+		return func() {}, nil
+	}
 	select {
 	case u.bulkSlots <- struct{}{}:
 	default:
@@ -147,7 +152,8 @@ func (u *Utxorpc) acquireBulk(ctx context.Context) (func(), error) {
 	return release, nil
 }
 
-// byteBudget tracks the payload bytes a single response has retained.
+// byteBudget tracks the payload bytes a single response has retained. A limit
+// of zero or less is not applied.
 type byteBudget struct {
 	limit int64
 	used  int64
@@ -156,7 +162,7 @@ type byteBudget struct {
 // fits reports whether n more bytes stay within the limit. The first item
 // always fits, so a limit smaller than one item still makes progress.
 func (b *byteBudget) fits(n int) bool {
-	return b.used == 0 || b.used+int64(n) <= b.limit
+	return b.limit <= 0 || b.used == 0 || b.used+int64(n) <= b.limit
 }
 
 func (b *byteBudget) add(n int) { b.used += int64(n) }
@@ -171,4 +177,25 @@ func (b *byteBudget) exceeded() error {
 			b.limit,
 		),
 	)
+}
+
+// responseByteLimit is MaxResponseBytes as a positive bound for callees that
+// require one; an unset limit becomes the largest representable bound.
+func (u *Utxorpc) responseByteLimit() int64 {
+	if u.config.MaxResponseBytes <= 0 {
+		return math.MaxInt64
+	}
+	return u.config.MaxResponseBytes
+}
+
+// withOptionalTimeout bounds ctx by timeout, or only makes it cancelable when
+// timeout is zero or less.
+func withOptionalTimeout(
+	ctx context.Context,
+	timeout time.Duration,
+) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, timeout)
 }

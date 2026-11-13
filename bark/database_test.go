@@ -2710,25 +2710,6 @@ func TestSnapshotListingsMapContextErrors(t *testing.T) {
 	}
 }
 
-func TestDatabaseDiagnosticsRejectConcurrentWork(t *testing.T) {
-	t.Parallel()
-	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
-	h.diagnostic <- struct{}{}
-	t.Cleanup(func() { <-h.diagnostic })
-
-	_, err := h.ListSnapshots(
-		t.Context(),
-		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{}),
-	)
-	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
-
-	_, err = h.GetDatabaseInfo(
-		t.Context(),
-		connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
-	)
-	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
-}
-
 // TestListSnapshotsSkipsCorruptedEntryButReturnsOthers verifies that one
 // snapshot's corrupted manifest.json doesn't hide every other, otherwise-
 // valid snapshot from ListSnapshots: this RPC used

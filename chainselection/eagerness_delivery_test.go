@@ -17,6 +17,7 @@ package chainselection
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -339,7 +340,7 @@ func TestEagernessAuthenticatedDeliveryCopiesAdmissionHistory(t *testing.T) {
 				f.selector.EagernessLimit().BlockNumber,
 			)
 			f.selector.mutex.Lock()
-			f.selector.peerTips[peer].observedPoints[0].Hash[0] = 'x'
+			rewriteFirstObservedPoint(f.selector.peerTips[peer], 'x')
 			f.selector.mutex.Unlock()
 			assert.Equal(
 				t,
@@ -617,4 +618,17 @@ func TestEagernessAuthenticatedDeliveryPinsPublicationAcrossRecording(t *testing
 	require.NotNil(t, delivery)
 	require.EqualValues(t, 11, delivery.ObservedTip.BlockNumber)
 	require.EqualValues(t, 1, head.generation)
+}
+
+// rewriteFirstObservedPoint gives tip a frontier whose oldest point has
+// another hash. A frontier array is never rewritten in place (see
+// frontierWindow), and the selector's comparisons rely on that, so the
+// conflicting history arrives as a new array, the way a rollback's does.
+func rewriteFirstObservedPoint(tip *PeerChainTip, first byte) {
+	points := slices.Clone(tip.observedPoints)
+	for i, point := range points {
+		points[i] = clonePoint(point)
+	}
+	points[0].Hash[0] = first
+	tip.observedPoints = points
 }

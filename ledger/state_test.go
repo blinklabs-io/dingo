@@ -14124,21 +14124,6 @@ func TestEvaluationAdmissionUnidentifiedCallsUseGlobalCapacity(t *testing.T) {
 	require.Equal(t, 4, limiter.total)
 }
 
-func TestEvaluationCapacityReservesConsensusProcessor(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(
-		t,
-		max(runtime.GOMAXPROCS(0)-1, 1),
-		evaluationCapacity(LedgerStateConfig{}),
-	)
-	require.Equal(
-		t,
-		7,
-		evaluationCapacity(LedgerStateConfig{MaxConcurrentEvaluations: 7}),
-	)
-}
-
 func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {
 	db := newTestDB(t)
 	cm, err := chain.NewManager(t.Context(), db, nil)

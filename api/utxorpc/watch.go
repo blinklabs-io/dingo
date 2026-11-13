@@ -234,7 +234,8 @@ func (s *watchServiceServer) WatchTx(
 	predicate := req.Msg.GetPredicate() // Predicate
 	fieldMask := req.Msg.GetFieldMask()
 	intersect := req.Msg.GetIntersect() // []*BlockRef
-	if len(intersect) > s.utxorpc.config.MaxBlockRefs {
+	if s.utxorpc.config.MaxBlockRefs > 0 &&
+		len(intersect) > s.utxorpc.config.MaxBlockRefs {
 		return connect.NewError(
 			connect.CodeInvalidArgument,
 			fmt.Errorf(
@@ -254,7 +255,7 @@ func (s *watchServiceServer) WatchTx(
 
 	var predTree *txPredicateNode
 	if predicate != nil {
-		remaining := s.utxorpc.config.MaxPredicateNodes
+		remaining := s.utxorpc.predicateNodeBudget()
 		if !predicateProtoWithinBudget(predicate, isNilPtr[watch.TxPredicate], &remaining, 0) {
 			return predicateBudgetError(s.utxorpc.config.MaxPredicateNodes)
 		}

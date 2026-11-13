@@ -1864,7 +1864,7 @@ func (evalBusyLedgerStub) EvaluateTxContext(
 	)
 }
 
-func TestEvalTxOverloadReturnsResourceExhausted(t *testing.T) {
+func TestEvalTxOverloadReturnsUnavailable(t *testing.T) {
 	t.Parallel()
 
 	_, txCbor, _ := firstTxInFixtureBlocks(t, 40)
@@ -1881,7 +1881,7 @@ func TestEvalTxOverloadReturnsResourceExhausted(t *testing.T) {
 		}),
 	)
 
-	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
 }
 
 func TestEvalTxPropagatesCancellation(t *testing.T) {

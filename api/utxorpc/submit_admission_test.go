@@ -21,73 +21,25 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
-	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/stretchr/testify/require"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit"
 )
 
-type busySubmissionMempool struct {
-	adds int
-}
-
-func (m *busySubmissionMempool) AddTransaction(
-	context.Context,
-	uint,
-	[]byte,
-) error {
-	m.adds++
-	return nil
-}
-
-func (m *busySubmissionMempool) TransactionsBounded(
-	int,
-	int64,
-) ([]mempool.MempoolTransaction, int) {
-	return nil, 0
-}
-
-func (m *busySubmissionMempool) AdmitSubmission(
-	ctx context.Context,
-) (context.Context, func(), error) {
-	return ctx, nil, mempool.ErrSubmissionBusy
-}
-
-// A full submission gate answers ResourceExhausted before the request's
-// transaction bytes are examined.
-func TestSubmitTxBusyIsResourceExhausted(t *testing.T) {
-	t.Parallel()
-	pool := &busySubmissionMempool{}
-	srv := &submitServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
-		Logger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Mempool: pool,
-	})}
-	_, err := srv.SubmitTx(
-		context.Background(),
-		connect.NewRequest(&submit.SubmitTxRequest{
-			Tx: &submit.AnyChainTx{
-				Type: &submit.AnyChainTx_Raw{Raw: []byte{0xff}},
-			},
-		}),
-	)
-	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
-	require.ErrorIs(t, err, mempool.ErrSubmissionBusy)
-	require.Zero(t, pool.adds)
-}
-
-// EvalTx is refused before transaction decoding once one remote host holds
-// its per-client share of evaluation requests.
+// With MaxEvalRequestsPerClient set, EvalTx is refused before transaction
+// decoding once one remote host holds its per-client share of evaluation requests.
 func TestEvalTxPerClientLimitIsResourceExhausted(t *testing.T) {
 	t.Parallel()
 	srv := &submitServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
-		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		LedgerState: &evalTxLedgerStub{},
+		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerState:              &evalTxLedgerStub{},
+		MaxEvalRequestsPerClient: 2,
 	})}
 	req := connect.NewRequest(&submit.EvalTxRequest{
 		Tx: &submit.AnyChainTx{
 			Type: &submit.AnyChainTx_Raw{Raw: []byte{0xff}},
 		},
 	})
-	for range DefaultMaxEvalRequestsPerClient {
+	for range srv.utxorpc.config.MaxEvalRequestsPerClient {
 		release, err := srv.utxorpc.admitEvalRequest(req.Peer())
 		require.NoError(t, err)
 		t.Cleanup(release)
