@@ -1299,9 +1299,10 @@ func (p *PeerGovernor) selectionConnLocked(peer *Peer) *PeerConnection {
 }
 
 // syncUpstreamWithholdLocked aligns each open connection's withhold with the
-// current denial and demotion state and appends the resulting chain selection events. A
-// denial that starts or expires while a connection is open changes whether
-// that connection may feed chainsync. Must be called with p.mu held.
+// current denial and demotion state and appends the resulting chain selection
+// events. A denial or demotion that starts or ends while a connection is open
+// changes whether that connection may feed chainsync. Must be called with p.mu
+// held.
 func (p *PeerGovernor) syncUpstreamWithholdLocked(
 	events []pendingEvent,
 ) []pendingEvent {
