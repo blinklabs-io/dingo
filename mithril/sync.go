@@ -189,6 +189,15 @@ func cleanupInvalidRepairStoredGapBeforeImport(
 	return true, nil
 }
 
+// errRejectedTailAfterUTxOImport is terminal for the database: the stored
+// blocks and the checkpoint that cause it are unchanged by a re-run, which
+// refuses again. Only a fresh bootstrap recovers.
+var errRejectedTailAfterUTxOImport = errors.New(
+	"the UTxOs of that state are already imported, and removing the stored " +
+		"tail would delete them; nothing was deleted, a re-run refuses the " +
+		"same way, so run the sync again with an empty data directory",
+)
+
 // cleanRejectedStoredGapBeforeImport removes the stored blocks above the
 // immutable tip, and the rows their processing wrote, when they do not extend
 // to the prepared ledger state. It runs before the import so the cleanup, which
@@ -235,8 +244,8 @@ func cleanRejectedStoredGapBeforeImport(
 		if checkpoint != nil &&
 			models.IsPhaseCompleted(checkpoint.Phase, models.ImportPhaseUTxO) {
 			return false, fmt.Errorf(
-				"stored volatile gap blocks above slot %d do not extend to ledger state slot %d, and the UTxOs of that state are already imported; removing the stored tail would delete them: %w",
-				immutableTipSlot, tip.Slot, gap.rejected,
+				"stored volatile gap blocks above slot %d do not extend to ledger state slot %d: %w: %w",
+				immutableTipSlot, tip.Slot, errRejectedTailAfterUTxOImport, gap.rejected,
 			)
 		}
 	}
@@ -1334,12 +1343,14 @@ func Sync(
 	syncComplete := false
 	defer func() {
 		if !syncComplete {
-			logger.Error(
-				"sync did not complete; "+
-					"re-run 'dingo mithril sync' to resume",
-				"component", "mithril",
-				"error", syncErr,
-			)
+			msg := "sync did not complete; " +
+				"re-run 'dingo mithril sync' to resume"
+			if errors.Is(syncErr, errRejectedTailAfterUTxOImport) {
+				msg = "sync did not complete and cannot resume on this " +
+					"database; run 'dingo mithril sync' with an empty " +
+					"data directory"
+			}
+			logger.Error(msg, "component", "mithril", "error", syncErr)
 		}
 	}()
 

@@ -3073,13 +3073,15 @@ replayed producer links an already-stored row without restamping it
 from the block store, restamps it with the producer's block slot, which is at
 or before the anchor, so it only lowers `added_slot`. A row recovered from the
 block store already carries that slot. Every rollback entry point keeps its
-deletion slot at or above the anchor -- `ledger.LedgerState.rollback` refuses
-a target below `mithril_ledger_slot`, and `Database.TruncateAfterSlot` floors
-the slot it applies to UTxOs, transactions and spends -- so an imported output,
-linked or not, and its assets survive a rollback of a block that replayed or
-re-confirmed it. `TruncateAfterSlot` applies the target slot itself to its
-other deletions, governance proposals included, so a target below the anchor
-deletes imported proposals above it.
+deletion slot at or above the anchor -- `ledger.LedgerState.rollback` and the
+`database/lifecycle` truncate both refuse a target below `mithril_ledger_slot`
+before mutating anything, and `Database.TruncateAfterSlot` floors the slot it
+applies to UTxOs, transactions and spends -- so an imported output, linked or
+not, and its assets survive a rollback of a block that replayed or re-confirmed
+it. `TruncateAfterSlot` applies the target slot itself to its other deletions;
+since both callers refuse a target below the anchor, those never reach an
+imported governance proposal, whose `added_slot` is the start slot of the
+epoch it was proposed in, at or before the anchor.
 
 The Mithril sync cleanup of a rejected stored tail
 (`deleteBlobBlocksAboveSlotExcept`) is a rollback entry point of another kind:
@@ -3095,7 +3097,9 @@ or before the copy in reward-state repair. A catch-up or repair import
 reconciles every phase and never reads a checkpoint, so it rewrites whatever
 the cleanup removed. A bootstrap resume skips its UTxO phase once the import
 checkpoint for its key records it complete; there the cleanup is refused with
-an error and nothing is deleted. A rejection found after the import is an
+an error and nothing is deleted. A re-run meets the same blocks and checkpoint
+and refuses again, so the only recovery is a fresh bootstrap into an empty data
+directory. A rejection found after the import is an
 error and deletes nothing. The cleanup cuts blocks, votes, UTxOs, transactions,
 spends and proposals at the same raw slot.
 

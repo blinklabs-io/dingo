@@ -893,6 +893,15 @@ func TestSyncResumeRefusesRejectedTailAfterUTxOImport(t *testing.T) {
 	require.NoError(t, err, "the refusal must not delete stored blocks")
 }
 
+// Nothing a later run does clears the refusal's state, so the error must be
+// distinguishable and name the only recovery: a fresh bootstrap.
+func TestSyncResumeRefusalNamesFreshBootstrapRecovery(t *testing.T) {
+	t.Parallel()
+	run := runRejectedTailSync(t, rejectedTailOptions{importedCheckpoint: true})
+	require.ErrorIs(t, run.syncErr, errRejectedTailAfterUTxOImport)
+	require.ErrorContains(t, run.syncErr, "empty data directory")
+}
+
 func TestSyncRewardRepairBelowCertifiedTipDropsOnlyForkBlocks(t *testing.T) {
 	t.Parallel()
 	testSyncRewardRepairBelowCertifiedTip(t, true)
