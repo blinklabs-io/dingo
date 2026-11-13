@@ -34,6 +34,7 @@ type fixedHashMetadataStore struct {
 	dreps               []*models.Drep
 	activePoolKeyHashes [][]byte
 	poolRows            []models.Pool
+	getPoolCalls        int
 }
 
 func (s *fixedHashMetadataStore) GetPool(
@@ -41,7 +42,21 @@ func (s *fixedHashMetadataStore) GetPool(
 	_ bool,
 	_ types.Txn,
 ) (*models.Pool, error) {
+	s.getPoolCalls++
 	return s.pool, nil
+}
+
+func (s *fixedHashMetadataStore) GetPoolStatus(
+	_ lcommon.PoolKeyHash,
+	_ types.Txn,
+) (models.PoolStatus, error) {
+	if s.pool == nil {
+		return models.PoolStatus{}, nil
+	}
+	return models.PoolStatus{
+		Exists: true,
+		Active: len(s.pool.Registration) > 0,
+	}, nil
 }
 
 func (s *fixedHashMetadataStore) GetPoolRegistrationsEffectiveForEpoch(
@@ -106,6 +121,7 @@ func TestLedgerViewPoolCurrentStateRejectsMalformedHashes(t *testing.T) {
 				VrfKeyHash:    make([]byte, lcommon.Blake2b256Size),
 				RewardAccount: make([]byte, lcommon.Blake2b224Size),
 				Registration: []models.PoolRegistration{{
+					PoolKeyHash:   make([]byte, lcommon.Blake2b224Size),
 					VrfKeyHash:    make([]byte, lcommon.Blake2b256Size),
 					RewardAccount: make([]byte, lcommon.Blake2b224Size),
 					Owners: []models.PoolRegistrationOwner{{
@@ -115,7 +131,8 @@ func TestLedgerViewPoolCurrentStateRejectsMalformedHashes(t *testing.T) {
 			}
 			switch field {
 			case "operator":
-				pool.PoolKeyHash = pool.PoolKeyHash[:lcommon.Blake2b224Size-1]
+				reg := &pool.Registration[0]
+				reg.PoolKeyHash = reg.PoolKeyHash[:lcommon.Blake2b224Size-1]
 			case "vrf":
 				reg := &pool.Registration[0]
 				reg.VrfKeyHash = reg.VrfKeyHash[:lcommon.Blake2b256Size-1]
@@ -224,4 +241,32 @@ func TestQueryLedgerPeerSnapshotRejectsMalformedActivePoolKey(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "active pool key")
 	require.Contains(t, err.Error(), "invalid blake2b-224 hash")
+}
+
+// PoolCurrentState reads the pool's stored state through GetPoolStatus and the
+// epoch-effective registration lookup: it never loads the pool and its
+// certificate history through GetPool.
+func TestLedgerViewPoolCurrentStateDoesNotReadPool(t *testing.T) {
+	t.Parallel()
+	pool := &models.Pool{
+		PoolKeyHash: make([]byte, lcommon.Blake2b224Size),
+		Registration: []models.PoolRegistration{{
+			PoolKeyHash:   make([]byte, lcommon.Blake2b224Size),
+			VrfKeyHash:    make([]byte, lcommon.Blake2b256Size),
+			RewardAccount: make([]byte, lcommon.Blake2b224Size),
+		}},
+	}
+	var spy *fixedHashMetadataStore
+	db := newFixedHashBoundaryDB(t, func(store *fixedHashMetadataStore) {
+		store.pool = pool
+		spy = store
+	})
+	txn := db.Transaction(context.Background(), false)
+	defer txn.Release()
+	view := &LedgerView{ls: &LedgerState{db: db}, txn: txn}
+
+	cert, _, err := view.PoolCurrentState(lcommon.PoolKeyHash{})
+	require.NoError(t, err)
+	require.NotNil(t, cert)
+	require.Zero(t, spy.getPoolCalls)
 }

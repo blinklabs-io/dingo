@@ -178,3 +178,20 @@ type PoolRetirementRefund struct {
 	RewardAccountCredentialTag uint8
 	DepositHeld                types.Uint64
 }
+
+// PoolStatus is a pool's lifecycle as GetPool(includeInactive=false) and the
+// ledger view report it, read without the pool's certificate history.
+type PoolStatus struct {
+	// Exists is true when a pool row is stored, whether or not it has
+	// certificates.
+	Exists bool
+	// Active is true when the pool has a registration and its newest
+	// certificate is not a retirement whose epoch has been reached.
+	Active bool
+	// RetirementEpoch is the epoch of the pool's pending retirement. It is nil
+	// when the newest retirement was cancelled by a later registration, which
+	// replaces the pending retirement exactly as a later retirement replaces an
+	// earlier one: the newest certificate in chain order wins, not the one with
+	// the latest epoch.
+	RetirementEpoch *uint64
+}

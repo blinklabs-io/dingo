@@ -8403,6 +8403,7 @@ VALUES (?, ?, ?, ?, '0', ?)`,
 		10_000_000,
 	)
 	require.NoError(tb, err)
+	dbtest.RefreshPoolCurrentState(tb, tx)
 	require.NoError(tb, tx.Commit())
 }
 
