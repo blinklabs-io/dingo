@@ -356,13 +356,10 @@ func TestHandleEventBlockfetchBatchDoneDiscardsQueuedRequestOnRollbackGeneration
 			},
 		},
 	}
-	// Slots 1-80 are Mithril-covered so the block deliveries below skip
-	// header crypto verification (header-crypto gate machinery, orthogonal to
-	// what
-	// this test proves): these synthetic blocks carry no real VRF/KES
-	// material.
-	ls.mithrilLedgerSlot = 80
-	ls.publishSnapshotsLocked()
+	// Header verification is orthogonal to what this test proves, and these
+	// synthetic blocks carry no real VRF/KES material, so the deliveries
+	// below have it deferred.
+	cacheEpochWithoutNonce(t, ls, 80)
 	ls.batchBlocksApplied = 1
 
 	// "next" was pre-queued while both generations were 0, exactly like

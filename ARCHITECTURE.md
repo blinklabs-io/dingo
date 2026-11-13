@@ -6016,6 +6016,46 @@ the batch. Without them a Byron epoch-boundary header, which carries no
 signature and may share its parent's block number, could extend a post-Byron
 block on any network.
 
+A header or block that extends its parent must also sit at a later slot
+(`chain.SlotNotAfterParentError`), as ouroboros-consensus requires of every
+header's envelope. Otherwise one leader slot signs a chain of any length, each
+header passing VRF, KES and the opcert counter check for the same slot, and
+that candidate wins the length comparison. `chain.SlotFollowsParent` holds the
+rule. A Byron main block may share the slot of an epoch-boundary parent, which
+sits at the first slot of its epoch. A later-era block on a Byron parent is
+left to `validateBlockOrder`, because a Byron slot number is derived with a
+fixed epoch length that matches the absolute slot only on networks whose Byron
+epochs have that length. Three places apply the rule. The ChainSync
+roll-forward handler checks each header against the point its session stands
+at (`chainsync.State.ClientRollForwardParent`), before chain selection or the
+ledger queue sees it, and recycles the connection on a violation. That point is
+the previous roll-forward header or, after a rollback, the rollback point. The
+session keeps its delivered headers, up to the security parameter plus one,
+with their era and kind, so a rollback to one of them restores what the next
+header must follow. This matters because chain selection keeps a peer's
+candidate length across such a rollback, so a peer could otherwise roll back to
+the point it stands at before every header. A rollback point outside those
+headers keeps only its slot, which the next header must exceed unless it is a
+Byron main block, since the point may be an epoch-boundary block.
+`Chain.AddBlockHeader` checks against the header tip it extends, and
+`Chain.AddBlock` and its variants against the tip block, which covers a locally
+forged block. Raw imports (`Chain.AddRawBlocks`), which copy a local
+ImmutableDB, are not ordered here.
+
+A header or block a peer offers is Mithril-covered only by point
+(`LedgerState.pointCoveredByMithril`): at or below the boundary slot and already
+on the primary chain together with the boundary block. Block application and
+the block pipeline still decide coverage of a block on the primary chain by
+slot. That is sound because the boundary block is never a Byron block (the
+import refuses a Byron ledger state, `ledgerstate.ErrByronSnapshotUnsupported`),
+so the Byron exception above never applies to it, and the primary chain is not
+rolled back below the boundary. Every block that extends the boundary block, or
+any block after it, through the checks above therefore sits above the boundary
+slot. This says nothing about blocks at or below the boundary, where a Byron
+main block may share the slot of an epoch boundary block, or about raw imports,
+which are not ordered; the point test, not the slot, keeps those from being
+treated as covered when a peer offers them.
+
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1
 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution now
 always runs whenever per-tx validation runs at all, including for blocks at or
@@ -8527,8 +8567,11 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   ChainSync client, which validates each candidate header once against the
   candidate's own header state and only trims the candidate when the local
   selection advances. Peer rollbacks and disconnects also clear the cache.
-  Verification is skipped only for a slot an imported Mithril snapshot already
-  covers, the same exemption the ledger's own header-queue path applies. A
+  Verification is skipped only for a block an imported Mithril snapshot
+  certified: one at or below the trust boundary slot and on the primary chain,
+  which also holds the trust boundary block. This is the same exemption the
+  ledger's own header-queue and block-fetch paths apply. A covered slot alone
+  earns nothing, because a peer chooses the slot its header carries. A
   result showing local state has not caught up to the header's slot
   (`IsHeaderVerificationDeferred`) never enters the observed ancestry used by
   fork resolution or rollback replay, and never penalizes the peer. A deferred
@@ -11968,11 +12011,8 @@ reading, which are network evidence taken once per forge cycle and carried to
 each attempt; the sync gate and the staleness bounds are still re-decided
 against that carried pair and each attempt's freshly read tip. Without the
 re-check the forger would compute a VRF proof and KES-sign a block whose parent
-slot is not below its own, and nothing local rejects that before diffusion:
-`Chain.AddLocalBlock` checks only prev-hash and block-number contiguity, so the
-block is admitted and broadcast to peers, and the slot-order check
-(`ledger.validateBlockOrder`) runs only later, from `ledgerProcessBlock`, when
-the ledger applies the block.
+slot is not below its own, which `Chain.AddLocalBlock` then refuses
+(`chain.SlotNotAfterParentError`), losing the slot.
 
 `dingo_forge_selection_fallback_total` reports how slots whose selection was
 aborted ended, by `result`: `retried` when a later attempt in the same slot

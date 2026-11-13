@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,7 +65,7 @@ func TestChainsyncObserverDeliveryAuthenticatesLinkedRawAncestry(t *testing.T) {
 			originalConn := f.conn
 			childAuthenticated := false
 			calls := 0
-			f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool {
+			f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool {
 				return true
 			}
 			// Substitute only crypto computation: the production roll-forward
@@ -161,7 +162,7 @@ func TestChainsyncObserverRawAncestryStillRequiresAdmissionOnPromotion(
 	f.o.config.ChainsyncIngressEligible = func(ouroboros.ConnectionId) bool {
 		return eligible
 	}
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	verifyCalls := 0
 	f.o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId, gledger.BlockHeader,
@@ -199,7 +200,7 @@ func TestChainsyncObserverRawAncestryRejectsReplacedSession(t *testing.T) {
 	t.Parallel()
 	f := newPatienceRollForwardFixture(t, false)
 	original := f.state.ClientSession(f.conn)
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	f.o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId, gledger.BlockHeader,
 	) (uint64, error) {
@@ -248,7 +249,7 @@ func TestChainsyncObserverVerificationFailureRecyclesOnlyDefiniteErrors(
 			)
 			delivered := 0
 			f.o.config.ChainsyncRecordDeliveredPeerTip = func(chainselection.PeerTipUpdateEvent) { delivered++ }
-			f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+			f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 			calls := 0
 			f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) { calls++; return 42, tc.err }
 			f.rollForward(t, newTestBlockHeader(100, 1, 0xaa))
@@ -312,7 +313,7 @@ func TestChainsyncObserverHeaderWaitsAtForecastHorizon(t *testing.T) {
 			return ctx.Err()
 		}
 	}
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	var verifyCalls atomic.Int32
 	f.o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId, gledger.BlockHeader,
@@ -358,7 +359,7 @@ func TestChainsyncObserverHorizonWaitTimeoutIsNotAnError(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	var verifyCalls atomic.Int32
 	f.o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId, gledger.BlockHeader,

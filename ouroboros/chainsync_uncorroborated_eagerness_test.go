@@ -42,7 +42,7 @@ func TestUncorroboratedIngressWaitsForEagernessAfterObservation(t *testing.T) {
 			f := newPatienceRollForwardFixture(t, true)
 			_, ledgerCh := f.o.eventBus.Subscribe(ledger.ChainsyncEventType)
 			var order []string
-			f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+			f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 			f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 				order = append(order, "authenticate")
 				return 42, nil
@@ -167,7 +167,7 @@ func TestEagernessExcludesObserverAndRejectedHeader(t *testing.T) {
 				calls.Add(1)
 				return nil
 			}
-			f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+			f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 			f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 				switch mode {
 				case "bad crypto":
@@ -222,7 +222,7 @@ func TestUncorroboratedEagernessPreservesOverlapUntilSlowerPeerCatchesUp(t *test
 	})
 	o.chainsyncState = state
 	o.corroborationHoldTimeout = time.Millisecond
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) { return 42, nil }
 	headers := newLinkedTestHeaders(6)
 	tip := ochainsync.Tip{Point: ocommon.NewPoint(1000000, []byte("advertised")), BlockNumber: 50000}
