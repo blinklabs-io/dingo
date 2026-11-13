@@ -827,6 +827,10 @@ func Sync(
 	}
 	catchUp = dec.engage || cfg.RepairLegacyRewardState
 	catchUpStart = dec.start
+	catchUpStart, err = resumeStartImmutable(db, mode, catchUpStart)
+	if err != nil {
+		return SyncResult{}, err
+	}
 	if mode == syncModeResume && !catchUp && isAPIMode(cfg.StorageMode) {
 		status, statusErr := db.GetSyncState("sync_status", nil)
 		if statusErr != nil {
@@ -995,6 +999,20 @@ func Sync(
 		}
 		pipeLastChunk = chunk.Num
 		pipeCopied = true
+		if cfg.CleanupAfterLoad {
+			// Chunk.Num is committed through its last block. Keep it as the
+			// resume anchor and drop everything below, recording the bound
+			// first so an interruption never leaves the marker behind the
+			// deletions.
+			if merr := setImmutableRetiredBelow(db, chunk.Num); merr != nil {
+				return merr
+			}
+			if rerr := pipeImm.RemoveChunksBefore(chunk.Num); rerr != nil {
+				return fmt.Errorf(
+					"retiring pipelined chunks below %d: %w", chunk.Num, rerr,
+				)
+			}
+		}
 		return nil
 	}
 
@@ -1425,6 +1443,17 @@ func Sync(
 					BytesPerSecond: p.BlocksPerSecond,
 				})
 			}),
+		}
+		if cfg.CleanupAfterLoad {
+			// The extracted tree is discarded after the load anyway, so each
+			// chunk goes as soon as its blocks are committed rather than
+			// holding a second copy of the chain until the end.
+			loadOptions = append(
+				loadOptions,
+				node.WithChunkRetirement(func(firstKept uint64) error {
+					return setImmutableRetiredBelow(db, firstKept)
+				}),
+			)
 		}
 		loadResult, loadErr = node.LoadBlobsWithDB(
 			ctx, nil, logger, bootstrapResult.ImmutableDir, db,
