@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -222,4 +224,70 @@ func TestLeiosValidationSkippedForCapacityRunsWhenSlotFrees(t *testing.T) {
 		leiosEBValidationValid,
 		o.leiosEndorserBlocks[key].semanticValidationStatus,
 	)
+}
+
+// The ledger republishes every chain update as a ledger.block Apply event
+// before it applies the block, so that event is not evidence the announcing
+// block is the ledger tip and must not trigger endorser-block validation. The
+// ledger's own at-tip notification, sent after the apply commits, does.
+func TestLeiosValidationNotRetriedByLedgerBlockEventBeforeApply(t *testing.T) {
+	t.Parallel()
+
+	var applied atomic.Bool
+	attempts := make(chan struct{}, 16)
+	validationLedger := &fakeLeiosAnnouncementLedger{
+		txValidationFunc: func(context.Context, gledger.BlockHeader) error {
+			attempts <- struct{}{}
+			if !applied.Load() {
+				return ledger.ErrLeiosValidationParentUnavailable
+			}
+			return nil
+		},
+	}
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: validationLedger,
+		EventBus:                bus,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+
+	key, data := testLeiosValidationEntry(t, 81, 0)
+	o.leiosMu.Lock()
+	o.leiosEndorserBlocks[key] = data
+	o.leiosMu.Unlock()
+
+	bus.Publish(ledger.BlockEventType, event.NewEvent(
+		ledger.BlockEventType,
+		ledger.BlockEvent{Action: ledger.BlockActionApply, Point: data.point},
+	))
+	testutil.RequireNoReceive(
+		t,
+		attempts,
+		300*time.Millisecond,
+		"a ledger.block Apply event precedes the ledger apply",
+	)
+
+	// A chain update also precedes the apply: validation runs and finds the
+	// basis block not yet the tip.
+	bus.Publish(chain.ChainUpdateEventType, event.NewEvent(
+		chain.ChainUpdateEventType,
+		chain.ChainBlockEvent{Point: data.point},
+	))
+	testutil.RequireReceive(
+		t,
+		attempts,
+		5*time.Second,
+		"chain update retry before the ledger apply",
+	)
+
+	applied.Store(true)
+	o.RetryLeiosEndorserBlockValidations()
+	require.Eventually(t, func() bool {
+		o.leiosMu.RLock()
+		defer o.leiosMu.RUnlock()
+		return o.leiosEndorserBlocks[key].semanticValidationStatus ==
+			leiosEBValidationValid
+	}, 5*time.Second, 10*time.Millisecond)
 }
