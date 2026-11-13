@@ -2368,7 +2368,11 @@ sweep, not after: it detects which pools need their denormalized
 `DeleteCertificatesAfterSlot` removes, so restoring first (while those rows
 still exist) is what lets it find the surviving prior registration to revert to,
 rather than silently leaving every re-registered pool's discarded values in
-place. The denormalized-field `UPDATE` and the companion
+place. It also deletes pools with no registration at or below `slot`, removing
+their `pool_registration_owner` and `pool_registration_relay` rows first:
+those tables reference `pool` directly (`fk_pool_owners`, `fk_pool_relays`) as
+well as through their registration, and MySQL and PostgreSQL reject the pool
+delete while such rows remain. The denormalized-field `UPDATE` and the companion
 `latest_op_cert_sequence` `UPDATE` immediately after it are both scoped to only
 the pools a given rollback actually affects — a CTE restricts the first to pools
 with a `PoolRegistration` row above `slot`, and the second is restricted to the
