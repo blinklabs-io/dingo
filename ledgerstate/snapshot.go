@@ -45,6 +45,16 @@ var ErrByronSnapshotUnsupported = errors.New(
 	"snapshot is in the Byron era: Byron ledger states are not supported",
 )
 
+// ErrPreConwaySnapshotUnsupported is returned for a snapshot whose current era
+// is Shelley through Babbage. Only Conway and later ledger states are
+// importable: the pending classic protocol-parameter update proposals and the
+// future parameters of earlier eras are not read, so the import would drop an
+// update the snapshot's ledger had already agreed on.
+var ErrPreConwaySnapshotUnsupported = errors.New(
+	"snapshot is in a pre-Conway era: only Conway and later ledger " +
+		"states can be imported",
+)
+
 // FindLedgerStateFile searches the extracted snapshot directory for
 // the ledger state file. It supports two formats:
 //   - Legacy: ledger/<slot>.lstate or ledger/<slot>
@@ -400,6 +410,13 @@ func parseSnapshotData(data []byte) (*RawLedgerState, error) {
 	// which nothing here reads.
 	if eraIndex == EraByron {
 		return nil, ErrByronSnapshotUnsupported
+	}
+	if eraIndex < EraConway {
+		return nil, fmt.Errorf(
+			"%w (current era %s)",
+			ErrPreConwaySnapshotUnsupported,
+			EraName(eraIndex),
+		)
 	}
 
 	// Parse the current era's state

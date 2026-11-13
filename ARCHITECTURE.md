@@ -13677,6 +13677,16 @@ soon as the tar header is decoded: Go's tar reader synthesizes sparse holes
 above the compressed-stream accounting, so accepting them would make the
 reported expanded-byte and cancellation boundaries incomplete.
 
+Ledger-state import supports Conway and later snapshots only. `ledgerstate`
+refuses a Byron snapshot (`ErrByronSnapshotUnsupported`) and a Shelley through
+Babbage snapshot (`ErrPreConwaySnapshotUnsupported`) while parsing, before any
+state is written. The pre-Conway refusal exists because the import never reads
+those eras' pending classic parameter update proposals or future parameters,
+so it would drop an update the snapshot's ledger had agreed on; from Conway on
+parameter changes come from the imported ratification state. Every import
+entry point parses through `ParseSnapshotBytes`, so Mithril bootstrap and
+catch-up report the refusal as a ledger-state parse failure.
+
 The post-download ImmutableDB copy completes before ledger-state import starts.
 The copy persists block and transaction metadata as well as block blobs, so it
 is a metadata writer even though its bulk payload belongs to the blob store.
