@@ -16,6 +16,7 @@ package governance
 
 import (
 	"context"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"io"
 	"log/slog"
 	"testing"
@@ -168,7 +169,7 @@ func TestProcessProposalsEnforcesParameterChangeWellFormedness(
 				100,
 				20,
 				parameterChangeTestPParams(test.dijkstra, test.major),
-				db,
+				dbadapter.New(db),
 				nil,
 				nil,
 			)
@@ -261,7 +262,7 @@ func TestProcessProposalsRejectsProgrammaticParameterUpdateWidths(
 					100,
 					20,
 					parameterChangeTestPParams(false, 10),
-					db,
+					dbadapter.New(db),
 					nil,
 					nil,
 				)

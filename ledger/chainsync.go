@@ -37,6 +37,7 @@ import (
 	cardano "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -592,7 +593,7 @@ func (ls *LedgerState) boundDeferredHeaderValidation() error {
 		floor = max(floor, m.slot+1)
 	}
 	if ls.db != nil && ls.db.Metadata() != nil {
-		if err := ls.db.SetSyncState(
+		if err := ls.ledgerDB().SetSyncState(
 			deferredHeaderValidationFloorSyncStateKey,
 			strconv.FormatUint(floor, 10),
 			nil,
@@ -913,7 +914,7 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 		ls.deferredHeaderValidationMu.Lock()
 		source := ls.deferredHeaderValidation[k]
 		ls.deferredHeaderValidationMu.Unlock()
-		restoreErr = ls.db.SetDeferredHeaderMarkerWithValue(
+		restoreErr = ls.ledgerDB().SetDeferredHeaderMarkerWithValue(
 			k,
 			deferredHeaderMarkerBlobValue(source),
 		)
@@ -945,17 +946,17 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 func (ls *LedgerState) deleteDeferredMarkerByKey(k string) error {
 	if ls.db.Metadata() != nil {
 		syncKey := deferredHeaderValidationSyncStatePrefix + k
-		value, err := ls.db.GetSyncState(syncKey, nil)
+		value, err := ls.ledgerDB().GetSyncState(syncKey, nil)
 		if err != nil {
 			return err
 		}
 		if value != "" {
-			if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
+			if err := ls.ledgerDB().DeleteSyncState(syncKey, nil); err != nil {
 				return err
 			}
 		}
 	}
-	return ls.db.DeleteDeferredHeaderMarker(k)
+	return ls.ledgerDB().DeleteDeferredHeaderMarker(k)
 }
 
 // repopulateDeferredHeaderValidation rebuilds the in-memory deferred-header set
@@ -980,7 +981,7 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 	if ls.db == nil {
 		return nil
 	}
-	markers, err := ls.db.ListDeferredHeaderMarkerValues()
+	markers, err := ls.ledgerDB().ListDeferredHeaderMarkerValues()
 	if err != nil {
 		return fmt.Errorf(
 			"repopulate deferred-header set from persisted markers: %w",
@@ -996,7 +997,7 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 	// Markers and the eviction floor an earlier version wrote to sync_state
 	// are still honoured.
 	if ls.db.Metadata() != nil {
-		legacy, err := ls.db.ListSyncStateKeysByPrefix(
+		legacy, err := ls.ledgerDB().ListSyncStateKeysByPrefix(
 			deferredHeaderValidationSyncStatePrefix,
 			nil,
 		)
@@ -1011,7 +1012,7 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 				syncKey,
 				deferredHeaderValidationSyncStatePrefix,
 			)
-			value, err := ls.db.GetSyncState(syncKey, nil)
+			value, err := ls.ledgerDB().GetSyncState(syncKey, nil)
 			if err != nil {
 				return fmt.Errorf(
 					"read deferred-header marker %q: %w", syncKey, err,
@@ -1030,7 +1031,7 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 				)
 			}
 		}
-		floorValue, err := ls.db.GetSyncState(
+		floorValue, err := ls.ledgerDB().GetSyncState(
 			deferredHeaderValidationFloorSyncStateKey,
 			nil,
 		)
@@ -1100,7 +1101,7 @@ func (ls *LedgerState) persistDeferredHeaderValidation(
 	if ls.db == nil {
 		return nil
 	}
-	if err := ls.db.SetDeferredHeaderMarkerWithValue(
+	if err := ls.ledgerDB().SetDeferredHeaderMarkerWithValue(
 		headerValidationPointKey(point),
 		deferredHeaderMarkerBlobValue(ls.deferredHeaderSource(point)),
 	); err != nil {
@@ -1120,7 +1121,7 @@ func (ls *LedgerState) persistDeferredHeaderValidation(
 // is harmless: the retention guard evicts it.
 func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
 	point ocommon.Point,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	if ls.db == nil {
 		return nil
@@ -1130,7 +1131,7 @@ func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
 		return err
 	}
 	if txn == nil {
-		if err := ls.db.DeleteDeferredHeaderMarker(key); err != nil {
+		if err := ls.ledgerDB().DeleteDeferredHeaderMarker(key); err != nil {
 			return fmt.Errorf(
 				"delete deferred header validation marker: %w",
 				err,
@@ -1139,7 +1140,7 @@ func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
 		return nil
 	}
 	txn.AfterCommit(func() {
-		if err := ls.db.DeleteDeferredHeaderMarker(key); err != nil {
+		if err := ls.ledgerDB().DeleteDeferredHeaderMarker(key); err != nil {
 			ls.config.Logger.Warn(
 				"failed to delete resolved deferred-header marker",
 				"key", key,
@@ -1156,20 +1157,20 @@ func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
 // markers never takes the write connection here.
 func (ls *LedgerState) deleteLegacyDeferredMarker(
 	point ocommon.Point,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	if ls.db.Metadata() == nil {
 		return nil
 	}
 	syncKey := deferredHeaderValidationSyncStateKey(point)
-	value, err := ls.db.GetSyncState(syncKey, txn)
+	value, err := ls.ledgerDB().GetSyncState(syncKey, txn)
 	if err != nil {
 		return fmt.Errorf("read deferred header validation marker: %w", err)
 	}
 	if value == "" {
 		return nil
 	}
-	if err := ls.db.DeleteSyncState(syncKey, txn); err != nil {
+	if err := ls.ledgerDB().DeleteSyncState(syncKey, txn); err != nil {
 		return fmt.Errorf("delete deferred header validation marker: %w", err)
 	}
 	return nil
@@ -1177,7 +1178,7 @@ func (ls *LedgerState) deleteLegacyDeferredMarker(
 
 func (ls *LedgerState) deferredHeaderValidationRequired(
 	point ocommon.Point,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (bool, ouroboros.ConnectionId, error) {
 	source, required := ls.takeDeferredHeaderValidation(point)
 	ls.deferredHeaderValidationMu.Lock()
@@ -1189,7 +1190,7 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 	if ls.db == nil {
 		return required, source, nil
 	}
-	payload, persisted, err := ls.db.GetDeferredHeaderMarkerValue(
+	payload, persisted, err := ls.ledgerDB().GetDeferredHeaderMarkerValue(
 		headerValidationPointKey(point),
 	)
 	if err != nil {
@@ -1212,7 +1213,7 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 	if ls.db.Metadata() == nil {
 		return required || persisted, source, nil
 	}
-	value, err := ls.db.GetSyncState(
+	value, err := ls.ledgerDB().GetSyncState(
 		deferredHeaderValidationSyncStateKey(point),
 		txn,
 	)
@@ -1293,7 +1294,7 @@ func deferredHeaderMarkerSource(value string) (ouroboros.ConnectionId, error) {
 
 func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	point ocommon.Point,
 	block gledger.Block,
 ) error {
@@ -8499,12 +8500,12 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("get genesis block hash: %w", err)
 	}
-	hasGenesis, err := ls.db.HasGenesisCbor(0, genesisHash[:])
+	hasGenesis, err := ls.ledgerDB().HasGenesisCbor(0, genesisHash[:])
 	if err != nil {
 		return fmt.Errorf("checking genesis CBOR: %w", err)
 	}
 	if !hasGenesis {
-		hasAnyGenesis, err := ls.db.HasAnyGenesisCbor(0)
+		hasAnyGenesis, err := ls.ledgerDB().HasAnyGenesisCbor(0)
 		if err != nil {
 			return fmt.Errorf("checking existing genesis CBOR: %w", err)
 		}
@@ -8554,11 +8555,11 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		)
 	}
 
-	txn, err := ls.db.BlockBatchTransactionContext(ctx)
+	txn, err := ls.ledgerDB().BlockBatchTransactionContext(ctx)
 	if err != nil {
 		return err
 	}
-	err = txn.Do(func(txn *database.Txn) error {
+	err = ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
 		// Record genesis UTxOs
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
 		byronGenesisUtxos, err := byronGenesis.GenesisUtxos()
@@ -8665,7 +8666,7 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		// We use SetGenesisCbor to avoid creating a block index entry that
 		// would cause the chain iterator to include it (genesis is already
 		// handled separately during initialization).
-		if err := ls.db.SetGenesisCbor(0, genesisHash[:], blockCbor, txn); err != nil {
+		if err := ls.ledgerDB().SetGenesisCbor(0, genesisHash[:], blockCbor, txn); err != nil {
 			return fmt.Errorf("store genesis cbor: %w", err)
 		}
 
@@ -8688,8 +8689,30 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		// hash used elsewhere), independent of whether its per-output
 		// UTxOs are (re-)inserted into the live UTxO store.
 		if !bootstrappedFromMithril {
+			genesisEvt := UtxoEvent{
+				Point: ocommon.Point{Slot: 0, Hash: genesisHash[:]},
+				Cause: UtxoChangeGenesis,
+			}
+			for _, utxos := range txUtxos {
+				for _, u := range utxos {
+					id := u.Id.Id()
+					genesisEvt.Added = append(genesisEvt.Added, UtxoOutput{
+						Ref: models.UtxoId{
+							Hash: append([]byte(nil), id[:]...),
+							Idx:  u.Id.Index(),
+						},
+						Cbor: outputCbor(u.Output),
+					})
+				}
+			}
+			// Staged before the genesis transactions are written: their
+			// stake refresh reads the live UTxO set when it is the only
+			// copy, and must see these outputs as the metadata rows would
+			// be. Genesis leaves the ledger at origin, which resume cannot
+			// roll back to, so it records no tip.
+			ls.publishUtxoEventAfterCommit(ctx, txn, genesisEvt, nil)
 			for txHashArray, utxos := range txUtxos {
-				if err := ls.db.SetGenesisTransaction(
+				if err := ls.ledgerDB().SetGenesisTransaction(
 					ctx,
 					txHashArray[:],
 					genesisHash[:],
@@ -8709,11 +8732,11 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		// The initial reserves are the maximum supply that was not placed in
 		// circulation by either genesis configuration. All later epoch, MIR,
 		// governance, and donation updates build from this slot-0 baseline.
-		if err := ls.db.Metadata().SetNetworkState(
+		if err := ls.ledgerDB().SetNetworkState(
 			0,
 			genesisReserves,
 			0,
-			txn.Metadata(),
+			txn,
 		); err != nil {
 			return fmt.Errorf("set genesis network state: %w", err)
 		}
@@ -8726,7 +8749,7 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		// precedes epoch 0.
 		if err := ls.saveGenesisRewardAdaPots(
 			genesisReserves,
-			txn.Metadata(),
+			txn,
 		); err != nil {
 			return err
 		}
@@ -8783,7 +8806,7 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 				),
 				"component", "ledger",
 			)
-			if err := ls.db.SetGenesisStakingWithDeposits(
+			if err := ls.ledgerDB().SetGenesisStakingWithDeposits(
 				genesisPools,
 				genesisStake,
 				uint64(shelleyGenesis.ProtocolParameters.KeyDeposit),
@@ -8814,7 +8837,7 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 				),
 				"component", "ledger",
 			)
-			if err := ls.db.SetGenesisGovernance(
+			if err := ls.ledgerDB().SetGenesisGovernance(
 				conwayGenesis.InitialDReps,
 				conwayGenesis.Delegs,
 				genesisHash[:],
@@ -8851,7 +8874,7 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 // snapshot, is always preferred over this slot-0 row. Re-running against a
 // store that already holds a constitution writes nothing, which keeps
 // restart and genesis replay idempotent.
-func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
+func (ls *LedgerState) ensureGenesisConstitution(txn ledgerdb.Txn) error {
 	genesisConstitution, err := governance.ConstitutionFromGenesis(
 		ls.config.CardanoNodeConfig.ConwayGenesis(),
 	)
@@ -8861,14 +8884,14 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 	if genesisConstitution == nil {
 		return nil
 	}
-	existing, err := ls.db.GetConstitution(txn)
+	existing, err := ls.ledgerDB().GetConstitution(txn)
 	if err != nil {
 		return fmt.Errorf("get existing constitution: %w", err)
 	}
 	if existing != nil {
 		return nil
 	}
-	if err := ls.db.SetConstitution(genesisConstitution, txn); err != nil {
+	if err := ls.ledgerDB().SetConstitution(genesisConstitution, txn); err != nil {
 		return fmt.Errorf("set genesis constitution: %w", err)
 	}
 	ls.config.Logger.Info(
@@ -8900,7 +8923,7 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 // its real history is left alone instead of being reverted to genesis state.
 func (ls *LedgerState) ensureGenesisCommittee(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
 	if conwayGenesis == nil {
@@ -8916,7 +8939,7 @@ func (ls *LedgerState) ensureGenesisCommittee(
 	if len(conwayGenesis.Committee.Members) == 0 {
 		return nil
 	}
-	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(ctx, txn)
+	existing, err := ls.ledgerDB().GetCommitteeMembersIncludeDeleted(ctx, txn)
 	if err != nil {
 		return fmt.Errorf("get existing committee members: %w", err)
 	}
@@ -8973,7 +8996,7 @@ func (ls *LedgerState) ensureGenesisCommittee(
 		}
 		return int(a.ColdCredentialTag) - int(b.ColdCredentialTag)
 	})
-	if err := ls.db.SetCommitteeMembers(ctx, newMembers, txn); err != nil {
+	if err := ls.ledgerDB().SetCommitteeMembers(ctx, newMembers, txn); err != nil {
 		return fmt.Errorf("set genesis committee members: %w", err)
 	}
 	ls.config.Logger.Info(
@@ -9033,11 +9056,11 @@ func parseGenesisCommitteeCredential(raw string) (uint8, []byte, error) {
 // ensureGenesisNetworkState initializes the slot-0 treasury/reserves baseline
 // for a matching pre-existing genesis database that has no network-state rows.
 func (ls *LedgerState) ensureGenesisNetworkState() error {
-	state, err := ls.db.Metadata().GetNetworkState(nil)
+	state, err := ls.ledgerDB().GetNetworkState(nil)
 	if err != nil {
 		return fmt.Errorf("get existing network state: %w", err)
 	}
-	pots, err := ls.db.Metadata().GetRewardAdaPots(0, nil)
+	pots, err := ls.ledgerDB().GetRewardAdaPots(0, nil)
 	if err != nil {
 		return fmt.Errorf("get existing epoch 0 reward ADA pots: %w", err)
 	}
@@ -9062,7 +9085,7 @@ func (ls *LedgerState) ensureGenesisNetworkState() error {
 		return fmt.Errorf("calculate genesis reserves: %w", err)
 	}
 	if state == nil {
-		if err := ls.db.Metadata().SetNetworkState(
+		if err := ls.ledgerDB().SetNetworkState(
 			0, reserves, 0, nil,
 		); err != nil {
 			return fmt.Errorf("set missing genesis network state: %w", err)
@@ -9101,9 +9124,9 @@ func (ls *LedgerState) ensureGenesisNetworkState() error {
 // instead of skipping it.
 func (ls *LedgerState) saveGenesisRewardAdaPots(
 	reserves uint64,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) error {
-	if err := ls.db.Metadata().SaveRewardAdaPots(&models.RewardAdaPots{
+	if err := ls.ledgerDB().SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        0,
 		Treasury:     0,
 		Reserves:     types.Uint64(reserves),
@@ -9306,7 +9329,7 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 // and labNonce as the new epoch's LastEpochBlockNonce so an empty next
 // epoch can carry it forward.
 func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	epochStartSlot uint64,
 	currentEra eras.EraDesc,
 	currentEpoch models.Epoch,
@@ -9401,7 +9424,7 @@ func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
 		// compute from epoch start — this is always correct (just
 		// slower) and handles genesis sync where the epoch's
 		// EvolvingNonce was set at creation and never updated.
-		nonceRows, nonceErr := ls.db.GetBlockNoncesInSlotRange(
+		nonceRows, nonceErr := ls.ledgerDB().GetBlockNoncesInSlotRange(
 			currentEpoch.StartSlot,
 			epochEndSlot,
 			txn,
@@ -9562,12 +9585,12 @@ func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
 // boundary slot, the same slot governance treasury-withdrawal enactment uses,
 // so the row reflects withdrawals first and donations second.
 func (ls *LedgerState) applyEpochDonations(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	endedEpoch uint64,
 	boundarySlot uint64,
 ) error {
-	donations, err := ls.db.Metadata().SumNetworkDonationsForEpoch(
-		endedEpoch, txn.Metadata(),
+	donations, err := ls.ledgerDB().SumNetworkDonationsForEpoch(
+		endedEpoch, txn,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -9577,7 +9600,7 @@ func (ls *LedgerState) applyEpochDonations(
 	if donations == 0 {
 		return nil
 	}
-	state, err := ls.db.Metadata().GetNetworkState(txn.Metadata())
+	state, err := ls.ledgerDB().GetNetworkState(txn)
 	if err != nil {
 		return fmt.Errorf("get network state: %w", err)
 	}
@@ -9586,11 +9609,11 @@ func (ls *LedgerState) applyEpochDonations(
 		treasury = uint64(state.Treasury)
 		reserves = uint64(state.Reserves)
 	}
-	if err := ls.db.Metadata().SetNetworkState(
+	if err := ls.ledgerDB().SetNetworkState(
 		treasury+donations,
 		reserves,
 		boundarySlot,
-		txn.Metadata(),
+		txn,
 	); err != nil {
 		return fmt.Errorf("set network state with donations: %w", err)
 	}
@@ -9663,7 +9686,7 @@ func cloneProtocolParametersForEra(
 
 func (ls *LedgerState) computeClassicPParamUpdates(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 	epoch uint64,
 	era eras.EraDesc,
@@ -9678,7 +9701,7 @@ func (ls *LedgerState) computeClassicPParamUpdates(
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
 	}
-	return ls.db.ComputeAndApplyPParamUpdates(
+	return ls.ledgerDB().ComputeAndApplyPParamUpdates(
 		ctx,
 		slot,
 		epoch,
@@ -9699,7 +9722,7 @@ func (ls *LedgerState) computeClassicPParamUpdates(
 //   - Calling Scheduler.ChangeInterval if SchedulerIntervalMs > 0
 func (ls *LedgerState) processEpochRollover(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
@@ -9718,7 +9741,7 @@ func (ls *LedgerState) processEpochRollover(
 
 func (ls *LedgerState) applyTransitionHardForkRules(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	majors []uint,
 	boundarySlot uint64,
 	newEpoch uint64,
@@ -9743,7 +9766,7 @@ func (ls *LedgerState) applyTransitionHardForkRules(
 
 func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
@@ -9766,7 +9789,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 
 func (ls *LedgerState) processEpochRolloverForTargetWithClassicPParamsContext(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	currentEpoch models.Epoch,
 	targetEpoch models.Epoch,
 	transitionEpoch models.Epoch,
@@ -9803,7 +9826,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithClassicPParamsContext(
 // boundary's enactment, because that needs the boundary's mark snapshot.
 func (ls *LedgerState) processEpochRolloverWithOptions(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
@@ -9841,7 +9864,7 @@ func (ls *LedgerState) processEpochRolloverWithOptions(
 // processEpochRolloverWithOptions.
 func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	currentEpoch models.Epoch,
 	targetEpoch models.Epoch,
 	transitionEpoch models.Epoch,
@@ -9916,7 +9939,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 		if err != nil {
 			return nil, fmt.Errorf("calculate epoch nonce: %w", err)
 		}
-		err = ls.db.SetEpoch(
+		err = ls.ledgerDB().SetEpoch(
 			epochStartSlot,
 			0, // epoch
 			tmpNonce,
@@ -9932,7 +9955,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 			return nil, fmt.Errorf("set epoch: %w", err)
 		}
 		// Load epoch info from DB to populate result
-		epochs, err := ls.db.GetEpochs(txn)
+		epochs, err := ls.ledgerDB().GetEpochs(txn)
 		if err != nil {
 			return nil, fmt.Errorf("load epochs: %w", err)
 		}
@@ -10010,7 +10033,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 		if err != nil {
 			return nil, fmt.Errorf("calculate jumped epoch nonce: %w", err)
 		}
-		if err := ls.db.SetEpoch(
+		if err := ls.ledgerDB().SetEpoch(
 			epochStartSlot,
 			targetEpoch.EpochId,
 			nonce,
@@ -10025,7 +10048,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 			return nil, fmt.Errorf("set jumped epoch: %w", err)
 		}
 		if byronTranslated && targetEpoch.EpochId > transitionEpoch.EpochId+1 {
-			if err := ls.db.SetEpoch(
+			if err := ls.ledgerDB().SetEpoch(
 				transitionEpoch.StartSlot,
 				transitionEpoch.EpochId,
 				nonce,
@@ -10040,7 +10063,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 				return nil, fmt.Errorf("set translated epoch: %w", err)
 			}
 		}
-		epochs, err := ls.db.GetEpochs(txn)
+		epochs, err := ls.ledgerDB().GetEpochs(txn)
 		if err != nil {
 			return nil, fmt.Errorf("load jumped epochs: %w", err)
 		}
@@ -10247,7 +10270,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 		if err := timePhase(
 			currentEpoch.EpochId+1, "pparam_updates", func() error {
 				var err error
-				newPParams, plutusV2CostModelWritten, err = ls.db.ComputeAndApplyPParamUpdates(
+				newPParams, plutusV2CostModelWritten, err = ls.ledgerDB().ComputeAndApplyPParamUpdates(
 					ctx,
 					epochStartSlot,
 					currentEpoch.EpochId+1, // Target epoch for updates
@@ -10323,8 +10346,8 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	}
 	// applyEpochDonations credits these after governance; RATIFY still
 	// counts them, as Conway's EPOCH rule does before seeding RATIFY.
-	pendingDonations, err := ls.db.Metadata().SumNetworkDonationsForEpoch(
-		currentEpoch.EpochId, txn.Metadata(),
+	pendingDonations, err := ls.ledgerDB().SumNetworkDonationsForEpoch(
+		currentEpoch.EpochId, txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -10336,7 +10359,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 		currentEpoch.EpochId+1, "governance", func() error {
 			var err error
 			govOut, err = governance.ProcessEpoch(ctx, &governance.EpochInput{
-				DB:                      ls.db,
+				DB:                      ls.ledgerDB(),
 				Txn:                     txn,
 				Logger:                  ls.config.Logger,
 				PrevEpoch:               currentEpoch.EpochId,
@@ -10444,7 +10467,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 				"encode post-enactment pparams: %w", encErr,
 			)
 		}
-		if err := ls.db.SetPParams(
+		if err := ls.ledgerDB().SetPParams(
 			pparamsCbor,
 			epochStartSlot,
 			currentEpoch.EpochId+1,
@@ -10615,7 +10638,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	if err != nil {
 		return nil, fmt.Errorf("calculate epoch nonce: %w", err)
 	}
-	err = ls.db.SetEpoch(
+	err = ls.ledgerDB().SetEpoch(
 		epochStartSlot,
 		currentEpoch.EpochId+1,
 		tmpNonce,
@@ -10631,7 +10654,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 		return nil, fmt.Errorf("set epoch: %w", err)
 	}
 	// Load epoch info from DB to populate result
-	epochs, err := ls.db.GetEpochs(txn)
+	epochs, err := ls.ledgerDB().GetEpochs(txn)
 	if err != nil {
 		return nil, fmt.Errorf("load epochs: %w", err)
 	}
@@ -10757,7 +10780,7 @@ func epochBoundarySnapshotSlot(boundarySlot uint64) uint64 {
 // half then uses the boundary-aware historical reconstruction; load mode also
 // records the failure so an incomplete capture is surfaced to the operator.
 func (ls *LedgerState) captureEpochBoundarySnapshotStake(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	prevEpoch models.Epoch,
 	boundarySlot uint64,
 	protocolVersion uint,
@@ -10828,7 +10851,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 // back empty while the previous boundary's mark holds stake. incomingEraID is
 // already chosen by the hard-fork transition, before its epoch row is stored.
 func (ls *LedgerState) currentBoundarySPOStakeState(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	prevEpoch models.Epoch,
 	boundarySlot uint64,
 	incomingEraID uint,
@@ -10881,7 +10904,7 @@ func (ls *LedgerState) boundarySnapshotEvent(
 }
 
 func (ls *LedgerState) captureEpochBoundarySnapshot(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	prevEpoch models.Epoch,
 	result *EpochRolloverResult,
 ) error {
@@ -10938,7 +10961,7 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(
 	ctx context.Context,
 	startSlot uint64,
 ) {
-	if startSlot == 0 || ls.db.StorageMode() == types.StorageModeAPI {
+	if startSlot == 0 || ls.ledgerDB().StorageMode() == types.StorageModeAPI {
 		return
 	}
 	ls.config.Logger.Debug(
@@ -10951,9 +10974,9 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(
 	)
 	ls.Lock()
 	defer ls.Unlock()
-	txn := ls.db.Transaction(ctx, true)
-	if err := txn.Do(func(txn *database.Txn) error {
-		return ls.db.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(startSlot, txn)
+	txn := ls.ledgerDB().Begin(ctx, true)
+	if err := ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
+		return ls.ledgerDB().DeleteBlockNoncesBeforeSlotWithoutCheckpoints(startSlot, txn)
 	}); err != nil {
 		ls.config.Logger.Error(
 			fmt.Sprintf("failed to clean up old block nonces: %s", err),

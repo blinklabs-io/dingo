@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -59,7 +60,7 @@ func TestCaptureEpochBoundaryUsesSnapPointStake(t *testing.T) {
 		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{40_000_000}},
 	}, 500)
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,
@@ -146,7 +147,7 @@ func TestCaptureEpochBoundaryMissingSnapHookUsesHistoricalStake(t *testing.T) {
 		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{40_000_000}},
 	}, 500)
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,
@@ -229,7 +230,7 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 	)
 	require.NoError(t, creditTxn.Commit())
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	abandoned := event.EpochTransitionEvent{
 		PreviousEpoch: 0,
 		NewEpoch:      1,
@@ -311,7 +312,7 @@ func TestCalculateStakeDistributionDedupesCredentialAcrossPools(t *testing.T) {
 	).Scan(&rows))
 	require.Equal(t, 2, rows, "fixture must hold the duplicate rows")
 
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
@@ -399,7 +400,7 @@ func TestCalculateEpochBoundaryFallbackHalvesAgree(t *testing.T) {
 				BlockNumber: 2,
 			}, nil))
 
-			calc := NewCalculator(db)
+			calc := NewCalculator(dbadapter.New(db), nil)
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Commit() }()
 			dist, err := calc.calculateBoundaryStakeDistributionInTxn(
@@ -457,7 +458,7 @@ func TestCaptureEpochBoundaryIncludesPriorBoundaryPostSnapshotCreditOnce(t *test
 		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{40_000_000}},
 	}, 500)
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 
 	// Epoch 0 -> 1 boundary: SNAP, then a post-SNAP boundary credit (e.g. a
 	// governance proposal-deposit refund), matching proposal
@@ -550,7 +551,7 @@ func TestCurrentBoundarySPOStakeRows_FallsBackToHistoricalReconstruction(
 		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{75_000_000}},
 	}, 500)
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch: 0,
 		NewEpoch:      1,
@@ -614,7 +615,7 @@ func TestCurrentBoundarySPOStakeRows_PeeksWithoutConsumingComputedStash(
 		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{75_000_000}},
 	}, 500)
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,
@@ -693,7 +694,7 @@ func TestCaptureEpochBoundarySnapshotMarksAuthoritative(t *testing.T) {
 		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{50_000_000}},
 	}, 500)
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,
@@ -732,7 +733,7 @@ func TestFallbackCaptureMarksNonAuthoritative(t *testing.T) {
 		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{20_000_000}},
 	}, 500)
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,
@@ -767,7 +768,7 @@ func TestFallbackCaptureReplacesProvisionalFallback(t *testing.T) {
 		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{30_000_000}},
 	}, 500)
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 
 	// First (slot-clock) fallback: no nonce yet.
 	provisional := event.EpochTransitionEvent{
@@ -1099,7 +1100,7 @@ func TestCaptureEpochBoundaryAgreesOnPointerStake(t *testing.T) {
 			poolHash := bytes.Repeat([]byte{0xb2}, 28)
 			seedPointerStakeFixture(t, db, poolHash)
 
-			mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+			mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 			evt := event.EpochTransitionEvent{
 				PreviousEpoch:   0,
 				NewEpoch:        1,
@@ -1274,7 +1275,7 @@ func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossTheEraCutover(
 			poolHash := bytes.Repeat([]byte{0xb6}, 28)
 			seedPointerStakeFixture(t, db, poolHash)
 
-			mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+			mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 			evt := event.EpochTransitionEvent{
 				PreviousEpoch:   0,
 				NewEpoch:        1,
@@ -1421,7 +1422,7 @@ func TestStakeDistributionKeepsRetiredPoolStakeInDenominator(t *testing.T) {
 		},
 	})
 
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
@@ -1549,13 +1550,13 @@ func TestRewardSnapshotActiveStakeKeepsDegradedPoolStake(t *testing.T) {
 		},
 	}
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	bundle, err := mgr.buildRewardStateInputs(
 		1,
 		models.PoolStakeSnapshotTypeMark,
 		distribution,
 		event.EpochTransitionEvent{BoundarySlot: 200},
-		db.Metadata(),
+		dbadapter.New(db),
 		nil,
 	)
 	require.NoError(t, err)
@@ -1638,13 +1639,13 @@ func TestRewardSnapshotActiveStakeTracksNoExclusion(t *testing.T) {
 		},
 	}
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	bundle, err := mgr.buildRewardStateInputs(
 		1,
 		models.PoolStakeSnapshotTypeMark,
 		distribution,
 		event.EpochTransitionEvent{BoundarySlot: 200},
-		db.Metadata(),
+		dbadapter.New(db),
 		nil,
 	)
 	require.NoError(t, err)
@@ -1727,7 +1728,7 @@ func TestSaveSnapshotKeepsDegradedPoolStakeInPoolAndEpochRows(t *testing.T) {
 		},
 	}
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	saved, err := mgr.saveSnapshot(
 		context.Background(),
 		1,
@@ -1838,7 +1839,7 @@ func TestDijkstraBoundarySnapshotIncludesEnactmentCredits(t *testing.T) {
 					utxoAmounts: []types.Uint64{40_000_000},
 				},
 			}, 500)
-			mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+			mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 			evt := event.EpochTransitionEvent{
 				PreviousEpoch:   0,
 				NewEpoch:        1,

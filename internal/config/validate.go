@@ -445,6 +445,42 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	switch c.LedgerUtxoReads {
+	case "":
+	case "verify", "set":
+		if !c.LedgerUtxoBadger {
+			errs = append(errs, fmt.Errorf(
+				"ledgerUtxoReads %q needs ledgerUtxoBadger",
+				c.LedgerUtxoReads,
+			))
+		}
+	default:
+		errs = append(errs, fmt.Errorf(
+			"invalid ledgerUtxoReads %q: must be empty, %q or %q",
+			c.LedgerUtxoReads, "verify", "set",
+		))
+	}
+
+	if c.LedgerUtxoBadgerOnly {
+		if !c.LedgerUtxoBadger {
+			errs = append(errs, errors.New(
+				"ledgerUtxoBadgerOnly needs ledgerUtxoBadger",
+			))
+		}
+		if c.StorageMode == storageModeAPI {
+			errs = append(errs, errors.New(
+				"ledgerUtxoBadgerOnly needs core storage mode",
+			))
+		}
+		if c.LedgerUtxoShadow {
+			// The shadow bootstraps from the metadata store's UTxO set,
+			// which this mode does not keep.
+			errs = append(errs, errors.New(
+				"ledgerUtxoShadow cannot run with ledgerUtxoBadgerOnly",
+			))
+		}
+	}
+
 	if c.TrustedNtCIdleTimeout < 0 {
 		errs = append(errs, fmt.Errorf(
 			"invalid trustedNtCIdleTimeout: %s (must be zero or positive)",

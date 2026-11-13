@@ -377,8 +377,9 @@ func (d *Database) SetTransactionWithOpts(
 				point.Slot,
 			)
 		}
-		// Store offset reference
-		if opts.OffsetsPersisted {
+		// Store offset reference. The live UTxO set holds output bytes
+		// itself.
+		if opts.OffsetsPersisted || d.liveUtxo {
 			continue
 		}
 		offsetData := EncodeUtxoOffset(&offset)
@@ -579,6 +580,9 @@ func (d *Database) SetGapBlockTransaction(
 				point.Slot,
 			)
 		}
+		if d.liveUtxo {
+			continue
+		}
 		offsetData := EncodeUtxoOffset(&offset)
 		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
 			return fmt.Errorf(
@@ -655,7 +659,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	opts BatchedTxIngestOpts,
 ) error {
 	consumed := tx.Consumed()
-	if len(consumed) == 0 {
+	if len(consumed) == 0 || d.liveUtxo {
 		return nil
 	}
 
@@ -1242,7 +1246,9 @@ func (d *Database) SetGenesisTransaction(
 			)
 		}
 
-		// Store offset reference
+		if d.liveUtxo {
+			continue
+		}
 		offsetData := EncodeUtxoOffset(&offset)
 		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
 			return fmt.Errorf(

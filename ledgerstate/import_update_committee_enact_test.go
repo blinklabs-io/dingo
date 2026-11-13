@@ -17,6 +17,7 @@ package ledgerstate
 import (
 	"bytes"
 	"context"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"log/slog"
 	"math/big"
 	"testing"
@@ -154,7 +155,7 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	pp := &conway.ConwayProtocolParameters{}
 	pp.ProtocolVersion.Major = 10
 	out, err := governance.ProcessEpoch(t.Context(), &governance.EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    500,
 		NewEpoch:     501,

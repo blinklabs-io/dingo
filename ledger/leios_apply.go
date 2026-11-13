@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -183,7 +185,7 @@ func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
 // instead of committing a partial endorser-block application.
 func (ls *LedgerState) applyEndorserBlock(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	rbPoint ocommon.Point,
 	rbBlockNumber uint64,
 	ebSlot uint64,
@@ -205,7 +207,7 @@ func (ls *LedgerState) applyEndorserBlock(
 
 func (ls *LedgerState) applyEndorserBlockInContext(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	rbPoint ocommon.Point,
 	rbBlockNumber uint64,
 	ebSlot uint64,
@@ -299,12 +301,12 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 	// backlog cannot overflow the shared 50-block chunk transaction with
 	// ErrTxnTooBig; offset reads use a fresh blob snapshot if the shared LRU
 	// misses. See DATABASE.md, "Leios endorser-block storage".
-	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, nil); err != nil {
+	if err := ls.ledgerDB().SetGenesisCbor(ebSlot, ebHash[:], blob, nil); err != nil {
 		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("store endorser block blob: %w", err),
 		}
 	}
-	txn.MarkBlockCborCommittedSeparately(ebSlot, ebHash)
+	dbadapter.Unwrap(txn).MarkBlockCborCommittedSeparately(ebSlot, ebHash)
 	// The offsets of a dense endorser block exceed one blob transaction, so
 	// they commit in bounded blob transactions of their own, after the blob
 	// they point at. See DATABASE.md, "Leios endorser-block storage".
@@ -312,7 +314,7 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 	for _, idx := range keepIndexes {
 		levels = append(levels, TransactionLevelsForApply(txs[idx])...)
 	}
-	if err := ls.db.PersistTransactionOffsets(
+	if err := ls.ledgerDB().PersistTransactionOffsets(
 		txn,
 		levels,
 		offsets,
@@ -339,7 +341,7 @@ func (e *leiosEndorserBlockValidationError) Unwrap() error {
 
 func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	rbPoint ocommon.Point,
 	rbBlockNumber uint64,
 	referenceSlot uint64,
@@ -352,7 +354,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		return 0, 0, err
 	}
 	snapshot := ls.txValidationSnapshot()
-	acc := ls.db.NewLeiosClosureBatchAccumulator()
+	acc := ls.ledgerDB().NewLeiosClosureBatchAccumulator()
 	if acc != nil {
 		defer acc.Reset()
 	}
@@ -362,7 +364,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 	}
 	flush := func() error {
 		flushStart := time.Now()
-		err := ls.db.FlushBatch(acc, txn)
+		err := ls.ledgerDB().FlushBatch(acc, txn)
 		ls.metrics.observeBlockStage(blockStageApply, time.Since(flushStart))
 		if err != nil {
 			return &leiosEndorserBlockStorageError{
@@ -382,7 +384,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 	windowEnd := 0
 	for position, idx := range indexes {
 		if acc != nil && position == windowEnd {
-			n, err := ls.db.PrepareLeiosClosureBatch(
+			n, err := ls.ledgerDB().PrepareLeiosClosureBatch(
 				acc,
 				txn,
 				selected[position:],
@@ -558,6 +560,13 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				ls.Lock()
 				ls.untickedClosure = pending
 				ls.Unlock()
+				// The closure's ledger.tx events wait for the certifying
+				// block, but its outputs are in the store now: a rollback
+				// before that block removes them, and a ledger.utxo
+				// consumer must have seen them added.
+				for _, evt := range applyEvents {
+					ls.publishUtxoEvent(ctx, utxoEventForTransaction(evt))
+				}
 			})
 		} else {
 			txn.AfterCommit(func() {
@@ -575,7 +584,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 
 func (ls *LedgerState) loadLeiosSpentInputs(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	tx lcommon.Transaction,
 	consumed map[utxoref.Key]struct{},
 	created map[utxoref.Key]lcommon.Utxo,
@@ -588,11 +597,11 @@ func (ls *LedgerState) loadLeiosSpentInputs(
 		if _, alreadyLoaded := created[key]; alreadyLoaded {
 			continue
 		}
-		stored, err := ls.db.UtxoByRefIncludingSpent(
+		stored, err := ls.utxoIncludingSpent(
 			ctx,
+			txn,
 			input.Id().Bytes(),
 			input.Index(),
-			txn,
 		)
 		if err != nil {
 			return err
@@ -615,7 +624,7 @@ func (ls *LedgerState) loadLeiosSpentInputs(
 func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
 	ctx context.Context,
 	txs []lcommon.Transaction,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) ([]int, error) {
 	if len(txs) == 0 {
 		return nil, nil
@@ -624,7 +633,7 @@ func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
 	for i, tx := range txs {
 		hashes[i] = tx.Hash().Bytes()
 	}
-	existing, err := ls.db.GetTransactionsByHashes(ctx, hashes, txn)
+	existing, err := ls.ledgerDB().GetTransactionsByHashes(ctx, hashes, txn)
 	if err != nil {
 		return nil, fmt.Errorf("dedup endorser transactions: %w", err)
 	}
@@ -1979,7 +1988,7 @@ func (b *leiosBackfiller) awaitFetch(
 // ledger before NEWEPOCH, retaining the certifying RB point for rollback.
 func (ls *LedgerState) applyUntickedBoundaryClosure(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	block ledger.Block,
 	parentPoint ocommon.Point,
 ) error {
@@ -2030,7 +2039,7 @@ func (ls *LedgerState) applyUntickedBoundaryClosure(
 		ls.RLock()
 		epoch := ls.currentEpoch.EpochId
 		ls.RUnlock()
-		if err := ls.db.Metadata().AddNetworkDonation(point.Slot, epoch, donation, txn.Metadata()); err != nil {
+		if err := ls.ledgerDB().AddNetworkDonation(point.Slot, epoch, donation, txn); err != nil {
 			return err
 		}
 	}
@@ -2046,7 +2055,7 @@ type pendingLeiosClosure struct {
 // the certifying RB's commit, including when a failed body is retried.
 func (ls *LedgerState) publishUntickedClosureAfterCommit(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	point ocommon.Point,
 ) {
 	ls.RLock()
@@ -2067,7 +2076,7 @@ func (ls *LedgerState) publishUntickedClosureAfterCommit(
 			ls.beforeTransactionApplyPublish()
 		}
 		for _, evt := range pending.events {
-			ls.publishTransactionEvent(ctx, evt)
+			ls.publishTransactionEventOnly(ctx, evt)
 		}
 	})
 }

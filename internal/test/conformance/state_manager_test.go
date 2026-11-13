@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"math/big"
 	"testing"
 
@@ -807,7 +808,7 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 	_, err = governance.ProcessEpoch(
 		context.Background(),
 		&governance.EpochInput{
-			DB:           m.db,
+			DB:           dbadapter.New(m.db),
 			Txn:          txn,
 			PrevEpoch:    0,
 			NewEpoch:     1,
@@ -822,7 +823,7 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 		"drive the real governance epoch-boundary orchestration",
 	)
 
-	snapshotMgr := snapshot.NewManager(m.db, event.NewEventBus(nil, nil), nil)
+	snapshotMgr := snapshot.NewManager(dbadapter.New(m.db), event.NewEventBus(nil, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,

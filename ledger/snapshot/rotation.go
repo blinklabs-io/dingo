@@ -24,9 +24,8 @@ import (
 	"math/big"
 	"sort"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -112,7 +111,7 @@ func (m *Manager) saveSnapshot(
 	checkAuthoritativeMark bool,
 ) (bool, error) {
 	_ = ctx
-	txn := m.db.Transaction(ctx, true) // read-write transaction
+	txn := m.db.Begin(ctx, true) // read-write transaction
 	defer func() { _ = txn.Rollback() }()
 
 	if err := m.saveSnapshotInTxn(
@@ -157,7 +156,7 @@ func (m *Manager) saveSnapshotInTxn(
 	resolveAutoVote bool,
 	persistRewardInputs bool,
 	checkAuthoritativeMark bool,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	return m.saveSnapshotInTxnDeferring(
 		ctx,
@@ -179,7 +178,7 @@ func (m *Manager) saveSnapshotInTxnDeferring(
 	persistRewardInputs bool,
 	checkAuthoritativeMark bool,
 	deferStakeInputs bool,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	prepared, err := m.prepareSnapshot(
 		ctx,
@@ -215,10 +214,9 @@ func (m *Manager) prepareSnapshot(
 	evt event.EpochTransitionEvent,
 	resolveAutoVote bool,
 	persistRewardInputs bool,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (*preparedSnapshot, error) {
-	meta := m.db.Metadata()
-	metaTxn := txn.Metadata()
+	ldb := m.db
 	prepared := &preparedSnapshot{
 		epoch:        epoch,
 		snapshotType: snapshotType,
@@ -227,7 +225,7 @@ func (m *Manager) prepareSnapshot(
 	}
 	if persistRewardInputs {
 		bundle, err := m.buildRewardStateInputs(
-			epoch, snapshotType, distribution, evt, meta, metaTxn,
+			epoch, snapshotType, distribution, evt, ldb, txn,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("build reward state inputs: %w", err)
@@ -243,8 +241,8 @@ func (m *Manager) prepareSnapshot(
 		epoch,
 		distribution,
 		evt,
-		meta,
-		metaTxn,
+		ldb,
+		txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("resolve snapshot Leios keys: %w", err)
@@ -300,10 +298,9 @@ func (m *Manager) writePreparedSnapshot(
 	prepared *preparedSnapshot,
 	checkAuthoritativeMark bool,
 	deferStakeInputs bool,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
-	meta := m.db.Metadata()
-	metaTxn := txn.Metadata()
+	ldb := m.db
 	epoch := prepared.epoch
 	snapshotType := prepared.snapshotType
 	bundle := prepared.bundle
@@ -312,12 +309,12 @@ func (m *Manager) writePreparedSnapshot(
 	if bundle != nil {
 		bundle.snapshot.Authoritative = authoritative
 		if authoritative {
-			if err := meta.SaveRewardSnapshot(bundle.snapshot, metaTxn); err != nil {
+			if err := ldb.SaveRewardSnapshot(bundle.snapshot, txn); err != nil {
 				return fmt.Errorf("save reward snapshot: %w", err)
 			}
 		} else {
-			proceed, err := meta.ClaimFallbackRewardSnapshot(
-				bundle.snapshot, metaTxn,
+			proceed, err := ldb.ClaimFallbackRewardSnapshot(
+				bundle.snapshot, txn,
 			)
 			if err != nil {
 				return fmt.Errorf("claim fallback reward snapshot: %w", err)
@@ -327,10 +324,10 @@ func (m *Manager) writePreparedSnapshot(
 			}
 		}
 	} else if checkAuthoritativeMark {
-		proceed, guardID, err := meta.ClaimFallbackRewardSnapshotGuard(
+		proceed, guardID, err := ldb.ClaimFallbackRewardSnapshotGuard(
 			epoch,
 			snapshotType,
-			metaTxn,
+			txn,
 		)
 		if err != nil {
 			return fmt.Errorf("claim fallback reward snapshot guard: %w", err)
@@ -341,21 +338,21 @@ func (m *Manager) writePreparedSnapshot(
 		temporaryFallbackGuardID = guardID
 	}
 
-	if err := meta.DeletePoolStakeSnapshotsForEpoch(
-		epoch, snapshotType, metaTxn,
+	if err := ldb.DeletePoolStakeSnapshotsForEpoch(
+		epoch, snapshotType, txn,
 	); err != nil {
 		return fmt.Errorf("replace pool snapshots: delete prior set: %w", err)
 	}
-	if err := meta.SavePoolStakeSnapshots(prepared.snapshots, metaTxn); err != nil {
+	if err := ldb.SavePoolStakeSnapshots(prepared.snapshots, txn); err != nil {
 		return fmt.Errorf("save pool snapshots: %w", err)
 	}
-	if err := meta.SaveEpochSummary(prepared.summary, metaTxn); err != nil {
+	if err := ldb.SaveEpochSummary(prepared.summary, txn); err != nil {
 		return fmt.Errorf("save epoch summary: %w", err)
 	}
 
 	if bundle != nil {
 		if err := m.saveRewardStateInputRows(
-			epoch, bundle, deferStakeInputs, meta, metaTxn,
+			epoch, bundle, deferStakeInputs, ldb, txn,
 		); err != nil {
 			return fmt.Errorf("save reward state inputs: %w", err)
 		}
@@ -372,9 +369,9 @@ func (m *Manager) writePreparedSnapshot(
 	}
 
 	if temporaryFallbackGuardID != 0 {
-		if err := meta.ReleaseFallbackRewardSnapshotGuard(
+		if err := ldb.ReleaseFallbackRewardSnapshotGuard(
 			temporaryFallbackGuardID,
-			metaTxn,
+			txn,
 		); err != nil {
 			return fmt.Errorf("release fallback reward snapshot guard: %w", err)
 		}
@@ -405,8 +402,8 @@ func (m *Manager) snapshotLeiosKeys(
 	snapshotEpoch uint64,
 	distribution *StakeDistribution,
 	evt event.EpochTransitionEvent,
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 ) (map[string]snapshottedLeiosKey, error) {
 	ret := make(map[string]snapshottedLeiosKey)
 	if distribution == nil || len(distribution.PoolStakes) == 0 {
@@ -543,8 +540,8 @@ func (m *Manager) buildRewardStateInputs(
 	snapshotType string,
 	distribution *StakeDistribution,
 	evt event.EpochTransitionEvent,
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 ) (*rewardStateBundle, error) {
 	rewardDistribution, err := rewardStakeDistribution(distribution)
 	if err != nil {
@@ -670,8 +667,8 @@ func (m *Manager) saveRewardStateInputRows(
 	epoch uint64,
 	bundle *rewardStateBundle,
 	deferStakeInputs bool,
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 ) error {
 	if err := meta.DeleteRewardOutputsForEpoch(epoch, metaTxn); err != nil {
 		return fmt.Errorf("replace reward outputs: %w", err)
@@ -722,8 +719,8 @@ func (m *Manager) rewardInputsSkippingDegradedPools(
 	epoch uint64,
 	distribution *StakeDistribution,
 	evt event.EpochTransitionEvent,
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 ) ([]*models.RewardPoolInput, []*models.RewardStakeInput, *StakeDistribution, error) {
 	working := cloneStakeDistributionForRewardInputs(distribution)
 	for {
@@ -865,8 +862,8 @@ func (m *Manager) rewardInputs(
 	epoch uint64,
 	distribution *StakeDistribution,
 	evt event.EpochTransitionEvent,
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 ) ([]*models.RewardPoolInput, []*models.RewardStakeInput, error) {
 	if err := validateRewardStakeInputTotals(distribution); err != nil {
 		return nil, nil, err
@@ -1017,8 +1014,8 @@ func (m *Manager) rewardInputs(
 }
 
 func rewardPoolBlockCounts(
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	poolKeys []lcommon.PoolKeyHash,
 	evt event.EpochTransitionEvent,
 ) (map[string]uint64, *uint64, error) {
@@ -1063,13 +1060,12 @@ func rewardPoolBlockCounts(
 	// the blocks above it; the snapshot's own counts supply the rest. When the
 	// epoch is covered by neither, the counts stay NULL rather than recording
 	// the tail as a smaller epoch.
-	counts, total, known, err := database.MergeImportedPoolBlockCounts(
-		meta,
-		metaTxn,
+	counts, total, known, err := meta.MergeImportedPoolBlockCounts(
 		evt.PreviousEpoch,
 		startSlot,
 		counts,
 		total,
+		metaTxn,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf(
@@ -1351,11 +1347,11 @@ func (m *Manager) cleanupOldSnapshots(
 					before,
 				)
 			}
-			poolTxn := m.db.Transaction(ctx, true)
+			poolTxn := m.db.Begin(ctx, true)
 			defer func() { _ = poolTxn.Rollback() }()
-			if err := m.db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(
+			if err := m.db.DeletePoolStakeSnapshotsBeforeEpoch(
 				before,
-				poolTxn.Metadata(),
+				poolTxn,
 			); err != nil {
 				return fmt.Errorf("cleanup pool snapshots: %w", err)
 			}
@@ -1393,8 +1389,7 @@ func (m *Manager) cleanupOldSnapshots(
 	// the write connection is free for block application between them; a
 	// single enclosing transaction would hold it for the whole prune, which
 	// on mainnet is minutes.
-	meta := m.db.Metadata()
-	var metaTxn types.Txn
+	ldb := m.db
 
 	switch {
 	case m.db.StorageMode() == types.StorageModeAPI:
@@ -1405,18 +1400,18 @@ func (m *Manager) cleanupOldSnapshots(
 	case m.RewardAccountOutputRetentionUnbounded():
 		// The in-process Koios parity observer needs reward_account_output
 		// only (see doc comment above).
-		if err := meta.DeleteRewardStakeInputBeforeEpoch(
+		if err := ldb.DeleteRewardStakeInputBeforeEpoch(
 			ctx,
 			deleteBeforeEpoch,
-			metaTxn,
+			nil,
 		); err != nil {
 			return fmt.Errorf("cleanup reward state: %w", err)
 		}
 	default:
-		if err := meta.DeleteRewardStateBeforeEpoch(
+		if err := ldb.DeleteRewardStateBeforeEpoch(
 			ctx,
 			deleteBeforeEpoch,
-			metaTxn,
+			nil,
 		); err != nil {
 			return fmt.Errorf("cleanup reward state: %w", err)
 		}

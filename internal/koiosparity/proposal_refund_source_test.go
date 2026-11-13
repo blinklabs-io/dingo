@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"errors"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"log/slog"
 	"math/big"
 	"path/filepath"
@@ -89,7 +90,7 @@ func runRefundBoundary(
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	_, err := governance.ProcessEpoch(context.Background(), &governance.EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    newEpoch - 1,
 		NewEpoch:     newEpoch,
@@ -432,7 +433,7 @@ func TestProposalDepositRefundsSkipLegacyWithdrawalToReturnAccount(
 		nil,
 	))
 	credited, err := governance.CreditRegisteredRewardAccountAfterSnapshot(
-		context.Background(), db, nil, 0, stakeKey,
+		context.Background(), dbadapter.New(db), nil, 0, stakeKey,
 		previewGovActionDeposit, slot, legacyProposalSourceHash(txHash, 0),
 	)
 	require.NoError(t, err)

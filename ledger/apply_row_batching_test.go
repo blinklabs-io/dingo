@@ -425,6 +425,20 @@ func runRowBatchingScenario(
 // references another row's id is kept.
 func rowBatchingDigest(t *testing.T, db *database.Database) string {
 	t.Helper()
+	return metadataDigest(t, db, nil, nil, nil)
+}
+
+// metadataDigest dumps every metadata table but skipTables, without
+// surrogate keys, timestamps and the columns skipCols names per table, in a
+// form two databases can be compared by.
+func metadataDigest(
+	t *testing.T,
+	db *database.Database,
+	skipTables map[string]bool,
+	skipCols map[string]map[string]bool,
+	skipRow func(table, line string) bool,
+) string {
+	t.Helper()
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	tableRows, err := raw.Query(
@@ -444,6 +458,9 @@ func rowBatchingDigest(t *testing.T, db *database.Database) string {
 
 	var out strings.Builder
 	for _, table := range tables {
+		if skipTables[table] {
+			continue
+		}
 		rows, err := raw.Query(fmt.Sprintf(`SELECT * FROM "%s"`, table))
 		require.NoError(t, err)
 		cols, err := rows.Columns()
@@ -463,6 +480,9 @@ func rowBatchingDigest(t *testing.T, db *database.Database) string {
 					"commit_timestamp", "timestamp":
 					continue
 				}
+				if skipCols[table][col] {
+					continue
+				}
 				switch v := values[i].(type) {
 				case []byte:
 					parts = append(parts, col+"="+hex.EncodeToString(v))
@@ -473,6 +493,9 @@ func rowBatchingDigest(t *testing.T, db *database.Database) string {
 				}
 			}
 			line := strings.Join(parts, "|")
+			if skipRow != nil && skipRow(table, line) {
+				continue
+			}
 			// The blob store's random identity differs between any two stores.
 			if table == "node_settings_gate" &&
 				strings.HasPrefix(line, "name=blob_store_id|") {

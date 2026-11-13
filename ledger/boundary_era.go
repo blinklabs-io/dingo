@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
@@ -51,7 +51,7 @@ type boundaryEraInputs struct {
 	// newEpochID is the epoch the first block after the boundary opens.
 	newEpochID uint64
 	// txn is the boundary transaction, nil outside a rollover.
-	txn *database.Txn
+	txn ledgerdb.Txn
 }
 
 // ledgerBoundaryEra returns the era the ledger is in after the boundary into
@@ -237,7 +237,7 @@ func (ls *LedgerState) forecastHardForkInitiations(
 	}
 	return governance.ForecastHardForkInitiations(
 		ctx,
-		ls.db,
+		ls.ledgerDB(),
 		in.txn,
 		in.epoch.EpochId+1,
 		boundarySlot,
@@ -251,7 +251,7 @@ func (ls *LedgerState) forecastHardForkInitiations(
 // deferred RATIFY decided and has not yet written, waiting for that decision.
 func (ls *LedgerState) pendingRatifiedProposals(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
 	rec, err := loadPendingRatification(ls.db, txn)
 	if err != nil || rec == nil {

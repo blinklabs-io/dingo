@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -332,8 +332,8 @@ func (ls *LedgerState) frozenCandidateNonceFromAncestor(
 			return cloneNonce(sourceEpoch.CandidateNonce), nil
 		}
 		var candidate []byte
-		txn := ls.db.Transaction(ctx, false)
-		err := txn.Do(func(txn *database.Txn) error {
+		txn := ls.ledgerDB().Begin(ctx, false)
+		err := ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
 			block, err := ancestorBeforeSlot(ctx, txn, ancestor, cutoff)
 			if err != nil {
 				return err
@@ -342,7 +342,7 @@ func (ls *LedgerState) frozenCandidateNonceFromAncestor(
 				candidate = cloneNonce(sourceEpoch.CandidateNonce)
 				return nil
 			}
-			candidate, err = ls.db.GetBlockNonce(
+			candidate, err = ls.ledgerDB().GetBlockNonce(
 				ocommon.Point{Slot: block.Slot, Hash: block.Hash}, txn,
 			)
 			return err
@@ -434,7 +434,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 			models.Epoch{},
 		)
 	} else {
-		initialEvolvingNonce, err = ls.db.GetBlockNonce(ancestor, nil)
+		initialEvolvingNonce, err = ls.ledgerDB().GetBlockNonce(ancestor, nil)
 		initialCandidateNonce = cloneNonce(initialEvolvingNonce)
 	}
 	if err != nil {

@@ -445,7 +445,8 @@ func (d *Database) SetTransactionBatchedWithOpts(
 				point.Slot,
 			)
 		}
-		if opts.SkipProducedUtxoOffsetWrites || opts.OffsetsPersisted {
+		if opts.SkipProducedUtxoOffsetWrites || opts.OffsetsPersisted ||
+			d.liveUtxo {
 			// Offset is required to be computed (validated above) so a
 			// regression in the indexer is still caught, but the blob
 			// write itself is elided: the immutable-copy phase already

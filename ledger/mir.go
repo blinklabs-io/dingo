@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -106,12 +106,12 @@ const (
 // would wedge the node, since the stored certificates are re-read and re-fail
 // on every deterministic retry.
 func (ls *LedgerState) applyMIRCerts(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	epochStartSlot uint64,
 	boundarySlot uint64,
 	epochEraID uint,
 ) error {
-	effects, err := ls.db.GetMIRCertsInSlotRange(
+	effects, err := ls.ledgerDB().GetMIRCertsInSlotRange(
 		ctx,
 		epochStartSlot, boundarySlot, txn,
 	)
@@ -173,8 +173,8 @@ func (ls *LedgerState) applyMIRCerts(ctx context.Context,
 	if newReserves == reserves && newTreasury == treasury {
 		return nil
 	}
-	return ls.db.Metadata().
-		SetNetworkState(newTreasury, newReserves, boundarySlot, txn.Metadata())
+	return ls.ledgerDB().
+		SetNetworkState(newTreasury, newReserves, boundarySlot, txn)
 }
 
 // discardMIRBoundary logs why a folded MIR boundary cannot be credited at
@@ -313,7 +313,7 @@ func (b *mirBoundary) addTransfer(sourcePot uint, amount uint64) {
 // `Map.union`'s left bias on the newer entry. See the era discussion on
 // applyMIRCerts.
 func (ls *LedgerState) collectMIRBoundary(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	effects []models.MIREffect,
 	epochEraID uint,
 ) (*mirBoundary, error) {
@@ -414,7 +414,7 @@ func (ls *LedgerState) collectMIRBoundary(ctx context.Context,
 // and it establishes the same registered-vs-skipped split before any pot is
 // debited.
 func (ls *LedgerState) registeredMIRAccounts(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	effects []models.MIREffect,
 ) (map[string]bool, error) {
 	refs := make([]models.StakeCredentialRef, 0, len(effects))
@@ -437,7 +437,7 @@ func (ls *LedgerState) registeredMIRAccounts(ctx context.Context,
 	if len(refs) == 0 {
 		return nil, nil
 	}
-	accounts, err := ls.db.GetAccountsByCredential(
+	accounts, err := ls.ledgerDB().GetAccountsByCredential(
 		ctx,
 		refs,
 		false,
@@ -460,14 +460,14 @@ func (ls *LedgerState) registeredMIRAccounts(ctx context.Context,
 // reused from the capacity check so the pot debit can never exceed what was
 // credited.
 func (ls *LedgerState) applyMIRCredits(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	credits []mirCredit,
 	boundarySlot uint64,
 ) (appliedReserves, appliedTreasury uint64, err error) {
 	for _, credit := range credits {
 		credited, err := governance.CreditRegisteredRewardAccountBeforeSnapshot(
 			ctx,
-			ls.db,
+			ls.ledgerDB(),
 			txn,
 			credit.credentialTag,
 			credit.credential,
@@ -606,9 +606,9 @@ func mirRewardSourceHash(pot uint) []byte {
 // readNetworkState returns the current treasury and reserves from the most
 // recent NetworkState row, returning (0, 0) if none exists yet.
 func (ls *LedgerState) readNetworkState(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (treasury, reserves uint64, err error) {
-	state, err := ls.db.Metadata().GetNetworkState(txn.Metadata())
+	state, err := ls.ledgerDB().GetNetworkState(txn)
 	if err != nil {
 		return 0, 0, fmt.Errorf("get network state: %w", err)
 	}

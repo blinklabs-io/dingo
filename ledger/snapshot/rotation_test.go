@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -62,7 +63,7 @@ func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 
 	db := setupTestDBWithStorageMode(t, types.StorageModeCore)
 	require.Equal(t, types.StorageModeCore, db.StorageMode())
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()
 
 	const currentEpoch = uint64(10)
@@ -144,7 +145,7 @@ func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
 
 	db := setupTestDBWithStorageMode(t, types.StorageModeAPI)
 	require.Equal(t, types.StorageModeAPI, db.StorageMode())
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()
 
 	const currentEpoch = uint64(10)
@@ -213,7 +214,7 @@ func TestCleanupOldSnapshotsKoiosParityRetentionUnbounded(t *testing.T) {
 
 	db := setupTestDBWithStorageMode(t, types.StorageModeCore)
 	require.Equal(t, types.StorageModeCore, db.StorageMode())
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	mgr.SetRewardAccountOutputRetentionUnbounded(true)
 	require.True(t, mgr.RewardAccountOutputRetentionUnbounded())
 	meta := db.Metadata()
@@ -444,7 +445,7 @@ func TestCleanupOldSnapshotsRetainsEpochSummaries(t *testing.T) {
 	t.Parallel()
 
 	db := setupTestDB(t)
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()
 
 	const currentEpoch = uint64(10)
@@ -603,7 +604,7 @@ func TestCleanupOldSnapshotsBelowWindowKeepsEverything(t *testing.T) {
 	t.Parallel()
 
 	db := setupTestDB(t)
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()
 
 	const currentEpoch = uint64(2)
@@ -681,7 +682,7 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 		TotalStake:     100,
 		TotalPools:     1,
 	}
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	saved, err := mgr.saveSnapshot(
 		context.Background(),
 		8,
@@ -806,7 +807,7 @@ func TestLeiosKeySnapshotUsesEraSpecificPoolRegistrationWindow(
 				TotalStake:     100,
 				TotalPools:     1,
 			}
-			mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+			mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 			saved, err := mgr.saveSnapshot(
 				context.Background(),
 				8,
@@ -892,7 +893,7 @@ func TestRotateSnapshotsPreservesLeiosKeyWhenImportedAgeIsUnknown(
 		TotalStake:     100,
 		TotalPools:     1,
 	}
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	saved, err := mgr.saveSnapshot(
 		context.Background(),
 		8,
@@ -940,7 +941,7 @@ func TestCleanupOldSnapshotsRetentionFloorRetainsDeferredHeaderEpochs(
 	t.Parallel()
 
 	db := setupTestDB(t)
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()
 
 	const currentEpoch = uint64(28)
@@ -1015,7 +1016,7 @@ func TestCleanupOldSnapshotsRetentionFloorAboveWindowIsNoop(t *testing.T) {
 	t.Parallel()
 
 	db := setupTestDB(t)
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()
 
 	const currentEpoch = uint64(10)
@@ -1055,7 +1056,7 @@ func TestCleanupOldSnapshotsRetentionDepthCapBounds(t *testing.T) {
 	t.Parallel()
 
 	db := setupTestDB(t)
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()
 
 	const currentEpoch = uint64(40)
@@ -1163,7 +1164,7 @@ func TestRewardPoolBlockCountsIncludeImportedCountsBelowAnchor(t *testing.T) {
 
 	db, pools := rewardPoolBlockCountsFixture(t, true)
 	counts, total, err := rewardPoolBlockCounts(
-		db.Metadata(),
+		dbadapter.New(db),
 		nil,
 		pools,
 		event.EpochTransitionEvent{PreviousEpoch: 2, BoundarySlot: 200},
@@ -1182,7 +1183,7 @@ func TestRewardPoolBlockCountsUnknownWithoutImportedCounts(t *testing.T) {
 
 	db, pools := rewardPoolBlockCountsFixture(t, false)
 	counts, total, err := rewardPoolBlockCounts(
-		db.Metadata(),
+		dbadapter.New(db),
 		nil,
 		pools,
 		event.EpochTransitionEvent{PreviousEpoch: 2, BoundarySlot: 200},

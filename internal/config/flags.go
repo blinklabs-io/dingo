@@ -901,6 +901,27 @@ var flagSpecs = []flagSpec{
 		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies, for validated blocks only (not consensus-affecting; default on)",
 	),
 	boolFlag(
+		"LedgerUtxoShadow",
+		"ledger-utxo-shadow",
+		"keep a Badger copy of the live UTxO set and check it against the metadata store (experimental, diagnostic only; default off)",
+	),
+	boolFlag(
+		"LedgerUtxoBadger",
+		"ledger-utxo-badger",
+		"keep the live UTxO set in a Badger store updated synchronously after each ledger commit (experimental; default off)",
+	),
+	boolFlag(
+		"LedgerUtxoBadgerOnly",
+		"ledger-utxo-badger-only",
+		"keep the live UTxO set only in Badger, with no utxo rows in the metadata store; core mode, a database synced this way from genesis or a Mithril import (experimental; default off)",
+	),
+	stringFlag(
+		"LedgerUtxoReads",
+		"ledger-utxo-reads",
+		"",
+		"where validation resolves its inputs with --ledger-utxo-badger: empty for the metadata store, verify to compare both, set for the live UTxO set (experimental)",
+	),
+	boolFlag(
 		"LedgerValidateAheadEnabled",
 		"ledger-validate-ahead-enabled",
 		"verify the witness signatures of a block-apply chunk's validated blocks on worker goroutines while earlier blocks apply (not consensus-affecting; default on)",

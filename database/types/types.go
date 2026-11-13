@@ -525,3 +525,33 @@ func BlockTombstone() []byte {
 func IsBlockTombstone(data []byte) bool {
 	return bytes.HasPrefix(data, BlockTombstoneMagic[:])
 }
+
+// LiveUtxoSource resolves live outputs for a metadata store that keeps no
+// utxo rows, because the ledger holds the live UTxO set elsewhere. txn is the
+// metadata transaction the store is writing in; the source answers as that
+// transaction sees the live set, including outputs the transaction created.
+type LiveUtxoSource interface {
+	LiveUtxoCbor(txn Txn, txID []byte, index uint32) ([]byte, bool, error)
+	// LiveUtxoStake returns the lovelace in live outputs whose address names
+	// the stake credential (credentialTag, stakingKey), classified as utxo
+	// rows classify outputs, as txn sees the live set. txn may be nil.
+	LiveUtxoStake(txn Txn, credentialTag uint8, stakingKey []byte) (uint64, error)
+	// LivePointerStakes returns the lovelace in live outputs at pointer
+	// addresses, per certificate position named, as txn sees the live set.
+	LivePointerStakes(txn Txn) ([]PointerStake, error)
+	// EachLiveUtxoStake calls fn for every stake credential with lovelace in
+	// live outputs as LiveUtxoStake counts it, as txn sees the live set.
+	EachLiveUtxoStake(
+		txn Txn,
+		fn func(credentialTag uint8, stakingKey []byte, lovelace uint64) error,
+	) error
+}
+
+// PointerStake is the lovelace in live outputs at pointer addresses naming
+// the certificate at (Slot, TxIndex, CertIndex).
+type PointerStake struct {
+	Slot      uint64
+	TxIndex   uint64
+	CertIndex uint64
+	Lovelace  uint64
+}

@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -3532,7 +3533,7 @@ func captureLiveMarkSnapshot(
 	t.Cleanup(eventBus.Close)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	mgr := ledgersnapshot.NewManager(db, eventBus, logger)
+	mgr := ledgersnapshot.NewManager(dbadapter.New(db), eventBus, logger)
 	require.NoError(t, mgr.Start(ctx))
 	t.Cleanup(func() {
 		cancel()

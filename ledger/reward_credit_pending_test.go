@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -287,7 +289,7 @@ func TestPendingRewardStakeInputsHoldBackTheRound(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return markRewardStakeInputsPending(
-			db.Metadata(), txn.Metadata(), survivalSnapshotEpoch, 100,
+			dbadapter.New(db), txn, survivalSnapshotEpoch, 100,
 		)
 	}))
 	ls.rewardPrecomputeMu.Lock()
@@ -327,8 +329,7 @@ func TestDeferredStakeInputWriteRetriesAfterError(t *testing.T) {
 			require.GreaterOrEqual(t, failures.Load(), int32(2),
 				"the failed write must be attempted again")
 		}
-		meta := f.db.Metadata()
-		pending, err := loadRewardStakeInputsPending(meta, nil)
+		pending, err := loadRewardStakeInputsPending(dbadapter.New(f.db), nil)
 		require.NoError(t, err)
 		require.Empty(t, pending.Entries,
 			"the retried write must complete the snapshot's rows")

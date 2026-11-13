@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -40,8 +40,8 @@ import (
 // pparams is returned unchanged when no HardForkInitiation is enacted.
 func ForecastHardForkInitiations(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 	pparams lcommon.ProtocolParameters,

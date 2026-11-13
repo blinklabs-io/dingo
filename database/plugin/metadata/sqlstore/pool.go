@@ -2747,6 +2747,9 @@ func (s *Store) getStakeByPoolsDirect(
 	if len(poolKeyHashes) == 0 {
 		return stakes, delegators, nil
 	}
+	if s.liveUtxo != nil {
+		return nil, nil, errLiveUtxoStakeIncomplete
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, nil, err

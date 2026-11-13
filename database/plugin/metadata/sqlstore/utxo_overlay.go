@@ -256,7 +256,7 @@ func (s *Store) EnableBatchUtxoOverlay(
 ) (bool, error) {
 	batched, ok := accumulator.(*transactionBatchAccumulator)
 	if !ok || s.dialect.Name() != "sqlite" ||
-		s.storageMode == types.StorageModeAPI {
+		s.storageMode == types.StorageModeAPI || s.liveUtxo != nil {
 		return false, nil
 	}
 	transaction, ok := txn.(*sqlTxn)

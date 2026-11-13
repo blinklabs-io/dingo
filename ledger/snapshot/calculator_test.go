@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -368,7 +369,7 @@ func TestCalculateStakeDistribution_NonZeroStake(t *testing.T) {
 	seedPoolAndDelegations(t, db, poolCHash, nil, 500)
 
 	// Calculate stake distribution at slot 1000
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 	dist, err := calc.CalculateStakeDistribution(context.Background(), 1000)
 	require.NoError(t, err, "CalculateStakeDistribution should not fail")
 
@@ -560,7 +561,7 @@ func TestCalculateStakeDistribution_UsesHistoricalDelegationAndRegistration(
 		AddedSlot:  100,
 	}), "create bootstrap utxo")
 
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 
 	dist, err := calc.CalculateStakeDistribution(context.Background(), 200)
 	require.NoError(t, err)
@@ -641,7 +642,7 @@ func TestCalculateStakeDistribution_HistoricalUtxoLiveness(t *testing.T) {
 		DeletedSlot: 0,
 	}))
 
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 	var poolKey lcommon.PoolKeyHash
 	copy(poolKey[:], poolHash)
 
@@ -714,7 +715,7 @@ func TestCalculateStakeDistribution_InactiveAccountsExcluded(t *testing.T) {
 	}))
 
 	// Calculate stake distribution
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 	dist, err := calc.CalculateStakeDistribution(context.Background(), 1000)
 	require.NoError(t, err)
 
@@ -781,7 +782,7 @@ func TestCalculateStakeDistribution_SpentUtxosExcluded(t *testing.T) {
 	}
 	require.NoError(t, db.CreateUtxo(context.Background(), nil, &spentUtxo))
 
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 	var poolKey lcommon.PoolKeyHash
 	copy(poolKey[:], poolHash)
 
@@ -807,7 +808,7 @@ func TestCalculateStakeDistribution_EmptyDatabase(t *testing.T) {
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
 
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 	dist, err := calc.CalculateStakeDistribution(context.Background(), 1000)
 	require.NoError(t, err)
 
@@ -862,7 +863,7 @@ func TestCalculateEpochBoundaryStakeLivePathExcludesExpiredAccount(
 	db := setupTestDB(t)
 	poolHash, expiredKey := seedBoundaryPathFixture(t, db)
 
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
@@ -903,7 +904,7 @@ func TestCalculateEpochBoundaryStakePathsAgree(t *testing.T) {
 			t.Parallel()
 			db := setupTestDB(t)
 			seedBoundaryPathFixture(t, db)
-			calc := NewCalculator(db)
+			calc := NewCalculator(dbadapter.New(db), nil)
 
 			require.NoError(t, db.SetTip(ochainsync.Tip{
 				Point: ocommon.Point{
@@ -990,7 +991,7 @@ func TestCalculateEpochBoundaryStakeUsesLiveAggregate(t *testing.T) {
 		BlockNumber: 1,
 	}, nil))
 
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateBoundaryStakeDistributionInTxn(
@@ -1062,7 +1063,7 @@ func TestCalculateEpochBoundaryStakeUsesHistoricalFallback(t *testing.T) {
 				}, nil))
 			}
 
-			calc := NewCalculator(db)
+			calc := NewCalculator(dbadapter.New(db), nil)
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Commit() }()
 			dist, err := calc.calculateBoundaryStakeDistributionInTxn(
@@ -1111,7 +1112,7 @@ func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
 		},
 	})
 
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
@@ -1158,7 +1159,7 @@ func TestCalculateStakeDistributionRejectsTotalStakeOverflow(t *testing.T) {
 		},
 	})
 
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
@@ -1272,7 +1273,7 @@ func runHistoricalBoundaryStakeIncludesUntickedClosure(t *testing.T, collateralR
 		}
 		require.NoError(t, db.CreateUtxo(t.Context(), nil, output))
 	}
-	calc := NewCalculator(db)
+	calc := NewCalculator(dbadapter.New(db), nil)
 	txn := db.Transaction(t.Context(), false)
 	defer txn.Rollback() //nolint:errcheck
 	dist, err := calc.calculateHistoricalBoundaryStakeDistributionInTxn(

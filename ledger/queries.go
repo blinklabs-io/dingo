@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -102,10 +104,10 @@ var ErrPointNotOnChain = errors.New(
 // read from has not incorporated it at all. Rejecting at.Slot above the
 // transaction-consistent tip closes that gap.
 func (ls *LedgerState) verifyPointOnChain(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	at QueryPoint,
 ) error {
-	tip, err := ls.db.GetTip(txn)
+	tip, err := ls.ledgerDB().GetTip(txn)
 	if err != nil {
 		return err
 	}
@@ -117,7 +119,7 @@ func (ls *LedgerState) verifyPointOnChain(
 			tip.Point.Slot,
 		)
 	}
-	block, err := database.BlockBySlotTxn(txn, at.Slot)
+	block, err := database.BlockBySlotTxn(dbadapter.Unwrap(txn), at.Slot)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return fmt.Errorf(
@@ -165,7 +167,7 @@ func (ls *LedgerState) VerifyPointOnChain(ctx context.Context, at QueryPoint) er
 	if !at.pinned() {
 		return nil
 	}
-	txn := ls.db.Transaction(ctx, false)
+	txn := ls.ledgerDB().Begin(ctx, false)
 	defer txn.Release()
 	return ls.verifyPointOnChain(txn, at)
 }
@@ -199,7 +201,7 @@ func (ls *LedgerState) VerifyPointOnChain(ctx context.Context, at QueryPoint) er
 // against that slot rather than falling through to the live branch the
 // way comparing a bare uint64 against zero would.
 func (ls *LedgerState) resolveAsOfEpoch(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	at QueryPoint,
 ) (epoch uint64, found bool, err error) {
 	if !at.pinned() {
@@ -212,7 +214,7 @@ func (ls *LedgerState) resolveAsOfEpoch(
 		}
 		return current.EpochId, true, nil
 	}
-	epochRow, err := ls.db.GetEpochBySlot(at.Slot, txn)
+	epochRow, err := ls.ledgerDB().GetEpochBySlot(at.Slot, txn)
 	if err != nil {
 		return 0, false, err
 	}
@@ -250,7 +252,7 @@ func errEpochNotResolved(at QueryPoint) error {
 // against, so a rollback landing between validation and this read cannot
 // make the two disagree about which chain they're describing.
 func (ls *LedgerState) queryShelleyEpochNo(ctx context.Context, at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	epoch, err := ls.shelleyEpochNo(ctx, at, txn)
 	if err != nil {
@@ -262,7 +264,7 @@ func (ls *LedgerState) queryShelleyEpochNo(ctx context.Context, at QueryPoint,
 // shelleyEpochNo returns the epoch at the query point, by the same rules as
 // queryShelleyEpochNo.
 func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (uint64, error) {
 	if !at.pinned() {
 		row, err := ls.snapshotEpoch(txn, at)
@@ -275,7 +277,7 @@ func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
 		return ls.loadConsensusSnapshot().currentEpoch.EpochId, nil
 	}
 	if txn == nil {
-		txn = ls.db.Transaction(ctx, false)
+		txn = ls.ledgerDB().Begin(ctx, false)
 		defer txn.Release()
 	}
 	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
@@ -345,14 +347,14 @@ func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
 // already covers.
 func (ls *LedgerState) VerifyPointQueryable(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	at QueryPoint,
 ) error {
 	if !at.pinned() {
 		return nil
 	}
 	if txn == nil {
-		txn = ls.db.Transaction(ctx, false)
+		txn = ls.ledgerDB().Begin(ctx, false)
 		defer txn.Release()
 	}
 	if err := ls.verifyPointOnChain(txn, at); err != nil {
@@ -423,10 +425,10 @@ func (ls *LedgerState) checkMithrilTrustBoundary(at QueryPoint) error {
 // It is only race-free when the caller registered its pin (PinAcquiredPoint)
 // before calling VerifyPointQueryable: see acquiredPointPins.
 func (ls *LedgerState) checkAnnouncedPruneFloors(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	at QueryPoint,
 ) error {
-	if ls.db.StorageMode() == types.StorageModeAPI {
+	if ls.ledgerDB().StorageMode() == types.StorageModeAPI {
 		return nil
 	}
 	utxoFloor, poolFloor := ls.announcedPruneFloors()
@@ -502,7 +504,7 @@ func (ls *LedgerState) QueryWithProtocolVersion(ctx context.Context, query any,
 // pinned (those queries resolve their own epoch), or no record covers the tip;
 // callers then answer from the live consensus snapshot.
 func (ls *LedgerState) snapshotEpoch(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	at QueryPoint,
 ) (*models.Epoch, error) {
 	if txn == nil || at.pinned() {
@@ -517,12 +519,12 @@ func (ls *LedgerState) snapshotEpoch(
 // is always safe to defer: it is a no-op for a transaction the caller owns.
 func (ls *LedgerState) readTxn(
 	ctx context.Context,
-	txn *database.Txn,
-) (*database.Txn, func()) {
+	txn ledgerdb.Txn,
+) (ledgerdb.Txn, func()) {
 	if txn != nil {
 		return txn, func() {}
 	}
-	opened := ls.db.Transaction(ctx, false)
+	opened := ls.ledgerDB().Begin(ctx, false)
 	return opened, opened.Release
 }
 
@@ -560,7 +562,7 @@ func (ls *LedgerState) queryInTxn(
 	query any,
 	at QueryPoint,
 	protocolVersion uint16,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	return ls.queryInTxnWithTransition(ctx, query, at, protocolVersion, txn, nil)
 }
@@ -570,7 +572,7 @@ func (ls *LedgerState) queryInTxnWithTransition(
 	query any,
 	at QueryPoint,
 	protocolVersion uint16,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	transitionInfo *hardfork.TransitionInfo,
 ) (any, error) {
 	if at.pinned() {
@@ -597,7 +599,7 @@ func (ls *LedgerState) queryInTxnWithTransition(
 
 func (ls *LedgerState) queryBlock(ctx context.Context, query *olocalstatequery.BlockQuery,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	protocolVersion uint16,
 	transitionInfo *hardfork.TransitionInfo,
 ) (any, error) {
@@ -641,7 +643,7 @@ func (ls *LedgerState) querySystemStart(ctx context.Context) (any, error) {
 
 func (ls *LedgerState) queryChainBlockNo(
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	tip, err := ls.queryTip(at, txn)
 	if err != nil {
@@ -656,7 +658,7 @@ func (ls *LedgerState) queryChainBlockNo(
 
 func (ls *LedgerState) queryChainPoint(
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	tip, err := ls.queryTip(at, txn)
 	if err != nil {
@@ -670,11 +672,11 @@ func (ls *LedgerState) queryChainPoint(
 // direct unpinned query reports the live in-memory tip.
 func (ls *LedgerState) queryTip(
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (ochainsync.Tip, error) {
 	if at.pinned() {
 		metadata, err := database.BlockMetadataByPointLocalTxn(
-			txn,
+			dbadapter.Unwrap(txn),
 			ocommon.NewPoint(at.Slot, at.Hash),
 		)
 		if err != nil {
@@ -688,7 +690,7 @@ func (ls *LedgerState) queryTip(
 	if txn == nil {
 		return cloneTip(ls.loadTipSnapshot().currentTip), nil
 	}
-	return ls.db.GetTip(txn)
+	return ls.ledgerDB().GetTip(txn)
 }
 
 // queryShelleyLedgerTip answers GetLedgerTip: the acquired point when one is
@@ -726,7 +728,7 @@ func (ls *LedgerState) queryShelleyLedgerTip(at QueryPoint) (any, error) {
 // (node-parity --from-genesis validation).
 func (ls *LedgerState) queryHardFork(ctx context.Context, query *olocalstatequery.HardForkQuery,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	return ls.queryHardForkWithTransition(ctx, query, at, txn, nil)
 }
@@ -735,7 +737,7 @@ func (ls *LedgerState) queryHardForkWithTransition(
 	ctx context.Context,
 	query *olocalstatequery.HardForkQuery,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	transitionInfo *hardfork.TransitionInfo,
 ) (any, error) {
 	switch q := query.Query.(type) {
@@ -753,7 +755,7 @@ func (ls *LedgerState) queryHardForkWithTransition(
 			return ls.loadConsensusSnapshot().currentEra.Id, nil
 		}
 		if txn == nil {
-			txn = ls.db.Transaction(ctx, false)
+			txn = ls.ledgerDB().Begin(ctx, false)
 			defer txn.Release()
 		}
 		targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
@@ -763,7 +765,7 @@ func (ls *LedgerState) queryHardForkWithTransition(
 		if !found {
 			return nil, errEpochNotResolved(at)
 		}
-		epochRow, err := ls.db.GetEpoch(targetEpoch, txn)
+		epochRow, err := ls.ledgerDB().GetEpoch(targetEpoch, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -848,7 +850,7 @@ type eraBoundData struct {
 
 func (ls *LedgerState) queryHardForkEraHistory(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	acquiredTransition ...hardfork.TransitionInfo,
 ) (any, error) {
 	if err := ctx.Err(); err != nil {
@@ -868,7 +870,7 @@ func (ls *LedgerState) queryHardForkEraHistory(
 	if txn != nil {
 		// A QueryView describes the tip and era it froze. The transition
 		// forecast is captured by QueryView because it has no stored form.
-		tip, err := ls.db.GetTip(txn)
+		tip, err := ls.ledgerDB().GetTip(txn)
 		if err != nil {
 			return nil, err
 		}
@@ -914,13 +916,13 @@ func (ls *LedgerState) queryHardForkEraHistory(
 	// counted from its bounds and not from the rows alone: epochs between two
 	// rows are priced at their era's geometry, and the boundary between eras is
 	// the transition epoch, so that every End equals the next era's Start.
-	allEpochs, dbErr := ls.db.GetEpochs(txn)
+	allEpochs, dbErr := ls.ledgerDB().GetEpochs(txn)
 	if dbErr != nil {
 		return nil, dbErr
 	}
 	eraEpochs := make([][]models.Epoch, currentIdx+1)
 	for i, entry := range shape.Eras[:currentIdx+1] {
-		epochs, dbErr := ls.db.GetEpochsByEra(entry.EraID, txn)
+		epochs, dbErr := ls.ledgerDB().GetEpochsByEra(entry.EraID, txn)
 		if dbErr != nil {
 			return nil, dbErr
 		}
@@ -1262,7 +1264,7 @@ func picosecondsToDuration(p *big.Int) time.Duration {
 
 func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery.ShelleyQuery,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	protocolVersion uint16,
 ) (any, error) {
 	return ls.queryShelleyLeaf(ctx, query.Query, at, txn, protocolVersion)
@@ -1368,7 +1370,7 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // forwards at to whatever it wraps).
 func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	protocolVersion uint16,
 ) (any, error) {
 	switch q := query.(type) {
@@ -1481,7 +1483,7 @@ func (ls *LedgerState) queryShelleyProposedProtocolParamsUpdates(
 	ctx context.Context,
 	q *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	eraID, err := ls.queryHardFork(
 		ctx,
@@ -1507,7 +1509,7 @@ func (ls *LedgerState) queryShelleyProposedProtocolParamsUpdates(
 // GetCBOR-wrapped queries flows through here.
 func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery.ShelleyCborQuery,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	protocolVersion uint16,
 ) (any, error) {
 	inner, err := ls.queryShelleyLeaf(ctx, q.Query, at, txn, protocolVersion)
@@ -1563,7 +1565,7 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 	ctx context.Context,
 	q *olocalstatequery.ShelleyStakeSnapshotsQuery,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	pools, all := q.PoolFilter()
 	consensus := ls.loadConsensusSnapshot()
@@ -1625,7 +1627,6 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 	// fires mid-query.
 	txn, release := ls.readTxn(ctx, txn)
 	defer release()
-	metaTxn := txn.Metadata()
 
 	var poolSnapshots map[ledger.Blake2b224]*olocalstatequery.PoolStakeSnapshot
 	if all {
@@ -1634,15 +1635,15 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 		// three: a pool that has retired keeps historical set/go stake that
 		// must still be returned, so the pool set is the union of all three
 		// snapshots rather than the mark snapshot alone.
-		mark, err := ls.markStakeByPool(epoch, true, metaTxn)
+		mark, err := ls.markStakeByPool(epoch, true, txn)
 		if err != nil {
 			return nil, err
 		}
-		set, err := ls.markStakeByPool(setEpoch, hasSet, metaTxn)
+		set, err := ls.markStakeByPool(setEpoch, hasSet, txn)
 		if err != nil {
 			return nil, err
 		}
-		snapshotGo, err := ls.markStakeByPool(goEpoch, hasGo, metaTxn)
+		snapshotGo, err := ls.markStakeByPool(goEpoch, hasGo, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -1673,20 +1674,20 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 	} else {
 		// Read each epoch's requested pools in one batch. This keeps database
 		// round trips constant as the caller's filter grows.
-		mark, err := ls.markStakeForPools(epoch, pools, metaTxn)
+		mark, err := ls.markStakeForPools(epoch, pools, txn)
 		if err != nil {
 			return nil, err
 		}
 		var set map[string]uint64
 		if hasSet {
-			set, err = ls.markStakeForPools(setEpoch, pools, metaTxn)
+			set, err = ls.markStakeForPools(setEpoch, pools, txn)
 			if err != nil {
 				return nil, err
 			}
 		}
 		var snapshotGo map[string]uint64
 		if hasGo {
-			snapshotGo, err = ls.markStakeForPools(goEpoch, pools, metaTxn)
+			snapshotGo, err = ls.markStakeForPools(goEpoch, pools, txn)
 			if err != nil {
 				return nil, err
 			}
@@ -1710,15 +1711,15 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 		}
 	}
 
-	markTotal, err := ls.totalActiveStake(epoch, true, metaTxn)
+	markTotal, err := ls.totalActiveStake(epoch, true, txn)
 	if err != nil {
 		return nil, err
 	}
-	setTotal, err := ls.totalActiveStake(setEpoch, hasSet, metaTxn)
+	setTotal, err := ls.totalActiveStake(setEpoch, hasSet, txn)
 	if err != nil {
 		return nil, err
 	}
-	goTotal, err := ls.totalActiveStake(goEpoch, hasGo, metaTxn)
+	goTotal, err := ls.totalActiveStake(goEpoch, hasGo, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -1740,7 +1741,7 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 func (ls *LedgerState) stakeSnapshotsAsOf(
 	consensus *consensusSnapshot,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (uint64, lcommon.ProtocolParameters, error) {
 	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
@@ -1753,7 +1754,7 @@ func (ls *LedgerState) stakeSnapshotsAsOf(
 	if err != nil {
 		return 0, nil, err
 	}
-	apiMode := ls.db.StorageMode() == types.StorageModeAPI
+	apiMode := ls.ledgerDB().StorageMode() == types.StorageModeAPI
 	if err := checkAsOfEpochRecency(epoch, liveEpoch, apiMode); err != nil {
 		return 0, nil, err
 	}
@@ -1814,12 +1815,12 @@ func priorEpoch(epoch, n uint64) (uint64, bool) {
 func (ls *LedgerState) markStakeByPool(
 	epoch uint64,
 	exists bool,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
 	if !exists {
 		return nil, nil
 	}
-	snapshots, err := ls.db.Metadata().GetPoolStakeSnapshotsByEpoch(
+	snapshots, err := ls.ledgerDB().GetPoolStakeSnapshotsByEpoch(
 		epoch,
 		snapshotTypeMark,
 		txn,
@@ -1833,9 +1834,9 @@ func (ls *LedgerState) markStakeByPool(
 func (ls *LedgerState) markStakeByPoolBounded(
 	epoch uint64,
 	maxRows int,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
-	snapshots, err := ls.db.Metadata().GetPoolStakeSnapshotsByEpochBounded(
+	snapshots, err := ls.ledgerDB().GetPoolStakeSnapshotsByEpochBounded(
 		epoch,
 		snapshotTypeMark,
 		maxRows,
@@ -1873,13 +1874,13 @@ func stakeByPoolSnapshots(
 func (ls *LedgerState) markStakeForPools(
 	epoch uint64,
 	poolIds []ledger.PoolId,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
 	hashes := make([][]byte, 0, len(poolIds))
 	for _, poolId := range poolIds {
 		hashes = append(hashes, lcommon.PoolKeyHash(poolId).Bytes())
 	}
-	snapshots, err := ls.db.Metadata().GetPoolStakeSnapshotsForPools(
+	snapshots, err := ls.ledgerDB().GetPoolStakeSnapshotsForPools(
 		epoch,
 		snapshotTypeMark,
 		hashes,
@@ -1907,12 +1908,12 @@ func (ls *LedgerState) markStakeForPools(
 func (ls *LedgerState) totalActiveStake(
 	epoch uint64,
 	exists bool,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (uint64, error) {
 	if !exists {
 		return 1, nil
 	}
-	total, err := ls.db.Metadata().
+	total, err := ls.ledgerDB().
 		GetTotalActiveStake(epoch, snapshotTypeMark, txn)
 	if err != nil {
 		return 0, err
@@ -1973,7 +1974,7 @@ func (ls *LedgerState) totalCirculatingSupply(
 	epoch uint64,
 	asOfSlot *uint64,
 	exists bool,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (uint64, error) {
 	fallback := func() (uint64, error) {
 		return ls.totalActiveStake(epoch, exists, txn)
@@ -1985,9 +1986,9 @@ func (ls *LedgerState) totalCirculatingSupply(
 	var state *models.NetworkState
 	var err error
 	if asOfSlot != nil {
-		state, err = ls.db.Metadata().GetNetworkStateAsOfSlot(*asOfSlot, txn)
+		state, err = ls.ledgerDB().GetNetworkStateAsOfSlot(*asOfSlot, txn)
 	} else {
-		state, err = ls.db.Metadata().GetNetworkState(txn)
+		state, err = ls.ledgerDB().GetNetworkState(txn)
 	}
 	if err != nil {
 		return 0, err
@@ -2182,10 +2183,10 @@ func genesisConfigResult(
 func (ls *LedgerState) queryShelleyStakePools(
 	ctx context.Context,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	if !at.pinned() {
-		keyHashes, err := ls.db.GetActivePoolKeyHashes(ctx, txn)
+		keyHashes, err := ls.ledgerDB().GetActivePoolKeyHashes(ctx, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -2193,8 +2194,7 @@ func (ls *LedgerState) queryShelleyStakePools(
 	}
 	txn, release := ls.readTxn(ctx, txn)
 	defer release()
-	keyHashes, err := ls.db.Metadata().
-		GetActivePoolKeyHashesAtSlot(at.Slot, txn.Metadata())
+	keyHashes, err := ls.ledgerDB().GetActivePoolKeyHashesAtSlot(at.Slot, txn)
 	if errors.Is(err, types.ErrNoEpochData) {
 		return nil, fmt.Errorf(
 			"%w: stake pools as of slot %d: %w",
@@ -2224,7 +2224,7 @@ func (ls *LedgerState) queryShelleyDRepState(
 	ctx context.Context,
 	creds []lcommon.Credential,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	if at.pinned() {
 		return ls.queryShelleyDRepStateAt(ctx, creds, at.Slot, txn)
@@ -2237,7 +2237,7 @@ func (ls *LedgerState) queryShelleyDRepState(
 	// below, bounded by the query item limit checked above.
 	var allDeposits map[string]uint64
 	if len(creds) == 0 {
-		all, err := ls.db.GetActiveDreps(ctx, txn)
+		all, err := ls.ledgerDB().GetActiveDreps(ctx, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -2245,7 +2245,8 @@ func (ls *LedgerState) queryShelleyDRepState(
 		if err != nil {
 			return nil, err
 		}
-		allDeposits, err = ls.db.GetDrepLastRegistrationDeposits(ctx, txn)
+		allDeposits, err = ls.ledgerDB().
+			GetDrepLastRegistrationDeposits(ctx, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -2256,7 +2257,7 @@ func (ls *LedgerState) queryShelleyDRepState(
 			if err != nil {
 				return nil, err
 			}
-			drep, err := ls.db.GetDrepByCredential(
+			drep, err := ls.ledgerDB().GetDrepByCredential(
 				ctx,
 				credentialTag,
 				cred.Credential[:],
@@ -2336,7 +2337,7 @@ func (ls *LedgerState) queryShelleyDRepStateAt(
 	ctx context.Context,
 	creds []lcommon.Credential,
 	slot uint64,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	refs := make([]models.StakeCredentialRef, 0, len(creds))
 	for _, cred := range creds {
@@ -2351,7 +2352,7 @@ func (ls *LedgerState) queryShelleyDRepStateAt(
 	}
 	txn, release := ls.readTxn(ctx, txn)
 	defer release()
-	dreps, err := ls.db.GetDrepsAtSlot(ctx, refs, slot, txn)
+	dreps, err := ls.ledgerDB().GetDrepsAtSlot(ctx, refs, slot, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -2370,12 +2371,14 @@ func (ls *LedgerState) queryShelleyDRepStateAt(
 			})
 		}
 	}
-	delegatorRefs, err := ls.db.GetDRepDelegatorsAtSlot(ctx, filter, slot, txn)
+	delegatorRefs, err := ls.ledgerDB().
+		GetDRepDelegatorsAtSlot(ctx, filter, slot, txn)
 	if err != nil {
 		return nil, err
 	}
 	// An absent deposit is reported as 0, as drepRecordedDeposit does.
-	deposits, err := ls.db.GetDrepRegistrationDepositsAtSlot(ctx, filter, slot, txn)
+	deposits, err := ls.ledgerDB().
+		GetDrepRegistrationDepositsAtSlot(ctx, filter, slot, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -2436,7 +2439,7 @@ func (ls *LedgerState) queryShelleyDRepStateAt(
 // reports the same recorded amount.
 func (ls *LedgerState) drepRecordedDeposit(ctx context.Context, drep *models.Drep,
 	deposits map[string]uint64,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (uint64, error) {
 	if deposits != nil {
 		return deposits[models.DrepDepositKey(
@@ -2444,7 +2447,7 @@ func (ls *LedgerState) drepRecordedDeposit(ctx context.Context, drep *models.Dre
 			drep.Credential,
 		)], nil
 	}
-	recorded, err := ls.db.GetDrepLastRegistrationDeposit(
+	recorded, err := ls.ledgerDB().GetDrepLastRegistrationDeposit(
 		ctx,
 		drep.CredentialTag,
 		drep.Credential,
@@ -2470,7 +2473,10 @@ func (ls *LedgerState) drepRecordedDeposit(ctx context.Context, drep *models.Dre
 // count on every empty GetDRepState request.
 const allDRepDelegatorsBatchSize = 10_000
 
-func (ls *LedgerState) allDRepDelegators(ctx context.Context, txn *database.Txn) (
+func (ls *LedgerState) allDRepDelegators(
+	ctx context.Context,
+	txn ledgerdb.Txn,
+) (
 	map[string][]olocalstatequery.StakeCredential,
 	error,
 ) {
@@ -2479,7 +2485,7 @@ func (ls *LedgerState) allDRepDelegators(ctx context.Context, txn *database.Txn)
 
 func (ls *LedgerState) allDRepDelegatorsBatched(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	batchSize int,
 ) (
 	map[string][]olocalstatequery.StakeCredential,
@@ -2493,7 +2499,7 @@ func (ls *LedgerState) allDRepDelegatorsBatched(
 	}
 	txn, release := ls.readTxn(ctx, txn)
 	defer release()
-	refs, err := ls.db.Metadata().GetActiveAccountCredentials(txn.Metadata())
+	refs, err := ls.ledgerDB().GetActiveAccountCredentials(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -2501,7 +2507,8 @@ func (ls *LedgerState) allDRepDelegatorsBatched(
 	for start := 0; start < len(refs); start += batchSize {
 		end := min(start+batchSize, len(refs))
 		batch := refs[start:end]
-		accounts, err := ls.db.GetAccountsByCredential(ctx, batch, false, txn)
+		accounts, err := ls.ledgerDB().
+			GetAccountsByCredential(ctx, batch, false, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -2559,15 +2566,14 @@ func (ls *LedgerState) allDRepDelegatorsBatched(
 func (ls *LedgerState) queryShelleyAccountState(
 	ctx context.Context,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	txn, release := ls.readTxn(ctx, txn)
 	defer release()
 	var state *models.NetworkState
 	var err error
 	if at.pinned() {
-		state, err = ls.db.Metadata().
-			GetNetworkStateAsOfSlot(at.Slot, txn.Metadata())
+		state, err = ls.ledgerDB().GetNetworkStateAsOfSlot(at.Slot, txn)
 		if err == nil && state == nil {
 			return nil, fmt.Errorf(
 				"%w: treasury and reserves as of slot %d cannot be "+
@@ -2578,7 +2584,7 @@ func (ls *LedgerState) queryShelleyAccountState(
 			)
 		}
 	} else {
-		state, err = ls.db.Metadata().GetNetworkState(txn.Metadata())
+		state, err = ls.ledgerDB().GetNetworkState(txn)
 	}
 	if err != nil {
 		return nil, err
@@ -2624,9 +2630,9 @@ func (ls *LedgerState) queryShelleyAccountState(
 func (ls *LedgerState) drepDelegators(
 	ctx context.Context,
 	drep *models.Drep,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) ([]olocalstatequery.StakeCredential, error) {
-	refs, err := ls.db.GetDRepDelegators(
+	refs, err := ls.ledgerDB().GetDRepDelegators(
 		ctx,
 		drep.CredentialTag,
 		drep.Credential,
@@ -2692,7 +2698,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 	ctx context.Context,
 	addrs []ledger.Address,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	if len(addrs) == 0 {
@@ -2703,14 +2709,23 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		return nil, err
 	}
 	var utxos []models.Utxo
-	if at.pinned() {
+	view, err := ls.liveUtxoView(at)
+	if err != nil {
+		return nil, err
+	}
+	if view != nil {
+		defer view.Close()
+		utxos, err = utxosByAddressFrom(
+			addrs, 0, eachInView(view),
+		)
+	} else if at.pinned() {
 		var release func()
 		txn, release = ls.readTxn(ctx, txn)
 		defer release()
 		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 			return nil, err
 		}
-		utxos, err = ls.db.UtxosByAddressAsOf(
+		utxos, err = ls.ledgerDB().UtxosByAddressAsOf(
 			ctx,
 			addrs,
 			at.Slot,
@@ -2718,7 +2733,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 			txn,
 		)
 	} else {
-		utxos, err = ls.db.UtxosByAddress(
+		utxos, err = ls.utxosByAddress(
 			ctx,
 			addrs,
 			0,
@@ -2791,7 +2806,7 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 	ctx context.Context,
 	creds []olocalstatequery.StakeCredential,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	delegations := make(map[olocalstatequery.StakeCredential]ledger.Blake2b224)
 	rewards := make(map[olocalstatequery.StakeCredential]uint64)
@@ -2879,7 +2894,7 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 	ctx context.Context,
 	creds []olocalstatequery.StakeCredential,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	ret := make(olocalstatequery.StakeDelegDepositsResult)
 	for _, cred := range creds {
@@ -2925,11 +2940,11 @@ func (ls *LedgerState) stakeRegistrationAsOf(
 	credentialTag uint8,
 	stakingKey []byte,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (bool, *uint64, error) {
 	var latest *models.AccountRegistrationHistoryRow
 	if at.pinned() {
-		row, err := ls.db.GetLatestAccountRegistrationAtOrBefore(
+		row, err := ls.ledgerDB().GetLatestAccountRegistrationAtOrBefore(
 			ctx,
 			credentialTag,
 			stakingKey,
@@ -2941,7 +2956,7 @@ func (ls *LedgerState) stakeRegistrationAsOf(
 		}
 		latest = row
 	} else {
-		history, err := ls.db.GetAccountRegistrationHistoryByCredential(
+		history, err := ls.ledgerDB().GetAccountRegistrationHistoryByCredential(
 			ctx,
 			credentialTag,
 			stakingKey,
@@ -2957,7 +2972,7 @@ func (ls *LedgerState) stakeRegistrationAsOf(
 			latest = &history[0]
 		}
 	}
-	imported, err := ls.db.GetAccountImportRegistrationByCredential(
+	imported, err := ls.ledgerDB().GetAccountImportRegistrationByCredential(
 		ctx,
 		credentialTag,
 		stakingKey,
@@ -2989,12 +3004,13 @@ func (ls *LedgerState) accountsByCredentialAt(
 	ctx context.Context,
 	refs []models.StakeCredentialRef,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (map[string]*models.Account, error) {
 	if at.pinned() {
-		return ls.db.GetAccountsByCredentialAtSlot(ctx, refs, at.Slot, txn)
+		return ls.ledgerDB().
+			GetAccountsByCredentialAtSlot(ctx, refs, at.Slot, txn)
 	}
-	return ls.db.GetAccountsByCredential(ctx, refs, false, txn)
+	return ls.ledgerDB().GetAccountsByCredential(ctx, refs, false, txn)
 }
 
 // queryShelleyFilteredVoteDelegatees returns the current DRep delegation for
@@ -3005,7 +3021,7 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 	ctx context.Context,
 	creds []lcommon.Credential,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	ret := make(olocalstatequery.FilteredVoteDelegateesResult)
 	refs := make([]models.StakeCredentialRef, 0, len(creds))
@@ -3086,16 +3102,17 @@ func (ls *LedgerState) queryShelleyGetProposals(
 	ctx context.Context,
 	actionIds []lcommon.GovActionId,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	// GetProposals returns the Conway proposals set, which keeps an action
 	// RATIFY classified expired until the boundary that drops it.
 	var proposals []*models.GovernanceProposal
 	var err error
 	if at.pinned() {
-		proposals, err = ls.db.GetGovernanceProposalSetAtSlot(ctx, at.Slot, txn)
+		proposals, err = ls.ledgerDB().
+			GetGovernanceProposalSetAtSlot(ctx, at.Slot, txn)
 	} else {
-		proposals, err = ls.db.GetGovernanceProposalSet(ctx, txn)
+		proposals, err = ls.ledgerDB().GetGovernanceProposalSet(ctx, txn)
 	}
 	if err != nil {
 		return nil, err
@@ -3135,7 +3152,7 @@ func (ls *LedgerState) governanceProposalState(
 	proposal *models.GovernanceProposal,
 	id lcommon.GovActionId,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (olocalstatequery.GovActionState, error) {
 	rewardAccount, err := lcommon.NewAddressFromBytes(proposal.ReturnAddress)
 	if err != nil {
@@ -3182,9 +3199,10 @@ func (ls *LedgerState) governanceProposalState(
 	}
 	var votes []*models.GovernanceVote
 	if at.pinned() {
-		votes, err = ls.db.GetGovernanceVotesAtSlot(ctx, proposal.ID, at.Slot, txn)
+		votes, err = ls.ledgerDB().
+			GetGovernanceVotesAtSlot(ctx, proposal.ID, at.Slot, txn)
 	} else {
-		votes, err = ls.db.GetGovernanceVotes(ctx, proposal.ID, txn)
+		votes, err = ls.ledgerDB().GetGovernanceVotes(ctx, proposal.ID, txn)
 	}
 	if err != nil {
 		return olocalstatequery.GovActionState{}, err
@@ -3270,7 +3288,7 @@ func stakeCredentialFromVote(
 // honest rejection.
 func (ls *LedgerState) queryShelleyUtxoByTxIn(ctx context.Context, txIns []ledger.ShelleyTransactionInput,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	if len(txIns) == 0 {
@@ -3284,23 +3302,39 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(ctx context.Context, txIns []ledge
 		}
 	}
 	var utxos []models.Utxo
-	var err error
-	if at.pinned() {
+	view, err := ls.liveUtxoView(at)
+	if err != nil {
+		return nil, err
+	}
+	if view != nil {
+		defer view.Close()
+		for _, ref := range refs {
+			c, ok, err := view.Get(ref.Hash, ref.Idx)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				utxos = append(utxos, models.Utxo{
+					TxId: ref.Hash, OutputIdx: ref.Idx, Cbor: c,
+				})
+			}
+		}
+	} else if at.pinned() {
 		if txn == nil {
-			txn = ls.db.Transaction(ctx, false)
+			txn = ls.ledgerDB().Begin(ctx, false)
 			defer txn.Release()
 		}
 		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 			return nil, err
 		}
-		utxos, err = ls.db.UtxosByRefsAsOf(
+		utxos, err = ls.ledgerDB().UtxosByRefsAsOf(
 			ctx,
 			refs,
 			at.Slot,
 			txn,
 		)
 	} else {
-		utxos, err = ls.db.UtxosByRefs(ctx, refs, txn)
+		utxos, err = ls.utxosByRefsForValidation(ctx, refs, txn)
 	}
 	if err != nil {
 		return nil, err
@@ -3379,13 +3413,13 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(ctx context.Context, txIns []ledge
 // txn is used only to read the tip and the persisted floor, consistently
 // with the same point verifyPointOnChain already validated at against.
 func (ls *LedgerState) checkUtxoRetentionWindow(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	at QueryPoint,
 ) error {
-	if ls.db.StorageMode() == types.StorageModeAPI {
+	if ls.ledgerDB().StorageMode() == types.StorageModeAPI {
 		return nil
 	}
-	tip, err := ls.db.GetTip(txn)
+	tip, err := ls.ledgerDB().GetTip(txn)
 	if err != nil {
 		return err
 	}

@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -98,7 +99,7 @@ func (ls *LedgerState) healMithrilGapBlockNonces(ctx context.Context) error {
 	// folded) is NOT a valid marker and must NOT short-circuit reconstruction,
 	// or the post-bootstrap epoch nonce would stay wrong. This mirrors the
 	// anchor selection below, which likewise ignores malformed rows.
-	boundaryRows, err := ls.db.GetBlockNoncesInSlotRange(
+	boundaryRows, err := ls.ledgerDB().GetBlockNoncesInSlotRange(
 		boundary,
 		boundary+1,
 		nil,
@@ -121,7 +122,7 @@ func (ls *LedgerState) healMithrilGapBlockNonces(ctx context.Context) error {
 	// snapshot's evolving nonce (eta_v at the anchor block), which correctly
 	// embeds the entire chain up to that block. Malformed rows are ignored
 	// rather than allowed to mask a usable lower-slot anchor.
-	anchorRows, err := ls.db.GetBlockNoncesInSlotRange(0, boundary, nil)
+	anchorRows, err := ls.ledgerDB().GetBlockNoncesInSlotRange(0, boundary, nil)
 	if err != nil {
 		return fmt.Errorf("query Mithril anchor block nonce: %w", err)
 	}
@@ -218,7 +219,7 @@ func (ls *LedgerState) healMithrilGapBlockNonces(ctx context.Context) error {
 	// Preserve existing checkpoint flags on rows we overwrite so pruning
 	// retention is unchanged, and ensure the trust-boundary block is
 	// checkpointed so post-boundary folding can always re-seed from it.
-	existingRows, err := ls.db.GetBlockNoncesInSlotRange(
+	existingRows, err := ls.ledgerDB().GetBlockNoncesInSlotRange(
 		anchorSlot+1,
 		tipPoint.Slot+1,
 		nil,
@@ -282,11 +283,11 @@ func (ls *LedgerState) healMithrilGapBlockNonces(ctx context.Context) error {
 		boundaryNonceRow *nonceRow
 	)
 	writeRows := func(rows []nonceRow) error {
-		txn := ls.db.Transaction(ctx, true)
+		txn := ls.ledgerDB().Begin(ctx, true)
 		defer txn.Release()
-		return txn.Do(func(txn *database.Txn) error {
+		return ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
 			for _, row := range rows {
-				if err := ls.db.SetBlockNonce(
+				if err := ls.ledgerDB().SetBlockNonce(
 					row.hash,
 					row.slot,
 					row.nonce,
@@ -418,7 +419,7 @@ func (ls *LedgerState) healMithrilGapBlockNonces(ctx context.Context) error {
 	// Refresh the in-memory tip nonce, which loadTip populated from the stale
 	// pre-heal value, and drop any epoch-nonce hex cache derived from it.
 	if len(tipPoint.Hash) > 0 {
-		tipNonce, err := ls.db.GetBlockNonce(tipPoint, nil)
+		tipNonce, err := ls.ledgerDB().GetBlockNonce(tipPoint, nil)
 		if err != nil {
 			return fmt.Errorf("reload tip block nonce after heal: %w", err)
 		}

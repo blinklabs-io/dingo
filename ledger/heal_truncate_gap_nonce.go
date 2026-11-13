@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -122,7 +123,8 @@ func (ls *LedgerState) healTruncateGapBlockNonces(ctx context.Context) error {
 	// Seed: the nearest checkpoint at or before the tip. Malformed rows
 	// (e.g. a DB predating evolving-nonce storage) are ignored rather than
 	// allowed to mask a usable lower-slot checkpoint.
-	rows, err := ls.db.GetBlockNoncesInSlotRange(0, tipPoint.Slot+1, nil)
+	rows, err := ls.ledgerDB().
+		GetBlockNoncesInSlotRange(0, tipPoint.Slot+1, nil)
 	if err != nil {
 		return fmt.Errorf(
 			"query checkpoint block nonces for truncate gap heal: %w",
@@ -250,7 +252,7 @@ func (ls *LedgerState) healTruncateGapBlockNonces(ctx context.Context) error {
 	// Preserve existing checkpoint flags on any rows in range that already
 	// exist (there should be none below the tip after a fresh gap, but a
 	// heal re-run after a partial previous attempt could find some).
-	existingRows, err := ls.db.GetBlockNoncesInSlotRange(
+	existingRows, err := ls.ledgerDB().GetBlockNoncesInSlotRange(
 		anchorSlot+1,
 		tipPoint.Slot+1,
 		nil,
@@ -307,11 +309,11 @@ func (ls *LedgerState) healTruncateGapBlockNonces(ctx context.Context) error {
 	}
 	var pending []nonceRow
 	writeRows := func(rows []nonceRow) error {
-		txn := ls.db.Transaction(ctx, true)
+		txn := ls.ledgerDB().Begin(ctx, true)
 		defer txn.Release()
-		return txn.Do(func(txn *database.Txn) error {
+		return ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
 			for _, row := range rows {
-				if err := ls.db.SetBlockNonce(
+				if err := ls.ledgerDB().SetBlockNonce(
 					row.hash,
 					row.slot,
 					row.nonce,

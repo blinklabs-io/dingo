@@ -16,6 +16,7 @@ package governance
 
 import (
 	"context"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -86,7 +87,7 @@ func TestForecastHardForkInitiations(t *testing.T) {
 			))
 		}
 		got, err := ForecastHardForkInitiations(
-			context.Background(), db, nil,
+			context.Background(), dbadapter.New(db), nil,
 			newEpoch, boundarySlot, pparams, updateFn, pending,
 		)
 		require.NoError(t, err)
@@ -155,7 +156,7 @@ func TestForecastHardForkInitiations(t *testing.T) {
 		db, _ := newTallyTestDB(t)
 		input := &babbage.BabbageProtocolParameters{}
 		got, err := ForecastHardForkInitiations(
-			context.Background(), db, nil,
+			context.Background(), dbadapter.New(db), nil,
 			newEpoch, boundarySlot, input, updateFn, nil,
 		)
 		require.NoError(t, err)

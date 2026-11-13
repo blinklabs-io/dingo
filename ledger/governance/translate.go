@@ -18,7 +18,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -29,8 +29,8 @@ import (
 // actions that must survive an era boundary in the target era's CBOR shape.
 func TranslateRatifiedGovActions(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	fromEraId uint,
 	toEraId uint,
 ) error {

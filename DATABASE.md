@@ -2112,7 +2112,14 @@ migration.
 JSON record in `sync_state` containing `format_version`, the target `slot` and
 hex `hash`, and a newest-first `blocks` array. Each block uses explicit JSON
 fields (`hash`, `prev_hash`, `cbor`, `id`, `slot`, `number`, `type`) rather than
-the Go storage model's field names. Peer-driven rollback records are written
+the Go storage model's field names. A ranking block that applied a certified
+endorser block also carries `endorser_txs`: each endorser transaction it
+applied, as `cbor` (the `block_transaction` bytes) and `index` (its position in
+the endorser block), in application order. The writer reads them from the
+endorser block and the `transaction` rows recorded under the ranking block,
+before the truncation deletes those rows, and the undo for them follows the
+ranking block's own. Each counts its CBOR plus 64 bytes against the payload
+limit. Peer-driven rollback records are written
 before chain truncation removes those block bodies. When the lagging ledger
 iterator reports a rollback after the chain has already removed them, it
 persists the iterator's captured `RollbackBlocks` payload before metadata
@@ -2123,7 +2130,7 @@ newly created intent is cleared. A matching record is cleared only after
 metadata rollback and ordered undo delivery complete. Recovery is at-least-once
 and consumers must tolerate a duplicate undo after a crash. The durable payload
 is limited to 4096 blocks
-and 64 MiB of raw block fields; a larger rollback logs a degraded-recovery
+and 64 MiB of raw block fields, endorser transactions included; a larger rollback logs a degraded-recovery
 warning and continues with live delivery rather than writing an unbounded
 value. A record recovery cannot replay as a truncation -- its point leads the
 applied ledger tip, or has left the primary chain -- still has its captured
@@ -2588,6 +2595,138 @@ failure rewinds that blob suffix to the last applied metadata tip before the
 command returns, so a rejected batch cannot become the next run's canonical
 starting point. If the storage backend refuses that rewind, the command returns
 both errors and the database requires recovery before another load.
+
+## Shadow UTxO set
+
+With `ledgerUtxoShadow` enabled, `<databasePath>/ledger/utxo-shadow` holds a
+Badger copy of the live UTxO set (`database/ledgerdb/badgerutxo`). Validation
+never reads it. Keys:
+
+| Key | Value |
+|---|---|
+| `u` + transaction ID (32 bytes) + output index (4 bytes, big-endian) | output CBOR, one per live output |
+| `mtip` | the slot and block hash of the last applied change |
+| `mcount` | the number of live outputs |
+| `j` + sequence (8 bytes, big-endian) | live set only: one record per block (or other point) within each applied commit, holding its slot, the point before it, and the state before it (absent, or the output CBOR) of every output its changes touched |
+| `mseq` | the next journal sequence number |
+| `a` + `c` + credential tag (1 byte) + staking key hash (28 bytes) | live set only: lovelace in live outputs whose address names that stake credential, big-endian `uint64` |
+| `a` + `p` + slot, transaction index, certificate index (8 bytes each, big-endian) | live set only: lovelace in live outputs at pointer addresses naming that certificate |
+| `mfmt` | layout version; a store without the current one is rebuilt at startup |
+
+The copy is bootstrapped from the metadata store's live UTxO set and then
+applies the ledger's `ledger.utxo` events. Those events carry the outputs a
+change adds and removes, including the outputs a rollback restores, so the
+copy keeps no history. The directory can be deleted at any time: the next
+event bootstraps it again.
+
+## Live UTxO set
+
+With `ledgerUtxoBadger` enabled, `<databasePath>/ledger/utxo` holds the live
+UTxO set in the same key layout (`internal/utxoset` over
+`database/ledgerdb/badgerutxo`), maintained beside the metadata store's
+`utxo` table. Each ledger commit's UTxO changes are applied to it in one
+Badger transaction, synchronously after the commit and before the next block
+is validated, so it does not depend on the event bus. `ledgerUtxoReads`
+selects whether validation reads it: `verify` reads both and counts every
+disagreement while using the metadata store's answer, and `set` uses the set
+alone. A read inside an open write transaction sees that transaction's staged
+changes over the set's committed state, as a SQLite read sees the
+transaction's own writes, so a multi-block commit can validate a block
+against the blocks before it. Reads fall back to the metadata store after an
+update to the set fails.
+
+`mtip` is the ledger point the last applied commit left the ledger at: the
+block a block-apply commit set as the ledger tip, or a rollback's target. A
+commit that changes the set without moving the ledger, such as the Allegra
+AVVM removal, leaves it unchanged, and genesis records none. The set
+therefore always equals the ledger's live set as of `mtip`. At startup,
+after database recovery, a set at the ledger tip is used as it is. A set
+behind it, after a crash between the two commits or a failed update, is
+caught up by rolling the ledger back to `mtip` with the ordinary rollback,
+whose change leaves a set already at that point unchanged, and letting the
+ledger apply the blocks after it again. When `mtip` is not an applied block
+on the primary chain, or the rollback would cross the Mithril trust boundary
+or the consumed-UTxO prune floor, the set is rebuilt from the metadata
+store's live set instead. The directory can be deleted while the node is
+stopped; the next start rebuilds it.
+
+The stake sums classify an output as `models.UtxoLedgerToModel` does for a
+`utxo` row: the stake key hash with its credential tag, else the pointer,
+else no stake. They change in the same Badger transaction as the outputs, on
+apply, rollback and rebuild, so a credential's sum equals the sum of
+`amount` over the metadata store's live rows with that `(credential_tag,
+staking_key)`, the value `reward_live_stake.utxo_stake` holds.
+
+### Live UTxO set as the only copy
+
+`ledgerUtxoBadgerOnly` (core mode, with `ledgerUtxoBadger`) turns this on.
+The first start in that mode records `ledger.utxo_set_only` in `sync_state`,
+and only on an empty database; a marked database refuses to start without
+the mode, and a database with a metadata UTxO set refuses to switch into it.
+Without a metadata UTxO set to rebuild from, a live set that startup cannot
+resume is an error except at origin.
+
+A ledger-state (Mithril) import in this mode (`ImportConfig.UtxoSet`, from
+`dingo mithril sync` or the node's snapshot restore) records the same mark,
+on a database with no live `utxo` rows and no earlier import progress, then
+loads the snapshot's UTxO set into the live set (`Store.Bootstrap`, at the
+snapshot's tip) in place of `utxo` rows and blob output CBOR. The metadata
+store reads UTxO stake from the set for the rest of the import, and the
+import rebuilds `reward_live_stake` in one transaction rather than in
+resumable ranges. A marked database refuses an import without the set, and
+a catch-up (`Reconcile`) import in this mode is refused.
+
+`LedgerStateConfig.UtxoSetOnly` (core storage mode) makes the live UTxO set
+the only copy. `Database.SetLiveUtxoSource` then stops the metadata store from
+writing `utxo` rows and their child rows, the blob store's per-output offset
+keys, and consumed-input recovery; the store resolves the inputs it still
+needs, the collateral amounts of phase-2-invalid transactions, through the
+source as the writing transaction sees the set. `reward_live_stake` keeps
+the same values: produced outputs add their stake from the row models, spent
+inputs subtract theirs read from the set, a credential re-sum reads the set
+(`LiveUtxoSource.LiveUtxoStake`), and a rollback refreshes the credentials of
+the outputs its journal change touches (`RewardStore.RefreshRewardLiveStakeRefs`).
+A rollback's UTxO change comes from the set's journal instead of the `utxo`
+table. Everything outside the `utxo` table and the tables keyed by its rows
+is the same as with `utxo` rows. Stake reads that summed `utxo` rows read `reward_live_stake`
+instead (single-DRep voting power goes through the batch lookup), pointer
+stake takes the live pointer positions and their totals from the source
+(`LivePointerStakes`) as a `VALUES` list resolved like `utxo_pointer` rows,
+and a read that would fall back to `utxo` rows because `reward_live_stake` is
+incomplete fails instead. The historical stake query reads the same live
+sources when its slot is not behind the metadata tip, which holds at an
+epoch boundary: no block after the snapshot slot is applied before the
+capture, and pool retirement, governance enactment and donations change no
+output. At a slot behind the tip it fails, since no history of outputs is
+kept. The startup consistency check then looks only for
+rows from an older calculation version and active accounts without a row.
+`RebuildRewardLiveStake` takes each account's UTxO stake from the set, then
+writes rows for the credentials holding stake in the set with no account
+(`LiveUtxoSource.EachLiveUtxoStake`), the rows the `utxo` half of its key
+source yields otherwise. The node runs that startup check after
+`reconcileUtxoSet`, since until then the set can trail the metadata store.
+The batched, resumable and running-total rebuilds, which serve Mithril
+import and API backfill, refuse to run.
+
+`Store.Rollback(point)` undoes the journal records after `point` newest
+first, one Badger transaction per record, each also moving `mtip` back to the
+tip before that record, so a crash part way leaves the set at a point it
+held. It returns the net change. Records older than one Shelley stability
+window behind the tip are pruned every 1,000 commits, and a rebuild or a
+Mithril load drops the journal. The journal reaches back to the tip before its
+oldest record, or only to the tip when it holds none; a rollback past that
+returns `ErrRollbackBeyondJournal` and changes nothing. `Store.AsOf(point)` opens a
+read-only view of the set as of a point the journal reaches: one Badger
+snapshot, with each output changed after the point read at its state before
+the oldest such change. It answers pinned LocalStateQuery UTxO queries when
+the set is the only copy.
+
+`GetUtxosRestoredByRollback(slot)` returns the UTxOs created at or before
+`slot` and spent after it, the outputs a rollback to `slot` makes live again.
+`Database.UtxoRollbackChanges` combines it with `GetUtxosAddedAfterSlot`,
+keeping only rows still live, and resolves the restored outputs' CBOR. The
+ledger reads it inside the rollback transaction, before truncating, to build
+the rollback's `ledger.utxo` event.
 
 ## Retained API closure UTxO batches
 

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
 
@@ -44,7 +45,7 @@ var ErrQueryViewClosed = errors.New("ledger query view is closed")
 type QueryView struct {
 	ls  *LedgerState
 	at  QueryPoint
-	txn *database.Txn
+	txn ledgerdb.Txn
 	// transitionInfo freezes the in-memory forecast that accompanied the
 	// database snapshot. Era-history queries must not observe a later forecast
 	// while every persisted input remains pinned at Acquire.
@@ -167,7 +168,7 @@ func (ls *LedgerState) waitPendingBoundaryJob(
 // only the open.
 func (ls *LedgerState) openQueryViewSnapshot(
 	ctx context.Context,
-) (*database.Txn, context.CancelFunc, error) {
+) (ledgerdb.Txn, context.CancelFunc, error) {
 	viewCtx, cancelView := context.WithCancel(context.WithoutCancel(ctx))
 	stopWatch := context.AfterFunc(ctx, cancelView)
 	txn, _, err := database.NewReadSnapshotContext(viewCtx, ls.db)
@@ -251,7 +252,7 @@ func (v *QueryView) detachForUtxoWhole() (QueryPoint, bool) {
 	}
 	point := v.at
 	if !point.pinned() {
-		tip, err := v.ls.db.GetTip(v.txn)
+		tip, err := v.ls.ledgerDB().GetTip(v.txn)
 		if err != nil || len(tip.Point.Hash) == 0 {
 			return QueryPoint{}, false
 		}

@@ -25,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -184,7 +185,7 @@ func encodeUtxoWholeResult(
 // block, so resolving them one at a time serializes millions of
 // independent blob-store reads with no data dependency between them.
 func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	// Detach an acquired view before waiting for admission. Queued whole-UTxO
 	// queries must not retain database snapshots or read connections while the
@@ -200,12 +201,28 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 		return nil, err
 	}
 	defer releaseAdmission()
-	if detachedPoint != nil {
+	if detachedPoint != nil && !ls.config.UtxoSetOnly {
 		return ls.queryUtxoWholePaged(ctx, *detachedPoint)
 	}
+	if detachedPoint != nil {
+		at = *detachedPoint
+	}
 	if txn == nil {
-		txn = ls.db.Transaction(ctx, false)
+		txn = ls.ledgerDB().Begin(ctx, false)
 		defer txn.Release()
+	}
+	if ls.config.UtxoSetOnly {
+		view, err := ls.liveUtxoView(at)
+		if err != nil {
+			return nil, err
+		}
+		if view == nil {
+			return liveUtxoWhole(ctx, func(fn func(*models.Utxo) error) error {
+				return ls.iterateLiveUtxos(ctx, txn, fn)
+			})
+		}
+		defer view.Close()
+		return liveUtxoWhole(ctx, eachInView(view))
 	}
 
 	// A bare UtxoRef, not a ref-plus-UtxoId pair: UtxoId is trivially
@@ -242,10 +259,10 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 			return nil, err
 		}
-		if err := ls.db.IterateUtxoRefsAsOf(ctx, at.Slot, txn, collect); err != nil {
+		if err := ls.ledgerDB().IterateUtxoRefsAsOf(ctx, at.Slot, txn, collect); err != nil {
 			return nil, err
 		}
-	} else if err := ls.db.IterateLiveUtxoRefs(ctx, txn, collect); err != nil {
+	} else if err := ls.ledgerDB().IterateLiveUtxoRefs(ctx, txn, collect); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -308,7 +325,7 @@ func (ls *LedgerState) resolveUtxoWhole(
 	// worker's transaction machinery panicked" from an ordinary resolve
 	// failure must see the same sentinel regardless of which
 	// implementation answered the query.
-	resolveRow := func(txn *database.Txn, ref database.UtxoRef) (r resolved) {
+	resolveRow := func(txn ledgerdb.Txn, ref database.UtxoRef) (r resolved) {
 		if err := ctx.Err(); err != nil {
 			return resolved{err: err}
 		}
@@ -339,7 +356,7 @@ func (ls *LedgerState) resolveUtxoWhole(
 		// Haskell node would
 		// otherwise read a dropped row as a ledger divergence rather than a
 		// storage fault.
-		cborBytes, err := ls.db.ResolveUtxoCborWithRecovery(
+		cborBytes, err := ls.ledgerDB().ResolveUtxoCborWithRecovery(
 			ctx,
 			ref.TxId[:],
 			ref.OutputIdx,
@@ -498,7 +515,7 @@ func (ls *LedgerState) queryUtxoWholePaged(
 			return nil, err
 		}
 		live = live[:0]
-		err := ls.db.IterateUtxoRefsAsOfPaged(
+		err := ls.ledgerDB().IterateUtxoRefsAsOfPaged(
 			ctx,
 			point.Slot,
 			utxoWholePageSize,
@@ -574,4 +591,40 @@ func decodeUtxoWholeCbor(
 		)
 	}
 	return localStateQueryTransactionOutput(txOut), nil
+}
+
+// liveUtxoWhole answers GetUTxOWhole from the live UTxO set when it is the
+// only copy, decoding each output's CBOR the way resolveUtxoWhole does.
+func liveUtxoWhole(
+	ctx context.Context,
+	each func(func(*models.Utxo) error) error,
+) (any, error) {
+	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	err := each(func(u *models.Utxo) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		txID, err := ledger.NewBlake2b256Checked(u.TxId)
+		if err != nil {
+			return fmt.Errorf("utxo ref tx id: %w", err)
+		}
+		ref := database.UtxoRef{TxId: txID, OutputIdx: u.OutputIdx}
+		txOut, err := decodeUtxoWholeCborFunc(ref, u.Cbor)
+		if err != nil {
+			return err
+		}
+		ret[olocalstatequery.UtxoId{
+			Hash: ledger.NewBlake2b256(ref.TxId[:]),
+			Idx:  int(ref.OutputIdx),
+		}] = txOut
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := encodeUtxoWholeResult(ctx, ret)
+	if err != nil {
+		return nil, fmt.Errorf("encode whole UTxO result: %w", err)
+	}
+	return &utxoWholeResult{encoded: encoded}, nil
 }

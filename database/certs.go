@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -58,6 +59,9 @@ func (d *Database) GetPoolRegistrations(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn *Txn,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
+	if txn == nil {
+		return d.metadata.GetPoolRegistrations(poolKeyHash, nil)
+	}
 	return d.metadata.GetPoolRegistrations(poolKeyHash, txn.Metadata())
 }
 
@@ -68,9 +72,13 @@ func (d *Database) GetStakeRegistrationsByCredential(
 	stakingKey []byte,
 	txn *Txn,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
+	var metaTxn types.Txn
+	if txn != nil {
+		metaTxn = txn.Metadata()
+	}
 	return d.certificateStore().GetStakeRegistrationsByCredential(
 		credentialTag,
 		stakingKey,
-		txn.Metadata(),
+		metaTxn,
 	)
 }

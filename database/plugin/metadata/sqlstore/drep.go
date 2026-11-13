@@ -740,6 +740,17 @@ func (s *Store) GetDRepVotingPower(
 	expiryEpoch uint64,
 	txn types.Txn,
 ) (uint64, error) {
+	if s.liveUtxo != nil {
+		// No utxo rows to sum; reward_live_stake carries UTxO stake.
+		ref := models.NewStakeCredentialRef(credentialTag, credential)
+		byCredential, err := s.GetDRepVotingPowerBatch(
+			[]models.StakeCredentialRef{ref}, expiryEpoch, txn,
+		)
+		if err != nil {
+			return 0, err
+		}
+		return byCredential[ref.MapKey()], nil
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
@@ -808,6 +819,9 @@ func (s *Store) GetDRepVotingPowerBatch(
 		if _, ok := incomplete[string(hash)]; ok {
 			hashes = append(hashes, hash)
 		}
+	}
+	if len(hashes) > 0 && s.liveUtxo != nil {
+		return nil, errLiveUtxoStakeIncomplete
 	}
 	// Each hash occurs in both the inner and outer IN list.
 	chunkSize := s.dialect.ParameterLimit() / 2

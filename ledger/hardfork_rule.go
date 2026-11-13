@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 )
 
 // applyIntraEraHardForkRule dispatches cardano-ledger's per-major-version
@@ -64,14 +64,15 @@ import (
 // Any future major-version bump that lands without a case here is a
 // no-op, matching the Haskell rule's `otherwise = id` branch.
 func (ls *LedgerState) applyIntraEraHardForkRule(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	newMajor uint,
 	boundarySlot uint64,
 	newEpoch uint64,
 ) error {
 	if txn == nil {
-		return ls.db.Transaction(ctx, true).
-			Do(func(txn *database.Txn) error {
+		return ls.ledgerDB().Run(
+			ls.ledgerDB().Begin(ctx, true),
+			func(txn ledgerdb.Txn) error {
 				return ls.applyIntraEraHardForkRule(ctx,
 					txn, newMajor, boundarySlot, newEpoch,
 				)
@@ -79,7 +80,7 @@ func (ls *LedgerState) applyIntraEraHardForkRule(ctx context.Context,
 	}
 	switch newMajor {
 	case 3:
-		state, err := ls.db.Metadata().GetNetworkState(txn.Metadata())
+		state, err := ls.ledgerDB().GetNetworkState(txn)
 		if err != nil {
 			return fmt.Errorf("get network state before AVVM return: %w", err)
 		}
@@ -103,8 +104,8 @@ func (ls *LedgerState) applyIntraEraHardForkRule(ctx context.Context,
 					total,
 				)
 			}
-			if err := ls.db.Metadata().SetNetworkState(
-				treasury, reserves+total, boundarySlot, txn.Metadata(),
+			if err := ls.ledgerDB().SetNetworkState(
+				treasury, reserves+total, boundarySlot, txn,
 			); err != nil {
 				return fmt.Errorf("credit AVVM value to reserves: %w", err)
 			}
@@ -122,7 +123,7 @@ func (ls *LedgerState) applyIntraEraHardForkRule(ctx context.Context,
 			"component", "ledger",
 		)
 	case 10:
-		n, err := ls.db.ClearDanglingDRepDelegations(
+		n, err := ls.ledgerDB().ClearDanglingDRepDelegations(
 			ctx,
 			boundarySlot,
 			txn,

@@ -16,6 +16,7 @@ package governance
 
 import (
 	"context"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -39,7 +40,7 @@ func purposeRootsProcessEpoch(
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	return ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    stabilityTestEpoch - 1,
 		NewEpoch:     stabilityTestEpoch,
@@ -78,7 +79,7 @@ func TestProcessEpochMithrilMissingPurposeRootFails(t *testing.T) {
 	assert.Equal(t, child.ParentTxHash, typed.ParentTxHash)
 
 	require.ErrorIs(t, VerifyPurposeRoots(
-		context.Background(), db, nil, stabilityTestEpoch-1,
+		context.Background(), dbadapter.New(db), nil, stabilityTestEpoch-1,
 	), ErrMissingEnactedRoot)
 }
 
@@ -94,7 +95,7 @@ func TestProcessEpochGenesisSyncedRootlessPurposeSkips(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, out.RatifiedCount)
 	assert.Nil(t, chainTestReload(t, db, stored[0]).RatifiedEpoch)
-	require.NoError(t, VerifyPurposeRoots(context.Background(), db, nil, stabilityTestEpoch-1))
+	require.NoError(t, VerifyPurposeRoots(context.Background(), dbadapter.New(db), nil, stabilityTestEpoch-1))
 }
 
 func TestProcessEpochMithrilPendingSiblingParentIsNotAnError(t *testing.T) {
@@ -117,7 +118,7 @@ func TestProcessEpochMithrilPendingSiblingParentIsNotAnError(t *testing.T) {
 	out, err := purposeRootsProcessEpoch(t, db)
 	require.NoError(t, err)
 	assert.Equal(t, 2, out.RatifiedCount)
-	require.NoError(t, VerifyPurposeRoots(context.Background(), db, nil, stabilityTestEpoch-1))
+	require.NoError(t, VerifyPurposeRoots(context.Background(), dbadapter.New(db), nil, stabilityTestEpoch-1))
 }
 
 func TestProcessEpochMithrilSupersededParentKeepsSkip(t *testing.T) {
@@ -143,7 +144,7 @@ func TestProcessEpochMithrilSupersededParentKeepsSkip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, out.RatifiedCount)
 	assert.Nil(t, chainTestReload(t, db, stored[1]).RatifiedEpoch)
-	require.NoError(t, VerifyPurposeRoots(context.Background(), db, nil, stabilityTestEpoch-1))
+	require.NoError(t, VerifyPurposeRoots(context.Background(), dbadapter.New(db), nil, stabilityTestEpoch-1))
 }
 
 // A parent whose deposit was already refunded is still a stored row, so its
@@ -172,5 +173,5 @@ func TestProcessEpochMithrilDroppedParentKeepsSkip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, out.RatifiedCount)
 	assert.Nil(t, chainTestReload(t, db, stored[1]).RatifiedEpoch)
-	require.NoError(t, VerifyPurposeRoots(context.Background(), db, nil, stabilityTestEpoch-1))
+	require.NoError(t, VerifyPurposeRoots(context.Background(), dbadapter.New(db), nil, stabilityTestEpoch-1))
 }

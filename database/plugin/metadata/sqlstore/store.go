@@ -150,6 +150,9 @@ type Store struct {
 	dialect                 Dialect
 	logger                  *slog.Logger
 	storageMode             string
+	// liveUtxo, when set, holds the live UTxO set: the store writes no utxo
+	// rows and resolves inputs through it. Set before the first write.
+	liveUtxo types.LiveUtxoSource
 
 	// committeeAuthRetentionSlots is the configured rollback window for
 	// auth_committee_hot pruning. Read it through committeeAuthRetention(),
@@ -999,7 +1002,11 @@ func (s *Store) dbFromTxn(
 		acc.overlay != nil {
 		db = barrierQueryer{queryer: db, store: s, accumulator: acc}
 	}
-	return db, sqlTransaction.ctx, nil
+	ctx := sqlTransaction.ctx
+	if s.liveUtxo != nil {
+		ctx = context.WithValue(ctx, liveUtxoTxnKey{}, txn)
+	}
+	return db, ctx, nil
 }
 
 func (s *Store) readDBFromTxn(

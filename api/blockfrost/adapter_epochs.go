@@ -23,6 +23,7 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -339,7 +340,7 @@ func (a *NodeAdapter) epochStakeRows(
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	incomplete, err := a.ledgerState.RewardStakeInputsIncomplete(
-		txn, label, label+1,
+		dbadapter.Txn(txn), label, label+1,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("check epoch %d stakes: %w", epoch, err)

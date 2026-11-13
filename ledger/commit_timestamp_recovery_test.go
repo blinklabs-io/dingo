@@ -23,12 +23,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -624,4 +626,57 @@ func TestRecoverCommitTimestampConflictSettlesContinuationAudit(
 			}
 		})
 	}
+}
+
+func TestRecoverCommitTimestampConflictUndoesTheAbandonedForkBlocks(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	// The fixture's CBOR does not decode, so the undo for the abandoned
+	// block reports a decode error at its point.
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	fixture.ls.config.EventBus = bus
+	subID, errCh := bus.Subscribe(LedgerErrorEventType)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, subID) })
+	require.NoError(
+		t,
+		fixture.ls.chain.Rollback(
+			context.Background(),
+			fixture.ancestorTip.Point,
+		),
+	)
+	require.NoError(
+		t,
+		fixture.ls.chain.AddRawBlocks(
+			context.Background(),
+			[]chain.RawBlock{{
+				Slot:        fixture.ancestorTip.Point.Slot + 5,
+				Hash:        testHashBytes("commit-recovery-undo-fork"),
+				BlockNumber: fixture.ancestorTip.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    fixture.ancestorTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			}},
+		),
+	)
+
+	require.NoError(
+		t,
+		fixture.ls.RecoverCommitTimestampConflict(context.Background()),
+	)
+
+	evt := testutil.RequireReceive(t, errCh, testutil.AsyncWait,
+		"undo for the block the ledger applied on the abandoned fork")
+	got, ok := evt.Data.(LedgerErrorEvent)
+	require.True(t, ok)
+	require.Equal(t, "rollback_tx_undo_decode", got.Operation)
+	require.Equal(t, fixture.currentTip.Point, got.Point)
+	testutil.RequireNoReceive(t, errCh, 100*time.Millisecond,
+		"no undo for the new fork's block, which the ledger never applied")
+	_, _, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	require.False(t, pending)
 }

@@ -21,6 +21,7 @@ import (
 	"math"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 )
@@ -71,7 +72,7 @@ func lateFirstRewardBlock(
 // the ordinary round.
 func (ls *LedgerState) replaysPreviousStakeRewardRound(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	newEpoch uint64,
 ) (bool, error) {
 	if newEpoch < 4 {
@@ -81,13 +82,12 @@ func (ls *LedgerState) replaysPreviousStakeRewardRound(
 	if window == 0 {
 		return false, nil
 	}
-	meta := ls.db.Metadata()
-	metaTxn := txn.Metadata()
-	ended, err := meta.GetEpoch(newEpoch-1, metaTxn)
+	ldb := ls.ledgerDB()
+	ended, err := ldb.GetEpoch(newEpoch-1, txn)
 	if err != nil {
 		return false, fmt.Errorf("get epoch %d: %w", newEpoch-1, err)
 	}
-	previous, err := meta.GetEpoch(newEpoch-2, metaTxn)
+	previous, err := ldb.GetEpoch(newEpoch-2, txn)
 	if err != nil {
 		return false, fmt.Errorf("get epoch %d: %w", newEpoch-2, err)
 	}
@@ -165,12 +165,12 @@ func replayedStakeRewardFees(
 // at this boundary.
 func (ls *LedgerState) applyReplayedStakeRewardRound(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
-	meta := ls.db.Metadata()
-	baseline, err := meta.GetRewardAdaPots(newEpoch-1, txn.Metadata())
+	ldb := ls.ledgerDB()
+	baseline, err := ldb.GetRewardAdaPots(newEpoch-1, txn)
 	if err != nil {
 		return fmt.Errorf(
 			"get reward ADA pots for epoch %d: %w", newEpoch-1, err,
@@ -196,7 +196,7 @@ func (ls *LedgerState) applyReplayedStakeRewardRound(
 		}
 	} else {
 		var ok bool
-		app, ok, err = ls.calculateStakeRewardApplication(
+		app, ok, err = ls.calculateStakeRewardApplication(ctx,
 			txn, newEpoch-1, boundarySlot, boundarySlot, true,
 		)
 		if err != nil {
@@ -217,7 +217,7 @@ func (ls *LedgerState) applyReplayedStakeRewardRound(
 // the replayed round's fee seed, are added.
 func (ls *LedgerState) carriedRewardFees(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	newEpoch uint64,
 	endedEpochFees uint64,
 ) (uint64, error) {
@@ -225,14 +225,14 @@ func (ls *LedgerState) carriedRewardFees(
 	if err != nil || !replay {
 		return endedEpochFees, err
 	}
-	meta := ls.db.Metadata()
-	carried, err := meta.GetRewardAdaPots(newEpoch-1, txn.Metadata())
+	ldb := ls.ledgerDB()
+	carried, err := ldb.GetRewardAdaPots(newEpoch-1, txn)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"get reward ADA pots for epoch %d: %w", newEpoch-1, err,
 		)
 	}
-	seed, err := meta.GetRewardAdaPots(newEpoch-2, txn.Metadata())
+	seed, err := ldb.GetRewardAdaPots(newEpoch-2, txn)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"get reward ADA pots for epoch %d: %w", newEpoch-2, err,

@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"crypto/ed25519"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -190,7 +191,7 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 						0,
 						pp.GovActionValidityPeriod,
 						pp,
-						fx.db,
+						dbadapter.New(fx.db),
 						txn,
 						nil,
 					)

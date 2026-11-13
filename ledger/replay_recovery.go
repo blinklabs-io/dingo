@@ -378,13 +378,38 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 			// The cycle that first starts holding at an unchanged tip repairs the
 			// metadata the failed block left above it; the cycles that keep
 			// holding at that same tip reuse what it restored.
-			if err := ls.rollbackWithBlocks(
-				context.Background(),
-				rewindPoint,
-				nil,
-				replayHolding && !wasReplayHolding &&
-					pointMatches(rewindPoint, ledgerTip.Point),
-			); err != nil {
+			repairSameTip := replayHolding && !wasReplayHolding &&
+				pointMatches(rewindPoint, ledgerTip.Point)
+			rollback := func() error {
+				return ls.rollbackWithBlocks(
+					context.Background(),
+					rewindPoint,
+					nil,
+					repairSameTip,
+				)
+			}
+			// A primary-chain rewind publishes its own undo. Without one the
+			// blocks above rewindPoint stay on the chain, and the ledger's
+			// undo for the ones it applied is published here.
+			if !rewindPrimaryChain {
+				rollback = func() error {
+					blocks, err := ls.appliedBlocksAbove(
+						context.Background(),
+						rewindPoint,
+					)
+					if err != nil {
+						return err
+					}
+					return ls.rollbackWithUndo(
+						context.Background(),
+						rewindPoint,
+						blocks,
+						repairSameTip,
+						true,
+					)
+				}
+			}
+			if err := rollback(); err != nil {
 				return fmt.Errorf(
 					"rollback ledger state for replay recovery: %w",
 					err,
@@ -2485,7 +2510,7 @@ func (ls *LedgerState) buildReplayRecoveryChainIndex(
 		if scanned >= maxReplayRecoveryScanBlocks {
 			break
 		}
-		block, err := ls.db.BlockByIndex(blockIndex, nil)
+		block, err := ls.ledgerDB().BlockByIndex(blockIndex, nil)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
 				if blockIndex == database.BlockInitialIndex {
@@ -2549,11 +2574,10 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 	pending replayRecoveryPendingInput,
 	chainIndex *replayRecoveryChainIndex,
 ) (*replayRecoveryResolvedProducer, bool, error) {
-	present, err := ls.db.UtxoExists(
+	present, err := ls.utxoExists(
 		context.Background(),
 		pending.Input.Id().Bytes(),
 		pending.Input.Index(),
-		nil,
 	)
 	if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
 		return nil, false, fmt.Errorf(
@@ -2571,7 +2595,7 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 		// never fix it.
 		return nil, true, nil
 	}
-	producerTx, err := ls.db.GetTransactionByHash(
+	producerTx, err := ls.ledgerDB().GetTransactionByHash(
 		context.Background(),
 		pending.Input.Id().Bytes(),
 		nil,
@@ -2741,7 +2765,7 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	} else if ok && floorIndex < targetIndex {
 		targetIndex = floorIndex
 	}
-	anchorBlock, err := ls.db.BlockByIndex(targetIndex, nil)
+	anchorBlock, err := ls.ledgerDB().BlockByIndex(targetIndex, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// A pruned prefix can put the security-parameter target below

@@ -305,6 +305,10 @@ type Config struct {
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
+	ledgerUtxoShadow                                                                    bool
+	ledgerUtxoBadger                                                                    bool
+	ledgerUtxoReads                                                                     string
+	ledgerUtxoBadgerOnly                                                                bool
 	ledgerValidateAheadEnabled                                                          bool
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
@@ -1024,6 +1028,10 @@ func (c *Config) syncCompatFields() {
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
+	c.ledgerUtxoShadow = c.cfg.LedgerUtxoShadow
+	c.ledgerUtxoBadger = c.cfg.LedgerUtxoBadger
+	c.ledgerUtxoReads = c.cfg.LedgerUtxoReads
+	c.ledgerUtxoBadgerOnly = c.cfg.LedgerUtxoBadgerOnly
 	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
@@ -2016,6 +2024,42 @@ func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerPrefetchAheadEnabled = enabled
+	}
+}
+
+// WithLedgerUtxoShadow keeps a Badger copy of the live UTxO set beside the
+// metadata store and checks the two against each other. Diagnostic only;
+// validation never reads the copy. Off by default.
+func WithLedgerUtxoShadow(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoShadow = enabled
+	}
+}
+
+// WithLedgerUtxoBadger keeps the live UTxO set in a LedgerDB Badger store,
+// updated synchronously after each ledger commit, beside the metadata store.
+// Experimental; validation does not read it yet. Off by default.
+func WithLedgerUtxoBadger(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoBadger = enabled
+	}
+}
+
+// WithLedgerUtxoReads selects where validation resolves its inputs when the
+// live UTxO set is kept in Badger: "" for the metadata store, "verify" for
+// both with every disagreement counted, or "set" for the live UTxO set.
+func WithLedgerUtxoReads(mode string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoReads = mode
+	}
+}
+
+// WithLedgerUtxoBadgerOnly makes the Badger live UTxO set the only copy of
+// the UTxO set: the metadata store keeps no utxo rows. Core storage mode, on
+// a database synced this way from genesis. Experimental; off by default.
+func WithLedgerUtxoBadgerOnly(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoBadgerOnly = enabled
 	}
 }
 
@@ -3021,6 +3065,27 @@ func (c *Config) BlockPipelineValidateEnabled() bool {
 // enabled.
 func (c *Config) LedgerPrefetchAheadEnabled() bool {
 	return c.cfg.LedgerPrefetchAheadEnabled
+}
+
+// LedgerUtxoShadow returns whether the shadow UTxO set is enabled.
+func (c *Config) LedgerUtxoShadow() bool {
+	return c.cfg.LedgerUtxoShadow
+}
+
+// LedgerUtxoBadger returns whether the live UTxO set is kept in Badger.
+func (c *Config) LedgerUtxoBadger() bool {
+	return c.cfg.LedgerUtxoBadger
+}
+
+// LedgerUtxoReads returns where validation resolves its inputs.
+func (c *Config) LedgerUtxoReads() string {
+	return c.cfg.LedgerUtxoReads
+}
+
+// LedgerUtxoBadgerOnly returns whether the Badger live UTxO set is the only
+// copy of the UTxO set.
+func (c *Config) LedgerUtxoBadgerOnly() bool {
+	return c.cfg.LedgerUtxoBadgerOnly
 }
 
 // LedgerValidateAheadEnabled returns whether state-independent validation

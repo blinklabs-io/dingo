@@ -793,6 +793,49 @@
 # CLI: --ledger-prefetch-ahead-enabled
 # ledgerPrefetchAheadEnabled: true
 
+# Keep a Badger copy of the live UTxO set under <databasePath>/ledger/utxo-shadow,
+# fed by the ledger's block events, and check it against the metadata store
+# (experimental, default: false). Diagnostic only: validation never reads it.
+# Mismatches are logged and counted in the dingo_utxo_shadow_* metrics.
+#
+# Can be overridden with the DINGO_LEDGER_UTXO_SHADOW environment variable
+# CLI: --ledger-utxo-shadow
+# ledgerUtxoShadow: false
+
+# Keep the live UTxO set in a Badger store under <databasePath>/ledger/utxo,
+# updated synchronously after each ledger commit and before the next block is
+# validated (experimental, default: false). ledgerUtxoReads selects whether
+# validation reads it.
+# A store left behind the ledger is caught up at startup by rolling the ledger
+# back to it, or rebuilt from the metadata store when that is not possible.
+# Counted in the dingo_utxo_set_* metrics.
+#
+# Can be overridden with the DINGO_LEDGER_UTXO_BADGER environment variable
+# CLI: --ledger-utxo-badger
+# ledgerUtxoBadger: false
+
+# Where validation resolves its inputs when ledgerUtxoBadger is on: empty for
+# the metadata store, "verify" to read both and count every disagreement in
+# dingo_utxo_set_read_mismatches_total while using the metadata store's
+# answer, or "set" to use the live UTxO set (experimental, default: empty).
+# Reads fall back to the metadata store if an update to the set fails.
+#
+# Can be overridden with the DINGO_LEDGER_UTXO_READS environment variable
+# CLI: --ledger-utxo-reads
+# ledgerUtxoReads: ""
+
+# Keep the live UTxO set only in the Badger store, with no utxo rows in the
+# metadata store (experimental, default: false). Needs ledgerUtxoBadger and
+# core storage mode. It can be turned on only for a database synced this way
+# from genesis or from a Mithril ledger-state import, and such a database
+# refuses to start without it, since its metadata store has no UTxO set to
+# fall back to. LocalStateQuery UTxO queries pinned more than one stability
+# window before the tip are refused.
+#
+# Can be overridden with the DINGO_LEDGER_UTXO_BADGER_ONLY environment variable
+# CLI: --ledger-utxo-badger-only
+# ledgerUtxoBadgerOnly: false
+
 # Verify the witness signatures of every validated block of a block-apply
 # chunk on worker goroutines while earlier blocks of the chunk validate and
 # write (default: true). Not consensus-affecting: each result is bound to

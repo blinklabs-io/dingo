@@ -17,7 +17,7 @@ package ledger
 import (
 	"context"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/utxoref"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -45,7 +45,7 @@ func trimTrustedReplayUtxos(
 // point lookup.
 func (ls *LedgerState) prefetchBlockUtxos(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	txs []lcommon.Transaction,
 	have map[utxoref.Key]lcommon.Utxo,
 	skip map[utxoref.Key]struct{},
@@ -90,7 +90,7 @@ func (ls *LedgerState) prefetchBlockUtxos(
 		return have
 	}
 	ls.utxoBatchLookups.Add(1)
-	rows, err := ls.db.UtxosByRefs(ctx, refs, txn)
+	rows, err := ls.utxosByRefsForValidation(ctx, refs, txn)
 	if err != nil {
 		// Prefetching is an optimization: a failed batch must not reject a
 		// block whose validators may never read the failing ref. The same

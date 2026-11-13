@@ -92,6 +92,7 @@ func stakeRewardApplicationForTest(
 	txn := db.Transaction(context.Background(), false)
 	t.Cleanup(func() { _ = txn.Rollback() })
 	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
 		txn,
 		4,
 		1_200,

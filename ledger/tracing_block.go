@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -98,10 +100,13 @@ func (ls *LedgerState) rollbackTraceBlocks(
 		return provided
 	}
 	var blocks []models.Block
-	txn := ls.db.Transaction(ctx, false)
-	err := txn.Do(func(txn *database.Txn) error {
+	txn := ls.ledgerDB().Begin(ctx, false)
+	err := ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
 		var err error
-		blocks, err = database.BlocksAfterSlotTxn(txn, point.Slot)
+		blocks, err = database.BlocksAfterSlotTxn(
+			dbadapter.Unwrap(txn),
+			point.Slot,
+		)
 		return err
 	})
 	if err != nil {

@@ -23,8 +23,13 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -75,6 +80,7 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 	if ls.config.EventBus == nil {
 		return
 	}
+	endorser := ls.rollbackEndorserUndo(blocks)
 
 	for _, block := range blocks {
 		blk, err := block.Decode()
@@ -114,11 +120,7 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 			Hash: block.Hash,
 		}
 
-		txs := blk.Transactions()
-		if len(txs) == 0 {
-			continue
-		}
-		for i, tx := range slices.Backward(txs) {
+		for i, tx := range slices.Backward(blk.Transactions()) {
 			ls.publishTransactionEvent(ctx, TransactionEvent{
 				Transaction: tx,
 				Point:       blockPoint,
@@ -127,7 +129,32 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 				Rollback:    true,
 			})
 		}
+		ls.emitEndorserUndo(ctx, block, endorser[string(block.Hash)])
 	}
+}
+
+// rollbackEndorserUndo returns the endorser transactions the pending rollback
+// intent recorded for blocks. Every caller of emitRollbackTransactionEvents
+// writes that intent before the truncation, while the rows that name the
+// applying block still exist; a rollback too large for the intent loses this
+// undo along with its crash replay.
+func (ls *LedgerState) rollbackEndorserUndo(
+	blocks []models.Block,
+) endorserUndo {
+	if !slices.ContainsFunc(blocks, func(b models.Block) bool {
+		return b.Type == gledger.BlockTypeDijkstra
+	}) {
+		return nil
+	}
+	endorser, err := loadRollbackIntentEndorserUndo(ls.db)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to load endorser transactions for rollback undo",
+			"component", "ledger",
+			"error", err,
+		)
+	}
+	return endorser
 }
 
 // publishTransactionEvent publishes a TransactionEvent on the ledger.tx
@@ -142,6 +169,18 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 // callback. Enqueueing here keeps subscriber work out of Commit while still
 // ensuring the transaction is durable before any Apply becomes visible.
 func (ls *LedgerState) publishTransactionEvent(
+	ctx context.Context,
+	evt TransactionEvent,
+) {
+	ls.publishTransactionEventOnly(ctx, evt)
+	if !evt.Rollback {
+		ls.publishUtxoEvent(ctx, utxoEventForTransaction(evt))
+	}
+}
+
+// publishTransactionEventOnly publishes evt on ledger.tx without its UTxO
+// change, for a caller that delivered that change when the change committed.
+func (ls *LedgerState) publishTransactionEventOnly(
 	ctx context.Context,
 	evt TransactionEvent,
 ) {
@@ -300,7 +339,7 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(ctx context.Context,
 	// The primary chain can be ahead of the applied ledger during catch-up.
 	// No ledger state will be rolled back in that case, so do not persist an
 	// intent that a crash could later misinterpret as an interrupted rollback.
-	durableTip, err := ls.db.GetTip(nil)
+	durableTip, err := ls.ledgerDB().GetTip(nil)
 	if err != nil {
 		return false, fmt.Errorf("read durable ledger tip: %w", err)
 	}
@@ -311,6 +350,7 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(ctx context.Context,
 	if err != nil {
 		return false, fmt.Errorf("read rollback undo blocks: %w", err)
 	}
+	blocks = blocksAppliedUpTo(blocks, durableTip.Point)
 	if len(blocks) == 0 {
 		return false, nil
 	}
@@ -356,10 +396,10 @@ func (ls *LedgerState) readBlocksAboveSlot(
 		return nil, nil
 	}
 	var blocks []models.Block
-	txn := ls.db.Transaction(ctx, false)
-	err := txn.Do(func(txn *database.Txn) error {
+	txn := ls.ledgerDB().Begin(ctx, false)
+	err := ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
 		var err error
-		blocks, err = database.BlocksAfterSlotTxn(txn, slot)
+		blocks, err = database.BlocksAfterSlotTxn(dbadapter.Unwrap(txn), slot)
 		return err
 	})
 	if err != nil {
@@ -367,6 +407,15 @@ func (ls *LedgerState) readBlocksAboveSlot(
 	}
 	slices.Reverse(blocks)
 	return blocks, nil
+}
+
+// blocksAppliedUpTo keeps the blocks at or below tip's slot. The primary chain
+// can hold blocks the ledger has not applied yet, and a rollback must not undo
+// what no consumer was ever told was applied.
+func blocksAppliedUpTo(blocks []models.Block, tip ocommon.Point) []models.Block {
+	return slices.DeleteFunc(slices.Clone(blocks), func(b models.Block) bool {
+		return b.Slot > tip.Slot
+	})
 }
 
 // reconciliationUndoBlocks returns the blocks the ledger itself applied
@@ -445,8 +494,8 @@ func (ls *LedgerState) reconciliationUndoBlocks(
 	if ledgerTipSlot <= ancestor.Slot {
 		return nil
 	}
-	nonceTxn := ls.db.MetadataTxn(ctx, false)
-	nonceRows, err := ls.db.GetBlockNoncesInSlotRange(
+	nonceTxn := ls.ledgerDB().BeginLedgerOnly(ctx, false)
+	nonceRows, err := ls.ledgerDB().GetBlockNoncesInSlotRange(
 		ancestor.Slot,
 		ledgerTipSlot+1,
 		nonceTxn,
@@ -522,4 +571,141 @@ func (ls *LedgerState) reconciliationUndoBlocks(
 		}
 	}
 	return blocks
+}
+
+// publishUtxoEvent publishes evt on the ledger.utxo ordered lane. Like
+// publishTransactionEvent it is asynchronous and ordered: subscribers rebuild
+// the live set from the sequence.
+func (ls *LedgerState) publishUtxoEvent(ctx context.Context, evt UtxoEvent) {
+	if ls.config.EventBus == nil ||
+		(len(evt.Added) == 0 && len(evt.Removed) == 0) {
+		return
+	}
+	publishCtx := ls.publishCtx //nolint:contextcheck // the ledger lifecycle context bounds the publish
+	if publishCtx == nil {
+		publishCtx = ctx
+	}
+	ls.config.EventBus.PublishOrderedContext(
+		publishCtx,
+		UtxoEventType,
+		event.NewEvent(UtxoEventType, evt),
+	)
+}
+
+// publishUtxoEventAfterCommit publishes evt once txn commits, or at once when
+// there is no txn.
+func (ls *LedgerState) publishUtxoEventAfterCommit(
+	ctx context.Context,
+	txn ledgerdb.Txn,
+	evt UtxoEvent,
+	tip *ocommon.Point,
+) {
+	ls.stageUtxoSet(txn, tip, evt) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	if ls.config.EventBus == nil {
+		return
+	}
+	if txn == nil {
+		ls.publishUtxoEvent(ctx, evt)
+		return
+	}
+	txn.AfterCommit(func() { ls.publishUtxoEvent(ctx, evt) })
+}
+
+// utxoEventForTransaction is the UTxO change a forward transaction event
+// makes.
+func utxoEventForTransaction(te TransactionEvent) UtxoEvent {
+	return utxoEventFor(te.Point, te.TxIndex, te.Transaction)
+}
+
+// utxoEventFor is the UTxO change applying tx at point makes: its consumed
+// inputs removed and its produced outputs added. For an invalid transaction
+// those are its collateral and collateral return.
+func utxoEventFor(
+	point ocommon.Point,
+	txIndex uint32,
+	tx lcommon.Transaction,
+) UtxoEvent {
+	evt := UtxoEvent{
+		Point:   point,
+		Cause:   UtxoChangeTransaction,
+		TxIndex: txIndex,
+	}
+	for _, in := range tx.Consumed() {
+		id := in.Id()
+		evt.Removed = append(evt.Removed, models.UtxoId{
+			Hash: append([]byte(nil), id[:]...),
+			Idx:  in.Index(),
+		})
+	}
+	for _, u := range tx.Produced() {
+		id := u.Id.Id()
+		evt.Added = append(evt.Added, UtxoOutput{
+			Ref: models.UtxoId{
+				Hash: append([]byte(nil), id[:]...),
+				Idx:  u.Id.Index(),
+			},
+			Cbor: outputCbor(u.Output),
+		})
+	}
+	return evt
+}
+
+// outputCbor returns an output's original CBOR, or encodes it when the
+// output was built rather than decoded.
+func outputCbor(out lcommon.TransactionOutput) []byte {
+	if c := out.Cbor(); len(c) > 0 {
+		return c
+	}
+	c, err := cbor.Encode(out)
+	if err != nil {
+		return nil
+	}
+	return c
+}
+
+// stageUtxoRollbackEvent reads what a rollback to point does to the live
+// UTxO set, before the truncation in txn erases it, and publishes it once
+// txn commits. Reading it from the store, rather than from the rolled-back
+// blocks, makes it exact on every rollback path.
+func (ls *LedgerState) stageUtxoRollbackEvent(
+	ctx context.Context,
+	txn ledgerdb.Txn,
+	point ocommon.Point,
+) error {
+	if ls.config.UtxoSetOnly {
+		// The metadata store holds no utxo rows; the set rolls back from
+		// its own journal after the commit and its net change is published.
+		ls.stageUtxoSetRollback(txn, point) //nolint:contextcheck // the change is published after the commit, under the ledger lifecycle
+		return nil
+	}
+	if ls.config.UtxoSet == nil && (ls.config.EventBus == nil ||
+		!ls.config.EventBus.HasSubscribers(UtxoEventType)) {
+		return nil
+	}
+	removed, restored, err := ls.ledgerDB().UtxoRollbackChanges(
+		ctx,
+		point.Slot,
+		txn,
+	)
+	if err != nil {
+		return fmt.Errorf("read UTxO rollback changes: %w", err)
+	}
+	// An empty change still moves the live UTxO set's tip to point.
+	if len(removed) == 0 && len(restored) == 0 && ls.config.UtxoSet == nil {
+		return nil
+	}
+	evt := UtxoEvent{
+		Point:   point,
+		Cause:   UtxoChangeRollback,
+		Removed: removed,
+		Added:   make([]UtxoOutput, 0, len(restored)),
+	}
+	for _, u := range restored {
+		evt.Added = append(evt.Added, UtxoOutput{
+			Ref:  models.UtxoId{Hash: u.TxId, Idx: u.OutputIdx},
+			Cbor: u.Cbor,
+		})
+	}
+	ls.publishUtxoEventAfterCommit(ctx, txn, evt, &point)
+	return nil
 }

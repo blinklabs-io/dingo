@@ -933,6 +933,17 @@ subscriber deriving state from it sees a block's transactions in index order
 and sees a rollback's undo events (`Rollback: true`) before any transaction
 event the ledger emits afterwards.
 
+A rollback undoes only blocks the ledger applied: blocks the primary chain
+holds above the durable ledger tip are skipped. Each block's undo covers its
+own transactions in reverse order and then, for a ranking block that applied a
+certified endorser block, the endorser transactions in reverse order, since
+apply ran them first. The endorser transactions come from the rollback
+outbox (see `DATABASE.md`), which records them before the truncation removes
+the rows that name the ranking block. Rollbacks that leave the primary chain
+in place, replay recovery's metadata rewind and partial-commit recovery,
+publish their undo after the metadata truncation and keep the outbox until it
+is delivered.
+
 Two producers feed that lane, on different goroutines: `LedgerDelta.apply`
 (`ledger/delta.go`) registers forward events on the database transaction's
 `AfterCommit` drain from the `ledgerProcessBlocks` goroutine, and the rollback
@@ -1797,6 +1808,9 @@ dingo/
 │   ├── hot_cache.go     # Hot cache for frequently accessed data
 │   ├── block_lru_cache.go # Block-level LRU cache
 │   ├── immutable/       # ImmutableDB chunk reader
+│   ├── indexerdb/       # IndexerDB role: API history and address queries
+│   ├── ledgerdb/        # LedgerDB role: ledger state consensus reads and writes
+│   │   └── dbadapter/   # LedgerDB and IndexerDB over *database.Database
 │   ├── lifecycle/       # Snapshot, restore, and truncation library
 │   ├── models/          # Database models
 │   ├── types/           # Database types
@@ -2602,6 +2616,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `mempool.remove_tx` | Mempool | Transaction removed |
 | `ledger.block` | LedgerState | Block applied or rolled back |
 | `ledger.tx` | LedgerState | Transaction processed (ordered lane — see below) |
+| `ledger.utxo` | LedgerState | One change to the live UTxO set, with the outputs it adds (and their CBOR) and removes: a transaction, genesis outputs, the Allegra AVVM removal, or a rollback (ordered lane, published after commit) |
 | `ledger.error` | LedgerState | Ledger error occurred |
 | `ledger.blockfetch` | Ouroboros | Block fetch event received |
 | `ledger.chainsync` | Ouroboros | Chainsync event received |
@@ -2975,6 +2990,153 @@ the `dingo_extra_plugins` build tag is enabled; project builds and CI still
 compile that boundary, while a plain `go build ./cmd/dingo` omits the cloud
 SDKs and non-default SQL drivers. Every compiled metadata provider passes the
 readiness gate after its dialect-specific migration completes.
+
+### LedgerDB and IndexerDB roles
+
+`database/ledgerdb` names the ledger state that consensus reads and writes,
+as role interfaces grouped by kind: `UtxoStore`, `AccountStore`,
+`RewardStore`, `PoolStore`, `SnapshotStore`, `GovernanceStore`, `EpochStore`
+and `ChainStore`, plus `Applier` for the block-apply write path. `LedgerDB`
+composes them with its own `Txn`. Two further roles mark what the LedgerDB
+must not keep: `TxHistory` lists the consensus paths that still read
+transaction history, and `LeiosStore` holds endorser blocks until they move to
+their own store. `database/indexerdb.Reader` holds the history and address
+queries that ledger state forwards for the APIs; validation does not use it.
+
+`database/ledgerdb/dbadapter` implements both over `*database.Database`, so
+every role is served by today's metadata and blob stores. Its transactions are
+`*database.Txn` values, which satisfy `ledgerdb.Txn`; a nil `Txn` runs a call
+in its own transaction, as before. Savepoints cover the metadata store only.
+An `Adapter` is a single pointer, so wrapping a database in one does not
+allocate.
+
+`LedgerState.ledgerDB()` returns the LedgerDB the ledger uses: one configured
+on the ledger state, or an adapter over its database. The ledger, the stake
+snapshot manager and calculator, and the governance package read and write
+ledger state through it, and carry a `ledgerdb.Txn` rather than a
+`*database.Txn`. Transactions open with `Begin`, or with `BeginLedgerOnly`
+when they never read block bytes, and `Run` replaces `(*database.Txn).Do`.
+API history and address queries that ledger state forwards go through
+`LedgerState.indexerDB()`.
+
+A nil `*database.Txn` converted to `ledgerdb.Txn` is a non-nil interface, so
+callers that may hold a nil transaction convert it with `dbadapter.Txn`, which
+keeps it nil. Both `*database.Txn` and `ledgerdb.Txn` also satisfy the
+metadata store's `types.Txn`, so passing one where a raw metadata transaction
+is expected compiles but fails at runtime; ledger code reaches the store only
+through the LedgerDB.
+
+The ledger still reaches the database directly for block bytes (blob-only
+transactions and iterators), for SQLite bulk-load and read-reservation tuning,
+and to check that a metadata store is configured.
+
+The ledger publishes every change to the live UTxO set on the ordered
+`ledger.utxo` lane, after the change commits. A forward change is derived
+from each published `ledger.tx` transaction (`Consumed` removed, `Produced`
+added, so an invalid transaction spends its collateral and adds its
+collateral return); genesis and the Allegra AVVM removal publish their own.
+A rollback's change is read from the store inside the truncation
+transaction, before the truncation, by `UtxoRollbackChanges`: the live
+outputs created after the rollback point are removed and the outputs spent
+after it but created at or before it are restored with their CBOR. Reading
+it from the store makes it exact whichever path rolled back, and it covers
+undoing the AVVM removal and Leios endorser-block transactions. A consumer
+that applies the events in order reproduces the live set without reading the
+store; `finishRollbackIntent` waits for both the `ledger.tx` and
+`ledger.utxo` lanes to drain.
+
+`internal/utxoshadow` is an opt-in diagnostic (`ledgerUtxoShadow`) that
+consumes `ledger.utxo` the way a stateless consumer would. It keeps a Badger
+copy of the live set (`database/ledgerdb/badgerutxo`), bootstraps it from the
+metadata store at the first event, self-checks every change (removed outputs
+must be live, added outputs must not be), and when a block's first
+transaction shows the previous block is complete, compares a sample with the
+metadata store as of that block's slot. It subscribes with the default
+backpressure policy, so a stalled shadow is detached rather than slowing the
+ledger. Results are logged and counted in the `dingo_utxo_shadow_*` metrics;
+validation never reads the copy.
+
+The live UTxO set (`ledgerUtxoBadger`, `internal/utxoset`) is the same Badger
+layout, kept by the ledger itself rather than by a subscriber.
+`LedgerStateConfig.UtxoSet` takes a `ledger.UtxoSetWriter`. Every site that
+makes a UTxO change stages it on its write transaction before the commit:
+forward transactions from the delta, Leios endorser-block and closure
+transactions, the rollback change, genesis and the AVVM removal. The
+block-apply commit stages the tip it writes, and a rollback stages its
+target, even with no change. One after-commit callback per transaction then
+hands the whole batch to the writer, which applies it atomically, so the
+set's recorded tip is always a point at which it equals the ledger. Forward
+changes are built whenever either consumer exists, so the set does not need
+an event bus. A Leios closure applied before its certifying block delivers
+its UTxO changes when the closure commits, and its `ledger.tx` events still
+wait for the certifying block, so a rollback that discards the pending
+closure removes outputs every consumer saw added. A failed update stops
+further updates. The node reconciles the set after database recovery and
+before the ledger starts, both at startup and after a live restore or
+truncate: a set behind the ledger is resumed by
+`LedgerState.ResumeUtxoSetFrom`, which rolls the ledger back to the set's
+tip so the blocks after it are applied again, or rebuilt from the metadata
+store when that rollback is not possible. With the set as the only copy, the
+startup `reward_live_stake` consistency check and rebuild run after this
+reconcile rather than before it, since a rebuild reads UTxO stake from the
+set. The set closes after the ledger in
+shutdown phase 3. Metrics are `dingo_utxo_set_*`.
+
+`ledgerUtxoReads` (`LedgerStateConfig.UtxoSetReads`) routes validation's
+input reads, `LedgerView.UtxoById` and the block prefetch, to the set when
+the writer is also a `ledger.UtxoSetReader`. Each open transaction's staged
+batch keeps the last state of every output it changed, and a read in that
+transaction consults it before the set. The batch is applied to the set after
+its transaction commits, so another write can start in between; until it is
+applied every reader also consults it, after any older such batch, and
+applying it and dropping it is one step under `utxoSetApplyMu`. Without this,
+a stake re-sum in that gap (a deferred reward-credit fold, for one) would
+store a credential's stake from before the commit until its next re-sum.
+`verify` mode reads both stores,
+uses the metadata store's answer and counts disagreements in
+`dingo_utxo_set_read_mismatches_total`; a mempool view's read-only snapshot
+can predate a commit the set already holds, so near the tip it can count
+disagreements that are not errors. `set` mode uses the set alone. Both fall
+back to the metadata store once an update to the set has failed.
+
+Each level of each transaction is staged right after the delta writes it,
+so later transactions in the same commit see it. The staged batch also keeps
+a stake delta per stake sum (`ledger.UtxoStakeOf` classifies outputs as
+`utxo` rows do), so `LedgerState.CredentialUtxoStake` answers as the open
+transaction sees the set. The set's journal keeps one record per block, so a
+rollback can stop between two blocks of one commit.
+
+`LedgerStateConfig.UtxoSetOnly` makes the set the only copy. The ledger
+registers itself as the database's `types.LiveUtxoSource`
+(`LedgerState.LiveUtxoCbor`, which finds the writing transaction's batch by
+its metadata transaction), so the metadata store writes no `utxo` rows and
+resolves collateral amounts through it. Validation reads only the set; after
+a failed update it reports the set unavailable instead of falling back. A
+rollback stages its target on the batch, the set rolls back from its journal
+after the commit (`ledger.UtxoSetRollbacker`), and the set's net change is
+published on `ledger.utxo`. Before the truncation, the rollback's change is
+previewed from the journal and staged in the overlay, so the metadata
+store's reads during the truncation see the rolled-back set.
+`reward_live_stake` keeps its UTxO part: the writer adds produced outputs'
+stake from its row models and subtracts each spent input's stake read
+through `LiveUtxoCbor`, a per-credential re-sum reads `LiveUtxoStake` (the
+write's context carries its metadata transaction), and after a rollback's
+truncation the ledger refreshes the credentials of the outputs it changed.
+Readers of `reward_live_stake` are unchanged. The ledger's other UTxO reads take the set
+in this mode: point and batch lookups (the state's wrappers, the mempool's
+resolution, LocalStateQuery's current-tip `GetUTxOByTxIn`, replay recovery,
+the continuation audit) go through the validation read path; the AVVM scan,
+the Byron reserves sum and address lookups iterate the set with the open
+transaction's staged changes over it; and a spent input (Leios dedup,
+`UtxoByRefIncludingSpent`) is read from the body of the transaction that
+produced it, as the metadata store records outputs: a valid transaction's
+outputs, or an invalid one's collateral return. LocalStateQuery UTxO queries
+(`GetUTxOByAddress`, `GetUTxOByTxIn`, `GetUTxOWhole`) pinned to a point are
+answered from a view of the set as of that point (`UtxoSetHistory`): one
+Badger snapshot read through the journal's prior states of every output
+changed after the point, so a commit during the reply cannot mix two states.
+The journal reaches back one stability window; a point older than it fails
+with `ledger.ErrUtxoAsOfUnavailable`.
 
 ### Cross-Store Commit Ordering
 

@@ -69,25 +69,58 @@ type durableRollbackBlock struct {
 	Hash     []byte `json:"hash"`
 	PrevHash []byte `json:"prev_hash"`
 	Cbor     []byte `json:"cbor"`
-	ID       uint64 `json:"id"`
-	Slot     uint64 `json:"slot"`
-	Number   uint64 `json:"number"`
-	Type     uint   `json:"type"`
+	// EndorserTxs are the endorser-block transactions this ranking block
+	// applied, in application order. They are read before the rollback
+	// truncates the rows that say which block applied them.
+	EndorserTxs []durableEndorserTx `json:"endorser_txs,omitempty"`
+	ID          uint64              `json:"id"`
+	Slot        uint64              `json:"slot"`
+	Number      uint64              `json:"number"`
+	Type        uint                `json:"type"`
+}
+
+// durableEndorserTx is one applied endorser-block transaction: its position
+// in the endorser block, which its forward event carried as TxIndex, and its
+// block_transaction CBOR.
+type durableEndorserTx struct {
+	Cbor  []byte `json:"cbor"`
+	Index uint32 `json:"index"`
+}
+
+// endorserUndo maps a ranking block hash to the endorser-block transactions
+// it applied.
+type endorserUndo map[string][]durableEndorserTx
+
+// durableEndorserTxOverhead is what one endorser transaction is charged
+// against the payload limit beyond its CBOR, so its JSON field names and index
+// stay inside maxRollbackIntentEncodedBytes.
+const durableEndorserTxOverhead = 64
+
+func durableBlockPayload(block durableRollbackBlock) int {
+	total := len(block.Hash) + len(block.PrevHash) + len(block.Cbor)
+	for _, tx := range block.EndorserTxs {
+		total += len(tx.Cbor) + durableEndorserTxOverhead
+	}
+	return total
 }
 
 func restoreRollbackIntent(
 	db *database.Database,
 	point ocommon.Point,
 	blocks []models.Block,
+	endorser endorserUndo,
 	pending bool,
 ) error {
 	if !pending {
 		return clearRollbackIntent(db)
 	}
-	return persistRollbackIntent(db, point, blocks)
+	return persistRollbackIntent(db, point, blocks, endorser)
 }
 
-func durableBlocks(blocks []models.Block) ([]durableRollbackBlock, error) {
+func durableBlocks(
+	blocks []models.Block,
+	endorser endorserUndo,
+) ([]durableRollbackBlock, error) {
 	if len(blocks) > maxRollbackIntentBlocks {
 		return nil, fmt.Errorf(
 			"%w: %d blocks exceeds %d",
@@ -99,7 +132,13 @@ func durableBlocks(blocks []models.Block) ([]durableRollbackBlock, error) {
 	total := 0
 	ret := make([]durableRollbackBlock, 0, len(blocks))
 	for _, block := range blocks {
-		total += len(block.Hash) + len(block.PrevHash) + len(block.Cbor)
+		durable := durableRollbackBlock{
+			Hash: block.Hash, PrevHash: block.PrevHash, Cbor: block.Cbor,
+			EndorserTxs: endorser[string(block.Hash)],
+			ID:          block.ID, Slot: block.Slot, Number: block.Number,
+			Type: block.Type,
+		}
+		total += durableBlockPayload(durable)
 		if total > maxRollbackIntentPayloadBytes {
 			return nil, fmt.Errorf(
 				"%w: block bytes exceed %d",
@@ -107,11 +146,7 @@ func durableBlocks(blocks []models.Block) ([]durableRollbackBlock, error) {
 				maxRollbackIntentPayloadBytes,
 			)
 		}
-		ret = append(ret, durableRollbackBlock{
-			Hash: block.Hash, PrevHash: block.PrevHash, Cbor: block.Cbor,
-			ID: block.ID, Slot: block.Slot, Number: block.Number,
-			Type: block.Type,
-		})
+		ret = append(ret, durable)
 	}
 	return ret, nil
 }
@@ -132,11 +167,12 @@ func persistRollbackIntent(
 	db *database.Database,
 	point ocommon.Point,
 	blocks []models.Block,
+	endorser endorserUndo,
 ) error {
 	if db == nil || db.Metadata() == nil {
 		return nil
 	}
-	persistedBlocks, err := durableBlocks(blocks)
+	persistedBlocks, err := durableBlocks(blocks, endorser)
 	if err != nil {
 		return err
 	}
@@ -185,6 +221,7 @@ func (ls *LedgerState) ensureRollbackIntent(
 	if err != nil {
 		return err
 	}
+	var endorser endorserUndo
 	if pending {
 		if existing.Slot != point.Slot ||
 			!bytes.Equal(existing.Hash, point.Hash) {
@@ -206,6 +243,13 @@ func (ls *LedgerState) ensureRollbackIntent(
 				existingBlocks,
 				rollbackBlocks,
 			)
+			// The existing intent's blocks may already be truncated, so
+			// their endorser transactions come from the intent, not the
+			// store.
+			endorser, err = loadRollbackIntentEndorserUndo(ls.db)
+			if err != nil {
+				return err
+			}
 		} else {
 			return nil
 		}
@@ -219,7 +263,8 @@ func (ls *LedgerState) ensureRollbackIntent(
 	if len(rollbackBlocks) == 0 {
 		return nil
 	}
-	return persistRollbackIntent(ls.db, point, rollbackBlocks)
+	endorser = ls.captureEndorserUndo(ctx, rollbackBlocks, endorser)
+	return persistRollbackIntent(ls.db, point, rollbackBlocks, endorser)
 }
 
 func (ls *LedgerState) prepareRollbackIntent(
@@ -327,6 +372,42 @@ func loadRollbackIntent(
 		modelBlocks(intent.Blocks), true, nil
 }
 
+// loadRollbackIntentEndorserUndo returns the endorser-block transactions the
+// pending intent recorded per ranking block, or nil without one.
+func loadRollbackIntentEndorserUndo(
+	db *database.Database,
+) (endorserUndo, error) {
+	if db == nil || db.Metadata() == nil {
+		return nil, nil
+	}
+	raw, err := db.GetSyncStateBounded(
+		durableRollbackIntentSyncKey,
+		maxRollbackIntentEncodedBytes,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load rollback intent: %w", err)
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	intent, err := decodeRollbackIntent(raw)
+	if err != nil {
+		return nil, err
+	}
+	var ret endorserUndo
+	for _, block := range intent.Blocks {
+		if len(block.EndorserTxs) == 0 {
+			continue
+		}
+		if ret == nil {
+			ret = make(endorserUndo)
+		}
+		ret[string(block.Hash)] = block.EndorserTxs
+	}
+	return ret, nil
+}
+
 // decodeRollbackIntent decodes a stored record under the limits the writer
 // enforces. The block array is read element by element so a record with more
 // than maxRollbackIntentBlocks entries, or more than
@@ -422,7 +503,7 @@ func decodeRollbackBlocks(
 		if err := dec.Decode(&block); err != nil {
 			return nil, err
 		}
-		total += len(block.Hash) + len(block.PrevHash) + len(block.Cbor)
+		total += durableBlockPayload(block)
 		if total > maxPayload {
 			return nil, fmt.Errorf(
 				"%w: block bytes exceed %d",
@@ -532,6 +613,9 @@ func (ls *LedgerState) finishRollbackIntent(ctx context.Context) error {
 		if !ls.config.EventBus.FlushOrderedContext(
 			publishCtx,
 			TransactionEventType,
+		) || !ls.config.EventBus.FlushOrderedContext(
+			publishCtx,
+			UtxoEventType,
 		) {
 			ls.config.Logger.Warn(
 				"retaining rollback intent until ordered undo delivery completes",

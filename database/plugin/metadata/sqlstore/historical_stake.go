@@ -972,6 +972,22 @@ func (s *Store) historicalStakeCTE(
 		reapSlot = boundarySlot
 	}
 	query, args := activeDelegationSQL(slot, reapSlot)
+	live := s.liveUtxo != nil
+	if live {
+		// Without utxo rows the UTxO side is the live set as this
+		// transaction sees it, which is the set at slot only when nothing
+		// has been applied after slot.
+		row, err := s.operationalQueries(db).GetTip(ctx)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", nil, fmt.Errorf("read tip for live stake: %w", err)
+		}
+		if err == nil && row.Slot.Int64 > 0 && uint64(row.Slot.Int64) > slot {
+			return "", nil, fmt.Errorf(
+				"%w: slot %d is before the ledger tip at slot %d",
+				errLiveUtxoAsOf, slot, row.Slot.Int64,
+			)
+		}
+	}
 	// Stake held at a pointer address reaches its credential only in the eras
 	// that count it, and only through the position recorded in utxo_pointer.
 	// When it is not counted the query is exactly what it was before pointer
@@ -983,7 +999,22 @@ func (s *Store) historicalStakeCTE(
 	if err != nil {
 		return "", nil, err
 	}
-	if countPointerStake {
+	if countPointerStake && live {
+		txn, _ := ctx.Value(liveUtxoTxnKey{}).(types.Txn)
+		pointers, err := s.liveUtxo.LivePointerStakes(txn)
+		if err != nil {
+			return "", nil, fmt.Errorf("read live pointer stake: %w", err)
+		}
+		if query, args, err = withLivePointers(query, args, pointers); err != nil {
+			return "", nil, err
+		}
+		slotValue, err := checkedInt64(slot)
+		if err != nil {
+			return "", nil, err
+		}
+		query += livePointerResolutionSQL
+		args = append(args, slotValue)
+	} else if countPointerStake {
 		resolution, resolutionArgs, err := pointerResolutionSQL(slot)
 		if err != nil {
 			return "", nil, err
@@ -1021,7 +1052,22 @@ func (s *Store) historicalStakeCTE(
  OR active_delegation.expiration_epoch >= ?
  OR active_delegation.expiration_epoch IS NULL) AND `
 	}
-	query += `,
+	if live {
+		// reward_live_stake carries each credential's UTxO stake, one row
+		// per credential; callers sum rows per (pool, credential).
+		query += `,
+active_delegator_stake AS (
+ SELECT active_delegation.pool_key_hash,
+        active_delegation.credential_tag,
+        active_delegation.staking_key,
+        live_utxo.utxo_stake AS utxo_amount
+ FROM ` + delegationSource + `
+ LEFT JOIN reward_live_stake live_utxo
+   ON live_utxo.credential_tag = active_delegation.credential_tag
+  AND live_utxo.staking_key = active_delegation.staking_key
+ WHERE ` + expiryPredicate + predicate
+	} else {
+		query += `,
 active_delegator_stake AS (
  SELECT active_delegation.pool_key_hash,
         active_delegation.credential_tag,
@@ -1034,12 +1080,29 @@ active_delegator_stake AS (
   AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.tx_id), utxo.added_slot) <= ?
   AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
  WHERE ` + expiryPredicate + predicate
-	args = append(args, slot, slot)
+		args = append(args, slot, slot)
+	}
 	if expiryEpoch > 0 {
 		args = append(args, expiryEpoch)
 	}
 	args = append(args, predicateArgs...)
-	if countPointerStake {
+	if countPointerStake && live {
+		query += `
+ UNION ALL
+ SELECT active_delegation.pool_key_hash,
+        active_delegation.credential_tag,
+        active_delegation.staking_key,
+        pointer_resolution.amount AS utxo_amount
+ FROM ` + delegationSource + `
+ JOIN pointer_resolution
+   ON pointer_resolution.credential_tag = active_delegation.credential_tag
+  AND pointer_resolution.staking_key = active_delegation.staking_key
+ WHERE ` + expiryPredicate + predicate
+		if expiryEpoch > 0 {
+			args = append(args, expiryEpoch)
+		}
+		args = append(args, predicateArgs...)
+	} else if countPointerStake {
 		// A pointer-held UTxO carries no staking_key, so it never joins the
 		// branch above and cannot be counted twice. Rows are summed per
 		// (pool, credential) by the callers, so UNION ALL adds stake without

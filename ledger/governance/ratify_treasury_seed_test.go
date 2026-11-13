@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -46,7 +47,7 @@ func seedTestRunEpoch(
 	txn := db.MetadataTxn(t.Context(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(t.Context(), &EpochInput{
-		DB:                       db,
+		DB:                       dbadapter.New(db),
 		Txn:                      txn,
 		PrevEpoch:                newEpoch - 1,
 		NewEpoch:                 newEpoch,

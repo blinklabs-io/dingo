@@ -17,6 +17,7 @@ package governance
 import (
 	"context"
 	"fmt"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"io"
 	"log/slog"
 	"math/big"
@@ -92,7 +93,7 @@ func TestDormantDRepBoundaryUsesNewEpochProposalSet(t *testing.T) {
 
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	require.NoError(t, BumpDormantDRepExpiryAtEpochBoundary(context.Background(), db, 5, 500, txn))
+	require.NoError(t, BumpDormantDRepExpiryAtEpochBoundary(context.Background(), dbadapter.New(db), 5, 500, txn))
 	require.NoError(t, txn.Commit())
 	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)
 	require.NoError(t, err)
@@ -176,7 +177,7 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 				100,
 				20,
 				testConwayProtocolParameters(),
-				db,
+				dbadapter.New(db),
 				nil,
 				nil,
 			)
@@ -212,19 +213,19 @@ func TestGovernanceEffectsRejectOverwideCostModelLanguageIDs(t *testing.T) {
 	type applyFunc func(*database.Database, lcommon.Transaction) error
 	paths := map[string]applyFunc{
 		"persistence core": func(db *database.Database, tx lcommon.Transaction) error {
-			return persistGovernanceProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, false, db, nil)
+			return persistGovernanceProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, false, dbadapter.New(db), nil)
 		},
 		"live proposals": func(db *database.Database, tx lcommon.Transaction) error {
-			return ProcessProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, nil, db, nil, &validated)
+			return ProcessProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, nil, dbadapter.New(db), nil, &validated)
 		},
 		"historical proposals": func(db *database.Database, tx lcommon.Transaction) error {
-			return ProcessHistoricalProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, nil, db, nil, &validated)
+			return ProcessHistoricalProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, nil, dbadapter.New(db), nil, &validated)
 		},
 		"live transaction effects": func(db *database.Database, tx lcommon.Transaction) error {
-			return ProcessTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, 20, 9, db, nil, nil, &validated)
+			return ProcessTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, 20, 9, dbadapter.New(db), nil, nil, &validated)
 		},
 		"historical transaction effects": func(db *database.Database, tx lcommon.Transaction) error {
-			return ProcessHistoricalTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil, nil, &validated)
+			return ProcessHistoricalTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, dbadapter.New(db), nil, nil, &validated)
 		},
 	}
 	rewardAccount, err := lcommon.NewAddressFromParts(
@@ -402,7 +403,7 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 			100,
 			20,
 			9,
-			db,
+			dbadapter.New(db),
 			txn,
 		)
 	}))
@@ -483,7 +484,7 @@ func TestPV9DRepRegistrationUsesProposalDormancyReset(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		if err := ResetDormantDRepExpiryBeforeCertificates(context.Background(), tx,
 			point,
-			db,
+			dbadapter.New(db),
 			txn,
 		); err != nil {
 			return err
@@ -497,10 +498,10 @@ func TestPV9DRepRegistrationUsesProposalDormancyReset(t *testing.T) {
 		); err != nil {
 			return err
 		}
-		if err := ProcessDRepActivityCertificates(context.Background(), tx, point, 100, 20, 9, db, txn); err != nil {
+		if err := ProcessDRepActivityCertificates(context.Background(), tx, point, 100, 20, 9, dbadapter.New(db), txn); err != nil {
 			return err
 		}
-		return ProcessProposals(context.Background(), tx, point, 0, 100, 20, nil, db, txn, nil)
+		return ProcessProposals(context.Background(), tx, point, 0, 100, 20, nil, dbadapter.New(db), txn, nil)
 	}))
 
 	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)
@@ -770,7 +771,7 @@ func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
 				point,
 				100,
 				20,
-				db,
+				dbadapter.New(db),
 				txn,
 			)
 		}),
@@ -975,7 +976,7 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 				votePoint,
 				voteEpoch,
 				20,
-				db,
+				dbadapter.New(db),
 				txn,
 			)
 		}),
@@ -1177,7 +1178,7 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 			votePoint,
 			voteEpoch,
 			20,
-			db,
+			dbadapter.New(db),
 			txn,
 		)
 	}))
@@ -1220,7 +1221,7 @@ func TestProposalRepairRejectsUnknownGovernanceEra(t *testing.T) {
 	_, err := cache.govActionValidityPeriod(
 		models.Epoch{EpochId: 100, EraId: 999},
 		testHash32("future-era-proposal"),
-		db,
+		dbadapter.New(db),
 		nil,
 	)
 	require.ErrorContains(t, err, "unexpected governance era 999")
@@ -1353,10 +1354,10 @@ func TestProcessHistoricalVotesSettlesRebuiltProposal(t *testing.T) {
 				if tc.historical {
 					return ProcessHistoricalVotes(
 						context.Background(),
-						voteTx, votePoint, voteEpoch, db, txn,
+						voteTx, votePoint, voteEpoch, dbadapter.New(db), txn,
 					)
 				}
-				return ProcessVotes(context.Background(), voteTx, votePoint, voteEpoch, 20, db, txn)
+				return ProcessVotes(context.Background(), voteTx, votePoint, voteEpoch, 20, dbadapter.New(db), txn)
 			}))
 
 			active, err := db.GetActiveGovernanceProposals(context.Background(), voteEpoch, nil)
@@ -1453,7 +1454,7 @@ func TestProcessVotesRecordsEveryCast(t *testing.T) {
 				ocommon.Point{Slot: slot, Hash: testHash32("cast-block")},
 				100,
 				20,
-				db,
+				dbadapter.New(db),
 				txn,
 			)
 		}))

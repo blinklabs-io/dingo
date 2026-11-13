@@ -20,6 +20,7 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 )
 
 // database.DelegatorInactivityActivatedSyncKey is the durable sync_state
@@ -60,13 +61,13 @@ import (
 // without ever having stamped anything. Passing the rollover's txn rules out
 // both partial states.
 func (ls *LedgerState) activateDelegatorInactivityIfNeeded(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	currentEpoch uint64,
 ) error {
 	if !ls.config.DelegatorInactivityEnabled {
 		return nil
 	}
-	done, err := ls.db.GetSyncState(
+	done, err := ls.ledgerDB().GetSyncState(
 		database.DelegatorInactivityActivatedSyncKey,
 		txn,
 	)
@@ -77,7 +78,7 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(ctx context.Context,
 		return nil
 	}
 	expiration := currentEpoch + ls.config.DelegatorInactivity
-	stamped, err := ls.db.StampAllActiveAccountExpirations(
+	stamped, err := ls.ledgerDB().StampAllActiveAccountExpirations(
 		ctx,
 		expiration,
 		txn,
@@ -87,7 +88,7 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(ctx context.Context,
 	}
 	// Record the activation epoch A (not a bare flag) so the rollback recompute
 	// can clamp orphaned accounts back up to the activation floor A + W.
-	if err := ls.db.SetSyncState(
+	if err := ls.ledgerDB().SetSyncState(
 		database.DelegatorInactivityActivatedSyncKey,
 		strconv.FormatUint(currentEpoch, 10),
 		txn,
@@ -116,9 +117,9 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(ctx context.Context,
 // write in activateDelegatorInactivityIfNeeded and is consumed by
 // recomputeAccountExpirationsAfterRollback.
 func (ls *LedgerState) delegatorInactivityActivationEpoch(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (epoch uint64, activated bool, err error) {
-	marker, err := ls.db.GetSyncState(
+	marker, err := ls.ledgerDB().GetSyncState(
 		database.DelegatorInactivityActivatedSyncKey,
 		txn,
 	)

@@ -19,7 +19,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 )
 
@@ -55,11 +55,11 @@ import (
 // slot-keyed and reverted by the normal rollback path, after which re-applying
 // the boundary re-derives the same refunds.
 func (ls *LedgerState) applyPoolRetirements(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
-	refunds, err := ls.db.GetPoolsRetiringAtEpoch(
+	refunds, err := ls.ledgerDB().GetPoolsRetiringAtEpoch(
 		ctx,
 		newEpoch, boundarySlot, txn,
 	)
@@ -77,7 +77,7 @@ func (ls *LedgerState) applyPoolRetirements(ctx context.Context,
 		// credential hash, the same form AddAccountReward looks up.
 		credited, err := governance.CreditRegisteredRewardAccountAfterSnapshot(
 			ctx,
-			ls.db,
+			ls.ledgerDB(),
 			txn,
 			refund.RewardAccountCredentialTag,
 			refund.RewardAccount,
@@ -97,7 +97,7 @@ func (ls *LedgerState) applyPoolRetirements(ctx context.Context,
 		}
 		if !credited {
 			if err := governance.AddUnclaimedToTreasury(
-				ls.db,
+				ls.ledgerDB(),
 				txn,
 				deposit,
 				boundarySlot,
@@ -116,10 +116,10 @@ func (ls *LedgerState) applyPoolRetirements(ctx context.Context,
 		// rows rejoin the pool distribution, the node's total active stake
 		// exceeds the network's, and every other pool's VRF leader threshold
 		// comes out too small.
-		if err := ls.db.Metadata().ClearDelegationsToRetiredPool(
+		if err := ls.ledgerDB().ClearDelegationsToRetiredPool(
 			refund.PoolKeyHash,
 			boundarySlot,
-			txn.Metadata(),
+			txn,
 		); err != nil {
 			return fmt.Errorf(
 				"clear delegations to retired pool %x: %w",

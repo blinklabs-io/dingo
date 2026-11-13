@@ -27,6 +27,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -186,16 +188,16 @@ func newBoundaryReplayHarnessWithDB(
 		h.addUtxo(byte(0x10+i), key, 20_000_000, 0)
 	}
 
-	mgr := snapshot.NewManager(ls.db, nil, nil)
+	mgr := snapshot.NewManager(dbadapter.New(ls.db), nil, nil)
 	ls.SetEpochBoundarySnapshotStakeHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return mgr.ComputeEpochBoundarySnapshot(
 				context.Background(), txn, evt,
 			)
 		},
 	)
 	ls.SetEpochBoundarySnapshotHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			h.snapCalls++
 			return mgr.CaptureEpochBoundarySnapshot(
 				context.Background(), txn, evt,
@@ -204,7 +206,7 @@ func newBoundaryReplayHarnessWithDB(
 	)
 	ls.SetCurrentBoundarySPOStakeHook(
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			evt event.EpochTransitionEvent,
 			incomingEraID uint,
 		) ([]*models.PoolStakeSnapshot, error) {
@@ -571,8 +573,7 @@ func TestRollbackDiscardsPendingRewardStakeInputsOfRewoundBoundary(
 	}
 	h.applyBoundary()
 
-	meta := h.ls.db.Metadata()
-	pending, err := loadRewardStakeInputsPending(meta, nil)
+	pending, err := loadRewardStakeInputsPending(dbadapter.New(h.ls.db), nil)
 	require.NoError(t, err)
 	require.Len(t, pending.Entries, 1,
 		"the boundary must leave its snapshot's basis pending")
@@ -580,7 +581,7 @@ func TestRollbackDiscardsPendingRewardStakeInputsOfRewoundBoundary(
 
 	h.rollbackBeforeBoundary()
 
-	pending, err = loadRewardStakeInputsPending(meta, nil)
+	pending, err = loadRewardStakeInputsPending(dbadapter.New(h.ls.db), nil)
 	require.NoError(t, err)
 	require.Empty(t, pending.Entries,
 		"the rollback deleted the snapshot the entry describes")

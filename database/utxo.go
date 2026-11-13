@@ -2255,3 +2255,105 @@ func (d *Database) MarkUtxosDeletedAtSlot(
 		)
 	})
 }
+
+// UtxoRollbackChanges reports what a rollback to slot does to the live UTxO
+// set, read before the rollback runs: removed are live outputs created after
+// slot, and restored are outputs created at or before slot but spent after
+// it, with their CBOR. Outputs both created and spent after slot are in
+// neither, because they are not live on either side of the rollback.
+func (d *Database) UtxoRollbackChanges(
+	ctx context.Context,
+	slot uint64,
+	txn *Txn,
+) ([]models.UtxoId, []models.Utxo, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	added, err := d.utxoStore().GetUtxosAddedAfterSlot(slot, txn.Metadata())
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"read UTxOs added after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	removed := make([]models.UtxoId, 0, len(added))
+	for _, u := range added {
+		if u.DeletedSlot != 0 {
+			continue
+		}
+		removed = append(removed, models.UtxoId{Hash: u.TxId, Idx: u.OutputIdx})
+	}
+	restored, err := d.utxoStore().GetUtxosRestoredByRollback(
+		slot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"read UTxOs restored by rollback to slot %d: %w", slot, err,
+		)
+	}
+	for i := range restored {
+		if err := loadCbor(&restored[i], txn); err != nil {
+			return nil, nil, fmt.Errorf(
+				"load CBOR of restored UTxO %x#%d: %w",
+				restored[i].TxId, restored[i].OutputIdx, err,
+			)
+		}
+	}
+	return removed, restored, nil
+}
+
+// UtxoSetOnlySyncKey marks, in sync_state, a database whose metadata store
+// holds no UTxO set because the ledger's live UTxO set is its only copy.
+const UtxoSetOnlySyncKey = "ledger.utxo_set_only"
+
+// liveUtxoSourceSetter is the metadata store hook SetLiveUtxoSource drives.
+type liveUtxoSourceSetter interface {
+	SetLiveUtxoSource(types.LiveUtxoSource)
+}
+
+// SetLiveUtxoSource makes the database keep no utxo rows, output offsets or
+// consumed-input recovery, because the ledger holds the live UTxO set and
+// resolves inputs through src. Core storage mode only; call it before the
+// first write.
+func (d *Database) SetLiveUtxoSource(src types.LiveUtxoSource) error {
+	if d.config.StorageMode == types.StorageModeAPI {
+		return errors.New("a live UTxO source needs core storage mode")
+	}
+	setter, ok := d.metadata.(liveUtxoSourceSetter)
+	if !ok {
+		return errors.New("the metadata store cannot use a live UTxO source")
+	}
+	setter.SetLiveUtxoSource(src)
+	d.liveUtxo = src != nil
+	return nil
+}
+
+// LiveUtxo reports whether the ledger holds the live UTxO set outside the
+// metadata store.
+func (d *Database) LiveUtxo() bool {
+	return d.liveUtxo
+}
+
+// RefreshRewardLiveStakeRefs recomputes the live reward aggregate of each
+// credential in refs, recording slot as its update.
+func (d *Database) RefreshRewardLiveStakeRefs(
+	refs []models.StakeCredentialRef,
+	slot uint64,
+	txn *Txn,
+) error {
+	refresher, ok := d.metadata.(interface {
+		RefreshRewardLiveStakeRefs(
+			[]models.StakeCredentialRef, uint64, types.Txn,
+		) error
+	})
+	if !ok {
+		return errors.New("the metadata store cannot refresh live stake")
+	}
+	if txn == nil {
+		return refresher.RefreshRewardLiveStakeRefs(refs, slot, nil)
+	}
+	return refresher.RefreshRewardLiveStakeRefs(refs, slot, txn.Metadata())
+}

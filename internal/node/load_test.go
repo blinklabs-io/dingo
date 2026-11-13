@@ -34,6 +34,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -935,7 +937,7 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 
 	stopAfterHook := errors.New("stop after snapshot hook capture")
 	var captured ledger.LedgerStateConfig
-	var capturedHook func(*database.Txn, event.EpochTransitionEvent) error
+	var capturedHook func(ledgerdb.Txn, event.EpochTransitionEvent) error
 	oldNewLedgerStateForLoad := newLedgerStateForLoad
 	oldInstallHook := installEpochBoundarySnapshotHookForLoad
 	newLedgerStateForLoad = func(
@@ -952,7 +954,7 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 	}
 	installEpochBoundarySnapshotHookForLoad = func(
 		_ *ledger.LedgerState,
-		fn func(*database.Txn, event.EpochTransitionEvent) error,
+		fn func(ledgerdb.Txn, event.EpochTransitionEvent) error,
 	) error {
 		capturedHook = fn
 		return stopAfterHook
@@ -1067,7 +1069,7 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 			}
 			installEpochBoundarySnapshotHookForLoad = func(
 				_ *ledger.LedgerState,
-				_ func(*database.Txn, event.EpochTransitionEvent) error,
+				_ func(ledgerdb.Txn, event.EpochTransitionEvent) error,
 			) error {
 				hookCalled = true
 				rollbackErr = loadConfig.ChainManager.PrimaryChain().
@@ -1391,7 +1393,7 @@ func TestCaptureLoadGenesisSnapshot_BlockProducerFatal(t *testing.T) {
 
 	db := newTestDB(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	mgr := snapshot.NewManager(db, nil, logger)
+	mgr := snapshot.NewManager(dbadapter.New(db), nil, logger)
 
 	// Close the database so the capture call fails deterministically.
 	require.NoError(t, closeTestDB(db))
@@ -1414,7 +1416,7 @@ func TestCaptureLoadGenesisSnapshot_RelayWarnsAndContinues(t *testing.T) {
 
 	db := newTestDB(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	mgr := snapshot.NewManager(db, nil, logger)
+	mgr := snapshot.NewManager(dbadapter.New(db), nil, logger)
 
 	require.NoError(t, closeTestDB(db))
 

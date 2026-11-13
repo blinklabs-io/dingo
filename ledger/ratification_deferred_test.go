@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -659,7 +661,7 @@ INSERT INTO auth_committee_hot (
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	s.snapshotMgr = snapshot.NewManager(db, newTestEventBus(t, nil), nil)
+	s.snapshotMgr = snapshot.NewManager(dbadapter.New(db), newTestEventBus(t, nil), nil)
 	s.wireSnapshotHooks()
 	seedEmptyRewardBasisForRollover(t, db, epoch, pparams)
 	return s
@@ -671,14 +673,14 @@ func (s *govDiffScenario) wireSnapshotHooks() {
 	snapshotMgr := s.snapshotMgr
 	// Production reads the SNAP-point stake inside the boundary.
 	s.ls.SetEpochBoundarySnapshotStakeHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return snapshotMgr.ComputeEpochBoundarySnapshot(
 				context.Background(), txn, evt,
 			)
 		},
 	)
 	s.ls.SetEpochBoundarySnapshotHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return snapshotMgr.CaptureEpochBoundarySnapshot(
 				context.Background(), txn, evt,
 			)
@@ -686,7 +688,7 @@ func (s *govDiffScenario) wireSnapshotHooks() {
 	)
 	s.ls.SetCurrentBoundarySPOStakeHook(
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			evt event.EpochTransitionEvent,
 			incomingEraID uint,
 		) ([]*models.PoolStakeSnapshot, error) {
@@ -938,7 +940,7 @@ func (s *govDiffScenario) dump(
 	require.NoError(t, err)
 	deposits, _, err := governance.ActiveProposalDepositDRepPower(
 		context.Background(),
-		s.db,
+		dbadapter.New(s.db),
 		nil,
 		epoch,
 		0,
@@ -1111,7 +1113,7 @@ type writeOnlySnapshot struct{}
 
 func (writeOnlySnapshot) SPOStakeRows() []*models.PoolStakeSnapshot { return nil }
 
-func (writeOnlySnapshot) Write(*database.Txn) error { return nil }
+func (writeOnlySnapshot) Write(ledgerdb.Txn) error { return nil }
 
 // TestConsumePendingRatificationValidationOnlyKeepsStagedStakeInputs pins that
 // a validation tick consuming a pending decision does not take the staged
@@ -1144,7 +1146,7 @@ func TestConsumePendingRatificationValidationOnlyKeepsStagedStakeInputs(
 			ls.ratificationMu.Unlock()
 			var taken int
 			ls.SetEpochBoundaryDeferredStakeInputsHook(
-				func(*database.Txn) (uint64, uint64, []*models.RewardStakeInput, bool) {
+				func(ledgerdb.Txn) (uint64, uint64, []*models.RewardStakeInput, bool) {
 					taken++
 					return 0, 0, nil, false
 				},

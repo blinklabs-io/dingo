@@ -20,7 +20,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -36,7 +37,7 @@ func TestPendingRewardInputsRetainReconstructionHistory(t *testing.T) {
 	require.NoError(
 		t,
 		markRewardStakeInputsPending(
-			meta,
+			dbadapter.New(fixture.db),
 			nil,
 			retentionRewardSnapshotEpoch,
 			100,
@@ -137,11 +138,10 @@ func TestPendingRewardInputsCorruptStatePreventsPruneAnnouncement(
 func TestPendingRewardInputsIgnoreRolledBackSnapshot(t *testing.T) {
 	t.Parallel()
 	fixture := seedRetentionReconstructionFixture(t)
-	meta := fixture.db.Metadata()
-	require.NoError(t, markRewardStakeInputsPending(meta, nil, 99, 999))
-	txn := meta.ReadTransaction(t.Context())
+	require.NoError(t, markRewardStakeInputsPending(dbadapter.New(fixture.db), nil, 99, 999))
+	txn := dbadapter.New(fixture.db).BeginLedgerOnly(t.Context(), false)
 	defer func() { _ = txn.Rollback() }()
-	floor, protected, err := pendingRewardStakeInputHistoryFloor(meta, txn)
+	floor, protected, err := pendingRewardStakeInputHistoryFloor(dbadapter.New(fixture.db), txn)
 	require.NoError(t, err)
 	require.False(t, protected)
 	require.Zero(t, floor)
@@ -164,7 +164,7 @@ func TestPendingRewardInputsDisableTrustedBatchPruning(t *testing.T) {
 			nil,
 		),
 	)
-	require.NoError(t, markRewardStakeInputsPending(meta, nil, 1, 1))
+	require.NoError(t, markRewardStakeInputsPending(dbadapter.New(h.db), nil, 1, 1))
 	overlays := h.countOverlays()
 	blocks, names := externalIngestBlocks(t, 0)
 	tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
@@ -176,7 +176,7 @@ func TestPendingRewardInputsDisableTrustedBatchPruning(t *testing.T) {
 	floor, err := h.db.ConsumedUtxoPruneFloor(nil)
 	require.NoError(t, err)
 	require.Zero(t, floor)
-	require.NoError(t, clearRewardStakeInputsPending(meta, nil, 1))
+	require.NoError(t, clearRewardStakeInputsPending(dbadapter.New(h.db), nil, 1))
 	pruned, _, err := h.ls.pruneConsumedUtxosUpTo(
 		t.Context(),
 		tip.Slot,
@@ -189,15 +189,15 @@ func TestPendingRewardInputsDisableTrustedBatchPruning(t *testing.T) {
 }
 
 type rewardRetentionHandoffStore struct {
-	metadata.MetadataStore
+	ledgerdb.LedgerDB
 	handoff func()
 }
 
 func (s *rewardRetentionHandoffStore) GetSyncState(
 	key string,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (string, error) {
-	raw, err := s.MetadataStore.GetSyncState(key, txn)
+	raw, err := s.LedgerDB.GetSyncState(key, txn)
 	if key == rewardStakeInputsPendingKey && s.handoff != nil {
 		handoff := s.handoff
 		s.handoff = nil
@@ -259,7 +259,7 @@ func TestPendingRewardRetentionSnapshotHandoff(t *testing.T) {
 		require.NoError(t, meta.SaveRewardPoolInputs(pools, tx.Metadata()))
 		require.NoError(
 			t,
-			markRewardStakeInputsPending(meta, tx.Metadata(), 1, 100),
+			markRewardStakeInputsPending(dbadapter.New(f.db), tx, 1, 100),
 		)
 		require.NoError(
 			t,
@@ -267,8 +267,11 @@ func TestPendingRewardRetentionSnapshotHandoff(t *testing.T) {
 		)
 		require.NoError(t, tx.Commit())
 	}
-	readTxn := meta.ReadTransaction(ctx)
-	spy := &rewardRetentionHandoffStore{MetadataStore: meta, handoff: handoff}
+	readTxn := dbadapter.New(f.db).BeginLedgerOnly(ctx, false)
+	spy := &rewardRetentionHandoffStore{
+		LedgerDB: dbadapter.New(f.db),
+		handoff:  handoff,
+	}
 	floor, protected, err := pendingRewardStakeInputHistoryFloor(spy, readTxn)
 	require.NoError(t, err)
 	require.True(t, protected)
@@ -321,7 +324,7 @@ func TestPendingRewardRetentionAcceptsNativeEmptyState(t *testing.T) {
 	meta := f.db.Metadata()
 	require.NoError(
 		t,
-		saveRewardStakeInputsPending(meta, nil, &rewardStakeInputsPending{}),
+		saveRewardStakeInputsPending(dbadapter.New(f.db), nil, &rewardStakeInputsPending{}),
 	)
 	raw, err := meta.GetSyncState(rewardStakeInputsPendingKey, nil)
 	require.NoError(t, err)

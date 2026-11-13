@@ -970,6 +970,9 @@ type UtxoStore interface {
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
+	// GetUtxosRestoredByRollback returns the UTxOs a rollback to the given
+	// slot makes live again: created at or before it and spent after it.
+	GetUtxosRestoredByRollback(uint64, types.Txn) ([]models.Utxo, error)
 	GetSpentUtxosMissingAddressAfterSlot(
 		uint64,
 		uint,

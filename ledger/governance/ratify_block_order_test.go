@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -234,7 +235,7 @@ func TestProcessProposalsRecordsTransactionPosition(t *testing.T) {
 		stabilityTestEpoch,
 		6,
 		testConwayProtocolParameters(),
-		db,
+		dbadapter.New(db),
 		nil,
 		nil,
 	))

@@ -199,6 +199,12 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: n.snapshotMgr.Stop,
 		})
 	}
+	if n.utxoShadow != nil {
+		stops = append(stops, namedStop{
+			name: "shadow UTxO set",
+			stop: n.stopUtxoShadow,
+		})
+	}
 	if n.dbLifecycleMgr != nil {
 		stops = append(stops, namedStop{
 			name: "database lifecycle manager",
@@ -827,6 +833,9 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	if err := n.configureSnapshotManager(); err != nil {
 		return err
 	}
+	if err := n.startUtxoShadow(); err != nil {
+		return err
+	}
 
 	// Rebuild the Koios parity observer (if enabled) against the fresh
 	// n.db a live restore/truncate just reinitialized, and resubscribe it to
@@ -841,6 +850,11 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		}
 	}
 
+	// The rebuilt database can be at any tip, so the set is reconciled to it
+	// before the ledger applies a block.
+	if err := n.reconcileUtxoSet(ctx); err != nil {
+		return err
+	}
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to restart ledger: %w", err)
 	}

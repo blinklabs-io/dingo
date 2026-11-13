@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
@@ -121,7 +122,7 @@ func (a *NodeAdapter) AccountStakeHistory(
 	// A snapshot captured before the account existed holds none of its
 	// stake, so only labels from first on can leave its history partial.
 	incomplete, err := a.ledgerState.RewardStakeInputsIncomplete(
-		txn, first, current,
+		dbadapter.Txn(txn), first, current,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("check account stake history: %w", err)

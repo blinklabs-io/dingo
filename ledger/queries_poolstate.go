@@ -17,7 +17,7 @@ package ledger
 import (
 	"context"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -57,7 +57,7 @@ func (ls *LedgerState) queryShelleyPoolState(
 	ctx context.Context,
 	q *olocalstatequery.ShelleyPoolStateQuery,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	filter, all := poolStateFilter(q)
 	pstate := map[ledger.PoolId]stakePoolParams{}
@@ -85,11 +85,10 @@ func (ls *LedgerState) queryShelleyPoolState(
 		return nil, errEpochNotResolved(at)
 	}
 	slot := tip.Point.Slot
-	meta := txn.Metadata()
 
 	var keyHashes []lcommon.PoolKeyHash
 	if all {
-		active, err := ls.db.Metadata().GetActivePoolKeyHashesAtSlot(slot, meta)
+		active, err := ls.ledgerDB().GetActivePoolKeyHashesAtSlot(slot, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -125,12 +124,12 @@ func (ls *LedgerState) queryShelleyPoolState(
 	}
 	networkID := uint8(ls.NewView(txn).NetworkId()) // #nosec G115 -- 0 or 1
 
-	effective, err := ls.db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+	effective, err := ls.ledgerDB().GetPoolRegistrationsEffectiveForEpoch(
 		keyHashes,
 		epoch.StartSlot,
 		epoch.EpochId,
 		slot,
-		meta,
+		txn,
 	)
 	if err != nil {
 		return nil, err
@@ -144,10 +143,10 @@ func (ls *LedgerState) queryShelleyPoolState(
 			lcommon.NewBlake2b224(effective[i].PoolKeyHash),
 		))
 	}
-	latest, err := ls.db.Metadata().GetPoolRegistrationsAtSlot(
+	latest, err := ls.ledgerDB().GetPoolRegistrationsAtSlot(
 		registered,
 		slot,
-		meta,
+		txn,
 	)
 	if err != nil {
 		return nil, err
@@ -156,18 +155,18 @@ func (ls *LedgerState) queryShelleyPoolState(
 	for i := range latest {
 		latestByPool[string(latest[i].PoolKeyHash)] = &latest[i]
 	}
-	held, err := ls.db.Metadata().GetPoolDepositsHeldAtSlot(
+	held, err := ls.ledgerDB().GetPoolDepositsHeldAtSlot(
 		registered,
 		slot,
-		meta,
+		txn,
 	)
 	if err != nil {
 		return nil, err
 	}
-	retiringRows, err := ls.db.Metadata().GetRetiringPoolsAtSlot(
+	retiringRows, err := ls.ledgerDB().GetRetiringPoolsAtSlot(
 		epoch.EpochId,
 		slot,
-		meta,
+		txn,
 	)
 	if err != nil {
 		return nil, err

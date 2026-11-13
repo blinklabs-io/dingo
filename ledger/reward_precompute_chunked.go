@@ -26,9 +26,8 @@ import (
 	"math/big"
 	"slices"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
 )
@@ -121,8 +120,8 @@ func rewardPrecomputeCursorKey(snapshotEpoch uint64) string {
 }
 
 func loadRewardPrecomputeCursor(
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	snapshotEpoch uint64,
 ) (*rewardPrecomputeCursor, error) {
 	raw, err := meta.GetSyncState(
@@ -154,8 +153,8 @@ func loadRewardPrecomputeCursor(
 }
 
 func saveRewardPrecomputeCursor(
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	cursor *rewardPrecomputeCursor,
 ) error {
 	raw, err := json.Marshal(cursor)
@@ -231,11 +230,16 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRound(
 ) (*stakeRewardPrecomputeRound, bool, error) {
 	var round *stakeRewardPrecomputeRound
 	var ok bool
-	readTxn := ls.db.Transaction(context.Background(), false)
-	err := readTxn.Do(func(txn *database.Txn) error {
+	readTxn := ls.ledgerDB().Begin(context.Background(), false)
+	err := ls.ledgerDB().Run(readTxn, func(txn ledgerdb.Txn) error {
 		var err error
 		round, ok, err = ls.resolveStakeRewardPrecomputeRoundInTxn(
-			txn, newEpoch, capturedSlot, boundarySlot, true,
+			context.Background(),
+			txn,
+			newEpoch,
+			capturedSlot,
+			boundarySlot,
+			true,
 		)
 		return err
 	})
@@ -249,7 +253,8 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRound(
 // against a caller's transaction. deferRetry controls whether a round whose
 // prefilter slot has not been reached queues a retry for it.
 func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
-	txn *database.Txn,
+	ctx context.Context,
+	txn ledgerdb.Txn,
 	newEpoch uint64,
 	capturedSlot uint64,
 	boundarySlot uint64,
@@ -271,10 +276,8 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 		}
 		return nil, false, err
 	}
-	meta := ls.db.Metadata()
-	metaTxn := txn.Metadata()
-
-	pots, err := meta.GetRewardAdaPots(epochs.pots, metaTxn)
+	ldb := ls.ledgerDB()
+	pots, err := ldb.GetRewardAdaPots(epochs.pots, txn)
 	if err != nil {
 		return nil, false, fmt.Errorf(
 			"get reward ADA pots for epoch %d: %w",
@@ -285,10 +288,10 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 	if pots == nil {
 		return nil, false, nil
 	}
-	rewardSnapshot, err := meta.GetRewardSnapshot(
+	rewardSnapshot, err := ldb.GetRewardSnapshot(
 		epochs.snapshot,
 		"mark",
-		metaTxn,
+		txn,
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf(
@@ -300,7 +303,7 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 	if rewardSnapshot == nil {
 		return nil, false, nil
 	}
-	poolInputs, err := meta.GetRewardPoolInputs(epochs.snapshot, metaTxn)
+	poolInputs, err := ldb.GetRewardPoolInputs(epochs.snapshot, txn)
 	if err != nil {
 		return nil, false, fmt.Errorf(
 			"get reward pool inputs for epoch %d: %w",
@@ -326,11 +329,11 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 				probePool = input
 			}
 		}
-		probe, err := meta.GetRewardStakeInputsInPoolKeyHashRange(
+		probe, err := ldb.GetRewardStakeInputsInPoolKeyHashRange(
 			epochs.snapshot,
 			probePool.PoolKeyHash,
 			probePool.PoolKeyHash,
-			metaTxn,
+			txn,
 		)
 		if err != nil {
 			return nil, false, fmt.Errorf(
@@ -341,7 +344,7 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 		}
 		if len(probe) == 0 && probePool.DelegatorCount > 0 {
 			rebuilt, err := ls.rebuildPrunedRewardStakeInputs(
-				meta, metaTxn, epochs.snapshot, rewardSnapshot, poolInputs,
+				ldb, txn, epochs.snapshot, rewardSnapshot, poolInputs,
 			)
 			if err != nil {
 				return nil, false, fmt.Errorf(
@@ -375,8 +378,8 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 		return nil, false, nil
 	}
 	blockCounts, totalBlocks, blockCountsKnown, err := ls.rewardBlockCounts(
-		meta,
-		metaTxn,
+		ldb,
+		txn,
 		epochs.performance,
 		poolInputs,
 		performanceDecentralization,
@@ -387,7 +390,7 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 	if !blockCountsKnown {
 		return nil, false, nil
 	}
-	prefilterSlot, err := ls.rewardPrefilterSlot(meta, metaTxn, epochs.pots)
+	prefilterSlot, err := ls.rewardPrefilterSlot(ldb, txn, epochs.pots)
 	if err != nil {
 		return nil, false, err
 	}
@@ -398,14 +401,14 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 		return nil, false, nil
 	}
 
-	activeAccounts, err := rewardActiveAccounts(
-		meta, metaTxn, poolInputs, nil,
+	activeAccounts, err := rewardActiveAccounts(ctx,
+		ldb, txn, poolInputs, nil,
 	)
 	if err != nil {
 		return nil, false, err
 	}
 	prefilterAccounts, err := rewardPrefilterAccounts(
-		meta, metaTxn, poolInputs, nil,
+		ldb, txn, poolInputs, nil,
 		prefilterSlot, params.RequiresRewardPrefilter(), activeAccounts,
 	)
 	if err != nil {
@@ -563,18 +566,18 @@ func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
 	defer ls.rewardPrecomputeWriteMu.Unlock()
 
 	done := false
-	writeTxn := ls.db.Transaction(context.Background(), true)
-	err := writeTxn.Do(func(txn *database.Txn) error {
+	writeTxn := ls.ledgerDB().Begin(context.Background(), true)
+	err := ls.ledgerDB().Run(writeTxn, func(txn ledgerdb.Txn) error {
 		if ls.rewardInputRollbackActive.Load() != 0 ||
 			ls.rewardInputGeneration.Load() != round.generation ||
 			ls.rewardPrecomputeFence.Load() != round.fence {
 			done = true
 			return nil
 		}
-		current, err := ls.db.Metadata().GetRewardSnapshot(
+		current, err := ls.ledgerDB().GetRewardSnapshot(
 			round.epochs.snapshot,
 			"mark",
-			txn.Metadata(),
+			txn,
 		)
 		if err != nil {
 			return fmt.Errorf(
@@ -598,14 +601,13 @@ func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
 // persisted cursor when its progress is still valid for round. done is true
 // once the round is complete.
 func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	round *stakeRewardPrecomputeRound,
 	maxChunks int,
 ) (bool, error) {
-	meta := ls.db.Metadata()
-	metaTxn := txn.Metadata()
+	ldb := ls.ledgerDB()
 	cursor, startIndex, err := ls.resumableRewardPrecomputeCursor(
-		meta, metaTxn, round,
+		ldb, txn, round,
 	)
 	if err != nil {
 		return false, err
@@ -614,8 +616,8 @@ func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(ctx context.Context,
 		return true, nil
 	}
 	if cursor == nil {
-		if err := meta.DeleteRewardOutputsForEpoch(
-			round.epochs.snapshot, metaTxn,
+		if err := ldb.DeleteRewardOutputsForEpoch(
+			round.epochs.snapshot, txn,
 		); err != nil {
 			return false, fmt.Errorf(
 				"clear reward outputs for epoch %d: %w",
@@ -626,8 +628,8 @@ func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(ctx context.Context,
 		if len(round.reconstructedStakeInputs) > 0 {
 			// Persisted once, up front, so every later chunk -- including
 			// one from a resumed run -- reads reward_stake_input normally.
-			if err := meta.SaveRewardStakeInputs(
-				round.reconstructedStakeInputs, metaTxn,
+			if err := ldb.SaveRewardStakeInputs(
+				round.reconstructedStakeInputs, txn,
 			); err != nil {
 				return false, fmt.Errorf(
 					"save reconstructed reward stake inputs for epoch %d: %w",
@@ -648,7 +650,7 @@ func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(ctx context.Context,
 	// already returned the whole available pot to reserves.
 	if round.totals.Degenerate {
 		if err := ls.finishStakeRewardPrecomputeLocked(
-			meta, metaTxn, round, cursor,
+			ldb, txn, round, cursor,
 		); err != nil {
 			return false, err
 		}
@@ -657,7 +659,7 @@ func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(ctx context.Context,
 	for chunks := 0; maxChunks <= 0 || chunks < maxChunks; chunks++ {
 		if startIndex >= len(round.poolInputs) {
 			if err := ls.finishStakeRewardPrecomputeLocked(
-				meta, metaTxn, round, cursor,
+				ldb, txn, round, cursor,
 			); err != nil {
 				return false, err
 			}
@@ -673,13 +675,13 @@ func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(ctx context.Context,
 		cursor.CompletedPools = next
 		if startIndex >= len(round.poolInputs) {
 			if err := ls.finishStakeRewardPrecomputeLocked(
-				meta, metaTxn, round, cursor,
+				ldb, txn, round, cursor,
 			); err != nil {
 				return false, err
 			}
 			return true, nil
 		}
-		if err := saveRewardPrecomputeCursor(meta, metaTxn, cursor); err != nil {
+		if err := saveRewardPrecomputeCursor(ldb, txn, cursor); err != nil {
 			return false, err
 		}
 		if ls.rewardPrecomputeChunkHook != nil {
@@ -694,8 +696,8 @@ func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(ctx context.Context,
 // A finished cursor is returned only when its output fingerprint still
 // matches the stored pool outputs.
 func (ls *LedgerState) resumableRewardPrecomputeCursor(
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	round *stakeRewardPrecomputeRound,
 ) (*rewardPrecomputeCursor, int, error) {
 	cursor, err := loadRewardPrecomputeCursor(
@@ -743,13 +745,12 @@ func (ls *LedgerState) resumableRewardPrecomputeCursor(
 // pools starting at startIndex, advancing cursor, and returns the next pool
 // index.
 func (ls *LedgerState) stakeRewardPrecomputeChunk(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	round *stakeRewardPrecomputeRound,
 	cursor *rewardPrecomputeCursor,
 	startIndex int,
 ) (int, error) {
-	meta := ls.db.Metadata()
-	metaTxn := txn.Metadata()
+	ldb := ls.ledgerDB()
 	var err error
 	endIndex := rewardPrecomputeChunkEnd(
 		round.poolInputs,
@@ -759,11 +760,11 @@ func (ls *LedgerState) stakeRewardPrecomputeChunk(ctx context.Context,
 	)
 	chunkPools := round.poolInputs[startIndex:endIndex]
 
-	stakeInputs, err := meta.GetRewardStakeInputsInPoolKeyHashRange(
+	stakeInputs, err := ldb.GetRewardStakeInputsInPoolKeyHashRange(
 		round.epochs.snapshot,
 		chunkPools[0].PoolKeyHash,
 		chunkPools[len(chunkPools)-1].PoolKeyHash,
-		metaTxn,
+		txn,
 	)
 	if err != nil {
 		return 0, fmt.Errorf(
@@ -782,14 +783,14 @@ func (ls *LedgerState) stakeRewardPrecomputeChunk(ctx context.Context,
 		key := string(input.PoolKeyHash)
 		stakeByPool[key] = append(stakeByPool[key], input)
 	}
-	activeAccounts, err := rewardActiveAccounts(
-		meta, metaTxn, chunkPools, stakeInputs,
+	activeAccounts, err := rewardActiveAccounts(ctx,
+		ldb, txn, chunkPools, stakeInputs,
 	)
 	if err != nil {
 		return 0, err
 	}
 	prefilterAccounts, err := rewardPrefilterAccounts(
-		meta, metaTxn, chunkPools, stakeInputs,
+		ldb, txn, chunkPools, stakeInputs,
 		round.prefilterSlot, round.params.RequiresRewardPrefilter(),
 		activeAccounts,
 	)
@@ -906,11 +907,11 @@ func (ls *LedgerState) stakeRewardPrecomputeChunk(ctx context.Context,
 	if ls.rewardPrecomputeBeforeSaveHook != nil {
 		ls.rewardPrecomputeBeforeSaveHook()
 	}
-	if err := meta.SaveRewardPoolOutputs(poolOutputs, metaTxn); err != nil {
+	if err := ldb.SaveRewardPoolOutputs(poolOutputs, txn); err != nil {
 		return 0, fmt.Errorf("save reward pool output chunk: %w", err)
 	}
-	if err := meta.SaveRewardAccountOutputs(
-		accountOutputs, metaTxn,
+	if err := ldb.SaveRewardAccountOutputs(
+		accountOutputs, txn,
 	); err != nil {
 		return 0, fmt.Errorf("save reward account output chunk: %w", err)
 	}
@@ -924,8 +925,8 @@ func (ls *LedgerState) stakeRewardPrecomputeChunk(ctx context.Context,
 // persists reward_ada_pots.Rewards and marks the cursor done with the
 // fingerprint of the finished pool outputs.
 func (ls *LedgerState) finishStakeRewardPrecomputeLocked(
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	round *stakeRewardPrecomputeRound,
 	cursor *rewardPrecomputeCursor,
 ) error {

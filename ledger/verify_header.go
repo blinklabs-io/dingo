@@ -28,7 +28,8 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/consensus/praos"
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/tracing"
@@ -1769,7 +1770,7 @@ func (ls *LedgerState) activeGenesisDelegationForSlot(
 func (ls *LedgerState) activeGenesisDelegationForSlotWithTxn(
 	initial genesisDelegation,
 	slot uint64,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (genesisDelegation, error) {
 	if ls.db == nil {
 		return genesisDelegation{}, errors.New(
@@ -1780,7 +1781,7 @@ func (ls *LedgerState) activeGenesisDelegationForSlotWithTxn(
 	if err != nil {
 		return genesisDelegation{}, err
 	}
-	row, err := ls.db.Metadata().GetGenesisDelegationForSlot(
+	row, err := ls.ledgerDB().GetGenesisDelegationForSlot(
 		initial.genesisHash,
 		slot,
 		window,
@@ -1823,7 +1824,7 @@ func (ls *LedgerState) GenesisDelegateKeyHashes(
 
 func (ls *LedgerState) genesisDelegateKeyHashes(
 	slot uint64,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) ([]lcommon.Blake2b224, error) {
 	if ls.config.CardanoNodeConfig == nil {
 		return nil, errors.New("unable to get cardano node config")
@@ -1863,7 +1864,7 @@ func (ls *LedgerState) genesisDelegateKeyHashes(
 // DELEG rule validates genesis key delegation certificates against.
 func (ls *LedgerState) genesisDelegState(
 	slot uint64,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (eras.GenesisDelegState, error) {
 	var ret eras.GenesisDelegState
 	if ls.config.CardanoNodeConfig == nil {
@@ -1905,7 +1906,7 @@ func (ls *LedgerState) genesisDelegState(
 	if slot >= ret.StabilityWindow {
 		fromSlot = slot - ret.StabilityWindow + 1
 	}
-	pending, err := ls.db.Metadata().GetGenesisDelegationsInSlotRange(
+	pending, err := ls.ledgerDB().GetGenesisDelegationsInSlotRange(
 		fromSlot,
 		slot,
 		txn,
@@ -1949,7 +1950,7 @@ func (ls *LedgerState) GenesisDelegateForGenesisKey(
 func (ls *LedgerState) genesisDelegateForGenesisKey(
 	genesisKeyHash lcommon.Blake2b224,
 	slot uint64,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) (lcommon.Blake2b224, bool, error) {
 	if ls.config.CardanoNodeConfig == nil {
 		return lcommon.Blake2b224{}, false, errors.New(
@@ -2140,7 +2141,8 @@ func (ls *LedgerState) genesisOverlayProtocolParamsForFutureEpoch(
 	if ls.db != nil {
 		era, ok := ls.eraById(paramsEraID)
 		if ok && era != nil && era.DecodePParamsFunc != nil {
-			rows, err := ls.db.Metadata().GetPParams(paramsEpoch, paramsEraID, nil)
+			rows, err := ls.ledgerDB().
+				GetPParamsRows(paramsEpoch, paramsEraID, nil)
 			if err == nil && len(rows) > 0 && rows[0].Epoch == paramsEpoch {
 				if pparams, pparamsErr := ls.loadPersistedProtocolParameters(
 					paramsEpoch,
@@ -2537,14 +2539,14 @@ func (ls *LedgerState) poolSnapshotPruned(
 	snapshotEpoch uint64,
 	snapshotType string,
 ) bool {
-	if ls.db.StorageMode() == types.StorageModeAPI {
+	if ls.ledgerDB().StorageMode() == types.StorageModeAPI {
 		return false
 	}
 	current := ls.loadConsensusSnapshot().currentEpoch.EpochId
 	if current < 3 || snapshotEpoch >= current-3 {
 		return false
 	}
-	rows, err := ls.db.Metadata().GetPoolStakeSnapshotsByEpoch(
+	rows, err := ls.ledgerDB().GetPoolStakeSnapshotsByEpoch(
 		snapshotEpoch,
 		snapshotType,
 		nil,
@@ -2588,7 +2590,7 @@ func (ls *LedgerState) resolveElectingSnapshotAtSlot(
 	slot, epochId uint64,
 	poolKeyHash lcommon.PoolKeyHash,
 	epochCache []models.Epoch,
-	txn types.Txn,
+	txn ledgerdb.Txn,
 ) electingSnapshot {
 	snap := electingSnapshot{
 		epoch: leaderStakeSnapshotEpochInCache(epochId, epochCache),
@@ -2609,7 +2611,7 @@ func (ls *LedgerState) resolveElectingSnapshotAtSlot(
 		snap.epoch = epochId
 		snap.kind = models.PoolStakeSnapshotTypeActive
 	}
-	row, err := ls.db.Metadata().GetPoolStakeSnapshot(
+	row, err := ls.ledgerDB().GetPoolStakeSnapshot(
 		snap.epoch,
 		snap.kind,
 		poolKeyHash[:],
@@ -2689,7 +2691,7 @@ func (ls *LedgerState) leaderEligibilityStakeFromSnapshot(
 			// and stays a rejection.
 			unavailable := snapshot != nil && snapshot.StakeDenominator == 0
 			if !unavailable {
-				if total, terr := ls.db.Metadata().GetTotalActiveStake(
+				if total, terr := ls.ledgerDB().GetTotalActiveStake(
 					epochId,
 					models.PoolStakeSnapshotTypeActive,
 					nil,
@@ -2759,7 +2761,7 @@ func (ls *LedgerState) leaderEligibilityStakeFromSnapshot(
 		// pruned history) rather than genuine pool ineligibility. Surface that
 		// distinction to operators without changing the reject decision.
 		diag := "pool is absent from the epoch distribution"
-		if total, terr := ls.db.Metadata().GetTotalActiveStake(
+		if total, terr := ls.ledgerDB().GetTotalActiveStake(
 			snapshotEpoch,
 			snapshotType,
 			nil,
@@ -2833,7 +2835,7 @@ func (ls *LedgerState) leaderEligibilityStakeFromSnapshot(
 				poolKeyHash[:],
 			)
 	}
-	totalStake, err := ls.db.Metadata().GetTotalActiveStake(
+	totalStake, err := ls.ledgerDB().GetTotalActiveStake(
 		snapshotEpoch,
 		snapshotType,
 		nil,
@@ -2979,10 +2981,14 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 	epochCache []models.Epoch,
 	snap electingSnapshot,
 ) (lcommon.Blake2b256, bool, error) {
-	txn := ls.db.MetadataTxn(ctx, false)
+	txn := ls.ledgerDB().BeginLedgerOnly(ctx, false)
 	defer txn.Release()
 	return ls.electingVrfKeyHashFromSnapshotWithTxn(
-		ctx, poolKeyHash, epochCache, snap, txn,
+		ctx,
+		poolKeyHash,
+		epochCache,
+		snap,
+		dbadapter.Txn(dbadapter.Unwrap(txn)),
 	)
 }
 
@@ -2991,7 +2997,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 	poolKeyHash lcommon.PoolKeyHash,
 	epochCache []models.Epoch,
 	snap electingSnapshot,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (lcommon.Blake2b256, bool, error) {
 	if snap.row != nil && len(snap.row.VrfKeyHash) > 0 {
 		hash, err := lcommon.NewBlake2b256Checked(snap.row.VrfKeyHash)
@@ -3029,10 +3035,10 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 				return hash, true, nil
 			}
 		}
-		vrfKeyHash, found, err = ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
+		vrfKeyHash, found, err = ls.ledgerDB().GetPoolVrfKeyHashAtSlot(
 			poolKeyHash[:],
 			cutoffSlot,
-			txn.Metadata(),
+			txn,
 		)
 		if err != nil {
 			return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
@@ -3065,12 +3071,11 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 		// holds for it. Earliest rather than latest: if the pool also
 		// re-registered in that same epoch, the re-registration was deferred
 		// and is not the key the snapshot carries.
-		vrfKeyHash, found, err = ls.db.Metadata().
-			GetPoolEarliestVrfKeyHashAtSlot(
-				poolKeyHash[:],
-				capturedSlot,
-				txn.Metadata(),
-			)
+		vrfKeyHash, found, err = ls.ledgerDB().GetPoolEarliestVrfKeyHashAtSlot(
+			poolKeyHash[:],
+			capturedSlot,
+			txn,
+		)
 		if err != nil {
 			return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 		}
@@ -3097,7 +3102,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 			poolKeyHash[:],
 		)
 	}
-	pool, err := ls.db.GetPoolVrfState(ctx, poolKeyHash, txn)
+	pool, err := ls.ledgerDB().GetPoolVrfState(ctx, poolKeyHash, txn)
 	if err != nil {
 		return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 	}
@@ -4001,7 +4006,7 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		// following slot instead of replaying from epoch start.
 		// If no anchor is found, fall through to defaults (compute from
 		// epoch start) — handles genesis sync gracefully.
-		nonceRows, nonceErr := ls.db.GetBlockNoncesInSlotRange(
+		nonceRows, nonceErr := ls.ledgerDB().GetBlockNoncesInSlotRange(
 			prevEpoch.StartSlot,
 			prevEpochEndSlot,
 			nil,

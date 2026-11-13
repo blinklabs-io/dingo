@@ -347,6 +347,28 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid storageMode",
 		},
 		{
+			name: "invalid ledger UTxO read mode",
+			modify: func(c *Config) {
+				c.LedgerUtxoBadger = true
+				c.LedgerUtxoReads = "badger"
+			},
+			wantErr: "invalid ledgerUtxoReads",
+		},
+		{
+			name: "shadow with the Badger set as the only copy",
+			modify: func(c *Config) {
+				c.LedgerUtxoBadger = true
+				c.LedgerUtxoBadgerOnly = true
+				c.LedgerUtxoShadow = true
+			},
+			wantErr: "ledgerUtxoShadow cannot run",
+		},
+		{
+			name:    "ledger UTxO reads without the Badger set",
+			modify:  func(c *Config) { c.LedgerUtxoReads = "set" },
+			wantErr: "needs ledgerUtxoBadger",
+		},
+		{
 			name: "negative history expiry frequency",
 			modify: func(c *Config) {
 				c.HistoryExpiry.Frequency = -time.Second

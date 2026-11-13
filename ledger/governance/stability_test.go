@@ -16,6 +16,7 @@ package governance
 
 import (
 	"context"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -216,7 +217,7 @@ func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(
 	db, _ := newTallyTestDB(t)
 	// pre-Conway: no governance state machine yet
 	in := NewStabilityCheckInputs(
-		db,
+		dbadapter.New(db),
 		nil,
 		stabilityTestEpoch,
 		false,
@@ -262,7 +263,7 @@ func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(
 	)
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
+		dbadapter.New(db), nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
 	require.NoError(t, err)
@@ -287,7 +288,7 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapRequiresCommitteeAndSPO(
 	seedHardForkCommitteeAndSPOVotes(t, db, store, proposal)
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
+		dbadapter.New(db), nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
 	require.NoError(t, err)
@@ -323,7 +324,7 @@ func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(
 	))
 
 	gateOff := NewStabilityCheckInputs(
-		db,
+		dbadapter.New(db),
 		nil,
 		stabilityTestEpoch,
 		false,
@@ -339,7 +340,7 @@ func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(
 	require.NotNil(t, got, "gate off must preserve the expired account's vote")
 
 	gateOn := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, true, stabilityConwayPParams(10), nil, nil,
+		dbadapter.New(db), nil, stabilityTestEpoch, true, stabilityConwayPParams(10), nil, nil,
 	)
 	got, err = EvaluateRatifiableHardForkInitiation(
 		context.Background(),
@@ -374,7 +375,7 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapDRepOnly_NotRatifiable(
 	seedDRepYesVote(t, db, proposal.ID, drepCred)
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
+		dbadapter.New(db), nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
 	require.NoError(t, err)
@@ -415,7 +416,7 @@ func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAdde
 	seedHardForkCommitteeAndSPOVotes(t, db, store, early, late)
 
 	in := NewStabilityCheckInputs(
-		db,
+		dbadapter.New(db),
 		nil,
 		stabilityTestEpoch,
 		false,
@@ -469,7 +470,7 @@ func TestEvaluateRatifiableHardForkInitiation_EarlierDelayingActionWins(
 			)
 
 			in := NewStabilityCheckInputs(
-				db,
+				dbadapter.New(db),
 				nil,
 				stabilityTestEpoch,
 				false,
@@ -505,7 +506,7 @@ func TestEvaluateRatifiableHardForkInitiation_RequiresEnactmentPrecondition(
 	seedHardForkCommitteeAndSPOVotes(t, db, store, proposal)
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(10), nil, nil,
+		dbadapter.New(db), nil, stabilityTestEpoch, false, stabilityConwayPParams(10), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(t.Context(), in)
 	require.NoError(t, err)

@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -46,6 +47,7 @@ type source struct {
 	stabilityWindow uint64
 	nodeConfig      *cardano.CardanoNodeConfig
 	dataDir         string
+	utxoSet         func() ledgerstate.UtxoSetLoader
 	logger          *slog.Logger
 
 	latestTarget func(
@@ -175,6 +177,7 @@ func New(p dingo.MithrilCatchUpParams) (dingo.MithrilCatchUp, error) {
 		stabilityWindow: stabilityWindow,
 		nodeConfig:      p.CardanoNodeConfig,
 		dataDir:         p.DataDir,
+		utxoSet:         p.UtxoSet,
 		logger:          logger,
 		latestTarget:    mithril.LatestCertifiedTarget,
 		runStream:       mithril.RunStreamCatchUp,
@@ -293,6 +296,10 @@ func (s *source) SnapshotProgress(
 }
 
 func (s *source) snapshotConfig(db *database.Database) mithril.SnapshotConfig {
+	var utxoSet ledgerstate.UtxoSetLoader
+	if s.utxoSet != nil {
+		utxoSet = s.utxoSet()
+	}
 	return mithril.SnapshotConfig{
 		Feed: mithril.ChunkFeedConfig{
 			Bootstrap:    s.bootstrap,
@@ -304,6 +311,7 @@ func (s *source) snapshotConfig(db *database.Database) mithril.SnapshotConfig {
 		CardanoNodeConfig: s.nodeConfig,
 		DataDir:           s.dataDir,
 		Logger:            s.logger,
+		UtxoSet:           utxoSet,
 	}
 }
 

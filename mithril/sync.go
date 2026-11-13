@@ -577,6 +577,10 @@ type SyncConfig struct {
 	Logger                  *slog.Logger     // optional; defaults to slog.Default()
 	OnProgress              SyncProgressFunc // optional
 	Metrics                 *PipelineMetrics // optional; records the immutable chunk downloads
+	// UtxoSet, when set, receives the ledger state's UTxO set for a node
+	// that keeps the live UTxO set as its only copy; see
+	// ledgerstate.ImportConfig.UtxoSet.
+	UtxoSet ledgerstate.UtxoSetLoader
 }
 
 // StoragePlugins contains canonical storage provider selections used during
@@ -1371,6 +1375,7 @@ func Sync(
 				bootstrapResult,
 				preparedRepairImport,
 				catchUp,
+				cfg.UtxoSet,
 				onLedger,
 			)
 		} else {
@@ -1382,6 +1387,7 @@ func Sync(
 				bootstrapResult,
 				catchUp,
 				certifiedTip.Slot,
+				cfg.UtxoSet,
 				onLedger,
 			)
 		}

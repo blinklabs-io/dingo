@@ -283,7 +283,7 @@ func TestImportLedgerStateRefusesUnvettedResult(t *testing.T) {
 			CertificateVerified: true,
 		},
 		false,
-		^uint64(0),
+		^uint64(0), nil,
 		nil,
 	)
 	require.Error(t, err)
@@ -305,7 +305,7 @@ func TestImportLedgerStateUnverifiedRunReportsNoAncillaryState(t *testing.T) {
 			ExtractDir:   t.TempDir(),
 		},
 		false,
-		^uint64(0),
+		^uint64(0), nil,
 		nil,
 	)
 	require.Error(t, err)
@@ -357,7 +357,7 @@ func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
 	// parser. Without this the refusal below could be any other failure.
 	_, _, _, err := importLedgerState(
 		t.Context(), nil, discard, nil, build(t, false),
-		false, ^uint64(0), nil,
+		false, ^uint64(0), nil, nil,
 	)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "parsing ledger state",
@@ -365,7 +365,7 @@ func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
 
 	_, _, _, err = importLedgerState(
 		t.Context(), nil, discard, nil, build(t, true),
-		false, ^uint64(0), nil,
+		false, ^uint64(0), nil, nil,
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ledgerstate.ErrUnsafeSnapshotPath,
@@ -429,7 +429,7 @@ func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 				ExtractDir:    extractDir,
 				ExtractRoot:   extractRoot,
 			},
-			false, ^uint64(0), nil,
+			false, ^uint64(0), nil, nil,
 		)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ledgerstate.ErrUnsafeSnapshotPath,
@@ -449,7 +449,7 @@ func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 				AncillaryDir:  anc,
 				AncillaryRoot: ancRoot,
 			},
-			false, ^uint64(0), nil,
+			false, ^uint64(0), nil, nil,
 		)
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "no ledger state at or before")
@@ -509,7 +509,7 @@ func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 				ExtractDir:        extractDir,
 				ExtractRoot:       extractRoot,
 			},
-			false, ^uint64(0), nil,
+			false, ^uint64(0), nil, nil,
 		)
 		require.Error(t, err)
 		return err
@@ -661,7 +661,7 @@ func TestImportLedgerStateAcceptsAVerifiedAncillaryStateNewerThanCertifiedTip(
 				"ledger/300/state": hex.EncodeToString(sum[:]),
 			},
 		},
-		false, 100, nil,
+		false, 100, nil, nil,
 	)
 	assert.ErrorContains(t, err, "parsing ledger state")
 	assert.NotErrorIs(t, err, ledgerstate.ErrNoUsableLedgerState)
@@ -998,7 +998,7 @@ func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(
 			// Control: the tree the manifest covered is read.
 			_, _, _, err := importLedgerState(
 				t.Context(), nil, discard, nil, build(t, false),
-				false, ^uint64(0), nil,
+				false, ^uint64(0), nil, nil,
 			)
 			require.Error(t, err)
 			require.ErrorContains(t, err, "parsing ledger state",
@@ -1006,7 +1006,7 @@ func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(
 
 			_, _, _, err = importLedgerState(
 				t.Context(), nil, discard, nil, build(t, true),
-				false, ^uint64(0), nil,
+				false, ^uint64(0), nil, nil,
 			)
 			require.Error(t, err)
 			assert.ErrorIs(t, err, errAncillaryDigestMismatch,
@@ -1049,7 +1049,7 @@ func TestImportLedgerStateRefusesAStateTheManifestDoesNotCover(t *testing.T) {
 			// Covers a different slot: the selected state is not in it.
 			AncillaryDigests: map[string]string{"ledger/100/state": "00"},
 		},
-		false, ^uint64(0), nil,
+		false, ^uint64(0), nil, nil,
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errAncillaryDigestMismatch)

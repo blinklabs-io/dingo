@@ -23,7 +23,7 @@ import (
 	"net"
 	"slices"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -221,7 +221,7 @@ func (ls *LedgerState) queryShelleyStakePoolParams(
 	ctx context.Context,
 	poolIds []ledger.PoolId,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	result := make(map[ledger.PoolId]stakePoolParams, len(poolIds))
 	if len(poolIds) == 0 {
@@ -249,7 +249,7 @@ func (ls *LedgerState) queryShelleyStakePoolParams(
 		epochRow = row
 		tipSlot = tip.Point.Slot
 	} else {
-		txn = ls.db.Transaction(ctx, false)
+		txn = ls.ledgerDB().Begin(ctx, false)
 		defer txn.Release()
 	}
 	pparams, err := ls.snapshotProtocolParameters(consensus, epochRow, txn)
@@ -265,12 +265,12 @@ func (ls *LedgerState) queryShelleyStakePoolParams(
 	for _, poolId := range poolIds {
 		keyHashes = append(keyHashes, lcommon.PoolKeyHash(poolId))
 	}
-	regs, err := ls.db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+	regs, err := ls.ledgerDB().GetPoolRegistrationsEffectiveForEpoch(
 		keyHashes,
 		epoch.StartSlot,
 		epoch.EpochId,
 		tipSlot,
-		txn.Metadata(),
+		txn,
 	)
 	if err != nil {
 		return nil, err

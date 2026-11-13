@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	dledger "github.com/blinklabs-io/dingo/ledger"
@@ -841,8 +842,8 @@ func (b *Backfill) processBlockGovernanceLevel(
 		txIndex,
 		epochId,
 		proposalLifetime,
-		b.db,
-		txn,
+		dbadapter.New(b.db),
+		dbadapter.Txn(txn),
 		pp,
 		validated,
 	); err != nil {

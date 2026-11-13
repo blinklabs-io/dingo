@@ -23,6 +23,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -197,7 +199,7 @@ func (n *Node) offchainMetadataConfig() offchainmetadata.Config {
 
 func (n *Node) configureSnapshotManager() error {
 	n.snapshotMgr = snapshot.NewManager(
-		n.db,
+		dbadapter.New(n.db),
 		n.eventBus,
 		n.config.logger,
 	)
@@ -236,12 +238,12 @@ func (n *Node) configureSnapshotManager() error {
 	// enactment) and the row write at the end of the rollover, both inside the
 	// same transaction.
 	n.ledgerState.SetEpochBoundarySnapshotStakeHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return n.snapshotMgr.ComputeEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
 	n.ledgerState.SetEpochBoundarySnapshotHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
@@ -253,7 +255,7 @@ func (n *Node) configureSnapshotManager() error {
 	// SPO stake for every SPO-gated action at every boundary.
 	n.ledgerState.SetCurrentBoundarySPOStakeHook(
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			evt event.EpochTransitionEvent,
 			incomingEraID uint,
 		) ([]*models.PoolStakeSnapshot, error) {

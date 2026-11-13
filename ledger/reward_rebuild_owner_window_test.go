@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -52,7 +53,7 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersAtSnapshotWindow(
 	))
 
 	rebuilt, err := ls.rebuildPrunedRewardStakeInputs(
-		meta, nil, snapshotEpoch, rewardSnapshot, poolInputs,
+		dbadapter.New(db), nil, snapshotEpoch, rewardSnapshot, poolInputs,
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, rebuilt,
@@ -92,7 +93,7 @@ func TestEnsureRewardStakeInputsReadyReportsRejectedReconstruction(
 		context.Background(), snapshotEpoch+1, nil,
 	))
 	require.NoError(t, markRewardStakeInputsPending(
-		meta, nil, snapshotEpoch, rewardSnapshot.BoundarySlot,
+		dbadapter.New(db), nil, snapshotEpoch, rewardSnapshot.BoundarySlot,
 	))
 
 	txn := db.Transaction(context.Background(), true)
@@ -192,7 +193,7 @@ func captureOwnerWindowRewardInputs(
 		))
 	}
 
-	mgr := snapshot.NewManager(db, newTestEventBus(t, nil), nil)
+	mgr := snapshot.NewManager(dbadapter.New(db), newTestEventBus(t, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   endedEpoch,
 		NewEpoch:        snapshotEpoch,
@@ -296,7 +297,7 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersForEpochZero(
 		eras.ShelleyEraDesc.Id, 1, uint(epochLength), nil,
 	))
 
-	mgr := snapshot.NewManager(db, newTestEventBus(t, nil), nil)
+	mgr := snapshot.NewManager(dbadapter.New(db), newTestEventBus(t, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   snapshotEpoch,
 		NewEpoch:        snapshotEpoch,
@@ -336,7 +337,7 @@ func TestRebuildPrunedRewardStakeInputsResolvesOwnersForEpochZero(
 	))
 
 	rebuilt, err := ls.rebuildPrunedRewardStakeInputs(
-		meta, nil, snapshotEpoch, rewardSnapshot, poolInputs,
+		dbadapter.New(db), nil, snapshotEpoch, rewardSnapshot, poolInputs,
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, rebuilt,

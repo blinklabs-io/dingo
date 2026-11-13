@@ -17,6 +17,7 @@ package governance
 import (
 	"bytes"
 	"context"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -66,7 +67,7 @@ func TestTranslateRatifiedGovActions_ConwayToDijkstra(t *testing.T) {
 
 	require.NoError(t, TranslateRatifiedGovActions(
 		context.Background(),
-		db,
+		dbadapter.New(db),
 		nil,
 		conway.EraIdConway,
 		gdijkstra.EraIdDijkstra,

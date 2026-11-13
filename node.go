@@ -41,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -59,6 +60,8 @@ import (
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/tracing"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
+	"github.com/blinklabs-io/dingo/internal/utxoshadow"
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -110,6 +113,9 @@ type Node struct {
 	db                      *database.Database
 	ledgerState             *ledger.LedgerState
 	snapshotMgr             *snapshot.Manager
+	utxoShadow              *utxoshadow.Shadow
+	utxoSet                 *utxoset.Set
+	utxoSetReconciled       bool
 	dbLifecycleMgr          *dblifecycle.Manager
 	plannerStatsMgr         *plannerstats.Manager
 	leiosVoteManager        *leios.VoteManager
@@ -1079,6 +1085,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// requires exists. Nothing between here and there dereferences it: the
 	// callbacks handed to ledger, connmanager and peergov below are closures
 	// that resolve n.ouroboros when they fire, not method values bound now.
+	if err := n.openUtxoSet(); err != nil {
+		return err
+	}
+	started = append(started, func() {
+		// Left open when the ledger may still be writing to it.
+		if ledgerStateDrainConfirmed {
+			_ = n.closeUtxoSet()
+		}
+	})
 	// Load state
 	state, err := ledger.NewLedgerState(n.ledgerStateConfig())
 	if err != nil {
@@ -1255,7 +1270,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		n.snapshotMgr.DeferEpochBoundaryCapture,
 		n.snapshotMgr.DiscardEpochBoundaryCapture,
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			evt event.EpochTransitionEvent,
 		) (ledger.DeferredBoundarySnapshot, error) {
 			return n.snapshotMgr.PrepareEpochBoundarySnapshot(n.ctx, txn, evt)
@@ -1288,6 +1303,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		})
 	}
 
+	if err := n.reconcileUtxoSet(ctx); err != nil {
+		return err
+	}
 	// Start ledger.
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
@@ -1303,6 +1321,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
 	}
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
+	if err := n.startUtxoShadow(); err != nil {
+		return err
+	}
+	started = append(started, func() { _ = n.stopUtxoShadow() })
 	// Initialize and start automatic database-snapshot manager (distinct
 	// from the stake/reward snapshot manager above — see
 	// internal/dblifecycle.Manager doc comment).
@@ -2705,6 +2727,13 @@ func (n *Node) enforceRecoveredNodeSettings(ctx context.Context) error {
 // cannot be safely reconstructed, and no cost argument justifies disabling
 // it, so it runs on every startup whether or not the scan is skipped.
 func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
+	// With the live UTxO set as the only copy, a rebuild reads UTxO stake
+	// from the set, which trails the metadata store after a crash until
+	// reconcileUtxoSet rolls the ledger back to it; reconcileUtxoSet runs
+	// this then.
+	if n.config.ledgerUtxoBadgerOnly && !n.utxoSetReconciled {
+		return nil
+	}
 	// Both probes are read-only, so they run on the read-only metadata
 	// connection and the writer stays idle. Only a genuine rebuild needs the
 	// writer, which is opened separately below. Holding the writer open across
@@ -3048,7 +3077,7 @@ func wireDeferredRewardStakeInputs(
 ) {
 	ls.SetEpochBoundaryDeferredStakeInputsHook(
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 		) (uint64, uint64, []*models.RewardStakeInput, bool) {
 			deferred, ok := mgr.TakeDeferredRewardStakeInputs(txn)
 			if !ok {

@@ -28,6 +28,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
@@ -50,7 +51,7 @@ func TestRollbackIntentRoundTripsUndoBlocks(t *testing.T) {
 		Number: 7,
 		Type:   1,
 	}}
-	require.NoError(t, persistRollbackIntent(db, point, blocks))
+	require.NoError(t, persistRollbackIntent(db, point, blocks, nil))
 
 	gotPoint, gotBlocks, pending, err := loadRollbackIntent(db)
 	require.NoError(t, err)
@@ -130,6 +131,7 @@ func TestRollbackNoopDoesNotFinishForeignIntent(t *testing.T) {
 		fixture.ls.db,
 		foreignPoint,
 		[]models.Block{block},
+		nil,
 	))
 
 	err = fixture.ls.rollbackWithBlocksAndIntent(
@@ -237,7 +239,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	ls.rollbackTruncateAfterSlotFunc = func(
 		ocommon.Point,
 		uint64,
-		*database.Txn,
+		ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error) {
 		return ochainsync.Tip{}, nil, injected
 	}
@@ -345,7 +347,7 @@ func TestRecoverRollbackIntentAheadOfLedgerDeliversUndo(t *testing.T) {
 	intentPoint := ocommon.NewPoint(blocks[0].Slot, blocks[0].Hash)
 	require.NoError(
 		t,
-		persistRollbackIntent(db, intentPoint, []models.Block{blocks[1]}),
+		persistRollbackIntent(db, intentPoint, []models.Block{blocks[1]}, nil),
 	)
 
 	// The applied ledger sits below the intent point, so no metadata rollback
@@ -567,7 +569,7 @@ func TestRollbackIntentAcceptsWriterMaximumBlockCount(t *testing.T) {
 		}
 	}
 	point := ocommon.Point{Slot: 1, Hash: []byte{1}}
-	require.NoError(t, persistRollbackIntent(db, point, blocks))
+	require.NoError(t, persistRollbackIntent(db, point, blocks, nil))
 
 	gotPoint, gotBlocks, pending, err := loadRollbackIntent(db)
 	require.NoError(t, err)

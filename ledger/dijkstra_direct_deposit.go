@@ -19,6 +19,8 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -79,7 +81,7 @@ func ApplyDijkstraDirectDeposits(
 	db *database.Database,
 	tx common.Transaction,
 	slot uint64,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	effects, err := DijkstraDirectDepositEffects(tx)
 	if err != nil {
@@ -97,7 +99,7 @@ func ApplyDijkstraDirectDeposits(
 			effect.Amount,
 			slot,
 			tx.Hash().Bytes(),
-			txn,
+			dbadapter.Unwrap(txn),
 		); err != nil {
 			return fmt.Errorf("credit direct-deposit account: %w", err)
 		}

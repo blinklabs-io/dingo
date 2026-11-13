@@ -391,6 +391,47 @@ func (s *Store) GetSpentUtxosMissingAddressAfterSlot(
 	return ret, rows.Err()
 }
 
+// GetUtxosRestoredByRollback returns the UTxOs a rollback to slot makes live
+// again: created at or before slot and spent after it.
+func (s *Store) GetUtxosRestoredByRollback(
+	slot uint64,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
+		utxosRestoredByRollbackSQL,
+	), slotValue, slotValue)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ret []models.Utxo
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return nil, err
+		}
+		utxo, err := utxoFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, *utxo)
+	}
+	return ret, rows.Err()
+}
+
+const utxosRestoredByRollbackSQL = `-- name: GetUtxosRestoredByRollback
+SELECT ` + utxoRowColumns + ` FROM utxo
+WHERE utxo.deleted_slot > ? AND utxo.added_slot <= ?
+ORDER BY utxo.id`
+
 func spentUtxosMissingAddressAfterSlotSQL(dialect string) string {
 	id := "utxo.id"
 	if dialect == "sqlite" {

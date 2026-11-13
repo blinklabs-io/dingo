@@ -20,15 +20,14 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 )
 
 // pendingRewardStakeInputHistoryFloor retains history until its deferred basis
 // is durable. Rolled-back markers do not protect snapshots that no longer exist.
 func pendingRewardStakeInputHistoryFloor(
-	meta metadata.MetadataStore,
-	txn types.Txn,
+	meta ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) (uint64, bool, error) {
 	if txn == nil {
 		return 0, false, errors.New(
@@ -83,8 +82,8 @@ func pendingRewardStakeInputHistoryFloor(
 // A deferred SNAP owns history before it can create the stake-input marker.
 // Both markers must be read through one transaction across their handoff.
 func pendingBoundarySnapshotHistoryFloor(
-	meta metadata.MetadataStore,
-	txn types.Txn,
+	meta ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) (uint64, bool, error) {
 	raw, err := meta.GetSyncState(pendingRatificationSyncKey, txn)
 	if err != nil {
