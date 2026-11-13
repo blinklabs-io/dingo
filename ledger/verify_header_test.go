@@ -9024,6 +9024,21 @@ func prunedSnapshotFixture(
 	onChain bool,
 ) *LedgerState {
 	t.Helper()
+	return prunedSnapshotFixtureWithRegistration(
+		t, tb, withSummary, onChain, true,
+	)
+}
+
+// prunedSnapshotFixtureWithRegistration is prunedSnapshotFixture with the
+// producer's live pool registration seeded only when registered is set.
+func prunedSnapshotFixtureWithRegistration(
+	t *testing.T,
+	tb *testBlockResult,
+	withSummary bool,
+	onChain bool,
+	registered bool,
+) *LedgerState {
+	t.Helper()
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	pool := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshot(t, db, 4, pool[:], 1_000_000_000)
@@ -9035,7 +9050,9 @@ func prunedSnapshotFixture(
 			SnapshotReady:    true,
 		}, nil))
 	}
-	seedBlockPoolRegistration(t, db, tb.block)
+	if registered {
+		seedBlockPoolRegistration(t, db, tb.block)
+	}
 	require.NoError(
 		t,
 		db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(5, nil),
@@ -9132,6 +9149,39 @@ func TestValidateChainSelectionHeaderCryptoForkHeaderPrunedSnapshotDefers(
 				"pruned snapshot must defer, not reject: %v",
 				err,
 			)
+		})
+	}
+}
+
+// A fork header from a pool that has since left the live pool table cannot be
+// judged once its electing snapshot is pruned: a surviving epoch summary
+// reports stake, but the missing row is not proof the pool was absent.
+func TestValidateChainSelectionHeaderCryptoForkHeaderPrunedSnapshotUnregisteredPoolDefers(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, withSummary := range []bool{false, true} {
+		name := "no-summary"
+		if withSummary {
+			name = "summary"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tb := createTestBlock(t, [32]byte{34}, 0, tamperNone)
+			ls := prunedSnapshotFixtureWithRegistration(
+				t, tb, withSummary, false, false,
+			)
+			err := ls.ValidateChainSelectionHeaderCrypto(tb.block.Header())
+			require.Error(t, err)
+			assert.ErrorIs(t, err, models.ErrPoolNotFound)
+			assert.ErrorIs(t, err, errPoolSnapshotPruned)
+			assert.True(
+				t,
+				IsHeaderVerificationDeferred(err),
+				"pruned snapshot must defer, not reject: %v",
+				err,
+			)
+			assert.False(t, headerFailureBlamesPeer(err), "%v", err)
 		})
 	}
 }

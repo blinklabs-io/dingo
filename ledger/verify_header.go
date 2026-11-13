@@ -1345,11 +1345,25 @@ func (ls *LedgerState) verifyBlockHeaderStateWithAuthorization(
 	if err := ls.verifyRegisteredVrfKeyFromSnapshot(
 		ctx, block, epochCache, snap,
 	); err != nil {
-		// ErrPoolNotFound comes from the live pool table, so it only
-		// reflects the electing snapshot when that snapshot has no row for
-		// the pool and already holds other pools: that is an authoritative
-		// absence, whatever the apply cursor. An empty snapshot, or a row
-		// whose registration cannot be resolved, can still be filled in.
+		// ErrPoolNotFound comes from the live pool table, so it says nothing
+		// about the electing snapshot on its own. A pruned snapshot cannot
+		// be evaluated, so the miss carries the same pruned sentinel the
+		// leader-stake check uses and chain selection defers it. A snapshot
+		// that has no row for the pool and still holds other pools is an
+		// authoritative absence, whatever the apply cursor. An empty
+		// snapshot, or a row whose registration cannot be resolved, can
+		// still be filled in.
+		if errors.Is(err, models.ErrPoolNotFound) &&
+			ls.poolMissingFromPrunedSnapshot(snap) {
+			err = fmt.Errorf(
+				"%w: %w: epoch %d %s snapshot: %w",
+				errLeaderStakeSnapshotUnavailable,
+				errPoolSnapshotPruned,
+				snap.epoch,
+				snap.kind,
+				err,
+			)
+		}
 		poolAbsentFromSnapshot := errors.Is(err, models.ErrPoolNotFound) &&
 			ls.poolAbsentFromPopulatedSnapshot(snap)
 		if allowStateDefer &&
@@ -1402,13 +1416,28 @@ func (ls *LedgerState) verifyBlockHeaderStateWithAuthorization(
 	return nil
 }
 
+// poolMissingFromPrunedSnapshot reports whether the electing snapshot was
+// read successfully, has no row for the producer, and lies below the
+// retention window, so the missing row says nothing about the pool.
+func (ls *LedgerState) poolMissingFromPrunedSnapshot(
+	snap electingSnapshot,
+) bool {
+	return snap.selErr == nil && snap.rowErr == nil && snap.row == nil &&
+		ls.poolSnapshotPruned(snap.epoch, snap.kind)
+}
+
 // poolAbsentFromPopulatedSnapshot reports whether the electing snapshot was
-// read successfully, holds stake, and has no row for the producer. Any failed
-// read reports false, which keeps the header deferrable.
+// read successfully, is not pruned, holds stake, and has no row for the
+// producer. Any failed read reports false, which keeps the header deferrable.
+// The pruned check comes first because a ready mark epoch summary survives
+// pruning and would otherwise report the deleted rows' stake.
 func (ls *LedgerState) poolAbsentFromPopulatedSnapshot(
 	snap electingSnapshot,
 ) bool {
 	if snap.selErr != nil || snap.rowErr != nil || snap.row != nil {
+		return false
+	}
+	if ls.poolSnapshotPruned(snap.epoch, snap.kind) {
 		return false
 	}
 	total, err := ls.db.Metadata().GetTotalActiveStake(
