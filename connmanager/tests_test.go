@@ -937,3 +937,42 @@ func TestLocalCloseReasonPublishedWithTransportError(t *testing.T) {
 	}
 	waitForConnectionManagerWatchers(t, cm)
 }
+
+func TestRecycleRequestPublishesLocalCloseReason(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		{name: "requested", want: "requested reason"},
+		{name: "unset", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := event.NewEventBus(nil, nil)
+			defer bus.Close()
+			_, closeEvents := bus.Subscribe(ConnectionClosedEventType)
+			cm := NewConnectionManager(ConnectionManagerConfig{EventBus: bus})
+			conn := newUnstartedConnection(t)
+			require.True(t, cm.AddConnection(conn, false, "1.2.3.4:3001"))
+			cm.HandleConnectionRecycleRequestedEvent(event.NewEvent(
+				ConnectionRecycleRequestedEventType,
+				ConnectionRecycleRequestedEvent{
+					ConnectionId:     conn.Id(),
+					Reason:           "logged only",
+					LocalCloseReason: tc.want,
+				},
+			))
+			conn.ErrorChan() <- nil
+			select {
+			case evt := <-closeEvents:
+				closed, ok := evt.Data.(ConnectionClosedEvent)
+				require.True(t, ok)
+				require.Equal(t, tc.want, closed.LocalCloseReason)
+			case <-time.After(time.Second):
+				t.Fatal("missing close event")
+			}
+			waitForConnectionManagerWatchers(t, cm)
+		})
+	}
+}

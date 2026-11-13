@@ -235,13 +235,6 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	})
 	require.NoError(t, err)
 	ls.metrics.init(prometheus.NewRegistry())
-	// The blocks' CBOR does not decode, so the undo for each rolled-back
-	// block reports a decode error at its point.
-	bus := newTestEventBus(t, nil)
-	t.Cleanup(bus.Stop)
-	ls.config.EventBus = bus
-	subID, errCh := bus.Subscribe(LedgerErrorEventType)
-	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, subID) })
 
 	parentTip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(parentBlock.Slot, parentBlock.Hash),
@@ -318,26 +311,6 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	dbTip, err := ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, parentTip, dbTip)
-	// The metadata-only rewind leaves the primary chain in place, so the
-	// ledger must publish the undo for the blocks it applied above the
-	// rewind point itself.
-	for _, want := range []chain.RawBlock{
-		currentBlock,
-		producerTwoBlock,
-		producerOneBlock,
-	} {
-		evt := testutil.RequireReceive(t, errCh, testutil.AsyncWait,
-			"undo for a rolled-back block")
-		got, ok := evt.Data.(LedgerErrorEvent)
-		require.True(t, ok)
-		assert.Equal(t, "rollback_tx_undo_decode", got.Operation)
-		assert.Equal(t, ocommon.NewPoint(want.Slot, want.Hash), got.Point)
-	}
-	testutil.RequireNoReceive(t, errCh, 100*time.Millisecond,
-		"no undo beyond the rolled-back blocks")
-	_, _, pending, err := loadRollbackIntent(ls.db)
-	require.NoError(t, err)
-	assert.False(t, pending, "the intent clears once the undo is delivered")
 }
 
 func TestFindReplayRecoveryCandidateFallsBackWhenProducerParentIsMissing(

@@ -3449,30 +3449,16 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 		ls.RLock()
 		publishedAtAncestor := pointMatches(ls.currentTip.Point, ancestor)
 		ls.RUnlock()
-		// The ledger tip is off the primary chain, so its applied blocks are
-		// read from the ledger's own record, not from what the chain holds
-		// at those slots now.
-		undoBlocks := ls.reconciliationUndoBlocks(
-			ctx,
-			ancestor,
-			tmpTip.Point.Slot,
-			tmpTip.BlockNumber,
-		)
-		// A partial commit can surface inside a rollback that already holds
-		// transactionEventMutex, so this recovery must not take it.
-		//
-		// Recovery may start before the durable tip has been published in
-		// memory, so the metadata repair is forced when the selected
-		// ancestor is already the in-memory tip (notably origin).
-		err = ls.withConsumedUtxoPruneBoundary(func() error {
-			return ls.rollbackWithUndoUnlocked(
-				ctx,
-				ancestor,
-				undoBlocks,
-				publishedAtAncestor,
-				true,
-			)
-		})
+		if publishedAtAncestor {
+			// Recovery may start before the durable tip has been published in
+			// memory. Force the metadata repair when the selected ancestor is
+			// already the in-memory tip (notably origin).
+			err = ls.withConsumedUtxoPruneBoundary(func() error {
+				return ls.rollbackAppliedStateWithUndo(ctx, ancestor, true)
+			})
+		} else {
+			err = ls.rollback(ctx, ancestor)
+		}
 		if err != nil {
 			wrappedErr := fmt.Errorf(
 				"failed to rollback ledger: %w",
@@ -5375,7 +5361,7 @@ func (ls *LedgerState) rollback(
 	point ocommon.Point,
 ) error {
 	return ls.withConsumedUtxoPruneBoundary(func() error {
-		return ls.rollbackWithBlocks(ctx, point, nil, false)
+		return ls.rollbackAppliedStateWithUndo(ctx, point, false)
 	})
 }
 
@@ -5430,75 +5416,6 @@ func (ls *LedgerState) rollbackWithBlocks(
 	)
 }
 
-// rollbackWithUndo rolls the ledger back to point and then publishes the undo
-// for blocks, the applied blocks above point, newest first. The rollback
-// intent stays durable until that undo is delivered, so a crash between the
-// metadata truncation and the publish replays it at startup. It is for
-// rollbacks that leave the primary chain where it is, so no chain truncation
-// has to be ordered against the undo; it takes transactionEventMutex.
-func (ls *LedgerState) rollbackWithUndo(
-	ctx context.Context,
-	point ocommon.Point,
-	blocks []models.Block,
-	repairSameTip bool,
-	publishResync bool,
-) error {
-	ls.transactionEventMutex.Lock()
-	defer ls.transactionEventMutex.Unlock()
-	return ls.rollbackWithUndoUnlocked(
-		ctx,
-		point,
-		blocks,
-		repairSameTip,
-		publishResync,
-	)
-}
-
-// rollbackWithUndoUnlocked is rollbackWithUndo without transactionEventMutex,
-// for a caller that may already run under it.
-func (ls *LedgerState) rollbackWithUndoUnlocked(
-	ctx context.Context,
-	point ocommon.Point,
-	blocks []models.Block,
-	repairSameTip bool,
-	publishResync bool,
-) error {
-	err := ls.rollbackWithBlocksAndIntent(
-		ctx,
-		point,
-		blocks,
-		repairSameTip,
-		publishResync,
-		true,
-	)
-	if err != nil {
-		if _, ok := errors.AsType[*rollbackCommittedError](err); !ok {
-			return err
-		}
-		ls.emitRollbackTransactionEvents(ctx, blocks)
-		return errors.Join(err, ls.finishRollbackIntentForPoint(ctx, point))
-	}
-	ls.emitRollbackTransactionEvents(ctx, blocks)
-	return ls.finishRollbackIntentForPoint(ctx, point)
-}
-
-// appliedBlocksAbove returns the blocks the primary chain holds above point
-// that the ledger has applied, newest first.
-func (ls *LedgerState) appliedBlocksAbove(
-	ctx context.Context,
-	point ocommon.Point,
-) ([]models.Block, error) {
-	durableTip, err := ls.ledgerDB().GetTip(nil)
-	if err != nil {
-		return nil, fmt.Errorf("read durable ledger tip: %w", err)
-	}
-	blocks, err := ls.readBlocksAboveSlot(ctx, point.Slot)
-	if err != nil {
-		return nil, fmt.Errorf("read rollback undo blocks: %w", err)
-	}
-	return blocksAppliedUpTo(blocks, durableTip.Point), nil
-}
-
 func (ls *LedgerState) rollbackWithBlocksRetainingIntent(
 	ctx context.Context,
 	point ocommon.Point,
@@ -5522,6 +5439,26 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	repairSameTip bool,
 	publishResync bool,
 	retainIntent bool,
+) error {
+	return ls.rollbackWithBlocksAndIntentOptions(
+		ctx,
+		point,
+		rollbackBlocks,
+		repairSameTip,
+		publishResync,
+		retainIntent,
+		false,
+	)
+}
+
+func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
+	ctx context.Context,
+	point ocommon.Point,
+	rollbackBlocks []models.Block,
+	repairSameTip bool,
+	publishResync bool,
+	retainIntent bool,
+	emitUndo bool,
 ) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
@@ -5858,6 +5795,9 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	}, true)
 	if err != nil {
 		return err
+	}
+	if emitUndo {
+		ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
 	}
 	// The blocks are gone from the ledger from here on, whichever path
 	// returns, including a rollbackCommittedError.
@@ -6690,6 +6630,7 @@ func (ls *LedgerState) processChainIteratorRollback(
 	rollback := func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
+		ctx := withTransactionEventMutexHeld(ctx)
 		durableTip, err := ls.ledgerDB().GetTip(nil)
 		if err != nil {
 			return fmt.Errorf("read durable ledger tip: %w", err)
@@ -13821,6 +13762,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 		if err := func() error {
 			ls.transactionEventMutex.Lock()
 			defer ls.transactionEventMutex.Unlock()
+			ctx := withTransactionEventMutexHeld(ctx)
 			ls.RLock()
 			currentLedgerTip := ls.currentTip
 			mithrilLedgerSlot := ls.mithrilLedgerSlot
@@ -13946,6 +13888,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 	if err := func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
+		ctx := withTransactionEventMutexHeld(ctx)
 		// Resolve the ledger's own applied blocks between the ancestor
 		// and the CURRENT applied tip only now, holding
 		// transactionEventMutex: submitBlockApplyDBTxn's forward-apply

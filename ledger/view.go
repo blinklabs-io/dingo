@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -23,6 +24,8 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"reflect"
+	"slices"
 	"sync"
 	"time"
 
@@ -96,16 +99,16 @@ type LedgerView struct {
 	utxoMemo map[utxoref.Key]lcommon.Utxo
 	// mirPendingMu guards mirPending.
 	mirPendingMu sync.Mutex
-	// mirPending holds the per-(pot, credential type, credential) totals of
-	// every MIR distribution stored from epochStartSlot on, built by the
-	// first PendingInstantaneousRewards call. A MIR certificate is stored
-	// only after the transaction carrying it validates, and every validation
-	// path builds one view per transaction, so the stored set cannot change
-	// during a view's lifetime. A view that outlives a MIR write would
-	// answer from stale totals. Never shared across views.
-	mirPending map[mirPendingKey]*big.Int
-	// onMIRCertsLoad, when non-nil, is called each time
-	// PendingInstantaneousRewards reads the stored MIR certificates. It is a
+	// mirPending holds what the MIR certificates stored from epochStartSlot
+	// on have accumulated, built by the first MIR state query. A MIR
+	// certificate is stored only after the transaction carrying it
+	// validates, and every validation path builds one view per transaction,
+	// so the stored set cannot change during a view's lifetime. A view that
+	// outlives a MIR write would answer from stale totals. Never shared
+	// across views.
+	mirPending *mirPendingState
+	// onMIRCertsLoad, when non-nil, is called each time the view reads the
+	// stored MIR certificates. It is a
 	// test hook that makes the one-read-per-view contract observable.
 	onMIRCertsLoad func()
 	// prefetchedUtxos holds the live UTxOs a block's transactions reference,
@@ -351,98 +354,25 @@ func (lv *LedgerView) Phase2ResultCache() *eras.Phase2ResultCache {
 
 var _ eras.Phase2ResultCacheProvider = (*LedgerView)(nil)
 
-// MIRDelegState returns the move instantaneous rewards DELEG state that a
-// certificate at slot is checked against: the chain account pots, the
-// distributions and pot transfers committed this epoch at or before slot, and
-// the epoch's too-late cutoff. additive selects how repeated distributions to
-// one credential fold, per eras.MIRDelegState.Pending.
-//
-// Every transaction's certificates are written to the database immediately
-// after that transaction validates (see ledgerProcessBlock), before the next
-// transaction in the same block validates, so this already reflects every
-// prior transaction's MIR certificates this epoch, same block or earlier.
-// Certificates within the transaction being validated are folded in memory by
-// the eras package as it walks the certificate list.
-//
-// The epoch start slot comes from lv.epochStartSlot, pinned from the same
-// snapshot pp was captured from (see its field doc comment), never a fresh
-// read of LedgerState.currentEpoch, which a concurrent writer could advance
-// mid-validation.
-func (lv *LedgerView) MIRDelegState(
-	slot uint64,
-	additive bool,
-) (eras.MIRDelegState, error) {
-	ret := eras.MIRDelegState{
-		DeltaReserves: new(big.Int),
-		DeltaTreasury: new(big.Int),
-		Pending:       make(map[eras.MIRCredentialKey]*big.Int),
-	}
-	cutoff, err := lv.ls.mirCertificateCutoff(slot)
-	if err != nil {
-		return ret, err
-	}
-	ret.Cutoff = cutoff
-	ret.Treasury, ret.Reserves, err = lv.ls.readNetworkState(lv.txn)
-	if err != nil {
-		return ret, err
-	}
-	epochStartSlot := lv.epochStartSlot
-	if slot < epochStartSlot {
-		return ret, nil
-	}
-	effects, err := lv.ls.ledgerDB().GetMIRCertsInSlotRange(
-		lv.EvaluationContext(),
-		epochStartSlot, slot+1, lv.txn,
-	)
-	if err != nil {
-		return ret, lv.storageFault("get MIR certs in slot range: %w", err)
-	}
-	for _, effect := range effects {
-		if effect.OtherPot > 0 {
-			amount := new(big.Int).SetUint64(effect.OtherPot)
-			source, target := ret.DeltaReserves, ret.DeltaTreasury
-			if effect.Pot == mirPotTreasury {
-				source, target = target, source
-			}
-			source.Sub(source, amount)
-			target.Add(target, amount)
-			continue
-		}
-		for _, reward := range effect.Rewards {
-			if reward.Amount == nil {
-				continue
-			}
-			credential, err := lcommon.NewBlake2b224Checked(
-				reward.Credential,
-			)
-			if err != nil {
-				return ret, fmt.Errorf("MIR reward credential: %w", err)
-			}
-			key := eras.MIRCredentialKey{
-				Tag:        reward.CredentialTag,
-				Credential: credential,
-				Pot:        effect.Pot,
-			}
-			if existing, ok := ret.Pending[key]; ok && additive {
-				ret.Pending[key] = new(big.Int).Add(existing, reward.Amount)
-			} else {
-				ret.Pending[key] = new(big.Int).Set(reward.Amount)
-			}
-		}
-	}
-	return ret, nil
+// mirPendingState is the move instantaneous rewards state the stored
+// certificates of the current epoch have accumulated.
+type mirPendingState struct {
+	// credits holds the per-credential pending rewards, the reference's
+	// iRReserves and iRTreasury.
+	credits map[mirPendingKey]*big.Int
+	// totals is the sum of credits per pot.
+	totals [2]*big.Int
+	// transfers is the net pot-to-pot transfer into each pot, the
+	// reference's deltaReserves and deltaTreasury.
+	transfers [2]*big.Int
 }
 
-// var _ eras.MIRDelegStateProvider = (*LedgerView)(nil) makes any future
-// drift in the MIRDelegStateProvider method signature a compile error instead
-// of a silent runtime no-op for every MIR DELEG predicate that reads it.
-var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
-
 // PendingInstantaneousRewards returns the instantaneous rewards pending for
-// cred in the pot named by source (0 reserves, 1 treasury): the sum of the
-// distributions committed earlier in the current epoch, or nil when there are
-// none. The gouroboros DELEG rule reads it only from protocol version 5, where
-// repeated distributions add, so the fold is always additive.
+// cred in the pot named by source (0 reserves, 1 treasury): the distributions
+// committed earlier in the current epoch folded the way the reference folds
+// them, or nil when there are none. From Alonzo a repeated distribution adds
+// to the pending amount; before it the later one replaces it. The gouroboros
+// DELEG rule reads it in both eras.
 //
 // The range is open-ended because a transaction's certificates are stored
 // only after it validates and a rollback deletes them, so everything stored
@@ -455,16 +385,11 @@ func (lv *LedgerView) PendingInstantaneousRewards(
 		// No stored reward carries a tag this wide.
 		return nil, nil
 	}
-	lv.mirPendingMu.Lock()
-	defer lv.mirPendingMu.Unlock()
-	if lv.mirPending == nil {
-		totals, err := lv.loadMIRPending()
-		if err != nil {
-			return nil, err
-		}
-		lv.mirPending = totals
+	state, err := lv.mirPendingState()
+	if err != nil {
+		return nil, err
 	}
-	total, ok := lv.mirPending[mirPendingKey{
+	total, ok := state.credits[mirPendingKey{
 		pot:        source,
 		tag:        uint8(cred.CredType), // #nosec G115 -- bounded above
 		credential: string(cred.Credential[:]),
@@ -475,10 +400,88 @@ func (lv *LedgerView) PendingInstantaneousRewards(
 	return new(big.Int).Set(total), nil
 }
 
-// loadMIRPending reads the MIR distributions stored in the current epoch once
-// and folds them into per-credential totals. Pot transfers (OtherPot > 0) and
-// rewards without an amount carry no credential credit and are skipped.
-func (lv *LedgerView) loadMIRPending() (map[mirPendingKey]*big.Int, error) {
+// InstantaneousRewardsTotal returns the sum of the instantaneous rewards
+// pending for stake credentials in the pot named by source, folded as
+// PendingInstantaneousRewards folds them.
+func (lv *LedgerView) InstantaneousRewardsTotal(
+	source uint,
+) (*big.Int, error) {
+	if source > mirPotTreasury {
+		return nil, fmt.Errorf("invalid MIR source pot: %d", source)
+	}
+	state, err := lv.mirPendingState()
+	if err != nil {
+		return nil, err
+	}
+	return new(big.Int).Set(state.totals[source]), nil
+}
+
+// InstantaneousPotTransfer returns the net pot-to-pot transfer pending into
+// the pot named by source this epoch: positive for funds moved in from the
+// opposite pot, negative for funds moved out. Transfers exist only from
+// Alonzo.
+func (lv *LedgerView) InstantaneousPotTransfer(
+	source uint,
+) (*big.Int, error) {
+	if source > mirPotTreasury {
+		return nil, fmt.Errorf("invalid MIR source pot: %d", source)
+	}
+	state, err := lv.mirPendingState()
+	if err != nil {
+		return nil, err
+	}
+	return new(big.Int).Set(state.transfers[source]), nil
+}
+
+func (lv *LedgerView) mirPendingState() (*mirPendingState, error) {
+	lv.mirPendingMu.Lock()
+	defer lv.mirPendingMu.Unlock()
+	if lv.mirPending == nil {
+		state, err := lv.loadMIRPending()
+		if err != nil {
+			return nil, err
+		}
+		lv.mirPending = state
+	}
+	return lv.mirPending, nil
+}
+
+// mirRewardsAdditive reports whether a repeated distribution to one
+// credential adds to the pending amount (from Alonzo, Map.unionWith (<>))
+// rather than replacing it (before, Map.union). The protocol parameters the
+// view was pinned with decide it; a view without them falls back to the era
+// of the epoch the view was pinned to, the same gate the epoch boundary
+// applies. A typed-nil parameter pointer counts as absent: the era types'
+// ProtocolMajorVersion dereferences its receiver. A view with neither fails
+// closed: folding the wrong way accepts or rejects certificates the reference
+// does not, so no default is assumed.
+func (lv *LedgerView) mirRewardsAdditive() (bool, error) {
+	if versioned, ok := lv.committeePParams.(interface {
+		ProtocolMajorVersion() uint
+	}); ok && !isNilPointer(versioned) {
+		return lcommon.MirTransferAllowed(versioned.ProtocolMajorVersion()), nil
+	}
+	if lv.ls != nil {
+		if epoch, err := lv.ls.epochForSlot(lv.epochStartSlot); err == nil {
+			return epoch.EraId >= alonzo.EraIdAlonzo, nil
+		}
+	}
+	return false, errors.New(
+		"MIR rewards fold is unknown: the view has no pinned protocol " +
+			"parameters or epoch era",
+	)
+}
+
+func isNilPointer(v any) bool {
+	value := reflect.ValueOf(v)
+	return value.Kind() == reflect.Pointer && value.IsNil()
+}
+
+// loadMIRPending reads the MIR certificates stored in the current epoch once
+// and folds them into per-credential rewards, per-pot totals and net pot
+// transfers. Rewards without an amount carry no credential credit and are
+// skipped.
+func (lv *LedgerView) loadMIRPending() (*mirPendingState, error) {
 	if lv.onMIRCertsLoad != nil {
 		lv.onMIRCertsLoad()
 	}
@@ -488,39 +491,71 @@ func (lv *LedgerView) loadMIRPending() (map[mirPendingKey]*big.Int, error) {
 	if err != nil {
 		return nil, lv.storageFault("get MIR certs in slot range: %w", err)
 	}
-	totals := make(map[mirPendingKey]*big.Int)
+	additive, err := lv.mirRewardsAdditive()
+	if err != nil {
+		return nil, err
+	}
+	state := &mirPendingState{
+		credits: make(map[mirPendingKey]*big.Int),
+		totals:  [2]*big.Int{new(big.Int), new(big.Int)},
+		transfers: [2]*big.Int{
+			new(big.Int), new(big.Int),
+		},
+	}
 	for _, effect := range effects {
+		if effect.Pot > mirPotTreasury {
+			return nil, fmt.Errorf("invalid MIR source pot: %d", effect.Pot)
+		}
 		if effect.OtherPot > 0 {
+			amount := new(big.Int).SetUint64(effect.OtherPot)
+			state.transfers[effect.Pot].Sub(state.transfers[effect.Pot], amount)
+			state.transfers[1-effect.Pot].Add(
+				state.transfers[1-effect.Pot], amount,
+			)
 			continue
 		}
 		for _, reward := range effect.Rewards {
 			if reward.Amount == nil {
 				continue
 			}
+			if _, err := lcommon.NewBlake2b224Checked(
+				reward.Credential,
+			); err != nil {
+				return nil, fmt.Errorf("MIR reward credential: %w", err)
+			}
 			key := mirPendingKey{
 				pot:        effect.Pot,
 				tag:        reward.CredentialTag,
 				credential: string(reward.Credential),
 			}
-			if total, ok := totals[key]; ok {
+			total, ok := state.credits[key]
+			switch {
+			case !ok:
+				state.credits[key] = new(big.Int).Set(reward.Amount)
+				state.totals[effect.Pot].Add(
+					state.totals[effect.Pot], reward.Amount,
+				)
+			case additive:
 				total.Add(total, reward.Amount)
-			} else {
-				totals[key] = new(big.Int).Set(reward.Amount)
+				state.totals[effect.Pot].Add(
+					state.totals[effect.Pot], reward.Amount,
+				)
+			default:
+				state.totals[effect.Pot].Sub(state.totals[effect.Pot], total)
+				total.Set(reward.Amount)
+				state.totals[effect.Pot].Add(
+					state.totals[effect.Pot], reward.Amount,
+				)
 			}
 		}
 	}
-	return totals, nil
+	return state, nil
 }
 
 // The gouroboros DELEG rule discovers this capability with a runtime type
 // assertion and, without it, rejects a negative delta an earlier transaction
 // covers, so signature drift must fail to build.
 var _ lcommon.PendingInstantaneousRewardsState = (*LedgerView)(nil)
-
-// The genesis key delegation predicates discover this capability with a
-// runtime type assertion and skip when it misses, so signature drift would
-// silently disable them rather than fail to build.
-var _ eras.GenesisDelegStateProvider = (*LedgerView)(nil)
 
 // The Conway committee certificate and voter rules discover this capability
 // with a runtime type assertion and fail closed when it misses, so signature
@@ -1066,13 +1101,6 @@ func (lv *LedgerView) GenesisDelegateKeyHashes(
 	return lv.ls.genesisDelegateKeyHashes(slot, lv.txn)
 }
 
-// GenesisDelegState implements eras.GenesisDelegStateProvider.
-func (lv *LedgerView) GenesisDelegState(
-	slot uint64,
-) (eras.GenesisDelegState, error) {
-	return lv.ls.genesisDelegState(slot, lv.txn)
-}
-
 func (lv *LedgerView) GenesisDelegateForGenesisKey(
 	genesisKeyHash lcommon.Blake2b224,
 	slot uint64,
@@ -1083,6 +1111,100 @@ func (lv *LedgerView) GenesisDelegateForGenesisKey(
 		lv.txn,
 	)
 }
+
+// The gouroboros DELEG rule discovers this capability with a runtime type
+// assertion and rejects a genesis key delegation certificate as undecidable
+// without it, so signature drift must fail to build.
+var _ lcommon.GenesisDelegationRegistryState = (*LedgerView)(nil)
+
+// CurrentGenesisDelegations returns the genesis delegation map in force at
+// slot, one entry per genesis key in genesis key order.
+func (lv *LedgerView) CurrentGenesisDelegations(
+	slot uint64,
+) ([]lcommon.GenesisDelegation, error) {
+	state, err := lv.ls.genesisDelegState(slot, lv.txn)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]lcommon.GenesisDelegation, 0, len(state.Current))
+	for genesisKey, pair := range state.Current {
+		ret = append(ret, lcommon.GenesisDelegation{
+			GenesisKeyHash:  genesisKey,
+			DelegateKeyHash: pair.Delegate,
+			VrfKeyHash:      pair.Vrf,
+		})
+	}
+	slices.SortFunc(ret, func(a, b lcommon.GenesisDelegation) int {
+		return bytes.Compare(a.GenesisKeyHash[:], b.GenesisKeyHash[:])
+	})
+	return ret, nil
+}
+
+// FutureGenesisDelegations returns the delegations certified in the last
+// stability window that are not yet in force at slot, ordered by the slot
+// they take effect and then by genesis key. A later certificate for the same
+// genesis key in the same slot has already replaced the earlier one.
+func (lv *LedgerView) FutureGenesisDelegations(
+	slot uint64,
+) ([]lcommon.GenesisDelegation, error) {
+	state, err := lv.ls.genesisDelegState(slot, lv.txn)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]futureGenesisDelegKey, 0, len(state.Future))
+	for key := range state.Future {
+		keys = append(keys, key)
+	}
+	slices.SortFunc(keys, func(a, b futureGenesisDelegKey) int {
+		if c := cmp.Compare(a.Slot, b.Slot); c != 0 {
+			return c
+		}
+		return bytes.Compare(a.Genesis[:], b.Genesis[:])
+	})
+	ret := make([]lcommon.GenesisDelegation, 0, len(keys))
+	for _, key := range keys {
+		pair := state.Future[key]
+		ret = append(ret, lcommon.GenesisDelegation{
+			GenesisKeyHash:  key.Genesis,
+			DelegateKeyHash: pair.Delegate,
+			VrfKeyHash:      pair.Vrf,
+		})
+	}
+	return ret, nil
+}
+
+// The gouroboros DELEG rule bounds a MIR certificate by the last stability
+// window of its epoch through this capability and rejects it as undecidable
+// without it, so signature drift must fail to build.
+var _ lcommon.StabilityWindowState = (*LedgerView)(nil)
+
+// NextEpochFirstSlot returns the first slot of the epoch after the one that
+// contains slot, from the epoch cache, which holds Byron epochs too.
+func (lv *LedgerView) NextEpochFirstSlot(slot uint64) (uint64, error) {
+	epoch, err := lv.ls.epochForSlot(slot)
+	if err != nil {
+		return 0, fmt.Errorf("epoch for slot %d: %w", slot, err)
+	}
+	length := uint64(epoch.LengthInSlots)
+	if epoch.StartSlot > math.MaxUint64-length {
+		return 0, errors.New("epoch end slot overflows")
+	}
+	return epoch.StartSlot + length, nil
+}
+
+// StabilityWindow returns the stability window in slots, ceil(3k/f), which
+// every Shelley-family era takes from Shelley genesis.
+func (lv *LedgerView) StabilityWindow() (uint64, error) {
+	if lv.ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("unable to get cardano node config")
+	}
+	return lv.ls.genesisDelegationWindow()
+}
+
+// The gouroboros DELEG rule bounds a MIR certificate by the pot net of what
+// earlier certificates in the epoch moved through this capability and rejects
+// it as undecidable without it, so signature drift must fail to build.
+var _ lcommon.InstantaneousRewardsTotalsState = (*LedgerView)(nil)
 
 func (lv *LedgerView) GenesisUpdateQuorum() (uint, error) {
 	return lv.ls.GenesisUpdateQuorum()
@@ -1267,9 +1389,10 @@ func (lv *LedgerView) CalculateRewards(
 //
 // It exists to satisfy common.RewardState, which gives it no way to report an
 // error, so an unavailable value is indistinguishable here from genuinely
-// zero pots. Every caller that can handle the difference must use
-// GetAdaPotsWithError; this one returns a zero value because a ledger rule
-// reaching it through the interface would otherwise kill the node.
+// zero pots. A storage fault is recorded on the view, so a caller that checks
+// StorageErr after validation sees the fault rather than the verdict the zero
+// pots produced. Every caller that can handle the difference must use
+// GetAdaPotsWithError.
 func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
 	adaPots, err := lv.GetAdaPotsWithError()
 	if err != nil {
@@ -1278,12 +1401,18 @@ func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
 	return adaPots
 }
 
-// GetAdaPotsWithError returns the current Ada pots.
-// TODO: implement the complete Ada pots retrieval. Treasury and reserves are
-// tracked in network_state, but this interface also needs the current fee and
-// reward pots as one coherent validation snapshot.
+// GetAdaPotsWithError returns the current reserves and treasury from the
+// network state. The rewards pot is not tracked and stays zero. A view with
+// no database cannot answer and returns ErrNotImplemented.
 func (lv *LedgerView) GetAdaPotsWithError() (lcommon.AdaPots, error) {
-	return lcommon.AdaPots{}, ErrNotImplemented
+	if lv.ls == nil || lv.ls.db == nil {
+		return lcommon.AdaPots{}, ErrNotImplemented
+	}
+	treasury, reserves, err := lv.ls.readNetworkState(lv.txn)
+	if err != nil {
+		return lcommon.AdaPots{}, lv.storageFault("read ada pots: %w", err)
+	}
+	return lcommon.AdaPots{Reserves: reserves, Treasury: treasury}, nil
 }
 
 // GetRewardSnapshot returns the current reward snapshot.

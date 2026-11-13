@@ -959,6 +959,15 @@ be read from the committed state. If rollback wins, truncation and the ledger
 rewind make the waiting block batch stale, and the tip recheck rejects it
 instead of publishing Apply after Undo.
 
+Replay recovery with a resolved producer and runtime partial-commit recovery
+can rewind ledger metadata without first rewinding the primary chain. Those
+paths use the ledger's applied-point record, bounded by the published ledger
+tip, to resolve the blocks being discarded; the active chain suffix may be
+ahead or may already belong to a replacement fork. They hold the same
+`transactionEventMutex` while capturing that applied range, enqueueing its
+Undo events, and committing the metadata truncation. An unapplied chain block
+therefore produces no Undo, and a later Apply cannot overtake the recovery.
+
 Both mutation paths stage their in-memory state against the durable commit.
 `Chain.AddBlocks` and `Chain.addRawBlocks` advance `currentTip`,
 `tipBlockIndex`, the queued headers, and the ephemeral block buffer per block
@@ -1148,13 +1157,13 @@ parameter, but it refuses to cross the consumed-UTxO prune floor because the
 deleted rows cannot be reconstructed.
 
 Getting this wrong is subtle, so the constraint is worth stating plainly:
-**the undo events must be emitted before the truncation, by the rollback
-path.** `handleEventChainUpdate` deliberately does *not* emit them, even
-though it receives `ChainRollbackEvent` with the rolled-back blocks. It is a
-`SubscribeFunc` dispatch reached only after `chain.Rollback` has published and
-returned, by which point the apply goroutine is already free to publish
-forward events — emitting there loses the race reproducibly. It still emits
-the `ledger.block` undo events, which are a different event type and so a
+**primary-chain undo events must be emitted before primary-chain truncation,
+by the rollback path.** `handleEventChainUpdate` deliberately does *not* emit
+them, even though it receives `ChainRollbackEvent` with the rolled-back blocks.
+It is a `SubscribeFunc` dispatch reached only after `chain.Rollback` has
+published and returned, by which point the apply goroutine is already free to
+publish forward events — emitting there loses the race reproducibly. It still
+emits the `ledger.block` undo events, which are a different event type and so a
 different lane. Emitting the undo events from a `go` statement onto the
 reordering shared pool loses the same race twice over.
 
@@ -1166,9 +1175,13 @@ because the latter deletes the block bodies. Success clears the record only
 after metadata truncation, cache reload, durable-floor enforcement, and an
 ordered-lane delivery barrier. Startup replays the stored payload while holding
 the transaction-event mutex, finishes the chain rewind if necessary, and then
-completes metadata truncation. This is an at-least-once outbox: an interruption
-after delivery and before clearing may replay an undo, so consumers must
-tolerate duplicate rollback notifications.
+completes metadata truncation. A payload successfully captured in the outbox is
+delivered at least once: an interruption after delivery and before clearing may
+replay an undo, so consumers must tolerate duplicate rollback notifications.
+An applied point whose block body was removed before a restart and is absent
+from the retained block cache cannot be added to that payload; the reconciler
+logs and counts the notification gap rather than using the replacement chain's
+block at the same slot.
 
 The record is bounded to 4096 blocks and 64 MiB of raw block fields. A larger
 rollback continues with live ordered delivery and logs that crash recovery is
@@ -7132,7 +7145,7 @@ set (`GetUTxOWhole`), stake-delegation deposits, the ledger peer snapshot, stake
 pools, stake pool parameters (`GetStakePoolParams`, the parameters in effect in
 the epoch of the acquired point from the registrations added at or before it, so
 a re-registration made during that epoch is not reported until the next one),
-which returns genesis relay addresses in ledger wire order and includes an
+which encodes every relay address in ledger wire order and includes an
 optional BLS key when protocol version 12 or later applies), Leios committee
 (`GetLeiosCommittee`, gated the same way through
 `LedgerStateConfig.LeiosCommittee`, which the node sets only from the strict
@@ -8941,9 +8954,10 @@ tokens per second. It follows the reference ChainSync client:
   `chainsync.client_patience_exhausted` and increments
   `dingo_chainsync_patience_exhausted_total`, and then requests
   `connmanager.connection_recycle_requested` with reason
-  `genesis_patience_exhausted`. That disconnect skips the stall path's grace,
-  cooldown, and only-eligible-peer guard, and is reported once per
-  connection.
+  `genesis_patience_exhausted`, also set as the request's `LocalCloseReason`
+  so peer governance delays the redial. That disconnect skips the stall
+  path's grace, cooldown, and only-eligible-peer guard, and is reported once
+  per connection.
 
 The defaults are 1000 tokens and 5 tokens per second: a 200-second allowance,
 the same budget as the reference node's 100,000 tokens at 500 per second. The
@@ -9156,7 +9170,10 @@ prefix of another is not a fork and decides nothing.
   not a proof: it exists because Dingo stops header download at `k` blocks
   rather than at the forecast horizon, and a temporarily sparse honest fork can
   lose it. Standoff losers are therefore disconnected but not deny-listed, so
-  an honest fork that lost can be redialed at once.
+  an honest fork that lost can be redialed. The close carries the local reason
+  `eagerness_standoff_lost`, which delays that redial (see peer governance's
+  reconnect backoff): a peer redialed at once would pin the limit again with
+  its first fork header.
 - A held peer against an idle one: a peer is idle after its ordered
   `MsgAwaitReply` observation confirms that it has no pending headers. The idle
   peer may be a fork that stopped at an older tip. Keepalive traffic refreshes
@@ -10453,6 +10470,28 @@ repeatedly stalls is not redialed immediately. The close handler then redials
 known alternates at once (`redialDisconnectedPeersLocked`) instead of waiting
 for the next reconcile, and redial ranking puts a peer that stalled within
 `chainsyncStallRankWindow` behind every other candidate.
+
+A close whose local reason is a chainsync demotion
+(`peergov.IsChainsyncDemotionReason`: `genesis_patience_exhausted` from the
+Limit on Patience, recorded through the recycle request's `LocalCloseReason`,
+or `eagerness_standoff_lost` from the node's standoff close) is handled like a
+stall and demotes the peer, whatever transport error the same close carries.
+The demotion lasts the peer's reconnect delay, which is at least ten seconds
+jittered by two seconds either way (8 to 12 seconds) and longer when the
+existing backoff already exceeds that, even when hot peers are critically low.
+That matches the reference's `repromoteErrorDelay` after a ChainSync error.
+Until the demotion ends (`ChainsyncDemotedUntil`) the peer is not dialed: a
+reconnect worker that was already waiting waits it out, and recovery redials
+skip the peer. A connection the peer opens to this node, or an outbound dial
+that was already in flight, is kept open but withheld from chain selection,
+like one from a denied peer, and an inbound arrival does not reset the backoff.
+A timer per demoted peer re-syncs the withhold when the demotion ends instead
+of waiting for the next reconcile; `Stop` cancels those timers and `Start`
+schedules them again for demotions still in force. A reconnected peer starts
+with a full patience bucket and nothing remembered by chain selection, so
+without the demotion a peer that keeps pinning the Limit on Eagerness regains
+it as soon as it reconnects. The connection manager only records the reason;
+it does not interpret it.
 
 Arbitrary inbound peers are identified by their transport tuple. A source host
 alone is insufficient because unrelated peers can arrive through the same NAT
@@ -21869,44 +21908,36 @@ POOLREAP precedes SNAP.
    The reference DELEG transition rejects most of what this check guards
    against at transaction-validation time, before any of it runs, which is
    what makes the boundary's own capacity check normally unreachable for a
-   fully validated chain. gouroboros's shelley validation rules implement only
-   the parts expressible against `common.LedgerState`, such as
-   `MIRNegativesNotCurrentlyAllowedError`. The rest need epoch-scoped state.
-   `ledger/eras.validateShelleyDelegCerts`, called from every
-   Shelley-through-Babbage `ValidateTx*` function, is dingo's implementation.
-   It walks a transaction's certificates in order, as DELEGS does, and it is
-   skipped for a phase-2-invalid transaction, for which DELEGS never runs.
-   For move instantaneous rewards it enforces
-   `MIRCertificateTooLateinEpochDELEG` (slot below `firstSlot(nextEpoch) -
-   3k/f`), `MIRTransferNotCurrentlyAllowed` (no pot transfer before protocol
-   version 5), `MIRProducesNegativeUpdate`,
-   `InsufficientForInstantaneousRewardsDELEG` and
-   `InsufficientForTransferDELEG`. Each certificate is checked against the
-   pots and pending rewards its predecessors left, so a later transfer
-   cannot fund an earlier distribution. The starting state comes from
-   `*LedgerView.MIRDelegState`: the `NetworkState` pots, the epoch's committed
-   distributions (summed from protocol version 5, replaced before it) and
-   net pot transfers, and the cutoff. Every transaction's certificates are
-   written immediately after that transaction validates, so this is always
-   caught up as of the currently validating slot. The gouroboros
-   `UtxoValidateDelegation` rule in the same rule lists checks
-   `MIRProducesNegativeUpdate` again from protocol version 5, reading the
-   pending rewards through `*LedgerView.PendingInstantaneousRewards` (the
-   epoch's committed distributions for one credential and pot, summed);
-   without that capability it rejects any negative delta an earlier
-   transaction covers as undecidable. For legacy stake
-   certificates the same walk enforces `StakeKeyAlreadyRegisteredDELEG`,
-   `StakeKeyNotRegisteredDELEG` and `StakeKeyNonZeroAccountBalanceDELEG`,
-   with withdrawals drained first. For genesis key delegation certificates it
-   enforces `GenesisKeyNotInMappingDELEG`, `DuplicateGenesisDelegateDELEG` and
-   `DuplicateGenesisVRFDELEG` against the delegations in force and the pending
-   ones from `*LedgerView.GenesisDelegState`, and a certified delegation takes
-   effect only at its slot plus the stability window. It also rejects
-   delegation from a
-   credential deregistered earlier in the transaction. Upstream value
-   conservation counts a deposit for every registration and a refund for
-   every deregistration, and those amounts match real accounts only because
-   this walk has already rejected the certificates that name no account.
+   fully validated chain. Dingo relies on the gouroboros
+   `UtxoValidateDelegation` rule in every Shelley-through-Babbage rule list
+   for it. That rule walks a transaction's certificates in order, as DELEGS
+   does, and gouroboros groups it with the rules a phase-2-invalid
+   transaction skips, since DELEGS never runs for one. It enforces the legacy
+   stake certificate predicates (`StakeKeyAlreadyRegisteredDELEG`,
+   `StakeKeyNotRegisteredDELEG`, `StakeKeyNonZeroAccountBalanceDELEG`, with
+   withdrawals drained first), the move instantaneous rewards predicates
+   (`MIRCertificateTooLateinEpochDELEG`, `MIRTransferNotCurrentlyAllowed`,
+   `MIRProducesNegativeUpdate`, `InsufficientForInstantaneousRewardsDELEG`,
+   `InsufficientForTransferDELEG`) and the genesis key delegation predicates
+   (`GenesisKeyNotInMappingDELEG`, `DuplicateGenesisDelegateDELEG`,
+   `DuplicateGenesisVRFDELEG`). The epoch-scoped state comes from optional
+   capabilities `*LedgerView` implements, each of which the rule treats as
+   undecidable and rejects without: `StabilityWindowState` (the next epoch's
+   first slot from the epoch cache and `ceil(3k/f)` from Shelley genesis),
+   `PendingInstantaneousRewardsState` and `InstantaneousRewardsTotalsState`
+   (the epoch's committed distributions, summed from Alonzo and replaced
+   before it, their per-pot totals and the net pot transfers), and
+   `GenesisDelegationRegistryState` (the delegations in force and those
+   certified but still inside the stability window). The pots come from
+   `GetAdaPots`, which reads reserves and treasury from `NetworkState`. Every
+   transaction's certificates are written immediately after that transaction
+   validates, so this state is always caught up as of the currently
+   validating slot, and gouroboros folds the earlier transactions of the same
+   block and the earlier certificates of the same transaction in memory.
+   Upstream value conservation counts a deposit for every registration and a
+   refund for every deregistration, and those amounts match real accounts
+   only because this walk has already rejected the certificates that name no
+   account.
 3. SNAP-point mark stake read (`captureEpochBoundarySnapshotStake` →
    `snapshot.Manager.ComputeEpochBoundarySnapshot`, when a stake hook is
    installed): read the mark snapshot's stake distribution here, after the two
