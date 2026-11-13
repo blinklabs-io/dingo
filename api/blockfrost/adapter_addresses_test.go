@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -90,7 +91,7 @@ func seedAddressOutput(
 	storePointerOutputCbor(t, db, txHash, 0, addr, amount)
 	if spentBy != nil {
 		_, err := raw.Exec(
-			`UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = ? WHERE tx_id = ?`,
+			`UPDATE utxo SET spent_at_tx_id = (SELECT id FROM "transaction" WHERE hash = ?), deleted_slot = ? WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 			spentBy,
 			slot+1,
 			txHash,
@@ -600,6 +601,7 @@ func seedSiblingOutputs(
 	require.NoError(t, err)
 	tx, err := raw.Begin()
 	require.NoError(t, err)
+	txIDs := testutil.NewTransactionIDs(t, tx)
 	stmt, err := tx.Prepare(`
 INSERT INTO utxo (tx_id, payment_key, staking_key, credential_tag,
     added_slot, deleted_slot, amount, output_idx, payment_script)
@@ -612,7 +614,7 @@ VALUES (?, ?, ?, 0, ?, 0, '1000000', 0, ?)`)
 		id[31] = 0xee
 		ids[i] = id
 		_, err = stmt.Exec(
-			id,
+			txIDs.ID(id),
 			sibling.PaymentKeyHash().Bytes(),
 			stakingKeyOf(sibling),
 			uint64(i)+1,

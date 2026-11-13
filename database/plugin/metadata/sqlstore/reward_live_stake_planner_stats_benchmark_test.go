@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -30,7 +31,7 @@ func BenchmarkRewardLiveStakePlannerStatsFinalizer(b *testing.B) {
 	for range b.N {
 		b.StopTimer()
 		store := newMigratedSQLiteStore(b)
-		_, err := store.writeDB.Exec(
+		_, err := testutil.ExecTransactionInsert(store.writeDB,
 			`INSERT INTO "transaction" (id, slot, block_index) VALUES (1, 1, 0)`,
 		)
 		require.NoError(b, err)

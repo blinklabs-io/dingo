@@ -141,7 +141,7 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 		return nil, err
 	}
 	defer release()
-	ctx, cancel := context.WithTimeout(ctx, s.utxorpc.config.ServerTimeout)
+	ctx, cancel := withOptionalTimeout(ctx, s.utxorpc.config.ServerTimeout)
 	defer cancel()
 
 	dist, err := s.utxorpc.config.LedgerState.PoolStakeDistributionBounded(
@@ -204,7 +204,8 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 			VrfKeyhash:    pool.VrfKeyHash.Bytes(),
 		}
 		retainedBytes += int64(proto.Size(item))
-		if retainedBytes > s.utxorpc.config.MaxResponseBytes {
+		if s.utxorpc.config.MaxResponseBytes > 0 &&
+			retainedBytes > s.utxorpc.config.MaxResponseBytes {
 			return nil, (&byteBudget{
 				limit: s.utxorpc.config.MaxResponseBytes,
 			}).exceeded()
@@ -227,7 +228,8 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 		},
 		LedgerTip: tip,
 	}
-	if int64(proto.Size(resp)) > s.utxorpc.config.MaxResponseBytes {
+	if s.utxorpc.config.MaxResponseBytes > 0 &&
+		int64(proto.Size(resp)) > s.utxorpc.config.MaxResponseBytes {
 		return nil, (&byteBudget{
 			limit: s.utxorpc.config.MaxResponseBytes,
 		}).exceeded()
@@ -250,6 +252,9 @@ func readStateContextError(err error) *connect.Error {
 const minimumStakePoolShareWireBytes = 64
 
 func maxStakePoolsForResponse(maxBytes int64) int {
+	if maxBytes <= 0 {
+		return math.MaxInt
+	}
 	maxPools := maxBytes / minimumStakePoolShareWireBytes
 	if maxPools < 1 {
 		return 1
@@ -281,7 +286,7 @@ func poolKeyHashFilter(
 	// registration reads it drives, so an unbounded one lets a single request
 	// choose how much work the node does. A caller wanting every pool sends an
 	// empty filter, which costs one bulk read regardless of pool count.
-	if len(poolKeyHashes) > maxPoolFilter {
+	if maxPoolFilter > 0 && len(poolKeyHashes) > maxPoolFilter {
 		return nil, fmt.Errorf(
 			"too many pool key hashes: %d exceeds maximum of %d",
 			len(poolKeyHashes),

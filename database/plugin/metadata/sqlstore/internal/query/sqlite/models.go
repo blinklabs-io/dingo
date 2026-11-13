@@ -6,8 +6,6 @@ package sqlitequery
 
 import (
 	"database/sql"
-
-	"github.com/blinklabs-io/dingo/database/types"
 )
 
 type Account struct {
@@ -38,6 +36,19 @@ type AddressTransaction struct {
 
 type AddressTransactionRebuildSource struct {
 	TransactionID int64
+}
+
+type AppliedTransaction struct {
+	TxID          int64
+	BlockHash     []byte
+	Metadata      []byte
+	Slot          sql.NullInt64
+	Type          sql.NullInt64
+	Fee           sql.NullString
+	CollateralFee sql.NullString
+	Ttl           sql.NullString
+	BlockIndex    sql.NullInt64
+	Valid         sql.NullBool
 }
 
 type Asset struct {
@@ -535,17 +546,8 @@ type TokenRegistryEntry struct {
 }
 
 type Transaction struct {
-	Hash          []byte
-	BlockHash     []byte
-	Metadata      []byte
-	Slot          sql.NullInt64
-	Type          sql.NullInt64
-	ID            int64
-	Fee           sql.NullString
-	CollateralFee sql.NullString
-	Ttl           sql.NullString
-	BlockIndex    sql.NullInt64
-	Valid         sql.NullBool
+	ID   int64
+	Hash []byte
 }
 
 type TransactionMetadataLabel struct {
@@ -558,22 +560,19 @@ type TransactionMetadataLabel struct {
 }
 
 type Utxo struct {
-	TransactionID           sql.NullInt64
+	ID                      int64
+	TxID                    int64
+	OutputIdx               int64
 	CollateralReturnForTxID sql.NullInt64
-	TxID                    []byte
+	SpentAtTxID             sql.NullInt64
 	PaymentKey              []byte
 	StakingKey              []byte
 	CredentialTag           int64
 	DatumHash               []byte
-	SpentAtTxID             types.NullableHash
-	ReferencedByTxID        types.NullableHash
-	CollateralByTxID        types.NullableHash
-	ID                      int64
+	Amount                  sql.NullString
+	PaymentScript           sql.NullBool
 	AddedSlot               sql.NullInt64
 	DeletedSlot             sql.NullInt64
-	Amount                  sql.NullString
-	OutputIdx               sql.NullInt64
-	PaymentScript           sql.NullBool
 }
 
 type UtxoAddress struct {

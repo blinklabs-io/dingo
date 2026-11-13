@@ -89,10 +89,6 @@ func (s *Store) redeemerScriptHashes(
 	return ret, nil
 }
 
-const spendScriptHashQuery = `-- name: GetSpendScriptHashByOutput :one
-SELECT payment_key, payment_script FROM utxo
-WHERE tx_id = ? AND output_idx = ?`
-
 // spendScriptHash returns the script locking the input a spend redeemer
 // points at, as recorded when that output was created.
 func (s *Store) spendScriptHash(
@@ -109,8 +105,10 @@ func (s *Store) spendScriptHash(
 		paymentKey []byte
 		isScript   sql.NullBool
 	)
+	u := s.utxoSQL()
 	err := s.queryRowCached(
-		ctx, db, spendScriptHashQuery, input.Id().Bytes(), input.Index(),
+		ctx, db, u.spendScriptHash,
+		u.refArgs(input.Id().Bytes(), input.Index())...,
 	).Scan(&paymentKey, &isScript)
 	if errors.Is(err, sql.ErrNoRows) {
 		return lcommon.ScriptHash{}, false, nil

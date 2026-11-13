@@ -28,12 +28,6 @@ import (
 )
 
 const (
-	// maxTxPayloadSize bounds the evaluation request bodies. Both endpoints
-	// carry the transaction encoded as base16 or base64 rather than as raw
-	// bytes, and the /utxos variant wraps it in JSON, so the encoded body is
-	// larger than the transaction it carries.
-	maxTxPayloadSize = 4 * maxTxBodySize
-
 	// ogmiosEvaluateVersion is the Ogmios major version whose response
 	// format these endpoints serve. Blockfrost defaults its `version` query
 	// parameter to the same value.
@@ -138,7 +132,6 @@ func (b *Blockfrost) handleTransactionEvaluate(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	b.setRequestBodyDeadline(w)
 	if !requireContentType(w, r, "application/cbor") {
 		return
 	}
@@ -163,7 +156,6 @@ func (b *Blockfrost) handleTransactionEvaluateUtxos(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	b.setRequestBodyDeadline(w)
 	if !requireContentType(w, r, "application/json") {
 		return
 	}
@@ -243,9 +235,9 @@ func (b *Blockfrost) evaluateTransaction(
 		if errors.Is(err, ErrEvaluationOverloaded) {
 			writeError(
 				w,
-				http.StatusTooManyRequests,
-				"Too Many Requests",
-				"transaction evaluation is at capacity, try again later",
+				http.StatusServiceUnavailable,
+				"Service Unavailable",
+				"transaction evaluation is busy, try again later",
 			)
 			return
 		}
@@ -329,23 +321,14 @@ func requireOgmiosVersion(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// readEvaluationBody reads a size-limited evaluation request body, writing
+// readEvaluationBody reads the whole evaluation request body without a size cap, writing
 // the error response itself when the body cannot be used.
 func (b *Blockfrost) readEvaluationBody(
 	w http.ResponseWriter,
 	r *http.Request,
 ) ([]byte, bool) {
-	body, err := b.readRequestBody(w, r, maxTxPayloadSize)
+	body, err := readRequestBody(r)
 	if err != nil {
-		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			writeError(
-				w,
-				http.StatusRequestEntityTooLarge,
-				"Request Entity Too Large",
-				"transaction body exceeds maximum allowed size",
-			)
-			return nil, false
-		}
 		writeError(
 			w,
 			http.StatusBadRequest,

@@ -219,7 +219,6 @@ func TestAccountCoinsMidStreamFailureIsNotAWellFormedDocument(t *testing.T) {
 		return ochainsync.Tip{}, nil
 	}
 	srv := httptest.NewServer(newTestHandler(t, deps, func(c *ServerConfig) {
-		c.maxConcurrentBulkReads = 1
 	}))
 	defer srv.Close()
 	post := func() (*http.Response, []byte, error) {

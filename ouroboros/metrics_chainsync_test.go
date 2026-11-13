@@ -15,6 +15,11 @@
 package ouroboros
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,5 +194,63 @@ func TestChainsyncResyncsCountedByReason(t *testing.T) {
 			require.Len(t, mf.GetMetric(), 4,
 				"formatted reasons must not add series")
 		}
+	}
+}
+
+// A resumed observer's re-intersect is a fixed reason and is counted under
+// it, not folded into "other" with the formatted ones.
+func TestChainsyncResyncObserverResumedKeepsItsReasonLabel(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonObserverResumed,
+		chainsyncResyncReasonLabel(
+			event.ChainsyncResyncReasonObserverResumed,
+		),
+	)
+}
+
+// Every fixed reason the event package defines keeps its own metric label; a
+// reason missing from the allowlist would be counted as other.
+func TestChainsyncResyncReasonLabelCoversEveryEventReason(t *testing.T) {
+	t.Parallel()
+	file, err := parser.ParseFile(
+		token.NewFileSet(),
+		"../event/chainsync_resync.go",
+		nil,
+		0,
+	)
+	require.NoError(t, err)
+	var reasons []string
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if !strings.HasPrefix(name.Name, "ChainsyncResyncReason") ||
+					i >= len(vs.Values) {
+					continue
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				reason, err := strconv.Unquote(lit.Value)
+				require.NoError(t, err)
+				reasons = append(reasons, reason)
+			}
+		}
+	}
+	require.NotEmpty(t, reasons)
+	require.Contains(t, reasons, event.ChainsyncResyncReasonWithheldCandidateAncestry)
+	for _, reason := range reasons {
+		require.Equal(t, reason, chainsyncResyncReasonLabel(reason))
 	}
 }

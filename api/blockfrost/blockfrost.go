@@ -16,83 +16,27 @@ package blockfrost
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 )
 
-// Leave time to report a stalled body before the 30-second write deadline.
-const (
-	defaultRequestBodyTimeout                   = 15 * time.Second
-	defaultListenHost                           = "127.0.0.1"
-	defaultMaxConcurrentMutations          uint = 4
-	defaultMaxConcurrentMutationsPerClient      = 1
-	defaultMaxConcurrentDRepDetails        uint = 4
-	defaultMaxDRepDetailsPerClient              = 1
-	defaultMaxAddressSummaries             uint = 4
-	defaultMaxAddressSummariesPerClient         = 2
-	defaultMaxChainSummaries               uint = 4
-	defaultMaxChainSummariesPerClient           = 2
-	defaultMaxAssetDetails                 uint = 4
-	defaultMaxAssetDetailsPerClient             = 2
-	defaultMaxMempoolAddresses             uint = 4
-	defaultMaxMempoolAddressesPerClient         = 1
-	defaultMaxPoolAggregates               uint = 4
-	defaultMaxPoolAggregatesPerClient           = 2
-	defaultMaxMetadataLabelPages           uint = 4
-	defaultMaxMetadataLabelPagesPerClient       = 2
-	defaultMaxPoolLists                    uint = 4
-	defaultMaxPoolListsPerClient                = 2
-	defaultMaxBlockLists                   uint = 4
-	defaultMaxBlockListsPerClient               = 2
-)
+const defaultListenHost = "127.0.0.1"
 
 // Blockfrost is the Blockfrost-compatible REST API server.
 type Blockfrost struct {
-	config             BlockfrostConfig
-	logger             *slog.Logger
-	requestBodyTimeout time.Duration
-	node               BlockfrostNode
-	mutationAdmission  *requestAdmission
-	drepAdmission      *requestAdmission
-	// addressSummaryAdmission is shared by every route that scans a whole
-	// address or account history: the base and extended summaries, the
-	// address transaction pages, the account summary, the address and account
-	// totals, the account asset balances, and the account associated-address
-	// pages.
-	addressSummaryAdmission *requestAdmission
-	// chainSummaryAdmission is shared by the routes that aggregate over the
-	// whole chain or a whole epoch: the network supply and stake summary, the
-	// latest epoch, a single epoch and the epochs before and after one. It is
-	// separate from addressSummaryAdmission so a burst of address scans cannot
-	// starve these routes, and the reverse.
-	chainSummaryAdmission *requestAdmission
-	// assetDetailAdmission bounds concurrent asset lookups, each of which
-	// totals every live holding of the asset.
-	assetDetailAdmission    *requestAdmission
-	mempoolAddressAdmission *requestAdmission
-	// poolAggregateAdmission is shared by the pool detail and the extended
-	// pool list, whose live stake is aggregated over the pool's delegators.
-	poolAggregateAdmission *requestAdmission
-	// metadataLabelAdmission is shared by the metadata label transaction
-	// pages, whose cost scales with the page offset into a label that can
-	// cover most of the chain.
-	metadataLabelAdmission *requestAdmission
-	// poolListAdmission is shared by the pool list and the retiring pool
-	// list, which rank the pool registration and retirement certificates on
-	// every request.
-	poolListAdmission *requestAdmission
-	// blockListAdmission is shared by the pool and epoch block lists, whose
-	// count and page read every block in the pool's or epoch's slot range.
-	blockListAdmission *requestAdmission
+	config BlockfrostConfig
+	logger *slog.Logger
+	node   BlockfrostNode
+	// mutationAdmission is nil unless the operator configured a mutation
+	// limit; a nil admission admits every request.
+	mutationAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -114,61 +58,21 @@ func New(
 	if cfg.ListenAddress == "" {
 		cfg.ListenAddress = net.JoinHostPort(defaultListenHost, "3000")
 	}
-	if cfg.MaxConcurrentMutations == 0 {
-		cfg.MaxConcurrentMutations = defaultMaxConcurrentMutations
-	}
-	if cfg.MaxConcurrentMutationsPerClient == 0 {
-		cfg.MaxConcurrentMutationsPerClient = defaultMaxConcurrentMutationsPerClient
-	}
 	return &Blockfrost{
-		config:             cfg,
-		requestBodyTimeout: defaultRequestBodyTimeout,
-		logger:             logger,
-		node:               node,
+		config: cfg,
+		logger: logger,
+		node:   node,
 		mutationAdmission: newRequestAdmission(
 			cfg.MaxConcurrentMutations,
 			cfg.MaxConcurrentMutationsPerClient,
-		),
-		drepAdmission: newRequestAdmission(
-			defaultMaxConcurrentDRepDetails,
-			defaultMaxDRepDetailsPerClient,
-		),
-		addressSummaryAdmission: newRequestAdmission(
-			defaultMaxAddressSummaries,
-			defaultMaxAddressSummariesPerClient,
-		),
-		chainSummaryAdmission: newRequestAdmission(
-			defaultMaxChainSummaries,
-			defaultMaxChainSummariesPerClient,
-		),
-		assetDetailAdmission: newRequestAdmission(
-			defaultMaxAssetDetails,
-			defaultMaxAssetDetailsPerClient,
-		),
-		mempoolAddressAdmission: newRequestAdmission(
-			defaultMaxMempoolAddresses,
-			defaultMaxMempoolAddressesPerClient,
-		),
-		poolAggregateAdmission: newRequestAdmission(
-			defaultMaxPoolAggregates,
-			defaultMaxPoolAggregatesPerClient,
-		),
-		metadataLabelAdmission: newRequestAdmission(
-			defaultMaxMetadataLabelPages,
-			defaultMaxMetadataLabelPagesPerClient,
-		),
-		poolListAdmission: newRequestAdmission(
-			defaultMaxPoolLists,
-			defaultMaxPoolListsPerClient,
-		),
-		blockListAdmission: newRequestAdmission(
-			defaultMaxBlockLists,
-			defaultMaxBlockListsPerClient,
 		),
 		listener: apilistener.New("Blockfrost API", logger),
 	}
 }
 
+// requestAdmission bounds concurrent requests. A zero maxActive or maxClient
+// leaves that bound off, and newRequestAdmission returns nil when both are
+// off.
 type requestAdmission struct {
 	mu           sync.Mutex
 	active       uint
@@ -178,6 +82,9 @@ type requestAdmission struct {
 }
 
 func newRequestAdmission(maxActive, maxClient uint) *requestAdmission {
+	if maxActive == 0 && maxClient == 0 {
+		return nil
+	}
 	return &requestAdmission{
 		activeClient: make(map[string]uint),
 		maxActive:    maxActive,
@@ -189,6 +96,9 @@ func (a *requestAdmission) acquire(
 	ctx context.Context,
 	client string,
 ) (func(), bool) {
+	if a == nil {
+		return func() {}, true
+	}
 	select {
 	case <-ctx.Done():
 		return nil, false
@@ -196,7 +106,8 @@ func (a *requestAdmission) acquire(
 	}
 
 	a.mu.Lock()
-	if a.active >= a.maxActive || a.activeClient[client] >= a.maxClient {
+	if (a.maxActive > 0 && a.active >= a.maxActive) ||
+		(a.maxClient > 0 && a.activeClient[client] >= a.maxClient) {
 		a.mu.Unlock()
 		return nil, false
 	}
@@ -235,7 +146,7 @@ func (b *Blockfrost) mutationHandler(next http.HandlerFunc) http.Handler {
 				w,
 				http.StatusTooManyRequests,
 				"Too Many Requests",
-				"transaction mutation capacity reached, try again later",
+				"transaction mutation limit reached, try again later",
 			)
 			return
 		}
@@ -594,18 +505,14 @@ func (b *Blockfrost) handler() http.Handler {
 	// registration order.
 	mux.HandleFunc("/", b.handleNotFound)
 
-	// Wrap handler with a request body size limit (1 MB)
-	// as defense-in-depth against oversized payloads.
-	const maxRequestBodyBytes int64 = 1 << 20 // 1 MB
 	routed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if b.writeUnsupportedMethod(w, r) {
 			return
 		}
 		mux.ServeHTTP(w, r)
 	})
-	limited := http.MaxBytesHandler(routed, maxRequestBodyBytes)
 	return httpcors.Handler(
-		limited,
+		routed,
 		httpcors.Config{
 			AllowedOrigins: b.config.CORSAllowedOrigins,
 			ExposeHeaders:  []string{"Retry-After"},
@@ -629,12 +536,8 @@ func (b *Blockfrost) Start(
 
 	server, bindDone, err := b.listener.Publish(func() *http.Server {
 		return &http.Server{
-			Addr:              b.config.ListenAddress,
-			Handler:           b.handler(),
-			ReadHeaderTimeout: 60 * time.Second,
-			ReadTimeout:       60 * time.Second,
-			WriteTimeout:      30 * time.Second,
-			IdleTimeout:       120 * time.Second,
+			Addr:    b.config.ListenAddress,
+			Handler: b.handler(),
 		}
 	})
 	if err != nil {
@@ -677,35 +580,7 @@ func (b *Blockfrost) Stop(
 	return b.listener.Stop(ctx, apilistener.Graceful)
 }
 
-// readRequestBody bounds both bytes and time before transaction processing.
-func (b *Blockfrost) readRequestBody(
-	w http.ResponseWriter,
-	r *http.Request,
-	limit int64,
-) ([]byte, error) {
-	b.setRequestBodyDeadline(w)
-	r.Body = http.MaxBytesReader(w, r.Body, limit)
-	body, err := io.ReadAll(r.Body)
-	if err == nil {
-		// A completed read must not expire during transaction processing or
-		// a later request. Preserve failed-read deadlines: net/http can still
-		// drain the unread body before sending the error response.
-		if err := http.NewResponseController(w).SetReadDeadline(time.Time{}); err != nil &&
-			!errors.Is(err, http.ErrNotSupported) {
-			b.logger.Debug(
-				"could not clear request body deadline",
-				"error",
-				err,
-			)
-		}
-	}
-	return body, err
-}
-
-func (b *Blockfrost) setRequestBodyDeadline(w http.ResponseWriter) {
-	if err := http.NewResponseController(w).SetReadDeadline(
-		time.Now().Add(b.requestBodyTimeout),
-	); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		b.logger.Debug("could not bound request body read", "error", err)
-	}
+// readRequestBody reads the whole request body.
+func readRequestBody(r *http.Request) ([]byte, error) {
+	return io.ReadAll(r.Body)
 }

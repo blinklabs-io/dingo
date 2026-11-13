@@ -75,12 +75,12 @@ func TestValidatedBlockBatchesAPIIndexesAndKeepsStateImmediate(t *testing.T) {
 				ComputeOffsets(block.Cbor(), block)
 			require.NoError(t, err)
 			_, err = raw.Exec(
-				`CREATE TRIGGER require_complete_validated_block BEFORE INSERT ON address_transaction WHEN (SELECT COUNT(*) FROM "transaction") < 2 BEGIN SELECT RAISE(ABORT, 'API rows flushed before validated block completed'); END`,
+				`CREATE TRIGGER require_complete_validated_block BEFORE INSERT ON address_transaction WHEN (SELECT COUNT(*) FROM applied_transaction) < 2 BEGIN SELECT RAISE(ABORT, 'API rows flushed before validated block completed'); END`,
 			)
 			require.NoError(t, err)
 			if failFlush {
 				_, err = raw.Exec(
-					`CREATE TRIGGER fail_validated_block_api BEFORE INSERT ON address_transaction WHEN (SELECT COUNT(*) FROM "transaction") >= 2 BEGIN SELECT RAISE(ABORT, 'injected validated-block flush failure'); END`,
+					`CREATE TRIGGER fail_validated_block_api BEFORE INSERT ON address_transaction WHEN (SELECT COUNT(*) FROM applied_transaction) >= 2 BEGIN SELECT RAISE(ABORT, 'injected validated-block flush failure'); END`,
 				)
 				require.NoError(t, err)
 			}

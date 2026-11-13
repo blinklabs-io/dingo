@@ -242,7 +242,8 @@ func rowBatchingScenario(t *testing.T) (
 			cbor.Tag{Number: 30, Content: []uint64{1, 10}},
 			rowBatchingRewardAccount(poolKey),
 			[]any{rowBatchingKey(poolKey)},
-			[]any{}, nil,
+			[]any{},
+			nil,
 		}},
 	})
 	names["register"] = newRowBatchingTx(t, map[uint]any{
@@ -271,7 +272,8 @@ func rowBatchingScenario(t *testing.T) (
 		}},
 		20: []any{[]any{
 			uint64(100_000_000), rowBatchingRewardAccount(stakeKey),
-			[]any{uint64(6)}, anchor,
+			[]any{uint64(6)},
+			anchor,
 		}},
 	})
 	registerOut := names["register"].hash
@@ -585,20 +587,20 @@ func TestApplyRowBatchingSameChunkDependencies(t *testing.T) {
 			require.Equal(t, rowBatchingKey(0x33), drep)
 
 			spentAt := rowBatchingQueryOne[[]byte](t, raw,
-				`SELECT spent_at_tx_id FROM utxo WHERE tx_id = ? AND output_idx = 0`,
+				`SELECT (SELECT hash FROM "transaction" WHERE id = utxo.spent_at_tx_id) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`,
 				names["register"].hash)
 			require.Equal(t, names["spend"].hash, spentAt,
 				"the output produced earlier in the chunk is marked spent by its consumer")
 			deleted := rowBatchingQueryOne[uint64](t, raw,
-				`SELECT deleted_slot FROM utxo WHERE tx_id = ? AND output_idx = 0`,
+				`SELECT deleted_slot FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`,
 				names["register"].hash)
 			require.Equal(t, uint64(20), deleted)
 			chained := rowBatchingQueryOne[[]byte](t, raw,
-				`SELECT spent_at_tx_id FROM utxo WHERE tx_id = ? AND output_idx = 1`,
+				`SELECT (SELECT hash FROM "transaction" WHERE id = utxo.spent_at_tx_id) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 1`,
 				names["spend"].hash)
 			require.Equal(t, names["chain"].hash, chained)
 			live := rowBatchingQueryOne[int](t, raw,
-				`SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND deleted_slot = 0`,
+				`SELECT COUNT(*) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND deleted_slot = 0`,
 				names["chain"].hash)
 			require.Equal(t, 1, live)
 

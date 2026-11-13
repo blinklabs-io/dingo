@@ -929,3 +929,20 @@ func (w *deadlineRecorder) Write(p []byte) (int, error) {
 	w.events = append(w.events, "write")
 	return w.ResponseRecorder.Write(p)
 }
+
+func TestHandlerBoundsRequestBody(t *testing.T) {
+	t.Parallel()
+
+	put := func(size int) int {
+		body := `{"rollback_to":{"slot_no":1},"patterns":["*"` +
+			strings.Repeat(`,"*"`, size/4) + `]}`
+		w := httptest.NewRecorder()
+		newTestServer(&mockNode{}).handler().ServeHTTP(
+			w,
+			httptest.NewRequest(http.MethodPut, "/patterns", strings.NewReader(body)),
+		)
+		return w.Code
+	}
+	require.Equal(t, http.StatusOK, put(16))
+	require.Equal(t, http.StatusBadRequest, put(int(maxRequestBodyBytes)+8))
+}

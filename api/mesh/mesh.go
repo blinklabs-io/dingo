@@ -23,7 +23,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
@@ -41,30 +40,6 @@ const (
 	nodeVersion       = "0.1.0"
 	blockchain        = "cardano"
 	defaultListenAddr = ":8080"
-	maxRequestBody    = 1 << 20 // 1 MB
-
-	// defaultRequestBodyTimeout bounds how long a single request may
-	// take to deliver its body. maxRequestBody caps how many bytes a
-	// client may send, but nothing caps how slowly it may send them, so
-	// without this a client that stops partway through a declared body
-	// holds its handler goroutine for as long as it keeps the
-	// connection open.
-	defaultRequestBodyTimeout = 30 * time.Second
-
-	// defaultMaxMempoolListing caps the identifiers one /mempool response
-	// names. The Mesh response has no cursor and must list every pending
-	// transaction, so a pool larger than this is refused as retriable.
-	defaultMaxMempoolListing = 10000
-
-	// defaultMaxConcurrentMempoolListings caps /mempool requests in flight.
-	// A request over the cap is refused rather than queued, so unauthenticated
-	// callers cannot pile up pool walks behind one another.
-	defaultMaxConcurrentMempoolListings = 8
-
-	// defaultMaxConcurrentBulkReads caps simultaneous complete /account/coins
-	// reads. It refuses excess work before starting a ledger query without
-	// changing the contents of a successful response.
-	defaultMaxConcurrentBulkReads = 8
 
 	// An /account/coins response streams the account's UTxOs from storage in
 	// pages of at most defaultAccountCoinsPageSize matches, scanning at most
@@ -74,18 +49,6 @@ const (
 	defaultAccountCoinsPageSize       = 500
 	defaultAccountCoinsPageCandidates = 5000
 	defaultAccountCoinsPageBytes      = 1 << 20
-
-	// accountCoinsPageWriteTimeout is the write deadline each streamed
-	// /account/coins page gets. Progress extends it, so a large account
-	// completes while a client that stops reading is cut off.
-	accountCoinsPageWriteTimeout = 30 * time.Second
-
-	// listenerReadTimeout bounds the whole request read at the
-	// connection, covering the requests whose body no handler reads --
-	// such as an unknown route -- which the per-request deadline above
-	// never sees.
-	// api/utxorpc's listener carries the same bound.
-	listenerReadTimeout = 60 * time.Second
 
 	// mainnetMagic is the network magic for Cardano
 	// mainnet, used to determine the address network.
@@ -109,25 +72,13 @@ type ServerConfig struct {
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
 	TLS                apiconfig.EffectiveTLS
-	// requestBodyTimeout bounds a single request's body read. It is
-	// unexported deliberately: operators get the constant above, not a
-	// knob whose only supported values are "the default" and "short
-	// enough for a test". NewServer substitutes
-	// defaultRequestBodyTimeout when it is not positive.
-	requestBodyTimeout time.Duration
-	// maxConcurrentBulkReads is unexported so the concurrency bound remains a
-	// server invariant rather than part of the Mesh wire contract.
-	maxConcurrentBulkReads int
 	// accountCoinsPageSize, accountCoinsPageCandidates and
 	// accountCoinsPageBytes bound one streamed /account/coins page. They are
-	// unexported for the same reason as maxConcurrentBulkReads.
+	// unexported so paging stays a server invariant rather than part of the
+	// Mesh wire contract.
 	accountCoinsPageSize       int
 	accountCoinsPageCandidates int
 	accountCoinsPageBytes      int64
-	// maxMempoolListing and maxConcurrentMempoolListings are unexported and
-	// defaulted the same way.
-	maxMempoolListing            int
-	maxConcurrentMempoolListings int
 }
 
 // Server is the Mesh-compatible REST API server.
@@ -141,11 +92,6 @@ type Server struct {
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
 	listener *apilistener.Listener
-	// bulkSlots admits complete /account/coins reads without changing their
-	// whole-result contract.
-	bulkSlots chan struct{}
-	// mempoolSlots holds one token per /mempool request in flight.
-	mempoolSlots chan struct{}
 }
 
 // NewServer creates a new Mesh API server instance.
@@ -198,16 +144,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.ListenAddress == "" {
 		cfg.ListenAddress = defaultListenAddr
 	}
-	if cfg.requestBodyTimeout <= 0 {
-		cfg.requestBodyTimeout = defaultRequestBodyTimeout
-	}
 
-	if cfg.maxMempoolListing <= 0 {
-		cfg.maxMempoolListing = defaultMaxMempoolListing
-	}
-	if cfg.maxConcurrentMempoolListings <= 0 {
-		cfg.maxConcurrentMempoolListings = defaultMaxConcurrentMempoolListings
-	}
 	if cfg.accountCoinsPageSize <= 0 {
 		cfg.accountCoinsPageSize = defaultAccountCoinsPageSize
 	}
@@ -216,9 +153,6 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.accountCoinsPageBytes <= 0 {
 		cfg.accountCoinsPageBytes = defaultAccountCoinsPageBytes
-	}
-	if cfg.maxConcurrentBulkReads <= 0 {
-		cfg.maxConcurrentBulkReads = defaultMaxConcurrentBulkReads
 	}
 
 	var addrNetID uint8 = lcommon.AddressNetworkTestnet
@@ -239,12 +173,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return &Server{
 		config:        cfg,
 		logger:        logger,
-		mempoolSlots:  make(chan struct{}, cfg.maxConcurrentMempoolListings),
 		networkID:     networkID,
 		genesisID:     genesisID,
 		addrNetworkID: addrNetID,
 		listener:      apilistener.New("Mesh API", logger),
-		bulkSlots:     make(chan struct{}, cfg.maxConcurrentBulkReads),
 	}, nil
 }
 
@@ -267,10 +199,6 @@ func (s *Server) Start(ctx context.Context) error {
 					AllowedOrigins: s.config.CORSAllowedOrigins,
 				},
 			),
-			ReadHeaderTimeout: 60 * time.Second,
-			ReadTimeout:       listenerReadTimeout,
-			WriteTimeout:      30 * time.Second,
-			IdleTimeout:       120 * time.Second,
 		}
 	})
 	if err != nil {
@@ -460,35 +388,19 @@ func writeError(w http.ResponseWriter, meshErr *Error) {
 	writeJSON(w, http.StatusInternalServerError, meshErr)
 }
 
-// decodeRequest decodes a JSON request body into dst under both
-// request bounds: maxRequestBody caps how many bytes a client may send,
-// and requestBodyTimeout caps how long it may take to send them. A
-// client that stalls partway through a declared body fails the read,
-// and its caller reports the same invalid-request error a malformed
-// body already produces.
+// decodeRequest decodes a JSON request body into dst, requiring the body to
+// hold exactly one JSON value.
 func (s *Server) decodeRequest(
-	w http.ResponseWriter,
+	_ http.ResponseWriter,
 	r *http.Request,
 	dst any,
 ) error {
-	rc := http.NewResponseController(w)
-	s.setBodyReadDeadline(
-		rc, time.Now().Add(s.config.requestBodyTimeout),
-	)
-	// Clear it on the way out: the deadline covers the body read only,
-	// and must not outlive it into the response write, the drain
-	// net/http performs to reuse the connection, or the next request
-	// on a kept-alive one.
-	defer s.setBodyReadDeadline(rc, time.Time{})
-
-	body := http.MaxBytesReader(w, r.Body, maxRequestBody)
+	body := r.Body
 	defer body.Close()
 	decoder := json.NewDecoder(body)
 	if err := decoder.Decode(dst); err != nil {
 		return err
 	}
-	// Decode again to require complete consumption, including any trailing
-	// whitespace, under the same byte and time limits.
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err != nil {
@@ -497,22 +409,4 @@ func (s *Server) decodeRequest(
 		return errors.New("request body must contain only one JSON value")
 	}
 	return nil
-}
-
-// setBodyReadDeadline applies a read deadline to the connection behind
-// a response writer. An httptest recorder, which the handler-level
-// tests use, does not carry one; the served path always does, and the
-// listenerReadTimeout still bounds a request there either way,
-// so a missing deadline is reported rather than raised.
-func (s *Server) setBodyReadDeadline(
-	rc *http.ResponseController,
-	deadline time.Time,
-) {
-	if err := rc.SetReadDeadline(deadline); err != nil &&
-		!errors.Is(err, http.ErrNotSupported) {
-		s.logger.Debug(
-			"could not bound request body read",
-			"error", err,
-		)
-	}
 }

@@ -3200,7 +3200,7 @@ func (a *NodeAdapter) exactAddressBalance(
 		}
 		for i := range batch {
 			candidates++
-			if candidates > limits.maxUtxos {
+			if limits.maxUtxos > 0 && candidates > limits.maxUtxos {
 				return nil, 0, fmt.Errorf(
 					"more than %d UTxOs read: %w",
 					limits.maxUtxos,
@@ -3228,7 +3228,8 @@ func (a *NodeAdapter) exactAddressBalance(
 			}
 			count++
 			sums.add(batch[i].Utxo)
-			if len(sums.assets) > limits.maxAssets {
+			if limits.maxAssets > 0 &&
+				len(sums.assets) > limits.maxAssets {
 				return nil, 0, fmt.Errorf(
 					"more than %d distinct assets: %w",
 					limits.maxAssets,
@@ -3474,7 +3475,10 @@ func (a *NodeAdapter) addressUTXOs(ctx context.Context,
 	defer txn.Release()
 	offset, ok := paginationOffset(params)
 	if !ok || offset > math.MaxInt-params.Count-1 {
-		return nil, 0, models.ErrUtxoQueryBudgetExceeded
+		return nil, 0, fmt.Errorf(
+			"page offset out of range: %w",
+			ErrInvalidPaginationParameters,
+		)
 	}
 	requestedEnd := offset + params.Count
 	matchLimit := requestedEnd + 1
@@ -3509,9 +3513,9 @@ func (a *NodeAdapter) addressUTXOs(ctx context.Context,
 			Descending:      params.Order == PaginationOrderDesc,
 		}
 		if filter != nil {
-			// The asset predicate has no index, so scan to the candidate
-			// budget to keep the exact total the listing reported before.
-			query.Limit = max(matchLimit, database.ExactAddressCandidateScanLimit+1)
+			// The asset predicate has no index, so scan every candidate to
+			// report the exact total.
+			query.Limit = math.MaxInt
 			query.FilterByAsset = true
 			query.AssetPolicyID = filter.policyID
 			query.AssetName = filter.assetName
@@ -3520,8 +3524,7 @@ func (a *NodeAdapter) addressUTXOs(ctx context.Context,
 			ctx,
 			query,
 			txn,
-			database.ExactAddressCandidateScanLimit,
-			database.DefaultPublicUtxoCborBudget,
+			0,
 		)
 		if scanErr != nil {
 			return nil, 0, fmt.Errorf(
@@ -3530,15 +3533,12 @@ func (a *NodeAdapter) addressUTXOs(ctx context.Context,
 				scanErr,
 			)
 		}
-		pageRefs, total, err = addressUtxoPageRefs(
+		pageRefs, total = addressUtxoPageRefs(
 			refs,
 			exhausted,
 			offset,
 			requestedEnd,
 		)
-		if err != nil {
-			return nil, 0, err
-		}
 	}
 
 	paged, err := a.orderedUtxosByRefs(ctx, pageRefs, txn)
@@ -3606,17 +3606,15 @@ func addressUtxoPageRefs(
 	exhausted bool,
 	offset int,
 	requestedEnd int,
-) ([]models.UtxoId, int, error) {
+) ([]models.UtxoId, int) {
 	total := -1
-	if !exhausted && len(refs) < requestedEnd {
-		return nil, 0, models.ErrUtxoQueryBudgetExceeded
-	}
+
 	if exhausted {
 		total = len(refs)
 	}
 	start := min(offset, len(refs))
 	end := min(requestedEnd, len(refs))
-	return refs[start:end], total, nil
+	return refs[start:end], total
 }
 
 // orderedUtxosByRefs fetches full UTxO rows (including assets) for refs in
@@ -4102,7 +4100,9 @@ func (a *NodeAdapter) TransactionSubmit(
 			ErrInvalidTransaction,
 		)
 	}
-	if err := a.submitter.AddTransaction(ctx, txType, txCbor); err != nil {
+	if err := a.submitter.AddTransaction(
+		mempool.WithAPISubmission(ctx), txType, txCbor,
+	); err != nil {
 		if _, ok := errors.AsType[*mempool.MempoolFullError](err); ok {
 			return "", fmt.Errorf(
 				"submit transaction to mempool: %w: %w",

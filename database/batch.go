@@ -86,6 +86,7 @@ func (d *Database) EnableBatchUtxoOverlay(
 	txn *Txn,
 	inputs []models.UtxoId,
 	deleteOnSpend []models.UtxoId,
+	producers [][]byte,
 ) (bool, error) {
 	if acc == nil || txn == nil {
 		return false, nil
@@ -99,7 +100,7 @@ func (d *Database) EnableBatchUtxoOverlay(
 		return false, types.ErrNilTxn
 	}
 	return overlay.EnableBatchUtxoOverlay(
-		acc, metadataTxn, inputs, deleteOnSpend,
+		acc, metadataTxn, inputs, deleteOnSpend, producers,
 	)
 }
 

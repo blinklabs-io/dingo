@@ -827,7 +827,10 @@ func (b *LedgerDeltaBatch) enableTrustedUtxoOverlay(
 		return false, nil
 	}
 	produced := make(map[utxoref.Key]struct{})
-	var inputs []models.UtxoId
+	var (
+		inputs    []models.UtxoId
+		producers [][]byte
+	)
 	for _, delta := range b.deltas {
 		if delta == nil {
 			continue
@@ -840,6 +843,7 @@ func (b *LedgerDeltaBatch) enableTrustedUtxoOverlay(
 			if len(levels) != 1 {
 				return false, nil
 			}
+			producers = append(producers, tr.Tx.Hash().Bytes())
 			for _, input := range levels[0].Consumed() {
 				if _, ok := produced[utxoref.ForInput(input)]; ok {
 					continue
@@ -862,7 +866,7 @@ func (b *LedgerDeltaBatch) enableTrustedUtxoOverlay(
 		deleteOnSpend = spends.committedAmong(inputs)
 	}
 	enabled, err := ls.db.EnableBatchUtxoOverlay(
-		acc, txn, inputs, deleteOnSpend,
+		acc, txn, inputs, deleteOnSpend, producers,
 	)
 	if err != nil {
 		return false, fmt.Errorf("enable batch UTxO overlay: %w", err)

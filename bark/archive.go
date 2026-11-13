@@ -248,16 +248,6 @@ func (a *archiveServiceHandler) FetchBlock(
 			errors.New("at least one block reference is required"),
 		)
 	}
-	if len(blocks) > DefaultMaxFetchBlockRefs {
-		return nil, connect.NewError(
-			connect.CodeResourceExhausted,
-			fmt.Errorf(
-				"block reference count %d exceeds maximum %d",
-				len(blocks),
-				DefaultMaxFetchBlockRefs,
-			),
-		)
-	}
 
 	// Validate the whole batch before acquiring the database, so a
 	// malformed request costs no storage work.
@@ -273,17 +263,21 @@ func (a *archiveServiceHandler) FetchBlock(
 		refs = append(refs, ref)
 	}
 
-	// A slot is taken before any storage is touched, and a request that finds
-	// none is refused rather than queued: ArchiveService is unauthenticated,
-	// so a queue would let anyone who can reach the listener stack up work.
-	select {
-	case a.bark.archiveSlots <- struct{}{}:
-		defer func() { <-a.bark.archiveSlots }()
-	default:
-		return nil, connect.NewError(
-			connect.CodeResourceExhausted,
-			errors.New("archive is serving its maximum concurrent requests"),
-		)
+	// When a concurrency limit is configured, a slot is taken before any
+	// storage is touched and a request that finds none is refused rather
+	// than queued.
+	if a.bark.archiveSlots != nil {
+		select {
+		case a.bark.archiveSlots <- struct{}{}:
+			defer func() { <-a.bark.archiveSlots }()
+		default:
+			return nil, connect.NewError(
+				connect.CodeResourceExhausted,
+				errors.New(
+					"archive is serving its maximum concurrent requests",
+				),
+			)
+		}
 	}
 
 	// Every reference costs a storage lookup, whether or not the block

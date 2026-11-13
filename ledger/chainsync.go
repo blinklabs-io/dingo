@@ -403,6 +403,22 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 		ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
 		return
 	}
+	if e.SessionReopened {
+		ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
+		// The coalescing window assumes a resync ends the connection ID. A
+		// re-intersect keeps it, so a divergence on the new cursor would be
+		// suppressed and the peer left delivering headers nothing accepts.
+		ls.clearChainsyncResyncCoalesce(e.ConnectionId)
+		// The peer replays from the intersection. Headers buffered from the
+		// old cursor would sit ahead of that replay, and its mismatch count
+		// would be charged to the new cursor.
+		ls.rejectBufferedHeaderEvents(
+			ls.takeBufferedPeerHeaders(e.ConnectionId),
+			&pending,
+		)
+		ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
+		return
+	}
 	// Also drops an event published before the hold was taken.
 	if ls.connectionIngestHeld(e.ConnectionId) {
 		queuePeerTipAdmission(&pending, e, false)
@@ -2367,6 +2383,8 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 	if e.BlockHeader == nil || len(e.Point.Hash) == 0 {
 		return
 	}
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
 	if ls.peerHeaderHistory == nil {
 		ls.peerHeaderHistory = make(map[string]*peerHeaderChain)
 	}
@@ -2490,6 +2508,8 @@ func (ls *LedgerState) peerHeaderHistoryByteBudget(
 	return maxPeerHeaderHistoryBytesPerConn
 }
 
+// evictOldestPeerHeaderRecord drops historyKey's oldest record. The caller
+// holds peerHeaderHistoryMu.
 func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
 	history := ls.peerHeaderHistory[historyKey]
 	if history == nil || len(history.order) == 0 {
@@ -2508,6 +2528,14 @@ func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
 }
 
 func (ls *LedgerState) removePeerHeaderHistory(historyKey string) {
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
+	ls.removePeerHeaderHistoryLocked(historyKey)
+}
+
+// removePeerHeaderHistoryLocked is removePeerHeaderHistory for a caller that
+// holds peerHeaderHistoryMu.
+func (ls *LedgerState) removePeerHeaderHistoryLocked(historyKey string) {
 	ls.removePeerForkNoncePrefix(historyKey)
 	history := ls.peerHeaderHistory[historyKey]
 	if history == nil {
@@ -2521,6 +2549,8 @@ func (ls *LedgerState) removePeerHeaderHistoryFrom(
 	historyKey string,
 	point ocommon.Point,
 ) {
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
 	history := ls.peerHeaderHistory[historyKey]
 	if history == nil {
 		return
@@ -2551,6 +2581,28 @@ func (ls *LedgerState) removePeerHeaderHistoryFrom(
 	}
 }
 
+// peerHeaderHistorySnapshot returns a copy of historyKey's chain, or nil. A
+// reader that walks a chain across storage lookups works on the copy, so it
+// neither holds peerHeaderHistoryMu that long nor sees a concurrent removal
+// half done. Records are shared: they are not modified once stored.
+func (ls *LedgerState) peerHeaderHistorySnapshot(
+	historyKey string,
+) *peerHeaderChain {
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
+	history := ls.peerHeaderHistory[historyKey]
+	if history == nil {
+		return nil
+	}
+	return &peerHeaderChain{
+		order:         slices.Clone(history.order),
+		byHash:        maps.Clone(history.byHash),
+		retainedBytes: history.retainedBytes,
+	}
+}
+
+// makePeerHeaderHistoryRoom evicts until recordBytes fits the total budget.
+// The caller holds peerHeaderHistoryMu.
 func (ls *LedgerState) makePeerHeaderHistoryRoom(
 	recordBytes int,
 	protectedKey string,
@@ -2615,7 +2667,7 @@ func (ls *LedgerState) makePeerHeaderHistoryRoom(
 		}
 		candidate := heap.Pop(&retirable).(*peerHeaderHistoryCandidate) //nolint:forcetypeassert
 		delete(retirableByKey, candidate.historyKey)
-		ls.removePeerHeaderHistory(candidate.historyKey)
+		ls.removePeerHeaderHistoryLocked(candidate.historyKey)
 	}
 	return true
 }
@@ -2695,6 +2747,8 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 		return false
 	}
 	tipHashKey := hex.EncodeToString(headerTip.Point.Hash)
+	ls.peerHeaderHistoryMu.Lock()
+	defer ls.peerHeaderHistoryMu.Unlock()
 	for _, history := range ls.peerHeaderHistory {
 		tipRecord, ok := history.byHash[tipHashKey]
 		if ok && bytes.Equal(tipRecord.prevHash, e.Point.Hash) {
@@ -2718,12 +2772,10 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 // The caller holds chainsyncMutex, so the guards below keep storage reads off
 // paths that cannot need them. The origin point carries no hash, and a header
 // beyond the localTip snapshot is not observed in the primary-chain index at
-// handler entry. The O(1) local hash index then rejects an unknown fork header
-// before a point lookup could fall through to a configured Bark archive. On a
-// hash-index hit, the returned block ID is checked through the point-only
-// primary-chain index path, avoiding a second block-CBOR read. A hash-index
-// miss also probes the exact local point key for pre-index databases, but that
-// bounded compatibility lookup cannot fall through to Bark's archive.
+// handler entry. The exact local point key then answers the question without
+// falling through to a configured Bark archive, and its block ID is checked
+// through the point-only primary-chain index path, avoiding a second
+// block-CBOR read.
 func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	e ChainsyncEvent,
 	localTip ochainsync.Tip,
@@ -2741,10 +2793,54 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	return contains
 }
 
+// rollbackTargetOnLocalChain reports whether a peer-requested rollback target
+// is origin or a block on the local primary chain. It shares the membership
+// result cached in the point's unrecoverableRollbacks record for the unchanged
+// local tip with reportUnrecoverableRollbackIfStuck, reading it when present
+// and filling it otherwise, so a repeated rejection costs one storage read. A
+// lookup error reports false so the caller keeps the more severe
+// classification.
+//
+// Callers must hold chainsyncMutex.
+func (ls *LedgerState) rollbackTargetOnLocalChain(
+	point ocommon.Point,
+) bool {
+	if len(point.Hash) == 0 {
+		return point.Slot == 0
+	}
+	if ls.chain == nil {
+		return false
+	}
+	localTip := ls.chain.HeaderTip()
+	key := unrecoverableRollbackKey(point)
+	rec, ok := ls.unrecoverableRollbacks[key]
+	cacheable := ok && pointMatches(rec.localTip, localTip.Point)
+	if cacheable && rec.primaryChainChecked {
+		return rec.onPrimaryChain
+	}
+	onPrimary, err := ls.historicalPointOnPrimaryChain(point, localTip)
+	if err != nil {
+		ls.config.Logger.Debug(
+			"could not classify rollback target against primary chain",
+			"component", "ledger",
+			"slot", point.Slot,
+			"hash", hex.EncodeToString(point.Hash),
+			"error", err,
+		)
+		return false
+	}
+	if cacheable {
+		rec.primaryChainChecked = true
+		rec.onPrimaryChain = onPrimary
+		ls.unrecoverableRollbacks[key] = rec
+	}
+	return onPrimary
+}
+
 // historicalPointOnPrimaryChain performs the bounded local membership check
 // shared by historical-header filtering and rollback diagnosis. It never
 // treats append-only blob presence as primary-chain membership and never
-// falls through to a configured archive for a legacy point lookup.
+// falls through to a configured archive.
 func (ls *LedgerState) historicalPointOnPrimaryChain(
 	point ocommon.Point,
 	localTip ochainsync.Tip,
@@ -2753,24 +2849,17 @@ func (ls *LedgerState) historicalPointOnPrimaryChain(
 		point.Slot > localTip.Point.Slot {
 		return false, nil
 	}
-	block, err := ls.blockByHash(ls.lifecycleContext(), point.Hash)
+	// Only the local point key can answer this. A block read through the hash
+	// index lets Bark turn expired CBOR into an archive fetch, while expiry
+	// keeps the metadata and block index that record membership.
+	blockID, err := database.BlockIDByPointLocal(ls.db, point)
 	if errors.Is(err, models.ErrBlockNotFound) {
-		// Blocks written before the hash index was introduced still have an
-		// exact point key and metadata. Probe that local path without allowing
-		// Bark to fall through to its archive on an unknown fork hash.
-		blockID, localErr := database.BlockIDByPointLocal(ls.db, point)
-		if errors.Is(localErr, models.ErrBlockNotFound) {
-			return false, nil
-		}
-		if localErr != nil {
-			return false, localErr
-		}
-		return ls.primaryChainContainsBlockID(blockID, point)
+		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return ls.primaryChainContainsBlock(block, point)
+	return ls.primaryChainContainsBlockID(blockID, point)
 }
 
 var errPeerForkAuthorizationChanged = errors.New(
@@ -2783,7 +2872,7 @@ func (ls *LedgerState) findPeerForkPath(
 	localTipSlot uint64,
 ) (*ocommon.Point, []ChainsyncEvent, error) {
 	prevHash := append([]byte(nil), initialPrevHash...)
-	history := ls.peerHeaderHistory[connIdKey(e.ConnectionId)]
+	history := ls.peerHeaderHistorySnapshot(connIdKey(e.ConnectionId))
 	pathReversed := []ChainsyncEvent{e}
 	visited := map[string]struct{}{
 		hex.EncodeToString(e.Point.Hash): {},
@@ -3082,8 +3171,9 @@ func (ls *LedgerState) requestChainsyncResync(
 // coalesceChainsyncResync reports whether a resync request for connId repeats
 // one already published within chainsyncResyncCoalesceWindow. A single
 // divergence delivers many headers that each fail the same way, and the
-// subscriber closes the connection and denies the peer once per request, so
-// only the first request of an episode is published.
+// subscriber acts on the connection once per request, so only the first
+// request of an episode is published. An episode ends when the connection
+// closes or re-intersects.
 func (ls *LedgerState) coalesceChainsyncResync(
 	connId ouroboros.ConnectionId,
 	reason string,
@@ -3566,6 +3656,8 @@ func (ls *LedgerState) recordRollback(
 	point ocommon.Point,
 	now time.Time,
 ) int {
+	ls.rollbackHistoryMu.Lock()
+	defer ls.rollbackHistoryMu.Unlock()
 	if ls.rollbackCounts == nil && len(ls.rollbackHistory) > 0 {
 		ls.rollbackCounts = make(map[rollbackCountKey]rollbackCountRecord)
 		for _, r := range ls.rollbackHistory {
@@ -3645,6 +3737,8 @@ func addRollbackOccurrence(
 }
 
 func (ls *LedgerState) clearRollbackHistory() {
+	ls.rollbackHistoryMu.Lock()
+	defer ls.rollbackHistoryMu.Unlock()
 	ls.rollbackHistory = nil
 	ls.rollbackCounts = nil
 }
@@ -3840,7 +3934,12 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			),
 		)
 	}
-	if err := ls.rollbackChainAndStateDeferred(ls.lifecycleContext(), e.Point, pending); err != nil {
+	depth, err := ls.rollbackChainAndStateDeferredDepth(
+		ls.lifecycleContext(),
+		e.Point,
+		pending,
+	)
+	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// Missing rollback point can happen when local state and peer
 			// chainsync cursor drift. Recover by forcing re-intersect.
@@ -3988,7 +4087,20 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			// boundary does. Returning the error instead would reach
 			// handleEventChainsync's fatal path and terminate the node on a
 			// rollback a peer chose.
-			ls.config.Logger.Error(
+			// The tracker runs first so the log level below reuses its cached
+			// membership result. A target on our own chain (origin included)
+			// means the peer is behind or forked, so it is not a local fault
+			// worth ERROR.
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+				e.ConnectionId,
+			)
+			logRejection := ls.config.Logger.Error
+			if ls.rollbackTargetOnLocalChain(e.Point) {
+				logRejection = ls.config.Logger.Warn
+			}
+			logRejection(
 				"chainsync rollback is below the consumed UTxO prune floor, rejecting peer chain",
 				"component",
 				"ledger",
@@ -4002,11 +4114,6 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				err,
 				"hint",
 				"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
-			)
-			ls.reportUnrecoverableRollbackIfStuck(
-				e.Point,
-				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
-				e.ConnectionId,
 			)
 			ls.resetChainsyncResyncState(pending)
 			ls.setChainsyncState(SyncingChainsyncState)
@@ -4030,6 +4137,12 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 	// un-crossable-rollback tracking is stale. Clear it so a later,
 	// unrelated divergence starts counting from zero.
 	ls.clearUnrecoverableRollbacks()
+	// Counted here, after the apply succeeded, so refused, deferred and
+	// no-op rollbacks never inflate it. The handler compares no candidate
+	// chain, so this is the only signal that a peer moved our chain. The
+	// depth is the block count the chain removed under its own lock; tip
+	// samples taken around the rollback would race concurrent blockfetch adds.
+	ls.metrics.observePeerRollbackApplied(depth)
 	// Crossing to the point is forward progress toward the peer's chain, so
 	// drop this point's per-connection loop-detector records too. A rollback
 	// we actually applied must not count toward the repeat-loop threshold on
@@ -4093,6 +4206,8 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 //
 // Callers must hold chainsyncMutex.
 func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
+	ls.rollbackHistoryMu.Lock()
+	defer ls.rollbackHistoryMu.Unlock()
 	filtered := ls.rollbackHistory[:0]
 	for _, r := range ls.rollbackHistory {
 		if pointMatches(r.point, point) {
@@ -4489,7 +4604,7 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 ) (int, error) {
-	history := ls.peerHeaderHistory[connIdKey(connId)]
+	history := ls.peerHeaderHistorySnapshot(connIdKey(connId))
 	if history == nil || len(history.order) == 0 {
 		return 0, nil
 	}
@@ -4824,19 +4939,37 @@ func queuePeerHeaderHistoryInvalidation(
 
 // pinChainsyncHeaderVerdict pins generation for admitting e, verifying the
 // header again when the verdict expired first. It returns a nil release and a
-// nil error when the header is withheld, and an error, after queueing the
+// nil error when no verdict could be pinned, and an error, after queueing the
 // connection for recycling, when the header fails verification again: a
 // verdict that expired says nothing about the header, but a fresh failure is
 // the same rejection as the first verification's.
+//
+// With no verdict pinned, a header that mustAuthorize is withheld and the
+// expired generation is returned. Any other header is queued without producer
+// authorization and zero is returned, as for a verdict that had expired
+// before admission began. Withholding it would leave a hole in the
+// connection's headers: the next one does not fit the queue, which is then
+// discarded and the peer re-intersected. A block publication waiting on the
+// pin's lock expires the verdict between the currency check and the pin.
 func (ls *LedgerState) pinChainsyncHeaderVerdict(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
 	generation uint64,
 	reverify func() (uint64, error),
+	mustAuthorize bool,
 ) (uint64, func(), error) {
 	pinned, release, err := ls.pinHeaderVerdict(generation, reverify)
 	if err != nil && !IsHeaderVerificationDeferred(err) {
 		return 0, nil, ls.rejectChainsyncHeaderVerification(e, pending, err)
+	}
+	if release == nil && !mustAuthorize {
+		ls.config.Logger.Debug(
+			"queueing chainsync header without producer authorization after it expired before admission",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+		)
+		return 0, nil, nil
 	}
 	if release == nil {
 		ls.config.Logger.Debug(
@@ -4980,12 +5113,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			pending,
 			headerCryptoVerificationGeneration,
 			reverify,
+			headerValidationRequired || headerTrusted,
 		)
 		if err != nil {
 			return err
 		}
-		if release == nil {
+		if release == nil && pinnedGeneration != 0 {
 			return nil
+		}
+		if release == nil {
+			headerCryptoVerified = false
 		}
 		releaseVerificationGeneration = release
 		if pinnedGeneration != headerCryptoVerificationGeneration {
@@ -5095,6 +5232,12 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 						ls.lifecycleContext(),
 						&e,
 						headerCryptoVerificationGeneration,
+						func() (uint64, error) {
+							return ls.ValidatePeerChainSelectionHeaderCryptoWithGeneration(
+								e.ConnectionId,
+								e.BlockHeader,
+							)
+						},
 					)
 					if !current {
 						cleanup := ls.invalidateChainsyncHeaderAdmission(e)
@@ -7093,6 +7236,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 					}
 					return nil
 				}
+				ls.metrics.incHeaderVerificationDeferred()
 				ls.config.Logger.Debug(
 					"deferring stateful block header verification until ledger apply",
 					"component",
@@ -7140,6 +7284,15 @@ func (ls *LedgerState) blockfetchEventCurrent(e BlockfetchEvent) bool {
 	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
 		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
 		return false
+	}
+	// A request released while still outstanding keeps streaming until its
+	// terminal event. The connection can be the active one again by then, so
+	// the connection alone does not say which request an event belongs to.
+	if e.RequestId != 0 {
+		released := ls.blockfetchReleasedRequestIds[connIdKey(e.ConnectionId)]
+		if _, ok := released[e.RequestId]; ok {
+			return false
+		}
 	}
 	return sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId) ||
 		(connIdKey(ls.shadowBlockfetchConnId) != "" &&

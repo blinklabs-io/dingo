@@ -24,14 +24,20 @@ const maxHeaderAdmissionSettleAttempts = 4
 
 // pinSettledHeaderAdmission bridges queue admission and its deferred selector
 // callback. Callers hold no ledger or chainsync lock while a transition settles.
-// An expired verdict can be replaced only by proof that the exact header has
-// already been applied on the current chain; a queued or retained fork header
-// does not establish that fact. Membership is read before taking the new pin;
-// the pin then rejects a publication or transition that invalidated that read.
+// An expired verdict is replaced in two cases: the exact header has already
+// been applied on the current chain, or the header is still queued and
+// reverify returns a verdict for the current publication. Queue admission
+// releases its pin just before the callback runs, and a block applied in
+// between publishes a tip that expires the verdict though nothing about the
+// header changed. A header that is neither applied nor queued keeps its
+// expired verdict, and being queued does not replace one by itself.
+// Membership is read before taking the new pin; the pin then rejects a
+// publication or transition that invalidated that read.
 func (ls *LedgerState) pinSettledHeaderAdmission(
 	ctx context.Context,
 	e *ChainsyncEvent,
 	generation uint64,
+	reverify func() (uint64, error),
 ) (func(), bool) {
 	if generation == 0 || e == nil {
 		return nil, false
@@ -39,6 +45,9 @@ func (ls *LedgerState) pinSettledHeaderAdmission(
 	if release, current := ls.PinHeaderCryptoVerificationGeneration(generation); current {
 		return release, true
 	}
+	bound := e.BlockHeader != nil && pointMatches(e.Point, ocommon.NewPoint(
+		e.BlockHeader.SlotNumber(), e.BlockHeader.Hash().Bytes(),
+	))
 	waitCtx, cancel := context.WithTimeout(ctx, blockfetchBusyTimeout)
 	defer cancel()
 	for range maxHeaderAdmissionSettleAttempts {
@@ -49,9 +58,7 @@ func (ls *LedgerState) pinSettledHeaderAdmission(
 		currentGeneration := ls.CurrentHeaderCryptoVerificationGeneration()
 		if currentGeneration != 0 {
 			applied, membershipSettled := false, true
-			if e.BlockHeader != nil && pointMatches(e.Point, ocommon.NewPoint(
-				e.BlockHeader.SlotNumber(), e.BlockHeader.Hash().Bytes(),
-			)) {
+			if bound {
 				applied, membershipSettled = ls.headerAppliedSettled(waitCtx, e.BlockHeader)
 			}
 			if !membershipSettled {
@@ -65,7 +72,26 @@ func (ls *LedgerState) pinSettledHeaderAdmission(
 			}
 			if !applied {
 				release()
-				return nil, false
+				if !bound || reverify == nil || ls.chain == nil ||
+					!ls.chain.HoldsQueuedHeader(e.Point) {
+					return nil, false
+				}
+				fresh, err := reverify()
+				if err != nil && !IsHeaderVerificationDeferred(err) {
+					return nil, false
+				}
+				if err != nil {
+					// A deferral names a publication or transition under
+					// way; the next attempt waits for it to settle.
+					continue
+				}
+				release, current = ls.PinHeaderCryptoVerificationGeneration(
+					fresh,
+				)
+				if !current {
+					continue
+				}
+				currentGeneration = fresh
 			}
 			e.HeaderCryptoVerificationGeneration = currentGeneration
 			if e.PeerTipUpdate != nil {
