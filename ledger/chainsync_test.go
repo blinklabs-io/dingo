@@ -19042,6 +19042,10 @@ func TestCreateGenesisBlockPreservesImportedCommittee(t *testing.T) {
 		strconv.FormatUint(anchorSlot, 10),
 		nil,
 	))
+	require.NoError(t, db.SetEpoch(
+		anchorSlot, 300, nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, 1, 100, nil,
+	))
 	require.NoError(t, ls.loadMithrilTrustBoundary())
 
 	retainedKey, err := hex.DecodeString(musashiGenesisCommitteeColdKeys[0])
@@ -19089,6 +19093,41 @@ func TestCreateGenesisBlockPreservesImportedCommittee(t *testing.T) {
 			coldKeyHex,
 		)
 	}
+}
+
+// TestCreateGenesisBlockSeedsCommitteeAfterPreConwayImport proves a snapshot
+// taken before Conway does not suppress the committee established by the
+// later hard fork.
+func TestCreateGenesisBlockSeedsCommitteeAfterPreConwayImport(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+	require.NoError(t, err)
+	require.NoError(t, db.SetGenesisCbor(0, genesisHash[:], []byte{0x80}, nil))
+
+	const anchorSlot = 1_000_000
+	ls.currentTip.Point = ocommon.NewPoint(
+		anchorSlot,
+		bytes.Repeat([]byte{0xa6}, lcommon.Blake2b256Size),
+	)
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		strconv.FormatUint(anchorSlot, 10),
+		nil,
+	))
+	require.NoError(t, db.SetEpoch(
+		anchorSlot, 299, nil, nil, nil, nil,
+		eras.BabbageEraDesc.Id, 1, 100, nil,
+	))
+	require.NoError(t, ls.loadMithrilTrustBoundary())
+
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
+	require.Equal(
+		t,
+		len(musashiGenesisCommitteeColdKeys),
+		committeeMemberRowCount(t, db),
+	)
 }
 
 // TestCreateGenesisBlockCommitteeReplayIdempotent proves re-running genesis
@@ -19219,14 +19258,23 @@ func TestEnsureGenesisCommitteeRejectsNegativeExpiryAfterImport(t *testing.T) {
 	t.Parallel()
 
 	ls, db := genesisConstitutionTestState(t)
+	const anchorSlot = 1_000_000
+	ls.currentTip.Point = ocommon.NewPoint(
+		anchorSlot,
+		bytes.Repeat([]byte{0xa7}, lcommon.Blake2b256Size),
+	)
 	members := ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members
 	rawKey := "keyHash-" + musashiGenesisCommitteeColdKeys[0]
 	require.Contains(t, members, rawKey)
 	members[rawKey] = -11
 	require.NoError(t, db.SetSyncState(
 		mithrilLedgerSlotSyncKey,
-		"1000000",
+		strconv.FormatUint(anchorSlot, 10),
 		nil,
+	))
+	require.NoError(t, db.SetEpoch(
+		anchorSlot, 300, nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, 1, 100, nil,
 	))
 
 	err := ls.ensureGenesisCommittee(context.Background(), nil)

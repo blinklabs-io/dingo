@@ -8898,9 +8898,11 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 // before inserting makes this safe for a chain replayed from genesis: a
 // credential a later UpdateCommittee has since re-elected or removed already
 // has a row, so its real history is left alone instead of being reverted to
-// genesis state. A completed Mithril import is different. Its committee is an
-// authoritative current-state snapshot, so an absent genesis credential means
-// it is not seated and must not be inferred from missing local history.
+// genesis state. A Mithril import whose current tip is in Conway or later is
+// different. Its committee is an authoritative current-state snapshot, so an
+// absent genesis credential means it is not seated and must not be inferred
+// from missing local history. A pre-Conway import has no committee state yet,
+// so it retains the genesis members for the later hard fork.
 func (ls *LedgerState) ensureGenesisCommittee(
 	ctx context.Context,
 	txn *database.Txn,
@@ -8950,7 +8952,22 @@ func (ls *LedgerState) ensureGenesisCommittee(
 		)
 	}
 	if mithrilBoundary > 0 {
-		return nil
+		tipEpoch, err := ls.db.GetEpochBySlot(ls.currentTip.Point.Slot, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"read current epoch before seeding genesis committee: %w",
+				err,
+			)
+		}
+		if tipEpoch == nil {
+			return fmt.Errorf(
+				"current tip slot %d has no persisted epoch",
+				ls.currentTip.Point.Slot,
+			)
+		}
+		if tipEpoch.EraId >= eras.ConwayEraDesc.Id {
+			return nil
+		}
 	}
 	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(ctx, txn)
 	if err != nil {
