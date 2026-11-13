@@ -761,6 +761,11 @@ ordinary header path and its fork resolution; either way the rollback only
 moved the peer's cursor and is dropped. A rollback from a session that has
 delivered a header is applied immediately. The deferred state is per
 connection, held under `chainsyncMutex`, and cleared on `ledger.conn_closed`.
+An in-place re-intersect opens a new session on a live connection, so its
+`IntersectFoundFunc` publishes a `ChainsyncEvent` with `SessionReopened` on the
+same ordered stream before the peer's opening rollback. The ledger then clears
+the connection's session state, and that rollback is deferred and resolved
+exactly as on a fresh connection instead of undoing applied blocks.
 
 Peer-fork header verification follows the candidate's retained ancestry from its
 intersection instead of reusing the applied tip's epoch nonce. The ledger folds
@@ -797,8 +802,20 @@ between its verification and its pin (`pinHeaderVerdict`) is verified again, up
 to three times while each new verdict expires the same way, before the header
 is withheld; a verification that defers ends those attempts and withholds the
 header, and a header that fails verification is rejected and its connection
-recycled, as on its first. A snapshot publication or validation transition
-also waits and retries a local extension: otherwise an unstamped header can
+recycled, as on its first. A header whose producer queue admission does not
+have to check, because its epoch nonce is not cached and it is not covered by
+a Mithril certificate, has nothing to verify again there: when a publication
+expires its verdict before the pin it is queued without the producer check,
+as it is when the verdict had expired on arrival. Withholding
+it would leave a hole in the connection's headers, so the next one would not
+fit and the header queue would be discarded. The deferred selector callback
+(`pinSettledHeaderAdmission`) runs after queue admission releases its pin, so
+a publication waiting on that pin expires the verdict first. It verifies a
+header that is still queued against the current publication, through the
+connection's own verifier and up to four times, and keeps the admission;
+a header that left the queue or fails that verification loses it, which
+discards the queue and re-intersects the peer. A snapshot publication or
+validation transition also waits and retries a local extension: otherwise an unstamped header can
 be withheld by corroboration while its peer cursor advances past it. Other
 deferrals on local extensions are forwarded unverified at once because
 missing epoch data may require applying that header's own block to settle.
@@ -847,6 +864,64 @@ otherwise. Some publishers format errors or connection IDs into the reason, so
 this keeps the label set bounded; the full reason stays in the logs. Resyncs
 coalesced by the ledger before publication are not counted, and neither are
 events dropped because the subscriber's context is done.
+
+`SubscribeChainsyncResync` recovers a local cursor reason
+(`event.IsLocalChainsyncResyncReason`, except `LocalLedgerRollback` and
+`NetworkIngestReleased`) by calling `Client.Reintersect` on the live connection
+instead of closing it. `Reintersect` drains every outstanding `MsgRequestNext`
+reply before sending `MsgFindIntersect`, so it runs on its own goroutine. A
+resync that arrives before that run's `IntersectFound` is absorbed by it; one
+that arrives later starts another run. Building the intersect points and
+`Reintersect` are both bounded by `chainsyncReintersectTimeout`: a client
+parked at the peer's tip drains only when the next block arrives. When the
+peer answers `IntersectFound`, the client's `IntersectFoundFunc` trims the
+peer's observed header history to the new intersection
+(`State.ClearObservedHeaderHistoryAfter`) rather than clearing it and drops the
+withheld-header marker, before the first `MsgRequestNext` of the new cursor is
+sent, so no header of that cursor is trimmed or withheld. The delivered-tip
+history in chain selection stays, so a Genesis corroborating peer keeps its
+density evidence; the first `RollBackward` after the intersect trims it. The
+connection is closed instead, as for every reason that blames the peer, when
+the client is absent, the watchdog expires, the ledger cannot supply intersect
+points, or the peer answers `IntersectNotFound`. A run is tied to the client it
+started on, so a run outliving its connection neither absorbs a resync of the
+connection that replaces it under the same ID nor closes that replacement.
+
+Closing a connection ended everything keyed by its connection ID; a
+re-intersect keeps the ID, so it ends that state itself. On `IntersectFound`,
+`settleReintersectedCursor` clears the observer header gap, the parked
+deferred-header recovery and the accepted header tip, and advances the
+connection's cursor epoch so a header the ledger rejects afterwards parks no
+new recovery. On `SessionReopened` the ledger also ends the connection's resync
+coalescing episode, rejects the headers it buffered from the old cursor and
+resets the mismatch count. Until `IntersectFound`, replies to requests
+pipelined on the old cursor are dropped before verification
+(`chainsyncCursorCondemned`), a rollback among them included.
+
+`ChainsyncResyncReasonRollbackNotFound` is not a local cursor reason, since it
+can also mean a peer the node cannot follow, but it re-intersects in place
+once: a repeat on the same connection within
+`chainsyncLostCursorReintersectCooldown` closes it, so the governor's reconnect
+backoff still applies to such a peer.
+
+While Genesis selection runs with no corroboration threshold, observer headers
+are counted by nothing, so an observer whose peer is more than the security
+parameter ahead of the local tip stops reading them
+(`holdUnreadObserver`): its roll-forward callback is held, which stops further
+`MsgRequestNext` once the pipelined replies are in. The hold is bounded by
+`catchUpBandWaitTimeout`, like every roll-forward wait, to stay under the
+protocol state timers; at the bound the header is dropped and the next one is
+held, so a held observer reads one header per bound. Every
+`observerParkPoll` it tries to take an ingress slot. It is released when it
+takes one, when deliveries are counted again, or when the local tip comes
+within the security parameter of its peer's tip
+(`ChainsyncResyncReasonObserverResumed`), and re-intersects either way because
+its cursor stopped while the local chain advanced. Within the security parameter observers read
+because the Genesis exit rule needs every observer to have sent
+`MsgAwaitReply`, which a held observer never reaches; farther away the local
+chain is behind the peer and the exit rule cannot be met. With a corroboration
+threshold observers read as before, since their headers are the witness
+evidence.
 
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
@@ -2782,7 +2857,11 @@ paths, where the point is to report before the goroutine unwinds.
   pre-queued request reserved, so a same-connection redispatch waits for its
   terminal event. A request a teardown released is remembered by ID; its late
   terminal event releases nothing, and consumes the latch only when the latch
-  was armed for it.
+  was armed for it. Until that event arrives its blocks are dropped by
+  request ID: a resync that re-intersects in place keeps the connection, the
+  next request is dispatched on it while the peer still streams the released
+  one, and the connection alone no longer says which request a block belongs
+  to.
 - The blast radius of such a stall is not local.
   `LedgerState.handleConnectionClosedEvent` takes `chainsyncMutex`, so a stall
   there stops `ledger.conn_closed` draining; the `node.go` handler translating
@@ -7829,7 +7908,22 @@ peers before a fork is available locally; it is not the authoritative
 fork-choice measurement. Both views live in append-only windows
 (`frontierWindow`) whose written prefix is never modified, so a staged
 admission frontier shares the committed peer's history and costs O(1) per
-header; the Limit on Eagerness delivery entries keep private copies. When an incoming header conflicts with the primary
+header; the Limit on Eagerness delivery entries keep private copies. The
+selector compares these frontiers for every delivered header: a delivery entry
+against its connection's admitted frontier (`extendsFragment`), an entry's
+proof range against the committed frontier (`fragmentsOverlapExactly`), and a
+witness against a candidate (`confirmsRecentChainFrom`). A frontier holds up
+to a Genesis window of points, and a connection that stays open fills it, so
+each comparison remembers how far it got by the addresses of the last points
+it compared (`chainselection/frontier_match.go`). Because a window's written
+prefix is never modified, a view that still has the remembered address at the
+remembered position holds below it what it held before, and only the newer
+points are compared. A rollback continues on a new array, fails the address
+test and is compared in full, as is the first comparison after a window is
+replaced on filling. The remembered state sits behind its own locks, since
+these comparisons run under the selector's read lock, and is dropped with
+the delivery entry or the peer. Frontier arrays must therefore never be
+rewritten in place. When an incoming header conflicts with the primary
 chain, the handler discards it through the in-memory duplicate and stale-header
 checks first, then asks whether the header point is still on the authoritative
 primary chain (`headerAlreadyOnPrimaryChain`). A historical replay can be behind

@@ -339,6 +339,29 @@ type Ouroboros struct {
 	// eagernessWaitTimeout bounds how long a roll-forward callback waits in
 	// ChainsyncAwaitEagerness.
 	eagernessWaitTimeout time.Duration
+	// chainsyncReintersectTimeout bounds how long a resync waits for a client
+	// to drain and re-intersect in place before the connection is closed.
+	chainsyncReintersectTimeout time.Duration
+	// chainsyncReintersecting holds the latest in-place re-intersect of each
+	// connection, so overlapping resyncs do not stack.
+	chainsyncReintersectMu  sync.Mutex
+	chainsyncReintersecting map[ouroboros.ConnectionId]*chainsyncReintersectRun
+	// chainsyncCursorEpochs counts the in-place re-intersects of each
+	// connection, guarded by chainsyncReintersectMu.
+	chainsyncCursorEpochs map[ouroboros.ConnectionId]uint64
+	// chainsyncLostCursorReintersects records when each connection was last
+	// re-intersected for a lost cursor, guarded by chainsyncReintersectMu.
+	chainsyncLostCursorReintersects map[ouroboros.ConnectionId]time.Time
+	// observerParkPoll is how often a held observer checks whether it may
+	// take an ingress slot or resume reading.
+	observerParkPoll time.Duration
+	// observerParkedHook runs when an observer's callback starts to be held.
+	// Tests use it to wait for the hold.
+	observerParkedHook func()
+	// chainsyncReintersectReturnedHook runs once an in-place re-intersect has
+	// returned and the re-intersected sync is already running. Tests use it to
+	// hold the resync goroutine while the new cursor streams.
+	chainsyncReintersectReturnedHook func()
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
 	chainsyncArrivalNow      func() time.Time
@@ -711,6 +734,15 @@ type OuroborosConfig struct {
 	// each attempt and waits on it, bounded, before verifying the header
 	// again. When nil, a deferred header is parked at once.
 	ChainsyncHeaderVerificationSettled func() <-chan struct{}
+	// ChainsyncObserverDeliveriesUnused reports whether headers delivered by
+	// observer connections are currently counted by nothing: they are not
+	// ingested, and no Genesis corroboration is reading them as witness
+	// evidence. While it reports true an observer stops reading headers
+	// instead of downloading the chain once more per connected peer, unless
+	// its peer's tip is within the security parameter of the local tip, where
+	// it reads so that it can reach MsgAwaitReply for the Genesis exit rule.
+	// When nil, observers always read.
+	ChainsyncObserverDeliveriesUnused func() bool
 	// ChainsyncAwaitCorroboration holds a roll-forward that ChainsyncApplyEligible
 	// denied, while the denial is only a lack of Genesis corroboration, and
 	// reports whether the header may then be applied. The peer's cursor stays
@@ -980,6 +1012,15 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		),
 		deferredHeaderRecovery: make(
 			map[ouroboros.ConnectionId]deferredHeaderRecoveryState,
+		),
+		chainsyncReintersectTimeout: defaultChainsyncReintersectTimeout,
+		observerParkPoll:            defaultObserverParkPoll,
+		chainsyncReintersecting: make(
+			map[ouroboros.ConnectionId]*chainsyncReintersectRun,
+		),
+		chainsyncCursorEpochs: make(map[ouroboros.ConnectionId]uint64),
+		chainsyncLostCursorReintersects: make(
+			map[ouroboros.ConnectionId]time.Time,
 		),
 		futureHeaderResyncCtx:    futureHeaderResyncCtx,
 		futureHeaderResyncCancel: futureHeaderResyncCancel,
@@ -1452,6 +1493,10 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.deferredHeaderRecoveryMu.Unlock()
 	o.forgetAcceptedHeaderTip(connId)
 	o.forgetServedActivity(connId)
+	o.chainsyncReintersectMu.Lock()
+	delete(o.chainsyncCursorEpochs, connId)
+	delete(o.chainsyncLostCursorReintersects, connId)
+	o.chainsyncReintersectMu.Unlock()
 
 	// Counts keep-alive pong timeouts.
 	if classifyKeepaliveTimeoutClose(e.Error) {

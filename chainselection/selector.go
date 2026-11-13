@@ -483,7 +483,10 @@ type ChainSelector struct {
 	// chain the limit bounds. It has its own mutex because the limit is
 	// computed under the read lock.
 	eagernessAnchorMu sync.Mutex
-	eagernessAnchor   *eagernessAnchor
+	// witnessMatches remembers how far each corroboration comparison got. It
+	// has its own lock: the comparisons run under the selector's read lock.
+	witnessMatches  witnessMatches
+	eagernessAnchor *eagernessAnchor
 
 	// jumpRecords holds the candidate fragments ChainSync Jumping assigns to
 	// peers that do not stream (see jumping.go). Guarded by mutex.
@@ -3183,6 +3186,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.peerTips, connId)
 	delete(cs.deliveredPeerTips, connId)
 	delete(cs.eagernessDeliveries, connId)
+	cs.witnessMatches.forget(connId)
 	delete(cs.pendingPeerTips, connId)
 	delete(cs.pendingPeerTipFrontiers, connId)
 	delete(cs.forecastHorizonWitnesses, connId)
@@ -5185,6 +5189,7 @@ func (cs *ChainSelector) sweepDeadDeliveredPeerTips() {
 		if _, tracked := cs.peerTips[connId]; !tracked {
 			delete(cs.deliveredPeerTips, connId)
 			delete(cs.eagernessDeliveries, connId)
+			cs.witnessMatches.forget(connId)
 		}
 	}
 }
