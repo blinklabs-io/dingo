@@ -2258,8 +2258,9 @@ journal and replayed in bounded batches before the candidate is published. A
 busy pass that cannot catch up leaves the live pool unchanged and is retried
 after a later chain update; it is not a failed admission or a partial swap.
 
-The chain-update worker coalesces confirmed-transaction removals and
-rolled-back transaction restores before rebuilding. Rollback events list blocks
+The chain-update worker evicts confirmed transactions as each chain update
+arrives and coalesces rolled-back transaction restores until the next
+successful rebuild. Rollback events list blocks
 newest first, so each event is traversed oldest first; if more rollback events
 arrive before the rebuild, their older transactions are placed ahead of the
 already queued restores. Revalidation therefore sees transactions in ledger
@@ -11245,10 +11246,11 @@ chain, which the `BlockBroadcaster` the forger holds calls
 `ChainUpdateEvent` is published inside that call, before it returns. The forger
 then runs its `blockForged` observer, and only after that — and only if
 admission succeeded — synchronously removes the block's transaction hashes
-through the backend-neutral `RemoveTxsByHash` adapter. The chain-update rebuild
-remains responsible for transactions confirmed by peer blocks. This local fast
-path prevents confirmed transactions from accumulating when sustained admissions
-make a long rebuild repeatedly lose its pinned ledger generation.
+through the backend-neutral `RemoveTxsByHash` adapter. Transactions confirmed
+by peer blocks are evicted by the chain-update worker as each chain update
+arrives, independent of whether the rebuild runs. This local path removes a
+forged block's transactions without waiting for that worker to reach its
+`ChainUpdateEvent`.
 
 ## DMQ Message Pool
 
