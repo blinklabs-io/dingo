@@ -11217,6 +11217,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 	var blockDonation uint64
+	// closureStorageSpan is the storage-index range the certified closure
+	// reserves; the block's own transactions are stored after it.
+	var closureStorageSpan uint64
 	// A certifying ranking block applies the certified closure -- the EB its
 	// parent announced -- before its own transactions; a CertRB may also
 	// announce a different, new EB, which is not applied. A ranking block
@@ -11277,7 +11280,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 						ebHash.String(),
 					)
 				}
-				applied, donation, err := ls.applyEndorserBlock(
+				applied, donation, reserved, err := ls.applyEndorserBlockReserving(
 					ctx,
 					txn,
 					point,
@@ -11332,6 +11335,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 					ebTxs,
 					applied,
 				)
+				closureStorageSpan = reserved
 				blockDonation, err = addUint64(blockDonation, donation)
 				if err != nil {
 					return nil, fmt.Errorf(
@@ -11424,7 +11428,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// dependencies only when TX validation is enabled.
 	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
 
-	var expandedIndexOffset uint64
+	// The closure applied first, so its transactions precede the body in the
+	// stored (block_index, cert_index) order that position-ranked readers use.
+	expandedIndexOffset := closureStorageSpan
 	for i, tx := range blockTransactions {
 		if delta == nil {
 			delta = NewLedgerDelta(
