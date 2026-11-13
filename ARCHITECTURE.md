@@ -2193,8 +2193,9 @@ When `Node.Run()` is called, components are initialized in this order:
     imported member from Conway genesis, because absence can represent a
     pre-snapshot removal; it records the member as removed (soft-deleted at
     slot 0) so committee state stays available even for a snapshot with no
-    committee. A pre-Conway imported tip has no committee state yet,
-    so startup retains the genesis members for the later hard fork.
+    committee. A pre-Conway snapshot has no committee state yet, so startup
+    retains the genesis members for the later hard fork; the era is read at
+    `mithril_ledger_slot`, not the current tip.
     For networks with a real Byron genesis, an empty database retains a Byron
     epoch cache until the on-chain Shelley boundary is observed. A configured
     experimental Shelley hard-fork epoch is the explicit exception used by

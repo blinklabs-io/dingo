@@ -8938,8 +8938,8 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 // before inserting makes this safe for a chain replayed from genesis: a
 // credential a later UpdateCommittee has since re-elected or removed already
 // has a row, so its real history is left alone instead of being reverted to
-// genesis state. A Mithril import whose current tip is in Conway or later is
-// different. Its committee is an authoritative current-state snapshot, so an
+// genesis state. A Mithril import whose snapshot slot is in Conway or later
+// is different. Its committee is an authoritative current-state snapshot, so an
 // absent genesis credential means it is not seated and must not be inferred
 // from missing local history: it is recorded as removed (soft-deleted at slot
 // 0) rather than seated. A pre-Conway import has no committee state yet, so it
