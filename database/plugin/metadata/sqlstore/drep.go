@@ -910,6 +910,9 @@ func (s *Store) GetDRepVotingPowerByType(
 	if err != nil {
 		return nil, err
 	}
+	if len(incomplete) > 0 && s.liveUtxo != nil {
+		return nil, errLiveUtxoStakeIncomplete
+	}
 	if len(incomplete) == 0 {
 		for _, drepType := range drepTypes {
 			if stake, ok := live.byType[drepType]; ok {

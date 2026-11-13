@@ -66,6 +66,9 @@ type Set struct {
 	history  uint64
 	commits  uint64
 	only     bool
+	// pruneJournal trims the rollback journal; a field so a test can fail
+	// it, which a healthy store never does right after a commit.
+	pruneJournal func(beforeSlot uint64) error
 }
 
 var _ ledger.UtxoSetWriter = (*Set)(nil)
@@ -129,11 +132,12 @@ func Open(cfg Config) (*Set, error) {
 		return nil, err
 	}
 	return &Set{
-		store:   store,
-		logger:  logger.With("component", "utxoset"),
-		m:       newMetrics(cfg.Registerer),
-		history: cfg.HistorySlots,
-		only:    cfg.Only,
+		store:        store,
+		logger:       logger.With("component", "utxoset"),
+		m:            newMetrics(cfg.Registerer),
+		history:      cfg.HistorySlots,
+		only:         cfg.Only,
+		pruneJournal: store.PruneJournal,
 	}, nil
 }
 
@@ -174,8 +178,14 @@ func (s *Set) ApplyUtxoChanges(
 		// Only the committing goroutine calls this, so commits needs no lock.
 		s.commits++
 		if s.commits%pruneEvery == 0 {
-			if err := s.store.PruneJournal(tip.Slot - s.history); err != nil {
-				return err
+			// The batch and tip are already committed, so a failure here
+			// is not a failed commit: the next prune retries it.
+			if err := s.pruneJournal(tip.Slot - s.history); err != nil {
+				s.logger.Warn(
+					"pruning the UTxO rollback journal failed",
+					"slot", tip.Slot,
+					"error", err,
+				)
 			}
 		}
 	}

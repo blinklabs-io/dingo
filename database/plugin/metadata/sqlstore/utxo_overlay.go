@@ -246,7 +246,9 @@ var errOverlaySavepoint = errors.New(
 // names inputs an earlier transaction of the same trusted batch committed.
 // producers are the hashes of the transactions the batch applies; an
 // identity row stored for one of them is reused rather than reported as a
-// conflict. It reports false, and changes nothing, outside SQLite core storage mode.
+// conflict. It reports false, and changes nothing, outside SQLite core storage
+// mode and when the live UTxO set holds the outputs, which leaves no rows to
+// overlay.
 func (s *Store) EnableBatchUtxoOverlay(
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,

@@ -1246,17 +1246,20 @@ func (d *Database) SetGenesisTransaction(
 			)
 		}
 
-		if d.liveUtxo {
-			continue
-		}
-		offsetData := EncodeUtxoOffset(&offset)
-		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
-			return fmt.Errorf(
-				"set genesis utxo offset %x#%d: %w",
-				bytePrefix(txId),
-				outputIdx,
-				err,
-			)
+		// The metadata store still needs the model of a live-set output: its
+		// stake credential feeds reward_live_stake.
+		if !d.liveUtxo {
+			offsetData := EncodeUtxoOffset(&offset)
+			if err := blob.SetUtxo(
+				blobTxn, txId, outputIdx, offsetData,
+			); err != nil {
+				return fmt.Errorf(
+					"set genesis utxo offset %x#%d: %w",
+					bytePrefix(txId),
+					outputIdx,
+					err,
+				)
+			}
 		}
 
 		// Build model for metadata store

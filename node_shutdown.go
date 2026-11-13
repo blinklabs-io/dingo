@@ -528,7 +528,12 @@ func (n *Node) shutdown() error {
 			n.config.logger.Error(
 				"leaving the live UTxO set open because shutdown drain was not confirmed",
 			)
-		} else if closeErr := n.closeUtxoSet(); closeErr != nil {
+		} else if closeErr := n.closeWithShutdownTimeout(
+			ctx,
+			"live UTxO set",
+			shutdownTimeout,
+			n.closeUtxoSet,
+		); closeErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("live UTxO set close: %w", closeErr),

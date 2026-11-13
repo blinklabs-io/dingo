@@ -158,3 +158,41 @@ reward_stake, total_stake FROM reward_live_stake ORDER BY 1, 2`)
 	})
 	require.ErrorContains(t, err, "without a metadata UTxO set")
 }
+
+// TestImportRejectingTheSnapshotLeavesTheDatabaseUnmarked requires an import
+// into the live UTxO set that fails validation not to pin the database to
+// the set-only mode.
+func TestImportRejectingTheSnapshotLeavesTheDatabaseUnmarked(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	nonce := make([]byte, 32)
+
+	err = ImportLedgerState(t.Context(), ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State: &RawLedgerState{
+			Epoch:               1,
+			EraIndex:            EraConway,
+			EraBounds:           make([]EraBound, EraConway+1),
+			EpochNonce:          nonce,
+			EvolvingNonce:       nonce,
+			CandidateNonce:      nonce,
+			LastEpochBlockNonce: nonce,
+			// A tip hash of the wrong width fails validation.
+			Tip: &SnapshotTip{Slot: 1_000, BlockHash: []byte{1}},
+		},
+		UtxoSet: set,
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 1_000, nil
+		},
+	})
+	require.ErrorContains(t, err, "validating ledger state")
+	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	require.NoError(t, err)
+	require.Empty(t, marked)
+}

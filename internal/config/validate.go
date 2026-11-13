@@ -461,10 +461,28 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// The node does not open the set without an on-disk database, and a
+	// set-only database would still be marked as holding no utxo rows.
+	if (c.LedgerUtxoBadger || c.LedgerUtxoBadgerOnly) &&
+		c.DatabasePath == "" {
+		errs = append(errs, errors.New(
+			"ledgerUtxoBadger needs databasePath: the live UTxO set is "+
+				"not opened without an on-disk database",
+		))
+	}
+
 	if c.LedgerUtxoBadgerOnly {
 		if !c.LedgerUtxoBadger {
 			errs = append(errs, errors.New(
 				"ledgerUtxoBadgerOnly needs ledgerUtxoBadger",
+			))
+		}
+		if c.LedgerUtxoReads == "verify" {
+			// There is no metadata UTxO set to compare against: reads
+			// always use the live set.
+			errs = append(errs, errors.New(
+				"ledgerUtxoReads \"verify\" has no effect with "+
+					"ledgerUtxoBadgerOnly",
 			))
 		}
 		if c.StorageMode == storageModeAPI {

@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -144,4 +145,18 @@ func (s oneStakeSource) EachLiveUtxoStake(
 	fn func(uint8, []byte, uint64) error,
 ) error {
 	return fn(0, s.key, s.lovelace)
+}
+
+// TestReinitializeCoreStorageClearsTheUtxoSetReconciledMark requires a live
+// Restore or Truncate rebuild to invalidate the set's reconcile, so the
+// startup stake backfill waits for the reconcile of the rebuilt ledger.
+func TestReinitializeCoreStorageClearsTheUtxoSetReconciledMark(t *testing.T) {
+	t.Parallel()
+	n := &Node{utxoSetReconciled: true}
+	n.config.cfg = &internalconfig.Config{}
+
+	// The rebuild cannot complete for a Node with no resolved storage
+	// plugins; the mark is cleared before that failure returns.
+	require.Error(t, n.reinitializeCoreStorage(t.Context()))
+	require.False(t, n.utxoSetReconciled)
 }

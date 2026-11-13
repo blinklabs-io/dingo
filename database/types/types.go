@@ -542,9 +542,11 @@ type LiveUtxoSource interface {
 	) (uint64, error)
 	// LivePointerStakes returns the lovelace in live outputs at pointer
 	// addresses, per certificate position named, as txn sees the live set.
+	// txn may be nil.
 	LivePointerStakes(txn Txn) ([]PointerStake, error)
 	// EachLiveUtxoStake calls fn for every stake credential with lovelace in
 	// live outputs as LiveUtxoStake counts it, as txn sees the live set.
+	// txn may be nil.
 	EachLiveUtxoStake(
 		txn Txn,
 		fn func(credentialTag uint8, stakingKey []byte, lovelace uint64) error,

@@ -900,6 +900,15 @@ func (n *Node) mithrilSnapshotStartup(ctx context.Context) error {
 	defer n.reportMithrilRestore(nil)
 	until, err := s.run(ctx)
 	n.mithrilSuppressedUntil = until
+	if err != nil {
+		// Start returns without registering the set's cleanup, so close it
+		// here rather than leave its Badger directory locked.
+		if closeErr := n.closeUtxoSet(); closeErr != nil {
+			err = errors.Join(
+				err, fmt.Errorf("live UTxO set close: %w", closeErr),
+			)
+		}
+	}
 	return err
 }
 

@@ -146,7 +146,13 @@ func TestReconcileWithoutAMetadataUtxoSetRefusesToRebuild(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	behind := ocommon.NewPoint(4, bytes.Repeat([]byte{4}, 32))
-	require.NoError(t, set.ApplyUtxoChanges(&behind, nil))
+	require.NoError(t, set.ApplyUtxoChanges(&behind, []ledger.UtxoEvent{{
+		Point: behind,
+		Added: []ledger.UtxoOutput{{
+			Ref:  models.UtxoId{Hash: bytes.Repeat([]byte{9}, 32), Idx: 0},
+			Cbor: []byte{0x80},
+		}},
+	}}))
 	err = set.Reconcile(
 		t.Context(),
 		dbadapter.New(db),
@@ -155,7 +161,7 @@ func TestReconcileWithoutAMetadataUtxoSetRefusesToRebuild(t *testing.T) {
 	require.Error(t, err)
 	n, err := set.Count()
 	require.NoError(t, err)
-	require.Zero(t, n)
+	require.Equal(t, uint64(1), n, "the refused rebuild must not clear the set")
 	setTip, ok, err := set.Tip()
 	require.NoError(t, err)
 	require.True(t, ok)

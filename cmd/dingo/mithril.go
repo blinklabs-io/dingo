@@ -606,6 +606,11 @@ func runMithrilSyncWithRepair(
 	// live UTxO set the node opens at the same path.
 	var utxoSet ledgerstate.UtxoSetLoader
 	if cfg.LedgerUtxoBadgerOnly {
+		if cfg.DatabasePath == "" {
+			return errors.New(
+				"ledgerUtxoBadgerOnly needs databasePath for the live UTxO set",
+			)
+		}
 		set, err := utxoset.Open(utxoset.Config{
 			Dir:    utxoset.DirFor(cfg.DatabasePath),
 			Logger: logger,

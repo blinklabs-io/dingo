@@ -673,15 +673,6 @@ func ImportLedgerState(
 			)
 		}
 	}
-	if cfg.UtxoSet != nil {
-		if err := markUtxoSetOnlyImport(ctx, cfg, marked, completedPhase); err != nil {
-			return err
-		}
-		if err := cfg.Database.SetLiveUtxoSource(cfg.UtxoSet); err != nil {
-			return fmt.Errorf("read UTxOs from the live UTxO set: %w", err)
-		}
-		defer func() { _ = cfg.Database.SetLiveUtxoSource(nil) }()
-	}
 	rewardLiveStakeCursor, rewardLiveStakeStarted, err := models.RewardLiveStakeImportCursor(completedPhase)
 	if err != nil {
 		return fmt.Errorf("loading reward live stake checkpoint: %w", err)
@@ -706,6 +697,19 @@ func ImportLedgerState(
 		return errors.New(
 			"UTxO-HD ledger state requires external UTxO table file",
 		)
+	}
+	// Marked only once the snapshot is known valid: the mark pins the
+	// database to this mode.
+	if cfg.UtxoSet != nil {
+		if err := markUtxoSetOnlyImport(
+			ctx, cfg, marked, completedPhase,
+		); err != nil {
+			return err
+		}
+		if err := cfg.Database.SetLiveUtxoSource(cfg.UtxoSet); err != nil {
+			return fmt.Errorf("read UTxOs from the live UTxO set: %w", err)
+		}
+		defer func() { _ = cfg.Database.SetLiveUtxoSource(nil) }()
 	}
 
 	// Delete post-anchor rollover residue so replay can re-trigger every

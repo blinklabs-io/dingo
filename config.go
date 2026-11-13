@@ -617,6 +617,25 @@ func (n *Node) configValidate() error {
 			StorageModeAPI,
 		)
 	}
+	switch n.config.cfg.LedgerUtxoReads {
+	case "", "verify", "set":
+	default:
+		return fmt.Errorf(
+			"invalid ledgerUtxoReads %q: must be empty, %q or %q",
+			n.config.cfg.LedgerUtxoReads, "verify", "set",
+		)
+	}
+	// Without the Badger set neither option has anything to act on; both
+	// would be ignored silently.
+	if n.config.cfg.LedgerUtxoBadgerOnly && !n.config.cfg.LedgerUtxoBadger {
+		return errors.New("ledgerUtxoBadgerOnly needs ledgerUtxoBadger")
+	}
+	if n.config.cfg.LedgerUtxoReads != "" && !n.config.cfg.LedgerUtxoBadger {
+		return fmt.Errorf(
+			"ledgerUtxoReads %q needs ledgerUtxoBadger",
+			n.config.cfg.LedgerUtxoReads,
+		)
+	}
 	if !n.config.cfg.StartEra.Valid() {
 		return fmt.Errorf(
 			"invalid start era %q: must be empty or %q",

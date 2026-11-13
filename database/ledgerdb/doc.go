@@ -20,6 +20,12 @@
 // group can move to its own storage without touching the others. LedgerDB
 // composes them with transactions.
 //
+// Two groups are transitional exceptions that tie LedgerDB to API history:
+// Applier, which still writes API history together with ledger state, and
+// TxHistory, the consensus paths that still read transaction history. TxHistory
+// must be removed before LedgerDB can stand alone, and Applier's history
+// writes cannot move independently of the ledger state until then.
+//
 // Package dbadapter implements LedgerDB over the metadata and blob stores of
 // *database.Database. Queries that serve the APIs rather than validation are
 // not part of the LedgerDB; see package indexerdb.

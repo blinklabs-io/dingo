@@ -660,6 +660,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	// The previous ledger's tip-gap observation must not make readiness look
 	// healthy while Restore or Truncate is rebuilding the core storage.
 	n.health.forgetTipGap()
+	// The live UTxO set was reconciled against the ledger being replaced.
+	// The backfill below must wait for the reconcile that follows the new
+	// ledger's construction, or it reads stake from a set that may trail it.
+	n.utxoSetReconciled = false
 	deps, err := n.storageDependencies(n.config.dataDir)
 	if err != nil {
 		return err

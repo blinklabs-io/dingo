@@ -70,9 +70,13 @@ func requireLive(
 	r badgerutxo.Ref,
 ) {
 	t.Helper()
-	_, ok, err := s.Get(r)
+	got, ok, err := s.Get(r)
 	require.NoError(t, err)
 	require.Equal(t, live, ok)
+	if live {
+		// out builds the payload from the ref's first and last bytes.
+		require.Equal(t, []byte{r[0], r[len(r)-1]}, got)
+	}
 }
 
 func requireCount(t *testing.T, s *badgerutxo.Store, want uint64) {
@@ -193,6 +197,10 @@ func TestSampleReturnsDistinctLiveOutputs(t *testing.T) {
 		outs = append(outs, out(byte(i+1), 0))
 	}
 	bootstrap(t, s, point(0, 0), outs...)
+	want := map[badgerutxo.Ref][]byte{}
+	for _, o := range outs {
+		want[o.Ref] = o.Cbor
+	}
 	got, err := s.Sample(50, rand.New(rand.NewPCG(1, 2)))
 	require.NoError(t, err)
 	require.Len(t, got, 20)
@@ -200,6 +208,9 @@ func TestSampleReturnsDistinctLiveOutputs(t *testing.T) {
 	for _, o := range got {
 		require.False(t, seen[o.Ref], "duplicate in sample")
 		seen[o.Ref] = true
+		cbor, live := want[o.Ref]
+		require.True(t, live, "sampled an output that is not live")
+		require.Equal(t, cbor, o.Cbor)
 	}
 }
 

@@ -15,7 +15,9 @@
 package badgerutxo_test
 
 import (
+	"bytes"
 	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
@@ -59,6 +61,10 @@ func TestRollbackRestoresEveryEarlierState(t *testing.T) {
 			for r := range live {
 				refs = append(refs, r)
 			}
+			// Map order is random; the seed must replay the same run.
+			slices.SortFunc(refs, func(a, b badgerutxo.Ref) int {
+				return bytes.Compare(a[:], b[:])
+			})
 			var c badgerutxo.Change
 			for _, r := range refs {
 				if rng.IntN(3) == 0 {
@@ -109,24 +115,30 @@ func TestRollbackRestoresEveryEarlierState(t *testing.T) {
 				want.at.Slot,
 			)
 			requireTip(t, s, want.at)
-			added := map[badgerutxo.Ref]string{}
-			for _, o := range res.Added {
-				added[o.Ref] = string(o.Cbor)
-			}
-			removed := map[badgerutxo.Ref]bool{}
-			for _, r := range res.Removed {
-				removed[r] = true
-			}
+			wantAdded := map[badgerutxo.Ref]string{}
 			for r, v := range want.set {
-				if from[r] != v {
-					require.Equal(t, v, added[r], "net added %x", r)
+				if old, ok := from[r]; !ok || old != v {
+					wantAdded[r] = v
 				}
 			}
+			wantRemoved := map[badgerutxo.Ref]bool{}
 			for r := range from {
 				if _, ok := want.set[r]; !ok {
-					require.True(t, removed[r], "net removed %x", r)
+					wantRemoved[r] = true
 				}
 			}
+			gotAdded := map[badgerutxo.Ref]string{}
+			for _, o := range res.Added {
+				gotAdded[o.Ref] = string(o.Cbor)
+			}
+			gotRemoved := map[badgerutxo.Ref]bool{}
+			for _, r := range res.Removed {
+				gotRemoved[r] = true
+			}
+			require.Equal(t, wantAdded, gotAdded, "net added")
+			require.Equal(t, wantRemoved, gotRemoved, "net removed")
+			require.Len(t, res.Added, len(wantAdded), "duplicate added")
+			require.Len(t, res.Removed, len(wantRemoved), "duplicate removed")
 			// Rolling back to the batches' slots removes every
 			// record but the ones at or before the point.
 			if i > 0 {

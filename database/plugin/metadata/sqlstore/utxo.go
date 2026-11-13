@@ -406,7 +406,7 @@ func (s *Store) GetUtxosRestoredByRollback(
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
-		utxosRestoredByRollbackSQL,
+		utxosRestoredByRollbackSQL(s.dialect.Name()),
 	), slotValue, slotValue)
 	if err != nil {
 		return nil, err
@@ -427,10 +427,19 @@ func (s *Store) GetUtxosRestoredByRollback(
 	return ret, rows.Err()
 }
 
-const utxosRestoredByRollbackSQL = `-- name: GetUtxosRestoredByRollback
+func utxosRestoredByRollbackSQL(dialect string) string {
+	id := "utxo.id"
+	if dialect == "sqlite" {
+		// Ordering by the rowid makes SQLite scan the whole table in id
+		// order instead of ranging over the partial spent-row index.
+		id = "+utxo.id"
+	}
+	return `-- name: GetUtxosRestoredByRollback
 SELECT ` + utxoRowColumns + ` FROM utxo
-WHERE utxo.deleted_slot > ? AND utxo.added_slot <= ?
-ORDER BY utxo.id`
+WHERE utxo.deleted_slot > ? AND utxo.deleted_slot > 0
+  AND utxo.added_slot <= ?
+ORDER BY ` + id
+}
 
 func spentUtxosMissingAddressAfterSlotSQL(dialect string) string {
 	id := "utxo.id"

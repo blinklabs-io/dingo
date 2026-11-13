@@ -831,6 +831,14 @@ func Sync(
 	}
 	catchUp = dec.engage || cfg.RepairLegacyRewardState
 	catchUpStart = dec.start
+	// The ledger-state import refuses a catch-up into a live-UTxO-set-only
+	// database, but only after the artifacts have downloaded.
+	if catchUp && cfg.UtxoSet != nil {
+		return SyncResult{}, errors.New(
+			"cannot catch up a database that keeps its UTxO set only in " +
+				"the live UTxO set",
+		)
+	}
 	if mode == syncModeResume && !catchUp && isAPIMode(cfg.StorageMode) {
 		status, statusErr := db.GetSyncState("sync_status", nil)
 		if statusErr != nil {

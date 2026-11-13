@@ -210,7 +210,6 @@ func latestRecord(txn *badger.Txn) ([]byte, journalRecord, bool, error) {
 	return item.KeyCopy(nil), rec, true, nil
 }
 
-// oldestRecord returns the oldest journal record.
 // journalReaches returns ErrRollbackBeyondJournal unless the set's state at
 // point can be restored: point is at or past the tip, or the journal holds
 // every change after it. Records cover the tip's history from the oldest
@@ -245,6 +244,7 @@ func journalReaches(txn *badger.Txn, point ocommon.Point) error {
 	return nil
 }
 
+// oldestRecord returns the oldest journal record.
 func oldestRecord(txn *badger.Txn) (journalRecord, bool, error) {
 	opts := badger.DefaultIteratorOptions
 	opts.Prefix = []byte{journalTag}

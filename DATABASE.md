@@ -2619,7 +2619,7 @@ never reads it. Keys:
 | `mseq` | the next journal sequence number |
 | `a` + `c` + credential tag (1 byte) + staking key hash (28 bytes) | live set only: lovelace in live outputs whose address names that stake credential, big-endian `uint64` |
 | `a` + `p` + slot, transaction index, certificate index (8 bytes each, big-endian) | live set only: lovelace in live outputs at pointer addresses naming that certificate |
-| `mfmt` | layout version; a store without the current one is rebuilt at startup |
+| `mfmt` | layout version; a store without the current one is rebuilt when the next event arrives |
 
 The copy is bootstrapped from the metadata store's live UTxO set and then
 applies the ledger's `ledger.utxo` events. Those events carry the outputs a
