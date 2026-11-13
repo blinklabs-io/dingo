@@ -5630,6 +5630,14 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	ctx context.Context,
 	e ChainsyncEvent,
 ) (bool, error) {
+	if e.BlockHeader != nil {
+		if err := ls.validateSupportedHeaderProtocolVersion(e.BlockHeader); err != nil {
+			return false, fmt.Errorf(
+				"validate chainsync header protocol version: %w",
+				err,
+			)
+		}
+	}
 	if e.ArrivalTime.IsZero() || ls.slotClock == nil || e.BlockHeader == nil {
 		return true, nil
 	}
@@ -5712,6 +5720,14 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 	ctx context.Context,
 	e ChainsyncEvent,
 ) error {
+	if e.BlockHeader != nil {
+		if err := ls.validateSupportedHeaderProtocolVersion(e.BlockHeader); err != nil {
+			return fmt.Errorf(
+				"validate observer header protocol version: %w",
+				err,
+			)
+		}
+	}
 	var anchor heldForkAnchor
 	parked := false
 	defer func() {

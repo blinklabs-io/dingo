@@ -342,6 +342,9 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 	if header == nil {
 		return errors.New("nil block header")
 	}
+	if err := ls.validateSupportedHeaderProtocolVersion(header); err != nil {
+		return err
+	}
 	// A header the ledger has applied was fully verified then. Re-verifying
 	// it here can fail only because the state it needs (pool snapshots older
 	// than the retention window) has since been pruned. The point carries the

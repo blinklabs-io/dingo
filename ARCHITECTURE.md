@@ -22679,8 +22679,12 @@ ledger reader reaches the replay header check, and `ls.chain` is consumed by the
 downstream blockfetch server and UTxO RPC sync/watch readers. A block that has
 not passed admission crypto must therefore never enter that chain.
 
-ChainSync admission also enforces the Ouroboros future-header rule before a
-header enters that queue. The raw network callback records `ChainsyncEvent`'s
+ChainSync admission also rejects a header whose protocol major version exceeds
+the eras enabled by the node before the header can enter chain selection or the
+ledger queue. This applies to ingress and observer connections, including
+Mithril-covered slots that do not need their header cryptography rechecked.
+Admission then enforces the Ouroboros future-header rule before a header enters
+that queue. The raw network callback records `ChainsyncEvent`'s
 `ArrivalTime` immediately, before header decoding, chain-selection, and EventBus
 work can delay delivery. The per-peer protocol callback asks ledger admission to
 convert the header slot to its wall-clock onset using the active hard-fork
