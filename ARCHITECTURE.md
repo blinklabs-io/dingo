@@ -10260,7 +10260,14 @@ gossip or ledger peer becomes sharable only after an outbound connection to it
 succeeds, as the reference node shares only peers it has connected to. An
 inbound connection never makes its remote address sharable: a duplex handshake
 does not prove the source port is a listening port, since Dingo negotiates
-duplex mode whether or not it dials from its listening port. Valid candidates
+duplex mode whether or not it dials from its listening port. An operator can
+set `advertiseAddress` (`--advertise-address`, `DINGO_ADVERTISE_ADDRESS`) to the
+public IP:port of the node's own NtN listener, which differs from `bindAddr` and
+`relayPort` behind NAT. When it is set, replies lead with it, it counts toward
+the reply cap and is not repeated if a peer shares the same address, and it
+passes the same routability check; configuration rejects a hostname, a zero
+port, or a non-routable address, and the server drops an invalid value rather
+than share it. Valid candidates
 are ordered by a salted hash of the address and the reply is capped at 10 addresses and at the
 requested count, as in the reference node. The salt is regenerated every 823
 seconds, so a requester sees a stable answer within a window and a different

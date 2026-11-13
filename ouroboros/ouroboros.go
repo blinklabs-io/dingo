@@ -626,8 +626,11 @@ type OuroborosConfig struct {
 	NetworkMagic           uint32
 	NodeToNodeNetworkMagic uint32
 	PeerSharing            bool
-	IntersectTip           bool
-	PromRegistry           prometheus.Registerer
+	// AdvertiseAddress is the "IP:port" included in PeerSharing replies as
+	// this node's own address. Empty means none is advertised.
+	AdvertiseAddress string
+	IntersectTip     bool
+	PromRegistry     prometheus.Registerer
 	// ChainsyncBlockTimeout bounds how long NtN chain-sync can wait for a
 	// block reply after a peer enters a server-agency state. Values below
 	// the protocol maximum are raised to the protocol maximum.

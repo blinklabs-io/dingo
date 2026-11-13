@@ -645,6 +645,7 @@ func (n *Node) newOuroborosConfig(
 		NetworkMagic:                   n.config.networkMagic,
 		NodeToNodeNetworkMagic:         n.consensusNetworkMagic(),
 		PeerSharing:                    n.config.peerSharing,
+		AdvertiseAddress:               n.config.advertiseAddress,
 		IntersectTip:                   n.config.intersectTip,
 		IntersectPoints:                n.config.intersectPoints,
 		PromRegistry:                   n.retainedComponentPromRegistry(),

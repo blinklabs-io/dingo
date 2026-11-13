@@ -19,6 +19,8 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"net"
+	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -195,16 +197,47 @@ func (o *Ouroboros) shareCandidates(
 	return candidates
 }
 
+// advertisedPeer returns the configured advertise address as a wire peer
+// address. An unparseable, unroutable, or zero-port value is dropped with a
+// warning rather than shared, since config validation is the only other
+// guard and this value is sent to arbitrary remote nodes.
+func (o *Ouroboros) advertisedPeer() (opeersharing.PeerAddress, bool) {
+	if o.config.AdvertiseAddress == "" {
+		return opeersharing.PeerAddress{}, false
+	}
+	ap, err := netip.ParseAddrPort(o.config.AdvertiseAddress)
+	if err != nil || ap.Port() == 0 ||
+		!peergov.IsRoutableIP(ap.Addr().Unmap().AsSlice()) {
+		o.config.Logger.Warn(
+			"advertise address is not a routable IP:port, not sharing it",
+			"address", o.config.AdvertiseAddress,
+		)
+		return opeersharing.PeerAddress{}, false
+	}
+	return opeersharing.PeerAddress{
+		IP:   net.IP(ap.Addr().Unmap().AsSlice()),
+		Port: ap.Port(),
+	}, true
+}
+
 func (o *Ouroboros) peersharingShareRequest(
 	ctx opeersharing.CallbackContext,
 	amount int,
 ) ([]opeersharing.PeerAddress, error) {
-	// If PeerGov isn't wired yet, don't share any peers rather than panic
-	if o.peerGov == nil {
-		return []opeersharing.PeerAddress{}, nil
-	}
 	if amount <= 0 {
 		return []opeersharing.PeerAddress{}, nil
+	}
+	limit := min(amount, peerShareMaxPeers)
+	peers := make([]opeersharing.PeerAddress, 0, limit)
+	// The node's own address always leads the reply, so it is never
+	// displaced by the salted ordering of the other sharable peers.
+	own, hasOwn := o.advertisedPeer()
+	if hasOwn {
+		peers = append(peers, own)
+	}
+	// If PeerGov isn't wired yet, share no other peers rather than panic
+	if o.peerGov == nil {
+		return peers, nil
 	}
 
 	// Collect every valid sharable candidate, order by a salted hash, and
@@ -215,15 +248,19 @@ func (o *Ouroboros) peersharingShareRequest(
 		o.peerGov.GetPeers(),
 		o.peerShareSalt.current(),
 	)
+	if hasOwn {
+		candidates = slices.DeleteFunc(candidates, func(c shareCandidate) bool {
+			return c.addr.Port == own.Port && c.addr.IP.Equal(own.IP)
+		})
+	}
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].rank != candidates[j].rank {
 			return candidates[i].rank < candidates[j].rank
 		}
 		return candidates[i].key < candidates[j].key
 	})
-	limit := min(amount, peerShareMaxPeers, len(candidates))
-	peers := make([]opeersharing.PeerAddress, 0, limit)
-	for _, c := range candidates[:limit] {
+	rest := min(limit-len(peers), len(candidates))
+	for _, c := range candidates[:rest] {
 		o.config.Logger.Debug("adding peer for sharing: " + c.key)
 		peers = append(peers, c.addr)
 	}

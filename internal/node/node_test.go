@@ -858,6 +858,26 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 	}
 }
 
+func TestBuildDingoConfigForwardsAdvertiseAddress(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{AdvertiseAddress: "45.0.0.7:3001"}
+	built := buildDingoConfig(
+		cfg,
+		slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+		nil,
+		nil,
+		true,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+	if got := built.AdvertiseAddress(); got != "45.0.0.7:3001" {
+		t.Fatalf("expected advertise address to flow through, got %q", got)
+	}
+}
+
 // TestBuildDingoConfigForwardsBlockProducerPools covers the pool list, which
 // TestBuildDingoConfigForwardsScalarConfigFields skips as a slice of structs.
 // Without it a multi-pool config would reach the node with no keys at all.

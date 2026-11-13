@@ -855,6 +855,7 @@ func buildDingoConfig(
 		dingo.WithListeners(listeners...),
 		dingo.WithOutboundSourcePort(cfg.RelayPort),
 		dingo.WithPeerSharing(peerSharing),
+		dingo.WithAdvertiseAddress(cfg.AdvertiseAddress),
 		dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 		dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 		dingo.WithAPIConfig(cfg.API),

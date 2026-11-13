@@ -34,6 +34,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
+	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -72,6 +73,23 @@ func validateHostPort(addr string) error {
 	}
 	if p, err := strconv.ParseUint(port, 10, 16); err != nil || p == 0 {
 		return fmt.Errorf("port %q is not in 1-65535", port)
+	}
+	return nil
+}
+
+// validateAdvertiseAddress checks that addr is an IP:port that remote nodes
+// can route to. The PeerSharing wire format carries IP literals only, and
+// peers drop non-routable addresses, so anything else would never be shared.
+func validateAdvertiseAddress(addr string) error {
+	ap, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		return errors.New("must be an IP literal and port, as IP:port")
+	}
+	if ap.Port() == 0 {
+		return errors.New("port must be in 1-65535")
+	}
+	if !peergov.IsRoutableIP(ap.Addr().Unmap().AsSlice()) {
+		return errors.New("must be a globally routable address")
 	}
 	return nil
 }
@@ -560,6 +578,16 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 	if _, err := dingoversion.HeaderProtocolMinor(c.CIP0203Enabled); err != nil {
 		errs = append(errs, err)
+	}
+
+	if c.AdvertiseAddress != "" {
+		if err := validateAdvertiseAddress(c.AdvertiseAddress); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"invalid advertiseAddress %q: %w",
+				c.AdvertiseAddress,
+				err,
+			))
+		}
 	}
 
 	// Mode enums

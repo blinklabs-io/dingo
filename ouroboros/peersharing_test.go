@@ -550,3 +550,88 @@ func TestShareCandidatesSkipsInvalidAddresses(t *testing.T) {
 	require.Len(t, got, 1)
 	require.Equal(t, "44.0.0.4:3001", got[0].key)
 }
+
+func shareAddrs(peers []opeersharing.PeerAddress) []string {
+	got := make([]string, 0, len(peers))
+	for _, p := range peers {
+		got = append(
+			got,
+			net.JoinHostPort(p.IP.String(), strconv.Itoa(int(p.Port))),
+		)
+	}
+	return got
+}
+
+func TestPeerSharingShareRequestAdvertisesOwnAddress(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	newGov := func(advertised ...string) *peergov.PeerGovernor {
+		pg := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+			Logger: logger,
+		})
+		loadShareTopology(t, pg, advertised, nil)
+		return pg
+	}
+	const own = "45.0.0.7:3001"
+	tests := []struct {
+		name       string
+		advertise  string
+		peers      []string
+		gov        bool
+		amount     int
+		wantFirst  string
+		wantLen    int
+		wantAbsent bool
+	}{
+		{name: "included first", advertise: own, peers: []string{"44.0.0.1:3001", "44.0.0.2:3001"}, gov: true, amount: 10, wantFirst: own, wantLen: 3},
+		{name: "counts toward requested amount", advertise: own, peers: []string{"44.0.0.1:3001", "44.0.0.2:3001"}, gov: true, amount: 1, wantFirst: own, wantLen: 1},
+		{name: "without sharable peers", advertise: own, gov: true, amount: 5, wantFirst: own, wantLen: 1},
+		{name: "without governor", advertise: own, amount: 5, wantFirst: own, wantLen: 1},
+		{name: "not duplicated when also a peer", advertise: own, peers: []string{own, "44.0.0.2:3001"}, gov: true, amount: 10, wantFirst: own, wantLen: 2},
+		{name: "ipv6", advertise: "[2001:4860:4860::8888]:3001", gov: true, amount: 5, wantFirst: "[2001:4860:4860::8888]:3001", wantLen: 1},
+		{name: "unset", peers: []string{"44.0.0.1:3001"}, gov: true, amount: 5, wantLen: 1, wantAbsent: true},
+		{name: "zero amount", advertise: own, gov: true, amount: 0, wantLen: 0, wantAbsent: true},
+		{name: "invalid ignored", advertise: "not-an-address", peers: []string{"44.0.0.1:3001"}, gov: true, amount: 5, wantLen: 1, wantAbsent: true},
+		{name: "unroutable ignored", advertise: "10.0.0.1:3001", peers: []string{"44.0.0.1:3001"}, gov: true, amount: 5, wantLen: 1, wantAbsent: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			o := newOuroboros(OuroborosConfig{
+				Logger:           logger,
+				PeerSharing:      true,
+				AdvertiseAddress: tt.advertise,
+			})
+			if tt.gov {
+				o.peerGov = newGov(tt.peers...)
+			}
+			peers, err := o.peersharingShareRequest(
+				opeersharing.CallbackContext{},
+				tt.amount,
+			)
+			require.NoError(t, err)
+			got := shareAddrs(peers)
+			require.Len(t, got, tt.wantLen)
+			require.ElementsMatch(t, got, uniq(got), "duplicate peer")
+			if tt.wantFirst != "" {
+				require.Equal(t, tt.wantFirst, got[0])
+			}
+			if tt.wantAbsent {
+				require.NotContains(t, got, tt.advertise)
+			}
+		})
+	}
+}
+
+func uniq(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}

@@ -336,6 +336,44 @@ func TestValidate(t *testing.T) {
 			modify:  func(c *Config) { c.RunMode = "batch" },
 			wantErr: "invalid runMode",
 		},
+		{name: "advertise address unset", modify: func(*Config) {}},
+		{
+			name:   "advertise address ipv4",
+			modify: func(c *Config) { c.AdvertiseAddress = "45.0.0.7:3001" },
+		},
+		{
+			name: "advertise address ipv6",
+			modify: func(c *Config) {
+				c.AdvertiseAddress = "[2001:4860:4860::8888]:3001"
+			},
+		},
+		{
+			name: "advertise address hostname",
+			modify: func(c *Config) {
+				c.AdvertiseAddress = "relay.example.com:3001"
+			},
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address without port",
+			modify:  func(c *Config) { c.AdvertiseAddress = "45.0.0.7" },
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address zero port",
+			modify:  func(c *Config) { c.AdvertiseAddress = "45.0.0.7:0" },
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address private",
+			modify:  func(c *Config) { c.AdvertiseAddress = "10.0.0.1:3001" },
+			wantErr: "invalid advertiseAddress",
+		},
+		{
+			name:    "advertise address wildcard",
+			modify:  func(c *Config) { c.AdvertiseAddress = "0.0.0.0:3001" },
+			wantErr: "invalid advertiseAddress",
+		},
 		{
 			name:    "invalid start era",
 			modify:  func(c *Config) { c.StartEra = "byron" },
