@@ -2127,12 +2127,28 @@ func waitForEpochTransition(
 	window time.Duration,
 	pollPeriod time.Duration,
 ) error {
-	timer := time.NewTimer(window)
-	defer timer.Stop()
 	ticker := time.NewTicker(pollPeriod)
 	defer ticker.Stop()
+	stallPolls := int((window + pollPeriod - 1) / pollPeriod)
+	return waitForEpochTransitionPolls(
+		events, targetEpoch, tipSlot, ticker.C, stallPolls,
+	)
+}
+
+// waitForEpochTransitionPolls counts the window in polls rather than reading a
+// timer, so a test can drive it with a prefilled channel and never depends on
+// scheduling. A real ticker drops ticks for a starved receiver, which only
+// lengthens the wall-clock window and cannot fail a progressing wait.
+func waitForEpochTransitionPolls(
+	events <-chan event.Event,
+	targetEpoch uint64,
+	tipSlot func() uint64,
+	polls <-chan time.Time,
+	stallPolls int,
+) error {
 	lastSlot := tipSlot()
 	lastMoved := time.Now()
+	idlePolls := 0
 	for {
 		select {
 		case evt, ok := <-events:
@@ -2144,28 +2160,35 @@ func waitForEpochTransition(
 				len(epochEvent.EpochNonce) > 0 {
 				return nil
 			}
-		case <-ticker.C:
+		case <-polls:
 			if slot := tipSlot(); slot != lastSlot {
 				lastSlot = slot
 				lastMoved = time.Now()
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(window)
+				idlePolls = 0
+				continue
 			}
-		case <-timer.C:
-			return fmt.Errorf(
-				"no progress waiting for epoch transition %d: tip slot %d "+
-					"unchanged for %s",
-				targetEpoch,
-				lastSlot,
-				time.Since(lastMoved).Round(time.Millisecond),
-			)
+			idlePolls++
+			if idlePolls >= stallPolls {
+				return fmt.Errorf(
+					"no progress waiting for epoch transition %d: tip slot %d "+
+						"unchanged for %s",
+					targetEpoch,
+					lastSlot,
+					time.Since(lastMoved).Round(time.Millisecond),
+				)
+			}
 		}
 	}
+}
+
+// prefilledPolls returns a channel holding n poll ticks, so a wait driven by
+// it makes exactly the polls the test intends with no real time involved.
+func prefilledPolls(n int) <-chan time.Time {
+	polls := make(chan time.Time, n)
+	for range n {
+		polls <- time.Time{}
+	}
+	return polls
 }
 
 func TestWaitForEpochTransitionWindowResetsOnProgress(t *testing.T) {
@@ -2183,29 +2206,29 @@ func TestWaitForEpochTransitionWindowResetsOnProgress(t *testing.T) {
 		t.Parallel()
 		events := make(chan event.Event, 1)
 		var polls uint64
-		// Every poll sees a new slot, so 150 polls at 5ms exceed the 500ms
-		// window; the event is delivered from the final poll.
+		// The slot moves on every fifth poll, so each gap is four idle polls,
+		// under the 10-poll window, while the 120 idle polls before the event
+		// on the 150th poll far exceed it.
 		tipSlot := func() uint64 {
 			polls++
 			if polls == 150 {
 				events <- newEvent()
 			}
-			return polls
+			return polls / 5
 		}
-		const window = 500 * time.Millisecond
-		start := time.Now()
-		require.NoError(t, waitForEpochTransition(
-			events, target, tipSlot, window, 5*time.Millisecond,
+		const window = 10
+		require.NoError(t, waitForEpochTransitionPolls(
+			events, target, tipSlot, prefilledPolls(200), window,
 		))
-		require.Greater(t, time.Since(start), window)
+		require.GreaterOrEqual(t, polls, uint64(150))
 	})
 
 	t.Run("stalled tip fails with last slot", func(t *testing.T) {
 		t.Parallel()
 		events := make(chan event.Event, 1)
-		err := waitForEpochTransition(
+		err := waitForEpochTransitionPolls(
 			events, target, func() uint64 { return 42 },
-			100*time.Millisecond, 5*time.Millisecond,
+			prefilledPolls(100), 10,
 		)
 		require.ErrorContains(t, err, "tip slot 42 unchanged")
 	})
@@ -2220,8 +2243,8 @@ func TestWaitForEpochTransitionWindowResetsOnProgress(t *testing.T) {
 			}
 			return polls
 		}
-		err := waitForEpochTransition(
-			events, target, tipSlot, 100*time.Millisecond, 5*time.Millisecond,
+		err := waitForEpochTransitionPolls(
+			events, target, tipSlot, prefilledPolls(100), 10,
 		)
 		require.ErrorContains(t, err, "tip slot 20 unchanged")
 	})
