@@ -11280,7 +11280,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 						ebHash.String(),
 					)
 				}
-				applied, donation, reserved, err := ls.applyEndorserBlockReserving(
+				applied, donation, reserved, err := ls.applyEndorserBlock(
 					ctx,
 					txn,
 					point,

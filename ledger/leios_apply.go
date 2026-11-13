@@ -185,36 +185,18 @@ func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
 // ranking block must remove them, and the ranking block is what admits the
 // endorser block to the chain.
 //
-// It returns the number of transactions applied and the Conway donation total
-// from accepted endorser-block transactions. Malformed peer transaction bytes
-// are deterministic validation failures. Local build failures happen before
-// storage is mutated and remain retryable. Once the endorser blob or
+// It returns the number of transactions applied, the Conway donation total
+// from accepted endorser-block transactions, and the number of transaction
+// storage indexes the closure reserves under the ranking block's point. The
+// ranking block's own transactions apply after the closure, so they must be
+// stored after that reserved range: the stored (block_index, cert_index) is
+// the order every position-ranked reader uses. Malformed peer transaction
+// bytes are deterministic validation failures. Local build failures happen
+// before storage is mutated and remain retryable. Once the endorser blob or
 // transaction rows start writing, any error is wrapped in
 // leiosEndorserBlockStorageError so callers can abort the outer transaction
 // instead of committing a partial endorser-block application.
-//
-//nolint:unused // exercised by tests; production applies through applyEndorserBlockReserving
 func (ls *LedgerState) applyEndorserBlock(
-	ctx context.Context,
-	txn *database.Txn,
-	rbPoint ocommon.Point,
-	rbBlockNumber uint64,
-	ebSlot uint64,
-	ebHashBytes []byte,
-	rawTxs []cbor.RawMessage,
-) (int, uint64, error) {
-	applied, donation, _, err := ls.applyEndorserBlockReserving(
-		ctx, txn, rbPoint, rbBlockNumber, ebSlot, ebHashBytes, rawTxs,
-	)
-	return applied, donation, err
-}
-
-// applyEndorserBlockReserving is applyEndorserBlock that also returns the
-// number of transaction storage indexes the closure reserves under the
-// ranking block's point. The ranking block's own transactions must be stored
-// after that reserved range: they apply after the closure, and the stored
-// (block_index, cert_index) is the order every position-ranked reader uses.
-func (ls *LedgerState) applyEndorserBlockReserving(
 	ctx context.Context,
 	txn *database.Txn,
 	rbPoint ocommon.Point,
