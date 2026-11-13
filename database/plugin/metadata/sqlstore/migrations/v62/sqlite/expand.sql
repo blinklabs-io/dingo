@@ -1,0 +1,5 @@
+-- Pool relay IPv6 addresses decoded from chain certificates and ledger-state
+-- snapshots were stored in the ledger's wire order (each 32-bit word
+-- little-endian). They are now stored in network order, as gouroboros decodes
+-- them. The word swap runs as a backfill because it rewrites blob contents.
+-- Genesis relays were parsed from text and already hold network order.

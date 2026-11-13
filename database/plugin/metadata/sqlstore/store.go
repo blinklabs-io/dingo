@@ -264,6 +264,11 @@ type Store struct {
 	stmts       map[string]*sql.Stmt
 	stmtBorrows map[*sql.Stmt]int
 	stmtRetired map[*sql.Stmt]struct{}
+	// stmtHits counts, per query text, the borrows of a cached statement.
+	// It exists for test and benchmark observability: it shows that a
+	// statement was served from the cache rather than merely absent from the
+	// driver's record of uncached calls.
+	stmtHits map[string]uint64
 	// stmtFailed holds hot queries whose lazy prepare failed; stmtsInvalidated
 	// is set once closePreparedStatements has emptied the cache for good.
 	stmtFailed       map[string]struct{}

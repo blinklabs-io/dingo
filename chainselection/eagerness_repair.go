@@ -56,7 +56,7 @@ func (cs *ChainSelector) EagernessDeliveryRepair(
 		(entry.valid == nil || entry.valid()) &&
 		cs.peerTipAdmissionGenerationCurrent(PeerTipUpdateEvent{
 			HeaderCryptoVerificationGeneration: entry.generation,
-		}) && extendsFragment(entry.fragment, base) {
+		}) && entry.extends(base) {
 		if proofHead, valid := eagernessFragmentHead(entry.fragment); valid &&
 			proofHead == update.ObservedTip.BlockNumber {
 			last := entry.fragment.points[len(entry.fragment.points)-1]
@@ -184,6 +184,7 @@ func (cs *ChainSelector) RecordVerifiedEagernessPath(
 			baseBlock,
 		), proofHead: update.ObservedTip.BlockNumber,
 		proofGeneration: generation,
+		join:            &eagernessJoin{},
 	}
 	cs.signalIngressChange()
 	return true

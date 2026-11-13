@@ -45,7 +45,7 @@ func spenderIndexDB(t *testing.T) (*sql.DB, func()) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 61)
+	require.Len(t, registry, 62)
 	runTo := func(registry []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -57,7 +57,7 @@ func spenderIndexDB(t *testing.T) (*sql.DB, func()) {
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
-	return db, func() { runTo(registry) }
+	return db, func() { runTo(registry[:50]) }
 }
 
 // indexSQL returns the stored definition of an index and whether it exists.

@@ -101,6 +101,7 @@ const (
 	metadataLabelSlotIndexSchemaRelease                 = "transaction-metadata-label-slot-index"
 	stakeBookkeepingIndexDropSchemaRelease              = "stake-bookkeeping-index-drop"
 	utxoSpentStakingIndexSchemaRelease                  = "utxo-spent-staking-index"
+	utxoTransactionIdentitySchemaRelease                = "utxo-transaction-identity"
 	poolRelayIPv6NetworkOrderSchemaRelease              = "pool-relay-ipv6-network-order"
 )
 
@@ -282,7 +283,8 @@ var schemaVersions = []struct {
 	{Version: 58, Name: metadataLabelSlotIndexSchemaRelease, Dir: "v58"},
 	{Version: 59, Name: stakeBookkeepingIndexDropSchemaRelease, Dir: "v59"},
 	{Version: 60, Name: utxoSpentStakingIndexSchemaRelease, Dir: "v60"},
-	{Version: 61, Name: poolRelayIPv6NetworkOrderSchemaRelease, Dir: "v61"},
+	{Version: 61, Name: utxoTransactionIdentitySchemaRelease, Dir: "v61"},
+	{Version: 62, Name: poolRelayIPv6NetworkOrderSchemaRelease, Dir: "v62"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -408,6 +410,11 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			dialect != "mysql" {
 			migration.BackfillRevision = "1"
 			migration.Backfill = utxoSpentStakingIndexBackfill
+		}
+		if version.Name == utxoTransactionIdentitySchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.BatchSize = utxoIdentityBatchSize
+			migration.Backfill = utxoTransactionIdentityBackfill(dialect)
 		}
 		if version.Name == poolRelayIPv6NetworkOrderSchemaRelease {
 			migration.BackfillRevision = "1"

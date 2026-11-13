@@ -48,15 +48,7 @@ var (
 	ErrTooManyUtxoResults = errors.New(
 		"utxo query exceeded the requested maxResults bound",
 	)
-	ErrUtxoQueryBudgetExceeded = errors.New(
-		"utxo query exceeded its work budget",
-	)
 )
-
-// MaxAssetQuantityHoldings is the most live holdings one asset quantity total
-// reads. An asset held by more UTxOs fails with ErrUtxoQueryBudgetExceeded
-// rather than scanning without a limit.
-const MaxAssetQuantityHoldings = 1_000_000
 
 // UtxoAddressPattern carries explicit address-match intent through the shared
 // query API. Fields within one pattern are ANDed; multiple patterns are ORed.
@@ -288,16 +280,24 @@ func AppendUtxoAddressOrBranchMode(
 // UtxoSpendState records whether a stored output has been consumed, without
 // loading its value, address, or assets.
 type UtxoSpendState struct {
-	DeletedSlot uint64
-	SpentAtTxId types.NullableHash
+	DeletedSlot   uint64
+	SpentAtTxHash types.NullableHash
 }
 
 // Utxo represents an unspent transaction output
 type Utxo struct {
-	TransactionID           *uint
-	CollateralReturnForTxID *uint // Unique: a transaction has at most one collateral return output
-	TxId                    []byte
-	PaymentKey              []byte
+	// TransactionID is the row id of the producing transaction in the
+	// transaction table. The store fills it on every row it returns and
+	// resolves it from TxId on write when it is nil, so a caller that only
+	// knows the hash leaves it unset.
+	TransactionID *uint
+	// CollateralReturnForTxID is set on the collateral return output, where
+	// it equals TransactionID. Unique: a transaction has at most one
+	// collateral return output.
+	CollateralReturnForTxID *uint
+	// TxId is the hash of the producing transaction.
+	TxId       []byte
+	PaymentKey []byte
 	// Address is the canonical rendered output address. Metadata stores use
 	// its bytes as the exact holder identity and lexical pagination key.
 	Address       []byte
@@ -312,19 +312,19 @@ type Utxo struct {
 	// reference script. It is not a utxo column; API storage mode indexes it
 	// in utxo_reference_script.
 	ReferenceScriptHash []byte
-	// SpentAtTxId, ReferencedByTxId, and CollateralByTxId are nullable FKs to
-	// transaction(hash); they are unset until a UTxO is spent/referenced.
-	// They use types.NullableHash so an empty value serializes to SQL NULL
-	// (not an empty blob), which is required for the FK to be skipped — see
-	// the type docs for the FOREIGN KEY constraint failed (787) issue.
-	SpentAtTxId      types.NullableHash
-	ReferencedByTxId types.NullableHash
-	CollateralByTxId types.NullableHash
-	ID               uint
-	AddedSlot        uint64
-	DeletedSlot      uint64
-	Amount           types.Uint64
-	OutputIdx        uint32
+	// SpentAtTxHash is the hash of the transaction that spent the output,
+	// empty while it is unspent. The table stores the spender's row id
+	// (SpentAtTxID); readers project the hash. types.NullableHash serializes
+	// an empty value to SQL NULL.
+	SpentAtTxHash types.NullableHash
+	// SpentAtTxID is the transaction row id of the spender. Readers fill it;
+	// writers may set either field.
+	SpentAtTxID *uint
+	ID          uint
+	AddedSlot   uint64
+	DeletedSlot uint64
+	Amount      types.Uint64
+	OutputIdx   uint32
 	// PaymentScript is true when the output's payment credential is a
 	// script hash (as opposed to a key hash). It is derived from the
 	// address type at index time and used to compute the network's

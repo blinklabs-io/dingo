@@ -59,7 +59,7 @@ VALUES (?, 0, ?, '0', TRUE, 1, 1)`,
 		pool,
 	)
 	require.NoError(t, err)
-	_, err = store.writeDB.Exec(
+	_, err = testutil.ExecTransactionInsert(store.writeDB,
 		`INSERT INTO "transaction" (id, slot, block_index) VALUES (1, 1, 0)`,
 	)
 	require.NoError(t, err)
@@ -79,8 +79,8 @@ VALUES (?, 0, ?, 1, 1)`,
 
 	_, err = store.writeDB.Exec(`
 WITH digits(d) AS (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9))
-INSERT INTO "transaction" (id, slot, block_index)
-SELECT n + 2, n + 2, 0
+INSERT INTO "transaction" (id, hash)
+SELECT n + 2, randomblob(32)
 FROM (
     SELECT d0.d + 10*d1.d + 100*d2.d AS n
     FROM digits d0
@@ -88,6 +88,9 @@ FROM (
     CROSS JOIN digits d2
 )
 `)
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec(`INSERT INTO applied_transaction (tx_id, slot, block_index)
+SELECT id, id, 0 FROM "transaction" WHERE id > 1`)
 	require.NoError(t, err)
 
 	stat := func() string {

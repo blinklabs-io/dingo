@@ -37,6 +37,7 @@ type stakeReader struct {
 
 func stakeReaders(store *Store) []stakeReader {
 	key := make([]byte, 28)
+	withdrawalQuery, withdrawalArgs := withdrawalHistoryQuery(0, key)
 	hash := make([]byte, 32)
 	return []stakeReader{
 		{
@@ -106,10 +107,8 @@ WHERE withdrawal = TRUE AND added_slot > ?`,
 		{
 			name: "withdrawalHistoryQuery", table: "account_reward_delta",
 			wantIndex: "idx_account_reward_delta_credential",
-			query: `SELECT ard.tx_hash, ard.amount, tx.slot, tx.block_index, tx.block_hash
-FROM account_reward_delta ard JOIN "transaction" tx ON tx.hash = ard.tx_hash
-WHERE ard.withdrawal = TRUE AND ard.credential_tag = ? AND ard.staking_key = ?`,
-			args: []any{0, key},
+			query:     withdrawalQuery,
+			args:      withdrawalArgs,
 		},
 		{
 			name: "GetLiveStakeInputsForPools", table: "reward_live_stake",

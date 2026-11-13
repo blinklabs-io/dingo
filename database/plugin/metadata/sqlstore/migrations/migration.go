@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 )
@@ -42,6 +43,15 @@ type Batch struct {
 	// nil; the runner substitutes an identity function for dialects that take
 	// ? directly.
 	Rebind func(string) string
+	// Logger receives backfill diagnostics; a nil Logger is slog.Default.
+	Logger *slog.Logger
+}
+
+func (b Batch) logger() *slog.Logger {
+	if b.Logger != nil {
+		return b.Logger
+	}
+	return slog.Default()
 }
 
 // BatchResult describes the durable checkpoint after a backfill batch.

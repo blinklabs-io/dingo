@@ -930,20 +930,7 @@ func (s *Server) handleConstructionSubmit(
 		writeError(w, meshErr)
 		return
 	}
-	// Reserve after the bounded body read, so a slow client cannot hold a
-	// validation slot while it trickles the request in, and before any
-	// transaction decoding.
 	ctx := r.Context()
-	if admitter, ok := s.config.Mempool.(mempool.SubmissionAdmitter); ok {
-		var release func()
-		var err error
-		ctx, release, err = admitter.AdmitSubmission(ctx)
-		if err != nil {
-			writeError(w, wrapErr(ErrUnavailable, err))
-			return
-		}
-		defer release()
-	}
 
 	txBytes, err := hex.DecodeString(
 		req.SignedTransaction,
@@ -981,7 +968,7 @@ func (s *Server) handleConstructionSubmit(
 	}
 
 	if err := s.config.Mempool.AddTransaction(
-		ctx, txType, txBytes,
+		mempool.WithAPISubmission(ctx), txType, txBytes,
 	); err != nil {
 		writeError(w, wrapErr(
 			ErrSubmitFailed,

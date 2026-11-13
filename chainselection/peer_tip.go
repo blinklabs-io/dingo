@@ -50,6 +50,12 @@ type PeerChainTip struct {
 	// eagernessPaused counts AwaitEagernessLimit calls holding this peer's
 	// header stream at the Limit on Eagerness. Guarded by the selector mutex.
 	eagernessPaused int
+	// catchUpPaused counts AwaitCatchUpBand calls parking this peer's header
+	// stream until the ledger catches up. It is kept apart from
+	// eagernessPaused because that parked header has not been verified and
+	// the peer is not at the limit, so it must not enter the eagerness
+	// standoff. Guarded by the selector mutex.
+	catchUpPaused int
 	// jumpRecord marks a ChainSync Jumping record. A jumper sends no headers
 	// by design, so its age says nothing about whether it is still there.
 	jumpRecord  bool
@@ -388,6 +394,13 @@ func (p *PeerChainTip) recordObservedTipHistory(
 // last delivered header.
 func (p *PeerChainTip) isIdling() bool { return p != nil && p.idling }
 
+// streamPaused reports whether the selector is holding this peer's header
+// stream for either reason. A paused peer sends no tips, so its silence is not
+// evidence that it is gone.
+func (p *PeerChainTip) streamPaused() bool {
+	return p != nil && (p.eagernessPaused > 0 || p.catchUpPaused > 0)
+}
+
 // recordObservedLinkedPoint records a (slot, hash) point into the observed
 // frontier used for Genesis density (observedSlots) and corroboration/GDD
 // (observedPoints). Slots are bounded by the density window; hash-bearing
@@ -609,73 +622,6 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 	return false
 }
 
-// confirmsRecentChain reports whether witness confirms this peer's (candidate's)
-// chain. Within the slot range of the candidate's observed frontier, every
-// witness-observed point must match the candidate, and the witness must have
-// independently delivered the candidate's current point.
-//
-// This is deliberately stronger than "share any common point": a fast source
-// that shares only an old ancestor and then diverges for every later block is
-// NOT confirmed, because the witness observed recent blocks the candidate did
-// not (or a conflicting hash at the same slot). A witness whose frontier does
-// not overlap the candidate's window at all cannot confirm it (returns false),
-// so corroboration fails closed — the candidate then stalls rather than being
-// followed uncorroborated. Requiring the current point is what keeps a match
-// in older candidate history, however recent, from authorizing candidate
-// blocks the witness has never observed.
-//
-// Both frontiers are kept in strictly-ascending slot order; this is a
-// two-pointer scan that starts the witness at the candidate's first slot. It
-// relies on the observed frontier being populated per header (dense) during
-// chainsync, so two peers on the same chain share every block in their
-// overlap.
-func (p *PeerChainTip) confirmsRecentChainWithin(
-	witness *PeerChainTip,
-	window uint64,
-) bool {
-	if p == nil || witness == nil ||
-		len(p.observedPoints) == 0 || len(witness.observedPoints) == 0 {
-		return false
-	}
-	candidate := p.observedPoints
-	if window > 0 {
-		hi := candidate[len(candidate)-1].Slot
-		var cutoff uint64
-		if hi >= window {
-			cutoff = hi - window + 1
-		}
-		candidate = candidate[sort.Search(len(candidate), func(i int) bool {
-			return candidate[i].Slot >= cutoff
-		}):]
-	}
-	lo := candidate[0].Slot
-	hi := candidate[len(candidate)-1].Slot
-	witnessPoints := witness.observedPoints
-	witnessPoints = witnessPoints[sort.Search(len(witnessPoints), func(i int) bool {
-		return witnessPoints[i].Slot >= lo
-	}):]
-	i := 0
-	tipMatched := false
-	for _, w := range witnessPoints {
-		if w.Slot > hi {
-			break
-		}
-		for i < len(candidate) && candidate[i].Slot < w.Slot {
-			i++
-		}
-		if i < len(candidate) && candidate[i].Slot == w.Slot &&
-			len(w.Hash) > 0 && bytes.Equal(candidate[i].Hash, w.Hash) {
-			tipMatched = i == len(candidate)-1
-			continue
-		}
-		// The witness observed a block within the candidate's range that the
-		// candidate does not have (or a conflicting hash at the same slot):
-		// they are on different chains, so this witness does not confirm.
-		return false
-	}
-	return tipMatched
-}
-
 func (p *PeerChainTip) observedDensity(window uint64) uint64 {
 	if p == nil || len(p.observedSlots) == 0 {
 		return 0
@@ -691,13 +637,12 @@ func (p *PeerChainTip) observedDensity(window uint64) uint64 {
 	} else {
 		cutoff = 1
 	}
-	for i, slot := range p.observedSlots {
-		if slot >= cutoff {
-			// #nosec G115 -- i < len(p.observedSlots), difference is non-negative
-			return uint64(len(p.observedSlots) - i)
-		}
-	}
-	return 0
+	// Slots are in strictly ascending order.
+	i := sort.Search(len(p.observedSlots), func(i int) bool {
+		return p.observedSlots[i] >= cutoff
+	})
+	// #nosec G115 -- i <= len(p.observedSlots), difference is non-negative
+	return uint64(len(p.observedSlots) - i)
 }
 
 // SelectionTip returns the best locally observed frontier for this peer.

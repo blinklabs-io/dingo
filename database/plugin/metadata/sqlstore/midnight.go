@@ -153,8 +153,9 @@ func (s *Store) GetMidnightCandidates(
 	rows, err := db.QueryContext(
 		ctx,
 		s.dialect.Rebind(`
-SELECT utxo.tx_id, utxo.output_idx, datum.raw_datum
+SELECT producer.hash, utxo.output_idx, datum.raw_datum
 FROM utxo
+JOIN "transaction" AS producer ON producer.id = utxo.tx_id
 LEFT JOIN datum ON datum.hash = utxo.datum_hash
 WHERE utxo.deleted_slot = 0 AND `+predicates[0]),
 		args...,

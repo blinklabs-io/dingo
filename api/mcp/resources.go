@@ -39,8 +39,8 @@ backfill all historical transaction metadata. Pruning also limits history.
 
 | Concept | cardano-db-sync | Dingo SQLite |
 | :--- | :--- | :--- |
-| Transactions | tx | "transaction": hash, block_hash, slot, block_index, fee |
-| Outputs | tx_out, tx_in | utxo: tx_id, output_idx, amount, deleted_slot |
+| Transactions | tx | "transaction": id, hash (every known transaction); applied_transaction: tx_id, block_hash, slot, block_index, fee (applied transactions) |
+| Outputs | tx_out, tx_in | utxo: tx_id (producer row id), output_idx, amount, deleted_slot, spent_at_tx_id |
 | Stake accounts | stake_address and delegation/reward tables | account: staking_key, credential_tag, pool, drep, reward, active |
 | Datums | datum | datum: hash, raw_datum (CBOR bytes) |
 | Native assets | multi_asset and output/mint relations | asset: policy_id, name, amount, utxo_id (output holdings) |
@@ -54,26 +54,33 @@ relevant history was not indexed or has been pruned.
 ### Recent retained transactions
 
 ~~~sql
-SELECT hex(hash) AS tx_hash, hex(block_hash) AS block_hash,
-       slot, block_index, fee AS fee_lovelace
-FROM "transaction"
-ORDER BY id DESC
+SELECT hex(t.hash) AS tx_hash, hex(a.block_hash) AS block_hash,
+       a.slot, a.block_index, a.fee AS fee_lovelace
+FROM applied_transaction a
+JOIN "transaction" t ON t.id = a.tx_id
+ORDER BY a.tx_id DESC
 LIMIT 20;
 ~~~
 
-The transaction table has no size or deposit column. Transaction hash and block
-hash are different identities. The utxo.transaction_id integer refers to the
-transaction row's id; utxo.tx_id is the binary transaction hash.
+"transaction" holds only the row id and hash of every transaction Dingo
+knows, including a producer named only by an imported output;
+applied_transaction holds the rows of transactions applied to the chain and
+has no size or deposit column. Transaction hash and block hash are different
+identities. utxo.tx_id is the row id of the producing transaction, the
+collateral return included, and utxo.spent_at_tx_id the row id of the
+spender; both refer to "transaction".id. To relate outputs to a transaction,
+filter on utxo.tx_id; the unique (tx_id, output_idx) index leads with it.
 
 ### Unspent outputs
 
 ~~~sql
-SELECT hex(tx_id) AS tx_hash, output_idx, amount AS lovelace,
-       hex(payment_key) AS payment_credential, payment_script,
-       hex(staking_key) AS stake_credential, credential_tag,
-       hex(datum_hash) AS datum_hash
-FROM utxo
-WHERE deleted_slot = 0
+SELECT hex(t.hash) AS tx_hash, u.output_idx, u.amount AS lovelace,
+       hex(u.payment_key) AS payment_credential, u.payment_script,
+       hex(u.staking_key) AS stake_credential, u.credential_tag,
+       hex(u.datum_hash) AS datum_hash
+FROM utxo u
+JOIN "transaction" t ON t.id = u.tx_id
+WHERE u.deleted_slot = 0
 LIMIT 20;
 ~~~
 
@@ -481,7 +488,7 @@ func registerResources(
 			}
 		} else if db != nil {
 			var rawHash []byte
-			err := db.QueryRowContext(ctx, `SELECT slot, block_hash FROM "transaction" ORDER BY slot DESC LIMIT 1`).Scan(&slot, &rawHash)
+			err := db.QueryRowContext(ctx, `SELECT slot, block_hash FROM applied_transaction ORDER BY slot DESC LIMIT 1`).Scan(&slot, &rawHash)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return nil, fmt.Errorf("read database tip: %w", err)
 			}

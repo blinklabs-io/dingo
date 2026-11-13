@@ -96,16 +96,18 @@ func (c *ConnectionManager) reserveNtCSlot(addr net.Addr, trustedLocal bool) fun
 	c.ntcAdmissionMutex.Lock()
 	reason := ""
 	if trustedLocal {
-		if c.trustedLocalNtCCount >= c.config.MaxTrustedLocalNtCConns {
+		if c.config.MaxTrustedLocalNtCConns > 0 &&
+			c.trustedLocalNtCCount >= c.config.MaxTrustedLocalNtCConns {
 			reason = "trusted_local_limit"
 		} else {
 			c.trustedLocalNtCCount++
 		}
 	} else {
 		switch {
-		case c.ntcCount >= c.config.MaxNtCConns:
+		case c.config.MaxNtCConns > 0 && c.ntcCount >= c.config.MaxNtCConns:
 			reason = "total_limit"
-		case ipKey != "" && c.ntcIPConns[ipKey] >= c.config.MaxNtCConnectionsPerIP:
+		case ipKey != "" && c.config.MaxNtCConnectionsPerIP > 0 &&
+			c.ntcIPConns[ipKey] >= c.config.MaxNtCConnectionsPerIP:
 			reason = "per_ip_limit"
 		default:
 			c.ntcCount++

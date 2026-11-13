@@ -31,9 +31,6 @@ type dialectQueryer struct {
 }
 
 func newDialectQueryer(db queryer, dialect string) queryer {
-	if dialect == "sqlite" {
-		return db
-	}
 	if wrapped, ok := unwrapDialectQueryer(db); ok && wrapped.dialect == dialect {
 		return db
 	}

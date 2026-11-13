@@ -212,7 +212,8 @@ func normalizedSQLiteSchema(db *sql.DB) ([]string, error) {
 			}
 			for indexColumns.Next() {
 				var indexSequence, cid int
-				var column string
+				// An expression key part reports a NULL column name.
+				var column sql.NullString
 				if err := indexColumns.Scan(
 					&indexSequence,
 					&cid,
@@ -227,7 +228,7 @@ func normalizedSQLiteSchema(db *sql.DB) ([]string, error) {
 					index.name,
 					indexSequence,
 					cid,
-					column,
+					column.String,
 				))
 			}
 			if err := indexColumns.Close(); err != nil {

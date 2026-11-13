@@ -99,7 +99,7 @@ SELECT ipv4, ipv6 FROM pool_registration_relay WHERE id = ?`, id,
 	var dirty bool
 	require.NoError(
 		t,
-		db.QueryRowContext(ctx, `SELECT dirty FROM schema_migrations WHERE version = 61`).
+		db.QueryRowContext(ctx, `SELECT dirty FROM schema_migrations WHERE version = 62`).
 			Scan(&dirty),
 	)
 	require.False(t, dirty)
@@ -144,7 +144,7 @@ VALUES (?, 2, 1, ?, 3001)`, chainRelays+1, []byte(standard))
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	index := slices.IndexFunc(registry, func(m migrations.Migration) bool {
-		return m.Version == 61
+		return m.Version == 62
 	})
 	require.GreaterOrEqual(t, index, 0)
 	registry[index].BatchSize = 1
@@ -180,7 +180,7 @@ SELECT ipv6 FROM pool_registration_relay WHERE id = ?`, id).Scan(&got))
 	var cursor string
 	var dirty bool
 	require.NoError(t, db.QueryRowContext(ctx, `
-SELECT cursor, dirty FROM schema_migrations WHERE version = 61`,
+SELECT cursor, dirty FROM schema_migrations WHERE version = 62`,
 	).Scan(&cursor, &dirty))
 	require.Equal(t, "2", cursor)
 	require.True(t, dirty)
@@ -198,6 +198,6 @@ SELECT cursor, dirty FROM schema_migrations WHERE version = 61`,
 		require.Equal(t, []byte(standard), read(id), "relay %d", id)
 	}
 	require.NoError(t, db.QueryRowContext(ctx, `
-SELECT dirty FROM schema_migrations WHERE version = 61`).Scan(&dirty))
+SELECT dirty FROM schema_migrations WHERE version = 62`).Scan(&dirty))
 	require.False(t, dirty)
 }

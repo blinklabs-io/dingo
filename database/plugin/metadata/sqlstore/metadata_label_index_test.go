@@ -30,9 +30,13 @@ func TestMetadataLabelPageUsesSlotIndex(t *testing.T) {
 	store := newMigratedSQLiteStore(t)
 	_, err := store.writeDB.Exec(`
 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<2000)
-INSERT INTO "transaction"
-  (hash, block_hash, slot, type, id, fee, collateral_fee, ttl, block_index, valid)
-SELECT randomblob(32), randomblob(32), i*20, 0, i, '0', '0', '0', i%10, 1 FROM n`)
+INSERT INTO "transaction" (id, hash) SELECT i, randomblob(32) FROM n`)
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec(`
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<2000)
+INSERT INTO applied_transaction
+  (tx_id, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid)
+SELECT i, randomblob(32), i*20, 0, '0', '0', '0', i%10, 1 FROM n`)
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(`
 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<2000)

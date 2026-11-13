@@ -39,7 +39,7 @@ api/mcp/
 ├── provider.go               # Dingo node API Provider plugin integration
 ├── server.go                 # MCP server lifecycle, options, and DB management
 ├── transport_http.go         # Streamable HTTP, SSE, and health endpoints
-├── security.go               # IP rate limiter and Origin validation
+├── security.go               # Optional IP rate limiter and Origin validation
 ├── sanitize.go               # Zero-width, prompt injection, and output sanitization
 ├── types.go                  # Tool schemas, server options, and resource records
 ├── tools_cardano.go          # 13 Cardano domain tools + node identity & doc inspection
@@ -82,14 +82,13 @@ api/mcp/
 ### 2.3 Security & Guardrails (`security.go`, `sanitize.go`)
 - **Anonymous HTTP**: All endpoints accept requests without caller credentials
   and support plaintext HTTP on every bind address.
-- **Rate Limiting**: Thread-safe token bucket rate limiter (default: 60
-  requests/sec with burst capacity of 15) keyed per client IP address.
-  Client limiter state is capped at 4096 identities and one timer removes
-  entries after 30 idle minutes.
-- **Session Admission**: Streamable HTTP and legacy SSE share a 128-session cap,
-  with at most eight sessions per client address. New sessions fail with HTTP
-  429 when either cap is full. Sessions close after five idle minutes, after one
-  hour of total lifetime, or during server shutdown.
+- **Rate Limiting (opt-in)**: Off by default. When `rateLimit` is positive, a
+  thread-safe token bucket (with `burst` capacity) is keyed per client IP
+  address. Client limiter state is capped at 4096 identities and one timer
+  removes entries after 30 idle minutes.
+- **Session Tracking**: Streamable HTTP and legacy SSE sessions are tracked only
+  so shutdown can close them. There is no session cap, per-client cap, idle
+  timeout or lifetime limit.
 - **Strict Read-Only SQL Validator**:
   - Identifies the main statement after CTE definitions, accounting for
     comments, quoted data and nested expressions; permits SELECT/VALUES reads
@@ -120,14 +119,9 @@ tools) and Cardano domain operations (18 tools).
 | `sqlite_explain` | Analyze query execution plans via `EXPLAIN QUERY PLAN` | `query` (string) |
 | `sqlite_table_schema` | Inspect table DDL, column types, nullability, and indices | `table_name` (string) |
 
-The three SQL tools, `get_asset_info`, `get_utxos_by_asset`, and raw-credential
-`get_utxos` searches share four execution slots and fail immediately when all
-slots are occupied. While the metadata SQLite `-wal` file
-exceeds 128 MiB, every tool call and resource read fails until the WAL is back
-under that size, so MCP reads cannot hold the snapshot that blocks the periodic
-TRUNCATE checkpoint. Caller-supplied SQL (`sqlite_query`, `sqlite_explain`)
-also counts against a two-slot sub-budget inside those four slots, so it can
-never take the slots the built-in tools rely on. SQLite rejects values over
+The SQL tools, `get_asset_info`, `get_utxos_by_asset`, and raw-credential
+`get_utxos` searches have no execution-slot pool, asset-row scan cap, offset
+ceiling or WAL-size gate. SQLite rejects values over
 64 KiB and result sets over 32 columns before Go materializes them;
 `sqlite_query` stops after 1 MiB of decoded cell data.
 
@@ -302,7 +296,7 @@ transaction and compare full address bytes from output CBOR. Pages return at
 most 100 matches and examine at most 2,000 candidates. A cursor follows the last
 completed candidate, including empty pages with more candidates. Separate pages
 read live state independently. Credential searches are intentionally wider and
-use offset pagination, with offsets capped at 10,000.
+use offset pagination with no offset ceiling.
 Stake accounts and DReps bind binary hashes together with their credential tag.
 Epoch queries use persisted epoch slot boundaries and epoch-summary nonces.
 Historical protocol-parameter requests return an explicit unsupported error.
@@ -313,8 +307,7 @@ Both HTTP transports share origin validation before route
 handling. Only same-origin on loopback or explicitly allowed origins pass; the
 shared CORS wildcard is ignored for MCP. Native clients without Origin remain
 supported. HTTP has no absolute write deadline
-because SSE responses span client sessions. The session admission layer supplies
-the finite idle and lifetime bounds for both transports. The limiter's
+because SSE responses span client sessions. When enabled, the limiter's
 idle-expiry timer reclaims entries even when no requests arrive and is stopped
 when its server shuts down.
 

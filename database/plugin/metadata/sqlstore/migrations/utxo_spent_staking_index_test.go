@@ -32,8 +32,8 @@ const utxoSpentStakingIndexVersion = 60
 
 // utxoSpentStakingIndexDB returns a database migrated through the version
 // before the index became partial, holding live outputs with and without a
-// stake credential and spent ones, and a function that runs the remaining
-// versions.
+// stake credential and spent ones, and a function that runs that version.
+// Later versions rebuild utxo, so the upgrade stops at the one under test.
 func utxoSpentStakingIndexDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
@@ -42,7 +42,7 @@ func utxoSpentStakingIndexDB(t *testing.T) (*sql.DB, func()) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 61)
+	require.GreaterOrEqual(t, len(registry), utxoSpentStakingIndexVersion)
 	runTo := func(registry []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -74,7 +74,7 @@ func utxoSpentStakingIndexDB(t *testing.T) (*sql.DB, func()) {
 		)
 		require.NoError(t, err)
 	}
-	return db, func() { runTo(registry) }
+	return db, func() { runTo(registry[:utxoSpentStakingIndexVersion]) }
 }
 
 func utxoRowsDigest(t *testing.T, db *sql.DB) string {

@@ -43,7 +43,8 @@ func (s *syncServiceServer) FetchBlock(
 	resp := &sync.FetchBlockResponse{}
 
 	// Enforce request size limit
-	if len(ref) > s.utxorpc.config.MaxBlockRefs {
+	if s.utxorpc.config.MaxBlockRefs > 0 &&
+		len(ref) > s.utxorpc.config.MaxBlockRefs {
 		return nil, connect.NewError(
 			connect.CodeInvalidArgument,
 			fmt.Errorf(
@@ -208,7 +209,8 @@ func (s *syncServiceServer) FollowTip(
 	defer release()
 
 	intersect := req.Msg.GetIntersect() // []*BlockRef
-	if len(intersect) > s.utxorpc.config.MaxBlockRefs {
+	if s.utxorpc.config.MaxBlockRefs > 0 &&
+		len(intersect) > s.utxorpc.config.MaxBlockRefs {
 		return connect.NewError(
 			connect.CodeInvalidArgument,
 			fmt.Errorf(
