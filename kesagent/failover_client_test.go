@@ -15,6 +15,7 @@
 package kesagent
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -201,4 +202,36 @@ func TestFailoverMetricsReportADuplicatedActiveAddress(t *testing.T) {
 	m.setActiveAgent([]string{"a:1", "b:1", "a:1"}, 0)
 	require.InDelta(t, 1, testutil.ToFloat64(m.activeAgent.WithLabelValues("a:1")), 0)
 	require.InDelta(t, 0, testutil.ToFloat64(m.activeAgent.WithLabelValues("b:1")), 0)
+}
+
+func TestFailoverConnectedGaugeFollowsTheActiveAgent(t *testing.T) {
+	t.Parallel()
+	_, vkey, opCert := testKESMaterial(t)
+	m := NewMetrics(prometheus.NewRegistry())
+	f, err := NewFailoverClient(
+		[]string{"127.0.0.1:1", "127.0.0.1:2"},
+		RemoteConfig{
+			Plaintext: true,
+			KESVKey:   vkey,
+			OpCert:    opCert,
+			Metrics:   m,
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = f.Close() })
+	connected := func() float64 { return testutil.ToFloat64(m.connected) }
+
+	f.clients[0].setConnected(true)
+	f.clients[1].setConnected(true)
+	f.clients[1].setConnected(false)
+	require.InDelta(t, 1, connected(), 0,
+		"a standby dropping its session does not clear the active agent's state")
+
+	f.moveFrom(0, errors.New("link failed"))
+	require.InDelta(t, 0, connected(), 0,
+		"after a move the gauge reports the new active agent")
+	f.clients[1].setConnected(true)
+	require.InDelta(t, 1, connected(), 0)
+	f.clients[0].setConnected(false)
+	require.InDelta(t, 1, connected(), 0)
 }

@@ -38,6 +38,13 @@ type FailoverClient struct {
 
 	mu     sync.Mutex
 	active int
+
+	// connMu guards connected and gaugeActive, which keep the connected
+	// gauge on the active agent's session state. It is separate from mu
+	// because a child reports its state while holding its own lock.
+	connMu      sync.Mutex
+	connected   []bool
+	gaugeActive int
 }
 
 // NewFailoverClient builds one RemoteClient per address from cfg, whose
@@ -54,13 +61,17 @@ func NewFailoverClient(
 		addresses: append([]string(nil), addresses...),
 		logger:    cfg.Logger,
 		metrics:   cfg.Metrics,
+		connected: make([]bool, len(addresses)),
 	}
 	if f.logger == nil {
 		f.logger = slog.Default()
 	}
-	for _, address := range addresses {
+	for i, address := range addresses {
 		c := cfg
 		c.Address = address
+		c.onConnected = func(connected bool) {
+			f.childConnected(i, connected)
+		}
 		client, err := NewRemoteClient(c)
 		if err != nil {
 			for _, built := range f.clients {
@@ -78,6 +89,17 @@ func NewFailoverClient(
 	)
 	f.metrics.setActiveAgent(f.addresses, 0)
 	return f, nil
+}
+
+// childConnected records child i's session state, and sets the connected
+// gauge when i is the active agent.
+func (f *FailoverClient) childConnected(i int, connected bool) {
+	f.connMu.Lock()
+	defer f.connMu.Unlock()
+	f.connected[i] = connected
+	if i == f.gaugeActive {
+		f.metrics.setConnected(connected)
+	}
 }
 
 // Active returns the address the next sign goes to.
@@ -110,6 +132,10 @@ func (f *FailoverClient) setActiveLocked(to int, reason error) {
 	}
 	from := f.active
 	f.active = to
+	f.connMu.Lock()
+	f.gaugeActive = to
+	f.metrics.setConnected(f.connected[to])
+	f.connMu.Unlock()
 	f.metrics.incAgentFailover()
 	f.metrics.setActiveAgent(f.addresses, to)
 	f.logger.Info(
