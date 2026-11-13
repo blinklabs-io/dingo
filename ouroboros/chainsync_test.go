@@ -4145,9 +4145,9 @@ func newChainsyncServerFixtureWithConfig(
 }
 
 // newChainsyncServerFixtureServing builds the fixture with the server's
-// waitForLedger behaviour chosen explicitly. The other constructors leave it
-// off, so their blocks are served as soon as the chain has them, without the
-// ledger applying them.
+// waitForLedger flag chosen explicitly. The flag selects which server
+// callbacks are wired (node-to-client or node-to-node); both gate roll-forwards
+// on the ledger having applied the block.
 func newChainsyncServerFixtureServing(
 	t *testing.T,
 	mode csmock.Mode,
