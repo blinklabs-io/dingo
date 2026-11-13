@@ -212,6 +212,11 @@ func TestLedgerProcessBlockOpCertCounterAppliesToHistoricalPeers(
 				return
 			}
 			require.NoError(t, err)
+			if !tc.trustedReplay {
+				stored, found := opCertBaselineRecorded(t, ls)
+				require.True(t, found)
+				require.Equal(t, tc.counter, stored)
+			}
 		})
 	}
 }
