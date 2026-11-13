@@ -21,12 +21,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Defaults for the WatchTx undo-history byte bounds on UtxorpcConfig.
-const (
-	DefaultMaxWatchHistoryBytes      = 16 << 20  // 16 MiB per stream
-	DefaultMaxWatchHistoryBytesTotal = 256 << 20 // 256 MiB across streams
-)
-
 // watchTxHistoryBudget is the process-wide cap on the bytes WatchTx streams
 // retain for rollback. Sizes are protobuf wire sizes, a lower bound on the
 // heap the converted transactions occupy, so the limit is a proportional
@@ -45,7 +39,7 @@ func newWatchTxHistoryBudget(limit int64) *watchTxHistoryBudget {
 func (b *watchTxHistoryBudget) reserve(n int64) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.used+n > b.limit {
+	if b.limit > 0 && b.used+n > b.limit {
 		return false
 	}
 	b.used += n
@@ -114,10 +108,11 @@ func (t *watchTxHistoryTracker) push(
 ) []watchTxHistoryEntry {
 	entry.size = watchTxEntrySize(entry.appliedTxs)
 	for len(history) > 0 &&
-		(len(history) >= t.maxBlocks || t.held+entry.size > t.maxBytes) {
+		(len(history) >= t.maxBlocks ||
+			(t.maxBytes > 0 && t.held+entry.size > t.maxBytes)) {
 		history = t.dropOldest(history)
 	}
-	if entry.size > t.maxBytes {
+	if t.maxBytes > 0 && entry.size > t.maxBytes {
 		return history
 	}
 	for !t.budget.reserve(entry.size) {

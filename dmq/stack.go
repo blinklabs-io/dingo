@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,6 +98,11 @@ type StackConfig struct {
 	// SocketPath is the Unix socket the local submission and notification
 	// protocols are served on.
 	SocketPath string
+	// SocketMode is the permission mode applied to SocketPath.
+	SocketMode os.FileMode
+	// SocketModeSet preserves an explicit zero mode. When false, zero selects
+	// the owner-only default.
+	SocketModeSet bool
 	// MessageTTL is the longest expiry a submitted message may claim. Zero
 	// uses the CIP-0137 default of 30 minutes.
 	MessageTTL time.Duration
@@ -189,6 +196,19 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 	}
 	if cfg.SocketPath == "" {
 		return nil, errors.New("dmq: stack requires a socket path")
+	}
+	if !cfg.SocketModeSet && cfg.SocketMode == 0 {
+		cfg.SocketMode = 0o600
+	}
+	if cfg.SocketMode != cfg.SocketMode.Perm() {
+		return nil, errors.New(
+			"dmq: socket mode must contain only Unix permission bits",
+		)
+	}
+	if runtime.GOOS != "windows" && cfg.SocketMode&0o002 != 0 {
+		return nil, errors.New(
+			"dmq: socket mode must not permit writes by other users",
+		)
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -290,10 +310,12 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 				s.handleClosed(id)
 			},
 			Listeners: []connmanager.ListenerConfig{{
-				ListenNetwork: "unix",
-				ListenAddress: cfg.SocketPath,
-				UseNtC:        true,
-				TrustedLocal:  true,
+				ListenNetwork:     "unix",
+				ListenAddress:     cfg.SocketPath,
+				UnixSocketMode:    cfg.SocketMode,
+				UnixSocketModeSet: true,
+				UseNtC:            true,
+				TrustedLocal:      true,
 				ConnectionOpts: []ouroboros.ConnectionOptionFunc{
 					ouroboros.WithDMQ(true),
 					ouroboros.WithNetworkMagic(cfg.NetworkMagic),

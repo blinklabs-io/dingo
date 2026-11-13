@@ -17,7 +17,6 @@ package blockfrost
 import (
 	"bytes"
 	"context"
-	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -81,84 +80,6 @@ func TestHandleAccountCancelledRequestWritesNothing(t *testing.T) {
 	require.Equal(t, 0, w.Body.Len())
 }
 
-func TestHandleAccountAdmissionCap(t *testing.T) {
-	t.Parallel()
-	node := newBlockingAccountNode()
-	b := newTestBlockfrost(node)
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(node.release) }) }
-	defer release()
-
-	var wg sync.WaitGroup
-	for range 2 {
-		wg.Go(func() {
-			b.handler().ServeHTTP(
-				httptest.NewRecorder(),
-				addressSummaryRequest(
-					context.Background(), "/api/v0/accounts/stake_test1",
-				),
-			)
-		})
-	}
-	for range 2 {
-		testutil.RequireReceive(
-			t, node.entered, 5*time.Second, "request admitted",
-		)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	w := httptest.NewRecorder()
-	b.handler().ServeHTTP(
-		w, addressSummaryRequest(ctx, "/api/v0/accounts/stake_test1"),
-	)
-	require.Equal(t, http.StatusTooManyRequests, w.Code)
-	require.Equal(t, "1", w.Header().Get("Retry-After"))
-
-	release()
-	wg.Wait()
-}
-
-// TestHandleAccountSharesAddressSummaryAdmission proves the account summary
-// draws on the same admission pool as the address summaries, so a client
-// cannot double its share of whole-history scans by mixing the routes.
-func TestHandleAccountSharesAddressSummaryAdmission(t *testing.T) {
-	t.Parallel()
-	node := newBlockingAccountNode()
-	b := newTestBlockfrost(node)
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(node.release) }) }
-	defer release()
-
-	var wg sync.WaitGroup
-	for range 2 {
-		wg.Go(func() {
-			b.handler().ServeHTTP(
-				httptest.NewRecorder(),
-				addressSummaryRequest(
-					context.Background(), "/api/v0/accounts/stake_test1",
-				),
-			)
-		})
-	}
-	for range 2 {
-		testutil.RequireReceive(
-			t, node.entered, 5*time.Second, "request admitted",
-		)
-	}
-
-	w := httptest.NewRecorder()
-	b.handler().ServeHTTP(
-		w,
-		addressSummaryRequest(context.Background(), "/api/v0/addresses/addr1"),
-	)
-	require.Equal(t, http.StatusTooManyRequests, w.Code)
-	require.Equal(t, "1", w.Header().Get("Retry-After"))
-
-	release()
-	wg.Wait()
-}
-
 func TestNodeAdapterAccountHonorsContext(t *testing.T) {
 	t.Parallel()
 	adapter, _, db := newDBBackedAdapter(t)
@@ -198,61 +119,4 @@ func (n *blockingAssociatedAddressesNode) AccountAssociatedAddresses(
 	case <-ctx.Done():
 		return nil, 0, ctx.Err()
 	}
-}
-
-// TestHandleAccountAssociatedAddressesAdmission proves the account address
-// pages share the whole-history admission pool: two in-flight pages fill the
-// client's cap, a third gets 429, and an invalid page request is rejected
-// before it can take a slot.
-func TestHandleAccountAssociatedAddressesAdmission(t *testing.T) {
-	t.Parallel()
-	node := &blockingAssociatedAddressesNode{
-		mockNode: &mockNode{},
-		entered:  make(chan struct{}, 8),
-		release:  make(chan struct{}),
-	}
-	b := newTestBlockfrost(node)
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(node.release) }) }
-	defer release()
-
-	const path = "/api/v0/accounts/stake_test1/addresses"
-	var wg sync.WaitGroup
-	for range 2 {
-		wg.Go(func() {
-			b.handler().ServeHTTP(
-				httptest.NewRecorder(),
-				addressSummaryRequest(context.Background(), path),
-			)
-		})
-	}
-	for range 2 {
-		testutil.RequireReceive(
-			t, node.entered, 5*time.Second, "request admitted",
-		)
-	}
-
-	// A rejected request returns at once; the deadline only keeps a wrongly
-	// admitted one from parking the test.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	w := httptest.NewRecorder()
-	b.handler().ServeHTTP(w, addressSummaryRequest(ctx, path))
-	require.Equal(t, http.StatusTooManyRequests, w.Code)
-	require.Equal(t, "1", w.Header().Get("Retry-After"))
-
-	w = httptest.NewRecorder()
-	b.handler().ServeHTTP(
-		w, addressSummaryRequest(context.Background(), path+"?count=0"),
-	)
-	require.Equal(t, http.StatusBadRequest, w.Code)
-
-	release()
-	wg.Wait()
-
-	w = httptest.NewRecorder()
-	b.handler().ServeHTTP(
-		w, addressSummaryRequest(context.Background(), path),
-	)
-	require.Equal(t, http.StatusOK, w.Code, "slots free after the requests")
 }

@@ -84,6 +84,13 @@ func catchUpBandWaitTimeoutFor(stall time.Duration) time.Duration {
 // the bound stays well under them.
 const defaultCorroborationHoldTimeout = 5 * time.Second
 
+// defaultDynamoCorroborationHoldBudget bounds the repeated corroboration holds
+// of one ChainSync Jumping dynamo header. Withholding a dynamo header moves the
+// dynamo's cursor past a header no other peer streams, so every later dynamo
+// header lacks a parent on the local chain; the dynamo instead keeps holding,
+// under the same protocol reply timers as a single hold.
+const defaultDynamoCorroborationHoldBudget = 60 * time.Second
+
 // Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
 // this interface local prevents networking from depending on FIFO internals.
 type Mempool interface {
@@ -149,9 +156,6 @@ type Ouroboros struct {
 	leiosValidationCtx      context.Context
 	leiosValidationCancel   context.CancelFunc
 	leiosValidationSlots    chan struct{}
-	// localTxSubmissionSlots is the in-flight LocalTxSubmission validation
-	// budget, shared by all connections.
-	localTxSubmissionSlots chan struct{}
 	// localTxSubmissionConnDoneFunc replaces the connection manager lookup of
 	// a connection's teardown signal. Test-only seam: the manager can only
 	// register a live connection.
@@ -169,6 +173,18 @@ type Ouroboros struct {
 	// and the counter has moved.
 	leiosValidationRetryGen atomic.Uint64
 	config                  OuroborosConfig
+	// csj is the ChainSync Jumping role table, nil when CSJ is off.
+	csj *chainsyncJumping
+	// outboundChainsyncLocks and outboundChainsyncLifecycle serialize and
+	// fence the ChainSync Jumping driver (chainsync_outbound.go).
+	outboundChainsyncLocks     outboundChainsyncLocks
+	outboundChainsyncLifecycle outboundChainsyncLifecycle
+	// demotionTimeout overrides defaultChainsyncDemotionTimeout in tests.
+	demotionTimeout time.Duration
+	// chainsyncClientStoppedHook, when set by a test, runs after
+	// stopOutboundChainsync has stopped a client, whether it kept or closed
+	// the connection.
+	chainsyncClientStoppedHook func(ouroboros.ConnectionId)
 	// registerer wraps config.PromRegistry and tracks every collector this
 	// instance registers, so Close can hand them all back. See lifecycle.go.
 	registerer *trackingRegisterer
@@ -311,6 +327,9 @@ type Ouroboros struct {
 	// height whose hash differs from the configured checkpoint. It is nil
 	// when no ledger state is attached.
 	chainsyncHeaderCheckpoint func(gledger.BlockHeader) error
+	// dynamoCorroborationHoldBudget bounds the total hold of one dynamo
+	// header (defaultDynamoCorroborationHoldBudget).
+	dynamoCorroborationHoldBudget time.Duration
 	// corroborationHoldTimeout bounds how long a roll-forward callback holds
 	// a header for Genesis corroboration.
 	corroborationHoldTimeout time.Duration
@@ -320,6 +339,29 @@ type Ouroboros struct {
 	// eagernessWaitTimeout bounds how long a roll-forward callback waits in
 	// ChainsyncAwaitEagerness.
 	eagernessWaitTimeout time.Duration
+	// chainsyncReintersectTimeout bounds how long a resync waits for a client
+	// to drain and re-intersect in place before the connection is closed.
+	chainsyncReintersectTimeout time.Duration
+	// chainsyncReintersecting holds the latest in-place re-intersect of each
+	// connection, so overlapping resyncs do not stack.
+	chainsyncReintersectMu  sync.Mutex
+	chainsyncReintersecting map[ouroboros.ConnectionId]*chainsyncReintersectRun
+	// chainsyncCursorEpochs counts the in-place re-intersects of each
+	// connection, guarded by chainsyncReintersectMu.
+	chainsyncCursorEpochs map[ouroboros.ConnectionId]uint64
+	// chainsyncLostCursorReintersects records when each connection was last
+	// re-intersected for a lost cursor, guarded by chainsyncReintersectMu.
+	chainsyncLostCursorReintersects map[ouroboros.ConnectionId]time.Time
+	// observerParkPoll is how often a held observer checks whether it may
+	// take an ingress slot or resume reading.
+	observerParkPoll time.Duration
+	// observerParkedHook runs when an observer's callback starts to be held.
+	// Tests use it to wait for the hold.
+	observerParkedHook func()
+	// chainsyncReintersectReturnedHook runs once an in-place re-intersect has
+	// returned and the re-intersected sync is already running. Tests use it to
+	// hold the resync goroutine while the new cursor streams.
+	chainsyncReintersectReturnedHook func()
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
 	chainsyncArrivalNow      func() time.Time
@@ -351,6 +393,11 @@ type Ouroboros struct {
 	// deferredHeaderIdleRetry records, per connection, the applied tip at
 	// which a deferred header last forced an immediate re-intersection.
 	deferredHeaderIdleRetry map[ouroboros.ConnectionId][]byte
+	// withheldAncestryRetry records, per connection, the applied tip at which
+	// a header withheld for unavailable ancestry last forced a
+	// re-intersection. Guarded by deferredHeaderRecoveryMu and cleared when the
+	// connection closes.
+	withheldAncestryRetry map[ouroboros.ConnectionId][]byte
 	// acceptedHeaderMu guards acceptedHeaderTips, the hash of the last header
 	// from each connection that extended the local chain and that chain
 	// selection accepted; any other outcome clears the entry. Ledger
@@ -659,6 +706,9 @@ type OuroborosConfig struct {
 	// peer running past the limit is paused rather than having headers dropped.
 	// appliedTip, when non-nil, reads the live applied ledger tip. When the
 	// hook is nil, no limit applies.
+	// ChainsyncJumping configures ChainSync Jumping for outbound peers while
+	// Genesis selection is active (chainsync_jumping.go).
+	ChainsyncJumping        ChainsyncJumpingConfig
 	ChainsyncAwaitEagerness func(
 		ctx context.Context,
 		connId ouroboros.ConnectionId,
@@ -684,6 +734,15 @@ type OuroborosConfig struct {
 	// each attempt and waits on it, bounded, before verifying the header
 	// again. When nil, a deferred header is parked at once.
 	ChainsyncHeaderVerificationSettled func() <-chan struct{}
+	// ChainsyncObserverDeliveriesUnused reports whether headers delivered by
+	// observer connections are currently counted by nothing: they are not
+	// ingested, and no Genesis corroboration is reading them as witness
+	// evidence. While it reports true an observer stops reading headers
+	// instead of downloading the chain once more per connected peer, unless
+	// its peer's tip is within the security parameter of the local tip, where
+	// it reads so that it can reach MsgAwaitReply for the Genesis exit rule.
+	// When nil, observers always read.
+	ChainsyncObserverDeliveriesUnused func() bool
 	// ChainsyncAwaitCorroboration holds a roll-forward that ChainsyncApplyEligible
 	// denied, while the denial is only a lack of Genesis corroboration, and
 	// reports whether the header may then be applied. The peer's cursor stays
@@ -918,15 +977,11 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosValidationCtx:      leiosValidationCtx,
 		leiosValidationCancel:   leiosValidationCancel,
 		leiosValidationSlots:    make(chan struct{}, 2),
-		localTxSubmissionSlots: make(
-			chan struct{},
-			localTxSubmissionMaxInFlight,
-		),
-		mempool:             cfg.Mempool,
-		chainsyncState:      cfg.ChainsyncState,
-		peerGov:             cfg.PeerGov,
-		blockFetchStarts:    make(map[blockFetchKey]time.Time),
-		blockFetchDoneEarly: make(map[blockFetchKey]error),
+		mempool:                 cfg.Mempool,
+		chainsyncState:          cfg.ChainsyncState,
+		peerGov:                 cfg.PeerGov,
+		blockFetchStarts:        make(map[blockFetchKey]time.Time),
+		blockFetchDoneEarly:     make(map[blockFetchKey]error),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),
@@ -946,16 +1001,26 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncStats: make(
 			map[ouroboros.ConnectionId]*chainsyncPeerStats,
 		),
-		chainsyncScheduleAt:      defaultChainsyncScheduleAt,
-		corroborationHoldTimeout: defaultCorroborationHoldTimeout,
-		catchUpBandWaitTimeout:   catchUpBandWait,
-		eagernessWaitTimeout:     catchUpBandWait,
-		chainsyncArrivalNow:      time.Now,
+		chainsyncScheduleAt:           defaultChainsyncScheduleAt,
+		corroborationHoldTimeout:      defaultCorroborationHoldTimeout,
+		dynamoCorroborationHoldBudget: defaultDynamoCorroborationHoldBudget,
+		catchUpBandWaitTimeout:        catchUpBandWait,
+		eagernessWaitTimeout:          catchUpBandWait,
+		chainsyncArrivalNow:           time.Now,
 		futureHeaderResyncs: make(
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
 		),
 		deferredHeaderRecovery: make(
 			map[ouroboros.ConnectionId]deferredHeaderRecoveryState,
+		),
+		chainsyncReintersectTimeout: defaultChainsyncReintersectTimeout,
+		observerParkPoll:            defaultObserverParkPoll,
+		chainsyncReintersecting: make(
+			map[ouroboros.ConnectionId]*chainsyncReintersectRun,
+		),
+		chainsyncCursorEpochs: make(map[ouroboros.ConnectionId]uint64),
+		chainsyncLostCursorReintersects: make(
+			map[ouroboros.ConnectionId]time.Time,
 		),
 		futureHeaderResyncCtx:    futureHeaderResyncCtx,
 		futureHeaderResyncCancel: futureHeaderResyncCancel,
@@ -994,6 +1059,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	)
 	o.blockfetchConnClient = o.blockfetchConnClientLive
 	o.chainsyncHasBestPeer = cfg.ChainsyncHasBestPeer
+	o.initChainsyncJumping()
 	o.blockfetchRangeBytes = func(ocommon.Point, ocommon.Point) uint64 { return 0 }
 	if o.ledgerState != nil {
 		o.blockfetchRangeBytes = o.ledgerState.BlockfetchRangeExpectedBytes
@@ -1422,8 +1488,15 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	connId := e.ConnectionId
 	o.cancelFutureHeaderResync(connId)
 	o.clearDeferredHeaderRecovery(connId)
+	o.deferredHeaderRecoveryMu.Lock()
+	delete(o.withheldAncestryRetry, connId)
+	o.deferredHeaderRecoveryMu.Unlock()
 	o.forgetAcceptedHeaderTip(connId)
 	o.forgetServedActivity(connId)
+	o.chainsyncReintersectMu.Lock()
+	delete(o.chainsyncCursorEpochs, connId)
+	delete(o.chainsyncLostCursorReintersects, connId)
+	o.chainsyncReintersectMu.Unlock()
 
 	// Counts keep-alive pong timeouts.
 	if classifyKeepaliveTimeoutClose(e.Error) {
@@ -1442,6 +1515,9 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.chainsyncState != nil {
 		o.chainsyncState.RemoveClientConnId(connId)
 	}
+	// After the client is removed, so that a dynamo rotation can take the
+	// ingress slot it held.
+	o.csjForget(connId)
 	// Remove mempool consumer
 	if o.mempool != nil {
 		o.mempool.RemoveConsumer(connId)
@@ -1578,71 +1654,12 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 	// the Ouroboros handshake/protocol negotiation has already failed and the
 	// peer will reject further mini-protocol starts on this connection.
 	if o.chainsyncState != nil {
-		// Registration runs before the tracked client exists, so the
-		// direction-aware fallback in shouldPublishChainsyncToLedger
-		// cannot see us yet. Outbound keeps its legacy default of
-		// eligible when no ChainsyncIngressEligible policy is wired.
-		ingressEligible := true
-		if o.config.ChainsyncIngressEligible != nil {
-			ingressEligible = o.config.ChainsyncIngressEligible(connId)
-		}
-		shouldStartChainsync := o.registerTrackedChainsyncClient(
-			connId,
-			ingressEligible,
-			true, // startedAsOutbound
-		)
-		if shouldStartChainsync {
-			// Capture the connection we are about to start chainsync on.
-			// The failure path below must close *this* connection, not
-			// whatever holds the id by the time the start returns: a
-			// reconnect can reuse the same local/remote address pair, and
-			// ConnectionId is exactly that pair, so a replacement can take
-			// over the id while the start is in flight.
-			startedConn := o.connManager.GetConnectionById(connId)
-			if err := o.chainsyncClientStart(connId); err != nil {
-				// Roll back the registration on failure
-				o.chainsyncState.RemoveClientConnId(connId)
-				o.config.Logger.Error(
-					"failed to start chainsync client, closing outbound connection",
-					"component",
-					"network",
-					"connection_id",
-					connId.String(),
-					"error",
-					err,
-				)
-				// Close the connection so peer governance observes the
-				// failure and applies its reconnect backoff.
-				//
-				// Returning while the connection is still open strands the
-				// peer half-connected: TCP is up and peergov still counts it
-				// as connected, but no chainsync client is tracked and this
-				// function returns before txsubmission starts, so nothing
-				// retries and the peer is never replaced. Any transient
-				// failure -- an intersect-point or rollback-anchor lookup
-				// hitting a storage fault, not just a negotiation failure --
-				// would silently cost us the peer for the lifetime of the
-				// connection.
-				//
-				// The inbound handler already closes on this same failure;
-				// this makes the outbound path consistent with it.
-				o.closeOutboundConnAfterChainsyncFailure(
-					connId,
-					startedConn,
-				)
-				return
-			}
-			o.config.Logger.Debug(
-				"started chainsync client",
-				"connection_id", connId.String(),
-				"total_clients", o.chainsyncState.ClientConnCount(),
-			)
-		} else if !o.chainsyncState.HasClientConnId(connId) {
-			// Not already tracked and TryAdd failed means limit reached
-			o.config.Logger.Debug(
-				"chainsync client limit reached, skipping eligible admission",
-				"connection_id", connId.String(),
-			)
+		// The connection the start runs on: the failure path closes this
+		// one, not a reconnect that reused the id meanwhile.
+		startedConn := o.connManager.GetConnectionById(connId)
+		if startedConn != nil &&
+			!o.startOutboundChainsyncLocked(connId, startedConn) {
+			return
 		}
 	}
 	// Start txsubmission client

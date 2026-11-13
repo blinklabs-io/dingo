@@ -2742,7 +2742,7 @@ func (f *BlockForger) evaluateTipGates(r forgeTipReading) forgeTipGates {
 	//
 	// That state REACHES this gate. The sync gate once refused every
 	// slot with upstreamActive && upstreamTip == 0, so it could not; it now
-	// bounds that branch by the local tip's lag instead, precisely so a
+	// bounds that branch by the forecast horizon instead, precisely so a
 	// node at tip forges and its header ends the window. A node at tip
 	// therefore arrives here with a live upstream and a zero target, and
 	// what keeps this bound quiet is the upstreamTarget > newestKnown term
@@ -2795,7 +2795,12 @@ func (f *BlockForger) evaluateTipGates(r forgeTipReading) forgeTipGates {
 	// a reading that trips this and a positional gate is still counted the
 	// way entry counts it.
 	g.syncSkip = r.upstreamLive &&
-		f.upstreamSyncSkipsForge(r.currentSlot, g.tipSlot, r.upstreamTarget)
+		f.upstreamSyncSkipsForge(
+			r.currentSlot,
+			g.tipSlot,
+			r.upstreamTarget,
+			f.forecastHorizonSlots(),
+		)
 
 	switch {
 	case g.primaryTipBehind:
@@ -3767,11 +3772,19 @@ func (f *BlockForger) checkOpCertSequence(
 // that suppressed forging prevented its own exit, and every node reported
 // healthy and connected throughout.
 //
-// The only evidence available in that window is our own tip's lag behind the
-// wall clock, so the same tolerance is applied to it. A node whose tip is
-// stale still waits, which is the protection this gate exists for -- a node
-// that has just switched peers does not forge on a stale view. A node at tip
-// forges, and the header it produces is what ends the window.
+// The reference node has no wall-clock lag gate at all. Its forge step builds
+// on the selected chain tip whatever the lag and refuses only when the ledger
+// view for the slot cannot be forecast from that tip (TraceNoLedgerView in
+// NodeKernel/Forge.hs), which happens once the slot is a full stability
+// window past the tip (maxFor in Shelley/Ledger/SupportsProtocol.hs). That
+// same bound is the only thing applied to an unpublished target:
+// forgeSyncToleranceSlots is a bulk-sync heuristic for a KNOWN target and must
+// not be reused as a lag bound here: after a restart or an ordinary network
+// gap every producer's tip can be further behind the clock than the
+// tolerance, and then no node forges the header that would end the window.
+//
+// window is the stability window in slots, 0 when unknown, in which case the
+// forecast bound cannot be evaluated and the node forges.
 //
 // tipSlot is the LEDGER-APPLIED tip, not the primary chain tip, on both
 // branches. That is the conservative reading of "our view": it is the state
@@ -3779,14 +3792,11 @@ func (f *BlockForger) checkOpCertSequence(
 // lower of the two, so a node whose pipeline is behind is measured as behind
 // rather than credited with headers it has admitted but not applied.
 func (f *BlockForger) upstreamSyncSkipsForge(
-	_, tipSlot, upstreamTip uint64,
+	currentSlot, tipSlot, upstreamTip, window uint64,
 ) bool {
 	if upstreamTip == 0 {
-		// An unpublished target is not evidence that a peer is ahead. The
-		// wall-clock slot can be arbitrarily far past our tip during an
-		// ordinary network gap, so comparing it with tipSlot would reject
-		// valid leader slots on an otherwise current node.
-		return false
+		return window > 0 && currentSlot > tipSlot &&
+			currentSlot-tipSlot > window
 	}
 	return upstreamTip > tipSlot &&
 		upstreamTip-tipSlot > f.forgeSyncToleranceSlots
@@ -5019,4 +5029,22 @@ func (f *BlockForger) modeString() string {
 	default:
 		return "unknown"
 	}
+}
+
+// ForgeForecastHorizonProvider is an optional extension of SlotClockProvider
+// that supplies the stability window in slots: how far past the applied tip a
+// ledger view can still be forecast. A slot clock without it leaves the
+// forecast bound unevaluated.
+type ForgeForecastHorizonProvider interface {
+	StabilityWindow() uint64
+}
+
+// forecastHorizonSlots returns the stability window, or 0 when the slot clock
+// does not supply one.
+func (f *BlockForger) forecastHorizonSlots() uint64 {
+	p, ok := f.slotClock.(ForgeForecastHorizonProvider)
+	if !ok {
+		return 0
+	}
+	return p.StabilityWindow()
 }

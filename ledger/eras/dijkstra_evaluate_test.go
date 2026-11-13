@@ -405,11 +405,10 @@ func TestEvaluateTxDijkstraFeeUsesRefScriptCostParameters(t *testing.T) {
 	subInput := dijkstraEvaluateTestRefInput(4)
 	ls := newMockLedgerState()
 	addDijkstraRefScriptUtxo(t, ls, topInput, v3)
-	addDijkstraRefScriptUtxo(
-		t, ls, subInput, lcommon.PlutusV4Script(plutusProgramBytes(
-			t, v4OnlyBuiltinProgram,
-		)),
-	)
+	subScript := lcommon.PlutusV4Script(plutusProgramBytes(
+		t, v4OnlyBuiltinProgram,
+	))
+	addDijkstraRefScriptUtxo(t, ls, subInput, subScript)
 	tx := &gdijkstra.DijkstraTransaction{
 		Body: gdijkstra.DijkstraTransactionBody{
 			TxMint: &mint,
@@ -443,9 +442,9 @@ func TestEvaluateTxDijkstraFeeUsesRefScriptCostParameters(t *testing.T) {
 	fee, _, _, err := EvaluateTxDijkstra(tx, ls, params)
 	require.NoError(t, err)
 
-	// Only the top-level reference script is charged, as in the Dijkstra
-	// minimum-fee rule; the sub-transaction's counts towards size limits only.
-	size := uint64(len(v3))
+	// The top-level and sub-transaction reference scripts are both charged,
+	// as in the Dijkstra minimum-fee rule.
+	size := uint64(len(v3)) + uint64(len(subScript))
 	require.Greater(t, size, 2*uint64(params.RefScriptCostStride))
 	want := calculateTieredRefScriptFee(
 		size, big.NewRat(1, 1), 2, big.NewRat(3, 1),

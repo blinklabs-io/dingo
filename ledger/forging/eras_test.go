@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
 	utxorpc_cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
@@ -60,4 +61,29 @@ func TestExtractPParamsLimitsRejectsTypedNilPointer(t *testing.T) {
 func TestExtractPParamsLimitsRejectsUnrecognizedType(t *testing.T) {
 	_, err := extractPParamsLimits(unrecognizedProtocolParameters{})
 	require.ErrorContains(t, err, "unsupported")
+}
+
+// TestExtractPParamsLimitsHeaderMajorNeverBelowEra pins that a ledger which
+// kept the previous era's major through a translation still forges headers
+// announcing the new era's first major.
+func TestExtractPParamsLimitsHeaderMajorNeverBelowEra(t *testing.T) {
+	t.Parallel()
+
+	conwayLimits, err := extractPParamsLimits(&conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: 8},
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(conway.MinProtocolVersionConway), conwayLimits.protoMajor)
+
+	babbageLimits, err := extractPParamsLimits(&babbage.BabbageProtocolParameters{
+		ProtocolMajor: 6,
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(babbage.MinProtocolVersionBabbage), babbageLimits.protoMajor)
+
+	higher, err := extractPParamsLimits(&conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: 10},
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(10), higher.protoMajor)
 }

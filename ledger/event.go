@@ -121,6 +121,11 @@ type ChainsyncEvent struct {
 	BlockNumber             uint64
 	Type                    uint // Block or header type ID
 	Rollback                bool // Set to true for a Rollback event
+	// SessionReopened marks an in-place re-intersect of a live connection. It
+	// carries no header or point: the connection's next rollback opens a new
+	// session, as on a fresh connection, so a rollback to a point our chain
+	// already holds moves only the peer's cursor.
+	SessionReopened bool
 }
 
 // ChainsyncAwaitReplyEvent is emitted when a chainsync peer explicitly reports

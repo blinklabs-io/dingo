@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -331,7 +332,8 @@ func TestExactAddressDeadlineInterruptsSQL(t *testing.T) {
 	require.NoError(t, err)
 	_, err = raw.Exec(
 		`INSERT INTO stored_utxo(tx_id, output_idx, payment_key, payment_script, added_slot, deleted_slot, amount)
- VALUES(zeroblob(32),0,?,0,1,0,'1000000')`,
+ VALUES(?,0,?,0,1,0,'1000000')`,
+		testutil.InsertTransactionIdentity(t, raw, 0, bytes.Repeat([]byte{0x33}, 32)),
 		payment,
 	)
 	require.NoError(t, err)

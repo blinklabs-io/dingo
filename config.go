@@ -285,7 +285,9 @@ type Config struct {
 	trustedNtCIdleTimeout                                                               time.Duration
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
+	onGenesisSelectionResolved                                                          func(genesisSelectionMode bool)
 	genesisCorroborationPeers                                                           int
+	genesisChainSyncJumping                                                             bool
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
@@ -1019,6 +1021,7 @@ func (c *Config) syncCompatFields() {
 	c.maxTrustedLocalNtCConns = c.cfg.MaxTrustedLocalNtCConns
 	c.trustedNtCIdleTimeout = c.cfg.TrustedNtCIdleTimeout
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
+	c.genesisChainSyncJumping = c.cfg.GenesisBootstrap.ChainSyncJumping
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.shelleyKESAgentAddress, c.shelleyKESAgentClientCertFile, c.shelleyKESAgentClientKeyFile = c.cfg.ShelleyKESAgentAddress, c.cfg.ShelleyKESAgentClientCertFile, c.cfg.ShelleyKESAgentClientKeyFile
@@ -1136,6 +1139,12 @@ func WithGenesisControlGroups(
 
 func WithGenesisCorroborationPeers(peers int) ConfigOptionFunc {
 	return func(c *Config) { c.cfg.GenesisBootstrap.CorroborationPeers = peers }
+}
+
+// WithGenesisChainSyncJumping turns ChainSync Jumping on or off for Genesis
+// selection.
+func WithGenesisChainSyncJumping(enabled bool) ConfigOptionFunc {
+	return func(c *Config) { c.cfg.GenesisBootstrap.ChainSyncJumping = enabled }
 }
 
 // WithGenesisLimitOnPatience configures the Genesis Limit on Patience for
@@ -3126,6 +3135,14 @@ func (c *Config) genesisSelectionEligible() bool {
 		!c.intersectTip &&
 		len(c.intersectPoints) == 0 &&
 		!c.cardanoNodeConfig.PraosConsensusMode()
+}
+
+// WithGenesisSelectionResolved registers fn to receive the mode the chain
+// selector actually starts in, once the node has resolved it from the
+// configuration and the caught-up marker. It is called once per node start,
+// before the selector is built.
+func WithGenesisSelectionResolved(fn func(genesisSelectionMode bool)) ConfigOptionFunc {
+	return func(c *Config) { c.onGenesisSelectionResolved = fn }
 }
 
 // TopologyConfig returns the loaded topology configuration.

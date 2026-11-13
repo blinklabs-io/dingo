@@ -20,6 +20,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
@@ -47,7 +48,8 @@ func TestGetUtxosWithHistoryFiltersAndHydratesLifecycle(t *testing.T) {
 		bytes.Repeat([]byte{0xb2}, 32),
 	}
 	for i := range createdHashes {
-		_, err := store.writeDB.Exec(`
+		_, err := testutil.ExecTransactionInsert(store.writeDB,
+			`
 INSERT INTO "transaction" (
     id, hash, block_hash, slot, block_index, type, fee, collateral_fee,
     ttl, valid
@@ -61,7 +63,8 @@ INSERT INTO "transaction" (
 		require.NoError(t, err)
 	}
 	for i := range spentHashes {
-		_, err := store.writeDB.Exec(`
+		_, err := testutil.ExecTransactionInsert(store.writeDB,
+			`
 INSERT INTO "transaction" (
     id, hash, block_hash, slot, block_index, type, fee, collateral_fee,
     ttl, valid
@@ -103,7 +106,7 @@ INSERT INTO transaction_metadata_label (
 			row.PaymentKey = paymentB
 		}
 		if i > 0 {
-			row.SpentAtTxId = types.NullableHash(spentHashes[i-1])
+			row.SpentAtTxHash = types.NullableHash(spentHashes[i-1])
 			row.DeletedSlot = uint64((i + 4) * 10)
 		}
 		require.NoError(t, store.CreateUtxo(nil, row))

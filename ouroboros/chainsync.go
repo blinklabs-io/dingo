@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	rtrace "runtime/trace"
 	"slices"
 	"time"
 
@@ -437,6 +438,80 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 	}
 }
 
+// recoverWithheldHeaderAncestry re-intersects a connection that delivered a
+// header above the applied tip whose ancestry reaches neither the peer's
+// retained history nor the local chain. The peer's cursor is already past
+// that header, so every descendant is withheld the same way and no header
+// ever reaches the queue; a fresh intersection from the local chain
+// redelivers the linking headers. It acts only for a connection that may feed
+// the ledger, once per connection and applied tip, and spaces repeats per
+// remote address with the deferred-recovery window, so a peer whose chain
+// really does not link cannot turn this into a reconnect loop.
+func (o *Ouroboros) recoverWithheldHeaderAncestry(
+	connId ouroboros.ConnectionId,
+	header gledger.BlockHeader,
+) {
+	if o.headerAtOrBelowLocalTip(header) {
+		return
+	}
+	if !o.shouldApplyChainsyncToLedger(connId) {
+		return
+	}
+	var tipHash []byte
+	switch {
+	case o.chainsyncLocalChainTips != nil:
+		tipHash, _ = o.chainsyncLocalChainTips()
+	case o.ledgerState != nil:
+		tipHash = o.ledgerState.Tip().Point.Hash
+	}
+	if len(tipHash) == 0 {
+		return
+	}
+	// Claim the marker before scheduling: a close that lands after scheduling
+	// must find it to delete, or a replacement connection reusing this
+	// ConnectionId inherits a suppressor for the same applied tip.
+	now := time.Now()
+	o.deferredHeaderRecoveryMu.Lock()
+	retried, seen := o.withheldAncestryRetry[connId]
+	if (seen && bytes.Equal(retried, tipHash)) ||
+		!o.claimDeferredRecoveryRecycle(connId, now) {
+		o.deferredHeaderRecoveryMu.Unlock()
+		return
+	}
+	if o.withheldAncestryRetry == nil {
+		o.withheldAncestryRetry = make(map[ouroboros.ConnectionId][]byte)
+	}
+	claimed := append([]byte(nil), tipHash...)
+	o.withheldAncestryRetry[connId] = claimed
+	o.deferredHeaderRecoveryMu.Unlock()
+	if !o.scheduleHeaderResync(
+		connId,
+		now,
+		event.ChainsyncResyncReasonWithheldCandidateAncestry,
+	) {
+		o.releaseDeferredRecoveryRecycle(connId, now)
+		o.deferredHeaderRecoveryMu.Lock()
+		if current, ok := o.withheldAncestryRetry[connId]; ok &&
+			bytes.Equal(current, claimed) {
+			if seen {
+				o.withheldAncestryRetry[connId] = retried
+			} else {
+				delete(o.withheldAncestryRetry, connId)
+			}
+		}
+		o.deferredHeaderRecoveryMu.Unlock()
+		return
+	}
+	o.config.Logger.Info(
+		"chainsync: re-intersecting after header with unavailable ancestry",
+		"component", "ouroboros",
+		"reason", event.ChainsyncResyncReasonWithheldCandidateAncestry,
+		"slot", header.SlotNumber(),
+		"block_number", header.BlockNumber(),
+		"connection_id", connId.String(),
+	)
+}
+
 // invalidateDeferredHeaderResolution keeps a connection's deferred-header
 // recovery but stops a later application of its withheld header from becoming
 // the connection's cursor, since a rollback moved the peer's protocol cursor
@@ -783,6 +858,7 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		ochainsync.WithRollBackwardFunc(
 			o.instrumentChainsyncRollBackward(o.chainsyncClientRollBackward),
 		),
+		ochainsync.WithIntersectFoundFunc(o.chainsyncClientIntersectFound),
 		// Keep the request window large enough to cover network latency. The
 		// ledger's header-capacity gate bounds admission and verification work.
 		ochainsync.WithPipelineLimit(ochainsync.DefaultPipelineLimit),
@@ -794,6 +870,52 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		ochainsync.WithIntersectTimeout(30 * time.Second),
 		ochainsync.WithBlockTimeout(o.config.ChainsyncBlockTimeout),
 	}
+}
+
+// chainsyncClientIntersectFound settles the state of an in-place
+// re-intersect at the new intersection. It runs on the protocol goroutine
+// before Reintersect sends the first MsgRequestNext of the new cursor, so no
+// header of that cursor can be trimmed from the peer's observed history or
+// withheld by the old cursor's resync marker, and the ledger learns of the new
+// session before the rollback that opens it. An initial intersect is left
+// alone.
+func (o *Ouroboros) chainsyncClientIntersectFound(
+	ctx ochainsync.CallbackContext,
+	point ocommon.Point,
+	_ ochainsync.Tip,
+) error {
+	o.chainsyncReintersectMu.Lock()
+	run := o.chainsyncReintersecting[ctx.ConnectionId]
+	reintersecting := run != nil && run.client == ctx.Client && !run.settled
+	if reintersecting {
+		run.settled = true
+	}
+	o.chainsyncReintersectMu.Unlock()
+	if !reintersecting {
+		return nil
+	}
+	o.settleReintersectedCursor(ctx.ConnectionId, point)
+	// The peer's next message is MsgRollBackward to point. On this connection
+	// the ledger has already seen headers, so it would apply that rollback and
+	// undo blocks it holds; the marker makes it treat the rollback as a new
+	// session's opening one, as for a fresh connection. It shares the ordered
+	// stream with the rollback, so it is handled after every header of the old
+	// cursor and before the rollback.
+	if o.eventBus != nil {
+		if err := o.eventBus.PublishBlocking(
+			ledger.ChainsyncEventType,
+			event.NewEvent(
+				ledger.ChainsyncEventType,
+				ledger.ChainsyncEvent{
+					ConnectionId:    ctx.ConnectionId,
+					SessionReopened: true,
+				},
+			),
+		); err != nil {
+			return fmt.Errorf("chainsync: publish session reopen: %w", err)
+		}
+	}
+	return nil
 }
 
 // chainsyncClientAwaitReply publishes the protocol's explicit idle proof after
@@ -834,6 +956,7 @@ func (o *Ouroboros) chainsyncClientAwaitReply(
 		}
 		o.config.ChainsyncObserveAwaitReply(ctx.ConnectionId, point)
 	}
+	o.csjOnAwaitReply(ctx.ConnectionId)
 	if observer {
 		return nil
 	}
@@ -1786,6 +1909,9 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) (err error) {
+	if o.chainsyncCursorCondemned(ctx) {
+		return nil
+	}
 	var clientSession chainsync.ClientSessionToken
 	if o.chainsyncState != nil {
 		clientSession = o.chainsyncState.ClientSession(ctx.ConnectionId)
@@ -2087,10 +2213,14 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 ) (err error) {
 	switch v := blockData.(type) {
 	case gledger.BlockHeader:
+		if o.chainsyncCursorCondemned(ctx) {
+			return nil
+		}
 		var clientSession chainsync.ClientSessionToken
 		if o.chainsyncState != nil {
 			clientSession = o.chainsyncState.ClientSession(ctx.ConnectionId)
 		}
+		cursorEpoch := o.chainsyncCursorEpoch(ctx.ConnectionId)
 		if o.config.ChainsyncRecoverDeliveredPeerTip != nil && o.chainsyncState != nil {
 			refreshCtx, cancelRefresh := chainsyncAdmissionContext(ctx)
 			stopRefresh := o.startChainsyncEagernessRecovery(refreshCtx, ctx, clientSession)
@@ -2251,6 +2381,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.releasePromotedAheadRecycle(promotedAheadClaim)
 			promotedAheadClaim = time.Time{}
 		}
+		if !ingressEligible && o.observerDeliveriesUnused(tip) {
+			return o.holdUnreadObserver(ctx, clientSession, tip)
+		}
 		observerDelivery := !ingressEligible
 		patienceResume = ingressEligible
 		// A promoting header that continues the local chain needs no fresh
@@ -2388,6 +2521,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// like an ingress connection; its delivered history is kept.
 		if !ingressEligible && o.chainsyncObserverHorizonWait != nil {
 			if err := o.awaitObserverHorizon(ctx, chainsyncEvent); err != nil {
+				if errors.Is(err, errObserverPromoted) {
+					return o.dropPromotedObserverHeader(ctx, clientSession, tip)
+				}
 				return err
 			}
 			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
@@ -2418,10 +2554,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// through this verifier. A header past the forecast horizon cannot
 		// reach blockfetch yet and is re-intersected separately. A header whose
 		// fork ancestry cannot be authenticated is also excluded from
-		// observation, but the connection keeps it for later ancestry lookups
-		// and neither resyncs nor recycles. A definite crypto/eligibility failure
-		// excludes the header and recycles the connection.
+		// observation; a header above the applied tip re-intersects the
+		// connection from the local chain once per connection and applied tip
+		// (recoverWithheldHeaderAncestry).
+		// A definite crypto/eligibility failure excludes the header and
+		// recycles the connection.
 		selectionEligible := ingressEligible
+		withheldAncestry := false
 		deferredVerification := false
 		transientVerification := false
 		shouldVerifyHeader := o.chainSelectionShouldVerifyHeaderCrypto != nil &&
@@ -2483,6 +2622,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			if verifyErr != nil {
 				if ledger.IsHeaderVerificationWithheld(verifyErr) {
 					selectionEligible = false
+					withheldAncestry = true
 				} else if ledger.IsHeaderVerificationDeferred(verifyErr) {
 					selectionEligible = false
 					deferredVerification = true
@@ -2545,6 +2685,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				!ledger.IsHeaderVerificationWithheld(verifyErr) &&
 				!errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
 				patienceResume = false
+				o.config.Logger.Warn(
+					"chainsync: recycling connection after observer header verification failure",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+					"error", verifyErr,
+				)
 				o.eventBus.Publish(
 					ledger.ConnectionRecycleRequestedEventType,
 					event.NewEvent(
@@ -2691,53 +2838,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				return fmt.Errorf("invalid peer tip disposition: %d", disposition)
 			}
 		}
-		// Apply-eligibility, evaluated after observation so it reflects this
-		// header. A peer can be ingress-eligible yet not apply-eligible (an
-		// uncorroborated Genesis fast source): its tips are observed but its
-		// blocks are withheld from the ledger.
-		applyEligible := selectionEligible &&
-			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
-		// A header withheld here is lost to the ledger: the peer's cursor moves
-		// past it. Hold only a selection-eligible header denied by Genesis
-		// corroboration; corroboration cannot override failed authentication.
-		// A header at or below the applied tip cannot reach the ledger, so
-		// waiting for witnesses only stalls the peer.
-		if selectionEligible && ingressEligible && !applyEligible &&
-			o.config.ChainsyncAwaitCorroboration != nil &&
-			!o.headerAtOrBelowLocalTip(v) {
-			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
-			holdCtx, cancelHold := context.WithTimeout(
-				admissionCtx,
-				o.corroborationHoldTimeout,
-			)
-			eligible, err := o.config.ChainsyncAwaitCorroboration(
-				holdCtx,
-				ctx.ConnectionId,
-			)
-			holdExpired := errors.Is(err, context.DeadlineExceeded) &&
-				admissionCtx.Err() == nil
-			cancelHold()
-			cancelAdmission()
-			switch {
-			case holdExpired:
-				// Keep the chainsync cursor. Re-intersecting immediately from
-				// the applied tip discards this peer's candidate history and
-				// repeats the same hold; another peer needs that history to
-				// corroborate the withheld header when it catches up.
-			case err != nil:
-				return fmt.Errorf("wait for genesis corroboration: %w", err)
-			}
-			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
-				return ochainsync.ErrStopSyncProcess
-			}
-			applyEligible = eligible
-		}
 		// Limit on Eagerness: the tip was observed above, so the limit already
-		// accounts for this header. Wait before recording cross-peer dedup state:
-		// if the connection closes while held, another peer must still be able
-		// to deliver the same header to the ledger. Uncorroborated ingress also
-		// advances observed history, so it must not run past the shared overlap
-		// while its blocks remain withheld from application.
+		// accounts for this header. Wait before the apply gate, which admits a
+		// header the limit vouches for, and before recording cross-peer dedup
+		// state: if the connection closes while held, another peer must still
+		// be able to deliver the same header to the ledger. Ingress that is
+		// not corroborated in lockstep also advances observed history, so it
+		// must not run past the shared overlap.
 		if selectionEligible && ingressEligible && o.config.ChainsyncAwaitEagerness != nil {
 			var appliedTip func() ochainsync.Tip
 			if o.ledgerState != nil {
@@ -2789,6 +2896,73 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				tipAccepted = false
 				return ochainsync.ErrStopSyncProcess
 			}
+		}
+		// Apply-eligibility, evaluated after observation and after the Limit
+		// on Eagerness wait, so it reflects this header and sees it within
+		// the limit: a peer that is not corroborated in lockstep is still
+		// apply-eligible while its header is at most k past a prefix other
+		// identities retain, as the reference node's LoE admits candidates.
+		// A peer can be ingress-eligible yet not apply-eligible (a lone or
+		// Sybil Genesis fast source): its tips are observed but its blocks
+		// are withheld from the ledger.
+		applyEligible := selectionEligible &&
+			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
+		// A header withheld here is lost to the ledger: the peer's cursor moves
+		// past it. Hold only a selection-eligible header denied by Genesis
+		// corroboration; corroboration cannot override failed authentication.
+		// A header at or below the applied tip cannot reach the ledger, so
+		// waiting for witnesses only stalls the peer.
+		if selectionEligible && ingressEligible && !applyEligible &&
+			o.config.ChainsyncAwaitCorroboration != nil &&
+			!o.headerAtOrBelowLocalTip(v) {
+			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+			holdStart := time.Now()
+			var eligible, holdExpired bool
+			var err error
+			for {
+				holdCtx, cancelHold := context.WithTimeout(
+					admissionCtx,
+					o.corroborationHoldTimeout,
+				)
+				eligible, err = o.config.ChainsyncAwaitCorroboration(
+					holdCtx,
+					ctx.ConnectionId,
+				)
+				holdExpired = errors.Is(err, context.DeadlineExceeded) &&
+					admissionCtx.Err() == nil
+				cancelHold()
+				// The dynamo is the only identified peer streaming, so its
+				// header is held again rather than withheld; a connection
+				// rotated away from the role falls back to the single hold.
+				if !holdExpired || !o.csjIsDynamo(ctx.ConnectionId) ||
+					time.Since(holdStart) >= o.dynamoCorroborationHoldBudget {
+					break
+				}
+			}
+			cancelAdmission()
+			switch {
+			case holdExpired && o.csjIsDynamo(ctx.ConnectionId):
+				// Re-intersect in place from the local chain rather than move
+				// the dynamo's cursor past a header the ledger never receives.
+				tipAccepted = false
+				o.scheduleHeaderResync(
+					ctx.ConnectionId,
+					time.Now(),
+					event.ChainsyncResyncReasonGenesisCorroborationHoldExpired,
+				)
+				return nil
+			case holdExpired:
+				// Keep the chainsync cursor. Re-intersecting immediately from
+				// the applied tip discards this peer's candidate history and
+				// repeats the same hold; another peer needs that history to
+				// corroborate the withheld header when it catches up.
+			case err != nil:
+				return fmt.Errorf("wait for genesis corroboration: %w", err)
+			}
+			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+				return ochainsync.ErrStopSyncProcess
+			}
+			applyEligible = eligible
 		}
 		patienceGrant = selectionEligible && ingressEligible
 		// Header arrival against slot time, for headers that passed (or
@@ -2848,7 +3022,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
-		if o.chainsyncState != nil {
+		if withheldAncestry {
+			// A header that cannot be linked is not progress: counting it
+			// would keep a peer that streams only unlinkable headers out of
+			// the stall recycler indefinitely.
+			o.recoverWithheldHeaderAncestry(ctx.ConnectionId, v)
+		} else if o.chainsyncState != nil {
 			o.chainsyncState.RecordClientDelivery(ctx.ConnectionId, point)
 		}
 		if !selectionEligible {
@@ -2966,7 +3145,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					delete(o.acceptedHeaderTips, ctx.ConnectionId)
 				}
 				o.acceptedHeaderMu.Unlock()
-				if o.ledgerState != nil {
+				// A re-intersect has replaced this header's cursor and
+				// replays it, so there is nothing left to recover.
+				if o.ledgerState != nil &&
+					o.chainsyncCursorEpoch(ctx.ConnectionId) == cursorEpoch {
 					o.markDeferredHeaderRecovery(
 						ctx.ConnectionId,
 						o.ledgerState.Tip(),
@@ -3091,7 +3273,12 @@ func (o *Ouroboros) verifyHeaderAwaitingLedger(
 					o.chainsyncLedgerIdleAt(*baseline))) {
 			return generation, err
 		}
-		if !wait.await(ctx, o.catchUpBandWaitTimeout, settled) {
+		region := rtrace.StartRegion(
+			context.Background(), tracing.RegionChainsyncHeaderSettleWait,
+		)
+		awaited := wait.await(ctx, o.catchUpBandWaitTimeout, settled)
+		region.End()
+		if !awaited {
 			return generation, err
 		}
 	}
@@ -3190,19 +3377,48 @@ func (o *Ouroboros) awaitCatchUpBand(
 // the ledger's forecast horizon. Like awaitCatchUpBand, a wait that reaches
 // its bound is not an error: the header then takes the ordinary observer path,
 // so the bound limits how long a promotion can go unnoticed. Cancellation is
-// returned.
+// returned. A promotion of the connection to ingress ends the wait with
+// errObserverPromoted: the ledger's wait ends only when a snapshot is
+// published, and a promoted connection may be the only one that can feed it.
 func (o *Ouroboros) awaitObserverHorizon(
 	ctx ochainsync.CallbackContext,
 	e ledger.ChainsyncEvent,
 ) error {
 	admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 	defer cancelAdmission()
+	var wake <-chan struct{}
+	if o.chainsyncState != nil {
+		var unregister func()
+		wake, unregister = o.chainsyncState.AwaitClientPromotion(
+			ctx.ConnectionId,
+		)
+		defer unregister()
+		// A promotion between the callback's role decision and the
+		// registration has nothing to wake.
+		if observer, tracked := o.chainsyncState.ClientObservabilityOnly(
+			ctx.ConnectionId,
+		); tracked && !observer {
+			return errObserverPromoted
+		}
+	}
 	waitCtx, cancelWait := context.WithTimeout(
 		admissionCtx,
 		o.catchUpBandWaitTimeout,
 	)
 	defer cancelWait()
+	waitCtx, cancelCause := context.WithCancelCause(waitCtx)
+	defer cancelCause(nil)
+	go func() {
+		select {
+		case <-wake:
+			cancelCause(errObserverPromoted)
+		case <-waitCtx.Done():
+		}
+	}()
 	err := o.chainsyncObserverHorizonWait(waitCtx, e)
+	if errors.Is(context.Cause(waitCtx), errObserverPromoted) {
+		return errObserverPromoted
+	}
 	if err == nil {
 		return nil
 	}
@@ -3210,6 +3426,39 @@ func (o *Ouroboros) awaitObserverHorizon(
 		return nil
 	}
 	return fmt.Errorf("chainsync: await observer forecast horizon: %w", err)
+}
+
+// errObserverPromoted ends a wait a connection's callback entered as an
+// observer once the connection holds an ingress slot.
+var errObserverPromoted = errors.New("observer promoted to ingress")
+
+// dropPromotedObserverHeader drops a header whose callback was parked as an
+// observer's and whose connection has since been promoted. The header was never
+// authenticated or retained, and the connection's cursor stands at it while the
+// local chain moved on, so the observer header gap makes the promotion
+// re-intersect and deliver it again as an ingress header.
+func (o *Ouroboros) dropPromotedObserverHeader(
+	ctx ochainsync.CallbackContext,
+	session chainsync.ClientSessionToken,
+	tip ochainsync.Tip,
+) error {
+	if o.chainsyncState != nil &&
+		o.chainsyncState.RecordClientObserverHeaderGap(
+			ctx.ConnectionId,
+			session,
+		) {
+		o.reconcileChainsyncIngressAdmission(
+			ctx.ConnectionId,
+			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
+		)
+	}
+	o.config.Logger.Debug(
+		"chainsync: observer header dropped, connection promoted while it waited",
+		"component", "ouroboros",
+		"connection_id", ctx.ConnectionId.String(),
+	)
+	o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+	return nil
 }
 
 // admitChainsyncHeader runs the future-header admission for one delivered
@@ -3475,6 +3724,11 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 	if !exists {
 		return false
 	}
+	// A jumper streams nothing, so an ingress slot would only expose it to
+	// the stall recycler.
+	if desiredEligible && o.csjIsJumper(connId) {
+		desiredEligible = false
+	}
 	if desiredEligible {
 		if observabilityOnly {
 			if !o.chainsyncState.SetClientObservabilityOnly(connId, false) {
@@ -3574,10 +3828,173 @@ func (o *Ouroboros) updateChainsyncMetrics(
 	o.peerGov.UpdatePeerChainSyncObservation(connId, headerRate, tipDelta)
 }
 
+// defaultObserverParkPoll bounds how long a freed ingress slot waits for a
+// held observer to notice it.
+const defaultObserverParkPoll = time.Second
+
+// observerDeliveriesUnused reports whether an observer whose peer advertises
+// peerTip may stop reading. Genesis selection is left only when every
+// ChainSync connection, observers included, has sent MsgAwaitReply, so an
+// observer must be able to reach its peer's tip before the exit rule can be
+// met. Near the local tip that is a short read, and the hold ends. Farther
+// away the local chain is behind that peer and the exit rule fails anyway, so
+// the hold saves the bandwidth. Without a local tip the observer is held, as
+// before.
+func (o *Ouroboros) observerDeliveriesUnused(peerTip ochainsync.Tip) bool {
+	if o.config.ChainsyncObserverDeliveriesUnused == nil ||
+		!o.config.ChainsyncObserverDeliveriesUnused() {
+		return false
+	}
+	if o.chainsyncLocalTipBlock == nil {
+		return true
+	}
+	localBlock, k := o.chainsyncLocalTipBlock()
+	return peerTip.BlockNumber > localBlock &&
+		peerTip.BlockNumber-localBlock > k
+}
+
+// holdUnreadObserver holds an observer's roll-forward callback while its
+// headers would be dropped uncounted. Every connected peer otherwise streams
+// the whole chain to a syncing node, of which only the ingress connections'
+// copies are used. Holding the callback stops the client from requesting more
+// once its pipelined replies are in, so the peer sends nothing further.
+//
+// The hold ends when the connection takes an ingress slot, when observer
+// deliveries are counted again, when the local tip comes within the security
+// parameter of the peer's tip (see observerDeliveriesUnused), when the
+// connection stops, or at
+// catchUpBandWaitTimeout, after which the next header is held: a held
+// observer reads one header per bound. The held header is dropped as any
+// observer header is. The connection's cursor stopped at it
+// while the local chain moved on, so it replays from a fresh intersection:
+// the observer header gap makes a promotion re-intersect, and a connection
+// that resumes as an observer is re-intersected here.
+func (o *Ouroboros) holdUnreadObserver(
+	ctx ochainsync.CallbackContext,
+	session chainsync.ClientSessionToken,
+	tip ochainsync.Tip,
+) error {
+	if o.chainsyncState != nil {
+		o.chainsyncState.RecordClientObserverHeaderGap(
+			ctx.ConnectionId,
+			session,
+		)
+	}
+	holdCtx, cancel := chainsyncAdmissionContext(ctx)
+	defer cancel()
+	// A held callback stops the protocol's receive loop, so the hold stays
+	// under the protocol state timers like the other roll-forward waits. At
+	// the bound this header is dropped and the next one is held.
+	bound := time.NewTimer(o.catchUpBandWaitTimeout)
+	defer bound.Stop()
+	if o.observerParkedHook != nil {
+		o.observerParkedHook()
+	}
+	ticker := time.NewTicker(o.observerParkPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-holdCtx.Done():
+			return fmt.Errorf(
+				"chainsync: observer hold: %w",
+				holdCtx.Err(),
+			)
+		case <-bound.C:
+			return nil
+		case <-ticker.C:
+		}
+		if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+			return ochainsync.ErrStopSyncProcess
+		}
+		if o.chainsyncIngressDesired(ctx.ConnectionId, tip) &&
+			o.reconcileChainsyncIngressAdmission(ctx.ConnectionId, true) {
+			return nil
+		}
+		if !o.observerDeliveriesUnused(tip) {
+			o.scheduleHeaderResync(
+				ctx.ConnectionId,
+				time.Now(),
+				event.ChainsyncResyncReasonObserverResumed,
+			)
+			return nil
+		}
+	}
+}
+
+// settleReintersectedCursor ends what was recorded against connId's previous
+// cursor once the peer has agreed to the new intersection at point. Closing
+// the connection used to end all of it, because the reconnect came back under
+// a new connection ID; a re-intersect keeps the ID.
+func (o *Ouroboros) settleReintersectedCursor(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	// A header the ledger still holds from the old cursor may be rejected
+	// after this point; the epoch tells its callback the cursor is gone.
+	o.chainsyncReintersectMu.Lock()
+	o.chainsyncCursorEpochs[connId]++
+	o.chainsyncReintersectMu.Unlock()
+	if o.chainsyncState != nil {
+		o.chainsyncState.ClearObservedHeaderHistoryAfter(connId, point)
+		// The intersection is on the local chain and the peer replays from
+		// it, which is the replay an observer header gap waits for. Left set,
+		// the gap arms an ingress-promotion resync on every later header.
+		o.chainsyncState.ClearClientObserverHeaderGap(
+			connId,
+			o.chainsyncState.ClientSession(connId),
+		)
+	}
+	// The marker withholds the old cursor's headers until it is replaced.
+	o.cancelFutureHeaderResync(connId)
+	// A recovery parked for a header of the old cursor would re-intersect the
+	// peer again on the next applied block, and the new cursor replays that
+	// header anyway. The once-per-applied-tip retry record is kept, so a peer
+	// that defers again at the same tip is not recycled in a loop.
+	o.deferredHeaderRecoveryMu.Lock()
+	delete(o.deferredHeaderRecovery, connId)
+	o.deferredHeaderRecoveryMu.Unlock()
+	o.forgetAcceptedHeaderTip(connId)
+}
+
+// chainsyncCursorCondemned reports whether the client that delivered a reply
+// is being re-intersected and has not yet agreed to the new intersection. Its
+// replies until then answer requests pipelined on the cursor the resync gave
+// up. Closing the connection used to discard them; they are dropped here
+// before any verification or ledger work, and a rollback among them is not
+// applied.
+func (o *Ouroboros) chainsyncCursorCondemned(
+	ctx ochainsync.CallbackContext,
+) bool {
+	if ctx.Client == nil {
+		return false
+	}
+	o.chainsyncReintersectMu.Lock()
+	defer o.chainsyncReintersectMu.Unlock()
+	run := o.chainsyncReintersecting[ctx.ConnectionId]
+	return run != nil && run.client == ctx.Client && !run.settled
+}
+
+// chainsyncCursorEpoch counts connId's in-place re-intersects. A callback
+// created for a header compares it to learn whether the header's cursor has
+// since been replaced.
+func (o *Ouroboros) chainsyncCursorEpoch(
+	connId ouroboros.ConnectionId,
+) uint64 {
+	o.chainsyncReintersectMu.Lock()
+	defer o.chainsyncReintersectMu.Unlock()
+	return o.chainsyncCursorEpochs[connId]
+}
+
+// defaultChainsyncReintersectTimeout bounds an in-place re-intersect. A client
+// parked at the peer's tip drains only when the next block arrives, so the
+// bound must stay well below the MustReply timer the protocol enforces.
+const defaultChainsyncReintersectTimeout = 5 * time.Second
+
 // SubscribeChainsyncResync registers an EventBus subscriber that
-// handles chainsync re-sync events. Resyncs close the affected
-// connections after resetting local dedup state so peer governance
-// reconnects with fresh intersect points. Local authoritative
+// handles chainsync re-sync events. Local cursor recoveries re-intersect the
+// affected clients in place; every other resync closes the connection after
+// resetting local dedup state so peer governance reconnects with fresh
+// intersect points. Local authoritative
 // rollbacks additionally rewind tracked client cursors and attempt
 // ledger-side recovery before recycling affected connections as a
 // fallback.
@@ -3702,37 +4119,256 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			if len(connIds) == 0 {
 				return
 			}
-			// Close the connection rather than re-intersecting in place.
-			// A live client always has RequestNext replies in flight, and
-			// MsgFindIntersect sent over them leaves the protocol in
-			// Intersect when those replies arrive, which tears the
-			// connection down anyway. Closing lets peer governance
-			// reconnect with a fresh bearer and updated intersect points.
 			for _, connId := range connIds {
+				if chainsyncResyncReintersects(e.Reason) &&
+					o.claimLostCursorReintersect(connId, e.Reason) &&
+					o.startChainsyncReintersect(ctx, connId, e.Reason) {
+					continue
+				}
 				//nolint:contextcheck // address normalization bounds its own DNS lookup
-				o.denyDivergentChainsyncPeer(
-					connId,
-					e.Reason,
-				)
-				if o.chainsyncState != nil {
-					o.chainsyncState.ClearObservedHeaderHistory(connId)
-				}
-				if o.connManager == nil {
-					continue
-				}
-				conn := o.connManager.GetConnectionById(connId)
-				if conn == nil {
-					continue
-				}
-				o.config.Logger.Info(
-					"closing connection for fresh chainsync",
-					"connection_id", connId.String(),
-					"reason", e.Reason,
-				)
-				_ = o.connManager.CloseConnectionWithReason(conn, e.Reason)
+				o.closeConnectionForChainsyncResync(connId, e.Reason)
 			}
 		},
 	)
+}
+
+// chainsyncResyncReintersects reports whether a re-sync reason is recovered by
+// re-intersecting the live client in place. Local cursor recoveries qualify.
+// A reason that blames the peer closes the connection and denies the peer, and
+// the ingest release closes every tracked client because their cursors froze
+// with the hold.
+func chainsyncResyncReintersects(reason string) bool {
+	switch reason {
+	case event.ChainsyncResyncReasonNetworkIngestReleased,
+		event.ChainsyncResyncReasonLocalLedgerRollback:
+		return false
+	}
+	// A cursor that lost its place is recovered by a fresh intersection too,
+	// but unlike the local reasons it can also mean a peer the node cannot
+	// follow; see claimLostCursorReintersect.
+	if reason == event.ChainsyncResyncReasonRollbackNotFound {
+		return true
+	}
+	return event.IsLocalChainsyncResyncReason(reason) &&
+		!chainsyncResyncDeniesPeer(reason)
+}
+
+// chainsyncLostCursorReintersectCooldown is how long after re-intersecting a
+// connection for a lost cursor the next such resync closes it instead.
+const chainsyncLostCursorReintersectCooldown = 30 * time.Second
+
+// claimLostCursorReintersect reports whether a resync for reason may
+// re-intersect connId in place. Every reason but "rollback point not found"
+// may. That one is raised when a header does not fit and its ancestry is
+// unknown, or a rollback names a point the node does not hold. While syncing
+// it is nearly always the local view of an honest peer's cursor gone stale,
+// which a fresh intersection repairs. A peer on a chain the node cannot follow
+// raises it again from every intersection, so a repeat within
+// chainsyncLostCursorReintersectCooldown closes the connection, as every such
+// resync used to, and the peer governor's reconnect backoff applies.
+func (o *Ouroboros) claimLostCursorReintersect(
+	connId ouroboros.ConnectionId,
+	reason string,
+) bool {
+	if reason != event.ChainsyncResyncReasonRollbackNotFound {
+		return true
+	}
+	now := time.Now()
+	o.chainsyncReintersectMu.Lock()
+	defer o.chainsyncReintersectMu.Unlock()
+	if run := o.chainsyncReintersecting[connId]; run != nil && !run.settled {
+		// The run in progress absorbs this resync.
+		return true
+	}
+	if last, ok := o.chainsyncLostCursorReintersects[connId]; ok &&
+		now.Sub(last) < chainsyncLostCursorReintersectCooldown {
+		return false
+	}
+	o.chainsyncLostCursorReintersects[connId] = now
+	return true
+}
+
+// closeConnectionForChainsyncResync drops connId's observed header history and
+// closes the connection so peer governance reconnects with fresh intersect
+// points. It is the outcome of every re-sync that is not recovered in place.
+func (o *Ouroboros) closeConnectionForChainsyncResync(
+	connId ouroboros.ConnectionId,
+	reason string,
+) {
+	o.denyDivergentChainsyncPeer(connId, reason)
+	if o.chainsyncState != nil {
+		o.chainsyncState.ClearObservedHeaderHistory(connId)
+	}
+	if o.connManager == nil {
+		return
+	}
+	conn := o.connManager.GetConnectionById(connId)
+	if conn == nil {
+		return
+	}
+	o.config.Logger.Info(
+		"closing connection for fresh chainsync",
+		"connection_id", connId.String(),
+		"reason", reason,
+	)
+	_ = o.connManager.CloseConnectionWithReason(conn, reason)
+}
+
+// chainsyncReintersectRun is one in-place re-intersect of a chainsync client.
+type chainsyncReintersectRun struct {
+	// client is the client being re-intersected. A connection that replaces
+	// it under the same ID has a different client.
+	client *ochainsync.Client
+	// settled is set once the client found the new intersection. A resync
+	// that arrives later is not absorbed by the run: the run has already
+	// trimmed the history and dropped the resync marker.
+	settled bool
+}
+
+// startChainsyncReintersect re-intersects connId's chainsync client in the
+// background and reports whether it took ownership of the resync. It returns
+// false when the connection has no running client to re-intersect, so the
+// caller closes instead. A resync that arrives while a run for the same client
+// has not yet found its intersection is absorbed by that run.
+//
+// Reintersect drains every reply already requested before it sends
+// FindIntersect, and callbacks keep running meanwhile, so it must not run on
+// the event bus goroutine or a chainsync callback.
+func (o *Ouroboros) startChainsyncReintersect(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	reason string,
+) bool {
+	if o.connManager == nil {
+		return false
+	}
+	conn := o.connManager.GetConnectionById(connId)
+	if conn == nil || conn.ChainSync() == nil ||
+		conn.ChainSync().Client == nil {
+		return false
+	}
+	client := conn.ChainSync().Client
+	o.chainsyncReintersectMu.Lock()
+	if prev := o.chainsyncReintersecting[connId]; prev != nil &&
+		prev.client == client && !prev.settled {
+		o.chainsyncReintersectMu.Unlock()
+		o.config.Logger.Debug(
+			"chainsync re-intersect already running",
+			"connection_id", connId.String(),
+			"reason", reason,
+		)
+		return true
+	}
+	run := &chainsyncReintersectRun{client: client}
+	o.chainsyncReintersecting[connId] = run
+	o.chainsyncReintersectMu.Unlock()
+	go func() {
+		defer func() {
+			o.chainsyncReintersectMu.Lock()
+			if o.chainsyncReintersecting[connId] == run {
+				delete(o.chainsyncReintersecting, connId)
+			}
+			o.chainsyncReintersectMu.Unlock()
+		}()
+		o.reintersectChainsyncClient(ctx, connId, client, reason)
+	}()
+	return true
+}
+
+// reintersectChainsyncClient moves client, connId's running client, to the
+// ledger's current intersect points, keeping the connection and the evidence
+// the peer delivered at or below the new intersection. Any failure, including
+// the watchdog expiring, falls back to closing the connection, unless another
+// connection has replaced it under connId.
+func (o *Ouroboros) reintersectChainsyncClient(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	client *ochainsync.Client,
+	reason string,
+) {
+	point, err := o.reintersectWithWatchdog(ctx, connId, client)
+	if o.chainsyncReintersectReturnedHook != nil {
+		o.chainsyncReintersectReturnedHook()
+	}
+	if err == nil {
+		// chainsyncClientIntersectFound has already trimmed the history and
+		// dropped the resync marker.
+		o.config.Logger.Info(
+			"re-intersected chainsync in place",
+			"connection_id", connId.String(),
+			"reason", reason,
+			"slot", point.Slot,
+		)
+		return
+	}
+	if errors.Is(err, ochainsync.ErrStopSyncProcess) {
+		// A callback stopped the sync on purpose, as a network ingest hold
+		// does; the owner of that decision restarts it.
+		return
+	}
+	if conn := o.connManager.GetConnectionById(connId); conn == nil ||
+		conn.ChainSync() == nil || conn.ChainSync().Client != client {
+		// The history and connection under connId now belong to its
+		// replacement.
+		o.config.Logger.Debug(
+			"chainsync re-intersect failed on a closed connection",
+			"connection_id", connId.String(),
+			"reason", reason,
+			"error", err,
+		)
+		return
+	}
+	o.config.Logger.Warn(
+		"chainsync re-intersect failed, closing connection",
+		"connection_id", connId.String(),
+		"reason", reason,
+		"error", err,
+	)
+	//nolint:contextcheck // address normalization bounds its own DNS lookup
+	o.closeConnectionForChainsyncResync(connId, reason)
+}
+
+// reintersectWithWatchdog builds connId's intersect points and runs
+// Reintersect on client, returning its intersection point. Both steps are
+// bounded by chainsyncReintersectTimeout: a client parked in MustReply drains
+// only when the peer sends the next block, and the ledger read behind the
+// points can block. On expiry the abandoned call returns once the caller
+// closes the connection.
+func (o *Ouroboros) reintersectWithWatchdog(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	client *ochainsync.Client,
+) (ocommon.Point, error) {
+	opCtx, cancel := context.WithTimeout(ctx, o.chainsyncReintersectTimeout)
+	defer cancel()
+	type result struct {
+		point ocommon.Point
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		points, err := o.buildDefaultChainsyncIntersectPoints(opCtx, connId)
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		if opCtx.Err() != nil {
+			// The caller has given up and may already be closing.
+			done <- result{err: opCtx.Err()}
+			return
+		}
+		point, _, err := client.Reintersect(points)
+		done <- result{point: point, err: err}
+	}()
+	select {
+	case r := <-done:
+		return r.point, r.err
+	case <-opCtx.Done():
+		if ctx.Err() != nil {
+			return ocommon.Point{}, ctx.Err()
+		}
+		return ocommon.Point{}, errors.New("re-intersect timed out")
+	}
 }
 
 func (o *Ouroboros) instrumentChainsyncFindIntersect(

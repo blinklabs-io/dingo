@@ -1282,6 +1282,14 @@ func (a *epochInfoAdapter) ConsensusModeForEpoch(
 	return a.ledgerState.ConsensusModeForEpoch(epoch)
 }
 
+// LeaderStakeSnapshotEpoch satisfies leader.LeaderStakeSnapshotProvider so the
+// schedule is elected by the same distribution header validation uses.
+func (a *epochInfoAdapter) LeaderStakeSnapshotEpoch(epoch uint64) uint64 {
+	return a.ledgerState.LeaderStakeSnapshotEpoch(epoch)
+}
+
+var _ leader.LeaderStakeSnapshotProvider = (*epochInfoAdapter)(nil)
+
 func (a *epochInfoAdapter) EraIDForEpoch(epoch uint64) (uint, error) {
 	return a.ledgerState.EraIDForEpoch(epoch)
 }
@@ -1307,6 +1315,11 @@ func (a *slotClockAdapter) ChainTip() ocommon.Point {
 
 func (a *slotClockAdapter) ChainTipSnapshot() ochainsync.Tip {
 	return a.ledgerState.Tip()
+}
+
+// StabilityWindow returns the ledger's stability window in slots.
+func (a *slotClockAdapter) StabilityWindow() uint64 {
+	return a.ledgerState.StabilityWindow()
 }
 
 func (a *slotClockAdapter) ForgeTipSnapshot() (ochainsync.Tip, int) {

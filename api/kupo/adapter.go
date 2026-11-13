@@ -288,7 +288,7 @@ func (i *nodeMatchIterator) loadPage() error {
 			!i.pattern.matchesAssets(utxo.Assets) ||
 			len(utxo.CreatedBlockHash) == 0 ||
 			(utxo.DeletedSlot != 0 &&
-				(len(utxo.SpentBlockHash) == 0 || len(utxo.SpentAtTxId) == 0)) {
+				(len(utxo.SpentBlockHash) == 0 || len(utxo.SpentAtTxHash) == 0)) {
 			continue
 		}
 		match, err := i.adapter.matchFromUtxo(
@@ -318,19 +318,19 @@ func (i *nodeMatchIterator) loadPage() error {
 func (i *nodeMatchIterator) spentFields(
 	utxo models.UtxoWithHistory,
 ) (*uint32, *string, error) {
-	cacheKey := string(utxo.SpentAtTxId)
+	cacheKey := string(utxo.SpentAtTxHash)
 	details, ok := i.spenders[cacheKey]
 	if !ok {
 		transaction, err := i.adapter.ledgerState.Database().
 			GetTransactionByHash(
 				i.ctx,
-				utxo.SpentAtTxId,
+				utxo.SpentAtTxHash,
 				i.txn,
 			)
 		if err != nil {
 			return nil, nil, fmt.Errorf(
 				"load Kupo spending transaction %x: %w",
-				utxo.SpentAtTxId,
+				utxo.SpentAtTxHash,
 				err,
 			)
 		}
@@ -547,7 +547,7 @@ func (a *NodeAdapter) matchFromUtxo(
 		}
 	}
 	if utxo.DeletedSlot != 0 {
-		spender := hex.EncodeToString(utxo.SpentAtTxId)
+		spender := hex.EncodeToString(utxo.SpentAtTxHash)
 		ret.SpentAt = &SpentPoint{
 			SlotNo:        utxo.DeletedSlot,
 			HeaderHash:    hex.EncodeToString(utxo.SpentBlockHash),

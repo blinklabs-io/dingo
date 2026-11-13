@@ -101,3 +101,14 @@ func TestReplayLimiterSharesBudgetAcrossIPv6Prefix(t *testing.T) {
 
 	require.NoError(t, l.charge(ctx, "[2001:db8:1:3::1]:1000"))
 }
+
+func TestReplayLimiterBudgetWithoutWindowIsUnlimited(t *testing.T) {
+	t.Parallel()
+
+	l := newReplayLimiter(0, 0, 0, 2, 0)
+	ctx := context.Background()
+	for range 5 {
+		require.NoError(t, l.charge(ctx, "192.0.2.1:1000"))
+	}
+	require.Empty(t, l.clients)
+}

@@ -396,6 +396,33 @@ func TestPeerHeaderForkPathTreatsUnverifiedQueuedParentAsLocalChain(
 	require.False(t, found)
 }
 
+// The ledger queues an accepted header asynchronously, so a header can be
+// verified while its parent, retained in the peer's history, is not queued
+// yet. The retained chain reaches a queued ancestor, so the header extends the
+// local queue and must not be withheld as a competing candidate.
+func TestPeerChainSelectionEpochNonceAcceptsChildOfInFlightQueuedDescendant(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 3)
+	connID := ouroboros.ConnectionId{}
+	f.stamps[string(f.headers[0].hash[:])] = 0
+	f.stamps[string(f.headers[1].hash[:])] = 0
+	require.NoError(
+		t,
+		f.ls.chain.AddBlockHeader(context.Background(), f.headers[0]),
+	)
+	snapshot, _ := f.ls.loadConsensusAndTipSnapshots()
+
+	_, _, fork, err := f.ls.peerChainSelectionEpochNonce(t.Context(),
+		connID,
+		f.headers[2],
+		snapshot,
+	)
+	require.NoError(t, err)
+	require.False(t, fork)
+}
+
 // TestPeerChainSelectionEpochNonceWithholdsUnknownParent keeps the other half:
 // a header whose parent is neither queued nor in the peer's history still
 // cannot be authenticated for chain selection.

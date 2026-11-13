@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 )
@@ -59,13 +58,6 @@ func (s *Server) handleAccountCoins(
 		writeError(w, wrapErr(ErrInvalidRequest, err))
 		return
 	}
-	release, ok := s.acquireBulk()
-	if !ok {
-		writeError(w, ErrUnavailable)
-		return
-	}
-	defer release()
-
 	stream := &coinStream{w: w, rc: http.NewResponseController(w)}
 	tip, err := s.config.LedgerState.ScanUtxosByAddress(
 		r.Context(),
@@ -181,9 +173,6 @@ func (c *coinStream) finish(blockID *BlockIdentifier) error {
 }
 
 func (c *coinStream) flush() error {
-	// A writer without deadline support, such as a test recorder, still
-	// streams; only the stall bound is lost.
-	_ = c.rc.SetWriteDeadline(time.Now().Add(accountCoinsPageWriteTimeout))
 	if _, err := c.w.Write(c.buf.Bytes()); err != nil {
 		return err
 	}

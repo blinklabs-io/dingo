@@ -359,6 +359,13 @@ type GenesisBootstrapConfig struct {
 	// LimitOnPatienceRate is the bucket leak rate in tokens per second. 0
 	// selects the default of 5.
 	LimitOnPatienceRate uint64 `yaml:"limitOnPatienceRate"         envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE"`
+	// ChainSyncJumping turns on ChainSync Jumping while Genesis selection is
+	// active: one identified outbound hot peer streams headers and every
+	// other outbound hot peer answers a periodic MsgFindIntersect for the
+	// streamed chain instead of streaming it, an identified peer's answer
+	// vouching for it in the Limit on Eagerness. Inbound peers take no
+	// CSJ role. On by default.
+	ChainSyncJumping bool `yaml:"chainSyncJumping"            envconfig:"DINGO_GENESIS_CSJ"`
 }
 
 // HistoryExpiryConfig controls local expiry of immutable block history.
@@ -554,6 +561,7 @@ func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 		Enabled:                true,
 		CorroborationPeers:     0,
 		LimitOnPatienceEnabled: true,
+		ChainSyncJumping:       true,
 	}
 }
 
@@ -669,6 +677,8 @@ type DMQConfig struct {
 	// SocketPath is the Unix socket serving local message submission and
 	// notification. It must differ from the Cardano SocketPath.
 	SocketPath string `yaml:"socketPath"   envconfig:"DINGO_DMQ_SOCKET_PATH"`
+	// SocketMode is the octal permission mode for SocketPath.
+	SocketMode string `yaml:"socketMode"   envconfig:"DINGO_DMQ_SOCKET_MODE"`
 	// MessageTTL is the longest expiry, in seconds, a submitted message may
 	// claim.
 	MessageTTL uint `yaml:"messageTtl"   envconfig:"DINGO_DMQ_MESSAGE_TTL"`
@@ -720,6 +730,7 @@ func DefaultDMQConfig() DMQConfig {
 	return DMQConfig{
 		Topic:                  "mithril",
 		SocketPath:             "dingo-dmq.socket",
+		SocketMode:             DefaultUnixSocketMode,
 		MessageTTL:             1800,
 		MinPoolMessageInterval: 60,
 		MaxMempoolSize:         128,
@@ -740,6 +751,7 @@ type Config struct {
 	CardanoConfig          string    `yaml:"cardanoConfig"                       envconfig:"config"`
 	DatabasePath           string    `yaml:"databasePath"                                                                                 split_words:"true"`
 	SocketPath             string    `yaml:"socketPath"                                                                                   split_words:"true"`
+	SocketMode             string    `yaml:"socketMode"                                                                                   split_words:"true"`
 	TlsCertFilePath        string    `yaml:"tlsCertFilePath"                     envconfig:"TLS_CERT_FILE_PATH"`
 	BindAddr               string    `yaml:"bindAddr"                                                                                     split_words:"true"`
 	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                                              split_words:"true"`
@@ -770,22 +782,21 @@ type Config struct {
 	// BarkClientCAFilePath is a legacy configuration input with no effect.
 	// Dingo APIs do not authenticate or authorize callers.
 	BarkClientCAFilePath string `yaml:"barkClientCaFilePath"                envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
-	// BarkArchiveMaxConcurrentFetches bounds how many ArchiveService
-	// FetchBlock requests Bark serves at once; a request over the limit is
-	// refused rather than queued. ArchiveService takes no client credentials,
-	// so this is what bounds the storage work an anonymous caller can cause.
-	// Zero selects Bark's default (16); a negative value is rejected.
+	// BarkArchiveMaxConcurrentFetches optionally bounds how many
+	// ArchiveService FetchBlock requests Bark serves at once; a request over
+	// the limit is refused rather than queued. Zero (the default) is
+	// unlimited; a negative value is rejected.
 	BarkArchiveMaxConcurrentFetches int `yaml:"barkArchiveMaxConcurrentFetches"     envconfig:"DINGO_BARK_ARCHIVE_MAX_CONCURRENT_FETCHES"`
 	// BarkArchiveLookupsPerSecond is the sustained rate of block lookups
 	// ArchiveService serves across all callers combined. Each lookup can cost
 	// a cloud storage request whether or not the block exists, so a FetchBlock
 	// whose references do not fit the remaining budget is refused whole. Zero
-	// selects Bark's default (200); a negative value is rejected.
+	// (the default) is unlimited; a negative value is rejected.
 	BarkArchiveLookupsPerSecond int `yaml:"barkArchiveLookupsPerSecond" envconfig:"DINGO_BARK_ARCHIVE_LOOKUPS_PER_SECOND"`
 	// BarkArchiveCallerLookupsPerSecond is the same rate for one caller
 	// address (one IPv4 address or one IPv6 /64), so a single client cannot
 	// spend the whole global budget. Callers behind one proxy share an
-	// allowance. Zero selects Bark's default (50); a negative value is
+	// allowance. Zero (the default) is unlimited; a negative value is
 	// rejected.
 	BarkArchiveCallerLookupsPerSecond int `yaml:"barkArchiveCallerLookupsPerSecond" envconfig:"DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND"`
 	// BarkOperatorCertificateFingerprints is a legacy configuration input with no effect.
@@ -812,6 +823,15 @@ type Config struct {
 	// pprof on a wildcard or management-network address.
 	DebugBindAddr string `yaml:"debugBindAddr"                       envconfig:"DINGO_DEBUG_BIND_ADDR"`
 	DebugPort     uint   `yaml:"debugPort"                           envconfig:"DINGO_DEBUG_PORT"`
+	// DebugMutexProfileFraction samples on average 1 in N contended mutex
+	// events for the pprof mutex profile. 0 leaves mutex profiling off.
+	// It only takes effect while DebugPort is non-zero.
+	DebugMutexProfileFraction uint `yaml:"debugMutexProfileFraction"           envconfig:"DINGO_DEBUG_MUTEX_PROFILE_FRACTION"`
+	// DebugBlockProfileRate samples one blocking event per N nanoseconds
+	// spent blocked for the pprof block profile. 0 leaves block profiling
+	// off; 1 records every event. It only takes effect while DebugPort is
+	// non-zero.
+	DebugBlockProfileRate uint `yaml:"debugBlockProfileRate"               envconfig:"DINGO_DEBUG_BLOCK_PROFILE_RATE"`
 	// HealthPort serves the liveness (/health, /healthz) and readiness
 	// (/readyz) probes on a listener of their own, so an operator can
 	// expose them to an orchestrator or load balancer without also
@@ -1646,6 +1666,7 @@ func newDefaultConfig() *Config {
 		CardanoConfig:                       "", // Will be set dynamically based on network
 		DatabasePath:                        ".dingo",
 		SocketPath:                          "dingo.socket",
+		SocketMode:                          DefaultUnixSocketMode,
 		IntersectTip:                        false,
 		ValidateHistorical:                  true,
 		StrictUtxoValidation:                true,
@@ -1658,6 +1679,8 @@ func newDefaultConfig() *Config {
 		DebugBindAddr:                       DefaultDebugBindAddr,
 		MetricsBindAddr:                     DefaultMetricsBindAddr,
 		DebugPort:                           0,
+		DebugMutexProfileFraction:           0,
+		DebugBlockProfileRate:               0,
 		HealthPort:                          DefaultHealthPort,
 		HealthReadyGapSlots:                 DefaultHealthReadyGapSlots,
 		PrivateBindAddr:                     "127.0.0.1",

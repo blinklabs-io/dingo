@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	dingo "github.com/blinklabs-io/dingo"
@@ -40,6 +41,7 @@ func serveRun(
 	if err != nil {
 		return err
 	}
+	applyDebugProfilingRates(logger, os.Stderr, cfg)
 
 	// Check for an in-progress sync. If the "sync_status" key in
 	// the sync_state table holds a non-empty value, a previous sync

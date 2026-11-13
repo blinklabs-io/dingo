@@ -39,6 +39,16 @@ func fragmentsOverlapExactly(left, right CandidateFragment) bool {
 	}
 }
 
+// proofOverlapsLocked reports whether conn's proof range equals legacy where
+// they overlap.
+func (cs *ChainSelector) proofOverlapsLocked(
+	conn ouroboros.ConnectionId,
+	proof, legacy CandidateFragment,
+) bool {
+	entry := cs.eagernessDeliveries[conn]
+	return entry.proofOverlaps(proof, legacy)
+}
+
 func (cs *ChainSelector) verifiedCorroborationFragmentLocked(
 	conn ouroboros.ConnectionId,
 ) (CandidateFragment, bool) {
@@ -54,7 +64,7 @@ func (cs *ChainSelector) verifiedCorroborationFragmentLocked(
 	}
 	base, ok := cs.admissionPeerTipLocked(conn)
 	if !ok || base == nil ||
-		!extendsFragment(entry.fragment, fragmentOf(base)) {
+		!entry.extends(fragmentOf(base)) {
 		return CandidateFragment{}, false
 	}
 	return CandidateFragment{
@@ -79,7 +89,7 @@ func (cs *ChainSelector) corroborationHistoryRepairNeededLocked(
 	head, _ := eagernessFragmentHead(proof)
 	return !ok || proof.baseBlock > anchor.BlockNumber ||
 		head < legacy.observedPointBaseBlock ||
-		!fragmentsOverlapExactly(proof, fragmentOf(legacy))
+		!cs.proofOverlapsLocked(conn, proof, fragmentOf(legacy))
 }
 
 func (cs *ChainSelector) verifiedCorroborationWitnessLocked(
@@ -89,7 +99,7 @@ func (cs *ChainSelector) verifiedCorroborationWitnessLocked(
 ) *PeerChainTip {
 	proof, ok := cs.verifiedCorroborationFragmentLocked(conn)
 	if !ok || legacy == nil || candidate == nil ||
-		!fragmentsOverlapExactly(proof, fragmentOf(legacy)) {
+		!cs.proofOverlapsLocked(conn, proof, fragmentOf(legacy)) {
 		return nil
 	}
 	head, _ := eagernessFragmentHead(proof)

@@ -31,8 +31,8 @@ type ProviderConfig struct {
 	AuthToken    string              `yaml:"authToken"`
 	Port         uint                `yaml:"port"`
 	Host         string              `yaml:"host"`
-	RateLimit    float64             `yaml:"rateLimit"` // requests per second (0 = unlimited)
-	Burst        int                 `yaml:"burst"`     // rate limiter burst allowance (default 15)
+	RateLimit    float64             `yaml:"rateLimit"` // optional requests per second (0 = unlimited, the default)
+	Burst        int                 `yaml:"burst"`     // optional rate limiter burst allowance; used only with rateLimit
 	QueryTimeout time.Duration       `yaml:"queryTimeout"`
 	MaxRows      int                 `yaml:"maxRows"`
 	TLS          apiconfig.TLSPolicy `yaml:"tls"`
@@ -59,8 +59,6 @@ func DefaultProviderConfig() ProviderConfig {
 	return ProviderConfig{
 		Port:         0,
 		Host:         "127.0.0.1",
-		RateLimit:    60.0, // requests per second
-		Burst:        15,
 		QueryTimeout: defaultQueryTimeout,
 		MaxRows:      100,
 	}

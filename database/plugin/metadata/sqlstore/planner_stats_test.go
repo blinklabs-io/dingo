@@ -95,29 +95,34 @@ func stat1Rows(tb testing.TB, db *sql.DB) (int, bool) {
 func seedPlannerStatsProbeUtxos(t *testing.T, store *Store) {
 	t.Helper()
 	seedStakeRefLookupUtxos(t, store, 3_000, 256)
-	_, err := store.writeDB.Exec("UPDATE utxo SET deleted_slot = 0")
+	_, err := store.writeDB.Exec(
+		`INSERT INTO applied_transaction (tx_id, slot)
+SELECT tx_id, MIN(added_slot) FROM utxo GROUP BY tx_id`,
+	)
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec("UPDATE utxo SET deleted_slot = 0")
 	require.NoError(t, err)
 }
 
-// statsSensitiveSpendSQL is the row-value form of the batched spend UPDATE.
-// Its plan depends on planner statistics: without them SQLite drives it from
-// a deleted_slot-leading index, with them from tx_id_output_idx. It is kept
-// here as a fixed probe so these tests keep observing the statistics refresh
-// whatever shape the production query takes.
+// statsSensitiveSpendSQL is the row-value form of the batched spend UPDATE,
+// keyed on the producer index. Its plan depends on planner statistics:
+// without them SQLite drives it from a deleted_slot-leading index, with them
+// from idx_utxo_tx_id_output_idx. It is kept here as a fixed probe so these
+// tests keep observing the statistics refresh whatever shape the production
+// query takes.
 const statsSensitiveSpendSQL = `UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL
   AND (tx_id, output_idx) IN ((?,?),(?,?))
-RETURNING tx_id, output_idx`
+RETURNING id`
 
 // consumeBatchPlan returns the plan statsSensitiveSpendSQL gets on conn.
 func consumeBatchPlan(tb testing.TB, conn *sql.Conn) string {
 	tb.Helper()
-	zero := make([]byte, 32)
 	rows, err := conn.QueryContext(
 		context.Background(),
 		"EXPLAIN QUERY PLAN "+statsSensitiveSpendSQL,
-		int64(1), zero, zero, 0, zero, 1,
+		int64(1), int64(1), int64(1), 0, int64(2), 1,
 	)
 	require.NoError(tb, err)
 	defer func() { require.NoError(tb, rows.Close()) }()
@@ -206,7 +211,7 @@ func TestOptimizePlannerStatsRefreshesPooledReadConnections(t *testing.T) {
 		require.Contains(
 			t,
 			plan,
-			"tx_id_output_idx",
+			"idx_utxo_tx_id_output_idx",
 			"read connection %d: %s",
 			i,
 			plan,
@@ -238,9 +243,15 @@ func TestOptimizePlannerStatsRefreshesAfterUpdateOnlyRun(t *testing.T) {
 	require.NoError(t, err)
 	_, err = tx.Exec(
 		"WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c " +
+			"WHERE i < 3000) INSERT INTO \"transaction\" (id, hash) " +
+			"SELECT 1000000 + i, randomblob(32) FROM c",
+	)
+	require.NoError(t, err)
+	_, err = tx.Exec(
+		"WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c " +
 			"WHERE i < 3000) INSERT INTO utxo (tx_id, output_idx, " +
 			"staking_key, credential_tag, added_slot, deleted_slot, amount) " +
-			"SELECT randomblob(32), i % 4, randomblob(28), 0, i, 0, '1' FROM c",
+			"SELECT 1000000 + i, i % 4, randomblob(28), 0, i, 0, '1' FROM c",
 	)
 	require.NoError(t, err)
 	require.NoError(t, tx.Commit())
@@ -254,7 +265,7 @@ func TestOptimizePlannerStatsRefreshesAfterUpdateOnlyRun(t *testing.T) {
 		require.Contains(
 			t,
 			plan,
-			"tx_id_output_idx",
+			"idx_utxo_tx_id_output_idx",
 			"read connection %d: %s",
 			i,
 			plan,
@@ -286,7 +297,7 @@ func TestOptimizePlannerStatsReloadsSharedCacheStatistics(t *testing.T) {
 		require.Contains(
 			t,
 			plan,
-			"tx_id_output_idx",
+			"idx_utxo_tx_id_output_idx",
 			"connection %d: %s",
 			i,
 			plan,
@@ -361,23 +372,25 @@ func TestPreparedStatementReplansAfterOptimizeOnSameConnection(t *testing.T) {
 	stmt, err := store.writeDB.PrepareContext(
 		ctx,
 		"SELECT COUNT(*) FROM utxo WHERE deleted_slot = 0 AND "+
-			"spent_at_tx_id IS NULL AND (tx_id, output_idx) IN "+
-			"((?, ?), (?, ?)) AND "+name+" = 1",
+			"spent_at_tx_id IS NULL AND "+
+			"(tx_id, output_idx) IN ((?, ?), (?, ?)) AND "+
+			name+" = 1",
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = stmt.Close() })
 	run := func() int64 {
 		visited.Store(0)
-		zero := make([]byte, 32)
 		var n int
-		require.NoError(t, stmt.QueryRowContext(ctx, zero, 0, zero, 1).Scan(&n))
+		require.NoError(t, stmt.QueryRowContext(
+			ctx, int64(1), 0, int64(2), 1,
+		).Scan(&n))
 		return visited.Load()
 	}
 	require.Greater(t, run(), int64(1_000), "stale plan must scan the table")
 
 	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerEpoch)
 	require.NoError(t, err)
-	require.LessOrEqual(t, run(), int64(2), "prepared statement must re-plan")
+	require.Equal(t, int64(2), run(), "prepared statement must re-plan")
 }
 
 func TestOptimizePlannerStatsSkipsDuringBulkLoad(t *testing.T) {
@@ -514,17 +527,23 @@ func TestRetiringCacheKeepsBorrowedStatementOpen(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			store := newFilePlannerStatsStore(t, nil)
-			stmt, release, ok := store.borrowCachedStmt(getLiveUtxoByRefQuery)
+			stmt, release, ok := store.borrowCachedStmt(store.utxoSQL().getLiveByRef)
 			require.True(t, ok, "hot statement must be cached at start")
 
 			retire(store)
 			zero := make([]byte, 32)
-			rows, err := stmt.QueryContext(context.Background(), zero, 0)
+			rows, err := stmt.QueryContext(
+				context.Background(),
+				store.utxoSQL().refArgs(zero, 0)...,
+			)
 			require.NoError(t, err, "a borrowed statement must stay open")
 			require.NoError(t, rows.Close())
 
 			release()
-			_, err = stmt.QueryContext(context.Background(), zero, 0)
+			_, err = stmt.QueryContext(
+				context.Background(),
+				store.utxoSQL().refArgs(zero, 0)...,
+			)
 			require.True(
 				t,
 				isClosedStmtErr(err),

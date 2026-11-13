@@ -17,8 +17,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -28,7 +26,9 @@ import (
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -123,8 +123,8 @@ func TestCheckSyncStateRepairsLegacyAlonzoPParamsUnit(t *testing.T) {
 // which is the only deferred-index entry point on that path.
 //
 // The state under test is the one two Mithril-bootstrapped preview nodes were
-// found in: idx_utxo_transaction_id absent with no pending marker to record
-// it, so every rollback's DELETE FROM "transaction" cascade scanned utxo once
+// found in: idx_utxo_spent_at_tx_id absent with no pending marker to record
+// it, so every rollback's delete of a transaction row scanned utxo once
 // per deleted transaction row.
 func TestServeCoreModeRepairsMissingCascadeIndex(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -148,7 +148,7 @@ func TestServeCoreModeRepairsMissingCascadeIndex(t *testing.T) {
 	require.NoError(t, err)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
-	_, err = raw.Exec("DROP INDEX IF EXISTS idx_utxo_transaction_id")
+	_, err = raw.Exec("DROP INDEX IF EXISTS idx_utxo_spent_at_tx_id")
 	require.NoError(t, err)
 	_, err = raw.Exec(
 		"DELETE FROM sync_state WHERE sync_key = ?",
@@ -162,7 +162,7 @@ func TestServeCoreModeRepairsMissingCascadeIndex(t *testing.T) {
 	var count int
 	require.NoError(t, raw.QueryRow(
 		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
-		"idx_utxo_transaction_id",
+		"idx_utxo_spent_at_tx_id",
 	).Scan(&count))
 	require.Equal(
 		t,

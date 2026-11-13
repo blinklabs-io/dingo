@@ -146,7 +146,8 @@ func seedReplayRecoveryTransaction(
 	t.Helper()
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
-	_, err = raw.Exec(`
+	_, err = testutil.ExecTransactionInsert(raw,
+		`
 INSERT INTO "transaction" (
     hash, block_hash, slot, type, valid, block_index
 ) VALUES (?, ?, ?, 1, TRUE, 0)`,
@@ -5213,7 +5214,7 @@ func TestDeterministicTxRecoveryDeclinesAtSameSlotSameHash(t *testing.T) {
 // way down.
 func TestAtTipRecoveryPruneFloorBindsAboveMithrilAnchor(t *testing.T) {
 	const mithrilAnchorSlot = pruneFixtureRootSlot
-	f := newPrunedUtxoFixture(t, mithrilAnchorSlot)
+	f := newDeepPrunedUtxoFixture(t, mithrilAnchorSlot)
 
 	f.ls.cleanupConsumedUtxos(context.Background())
 	floor, err := f.db.ConsumedUtxoPruneFloor(nil)

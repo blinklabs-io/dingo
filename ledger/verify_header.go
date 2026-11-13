@@ -342,6 +342,9 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 	if header == nil {
 		return errors.New("nil block header")
 	}
+	if err := ls.validateSupportedHeaderProtocolVersion(header); err != nil {
+		return err
+	}
 	// A header the ledger has applied was fully verified then. Re-verifying
 	// it here can fail only because the state it needs (pool snapshots older
 	// than the retention window) has since been pruned. The point carries the
@@ -1257,13 +1260,14 @@ func (ls *LedgerState) verifyBlockHeaderStateWithCache(
 		epochCache,
 		allowStateDefer,
 		func(
-			_ context.Context,
+			ctx context.Context,
 			block ledger.Block,
 			epochID uint64,
 			_ []models.Epoch,
 			snap electingSnapshot,
 		) error {
 			return ls.verifyBlockLeaderEligibilityFromSnapshot(
+				ctx,
 				block,
 				epochID,
 				snap,
@@ -1857,14 +1861,40 @@ func (ls *LedgerState) genesisDelegateKeyHashes(
 	return ret, nil
 }
 
+// genesisDelegPair is a genesis delegate's cold key hash and VRF key hash.
+type genesisDelegPair struct {
+	Delegate lcommon.Blake2b224
+	Vrf      lcommon.Blake2b256
+}
+
+// futureGenesisDelegKey identifies a pending genesis delegation by the slot it
+// activates at and the genesis key it replaces the delegate of. A later
+// certificate for the same key at the same slot replaces the earlier one.
+type futureGenesisDelegKey struct {
+	Slot    uint64
+	Genesis lcommon.Blake2b224
+}
+
+// genesisDelegationSnapshot is the slice of the ledger's DELEG state that the
+// genesis key delegation predicates read: dsGenDelegs and dsFutureGenDelegs.
+type genesisDelegationSnapshot struct {
+	// Current maps every genesis key to the delegate in force at the slot.
+	Current map[lcommon.Blake2b224]genesisDelegPair
+	// Future holds the delegations certified but not yet in force.
+	Future map[futureGenesisDelegKey]genesisDelegPair
+	// StabilityWindow is the delay between a certificate's slot and the slot
+	// its delegation takes effect.
+	StabilityWindow uint64
+}
+
 // genesisDelegState returns the genesis delegations in force at slot and those
 // certified but still inside the stability window, the state the reference's
 // DELEG rule validates genesis key delegation certificates against.
 func (ls *LedgerState) genesisDelegState(
 	slot uint64,
 	txn types.Txn,
-) (eras.GenesisDelegState, error) {
-	var ret eras.GenesisDelegState
+) (genesisDelegationSnapshot, error) {
+	var ret genesisDelegationSnapshot
 	if ls.config.CardanoNodeConfig == nil {
 		return ret, errors.New("unable to get cardano node config")
 	}
@@ -1879,7 +1909,7 @@ func (ls *LedgerState) genesisDelegState(
 		return ret, err
 	}
 	ret.Current = make(
-		map[lcommon.Blake2b224]eras.GenesisDelegPair,
+		map[lcommon.Blake2b224]genesisDelegPair,
 		len(genesis),
 	)
 	for _, initial := range genesis {
@@ -1892,7 +1922,7 @@ func (ls *LedgerState) genesisDelegState(
 			return ret, err
 		}
 		genesisKey := lcommon.NewBlake2b224(initial.genesisHash)
-		ret.Current[genesisKey] = eras.GenesisDelegPair{
+		ret.Current[genesisKey] = genesisDelegPair{
 			Delegate: lcommon.NewBlake2b224(active.delegateHash),
 			Vrf:      lcommon.NewBlake2b256(active.vrfHash),
 		}
@@ -1913,7 +1943,7 @@ func (ls *LedgerState) genesisDelegState(
 		return ret, fmt.Errorf("get pending genesis delegations: %w", err)
 	}
 	ret.Future = make(
-		map[eras.FutureGenesisDelegKey]eras.GenesisDelegPair,
+		map[futureGenesisDelegKey]genesisDelegPair,
 		len(pending),
 	)
 	for _, row := range pending {
@@ -1925,10 +1955,10 @@ func (ls *LedgerState) genesisDelegState(
 				row.GenesisHash,
 			)
 		}
-		ret.Future[eras.FutureGenesisDelegKey{
+		ret.Future[futureGenesisDelegKey{
 			Slot:    row.AddedSlot + ret.StabilityWindow,
 			Genesis: lcommon.NewBlake2b224(row.GenesisHash),
-		}] = eras.GenesisDelegPair{
+		}] = genesisDelegPair{
 			Delegate: lcommon.NewBlake2b224(row.GenesisDelegateHash),
 			Vrf:      lcommon.NewBlake2b256(row.VrfKeyHash),
 		}
@@ -2154,8 +2184,18 @@ func (ls *LedgerState) genesisOverlayProtocolParamsForFutureEpoch(
 	// A boundary block encoded in the current era is led under that era's
 	// parameters with the pending in-era update applied, before any hard-fork
 	// translation, which ProtocolParamsForSlot would also apply.
+	//
+	// NEWEPOCH enacts only for the successor of the ledger epoch label. When
+	// an empty epoch left the label behind, the boundary into paramsEpoch
+	// enacts nothing and the parameters stay as they were.
 	if paramsEpoch == snapshot.currentEpoch.EpochId+1 &&
 		paramsEraID == snapshot.currentEra.Id {
+		label := ledgerEpochLabelInCache(
+			snapshot.currentEpoch.EpochId, snapshot.epochCache,
+		)
+		if paramsEpoch != label+1 {
+			return snapshot.currentPParams
+		}
 		updated, err := ls.forecastPendingPParamUpdate(
 			snapshot.currentEra,
 			paramsEpoch,
@@ -2250,12 +2290,58 @@ func (ls *LedgerState) epochCacheSnapshot() []models.Epoch {
 	return snapshot.epochCache
 }
 
+// ledgerEpochLabelInCache returns the ledger epoch label in force at epoch,
+// reconstructed from the cache rows up to it. It is epoch itself when the cache
+// holds none.
+func ledgerEpochLabelInCache(epoch uint64, cache []models.Epoch) uint64 {
+	end := 0
+	for end < len(cache) && cache[end].EpochId <= epoch {
+		end++
+	}
+	if end == 0 {
+		return epoch
+	}
+	return ledgerEpochFromCache(cache[:end])
+}
+
+// leaderStakeSnapshotEpochInCache returns the mark snapshot epoch that elects
+// a block in epoch, given the epoch cache that describes the chain the block
+// extends. The ledger epoch label is reconstructed from the rows up to epoch,
+// so rows persisted for a jump over an empty epoch leave it behind and the
+// distribution frozen at the label stays in force.
+func leaderStakeSnapshotEpochInCache(
+	epoch uint64,
+	cache []models.Epoch,
+) uint64 {
+	if len(cache) == 0 {
+		return praos.StakeSnapshotEpoch(epoch)
+	}
+	end := 0
+	for end < len(cache) && cache[end].EpochId <= epoch {
+		end++
+	}
+	if end == 0 {
+		return praos.StakeSnapshotEpoch(epoch)
+	}
+	return praos.LeaderStakeSnapshotEpoch(
+		epoch,
+		ledgerEpochFromCache(cache[:end]),
+	)
+}
+
+// LeaderStakeSnapshotEpoch returns the mark snapshot epoch that elects leaders
+// for the given epoch against the published epoch cache.
+func (ls *LedgerState) LeaderStakeSnapshotEpoch(epoch uint64) uint64 {
+	return leaderStakeSnapshotEpochInCache(epoch, ls.epochCacheSnapshot())
+}
+
 //nolint:unused // retained as a test helper
 func (ls *LedgerState) verifyBlockLeaderEligibility(
 	block ledger.Block,
 	epochId uint64,
 ) error {
 	return ls.verifyBlockLeaderEligibilityFromSnapshot(
+		ls.closeCtx(),
 		block,
 		epochId,
 		ls.resolveElectingSnapshotForBlock(
@@ -2265,6 +2351,7 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 }
 
 func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
+	ctx context.Context,
 	block ledger.Block,
 	epochId uint64,
 	snap electingSnapshot,
@@ -2356,7 +2443,7 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 	}
 
 	// Consensus mode determines the VRF leader-value derivation path.
-	mode, modeErr := ls.ConsensusModeForEpoch(epochId)
+	mode, modeErr := ls.consensusModeForEpoch(ctx, epochId)
 	if modeErr != nil {
 		// The mode selects both the leader-value derivation and the
 		// eligibility predicate, so without it eligibility cannot be evaluated. The era
@@ -2533,7 +2620,7 @@ func (ls *LedgerState) resolveElectingSnapshotAtSlot(
 	txn types.Txn,
 ) electingSnapshot {
 	snap := electingSnapshot{
-		epoch: praos.StakeSnapshotEpoch(epochId),
+		epoch: leaderStakeSnapshotEpochInCache(epochId, epochCache),
 		kind:  models.PoolStakeSnapshotTypeMark,
 
 		epochCache: epochCache,
@@ -3526,7 +3613,7 @@ func (ls *LedgerState) oldestRequiredSnapshotEpochLocked() (uint64, bool) {
 			// will read once the cache advances, looping the header on defer.
 			return 0, true
 		}
-		snapshotEpoch := praos.StakeSnapshotEpoch(epoch.EpochId)
+		snapshotEpoch := leaderStakeSnapshotEpochInCache(epoch.EpochId, cache)
 		if !have || snapshotEpoch < floor {
 			floor = snapshotEpoch
 			have = true
@@ -3615,7 +3702,7 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 	// released; the epoch cache is an atomic snapshot and takes no lock. One
 	// cache generation for every pin keeps the floor coherent, as above.
 	cache := ls.loadConsensusSnapshot().epochCache
-	before = ls.capPoolSnapshotPruneBefore(
+	before = ls.capPoolSnapshotPruneBeforeWith(
 		before, minBefore,
 		func(slot uint64) (uint64, bool) {
 			epoch, err := epochForSlotInCache(cache, slot)
@@ -3624,7 +3711,23 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 			}
 			return epoch.EpochId, true
 		},
+		func(epoch uint64) uint64 {
+			return leaderStakeSnapshotEpochInCache(epoch, cache)
+		},
 	)
+	// Once an epoch has been empty the ledger epoch label stops advancing, so
+	// the distribution leaders are elected by stays the one captured before the
+	// gap however many epochs pass. It is not a deferred header's need and so
+	// is exempt from the depth backstop: pruning it leaves every later block
+	// without a leader distribution.
+	if len(cache) > 0 &&
+		ledgerEpochFromCache(cache) < cache[len(cache)-1].EpochId {
+		if frozen := leaderStakeSnapshotEpochInCache(
+			cache[len(cache)-1].EpochId+1, cache,
+		); frozen < before {
+			before = frozen
+		}
+	}
 	// Prune runs with the mutex RELEASED: it opens the single sqlite write
 	// connection, which block apply holds before taking this mutex, so running
 	// it under the lock deadlocks. See the doc comment.
@@ -3662,36 +3765,24 @@ func (ls *LedgerState) ensureEpochForSlot(
 	ctx context.Context,
 	targetSlot uint64,
 ) (models.Epoch, error) {
-	const maxAdvance = 5 // Safety limit against runaway loops
-	for range maxAdvance {
-		if err := ls.advanceEpochCache(ctx); err != nil {
-			return models.Epoch{}, fmt.Errorf(
-				"advance epoch cache: %w",
-				err,
-			)
-		}
-		epoch, err := ls.epochForSlot(targetSlot)
-		if err == nil {
-			return epoch, nil
-		}
+	if epoch, err := ls.epochForSlot(targetSlot); err == nil {
+		return epoch, nil
 	}
-	return models.Epoch{}, fmt.Errorf(
-		"could not advance epoch cache to cover slot %d after %d advances",
-		targetSlot,
-		maxAdvance,
-	)
+	if err := ls.advanceEpochCacheToSlot(ctx, targetSlot); err != nil {
+		return models.Epoch{}, fmt.Errorf("advance epoch cache: %w", err)
+	}
+	return ls.epochForSlot(targetSlot)
 }
 
-// advanceEpochCache computes the next same-era epoch's parameters and nonce
-// from chain data and appends it to the in-memory epoch cache. This is a
-// lightweight alternative to the full processEpochRollover — it only
-// populates the nonce and epoch boundaries needed for header verification,
-// without running pparam updates, snapshot rotation, or DB writes. It refuses
-// to cross a confirmed or configured hard-fork boundary because only the full
-// rollover owns the successor era's parameters and snapshot rotation. The full
-// rollover will run later in ledgerProcessBlocks and replace the cache with the
-// authoritative DB-backed version.
-func (ls *LedgerState) advanceEpochCache(ctx context.Context) error {
+// advanceEpochCacheToSlot computes a same-era target epoch's parameters and
+// nonce from chain data and appends it to the in-memory epoch cache. This is a
+// lightweight alternative to the full processEpochRollover: it only populates
+// the nonce and epoch boundaries needed for header verification, without
+// running pparam updates, snapshot rotation, or DB writes.
+func (ls *LedgerState) advanceEpochCacheToSlot(
+	ctx context.Context,
+	targetSlot uint64,
+) error {
 	// Read last epoch from the lock-free consensus snapshot
 	snapshot := ls.loadConsensusSnapshot()
 	if snapshot == nil {
@@ -3702,8 +3793,16 @@ func (ls *LedgerState) advanceEpochCache(ctx context.Context) error {
 		return errors.New("epoch cache is empty")
 	}
 	lastEpoch := cache[len(cache)-1]
-	if err := ls.validateEpochCacheForecast(
+	targetEpoch, err := epochAtSlot(lastEpoch, targetSlot)
+	if err != nil {
+		return err
+	}
+	if targetEpoch.EpochId == lastEpoch.EpochId {
+		return nil
+	}
+	if err := ls.validateEpochCacheForecastTo(
 		lastEpoch,
+		targetEpoch.EpochId,
 		snapshot.currentEra.Id,
 		snapshot.transitionInfo,
 	); err != nil {
@@ -3714,7 +3813,7 @@ func (ls *LedgerState) advanceEpochCache(ctx context.Context) error {
 		return errors.New("last epoch has zero length")
 	}
 
-	newStartSlot := lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots)
+	newStartSlot := targetEpoch.StartSlot
 
 	// Compute epoch nonce (requires DB access, done outside lock)
 	nonce, evolvingNonce, candidateNonce, labNonce, err := ls.computeEpochNonceForSlot(
@@ -3725,13 +3824,13 @@ func (ls *LedgerState) advanceEpochCache(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf(
 			"compute epoch nonce for epoch %d: %w",
-			lastEpoch.EpochId+1,
+			targetEpoch.EpochId,
 			err,
 		)
 	}
 
 	newEpoch := models.Epoch{
-		EpochId:             lastEpoch.EpochId + 1,
+		EpochId:             targetEpoch.EpochId,
 		StartSlot:           newStartSlot,
 		LengthInSlots:       lastEpoch.LengthInSlots,
 		SlotLength:          lastEpoch.SlotLength,
@@ -3769,8 +3868,9 @@ func (ls *LedgerState) advanceEpochCache(ctx context.Context) error {
 	// nonce computation is in flight. Recheck under the writer lock so that
 	// publication cannot race a newly-confirmed boundary and append a row with
 	// the source era's parameters on the other side.
-	if err := ls.validateEpochCacheForecast(
+	if err := ls.validateEpochCacheForecastTo(
 		lastCached,
+		newEpoch.EpochId,
 		ls.currentEra.Id,
 		ls.transitionInfo,
 	); err != nil {
@@ -3805,7 +3905,21 @@ func (ls *LedgerState) validateEpochCacheForecast(
 	currentEraID uint,
 	transition hardfork.TransitionInfo,
 ) error {
-	nextEpochID := lastEpoch.EpochId + 1
+	return ls.validateEpochCacheForecastTo(
+		lastEpoch,
+		lastEpoch.EpochId+1,
+		currentEraID,
+		transition,
+	)
+}
+
+func (ls *LedgerState) validateEpochCacheForecastTo(
+	lastEpoch models.Epoch,
+	targetEpochID uint64,
+	currentEraID uint,
+	transition hardfork.TransitionInfo,
+) error {
+	nextEpochID := targetEpochID
 	shape := ls.eraShape()
 	if entry, ok := shape.EraForID(lastEpoch.EraId); ok &&
 		entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch {
@@ -3989,12 +4103,29 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 	// supplies it to TICKN. Mainnet set a non-neutral value for exactly one
 	// epoch (259); everywhere else this resolves to NeutralNonce and leaves
 	// the result unchanged.
-	extraEntropy, err := ls.forecastExtraEntropyForEpoch(
-		prevEpoch.EpochId+1,
-		prevEpoch.EraId,
-	)
-	if err != nil {
-		return nil, nil, nil, nil, err
+	var extraEntropy []byte
+	consensusState := ls.loadConsensusSnapshot()
+	if epochStartSlot > prevEpochEndSlot ||
+		ledgerEpochLagsCacheRow(consensusState, prevEpoch.EpochId) {
+		// A jump over an empty epoch does not run NEWEPOCH, so no pending
+		// parameter update is enacted. The row written at the jump target
+		// leaves the ledger epoch label behind, so the epochs after it are
+		// still non-successor signals and keep skipping NEWEPOCH. TICKN sees
+		// the currently published ledger view rather than a chain of
+		// per-epoch forecasts.
+		if consensusState != nil {
+			extraEntropy = extraEntropyFromPParams(
+				consensusState.currentPParams,
+			)
+		}
+	} else {
+		extraEntropy, err = ls.forecastExtraEntropyForEpoch(
+			prevEpoch.EpochId+1,
+			prevEpoch.EraId,
+		)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
 	}
 
 	if len(labForEta) == 0 && len(extraEntropy) == 0 {
@@ -4041,4 +4172,26 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 	)
 
 	return result, evolvingNonce, candidateNonce, labNonceToSave, nil
+}
+
+// ledgerEpochLagsCacheRow reports whether the epoch row epochID is a sparse
+// jump target: the ledger epoch label reconstructed from the cache up to that
+// row is older than the row, so NEWEPOCH did not run for it. A row absent from
+// the cache reports false.
+func ledgerEpochLagsCacheRow(
+	consensusState *consensusSnapshot,
+	epochID uint64,
+) bool {
+	if consensusState == nil {
+		return false
+	}
+	cache := consensusState.epochCache
+	idx := slices.IndexFunc(cache, func(e models.Epoch) bool {
+		return e.EpochId == epochID
+	})
+	if idx < 0 {
+		return false
+	}
+	end := idx + 1
+	return ledgerEpochFromCache(cache[:end]) != epochID
 }

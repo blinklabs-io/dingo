@@ -116,7 +116,7 @@ func TestCapPoolSnapshotPruneBefore_PinLowersBoundary(t *testing.T) {
 	epochOf := func(uint64) (uint64, bool) { return 7, true }
 	// Epoch 7's mark snapshot is epoch 6 (praos.StakeSnapshotEpoch).
 	require.Equal(t, uint64(6),
-		ls.capPoolSnapshotPruneBefore(8, 0, epochOf))
+		ls.capPoolSnapshotPruneBeforeWith(8, 0, epochOf, ls.LeaderStakeSnapshotEpoch))
 }
 
 // TestCapPoolSnapshotPruneBefore_UnmappableRetainsToBackstop: a pin whose
@@ -129,7 +129,7 @@ func TestCapPoolSnapshotPruneBefore_UnmappableRetainsToBackstop(t *testing.T) {
 	defer release()
 	epochOf := func(uint64) (uint64, bool) { return 0, false }
 	require.Equal(t, uint64(4),
-		ls.capPoolSnapshotPruneBefore(8, 4, epochOf))
+		ls.capPoolSnapshotPruneBeforeWith(8, 4, epochOf, ls.LeaderStakeSnapshotEpoch))
 }
 
 // The two tests below are the race itself. Acquire pins, then verifies, then
@@ -211,9 +211,9 @@ func TestVerifyPointQueryable_PoolSnapshotPruneAnnouncedBeforePin_IsRejected(
 	ls, at := newPinnedPointLedger(t)
 	// The point is in epoch 3, so it needs the mark snapshot from epoch 2.
 	// No pins yet, so the boundary is announced as given.
-	ls.capPoolSnapshotPruneBefore(3, 0, func(uint64) (uint64, bool) {
+	ls.capPoolSnapshotPruneBeforeWith(3, 0, func(uint64) (uint64, bool) {
 		return 3, true
-	})
+	}, ls.LeaderStakeSnapshotEpoch)
 
 	release := ls.PinAcquiredPoint(at.Slot)
 	defer release()

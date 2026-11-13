@@ -43,7 +43,7 @@ LEFT JOIN pool_registration registration ON registration.id = (
     SELECT r.id
     FROM pool_registration r
     LEFT JOIN certs c ON c.id = r.certificate_id
-    LEFT JOIN ` + s.dialect.QuoteIdentifier("transaction") + ` tx ON tx.id = c.transaction_id
+    LEFT JOIN applied_transaction tx ON tx.tx_id = c.transaction_id
     WHERE r.pool_id = p.id
     ORDER BY r.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
              COALESCE(c.cert_index, 0) DESC, r.registration_index DESC,

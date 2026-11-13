@@ -95,6 +95,7 @@ func TestTachysEligibilityDefersWhenContextChangesDuringLoad(t *testing.T) {
 		t.Context(),
 		block,
 		epochID,
+		ls.epochCacheSnapshot(),
 		electingSnapshot{},
 		make([]byte, common.Blake2b256Size),
 	)

@@ -87,6 +87,25 @@ func TestProtocolParamsForSlotForecastsVersionTriggeredEra(t *testing.T) {
 		require.Truef(t, ok, "forged era must stay Babbage, got %T", got)
 		require.Equal(t, uint(8), pparams.ProtocolMajor)
 	})
+	// A slot beyond an empty epoch is a non-successor signal: NEWEPOCH enacts
+	// nothing, so the parameters stay those in force. The pending update
+	// still names the era the hard-fork combinator extends the ledger into.
+	t.Run("a slot past an empty epoch enacts no update", func(t *testing.T) {
+		t.Parallel()
+		const firstSlotOfEpoch3 = 3 * firstSlotOfEpoch1
+		ls, _ := newLedger(t, 0, true)
+		got := ls.ProtocolParamsForSlot(firstSlotOfEpoch3)
+		pparams, ok := got.(*babbage.BabbageProtocolParameters)
+		require.Truef(t, ok, "era must stay Babbage, got %T", got)
+		require.Equal(t, uint(8), pparams.ProtocolMajor,
+			"a skipped epoch must not enact the pending version update")
+
+		ls, _ = newLedger(t, 1, true)
+		got = ls.ProtocolParamsForSlot(firstSlotOfEpoch3)
+		_, ok = got.(*conway.ConwayProtocolParameters)
+		require.Truef(t, ok,
+			"the pending update names Conway for the ledger, got %T", got)
+	})
 	t.Run("waits out an interrupted publication", func(t *testing.T) {
 		t.Parallel()
 		// The published state counts no block past the deadline, so its
