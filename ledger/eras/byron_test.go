@@ -1680,6 +1680,8 @@ type mockLedgerState struct {
 	// stakeRegistered backs IsStakeCredentialRegistered, and rewardBalances
 	// the balance RewardAccountBalance reports for a registered credential.
 	stakeRegistered map[lcommon.Blake2b224]bool
+	// poolsRegistered makes IsPoolRegistered report every pool as registered.
+	poolsRegistered bool
 	rewardBalances  map[lcommon.Blake2b224]uint64
 	// plutusEvalContextCache backs PlutusEvalContextCache, letting a test opt
 	// a *mockLedgerState into eras.PlutusEvalContextCacheProvider. nil (the
@@ -1702,13 +1704,11 @@ func (m *mockLedgerState) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
 	return m.governanceState.GovPurposeRoots()
 }
 
-// MIRDelegState implements eras.MIRDelegStateProvider for tests. The real
-// implementation (*ledger.LedgerView) derives this from the database. The
-// Pending map is copied because the caller folds certificates into it.
-func (m *mockLedgerState) MIRDelegState(
-	_ uint64,
-	_ bool,
-) (MIRDelegState, error) {
+// mirDelegState is the move instantaneous rewards state a test seeds: the
+// chain pots, what earlier certificates this epoch accumulated, and the slot at
+// which a certificate becomes too late. The Pending map is copied because the
+// caller folds certificates into it.
+func (m *mockLedgerState) mirDelegState() MIRDelegState {
 	state := MIRDelegState{
 		Reserves: math.MaxUint64,
 		Treasury: math.MaxUint64,
@@ -1717,20 +1717,64 @@ func (m *mockLedgerState) MIRDelegState(
 	}
 	if m.mirState != nil {
 		state = *m.mirState
-		if state.DeltaReserves != nil {
-			state.DeltaReserves = new(big.Int).Set(state.DeltaReserves)
-		}
-		if state.DeltaTreasury != nil {
-			state.DeltaTreasury = new(big.Int).Set(state.DeltaTreasury)
-		}
 	}
 	pending := make(map[MIRCredentialKey]*big.Int, len(state.Pending))
 	for key, amount := range state.Pending {
 		pending[key] = new(big.Int).Set(amount)
 	}
 	state.Pending = pending
-	return state, nil
+	return state
 }
+
+// PendingInstantaneousRewards implements lcommon.PendingInstantaneousRewardsState.
+func (m *mockLedgerState) PendingInstantaneousRewards(
+	source uint,
+	cred lcommon.Credential,
+) (*big.Int, error) {
+	amount := m.mirDelegState().Pending[MIRCredentialKey{
+		Tag:        uint8(cred.CredType), //nolint:gosec // test credential types are 0 or 1
+		Credential: cred.Credential,
+		Pot:        source,
+	}]
+	return amount, nil
+}
+
+// InstantaneousRewardsTotal implements lcommon.InstantaneousRewardsTotalsState.
+func (m *mockLedgerState) InstantaneousRewardsTotal(
+	source uint,
+) (*big.Int, error) {
+	total := new(big.Int)
+	for key, amount := range m.mirDelegState().Pending {
+		if key.Pot == source {
+			total.Add(total, amount)
+		}
+	}
+	return total, nil
+}
+
+// InstantaneousPotTransfer implements lcommon.InstantaneousRewardsTotalsState.
+func (m *mockLedgerState) InstantaneousPotTransfer(
+	source uint,
+) (*big.Int, error) {
+	state := m.mirDelegState()
+	delta := state.DeltaReserves
+	if source == 1 {
+		delta = state.DeltaTreasury
+	}
+	if delta == nil {
+		return new(big.Int), nil
+	}
+	return new(big.Int).Set(delta), nil
+}
+
+// NextEpochFirstSlot and StabilityWindow implement
+// lcommon.StabilityWindowState with a zero window, so the cutoff is the seeded
+// Cutoff.
+func (m *mockLedgerState) NextEpochFirstSlot(uint64) (uint64, error) {
+	return m.mirDelegState().Cutoff, nil
+}
+
+func (m *mockLedgerState) StabilityWindow() (uint64, error) { return 0, nil }
 
 // SyntheticV2CostModelInEffect implements the eras package's local
 // syntheticV2CostModelReporter interface (see eras.go), the same way
@@ -1852,7 +1896,7 @@ func (m *mockLedgerState) PoolCurrentState(
 func (m *mockLedgerState) IsPoolRegistered(
 	_ lcommon.PoolKeyHash,
 ) bool {
-	return false
+	return m.poolsRegistered
 }
 
 func (m *mockLedgerState) IsVrfKeyInUse(
@@ -1870,7 +1914,8 @@ func (m *mockLedgerState) CalculateRewards(
 }
 
 func (m *mockLedgerState) GetAdaPots() lcommon.AdaPots {
-	return lcommon.AdaPots{}
+	state := m.mirDelegState()
+	return lcommon.AdaPots{Reserves: state.Reserves, Treasury: state.Treasury}
 }
 
 func (m *mockLedgerState) UpdateAdaPots(

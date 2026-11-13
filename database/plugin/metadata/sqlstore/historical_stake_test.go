@@ -180,7 +180,7 @@ func TestHistoricalPoolEventsOrderClosureBeforeCertifier(t *testing.T) {
 	writeDepositHeldCert(t, store, 100, 0, depositHeldRegistration(pool), 0)
 	writeDepositHeldCert(t, store, 400, 1, depositHeldRetirement(pool, 0), 0)
 	_, err := store.writeDB.Exec(`INSERT INTO leios_transaction_context
-		(transaction_id, slot) SELECT id, 200 FROM "transaction"
+		(transaction_id, slot) SELECT tx_id, 200 FROM applied_transaction
 		WHERE slot = 400 AND block_index = 1`)
 	require.NoError(t, err)
 	writeDepositHeldCert(t, store, 400, 0, depositHeldRegistration(pool), 0)
@@ -241,7 +241,7 @@ func testHistoricalExpirationUsesClosureExecutionSlot(
 			StakeCredential: &credential, PoolKeyHash: pool,
 		}, 0)
 	_, err := db.ExecContext(t.Context(), `INSERT INTO leios_transaction_context
-		(transaction_id, slot) SELECT id, 1999 FROM "transaction"
+		(transaction_id, slot) SELECT tx_id, 1999 FROM applied_transaction
 		WHERE slot = 2000`)
 	require.NoError(t, err)
 	query, args := activeDelegationSQL(1_999, 1_999)

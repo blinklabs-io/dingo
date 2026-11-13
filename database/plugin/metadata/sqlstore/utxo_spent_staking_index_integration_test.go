@@ -79,11 +79,12 @@ func testSpentStakingIndex(t *testing.T, store *Store, schema string) {
 	// The rollback un-spend and the spent-output history read through the
 	// statements that state deleted_slot > 0.
 	for i, deleted := range []int64{0, 3, 7} {
+		producer := fixtureIdentityRow(t, store, 0, []byte{byte(i + 1)})
 		_, err := store.writeDB.Exec(store.dialect.Rebind(
 			"INSERT INTO utxo (tx_id, output_idx, credential_tag, "+
 				"staking_key, added_slot, deleted_slot, amount, "+
 				"payment_script) VALUES (?, 0, 0, ?, 1, ?, '100', FALSE)",
-		), []byte{byte(i + 1)}, []byte{9}, deleted)
+		), producer, []byte{9}, deleted)
 		require.NoError(t, err)
 	}
 	require.NoError(t, store.SetUtxosNotDeletedAfterSlot(5, nil))
@@ -127,27 +128,41 @@ func requireSpentRangeUsesIndex(t *testing.T, store *Store) {
 	}
 	_, err := store.writeDB.Exec(dropSupply)
 	require.NoError(t, err)
-	var seed string
+	// Each output names its own producer's identity row.
+	transaction := store.dialect.QuoteIdentifier("transaction")
+	var seed []string
 	if store.dialect.Name() == "postgres" {
-		seed = "INSERT INTO utxo (tx_id, output_idx, credential_tag, " +
-			"staking_key, added_slot, deleted_slot, amount, payment_script) " +
-			"SELECT decode(lpad(to_hex(g), 64, '0'), 'hex'), 0, 0, " +
-			"decode(lpad(to_hex(g % 997), 56, '0'), 'hex'), g, " +
-			"CASE WHEN g % 50 = 0 THEN g ELSE 0 END, '100', FALSE " +
-			"FROM generate_series(1, 50000) g"
+		seed = []string{
+			"INSERT INTO " + transaction + " (hash) " +
+				"SELECT decode(lpad(to_hex(g), 64, '0'), 'hex') " +
+				"FROM generate_series(1, 50000) g",
+			"INSERT INTO utxo (tx_id, output_idx, credential_tag, " +
+				"staking_key, added_slot, deleted_slot, amount, payment_script) " +
+				"SELECT t.id, 0, 0, " +
+				"decode(lpad(to_hex(g % 997), 56, '0'), 'hex'), g, " +
+				"CASE WHEN g % 50 = 0 THEN g ELSE 0 END, '100', FALSE " +
+				"FROM generate_series(1, 50000) g JOIN " + transaction +
+				" t ON t.hash = decode(lpad(to_hex(g), 64, '0'), 'hex')",
+		}
 	} else {
-		seed = "INSERT INTO utxo (tx_id, output_idx, credential_tag, " +
-			"staking_key, added_slot, deleted_slot, amount, payment_script) " +
-			"WITH RECURSIVE g(n) AS (SELECT 1 UNION ALL SELECT n + 1 " +
-			"FROM g WHERE n < 50000) " +
-			"SELECT UNHEX(LPAD(HEX(n), 64, '0')), 0, 0, " +
-			"UNHEX(LPAD(HEX(n % 997), 56, '0')), n, " +
-			"IF(n % 50 = 0, n, 0), '100', FALSE FROM g"
-		_, err := store.writeDB.Exec("SET SESSION cte_max_recursion_depth = 100000")
+		const series = "WITH RECURSIVE g(n) AS (SELECT 1 UNION ALL " +
+			"SELECT n + 1 FROM g WHERE n < 50000) "
+		seed = []string{
+			"SET SESSION cte_max_recursion_depth = 100000",
+			"INSERT INTO " + transaction + " (hash) " + series +
+				"SELECT UNHEX(LPAD(HEX(n), 64, '0')) FROM g",
+			"INSERT INTO utxo (tx_id, output_idx, credential_tag, " +
+				"staking_key, added_slot, deleted_slot, amount, payment_script) " +
+				series + "SELECT t.id, 0, 0, " +
+				"UNHEX(LPAD(HEX(n % 997), 56, '0')), n, " +
+				"IF(n % 50 = 0, n, 0), '100', FALSE FROM g JOIN " +
+				transaction + " t ON t.hash = UNHEX(LPAD(HEX(n), 64, '0'))",
+		}
+	}
+	for _, statement := range seed {
+		_, err = store.writeDB.Exec(statement)
 		require.NoError(t, err)
 	}
-	_, err = store.writeDB.Exec(seed)
-	require.NoError(t, err)
 	analyze := "ANALYZE TABLE utxo"
 	if store.dialect.Name() == "postgres" {
 		analyze = "ANALYZE utxo"

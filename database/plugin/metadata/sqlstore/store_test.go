@@ -239,14 +239,12 @@ func TestCreateUtxoBindsEmptyNullableHashesAsSQLNull(t *testing.T) {
 		AddedSlot: 1,
 	}
 	require.NoError(t, store.CreateUtxo(nil, utxo))
-	var spent, referenced, collateral any
+	var spent any
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT spent_at_tx_id, referenced_by_tx_id, collateral_by_tx_id FROM utxo WHERE id = ?",
+		"SELECT spent_at_tx_id FROM utxo WHERE id = ?",
 		utxo.ID,
-	).Scan(&spent, &referenced, &collateral))
+	).Scan(&spent))
 	require.Nil(t, spent)
-	require.Nil(t, referenced)
-	require.Nil(t, collateral)
 }
 
 func TestGetStakeByPoolsUsesLiveCredentialAggregate(t *testing.T) {
@@ -868,12 +866,12 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 	retained := retainedTxStmtCount(t, sqlTransaction.tx)
 	require.NoError(t, txn.Commit())
 
-	// insertUtxoModel here consults exactly three distinct cached queries --
-	// insertUtxoQueryIgnoreConflict, importAssetQuery, and getAssetIDQuery --
-	// so 3 is the exact bound, not just an upper one.
+	// insertUtxoModel here consults exactly four distinct cached queries --
+	// the cross-identity probe, the insert, importAssetQuery, and
+	// getAssetIDQuery -- so 4 is the exact bound, not just an upper one.
 	require.Equal(
 		t,
-		3,
+		4,
 		retained,
 		"expected bounded Tx-scoped statement retention for %d outputs, got %d",
 		outputCount,

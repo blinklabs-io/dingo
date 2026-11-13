@@ -756,7 +756,7 @@ func (c *Chain) addBlockHeader(
 		// parent. A Byron epoch-boundary header passes the block-number rule
 		// with its parent's number and carries no signature, so this is the
 		// only check that keeps one from extending a post-Byron block.
-		parentEra, found, err := c.parentEraLocked(ctx, queued.prevHash)
+		parent, found, err := c.parentLinkLocked(ctx, queued.prevHash)
 		if err != nil {
 			return fmt.Errorf(
 				"resolve parent era of header %s: %w",
@@ -764,10 +764,25 @@ func (c *Chain) addBlockHeader(
 				err,
 			)
 		}
-		if found {
-			if err := CheckEraOrder(header.Era().Id, parentEra); err != nil {
+		if found && parent.Known {
+			if err := CheckEraOrder(header.Era().Id, parent.EraId); err != nil {
 				return fmt.Errorf("header %s: %w", headerHash.String(), err)
 			}
+		}
+		if !found {
+			parent = SlotParent{Slot: headerTip.Point.Slot}
+		}
+		if !SlotFollowsParent(
+			header.Era().Id,
+			IsByronBoundaryHeader(header),
+			queued.point.Slot,
+			parent,
+		) {
+			return NewSlotNotAfterParentError(
+				headerHash.String(),
+				queued.point.Slot,
+				parent.Slot,
+			)
 		}
 	} else if c.atOriginAfterMutation() &&
 		!firstBlockNumberValid(queued.blockNumber) {
@@ -1264,6 +1279,7 @@ func (c *Chain) addBlockInternal(
 	}
 	c.recordCallerTxnAdd(txn)
 	evt, err := c.addBlockLocked(
+		ctx,
 		block,
 		point,
 		txn,
@@ -1286,6 +1302,7 @@ func (c *Chain) addBlockInternal(
 }
 
 func (c *Chain) addBlockLocked(
+	ctx context.Context,
 	block ledger.Block,
 	point ocommon.Point,
 	txn *database.Txn,
@@ -1346,6 +1363,28 @@ func (c *Chain) addBlockLocked(
 				blockNumber,
 				c.currentTip.BlockNumber,
 			)
+		}
+		// A block matching a queued header was ordered when the header was
+		// queued; a locally forged block was not. The parent is read only
+		// when the plain rule fails, since otherwise it is a store read per
+		// block.
+		if point.Slot <= c.currentTip.Point.Slot {
+			parent, err := c.tipSlotParentLocked(ctx, txn)
+			if err != nil {
+				return event.Event{}, err
+			}
+			if !SlotFollowsParent(
+				block.Era().Id,
+				isByronBoundaryBlock(block),
+				point.Slot,
+				parent,
+			) {
+				return event.Event{}, NewSlotNotAfterParentError(
+					hex.EncodeToString(blockHashBytes),
+					point.Slot,
+					parent.Slot,
+				)
+			}
 		}
 	} else if c.atOriginAfterMutation() && !firstBlockNumberValid(blockNumber) {
 		// Chain rolled back to origin: anchor the first block on its block
@@ -1509,6 +1548,7 @@ func (c *Chain) AddBlocks(
 					err := ctx.Err()
 					if err == nil {
 						evt, err = c.addBlockLocked(
+							ctx,
 							tmpBlock,
 							ocommon.Point{},
 							txn,

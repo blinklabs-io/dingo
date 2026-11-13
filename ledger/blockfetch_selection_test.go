@@ -435,7 +435,6 @@ func TestBlockfetchFirstBlockInvalidatesExpiredNearTipWatchdog(t *testing.T) {
 		chain:                        testChain,
 		activeBlockfetchConnId:       connId,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
-		mithrilLedgerSlot:            100,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			RecordBlockfetchLatencyFunc: func(
@@ -446,7 +445,7 @@ func TestBlockfetchFirstBlockInvalidatesExpiredNearTipWatchdog(t *testing.T) {
 			},
 		},
 	}
-	ls.publishSnapshotsLocked()
+	cacheEpochWithoutNonce(t, ls, 100)
 
 	ls.chainsyncBlockfetchMutex.Lock()
 	ls.activeBlockfetchStart = time.Now()
@@ -600,8 +599,8 @@ type throughputSample struct {
 }
 
 // newThroughputFixture returns a ledger whose active batch is on conn, with
-// every slot Mithril-covered so blocks are accepted without header crypto, and
-// a recorder for the throughput samples.
+// header verification deferred for its synthetic blocks, and a recorder for
+// the throughput samples.
 func newThroughputFixture(
 	t *testing.T,
 ) (*LedgerState, ouroboros.ConnectionId, *[]throughputSample) {
@@ -611,8 +610,7 @@ func newThroughputFixture(
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.activeBlockfetchConnId = conn
 	ls.selectedBlockfetchConnId = conn
-	ls.mithrilLedgerSlot = 100
-	ls.publishSnapshotsLocked()
+	cacheEpochWithoutNonce(t, ls, 100)
 	samples := &[]throughputSample{}
 	ls.config.RecordBlockfetchThroughputFunc = func(
 		connId ouroboros.ConnectionId,
@@ -646,6 +644,11 @@ func deliverBlocks(
 			},
 			nil,
 		))
+		// Model a mid-batch flush committing each block before the next
+		// arrives: the mock blocks cannot be applied to a chain, and an
+		// arrival whose header verification is deferred flushes whatever
+		// is still pending first.
+		ls.pendingBlockfetchEvents = nil
 	}
 }
 

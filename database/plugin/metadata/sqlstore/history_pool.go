@@ -173,16 +173,18 @@ func (s *Store) GetPoolDelegators(
 
 const poolCertificateEventsQuery = `
 SELECT item.added_slot AS added_slot, tx.block_index AS block_index,
-       c.cert_index AS cert_index, tx.hash AS tx_hash, ? AS action
+       c.cert_index AS cert_index, txh.hash AS tx_hash, ? AS action
 FROM pool_registration item
 JOIN certs c ON c.id = item.certificate_id
-JOIN "transaction" tx ON tx.id = c.transaction_id
+JOIN applied_transaction tx ON tx.tx_id = c.transaction_id
+JOIN "transaction" txh ON txh.id = tx.tx_id
 WHERE item.pool_key_hash = ?
 UNION ALL
-SELECT item.added_slot, tx.block_index, c.cert_index, tx.hash, ?
+SELECT item.added_slot, tx.block_index, c.cert_index, txh.hash, ?
 FROM pool_retirement item
 JOIN certs c ON c.id = item.certificate_id
-JOIN "transaction" tx ON tx.id = c.transaction_id
+JOIN applied_transaction tx ON tx.tx_id = c.transaction_id
+JOIN "transaction" txh ON txh.id = tx.tx_id
 WHERE item.pool_key_hash = ?`
 
 func (s *Store) GetPoolCertificateEvents(

@@ -33,7 +33,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -167,7 +166,7 @@ func TestLedgerProcessBlockRejectsLateMIRCertificate(t *testing.T) {
 			)
 			return err
 		})
-	var tooLate eras.MIRCertificateTooLateError
+	var tooLate shelley.MIRCertificateTooLateinEpochError
 	require.ErrorAs(t, err, &tooLate)
 	require.Equal(t, uint64(974_080), tooLate.Cutoff)
 
@@ -1907,149 +1906,15 @@ func withMIRCutoffEpoch(t *testing.T, ls *LedgerState, epoch models.Epoch) {
 	ls.Unlock()
 }
 
-func mirDelegState(
-	t *testing.T,
-	ls *LedgerState,
-	db *database.Database,
-	epochStartSlot uint64,
-	slot uint64,
-	additive bool,
-) eras.MIRDelegState {
-	t.Helper()
-	var state eras.MIRDelegState
-	txn := db.Transaction(context.Background(), false)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: epochStartSlot}
-		var err error
-		state, err = lv.MIRDelegState(slot, additive)
-		return err
-	}))
-	return state
-}
-
-// TestLedgerView_MIRDelegState_Cutoff pins the cutoff to the worked example: a
-// boundary at 1,000,000 and a 129,600-slot window put it at 870,400, whichever
-// slot of the epoch asks.
-func TestLedgerView_MIRDelegState_Cutoff(t *testing.T) {
-	t.Parallel()
-
-	ls, db, _ := newMIRTestLedger(t)
-	withMIRCutoffEpoch(t, ls, models.Epoch{
-		EpochId:       1,
-		StartSlot:     568_000,
-		LengthInSlots: 432_000,
-	})
-	for _, slot := range []uint64{568_000, 870_399, 870_400, 999_999} {
-		state := mirDelegState(t, ls, db, 568_000, slot, true)
-		assert.Equal(t, uint64(870_400), state.Cutoff, "slot %d", slot)
-	}
-}
-
-// TestLedgerView_MIRDelegState_CutoffRequiresGenesis proves the cutoff fails
-// closed rather than falling back to a default window when the Shelley
-// genesis is missing.
-func TestLedgerView_MIRDelegState_CutoffRequiresGenesis(t *testing.T) {
-	t.Parallel()
-
-	ls, db, _ := newMIRTestLedger(t)
-	epoch := models.Epoch{StartSlot: 0, LengthInSlots: 432_000}
-	ls.Lock()
-	ls.currentEpoch = epoch
-	ls.epochCache = []models.Epoch{epoch}
-	ls.publishSnapshotsLocked()
-	ls.Unlock()
-	txn := db.Transaction(context.Background(), false)
-	err := txn.Do(func(txn *database.Txn) error {
-		lv := &LedgerView{ls: ls, txn: txn}
-		_, err := lv.MIRDelegState(100, true)
-		return err
-	})
-	require.ErrorContains(t, err, "cardano node config is not set")
-}
-
-// TestLedgerView_MIRDelegState_Pending verifies the query sees MIR
-// certificates already committed earlier in the current epoch: it folds deltas
-// per credential within [epochStartSlot, slot] inclusive and excludes anything
-// outside that window on either side.
-func TestLedgerView_MIRDelegState_Pending(t *testing.T) {
-	t.Parallel()
-
-	ls, db, gdb := newMIRTestLedger(t)
-	withMIRCutoffEpoch(
-		t,
-		ls,
-		models.Epoch{StartSlot: 100, LengthInSlots: 432_000},
-	)
-
-	cred := mirCred28(0x77)
-	other := mirCred28(0x78)
-	// Before epochStartSlot=100 — excluded.
-	seedMIRDistribution(t, gdb, mirPotReserves, 50,
-		[]models.MoveInstantaneousRewardsReward{
-			{Credential: cred, Amount: big.NewInt(1_000)},
-		})
-	// Within the window, two certs on the same credential.
-	seedMIRDistribution(t, gdb, mirPotReserves, 150,
-		[]models.MoveInstantaneousRewardsReward{
-			{Credential: cred, Amount: big.NewInt(10)},
-		})
-	seedMIRDistribution(t, gdb, mirPotReserves, 200,
-		[]models.MoveInstantaneousRewardsReward{
-			{Credential: cred, Amount: big.NewInt(-3)},
-			{Credential: other, Amount: big.NewInt(5)},
-		})
-	// After slot=200 — excluded, as if not yet validated.
-	seedMIRDistribution(t, gdb, mirPotReserves, 201,
-		[]models.MoveInstantaneousRewardsReward{
-			{Credential: cred, Amount: big.NewInt(999)},
-		})
-
-	credKey := eras.MIRCredentialKey{Credential: lcommon.NewBlake2b224(cred)}
-	otherKey := eras.MIRCredentialKey{Credential: lcommon.NewBlake2b224(other)}
-
-	additive := mirDelegState(t, ls, db, 100, 200, true)
-	assert.Equal(t, big.NewInt(7), additive.Pending[credKey],
-		"10 at slot 150 plus -3 at slot 200, excluding slot 50 and slot 201")
-	assert.Equal(t, big.NewInt(5), additive.Pending[otherKey])
-
-	replaced := mirDelegState(t, ls, db, 100, 200, false)
-	assert.Equal(t, big.NewInt(-3), replaced.Pending[credKey],
-		"before protocol version 5 the later certificate replaces the earlier")
-}
-
-// TestLedgerView_MIRDelegState_PotsAndTransfers verifies the query reports the
-// chain account pots and nets the epoch's pot transfers into signed deltas.
-func TestLedgerView_MIRDelegState_PotsAndTransfers(t *testing.T) {
-	t.Parallel()
-
-	ls, db, gdb := newMIRTestLedger(t)
-	withMIRCutoffEpoch(
-		t,
-		ls,
-		models.Epoch{StartSlot: 100, LengthInSlots: 432_000},
-	)
-	require.NoError(t,
-		db.Metadata().SetNetworkState(1_000, 5_000, 100, nil))
-	seedMIRPotTransfer(t, gdb, mirPotReserves, 300, 150)
-	seedMIRPotTransfer(t, gdb, mirPotTreasury, 40, 160)
-	seedMIRPotTransfer(t, gdb, mirPotReserves, 7, 50)
-
-	state := mirDelegState(t, ls, db, 100, 200, true)
-	assert.Equal(t, uint64(5_000), state.Reserves)
-	assert.Equal(t, uint64(1_000), state.Treasury)
-	assert.Equal(t, big.NewInt(-260), state.DeltaReserves)
-	assert.Equal(t, big.NewInt(260), state.DeltaTreasury)
-}
-
-// TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover pins that the
-// query must read lv.epochStartSlot, a value pinned once when this view was
+// TestLedgerView_MIRPending_PinnedSurvivesConcurrentRollover pins that the
+// MIR state must read lv.epochStartSlot, a value pinned once when this view was
 // built for a specific transaction's validation, never a fresh read of
 // LedgerState.currentEpoch -- because a concurrent writer can roll the epoch
 // over while this transaction's validation is still in flight. A view built
 // fresh after the rollover (ls.NewView, exactly what a caller must not do
 // mid-validation) reproduces the bug: the rolled-over epoch's later start slot
-// exceeds the still-valid slot and hides every pending delta.
-func TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover(
+// hides every pending delta.
+func TestLedgerView_MIRPending_PinnedSurvivesConcurrentRollover(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -2076,56 +1941,37 @@ func TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover(
 		ls.publishSnapshotsLocked()
 		ls.Unlock()
 
-		pinnedState, err := pinned.MIRDelegState(150, true)
+		pending, err := pinned.PendingInstantaneousRewards(
+			mirPotReserves, mirTestCredential(0, 0x7A),
+		)
 		require.NoError(t, err)
-		key := eras.MIRCredentialKey{Credential: lcommon.NewBlake2b224(cred)}
 		assert.Equal(
 			t,
 			big.NewInt(10),
-			pinnedState.Pending[key],
+			pending,
 			"a pinned view must still see epoch A's own certificates after a concurrent rollover to epoch B",
 		)
 
-		freshState, err := ls.NewView(txn).MIRDelegState(150, true)
+		fresh, err := ls.NewView(txn).PendingInstantaneousRewards(
+			mirPotReserves, mirTestCredential(0, 0x7A),
+		)
 		require.NoError(t, err)
-		assert.Empty(
+		assert.Nil(
 			t,
-			freshState.Pending,
+			fresh,
 			"documents why a validation call must reuse its own pinned view, never build a fresh one mid-flight",
 		)
 		return nil
 	}))
 }
 
-// TestLedgerView_MIRDelegState_BeforeEpochStart verifies that a validating
-// slot before the current epoch's start (a stale/overlay call) returns no
-// pending deltas rather than an inverted or negative range.
-func TestLedgerView_MIRDelegState_BeforeEpochStart(t *testing.T) {
-	t.Parallel()
-
-	ls, db, _ := newMIRTestLedger(t)
-	withMIRCutoffEpoch(
-		t,
-		ls,
-		models.Epoch{StartSlot: 0, LengthInSlots: 432_000},
-	)
-	state := mirDelegState(t, ls, db, 100, 50, true)
-	assert.Empty(t, state.Pending)
-}
-
-// TestLedgerView_MIRDelegState_SeparatesPots proves the query keys its totals
-// by source pot as well as credential, matching the reference's separate
-// iRReserves and iRTreasury maps.
-func TestLedgerView_MIRDelegState_SeparatesPots(t *testing.T) {
+// TestLedgerView_MIRTotals_SeparatesPots proves the totals are keyed by source
+// pot as well as credential, matching the reference's separate iRReserves and
+// iRTreasury maps.
+func TestLedgerView_MIRTotals_SeparatesPots(t *testing.T) {
 	t.Parallel()
 
 	ls, db, gdb := newMIRTestLedger(t)
-	withMIRCutoffEpoch(
-		t,
-		ls,
-		models.Epoch{StartSlot: 100, LengthInSlots: 432_000},
-	)
-
 	cred := mirCred28(0x79)
 	seedMIRDistribution(t, gdb, mirPotReserves, 150,
 		[]models.MoveInstantaneousRewardsReward{
@@ -2136,16 +1982,28 @@ func TestLedgerView_MIRDelegState_SeparatesPots(t *testing.T) {
 			{Credential: cred, Amount: big.NewInt(-50)},
 		})
 
-	state := mirDelegState(t, ls, db, 100, 200, true)
-	reservesKey := eras.MIRCredentialKey{
-		Credential: lcommon.NewBlake2b224(cred),
-		Pot:        mirPotReserves,
-	}
-	treasuryKey := eras.MIRCredentialKey{
-		Credential: lcommon.NewBlake2b224(cred),
-		Pot:        mirPotTreasury,
-	}
-	assert.Equal(t, big.NewInt(100), state.Pending[reservesKey],
-		"the reserves cert must not be netted against the treasury cert")
-	assert.Equal(t, big.NewInt(-50), state.Pending[treasuryKey])
+	txn := db.Transaction(context.Background(), false)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		lv := mirReaderView(ls, txn, 100, 5)
+		reserves, err := lv.InstantaneousRewardsTotal(mirPotReserves)
+		require.NoError(t, err)
+		treasury, err := lv.InstantaneousRewardsTotal(mirPotTreasury)
+		require.NoError(t, err)
+		assert.Equal(t, "100", reserves.String(),
+			"the reserves cert must not be netted against the treasury cert")
+		assert.Equal(t, "-50", treasury.String())
+		return nil
+	}))
+}
+
+// TestLedgerView_StabilityWindow_RequiresGenesis proves the window fails
+// closed rather than falling back to a default when the Shelley genesis is
+// missing.
+func TestLedgerView_StabilityWindow_RequiresGenesis(t *testing.T) {
+	t.Parallel()
+
+	ls, _, _ := newMIRTestLedger(t)
+	lv := &LedgerView{ls: ls}
+	_, err := lv.StabilityWindow()
+	require.ErrorContains(t, err, "cardano node config")
 }

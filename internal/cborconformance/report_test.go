@@ -113,10 +113,10 @@ func TestGenerateReport(t *testing.T) {
 	if !report.Successful {
 		t.Fatalf("report has failures: %+v", report.Failures)
 	}
-	if report.CorpusRevision != testCorpusRevision {
+	if report.DatasetCommit != testCorpusRevision {
 		t.Fatalf(
 			"corpus revision = %q, want %q",
-			report.CorpusRevision,
+			report.DatasetCommit,
 			testCorpusRevision,
 		)
 	}
@@ -808,5 +808,24 @@ func TestGenerateReportClassifiesAcceptedMutation(t *testing.T) {
 	}
 	if failure.Sample != "credential/invalid/zap-1/accepted" {
 		t.Fatalf("failure sample = %q", failure.Sample)
+	}
+}
+
+func TestReportJSONPinsDatasetCommit(t *testing.T) {
+	t.Parallel()
+
+	data, err := json.Marshal(Report{DatasetCommit: testCorpusRevision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if got := fields["dataset_commit"]; got != testCorpusRevision {
+		t.Fatalf("dataset_commit = %v, want %q", got, testCorpusRevision)
+	}
+	if _, ok := fields["corpus_revision"]; ok {
+		t.Fatal("report still emits corpus_revision")
 	}
 }

@@ -123,7 +123,7 @@ func seedLegacyAssetUtxosWithoutAddress(
 		result, err := metadataTxn.Exec(`
 INSERT INTO utxo (
     tx_id, added_slot, deleted_slot, amount, output_idx, payment_script
-) VALUES (?, 1, 0, '1', 0, FALSE)`, txID)
+) VALUES (?, 1, 0, '1', 0, FALSE)`, testutil.TransactionID(t, metadataTxn, txID))
 		require.NoError(t, err)
 		utxoID, err := result.LastInsertId()
 		require.NoError(t, err)
@@ -249,13 +249,14 @@ func TestRollbackRestoresLegacyAssetAddressAtomically(t *testing.T) {
 			}
 			seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, outputCbor)
 			spenderHash := bytes.Repeat([]byte{0x73}, 32)
-			_, err = raw.Exec(`
+			_, err = testutil.ExecTransactionInsert(raw,
+				`
 INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, 20, 0)`,
 				spenderHash,
 			)
 			require.NoError(t, err)
 			_, err = raw.Exec(`
-UPDATE utxo SET deleted_slot = 20, spent_at_tx_id = ?`, spenderHash)
+UPDATE utxo SET deleted_slot = 20, spent_at_tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, spenderHash)
 			require.NoError(t, err)
 
 			if tc.metadataOnly {
@@ -389,7 +390,7 @@ func TestAPIModeAssetUtxoRequiresAddressIdentity(t *testing.T) {
 	)
 	var count int
 	require.NoError(t, raw.QueryRow(
-		`SELECT COUNT(*) FROM utxo WHERE tx_id = ?`, utxo.TxId,
+		`SELECT COUNT(*) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, utxo.TxId,
 	).Scan(&count))
 	require.Zero(t, count)
 
@@ -402,7 +403,7 @@ func TestAPIModeAssetUtxoRequiresAddressIdentity(t *testing.T) {
 		"address is unavailable",
 	)
 	require.NoError(t, raw.QueryRow(
-		`SELECT COUNT(*) FROM utxo WHERE tx_id = ?`, imported.TxId,
+		`SELECT COUNT(*) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, imported.TxId,
 	).Scan(&count))
 	require.Zero(t, count)
 }
@@ -447,7 +448,8 @@ func seedExactAddressUtxoWithHash(
 ) models.Utxo {
 	t.Helper()
 	txID := uint(slot)
-	_, err := raw.Exec(`
+	_, err := testutil.ExecTransactionInsert(raw,
+		`
 INSERT INTO "transaction" (
     id, hash, slot, block_index, type, fee, collateral_fee, ttl, valid
 ) VALUES (?, ?, ?, 0, 0, '0', '0', '0', TRUE)`,
@@ -473,11 +475,10 @@ INSERT INTO "transaction" (
 	}
 	_, err = raw.Exec(`
 INSERT INTO utxo (
-    transaction_id, tx_id, payment_key, staking_key, credential_tag,
+    tx_id, payment_key, staking_key, credential_tag,
     added_slot, deleted_slot, amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, FALSE)`,
+) VALUES (?, ?, ?, ?, ?, 0, ?, ?, FALSE)`,
 		txID,
-		row.TxId,
 		paymentKey,
 		row.StakingKey,
 		row.CredentialTag,
@@ -586,7 +587,7 @@ func TestHistoricalAddressBalanceUsesExactIdentityAndSlot(t *testing.T) {
 	seedExactAddressUtxo(t, db, raw, enterprise, 10, 0x44)
 	second := seedExactAddressUtxo(t, db, raw, enterprise, 11, 0x45)
 	seedExactAddressUtxo(t, db, raw, base, 9, 0x46)
-	_, err = raw.Exec(`UPDATE utxo SET deleted_slot = 12 WHERE tx_id = ?`, second.TxId)
+	_, err = raw.Exec(`UPDATE utxo SET deleted_slot = 12 WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, second.TxId)
 	require.NoError(t, err)
 	require.NoError(t, db.SetSyncState(utxoAddressBackfillSyncKey, "", nil))
 	require.NoError(t, db.backfillUtxoAddresses(context.Background()))
@@ -626,7 +627,7 @@ func TestHistoricalAddressBalanceAggregatesLargeResultSet(t *testing.T) {
 		binary.BigEndian.PutUint64(txID[24:], uint64(i))
 		result, err := txn.Exec(`
 INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_script)
-VALUES (?, 1, 0, '1', 0, FALSE)`, txID)
+VALUES (?, 1, 0, '1', 0, FALSE)`, testutil.TransactionID(t, txn, txID))
 		require.NoError(t, err)
 		utxoID, err := result.LastInsertId()
 		require.NoError(t, err)
@@ -673,7 +674,8 @@ func TestHistoricalAddressBalanceEnforcesAssetRowLimit(t *testing.T) {
 	address := []byte("addr_test1_asset_budget")
 	result, err := raw.Exec(`
 INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_script)
-VALUES (?, 1, 0, '1', 0, FALSE)`, bytes.Repeat([]byte{0x49}, 32))
+VALUES (?, 1, 0, '1', 0, FALSE)`,
+		testutil.TransactionID(t, raw, bytes.Repeat([]byte{0x49}, 32)))
 	require.NoError(t, err)
 	utxoID, err := result.LastInsertId()
 	require.NoError(t, err)
@@ -936,7 +938,8 @@ func TestUtxosWithHistoryLoadsCborAndPreservesExactAddressIdentity(
 
 	spenderHash := bytes.Repeat([]byte{0x73}, 32)
 	spenderBlockHash := bytes.Repeat([]byte{0x74}, 32)
-	_, err = raw.Exec(`
+	_, err = testutil.ExecTransactionInsert(raw,
+		`
 INSERT INTO "transaction" (
     id, hash, block_hash, slot, block_index, type, fee, collateral_fee,
     ttl, valid
@@ -946,7 +949,7 @@ INSERT INTO "transaction" (
 	)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
-UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = 30 WHERE tx_id = ?`,
+UPDATE utxo SET spent_at_tx_id = (SELECT id FROM "transaction" WHERE hash = ?), deleted_slot = 30 WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 		spenderHash,
 		enterpriseUtxo.TxId,
 	)
@@ -1103,10 +1106,10 @@ func TestUtxosWithHistoryExactAddressHasNoTotalCandidateCap(t *testing.T) {
 			}
 			if _, err := metadataTxn.Exec(`
 INSERT INTO utxo (
-    transaction_id, tx_id, payment_key, staking_key, credential_tag,
+    tx_id, payment_key, staking_key, credential_tag,
     added_slot, deleted_slot, amount, output_idx, payment_script
-) VALUES (NULL, ?, ?, NULL, 0, ?, 0, '1000000', 0, FALSE)`,
-				txHash,
+) VALUES (?, ?, NULL, 0, ?, 0, '1000000', 0, FALSE)`,
+				testutil.TransactionID(t, metadataTxn, txHash),
 				payment,
 				slot,
 			); err != nil {
@@ -1594,10 +1597,10 @@ func seedExactAddressImportedUtxo(
 	}
 	_, err := raw.Exec(`
 INSERT INTO utxo (
-    transaction_id, tx_id, payment_key, staking_key, credential_tag,
+    tx_id, payment_key, staking_key, credential_tag,
     added_slot, deleted_slot, amount, output_idx, payment_script
-) VALUES (NULL, ?, ?, ?, 0, ?, 0, ?, ?, FALSE)`,
-		txHash,
+) VALUES (?, ?, ?, 0, ?, 0, ?, ?, FALSE)`,
+		testutil.TransactionID(t, raw, txHash),
 		paymentKey,
 		stakingKey,
 		slot,
@@ -1871,7 +1874,8 @@ func seedManyUtxoAddressesAndAssertRoundTrip(
 			txIds[i] = txHash
 			amount := uint64(i+1) * 1_000_000
 
-			if _, err := raw.Exec(`
+			if _, err := testutil.ExecTransactionInsert(raw,
+				`
 INSERT INTO "transaction" (
     id, hash, slot, block_index, type, fee, collateral_fee, ttl, valid
 ) VALUES (?, ?, ?, 0, 0, '0', '0', '0', TRUE)`,
@@ -1889,10 +1893,10 @@ INSERT INTO "transaction" (
 			}
 			if _, err := raw.Exec(`
 INSERT INTO utxo (
-    transaction_id, tx_id, payment_key, staking_key, credential_tag,
+    tx_id, payment_key, staking_key, credential_tag,
     added_slot, deleted_slot, amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, 0, ?, 0, ?, 0, FALSE)`,
-				txID, txHash, paymentKey, stakingKey, uint64(i+1),
+) VALUES (?, ?, ?, 0, ?, 0, ?, 0, FALSE)`,
+				txID, paymentKey, stakingKey, uint64(i+1),
 				strconv.FormatUint(amount, 10),
 			); err != nil {
 				return err
@@ -2720,12 +2724,13 @@ func TestRollbackTransactionDeletionRestoresLegacyAssetAddress(t *testing.T) {
 			outputCbor, wantAddress := tc.outputCbor(t)
 			seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, outputCbor)
 			consumerHash := bytes.Repeat([]byte{0xe1}, 32)
-			_, err := raw.Exec(`
+			_, err := testutil.ExecTransactionInsert(raw,
+				`
 INSERT INTO "transaction" (hash, slot, valid) VALUES (?, 10, TRUE)`,
 				consumerHash)
 			require.NoError(t, err)
 			_, err = raw.Exec(`
-UPDATE utxo SET deleted_slot = 10, spent_at_tx_id = ?`, consumerHash)
+UPDATE utxo SET deleted_slot = 10, spent_at_tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, consumerHash)
 			require.NoError(t, err)
 
 			err = db.Transaction(context.Background(), true).Do(func(txn *Txn) error {

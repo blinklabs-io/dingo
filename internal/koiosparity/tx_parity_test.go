@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -894,7 +895,7 @@ func sampleStoredTxParityBlock(
 				`INSERT INTO utxo (tx_id, output_idx, amount, added_slot,
 					deleted_slot, payment_script, credential_tag)
 				VALUES (?, ?, '1', 1, 0, 0, 0)`,
-				in.Id().Bytes(), in.Index(),
+				testutil.TransactionID(t, raw.db, in.Id().Bytes()), in.Index(),
 			)
 			require.NoError(t, err)
 		}

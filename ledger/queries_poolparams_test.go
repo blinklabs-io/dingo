@@ -478,8 +478,9 @@ func TestGenesisConfigResultExtraConfigBytes(t *testing.T) {
 	)
 }
 
-// Genesis relay addresses originate as text, while the ledger codec stores
-// each 32-bit word in little-endian order.
+// Genesis relay addresses originate as text. The ledger encodes an IPv4
+// address in network order and an IPv6 address as four little-endian 32-bit
+// words (ipv4ToBytes and ipv6ToBytes in Cardano.Ledger.Binary.Encoding).
 func TestGenesisConfigResultConvertsRelayAddressByteOrder(t *testing.T) {
 	t.Parallel()
 
@@ -501,7 +502,7 @@ func TestGenesisConfigResultConvertsRelayAddressByteOrder(t *testing.T) {
 	result, err := genesisConfigResult(cfg.ShelleyGenesis())
 	require.NoError(t, err)
 	encoded := hex.EncodeToString(result.ExtraConfig)
-	require.Contains(t, encoded, "440101a8c0")
+	require.Contains(t, encoded, "44c0a80101")
 	require.Contains(t, encoded, "50b80d0120000000000000000001000000")
 }
 
@@ -535,30 +536,6 @@ func TestQueryProposedProtocolParamsUpdatesPinnedBeforeConway(t *testing.T) {
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
 	require.Equal(t, "81a0", hex.EncodeToString(gotCbor))
-}
-
-// TestWireOrderRelays checks the byte order of genesis-declared relay
-// addresses against the ledger's queryStakePoolRelays golden, where 10.0.0.5
-// is 0500000a and 2001:db8::1 is b80d0120 00000000 00000000 01000000.
-func TestWireOrderRelays(t *testing.T) {
-	t.Parallel()
-
-	v4 := net.ParseIP("10.0.0.5")
-	v6 := net.ParseIP("2001:db8::1")
-	host := "relay.example"
-	in := []lcommon.PoolRelay{
-		{Type: 0, Ipv4: &v4, Ipv6: &v6},
-		{Type: 1, Hostname: &host},
-	}
-	out := wireOrderRelays(in)
-	require.Equal(t, "0500000a", hex.EncodeToString(*out[0].Ipv4))
-	require.Equal(
-		t,
-		"b80d012000000000000000000100"+"0000",
-		hex.EncodeToString(*out[0].Ipv6),
-	)
-	require.Equal(t, &host, out[1].Hostname)
-	require.Equal(t, "10.0.0.5", in[0].Ipv4.String(), "input is not modified")
 }
 
 // TestStakePoolParamsBlsKeyEncoding places the BLS key as the third element
@@ -720,7 +697,7 @@ func TestQueryStakePoolParams_GenesisRelayWireOrderAndBlsKey(t *testing.T) {
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
 	encoded := hex.EncodeToString(gotCbor)
-	require.Contains(t, encoded, "440101a8c0")
+	require.Contains(t, encoded, "44c0a80101")
 	require.Contains(t, encoded, "50b80d0120000000000000000001000000")
 	require.Contains(
 		t,
@@ -739,7 +716,10 @@ func TestQueryStakePoolParams_SnapshotRelayWireOrder(t *testing.T) {
 	poolID := repeatedBytes(28, 0x11)
 	vrf := repeatedBytes(32, 0xAA)
 	reward := repeatedBytes(28, 0x22)
-	ipv4 := net.IP{1, 1, 168, 192}
+	// Stored relays hold network order; the reply carries the ledger's
+	// encoding, IPv4 as is and IPv6 as little-endian 32-bit words.
+	ipv4 := net.IP{192, 168, 1, 1}
+	ipv6 := net.ParseIP("2001:db8::1")
 	require.NoError(t, ls.db.Metadata().ImportPool(
 		&models.Pool{
 			PoolKeyHash: poolID, VrfKeyHash: vrf, RewardAccount: reward,
@@ -747,7 +727,9 @@ func TestQueryStakePoolParams_SnapshotRelayWireOrder(t *testing.T) {
 		&models.PoolRegistration{
 			PoolKeyHash: poolID, VrfKeyHash: vrf, RewardAccount: reward,
 			AddedSlot: 5,
-			Relays:    []models.PoolRegistrationRelay{{Ipv4: &ipv4, Port: 3001}},
+			Relays: []models.PoolRegistrationRelay{
+				{Ipv4: &ipv4, Ipv6: &ipv6, Port: 3001},
+			},
 		},
 		nil,
 	))
@@ -756,7 +738,9 @@ func TestQueryStakePoolParams_SnapshotRelayWireOrder(t *testing.T) {
 	require.NoError(t, err)
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
-	require.Contains(t, hex.EncodeToString(gotCbor), "440101a8c0")
+	encoded := hex.EncodeToString(gotCbor)
+	require.Contains(t, encoded, "44c0a80101")
+	require.Contains(t, encoded, "50b80d0120000000000000000001000000")
 }
 
 func TestInitialPoolsReadsGenesisLeiosKey(t *testing.T) {

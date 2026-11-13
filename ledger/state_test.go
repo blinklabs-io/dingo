@@ -5333,7 +5333,12 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	ls := &LedgerState{db: db}
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			TrustedReplay: true,
+		},
+	}
 
 	var issuerVkey lcommon.IssuerVkey
 	for i := range issuerVkey {
@@ -5428,6 +5433,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 		db: db,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			TrustedReplay: true,
 			EndorserBlockProvider: func(
 				[]byte,
 				uint64,
@@ -7192,7 +7198,7 @@ func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
 // storage mode: the periodic cleanup must leave
 // spent UTxO metadata rows in place so historical transaction queries
 // can resolve input / collateral / reference-input associations via
-// spent_at_tx_id, collateral_by_tx_id, and referenced_by_tx_id.
+// spent_at_tx_id and the utxo_collateral_edge and utxo_reference_edge tables.
 func TestCleanupConsumedUtxos_APIModeRetains(t *testing.T) {
 	t.Parallel()
 
@@ -7710,15 +7716,14 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	var result *EpochRolloverResult
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		params, eraID, transitions, transitionMajors, v2Written, err :=
-			ls.prepareEraTransitionsForRollover(
-				context.Background(),
-				txn,
-				ls.currentEpoch,
-				ls.currentEra,
-				ls.currentPParams,
-				transitionPath,
-			)
+		params, eraID, transitions, transitionMajors, v2Written, err := ls.prepareEraTransitionsForRollover(
+			context.Background(),
+			txn,
+			ls.currentEpoch,
+			ls.currentEra,
+			ls.currentPParams,
+			transitionPath,
+		)
 		if err != nil {
 			return err
 		}
@@ -10242,18 +10247,24 @@ func TestProtocolParamsForSlot_FallbackProjectsFromCurrentEpoch(t *testing.T) {
 
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
-			{EpochId: 0, StartSlot: 0, SlotLength: 20_000,
+			{
+				EpochId: 0, StartSlot: 0, SlotLength: 20_000,
 				LengthInSlots: uint(
 					byronEpochLength,
-				), EraId: eras.ByronEraDesc.Id},
-			{EpochId: 1, StartSlot: byronEpochLength, SlotLength: 20_000,
+				), EraId: eras.ByronEraDesc.Id,
+			},
+			{
+				EpochId: 1, StartSlot: byronEpochLength, SlotLength: 20_000,
 				LengthInSlots: uint(
 					byronEpochLength,
-				), EraId: eras.ByronEraDesc.Id},
-			{EpochId: currentEpoch, StartSlot: currentStart, SlotLength: 1_000,
+				), EraId: eras.ByronEraDesc.Id,
+			},
+			{
+				EpochId: currentEpoch, StartSlot: currentStart, SlotLength: 1_000,
 				LengthInSlots: uint(
 					shelleyEpochLen,
-				), EraId: eras.ShelleyEraDesc.Id},
+				), EraId: eras.ShelleyEraDesc.Id,
+			},
 		},
 		currentEra: eras.ShelleyEraDesc,
 		currentEpoch: models.Epoch{

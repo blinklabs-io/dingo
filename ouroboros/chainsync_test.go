@@ -126,7 +126,7 @@ func TestChainsyncClientRollForwardCarriesHeaderCryptoVerdict(t *testing.T) {
 		EventBus:                 bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool { return true },
 	})
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		return 42, nil
 	}
@@ -165,7 +165,7 @@ func TestChainsyncClientRollForwardRecordsObserverDelivery(t *testing.T) {
 		observeCalled = true
 		return chainselection.PeerTipUpdateAccepted
 	}
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	f.o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -192,7 +192,7 @@ func TestChainsyncClientRollForwardRejectsUnverifiedObserverDelivery(
 ) {
 	t.Parallel()
 	f := newPatienceRollForwardFixture(t, false)
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	f.o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -246,7 +246,7 @@ func TestChainsyncPeerTipAdmissionUsesRevalidatedGeneration(t *testing.T) {
 			}
 		},
 	})
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -725,7 +725,7 @@ func TestChainsyncHeaderBackpressurePrecedesAdmissionAndCrypto(t *testing.T) {
 		return false, nil
 	}
 	var cryptoCalls atomic.Int32
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -1473,7 +1473,7 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	o.config.ChainsyncObserveAwaitReply = func(ouroboros.ConnectionId, ocommon.Point) {
 		awaitObserved = true
 	}
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	var verifiedConn ouroboros.ConnectionId
 	verificationCalls := 0
 	o.chainSelectionVerifyHeaderCrypto = func(
@@ -1596,7 +1596,7 @@ func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
 	// would itself have skipped verification for -- so a caller relying only on
 	// the real verifier's own error classification, without the readiness gate,
 	// must still get fast-sync-safe (deferred, not excluded) behavior.
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(
 		connId ouroboros.ConnectionId,
 		header gledger.BlockHeader,
@@ -1769,7 +1769,7 @@ func TestDeferredHeaderRecoveryResyncsWhenAppliedTipAdvancesDuringVerification(
 			return true
 		},
 	})
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	deferredErr := ls.ValidateChainSelectionHeaderCrypto(
 		nonByronTestHeader{&testBlockHeader{slotNumber: 200}},
 	)
@@ -1887,7 +1887,7 @@ func TestDeferredHeaderRecoveryKeepsPeerWhenDeferredHeaderIsApplied(
 			return true
 		},
 	})
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	header := nonByronTestHeader{&testBlockHeader{
 		hash:       gledger.Blake2b256{0xef},
 		slotNumber: 200,
@@ -1963,7 +1963,7 @@ func newDeferredHeaderRecoveryFixture(
 			return true
 		},
 	})
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	deferredErr := ls.ValidateChainSelectionHeaderCrypto(nonByronTestHeader{
 		&testBlockHeader{hash: gledger.Blake2b256{0xee}, slotNumber: 200},
 	})
@@ -2149,7 +2149,7 @@ func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(
 	})
 	o.chainsyncState = state
 	o.eventBus = bus
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -2235,7 +2235,7 @@ func TestChainsyncClientRollForwardDefersVerdictStaleBeforeObservation(
 			return selector.PreparePeerTipAdmissionDisposition(update)
 		},
 	})
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -2307,7 +2307,7 @@ func newDeferredHeaderFixture(
 		nonByronTestHeader{&testBlockHeader{blockNumber: 1, slotNumber: 200}},
 	)
 	require.True(t, ledger.IsHeaderVerificationDeferred(deferredErr))
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		return 0, deferredErr
 	}
@@ -2824,7 +2824,7 @@ func TestChainsyncClientRollForwardCompetingPeersOnlyVerifiedHeaderCounted(
 	})
 	o.chainsyncState = state
 	o.eventBus = bus
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(
 		_ ouroboros.ConnectionId,
 		h gledger.BlockHeader,
@@ -3921,7 +3921,7 @@ func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 	t.Run("verification failure", func(t *testing.T) {
 		t.Parallel()
 		f := newPatienceRollForwardFixture(t, true)
-		f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool {
+		f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool {
 			return true
 		}
 		f.o.chainSelectionVerifyHeaderCrypto = func(
@@ -3939,7 +3939,7 @@ func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 	t.Run("verification withheld", func(t *testing.T) {
 		t.Parallel()
 		f := newPatienceRollForwardFixture(t, true)
-		f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool {
+		f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool {
 			return true
 		}
 		f.o.chainSelectionVerifyHeaderCrypto = func(
@@ -5320,6 +5320,7 @@ func parkOnByronBoundaryBlock(
 		parent *testBlock,
 		slot, blockNumber uint64,
 		hashByte byte,
+		blockType int,
 	) (*testBlock, ocommon.Point) {
 		t.Helper()
 		header, ok := newTestBlockHeader(
@@ -5331,7 +5332,7 @@ func parkOnByronBoundaryBlock(
 		header.prevHash = parent.Hash()
 		block := &testBlock{
 			BlockHeader: header,
-			blockType:   1,
+			blockType:   blockType,
 			cbor:        []byte{0x81, hashByte},
 		}
 		require.NoError(
@@ -5346,10 +5347,12 @@ func parkOnByronBoundaryBlock(
 
 	// A boundary block reuses its parent's block number; the next block
 	// shares its slot.
-	boundary, _ = appendChild(block1, 2, 1, 0x02)
+	boundary, _ = appendChild(block1, 2, 1, 0x02, gledger.BlockTypeByronEbb)
 	require.NoError(t, f.h.RequestNext())
 	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
-	successor, successorPoint := appendChild(boundary, 2, 2, 0x03)
+	successor, successorPoint := appendChild(
+		boundary, 2, 2, 0x03, gledger.BlockTypeByronMain,
+	)
 	if waiting != nil {
 		testutil.RequireReceive(t, waiting, 10*time.Second, "waiter parks")
 	}

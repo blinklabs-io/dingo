@@ -104,6 +104,16 @@ func (st *SlotTracker) WasForgedByUs(
 	return hashCopy, true
 }
 
+// ForgedBlockHashes returns the hash of the block the local node forged
+// for slot, or nil. One tracker belongs to one pool, which forges at most
+// one block per slot.
+func (st *SlotTracker) ForgedBlockHashes(slot uint64) [][]byte {
+	if hash, ok := st.WasForgedByUs(slot); ok {
+		return [][]byte{hash}
+	}
+	return nil
+}
+
 // Len returns the number of tracked forged slots.
 func (st *SlotTracker) Len() int {
 	st.mu.RLock()

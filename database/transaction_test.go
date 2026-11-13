@@ -676,7 +676,7 @@ func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(
 		require.NoError(t, db.Close())
 	}()
 	raw := rawSQLiteMetadataFixture(t, db)
-	_, err = raw.Exec(
+	_, err = dbtestutil.ExecTransactionInsert(raw,
 		`INSERT INTO "transaction" (hash, slot, valid) VALUES (?, ?, ?)`,
 		txHash,
 		200,
@@ -744,7 +744,7 @@ func TestUtxosDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
 	_, err = raw.Exec(`
 INSERT INTO utxo (tx_id, output_idx, added_slot, amount)
 VALUES (?, ?, ?, ?)`,
-		txID,
+		dbtestutil.TransactionID(t, raw, txID),
 		0,
 		200,
 		"1",
@@ -755,7 +755,7 @@ VALUES (?, ?, ?, ?)`,
 
 	var count int64
 	require.NoError(t, raw.QueryRow(`
-SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
+SELECT COUNT(*) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
 		txID,
 		0,
 	).Scan(&count))

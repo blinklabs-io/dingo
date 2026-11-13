@@ -77,3 +77,25 @@ func TestAcceptedNtCConnectionIsNotLoggedAtInfo(t *testing.T) {
 		"the accepted connection must still be logged at debug level",
 	)
 }
+
+// A client that connects and closes before the handshake, such as a TCP
+// reachability check, is routine and must not be logged at error level.
+func TestNtCClientClosingBeforeHandshakeIsNotLoggedAsError(t *testing.T) {
+	t.Parallel()
+	out := &syncBuffer{}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	startNtCAdmissionManager(t, ConnectionManagerConfig{
+		Logger: slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		})),
+	}, listener)
+	conn := dialNtCAdmissionClient(t, listener)
+	require.NoError(t, conn.Close())
+	const msg = `"msg":"listener: failed to setup NtC connection"`
+	require.Eventually(t, func() bool {
+		return strings.Contains(out.String(), msg)
+	}, 3*time.Second, time.Millisecond)
+	require.NotContains(t, out.String(), `"level":"ERROR"`)
+	require.Contains(t, out.String(), `"level":"INFO","msg":"listener: failed to setup NtC connection"`)
+}

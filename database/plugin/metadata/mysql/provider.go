@@ -110,6 +110,13 @@ func RegisterProvider(host *plugin.Host) error {
 	)
 }
 
+// mysqlMigrationLockTimeout bounds how long a starting process waits for the
+// server-wide migration lock another process holds. The schema migrations of
+// a fresh database hold it for about half a minute against a containerised
+// MySQL, so a shorter wait makes a second process that starts alongside the
+// first fail for that reason alone.
+const mysqlMigrationLockTimeout = 5 * time.Minute
+
 // assembleDSN builds a driver DSN from a provider-generated Config (i.e.
 // cfg.DSN is empty; an explicit DSN is used verbatim by callers and never
 // reaches this function). Named to match postgres.assembleDSN's role.
@@ -274,7 +281,7 @@ func openStore(
 		MigrationLocker: migrations.NewAdvisoryLocker(
 			"mysql",
 			0x64696e676f6d6574,
-			30*time.Second,
+			mysqlMigrationLockTimeout,
 		),
 		BackupTo: func(ctx context.Context, dstPath string) error {
 			return backupMySQL(ctx, dsn, dstPath)

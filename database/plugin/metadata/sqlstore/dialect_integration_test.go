@@ -529,11 +529,8 @@ INSERT INTO reward_live_stake (
 	// without a second pooled connection carrying LAST_INSERT_ID state.
 	queryer := newDialectQueryer(db, dialectName)
 	transactionHash := []byte{0xa0, 0xb0, 0xc0}
-	transactionQuery := `INSERT INTO "transaction" (
- hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
- block_index, valid
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (hash) DO UPDATE SET block_hash = excluded.block_hash
+	transactionQuery := `INSERT INTO "transaction" (hash) VALUES (?)
+ON CONFLICT (hash) DO UPDATE SET hash = excluded.hash
 RETURNING id`
 	var transactionID int64
 	require.NoError(
@@ -542,15 +539,6 @@ RETURNING id`
 			context.Background(),
 			transactionQuery,
 			transactionHash,
-			[]byte{0xd0},
-			nil,
-			int64(100),
-			0,
-			"0",
-			"0",
-			"0",
-			0,
-			true,
 		).Scan(&transactionID),
 	)
 	require.NotZero(t, transactionID)
@@ -561,15 +549,6 @@ RETURNING id`
 			context.Background(),
 			transactionQuery,
 			transactionHash,
-			[]byte{0xe0},
-			nil,
-			int64(100),
-			0,
-			"0",
-			"0",
-			"0",
-			0,
-			true,
 		).Scan(&transactionID),
 	)
 	require.Equal(t, firstTransactionID, transactionID)

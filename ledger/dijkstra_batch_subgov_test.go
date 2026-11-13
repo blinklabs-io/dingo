@@ -55,6 +55,7 @@ func newSubGovLedger(t *testing.T) (*LedgerState, *database.Database) {
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+			TrustedReplay:     true,
 		},
 	}
 	publishGovernanceTestEpoch(ls, 12, eras.DijkstraEraDesc)

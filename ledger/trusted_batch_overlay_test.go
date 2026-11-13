@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -571,7 +572,8 @@ func TestTrustedBatchOverlayFallsBackOnConflict(t *testing.T) {
 			   credential_tag, added_slot, deleted_slot, amount,
 			   payment_script)
 			 VALUES (?, 0, ?, ?, 0, 10, 0, '1000000', 0)`,
-			names["pool"].hash, rowBatchingKey(0x44), rowBatchingKey(0x55),
+			testutil.TransactionID(t, raw, names["pool"].hash),
+			rowBatchingKey(0x44), rowBatchingKey(0x55),
 		)
 		require.NoError(t, err)
 	}
@@ -616,7 +618,7 @@ func TestTrustedBatchOverlayFallsBackOnTransactionConflict(t *testing.T) {
 	precreate := func(h *externalIngestHarness) {
 		raw, err := dbtest.RawSQLiteMetadata(t, h.db)
 		require.NoError(t, err)
-		_, err = raw.Exec(
+		_, err = testutil.ExecTransactionInsert(raw,
 			`INSERT INTO "transaction" (hash, slot, valid) VALUES (?, 5, 1)`,
 			names["pool"].hash,
 		)
@@ -674,7 +676,7 @@ func TestTrustedBatchOverlayFallsBackOnReadBarrierConflict(t *testing.T) {
 	prepare := func(h *externalIngestHarness) {
 		raw, err := dbtest.RawSQLiteMetadata(t, h.db)
 		require.NoError(t, err)
-		_, err = raw.Exec(
+		_, err = testutil.ExecTransactionInsert(raw,
 			`INSERT INTO "transaction" (hash, slot, valid) VALUES (?, 5, 1)`,
 			txA.hash,
 		)

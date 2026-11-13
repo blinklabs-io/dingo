@@ -419,7 +419,8 @@ func withdrawalHistoryQuery(
 	return `
 SELECT ard.tx_hash, ard.amount, tx.slot, tx.block_index, tx.block_hash
 FROM account_reward_delta ard
-JOIN "transaction" tx ON tx.hash = ard.tx_hash
+JOIN "transaction" th ON th.hash = ard.tx_hash
+JOIN applied_transaction tx ON tx.tx_id = th.id
 WHERE ard.withdrawal = TRUE
   AND ard.credential_tag = ?
   AND ard.staking_key = ?`, []any{credentialTag, stakingKey}
@@ -429,7 +430,7 @@ const stakeRegistrationsBySourceSQL = `
 SELECT sr.credential_tag, sr.staking_key
 FROM stake_registration sr
 LEFT JOIN certs c ON c.id = sr.certificate_id
-LEFT JOIN "transaction" t ON t.id = c.transaction_id
+LEFT JOIN applied_transaction t ON t.tx_id = c.transaction_id
 WHERE sr.credential_tag = ? AND sr.staking_key = ?
 ORDER BY sr.added_slot DESC, COALESCE(t.block_index, 0) DESC,
          COALESCE(c.cert_index, 0) DESC`
@@ -752,13 +753,14 @@ func accountDelegationHistoryQuery(
 SELECT %[1]s.added_slot AS added_slot,
        tx.block_index AS block_index,
        certs.cert_index AS cert_index,
-       tx.hash AS tx_hash,
+       txh.hash AS tx_hash,
        %[1]s.pool_key_hash AS pool_key_hash,
        tx.slot AS tx_slot,
        tx.block_hash AS block_hash
 FROM %[1]s
 JOIN certs ON certs.id = %[1]s.certificate_id AND certs.cert_type = ?
-JOIN "transaction" tx ON tx.id = certs.transaction_id
+JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
+JOIN "transaction" txh ON txh.id = tx.tx_id
 WHERE %[1]s.credential_tag = ? AND %[1]s.staking_key = ?`,
 			source.table,
 		))
@@ -794,14 +796,15 @@ func accountRegistrationHistoryQuery(
 SELECT %[1]s.added_slot AS added_slot,
        tx.block_index AS block_index,
        certs.cert_index AS cert_index,
-       tx.hash AS tx_hash,
+       txh.hash AS tx_hash,
        ? AS action,
        %[2]s AS deposit,
        tx.slot AS tx_slot,
        tx.block_hash AS block_hash
 FROM %[1]s
 JOIN certs ON certs.id = %[1]s.certificate_id AND certs.cert_type = ?
-JOIN "transaction" tx ON tx.id = certs.transaction_id
+JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
+JOIN "transaction" txh ON txh.id = tx.tx_id
 WHERE %[1]s.credential_tag = ? AND %[1]s.staking_key = ?`,
 			source.table,
 			deposit,
@@ -896,7 +899,7 @@ SELECT source.credential_tag, source.staking_key, source.added_slot,
        COALESCE(tx.block_index, 0), COALESCE(c.cert_index, 0)
 FROM ` + table + ` source
 JOIN certs c ON c.id = source.certificate_id
-LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
+LEFT JOIN applied_transaction tx ON tx.tx_id = c.transaction_id
 WHERE source.staking_key IN (` + bindPlaceholders(keys) + `)
   AND source.added_slot <= ?`
 }

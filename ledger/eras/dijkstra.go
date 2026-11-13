@@ -1082,9 +1082,9 @@ func EvaluateTxDijkstra(
 }
 
 // dijkstraEvaluationFee is the Dijkstra minimum fee for tx with exUnits as
-// its execution units. As in the Dijkstra minimum-fee rule, only top-level
-// reference scripts are charged, at the protocol's tiered stride and
-// multiplier.
+// its execution units. As in the Dijkstra minimum-fee rule, the reference
+// scripts of the top-level transaction and of every sub-transaction are
+// charged, at the protocol's tiered stride and multiplier.
 func dijkstraEvaluationFee(
 	tx lcommon.Transaction,
 	ls lcommon.LedgerState,
@@ -1094,6 +1094,13 @@ func dijkstraEvaluationFee(
 	refScriptSize, err := lcommon.ConsumedReferenceScriptSize(tx, ls)
 	if err != nil {
 		return 0, err
+	}
+	for _, subTxBody := range lcommon.SubTransactionBodiesFromTransaction(tx) {
+		subTxSize, err := lcommon.ConsumedReferenceScriptSize(subTxBody, ls)
+		if err != nil {
+			return 0, err
+		}
+		refScriptSize = saturatedAddUint64(refScriptSize, subTxSize)
 	}
 	stride, multiplier := dijkstraRefScriptTiers(pp)
 	return saturatedAddUint64(

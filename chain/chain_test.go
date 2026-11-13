@@ -7386,11 +7386,12 @@ func TestTipPredecessorRefusesWithoutAResolvablePredecessor(t *testing.T) {
 // slot-ordering half of the contract. The alternative built on this context is
 // signed against the parent it names, so a parent whose slot is not strictly
 // below the contested tip's would produce a block that Praos ordering and
-// ledger envelope validation both reject. The chain does not enforce
-// increasing slots on add, so this state is reachable; the answer is "no
-// context", never a context the signer cannot use.
+// ledger envelope validation both reject. AddBlock refuses such a tip, but a
+// raw import of local blocks does not order slots, so this state is still
+// reachable; the answer is "no context", never a context the signer cannot
+// use.
 func TestTipPredecessorRefusesAParentAtOrAboveTheContestedSlot(t *testing.T) {
-	cm, err := chain.NewManager(context.Background(), nil, nil)
+	cm, err := chain.NewManager(context.Background(), newTestDB(t), nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
@@ -7411,8 +7412,15 @@ func TestTipPredecessorRefusesAParentAtOrAboveTheContestedSlot(t *testing.T) {
 		MockHash:        testHashPrefix + "00fe",
 		MockPrevHash:    testBlocks[2].MockHash,
 	}
-	if err := c.AddBlock(context.Background(), sameSlotTip, nil); err != nil {
-		t.Fatalf("unexpected error adding same-slot block: %s", err)
+	if err := c.AddRawBlocks(context.Background(), []chain.RawBlock{{
+		Slot:        sameSlotTip.SlotNumber(),
+		Hash:        sameSlotTip.Hash().Bytes(),
+		BlockNumber: sameSlotTip.BlockNumber(),
+		Type:        uint(sameSlotTip.Type()),
+		PrevHash:    sameSlotTip.PrevHash().Bytes(),
+		Cbor:        sameSlotTip.Cbor(),
+	}}); err != nil {
+		t.Fatalf("unexpected error importing same-slot block: %s", err)
 	}
 	if parent, tip, ok := c.TipPredecessor(context.Background()); ok {
 		t.Fatalf(
@@ -7538,7 +7546,7 @@ func TestIsFirstOnHeaderChain(t *testing.T) {
 	}
 	second := &MockBlock{
 		MockBlockNumber: 1,
-		MockSlot:        0,
+		MockSlot:        1,
 		MockHash:        testHashPrefix + "0f02",
 		MockPrevHash:    first.MockHash,
 	}
