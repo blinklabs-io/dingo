@@ -789,9 +789,12 @@ type OuroborosConfig struct {
 	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
-	// LeiosPersistenceRetentionSlots optionally prunes historical-serving
-	// Leios endorser-block records older than this many slots behind the
-	// highest persisted endorser block. Zero retains all history.
+	// LeiosPersistenceRetentionSlots sets how many slots behind the highest
+	// persisted endorser block uncertified historical-serving Leios records
+	// are kept. Zero prunes an uncertified record once the immutable point of
+	// LedgerState passes its slot, and prunes nothing without a LedgerState.
+	// A positive value never prunes past the immutable point. Records of a
+	// certified endorser block are never pruned.
 	LeiosPersistenceRetentionSlots uint64
 	// LocalStateQueryViewMaxLifetime bounds how long a connection may hold
 	// one acquired LocalStateQuery ledger snapshot before it is forcibly

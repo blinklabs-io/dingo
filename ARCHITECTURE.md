@@ -5428,19 +5428,21 @@ Positive retention values must cover at least the network stability window,
 from the ledger's genesis parameters. Startup rejects a smaller value or unknown
 parameters before constructing the persistence workers.
 
-Leios historical-serving records are kept indefinitely unless an operator sets
-`leiosPersistenceRetentionSlots` (or
-`DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) to a positive value. The separate
-GC worker prunes `em`/`et` manifests and transaction bodies strictly older
-than the highest persisted Leios EB slot minus that window, first after startup
-restores the watermark and then hourly. It uses the blob namespace only;
+Leios historical-serving records follow the reference node's retention: the
+`em`/`et` records of a certified endorser block are kept, and an uncertified
+one is pruned once the immutable point passes its slot. A positive
+`leiosPersistenceRetentionSlots` (or `DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`)
+keeps uncertified records back to the highest persisted Leios EB slot minus
+that window, never past the immutable point; `DATABASE.md` gives the full rule.
+The separate GC worker runs first after startup restores the watermark and
+then hourly. It uses the blob namespace only;
 ordinary ledger block history and already-applied UTxO effects are unaffected.
 The Ouroboros provider also reloads EBs from these keys on a cache miss, so a
 later rollback/replay that needs pruned data must refetch it from a Leios peer;
-downstream requests outside the configured window have the same peer
-dependency. Hourly sweeps list manifests to find the highest persisted slot,
-then scan the shared Leios prefix for deletion candidates. On object stores
-this means two paginated listings plus per-key deletes, so the cost is opt-in.
+downstream requests for pruned records have the same peer dependency. A sweep
+with a positive window lists manifests to find the highest persisted slot; every
+sweep scans the shared Leios prefix for deletion candidates. On object stores
+this means paginated listings plus per-key deletes.
 The GC worker does not share the persistence writer's queue and cannot stall
 its write drain. Live Restore/Truncate stops
 and joins both workers before storage replacement; if either worker cannot

@@ -4993,15 +4993,19 @@ is the immutable point's slot, and a positive setting (environment variable
 `DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) keeps uncertified records back to
 `max persisted Leios EB slot - retention slots` but never past the immutable
 point. The cutoff slot itself is retained. Nothing is pruned while the chain is
-too short to have an immutable point, or without a ledger.
+too short to have an immutable point. When the immutable point cannot be
+resolved, or there is no ledger, a positive setting applies its window alone,
+which covers at least the stability window, and zero prunes nothing.
 
 An occurrence is certified when its `ec` marker exists or a standalone
 endorser-block blob (`SetGenesisCbor` at its slot and hash) exists. Ledger
 apply writes the marker, in its own blob transaction, when a ranking block
 certifies the endorser block, including one with no transactions, which has no
 standalone blob; the blob test covers closures applied before the marker
-existed. A rollback does not remove the marker, so a certified occurrence that
-leaves the chain is retained rather than lost. The persistence writer still
+existed. A rollback does not remove the marker, and neither does a ranking
+block rejected by a check that runs after its endorser block applied (deferred
+header state, its own transactions), which also leaves the standalone blob, so
+such an occurrence is retained rather than lost. The persistence writer still
 persists a certified occurrence below the cutoff, and leios-fetch answers an
 uncertified occurrence behind the immutable point as unknown even while it is
 cached or persisted. The asynchronous GC scans the shared `e` prefix, deletes `em` and
