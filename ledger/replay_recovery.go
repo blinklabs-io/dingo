@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -180,8 +181,11 @@ type replayRecoveryPendingInput struct {
 	Input   lcommon.TransactionInput
 	MaxSlot uint64
 	// SpentCeiling is the highest slot whose spend counts as applied ledger
-	// history. Zero disables the spent-row check, as for the inputs of a
-	// producer, which that producer itself consumed.
+	// history. Zero disables the spent-row check. Only the failing
+	// transaction's own inputs carry a ceiling: the inputs, collateral, and
+	// reference inputs walked from a resolved producer are provenance
+	// dependencies, and their spend state says nothing about whether the
+	// failing block carries a bad input.
 	SpentCeiling uint64
 }
 
@@ -2569,6 +2573,35 @@ func (ls *LedgerState) buildReplayRecoveryChainIndex(
 	return index, nil
 }
 
+// replayRecoveryDeletedSlot returns the slot at which input's UTxO row was
+// spent, or zero when the row is live or absent. It reads only the spend state
+// where the store supports it, so the output's assets are never loaded.
+func (ls *LedgerState) replayRecoveryDeletedSlot(
+	input lcommon.TransactionInput,
+) (uint64, error) {
+	store := ls.db.Metadata()
+	if reader, ok := store.(metadata.UtxoSpendStateReader); ok {
+		state, err := reader.GetUtxoSpendState(
+			input.Id().Bytes(),
+			input.Index(),
+			nil,
+		)
+		if err != nil || state == nil {
+			return 0, err
+		}
+		return state.DeletedSlot, nil
+	}
+	utxo, err := store.GetUtxoIncludingSpent(
+		input.Id().Bytes(),
+		input.Index(),
+		nil,
+	)
+	if err != nil || utxo == nil {
+		return 0, err
+	}
+	return utxo.DeletedSlot, nil
+}
+
 // resolveReplayRecoveryProducer locates the block that produced pending.Input.
 //
 // The bool reports that the input is present in the UTxO set or was consumed
@@ -2606,11 +2639,7 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 		// A row consumed at or below SpentCeiling was spent by a block the
 		// ledger has applied. Rolling back to its producer cannot make it
 		// spendable, so it is a bad input, not a provenance gap.
-		spent, err := ls.db.Metadata().GetUtxoIncludingSpent(
-			pending.Input.Id().Bytes(),
-			pending.Input.Index(),
-			nil,
-		)
+		deletedSlot, err := ls.replayRecoveryDeletedSlot(pending.Input)
 		if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
 			return nil, false, fmt.Errorf(
 				"lookup spent validation input %s: %w",
@@ -2618,8 +2647,7 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 				err,
 			)
 		}
-		if spent != nil && spent.DeletedSlot != 0 &&
-			spent.DeletedSlot <= pending.SpentCeiling {
+		if deletedSlot != 0 && deletedSlot <= pending.SpentCeiling {
 			return nil, true, nil
 		}
 	}

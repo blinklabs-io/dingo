@@ -10626,8 +10626,12 @@ bounded by the durable applied floor, is also reported as present: the block
 spends an input the local chain already consumed, and no rollback makes it
 spendable. The failing batch's metadata transaction is discarded before
 recovery runs, so a row marked spent above that ceiling is a stale write and
-still resolves to its producer, as does a missing or pruned row. Inputs of a
-resolved producer skip this check, because that producer consumed them.
+still resolves to its producer, as does a missing or pruned row. The check
+applies only to the failing transaction's own inputs. The inputs, collateral,
+and reference inputs walked from a resolved producer are provenance
+dependencies and skip it: their spend state says nothing about whether the
+failing block carries a bad input. The check reads only the row's spend state
+where the metadata store supports it, so the output's assets are not loaded.
 
 A retention-pruned prefix or a Mithril bootstrap leaves the transaction index
 pointing at blocks the block store no longer holds. Three lookups on the
