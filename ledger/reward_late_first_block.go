@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -71,7 +70,6 @@ func lateFirstRewardBlock(
 // node whose block store lacks the earlier epochs cannot tell, and keeps
 // the ordinary round.
 func (ls *LedgerState) replaysPreviousStakeRewardRound(
-	ctx context.Context,
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 ) (bool, error) {
@@ -99,7 +97,7 @@ func (ls *LedgerState) replaysPreviousStakeRewardRound(
 		return false, nil
 	}
 	first, found, err := firstBlockInSlotRange(
-		ctx, ls.db, ended.StartSlot, uint64(ended.LengthInSlots),
+		ldb, txn, ended.StartSlot, uint64(ended.LengthInSlots),
 	)
 	if err != nil || !found {
 		return false, err
@@ -108,7 +106,7 @@ func (ls *LedgerState) replaysPreviousStakeRewardRound(
 		return false, nil
 	}
 	_, found, err = firstBlockInSlotRange(
-		ctx, ls.db, previous.StartSlot, uint64(previous.LengthInSlots),
+		ldb, txn, previous.StartSlot, uint64(previous.LengthInSlots),
 	)
 	if err != nil {
 		return false, err
@@ -119,12 +117,12 @@ func (ls *LedgerState) replaysPreviousStakeRewardRound(
 // firstBlockInSlotRange returns the slot of the first stored block in
 // [start, start+length).
 func firstBlockInSlotRange(
-	ctx context.Context,
-	db *database.Database,
+	ldb ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	start uint64,
 	length uint64,
 ) (uint64, bool, error) {
-	block, err := database.FirstBlockAtOrAfterSlot(ctx, db, start)
+	block, err := ldb.FirstBlockAtOrAfterSlot(start, txn)
 	if errors.Is(err, models.ErrBlockNotFound) {
 		return 0, false, nil
 	}
@@ -216,12 +214,11 @@ func (ls *LedgerState) applyReplayedStakeRewardRound(
 // replays a round, where the fees carried from the previous boundary, less
 // the replayed round's fee seed, are added.
 func (ls *LedgerState) carriedRewardFees(
-	ctx context.Context,
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	endedEpochFees uint64,
 ) (uint64, error) {
-	replay, err := ls.replaysPreviousStakeRewardRound(ctx, txn, newEpoch)
+	replay, err := ls.replaysPreviousStakeRewardRound(txn, newEpoch)
 	if err != nil || !replay {
 		return endedEpochFees, err
 	}

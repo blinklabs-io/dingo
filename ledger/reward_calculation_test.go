@@ -9667,7 +9667,7 @@ func TestStakeRewardsGenesisWarmingNeedsPrototypeNetwork(t *testing.T) {
 		if err := ls.applyStakeRewards(context.Background(), txn, 1, 500, false); err != nil {
 			return err
 		}
-		return ls.saveRewardAdaPotsForEpoch(context.Background(), txn, 1, *ended, 500)
+		return ls.saveRewardAdaPotsForEpoch(txn, 1, *ended, 500)
 	}))
 
 	readTxn := db.Transaction(t.Context(), false)
@@ -9729,7 +9729,7 @@ func TestApplyStakeRewardsPrototypeGenesisPerformance(t *testing.T) {
 			if err := ls.applyStakeRewards(context.Background(), txn, tc.epoch, boundary, false); err != nil {
 				return err
 			}
-			return ls.saveRewardAdaPotsForEpoch(context.Background(), txn, tc.epoch, *ended, boundary)
+			return ls.saveRewardAdaPotsForEpoch(txn, tc.epoch, *ended, boundary)
 		}))
 		state, err := meta.GetNetworkState(nil)
 		require.NoError(t, err)
@@ -9828,9 +9828,7 @@ INSERT INTO "transaction" (
 	}
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.saveRewardAdaPotsForEpoch(
-			context.Background(), txn, endedEpoch+1, ended, newEpochBoundarySlot,
-		)
+		return ls.saveRewardAdaPotsForEpoch(txn, endedEpoch+1, ended, newEpochBoundarySlot)
 	}))
 
 	pots, err := meta.GetRewardAdaPots(endedEpoch+1, nil)
@@ -9916,9 +9914,7 @@ INSERT INTO "transaction" (
 			}
 			txn := db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				return ls.saveRewardAdaPotsForEpoch(
-					context.Background(), txn, endedEpoch+1, ended, epochEndSlot+1,
-				)
+				return ls.saveRewardAdaPotsForEpoch(txn, endedEpoch+1, ended, epochEndSlot+1)
 			}))
 			pots, err := meta.GetRewardAdaPots(endedEpoch+1, nil)
 			require.NoError(t, err)
@@ -10771,9 +10767,7 @@ INSERT INTO "transaction" (
 		); err != nil {
 			return err
 		}
-		return ls.saveRewardAdaPotsForEpoch(
-			context.Background(), txn, 1, *epoch0, previewEpochLength,
-		)
+		return ls.saveRewardAdaPotsForEpoch(txn, 1, *epoch0, previewEpochLength)
 	}))
 
 	pots1, err := meta.GetRewardAdaPots(1, nil)
@@ -11062,7 +11056,7 @@ INSERT INTO "transaction" (
 			if err := ls.applyStakeRewards(t.Context(), txn, tc.epoch, boundary, false); err != nil {
 				return err
 			}
-			return ls.saveRewardAdaPotsForEpoch(context.Background(), txn, tc.epoch, *ended, boundary)
+			return ls.saveRewardAdaPotsForEpoch(txn, tc.epoch, *ended, boundary)
 		}))
 		state, err := meta.GetNetworkState(nil)
 		require.NoError(t, err)

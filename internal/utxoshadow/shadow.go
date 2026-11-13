@@ -201,9 +201,13 @@ func Start(cfg Config) (*Shadow, error) {
 		m:      newMetrics(cfg.Registerer),
 		rng:    sampleRand(),
 	}
-	s.subID = cfg.EventBus.SubscribeFuncWithBuffer(
+	// A detached subscription would silently skip changes and leave the copy
+	// stale with no signal to rebuild, so a slow Badger write must stall
+	// delivery instead.
+	s.subID = cfg.EventBus.SubscribeFuncWithBufferPolicy(
 		ledger.UtxoEventType,
 		event.EventQueueSize,
+		event.SubscriberBackpressureBlock,
 		s.handle,
 	)
 	return s, nil

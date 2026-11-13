@@ -1808,6 +1808,11 @@ type ChainStore interface {
 	// sparse imported chains do not require one lookup and transaction per
 	// missing index.
 	BlockAtOrAfterIndex(blockIndex uint64, txn Txn) (models.Block, error)
+	// FirstBlockAtOrAfterSlot returns the lowest-slot ranking block whose slot
+	// is at or above slot, or models.ErrBlockNotFound when there is none.
+	// Genesis and other synthetic blobs are skipped. It reads in txn, so the
+	// answer matches the snapshot the rest of the transaction sees.
+	FirstBlockAtOrAfterSlot(slot uint64, txn Txn) (models.Block, error)
 	// BlockByIndex returns the block with chain index blockIndex.
 	BlockByIndex(blockIndex uint64, txn Txn) (models.Block, error)
 	// BlockCreate stores block.

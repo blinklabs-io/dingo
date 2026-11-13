@@ -1980,6 +1980,18 @@ func (a Adapter) BlockAtOrAfterIndex(
 	return a.db.BlockAtOrAfterIndex(blockIndex, dbTxn(txn))
 }
 
+func (a Adapter) FirstBlockAtOrAfterSlot(
+	slot uint64,
+	txn ledgerdb.Txn,
+) (models.Block, error) {
+	t := dbTxn(txn)
+	if t == nil {
+		t = a.db.BlobTxn(false)
+		defer t.Rollback() //nolint:errcheck
+	}
+	return database.FirstBlockAtOrAfterSlotTxn(t, slot)
+}
+
 func (a Adapter) BlockByIndex(
 	blockIndex uint64,
 	txn ledgerdb.Txn,

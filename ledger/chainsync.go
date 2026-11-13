@@ -8757,7 +8757,11 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 			// copy, and must see these outputs as the metadata rows would
 			// be. Genesis leaves the ledger at origin, which resume cannot
 			// roll back to, so it records no tip.
-			ls.publishUtxoEventAfterCommit(ctx, txn, genesisEvt, nil)
+			// Cut so each live-set write stays inside the transaction limits
+			// however many genesis outputs there are.
+			for _, part := range splitUtxoEvent(genesisEvt) {
+				ls.publishUtxoEventAfterCommit(ctx, txn, part, nil)
+			}
 			for txHashArray, utxos := range txUtxos {
 				if err := ls.ledgerDB().SetGenesisTransaction(
 					ctx,
@@ -10688,9 +10692,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 	// must observe the fully settled pots for the ended epoch.
 	if err := timePhase(
 		currentEpoch.EpochId+1, "save_pots", func() error {
-			return ls.saveRewardAdaPotsForEpoch(
-				ctx,
-				txn,
+			return ls.saveRewardAdaPotsForEpoch(txn,
 				currentEpoch.EpochId+1,
 				currentEpoch,
 				epochStartSlot,

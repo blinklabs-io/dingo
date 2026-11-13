@@ -3072,13 +3072,19 @@ copy of the live set (`database/ledgerdb/badgerutxo`), bootstraps it from the
 metadata store at the first event, self-checks every change (removed outputs
 must be live, added outputs must not be), and when a block's first
 transaction shows the previous block is complete, compares a sample with the
-metadata store as of that block's slot. It subscribes with the default
-backpressure policy, so a stalled shadow is detached rather than slowing the
-ledger. Results are logged and counted in the `dingo_utxo_shadow_*` metrics;
+metadata store as of that block's slot. It subscribes with the lossless
+backpressure policy, because a detached subscription would skip changes with no
+signal to rebuild; a stalled shadow therefore backs up delivery rather than
+silently going stale. Results are logged and counted in the `dingo_utxo_shadow_*` metrics;
 validation never reads the copy.
 
 The live UTxO set (`ledgerUtxoBadger`, `internal/utxoset`) is the same Badger
 layout, kept by the ledger itself rather than by a subscriber.
+Genesis outputs are staged as several events, each within `ledger.MaxUtxoEventEntries`
+and `ledger.MaxUtxoEventBytes`, and `utxoset.Set` writes a batch that carries
+no tip in groups within the same bounds, so a large genesis set does not
+exceed one Badger transaction. A batch with a tip is one block's and stays in
+one transaction.
 `LedgerStateConfig.UtxoSet` takes a `ledger.UtxoSetWriter`. Every site that
 makes a UTxO change stages it on its write transaction before the commit:
 forward transactions from the delta, Leios endorser-block and closure

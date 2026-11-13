@@ -2179,57 +2179,67 @@ func FirstBlockAtOrAfterSlot(
 	db *Database,
 	slotNumber uint64,
 ) (models.Block, error) {
-	var ret models.Block
 	txn := db.Transaction(ctx, false)
+	var ret models.Block
 	err := txn.Do(func(txn *Txn) error {
-		blobTxn := txn.Blob()
-		if blobTxn == nil {
-			return types.ErrNilTxn
-		}
-		blob := txn.BlobStore()
-		if blob == nil {
-			return types.ErrBlobStoreUnavailable
-		}
-		it := blob.NewIterator(
-			blobTxn,
-			types.BlobIteratorOptions{Prefix: []byte(types.BlockBlobKeyPrefix)},
-		)
-		if it == nil {
-			return errors.New("blob iterator is nil")
-		}
-		defer it.Close()
-		seek := slices.Concat(
-			[]byte(types.BlockBlobKeyPrefix),
-			types.BlockBlobKeyUint64ToBytes(slotNumber),
-		)
-		for it.Seek(seek); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
-			item := it.Item()
-			if item == nil {
-				continue
-			}
-			k := item.Key()
-			if k == nil ||
-				strings.HasSuffix(string(k), types.BlockBlobMetadataKeySuffix) {
-				continue
-			}
-			blk, err := blockByKey(txn, k)
-			if err != nil {
-				return err
-			}
-			// Synthetic blobs (genesis CBOR, Leios endorser blocks) carry
-			// ID 0 and are not ranking blocks; see BlockBeforeSlotTxn.
-			if blk.ID == 0 {
-				continue
-			}
-			ret = blk
-			return nil
-		}
-		if err := it.Err(); err != nil {
-			return err
-		}
-		return models.ErrBlockNotFound
+		var err error
+		ret, err = FirstBlockAtOrAfterSlotTxn(txn, slotNumber)
+		return err
 	})
 	return ret, err
+}
+
+// FirstBlockAtOrAfterSlotTxn is FirstBlockAtOrAfterSlot inside the caller's
+// transaction, so the read sees that transaction's snapshot.
+func FirstBlockAtOrAfterSlotTxn(
+	txn *Txn,
+	slotNumber uint64,
+) (models.Block, error) {
+	if txn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blob := txn.BlobStore()
+	if blob == nil {
+		return models.Block{}, types.ErrBlobStoreUnavailable
+	}
+	prefix := []byte(types.BlockBlobKeyPrefix)
+	it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{Prefix: prefix})
+	if it == nil {
+		return models.Block{}, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	seek := slices.Concat(
+		prefix, types.BlockBlobKeyUint64ToBytes(slotNumber),
+	)
+	for it.Seek(seek); it.ValidForPrefix(prefix); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		k := item.Key()
+		if k == nil ||
+			strings.HasSuffix(string(k), types.BlockBlobMetadataKeySuffix) {
+			continue
+		}
+		blk, err := blockByKey(txn, k)
+		if err != nil {
+			return models.Block{}, err
+		}
+		// Synthetic blobs (genesis CBOR, Leios endorser blocks) carry
+		// ID 0 and are not ranking blocks; see BlockBeforeSlotTxn.
+		if blk.ID == 0 {
+			continue
+		}
+		return blk, nil
+	}
+	if err := it.Err(); err != nil {
+		return models.Block{}, err
+	}
+	return models.Block{}, models.ErrBlockNotFound
 }
 
 // BlocksAfterSlotTxn returns all blocks after the specified slot; keep txn valid until results are consumed.

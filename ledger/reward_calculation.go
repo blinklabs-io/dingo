@@ -171,7 +171,7 @@ func (ls *LedgerState) applyStakeRewardUpdate(ctx context.Context,
 			return nil
 		}
 	}
-	replay, err := ls.replaysPreviousStakeRewardRound(ctx, txn, newEpoch)
+	replay, err := ls.replaysPreviousStakeRewardRound(txn, newEpoch)
 	if err != nil {
 		return err
 	}
@@ -4029,7 +4029,6 @@ func stakeRewardEpochsForNewEpoch(newEpoch uint64) (stakeRewardEpochs, bool) {
 }
 
 func (ls *LedgerState) saveRewardAdaPotsForEpoch(
-	ctx context.Context,
 	txn ledgerdb.Txn,
 	newEpoch uint64,
 	endedEpoch models.Epoch,
@@ -4053,7 +4052,7 @@ func (ls *LedgerState) saveRewardAdaPotsForEpoch(
 		treasury = uint64(state.Treasury)
 		reserves = uint64(state.Reserves)
 	}
-	fees, err = ls.carriedRewardFees(ctx, txn, newEpoch, fees)
+	fees, err = ls.carriedRewardFees(txn, newEpoch, fees)
 	if err != nil {
 		return err
 	}

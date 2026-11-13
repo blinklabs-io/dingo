@@ -17,6 +17,7 @@ package utxoshadow
 import (
 	"bytes"
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -271,4 +272,37 @@ func TestCompareFindsMissingAndDifferentOutputs(t *testing.T) {
 	require.False(t, rep.Clean())
 	require.Len(t, rep.CborDiffers, 1)
 	require.Len(t, rep.ExtraInShadow, 1)
+}
+
+func TestShadowStaysSubscribedWhenTheHandlerFallsBehind(t *testing.T) {
+	restore := event.SetChannelDeliveryTimeoutForTesting(20 * time.Millisecond)
+	defer restore()
+	bus := event.NewEventBus(nil, nil)
+	s, err := Start(Config{
+		Dir:      t.TempDir(),
+		LedgerDB: &stubLedgerDB{},
+		EventBus: bus,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Stop() })
+
+	// Holding the lock stalls the handler, so published events fill the
+	// subscription's buffer and some wait past the delivery timeout.
+	s.mu.Lock()
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range event.EventQueueSize + 50 {
+			bus.Publish(
+				ledger.UtxoEventType,
+				event.NewEvent(ledger.UtxoEventType, ledger.UtxoEvent{
+					Point: pt(uint64(i%200) + 1),
+					Cause: ledger.UtxoChangeTransaction,
+				}),
+			)
+		}
+	})
+	time.Sleep(200 * time.Millisecond)
+	s.mu.Unlock()
+	wg.Wait()
+	require.True(t, bus.HasSubscribers(ledger.UtxoEventType))
 }

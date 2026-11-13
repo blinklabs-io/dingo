@@ -169,7 +169,7 @@ func (s *Set) ApplyUtxoChanges(
 		}
 		batch = append(batch, c)
 	}
-	res, err := s.store.ApplyBatch(tip, batch)
+	res, err := s.applyBatch(tip, changes, batch)
 	if err != nil {
 		return err
 	}
@@ -206,6 +206,43 @@ func (s *Set) ApplyUtxoChanges(
 		s.logger.Warn("UTxO changes disagree with the live UTxO set", attrs...)
 	}
 	return nil
+}
+
+// applyBatch writes batch in one transaction. Changes without a tip, such as
+// the genesis outputs, can together exceed what one Badger transaction takes,
+// so they are written in groups that each stay within the ledger's event
+// bounds. A change with a tip is one block's and is never split, which keeps
+// the tip and its changes atomic.
+func (s *Set) applyBatch(
+	tip *ocommon.Point,
+	events []ledger.UtxoEvent,
+	batch []badgerutxo.Change,
+) (badgerutxo.ApplyResult, error) {
+	if tip != nil {
+		return s.store.ApplyBatch(tip, batch)
+	}
+	var res badgerutxo.ApplyResult
+	start, entries, bytes := 0, 0, 0
+	write := func(end int) error {
+		r, err := s.store.ApplyBatch(nil, batch[start:end])
+		res.Missing = append(res.Missing, r.Missing...)
+		res.Duplicate = append(res.Duplicate, r.Duplicate...)
+		start, entries, bytes = end, 0, 0
+		return err
+	}
+	for i, evt := range events {
+		e, b := ledger.UtxoEventCost(evt)
+		if i > start && (entries+e > ledger.MaxUtxoEventEntries ||
+			bytes+b > ledger.MaxUtxoEventBytes) {
+			if err := write(i); err != nil {
+				return res, err
+			}
+		}
+		entries += e
+		bytes += b
+	}
+	err := write(len(events))
+	return res, err
 }
 
 // Get returns the CBOR of the live output txID#index.
