@@ -4837,8 +4837,16 @@ domain for pool-registration proofs of possession. Other chains retain the
 IETF `BLS_POP` domain. Node startup, storage reinitialization, and immutable
 replay supply that immutable policy through `LedgerStateConfig` and
 `LedgerView`; gOuroboros resolves it through pending and cached validation
-views. Validation checks exactly the selected domain. This pool-registration
-policy does not change Leios committee or aggregate-certificate verification.
+views. Validation checks exactly the selected domain. The same selection
+(`LedgerStateConfig.DijkstraBlsProofDomain`) is passed to `VoteManager` as
+`KeyProofDomain`, so the proofs of possession on committee seat keys are
+verified under the domain their pool registration used. Dingo passes
+gOuroboros's `VerifyBlock` a header-only block, for which its certificate check
+returns early, and the ledger view does not implement
+`DijkstraLeiosCertificateState`, so the vote manager's certificate validation
+is the only committee-key check.
+The verified-key cache is keyed by domain, and the other domain is never tried
+after a failure.
 
 Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
 can run its own implementation — the reference-script-aware fee rule, local
@@ -13471,9 +13479,10 @@ votes:
   `epochEntry.onChainKeys`. It excludes keys with unknown age or at or beyond
   `ceil(MaxKESEvolutions * SlotsPerKESPeriod / SlotsPerEpoch) + 2` epochs old,
   with age measured at the committee epoch the snapshot selects (snapshot epoch
-  plus one), then verifies proof of possession; an invalid, missing, unknown-age, or
-  expired key leaves the seat and its stake intact but cannot sign or validate a
-  certificate.
+  plus one), then verifies proof of possession under the network's selected
+  Dijkstra BLS proof domain (`VoteManagerConfig.KeyProofDomain`); an invalid,
+  missing, unknown-age, or expired key leaves the seat and its stake intact but
+  cannot sign or validate a certificate.
 - **Certificate admission**: before asynchronous certified endorser-block
   fetches or apply-time fetch and transaction application, ledger admission
   checks that the Dijkstra header certification flag agrees with body
