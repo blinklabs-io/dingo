@@ -12702,6 +12702,20 @@ replace the ledger state and the live credentials the reload reads. Unlike
 initial startup, reload refuses a wall-clock slot outside confirmed era history:
 it cannot replace working keys without verifying the replacement's KES window.
 
+A node that forges for several pools (`blockProducerPools`) reloads each
+running pool through its own key source on the same `SIGHUP`: every pool's
+replacement is validated in full and swapped on its own, and a pool whose
+replacement is refused keeps its loaded credentials without holding back the
+others. Each successful swap logs its `pool_id` with the old and new counter,
+each refusal is named in the returned error and counted on
+`dingo_block_producer_credential_reload_failures_total{pool_id}`. A pool whose
+credentials were already loaded reports itself unchanged, which is not a
+failure; the reload as a whole reads `unchanged` only when every pool did.
+The credential file watch covers the files of every pool that can reload. A
+serve-key pool's files are not watched, and a reload the watch triggers skips
+that pool, so a file change neither logs its refusal nor counts it as a
+failure; a `SIGHUP` still reports and counts it.
+
 **Reload with a KES agent.** In serve-key mode the agent pushes each new key
 and the node installs it as it arrives, so a reload is refused. In sign mode
 (`node_key_reload.go`) a reload re-reads the VRF key and operational
@@ -12720,8 +12734,13 @@ That agent check runs before the reload takes the lifecycle gates: it can wait
 on the network for up to the client's hello timeout, and the chainsync and
 chain-switch handlers drop their work while the gates are held. Under the
 gates a file or SIGHUP reload reads the certificate file again and refuses it
-if it no longer matches the one the agent admitted; every reload then runs the counter, signature,
-KES-window and ledger checks and the swap.
+if it no longer matches the one the agent admitted; every reload then runs the
+counter, signature, KES-window and ledger checks and the swap into that pool's
+client slot. With several pools every sign-mode pool is checked with its own
+agent this way before the gates are taken, each on its own: a pool whose check
+is refused, a changed VRF key included, reports and counts that refusal
+without holding back the others, and a pool that starts forging between the
+check and the gates is left to the next reload.
 After `ReplaceWith` the replaced client stays open for
 `retiredKESAgentClientGrace` (10s), because a forge attempt that selected its
 snapshot before the swap still signs through it. The VRF key cannot change on
@@ -12736,7 +12755,10 @@ byte; when the agent's carries the same cold key and a higher counter, the
 client hands it to `RemoteConfig.OnNewerOpCert` and still refuses the session.
 The node runs a reload with that certificate in place of the file
 (`Node.agentOpCertLoop`), keeping only the newest offer and retrying the same
-certificate at most once a minute after a refusal. The reloaded certificate
+certificate at most once a minute after a refusal. With several pools each
+pool's remote client offers to that pool's own queue (`agentOfferState`) and
+loop, so a newer certificate from pool A's agent reloads pool A only, and a
+refusal counts against that pool. The reloaded certificate
 lives in memory only; after a restart the node loads its file again and the
 agent's newer certificate is picked up the same way. A rotation that lands
 after admission, between the pre-connect and the sign, is refused by the
@@ -12760,7 +12782,9 @@ content rather than file events sees the atomic `..data` symlink swap
 Kubernetes uses for a mounted Secret and needs no notification support. The
 two-poll wait reduces reloads during short writes; credential validation still
 rejects an incomplete credential set. In serve-key mode, where a reload is
-always refused, the watch is not started and a warning says so.
+always refused, the watch is not started and a warning says so. With several
+pools the watch is skipped only when every pool is serve-key; otherwise it
+runs for the pools that can reload and leaves the serve-key pools out.
 `dingo_forge_credential_reloads_total{trigger,result}` counts reloads by
 trigger (`signal`, `file`, `agent`) and result (`success`, `unchanged`,
 `failure`), and `dingo_forge_opcert_counter_loaded` reports the counter the
@@ -13066,6 +13090,92 @@ outside the lock. That is what lets it interrupt a goroutine parked in
 `Client.Run`'s background loop spends nearly all its time in — during
 shutdown; holding the lock across that read instead (the natural first
 attempt) deadlocks `Close` behind the very read only it can unblock.
+
+### Several Pools on One Node (`node_pool_producers.go`, `node_slot_arbiter.go`)
+
+`blockProducerPools` lists every pool a producer forges for, each with its own
+VRF key, operational certificate and one KES source: a local key file, a local
+KES agent socket in serve-key or sign mode, or a remote agent. The list
+replaces the single-pool `shelley*` key and KES source settings (the KES
+agent sign timeout and key watch interval apply to every pool). Configuration
+validation refuses the two together, in YAML and when a library caller mixes
+`WithBlockProducerPools` with the single-pool options in `New`, and also
+refuses two entries sharing an opcert or a remote agent address, and more than
+one pool
+with Leios forging or voting, whose pipeline and vote key are wired for one.
+
+The first pool keeps the node's own forging fields (`blockForger`,
+`leaderElection`, `blockProducerCreds`, `kesAgentClient`), so a single-pool node
+runs exactly as before. Every other pool is a `poolProducer` with its own
+credentials, KES agent client, leader election, durable forge fence (keyed by
+pool) and `BlockForger`. Each pool's key source (`poolKeySource`) loads and
+validates its credentials exactly as the first pool's does, with one KES
+agent client per pool. Over a local agent socket one agent can serve every
+pool through its profiles. Over the remote listener it cannot: an attested
+session cannot name a profile, so Bursa allows one profile per attested
+listener, and each pool signing remotely needs its own agent and address.
+Configuration validation refuses two pools with the same
+`shelleyKesAgentAddress`.
+
+**Startup and isolation.** The other pools start after the first. A pool whose
+serve-key KES source cannot be reached -- an agent that never pushes its key --
+is skipped, logged, reported by `BlockProducerReady`, and retried every 30
+seconds until it starts; a sign-mode client dials nothing at startup, so its
+pool starts and an unreachable agent shows in its readiness check instead. The
+retry takes the lifecycle gates, so it never races a restore, truncate or
+shutdown. Keys that do not validate and a ledger
+mismatch against the pool's registration stop startup, as they do for one
+pool. Stops run the other pools first, each in the first pool's order: forger,
+agent client, election, then the keys.
+
+**Metrics.** With more than one pool, each pool's forging, leader-election and
+KES agent client series carry a `pool_id` label (`prometheus.WrapRegistererWith`);
+the pool ID comes from the opcert's cold key, which is a local file in every KES
+mode. One pool keeps its unlabelled series.
+
+**Schedules.** Every pool computes its own Praos leader schedule. A semaphore
+shared by all the pools' elections (`Election.SetComputeGate`, half the CPUs)
+bounds how many compute at once, so an epoch boundary does not run every
+pool's proofs together.
+
+**Shared slots.** Two pools of one node can lead the same slot, and only one
+block per slot can stay on chain. Each forger asks the node's
+`poolSlotArbiter` after its leader check. When more than one pool leads the
+slot, the arbiter proves each one's leader VRF input (`MkInputVrf` from Babbage
+on, the `SeedL` TPraos seed before) and keeps the pool with the lowest output,
+the value chain selection compares for two blocks in one slot. The decision is
+made once per slot and cached for the pools that ask after it; a slot fewer
+than two pools lead is not cached, since a pool whose schedule is not ready yet
+reads as a non-leader. Anything that leaves the decision in doubt -- a
+non-Praos schedule, no epoch nonce, a VRF failure, a panicking arbiter -- lets
+every leading pool forge: an extra block of the node's own costs less than a
+lost slot.
+
+The ranking is made from leader VRF alone, before the winner's own later
+refusals (operational certificate counter, stale tip, a credential change) and
+before it builds, validates and adopts its block. So a pool that loses the
+ranking does not give the slot up; it waits for the slot's outcome. Every
+forge check reports its outcome to the arbiter on every exit, an adopted block
+as soon as it is adopted. When any pool adopts a block for the slot, the
+waiting pools skip it and count `dingo_forge_yielded_to_own_pool_total`
+instead of a missed leader slot. When the winner exits without one, it
+releases the slot: the arbiter decides again among the leaders that have not
+released it, so the next best pool forges and any pool behind that one keeps
+waiting, and a winner that released before another pool asked is never
+yielded to. A wait also ends in a forge when the slot's retry deadline (the
+slot end less `ForgeSelectionRetryMargin`) passes without a report, when the
+forger's context ends, when a pool is added or removed or the ledger view
+changes, or when the wait panics. A yielded pool that forges goes through its
+own checks as any leader does.
+
+**Own blocks.** The ledger's slot battle checks and the equivocation detector
+treat every pool as the node's own: `ownForgedBlocks` answers
+`ForgedBlockHashes` with every forger's block for the slot and counts a battle
+against the first forger with one, and every pool ID is labelled
+`self_key="true"`. A slot can hold two blocks of the node's own when the
+arbiter fails open, so the ledger compares a block against every own hash for
+its slot: the second own block is neither a slot battle nor a peer block for
+the header-failure path to rewind past.
 
 ### Leios Announcement Admission (`ouroboros/`)
 

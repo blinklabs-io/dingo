@@ -1245,6 +1245,15 @@ func TestCloneConfigDoesNotShareTracingPools(t *testing.T) {
 	assert.Equal(t, "a", cfg.TracingAlwaysSamplePools[0])
 }
 
+func TestCloneConfigDoesNotShareBlockProducerPools(t *testing.T) {
+	cfg := &Config{BlockProducerPools: []BlockProducerPool{
+		{ShelleyVRFKey: "a.vrf.skey"},
+	}}
+	clone := cloneConfig(cfg)
+	clone.BlockProducerPools[0].ShelleyVRFKey = "mutated"
+	assert.Equal(t, "a.vrf.skey", cfg.BlockProducerPools[0].ShelleyVRFKey)
+}
+
 // exampleConfigPath returns the path to the repo's bundled
 // dingo.yaml.example, independent of the working directory the test binary
 // runs from.

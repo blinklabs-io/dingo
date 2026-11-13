@@ -16946,7 +16946,10 @@ func TestCheckComparedTipSlotBattleRestrictedWindow(t *testing.T) {
 		comparison   praos.ChainComparisonResult
 		incomingView praos.PraosTiebreakerView
 		trackedHash  []byte
-		wantBattles  int64
+		// remoteOurs marks the incoming tip as forged by another of this
+		// node's pools.
+		remoteOurs  bool
+		wantBattles int64
 	}{
 		{
 			name:         "remote wins below boundary",
@@ -16999,6 +17002,15 @@ func TestCheckComparedTipSlotBattleRestrictedWindow(t *testing.T) {
 			trackedHash:  bytes.Repeat([]byte{0x33}, 32),
 		},
 		{
+			name:         "incoming tip forged by another own pool",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainABetter,
+			incomingView: restricted,
+			trackedHash:  localHash,
+			remoteOurs:   true,
+		},
+		{
 			name:         "unrestricted era stays on body detection",
 			remoteSlot:   localSlot + 4,
 			remoteBlock:  localBlockNumber,
@@ -17013,8 +17025,12 @@ func TestCheckComparedTipSlotBattleRestrictedWindow(t *testing.T) {
 			f := newSiblingFixture(t)
 			recorder := &countingSlotBattleRecorder{}
 			f.ls.SetSlotBattleRecorder(recorder)
+			forged := map[uint64][]byte{localSlot: tc.trackedHash}
+			if tc.remoteOurs {
+				forged[tc.remoteSlot] = remoteHash
+			}
 			f.ls.SetForgedBlockChecker(&mockForgedBlockChecker{
-				forgedSlots: map[uint64][]byte{localSlot: tc.trackedHash},
+				forgedSlots: forged,
 			})
 			f.ls.checkComparedTipSlotBattle(
 				ochainsync.Tip{
@@ -17291,6 +17307,49 @@ func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
 		50*time.Millisecond,
 		"same-hash block should not trigger slot battle",
 	)
+}
+
+// twoPoolForgedChecker answers for a node two of whose pools forged a slot,
+// as they both do when the slot arbiter fails open.
+type twoPoolForgedChecker map[uint64][][]byte
+
+func (c twoPoolForgedChecker) ForgedBlockHashes(slot uint64) [][]byte {
+	return c[slot]
+}
+
+// Two own pools forged slot 1000. The second pool's block is the node's own
+// as much as the first's: it is no slot battle, and a failed check on it is a
+// local forging defect, not a peer block to rewind past.
+func TestCheckSlotBattle_SecondOwnBlockIsNotBattle(t *testing.T) {
+	t.Parallel()
+
+	f := newSiblingFixture(t)
+	ls := f.ls
+	recorder := &countingSlotBattleRecorder{}
+	ls.SetSlotBattleRecorder(recorder)
+
+	first := f.rival.Hash().Bytes()
+	second := []byte{0x05, 0x06, 0x07, 0x08}
+	ls.config.ForgedBlockChecker = twoPoolForgedChecker{
+		siblingSlot: {first, second},
+	}
+
+	point := ocommon.Point{Slot: siblingSlot, Hash: second}
+	ls.checkSlotBattle(BlockfetchEvent{Point: point})
+	require.Zero(t, recorder.n.Load(),
+		"the second own block of a slot must not count a slot battle")
+	require.Empty(t, ls.slotBattles.pending)
+
+	cause := errors.New("envelope check failed")
+	require.Same(t, cause, ls.rejectInboundEnvelopeFailure(point, cause),
+		"a failed check on an own block must surface, not be rewound past")
+
+	// A peer block in the same slot is still a battle.
+	ls.checkSlotBattle(BlockfetchEvent{Point: ocommon.Point{
+		Slot: siblingSlot,
+		Hash: []byte{0x0a, 0x0b, 0x0c, 0x0d},
+	}})
+	require.Equal(t, int64(1), recorder.n.Load())
 }
 
 func TestCheckSlotBattle_NilCheckerSkips(t *testing.T) {

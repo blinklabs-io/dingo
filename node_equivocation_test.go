@@ -220,6 +220,28 @@ func TestEquivocationLabelsOwnKey(t *testing.T) {
 	}, equivocations(t, registry))
 }
 
+func TestEquivocationLabelsEveryOwnPool(t *testing.T) {
+	t.Parallel()
+	d, registry := newTestEquivocationDetector(t)
+	ownA, ownB, other := newPoolFixture(1), newPoolFixture(2), newPoolFixture(3)
+	d.setSelfPoolIDs(ownA.poolID, ownB.poolID)
+
+	d.handleChainUpdate(rollbackEvt(
+		ownA.block(t, 100, 10, "a-loser"),
+		ownB.block(t, 90, 9, "b-loser"),
+		other.block(t, 80, 8, "other-loser"),
+	))
+	d.handleChainUpdate(addEvt(ownA.block(t, 100, 10, "a-winner")))
+	d.handleChainUpdate(addEvt(ownB.block(t, 90, 9, "b-winner")))
+	d.handleChainUpdate(addEvt(other.block(t, 80, 8, "other-winner")))
+
+	assert.Equal(t, map[string]float64{
+		"pool_id=" + ownA.poolID + ",self_key=true,":   1,
+		"pool_id=" + ownB.poolID + ",self_key=true,":   1,
+		"pool_id=" + other.poolID + ",self_key=false,": 1,
+	}, equivocations(t, registry))
+}
+
 // The node labels its own key with the pool ID held by its block producer
 // credentials, which derive it from the cold key as a PoolId; that must render
 // exactly as the issuer's PoolId read from a block, or self_key never matches.

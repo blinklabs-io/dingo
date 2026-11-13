@@ -3819,7 +3819,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 		// (slot battles), not a pathological loop.
 		skipRollback := true
 		if checker := ls.loadForgedBlockChecker(); checker != nil {
-			if _, forged := checker.WasForgedByUs(e.Point.Slot); forged {
+			if len(checker.ForgedBlockHashes(e.Point.Slot)) > 0 {
 				ls.config.Logger.Info(
 					"allowing rollback on forged slot (slot battle resolution)",
 					"component", "ledger",
@@ -10999,19 +10999,20 @@ func (ls *LedgerState) checkSlotBattle(e BlockfetchEvent) {
 	}
 
 	incomingSlot := e.Point.Slot
-	localHash, forged := checker.WasForgedByUs(incomingSlot)
-	if !forged {
+	localHashes := checker.ForgedBlockHashes(incomingSlot)
+	if len(localHashes) == 0 {
 		return
 	}
 
 	remoteHash := e.Point.Hash
 
-	// Same hash means same block -- not a battle
-	if bytes.Equal(localHash, remoteHash) {
+	// A hash of our own means our own block -- not a battle. With several
+	// pools, two of them can forge the slot, and either block is ours.
+	if forgedByUs(checker, incomingSlot, remoteHash) {
 		return
 	}
 
-	ls.recordSlotBattle(incomingSlot, localHash, incomingSlot, remoteHash)
+	ls.recordSlotBattle(incomingSlot, localHashes[0], incomingSlot, remoteHash)
 }
 
 func (ls *LedgerState) checkComparedTipSlotBattle(
@@ -11038,15 +11039,17 @@ func (ls *LedgerState) checkComparedTipSlotBattle(
 	if checker == nil {
 		return
 	}
-	localHash, forged := checker.WasForgedByUs(localTip.Point.Slot)
-	if !forged || !bytes.Equal(localHash, localTip.Point.Hash) ||
-		bytes.Equal(localHash, incomingTip.Point.Hash) {
+	// Both tips ours is not a battle: with several pools, two of them can
+	// forge blocks the restricted window compares.
+	if !forgedByUs(checker, localTip.Point.Slot, localTip.Point.Hash) ||
+		bytes.Equal(localTip.Point.Hash, incomingTip.Point.Hash) ||
+		forgedByUs(checker, incomingTip.Point.Slot, incomingTip.Point.Hash) {
 		return
 	}
 
 	ls.recordSlotBattle(
 		localTip.Point.Slot,
-		localHash,
+		localTip.Point.Hash,
 		incomingTip.Point.Slot,
 		incomingTip.Point.Hash,
 	)
