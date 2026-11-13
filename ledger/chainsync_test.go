@@ -19232,8 +19232,10 @@ func TestCreateGenesisBlockNoConfidenceImportRejectsRemovedMembers(
 			CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
 			ColdCredential: cold,
 			HotCredential: lcommon.Credential{
-				CredType:   lcommon.CredentialTypeAddrKeyHash,
-				Credential: lcommon.NewBlake2b224(bytes.Repeat([]byte{0xb1}, 28)),
+				CredType: lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(
+					bytes.Repeat([]byte{0xb1}, 28),
+				),
 			},
 		}
 		tx := &conway.ConwayTransaction{
