@@ -63,12 +63,6 @@ func (ls *LedgerState) queryShelleyStakePoolState(
 	txn *database.Txn,
 ) (any, error) {
 	filter, all := q.PoolFilter()
-	if err := checkLocalStateQueryItemLimit(
-		"GetStakePoolState",
-		len(filter),
-	); err != nil {
-		return nil, err
-	}
 	result := make(
 		map[ledger.PoolId]olocalstatequery.StakePoolStateEntry,
 	)

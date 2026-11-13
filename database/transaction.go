@@ -1577,15 +1577,9 @@ func (d *Database) getTransactionsByExactAddress(
 	initialCapacity := min(max(limit, 0), candidateBatchSize)
 	ret := make([]models.Transaction, 0, initialCapacity)
 	candidateOffset := 0
-	candidatesProcessed := 0
 	matchesSkipped := 0
 	for {
-		remainingCandidates := exactAddressCandidateScanLimit -
-			candidatesProcessed
-		if remainingCandidates <= 0 {
-			return ret, errExactAddressCandidateScanLimit
-		}
-		batchSize := min(candidateBatchSize, remainingCandidates)
+		batchSize := candidateBatchSize
 		candidates, err := d.transactionStore().GetTransactionsByAddress(
 			paymentKey,
 			credentialTag,
@@ -1603,7 +1597,6 @@ func (d *Database) getTransactionsByExactAddress(
 				err,
 			)
 		}
-		candidatesProcessed += len(candidates)
 		for i := range candidates {
 			match, err := transactionContainsExactAddress(
 				&candidates[i],
@@ -1627,9 +1620,6 @@ func (d *Database) getTransactionsByExactAddress(
 		}
 		if len(candidates) < batchSize {
 			return ret, nil
-		}
-		if candidatesProcessed >= exactAddressCandidateScanLimit {
-			return ret, errExactAddressCandidateScanLimit
 		}
 		candidateOffset += len(candidates)
 	}

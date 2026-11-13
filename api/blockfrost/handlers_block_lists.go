@@ -16,19 +16,10 @@ package blockfrost
 
 import (
 	"context"
-	"errors"
 	"net/http"
-	"time"
 )
 
-// blockListTimeout bounds how long one block list page may run.
-const blockListTimeout = 15 * time.Second
-
-// serveBlockPage serves a block hash list under the block list admission
-// pool and deadline. The pagination query is validated first, and a pool id
-// the node rejects before any database read does not take a slot, so neither
-// reads as capacity. A full pool answers 429 and an overrun answers 503, both
-// with Retry-After.
+// serveBlockPage serves a block hash list.
 func serveBlockPage(
 	b *Blockfrost,
 	w http.ResponseWriter,
@@ -41,38 +32,7 @@ func serveBlockPage(
 	if !ok {
 		return
 	}
-	poolID := r.PathValue("pool_id")
-	if _, err := parsePoolID(poolID); err == nil || poolID == "" {
-		release, ok := b.blockListAdmission.acquire(
-			r.Context(),
-			requestClient(r),
-		)
-		if !ok {
-			w.Header().Set("Retry-After", "1")
-			writeError(
-				w,
-				http.StatusTooManyRequests,
-				"Too Many Requests",
-				"block list capacity reached, try again later",
-			)
-			return
-		}
-		defer release()
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), blockListTimeout)
-	defer cancel()
-	items, total, err := fetch(ctx, params)
-	if errors.Is(err, context.DeadlineExceeded) {
-		b.logger.Warn(internalMessage, "error", err)
-		w.Header().Set("Retry-After", "1")
-		writeError(
-			w,
-			http.StatusServiceUnavailable,
-			"Service Unavailable",
-			"block list deadline exceeded, try again later",
-		)
-		return
-	}
+	items, total, err := fetch(r.Context(), params)
 	if err != nil {
 		b.writeHistoryError(w, err, internalMessage)
 		return

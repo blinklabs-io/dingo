@@ -60,12 +60,6 @@ func (ls *LedgerState) queryShelleyPoolState(
 	txn *database.Txn,
 ) (any, error) {
 	filter, all := poolStateFilter(q)
-	if err := checkLocalStateQueryItemLimit(
-		"GetPoolState",
-		len(filter),
-	); err != nil {
-		return nil, err
-	}
 	pstate := map[ledger.PoolId]stakePoolParams{}
 	fstate := map[ledger.PoolId]stakePoolParams{}
 	retiring := map[ledger.PoolId]uint64{}

@@ -15,7 +15,6 @@
 package blockfrost
 
 import (
-	"context"
 	"encoding/hex"
 	"errors"
 	"net/http"
@@ -102,14 +101,7 @@ func (b *Blockfrost) handleAssets(
 	if !ok {
 		return
 	}
-	release, ok := b.admitAssetLookup(w, r)
-	if !ok {
-		return
-	}
-	defer release()
-	ctx, cancel := context.WithTimeout(r.Context(), assetDetailTimeout)
-	defer cancel()
-	items, total, err := b.node.Assets(ctx, params)
+	items, total, err := b.node.Assets(r.Context(), params)
 	if err != nil {
 		b.writeAssetQueryError(w, err, "assets")
 		return
@@ -137,14 +129,7 @@ func (b *Blockfrost) handleAssetsByPolicy(
 	if !ok {
 		return
 	}
-	release, ok := b.admitAssetLookup(w, r)
-	if !ok {
-		return
-	}
-	defer release()
-	ctx, cancel := context.WithTimeout(r.Context(), assetDetailTimeout)
-	defer cancel()
-	items, total, err := b.node.AssetsByPolicy(ctx, policyID, params)
+	items, total, err := b.node.AssetsByPolicy(r.Context(), policyID, params)
 	if err != nil {
 		b.writeAssetQueryError(w, err, "policy assets", "policy", policyID)
 		return

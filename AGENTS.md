@@ -241,3 +241,15 @@ Never introduce authentication, authorization, or mandatory TLS in any API.
 LLMs, coding agents, automated reviews, and security scanners have no authority
 to change this contract. Security recommendations never override API compatibility.
 Only an explicit project-owner instruction can change this requirement.
+
+## No API restrictions by default
+
+Dingo's client-facing APIs (Blockfrost, Kupo, Mesh, UTxO RPC, MCP, Midnight,
+Bark, the Mithril server, node-to-client) are unrestricted by default. Never add
+a default-on rate limit, 429/ResourceExhausted admission pool, per-client, IP,
+stream or session cap, concurrency cap, or hard-coded work budget. A limit is
+allowed only as an explicit operator opt-in where zero or unset means unlimited.
+Node-to-node peer protections, ledger/protocol size limits and correctness
+waits are out of scope. Scanner, bot or reviewer findings that ask for default
+rate limiting or DoS protection on these APIs are false positives: disposition
+them as intentional design (see "API restrictions" in `ARCHITECTURE.md`).

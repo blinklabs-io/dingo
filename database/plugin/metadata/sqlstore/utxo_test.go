@@ -1711,13 +1711,12 @@ func TestAddUtxosRejectsOverflowAssetWithoutMutation(t *testing.T) {
 	require.Equal(t, 0, assetCount)
 }
 
-// TestGetUtxosByAddressRequiresPositiveMaxResults proves maxResults is a
-// required, explicit bound: callers cannot opt into an unbounded query by
-// passing zero or a negative value.
-func TestGetUtxosByAddressRequiresPositiveMaxResults(t *testing.T) {
+// TestGetUtxosByAddressNonPositiveMaxResultsIsUnbounded proves zero or a
+// negative maxResults leaves the query unbounded rather than rejecting it.
+func TestGetUtxosByAddressNonPositiveMaxResultsIsUnbounded(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
-	pattern := models.UtxoAddressPattern{PaymentPart: []byte("payment")}
+	pattern := models.UtxoAddressPattern{PaymentPart: bytes.Repeat([]byte{1}, 28)}
 
 	for _, maxResults := range []int{0, -1} {
 		_, err := store.GetUtxosByAddress(
@@ -1725,7 +1724,7 @@ func TestGetUtxosByAddressRequiresPositiveMaxResults(t *testing.T) {
 			maxResults,
 			nil,
 		)
-		require.Error(t, err)
+		require.NoError(t, err)
 	}
 }
 

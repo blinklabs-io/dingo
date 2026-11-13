@@ -243,3 +243,121 @@ func TestOpeningRollbackStateClearedOnConnectionClose(t *testing.T) {
 	assert.Empty(t, f.ls.chainsyncOpeningRollbacks)
 	assert.Empty(t, f.ls.chainsyncHeaderSessions)
 }
+
+// An in-place re-intersect opens a new session on a connection that has
+// already streamed headers. Its opening rollback to a point behind our tip on
+// our chain must move only the peer's cursor, exactly as on a fresh
+// connection: applying it undid blocks already applied and published a
+// local-rollback recovery that closed every connection.
+func TestReintersectOpeningRollbackBehindOurTipKeepsOurChain(t *testing.T) {
+	t.Parallel()
+
+	f := newBehindPeerFixture(t)
+	localTip := f.ls.chain.Tip()
+	f.sendHeader(1, "")
+
+	f.sendChainsync(ChainsyncEvent{SessionReopened: true})
+	f.sendOpeningRollback(3)
+	require.Equal(
+		t,
+		localTip,
+		f.ls.chain.Tip(),
+		"a re-intersect's opening rollback must not roll our chain back",
+	)
+	f.sendHeader(3, "")
+
+	assert.Equal(
+		t,
+		localTip,
+		f.ls.chain.Tip(),
+		"a re-intersected peer replaying our chain must not roll it back",
+	)
+	assert.Empty(t, f.ls.chainsyncOpeningRollbacks)
+	f.requireNoResyncEvent(t)
+}
+
+// A re-intersected peer whose first header leaves our chain at the
+// intersection still gets the rollback it asked for.
+func TestReintersectOpeningRollbackAppliedWhenPeerLeavesOurChain(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newBehindPeerFixture(t)
+	f.sendHeader(1, "")
+
+	f.sendChainsync(ChainsyncEvent{SessionReopened: true})
+	f.sendOpeningRollback(2)
+	f.sendHeader(2, "reintersect-fork-block")
+
+	assert.Equal(t, f.pointAtDepth(2), f.ls.chain.Tip().Point)
+}
+
+// Resync requests for one connection are coalesced because the subscriber
+// used to close the connection once per divergence, and the reconnect came
+// back under a new connection ID. A re-intersect keeps the ID, so a
+// divergence on the new cursor must be published rather than coalesced into
+// the request that opened it: suppressed, the peer keeps delivering headers
+// the ledger discards until the window expires.
+func TestReintersectEndsResyncCoalescing(t *testing.T) {
+	t.Parallel()
+
+	f := newBehindPeerFixture(t)
+	reason := event.ChainsyncResyncReasonHeaderAuthorizationChanged
+
+	require.False(t, f.ls.coalesceChainsyncResync(f.connId, reason))
+	require.True(
+		t,
+		f.ls.coalesceChainsyncResync(f.connId, reason),
+		"a repeat on the same cursor is coalesced",
+	)
+
+	f.sendChainsync(ChainsyncEvent{SessionReopened: true})
+
+	assert.False(
+		t,
+		f.ls.coalesceChainsyncResync(f.connId, reason),
+		"a divergence on the re-intersected cursor must be published",
+	)
+}
+
+// A connection's buffered headers and its consecutive-mismatch count describe
+// the cursor that delivered them. Both used to end with the connection. After
+// a re-intersect the peer replays from the intersection, so headers buffered
+// from the old cursor would sit ahead of the replay and break its order when
+// the connection takes over the header pipeline, and old mismatches would
+// count the new cursor's first mismatch as a persistent fork.
+func TestReintersectDropsOldCursorBufferedHeaders(t *testing.T) {
+	t.Parallel()
+
+	f := newBehindPeerFixture(t)
+	key := connIdKey(f.connId)
+	var rejected []bool
+	f.ls.bufferedHeaderMutex.Lock()
+	f.ls.bufferedHeaderEvents = map[string][]ChainsyncEvent{
+		key: {{
+			ConnectionId: f.connId,
+			Point:        f.peerTipAhead().Point,
+			PeerTipAdmission: func(admitted bool) {
+				rejected = append(rejected, !admitted)
+			},
+		}},
+	}
+	f.ls.bufferedHeaderMutex.Unlock()
+	f.ls.headerMismatchMu.Lock()
+	f.ls.headerMismatchCounts = map[string]int{key: 3}
+	f.ls.headerMismatchMu.Unlock()
+
+	f.sendChainsync(ChainsyncEvent{SessionReopened: true})
+
+	f.ls.bufferedHeaderMutex.Lock()
+	buffered := len(f.ls.bufferedHeaderEvents[key])
+	f.ls.bufferedHeaderMutex.Unlock()
+	assert.Zero(t, buffered, "the old cursor's buffered headers must be dropped")
+	assert.Equal(t, []bool{true}, rejected,
+		"a dropped header's staged peer tip must be rejected")
+	f.ls.headerMismatchMu.Lock()
+	mismatches := f.ls.headerMismatchCounts[key]
+	f.ls.headerMismatchMu.Unlock()
+	assert.Zero(t, mismatches, "the new cursor starts with no mismatches")
+}

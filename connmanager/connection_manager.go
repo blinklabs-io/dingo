@@ -52,10 +52,7 @@ const (
 	// simultaneous inbound connections accepted by the connection manager.
 	// This prevents resource exhaustion from malicious or accidental
 	// connection floods.
-	DefaultMaxInboundConnections         = 100
-	DefaultMaxNtCConnections             = 100
-	DefaultMaxNtCConnectionsPerIP        = 5
-	DefaultMaxTrustedLocalNtCConnections = 100
+	DefaultMaxInboundConnections = 100
 )
 
 type connectionInfo struct {
@@ -149,7 +146,9 @@ type ConnectionManagerConfig struct {
 	// MaxConnectionsPerIP limits the number of concurrent inbound
 	// connections from the same IP address. IPv6 addresses are grouped
 	// by /64 prefix. A value of 0 means use DefaultMaxConnectionsPerIP.
-	MaxConnectionsPerIP     int
+	MaxConnectionsPerIP int
+	// MaxNtCConns, MaxNtCConnectionsPerIP and MaxTrustedLocalNtCConns are
+	// optional node-to-client connection caps. Zero means unlimited.
 	MaxNtCConns             int
 	MaxNtCConnectionsPerIP  int
 	MaxTrustedLocalNtCConns int
@@ -221,15 +220,6 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 	}
 	if cfg.MaxConnectionsPerIP <= 0 {
 		cfg.MaxConnectionsPerIP = DefaultMaxConnectionsPerIP
-	}
-	if cfg.MaxNtCConns <= 0 {
-		cfg.MaxNtCConns = DefaultMaxNtCConnections
-	}
-	if cfg.MaxNtCConnectionsPerIP <= 0 {
-		cfg.MaxNtCConnectionsPerIP = DefaultMaxNtCConnectionsPerIP
-	}
-	if cfg.MaxTrustedLocalNtCConns <= 0 {
-		cfg.MaxTrustedLocalNtCConns = DefaultMaxTrustedLocalNtCConnections
 	}
 	c := &ConnectionManager{
 		config: cfg,

@@ -24,13 +24,6 @@ import (
 )
 
 const (
-	// DefaultArchiveLookupsPerSecond is the default for
-	// BarkConfig.ArchiveLookupsPerSecond.
-	DefaultArchiveLookupsPerSecond = 200
-	// DefaultArchiveCallerLookupsPerSecond is the default for
-	// BarkConfig.ArchiveCallerLookupsPerSecond.
-	DefaultArchiveCallerLookupsPerSecond = 50
-
 	// maxArchiveCallers bounds the per-caller table so a client cycling
 	// source addresses cannot grow it without limit.
 	maxArchiveCallers = 4096
@@ -43,9 +36,10 @@ const (
 	archiveCallerSweepInterval = time.Second
 )
 
-// archiveBudget rations the storage lookups ArchiveService performs for
-// anonymous callers: one global token bucket shared by every caller, and one
-// bucket per caller address. A hash+slot reference is served without reading
+// archiveBudget optionally rations the storage lookups ArchiveService
+// performs for anonymous callers: one global token bucket shared by every
+// caller, and one bucket per caller address. A rate of zero disables that
+// bucket, and a nil archiveBudget allows everything. A hash+slot reference is served without reading
 // any local index (see resolveBlockPoint), so each reference, present or not,
 // costs a cloud lookup; the concurrency cap alone does not limit how often
 // that can be repeated.
@@ -69,20 +63,26 @@ func archiveBurst(perSecond int) int {
 }
 
 func newArchiveBudget(globalPerSecond, callerPerSecond int) *archiveBudget {
-	return &archiveBudget{
-		now: time.Now,
-		global: rate.NewLimiter(
+	if globalPerSecond <= 0 && callerPerSecond <= 0 {
+		return nil
+	}
+	b := &archiveBudget{now: time.Now}
+	if globalPerSecond > 0 {
+		b.global = rate.NewLimiter(
 			rate.Limit(globalPerSecond),
 			archiveBurst(globalPerSecond),
-		),
-		callerRate:  rate.Limit(callerPerSecond),
-		callerBurst: archiveBurst(callerPerSecond),
-		callers:     make(map[string]*rate.Limiter),
-		overflow: rate.NewLimiter(
+		)
+	}
+	if callerPerSecond > 0 {
+		b.callerRate = rate.Limit(callerPerSecond)
+		b.callerBurst = archiveBurst(callerPerSecond)
+		b.callers = make(map[string]*rate.Limiter)
+		b.overflow = rate.NewLimiter(
 			rate.Limit(callerPerSecond),
 			archiveBurst(callerPerSecond),
-		),
+		)
 	}
+	return b
 }
 
 // archiveCallerKey identifies the caller by host, ignoring the ephemeral
@@ -109,23 +109,32 @@ func archiveCallerKey(peerAddr string) string {
 // allow takes n lookups from the caller's allowance and the global budget,
 // or none at all when either is short.
 func (b *archiveBudget) allow(caller string, n int) bool {
+	if b == nil {
+		return true
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
 
-	callerLimiter := b.callerLimiter(caller, now)
-	callerRes := callerLimiter.ReserveN(now, n)
-	if !callerRes.OK() || callerRes.DelayFrom(now) > 0 {
-		callerRes.CancelAt(now)
-		return false
+	var callerRes *rate.Reservation
+	if b.callers != nil {
+		callerRes = b.callerLimiter(caller, now).ReserveN(now, n)
+		if !callerRes.OK() || callerRes.DelayFrom(now) > 0 {
+			callerRes.CancelAt(now)
+			return false
+		}
 	}
-	globalRes := b.global.ReserveN(now, n)
-	if !globalRes.OK() || globalRes.DelayFrom(now) > 0 {
-		globalRes.CancelAt(now)
-		// Return the caller's tokens: a request refused for global
-		// exhaustion must not also drain that caller's own allowance.
-		callerRes.CancelAt(now)
-		return false
+	if b.global != nil {
+		globalRes := b.global.ReserveN(now, n)
+		if !globalRes.OK() || globalRes.DelayFrom(now) > 0 {
+			globalRes.CancelAt(now)
+			// Return the caller's tokens: a request refused for global
+			// exhaustion must not also drain that caller's own allowance.
+			if callerRes != nil {
+				callerRes.CancelAt(now)
+			}
+			return false
+		}
 	}
 	return true
 }

@@ -221,7 +221,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	const total = database.ExactAddressCandidateScanLimit + 1
+	const total = 10_000 + 1
 	outs := make([]pointerOutput, 0, total)
 	inSQLTransaction(t, raw, func(tx *sql.Tx) {
 		for i := range total {
@@ -292,7 +292,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 			addr.String(),
 			PaginationParams{
 				Count: 1,
-				Page:  database.ExactAddressCandidateScanLimit + 1,
+				Page:  10_000 + 1,
 				Order: PaginationOrderAsc,
 			},
 		)
@@ -317,7 +317,7 @@ func TestNodeAdapterAddressUTXOsDescendingPageStopsAtRequestedWindow(t *testing.
 	)
 	require.NoError(t, err)
 
-	const total = database.DefaultPublicUtxoResultLimit + 2
+	const total = 1000 + 2
 	for i := range total {
 		txHash := make([]byte, 32)
 		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
@@ -403,18 +403,6 @@ func TestNodeAdapterAddressUTXOsStopsAfterRequestedWindow(t *testing.T) {
 	assert.Equal(t, -1, total)
 }
 
-func TestAddressUtxoPageRefsRejectsSparseCandidateExhaustion(t *testing.T) {
-	t.Parallel()
-
-	refs := []models.UtxoId{{Hash: fill32(0x01), Idx: 0}}
-	_, _, err := addressUtxoPageRefs(
-		refs,
-		false,
-		0,
-		2,
-	)
-	require.ErrorIs(t, err, models.ErrUtxoQueryBudgetExceeded)
-}
 func TestNodeAdapterAssetAddressesHonorsCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -511,7 +499,7 @@ func TestNodeAdapterAssetAddressesStreamsWidelyHeldAsset(t *testing.T) {
 	policyID := bytes.Repeat([]byte{0x47}, lcommon.AddressHashSize)
 	assetName := []byte("POPULAR")
 	txHash := fill32(0x56)
-	outputs := make([]models.Utxo, database.DefaultPublicUtxoResultLimit+1)
+	outputs := make([]models.Utxo, 1000+1)
 	for i := range outputs {
 		outputs[i] = models.Utxo{
 			TxId:       txHash,
@@ -557,7 +545,7 @@ func TestNodeAdapterAssetAddressesStreamsWidelyHeldAsset(t *testing.T) {
 	assert.Equal(t, addr.String(), holders[0].Address)
 	assert.Equal(
 		t,
-		strconv.Itoa(database.DefaultPublicUtxoResultLimit+1),
+		strconv.Itoa(1000+1),
 		holders[0].Quantity,
 	)
 }
@@ -609,7 +597,7 @@ func TestNodeAdapterAssetAddressesPagesHighCardinalityInMetadata(t *testing.T) {
 	adapter, raw, _ := newDBBackedAdapter(t)
 	policyID := bytes.Repeat([]byte{0x48}, lcommon.AddressHashSize)
 	assetName := []byte("MANY")
-	addresses := make([]string, database.ExactAddressCandidateScanLimit+1)
+	addresses := make([]string, 10_000+1)
 	amounts := make([]string, len(addresses))
 	for i := range addresses {
 		payment := make([]byte, lcommon.AddressHashSize)

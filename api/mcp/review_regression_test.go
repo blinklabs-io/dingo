@@ -85,13 +85,6 @@ func TestReviewSQLiteBoundsAndRestoresInjectedConnection(t *testing.T) {
 	for _, query := range []string{"SELECT zeroblob(2097152)", "SELECT printf('%2097152s', 'x')", "SELECT hex(zeroblob(1048576))"} {
 		callTool(t, cs, "sqlite_query", map[string]any{"query": query}, true)
 	}
-	callTool(
-		t,
-		cs,
-		"sqlite_query",
-		map[string]any{"query": "SELECT 1", "offset": 10001},
-		true,
-	)
 	require.Contains(
 		t,
 		callTool(

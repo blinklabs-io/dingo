@@ -669,6 +669,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncAwaitCatchUpBand:            n.chainsyncAwaitCatchUpBand,
 		ChainsyncHeaderVerificationSettled:   n.chainsyncHeaderVerificationSettled,
 		ChainsyncAwaitCorroboration:          n.chainsyncAwaitCorroboration,
+		ChainsyncObserverDeliveriesUnused:    n.chainsyncObserverDeliveriesUnused,
 		ChainsyncIntersectAtLedgerTip:        n.chainsyncIntersectAtLedgerTip,
 		ChainsyncObservePeerTip:              n.chainsyncObservePeerTip,
 		ChainsyncRecordDeliveredPeerTip:      n.chainsyncRecordDeliveredPeerTip,
@@ -1409,6 +1410,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		n.ledgerState.ActiveSlotCoeffRat(),
 	)
 	genesisSelectionMode := n.initialGenesisSelectionMode()
+	if n.config.onGenesisSelectionResolved != nil {
+		n.config.onGenesisSelectionResolved(genesisSelectionMode)
+	}
 	chainSelectorConfig := n.buildChainSelectorConfig(
 		chainSelectorSecurityParam,
 		genesisSelectionMode,
@@ -2433,6 +2437,23 @@ func (n *Node) isConfiguredRootConnection(
 	n.peerGovMu.RLock()
 	defer n.peerGovMu.RUnlock()
 	return n.peerGov != nil && n.peerGov.IsConfiguredRootConnection(connId)
+}
+
+// chainsyncObserverDeliveriesUnused reports whether the headers observer
+// connections deliver are counted by nothing. Observer headers are never
+// ingested; Genesis corroboration counts them as witness evidence, so they are
+// unused while Genesis selection runs without a corroboration threshold.
+// Outside Genesis selection the node is at the tip, where observers follow new
+// blocks and their tips keep chain selection informed. The Genesis exit rule
+// also needs every observer to have sent MsgAwaitReply; the ouroboros package
+// therefore stops holding an observer once its peer is within the security
+// parameter of the local tip.
+func (n *Node) chainsyncObserverDeliveriesUnused() bool {
+	if n.chainSelector == nil || n.config.genesisCorroborationPeers > 0 {
+		return false
+	}
+	active, _ := n.chainSelector.GenesisSelectionState()
+	return active
 }
 
 // corroborationIdentityForIngress returns connId's Genesis corroboration
