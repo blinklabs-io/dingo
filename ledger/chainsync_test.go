@@ -1824,10 +1824,9 @@ func requestIdTestLedgerWithHeaders(
 			},
 		},
 	}
-	// Mithril-covered so delivered blocks skip header crypto verification;
-	// these synthetic blocks carry no VRF/KES material.
-	ls.mithrilLedgerSlot = uint64(headerCount)
-	ls.publishSnapshotsLocked()
+	// These synthetic blocks carry no VRF/KES material, so delivered blocks
+	// have their header verification deferred.
+	cacheEpochWithoutNonce(t, ls, uint64(headerCount))
 	return ls, dispatched, hashes
 }
 
