@@ -228,6 +228,11 @@ type MempoolConfig struct {
 	// Zero uses one quarter of MempoolCapacity.
 	ConsumerCacheBytes int64
 	CurrentSlotFunc    func() uint64 // returns current slot for early TX rejection
+	// MaxAPISubmissions sizes the validation-slot pool reserved for
+	// transactions submitted through an API (see WithAPISubmission). It is
+	// separate from the pool used by peer relay, so API load never takes
+	// capacity from relay. Zero uses the size of the peer pool.
+	MaxAPISubmissions int
 }
 
 type Mempool struct {
@@ -293,8 +298,8 @@ type Mempool struct {
 	dag               *transactionDAG
 	headroomChanged   chan struct{}
 	submissionSlots   chan struct{}
-	// apiSubmissionSlots keeps one shared validation slot available to direct
-	// network submission when Mesh or UTxO RPC saturates API admission.
+	// apiSubmissionSlots is the validation-slot pool for API submissions,
+	// kept apart from submissionSlots so API load cannot delay peer relay.
 	apiSubmissionSlots chan struct{}
 
 	// rebuildMutex permits one double-buffer rebuild at a time. mutationSeq and
@@ -640,22 +645,18 @@ var ErrNilValidator = errors.New("mempool: validator is nil")
 // ErrMempoolStopped is returned when admission is attempted after shutdown.
 var ErrMempoolStopped = errors.New("mempool: stopped")
 
-// ErrSubmissionBusy reports that API submission cannot reserve its bounded
-// share of transaction-validation capacity. AdmitSubmission returns it instead
-// of waiting, so an API request does not hold a handler goroutine while it
-// waits for a metadata read transaction.
-var ErrSubmissionBusy = errors.New("transaction submission capacity exhausted")
+type apiSubmissionKey struct{}
 
-type submissionAdmissionKey struct{}
-
-type submissionAdmission struct {
-	mempool *Mempool
+// WithAPISubmission marks ctx as belonging to a transaction submitted through
+// an API. AddTransaction validates such a transaction in the API slot pool
+// instead of the pool shared by peer relay and local submission.
+func WithAPISubmission(ctx context.Context) context.Context {
+	return context.WithValue(ctx, apiSubmissionKey{}, struct{}{})
 }
 
-// SubmissionAdmitter is implemented by a mempool that can reserve validation
-// capacity before an API decodes an untrusted transaction body.
-type SubmissionAdmitter interface {
-	AdmitSubmission(context.Context) (context.Context, func(), error)
+func isAPISubmission(ctx context.Context) bool {
+	_, ok := ctx.Value(apiSubmissionKey{}).(struct{})
+	return ok
 }
 
 type submissionCapacityProvider interface {
@@ -696,6 +697,16 @@ func newMempool(
 		if limit := provider.MempoolSubmissionCapacity(); limit > 0 {
 			submissionCapacity = min(submissionCapacity, limit)
 		}
+	}
+	apiSubmissionCapacity := config.MaxAPISubmissions
+	if apiSubmissionCapacity < 0 {
+		return nil, fmt.Errorf(
+			"invalid API submission capacity: %d (must not be negative)",
+			apiSubmissionCapacity,
+		)
+	}
+	if apiSubmissionCapacity == 0 {
+		apiSubmissionCapacity = submissionCapacity
 	}
 	if !implementation.Valid() {
 		return nil, fmt.Errorf(
@@ -767,7 +778,7 @@ func newMempool(
 		),
 		apiSubmissionSlots: make(
 			chan struct{},
-			max(submissionCapacity-1, 0),
+			apiSubmissionCapacity,
 		),
 	}
 	if implementation == ImplementationDAG {
@@ -1068,6 +1079,10 @@ type ProviderConfig struct {
 	// consumer. Zero uses one quarter of Capacity; see
 	// MempoolConfig.ConsumerCacheBytes.
 	ConsumerCacheBytes int64 `yaml:"consumerCacheBytes"`
+	// MaxAPISubmissions sizes the validation-slot pool for transactions
+	// submitted through an API, separate from the pool used by peer relay.
+	// Zero uses the size of the peer pool; see MempoolConfig.MaxAPISubmissions.
+	MaxAPISubmissions int `yaml:"maxApiSubmissions"`
 }
 
 // ProviderDependencies are runtime dependencies assembled after ledger and
@@ -1126,6 +1141,7 @@ func registerProvider(
 				RejectionWatermark:   cfg.RejectionWatermark,
 				RevalidationDeltaCap: cfg.RevalidationDeltaCap,
 				ConsumerCacheBytes:   cfg.ConsumerCacheBytes,
+				MaxAPISubmissions:    cfg.MaxAPISubmissions,
 				CurrentSlotFunc:      deps.CurrentSlotFunc,
 			}
 			var (
@@ -2061,13 +2077,15 @@ func (m *Mempool) AddTransaction(
 	if err := m.rejectOversizedTx(txType, txBytes); err != nil {
 		return err
 	}
-	if admission, _ := ctx.Value(submissionAdmissionKey{}).(submissionAdmission); admission.mempool != m {
-		release, err := m.waitSubmissionSlot(ctx)
-		if err != nil {
-			return err
-		}
-		defer release()
+	slots := m.submissionSlots
+	if isAPISubmission(ctx) {
+		slots = m.apiSubmissionSlots
 	}
+	release, err := m.waitSubmissionSlot(ctx, slots)
+	if err != nil {
+		return err
+	}
+	defer release()
 	// Decode transaction outside the lock (CPU-bound, no shared state)
 	tmpTx, err := safedecode.Transaction(txType, txBytes)
 	if err != nil {
@@ -2139,67 +2157,24 @@ func (m *Mempool) AddTransaction(
 	return nil
 }
 
-// AdmitSubmission reserves API and shared validation capacity without waiting
-// and marks the returned context so AddTransaction can reuse the reservation.
-// API handlers call this before decoding request data so a busy node can answer
-// the client at once; it returns ErrSubmissionBusy when either limit is held.
-func (m *Mempool) AdmitSubmission(
+// waitSubmissionSlot reserves a validation slot from slots. Submissions wait
+// for a slot rather than being refused. The wait ends when ctx is done or the
+// mempool stops.
+func (m *Mempool) waitSubmissionSlot(
 	ctx context.Context,
-) (context.Context, func(), error) {
-	if err := ctx.Err(); err != nil {
-		return ctx, nil, err
-	}
-	select {
-	case m.apiSubmissionSlots <- struct{}{}:
-	default:
-		return ctx, nil, ErrSubmissionBusy
-	}
-	select {
-	case m.submissionSlots <- struct{}{}:
-		return context.WithValue(
-			ctx,
-			submissionAdmissionKey{},
-			submissionAdmission{mempool: m},
-		), m.apiSubmissionSlotRelease(), nil
-	default:
-		<-m.apiSubmissionSlots
-		return ctx, nil, ErrSubmissionBusy
-	}
-}
-
-// waitSubmissionSlot reserves a validation slot for a caller that did not
-// call AdmitSubmission. Node-to-node and node-to-client submission and
-// rolled-back transaction restoration have no client to answer with a busy
-// status, so they wait for a slot rather than drop the transaction. The wait
-// ends when ctx is done or the mempool stops.
-func (m *Mempool) waitSubmissionSlot(ctx context.Context) (func(), error) {
+	slots chan struct{},
+) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	select {
-	case m.submissionSlots <- struct{}{}:
-		return m.submissionSlotRelease(), nil
+	case slots <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-slots }) }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-m.done:
 		return nil, ErrMempoolStopped
-	}
-}
-
-func (m *Mempool) submissionSlotRelease() func() {
-	var once sync.Once
-	return func() {
-		once.Do(func() { <-m.submissionSlots })
-	}
-}
-
-func (m *Mempool) apiSubmissionSlotRelease() func() {
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			<-m.submissionSlots
-			<-m.apiSubmissionSlots
-		})
 	}
 }
 

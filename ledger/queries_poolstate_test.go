@@ -367,21 +367,6 @@ func TestQueryPoolState_PinnedPointWithoutEpochRejected(t *testing.T) {
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
-// TestQueryPoolState_OverLimitFilterRejected bounds the filter like every
-// other caller-sized query.
-func TestQueryPoolState_OverLimitFilterRejected(t *testing.T) {
-	t.Parallel()
-	ls := newPoolStateTimeline(t)
-	pools := make([][]byte, 0, MaxLocalStateQueryItems+1)
-	for i := range MaxLocalStateQueryItems + 1 {
-		pool := repeatedBytes(28, 0)
-		pool[0], pool[1] = byte(i>>8), byte(i)
-		pools = append(pools, pool)
-	}
-	_, err := ls.Query(t.Context(), poolStateQuery(pools), QueryPoint{})
-	require.ErrorIs(t, err, ErrLocalStateQueryLimitExceeded)
-}
-
 // TestQueryPoolState_PinnedPointIgnoresLaterRegistrations answers a past point
 // with the deposit the pool held then and no future parameters, although a
 // registration added since would be both at the tip.

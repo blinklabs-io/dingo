@@ -156,9 +156,6 @@ type Ouroboros struct {
 	leiosValidationCtx      context.Context
 	leiosValidationCancel   context.CancelFunc
 	leiosValidationSlots    chan struct{}
-	// localTxSubmissionSlots is the in-flight LocalTxSubmission validation
-	// budget, shared by all connections.
-	localTxSubmissionSlots chan struct{}
 	// localTxSubmissionConnDoneFunc replaces the connection manager lookup of
 	// a connection's teardown signal. Test-only seam: the manager can only
 	// register a live connection.
@@ -948,15 +945,11 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosValidationCtx:      leiosValidationCtx,
 		leiosValidationCancel:   leiosValidationCancel,
 		leiosValidationSlots:    make(chan struct{}, 2),
-		localTxSubmissionSlots: make(
-			chan struct{},
-			localTxSubmissionMaxInFlight,
-		),
-		mempool:             cfg.Mempool,
-		chainsyncState:      cfg.ChainsyncState,
-		peerGov:             cfg.PeerGov,
-		blockFetchStarts:    make(map[blockFetchKey]time.Time),
-		blockFetchDoneEarly: make(map[blockFetchKey]error),
+		mempool:                 cfg.Mempool,
+		chainsyncState:          cfg.ChainsyncState,
+		peerGov:                 cfg.PeerGov,
+		blockFetchStarts:        make(map[blockFetchKey]time.Time),
+		blockFetchDoneEarly:     make(map[blockFetchKey]error),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),

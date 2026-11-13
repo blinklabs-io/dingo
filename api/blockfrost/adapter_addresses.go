@@ -36,26 +36,8 @@ const lovelaceDecimals = 6
 // totals scan loads.
 const addressTotalBatch = 1000
 
-const (
-	// addressSummaryMaxUTxOs bounds the live outputs one address summary
-	// reads.
-	addressSummaryMaxUTxOs = 50_000
-	// addressSummaryMaxAssets bounds the distinct assets one address
-	// summary accumulates and returns.
-	addressSummaryMaxAssets = 5_000
-	// addressTotalMaxOutputs bounds the output rows one address total
-	// reads, spent history included.
-	addressTotalMaxOutputs = 100_000
-	// accountMaxAssetRows bounds the asset holdings one account aggregate
-	// reads, spent history included for the totals.
-	accountMaxAssetRows = 200_000
-	// addressExtendedMaxAssets bounds the assets the extended summary
-	// enriches; each costs three point reads and the route is unpaginated.
-	addressExtendedMaxAssets = 1_000
-)
-
-// addressSummaryLimits is the read budget of one address summary request.
-// A zero field selects its default.
+// addressSummaryLimits is the optional read budget of one address summary
+// request. A zero field leaves that dimension unbounded.
 type addressSummaryLimits struct {
 	batch             int
 	maxUtxos          int
@@ -69,27 +51,11 @@ func (l addressSummaryLimits) withDefaults() addressSummaryLimits {
 	if l.batch <= 0 {
 		l.batch = addressTotalBatch
 	}
-	if l.maxUtxos <= 0 {
-		l.maxUtxos = addressSummaryMaxUTxOs
-	}
-	if l.maxAssets <= 0 {
-		l.maxAssets = addressSummaryMaxAssets
-	}
-	if l.maxEnrichedAssets <= 0 {
-		l.maxEnrichedAssets = addressExtendedMaxAssets
-	}
-	if l.maxTotalOutputs <= 0 {
-		l.maxTotalOutputs = addressTotalMaxOutputs
-	}
-	if l.maxAssetRows <= 0 {
-		l.maxAssetRows = accountMaxAssetRows
-	}
 	return l
 }
 
 // accountLimits is the database budget of one account aggregate read.
 func (l addressSummaryLimits) accountLimits() models.AccountAggregateLimits {
-	l = l.withDefaults()
 	return models.AccountAggregateLimits{
 		MaxUtxos:     l.maxTotalOutputs,
 		MaxAssetRows: l.maxAssetRows,
@@ -131,7 +97,7 @@ func (a *NodeAdapter) AddressExtended(
 		return AddressExtendedInfo{}, err
 	}
 	// The first amount is lovelace.
-	if maxAssets := a.summaryLimits.withDefaults().maxEnrichedAssets; len(
+	if maxAssets := a.summaryLimits.maxEnrichedAssets; maxAssets > 0 && len(
 		info.Amount,
 	)-1 > maxAssets {
 		return AddressExtendedInfo{}, fmt.Errorf(
@@ -332,13 +298,19 @@ func (a *NodeAdapter) AddressTotal(
 	}
 	for {
 		// One row past the budget is enough to know it was exceeded.
-		query.Limit = min(limits.batch, limits.maxTotalOutputs+1-outputs)
+		query.Limit = limits.batch
+		if limits.maxTotalOutputs > 0 {
+			query.Limit = min(
+				limits.batch,
+				limits.maxTotalOutputs+1-outputs,
+			)
+		}
 		if err := ctx.Err(); err != nil {
 			return AddressTotalInfo{}, err
 		}
 		// The read runs in txn, which carries ctx.
 		var batch []models.UtxoWithHistory
-		if isPaymentCred {
+		if isPaymentCred || limits.maxTotalOutputs <= 0 {
 			//nolint:contextcheck // UtxosWithHistory takes its context from txn
 			batch, err = db.UtxosWithHistory(query, txn)
 		} else {
@@ -367,7 +339,8 @@ func (a *NodeAdapter) AddressTotal(
 		}
 		for i := range batch {
 			outputs++
-			if outputs > limits.maxTotalOutputs {
+			if limits.maxTotalOutputs > 0 &&
+				outputs > limits.maxTotalOutputs {
 				return AddressTotalInfo{}, fmt.Errorf(
 					"more than %d outputs: %w",
 					limits.maxTotalOutputs,
@@ -378,7 +351,8 @@ func (a *NodeAdapter) AddressTotal(
 			if batch[i].DeletedSlot != 0 {
 				sent.add(batch[i].Utxo)
 			}
-			if len(received.assets) > limits.maxAssets {
+			if limits.maxAssets > 0 &&
+				len(received.assets) > limits.maxAssets {
 				return AddressTotalInfo{}, fmt.Errorf(
 					"more than %d distinct assets: %w",
 					limits.maxAssets,

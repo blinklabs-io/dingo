@@ -1019,8 +1019,7 @@ type LedgerStateConfig struct {
 	// production state after rollback publishes its replacement snapshot.
 	ConsensusStateRestoredFunc func()
 	// MaxConcurrentEvaluations bounds transaction evaluations running at
-	// once across every API front end. Zero leaves one logical processor for
-	// consensus work when possible.
+	// once across every API front end. Zero, the default, is unlimited.
 	MaxConcurrentEvaluations int
 	PromRegistry             prometheus.Registerer
 	Logger                   *slog.Logger
@@ -2568,7 +2567,9 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		plutusEvalCtxCache: eras.NewPlutusEvalContextCache(),
 		phase2Results:      eras.NewPhase2ResultCache(),
 		byronPBFT:          byronPBFT,
-		evalAdmission:      newEvaluationLimiter(evaluationCapacity(cfg)),
+	}
+	if cfg.MaxConcurrentEvaluations > 0 {
+		ls.evalAdmission = newEvaluationLimiter(cfg.MaxConcurrentEvaluations)
 	}
 	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
 	ls.timeConverter = ls.newTimeConverter()
@@ -16171,7 +16172,7 @@ func (ls *LedgerState) UtxosByAddress(
 	utxos, err := ls.db.UtxosByAddress(
 		ctx,
 		addrs,
-		database.MaxUtxosByAddressResults,
+		0,
 		nil,
 	)
 	if err != nil {
@@ -17438,13 +17439,6 @@ type evaluationLimiter struct {
 	perSource    map[string]int
 	maxTotal     int
 	maxPerSource int
-}
-
-func evaluationCapacity(cfg LedgerStateConfig) int {
-	if cfg.MaxConcurrentEvaluations > 0 {
-		return cfg.MaxConcurrentEvaluations
-	}
-	return max(runtime.GOMAXPROCS(0)-1, 1)
 }
 
 func newEvaluationLimiter(maxTotal int) *evaluationLimiter {

@@ -174,45 +174,6 @@ func TestEvaluateTxAcceptsPayloadAtTheCap(t *testing.T) {
 	require.Contains(t, text, "Invalid transaction CBOR")
 }
 
-// While one evaluation holds the only slot, a second request is refused as
-// busy before its payload is parsed: a malformed body gets the busy error, not
-// the parse error it would get if it were decoded outside the slot.
-func TestEvaluateTxAdmitsBeforeParsing(t *testing.T) {
-	t.Parallel()
-	evaluator := newBlockingEvaluator()
-	cs := evaluateTxSession(t, evaluator)
-
-	first := make(chan string, 1)
-	go func() {
-		first <- callTool(
-			t,
-			cs,
-			"evaluate_tx",
-			map[string]any{"cbor": admissionValidTxHex},
-			false,
-		)
-	}()
-	testutil.RequireReceive(
-		t,
-		evaluator.entered,
-		5*time.Second,
-		"first evaluation",
-	)
-
-	text := callTool(t, cs, "evaluate_tx", map[string]any{"cbor": "80ff"}, true)
-	require.Contains(t, text, "busy")
-	require.NotContains(t, text, "trailing data")
-	require.NotContains(t, text, "Invalid transaction CBOR")
-	require.Equal(t, int32(1), evaluator.calls.Load())
-
-	close(evaluator.release)
-	testutil.RequireReceive(t, first, 5*time.Second, "first evaluation result")
-
-	// With the slot free again the malformed body is parsed and rejected.
-	text = callTool(t, cs, "evaluate_tx", map[string]any{"cbor": "80ff"}, true)
-	require.Contains(t, text, "trailing data")
-}
-
 func TestCalculateMinUtxoRejectsOversizedOutputWithoutParsing(t *testing.T) {
 	t.Parallel()
 	limits := newReadLimits()
@@ -254,37 +215,6 @@ func TestCalculateMinUtxoAcceptsOutputAtTheCap(t *testing.T) {
 	)
 	require.NotContains(t, text, "too large")
 	require.Contains(t, text, "decode output CBOR")
-}
-
-// Output parsing takes a slot from the shared pool and gives it back, and a
-// request that finds the pool full is refused instead of parsed.
-func TestCalculateMinUtxoAdmitsParsesThroughSlots(t *testing.T) {
-	t.Parallel()
-	limits := newReadLimits()
-	cs := minUtxoSession(t, limits)
-	args := map[string]any{"output_cbor_hex": admissionValidOutputHex}
-
-	for range cap(limits.parseSlots) {
-		limits.parseSlots <- struct{}{}
-	}
-	text := callTool(t, cs, "calculate_min_utxo", args, true)
-	require.Contains(t, text, "too many concurrent payload parses")
-	// A malformed body is refused the same way, not parsed.
-	text = callTool(
-		t,
-		cs,
-		"calculate_min_utxo",
-		map[string]any{"output_cbor_hex": "ff"},
-		true,
-	)
-	require.Contains(t, text, "too many concurrent payload parses")
-
-	for range cap(limits.parseSlots) {
-		<-limits.parseSlots
-	}
-	text = callTool(t, cs, "calculate_min_utxo", args, false)
-	require.Contains(t, text, "Required Minimum Deposit")
-	require.Zero(t, len(limits.parseSlots), "parse slot not released")
 }
 
 func TestRunAdmittedHoldsSlotUntilWorkReturns(t *testing.T) {
