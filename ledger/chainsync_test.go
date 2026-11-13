@@ -19279,6 +19279,68 @@ func TestCreateGenesisBlockNoConfidenceImportRejectsRemovedMembers(
 	)
 }
 
+// TestCreateGenesisBlockNoConfidenceImportRejectsRemovedMemberVotes proves a
+// vote from the hot credential a genesis member authorized before its removal
+// is an unknown voter after a NoConfidence snapshot import.
+func TestCreateGenesisBlockNoConfidenceImportRejectsRemovedMemberVotes(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+	require.NoError(t, err)
+	require.NoError(t, db.SetGenesisCbor(0, genesisHash[:], []byte{0x80}, nil))
+
+	const anchorSlot = 1_000_000
+	ls.currentTip.Point = ocommon.NewPoint(
+		anchorSlot,
+		bytes.Repeat([]byte{0xaa}, lcommon.Blake2b256Size),
+	)
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		strconv.FormatUint(anchorSlot, 10),
+		nil,
+	))
+	require.NoError(t, db.SetEpoch(
+		anchorSlot, 300, nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, 1, 100, nil,
+	))
+	require.NoError(t, ls.loadMithrilTrustBoundary())
+
+	removedKey, err := hex.DecodeString(musashiGenesisCommitteeColdKeys[0])
+	require.NoError(t, err)
+	hot := lcommon.NewBlake2b224(bytes.Repeat([]byte{0xb2}, 28))
+	seedCommitteeAuthorization(
+		t, db, lcommon.NewBlake2b224(removedKey), hot, 1, anchorSlot-500,
+	)
+
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
+
+	ls.currentEpoch = models.Epoch{EpochId: 300, StartSlot: anchorSlot}
+	ls.currentPParams = &conway.ConwayProtocolParameters{}
+	ls.publishSnapshotsLocked()
+	lv := ls.NewView(nil)
+	tx := &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{
+				&lcommon.Voter{
+					Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+					Hash: [28]byte(hot),
+				}: {},
+			},
+		},
+	}
+	var unknown conway.UnknownVoterError
+	require.ErrorAs(
+		t,
+		eras.ValidateTxConway(tx, 0, lv, ls.currentPParams),
+		&unknown,
+		"removed genesis member's hot credential voted",
+	)
+}
+
 // TestCreateGenesisBlockSeedsCommitteeAfterPreConwayImport proves a snapshot
 // taken before Conway does not suppress the committee established by the
 // later hard fork.
