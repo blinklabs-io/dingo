@@ -428,9 +428,10 @@ func leiosEBCertified(
 	return false, nil
 }
 
-// blobKeyExists probes one key through an iterator rather than Get so that
-// wrappers which unwrap their transaction only in NewIterator, as the prune
-// store wrapper does, keep working.
+// blobKeyExists probes one key through a key-only iterator rather than Get:
+// Get returns the whole value, and a standalone endorser-block blob carries
+// every transaction of the block, which a cloud store would download only to
+// test that it exists.
 func blobKeyExists(
 	store blobplugin.BlobStore,
 	blobTxn types.Txn,
