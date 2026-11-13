@@ -415,6 +415,15 @@ func (d *Database) rollbackAfterSlot(
 			err,
 		)
 	}
+	// Before the UTxO deletes, which can exhaust the blob transaction's
+	// budget: a stale marker would keep an endorser block that the selected
+	// chain no longer certifies.
+	if err := d.deleteLeiosEBCertifiedFromSlot(point.Slot, txn); err != nil {
+		return ochainsync.Tip{}, nil, fmt.Errorf(
+			"delete Leios certification markers after rollback: %w",
+			err,
+		)
+	}
 	// Delete rolled-back UTxOs (blob offsets and metadata).
 	//
 	// Floor the deletion slot at mithrilFloor. UTxOs produced by gap
