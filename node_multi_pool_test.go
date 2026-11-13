@@ -448,6 +448,11 @@ func TestStartBlockProducerSkipsAPoolWhoseKESAgentIsUnreachable(t *testing.T) {
 	secondOpCert := opCertFixtureForColdKey(t, coldVKey, coldSKey, 0, nil)
 	secondID, err := poolIDFromOpCertFile(secondOpCert)
 	require.NoError(t, err)
+	// A short directory: t.TempDir's name makes the socket path longer than
+	// macOS allows, which is refused before any dial.
+	socketDir, err := os.MkdirTemp("", "kes")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
 	n.config.blockProducerPools = []BlockProducerPool{
 		{
 			ShelleyVRFKey:                 n.config.shelleyVRFKey,
@@ -457,11 +462,8 @@ func TestStartBlockProducerSkipsAPoolWhoseKESAgentIsUnreachable(t *testing.T) {
 		{
 			ShelleyVRFKey:                 n.config.shelleyVRFKey,
 			ShelleyOperationalCertificate: secondOpCert,
-			ShelleyKESAgentSocket: filepath.Join(
-				t.TempDir(),
-				"absent.sock",
-			),
-			ShelleyKESAgentMode: "serve-key",
+			ShelleyKESAgentSocket:         filepath.Join(socketDir, "absent.sock"),
+			ShelleyKESAgentMode:           "serve-key",
 		},
 	}
 
