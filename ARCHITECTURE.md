@@ -651,7 +651,7 @@ sequenceDiagram
     OB->>Peer: otherwise re-intersect at last accepted cursor
     Peer->>OB: replay parent-linked headers in order
     OB->>OB: strictly verify and promote each replayed header
-    LS->>EB: publish BlockEvent
+    LS->>EB: republish chain update as BlockEvent (can precede the ledger apply; not an applied-tip signal)
 
     Note over Peer,DB: Rollback Path
     Peer->>OB: RollBackward(point)
@@ -1199,7 +1199,9 @@ pending before preparation, or clears only the new intent when there was none.
 The forward path keeps async semantics deliberately: its after-commit callback
 only enqueues onto the ordered lane, so subscribers cannot observe an Apply
 before storage is durable and their work never runs inline in `Commit`.
-`ledger.block` remains `PublishBlocking` on the handler's own goroutine.
+`ledger.block` is published with `PublishBlocking` on the handler's own
+goroutine when the block joins or leaves the primary chain, which can be before
+the ledger applies it, so it is not an applied-tip signal.
 
 An ordinary stalled subscriber detaches after its delivery timeout; a lossless
 subscriber deliberately remains attached until it drains or is stopped, closed,
@@ -2619,7 +2621,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `ledger.connection_recycle_requested` | Ouroboros | Unusable peer connection detected; node wiring translates the request to `connmanager.connection_recycle_requested` |
 | `mempool.add_tx` | Mempool | Transaction added |
 | `mempool.remove_tx` | Mempool | Transaction removed |
-| `ledger.block` | LedgerState | Block applied or rolled back |
+| `ledger.block` | LedgerState | Block added to or removed from the primary chain, republished from `chain.update`. Can be published before the ledger applies the block, so it is not an applied-tip signal |
 | `ledger.tx` | LedgerState | Transaction processed (ordered lane — see below) |
 | `ledger.error` | LedgerState | Ledger error occurred |
 | `ledger.blockfetch` | Ouroboros | Block fetch event received |
