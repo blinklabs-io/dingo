@@ -227,3 +227,17 @@ func TestHistoricityCutoffIgnoresConfiguredGenesisWindow(t *testing.T) {
 		)
 	}
 }
+
+// The resolved-mode hook is the only way the effective-configuration line
+// can report the mode the selector actually starts in, which the marker can
+// force to Praos for an eligible configuration.
+func TestWithGenesisSelectionResolvedSetsHook(t *testing.T) {
+	t.Parallel()
+	var got []bool
+	cfg := NewConfig(WithGenesisSelectionResolved(func(mode bool) {
+		got = append(got, mode)
+	}))
+	require.NotNil(t, cfg.onGenesisSelectionResolved)
+	cfg.onGenesisSelectionResolved(false)
+	require.Equal(t, []bool{false}, got)
+}

@@ -175,6 +175,34 @@ func TestFreedSlotPromotesConnectedRoot(t *testing.T) {
 	)
 }
 
+// A root handed a freed slot wakes a wait registered for its promotion, so a
+// roll-forward callback it parked as an observer does not wait on after the
+// connection became an ingress source.
+func TestFreedSlotPromotionWakesPromotionWait(t *testing.T) {
+	t.Parallel()
+	state := chainsync.NewStateWithConfig(nil, nil, chainsync.Config{
+		MaxClients:   1,
+		StallTimeout: chainsync.DefaultStallTimeout,
+		IsRoot: func(connId ouroboros.ConnectionId) bool {
+			return connId.RemoteAddr.(*net.TCPAddr).Port >= 100
+		},
+	})
+	first, second := newTestConnId(100), newTestConnId(101)
+	require.True(t, state.TryAddClientConnIdWithDirection(first, 1, true))
+	require.True(t, state.TryAddObservedClientConnIdWithDirection(second, true))
+	wake, unregister := state.AwaitClientPromotion(second)
+	defer unregister()
+
+	state.RemoveClientConnId(first)
+
+	require.False(t, observabilityOnly(t, state, second))
+	select {
+	case <-wake:
+	default:
+		t.Fatal("a root promoted into a freed slot did not wake its promotion wait")
+	}
+}
+
 // A slot freed by demoting a client to an observer also goes to a connected
 // root that was holding an observer slot.
 func TestDemotionPromotesConnectedRoot(t *testing.T) {

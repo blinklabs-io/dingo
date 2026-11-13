@@ -122,9 +122,9 @@ func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
 			require.NotNil(t, server)
 			require.Zero(t, server.WriteTimeout,
 				"streaming responses must not have an overall write deadline")
-			require.Equal(t, 60*time.Second, server.ReadHeaderTimeout)
-			require.Equal(t, DefaultRequestReadTimeout, server.ReadTimeout)
-			require.Equal(t, 120*time.Second, server.IdleTimeout)
+			require.Zero(t, server.ReadHeaderTimeout)
+			require.Zero(t, server.ReadTimeout)
+			require.Zero(t, server.IdleTimeout)
 		})
 	}
 }

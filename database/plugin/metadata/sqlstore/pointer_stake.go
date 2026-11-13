@@ -132,7 +132,7 @@ LIMIT 1`,
 // address's pointer payload, and gouroboros decodes each component with an
 // unbounded shift-accumulate loop (AddressPayloadPointer.decode), so a
 // spendable output can carry a position no int64 column can hold. Such a
-// position names no certificate -- certs.slot, "transaction".block_index and
+// position names no certificate -- certs.slot, applied_transaction.block_index and
 // certs.cert_index are int64 columns holding real chain values -- so it is
 // dangling by construction, and dropping it leaves the output unattributed
 // exactly as a pointer to an unoccupied position is. Returning an error here
@@ -209,9 +209,9 @@ pointer_resolution AS (
  JOIN certs
    ON certs.slot = utxo_pointer.ptr_slot
   AND certs.cert_index = utxo_pointer.ptr_cert_index
- JOIN "transaction"
-   ON "transaction".id = certs.transaction_id
-  AND "transaction".block_index = utxo_pointer.ptr_tx_index
+ JOIN applied_transaction
+   ON applied_transaction.tx_id = certs.transaction_id
+  AND applied_transaction.block_index = utxo_pointer.ptr_tx_index
  JOIN stake_registration
    ON stake_registration.certificate_id = certs.id
  WHERE certs.slot <= ?
@@ -222,9 +222,9 @@ pointer_resolution AS (
        AND removal.staking_key = stake_registration.staking_key
        AND (removal.added_slot > certs.slot
          OR (removal.added_slot = certs.slot
-           AND removal.block_index > "transaction".block_index)
+           AND removal.block_index > applied_transaction.block_index)
          OR (removal.added_slot = certs.slot
-           AND removal.block_index = "transaction".block_index
+           AND removal.block_index = applied_transaction.block_index
            AND removal.cert_index > certs.cert_index))
    )
 )`, []any{slotValue}, nil
@@ -263,9 +263,9 @@ func pointerStakeInputsSQL(
    ON certs.slot = utxo_pointer.ptr_slot
   AND certs.cert_index = utxo_pointer.ptr_cert_index
   AND certs.slot <= ?
- JOIN "transaction"
-   ON "transaction".id = certs.transaction_id
-  AND "transaction".block_index = utxo_pointer.ptr_tx_index
+ JOIN applied_transaction
+   ON applied_transaction.tx_id = certs.transaction_id
+  AND applied_transaction.block_index = utxo_pointer.ptr_tx_index
  JOIN stake_registration
    ON stake_registration.certificate_id = certs.id`,
 		[]any{slotValue, slotValue, slotValue},

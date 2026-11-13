@@ -30,7 +30,7 @@ package deferred
 //
 //   - Primary keys (autoincrement IDs).
 //   - Unique indexes that back ON CONFLICT clauses used during
-//     import (e.g. utxo.tx_id_output_idx, transaction.hash,
+//     import (e.g. utxo.idx_utxo_tx_id_output_idx, transaction.hash,
 //     asset.idx_asset_unique, datum.hash, script.hash,
 //     certs.uniq_tx_cert).
 //   - Indexes on resume-checkpoint tables
@@ -74,8 +74,13 @@ type Index struct {
 	Columns []string
 	// Where, when set, makes the index partial: a predicate over plain
 	// column names that the rebuild appends as the index's WHERE clause.
-	// MySQL has no partial indexes and builds the full index instead.
+	// MySQL has no partial indexes and builds the full index instead, over
+	// MySQLColumns when that is set.
 	Where string
+	// MySQLColumns, when set, replaces Columns on MySQL. It is for an entry
+	// whose partial form MySQL cannot hold and whose full multi-column form
+	// would cost every live row an unrelated leaf.
+	MySQLColumns []string
 	// Notes documents why this index is safe to defer. Surfaces
 	// in the manifest test failure message when the
 	// classification is questioned.
@@ -198,47 +203,20 @@ var Manifest = []Index{
 		Notes:   "API stake lookup", Critical: true,
 		CatchUpDroppable: true,
 	},
+	// The spender column's foreign key to transaction(id) needs this index so
+	// that deleting a transaction row does not scan utxo.
 	{
 		Name: "idx_utxo_spent_at_tx_id", Table: "utxo",
 		Columns: []string{"spent_at_tx_id"},
 		Where:   "spent_at_tx_id IS NOT NULL",
-		Notes:   "Consumer transaction lookup and rollback repair", Critical: true,
-		CatchUpDroppable: true,
-	},
-	{
-		Name: "idx_utxo_referenced_by_tx_id", Table: "utxo",
-		Columns: []string{"referenced_by_tx_id"},
-		Where:   "referenced_by_tx_id IS NOT NULL",
-		Notes:   "Reference-input lookup and rollback repair", Critical: true,
-		CatchUpDroppable: true,
-	},
-	{
-		Name: "idx_utxo_collateral_by_tx_id", Table: "utxo",
-		Columns: []string{"collateral_by_tx_id"},
-		Where:   "collateral_by_tx_id IS NOT NULL",
-		Notes:   "Collateral lookup and rollback repair", Critical: true,
+		Notes: "Consumer transaction lookup, rollback repair and " +
+			"foreign key child index", Critical: true,
 		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_utxo_added_slot", Table: "utxo",
 		Columns: []string{"added_slot"},
 		Notes:   "Rollback range scan", Critical: true,
-		CatchUpDroppable: true,
-	},
-	// idx_utxo_transaction_id is critical because the rollback sweep's
-	// DELETE FROM "transaction" WHERE slot > ? cascades through
-	// fk_transaction_outputs, and SQLite resolves that cascade with one
-	// DELETE FROM utxo WHERE transaction_id = ? per deleted transaction
-	// row. Deferred, each of those is a full scan of utxo: measured on a
-	// preview relay, a 1,001-transaction rollback against a 3.2M row utxo
-	// table took 556s with the index absent and 0.095s with it present,
-	// with no log output in between.
-	{
-		Name: "idx_utxo_transaction_id", Table: "utxo",
-		Columns: []string{"transaction_id"},
-		Notes: "Rollback DELETE cascade into utxo " +
-			"(fk_transaction_outputs)",
-		Critical:         true,
 		CatchUpDroppable: true,
 	},
 	{
@@ -249,7 +227,18 @@ var Manifest = []Index{
 			"staking_key",
 			"amount",
 		},
-		Notes: "Primary UTxO RPC search path", Critical: true,
+		// Spent rows only: a live output at deleted_slot = 0 would sit at a
+		// random position, ordered by credential and amount, and every
+		// created and spent output would dirty an unrelated leaf. Nothing
+		// reads the live region through this index.
+		Where: "deleted_slot > 0",
+		// MySQL has no partial indexes. InnoDB appends the primary key to
+		// each secondary entry, so (deleted_slot) alone clusters live rows at
+		// deleted_slot = 0 in id order, which grows, and a spend lands under
+		// the spend slot.
+		MySQLColumns: []string{"deleted_slot"},
+		Notes:        "Rollback un-spend and stake-credential sweep, spent-UTxO prune",
+		Critical:     true,
 	},
 	// idx_utxo_staking_deleted_amount is deliberately NOT deferred.
 	// FlushBatch -> refreshRewardLiveStakeAggregates runs a per-credential
@@ -267,13 +256,13 @@ var Manifest = []Index{
 		Notes:   "Script-locked supply", Critical: true,
 	},
 	{
-		Name: "idx_transaction_block_hash", Table: "transaction",
+		Name: "idx_applied_transaction_block_hash", Table: "applied_transaction",
 		Columns: []string{"block_hash"},
 		Notes:   "Block transaction grouping", Critical: true,
 		CatchUpDroppable: true,
 	},
 	{
-		Name: "idx_transaction_slot", Table: "transaction",
+		Name: "idx_applied_transaction_slot", Table: "applied_transaction",
 		Columns: []string{"slot"},
 		Notes:   "Rollback and transaction history ordering", Critical: true,
 	},

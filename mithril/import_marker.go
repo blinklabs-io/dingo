@@ -215,3 +215,63 @@ func getCatchUpActive(db *database.Database) (bool, error) {
 	}
 	return val != "", nil
 }
+
+// syncKeyImmutableRetired records the lowest immutable file number still
+// present in the extracted tree while an interrupted load deletes chunks as
+// their blocks commit. Every chunk below it is committed to the blob store and
+// may be gone from disk, so a resumed run starts its download there instead of
+// fetching those chunks again. Ephemeral: cleared with the rest of sync_state
+// when the import completes.
+const syncKeyImmutableRetired = "mithril_immutable_retired_below"
+
+func setImmutableRetiredBelow(db *database.Database, num uint64) error {
+	if err := db.SetSyncState(
+		syncKeyImmutableRetired, strconv.FormatUint(num, 10), nil,
+	); err != nil {
+		return fmt.Errorf("recording retired immutable chunks: %w", err)
+	}
+	return nil
+}
+
+func getImmutableRetiredBelow(
+	db *database.Database,
+) (num uint64, ok bool, err error) {
+	val, err := db.GetSyncState(syncKeyImmutableRetired, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"reading retired immutable chunk marker: %w", err,
+		)
+	}
+	if val == "" {
+		return 0, false, nil
+	}
+	num, err = strconv.ParseUint(val, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"parsing retired immutable chunk marker %q: %w", val, err,
+		)
+	}
+	return num, true, nil
+}
+
+// resumeStartImmutable returns the lowest immutable file a run must fetch. An
+// interrupted load deleted every chunk below the recorded bound after its
+// blocks committed, so a resume fetches from there instead of the full range.
+// Only a resume honours it: a fresh or catch-up run never has one.
+func resumeStartImmutable(
+	db *database.Database,
+	mode syncMode,
+	start uint64,
+) (uint64, error) {
+	if mode != syncModeResume {
+		return start, nil
+	}
+	retiredBelow, ok, err := getImmutableRetiredBelow(db)
+	if err != nil {
+		return 0, err
+	}
+	if ok && retiredBelow > start {
+		return retiredBelow, nil
+	}
+	return start, nil
+}

@@ -236,6 +236,7 @@ type BlockForger struct {
 	// Production mode components
 	creds            *PoolCredentials
 	leaderChecker    LeaderChecker
+	slotArbiter      SlotArbiter
 	blockBuilder     BlockBuilder
 	blockBroadcaster BlockBroadcaster
 	confirmedTxs     ConfirmedTxRemover
@@ -642,8 +643,13 @@ type ForgerConfig struct {
 
 	// Production mode configuration. Credentials must have passed
 	// ValidateKESPeriod so the forger can enforce the genesis KES lifetime.
-	Credentials      *PoolCredentials
-	LeaderChecker    LeaderChecker
+	Credentials   *PoolCredentials
+	LeaderChecker LeaderChecker
+	// SlotArbiter, when set, decides a slot this pool leads together with
+	// another pool the same node forges for. Only one block per slot can stay
+	// on chain, so the node forges for one of them. Nil forges every leader
+	// slot.
+	SlotArbiter      SlotArbiter
 	BlockBuilder     BlockBuilder
 	BlockBroadcaster BlockBroadcaster
 	ConfirmedTxs     ConfirmedTxRemover
@@ -840,6 +846,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		slotDuration:               cfg.SlotDuration,
 		creds:                      cfg.Credentials,
 		leaderChecker:              cfg.LeaderChecker,
+		slotArbiter:                cfg.SlotArbiter,
 		blockBuilder:               cfg.BlockBuilder,
 		blockBroadcaster:           cfg.BlockBroadcaster,
 		confirmedTxs:               cfg.ConfirmedTxs,
@@ -1197,6 +1204,18 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to get current slot: %w", err)
 	}
+	// Every exit reports this pool's outcome for the slot to the arbiter, so
+	// a pool of this node that yielded the slot to this one forges it when
+	// this one refuses or fails (see SlotArbiter). Adoption reports at once,
+	// before the observer runs; the deferred call reports any other exit.
+	slotReported := false
+	reportSlot := func(adopted bool) {
+		if !slotReported {
+			slotReported = true
+			f.reportSlotSafe(currentSlot, adopted)
+		}
+	}
+	defer reportSlot(false)
 	f.prepareRemoteSignerForUpcomingLeaderSlot(currentSlot)
 
 	// Advance the KES state on every wall-clock slot, before any chain gate or
@@ -1647,6 +1666,32 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 			f.metrics.forgeNotLeader.Inc()
 		}
 		return nil
+	}
+
+	// Another pool this node forges for may lead the same slot. Yielding to
+	// it is not a lost slot: the node's block for the slot is the other
+	// pool's, so it is counted apart from missed leader slots. The winner was
+	// chosen from leader VRF alone and can still refuse or fail, so this pool
+	// yields only once a block of the node's own is adopted for the slot. If
+	// the winner adopts none, or does not report by the slot's retry
+	// deadline, this pool goes on to its own checks and forges.
+	if yield, winner := f.yieldSlotSafe(currentSlot); yield {
+		if f.awaitWinnerSafe(ctx, currentSlot, f.yieldWaitDeadline(currentSlot)) {
+			f.logger.Info(
+				"forge skip: another pool of this node leads the slot with a better tiebreaker",
+				"slot", currentSlot,
+				"winning_pool", winner,
+			)
+			if f.metrics != nil {
+				f.metrics.forgeYieldedToOwnPool.Inc()
+			}
+			return nil
+		}
+		f.logger.Warn(
+			"another pool of this node won the slot but adopted no block; forging it",
+			"slot", currentSlot,
+			"winning_pool", winner,
+		)
 	}
 
 	// Every path out of here that does not adopt this node's own block is a
@@ -2234,6 +2279,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	}
 	forgeAdopted = true
 	leaderSlotMissed = false
+	reportSlot(true)
 	// Traced here so the span ends at adoption, before the observer below,
 	// which may be slow.
 	traceForgedBlock(ctx, block, currentSlot, forgeStartTime)
@@ -3920,6 +3966,102 @@ func (f *BlockForger) checkLeaderSafe(slot uint64) (isLeader bool) {
 		}
 	}()
 	return f.leaderChecker.ShouldProduceBlock(slot)
+}
+
+// SlotArbiter chooses which of a node's pools forges a slot that several of
+// them lead.
+//
+// The winner is chosen from leader VRF alone, before the winner's own later
+// refusals (operational certificate counter, stale tip, a credential change)
+// and before it builds, validates and adopts. A pool that yields therefore
+// waits for the winner's outcome rather than giving the slot up: it skips the
+// slot only once a pool of the node has adopted a block for it, and forges
+// when the winner reports that it adopted none, when ctx ends, or when the
+// slot's retry deadline passes without a report. Any doubt forges: an extra
+// block of the node's own costs less than a lost slot.
+type SlotArbiter interface {
+	// YieldSlot reports whether the pool asking should leave slot to another
+	// pool of the same node, because that pool leads it too and wins the
+	// tiebreak, and which pool that is.
+	YieldSlot(slot uint64) (yield bool, winner string)
+	// AwaitWinner waits, after YieldSlot said to yield, until the slot's
+	// outcome is known or until passes. It returns true only when a pool of
+	// the node adopted a block for slot; false means forge.
+	AwaitWinner(ctx context.Context, slot uint64, until time.Time) (adopted bool)
+	// ReportSlot records the outcome of the asking pool's forge check for
+	// slot: adopted when it adopted its own block. Every forge check reports
+	// once, on every exit, so a winner that refuses or fails releases the
+	// slot to a pool waiting on it.
+	ReportSlot(slot uint64, adopted bool)
+}
+
+// yieldSlotSafe calls the pluggable SlotArbiter, recovering a panic. A
+// recovered panic forges: the arbiter only prevents a second block of this
+// node's own, so failing open costs at most one extra block in a slot both
+// pools lead, while failing closed would lose the slot.
+func (f *BlockForger) yieldSlotSafe(slot uint64) (yield bool, winner string) {
+	if f.slotArbiter == nil {
+		return false, ""
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			yield, winner = false, ""
+			f.reportForgeCallbackPanic("slot_arbiter", r)
+		}
+	}()
+	return f.slotArbiter.YieldSlot(slot)
+}
+
+// yieldWaitDeadline bounds how long a pool that yielded slot waits for the
+// winner's outcome: the slot's retry deadline, so the pool still has the rest
+// of the slot to forge if the winner adopts nothing, and the forge loop wakes
+// for the next slot on time. A slot shorter than the retry margin has that
+// deadline behind it already, and would not wait at all, so both pools would
+// forge; it waits half of what remains of the slot instead. Without a slot
+// clock answer it waits one slot.
+func (f *BlockForger) yieldWaitDeadline(slot uint64) time.Time {
+	if end, ok := f.slotEnd(slot); ok {
+		deadline := end.Add(-f.forgeSelectionRetryMargin)
+		if now := time.Now(); !deadline.After(now) {
+			deadline = now.Add(end.Sub(now) / 2)
+		}
+		return deadline
+	}
+	wait := f.slotDuration
+	if wait <= 0 {
+		wait = time.Second
+	}
+	return time.Now().Add(wait)
+}
+
+// awaitWinnerSafe calls SlotArbiter.AwaitWinner, recovering a panic. A
+// recovered panic forges, for the reason yieldSlotSafe gives.
+func (f *BlockForger) awaitWinnerSafe(
+	ctx context.Context,
+	slot uint64,
+	until time.Time,
+) (adopted bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			adopted = false
+			f.reportForgeCallbackPanic("slot_arbiter", r)
+		}
+	}()
+	return f.slotArbiter.AwaitWinner(ctx, slot, until)
+}
+
+// reportSlotSafe calls SlotArbiter.ReportSlot, recovering a panic. A pool
+// waiting on a report that never comes forges at its deadline.
+func (f *BlockForger) reportSlotSafe(slot uint64, adopted bool) {
+	if f.slotArbiter == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			f.reportForgeCallbackPanic("slot_arbiter", r)
+		}
+	}()
+	f.slotArbiter.ReportSlot(slot, adopted)
 }
 
 // validateForgedBlockSafe calls the pluggable BlockValidator,

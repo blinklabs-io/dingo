@@ -82,6 +82,12 @@ const (
 	// wait. The header was withheld, so the fresh intersection delivers it
 	// again. It is not a peer-fault signal.
 	ChainsyncResyncReasonEagernessWaitExpired = "eagerness wait expired"
+	// ChainsyncResyncReasonWithheldCandidateAncestry re-intersects a connection
+	// whose header above the applied tip could not be linked to the peer's
+	// retained history or the local chain. The header was withheld, so the
+	// fresh intersection redelivers the headers that link it. It is not a
+	// peer-fault signal.
+	ChainsyncResyncReasonWithheldCandidateAncestry = "withheld candidate ancestry"
 	// ChainsyncResyncReasonIngressPromotion re-intersects an ingress-eligible
 	// client that skipped headers while observing, so normal admission can
 	// replay its complete chain from a safe local intersection.
@@ -121,6 +127,12 @@ const (
 	// with its headers dropped. It carries no ConnectionId, is not a
 	// peer-fault signal and does not impose a peer cooldown.
 	ChainsyncResyncReasonNetworkIngestReleased = "network ingest released"
+	// ChainsyncResyncReasonObserverResumed re-intersects an observer
+	// connection that stopped reading headers while nothing counted them and
+	// now reads again. Its cursor stayed where it stopped while the local
+	// chain moved on. It is not a peer-fault signal and does not impose a
+	// peer cooldown.
+	ChainsyncResyncReasonObserverResumed = "observer resumed"
 )
 
 // ChainsyncResyncEvent carries the connection ID that should
@@ -146,10 +158,12 @@ func IsLocalChainsyncResyncReason(reason string) bool {
 		ChainsyncResyncReasonDisconnectedHeaderAdmission,
 		ChainsyncResyncReasonGenesisCorroborationHoldExpired,
 		ChainsyncResyncReasonEagernessWaitExpired,
+		ChainsyncResyncReasonWithheldCandidateAncestry,
 		ChainsyncResyncReasonForecastHorizonNoWork,
 		ChainsyncResyncReasonHeaderPastForecastHorizon,
 		ChainsyncResyncReasonBufferedHeaderLimitExceeded,
 		ChainsyncResyncReasonBehindLocalTip,
+		ChainsyncResyncReasonObserverResumed,
 		ChainsyncResyncReasonNetworkIngestReleased,
 		ChainsyncResyncReasonLocalLedgerRollback:
 		return true

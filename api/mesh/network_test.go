@@ -16,9 +16,7 @@ package mesh
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -351,21 +349,6 @@ func TestRequestRequiresSingleJSONValue(t *testing.T) {
 						requireMeshError(t, rec, ErrInvalidRequest, http.StatusInternalServerError)
 					}
 				})
-			}
-		})
-	}
-}
-
-func TestRequestTrailingWhitespaceByteLimit(t *testing.T) {
-	for _, delta := range []int{-1, 0, 1} {
-		t.Run(fmt.Sprintf("limit%+d", delta), func(t *testing.T) {
-			h := newTestHandler(t, newTestDeps())
-			body := "{}" + strings.Repeat(" ", maxRequestBody-2+delta)
-			rec := postRaw(t, h, "/network/list", body)
-			if delta <= 0 {
-				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-			} else {
-				requireMeshError(t, rec, ErrInvalidRequest, http.StatusInternalServerError)
 			}
 		})
 	}

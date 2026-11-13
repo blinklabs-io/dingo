@@ -20,8 +20,10 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net"
+	rtrace "runtime/trace"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -29,6 +31,7 @@ import (
 
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -201,6 +204,12 @@ type ChainSelectorConfig struct {
 	// callers hold the selector lock, so it must not call back into the
 	// selector.
 	ConnectionLive func(ouroboros.ConnectionId) bool
+	// ChainSyncJumping enables ChainSync Jumping records
+	// (RecordJumpAgreement, RecordJumpRejection): a peer that answers a jump
+	// to the dynamo's point becomes a Limit on Eagerness candidate and
+	// witness without streaming headers. Off by default; while off both
+	// calls are refused.
+	ChainSyncJumping bool
 	// PeerIdentity maps a connection to a control identity used to
 	// de-duplicate corroborating witnesses. A connection for which it returns
 	// "" has no trustworthy independence evidence and
@@ -474,7 +483,14 @@ type ChainSelector struct {
 	// chain the limit bounds. It has its own mutex because the limit is
 	// computed under the read lock.
 	eagernessAnchorMu sync.Mutex
-	eagernessAnchor   *eagernessAnchor
+	// witnessMatches remembers how far each corroboration comparison got. It
+	// has its own lock: the comparisons run under the selector's read lock.
+	witnessMatches  witnessMatches
+	eagernessAnchor *eagernessAnchor
+
+	// jumpRecords holds the candidate fragments ChainSync Jumping assigns to
+	// peers that do not stream (see jumping.go). Guarded by mutex.
+	jumpRecords map[ouroboros.ConnectionId]*jumpRecord
 
 	// ingressWake is closed when staged or committed peer frontiers change,
 	// waking headers held by AwaitIngressCorroboration. It has its own mutex
@@ -739,6 +755,9 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		forecastHorizonWitnesses: make(
 			map[ouroboros.ConnectionId]forecastHorizonWitness,
 		),
+		jumpRecords: make(
+			map[ouroboros.ConnectionId]*jumpRecord,
+		),
 		farTipClaims:              make(map[ouroboros.ConnectionId]farTipClaim),
 		pendingFarTipClaims:       make(map[ouroboros.ConnectionId]farTipClaim),
 		farTipRunsByIdentity:      make(map[string]farTipRunContinuity),
@@ -990,6 +1009,9 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		defer rtrace.StartRegion(
+			context.Background(), tracing.RegionChainSelectionAdmission,
+		).End()
 
 		if cs.loneFrontierBrokenLocked(
 			connId, observedTip, link, cs.farTipClaims,
@@ -1452,6 +1474,7 @@ func (cs *ChainSelector) rebuildPeerTipAdmissionFrontierLocked(
 	}
 	if previous := cs.pendingPeerTipFrontiers[connId]; previous != nil {
 		frontier.eagernessPaused = previous.eagernessPaused
+		frontier.catchUpPaused = previous.catchUpPaused
 	}
 	cs.pendingPeerTipFrontiers[connId] = frontier
 }
@@ -1561,6 +1584,7 @@ func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 		cs.applyPeerTipAdmissionUpdateLocked(frontier, update)
 		if previous := previousFrontiers[update.ConnectionId]; previous != nil {
 			frontier.eagernessPaused = previous.eagernessPaused
+			frontier.catchUpPaused = previous.catchUpPaused
 			*previous = *frontier
 			frontier = previous
 		}
@@ -1798,6 +1822,9 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		defer rtrace.StartRegion(
+			context.Background(), tracing.RegionChainSelectionAdmission,
+		).End()
 		if witness != nil && !cs.admittedPeerTipPointLocked(*witness) {
 			return
 		}
@@ -3159,9 +3186,11 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.peerTips, connId)
 	delete(cs.deliveredPeerTips, connId)
 	delete(cs.eagernessDeliveries, connId)
+	cs.witnessMatches.forget(connId)
 	delete(cs.pendingPeerTips, connId)
 	delete(cs.pendingPeerTipFrontiers, connId)
 	delete(cs.forecastHorizonWitnesses, connId)
+	delete(cs.jumpRecords, connId)
 	delete(cs.committedPeerTips, connId)
 	delete(cs.eligible, connId)
 	delete(cs.priority, connId)
@@ -3695,8 +3724,9 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 	}
 	// Genesis corroboration gate: a fast source must be corroborated by the
 	// configured minimum number of independent peers before it can steer
-	// selection. No-op outside Genesis mode / with corroboration disabled.
-	if !cs.isPeerCorroboratedLocked(connId, peerTip) {
+	// selection, or be within the Limit on Eagerness of a prefix they retain.
+	// No-op outside Genesis mode / with corroboration disabled.
+	if !cs.selectionCorroboratedLocked(connId, peerTip) {
 		if logSkip {
 			cs.config.Logger.Debug(
 				"skipping uncorroborated genesis fast source",
@@ -3935,9 +3965,11 @@ func (cs *ChainSelector) connectionPriority(
 }
 
 func (cs *ChainSelector) isPeerTipStale(peerTip *PeerChainTip) bool {
-	// A peer held at the Limit on Eagerness sends no tips because the pause
-	// stops them, so the silence is not evidence that it is gone.
-	return peerTip != nil && peerTip.eagernessPaused == 0 &&
+	// A held peer sends no tips because the pause stops them, and a jumper
+	// sends none because it is jumped, so the silence is not evidence that
+	// either is gone.
+	return peerTip != nil && !peerTip.streamPaused() &&
+		!peerTip.jumpRecord &&
 		peerTip.IsStale(cs.config.StaleTipThreshold)
 }
 
@@ -4715,6 +4747,9 @@ func (cs *ChainSelector) evaluateAndSwitch(generationPinned bool) bool {
 		defer releaseGeneration()
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		defer rtrace.StartRegion(
+			context.Background(), tracing.RegionChainSelectionEvaluate,
+		).End()
 		switchOccurred, switchEvent, selectionEvent, corroborationEvent = cs.evaluateBestPeerLocked()
 		sparse = cs.genesisDensityDisconnectsLocked()
 	}()
@@ -5154,12 +5189,52 @@ func (cs *ChainSelector) sweepDeadDeliveredPeerTips() {
 		if _, tracked := cs.peerTips[connId]; !tracked {
 			delete(cs.deliveredPeerTips, connId)
 			delete(cs.eagernessDeliveries, connId)
+			cs.witnessMatches.forget(connId)
 		}
+	}
+}
+
+// sweepDeadJumpRecords removes the jump records of connections that are no
+// longer live. RecordJumpAgreement probes liveness before taking cs.mutex, so
+// an agreement racing the connection's removal can store a record after
+// deletePeerLocked dropped it. Nothing else would remove that record, and as a
+// Limit on Eagerness candidate exempt from the stale-tip rule it would hold
+// the limit at its frozen point. ConnectionLive is probed outside cs.mutex, as
+// in sweepDeadDeliveredPeerTips.
+func (cs *ChainSelector) sweepDeadJumpRecords() {
+	if cs.config.ConnectionLive == nil {
+		return
+	}
+	cs.mutex.RLock()
+	candidates := maps.Clone(cs.jumpRecords)
+	cs.mutex.RUnlock()
+	var dead []ouroboros.ConnectionId
+	for connId := range candidates {
+		if !cs.config.ConnectionLive(connId) {
+			dead = append(dead, connId)
+		}
+	}
+	if len(dead) == 0 {
+		return
+	}
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	removed := false
+	for _, connId := range dead {
+		// A record replaced meanwhile belongs to a reconnect reusing the id.
+		if cs.jumpRecords[connId] == candidates[connId] {
+			delete(cs.jumpRecords, connId)
+			removed = true
+		}
+	}
+	if removed {
+		cs.signalIngressChange()
 	}
 }
 
 func (cs *ChainSelector) cleanupStalePeers() {
 	cs.sweepDeadDeliveredPeerTips()
+	cs.sweepDeadJumpRecords()
 	var switchEvent *event.Event
 
 	func() {
@@ -5174,7 +5249,7 @@ func (cs *ChainSelector) cleanupStalePeers() {
 			// skipped from selection after StaleTipThreshold, but we keep them
 			// tracked for an additional period in case they reconnect or update.
 			// After 2x the threshold, we consider them truly gone and remove them.
-			if peerTip.eagernessPaused == 0 &&
+			if !peerTip.streamPaused() &&
 				peerTip.IsStale(cs.config.StaleTipThreshold*2) {
 				cs.config.Logger.Debug(
 					"removing very stale peer",

@@ -54,6 +54,13 @@ linters:
       - third_party$
       - builtin$
   settings:
+    gosec:
+      excludes:
+        # G112 asks every http.Server to set ReadHeaderTimeout. Dingo's
+        # client-facing APIs deliberately set no timeouts and no request caps:
+        # the operator decides what limits apply, so this finding is not a
+        # defect.
+        - G112
     recvcheck:
       # UnmarshalJSON has to take a pointer to mutate the receiver, while
       # MarshalJSON conventionally takes a value so both a value and a pointer

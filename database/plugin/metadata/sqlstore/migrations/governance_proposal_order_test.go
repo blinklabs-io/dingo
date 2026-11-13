@@ -39,7 +39,7 @@ func TestGovernanceProposalOrderBackfillUsesStoredBlockPosition(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 59)
+	require.Len(t, registry, 64)
 
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{

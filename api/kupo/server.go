@@ -19,23 +19,21 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 )
 
-// responseWriteTimeout bounds how long one response write may block on a
-// client that has stopped reading. It is refreshed before every write, so a
-// steadily read stream of any length is unaffected.
 const (
-	responseWriteTimeout      = 30 * time.Second
-	matchStreamTimeout        = 5 * time.Minute
-	maxConcurrentMatchStreams = 3
-	maxMatchStreamsPerClient  = 1
+	// responseWriteTimeout bounds how long one response write may block on a
+	// client that has stopped reading. It is refreshed before every write, so
+	// a steadily read stream of any length is unaffected.
+	responseWriteTimeout = 2 * time.Minute
+	// maxRequestBodyBytes bounds a request body; pattern-mutation bodies are
+	// far smaller.
+	maxRequestBodyBytes int64 = 4 << 20
 )
 
 // Server is a Kupo-compatible HTTP API backed by Dingo's complete index.
@@ -45,8 +43,6 @@ type Server struct {
 	node                 KupoNode
 	listener             *apilistener.Listener
 	responseWriteTimeout time.Duration
-	matchStreamTimeout   time.Duration
-	matchAdmission       *matchAdmission
 }
 
 // New creates a Kupo-compatible server.
@@ -64,63 +60,7 @@ func New(cfg Config, node KupoNode, logger *slog.Logger) *Server {
 		node:                 node,
 		listener:             apilistener.New("Kupo API", logger),
 		responseWriteTimeout: responseWriteTimeout,
-		matchStreamTimeout:   matchStreamTimeout,
-		matchAdmission: newMatchAdmission(
-			maxConcurrentMatchStreams,
-			maxMatchStreamsPerClient,
-		),
 	}
-}
-
-type matchAdmission struct {
-	mu           sync.Mutex
-	active       int
-	activeClient map[string]int
-	maxActive    int
-	maxClient    int
-}
-
-func newMatchAdmission(maxActive, maxClient int) *matchAdmission {
-	return &matchAdmission{
-		activeClient: make(map[string]int),
-		maxActive:    maxActive,
-		maxClient:    maxClient,
-	}
-}
-
-func (a *matchAdmission) acquire(ctx context.Context, client string) (func(), bool) {
-	select {
-	case <-ctx.Done():
-		return nil, false
-	default:
-	}
-
-	a.mu.Lock()
-	if a.active >= a.maxActive || a.activeClient[client] >= a.maxClient {
-		a.mu.Unlock()
-		return nil, false
-	}
-	a.active++
-	a.activeClient[client]++
-	a.mu.Unlock()
-
-	return func() {
-		a.mu.Lock()
-		a.active--
-		a.activeClient[client]--
-		if a.activeClient[client] == 0 {
-			delete(a.activeClient, client)
-		}
-		a.mu.Unlock()
-	}, true
-}
-
-func matchClient(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return r.RemoteAddr
 }
 
 // corsExposeHeaders lists every response header this API sets that is not
@@ -141,7 +81,6 @@ func (s *Server) handler() http.Handler {
 	}
 	mux.HandleFunc("/", s.handleNotFound)
 
-	const maxRequestBodyBytes int64 = 1 << 20
 	limited := http.MaxBytesHandler(s.boundWrites(mux), maxRequestBodyBytes)
 	return httpcors.Handler(limited, httpcors.Config{
 		AllowedOrigins: s.config.CORSAllowedOrigins,
@@ -163,9 +102,10 @@ func (s *Server) boundWrites(next http.Handler) http.Handler {
 // progressResponseWriter refreshes the connection write deadline before each
 // body write. A response holds its read snapshot until the handler returns,
 // and a client that stops reading would otherwise block a write, and keep
-// that snapshot, for as long as the connection stays open. The last deadline
-// stays armed while net/http flushes after the handler returns; net/http
-// clears it before reusing the connection.
+// that snapshot, for as long as the connection stays open. Re-arming per write
+// instead of using a server WriteTimeout keeps arbitrarily long streams
+// intact. The last deadline stays armed while net/http flushes after the
+// handler returns; net/http clears it before reusing the connection.
 type progressResponseWriter struct {
 	http.ResponseWriter
 	controller *http.ResponseController
@@ -250,15 +190,9 @@ func (s *Server) Start(ctx context.Context) error {
 			Handler:           s.handler(),
 			ReadHeaderTimeout: 60 * time.Second,
 			ReadTimeout:       60 * time.Second,
-			// WriteTimeout deliberately 0, as in api/utxorpc: /matches
-			// streams an unbounded result set, so any fixed deadline
-			// truncates a legitimately large response. boundWrites instead
-			// re-arms a per-write deadline, so a client that stops reading
-			// releases its read snapshot within responseWriteTimeout. The
-			// read-snapshot admission cap in
-			// database.NewReadSnapshotContext, one below the read pool size,
-			// still keeps the last connection free for rollback while
-			// clients stream.
+			// WriteTimeout is deliberately 0: /matches streams an unbounded
+			// result set, so a fixed deadline would truncate a large
+			// response. boundWrites re-arms a per-write deadline instead.
 			WriteTimeout: 0,
 			IdleTimeout:  120 * time.Second,
 		}

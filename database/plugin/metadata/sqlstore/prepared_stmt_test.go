@@ -83,10 +83,10 @@ func TestGetUtxoUsesPreparedLiveAndIncludingSpentStatements(t *testing.T) {
 		AddedSlot: 42,
 	}))
 
-	liveStmt, ok := store.lookupCachedStmt(getLiveUtxoByRefQuery)
+	liveStmt, ok := store.lookupCachedStmt(store.utxoSQL().getLiveByRef)
 	require.True(t, ok)
 	require.NotNil(t, liveStmt)
-	spentStmt, ok := store.lookupCachedStmt(getUtxoIncludingSpentByRefQuery)
+	spentStmt, ok := store.lookupCachedStmt(store.utxoSQL().getIncludingSpent)
 	require.True(t, ok)
 	require.NotNil(t, spentStmt)
 
@@ -99,7 +99,7 @@ func TestGetUtxoUsesPreparedLiveAndIncludingSpentStatements(t *testing.T) {
 
 	_, err = store.writeDB.ExecContext(
 		t.Context(),
-		"UPDATE utxo SET deleted_slot = 43 WHERE tx_id = ? AND output_idx = ?",
+		"UPDATE utxo SET deleted_slot = 43 WHERE tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?) AND output_idx = ?",
 		txID,
 		3,
 	)
@@ -483,7 +483,7 @@ func TestCacheableForDialect(t *testing.T) {
 	}{
 		{
 			"sqlite insert with returning",
-			"sqlite", insertUtxoQueryIgnoreConflict, true,
+			"sqlite", sqliteUtxoSQL.insertIgnore, true,
 		},
 		{
 			"sqlite insert without conflict clause",
@@ -491,11 +491,11 @@ func TestCacheableForDialect(t *testing.T) {
 		},
 		{
 			"postgres insert with returning",
-			"postgres", insertUtxoQueryIgnoreConflict, true,
+			"postgres", sharedUtxoSQL.insertIgnore, true,
 		},
 		{
 			"mysql insert with returning (ignore conflict)",
-			"mysql", insertUtxoQueryIgnoreConflict, false,
+			"mysql", sharedUtxoSQL.insertIgnore, false,
 		},
 		{
 			"mysql insert with returning (no conflict clause)",
@@ -586,7 +586,7 @@ func TestPrepareHotStatementsSkipsReturningIDQueryOnMySQL(t *testing.T) {
 	_, ok := mysqlStore.lookupCachedStmt(insertUtxoQuery)
 	require.False(t, ok, "expected insertUtxoQuery to be uncached on MySQL")
 
-	_, ok = mysqlStore.lookupCachedStmt(insertUtxoQueryIgnoreConflict)
+	_, ok = mysqlStore.lookupCachedStmt(sharedUtxoSQL.insertIgnore)
 	require.False(
 		t,
 		ok,
@@ -621,7 +621,7 @@ func TestCacheableSQLiteInsertResultQueries(t *testing.T) {
 	for _, dialect := range []string{"sqlite", "postgres", "mysql"} {
 		t.Run(dialect, func(t *testing.T) {
 			t.Parallel()
-			for _, query := range []string{insertUtxoResultQuery, insertUtxoResultIgnoreConflictQuery} {
+			for _, query := range []string{sqliteUtxoSQL.insertResult, sqliteUtxoSQL.insertResultIgnore} {
 				require.Equal(t, dialect == "sqlite", cacheableForDialect(dialect, query), "SQLite insert-result queries must not be prepared on other providers")
 			}
 		})

@@ -976,29 +976,47 @@ func TestValidateTxDijkstraTieredRefScriptFeeBoundaries(t *testing.T) {
 	}
 }
 
-func TestValidateTxDijkstraChildRefScriptsExcludedFromFee(t *testing.T) {
+func TestValidateTxDijkstraChildRefScriptsIncludedInFee(t *testing.T) {
 	t.Parallel()
 	const size = 250
 	state := newRefFeeTestState(t, size)
+	minFee := uint64(refFeeTestBase) + tieredRefScriptFee(size)
 
-	// The script sits on a sub-transaction reference input, so the top-level
-	// fee stays at the size-only minimum.
+	// The script sits on a sub-transaction reference input; the minimum fee
+	// charges it like a top-level reference script.
 	err := ValidateTxDijkstra(
-		newRefFeeTestTx(t, refFeeTestBase, true), 0, state, refFeeTestParams(),
+		newRefFeeTestTx(t, minFee, true), 0, state, refFeeTestParams(),
 	)
 	require.NoError(t, err)
 
 	err = ValidateTxDijkstra(
-		newRefFeeTestTx(
-			t,
-			refFeeTestBase-1,
-			true,
-		),
-		0,
-		state,
-		refFeeTestParams(),
+		newRefFeeTestTx(t, minFee-1, true), 0, state, refFeeTestParams(),
 	)
 	requireFeeTooSmall(t, err)
+}
+
+func TestDijkstraEvaluationFeeChargesChildRefScripts(t *testing.T) {
+	t.Parallel()
+	const size = 250
+	state := newRefFeeTestState(t, size)
+	params := refFeeTestParams()
+	var exUnits lcommon.ExUnits
+
+	topFee, err := dijkstraEvaluationFee(
+		newRefFeeTestTx(t, refFeeTestBase, false), state, params, exUnits,
+	)
+	require.NoError(t, err)
+	childFee, err := dijkstraEvaluationFee(
+		newRefFeeTestTx(t, refFeeTestBase, true), state, params, exUnits,
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		topFee,
+		childFee,
+		"sub-transaction reference scripts must be charged like top-level ones",
+	)
+	require.GreaterOrEqual(t, childFee, tieredRefScriptFee(size))
 }
 
 func TestValidateTxDijkstraRefScriptFeeWithEmptyGenesisUpgrade(t *testing.T) {

@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -81,7 +82,7 @@ func newCertifiedEndorserLedger(t *testing.T) *certifiedEndorserLedger {
 	// certifying ranking block.
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
-	_, err = raw.Exec(
+	_, err = testutil.ExecTransactionInsert(raw,
 		`INSERT INTO "transaction" (hash, block_hash, slot, fee, collateral_fee, ttl, block_index, valid) VALUES (?, ?, ?, '0', '0', '0', 0, TRUE)`,
 		tx.Hash().Bytes(),
 		f.Certifier.Hash().Bytes(),

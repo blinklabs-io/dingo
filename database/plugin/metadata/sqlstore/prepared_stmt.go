@@ -30,7 +30,23 @@ import (
 // sumCredentialUtxoStakeQuery's doc comment does, that it is worth the
 // caching mechanism's overhead and that it is safe to prepare once and
 // reuse under this Store's single write connection.
-var hotStatements = func() []string {
+var (
+	// hotStatements is the list of the SQLite store, the dialect whose
+	// statements the tests exercise; sharedHotStatements is the list of
+	// PostgreSQL and MySQL. Both are fixed at package initialisation.
+	hotStatements       = hotStatementsFor(sqliteUtxoSQL)
+	sharedHotStatements = hotStatementsFor(sharedUtxoSQL)
+)
+
+// hotList returns the hot statements of the store's dialect.
+func (s *Store) hotList() []string {
+	if s.dialect.Name() == "sqlite" {
+		return hotStatements
+	}
+	return sharedHotStatements
+}
+
+func hotStatementsFor(u *utxoSQL) []string {
 	queries := []string{
 		sumCredentialUtxoStakeQuery,
 		rewardLiveStakeAccountQuery,
@@ -38,23 +54,25 @@ var hotStatements = func() []string {
 		rewardLiveStakeUpsertKeepPoolQuery,
 		rewardLiveStakeUtxoStakeQuery,
 		insertUtxoQuery,
-		insertUtxoQueryIgnoreConflict,
-		insertUtxoResultQuery,
-		insertUtxoResultIgnoreConflictQuery,
-		repairConflictedUtxoQuery,
+		u.insertIgnore,
+		u.repairConflicted,
+		u.hydrate,
+		u.clearStaleSpend,
+		u.amountByOutput,
+		u.idByOutput,
+		u.idByRef,
 		importAssetQuery,
 		getAssetIDQuery,
-		getLiveUtxoByRefQuery,
-		getUtxoIncludingSpentByRefQuery,
-		transactionInsertSQL,
-		transactionBatchInsertSQL,
-		transactionBatchInsertResultSQL,
-		transactionBatchConflictUpdateSQL,
-		transactionBatchConflictIDSQL,
+		u.getLiveByRef,
+		u.getIncludingSpent,
+		transactionIdentityInsertSQL,
+		transactionIdentityInsertReturningSQL,
+		transactionIdentityIDSQL,
+		appliedTransactionInsertSQL,
+		appliedTransactionUpdateSQL,
 		committeeHotAuthorizationDeleteIDQuery,
-		consumeUtxoSQL,
-		consumeUtxoSQLiteReturningSQL,
-		getUtxoSpendStateQuery,
+		u.getSpendState,
+		u.getSpendStateHash,
 		poolOpCertSequenceInsertSQL,
 		poolOpCertSequenceBySlotSQL,
 		poolUpdateLatestOpCertSequenceSQL,
@@ -69,7 +87,7 @@ var hotStatements = func() []string {
 		governanceVoteHistoryInsertQuery,
 		governanceVoteCastExistsQuery,
 		poolByKeyHashQuery,
-		spendScriptHashQuery,
+		u.spendScriptHash,
 		deleteRedeemerScriptsSQL,
 		upsertUtxoReferenceScriptQuery,
 		updateCertificateSpecializedIDSQL,
@@ -87,18 +105,31 @@ var hotStatements = func() []string {
 		sqlitequery.GetSyncStateQuery,
 		sqlitequery.SetTipQuery,
 		sqlitequery.SetBlockNonceQuery,
-		utxoStakeConsumedDeltaQuery(1),
-		utxoStakeConsumedDeltaQuery(2),
-		utxoStakeConsumedDeltaQuery(4),
-		utxoStakeConsumedDeltaQuery(8),
-		utxoStakeConsumedDeltaQuery(16),
-		utxoStakeConsumedDeltaQuery(32),
-		utxoStakeConsumedDeltaQuery(64),
-		utxoStakeConsumedDeltaQuery(128),
-		utxoStakeConsumedDeltaQuery(256),
-		utxoStakeConsumedDeltaQuery(400),
 	}
 	queries = append(queries, upsertAccountChangedSQLs[:]...)
+	for _, size := range sqliteInListSizes {
+		queries = append(queries, u.stakeConsumedDeltaQuery(size))
+	}
+	for _, table := range transactionWitnessTables {
+		queries = append(queries, TransactionWitnessCleanupSQL(table))
+	}
+	for _, table := range certificateTables {
+		queries = append(queries, certificateTableCleanupSQL(table))
+	}
+	for _, size := range cachedAddressInputQuerySizes {
+		queries = append(queries, u.addressInputsQuery(size))
+		for _, table := range []string{
+			utxoCollateralEdgeTable,
+			utxoReferenceEdgeTable,
+		} {
+			queries = append(queries, u.edgeInsertQuery(table, size))
+		}
+	}
+	if !u.sqlite {
+		return append(queries, consumeUtxoSQL)
+	}
+	queries = append(queries, u.insertResult, u.insertResultIgnore,
+		consumeUtxoSQLiteReturningSQL)
 	for rowCount := 2; rowCount <= utxoInsertBatchSize; rowCount++ {
 		queries = append(queries, insertUtxoBatchQuery(rowCount))
 	}
@@ -108,33 +139,8 @@ var hotStatements = func() []string {
 			consumeUtxosBatchQuery(rowCount, true),
 		)
 	}
-	for _, table := range transactionWitnessTables {
-		queries = append(queries, TransactionWitnessCleanupSQL(table))
-	}
-	for _, table := range certificateTables {
-		queries = append(queries, certificateTableCleanupSQL(table))
-	}
-	for _, size := range cachedAddressInputQuerySizes {
-		queries = append(queries, addressTransactionInputQuery(size))
-		for _, table := range []string{
-			"utxo_collateral_input",
-			"utxo_reference_input",
-		} {
-			queries = append(queries,
-				utxoReferenceInsertBatchSQL(table, size),
-			)
-		}
-		for _, column := range []string{
-			"collateral_by_tx_id",
-			"referenced_by_tx_id",
-		} {
-			queries = append(queries,
-				utxoReferenceUpdateBatchSQL(column, size),
-			)
-		}
-	}
 	return queries
-}()
+}
 
 // hotStatementSet is hotStatements as a set, for borrowStmt's membership test.
 var hotStatementSet = func() map[string]struct{} {
@@ -159,17 +165,18 @@ var hotStatementSet = func() map[string]struct{} {
 // and are excluded from other dialects.
 func cacheableForDialect(dialect, query string) bool {
 	if dialect != "sqlite" && (isSQLiteBatchQuery(query) ||
-		query == transactionBatchInsertResultSQL ||
-		query == insertUtxoResultQuery || query == insertUtxoResultIgnoreConflictQuery) {
+		query == transactionIdentityInsertSQL ||
+		query == consumeUtxoSQLiteReturningSQL ||
+		query == sqliteUtxoSQL.insertResult ||
+		query == sqliteUtxoSQL.insertResultIgnore) {
 		return false
 	}
 	return dialect != "mysql" || !hasReturningID(query)
 }
 
 func isSQLiteBatchQuery(query string) bool {
-	return strings.Contains(query, "RETURNING id, tx_id, output_idx") ||
-		strings.Contains(query, "RETURNING tx_id, output_idx") ||
-		strings.Contains(query, "AND (tx_id, output_idx) IN (")
+	return strings.HasPrefix(query, "-- name: InsertUtxoBatch ") ||
+		strings.HasPrefix(query, "-- name: ConsumeUtxosBatch")
 }
 
 // prepareHotStatements prepares every entry in hotStatements once against
@@ -238,13 +245,13 @@ func (s *Store) prepareHotStatements(ctx context.Context) {
 // s.writeDB and returns them without installing anything; see
 // prepareHotStatements for the caching rules.
 func (s *Store) buildHotStatements(ctx context.Context) map[string]*sql.Stmt {
-	prepared := make(map[string]*sql.Stmt, len(hotStatements))
+	prepared := make(map[string]*sql.Stmt, len(s.hotList()))
 	// instrumentedQueryer, not newDialectQueryer directly: PrepareContext is
 	// not counted by countingQueryer (see metrics.go), so this only gains
 	// dialect translation here, same as before -- routed through the shared
 	// helper purely for consistency with every other call site.
 	dialectDB := s.instrumentedQueryer(s.writeDB)
-	for _, query := range hotStatements {
+	for _, query := range s.hotList() {
 		if !cacheableForDialect(s.dialect.Name(), query) {
 			// See insertUtxoQuery's doc comment (transaction_write.go): a
 			// RETURNING-id query is never safe to cache on MySQL, because
@@ -410,6 +417,10 @@ func (s *Store) borrowCachedStmt(
 		s.stmtBorrows = make(map[*sql.Stmt]int)
 	}
 	s.stmtBorrows[stmt]++
+	if s.stmtHits == nil {
+		s.stmtHits = make(map[string]uint64)
+	}
+	s.stmtHits[query]++
 	return stmt, func() { s.releaseCachedStmt(stmt) }, true
 }
 

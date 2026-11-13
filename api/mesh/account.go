@@ -71,12 +71,6 @@ func (s *Server) handleAccountBalance(
 		}
 		balances = aggregateAddressBalance(historical)
 	} else {
-		release, ok := s.acquireBulk()
-		if !ok {
-			writeError(w, ErrUnavailable)
-			return
-		}
-		defer release()
 		utxos, err := s.config.LedgerState.UtxosByAddress(
 			r.Context(),
 			[]ledger.Address{addr},
@@ -113,22 +107,11 @@ func (s *Server) writeAccountBalanceError(
 		"historical", point.historical,
 		"error", err,
 	)
-	if errors.Is(err, models.ErrUtxoQueryBudgetExceeded) ||
-		errors.Is(err, models.ErrTooManyUtxoResults) ||
+	if errors.Is(err, models.ErrTooManyUtxoResults) ||
 		errors.Is(err, dledger.ErrHistoricalStateUnavailable) {
 		writeError(w, wrapErr(ErrInvalidRequest, err))
 	} else {
 		writeError(w, wrapErr(ErrInternal, err))
-	}
-}
-
-// acquireBulk reserves a complete-result read slot without waiting.
-func (s *Server) acquireBulk() (func(), bool) {
-	select {
-	case s.bulkSlots <- struct{}{}:
-		return func() { <-s.bulkSlots }, true
-	default:
-		return nil, false
 	}
 }
 

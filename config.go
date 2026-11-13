@@ -298,7 +298,9 @@ type Config struct {
 	trustedNtCIdleTimeout                                                               time.Duration
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
+	onGenesisSelectionResolved                                                          func(genesisSelectionMode bool)
 	genesisCorroborationPeers                                                           int
+	genesisChainSyncJumping                                                             bool
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
@@ -307,6 +309,7 @@ type Config struct {
 	shelleyKESAgentAddress, shelleyKESAgentClientCertFile, shelleyKESAgentClientKeyFile string
 	shelleyKESAgentServerSPKISHA256                                                     string
 	shelleyKESAgentPlaintext                                                            bool
+	blockProducerPools                                                                  []BlockProducerPool
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
 	forgeEndorserBlockStalenessSlots                                                    uint64
@@ -629,6 +632,16 @@ func (n *Node) configValidate() error {
 			"invalid start era %q: must be empty or %q",
 			n.config.cfg.StartEra,
 			internalconfig.StartEraDijkstra,
+		)
+	}
+	if len(n.config.cfg.BlockProducerPools) > 0 &&
+		n.config.cfg.HasSinglePoolKeys() {
+		return errors.New(
+			"WithBlockProducerPools replaces WithShelleyVRFKey, " +
+				"WithShelleyKESKey, WithShelleyOperationalCertificate, " +
+				"WithShelleyKESAgentSocket, WithShelleyKESAgentMode, " +
+				"WithShelleyKESAgentRemote and WithShelleyKESAgentPlaintext; " +
+				"set them in each pool",
 		)
 	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
@@ -1021,12 +1034,14 @@ func (c *Config) syncCompatFields() {
 	c.maxTrustedLocalNtCConns = c.cfg.MaxTrustedLocalNtCConns
 	c.trustedNtCIdleTimeout = c.cfg.TrustedNtCIdleTimeout
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
+	c.genesisChainSyncJumping = c.cfg.GenesisBootstrap.ChainSyncJumping
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.shelleyKESAgentAddress, c.shelleyKESAgentClientCertFile, c.shelleyKESAgentClientKeyFile = c.cfg.ShelleyKESAgentAddress, c.cfg.ShelleyKESAgentClientCertFile, c.cfg.ShelleyKESAgentClientKeyFile
 	c.shelleyKESAgentServerSPKISHA256 = c.cfg.ShelleyKESAgentServerSPKISHA256
 	c.shelleyKeyWatchInterval = c.cfg.ShelleyKeyWatchInterval
 	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
+	c.blockProducerPools = slices.Clone(c.cfg.BlockProducerPools)
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
 	c.forgeEndorserBlockStalenessSlots = c.cfg.ForgeEndorserBlockStalenessSlots
@@ -1136,6 +1151,12 @@ func WithGenesisControlGroups(
 
 func WithGenesisCorroborationPeers(peers int) ConfigOptionFunc {
 	return func(c *Config) { c.cfg.GenesisBootstrap.CorroborationPeers = peers }
+}
+
+// WithGenesisChainSyncJumping turns ChainSync Jumping on or off for Genesis
+// selection.
+func WithGenesisChainSyncJumping(enabled bool) ConfigOptionFunc {
+	return func(c *Config) { c.cfg.GenesisBootstrap.ChainSyncJumping = enabled }
 }
 
 // WithGenesisLimitOnPatience configures the Genesis Limit on Patience for
@@ -1853,6 +1874,24 @@ func WithShelleyKESAgentPlaintext(plaintext bool) ConfigOptionFunc {
 	}
 }
 
+// BlockProducerPool is one pool a block producer forges for: its VRF key and
+// operational certificate files and one KES source.
+type BlockProducerPool = internalconfig.BlockProducerPool
+
+// WithBlockProducerPools lists every pool this block producer forges for, each
+// with its own VRF key, operational certificate and KES source. It replaces
+// the single-pool WithShelleyVRFKey, WithShelleyKESKey,
+// WithShelleyOperationalCertificate, WithShelleyKESAgentSocket,
+// WithShelleyKESAgentMode, WithShelleyKESAgentRemote and
+// WithShelleyKESAgentPlaintext options; New refuses a config that sets any of
+// them beside the pools. WithShelleyKESAgentSignTimeout and
+// WithShelleyKeyWatchInterval apply to every pool.
+func WithBlockProducerPools(pools ...BlockProducerPool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BlockProducerPools = slices.Clone(pools)
+	}
+}
+
 // WithLeiosVoteSigningKeyFile specifies the path to a hex-encoded BLS12-381
 // Leios vote signing key (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE). When set on a
 // block producer whose pool is a Leios committee member, the node emits
@@ -1863,9 +1902,10 @@ func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	}
 }
 
-// WithLeiosPersistenceRetentionSlots sets the number of slots of persisted
-// Leios endorser-block history retained for historical serving. Zero keeps all
-// persisted history.
+// WithLeiosPersistenceRetentionSlots sets the number of slots of uncertified
+// Leios endorser-block history retained for historical serving. Zero prunes an
+// uncertified endorser block once the immutable point passes its slot.
+// Certified endorser blocks are always retained.
 func WithLeiosPersistenceRetentionSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LeiosPersistenceRetentionSlots = slots
@@ -2956,6 +2996,15 @@ func (c *Config) ShelleyOperationalCertificate() string {
 	return c.cfg.ShelleyOperationalCertificate
 }
 
+// BlockProducerPools returns a copy of the pools listed with
+// WithBlockProducerPools, or nil when the single-pool settings are used.
+func (c *Config) BlockProducerPools() []BlockProducerPool {
+	if len(c.cfg.BlockProducerPools) == 0 {
+		return nil
+	}
+	return slices.Clone(c.cfg.BlockProducerPools)
+}
+
 // ForgeSyncToleranceSlots returns the sync tolerance for block forging.
 func (c *Config) ForgeSyncToleranceSlots() uint64 {
 	return c.cfg.ForgeSyncToleranceSlots
@@ -3088,6 +3137,14 @@ func (c *Config) genesisSelectionEligible() bool {
 		!c.intersectTip &&
 		len(c.intersectPoints) == 0 &&
 		!c.cardanoNodeConfig.PraosConsensusMode()
+}
+
+// WithGenesisSelectionResolved registers fn to receive the mode the chain
+// selector actually starts in, once the node has resolved it from the
+// configuration and the caught-up marker. It is called once per node start,
+// before the selector is built.
+func WithGenesisSelectionResolved(fn func(genesisSelectionMode bool)) ConfigOptionFunc {
+	return func(c *Config) { c.onGenesisSelectionResolved = fn }
 }
 
 // TopologyConfig returns the loaded topology configuration.

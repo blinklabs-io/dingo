@@ -176,7 +176,8 @@ func TestNodeAdapterBlockOutputAndFeesRetainsOutputHistory(t *testing.T) {
 			require.Equal(t, "41", output)
 			require.Equal(t, "21", fees)
 			// Legacy nullable validity is decoded as false by the hydrated path.
-			_, err = raw.Exec(`UPDATE "transaction" SET valid = NULL WHERE hash = ?`, fill32(2))
+			_, err = raw.Exec(`UPDATE applied_transaction SET valid = NULL
+WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, fill32(2))
 			require.NoError(t, err)
 			output, fees, err = adapter.blockOutputAndFees(t.Context(), hash)
 			require.NoError(t, err)

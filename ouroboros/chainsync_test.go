@@ -126,7 +126,7 @@ func TestChainsyncClientRollForwardCarriesHeaderCryptoVerdict(t *testing.T) {
 		EventBus:                 bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool { return true },
 	})
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		return 42, nil
 	}
@@ -165,7 +165,7 @@ func TestChainsyncClientRollForwardRecordsObserverDelivery(t *testing.T) {
 		observeCalled = true
 		return chainselection.PeerTipUpdateAccepted
 	}
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	f.o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -192,7 +192,7 @@ func TestChainsyncClientRollForwardRejectsUnverifiedObserverDelivery(
 ) {
 	t.Parallel()
 	f := newPatienceRollForwardFixture(t, false)
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	f.o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -246,7 +246,7 @@ func TestChainsyncPeerTipAdmissionUsesRevalidatedGeneration(t *testing.T) {
 			}
 		},
 	})
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -725,7 +725,7 @@ func TestChainsyncHeaderBackpressurePrecedesAdmissionAndCrypto(t *testing.T) {
 		return false, nil
 	}
 	var cryptoCalls atomic.Int32
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -1473,7 +1473,7 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	o.config.ChainsyncObserveAwaitReply = func(ouroboros.ConnectionId, ocommon.Point) {
 		awaitObserved = true
 	}
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	var verifiedConn ouroboros.ConnectionId
 	verificationCalls := 0
 	o.chainSelectionVerifyHeaderCrypto = func(
@@ -1596,7 +1596,7 @@ func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
 	// would itself have skipped verification for -- so a caller relying only on
 	// the real verifier's own error classification, without the readiness gate,
 	// must still get fast-sync-safe (deferred, not excluded) behavior.
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(
 		connId ouroboros.ConnectionId,
 		header gledger.BlockHeader,
@@ -1769,7 +1769,7 @@ func TestDeferredHeaderRecoveryResyncsWhenAppliedTipAdvancesDuringVerification(
 			return true
 		},
 	})
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	deferredErr := ls.ValidateChainSelectionHeaderCrypto(
 		nonByronTestHeader{&testBlockHeader{slotNumber: 200}},
 	)
@@ -1887,7 +1887,7 @@ func TestDeferredHeaderRecoveryKeepsPeerWhenDeferredHeaderIsApplied(
 			return true
 		},
 	})
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	header := nonByronTestHeader{&testBlockHeader{
 		hash:       gledger.Blake2b256{0xef},
 		slotNumber: 200,
@@ -1963,7 +1963,7 @@ func newDeferredHeaderRecoveryFixture(
 			return true
 		},
 	})
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	deferredErr := ls.ValidateChainSelectionHeaderCrypto(nonByronTestHeader{
 		&testBlockHeader{hash: gledger.Blake2b256{0xee}, slotNumber: 200},
 	})
@@ -2149,7 +2149,7 @@ func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(
 	})
 	o.chainsyncState = state
 	o.eventBus = bus
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -2235,7 +2235,7 @@ func TestChainsyncClientRollForwardDefersVerdictStaleBeforeObservation(
 			return selector.PreparePeerTipAdmissionDisposition(update)
 		},
 	})
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -2307,7 +2307,7 @@ func newDeferredHeaderFixture(
 		nonByronTestHeader{&testBlockHeader{blockNumber: 1, slotNumber: 200}},
 	)
 	require.True(t, ledger.IsHeaderVerificationDeferred(deferredErr))
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		return 0, deferredErr
 	}
@@ -2824,7 +2824,7 @@ func TestChainsyncClientRollForwardCompetingPeersOnlyVerifiedHeaderCounted(
 	})
 	o.chainsyncState = state
 	o.eventBus = bus
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(
 		_ ouroboros.ConnectionId,
 		h gledger.BlockHeader,
@@ -3921,7 +3921,7 @@ func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 	t.Run("verification failure", func(t *testing.T) {
 		t.Parallel()
 		f := newPatienceRollForwardFixture(t, true)
-		f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool {
+		f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool {
 			return true
 		}
 		f.o.chainSelectionVerifyHeaderCrypto = func(
@@ -3939,7 +3939,7 @@ func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 	t.Run("verification withheld", func(t *testing.T) {
 		t.Parallel()
 		f := newPatienceRollForwardFixture(t, true)
-		f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool {
+		f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool {
 			return true
 		}
 		f.o.chainSelectionVerifyHeaderCrypto = func(
@@ -4145,9 +4145,9 @@ func newChainsyncServerFixtureWithConfig(
 }
 
 // newChainsyncServerFixtureServing builds the fixture with the server's
-// waitForLedger behaviour chosen explicitly. The other constructors leave it
-// off, so their blocks are served as soon as the chain has them, without the
-// ledger applying them.
+// waitForLedger flag chosen explicitly. The flag selects which server
+// callbacks are wired (node-to-client or node-to-node); both gate roll-forwards
+// on the ledger having applied the block.
 func newChainsyncServerFixtureServing(
 	t *testing.T,
 	mode csmock.Mode,
@@ -4655,6 +4655,7 @@ func TestChainsyncServerRequestNextEmitsRollForwardWithExactBlock(
 	f.drainInitialRollback(t, csmock.OriginPoint())
 
 	block, point := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block, point)
 
 	require.NoError(t, f.h.RequestNext())
 
@@ -4688,7 +4689,8 @@ func TestChainsyncServerRequestNextEmitsRollBackwardOnChainRollback(
 
 	// Serve one block so the iterator is past origin, then roll the chain
 	// back so the next synchronous iterator result is a rollback event.
-	f.appendBlock(t, 1, 1, 0x01)
+	block, point := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block, point)
 	require.NoError(t, f.h.RequestNext())
 	require.True(t, f.observe(t).IsRollForward())
 
@@ -4915,6 +4917,7 @@ func TestChainsyncServerRequestNextEmitsAwaitReplyThenAsyncRollForward(
 
 	// A block arriving after the park must be served by the async goroutine.
 	block, point := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block, point)
 
 	msg := f.observe(t)
 	require.True(t, msg.IsRollForward(), "expected async RollForward")
@@ -4940,7 +4943,8 @@ func TestChainsyncServerRequestNextEmitsAsyncRollBackward(t *testing.T) {
 	f.drainInitialRollback(t, csmock.OriginPoint())
 
 	// Serve one block so the iterator is past origin.
-	f.appendBlock(t, 1, 1, 0x01)
+	block, point := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block, point)
 	require.NoError(t, f.h.RequestNext())
 	require.True(t, f.observe(t).IsRollForward())
 
@@ -4980,7 +4984,8 @@ func TestChainsyncServerRequestNextAsyncRollForwardFailureClosesConnection(
 
 	// Stop the protocol so the async send fails, then wake the iterator.
 	f.h.Server().Stop()
-	f.appendBlock(t, 1, 1, 0x01)
+	block, point := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block, point)
 
 	f.requireConnectionClosed(
 		t,
@@ -4999,7 +5004,8 @@ func TestChainsyncServerRequestNextAsyncRollBackwardFailureClosesConnection(
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.drainInitialRollback(t, csmock.OriginPoint())
 
-	f.appendBlock(t, 1, 1, 0x01)
+	block, point := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block, point)
 	require.NoError(t, f.h.RequestNext())
 	require.True(t, f.observe(t).IsRollForward())
 
@@ -5132,6 +5138,170 @@ func TestChainsyncServerLocalClientNotServedAheadOfLedger(t *testing.T) {
 	require.Equal(t, point3, rollbackPoint)
 }
 
+func TestChainsyncServerPeerNotServedAheadOfLedger(t *testing.T) {
+	t.Parallel()
+
+	// The harness uses node-to-client framing so its synthetic full block is
+	// observable while exercising the production node-to-node callback.
+	f := newChainsyncServerFixtureServing(
+		t,
+		csmock.ModeNtC,
+		OuroborosConfig{},
+		false,
+	)
+	block1, point1 := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block1, point1)
+	f.drainInitialRollback(t, csmock.OriginPoint())
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsRollForward(), "applied block is served")
+
+	header, ok := newTestBlockHeader(2, 2, 0x02).(*testBlockHeader)
+	require.True(t, ok)
+	header.prevHash = block1.Hash()
+	block2 := &testBlock{
+		BlockHeader: header,
+		blockType:   1,
+		cbor:        []byte{0x80},
+	}
+	require.NoError(
+		t,
+		f.o.ledgerState.Chain().AddBlock(t.Context(), block2, nil),
+	)
+	point2 := ocommon.NewPoint(block2.SlotNumber(), block2.Hash().Bytes())
+
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+	testutil.RequireNoReceive(
+		t,
+		f.h.Observed(),
+		100*time.Millisecond,
+		"a peer must not receive a block the ledger has not applied",
+	)
+	f.setTip(block2, point2)
+	require.True(t, f.observe(t).IsRollForward(), "expected RollForward")
+}
+
+func TestChainsyncServerPeerNotServedReplacementBeforeLedgerRollback(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newChainsyncServerFixtureServing(
+		t,
+		csmock.ModeNtC,
+		OuroborosConfig{},
+		false,
+	)
+	block1, point1 := f.appendBlock(t, 1, 1, 0x01)
+	appendChild := func(
+		parent *testBlock,
+		slot, blockNumber uint64,
+		hashByte byte,
+	) (*testBlock, ocommon.Point) {
+		t.Helper()
+		header, ok := newTestBlockHeader(
+			slot,
+			blockNumber,
+			hashByte,
+		).(*testBlockHeader)
+		require.True(t, ok)
+		header.prevHash = parent.Hash()
+		block := &testBlock{
+			BlockHeader: header,
+			blockType:   1,
+			cbor:        []byte{0x81, hashByte},
+		}
+		require.NoError(
+			t,
+			f.o.ledgerState.Chain().AddBlock(t.Context(), block, nil),
+		)
+		return block, ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
+	}
+	block2, _ := appendChild(block1, 2, 2, 0x02)
+	block3, point3 := appendChild(block2, 3, 3, 0x03)
+	f.setTip(block3, point3)
+
+	require.NoError(t, f.o.ledgerState.Chain().Rollback(t.Context(), point1))
+	replacement, replacementPoint := appendChild(block1, 2, 2, 0x04)
+	f.drainInitialRollback(t, point1)
+
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+	testutil.RequireNoReceive(
+		t,
+		f.h.Observed(),
+		100*time.Millisecond,
+		"a replacement branch must wait for the ledger to roll back",
+	)
+	f.setTip(block1, point1)
+	testutil.RequireNoReceive(
+		t,
+		f.h.Observed(),
+		100*time.Millisecond,
+		"a replacement block must wait for its own application",
+	)
+	f.setTip(replacement, replacementPoint)
+	require.True(t, f.observe(t).IsRollForward(), "expected RollForward")
+}
+
+func TestChainsyncServerPeerNotServedEqualSlotSuccessorAheadOfLedger(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newChainsyncServerFixtureServing(
+		t,
+		csmock.ModeNtC,
+		OuroborosConfig{},
+		false,
+	)
+	block1, point1 := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block1, point1)
+	f.drainInitialRollback(t, csmock.OriginPoint())
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsRollForward(), "applied block is served")
+
+	appendChild := func(
+		parent *testBlock,
+		slot, blockNumber uint64,
+		blockType int,
+		hashByte byte,
+	) (*testBlock, ocommon.Point) {
+		t.Helper()
+		header, ok := newTestBlockHeader(slot, blockNumber, hashByte).(*testBlockHeader)
+		require.True(t, ok)
+		header.prevHash = parent.Hash()
+		block := &testBlock{
+			BlockHeader: header,
+			blockType:   blockType,
+			cbor:        []byte{0x81, hashByte},
+		}
+		require.NoError(t, f.o.ledgerState.Chain().AddBlock(t.Context(), block, nil))
+		return block, ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
+	}
+
+	boundary, boundaryPoint := appendChild(
+		block1, 2, 1, int(gledger.BlockTypeByronEbb), 0x02,
+	)
+	successor, successorPoint := appendChild(
+		boundary, 2, 2, int(gledger.BlockTypeByronMain), 0x03,
+	)
+	f.setTip(boundary, boundaryPoint)
+
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsRollForward(), "applied boundary block is served")
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+	testutil.RequireNoReceive(
+		t,
+		f.h.Observed(),
+		100*time.Millisecond,
+		"an equal-slot successor must wait for its own application",
+	)
+	f.setTip(successor, successorPoint)
+	require.True(t, f.observe(t).IsRollForward(), "expected RollForward")
+}
+
 // parkOnByronBoundaryBlock serves block 1 to a local client, appends a Byron
 // epoch-boundary block and its same-slot successor, parks the client on the
 // boundary block, and then publishes the successor as the applied tip, as when
@@ -5155,6 +5325,7 @@ func parkOnByronBoundaryBlock(
 		parent *testBlock,
 		slot, blockNumber uint64,
 		hashByte byte,
+		blockType int,
 	) (*testBlock, ocommon.Point) {
 		t.Helper()
 		header, ok := newTestBlockHeader(
@@ -5166,7 +5337,7 @@ func parkOnByronBoundaryBlock(
 		header.prevHash = parent.Hash()
 		block := &testBlock{
 			BlockHeader: header,
-			blockType:   1,
+			blockType:   blockType,
 			cbor:        []byte{0x81, hashByte},
 		}
 		require.NoError(
@@ -5181,10 +5352,12 @@ func parkOnByronBoundaryBlock(
 
 	// A boundary block reuses its parent's block number; the next block
 	// shares its slot.
-	boundary, _ = appendChild(block1, 2, 1, 0x02)
+	boundary, _ = appendChild(block1, 2, 1, 0x02, gledger.BlockTypeByronEbb)
 	require.NoError(t, f.h.RequestNext())
 	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
-	successor, successorPoint := appendChild(boundary, 2, 2, 0x03)
+	successor, successorPoint := appendChild(
+		boundary, 2, 2, 0x03, gledger.BlockTypeByronMain,
+	)
 	if waiting != nil {
 		testutil.RequireReceive(t, waiting, 10*time.Second, "waiter parks")
 	}
@@ -7368,9 +7541,8 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
 		event.ChainsyncResyncReasonReplayRecoveryNonConverging,
 		event.ChainsyncResyncReasonChainSwitchCursorAhead,
-		// Every re-sync reason replaces the connection: an in-place
-		// re-intersect sends FindIntersect while RequestNext replies are
-		// still in flight, which the peer's replies then violate.
+		// This connection runs no chainsync client, so the local reasons
+		// below have nothing to re-intersect in place and replace it.
 		event.ChainsyncResyncReasonRollbackAhead,
 		event.ChainsyncResyncReasonHeaderValidationRecovery,
 		event.ChainsyncResyncReasonForecastCorroborationRecovery,
@@ -8598,4 +8770,61 @@ func TestChainsyncRollBackwardTrimsIneligibleObserverDeliveredHistory(
 		"an ineligible observer's rollback must reach the delivered history")
 	require.Equal(t, f.conn, e.ConnectionId)
 	require.Equal(t, point, e.Point)
+}
+
+// The ledger rejects headers it buffered for a connection when that
+// connection is resynced. Each rejection used to park a deferred-header
+// recovery, which was harmless while the resync closed the connection. After
+// an in-place re-intersect the rejected header belongs to a cursor that no
+// longer exists and the new cursor replays it, so parking a recovery only
+// re-intersects the peer a second time.
+func TestChainsyncRejectedHeaderOfReplacedCursorParksNoRecovery(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	conn := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	state := dchainsync.NewState(bus, nil)
+	require.True(t, state.AddClientConnId(conn))
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncObservePeerTip: func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition {
+			return chainselection.PeerTipUpdateAccepted
+		},
+		ChainsyncResolvePeerTip: func(chainselection.PeerTipUpdateEvent, bool) {},
+	})
+	o.eventBus = bus
+	o.chainsyncState = state
+	o.ledgerState = newTestLedgerState(t)
+
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		0,
+		header,
+		tip,
+	))
+	evt := testutil.RequireReceive(
+		t, ledgerCh, time.Second, "header sent for ledger admission",
+	)
+	chainsyncEvent, ok := evt.Data.(ledger.ChainsyncEvent)
+	require.True(t, ok)
+	require.NotNil(t, chainsyncEvent.PeerTipAdmission)
+
+	o.settleReintersectedCursor(conn, ocommon.NewPointOrigin())
+	chainsyncEvent.PeerTipAdmission(false)
+
+	o.deferredHeaderRecoveryMu.Lock()
+	_, parked := o.deferredHeaderRecovery[conn]
+	o.deferredHeaderRecoveryMu.Unlock()
+	require.False(t, parked,
+		"a header of a replaced cursor must not park a recovery")
 }

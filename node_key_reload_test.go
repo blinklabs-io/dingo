@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -326,7 +327,7 @@ func TestKeyWatchIsSkippedInServeKeyMode(t *testing.T) {
 	s := newSignModeReloadNode(t, 1)
 	s.config.shelleyKESAgentMode = kesagent.ModeServeKey
 	s.config.shelleyKeyWatchInterval = time.Millisecond
-	s.startKeyReloadLoops()
+	s.startKeyReloadLoops(s.credentialWatchBaseline())
 	t.Cleanup(s.stopKeyReloadLoops)
 	require.Contains(t, s.logs.String(), "ignored in KES agent serve-key mode")
 }
@@ -389,6 +390,16 @@ func TestAgentOpCertLoopReloadsEachNewOffer(t *testing.T) {
 		testutil.RequireReceive(t, reloads, time.Second, "a different offer"))
 }
 
+// replaceFileAtomically swaps in new content with a rename, as a credential
+// rotation does. Rewriting in place truncates first, and a poll that lands
+// between the truncate and the write sees an empty file.
+func replaceFileAtomically(t *testing.T, path string, data []byte) {
+	t.Helper()
+	tmp := path + ".tmp"
+	require.NoError(t, os.WriteFile(tmp, data, 0o600))
+	require.NoError(t, os.Rename(tmp, path))
+}
+
 func TestCredentialFileWatchReloadsOnceAfterAStableChange(t *testing.T) {
 	t.Parallel()
 	n := newTestNodeForBP(t, false, "", "", "", nil)
@@ -400,6 +411,7 @@ func TestCredentialFileWatchReloadsOnceAfterAStableChange(t *testing.T) {
 	t.Cleanup(cancel)
 	reloads := make(chan struct{}, 4)
 	go n.credentialFileWatchLoop(ctx, 5*time.Millisecond, []string{file},
+		credentialFilesDigest([]string{file}),
 		func() error {
 			reloads <- struct{}{}
 			return nil
@@ -408,7 +420,7 @@ func TestCredentialFileWatchReloadsOnceAfterAStableChange(t *testing.T) {
 
 	testutil.RequireNoReceive(t, reloads, 50*time.Millisecond,
 		"unchanged files must not reload")
-	require.NoError(t, os.WriteFile(file, []byte("counter 2"), 0o600))
+	replaceFileAtomically(t, file, []byte("counter 2"))
 	testutil.RequireReceive(t, reloads, 2*time.Second, "reload after a change")
 	testutil.RequireNoReceive(t, reloads, 50*time.Millisecond,
 		"one change reloads once")
@@ -439,6 +451,7 @@ func TestCredentialFileWatchSeesASymlinkSwap(t *testing.T) {
 	t.Cleanup(cancel)
 	reloads := make(chan struct{}, 4)
 	go n.credentialFileWatchLoop(ctx, 5*time.Millisecond, []string{file},
+		credentialFilesDigest([]string{file}),
 		func() error {
 			reloads <- struct{}{}
 			return nil
@@ -464,6 +477,7 @@ func TestCredentialFileWatchRetriesAFailedReload(t *testing.T) {
 	reloads := make(chan error, 4)
 	var calls int
 	go n.credentialFileWatchLoop(ctx, 5*time.Millisecond, []string{file},
+		credentialFilesDigest([]string{file}),
 		func() error {
 			calls++
 			var err error
@@ -476,7 +490,7 @@ func TestCredentialFileWatchRetriesAFailedReload(t *testing.T) {
 	)
 
 	testutil.RequireNoReceive(t, reloads, 50*time.Millisecond, "no change yet")
-	require.NoError(t, os.WriteFile(file, []byte("counter 2"), 0o600))
+	replaceFileAtomically(t, file, []byte("counter 2"))
 	require.Error(t,
 		testutil.RequireReceive(t, reloads, 2*time.Second, "first reload"))
 	// The files do not change again; the failed reload is retried anyway.
@@ -484,4 +498,57 @@ func TestCredentialFileWatchRetriesAFailedReload(t *testing.T) {
 		testutil.RequireReceive(t, reloads, 2*time.Second, "retried reload"))
 	testutil.RequireNoReceive(t, reloads, 50*time.Millisecond,
 		"a successful reload is not repeated")
+}
+
+// TestKeyWatchSeesAChangeRightAfterTheLoopsStart pins that the watch's
+// baseline is the files as they were when the loops started: a rotation that
+// lands before the watch goroutine first runs is a change, not the baseline.
+func TestKeyWatchSeesAChangeRightAfterTheLoopsStart(t *testing.T) {
+	t.Parallel()
+	s := newSignModeReloadNode(t, 1)
+	start := time.Now().Add(-time.Minute)
+	s.ledgerState = newStartupCleanupProducerNodeWithGenesisStart(
+		t,
+		&start,
+	).ledgerState
+	s.config.shelleyKeyWatchInterval = time.Millisecond
+	s.startKeyReloadLoops(s.credentialWatchBaseline())
+	t.Cleanup(s.stopKeyReloadLoops)
+
+	s.rotateTo(t, 2, nil)
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(
+			s.logs.String(),
+			"block producer credentials reloaded",
+		)
+	}, 5*time.Second, 10*time.Millisecond,
+		"a change made right after the loops start must reload")
+	s.requireLiveCounter(t, 2)
+}
+
+func TestCredentialFileWatchSeesAChangeMadeBeforeItsFirstPoll(t *testing.T) {
+	t.Parallel()
+	n := newTestNodeForBP(t, false, "", "", "", nil)
+	file := filepath.Join(t.TempDir(), "opcert.cert")
+	require.NoError(t, os.WriteFile(file, []byte("counter 1"), 0o600))
+	loaded := credentialFilesDigest([]string{file})
+	// Replaced after the credentials were loaded and before the loop starts.
+	require.NoError(t, os.WriteFile(file, []byte("counter 2"), 0o600))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	reloads := make(chan struct{}, 4)
+	go n.credentialFileWatchLoop(
+		ctx,
+		5*time.Millisecond,
+		[]string{file},
+		loaded,
+		func() error {
+			reloads <- struct{}{}
+			return nil
+		},
+	)
+	testutil.RequireReceive(t, reloads, 2*time.Second,
+		"reload of a file changed before the first poll")
 }

@@ -37,7 +37,7 @@ import (
 func TestChainsyncEagernessRecoveryAuthenticatesAndBindsSession(t *testing.T) {
 	t.Parallel()
 	f := newPatienceRollForwardFixture(t, false)
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	var verified atomic.Int64
 	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		verified.Add(1)
@@ -136,7 +136,7 @@ func TestChainsyncEagernessRecoveryRefreshesProofWhileHeld(t *testing.T) {
 		ochainsync.Tip{Point: path[432].Point, BlockNumber: 7642},
 	)
 	require.EqualValues(t, 7642, selector.EagernessLimit().BlockNumber)
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	var verifications atomic.Int64
 	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		verifications.Add(1)
@@ -245,7 +245,7 @@ func TestChainsyncEagernessRecoveryRefreshesObserverBeforeAuthentication(
 ) {
 	t.Parallel()
 	f := newPatienceRollForwardFixture(t, false)
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	var generation atomic.Uint64
 	generation.Store(217)
 	selector := chainselection.NewChainSelector(
@@ -398,7 +398,7 @@ func TestChainsyncEagernessRecoveryExcludesUnverifiedHeader(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			f := newPatienceRollForwardFixture(t, false)
-			f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+			f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 			verifyErr := errors.New("bad vrf proof")
 			if name == "transient publication" {
 				verifyErr = transientContextErr(t)

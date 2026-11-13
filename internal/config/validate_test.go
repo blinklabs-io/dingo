@@ -71,6 +71,39 @@ func TestValidateDefaultsPass(t *testing.T) {
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
+func TestValidateUnixSocketModes(t *testing.T) {
+	t.Parallel()
+
+	cfg := validTestConfig()
+	cfg.SocketMode = "0660"
+	cfg.DMQ.SocketMode = "0600"
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+
+	cfg.SocketMode = "0666"
+	if runtime.GOOS == "windows" {
+		// Windows has no group or other permission bits to restrict.
+		require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+	} else {
+		require.ErrorContains(
+			t,
+			cfg.validate(cfg.RunMode, minUnprivilegedPort),
+			"socketMode \"0666\" must not permit writes by other users",
+		)
+	}
+
+	cfg = validTestConfig()
+	cfg.SocketMode = "0000"
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
+func TestDefaultUnixSocketModes(t *testing.T) {
+	t.Parallel()
+
+	cfg := newDefaultConfig()
+	require.Equal(t, DefaultUnixSocketMode, cfg.SocketMode)
+	require.Equal(t, DefaultUnixSocketMode, cfg.DMQ.SocketMode)
+}
+
 func TestValidateTrustedNtCIdleTimeout(t *testing.T) {
 	cfg := validTestConfig()
 	assert.Zero(t, cfg.TrustedNtCIdleTimeout)

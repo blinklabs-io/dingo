@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -3089,6 +3090,27 @@ func (ls *LedgerState) precomputeStakeRewards(
 	)
 }
 
+// deleteUncreditedRewardOutputs deletes the reward outputs of snapshotEpoch
+// and refuses when that round is credited: its outputs are then account
+// balances, and recomputing them would erase credited rewards.
+func deleteUncreditedRewardOutputs(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	snapshotEpoch uint64,
+) error {
+	credited, err := meta.HasAppliedRewardCreditRound(snapshotEpoch, metaTxn)
+	if err != nil {
+		return err
+	}
+	if credited {
+		return fmt.Errorf(
+			"reward outputs for epoch %d are a credited round",
+			snapshotEpoch,
+		)
+	}
+	return meta.DeleteRewardOutputsForEpoch(snapshotEpoch, metaTxn)
+}
+
 func saveStakeRewardOutputs(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
@@ -3097,20 +3119,9 @@ func saveStakeRewardOutputs(
 	if app == nil {
 		return errors.New("missing stake reward application")
 	}
-	credited, err := meta.HasAppliedRewardCreditRound(
-		app.epochs.snapshot,
-		metaTxn,
-	)
-	if err != nil {
-		return err
-	}
-	if credited {
-		return fmt.Errorf(
-			"reward outputs for epoch %d are a credited round",
-			app.epochs.snapshot,
-		)
-	}
-	if err := meta.DeleteRewardOutputsForEpoch(app.epochs.snapshot, metaTxn); err != nil {
+	if err := deleteUncreditedRewardOutputs(
+		meta, metaTxn, app.epochs.snapshot,
+	); err != nil {
 		return fmt.Errorf(
 			"replace reward outputs for epoch %d: %w",
 			app.epochs.snapshot,
@@ -3477,8 +3488,25 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 	rewardSnapshot *models.RewardSnapshot,
 	poolInputs []*models.RewardPoolInput,
 ) ([]*models.RewardStakeInput, error) {
+	rebuilt, _, err := ls.rebuildPrunedRewardStakeInputsDetailed(
+		meta, metaTxn, rewardSnapshotEpoch, rewardSnapshot, poolInputs,
+	)
+	return rebuilt, err
+}
+
+// rebuildPrunedRewardStakeInputsDetailed is rebuildPrunedRewardStakeInputs
+// that also reports whether an empty result means the reconstruction found
+// rows but reconcileRebuiltRewardStakeInputs rejected them against the
+// retained reward_pool_input totals, rather than finding no rows at all.
+func (ls *LedgerState) rebuildPrunedRewardStakeInputsDetailed(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	rewardSnapshotEpoch uint64,
+	rewardSnapshot *models.RewardSnapshot,
+	poolInputs []*models.RewardPoolInput,
+) ([]*models.RewardStakeInput, bool, error) {
 	if len(poolInputs) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 	seen := make(map[string]struct{}, len(poolInputs))
 	poolKeyHashes := make([][]byte, 0, len(poolInputs))
@@ -3501,20 +3529,36 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 		expiryEpoch = rewardSnapshotEpoch
 		inactivityPeriod = ls.config.DelegatorInactivity
 	}
+	// The live capture passes the incoming era explicitly; the snapshot
+	// epoch's own row records that era, so pass it the same way.
+	snapshotEpoch, err := meta.GetEpoch(rewardSnapshotEpoch, metaTxn)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"get snapshot epoch %d for reward stake inputs: %w",
+			rewardSnapshotEpoch, err,
+		)
+	}
+	var incomingEraID *uint
+	if snapshotEpoch != nil {
+		eraID := snapshotEpoch.EraId
+		incomingEraID = &eraID
+	}
 	rebuilt, err := meta.GetEpochBoundaryRewardStakeInputsForPools(
 		poolKeyHashes,
 		rewardSnapshot.CapturedSlot,
 		rewardSnapshot.BoundarySlot,
-		nil,
+		incomingEraID,
 		expiryEpoch,
 		inactivityPeriod,
 		metaTxn,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("reconstruct reward stake inputs: %w", err)
+		return nil, false, fmt.Errorf(
+			"reconstruct reward stake inputs: %w", err,
+		)
 	}
 	if len(rebuilt) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 	for _, input := range rebuilt {
 		input.Epoch = rewardSnapshotEpoch
@@ -3526,23 +3570,40 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 	// not from a pool's registered owner-key list -- so every row comes back
 	// with Owner left at its zero value. rewardStakeInputs (the live capture
 	// path) resolves ownership separately, from each pool's certificate
-	// effective for the ended epoch; do the same here so an owner's stake is
-	// flagged and validateRewardCalculatorInputs's owner-stake reconciliation
-	// (poolOwnerStakeByKey vs the Owner-flagged rows) does not see every
-	// pool's owner stake as entirely missing.
-	endedEpoch, err := meta.GetEpoch(rewardSnapshotEpoch, metaTxn)
+	// effective at snapshot.PoolRegistrationSnapshotWindow; use the same
+	// window here so an owner's stake is flagged exactly as it was captured.
+	// The snapshot epoch's own start slot is the wrong bound: it admits a
+	// re-registration submitted during the ended epoch, which only takes
+	// effect after this snapshot, and its new owners' stake then fails the
+	// owner-stake reconciliation against the retained OwnerStake.
+	// Epoch 0 has no ended epoch before it, so its owners resolve from its
+	// own start, as they did before the window was introduced.
+	previousEpoch := rewardSnapshotEpoch
+	if previousEpoch > 0 {
+		previousEpoch--
+	}
+	endedEpoch, err := meta.GetEpoch(previousEpoch, metaTxn)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, false, fmt.Errorf(
 			"get ended epoch %d for owner resolution: %w",
-			rewardSnapshotEpoch, err,
+			previousEpoch, err,
 		)
 	}
 	if endedEpoch != nil {
+		registrationStartSlot, registrationEpoch := snapshot.PoolRegistrationSnapshotWindow(
+			event.EpochTransitionEvent{
+				NewEpoch:        rewardSnapshotEpoch,
+				PreviousEpoch:   previousEpoch,
+				BoundarySlot:    rewardSnapshot.BoundarySlot,
+				ProtocolVersion: rewardSnapshot.ProtocolVersion,
+			},
+			endedEpoch.StartSlot,
+		)
 		poolIDs := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
 		for _, hash := range poolKeyHashes {
 			poolID, err := lcommon.NewBlake2b224Checked(hash)
 			if err != nil {
-				return nil, fmt.Errorf(
+				return nil, false, fmt.Errorf(
 					"%w: reward pool input for epoch %d: %w",
 					errRewardStakeInputsUnrecoverable,
 					rewardSnapshotEpoch, err,
@@ -3552,13 +3613,13 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 		}
 		registrations, regErr := meta.GetPoolRegistrationsEffectiveForEpoch(
 			poolIDs,
-			endedEpoch.StartSlot,
-			rewardSnapshotEpoch,
+			registrationStartSlot,
+			registrationEpoch,
 			rewardSnapshot.CapturedSlot,
 			metaTxn,
 		)
 		if regErr != nil {
-			return nil, fmt.Errorf(
+			return nil, false, fmt.Errorf(
 				"get pool registrations for owner resolution: %w",
 				regErr,
 			)
@@ -3582,11 +3643,12 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 			}
 		}
 	}
-	return ls.reconcileRebuiltRewardStakeInputs(
+	reconciled := ls.reconcileRebuiltRewardStakeInputs(
 		rebuilt,
 		poolInputs,
 		rewardSnapshotEpoch,
-	), nil
+	)
+	return reconciled, len(reconciled) == 0, nil
 }
 
 func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(

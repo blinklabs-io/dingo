@@ -37,6 +37,9 @@ type verifiedAncestryFixture struct {
 	ls     *LedgerState
 	blocks []gledger.Block
 	raw    map[string]gledger.BlockHeader
+	// stamps maps a header hash to the verification generation its retained
+	// record reports; a header without an entry reports none.
+	stamps map[string]uint64
 }
 
 func ancestryTip(block gledger.Block) ochainsync.Tip {
@@ -54,6 +57,19 @@ func newVerifiedAncestryFixture(
 	counters []uint64,
 ) verifiedAncestryFixture {
 	t.Helper()
+	return newVerifiedAncestryFixtureAt(t, tamper, 3, counters, 3)
+}
+
+// newVerifiedAncestryFixtureAt builds five signed blocks of which the first
+// applied are on the primary chain, with tamper applied to block tamperIndex.
+func newVerifiedAncestryFixtureAt(
+	t *testing.T,
+	tamper tamperOption,
+	tamperIndex int,
+	counters []uint64,
+	applied int,
+) verifiedAncestryFixture {
+	t.Helper()
 	cfg := newHighFreqShelleyGenesisCfg(t)
 	nonce := bytes.Repeat([]byte{0x51}, 32)
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
@@ -65,13 +81,16 @@ func newVerifiedAncestryFixture(
 		t,
 		manager.SetLedger(testSecurityParamLedger{securityParam: 10}),
 	)
-	f := verifiedAncestryFixture{raw: make(map[string]gledger.BlockHeader)}
+	f := verifiedAncestryFixture{
+		raw:    make(map[string]gledger.BlockHeader),
+		stamps: make(map[string]uint64),
+	}
 	previous := make([]byte, 32)
 	var slotsPerKES uint64
 	for index := range 5 {
 		number := uint64(index + 1)
 		corruption := tamperNone
-		if index == 3 {
+		if index == tamperIndex {
 			corruption = tamper
 		}
 		sequence := uint64(0)
@@ -86,7 +105,7 @@ func newVerifiedAncestryFixture(
 		f.blocks = append(f.blocks, block.block)
 		f.raw[string(block.block.Hash().Bytes())] = block.block.Header()
 		previous = block.block.Hash().Bytes()
-		if index < 3 {
+		if index < applied {
 			require.NoError(
 				t,
 				manager.PrimaryChain().AddLocalBlock(t.Context(), block.block),
@@ -101,7 +120,7 @@ func newVerifiedAncestryFixture(
 		EraId: eras.BabbageEraDesc.Id, Nonce: nonce, EvolvingNonce: nonce, CandidateNonce: nonce,
 	}
 	f.ls = &LedgerState{
-		db: db, chain: manager.PrimaryChain(), currentTip: ancestryTip(f.blocks[2]),
+		db: db, chain: manager.PrimaryChain(), currentTip: ancestryTip(f.blocks[applied-1]),
 		currentEpoch: epoch, currentEra: eras.BabbageEraDesc, epochCache: []models.Epoch{epoch},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -117,6 +136,7 @@ func newVerifiedAncestryFixture(
 		}
 		return ChainsyncEvent{
 			ConnectionId: conn, Point: ocommon.NewPoint(h.SlotNumber(), h.Hash().Bytes()), BlockHeader: h,
+			HeaderCryptoVerificationGeneration: f.stamps[string(hash)],
 		}, h.PrevHash().Bytes(), true
 	}
 	f.ls.publishSnapshotsLocked()

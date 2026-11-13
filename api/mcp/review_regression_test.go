@@ -85,13 +85,6 @@ func TestReviewSQLiteBoundsAndRestoresInjectedConnection(t *testing.T) {
 	for _, query := range []string{"SELECT zeroblob(2097152)", "SELECT printf('%2097152s', 'x')", "SELECT hex(zeroblob(1048576))"} {
 		callTool(t, cs, "sqlite_query", map[string]any{"query": query}, true)
 	}
-	callTool(
-		t,
-		cs,
-		"sqlite_query",
-		map[string]any{"query": "SELECT 1", "offset": 10001},
-		true,
-	)
 	require.Contains(
 		t,
 		callTool(
@@ -122,7 +115,7 @@ func TestReviewStatusAndQuotedSchema(t *testing.T) {
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	_, err = db.Exec(
-		`CREATE TABLE "transaction"(slot INTEGER, hash BLOB, block_hash BLOB); INSERT INTO "transaction" VALUES (42,x'aa',x'bb'); CREATE TABLE "catalog's probe"("quoted col" TEXT);`,
+		`CREATE TABLE applied_transaction(slot INTEGER, hash BLOB, block_hash BLOB); INSERT INTO applied_transaction VALUES (42,x'aa',x'bb'); CREATE TABLE "catalog's probe"("quoted col" TEXT);`,
 	)
 	require.NoError(t, err)
 	server := mcp.NewServer(
@@ -145,7 +138,7 @@ func TestReviewStatusAndQuotedSchema(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Contains(t, result.Contents[0].Text, "quoted col")
-	_, err = db.Exec(`DROP TABLE "transaction"; DROP TABLE "catalog's probe"`)
+	_, err = db.Exec(`DROP TABLE applied_transaction; DROP TABLE "catalog's probe"`)
 	require.NoError(t, err)
 	_, err = cs.ReadResource(
 		t.Context(),
@@ -164,9 +157,13 @@ func TestReviewAssetSupplyAndLiveRows(t *testing.T) {
 	db := newSchemaDB(t)
 	policy := bytes.Repeat([]byte{1}, 28)
 	for i, deleted := range []any{0, 0, nil, 5} {
+		txID := testutil.InsertTransactionIdentity(
+			t, db, int64(i+1), bytes.Repeat([]byte{byte(i + 1)}, 32),
+		)
 		_, err := db.Exec(
-			"INSERT INTO utxo(id,payment_key,added_slot,deleted_slot) VALUES (?,?,100,?)",
+			"INSERT INTO utxo(id,tx_id,output_idx,payment_key,added_slot,deleted_slot) VALUES (?,?,0,?,100,?)",
 			i+1,
+			txID,
 			policy,
 			deleted,
 		)
@@ -431,7 +428,7 @@ func TestReviewTipAndLookupFailures(t *testing.T) {
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	_, err = db.Exec(
-		`CREATE TABLE "transaction"(id INTEGER, slot INTEGER, hash BLOB, block_hash BLOB, fee INTEGER, block_index INTEGER); INSERT INTO "transaction" VALUES(1,42,x'aa',x'bb',0,0)`,
+		`CREATE TABLE "transaction"(id INTEGER PRIMARY KEY, hash BLOB); CREATE TABLE applied_transaction(tx_id INTEGER PRIMARY KEY, slot INTEGER, block_hash BLOB, fee INTEGER, block_index INTEGER); INSERT INTO "transaction" VALUES(1,x'aa'); INSERT INTO applied_transaction VALUES(1,42,x'bb',0,0)`,
 	)
 	require.NoError(t, err)
 	cs := newToolSession(t, db, 100)
@@ -479,7 +476,8 @@ func TestReviewResourceTimeout(t *testing.T) {
 	require.NoError(t, err)
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	_, err = db.Exec(`CREATE TABLE "transaction"(slot INTEGER, block_hash BLOB)`)
+	_, err = db.Exec(`CREATE TABLE "transaction"(id INTEGER PRIMARY KEY, hash BLOB);
+ CREATE TABLE applied_transaction(tx_id INTEGER PRIMARY KEY, slot INTEGER, block_hash BLOB)`)
 	require.NoError(t, err)
 	cfg := DefaultProviderConfig()
 	cfg.QueryTimeout = 10 * time.Millisecond
@@ -502,7 +500,8 @@ func TestReviewPolicyOnlyPagination(t *testing.T) {
 	t.Parallel()
 	db := newSchemaDB(t)
 	_, err := db.Exec(
-		`INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot) VALUES(1,zeroblob(32),0,zeroblob(28),'1',0);
+		`INSERT INTO "transaction"(id,hash) VALUES(1,zeroblob(32));
+ INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot) VALUES(1,1,0,zeroblob(28),'1',0);
  INSERT INTO asset(id,utxo_id,policy_id,name,fingerprint,amount) VALUES(1,1,zeroblob(28),x'41',x'aa','1'),(2,1,zeroblob(28),x'42',x'bb','2');`,
 	)
 	require.NoError(t, err)
@@ -638,7 +637,8 @@ func TestTableResourcesRegisteredWhenEnumerationExceedsQueryTimeout(
 	t.Parallel()
 	db, deadlines := newDeadlineRecordingDB(t)
 	_, err := db.Exec(
-		`CREATE TABLE "transaction"(slot INTEGER, block_hash BLOB)`,
+		`CREATE TABLE "transaction"(id INTEGER PRIMARY KEY, hash BLOB);
+ CREATE TABLE applied_transaction(tx_id INTEGER PRIMARY KEY, slot INTEGER, block_hash BLOB)`,
 	)
 	require.NoError(t, err)
 	cfg := DefaultProviderConfig()
@@ -691,7 +691,8 @@ func TestTableEnumerationKeepsLongerQueryTimeout(t *testing.T) {
 	t.Parallel()
 	db, deadlines := newDeadlineRecordingDB(t)
 	_, err := db.Exec(
-		`CREATE TABLE "transaction"(slot INTEGER, block_hash BLOB)`,
+		`CREATE TABLE "transaction"(id INTEGER PRIMARY KEY, hash BLOB);
+ CREATE TABLE applied_transaction(tx_id INTEGER PRIMARY KEY, slot INTEGER, block_hash BLOB)`,
 	)
 	require.NoError(t, err)
 	server := mcp.NewServer(

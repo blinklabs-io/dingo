@@ -135,6 +135,19 @@ const (
 	// pool within seconds, slow enough (a handful of reconnects per minute per
 	// peer) to avoid port exhaustion.
 	emergencyReconnectDelay = 5 * time.Second
+	// chainsyncDemotionReconnectDelay, jittered by up to
+	// chainsyncDemotionJitter either way, is how long a peer closed for a
+	// chainsync demotion (IsChainsyncDemotionReason) stays demoted: it
+	// is not redialed, and a connection it opens is withheld from chain
+	// selection. The reference re-promotes a peer after a ChainSync error no
+	// sooner (repromoteErrorDelay in ouroboros-network's Diffusion/Policies.hs,
+	// jittered by two seconds in its governor). A reconnected peer starts with
+	// a full patience bucket and nothing remembered by chain selection, so
+	// without the delay one fork header pins the Limit on Eagerness again. It
+	// holds even when hot peers are critically low: alternates are dialed
+	// immediately instead.
+	chainsyncDemotionReconnectDelay = 10 * time.Second
+	chainsyncDemotionJitter         = 2 * time.Second
 	// dialDNSResolveTimeout bounds peer hostname resolution. It is intentionally
 	// shorter than connmanager's 10s dial timeout so a hung or slow resolver
 	// cannot wedge peer admission or the outbound-dial loop; dial attempts fall
@@ -168,6 +181,11 @@ const (
 )
 
 type PeerGovernor struct {
+	// afterFunc, when set, replaces time.AfterFunc for scheduled peer
+	// state changes and returns the timer's Stop. Tests set it.
+	afterFunc func(d time.Duration, f func()) func() bool
+	// demotionReleases holds each peer's pending demotion release.
+	demotionReleases        map[*Peer]*demotionRelease
 	metrics                 *peerGovernorMetrics
 	reconcileTicker         *time.Ticker
 	gossipChurnTicker       *time.Ticker
@@ -545,6 +563,7 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 	p.gossipChurnTicker = gossipChurnTicker
 	p.publicRootChurnTicker = publicRootChurnTicker
 	p.stopCh = stopCh
+	p.scheduleActiveDemotionReleasesLocked()
 	p.mu.Unlock()
 
 	// Reconcile loop
@@ -664,6 +683,7 @@ func (p *PeerGovernor) Stop(ctx context.Context) error {
 		p.publicRootChurnTicker.Stop()
 		p.publicRootChurnTicker = nil
 	}
+	p.stopDemotionReleasesLocked()
 	// Close stop channel to signal goroutines
 	if p.stopCh != nil {
 		close(p.stopCh)

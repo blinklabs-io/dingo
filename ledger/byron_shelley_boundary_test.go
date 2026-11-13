@@ -606,6 +606,39 @@ func TestByronTransitionEpochsUsesSuccessorGeometryWhenUnknown(t *testing.T) {
 	require.Equal(t, eras.ShelleyEraDesc.Id, target.EraId)
 }
 
+// TestByronTransitionEpochsKeepsByronGeometryBeforeTransitionEpoch pins that a
+// boundary into an epoch before the known transition epoch stays on Byron
+// geometry. Projecting it from the transition epoch's start would put the
+// boundary slot before that start and stall the pipeline.
+func TestByronTransitionEpochsKeepsByronGeometryBeforeTransitionEpoch(t *testing.T) {
+	t.Parallel()
+
+	ls, _, _ := newByronShelleyBoundaryLedger(t)
+	const (
+		transitionEpoch uint64 = 4
+		boundarySlot    uint64 = 64_802
+	)
+	current := models.Epoch{
+		EpochId:       2,
+		StartSlot:     43_200,
+		SlotLength:    20_000,
+		LengthInSlots: 21_600,
+		EraId:         eras.ByronEraDesc.Id,
+	}
+
+	transition, target, err := ls.byronTransitionEpochs(
+		current,
+		transitionEpoch,
+		boundarySlot,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), target.EpochId)
+	require.Equal(t, uint64(64_800), target.StartSlot)
+	require.Equal(t, uint(21_600), target.LengthInSlots)
+	require.Equal(t, eras.ByronEraDesc.Id, target.EraId)
+	require.Equal(t, target, transition)
+}
+
 // TestEpochAtSlotForRolloverUsesCapturedSnapshot pins that the rollover resolves
 // its target epoch from the snapshot it captured rather than from whatever is
 // published when the summary is built.

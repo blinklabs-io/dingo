@@ -34,7 +34,8 @@ import (
 var ErrEagernessPeerUntracked = errors.New("eagerness peer untracked")
 
 // peerTipsIncludingCandidatesLocked lets admission gates see staged headers
-// without promoting them into the selectable peer set.
+// and ChainSync Jumping records without promoting them into the selectable
+// peer set.
 func (cs *ChainSelector) peerTipsIncludingCandidatesLocked() iter.Seq2[ouroboros.ConnectionId, *PeerChainTip] {
 	return func(yield func(ouroboros.ConnectionId, *PeerChainTip) bool) {
 		for connId, committed := range cs.peerTips {
@@ -52,6 +53,12 @@ func (cs *ChainSelector) peerTipsIncludingCandidatesLocked() iter.Seq2[ouroboros
 				continue
 			}
 			if _, exists := cs.peerTips[connId]; !exists && !yield(connId, peerTip) {
+				return
+			}
+		}
+		for connId := range cs.jumpRecords {
+			peerTip := cs.jumpCandidateLocked(connId)
+			if peerTip != nil && !yield(connId, peerTip) {
 				return
 			}
 		}
@@ -190,10 +197,14 @@ func (cs *ChainSelector) computeEagernessLimitFromPeersLocked(
 		// there is no switch to it for the limit to protect; counting it would
 		// pin the limit at k past its fork point while it stays connected. The
 		// ConnectionEligible hook drops a chainsync observer the same way: its
-		// headers are not ingested, so its fragment can freeze.
+		// headers are not ingested, so its fragment can freeze. A connection
+		// without a corroboration identity can never witness or be selected
+		// while Genesis corroboration is active, so its fragment would only
+		// hold back the identified candidates.
 		if !cs.peerLiveEligibleNonStaleLocked(connId, peerTip) ||
 			cs.advertisedTipStaleLocked(peerTip) ||
-			!cs.eagernessCandidateAdmittedLocked(connId) {
+			!cs.loeCandidateConnectionLocked(connId) ||
+			!cs.loeIdentifiedLocked(connId) {
 			if include == nil || *include != connId {
 				continue
 			}
@@ -353,6 +364,19 @@ func inertAgainst(
 		}
 	}
 	return true
+}
+
+// loeIdentifiedLocked reports whether connId may bound the Limit on
+// Eagerness: always outside Genesis corroboration, and otherwise only with a
+// corroboration identity. Must be called with cs.mutex held.
+func (cs *ChainSelector) loeIdentifiedLocked(
+	connId ouroboros.ConnectionId,
+) bool {
+	if !cs.genesisCorroborationActiveLocked() {
+		return true
+	}
+	_, ok := cs.corroboratorIdentity(connId)
+	return ok
 }
 
 // fragmentHeadBlock returns the block number of a non-empty fragment's head.
@@ -526,12 +550,33 @@ func (cs *ChainSelector) AwaitEagernessLimit(
 func (cs *ChainSelector) pauseEagerness(
 	connId ouroboros.ConnectionId,
 ) func() {
+	return cs.pauseStream(connId, func(p *PeerChainTip) *int {
+		return &p.eagernessPaused
+	})
+}
+
+// pauseCatchUpBand records that connId's header stream is parked by the
+// catch-up band and returns the function that ends the pause. It exempts the
+// peer from staleness as pauseEagerness does, but does not make it a held
+// peer for the eagerness standoff.
+func (cs *ChainSelector) pauseCatchUpBand(
+	connId ouroboros.ConnectionId,
+) func() {
+	return cs.pauseStream(connId, func(p *PeerChainTip) *int {
+		return &p.catchUpPaused
+	})
+}
+
+func (cs *ChainSelector) pauseStream(
+	connId ouroboros.ConnectionId,
+	counter func(*PeerChainTip) *int,
+) func() {
 	cs.mutex.Lock()
 	peerTip, ok := cs.admissionPeerTipLocked(connId)
 	if ok && peerTip != nil {
-		peerTip.eagernessPaused++
+		*counter(peerTip)++
 		if committed := cs.peerTips[connId]; committed != nil && committed != peerTip {
-			committed.eagernessPaused++
+			*counter(committed)++
 		}
 	}
 	cs.mutex.Unlock()
@@ -540,23 +585,24 @@ func (cs *ChainSelector) pauseEagerness(
 	}
 	return func() {
 		cs.mutex.Lock()
-		if current, exists := cs.admissionPeerTipLocked(connId); exists && current.eagernessPaused > 0 {
-			current.eagernessPaused--
-			if committed := cs.peerTips[connId]; committed != nil && committed != current && committed.eagernessPaused > 0 {
-				committed.eagernessPaused--
+		if current, exists := cs.admissionPeerTipLocked(connId); exists && *counter(current) > 0 {
+			*counter(current)--
+			if committed := cs.peerTips[connId]; committed != nil && committed != current && *counter(committed) > 0 {
+				*counter(committed)--
 			}
 		}
 		cs.mutex.Unlock()
 	}
 }
 
-// EagernessPaused reports whether connId's header stream is currently held at
-// the Limit on Eagerness.
+// EagernessPaused reports whether connId's header stream is currently held by
+// the selector, at the Limit on Eagerness or in the catch-up band. A held
+// stream delivers no headers, so its silence is not a stall.
 func (cs *ChainSelector) EagernessPaused(connId ouroboros.ConnectionId) bool {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	peerTip, ok := cs.admissionPeerTipLocked(connId)
-	return ok && peerTip != nil && peerTip.eagernessPaused > 0
+	return ok && peerTip.streamPaused()
 }
 
 func (cs *ChainSelector) eagernessAdmissionStatus(

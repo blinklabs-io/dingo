@@ -1185,6 +1185,9 @@ type loadBlobsOptions struct {
 	onProgress     func(LoadBlobsProgress)
 	immutableDB    *immutable.ImmutableDb
 	immutableDBSet bool
+	// retireChunks, when set, enables deleting source chunks once committed.
+	retireChunks   bool
+	onChunksCommit func(firstKept uint64) error
 }
 
 // LoadBlobsOption customizes LoadBlobsWithDB behavior.
@@ -1196,6 +1199,24 @@ func WithLoadBlobsProgress(
 ) LoadBlobsOption {
 	return func(opts *loadBlobsOptions) {
 		opts.onProgress = onProgress
+	}
+}
+
+// WithChunkRetirement deletes each source chunk's files from the ImmutableDB
+// once every block in it is committed to the blob store, so the extracted tree
+// and the blob store do not both hold the whole chain.
+//
+// The chunk holding the most recently committed block is kept: it is where a
+// resumed copy restarts. onCommitted, when non-nil, is called with that chunk's
+// number before the chunks below it are deleted, so a caller can record it
+// durably; every chunk below it is then committed and may be absent from the
+// tree on the next run. An error from it stops the copy before any deletion.
+//
+// The copy must be the only reader of the tree once it starts.
+func WithChunkRetirement(onCommitted func(firstKept uint64) error) LoadBlobsOption {
+	return func(opts *loadBlobsOptions) {
+		opts.retireChunks = true
+		opts.onChunksCommit = onCommitted
 	}
 }
 
@@ -1295,10 +1316,28 @@ func LoadBlobsWithDB(
 			return nil
 		}
 	}
+	var retire func(uint64) error
+	if opts.retireChunks {
+		retire = func(firstKept uint64) error {
+			// A blob-only batch commit is not fsynced. Flush before the
+			// chunks become deletable, or a host failure could keep the
+			// deletion while losing the blocks it was supposed to back.
+			if err := db.Blob().Sync(); err != nil {
+				return fmt.Errorf("syncing blob store before retiring chunks: %w", err)
+			}
+			if opts.onChunksCommit != nil {
+				if err := opts.onChunksCommit(firstKept); err != nil {
+					return err
+				}
+			}
+			return imm.RemoveChunksBefore(firstKept)
+		}
+	}
 	blocksCopied, immutableTipSlot, err := copyBlocksRawWithCallback(
 		ctx, logger, imm, db, c,
 		callback,
 		opts.onProgress,
+		retire,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("loading blocks: %w", err)
@@ -1786,6 +1825,10 @@ func CopyImmutableBlocks(
 // The ImmutableDB is passed in already open so the caller decides how its
 // directory was resolved — by pathname, or through a handle that binds the
 // reads to a directory somebody else cannot repoint. See WithImmutableDB.
+//
+// When retire is non-nil it is called after each batch commits, with the
+// chunk holding the batch's last block whenever that chunk advanced; blocks
+// arrive in ascending order, so every chunk below it is fully committed.
 func copyBlocksRawWithCallback(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -1794,6 +1837,7 @@ func copyBlocksRawWithCallback(
 	c *chain.Chain,
 	callback func(chain.RawBlock, *database.Txn) error,
 	onProgress func(LoadBlobsProgress),
+	retire func(firstKept uint64) error,
 ) (int, uint64, error) {
 	immutableTip, err := imm.GetTip()
 	if err != nil {
@@ -1865,6 +1909,10 @@ func copyBlocksRawWithCallback(
 	lastProgressLog := time.Time{}
 	lastProgressSlot := chainTip.Point.Slot
 	blockBatch := make([]chain.RawBlock, 0, loadBlockBatchSize)
+	var (
+		batchChunk, retiredChunk  uint64
+		batchChunkSet, retiredSet bool
+	)
 	for {
 		for {
 			next, err := iter.Next()
@@ -1893,6 +1941,9 @@ func copyBlocksRawWithCallback(
 				)
 			}
 			blockBatch = append(blockBatch, rawBlock)
+			if num, ok := iter.Chunk(); ok {
+				batchChunk, batchChunkSet = num, true
+			}
 			if len(blockBatch) == cap(blockBatch) {
 				break
 			}
@@ -1905,6 +1956,14 @@ func copyBlocksRawWithCallback(
 				"failed to import block: %w",
 				err,
 			)
+		}
+		if retire != nil && batchChunkSet &&
+			(!retiredSet || batchChunk > retiredChunk) {
+			if err := retire(batchChunk); err != nil {
+				return blocksCopied + len(blockBatch), immutableTip.Slot,
+					fmt.Errorf("retiring committed chunks: %w", err)
+			}
+			retiredChunk, retiredSet = batchChunk, true
 		}
 		blocksCopied += len(blockBatch)
 		if tmpLen := len(blockBatch); tmpLen > 0 {

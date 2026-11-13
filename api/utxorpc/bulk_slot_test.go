@@ -226,6 +226,8 @@ func TestBulkSlot_InvalidRequestsDoNotContend(t *testing.T) {
 		Logger:                    discardLogger(),
 		Mempool:                   mp,
 		MaxConcurrentBulkRequests: 1,
+		MaxUtxoKeys:               1,
+		MaxBlockRefs:              1,
 	})
 	held := make(chan error, 1)
 	go func() {
@@ -262,6 +264,8 @@ func TestBulkRequests_LogAfterValidation(t *testing.T) {
 				return logBuf.Write(p)
 			}), nil,
 		)),
+		MaxUtxoKeys:  1,
+		MaxBlockRefs: 1,
 	})
 
 	for name, err := range invalidBulkRequests(u) {

@@ -212,24 +212,27 @@ CASE WHEN v.deleted_slot IS NULL AND NOT EXISTS (
 
 const drepUpdatesQuery = `
 SELECT item.added_slot AS added_slot, tx.block_index AS block_index,
-       c.cert_index AS cert_index, tx.hash AS tx_hash, ? AS action,
+       c.cert_index AS cert_index, txh.hash AS tx_hash, ? AS action,
        item.deposit_amount AS deposit
 FROM registration_drep item
 JOIN certs c ON c.id = item.certificate_id
-JOIN "transaction" tx ON tx.id = c.transaction_id
+JOIN applied_transaction tx ON tx.tx_id = c.transaction_id
+JOIN "transaction" txh ON txh.id = tx.tx_id
 WHERE item.credential_tag = ? AND item.drep_credential = ?
 UNION ALL
-SELECT item.added_slot, tx.block_index, c.cert_index, tx.hash, ?,
+SELECT item.added_slot, tx.block_index, c.cert_index, txh.hash, ?,
        item.deposit_amount
 FROM deregistration_drep item
 JOIN certs c ON c.id = item.certificate_id
-JOIN "transaction" tx ON tx.id = c.transaction_id
+JOIN applied_transaction tx ON tx.tx_id = c.transaction_id
+JOIN "transaction" txh ON txh.id = tx.tx_id
 WHERE item.credential_tag = ? AND item.drep_credential = ?
 UNION ALL
-SELECT item.added_slot, tx.block_index, c.cert_index, tx.hash, ?, NULL
+SELECT item.added_slot, tx.block_index, c.cert_index, txh.hash, ?, NULL
 FROM update_drep item
 JOIN certs c ON c.id = item.certificate_id
-JOIN "transaction" tx ON tx.id = c.transaction_id
+JOIN applied_transaction tx ON tx.tx_id = c.transaction_id
+JOIN "transaction" txh ON txh.id = tx.tx_id
 WHERE item.credential_tag = ? AND item.credential = ?`
 
 func (s *Store) HasUnattributedCommitteeVotes(

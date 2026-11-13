@@ -33,7 +33,11 @@ const (
 	// round trip while EventBus backpressure stops further admission.
 	ChainsyncEventBufferSize = ochainsync.DefaultPipelineLimit
 
-	BlockfetchEventType                 event.EventType = "ledger.blockfetch"
+	BlockfetchEventType event.EventType = "ledger.blockfetch"
+	// BlockEventType carries a BlockEvent for a block added to or removed from
+	// the primary chain. The ledger republishes it from the chain-update
+	// stream, so an Apply marks the block joining the chain, not the ledger
+	// having applied it.
 	BlockEventType                      event.EventType = "ledger.block"
 	ChainsyncEventType                  event.EventType = "ledger.chainsync"
 	ChainsyncAwaitReplyEventType        event.EventType = "ledger.chainsync_await_reply"
@@ -121,6 +125,11 @@ type ChainsyncEvent struct {
 	BlockNumber             uint64
 	Type                    uint // Block or header type ID
 	Rollback                bool // Set to true for a Rollback event
+	// SessionReopened marks an in-place re-intersect of a live connection. It
+	// carries no header or point: the connection's next rollback opens a new
+	// session, as on a fresh connection, so a rollback to a point our chain
+	// already holds moves only the peer's cursor.
+	SessionReopened bool
 }
 
 // ChainsyncAwaitReplyEvent is emitted when a chainsync peer explicitly reports
