@@ -482,6 +482,36 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		)
 		return nil
 	}
+	if start.Slot == end.Slot && !bytes.Equal(start.Hash, end.Hash) {
+		orderIter, orderErr := o.ledgerState.GetChainFromPoint(start, true)
+		ordered := orderErr == nil &&
+			blockfetchStartPrecedesEnd(orderIter, start, end)
+		if orderErr == nil {
+			orderIter.Cancel()
+		}
+		if !ordered {
+			o.config.Logger.Warn(
+				"blockfetch: requested range has start after end in one slot, sending NoBlocks",
+				"connection_id", ctx.ConnectionId.String(),
+				"slot", start.Slot,
+			)
+			endIter.Cancel()
+			chainIter.Cancel()
+			if err := ctx.Server.NoBlocks(); err != nil {
+				return fmt.Errorf(
+					"blockfetch NoBlocks after same-slot inverted range: %w",
+					err,
+				)
+			}
+			o.blockfetchRecordNoBlocksAndMaybeClose(
+				ctx.ConnectionId,
+				start,
+				"blockfetch: closing stuck peer after repeated inverted range requests",
+				"blockfetch: peer stuck on inverted range",
+			)
+			return nil
+		}
+	}
 	appliedTip := o.ledgerState.Tip()
 	tipIter, tipErr := o.ledgerState.GetChainFromPoint(appliedTip.Point, true)
 	if tipErr == nil {
@@ -627,6 +657,26 @@ func blockfetchEndAtOrBeforeAppliedTip(
 			return false
 		}
 		if bytes.Equal(next.Point.Hash, appliedTip.Hash) {
+			return true
+		}
+	}
+}
+
+// blockfetchStartPrecedesEnd reports whether end follows start on the chain
+// when both points share a slot, which only a Byron epoch-boundary block and
+// the main block after it do. Slot order alone cannot tell them apart.
+func blockfetchStartPrecedesEnd(
+	startIter blockfetchRangeIterator,
+	start ocommon.Point,
+	end ocommon.Point,
+) bool {
+	for {
+		next, err := startIter.Next(false)
+		if err != nil || next == nil || next.Rollback ||
+			next.Point.Slot != start.Slot {
+			return false
+		}
+		if bytes.Equal(next.Point.Hash, end.Hash) {
 			return true
 		}
 	}

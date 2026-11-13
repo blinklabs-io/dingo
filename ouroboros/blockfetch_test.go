@@ -617,6 +617,20 @@ func newBlockfetchRangeFixtureWithSlots(
 	return newBlockfetchRangeFixtureWithSlotsAndConfig(t, slots, nil)
 }
 
+// newBlockfetchRangeFixtureWithTypes is newBlockfetchRangeFixtureWithSlots with
+// a caller-chosen block type per block, so a test can chain a Byron
+// epoch-boundary block (type 0) and the main block sharing its slot.
+func newBlockfetchRangeFixtureWithTypes(
+	t *testing.T,
+	slots []uint64,
+	blockTypes []uint,
+) *blockfetchRangeFixture {
+	t.Helper()
+	return newBlockfetchRangeFixtureWithSlotsConfigAndTypes(
+		t, slots, nil, blockTypes,
+	)
+}
+
 // newBlockfetchRangeFixtureWithSlotsAndConfig is
 // newBlockfetchRangeFixtureWithSlots generalized to an optional
 // *cardano.CardanoNodeConfig, so a test can control what
@@ -628,6 +642,18 @@ func newBlockfetchRangeFixtureWithSlotsAndConfig(
 	t *testing.T,
 	slots []uint64,
 	cardanoConfig *cardano.CardanoNodeConfig,
+) *blockfetchRangeFixture {
+	t.Helper()
+	return newBlockfetchRangeFixtureWithSlotsConfigAndTypes(
+		t, slots, cardanoConfig, nil,
+	)
+}
+
+func newBlockfetchRangeFixtureWithSlotsConfigAndTypes(
+	t *testing.T,
+	slots []uint64,
+	cardanoConfig *cardano.CardanoNodeConfig,
+	blockTypes []uint,
 ) *blockfetchRangeFixture {
 	t.Helper()
 
@@ -647,11 +673,15 @@ func newBlockfetchRangeFixtureWithSlotsAndConfig(
 	for i, slot := range slots {
 		sum := sha256.Sum256([]byte{byte(i)})
 		hash := append([]byte(nil), sum[:]...)
+		blockType := uint(1)
+		if blockTypes != nil {
+			blockType = blockTypes[i]
+		}
 		blocks = append(blocks, chain.RawBlock{
 			Slot:        slot,
 			Hash:        hash,
 			BlockNumber: uint64(i),
-			Type:        1,
+			Type:        blockType,
 			PrevHash:    prevHash,
 			Cbor:        []byte{0x80},
 		})
@@ -852,6 +882,81 @@ func TestBlockfetchEndAtOrBeforeAppliedTip(t *testing.T) {
 					test.end,
 					test.appliedTip,
 				),
+			)
+		})
+	}
+}
+
+func TestBlockfetchServerRequestRange_RejectsInvertedSameSlotRange(
+	t *testing.T,
+) {
+	f := newBlockfetchRangeFixtureWithTypes(
+		t,
+		[]uint64{10, 20, 20},
+		[]uint{1, 0, 1},
+	)
+	boundary := f.blocks[1]
+	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{
+		Point:       ocommon.NewPoint(boundary.Slot, boundary.Hash),
+		BlockNumber: boundary.BlockNumber,
+	})
+
+	// The main block after the applied boundary block is ahead of the ledger;
+	// asking for it as the start of a range that ends at the boundary must not
+	// stream it.
+	f.requestRange(t, f.point(2), f.point(1))
+	assert.Equal(
+		t,
+		[]byte{blockfetch.MessageTypeNoBlocks},
+		f.readMessageTypes(t, 1),
+	)
+}
+
+func TestBlockfetchStartPrecedesEnd(t *testing.T) {
+	t.Parallel()
+
+	hash := func(value byte) []byte {
+		return bytes.Repeat([]byte{value}, lcommon.Blake2b256Size)
+	}
+	boundary := ocommon.NewPoint(100, hash(0x01))
+	mainBlock := ocommon.NewPoint(100, hash(0x02))
+	later := ocommon.NewPoint(101, hash(0x03))
+
+	tests := []struct {
+		name  string
+		start ocommon.Point
+		end   ocommon.Point
+		steps []blockfetchIteratorStep
+		want  bool
+	}{
+		{
+			name:  "boundary start, main block end",
+			start: boundary,
+			end:   mainBlock,
+			steps: []blockfetchIteratorStep{
+				{result: &chain.ChainIteratorResult{Point: boundary}},
+				{result: &chain.ChainIteratorResult{Point: mainBlock}},
+			},
+			want: true,
+		},
+		{
+			name:  "main block start, boundary end",
+			start: mainBlock,
+			end:   boundary,
+			steps: []blockfetchIteratorStep{
+				{result: &chain.ChainIteratorResult{Point: mainBlock}},
+				{result: &chain.ChainIteratorResult{Point: later}},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			iter := &stubBlockfetchIterator{steps: test.steps}
+			assert.Equal(
+				t,
+				test.want,
+				blockfetchStartPrecedesEnd(iter, test.start, test.end),
 			)
 		})
 	}
