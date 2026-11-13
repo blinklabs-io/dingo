@@ -8795,9 +8795,10 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 		ls.metrics.setPipelineNoProgress(0, false)
 	}()
 	var progress pipelineProgress
-	// noPeerWaits counts consecutive restarts whose endorser block could not
-	// be fetched because no peer was connected. It paces those restarts
-	// without feeding the halt threshold.
+	// noPeerWaits counts consecutive restarts held without feeding the halt
+	// threshold: an endorser block that could not be fetched because no peer
+	// was connected, or whose semantic validation is still pending. It paces
+	// those restarts.
 	noPeerWaits := 0
 	for {
 		err := attempt(ctx)
@@ -8840,8 +8841,12 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 			// counts toward the halt nor resets the count, and a peer gap of
 			// any length waits for a connection instead of stopping the
 			// pipeline for good.
+			//
+			// A validation that is still pending is held the same way: the
+			// verdict is outstanding, not a failure to advance.
 			var retryCount int
-			if errors.Is(err, ErrEndorserBlockFetchNoPeer) {
+			if errors.Is(err, ErrEndorserBlockFetchNoPeer) ||
+				errors.Is(err, errEndorserBlockValidationPending) {
 				progress = ls.holdPipelineProgress(progress)
 				noPeerWaits++
 				retryCount = min(

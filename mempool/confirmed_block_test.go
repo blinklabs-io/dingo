@@ -18,8 +18,10 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -343,4 +345,78 @@ func TestChainUpdateRetriesUnsettledRolledBackTransaction(t *testing.T) {
 	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
 	_, ok := m.GetTransaction(hash)
 	require.True(t, ok)
+}
+
+// A block confirming a pooled transaction evicts it even while a failed
+// overlay rebuild is waiting out its retry interval.
+func TestChainUpdateEvictsConfirmedTransactionWhileRebuildRetryPending(
+	t *testing.T,
+) {
+	t.Parallel()
+	logs := &lockedBuffer{}
+	v := &changingSessionValidator{}
+	m, err := NewMempool(MempoolConfig{
+		Logger: slog.New(slog.NewTextHandler(
+			logs, &slog.HandlerOptions{Level: slog.LevelDebug},
+		)),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       v,
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, m.Stop(context.Background()))
+		m.eventBus.Close()
+	})
+	txBytes := getTestTxBytes(t)
+	require.NoError(
+		t,
+		m.AddTransaction(
+			context.Background(), uint(conway.EraIdConway), txBytes,
+		),
+	)
+	tx, err := gledger.NewTransactionFromCbor(
+		uint(conway.EraIdConway), txBytes,
+	)
+	require.NoError(t, err)
+	hash := tx.Hash().String()
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return m.eventBus.HasSubscribers(chain.ChainUpdateEventType)
+		},
+		time.Second,
+		"chain worker subscribes",
+	)
+
+	v.stale.Store(true)
+	m.eventBus.Publish(chain.ChainUpdateEventType, chainUpdate(nil))
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return strings.Contains(
+				logs.String(), "mempool overlay rebuild deferred",
+			)
+		},
+		5*time.Second,
+		"rebuild fails and its retry is pending",
+	)
+
+	m.eventBus.Publish(
+		chain.ChainUpdateEventType,
+		chainUpdate(chain.ChainBlockEvent{
+			Block: blockCarryingTx(t, txBytes),
+		}),
+	)
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			_, ok := m.GetTransaction(hash)
+			return !ok
+		},
+		5*time.Second,
+		"confirmed transaction is evicted before the rebuild retry",
+	)
 }

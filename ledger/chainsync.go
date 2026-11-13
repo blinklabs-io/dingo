@@ -8935,9 +8935,14 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 // it since genesis.
 //
 // Checking each credential against the existing (including soft-deleted) set
-// before inserting makes this safe to call on every startup: a credential a
-// later UpdateCommittee has since re-elected or removed already has a row, so
-// its real history is left alone instead of being reverted to genesis state.
+// before inserting makes this safe for a chain replayed from genesis: a
+// credential a later UpdateCommittee has since re-elected or removed already
+// has a row, so its real history is left alone instead of being reverted to
+// genesis state. A Mithril import whose current tip is in Conway or later is
+// different. Its committee is an authoritative current-state snapshot, so an
+// absent genesis credential means it is not seated and must not be inferred
+// from missing local history. A pre-Conway import has no committee state yet,
+// so it retains the genesis members for the later hard fork.
 func (ls *LedgerState) ensureGenesisCommittee(
 	ctx context.Context,
 	txn *database.Txn,
@@ -8956,6 +8961,54 @@ func (ls *LedgerState) ensureGenesisCommittee(
 	if len(conwayGenesis.Committee.Members) == 0 {
 		return nil
 	}
+	genesisMembers := make(
+		[]*models.CommitteeMember,
+		0,
+		len(conwayGenesis.Committee.Members),
+	)
+	for raw, expiry := range conwayGenesis.Committee.Members {
+		tag, hash, err := parseGenesisCommitteeCredential(raw)
+		if err != nil {
+			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
+		}
+		expiresEpoch, err := genesisCommitteeExpiryEpoch(expiry)
+		if err != nil {
+			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
+		}
+		genesisMembers = append(genesisMembers, &models.CommitteeMember{
+			ColdCredentialTag: tag,
+			ColdCredHash:      hash,
+			ExpiresEpoch:      expiresEpoch,
+			TermStartSlot:     0,
+			TermStartSlotSet:  true,
+			AddedSlot:         0,
+		})
+	}
+	mithrilBoundary, err := ls.db.MithrilTrustBoundarySlotStrict(txn)
+	if err != nil {
+		return fmt.Errorf(
+			"read Mithril boundary before seeding genesis committee: %w",
+			err,
+		)
+	}
+	if mithrilBoundary > 0 {
+		tipEpoch, err := ls.db.GetEpochBySlot(ls.currentTip.Point.Slot, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"read current epoch before seeding genesis committee: %w",
+				err,
+			)
+		}
+		if tipEpoch == nil {
+			return fmt.Errorf(
+				"current tip slot %d has no persisted epoch",
+				ls.currentTip.Point.Slot,
+			)
+		}
+		if tipEpoch.EraId >= eras.ConwayEraDesc.Id {
+			return nil
+		}
+	}
 	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(ctx, txn)
 	if err != nil {
 		return fmt.Errorf("get existing committee members: %w", err)
@@ -8970,37 +9023,17 @@ func (ls *LedgerState) ensureGenesisCommittee(
 	newMembers := make(
 		[]*models.CommitteeMember,
 		0,
-		len(conwayGenesis.Committee.Members),
+		len(genesisMembers),
 	)
-	for raw, expiry := range conwayGenesis.Committee.Members {
-		tag, hash, err := parseGenesisCommitteeCredential(raw)
-		if err != nil {
-			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
-		}
-		// Validate the whole genesis entry before the already-seeded check, so
-		// a malformed expiry fails closed the same way on a fresh database and
-		// on one that already holds a row for this credential. Validating
-		// after the check would accept a genesis this function itself declares
-		// malformed, purely because some earlier startup got there first.
-		expiresEpoch, err := genesisCommitteeExpiryEpoch(expiry)
-		if err != nil {
-			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
-		}
+	for _, member := range genesisMembers {
 		key := (models.CommitteeCredential{
-			CredentialTag: tag,
-			Credential:    hash,
+			CredentialTag: member.ColdCredentialTag,
+			Credential:    member.ColdCredHash,
 		}).Key()
 		if _, ok := seen[key]; ok {
 			continue
 		}
-		newMembers = append(newMembers, &models.CommitteeMember{
-			ColdCredentialTag: tag,
-			ColdCredHash:      hash,
-			ExpiresEpoch:      expiresEpoch,
-			TermStartSlot:     0,
-			TermStartSlotSet:  true,
-			AddedSlot:         0,
-		})
+		newMembers = append(newMembers, member)
 	}
 	if len(newMembers) == 0 {
 		return nil

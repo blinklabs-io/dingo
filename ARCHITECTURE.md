@@ -2187,7 +2187,12 @@ When `Node.Run()` is called, components are initialized in this order:
     function has no way to tell a still-live genesis declaration from one
     already spent/retired/changed since. A slot-zero tip with a non-empty hash
     is likewise an existing chain point rather than origin, so restart takes
-    this preservation path instead of reapplying genesis declarations.
+    this preservation path instead of reapplying genesis declarations. The
+    durable `mithril_ledger_slot` also makes a Conway-or-later imported
+    Constitutional Committee authoritative: startup never fills an absent
+    imported member from Conway genesis, because absence can represent a
+    pre-snapshot removal. A pre-Conway imported tip has no committee state yet,
+    so startup retains the genesis members for the later hard fork.
     For networks with a real Byron genesis, an empty database retains a Byron
     epoch cache until the on-chain Shelley boundary is observed. A configured
     experimental Shelley hard-fork epoch is the explicit exception used by
@@ -2271,8 +2276,9 @@ journal and replayed in bounded batches before the candidate is published. A
 busy pass that cannot catch up leaves the live pool unchanged and is retried
 after a later chain update; it is not a failed admission or a partial swap.
 
-The chain-update worker coalesces confirmed-transaction removals and
-rolled-back transaction restores before rebuilding. Rollback events list blocks
+The chain-update worker evicts confirmed transactions as each chain update
+arrives and coalesces rolled-back transaction restores until the next
+successful rebuild. Rollback events list blocks
 newest first, so each event is traversed oldest first; if more rollback events
 arrive before the rebuild, their older transactions are placed ahead of the
 already queued restores. Revalidation therefore sees transactions in ledger
@@ -5442,8 +5448,11 @@ When a certified endorser-block fetch has no connected leios-fetch peer, or
 startup replay reaches it before Ouroboros networking is initialized, the fetch
 is retried without increasing the deterministic-halt count. The count is
 preserved while the ledger tip is unchanged, and normal progress tracking resets
-it if the tip advances. A block that connected peers cannot serve continues to
-count toward the halt threshold.
+it if the tip advances. A certified endorser block whose semantic validation
+is still pending is retried the same way: the verdict is outstanding, and a
+validation queued behind a long database writer can outlast any fixed restart
+budget. A block that connected peers cannot serve continues to count toward
+the halt threshold.
 
 Certified closure application preverifies selected transactions' witness
 signatures with bounded parallel workers. Results bind to the full transaction;
@@ -5898,8 +5907,9 @@ selection, full block fetch and admission to the ledger apply stream; an apply
 chunk ends with its first live announcing block, and the next chunk's
 preparation validates that block's endorser block while it is the published
 tip and before any later block applies. The background validator in
-`ouroboros` uses the same state. The ledger's `ledger.block` apply event and
-`chain.update` can both precede the apply, so the ledger also notifies the
+`ouroboros` uses the same state. The `ledger.block` apply event (a
+republished chain update) and `chain.update` can both precede the apply, so
+`ledger.block` does not trigger a retry, and the ledger also notifies the
 node (`LedgerStateConfig.LeiosAnnouncementAtTip`) as soon as the chunk ending
 with the live announcing block commits, which retries the background
 validation. Without that notification a voter would vote only when the next
@@ -10706,6 +10716,17 @@ yields no candidate and the branch is rejected instead. Presence is asked of
 `Database.UtxoExists`, which does not materialize the output's CBOR: `UtxoByRef`
 reconstructs it by decoding the producing block on a blob miss, which turned a
 UTxO that demonstrably exists into a hard error out of recovery.
+A failing input whose UTxO row was spent at or below the applied ledger tip,
+bounded by the durable applied floor, is also reported as present: the block
+spends an input the local chain already consumed, and no rollback makes it
+spendable. The failing batch's metadata transaction is discarded before
+recovery runs, so a row marked spent above that ceiling is a stale write and
+still resolves to its producer, as does a missing or pruned row. The check
+applies only to the failing transaction's own inputs. The inputs, collateral,
+and reference inputs walked from a resolved producer are provenance
+dependencies and skip it: their spend state says nothing about whether the
+failing block carries a bad input. The check reads only the row's spend state
+where the metadata store supports it, so the output's assets are not loaded.
 
 A retention-pruned prefix or a Mithril bootstrap leaves the transaction index
 pointing at blocks the block store no longer holds. Three lookups on the
@@ -11223,10 +11244,12 @@ on both the submit endpoint and the evaluation endpoints, where
 an open per-era set of gouroboros types with no shared marker, so the
 complement cannot be enumerated: an unrecognized error stays a rejection.
 
-Each rebuild first evicts (`RemoveTxsByHash`) the transactions of blocks added
-since the previous rebuild, on every node, so a block produced elsewhere is not
-reported as invalid transactions dropped by revalidation. A rollback forgets
-the transactions of the blocks it removes before they are evicted.
+Every chain update evicts (`RemoveTxsByHash`) the transactions of added blocks,
+on every node, so a block produced elsewhere is not reported as invalid
+transactions dropped by revalidation. Eviction does not wait for the rebuild,
+which the chain-update worker skips while draining a backlog or while a failed
+rebuild waits out its retry interval. A rollback queues the transactions of the
+blocks it removes for readmission after the next successful rebuild.
 
 A block's transactions are every transaction the ledger applies with it. A
 Leios certifying ranking block carries none of its own: it applies the
@@ -11302,10 +11325,11 @@ chain, which the `BlockBroadcaster` the forger holds calls
 `ChainUpdateEvent` is published inside that call, before it returns. The forger
 then runs its `blockForged` observer, and only after that — and only if
 admission succeeded — synchronously removes the block's transaction hashes
-through the backend-neutral `RemoveTxsByHash` adapter. The chain-update rebuild
-remains responsible for transactions confirmed by peer blocks. This local fast
-path prevents confirmed transactions from accumulating when sustained admissions
-make a long rebuild repeatedly lose its pinned ledger generation.
+through the backend-neutral `RemoveTxsByHash` adapter. Transactions confirmed
+by peer blocks are evicted by the chain-update worker as each chain update
+arrives, independent of whether the rebuild runs. This local path removes a
+forged block's transactions without waiting for that worker to reach its
+`ChainUpdateEvent`.
 
 ## DMQ Message Pool
 
