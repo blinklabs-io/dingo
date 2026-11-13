@@ -7415,6 +7415,15 @@ reporting a "state as of" point names the point they were read at rather than
 sampling the tip again afterwards and reporting a point the chain has since
 moved to.
 
+The VRF key reported for a pool is the one header validation requires of a
+block from it at that point: the electing snapshot's key (as the reference
+`individualPoolStakeVrf` reads it), resolved by `electingVrfKeyHashAtSlot`, not
+the pool's latest registration. A re-registration with a new key after the
+snapshot was captured therefore does not change the reply until a later
+snapshot carries it. A live `GetStakeDistribution`/`GetStakeDistribution2`
+reply resolves the key the same way; a pinned one reports the registration in
+force at the pinned slot.
+
 The read itself lives in `ledger.LedgerState.PoolStakeDistribution`, which the
 UTxO RPC `v1beta QueryService.ReadState` handler also calls;
 `queryShelleyPoolDistr2` is only the adaptation of that result into the
@@ -7530,9 +7539,10 @@ were completely absent from dingo's reply for no reason other than that
 snapshot lag. `GetStakeDistribution2` (`queryShelleyStakeDistribution2`)
 is answered by cardano-node from the same `poolsByTotalStakeFraction`, so it
 shares `GetStakeDistribution`'s live reconstruction (`liveStakeDistribution`)
-rather than `GetPoolDistr2`'s mark snapshot: pools, stakes and VRF keys are
-as of the queried slot, and each fraction is over total circulating supply
-where `GetPoolDistr2` divides by delegated stake. Its reply total is the
+rather than `GetPoolDistr2`'s mark snapshot: pools and stakes are as of the
+queried slot (VRF keys as described for `GetPoolDistr2`), and each fraction
+is over total circulating supply where `GetPoolDistr2` divides by delegated
+stake. Its reply total is the
 delegated stake summed across the reconstructed pools, as
 `poolsByTotalStakeFraction` returns it. Both queries omit a pool with no
 delegated stake, as `calculatePoolDistr` does.

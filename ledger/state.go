@@ -3750,24 +3750,41 @@ func (ls *LedgerState) PoolRegistrationVRFKeyHash(
 	if err != nil {
 		return vrfHash, false, err
 	}
+	return ls.electingVrfKeyHashAtSlot(
+		ctx, pkh, slot, epoch.EpochId, consensusState.epochCache, txn,
+	)
+}
+
+// electingVrfKeyHashAtSlot returns the VRF key hash a block from pkh at slot,
+// in epochId, must carry: the key held by the snapshot that elects that slot,
+// or the epoch-effective registration when no such snapshot row exists.
+// found is false for a pool with no registration in force.
+func (ls *LedgerState) electingVrfKeyHashAtSlot(
+	ctx context.Context,
+	pkh lcommon.PoolKeyHash,
+	slot uint64,
+	epochId uint64,
+	epochCache []models.Epoch,
+	txn *database.Txn,
+) (vrfHash [32]byte, found bool, err error) {
 	var snap electingSnapshot
 	if slot != 0 && slot == ls.mithrilLedgerSlot {
 		// At the bootstrap anchor, startup needs the imported active
 		// distribution that elects the first uncovered headers.
 		row, rowErr := ls.db.Metadata().GetPoolStakeSnapshot(
-			epoch.EpochId, models.PoolStakeSnapshotTypeActive,
+			epochId, models.PoolStakeSnapshotTypeActive,
 			pkh[:], txn.Metadata(),
 		)
 		snap = electingSnapshot{
-			epoch:      epoch.EpochId,
+			epoch:      epochId,
 			kind:       models.PoolStakeSnapshotTypeActive,
-			epochCache: consensusState.epochCache,
+			epochCache: epochCache,
 			row:        row,
 			rowErr:     headerStateLookupErr(rowErr),
 		}
 	} else {
 		snap = ls.resolveElectingSnapshotAtSlot(
-			slot, epoch.EpochId, pkh, consensusState.epochCache, txn.Metadata(),
+			slot, epochId, pkh, epochCache, txn.Metadata(),
 		)
 	}
 	if snap.selErr != nil {
@@ -3778,15 +3795,19 @@ func (ls *LedgerState) PoolRegistrationVRFKeyHash(
 	}
 	if snap.row != nil && snap.row.CapturedSlot != 0 {
 		hash, ok, lookupErr := ls.electingVrfKeyHashFromSnapshotWithTxn(
-			ctx, pkh, consensusState.epochCache, snap, txn,
+			ctx, pkh, epochCache, snap, txn,
 		)
 		return [32]byte(hash), ok, lookupErr
+	}
+	epoch, err := epochForSlotInCache(epochCache, slot)
+	if err != nil {
+		return vrfHash, false, err
 	}
 	registrations, err := ls.db.Metadata().
 		GetPoolRegistrationsEffectiveForEpoch(
 			[]lcommon.PoolKeyHash{pkh},
 			epoch.StartSlot,
-			epoch.EpochId,
+			epochId,
 			slot,
 			txn.Metadata(),
 		)
