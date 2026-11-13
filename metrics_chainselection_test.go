@@ -518,6 +518,56 @@ func TestGenesisDensityDisconnectStandoffDoesNotDenyPeer(t *testing.T) {
 	)
 }
 
+// The standoff loser's close carries its reason, so peer governance delays
+// the redial; a provably sparser peer is denied instead and needs no reason.
+func TestGenesisDensityDisconnectRecordsStandoffCloseReason(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		standoff bool
+		want     string
+	}{
+		{"standoff", true, peergov.CloseReasonEagernessStandoffLost},
+		{"sparser", false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			n, _ := newMetricsTestNode(t)
+			n.peerGov = peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+			bus := event.NewEventBus(nil, nil)
+			t.Cleanup(bus.Close)
+			_, closeEvents := bus.Subscribe(
+				connmanager.ConnectionClosedEventType,
+			)
+			n.connManager = connmanager.NewConnectionManager(
+				connmanager.ConnectionManagerConfig{EventBus: bus},
+			)
+			conn, err := ouroboros.NewConnection()
+			require.NoError(t, err)
+			require.True(
+				t,
+				n.connManager.AddConnection(conn, false, "1.2.3.4:3001"),
+			)
+
+			n.onGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
+				ConnectionId:      conn.Id(),
+				EagernessStandoff: tc.standoff,
+			})
+			conn.ErrorChan() <- nil
+
+			evt := testutil.RequireReceive(
+				t,
+				closeEvents,
+				time.Second,
+				"close event",
+			)
+			closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+			require.True(t, ok)
+			assert.Equal(t, tc.want, closed.LocalCloseReason)
+		})
+	}
+}
+
 // Without k and a positive f the node keeps the selector's long-standing
 // 6480-slot window but must not run the Genesis Density Disconnector over it.
 func TestChainSelectorGenesisWindow(t *testing.T) {

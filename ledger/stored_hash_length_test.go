@@ -167,7 +167,7 @@ func shortStoredHash(size int, fill byte) []byte {
 	return bytes.Repeat([]byte{fill}, size-1)
 }
 
-func TestMIRDelegStateRejectsMalformedStoredCredential(t *testing.T) {
+func TestMIRPendingRejectsMalformedStoredCredential(t *testing.T) {
 	t.Parallel()
 	ls, db, raw := newMIRTestLedger(t)
 	withMIRCutoffEpoch(
@@ -184,7 +184,7 @@ func TestMIRDelegStateRejectsMalformedStoredCredential(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	err := txn.Do(func(txn *database.Txn) error {
 		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
-		_, err := lv.MIRDelegState(200, true)
+		_, err := lv.InstantaneousRewardsTotal(mirPotReserves)
 		return err
 	})
 	require.ErrorContains(t, err, "MIR reward credential")

@@ -149,6 +149,7 @@ var logPlainConfigFields = []string{
 	"BlockPipelineEnabled",
 	"BlockPipelineValidateEnabled",
 	"BlockProducer",
+	"BlockProducerPools",
 	"BlockfetchLowWatermarkEnabled",
 	"CORSAllowedOrigins",
 	"Cache.BlockLRUEntries",

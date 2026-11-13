@@ -232,7 +232,12 @@ func (n *Node) BlockProducerReady() error {
 		if forger == nil {
 			return nil, errors.New("block forger is not initialized")
 		}
-		return func() error { return blockProducerReadiness(forger) }, nil
+		return func() error {
+			if err := blockProducerReadiness(forger); err != nil {
+				return err
+			}
+			return n.poolProducersReady()
+		}, nil
 	})
 }
 

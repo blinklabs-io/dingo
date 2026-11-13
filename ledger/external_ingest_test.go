@@ -126,6 +126,12 @@ func newExternalIngestHarnessWith(
 		PoolDeposit:      500_000_000,
 		DRepDeposit:      500_000_000,
 		GovActionDeposit: 100_000_000,
+		MaxBlockBodySize:   90_112,
+		MaxBlockHeaderSize: 1_100,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62_000_000,
+			Steps:  20_000_000_000,
+		},
 		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 			Major: lcommon.ProtocolVersionPlomin,
 		},
