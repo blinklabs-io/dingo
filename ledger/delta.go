@@ -374,11 +374,25 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			// Staged per level, right after its write, so a later level or
 			// transaction in this commit resolves this one's outputs from
 			// the live UTxO set's overlay.
-			ls.stageUtxoSet( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-				txn,
-				nil,
-				utxoEventFor(d.Point, uint32(tr.Index), level), //nolint:gosec
-			)
+			if ls.config.UtxoSet != nil {
+				utxoEvt, err := utxoEventFor(
+					d.Point,
+					uint32(tr.Index), //nolint:gosec
+					level,
+				)
+				if err != nil {
+					return fmt.Errorf(
+						"build transaction body %d UTxO event: %w",
+						levelIndex,
+						err,
+					)
+				}
+				ls.stageUtxoSet( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+					txn,
+					nil,
+					utxoEvt,
+				)
+			}
 			if level.IsValid() {
 				if err := d.processGovernance(
 					ctx,

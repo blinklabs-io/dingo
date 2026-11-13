@@ -206,6 +206,11 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 	}
 	if detachedPoint != nil {
 		at = *detachedPoint
+		// The point could be rolled back while the query waited for
+		// admission; the paged path re-checks it for the same reason.
+		if err := ls.VerifyPointQueryable(ctx, nil, at); err != nil {
+			return nil, err
+		}
 	}
 	if txn == nil {
 		txn = ls.ledgerDB().Begin(ctx, false)
@@ -595,6 +600,11 @@ func decodeUtxoWholeCbor(
 
 // liveUtxoWhole answers GetUTxOWhole from the live UTxO set when it is the
 // only copy, decoding each output's CBOR the way resolveUtxoWhole does.
+//
+// It decodes on the calling goroutine instead of resolveUtxoWhole's worker
+// pool. The set hands over each output's CBOR already in memory, so there is
+// no per-row blob read for a pool to overlap, and no spawned goroutine whose
+// panic could escape the request's own recovery.
 func liveUtxoWhole(
 	ctx context.Context,
 	each func(func(*models.Utxo) error) error,

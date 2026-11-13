@@ -2584,6 +2584,11 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if cfg.StartInDijkstra && !cfg.EnableDijkstra {
 		return nil, errors.New("StartInDijkstra requires EnableDijkstra")
 	}
+	if cfg.UtxoSetReads != UtxoSetReadsOff {
+		if _, ok := cfg.UtxoSet.(UtxoSetReader); !ok {
+			return nil, errors.New("UtxoSetReads needs a readable UtxoSet")
+		}
+	}
 	if cfg.UtxoSetOnly {
 		if _, ok := cfg.UtxoSet.(UtxoSetReader); !ok {
 			return nil, errors.New("UtxoSetOnly needs a readable UtxoSet")
@@ -13952,11 +13957,8 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 			currentLedgerTip.Point.Slot,
 			currentLedgerTip.BlockNumber,
 		)
-		priorIntentPoint, priorIntentBlocks, priorIntentPending, intentErr := loadRollbackIntent(ls.db)
-		if intentErr != nil {
-			return fmt.Errorf("load prior rollback intent: %w", intentErr)
-		}
-		priorIntentEndorser, intentErr := loadRollbackIntentEndorserUndo(ls.db)
+		priorIntentPoint, priorIntentBlocks, priorIntentEndorser,
+			priorIntentPending, intentErr := loadIntentWithEndorser(ls.db)
 		if intentErr != nil {
 			return fmt.Errorf("load prior rollback intent: %w", intentErr)
 		}

@@ -8696,12 +8696,19 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 			for _, utxos := range txUtxos {
 				for _, u := range utxos {
 					id := u.Id.Id()
+					c, err := outputCbor(u.Output)
+					if err != nil {
+						return fmt.Errorf(
+							"encode genesis output %x#%d: %w",
+							id[:], u.Id.Index(), err,
+						)
+					}
 					genesisEvt.Added = append(genesisEvt.Added, UtxoOutput{
 						Ref: models.UtxoId{
 							Hash: append([]byte(nil), id[:]...),
 							Idx:  u.Id.Index(),
 						},
-						Cbor: outputCbor(u.Output),
+						Cbor: c,
 					})
 				}
 			}

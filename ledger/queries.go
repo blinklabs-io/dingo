@@ -3334,7 +3334,7 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(ctx context.Context, txIns []ledge
 			txn,
 		)
 	} else {
-		utxos, err = ls.utxosByRefsForValidation(ctx, refs, txn)
+		utxos, err = ls.utxosByRefsForQuery(ctx, refs, txn)
 	}
 	if err != nil {
 		return nil, err

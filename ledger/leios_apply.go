@@ -565,7 +565,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				// before that block removes them, and a ledger.utxo
 				// consumer must have seen them added.
 				for _, evt := range applyEvents {
-					ls.publishUtxoEvent(ctx, utxoEventForTransaction(evt))
+					ls.publishUtxoEventForTransaction(ctx, evt)
 				}
 			})
 		} else {

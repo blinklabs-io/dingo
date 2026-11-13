@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -174,8 +175,29 @@ func (ls *LedgerState) publishTransactionEvent(
 ) {
 	ls.publishTransactionEventOnly(ctx, evt)
 	if !evt.Rollback {
-		ls.publishUtxoEvent(ctx, utxoEventForTransaction(evt))
+		ls.publishUtxoEventForTransaction(ctx, evt)
 	}
+}
+
+// publishUtxoEventForTransaction publishes the UTxO change of a forward
+// transaction event. An output that cannot be encoded is logged and the event
+// is not published, rather than announcing an output with empty CBOR.
+func (ls *LedgerState) publishUtxoEventForTransaction(
+	ctx context.Context,
+	evt TransactionEvent,
+) {
+	utxoEvt, err := utxoEventForTransaction(evt)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to build ledger.utxo event",
+			"component", "ledger",
+			"error", err,
+			"slot", evt.Point.Slot,
+			"tx_index", evt.TxIndex,
+		)
+		return
+	}
+	ls.publishUtxoEvent(ctx, utxoEvt)
 }
 
 // publishTransactionEventOnly publishes evt on ledger.tx without its UTxO
@@ -409,15 +431,20 @@ func (ls *LedgerState) readBlocksAboveSlot(
 	return blocks, nil
 }
 
-// blocksAppliedUpTo keeps the blocks at or below tip's slot. The primary chain
-// can hold blocks the ledger has not applied yet, and a rollback must not undo
-// what no consumer was ever told was applied.
+// blocksAppliedUpTo keeps the blocks the ledger applied: those below tip's
+// slot and the block at that slot that is tip itself. The primary chain can
+// hold blocks the ledger has not applied yet, including a competing block at
+// tip's slot, and a rollback must not undo what no consumer was ever told was
+// applied.
 func blocksAppliedUpTo(
 	blocks []models.Block,
 	tip ocommon.Point,
 ) []models.Block {
 	return slices.DeleteFunc(slices.Clone(blocks), func(b models.Block) bool {
-		return b.Slot > tip.Slot
+		if b.Slot != tip.Slot || len(tip.Hash) == 0 {
+			return b.Slot > tip.Slot
+		}
+		return !bytes.Equal(b.Hash, tip.Hash)
 	})
 }
 
@@ -673,7 +700,7 @@ func (ls *LedgerState) publishUtxoEventAfterCommit(
 
 // utxoEventForTransaction is the UTxO change a forward transaction event
 // makes.
-func utxoEventForTransaction(te TransactionEvent) UtxoEvent {
+func utxoEventForTransaction(te TransactionEvent) (UtxoEvent, error) {
 	return utxoEventFor(te.Point, te.TxIndex, te.Transaction)
 }
 
@@ -684,7 +711,7 @@ func utxoEventFor(
 	point ocommon.Point,
 	txIndex uint32,
 	tx lcommon.Transaction,
-) UtxoEvent {
+) (UtxoEvent, error) {
 	evt := UtxoEvent{
 		Point:   point,
 		Cause:   UtxoChangeTransaction,
@@ -699,28 +726,36 @@ func utxoEventFor(
 	}
 	for _, u := range tx.Produced() {
 		id := u.Id.Id()
+		c, err := outputCbor(u.Output)
+		if err != nil {
+			return UtxoEvent{}, fmt.Errorf(
+				"encode output %x#%d: %w", id[:], u.Id.Index(), err,
+			)
+		}
 		evt.Added = append(evt.Added, UtxoOutput{
 			Ref: models.UtxoId{
 				Hash: append([]byte(nil), id[:]...),
 				Idx:  u.Id.Index(),
 			},
-			Cbor: outputCbor(u.Output),
+			Cbor: c,
 		})
 	}
-	return evt
+	return evt, nil
 }
 
 // outputCbor returns an output's original CBOR, or encodes it when the
-// output was built rather than decoded.
-func outputCbor(out lcommon.TransactionOutput) []byte {
+// output was built rather than decoded. An output that cannot be encoded is an
+// error: staging it with empty CBOR would put an unreadable row in the live
+// UTxO set.
+func outputCbor(out lcommon.TransactionOutput) ([]byte, error) {
 	if c := out.Cbor(); len(c) > 0 {
-		return c
+		return c, nil
 	}
 	c, err := cbor.Encode(out)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("encode transaction output: %w", err)
 	}
-	return c
+	return c, nil
 }
 
 // stageUtxoRollbackEvent reads what a rollback to point does to the live

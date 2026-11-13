@@ -616,6 +616,21 @@ func (ls *LedgerState) utxoByRefForValidation(
 	return utxo, err
 }
 
+// utxosByRefsForQuery resolves refs for a client query: the live UTxO set when
+// it is the only copy, otherwise the metadata store. Unlike
+// utxosByRefsForValidation it never runs the verify comparison, so queries do
+// not count toward or log validation read mismatches.
+func (ls *LedgerState) utxosByRefsForQuery(
+	ctx context.Context,
+	refs []models.UtxoId,
+	txn ledgerdb.Txn,
+) ([]models.Utxo, error) {
+	if ls.config.UtxoSetOnly {
+		return ls.utxosByRefsForValidation(ctx, refs, txn)
+	}
+	return ls.ledgerDB().UtxosByRefs(ctx, refs, txn)
+}
+
 // utxosByRefsForValidation resolves refs for validation from the store the
 // read mode selects, leaving out refs that are not live.
 func (ls *LedgerState) utxosByRefsForValidation(
@@ -1082,10 +1097,14 @@ func (ls *LedgerState) utxoIncludingSpent(
 	if out == nil {
 		return nil, nil
 	}
+	c, err := outputCbor(out)
+	if err != nil {
+		return nil, fmt.Errorf("encode output %x#%d: %w", txID, index, err)
+	}
 	return &models.Utxo{
 		TxId:      txID,
 		OutputIdx: index,
-		Cbor:      outputCbor(out),
+		Cbor:      c,
 	}, nil
 }
 

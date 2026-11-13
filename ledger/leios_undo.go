@@ -18,9 +18,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"fmt"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -145,6 +147,22 @@ func (ls *LedgerState) emitEndorserUndo(
 				"hash", hex.EncodeToString(block.Hash),
 				"tx_index", etx.Index,
 			)
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					LedgerErrorEventType,
+					event.NewEvent(
+						LedgerErrorEventType,
+						LedgerErrorEvent{
+							Error: fmt.Errorf(
+								"decode endorser transaction for tx undo events: %w",
+								err,
+							),
+							Operation: "rollback_tx_undo_decode",
+							Point:     point,
+						},
+					),
+				)
+			}
 			continue
 		}
 		ls.publishTransactionEvent(ctx, TransactionEvent{

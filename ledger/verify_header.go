@@ -29,7 +29,6 @@ import (
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/tracing"
@@ -3014,7 +3013,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 		poolKeyHash,
 		epochCache,
 		snap,
-		dbadapter.Txn(dbadapter.Unwrap(txn)),
+		txn,
 	)
 }
 

@@ -34,6 +34,12 @@ const (
 // do (models.UtxoLedgerToModel): the stake sum it adds its lovelace to, keyed
 // by CredentialStakeKey for a stake key hash or PointerStakeKey for a
 // pointer address. ok is false for an output that adds to no stake.
+//
+// ok is also false for CBOR that does not decode or whose amount exceeds
+// uint64, and that silence is intended: the signature is the aggregator
+// callback the live set sums with, which cannot fail a commit, and an output
+// reaches the set only after it was decoded or encoded when staged, so the
+// metadata rows classify it the same way.
 func UtxoStakeOf(cbor []byte) (key []byte, lovelace uint64, ok bool) {
 	out, err := gledger.NewTransactionOutputFromCbor(cbor)
 	if err != nil || out == nil {

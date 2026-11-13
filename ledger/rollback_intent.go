@@ -217,11 +217,14 @@ func (ls *LedgerState) ensureRollbackIntent(
 	point ocommon.Point,
 	rollbackBlocks []models.Block,
 ) error {
-	existing, existingBlocks, pending, err := loadRollbackIntent(ls.db)
+	// An existing intent's blocks may already be truncated, so their endorser
+	// transactions come from the intent, not the store.
+	existing, existingBlocks, endorser, pending, err := loadIntentWithEndorser(
+		ls.db,
+	)
 	if err != nil {
 		return err
 	}
-	var endorser endorserUndo
 	if pending {
 		if existing.Slot != point.Slot ||
 			!bytes.Equal(existing.Hash, point.Hash) {
@@ -243,13 +246,6 @@ func (ls *LedgerState) ensureRollbackIntent(
 				existingBlocks,
 				rollbackBlocks,
 			)
-			// The existing intent's blocks may already be truncated, so
-			// their endorser transactions come from the intent, not the
-			// store.
-			endorser, err = loadRollbackIntentEndorserUndo(ls.db)
-			if err != nil {
-				return err
-			}
 		} else {
 			return nil
 		}
@@ -311,8 +307,17 @@ func mergeRollbackBlocks(
 func loadRollbackIntent(
 	db *database.Database,
 ) (ocommon.Point, []models.Block, bool, error) {
+	point, blocks, _, pending, err := loadIntentWithEndorser(db)
+	return point, blocks, pending, err
+}
+
+// loadIntentWithEndorser is loadRollbackIntent that also returns the
+// endorser transactions the intent recorded, from the same decode.
+func loadIntentWithEndorser(
+	db *database.Database,
+) (ocommon.Point, []models.Block, endorserUndo, bool, error) {
 	if db == nil || db.Metadata() == nil {
-		return ocommon.Point{}, nil, false, nil
+		return ocommon.Point{}, nil, nil, false, nil
 	}
 	raw, err := db.GetSyncStateBounded(
 		durableRollbackIntentSyncKey,
@@ -320,37 +325,37 @@ func loadRollbackIntent(
 		nil,
 	)
 	if errors.Is(err, metadata.ErrSyncStateTooLarge) {
-		return ocommon.Point{}, nil, false, fmt.Errorf(
+		return ocommon.Point{}, nil, nil, false, fmt.Errorf(
 			"%w: %w", errInvalidRollbackIntent, err,
 		)
 	}
 	if err != nil {
-		return ocommon.Point{}, nil, false, fmt.Errorf(
+		return ocommon.Point{}, nil, nil, false, fmt.Errorf(
 			"load rollback intent: %w", err,
 		)
 	}
 	if raw == "" {
-		return ocommon.Point{}, nil, false, nil
+		return ocommon.Point{}, nil, nil, false, nil
 	}
 	intent, err := decodeRollbackIntent(raw)
 	if err != nil {
-		return ocommon.Point{}, nil, false, err
+		return ocommon.Point{}, nil, nil, false, err
 	}
 	if intent.Version != durableRollbackIntentVersion {
-		return ocommon.Point{}, nil, false, fmt.Errorf(
+		return ocommon.Point{}, nil, nil, false, fmt.Errorf(
 			"%w: unsupported format version %d",
 			errInvalidRollbackIntent,
 			intent.Version,
 		)
 	}
 	if intent.Slot == nil || intent.Hash == nil {
-		return ocommon.Point{}, nil, false, fmt.Errorf(
+		return ocommon.Point{}, nil, nil, false, fmt.Errorf(
 			"%w: missing slot or hash",
 			errInvalidRollbackIntent,
 		)
 	}
 	if *intent.Slot > 0 && *intent.Hash == "" {
-		return ocommon.Point{}, nil, false, fmt.Errorf(
+		return ocommon.Point{}, nil, nil, false, fmt.Errorf(
 			"%w: invalid origin point",
 			errInvalidRollbackIntent,
 		)
@@ -358,18 +363,18 @@ func loadRollbackIntent(
 	hash, err := hex.DecodeString(*intent.Hash)
 	if err != nil {
 		detail := err.Error()
-		return ocommon.Point{}, nil, false, fmt.Errorf(
+		return ocommon.Point{}, nil, nil, false, fmt.Errorf(
 			"%w: decode hash: %s", errInvalidRollbackIntent, detail,
 		)
 	}
 	if *intent.Slot > 0 && len(hash) == 0 {
-		return ocommon.Point{}, nil, false, fmt.Errorf(
+		return ocommon.Point{}, nil, nil, false, fmt.Errorf(
 			"%w: empty non-origin hash",
 			errInvalidRollbackIntent,
 		)
 	}
 	return ocommon.Point{Slot: *intent.Slot, Hash: hash},
-		modelBlocks(intent.Blocks), true, nil
+		modelBlocks(intent.Blocks), intent.endorserUndo(), true, nil
 }
 
 // loadRollbackIntentEndorserUndo returns the endorser-block transactions the
@@ -395,6 +400,12 @@ func loadRollbackIntentEndorserUndo(
 	if err != nil {
 		return nil, err
 	}
+	return intent.endorserUndo(), nil
+}
+
+// endorserUndo returns the endorser transactions the intent recorded per
+// ranking block, or nil when it recorded none.
+func (intent durableRollbackIntent) endorserUndo() endorserUndo {
 	var ret endorserUndo
 	for _, block := range intent.Blocks {
 		if len(block.EndorserTxs) == 0 {
@@ -405,7 +416,7 @@ func loadRollbackIntentEndorserUndo(
 		}
 		ret[string(block.Hash)] = block.EndorserTxs
 	}
-	return ret, nil
+	return ret
 }
 
 // decodeRollbackIntent decodes a stored record under the limits the writer
