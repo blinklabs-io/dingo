@@ -12845,10 +12845,12 @@ files and reload once a changed content has held for two polls. Polling
 content rather than file events sees the atomic `..data` symlink swap
 Kubernetes uses for a mounted Secret and needs no notification support. The
 two-poll wait reduces reloads during short writes; credential validation still
-rejects an incomplete credential set. In serve-key mode, where a reload is
-always refused, the watch is not started and a warning says so. With several
-pools the watch is skipped only when every pool is serve-key; otherwise it
-runs for the pools that can reload and leaves the serve-key pools out.
+rejects an incomplete credential set. The watch baseline is taken before the
+credentials are loaded, so a file replaced after the load is a change. In
+serve-key mode, where a reload is always refused, the watch is not started
+and a warning says so. With several pools the watch is skipped only when every
+pool is serve-key; otherwise it runs for the pools that can reload and leaves
+the serve-key pools out.
 `dingo_forge_credential_reloads_total{trigger,result}` counts reloads by
 trigger (`signal`, `file`, `agent`) and result (`success`, `unchanged`,
 `failure`), and `dingo_forge_opcert_counter_loaded` reports the counter the
