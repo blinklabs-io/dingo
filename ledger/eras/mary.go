@@ -162,6 +162,5 @@ func ValidateTxMary(
 			validationFunc(tx, slot, ls, pp),
 		)
 	}
-	errs = append(errs, validateShelleyDelegCerts(tx, slot, ls, pp))
 	return errors.Join(errs...)
 }

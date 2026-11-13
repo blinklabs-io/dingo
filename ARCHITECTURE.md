@@ -6970,7 +6970,7 @@ set (`GetUTxOWhole`), stake-delegation deposits, the ledger peer snapshot, stake
 pools, stake pool parameters (`GetStakePoolParams`, the parameters in effect in
 the epoch of the acquired point from the registrations added at or before it, so
 a re-registration made during that epoch is not reported until the next one),
-which returns genesis relay addresses in ledger wire order and includes an
+which encodes every relay address in ledger wire order and includes an
 optional BLS key when protocol version 12 or later applies), Leios committee
 (`GetLeiosCommittee`, gated the same way through
 `LedgerStateConfig.LeiosCommittee`, which the node sets only from the strict
@@ -21707,44 +21707,36 @@ POOLREAP precedes SNAP.
    The reference DELEG transition rejects most of what this check guards
    against at transaction-validation time, before any of it runs, which is
    what makes the boundary's own capacity check normally unreachable for a
-   fully validated chain. gouroboros's shelley validation rules implement only
-   the parts expressible against `common.LedgerState`, such as
-   `MIRNegativesNotCurrentlyAllowedError`. The rest need epoch-scoped state.
-   `ledger/eras.validateShelleyDelegCerts`, called from every
-   Shelley-through-Babbage `ValidateTx*` function, is dingo's implementation.
-   It walks a transaction's certificates in order, as DELEGS does, and it is
-   skipped for a phase-2-invalid transaction, for which DELEGS never runs.
-   For move instantaneous rewards it enforces
-   `MIRCertificateTooLateinEpochDELEG` (slot below `firstSlot(nextEpoch) -
-   3k/f`), `MIRTransferNotCurrentlyAllowed` (no pot transfer before protocol
-   version 5), `MIRProducesNegativeUpdate`,
-   `InsufficientForInstantaneousRewardsDELEG` and
-   `InsufficientForTransferDELEG`. Each certificate is checked against the
-   pots and pending rewards its predecessors left, so a later transfer
-   cannot fund an earlier distribution. The starting state comes from
-   `*LedgerView.MIRDelegState`: the `NetworkState` pots, the epoch's committed
-   distributions (summed from protocol version 5, replaced before it) and
-   net pot transfers, and the cutoff. Every transaction's certificates are
-   written immediately after that transaction validates, so this is always
-   caught up as of the currently validating slot. The gouroboros
-   `UtxoValidateDelegation` rule in the same rule lists checks
-   `MIRProducesNegativeUpdate` again from protocol version 5, reading the
-   pending rewards through `*LedgerView.PendingInstantaneousRewards` (the
-   epoch's committed distributions for one credential and pot, summed);
-   without that capability it rejects any negative delta an earlier
-   transaction covers as undecidable. For legacy stake
-   certificates the same walk enforces `StakeKeyAlreadyRegisteredDELEG`,
-   `StakeKeyNotRegisteredDELEG` and `StakeKeyNonZeroAccountBalanceDELEG`,
-   with withdrawals drained first. For genesis key delegation certificates it
-   enforces `GenesisKeyNotInMappingDELEG`, `DuplicateGenesisDelegateDELEG` and
-   `DuplicateGenesisVRFDELEG` against the delegations in force and the pending
-   ones from `*LedgerView.GenesisDelegState`, and a certified delegation takes
-   effect only at its slot plus the stability window. It also rejects
-   delegation from a
-   credential deregistered earlier in the transaction. Upstream value
-   conservation counts a deposit for every registration and a refund for
-   every deregistration, and those amounts match real accounts only because
-   this walk has already rejected the certificates that name no account.
+   fully validated chain. Dingo relies on the gouroboros
+   `UtxoValidateDelegation` rule in every Shelley-through-Babbage rule list
+   for it. That rule walks a transaction's certificates in order, as DELEGS
+   does, and gouroboros groups it with the rules a phase-2-invalid
+   transaction skips, since DELEGS never runs for one. It enforces the legacy
+   stake certificate predicates (`StakeKeyAlreadyRegisteredDELEG`,
+   `StakeKeyNotRegisteredDELEG`, `StakeKeyNonZeroAccountBalanceDELEG`, with
+   withdrawals drained first), the move instantaneous rewards predicates
+   (`MIRCertificateTooLateinEpochDELEG`, `MIRTransferNotCurrentlyAllowed`,
+   `MIRProducesNegativeUpdate`, `InsufficientForInstantaneousRewardsDELEG`,
+   `InsufficientForTransferDELEG`) and the genesis key delegation predicates
+   (`GenesisKeyNotInMappingDELEG`, `DuplicateGenesisDelegateDELEG`,
+   `DuplicateGenesisVRFDELEG`). The epoch-scoped state comes from optional
+   capabilities `*LedgerView` implements, each of which the rule treats as
+   undecidable and rejects without: `StabilityWindowState` (the next epoch's
+   first slot from the epoch cache and `ceil(3k/f)` from Shelley genesis),
+   `PendingInstantaneousRewardsState` and `InstantaneousRewardsTotalsState`
+   (the epoch's committed distributions, summed from Alonzo and replaced
+   before it, their per-pot totals and the net pot transfers), and
+   `GenesisDelegationRegistryState` (the delegations in force and those
+   certified but still inside the stability window). The pots come from
+   `GetAdaPots`, which reads reserves and treasury from `NetworkState`. Every
+   transaction's certificates are written immediately after that transaction
+   validates, so this state is always caught up as of the currently
+   validating slot, and gouroboros folds the earlier transactions of the same
+   block and the earlier certificates of the same transaction in memory.
+   Upstream value conservation counts a deposit for every registration and a
+   refund for every deregistration, and those amounts match real accounts
+   only because this walk has already rejected the certificates that name no
+   account.
 3. SNAP-point mark stake read (`captureEpochBoundarySnapshotStake` →
    `snapshot.Manager.ComputeEpochBoundarySnapshot`, when a stake hook is
    installed): read the mark snapshot's stake distribution here, after the two

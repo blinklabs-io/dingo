@@ -1858,14 +1858,40 @@ func (ls *LedgerState) genesisDelegateKeyHashes(
 	return ret, nil
 }
 
+// genesisDelegPair is a genesis delegate's cold key hash and VRF key hash.
+type genesisDelegPair struct {
+	Delegate lcommon.Blake2b224
+	Vrf      lcommon.Blake2b256
+}
+
+// futureGenesisDelegKey identifies a pending genesis delegation by the slot it
+// activates at and the genesis key it replaces the delegate of. A later
+// certificate for the same key at the same slot replaces the earlier one.
+type futureGenesisDelegKey struct {
+	Slot    uint64
+	Genesis lcommon.Blake2b224
+}
+
+// genesisDelegationSnapshot is the slice of the ledger's DELEG state that the
+// genesis key delegation predicates read: dsGenDelegs and dsFutureGenDelegs.
+type genesisDelegationSnapshot struct {
+	// Current maps every genesis key to the delegate in force at the slot.
+	Current map[lcommon.Blake2b224]genesisDelegPair
+	// Future holds the delegations certified but not yet in force.
+	Future map[futureGenesisDelegKey]genesisDelegPair
+	// StabilityWindow is the delay between a certificate's slot and the slot
+	// its delegation takes effect.
+	StabilityWindow uint64
+}
+
 // genesisDelegState returns the genesis delegations in force at slot and those
 // certified but still inside the stability window, the state the reference's
 // DELEG rule validates genesis key delegation certificates against.
 func (ls *LedgerState) genesisDelegState(
 	slot uint64,
 	txn types.Txn,
-) (eras.GenesisDelegState, error) {
-	var ret eras.GenesisDelegState
+) (genesisDelegationSnapshot, error) {
+	var ret genesisDelegationSnapshot
 	if ls.config.CardanoNodeConfig == nil {
 		return ret, errors.New("unable to get cardano node config")
 	}
@@ -1880,7 +1906,7 @@ func (ls *LedgerState) genesisDelegState(
 		return ret, err
 	}
 	ret.Current = make(
-		map[lcommon.Blake2b224]eras.GenesisDelegPair,
+		map[lcommon.Blake2b224]genesisDelegPair,
 		len(genesis),
 	)
 	for _, initial := range genesis {
@@ -1893,7 +1919,7 @@ func (ls *LedgerState) genesisDelegState(
 			return ret, err
 		}
 		genesisKey := lcommon.NewBlake2b224(initial.genesisHash)
-		ret.Current[genesisKey] = eras.GenesisDelegPair{
+		ret.Current[genesisKey] = genesisDelegPair{
 			Delegate: lcommon.NewBlake2b224(active.delegateHash),
 			Vrf:      lcommon.NewBlake2b256(active.vrfHash),
 		}
@@ -1914,7 +1940,7 @@ func (ls *LedgerState) genesisDelegState(
 		return ret, fmt.Errorf("get pending genesis delegations: %w", err)
 	}
 	ret.Future = make(
-		map[eras.FutureGenesisDelegKey]eras.GenesisDelegPair,
+		map[futureGenesisDelegKey]genesisDelegPair,
 		len(pending),
 	)
 	for _, row := range pending {
@@ -1926,10 +1952,10 @@ func (ls *LedgerState) genesisDelegState(
 				row.GenesisHash,
 			)
 		}
-		ret.Future[eras.FutureGenesisDelegKey{
+		ret.Future[futureGenesisDelegKey{
 			Slot:    row.AddedSlot + ret.StabilityWindow,
 			Genesis: lcommon.NewBlake2b224(row.GenesisHash),
-		}] = eras.GenesisDelegPair{
+		}] = genesisDelegPair{
 			Delegate: lcommon.NewBlake2b224(row.GenesisDelegateHash),
 			Vrf:      lcommon.NewBlake2b256(row.VrfKeyHash),
 		}
