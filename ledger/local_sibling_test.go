@@ -22,6 +22,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/consensus/praos"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -34,6 +36,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// cacheEpochWithoutNonce caches an epoch covering slot whose nonce is not
+// published yet, the state of a catching-up node. A block there that carries
+// no verifiable VRF/KES material has its header verification deferred to
+// ledger apply rather than rejected, so a test about delivery and batching
+// can admit it. Mithril coverage cannot stand in: it applies only to blocks
+// already on the certified chain.
+func cacheEpochWithoutNonce(t *testing.T, ls *LedgerState, slot uint64) {
+	t.Helper()
+	ls.Lock()
+	defer ls.Unlock()
+	require.Empty(t, ls.epochCache, "fixture already caches an epoch")
+	ls.epochCache = []models.Epoch{{
+		EpochId:       0,
+		StartSlot:     0,
+		LengthInSlots: uint(slot) + 1000,
+		SlotLength:    1,
+		EraId:         eras.BabbageEraDesc.Id,
+	}}
+	ls.publishSnapshotsLocked()
+}
 
 // stageInFlightBlockfetchBatch puts the fixture in the state that exists while
 // a blockfetch batch requested for the rival's continuation is in flight: the
@@ -63,11 +86,7 @@ func stageInFlightBlockfetchBatch(
 	connId := testRecycleConnId()
 	ls.activeBlockfetchConnId = connId
 	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
-	previousMithrilLedgerSlot := ls.mithrilLedgerSlot
-	ls.mithrilLedgerSlot = point.Slot
-	defer func() {
-		ls.mithrilLedgerSlot = previousMithrilLedgerSlot
-	}()
+	cacheEpochWithoutNonce(t, ls, point.Slot)
 	require.NoError(t, handleEventBlockfetchBlockDeferred(ls,
 		BlockfetchEvent{
 			ConnectionId: connId,

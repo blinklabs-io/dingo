@@ -3951,6 +3951,152 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 	assert.Equal(t, currentTip, ls.chain.Tip())
 }
 
+// An input consumed by a block the ledger has applied is a bad input the
+// failing block carries, not a gap in local state: no rollback can make it
+// spendable again. The failing batch's transaction is discarded before
+// recovery runs, so a row marked spent above the applied ledger tip is a stale
+// write, and an input with no UTxO row at all is missing state; both must keep
+// resolving to the producer.
+func TestReplayRecoverySpentInputIsNotMissingState(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name            string
+		spentAtSlot     uint64
+		floorAtProducer bool
+		wantRecovered   bool
+	}{
+		{name: "consumed at the applied ledger tip", spentAtSlot: 140},
+		{
+			name:            "marked spent above the durable applied floor",
+			spentAtSlot:     140,
+			floorAtProducer: true,
+			wantRecovered:   true,
+		},
+		{
+			name:          "marked spent above the applied ledger tip",
+			spentAtSlot:   150,
+			wantRecovered: true,
+		},
+		{
+			name:          "marked spent at the failing block",
+			spentAtSlot:   160,
+			wantRecovered: true,
+		},
+		{name: "no utxo row", wantRecovered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db, err := dbtest.NewDatabase(t, &database.Config{
+				DataDir: t.TempDir(),
+			})
+			require.NoError(t, err)
+			cm, err := chain.NewManager(context.Background(), db, nil)
+			require.NoError(t, err)
+
+			parentBlock := testRawBlock("spent-parent", 100, 1, nil)
+			producerBlock := testRawBlock(
+				"spent-producer", 120, 2, parentBlock.Hash,
+			)
+			spenderBlock := testRawBlock(
+				"spent-spender", 140, 3, producerBlock.Hash,
+			)
+			failingBlock := testRawBlock(
+				"spent-failing", 160, 4, spenderBlock.Hash,
+			)
+			require.NoError(t, cm.PrimaryChain().AddRawBlocks(
+				context.Background(),
+				[]chain.RawBlock{
+					parentBlock, producerBlock, spenderBlock, failingBlock,
+				},
+			))
+			chainTip := rawBlockTip(failingBlock)
+
+			ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
+				Database:          db,
+				ChainManager:      cm,
+				CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+				Logger: slog.New(
+					slog.NewJSONHandler(io.Discard, nil),
+				),
+			})
+			require.NoError(t, err)
+			ls.metrics.init(prometheus.NewRegistry())
+
+			ledgerTip := rawBlockTip(spenderBlock)
+			floor := ledgerTip
+			if tc.floorAtProducer {
+				// currentTip leads the durably applied state, as a
+				// slot-based rollback can leave it.
+				floor = rawBlockTip(producerBlock)
+			}
+			require.NoError(t, db.SetBlockNonce(
+				floor.Point.Hash, floor.Point.Slot,
+				[]byte("nonce-floor"), false, nil,
+			))
+			require.NoError(t, db.SetTip(ledgerTip, nil))
+			ls.currentTip = ledgerTip
+			ls.currentTipBlockNonce = []byte("nonce-floor")
+			ls.publishSnapshotsLocked()
+
+			producerTxHash := testHashBytes("spent-producer-tx")
+			seedReplayRecoveryTransaction(
+				t, db, producerTxHash, producerBlock.Hash,
+				producerBlock.Slot,
+			)
+			if tc.spentAtSlot != 0 {
+				require.NoError(t, db.CreateUtxo(
+					context.Background(), nil, &models.Utxo{
+						TxId:      producerTxHash,
+						OutputIdx: 0,
+						Amount:    types.Uint64(1_000_000),
+						AddedSlot: producerBlock.Slot,
+					},
+				))
+				raw, err := dbtest.RawSQLiteMetadata(t, db)
+				require.NoError(t, err)
+				res, err := raw.Exec(
+					`UPDATE utxo SET deleted_slot = ? WHERE tx_id = `+
+						`(SELECT id FROM "transaction" WHERE hash = ?) `+
+						`AND output_idx = 0`,
+					tc.spentAtSlot, producerTxHash,
+				)
+				require.NoError(t, err)
+				rows, err := res.RowsAffected()
+				require.NoError(t, err)
+				require.Equal(t, int64(1), rows)
+				live, err := db.UtxoExists(
+					context.Background(), producerTxHash, 0, nil,
+				)
+				require.NoError(t, err)
+				require.False(t, live, "the seeded row must be spent")
+			}
+
+			validationErr := &txValidationError{
+				BlockPoint: chainTip.Point,
+				TxHash:     testHashBytes("spent-failing-tx"),
+				Inputs: []lcommon.TransactionInput{
+					&replayRecoveryInput{txId: producerTxHash, index: 0},
+				},
+				Cause: fmt.Errorf(
+					"shelley utxo validation rule 8: %w",
+					shelley.BadInputsUtxoError{},
+				),
+			}
+
+			recovered, err := ls.tryRecoverFromTxValidationError(validationErr)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantRecovered, recovered)
+			if !tc.wantRecovered {
+				assert.Equal(t, ledgerTip, ls.currentTip,
+					"a spent input must not rewind the ledger")
+				assert.Equal(t, chainTip, ls.chain.Tip())
+			}
+		})
+	}
+}
+
 // TestResolveReplayRecoveryProducerReportsPresentInput pins the distinction the
 // candidate search depends on. resolveReplayRecoveryProducer returns a nil
 // producer for two unrelated situations — the input is present so there is

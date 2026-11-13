@@ -719,3 +719,56 @@ func (ls *LedgerState) reconciliationUndoBlocks(
 	}
 	return blocks
 }
+
+type transactionEventMutexHeldKey struct{}
+
+func withTransactionEventMutexHeld(ctx context.Context) context.Context {
+	return context.WithValue(ctx, transactionEventMutexHeldKey{}, true)
+}
+
+func transactionEventMutexHeld(ctx context.Context) bool {
+	held, _ := ctx.Value(transactionEventMutexHeldKey{}).(bool)
+	return held
+}
+
+// rollbackAppliedStateWithUndo rolls metadata back while publishing undo
+// events from the ledger's applied-block record. Recovery paths use this when
+// the primary chain may still extend beyond the target or may already contain
+// a different fork, so reading the active chain range would identify blocks
+// that the ledger never applied.
+func (ls *LedgerState) rollbackAppliedStateWithUndo(
+	ctx context.Context,
+	point ocommon.Point,
+	repairSameTip bool,
+) error {
+	// Serialize the applied-tip snapshot, Undo enqueue, and metadata truncation
+	// against a block-apply commit and its AfterCommit Apply publication.
+	if !transactionEventMutexHeld(ctx) {
+		ls.transactionEventMutex.Lock()
+		defer ls.transactionEventMutex.Unlock()
+		ctx = withTransactionEventMutexHeld(ctx)
+	}
+
+	ls.RLock()
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	resolved, err := ls.resolveRollbackTarget(ctx, point, currentTip)
+	if err != nil {
+		return err
+	}
+	undoBlocks := ls.reconciliationUndoBlocks(
+		ctx,
+		resolved,
+		currentTip.Point.Slot,
+		currentTip.BlockNumber,
+	)
+	return ls.rollbackWithBlocksAndIntentOptions(
+		ctx,
+		resolved,
+		undoBlocks,
+		repairSameTip,
+		true,
+		false,
+		true,
+	)
+}

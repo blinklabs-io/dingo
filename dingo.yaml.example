@@ -614,6 +614,19 @@
 #   # Or plain TCP, taking no pin or client certificate (the agent's
 #   # counterpart is kes_agent.attested_plaintext):
 #   # shelleyKesAgentPlaintext: true
+#   # Or forge for several pools, each with its own keys and KES source
+#   # (replaces the shelley* settings above; YAML only, not with Leios):
+#   # A remote shelleyKesAgentAddress serves one pool only, so each pool
+#   # signing remotely needs its own agent address; a local socket can
+#   # serve several pools through its profiles.
+#   # blockProducerPools:
+#   #   - shelleyVrfKey: "/keys/pool-a/vrf.skey"
+#   #     shelleyOperationalCertificate: "/keys/pool-a/opcert.cert"
+#   #     shelleyKesAgentSocket: "/run/kes-agent/service.sock"
+#   #     shelleyKesAgentMode: "sign"
+#   #   - shelleyVrfKey: "/keys/pool-b/vrf.skey"
+#   #     shelleyKesKey: "/keys/pool-b/kes.skey"
+#   #     shelleyOperationalCertificate: "/keys/pool-b/opcert.cert"
 #   # With storageMode: "core", Badger blob defaults switch to mmap-only:
 #   #   blockCacheSize: 0
 #   #   indexCacheSize: 0

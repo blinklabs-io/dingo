@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -179,6 +180,13 @@ type replayRecoveryCandidate struct {
 type replayRecoveryPendingInput struct {
 	Input   lcommon.TransactionInput
 	MaxSlot uint64
+	// SpentCeiling is the highest slot whose spend counts as applied ledger
+	// history. Zero disables the spent-row check. Only the failing
+	// transaction's own inputs carry a ceiling: the inputs, collateral, and
+	// reference inputs walked from a resolved producer are provenance
+	// dependencies, and their spend state says nothing about whether the
+	// failing block carries a bad input.
+	SpentCeiling uint64
 }
 
 type replayRecoveryResolvedProducer struct {
@@ -362,15 +370,16 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		}
 		return ls.withDestructiveDatabaseTransition(ls.closeCtx(), func() error {
 			if rewindPrimaryChain && !primaryChainAlreadyHeld {
-				if err := ls.rewindPrimaryChainForRecovery(
+				var rewindErr error
+				primaryChainRewound, rewindErr = ls.rewindPrimaryChainForRecoveryResult(
 					rewindPoint,
-				); err != nil {
+				)
+				if rewindErr != nil {
 					return fmt.Errorf(
 						"rewind primary chain for replay recovery: %w",
-						err,
+						rewindErr,
 					)
 				}
-				primaryChainRewound = true
 			}
 			// The chain moves first while the rollback anchor is guaranteed to
 			// remain available. If metadata synchronization fails, the primary
@@ -378,16 +387,30 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 			// The cycle that first starts holding at an unchanged tip repairs the
 			// metadata the failed block left above it; the cycles that keep
 			// holding at that same tip reuse what it restored.
-			if err := ls.rollbackWithBlocks(
-				context.Background(),
-				rewindPoint,
-				nil,
-				replayHolding && !wasReplayHolding &&
-					pointMatches(rewindPoint, ledgerTip.Point),
-			); err != nil {
+			repairSameTip := replayHolding && !wasReplayHolding &&
+				pointMatches(rewindPoint, ledgerTip.Point)
+			var rollbackErr error
+			if primaryChainRewound {
+				// The primary-chain rewind already published undo events before
+				// removing its blocks. Do not publish them a second time while
+				// synchronizing metadata.
+				rollbackErr = ls.rollbackWithBlocks(
+					context.Background(),
+					rewindPoint,
+					nil,
+					repairSameTip,
+				)
+			} else {
+				rollbackErr = ls.rollbackAppliedStateWithUndo(
+					context.Background(),
+					rewindPoint,
+					repairSameTip,
+				)
+			}
+			if rollbackErr != nil {
 				return fmt.Errorf(
 					"rollback ledger state for replay recovery: %w",
-					err,
+					rollbackErr,
 				)
 			}
 			return nil
@@ -1390,6 +1413,13 @@ func (ls *LedgerState) resetRecoveryRewindRejections(newTipSlot uint64) {
 func (ls *LedgerState) rewindPrimaryChainForRecovery(
 	point ocommon.Point,
 ) error {
+	_, err := ls.rewindPrimaryChainForRecoveryResult(point)
+	return err
+}
+
+func (ls *LedgerState) rewindPrimaryChainForRecoveryResult(
+	point ocommon.Point,
+) (bool, error) {
 	return ls.rewindPrimaryChainForRecoveryWithRollback(
 		point, ls.rollbackPrimaryChainInSecurityParamWindows,
 	)
@@ -1398,15 +1428,16 @@ func (ls *LedgerState) rewindPrimaryChainForRecovery(
 func (ls *LedgerState) rewindPrimaryChainAtTipForRecovery(
 	point ocommon.Point,
 ) error {
-	return ls.rewindPrimaryChainForRecoveryWithRollback(
+	_, err := ls.rewindPrimaryChainForRecoveryWithRollback(
 		point, ls.rollbackPrimaryChainWithinSecurityParam,
 	)
+	return err
 }
 
 func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 	point ocommon.Point,
 	rollback func(ocommon.Point) (bool, error),
-) error {
+) (bool, error) {
 	// This is the funnel every recovery truncation of the primary chain
 	// passes through, and it runs outside the rollback path that arms and
 	// disarms the continuation audit. A window armed before it describes
@@ -1439,7 +1470,7 @@ func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 	if err == nil ||
 		(!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
 			!errors.Is(err, errRecoveryRewindNotConverging)) {
-		return err
+		return committed, err
 	}
 	ls.RLock()
 	tipSlot := ls.currentTip.Point.Slot
@@ -1463,7 +1494,7 @@ func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 				err,
 			)
 		}
-		return err
+		return committed, err
 	}
 	if ls.config.Logger != nil {
 		ls.config.Logger.Error(
@@ -1484,7 +1515,7 @@ func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 			"the node has stopped following the chain; the rewind recovery needs is deeper than the security parameter allows, so restarting the pipeline reproduces it -- investigate the rejected block or resync the node",
 		)
 	}
-	return fmt.Errorf("%w (%w)", errHaltLedgerPipeline, err)
+	return committed, fmt.Errorf("%w (%w)", errHaltLedgerPipeline, err)
 }
 
 // takeContinuationAuditForRewind clears the audit window and returns what it
@@ -2346,10 +2377,36 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 		0,
 		len(validationErr.Inputs),
 	)
+	// The failing batch's transaction is discarded before recovery runs, so
+	// only spends at or below the applied ledger tip are committed history. A
+	// row marked spent above it is a stale write that a rollback repairs. The
+	// durable floor bounds it too: a slot-based rollback can leave currentTip
+	// above the state that was durably applied.
+	ls.RLock()
+	spentCeiling := ls.currentTip.Point.Slot
+	ls.RUnlock()
+	floor, ok, err := ls.durableAppliedFloor()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"determine durable applied floor for replay recovery: %w",
+			err,
+		)
+	}
+	if ok {
+		spentCeiling = min(spentCeiling, floor.Slot)
+	}
+	failingSlot := validationErr.BlockPoint.Slot
+	if spentCeiling >= failingSlot {
+		spentCeiling = 0
+		if failingSlot > 0 {
+			spentCeiling = failingSlot - 1
+		}
+	}
 	for _, input := range validationErr.Inputs {
 		pendingInputs = append(pendingInputs, replayRecoveryPendingInput{
-			Input:   input,
-			MaxSlot: validationErr.BlockPoint.Slot,
+			Input:        input,
+			MaxSlot:      validationErr.BlockPoint.Slot,
+			SpentCeiling: spentCeiling,
 		})
 	}
 	seenInputs := make(map[string]struct{})
@@ -2539,12 +2596,42 @@ func (ls *LedgerState) buildReplayRecoveryChainIndex(
 	return index, nil
 }
 
+// replayRecoveryDeletedSlot returns the slot at which input's UTxO row was
+// spent, or zero when the row is live or absent. It reads only the spend state
+// where the store supports it, so the output's assets are never loaded.
+func (ls *LedgerState) replayRecoveryDeletedSlot(
+	input lcommon.TransactionInput,
+) (uint64, error) {
+	store := ls.db.Metadata()
+	if reader, ok := store.(metadata.UtxoSpendStateReader); ok {
+		state, err := reader.GetUtxoSpendState(
+			input.Id().Bytes(),
+			input.Index(),
+			nil,
+		)
+		if err != nil || state == nil {
+			return 0, err
+		}
+		return state.DeletedSlot, nil
+	}
+	utxo, err := store.GetUtxoIncludingSpent(
+		input.Id().Bytes(),
+		input.Index(),
+		nil,
+	)
+	if err != nil || utxo == nil {
+		return 0, err
+	}
+	return utxo.DeletedSlot, nil
+}
+
 // resolveReplayRecoveryProducer locates the block that produced pending.Input.
 //
-// The bool reports that the input is present in the UTxO set, which is a
-// different answer from a nil producer: present means nothing about this input
-// needs repairing, while a nil producer with present false means the input is
-// missing and its producer could not be found either.
+// The bool reports that the input is present in the UTxO set or was consumed
+// by applied ledger history, which is a different answer from a nil producer:
+// present means nothing about this input needs repairing, while a nil producer
+// with present false means the input is missing and its producer could not be
+// found either.
 func (ls *LedgerState) resolveReplayRecoveryProducer(
 	pending replayRecoveryPendingInput,
 	chainIndex *replayRecoveryChainIndex,
@@ -2570,6 +2657,22 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 		// -- a script data hash mismatch, say -- drive a rewind that could
 		// never fix it.
 		return nil, true, nil
+	}
+	if pending.SpentCeiling != 0 {
+		// A row consumed at or below SpentCeiling was spent by a block the
+		// ledger has applied. Rolling back to its producer cannot make it
+		// spendable, so it is a bad input, not a provenance gap.
+		deletedSlot, err := ls.replayRecoveryDeletedSlot(pending.Input)
+		if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
+			return nil, false, fmt.Errorf(
+				"lookup spent validation input %s: %w",
+				pending.Input.String(),
+				err,
+			)
+		}
+		if deletedSlot != 0 && deletedSlot <= pending.SpentCeiling {
+			return nil, true, nil
+		}
 	}
 	producerTx, err := ls.db.GetTransactionByHash(
 		context.Background(),

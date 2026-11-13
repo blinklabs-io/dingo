@@ -79,9 +79,7 @@ func (ls *LedgerState) rejectInboundEnvelopeFailure(
 	cause error,
 ) error {
 	if checker := ls.loadForgedBlockChecker(); checker != nil {
-		if forgedHash, forged := checker.WasForgedByUs(
-			point.Slot,
-		); forged && bytes.Equal(forgedHash, point.Hash) {
+		if forgedByUs(checker, point.Slot, point.Hash) {
 			return cause
 		}
 	}
