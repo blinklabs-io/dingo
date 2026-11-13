@@ -981,12 +981,15 @@ func (ls *LedgerState) iterateLiveUtxos(
 
 // liveUtxoLovelace is the lovelace in every live output as txn sees the UTxO
 // set.
-func (ls *LedgerState) liveUtxoLovelace(txn ledgerdb.Txn) (uint64, error) {
+func (ls *LedgerState) liveUtxoLovelace(
+	ctx context.Context,
+	txn ledgerdb.Txn,
+) (uint64, error) {
 	if !ls.config.UtxoSetOnly {
 		return ls.ledgerDB().GetLiveUtxoLovelace(txn)
 	}
 	var total uint64
-	err := ls.iterateLiveUtxos(context.Background(), txn, func(u *models.Utxo) error {
+	err := ls.iterateLiveUtxos(ctx, txn, func(u *models.Utxo) error {
 		out, err := u.Decode()
 		if err != nil {
 			return fmt.Errorf("decode utxo %x#%d: %w", u.TxId, u.OutputIdx, err)

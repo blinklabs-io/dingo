@@ -9987,6 +9987,7 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 		if err := timePhase(
 			transitionEpoch.EpochId, "byron_translation", func() error {
 				return ls.applyByronTranslationReserves(
+					ctx,
 					txn,
 					transitionEpoch.EpochId,
 					transitionEpoch.StartSlot,
