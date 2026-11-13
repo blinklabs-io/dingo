@@ -73,7 +73,9 @@ func PointerStakeKey(slot, txIndex, certIndex uint64) []byte {
 
 // ParsePointerStakeKey returns the certificate position a PointerStakeKey
 // names.
-func ParsePointerStakeKey(key []byte) (slot, txIndex, certIndex uint64, ok bool) {
+func ParsePointerStakeKey(
+	key []byte,
+) (slot, txIndex, certIndex uint64, ok bool) {
 	if len(key) != 25 || key[0] != pointerStakePrefix {
 		return 0, 0, 0, false
 	}

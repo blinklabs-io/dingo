@@ -76,7 +76,13 @@ func TestLoadDRepVotingStateMatchesLazyTally(t *testing.T) {
 		),
 	)
 
-	state, err := LoadDRepVotingState(context.Background(), dbadapter.New(db), nil, 0, false)
+	state, err := LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		0,
+		false,
+	)
 	require.NoError(t, err)
 	precomputedTally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -108,7 +114,13 @@ func TestPrecomputedDRepStateReusedAcrossProposals(t *testing.T) {
 		t, store, stakeCred, nil, models.DrepTypeAlwaysNoConfidence, 30, 3,
 	)
 
-	state, err := LoadDRepVotingState(context.Background(), dbadapter.New(db), nil, 0, false)
+	state, err := LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		0,
+		false,
+	)
 	require.NoError(t, err)
 
 	noConfidence := &ProposalTally{
@@ -116,7 +128,12 @@ func TestPrecomputedDRepStateReusedAcrossProposals(t *testing.T) {
 	}
 	require.NoError(t, tallyDRepVotes(
 		context.Background(),
-		&TallyContext{DB: dbadapter.New(db), DRepState: state}, nil, noConfidence,
+		&TallyContext{
+			DB:        dbadapter.New(db),
+			DRepState: state,
+		},
+		nil,
+		noConfidence,
 	))
 	assert.Equal(t, uint64(30), noConfidence.DRepTotalStake)
 	assert.Equal(t, uint64(30), noConfidence.DRepYesStake)
@@ -127,7 +144,12 @@ func TestPrecomputedDRepStateReusedAcrossProposals(t *testing.T) {
 	}
 	require.NoError(t, tallyDRepVotes(
 		context.Background(),
-		&TallyContext{DB: dbadapter.New(db), DRepState: state}, nil, updateCommittee,
+		&TallyContext{
+			DB:        dbadapter.New(db),
+			DRepState: state,
+		},
+		nil,
+		updateCommittee,
 	))
 	assert.Equal(t, uint64(30), updateCommittee.DRepTotalStake)
 	assert.Equal(t, uint64(0), updateCommittee.DRepYesStake)
@@ -742,7 +764,12 @@ func TestLoadCommitteeVotingStateExcludesSeatedMembersWithoutHotAuth(
 		AddedSlot:      1,
 	})
 
-	state, err := LoadCommitteeVotingState(context.Background(), dbadapter.New(db), nil, 10)
+	state, err := LoadCommitteeVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		10,
+	)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, state.ActiveMemberCount)
@@ -795,7 +822,12 @@ func TestLoadCommitteeVotingStateExcludesResignedMembers(t *testing.T) {
 		AddedSlot:      2,
 	})
 
-	state, err := LoadCommitteeVotingState(context.Background(), dbadapter.New(db), nil, 10)
+	state, err := LoadCommitteeVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		10,
+	)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, state.ActiveMemberCount)

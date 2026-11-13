@@ -2589,7 +2589,9 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 			return nil, errors.New("UtxoSetOnly needs a readable UtxoSet")
 		}
 		if _, ok := cfg.UtxoSet.(UtxoSetRollbacker); !ok {
-			return nil, errors.New("UtxoSetOnly needs a UtxoSet that rolls back")
+			return nil, errors.New(
+				"UtxoSetOnly needs a UtxoSet that rolls back",
+			)
 		}
 	}
 	byronPBFT, err := newByronPBFTCache(cfg)
@@ -10834,7 +10836,10 @@ func (ls *LedgerState) processBlocksFromSource(
 						if err := ls.ledgerDB().SetTip(pendingTip, txn); err != nil {
 							return fmt.Errorf("failed to set tip: %w", err)
 						}
-						ls.stageUtxoSet(txn, &pendingTip.Point) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+						ls.stageUtxoSet(
+							txn,
+							&pendingTip.Point,
+						) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 					}
 					// Header verification must settle before beforeCommit
 					// records this batch as committed.

@@ -138,10 +138,16 @@ func TestPendingRewardInputsCorruptStatePreventsPruneAnnouncement(
 func TestPendingRewardInputsIgnoreRolledBackSnapshot(t *testing.T) {
 	t.Parallel()
 	fixture := seedRetentionReconstructionFixture(t)
-	require.NoError(t, markRewardStakeInputsPending(dbadapter.New(fixture.db), nil, 99, 999))
+	require.NoError(
+		t,
+		markRewardStakeInputsPending(dbadapter.New(fixture.db), nil, 99, 999),
+	)
 	txn := dbadapter.New(fixture.db).BeginLedgerOnly(t.Context(), false)
 	defer func() { _ = txn.Rollback() }()
-	floor, protected, err := pendingRewardStakeInputHistoryFloor(dbadapter.New(fixture.db), txn)
+	floor, protected, err := pendingRewardStakeInputHistoryFloor(
+		dbadapter.New(fixture.db),
+		txn,
+	)
 	require.NoError(t, err)
 	require.False(t, protected)
 	require.Zero(t, floor)
@@ -164,7 +170,10 @@ func TestPendingRewardInputsDisableTrustedBatchPruning(t *testing.T) {
 			nil,
 		),
 	)
-	require.NoError(t, markRewardStakeInputsPending(dbadapter.New(h.db), nil, 1, 1))
+	require.NoError(
+		t,
+		markRewardStakeInputsPending(dbadapter.New(h.db), nil, 1, 1),
+	)
 	overlays := h.countOverlays()
 	blocks, names := externalIngestBlocks(t, 0)
 	tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
@@ -176,7 +185,10 @@ func TestPendingRewardInputsDisableTrustedBatchPruning(t *testing.T) {
 	floor, err := h.db.ConsumedUtxoPruneFloor(nil)
 	require.NoError(t, err)
 	require.Zero(t, floor)
-	require.NoError(t, clearRewardStakeInputsPending(dbadapter.New(h.db), nil, 1))
+	require.NoError(
+		t,
+		clearRewardStakeInputsPending(dbadapter.New(h.db), nil, 1),
+	)
 	pruned, _, err := h.ls.pruneConsumedUtxosUpTo(
 		t.Context(),
 		tip.Slot,
@@ -324,7 +336,11 @@ func TestPendingRewardRetentionAcceptsNativeEmptyState(t *testing.T) {
 	meta := f.db.Metadata()
 	require.NoError(
 		t,
-		saveRewardStakeInputsPending(dbadapter.New(f.db), nil, &rewardStakeInputsPending{}),
+		saveRewardStakeInputsPending(
+			dbadapter.New(f.db),
+			nil,
+			&rewardStakeInputsPending{},
+		),
 	)
 	raw, err := meta.GetSyncState(rewardStakeInputsPendingKey, nil)
 	require.NoError(t, err)

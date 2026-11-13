@@ -157,7 +157,11 @@ func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossSameRuleEraChanges(
 				poolHash := bytes.Repeat([]byte{0xb7}, 28)
 				seedPointerStakeFixture(t, db, poolHash)
 
-				mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
+				mgr := NewManager(
+					dbadapter.New(db),
+					event.NewEventBus(nil, nil),
+					nil,
+				)
 				evt := event.EpochTransitionEvent{
 					PreviousEpoch:   0,
 					NewEpoch:        1,

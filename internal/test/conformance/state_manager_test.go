@@ -824,7 +824,11 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 		"drive the real governance epoch-boundary orchestration",
 	)
 
-	snapshotMgr := snapshot.NewManager(dbadapter.New(m.db), event.NewEventBus(nil, nil), nil)
+	snapshotMgr := snapshot.NewManager(
+		dbadapter.New(m.db),
+		event.NewEventBus(nil, nil),
+		nil,
+	)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,

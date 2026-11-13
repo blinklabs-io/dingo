@@ -1100,7 +1100,11 @@ func TestCaptureEpochBoundaryAgreesOnPointerStake(t *testing.T) {
 			poolHash := bytes.Repeat([]byte{0xb2}, 28)
 			seedPointerStakeFixture(t, db, poolHash)
 
-			mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
+			mgr := NewManager(
+				dbadapter.New(db),
+				event.NewEventBus(nil, nil),
+				nil,
+			)
 			evt := event.EpochTransitionEvent{
 				PreviousEpoch:   0,
 				NewEpoch:        1,
@@ -1275,7 +1279,11 @@ func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossTheEraCutover(
 			poolHash := bytes.Repeat([]byte{0xb6}, 28)
 			seedPointerStakeFixture(t, db, poolHash)
 
-			mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
+			mgr := NewManager(
+				dbadapter.New(db),
+				event.NewEventBus(nil, nil),
+				nil,
+			)
 			evt := event.EpochTransitionEvent{
 				PreviousEpoch:   0,
 				NewEpoch:        1,
@@ -1839,7 +1847,11 @@ func TestDijkstraBoundarySnapshotIncludesEnactmentCredits(t *testing.T) {
 					utxoAmounts: []types.Uint64{40_000_000},
 				},
 			}, 500)
-			mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
+			mgr := NewManager(
+				dbadapter.New(db),
+				event.NewEventBus(nil, nil),
+				nil,
+			)
 			evt := event.EpochTransitionEvent{
 				PreviousEpoch:   0,
 				NewEpoch:        1,

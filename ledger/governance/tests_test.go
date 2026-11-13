@@ -461,7 +461,15 @@ func TestMidEpochPredictionAndBoundaryReadDifferentMarks(t *testing.T) {
 	got, err := EvaluateRatifiableHardForkInitiation(
 		context.Background(),
 		NewStabilityCheckInputs(
-			dbadapter.New(db), nil, currentEpoch, false, stabilityConwayPParams(9), nil, nil,
+			dbadapter.New(
+				db,
+			),
+			nil,
+			currentEpoch,
+			false,
+			stabilityConwayPParams(9),
+			nil,
+			nil,
 		),
 	)
 	require.NoError(t, err)
@@ -1023,7 +1031,11 @@ func TestRatifyLevelForkRestoresVoteAcrossAllVoterTypes(t *testing.T) {
 	pparams.DRepVotingThresholds.HardForkInitiation = newRat(60, 100)
 	pparams.PoolVotingThresholds.HardForkInitiation = newRat(51, 100)
 
-	tallyCtx := &TallyContext{DB: dbadapter.New(db), StakeEpoch: 5, CurrentEpoch: 10}
+	tallyCtx := &TallyContext{
+		DB:           dbadapter.New(db),
+		StakeEpoch:   5,
+		CurrentEpoch: 10,
+	}
 	ratify := func() RatifyDecision {
 		tally, err := TallyProposal(context.Background(), tallyCtx, proposal)
 		require.NoError(t, err)

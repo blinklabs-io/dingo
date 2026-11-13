@@ -99,7 +99,10 @@ reward_stake, total_stake FROM reward_live_stake ORDER BY 1, 2`)
 			var key []byte
 			var u, r, tot string
 			require.NoError(t, rows.Scan(&tag, &key, &u, &r, &tot))
-			out = append(out, fmt.Sprintf("%d/%x %s %s %s", tag, key, u, r, tot))
+			out = append(
+				out,
+				fmt.Sprintf("%d/%x %s %s %s", tag, key, u, r, tot),
+			)
 		}
 		require.NoError(t, rows.Err())
 		return out
@@ -113,15 +116,21 @@ reward_stake, total_stake FROM reward_live_stake ORDER BY 1, 2`)
 	fromRows := map[string]string{}
 	require.NoError(t, rowsDB.IterateLiveUtxos(t.Context(), nil,
 		func(u *models.Utxo) error {
-			fromRows[fmt.Sprintf("%x#%d", u.TxId, u.OutputIdx)] = fmt.Sprintf("%x", u.Cbor)
+			fromRows[fmt.Sprintf("%x#%d", u.TxId, u.OutputIdx)] = fmt.Sprintf(
+				"%x",
+				u.Cbor,
+			)
 			return nil
 		}))
 	require.Len(t, fromRows, len(amounts))
 	fromSet := map[string]string{}
-	require.NoError(t, set.EachUtxo(func(txID []byte, index uint32, cbor []byte) error {
-		fromSet[fmt.Sprintf("%x#%d", txID, index)] = fmt.Sprintf("%x", cbor)
-		return nil
-	}))
+	require.NoError(
+		t,
+		set.EachUtxo(func(txID []byte, index uint32, cbor []byte) error {
+			fromSet[fmt.Sprintf("%x#%d", txID, index)] = fmt.Sprintf("%x", cbor)
+			return nil
+		}),
+	)
 	require.Equal(t, fromRows, fromSet)
 	tip, ok, err := set.Tip()
 	require.NoError(t, err)

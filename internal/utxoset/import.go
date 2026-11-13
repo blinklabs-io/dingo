@@ -49,19 +49,33 @@ func (s *Set) LoadUtxoSet(
 		return fmt.Errorf("utxoset: load: %w", err)
 	}
 	n, _ := s.store.Count()
-	s.logger.Info("loaded the live UTxO set", "live_outputs", n, "slot", point.Slot)
+	s.logger.Info(
+		"loaded the live UTxO set",
+		"live_outputs",
+		n,
+		"slot",
+		point.Slot,
+	)
 	return nil
 }
 
 // LiveUtxoCbor implements types.LiveUtxoSource over the set's committed
 // state, for a metadata store with no ledger staging changes over it.
-func (s *Set) LiveUtxoCbor(_ types.Txn, txID []byte, index uint32) ([]byte, bool, error) {
+func (s *Set) LiveUtxoCbor(
+	_ types.Txn,
+	txID []byte,
+	index uint32,
+) ([]byte, bool, error) {
 	return s.Get(txID, index)
 }
 
 // LiveUtxoStake implements types.LiveUtxoSource over the set's committed
 // state.
-func (s *Set) LiveUtxoStake(_ types.Txn, tag uint8, hash []byte) (uint64, error) {
+func (s *Set) LiveUtxoStake(
+	_ types.Txn,
+	tag uint8,
+	hash []byte,
+) (uint64, error) {
 	return s.CredentialStake(tag, hash)
 }
 

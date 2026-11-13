@@ -2718,7 +2718,12 @@ func (s *Store) liveConsumedStakeDeltas(
 		}
 		out, err := gledger.NewTransactionOutputFromCbor(cbor)
 		if err != nil {
-			return nil, fmt.Errorf("decode input %x#%d: %w", in.Hash, in.Idx, err)
+			return nil, fmt.Errorf(
+				"decode input %x#%d: %w",
+				in.Hash,
+				in.Idx,
+				err,
+			)
 		}
 		skh := out.Address().StakeKeyHash()
 		if skh == (lcommon.Blake2b224{}) {

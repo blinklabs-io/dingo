@@ -86,7 +86,15 @@ func RunUtxoSetScenarioForTest(
 	attach func(*database.Database),
 ) ShadowScenario {
 	t.Helper()
-	return runUtxoSetScenario(t, storageMode, bus, utxoSet, reads, false, attach)
+	return runUtxoSetScenario(
+		t,
+		storageMode,
+		bus,
+		utxoSet,
+		reads,
+		false,
+		attach,
+	)
 }
 
 func runUtxoSetScenario(
@@ -191,13 +199,24 @@ func RunUtxoSetOnlyScenarioForTest(
 	attach func(*database.Database),
 ) ShadowScenario {
 	t.Helper()
-	return runUtxoSetScenario(t, types.StorageModeCore, nil, utxoSet, UtxoSetReadsOff, true, attach)
+	return runUtxoSetScenario(
+		t,
+		types.StorageModeCore,
+		nil,
+		utxoSet,
+		UtxoSetReadsOff,
+		true,
+		attach,
+	)
 }
 
 // MetadataDigestOutsideUtxoSetForTest digests the metadata store without what
 // UtxoSetOnly moves to the live UTxO set: the utxo table and the tables keyed
 // by its rows.
-func MetadataDigestOutsideUtxoSetForTest(t *testing.T, db *database.Database) string {
+func MetadataDigestOutsideUtxoSetForTest(
+	t *testing.T,
+	db *database.Database,
+) string {
 	t.Helper()
 	return metadataDigest(
 		t,

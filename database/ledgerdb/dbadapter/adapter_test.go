@@ -142,7 +142,11 @@ func TestTxnKeepsNilDatabaseTxnNil(t *testing.T) {
 	var typedNil *database.Txn
 	var direct ledgerdb.Txn = typedNil
 	// require.NotNil looks through the interface, so compare directly.
-	require.True(t, direct != nil, "a nil pointer converts to a non-nil interface")
+	require.True(
+		t,
+		direct != nil,
+		"a nil pointer converts to a non-nil interface",
+	)
 	require.Nil(t, dbadapter.Txn(typedNil))
 
 	a := newAdapter(t)

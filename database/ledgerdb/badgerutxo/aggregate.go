@@ -53,7 +53,9 @@ func (s *Store) addOutput(d aggDeltas, cbor []byte, sign int64) {
 	if !ok || amount == 0 {
 		return
 	}
-	d[string(key)] += sign * int64(amount) //nolint:gosec // lovelace fits in int64
+	d[string(key)] += sign * int64(
+		amount,
+	) //nolint:gosec // lovelace fits in int64
 }
 
 func applyAggDeltas(txn *badger.Txn, d aggDeltas) error {

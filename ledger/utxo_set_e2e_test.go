@@ -176,7 +176,10 @@ func TestValidationReadsFromTheLiveUtxoSet(t *testing.T) {
 			require.NoError(t, ldb.IterateLiveUtxos(
 				t.Context(), nil,
 				func(u *models.Utxo) error {
-					refs = append(refs, models.UtxoId{Hash: u.TxId, Idx: u.OutputIdx})
+					refs = append(
+						refs,
+						models.UtxoId{Hash: u.TxId, Idx: u.OutputIdx},
+					)
 					want[fmt.Sprintf("%x#%d", u.TxId, u.OutputIdx)] = u.Cbor
 					return nil
 				},
@@ -232,7 +235,11 @@ func TestLiveUtxoSetStakeMatchesTheStoresRows(t *testing.T) {
 	requireStakeMatches(t, set, db)
 }
 
-func requireStakeMatches(t *testing.T, set *utxoset.Set, db *database.Database) {
+func requireStakeMatches(
+	t *testing.T,
+	set *utxoset.Set,
+	db *database.Database,
+) {
 	t.Helper()
 	ldb := dbadapter.New(db)
 	want := map[string]uint64{}
@@ -240,7 +247,9 @@ func requireStakeMatches(t *testing.T, set *utxoset.Set, db *database.Database) 
 		t.Context(), nil,
 		func(u *models.Utxo) error {
 			if len(u.StakingKey) > 0 {
-				want[fmt.Sprintf("%d/%x", u.CredentialTag, u.StakingKey)] += uint64(u.Amount)
+				want[fmt.Sprintf("%d/%x", u.CredentialTag, u.StakingKey)] += uint64(
+					u.Amount,
+				)
 			}
 			return nil
 		},
@@ -336,11 +345,18 @@ func TestUtxoSetOnlyMatchesTheMetadataStore(t *testing.T) {
 		require.NoError(t, err)
 		var out []string
 		for _, u := range got {
-			out = append(out, fmt.Sprintf("%x#%d=%x", u.TxId, u.OutputIdx, u.Cbor))
+			out = append(
+				out,
+				fmt.Sprintf("%x#%d=%x", u.TxId, u.OutputIdx, u.Cbor),
+			)
 		}
 		return out
 	}
-	require.ElementsMatch(t, byAddr(rowsRun.UtxosByAddress), byAddr(onlyRun.UtxosByAddress))
+	require.ElementsMatch(
+		t,
+		byAddr(rowsRun.UtxosByAddress),
+		byAddr(onlyRun.UtxosByAddress),
+	)
 	for _, ref := range allRefs {
 		want, err := rowsRun.UtxoIncludingSpent(ref.Hash, ref.Idx)
 		require.NoError(t, err)

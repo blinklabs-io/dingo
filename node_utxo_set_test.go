@@ -67,7 +67,10 @@ func TestUtxoSetOnlyStakeRebuildWaitsForTheSet(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	stakeKey := bytes.Repeat([]byte{0x44}, 28)
-	require.NoError(t, db.SetLiveUtxoSource(oneStakeSource{key: stakeKey, lovelace: 42}))
+	require.NoError(
+		t,
+		db.SetLiveUtxoSource(oneStakeSource{key: stakeKey, lovelace: 42}),
+	)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	// A row from an older calculation makes the startup check rebuild.
@@ -77,7 +80,9 @@ updated_slot, calculation_version) VALUES (?, 0, '1', '0', '1', 0, 0, 0)`,
 		bytes.Repeat([]byte{0x55}, 28))
 	require.NoError(t, err)
 	rows := func() []string {
-		r, err := raw.Query(`SELECT staking_key, utxo_stake FROM reward_live_stake ORDER BY 1`)
+		r, err := raw.Query(
+			`SELECT staking_key, utxo_stake FROM reward_live_stake ORDER BY 1`,
+		)
 		require.NoError(t, err)
 		defer r.Close()
 		var out []string
@@ -109,18 +114,28 @@ type oneStakeSource struct {
 	lovelace uint64
 }
 
-func (oneStakeSource) LiveUtxoCbor(types.Txn, []byte, uint32) ([]byte, bool, error) {
+func (oneStakeSource) LiveUtxoCbor(
+	types.Txn,
+	[]byte,
+	uint32,
+) ([]byte, bool, error) {
 	return nil, false, nil
 }
 
-func (s oneStakeSource) LiveUtxoStake(_ types.Txn, tag uint8, key []byte) (uint64, error) {
+func (s oneStakeSource) LiveUtxoStake(
+	_ types.Txn,
+	tag uint8,
+	key []byte,
+) (uint64, error) {
 	if tag == 0 && bytes.Equal(key, s.key) {
 		return s.lovelace, nil
 	}
 	return 0, nil
 }
 
-func (oneStakeSource) LivePointerStakes(types.Txn) ([]types.PointerStake, error) {
+func (oneStakeSource) LivePointerStakes(
+	types.Txn,
+) ([]types.PointerStake, error) {
 	return nil, nil
 }
 

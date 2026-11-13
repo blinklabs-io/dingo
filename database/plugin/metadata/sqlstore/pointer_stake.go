@@ -374,7 +374,11 @@ func (s *Store) GetPointerStakeInputsForPools(
 		if len(pointers) == 0 {
 			return nil, nil
 		}
-		query, args, err = livePointerStakeInputsSQL(slot, expiryEpoch, pointers)
+		query, args, err = livePointerStakeInputsSQL(
+			slot,
+			expiryEpoch,
+			pointers,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -549,9 +553,17 @@ func withLivePointers(
 		values = append(values, "(-1, -1, -1, '0')")
 	}
 	return "WITH live_pointer(ptr_slot, ptr_tx_index, ptr_cert_index, amount) AS (VALUES " +
-			strings.Join(values, ", ") + "),\n" +
-			strings.TrimPrefix(trimmed, "WITH "),
-		append(liveArgs, args...), nil
+			strings.Join(
+				values,
+				", ",
+			) + "),\n" +
+			strings.TrimPrefix(
+				trimmed,
+				"WITH ",
+			),
+		append(
+			liveArgs,
+			args...), nil
 }
 
 // livePointerResolutionSQL is pointerResolutionSQL over live_pointer rows,

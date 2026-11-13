@@ -535,7 +535,11 @@ type LiveUtxoSource interface {
 	// LiveUtxoStake returns the lovelace in live outputs whose address names
 	// the stake credential (credentialTag, stakingKey), classified as utxo
 	// rows classify outputs, as txn sees the live set. txn may be nil.
-	LiveUtxoStake(txn Txn, credentialTag uint8, stakingKey []byte) (uint64, error)
+	LiveUtxoStake(
+		txn Txn,
+		credentialTag uint8,
+		stakingKey []byte,
+	) (uint64, error)
 	// LivePointerStakes returns the lovelace in live outputs at pointer
 	// addresses, per certificate position named, as txn sees the live set.
 	LivePointerStakes(txn Txn) ([]PointerStake, error)

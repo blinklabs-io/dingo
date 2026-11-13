@@ -68,7 +68,10 @@ func TestRollbackUndoesCertifiedEndorserTransactions(t *testing.T) {
 	// undo after; between them the rows that say which block applied the
 	// endorser transaction are deleted.
 	f.ls.transactionEventMutex.Lock()
-	require.NoError(t, f.ls.ensureRollbackIntent(t.Context(), parentPoint, blocks))
+	require.NoError(
+		t,
+		f.ls.ensureRollbackIntent(t.Context(), parentPoint, blocks),
+	)
 	truncate := f.db.Transaction(context.Background(), true)
 	require.NoError(t, truncate.Do(func(txn *database.Txn) error {
 		if err := f.db.UtxosDeleteRolledback(

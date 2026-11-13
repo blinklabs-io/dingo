@@ -211,8 +211,16 @@ func TestApplyBatchIsOneChangeAndKeepsTipWhenNil(t *testing.T) {
 	blk := point(5, 5)
 	// The second change spends an output the first creates.
 	_, err := s.ApplyBatch(&blk, []badgerutxo.Change{
-		{Point: blk, Added: []badgerutxo.Output{out(2, 0)}, Removed: []badgerutxo.Ref{ref(1, 0)}},
-		{Point: blk, Added: []badgerutxo.Output{out(3, 0)}, Removed: []badgerutxo.Ref{ref(2, 0)}},
+		{
+			Point:   blk,
+			Added:   []badgerutxo.Output{out(2, 0)},
+			Removed: []badgerutxo.Ref{ref(1, 0)},
+		},
+		{
+			Point:   blk,
+			Added:   []badgerutxo.Output{out(3, 0)},
+			Removed: []badgerutxo.Ref{ref(2, 0)},
+		},
 	})
 	require.NoError(t, err)
 	requireLive(t, s, false, ref(1, 0))

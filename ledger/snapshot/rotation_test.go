@@ -807,7 +807,11 @@ func TestLeiosKeySnapshotUsesEraSpecificPoolRegistrationWindow(
 				TotalStake:     100,
 				TotalPools:     1,
 			}
-			mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
+			mgr := NewManager(
+				dbadapter.New(db),
+				event.NewEventBus(nil, nil),
+				nil,
+			)
 			saved, err := mgr.saveSnapshot(
 				context.Background(),
 				8,

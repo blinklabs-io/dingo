@@ -299,7 +299,10 @@ func (s *Store) Apply(
 	added []Output,
 	removed []Ref,
 ) (ApplyResult, error) {
-	return s.ApplyBatch(&point, []Change{{Point: point, Added: added, Removed: removed}})
+	return s.ApplyBatch(
+		&point,
+		[]Change{{Point: point, Added: added, Removed: removed}},
+	)
 }
 
 // ApplyBatch applies changes in order in one transaction, so a reader or a
@@ -362,7 +365,10 @@ func (s *Store) ApplyBatch(
 			}
 			if _, ok := seen[r]; !ok {
 				seen[r] = struct{}{}
-				rec.ops = append(rec.ops, journalOp{ref: r, present: true, cbor: v})
+				rec.ops = append(
+					rec.ops,
+					journalOp{ref: r, present: true, cbor: v},
+				)
 			}
 			return v, true, nil
 		}

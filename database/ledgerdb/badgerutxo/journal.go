@@ -68,13 +68,20 @@ func encodeRecord(rec journalRecord) []byte {
 	b := make([]byte, 0, size)
 	b = binary.BigEndian.AppendUint64(b, rec.slot)
 	if rec.hadTip {
-		b = append(b, 1, byte(len(rec.prevTip.Hash))) //nolint:gosec // a block hash is 32 bytes
+		b = append(
+			b,
+			1,
+			byte(len(rec.prevTip.Hash)),
+		) //nolint:gosec // a block hash is 32 bytes
 		b = binary.BigEndian.AppendUint64(b, rec.prevTip.Slot)
 		b = append(b, rec.prevTip.Hash...)
 	} else {
 		b = append(b, 0)
 	}
-	b = binary.BigEndian.AppendUint32(b, uint32(len(rec.ops))) //nolint:gosec // bounded by the batch
+	b = binary.BigEndian.AppendUint32(
+		b,
+		uint32(len(rec.ops)),
+	) //nolint:gosec // bounded by the batch
 	for _, op := range rec.ops {
 		b = append(b, op.ref[:]...)
 		if op.present {
@@ -82,7 +89,10 @@ func encodeRecord(rec journalRecord) []byte {
 		} else {
 			b = append(b, 0)
 		}
-		b = binary.BigEndian.AppendUint32(b, uint32(len(op.cbor))) //nolint:gosec // one output
+		b = binary.BigEndian.AppendUint32(
+			b,
+			uint32(len(op.cbor)),
+		) //nolint:gosec // one output
 		b = append(b, op.cbor...)
 	}
 	return b
@@ -182,7 +192,19 @@ func latestRecord(txn *badger.Txn) ([]byte, journalRecord, bool, error) {
 	opts.Prefix = []byte{journalTag}
 	it := txn.NewIterator(opts)
 	defer it.Close()
-	it.Seek(append([]byte{journalTag}, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
+	it.Seek(
+		append(
+			[]byte{journalTag},
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+		),
+	)
 	if !it.Valid() {
 		return nil, journalRecord{}, false, nil
 	}
@@ -433,7 +455,19 @@ func previewIn(txn *badger.Txn, point ocommon.Point) (RollbackResult, error) {
 	if err := journalReaches(txn, point); err != nil {
 		return res, err
 	}
-	it.Seek(append([]byte{journalTag}, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))
+	it.Seek(
+		append(
+			[]byte{journalTag},
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+			0xff,
+		),
+	)
 	for ; it.Valid(); it.Next() {
 		v, err := it.Item().ValueCopy(nil)
 		if err != nil {

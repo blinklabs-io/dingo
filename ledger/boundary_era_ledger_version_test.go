@@ -397,7 +397,11 @@ func newBoundaryEraLedgerChain(
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	// A rollover that enacts a HardForkInitiation ratifies at the boundary,
 	// which a production node serves from the snapshot manager's rows.
-	snapshotMgr := snapshot.NewManager(dbadapter.New(db), newTestEventBus(t, nil), nil)
+	snapshotMgr := snapshot.NewManager(
+		dbadapter.New(db),
+		newTestEventBus(t, nil),
+		nil,
+	)
 	ls.SetCurrentBoundarySPOStakeHook(
 		func(
 			txn ledgerdb.Txn,

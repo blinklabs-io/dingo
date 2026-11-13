@@ -1136,7 +1136,12 @@ func (s *Store) rebuildRewardLiveStake(
 				}
 			}
 			if s.liveUtxo != nil && !fromRunningTotals {
-				n, err := s.rebuildLiveUtxoOnlyStake(ctx, db, upserter, slotValue)
+				n, err := s.rebuildLiveUtxoOnlyStake(
+					ctx,
+					db,
+					upserter,
+					slotValue,
+				)
 				if err != nil {
 					return err
 				}
@@ -1507,7 +1512,11 @@ func (s *Store) rebuildRewardLiveStakeRange(
 			utxoStakes[rewardLiveStakeKey(c.tag, c.key)] = n
 		}
 	}
-	values, err := rewardLiveStakeRows(credentials, utxoStakes, fromRunningTotals)
+	values, err := rewardLiveStakeRows(
+		credentials,
+		utxoStakes,
+		fromRunningTotals,
+	)
 	if err != nil {
 		return 0, err
 	}

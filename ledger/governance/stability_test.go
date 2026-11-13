@@ -264,7 +264,15 @@ func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(
 	)
 
 	in := NewStabilityCheckInputs(
-		dbadapter.New(db), nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
+		dbadapter.New(
+			db,
+		),
+		nil,
+		stabilityTestEpoch,
+		false,
+		stabilityConwayPParams(9),
+		nil,
+		nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
 	require.NoError(t, err)
@@ -289,7 +297,15 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapRequiresCommitteeAndSPO(
 	seedHardForkCommitteeAndSPOVotes(t, db, store, proposal)
 
 	in := NewStabilityCheckInputs(
-		dbadapter.New(db), nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
+		dbadapter.New(
+			db,
+		),
+		nil,
+		stabilityTestEpoch,
+		false,
+		stabilityConwayPParams(9),
+		nil,
+		nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
 	require.NoError(t, err)
@@ -341,7 +357,15 @@ func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(
 	require.NotNil(t, got, "gate off must preserve the expired account's vote")
 
 	gateOn := NewStabilityCheckInputs(
-		dbadapter.New(db), nil, stabilityTestEpoch, true, stabilityConwayPParams(10), nil, nil,
+		dbadapter.New(
+			db,
+		),
+		nil,
+		stabilityTestEpoch,
+		true,
+		stabilityConwayPParams(10),
+		nil,
+		nil,
 	)
 	got, err = EvaluateRatifiableHardForkInitiation(
 		context.Background(),
@@ -376,7 +400,15 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapDRepOnly_NotRatifiable(
 	seedDRepYesVote(t, db, proposal.ID, drepCred)
 
 	in := NewStabilityCheckInputs(
-		dbadapter.New(db), nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
+		dbadapter.New(
+			db,
+		),
+		nil,
+		stabilityTestEpoch,
+		false,
+		stabilityConwayPParams(9),
+		nil,
+		nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(context.Background(), in)
 	require.NoError(t, err)
@@ -507,7 +539,15 @@ func TestEvaluateRatifiableHardForkInitiation_RequiresEnactmentPrecondition(
 	seedHardForkCommitteeAndSPOVotes(t, db, store, proposal)
 
 	in := NewStabilityCheckInputs(
-		dbadapter.New(db), nil, stabilityTestEpoch, false, stabilityConwayPParams(10), nil, nil,
+		dbadapter.New(
+			db,
+		),
+		nil,
+		stabilityTestEpoch,
+		false,
+		stabilityConwayPParams(10),
+		nil,
+		nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(t.Context(), in)
 	require.NoError(t, err)

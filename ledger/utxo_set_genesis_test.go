@@ -36,7 +36,10 @@ func (m *memUtxoSet) key(txID []byte, index uint32) string {
 	return string(txID) + string(rune(index))
 }
 
-func (m *memUtxoSet) ApplyUtxoChanges(_ *ocommon.Point, changes []UtxoEvent) error {
+func (m *memUtxoSet) ApplyUtxoChanges(
+	_ *ocommon.Point,
+	changes []UtxoEvent,
+) error {
 	for _, c := range changes {
 		for _, r := range c.Removed {
 			delete(m.outputs, m.key(r.Hash, r.Idx))
@@ -100,7 +103,10 @@ func TestGenesisWithTheLiveUtxoSetAsOnlyCopyMatchesUtxoRows(t *testing.T) {
 			)
 			require.NoError(t, err)
 			create := func(set *memUtxoSet) *database.Database {
-				db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+				db, err := dbtest.NewDatabase(
+					t,
+					&database.Config{DataDir: t.TempDir()},
+				)
 				require.NoError(t, err)
 				t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 				ls := &LedgerState{
@@ -108,7 +114,9 @@ func TestGenesisWithTheLiveUtxoSetAsOnlyCopyMatchesUtxoRows(t *testing.T) {
 					config: LedgerStateConfig{
 						Database:          db,
 						CardanoNodeConfig: nodeCfg,
-						Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+						Logger: slog.New(
+							slog.NewTextHandler(io.Discard, nil),
+						),
 					},
 				}
 				if set != nil {

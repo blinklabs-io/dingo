@@ -661,7 +661,11 @@ INSERT INTO auth_committee_hot (
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	s.snapshotMgr = snapshot.NewManager(dbadapter.New(db), newTestEventBus(t, nil), nil)
+	s.snapshotMgr = snapshot.NewManager(
+		dbadapter.New(db),
+		newTestEventBus(t, nil),
+		nil,
+	)
 	s.wireSnapshotHooks()
 	seedEmptyRewardBasisForRollover(t, db, epoch, pparams)
 	return s
@@ -1146,7 +1150,9 @@ func TestConsumePendingRatificationValidationOnlyKeepsStagedStakeInputs(
 			ls.ratificationMu.Unlock()
 			var taken int
 			ls.SetEpochBoundaryDeferredStakeInputsHook(
-				func(ledgerdb.Txn) (uint64, uint64, []*models.RewardStakeInput, bool) {
+				func(
+					ledgerdb.Txn,
+				) (uint64, uint64, []*models.RewardStakeInput, bool) {
 					taken++
 					return 0, 0, nil, false
 				},

@@ -46,7 +46,8 @@ func (n *Node) openUtxoSet() error {
 	if err != nil {
 		n.config.logger.Warn(
 			"no stability window for the live UTxO set; keeping its whole rollback journal",
-			"error", err,
+			"error",
+			err,
 		)
 		history = 0
 	}

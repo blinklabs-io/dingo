@@ -4879,7 +4879,11 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 	t.Run("pre-babbage waits", func(t *testing.T) {
 		ls, db := seedRewardPrecomputeTimingState(t, 6)
 		meta := db.Metadata()
-		prefilterSlot, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, potsEpoch)
+		prefilterSlot, err := ls.rewardPrefilterSlot(
+			dbadapter.New(db),
+			nil,
+			potsEpoch,
+		)
 		require.NoError(t, err)
 		require.Greater(t, prefilterSlot, capturedSlot)
 
@@ -4933,7 +4937,11 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 		func(t *testing.T) {
 			ls, db := seedRewardPrecomputeTimingState(t, 6)
 			meta := db.Metadata()
-			prefilterSlot, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, potsEpoch)
+			prefilterSlot, err := ls.rewardPrefilterSlot(
+				dbadapter.New(db),
+				nil,
+				potsEpoch,
+			)
 			require.NoError(t, err)
 			rewardCalcSeedStakeCert(
 				t,
@@ -4986,7 +4994,11 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 	t.Run("babbage precomputes immediately", func(t *testing.T) {
 		ls, db := seedRewardPrecomputeTimingState(t, 7)
 		meta := db.Metadata()
-		prefilterSlot, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, potsEpoch)
+		prefilterSlot, err := ls.rewardPrefilterSlot(
+			dbadapter.New(db),
+			nil,
+			potsEpoch,
+		)
 		require.NoError(t, err)
 		require.Greater(t, prefilterSlot, capturedSlot)
 
@@ -5666,7 +5678,11 @@ func TestApplyStakeRewardsPrefilterUsesBeginningOfRUPDSlot(t *testing.T) {
 	)
 	rewardAccount := rewardCalcHash(0x5a)
 	member := rewardCalcHash(0x6a)
-	prefilterSlot, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, potsEpoch)
+	prefilterSlot, err := ls.rewardPrefilterSlot(
+		dbadapter.New(db),
+		nil,
+		potsEpoch,
+	)
 	require.NoError(t, err)
 
 	rewardCalcSetAccountActive(t, db, rewardAccount, false)
@@ -8038,9 +8054,13 @@ func (f *epochBoundaryBenchFixture) wire(tb testing.TB) {
 			Logger:            slog.New(f.phases),
 		},
 	}
-	mgr := snapshot.NewManager(dbadapter.New(db), nil, slog.New(slog.NewTextHandler(
-		io.Discard, nil,
-	)))
+	mgr := snapshot.NewManager(
+		dbadapter.New(db),
+		nil,
+		slog.New(slog.NewTextHandler(
+			io.Discard, nil,
+		)),
+	)
 	f.ls.SetEpochBoundarySnapshotStakeHook(
 		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return mgr.ComputeEpochBoundarySnapshot(
@@ -9450,7 +9470,14 @@ func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(context.Background(), txn, 1, 100, 100, true)
+	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
+		txn,
+		1,
+		100,
+		100,
+		true,
+	)
 	require.NoError(t, err)
 	require.True(
 		t,
@@ -9513,7 +9540,12 @@ func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(context.Background(), txn, 2, 200)
+	app, ok, err := ls.precomputedStakeRewardApplication(
+		context.Background(),
+		txn,
+		2,
+		200,
+	)
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Nil(t, app)
@@ -11184,14 +11216,28 @@ func TestRequiredRewardBasisErrorNamesHiddenBlockCounts(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 
-	_, ok, err := ls.calculateStakeRewardApplication(context.Background(), txn, 4, 1_200, 1_200, true)
+	_, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
+		txn,
+		4,
+		1_200,
+		1_200,
+		true,
+	)
 	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
 	require.False(t, ok)
 	assert.Contains(t, err.Error(), "new epoch 4")
 	assert.Contains(t, err.Error(), "performance_epoch=2")
 	assert.Contains(t, err.Error(), "re-running Mithril sync")
 
-	_, ok, err = ls.calculateStakeRewardApplication(context.Background(), txn, 4, 1_200, 1_200, false)
+	_, ok, err = ls.calculateStakeRewardApplication(
+		context.Background(),
+		txn,
+		4,
+		1_200,
+		1_200,
+		false,
+	)
 	require.NoError(t, err)
 	require.False(t, ok)
 }

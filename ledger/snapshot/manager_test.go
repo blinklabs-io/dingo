@@ -2182,7 +2182,11 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 				utxoAmounts: []types.Uint64{50_000_000},
 			},
 		}, 500)
-		return NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil), poolHash,
+		return NewManager(
+				dbadapter.New(db),
+				event.NewEventBus(nil, nil),
+				nil,
+			), poolHash,
 			event.EpochTransitionEvent{
 				PreviousEpoch:   0,
 				NewEpoch:        1,
@@ -2663,7 +2667,11 @@ func TestCaptureGenesisSnapshot_RestartReseedsUnprovenEmptyMark(
 				))
 			}
 
-			mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
+			mgr := NewManager(
+				dbadapter.New(db),
+				event.NewEventBus(nil, nil),
+				nil,
+			)
 			require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
 
 			repaired, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(

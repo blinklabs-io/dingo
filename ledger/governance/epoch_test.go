@@ -175,11 +175,23 @@ func TestRefundProposalDeposit_DistinguishesSameTxActionIndex(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		refundProposalDeposit(context.Background(), dbadapter.New(db), nil, first, 123),
+		refundProposalDeposit(
+			context.Background(),
+			dbadapter.New(db),
+			nil,
+			first,
+			123,
+		),
 	)
 	require.NoError(
 		t,
-		refundProposalDeposit(context.Background(), dbadapter.New(db), nil, second, 123),
+		refundProposalDeposit(
+			context.Background(),
+			dbadapter.New(db),
+			nil,
+			second,
+			123,
+		),
 	)
 
 	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)

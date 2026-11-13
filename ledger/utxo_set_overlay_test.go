@@ -69,7 +69,9 @@ func TestUtxoSetReadsSeeTheirTransactionsStagedChanges(t *testing.T) {
 	txn := ls.ledgerDB().Begin(t.Context(), true)
 	ls.stageUtxoSet(txn, nil, UtxoEvent{
 		Removed: []models.UtxoId{{Hash: spentID}},
-		Added:   []UtxoOutput{{Ref: models.UtxoId{Hash: newID}, Cbor: []byte{0x81}}},
+		Added: []UtxoOutput{
+			{Ref: models.UtxoId{Hash: newID}, Cbor: []byte{0x81}},
+		},
 	})
 
 	_, ok, err := ls.utxoSetGet(set, txn, spentID, 0)
@@ -95,7 +97,9 @@ func TestUtxoSetReadsSeeTheirTransactionsStagedChanges(t *testing.T) {
 
 func stakedOutput(t *testing.T, stake byte, lovelace uint64) []byte {
 	t.Helper()
-	addr, err := lcommon.NewAddressFromBytes(rowBatchingBaseAddress(t, 0x11, stake))
+	addr, err := lcommon.NewAddressFromBytes(
+		rowBatchingBaseAddress(t, 0x11, stake),
+	)
 	require.NoError(t, err)
 	raw, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
 		OutputAddress: addr,
@@ -114,7 +118,9 @@ func TestUtxoStakeSeenByIncludesTheTransactionsStagedChanges(t *testing.T) {
 	t.Parallel()
 	spent := bytes.Repeat([]byte{1}, 32)
 	created := bytes.Repeat([]byte{2}, 32)
-	set := committedUtxoSet{string(spent) + string(rune(0)): stakedOutput(t, 0x22, 5_000_000)}
+	set := committedUtxoSet{
+		string(spent) + string(rune(0)): stakedOutput(t, 0x22, 5_000_000),
+	}
 	key := CredentialStakeKey(0, rowBatchingKey(0x22))
 	ls := &LedgerState{
 		db:     newTestDB(t),
@@ -125,8 +131,14 @@ func TestUtxoStakeSeenByIncludesTheTransactionsStagedChanges(t *testing.T) {
 		UtxoEvent{
 			Removed: []models.UtxoId{{Hash: spent}},
 			Added: []UtxoOutput{
-				{Ref: models.UtxoId{Hash: created, Idx: 0}, Cbor: stakedOutput(t, 0x22, 3_000_000)},
-				{Ref: models.UtxoId{Hash: created, Idx: 1}, Cbor: stakedOutput(t, 0x22, 1_000_000)},
+				{
+					Ref:  models.UtxoId{Hash: created, Idx: 0},
+					Cbor: stakedOutput(t, 0x22, 3_000_000),
+				},
+				{
+					Ref:  models.UtxoId{Hash: created, Idx: 1},
+					Cbor: stakedOutput(t, 0x22, 1_000_000),
+				},
 			},
 		},
 		UtxoEvent{Removed: []models.UtxoId{{Hash: created, Idx: 1}}},
@@ -149,7 +161,10 @@ type applyingUtxoSet struct {
 	outputs committedUtxoSet
 }
 
-func (s *applyingUtxoSet) ApplyUtxoChanges(_ *ocommon.Point, changes []UtxoEvent) error {
+func (s *applyingUtxoSet) ApplyUtxoChanges(
+	_ *ocommon.Point,
+	changes []UtxoEvent,
+) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, c := range changes {
@@ -175,7 +190,9 @@ func (s *applyingUtxoSet) Get(txID []byte, index uint32) ([]byte, bool, error) {
 	return s.outputs.Get(txID, index)
 }
 
-func (s *applyingUtxoSet) EachSum(fn func(key []byte, lovelace uint64) error) error {
+func (s *applyingUtxoSet) EachSum(
+	fn func(key []byte, lovelace uint64) error,
+) error {
 	s.mu.Lock()
 	sums := make(map[string]uint64)
 	for _, c := range s.outputs {
@@ -249,8 +266,12 @@ func TestUtxoSetReadsSeeACommittedBatchBeforeItIsApplied(t *testing.T) {
 			Cbor: stakedOutput(t, 0x22, 3_000_000),
 		}},
 	})
-	require.Equal(t, seen{stake: 5_000_000, each: 5_000_000, spentLive: true}, read(),
-		"before the commit other readers see only the committed set")
+	require.Equal(
+		t,
+		seen{stake: 5_000_000, each: 5_000_000, spentLive: true},
+		read(),
+		"before the commit other readers see only the committed set",
+	)
 	require.NoError(t, txn.Commit())
 	require.Equal(t, want, inGap, "a committed batch not yet applied")
 	require.Equal(t, want, read(), "after the batch is applied, counted once")

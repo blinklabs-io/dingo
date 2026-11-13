@@ -139,8 +139,10 @@ func (ls *LedgerState) stageUtxoSet(
 			ls.utxoSetFailed.Store(true)
 			ls.config.Logger.Error(
 				"live UTxO set read failed while staging; it stops following the ledger until startup resumes it",
-				"component", "ledger",
-				"error", err,
+				"component",
+				"ledger",
+				"error",
+				err,
 			)
 		}
 	}
@@ -232,7 +234,10 @@ func (ls *LedgerState) stagedStake(
 // took for startup to resume from.
 func (ls *LedgerState) applyUtxoSet(batch *utxoSetBatch) {
 	if rolledBack := ls.applyAndForgetUtxoSet(batch); rolledBack != nil {
-		ls.publishUtxoEvent(ls.lifecycleContext(), *rolledBack) //nolint:contextcheck // the ledger lifecycle bounds an after-commit publish
+		ls.publishUtxoEvent(
+			ls.lifecycleContext(),
+			*rolledBack,
+		) //nolint:contextcheck // the ledger lifecycle bounds an after-commit publish
 	}
 }
 
@@ -271,9 +276,12 @@ func (ls *LedgerState) applyUtxoSetLocked(batch *utxoSetBatch) *UtxoEvent {
 			ls.utxoSetFailed.Store(true)
 			ls.config.Logger.Error(
 				"live UTxO set rollback failed; it stops following the ledger until startup resumes it",
-				"component", "ledger",
-				"error", err,
-				"slot", batch.rollbackTo.Slot,
+				"component",
+				"ledger",
+				"error",
+				err,
+				"slot",
+				batch.rollbackTo.Slot,
 			)
 			return nil
 		}
@@ -322,7 +330,10 @@ func (ls *LedgerState) ResumeUtxoSetFrom(
 	}
 	onChain, err := ls.primaryChainContainsPoint(ctx, point)
 	if err != nil {
-		return false, fmt.Errorf("check live UTxO set tip on the chain: %w", err)
+		return false, fmt.Errorf(
+			"check live UTxO set tip on the chain: %w",
+			err,
+		)
 	}
 	if !onChain {
 		return false, nil
@@ -443,7 +454,9 @@ func (b *utxoSetBatch) addStake(cbor []byte, sign int64) {
 	if b.stake == nil {
 		b.stake = make(map[string]int64)
 	}
-	b.stake[string(key)] += sign * int64(lovelace) //nolint:gosec // lovelace fits in int64
+	b.stake[string(key)] += sign * int64(
+		lovelace,
+	) //nolint:gosec // lovelace fits in int64
 }
 
 // CredentialUtxoStake returns the lovelace in live outputs naming the stake
@@ -767,9 +780,12 @@ func (ls *LedgerState) stageUtxoSetRollback(
 		ls.utxoSetFailed.Store(true)
 		ls.config.Logger.Error(
 			"live UTxO set rollback preview failed; it stops following the ledger until startup resumes it",
-			"component", "ledger",
-			"error", err,
-			"slot", point.Slot,
+			"component",
+			"ledger",
+			"error",
+			err,
+			"slot",
+			point.Slot,
 		)
 	}
 }
@@ -789,7 +805,11 @@ func (ls *LedgerState) LiveUtxoStake(
 	if ls.utxoSetFailed.Load() {
 		return 0, errLiveUtxoSetUnavailable
 	}
-	return ls.stakeWithBatch(r, ls.utxoSetBatchFor(meta), CredentialStakeKey(tag, hash))
+	return ls.stakeWithBatch(
+		r,
+		ls.utxoSetBatchFor(meta),
+		CredentialStakeKey(tag, hash),
+	)
 }
 
 // EachLiveUtxoStake implements types.LiveUtxoSource: every stake
@@ -1037,7 +1057,12 @@ func (ls *LedgerState) utxoIncludingSpent(
 	}
 	bodyCbor, err := ls.ledgerDB().ResolveTxCbor(txn, txID)
 	if err != nil {
-		return nil, fmt.Errorf("resolve producer of %x#%d: %w", txID, index, err)
+		return nil, fmt.Errorf(
+			"resolve producer of %x#%d: %w",
+			txID,
+			index,
+			err,
+		)
 	}
 	body, err := gledger.NewTransactionBodyFromCbor(
 		uint(rows[0].Type), //nolint:gosec // era ID fits in uint
@@ -1057,7 +1082,11 @@ func (ls *LedgerState) utxoIncludingSpent(
 	if out == nil {
 		return nil, nil
 	}
-	return &models.Utxo{TxId: txID, OutputIdx: index, Cbor: outputCbor(out)}, nil
+	return &models.Utxo{
+		TxId:      txID,
+		OutputIdx: index,
+		Cbor:      outputCbor(out),
+	}, nil
 }
 
 // utxosByAddress returns the live outputs paid to any of addrs, at most limit
@@ -1072,9 +1101,13 @@ func (ls *LedgerState) utxosByAddress(
 	if !ls.config.UtxoSetOnly {
 		return ls.ledgerDB().UtxosByAddress(ctx, addrs, limit, txn)
 	}
-	return utxosByAddressFrom(addrs, limit, func(fn func(*models.Utxo) error) error {
-		return ls.iterateLiveUtxos(ctx, txn, fn)
-	})
+	return utxosByAddressFrom(
+		addrs,
+		limit,
+		func(fn func(*models.Utxo) error) error {
+			return ls.iterateLiveUtxos(ctx, txn, fn)
+		},
+	)
 }
 
 // utxosByAddressFrom returns up to limit outputs each yields that pay to one
@@ -1126,7 +1159,9 @@ type UtxoSetSums interface {
 // LivePointerStakes implements types.LiveUtxoSource: the lovelace at each
 // pointer position as the ledger transaction writing in meta sees the live
 // UTxO set.
-func (ls *LedgerState) LivePointerStakes(meta types.Txn) ([]types.PointerStake, error) {
+func (ls *LedgerState) LivePointerStakes(
+	meta types.Txn,
+) ([]types.PointerStake, error) {
 	sums, ok := ls.config.UtxoSet.(UtxoSetSums)
 	if !ok {
 		return nil, errors.New("the live UTxO set keeps no stake sums")
@@ -1144,7 +1179,9 @@ func (ls *LedgerState) LivePointerStakes(meta types.Txn) ([]types.PointerStake, 
 	)
 	err := sums.EachSum(func(key []byte, n uint64) error {
 		if isPointer(key) {
-			totals[string(key)] += int64(n) //nolint:gosec // lovelace fits in int64
+			totals[string(key)] += int64(
+				n,
+			) //nolint:gosec // lovelace fits in int64
 		}
 		return nil
 	})
@@ -1155,7 +1192,10 @@ func (ls *LedgerState) LivePointerStakes(meta types.Txn) ([]types.PointerStake, 
 	ret := make([]types.PointerStake, 0, len(totals))
 	for key, n := range totals {
 		if n < 0 {
-			return nil, fmt.Errorf("pointer stake %x is negative as staged", key)
+			return nil, fmt.Errorf(
+				"pointer stake %x is negative as staged",
+				key,
+			)
 		}
 		if n == 0 {
 			continue

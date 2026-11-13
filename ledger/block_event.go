@@ -412,7 +412,10 @@ func (ls *LedgerState) readBlocksAboveSlot(
 // blocksAppliedUpTo keeps the blocks at or below tip's slot. The primary chain
 // can hold blocks the ledger has not applied yet, and a rollback must not undo
 // what no consumer was ever told was applied.
-func blocksAppliedUpTo(blocks []models.Block, tip ocommon.Point) []models.Block {
+func blocksAppliedUpTo(
+	blocks []models.Block,
+	tip ocommon.Point,
+) []models.Block {
 	return slices.DeleteFunc(slices.Clone(blocks), func(b models.Block) bool {
 		return b.Slot > tip.Slot
 	})
@@ -653,7 +656,11 @@ func (ls *LedgerState) publishUtxoEventAfterCommit(
 	evt UtxoEvent,
 	tip *ocommon.Point,
 ) {
-	ls.stageUtxoSet(txn, tip, evt) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	ls.stageUtxoSet(
+		txn,
+		tip,
+		evt,
+	) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 	if ls.config.EventBus == nil {
 		return
 	}
@@ -728,7 +735,10 @@ func (ls *LedgerState) stageUtxoRollbackEvent(
 	if ls.config.UtxoSetOnly {
 		// The metadata store holds no utxo rows; the set rolls back from
 		// its own journal after the commit and its net change is published.
-		ls.stageUtxoSetRollback(txn, point) //nolint:contextcheck // the change is published after the commit, under the ledger lifecycle
+		ls.stageUtxoSetRollback(
+			txn,
+			point,
+		) //nolint:contextcheck // the change is published after the commit, under the ledger lifecycle
 		return nil
 	}
 	if ls.config.UtxoSet == nil && (ls.config.EventBus == nil ||

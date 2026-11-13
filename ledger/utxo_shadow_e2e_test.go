@@ -83,8 +83,13 @@ func TestShadowMatchesTheLedgerAfterApplyAndRollback(t *testing.T) {
 				return err == nil && rep.Clean() && shadow.Rollbacks() > 0
 			}, 5*time.Second, 10*time.Millisecond, "after rollback: %+v", rep)
 			t.Logf("after rollback: %d live outputs", rep.Checked)
-			require.InDelta(t, beforeRollback, shadow.Disagreements(), 0,
-				"the rollback must remove only live outputs and add only new ones")
+			require.InDelta(
+				t,
+				beforeRollback,
+				shadow.Disagreements(),
+				0,
+				"the rollback must remove only live outputs and add only new ones",
+			)
 		})
 	}
 }

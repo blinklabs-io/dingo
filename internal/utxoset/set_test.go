@@ -52,7 +52,10 @@ func TestReconcileKeepsASetAtTheLedgerTipAndResumesOrRebuildsOneBehind(
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+			db, err := dbtest.NewDatabase(
+				t,
+				&database.Config{DataDir: t.TempDir()},
+			)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 			require.NoError(t, db.SetTip(ochainsync.Tip{Point: tip}, nil))
@@ -60,18 +63,24 @@ func TestReconcileKeepsASetAtTheLedgerTipAndResumesOrRebuildsOneBehind(
 			set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = set.Close() })
-			require.NoError(t, set.ApplyUtxoChanges(&tc.setTip, []ledger.UtxoEvent{{
-				Added: []ledger.UtxoOutput{{
-					Ref:  models.UtxoId{Hash: bytes.Repeat([]byte{1}, 32)},
-					Cbor: []byte{0x80},
-				}},
-			}}))
+			require.NoError(
+				t,
+				set.ApplyUtxoChanges(&tc.setTip, []ledger.UtxoEvent{{
+					Added: []ledger.UtxoOutput{{
+						Ref:  models.UtxoId{Hash: bytes.Repeat([]byte{1}, 32)},
+						Cbor: []byte{0x80},
+					}},
+				}}),
+			)
 			var resumedFrom *ocommon.Point
 			resume := func(_ context.Context, p ocommon.Point) (bool, error) {
 				resumedFrom = &p
 				return tc.resumes, nil
 			}
-			require.NoError(t, set.Reconcile(t.Context(), dbadapter.New(db), resume))
+			require.NoError(
+				t,
+				set.Reconcile(t.Context(), dbadapter.New(db), resume),
+			)
 			if tc.wantResume {
 				require.NotNil(t, resumedFrom)
 				require.Equal(t, tc.setTip, *resumedFrom)
@@ -94,7 +103,9 @@ func TestReconcileKeepsASetAtTheLedgerTipAndResumesOrRebuildsOneBehind(
 // past it to be refused.
 func TestSetPrunesItsJournalBehindTheHistoryWindow(t *testing.T) {
 	t.Parallel()
-	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), HistorySlots: 100})
+	set, err := utxoset.Open(
+		utxoset.Config{Dir: t.TempDir(), HistorySlots: 100},
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	for slot := uint64(1); slot <= 1200; slot++ {
@@ -102,7 +113,10 @@ func TestSetPrunesItsJournalBehindTheHistoryWindow(t *testing.T) {
 		require.NoError(t, set.ApplyUtxoChanges(&tip, []ledger.UtxoEvent{{
 			Point: tip,
 			Added: []ledger.UtxoOutput{{
-				Ref:  models.UtxoId{Hash: bytes.Repeat([]byte{byte(slot)}, 32), Idx: uint32(slot)},
+				Ref: models.UtxoId{
+					Hash: bytes.Repeat([]byte{byte(slot)}, 32),
+					Idx:  uint32(slot),
+				},
 				Cbor: []byte{0x80},
 			}},
 		}}))
@@ -110,7 +124,9 @@ func TestSetPrunesItsJournalBehindTheHistoryWindow(t *testing.T) {
 	_, err = set.Rollback(ocommon.NewPoint(500, bytes.Repeat([]byte{1}, 32)))
 	require.ErrorIs(t, err, badgerutxo.ErrRollbackBeyondJournal)
 	back := uint64(1150)
-	_, err = set.Rollback(ocommon.NewPoint(back, bytes.Repeat([]byte{byte(back)}, 32)))
+	_, err = set.Rollback(
+		ocommon.NewPoint(back, bytes.Repeat([]byte{byte(back)}, 32)),
+	)
 	require.NoError(t, err)
 	n, err := set.Count()
 	require.NoError(t, err)
@@ -131,8 +147,11 @@ func TestReconcileWithoutAMetadataUtxoSetRefusesToRebuild(t *testing.T) {
 	t.Cleanup(func() { _ = set.Close() })
 	behind := ocommon.NewPoint(4, bytes.Repeat([]byte{4}, 32))
 	require.NoError(t, set.ApplyUtxoChanges(&behind, nil))
-	err = set.Reconcile(t.Context(), dbadapter.New(db),
-		func(context.Context, ocommon.Point) (bool, error) { return false, nil })
+	err = set.Reconcile(
+		t.Context(),
+		dbadapter.New(db),
+		func(context.Context, ocommon.Point) (bool, error) { return false, nil },
+	)
 	require.Error(t, err)
 	n, err := set.Count()
 	require.NoError(t, err)

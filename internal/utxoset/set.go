@@ -214,7 +214,9 @@ func (s *Set) RollbackPreview(point ocommon.Point) (ledger.UtxoEvent, error) {
 }
 
 // PreviewUtxoSetRollback implements ledger.UtxoSetRollbacker.
-func (s *Set) PreviewUtxoSetRollback(point ocommon.Point) (ledger.UtxoEvent, error) {
+func (s *Set) PreviewUtxoSetRollback(
+	point ocommon.Point,
+) (ledger.UtxoEvent, error) {
 	return s.RollbackPreview(point)
 }
 
@@ -229,7 +231,10 @@ func (s *Set) Rollback(point ocommon.Point) (ledger.UtxoEvent, error) {
 	return rollbackEvent(point, res), nil
 }
 
-func rollbackEvent(point ocommon.Point, res badgerutxo.RollbackResult) ledger.UtxoEvent {
+func rollbackEvent(
+	point ocommon.Point,
+	res badgerutxo.RollbackResult,
+) ledger.UtxoEvent {
 	evt := ledger.UtxoEvent{
 		Point:   point,
 		Cause:   ledger.UtxoChangeRollback,
@@ -350,7 +355,8 @@ func (s *Set) rebuild(
 	if s.only && (ledgerTip.Slot != 0 || len(ledgerTip.Hash) != 0) {
 		return fmt.Errorf(
 			"utxoset: the live UTxO set at slot %d cannot be caught up to the ledger at slot %d and the metadata store holds no UTxO set to rebuild it from; resync",
-			setTip.Slot, ledgerTip.Slot,
+			setTip.Slot,
+			ledgerTip.Slot,
 		)
 	}
 	s.logger.Info("rebuilding the live UTxO set from the metadata store",
@@ -415,7 +421,9 @@ func (s *Set) RollbackUtxoSet(point ocommon.Point) (ledger.UtxoEvent, error) {
 }
 
 // EachUtxo implements ledger.UtxoSetIterator.
-func (s *Set) EachUtxo(fn func(txID []byte, index uint32, cbor []byte) error) error {
+func (s *Set) EachUtxo(
+	fn func(txID []byte, index uint32, cbor []byte) error,
+) error {
 	return s.store.Each(func(o badgerutxo.Output) error {
 		id := refID(o.Ref)
 		return fn(id.Hash, id.Idx, o.Cbor)
@@ -441,7 +449,9 @@ func (a asOfView) Get(txID []byte, index uint32) ([]byte, bool, error) {
 	return a.v.Get(badgerutxo.NewRef(txID, index))
 }
 
-func (a asOfView) EachUtxo(fn func(txID []byte, index uint32, cbor []byte) error) error {
+func (a asOfView) EachUtxo(
+	fn func(txID []byte, index uint32, cbor []byte) error,
+) error {
 	return a.v.Each(func(o badgerutxo.Output) error {
 		id := refID(o.Ref)
 		return fn(id.Hash, id.Idx, o.Cbor)

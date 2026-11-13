@@ -1473,7 +1473,13 @@ func TestImportedProposalDepositContributesToDRepVotingPower(t *testing.T) {
 	imported, err := db.GetGovernanceProposal(context.Background(), proposalTxHash, 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), imported.Deposit)
-	state, err := governance.LoadDRepVotingState(context.Background(), dbadapter.New(db), nil, 500, false)
+	state, err := governance.LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		500,
+		false,
+	)
 	require.NoError(t, err)
 	ref := models.StakeCredentialRef{Tag: 0, Key: drepCredential}
 	assert.Equal(t, uint64(100), state.Powers[ref.MapKey()])

@@ -2996,11 +2996,19 @@ func TestEpochBoundaryStakeIncludesPreSnapshotCreditsOnly(t *testing.T) {
 // compared with the same query over the rows.
 type rowsPointerSource struct{ db *sql.DB }
 
-func (rowsPointerSource) LiveUtxoCbor(types.Txn, []byte, uint32) ([]byte, bool, error) {
+func (rowsPointerSource) LiveUtxoCbor(
+	types.Txn,
+	[]byte,
+	uint32,
+) ([]byte, bool, error) {
 	return nil, false, errors.New("unused")
 }
 
-func (rowsPointerSource) LiveUtxoStake(types.Txn, uint8, []byte) (uint64, error) {
+func (rowsPointerSource) LiveUtxoStake(
+	types.Txn,
+	uint8,
+	[]byte,
+) (uint64, error) {
 	return 0, errors.New("unused")
 }
 
@@ -3010,7 +3018,9 @@ func (rowsPointerSource) EachLiveUtxoStake(
 	return errors.New("unused")
 }
 
-func (s rowsPointerSource) LivePointerStakes(types.Txn) ([]types.PointerStake, error) {
+func (s rowsPointerSource) LivePointerStakes(
+	types.Txn,
+) ([]types.PointerStake, error) {
 	rows, err := s.db.Query(`
 SELECT utxo_pointer.ptr_slot, utxo_pointer.ptr_tx_index,
        utxo_pointer.ptr_cert_index, SUM(CAST(utxo.amount AS INTEGER))
@@ -3054,7 +3064,9 @@ func TestLivePointerStakeResolvesLikeUtxoRows(t *testing.T) {
 		require.NoError(t, err)
 		got := map[string]uint64{}
 		for _, in := range inputs {
-			got[fmt.Sprintf("%x/%d/%x", in.PoolKeyHash, in.CredentialTag, in.StakingKey)] += uint64(in.Stake)
+			got[fmt.Sprintf("%x/%d/%x", in.PoolKeyHash, in.CredentialTag, in.StakingKey)] += uint64(
+				in.Stake,
+			)
 		}
 		return got
 	}
@@ -3075,7 +3087,14 @@ func TestLiveHistoricalStakeAtTheTipMatchesUtxoRows(t *testing.T) {
 	f.setEra(t, babbage.EraIdBabbage)
 	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
 	f.apply(t, 100, 0, []lcommon.Certificate{f.register(), f.delegate()})
-	f.apply(t, 150, 0, nil, f.output(700, f.baseAddress(t)), f.output(55, f.baseAddress(t)))
+	f.apply(
+		t,
+		150,
+		0,
+		nil,
+		f.output(700, f.baseAddress(t)),
+		f.output(55, f.baseAddress(t)),
+	)
 	f.apply(t, 200, 0, nil,
 		f.output(600, newPointerAddress(t, paymentKey, 100, 0, 0)))
 	fromRows := f.stakeAt(t, 300)
@@ -3097,7 +3116,11 @@ func TestLiveHistoricalStakeAtTheTipMatchesUtxoRows(t *testing.T) {
 // outputs.
 type emptyLiveSource struct{}
 
-func (emptyLiveSource) LiveUtxoCbor(types.Txn, []byte, uint32) ([]byte, bool, error) {
+func (emptyLiveSource) LiveUtxoCbor(
+	types.Txn,
+	[]byte,
+	uint32,
+) ([]byte, bool, error) {
 	return nil, false, nil
 }
 
@@ -3105,7 +3128,9 @@ func (emptyLiveSource) LiveUtxoStake(types.Txn, uint8, []byte) (uint64, error) {
 	return 0, nil
 }
 
-func (emptyLiveSource) LivePointerStakes(types.Txn) ([]types.PointerStake, error) {
+func (emptyLiveSource) LivePointerStakes(
+	types.Txn,
+) ([]types.PointerStake, error) {
 	return nil, nil
 }
 

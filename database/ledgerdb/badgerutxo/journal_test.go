@@ -100,7 +100,14 @@ func TestRollbackRestoresEveryEarlierState(t *testing.T) {
 			res, err := s.Rollback(want.at)
 			require.NoError(t, err)
 			got := contents(t, s)
-			require.Equal(t, want.set, got, "seed %d rollback to slot %d", seed, want.at.Slot)
+			require.Equal(
+				t,
+				want.set,
+				got,
+				"seed %d rollback to slot %d",
+				seed,
+				want.at.Slot,
+			)
 			requireTip(t, s, want.at)
 			added := map[badgerutxo.Ref]string{}
 			for _, o := range res.Added {
@@ -169,8 +176,16 @@ func TestRollbackStopsBetweenBlocksOfOneBatch(t *testing.T) {
 	bootstrap(t, s, point(1, 1), out(1, 0))
 	first, second := point(10, 10), point(20, 20)
 	_, err := s.ApplyBatch(&second, []badgerutxo.Change{
-		{Point: first, Added: []badgerutxo.Output{out(2, 0)}, Removed: []badgerutxo.Ref{ref(1, 0)}},
-		{Point: second, Added: []badgerutxo.Output{out(3, 0)}, Removed: []badgerutxo.Ref{ref(2, 0)}},
+		{
+			Point:   first,
+			Added:   []badgerutxo.Output{out(2, 0)},
+			Removed: []badgerutxo.Ref{ref(1, 0)},
+		},
+		{
+			Point:   second,
+			Added:   []badgerutxo.Output{out(3, 0)},
+			Removed: []badgerutxo.Ref{ref(2, 0)},
+		},
 	})
 	require.NoError(t, err)
 	_, err = s.Rollback(first)
