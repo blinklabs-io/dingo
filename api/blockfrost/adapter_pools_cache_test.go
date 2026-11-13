@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,9 +34,9 @@ func TestActivePoolCacheLoadsOncePerTip(t *testing.T) {
 	t.Parallel()
 	var cache activePoolCache
 	var loads atomic.Int32
-	load := func() ([][]byte, bool, error) {
+	load := func() ([][]byte, error) {
 		loads.Add(1)
-		return [][]byte{{1}, {2}}, true, nil
+		return [][]byte{{1}, {2}}, nil
 	}
 	tipA := activePoolCacheKey{slot: 10, hash: "a"}
 
@@ -60,12 +62,12 @@ func TestActivePoolCacheDoesNotCacheFailure(t *testing.T) {
 	var cache activePoolCache
 	key := activePoolCacheKey{slot: 1, hash: "a"}
 	boom := errors.New("boom")
-	_, err := cache.get(context.Background(), key, func() ([][]byte, bool, error) {
-		return nil, false, boom
+	_, err := cache.get(context.Background(), key, func() ([][]byte, error) {
+		return nil, boom
 	})
 	require.ErrorIs(t, err, boom)
-	got, err := cache.get(context.Background(), key, func() ([][]byte, bool, error) {
-		return [][]byte{{9}}, true, nil
+	got, err := cache.get(context.Background(), key, func() ([][]byte, error) {
+		return [][]byte{{9}}, nil
 	})
 	require.NoError(t, err)
 	require.Equal(t, [][]byte{{9}}, got)
@@ -81,11 +83,11 @@ func TestActivePoolCacheSharesConcurrentLoad(t *testing.T) {
 	var loads atomic.Int32
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	load := func() ([][]byte, bool, error) {
+	load := func() ([][]byte, error) {
 		loads.Add(1)
 		close(entered)
 		<-release
-		return [][]byte{{1}}, true, nil
+		return [][]byte{{1}}, nil
 	}
 
 	var wg sync.WaitGroup
@@ -121,40 +123,53 @@ func TestActivePoolCacheSharesConcurrentLoad(t *testing.T) {
 	require.Equal(t, [][]byte{{1}}, <-results)
 }
 
-func TestActivePoolCacheSkipsUncacheableLoad(t *testing.T) {
-	t.Parallel()
-	var cache activePoolCache
-	key := activePoolCacheKey{slot: 1, hash: "a"}
-	var loads atomic.Int32
-	got, err := cache.get(context.Background(), key,
-		func() ([][]byte, bool, error) {
-			loads.Add(1)
-			return [][]byte{{1}}, false, nil
-		})
-	require.NoError(t, err)
-	require.Equal(t, [][]byte{{1}}, got)
-	_, err = cache.get(context.Background(), key,
-		func() ([][]byte, bool, error) {
-			loads.Add(1)
-			return [][]byte{{2}}, true, nil
-		})
-	require.NoError(t, err)
-	require.Equal(t, int32(2), loads.Load())
-}
-
 func TestActivePoolCachePanicReleasesWaiters(t *testing.T) {
 	t.Parallel()
 	var cache activePoolCache
 	key := activePoolCacheKey{slot: 1, hash: "a"}
 	require.Panics(t, func() {
 		_, _ = cache.get(context.Background(), key,
-			func() ([][]byte, bool, error) { panic("boom") })
+			func() ([][]byte, error) { panic("boom") })
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	got, err := cache.get(ctx, key, func() ([][]byte, bool, error) {
-		return [][]byte{{3}}, true, nil
+	got, err := cache.get(ctx, key, func() ([][]byte, error) {
+		return [][]byte{{3}}, nil
 	})
 	require.NoError(t, err)
 	require.Equal(t, [][]byte{{3}}, got)
+}
+
+// TestPoolsListCachesUnderSnapshotTip covers the cache key: it is the tip
+// stored in the snapshot the list was read from, not the in-memory ledger
+// tip. A tip that moved and returned to its old slot and hash while a list
+// was being read would otherwise file the discarded fork's list under the
+// restored tip.
+func TestPoolsListCachesUnderSnapshotTip(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	require.NoError(t, db.Metadata().SetEpoch(
+		0, 0, nil, nil, nil, nil, 6, 1, 1000, nil,
+	))
+	stored := ochainsync.Tip{
+		Point:       ocommon.NewPoint(50, []byte("snapshot-tip-hash-0000000000")),
+		BlockNumber: 5,
+	}
+	require.NoError(t, db.SetTip(stored, nil))
+	adapter.ledgerState.SetTipForTesting(ochainsync.Tip{
+		Point:       ocommon.NewPoint(99, []byte("ledger-tip-hash-00000000000")),
+		BlockNumber: 9,
+	})
+
+	_, _, err := adapter.PoolsList(t.Context(), PaginationParams{Count: 1, Page: 1})
+	require.NoError(t, err)
+
+	adapter.activePools.mu.Lock()
+	defer adapter.activePools.mu.Unlock()
+	require.True(t, adapter.activePools.valid)
+	require.Equal(
+		t,
+		activePoolCacheKey{slot: 50, hash: string(stored.Point.Hash)},
+		adapter.activePools.key,
+	)
 }

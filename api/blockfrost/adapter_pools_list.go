@@ -48,30 +48,29 @@ import (
 // result is one row per active pool (~3,000 on mainnet) and depends only on
 // the chain state, so it is cached per tip point (activePoolCache): requests
 // at one tip share one computation, and the page is sliced from the cached
-// list in memory.
+// list in memory. The tip is the one stored in the snapshot the list is read
+// from.
 func (a *NodeAdapter) PoolsList(ctx context.Context,
 	params PaginationParams,
 ) ([]string, int, error) {
 	db := a.ledgerState.Database()
-	// The tip is read before the transaction opens, so the snapshot is at or
-	// after the key; the loader then rereads the tip and the list is cached
-	// only if the tip did not move, so a list is never filed under a tip it
-	// was not computed at.
-	tip := a.ledgerState.Tip()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
+	// The cache key is the tip stored in the same read snapshot the list is
+	// computed from, so a list is filed under the state it was read at. The
+	// in-memory ledger tip cannot serve as the key: a block applied and then
+	// rolled back between reading it and reading the snapshot restores the
+	// same slot and hash, and the list of the discarded fork would be filed
+	// under the restored tip.
+	tip, err := db.GetTip(txn)
+	if err != nil {
+		return nil, 0, fmt.Errorf("get tip: %w", err)
+	}
 	poolKeyHashes, err := a.activePools.get(
 		ctx,
 		activePoolCacheKey{slot: tip.Point.Slot, hash: string(tip.Point.Hash)},
-		func() ([][]byte, bool, error) {
-			hashes, err := db.GetActivePoolKeyHashesOrdered(ctx, txn)
-			if err != nil {
-				return nil, false, err
-			}
-			after := a.ledgerState.Tip()
-			stable := after.Point.Slot == tip.Point.Slot &&
-				string(after.Point.Hash) == string(tip.Point.Hash)
-			return hashes, stable, nil
+		func() ([][]byte, error) {
+			return db.GetActivePoolKeyHashesOrdered(ctx, txn)
 		},
 	)
 	if err != nil {

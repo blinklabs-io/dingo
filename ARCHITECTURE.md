@@ -16093,8 +16093,12 @@ oldest-first sequence against the same fixture.
 The ordered list depends only on chain state, so the adapter caches it for the
 tip point it was computed at (`activePoolCache`): requests at one tip share a
 single computation, a request that arrives during it waits for it or for its
-own context, a failed computation is not cached, a list computed while the tip moved is not cached, and a new block or rollback
-moves the tip and so replaces the list. The retiring and retired lists find their candidate pools through
+own context, a failed computation is not cached, and a new block or rollback
+moves the tip and so replaces the list. The key is the tip stored in the same
+read snapshot the list is read from, not the in-memory ledger tip: a block
+applied and rolled back while a list is read restores the same slot and hash,
+so comparing the ledger tip before and after would file the discarded fork's
+list under the restored tip. The retiring and retired lists find their candidate pools through
 the `pool_retirement` epoch index and rank certificates only for those pools, though they still rank the
 full history of each candidate, so a page does not read every registration and retirement ever recorded
 when few pools qualify.
