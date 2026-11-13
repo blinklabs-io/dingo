@@ -1518,12 +1518,19 @@ func TestVerifyBlockHeaderCryptoBeforeApplyRejectsPoolAbsentFromPopulatedSnapsho
 	// The electing mark snapshot exists and holds another pool only.
 	otherPool := bytes.Repeat([]byte{0xAB}, 28)
 	seedPoolStakeSnapshot(t, db, 4, otherPool, 1_000_000_000)
+	// The block's pool is registered, so only the snapshot check can reject.
+	seedBlockPoolRegistration(t, db, tb.block)
 
 	err := ls.verifyBlockHeaderCryptoBeforeApply(tb.block)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, errHeaderVerificationDeferred)
 	assert.False(t, IsHeaderVerificationDeferred(err))
-	assert.ErrorIs(t, err, models.ErrPoolNotFound)
+	assert.NotErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+	assert.ErrorContains(
+		t,
+		err,
+		"has no stake in epoch 4 snapshot (pool is absent from the epoch distribution)",
+	)
 }
 
 func TestVerifyBlockHeaderStateImportedActivePoolAbsenceAheadOfApply(
