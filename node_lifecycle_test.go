@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -2108,6 +2109,124 @@ func smallEpochGenesisCfgForLifecycleTest(
 	return cfg
 }
 
+// Under heavy CPU contention one epoch-boundary commit was measured at over
+// ten seconds, so the window must cover a rollover with no tip movement.
+const (
+	epochTransitionStallWindow = 2 * time.Minute
+	epochTransitionPollPeriod  = 150 * time.Millisecond
+)
+
+// waitForEpochTransition waits for the transition event into targetEpoch.
+// The window bounds time without progress rather than total time: it restarts
+// whenever tipSlot reports a new value, so a slow but advancing pipeline never
+// fails and a stalled one fails after one window.
+func waitForEpochTransition(
+	events <-chan event.Event,
+	targetEpoch uint64,
+	tipSlot func() uint64,
+	window time.Duration,
+	pollPeriod time.Duration,
+) error {
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+	ticker := time.NewTicker(pollPeriod)
+	defer ticker.Stop()
+	lastSlot := tipSlot()
+	lastMoved := time.Now()
+	for {
+		select {
+		case evt, ok := <-events:
+			if !ok {
+				return errors.New("epoch transition subscription closed")
+			}
+			epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
+			if ok && epochEvent.NewEpoch == targetEpoch &&
+				len(epochEvent.EpochNonce) > 0 {
+				return nil
+			}
+		case <-ticker.C:
+			if slot := tipSlot(); slot != lastSlot {
+				lastSlot = slot
+				lastMoved = time.Now()
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(window)
+			}
+		case <-timer.C:
+			return fmt.Errorf(
+				"no progress waiting for epoch transition %d: tip slot %d "+
+					"unchanged for %s",
+				targetEpoch,
+				lastSlot,
+				time.Since(lastMoved).Round(time.Millisecond),
+			)
+		}
+	}
+}
+
+func TestWaitForEpochTransitionWindowResetsOnProgress(t *testing.T) {
+	t.Parallel()
+
+	const target = 3
+	newEvent := func() event.Event {
+		return event.NewEvent(
+			event.EpochTransitionEventType,
+			event.EpochTransitionEvent{NewEpoch: target, EpochNonce: []byte{1}},
+		)
+	}
+
+	t.Run("advancing tip outlives the window", func(t *testing.T) {
+		t.Parallel()
+		events := make(chan event.Event, 1)
+		var polls uint64
+		// Every poll sees a new slot, so 150 polls at 5ms exceed the 500ms
+		// window; the event is delivered from the final poll.
+		tipSlot := func() uint64 {
+			polls++
+			if polls == 150 {
+				events <- newEvent()
+			}
+			return polls
+		}
+		const window = 500 * time.Millisecond
+		start := time.Now()
+		require.NoError(t, waitForEpochTransition(
+			events, target, tipSlot, window, 5*time.Millisecond,
+		))
+		require.Greater(t, time.Since(start), window)
+	})
+
+	t.Run("stalled tip fails with last slot", func(t *testing.T) {
+		t.Parallel()
+		events := make(chan event.Event, 1)
+		err := waitForEpochTransition(
+			events, target, func() uint64 { return 42 },
+			100*time.Millisecond, 5*time.Millisecond,
+		)
+		require.ErrorContains(t, err, "tip slot 42 unchanged")
+	})
+
+	t.Run("tip that stops moving fails", func(t *testing.T) {
+		t.Parallel()
+		events := make(chan event.Event, 1)
+		var polls uint64
+		tipSlot := func() uint64 {
+			if polls < 20 {
+				polls++
+			}
+			return polls
+		}
+		err := waitForEpochTransition(
+			events, target, tipSlot, 100*time.Millisecond, 5*time.Millisecond,
+		)
+		require.ErrorContains(t, err, "tip slot 20 unchanged")
+	})
+}
+
 // addBlocksSerially waits for each block-based epoch transition to commit
 // before entering the next epoch. This orders ledger commits only; snapshot
 // events run in their own serial loop and reward precomputation coalesces
@@ -2120,9 +2239,9 @@ func addBlocksSerially(
 ) {
 	t.Helper()
 	// With no upstream connection and reachedTip unlatched, the ledger loop
-	// holds each lone new block for about two seconds waiting for more, out
-	// of the five second wait below. A live truncate or restore builds a new
-	// ledger with the flag clear, so latch the current one.
+	// holds each lone new block for about two seconds waiting for more. A
+	// live truncate or restore builds a new ledger with the flag clear, so
+	// latch the current one.
 	n.ledgerState.MarkReachedTipForTesting()
 	subID, epochEvents := n.eventBus.SubscribeWithBuffer(
 		event.EpochTransitionEventType,
@@ -2135,24 +2254,13 @@ func addBlocksSerially(
 	}()
 	waitForEpoch := func(targetEpoch uint64) {
 		t.Helper()
-		timer := time.NewTimer(5 * time.Second)
-		defer timer.Stop()
-		for {
-			select {
-			case evt, ok := <-epochEvents:
-				require.True(t, ok, "epoch transition subscription closed")
-				epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
-				if ok && epochEvent.NewEpoch == targetEpoch &&
-					len(epochEvent.EpochNonce) > 0 {
-					return
-				}
-			case <-timer.C:
-				t.Fatalf(
-					"timeout waiting for block-based epoch transition %d",
-					targetEpoch,
-				)
-			}
-		}
+		require.NoError(t, waitForEpochTransition(
+			epochEvents,
+			targetEpoch,
+			func() uint64 { return n.ledgerState.Tip().Point.Slot },
+			epochTransitionStallWindow,
+			epochTransitionPollPeriod,
+		))
 	}
 	currentEpoch := n.ledgerState.Tip().Point.Slot / epochLength
 	for _, b := range blocks {
