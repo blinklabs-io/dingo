@@ -245,3 +245,47 @@ func TestLeiosFetchServerRefusesUncertifiedBehindImmutableTip(t *testing.T) {
 		require.Nil(t, txsMsg)
 	}
 }
+
+// The refusal holds for an occurrence already loaded into the in-memory cache
+// when the immutable point later passes it.
+func TestLeiosFetchServerRefusesCachedUncertifiedBehindImmutableTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	withImmutableSlot(o, 10)
+	tx, ref := testLeiosManifestTx(t, 1)
+	raw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(50, lcommon.Blake2b256Hash(raw).Bytes())
+	require.NoError(t, o.leiosDatabase().SetLeiosEB(
+		point.Slot, point.Hash, raw, []cbor.RawMessage{tx},
+	))
+	_, err = o.leiosfetchServerBlockRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+	)
+	require.NoError(t, err)
+	o.leiosMu.RLock()
+	cached := o.leiosEndorserBlocks[leiosBlockKey(point.Slot, point.Hash)]
+	o.leiosMu.RUnlock()
+	require.NotNil(t, cached, "served endorser block was not cached")
+
+	withImmutableSlot(o, 100)
+	blockMsg, err := o.leiosfetchServerBlockRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+	)
+	require.ErrorIs(t, err, oleiosfetch.ErrBlockNotFound)
+	require.Nil(t, blockMsg)
+	txsMsg, err := o.leiosfetchServerBlockTxsRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+		map[uint16]uint64{0: 1 << 63},
+	)
+	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
+	require.Nil(t, txsMsg)
+}
