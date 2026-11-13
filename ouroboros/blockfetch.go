@@ -484,9 +484,9 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	}
 	if start.Slot == end.Slot && !bytes.Equal(start.Hash, end.Hash) {
 		orderIter, orderErr := o.ledgerState.GetChainFromPoint(start, true)
-		ordered := orderErr == nil &&
-			blockfetchStartPrecedesEnd(orderIter, start, end)
-		if orderErr == nil {
+		ordered := false
+		if orderErr == nil && orderIter != nil {
+			ordered = blockfetchStartPrecedesEnd(orderIter, start, end)
 			orderIter.Cancel()
 		}
 		if !ordered {
