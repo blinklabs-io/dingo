@@ -5307,8 +5307,9 @@ budget is a steady-state limit rather than a one-shot allowance.
 Retention follows the reference node: the retention GC (`runLeiosPersistenceGC`)
 prunes an uncertified endorser block once the immutable point
 (`LedgerState.ImmutablePoint`, `k` blocks behind the applied tip) passes its
-slot, while a certified one (`Database.IsLeiosEBCertified`; the ledger writes
-the marker when a ranking block certifies it) is kept permanently. A positive
+slot, while a certified one (`Database.IsLeiosEBCertified`; the ledger stages
+the marker in the certifying ranking block's apply transaction, so it commits
+only with that block, and a rollback removes it) is kept permanently. A positive
 `leiosPersistenceRetentionSlots` only widens the window and never prunes past
 the immutable point, and the writer still persists a certified block below the
 cutoff. The leios-fetch server answers an uncertified block behind the

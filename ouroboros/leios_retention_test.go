@@ -89,7 +89,7 @@ func TestLeiosPersistenceGCDefaultPrunesUncertifiedBehindImmutableTip(
 	}
 	require.NoError(
 		t,
-		db.SetLeiosEBCertified(staleCertified.slot, staleCertified.hash),
+		db.SetLeiosEBCertified(staleCertified.slot, staleCertified.hash, nil),
 	)
 
 	o.runLeiosPersistenceGC(context.Background(), nil)
@@ -188,7 +188,7 @@ func TestLeiosPersistenceWriterKeepsCertifiedBehindFrontier(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		db.SetLeiosEBCertified(certifiedPoint.Slot, certifiedPoint.Hash),
+		db.SetLeiosEBCertified(certifiedPoint.Slot, certifiedPoint.Hash, nil),
 	)
 	uncertifiedPoint, uncertifiedRaw, uncertifiedData, _ := leiosPersistTestEntry(
 		t, 11, 1, 4,
@@ -240,7 +240,7 @@ func TestLeiosFetchServerRefusesUncertifiedBehindImmutableTip(t *testing.T) {
 			c.slot, hash, raw, []cbor.RawMessage{tx},
 		))
 		if c.certified {
-			require.NoError(t, db.SetLeiosEBCertified(c.slot, hash))
+			require.NoError(t, db.SetLeiosEBCertified(c.slot, hash, nil))
 		}
 		cases = append(cases, served{
 			point:  leiosRetentionRecord{c.slot, hash},
