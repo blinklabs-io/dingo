@@ -159,18 +159,20 @@ func (o *Ouroboros) leiosfetchServerBlockRequest(
 	ctx oleiosfetch.CallbackContext,
 	point ocommon.Point,
 ) (protocol.Message, error) {
-	var data *leiosEndorserBlockData
-	ok := !o.leiosServingRefused(point)
-	if ok {
-		data, ok = o.lookupLeiosFetchServingData(ctx, point, nil)
-	}
-	if !ok {
-		return nil, fmt.Errorf(
+	notFound := func() error {
+		return fmt.Errorf(
 			"leios endorser block not found: %d.%x: %w",
 			point.Slot,
 			point.Hash,
 			oleiosfetch.ErrBlockNotFound,
 		)
+	}
+	if o.leiosServingRefused(point) {
+		return nil, notFound()
+	}
+	data, ok := o.lookupLeiosFetchServingData(ctx, point, nil)
+	if !ok {
+		return nil, notFound()
 	}
 	return oleiosfetch.NewMsgBlock(cbor.RawMessage(data.blockRaw)), nil
 }
@@ -180,20 +182,22 @@ func (o *Ouroboros) leiosfetchServerBlockTxsRequest(
 	point ocommon.Point,
 	txBitmap map[uint16]uint64,
 ) (protocol.Message, error) {
-	var data *leiosEndorserBlockData
-	ok := !o.leiosServingRefused(point)
-	if ok {
-		data, ok = o.lookupLeiosFetchServingData(ctx, point, func(data *leiosEndorserBlockData) bool {
-			return leiosRequestedTxsAvailable(data, txBitmap)
-		})
-	}
-	if !ok {
-		return nil, fmt.Errorf(
+	notAvailable := func() error {
+		return fmt.Errorf(
 			"leios endorser block not available: %d.%x: %w",
 			point.Slot,
 			point.Hash,
 			oleiosfetch.ErrBlockTxsNotFound,
 		)
+	}
+	if o.leiosServingRefused(point) {
+		return nil, notAvailable()
+	}
+	data, ok := o.lookupLeiosFetchServingData(ctx, point, func(data *leiosEndorserBlockData) bool {
+		return leiosRequestedTxsAvailable(data, txBitmap)
+	})
+	if !ok {
+		return nil, notAvailable()
 	}
 	if err := validateLeiosTxBitmap(data.txCount, txBitmap); err != nil {
 		return nil, err
