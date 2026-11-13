@@ -469,15 +469,11 @@ func (c *ConnectionManager) setupAcceptedConnection(
 	connOpts := append(defaultConnOpts, ouroboros.WithConnection(conn))
 	oConn, err := ouroboros.NewConnection(connOpts...)
 	if err != nil {
+		msg := "listener: inbound connection failed"
 		if l.UseNtC {
-			c.config.Logger.Error(
-				"listener: failed to setup NtC connection",
-				"error",
-				err,
-			)
-		} else {
-			c.config.Logger.Info("listener: inbound connection failed", "error", err)
+			msg = "listener: failed to setup NtC connection"
 		}
+		c.config.Logger.Info(msg, "error", err)
 		closeConnAndLog(c.config.Logger, conn, "listener: close failed")
 		if ipKey != "" {
 			c.releaseIPSlot(ipKey)
