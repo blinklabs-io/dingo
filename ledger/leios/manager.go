@@ -327,6 +327,10 @@ type VoteManagerConfig struct {
 	// PoP-verified result is a keyless seat and Registry is ignored. Nil
 	// explicitly selects the Registry-only private test/devnet seam.
 	KeyProvider LeiosKeyProvider
+	// KeyProofDomain selects the single domain under which registered key
+	// proofs of possession are verified. The zero value is the IETF BLS_POP
+	// domain.
+	KeyProofDomain lcommon.DijkstraBlsProofDomain
 	// SlotProvider enables local wall-clock voting rules and the relayed vote
 	// slot window. Nil is the private test seam that disables both checks.
 	SlotProvider SlotProvider
@@ -477,7 +481,7 @@ type ebTally struct {
 
 // epochEntry memoizes the committee, quorum threshold, and resolved,
 // PoP-verified on-chain voter keys for an epoch. onChainKeys holds only
-// keys that passed VerifyLeiosKeyProofOfPossession; a committee member
+// keys whose proof verified under the manager's KeyProofDomain; a member
 // absent from it has no usable on-chain key for the epoch and is keyless.
 type epochEntry struct {
 	committee   *Committee
@@ -524,6 +528,7 @@ type VoteManager struct {
 	paramsProvider       CommitteeParamsProvider
 	votingParamsProvider VotingParamsProvider
 	keyProvider          LeiosKeyProvider // nil explicitly enables Registry-only mode
+	keyProofDomain       lcommon.DijkstraBlsProofDomain
 	slotProvider         SlotProvider
 	// certifyByDeadlineSlots is the past bound for peer vote acceptance.
 	// Relayed votes remain useful after local vote production closes, while
@@ -673,6 +678,9 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 	if cfg.ParamsProvider == nil {
 		return nil, errors.New("leios vote manager: nil params provider")
 	}
+	if _, err := keyProofDST(cfg.KeyProofDomain); err != nil {
+		return nil, fmt.Errorf("leios vote manager: %w", err)
+	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -697,6 +705,7 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		paramsProvider:       cfg.ParamsProvider,
 		votingParamsProvider: cfg.VotingParamsProvider,
 		keyProvider:          cfg.KeyProvider,
+		keyProofDomain:       cfg.KeyProofDomain,
 		slotProvider:         cfg.SlotProvider,
 		scheduledVotes:       make(map[lcommon.Blake2b256]scheduledVote),
 		scheduleAfter: func(d time.Duration, f func()) func() bool {
@@ -1416,6 +1425,12 @@ func (m *VoteManager) CommitteeSeatsForEpoch(
 	return seats, nil
 }
 
+// KeyProofDomain returns the domain under which registered key proofs are
+// verified.
+func (m *VoteManager) KeyProofDomain() lcommon.DijkstraBlsProofDomain {
+	return m.keyProofDomain
+}
+
 // ValidateDijkstraCertificate verifies a Dijkstra certificate against the
 // historical committee and keys resolved for epoch. Unlike vote admission,
 // block admission is strict: every selected signer must have a verified key.
@@ -1767,7 +1782,7 @@ func (m *VoteManager) resolveOnChainKeys(
 	pubs := make([]*bls12381.G2Affine, len(pools))
 	errs := make([]error, len(pools))
 	parallelFor(len(pools), func(i int) {
-		pubs[i], errs[i] = verifiedLeiosKey(raw[pools[i]])
+		pubs[i], errs[i] = verifiedLeiosKey(raw[pools[i]], m.keyProofDomain)
 	})
 	for i, poolHashHex := range pools {
 		if errs[i] != nil {

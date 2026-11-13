@@ -30,11 +30,14 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/blake2b"
 )
 
 // seedCompleteDB creates a database at dataDir that looks like a finished sync:
@@ -484,17 +487,48 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		})
 		files, _ := validImmutableFiles(t, 1000)
 		firstHash := bytes.Clone(files["immutable/00000.secondary"][16:48])
-		headerCBOR, err := cbor.Encode(shelley.ShelleyBlockHeader{
-			Body: shelley.ShelleyBlockHeaderBody{
-				BlockNumber:       1,
-				Slot:              999,
-				BlockBodySize:     0,
-				ProtoMajorVersion: 1,
+		// The imported ledger state is Conway, so the backfill derives the
+		// block nonce with the Conway rule and needs a Conway block whose
+		// header commits to its body.
+		bodyParts := make([][]byte, 0, 4)
+		var bodyHashes []byte
+		bodyTotal := 0
+		for _, part := range []any{
+			[]any{}, []any{}, map[uint]any{}, []any{},
+		} {
+			enc, err := cbor.Encode(part)
+			require.NoError(t, err)
+			bodyParts = append(bodyParts, enc)
+			sum := blake2b.Sum256(enc)
+			bodyHashes = append(bodyHashes, sum[:]...)
+			bodyTotal += len(enc)
+		}
+		bodyHash := blake2b.Sum256(bodyHashes)
+		headerCBOR, err := cbor.Encode(babbage.BabbageBlockHeader{
+			Body: babbage.BabbageBlockHeaderBody{
+				BlockNumber:   1,
+				Slot:          999,
+				BlockBodySize: uint64(bodyTotal), //nolint:gosec
+				BlockBodyHash: lcommon.NewBlake2b256(bodyHash[:]),
+				VrfKey:        bytes.Repeat([]byte{1}, 32),
+				VrfResult: lcommon.VrfResult{
+					Output: bytes.Repeat([]byte{2}, 64),
+					Proof:  bytes.Repeat([]byte{3}, 80),
+				},
+				OpCert: babbage.BabbageOpCert{
+					HotVkey:   bytes.Repeat([]byte{4}, 32),
+					Signature: bytes.Repeat([]byte{5}, 64),
+				},
 			},
+			Signature: bytes.Repeat([]byte{6}, 448),
 		})
 		require.NoError(t, err)
 		blockBodyCBOR, err := cbor.Encode([]any{
-			cbor.RawMessage(headerCBOR), []any{}, []any{}, map[uint]any{},
+			cbor.RawMessage(headerCBOR),
+			cbor.RawMessage(bodyParts[0]),
+			cbor.RawMessage(bodyParts[1]),
+			cbor.RawMessage(bodyParts[2]),
+			cbor.RawMessage(bodyParts[3]),
 		})
 		require.NoError(t, err)
 		dataDir := t.TempDir()
@@ -510,7 +544,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			PrevHash: bytes.Repeat([]byte{0}, 32),
 			Cbor:     blockBodyCBOR,
 			Number:   1,
-			Type:     uint(shelley.BlockTypeShelley),
+			Type:     uint(conway.BlockTypeConway),
 		}, nil))
 		require.NoError(t, setImmutableImportMarker(db, 0))
 		require.NoError(t, db.Metadata().SetBackfillCheckpoint(
