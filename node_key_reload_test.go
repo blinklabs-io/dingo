@@ -516,3 +516,29 @@ func TestKeyWatchSeesAChangeRightAfterTheLoopsStart(t *testing.T) {
 		"a change made right after the loops start must reload")
 	s.requireLiveCounter(t, 2)
 }
+
+func TestCredentialFileWatchSeesAChangeMadeBeforeItsFirstPoll(t *testing.T) {
+	t.Parallel()
+	n := newTestNodeForBP(t, false, "", "", "", nil)
+	file := filepath.Join(t.TempDir(), "opcert.cert")
+	require.NoError(t, os.WriteFile(file, []byte("counter 1"), 0o600))
+	loaded := credentialFilesDigest([]string{file})
+	// Replaced after the credentials were loaded and before the loop starts.
+	require.NoError(t, os.WriteFile(file, []byte("counter 2"), 0o600))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	reloads := make(chan struct{}, 4)
+	go n.credentialFileWatchLoop(
+		ctx,
+		5*time.Millisecond,
+		[]string{file},
+		loaded,
+		func() error {
+			reloads <- struct{}{}
+			return nil
+		},
+	)
+	testutil.RequireReceive(t, reloads, 2*time.Second,
+		"reload of a file changed before the first poll")
+}

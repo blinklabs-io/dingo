@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -2108,6 +2109,147 @@ func smallEpochGenesisCfgForLifecycleTest(
 	return cfg
 }
 
+// Under heavy CPU contention one epoch-boundary commit was measured at over
+// ten seconds, so the window must cover a rollover with no tip movement.
+const (
+	epochTransitionStallWindow = 2 * time.Minute
+	epochTransitionPollPeriod  = 150 * time.Millisecond
+)
+
+// waitForEpochTransition waits for the transition event into targetEpoch.
+// The window bounds time without progress rather than total time: it restarts
+// whenever tipSlot reports a new value, so a slow but advancing pipeline never
+// fails and a stalled one fails after one window.
+func waitForEpochTransition(
+	events <-chan event.Event,
+	targetEpoch uint64,
+	tipSlot func() uint64,
+	window time.Duration,
+	pollPeriod time.Duration,
+) error {
+	ticker := time.NewTicker(pollPeriod)
+	defer ticker.Stop()
+	stallPolls := int((window + pollPeriod - 1) / pollPeriod)
+	return waitForEpochTransitionPolls(
+		events, targetEpoch, tipSlot, ticker.C, stallPolls,
+	)
+}
+
+// waitForEpochTransitionPolls counts the window in polls rather than reading a
+// timer, so a test can drive it with a prefilled channel and never depends on
+// scheduling. A real ticker drops ticks for a starved receiver, which only
+// lengthens the wall-clock window and cannot fail a progressing wait.
+func waitForEpochTransitionPolls(
+	events <-chan event.Event,
+	targetEpoch uint64,
+	tipSlot func() uint64,
+	polls <-chan time.Time,
+	stallPolls int,
+) error {
+	lastSlot := tipSlot()
+	lastMoved := time.Now()
+	idlePolls := 0
+	for {
+		select {
+		case evt, ok := <-events:
+			if !ok {
+				return errors.New("epoch transition subscription closed")
+			}
+			epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
+			if ok && epochEvent.NewEpoch == targetEpoch &&
+				len(epochEvent.EpochNonce) > 0 {
+				return nil
+			}
+		case <-polls:
+			if slot := tipSlot(); slot != lastSlot {
+				lastSlot = slot
+				lastMoved = time.Now()
+				idlePolls = 0
+				continue
+			}
+			idlePolls++
+			if idlePolls >= stallPolls {
+				return fmt.Errorf(
+					"no progress waiting for epoch transition %d: tip slot %d "+
+						"unchanged for %s",
+					targetEpoch,
+					lastSlot,
+					time.Since(lastMoved).Round(time.Millisecond),
+				)
+			}
+		}
+	}
+}
+
+// prefilledPolls returns a channel holding n poll ticks, so a wait driven by
+// it makes exactly the polls the test intends with no real time involved.
+func prefilledPolls(n int) <-chan time.Time {
+	polls := make(chan time.Time, n)
+	for range n {
+		polls <- time.Time{}
+	}
+	return polls
+}
+
+func TestWaitForEpochTransitionWindowResetsOnProgress(t *testing.T) {
+	t.Parallel()
+
+	const target = 3
+	newEvent := func() event.Event {
+		return event.NewEvent(
+			event.EpochTransitionEventType,
+			event.EpochTransitionEvent{NewEpoch: target, EpochNonce: []byte{1}},
+		)
+	}
+
+	t.Run("advancing tip outlives the window", func(t *testing.T) {
+		t.Parallel()
+		events := make(chan event.Event, 1)
+		var polls uint64
+		// The slot moves on every fifth poll, so each gap is four idle polls,
+		// under the 10-poll window, while the 120 idle polls before the event
+		// on the 150th poll far exceed it.
+		tipSlot := func() uint64 {
+			polls++
+			if polls == 150 {
+				events <- newEvent()
+			}
+			return polls / 5
+		}
+		const window = 10
+		require.NoError(t, waitForEpochTransitionPolls(
+			events, target, tipSlot, prefilledPolls(200), window,
+		))
+		require.GreaterOrEqual(t, polls, uint64(150))
+	})
+
+	t.Run("stalled tip fails with last slot", func(t *testing.T) {
+		t.Parallel()
+		events := make(chan event.Event, 1)
+		err := waitForEpochTransitionPolls(
+			events, target, func() uint64 { return 42 },
+			prefilledPolls(100), 10,
+		)
+		require.ErrorContains(t, err, "tip slot 42 unchanged")
+	})
+
+	t.Run("tip that stops moving fails", func(t *testing.T) {
+		t.Parallel()
+		events := make(chan event.Event, 1)
+		var polls uint64
+		tipSlot := func() uint64 {
+			if polls < 20 {
+				polls++
+			}
+			return polls
+		}
+		err := waitForEpochTransitionPolls(
+			events, target, tipSlot, prefilledPolls(100), 10,
+		)
+		require.ErrorContains(t, err, "tip slot 20 unchanged")
+	})
+}
+
 // addBlocksSerially waits for each block-based epoch transition to commit
 // before entering the next epoch. This orders ledger commits only; snapshot
 // events run in their own serial loop and reward precomputation coalesces
@@ -2120,9 +2262,9 @@ func addBlocksSerially(
 ) {
 	t.Helper()
 	// With no upstream connection and reachedTip unlatched, the ledger loop
-	// holds each lone new block for about two seconds waiting for more, out
-	// of the five second wait below. A live truncate or restore builds a new
-	// ledger with the flag clear, so latch the current one.
+	// holds each lone new block for about two seconds waiting for more. A
+	// live truncate or restore builds a new ledger with the flag clear, so
+	// latch the current one.
 	n.ledgerState.MarkReachedTipForTesting()
 	subID, epochEvents := n.eventBus.SubscribeWithBuffer(
 		event.EpochTransitionEventType,
@@ -2135,24 +2277,13 @@ func addBlocksSerially(
 	}()
 	waitForEpoch := func(targetEpoch uint64) {
 		t.Helper()
-		timer := time.NewTimer(5 * time.Second)
-		defer timer.Stop()
-		for {
-			select {
-			case evt, ok := <-epochEvents:
-				require.True(t, ok, "epoch transition subscription closed")
-				epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
-				if ok && epochEvent.NewEpoch == targetEpoch &&
-					len(epochEvent.EpochNonce) > 0 {
-					return
-				}
-			case <-timer.C:
-				t.Fatalf(
-					"timeout waiting for block-based epoch transition %d",
-					targetEpoch,
-				)
-			}
-		}
+		require.NoError(t, waitForEpochTransition(
+			epochEvents,
+			targetEpoch,
+			func() uint64 { return n.ledgerState.Tip().Point.Slot },
+			epochTransitionStallWindow,
+			epochTransitionPollPeriod,
+		))
 	}
 	currentEpoch := n.ledgerState.Tip().Point.Slot / epochLength
 	for _, b := range blocks {

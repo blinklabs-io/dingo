@@ -1,4 +1,6 @@
--- Find the pools whose retirement targets an epoch from the epoch index. The
--- retiring and retired pool lists rank certificates only for those pools, so
--- a page no longer reads every retirement certificate ever recorded.
-CREATE INDEX IF NOT EXISTS `idx_pool_retirement_epoch` ON `pool_retirement`(`epoch`);
+-- Serve the epoch-wide epoch stakes count and page. `registered` was not in
+-- any index, so the count read every stake row of the epoch. With the primary
+-- key last, the count reads only matching entries and the page, which orders
+-- by the primary key, needs no sort. The key holds no blob column: MySQL keys
+-- those by prefix, which cannot serve an ORDER BY.
+CREATE INDEX IF NOT EXISTS `idx_reward_stake_input_epoch_registered_id` ON `reward_stake_input`(`epoch`,`registered`,`id`);

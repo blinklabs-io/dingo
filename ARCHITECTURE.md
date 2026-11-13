@@ -12845,10 +12845,12 @@ files and reload once a changed content has held for two polls. Polling
 content rather than file events sees the atomic `..data` symlink swap
 Kubernetes uses for a mounted Secret and needs no notification support. The
 two-poll wait reduces reloads during short writes; credential validation still
-rejects an incomplete credential set. In serve-key mode, where a reload is
-always refused, the watch is not started and a warning says so. With several
-pools the watch is skipped only when every pool is serve-key; otherwise it
-runs for the pools that can reload and leaves the serve-key pools out.
+rejects an incomplete credential set. The watch baseline is taken before the
+credentials are loaded, so a file replaced after the load is a change. In
+serve-key mode, where a reload is always refused, the watch is not started
+and a warning says so. With several pools the watch is skipped only when every
+pool is serve-key; otherwise it runs for the pools that can reload and leaves
+the serve-key pools out.
 `dingo_forge_credential_reloads_total{trigger,result}` counts reloads by
 trigger (`signal`, `file`, `agent`) and result (`success`, `unchanged`,
 `failure`), and `dingo_forge_opcert_counter_loaded` reports the counter the
@@ -13644,6 +13646,18 @@ is a metadata writer even though its bulk payload belongs to the blob store.
 Ordering the two resumable phases keeps their SQLite write transactions from
 contending during bootstrap. A later import failure resumes against the already
 copied immutable data.
+
+When `cleanupAfterLoad` is on, both the post-download copy and the pipelined
+copy that runs during the download delete each extracted chunk's
+`.chunk`, `.primary` and `.secondary` files once the batch holding a later
+block has committed, so the extracted tree and the blob store do not both hold
+the chain. The chunk holding the newest committed block is kept because a
+resumed copy restarts from the chain tip there. Before deleting, the copy
+records that chunk number in the ephemeral `mithril_immutable_retired_below`
+sync-state key; a resumed sync starts its download at that chunk instead of
+fetching the deleted ones, and completion clears the key with the rest of
+sync_state. Everything that reads the extracted tree (certified tip, catch-up
+ancestry check) runs before the copy starts; nothing reads it afterwards.
 
 The Core-mode copy omits produced-UTxO offset references, which are used by
 API-mode UTxO resolution. It does not mark the immutable offset range complete;
@@ -16090,7 +16104,7 @@ context. The page reads the label's rows through the
 rather than the number of transactions with the label. `GET /pools/{pool_id}/blocks`, `GET /epochs/{number}/blocks` and
 `GET /epochs/{number}/blocks/{pool_id}` count and page the `block_nonce` rows in
 a slot range through the `(slot, hash)` index under the request context; an
-offset past the total skips the page query. The latest block routes resolve the ledger tip's block; a rollback deletes blocks before the ledger publishes the lower tip, so a tip block that is not stored is retried against a reread tip and, if it never resolves, answers 503 with `Retry-After`. Pool and account list routes reject
+offset past the total skips the page query. The latest block routes resolve the ledger tip's block; a rollback deletes blocks before the ledger publishes the lower tip, so a tip block that is not stored is retried against a reread tip and, if it never resolves, answers 503 with `Retry-After`. `GET /epochs/{number}/stakes` and `GET /epochs/{number}/stakes/{pool_id}` count and page the rows through the `(epoch, registered, id)` index, so the epoch-wide list returns in the order the snapshot was stored and needs no sort on any database, and skip the page query when the offset is at or past the count; a single pool's list keeps the credential order. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,
