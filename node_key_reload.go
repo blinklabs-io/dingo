@@ -756,11 +756,19 @@ func (n *Node) agentOpCertOffers() chan []byte {
 	return n.keyReload.agentOffers.channel()
 }
 
+// credentialWatchBaseline digests the watched credential files. Startup takes
+// it before it reads the credentials, so a rotation landing between that read
+// and the watch loop's start differs from the baseline and is reloaded.
+func (n *Node) credentialWatchBaseline() [sha256.Size]byte {
+	return credentialFilesDigest(n.watchedCredentialFiles())
+}
+
 // startKeyReloadLoops starts the background reload triggers for the running
 // block producer: each pool's agent newer-certificate offers, and the credential
-// file watch when shelleyKeyWatchInterval is set. A second call replaces the
-// loops of the first, so a live-lifecycle rebuild does not run two.
-func (n *Node) startKeyReloadLoops() {
+// file watch when shelleyKeyWatchInterval is set, compared against baseline. A
+// second call replaces the loops of the first, so a live-lifecycle rebuild does
+// not run two.
+func (n *Node) startKeyReloadLoops(baseline [sha256.Size]byte) {
 	ctx, cancel := context.WithCancel(n.blockProducerContext())
 	n.keyReload.mu.Lock()
 	if n.keyReload.loopsCancel != nil {
@@ -796,14 +804,11 @@ func (n *Node) startKeyReloadLoops() {
 			)
 			return
 		}
-		// The baseline is read here, before the goroutine starts, so a
-		// change landing before it first runs is seen as a change.
-		files := n.watchedCredentialFiles()
 		go n.credentialFileWatchLoop(
 			ctx,
 			interval,
-			files,
-			credentialFilesDigest(files),
+			n.watchedCredentialFiles(),
+			baseline,
 			func() error {
 				return n.reloadCredentials(reloadTriggerFile, nil)
 			},

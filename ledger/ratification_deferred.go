@@ -248,6 +248,19 @@ func (ls *LedgerState) writeRatificationDecision(
 	txn *database.Txn,
 	job *ratificationJob,
 ) error {
+	return ls.writeRatificationDecisionWithOptions(ctx, txn, job, false)
+}
+
+// writeRatificationDecisionWithOptions is writeRatificationDecision.
+// validationOnly leaves the staged reward stake inputs alone: the boundary
+// capture they came from is shared with the real boundary, which a
+// validation tick's transaction never commits.
+func (ls *LedgerState) writeRatificationDecisionWithOptions(
+	ctx context.Context,
+	txn *database.Txn,
+	job *ratificationJob,
+	validationOnly bool,
+) error {
 	rec, err := loadPendingRatification(ls.db, txn)
 	if err != nil {
 		return err
@@ -261,10 +274,13 @@ func (ls *LedgerState) writeRatificationDecision(
 				"write mark snapshot for epoch %d: %w", rec.Epoch, err,
 			)
 		}
-		if err := ls.takeDeferredRewardStakeInputs(ctx, txn); err != nil {
-			return fmt.Errorf(
-				"stage reward stake inputs for epoch %d: %w", rec.Epoch, err,
-			)
+		if !validationOnly {
+			if err := ls.takeDeferredRewardStakeInputs(ctx, txn); err != nil {
+				return fmt.Errorf(
+					"stage reward stake inputs for epoch %d: %w",
+					rec.Epoch, err,
+				)
+			}
 		}
 	}
 	if job.plan != nil {
@@ -281,11 +297,16 @@ func (ls *LedgerState) writeRatificationDecision(
 	return nil
 }
 
-// consumePendingRatification writes the previous boundary's RATIFY decision
+// consumePendingRatificationWithOptions writes the previous boundary's RATIFY decision
 // in this boundary's transaction if the background job has not, waiting for
 // the job to decide. It runs before anything else at the boundary, so ENACT
 // and DROP read the same marks the boundary before would have written.
-func (ls *LedgerState) consumePendingRatification(ctx context.Context, txn *database.Txn) error {
+// validationOnly is passed to writeRatificationDecisionWithOptions.
+func (ls *LedgerState) consumePendingRatificationWithOptions(
+	ctx context.Context,
+	txn *database.Txn,
+	validationOnly bool,
+) error {
 	rec, err := loadPendingRatification(ls.db, txn)
 	if err != nil || rec == nil {
 		return err
@@ -310,7 +331,7 @@ func (ls *LedgerState) consumePendingRatification(ctx context.Context, txn *data
 			"ratification for epoch %d failed: %w", rec.Epoch, job.err,
 		)
 	}
-	return ls.writeRatificationDecision(ctx, txn, job)
+	return ls.writeRatificationDecisionWithOptions(ctx, txn, job, validationOnly)
 }
 
 func (ls *LedgerState) closeCh() <-chan struct{} {

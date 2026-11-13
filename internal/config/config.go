@@ -1843,6 +1843,10 @@ func cloneConfig(cfg *Config) *Config {
 		cfg.BarkLifecycleOperatorCertificateFingerprints...,
 	)
 	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
+	clone.BlockProducerPools = append(
+		[]BlockProducerPool(nil),
+		cfg.BlockProducerPools...,
+	)
 	clone.TracingAlwaysSamplePools = append(
 		[]string(nil),
 		cfg.TracingAlwaysSamplePools...,

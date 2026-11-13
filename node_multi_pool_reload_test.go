@@ -109,7 +109,7 @@ func (n *twoPoolSignNode) startLoops(t *testing.T) {
 		t,
 		&start,
 	).ledgerState
-	n.first.startKeyReloadLoops()
+	n.first.startKeyReloadLoops(n.first.credentialWatchBaseline())
 	t.Cleanup(n.first.stopKeyReloadLoops)
 }
 
@@ -168,6 +168,54 @@ func TestAgentOpCertOfferReloadsOnlyItsOwnPool(t *testing.T) {
 		require.Same(t, n.second.initial, n.pp.kesAgentClient)
 		require.NotSame(t, n.first.initial, n.first.kesAgentClient)
 	})
+}
+
+func TestRestartedReloadLoopsServeRebuiltPools(t *testing.T) {
+	t.Parallel()
+	n := newTwoPoolSignNode(t)
+	n.startLoops(t)
+
+	// A live rebuild replaces every pool producer, and their offer channels
+	// with them.
+	rebuilt := &poolProducer{
+		index:          n.pp.index,
+		keys:           n.pp.keys,
+		poolID:         n.pp.poolID,
+		creds:          n.pp.creds,
+		kesAgentClient: n.pp.kesAgentClient,
+	}
+	n.first.multiPool.mu.Lock()
+	n.first.multiPool.producers = []*poolProducer{rebuilt}
+	n.first.multiPool.mu.Unlock()
+	n.first.startKeyReloadLoops(n.first.credentialWatchBaseline())
+
+	offer := rebuilt.keySource(n.first.Node).onNewerOpCert
+	require.NotNil(t, offer, "the rebuilt pool has no newer opcert hook")
+	offer(n.second.opCertCBOR(t, 2))
+
+	n.waitReloaded(t, rebuilt.poolID)
+	n.second.requireLiveCounter(t, 2)
+}
+
+func TestKeyWatchReloadsARotationBeforeTheLoopsStart(t *testing.T) {
+	t.Parallel()
+	n := newTwoPoolSignNode(t)
+	n.first.config.shelleyKeyWatchInterval = time.Millisecond
+	start := time.Now().Add(-time.Minute)
+	n.first.ledgerState = newStartupCleanupProducerNodeWithGenesisStart(
+		t,
+		&start,
+	).ledgerState
+
+	// Startup takes the baseline before it reads the credentials; a
+	// rotation between that read and the loops' start is still a change.
+	baseline := n.first.credentialWatchBaseline()
+	n.second.rotateTo(t, 2, nil)
+	n.first.startKeyReloadLoops(baseline)
+	t.Cleanup(n.first.stopKeyReloadLoops)
+
+	n.waitReloaded(t, n.pp.poolID)
+	n.second.requireLiveCounter(t, 2)
 }
 
 func TestKeyWatchCoversEveryPool(t *testing.T) {

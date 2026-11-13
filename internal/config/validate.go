@@ -75,10 +75,11 @@ func validateHostPort(addr string) error {
 }
 
 // kesAgentAddressKey returns the listener a remote KES agent address names,
-// for spotting two pools that share one: the host lower-cased and the port as
-// a number, so a zero-padded port that validateHostPort accepts, a host typed
-// in another case and the bracketed IPv6 form all compare equal. An address
-// that does not parse returns "", since validateHostPort reports it already.
+// for spotting two pools that share one: an IP literal in its canonical form,
+// any other host lower-cased, and the port as a number, so a zero-padded port
+// that validateHostPort accepts, a host typed in another case and the
+// different spellings of one IPv6 address all compare equal. An address that
+// does not parse returns "", since validateHostPort reports it already.
 func kesAgentAddressKey(addr string) string {
 	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
 	if err != nil || host == "" {
@@ -88,10 +89,11 @@ func kesAgentAddressKey(addr string) string {
 	if err != nil || p == 0 {
 		return ""
 	}
-	return net.JoinHostPort(
-		strings.ToLower(host),
-		strconv.FormatUint(p, 10),
-	)
+	host = strings.ToLower(host)
+	if ip, err := netip.ParseAddr(host); err == nil {
+		host = ip.Unmap().String()
+	}
+	return net.JoinHostPort(host, strconv.FormatUint(p, 10))
 }
 
 // validateRemoteKESAgent checks a pool's remote KES agent configuration: one
@@ -275,9 +277,9 @@ func (c *Config) validateBlockProducerPools() []error {
 	for i, p := range c.BlockProducerPools {
 		prefix := fmt.Sprintf("blockProducerPools[%d].", i)
 		errs = append(errs, validateBlockProducerPool(p, prefix)...)
-		// A remote KES agent session cannot name a profile yet, and bursa
-		// refuses more than one profile per attested listener, so a remote
-		// agent address can serve one pool only. A local socket is not
+		// An attested KES agent session cannot name a profile, so Bursa
+		// allows one profile per attested listener and a remote agent
+		// address can serve one pool only. A local socket is not
 		// limited: it serves several pools through its profiles.
 		for _, address := range p.RemoteAgentAddresses() {
 			addr := kesAgentAddressKey(address)
@@ -287,8 +289,8 @@ func (c *Config) validateBlockProducerPools() []error {
 			if j, dup := agentAddresses[addr]; dup && j != i {
 				errs = append(errs, fmt.Errorf(
 					"blockProducerPools[%d] and blockProducerPools[%d] use the same shelleyKesAgentAddress %q: "+
-						"a remote KES agent session cannot name a profile yet and bursa refuses more than one "+
-						"profile per attested listener (blinklabs-io/bursa#1276), so each pool needs its own agent address",
+						"an attested KES agent session cannot name a profile, so Bursa allows one profile "+
+						"per attested listener and each pool needs its own agent address",
 					j,
 					i,
 					address,

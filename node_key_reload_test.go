@@ -327,7 +327,7 @@ func TestKeyWatchIsSkippedInServeKeyMode(t *testing.T) {
 	s := newSignModeReloadNode(t, 1)
 	s.config.shelleyKESAgentMode = kesagent.ModeServeKey
 	s.config.shelleyKeyWatchInterval = time.Millisecond
-	s.startKeyReloadLoops()
+	s.startKeyReloadLoops(s.credentialWatchBaseline())
 	t.Cleanup(s.stopKeyReloadLoops)
 	require.Contains(t, s.logs.String(), "ignored in KES agent serve-key mode")
 }
@@ -502,7 +502,7 @@ func TestKeyWatchSeesAChangeRightAfterTheLoopsStart(t *testing.T) {
 		&start,
 	).ledgerState
 	s.config.shelleyKeyWatchInterval = time.Millisecond
-	s.startKeyReloadLoops()
+	s.startKeyReloadLoops(s.credentialWatchBaseline())
 	t.Cleanup(s.stopKeyReloadLoops)
 
 	s.rotateTo(t, 2, nil)

@@ -205,7 +205,7 @@ func TestTxValidationSessionAppliesDijkstraBatchLevels(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	err := ls.withTxValidationSession(context.Background(), nil, nil, true, false, func(
+	err := ls.withTxValidationSession(context.Background(), nil, nil, true, false, nil, func(
 		_ func(common.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]common.Utxo, *utxoref.StateOverlay) error,
 		_ func() bool,
 		_ func(func() error) (bool, error),

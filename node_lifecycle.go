@@ -1012,7 +1012,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// disabled. This matches Run's own long-lived subscription.
 	n.ouroboros().SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
 
-	genesisSelectionMode := n.config.genesisSelectionMode()
+	genesisSelectionMode := n.config.genesisSelectionEligible()
 	if n.config.topologyConfig != nil {
 		topologyConfig := n.config.topologyConfig
 		usePeerSnapshot := genesisSelectionMode &&
@@ -1264,6 +1264,7 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	if err := n.prepareMultiPool(); err != nil {
 		return fmt.Errorf("block producer pools: %w", err)
 	}
+	watchBaseline := n.credentialWatchBaseline()
 	creds, err := n.validateBlockProducerStartup()
 	if err != nil {
 		return fmt.Errorf("block producer startup validation failed: %w", err)
@@ -1301,6 +1302,10 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 		return fmt.Errorf("failed to restart block producer pools: %w", err)
 	}
 	n.wireForgedBlockTracking()
+	// The rebuild replaced every pool producer, so the reload loops started
+	// at Run still hold the old ones and their offer channels. Restarting
+	// them replaces those loops; it runs after the last step that can fail.
+	n.startKeyReloadLoops(watchBaseline)
 	return nil
 }
 
@@ -1346,6 +1351,11 @@ func (n *Node) storageDependencies(
 // from — so it brings the whole node down (n.cancel()) for a supervised
 // restart, the same way LedgerStateConfig.FatalErrorFunc does elsewhere.
 func (n *Node) reinitializeAndResume(ctx context.Context) error {
+	// Restore and Truncate removed the marker when they began, but the
+	// selector keeps running, and a Genesis exit taken on the old chain can
+	// have written it again. It goes before any fallible rebuild step, so a
+	// rebuild that fails cannot leave it behind for the next start.
+	n.removeCaughtUpMarker()
 	steps := []struct {
 		name string
 		fn   func() error
@@ -1520,6 +1530,10 @@ func (n *Node) Restore(
 		)
 	}
 	defer restoreHost.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
+
+	// The operation is about to change the chain the caught-up marker vouched
+	// for, and some of its failure paths stop the node without a rebuild.
+	n.removeCaughtUpMarker()
 
 	// Quiesce and close this node's own storage BEFORE any restore work
 	// touches either the staging directory or (for a client/server
@@ -2146,6 +2160,10 @@ func (n *Node) Truncate(
 	// liveLifecycleMu.
 	n.snapshotMu.Lock()
 	defer n.snapshotMu.Unlock()
+
+	// The operation is about to change the chain the caught-up marker vouched
+	// for, and some of its failure paths stop the node without a rebuild.
+	n.removeCaughtUpMarker()
 
 	// See Restore's identical handling for why a quiesce/close-storage
 	// failure must still attempt reinitializeAndResume rather than just

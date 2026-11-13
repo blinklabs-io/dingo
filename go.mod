@@ -1,6 +1,6 @@
 module github.com/blinklabs-io/dingo
 
-go 1.26.10
+go 1.26.11
 
 require (
 	cloud.google.com/go/storage v1.68.0
@@ -9,6 +9,7 @@ require (
 	connectrpc.com/grpcreflect v1.3.1
 	github.com/Microsoft/go-winio v0.6.4
 	github.com/XSAM/otelsql v0.44.0
+	github.com/antithesishq/antithesis-sdk-go v0.8.0
 	github.com/aws/aws-sdk-go-v2 v1.47.8
 	github.com/aws/aws-sdk-go-v2/config v1.33.15
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.16

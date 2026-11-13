@@ -3451,7 +3451,14 @@ func newFakeEraLedgerState(
 			EvaluateTxFunc: evaluateTxFunc,
 		},
 		currentPParams: &conway.ConwayProtocolParameters{},
+		currentEpoch: models.Epoch{
+			StartSlot:     0,
+			LengthInSlots: 100_000,
+			SlotLength:    1_000,
+			EraId:         conway.EraIdConway,
+		},
 	}
+	ls.epochCache = []models.Epoch{ls.currentEpoch}
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 	return ls

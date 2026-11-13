@@ -246,7 +246,12 @@ func TestValidateBlockProducerPoolsRefusesASharedKESAgentAddress(t *testing.T) {
 		err,
 		"blockProducerPools[0] and blockProducerPools[1] use the same shelleyKesAgentAddress",
 	)
-	require.ErrorContains(t, err, "bursa#1276")
+	require.ErrorContains(
+		t,
+		err,
+		"an attested KES agent session cannot name a profile, so Bursa allows one profile per attested listener",
+	)
+	require.NotContains(t, err.Error(), "bursa#")
 
 	// The port is compared as a number: validateHostPort accepts a
 	// zero-padded port, which names the same listener.
@@ -260,6 +265,23 @@ func TestValidateBlockProducerPoolsRefusesASharedKESAgentAddress(t *testing.T) {
 	// An IPv6 literal is compared case-insensitively, its port as a number.
 	a.ShelleyKESAgentAddress = "[2001:DB8::1]:3443"
 	b.ShelleyKESAgentAddress = "[2001:db8::1]:003443"
+	require.ErrorContains(
+		t,
+		validate(a, b),
+		"blockProducerPools[0] and blockProducerPools[1] use the same shelleyKesAgentAddress",
+	)
+
+	// Two spellings of one IPv6 address name the same listener, as does an
+	// IPv4-mapped IPv6 address and its IPv4 form.
+	a.ShelleyKESAgentAddress = "[2001:db8::1]:3443"
+	b.ShelleyKESAgentAddress = "[2001:0db8:0:0:0:0:0:1]:3443"
+	require.ErrorContains(
+		t,
+		validate(a, b),
+		"blockProducerPools[0] and blockProducerPools[1] use the same shelleyKesAgentAddress",
+	)
+	a.ShelleyKESAgentAddress = "192.0.2.1:3443"
+	b.ShelleyKESAgentAddress = "[::ffff:192.0.2.1]:3443"
 	require.ErrorContains(
 		t,
 		validate(a, b),

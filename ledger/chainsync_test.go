@@ -5907,6 +5907,45 @@ func insertTestDijkstraBlock(
 	}, nil))
 }
 
+func TestLocalTipPraosView(t *testing.T) {
+	t.Parallel()
+
+	var nilLedger *LedgerState
+	_, ok := nilLedger.LocalTipPraosView(ochainsync.Tip{
+		Point: ocommon.Point{Slot: 1, Hash: []byte("h")},
+	})
+	assert.False(t, ok, "a nil ledger has no view")
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	hash := []byte("local-tip-praos-view-hash-32byte")[:32]
+	insertTestDijkstraBlock(
+		t, db, 300, 60, hash, 0x07, 3, make64ByteVRFFirstByteLedger(0x10),
+	)
+
+	view, ok := ls.LocalTipPraosView(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 300, Hash: hash},
+		BlockNumber: 60,
+	})
+	require.True(t, ok, "a stored block yields its header view")
+	assert.Equal(t, uint64(300), view.Slot)
+	assert.Equal(t, uint64(3), view.IssueNo)
+	assert.NotEmpty(t, view.Issuer)
+
+	_, ok = ls.LocalTipPraosView(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 300, Hash: []byte("missing-hash")},
+		BlockNumber: 60,
+	})
+	assert.False(t, ok, "a missing block has no view")
+}
+
 // TestCompareIncomingHeaderToLocalTip_Dijkstra exercises the actual
 // chain-selection caller (ledger/chainsync.go's compareIncomingHeaderToLocalTip,
 // the mechanism identified as reachable from
@@ -16830,7 +16869,10 @@ func TestCheckComparedTipSlotBattleRestrictedWindow(t *testing.T) {
 		comparison   praos.ChainComparisonResult
 		incomingView praos.PraosTiebreakerView
 		trackedHash  []byte
-		wantBattles  int64
+		// remoteOurs marks the incoming tip as forged by another of this
+		// node's pools.
+		remoteOurs  bool
+		wantBattles int64
 	}{
 		{
 			name:         "remote wins below boundary",
@@ -16883,6 +16925,15 @@ func TestCheckComparedTipSlotBattleRestrictedWindow(t *testing.T) {
 			trackedHash:  bytes.Repeat([]byte{0x33}, 32),
 		},
 		{
+			name:         "incoming tip forged by another own pool",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainABetter,
+			incomingView: restricted,
+			trackedHash:  localHash,
+			remoteOurs:   true,
+		},
+		{
 			name:         "unrestricted era stays on body detection",
 			remoteSlot:   localSlot + 4,
 			remoteBlock:  localBlockNumber,
@@ -16897,8 +16948,12 @@ func TestCheckComparedTipSlotBattleRestrictedWindow(t *testing.T) {
 			f := newSiblingFixture(t)
 			recorder := &countingSlotBattleRecorder{}
 			f.ls.SetSlotBattleRecorder(recorder)
+			forged := map[uint64][]byte{localSlot: tc.trackedHash}
+			if tc.remoteOurs {
+				forged[tc.remoteSlot] = remoteHash
+			}
 			f.ls.SetForgedBlockChecker(&mockForgedBlockChecker{
-				forgedSlots: map[uint64][]byte{localSlot: tc.trackedHash},
+				forgedSlots: forged,
 			})
 			f.ls.checkComparedTipSlotBattle(
 				ochainsync.Tip{
