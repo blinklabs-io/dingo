@@ -3554,6 +3554,9 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 	return epochForSlotInCache(snapshot.epochCache, slot)
 }
 
+// errEpochCacheEmpty reports a lookup against a cache holding no epochs.
+var errEpochCacheEmpty = errors.New("epoch cache is empty")
+
 // epochForSlotInCache resolves a slot to its epoch against a caller-supplied
 // epoch-cache snapshot. Callers that resolve several slots and must see one
 // coherent view (e.g. computing a single retention floor) capture the cache
@@ -3564,7 +3567,7 @@ func epochForSlotInCache(
 	slot uint64,
 ) (models.Epoch, error) {
 	if len(cache) == 0 {
-		return models.Epoch{}, errors.New("epoch cache is empty")
+		return models.Epoch{}, errEpochCacheEmpty
 	}
 
 	// Search newest-to-oldest so that if cache entries overlap
