@@ -165,6 +165,43 @@ func (e BlockNumberNotContiguousError) Error() string {
 	)
 }
 
+// SlotNotAfterParentError is returned when a header or block that extends its
+// parent does not sit at a later slot. One leader slot otherwise yields a chain
+// of any length, every header passing VRF, KES and opcert checks for the same
+// slot, so a candidate built that way would win the length comparison.
+type SlotNotAfterParentError struct {
+	blockHash  string
+	slot       uint64
+	parentSlot uint64
+}
+
+func NewSlotNotAfterParentError(
+	blockHash string,
+	slot uint64,
+	parentSlot uint64,
+) SlotNotAfterParentError {
+	return SlotNotAfterParentError{
+		blockHash:  blockHash,
+		slot:       slot,
+		parentSlot: parentSlot,
+	}
+}
+
+func (e SlotNotAfterParentError) BlockHash() string { return e.blockHash }
+
+func (e SlotNotAfterParentError) Slot() uint64 { return e.slot }
+
+func (e SlotNotAfterParentError) ParentSlot() uint64 { return e.parentSlot }
+
+func (e SlotNotAfterParentError) Error() string {
+	return fmt.Sprintf(
+		"block %s at slot %d does not follow parent slot %d",
+		e.blockHash,
+		e.slot,
+		e.parentSlot,
+	)
+}
+
 type BlockNotMatchHeaderError struct {
 	blockHash  string
 	headerHash string

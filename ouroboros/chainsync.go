@@ -2204,6 +2204,75 @@ func (o *Ouroboros) releasePromotedAheadRecycle(now time.Time) {
 	}
 }
 
+// chainsyncHeaderSlotOrderError returns a chain.SlotNotAfterParentError when
+// header names the point session stands at, its previous roll-forward header
+// or the point it rolled back to, as its parent without following it in slot
+// order. Checking after a rollback as well matters: a peer may roll back to
+// the point it already stands at before every header.
+func (o *Ouroboros) chainsyncHeaderSlotOrderError(
+	connId ouroboros.ConnectionId,
+	session chainsync.ClientSessionToken,
+	header gledger.BlockHeader,
+) error {
+	parentHash, parent, ok := o.chainsyncState.ClientRollForwardParent(
+		connId,
+		session,
+	)
+	if !ok {
+		return nil
+	}
+	prevHash := header.PrevHash()
+	if !bytes.Equal(prevHash.Bytes(), parentHash) {
+		return nil
+	}
+	slot := header.SlotNumber()
+	if chain.SlotFollowsParent(
+		header.Era().Id,
+		chain.IsByronBoundaryHeader(header),
+		slot,
+		parent,
+	) {
+		return nil
+	}
+	return chain.NewSlotNotAfterParentError(
+		header.Hash().String(),
+		slot,
+		parent.Slot,
+	)
+}
+
+// rejectChainsyncHeader recycles the connection that delivered an invalid
+// header and fails its chainsync client.
+func (o *Ouroboros) rejectChainsyncHeader(
+	connId ouroboros.ConnectionId,
+	slot uint64,
+	msg string,
+	err error,
+) {
+	o.config.Logger.Warn(
+		msg,
+		"component", "ouroboros",
+		"slot", slot,
+		"connection_id", connId.String(),
+		"error", err,
+	)
+	if o.eventBus != nil {
+		o.eventBus.Publish(
+			ledger.ConnectionRecycleRequestedEventType,
+			event.NewEvent(
+				ledger.ConnectionRecycleRequestedEventType,
+				ledger.ConnectionRecycleRequestedEvent{
+					ConnectionId: connId,
+					Reason:       "header_verification_failure",
+				},
+			),
+		)
+	}
+	if o.chainsyncState != nil {
+		o.chainsyncState.MarkClientFailed(connId)
+	}
+}
+
 func (o *Ouroboros) chainsyncClientRollForwardAt(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
@@ -2244,10 +2313,31 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
 		if o.chainsyncState != nil {
-			o.chainsyncState.RecordClientProtocolPoint(
+			// Chain selection compares candidates by the block numbers their
+			// delivered headers claim, so a header continuing the session
+			// must also follow its parent's slot: otherwise one leader slot
+			// signs a candidate of any length. Refused before any per-session
+			// state records it.
+			if slotErr := o.chainsyncHeaderSlotOrderError(
+				ctx.ConnectionId,
+				clientSession,
+				v,
+			); slotErr != nil {
+				o.rejectChainsyncHeader(
+					ctx.ConnectionId,
+					blockSlot,
+					"chainsync: recycling connection after header did not follow its parent's slot",
+					slotErr,
+				)
+				return fmt.Errorf("chainsync: %w", slotErr)
+			}
+			o.chainsyncState.RecordClientRollForward(
 				ctx.ConnectionId,
 				clientSession,
 				ocommon.NewPoint(blockSlot, blockHash),
+				v.Era().Id,
+				chain.IsByronBoundaryHeader(v),
+				o.chainsyncHeaderHistoryLimit,
 			)
 		}
 		if o.config.ChainsyncObserveRollForward != nil {
@@ -2283,26 +2373,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// Mithril coverage.
 		if o.chainsyncHeaderCheckpoint != nil {
 			if cpErr := o.chainsyncHeaderCheckpoint(v); cpErr != nil {
-				o.config.Logger.Warn(
+				o.rejectChainsyncHeader(
+					ctx.ConnectionId,
+					blockSlot,
 					"chainsync: recycling connection after header failed checkpoint",
-					"component", "ouroboros",
-					"slot", blockSlot,
-					"connection_id", ctx.ConnectionId.String(),
-					"error", cpErr,
+					cpErr,
 				)
-				o.eventBus.Publish(
-					ledger.ConnectionRecycleRequestedEventType,
-					event.NewEvent(
-						ledger.ConnectionRecycleRequestedEventType,
-						ledger.ConnectionRecycleRequestedEvent{
-							ConnectionId: ctx.ConnectionId,
-							Reason:       "header_verification_failure",
-						},
-					),
-				)
-				if o.chainsyncState != nil {
-					o.chainsyncState.MarkClientFailed(ctx.ConnectionId)
-				}
 				return fmt.Errorf(
 					"chainsync: header failed checkpoint validation: %w",
 					cpErr,
@@ -2540,8 +2616,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// headers never reach the ledger's own chainsync header-queue
 		// verification, since that only runs for headers actually applied.
 		//
-		// Verification is skipped only for a slot an imported Mithril
-		// snapshot already covers; a coarse bulk
+		// Verification is skipped only for a block an imported Mithril
+		// snapshot certified, identified by point; a coarse bulk
 		// historical/catch-up loading toggle no longer exempts it, so a
 		// Mithril-restored bootstrap is unaffected but ordinary fast sync is
 		// not. A deferred result (local state has not caught up to this
@@ -2564,7 +2640,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		deferredVerification := false
 		transientVerification := false
 		shouldVerifyHeader := o.chainSelectionShouldVerifyHeaderCrypto != nil &&
-			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot)
+			o.chainSelectionShouldVerifyHeaderCrypto(point)
 		deliveryVerified := !shouldVerifyHeader
 		verificationAttempted := false
 		var verificationTipBaseline ochainsync.Tip

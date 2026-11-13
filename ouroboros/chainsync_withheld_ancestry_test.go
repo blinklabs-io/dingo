@@ -90,7 +90,7 @@ func newWithheldAncestryFixture(t *testing.T) *withheldAncestryFixture {
 		defer f.mu.Unlock()
 		return f.tipHash, f.tipHash
 	}
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	f.o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
