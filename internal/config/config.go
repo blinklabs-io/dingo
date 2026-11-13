@@ -782,22 +782,21 @@ type Config struct {
 	// BarkClientCAFilePath is a legacy configuration input with no effect.
 	// Dingo APIs do not authenticate or authorize callers.
 	BarkClientCAFilePath string `yaml:"barkClientCaFilePath"                envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
-	// BarkArchiveMaxConcurrentFetches bounds how many ArchiveService
-	// FetchBlock requests Bark serves at once; a request over the limit is
-	// refused rather than queued. ArchiveService takes no client credentials,
-	// so this is what bounds the storage work an anonymous caller can cause.
-	// Zero selects Bark's default (16); a negative value is rejected.
+	// BarkArchiveMaxConcurrentFetches optionally bounds how many
+	// ArchiveService FetchBlock requests Bark serves at once; a request over
+	// the limit is refused rather than queued. Zero (the default) is
+	// unlimited; a negative value is rejected.
 	BarkArchiveMaxConcurrentFetches int `yaml:"barkArchiveMaxConcurrentFetches"     envconfig:"DINGO_BARK_ARCHIVE_MAX_CONCURRENT_FETCHES"`
 	// BarkArchiveLookupsPerSecond is the sustained rate of block lookups
 	// ArchiveService serves across all callers combined. Each lookup can cost
 	// a cloud storage request whether or not the block exists, so a FetchBlock
 	// whose references do not fit the remaining budget is refused whole. Zero
-	// selects Bark's default (200); a negative value is rejected.
+	// (the default) is unlimited; a negative value is rejected.
 	BarkArchiveLookupsPerSecond int `yaml:"barkArchiveLookupsPerSecond" envconfig:"DINGO_BARK_ARCHIVE_LOOKUPS_PER_SECOND"`
 	// BarkArchiveCallerLookupsPerSecond is the same rate for one caller
 	// address (one IPv4 address or one IPv6 /64), so a single client cannot
 	// spend the whole global budget. Callers behind one proxy share an
-	// allowance. Zero selects Bark's default (50); a negative value is
+	// allowance. Zero (the default) is unlimited; a negative value is
 	// rejected.
 	BarkArchiveCallerLookupsPerSecond int `yaml:"barkArchiveCallerLookupsPerSecond" envconfig:"DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND"`
 	// BarkOperatorCertificateFingerprints is a legacy configuration input with no effect.
@@ -824,6 +823,15 @@ type Config struct {
 	// pprof on a wildcard or management-network address.
 	DebugBindAddr string `yaml:"debugBindAddr"                       envconfig:"DINGO_DEBUG_BIND_ADDR"`
 	DebugPort     uint   `yaml:"debugPort"                           envconfig:"DINGO_DEBUG_PORT"`
+	// DebugMutexProfileFraction samples on average 1 in N contended mutex
+	// events for the pprof mutex profile. 0 leaves mutex profiling off.
+	// It only takes effect while DebugPort is non-zero.
+	DebugMutexProfileFraction uint `yaml:"debugMutexProfileFraction"           envconfig:"DINGO_DEBUG_MUTEX_PROFILE_FRACTION"`
+	// DebugBlockProfileRate samples one blocking event per N nanoseconds
+	// spent blocked for the pprof block profile. 0 leaves block profiling
+	// off; 1 records every event. It only takes effect while DebugPort is
+	// non-zero.
+	DebugBlockProfileRate uint `yaml:"debugBlockProfileRate"               envconfig:"DINGO_DEBUG_BLOCK_PROFILE_RATE"`
 	// HealthPort serves the liveness (/health, /healthz) and readiness
 	// (/readyz) probes on a listener of their own, so an operator can
 	// expose them to an orchestrator or load balancer without also
@@ -1652,6 +1660,8 @@ func newDefaultConfig() *Config {
 		DebugBindAddr:                       DefaultDebugBindAddr,
 		MetricsBindAddr:                     DefaultMetricsBindAddr,
 		DebugPort:                           0,
+		DebugMutexProfileFraction:           0,
+		DebugBlockProfileRate:               0,
 		HealthPort:                          DefaultHealthPort,
 		HealthReadyGapSlots:                 DefaultHealthReadyGapSlots,
 		PrivateBindAddr:                     "127.0.0.1",

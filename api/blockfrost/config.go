@@ -23,10 +23,11 @@ type BlockfrostConfig struct {
 	// Defaults to "127.0.0.1:3000".
 	ListenAddress string
 	// MaxConcurrentMutations bounds transaction submission and evaluation
-	// work across the server.
+	// work across the server. Zero (the default) is unlimited.
 	MaxConcurrentMutations uint
 	// MaxConcurrentMutationsPerClient bounds transaction submission and
-	// evaluation work from one remote address.
+	// evaluation work from one remote address. Zero (the default) is
+	// unlimited.
 	MaxConcurrentMutationsPerClient uint
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.

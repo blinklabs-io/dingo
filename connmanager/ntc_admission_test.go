@@ -531,17 +531,17 @@ func TestTrustedLocalNtCIdleTimeoutDisabledKeepsIdleClient(t *testing.T) {
 		"idle trusted NtC client was closed with the idle timeout disabled")
 }
 
-// TestNtCAdmissionDefaultLimitsBoundRemoteFlood pins the admission boundary an
-// unauthenticated remote NtC client faces at the documented limits: 5
+// TestNtCAdmissionLimitsBoundRemoteFlood pins the admission boundary an
+// unauthenticated remote NtC client faces with operator-set limits: 5
 // connections per source IP and 100 in total. A flood from one address must
 // not reduce admission for another address, while the total stays shared
 // across addresses.
-func TestNtCAdmissionDefaultLimitsBoundRemoteFlood(t *testing.T) {
+func TestNtCAdmissionLimitsBoundRemoteFlood(t *testing.T) {
 	t.Parallel()
 
 	const (
-		total = DefaultMaxNtCConnections
-		perIP = DefaultMaxNtCConnectionsPerIP
+		total = 100
+		perIP = 5
 	)
 	manager := NewConnectionManager(ConnectionManagerConfig{
 		MaxNtCConns:            total,

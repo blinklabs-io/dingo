@@ -24,7 +24,6 @@ import (
 	"net"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
@@ -91,8 +90,7 @@ func (s *Server) handler() http.Handler {
 				return s.mcpServer
 			},
 			&mcp.StreamableHTTPOptions{
-				Logger:         s.logger,
-				SessionTimeout: mcpSessionIdleTimeout,
+				Logger: s.logger,
 			},
 		),
 		admission: sessionAdmission,
@@ -162,13 +160,8 @@ func (s *Server) Start(ctx context.Context) error {
 
 	server, bindDone, err := s.listener.Publish(func() *http.Server {
 		return &http.Server{
-			Addr:              s.listenAddress,
-			Handler:           s.handler(),
-			ReadHeaderTimeout: 30 * time.Second,
-			ReadTimeout:       60 * time.Second,
-			// SSE responses can live for the entire client session.
-			WriteTimeout: 0,
-			IdleTimeout:  120 * time.Second,
+			Addr:    s.listenAddress,
+			Handler: s.handler(),
 		}
 	})
 	if err != nil {

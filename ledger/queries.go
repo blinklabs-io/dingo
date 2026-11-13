@@ -40,53 +40,6 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
-// MaxLocalStateQueryItems bounds caller-controlled credential filters on query
-// paths that perform per-item work or build account maps from batched reads.
-// Explicit over-limit filters are rejected before database access.
-const MaxLocalStateQueryItems = 1000
-
-// ErrLocalStateQueryLimitExceeded identifies a LocalStateQuery request whose
-// caller-controlled item count exceeds MaxLocalStateQueryItems.
-var ErrLocalStateQueryLimitExceeded = errors.New(
-	"local state query item limit exceeded",
-)
-
-// LocalStateQueryLimitError describes an over-limit LocalStateQuery request.
-// In-process callers can use errors.Is for the stable category and errors.As
-// for QueryName, SubmittedItemCount, and MaximumAllowedItemCount. Node-to-client
-// protocol errors terminate the connection, so an over-the-wire client
-// observes a closed connection rather than this Go error value.
-type LocalStateQueryLimitError struct {
-	QueryName               string
-	SubmittedItemCount      int
-	MaximumAllowedItemCount int
-}
-
-func (e *LocalStateQueryLimitError) Error() string {
-	return fmt.Sprintf(
-		"%s: %s: got %d items, limit %d",
-		ErrLocalStateQueryLimitExceeded,
-		e.QueryName,
-		e.SubmittedItemCount,
-		e.MaximumAllowedItemCount,
-	)
-}
-
-func (e *LocalStateQueryLimitError) Unwrap() error {
-	return ErrLocalStateQueryLimitExceeded
-}
-
-func checkLocalStateQueryItemLimit(query string, items int) error {
-	if items <= MaxLocalStateQueryItems {
-		return nil
-	}
-	return &LocalStateQueryLimitError{
-		QueryName:               query,
-		SubmittedItemCount:      items,
-		MaximumAllowedItemCount: MaxLocalStateQueryItems,
-	}
-}
-
 // QueryPoint pins a Query call to a specific historical block instead of
 // live-right-now. The zero value (Slot 0, no Hash) means no pin -- the
 // existing, default behavior of answering from whatever is live right now --
@@ -2273,12 +2226,6 @@ func (ls *LedgerState) queryShelleyDRepState(
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
-	if err := checkLocalStateQueryItemLimit(
-		"GetDRepState",
-		len(creds),
-	); err != nil {
-		return nil, err
-	}
 	if at.pinned() {
 		return ls.queryShelleyDRepStateAt(ctx, creds, at.Slot, txn)
 	}
@@ -2767,14 +2714,14 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 			ctx,
 			addrs,
 			at.Slot,
-			database.MaxUtxosByAddressResults,
+			0,
 			txn,
 		)
 	} else {
 		utxos, err = ls.db.UtxosByAddress(
 			ctx,
 			addrs,
-			database.MaxUtxosByAddressResults,
+			0,
 			txn,
 		)
 	}
@@ -2846,12 +2793,6 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
-	if err := checkLocalStateQueryItemLimit(
-		"GetFilteredDelegationsAndRewardAccounts",
-		len(creds),
-	); err != nil {
-		return nil, err
-	}
 	delegations := make(map[olocalstatequery.StakeCredential]ledger.Blake2b224)
 	rewards := make(map[olocalstatequery.StakeCredential]uint64)
 	if len(creds) == 0 {
@@ -2940,12 +2881,6 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
-	if err := checkLocalStateQueryItemLimit(
-		"GetStakeDelegDeposits",
-		len(creds),
-	); err != nil {
-		return nil, err
-	}
 	ret := make(olocalstatequery.StakeDelegDepositsResult)
 	for _, cred := range creds {
 		credentialTag, err := models.CredentialTagFromUint64(cred.Tag)
@@ -3072,12 +3007,6 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
-	if err := checkLocalStateQueryItemLimit(
-		"GetFilteredVoteDelegatees",
-		len(creds),
-	); err != nil {
-		return nil, err
-	}
 	ret := make(olocalstatequery.FilteredVoteDelegateesResult)
 	refs := make([]models.StakeCredentialRef, 0, len(creds))
 	// Carried alongside creds so the second loop can reuse the tag each

@@ -39,19 +39,6 @@ var errLocalTxSubmissionMempoolUnavailable = errors.New(
 	"local-tx-submission: mempool unavailable",
 )
 
-// errLocalTxSubmissionBusy is returned when every in-flight validation slot is
-// held. It is a node condition, not a verdict on the transaction.
-var errLocalTxSubmissionBusy = errors.New(
-	"local-tx-submission: validation capacity exhausted",
-)
-
-// localTxSubmissionMaxInFlight bounds validations that are queued behind or
-// running under the mempool mutation gate across all NtC connections. The gate
-// serializes validation, so extra slots only add waiters; the bound exists to
-// cap what a client that reconnects can park, not to add throughput. A slot is
-// held until the callback returns, never until the socket closes.
-const localTxSubmissionMaxInFlight = 8
-
 func (o *Ouroboros) localtxsubmissionServerConnOpts(
 	trackActivity ...bool,
 ) []olocaltxsubmission.LocalTxSubmissionOptionFunc {
@@ -108,17 +95,6 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 	}
 	if o.mempool == nil {
 		return errLocalTxSubmissionMempoolUnavailable
-	}
-	// The slot is released only when AddTransaction returns, so a closed
-	// connection cannot free capacity that its still-queued validation uses.
-	select {
-	case o.localTxSubmissionSlots <- struct{}{}:
-		defer func() { <-o.localTxSubmissionSlots }()
-	default:
-		return localTxSubmissionRejectReason(
-			tx.EraId,
-			errLocalTxSubmissionBusy,
-		)
 	}
 	// The listener starts protocols before registering the connection, so the
 	// manager's teardown signal can be absent here. The protocol's stop signal
@@ -239,8 +215,7 @@ func (o *Ouroboros) localTxSubmissionConnDone(
 
 func isLocalTxSubmissionInfrastructureError(err error) bool {
 	var fullErr *mempool.MempoolFullError
-	return errors.Is(err, errLocalTxSubmissionBusy) ||
-		errors.Is(err, context.Canceled) ||
+	return errors.Is(err, context.Canceled) ||
 		errors.Is(err, mempool.ErrNilValidator) ||
 		errors.Is(err, mempool.ErrMempoolStopped) ||
 		errors.Is(err, mempool.ErrPendingStateMoved) ||

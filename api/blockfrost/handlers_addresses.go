@@ -48,30 +48,6 @@ func (b *Blockfrost) writeAddressQueryError(
 	writeNodeQueryError(w, err, "failed to retrieve "+what)
 }
 
-// admitAddressSummary reserves one address summary slot for the request's
-// client. When the cap is reached it writes the 429 response and reports
-// false.
-func (b *Blockfrost) admitAddressSummary(
-	w http.ResponseWriter,
-	r *http.Request,
-) (func(), bool) {
-	release, ok := b.addressSummaryAdmission.acquire(
-		r.Context(),
-		requestClient(r),
-	)
-	if !ok {
-		w.Header().Set("Retry-After", "1")
-		writeError(
-			w,
-			http.StatusTooManyRequests,
-			"Too Many Requests",
-			"address summary capacity reached, try again later",
-		)
-		return nil, false
-	}
-	return release, true
-}
-
 // handleAddressTransactionHashes handles the deprecated
 // GET /api/v0/addresses/{address}/txs, which lists transaction hashes without
 // a block range.
@@ -83,11 +59,6 @@ func (b *Blockfrost) handleAddressTransactionHashes(
 	if !ok {
 		return
 	}
-	release, ok := b.admitAddressSummary(w, r)
-	if !ok {
-		return
-	}
-	defer release()
 	address := r.PathValue("address")
 	txs, total, err := b.node.AddressTransactions(
 		r.Context(),
@@ -112,11 +83,6 @@ func (b *Blockfrost) handleAddressExtended(
 	r *http.Request,
 ) {
 	address := r.PathValue("address")
-	release, ok := b.admitAddressSummary(w, r)
-	if !ok {
-		return
-	}
-	defer release()
 	info, err := b.node.AddressExtended(r.Context(), address)
 	if err != nil {
 		b.writeAddressQueryError(w, err, address, "extended address")
@@ -141,11 +107,6 @@ func (b *Blockfrost) handleAddressTotal(
 	r *http.Request,
 ) {
 	address := r.PathValue("address")
-	release, ok := b.admitAddressSummary(w, r)
-	if !ok {
-		return
-	}
-	defer release()
 	info, err := b.node.AddressTotal(r.Context(), address)
 	if err != nil {
 		b.writeAddressQueryError(w, err, address, "address total")

@@ -767,7 +767,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 			got, err := db.UtxosByAddress(
 				context.Background(),
 				[]lcommon.Address{tc.addr},
-				MaxUtxosByAddressResults,
+				0,
 				nil,
 			)
 			require.NoError(t, err)
@@ -783,7 +783,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 		got, err := db.UtxosByAddress(
 			context.Background(),
 			[]lcommon.Address{enterprise, base},
-			MaxUtxosByAddressResults,
+			0,
 			nil,
 		)
 		require.NoError(t, err)
@@ -1086,7 +1086,7 @@ func TestUtxosWithHistoryExactAddressHasNoTotalCandidateCap(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	const siblingCount = ExactAddressCandidateScanLimit + 1
+	const siblingCount = 10_001
 	const targetSlot = siblingCount + 1
 	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
 		metadataTxn, err := raw.Begin()
@@ -1506,7 +1506,6 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedExcludesPointerSiblings(
 		},
 		txn,
 		10,
-		DefaultPublicUtxoCborBudget,
 	)
 	require.NoError(t, err)
 	assert.True(t, exhausted)
@@ -1560,7 +1559,6 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedCrossesBatchBoundary(
 		},
 		txn,
 		total+1,
-		DefaultPublicUtxoCborBudget,
 	)
 	require.NoError(t, err)
 	assert.True(t, exhausted)
@@ -1666,7 +1664,6 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedSnapshotTieBreak(t *testing
 		},
 		txn,
 		total+1,
-		DefaultPublicUtxoCborBudget,
 	)
 	require.NoError(t, err)
 	assert.True(t, exhausted)
@@ -1688,7 +1685,7 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedSnapshotTieBreak(t *testing
 	assert.Equal(t, wantHashes, got)
 }
 
-func TestMatchingUtxoRefsByAddressWithOrderingBoundedBudgets(t *testing.T) {
+func TestMatchingUtxoRefsByAddressWithOrderingBoundedCandidateLimit(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
@@ -1729,20 +1726,11 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedBudgets(t *testing.T) {
 		txn := NewTxnContext(t.Context(), db, false)
 		defer txn.Release()
 		refs, exhausted, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
-			t.Context(), query, txn, 2, len(encoded)*total,
+			t.Context(), query, txn, 2,
 		)
 		require.NoError(t, err)
 		assert.False(t, exhausted)
 		assert.Len(t, refs, 2)
-	})
-
-	t.Run("CBOR bytes", func(t *testing.T) {
-		txn := NewTxnContext(t.Context(), db, false)
-		defer txn.Release()
-		_, _, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
-			t.Context(), query, txn, total, len(encoded),
-		)
-		require.ErrorIs(t, err, models.ErrUtxoQueryBudgetExceeded)
 	})
 
 	t.Run("cancellation after first batch", func(t *testing.T) {
@@ -1755,7 +1743,7 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedBudgets(t *testing.T) {
 			done:        make(chan struct{}),
 		}
 		_, _, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
-			ctx, query, txn, total, len(encoded)*total,
+			ctx, query, txn, total,
 		)
 		require.ErrorIs(t, err, context.Canceled)
 		assert.Greater(t, ctx.checks, matchingUtxoRefBatchSize*2)
@@ -1927,7 +1915,7 @@ INSERT INTO utxo (
 	got, err := db.UtxosByAddress(
 		context.Background(),
 		addrs,
-		MaxUtxosByAddressResults,
+		0,
 		nil,
 	)
 	require.NoError(t, err)
@@ -2016,7 +2004,7 @@ func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
 	got, err := db.UtxosByAddress(
 		context.Background(),
 		addrs,
-		MaxUtxosByAddressResults,
+		0,
 		nil,
 	)
 	require.NoError(t, err)

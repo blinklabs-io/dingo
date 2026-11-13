@@ -421,7 +421,8 @@ func (s *queryServiceServer) ReadUtxos(
 	keys := req.Msg.GetKeys() // []*TxoRef
 
 	// Enforce request size limit
-	if len(keys) > s.utxorpc.config.MaxUtxoKeys {
+	if s.utxorpc.config.MaxUtxoKeys > 0 &&
+		len(keys) > s.utxorpc.config.MaxUtxoKeys {
 		return nil, connect.NewError(
 			connect.CodeInvalidArgument,
 			fmt.Errorf(
@@ -644,7 +645,7 @@ func (s *queryServiceServer) SearchUtxos(
 		ctx,
 		utxoQ,
 		int(maxAllowed)+1,
-		s.utxorpc.config.MaxResponseBytes,
+		s.utxorpc.responseByteLimit(),
 	)
 	if err != nil {
 		return nil, err
@@ -698,7 +699,8 @@ func (s *queryServiceServer) ReadData(
 	keys := req.Msg.GetKeys() // [][]byte
 
 	// Enforce request size limit
-	if len(keys) > s.utxorpc.config.MaxDataKeys {
+	if s.utxorpc.config.MaxDataKeys > 0 &&
+		len(keys) > s.utxorpc.config.MaxDataKeys {
 		return nil, connect.NewError(
 			connect.CodeInvalidArgument,
 			fmt.Errorf(

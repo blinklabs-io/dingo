@@ -2723,14 +2723,6 @@ func TestHandleTransactionSubmitErrors(t *testing.T) {
 			wantMessage: "Content-Type must be application/cbor.",
 		},
 		{
-			name:        "oversized body",
-			contentType: "application/cbor",
-			body:        strings.Repeat("x", maxTxBodySize+1),
-			wantStatus:  http.StatusRequestEntityTooLarge,
-			wantError:   "Request Entity Too Large",
-			wantMessage: "transaction body exceeds maximum allowed size",
-		},
-		{
 			name:        "empty body",
 			contentType: "application/cbor",
 			body:        "",

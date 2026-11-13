@@ -403,6 +403,22 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 		ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
 		return
 	}
+	if e.SessionReopened {
+		ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
+		// The coalescing window assumes a resync ends the connection ID. A
+		// re-intersect keeps it, so a divergence on the new cursor would be
+		// suppressed and the peer left delivering headers nothing accepts.
+		ls.clearChainsyncResyncCoalesce(e.ConnectionId)
+		// The peer replays from the intersection. Headers buffered from the
+		// old cursor would sit ahead of that replay, and its mismatch count
+		// would be charged to the new cursor.
+		ls.rejectBufferedHeaderEvents(
+			ls.takeBufferedPeerHeaders(e.ConnectionId),
+			&pending,
+		)
+		ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
+		return
+	}
 	// Also drops an event published before the hold was taken.
 	if ls.connectionIngestHeld(e.ConnectionId) {
 		queuePeerTipAdmission(&pending, e, false)
@@ -3155,8 +3171,9 @@ func (ls *LedgerState) requestChainsyncResync(
 // coalesceChainsyncResync reports whether a resync request for connId repeats
 // one already published within chainsyncResyncCoalesceWindow. A single
 // divergence delivers many headers that each fail the same way, and the
-// subscriber closes the connection and denies the peer once per request, so
-// only the first request of an episode is published.
+// subscriber acts on the connection once per request, so only the first
+// request of an episode is published. An episode ends when the connection
+// closes or re-intersects.
 func (ls *LedgerState) coalesceChainsyncResync(
 	connId ouroboros.ConnectionId,
 	reason string,
@@ -3917,7 +3934,12 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			),
 		)
 	}
-	if err := ls.rollbackChainAndStateDeferred(ls.lifecycleContext(), e.Point, pending); err != nil {
+	depth, err := ls.rollbackChainAndStateDeferredDepth(
+		ls.lifecycleContext(),
+		e.Point,
+		pending,
+	)
+	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// Missing rollback point can happen when local state and peer
 			// chainsync cursor drift. Recover by forcing re-intersect.
@@ -4115,6 +4137,12 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 	// un-crossable-rollback tracking is stale. Clear it so a later,
 	// unrelated divergence starts counting from zero.
 	ls.clearUnrecoverableRollbacks()
+	// Counted here, after the apply succeeded, so refused, deferred and
+	// no-op rollbacks never inflate it. The handler compares no candidate
+	// chain, so this is the only signal that a peer moved our chain. The
+	// depth is the block count the chain removed under its own lock; tip
+	// samples taken around the rollback would race concurrent blockfetch adds.
+	ls.metrics.observePeerRollbackApplied(depth)
 	// Crossing to the point is forward progress toward the peer's chain, so
 	// drop this point's per-connection loop-detector records too. A rollback
 	// we actually applied must not count toward the repeat-loop threshold on
@@ -4911,19 +4939,37 @@ func queuePeerHeaderHistoryInvalidation(
 
 // pinChainsyncHeaderVerdict pins generation for admitting e, verifying the
 // header again when the verdict expired first. It returns a nil release and a
-// nil error when the header is withheld, and an error, after queueing the
+// nil error when no verdict could be pinned, and an error, after queueing the
 // connection for recycling, when the header fails verification again: a
 // verdict that expired says nothing about the header, but a fresh failure is
 // the same rejection as the first verification's.
+//
+// With no verdict pinned, a header that mustAuthorize is withheld and the
+// expired generation is returned. Any other header is queued without producer
+// authorization and zero is returned, as for a verdict that had expired
+// before admission began. Withholding it would leave a hole in the
+// connection's headers: the next one does not fit the queue, which is then
+// discarded and the peer re-intersected. A block publication waiting on the
+// pin's lock expires the verdict between the currency check and the pin.
 func (ls *LedgerState) pinChainsyncHeaderVerdict(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
 	generation uint64,
 	reverify func() (uint64, error),
+	mustAuthorize bool,
 ) (uint64, func(), error) {
 	pinned, release, err := ls.pinHeaderVerdict(generation, reverify)
 	if err != nil && !IsHeaderVerificationDeferred(err) {
 		return 0, nil, ls.rejectChainsyncHeaderVerification(e, pending, err)
+	}
+	if release == nil && !mustAuthorize {
+		ls.config.Logger.Debug(
+			"queueing chainsync header without producer authorization after it expired before admission",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+		)
+		return 0, nil, nil
 	}
 	if release == nil {
 		ls.config.Logger.Debug(
@@ -5067,12 +5113,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			pending,
 			headerCryptoVerificationGeneration,
 			reverify,
+			headerValidationRequired || headerTrusted,
 		)
 		if err != nil {
 			return err
 		}
-		if release == nil {
+		if release == nil && pinnedGeneration != 0 {
 			return nil
+		}
+		if release == nil {
+			headerCryptoVerified = false
 		}
 		releaseVerificationGeneration = release
 		if pinnedGeneration != headerCryptoVerificationGeneration {
@@ -5182,6 +5232,12 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 						ls.lifecycleContext(),
 						&e,
 						headerCryptoVerificationGeneration,
+						func() (uint64, error) {
+							return ls.ValidatePeerChainSelectionHeaderCryptoWithGeneration(
+								e.ConnectionId,
+								e.BlockHeader,
+							)
+						},
 					)
 					if !current {
 						cleanup := ls.invalidateChainsyncHeaderAdmission(e)
@@ -7180,6 +7236,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 					}
 					return nil
 				}
+				ls.metrics.incHeaderVerificationDeferred()
 				ls.config.Logger.Debug(
 					"deferring stateful block header verification until ledger apply",
 					"component",
@@ -7227,6 +7284,15 @@ func (ls *LedgerState) blockfetchEventCurrent(e BlockfetchEvent) bool {
 	if connIdKey(ls.blockfetchDiscardConnId) != "" &&
 		sameConnectionId(e.ConnectionId, ls.blockfetchDiscardConnId) {
 		return false
+	}
+	// A request released while still outstanding keeps streaming until its
+	// terminal event. The connection can be the active one again by then, so
+	// the connection alone does not say which request an event belongs to.
+	if e.RequestId != 0 {
+		released := ls.blockfetchReleasedRequestIds[connIdKey(e.ConnectionId)]
+		if _, ok := released[e.RequestId]; ok {
+			return false
+		}
 	}
 	return sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId) ||
 		(connIdKey(ls.shadowBlockfetchConnId) != "" &&
