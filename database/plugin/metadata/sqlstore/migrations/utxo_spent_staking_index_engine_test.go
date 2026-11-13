@@ -92,8 +92,8 @@ func runSpentStakingUpgrade(
 		require.NoError(t, err)
 	}
 	before := digest()
-	runner(registry)
-	runner(registry)
+	runner(registry[:utxoSpentStakingIndexVersion])
+	runner(registry[:utxoSpentStakingIndexVersion])
 	return before, digest()
 }
 

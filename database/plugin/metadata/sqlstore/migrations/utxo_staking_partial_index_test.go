@@ -86,7 +86,7 @@ func TestUtxoStakingIndexesUpgrade(t *testing.T) {
 					require.True(t, ok)
 					require.NotContains(t, definition, "WHERE")
 				}
-				run(registry)
+				run(registry[:53])
 			},
 		)
 	}

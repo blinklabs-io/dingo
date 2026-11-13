@@ -291,9 +291,10 @@ func TestBatchInsertTransactionIsCounted(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(
 		t,
-		before+1,
+		before+2,
 		counterValue(t, reg, "insert"),
-		"expected the batch accumulator's prepared insert to be counted",
+		"expected the prepared identity insert and the application row "+
+			"insert to be counted",
 	)
 
 	require.NoError(t, txn.Rollback())

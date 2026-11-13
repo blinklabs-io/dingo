@@ -269,7 +269,7 @@ func utxoRowExists(
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	return rowBatchingQueryOne[int](t, raw,
-		`SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
+		`SELECT COUNT(*) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
 		txHash, idx) > 0
 }
 

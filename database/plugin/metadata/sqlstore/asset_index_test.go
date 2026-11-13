@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
@@ -190,7 +191,8 @@ func (f assetTxFixture) transaction(
 	blockIndex uint32,
 ) int64 {
 	t.Helper()
-	res, err := f.db.Exec(`
+	res, err := testutil.ExecTransactionInsert(f.db,
+		`
 INSERT INTO "transaction" (hash, block_hash, slot, block_index, valid, fee)
 VALUES (?, ?, ?, ?, 1, '0')`,
 		hash, credentialHash(0xee), slot, blockIndex,
@@ -212,17 +214,16 @@ func (f assetTxFixture) output(
 	collateralReturn bool,
 ) {
 	t.Helper()
-	var producer, collateral any
+	var collateral any
 	if collateralReturn {
 		collateral = transactionID
-	} else {
-		producer = transactionID
 	}
 	res, err := f.db.Exec(`
-INSERT INTO utxo (transaction_id, collateral_return_for_tx_id, tx_id, output_idx,
+INSERT INTO utxo (tx_id, collateral_return_for_tx_id, output_idx,
     added_slot, deleted_slot, amount, spent_at_tx_id, credential_tag)
-VALUES (?, ?, ?, 0, 1, 0, '1', ?, 0)`,
-		producer, collateral, txHash, spentBy,
+VALUES (?, ?, 0, 1, 0, '1',
+    (SELECT id FROM "transaction" WHERE hash = ?), 0)`,
+		transactionID, collateral, spentBy,
 	)
 	require.NoError(t, err)
 	if !held {
@@ -273,7 +274,7 @@ func TestGetAssetTransactionsCoversMintCreateAndSpend(t *testing.T) {
 	f.output(t, unrelated, unrelatedID, false, nil, false)
 	var unrelatedUtxo int64
 	require.NoError(t, db.QueryRow(
-		`SELECT id FROM utxo WHERE tx_id = ?`, unrelated,
+		`SELECT id FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, unrelated,
 	).Scan(&unrelatedUtxo))
 	for _, other := range []struct {
 		policy []byte
@@ -293,12 +294,12 @@ VALUES (?, ?, ?, ?, '1')`, []byte(other.name), other.policy, []byte("fp"),
 	f.output(t, collateralTx, collateralID, true, nil, true)
 	// A second UTxO of the same transaction does not duplicate the row.
 	_, err := db.Exec(`
-INSERT INTO utxo (transaction_id, tx_id, output_idx, added_slot, deleted_slot, amount, credential_tag)
-VALUES (?, ?, 1, 1, 0, '1', 0)`, createID, create)
+INSERT INTO utxo (tx_id, output_idx, added_slot, deleted_slot, amount, credential_tag)
+VALUES (?, 1, 1, 0, '1', 0)`, createID)
 	require.NoError(t, err)
 	var secondUtxo int64
 	require.NoError(t, db.QueryRow(
-		`SELECT id FROM utxo WHERE tx_id = ? AND output_idx = 1`, create,
+		`SELECT id FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 1`, create,
 	).Scan(&secondUtxo))
 	_, err = db.Exec(`
 INSERT INTO asset (name, policy_id, fingerprint, utxo_id, amount)

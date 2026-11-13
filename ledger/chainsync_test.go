@@ -7875,6 +7875,7 @@ func (b *nonExtendingRejectionTestBlock) Type() int                   { return 0
 func (b *nonExtendingRejectionTestBlock) Transactions() []lcommon.Transaction {
 	return nil
 }
+
 func (b *nonExtendingRejectionTestBlock) Utxorpc() (*utxorpc.Block, error) {
 	return nil, nil
 }
@@ -18878,7 +18879,7 @@ func TestPrepareEraTransitionsEnactsClassicUpdateWithSourceDecoder(
 // foreign_keys=ON is enforced.
 //
 // Genesis UTxOs are unspent/unreferenced, so the utxo columns spent_at_tx_id /
-// referenced_by_tx_id / collateral_by_tx_id (FKs to transaction(hash)) must be
+// collateral_return_for_tx_id (FKs to transaction(id)) must be
 // stored as SQL NULL. If they are bound as an empty blob, the FK fails with
 // "FOREIGN KEY constraint failed (787)". This is the failure reported for
 // BURSA_SYNC=genesis on preview/devnet.
@@ -18945,14 +18946,13 @@ func TestCreateGenesisBlockFileBackedNoFKError(t *testing.T) {
 			require.NoError(t, raw.QueryRow(`
 SELECT COUNT(*) FROM utxo
 WHERE spent_at_tx_id IS NOT NULL
-   OR referenced_by_tx_id IS NOT NULL
-   OR collateral_by_tx_id IS NOT NULL`,
+   OR collateral_return_for_tx_id IS NOT NULL`,
 			).Scan(&nonNull))
 			require.Equal(
 				t,
 				int64(0),
 				nonNull,
-				"genesis UTxOs must store NULL hash FKs, not empty blobs",
+				"genesis UTxOs must store NULL transaction FKs, not zero ids",
 			)
 
 			// Second run: idempotent, still no error.
@@ -20538,8 +20538,10 @@ func TestCreateGenesisBlockPreservesPoolDeposit(t *testing.T) {
 	require.NotEmpty(t, pools)
 	ls := &LedgerState{
 		db: db,
-		config: LedgerStateConfig{Database: db, CardanoNodeConfig: cfg,
-			Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		config: LedgerStateConfig{
+			Database: db, CardanoNodeConfig: cfg,
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
 	}
 	require.NoError(t, ls.createGenesisBlock(t.Context()))
 	for key := range pools {
