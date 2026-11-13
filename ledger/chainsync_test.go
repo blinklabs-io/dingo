@@ -19281,6 +19281,148 @@ func TestCreateGenesisBlockNoConfidenceImportRejectsRemovedMembers(
 	)
 }
 
+// TestCreateGenesisBlockUnseatsGenesisMembersSeededOverConwayImport proves
+// startup repairs a database where an earlier startup seated absent genesis
+// members over a Conway-era snapshot: a live slot-0 row there can only be
+// such a seed, since the import writes its committee at the snapshot epoch.
+func TestCreateGenesisBlockUnseatsGenesisMembersSeededOverConwayImport(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+	require.NoError(t, err)
+	require.NoError(t, db.SetGenesisCbor(0, genesisHash[:], []byte{0x80}, nil))
+
+	const anchorSlot = 1_000_000
+	ls.currentTip.Point = ocommon.NewPoint(
+		anchorSlot,
+		bytes.Repeat([]byte{0xab}, lcommon.Blake2b256Size),
+	)
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		strconv.FormatUint(anchorSlot, 10),
+		nil,
+	))
+	require.NoError(t, db.SetEpoch(
+		anchorSlot, 300, nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, 1, 100, nil,
+	))
+	require.NoError(t, ls.loadMithrilTrustBoundary())
+
+	retainedKey, err := hex.DecodeString(musashiGenesisCommitteeColdKeys[0])
+	require.NoError(t, err)
+	seeded := make(
+		[]*models.CommitteeMember,
+		0,
+		len(musashiGenesisCommitteeColdKeys),
+	)
+	for _, coldKeyHex := range musashiGenesisCommitteeColdKeys[1:] {
+		key, err := hex.DecodeString(coldKeyHex)
+		require.NoError(t, err)
+		seeded = append(seeded, &models.CommitteeMember{
+			ColdCredHash:     key,
+			ExpiresEpoch:     500,
+			TermStartSlotSet: true,
+		})
+	}
+	require.NoError(t, db.SetCommitteeMembers(
+		context.Background(),
+		[]*models.CommitteeMember{{
+			ColdCredHash:     retainedKey,
+			ExpiresEpoch:     400,
+			TermStartSlot:    anchorSlot,
+			TermStartSlotSet: true,
+			AddedSlot:        anchorSlot,
+		}},
+		nil,
+	))
+	require.NoError(t, db.SetCommitteeMembers(
+		context.Background(), seeded, nil,
+	))
+
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
+
+	ls.currentEpoch = models.Epoch{EpochId: 300, StartSlot: anchorSlot}
+	ls.currentPParams = &conway.ConwayProtocolParameters{}
+	ls.publishSnapshotsLocked()
+	lv := ls.NewView(nil)
+	retained, err := lv.CommitteeCredentialMember(lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(retainedKey),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, retained, "imported member unseated")
+	for _, coldKeyHex := range musashiGenesisCommitteeColdKeys[1:] {
+		key, err := hex.DecodeString(coldKeyHex)
+		require.NoError(t, err)
+		member, err := lv.CommitteeCredentialMember(lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(key),
+		})
+		require.NoError(t, err)
+		require.Nil(
+			t, member, "seeded genesis member %s still seated", coldKeyHex,
+		)
+	}
+	require.NoError(t, db.DeleteCommitteeMembersAfterSlot(
+		context.Background(), anchorSlot-1, nil,
+	))
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
+	require.NoError(t, err)
+	require.Empty(t, members, "rollback below the anchor re-seated a member")
+}
+
+// TestCreateGenesisBlockKeepsSlotZeroImportInFirstEpoch proves the repair of
+// seeded seats leaves a snapshot taken in a Conway epoch starting at slot 0
+// alone: its imported committee is written at slot 0 too.
+func TestCreateGenesisBlockKeepsSlotZeroImportInFirstEpoch(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+	require.NoError(t, err)
+	require.NoError(t, db.SetGenesisCbor(0, genesisHash[:], []byte{0x80}, nil))
+
+	const anchorSlot = 50
+	ls.currentTip.Point = ocommon.NewPoint(
+		anchorSlot,
+		bytes.Repeat([]byte{0xac}, lcommon.Blake2b256Size),
+	)
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		strconv.FormatUint(anchorSlot, 10),
+		nil,
+	))
+	require.NoError(t, db.SetEpoch(
+		0, 0, nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, 1, 100, nil,
+	))
+	require.NoError(t, ls.loadMithrilTrustBoundary())
+
+	imported := make(
+		[]*models.CommitteeMember,
+		0,
+		len(musashiGenesisCommitteeColdKeys),
+	)
+	for _, coldKeyHex := range musashiGenesisCommitteeColdKeys {
+		key, err := hex.DecodeString(coldKeyHex)
+		require.NoError(t, err)
+		imported = append(imported, &models.CommitteeMember{
+			ColdCredHash:     key,
+			ExpiresEpoch:     500,
+			TermStartSlotSet: true,
+		})
+	}
+	require.NoError(t, db.SetCommitteeMembers(
+		context.Background(), imported, nil,
+	))
+
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
+	requireGenesisCommitteeSeated(t, ls, 0)
+}
+
 // TestCreateGenesisBlockNoConfidenceImportRejectsRemovedMemberVotes proves a
 // vote from the hot credential a genesis member authorized before its removal
 // is an unknown voter after a NoConfidence snapshot import.
