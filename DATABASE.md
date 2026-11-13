@@ -88,6 +88,14 @@ behavior, and persisted formats are unchanged. Library callers of Mithril
 `Sync` or `NeedsSync` may leave `SyncConfig.StoragePlugins` unset to select the
 local `badger` blob and `sqlite` metadata providers.
 
+Before a backfill starts or resumes, `node.RunPlannerStats` runs the incremental
+pass instead of a full `ANALYZE` when `sqlite_stat1` already holds rows
+(`metadata.PlannerStatsPresenceChecker`), because a full `ANALYZE` reads every
+table and index and its cost grows with the database. A database without
+statistics, a backend without an incremental form (PostgreSQL, MySQL), or an
+incremental pass skipped during a bulk load still gets the full refresh. The
+full `ANALYZE` after a completed backfill is unchanged.
+
 Completed metadata backfills refresh planner statistics after critical index
 repair and before startup clears the import state. The optional
 `metadata.ContextPlannerStatsUpdater` capability makes this refresh cancellable;

@@ -366,12 +366,50 @@ func withBulkLoadPragmas(
 	return cleanup
 }
 
-// RunPlannerStats collects query-planner statistics on the metadata store
-// if it implements PlannerStatsUpdater. No-op for non-SQLite stores.
+// RunPlannerStats prepares query-planner statistics before a backfill starts
+// or resumes. When statistics already exist and the backend maintains them
+// incrementally, only the incremental pass runs, because a full ANALYZE
+// reads every table and index and its cost grows with the database. A
+// database without statistics, a backend without an incremental form, or an
+// incremental pass that cannot run (bulk mode) gets the full refresh.
+// No-op for stores without planner statistics.
 func RunPlannerStats(db *database.Database, logger *slog.Logger) error {
-	updater, ok := db.Metadata().(metadata.PlannerStatsUpdater)
+	return runPlannerStats(context.Background(), db.Metadata(), logger)
+}
+
+func runPlannerStats(
+	ctx context.Context,
+	store any,
+	logger *slog.Logger,
+) error {
+	updater, ok := store.(metadata.PlannerStatsUpdater)
 	if !ok {
 		return nil
+	}
+	incremental, hasIncremental := store.(metadata.IncrementalPlannerStatsUpdater)
+	checker, hasChecker := store.(metadata.PlannerStatsPresenceChecker)
+	if hasIncremental && hasChecker {
+		present, err := checker.HasPlannerStats(ctx)
+		if err != nil {
+			return fmt.Errorf("planner statistics maintenance: %w", err)
+		}
+		if present {
+			result, err := incremental.OptimizePlannerStatsContext(
+				ctx,
+				datatypes.PlannerStatsTriggerStartup,
+			)
+			if err != nil {
+				return fmt.Errorf("planner statistics maintenance: %w", err)
+			}
+			if result.Supported && !result.Skipped {
+				logger.Debug(
+					"planner statistics maintained incrementally",
+					"changed", result.Changed,
+					"stat1_rows", result.Stat1Rows,
+				)
+				return nil
+			}
+		}
 	}
 	if err := updater.UpdatePlannerStats(); err != nil {
 		return fmt.Errorf("planner statistics maintenance: %w", err)

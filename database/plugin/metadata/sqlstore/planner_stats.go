@@ -191,6 +191,26 @@ func (s *Store) OptimizePlannerStatsContext(
 	return result, nil
 }
 
+// HasPlannerStats reports whether incremental maintenance can build on
+// existing statistics: the backend has an incremental form and sqlite_stat1
+// holds at least one row. It reads the database rather than a flag, so a
+// database copied or restored with its statistics is recognised.
+func (s *Store) HasPlannerStats(ctx context.Context) (bool, error) {
+	if s.closed.Load() || !s.ready.Load() {
+		return false, errors.New("sqlstore: store is not ready")
+	}
+	if !s.dialect.HasIncrementalPlannerStats() {
+		return false, nil
+	}
+	s.scheduledWorkMu.Lock()
+	defer s.scheduledWorkMu.Unlock()
+	_, rows, err := s.plannerStatsFingerprint(ctx)
+	if err != nil {
+		return false, fmt.Errorf("planner statistics: %w", err)
+	}
+	return rows > 0, nil
+}
+
 func (s *Store) plannerStatsFailed(
 	trigger string,
 	started time.Time,
