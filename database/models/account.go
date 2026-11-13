@@ -26,7 +26,7 @@ import (
 var (
 	ErrAccountNotFound = errors.New("account not found")
 	// ErrWithdrawalTransactionNotFound identifies a reward withdrawal whose
-	// withdrawing transaction has no row in the transaction table.
+	// withdrawing transaction has not been applied: no applied_transaction row.
 	ErrWithdrawalTransactionNotFound = errors.New(
 		"withdrawing transaction not found",
 	)

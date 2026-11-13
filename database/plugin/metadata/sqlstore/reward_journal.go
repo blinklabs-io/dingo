@@ -98,8 +98,13 @@ INSERT INTO reward_withdrawal (
 ) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (tx_id, account_id) DO NOTHING`
 
+	// getTransactionIDByHashSQL binds a withdrawal to an applied transaction.
+	// An identity row alone names a transaction the store has only seen
+	// referenced, such as the producer of an imported output.
 	getTransactionIDByHashSQL = `-- name: GetWithdrawalTransactionID :one
-SELECT id FROM "transaction" WHERE hash = ?`
+SELECT t.id FROM "transaction" t
+JOIN applied_transaction a ON a.tx_id = t.id
+WHERE t.hash = ?`
 
 	rollbackRewardEventAccountsSQL = `
 SELECT e.account_id, e.slot, e.amount, e.after_withdrawal FROM reward_event_credit e

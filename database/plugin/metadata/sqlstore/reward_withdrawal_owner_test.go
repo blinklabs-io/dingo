@@ -67,3 +67,26 @@ JOIN "transaction" t ON t.id = w.tx_id AND t.hash = ?`, hash,
 	require.Zero(t, incomplete)
 	require.Equal(t, 1, owned)
 }
+
+// An identity row with no application row names a transaction the store has
+// only seen referenced, such as the producer of an imported output. A
+// withdrawal is refused against it: the withdrawing transaction is applied.
+func TestApplyAccountRewardWithdrawalRequiresAppliedTransaction(t *testing.T) {
+	t.Parallel()
+	store, raw := newManagementTestStoreWithRawDB(t)
+	key := bytesRepeat(0x73, 28)
+	hash := bytesRepeat(0x74, 32)
+	rollbackAccount(t, store, key, 40)
+	_, err := raw.Exec(`INSERT INTO "transaction" (hash) VALUES (?)`, hash)
+	require.NoError(t, err)
+
+	err = store.ApplyAccountRewardWithdrawal(0, key, 40, 200, hash, nil)
+	require.ErrorIs(t, err, models.ErrWithdrawalTransactionNotFound)
+
+	var withdrawals int
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM reward_withdrawal`,
+	).Scan(&withdrawals))
+	require.Zero(t, withdrawals)
+	require.Equal(t, uint64(40), rewardOf(t, store, key))
+}
