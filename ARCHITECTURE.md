@@ -13647,6 +13647,18 @@ Ordering the two resumable phases keeps their SQLite write transactions from
 contending during bootstrap. A later import failure resumes against the already
 copied immutable data.
 
+When `cleanupAfterLoad` is on, both the post-download copy and the pipelined
+copy that runs during the download delete each extracted chunk's
+`.chunk`, `.primary` and `.secondary` files once the batch holding a later
+block has committed, so the extracted tree and the blob store do not both hold
+the chain. The chunk holding the newest committed block is kept because a
+resumed copy restarts from the chain tip there. Before deleting, the copy
+records that chunk number in the ephemeral `mithril_immutable_retired_below`
+sync-state key; a resumed sync starts its download at that chunk instead of
+fetching the deleted ones, and completion clears the key with the rest of
+sync_state. Everything that reads the extracted tree (certified tip, catch-up
+ancestry check) runs before the copy starts; nothing reads it afterwards.
+
 The Core-mode copy omits produced-UTxO offset references, which are used by
 API-mode UTxO resolution. It does not mark the immutable offset range complete;
 an API-mode backfill after a later storage-mode change will therefore build

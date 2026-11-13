@@ -900,6 +900,33 @@ func (i *ImmutableDb) BlocksFromPoint(
 	return ret, nil
 }
 
+// RemoveChunksBefore deletes the .chunk, .primary and .secondary files of every
+// chunk numbered below num. Files already gone are not an error, so a retry
+// after an interrupted removal completes it. Callers must have made the
+// removed chunks' blocks durable elsewhere first.
+func (i *ImmutableDb) RemoveChunksBefore(num uint64) error {
+	entries, err := i.readDir()
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		base, ext, ok := strings.Cut(name, ".")
+		if !ok || (ext != "chunk" && ext != "primary" && ext != "secondary") {
+			continue
+		}
+		n, err := strconv.ParseUint(base, 10, 64)
+		if err != nil || n >= num || !isCanonicalChunkName(base) {
+			continue
+		}
+		if err := i.removeEntry(name); err != nil &&
+			!errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("removing immutable entry %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // BlocksInChunk returns an iterator over the blocks of the single immutable
 // file numbered num, in order, and nothing from any other chunk.
 //
@@ -972,6 +999,16 @@ func (b *BlockIterator) Next() (*Block, error) {
 		}
 		return tmpBlock, nil
 	}
+}
+
+// Chunk returns the number of the chunk the block most recently returned by
+// Next came from. It is only meaningful after a Next that returned a block.
+func (b *BlockIterator) Chunk() (uint64, bool) {
+	if b.chunkIdx >= len(b.chunkNames) {
+		return 0, false
+	}
+	num, err := strconv.ParseUint(b.chunkNames[b.chunkIdx], 10, 64)
+	return num, err == nil
 }
 
 func (b *BlockIterator) Close() error {
