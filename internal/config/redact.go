@@ -173,6 +173,8 @@ var logPlainConfigFields = []string{
 	"DatabaseQueueSize",
 	"DatabaseWorkers",
 	"DebugBindAddr",
+	"DebugBlockProfileRate",
+	"DebugMutexProfileFraction",
 	"DebugPort",
 	"DelegatorInactivity",
 	"DelegatorInactivityEnabled",

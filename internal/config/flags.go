@@ -230,6 +230,16 @@ var flagSpecs = []flagSpec{
 	),
 	uintFlag("DebugPort", "debug-port", "debug pprof port (0 = disabled)"),
 	uintFlag(
+		"DebugMutexProfileFraction",
+		"debug-mutex-profile-fraction",
+		"sample 1 in N mutex contention events for the pprof mutex profile (0 = off; needs --debug-port)",
+	),
+	uintFlag(
+		"DebugBlockProfileRate",
+		"debug-block-profile-rate",
+		"pprof block profile rate in ns blocked per sample (0 = off, 1 = every event; needs --debug-port)",
+	),
+	uintFlag(
 		"HealthPort",
 		"health-port",
 		"liveness/readiness probe port (0 = disabled)",
