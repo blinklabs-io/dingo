@@ -15,12 +15,14 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
 
+	blobplugin "github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 )
@@ -356,6 +358,153 @@ func (d *Database) SetLeiosEB(
 	return nil
 }
 
+// SetLeiosEBCertified records that a ranking block certified the endorser
+// block occurrence (slot, hash). Pruning keeps the persisted manifest and
+// transactions of a certified occurrence, and the marker is idempotent.
+//
+// Ledger apply passes the block-apply transaction, so the marker commits with
+// the certifying ranking block and is discarded with it when any later check
+// rejects the block. A nil txn commits the marker in its own blob transaction.
+func (d *Database) SetLeiosEBCertified(
+	slot uint64,
+	hash []byte,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.BlobTxn(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	blob := txn.BlobStore()
+	if blob == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return types.ErrNilTxn
+	}
+	if err := blob.Set(
+		blobTxn,
+		types.LeiosEBCertifiedKey(hash, slot),
+		[]byte{1},
+	); err != nil {
+		return fmt.Errorf("SetLeiosEBCertified: %w", err)
+	}
+	if !owned {
+		return nil
+	}
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("SetLeiosEBCertified: commit: %w", err)
+	}
+	return nil
+}
+
+// IsLeiosEBCertified reports whether the endorser block occurrence
+// (slot, hash) was certified by a committed ranking block on the selected
+// chain: whether its certification marker exists. The standalone
+// endorser-block blob is not evidence, because ledger apply writes it before
+// the ranking block's remaining checks run and a rejection does not remove it.
+func (d *Database) IsLeiosEBCertified(
+	slot uint64,
+	hash []byte,
+) (bool, error) {
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
+	if blob == nil {
+		return false, types.ErrBlobStoreUnavailable
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return false, types.ErrNilTxn
+	}
+	return leiosEBCertified(blob, blobTxn, slot, hash)
+}
+
+func leiosEBCertified(
+	store blobplugin.BlobStore,
+	blobTxn types.Txn,
+	slot uint64,
+	hash []byte,
+) (bool, error) {
+	key := types.LeiosEBCertifiedKey(hash, slot)
+	it := store.NewIterator(blobTxn, types.BlobIteratorOptions{Prefix: key})
+	if it == nil {
+		return false, types.ErrBlobStoreUnavailable
+	}
+	defer it.Close()
+	it.Seek(key)
+	if !it.ValidForPrefix(key) {
+		if err := it.Err(); err != nil {
+			return false, fmt.Errorf("read Leios certification: %w", err)
+		}
+		return false, nil
+	}
+	item := it.Item()
+	if err := it.Err(); err != nil {
+		return false, fmt.Errorf("read Leios certification: %w", err)
+	}
+	return item != nil && bytes.Equal(item.Key(), key), nil
+}
+
+// deleteLeiosEBCertifiedFromSlot removes the certification markers of every
+// endorser block at or after slot, staged in the rollback transaction txn.
+// An endorser block shares its announcing ranking block's slot and is
+// certified by that block's child, so a rollback to slot removes the
+// certifying block of every such occurrence, including one announced by the
+// block at slot itself. A re-applied certifying block writes the marker again.
+// Markers left unstaged past the transaction's budget only over-retain.
+func (d *Database) deleteLeiosEBCertifiedFromSlot(
+	slot uint64,
+	txn *Txn,
+) error {
+	blob := txn.BlobStore()
+	if blob == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return types.ErrNilTxn
+	}
+	prefix := []byte(types.LeiosEBCertifiedKeyPrefix)
+	it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{Prefix: prefix})
+	if it == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	var keys [][]byte
+	it.Seek(types.LeiosEBCertifiedSlotPrefix(slot))
+	for ; it.ValidForPrefix(prefix); it.Next() {
+		if item := it.Item(); item != nil {
+			keys = append(keys, bytes.Clone(item.Key()))
+		}
+	}
+	err := it.Err()
+	it.Close()
+	if err != nil {
+		return fmt.Errorf("list Leios certification markers: %w", err)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	staged := stagedBlobDeleteLimit(blob, blobTxn, len(keys[0]), len(keys))
+	for _, key := range keys[:staged] {
+		if err := blob.Delete(blobTxn, key); err != nil &&
+			!errors.Is(err, types.ErrBlobKeyNotFound) {
+			return fmt.Errorf("delete Leios certification marker: %w", err)
+		}
+	}
+	if skipped := len(keys) - staged; skipped > 0 && d.logger != nil {
+		d.logger.Warn(
+			"Leios certification markers left past the rollback budget",
+			"component", "database",
+			"skipped", skipped,
+			"total", len(keys),
+		)
+	}
+	return nil
+}
+
 // Cloud blob transactions spool every prior object value before applying
 // deletes so they can compensate a partial commit. The BlobItem interface
 // does not expose value sizes; keeping one delete per transaction bounds that
@@ -363,8 +512,10 @@ func (d *Database) SetLeiosEB(
 const leiosEBPruneBatchSize = 1
 
 // PruneLeiosEBBeforeSlot removes persisted Leios manifests and transaction
-// lists strictly older than beforeSlot. The caller chooses the retention
-// frontier; this method does not infer one from chain state.
+// lists strictly older than beforeSlot, except those of a certified
+// occurrence (see IsLeiosEBCertified), which are never pruned. The caller
+// chooses the retention frontier; this method does not infer one from chain
+// state.
 //
 // It scans the shared "e" prefix once because the manifest and transaction
 // prefixes are adjacent. Deletes commit in blob-only transactions containing
@@ -463,6 +614,10 @@ func (d *Database) PruneLeiosEBBeforeSlot(
 		return nil
 	}
 
+	keepCertified := func(hash []byte, slot uint64) (bool, error) {
+		return leiosEBCertified(blob, blobTxn, slot, hash)
+	}
+
 	it.Seek(iteratorPrefix)
 	for ; it.ValidForPrefix(iteratorPrefix); it.Next() {
 		if err := ctx.Err(); err != nil {
@@ -484,6 +639,13 @@ func (d *Database) PruneLeiosEBBeforeSlot(
 				if slot >= beforeSlot {
 					continue
 				}
+				keep, err := keepCertified(key[2:len(key)-8], slot)
+				if err != nil {
+					return deletedKeyCnt, err
+				}
+				if keep {
+					continue
+				}
 				if err := stageDelete(key); err != nil {
 					return deletedKeyCnt, err
 				}
@@ -499,6 +661,16 @@ func (d *Database) PruneLeiosEBBeforeSlot(
 					binary.BigEndian.Uint64(value[:8]) >= beforeSlot {
 					continue
 				}
+				keep, err := keepCertified(
+					key[2:],
+					binary.BigEndian.Uint64(value[:8]),
+				)
+				if err != nil {
+					return deletedKeyCnt, err
+				}
+				if keep {
+					continue
+				}
 				if err := stageDelete(key); err != nil {
 					return deletedKeyCnt, err
 				}
@@ -510,6 +682,13 @@ func (d *Database) PruneLeiosEBBeforeSlot(
 			case len(types.LeiosEBTxsKeyPrefix) + 32 + 8:
 				slot := binary.BigEndian.Uint64(key[len(key)-8:])
 				if slot < beforeSlot {
+					keep, err := keepCertified(key[2:len(key)-8], slot)
+					if err != nil {
+						return deletedKeyCnt, err
+					}
+					if keep {
+						continue
+					}
 					if err := stageDelete(key); err != nil {
 						return deletedKeyCnt, err
 					}
@@ -535,6 +714,17 @@ func (d *Database) PruneLeiosEBBeforeSlot(
 					continue
 				case binary.BigEndian.Uint64(manifest[:8]) >= beforeSlot:
 					continue
+				default:
+					keep, err := keepCertified(
+						hash,
+						binary.BigEndian.Uint64(manifest[:8]),
+					)
+					if err != nil {
+						return deletedKeyCnt, err
+					}
+					if keep {
+						continue
+					}
 				}
 				if err := stageDelete(key); err != nil {
 					return deletedKeyCnt, err

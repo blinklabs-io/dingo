@@ -301,6 +301,11 @@ type Ouroboros struct {
 	// chainsyncLocalTipBlock returns the local tip's block number and the
 	// security parameter k. Tests override it without a LedgerState.
 	chainsyncLocalTipBlock func() (tipBlock, k uint64)
+	// leiosImmutableSlot returns the slot of the selected chain's immutable
+	// point, k blocks behind the applied tip. found is false while the chain is
+	// too short to have one. It is nil without a ledger, which disables every
+	// immutable-tip-relative Leios retention and serving rule.
+	leiosImmutableSlot func(context.Context) (slot uint64, found bool, err error)
 	// chainsyncHasBestPeer reports whether chain selection currently has a
 	// best peer. Nil means none. Tests override it without a node.
 	chainsyncHasBestPeer func() bool
@@ -794,9 +799,12 @@ type OuroborosConfig struct {
 	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
-	// LeiosPersistenceRetentionSlots optionally prunes historical-serving
-	// Leios endorser-block records older than this many slots behind the
-	// highest persisted endorser block. Zero retains all history.
+	// LeiosPersistenceRetentionSlots sets how many slots behind the highest
+	// persisted endorser block uncertified historical-serving Leios records
+	// are kept. Zero prunes an uncertified record once the immutable point of
+	// LedgerState passes its slot, and prunes nothing without a LedgerState.
+	// A positive value never prunes past the immutable point. Records of a
+	// certified endorser block are never pruned.
 	LeiosPersistenceRetentionSlots uint64
 	// LocalStateQueryViewMaxLifetime bounds how long a connection may hold
 	// one acquired LocalStateQuery ledger snapshot before it is forcibly
@@ -1081,6 +1089,12 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.chainsyncLocalTipBlock = func() (uint64, uint64) {
 			k := max(o.ledgerState.SecurityParam(), 0)
 			return o.ledgerState.Tip().BlockNumber, uint64(k)
+		}
+		o.leiosImmutableSlot = func(
+			ctx context.Context,
+		) (uint64, bool, error) {
+			point, found, err := o.ledgerState.ImmutablePoint(ctx)
+			return point.Slot, found, err
 		}
 		o.chainsyncHeaderCheckpoint = o.ledgerState.ValidateHeaderCheckpoint
 		if k := o.ledgerState.SecurityParam(); k > 0 {

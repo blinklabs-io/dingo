@@ -285,6 +285,10 @@ func TestPeerForkAncestorCryptoCacheStillChecksStateAfterCryptoSuccess(
 	seedBlockPoolRegistration(t, db, target.block)
 	targetPool := target.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshot(t, db, 5, targetPool[:], 1_000_000_000)
+	// The ancestor has a snapshot row but no registration to resolve its VRF
+	// key from, so its pool state is unavailable rather than absent.
+	ancestorPool := unverifiedAncestor.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 5, ancestorPool[:], 1_000_000_000)
 	ls.config.PeerHeaderLookupFunc = func(
 		_ ouroboros.ConnectionId,
 		hash []byte,

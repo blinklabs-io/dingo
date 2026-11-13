@@ -226,10 +226,11 @@ func TestLeiosValidationSkippedForCapacityRunsWhenSlotFrees(t *testing.T) {
 	)
 }
 
-// The ledger republishes every chain update as a ledger.block Apply event
-// before it applies the block, so that event is not evidence the announcing
-// block is the ledger tip and must not trigger endorser-block validation. The
-// ledger's own at-tip notification, sent after the apply commits, does.
+// The ledger republishes each chain update as a ledger.block event, which can
+// precede the ledger applying the block, so that event is not evidence the
+// announcing block is the ledger tip and must not trigger endorser-block
+// validation. The ledger's own at-tip notification, sent after the apply
+// commits, does.
 func TestLeiosValidationNotRetriedByLedgerBlockEventBeforeApply(t *testing.T) {
 	t.Parallel()
 
@@ -282,8 +283,24 @@ func TestLeiosValidationNotRetriedByLedgerBlockEventBeforeApply(t *testing.T) {
 		"chain update retry before the ledger apply",
 	)
 
+	// The attempt reports itself before reading applied, so wait for it to
+	// finish and record the basis block as unavailable. Otherwise it could
+	// observe applied and validate without any retry.
+	require.Eventually(t, func() bool {
+		o.leiosMu.RLock()
+		defer o.leiosMu.RUnlock()
+		return o.leiosEndorserBlocks[key].semanticValidationStatus ==
+			leiosEBValidationUnknown
+	}, 5*time.Second, 10*time.Millisecond)
+
 	applied.Store(true)
 	o.RetryLeiosEndorserBlockValidations()
+	testutil.RequireReceive(
+		t,
+		attempts,
+		5*time.Second,
+		"retry after the ledger apply",
+	)
 	require.Eventually(t, func() bool {
 		o.leiosMu.RLock()
 		defer o.leiosMu.RUnlock()

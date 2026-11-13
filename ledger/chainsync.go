@@ -8938,11 +8938,13 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 // before inserting makes this safe for a chain replayed from genesis: a
 // credential a later UpdateCommittee has since re-elected or removed already
 // has a row, so its real history is left alone instead of being reverted to
-// genesis state. A Mithril import whose current tip is in Conway or later is
-// different. Its committee is an authoritative current-state snapshot, so an
+// genesis state. A Mithril import whose snapshot slot is in Conway or later
+// is different. Its committee is an authoritative current-state snapshot, so an
 // absent genesis credential means it is not seated and must not be inferred
-// from missing local history. A pre-Conway import has no committee state yet,
-// so it retains the genesis members for the later hard fork.
+// from missing local history: it is recorded as removed (soft-deleted at slot
+// 0) rather than seated, and a live slot-0 seat an earlier startup inferred
+// for it is recorded the same way. A pre-Conway import has no committee state
+// yet, so it retains the genesis members for the later hard fork.
 func (ls *LedgerState) ensureGenesisCommittee(
 	ctx context.Context,
 	txn *database.Txn,
@@ -8984,6 +8986,8 @@ func (ls *LedgerState) ensureGenesisCommittee(
 			AddedSlot:         0,
 		})
 	}
+	var removedSlot *uint64
+	var unseatSeeded bool
 	mithrilBoundary, err := ls.db.MithrilTrustBoundarySlotStrict(txn)
 	if err != nil {
 		return fmt.Errorf(
@@ -8992,33 +8996,78 @@ func (ls *LedgerState) ensureGenesisCommittee(
 		)
 	}
 	if mithrilBoundary > 0 {
-		tipEpoch, err := ls.db.GetEpochBySlot(ls.currentTip.Point.Slot, txn)
+		// The era is the snapshot's, not the tip's: a node that imported a
+		// pre-Conway snapshot and has since synced into Conway holds no
+		// imported committee to treat as authoritative.
+		boundaryEpoch, err := ls.db.GetEpochBySlot(mithrilBoundary, txn)
 		if err != nil {
 			return fmt.Errorf(
-				"read current epoch before seeding genesis committee: %w",
+				"read snapshot epoch before seeding genesis committee: %w",
 				err,
 			)
 		}
-		if tipEpoch == nil {
+		if boundaryEpoch == nil {
 			return fmt.Errorf(
-				"current tip slot %d has no persisted epoch",
-				ls.currentTip.Point.Slot,
+				"snapshot boundary slot %d has no persisted epoch",
+				mithrilBoundary,
 			)
 		}
-		if tipEpoch.EraId >= eras.ConwayEraDesc.Id {
-			return nil
+		// A Conway-or-later snapshot's committee is authoritative, so a
+		// genesis member without a row was removed before it. Recording
+		// that removal at slot 0 keeps include-deleted history non-empty
+		// (a NoConfidence snapshot has no committee rows at all) and
+		// survives any rollback, which only restores rows deleted after
+		// the rollback slot.
+		if boundaryEpoch.EraId >= eras.ConwayEraDesc.Id {
+			removedSlot = new(uint64)
+			// The import writes its committee at the snapshot epoch's start
+			// slot, so only a snapshot epoch starting after slot 0 separates
+			// an imported seat from a genesis seed.
+			unseatSeeded = boundaryEpoch.StartSlot > 0
 		}
 	}
 	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(ctx, txn)
 	if err != nil {
 		return fmt.Errorf("get existing committee members: %w", err)
 	}
-	seen := make(map[string]struct{}, len(existing))
-	for _, member := range existing {
-		seen[(models.CommitteeCredential{
+	genesisKeys := make(map[string]struct{}, len(genesisMembers))
+	for _, member := range genesisMembers {
+		genesisKeys[(models.CommitteeCredential{
 			CredentialTag: member.ColdCredentialTag,
 			Credential:    member.ColdCredHash,
 		}).Key()] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(existing))
+	var unseat []models.CommitteeCredential
+	for _, member := range existing {
+		credential := models.CommitteeCredential{
+			CredentialTag: member.ColdCredentialTag,
+			Credential:    member.ColdCredHash,
+		}
+		key := credential.Key()
+		seen[key] = struct{}{}
+		// A live slot-0 genesis row over such a snapshot was seated by an
+		// earlier startup that seeded absent genesis members; enactment
+		// writes at its own slot. Record that seat as the removal it
+		// stands for.
+		if _, genesis := genesisKeys[key]; genesis && unseatSeeded &&
+			member.AddedSlot == 0 && member.DeletedSlot == nil {
+			unseat = append(unseat, credential)
+		}
+	}
+	if len(unseat) > 0 {
+		if err := ls.db.SoftDeleteCommitteeMembers(
+			ctx, unseat, 0, txn,
+		); err != nil {
+			return fmt.Errorf("unseat genesis committee members: %w", err)
+		}
+		ls.config.Logger.Info(
+			fmt.Sprintf(
+				"unseated %d genesis committee member(s) absent from the Mithril snapshot",
+				len(unseat),
+			),
+			"component", "ledger",
+		)
 	}
 	newMembers := make(
 		[]*models.CommitteeMember,
@@ -9033,6 +9082,7 @@ func (ls *LedgerState) ensureGenesisCommittee(
 		if _, ok := seen[key]; ok {
 			continue
 		}
+		member.DeletedSlot = removedSlot
 		newMembers = append(newMembers, member)
 	}
 	if len(newMembers) == 0 {
@@ -9054,6 +9104,7 @@ func (ls *LedgerState) ensureGenesisCommittee(
 			"recorded %d Conway genesis committee member(s)",
 			len(newMembers),
 		),
+		"removed", removedSlot != nil,
 		"component", "ledger",
 	)
 	return nil
