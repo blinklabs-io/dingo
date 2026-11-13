@@ -560,6 +560,10 @@ func (d *Database) SetGapBlockTransaction(
 	if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
 		return fmt.Errorf("set gap block tx offset: %w", err)
 	}
+	setOnly, err := d.utxoSetOnly(txn)
+	if err != nil {
+		return err
+	}
 
 	// Store UTxO offsets for produced outputs
 	for _, utxo := range tx.Produced() {
@@ -580,7 +584,7 @@ func (d *Database) SetGapBlockTransaction(
 				point.Slot,
 			)
 		}
-		if d.liveUtxo {
+		if setOnly {
 			continue
 		}
 		offsetData := EncodeUtxoOffset(&offset)
@@ -593,11 +597,18 @@ func (d *Database) SetGapBlockTransaction(
 	}
 
 	if err := d.transactionStore().SetGapBlockTransaction(
-		tx, point, idx, certDeposits, txn.Metadata(), protocolMajor,
+		tx, point, idx, certDeposits, txn.Metadata(), protocolMajor, setOnly,
 	); err != nil {
 		return fmt.Errorf(
 			"set gap block transaction metadata: %w", err,
 		)
+	}
+	if setOnly {
+		// No inputs to recover, and none to price a collateral fee from.
+		if owned {
+			return txn.Commit()
+		}
+		return nil
 	}
 	// ensureGapConsumedUtxos must run after SetGapBlockTransaction: it marks
 	// the consumed inputs spent by this tx (utxo.spent_by_tx_id holds

@@ -2684,6 +2684,16 @@ import rebuilds `reward_live_stake` in one transaction rather than in
 resumable ranges. A marked database refuses an import without the set, and
 a catch-up (`Reconcile`) import in this mode is refused.
 
+The import detaches the live source when it returns, before the gap blocks
+between the ImmutableDB tip and the snapshot's tip are ingested, so
+`Database.SetGapBlockTransaction` reads the mark instead. On a marked
+database it stores each gap transaction's blob offset, transaction row and
+certificates, and passes `historyOnly` to `MetadataStore.SetGapBlockTransaction`,
+which then writes no `utxo` rows and no `reward_live_stake` change: the live
+set and its stake are already at or past the gap. Consumed-input recovery and
+the collateral-fee recompute are skipped, since there are no input rows to
+recover or to price a phase-2-invalid transaction's collateral from.
+
 `LedgerStateConfig.UtxoSetOnly` (core storage mode) makes the live UTxO set
 the only copy. `Database.SetLiveUtxoSource` then stops the metadata store from
 writing `utxo` rows and their child rows, the blob store's per-output offset

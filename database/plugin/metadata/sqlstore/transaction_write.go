@@ -1665,6 +1665,7 @@ func (s *Store) SetGapBlockTransaction(
 	certDeposits map[int]uint64,
 	txn types.Txn,
 	protocolMajor uint64,
+	historyOnly bool,
 ) error {
 	// Gap ingestion intentionally has no available input state, so this is
 	// equivalent to SetTransaction with the consumed-input update suppressed.
@@ -1728,6 +1729,11 @@ func (s *Store) SetGapBlockTransaction(
 				if err != nil {
 					return err
 				}
+			}
+			if historyOnly {
+				// The UTxO set and its stake are the live set's, already
+				// at or past this block.
+				return nil
 			}
 			collateralReturn := transaction.CollateralReturn()
 			producedStakeDeltas := make([]stakeCredentialDelta, 0)

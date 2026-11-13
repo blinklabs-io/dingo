@@ -2331,6 +2331,21 @@ func (d *Database) SetLiveUtxoSource(src types.LiveUtxoSource) error {
 	return nil
 }
 
+// utxoSetOnly reports whether the metadata store holds no UTxO set: a live
+// source is attached, or the database is marked set-only. A Mithril import
+// detaches its live source before the gap blocks are ingested, so the mark is
+// what tells the gap path.
+func (d *Database) utxoSetOnly(txn *Txn) (bool, error) {
+	if d.liveUtxo {
+		return true, nil
+	}
+	marked, err := d.GetSyncState(UtxoSetOnlySyncKey, txn)
+	if err != nil {
+		return false, fmt.Errorf("read the UTxO-set-only mark: %w", err)
+	}
+	return marked != "", nil
+}
+
 // LiveUtxo reports whether the ledger holds the live UTxO set outside the
 // metadata store.
 func (d *Database) LiveUtxo() bool {
