@@ -100,6 +100,64 @@ func TestPoolStakeDistribution_ReportsElectingVrfAfterMidEpochRotation(
 		"the distribution must report the key header validation requires")
 }
 
+// A snapshot row written without its VRF key misses the bulk read and is
+// resolved per pool. With no epoch history to place the capture, that
+// resolution falls back to the latest registration rather than dropping the
+// pool.
+func TestPoolStakeDistribution_SnapshotRowWithoutVrfFallsBackPerPool(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newTestDB(t)
+
+	oldVrf := repeatedBytes(32, 0xAA)
+	newVrf := repeatedBytes(32, 0xBB)
+	const snapshotEpoch = 0
+	pkh := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(repeatedBytes(28, 0x11)),
+	)
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: oldVrf},
+		&models.PoolRegistration{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  oldVrf,
+			AddedSlot:   1,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        snapshotEpoch,
+			SnapshotType: snapshotTypeMark,
+			PoolKeyHash:  pkh.Bytes(),
+			TotalStake:   dbtypes.Uint64(1_000_000),
+			CapturedSlot: 1,
+		},
+		nil,
+	))
+	// The re-registration lands after the capture.
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: newVrf},
+		&models.PoolRegistration{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  newVrf,
+			AddedSlot:   5,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+	ls := newPoolDistr2Ledger(t, db)
+
+	dist, err := ls.PoolStakeDistribution(t.Context(), nil, QueryPoint{}, nil)
+	require.NoError(t, err)
+	require.Len(t, dist.Pools, 1)
+	assert.Equal(t, newVrf, dist.Pools[0].VrfKeyHash[:],
+		"a key the history cannot place falls back to the latest registration")
+}
+
 // GetStakeDistribution answers from live stake but names the key header
 // validation holds the pool to, so a registration newer than the electing
 // snapshot must not change the reported key.

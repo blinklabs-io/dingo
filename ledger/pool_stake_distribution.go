@@ -594,8 +594,18 @@ func (ls *LedgerState) electingPoolVrfKeyHashes(
 		return out, nil
 	}
 	epochCache := ls.epochCacheSnapshot()
+	fromSnapshot, err := ls.electingSnapshotVrfKeyHashes(
+		slot, epochId, epochCache, txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("pool stake distribution: %w", err)
+	}
 	var latest []lcommon.PoolKeyHash
 	for _, pkh := range keyHashes {
+		if vrf, ok := fromSnapshot[pkh]; ok {
+			out[pkh] = vrf
+			continue
+		}
 		vrf, ok, err := ls.electingVrfKeyHashAtSlot(
 			ctx, pkh, slot, epochId, epochCache, txn,
 		)
@@ -619,6 +629,51 @@ func (ls *LedgerState) electingPoolVrfKeyHashes(
 			return nil, err
 		}
 		maps.Copy(out, fallback)
+	}
+	return out, nil
+}
+
+// electingSnapshotVrfKeyHashes reads, in one query, the VRF key hashes that
+// the snapshot electing slot carries on its own rows. It selects the snapshot
+// the way electingVrfKeyHashAtSlot does and keeps only the rows that function
+// would answer from directly (a capture slot and a well-formed key), so a
+// pool missing here is resolved per pool with the same result. Without the
+// bulk read an unfiltered distribution costs one snapshot query per pool.
+func (ls *LedgerState) electingSnapshotVrfKeyHashes(
+	slot, epochId uint64,
+	epochCache []models.Epoch,
+	txn *database.Txn,
+) (map[lcommon.PoolKeyHash]ledger.Blake2b256, error) {
+	snapEpoch := epochId
+	kind := models.PoolStakeSnapshotTypeActive
+	if slot == 0 || slot != ls.mithrilLedgerSlot {
+		useImportedActive, err := ls.shouldUseImportedActivePoolDistributionAtSlot(
+			slot, epochId, epochCache,
+		)
+		if err != nil {
+			return nil, nil //nolint:nilerr // reported per pool below
+		}
+		if !useImportedActive {
+			snapEpoch = leaderStakeSnapshotEpochInCache(epochId, epochCache)
+			kind = models.PoolStakeSnapshotTypeMark
+		}
+	}
+	rows, err := ls.db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		snapEpoch, kind, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read electing snapshot VRF keys: %w", err)
+	}
+	out := make(map[lcommon.PoolKeyHash]ledger.Blake2b256, len(rows))
+	for _, row := range rows {
+		if row == nil || row.CapturedSlot == 0 ||
+			len(row.PoolKeyHash) != len(lcommon.PoolKeyHash{}) ||
+			len(row.VrfKeyHash) != len(ledger.Blake2b256{}) {
+			continue
+		}
+		out[lcommon.PoolKeyHash(row.PoolKeyHash)] = ledger.Blake2b256(
+			row.VrfKeyHash,
+		)
 	}
 	return out, nil
 }
