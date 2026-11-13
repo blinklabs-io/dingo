@@ -5264,6 +5264,7 @@ func TestChainsyncServerPeerNotServedEqualSlotSuccessorAheadOfLedger(
 	appendChild := func(
 		parent *testBlock,
 		slot, blockNumber uint64,
+		blockType int,
 		hashByte byte,
 	) (*testBlock, ocommon.Point) {
 		t.Helper()
@@ -5272,15 +5273,19 @@ func TestChainsyncServerPeerNotServedEqualSlotSuccessorAheadOfLedger(
 		header.prevHash = parent.Hash()
 		block := &testBlock{
 			BlockHeader: header,
-			blockType:   1,
+			blockType:   blockType,
 			cbor:        []byte{0x81, hashByte},
 		}
 		require.NoError(t, f.o.ledgerState.Chain().AddBlock(t.Context(), block, nil))
 		return block, ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
 	}
 
-	boundary, boundaryPoint := appendChild(block1, 2, 1, 0x02)
-	successor, successorPoint := appendChild(boundary, 2, 2, 0x03)
+	boundary, boundaryPoint := appendChild(
+		block1, 2, 1, int(gledger.BlockTypeByronEbb), 0x02,
+	)
+	successor, successorPoint := appendChild(
+		boundary, 2, 2, int(gledger.BlockTypeByronMain), 0x03,
+	)
 	f.setTip(boundary, boundaryPoint)
 
 	require.NoError(t, f.h.RequestNext())
