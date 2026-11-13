@@ -34,6 +34,8 @@ type ProviderConfig struct {
 	Host                            string              `yaml:"host"`
 	MaxConcurrentMutations          uint                `yaml:"maxConcurrentMutations"`
 	MaxConcurrentMutationsPerClient uint                `yaml:"maxConcurrentMutationsPerClient"`
+	MaxConcurrentPoolLists          uint                `yaml:"maxConcurrentPoolLists"`
+	MaxConcurrentPoolListsPerClient uint                `yaml:"maxConcurrentPoolListsPerClient"`
 	TLS                             apiconfig.TLSPolicy `yaml:"tls"`
 }
 
@@ -79,6 +81,13 @@ func RegisterProvider(host *plugin.Host) error {
 					"blockfrost: maxConcurrentMutationsPerClient must not exceed maxConcurrentMutations",
 				)
 			}
+			if cfg.MaxConcurrentPoolLists > 0 &&
+				cfg.MaxConcurrentPoolListsPerClient >
+					cfg.MaxConcurrentPoolLists {
+				return nil, nil, errors.New(
+					"blockfrost: maxConcurrentPoolListsPerClient must not exceed maxConcurrentPoolLists",
+				)
+			}
 			server := New(BlockfrostConfig{
 				ListenAddress: net.JoinHostPort(
 					listenHost,
@@ -86,6 +95,8 @@ func RegisterProvider(host *plugin.Host) error {
 				),
 				MaxConcurrentMutations:          cfg.MaxConcurrentMutations,
 				MaxConcurrentMutationsPerClient: cfg.MaxConcurrentMutationsPerClient,
+				MaxConcurrentPoolLists:          cfg.MaxConcurrentPoolLists,
+				MaxConcurrentPoolListsPerClient: cfg.MaxConcurrentPoolListsPerClient,
 				CORSAllowedOrigins:              deps.CORSAllowedOrigins,
 				TLS:                             tls,
 			}, deps.Node, deps.Logger)

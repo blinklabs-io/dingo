@@ -418,6 +418,7 @@ var providerConfigPlainKeys = []string{
 	"revalidationdeltacap",
 	// api/blockfrost admission limits
 	"maxconcurrentmutations", "maxconcurrentmutationsperclient",
+	"maxconcurrentpoollists", "maxconcurrentpoollistsperclient",
 	// api/{blockfrost,kupo,mesh,utxorpc} TLS policy keys
 	"mode", "certfilepath", "keyfilepath",
 }

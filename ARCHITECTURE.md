@@ -15739,6 +15739,9 @@ nonzero default exists. The opt-in settings are:
 - Blockfrost `maxConcurrentMutations` and `maxConcurrentMutationsPerClient`
   (submission and evaluation; per-client may not exceed the shared limit when
   both are set).
+- Blockfrost `maxConcurrentPoolLists` and `maxConcurrentPoolListsPerClient`
+  (the pool list and retiring pool list; per-client may not exceed the shared
+  limit when both are set).
 - MCP `rateLimit` (requests per second) and `burst`.
 - Bark `barkArchiveMaxConcurrentFetches`, `barkArchiveLookupsPerSecond` and
   `barkArchiveCallerLookupsPerSecond`.
@@ -16037,6 +16040,13 @@ evaluation work and a positive `maxConcurrentMutationsPerClient` caps one remote
 address (it may equal the shared limit, in which case one address can use the
 whole budget); work over either configured limit receives HTTP 429 without
 reading its body.
+
+Pool list admission is optional in the same way. With
+`maxConcurrentPoolLists` and `maxConcurrentPoolListsPerClient` both zero (the
+default) `GET /pools` and `GET /pools/retiring` are always admitted. A positive
+`maxConcurrentPoolLists` bounds how many of them run at once across the server
+and a positive `maxConcurrentPoolListsPerClient` caps one remote address; work
+over either limit receives HTTP 429 with `Retry-After`.
 
 The DRep detail route has no admission limit. Client cancellation flows through
 the epoch-boundary wait and the single read transaction used for the detail,

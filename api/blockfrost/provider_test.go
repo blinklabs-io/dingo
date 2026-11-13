@@ -146,3 +146,40 @@ func TestProviderPropagatesTLS(t *testing.T) {
 	require.Equal(t, certPath, srv.config.TLS.CertFilePath)
 	require.Equal(t, keyPath, srv.config.TLS.KeyFilePath)
 }
+
+func TestProviderPropagatesPoolListLimits(t *testing.T) {
+	t.Parallel()
+
+	host := newProviderHost(t)
+	srv := resolveOnFreePortWithConfig(t, host, map[string]any{
+		"maxConcurrentPoolLists":          3,
+		"maxConcurrentPoolListsPerClient": 2,
+	})
+
+	require.Equal(t, uint(3), srv.config.MaxConcurrentPoolLists)
+	require.Equal(t, uint(2), srv.config.MaxConcurrentPoolListsPerClient)
+	require.NotNil(t, srv.poolListAdmission)
+}
+
+func TestProviderRejectsPoolListClientLimitAboveShared(t *testing.T) {
+	t.Parallel()
+
+	host := newProviderHost(t)
+
+	_, err := plugin.Resolve[*Blockfrost](
+		t.Context(),
+		host,
+		plugin.CapabilityAPIBlockfrost,
+		"builtin",
+		map[string]any{
+			"port":                            freeLoopbackPort(t),
+			"maxConcurrentPoolLists":          1,
+			"maxConcurrentPoolListsPerClient": 2,
+		},
+		ProviderDependencies{Node: &mockNode{}, Host: "127.0.0.1"},
+	)
+
+	require.ErrorContains(
+		t, err, "maxConcurrentPoolListsPerClient must not exceed",
+	)
+}

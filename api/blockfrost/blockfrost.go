@@ -37,6 +37,10 @@ type Blockfrost struct {
 	// mutationAdmission is nil unless the operator configured a mutation
 	// limit; a nil admission admits every request.
 	mutationAdmission *requestAdmission
+	// poolListAdmission is nil unless the operator configured a pool list
+	// limit. It is shared by the pool list and the retiring pool list, which
+	// rank the pool registration and retirement certificates.
+	poolListAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -65,6 +69,10 @@ func New(
 		mutationAdmission: newRequestAdmission(
 			cfg.MaxConcurrentMutations,
 			cfg.MaxConcurrentMutationsPerClient,
+		),
+		poolListAdmission: newRequestAdmission(
+			cfg.MaxConcurrentPoolLists,
+			cfg.MaxConcurrentPoolListsPerClient,
 		),
 		listener: apilistener.New("Blockfrost API", logger),
 	}
