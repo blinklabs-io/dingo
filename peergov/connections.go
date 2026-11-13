@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"regexp"
 	"strconv"
@@ -990,6 +991,8 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 		connClosedAt := time.Now()
 		denied := p.isPeerDeniedLocked(peer)
 		stalled := isChainsyncStallError(e.Error)
+		demoted := e.Error == nil &&
+			event.IsChainsyncDemotionReason(e.LocalCloseReason)
 		if peer.Source == PeerSourceInboundConn {
 			connDur := time.Duration(0)
 			if !peer.InboundConnectedAt.IsZero() {
@@ -1055,7 +1058,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 					)
 					connDur = 0
 				}
-				if stalled {
+				if stalled || demoted {
 					peer.LastChainsyncStall = connClosedAt
 				}
 				// A stall ends a long session without the peer having been
@@ -1065,7 +1068,8 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 					// Keep retry pacing and existing failure history, so a
 					// later genuine failure resumes its previous backoff rung.
 					peer.ReconnectDelay = initialReconnectDelay
-				} else if !stalled && !peer.ConnectedAt.IsZero() &&
+				} else if !stalled && !demoted &&
+					!peer.ConnectedAt.IsZero() &&
 					connDur >= minStableConnectionDuration {
 					// Connection was stable, reset backoff
 					peer.ReconnectCount = 0
@@ -1112,6 +1116,15 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 						)
 					}
 				}
+				if demoted {
+					floor := chainsyncDemotionReconnectDelay +
+						chainsyncDemotionMinJitter +
+						rand.N( //nolint:gosec // redial spread, not security-sensitive
+							chainsyncDemotionMaxJitter-
+								chainsyncDemotionMinJitter,
+						)
+					peer.ReconnectDelay = max(peer.ReconnectDelay, floor)
+				}
 			}
 			peer.ConnectedAt = time.Time{} // Reset for next connection
 		}
@@ -1127,8 +1140,8 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			if !peer.Reconnecting {
 				p.spawnOutboundConnectionLocked(peer)
 			}
-			if stalled {
-				// The stalled peer is now backing off. Dial alternates
+			if stalled || demoted {
+				// The peer is now backing off. Dial alternates
 				// immediately: the next reconcile is minutes away, and
 				// until then the node would only redial the peer that
 				// just failed.

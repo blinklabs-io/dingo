@@ -787,6 +787,11 @@ func TestTickDisconnectsPatienceExhaustedPeer(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, connId, recycleEvt.ConnectionId)
 	assert.Equal(t, ReasonPatienceExhausted, recycleEvt.Reason)
+	assert.Equal(
+		t,
+		event.ConnectionCloseReasonPatienceExhausted,
+		recycleEvt.LocalCloseReason,
+	)
 
 	runTickWith(r, st, live, now.Add(time.Second), 100)
 	assert.Len(

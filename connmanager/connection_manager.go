@@ -1336,7 +1336,13 @@ func (c *ConnectionManager) HandleConnectionRecycleRequestedEvent(
 			"connection_id", e.ConnectionId.String(),
 			"reason", e.Reason,
 		)
-		if err := conn.Close(); err != nil {
+		var err error
+		if e.LocalCloseReason != "" {
+			err = c.CloseConnectionWithReason(conn, e.LocalCloseReason)
+		} else {
+			err = conn.Close()
+		}
+		if err != nil {
 			c.config.Logger.Debug(
 				"failed to close recycled connection",
 				"connection_id", e.ConnectionId.String(),

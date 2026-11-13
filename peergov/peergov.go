@@ -135,6 +135,18 @@ const (
 	// pool within seconds, slow enough (a handful of reconnects per minute per
 	// peer) to avoid port exhaustion.
 	emergencyReconnectDelay = 5 * time.Second
+	// chainsyncDemotionReconnectDelay, plus a jitter in
+	// [chainsyncDemotionMinJitter, chainsyncDemotionMaxJitter), is the least
+	// a peer closed for a chainsync demotion (event.IsChainsyncDemotionReason)
+	// waits before it is redialed, as the reference node waits after a
+	// ChainSync failure. A redialed peer starts with a full patience bucket
+	// and nothing remembered by chain selection, so without the wait one fork
+	// header after reconnecting pins the Limit on Eagerness again. The floor
+	// holds even when hot peers are critically low: alternates are dialed
+	// immediately instead.
+	chainsyncDemotionReconnectDelay = 10 * time.Second
+	chainsyncDemotionMinJitter      = 100 * time.Millisecond
+	chainsyncDemotionMaxJitter      = 4 * time.Second
 	// dialDNSResolveTimeout bounds peer hostname resolution. It is intentionally
 	// shorter than connmanager's 10s dial timeout so a hung or slow resolver
 	// cannot wedge peer admission or the outbound-dial loop; dial attempts fall

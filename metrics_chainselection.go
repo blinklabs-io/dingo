@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/prometheus/client_golang/prometheus"
@@ -270,9 +271,18 @@ func (n *Node) onGenesisDensityDisconnect(
 	if n.connManager == nil {
 		return
 	}
-	if conn := n.connManager.GetConnectionById(d.ConnectionId); conn != nil {
-		conn.Close()
+	conn := n.connManager.GetConnectionById(d.ConnectionId)
+	if conn == nil {
+		return
 	}
+	if d.EagernessStandoff {
+		_ = n.connManager.CloseConnectionWithReason(
+			conn,
+			event.ConnectionCloseReasonEagernessStandoffLost,
+		)
+		return
+	}
+	conn.Close()
 }
 
 // denyPeer applies a denial to the current peer governor. Live database
