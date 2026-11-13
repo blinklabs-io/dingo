@@ -5907,8 +5907,9 @@ selection, full block fetch and admission to the ledger apply stream; an apply
 chunk ends with its first live announcing block, and the next chunk's
 preparation validates that block's endorser block while it is the published
 tip and before any later block applies. The background validator in
-`ouroboros` uses the same state. The ledger's `ledger.block` apply event and
-`chain.update` can both precede the apply, so the ledger also notifies the
+`ouroboros` uses the same state. The `ledger.block` apply event (a
+republished chain update) and `chain.update` can both precede the apply, so
+`ledger.block` does not trigger a retry, and the ledger also notifies the
 node (`LedgerStateConfig.LeiosAnnouncementAtTip`) as soon as the chunk ending
 with the live announcing block commits, which retries the background
 validation. Without that notification a voter would vote only when the next
