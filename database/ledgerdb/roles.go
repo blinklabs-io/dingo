@@ -2177,4 +2177,10 @@ type LeiosStore interface {
 		manifestRaw []byte,
 		txsRaw []cbor.RawMessage,
 	) error
+	// SetLeiosEBCertified records that a ranking block certified the endorser
+	// block occurrence (slot, hash). The marker is idempotent and, given the
+	// block-apply transaction, commits with the certifying ranking block and is
+	// discarded with it when a later check rejects the block. A nil txn commits
+	// the marker in its own blob transaction.
+	SetLeiosEBCertified(slot uint64, hash []byte, txn Txn) error
 }

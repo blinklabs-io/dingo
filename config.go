@@ -1915,9 +1915,10 @@ func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	}
 }
 
-// WithLeiosPersistenceRetentionSlots sets the number of slots of persisted
-// Leios endorser-block history retained for historical serving. Zero keeps all
-// persisted history.
+// WithLeiosPersistenceRetentionSlots sets the number of slots of uncertified
+// Leios endorser-block history retained for historical serving. Zero prunes an
+// uncertified endorser block once the immutable point passes its slot.
+// Certified endorser blocks are always retained.
 func WithLeiosPersistenceRetentionSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LeiosPersistenceRetentionSlots = slots

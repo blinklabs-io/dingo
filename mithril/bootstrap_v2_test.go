@@ -48,6 +48,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/klauspost/compress/zstd"
@@ -217,6 +218,85 @@ func validImmutableChunk(
 	}, hashes
 }
 
+func testConwayPParams() *conway.ConwayProtocolParameters {
+	return &conway.ConwayProtocolParameters{
+		MinFeeA:            44,
+		MinFeeB:            155381,
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+		KeyDeposit:         2000000,
+		PoolDeposit:        500000000,
+		MaxEpoch:           18,
+		NOpt:               500,
+		A0:                 &cbor.Rat{Rat: big.NewRat(3, 10)},
+		Rho:                &cbor.Rat{Rat: big.NewRat(3, 1000)},
+		Tau:                &cbor.Rat{Rat: big.NewRat(1, 5)},
+		ProtocolVersion: common.ProtocolParametersProtocolVersion{
+			Major: 10,
+			Minor: 0,
+		},
+		MinPoolCost:    340000000,
+		AdaPerUtxoByte: 4310,
+		CostModels:     map[uint][]int64{1: {0}},
+		ExecutionCosts: common.ExUnitPrice{
+			MemPrice:  &cbor.Rat{Rat: big.NewRat(577, 10000)},
+			StepPrice: &cbor.Rat{Rat: big.NewRat(721, 10000000)},
+		},
+		MaxTxExUnits: common.ExUnits{
+			Memory: 10000000,
+			Steps:  10000000000,
+		},
+		MaxBlockExUnits: common.ExUnits{
+			Memory: 50000000,
+			Steps:  40000000000,
+		},
+		MaxValueSize:         5000,
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
+		PoolVotingThresholds: conway.PoolVotingThresholds{
+			MotionNoConfidence:    cbor.Rat{Rat: big.NewRat(1, 2)},
+			CommitteeNormal:       cbor.Rat{Rat: big.NewRat(1, 2)},
+			CommitteeNoConfidence: cbor.Rat{Rat: big.NewRat(1, 2)},
+			HardForkInitiation:    cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpSecurityGroup:       cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		DRepVotingThresholds: conway.DRepVotingThresholds{
+			MotionNoConfidence:    cbor.Rat{Rat: big.NewRat(1, 2)},
+			CommitteeNormal:       cbor.Rat{Rat: big.NewRat(1, 2)},
+			CommitteeNoConfidence: cbor.Rat{Rat: big.NewRat(1, 2)},
+			UpdateToConstitution:  cbor.Rat{Rat: big.NewRat(1, 2)},
+			HardForkInitiation:    cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpNetworkGroup:        cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpEconomicGroup:       cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpTechnicalGroup:      cbor.Rat{Rat: big.NewRat(1, 2)},
+			PpGovGroup:            cbor.Rat{Rat: big.NewRat(1, 2)},
+			TreasuryWithdrawal:    cbor.Rat{Rat: big.NewRat(1, 2)},
+		},
+		MinCommitteeSize:        5,
+		CommitteeTermLimit:      146,
+		GovActionValidityPeriod: 20,
+		GovActionDeposit:        100000000000,
+		DRepDeposit:             500000000,
+		DRepInactivityPeriod:    20,
+		MinFeeRefScriptCostPerByte: &cbor.Rat{
+			Rat: big.NewRat(1, 1),
+		},
+	}
+}
+
+// conwayTelescope builds a flat hard-fork telescope whose last entry is the
+// Conway era: one past entry per earlier era, then the current entry. The
+// import refuses ledger states from any earlier era.
+func conwayTelescope(pastEra, currentEra []byte) []any {
+	const conwayIndex = 6
+	entries := make([]any, 0, conwayIndex+1)
+	for range conwayIndex {
+		entries = append(entries, cbor.RawMessage(pastEra))
+	}
+	return append(entries, cbor.RawMessage(currentEra))
+}
+
 func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
 	return minimalLedgerStateWithUTxOMap(t, slot, hash, nil)
 }
@@ -271,7 +351,46 @@ func minimalLedgerStateWithUTxOMap(
 	if len(utxoMap) == 0 {
 		utxoMap = emptyMap
 	}
-	utxoState, err := cbor.Encode([]any{cbor.RawMessage(utxoMap)})
+	pparams, err := cbor.Encode(testConwayPParams())
+	require.NoError(t, err)
+	// The import refuses pre-Conway states, and a Conway reconcile needs the
+	// governance state: no proposals, no committee, an empty pulsing state.
+	govState, err := cbor.Encode([]any{
+		[]any{
+			[]any{[]any{}, []any{}, []any{}, []any{}},
+			[]any{},
+		},
+		[]any{},
+		[]any{
+			[]any{
+				"https://example.com/constitution",
+				bytes.Repeat([]byte{0xAA}, 32),
+			},
+			nil,
+		},
+		cbor.RawMessage(pparams),
+		cbor.RawMessage(pparams),
+		cbor.RawMessage(pparams),
+		[]any{
+			[]any{
+				[]any{},
+				cbor.RawMessage(emptyMap),
+				cbor.RawMessage(emptyMap),
+				cbor.RawMessage(emptyMap),
+			},
+			[]any{
+				[]any{[]any{}, nil, nil, nil, nil, nil, nil},
+				[]any{}, []any{}, false,
+			},
+		},
+	})
+	require.NoError(t, err)
+	utxoState, err := cbor.Encode([]any{
+		cbor.RawMessage(utxoMap),
+		uint64(0),
+		uint64(0),
+		cbor.RawMessage(govState),
+	})
 	require.NoError(t, err)
 	ledgerState, err := cbor.Encode([]any{
 		cbor.RawMessage(certState),
@@ -318,9 +437,7 @@ func minimalLedgerStateWithUTxOMap(
 		cbor.RawMessage(bound), cbor.RawMessage(shelleyState),
 	})
 	require.NoError(t, err)
-	telescope, err := cbor.Encode([]any{
-		cbor.RawMessage(pastEra), cbor.RawMessage(currentEra),
-	})
+	telescope, err := cbor.Encode(conwayTelescope(pastEra, currentEra))
 	require.NoError(t, err)
 	neutralNonce, err := cbor.Encode([]any{uint64(0)})
 	require.NoError(t, err)
@@ -339,9 +456,9 @@ func minimalLedgerStateWithUTxOMap(
 		cbor.RawMessage(bound), cbor.RawMessage(praosState),
 	})
 	require.NoError(t, err)
-	praosTelescope, err := cbor.Encode([]any{
-		cbor.RawMessage(pastEra), cbor.RawMessage(praosCurrentEra),
-	})
+	praosTelescope, err := cbor.Encode(
+		conwayTelescope(pastEra, praosCurrentEra),
+	)
 	require.NoError(t, err)
 	headerState, err := cbor.Encode([]any{
 		[]any{}, cbor.RawMessage(praosTelescope),

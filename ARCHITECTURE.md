@@ -651,7 +651,7 @@ sequenceDiagram
     OB->>Peer: otherwise re-intersect at last accepted cursor
     Peer->>OB: replay parent-linked headers in order
     OB->>OB: strictly verify and promote each replayed header
-    LS->>EB: publish BlockEvent
+    LS->>EB: republish chain update as BlockEvent (can precede the ledger apply; not an applied-tip signal)
 
     Note over Peer,DB: Rollback Path
     Peer->>OB: RollBackward(point)
@@ -1212,7 +1212,9 @@ pending before preparation, or clears only the new intent when there was none.
 The forward path keeps async semantics deliberately: its after-commit callback
 only enqueues onto the ordered lane, so subscribers cannot observe an Apply
 before storage is durable and their work never runs inline in `Commit`.
-`ledger.block` remains `PublishBlocking` on the handler's own goroutine.
+`ledger.block` is published with `PublishBlocking` on the handler's own
+goroutine when the block joins or leaves the primary chain, which can be before
+the ledger applies it, so it is not an applied-tip signal.
 
 An ordinary stalled subscriber detaches after its delivery timeout; a lossless
 subscriber deliberately remains attached until it drains or is stopped, closed,
@@ -1255,11 +1257,17 @@ answers `NoBlocks` before another database transaction is opened.
 
 When a peer requests a range, `ouroboros/blockfetch.go` opens chain iterators
 at the requested start and end points to validate both endpoints against the
-serving chain, then sends `StartBatch`. A persistent-chain iterator first
-checks local point metadata, so a missing point cannot fall through to a remote
-archive. It resolves the block index before taking the chain lock and verifies
-the chain mutation generation after acquiring it, keeping remote reads outside
-the lock without accepting an index invalidated by a concurrent rollback.
+serving chain. It also verifies that the applied ledger tip is on that chain
+and that the requested end is no later than the applied tip before sending
+`StartBatch`; ranges into fetched but unapplied blocks receive `NoBlocks`.
+Equal-slot ordering is checked with the iterator because a Byron main block can
+share a slot with its epoch-boundary parent; this includes a start that follows
+the end within one slot, which receives `NoBlocks`. A persistent-chain
+iterator first checks local point metadata, so a missing point cannot fall
+through to a remote archive. It resolves the block index before taking the
+chain lock and verifies the chain mutation generation after acquiring it,
+keeping remote reads outside the lock without accepting an index invalidated
+by a concurrent rollback.
 Checking only
 the end slot let a peer name an end point the server does not hold and receive
 a slot-bounded prefix of the server's own chain in its place. An end point
@@ -2205,10 +2213,15 @@ When `Node.Run()` is called, components are initialized in this order:
     is likewise an existing chain point rather than origin, so restart takes
     this preservation path instead of reapplying genesis declarations. The
     durable `mithril_ledger_slot` also makes a Conway-or-later imported
-    Constitutional Committee authoritative: startup never fills an absent
+    Constitutional Committee authoritative: startup never seats an absent
     imported member from Conway genesis, because absence can represent a
-    pre-snapshot removal. A pre-Conway imported tip has no committee state yet,
-    so startup retains the genesis members for the later hard fork.
+    pre-snapshot removal; it records the member as removed (soft-deleted at
+    slot 0) so committee state stays available even for a snapshot with no
+    committee, and unseats a live slot-0 genesis seat an earlier startup
+    inferred when the snapshot epoch starts after slot 0. A pre-Conway
+    snapshot has no committee state yet, so startup retains the genesis
+    members for the later hard fork; the era is read at
+    `mithril_ledger_slot`, not the current tip.
     For networks with a real Byron genesis, an empty database retains a Byron
     epoch cache until the on-chain Shelley boundary is observed. A configured
     experimental Shelley hard-fork epoch is the explicit exception used by
@@ -2400,7 +2413,7 @@ outlive it:
   on its own behalf. A leaked one would be handled once per restore cycle,
   forever.
 - **Leios persistence workers.** `Close` stops the historical-serving writer
-  and optional retention GC before storage closes. An unconfirmed worker drain
+  and retention GC before storage closes. An unconfirmed worker drain
   prevents normal shutdown and live restore from closing storage underneath it.
 
 `Close` is idempotent, so `Node.Stop` and an explicit restore teardown can both
@@ -2635,7 +2648,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `ledger.connection_recycle_requested` | Ouroboros | Unusable peer connection detected; node wiring translates the request to `connmanager.connection_recycle_requested` |
 | `mempool.add_tx` | Mempool | Transaction added |
 | `mempool.remove_tx` | Mempool | Transaction removed |
-| `ledger.block` | LedgerState | Block applied or rolled back |
+| `ledger.block` | LedgerState | Block added to or removed from the primary chain, republished from `chain.update`. Can be published before the ledger applies the block, so it is not an applied-tip signal |
 | `ledger.tx` | LedgerState | Transaction processed (ordered lane — see below) |
 | `ledger.utxo` | LedgerState | One change to the live UTxO set, with the outputs it adds (and their CBOR) and removes: a transaction, genesis outputs, the Allegra AVVM removal, or a rollback (ordered lane, published after commit) |
 | `ledger.error` | LedgerState | Ledger error occurred |
@@ -5010,8 +5023,16 @@ domain for pool-registration proofs of possession. Other chains retain the
 IETF `BLS_POP` domain. Node startup, storage reinitialization, and immutable
 replay supply that immutable policy through `LedgerStateConfig` and
 `LedgerView`; gOuroboros resolves it through pending and cached validation
-views. Validation checks exactly the selected domain. This pool-registration
-policy does not change Leios committee or aggregate-certificate verification.
+views. Validation checks exactly the selected domain. The same selection
+(`LedgerStateConfig.DijkstraBlsProofDomain`) is passed to `VoteManager` as
+`KeyProofDomain`, so the proofs of possession on committee seat keys are
+verified under the domain their pool registration used. Dingo passes
+gOuroboros's `VerifyBlock` a header-only block, for which its certificate check
+returns early, and the ledger view does not implement
+`DijkstraLeiosCertificateState`, so the vote manager's certificate validation
+is the only committee-key check.
+The verified-key cache is keyed by domain, and the other domain is never tried
+after a failure.
 
 Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
 can run its own implementation — the reference-script-aware fee rule, local
@@ -5482,6 +5503,17 @@ install a job — an unwinding clone, a stopped writer, a complete job that land
 for the same occurrence meanwhile — and an installed job's reservation is
 released when it is superseded by a replacement or popped by the drain, so the
 budget is a steady-state limit rather than a one-shot allowance.
+Retention follows the reference node: the retention GC (`runLeiosPersistenceGC`)
+prunes an uncertified endorser block once the immutable point
+(`LedgerState.ImmutablePoint`, `k` blocks behind the applied tip) passes its
+slot, while a certified one (`Database.IsLeiosEBCertified`; the ledger stages
+the marker in the certifying ranking block's apply transaction, so it commits
+only with that block, and a rollback removes it) is kept permanently. A positive
+`leiosPersistenceRetentionSlots` only widens the window and never prunes past
+the immutable point, and the writer still persists a certified block below the
+cutoff. The leios-fetch server answers an uncertified block behind the
+immutable point as unknown, the same absence reply as any other missing block,
+whether it is still cached or persisted.
 `startLeiosPersistWriter` resets the accounting with the pending map, so a live
 Restore/Truncate restart does not carry the old queue's reservations onto the
 new one; the writer is drained and stopped at shutdown via
@@ -5596,19 +5628,21 @@ Positive retention values must cover at least the network stability window,
 from the ledger's genesis parameters. Startup rejects a smaller value or unknown
 parameters before constructing the persistence workers.
 
-Leios historical-serving records are kept indefinitely unless an operator sets
-`leiosPersistenceRetentionSlots` (or
-`DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) to a positive value. The separate
-GC worker prunes `em`/`et` manifests and transaction bodies strictly older
-than the highest persisted Leios EB slot minus that window, first after startup
-restores the watermark and then hourly. It uses the blob namespace only;
+Leios historical-serving records follow the reference node's retention: the
+`em`/`et` records of a certified endorser block are kept, and an uncertified
+one is pruned once the immutable point passes its slot. A positive
+`leiosPersistenceRetentionSlots` (or `DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`)
+keeps uncertified records back to the highest persisted Leios EB slot minus
+that window, never past the immutable point; `DATABASE.md` gives the full rule.
+The separate GC worker runs first after startup restores the watermark and
+then hourly. It uses the blob namespace only;
 ordinary ledger block history and already-applied UTxO effects are unaffected.
 The Ouroboros provider also reloads EBs from these keys on a cache miss, so a
 later rollback/replay that needs pruned data must refetch it from a Leios peer;
-downstream requests outside the configured window have the same peer
-dependency. Hourly sweeps list manifests to find the highest persisted slot,
-then scan the shared Leios prefix for deletion candidates. On object stores
-this means two paginated listings plus per-key deletes, so the cost is opt-in.
+downstream requests for pruned records have the same peer dependency. A sweep
+with a positive window lists manifests to find the highest persisted slot; every
+sweep scans the shared Leios prefix for deletion candidates. On object stores
+this means paginated listings plus per-key deletes.
 The GC worker does not share the persistence writer's queue and cannot stall
 its write drain. Live Restore/Truncate stops
 and joins both workers before storage replacement; if either worker cannot
@@ -7591,12 +7625,16 @@ snapshot closed by the lifetime bound above reproduces this connection-teardown
 behavior.
 
 "Ahead of the tip" means ahead of the applied ledger tip, and the chain
-iterator runs ahead of it during sync. So the node-to-client ChainSync server
-(`chainsyncServerRequestNext` with `waitForLedger`) holds a roll-forward
+iterator runs ahead of it during sync. ChainSync servers hold a roll-forward
+(`chainsyncServerRequestNext` with `waitForLedger`)
 behind `MsgAwaitReply` until `LedgerState.AwaitAppliedSlot` sees the ledger
-reach the block, as cardano-node serves local clients only blocks it has
-already validated. A local client can therefore Acquire every point ChainSync
-delivers to it. Node-to-node peers are still served ahead of the ledger.
+reach the block, as cardano-node serves downstream clients and peers only
+blocks on its validated selected chain. A local client can therefore Acquire
+every point ChainSync delivers to it, and a peer cannot fetch or propagate a
+block before its ledger application succeeds.
+When the selected chain rolls back before the ledger follows, the old applied
+tip no longer bounds the replacement branch: serving waits until the applied
+tip belongs to the selected chain again.
 When the applied tip reaches the held block's slot with a different hash, the
 server waits for the iterator's rollback instead, unless the held block is the
 tip's parent: a Byron epoch-boundary block shares its slot with the block after
@@ -13017,10 +13055,12 @@ files and reload once a changed content has held for two polls. Polling
 content rather than file events sees the atomic `..data` symlink swap
 Kubernetes uses for a mounted Secret and needs no notification support. The
 two-poll wait reduces reloads during short writes; credential validation still
-rejects an incomplete credential set. In serve-key mode, where a reload is
-always refused, the watch is not started and a warning says so. With several
-pools the watch is skipped only when every pool is serve-key; otherwise it
-runs for the pools that can reload and leaves the serve-key pools out.
+rejects an incomplete credential set. The watch baseline is taken before the
+credentials are loaded, so a file replaced after the load is a change. In
+serve-key mode, where a reload is always refused, the watch is not started
+and a warning says so. With several pools the watch is skipped only when every
+pool is serve-key; otherwise it runs for the pools that can reload and leaves
+the serve-key pools out.
 `dingo_forge_credential_reloads_total{trigger,result}` counts reloads by
 trigger (`signal`, `file`, `agent`) and result (`success`, `unchanged`,
 `failure`), and `dingo_forge_opcert_counter_loaded` reports the counter the
@@ -13648,9 +13688,10 @@ votes:
   `epochEntry.onChainKeys`. It excludes keys with unknown age or at or beyond
   `ceil(MaxKESEvolutions * SlotsPerKESPeriod / SlotsPerEpoch) + 2` epochs old,
   with age measured at the committee epoch the snapshot selects (snapshot epoch
-  plus one), then verifies proof of possession; an invalid, missing, unknown-age, or
-  expired key leaves the seat and its stake intact but cannot sign or validate a
-  certificate.
+  plus one), then verifies proof of possession under the network's selected
+  Dijkstra BLS proof domain (`VoteManagerConfig.KeyProofDomain`); an invalid,
+  missing, unknown-age, or expired key leaves the seat and its stake intact but
+  cannot sign or validate a certificate.
 - **Certificate admission**: before asynchronous certified endorser-block
   fetches or apply-time fetch and transaction application, ledger admission
   checks that the Dijkstra header certification flag agrees with body
@@ -13810,12 +13851,34 @@ soon as the tar header is decoded: Go's tar reader synthesizes sparse holes
 above the compressed-stream accounting, so accepting them would make the
 reported expanded-byte and cancellation boundaries incomplete.
 
+Ledger-state import supports Conway and later snapshots only. `ledgerstate`
+refuses a Byron snapshot (`ErrByronSnapshotUnsupported`) and a Shelley through
+Babbage snapshot (`ErrPreConwaySnapshotUnsupported`) while parsing, before any
+state is written. The pre-Conway refusal exists because the import never reads
+those eras' pending classic parameter update proposals or future parameters,
+so it would drop an update the snapshot's ledger had agreed on; from Conway on
+parameter changes come from the imported ratification state. Every import
+entry point parses through `ParseSnapshotBytes`, so Mithril bootstrap and
+catch-up report the refusal as a ledger-state parse failure.
+
 The post-download ImmutableDB copy completes before ledger-state import starts.
 The copy persists block and transaction metadata as well as block blobs, so it
 is a metadata writer even though its bulk payload belongs to the blob store.
 Ordering the two resumable phases keeps their SQLite write transactions from
 contending during bootstrap. A later import failure resumes against the already
 copied immutable data.
+
+When `cleanupAfterLoad` is on, both the post-download copy and the pipelined
+copy that runs during the download delete each extracted chunk's
+`.chunk`, `.primary` and `.secondary` files once the batch holding a later
+block has committed, so the extracted tree and the blob store do not both hold
+the chain. The chunk holding the newest committed block is kept because a
+resumed copy restarts from the chain tip there. Before deleting, the copy
+records that chunk number in the ephemeral `mithril_immutable_retired_below`
+sync-state key; a resumed sync starts its download at that chunk instead of
+fetching the deleted ones, and completion clears the key with the rest of
+sync_state. Everything that reads the extracted tree (certified tip, catch-up
+ancestry check) runs before the copy starts; nothing reads it afterwards.
 
 The Core-mode copy omits produced-UTxO offset references, which are used by
 API-mode UTxO resolution. It does not mark the immutable offset range complete;
@@ -16262,7 +16325,7 @@ context. The page reads the label's rows through the
 rather than the number of transactions with the label. `GET /pools/{pool_id}/blocks`, `GET /epochs/{number}/blocks` and
 `GET /epochs/{number}/blocks/{pool_id}` count and page the `block_nonce` rows in
 a slot range through the `(slot, hash)` index under the request context; an
-offset past the total skips the page query. The latest block routes resolve the ledger tip's block; a rollback deletes blocks before the ledger publishes the lower tip, so a tip block that is not stored is retried against a reread tip and, if it never resolves, answers 503 with `Retry-After`. Pool and account list routes reject
+offset past the total skips the page query. The latest block routes resolve the ledger tip's block; a rollback deletes blocks before the ledger publishes the lower tip, so a tip block that is not stored is retried against a reread tip and, if it never resolves, answers 503 with `Retry-After`. `GET /epochs/{number}/stakes` and `GET /epochs/{number}/stakes/{pool_id}` count and page the rows through the `(epoch, registered, id)` index, so the epoch-wide list returns in the order the snapshot was stored and needs no sort on any database, and skip the page query when the offset is at or past the count; a single pool's list keeps the credential order. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the shared
 strict pagination parser (count 1–100, page 1–21474836). The epoch next,
 previous and stakes lists, whose Blockfrost schema defines only count and page,

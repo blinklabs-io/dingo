@@ -2249,6 +2249,14 @@ func (a Adapter) ResolveUtxoCborWithRecovery(
 	return a.db.ResolveUtxoCborWithRecovery(ctx, txId, outputIdx, dbTxn(txn))
 }
 
+func (a Adapter) SetLeiosEBCertified(
+	slot uint64,
+	hash []byte,
+	txn ledgerdb.Txn,
+) error {
+	return a.db.SetLeiosEBCertified(slot, hash, dbTxn(txn))
+}
+
 func (a Adapter) GetLeiosEBManifest(hash []byte, slot uint64) ([]byte, error) {
 	return a.db.GetLeiosEBManifest(hash, slot)
 }

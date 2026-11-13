@@ -1178,8 +1178,11 @@ type Config struct {
 
 	// Leios persistence retention (experimental, leios runMode only).
 	// LeiosPersistenceRetentionSlots bounds how far behind the highest
-	// persisted Leios endorser block historical-serving records are kept.
-	// Zero retains all history; positive values must cover the stability window.
+	// persisted Leios endorser block uncertified historical-serving records are
+	// kept. Zero uses the default: uncertified records are pruned once the
+	// immutable point passes their slot. A positive value must cover the
+	// stability window and never prunes past the immutable point. Certified
+	// endorser blocks are never pruned.
 	LeiosPersistenceRetentionSlots uint64 `yaml:"leiosPersistenceRetentionSlots" envconfig:"DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS"`
 
 	// Leios voting configuration (experimental, leios runMode only).

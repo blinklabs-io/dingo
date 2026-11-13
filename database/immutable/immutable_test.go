@@ -917,3 +917,42 @@ func TestBlocksInChunkMissingChunkErrors(t *testing.T) {
 		t.Fatalf("expected an error for a chunk that is not present")
 	}
 }
+
+func TestRemoveChunksBefore(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, name := range []string{"00000", "00001", "00002"} {
+		for _, ext := range []string{".chunk", ".primary", ".secondary"} {
+			data, err := os.ReadFile(filepath.Join(testDataDir, name+ext))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(
+				filepath.Join(dir, name+ext), data, 0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	imm, err := immutable.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // a second pass finds nothing left and still succeeds
+		if err := imm.RemoveChunksBefore(2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("want only chunk 2's three files left, got %d", len(entries))
+	}
+	for _, e := range entries {
+		if e.Name()[:5] != "00002" {
+			t.Fatalf("unexpected survivor %s", e.Name())
+		}
+	}
+}

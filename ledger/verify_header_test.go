@@ -1507,6 +1507,76 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersMissingPoolState(
 	assert.ErrorIs(t, err, models.ErrPoolNotFound)
 }
 
+func TestVerifyBlockHeaderCryptoBeforeApplyRejectsPoolAbsentFromPopulatedSnapshot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{47}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
+	ls.publishSnapshotsLocked()
+	// The electing mark snapshot exists and holds another pool only.
+	otherPool := bytes.Repeat([]byte{0xAB}, 28)
+	seedPoolStakeSnapshot(t, db, 4, otherPool, 1_000_000_000)
+	// The block's pool is registered, so only the snapshot check can reject.
+	seedBlockPoolRegistration(t, db, tb.block)
+
+	err := ls.verifyBlockHeaderCryptoBeforeApply(tb.block)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, errHeaderVerificationDeferred)
+	assert.False(t, IsHeaderVerificationDeferred(err))
+	assert.NotErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+	assert.ErrorContains(
+		t,
+		err,
+		"has no stake in epoch 4 snapshot (pool is absent from the epoch distribution)",
+	)
+}
+
+func TestVerifyBlockHeaderStateImportedActivePoolAbsenceAheadOfApply(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		populated bool
+	}{
+		{name: "populated distribution rejects", populated: true},
+		{name: "empty distribution defers", populated: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := createTestBlock(t, [32]byte{48}, 0, tamperNone)
+			ls, db := newImportedActiveLedger(t, tb)
+			ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
+			ls.publishSnapshotsLocked()
+			if tc.populated {
+				seedPoolStakeSnapshotOfType(
+					t,
+					db,
+					5,
+					models.PoolStakeSnapshotTypeActive,
+					bytes.Repeat([]byte{0xAB}, 28),
+					1_000_000_000,
+					1_000_000_000,
+				)
+			}
+
+			err := ls.verifyBlockHeaderState(tb.block, 5, true)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, models.ErrPoolNotFound)
+			assert.Equal(
+				t,
+				!tc.populated,
+				IsHeaderVerificationDeferred(err),
+			)
+		})
+	}
+}
+
 func TestVerifyBlockHeaderCryptoBeforeApplyDefersEmptyMarkSnapshot(
 	t *testing.T,
 ) {
@@ -7980,6 +8050,16 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		withheldDescendantPool[:],
 		1_000_000_000_000_000,
 	)
+	// The withheld ancestor has a snapshot row but no registration to resolve
+	// its VRF key from, so its pool state is unavailable rather than absent.
+	withheldAncestorPool := withheldAncestor.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(
+		t,
+		db,
+		5,
+		withheldAncestorPool[:],
+		1_000_000_000_000_000,
+	)
 	ls.removePeerHeaderHistory(connIdKey(ouroboros.ConnectionId{}))
 	ls.config.PeerHeaderLookupFunc = func(
 		_ ouroboros.ConnectionId,
@@ -8976,6 +9056,21 @@ func prunedSnapshotFixture(
 	onChain bool,
 ) *LedgerState {
 	t.Helper()
+	return prunedSnapshotFixtureWithRegistration(
+		t, tb, withSummary, onChain, true,
+	)
+}
+
+// prunedSnapshotFixtureWithRegistration is prunedSnapshotFixture with the
+// producer's live pool registration seeded only when registered is set.
+func prunedSnapshotFixtureWithRegistration(
+	t *testing.T,
+	tb *testBlockResult,
+	withSummary bool,
+	onChain bool,
+	registered bool,
+) *LedgerState {
+	t.Helper()
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	pool := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshot(t, db, 4, pool[:], 1_000_000_000)
@@ -8987,7 +9082,9 @@ func prunedSnapshotFixture(
 			SnapshotReady:    true,
 		}, nil))
 	}
-	seedBlockPoolRegistration(t, db, tb.block)
+	if registered {
+		seedBlockPoolRegistration(t, db, tb.block)
+	}
 	require.NoError(
 		t,
 		db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(5, nil),
@@ -9084,6 +9181,39 @@ func TestValidateChainSelectionHeaderCryptoForkHeaderPrunedSnapshotDefers(
 				"pruned snapshot must defer, not reject: %v",
 				err,
 			)
+		})
+	}
+}
+
+// A fork header from a pool that has since left the live pool table cannot be
+// judged once its electing snapshot is pruned: a surviving epoch summary
+// reports stake, but the missing row is not proof the pool was absent.
+func TestValidateChainSelectionHeaderCryptoForkHeaderPrunedSnapshotUnregisteredPoolDefers(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, withSummary := range []bool{false, true} {
+		name := "no-summary"
+		if withSummary {
+			name = "summary"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tb := createTestBlock(t, [32]byte{34}, 0, tamperNone)
+			ls := prunedSnapshotFixtureWithRegistration(
+				t, tb, withSummary, false, false,
+			)
+			err := ls.ValidateChainSelectionHeaderCrypto(tb.block.Header())
+			require.Error(t, err)
+			assert.ErrorIs(t, err, models.ErrPoolNotFound)
+			assert.ErrorIs(t, err, errPoolSnapshotPruned)
+			assert.True(
+				t,
+				IsHeaderVerificationDeferred(err),
+				"pruned snapshot must defer, not reject: %v",
+				err,
+			)
+			assert.False(t, headerFailureBlamesPeer(err), "%v", err)
 		})
 	}
 }

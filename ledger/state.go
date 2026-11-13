@@ -9187,6 +9187,16 @@ func (ls *LedgerState) byronTransitionEpochs(
 	if err != nil {
 		return models.Epoch{}, models.Epoch{}, err
 	}
+	// A boundary into an epoch before the transition epoch is still a Byron
+	// boundary: projecting it from the transition epoch's start would place
+	// the slot before that start.
+	if targetSlot < transitionEpoch.StartSlot {
+		target, err := epochAtSlot(current, targetSlot)
+		if err != nil {
+			return models.Epoch{}, models.Epoch{}, err
+		}
+		return target, target, nil
+	}
 	successor, ok := ls.eraById(current.EraId + 1)
 	if !ok || successor == nil {
 		return models.Epoch{}, models.Epoch{}, fmt.Errorf(
@@ -11403,6 +11413,21 @@ func (ls *LedgerState) ledgerProcessBlock(
 						point.Slot,
 						err,
 					)
+				}
+				// Staged in the block-apply transaction, so the marker
+				// commits only with this ranking block: a later check that
+				// rejects it rolls the marker back with the rest.
+				if err := ls.ledgerDB().SetLeiosEBCertified(
+					ebSlot,
+					ebHash.Bytes(),
+					txn,
+				); err != nil {
+					return nil, &leiosEndorserBlockStorageError{
+						err: fmt.Errorf(
+							"mark certified endorser block: %w",
+							err,
+						),
+					}
 				}
 				ls.logLeiosEndorserBlockApplyResult(
 					point,

@@ -1118,7 +1118,7 @@ var flagSpecs = []flagSpec{
 	uint64Flag(
 		"LeiosPersistenceRetentionSlots",
 		"leios-persistence-retention-slots",
-		"number of slots of Leios persistence to retain (0 keeps all history)",
+		"slots of uncertified Leios persistence to retain (0 prunes behind the immutable tip)",
 	),
 	stringFlag(
 		"LeiosVoteSigningKeyFile",

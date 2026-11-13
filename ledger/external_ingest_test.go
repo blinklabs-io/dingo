@@ -122,10 +122,10 @@ func newExternalIngestHarnessWith(
 	nonce := bytes.Repeat([]byte{0x42}, 32)
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentPParams = &conway.ConwayProtocolParameters{
-		KeyDeposit:       2_000_000,
-		PoolDeposit:      500_000_000,
-		DRepDeposit:      500_000_000,
-		GovActionDeposit: 100_000_000,
+		KeyDeposit:         2_000_000,
+		PoolDeposit:        500_000_000,
+		DRepDeposit:        500_000_000,
+		GovActionDeposit:   100_000_000,
 		MaxBlockBodySize:   90_112,
 		MaxBlockHeaderSize: 1_100,
 		MaxBlockExUnits: lcommon.ExUnits{

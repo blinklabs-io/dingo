@@ -1399,7 +1399,10 @@ func TestAtTipRollbackPreflightExcludesCompetingBlockAdd(t *testing.T) {
 	_, _, pending, err := loadRollbackIntent(db)
 	require.NoError(t, err)
 	require.True(t, pending)
+	// An intent that leads the applied tip means the ledger never applied the
+	// discarded blocks, so the durable tip is empty as well as the live one.
 	ls.currentTip = ochainsync.Tip{}
+	require.NoError(t, db.SetTip(ochainsync.Tip{}, nil))
 	committed, err := ls.rollbackPrimaryChainWithinSecurityParam(target)
 	require.NoError(t, err)
 	assert.False(t, committed)

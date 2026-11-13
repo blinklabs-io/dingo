@@ -5434,7 +5434,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			TrustedReplay: true,
 			EndorserBlockProvider: func(
 				[]byte,

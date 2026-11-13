@@ -43,6 +43,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
@@ -616,6 +617,20 @@ func newBlockfetchRangeFixtureWithSlots(
 	return newBlockfetchRangeFixtureWithSlotsAndConfig(t, slots, nil)
 }
 
+// newBlockfetchRangeFixtureWithTypes is newBlockfetchRangeFixtureWithSlots with
+// a caller-chosen block type per block, so a test can chain a Byron
+// epoch-boundary block (type 0) and the main block sharing its slot.
+func newBlockfetchRangeFixtureWithTypes(
+	t *testing.T,
+	slots []uint64,
+	blockTypes []uint,
+) *blockfetchRangeFixture {
+	t.Helper()
+	return newBlockfetchRangeFixtureWithSlotsConfigAndTypes(
+		t, slots, nil, blockTypes,
+	)
+}
+
 // newBlockfetchRangeFixtureWithSlotsAndConfig is
 // newBlockfetchRangeFixtureWithSlots generalized to an optional
 // *cardano.CardanoNodeConfig, so a test can control what
@@ -627,6 +642,18 @@ func newBlockfetchRangeFixtureWithSlotsAndConfig(
 	t *testing.T,
 	slots []uint64,
 	cardanoConfig *cardano.CardanoNodeConfig,
+) *blockfetchRangeFixture {
+	t.Helper()
+	return newBlockfetchRangeFixtureWithSlotsConfigAndTypes(
+		t, slots, cardanoConfig, nil,
+	)
+}
+
+func newBlockfetchRangeFixtureWithSlotsConfigAndTypes(
+	t *testing.T,
+	slots []uint64,
+	cardanoConfig *cardano.CardanoNodeConfig,
+	blockTypes []uint,
 ) *blockfetchRangeFixture {
 	t.Helper()
 
@@ -646,11 +673,15 @@ func newBlockfetchRangeFixtureWithSlotsAndConfig(
 	for i, slot := range slots {
 		sum := sha256.Sum256([]byte{byte(i)})
 		hash := append([]byte(nil), sum[:]...)
+		blockType := uint(1)
+		if blockTypes != nil {
+			blockType = blockTypes[i]
+		}
 		blocks = append(blocks, chain.RawBlock{
 			Slot:        slot,
 			Hash:        hash,
 			BlockNumber: uint64(i),
-			Type:        1,
+			Type:        blockType,
 			PrevHash:    prevHash,
 			Cbor:        []byte{0x80},
 		})
@@ -671,6 +702,11 @@ func newBlockfetchRangeFixtureWithSlotsAndConfig(
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
+	lastBlock := blocks[len(blocks)-1]
+	ls.SetTipForTesting(ochainsync.Tip{
+		Point:       ocommon.NewPoint(lastBlock.Slot, lastBlock.Hash),
+		BlockNumber: lastBlock.BlockNumber,
+	})
 
 	bus := event.NewEventBus(nil, logger)
 	t.Cleanup(bus.Close)
@@ -726,6 +762,203 @@ func newBlockfetchRangeFixtureWithSlotsAndConfig(
 		peer:   peer,
 		blocks: blocks,
 		connID: conn.Id(),
+	}
+}
+
+func TestBlockfetchServerRequestRange_RejectsUnappliedEndPoint(t *testing.T) {
+	t.Parallel()
+
+	f := newBlockfetchRangeFixture(t)
+	applied := f.blocks[0]
+	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{
+		Point:       ocommon.NewPoint(applied.Slot, applied.Hash),
+		BlockNumber: applied.BlockNumber,
+	})
+
+	f.requestRange(t, f.point(0), f.point(2))
+
+	assert.Equal(
+		t,
+		[]byte{blockfetch.MessageTypeNoBlocks},
+		f.readMessageTypes(t, 1),
+		"a peer must not fetch blocks the ledger has not applied",
+	)
+}
+
+func TestBlockfetchServerRequestRange_RepeatedUnappliedEndPointClosesPeer(
+	t *testing.T,
+) {
+	f := newBlockfetchRangeFixture(t)
+	applied := f.blocks[0]
+	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{
+		Point:       ocommon.NewPoint(applied.Slot, applied.Hash),
+		BlockNumber: applied.BlockNumber,
+	})
+
+	for i := 1; i <= blockfetchMaxConsecutiveNoBlocks; i++ {
+		f.requestRange(t, f.point(0), f.point(2))
+		assert.Equal(
+			t,
+			[]byte{blockfetch.MessageTypeNoBlocks},
+			f.readMessageTypes(t, 1),
+			"request %d should be answered with NoBlocks",
+			i,
+		)
+	}
+	testutil.WaitForCondition(t, func() bool {
+		return f.o.connManager.GetConnectionById(f.connID) == nil
+	}, 10*time.Second, "threshold must close the peer")
+}
+
+func TestBlockfetchEndAtOrBeforeAppliedTip(t *testing.T) {
+	t.Parallel()
+
+	hash := func(value byte) []byte {
+		return bytes.Repeat([]byte{value}, lcommon.Blake2b256Size)
+	}
+	boundary := ocommon.NewPoint(100, hash(0x01))
+	mainBlock := ocommon.NewPoint(100, hash(0x02))
+
+	tests := []struct {
+		name       string
+		end        ocommon.Point
+		appliedTip ocommon.Point
+		steps      []blockfetchIteratorStep
+		want       bool
+	}{
+		{
+			name:       "end before applied slot",
+			end:        ocommon.NewPoint(99, hash(0x03)),
+			appliedTip: mainBlock,
+			want:       true,
+		},
+		{
+			name:       "end after applied slot",
+			end:        ocommon.NewPoint(101, hash(0x04)),
+			appliedTip: mainBlock,
+		},
+		{
+			name:       "end is applied tip",
+			end:        mainBlock,
+			appliedTip: mainBlock,
+			steps: []blockfetchIteratorStep{{
+				result: &chain.ChainIteratorResult{Point: mainBlock},
+			}},
+			want: true,
+		},
+		{
+			name:       "boundary end precedes same-slot applied main block",
+			end:        boundary,
+			appliedTip: mainBlock,
+			steps: []blockfetchIteratorStep{
+				{result: &chain.ChainIteratorResult{Point: boundary}},
+				{result: &chain.ChainIteratorResult{Point: mainBlock}},
+			},
+			want: true,
+		},
+		{
+			name:       "main block follows same-slot applied boundary",
+			end:        mainBlock,
+			appliedTip: boundary,
+			steps: []blockfetchIteratorStep{{
+				result: &chain.ChainIteratorResult{Point: mainBlock},
+			}},
+		},
+		{
+			name: "origin is not an applied block",
+			end:  boundary,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			iter := &stubBlockfetchIterator{steps: test.steps}
+			assert.Equal(
+				t,
+				test.want,
+				blockfetchEndAtOrBeforeAppliedTip(
+					iter,
+					test.end,
+					test.appliedTip,
+				),
+			)
+		})
+	}
+}
+
+func TestBlockfetchServerRequestRange_RejectsInvertedSameSlotRange(
+	t *testing.T,
+) {
+	f := newBlockfetchRangeFixtureWithTypes(
+		t,
+		[]uint64{10, 20, 20},
+		[]uint{1, 0, 1},
+	)
+	boundary := f.blocks[1]
+	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{
+		Point:       ocommon.NewPoint(boundary.Slot, boundary.Hash),
+		BlockNumber: boundary.BlockNumber,
+	})
+
+	// The main block after the applied boundary block is ahead of the ledger;
+	// asking for it as the start of a range that ends at the boundary must not
+	// stream it.
+	f.requestRange(t, f.point(2), f.point(1))
+	assert.Equal(
+		t,
+		[]byte{blockfetch.MessageTypeNoBlocks},
+		f.readMessageTypes(t, 1),
+	)
+}
+
+func TestBlockfetchStartPrecedesEnd(t *testing.T) {
+	t.Parallel()
+
+	hash := func(value byte) []byte {
+		return bytes.Repeat([]byte{value}, lcommon.Blake2b256Size)
+	}
+	boundary := ocommon.NewPoint(100, hash(0x01))
+	mainBlock := ocommon.NewPoint(100, hash(0x02))
+	later := ocommon.NewPoint(101, hash(0x03))
+
+	tests := []struct {
+		name  string
+		start ocommon.Point
+		end   ocommon.Point
+		steps []blockfetchIteratorStep
+		want  bool
+	}{
+		{
+			name:  "boundary start, main block end",
+			start: boundary,
+			end:   mainBlock,
+			steps: []blockfetchIteratorStep{
+				{result: &chain.ChainIteratorResult{Point: boundary}},
+				{result: &chain.ChainIteratorResult{Point: mainBlock}},
+			},
+			want: true,
+		},
+		{
+			name:  "main block start, boundary end",
+			start: mainBlock,
+			end:   boundary,
+			steps: []blockfetchIteratorStep{
+				{result: &chain.ChainIteratorResult{Point: mainBlock}},
+				{result: &chain.ChainIteratorResult{Point: later}},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			iter := &stubBlockfetchIterator{steps: test.steps}
+			assert.Equal(
+				t,
+				test.want,
+				blockfetchStartPrecedesEnd(iter, test.start, test.end),
+			)
+		})
 	}
 }
 
