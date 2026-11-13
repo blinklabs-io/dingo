@@ -48,6 +48,19 @@ func TestRunCommitsWhenFnSucceeds(t *testing.T) {
 	require.Equal(t, "committed", got)
 }
 
+func TestRunWithNilTxnCommitsInItsOwnTransaction(t *testing.T) {
+	t.Parallel()
+	a := newAdapter(t)
+	err := a.Run(nil, func(txn ledgerdb.Txn) error {
+		require.NotNil(t, txn)
+		return a.SetSyncState("seam-key", "owned", txn)
+	})
+	require.NoError(t, err)
+	got, err := a.GetSyncState("seam-key", nil)
+	require.NoError(t, err)
+	require.Equal(t, "owned", got)
+}
+
 func TestRunRollsBackWhenFnFails(t *testing.T) {
 	t.Parallel()
 	a := newAdapter(t)

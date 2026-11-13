@@ -238,6 +238,19 @@ func (s *Store) Bootstrap(
 	point ocommon.Point,
 	feed func(put func(Output) error) error,
 ) error {
+	// Clear the markers first, in one transaction: until the final commit
+	// below the contents are partial, and a store with no tip and no format
+	// marker is rebuilt rather than trusted.
+	if err := s.db.Update(func(txn *badger.Txn) error {
+		for _, key := range [][]byte{tipKey, countKey, seqKey, formatKey} {
+			if err := txn.Delete(key); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("badgerutxo: clear markers for bootstrap: %w", err)
+	}
 	// The journal describes history the new contents do not share.
 	if err := s.db.DropPrefix(
 		[]byte{utxoTag}, []byte{journalTag}, []byte{aggTag},

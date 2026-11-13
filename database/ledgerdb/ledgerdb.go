@@ -60,7 +60,7 @@ type LedgerDB interface {
 	BeginLedgerOnly(ctx context.Context, readWrite bool) Txn
 	// Run calls fn with txn, then commits if fn returns nil and rolls back
 	// otherwise. A panic in fn rolls back and is returned as an error. txn is
-	// finished either way.
+	// finished either way. A nil txn runs fn in a new read-write transaction.
 	Run(txn Txn, fn func(Txn) error) error
 	// StorageMode reports the node's storage mode, "core" or "api".
 	StorageMode() string

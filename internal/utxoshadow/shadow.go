@@ -54,6 +54,13 @@ const (
 	maxLoggedRefs          = 8
 )
 
+var (
+	errShadowStopped         = errors.New("utxoshadow: stopped")
+	errShadowNotBootstrapped = errors.New(
+		"utxoshadow: not bootstrapped yet",
+	)
+)
+
 // Config configures a Shadow.
 type Config struct {
 	// Dir is the directory the Badger copy lives in.
@@ -76,6 +83,8 @@ type Config struct {
 }
 
 type metrics struct {
+	reg                         prometheus.Registerer
+	collectors                  []prometheus.Collector
 	applied, undone, bootstraps prometheus.Counter
 	missing, duplicate          prometheus.Counter
 	sampled, sampleMismatch     prometheus.Counter
@@ -83,6 +92,7 @@ type metrics struct {
 }
 
 func newMetrics(reg prometheus.Registerer) *metrics {
+	var collectors []prometheus.Collector
 	c := func(name, help string) prometheus.Counter {
 		ctr := prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "dingo",
@@ -92,10 +102,11 @@ func newMetrics(reg prometheus.Registerer) *metrics {
 		})
 		if reg != nil {
 			reg.MustRegister(ctr)
+			collectors = append(collectors, ctr)
 		}
 		return ctr
 	}
-	return &metrics{
+	m := &metrics{
 		applied: c(
 			"transactions_applied_total",
 			"Transactions applied to the shadow UTxO set.",
@@ -129,6 +140,17 @@ func newMetrics(reg prometheus.Registerer) *metrics {
 			"Comparisons skipped because the metadata store could not be read.",
 		),
 	}
+	m.reg = reg
+	m.collectors = collectors
+	return m
+}
+
+// unregister removes the collectors newMetrics registered, so a later Start
+// on the same registry can register them again.
+func (m *metrics) unregister() {
+	for _, c := range m.collectors {
+		m.reg.Unregister(c)
+	}
 }
 
 // Shadow follows the ledger's UTxO events into a Badger UTxO set.
@@ -140,6 +162,7 @@ type Shadow struct {
 	subID   event.EventSubscriberId
 	rng     *rand.Rand
 	mu      sync.Mutex
+	stopped bool
 	synced  bool
 	anchor  ocommon.Point
 	forward ocommon.Point
@@ -186,11 +209,18 @@ func Start(cfg Config) (*Shadow, error) {
 	return s, nil
 }
 
-// Stop unsubscribes and closes the Badger copy.
+// Stop unsubscribes, closes the Badger copy and unregisters the metrics.
 func (s *Shadow) Stop() error {
 	s.cfg.EventBus.Unsubscribe(ledger.UtxoEventType, s.subID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stopped {
+		return nil
+	}
+	// Unsubscribe does not wait for a handler already dispatched; it sees
+	// stopped and leaves the closed store alone.
+	s.stopped = true
+	s.m.unregister()
 	return s.store.Close()
 }
 
@@ -201,6 +231,9 @@ func (s *Shadow) handle(evt event.Event) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stopped {
+		return
+	}
 	if err := s.process(ue); err != nil {
 		s.logger.Warn("shadow UTxO set out of sync, will bootstrap again",
 			"slot", ue.Point.Slot, "cause", ue.Cause, "error", err)
@@ -284,10 +317,25 @@ func (s *Shadow) process(ue ledger.UtxoEvent) error {
 			if s.blocks%s.cfg.SampleEvery == 0 {
 				s.compare(s.block.Slot)
 			}
+			if s.blocks%pruneEvery == 0 {
+				s.prune(s.block.Slot)
+			}
 		}
 		s.block = ue.Point
 	}
 	return s.apply(ue, s.m.applied)
+}
+
+// prune drops journal records older than the diff window behind slot. A
+// failure only delays pruning; the copy itself is unaffected.
+func (s *Shadow) prune(slot uint64) {
+	if slot <= s.cfg.DiffWindowSlots {
+		return
+	}
+	if err := s.store.PruneJournal(slot - s.cfg.DiffWindowSlots); err != nil {
+		s.logger.Warn("pruning the shadow UTxO set's journal failed",
+			"slot", slot, "error", err)
+	}
 }
 
 func (s *Shadow) bootstrap() error {
@@ -434,6 +482,12 @@ func (r VerifyReport) Clean() bool {
 func (s *Shadow) VerifyAll(ctx context.Context) (VerifyReport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stopped {
+		return VerifyReport{}, errShadowStopped
+	}
+	if !s.synced {
+		return VerifyReport{}, errShadowNotBootstrapped
+	}
 	shadow := map[badgerutxo.Ref][]byte{}
 	if err := s.store.Each(func(o badgerutxo.Output) error {
 		shadow[o.Ref] = o.Cbor

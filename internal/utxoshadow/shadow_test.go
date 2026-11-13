@@ -49,6 +49,8 @@ type stubLedgerDB struct {
 	ledgerdb.LedgerDB
 	tip  ocommon.Point
 	live map[badgerutxo.Ref][]byte
+	// asOf records the slot of every as-of lookup.
+	asOf []uint64
 }
 
 func (s *stubLedgerDB) Begin(context.Context, bool) ledgerdb.Txn {
@@ -77,9 +79,10 @@ func (s *stubLedgerDB) IterateLiveUtxos(
 func (s *stubLedgerDB) UtxosByRefsAsOf(
 	_ context.Context,
 	refs []models.UtxoId,
-	_ uint64,
+	atSlot uint64,
 	_ ledgerdb.Txn,
 ) ([]models.Utxo, error) {
+	s.asOf = append(s.asOf, atSlot)
 	var out []models.Utxo
 	for _, r := range refs {
 		if c, ok := s.live[badgerutxo.NewRef(r.Hash, r.Idx)]; ok {
@@ -241,6 +244,8 @@ func TestShadowComparesWhenABlockCompletes(t *testing.T) {
 	send(s, txChange(3, nil))
 	require.Positive(t, testutil.ToFloat64(s.m.sampled))
 	require.Zero(t, testutil.ToFloat64(s.m.sampleMismatch))
+	require.Equal(t, []uint64{2}, ldb.asOf,
+		"the comparison reads the store as of the completed block")
 }
 
 func TestCompareFindsMissingAndDifferentOutputs(t *testing.T) {

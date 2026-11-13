@@ -18,7 +18,6 @@ package dbadapter
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
@@ -61,11 +60,12 @@ func (a Adapter) BeginLedgerOnly(
 	return a.db.MetadataTxn(ctx, readWrite)
 }
 
-// Run runs fn in txn through (*database.Txn).Do.
+// Run runs fn in txn through (*database.Txn).Do, or in a new read-write
+// transaction when txn is nil.
 func (a Adapter) Run(txn ledgerdb.Txn, fn func(ledgerdb.Txn) error) error {
 	t := dbTxn(txn)
 	if t == nil {
-		return errors.New("dbadapter: Run needs a transaction")
+		t = a.db.Transaction(context.Background(), true)
 	}
 	return t.Do(func(t *database.Txn) error { return fn(t) })
 }
