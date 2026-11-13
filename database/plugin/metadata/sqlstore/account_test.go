@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -142,7 +143,7 @@ func insertLatestDelegationRow(
 	addedSlot, blockIndex, certIndex int64,
 ) {
 	t.Helper()
-	txResult, err := store.writeDB.Exec(
+	txResult, err := testutil.ExecTransactionInsert(store.writeDB,
 		"INSERT INTO \"transaction\" (slot, block_index) VALUES (?, ?)",
 		addedSlot, blockIndex,
 	)
@@ -323,7 +324,7 @@ WHERE credential_tag = ? AND staking_key = ?`, ref.Tag, ref.Key).
 	require.Equal(t, "50", before)
 
 	_, err := store.writeDB.Exec(
-		`UPDATE utxo SET amount = 'not-a-lovelace' WHERE tx_id = ?`,
+		`UPDATE utxo SET amount = 'not-a-lovelace' WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 		utxo.TxId,
 	)
 	require.NoError(t, err)

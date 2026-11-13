@@ -17,14 +17,14 @@ package mcp
 import (
 	"context"
 	"database/sql"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
-	"regexp"
-
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -312,11 +312,14 @@ func TestSchemaGuidanceAgainstMigratedDatabase(t *testing.T) {
 	require.NoError(t, err)
 	db, err := dbtest.RawSQLiteMetadata(t, nodeDB)
 	require.NoError(t, err)
+	_, err = testutil.ExecTransactionInsert(db,
+		`INSERT INTO "transaction" (hash, block_hash, slot, block_index, fee)
+VALUES (zeroblob(32), zeroblob(32), 123, 0, '170001')`,
+	)
+	require.NoError(t, err)
 	_, err = db.Exec(`
-INSERT INTO "transaction" (hash, block_hash, slot, block_index, fee)
-VALUES (zeroblob(32), zeroblob(32), 123, 0, '170001');
 INSERT INTO utxo (tx_id, output_idx, amount, deleted_slot)
-VALUES (zeroblob(32), 0, '1000001', 0), (zeroblob(32), 1, '2000002', 124);
+VALUES (1, 0, '1000001', 0), (1, 1, '2000002', 124);
 INSERT INTO account (staking_key, credential_tag, reward, active)
 VALUES (zeroblob(28), 0, '111', 1), (zeroblob(28), 1, '222', 1),
        (X'01', 0, '333', 0);
@@ -357,7 +360,7 @@ VALUES (zeroblob(32), X'182A', 123);`)
 		require.NoError(t, ValidateReadOnlyQuery(query))
 		rows := readGuidanceRows(t, db, query)
 		switch {
-		case strings.Contains(query, `FROM "transaction"`):
+		case strings.Contains(query, "FROM applied_transaction"):
 			require.Len(t, rows, 1)
 			require.Equal(t, "170001", rows[0]["fee_lovelace"])
 			require.Equal(t, strings.Repeat("00", 32), rows[0]["tx_hash"])

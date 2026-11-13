@@ -20,23 +20,22 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
 // spenderColumns are the nullable utxo columns naming the transaction that
-// spent, collateralised, or referenced the output, each with its own index.
+// spent the output, each with its own index.
 var spenderColumns = []string{
 	"spent_at_tx_id",
-	"collateral_by_tx_id",
-	"referenced_by_tx_id",
 }
 
 // newImportedLedgerStatsStore returns a store whose planner statistics were
 // gathered over a never-spent UTxO set, as after a ledger-state import, and
 // which has since spent a few outputs through every spender column. The
 // spends do not grow utxo enough for the incremental refresh to re-analyze it.
-func newImportedLedgerStatsStore(t *testing.T) (*Store, []byte) {
+func newImportedLedgerStatsStore(t *testing.T) (*Store, map[string]any) {
 	t.Helper()
 	store := newFilePlannerStatsStore(t, prometheus.NewRegistry())
 	exec := func(query string, args ...any) {
@@ -48,26 +47,34 @@ func newImportedLedgerStatsStore(t *testing.T) (*Store, []byte) {
 WITH RECURSIVE n(i) AS (
     SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000
 )
+INSERT INTO "transaction" (id, hash) SELECT i, randomblob(32) FROM n`)
+	exec(`
+WITH RECURSIVE n(i) AS (
+    SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000
+)
 INSERT INTO utxo
     (tx_id, output_idx, credential_tag, staking_key,
      added_slot, deleted_slot, amount)
-SELECT randomblob(32), 0, i % 2, randomblob(28), 1, 0, '1' FROM n`)
+SELECT i, 0, i % 2, randomblob(28), 1, 0, '1' FROM n`)
 	exec("ANALYZE")
 
 	spender := []byte(fmt.Sprintf("%032d", 1))
-	exec(
-		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, 10, 0)`,
-		spender,
-	)
+	spenderID := testutil.InsertAppliedTransaction(t, store.writeDB,
+		testutil.AppliedTransaction{Hash: spender, Slot: 10})
+	values := make(map[string]any, len(spenderColumns))
 	for i, column := range spenderColumns {
+		values[column] = spender
+		if column == "spent_at_tx_id" {
+			values[column] = spenderID
+		}
 		exec(
 			"UPDATE utxo SET "+column+" = ? WHERE id = ?",
-			spender,
+			values[column],
 			i+1,
 		)
 	}
 	require.NoError(t, store.refreshReadPool(context.Background()))
-	return store, spender
+	return store, values
 }
 
 func writeQueryPlan(
@@ -103,7 +110,7 @@ func TestRollbackSpenderLookupsSearchIndexUnderImportStatistics(
 	t *testing.T,
 ) {
 	t.Parallel()
-	store, spender := newImportedLedgerStatsStore(t)
+	store, values := newImportedLedgerStatsStore(t)
 	statements := map[string]string{
 		"idx_utxo_spent_at_tx_id": `
 SELECT DISTINCT credential_tag, staking_key FROM utxo
@@ -115,7 +122,8 @@ WHERE spent_at_tx_id IN (?)`,
 	}
 	for name, query := range statements {
 		index := strings.TrimSuffix(name, " update")
-		plan := writeQueryPlan(t, store, query, spender)
+		column := strings.TrimPrefix(index, "idx_utxo_")
+		plan := writeQueryPlan(t, store, query, values[column])
 		require.NotContains(t, plan, "SCAN utxo",
 			"%s must not scan utxo, plan:\n%s", name, plan)
 		require.Contains(t, plan, index,

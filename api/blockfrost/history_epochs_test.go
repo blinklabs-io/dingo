@@ -859,7 +859,7 @@ func TestNodeAdapterEpochOutputRejectsNegativeSubtotal(t *testing.T) {
 			fx := newEpochFixture(t)
 			if valid {
 				_, err := fx.raw.Exec(
-					`UPDATE utxo SET amount = '-10000' WHERE transaction_id IN (SELECT id FROM "transaction" WHERE valid = TRUE AND slot < 172800)`,
+					`UPDATE utxo SET amount = '-10000' WHERE collateral_return_for_tx_id IS NULL AND tx_id IN (SELECT tx_id FROM applied_transaction WHERE valid = TRUE AND slot < 172800)`,
 				)
 				require.NoError(t, err)
 			} else {

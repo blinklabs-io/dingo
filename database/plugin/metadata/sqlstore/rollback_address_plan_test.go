@@ -28,12 +28,16 @@ func TestRollbackAddressLookupUsesDeletedSlotRange(t *testing.T) {
 	t.Parallel()
 	s := newFilePlannerStatsStore(t, prometheus.NewRegistry())
 	_, err := s.writeDB.Exec(`WITH RECURSIVE n(i) AS (
+ SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<20003
+) INSERT INTO "transaction"(id,hash) SELECT i,randomblob(32) FROM n`)
+	require.NoError(t, err)
+	_, err = s.writeDB.Exec(`WITH RECURSIVE n(i) AS (
  SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<20000
 ) INSERT INTO utxo(tx_id,output_idx,added_slot,deleted_slot,amount)
-SELECT randomblob(32),0,1,2,'1' FROM n`)
+SELECT i,0,1,2,'1' FROM n`)
 	require.NoError(t, err)
 	_, err = s.writeDB.Exec(`INSERT INTO utxo(tx_id,output_idx,added_slot,deleted_slot,amount)
- VALUES(randomblob(32),0,1,101,'1'),(randomblob(32),0,1,102,'1'),(randomblob(32),0,1,103,'1')`)
+ VALUES(20001,0,1,101,'1'),(20002,0,1,102,'1'),(20003,0,1,103,'1')`)
 	require.NoError(t, err)
 	_, err = s.writeDB.Exec(`INSERT INTO utxo_address(utxo_id,address) VALUES(20002,x'01')`)
 	require.NoError(t, err)

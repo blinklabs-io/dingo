@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -563,6 +564,7 @@ func seedAssetHolderRows(
 	txn, err := raw.Begin()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = txn.Rollback() })
+	txIDs := testutil.NewTransactionIDs(t, txn)
 	utxoStmt, err := txn.Prepare(`
 INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_script)
 VALUES (?, 1, 0, '1', 0, FALSE)`)
@@ -579,7 +581,7 @@ INSERT INTO asset (name, policy_id, utxo_id, amount) VALUES (?, ?, ?, ?)`)
 	for i := range addresses {
 		txID := make([]byte, 32)
 		binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
-		result, err := utxoStmt.Exec(txID)
+		result, err := utxoStmt.Exec(txIDs.ID(txID))
 		require.NoError(t, err)
 		utxoID, err := result.LastInsertId()
 		require.NoError(t, err)
@@ -869,6 +871,8 @@ func newDBBackedAdapterWithStorageMode(
 // autocommit per statement.
 type sqlExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 func insertAdapterUtxo(
@@ -877,15 +881,25 @@ func insertAdapterUtxo(
 	utxo *models.Utxo,
 ) {
 	t.Helper()
+	// The producer is the transaction named by the model's ids, or the
+	// identity row of its hash for an imported output.
+	var producer int64
+	switch {
+	case utxo.TransactionID != nil:
+		producer = int64(*utxo.TransactionID)
+	case utxo.CollateralReturnForTxID != nil:
+		producer = int64(*utxo.CollateralReturnForTxID)
+	default:
+		producer = testutil.TransactionID(t, raw, utxo.TxId)
+	}
 	result, err := raw.Exec(`
 INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
+    tx_id, collateral_return_for_tx_id, payment_key,
     staking_key, credential_tag, added_slot, deleted_slot, amount, output_idx,
     payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		utxo.TransactionID,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		producer,
 		utxo.CollateralReturnForTxID,
-		utxo.TxId,
 		utxo.PaymentKey,
 		utxo.StakingKey,
 		utxo.CredentialTag,
@@ -931,7 +945,8 @@ func insertAdapterTransaction(
 	if tx.ID != 0 {
 		id = tx.ID
 	}
-	result, err := raw.Exec(`
+	result, err := testutil.ExecTransactionInsert(raw,
+		`
 INSERT INTO "transaction" (
     id, hash, block_hash, metadata, slot, type, fee, collateral_fee,
     ttl, block_index, valid
@@ -960,6 +975,11 @@ INSERT INTO "transaction" (
 	}
 	if tx.CollateralReturn != nil {
 		tx.CollateralReturn.CollateralReturnForTxID = &tx.ID
+		// A collateral return takes the index after the declared outputs, so
+		// it never shares (transaction, index) with one of them.
+		if tx.CollateralReturn.OutputIdx == 0 {
+			tx.CollateralReturn.OutputIdx = uint32(len(tx.Outputs)) //nolint:gosec
+		}
 		insertAdapterUtxo(t, raw, tx.CollateralReturn)
 	}
 }

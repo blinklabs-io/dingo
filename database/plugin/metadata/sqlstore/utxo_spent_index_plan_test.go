@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
@@ -206,8 +207,10 @@ func utxoPlanScenarios() []utxoPlanScenario {
 						't', 2*planSpendSequence.Add(1)+1, 0, 32,
 					)).WithIndex(0).Build()
 				require.NoError(t, err)
+				spender := churnHash('x', 1, 0, 32)
+				testutil.TransactionID(t, store.writeDB, spender)
 				require.NoError(t, store.SetUtxoDeletedAtSlot(
-					input, slot, churnHash('x', 1, 0, 32), nil,
+					input, slot, spender, nil,
 				))
 			},
 		},

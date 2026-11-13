@@ -27,8 +27,6 @@ type Querier interface {
 	CreateMidnightDeregistration(ctx context.Context, arg CreateMidnightDeregistrationParams) (int64, error)
 	CreateMidnightRegistration(ctx context.Context, arg CreateMidnightRegistrationParams) (int64, error)
 	CreatePoolStakeSnapshot(ctx context.Context, arg CreatePoolStakeSnapshotParams) (int64, error)
-	CreateUtxo(ctx context.Context, arg CreateUtxoParams) (int64, error)
-	CreateUtxoIfAbsent(ctx context.Context, arg CreateUtxoIfAbsentParams) (int64, error)
 	DeleteAddressTransactionsAfterSlot(ctx context.Context, slot sql.NullInt64) error
 	DeleteBlockNoncesAfterOrigin(ctx context.Context, slot sql.NullInt64) error
 	DeleteBlockNoncesAfterPoint(ctx context.Context, arg DeleteBlockNoncesAfterPointParams) error
@@ -141,10 +139,7 @@ type Querier interface {
 	GetLatestMidnightAriadneParams(ctx context.Context) (MidnightAriadneParam, error)
 	GetLatestMidnightGovernanceDatum(ctx context.Context, arg GetLatestMidnightGovernanceDatumParams) (MidnightGovernanceDatum, error)
 	GetLatestNetworkState(ctx context.Context) (NetworkState, error)
-	GetLiveUtxo(ctx context.Context, arg GetLiveUtxoParams) (Utxo, error)
 	GetLiveUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetLiveUtxoRefsBySlotRow, error)
-	GetLiveUtxosByAsset(ctx context.Context, arg GetLiveUtxosByAssetParams) ([]Utxo, error)
-	GetLiveUtxosByAssetPolicy(ctx context.Context, policyID []byte) ([]Utxo, error)
 	GetMidnightAriadneParamsAtOrBeforeEpoch(ctx context.Context, epoch int64) (MidnightAriadneParam, error)
 	GetMidnightAriadneParamsByEpoch(ctx context.Context, epoch int64) (MidnightAriadneParam, error)
 	GetMidnightAssetCreatesByBlock(ctx context.Context, blockNumber int64) ([]MidnightAssetCreate, error)
@@ -175,20 +170,13 @@ type Querier interface {
 	GetSyncState(ctx context.Context, syncKey string) (string, error)
 	GetTip(ctx context.Context) (GetTipRow, error)
 	GetTokenRegistryEntry(ctx context.Context, subject string) (GetTokenRegistryEntryRow, error)
-	GetTransactionByHash(ctx context.Context, hash []byte) (Transaction, error)
+	GetTransactionByHash(ctx context.Context, hash []byte) (GetTransactionByHashRow, error)
 	GetTransactionHashesAfterSlot(ctx context.Context, slot sql.NullInt64) ([][]byte, error)
 	GetTransactionIDByHash(ctx context.Context, hash []byte) (int64, error)
 	GetTransactionMetadataByHash(ctx context.Context, hash []byte) ([]byte, error)
 	GetTransactionSlotByHash(ctx context.Context, hash []byte) (sql.NullInt64, error)
-	GetTransactionsByBlockHash(ctx context.Context, blockHash []byte) ([]Transaction, error)
-	GetUtxoIDByRef(ctx context.Context, arg GetUtxoIDByRefParams) (int64, error)
-	GetUtxoIncludingSpent(ctx context.Context, arg GetUtxoIncludingSpentParams) (Utxo, error)
+	GetTransactionsByBlockHash(ctx context.Context, blockHash []byte) ([]GetTransactionsByBlockHashRow, error)
 	GetUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetUtxoRefsBySlotRow, error)
-	// Order by added_slot before id so the sort is the reverse of
-	// idx_utxo_added_slot's own order; ordering by id alone costs a full table
-	// scan. See the Store wrapper for the full rationale.
-	GetUtxosAddedAfterSlot(ctx context.Context, addedSlot sql.NullInt64) ([]Utxo, error)
-	GetUtxosDeletedBeforeSlot(ctx context.Context, arg GetUtxosDeletedBeforeSlotParams) ([]Utxo, error)
 	ImportAccount(ctx context.Context, arg ImportAccountParams) (int64, error)
 	ImportAsset(ctx context.Context, arg ImportAssetParams) error
 	ImportDrep(ctx context.Context, arg ImportDrepParams) (int64, error)

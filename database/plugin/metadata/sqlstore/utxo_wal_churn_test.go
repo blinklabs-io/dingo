@@ -95,6 +95,8 @@ func seedChurnUtxos(
 			"VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?)",
 	)
 	require.NoError(tb, err)
+	identity, err := tx.Prepare(`INSERT INTO "transaction" (hash) VALUES (?)`)
+	require.NoError(tb, err)
 	var live [][]byte
 	for i := range uint64(n) {
 		kind := churnKindFor(mix, i)
@@ -109,13 +111,18 @@ func seedChurnUtxos(
 		} else {
 			live = append(live, txID)
 		}
-		_, err := stmt.Exec(
-			txID, churnHash('p', i, 0, 28), int64(0), stakingKey,
+		res, err := identity.Exec(txID)
+		require.NoError(tb, err)
+		producer, err := res.LastInsertId()
+		require.NoError(tb, err)
+		_, err = stmt.Exec(
+			producer, churnHash('p', i, 0, 28), int64(0), stakingKey,
 			int64(i), deleted, churnAmount(i), kind == churnScript,
 		)
 		require.NoError(tb, err)
 	}
 	require.NoError(tb, stmt.Close())
+	require.NoError(tb, identity.Close())
 	require.NoError(tb, tx.Commit())
 	return live
 }
