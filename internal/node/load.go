@@ -1319,6 +1319,12 @@ func LoadBlobsWithDB(
 	var retire func(uint64) error
 	if opts.retireChunks {
 		retire = func(firstKept uint64) error {
+			// A blob-only batch commit is not fsynced. Flush before the
+			// chunks become deletable, or a host failure could keep the
+			// deletion while losing the blocks it was supposed to back.
+			if err := db.Blob().Sync(); err != nil {
+				return fmt.Errorf("syncing blob store before retiring chunks: %w", err)
+			}
 			if opts.onChunksCommit != nil {
 				if err := opts.onChunksCommit(firstKept); err != nil {
 					return err

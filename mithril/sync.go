@@ -1004,6 +1004,11 @@ func Sync(
 			// resume anchor and drop everything below, recording the bound
 			// first so an interruption never leaves the marker behind the
 			// deletions.
+			if serr := db.Blob().Sync(); serr != nil {
+				return fmt.Errorf(
+					"syncing blob store before retiring chunks: %w", serr,
+				)
+			}
 			if merr := setImmutableRetiredBelow(db, chunk.Num); merr != nil {
 				return merr
 			}
