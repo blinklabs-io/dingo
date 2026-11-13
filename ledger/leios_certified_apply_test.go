@@ -19,11 +19,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -834,4 +839,115 @@ func TestLeiosUndecodableParentIsNotAMissingAnnouncement(t *testing.T) {
 		err,
 	)
 	require.Zero(t, f.certCalls)
+}
+
+// Rolling back a certifying ranking block undoes the endorser-block
+// transactions it applied, after its own transactions and in the reverse of
+// application order.
+func TestLeiosRollbackEmitsUndoEventsForEndorserBlockTransactions(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	parent := f.announce()
+	certifier, offsets, envParent := f.certifyingChild(parent)
+	require.NoError(t, f.ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	))
+	require.NoError(t, f.process(certifier, offsets, envParent))
+	f.requireEndorserEffects(true)
+
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	subID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), subID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
+	f.ls.config.EventBus = bus
+	f.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	f.ls.emitRollbackTransactionEvents(t.Context(), []models.Block{{
+		Slot:     certifier.SlotNumber(),
+		Hash:     certifier.Hash().Bytes(),
+		PrevHash: certifier.PrevHash().Bytes(),
+		Number:   certifier.BlockNumber(),
+		Type:     gledger.BlockTypeDijkstra,
+		Cbor:     certifier.Cbor(),
+	}})
+
+	evt := testutil.RequireReceive(
+		t, txCh, testutil.AsyncWait, "endorser transaction undo event",
+	)
+	te, ok := evt.Data.(TransactionEvent)
+	require.True(t, ok, "unexpected payload %T", evt.Data)
+	require.True(t, te.Rollback)
+	require.Equal(t, f.ebTx.Hash().Bytes(), te.Transaction.Hash().Bytes())
+	require.Equal(t, certifier.Hash().Bytes(), te.Point.Hash)
+	require.Equal(t, certifier.SlotNumber(), te.Point.Slot)
+	require.Equal(t, certifier.BlockNumber(), te.BlockNumber)
+	require.Equal(t, uint32(0), te.TxIndex)
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond, "unexpected extra undo event",
+	)
+}
+
+// An endorser-block transaction another block already recorded is skipped
+// when the certifying block applies, so rolling the certifying block back
+// must not undo it.
+func TestLeiosRollbackSkipsUndoForEndorserTransactionRecordedElsewhere(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	parent := f.announce()
+	earlier := leiosApplyTestRankingPoint(0x81)
+	require.NoError(t, f.db.Transaction(t.Context(), true).Do(
+		func(txn *database.Txn) error {
+			_, _, err := f.ls.applyEndorserBlock(
+				t.Context(),
+				txn,
+				earlier,
+				1,
+				earlier.Slot,
+				leiosApplyTestEbHash(0x82),
+				f.ebTxs,
+			)
+			return err
+		},
+	))
+	certifier, offsets, envParent := f.certifyingChild(parent)
+	require.NoError(t, f.ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	))
+	require.NoError(t, f.process(certifier, offsets, envParent))
+	recorded, err := f.db.GetTransactionsByHashes(
+		t.Context(),
+		[][]byte{f.ebTx.Hash().Bytes()},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, recorded, 1)
+	require.Equal(t, earlier.Hash, recorded[0].BlockHash)
+
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	subID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), subID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
+	f.ls.config.EventBus = bus
+	f.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	f.ls.emitRollbackTransactionEvents(t.Context(), []models.Block{{
+		Slot:     certifier.SlotNumber(),
+		Hash:     certifier.Hash().Bytes(),
+		PrevHash: certifier.PrevHash().Bytes(),
+		Number:   certifier.BlockNumber(),
+		Type:     gledger.BlockTypeDijkstra,
+		Cbor:     certifier.Cbor(),
+	}})
+
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond, "undo for a transaction applied elsewhere",
+	)
 }

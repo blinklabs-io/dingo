@@ -933,6 +933,14 @@ subscriber deriving state from it sees a block's transactions in index order
 and sees a rollback's undo events (`Rollback: true`) before any transaction
 event the ledger emits afterwards.
 
+Rolling back a certifying ranking block also undoes the transactions its
+certified endorser block applied, after the block's own and in reverse
+application order, at the ranking block's point. An endorser transaction that
+apply skipped, because it repeats within the endorser block or is already
+recorded by another block, gets no undo event, matching the forward events.
+When the endorser block cannot be resolved, the ledger logs the failure and
+publishes a `LedgerErrorEvent` instead of those undo events.
+
 Two producers feed that lane, on different goroutines: `LedgerDelta.apply`
 (`ledger/delta.go`) registers forward events on the database transaction's
 `AfterCommit` drain from the `ledgerProcessBlocks` goroutine, and the rollback
