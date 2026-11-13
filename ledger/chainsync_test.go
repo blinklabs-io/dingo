@@ -19513,6 +19513,11 @@ func TestCreateGenesisBlockSeedsCommitteeAfterPreConwayImport(t *testing.T) {
 	require.NoError(t, ls.loadMithrilTrustBoundary())
 
 	require.NoError(t, ls.createGenesisBlock(context.Background()))
+	require.Equal(
+		t,
+		len(musashiGenesisCommitteeColdKeys),
+		committeeMemberRowCount(t, db),
+	)
 	requireGenesisCommitteeSeated(t, ls, 300)
 }
 
