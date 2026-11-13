@@ -18,6 +18,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -64,7 +66,7 @@ func rollbackTestRunEpoch(
 	txn := db.MetadataTxn(t.Context(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(t.Context(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    newEpoch - 1,
 		NewEpoch:     newEpoch,
@@ -155,7 +157,7 @@ func TestProcessEpochRatifyErrorWritesNoVerdicts(t *testing.T) {
 	// The child's update passes its enactment precondition and then fails
 	// while RATIFY stages it, after the parent was accepted.
 	_, err := ProcessEpoch(t.Context(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    stabilityTestEpoch - 1,
 		NewEpoch:     stabilityTestEpoch,

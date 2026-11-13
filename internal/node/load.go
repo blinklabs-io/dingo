@@ -32,6 +32,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -164,7 +166,7 @@ func loadSecurityParamForConfig(
 // composition can verify the hook is installed without starting ledger workers.
 var installEpochBoundarySnapshotHookForLoad = func(
 	ls *ledger.LedgerState,
-	fn func(*database.Txn, event.EpochTransitionEvent) error,
+	fn func(ledgerdb.Txn, event.EpochTransitionEvent) error,
 ) error {
 	ls.SetEpochBoundarySnapshotHook(fn)
 	return nil
@@ -852,7 +854,7 @@ func LoadWithDB(
 	if c == nil {
 		return errors.New("primary chain not available")
 	}
-	snapshotMgr := snapshot.NewManager(db, nil, logger)
+	snapshotMgr := snapshot.NewManager(dbadapter.New(db), nil, logger)
 	// Mirror the CIP-0163 reward-account inactivity gate into snapshot capture
 	// so replay matches serve mode (node.go) on the same DB.
 	if err := snapshotMgr.SetDelegatorInactivity(
@@ -920,7 +922,7 @@ func LoadWithDB(
 	// that read fails, the persist hook uses boundary-aware historical
 	// reconstruction; the tracker reports only failure of the complete capture.
 	ls.SetEpochBoundarySnapshotStakeHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return snapshotMgr.ComputeEpochBoundarySnapshot(ctx, txn, evt)
 		},
 	)
@@ -932,7 +934,7 @@ func LoadWithDB(
 	// action would silently see zero stake at every replayed boundary.
 	ls.SetCurrentBoundarySPOStakeHook(
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			evt event.EpochTransitionEvent,
 			incomingEraID uint,
 		) ([]*models.PoolStakeSnapshot, error) {
@@ -943,7 +945,7 @@ func LoadWithDB(
 	)
 	if err := installEpochBoundarySnapshotHookForLoad(
 		ls,
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			// The ledger suppresses a failed authoritative capture and defers
 			// to the event-driven fallback, which does not exist in load mode.
 			// Record the failure so LoadWithDB can surface it after replay

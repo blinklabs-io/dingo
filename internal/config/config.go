@@ -921,6 +921,22 @@ type Config struct {
 	// separate goroutine while the current block applies, for blocks under
 	// normal validation only. Not consensus-affecting; on by default.
 	LedgerPrefetchAheadEnabled bool `yaml:"ledgerPrefetchAheadEnabled"          envconfig:"DINGO_LEDGER_PREFETCH_AHEAD_ENABLED"`
+	// LedgerUtxoShadow keeps a Badger copy of the live UTxO set beside the
+	// metadata store and checks the two against each other (experimental,
+	// diagnostic only; default off).
+	LedgerUtxoShadow bool `yaml:"ledgerUtxoShadow"              envconfig:"DINGO_LEDGER_UTXO_SHADOW"`
+	// LedgerUtxoBadger keeps the live UTxO set in a Badger store updated
+	// synchronously after each ledger commit (experimental; default off).
+	LedgerUtxoBadger bool `yaml:"ledgerUtxoBadger"              envconfig:"DINGO_LEDGER_UTXO_BADGER"`
+	// LedgerUtxoReads selects where validation resolves its inputs with
+	// LedgerUtxoBadger: "" for the metadata store, "verify" to compare both,
+	// "set" for the live UTxO set (experimental).
+	LedgerUtxoReads string `yaml:"ledgerUtxoReads"               envconfig:"DINGO_LEDGER_UTXO_READS"`
+	// LedgerUtxoBadgerOnly makes the Badger live UTxO set the only copy of
+	// the UTxO set, with no utxo rows in the metadata store (core mode, a
+	// database synced this way from genesis or a Mithril import;
+	// experimental; default off).
+	LedgerUtxoBadgerOnly bool `yaml:"ledgerUtxoBadgerOnly"          envconfig:"DINGO_LEDGER_UTXO_BADGER_ONLY"`
 	// LedgerValidateAheadEnabled verifies the witness signatures of the
 	// validated blocks of a block-apply chunk on worker goroutines while
 	// earlier blocks of the chunk apply. Not consensus-affecting; on by

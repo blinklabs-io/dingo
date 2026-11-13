@@ -29,6 +29,8 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -395,10 +397,14 @@ func newBoundaryEraLedgerChain(
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	// A rollover that enacts a HardForkInitiation ratifies at the boundary,
 	// which a production node serves from the snapshot manager's rows.
-	snapshotMgr := snapshot.NewManager(db, newTestEventBus(t, nil), nil)
+	snapshotMgr := snapshot.NewManager(
+		dbadapter.New(db),
+		newTestEventBus(t, nil),
+		nil,
+	)
 	ls.SetCurrentBoundarySPOStakeHook(
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			evt event.EpochTransitionEvent,
 			incomingEraID uint,
 		) ([]*models.PoolStakeSnapshot, error) {

@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -407,15 +408,14 @@ func TestNonceFromBytesKeepsEmptyNeutral(t *testing.T) {
 
 func TestRewardBlockCountsRejectsMalformedPoolInput(t *testing.T) {
 	t.Parallel()
-	db, store := newStoredHashDB(t, func(s *storedHashStore) {
+	db, _ := newStoredHashDB(t, func(s *storedHashStore) {
 		s.epoch = &models.Epoch{EpochId: 5, StartSlot: 100, LengthInSlots: 100}
 	})
-	_ = db
 	ls := &LedgerState{config: LedgerStateConfig{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}}
 	_, _, _, err := ls.rewardBlockCounts(
-		store,
+		dbadapter.New(db),
 		nil,
 		5,
 		[]*models.RewardPoolInput{{
@@ -430,7 +430,7 @@ func TestRewardBlockCountsRejectsMalformedPoolInput(t *testing.T) {
 func TestRebuildPrunedRewardStakeInputsRejectsMalformedPoolInput(t *testing.T) {
 	t.Parallel()
 	short := shortStoredHash(lcommon.Blake2b224Size, 0x61)
-	_, store := newStoredHashDB(t, func(s *storedHashStore) {
+	db, store := newStoredHashDB(t, func(s *storedHashStore) {
 		s.epoch = &models.Epoch{EpochId: 5, StartSlot: 100, LengthInSlots: 100}
 		s.rebuiltInputs = []*models.RewardStakeInput{{
 			PoolKeyHash: short,
@@ -442,7 +442,7 @@ func TestRebuildPrunedRewardStakeInputsRejectsMalformedPoolInput(t *testing.T) {
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}}
 	_, err := ls.rebuildPrunedRewardStakeInputs(
-		store,
+		dbadapter.New(db),
 		nil,
 		5,
 		&models.RewardSnapshot{CapturedSlot: 150, BoundarySlot: 199},
@@ -460,14 +460,14 @@ func TestRebuildPrunedRewardStakeInputsKeepsQueryFailureRetryable(
 ) {
 	t.Parallel()
 	queryErr := errors.New("database temporarily unavailable")
-	_, store := newStoredHashDB(t, func(s *storedHashStore) {
+	db, _ := newStoredHashDB(t, func(s *storedHashStore) {
 		s.rebuiltErr = queryErr
 	})
 	ls := &LedgerState{config: LedgerStateConfig{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}}
 	_, err := ls.rebuildPrunedRewardStakeInputs(
-		store,
+		dbadapter.New(db),
 		nil,
 		5,
 		&models.RewardSnapshot{CapturedSlot: 150, BoundarySlot: 199},

@@ -18,7 +18,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/stretchr/testify/require"
 )
@@ -40,7 +40,7 @@ func TestBlockProcessingProgressBeforeCommitAndAfterRetry(t *testing.T) {
 			t.Context(),
 			results,
 			blockSourceOptions{
-				beforeCommit: func(_ *database.Txn, applied []gledger.Block) error {
+				beforeCommit: func(_ ledgerdb.Txn, applied []gledger.Block) error {
 					if len(applied) == 0 {
 						return nil
 					}

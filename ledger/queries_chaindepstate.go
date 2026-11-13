@@ -22,6 +22,8 @@ import (
 	"math"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -175,13 +177,13 @@ type versionedChainDepState struct {
 // is the chain that has applied no blocks at all, where the callers' neutral
 // and zero defaults are the right answer.
 func (ls *LedgerState) epochAtTip(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (ochainsync.Tip, *models.Epoch, error) {
-	tip, err := ls.db.GetTip(txn)
+	tip, err := ls.ledgerDB().GetTip(txn)
 	if err != nil {
 		return ochainsync.Tip{}, nil, err
 	}
-	current, err := ls.db.GetEpochBySlot(tip.Point.Slot, txn)
+	current, err := ls.ledgerDB().GetEpochBySlot(tip.Point.Slot, txn)
 	if err != nil {
 		return ochainsync.Tip{}, nil, err
 	}
@@ -192,12 +194,12 @@ func (ls *LedgerState) epochAtTip(
 // for the tip, and the epoch is the one containing its slot.
 func (ls *LedgerState) epochAtPoint(
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (ochainsync.Tip, *models.Epoch, error) {
 	if !at.pinned() {
 		return ls.epochAtTip(txn)
 	}
-	current, err := ls.db.GetEpochBySlot(at.Slot, txn)
+	current, err := ls.ledgerDB().GetEpochBySlot(at.Slot, txn)
 	if err != nil {
 		return ochainsync.Tip{}, nil, err
 	}
@@ -237,7 +239,7 @@ func nonceFromBytes(b []byte) (lcommon.Nonce, error) {
 func (ls *LedgerState) queryShelleyDebugChainDepState(
 	ctx context.Context,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	// Every value in the reply is read from this one transaction, tip and epoch
 	// included; see epochAtTip for why neither may come from the in-memory
@@ -326,14 +328,14 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 		}
 		// Epoch 0 has no predecessor; its previous-epoch nonce stays neutral.
 		if current.EpochId > 0 {
-			previous, err := ls.db.GetEpoch(current.EpochId-1, txn)
+			previous, err := ls.ledgerDB().GetEpoch(current.EpochId-1, txn)
 			if err != nil {
 				return nil, err
 			}
 			if previous == nil {
 				// Sparse epoch rows skip empty epochs, so the predecessor
 				// is the nearest earlier row.
-				epochs, err := ls.db.GetEpochs(txn)
+				epochs, err := ls.ledgerDB().GetEpochs(txn)
 				if err != nil {
 					return nil, err
 				}
@@ -448,13 +450,13 @@ func newPraos2ChainDepState(
 // body was never stored, reports no announcement, the same fallback the lab
 // nonce takes. A header of an era without the Leios extension reports none.
 func (ls *LedgerState) chainDepStateAnnouncement(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	tip ochainsync.Tip,
 ) (*olocalstatequery.ChainDepStateAnnouncement, error) {
 	if len(tip.Point.Hash) != lcommon.Blake2b256Size {
 		return nil, nil
 	}
-	block, err := database.BlockByPointTxn(txn, tip.Point)
+	block, err := database.BlockByPointTxn(dbadapter.Unwrap(txn), tip.Point)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, nil
@@ -545,7 +547,7 @@ func foldEndSlotForTip(tipSlot uint64) uint64 {
 // lag had reached when the epoch opened. After that it is a stale answer for a
 // field the chain has already moved on from.
 func (ls *LedgerState) chainDepStateLabNonce(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	tip ochainsync.Tip,
 	carriedLabNonce []byte,
 ) (lcommon.Nonce, error) {
@@ -563,7 +565,7 @@ func (ls *LedgerState) chainDepStateLabNonce(
 	// restarted on such a database has exactly one of them as its tip. The
 	// tip's slot and hash address the block's blob directly, which needs no
 	// index.
-	block, err := database.BlockByPointTxn(txn, tip.Point)
+	block, err := database.BlockByPointTxn(dbadapter.Unwrap(txn), tip.Point)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// The tip names a block this transaction cannot read at all --
@@ -608,7 +610,7 @@ func (ls *LedgerState) chainDepStateLabNonce(
 // block claiming its cold key.
 func (ls *LedgerState) chainDepStateOpCertCounters(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	at QueryPoint,
 ) (
 	map[lcommon.Blake2b224]uint64,
@@ -617,13 +619,13 @@ func (ls *LedgerState) chainDepStateOpCertCounters(
 	var sequences map[string]uint64
 	var err error
 	if at.pinned() {
-		sequences, err = ls.db.LatestPoolOpCertSequencesAtOrBefore(
+		sequences, err = ls.ledgerDB().LatestPoolOpCertSequencesAtOrBefore(
 			ctx,
 			at.Slot,
 			txn,
 		)
 	} else {
-		sequences, err = ls.db.LatestPoolOpCertSequences(ctx, txn)
+		sequences, err = ls.ledgerDB().LatestPoolOpCertSequences(ctx, txn)
 	}
 	if err != nil {
 		return nil, err

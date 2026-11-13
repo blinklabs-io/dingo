@@ -20,6 +20,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1398,7 +1400,13 @@ func TestConwayRatifyQuorum_PrefersDBOverGenesis(t *testing.T) {
 			Threshold: &threshold,
 		},
 	}
-	got, err := conwayRatifyQuorum(context.Background(), nil, db, nil, genesis)
+	got, err := conwayRatifyQuorum(
+		context.Background(),
+		nil,
+		dbadapter.New(db),
+		nil,
+		genesis,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, big.NewRat(3, 5), got)
 }
@@ -1434,7 +1442,13 @@ func TestConwayRatifyQuorum_FallsBackToGenesisAfterClear(
 			Threshold: &threshold,
 		},
 	}
-	got, err := conwayRatifyQuorum(context.Background(), nil, db, nil, genesis)
+	got, err := conwayRatifyQuorum(
+		context.Background(),
+		nil,
+		dbadapter.New(db),
+		nil,
+		genesis,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, big.NewRat(4, 7), got)
 }

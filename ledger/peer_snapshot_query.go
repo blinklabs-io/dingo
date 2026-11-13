@@ -24,7 +24,7 @@ import (
 	"net"
 	"sort"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -64,7 +64,7 @@ var bigLedgerPeerQuota = big.NewRat(9, 10)
 func (ls *LedgerState) queryLedgerPeerSnapshot(
 	ctx context.Context,
 	q *olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	var magic uint32
 	if q.WithPeerKind {
@@ -80,7 +80,7 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 	// Read the tip from the same read transaction as the pool/stake data so
 	// the reported snapshot slot describes the exact point the relays and
 	// stake were observed at, even under a concurrent block apply or rollback.
-	tip, err := ls.db.GetTip(txn)
+	tip, err := ls.ledgerDB().GetTip(txn)
 	if err != nil {
 		return nil, fmt.Errorf("GetLedgerPeerSnapshot: get tip: %w", err)
 	}
@@ -108,7 +108,7 @@ func (ls *LedgerState) LedgerPeerSnapshot(
 ) (olocalstatequery.LedgerPeerSnapshotResult, error) {
 	txn, release := ls.readTxn(ctx, nil)
 	defer release()
-	tip, err := ls.db.GetTip(txn)
+	tip, err := ls.ledgerDB().GetTip(txn)
 	if err != nil {
 		return olocalstatequery.LedgerPeerSnapshotResult{}, fmt.Errorf(
 			"ledger peer snapshot: get tip: %w", err,
@@ -174,12 +174,12 @@ func (ls *LedgerState) ledgerPeerSnapshotAtTip(
 	ctx context.Context,
 	peerKind olocalstatequery.LedgerPeerKind,
 	tipPoint ocommon.Point,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (olocalstatequery.LedgerPeerSnapshotResult, error) {
 	slot := withOriginSlot(tipPoint)
 	empty := emptyLedgerPeerSnapshot(slot)
 
-	pkhBytes, err := ls.db.Metadata().GetActivePoolKeyHashes(txn.Metadata())
+	pkhBytes, err := ls.ledgerDB().GetActivePoolKeyHashes(ctx, txn)
 	if err != nil {
 		// Epoch data may not be synced yet for the current tip (early sync);
 		// there are simply no ledger peers to report at that point.
@@ -195,9 +195,9 @@ func (ls *LedgerState) ledgerPeerSnapshotAtTip(
 		return empty, nil
 	}
 
-	stakeByPool, _, err := ls.db.Metadata().GetStakeByPools(
+	stakeByPool, _, err := ls.ledgerDB().GetStakeByPools(ctx,
 		pkhBytes,
-		txn.Metadata(),
+		txn,
 	)
 	if err != nil {
 		return empty, fmt.Errorf(
@@ -210,7 +210,7 @@ func (ls *LedgerState) ledgerPeerSnapshotAtTip(
 	if err != nil {
 		return empty, err
 	}
-	pools, err := ls.db.GetPools(ctx, pkhs, txn)
+	pools, err := ls.ledgerDB().GetPools(ctx, pkhs, txn)
 	if err != nil {
 		return empty, fmt.Errorf(
 			"GetLedgerPeerSnapshot: get pools: %w",

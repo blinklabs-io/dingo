@@ -221,7 +221,7 @@ func (ls *LedgerState) appliedAncestryPrefix(
 		if err != nil {
 			return nil, errHeaderVerificationDeferred
 		}
-		point, err := ls.db.BlockPointByIndex(id, txn)
+		point, err := ls.ledgerDB().BlockPointByIndex(id, txn)
 		if err != nil || !pointMatches(point, tip.Point) {
 			return nil, errHeaderVerificationDeferred
 		}
@@ -247,7 +247,7 @@ func (ls *LedgerState) appliedAncestryPrefix(
 				err,
 			)
 		}
-		indexed, err := ls.db.BlockPointByIndex(metadata.ID, txn)
+		indexed, err := ls.ledgerDB().BlockPointByIndex(metadata.ID, txn)
 		if err != nil || !pointMatches(indexed, current.Point) ||
 			metadata.Height != current.BlockNumber || metadata.Type == gledger.BlockTypeByronEbb {
 			return nil, errHeaderVerificationDeferred
@@ -268,7 +268,7 @@ func (ls *LedgerState) appliedAncestryPrefix(
 		if metadata.ID == 0 || current.BlockNumber == 0 {
 			return nil, errHeaderVerificationDeferred
 		}
-		parent, err := ls.db.BlockPointByIndex(metadata.ID-1, txn)
+		parent, err := ls.ledgerDB().BlockPointByIndex(metadata.ID-1, txn)
 		if err != nil || parent.Slot >= current.Point.Slot ||
 			!bytes.Equal(parent.Hash, metadata.PrevHash) {
 			return nil, errHeaderVerificationDeferred

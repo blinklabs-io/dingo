@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -802,8 +803,8 @@ func processGapBlockTransactions(
 				uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
 				epochId,
 				govActionLifetime,
-				db,
-				txn,
+				dbadapter.New(db),
+				dbadapter.Txn(txn),
 				pparams,
 				&proposalsValidated,
 			); err != nil {

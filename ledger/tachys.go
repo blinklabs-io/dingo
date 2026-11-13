@@ -59,7 +59,7 @@ func (ls *LedgerState) TachysDistribution(
 			return cached.distribution, nil
 		}
 	}
-	txn := ls.db.MetadataTxn(ctx, false)
+	txn := ls.ledgerDB().BeginLedgerOnly(ctx, false)
 	if txn == nil {
 		return nil, errors.New("metadata transaction unavailable")
 	}

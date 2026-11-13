@@ -15,11 +15,13 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -100,7 +102,8 @@ func genesisReserveBalance(
 // nor the genesis baseline is the translated reserves then, so the boundary
 // fails rather than commit the first Shelley epoch from an unverified supply.
 func (ls *LedgerState) applyByronTranslationReserves(
-	txn *database.Txn,
+	ctx context.Context,
+	txn ledgerdb.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
@@ -108,8 +111,8 @@ func (ls *LedgerState) applyByronTranslationReserves(
 	if shelleyGenesis == nil {
 		return errors.New("missing Shelley genesis")
 	}
-	meta := ls.db.Metadata()
-	live, err := meta.GetLiveUtxoLovelace(txn.Metadata())
+	ldb := ls.ledgerDB()
+	live, err := ls.liveUtxoLovelace(ctx, txn)
 	if err != nil {
 		return fmt.Errorf("sum live UTxO balance: %w", err)
 	}
@@ -129,7 +132,7 @@ func (ls *LedgerState) applyByronTranslationReserves(
 		)
 	}
 	reserves := shelleyGenesis.MaxLovelaceSupply - live
-	state, err := meta.GetNetworkState(txn.Metadata())
+	state, err := ldb.GetNetworkState(txn)
 	if err != nil {
 		return fmt.Errorf("get network state: %w", err)
 	}
@@ -137,8 +140,8 @@ func (ls *LedgerState) applyByronTranslationReserves(
 	if state != nil {
 		treasury = uint64(state.Treasury)
 	}
-	if err := meta.SetNetworkState(
-		treasury, reserves, boundarySlot, txn.Metadata(),
+	if err := ldb.SetNetworkState(
+		treasury, reserves, boundarySlot, txn,
 	); err != nil {
 		return fmt.Errorf("set translated reserves: %w", err)
 	}

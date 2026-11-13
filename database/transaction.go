@@ -377,8 +377,9 @@ func (d *Database) SetTransactionWithOpts(
 				point.Slot,
 			)
 		}
-		// Store offset reference
-		if opts.OffsetsPersisted {
+		// Store offset reference. The live UTxO set holds output bytes
+		// itself.
+		if opts.OffsetsPersisted || d.liveUtxo {
 			continue
 		}
 		offsetData := EncodeUtxoOffset(&offset)
@@ -559,6 +560,10 @@ func (d *Database) SetGapBlockTransaction(
 	if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
 		return fmt.Errorf("set gap block tx offset: %w", err)
 	}
+	setOnly, err := d.utxoSetOnly(txn)
+	if err != nil {
+		return err
+	}
 
 	// Store UTxO offsets for produced outputs
 	for _, utxo := range tx.Produced() {
@@ -579,6 +584,9 @@ func (d *Database) SetGapBlockTransaction(
 				point.Slot,
 			)
 		}
+		if setOnly {
+			continue
+		}
 		offsetData := EncodeUtxoOffset(&offset)
 		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
 			return fmt.Errorf(
@@ -589,11 +597,18 @@ func (d *Database) SetGapBlockTransaction(
 	}
 
 	if err := d.transactionStore().SetGapBlockTransaction(
-		tx, point, idx, certDeposits, txn.Metadata(), protocolMajor,
+		tx, point, idx, certDeposits, txn.Metadata(), protocolMajor, setOnly,
 	); err != nil {
 		return fmt.Errorf(
 			"set gap block transaction metadata: %w", err,
 		)
+	}
+	if setOnly {
+		// No inputs to recover, and none to price a collateral fee from.
+		if owned {
+			return txn.Commit()
+		}
+		return nil
 	}
 	// ensureGapConsumedUtxos must run after SetGapBlockTransaction: it marks
 	// the consumed inputs spent by this tx (utxo.spent_by_tx_id holds
@@ -655,7 +670,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	opts BatchedTxIngestOpts,
 ) error {
 	consumed := tx.Consumed()
-	if len(consumed) == 0 {
+	if len(consumed) == 0 || d.liveUtxo {
 		return nil
 	}
 
@@ -1242,15 +1257,20 @@ func (d *Database) SetGenesisTransaction(
 			)
 		}
 
-		// Store offset reference
-		offsetData := EncodeUtxoOffset(&offset)
-		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
-			return fmt.Errorf(
-				"set genesis utxo offset %x#%d: %w",
-				bytePrefix(txId),
-				outputIdx,
-				err,
-			)
+		// The metadata store still needs the model of a live-set output: its
+		// stake credential feeds reward_live_stake.
+		if !d.liveUtxo {
+			offsetData := EncodeUtxoOffset(&offset)
+			if err := blob.SetUtxo(
+				blobTxn, txId, outputIdx, offsetData,
+			); err != nil {
+				return fmt.Errorf(
+					"set genesis utxo offset %x#%d: %w",
+					bytePrefix(txId),
+					outputIdx,
+					err,
+				)
+			}
 		}
 
 		// Build model for metadata store

@@ -139,11 +139,12 @@ func (ls *LedgerState) loadCertifiedClosure(
 		)
 	}
 
-	manifestRaw, manifestErr := ls.db.GetLeiosEBManifest(
+	manifestRaw, manifestErr := ls.ledgerDB().GetLeiosEBManifest(
 		ebHash.Bytes(),
 		parent.Slot,
 	)
-	blockTransactions, txErr := ls.db.GetLeiosEBTxs(ebHash.Bytes(), parent.Slot)
+	blockTransactions, txErr := ls.ledgerDB().
+		GetLeiosEBTxs(ebHash.Bytes(), parent.Slot)
 	if manifestErr != nil && !errors.Is(manifestErr, types.ErrBlobKeyNotFound) {
 		return nil, fmt.Errorf(
 			"load certified endorser-block manifest: %w",

@@ -19,6 +19,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -104,7 +106,14 @@ func TestLoadDRepVotingStateIncludesActiveProposalDeposit(t *testing.T) {
 		AddedSlot:     1,
 	}, nil))
 
-	state, err := loadDRepVotingState(context.Background(), db, nil, 6, 5, false)
+	state, err := loadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		6,
+		5,
+		false,
+	)
 	require.NoError(t, err)
 	ref := models.StakeCredentialRef{Tag: 0, Key: drepCred}
 	assert.Equal(t, uint64(150), state.Powers[ref.MapKey()])
@@ -148,7 +157,7 @@ func TestSPOVotingPowerIncludesProposalDepositsWithoutChangingMarkStake(
 	}
 	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
 
-	state, err := LoadSPOVotingState(db, nil, 6)
+	state, err := LoadSPOVotingState(dbadapter.New(db), nil, 6)
 	require.NoError(t, err)
 	tally := &ProposalTally{
 		ActionType:     uint8(lcommon.GovActionTypeUpdateCommittee),
@@ -158,7 +167,7 @@ func TestSPOVotingPowerIncludesProposalDepositsWithoutChangingMarkStake(
 	proposalEpoch := uint64(5)
 	require.NoError(t, tallySPOVotes(context.Background(),
 		&TallyContext{
-			DB:                  db,
+			DB:                  dbadapter.New(db),
 			StakeEpoch:          6,
 			CurrentEpoch:        6,
 			ActiveProposalEpoch: &proposalEpoch,
@@ -178,7 +187,7 @@ func TestSPOVotingPowerIncludesProposalDepositsWithoutChangingMarkStake(
 	replayedTally := &ProposalTally{ActionType: tally.ActionType}
 	require.NoError(t, tallySPOVotes(context.Background(),
 		&TallyContext{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			StakeEpoch:   6,
 			CurrentEpoch: 6,
 			SPOState:     state,
@@ -341,7 +350,7 @@ func TestProcessEpochRatifiesWithMultipleKeyAndScriptProposalDeposits(
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    epoch - 1,
 		NewEpoch:     epoch,
@@ -380,8 +389,17 @@ func TestProcessEpochRatifiesWithMultipleKeyAndScriptProposalDeposits(
 
 	// Rolling back the proposal transactions removes their deposits from
 	// both voting distributions without changing the persistent mark snapshot.
-	require.NoError(t, db.DeleteGovernanceProposalsAfterSlot(context.Background(), 0, nil))
-	drepState, err := LoadDRepVotingState(context.Background(), db, nil, epoch, false)
+	require.NoError(
+		t,
+		db.DeleteGovernanceProposalsAfterSlot(context.Background(), 0, nil),
+	)
+	drepState, err := LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		epoch,
+		false,
+	)
 	require.NoError(t, err)
 	assert.Equal(
 		t,
@@ -391,14 +409,14 @@ func TestProcessEpochRatifiesWithMultipleKeyAndScriptProposalDeposits(
 			Key: drepYes,
 		}).MapKey()],
 	)
-	spoState, err := LoadSPOVotingState(db, nil, epoch)
+	spoState, err := LoadSPOVotingState(dbadapter.New(db), nil, epoch)
 	require.NoError(t, err)
 	rolledBackTally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeUpdateCommittee),
 	}
 	require.NoError(t, tallySPOVotes(context.Background(),
 		&TallyContext{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			StakeEpoch:   epoch,
 			CurrentEpoch: epoch,
 			SPOState:     spoState,
@@ -517,7 +535,7 @@ func TestProcessEpochUpdateCommitteeThresholdUsesCommitteePresence(
 			txn := db.MetadataTxn(context.Background(), true)
 			defer txn.Release()
 			out, err := ProcessEpoch(context.Background(), &EpochInput{
-				DB:           db,
+				DB:           dbadapter.New(db),
 				Txn:          txn,
 				PrevEpoch:    epoch - 1,
 				NewEpoch:     epoch,
@@ -576,7 +594,13 @@ func TestLoadDRepVotingStateAddsProposalDepositToAlwaysNoConfidence(t *testing.T
 		AddedSlot:     1,
 	}, nil))
 
-	state, err := LoadDRepVotingState(context.Background(), db, nil, 6, false)
+	state, err := LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		6,
+		false,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(75), state.NoConfidencePower)
 }
@@ -607,7 +631,13 @@ func TestLoadDRepVotingStateExcludesAlwaysAbstainProposalDeposit(t *testing.T) {
 		AddedSlot:     1,
 	}, nil))
 
-	state, err := LoadDRepVotingState(context.Background(), db, nil, 6, false)
+	state, err := LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		6,
+		false,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), state.AbstainPower)
 	assert.Equal(t, uint64(0), state.NoConfidencePower)
@@ -648,7 +678,13 @@ func TestLoadDRepVotingStateExcludesExpiredProposalDeposit(t *testing.T) {
 		AddedSlot:     1,
 	}, nil))
 
-	state, err := LoadDRepVotingState(context.Background(), db, nil, 6, false)
+	state, err := LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		6,
+		false,
+	)
 	require.NoError(t, err)
 	ref := models.StakeCredentialRef{Tag: 0, Key: drepCred}
 	assert.Equal(t, uint64(0), state.Powers[ref.MapKey()])
@@ -691,7 +727,13 @@ func TestLoadDRepVotingStateExcludesDeregisteredReturnAccountDeposit(t *testing.
 		AddedSlot:     1,
 	}, nil))
 
-	state, err := LoadDRepVotingState(context.Background(), db, nil, 6, false)
+	state, err := LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		6,
+		false,
+	)
 	require.NoError(t, err)
 	ref := models.StakeCredentialRef{Tag: 0, Key: drepCred}
 	assert.Equal(t, uint64(100), state.Powers[ref.MapKey()])
@@ -741,14 +783,26 @@ func TestLoadDRepVotingStateHonorsDelegatorInactivityGateOnDeposit(t *testing.T)
 
 	// Gate off: byte-identical to pre-CIP-0163 behavior, deposit still
 	// counts regardless of the stale ExpirationEpoch.
-	offState, err := LoadDRepVotingState(context.Background(), db, nil, 6, false)
+	offState, err := LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		6,
+		false,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(150), offState.Powers[ref.MapKey()])
 
 	// Gate on: the return account is inactive by the same rule
 	// VotingPowerBatchSQL applies to its ordinary stake, so its deposit is
 	// excluded too.
-	onState, err := LoadDRepVotingState(context.Background(), db, nil, 6, true)
+	onState, err := LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		6,
+		true,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), onState.Powers[ref.MapKey()])
 }
@@ -793,7 +847,13 @@ func TestLoadDRepVotingStateProposalDepositSumOverflow(t *testing.T) {
 		}, nil))
 	}
 
-	_, err := LoadDRepVotingState(context.Background(), db, nil, 6, false)
+	_, err := LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		6,
+		false,
+	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sum active proposal deposits")
 }

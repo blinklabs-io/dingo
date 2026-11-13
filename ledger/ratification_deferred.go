@@ -23,6 +23,8 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/governance"
@@ -47,7 +49,7 @@ type pendingRatificationRecord struct {
 // transaction pinned at the boundary's commit, written through another.
 type DeferredBoundarySnapshot interface {
 	SPOStakeRows() []*models.PoolStakeSnapshot
-	Write(txn *database.Txn) error
+	Write(txn ledgerdb.Txn) error
 }
 
 // ratificationJob builds one boundary's deferred mark snapshot and decides its
@@ -73,9 +75,12 @@ func (j *ratificationJob) settle() {
 
 func loadPendingRatification(
 	db *database.Database,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (*pendingRatificationRecord, error) {
-	raw, err := db.GetSyncState(pendingRatificationSyncKey, txn)
+	raw, err := db.GetSyncState(
+		pendingRatificationSyncKey,
+		dbadapter.Unwrap(txn),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +98,7 @@ func loadPendingRatification(
 // and, once it commits, pins a read transaction and runs the work on it in the
 // background: mark[epoch] when snapshotEvt is set, then plan's RATIFY.
 func (ls *LedgerState) deferBoundaryJob(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	epoch uint64,
 	boundarySlot uint64,
 	plan *governance.RatificationPlan,
@@ -109,7 +114,7 @@ func (ls *LedgerState) deferBoundaryJob(ctx context.Context,
 	if err != nil {
 		return fmt.Errorf("encode pending ratification: %w", err)
 	}
-	if err := ls.db.SetSyncState(
+	if err := ls.ledgerDB().SetSyncState(
 		pendingRatificationSyncKey, string(raw), txn,
 	); err != nil {
 		return err
@@ -126,7 +131,7 @@ func (ls *LedgerState) deferBoundaryJob(ctx context.Context,
 	txn.AfterCommit(func() {
 		jobCtx, cancelJob := context.WithCancel(context.WithoutCancel(ctx))
 		stopClose := context.AfterFunc(ls.closeCtx(), cancelJob) //nolint:contextcheck // Ledger shutdown independently cancels the detached after-commit job.
-		snapshot := ls.db.Transaction(jobCtx, false)
+		snapshot := ls.ledgerDB().Begin(jobCtx, false)
 		pinned, err := loadPendingRatification(ls.db, snapshot)
 		if err == nil && (pinned == nil || *pinned != rec) {
 			err = errors.New("pending ratification missing from its snapshot")
@@ -159,7 +164,7 @@ func (ls *LedgerState) deferBoundaryJob(ctx context.Context,
 
 func (ls *LedgerState) runRatificationJob(ctx context.Context,
 	job *ratificationJob,
-	snapshot *database.Txn,
+	snapshot ledgerdb.Txn,
 	pinErr error,
 ) {
 	var (
@@ -226,8 +231,8 @@ func (ls *LedgerState) applyRatificationJob(
 	if ls.rewardInputRollbackActive.Load() != 0 {
 		return
 	}
-	txn := ls.db.Transaction(ctx, true)
-	err := txn.Do(func(txn *database.Txn) error {
+	txn := ls.ledgerDB().Begin(ctx, true)
+	err := ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
 		return ls.writeRatificationDecision(ctx, txn, job)
 	})
 	if err != nil {
@@ -245,7 +250,7 @@ func (ls *LedgerState) applyRatificationJob(
 // in txn, doing nothing when the record in txn is not job's.
 func (ls *LedgerState) writeRatificationDecision(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	job *ratificationJob,
 ) error {
 	return ls.writeRatificationDecisionWithOptions(ctx, txn, job, false)
@@ -257,7 +262,7 @@ func (ls *LedgerState) writeRatificationDecision(
 // validation tick's transaction never commits.
 func (ls *LedgerState) writeRatificationDecisionWithOptions(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	job *ratificationJob,
 	validationOnly bool,
 ) error {
@@ -290,7 +295,7 @@ func (ls *LedgerState) writeRatificationDecisionWithOptions(
 			)
 		}
 	}
-	if err := ls.db.DeleteSyncState(pendingRatificationSyncKey, txn); err != nil {
+	if err := ls.ledgerDB().DeleteSyncState(pendingRatificationSyncKey, txn); err != nil {
 		return err
 	}
 	txn.AfterCommit(job.settle)
@@ -304,7 +309,7 @@ func (ls *LedgerState) writeRatificationDecisionWithOptions(
 // validationOnly is passed to writeRatificationDecisionWithOptions.
 func (ls *LedgerState) consumePendingRatificationWithOptions(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	validationOnly bool,
 ) error {
 	rec, err := loadPendingRatification(ls.db, txn)
@@ -429,14 +434,14 @@ func (ls *LedgerState) HoldEpochBoundaryJobForTesting(
 // discardPendingRatificationAfterSlot deletes, in the rollback transaction, a
 // pending record whose boundary the rollback removes.
 func (ls *LedgerState) discardPendingRatificationAfterSlot(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 ) error {
 	rec, err := loadPendingRatification(ls.db, txn)
 	if err != nil || rec == nil || rec.BoundarySlot <= slot {
 		return err
 	}
-	if err := ls.db.DeleteSyncState(pendingRatificationSyncKey, txn); err != nil {
+	if err := ls.ledgerDB().DeleteSyncState(pendingRatificationSyncKey, txn); err != nil {
 		return err
 	}
 	txn.AfterCommit(func() {
@@ -499,10 +504,10 @@ func (ls *LedgerState) resumePendingRatificationIntent(
 	}
 	point := ocommon.NewPoint(block.Slot, block.Hash)
 	var blocks []models.Block
-	txn := ls.db.Transaction(ctx, false)
-	if err := txn.Do(func(txn *database.Txn) error {
+	txn := ls.ledgerDB().Begin(ctx, false)
+	if err := ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
 		var err error
-		blocks, err = database.BlocksAfterSlotTxn(txn, point.Slot)
+		blocks, err = database.BlocksAfterSlotTxn(dbadapter.Unwrap(txn), point.Slot)
 		return err
 	}); err != nil {
 		return fmt.Errorf("read blocks above rewind point: %w", err)
@@ -516,7 +521,12 @@ func (ls *LedgerState) resumePendingRatificationIntent(
 		"rewind_slot", point.Slot,
 		"blocks", len(blocks),
 	)
-	if err := persistRollbackIntent(ls.db, point, blocks); err != nil {
+	if err := persistRollbackIntent(
+		ls.db,
+		point,
+		blocks,
+		ls.captureEndorserUndo(ctx, blocks, nil),
+	); err != nil {
 		if errors.Is(err, errRollbackIntentTooLarge) {
 			return fmt.Errorf(
 				"pending ratification recovery for epoch %d exceeds the automatic rewind limit; resync required: %w",
@@ -532,9 +542,9 @@ func (ls *LedgerState) resumePendingRatificationIntent(
 }
 
 type deferredBoundarySnapshotHookHolder struct {
-	capture func(*database.Txn, event.EpochTransitionEvent) error
+	capture func(ledgerdb.Txn, event.EpochTransitionEvent) error
 	discard func(uint64)
-	prepare func(*database.Txn, event.EpochTransitionEvent) (
+	prepare func(ledgerdb.Txn, event.EpochTransitionEvent) (
 		DeferredBoundarySnapshot, error,
 	)
 }
@@ -546,9 +556,9 @@ type deferredBoundarySnapshotHookHolder struct {
 // builds the snapshot reading only the given transaction. Without them every
 // boundary captures its snapshot itself.
 func (ls *LedgerState) SetDeferredEpochBoundarySnapshotHooks(
-	capture func(*database.Txn, event.EpochTransitionEvent) error,
+	capture func(ledgerdb.Txn, event.EpochTransitionEvent) error,
 	discard func(epoch uint64),
-	prepare func(*database.Txn, event.EpochTransitionEvent) (
+	prepare func(ledgerdb.Txn, event.EpochTransitionEvent) (
 		DeferredBoundarySnapshot, error,
 	),
 ) {
@@ -565,7 +575,7 @@ func (ls *LedgerState) SetDeferredEpochBoundarySnapshotHooks(
 
 // captureDeferredBoundarySnapshot runs the capture hook at the SNAP point.
 func (ls *LedgerState) captureDeferredBoundarySnapshot(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	prevEpoch uint64,
 	boundarySlot uint64,
 ) error {
@@ -588,7 +598,7 @@ func (ls *LedgerState) discardDeferredBoundarySnapshot(epoch uint64) {
 }
 
 func (ls *LedgerState) prepareDeferredBoundarySnapshot(
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	evt event.EpochTransitionEvent,
 ) (DeferredBoundarySnapshot, error) {
 	h := ls.deferredBoundarySnapshotHook.Load()

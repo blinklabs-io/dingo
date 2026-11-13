@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
@@ -562,4 +563,30 @@ func TestNodeStopBoundsEventBusCloseAndSkipsDatabaseClose(t *testing.T) {
 	require.ErrorIs(t, stopErr, errStorageDrainUnconfirmed)
 	assert.ErrorContains(t, stopErr, string(stuckType))
 	assert.ErrorContains(t, stopErr, "database close skipped")
+}
+
+// TestNodeStopClosesLiveUtxoSetWithinTheShutdownDeadline requires the live
+// UTxO set close to run under the shutdown deadline like the other storage
+// closes, which log one record per resource.
+// Not t.Parallel: swaps the package-level componentStopsForShutdownPhase1
+// seam.
+func TestNodeStopClosesLiveUtxoSetWithinTheShutdownDeadline(t *testing.T) {
+	previous := componentStopsForShutdownPhase1
+	t.Cleanup(func() { componentStopsForShutdownPhase1 = previous })
+	componentStopsForShutdownPhase1 = func(*Node) []namedStop { return nil }
+
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	var closeLogs atomic.Int32
+	n := &Node{utxoSet: set}
+	n.config = NewConfig(WithShutdownTimeout(5 * time.Second))
+	n.config.logger = slog.New(shutdownTestResourceLogHandler{
+		resource: "live UTxO set",
+		count:    &closeLogs,
+	})
+
+	require.NoError(t, n.Stop())
+	assert.Equal(t, int32(1), closeLogs.Load(),
+		"shutdown must close the live UTxO set under the shutdown deadline")
+	assert.Nil(t, n.utxoSet)
 }

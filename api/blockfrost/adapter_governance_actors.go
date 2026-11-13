@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -405,7 +406,10 @@ func (a *NodeAdapter) GovernanceCommittee(
 	}
 
 	quorum, err := governance.EffectiveCommitteeQuorum(
-		ctx, db, txn, a.ledgerState.CardanoNodeConfig().ConwayGenesis(),
+		ctx,
+		dbadapter.New(db),
+		dbadapter.Txn(txn),
+		a.ledgerState.CardanoNodeConfig().ConwayGenesis(),
 	)
 	if err != nil {
 		return CommitteeInfo{}, fmt.Errorf("get committee quorum: %w", err)

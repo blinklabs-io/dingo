@@ -37,6 +37,8 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -413,6 +415,7 @@ func TestSkippedPrunedStakeInputsSuppressedDuringPrecompute(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
 		txn,
 		retentionNewEpoch,
 		retentionBoundarySlot,
@@ -511,7 +514,7 @@ func seedRetentionReconstructionFixture(
 		0, 0, nil, nil, nil, nil,
 		eras.ShelleyEraDesc.Id, 1, 100, nil,
 	))
-	mgr := snapshot.NewManager(db, newTestEventBus(t, nil), nil)
+	mgr := snapshot.NewManager(dbadapter.New(db), newTestEventBus(t, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        retentionRewardSnapshotEpoch,
@@ -1921,6 +1924,7 @@ WHERE epoch = ? AND pool_key_hash = ? AND staking_key = ?`,
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
 		txn,
 		4,
 		1_200,
@@ -1954,6 +1958,7 @@ WHERE epoch = ? AND pool_key_hash = ?`,
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
 		txn,
 		4,
 		1_200,
@@ -1987,6 +1992,7 @@ WHERE epoch = ? AND pool_key_hash = ?`,
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
 		txn,
 		4,
 		1_200,
@@ -2017,6 +2023,7 @@ WHERE epoch = ? AND snapshot_type = ?`,
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
 		txn,
 		4,
 		1_200,
@@ -2050,6 +2057,7 @@ WHERE epoch = ? AND pool_key_hash = ?`,
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
 		txn,
 		4,
 		1_200,
@@ -2085,6 +2093,7 @@ WHERE epoch = ? AND pool_key_hash = ? AND staking_key = ?`,
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
 		txn,
 		4,
 		1_200,
@@ -2222,6 +2231,7 @@ INSERT INTO reward_stake_input (
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
 		txn,
 		4,
 		1_200,
@@ -3111,6 +3121,7 @@ func TestPrecomputedStakeRewardsRequireCompletePoolOutputs(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.precomputedStakeRewardApplication(
+		context.Background(),
 		txn,
 		newEpoch,
 		boundarySlot,
@@ -3161,6 +3172,7 @@ func TestPrecomputedStakeRewardsRejectOutputsWithoutStakeInputs(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.precomputedStakeRewardApplication(
+		context.Background(),
 		txn,
 		newEpoch,
 		boundarySlot,
@@ -3210,6 +3222,7 @@ func TestPrecomputedStakeRewardsRejectOutputsWithoutPoolInputs(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.precomputedStakeRewardApplication(
+		context.Background(),
 		txn,
 		newEpoch,
 		boundarySlot,
@@ -3262,6 +3275,7 @@ func TestPrecomputedStakeRewardsRejectExtraPoolOutputs(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.precomputedStakeRewardApplication(
+		context.Background(),
 		txn,
 		newEpoch,
 		boundarySlot,
@@ -3307,6 +3321,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputOutsideSnapshotInputs(
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.precomputedStakeRewardApplication(
+		context.Background(),
 		txn,
 		newEpoch,
 		boundarySlot,
@@ -3353,6 +3368,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputOwnerStakeMismatch(
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.precomputedStakeRewardApplication(
+		context.Background(),
 		txn,
 		newEpoch,
 		boundarySlot,
@@ -3406,6 +3422,7 @@ func TestPrecomputedStakeRewardsRequireCompleteAccountOutputs(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.precomputedStakeRewardApplication(
+		context.Background(),
 		txn,
 		newEpoch,
 		boundarySlot,
@@ -3510,6 +3527,7 @@ func TestPrecomputedStakeRewardsRejectOutputsOutsideApplicationBoundary(
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
 			app, ok, err := ls.precomputedStakeRewardApplication(
+				context.Background(),
 				txn,
 				newEpoch,
 				boundarySlot,
@@ -4368,6 +4386,7 @@ func TestPrecomputedStakeRewardsRejectPoolRewardMismatch(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.precomputedStakeRewardApplication(
+		context.Background(),
 		txn,
 		newEpoch,
 		boundarySlot,
@@ -4427,8 +4446,8 @@ func TestSaveStakeRewardOutputsReplacesEpochRows(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	defer func() { _ = txn.Rollback() }()
 	require.NoError(t, saveStakeRewardOutputs(
-		meta,
-		txn.Metadata(),
+		dbadapter.New(db),
+		txn,
 		&stakeRewardApplication{
 			epochs: stakeRewardEpochs{snapshot: rewardSnapshotEpoch},
 			poolOutputs: []*models.RewardPoolOutput{
@@ -4547,6 +4566,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
 			app, ok, err := ls.precomputedStakeRewardApplication(
+				context.Background(),
 				txn,
 				newEpoch,
 				boundarySlot,
@@ -4595,6 +4615,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(
 		txn := db.Transaction(context.Background(), false)
 		defer func() { _ = txn.Rollback() }()
 		app, ok, err := ls.precomputedStakeRewardApplication(
+			context.Background(),
 			txn,
 			newEpoch,
 			boundarySlot,
@@ -4648,6 +4669,7 @@ func TestPrecomputedStakeRewardsRejectPoolInputsMismatchingSnapshot(
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.precomputedStakeRewardApplication(
+		context.Background(),
 		txn,
 		newEpoch,
 		boundarySlot,
@@ -4831,6 +4853,7 @@ func TestPrecomputedStakeRewardsRejectImpossibleRewardPot(t *testing.T) {
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
 			app, ok, err := ls.precomputedStakeRewardApplication(
+				context.Background(),
 				txn,
 				newEpoch,
 				boundarySlot,
@@ -4856,7 +4879,11 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 	t.Run("pre-babbage waits", func(t *testing.T) {
 		ls, db := seedRewardPrecomputeTimingState(t, 6)
 		meta := db.Metadata()
-		prefilterSlot, err := ls.rewardPrefilterSlot(meta, nil, potsEpoch)
+		prefilterSlot, err := ls.rewardPrefilterSlot(
+			dbadapter.New(db),
+			nil,
+			potsEpoch,
+		)
 		require.NoError(t, err)
 		require.Greater(t, prefilterSlot, capturedSlot)
 
@@ -4910,7 +4937,11 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 		func(t *testing.T) {
 			ls, db := seedRewardPrecomputeTimingState(t, 6)
 			meta := db.Metadata()
-			prefilterSlot, err := ls.rewardPrefilterSlot(meta, nil, potsEpoch)
+			prefilterSlot, err := ls.rewardPrefilterSlot(
+				dbadapter.New(db),
+				nil,
+				potsEpoch,
+			)
 			require.NoError(t, err)
 			rewardCalcSeedStakeCert(
 				t,
@@ -4963,7 +4994,11 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 	t.Run("babbage precomputes immediately", func(t *testing.T) {
 		ls, db := seedRewardPrecomputeTimingState(t, 7)
 		meta := db.Metadata()
-		prefilterSlot, err := ls.rewardPrefilterSlot(meta, nil, potsEpoch)
+		prefilterSlot, err := ls.rewardPrefilterSlot(
+			dbadapter.New(db),
+			nil,
+			potsEpoch,
+		)
 		require.NoError(t, err)
 		require.Greater(t, prefilterSlot, capturedSlot)
 
@@ -5121,7 +5156,7 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 	t.Run("pre-babbage rejects", func(t *testing.T) {
 		ls, db := seedRewardPrecomputeTimingState(t, 6)
 		prefilterSlot, err := ls.rewardPrefilterSlot(
-			db.Metadata(),
+			dbadapter.New(db),
 			nil,
 			potsEpoch,
 		)
@@ -5132,6 +5167,7 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 		txn := db.Transaction(context.Background(), false)
 		defer func() { _ = txn.Rollback() }()
 		app, ok, err := ls.precomputedStakeRewardApplication(
+			context.Background(),
 			txn,
 			newEpoch,
 			boundarySlot,
@@ -5144,7 +5180,7 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 	t.Run("babbage accepts", func(t *testing.T) {
 		ls, db := seedRewardPrecomputeTimingState(t, 7)
 		prefilterSlot, err := ls.rewardPrefilterSlot(
-			db.Metadata(),
+			dbadapter.New(db),
 			nil,
 			potsEpoch,
 		)
@@ -5155,6 +5191,7 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 		txn := db.Transaction(context.Background(), false)
 		defer func() { _ = txn.Rollback() }()
 		app, ok, err := ls.precomputedStakeRewardApplication(
+			context.Background(),
 			txn,
 			newEpoch,
 			boundarySlot,
@@ -5280,6 +5317,7 @@ func TestPrecomputedStakeRewardsRejectMissingBabbageLeaderOutput(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.precomputedStakeRewardApplication(
+		context.Background(),
 		txn,
 		newEpoch,
 		boundarySlot,
@@ -5323,7 +5361,7 @@ func TestPrecomputedStakeRewardsCheckPreBabbageMissingLeaderPrefilter(
 			member := rewardCalcHash(0x6a)
 
 			prefilterSlot, err := ls.rewardPrefilterSlot(
-				meta,
+				dbadapter.New(db),
 				nil,
 				potsEpoch,
 			)
@@ -5387,6 +5425,7 @@ func TestPrecomputedStakeRewardsCheckPreBabbageMissingLeaderPrefilter(
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
 			app, ok, err := ls.precomputedStakeRewardApplication(
+				context.Background(),
 				txn,
 				newEpoch,
 				boundarySlot,
@@ -5639,7 +5678,11 @@ func TestApplyStakeRewardsPrefilterUsesBeginningOfRUPDSlot(t *testing.T) {
 	)
 	rewardAccount := rewardCalcHash(0x5a)
 	member := rewardCalcHash(0x6a)
-	prefilterSlot, err := ls.rewardPrefilterSlot(meta, nil, potsEpoch)
+	prefilterSlot, err := ls.rewardPrefilterSlot(
+		dbadapter.New(db),
+		nil,
+		potsEpoch,
+	)
 	require.NoError(t, err)
 
 	rewardCalcSetAccountActive(t, db, rewardAccount, false)
@@ -6118,7 +6161,7 @@ func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 	}
 
 	counts, total, known, err := ls.rewardBlockCounts(
-		meta,
+		dbadapter.New(db),
 		nil,
 		performanceEpoch,
 		[]*models.RewardPoolInput{
@@ -6182,7 +6225,7 @@ func TestRewardBlockCountsSkipsOverlaySlots(t *testing.T) {
 	require.False(t, rewardIsOverlaySlot(100, decentralization, 103))
 
 	counts, total, known, err := ls.rewardBlockCounts(
-		meta,
+		dbadapter.New(db),
 		nil,
 		performanceEpoch,
 		[]*models.RewardPoolInput{
@@ -6214,7 +6257,7 @@ func TestRewardPrefilterSlotUsesRUPDRandomnessWindow(t *testing.T) {
 		nil,
 	))
 
-	slot, err := ls.rewardPrefilterSlot(meta, nil, 3)
+	slot, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 3)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1_401), slot)
 	require.Equal(
@@ -6257,7 +6300,7 @@ func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
 		EraId:         eras.ShelleyEraDesc.Id,
 	}, pparams)
 	ls.SetEpochBoundarySnapshotHook(func(
-		_ *database.Txn,
+		_ ledgerdb.Txn,
 		evt event.EpochTransitionEvent,
 	) error {
 		got = evt
@@ -6563,15 +6606,15 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 			writeTxn := db.Transaction(context.Background(), true)
 			require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
 				ok, err := stakeRewardPrecomputeSnapshotGuardOK(
-					meta,
-					txn.Metadata(),
+					dbadapter.New(db),
+					txn,
 					app,
 				)
 				require.NoError(t, err)
 				require.True(t, ok)
 				return ls.saveStakeRewardPrecompute(
-					meta,
-					txn.Metadata(),
+					dbadapter.New(db),
+					txn,
 					app,
 					newEpoch,
 					capturedSlot,
@@ -6619,8 +6662,8 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 			writeTxn := db.Transaction(context.Background(), true)
 			require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
 				ok, err := stakeRewardPrecomputeSnapshotGuardOK(
-					meta,
-					txn.Metadata(),
+					dbadapter.New(db),
+					txn,
 					app,
 				)
 				require.NoError(t, err)
@@ -6656,8 +6699,8 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 			writeTxn := db.Transaction(context.Background(), true)
 			require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
 				ok, err := stakeRewardPrecomputeSnapshotGuardOK(
-					meta,
-					txn.Metadata(),
+					dbadapter.New(db),
+					txn,
 					app,
 				)
 				require.NoError(t, err)
@@ -6678,7 +6721,6 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 		"rollback generation changed between read and write is dropped",
 		func(t *testing.T) {
 			ls, db := seedRewardPrecomputeTimingState(t, 7)
-			meta := db.Metadata()
 			app := calculate(t, ls, db)
 
 			// The Mark snapshot is deliberately unchanged. The generation represents
@@ -6689,8 +6731,8 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 			writeTxn := db.Transaction(context.Background(), true)
 			require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
 				ok, err := stakeRewardPrecomputeSnapshotGuardOK(
-					meta,
-					txn.Metadata(),
+					dbadapter.New(db),
+					txn,
 					app,
 				)
 				require.NoError(t, err)
@@ -6723,7 +6765,7 @@ type rewardAccountHistoryMustNotRun struct{}
 func (rewardAccountHistoryMustNotRun) GetAccountsActiveAtSlot(
 	[]models.StakeCredentialRef,
 	uint64,
-	types.Txn,
+	ledgerdb.Txn,
 ) (map[string]struct{}, error) {
 	panic("reward account history query must not run")
 }
@@ -6795,8 +6837,8 @@ func TestStakeRewardPrecomputeSnapshotGuardRejectsSameSlotContentChange(
 	writeTxn := db.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
 		ok, err := stakeRewardPrecomputeSnapshotGuardOK(
-			meta,
-			txn.Metadata(),
+			dbadapter.New(db),
+			txn,
 			app,
 		)
 		require.NoError(t, err)
@@ -7782,7 +7824,7 @@ func wireDeferredBoundarySnapshot(ls *LedgerState, mgr *snapshot.Manager) {
 		mgr.DeferEpochBoundaryCapture,
 		mgr.DiscardEpochBoundaryCapture,
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			evt event.EpochTransitionEvent,
 		) (DeferredBoundarySnapshot, error) {
 			return mgr.PrepareEpochBoundarySnapshot(
@@ -7797,7 +7839,7 @@ func wireDeferredBoundarySnapshot(ls *LedgerState, mgr *snapshot.Manager) {
 func epochBoundaryBenchWireDeferred(ls *LedgerState, mgr *snapshot.Manager) {
 	ls.SetEpochBoundaryDeferredStakeInputsHook(
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 		) (uint64, uint64, []*models.RewardStakeInput, bool) {
 			deferred, ok := mgr.TakeDeferredRewardStakeInputs(txn)
 			if !ok {
@@ -8020,11 +8062,15 @@ func (f *epochBoundaryBenchFixture) wire(tb testing.TB) {
 			Logger:            slog.New(f.phases),
 		},
 	}
-	mgr := snapshot.NewManager(db, nil, slog.New(slog.NewTextHandler(
-		io.Discard, nil,
-	)))
+	mgr := snapshot.NewManager(
+		dbadapter.New(db),
+		nil,
+		slog.New(slog.NewTextHandler(
+			io.Discard, nil,
+		)),
+	)
 	f.ls.SetEpochBoundarySnapshotStakeHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return mgr.ComputeEpochBoundarySnapshot(
 				context.Background(),
 				txn,
@@ -8033,7 +8079,7 @@ func (f *epochBoundaryBenchFixture) wire(tb testing.TB) {
 		},
 	)
 	f.ls.SetEpochBoundarySnapshotHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return mgr.CaptureEpochBoundarySnapshot(
 				context.Background(),
 				txn,
@@ -8045,7 +8091,7 @@ func (f *epochBoundaryBenchFixture) wire(tb testing.TB) {
 	wireDeferredBoundarySnapshot(f.ls, mgr)
 	f.ls.SetCurrentBoundarySPOStakeHook(
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			evt event.EpochTransitionEvent,
 			incomingEraID uint,
 		) ([]*models.PoolStakeSnapshot, error) {
@@ -8934,7 +8980,7 @@ func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
 		},
 		nil,
 	))
-	prefilterSlot, err := ls.rewardPrefilterSlot(db.Metadata(), nil, 1397)
+	prefilterSlot, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 1397)
 	require.NoError(t, err)
 	require.LessOrEqual(t, prefilterSlot, uint64(1_397_799))
 
@@ -9178,7 +9224,7 @@ func TestRewardBlockCountsMergesImportedCountsAcrossTheAnchor(t *testing.T) {
 	))
 
 	counts, total, known, err := ls.rewardBlockCounts(
-		meta,
+		dbadapter.New(db),
 		nil,
 		performanceEpoch,
 		[]*models.RewardPoolInput{
@@ -9228,7 +9274,7 @@ func TestRewardBlockCountsUnknownWhenAnchorHidesTheEpoch(t *testing.T) {
 	))
 
 	_, _, known, err := ls.rewardBlockCounts(
-		meta,
+		dbadapter.New(db),
 		nil,
 		performanceEpoch,
 		[]*models.RewardPoolInput{{PoolKeyHash: poolKey}},
@@ -9265,7 +9311,7 @@ func TestRewardBlockCountsAcceptsObservableZero(t *testing.T) {
 	))
 
 	counts, total, known, err := ls.rewardBlockCounts(
-		meta,
+		dbadapter.New(db),
 		nil,
 		performanceEpoch,
 		[]*models.RewardPoolInput{{PoolKeyHash: poolKey}},
@@ -9329,7 +9375,7 @@ func TestRewardBlockCountsIgnoresImportedCountsAboveTheAnchor(t *testing.T) {
 	))
 
 	counts, total, known, err := ls.rewardBlockCounts(
-		meta,
+		dbadapter.New(db),
 		nil,
 		performanceEpoch,
 		[]*models.RewardPoolInput{{PoolKeyHash: poolKey}},
@@ -9361,6 +9407,7 @@ func TestStakeRewardRoundRejectsHiddenBlockCounts(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
 		txn,
 		4,
 		1_200,
@@ -9431,7 +9478,14 @@ func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.calculateStakeRewardApplication(txn, 1, 100, 100, true)
+	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
+		txn,
+		1,
+		100,
+		100,
+		true,
+	)
 	require.NoError(t, err)
 	require.True(
 		t,
@@ -9494,7 +9548,12 @@ func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(txn, 2, 200)
+	app, ok, err := ls.precomputedStakeRewardApplication(
+		context.Background(),
+		txn,
+		2,
+		200,
+	)
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Nil(t, app)
@@ -9608,11 +9667,12 @@ func TestStakeRewardsGenesisWarmingNeedsPrototypeNetwork(t *testing.T) {
 		if err := ls.applyStakeRewards(context.Background(), txn, 1, 500, false); err != nil {
 			return err
 		}
-		return ls.saveRewardAdaPotsForEpoch(context.Background(), txn, 1, *ended, 500)
+		return ls.saveRewardAdaPotsForEpoch(txn, 1, *ended, 500)
 	}))
 
 	readTxn := db.Transaction(t.Context(), false)
 	app, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
 		readTxn, 2, 1000, 1000, true,
 	)
 	require.NoError(t, readTxn.Rollback())
@@ -9643,6 +9703,7 @@ func TestApplyStakeRewardsPrototypeGenesisPerformance(t *testing.T) {
 		if tc.epoch == 2 {
 			readTxn := db.Transaction(t.Context(), false)
 			app, ok, err := ls.calculateStakeRewardApplication(
+				context.Background(),
 				readTxn,
 				2,
 				1000,
@@ -9668,7 +9729,7 @@ func TestApplyStakeRewardsPrototypeGenesisPerformance(t *testing.T) {
 			if err := ls.applyStakeRewards(context.Background(), txn, tc.epoch, boundary, false); err != nil {
 				return err
 			}
-			return ls.saveRewardAdaPotsForEpoch(context.Background(), txn, tc.epoch, *ended, boundary)
+			return ls.saveRewardAdaPotsForEpoch(txn, tc.epoch, *ended, boundary)
 		}))
 		state, err := meta.GetNetworkState(nil)
 		require.NoError(t, err)
@@ -9767,9 +9828,7 @@ INSERT INTO "transaction" (
 	}
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.saveRewardAdaPotsForEpoch(
-			context.Background(), txn, endedEpoch+1, ended, newEpochBoundarySlot,
-		)
+		return ls.saveRewardAdaPotsForEpoch(txn, endedEpoch+1, ended, newEpochBoundarySlot)
 	}))
 
 	pots, err := meta.GetRewardAdaPots(endedEpoch+1, nil)
@@ -9855,9 +9914,7 @@ INSERT INTO "transaction" (
 			}
 			txn := db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
-				return ls.saveRewardAdaPotsForEpoch(
-					context.Background(), txn, endedEpoch+1, ended, epochEndSlot+1,
-				)
+				return ls.saveRewardAdaPotsForEpoch(txn, endedEpoch+1, ended, epochEndSlot+1)
 			}))
 			pots, err := meta.GetRewardAdaPots(endedEpoch+1, nil)
 			require.NoError(t, err)
@@ -10174,7 +10231,7 @@ func TestRollbackRewardPrecomputeDropsAbandonedPrefilterHistory(
 	require.NoError(t, err)
 	ls.currentEpoch = *epoch
 	ls.currentEra = eras.ShelleyEraDesc
-	cutoff, err := ls.rewardPrefilterSlot(db.Metadata(), nil, 3)
+	cutoff, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 3)
 	require.NoError(t, err)
 	member := rewardCalcHash(0x6a)
 	// member is registered before the epoch; the abandoned chain deregisters
@@ -10251,6 +10308,7 @@ func TestRollbackRewardPrecomputeDropsAbandonedPrefilterHistory(
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		want, ok, err := ls.calculateStakeRewardApplication(
+			context.Background(),
 			txn, 4, replacement.Slot, 1_200, false,
 		)
 		require.NoError(t, err)
@@ -10275,6 +10333,7 @@ func TestRollbackRewardPrecomputeDropsAbandonedPrefilterHistory(
 		require.NoError(t, err)
 		require.Equal(t, want.totalRewardPot, uint64(pots.Rewards))
 		_, reusable, err := ls.precomputedStakeRewardApplication(
+			context.Background(),
 			txn, 4, 1_200,
 		)
 		require.NoError(t, err)
@@ -10708,9 +10767,7 @@ INSERT INTO "transaction" (
 		); err != nil {
 			return err
 		}
-		return ls.saveRewardAdaPotsForEpoch(
-			context.Background(), txn, 1, *epoch0, previewEpochLength,
-		)
+		return ls.saveRewardAdaPotsForEpoch(txn, 1, *epoch0, previewEpochLength)
 	}))
 
 	pots1, err := meta.GetRewardAdaPots(1, nil)
@@ -10892,6 +10949,7 @@ func TestMissingRewardSnapshotReportsImportedSeedFailure(t *testing.T) {
 			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Rollback() }()
 			app, ok, err := ls.calculateStakeRewardApplication(
+				context.Background(),
 				txn,
 				newEpoch,
 				400,
@@ -10998,7 +11056,7 @@ INSERT INTO "transaction" (
 			if err := ls.applyStakeRewards(t.Context(), txn, tc.epoch, boundary, false); err != nil {
 				return err
 			}
-			return ls.saveRewardAdaPotsForEpoch(context.Background(), txn, tc.epoch, *ended, boundary)
+			return ls.saveRewardAdaPotsForEpoch(txn, tc.epoch, *ended, boundary)
 		}))
 		state, err := meta.GetNetworkState(nil)
 		require.NoError(t, err)
@@ -11124,6 +11182,7 @@ func TestRequiredRewardBasisErrorNamesEpochInputAndRecovery(t *testing.T) {
 			defer func() { _ = txn.Rollback() }()
 
 			app, ok, err := ls.calculateStakeRewardApplication(
+				context.Background(),
 				txn, retentionNewEpoch, retentionBoundarySlot,
 				retentionBoundarySlot, true,
 			)
@@ -11138,6 +11197,7 @@ func TestRequiredRewardBasisErrorNamesEpochInputAndRecovery(t *testing.T) {
 			assert.Contains(t, err.Error(), "ledgerstate import warnings")
 
 			app, ok, err = ls.calculateStakeRewardApplication(
+				context.Background(),
 				txn, retentionNewEpoch, retentionBoundarySlot,
 				retentionBoundarySlot, false,
 			)
@@ -11158,14 +11218,28 @@ func TestRequiredRewardBasisErrorNamesHiddenBlockCounts(t *testing.T) {
 	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 
-	_, ok, err := ls.calculateStakeRewardApplication(txn, 4, 1_200, 1_200, true)
+	_, ok, err := ls.calculateStakeRewardApplication(
+		context.Background(),
+		txn,
+		4,
+		1_200,
+		1_200,
+		true,
+	)
 	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
 	require.False(t, ok)
 	assert.Contains(t, err.Error(), "new epoch 4")
 	assert.Contains(t, err.Error(), "performance_epoch=2")
 	assert.Contains(t, err.Error(), "re-running Mithril sync")
 
-	_, ok, err = ls.calculateStakeRewardApplication(txn, 4, 1_200, 1_200, false)
+	_, ok, err = ls.calculateStakeRewardApplication(
+		context.Background(),
+		txn,
+		4,
+		1_200,
+		1_200,
+		false,
+	)
 	require.NoError(t, err)
 	require.False(t, ok)
 }

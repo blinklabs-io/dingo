@@ -441,6 +441,24 @@ type ImportConfig struct {
 	// rewardCreditFoldBatchSize overrides how many covered reward credits one
 	// transaction folds. Zero selects defaultRewardCreditFoldBatchSize.
 	rewardCreditFoldBatchSize int
+	// UtxoSet, when set, receives the snapshot's UTxO set in place of the
+	// metadata store, for a ledger that keeps the live UTxO set as its only
+	// copy: the import marks the database (database.UtxoSetOnlySyncKey),
+	// writes no utxo rows or output CBOR to the metadata and blob stores,
+	// and reads UTxO stake from the set. It needs a database that is empty or
+	// already marked, and Reconcile off.
+	UtxoSet UtxoSetLoader
+}
+
+// UtxoSetLoader is a live UTxO set an import loads, which serves the metadata
+// store's UTxO reads during the import.
+type UtxoSetLoader interface {
+	types.LiveUtxoSource
+	// LoadUtxoSet replaces the set with the outputs feed puts, as of point.
+	LoadUtxoSet(
+		point ocommon.Point,
+		feed func(put func(txID []byte, index uint32, cbor []byte) error) error,
+	) error
 }
 
 type deferredRewardLiveStakeImporter interface {
@@ -589,6 +607,22 @@ func ImportLedgerState(
 	if cfg.Database == nil {
 		return errors.New("database is nil")
 	}
+	// A database whose ledger keeps the UTxO set only in its live UTxO set
+	// would get a metadata UTxO set its ledger never reads.
+	marked, err := cfg.Database.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	if err != nil {
+		return fmt.Errorf("read UTxO set mode: %w", err)
+	}
+	if marked != "" && cfg.UtxoSet == nil {
+		return errors.New(
+			"this database keeps its UTxO set only in the live UTxO set; import it with that set",
+		)
+	}
+	if cfg.UtxoSet != nil && cfg.Reconcile {
+		return errors.New(
+			"a catch-up import into a live-UTxO-set-only database is not supported",
+		)
+	}
 	if cfg.State == nil {
 		return errors.New("ledger state is nil")
 	}
@@ -663,6 +697,19 @@ func ImportLedgerState(
 		return errors.New(
 			"UTxO-HD ledger state requires external UTxO table file",
 		)
+	}
+	// Marked only once the snapshot is known valid: the mark pins the
+	// database to this mode.
+	if cfg.UtxoSet != nil {
+		if err := markUtxoSetOnlyImport(
+			ctx, cfg, marked, completedPhase,
+		); err != nil {
+			return err
+		}
+		if err := cfg.Database.SetLiveUtxoSource(cfg.UtxoSet); err != nil {
+			return fmt.Errorf("read UTxOs from the live UTxO set: %w", err)
+		}
+		defer func() { _ = cfg.Database.SetLiveUtxoSource(nil) }()
 	}
 
 	// Delete post-anchor rollover residue so replay can re-trigger every
@@ -1012,7 +1059,9 @@ func ImportLedgerState(
 				err,
 			)
 		}
-		if cfg.ImportKey != "" && !cfg.Reconcile {
+		// The resumable rebuild reads utxo rows; with the live UTxO set the
+		// single-transaction rebuild reads the set.
+		if cfg.ImportKey != "" && !cfg.Reconcile && cfg.UtxoSet == nil {
 			err := cfg.Database.RebuildRewardLiveStakeResumable(
 				ctx,
 				slot,
@@ -1428,6 +1477,10 @@ func importUTxOs(
 		"source", source,
 	)
 
+	if cfg.UtxoSet != nil {
+		return loadUtxoSet(ctx, cfg, progress)
+	}
+
 	store := cfg.Database.Metadata()
 	// The concrete store cannot change mid-import, so resolve the deferred
 	// importer once rather than per batch. Skipping the per-batch aggregate
@@ -1435,8 +1488,6 @@ func importUTxOs(
 	// reward_live_stake in full once every phase has been imported.
 	importer, supportsDeferredRefresh := store.(deferredRewardLiveStakeImporter)
 	totalImported := 0
-	lastProgressLog := time.Time{}
-	lastLoggedPercent := -5.0
 
 	batchCallback := func(batch []ParsedUTxO) error {
 		select {
@@ -1522,6 +1573,31 @@ func importUTxOs(
 		return nil
 	}
 
+	if err := parseImportUTxOs(cfg, batchCallback, progress); err != nil {
+		return err
+	}
+
+	if cfg.reconcileKeys != nil {
+		cfg.reconcileKeys.markUtxosComplete()
+	}
+
+	cfg.Logger.Info(
+		"finished importing UTxOs",
+		"component", "ledgerstate",
+		"count", totalImported,
+	)
+
+	return nil
+}
+
+// parseImportUTxOs streams the snapshot's UTxOs to batchCallback in batches.
+func parseImportUTxOs(
+	cfg ImportConfig,
+	batchCallback func([]ParsedUTxO) error,
+	progress func(ImportProgress),
+) error {
+	lastProgressLog := time.Time{}
+	lastLoggedPercent := -5.0
 	reportProgress := func(p UTxOParseProgress) {
 		now := time.Now()
 		if !lastProgressLog.IsZero() &&
@@ -1584,17 +1660,87 @@ func importUTxOs(
 			)
 		}
 	}
+	return nil
+}
 
-	if cfg.reconcileKeys != nil {
-		cfg.reconcileKeys.markUtxosComplete()
+// loadUtxoSet loads the snapshot's UTxOs into cfg.UtxoSet as of the
+// snapshot's tip.
+func loadUtxoSet(
+	ctx context.Context,
+	cfg ImportConfig,
+	progress func(ImportProgress),
+) error {
+	point := ocommon.Point{
+		Slot: cfg.State.Tip.Slot,
+		Hash: cfg.State.Tip.BlockHash,
 	}
-
+	total := 0
+	if err := cfg.UtxoSet.LoadUtxoSet(point,
+		func(put func([]byte, uint32, []byte) error) error {
+			return parseImportUTxOs(cfg, func(batch []ParsedUTxO) error {
+				if err := ctx.Err(); err != nil {
+					return fmt.Errorf("UTxO import cancelled: %w", err)
+				}
+				for i := range batch {
+					if len(batch[i].Cbor) == 0 {
+						return fmt.Errorf(
+							"UTxO %x#%d has no serialized output",
+							batch[i].TxHash,
+							batch[i].OutputIndex,
+						)
+					}
+					if err := put(
+						batch[i].TxHash, batch[i].OutputIndex, batch[i].Cbor,
+					); err != nil {
+						return err
+					}
+				}
+				total += len(batch)
+				return nil
+			}, progress)
+		},
+	); err != nil {
+		return fmt.Errorf("loading the live UTxO set: %w", err)
+	}
 	cfg.Logger.Info(
-		"finished importing UTxOs",
+		"finished loading UTxOs into the live UTxO set",
 		"component", "ledgerstate",
-		"count", totalImported,
+		"count", total,
 	)
+	return nil
+}
 
+// markUtxoSetOnlyImport records that the database keeps its UTxO set only in
+// the live UTxO set, unless it already does. An unmarked database must hold
+// no live utxo rows and no earlier import's progress; a snapshot restore may
+// already have stored its blocks.
+func markUtxoSetOnlyImport(
+	ctx context.Context,
+	cfg ImportConfig,
+	marked string,
+	completedPhase string,
+) error {
+	if marked != "" {
+		return nil
+	}
+	errHasRows := errors.New("has utxo rows")
+	err := cfg.Database.IterateLiveUtxos(
+		ctx, nil,
+		func(*models.Utxo) error { return errHasRows },
+	)
+	if err != nil && !errors.Is(err, errHasRows) {
+		return fmt.Errorf("look for utxo rows: %w", err)
+	}
+	if err != nil || completedPhase != "" {
+		return errors.New(
+			"a live-UTxO-set-only import needs a database without a metadata UTxO set",
+		)
+	}
+	if err := cfg.Database.SetSyncState(
+		database.UtxoSetOnlySyncKey, "1", nil,
+	); err != nil {
+		return fmt.Errorf("record UTxO set mode: %w", err)
+	}
 	return nil
 }
 

@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -101,7 +102,7 @@ func TestDeferredStakeInputRecoveryPreservesRowsWhenReconstructionIsEmpty(
 	require.NoError(t, meta.DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
 	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{partial}, nil))
 	require.NoError(t, markRewardStakeInputsPending(
-		meta, nil, rewardSnapshotEpoch, 100,
+		dbadapter.New(db), nil, rewardSnapshotEpoch, 100,
 	))
 
 	txn := db.Transaction(context.Background(), true)
@@ -115,7 +116,7 @@ func TestDeferredStakeInputRecoveryPreservesRowsWhenReconstructionIsEmpty(
 	require.NoError(t, err)
 	require.Len(t, inputs, 1, "empty reconstruction must not delete partial inputs")
 	require.Equal(t, partial.Stake, inputs[0].Stake)
-	pending, err := loadRewardStakeInputsPending(meta, nil)
+	pending, err := loadRewardStakeInputsPending(dbadapter.New(db), nil)
 	require.NoError(t, err)
 	require.Len(t, pending.Entries, 1, "the snapshot must remain marked incomplete")
 }
@@ -129,7 +130,7 @@ func TestApplyStakeRewardsHaltsWhenPendingInputsCannotBeReconstructed(
 	const rewardSnapshotEpoch = uint64(1)
 	require.NoError(t, meta.DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
 	require.NoError(t, markRewardStakeInputsPending(
-		meta, nil, rewardSnapshotEpoch, 100,
+		dbadapter.New(db), nil, rewardSnapshotEpoch, 100,
 	))
 
 	var fatalErr error
@@ -149,7 +150,7 @@ func TestApplyStakeRewardsHaltsWhenPendingInputsCannotBeReconstructed(
 	require.ErrorIs(t, fatalErr, errRequiredStakeRewardBasisUnavailable)
 	require.ErrorIs(t, fatalErr, errHaltLedgerPipeline)
 
-	pending, err := loadRewardStakeInputsPending(meta, nil)
+	pending, err := loadRewardStakeInputsPending(dbadapter.New(db), nil)
 	require.NoError(t, err)
 	require.Len(t, pending.Entries, 1,
 		"the unrecoverable snapshot must remain marked incomplete")
@@ -167,7 +168,7 @@ func TestApplyStakeRewardsValidationOnlyDoesNotStopNode(t *testing.T) {
 			const rewardSnapshotEpoch = uint64(1)
 			require.NoError(t, meta.DeleteRewardInputsForEpoch(rewardSnapshotEpoch, nil))
 			require.NoError(t, markRewardStakeInputsPending(
-				meta, nil, rewardSnapshotEpoch, 100,
+				dbadapter.New(db), nil, rewardSnapshotEpoch, 100,
 			))
 			ls.metrics.init(prometheus.NewRegistry())
 			var fatalErr error
@@ -487,6 +488,7 @@ func TestChunkedRewardPrecomputeMatchesMonolithicCalculation(t *testing.T) {
 	writeTxn := monolithicDB.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
 		app, ok, err := monolithic.calculateStakeRewardApplication(
+			context.Background(),
 			txn, newEpoch, capturedSlot, boundarySlot, true,
 		)
 		require.NoError(t, err)
@@ -644,7 +646,7 @@ func TestChunkedRewardPrecomputeRestartsOnInputFingerprintChange(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, done)
 	oldCursor, err := loadRewardPrecomputeCursor(
-		resumedDB.Metadata(), nil, rewardSnapshotEpoch,
+		dbadapter.New(resumedDB), nil, rewardSnapshotEpoch,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, oldCursor)
@@ -696,7 +698,7 @@ func TestChunkedRewardPrecomputeRestartsOnInactivityWindowChange(t *testing.T) {
 		}
 	}
 	oldCursor, err := loadRewardPrecomputeCursor(
-		db.Metadata(), nil, rewardSnapshotEpoch,
+		dbadapter.New(db), nil, rewardSnapshotEpoch,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, oldCursor)
@@ -712,7 +714,7 @@ func TestChunkedRewardPrecomputeRestartsOnInactivityWindowChange(t *testing.T) {
 	require.True(t, ok)
 	require.NotEqual(t, oldCursor.InputFingerprint, newRound.inputFingerprint)
 	cursor, startIndex, err := ls.resumableRewardPrecomputeCursor(
-		db.Metadata(), nil, newRound,
+		dbadapter.New(db), nil, newRound,
 	)
 	require.NoError(t, err)
 	require.Nil(t, cursor, "changed guard settings must invalidate the completed cursor")
@@ -814,6 +816,7 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 	writeTxn := monolithicDB.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
 		app, ok, err := monolithic.calculateStakeRewardApplication(
+			context.Background(),
 			txn, newEpoch, capturedSlot, boundarySlot, true,
 		)
 		require.NoError(t, err)
@@ -832,7 +835,7 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 		newEpoch, capturedSlot, boundarySlot,
 	))
 	cursor, err := loadRewardPrecomputeCursor(
-		chunkedDB.Metadata(), nil, rewardSnapshotEpoch,
+		dbadapter.New(chunkedDB), nil, rewardSnapshotEpoch,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, cursor)

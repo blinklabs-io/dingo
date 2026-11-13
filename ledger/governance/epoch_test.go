@@ -20,6 +20,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -60,7 +62,7 @@ func TestProcessEpochExtendsDRepsWhenNoLiveProposals(t *testing.T) {
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		_, err := ProcessEpoch(context.Background(), &EpochInput{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			Txn:          txn,
 			PrevEpoch:    4,
 			NewEpoch:     5,
@@ -130,7 +132,7 @@ func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 	}))
 	err = refundProposalDeposit(
 		context.Background(),
-		db,
+		dbadapter.New(db),
 		nil,
 		&models.GovernanceProposal{
 			Deposit:       7,
@@ -173,11 +175,23 @@ func TestRefundProposalDeposit_DistinguishesSameTxActionIndex(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		refundProposalDeposit(context.Background(), db, nil, first, 123),
+		refundProposalDeposit(
+			context.Background(),
+			dbadapter.New(db),
+			nil,
+			first,
+			123,
+		),
 	)
 	require.NoError(
 		t,
-		refundProposalDeposit(context.Background(), db, nil, second, 123),
+		refundProposalDeposit(
+			context.Background(),
+			dbadapter.New(db),
+			nil,
+			second,
+			123,
+		),
 	)
 
 	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
@@ -294,7 +308,7 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    4,
 		NewEpoch:     5,
@@ -393,7 +407,7 @@ func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		out, err := ProcessEpoch(context.Background(), &EpochInput{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
 			NewEpoch:     newEpoch,
@@ -487,7 +501,7 @@ func TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch(
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		out, err := ProcessEpoch(context.Background(), &EpochInput{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
 			NewEpoch:     newEpoch,
@@ -596,7 +610,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		out, err := ProcessEpoch(context.Background(), &EpochInput{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
 			NewEpoch:     newEpoch,
@@ -680,7 +694,7 @@ func TestProcessEpochReplaysBoundaryDroppedProposalAfterStakeRewardReset(
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		out, err := ProcessEpoch(context.Background(), &EpochInput{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
 			NewEpoch:     newEpoch,
@@ -770,7 +784,7 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		out, err := ProcessEpoch(context.Background(), &EpochInput{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
 			NewEpoch:     newEpoch,
@@ -961,7 +975,7 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	txn := db.MetadataTxn(t.Context(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(t.Context(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    stabilityTestEpoch - 1,
 		NewEpoch:     stabilityTestEpoch,
@@ -989,7 +1003,7 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	enactTxn := db.MetadataTxn(t.Context(), true)
 	defer enactTxn.Release()
 	enactOut, err := ProcessEpoch(t.Context(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          enactTxn,
 		PrevEpoch:    stabilityTestEpoch,
 		NewEpoch:     stabilityTestEpoch + 1,
@@ -1036,7 +1050,7 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	replayTxn := db.MetadataTxn(t.Context(), true)
 	defer replayTxn.Release()
 	replayOut, err := ProcessEpoch(t.Context(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          replayTxn,
 		PrevEpoch:    stabilityTestEpoch,
 		NewEpoch:     stabilityTestEpoch + 1,
@@ -1156,7 +1170,7 @@ func TestProcessEpochOrdersParameterChangesBeforeTreasuryWithdrawals(
 			txn := db.MetadataTxn(t.Context(), true)
 			defer txn.Release()
 			out, err := ProcessEpoch(t.Context(), &EpochInput{
-				DB:           db,
+				DB:           dbadapter.New(db),
 				Txn:          txn,
 				PrevEpoch:    stabilityTestEpoch - 1,
 				NewEpoch:     stabilityTestEpoch,
@@ -1219,7 +1233,7 @@ func TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify(
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    stabilityTestEpoch - 1,
 		NewEpoch:     stabilityTestEpoch,
@@ -1308,7 +1322,7 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 			txn := db.MetadataTxn(context.Background(), true)
 			defer txn.Release()
 			out, err := ProcessEpoch(context.Background(), &EpochInput{
-				DB:           db,
+				DB:           dbadapter.New(db),
 				Txn:          txn,
 				PrevEpoch:    4,
 				NewEpoch:     5,
@@ -1386,7 +1400,7 @@ func TestProcessEpochDormancyBumpIgnoresActionRatifiedAtFinalBoundary(
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    4,
 		NewEpoch:     5,
@@ -1576,7 +1590,7 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 				txn := db.MetadataTxn(context.Background(), true)
 				defer txn.Release()
 				out, processErr := ProcessEpoch(context.Background(), &EpochInput{
-					DB:           db,
+					DB:           dbadapter.New(db),
 					Txn:          txn,
 					PrevEpoch:    prevEpoch,
 					NewEpoch:     newEpoch,
@@ -1701,7 +1715,7 @@ func TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten(
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		out, processErr := ProcessEpoch(context.Background(), &EpochInput{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			Txn:          txn,
 			PrevEpoch:    prevEpoch,
 			NewEpoch:     newEpoch,
@@ -1789,7 +1803,7 @@ func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		out, err := ProcessEpoch(context.Background(), &EpochInput{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			Txn:          txn,
 			PrevEpoch:    4,
 			NewEpoch:     5,
@@ -1934,7 +1948,7 @@ func TestProcessEpochUnclaimedDepositDoesNotIncreaseWithdrawalCapacity(
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    4,
 		NewEpoch:     5,
@@ -2009,7 +2023,7 @@ func TestRefundProposalDepositReturnsInactiveRewardAccountToTreasury(
 
 	err = refundProposalDeposit(
 		context.Background(),
-		db,
+		dbadapter.New(db),
 		nil,
 		&models.GovernanceProposal{
 			Deposit:       7,
@@ -2056,7 +2070,7 @@ func TestRewardCreditsRollbackBySlot(t *testing.T) {
 
 	err = refundProposalDeposit(
 		context.Background(),
-		db,
+		dbadapter.New(db),
 		nil,
 		&models.GovernanceProposal{
 			Deposit:       7,
@@ -2115,7 +2129,7 @@ func TestCountActiveDRepsFiltersExpiredDReps(t *testing.T) {
 	} {
 		count, err := countActiveDReps(
 			context.Background(),
-			db,
+			dbadapter.New(db),
 			nil,
 			test.epoch,
 		)
@@ -2129,7 +2143,7 @@ func TestCountActiveDRepsFiltersExpiredDReps(t *testing.T) {
 		)
 		state, err := LoadDRepVotingState(
 			context.Background(),
-			db,
+			dbadapter.New(db),
 			nil,
 			test.epoch,
 			false,
@@ -2306,7 +2320,7 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 			txn := db.MetadataTxn(context.Background(), true)
 			defer txn.Release()
 			out, err := ProcessEpoch(context.Background(), &EpochInput{
-				DB:           db,
+				DB:           dbadapter.New(db),
 				Txn:          txn,
 				PrevEpoch:    currentEpoch - 1,
 				NewEpoch:     currentEpoch,
@@ -2347,7 +2361,7 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 				if test.wantEnactment {
 					nextTxn := db.MetadataTxn(context.Background(), true)
 					nextOut, nextErr := ProcessEpoch(context.Background(), &EpochInput{
-						DB:           db,
+						DB:           dbadapter.New(db),
 						Txn:          nextTxn,
 						PrevEpoch:    currentEpoch,
 						NewEpoch:     currentEpoch + 1,
@@ -2515,7 +2529,7 @@ func TestProcessEpochEnactedChildPreserved(t *testing.T) {
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    4,
 		NewEpoch:     5,
@@ -2616,7 +2630,7 @@ func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		out, err := ProcessEpoch(context.Background(), &EpochInput{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
 			NewEpoch:     newEpoch,
@@ -2716,7 +2730,7 @@ func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		out, err := ProcessEpoch(context.Background(), &EpochInput{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
 			NewEpoch:     newEpoch,
@@ -2799,7 +2813,7 @@ func TestProcessEpochOrphanExcludedFromActiveProposals(t *testing.T) {
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	_, err := ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    4,
 		NewEpoch:     5,
@@ -2855,7 +2869,7 @@ func TestProcessEpochOrphanedSiblingRestoredOnRollback(t *testing.T) {
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	_, err := ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    4,
 		NewEpoch:     5,
@@ -2948,7 +2962,7 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
 		out, err := ProcessEpoch(context.Background(), &EpochInput{
-			DB:           db,
+			DB:           dbadapter.New(db),
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
 			NewEpoch:     newEpoch,
@@ -3019,7 +3033,7 @@ func TestDeferredRatificationUsesBoundaryProposalAndDRepState(t *testing.T) {
 
 	boundaryTxn := db.MetadataTxn(ctx, true)
 	out, err := ProcessEpoch(ctx, &EpochInput{
-		DB: db, Txn: boundaryTxn, PrevEpoch: 4, NewEpoch: 5,
+		DB: dbadapter.New(db), Txn: boundaryTxn, PrevEpoch: 4, NewEpoch: 5,
 		BoundarySlot: 500, PParams: conwayPParamsFixture(10),
 		CurrentBoundarySPOState: &SPOVotingState{},
 		DeferRatification:       true,
@@ -3138,7 +3152,7 @@ func TestDecideRatificationOnReadOnlySnapshotMatchesBoundary(t *testing.T) {
 	))
 
 	input := func(txn *EpochInput) *EpochInput {
-		txn.DB = db
+		txn.DB = dbadapter.New(db)
 		txn.PrevEpoch = currentEpoch
 		txn.NewEpoch = newEpoch
 		txn.BoundarySlot = newEpoch * 100

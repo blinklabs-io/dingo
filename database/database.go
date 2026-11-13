@@ -94,6 +94,9 @@ type Database struct {
 	config   *Config
 	logger   *slog.Logger
 	metadata metadata.MetadataStore
+	// liveUtxo is set when the ledger holds the live UTxO set outside the
+	// metadata store; see SetLiveUtxoSource.
+	liveUtxo bool
 	// blobRef is the installed blob store, guarded by blobMu. See
 	// blob_store.go for the ownership, locking, and replacement rules that
 	// apply to both fields; nothing outside that file touches blobRef

@@ -20,6 +20,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -81,7 +83,7 @@ func TestBoundaryCreditVisibility_TreasuryWithdrawalIsExcludedFromSnapshot(
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
 	require.NoError(t, applyTreasuryWithdrawal(context.Background(),
-		&EnactmentContext{DB: db, Slot: 200},
+		&EnactmentContext{DB: dbadapter.New(db), Slot: 200},
 		&lcommon.TreasuryWithdrawalGovAction{
 			Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 7},
 		},
@@ -113,7 +115,7 @@ func TestBoundaryCreditVisibility_ProposalRefundIsExcludedFromSnapshot(
 		t,
 		refundProposalDeposit(
 			context.Background(),
-			db,
+			dbadapter.New(db),
 			nil,
 			&models.GovernanceProposal{
 				TxHash:        testBytes(32, 0x64),
@@ -340,7 +342,7 @@ func TestProcessEpoch_NoConfidence_SPOThresholdUsesSameBoundaryMark(
 			txn := db.MetadataTxn(context.Background(), true)
 			defer txn.Release()
 			out, err := ProcessEpoch(context.Background(), &EpochInput{
-				DB:           db,
+				DB:           dbadapter.New(db),
 				Txn:          txn,
 				PrevEpoch:    newEpoch - 1,
 				NewEpoch:     newEpoch,
@@ -459,7 +461,15 @@ func TestMidEpochPredictionAndBoundaryReadDifferentMarks(t *testing.T) {
 	got, err := EvaluateRatifiableHardForkInitiation(
 		context.Background(),
 		NewStabilityCheckInputs(
-			db, nil, currentEpoch, false, stabilityConwayPParams(9), nil, nil,
+			dbadapter.New(
+				db,
+			),
+			nil,
+			currentEpoch,
+			false,
+			stabilityConwayPParams(9),
+			nil,
+			nil,
 		),
 	)
 	require.NoError(t, err)
@@ -468,7 +478,7 @@ func TestMidEpochPredictionAndBoundaryReadDifferentMarks(t *testing.T) {
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    currentEpoch,
 		NewEpoch:     newEpoch,
@@ -523,7 +533,7 @@ func TestProcessEpoch_MissingSameBoundarySPOState_Errors(t *testing.T) {
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	_, err := ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    newEpoch - 1,
 		NewEpoch:     newEpoch,
@@ -577,7 +587,7 @@ func TestProcessEpoch_SuppliedSameBoundarySPOState_Ratifies(t *testing.T) {
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    newEpoch - 1,
 		NewEpoch:     newEpoch,
@@ -852,7 +862,7 @@ func runSPONonVoterRatification(
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(context.Background(), &EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    stabilityTestEpoch - 1,
 		NewEpoch:     stabilityTestEpoch,
@@ -1021,7 +1031,11 @@ func TestRatifyLevelForkRestoresVoteAcrossAllVoterTypes(t *testing.T) {
 	pparams.DRepVotingThresholds.HardForkInitiation = newRat(60, 100)
 	pparams.PoolVotingThresholds.HardForkInitiation = newRat(51, 100)
 
-	tallyCtx := &TallyContext{DB: db, StakeEpoch: 5, CurrentEpoch: 10}
+	tallyCtx := &TallyContext{
+		DB:           dbadapter.New(db),
+		StakeEpoch:   5,
+		CurrentEpoch: 10,
+	}
 	ratify := func() RatifyDecision {
 		tally, err := TallyProposal(context.Background(), tallyCtx, proposal)
 		require.NoError(t, err)

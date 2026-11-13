@@ -20,6 +20,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -68,20 +70,26 @@ func TestLoadDRepVotingStateMatchesLazyTally(t *testing.T) {
 		t,
 		tallyDRepVotes(
 			context.Background(),
-			&TallyContext{DB: db},
+			&TallyContext{DB: dbadapter.New(db)},
 			votes,
 			lazyTally,
 		),
 	)
 
-	state, err := LoadDRepVotingState(context.Background(), db, nil, 0, false)
+	state, err := LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		0,
+		false,
+	)
 	require.NoError(t, err)
 	precomputedTally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
 	}
 	require.NoError(t, tallyDRepVotes(
 		context.Background(),
-		&TallyContext{DB: db, DRepState: state},
+		&TallyContext{DB: dbadapter.New(db), DRepState: state},
 		votes,
 		precomputedTally,
 	))
@@ -106,7 +114,13 @@ func TestPrecomputedDRepStateReusedAcrossProposals(t *testing.T) {
 		t, store, stakeCred, nil, models.DrepTypeAlwaysNoConfidence, 30, 3,
 	)
 
-	state, err := LoadDRepVotingState(context.Background(), db, nil, 0, false)
+	state, err := LoadDRepVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		0,
+		false,
+	)
 	require.NoError(t, err)
 
 	noConfidence := &ProposalTally{
@@ -114,7 +128,12 @@ func TestPrecomputedDRepStateReusedAcrossProposals(t *testing.T) {
 	}
 	require.NoError(t, tallyDRepVotes(
 		context.Background(),
-		&TallyContext{DB: db, DRepState: state}, nil, noConfidence,
+		&TallyContext{
+			DB:        dbadapter.New(db),
+			DRepState: state,
+		},
+		nil,
+		noConfidence,
 	))
 	assert.Equal(t, uint64(30), noConfidence.DRepTotalStake)
 	assert.Equal(t, uint64(30), noConfidence.DRepYesStake)
@@ -125,7 +144,12 @@ func TestPrecomputedDRepStateReusedAcrossProposals(t *testing.T) {
 	}
 	require.NoError(t, tallyDRepVotes(
 		context.Background(),
-		&TallyContext{DB: db, DRepState: state}, nil, updateCommittee,
+		&TallyContext{
+			DB:        dbadapter.New(db),
+			DRepState: state,
+		},
+		nil,
+		updateCommittee,
 	))
 	assert.Equal(t, uint64(30), updateCommittee.DRepTotalStake)
 	assert.Equal(t, uint64(0), updateCommittee.DRepYesStake)
@@ -157,16 +181,16 @@ func TestLoadSPOVotingStateMatchesLazyTally(t *testing.T) {
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
 	}
 	require.NoError(t, tallySPOVotes(context.Background(),
-		&TallyContext{DB: db, StakeEpoch: 5}, votes, lazyTally,
+		&TallyContext{DB: dbadapter.New(db), StakeEpoch: 5}, votes, lazyTally,
 	))
 
-	state, err := LoadSPOVotingState(db, nil, 5)
+	state, err := LoadSPOVotingState(dbadapter.New(db), nil, 5)
 	require.NoError(t, err)
 	precomputedTally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
 	}
 	require.NoError(t, tallySPOVotes(context.Background(),
-		&TallyContext{DB: db, StakeEpoch: 5, SPOState: state},
+		&TallyContext{DB: dbadapter.New(db), StakeEpoch: 5, SPOState: state},
 		votes,
 		precomputedTally,
 	))
@@ -191,7 +215,7 @@ func TestTallyDRepVotesIncludesAlwaysNoConfidence(t *testing.T) {
 	}
 	err := tallyDRepVotes(
 		context.Background(),
-		&TallyContext{DB: db},
+		&TallyContext{DB: dbadapter.New(db)},
 		nil,
 		noConfidenceTally,
 	)
@@ -205,7 +229,7 @@ func TestTallyDRepVotesIncludesAlwaysNoConfidence(t *testing.T) {
 	}
 	err = tallyDRepVotes(
 		context.Background(),
-		&TallyContext{DB: db},
+		&TallyContext{DB: dbadapter.New(db)},
 		nil,
 		updateCommitteeTally,
 	)
@@ -268,7 +292,7 @@ func TestTallyDRepVotesSeparatesSameHashByCredentialTag(t *testing.T) {
 	}
 	err := tallyDRepVotes(
 		context.Background(),
-		&TallyContext{DB: db},
+		&TallyContext{DB: dbadapter.New(db)},
 		[]*models.GovernanceVote{
 			{
 				VoterType:          models.VoterTypeDRep,
@@ -628,13 +652,13 @@ func TestLoadSPOVotingStateTotalStakeOverflow(t *testing.T) {
 	}
 
 	t.Run("just below overflow succeeds", func(t *testing.T) {
-		state, err := LoadSPOVotingState(newDB(1), nil, 9)
+		state, err := LoadSPOVotingState(dbadapter.New(newDB(1)), nil, 9)
 		require.NoError(t, err)
 		assert.Equal(t, maxUint64, state.TotalStake)
 	})
 
 	t.Run("just above overflow fails", func(t *testing.T) {
-		_, err := LoadSPOVotingState(newDB(2), nil, 9)
+		_, err := LoadSPOVotingState(dbadapter.New(newDB(2)), nil, 9)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "overflows uint64")
 	})
@@ -702,7 +726,7 @@ func TestTallyProposalRequiresSeatedAuthorizedCommitteeMembers(t *testing.T) {
 
 	tally, err := TallyProposal(
 		context.Background(),
-		&TallyContext{DB: db, CurrentEpoch: 10}, proposal,
+		&TallyContext{DB: dbadapter.New(db), CurrentEpoch: 10}, proposal,
 	)
 	require.NoError(t, err)
 
@@ -740,7 +764,12 @@ func TestLoadCommitteeVotingStateExcludesSeatedMembersWithoutHotAuth(
 		AddedSlot:      1,
 	})
 
-	state, err := LoadCommitteeVotingState(context.Background(), db, nil, 10)
+	state, err := LoadCommitteeVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		10,
+	)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, state.ActiveMemberCount)
@@ -793,7 +822,12 @@ func TestLoadCommitteeVotingStateExcludesResignedMembers(t *testing.T) {
 		AddedSlot:      2,
 	})
 
-	state, err := LoadCommitteeVotingState(context.Background(), db, nil, 10)
+	state, err := LoadCommitteeVotingState(
+		context.Background(),
+		dbadapter.New(db),
+		nil,
+		10,
+	)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, state.ActiveMemberCount)
@@ -846,7 +880,7 @@ func TestTallyCCVotesExcludesResignedFromDenominator(t *testing.T) {
 	tally := &ProposalTally{}
 	err := tallyCCVotes(
 		context.Background(),
-		&TallyContext{DB: db, CurrentEpoch: 10},
+		&TallyContext{DB: dbadapter.New(db), CurrentEpoch: 10},
 		[]*models.GovernanceVote{{
 			VoterType:       models.VoterTypeCC,
 			VoterCredential: yesHot,
@@ -881,7 +915,7 @@ func TestTallyCCVotesExcludesExpiredCommitteeMembers(t *testing.T) {
 	tally := &ProposalTally{}
 	err := tallyCCVotes(
 		context.Background(),
-		&TallyContext{DB: db, CurrentEpoch: 10},
+		&TallyContext{DB: dbadapter.New(db), CurrentEpoch: 10},
 		[]*models.GovernanceVote{{
 			VoterType:       models.VoterTypeCC,
 			VoterCredential: hot,
@@ -954,7 +988,7 @@ func TestTallyProposalCommitteeTermEpochIsInclusive(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			tally, err := TallyProposal(context.Background(), &TallyContext{
-				DB:           db,
+				DB:           dbadapter.New(db),
 				CurrentEpoch: testCase.currentEpoch,
 			}, proposal)
 			require.NoError(t, err)
@@ -1005,7 +1039,7 @@ func TestTallyCCVotesNonVotingMembersAreNotCountedAsNo(t *testing.T) {
 	tally := &ProposalTally{}
 	err := tallyCCVotes(
 		context.Background(),
-		&TallyContext{DB: db, CurrentEpoch: 10},
+		&TallyContext{DB: dbadapter.New(db), CurrentEpoch: 10},
 		[]*models.GovernanceVote{
 			{
 				VoterType:       models.VoterTypeCC,
@@ -1237,7 +1271,7 @@ func TestTallySPOVotesAlwaysAbstainDelegation(t *testing.T) {
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
 	}
 	err := tallySPOVotes(context.Background(),
-		&TallyContext{DB: db, StakeEpoch: 7},
+		&TallyContext{DB: dbadapter.New(db), StakeEpoch: 7},
 		nil,
 		tally,
 	)
@@ -1353,7 +1387,7 @@ func TestTallySPOVotesAlwaysNoConfidenceFlipsByActionType(t *testing.T) {
 
 			tally := &ProposalTally{ActionType: uint8(tc.actionType)}
 			err := tallySPOVotes(context.Background(),
-				&TallyContext{DB: db, StakeEpoch: 11},
+				&TallyContext{DB: dbadapter.New(db), StakeEpoch: 11},
 				nil,
 				tally,
 			)
@@ -1388,7 +1422,7 @@ func TestTallySPOVotesOrdinaryDRepNoAutoVote(t *testing.T) {
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
 	}
 	err := tallySPOVotes(context.Background(),
-		&TallyContext{DB: db, StakeEpoch: 4},
+		&TallyContext{DB: dbadapter.New(db), StakeEpoch: 4},
 		nil,
 		tally,
 	)
@@ -1432,7 +1466,7 @@ func TestTallySPOVotesNoRewardAccountDelegation(t *testing.T) {
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
 	}
 	err := tallySPOVotes(context.Background(),
-		&TallyContext{DB: db, StakeEpoch: 8},
+		&TallyContext{DB: dbadapter.New(db), StakeEpoch: 8},
 		nil,
 		tally,
 	)
@@ -1484,7 +1518,7 @@ func TestTallySPOVotesDeregisteredRewardAccountDoesNotAutoVote(t *testing.T) {
 		ActionType: uint8(lcommon.GovActionTypeNoConfidence),
 	}
 	err := tallySPOVotes(context.Background(),
-		&TallyContext{DB: db, StakeEpoch: 12},
+		&TallyContext{DB: dbadapter.New(db), StakeEpoch: 12},
 		nil,
 		tally,
 	)
@@ -1541,7 +1575,7 @@ func TestTallySPOVotesMixedExplicitAndAutoVotes(t *testing.T) {
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
 	}
 	err := tallySPOVotes(context.Background(),
-		&TallyContext{DB: db, StakeEpoch: 9},
+		&TallyContext{DB: dbadapter.New(db), StakeEpoch: 9},
 		[]*models.GovernanceVote{{
 			VoterType:       models.VoterTypeSPO,
 			VoterCredential: explicitYesPool,
@@ -1600,7 +1634,7 @@ func TestTallySPOVotesUnresolvedSnapshotRowFallsBackToImplicitNo(t *testing.T) {
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
 	}
 	err := tallySPOVotes(context.Background(),
-		&TallyContext{DB: db, StakeEpoch: 15},
+		&TallyContext{DB: dbadapter.New(db), StakeEpoch: 15},
 		nil,
 		tally,
 	)
@@ -1665,7 +1699,7 @@ UPDATE account SET drep = ?, drep_type = ? WHERE staking_key = ?`,
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
 	}
 	err = tallySPOVotes(context.Background(),
-		&TallyContext{DB: db, StakeEpoch: 13},
+		&TallyContext{DB: dbadapter.New(db), StakeEpoch: 13},
 		nil,
 		tally,
 	)

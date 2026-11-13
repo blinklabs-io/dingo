@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
@@ -51,7 +51,7 @@ var ErrLeiosCommitteeNotYetAvailable = errors.New(
 func (ls *LedgerState) queryShelleyLeiosCommittee(
 	ctx context.Context,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	epoch, err := ls.shelleyEpochNo(ctx, at, txn)
 	if err != nil {

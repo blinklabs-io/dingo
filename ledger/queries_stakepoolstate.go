@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -60,7 +60,7 @@ import (
 func (ls *LedgerState) queryShelleyStakePoolState(
 	ctx context.Context,
 	q *olocalstatequery.ShelleyStakePoolStateQuery,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	filter, all := q.PoolFilter()
 	result := make(
@@ -78,7 +78,7 @@ func (ls *LedgerState) queryShelleyStakePoolState(
 	// registered pools.
 	var keyHashes []lcommon.PoolKeyHash
 	if all {
-		active, err := ls.db.GetActivePoolKeyHashes(ctx, txn)
+		active, err := ls.ledgerDB().GetActivePoolKeyHashes(ctx, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -104,7 +104,6 @@ func (ls *LedgerState) queryShelleyStakePoolState(
 		return []any{result}, nil
 	}
 
-	meta := txn.Metadata()
 	networkID := uint8(ls.NewView(txn).NetworkId()) // #nosec G115 -- 0 or 1
 	consensus := ls.loadConsensusSnapshot()
 	tip, epochRow, err := ls.epochAtTip(txn)
@@ -125,12 +124,12 @@ func (ls *LedgerState) queryShelleyStakePoolState(
 		includeBlsKey = pv.Major >= blsKeyMinProtocolMajor
 	}
 
-	effective, err := ls.db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+	effective, err := ls.ledgerDB().GetPoolRegistrationsEffectiveForEpoch(
 		keyHashes,
 		epoch.StartSlot,
 		epoch.EpochId,
 		tipSlot,
-		meta,
+		txn,
 	)
 	if err != nil {
 		return nil, err
@@ -138,10 +137,10 @@ func (ls *LedgerState) queryShelleyStakePoolState(
 	if len(effective) == 0 {
 		return []any{result}, nil
 	}
-	latest, err := ls.db.Metadata().GetPoolRegistrationsAtSlot(
+	latest, err := ls.ledgerDB().GetPoolRegistrationsAtSlot(
 		keyHashes,
 		math.MaxInt64,
-		meta,
+		txn,
 	)
 	if err != nil {
 		return nil, err
@@ -150,11 +149,11 @@ func (ls *LedgerState) queryShelleyStakePoolState(
 	for i := range latest {
 		latestByPool[string(latest[i].PoolKeyHash)] = &latest[i]
 	}
-	deposits, err := ls.db.Metadata().GetPoolDepositsHeld(keyHashes, meta)
+	deposits, err := ls.ledgerDB().GetPoolDepositsHeld(keyHashes, txn)
 	if err != nil {
 		return nil, err
 	}
-	retiringRows, err := ls.db.Metadata().GetRetiringPools(epoch.EpochId, meta)
+	retiringRows, err := ls.ledgerDB().GetRetiringPools(epoch.EpochId, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -162,18 +161,18 @@ func (ls *LedgerState) queryShelleyStakePoolState(
 	for _, row := range retiringRows {
 		retiring[string(row.PoolKeyHash)] = row.Epoch
 	}
-	delegatorCounts, err := ls.db.Metadata().GetActiveDelegatorCountsByPool(
+	delegatorCounts, err := ls.ledgerDB().GetActiveDelegatorCountsByPool(
 		keyHashes,
-		meta,
+		txn,
 	)
 	if err != nil {
 		return nil, err
 	}
 	var delegators map[string][]models.StakeCredentialRef
 	if q.IncludeDelegators {
-		delegators, err = ls.db.Metadata().GetActiveDelegatorCredentialsByPool(
+		delegators, err = ls.ledgerDB().GetActiveDelegatorCredentialsByPool(
 			keyHashes,
-			meta,
+			txn,
 		)
 		if err != nil {
 			return nil, err

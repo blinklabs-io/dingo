@@ -71,6 +71,18 @@ func (n *Node) chainsyncSyncTarget(
 // n.chainSelector are all replaced by a live rebuild -- a method value
 // would pin the rebuilt ledger to the outgoing instance.
 func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
+	cfg := n.ledgerStateConfigBase()
+	// Assigned only when open: a nil *utxoset.Set in the interface field
+	// would read as configured.
+	if n.utxoSet != nil {
+		cfg.UtxoSet = n.utxoSet
+		cfg.UtxoSetReads = n.config.ledgerUtxoReads
+		cfg.UtxoSetOnly = n.config.ledgerUtxoBadgerOnly
+	}
+	return cfg
+}
+
+func (n *Node) ledgerStateConfigBase() ledger.LedgerStateConfig {
 	healthGeneration := n.health.currentGeneration()
 	return ledger.LedgerStateConfig{
 		Consensus:      n.selectedConsensusProvider(),

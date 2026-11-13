@@ -20,6 +20,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -362,9 +364,29 @@ func (s *Store) GetPointerStakeInputsForPools(
 	for _, pool := range poolKeyHashes {
 		wantedPools[string(pool)] = struct{}{}
 	}
-	query, args, err := pointerStakeInputsSQL(slot, expiryEpoch)
-	if err != nil {
-		return nil, err
+	var query string
+	var args []any
+	if s.liveUtxo != nil {
+		pointers, err := s.liveUtxo.LivePointerStakes(txn)
+		if err != nil {
+			return nil, fmt.Errorf("read live pointer stake: %w", err)
+		}
+		if len(pointers) == 0 {
+			return nil, nil
+		}
+		query, args, err = livePointerStakeInputsSQL(
+			slot,
+			expiryEpoch,
+			pointers,
+		)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		query, args, err = pointerStakeInputsSQL(slot, expiryEpoch)
+		if err != nil {
+			return nil, err
+		}
 	}
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -432,3 +454,146 @@ func (s *Store) GetPointerStakeInputsForPools(
 	}
 	return ret, nil
 }
+
+// livePointerStakeInputsSQL is pointerStakeInputsSQL for a store that keeps
+// no utxo rows: the live pointer outputs, summed per position, come from the
+// live UTxO set as a VALUES list, and are resolved and delegated exactly as
+// pointerStakeInputsSQL resolves utxo_pointer rows. Each row's amount is the
+// position's total, which the caller sums per credential as it sums outputs.
+func livePointerStakeInputsSQL(
+	slot uint64,
+	expiryEpoch uint64,
+	pointers []types.PointerStake,
+) (string, []any, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return "", nil, err
+	}
+	query, args := activeDelegationScopedSQL(slot, slot, `
+ SELECT DISTINCT stake_registration.credential_tag,
+        stake_registration.staking_key
+ FROM live_pointer
+ JOIN certs
+   ON certs.slot = live_pointer.ptr_slot
+  AND certs.cert_index = live_pointer.ptr_cert_index
+  AND certs.slot <= ?
+ JOIN applied_transaction
+   ON applied_transaction.tx_id = certs.transaction_id
+  AND applied_transaction.block_index = live_pointer.ptr_tx_index
+ JOIN stake_registration
+   ON stake_registration.certificate_id = certs.id`,
+		[]any{slotValue},
+	)
+	query, args, err = withLivePointers(query, args, pointers)
+	if err != nil {
+		return "", nil, err
+	}
+	query += livePointerResolutionSQL
+	args = append(args, slotValue)
+	expiryJoin := ""
+	expiryPredicate := ""
+	if expiryEpoch > 0 {
+		expiryJoin = `
+LEFT JOIN account acct
+  ON acct.credential_tag = active_delegation.credential_tag
+ AND acct.staking_key = active_delegation.staking_key`
+		expiryPredicate = `
+WHERE acct.expiration_epoch = 0
+ OR acct.expiration_epoch >= ? OR acct.expiration_epoch IS NULL`
+	}
+	query += `
+SELECT active_delegation.pool_key_hash, active_delegation.credential_tag,
+       active_delegation.staking_key, pointer_resolution.amount AS utxo_amount
+FROM active_delegation
+JOIN pointer_resolution
+  ON pointer_resolution.credential_tag = active_delegation.credential_tag
+ AND pointer_resolution.staking_key = active_delegation.staking_key
+` + expiryJoin + expiryPredicate
+	if expiryEpoch > 0 {
+		args = append(args, expiryEpoch)
+	}
+	return query, args, nil
+}
+
+// withLivePointers prefixes query, which starts with WITH, with a live_pointer
+// CTE holding pointers as (ptr_slot, ptr_tx_index, ptr_cert_index, amount)
+// rows, and puts their arguments first.
+func withLivePointers(
+	query string,
+	args []any,
+	pointers []types.PointerStake,
+) (string, []any, error) {
+	trimmed := strings.TrimSpace(query)
+	if !strings.HasPrefix(trimmed, "WITH ") {
+		return "", nil, errors.New("stake query does not start with WITH")
+	}
+	values := make([]string, 0, len(pointers))
+	liveArgs := make([]any, 0, 4*len(pointers)+len(args))
+	for _, p := range pointers {
+		ptrSlot, err := checkedInt64(p.Slot)
+		if err != nil {
+			return "", nil, err
+		}
+		txIndex, err := checkedInt64(p.TxIndex)
+		if err != nil {
+			return "", nil, err
+		}
+		certIndex, err := checkedInt64(p.CertIndex)
+		if err != nil {
+			return "", nil, err
+		}
+		values = append(values, "(?, ?, ?, ?)")
+		liveArgs = append(liveArgs,
+			ptrSlot, txIndex, certIndex, strconv.FormatUint(p.Lovelace, 10),
+		)
+	}
+	if len(values) == 0 {
+		// An empty VALUES list is not valid SQL; a row that no certificate
+		// matches stands in for it.
+		values = append(values, "(-1, -1, -1, '0')")
+	}
+	return "WITH live_pointer(ptr_slot, ptr_tx_index, ptr_cert_index, amount) AS (VALUES " +
+			strings.Join(
+				values,
+				", ",
+			) + "),\n" +
+			strings.TrimPrefix(
+				trimmed,
+				"WITH ",
+			),
+		append(
+			liveArgs,
+			args...), nil
+}
+
+// livePointerResolutionSQL is pointerResolutionSQL over live_pointer rows,
+// carrying each position's amount instead of a utxo id. It takes the slot as
+// its one argument.
+const livePointerResolutionSQL = `,
+pointer_resolution AS (
+ SELECT live_pointer.amount AS amount,
+        stake_registration.credential_tag AS credential_tag,
+        stake_registration.staking_key AS staking_key
+ FROM live_pointer
+ JOIN certs
+   ON certs.slot = live_pointer.ptr_slot
+  AND certs.cert_index = live_pointer.ptr_cert_index
+ JOIN applied_transaction
+   ON applied_transaction.tx_id = certs.transaction_id
+  AND applied_transaction.block_index = live_pointer.ptr_tx_index
+ JOIN stake_registration
+   ON stake_registration.certificate_id = certs.id
+ WHERE certs.slot <= ?
+   AND NOT EXISTS (
+     SELECT 1 FROM registration_events removal
+     WHERE removal.registered = 0
+       AND removal.credential_tag = stake_registration.credential_tag
+       AND removal.staking_key = stake_registration.staking_key
+       AND (removal.added_slot > certs.slot
+         OR (removal.added_slot = certs.slot
+           AND removal.block_index > applied_transaction.block_index)
+         OR (removal.added_slot = certs.slot
+           AND removal.block_index = applied_transaction.block_index
+           AND removal.cert_index > certs.cert_index))
+   )
+)`

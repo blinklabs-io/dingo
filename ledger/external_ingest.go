@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -481,7 +483,7 @@ func (ls *LedgerState) applyTrustedBlocks(
 	// API storage mode keeps spent rows for historical queries, so only the
 	// other modes drop the outputs a batch creates and spends.
 	spends := newIntraBatchSpends(
-		ls.db.StorageMode() != types.StorageModeAPI,
+		ls.ledgerDB().StorageMode() != types.StorageModeAPI,
 	)
 	e.spends.Store(spends)
 	defer e.spends.Store(nil)
@@ -543,7 +545,7 @@ func (ls *LedgerState) applyTrustedSource(
 	return ls.processBlocksFromSource(ctx, source, blockSourceOptions{
 		trusted:   true,
 		chunkSize: len(blocks),
-		beforeCommit: func(txn *database.Txn, applied []ledger.Block) error {
+		beforeCommit: func(txn ledgerdb.Txn, applied []ledger.Block) error {
 			if err := spends.removeFromTxn(
 				ls.db, txn, applied,
 				ls.externalIngest.takeOverlayOnly(),
@@ -671,14 +673,17 @@ func (s *intraBatchSpends) committedAmong(
 // and the prune floor are left.
 func (s *intraBatchSpends) removeFromTxn(
 	db *database.Database,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	applied []ledger.Block,
 	overlay bool,
 ) error {
 	if !s.enabled || len(applied) == 0 {
 		return nil
 	}
-	_, protected, err := pendingRewardStakeInputHistoryFloor(db.Metadata(), txn.Metadata())
+	_, protected, err := pendingRewardStakeInputHistoryFloor(
+		dbadapter.New(db),
+		txn,
+	)
 	if err != nil {
 		return err
 	}
@@ -708,7 +713,7 @@ func (s *intraBatchSpends) removeFromTxn(
 	}
 	slot := applied[len(applied)-1].SlotNumber()
 	if overlay {
-		return db.UtxosDropSpentInBatchBlobs(spent, slot, txn)
+		return db.UtxosDropSpentInBatchBlobs(spent, slot, dbadapter.Unwrap(txn))
 	}
-	return db.UtxosDeleteSpentInBatch(spent, slot, txn)
+	return db.UtxosDeleteSpentInBatch(spent, slot, dbadapter.Unwrap(txn))
 }

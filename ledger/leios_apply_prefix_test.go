@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -394,7 +394,7 @@ func TestLeiosApplyPrefixCommitsBeforeLaterClosureArrives(t *testing.T) {
 		finished <- ls.processBlocksFromSource(f.ctx, results, blockSourceOptions{
 			trusted: true,
 			gated:   true,
-			beforeCommit: func(_ *database.Txn, applied []gledger.Block) error {
+			beforeCommit: func(_ ledgerdb.Txn, applied []gledger.Block) error {
 				if len(applied) > 0 {
 					slots := make([]uint64, len(applied))
 					for i, block := range applied {
@@ -486,7 +486,7 @@ func TestLeiosApplyPrefixPreservesSourceCommitBoundaries(t *testing.T) {
 					trusted:   true,
 					gated:     tc.gated,
 					chunkSize: len(blocks),
-					beforeCommit: func(_ *database.Txn, blocks []gledger.Block) error {
+					beforeCommit: func(_ ledgerdb.Txn, blocks []gledger.Block) error {
 						applied.Add(int32(len(blocks)))
 						return nil
 					},

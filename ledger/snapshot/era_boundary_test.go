@@ -19,6 +19,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -57,7 +59,7 @@ func captureAcrossEraBoundary(
 		{stakingKey: stakingKey, utxoAmounts: []types.Uint64{types.Uint64(seededStake)}},
 	}, 500)
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,
@@ -155,7 +157,11 @@ func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossSameRuleEraChanges(
 				poolHash := bytes.Repeat([]byte{0xb7}, 28)
 				seedPointerStakeFixture(t, db, poolHash)
 
-				mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+				mgr := NewManager(
+					dbadapter.New(db),
+					event.NewEventBus(nil, nil),
+					nil,
+				)
 				evt := event.EpochTransitionEvent{
 					PreviousEpoch:   0,
 					NewEpoch:        1,
@@ -217,7 +223,7 @@ func TestCurrentBoundarySPOStakeRowsUsesIncomingEraBeforeEpochRowExists(
 	poolHash := bytes.Repeat([]byte{0xb7}, 28)
 	seedPointerStakeFixture(t, db, poolHash)
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,

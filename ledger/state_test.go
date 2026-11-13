@@ -39,6 +39,8 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
@@ -5432,7 +5434,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			TrustedReplay: true,
 			EndorserBlockProvider: func(
 				[]byte,
@@ -7699,7 +7701,7 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 
 	var captures []event.EpochTransitionEvent
 	ls.SetEpochBoundarySnapshotHook(
-		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+		func(_ ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			captures = append(captures, evt)
 			return nil
 		},
@@ -7857,7 +7859,7 @@ func TestEpochRolloverJumpSkipsNewEpochEffects(t *testing.T) {
 	ls, db := newBoundaryRolloverLedger(t)
 	var captures []event.EpochTransitionEvent
 	ls.SetEpochBoundarySnapshotHook(
-		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+		func(_ ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			captures = append(captures, evt)
 			return nil
 		},
@@ -7993,7 +7995,7 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 
 	var captures []event.EpochTransitionEvent
 	ls.SetEpochBoundarySnapshotHook(
-		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+		func(_ ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			captures = append(captures, evt)
 			return nil
 		},
@@ -8602,25 +8604,25 @@ func TestHardForkBoundaryDiscardsDeferredSnapshotCapture(t *testing.T) {
 	ratifyResult := f.rollover(t, f.ls.currentEpoch, f.pparams)
 	require.Equal(t, uint64(742), ratifyResult.NewCurrentEpoch.EpochId)
 
-	noop := func(*database.Txn, event.EpochTransitionEvent) error { return nil }
+	noop := func(ledgerdb.Txn, event.EpochTransitionEvent) error { return nil }
 	f.ls.SetEpochBoundarySnapshotStakeHook(noop)
 	f.ls.SetEpochBoundarySnapshotHook(noop)
 	f.ls.SetCurrentBoundarySPOStakeHook(
 		func(
-			*database.Txn, event.EpochTransitionEvent, uint,
+			ledgerdb.Txn, event.EpochTransitionEvent, uint,
 		) ([]*models.PoolStakeSnapshot, error) {
 			return nil, nil
 		},
 	)
 	var captured, discarded []uint64
 	f.ls.SetDeferredEpochBoundarySnapshotHooks(
-		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+		func(_ ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			captured = append(captured, evt.NewEpoch)
 			return nil
 		},
 		func(epoch uint64) { discarded = append(discarded, epoch) },
 		func(
-			*database.Txn, event.EpochTransitionEvent,
+			ledgerdb.Txn, event.EpochTransitionEvent,
 		) (DeferredBoundarySnapshot, error) {
 			return nil, errors.New("hard-fork boundary deferred its snapshot")
 		},
@@ -11776,7 +11778,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 			require.NoError(t, err)
 			ls.metrics.init(prometheus.NewRegistry())
 			t.Cleanup(func() { require.NoError(t, ls.Close()) })
-			cutoff, err := ls.rewardPrefilterSlot(db.Metadata(), nil, 3)
+			cutoff, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 3)
 			require.NoError(t, err)
 			ancestor := chain.RawBlock{
 				Slot: cutoff + 1, Hash: testHashBytes("reward-ancestor"),
@@ -11815,6 +11817,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 			txn := db.Transaction(context.Background(), false)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
 				app, ok, err := ls.precomputedStakeRewardApplication(
+					context.Background(),
 					txn,
 					4,
 					1_200,
@@ -11948,7 +11951,7 @@ func TestRollbackFailureDuringCloseDoesNotRestoreRewardPrecompute(
 	ls.rollbackTruncateAfterSlotFunc = func(
 		ocommon.Point,
 		uint64,
-		*database.Txn,
+		ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error) {
 		// Close marks the ledger closed and discards queued precompute
 		// work while this transaction is still open.

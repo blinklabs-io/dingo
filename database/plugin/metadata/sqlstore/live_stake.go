@@ -338,6 +338,14 @@ func (s *Store) refreshRewardLiveStakeAggregateDelta(
 		if err != nil {
 			return fmt.Errorf("sum reward live stake UTxOs: %w", err)
 		}
+		// Utxo rows already include this write's outputs and spends; the
+		// live set does not yet, so its sum takes the write's own change.
+		if preWrite, _ := ctx.Value(liveUtxoPreWriteKey{}).(bool); preWrite {
+			utxoStake, err = applyUtxoStakeDelta(utxoStake, delta, ref)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	return s.applyRewardLiveStakeAggregateWithPrior(
 		ctx, db, ref, slot, utxoStake, &prior,
@@ -554,6 +562,10 @@ func (s *Store) sumCredentialUtxoStake(
 	ref models.StakeCredentialRef,
 ) (uint64, error) {
 	s.sumCredentialUtxoStakeCalls.Add(1)
+	if s.liveUtxo != nil {
+		txn, _ := ctx.Value(liveUtxoTxnKey{}).(types.Txn)
+		return s.liveUtxo.LiveUtxoStake(txn, ref.Tag, ref.Key)
+	}
 	// No cached statement means Start (the only place that populates it) has
 	// not run since a Reset/RestoreFrom last invalidated the cache;
 	// queryRowCached falls back to a plain one-shot call against db itself in
@@ -595,6 +607,9 @@ func (s *Store) RebuildRewardLiveStakeFromRunningTotals(
 	slot uint64,
 	txn types.Txn,
 ) error {
+	if s.liveUtxo != nil {
+		return errLiveUtxoStakeIncomplete
+	}
 	return s.rebuildRewardLiveStake(slot, txn, true)
 }
 
@@ -609,6 +624,9 @@ func (s *Store) RebuildRewardLiveStakeFromRunningTotalsInBatches(
 ) error {
 	if runTxn == nil {
 		return errors.New("reward live stake batch transaction runner is nil")
+	}
+	if s.liveUtxo != nil {
+		return errLiveUtxoStakeIncomplete
 	}
 	return s.rebuildRewardLiveStakeInBatches(slot, runTxn, nil)
 }
@@ -626,6 +644,9 @@ func (s *Store) RebuildRewardLiveStakeInBatches(
 ) error {
 	if runTxn == nil {
 		return errors.New("reward live stake batch transaction runner is nil")
+	}
+	if s.liveUtxo != nil {
+		return errLiveUtxoStakeIncomplete
 	}
 	return s.rebuildRewardLiveStakeResumable(
 		ctx,
@@ -1114,6 +1135,18 @@ func (s *Store) rebuildRewardLiveStake(
 					)
 				}
 			}
+			if s.liveUtxo != nil && !fromRunningTotals {
+				n, err := s.rebuildLiveUtxoOnlyStake(
+					ctx,
+					db,
+					upserter,
+					slotValue,
+				)
+				if err != nil {
+					return err
+				}
+				processed += int64(n)
+			}
 			s.logger.Info(
 				"reward live stake rebuild: complete",
 				"rows", processed,
@@ -1423,7 +1456,7 @@ func (s *Store) rebuildRewardLiveStakeRange(
 ) (int, error) {
 	var utxoStakes map[string]uint64
 	var err error
-	if !fromRunningTotals {
+	if !fromRunningTotals && s.liveUtxo == nil {
 		utxoStakes, err = sumRewardLiveStakeUtxos(ctx, db, keys)
 		if err != nil {
 			return 0, err
@@ -1465,6 +1498,43 @@ func (s *Store) rebuildRewardLiveStakeRange(
 	if err := rows.Close(); err != nil {
 		return 0, fmt.Errorf("close reward live stake credentials: %w", err)
 	}
+	if !fromRunningTotals && s.liveUtxo != nil {
+		// With no utxo rows the key source holds only accounts; credentials
+		// with stake but no account follow in rebuildLiveUtxoOnlyStake.
+		utxoStakes = make(map[string]uint64, len(credentials))
+		for _, c := range credentials {
+			n, err := s.sumCredentialUtxoStake(
+				ctx, db, models.NewStakeCredentialRef(c.tag, c.key),
+			)
+			if err != nil {
+				return 0, err
+			}
+			utxoStakes[rewardLiveStakeKey(c.tag, c.key)] = n
+		}
+	}
+	values, err := rewardLiveStakeRows(
+		credentials,
+		utxoStakes,
+		fromRunningTotals,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if err := upserter.upsert(ctx, values, slotValue); err != nil {
+		return 0, err
+	}
+	return len(values), nil
+}
+
+// rewardLiveStakeRows builds the aggregate rows for credentials, taking each
+// one's UTxO stake from utxoStakes or, fromRunningTotals, from its row's
+// running total.
+func rewardLiveStakeRows(
+	credentials []rewardLiveStakeCredential,
+	utxoStakes map[string]uint64,
+	fromRunningTotals bool,
+) ([]rewardLiveStakeRow, error) {
+	var err error
 	values := make([]rewardLiveStakeRow, 0, len(credentials))
 	for _, credential := range credentials {
 		tag := credential.tag
@@ -1477,7 +1547,7 @@ func (s *Store) rebuildRewardLiveStakeRange(
 				credential.utxoStake.String,
 			)
 			if err != nil {
-				return 0, err
+				return nil, err
 			}
 		}
 		rewardStake := uint64(0)
@@ -1487,11 +1557,11 @@ func (s *Store) rebuildRewardLiveStakeRange(
 				credential.reward.String,
 			)
 			if err != nil {
-				return 0, err
+				return nil, err
 			}
 		}
 		if ^uint64(0)-utxoStake < rewardStake {
-			return 0, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"reward live stake overflow for credential %d:%x",
 				tag,
 				key,
@@ -1531,10 +1601,75 @@ func (s *Store) rebuildRewardLiveStakeRange(
 			delegationCert:  certIndex,
 		})
 	}
-	if err := upserter.upsert(ctx, values, slotValue); err != nil {
+	return values, nil
+}
+
+// rebuildLiveUtxoOnlyStake writes the aggregate rows of credentials holding
+// stake in the live UTxO set that the account-keyed ranges did not write: the
+// rows the utxo half of rewardLiveStakeKeySource yields when utxo rows exist.
+func (s *Store) rebuildLiveUtxoOnlyStake(
+	ctx context.Context,
+	db queryer,
+	upserter *rewardLiveStakeUpserter,
+	slotValue int64,
+) (int, error) {
+	txn, _ := ctx.Value(liveUtxoTxnKey{}).(types.Txn)
+	var (
+		pending []rewardLiveStakeCredential
+		stakes  = make(map[string]uint64)
+		written int
+	)
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		missing := pending[:0]
+		for _, c := range pending {
+			var exists bool
+			if err := db.QueryRowContext(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM reward_live_stake
+  WHERE credential_tag = ? AND staking_key = ?
+)`, c.tag, c.key).Scan(&exists); err != nil {
+				return fmt.Errorf("check reward live stake row: %w", err)
+			}
+			if !exists {
+				missing = append(missing, c)
+			}
+		}
+		values, err := rewardLiveStakeRows(missing, stakes, false)
+		if err != nil {
+			return err
+		}
+		if err := upserter.upsert(ctx, values, slotValue); err != nil {
+			return err
+		}
+		written += len(values)
+		pending = pending[:0]
+		clear(stakes)
+		return nil
+	}
+	err := s.liveUtxo.EachLiveUtxoStake(txn,
+		func(tag uint8, key []byte, lovelace uint64) error {
+			if len(key) == 0 {
+				return nil
+			}
+			pending = append(pending, rewardLiveStakeCredential{
+				tag: tag, key: bytes.Clone(key),
+			})
+			stakes[rewardLiveStakeKey(tag, key)] = lovelace
+			if len(pending) >= s.rewardLiveStakeBatch() {
+				return flush()
+			}
+			return nil
+		})
+	if err != nil {
 		return 0, err
 	}
-	return len(values), nil
+	if err := flush(); err != nil {
+		return 0, err
+	}
+	return written, nil
 }
 
 func rewardLiveStakeKey(tag uint8, key []byte) string {
@@ -1723,6 +1858,9 @@ func (s *Store) RewardLiveStakeNeedsBackfill(
 			"reward live stake needs backfill: resolve db: %w",
 			err,
 		)
+	}
+	if s.liveUtxo != nil {
+		return s.liveRewardLiveStakeNeedsBackfill(ctx, db)
 	}
 	type credentialKey struct {
 		tag uint8
@@ -2289,3 +2427,61 @@ WHERE pool_key_hash IS NOT NULL AND LENGTH(pool_key_hash) > 0`)
 	}
 	return ret, rows.Err()
 }
+
+// RefreshRewardLiveStakeRefs recomputes the live reward aggregate of each
+// credential in refs, recording slot as its update.
+func (s *Store) RefreshRewardLiveStakeRefs(
+	refs []models.StakeCredentialRef,
+	slot uint64,
+	txn types.Txn,
+) error {
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			return s.refreshRewardLiveStakeRefs(
+				ctx, db, mergeStakeCredentialRefs(refs), slot,
+			)
+		},
+	)
+}
+
+// errLiveUtxoStakeIncomplete reports a stake read that would fall back to
+// summing utxo rows, in a store that keeps none: some credential has no
+// current reward_live_stake row, which the live UTxO set's rebuild of
+// reward_live_stake must supply.
+var errLiveUtxoStakeIncomplete = errors.New(
+	"reward_live_stake is incomplete and there are no utxo rows to fall back to",
+)
+
+// liveRewardLiveStakeNeedsBackfill is RewardLiveStakeNeedsBackfill for a store
+// that keeps no utxo rows. reward_live_stake is then maintained only
+// transactionally, from the live UTxO set, so it needs a rebuild only when a
+// row predates the current calculation or an active account has none; the
+// UTxO side cannot be cross-checked against rows that do not exist.
+func (s *Store) liveRewardLiveStakeNeedsBackfill(
+	ctx context.Context,
+	db queryer,
+) (bool, error) {
+	var stale bool
+	if err := db.QueryRowContext(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM reward_live_stake WHERE calculation_version <> ?
+) OR EXISTS (
+  SELECT 1 FROM account a
+  WHERE a.active = TRUE AND LENGTH(a.staking_key) > 0
+    AND NOT EXISTS (
+      SELECT 1 FROM reward_live_stake r
+      WHERE r.credential_tag = a.credential_tag
+        AND r.staking_key = a.staking_key
+    )
+)`, models.RewardStakeCalculationVersion).Scan(&stale); err != nil {
+		return false, fmt.Errorf("check live reward stake: %w", err)
+	}
+	return stale, nil
+}
+
+// errLiveUtxoAsOf reports a stake read as of a slot the ledger has moved
+// past, in a store that keeps no utxo rows to read history from.
+var errLiveUtxoAsOf = errors.New(
+	"UTxO stake as of a past slot is not kept without utxo rows",
+)

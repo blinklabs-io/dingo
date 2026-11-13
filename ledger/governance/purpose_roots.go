@@ -20,7 +20,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -68,8 +68,8 @@ func (e *MissingEnactedRootError) Is(target error) bool {
 // legitimate skip and returns nil.
 func checkMissingEnactedRoot(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	proposal *models.GovernanceProposal,
 	root *models.GovernanceProposal,
 	active map[string]struct{},
@@ -118,8 +118,8 @@ func activeProposalKeys(
 // ledger-state snapshot. A genesis-synced node derives every purpose root
 // from its own enactments, and a rootless purpose there is legitimate.
 func isMithrilBootstrapped(
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 ) (bool, error) {
 	slot, err := db.MithrilTrustBoundarySlotStrict(txn)
 	if err != nil {
@@ -134,8 +134,8 @@ func isMithrilBootstrapped(
 // genesis-synced database.
 func VerifyPurposeRoots(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	epoch uint64,
 ) error {
 	bootstrapped, err := isMithrilBootstrapped(db, txn)

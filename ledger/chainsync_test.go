@@ -41,6 +41,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -6795,7 +6797,7 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 	ls.rollbackTruncateAfterSlotFunc = func(
 		point ocommon.Point,
 		trustSlot uint64,
-		txn *database.Txn,
+		txn ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error) {
 		close(truncateEntered)
 		<-allowTruncate
@@ -6803,7 +6805,7 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 			ls.lifecycleContext(),
 			point,
 			trustSlot,
-			txn,
+			dbadapter.Unwrap(txn),
 		)
 	}
 
@@ -11395,7 +11397,7 @@ func TestProcessChainIteratorRollbackRetainsIntentAfterMetadataTruncationFailure
 	fixture.ls.rollbackTruncateAfterSlotFunc = func(
 		ocommon.Point,
 		uint64,
-		*database.Txn,
+		ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error) {
 		return ochainsync.Tip{}, nil, injected
 	}
@@ -11538,7 +11540,7 @@ func TestProcessChainIteratorRollbackUsesCapturedBlocksAfterChainDeletion(
 	fixture.ls.rollbackTruncateAfterSlotFunc = func(
 		ocommon.Point,
 		uint64,
-		*database.Txn,
+		ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error) {
 		return ochainsync.Tip{}, nil, injected
 	}
@@ -12506,7 +12508,7 @@ func TestCaptureEpochBoundarySnapshotStakeHookInvoked(t *testing.T) {
 	var called bool
 	var got event.EpochTransitionEvent
 	ls.SetEpochBoundarySnapshotStakeHook(
-		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+		func(_ ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			called = true
 			got = evt
 			return nil
@@ -12537,7 +12539,7 @@ func TestCaptureEpochBoundarySnapshotStakeHookFailureDeferred(t *testing.T) {
 	ls, db := newHookTestLedger(t)
 
 	ls.SetEpochBoundarySnapshotStakeHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			// Read hooks must not write, but prove the savepoint covers it.
 			if err := db.Metadata().SaveRewardSnapshot(&models.RewardSnapshot{
 				Epoch:           evt.NewEpoch,
@@ -12546,7 +12548,7 @@ func TestCaptureEpochBoundarySnapshotStakeHookFailureDeferred(t *testing.T) {
 				BoundarySlot:    1,
 				ProtocolVersion: 8,
 				Authoritative:   true,
-			}, txn.Metadata()); err != nil {
+			}, dbadapter.Unwrap(txn).Metadata()); err != nil {
 				return err
 			}
 			return errStakeHookBoom
@@ -18518,7 +18520,7 @@ func TestCaptureEpochBoundarySnapshotHookInvoked(t *testing.T) {
 	var called bool
 	var got event.EpochTransitionEvent
 	ls.SetEpochBoundarySnapshotHook(
-		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+		func(_ ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			called = true
 			got = evt
 			return nil
@@ -18556,7 +18558,7 @@ func TestCaptureEpochBoundarySnapshotHookFailureDeferred(t *testing.T) {
 	ls, db := newHookTestLedger(t)
 
 	ls.SetEpochBoundarySnapshotHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			// Write a row, then fail: the savepoint rollback must discard it.
 			if err := db.Metadata().SaveRewardSnapshot(&models.RewardSnapshot{
 				Epoch:           evt.NewEpoch,
@@ -18565,7 +18567,7 @@ func TestCaptureEpochBoundarySnapshotHookFailureDeferred(t *testing.T) {
 				BoundarySlot:    1,
 				ProtocolVersion: 8,
 				Authoritative:   true,
-			}, txn.Metadata()); err != nil {
+			}, dbadapter.Unwrap(txn).Metadata()); err != nil {
 				return err
 			}
 			return errors.New("capture boom")

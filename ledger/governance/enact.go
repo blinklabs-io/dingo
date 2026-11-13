@@ -21,9 +21,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -35,8 +34,8 @@ import (
 // transaction, the epoch and slot at which enactment takes effect,
 // and the protocol-parameter update function for the current era.
 type EnactmentContext struct {
-	DB    *database.Database
-	Txn   *database.Txn
+	DB    ledgerdb.LedgerDB
+	Txn   ledgerdb.Txn
 	Epoch uint64
 	Slot  uint64
 	// PrevEpochStartSlot is the first slot of the epoch this boundary
@@ -272,11 +271,7 @@ func applyTreasuryWithdrawal(
 		return errors.New("nil enactment context")
 	}
 	sourceHash := proposalRewardSourceHash(proposal)
-	var metaTxn types.Txn
-	if ctx.Txn != nil {
-		metaTxn = ctx.Txn.Metadata()
-	}
-	state, err := ctx.DB.Metadata().GetNetworkState(metaTxn)
+	state, err := ctx.DB.GetNetworkState(ctx.Txn)
 	if err != nil {
 		return fmt.Errorf("get network state: %w", err)
 	}
@@ -342,11 +337,11 @@ func applyTreasuryWithdrawal(
 			unclaimed += amount
 		}
 	}
-	return ctx.DB.Metadata().SetNetworkState(
+	return ctx.DB.SetNetworkState(
 		treasury-total+unclaimed,
 		reserves,
 		ctx.Slot,
-		metaTxn,
+		ctx.Txn,
 	)
 }
 
@@ -424,8 +419,8 @@ func treasuryWithdrawalTotal(
 // and a caller that has not made it cannot pick correctly.
 func CreditRegisteredRewardAccountAfterSnapshot(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	credentialTag uint8,
 	stakeCredential []byte,
 	amount uint64,
@@ -446,8 +441,8 @@ func CreditRegisteredRewardAccountAfterSnapshot(
 // epoch-boundary stake reconstruction retains it.
 func CreditRegisteredRewardAccountBeforeSnapshot(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	credentialTag uint8,
 	stakeCredential []byte,
 	amount uint64,
@@ -481,8 +476,8 @@ func CreditRegisteredRewardAccountBeforeSnapshot(
 // idempotent. Pass nil when no per-event discriminator is available.
 func creditRegisteredRewardAccount(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	credentialTag uint8,
 	stakeCredential []byte,
 	amount uint64,
@@ -517,19 +512,15 @@ func creditRegisteredRewardAccount(
 // reserves unchanged and writing the updated NetworkState at the given slot.
 // Shared by governance and POOLREAP for consistent treasury accounting.
 func AddUnclaimedToTreasury(
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	amount uint64,
 	slot uint64,
 ) error {
 	if amount == 0 {
 		return nil
 	}
-	var metaTxn types.Txn
-	if txn != nil {
-		metaTxn = txn.Metadata()
-	}
-	state, err := db.Metadata().GetNetworkState(metaTxn)
+	state, err := db.GetNetworkState(txn)
 	if err != nil {
 		return fmt.Errorf("get network state: %w", err)
 	}
@@ -544,11 +535,11 @@ func AddUnclaimedToTreasury(
 			amount,
 		)
 	}
-	return db.Metadata().SetNetworkState(
+	return db.SetNetworkState(
 		treasury+amount,
 		reserves,
 		slot,
-		metaTxn,
+		txn,
 	)
 }
 

@@ -306,6 +306,10 @@ type Config struct {
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
+	ledgerUtxoShadow                                                                    bool
+	ledgerUtxoBadger                                                                    bool
+	ledgerUtxoReads                                                                     string
+	ledgerUtxoBadgerOnly                                                                bool
 	ledgerValidateAheadEnabled                                                          bool
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
@@ -612,6 +616,25 @@ func (n *Node) configValidate() error {
 			storageMode,
 			StorageModeCore,
 			StorageModeAPI,
+		)
+	}
+	switch n.config.cfg.LedgerUtxoReads {
+	case "", "verify", "set":
+	default:
+		return fmt.Errorf(
+			"invalid ledgerUtxoReads %q: must be empty, %q or %q",
+			n.config.cfg.LedgerUtxoReads, "verify", "set",
+		)
+	}
+	// Without the Badger set neither option has anything to act on; both
+	// would be ignored silently.
+	if n.config.cfg.LedgerUtxoBadgerOnly && !n.config.cfg.LedgerUtxoBadger {
+		return errors.New("ledgerUtxoBadgerOnly needs ledgerUtxoBadger")
+	}
+	if n.config.cfg.LedgerUtxoReads != "" && !n.config.cfg.LedgerUtxoBadger {
+		return fmt.Errorf(
+			"ledgerUtxoReads %q needs ledgerUtxoBadger",
+			n.config.cfg.LedgerUtxoReads,
 		)
 	}
 	if !n.config.cfg.StartEra.Valid() {
@@ -1036,6 +1059,10 @@ func (c *Config) syncCompatFields() {
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
+	c.ledgerUtxoShadow = c.cfg.LedgerUtxoShadow
+	c.ledgerUtxoBadger = c.cfg.LedgerUtxoBadger
+	c.ledgerUtxoReads = c.cfg.LedgerUtxoReads
+	c.ledgerUtxoBadgerOnly = c.cfg.LedgerUtxoBadgerOnly
 	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
@@ -2050,6 +2077,42 @@ func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 	}
 }
 
+// WithLedgerUtxoShadow keeps a Badger copy of the live UTxO set beside the
+// metadata store and checks the two against each other. Diagnostic only;
+// validation never reads the copy. Off by default.
+func WithLedgerUtxoShadow(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoShadow = enabled
+	}
+}
+
+// WithLedgerUtxoBadger keeps the live UTxO set in a LedgerDB Badger store,
+// updated synchronously after each ledger commit, beside the metadata store.
+// Experimental; validation does not read it yet. Off by default.
+func WithLedgerUtxoBadger(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoBadger = enabled
+	}
+}
+
+// WithLedgerUtxoReads selects where validation resolves its inputs when the
+// live UTxO set is kept in Badger: "" for the metadata store, "verify" for
+// both with every disagreement counted, or "set" for the live UTxO set.
+func WithLedgerUtxoReads(mode string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoReads = mode
+	}
+}
+
+// WithLedgerUtxoBadgerOnly makes the Badger live UTxO set the only copy of
+// the UTxO set: the metadata store keeps no utxo rows. Core storage mode, on
+// a database synced this way from genesis. Experimental; off by default.
+func WithLedgerUtxoBadgerOnly(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoBadgerOnly = enabled
+	}
+}
+
 // WithLedgerValidateAheadEnabled verifies the witness signatures of the
 // validated blocks of a block-apply chunk on worker goroutines while earlier
 // blocks of the chunk validate and write. Not consensus-affecting; on by
@@ -3061,6 +3124,27 @@ func (c *Config) BlockPipelineValidateEnabled() bool {
 // enabled.
 func (c *Config) LedgerPrefetchAheadEnabled() bool {
 	return c.cfg.LedgerPrefetchAheadEnabled
+}
+
+// LedgerUtxoShadow returns whether the shadow UTxO set is enabled.
+func (c *Config) LedgerUtxoShadow() bool {
+	return c.cfg.LedgerUtxoShadow
+}
+
+// LedgerUtxoBadger returns whether the live UTxO set is kept in Badger.
+func (c *Config) LedgerUtxoBadger() bool {
+	return c.cfg.LedgerUtxoBadger
+}
+
+// LedgerUtxoReads returns where validation resolves its inputs.
+func (c *Config) LedgerUtxoReads() string {
+	return c.cfg.LedgerUtxoReads
+}
+
+// LedgerUtxoBadgerOnly returns whether the Badger live UTxO set is the only
+// copy of the UTxO set.
+func (c *Config) LedgerUtxoBadgerOnly() bool {
+	return c.cfg.LedgerUtxoBadgerOnly
 }
 
 // LedgerValidateAheadEnabled returns whether state-independent validation

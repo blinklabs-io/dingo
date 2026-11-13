@@ -31,6 +31,7 @@ import (
 	"sort"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -1053,8 +1054,8 @@ func (m *DingoStateManager) ApplyTransaction(
 			context.Background(),
 			level,
 			point,
-			m.db,
-			txn,
+			dbadapter.New(m.db),
+			dbadapter.Txn(txn),
 		); err != nil {
 			return fmt.Errorf(
 				"reset DRep dormancy before certificates: %w",
@@ -1118,7 +1119,7 @@ func (m *DingoStateManager) ApplyTransaction(
 			m.db,
 			level,
 			slot,
-			txn,
+			dbadapter.Txn(txn),
 		); err != nil {
 			return fmt.Errorf(
 				"apply transaction body %d direct deposits: %w",
@@ -1136,8 +1137,8 @@ func (m *DingoStateManager) ApplyTransaction(
 			drepInactivityPeriod,
 			govActionLifetime,
 			protocolMajor,
-			m.db,
-			txn,
+			dbadapter.New(m.db),
+			dbadapter.Txn(txn),
 			m.protocolParams,
 			&proposalsValidated,
 		); err != nil {
@@ -2237,8 +2238,8 @@ func (m *DingoStateManager) persistEnactment(
 	result, err := governance.EnactProposal(
 		context.Background(),
 		&governance.EnactmentContext{
-			DB:                 m.db,
-			Txn:                txn,
+			DB:                 dbadapter.New(m.db),
+			Txn:                dbadapter.Txn(txn),
 			Epoch:              m.currentEpoch,
 			Slot:               boundarySlot,
 			PrevEpochStartSlot: m.committeeEpochStartSlot,

@@ -523,6 +523,24 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.utxoSet != nil {
+		if !storageDrainConfirmed {
+			n.config.logger.Error(
+				"leaving the live UTxO set open because shutdown drain was not confirmed",
+			)
+		} else if closeErr := n.closeWithShutdownTimeout(
+			ctx,
+			"live UTxO set",
+			shutdownTimeout,
+			n.closeUtxoSet,
+		); closeErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("live UTxO set close: %w", closeErr),
+			)
+		}
+	}
+
 	if n.db != nil {
 		if !storageDrainConfirmed {
 			n.config.logger.Error(

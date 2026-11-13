@@ -18,6 +18,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -92,7 +94,7 @@ func TestMatchProposalDepositRefundsPairsEachCreditedDeposit(t *testing.T) {
 	second := droppedProposal(0x02, 0, 100, returnAddress, epoch, slot)
 	for _, p := range []*models.GovernanceProposal{first, second} {
 		require.NoError(t, refundProposalDeposit(
-			context.Background(), db, nil, p, slot,
+			context.Background(), dbadapter.New(db), nil, p, slot,
 		))
 	}
 
@@ -125,7 +127,7 @@ func TestMatchProposalDepositRefundsSkipsDepositReturnedToTreasury(
 	returnAddress := buildRewardAddr(t, testBytes(28, 0x42))
 	p := droppedProposal(0x03, 0, 100, returnAddress, epoch, slot)
 	require.NoError(t, refundProposalDeposit(
-		context.Background(), db, nil, p, slot,
+		context.Background(), dbadapter.New(db), nil, p, slot,
 	))
 
 	refunds, err := MatchProposalDepositRefunds(
@@ -155,7 +157,7 @@ func TestMatchProposalDepositRefundsIgnoresOtherCreditsToTheAccount(
 		Active:     true,
 	}))
 	credited, err := CreditRegisteredRewardAccountAfterSnapshot(
-		context.Background(), db, nil, 0, stakeCred, 100, slot,
+		context.Background(), dbadapter.New(db), nil, 0, stakeCred, 100, slot,
 		testBytes(32, 0xee),
 	)
 	require.NoError(t, err)
@@ -200,13 +202,13 @@ func TestMatchProposalDepositRefundsSeparatesWithdrawalFromRefund(
 		EnactedSlot:   new(slot),
 	}
 	credited, err := CreditRegisteredRewardAccountAfterSnapshot(
-		context.Background(), db, nil, 0, stakeCred, 777, slot,
+		context.Background(), dbadapter.New(db), nil, 0, stakeCred, 777, slot,
 		proposalRewardSourceHash(p),
 	)
 	require.NoError(t, err)
 	require.True(t, credited)
 	require.NoError(t, refundProposalDepositFromSource(
-		context.Background(), db, nil, p, slot,
+		context.Background(), dbadapter.New(db), nil, p, slot,
 		proposalDepositRefundSourceHash(p),
 	))
 
@@ -281,7 +283,7 @@ func TestMatchProposalDepositRefundsSkipsLegacyWithdrawalToReturnAccount(
 		epoch, slot,
 	)
 	credited, err := CreditRegisteredRewardAccountAfterSnapshot(
-		context.Background(), db, nil, 0, stakeCred, 100, slot,
+		context.Background(), dbadapter.New(db), nil, 0, stakeCred, 100, slot,
 		proposalRewardSourceHash(p),
 	)
 	require.NoError(t, err)
@@ -318,7 +320,7 @@ func TestMatchProposalDepositRefundsPairsWithdrawalRefundToOtherAccount(
 		500, epoch, slot,
 	)
 	require.NoError(t, refundProposalDepositFromSource(
-		context.Background(), db, nil, p, slot,
+		context.Background(), dbadapter.New(db), nil, p, slot,
 		proposalRewardSourceHash(p),
 	))
 
@@ -347,7 +349,7 @@ func TestMatchProposalDepositRefundsIgnoresCreditsAtOtherSlots(t *testing.T) {
 	)
 	// Journaled at a different boundary than the proposal's recorded slot.
 	require.NoError(t, refundProposalDeposit(
-		context.Background(), db, nil, p, 4_000,
+		context.Background(), dbadapter.New(db), nil, p, 4_000,
 	))
 
 	refunds, err := MatchProposalDepositRefunds(

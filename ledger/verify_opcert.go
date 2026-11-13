@@ -226,7 +226,7 @@ func (ls *LedgerState) leiosAnnouncementOCINStaleness(
 		return LeiosAnnouncementStaleOCIN, nil
 	}
 	poolKeyHash := lcommon.PoolKeyHash(header.IssuerVkey().Hash())
-	stored, found, err := ls.db.LatestPoolOpCertSequenceAtOrBefore(
+	stored, found, err := ls.ledgerDB().LatestPoolOpCertSequenceAtOrBefore(
 		context.Background(),
 		poolKeyHash,
 		immutablePoint.Slot,

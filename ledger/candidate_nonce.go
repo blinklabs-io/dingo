@@ -25,6 +25,8 @@ import (
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -42,11 +44,11 @@ import (
 func lookupBlockBeforeSlot(
 	ctx context.Context,
 	db *database.Database,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 ) (models.Block, error) {
 	if txn != nil {
-		return database.BlockBeforeSlotTxn(txn, slot)
+		return database.BlockBeforeSlotTxn(dbadapter.Unwrap(txn), slot)
 	}
 	return database.BlockBeforeSlot(ctx, db, slot)
 }
@@ -56,16 +58,23 @@ func lookupBlockBeforeSlot(
 // chain has no block below bound.
 func ancestorBeforeSlot(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	tip ocommon.Point,
 	bound uint64,
 ) (models.Block, error) {
+	dbTxn := dbadapter.Unwrap(txn)
+	if dbTxn == nil {
+		return models.Block{}, errAncestorWalkNeedsTxn
+	}
 	cur := tip
 	for cur.Slot >= bound {
 		if err := ctx.Err(); err != nil {
 			return models.Block{}, err
 		}
-		parent, ok, err := database.BlockParentPointTxn(txn, cur)
+		parent, ok, err := database.BlockParentPointTxn(
+			dbTxn,
+			cur,
+		)
 		if err != nil {
 			return models.Block{}, err
 		}
@@ -81,11 +90,15 @@ func ancestorBeforeSlot(
 // startSlot up to its last block below endSlot, oldest first.
 func ancestorPointsFrom(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	tip ocommon.Point,
 	startSlot uint64,
 	endSlot uint64,
 ) ([]ocommon.Point, error) {
+	dbTxn := dbadapter.Unwrap(txn)
+	if dbTxn == nil {
+		return nil, errAncestorWalkNeedsTxn
+	}
 	var points []ocommon.Point
 	cur := tip
 	for cur.Slot >= startSlot {
@@ -95,7 +108,10 @@ func ancestorPointsFrom(
 		if cur.Slot < endSlot {
 			points = append(points, cur)
 		}
-		parent, ok, err := database.BlockParentPointTxn(txn, cur)
+		parent, ok, err := database.BlockParentPointTxn(
+			dbTxn,
+			cur,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -116,6 +132,10 @@ var errNoncesMissing = errors.New("block nonce rows missing for epoch")
 // errEpochRangeOverflow is returned when an epoch's end slot does not fit in
 // a uint64.
 var errEpochRangeOverflow = errors.New("epoch slot range overflows uint64")
+
+// errAncestorWalkNeedsTxn reports a chain walk called without the read
+// transaction that pins the blocks it follows.
+var errAncestorWalkNeedsTxn = errors.New("ancestor walk needs a transaction")
 
 // computeCandidateNonce computes the candidate nonce and end-of-epoch
 // evolving nonce for the given epoch.
@@ -162,7 +182,7 @@ var errEpochRangeOverflow = errors.New("epoch slot range overflows uint64")
 //   - evolvingNonce: the evolving nonce after all blocks in the epoch
 func (ls *LedgerState) computeCandidateNonce(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	eraId uint,
 	prevEvolvingNonce []byte,
 	prevCandidateNonce []byte,
@@ -207,7 +227,7 @@ func (ls *LedgerState) computeCandidateNonce(
 // path folds exactly its ancestors. The boundary computation passes nil.
 func (ls *LedgerState) computeCandidateNonceAsOf(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	eraId uint,
 	prevEvolvingNonce []byte,
 	prevCandidateNonce []byte,
@@ -302,14 +322,17 @@ func (ls *LedgerState) computeCandidateNonceAsOf(
 // blockHeld reports whether the local store holds metadata for point.
 func (ls *LedgerState) blockHeld(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	point ocommon.Point,
 ) (bool, error) {
 	if txn == nil {
-		txn = ls.db.Transaction(ctx, false)
+		txn = ls.ledgerDB().Begin(ctx, false)
 		defer txn.Release()
 	}
-	_, err := database.BlockMetadataByPointLocalTxn(txn, point)
+	_, err := database.BlockMetadataByPointLocalTxn(
+		dbadapter.Unwrap(txn),
+		point,
+	)
 	if errors.Is(err, models.ErrBlockNotFound) {
 		return false, nil
 	}
@@ -327,7 +350,7 @@ func (ls *LedgerState) blockHeld(
 // header verification fires — prevents that hazard.
 func (ls *LedgerState) computeCandidateNonceFast(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	prevEvolvingNonce []byte,
 	prevCandidateNonce []byte,
 	epochStartSlot uint64,
@@ -336,7 +359,7 @@ func (ls *LedgerState) computeCandidateNonceFast(
 	foldTip *ocommon.Point,
 ) ([]byte, []byte, error) {
 	if txn == nil {
-		txn = ls.db.Transaction(ctx, false)
+		txn = ls.ledgerDB().Begin(ctx, false)
 		defer txn.Release()
 	}
 	// The last block before bound. With foldTip it is found on foldTip's own
@@ -371,7 +394,7 @@ func (ls *LedgerState) computeCandidateNonceFast(
 
 	var evolvingNonce []byte
 	if hasBlocks {
-		nonce, err := ls.db.GetBlockNonce(
+		nonce, err := ls.ledgerDB().GetBlockNonce(
 			ocommon.Point{
 				Slot: lastBlock.Slot,
 				Hash: lastBlock.Hash,
@@ -421,7 +444,7 @@ func (ls *LedgerState) computeCandidateNonceFast(
 			)
 		}
 		if hasPreCutoff {
-			nonce, err := ls.db.GetBlockNonce(
+			nonce, err := ls.ledgerDB().GetBlockNonce(
 				ocommon.Point{
 					Slot: lastPreCutoff.Slot,
 					Hash: lastPreCutoff.Hash,
@@ -524,7 +547,7 @@ func (ls *LedgerState) foldBlockEtaV(
 // only foldTip's own chain, rather than every block stored in the range.
 func (ls *LedgerState) computeCandidateNonceSlow(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	prevEvolvingNonce []byte,
 	prevCandidateNonce []byte,
 	epochStartSlot uint64,
@@ -566,7 +589,7 @@ func (ls *LedgerState) computeCandidateNonceSlow(
 
 	if foldTip != nil {
 		if txn == nil {
-			txn = ls.db.Transaction(ctx, false)
+			txn = ls.ledgerDB().Begin(ctx, false)
 			defer txn.Release()
 		}
 		points, err := ancestorPointsFrom(
@@ -578,7 +601,7 @@ func (ls *LedgerState) computeCandidateNonceSlow(
 			)
 		}
 		for _, point := range points {
-			block, err := database.BlockByPointTxn(txn, point)
+			block, err := database.BlockByPointTxn(dbadapter.Unwrap(txn), point)
 			if err != nil {
 				return nil, nil, fmt.Errorf(
 					"read block at slot %d: %w", point.Slot, err,
@@ -590,7 +613,7 @@ func (ls *LedgerState) computeCandidateNonceSlow(
 		}
 	} else if txn != nil {
 		err := database.ForEachBlockInRange(
-			txn,
+			dbadapter.Unwrap(txn),
 			epochStartSlot,
 			foldEndSlot,
 			iterFn,

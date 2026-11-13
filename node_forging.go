@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	"github.com/blinklabs-io/dingo/kesagent"
@@ -1079,7 +1080,7 @@ func (a *stakeDistributionAdapter) getStakeDistribution(
 			)
 		}
 	}()
-	return a.ledgerState.NewView(txn).GetStakeDistribution(epoch)
+	return a.ledgerState.NewView(dbadapter.Txn(txn)).GetStakeDistribution(epoch)
 }
 
 // GetPoolAndTotalActiveStake reads the sigma numerator and denominator for
@@ -1135,7 +1136,7 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 			)
 		}
 	}()
-	view := a.ledgerState.NewView(txn)
+	view := a.ledgerState.NewView(dbadapter.Txn(txn))
 	poolKey := hex.EncodeToString(poolKeyHash)
 	poolStake, err = view.GetPoolStake(epoch, poolKeyHash)
 	if err != nil {

@@ -18,7 +18,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -53,7 +53,7 @@ type utxoPrefetchAhead struct {
 	once  sync.Once
 	// readTxn is the goroutine's read transaction, kept so tests can check it
 	// is released once done is closed. Production code does not read it.
-	readTxn *database.Txn
+	readTxn ledgerdb.Txn
 }
 
 // startUtxoPrefetchAhead launches the prefetch goroutine for a chunk. wanted[k]
@@ -107,7 +107,7 @@ func (p *utxoPrefetchAhead) run(ctx context.Context) {
 		wantsAny = wantsAny || w
 	}
 	if wantsAny {
-		p.readTxn = p.ls.db.Transaction(ctx, false)
+		p.readTxn = p.ls.ledgerDB().Begin(ctx, false)
 	}
 	close(p.ready)
 	limit := 0

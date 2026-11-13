@@ -577,6 +577,10 @@ type SyncConfig struct {
 	Logger                  *slog.Logger     // optional; defaults to slog.Default()
 	OnProgress              SyncProgressFunc // optional
 	Metrics                 *PipelineMetrics // optional; records the immutable chunk downloads
+	// UtxoSet, when set, receives the ledger state's UTxO set for a node
+	// that keeps the live UTxO set as its only copy; see
+	// ledgerstate.ImportConfig.UtxoSet.
+	UtxoSet ledgerstate.UtxoSetLoader
 }
 
 // StoragePlugins contains canonical storage provider selections used during
@@ -827,6 +831,14 @@ func Sync(
 	}
 	catchUp = dec.engage || cfg.RepairLegacyRewardState
 	catchUpStart = dec.start
+	// The ledger-state import refuses a catch-up into a live-UTxO-set-only
+	// database, but only after the artifacts have downloaded.
+	if catchUp && cfg.UtxoSet != nil {
+		return SyncResult{}, errors.New(
+			"cannot catch up a database that keeps its UTxO set only in " +
+				"the live UTxO set",
+		)
+	}
 	catchUpStart, err = resumeStartImmutable(db, mode, catchUpStart)
 	if err != nil {
 		return SyncResult{}, err
@@ -1394,6 +1406,7 @@ func Sync(
 				bootstrapResult,
 				preparedRepairImport,
 				catchUp,
+				cfg.UtxoSet,
 				onLedger,
 			)
 		} else {
@@ -1405,6 +1418,7 @@ func Sync(
 				bootstrapResult,
 				catchUp,
 				certifiedTip.Slot,
+				cfg.UtxoSet,
 				onLedger,
 			)
 		}

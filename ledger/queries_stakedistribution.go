@@ -22,7 +22,7 @@ import (
 	"math/big"
 	"slices"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -80,7 +80,7 @@ type stakeDistributionEntry = struct {
 // numerator is paired with the reserves that were genuinely true at that
 // same point rather than whatever is live now.
 func (ls *LedgerState) queryShelleyStakeDistribution(ctx context.Context, at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	live, err := ls.liveStakeDistribution(ctx, at, txn)
 	if err != nil {
@@ -143,19 +143,18 @@ func (d *liveStakeDistribution) fraction(stake uint64) *cbor.Rat {
 func (ls *LedgerState) liveStakeDistribution(
 	ctx context.Context,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (*liveStakeDistribution, error) {
 	if txn == nil {
-		txn = ls.db.Transaction(ctx, false)
+		txn = ls.ledgerDB().Begin(ctx, false)
 		defer txn.Release()
 	}
-	metaTxn := txn.Metadata()
 
 	var targetSlot uint64
 	if at.pinned() {
 		targetSlot = at.Slot
 	} else {
-		tip, err := ls.db.GetTip(txn)
+		tip, err := ls.ledgerDB().GetTip(txn)
 		if err != nil {
 			return nil, err
 		}
@@ -169,7 +168,7 @@ func (ls *LedgerState) liveStakeDistribution(
 		return nil, errEpochNotResolved(at)
 	}
 
-	calc := snapshot.NewCalculator(ls.db)
+	calc := snapshot.NewCalculator(ls.ledgerDB(), ls.config.Logger)
 	live, err := calc.CalculateStakeDistributionInTxn(
 		ctx, txn, targetSlot,
 	)
@@ -195,7 +194,7 @@ func (ls *LedgerState) liveStakeDistribution(
 		epoch,
 		networkStateAsOfSlot,
 		true,
-		metaTxn,
+		txn,
 	)
 	if err != nil {
 		return nil, err
@@ -234,7 +233,7 @@ func (ls *LedgerState) liveStakeDistribution(
 	if at.pinned() {
 		vrfAsOfSlot = &targetSlot
 	}
-	vrfByPool, err := ls.poolVrfKeyHashes(keyHashes, vrfAsOfSlot, metaTxn)
+	vrfByPool, err := ls.poolVrfKeyHashes(ctx, keyHashes, vrfAsOfSlot, txn)
 	if err != nil {
 		return nil, err
 	}

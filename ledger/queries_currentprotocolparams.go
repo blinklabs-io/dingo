@@ -20,6 +20,8 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -63,7 +65,7 @@ import (
 // cost model had not yet been replaced by real data carries that same
 // fabrication in its persisted CBOR.
 func (ls *LedgerState) queryShelleyCurrentProtocolParams(ctx context.Context, at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	snapshot := ls.loadConsensusSnapshot()
 	if !at.pinned() {
@@ -91,7 +93,7 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(ctx context.Context, at
 		)}, nil
 	}
 	if txn == nil {
-		txn = ls.db.Transaction(ctx, false)
+		txn = ls.ledgerDB().Begin(ctx, false)
 		defer txn.Release()
 	}
 	targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
@@ -121,10 +123,10 @@ func (ls *LedgerState) historicalProtocolParameters(
 	snapshot *consensusSnapshot,
 	targetEpoch uint64,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	liveEpoch := snapshot.currentEpoch.EpochId
-	epochRow, err := ls.db.GetEpoch(targetEpoch, txn)
+	epochRow, err := ls.ledgerDB().GetEpoch(targetEpoch, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +185,7 @@ func (ls *LedgerState) historicalProtocolParameters(
 	// genuinely ambiguous case: no confirmation recorded at all, or
 	// targetEpoch predates the one that confirmed it.
 	clearedEpoch, cleared, err := database.SyntheticV2CostModelClearedEpoch(
-		ls.db, txn,
+		ls.db, dbadapter.Unwrap(txn),
 	)
 	if err != nil {
 		return nil, err
@@ -208,7 +210,7 @@ func (ls *LedgerState) historicalProtocolParameters(
 func (ls *LedgerState) snapshotProtocolParameters(
 	snapshot *consensusSnapshot,
 	row *models.Epoch,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (lcommon.ProtocolParameters, error) {
 	if row == nil || row.EpochId == snapshot.currentEpoch.EpochId {
 		return snapshot.currentPParams, nil

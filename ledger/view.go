@@ -30,8 +30,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -69,7 +69,7 @@ var ErrLedgerViewStorageFault = errors.New("ledger view storage fault")
 type LedgerView struct {
 	ctx context.Context
 	ls  *LedgerState
-	txn *database.Txn
+	txn ledgerdb.Txn
 	// Committee proposal resolution must use the same immutable consensus
 	// publication as the validation that owns this view.
 	committeeEpoch       uint64
@@ -485,7 +485,7 @@ func (lv *LedgerView) loadMIRPending() (*mirPendingState, error) {
 	if lv.onMIRCertsLoad != nil {
 		lv.onMIRCertsLoad()
 	}
-	effects, err := lv.ls.db.GetMIRCertsInSlotRange(
+	effects, err := lv.ls.ledgerDB().GetMIRCertsInSlotRange(
 		lv.EvaluationContext(), lv.epochStartSlot, math.MaxInt64, lv.txn,
 	)
 	if err != nil {
@@ -701,7 +701,7 @@ func (lv *LedgerView) UtxoById(
 	}
 
 	lv.ls.utxoByRefReads.Add(1)
-	utxo, err := lv.ls.db.UtxoByRef(
+	utxo, err := lv.ls.utxoByRefForValidation(
 		lv.EvaluationContext(),
 		utxoId.Id().Bytes(),
 		utxoId.Index(),
@@ -745,7 +745,7 @@ func (lv *LedgerView) UtxoById(
 func (lv *LedgerView) PoolRegistration(
 	pkh lcommon.PoolKeyHash,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
-	registrations, err := lv.ls.db.GetPoolRegistrations(pkh, lv.txn)
+	registrations, err := lv.ls.ledgerDB().GetPoolRegistrations(pkh, lv.txn)
 	if err != nil {
 		return nil, lv.storageFault("get pool registrations: %w", err)
 	}
@@ -756,7 +756,7 @@ func (lv *LedgerView) StakeRegistration(
 	stakingKey []byte,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	// stakingKey = lcommon.NewBlake2b224(stakingKey)
-	registrations, err := lv.ls.db.GetStakeRegistrationsByCredential(
+	registrations, err := lv.ls.ledgerDB().GetStakeRegistrationsByCredential(
 		0, stakingKey, lv.txn,
 	)
 	if err != nil {
@@ -774,7 +774,7 @@ func (lv *LedgerView) StakeRegistrationByCredential(
 	if err != nil {
 		return nil, err
 	}
-	registrations, err := lv.ls.db.GetStakeRegistrationsByCredential(
+	registrations, err := lv.ls.ledgerDB().GetStakeRegistrationsByCredential(
 		credentialTag,
 		cred.Credential[:],
 		lv.txn,
@@ -803,7 +803,7 @@ func (lv *LedgerView) IsStakeCredentialRegistered(
 	if err != nil {
 		return false
 	}
-	account, err := lv.ls.db.GetAccountByCredential(
+	account, err := lv.ls.ledgerDB().GetAccountByCredential(
 		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
@@ -841,7 +841,7 @@ func (lv *LedgerView) StakeCredentialDeposit(
 	if err != nil {
 		return nil, err
 	}
-	account, err := lv.ls.db.GetAccountByCredential(
+	account, err := lv.ls.ledgerDB().GetAccountByCredential(
 		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
@@ -857,7 +857,7 @@ func (lv *LedgerView) StakeCredentialDeposit(
 	if account == nil || !account.Active {
 		return nil, nil
 	}
-	history, err := lv.ls.db.GetAccountRegistrationHistoryByCredential(
+	history, err := lv.ls.ledgerDB().GetAccountRegistrationHistoryByCredential(
 		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
@@ -869,12 +869,13 @@ func (lv *LedgerView) StakeCredentialDeposit(
 	if err != nil {
 		return nil, lv.storageFault("get stake registration history: %w", err)
 	}
-	importRegistration, err := lv.ls.db.GetAccountImportRegistrationByCredential(
-		lv.EvaluationContext(),
-		credentialTag,
-		cred.Credential[:],
-		lv.txn,
-	)
+	importRegistration, err := lv.ls.ledgerDB().
+		GetAccountImportRegistrationByCredential(
+			lv.EvaluationContext(),
+			credentialTag,
+			cred.Credential[:],
+			lv.txn,
+		)
 	if err != nil {
 		return nil, lv.storageFault("get imported stake registration: %w", err)
 	}
@@ -902,7 +903,8 @@ func (lv *LedgerView) StakeCredentialDeposit(
 func (lv *LedgerView) PoolCurrentState(
 	pkh lcommon.PoolKeyHash,
 ) (*lcommon.PoolRegistrationCertificate, *uint64, error) {
-	pool, err := lv.ls.db.GetPool(lv.EvaluationContext(), pkh, false, lv.txn)
+	pool, err := lv.ls.ledgerDB().
+		GetPool(lv.EvaluationContext(), pkh, false, lv.txn)
 	if err != nil {
 		if errors.Is(err, models.ErrPoolNotFound) {
 			pool = &models.Pool{}
@@ -912,12 +914,12 @@ func (lv *LedgerView) PoolCurrentState(
 	}
 	var currentReg *lcommon.PoolRegistrationCertificate
 	if len(pool.PoolKeyHash) > 0 {
-		regs, err := lv.ls.db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+		regs, err := lv.ls.ledgerDB().GetPoolRegistrationsEffectiveForEpoch(
 			[]lcommon.PoolKeyHash{pkh},
 			lv.epochStartSlot,
 			lv.committeeEpoch,
 			math.MaxInt64,
-			lv.metadataTxn(),
+			lv.txn,
 		)
 		if err != nil {
 			return nil, nil, lv.storageFault(
@@ -1096,7 +1098,7 @@ var _ lcommon.EpochState = (*LedgerView)(nil)
 func (lv *LedgerView) GenesisDelegateKeyHashes(
 	slot uint64,
 ) ([]lcommon.Blake2b224, error) {
-	return lv.ls.genesisDelegateKeyHashes(slot, lv.metadataTxn())
+	return lv.ls.genesisDelegateKeyHashes(slot, lv.txn)
 }
 
 func (lv *LedgerView) GenesisDelegateForGenesisKey(
@@ -1106,7 +1108,7 @@ func (lv *LedgerView) GenesisDelegateForGenesisKey(
 	return lv.ls.genesisDelegateForGenesisKey(
 		genesisKeyHash,
 		slot,
-		lv.metadataTxn(),
+		lv.txn,
 	)
 }
 
@@ -1120,7 +1122,7 @@ var _ lcommon.GenesisDelegationRegistryState = (*LedgerView)(nil)
 func (lv *LedgerView) CurrentGenesisDelegations(
 	slot uint64,
 ) ([]lcommon.GenesisDelegation, error) {
-	state, err := lv.ls.genesisDelegState(slot, lv.metadataTxn())
+	state, err := lv.ls.genesisDelegState(slot, lv.txn)
 	if err != nil {
 		return nil, err
 	}
@@ -1145,7 +1147,7 @@ func (lv *LedgerView) CurrentGenesisDelegations(
 func (lv *LedgerView) FutureGenesisDelegations(
 	slot uint64,
 ) ([]lcommon.GenesisDelegation, error) {
-	state, err := lv.ls.genesisDelegState(slot, lv.metadataTxn())
+	state, err := lv.ls.genesisDelegState(slot, lv.txn)
 	if err != nil {
 		return nil, err
 	}
@@ -1214,13 +1216,6 @@ func (lv *LedgerView) ProtocolParameterUpdateWindow(
 	return lv.ls.ProtocolParameterUpdateWindow(slot)
 }
 
-func (lv *LedgerView) metadataTxn() types.Txn {
-	if lv.txn == nil {
-		return nil
-	}
-	return lv.txn.Metadata()
-}
-
 // IsPoolRegistered checks if a pool is currently registered
 func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 	reg, _, err := lv.PoolCurrentState(pkh)
@@ -1258,7 +1253,7 @@ func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 func (lv *LedgerView) IsVrfKeyInUse(
 	vrfKeyHash lcommon.Blake2b256,
 ) (bool, lcommon.PoolKeyHash, error) {
-	pool, err := lv.ls.db.GetPoolByVrfKeyHash(
+	pool, err := lv.ls.ledgerDB().GetPoolByVrfKeyHash(
 		lv.EvaluationContext(),
 		vrfKeyHash.Bytes(),
 		lv.epochStartSlot,
@@ -1287,7 +1282,7 @@ func (lv *LedgerView) IsVrfKeyInUse(
 func (lv *LedgerView) IsFutureVrfKeyInUse(
 	vrfKeyHash lcommon.Blake2b256,
 ) (bool, lcommon.PoolKeyHash, error) {
-	pool, err := lv.ls.db.GetFuturePoolByVrfKeyHash(
+	pool, err := lv.ls.ledgerDB().GetFuturePoolByVrfKeyHash(
 		lv.EvaluationContext(),
 		vrfKeyHash.Bytes(),
 		lv.epochStartSlot,
@@ -1316,7 +1311,7 @@ func (lv *LedgerView) IsFutureVrfKeyInUse(
 func (lv *LedgerView) IsBlsKeyInUse(
 	publicKey []byte,
 ) (bool, lcommon.PoolKeyHash, error) {
-	pool, err := lv.ls.db.GetPoolByLeiosKey(
+	pool, err := lv.ls.ledgerDB().GetPoolByLeiosKey(
 		lv.EvaluationContext(),
 		publicKey,
 		lv.epochStartSlot,
@@ -1328,7 +1323,7 @@ func (lv *LedgerView) IsBlsKeyInUse(
 		)
 	}
 	if pool == nil {
-		pool, err = lv.ls.db.GetFuturePoolByLeiosKey(
+		pool, err = lv.ls.ledgerDB().GetFuturePoolByLeiosKey(
 			lv.EvaluationContext(),
 			publicKey,
 			lv.epochStartSlot,
@@ -1443,7 +1438,7 @@ func (lv *LedgerView) IsRewardAccountRegistered(
 	if err != nil {
 		return false
 	}
-	account, err := lv.ls.db.GetAccountByCredential(
+	account, err := lv.ls.ledgerDB().GetAccountByCredential(
 		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
@@ -1480,7 +1475,7 @@ func (lv *LedgerView) RewardAccountBalance(
 	if err != nil {
 		return nil, err
 	}
-	account, err := lv.ls.db.GetAccountByCredential(
+	account, err := lv.ls.ledgerDB().GetAccountByCredential(
 		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
@@ -1747,7 +1742,7 @@ func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 	// GetCommitteeAuthorizedCount is not a substitute for either: it counts
 	// only members with a hot key, so a seated committee that has authorized
 	// no hot keys would report zero.
-	members, err := lv.ls.db.GetCommitteeMembersIncludeDeleted(
+	members, err := lv.ls.ledgerDB().GetCommitteeMembersIncludeDeleted(
 		lv.EvaluationContext(),
 		lv.txn,
 	)
@@ -1817,7 +1812,8 @@ func (lv *LedgerView) legacyCommitteeCredentialMember(
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee cold credential: %w", err)
 	}
-	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
+	dbMembers, err := lv.ls.ledgerDB().
+		GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
 	if err != nil {
 		return nil, lv.storageFault("get committee members: %w", err)
 	}
@@ -1865,7 +1861,8 @@ func (lv *LedgerView) CommitteeCredentialMember(
 	if err != nil {
 		return nil, fmt.Errorf("invalid committee cold credential: %w", err)
 	}
-	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
+	dbMembers, err := lv.ls.ledgerDB().
+		GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
 	if err != nil {
 		return nil, lv.storageFault("get committee members: %w", err)
 	}
@@ -1920,7 +1917,7 @@ func (lv *LedgerView) populateCommitteeMemberStatus(
 	if err != nil {
 		return fmt.Errorf("invalid committee cold credential: %w", err)
 	}
-	resigned, err := lv.ls.db.IsCommitteeMemberResigned(
+	resigned, err := lv.ls.ledgerDB().IsCommitteeMemberResigned(
 		lv.EvaluationContext(),
 		coldTag,
 		coldCredential.Credential[:],
@@ -1934,7 +1931,7 @@ func (lv *LedgerView) populateCommitteeMemberStatus(
 	if resigned {
 		return nil
 	}
-	authorization, err := lv.ls.db.GetCommitteeMember(
+	authorization, err := lv.ls.ledgerDB().GetCommitteeMember(
 		lv.EvaluationContext(),
 		coldTag,
 		coldCredential.Credential[:],
@@ -1962,7 +1959,7 @@ func (lv *LedgerView) proposedCommitteeMember(
 	_, pparams := lv.committeeSnapshot()
 	// GOVCERT's isPotentialFutureMember reads the whole proposals set, which
 	// keeps an expired UpdateCommittee until the boundary that drops it.
-	proposals, err := lv.ls.db.GetGovernanceProposalSet(
+	proposals, err := lv.ls.ledgerDB().GetGovernanceProposalSet(
 		lv.EvaluationContext(),
 		lv.txn,
 	)
@@ -1973,7 +1970,7 @@ func (lv *LedgerView) proposedCommitteeMember(
 	// the root must be the latest enacted member of the pair. Querying only
 	// UpdateCommittee returns a stale root once a NoConfidence is enacted,
 	// which drops every pending member chained off it.
-	root, err := lv.ls.db.GetLastEnactedGovernanceProposal(
+	root, err := lv.ls.ledgerDB().GetLastEnactedGovernanceProposal(
 		lv.EvaluationContext(),
 		governancePurposeActionTypes(
 			uint8(lcommon.GovActionTypeUpdateCommittee),
@@ -2151,7 +2148,7 @@ func (lv *LedgerView) committeeHotAuthorizations(
 	}
 	var ret []committeeHotAuthorization
 	seen := make(map[coldKey]struct{})
-	seatedAuthorizations, err := lv.ls.db.GetActiveCommitteeMembers(
+	seatedAuthorizations, err := lv.ls.ledgerDB().GetActiveCommitteeMembers(
 		lv.EvaluationContext(),
 		lv.txn,
 	)
@@ -2193,7 +2190,8 @@ func (lv *LedgerView) committeeHotAuthorizations(
 			return ret, nil
 		}
 	}
-	seated, err := lv.ls.db.GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
+	seated, err := lv.ls.ledgerDB().
+		GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
 	if err != nil {
 		return nil, lv.storageFault("get committee members: %w", err)
 	}
@@ -2213,7 +2211,7 @@ func (lv *LedgerView) committeeHotAuthorizations(
 			hash: storedCold.Credential,
 		}] = struct{}{}
 	}
-	authorizations, err := lv.ls.db.GetCommitteeHotAuthorizationsSince(
+	authorizations, err := lv.ls.ledgerDB().GetCommitteeHotAuthorizationsSince(
 		lv.EvaluationContext(),
 		lv.epochStartSlot,
 		lv.txn,
@@ -2245,7 +2243,7 @@ func (lv *LedgerView) committeeHotAuthorizations(
 		if _, ok := seen[key]; ok {
 			continue
 		}
-		resigned, err := lv.ls.db.IsCommitteeMemberResigned(
+		resigned, err := lv.ls.ledgerDB().IsCommitteeMemberResigned(
 			lv.EvaluationContext(),
 			authorization.ColdCredentialTag,
 			authorization.ColdCredential,
@@ -2289,7 +2287,8 @@ func (lv *LedgerView) CommitteeCredentialIsElected(
 	if err != nil {
 		return false, fmt.Errorf("invalid committee cold credential: %w", err)
 	}
-	members, err := lv.ls.db.GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
+	members, err := lv.ls.ledgerDB().
+		GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
 	if err != nil {
 		return false, lv.storageFault("get elected committee members: %w", err)
 	}
@@ -2317,7 +2316,8 @@ func (lv *LedgerView) CommitteeCredentialIsElected(
 // CommitteeCredentialMember per seat, which would reload the whole set for
 // every member. Resignations are fetched for the whole set in one query.
 func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
-	dbMembers, err := lv.ls.db.GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
+	dbMembers, err := lv.ls.ledgerDB().
+		GetCommitteeMembers(lv.EvaluationContext(), lv.txn)
 	if err != nil {
 		return nil, lv.storageFault("get committee members: %w", err)
 	}
@@ -2374,7 +2374,7 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 			TermStartSlot: found.TermStartSlot,
 		})
 	}
-	resigned, err := lv.ls.db.GetResignedCommitteeMembers(
+	resigned, err := lv.ls.ledgerDB().GetResignedCommitteeMembers(
 		lv.EvaluationContext(),
 		credentials,
 		lv.txn,
@@ -2425,7 +2425,7 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 			members = append(members, *member)
 			continue
 		}
-		authorization, err := lv.ls.db.GetCommitteeMember(
+		authorization, err := lv.ls.ledgerDB().GetCommitteeMember(
 			lv.EvaluationContext(),
 			found.ColdCredentialTag,
 			found.ColdCredHash,
@@ -2561,7 +2561,7 @@ func (lv *LedgerView) DRepRegistration(
 	if err != nil {
 		return nil, err
 	}
-	drep, err := lv.ls.db.GetDrepByCredential(
+	drep, err := lv.ls.ledgerDB().GetDrepByCredential(
 		lv.EvaluationContext(),
 		credentialTag,
 		credential.Credential[:],
@@ -2574,7 +2574,7 @@ func (lv *LedgerView) DRepRegistration(
 		}
 		return nil, lv.storageFault("get drep: %w", err)
 	}
-	deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
+	deposit, err := lv.ls.ledgerDB().GetDrepLastRegistrationDeposit(
 		lv.EvaluationContext(),
 		drep.CredentialTag,
 		credential.Credential[:],
@@ -2612,7 +2612,8 @@ func (lv *LedgerView) DRepRegistration(
 
 // DRepRegistrations returns all active DRep registrations.
 func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
-	dreps, err := lv.ls.db.GetActiveDreps(lv.EvaluationContext(), lv.txn)
+	dreps, err := lv.ls.ledgerDB().
+		GetActiveDreps(lv.EvaluationContext(), lv.txn)
 	if err != nil {
 		return nil, lv.storageFault("get active dreps: %w", err)
 	}
@@ -2629,7 +2630,7 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	// either tree calls the plural form outside gouroboros's own test
 	// mocks. The batching bounds the cost of a caller that does appear
 	// rather than one that exists today.
-	deposits, err := lv.ls.db.GetDrepLastRegistrationDeposits(
+	deposits, err := lv.ls.ledgerDB().GetDrepLastRegistrationDeposits(
 		lv.EvaluationContext(),
 		lv.txn,
 	)
@@ -2697,7 +2698,7 @@ func (lv *LedgerView) DRepDelegation(
 	if err != nil {
 		return nil, err
 	}
-	account, err := lv.ls.db.GetAccountByCredential(
+	account, err := lv.ls.ledgerDB().GetAccountByCredential(
 		lv.EvaluationContext(),
 		credentialTag,
 		cred.Credential[:],
@@ -2776,7 +2777,7 @@ func (lv *LedgerView) DRepDelegation(
 // empty-but-valid constitution, which gouroboros' guardrails rule would
 // read as "no guardrails script required".
 func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
-	constitution, err := lv.ls.db.GetConstitution(lv.txn)
+	constitution, err := lv.ls.ledgerDB().GetConstitution(lv.txn)
 	if err != nil {
 		return nil, lv.storageFault("get constitution: %w", err)
 	}
@@ -2802,11 +2803,7 @@ func (lv *LedgerView) TreasuryValue() (uint64, error) {
 		state *models.NetworkState
 		err   error
 	)
-	if lv.txn == nil {
-		state, err = lv.ls.db.Metadata().GetNetworkState(nil)
-	} else {
-		state, err = lv.ls.db.Metadata().GetNetworkState(lv.txn.Metadata())
-	}
+	state, err = lv.ls.ledgerDB().GetNetworkState(lv.txn)
 	if err != nil {
 		return 0, lv.storageFault("get treasury network state: %w", err)
 	}
@@ -2826,10 +2823,10 @@ func (lv *LedgerView) GovActionById(
 ) (*lcommon.GovActionState, error) {
 	txn := lv.txn
 	if txn == nil {
-		txn = lv.ls.db.MetadataTxn(lv.EvaluationContext(), false)
+		txn = lv.ls.ledgerDB().BeginLedgerOnly(lv.EvaluationContext(), false)
 		defer txn.Release()
 	}
-	proposal, err := lv.ls.db.GetGovernanceProposal(
+	proposal, err := lv.ls.ledgerDB().GetGovernanceProposal(
 		lv.EvaluationContext(),
 		id.TransactionId[:],
 		id.GovActionIdx,
@@ -2889,13 +2886,13 @@ func (lv *LedgerView) GovActionById(
 
 func (lv *LedgerView) governanceProposalIsPurposeRoot(
 	proposal *models.GovernanceProposal,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (bool, error) {
 	actionTypes := governancePurposeActionTypes(proposal.ActionType)
 	if len(actionTypes) == 0 {
 		return false, nil
 	}
-	root, err := lv.ls.db.GetLastEnactedGovernanceProposal(
+	root, err := lv.ls.ledgerDB().GetLastEnactedGovernanceProposal(
 		lv.EvaluationContext(),
 		actionTypes,
 		txn,
@@ -2938,7 +2935,7 @@ func governancePurposeActionTypes(actionType uint8) []uint8 {
 func (lv *LedgerView) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
 	txn := lv.txn
 	if txn == nil {
-		txn = lv.ls.db.MetadataTxn(lv.EvaluationContext(), false)
+		txn = lv.ls.ledgerDB().BeginLedgerOnly(lv.EvaluationContext(), false)
 		defer txn.Release()
 	}
 	parameterChange, err := lv.governancePurposeRoot(
@@ -2987,9 +2984,9 @@ func (lv *LedgerView) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
 
 func (lv *LedgerView) governancePurposeRoot(
 	actionTypes []uint8,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (*lcommon.GovActionId, error) {
-	proposal, err := lv.ls.db.GetLastEnactedGovernanceProposal(
+	proposal, err := lv.ls.ledgerDB().GetLastEnactedGovernanceProposal(
 		lv.EvaluationContext(),
 		actionTypes,
 		txn,
@@ -3020,7 +3017,7 @@ func (lv *LedgerView) governancePurposeRoot(
 
 func (lv *LedgerView) governanceProposalExpirySlot(
 	proposal *models.GovernanceProposal,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (uint64, error) {
 	if proposal.ExpiresEpoch < proposal.ProposedEpoch {
 		return 0, lv.storageFault(
@@ -3032,7 +3029,7 @@ func (lv *LedgerView) governanceProposalExpirySlot(
 			),
 		)
 	}
-	epoch, err := lv.ls.db.GetEpoch(proposal.ProposedEpoch, txn)
+	epoch, err := lv.ls.ledgerDB().GetEpoch(proposal.ProposedEpoch, txn)
 	if err != nil {
 		return 0, lv.storageFault(
 			"get governance proposal epoch: %w",
@@ -3078,7 +3075,7 @@ func (lv *LedgerView) governanceProposalExpirySlot(
 
 // GovActionExists returns whether a governance action exists.
 func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
-	proposal, err := lv.ls.db.GetGovernanceProposal(
+	proposal, err := lv.ls.ledgerDB().GetGovernanceProposal(
 		lv.EvaluationContext(),
 		id.TransactionId[:],
 		id.GovActionIdx,
@@ -3125,10 +3122,10 @@ type StakeDistribution struct {
 func (lv *LedgerView) GetStakeDistribution(
 	epoch uint64,
 ) (*StakeDistribution, error) {
-	snapshots, err := lv.ls.db.Metadata().GetPoolStakeSnapshotsByEpoch(
+	snapshots, err := lv.ls.ledgerDB().GetPoolStakeSnapshotsByEpoch(
 		epoch,
 		"mark",
-		(*lv.txn).Metadata(),
+		lv.txn,
 	)
 	if err != nil {
 		return nil, lv.storageFault("get pool stake snapshots: %w", err)
@@ -3169,11 +3166,11 @@ func (lv *LedgerView) GetLeiosKeys(
 			append([]byte(nil), poolKeyHash[:]...),
 		)
 	}
-	snapshots, err := lv.ls.db.Metadata().GetPoolStakeSnapshotsForPools(
+	snapshots, err := lv.ls.ledgerDB().GetPoolStakeSnapshotsForPools(
 		epoch,
 		models.PoolStakeSnapshotTypeMark,
 		rawPoolKeyHashes,
-		(*lv.txn).Metadata(),
+		lv.txn,
 	)
 	if err != nil {
 		return nil, lv.storageFault("get pool stake snapshots: %w", err)
@@ -3246,11 +3243,11 @@ func (lv *LedgerView) GetPoolStake(
 	epoch uint64,
 	poolKeyHash []byte,
 ) (uint64, error) {
-	snapshot, err := lv.ls.db.Metadata().GetPoolStakeSnapshot(
+	snapshot, err := lv.ls.ledgerDB().GetPoolStakeSnapshot(
 		epoch,
 		"mark",
 		poolKeyHash,
-		(*lv.txn).Metadata(),
+		lv.txn,
 	)
 	if err != nil {
 		return 0, lv.storageFault("get pool stake snapshot: %w", err)
@@ -3263,10 +3260,10 @@ func (lv *LedgerView) GetPoolStake(
 
 // GetTotalActiveStake returns the total stake from the requested mark snapshot.
 func (lv *LedgerView) GetTotalActiveStake(epoch uint64) (uint64, error) {
-	total, err := lv.ls.db.Metadata().GetTotalActiveStake(
+	total, err := lv.ls.ledgerDB().GetTotalActiveStake(
 		epoch,
 		"mark",
-		(*lv.txn).Metadata(),
+		lv.txn,
 	)
 	if err != nil {
 		return 0, lv.storageFault("get total active stake: %w", err)
@@ -3287,7 +3284,7 @@ func (lv *LedgerView) GetDRepVotingPower(
 ) (uint64, error) {
 	// expiryEpoch 0: this point-in-time API query is not gated by the
 	// CIP-0163 epoch-boundary tally (see ledger/governance for that path).
-	power, err := lv.ls.db.GetDRepVotingPower(
+	power, err := lv.ls.ledgerDB().GetDRepVotingPower(
 		lv.EvaluationContext(),
 		credentialTag,
 		drepCredential,
@@ -3303,7 +3300,7 @@ func (lv *LedgerView) GetDRepVotingPower(
 	// Blockfrost adapter's DRep voting-power reads (CIP-1694).
 	drepDepositPower, _, err := governance.ActiveProposalDepositDRepPower(
 		lv.EvaluationContext(),
-		lv.ls.db,
+		lv.ls.ledgerDB(),
 		lv.txn,
 		lv.ls.CurrentEpoch(),
 		0,
@@ -3325,7 +3322,8 @@ func (lv *LedgerView) GetDRepVotingPower(
 func (lv *LedgerView) GetExpiredDReps(
 	epoch uint64,
 ) ([]*models.Drep, error) {
-	dreps, err := lv.ls.db.GetExpiredDReps(lv.EvaluationContext(), epoch, lv.txn)
+	dreps, err := lv.ls.ledgerDB().
+		GetExpiredDReps(lv.EvaluationContext(), epoch, lv.txn)
 	if err != nil {
 		return nil, lv.storageFault("get expired dreps: %w", err)
 	}
@@ -3336,7 +3334,8 @@ func (lv *LedgerView) GetExpiredDReps(
 // committee members that hold a current hot-key authorization. Members
 // without a hot key are not counted and term expiry is not applied.
 func (lv *LedgerView) GetCommitteeAuthorizedCount() (int, error) {
-	count, err := lv.ls.db.GetCommitteeAuthorizedCount(lv.EvaluationContext(), lv.txn)
+	count, err := lv.ls.ledgerDB().
+		GetCommitteeAuthorizedCount(lv.EvaluationContext(), lv.txn)
 	if err != nil {
 		return 0, lv.storageFault("get committee authorized count: %w", err)
 	}

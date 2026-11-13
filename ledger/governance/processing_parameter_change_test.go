@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -168,7 +170,7 @@ func TestProcessProposalsEnforcesParameterChangeWellFormedness(
 				100,
 				20,
 				parameterChangeTestPParams(test.dijkstra, test.major),
-				db,
+				dbadapter.New(db),
 				nil,
 				nil,
 			)
@@ -261,7 +263,7 @@ func TestProcessProposalsRejectsProgrammaticParameterUpdateWidths(
 					100,
 					20,
 					parameterChangeTestPParams(false, 10),
-					db,
+					dbadapter.New(db),
 					nil,
 					nil,
 				)

@@ -26,6 +26,7 @@ import (
 	dingo "github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
 	"github.com/spf13/cobra"
@@ -601,10 +602,32 @@ func runMithrilSyncWithRepair(
 		return err
 	}
 
+	// With ledgerUtxoBadgerOnly the ledger state's UTxO set goes to the
+	// live UTxO set the node opens at the same path.
+	var utxoSet ledgerstate.UtxoSetLoader
+	if cfg.LedgerUtxoBadgerOnly {
+		if cfg.DatabasePath == "" {
+			return errors.New(
+				"ledgerUtxoBadgerOnly needs databasePath for the live UTxO set",
+			)
+		}
+		set, err := utxoset.Open(utxoset.Config{
+			Dir:    utxoset.DirFor(cfg.DatabasePath),
+			Logger: logger,
+			Only:   true,
+		})
+		if err != nil {
+			return fmt.Errorf("open live UTxO set: %w", err)
+		}
+		defer set.Close()
+		utxoSet = set
+	}
+
 	res, err := mithril.Sync(ctx, mithril.SyncConfig{
 		Network:                 network,
 		DataDir:                 cfg.DatabasePath,
 		StorageMode:             cfg.StorageMode,
+		UtxoSet:                 utxoSet,
 		CardanoConfigPath:       cfg.CardanoConfig,
 		Backend:                 backend,
 		AggregatorURL:           cfg.Mithril.AggregatorURL,

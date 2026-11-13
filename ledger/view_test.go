@@ -29,9 +29,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -1233,7 +1236,7 @@ func enactTestUpdateCommittee(
 		db.SetGovernanceProposal(context.Background(), proposal, nil),
 	)
 	_, err = governance.EnactProposal(context.Background(), &governance.EnactmentContext{
-		DB:      db,
+		DB:      dbadapter.New(db),
 		Epoch:   0,
 		Slot:    slot,
 		PParams: pparams,
@@ -4302,7 +4305,7 @@ func runProposalSetBoundary(
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := governance.ProcessEpoch(context.Background(), &governance.EpochInput{
-		DB:           db,
+		DB:           dbadapter.New(db),
 		Txn:          txn,
 		PrevEpoch:    newEpoch - 1,
 		NewEpoch:     newEpoch,
@@ -6039,7 +6042,7 @@ INSERT INTO auth_committee_hot (
 			require.NotNil(t, enacted.EnactedSlot)
 
 			state, err := governance.LoadCommitteeVotingState(context.Background(),
-				f.db, nil, result.NewCurrentEpoch.EpochId,
+				dbadapter.New(f.db), nil, result.NewCurrentEpoch.EpochId,
 			)
 			require.NoError(t, err)
 			wantActive := 1
@@ -7918,7 +7921,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			if _, err := governance.ProcessEpoch(context.Background(), &governance.EpochInput{
-				DB:           db,
+				DB:           dbadapter.New(db),
 				Txn:          txn,
 				PrevEpoch:    endedEpoch,
 				NewEpoch:     endedEpoch + 1,
@@ -8742,13 +8745,13 @@ func TestEpochRolloverUsesEraSpecificEnactmentSnapshot(t *testing.T) {
 			seedEmptyRewardBasisForRollover(t, f.db, f.currentEpoch, params)
 			var observed []uint64
 			f.ls.SetEpochBoundarySnapshotStakeHook(
-				func(txn *database.Txn, _ event.EpochTransitionEvent) error {
+				func(txn ledgerdb.Txn, _ event.EpochTransitionEvent) error {
 					account, err := f.db.GetAccountByCredential(
 						t.Context(),
 						0,
 						credential,
 						false,
-						txn,
+						dbadapter.Unwrap(txn),
 					)
 					if err != nil {
 						return err

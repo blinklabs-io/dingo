@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/governance"
@@ -162,7 +163,7 @@ func (d *LedgerDelta) addTransaction(
 func (d *LedgerDelta) apply(
 	ctx context.Context,
 	ls *LedgerState,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	return d.applyWithDonationRecording(ctx, ls, txn, true, nil)
 }
@@ -170,7 +171,7 @@ func (d *LedgerDelta) apply(
 func (d *LedgerDelta) applyWithoutRecordingDonations(
 	ctx context.Context,
 	ls *LedgerState,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	return d.applyWithDonationRecording(ctx, ls, txn, false, nil)
 }
@@ -178,7 +179,7 @@ func (d *LedgerDelta) applyWithoutRecordingDonations(
 func (d *LedgerDelta) applyWithoutRecordingDonationsWithAccumulator(
 	ctx context.Context,
 	ls *LedgerState,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	acc database.BatchAccumulator,
 ) error {
 	return d.applyWithDonationRecording(ctx, ls, txn, false, acc)
@@ -207,7 +208,7 @@ func validatedReplayAccumulatorFrom(
 func (d *LedgerDelta) applyWithAccumulator(
 	ctx context.Context,
 	ls *LedgerState,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	acc database.BatchAccumulator,
 ) error {
 	return d.applyWithDonationRecording(ctx, ls, txn, true, acc)
@@ -216,7 +217,7 @@ func (d *LedgerDelta) applyWithAccumulator(
 func (d *LedgerDelta) applyWithDonationRecording(
 	ctx context.Context,
 	ls *LedgerState,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	recordDonations bool,
 	acc database.BatchAccumulator,
 ) error {
@@ -260,7 +261,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 					ctx,
 					level,
 					d.Point,
-					ls.db,
+					ls.ledgerDB(),
 					txn,
 				); err != nil {
 					certDepositsMapPool.Put(certDeposits)
@@ -316,7 +317,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			}
 			var setErr error
 			if acc != nil {
-				setErr = ls.db.SetTransactionBatchedWithOpts(
+				setErr = ls.ledgerDB().SetTransactionBatchedWithOpts(
 					ctx,
 					level,
 					d.Point,
@@ -336,7 +337,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 					setErr = ls.afterBatchedTransactionStored(txn, level)
 				}
 			} else {
-				setErr = ls.db.SetTransactionWithOpts(
+				setErr = ls.ledgerDB().SetTransactionWithOpts(
 					ctx,
 					level,
 					d.Point,
@@ -369,6 +370,28 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				txn,
 			); err != nil {
 				return fmt.Errorf("apply transaction body %d direct deposits: %w", levelIndex, err)
+			}
+			// Staged per level, right after its write, so a later level or
+			// transaction in this commit resolves this one's outputs from
+			// the live UTxO set's overlay.
+			if ls.config.UtxoSet != nil {
+				utxoEvt, err := utxoEventFor(
+					d.Point,
+					uint32(tr.Index), //nolint:gosec
+					level,
+				)
+				if err != nil {
+					return fmt.Errorf(
+						"build transaction body %d UTxO event: %w",
+						levelIndex,
+						err,
+					)
+				}
+				ls.stageUtxoSet( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+					txn,
+					nil,
+					utxoEvt,
+				)
 			}
 			if level.IsValid() {
 				if err := d.processGovernance(
@@ -434,7 +457,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// callbacks in registration order, and this callback walks transactions in
 	// index order before handing each event to the ledger.tx ordered lane. See
 	// publishTransactionEvent.
-	if d.stageApplyEvents != nil || ls.config.EventBus != nil {
+	if d.stageApplyEvents != nil || ls.utxoChangesWanted() {
 		applyEvents := make([]TransactionEvent, 0, len(d.Transactions))
 		for i, tr := range d.Transactions {
 			if !appliedTxs[i] {
@@ -451,6 +474,9 @@ func (d *LedgerDelta) applyWithDonationRecording(
 		if len(applyEvents) > 0 && d.stageApplyEvents != nil {
 			d.stageApplyEvents(applyEvents)
 		} else if len(applyEvents) > 0 {
+			if ls.config.EventBus == nil {
+				return nil
+			}
 			txn.AfterCommit(func() {
 				if ls.beforeTransactionApplyPublish != nil {
 					ls.beforeTransactionApplyPublish()
@@ -523,7 +549,7 @@ func (d *LedgerDelta) accumulateNetworkDonations(appliedTxs []bool) error {
 
 func (d *LedgerDelta) recordNetworkDonations(
 	ls *LedgerState,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	appliedTxs []bool,
 ) error {
 	// Accumulate Conway treasury donations from this block. Donations move
@@ -543,11 +569,11 @@ func (d *LedgerDelta) recordNetworkDonations(
 	ls.RLock()
 	epoch := ls.currentEpoch.EpochId
 	ls.RUnlock()
-	if err := ls.db.Metadata().AddNetworkDonation(
+	if err := ls.ledgerDB().AddNetworkDonation(
 		d.Point.Slot,
 		epoch,
 		donation,
-		txn.Metadata(),
+		txn,
 	); err != nil {
 		return fmt.Errorf("record network donation: %w", err)
 	}
@@ -565,7 +591,7 @@ func (d *LedgerDelta) processGovernance(
 	ls *LedgerState,
 	tx lcommon.Transaction,
 	txIndex uint32,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	validated *bool,
 ) error {
 	proposals := tx.ProposalProcedures()
@@ -627,7 +653,7 @@ func (d *LedgerDelta) processGovernance(
 				blockEpoch.EpochId,
 				conwayPParams.GovActionValidityPeriod,
 				pparams,
-				ls.db,
+				ls.ledgerDB(),
 				txn,
 				validated,
 			); err != nil {
@@ -643,7 +669,7 @@ func (d *LedgerDelta) processGovernance(
 				d.Point,
 				blockEpoch.EpochId,
 				conwayPParams.DRepInactivityPeriod,
-				ls.db,
+				ls.ledgerDB(),
 				txn,
 			); err != nil {
 				return fmt.Errorf("process governance votes: %w", err)
@@ -658,7 +684,7 @@ func (d *LedgerDelta) processGovernance(
 				blockEpoch.EpochId,
 				conwayPParams.DRepInactivityPeriod,
 				uint64(conwayPParams.ProtocolVersion.Major),
-				ls.db,
+				ls.ledgerDB(),
 				txn,
 			); err != nil {
 				return fmt.Errorf("process DRep activity certificates: %w", err)
@@ -671,7 +697,7 @@ func (d *LedgerDelta) processGovernance(
 			tx,
 			d.Point,
 			blockEpoch.EpochId,
-			ls.db,
+			ls.ledgerDB(),
 			txn,
 		); err != nil {
 			return fmt.Errorf("process DRep deregistration effects: %w", err)
@@ -728,7 +754,7 @@ func (b *LedgerDeltaBatch) addDelta(delta *LedgerDelta) {
 func (b *LedgerDeltaBatch) apply(
 	ctx context.Context,
 	ls *LedgerState,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	if ls.externalIngest.trusted.Load() {
 		// ApplyTrustedBatch's beforeCommit deletes outputs spent within
@@ -745,13 +771,13 @@ func (b *LedgerDeltaBatch) apply(
 func (b *LedgerDeltaBatch) applyBatched(
 	ctx context.Context,
 	ls *LedgerState,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	usedOverlay *bool,
 ) (err error) {
 	// API mode and ApplyTrustedBatch batch without the flag. Other storage
 	// modes batch only when ApplyRowBatchingEnabled is set; the stored state
 	// is the same either way.
-	if ls.db.StorageMode() != types.StorageModeAPI &&
+	if ls.ledgerDB().StorageMode() != types.StorageModeAPI &&
 		!ls.config.ApplyRowBatchingEnabled &&
 		!ls.externalIngest.trusted.Load() {
 		return b.applyUnbatched(ctx, ls, txn)
@@ -767,7 +793,7 @@ func (b *LedgerDeltaBatch) applyBatched(
 		}
 	}
 
-	acc := ls.db.NewBatchAccumulator()
+	acc := ls.ledgerDB().NewBatchAccumulator()
 	if acc == nil {
 		return b.applyUnbatched(ctx, ls, txn)
 	}
@@ -793,11 +819,11 @@ func (b *LedgerDeltaBatch) applyBatched(
 		}
 		// With the overlay this only ends the block's stake segment; the
 		// overlay writes it at FlushBatch or at a read barrier.
-		if err := ls.db.FlushBatchStakeDeltas(acc, txn); err != nil {
+		if err := ls.ledgerDB().FlushBatchStakeDeltas(acc, txn); err != nil {
 			return fmt.Errorf("flush ledger delta stake metadata: %w", err)
 		}
 	}
-	if err := ls.db.FlushBatch(acc, txn); err != nil {
+	if err := ls.ledgerDB().FlushBatch(acc, txn); err != nil {
 		return fmt.Errorf("flush ledger delta metadata batch: %w", err)
 	}
 	return nil
@@ -812,14 +838,17 @@ func (b *LedgerDeltaBatch) applyBatched(
 // to.
 func (b *LedgerDeltaBatch) enableTrustedUtxoOverlay(
 	ls *LedgerState,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	acc database.BatchAccumulator,
 ) (bool, error) {
 	e := &ls.externalIngest
 	if !e.trusted.Load() || e.overlayOff.Load() || ls.trustedBatchOverlayOff {
 		return false, nil
 	}
-	_, protected, err := pendingRewardStakeInputHistoryFloor(ls.db.Metadata(), txn.Metadata())
+	_, protected, err := pendingRewardStakeInputHistoryFloor(
+		ls.ledgerDB(),
+		txn,
+	)
 	if err != nil {
 		return false, err
 	}
@@ -865,7 +894,7 @@ func (b *LedgerDeltaBatch) enableTrustedUtxoOverlay(
 	if spends := e.spends.Load(); spends != nil {
 		deleteOnSpend = spends.committedAmong(inputs)
 	}
-	enabled, err := ls.db.EnableBatchUtxoOverlay(
+	enabled, err := ls.ledgerDB().EnableBatchUtxoOverlay(
 		acc, txn, inputs, deleteOnSpend, producers,
 	)
 	if err != nil {
@@ -880,7 +909,7 @@ func (b *LedgerDeltaBatch) enableTrustedUtxoOverlay(
 func (b *LedgerDeltaBatch) applyUnbatched(
 	ctx context.Context,
 	ls *LedgerState,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) error {
 	for _, delta := range b.deltas {
 		if delta == nil {

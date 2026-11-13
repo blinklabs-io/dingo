@@ -970,6 +970,9 @@ type UtxoStore interface {
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
+	// GetUtxosRestoredByRollback returns the UTxOs a rollback to the given
+	// slot makes live again: created at or before it and spent after it.
+	GetUtxosRestoredByRollback(uint64, types.Txn) ([]models.Utxo, error)
 	GetSpentUtxosMissingAddressAfterSlot(
 		uint64,
 		uint,
@@ -1325,7 +1328,10 @@ type TransactionStore interface {
 	// SetGapBlockTransaction stores a transaction record and its
 	// produced outputs without looking up or consuming input UTxOs.
 	// This is used for mithril gap blocks where the snapshot's UTxO
-	// set already reflects the correct spent/unspent state.
+	// set already reflects the correct spent/unspent state. With
+	// historyOnly it stores the transaction and its certificates but no
+	// output rows or stake changes, for a database whose UTxO set lives
+	// outside the metadata store.
 	SetGapBlockTransaction(
 		lcommon.Transaction,
 		ocommon.Point,
@@ -1333,6 +1339,7 @@ type TransactionStore interface {
 		map[int]uint64, // certDeposits; see SetTransaction
 		types.Txn,
 		uint64, // protocol major version
+		bool, // historyOnly
 	) error
 
 	// RecomputeGapCollateralFee recomputes and persists the collateral fee

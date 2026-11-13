@@ -19,6 +19,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -66,7 +68,7 @@ func TestTranslateRatifiedGovActions_ConwayToDijkstra(t *testing.T) {
 
 	require.NoError(t, TranslateRatifiedGovActions(
 		context.Background(),
-		db,
+		dbadapter.New(db),
 		nil,
 		conway.EraIdConway,
 		gdijkstra.EraIdDijkstra,

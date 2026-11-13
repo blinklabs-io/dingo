@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -682,11 +684,11 @@ func TestTrustedBatchOverlayFallsBackOnReadBarrierConflict(t *testing.T) {
 		)
 		require.NoError(t, err)
 		h.ls.afterBatchedTransactionStored = func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			tx lcommon.Transaction,
 		) error {
 			stored, err := h.db.Metadata().GetUtxo(
-				tx.Hash().Bytes(), 0, txn.Metadata(),
+				tx.Hash().Bytes(), 0, dbadapter.Unwrap(txn).Metadata(),
 			)
 			if err != nil {
 				return err

@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -90,7 +91,7 @@ func TestValidatedBlockBatchesAPIIndexesAndKeepsStateImmediate(t *testing.T) {
 				lv := state.(*LedgerView)
 				for _, input := range tx.Inputs() {
 					stored, err := db.Metadata().
-						GetUtxo(input.Id().Bytes(), input.Index(), lv.txn.Metadata())
+						GetUtxo(input.Id().Bytes(), input.Index(), dbadapter.Unwrap(lv.txn).Metadata())
 					require.NoError(t, err)
 					require.NotNil(
 						t,

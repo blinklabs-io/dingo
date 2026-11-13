@@ -46,6 +46,7 @@ const (
 	LedgerErrorEventType                event.EventType = "ledger.error"
 	PoolStateRestoredEventType          event.EventType = event.PoolStateRestoredEventType
 	TransactionEventType                event.EventType = "ledger.tx"
+	UtxoEventType                       event.EventType = "ledger.utxo"
 )
 
 // BlockAction is the direction a block moved on the primary chain: added
@@ -162,6 +163,47 @@ type TransactionEvent struct {
 	BlockNumber uint64
 	TxIndex     uint32
 	Rollback    bool
+}
+
+// UtxoChangeCause names what changed the live UTxO set.
+type UtxoChangeCause string
+
+const (
+	// UtxoChangeTransaction is a transaction applied by a block, valid or
+	// not: an invalid transaction spends its collateral and creates its
+	// collateral return.
+	UtxoChangeTransaction UtxoChangeCause = "transaction"
+	// UtxoChangeGenesis creates the genesis outputs.
+	UtxoChangeGenesis UtxoChangeCause = "genesis"
+	// UtxoChangeAvvmRemoval removes the AVVM outputs at the Allegra boundary.
+	UtxoChangeAvvmRemoval UtxoChangeCause = "avvm_removal"
+	// UtxoChangeRollback reverts every change after Point.
+	UtxoChangeRollback UtxoChangeCause = "rollback"
+)
+
+// UtxoOutput is an output and its CBOR.
+type UtxoOutput struct {
+	Ref  models.UtxoId
+	Cbor []byte
+}
+
+// UtxoEvent is one change to the live UTxO set, published on the ordered
+// ledger.utxo lane after the change commits. Applying every event in order,
+// adding Added and removing Removed, reproduces the live set without reading
+// the store: a rollback's event carries the outputs it restores.
+type UtxoEvent struct {
+	// Point is where the change happens. For a rollback it is the point
+	// rolled back to. Its hash may be empty for genesis and the AVVM
+	// removal.
+	Point ocommon.Point
+	Cause UtxoChangeCause
+	// TxIndex is the transaction's index in its block, for
+	// UtxoChangeTransaction.
+	TxIndex uint32
+	// Added are outputs that become live.
+	Added []UtxoOutput
+	// Removed are outputs that stop being live.
+	Removed []models.UtxoId
 }
 
 // ConnectionClosedEvent is emitted by the node layer when a connection closes.

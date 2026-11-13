@@ -19,6 +19,8 @@ import (
 	"crypto/ed25519"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -190,7 +192,7 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 						0,
 						pp.GovActionValidityPeriod,
 						pp,
-						fx.db,
+						dbadapter.New(fx.db),
 						txn,
 						nil,
 					)

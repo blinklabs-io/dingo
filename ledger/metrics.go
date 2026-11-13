@@ -284,6 +284,10 @@ type stateMetrics struct {
 	// that block is missing, so a rising value means ledger.tx subscribers
 	// may be carrying stale derived state for an abandoned branch.
 	reconciliationUndoUnresolved prometheus.Counter
+	// Verify-mode reads of the live UTxO set, and those whose answer
+	// differed from the metadata store's.
+	utxoSetReadsVerified  prometheus.Counter
+	utxoSetReadMismatches prometheus.Counter
 	// Incremented by the block-number count the reconciler's undo-block
 	// resolution expects but has no block_nonce row for at all -- not
 	// merely unresolvable (reconciliationUndoUnresolved), but entirely
@@ -1330,6 +1334,18 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_continuation_input_unresolved_total",
 			Help: "inputs in freshly fetched continuation blocks whose producing transaction is not on the local applied chain (cross-fork splice indicator)",
+		},
+	)
+	m.utxoSetReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_utxo_set_reads_verified_total",
+			Help: "validation input reads answered by both the metadata store and the live UTxO set in verify mode",
+		},
+	)
+	m.utxoSetReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_utxo_set_read_mismatches_total",
+			Help: "verify-mode validation input reads where the live UTxO set's answer differed from the metadata store's",
 		},
 	)
 	m.reconciliationUndoUnresolved = promautoFactory.NewCounter(

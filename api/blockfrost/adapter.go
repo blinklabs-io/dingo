@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
@@ -1255,8 +1256,8 @@ func (a *NodeAdapter) predefinedDRep(
 	if drepType == models.DrepTypeAlwaysNoConfidence {
 		_, depositPower, err := governance.ActiveProposalDepositDRepPower(
 			ctx,
-			db,
-			txn,
+			dbadapter.New(db),
+			dbadapter.Txn(txn),
 			a.ledgerState.CurrentEpoch(),
 			0,
 		)
@@ -1376,8 +1377,8 @@ func (a *NodeAdapter) drepByCredentialTag(
 	// ledger/governance.LoadDRepVotingState uses for ratification (CIP-1694).
 	drepDepositPower, _, err := governance.ActiveProposalDepositDRepPower(
 		ctx,
-		db,
-		txn,
+		dbadapter.New(db),
+		dbadapter.Txn(txn),
 		currentEpoch,
 		0,
 	)
@@ -1496,7 +1497,13 @@ func (a *NodeAdapter) DReps(
 	var powerAdjustments []models.DrepPowerAdjustment
 	if params.OrderByAmount {
 		refPower, noConfidencePower, err := governance.
-			ActiveProposalDepositDRepPower(ctx, db, txn, currentEpoch, 0)
+			ActiveProposalDepositDRepPower(
+				ctx,
+				dbadapter.New(db),
+				dbadapter.Txn(txn),
+				currentEpoch,
+				0,
+			)
 		if err != nil {
 			return nil, 0, fmt.Errorf(
 				"get active proposal deposit voting power: %w", err,
@@ -1638,8 +1645,8 @@ func (a *NodeAdapter) DReps(
 		depositRefPower, depositNoConfidencePower, depositErr := governance.
 			ActiveProposalDepositDRepPower(
 				ctx,
-				db,
-				txn,
+				dbadapter.New(db),
+				dbadapter.Txn(txn),
 				currentEpoch,
 				0,
 			)
@@ -2288,7 +2295,7 @@ func (a *NodeAdapter) Account(
 			return err
 		}
 		pendingReward, err = a.ledgerState.PendingRewardCredit(
-			txn, credentialTag, stakeKey,
+			dbadapter.Txn(txn), credentialTag, stakeKey,
 		)
 		if err != nil {
 			return err
