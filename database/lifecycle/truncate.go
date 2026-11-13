@@ -497,6 +497,9 @@ func Truncate(
 	if pending, err := GetPendingTruncate(db); err != nil {
 		return 0, fmt.Errorf("truncate: %w", err)
 	} else if pending != nil {
+		if err := checkPendingMithrilFloor(db, *pending); err != nil {
+			return 0, err
+		}
 		return finishPendingTruncate(
 			ctx,
 			db,
@@ -778,6 +781,42 @@ func Truncate(
 		delegatorInactivityEnabled,
 		delegatorInactivity,
 	)
+}
+
+// checkPendingMithrilFloor refuses to resume a marker whose recorded floor
+// no longer matches the database. A Mithril import that ran after the marker
+// was written raises the boundary and imports outputs at that slot; resuming
+// with the older floor would delete them. The marker is left in place.
+func checkPendingMithrilFloor(
+	db *database.Database,
+	pending PendingTruncate,
+) error {
+	syncStatus, err := db.GetSyncState(syncStatusSyncKey, nil)
+	if err != nil {
+		return fmt.Errorf("truncate: read sync status: %w", err)
+	}
+	if syncStatus == syncStatusInProgress {
+		return errors.New(
+			"truncate: a Mithril sync or snapshot restore is in progress; " +
+				"finish it before resuming the pending truncate",
+		)
+	}
+	floor, err := db.MithrilTrustBoundarySlotStrict(nil)
+	if err != nil {
+		return fmt.Errorf(
+			"truncate: could not verify Mithril trust boundary: %w", err,
+		)
+	}
+	if floor > pending.MithrilFloor {
+		return fmt.Errorf(
+			"truncate: Mithril trust boundary %d is above the pending "+
+				"truncate's recorded boundary %d; a Mithril import ran "+
+				"after the truncate was interrupted",
+			floor,
+			pending.MithrilFloor,
+		)
+	}
+	return nil
 }
 
 func finishPendingTruncate(

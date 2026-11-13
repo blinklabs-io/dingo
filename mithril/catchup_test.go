@@ -825,7 +825,6 @@ func runRejectedTailSync(
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	gapBlocksIdle := false
 	_, syncErr := Sync(ctx, SyncConfig{
 		Network:     "preprod",
 		DataDir:     dataDir,
@@ -845,12 +844,9 @@ func runRejectedTailSync(
 				return
 			}
 			if !progress.Active {
-				gapBlocksIdle = true
 				return
 			}
-			if gapBlocksIdle {
-				cancel()
-			}
+			cancel()
 		},
 	})
 	return rejectedTailSync{
