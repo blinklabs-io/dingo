@@ -2378,7 +2378,7 @@ outlive it:
   on its own behalf. A leaked one would be handled once per restore cycle,
   forever.
 - **Leios persistence workers.** `Close` stops the historical-serving writer
-  and optional retention GC before storage closes. An unconfirmed worker drain
+  and retention GC before storage closes. An unconfirmed worker drain
   prevents normal shutdown and live restore from closing storage underneath it.
 
 `Close` is idempotent, so `Node.Stop` and an explicit restore teardown can both
@@ -5304,6 +5304,16 @@ install a job — an unwinding clone, a stopped writer, a complete job that land
 for the same occurrence meanwhile — and an installed job's reservation is
 released when it is superseded by a replacement or popped by the drain, so the
 budget is a steady-state limit rather than a one-shot allowance.
+Retention follows the reference node: the retention GC (`runLeiosPersistenceGC`)
+prunes an uncertified endorser block once the immutable point
+(`LedgerState.ImmutablePoint`, `k` blocks behind the applied tip) passes its
+slot, while a certified one (`Database.IsLeiosEBCertified`; the ledger writes
+the marker when a ranking block certifies it) is kept permanently. A positive
+`leiosPersistenceRetentionSlots` only widens the window and never prunes past
+the immutable point, and the writer still persists a certified block below the
+cutoff. The leios-fetch server answers an uncertified block behind the
+immutable point as unknown, the same absence reply as any other missing block,
+whether it is still cached or persisted.
 `startLeiosPersistWriter` resets the accounting with the pending map, so a live
 Restore/Truncate restart does not carry the old queue's reservations onto the
 new one; the writer is drained and stopped at shutdown via

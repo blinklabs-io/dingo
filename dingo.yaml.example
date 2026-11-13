@@ -730,17 +730,21 @@
 # Can be overridden with DINGO_LEIOS_VOTE_SIGNING_KEY_FILE.
 # leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
 
-# Optional retention for persisted Leios endorser-block history used by
-# leios-fetch to serve historical blocks after the in-memory cache expires.
-# Zero or unset retains all history. Positive values must be at least the
-# network stability window, ceil(3k/f) slots. A positive value keeps records from the
-# highest persisted endorser-block slot back through this many slots; older
-# manifests and transaction bodies are pruned at startup and hourly. This does
-# not remove already-applied ledger state, but historical serving and a later
-# rollback/replay that needs pruned data then depend on a connected peer.
-# Hourly sweeps list manifests to find the highest persisted slot, then scan
-# the shared Leios prefix for deletion candidates. Object stores pay both
-# listing costs plus per-key delete requests.
+# Retention for persisted Leios endorser-block history used by leios-fetch to
+# serve historical blocks after the in-memory cache expires. Endorser blocks
+# certified by a ranking block and their transactions are never pruned.
+# Uncertified endorser blocks are pruned once the immutable point (k blocks
+# behind the tip) passes their slot, and leios-fetch refuses requests for one
+# behind it. Zero or unset uses that default. A positive value keeps
+# uncertified records from the highest persisted endorser-block slot back
+# through this many slots, but never past the immutable point, and must be at
+# least the network stability window, ceil(3k/f) slots. Older manifests and
+# transaction bodies are pruned at startup and hourly. This does not remove
+# already-applied ledger state.
+# Hourly sweeps scan the shared Leios prefix for deletion candidates and probe
+# each candidate's certification. Object stores pay the listing costs plus
+# per-key delete requests; a positive value also lists manifests to find the
+# highest persisted slot.
 # Can be overridden with DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS.
 # leiosPersistenceRetentionSlots: 0
 

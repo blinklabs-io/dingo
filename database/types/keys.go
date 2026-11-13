@@ -154,6 +154,12 @@ const (
 	// txCount txs fetched), so a missing "et" key means the txs are not
 	// available.
 	LeiosEBTxsKeyPrefix = "et"
+	// LeiosEBCertifiedKeyPrefix is the key prefix of the marker recording that
+	// a ranking block certified one occurrence of an endorser block. Key
+	// format: "ec" + hash(32 bytes) + slot(8 bytes big-endian); the value is
+	// a single byte and only the key's presence is meaningful. Pruning never
+	// removes the manifest or transactions of a marked occurrence.
+	LeiosEBCertifiedKeyPrefix = "ec"
 	// DeferredHeaderMarkerKeyPrefix is the key prefix for the durable marker
 	// that records a block whose stateful header checks were deferred to
 	// ledger apply. Key format: "dh" + "<slot>:<hash hex>"; the value is a
@@ -177,6 +183,17 @@ func LeiosEBManifestKey(hash []byte, slot uint64) []byte {
 func LeiosEBTxsKey(hash []byte, slot uint64) []byte {
 	key := make([]byte, 0, len(LeiosEBTxsKeyPrefix)+len(hash)+8)
 	key = append(key, LeiosEBTxsKeyPrefix...)
+	key = append(key, hash...)
+	key = binary.BigEndian.AppendUint64(key, slot)
+	return key
+}
+
+// LeiosEBCertifiedKey builds the blob key of the certification marker for one
+// occurrence of a Leios endorser block, identified by its slot and hash
+// together.
+func LeiosEBCertifiedKey(hash []byte, slot uint64) []byte {
+	key := make([]byte, 0, len(LeiosEBCertifiedKeyPrefix)+len(hash)+8)
+	key = append(key, LeiosEBCertifiedKeyPrefix...)
 	key = append(key, hash...)
 	key = binary.BigEndian.AppendUint64(key, slot)
 	return key

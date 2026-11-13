@@ -4974,6 +4974,7 @@ legacy occurrence checks are unchanged.
 | `u` + tx hash bytes + big-endian output index `uint32` | UTxO CBOR or a 52-byte `DOFF` CBOR-offset reference into a block | UTxO resolution and history expiry |
 | `t` + tx hash bytes | Transaction CBOR offset bytes. Current writers store 52-byte `DOFF`; readers also support 69-byte `DTXP` tx-part offsets. | Transaction CBOR lookup |
 | `em` + endorser-block hash bytes (32) + big-endian slot `uint64` (8 bytes) | The raw endorser-block manifest CBOR received over leios-fetch `MsgBlock`. Written by `Database.SetLeiosEB` (the merged manifest+txs single-commit writer) on the asynchronous background persistence writer, off the leios-fetch hot path; the granular `Database.SetLeiosEBManifest` remains available. Read by `Database.GetLeiosEBManifest`. Used so a synced node can serve historical EB manifests to downstream peers via leios-fetch `MsgBlockRequest` after the in-memory 10-minute TTL has expired. Keyed by (hash, slot) together, matching the in-memory `Ouroboros.leiosEndorserBlocks` cache: the manifest is content-addressed and can be a live, independently required occurrence at more than one slot at once, and a hash-only key would let a second occurrence's persist silently overwrite the first (see `ARCHITECTURE.md`'s Leios Networking section). The slot is part of the key rather than the value now, so `GetLeiosEBManifest`/`GetLeiosEBTxs` take the caller's expected slot and resolve exactly that occurrence rather than reporting one and letting the caller compare. `GetLeiosEBManifest` falls back to the legacy key (`types.LegacyLeiosEBManifestKey`, hash only, value `slot(8) + manifest`) on a miss, so a manifest persisted by a node running before this key format changed remains readable after an upgrade instead of silently orphaned; the legacy value's embedded slot must match the requested slot. | Leios EB manifest serving |
+| `ec` + endorser-block hash bytes (32) + big-endian slot `uint64` (8 bytes) | One byte. Written by `Database.SetLeiosEBCertified` when an applied ranking block certifies that endorser-block occurrence; only its presence matters. `Database.IsLeiosEBCertified` also treats a standalone endorser-block blob at the same slot and hash as certified. `PruneLeiosEBBeforeSlot` never deletes the `em`/`et` records of a certified occurrence, and the GC's shared `e` scan skips `ec` keys. | Leios EB retention |
 | `et` + endorser-block hash bytes (32) + big-endian slot `uint64` (8 bytes) | CBOR-encoded `[]cbor.RawMessage` — the complete transaction list from leios-fetch `MsgBlockTxs`, each element the Dijkstra `block_transaction` CBOR (`[body, witnesses, auxiliary_data / null, is_valid]`) with the wire's tag-24 wrapper already removed. Lists written before this form (byte-string wrapped elements) fail the manifest revalidation below and are discarded, so the transactions are fetched again. Written by `Database.SetLeiosEB` in the same blob transaction as the `em` manifest, only when the tx cache is complete (`txCount` txs fetched), on the asynchronous background persistence writer; the granular `Database.SetLeiosEBTxs` remains available. A missing key is not by itself evidence of any one cause: txs may never have been fully fetched, the endorser block may carry no transactions, the best-effort historical-serving write may have been dropped because the writer's queue was at its entry-count or aggregate-byte bound, the blob-store write may have failed, or the node may predate this key. Read by `Database.GetLeiosEBTxs`; the Ouroboros reload path revalidates every body hash and encoded size against the corresponding `em` manifest reference before caching it, and discards a stale or corrupted transaction list so the normal by-point path can fetch a verified replacement. Used so a synced node can serve historical EB transactions to downstream peers via leios-fetch `MsgBlockTxsRequest`. Same (hash, slot) keying and legacy-key fallback (`types.LegacyLeiosEBTxsKey`) as `em` above; the legacy fallback is gated on the legacy `em` record's own embedded slot matching, since the legacy format paired exactly one `em`/`et` record per hash. | Leios EB tx-body serving |
 | `dh` + `<slot>:<hash hex>` (ASCII) | A single byte; presence is the signal | Deferred-header validation in `ledger`: written by `Database.SetDeferredHeaderMarker` when blockfetch defers stateful header checks to ledger apply, before the block is added to the chain. It lives in the blob store rather than `sync_state` because the blockfetch handler writes it, and a `sync_state` write needs the single SQLite write connection that a block-apply transaction (an epoch-rollover snapshot, a hard-fork boundary transition) holds for its whole length. Apply deletes it through `Txn.AfterCommit`, so a crash between the blob and metadata commits leaves a harmless stale marker rather than an unapplied block with no marker. Repopulated into the in-memory deferred set at startup alongside any legacy `sync_state` rows. |
 | `metadata_commit_timestamp` | Big-endian timestamp integer bytes | Commit consistency check with SQL `commit_timestamp` |
@@ -4984,11 +4985,26 @@ Positive retention values must cover at least the network stability window,
 from the ledger's genesis parameters. Startup rejects a smaller value or unknown
 parameters before constructing the persistence workers.
 
-Leios historical-serving persistence is kept indefinitely by default. A positive
-`leiosPersistenceRetentionSlots` setting (environment variable
-`DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) opts into pruning records older than
-`max persisted Leios EB slot - retention slots`; the cutoff slot itself is
-retained. The asynchronous GC scans the shared `e` prefix, deletes `em` and
+Leios historical-serving persistence follows the reference node. The manifest
+and transactions of a certified endorser block are never pruned. An uncertified
+one is pruned once the immutable point (`k` blocks behind the applied tip)
+passes its slot: with `leiosPersistenceRetentionSlots` unset or zero the cutoff
+is the immutable point's slot, and a positive setting (environment variable
+`DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) keeps uncertified records back to
+`max persisted Leios EB slot - retention slots` but never past the immutable
+point. The cutoff slot itself is retained. Nothing is pruned while the chain is
+too short to have an immutable point, or without a ledger.
+
+An occurrence is certified when its `ec` marker exists or a standalone
+endorser-block blob (`SetGenesisCbor` at its slot and hash) exists. Ledger
+apply writes the marker, in its own blob transaction, when a ranking block
+certifies the endorser block, including one with no transactions, which has no
+standalone blob; the blob test covers closures applied before the marker
+existed. A rollback does not remove the marker, so a certified occurrence that
+leaves the chain is retained rather than lost. The persistence writer still
+persists a certified occurrence below the cutoff, and leios-fetch answers an
+uncertified occurrence behind the immutable point as unknown even while it is
+cached or persisted. The asynchronous GC scans the shared `e` prefix, deletes `em` and
 `et` keys one per transaction, and runs after startup restores the Leios slot
 watermark and then hourly. It also removes legacy hash-only records when their
 embedded slot is older than the cutoff, plus unpaired legacy transaction

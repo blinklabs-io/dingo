@@ -835,3 +835,34 @@ func TestLeiosUndecodableParentIsNotAMissingAnnouncement(t *testing.T) {
 	)
 	require.Zero(t, f.certCalls)
 }
+
+// A certifying ranking block marks the endorser block it certifies, including
+// one with no transactions, which writes no standalone closure blob, so that
+// persisted serving data is not pruned as uncertified.
+func TestLeiosCertifiedRankingBlockMarksEndorserBlockCertified(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	f.ebTxs = nil
+	parent := f.announce()
+
+	certified, err := f.db.IsLeiosEBCertified(
+		leiosCertApplyAnnouncingSlot,
+		f.ebHash.Bytes(),
+	)
+	require.NoError(t, err)
+	require.False(t, certified, "an announced endorser block is not certified")
+
+	certifier, offsets, envParent := f.certifyingChild(parent)
+	require.NoError(t, f.ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	))
+	require.NoError(t, f.process(certifier, offsets, envParent))
+
+	certified, err = f.db.IsLeiosEBCertified(
+		leiosCertApplyAnnouncingSlot,
+		f.ebHash.Bytes(),
+	)
+	require.NoError(t, err)
+	require.True(t, certified, "certified endorser block was not marked")
+}

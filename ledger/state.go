@@ -11283,6 +11283,20 @@ func (ls *LedgerState) ledgerProcessBlock(
 						err,
 					)
 				}
+				// An endorser block with no transactions writes no
+				// standalone closure blob, so certification is recorded
+				// explicitly for pruning of the persisted serving data.
+				if err := ls.db.SetLeiosEBCertified(
+					ebSlot,
+					ebHash.Bytes(),
+				); err != nil {
+					return nil, &leiosEndorserBlockStorageError{
+						err: fmt.Errorf(
+							"mark certified endorser block: %w",
+							err,
+						),
+					}
+				}
 				ls.logLeiosEndorserBlockApplyResult(
 					point,
 					ebSlot,

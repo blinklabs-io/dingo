@@ -425,3 +425,65 @@ func TestPruneLeiosEBBeforeSlotBoundsCloudCompensationBatchSize(
 		require.LessOrEqual(t, batch.valueBytes, valueSize)
 	}
 }
+
+func TestPruneLeiosEBBeforeSlotKeepsCertifiedOccurrences(t *testing.T) {
+	t.Parallel()
+
+	d := newTestDB(t)
+	txs := []cbor.RawMessage{mustCborForLeiosTest(t, "tx")}
+	uncertified := randomHash(t)
+	marked := randomHash(t)
+	applied := randomHash(t)
+	legacyMarked := randomHash(t)
+	for _, hash := range [][]byte{uncertified, marked, applied} {
+		require.NoError(t, d.SetLeiosEB(10, hash, []byte("manifest"), txs))
+	}
+	writeLegacyLeiosEB(t, d, 5, legacyMarked, []byte("legacy"), txs)
+
+	// Marked is certified through the marker; applied only through the
+	// standalone endorser-block blob that ledger apply wrote before the marker
+	// existed.
+	require.NoError(t, d.SetLeiosEBCertified(10, marked))
+	require.NoError(t, d.SetLeiosEBCertified(5, legacyMarked))
+	require.NoError(t, d.SetGenesisCbor(10, applied, []byte("closure"), nil))
+
+	_, err := d.PruneLeiosEBBeforeSlot(t.Context(), 20)
+	require.NoError(t, err)
+
+	_, err = d.GetLeiosEBManifest(uncertified, 10)
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+	_, err = d.GetLeiosEBTxs(uncertified, 10)
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+	for _, record := range []struct {
+		slot uint64
+		hash []byte
+	}{
+		{slot: 10, hash: marked},
+		{slot: 10, hash: applied},
+		{slot: 5, hash: legacyMarked},
+	} {
+		_, err := d.GetLeiosEBManifest(record.hash, record.slot)
+		require.NoError(t, err)
+		gotTxs, err := d.GetLeiosEBTxs(record.hash, record.slot)
+		require.NoError(t, err)
+		require.Equal(t, txs, gotTxs)
+	}
+}
+
+func TestIsLeiosEBCertifiedIsPerOccurrence(t *testing.T) {
+	t.Parallel()
+
+	d := newTestDB(t)
+	hash := randomHash(t)
+	certified, err := d.IsLeiosEBCertified(10, hash)
+	require.NoError(t, err)
+	require.False(t, certified)
+
+	require.NoError(t, d.SetLeiosEBCertified(10, hash))
+	certified, err = d.IsLeiosEBCertified(10, hash)
+	require.NoError(t, err)
+	require.True(t, certified)
+	certified, err = d.IsLeiosEBCertified(11, hash)
+	require.NoError(t, err)
+	require.False(t, certified)
+}
