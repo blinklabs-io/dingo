@@ -282,8 +282,24 @@ func TestLeiosValidationNotRetriedByLedgerBlockEventBeforeApply(t *testing.T) {
 		"chain update retry before the ledger apply",
 	)
 
+	// The attempt reports itself before reading applied, so wait for it to
+	// finish and record the basis block as unavailable. Otherwise it could
+	// observe applied and validate without any retry.
+	require.Eventually(t, func() bool {
+		o.leiosMu.RLock()
+		defer o.leiosMu.RUnlock()
+		return o.leiosEndorserBlocks[key].semanticValidationStatus ==
+			leiosEBValidationUnknown
+	}, 5*time.Second, 10*time.Millisecond)
+
 	applied.Store(true)
 	o.RetryLeiosEndorserBlockValidations()
+	testutil.RequireReceive(
+		t,
+		attempts,
+		5*time.Second,
+		"retry after the ledger apply",
+	)
 	require.Eventually(t, func() bool {
 		o.leiosMu.RLock()
 		defer o.leiosMu.RUnlock()
