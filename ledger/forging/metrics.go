@@ -40,6 +40,9 @@ type forgingMetrics struct {
 	// Slots this node won the leader election for and did not turn into a
 	// block of its own on the chain.
 	forgeMissedLeaderSlots prometheus.Counter
+	// Leader slots handed to another pool of the same node that also leads
+	// the slot and wins the tiebreak.
+	forgeYieldedToOwnPool prometheus.Counter
 
 	// Dingo-specific (no cardano-node equivalent)
 	slotBattlesTotal prometheus.Counter
@@ -176,6 +179,13 @@ func initForgingMetrics(
 		prometheus.CounterOpts{
 			Name: "dingo_forge_missed_leader_slots_total",
 			Help: "slots confirmed by leader selection that did not end with a block of this node adopted (build, validation or adoption failure, a lost slot battle, or a post-selection refusal); excludes pre-selection KES and tip safety refusals",
+		},
+	)
+
+	m.forgeYieldedToOwnPool = factory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_yielded_to_own_pool_total",
+			Help: "leader slots not forged because another pool of this node leads the same slot and wins the tiebreak",
 		},
 	)
 

@@ -1078,9 +1078,21 @@ type Config struct {
 	// for setups where something else secures it, such as a service mesh
 	// sidecar. The agent's counterpart is kes_agent.attested_plaintext. A
 	// server pin and a client certificate need TLS, so it takes neither.
-	ShelleyKESAgentPlaintext    bool   `yaml:"shelleyKesAgentPlaintext" envconfig:"SHELLEY_KES_AGENT_PLAINTEXT"`
-	ForgeSyncToleranceSlots     uint64 `yaml:"forgeSyncToleranceSlots"          envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
-	ForgeStaleGapThresholdSlots uint64 `yaml:"forgeStaleGapThresholdSlots"      envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	ShelleyKESAgentPlaintext bool `yaml:"shelleyKesAgentPlaintext" envconfig:"SHELLEY_KES_AGENT_PLAINTEXT"`
+	// BlockProducerPools lists every pool this block producer forges for,
+	// each with its own VRF key, operational certificate and KES source. It
+	// replaces the single-pool shelleyVrfKey, shelleyKesKey,
+	// shelleyOperationalCertificate, shelleyKesAgentSocket,
+	// shelleyKesAgentMode, shelleyKesAgentAddress,
+	// shelleyKesAgentClientCertFile, shelleyKesAgentClientKeyFile,
+	// shelleyKesAgentServerSpkiSha256 and shelleyKesAgentPlaintext settings
+	// above, which stay the way to configure one pool;
+	// shelleyKesAgentSignTimeout and shelleyKeyWatchInterval apply to every
+	// pool. It is set in YAML or with dingo.WithBlockProducerPools, and is not
+	// read from the environment.
+	BlockProducerPools          []BlockProducerPool `yaml:"blockProducerPools"              ignored:"true"`
+	ForgeSyncToleranceSlots     uint64              `yaml:"forgeSyncToleranceSlots"          envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots uint64              `yaml:"forgeStaleGapThresholdSlots"      envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 	// ForgeUpstreamStalenessSlots bounds how far the newest block this node
 	// holds may trail the corroborated upstream sync target before forging is
 	// skipped. 0 (the default) disables it.
@@ -1847,6 +1859,10 @@ func cloneConfig(cfg *Config) *Config {
 		cfg.BarkLifecycleOperatorCertificateFingerprints...,
 	)
 	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
+	clone.BlockProducerPools = append(
+		[]BlockProducerPool(nil),
+		cfg.BlockProducerPools...,
+	)
 	clone.TracingAlwaysSamplePools = append(
 		[]string(nil),
 		cfg.TracingAlwaysSamplePools...,
@@ -2124,6 +2140,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.ShelleyKESAgentAddress != "" && c.ShelleyKESAgentMode == "" {
 		c.ShelleyKESAgentMode = "sign"
+	}
+	for i := range c.BlockProducerPools {
+		c.BlockProducerPools[i].applyDefaults()
 	}
 	// Match the Midnight server's default for explicitly empty YAML or
 	// environment values.
@@ -2407,4 +2426,56 @@ func applyTokenRegistryHeaderSecretsEnvironment(cfg *Config) error {
 	}
 	cfg.TokenRegistry.HeaderSecrets = headers
 	return nil
+}
+
+// BlockProducerPool is one pool a block producer forges for: its VRF key,
+// its operational certificate, and one KES source -- a local key file, a
+// local KES agent socket, or a remote KES agent. The fields mean what the
+// top-level settings of the same name mean.
+type BlockProducerPool struct {
+	ShelleyVRFKey                   string `yaml:"shelleyVrfKey"`
+	ShelleyKESKey                   string `yaml:"shelleyKesKey"`
+	ShelleyOperationalCertificate   string `yaml:"shelleyOperationalCertificate"`
+	ShelleyKESAgentSocket           string `yaml:"shelleyKesAgentSocket"`
+	ShelleyKESAgentMode             string `yaml:"shelleyKesAgentMode"`
+	ShelleyKESAgentAddress          string `yaml:"shelleyKesAgentAddress"`
+	ShelleyKESAgentClientCertFile   string `yaml:"shelleyKesAgentClientCertFile"`
+	ShelleyKESAgentClientKeyFile    string `yaml:"shelleyKesAgentClientKeyFile"`
+	ShelleyKESAgentServerSPKISHA256 string `yaml:"shelleyKesAgentServerSpkiSha256"`
+	ShelleyKESAgentPlaintext        bool   `yaml:"shelleyKesAgentPlaintext"`
+}
+
+func (p *BlockProducerPool) applyDefaults() {
+	if p.ShelleyKESAgentMode != "" {
+		return
+	}
+	switch {
+	case p.ShelleyKESAgentAddress != "":
+		p.ShelleyKESAgentMode = "sign"
+	case p.ShelleyKESAgentSocket != "":
+		p.ShelleyKESAgentMode = "serve-key"
+	}
+}
+
+// HasSinglePoolKeys reports whether any top-level key setting that
+// BlockProducerPools replaces is set. The KES agent sign timeout and the key
+// watch interval apply to every pool and are not among them.
+func (c *Config) HasSinglePoolKeys() bool {
+	return c.singlePool() != (BlockProducerPool{})
+}
+
+// singlePool is the pool the top-level key settings describe.
+func (c *Config) singlePool() BlockProducerPool {
+	return BlockProducerPool{
+		ShelleyVRFKey:                   c.ShelleyVRFKey,
+		ShelleyKESKey:                   c.ShelleyKESKey,
+		ShelleyOperationalCertificate:   c.ShelleyOperationalCertificate,
+		ShelleyKESAgentSocket:           c.ShelleyKESAgentSocket,
+		ShelleyKESAgentMode:             c.ShelleyKESAgentMode,
+		ShelleyKESAgentAddress:          c.ShelleyKESAgentAddress,
+		ShelleyKESAgentClientCertFile:   c.ShelleyKESAgentClientCertFile,
+		ShelleyKESAgentClientKeyFile:    c.ShelleyKESAgentClientKeyFile,
+		ShelleyKESAgentServerSPKISHA256: c.ShelleyKESAgentServerSPKISHA256,
+		ShelleyKESAgentPlaintext:        c.ShelleyKESAgentPlaintext,
+	}
 }

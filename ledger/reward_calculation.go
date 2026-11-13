@@ -3090,6 +3090,27 @@ func (ls *LedgerState) precomputeStakeRewards(
 	)
 }
 
+// deleteUncreditedRewardOutputs deletes the reward outputs of snapshotEpoch
+// and refuses when that round is credited: its outputs are then account
+// balances, and recomputing them would erase credited rewards.
+func deleteUncreditedRewardOutputs(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	snapshotEpoch uint64,
+) error {
+	credited, err := meta.HasAppliedRewardCreditRound(snapshotEpoch, metaTxn)
+	if err != nil {
+		return err
+	}
+	if credited {
+		return fmt.Errorf(
+			"reward outputs for epoch %d are a credited round",
+			snapshotEpoch,
+		)
+	}
+	return meta.DeleteRewardOutputsForEpoch(snapshotEpoch, metaTxn)
+}
+
 func saveStakeRewardOutputs(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
@@ -3098,20 +3119,9 @@ func saveStakeRewardOutputs(
 	if app == nil {
 		return errors.New("missing stake reward application")
 	}
-	credited, err := meta.HasAppliedRewardCreditRound(
-		app.epochs.snapshot,
-		metaTxn,
-	)
-	if err != nil {
-		return err
-	}
-	if credited {
-		return fmt.Errorf(
-			"reward outputs for epoch %d are a credited round",
-			app.epochs.snapshot,
-		)
-	}
-	if err := meta.DeleteRewardOutputsForEpoch(app.epochs.snapshot, metaTxn); err != nil {
+	if err := deleteUncreditedRewardOutputs(
+		meta, metaTxn, app.epochs.snapshot,
+	); err != nil {
 		return fmt.Errorf(
 			"replace reward outputs for epoch %d: %w",
 			app.epochs.snapshot,

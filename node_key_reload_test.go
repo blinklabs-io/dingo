@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -326,7 +327,7 @@ func TestKeyWatchIsSkippedInServeKeyMode(t *testing.T) {
 	s := newSignModeReloadNode(t, 1)
 	s.config.shelleyKESAgentMode = kesagent.ModeServeKey
 	s.config.shelleyKeyWatchInterval = time.Millisecond
-	s.startKeyReloadLoops([32]byte{})
+	s.startKeyReloadLoops(s.credentialWatchBaseline())
 	t.Cleanup(s.stopKeyReloadLoops)
 	require.Contains(t, s.logs.String(), "ignored in KES agent serve-key mode")
 }
@@ -399,10 +400,7 @@ func TestCredentialFileWatchReloadsOnceAfterAStableChange(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	reloads := make(chan struct{}, 4)
-	go n.credentialFileWatchLoop(
-		ctx,
-		5*time.Millisecond,
-		[]string{file},
+	go n.credentialFileWatchLoop(ctx, 5*time.Millisecond, []string{file},
 		credentialFilesDigest([]string{file}),
 		func() error {
 			reloads <- struct{}{}
@@ -442,10 +440,7 @@ func TestCredentialFileWatchSeesASymlinkSwap(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	reloads := make(chan struct{}, 4)
-	go n.credentialFileWatchLoop(
-		ctx,
-		5*time.Millisecond,
-		[]string{file},
+	go n.credentialFileWatchLoop(ctx, 5*time.Millisecond, []string{file},
 		credentialFilesDigest([]string{file}),
 		func() error {
 			reloads <- struct{}{}
@@ -471,10 +466,7 @@ func TestCredentialFileWatchRetriesAFailedReload(t *testing.T) {
 	t.Cleanup(cancel)
 	reloads := make(chan error, 4)
 	var calls int
-	go n.credentialFileWatchLoop(
-		ctx,
-		5*time.Millisecond,
-		[]string{file},
+	go n.credentialFileWatchLoop(ctx, 5*time.Millisecond, []string{file},
 		credentialFilesDigest([]string{file}),
 		func() error {
 			calls++
@@ -496,6 +488,33 @@ func TestCredentialFileWatchRetriesAFailedReload(t *testing.T) {
 		testutil.RequireReceive(t, reloads, 2*time.Second, "retried reload"))
 	testutil.RequireNoReceive(t, reloads, 50*time.Millisecond,
 		"a successful reload is not repeated")
+}
+
+// TestKeyWatchSeesAChangeRightAfterTheLoopsStart pins that the watch's
+// baseline is the files as they were when the loops started: a rotation that
+// lands before the watch goroutine first runs is a change, not the baseline.
+func TestKeyWatchSeesAChangeRightAfterTheLoopsStart(t *testing.T) {
+	t.Parallel()
+	s := newSignModeReloadNode(t, 1)
+	start := time.Now().Add(-time.Minute)
+	s.ledgerState = newStartupCleanupProducerNodeWithGenesisStart(
+		t,
+		&start,
+	).ledgerState
+	s.config.shelleyKeyWatchInterval = time.Millisecond
+	s.startKeyReloadLoops(s.credentialWatchBaseline())
+	t.Cleanup(s.stopKeyReloadLoops)
+
+	s.rotateTo(t, 2, nil)
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(
+			s.logs.String(),
+			"block producer credentials reloaded",
+		)
+	}, 5*time.Second, 10*time.Millisecond,
+		"a change made right after the loops start must reload")
+	s.requireLiveCounter(t, 2)
 }
 
 func TestCredentialFileWatchSeesAChangeMadeBeforeItsFirstPoll(t *testing.T) {

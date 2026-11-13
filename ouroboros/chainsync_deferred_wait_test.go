@@ -509,7 +509,7 @@ func TestChainsyncClientRollForwardReleasesDeferredWaitOnReadmissionReturn(
 func TestChainsyncDeferredVerificationEndsOnRealTransportClose(t *testing.T) {
 	t.Parallel()
 	f := newPatienceRollForwardFixture(t, true)
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	settle := newSettleSignal()
 	f.o.config.ChainsyncHeaderVerificationSettled = settle.current
 	f.o.catchUpBandWaitTimeout = time.Minute
