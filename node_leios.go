@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -327,6 +328,11 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		KeyProvider: &leiosKeyProviderAdapter{
 			ledgerState: n.ledgerState,
 		},
+		KeyProofDomain: cardano.DijkstraPoolBlsProofDomain(
+			n.config.cardanoNodeConfig,
+			n.config.network,
+			n.config.networkMagic,
+		),
 		EpochProvider: &epochInfoAdapter{
 			ledgerState: n.ledgerState,
 		},
