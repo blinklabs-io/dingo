@@ -436,7 +436,9 @@ func selectLedgerStateSnapshot(
 
 // importLedgerState finds, parses, and imports the ledger state
 // from the extracted Mithril snapshot. It searches the ancillary directory
-// for the state file.
+// for the state file. Each beforeImport hook runs on the selected state, after
+// it is verified and before the import writes anything; a hook error stops the
+// import.
 func importLedgerState(
 	ctx context.Context,
 	db *database.Database,
@@ -446,6 +448,7 @@ func importLedgerState(
 	reconcile bool,
 	maxTrustedSlot uint64,
 	onLedger func(ledgerstate.ImportProgress),
+	beforeImport ...func(*preparedLedgerStateImport) error,
 ) (
 	ledgerStateSlot uint64,
 	ledgerStateHash []byte,
@@ -462,6 +465,11 @@ func importLedgerState(
 		return 0, nil, false, err
 	}
 	defer prepared.Close()
+	for _, hook := range beforeImport {
+		if err := hook(prepared); err != nil {
+			return 0, nil, false, err
+		}
+	}
 	return importPreparedLedgerState(
 		ctx, db, logger, nodeCfg, result, prepared, reconcile, onLedger,
 	)
@@ -625,10 +633,7 @@ func importPreparedLedgerState(
 	// Build import key for resume tracking. A catch-up reconcile must run the
 	// full import pass (so its snapshot key set is complete), so resume is
 	// disabled by leaving the import key empty.
-	importKey := ""
-	if !reconcile && result.Snapshot != nil && result.Snapshot.Digest != "" {
-		importKey = ledgerImportKey(result.Snapshot.Digest, state.Tip.Slot)
-	}
+	importKey := importCheckpointKey(reconcile, result, state.Tip.Slot)
 
 	// Import the ledger state
 	if err := ledgerstate.ImportLedgerState(
@@ -684,6 +689,19 @@ func importPreparedLedgerState(
 		return 0, nil, false, fmt.Errorf("importing ledger state: %w", err)
 	}
 	return state.Tip.Slot, state.Tip.BlockHash, beyondCertifiedTip, nil
+}
+
+// importCheckpointKey is the checkpoint key an import of the state at slot
+// resumes from, empty when the import does not resume.
+func importCheckpointKey(
+	reconcile bool,
+	result *BootstrapResult,
+	slot uint64,
+) string {
+	if reconcile || result.Snapshot == nil || result.Snapshot.Digest == "" {
+		return ""
+	}
+	return ledgerImportKey(result.Snapshot.Digest, slot)
 }
 
 // ledgerImportKey is the ledger-state import checkpoint key for an

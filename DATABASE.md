@@ -3075,8 +3075,29 @@ or before the anchor, so it only lowers `added_slot`. A row recovered from the
 block store already carries that slot. Every rollback entry point keeps its
 deletion slot at or above the anchor -- `ledger.LedgerState.rollback` refuses
 a target below `mithril_ledger_slot`, and `Database.TruncateAfterSlot` floors
-the slot it deletes at -- so an imported output, linked or not, and its
-assets survive a rollback of a block that replayed or re-confirmed it.
+the slot it applies to UTxOs, transactions and spends -- so an imported output,
+linked or not, and its assets survive a rollback of a block that replayed or
+re-confirmed it. `TruncateAfterSlot` applies the target slot itself to its
+other deletions, governance proposals included, so a target below the anchor
+deletes imported proposals above it.
+
+The Mithril sync cleanup of a rejected stored tail
+(`deleteBlobBlocksAboveSlotExcept`) is a rollback entry point of another kind:
+it cuts UTxOs, transactions, spends and governance proposals at the immutable
+tip's slot, below the imported rows' slots, and it distinguishes rows only by
+slot. The rows it must remove are those the rejected blocks' processing wrote
+in `(immutable tip, ledger state slot]`, which a slot rule cannot tell from the
+imported rows there (a producer's hydrated `added_slot`). So it never runs
+after an import has written rows: `Sync` judges the stored blocks against the
+selected ledger state (`checkStoredGap`, which reads blocks only) and cleans
+between the immutable copy and the import (`cleanRejectedStoredGapBeforeImport`),
+or before the copy in reward-state repair. A catch-up or repair import
+reconciles every phase and never reads a checkpoint, so it rewrites whatever
+the cleanup removed. A bootstrap resume skips its UTxO phase once the import
+checkpoint for its key records it complete; there the cleanup is refused with
+an error and nothing is deleted. A rejection found after the import is an
+error and deletes nothing. The cleanup cuts blocks, votes, UTxOs, transactions,
+spends and proposals at the same raw slot.
 
 `database.Config` carries the gate values a bare database open can supply,
 independently of any parsed cardano config: `NetworkMagic`, `StartEra`,
