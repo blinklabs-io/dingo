@@ -8895,9 +8895,12 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 // it since genesis.
 //
 // Checking each credential against the existing (including soft-deleted) set
-// before inserting makes this safe to call on every startup: a credential a
-// later UpdateCommittee has since re-elected or removed already has a row, so
-// its real history is left alone instead of being reverted to genesis state.
+// before inserting makes this safe for a chain replayed from genesis: a
+// credential a later UpdateCommittee has since re-elected or removed already
+// has a row, so its real history is left alone instead of being reverted to
+// genesis state. A completed Mithril import is different. Its committee is an
+// authoritative current-state snapshot, so an absent genesis credential means
+// it is not seated and must not be inferred from missing local history.
 func (ls *LedgerState) ensureGenesisCommittee(
 	ctx context.Context,
 	txn *database.Txn,
@@ -8914,6 +8917,16 @@ func (ls *LedgerState) ensureGenesisCommittee(
 		return nil
 	}
 	if len(conwayGenesis.Committee.Members) == 0 {
+		return nil
+	}
+	mithrilBoundary, err := ls.db.MithrilTrustBoundarySlotStrict(txn)
+	if err != nil {
+		return fmt.Errorf(
+			"read Mithril boundary before seeding genesis committee: %w",
+			err,
+		)
+	}
+	if mithrilBoundary > 0 {
 		return nil
 	}
 	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(ctx, txn)

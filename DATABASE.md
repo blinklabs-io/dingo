@@ -713,8 +713,11 @@ authoritative. An explicitly empty genesis committee is also authoritative,
 without requiring a sentinel row. Certificate and voter membership checks
 remain enforced in both empty states. No rows without an empty genesis
 declaration do not establish authority; validation cannot infer non-membership
-from missing state. A failed database lookup still fails closed, even with an
-empty genesis committee.
+from missing state. A completed Mithril import is authoritative for the
+committee at its `mithril_ledger_slot`: startup does not seed a genesis member
+missing from that imported current-state set, because the member may have been
+removed before the snapshot. A failed database lookup still fails closed, even
+with an empty genesis committee.
 
 Migration `v9` (`committee-term-start-presence`, integer version 9) adds
 `committee_member.term_start_slot_set`. Existing rows are marked present

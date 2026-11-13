@@ -19020,6 +19020,77 @@ func TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase(t *testing.T) {
 	}
 }
 
+// TestCreateGenesisBlockPreservesImportedCommittee proves startup treats a
+// completed Mithril snapshot's committee as authoritative. A genesis member
+// absent from that snapshot was removed before the anchor and must not be
+// seated again merely because no local history row exists for it.
+func TestCreateGenesisBlockPreservesImportedCommittee(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+	require.NoError(t, err)
+	require.NoError(t, db.SetGenesisCbor(0, genesisHash[:], []byte{0x80}, nil))
+
+	const anchorSlot = 1_000_000
+	ls.currentTip.Point = ocommon.NewPoint(
+		anchorSlot,
+		bytes.Repeat([]byte{0xa5}, lcommon.Blake2b256Size),
+	)
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		strconv.FormatUint(anchorSlot, 10),
+		nil,
+	))
+	require.NoError(t, ls.loadMithrilTrustBoundary())
+
+	retainedKey, err := hex.DecodeString(musashiGenesisCommitteeColdKeys[0])
+	require.NoError(t, err)
+	require.NoError(t, db.SetCommitteeMembers(
+		context.Background(),
+		[]*models.CommitteeMember{{
+			ColdCredentialTag: lcommon.CredentialTypeAddrKeyHash,
+			ColdCredHash:      retainedKey,
+			ExpiresEpoch:      400,
+			TermStartSlot:     anchorSlot,
+			TermStartSlotSet:  true,
+			AddedSlot:         anchorSlot,
+		}},
+		nil,
+	))
+
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
+	require.Equal(t, 1, committeeMemberRowCount(t, db))
+
+	ls.currentEpoch = models.Epoch{EpochId: 300, StartSlot: anchorSlot}
+	ls.currentPParams = &conway.ConwayProtocolParameters{}
+	ls.publishSnapshotsLocked()
+	lv := ls.NewView(nil)
+	retained, err := lv.CommitteeCredentialMember(lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(retainedKey),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, retained)
+	require.Equal(t, uint64(400), retained.ExpiryEpoch)
+
+	for _, coldKeyHex := range musashiGenesisCommitteeColdKeys[1:] {
+		removedKey, err := hex.DecodeString(coldKeyHex)
+		require.NoError(t, err)
+		removed, err := lv.CommitteeCredentialMember(lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(removedKey),
+		})
+		require.NoError(t, err)
+		require.Nil(
+			t,
+			removed,
+			"removed genesis member %s was re-seated",
+			coldKeyHex,
+		)
+	}
+}
+
 // TestCreateGenesisBlockCommitteeReplayIdempotent proves re-running genesis
 // initialization over a store that already holds the genesis committee
 // leaves a single row per member rather than a duplicate soft-delete/insert
