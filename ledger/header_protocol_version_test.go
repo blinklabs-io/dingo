@@ -782,8 +782,7 @@ func TestChainSelectionEnforcesSupportedProtocolVersion(
 		ouroboros.ConnectionId{},
 		supported,
 	)
-	var unsupportedVersion *UnsupportedHeaderProtocolVersionError
-	require.NotErrorAs(t, supportedErr, &unsupportedVersion)
+	require.ErrorIs(t, supportedErr, errHeaderVerificationContextUnavailable)
 
 	unsupported := &conway.ConwayBlockHeader{
 		BabbageBlockHeader: *babbageHeaderWithMajor(
