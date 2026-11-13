@@ -143,6 +143,37 @@ func TestLeiosPersistenceGCDefaultWaitsForImmutablePoint(t *testing.T) {
 	requireLeiosEBPersisted(t, o, record, true)
 }
 
+// A configured window is capped by the immutable point, so it prunes nothing
+// while the ledger reports none: an uncertified endorser block there can still
+// be certified, and a pruned one is not recoverable.
+func TestLeiosPersistenceGCConfiguredWindowWaitsForImmutablePoint(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	o.leiosImmutableSlot = func(context.Context) (uint64, bool, error) {
+		return 0, false, nil
+	}
+	db := o.leiosDatabase()
+	old := leiosRetentionRecord{150, leiosRetentionHash(1)}
+	newest := leiosRetentionRecord{300, leiosRetentionHash(2)}
+	for _, record := range []leiosRetentionRecord{old, newest} {
+		require.NoError(t, db.SetLeiosEB(
+			record.slot, record.hash, []byte("manifest"), nil,
+		))
+	}
+
+	o.runLeiosPersistenceGC(context.Background(), nil)
+
+	requireLeiosEBPersisted(t, o, old, true)
+	requireLeiosEBPersisted(t, o, newest, true)
+	o.leiosPersistStoreMu.Lock()
+	defer o.leiosPersistStoreMu.Unlock()
+	require.Zero(t, o.leiosPersistPruneBeforeSlot)
+}
+
 // The writer drops an uncertified endorser block behind the frontier but
 // still persists a certified one, which is re-fetched for replay.
 func TestLeiosPersistenceWriterKeepsCertifiedBehindFrontier(t *testing.T) {

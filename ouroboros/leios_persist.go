@@ -485,7 +485,11 @@ func (o *Ouroboros) runLeiosPersistenceGC(
 		return
 	}
 	// An uncertified endorser block at or after the immutable point can still
-	// be certified, so no retention setting may prune past it.
+	// be certified, so no retention setting prunes past it, and nothing is
+	// pruned while the ledger reports none. Below the immutable point the
+	// certifying ranking block has applied and written the marker, so the
+	// writer may drop an uncertified job there. A failed lookup, or no ledger
+	// at all, leaves the configured window, at least the stability window.
 	var (
 		immutableSlot  uint64
 		immutableKnown bool
@@ -493,18 +497,21 @@ func (o *Ouroboros) runLeiosPersistenceGC(
 	if o.leiosImmutableSlot != nil {
 		var err error
 		immutableSlot, immutableKnown, err = o.leiosImmutableSlot(ctx)
-		if err != nil {
+		switch {
+		case err != nil:
 			if !errors.Is(err, context.Canceled) {
 				o.config.Logger.Warn(
 					"failed to resolve immutable point for leios pruning",
 					"error", err,
 				)
 			}
-			// The configured window is the fallback; the default has none.
+			// The default has no window to fall back on.
 			if retention == 0 {
 				return
 			}
 			immutableSlot, immutableKnown = 0, false
+		case !immutableKnown:
+			return
 		}
 	}
 	var candidateBeforeSlot uint64
