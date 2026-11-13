@@ -42,22 +42,9 @@ import (
 )
 
 const (
-	// DefaultMaxRequestBody bounds each incoming Connect message before it is
-	// decoded or authenticated. Connect applies this per-message limit to both
-	// compressed wire bytes and the decompressed message.
-	DefaultMaxRequestBody = 1 << 20 // 1 MiB
-	// DefaultMaxResponseBody bounds each outgoing Connect message without
-	// imposing a whole-stream limit on StreamOperationProgress.
-	DefaultMaxResponseBody = 1 << 20 // 1 MiB
-	// DefaultMaxFetchBlockRefs bounds the storage/signing work and response
-	// growth driven by one anonymous ArchiveService request.
+	// DefaultMaxFetchBlockRefs sizes the lookup-rate buckets so that a batch
+	// of this many references fits whatever the configured rate.
 	DefaultMaxFetchBlockRefs = 100
-	// DefaultMaxArchiveConcurrentFetches is the default for
-	// BarkConfig.ArchiveMaxConcurrentFetches.
-	DefaultMaxArchiveConcurrentFetches = 16
-	// DefaultRequestReadTimeout bounds request headers and bodies while leaving
-	// response writes unbounded for long-lived server streams.
-	DefaultRequestReadTimeout = 60 * time.Second
 )
 
 type Bark struct {
@@ -85,40 +72,6 @@ type Bark struct {
 	// of startServer so a test can hold Start inside its TLS/listen
 	// preflight while another goroutine races it.
 	beforePreflight func()
-}
-
-type responseWriteDeadlineSetter func(time.Time) error
-
-type responseWriteDeadlineContextKey struct{}
-
-func withResponseWriteDeadlineSetter(
-	ctx context.Context,
-	setter responseWriteDeadlineSetter,
-) context.Context {
-	return context.WithValue(
-		ctx,
-		responseWriteDeadlineContextKey{},
-		setter,
-	)
-}
-
-func responseWriteDeadlineSetterFromContext(
-	ctx context.Context,
-) (responseWriteDeadlineSetter, bool) {
-	value := ctx.Value(responseWriteDeadlineContextKey{})
-	setter, ok := value.(responseWriteDeadlineSetter)
-	return setter, ok
-}
-
-func responseControllerContextMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		controller := http.NewResponseController(w)
-		ctx := withResponseWriteDeadlineSetter(
-			r.Context(),
-			controller.SetWriteDeadline,
-		)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
 }
 
 // lifecycleMutex keeps preflight and publication atomic while allowing Stop
@@ -216,12 +169,10 @@ type BarkConfig struct {
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
-	// ArchiveMaxConcurrentFetches bounds how many ArchiveService.FetchBlock
-	// requests run at once; a request over the limit is refused immediately
-	// rather than queued. ArchiveService takes no client credentials, so this
-	// and DefaultMaxFetchBlockRefs are what bound the work anyone who can
-	// reach the listener can cause. Zero selects
-	// DefaultMaxArchiveConcurrentFetches; a negative value is invalid.
+	// ArchiveMaxConcurrentFetches optionally bounds how many
+	// ArchiveService.FetchBlock requests run at once; a request over the
+	// limit is refused immediately rather than queued. Zero, the default,
+	// is unlimited; a negative value is invalid.
 	ArchiveMaxConcurrentFetches int
 	// ArchiveLookupsPerSecond is the sustained rate of block lookups, each
 	// of which can cost cloud storage requests, that ArchiveService serves
@@ -229,14 +180,13 @@ type BarkConfig struct {
 	// lookup; one by height alone also pays for the index search it runs
 	// (see archiveHeightSearchLookups). A FetchBlock whose references do not
 	// fit the remaining budget is refused whole, so the bucket is never
-	// smaller than one maximum-size batch of hash or slot references. Zero
-	// selects DefaultArchiveLookupsPerSecond; a negative value is invalid.
+	// smaller than DefaultMaxFetchBlockRefs hash or slot references. Zero,
+	// the default, is unlimited; a negative value is invalid.
 	ArchiveLookupsPerSecond int
 	// ArchiveCallerLookupsPerSecond is the same rate for one caller, keyed
 	// by IPv4 address or IPv6 /64, so a single client cannot spend the whole
 	// global budget. Callers behind one proxy share an address and therefore
-	// an allowance. Zero
-	// selects DefaultArchiveCallerLookupsPerSecond; a negative value is
+	// an allowance. Zero, the default, is unlimited; a negative value is
 	// invalid.
 	ArchiveCallerLookupsPerSecond int
 }
@@ -347,34 +297,26 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 			"bark: ArchiveMaxConcurrentFetches must not be negative",
 		)
 	}
-	if cfg.ArchiveMaxConcurrentFetches == 0 {
-		cfg.ArchiveMaxConcurrentFetches = DefaultMaxArchiveConcurrentFetches
-	}
 	if cfg.ArchiveLookupsPerSecond < 0 {
 		return nil, errors.New(
 			"bark: ArchiveLookupsPerSecond must not be negative",
 		)
-	}
-	if cfg.ArchiveLookupsPerSecond == 0 {
-		cfg.ArchiveLookupsPerSecond = DefaultArchiveLookupsPerSecond
 	}
 	if cfg.ArchiveCallerLookupsPerSecond < 0 {
 		return nil, errors.New(
 			"bark: ArchiveCallerLookupsPerSecond must not be negative",
 		)
 	}
-	if cfg.ArchiveCallerLookupsPerSecond == 0 {
-		cfg.ArchiveCallerLookupsPerSecond = DefaultArchiveCallerLookupsPerSecond
-	}
 	if cfg.Host == "" {
 		cfg.Host = "0.0.0.0"
 	}
+	var archiveSlots chan struct{}
+	if cfg.ArchiveMaxConcurrentFetches > 0 {
+		archiveSlots = make(chan struct{}, cfg.ArchiveMaxConcurrentFetches)
+	}
 	return &Bark{
-		config: cfg,
-		archiveSlots: make(
-			chan struct{},
-			cfg.ArchiveMaxConcurrentFetches,
-		),
+		config:       cfg,
+		archiveSlots: archiveSlots,
 		archiveBudget: newArchiveBudget(
 			cfg.ArchiveLookupsPerSecond,
 			cfg.ArchiveCallerLookupsPerSecond,
@@ -399,8 +341,6 @@ func (b *Bark) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	commonHandlerOptions := connect.WithOptions(
 		connect.WithCompressMinBytes(1024),
-		connect.WithReadMaxBytes(DefaultMaxRequestBody),
-		connect.WithSendMaxBytes(DefaultMaxResponseBody),
 	)
 
 	serviceNames := []string{archiveconnect.ArchiveServiceName}
@@ -451,14 +391,12 @@ func (b *Bark) Start(ctx context.Context) error {
 		),
 	)
 
-	handler := requestClientMiddleware(responseControllerContextMiddleware(
-		httpcors.Handler(
-			mux,
-			httpcors.Config{
-				AllowedOrigins: b.config.CORSAllowedOrigins,
-			},
-		),
-	))
+	handler := httpcors.Handler(
+		mux,
+		httpcors.Config{
+			AllowedOrigins: b.config.CORSAllowedOrigins,
+		},
+	)
 	listenAddr := barkListenAddr(b.config.Host, b.config.Port)
 	var server *http.Server
 	if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != "" {
@@ -467,23 +405,17 @@ func (b *Bark) Start(ctx context.Context) error {
 		)
 
 		server = &http.Server{
-			Addr:              listenAddr,
-			Handler:           handler,
-			ReadHeaderTimeout: 60 * time.Second,
-			ReadTimeout:       DefaultRequestReadTimeout,
-			IdleTimeout:       120 * time.Second,
+			Addr:    listenAddr,
+			Handler: handler,
 		}
 	} else {
 		b.config.Logger.Info(
 			"starting bark gRPC listener on " + listenAddr,
 		)
 		server = &http.Server{
-			Addr:              listenAddr,
-			Handler:           handler,
-			Protocols:         unencryptedHTTP2Protocols(),
-			ReadHeaderTimeout: 60 * time.Second,
-			ReadTimeout:       DefaultRequestReadTimeout,
-			IdleTimeout:       120 * time.Second,
+			Addr:      listenAddr,
+			Handler:   handler,
+			Protocols: unencryptedHTTP2Protocols(),
 		}
 	}
 	if err := b.startServer(server); err != nil {

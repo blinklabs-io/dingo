@@ -21,9 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"path"
 	"regexp"
@@ -45,31 +43,9 @@ var (
 	)
 )
 
-// publicRequestLimit bounds concurrent artifact reads. One v2 bootstrap holds
-// immutableDownloadWorkers archive downloads and the ancillary download at
-// once, so the bound admits two of them without shedding a request.
-const publicRequestLimit = 2 * (immutableDownloadWorkers + 1)
-
-// signatureRequestLimit bounds signature verification independently from
-// artifact reads so downloads cannot starve certificate production.
-const signatureRequestLimit = 4
-
-// Signature body reads have their own wider bound. A client may occupy at
-// most half of it, leaving capacity for another client while incomplete
-// bodies wait for the read deadline.
 const (
-	signatureRequestReadLimit      = 2 * signatureRequestLimit
-	signatureRequestReadsPerClient = signatureRequestLimit
-)
-
-const (
-	certificatesPrefix            = "certificates"
-	publicRequestReadTimeout      = 15 * time.Second
-	artifactResponseWriteTimeout  = 15 * time.Second
-	snapshotCatalogTTL            = 30 * time.Second
-	artifactDownloadsPerClient    = immutableDownloadWorkers + 1
-	artifactMinimumBytesPerSecond = 64 << 10
-	artifactTransferGrace         = 30 * time.Second
+	certificatesPrefix = "certificates"
+	snapshotCatalogTTL = 30 * time.Second
 )
 
 type snapshotCatalog struct {
@@ -155,60 +131,6 @@ func (c *snapshotCatalog) invalidate() {
 	c.expires = time.Time{}
 	c.valid = false
 	c.mu.Unlock()
-}
-
-type clientAdmission struct {
-	mu        sync.Mutex
-	active    map[string]int
-	perClient int
-}
-
-func newClientAdmission(perClient int) *clientAdmission {
-	return &clientAdmission{
-		active:    make(map[string]int),
-		perClient: perClient,
-	}
-}
-
-// requestClientKey identifies the client a request counts against. IPv6
-// clients are keyed by their /64, since a single host usually controls one
-// and can rotate addresses within it; an IPv4-mapped address counts as its
-// IPv4 address.
-func requestClientKey(remoteAddr string) string {
-	host := remoteAddr
-	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
-		host = h
-	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return host
-	}
-	addr = addr.Unmap().WithZone("")
-	if addr.Is4() {
-		return addr.String()
-	}
-	prefix, err := addr.Prefix(64)
-	if err != nil {
-		return addr.String()
-	}
-	return prefix.String()
-}
-
-func (a *clientAdmission) acquire(remoteAddr string) (func(), bool) {
-	client := requestClientKey(remoteAddr)
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.active[client] >= a.perClient {
-		return nil, false
-	}
-	a.active[client]++
-	return sync.OnceFunc(func() {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		if a.active[client]--; a.active[client] == 0 {
-			delete(a.active, client)
-		}
-	}), true
 }
 
 // ServerConfig configures the snapshot artifact HTTP handler.
@@ -327,35 +249,20 @@ func readSnapshot(
 }
 
 type snapshotServer struct {
-	cfg                  ServerConfig
-	catalog              *snapshotCatalog
-	publicBaseURL        *url.URL
-	publicBaseURLErr     error
-	publicRequests       chan struct{}
-	signatureReads       chan struct{}
-	signatureReadClients *clientAdmission
-	signatureRequests    chan struct{}
-	artifactDownloads    *clientAdmission
-	requestReadTimeout   time.Duration
-	responseWriteTimeout time.Duration
+	cfg              ServerConfig
+	catalog          *snapshotCatalog
+	publicBaseURL    *url.URL
+	publicBaseURLErr error
 }
 
 // NewServerHandler returns the handler serving the Mithril aggregator
 // Cardano database artifact API over cfg.Store, plus the archive downloads
 // the artifact locations point at.
 func NewServerHandler(cfg ServerConfig) http.Handler {
-	return newServerHandler(
-		cfg,
-		publicRequestLimit,
-		artifactResponseWriteTimeout,
-	)
+	return newServerHandler(cfg)
 }
 
-func newServerHandler(
-	cfg ServerConfig,
-	requestLimit int,
-	responseWriteTimeout time.Duration,
-) http.Handler {
+func newServerHandler(cfg ServerConfig) http.Handler {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -365,17 +272,10 @@ func newServerHandler(
 		cfg.Aggregator.watchCatalog(catalog)
 	}
 	s := &snapshotServer{
-		cfg:                  cfg,
-		catalog:              catalog,
-		publicBaseURL:        publicBaseURL,
-		publicBaseURLErr:     publicBaseURLErr,
-		publicRequests:       make(chan struct{}, requestLimit),
-		signatureReads:       make(chan struct{}, signatureRequestReadLimit),
-		signatureReadClients: newClientAdmission(signatureRequestReadsPerClient),
-		signatureRequests:    make(chan struct{}, signatureRequestLimit),
-		artifactDownloads:    newClientAdmission(artifactDownloadsPerClient),
-		requestReadTimeout:   publicRequestReadTimeout,
-		responseWriteTimeout: responseWriteTimeout,
+		cfg:              cfg,
+		catalog:          catalog,
+		publicBaseURL:    publicBaseURL,
+		publicBaseURLErr: publicBaseURLErr,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(
@@ -388,7 +288,7 @@ func newServerHandler(
 	)
 	mux.HandleFunc(
 		"GET /download/{hash}/{name}",
-		s.withPublicRequest(s.withArtifactDownload(s.handleDownload)),
+		s.withPublicRequest(s.handleDownload),
 	)
 	mux.HandleFunc(
 		"GET /certificate/{hash}",
@@ -404,34 +304,10 @@ func newServerHandler(
 	return mux
 }
 
-func (s *snapshotServer) withArtifactDownload(
-	next http.HandlerFunc,
-) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		release, ok := s.artifactDownloads.acquire(r.RemoteAddr)
-		if !ok {
-			w.Header().Set("Retry-After", "1")
-			http.Error(
-				w,
-				"client download limit reached",
-				http.StatusTooManyRequests,
-			)
-			return
-		}
-		defer release()
-		if bounded, ok := w.(*progressResponseWriter); ok {
-			bounded.minimumBytesPerSecond = artifactMinimumBytesPerSecond
-			bounded.transferStarted = time.Now()
-			bounded.transferGrace = artifactTransferGrace
-		}
-		next(w, r)
-	}
-}
-
 func (s *snapshotServer) withPublicRequest(
 	next http.HandlerFunc,
 ) http.HandlerFunc {
-	return s.withRequestAdmission(s.publicRequests, next)
+	return next
 }
 
 type signatureRequestHandler func(
@@ -444,189 +320,12 @@ func (s *snapshotServer) withSignatureRequest(
 	next signatureRequestHandler,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		controller := s.armRequestReadDeadline(w, r)
-		bounded := s.boundedResponseWriter(w, controller)
-		clientRelease, ok := s.signatureReadClients.acquire(r.RemoteAddr)
-		if !ok {
-			s.rejectUnreadRequest(
-				bounded, controller,
-				"client signature read limit reached",
-				http.StatusTooManyRequests,
-			)
-			return
-		}
-		readRelease, ok := tryAdmitRequest(s.signatureReads)
-		if !ok {
-			clientRelease()
-			s.rejectUnreadRequest(
-				bounded, controller,
-				"server busy",
-				http.StatusServiceUnavailable,
-			)
-			return
-		}
 		var req registerSignatureRequest
-		decodeErr := func() error {
-			defer readRelease()
-			defer clientRelease()
-			err := decodeJSONBody(bounded, r, &req)
-			if err != nil {
-				s.disposeUnreadRequest(bounded, controller)
-			}
-			return err
-		}()
-		if decodeErr != nil {
-			writeAPIError(bounded, decodeErr)
+		if err := decodeJSONBody(r, &req); err != nil {
+			writeAPIError(w, err)
 			return
 		}
-
-		release, ok := admitRequest(bounded, s.signatureRequests)
-		if !ok {
-			return
-		}
-		defer release()
-		next(bounded, r, req)
-	}
-}
-
-func (s *snapshotServer) withRequestAdmission(
-	slots chan struct{},
-	next http.HandlerFunc,
-) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		controller := s.armRequestReadDeadline(w, r)
-		release, ok := admitRequest(w, slots)
-		if !ok {
-			return
-		}
-		defer release()
-		bounded := s.boundedResponseWriter(w, controller)
-		next(bounded, r)
-	}
-}
-
-func (s *snapshotServer) armRequestReadDeadline(
-	w http.ResponseWriter,
-	r *http.Request,
-) *http.ResponseController {
-	controller := http.NewResponseController(w)
-	if r.Method == http.MethodPost {
-		if err := controller.SetReadDeadline(
-			time.Now().Add(s.requestReadTimeout),
-		); err != nil && !errors.Is(err, http.ErrNotSupported) {
-			s.cfg.Logger.Debug(
-				"could not bound public request body read",
-				"error", err,
-			)
-		}
-	}
-	return controller
-}
-
-func (s *snapshotServer) boundedResponseWriter(
-	w http.ResponseWriter,
-	controller *http.ResponseController,
-) *progressResponseWriter {
-	return &progressResponseWriter{
-		ResponseWriter: w,
-		controller:     controller,
-		timeout:        s.responseWriteTimeout,
-		logger:         s.cfg.Logger,
-	}
-}
-
-func (s *snapshotServer) rejectUnreadRequest(
-	w http.ResponseWriter,
-	controller *http.ResponseController,
-	message string,
-	status int,
-) {
-	s.disposeUnreadRequest(w, controller)
-	w.Header().Set("Retry-After", "1")
-	http.Error(w, message, status)
-}
-
-func (s *snapshotServer) disposeUnreadRequest(
-	w http.ResponseWriter,
-	controller *http.ResponseController,
-) {
-	w.Header().Set("Connection", "close")
-	if err := controller.SetReadDeadline(time.Now()); err != nil &&
-		!errors.Is(err, http.ErrNotSupported) {
-		s.cfg.Logger.Debug(
-			"could not stop rejected request body read",
-			"error", err,
-		)
-	}
-}
-
-func admitRequest(
-	w http.ResponseWriter,
-	slots chan struct{},
-) (func(), bool) {
-	release, ok := tryAdmitRequest(slots)
-	if !ok {
-		w.Header().Set("Retry-After", "1")
-		http.Error(w, "server busy", http.StatusServiceUnavailable)
-	}
-	return release, ok
-}
-
-func tryAdmitRequest(slots chan struct{}) (func(), bool) {
-	select {
-	case slots <- struct{}{}:
-		return func() { <-slots }, true
-	default:
-		return nil, false
-	}
-}
-
-// progressResponseWriter refreshes the connection write deadline before each
-// body write. It deliberately does not expose io.ReaderFrom: ServeContent must
-// pass each copied chunk through Write so steady large transfers keep making
-// progress without receiving an absolute response deadline. The last deadline
-// remains armed while net/http flushes its response buffer after the handler
-// returns; net/http clears it before reusing the connection.
-type progressResponseWriter struct {
-	http.ResponseWriter
-	controller            *http.ResponseController
-	timeout               time.Duration
-	logger                *slog.Logger
-	minimumBytesPerSecond int64
-	transferStarted       time.Time
-	transferGrace         time.Duration
-	written               int64
-}
-
-func (w *progressResponseWriter) Unwrap() http.ResponseWriter {
-	return w.ResponseWriter
-}
-
-func (w *progressResponseWriter) Write(p []byte) (int, error) {
-	deadline := time.Now().Add(w.timeout)
-	if w.minimumBytesPerSecond > 0 {
-		total := w.written + int64(len(p))
-		allowed := time.Duration(total/w.minimumBytesPerSecond)*time.Second +
-			time.Duration(total%w.minimumBytesPerSecond)*time.Second/
-				time.Duration(w.minimumBytesPerSecond)
-		transferDeadline := w.transferStarted.Add(w.transferGrace + allowed)
-		if transferDeadline.Before(deadline) {
-			deadline = transferDeadline
-		}
-	}
-	w.setDeadline(deadline)
-	n, err := w.ResponseWriter.Write(p)
-	w.written += int64(n)
-	return n, err
-}
-
-func (w *progressResponseWriter) setDeadline(deadline time.Time) {
-	if err := w.controller.SetWriteDeadline(deadline); err != nil &&
-		!errors.Is(err, http.ErrNotSupported) {
-		w.logger.Debug(
-			"could not bound snapshot response write",
-			"error", err,
-		)
+		next(w, r, req)
 	}
 }
 

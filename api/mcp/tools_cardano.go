@@ -60,7 +60,7 @@ type TransactionParams struct {
 type UTxOsParams struct {
 	AddressOrCredential string `json:"address_or_credential" jsonschema:"Bech32 Cardano address or hex payment credential"`
 	Limit               int    `json:"limit,omitempty"       jsonschema:"Maximum UTxOs to return (default 20, max 100)"`
-	Offset              int    `json:"offset,omitempty"      jsonschema:"Offset for raw-credential searches only, max 10000; full addresses use cursor"`
+	Offset              int    `json:"offset,omitempty"      jsonschema:"Offset for raw-credential searches only; full addresses use cursor"`
 	Cursor              string `json:"cursor,omitempty"      jsonschema:"Continuation cursor from a full-address query"`
 }
 
@@ -90,7 +90,7 @@ type UtxosByAssetParams struct {
 	PolicyID  string `json:"policy_id"            jsonschema:"Hex-encoded 28-byte (56 hex characters) minting policy ID"`
 	AssetName string `json:"asset_name,omitempty" jsonschema:"Asset name as hex or literal UTF-8; hex takes precedence, max 32 bytes, omitted means any name"`
 	Limit     int    `json:"limit,omitempty"      jsonschema:"Maximum UTxOs to return (default 50, max 200)"`
-	Offset    int    `json:"offset,omitempty"     jsonschema:"Pagination offset (default 0, max 10000)"`
+	Offset    int    `json:"offset,omitempty"     jsonschema:"Pagination offset (default 0)"`
 }
 
 var errAssetInfoIncomplete = errors.New("asset info row cap exceeded")
@@ -560,7 +560,7 @@ func registerCardanoTools(
 				"cursor pagination requires a full address",
 			)
 		}
-		if offset > limits.maxOffset {
+		if limits.maxOffset > 0 && offset > limits.maxOffset {
 			return nil, nil, errOffsetTooLarge
 		}
 		if err := limits.admit(); err != nil {
@@ -1167,7 +1167,7 @@ func registerCardanoTools(
 			limit = 200
 		}
 		offset := max(input.Offset, 0)
-		if offset > limits.maxOffset {
+		if limits.maxOffset > 0 && offset > limits.maxOffset {
 			return nil, nil, errOffsetTooLarge
 		}
 		if err := limits.admit(); err != nil {
@@ -1403,14 +1403,14 @@ func registerCardanoTools(
 			circArgs = []any{
 				policyBytes,
 				rawName,
-				limits.maxAssetRows + 1,
+				limits.assetScanLimit(),
 			}
 		} else {
 			circQuery = `SELECT a.amount, u.id
 						 FROM asset a
 						 JOIN utxo u ON a.utxo_id = u.id
 						 WHERE a.policy_id = ? AND u.deleted_slot = 0 LIMIT ?`
-			circArgs = []any{policyBytes, limits.maxAssetRows + 1}
+			circArgs = []any{policyBytes, limits.assetScanLimit()}
 		}
 		if err := func() error {
 			rows, err := db.QueryContext(qCtx, circQuery, circArgs...)
@@ -1424,7 +1424,7 @@ func registerCardanoTools(
 				// The query reads one row past the cap so an over-cap
 				// policy is detected rather than silently truncated.
 				scanned++
-				if scanned > limits.maxAssetRows {
+				if limits.maxAssetRows > 0 && scanned > limits.maxAssetRows {
 					return errAssetInfoIncomplete
 				}
 				var amount string
@@ -2290,7 +2290,6 @@ func registerEvaluateTxTool(
 	evaluator txEvaluator,
 	queryTimeout time.Duration,
 ) {
-	evaluationGate := make(chan struct{}, 1)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "evaluate_tx",
 		Description: "Simulate and evaluate Plutus script execution units (CPU steps, Memory units) and script fees for a transaction before on-chain submission.",
@@ -2349,14 +2348,13 @@ func registerEvaluateTxTool(
 			}, nil, nil
 		}
 
-		// The payload is parsed inside the evaluation slot and under the
-		// deadline, so concurrent callers cannot spend parsing CPU and memory
-		// outside either limit.
+		// The payload is parsed under the request deadline. No evaluation slot
+		// is configured, so concurrency is not limited here.
 		evalCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 		result, err := runBoundedEvaluation(
 			evalCtx,
-			evaluationGate,
+			nil,
 			func(ctx context.Context) (evaluationResult, error) {
 				tx, err := decodeEvaluateTransaction(txBytes)
 				if err != nil {

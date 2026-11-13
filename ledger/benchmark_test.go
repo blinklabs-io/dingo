@@ -871,7 +871,7 @@ func BenchmarkUtxoLookupByAddressNoData(b *testing.B) {
 	for b.Loop() {
 		_, err := db.UtxosByAddress(context.Background(),
 			[]ledger.Address{testAddr},
-			database.MaxUtxosByAddressResults,
+			0,
 			nil,
 		)
 		if err != nil {
@@ -906,7 +906,7 @@ func BenchmarkUtxoLookupByAddressRealData(b *testing.B) {
 	for _, addr := range addrs {
 		found, err := db.UtxosByAddress(context.Background(),
 			[]ledger.Address{addr},
-			database.MaxUtxosByAddressResults,
+			0,
 			nil,
 		)
 		if err != nil {
@@ -922,7 +922,7 @@ func BenchmarkUtxoLookupByAddressRealData(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		if _, err := db.UtxosByAddress(context.Background(),
 			[]ledger.Address{addrs[i%len(addrs)]},
-			database.MaxUtxosByAddressResults,
+			0,
 			nil,
 		); err != nil {
 			b.Fatalf("UTxO address lookup: %v", err)
@@ -3261,7 +3261,7 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 	}
 	seededUtxos, addresses := seedFixtureUtxos(b, db, immDb, 0, 100, 256)
 	addressRows, err := db.UtxosByAddress(context.Background(),
-		addresses[:1], database.MaxUtxosByAddressResults, nil,
+		addresses[:1], 0, nil,
 	)
 	if err != nil || len(addressRows) == 0 {
 		b.Fatalf("preflight address query returned %d rows: %v", len(addressRows), err)
@@ -3314,7 +3314,7 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 			case "utxo_address":
 				res, err := db.UtxosByAddress(context.Background(),
 					[]ledger.Address{addresses[workerID%len(addresses)]},
-					database.MaxUtxosByAddressResults,
+					0,
 					nil,
 				)
 				if err != nil || len(res) == 0 {

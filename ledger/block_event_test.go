@@ -318,6 +318,7 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 			context.Background(),
 			fixture.currentTip,
 			fixture.currentTip.Point,
+			"",
 			func(txn *database.Txn) error {
 				return delta.apply(context.Background(), ls, txn)
 			},
@@ -463,6 +464,7 @@ func TestBlockApplyRejectsRolledBackCandidate(t *testing.T) {
 		context.Background(),
 		fixture.ancestorTip,
 		rolledBackCandidate,
+		"",
 		func(*database.Txn) error {
 			operationCalled = true
 			return nil
@@ -483,6 +485,7 @@ func TestBlockApplyRejectsDurablyRolledBackTipBeforeCacheReload(t *testing.T) {
 		context.Background(),
 		fixture.currentTip,
 		fixture.currentTip.Point,
+		"",
 		func(*database.Txn) error {
 			operationCalled = true
 			return nil

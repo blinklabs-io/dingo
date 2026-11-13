@@ -223,12 +223,6 @@ func (ls *LedgerState) queryShelleyStakePoolParams(
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
-	if err := checkLocalStateQueryItemLimit(
-		"GetStakePoolParams",
-		len(poolIds),
-	); err != nil {
-		return nil, err
-	}
 	result := make(map[ledger.PoolId]stakePoolParams, len(poolIds))
 	if len(poolIds) == 0 {
 		return []any{result}, nil

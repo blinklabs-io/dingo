@@ -1788,8 +1788,19 @@ func requestIdTestLedger(
 	connIds ...ouroboros.ConnectionId,
 ) (*LedgerState, <-chan uint64, []lcommon.Blake2b256) {
 	t.Helper()
+	return requestIdTestLedgerWithHeaders(t, BlockfetchBatchSize+50, connIds...)
+}
+
+// requestIdTestLedgerWithHeaders is requestIdTestLedger with headerCount
+// queued headers. At or below shadowBlockfetchMaxHeaders a dispatch
+// pre-queues no second request.
+func requestIdTestLedgerWithHeaders(
+	t *testing.T,
+	headerCount int,
+	connIds ...ouroboros.ConnectionId,
+) (*LedgerState, <-chan uint64, []lcommon.Blake2b256) {
+	t.Helper()
 	require.NotEmpty(t, connIds)
-	headerCount := BlockfetchBatchSize + 50
 	testChain, hashes := buildDeepCatchupChain(t, headerCount)
 	dispatched := make(chan uint64, 16)
 	var mu sync.Mutex
@@ -1842,6 +1853,69 @@ func blockfetchReservationsLocked(
 	connId ouroboros.ConnectionId,
 ) int {
 	return len(ls.blockfetchRequestsInFlight[connIdKey(connId)])
+}
+
+// A resync that keeps its connection abandons the active range while the peer
+// is still streaming it, and the next range is dispatched on that connection.
+// The abandoned range's remaining bodies then arrive while the new range is
+// active. They must be dropped: taken for the new range's, a body that is not
+// the queue head clears the replacement queue, and the ones behind it count
+// against the peer as non-extending blocks until the connection is recycled.
+func TestBlockfetchDropsBodiesOfRequestReleasedOnTheSameConnection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	connId := testChainsyncConnId(6330, 3001)
+	ls, dispatched, hashes := requestIdTestLedgerWithHeaders(t, 3, connId)
+	body := func(requestId uint64) BlockfetchEvent {
+		return BlockfetchEvent{
+			ConnectionId: connId,
+			RequestId:    requestId,
+			Point:        ocommon.NewPoint(1, hashes[0].Bytes()),
+			Block: &blockfetchTestBlock{
+				hash:        hashes[0],
+				prevHash:    lcommon.NewBlake2b256(nil),
+				slot:        1,
+				blockNumber: 1,
+			},
+		}
+	}
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	require.NoError(t, ls.startQueuedBlockfetchLocked(connId, nil))
+	require.Nil(t, ls.nextBlockfetchRequest)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	receiveDispatches(t, dispatched, 1)
+
+	// The teardown resetChainsyncResyncState performs, with the connection
+	// left open and the queue refilled with the same headers.
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	require.NoError(t, ls.startQueuedBlockfetchLocked(connId, nil))
+	ls.chainsyncBlockfetchMutex.Unlock()
+	receiveDispatches(t, dispatched, 2)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, handleEventBlockfetchBlockDeferred(ls, body(1), nil))
+	assert.Empty(
+		t,
+		ls.pendingBlockfetchEvents,
+		"a body of the released request was taken for the active one",
+	)
+
+	// Its terminal event ends the released request; the active request's
+	// bodies are accepted before and after it.
+	require.NoError(t, ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
+		ConnectionId: connId,
+		BatchDone:    true,
+		RequestId:    1,
+	}, nil))
+	require.NotNil(t, ls.chainsyncBlockfetchReadyChan)
+	require.NoError(t, handleEventBlockfetchBlockDeferred(ls, body(2), nil))
+	assert.Len(t, ls.pendingBlockfetchEvents, 1)
 }
 
 // TestBlockfetchRefusedPromotionKeepsQueuedRequestReserved reproduces the
@@ -11650,16 +11724,13 @@ func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
 	))
 }
 
-func TestHeaderAlreadyOnPrimaryChainUsesHashIndexPrefilter(t *testing.T) {
+func TestHeaderAlreadyOnPrimaryChainProbesUnknownForkLocally(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
 	localTip := fixture.ls.chain.Tip()
-	lookupCalls := 0
-	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
-		lookupCalls++
-		return models.Block{}, models.ErrBlockNotFound
-	}
+	store := &remoteCountingBlobStore{BlobStore: fixture.ls.db.Blob()}
+	fixture.ls.db.SetBlobStore(store)
 
 	assert.False(t, fixture.ls.headerAlreadyOnPrimaryChain(
 		ChainsyncEvent{
@@ -11670,7 +11741,8 @@ func TestHeaderAlreadyOnPrimaryChainUsesHashIndexPrefilter(t *testing.T) {
 		},
 		localTip,
 	))
-	assert.Equal(t, 1, lookupCalls)
+	assert.Equal(t, int64(1), store.getBlockLocalCalls.Load())
+	assert.Zero(t, store.getBlockCalls.Load())
 }
 
 func TestHeaderAlreadyOnPrimaryChainSupportsLegacyHashIndexMiss(t *testing.T) {
@@ -11698,11 +11770,8 @@ func TestHeaderAlreadyOnPrimaryChainSkipsLookupBeyondLocalTip(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	localTip := fixture.ls.chain.Tip()
-	lookupCalled := false
-	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
-		lookupCalled = true
-		return models.Block{}, errors.New("unexpected lookup")
-	}
+	store := &remoteCountingBlobStore{BlobStore: fixture.ls.db.Blob()}
+	fixture.ls.db.SetBlobStore(store)
 
 	assert.False(t, fixture.ls.headerAlreadyOnPrimaryChain(
 		ChainsyncEvent{
@@ -11713,7 +11782,8 @@ func TestHeaderAlreadyOnPrimaryChainSkipsLookupBeyondLocalTip(t *testing.T) {
 		},
 		localTip,
 	))
-	assert.False(t, lookupCalled)
+	assert.Zero(t, store.getBlockLocalCalls.Load())
+	assert.Zero(t, store.getBlockCalls.Load())
 }
 
 func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
