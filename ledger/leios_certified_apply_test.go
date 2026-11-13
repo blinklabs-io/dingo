@@ -866,14 +866,17 @@ func TestLeiosRollbackEmitsUndoEventsForEndorserBlockTransactions(
 	f.ls.config.EventBus = bus
 	f.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	f.ls.emitRollbackTransactionEvents(t.Context(), []models.Block{{
-		Slot:     certifier.SlotNumber(),
-		Hash:     certifier.Hash().Bytes(),
-		PrevHash: certifier.PrevHash().Bytes(),
-		Number:   certifier.BlockNumber(),
-		Type:     gledger.BlockTypeDijkstra,
-		Cbor:     certifier.Cbor(),
-	}})
+	require.NoError(t, f.ls.emitRollbackTransactionEvents(
+		t.Context(),
+		[]models.Block{{
+			Slot:     certifier.SlotNumber(),
+			Hash:     certifier.Hash().Bytes(),
+			PrevHash: certifier.PrevHash().Bytes(),
+			Number:   certifier.BlockNumber(),
+			Type:     gledger.BlockTypeDijkstra,
+			Cbor:     certifier.Cbor(),
+		}},
+	))
 
 	evt := testutil.RequireReceive(
 		t, txCh, testutil.AsyncWait, "endorser transaction undo event",
@@ -938,14 +941,14 @@ func TestLeiosRollbackSkipsUndoForEndorserTransactionRecordedElsewhere(
 	f.ls.config.EventBus = bus
 	f.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	f.ls.emitRollbackTransactionEvents(t.Context(), []models.Block{{
+	require.NoError(t, f.ls.emitRollbackTransactionEvents(t.Context(), []models.Block{{
 		Slot:     certifier.SlotNumber(),
 		Hash:     certifier.Hash().Bytes(),
 		PrevHash: certifier.PrevHash().Bytes(),
 		Number:   certifier.BlockNumber(),
 		Type:     gledger.BlockTypeDijkstra,
 		Cbor:     certifier.Cbor(),
-	}})
+	}}))
 
 	testutil.RequireNoReceive(
 		t, txCh, 250*time.Millisecond, "undo for a transaction applied elsewhere",
@@ -978,14 +981,17 @@ func TestLeiosRollbackReportsUnavailableEndorserBlock(t *testing.T) {
 	f.ls.config.EventBus = bus
 	f.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	f.ls.emitRollbackTransactionEvents(t.Context(), []models.Block{{
-		Slot:     certifier.SlotNumber(),
-		Hash:     certifier.Hash().Bytes(),
-		PrevHash: certifier.PrevHash().Bytes(),
-		Number:   certifier.BlockNumber(),
-		Type:     gledger.BlockTypeDijkstra,
-		Cbor:     certifier.Cbor(),
-	}})
+	require.Error(t, f.ls.emitRollbackTransactionEvents(
+		t.Context(),
+		[]models.Block{{
+			Slot:     certifier.SlotNumber(),
+			Hash:     certifier.Hash().Bytes(),
+			PrevHash: certifier.PrevHash().Bytes(),
+			Number:   certifier.BlockNumber(),
+			Type:     gledger.BlockTypeDijkstra,
+			Cbor:     certifier.Cbor(),
+		}},
+	))
 
 	evt := testutil.RequireReceive(
 		t, errCh, testutil.AsyncWait, "endorser block resolution error",
@@ -1074,10 +1080,10 @@ func TestLeiosRollbackReplayResolvesRolledBackParentAndUndoesSharedTxOnce(
 	f.ls.config.EventBus = bus
 	f.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	f.ls.emitRollbackTransactionEvents(
+	require.NoError(t, f.ls.emitRollbackTransactionEvents(
 		t.Context(),
 		[]models.Block{newer, older},
-	)
+	))
 
 	testutil.RequireNoReceive(
 		t, errCh, 250*time.Millisecond, "endorser block resolution error",
@@ -1092,5 +1098,85 @@ func TestLeiosRollbackReplayResolvesRolledBackParentAndUndoesSharedTxOnce(
 	require.Equal(t, older.Hash, te.Point.Hash)
 	testutil.RequireNoReceive(
 		t, txCh, 250*time.Millisecond, "second undo for the shared transaction",
+	)
+}
+
+// A rollback whose set contains one certifying block with an unresolvable
+// endorser block must fail before publishing any undo event, including those
+// of blocks that resolve, so a retry from the durable intent does not deliver
+// them twice.
+func TestLeiosRollbackUnavailableEndorserBlockPublishesNoUndo(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	announcer := f.announce()
+	decoded := func(blk *dijkstra.DijkstraBlock) models.Block {
+		t.Helper()
+		dec, err := models.DecodeBlockCbor(
+			gledger.BlockTypeDijkstra,
+			blk.Cbor(),
+		)
+		require.NoError(t, err)
+		return models.Block{
+			Slot:     dec.SlotNumber(),
+			Hash:     dec.Hash().Bytes(),
+			PrevHash: dec.PrevHash().Bytes(),
+			Number:   dec.BlockNumber(),
+			Type:     gledger.BlockTypeDijkstra,
+			Cbor:     blk.Cbor(),
+		}
+	}
+	olderBlk, _ := f.block(
+		2,
+		leiosCertApplyCertifyingSlot,
+		announcer.Hash().Bytes(),
+		true,
+		true,
+	)
+	older := decoded(olderBlk)
+	newerBlk, _ := f.block(
+		3,
+		leiosCertApplyCertifyingSlot+1,
+		older.Hash,
+		true,
+		false,
+	)
+	newer := decoded(newerBlk)
+	f.ls.config.EndorserBlockProvider = func(
+		hash []byte,
+		slot uint64,
+	) ([]cbor.RawMessage, bool) {
+		if !bytes.Equal(hash, f.ebHash.Bytes()) ||
+			(slot != announcer.SlotNumber() && slot != older.Slot) {
+			return nil, false
+		}
+		return f.ebTxs, true
+	}
+	// Only the newer certifying block names an endorser block nobody can
+	// supply.
+	provider := f.ls.config.EndorserBlockProvider
+	f.ls.config.EndorserBlockProvider = func(
+		hash []byte,
+		slot uint64,
+	) ([]cbor.RawMessage, bool) {
+		if slot == older.Slot {
+			return nil, false
+		}
+		return provider(hash, slot)
+	}
+
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+	f.ls.config.EventBus = bus
+	f.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	require.Error(t, f.ls.emitRollbackTransactionEvents(
+		t.Context(),
+		[]models.Block{newer, older},
+	))
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond, "undo published despite resolution failure",
 	)
 }

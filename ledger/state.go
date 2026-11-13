@@ -5741,8 +5741,9 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 	if err != nil {
 		return err
 	}
+	var undoErr error
 	if emitUndo {
-		ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
+		undoErr = ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
 	}
 	// The blocks are gone from the ledger from here on, whichever path
 	// returns, including a rollbackCommittedError.
@@ -6131,6 +6132,11 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 			ls.config.FatalErrorFunc(floorErr)
 		}
 		return &rollbackCommittedError{err: floorErr}
+	}
+	// The metadata is already truncated, so report the failure as committed
+	// and keep the intent: recovery replays the undo from its payload.
+	if undoErr != nil {
+		return &rollbackCommittedError{err: undoErr}
 	}
 	if retainIntent {
 		return nil
@@ -6585,10 +6591,20 @@ func (ls *LedgerState) processChainIteratorRollback(
 			if _, ok := errors.AsType[*rollbackCommittedError](err); !ok {
 				return err
 			}
-			ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
+			if emitErr := ls.emitRollbackTransactionEvents(
+				ctx,
+				rollbackBlocks,
+			); emitErr != nil {
+				return errors.Join(err, emitErr)
+			}
 			return errors.Join(err, ls.finishRollbackIntentForPoint(ctx, point))
 		}
-		ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
+		if err := ls.emitRollbackTransactionEvents(
+			ctx,
+			rollbackBlocks,
+		); err != nil {
+			return err
+		}
 		return ls.finishRollbackIntentForPoint(ctx, point)
 	}
 	chainTip := ls.chain.Tip()
@@ -13736,7 +13752,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 				false,
 			); err != nil {
 				if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
-					ls.emitRollbackTransactionEvents(ctx, undoBlocks)
+					if emitErr := ls.emitRollbackTransactionEvents(
+						ctx,
+						undoBlocks,
+					); emitErr != nil {
+						return errors.Join(err, emitErr)
+					}
 					return errors.Join(
 						err,
 						ls.finishRollbackIntentForPoint(ctx, chainTip.Point),
@@ -13744,7 +13765,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 				}
 				return err
 			}
-			ls.emitRollbackTransactionEvents(ctx, undoBlocks)
+			if err := ls.emitRollbackTransactionEvents(
+				ctx,
+				undoBlocks,
+			); err != nil {
+				return err
+			}
 			return ls.finishRollbackIntentForPoint(ctx, chainTip.Point)
 		}(); err != nil {
 			ls.config.Logger.Error(
@@ -13994,7 +14020,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 			false,
 		); err != nil {
 			if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
-				ls.emitRollbackTransactionEvents(ctx, undoBlocks)
+				if emitErr := ls.emitRollbackTransactionEvents(
+					ctx,
+					undoBlocks,
+				); emitErr != nil {
+					return errors.Join(err, emitErr)
+				}
 				return errors.Join(
 					err,
 					ls.finishRollbackIntentForPoint(ctx, ancestor),
@@ -14002,7 +14033,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 			}
 			return err
 		}
-		ls.emitRollbackTransactionEvents(ctx, undoBlocks)
+		if err := ls.emitRollbackTransactionEvents(
+			ctx,
+			undoBlocks,
+		); err != nil {
+			return err
+		}
 		return ls.finishRollbackIntentForPoint(ctx, ancestor)
 	}(); err != nil {
 		return fmt.Errorf(

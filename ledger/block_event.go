@@ -74,15 +74,65 @@ func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
 // it. Emitting after the truncation -- or from a different goroutine that
 // merely learns of it later, as the chain-update handler does -- loses that
 // race and lets a subscriber apply an undo after the redo that followed it.
+//
+// It returns an error, having published no transaction event, when a
+// certifying block's endorser block cannot be resolved. The caller must then
+// leave the durable undo intent pending so recovery retries the whole set.
+// A block that fails to decode is logged and skipped instead: the failure is
+// deterministic, so a retry could never succeed.
 func (ls *LedgerState) emitRollbackTransactionEvents(
 	ctx context.Context,
 	blocks []models.Block,
-) {
+) error {
 	if ls.config.EventBus == nil {
-		return
+		return nil
 	}
 
-	for _, u := range ls.rollbackUndoBlocks(ctx, blocks) {
+	undoBlocks := ls.rollbackUndoBlocks(ctx, blocks)
+	// Resolve every certifying block's endorser transactions before
+	// publishing anything. A resolution failure is reported to the caller,
+	// which must then keep the durable undo intent pending: publishing the
+	// other blocks first would deliver them again when recovery retries, and
+	// swallowing the failure would leave the endorser transactions without
+	// an undo event once the chain is truncated.
+	var resolveErr error
+	for _, u := range undoBlocks {
+		if u.endorserErr == nil {
+			continue
+		}
+		undoErr := fmt.Errorf(
+			"resolve certified endorser block for tx undo events: %w",
+			u.endorserErr,
+		)
+		ls.config.Logger.Error(
+			"failed to resolve endorser block for rollback tx undo events",
+			"component", "ledger",
+			"error", undoErr,
+			"slot", u.block.Slot,
+			"hash", hex.EncodeToString(u.block.Hash),
+			"block_number", u.block.Number,
+		)
+		ls.config.EventBus.Publish(
+			LedgerErrorEventType,
+			event.NewEvent(
+				LedgerErrorEventType,
+				LedgerErrorEvent{
+					Error:     undoErr,
+					Operation: "rollback_tx_undo_endorser_block",
+					Point: ocommon.Point{
+						Slot: u.block.Slot,
+						Hash: u.block.Hash,
+					},
+				},
+			),
+		)
+		resolveErr = errors.Join(resolveErr, undoErr)
+	}
+	if resolveErr != nil {
+		return resolveErr
+	}
+
+	for _, u := range undoBlocks {
 		block := u.block
 		blockPoint := ocommon.Point{
 			Slot: block.Slot,
@@ -127,32 +177,6 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 		}
 		// A certifying block applied its endorser block's transactions
 		// before its own, so they are undone after them.
-		if u.endorserErr != nil {
-			undoErr := fmt.Errorf(
-				"resolve certified endorser block for tx undo events: %w",
-				u.endorserErr,
-			)
-			ls.config.Logger.Error(
-				"failed to resolve endorser block for rollback tx undo events",
-				"component", "ledger",
-				"error", undoErr,
-				"slot", block.Slot,
-				"hash", hex.EncodeToString(block.Hash),
-				"block_number", block.Number,
-			)
-			ls.config.EventBus.Publish(
-				LedgerErrorEventType,
-				event.NewEvent(
-					LedgerErrorEventType,
-					LedgerErrorEvent{
-						Error:     undoErr,
-						Operation: "rollback_tx_undo_endorser_block",
-						Point:     blockPoint,
-					},
-				),
-			)
-			continue
-		}
 		for _, ebTx := range slices.Backward(u.endorserTxs) {
 			ls.publishTransactionEvent(ctx, TransactionEvent{
 				Transaction: ebTx.tx,
@@ -163,6 +187,7 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 			})
 		}
 	}
+	return nil
 }
 
 type endorserTransaction struct {
@@ -520,7 +545,9 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(ctx context.Context,
 			"error", err,
 		)
 	}
-	ls.emitRollbackTransactionEvents(ctx, blocks)
+	if err := ls.emitRollbackTransactionEvents(ctx, blocks); err != nil {
+		return false, err
+	}
 	return len(blocks) > 0, nil
 }
 

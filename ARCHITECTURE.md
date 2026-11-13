@@ -942,8 +942,11 @@ The rollback set itself counts as that record: a transaction an older
 rolled-back block applied is undone only at that block, and a certifying
 block's parent is resolved from the set before the block store, so a rollback
 replayed after the chain and metadata dropped those blocks undoes the same
-transactions once. When the endorser block cannot be resolved, the ledger logs
-the failure and publishes a `LedgerErrorEvent` instead of those undo events.
+transactions once. When any certified endorser block in the rollback set cannot be resolved,
+the ledger publishes a `LedgerErrorEvent` and no undo event for any block,
+and the rollback fails before the chain is truncated. The durable undo intent
+stays pending, so recovery retries the whole set rather than delivering part
+of it twice.
 
 Two producers feed that lane, on different goroutines: `LedgerDelta.apply`
 (`ledger/delta.go`) registers forward events on the database transaction's
