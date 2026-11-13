@@ -5447,8 +5447,11 @@ When a certified endorser-block fetch has no connected leios-fetch peer, or
 startup replay reaches it before Ouroboros networking is initialized, the fetch
 is retried without increasing the deterministic-halt count. The count is
 preserved while the ledger tip is unchanged, and normal progress tracking resets
-it if the tip advances. A block that connected peers cannot serve continues to
-count toward the halt threshold.
+it if the tip advances. A certified endorser block whose semantic validation
+is still pending is retried the same way: the verdict is outstanding, and a
+validation queued behind a long database writer can outlast any fixed restart
+budget. A block that connected peers cannot serve continues to count toward
+the halt threshold.
 
 Certified closure application preverifies selected transactions' witness
 signatures with bounded parallel workers. Results bind to the full transaction;
