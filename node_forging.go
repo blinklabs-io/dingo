@@ -884,6 +884,8 @@ func (n *Node) startBlockProducer(
 	ctx context.Context,
 	started []func(),
 ) ([]func(), error) {
+	// Taken before the load, so a file replaced after it is read is a change.
+	loadedDigest := credentialFilesDigest(n.watchedCredentialFiles())
 	//nolint:contextcheck // the KES agent loop is bound to the node lifecycle context, not this call
 	creds, err := n.validateBlockProducerStartup()
 	if err != nil {
@@ -895,7 +897,7 @@ func (n *Node) startBlockProducer(
 	n.blockProducerCreds.Store(creds)
 	n.setEquivocationSelfPoolID(creds)
 	//nolint:contextcheck // the reload loops are bound to the node lifecycle context, not this call
-	n.startKeyReloadLoops()
+	n.startKeyReloadLoops(loadedDigest)
 	started = append(started, func() {
 		n.stopKeyReloadLoops()
 		if n.blockForger != nil {

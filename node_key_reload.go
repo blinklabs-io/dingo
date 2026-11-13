@@ -465,9 +465,10 @@ func (n *Node) agentOpCertOffers() chan []byte {
 
 // startKeyReloadLoops starts the background reload triggers for the running
 // block producer: the agent's newer-certificate offers, and the credential
-// file watch when shelleyKeyWatchInterval is set. A second call replaces the
+// file watch when shelleyKeyWatchInterval is set. loaded is the digest of the
+// credential files taken before they were loaded. A second call replaces the
 // loops of the first, so a live-lifecycle rebuild does not run two.
-func (n *Node) startKeyReloadLoops() {
+func (n *Node) startKeyReloadLoops(loaded [sha256.Size]byte) {
 	ctx, cancel := context.WithCancel(n.blockProducerContext())
 	n.keyReload.mu.Lock()
 	if n.keyReload.loopsCancel != nil {
@@ -493,6 +494,7 @@ func (n *Node) startKeyReloadLoops() {
 			ctx,
 			interval,
 			n.watchedCredentialFiles(),
+			loaded,
 			func() error {
 				return n.reloadCredentials(reloadTriggerFile, nil)
 			},
@@ -582,11 +584,11 @@ func (n *Node) credentialFileWatchLoop(
 	ctx context.Context,
 	interval time.Duration,
 	files []string,
+	loaded [sha256.Size]byte,
 	reload func() error,
 ) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	loaded := credentialFilesDigest(files)
 	var pending [sha256.Size]byte
 	havePending := false
 	for {

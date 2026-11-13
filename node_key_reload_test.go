@@ -326,7 +326,7 @@ func TestKeyWatchIsSkippedInServeKeyMode(t *testing.T) {
 	s := newSignModeReloadNode(t, 1)
 	s.config.shelleyKESAgentMode = kesagent.ModeServeKey
 	s.config.shelleyKeyWatchInterval = time.Millisecond
-	s.startKeyReloadLoops()
+	s.startKeyReloadLoops([32]byte{})
 	t.Cleanup(s.stopKeyReloadLoops)
 	require.Contains(t, s.logs.String(), "ignored in KES agent serve-key mode")
 }
@@ -399,7 +399,11 @@ func TestCredentialFileWatchReloadsOnceAfterAStableChange(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	reloads := make(chan struct{}, 4)
-	go n.credentialFileWatchLoop(ctx, 5*time.Millisecond, []string{file},
+	go n.credentialFileWatchLoop(
+		ctx,
+		5*time.Millisecond,
+		[]string{file},
+		credentialFilesDigest([]string{file}),
 		func() error {
 			reloads <- struct{}{}
 			return nil
@@ -438,7 +442,11 @@ func TestCredentialFileWatchSeesASymlinkSwap(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	reloads := make(chan struct{}, 4)
-	go n.credentialFileWatchLoop(ctx, 5*time.Millisecond, []string{file},
+	go n.credentialFileWatchLoop(
+		ctx,
+		5*time.Millisecond,
+		[]string{file},
+		credentialFilesDigest([]string{file}),
 		func() error {
 			reloads <- struct{}{}
 			return nil
@@ -463,7 +471,11 @@ func TestCredentialFileWatchRetriesAFailedReload(t *testing.T) {
 	t.Cleanup(cancel)
 	reloads := make(chan error, 4)
 	var calls int
-	go n.credentialFileWatchLoop(ctx, 5*time.Millisecond, []string{file},
+	go n.credentialFileWatchLoop(
+		ctx,
+		5*time.Millisecond,
+		[]string{file},
+		credentialFilesDigest([]string{file}),
 		func() error {
 			calls++
 			var err error
@@ -484,4 +496,30 @@ func TestCredentialFileWatchRetriesAFailedReload(t *testing.T) {
 		testutil.RequireReceive(t, reloads, 2*time.Second, "retried reload"))
 	testutil.RequireNoReceive(t, reloads, 50*time.Millisecond,
 		"a successful reload is not repeated")
+}
+
+func TestCredentialFileWatchSeesAChangeMadeBeforeItsFirstPoll(t *testing.T) {
+	t.Parallel()
+	n := newTestNodeForBP(t, false, "", "", "", nil)
+	file := filepath.Join(t.TempDir(), "opcert.cert")
+	require.NoError(t, os.WriteFile(file, []byte("counter 1"), 0o600))
+	loaded := credentialFilesDigest([]string{file})
+	// Replaced after the credentials were loaded and before the loop starts.
+	require.NoError(t, os.WriteFile(file, []byte("counter 2"), 0o600))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	reloads := make(chan struct{}, 4)
+	go n.credentialFileWatchLoop(
+		ctx,
+		5*time.Millisecond,
+		[]string{file},
+		loaded,
+		func() error {
+			reloads <- struct{}{}
+			return nil
+		},
+	)
+	testutil.RequireReceive(t, reloads, 2*time.Second,
+		"reload of a file changed before the first poll")
 }
