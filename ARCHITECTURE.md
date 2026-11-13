@@ -2187,7 +2187,12 @@ When `Node.Run()` is called, components are initialized in this order:
     function has no way to tell a still-live genesis declaration from one
     already spent/retired/changed since. A slot-zero tip with a non-empty hash
     is likewise an existing chain point rather than origin, so restart takes
-    this preservation path instead of reapplying genesis declarations.
+    this preservation path instead of reapplying genesis declarations. The
+    durable `mithril_ledger_slot` also makes a Conway-or-later imported
+    Constitutional Committee authoritative: startup never fills an absent
+    imported member from Conway genesis, because absence can represent a
+    pre-snapshot removal. A pre-Conway imported tip has no committee state yet,
+    so startup retains the genesis members for the later hard fork.
     For networks with a real Byron genesis, an empty database retains a Byron
     epoch cache until the on-chain Shelley boundary is observed. A configured
     experimental Shelley hard-fork epoch is the explicit exception used by

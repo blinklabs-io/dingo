@@ -19097,6 +19097,116 @@ func TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase(t *testing.T) {
 	}
 }
 
+// TestCreateGenesisBlockPreservesImportedCommittee proves startup treats a
+// completed Mithril snapshot's committee as authoritative. A genesis member
+// absent from that snapshot was removed before the anchor and must not be
+// seated again merely because no local history row exists for it.
+func TestCreateGenesisBlockPreservesImportedCommittee(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+	require.NoError(t, err)
+	require.NoError(t, db.SetGenesisCbor(0, genesisHash[:], []byte{0x80}, nil))
+
+	const anchorSlot = 1_000_000
+	ls.currentTip.Point = ocommon.NewPoint(
+		anchorSlot,
+		bytes.Repeat([]byte{0xa5}, lcommon.Blake2b256Size),
+	)
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		strconv.FormatUint(anchorSlot, 10),
+		nil,
+	))
+	require.NoError(t, db.SetEpoch(
+		anchorSlot, 300, nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, 1, 100, nil,
+	))
+	require.NoError(t, ls.loadMithrilTrustBoundary())
+
+	retainedKey, err := hex.DecodeString(musashiGenesisCommitteeColdKeys[0])
+	require.NoError(t, err)
+	require.NoError(t, db.SetCommitteeMembers(
+		context.Background(),
+		[]*models.CommitteeMember{{
+			ColdCredentialTag: lcommon.CredentialTypeAddrKeyHash,
+			ColdCredHash:      retainedKey,
+			ExpiresEpoch:      400,
+			TermStartSlot:     anchorSlot,
+			TermStartSlotSet:  true,
+			AddedSlot:         anchorSlot,
+		}},
+		nil,
+	))
+
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
+	require.Equal(t, 1, committeeMemberRowCount(t, db))
+
+	ls.currentEpoch = models.Epoch{EpochId: 300, StartSlot: anchorSlot}
+	ls.currentPParams = &conway.ConwayProtocolParameters{}
+	ls.publishSnapshotsLocked()
+	lv := ls.NewView(nil)
+	retained, err := lv.CommitteeCredentialMember(lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(retainedKey),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, retained)
+	require.Equal(t, uint64(400), retained.ExpiryEpoch)
+
+	for _, coldKeyHex := range musashiGenesisCommitteeColdKeys[1:] {
+		removedKey, err := hex.DecodeString(coldKeyHex)
+		require.NoError(t, err)
+		removed, err := lv.CommitteeCredentialMember(lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(removedKey),
+		})
+		require.NoError(t, err)
+		require.Nil(
+			t,
+			removed,
+			"removed genesis member %s was re-seated",
+			coldKeyHex,
+		)
+	}
+}
+
+// TestCreateGenesisBlockSeedsCommitteeAfterPreConwayImport proves a snapshot
+// taken before Conway does not suppress the committee established by the
+// later hard fork.
+func TestCreateGenesisBlockSeedsCommitteeAfterPreConwayImport(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+	require.NoError(t, err)
+	require.NoError(t, db.SetGenesisCbor(0, genesisHash[:], []byte{0x80}, nil))
+
+	const anchorSlot = 1_000_000
+	ls.currentTip.Point = ocommon.NewPoint(
+		anchorSlot,
+		bytes.Repeat([]byte{0xa6}, lcommon.Blake2b256Size),
+	)
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		strconv.FormatUint(anchorSlot, 10),
+		nil,
+	))
+	require.NoError(t, db.SetEpoch(
+		anchorSlot, 299, nil, nil, nil, nil,
+		eras.BabbageEraDesc.Id, 1, 100, nil,
+	))
+	require.NoError(t, ls.loadMithrilTrustBoundary())
+
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
+	require.Equal(
+		t,
+		len(musashiGenesisCommitteeColdKeys),
+		committeeMemberRowCount(t, db),
+	)
+}
+
 // TestCreateGenesisBlockCommitteeReplayIdempotent proves re-running genesis
 // initialization over a store that already holds the genesis committee
 // leaves a single row per member rather than a duplicate soft-delete/insert
@@ -19216,6 +19326,38 @@ func TestEnsureGenesisCommitteeRejectsNegativeExpiryWhenAlreadySeeded(
 		committeeMemberRowCount(t, db),
 		"the failed check must not add or remove rows",
 	)
+}
+
+// TestEnsureGenesisCommitteeRejectsNegativeExpiryAfterImport proves a
+// completed Mithril import does not bypass validation of the configured
+// genesis committee.
+func TestEnsureGenesisCommitteeRejectsNegativeExpiryAfterImport(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	const anchorSlot = 1_000_000
+	ls.currentTip.Point = ocommon.NewPoint(
+		anchorSlot,
+		bytes.Repeat([]byte{0xa7}, lcommon.Blake2b256Size),
+	)
+	members := ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members
+	rawKey := "keyHash-" + musashiGenesisCommitteeColdKeys[0]
+	require.Contains(t, members, rawKey)
+	members[rawKey] = -11
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		strconv.FormatUint(anchorSlot, 10),
+		nil,
+	))
+	require.NoError(t, db.SetEpoch(
+		anchorSlot, 300, nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, 1, 100, nil,
+	))
+
+	err := ls.ensureGenesisCommittee(context.Background(), nil)
+	require.ErrorContains(t, err, "negative expiry epoch -11")
+	require.ErrorContains(t, err, musashiGenesisCommitteeColdKeys[0])
+	require.Equal(t, 0, committeeMemberRowCount(t, db))
 }
 
 // TestGenesisCommitteeExpiryEpoch covers the signed-to-unsigned conversion
