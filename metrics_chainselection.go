@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/internal/promutil"
+	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -278,7 +278,7 @@ func (n *Node) onGenesisDensityDisconnect(
 	if d.EagernessStandoff {
 		_ = n.connManager.CloseConnectionWithReason(
 			conn,
-			event.ConnectionCloseReasonEagernessStandoffLost,
+			peergov.CloseReasonEagernessStandoffLost,
 		)
 		return
 	}

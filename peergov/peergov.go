@@ -137,7 +137,7 @@ const (
 	emergencyReconnectDelay = 5 * time.Second
 	// chainsyncDemotionReconnectDelay, jittered by up to
 	// chainsyncDemotionJitter either way, is how long a peer closed for a
-	// chainsync demotion (event.IsChainsyncDemotionReason) stays demoted: it
+	// chainsync demotion (IsChainsyncDemotionReason) stays demoted: it
 	// is not redialed, and a connection it opens is withheld from chain
 	// selection. The reference re-promotes a peer after a ChainSync error no
 	// sooner (repromoteErrorDelay in ouroboros-network's Diffusion/Policies.hs,
@@ -182,8 +182,10 @@ const (
 
 type PeerGovernor struct {
 	// afterFunc, when set, replaces time.AfterFunc for scheduled peer
-	// state changes. Tests set it.
-	afterFunc               func(d time.Duration, f func())
+	// state changes and returns the timer's Stop. Tests set it.
+	afterFunc func(d time.Duration, f func()) func() bool
+	// demotionReleases holds each peer's pending demotion release.
+	demotionReleases        map[*Peer]*demotionRelease
 	metrics                 *peerGovernorMetrics
 	reconcileTicker         *time.Ticker
 	gossipChurnTicker       *time.Ticker
@@ -561,6 +563,7 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 	p.gossipChurnTicker = gossipChurnTicker
 	p.publicRootChurnTicker = publicRootChurnTicker
 	p.stopCh = stopCh
+	p.scheduleActiveDemotionReleasesLocked()
 	p.mu.Unlock()
 
 	// Reconcile loop
@@ -680,6 +683,7 @@ func (p *PeerGovernor) Stop(ctx context.Context) error {
 		p.publicRootChurnTicker.Stop()
 		p.publicRootChurnTicker = nil
 	}
+	p.stopDemotionReleasesLocked()
 	// Close stop channel to signal goroutines
 	if p.stopCh != nil {
 		close(p.stopCh)

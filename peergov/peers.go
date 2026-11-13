@@ -1261,23 +1261,80 @@ func chainsyncDemoted(peer *Peer, now time.Time) bool {
 	return now.Before(peer.ChainsyncDemotedUntil)
 }
 
-// after runs f once d has elapsed.
-func (p *PeerGovernor) after(d time.Duration, f func()) {
+// after runs f once d has elapsed and returns a func that cancels it.
+func (p *PeerGovernor) after(d time.Duration, f func()) func() bool {
 	if p.afterFunc != nil {
-		p.afterFunc(d, f)
-		return
+		return p.afterFunc(d, f)
 	}
-	time.AfterFunc(d, f)
+	return time.AfterFunc(d, f).Stop
 }
 
-// endChainsyncDemotion releases connections withheld by a chainsync demotion
-// that has ended. The periodic reconcile would release them too, but minutes
-// later.
-func (p *PeerGovernor) endChainsyncDemotion() {
+// demotionRelease is a pending end of one peer's chainsync demotion.
+type demotionRelease struct {
+	stop func() bool
+}
+
+// scheduleDemotionReleaseLocked releases peer's withheld connection once its
+// demotion ends, d from now; the periodic reconcile would do it minutes
+// later. It replaces any release already pending for peer. Must be called
+// with p.mu held, which also keeps the callback from running before stop is
+// set.
+func (p *PeerGovernor) scheduleDemotionReleaseLocked(
+	peer *Peer,
+	d time.Duration,
+) {
+	if pending := p.demotionReleases[peer]; pending != nil {
+		pending.stop()
+	}
+	if p.demotionReleases == nil {
+		p.demotionReleases = make(map[*Peer]*demotionRelease)
+	}
+	release := &demotionRelease{}
+	p.demotionReleases[peer] = release
+	release.stop = p.after(d, func() {
+		p.endChainsyncDemotion(peer, release)
+	})
+}
+
+// endChainsyncDemotion re-syncs upstream withholds when release is still the
+// peer's pending release. Stop drops every pending release, so a callback
+// that fires after Stop, or races it, changes nothing.
+func (p *PeerGovernor) endChainsyncDemotion(
+	peer *Peer,
+	release *demotionRelease,
+) {
 	p.mu.Lock()
+	if p.demotionReleases[peer] != release {
+		p.mu.Unlock()
+		return
+	}
+	delete(p.demotionReleases, peer)
 	events := p.syncUpstreamWithholdLocked(nil)
 	p.mu.Unlock()
 	p.publishPendingEvents(events)
+}
+
+// stopDemotionReleasesLocked cancels every pending demotion release. Must be
+// called with p.mu held.
+func (p *PeerGovernor) stopDemotionReleasesLocked() {
+	for _, release := range p.demotionReleases {
+		release.stop()
+	}
+	p.demotionReleases = nil
+}
+
+// scheduleActiveDemotionReleasesLocked schedules the release of every
+// demotion that outlived a Stop. Must be called with p.mu held.
+func (p *PeerGovernor) scheduleActiveDemotionReleasesLocked() {
+	now := time.Now()
+	for _, peer := range p.peers {
+		if peer != nil && chainsyncDemoted(peer, now) {
+			p.scheduleDemotionReleaseLocked(
+				peer,
+				peer.ChainsyncDemotedUntil.Sub(now),
+			)
+		}
+	}
 }
 
 // usableClientLocked reports whether peer has a client-capable connection

@@ -164,24 +164,3 @@ func IsLocalChainsyncResyncReason(reason string) bool {
 		return false
 	}
 }
-
-// Close reasons for a connection the node closed because its peer stopped
-// helping Genesis chain selection: it ran out of the Limit on Patience, or it
-// lost a standoff at the Limit on Eagerness. Neither is a protocol error, so
-// the transport close is clean and the reason is the only evidence.
-const (
-	ConnectionCloseReasonPatienceExhausted     = "genesis_patience_exhausted"
-	ConnectionCloseReasonEagernessStandoffLost = "eagerness_standoff_lost"
-)
-
-// IsChainsyncDemotionReason reports whether reason records a close for one of
-// those causes. Consumers must also require a clean transport close.
-func IsChainsyncDemotionReason(reason string) bool {
-	switch reason {
-	case ConnectionCloseReasonPatienceExhausted,
-		ConnectionCloseReasonEagernessStandoffLost:
-		return true
-	default:
-		return false
-	}
-}

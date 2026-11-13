@@ -10211,21 +10211,27 @@ known alternates at once (`redialDisconnectedPeersLocked`) instead of waiting
 for the next reconcile, and redial ranking puts a peer that stalled within
 `chainsyncStallRankWindow` behind every other candidate.
 
-A clean close whose local reason is a chainsync demotion
-(`event.IsChainsyncDemotionReason`: `genesis_patience_exhausted` from the Limit
-on Patience, recorded through the recycle request's `LocalCloseReason`, or
-`eagerness_standoff_lost` from the node's standoff close) is handled like a
-stall and demotes the peer for at least ten seconds, jittered by two seconds
-either way, even when hot peers are critically low. That matches the
-reference's `repromoteErrorDelay` after a ChainSync error. Until the demotion
-ends (`ChainsyncDemotedUntil`) the peer is not redialed, and a connection it
-opens to this node is kept open but withheld from chain selection, like one
-from a denied peer; its arrival does not reset the backoff either. A timer
-re-syncs the withhold when the demotion ends instead of waiting for the next
-reconcile. A reconnected peer starts with a full patience bucket and nothing
-remembered by chain selection, so without the demotion a peer that keeps
-pinning the Limit on Eagerness regains it as soon as it reconnects. The
-connection manager only records the reason; it does not interpret it.
+A close whose local reason is a chainsync demotion
+(`peergov.IsChainsyncDemotionReason`: `genesis_patience_exhausted` from the
+Limit on Patience, recorded through the recycle request's `LocalCloseReason`,
+or `eagerness_standoff_lost` from the node's standoff close) is handled like a
+stall and demotes the peer, whatever transport error the same close carries.
+The demotion lasts the peer's reconnect delay, which is at least ten seconds
+jittered by two seconds either way (8 to 12 seconds) and longer when the
+existing backoff already exceeds that, even when hot peers are critically low.
+That matches the reference's `repromoteErrorDelay` after a ChainSync error.
+Until the demotion ends (`ChainsyncDemotedUntil`) the peer is not dialed: a
+reconnect worker that was already waiting waits it out, and recovery redials
+skip the peer. A connection the peer opens to this node, or an outbound dial
+that was already in flight, is kept open but withheld from chain selection,
+like one from a denied peer, and an inbound arrival does not reset the backoff.
+A timer per demoted peer re-syncs the withhold when the demotion ends instead
+of waiting for the next reconcile; `Stop` cancels those timers and `Start`
+schedules them again for demotions still in force. A reconnected peer starts
+with a full patience bucket and nothing remembered by chain selection, so
+without the demotion a peer that keeps pinning the Limit on Eagerness regains
+it as soon as it reconnects. The connection manager only records the reason;
+it does not interpret it.
 
 Arbitrary inbound peers are identified by their transport tuple. A source host
 alone is insufficient because unrelated peers can arrive through the same NAT

@@ -396,7 +396,18 @@ func (p *PeerGovernor) createOutboundConnection(
 			return
 		}
 		currentPeerConnKnown := p.peers[peerIdx].Connection != nil
+		// A worker already waiting when the peer was demoted must not dial
+		// before the demotion ends.
+		demotedFor := time.Until(currentPeer.ChainsyncDemotedUntil)
 		p.mu.Unlock()
+		if demotedFor > 0 {
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(demotedFor):
+			}
+			continue
+		}
 
 		// Skip outbound if there is already an inbound connection from the
 		// same exact remote peer address. Matching on the full remote
@@ -487,9 +498,7 @@ func (p *PeerGovernor) createOutboundConnection(
 			}
 			oldSource := currentPeer.Source
 			oldConn := clonePeerConnection(currentPeer.Connection)
-			currentPeer.recordOutboundConnected(conn, time.Now())
-			p.recordPeerStateChange(currentPeer.State, PeerStateWarm)
-			currentPeer.State = PeerStateWarm
+			p.attachOutboundConnLocked(currentPeer, conn, time.Now())
 			selectionEvents := p.appendChainSelectionEventsLocked(
 				nil,
 				p.bootstrapExited,
@@ -948,6 +957,20 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	p.publishPendingEvents(selectionEvents)
 }
 
+// attachOutboundConnLocked records a newly established outbound connection
+// on peer. Must be called with p.mu held.
+func (p *PeerGovernor) attachOutboundConnLocked(
+	peer *Peer,
+	conn *ouroboros.Connection,
+	now time.Time,
+) {
+	peer.recordOutboundConnected(conn, now)
+	// A dial already in flight can complete during a demotion.
+	p.withholdDeniedUpstreamLocked(peer)
+	p.recordPeerStateChange(peer.State, PeerStateWarm)
+	peer.State = PeerStateWarm
+}
+
 func isLocalChainsyncRestart(e connmanager.ConnectionClosedEvent) bool {
 	return e.Error == nil &&
 		event.IsLocalChainsyncResyncReason(e.LocalCloseReason)
@@ -993,8 +1016,9 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 		connClosedAt := time.Now()
 		denied := p.isPeerDeniedLocked(peer)
 		stalled := isChainsyncStallError(e.Error)
-		demoted := e.Error == nil &&
-			event.IsChainsyncDemotionReason(e.LocalCloseReason)
+		// The reason is recorded before teardown, so a transport error that
+		// races the close does not cancel the demotion.
+		demoted := IsChainsyncDemotionReason(e.LocalCloseReason)
 		if peer.Source == PeerSourceInboundConn {
 			connDur := time.Duration(0)
 			if !peer.InboundConnectedAt.IsZero() {
@@ -1128,7 +1152,10 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 					peer.ChainsyncDemotedUntil = connClosedAt.Add(
 						peer.ReconnectDelay,
 					)
-					p.after(peer.ReconnectDelay, p.endChainsyncDemotion)
+					p.scheduleDemotionReleaseLocked(
+						peer,
+						peer.ReconnectDelay,
+					)
 				}
 			}
 			peer.ConnectedAt = time.Time{} // Reset for next connection

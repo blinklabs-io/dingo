@@ -527,7 +527,7 @@ func TestGenesisDensityDisconnectRecordsStandoffCloseReason(t *testing.T) {
 		standoff bool
 		want     string
 	}{
-		{"standoff", true, event.ConnectionCloseReasonEagernessStandoffLost},
+		{"standoff", true, peergov.CloseReasonEagernessStandoffLost},
 		{"sparser", false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

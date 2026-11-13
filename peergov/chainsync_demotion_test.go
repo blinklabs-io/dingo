@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,11 +31,20 @@ import (
 )
 
 var chainsyncDemotionReasons = []string{
-	event.ConnectionCloseReasonPatienceExhausted,
-	event.ConnectionCloseReasonEagernessStandoffLost,
+	CloseReasonPatienceExhausted,
+	CloseReasonEagernessStandoffLost,
 }
 
 func closePeerWithReason(pg *PeerGovernor, peer *Peer, reason string) {
+	closePeerWithReasonAndError(pg, peer, reason, nil)
+}
+
+func closePeerWithReasonAndError(
+	pg *PeerGovernor,
+	peer *Peer,
+	reason string,
+	closeErr error,
+) {
 	connId := outboundTestConnId()
 	pg.mu.Lock()
 	peer.Connection = &PeerConnection{Id: connId, IsClient: true}
@@ -47,6 +57,7 @@ func closePeerWithReason(pg *PeerGovernor, peer *Peer, reason string) {
 		connmanager.ConnectionClosedEventType,
 		connmanager.ConnectionClosedEvent{
 			ConnectionId:     connId,
+			Error:            closeErr,
 			LocalCloseReason: reason,
 		},
 	))
@@ -160,7 +171,7 @@ func TestHandleConnectionClosedEvent_ChainsyncDemotionDialsColdAlternate(
 	closePeerWithReason(
 		pg,
 		demoted,
-		event.ConnectionCloseReasonEagernessStandoffLost,
+		CloseReasonEagernessStandoffLost,
 	)
 
 	require.Eventually(
@@ -224,11 +235,13 @@ func publishInboundFrom(pg *PeerGovernor, addr string) {
 func TestInboundArrivalKeepsChainsyncDemotionBackoff(t *testing.T) {
 	t.Parallel()
 	pg, peer := newDemotionTestGovernor(t)
-	pg.afterFunc = func(time.Duration, func()) {}
+	pg.afterFunc = func(time.Duration, func()) func() bool {
+		return func() bool { return true }
+	}
 	closePeerWithReason(
 		pg,
 		peer,
-		event.ConnectionCloseReasonEagernessStandoffLost,
+		CloseReasonEagernessStandoffLost,
 	)
 
 	publishInboundFrom(pg, "44.0.0.1:3001")
@@ -247,13 +260,14 @@ func TestChainsyncDemotionWithholdsUpstreamUntilItEnds(t *testing.T) {
 	pg, peer := newDemotionTestGovernor(t)
 	var release func()
 	var releaseAfter time.Duration
-	pg.afterFunc = func(d time.Duration, f func()) {
+	pg.afterFunc = func(d time.Duration, f func()) func() bool {
 		releaseAfter, release = d, f
+		return func() bool { return true }
 	}
 	closePeerWithReason(
 		pg,
 		peer,
-		event.ConnectionCloseReasonPatienceExhausted,
+		CloseReasonPatienceExhausted,
 	)
 	require.NotNil(t, release, "the end of the demotion must be scheduled")
 
@@ -282,4 +296,212 @@ func TestChainsyncDemotionWithholdsUpstreamUntilItEnds(t *testing.T) {
 		peer.Source,
 		pg.selectionConnLocked(peer),
 	))
+}
+
+// The connection manager records the local reason before teardown, so a
+// transport error that races it does not cancel the demotion.
+func TestChainsyncDemotionSurvivesTransportError(t *testing.T) {
+	t.Parallel()
+	pg, peer := newDemotionTestGovernor(t)
+	pg.afterFunc = func(time.Duration, func()) func() bool {
+		return func() bool { return true }
+	}
+	closePeerWithReasonAndError(
+		pg,
+		peer,
+		CloseReasonEagernessStandoffLost,
+		io.ErrUnexpectedEOF,
+	)
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	assert.GreaterOrEqual(t, peer.ReconnectDelay,
+		chainsyncDemotionReconnectDelay-chainsyncDemotionJitter)
+	assert.True(t, chainsyncDemoted(peer, time.Now()))
+}
+
+// Stop cancels a pending demotion release, and a release that already fired
+// does nothing once the governor has stopped.
+func TestStopCancelsChainsyncDemotionRelease(t *testing.T) {
+	t.Parallel()
+	pg, peer := newDemotionTestGovernor(t)
+	var release func()
+	stopped := false
+	pg.afterFunc = func(_ time.Duration, f func()) func() bool {
+		release = f
+		return func() bool { stopped = true; return true }
+	}
+	closePeerWithReason(pg, peer, CloseReasonPatienceExhausted)
+	require.NotNil(t, release)
+	pg.mu.Lock()
+	peer.Connection = &PeerConnection{
+		Id:               outboundTestConnId(),
+		IsClient:         true,
+		UpstreamWithheld: true,
+	}
+	peer.ChainsyncDemotedUntil = time.Now().Add(-time.Second)
+	pg.mu.Unlock()
+
+	require.NoError(t, pg.Stop(context.Background()))
+	release()
+
+	assert.True(t, stopped, "Stop must cancel the release timer")
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	assert.True(t, peer.Connection.UpstreamWithheld,
+		"a release after Stop must not change the stopped governor")
+}
+
+// Recovery redials skip a demoted peer, so its slot goes to an alternate.
+func TestRedialCandidatesSkipDemotedPeer(t *testing.T) {
+	t.Parallel()
+	pg, peer := newDemotionTestGovernor(t)
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	peer.Reconnecting = false
+	require.Contains(t, pg.redialCandidatesLocked(), peer)
+
+	peer.ChainsyncDemotedUntil = time.Now().Add(time.Minute)
+
+	assert.NotContains(t, pg.redialCandidatesLocked(), peer)
+}
+
+// A reconnect worker that was already running when the peer was demoted
+// waits out the demotion before dialing.
+func TestOutboundDialWaitsOutChainsyncDemotion(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: logger,
+		ConnManager: connmanager.NewConnectionManager(
+			connmanager.ConnectionManagerConfig{Logger: logger},
+		),
+	})
+	peer := &Peer{
+		// Nothing listens here, so a dial fails at once and is counted.
+		Address:               "127.0.0.1:1",
+		NormalizedAddress:     "127.0.0.1:1",
+		Source:                PeerSourceTopologyLocalRoot,
+		ChainsyncDemotedUntil: time.Now().Add(time.Hour),
+	}
+	pg.mu.Lock()
+	pg.ctx = t.Context()
+	pg.stopCh = make(chan struct{})
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pg.createOutboundConnection(peer, false)
+	}()
+
+	require.Eventually(t, func() bool {
+		pg.mu.Lock()
+		defer pg.mu.Unlock()
+		return peer.Reconnecting
+	}, 5*time.Second, time.Millisecond)
+	require.Never(t, func() bool {
+		pg.mu.Lock()
+		defer pg.mu.Unlock()
+		return peer.ReconnectCount > 0
+	}, 300*time.Millisecond, 5*time.Millisecond,
+		"a demoted peer must not be dialed")
+
+	require.NoError(t, pg.Stop(context.Background()))
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reconnect worker did not stop")
+	}
+}
+
+// An outbound connection that completes while the peer is demoted is kept
+// but withheld from chain selection.
+func TestOutboundConnectionDuringDemotionIsWithheld(t *testing.T) {
+	t.Parallel()
+	pg, peer := newDemotionTestGovernor(t)
+	conn, err := ouroboros.NewConnection()
+	require.NoError(t, err)
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	peer.ChainsyncDemotedUntil = time.Now().Add(time.Minute)
+
+	pg.attachOutboundConnLocked(peer, conn, time.Now())
+
+	require.NotNil(t, peer.Connection)
+	assert.True(t, peer.Connection.UpstreamWithheld)
+}
+
+// A real full-duplex inbound connection from a demoted topology peer stays
+// open but is not a chain selection source until the demotion ends.
+func TestRealInboundArrivalDuringChainsyncDemotionIsWithheld(t *testing.T) {
+	t.Parallel()
+	f := newWithholdFixture(t, PeerSourceTopologyLocalRoot)
+	var release func()
+	f.pg.afterFunc = func(_ time.Duration, fn func()) func() bool {
+		release = fn
+		return func() bool { return true }
+	}
+	f.pg.mu.Lock()
+	peer := f.pg.peers[0]
+	peer.Reconnecting = true
+	f.pg.mu.Unlock()
+	closePeerWithReason(f.pg, peer, CloseReasonEagernessStandoffLost)
+	require.NotNil(t, release)
+
+	f.pg.handleInboundConnectionEvent(f.arrival)
+
+	require.NotNil(t, f.pg.GetPeers()[0].Connection,
+		"the connection stays open for downstream use")
+	assert.False(t, f.pg.IsChainSelectionEligible(f.connId))
+	assert.False(t, nextEligibilityOf(t, f).Eligible)
+
+	f.pg.mu.Lock()
+	peer.ChainsyncDemotedUntil = time.Now().Add(-time.Second)
+	f.pg.mu.Unlock()
+	release()
+
+	assert.True(t, f.pg.IsChainSelectionEligible(f.connId))
+	assert.True(t, nextEligibilityOf(t, f).Eligible)
+}
+
+// nextEligibilityOf skips events for connections other than the fixture's,
+// such as the closed connection that set up the demotion.
+func nextEligibilityOf(
+	t *testing.T,
+	f *withholdFixture,
+) PeerEligibilityChangedEvent {
+	t.Helper()
+	for {
+		evt := f.nextEligibility(t)
+		if evt.ConnectionId.String() == f.connId.String() {
+			return evt
+		}
+	}
+}
+
+// A demotion still in force when the governor restarts gets its release
+// scheduled again: Stop cancelled the first one.
+func TestStartReschedulesActiveDemotionRelease(t *testing.T) {
+	t.Parallel()
+	pg, peer := newDemotionTestGovernor(t)
+	var mu sync.Mutex
+	var scheduled []time.Duration
+	pg.afterFunc = func(d time.Duration, _ func()) func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		scheduled = append(scheduled, d)
+		return func() bool { return true }
+	}
+	closePeerWithReason(pg, peer, CloseReasonPatienceExhausted)
+	require.NoError(t, pg.Stop(context.Background()))
+
+	require.NoError(t, pg.Start(t.Context()))
+	t.Cleanup(func() { _ = pg.Stop(context.Background()) })
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, scheduled, 2)
+	assert.Positive(t, scheduled[1])
+	assert.LessOrEqual(t, scheduled[1], scheduled[0])
 }
