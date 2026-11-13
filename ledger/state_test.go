@@ -5333,7 +5333,12 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	ls := &LedgerState{db: db}
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			TrustedReplay: true,
+		},
+	}
 
 	var issuerVkey lcommon.IssuerVkey
 	for i := range issuerVkey {
@@ -5428,6 +5433,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 		db: db,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			TrustedReplay: true,
 			EndorserBlockProvider: func(
 				[]byte,
 				uint64,

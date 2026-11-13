@@ -11097,11 +11097,19 @@ func (ls *LedgerState) ledgerProcessBlock(
 			err,
 		)
 	}
+	// Peer-sourced blocks always require the inexpensive block-envelope and
+	// stateful opcert-counter checks, even when full historical validation is
+	// disabled. Trusted replay and Mithril-certified history are the only
+	// inputs allowed to skip them.
+	trustedReplay := ls.config.TrustedReplay ||
+		trustedReplayOpCertCounterCacheFrom(ctx) != nil
+	validateInboundBasics := shouldValidate ||
+		(!trustedReplay && !ls.slotCoveredByMithril(point.Slot))
 	// Full validation applies both the node's enabled-era ceiling and the BBODY
 	// current-version-plus-one rule. Historical peer blocks still apply the
 	// enabled-era ceiling below; only trusted replay and Mithril-certified
 	// history skip it.
-	if shouldValidate {
+	if validateInboundBasics {
 		if err := validateInboundBlockEnvelope(
 			block,
 			pparams,
@@ -11110,24 +11118,18 @@ func (ls *LedgerState) ledgerProcessBlock(
 		); err != nil {
 			return nil, ls.rejectInboundEnvelopeFailure(point, err)
 		}
-		if err := ls.validateBlockHeaderProtocolVersion(
-			block.Header(), pparams,
-		); err != nil {
-			return nil, ls.rejectInboundEnvelopeFailure(point, err)
-		}
-	} else if !ls.config.TrustedReplay && !ls.slotCoveredByMithril(point.Slot) {
-		if err := ls.validateSupportedHeaderProtocolVersion(
-			block.Header(),
-		); err != nil {
-			return nil, ls.rejectInboundEnvelopeFailure(point, err)
-		}
-		// The aggregate maxBlockExUnits bound is a block-level ledger rule
-		// that per-transaction validation never repeats, so a peer-sourced
-		// block must meet it even when ValidateHistorical=false skips the
-		// rest of validation. Mithril-certified and TrustedReplay blocks are
-		// trusted input and keep skipping it.
-		if err := validateBlockExUnits(block, pparams); err != nil {
-			return nil, ls.rejectInboundEnvelopeFailure(point, err)
+		if shouldValidate {
+			if err := ls.validateBlockHeaderProtocolVersion(
+				block.Header(), pparams,
+			); err != nil {
+				return nil, ls.rejectInboundEnvelopeFailure(point, err)
+			}
+		} else {
+			if err := ls.validateSupportedHeaderProtocolVersion(
+				block.Header(),
+			); err != nil {
+				return nil, ls.rejectInboundEnvelopeFailure(point, err)
+			}
 		}
 	}
 	// Validate the operational certificate counter before processing the
@@ -11159,7 +11161,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		// transactions are processed (below); rollback safety is inherited from
 		// the per-(pool,slot) PoolOpCertSequence store, which drops rows past
 		// the rollback slot and recomputes the latest counter.
-		if shouldValidate {
+		if validateInboundBasics {
 			stored, found, err := ls.latestOpCertCounterForValidation(
 				ctx,
 				opCertPoolKeyHash,
