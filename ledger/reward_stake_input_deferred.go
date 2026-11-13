@@ -419,13 +419,21 @@ func (ls *LedgerState) ensureRewardStakeInputsReady(
 			"get reward pool inputs for epoch %d: %w", epoch, err,
 		)
 	}
-	rebuilt, err := ls.rebuildPrunedRewardStakeInputs(
+	rebuilt, rejected, err := ls.rebuildPrunedRewardStakeInputsDetailed(
 		meta, metaTxn, epoch, snapshot, poolInputs,
 	)
 	if err != nil {
 		return fmt.Errorf(
 			"rebuild pending reward stake inputs for epoch %d: %w",
 			epoch, err,
+		)
+	}
+	if rejected && snapshot.TotalDelegators > 0 {
+		return fmt.Errorf(
+			"%w: pending epoch %d reconstruction disagrees with the "+
+				"retained reward_pool_input totals",
+			errRewardStakeInputsUnrecoverable,
+			epoch,
 		)
 	}
 	if len(rebuilt) == 0 && snapshot.TotalDelegators > 0 {
