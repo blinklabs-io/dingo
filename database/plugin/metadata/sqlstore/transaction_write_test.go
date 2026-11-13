@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -57,14 +58,18 @@ func buildSharedCredentialTx(
 	t.Helper()
 
 	paymentHash := lcommon.NewBlake2b224(
-		[]byte{seed, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+		[]byte{
+			seed, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
 			0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
-			0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b},
+			0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+		},
 	)
 	stakingHash := lcommon.NewBlake2b224(
-		[]byte{seed, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a,
+		[]byte{
+			seed, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a,
 			0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,
-			0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b},
+			0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
+		},
 	)
 
 	addr, err := lcommon.NewAddressFromParts(
@@ -141,7 +146,7 @@ func seedConsumedUtxo(
 	_, err := store.writeDB.ExecContext(context.Background(), `
 INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
 VALUES (?, ?, ?, ?, ?, 0, ?)`,
-		fx.consumedTxID,
+		testutil.TransactionID(t, store.writeDB, fx.consumedTxID),
 		0,
 		fx.ref.Key,
 		int64(fx.ref.Tag),
@@ -623,7 +628,7 @@ func TestSetTransactionBatchedInputsReturnConsumedStake(t *testing.T) {
 	_, err = store.writeDB.ExecContext(ctx, `
 INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
 VALUES (?, 0, ?, ?, 1, 0, ?)`,
-		secondTxID,
+		testutil.TransactionID(t, store.writeDB, secondTxID),
 		fx.ref.Key,
 		int64(fx.ref.Tag),
 		decimalUint64(types.Uint64(7_000_000)),
@@ -649,17 +654,10 @@ func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
 	conflictTxID := bytes.Repeat([]byte{0x51}, 32)
 	conflictCollateralTxID := bytes.Repeat([]byte{0x53}, 32)
 	newTxID := bytes.Repeat([]byte{0x52}, 32)
-	var transactionID, collateralReturnID uint
-	require.NoError(t, store.writeDB.QueryRowContext(
-		context.Background(),
-		`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`,
-		conflictTxID,
-	).Scan(&transactionID))
-	require.NoError(t, store.writeDB.QueryRowContext(
-		context.Background(),
-		`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`,
-		conflictCollateralTxID,
-	).Scan(&collateralReturnID))
+	transactionID := uint(testutil.TransactionID(t, store.writeDB, conflictTxID))
+	collateralReturnID := uint(testutil.TransactionID(
+		t, store.writeDB, conflictCollateralTxID,
+	))
 	require.NoError(t, store.ImportUtxos([]models.Utxo{{
 		TxId: conflictTxID, Amount: types.Uint64(1), OutputIdx: 0,
 	}, {
@@ -700,15 +698,16 @@ func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
 	require.Equal(t, []bool{false, false, true}, inserted)
 	require.Equal(
 		t,
-		beforeInserts+1,
+		beforeInserts+2,
 		counterValue(t, reg, "insert"),
-		"a conflicting row in a SQLite batch should not issue a second per-row INSERT",
+		"the batch INSERT and the new producer's identity row are the only "+
+			"inserts: a conflicting row never issues a per-row INSERT",
 	)
 	require.Equal(
 		t,
-		beforeSelects,
+		beforeSelects+1,
 		counterValue(t, reg, "select"),
-		"the UPDATE RETURNING path should not SELECT the conflicting row ID",
+		"only the producer identity lookup SELECTs, never the conflicting row ID",
 	)
 	repaired, err := store.GetUtxo(conflictTxID, 0, nil)
 	require.NoError(t, err)
@@ -775,11 +774,10 @@ func TestSetTransactionLeiosClosureSkippedInputAppliesNoDelta(t *testing.T) {
 	fx := buildSharedCredentialTx(t, 0x43)
 	seedConsumedUtxo(t, store, fx)
 
-	otherSpender := make([]byte, 32)
-	otherSpender[0] = 0xfe
+	const otherSpenderID = 999999
 	_, err := store.writeDB.ExecContext(ctx, `
 UPDATE utxo SET deleted_slot = 900, spent_at_tx_id = ?
-WHERE tx_id = ? AND output_idx = 0`, otherSpender, fx.consumedTxID)
+WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`, otherSpenderID, fx.consumedTxID)
 	require.NoError(t, err)
 
 	// A second live UTxO keeps the credential's reward_live_stake row in
@@ -850,7 +848,9 @@ func TestTransactionBatchAccumulatorResetClosesStatement(t *testing.T) {
 
 	acc := store.NewBatchAccumulator().(*transactionBatchAccumulator)
 	oldStmtArgs := []any{
-		[]byte{0x01}, []byte{0x02}, nil, 1, 0,
+		[]byte{0x01},
+		[]byte{0x02},
+		nil, 1, 0,
 		"0", "0", "0", 0, true,
 	}
 	_, _, err = acc.insertTransaction(ctx, db, oldStmtArgs...)

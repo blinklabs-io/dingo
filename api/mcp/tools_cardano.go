@@ -60,7 +60,7 @@ type TransactionParams struct {
 type UTxOsParams struct {
 	AddressOrCredential string `json:"address_or_credential" jsonschema:"Bech32 Cardano address or hex payment credential"`
 	Limit               int    `json:"limit,omitempty"       jsonschema:"Maximum UTxOs to return (default 20, max 100)"`
-	Offset              int    `json:"offset,omitempty"      jsonschema:"Offset for raw-credential searches only, max 10000; full addresses use cursor"`
+	Offset              int    `json:"offset,omitempty"      jsonschema:"Offset for raw-credential searches only; full addresses use cursor"`
 	Cursor              string `json:"cursor,omitempty"      jsonschema:"Continuation cursor from a full-address query"`
 }
 
@@ -90,7 +90,7 @@ type UtxosByAssetParams struct {
 	PolicyID  string `json:"policy_id"            jsonschema:"Hex-encoded 28-byte (56 hex characters) minting policy ID"`
 	AssetName string `json:"asset_name,omitempty" jsonschema:"Asset name as hex or literal UTF-8; hex takes precedence, max 32 bytes, omitted means any name"`
 	Limit     int    `json:"limit,omitempty"      jsonschema:"Maximum UTxOs to return (default 50, max 200)"`
-	Offset    int    `json:"offset,omitempty"     jsonschema:"Pagination offset (default 0, max 10000)"`
+	Offset    int    `json:"offset,omitempty"     jsonschema:"Pagination offset (default 0)"`
 }
 
 var errAssetInfoIncomplete = errors.New("asset info row cap exceeded")
@@ -123,6 +123,13 @@ func formatHash(val any) string {
 		return fmt.Sprintf("%v", v)
 	}
 }
+
+// transactionOutputTotalsSQL counts the outputs of a transaction, its
+// collateral return included: every output carries its producer's row id in
+// tx_id, which the unique (tx_id, output_idx) index leads with. It binds the
+// transaction's row id.
+const transactionOutputTotalsSQL = `SELECT count(*), coalesce(sum(amount), 0)
+FROM utxo WHERE tx_id = ?`
 
 type utxoAddressLookup func(context.Context, *models.UtxoWithOrderingQuery, int) (models.UtxoAddressPage, error)
 
@@ -241,7 +248,7 @@ func registerCardanoTools(
 			queries := []struct{ sql, source string }{
 				{"SELECT slot, hash, block_number FROM tip ORDER BY id DESC LIMIT 1", "metadata_tip"},
 				{"SELECT slot, hash, height FROM blocks ORDER BY slot DESC LIMIT 1", "metadata_blocks"},
-				{"SELECT slot, block_hash, 0 FROM \"transaction\" ORDER BY slot DESC LIMIT 1", "metadata_transaction"},
+				{"SELECT slot, block_hash, 0 FROM applied_transaction ORDER BY slot DESC LIMIT 1", "metadata_transaction"},
 			}
 			for _, query := range queries {
 				err := db.QueryRowContext(qCtx, query.sql).Scan(&slot, &rawHash, &blockHeight)
@@ -354,7 +361,7 @@ func registerCardanoTools(
 			}
 		}
 		if found {
-			for _, table := range []string{`"transaction"`, "tx"} {
+			for _, table := range []string{"applied_transaction", "tx"} {
 				err := db.QueryRowContext(qCtx, "SELECT count(*), coalesce(sum(fee), 0) FROM "+table+" WHERE slot = ?", slot).
 					Scan(&txCount, &totalFees)
 				if err != nil && strings.Contains(err.Error(), "no such table:") {
@@ -371,7 +378,7 @@ func registerCardanoTools(
 			if !bySlot {
 				where = "block_hash = ? OR block_hash = ?"
 			}
-			for _, table := range []string{`"transaction"`, "tx"} {
+			for _, table := range []string{"applied_transaction", "tx"} {
 				// HAVING avoids scanning NULL aggregates when no transaction matches.
 				ok, err := scan("SELECT count(*), coalesce(sum(fee), 0), min(slot), min(block_hash) FROM "+table+" WHERE "+where+" HAVING count(*) > 0", &txCount, &totalFees, &slot, &rawHash)
 				if err != nil {
@@ -449,7 +456,7 @@ func registerCardanoTools(
 
 		err = db.QueryRowContext(
 			qCtx,
-			"SELECT id, slot, fee, block_index FROM \"transaction\" WHERE hash = ? OR hash = ?",
+			"SELECT t.id, a.slot, a.fee, a.block_index FROM \"transaction\" t JOIN applied_transaction a ON a.tx_id = t.id WHERE t.hash = ? OR t.hash = ?",
 			hashBytes,
 			cleanHash,
 		).Scan(&txID, &slot, &fee, &blockIndex)
@@ -479,7 +486,7 @@ func registerCardanoTools(
 		// Count UTxOs created by this tx
 		var outCount int
 		var totalOut uint64
-		err = db.QueryRowContext(qCtx, "SELECT count(*), coalesce(sum(amount), 0) FROM utxo WHERE transaction_id = ? OR tx_id = ?", txID, hashBytes).
+		err = db.QueryRowContext(qCtx, transactionOutputTotalsSQL, txID).
 			Scan(&outCount, &totalOut)
 		if err != nil {
 			return nil, nil, fmt.Errorf("query transaction outputs: %w", err)
@@ -560,7 +567,7 @@ func registerCardanoTools(
 				"cursor pagination requires a full address",
 			)
 		}
-		if offset > limits.maxOffset {
+		if limits.maxOffset > 0 && offset > limits.maxOffset {
 			return nil, nil, errOffsetTooLarge
 		}
 		if err := limits.admit(); err != nil {
@@ -1167,7 +1174,7 @@ func registerCardanoTools(
 			limit = 200
 		}
 		offset := max(input.Offset, 0)
-		if offset > limits.maxOffset {
+		if limits.maxOffset > 0 && offset > limits.maxOffset {
 			return nil, nil, errOffsetTooLarge
 		}
 		if err := limits.admit(); err != nil {
@@ -1185,10 +1192,11 @@ func registerCardanoTools(
 			if len(rawName) > 32 {
 				return nil, nil, errors.New("asset name exceeds 32 bytes")
 			}
-			q = `SELECT u.tx_id, u.output_idx, u.payment_key, u.amount, i.name, h.amount, u.datum_hash
+			q = `SELECT p.hash, u.output_idx, u.payment_key, u.amount, i.name, h.amount, u.datum_hash
 				 FROM asset_identity i
 				 JOIN asset_holding h ON h.asset_id = i.id
 				 JOIN utxo u ON h.utxo_id = u.id
+				 JOIN "transaction" p ON p.id = u.tx_id
 				 WHERE i.policy_id = ? AND i.name = ? AND u.deleted_slot = 0
 				 ORDER BY u.id DESC, h.asset_id DESC
 				 LIMIT ? OFFSET ?`
@@ -1199,10 +1207,11 @@ func registerCardanoTools(
 				offset,
 			}
 		} else {
-			q = `SELECT u.tx_id, u.output_idx, u.payment_key, u.amount, i.name, h.amount, u.datum_hash
+			q = `SELECT p.hash, u.output_idx, u.payment_key, u.amount, i.name, h.amount, u.datum_hash
 				 FROM asset_identity i
 				 JOIN asset_holding h ON h.asset_id = i.id
 				 JOIN utxo u ON h.utxo_id = u.id
+				 JOIN "transaction" p ON p.id = u.tx_id
 				 WHERE i.policy_id = ? AND u.deleted_slot = 0
 				 ORDER BY u.id DESC, h.asset_id DESC
 				 LIMIT ? OFFSET ?`
@@ -1405,7 +1414,7 @@ func registerCardanoTools(
 			circArgs = []any{
 				policyBytes,
 				rawName,
-				limits.maxAssetRows + 1,
+				limits.assetScanLimit(),
 			}
 		} else {
 			circQuery = `SELECT h.amount, u.id
@@ -1413,7 +1422,7 @@ func registerCardanoTools(
 						 JOIN asset_holding h ON h.asset_id = i.id
 						 JOIN utxo u ON h.utxo_id = u.id
 						 WHERE i.policy_id = ? AND u.deleted_slot = 0 LIMIT ?`
-			circArgs = []any{policyBytes, limits.maxAssetRows + 1}
+			circArgs = []any{policyBytes, limits.assetScanLimit()}
 		}
 		if err := func() error {
 			rows, err := db.QueryContext(qCtx, circQuery, circArgs...)
@@ -1427,7 +1436,7 @@ func registerCardanoTools(
 				// The query reads one row past the cap so an over-cap
 				// policy is detected rather than silently truncated.
 				scanned++
-				if scanned > limits.maxAssetRows {
+				if limits.maxAssetRows > 0 && scanned > limits.maxAssetRows {
 					return errAssetInfoIncomplete
 				}
 				var amount string
@@ -2293,7 +2302,6 @@ func registerEvaluateTxTool(
 	evaluator txEvaluator,
 	queryTimeout time.Duration,
 ) {
-	evaluationGate := make(chan struct{}, 1)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "evaluate_tx",
 		Description: "Simulate and evaluate Plutus script execution units (CPU steps, Memory units) and script fees for a transaction before on-chain submission.",
@@ -2352,14 +2360,13 @@ func registerEvaluateTxTool(
 			}, nil, nil
 		}
 
-		// The payload is parsed inside the evaluation slot and under the
-		// deadline, so concurrent callers cannot spend parsing CPU and memory
-		// outside either limit.
+		// The payload is parsed under the request deadline. No evaluation slot
+		// is configured, so concurrency is not limited here.
 		evalCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 		result, err := runBoundedEvaluation(
 			evalCtx,
-			evaluationGate,
+			nil,
 			func(ctx context.Context) (evaluationResult, error) {
 				tx, err := decodeEvaluateTransaction(txBytes)
 				if err != nil {

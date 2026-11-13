@@ -126,7 +126,7 @@ func applyPlainOverlayChain(
 			)
 			require.NoError(t, err)
 			require.NotNil(t, historical)
-			require.Equal(t, tx.Hash().Bytes(), []byte(historical.SpentAtTxId))
+			require.Equal(t, tx.Hash().Bytes(), []byte(historical.SpentAtTxHash))
 			for _, value := range []any{again, historical} {
 				encoded, err := json.Marshal(value)
 				require.NoError(t, err)
@@ -377,9 +377,9 @@ func retainedOverlayAPIState(t testing.TB, store *Store) string {
 func TestLeiosRetainedUtxoOverlayRejectsExternalMutation(t *testing.T) {
 	t.Parallel()
 	for _, query := range []string{
-		`DELETE FROM utxo WHERE tx_id = ?`,
-		`WITH x AS (SELECT id FROM utxo) DELETE FROM utxo WHERE tx_id = ?`,
-		`WITH x AS (SELECT id FROM utxo) UPDATE utxo SET amount='9' WHERE tx_id = ?`,
+		`DELETE FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
+		`WITH x AS (SELECT id FROM utxo) DELETE FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
+		`WITH x AS (SELECT id FROM utxo) UPDATE utxo SET amount='9' WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 	} {
 		t.Run(query, func(t *testing.T) {
 			t.Parallel()
@@ -461,7 +461,7 @@ func TestLeiosRetainedUtxoOverlayRejectsPointerInput(t *testing.T) {
 		),
 	)
 	_, err := store.writeDB.Exec(
-		`INSERT INTO utxo_pointer(utxo_id, ptr_slot, ptr_tx_index, ptr_cert_index) SELECT id, 1, 0, 0 FROM utxo WHERE tx_id = ?`,
+		`INSERT INTO utxo_pointer(utxo_id, ptr_slot, ptr_tx_index, ptr_cert_index) SELECT id, 1, 0, 0 FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 		seed.Hash().Bytes(),
 	)
 	require.NoError(t, err)

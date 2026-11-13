@@ -290,7 +290,8 @@ func TestNodeAdapterAssetTransactions(t *testing.T) {
 		Type: 0, Cbor: []byte{2},
 	}, nil))
 	_, err := raw.Exec(
-		`UPDATE "transaction" SET block_hash = ?, block_index = 0 WHERE hash = ?`,
+		`UPDATE applied_transaction SET block_hash = ?, block_index = 0
+WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 		blockHash,
 		produce,
 	)
@@ -421,7 +422,7 @@ func TestNodeAdapterAssetUTXOs(t *testing.T) {
 		})
 		if spentBy != nil {
 			_, err := raw.Exec(
-				`UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = 41 WHERE tx_id = ?`,
+				`UPDATE utxo SET spent_at_tx_id = (SELECT id FROM "transaction" WHERE hash = ?), deleted_slot = 41 WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 				spentBy,
 				tx.Hash,
 			)

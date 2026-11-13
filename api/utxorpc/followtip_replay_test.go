@@ -249,6 +249,7 @@ func TestConnect_FollowTipReplayStopsAtClientBudget(t *testing.T) {
 		numBlocks: followTipReplayBlocks,
 		tune: func(cfg *UtxorpcConfig) {
 			cfg.MaxReplayBlocksPerClient = budget
+			cfg.ReplayBudgetWindow = time.Hour
 		},
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -330,6 +331,7 @@ func TestConnect_FollowTipReplayOneSlotPerClient(t *testing.T) {
 
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks: followTipReplayBlocks,
+		tune:      func(cfg *UtxorpcConfig) { cfg.MaxReplaysPerClient = 1 },
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -396,6 +398,7 @@ func TestConnect_FollowTipChargesBlocksAheadOfLedgerTip(t *testing.T) {
 		numBlocks: followTipReplayBlocks,
 		tune: func(cfg *UtxorpcConfig) {
 			cfg.MaxReplayBlocksPerClient = budget
+			cfg.ReplayBudgetWindow = time.Hour
 			// The ledger has applied only the first block while the chain
 			// holds them all, as while the ledger catches up.
 			cfg.LedgerState = &laggingLedger{

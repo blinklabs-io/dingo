@@ -131,7 +131,8 @@ func (s *Store) GetAccountMIRHistory(
 	const from = ` FROM move_instantaneous_rewards_reward reward
 JOIN move_instantaneous_rewards mir ON mir.id = reward.mir_id
 JOIN certs ON certs.id = mir.certificate_id
-JOIN "transaction" tx ON tx.id = certs.transaction_id
+JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
+JOIN "transaction" txh ON txh.id = tx.tx_id
 WHERE reward.credential_tag = ? AND reward.credential = ?`
 	args := []any{credentialTag, stakingKey}
 	var total int
@@ -145,7 +146,7 @@ WHERE reward.credential_tag = ? AND reward.credential = ?`
 	}
 	dir := orderDirectionFromString(order)
 	query, queryArgs := addLimitOffset(
-		"SELECT tx.hash, reward.amount, tx.slot, tx.block_index, tx.block_hash"+
+		"SELECT txh.hash, reward.amount, tx.slot, tx.block_index, tx.block_hash"+
 			from+" ORDER BY mir.added_slot "+dir+", tx.block_index "+dir+
 			", certs.cert_index "+dir+", reward.id "+dir,
 		args, limit, offset,

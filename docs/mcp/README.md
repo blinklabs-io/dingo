@@ -66,10 +66,11 @@ Ask your AI assistant:
   `{"service":"dingo-mcp","status":"ok"}`; it does not probe database
   connectivity.
 
-Both session transports share a 128-session cap and an eight-session cap per
-client address. A session closes after five idle minutes, after one hour total,
-or when the server stops. New sessions receive HTTP 429 while either cap is
-full.
+Both session transports have no session cap, per-client cap, idle timeout or
+lifetime limit. An SSE session closes when the client disconnects. A
+Streamable HTTP session is not closed by an ordinary request ending; it closes
+when the client sends an MCP `DELETE` or the server stops, so abandoned
+sessions remain until then.
 
 ### 21 Registered Tools
 Dingo registers 21 typed, read-only tools:
@@ -126,8 +127,8 @@ Pre-packaged diagnostic and forensic protocols exposed via `prompts/list` and
   metadata PRAGMAs are supported.
 - **Immutable Ledger State**: Cardano domain tools read immutable in-memory
   ledger state or read-only database connections.
-- **Rate Limiting**: Per-IP token bucket (default 60 req/s, burst 15) prevents
-  runaway agent loops from exhausting CPU or disk I/O. Client limiter state
+- **Rate Limiting (opt-in)**: Off by default. When an operator sets `rateLimit`
+  (and optionally `burst`), a per-IP token bucket applies. Client limiter state
   is capped at 4096 identities and entries expire after 30 idle minutes
   independently of incoming traffic.
 - **Output Sanitization**: External asset text is length-bounded, stripped of
@@ -300,8 +301,9 @@ The complete lifecycle of a request consists of 6 distinct phases:
    - The LLM parses the user prompt, determines the required data, and emits a
      JSON-RPC 2.0 tool invocation.
 3. **Phase 3: Ingress Security Perimeter**:
-   - **Rate Limiting**: Per-client IP token bucket (default 60 req/s, burst 15)
-     decrements tokens. Excess requests receive HTTP 429.
+   - **Rate Limiting (opt-in)**: With `rateLimit` set, a per-client IP token
+     bucket decrements tokens and excess requests receive HTTP 429. Unset by
+     default.
    - **SQL Statement Validation**: SQL tools tokenize comments, quoted data, and
      CTE definitions to identify the main statement. Rejected queries return an
      MCP tool error before execution.
@@ -356,8 +358,8 @@ You can configure MCP via canonical plugin environment variables:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DINGO_PLUGINS_API_MCP_CONFIG_PORT` | `0` (disabled) | Port for the MCP HTTP/SSE listener (also accepts legacy `DINGO_MCP_PORT`) |
-| `DINGO_PLUGINS_API_MCP_CONFIG_RATE_LIMIT` | `60.0` | Sustained requests per second per IP (0 = unlimited) |
-| `DINGO_PLUGINS_API_MCP_CONFIG_BURST` | `15` | Maximum burst requests per IP |
+| `DINGO_PLUGINS_API_MCP_CONFIG_RATE_LIMIT` | `0` (unlimited) | Optional sustained requests per second per IP |
+| `DINGO_PLUGINS_API_MCP_CONFIG_BURST` | `0` (10 when a rate limit is set) | Optional burst requests per IP; used only with a rate limit, and 10 when omitted |
 | `DINGO_PLUGINS_API_MCP_CONFIG_QUERY_TIMEOUT` | `5s` | Maximum execution timeout for SQLite queries |
 | `DINGO_PLUGINS_API_MCP_CONFIG_MAX_ROWS` | `100` | Maximum rows returned per query by default |
 
@@ -431,11 +433,8 @@ metadata backend or an in-memory SQLite store, file-based SQL tools are
 unavailable. Full-address UTxO lookup uses the active database's exact CBOR
 address matcher in ascending ledger order. Full addresses use `cursor`
 pagination and reject nonzero `offset`; raw payment credentials retain offset
-pagination, capped at 10,000, and intentionally search across address forms.
-When a full page from a raw-credential `get_utxos`, `get_utxos_by_asset`, or
-`sqlite_query` call ends where the next offset would exceed 10,000, the response
-states that the offset limit was reached and later rows are not retrievable
-through that tool. Stake addresses and CIP-129 DRep identifiers preserve
+pagination with no offset ceiling, and intentionally search across address forms.
+Stake addresses and CIP-129 DRep identifiers preserve
 key/script types; raw hashes mean key credentials. An all-zero stake credential
 remains a valid lookup.
 
@@ -460,7 +459,7 @@ pages do not provide a complete balance at a single ledger snapshot.
 `sqlite_query` applies `offset` and the effective row limit while reading
 results, including PRAGMA and EXPLAIN results and SQL containing its own LIMIT.
 The result cap is the smallest of the requested limit (default 50), configured
-`maxRows`, and 200. Offsets above 10,000 are rejected. Before execution, SQL
+`maxRows`, and 200. Offsets are not capped. Before execution, SQL
 longer than 64 KiB is rejected before tokenization. SQLite enforces a 1 MiB
 value/encoded-row limit, 64 KiB SQL limit, and 128-column limit. Arbitrary SQL
 runs with connection-level `query_only`, including injected pools, and the
@@ -705,7 +704,7 @@ The Dingo MCP server provides 21 specialized tools:
 | `get_cardano_tip` | Live Cardano slot, height, block hash, and sync state | *none* |
 | `get_block` | Look up block details by slot number or block hash | `hash_or_slot` (string, required) |
 | `get_transaction` | Fetch transaction details by 64-character hex hash | `tx_hash` (string, required) |
-| `get_utxos` | Query unspent outputs for a Bech32 address or payment credential | `address_or_credential` (string, required), `limit`, `cursor` (full addresses; nonzero `offset` rejected), `offset` (payment credentials, at most 10,000) |
+| `get_utxos` | Query unspent outputs for a Bech32 address or payment credential | `address_or_credential` (string, required), `limit`, `cursor` (full addresses; nonzero `offset` rejected), `offset` (payment credentials) |
 | `get_account` | Query the stored stake-account row, including indexed delegation, reward, and DRep fields | `stake_address_or_credential` (string, required), `credential_type` (`key` or `script`, required for hex credentials) |
 | `get_epoch_summary` | Summary stats and boundary nonces for an epoch | `epoch` (int, optional) |
 | `resolve_datum_or_script` | Look up and decode Plutus CIP-32 datum or script metadata from hash | `hash` (string, required - 56 or 64 hex chars) |

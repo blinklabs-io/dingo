@@ -17,6 +17,7 @@ package utxorpc
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 
 	"connectrpc.com/connect"
@@ -24,17 +25,9 @@ import (
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit"
 )
 
-// Defaults for the long-lived stream bounds on UtxorpcConfig.
-const (
-	DefaultMaxStreams          = 1000
-	DefaultMaxStreamsPerClient = 20
-	DefaultMaxPredicateNodes   = 1000
-	DefaultMaxReplayBlocks     = 10000
-)
-
 // streamLimiter admits long-lived streams (FollowTip, WatchTx, WatchMempool,
-// WaitForTx)
-// under a process-wide and a per-client cap. A client is the remote IPv4
+// WaitForTx) under a process-wide and a per-client cap. A cap of zero or less
+// is not applied. A client is the remote IPv4
 // address or IPv6 /64 prefix (see clientKey), so clients behind one proxy
 // share a budget.
 type streamLimiter struct {
@@ -73,7 +66,7 @@ func (l *streamLimiter) acquire(peerAddr string) (func(), error) {
 	client := clientKey(peerAddr)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.total >= l.maxTotal {
+	if l.maxTotal > 0 && l.total >= l.maxTotal {
 		return nil, connect.NewError(
 			connect.CodeResourceExhausted,
 			fmt.Errorf(
@@ -83,7 +76,7 @@ func (l *streamLimiter) acquire(peerAddr string) (func(), error) {
 			),
 		)
 	}
-	if l.perClient[client] >= l.maxPerClient {
+	if l.maxPerClient > 0 && l.perClient[client] >= l.maxPerClient {
 		return nil, connect.NewError(
 			connect.CodeResourceExhausted,
 			fmt.Errorf(
@@ -110,28 +103,53 @@ func (l *streamLimiter) acquire(peerAddr string) (func(), error) {
 
 // mempoolStreamQueue hands WatchMempool responses from the event bus
 // callback to the request goroutine, the only stream sender. offer never
-// blocks, so a slow client cannot hold up event delivery; a client that lets
-// the queue fill is cut off instead.
+// blocks, so a slow client cannot hold up event delivery. A positive limit
+// cuts off a client that lets that many responses queue; zero is unbounded.
 type mempoolStreamQueue struct {
-	responses chan *submit.WatchMempoolResponse
+	mu      sync.Mutex
+	pending []*submit.WatchMempoolResponse
+	limit   int
+	notify  chan struct{}
 }
 
-func newMempoolStreamQueue(size int) *mempoolStreamQueue {
+func newMempoolStreamQueue(limit int) *mempoolStreamQueue {
 	return &mempoolStreamQueue{
-		responses: make(chan *submit.WatchMempoolResponse, size),
+		limit:  limit,
+		notify: make(chan struct{}, 1),
 	}
 }
 
 func (q *mempoolStreamQueue) offer(resp *submit.WatchMempoolResponse) error {
-	select {
-	case q.responses <- resp:
-		return nil
-	default:
+	q.mu.Lock()
+	if q.limit > 0 && len(q.pending) >= q.limit {
+		q.mu.Unlock()
 		return connect.NewError(
 			connect.CodeResourceExhausted,
 			errors.New("client is too slow to receive mempool transactions"),
 		)
 	}
+	q.pending = append(q.pending, resp)
+	q.mu.Unlock()
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// pop removes and returns the oldest queued response, or nil when none is
+// queued. The sender takes one response per Send so that everything still
+// waiting stays counted against the limit while a Send blocks on a slow client.
+func (q *mempoolStreamQueue) pop() *submit.WatchMempoolResponse {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.pending) == 0 {
+		return nil
+	}
+	resp := q.pending[0]
+	q.pending[0] = nil
+	q.pending = q.pending[1:]
+	return resp
 }
 
 // admitStream reserves a stream slot for the calling client; the returned
@@ -151,9 +169,12 @@ func predicateBudgetError(limit int) error {
 	)
 }
 
-// checkReplayDistance refuses a WatchTx start point more than MaxReplayBlocks
+// checkReplayDistance refuses a WatchTx start point (when MaxReplayBlocks is set) more than MaxReplayBlocks
 // behind the tip, bounding the history evaluated before the stream goes live.
 func (u *Utxorpc) checkReplayDistance(point ocommon.Point) error {
+	if u.config.MaxReplayBlocks <= 0 {
+		return nil
+	}
 	var pointHeight uint64
 	if len(point.Hash) > 0 {
 		block, err := u.config.LedgerState.GetBlock(point)
@@ -163,7 +184,7 @@ func (u *Utxorpc) checkReplayDistance(point ocommon.Point) error {
 		pointHeight = block.Number
 	}
 	tipHeight := u.config.LedgerState.Tip().BlockNumber
-	// #nosec G115 -- MaxReplayBlocks is positive after NewUtxorpc defaults it
+	// #nosec G115 -- MaxReplayBlocks is positive here
 	if tipHeight > pointHeight &&
 		tipHeight-pointHeight > uint64(u.config.MaxReplayBlocks) {
 		return connect.NewError(
@@ -176,4 +197,13 @@ func (u *Utxorpc) checkReplayDistance(point ocommon.Point) error {
 		)
 	}
 	return nil
+}
+
+// predicateNodeBudget is the node count a watch predicate may have; an unset
+// MaxPredicateNodes allows any size.
+func (u *Utxorpc) predicateNodeBudget() int {
+	if u.config.MaxPredicateNodes <= 0 {
+		return math.MaxInt
+	}
+	return u.config.MaxPredicateNodes
 }

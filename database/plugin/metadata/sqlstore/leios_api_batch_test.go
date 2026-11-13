@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -76,7 +77,9 @@ func TestLeiosAPIBatchPreservesConsumedInputTolerance(t *testing.T) {
 	fx := buildSharedCredentialTx(t, 0x43)
 	seedConsumedUtxo(t, store, fx)
 	other := []byte{0xfe}
-	_, err := store.writeDB.Exec(`UPDATE utxo SET deleted_slot = 1, spent_at_tx_id = ? WHERE tx_id = ? AND output_idx = 0`, other, fx.consumedTxID)
+	_, err := testutil.ExecTransactionInsert(store.writeDB, `INSERT INTO "transaction" (hash, slot) VALUES (?, 1)`, other)
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec(`UPDATE utxo SET deleted_slot = 1, spent_at_tx_id = (SELECT id FROM "transaction" WHERE hash = ?) WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`, other, fx.consumedTxID)
 	require.NoError(t, err)
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })
@@ -85,7 +88,7 @@ func TestLeiosAPIBatchPreservesConsumedInputTolerance(t *testing.T) {
 	require.NoError(t, store.SetTransactionLeiosClosureBatched(fx.tx, fx.point, 0, fx.certDeposits, false, nil, acc, txn, 0))
 	stored, err := store.GetUtxoIncludingSpent(fx.consumedTxID, 0, txn)
 	require.NoError(t, err)
-	require.Equal(t, other, []byte(stored.SpentAtTxId))
+	require.Equal(t, other, []byte(stored.SpentAtTxHash))
 	require.NoError(t, store.FlushBatch(acc, txn))
 }
 

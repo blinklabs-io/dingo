@@ -151,71 +151,43 @@ func (s *Store) AssetHeld(
 	)
 }
 
+// assetQuantityQuery totals the live holdings of one asset with
+// sumExpression, which reads h.amount.
+func assetQuantityQuery(sumExpression string) string {
+	return `
+SELECT ` + sumExpression + `
+FROM asset_identity AS i
+INNER JOIN asset_holding AS h ON h.asset_id = i.id
+INNER JOIN utxo ON h.utxo_id = utxo.id
+WHERE i.policy_id = ? AND i.name = ? AND utxo.deleted_slot = 0
+  AND h.amount IS NOT NULL`
+}
+
 // GetAssetQuantityByPolicyAndName sums the live holdings of an asset in the
-// database, so one row crosses the driver however many UTxOs hold it. It reads
-// at most models.MaxAssetQuantityHoldings holdings and fails with
-// models.ErrUtxoQueryBudgetExceeded for an asset held by more, so one request
-// cannot make the database scan without limit. The scan runs under the
-// transaction's context, so it stops when the caller's request does.
+// database, so one row crosses the driver however many UTxOs hold it. The scan
+// runs under the transaction's context, so it stops when the caller's request
+// does.
 func (s *Store) GetAssetQuantityByPolicyAndName(
 	policyID lcommon.Blake2b224,
 	assetName []byte,
-	txn types.Txn,
-) (uint64, error) {
-	return s.assetQuantity(
-		policyID,
-		assetName,
-		models.MaxAssetQuantityHoldings,
-		txn,
-	)
-}
-
-// assetQuantityQuery totals the live holdings of one asset, reading at most
-// the bound its last parameter sets.
-func assetQuantityQuery(sumExpression string) string {
-	return `
-SELECT COUNT(*), ` + sumExpression + `
-FROM (
-  SELECT h.amount AS amount
-  FROM asset_identity AS i
-  INNER JOIN asset_holding AS h ON h.asset_id = i.id
-  INNER JOIN utxo ON h.utxo_id = utxo.id
-  WHERE i.policy_id = ? AND i.name = ? AND utxo.deleted_slot = 0
-    AND h.amount IS NOT NULL
-  LIMIT ?
-) AS holdings`
-}
-
-func (s *Store) assetQuantity(
-	policyID lcommon.Blake2b224,
-	assetName []byte,
-	maxHoldings int,
 	txn types.Txn,
 ) (uint64, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
-	sumExpression := "SUM(CAST(amount AS DECIMAL(20, 0)))"
+	sumExpression := "SUM(CAST(h.amount AS DECIMAL(20, 0)))"
 	if s.dialect.Name() == "sqlite" {
-		sumExpression = "dingo_uint64_sum(amount)"
+		sumExpression = "dingo_uint64_sum(h.amount)"
 	}
-	// The inner LIMIT is what bounds the scan: one row past the cap shows
-	// the asset has more holdings than are allowed to be read.
-	var (
-		count int
-		raw   sql.NullString
-	)
+	var raw sql.NullString
 	err = db.QueryRowContext(ctx, s.dialect.Rebind(
 		assetQuantityQuery(sumExpression)),
-		policyID[:], nonNilName(assetName), maxHoldings+1,
-	).Scan(&count, &raw)
+		policyID[:], nonNilName(assetName),
+	).Scan(&raw)
 	if err != nil {
 		// The sqlite aggregate refuses a sum beyond 64 bits itself.
 		return 0, err
-	}
-	if count > maxHoldings {
-		return 0, models.ErrUtxoQueryBudgetExceeded
 	}
 	if !raw.Valid {
 		return 0, nil

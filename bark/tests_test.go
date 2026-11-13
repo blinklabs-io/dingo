@@ -29,23 +29,18 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
-	randv2 "math/rand/v2"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
 	archivev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/archive"
-	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
-	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // TestNewBark_RejectsNilDB pins that the constructor returns an error
@@ -111,83 +106,6 @@ func sendBarkProtoRequest(
 	return resp
 }
 
-func TestBarkConnectLimitRejectsOversizedDecompressedMessageBeforeAuth(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	serverCertPath, serverKeyPath := writeTestTLSCertKey(t)
-	_, _, clientCAPath := writeTestCA(t)
-	b, err := NewBark(BarkConfig{
-		DB:                              newTestDB(t),
-		Lifecycle:                       newTestLifecycleService(t),
-		SnapshotDir:                     t.TempDir(),
-		Host:                            "127.0.0.1",
-		TlsCertFilePath:                 serverCertPath,
-		TlsKeyFilePath:                  serverKeyPath,
-		TlsClientCAFilePath:             clientCAPath,
-		OperatorCertificateFingerprints: []string{strings.Repeat("00", 32)},
-	})
-	require.NoError(t, err)
-	require.NoError(t, b.Start(t.Context()))
-	t.Cleanup(func() { _ = b.Stop(t.Context()) })
-
-	// A highly-compressible unknown protobuf field expands beyond the limit.
-	// The destructive procedure would reject this anonymous client at the
-	// interceptor, so HTTP 429 also proves the decoder enforced the limit first.
-	body := protowire.AppendTag(nil, 100, protowire.BytesType)
-	body = protowire.AppendBytes(
-		body,
-		bytes.Repeat([]byte{'a'}, DefaultMaxRequestBody),
-	)
-	compressed := gzipBarkRequestBody(t, body)
-	require.Less(t, len(compressed), DefaultMaxRequestBody)
-
-	resp := sendBarkProtoRequest(
-		t,
-		mtlsHTTPClient(t, "", ""),
-		"https://"+b.Addr(),
-		databaseconnect.DatabaseServiceCancelOperationProcedure,
-		body,
-		true,
-	)
-	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
-}
-
-func TestBarkConnectLimitRejectsOversizedCompressedWireMessage(t *testing.T) {
-	t.Parallel()
-
-	b, err := NewBark(BarkConfig{
-		DB:   newTestDB(t),
-		Host: "127.0.0.1",
-	})
-	require.NoError(t, err)
-	require.NoError(t, b.Start(t.Context()))
-	t.Cleanup(func() { _ = b.Stop(t.Context()) })
-
-	// Random payload bytes do not compress, so gzip expands the request. The
-	// decoded protobuf message remains within the limit while the compressed
-	// wire message exceeds it, isolating the pre-decompression wire bound.
-	payload := make([]byte, DefaultMaxRequestBody-5)
-	_, err = randv2.NewChaCha8([32]byte{1}).Read(payload)
-	require.NoError(t, err)
-	body := protowire.AppendTag(nil, 100, protowire.BytesType)
-	body = protowire.AppendBytes(body, payload)
-	compressed := gzipBarkRequestBody(t, body)
-	require.LessOrEqual(t, len(body), DefaultMaxRequestBody)
-	require.Greater(t, len(compressed), DefaultMaxRequestBody)
-
-	resp := sendBarkProtoRequest(
-		t,
-		http.DefaultClient,
-		"http://"+b.Addr(),
-		archiveconnect.ArchiveServiceFetchBlockProcedure,
-		body,
-		true,
-	)
-	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
-}
-
 func TestArchiveFetchBlockRejectsInvalidBatchSizes(t *testing.T) {
 	t.Parallel()
 
@@ -201,24 +119,6 @@ func TestArchiveFetchBlockRejectsInvalidBatchSizes(t *testing.T) {
 		)
 		require.Error(t, err)
 		require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
-	})
-
-	t.Run("oversized", func(t *testing.T) {
-		blocks := make(
-			[]*archivev1alpha1.BlockRef,
-			DefaultMaxFetchBlockRefs+1,
-		)
-		for i := range blocks {
-			blocks[i] = &archivev1alpha1.BlockRef{}
-		}
-		_, err := handler.FetchBlock(
-			t.Context(),
-			connect.NewRequest(&archivev1alpha1.FetchBlockRequest{
-				Blocks: blocks,
-			}),
-		)
-		require.Error(t, err)
-		require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
 	})
 
 	t.Run("maximum reaches storage", func(t *testing.T) {

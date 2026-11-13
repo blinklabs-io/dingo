@@ -835,3 +835,97 @@ func TestLeiosUndecodableParentIsNotAMissingAnnouncement(t *testing.T) {
 	)
 	require.Zero(t, f.certCalls)
 }
+
+// A certifying ranking block marks the endorser block it certifies, including
+// one with no transactions, which writes no standalone closure blob, so that
+// persisted serving data is not pruned as uncertified.
+func TestLeiosCertifiedRankingBlockMarksEndorserBlockCertified(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	f.ebTxs = nil
+	parent := f.announce()
+
+	certified, err := f.db.IsLeiosEBCertified(
+		leiosCertApplyAnnouncingSlot,
+		f.ebHash.Bytes(),
+	)
+	require.NoError(t, err)
+	require.False(t, certified, "an announced endorser block is not certified")
+
+	certifier, offsets, envParent := f.certifyingChild(parent)
+	require.NoError(t, f.ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	))
+	require.NoError(t, f.process(certifier, offsets, envParent))
+
+	certified, err = f.db.IsLeiosEBCertified(
+		leiosCertApplyAnnouncingSlot,
+		f.ebHash.Bytes(),
+	)
+	require.NoError(t, err)
+	require.True(t, certified, "certified endorser block was not marked")
+}
+
+// A ranking block rejected by a check that runs after its certified endorser
+// block applied leaves no certification behind, with or without transactions:
+// the marker rolls back with the block, and the standalone closure blob that
+// commits on its own does not count.
+func TestLeiosRejectedRankingBlockLeavesEndorserBlockUncertified(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		noTxs bool
+	}{
+		{name: "with transactions"},
+		{name: "without transactions", noTxs: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLeiosCertApplyFixture(t)
+			if tc.noTxs {
+				f.ebTxs = nil
+			}
+			parent := f.announce()
+			certifier, offsets, envParent := f.certifyingChild(parent)
+			require.NoError(t, f.ls.ensureReferencedEndorserBlocks(
+				t.Context(),
+				[]gledger.Block{certifier},
+			))
+			// The fixture header carries no valid VRF or KES proof, so
+			// forcing header verification rejects the block after its
+			// endorser block applied.
+			f.ls.config.VerifyReplayHeaders = true
+
+			err := f.process(certifier, offsets, envParent)
+			var headerErr *headerValidationError
+			require.ErrorAs(t, err, &headerErr)
+			if !tc.noTxs {
+				// The closure applied before the rejection: its standalone
+				// blob committed on its own and outlives the block.
+				_, err = database.BlockByPoint(
+					t.Context(),
+					f.db,
+					ocommon.Point{
+						Slot: leiosCertApplyAnnouncingSlot,
+						Hash: f.ebHash.Bytes(),
+					},
+				)
+				require.NoError(t, err)
+			}
+
+			certified, err := f.db.IsLeiosEBCertified(
+				leiosCertApplyAnnouncingSlot,
+				f.ebHash.Bytes(),
+			)
+			require.NoError(t, err)
+			require.False(
+				t,
+				certified,
+				"a rejected ranking block left its endorser block certified",
+			)
+		})
+	}
+}

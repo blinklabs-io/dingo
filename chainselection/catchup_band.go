@@ -118,9 +118,11 @@ func (cs *ChainSelector) catchUpBandHold(
 // connection whose header is past an admission bound because the ledger lags
 // waits.
 //
-// The wait reads selector state and records nothing: no frontier, claim, or
-// witness, so a waiting connection can neither be selected nor corroborate
-// another. It takes the selector lock only for each check, never while parked.
+// The wait records no frontier, claim, or witness, so a waiting connection can
+// neither be selected nor corroborate another. It records only the pause,
+// which keeps the silent connection from aging into staleness but does not
+// count as held at the Limit on Eagerness: the parked header is unverified.
+// It takes the selector lock only for each check, never while parked.
 // The reference, the applied tip, and the connection set are re-read on every
 // check, so the wait ends when the ledger advances, the reference moves, or
 // the reference peers go away. The caller bounds it with the context.
@@ -136,7 +138,7 @@ func (cs *ChainSelector) AwaitCatchUpBand(
 	if !cs.catchUpBandHold(connId, observedTip, false) {
 		return nil
 	}
-	defer cs.pauseEagerness(connId)()
+	defer cs.pauseCatchUpBand(connId)()
 	ticker := time.NewTicker(eagernessPollInterval)
 	defer ticker.Stop()
 	for {

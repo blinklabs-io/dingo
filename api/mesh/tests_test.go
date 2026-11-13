@@ -450,44 +450,6 @@ func preflight(
 
 // --- request bounds -----------------------------------------------------
 
-// TestRequestBodyLimit covers the 1 MiB request cap: an oversized body
-// is rejected as an invalid request rather than being buffered whole.
-func TestRequestBodyLimit(t *testing.T) {
-	t.Parallel()
-
-	h := newTestHandler(t, newTestDeps())
-	oversized := `{"network_identifier":{"blockchain":"cardano",` +
-		`"network":"preview"},"metadata":{"pad":"` +
-		strings.Repeat("a", maxRequestBody) + `"}}`
-
-	rec := postRaw(t, h, "/network/status", oversized)
-
-	requireMeshError(
-		t, rec, ErrInvalidRequest, http.StatusInternalServerError,
-	)
-}
-
-// TestRequestBodyAtLimitIsAccepted pins the accepting side of the cap
-// at the exact boundary: a body of precisely maxRequestBody bytes must
-// still be served, so a regression that tightens the limit is caught
-// rather than hidden behind a comfortably small request.
-func TestRequestBodyAtLimitIsAccepted(t *testing.T) {
-	t.Parallel()
-
-	h := newTestHandler(t, newTestDeps())
-	const prefix = `{"network_identifier":{"blockchain":"cardano",` +
-		`"network":"preview"},"metadata":{"pad":"`
-	const suffix = `"}}`
-	padded := prefix +
-		strings.Repeat("a", maxRequestBody-len(prefix)-len(suffix)) +
-		suffix
-	require.Len(t, padded, maxRequestBody)
-
-	rec := postRaw(t, h, "/network/status", padded)
-
-	decodeResponse[NetworkStatusResponse](t, rec)
-}
-
 // --- routing ------------------------------------------------------------
 
 // TestRoutesRejectNonPost asserts every Mesh endpoint is POST-only, as
@@ -549,30 +511,10 @@ func TestStartIsRefusedWhileAnotherStartHoldsTheGate(t *testing.T) {
 	require.NoError(t, srv.Stop(t.Context()))
 }
 
-// The oversized half of the request bounds is covered at the handler by
-// TestRequestBodyLimit and TestRequestBodyAtLimitIsAccepted. The cases
-// here need a real socket, because a stalled or truncated body cannot
-// be expressed through net/http's client or an httptest recorder: both
-// always deliver a complete body.
+// A truncated body cannot be expressed through net/http's client or an
+// httptest recorder, so these cases use a real socket.
 
-// testBodyTimeout is short enough to keep the stalled-client case fast
-// while staying far above the loopback round trip it measures against.
-const testBodyTimeout = 250 * time.Millisecond
-
-// respondWithin bounds how long a bounded handler may take to answer.
-// It has to clear loopback and CI scheduling noise, but it also has to
-// stay well under both listenerReadTimeout and any plausible
-// regression of the body deadline: an allowance of tens of seconds
-// would pass a deadline that had grown to seconds, or been dropped
-// onto the listener backstop, which is the regression these cases
-// exist to catch.
-const respondWithin = 20 * testBodyTimeout
-
-// withRequestBodyTimeout sets the per-request body deadline so a test
-// need not wait out the production default.
-func withRequestBodyTimeout(d time.Duration) serverOption {
-	return func(c *ServerConfig) { c.requestBodyTimeout = d }
-}
+const respondWithin = 5 * time.Second
 
 // dialTestServer opens a raw connection to a running test server, so a
 // test can control exactly how much of a request body reaches it.
@@ -650,38 +592,6 @@ func requireInvalidRequest(
 	require.Equal(t, ErrInvalidRequest.Retriable, got.Retriable)
 }
 
-// TestRequestBodyStalledClientIsBounded covers the slow-client case: a
-// client that sends a complete request head and then stops partway
-// through the declared body must not hold the handler indefinitely.
-// The byte cap cannot fire here, because the client never sends enough
-// bytes to reach it.
-func TestRequestBodyStalledClientIsBounded(t *testing.T) {
-	t.Parallel()
-
-	_, baseURL := startTestServer(
-		t, newTestDeps(), withRequestBodyTimeout(testBodyTimeout),
-	)
-
-	conn := dialTestServer(t, baseURL)
-	// Declares far more body than it sends, then goes quiet without
-	// closing: the connection stays open and silent indefinitely.
-	start := time.Now()
-	writePartialRequest(
-		t, conn, "/network/list", 4096,
-		`{"network_identifier":{"blockchain":"cardano"`,
-	)
-
-	resp, body := readMeshResponse(t, conn, respondWithin)
-	elapsed := time.Since(start)
-
-	requireInvalidRequest(t, resp, body)
-	// The deadline is what ended this read. An answer arriving before
-	// it could not have come from waiting on the body, so it would
-	// mean the request failed for some other reason and the case was
-	// no longer exercising the bound it names.
-	require.GreaterOrEqual(t, elapsed, testBodyTimeout)
-}
-
 // TestRequestBodyTruncatedIsRejected covers a body shorter than its
 // declared Content-Length, where the client half-closes instead of
 // stalling. The read ends in an unexpected EOF rather than a deadline,
@@ -690,7 +600,7 @@ func TestRequestBodyTruncatedIsRejected(t *testing.T) {
 	t.Parallel()
 
 	_, baseURL := startTestServer(
-		t, newTestDeps(), withRequestBodyTimeout(testBodyTimeout),
+		t, newTestDeps(),
 	)
 
 	conn := dialTestServer(t, baseURL)
@@ -708,13 +618,13 @@ func TestRequestBodyTruncatedIsRejected(t *testing.T) {
 }
 
 // TestRequestBodyNormalRequestUnaffected is the control: a well-formed
-// request served under the same short deadline must still succeed, so
+// request served must still succeed, so
 // the bound cannot be satisfied by rejecting everything.
 func TestRequestBodyNormalRequestUnaffected(t *testing.T) {
 	t.Parallel()
 
 	_, baseURL := startTestServer(
-		t, newTestDeps(), withRequestBodyTimeout(testBodyTimeout),
+		t, newTestDeps(),
 	)
 
 	raw, err := json.Marshal(MetadataRequest{})
@@ -734,17 +644,6 @@ func TestRequestBodyNormalRequestUnaffected(t *testing.T) {
 		t, json.NewDecoder(resp.Body).Decode(&decoded),
 	)
 	require.Len(t, decoded.NetworkIdentifiers, 1)
-}
-
-// A complete first value does not complete the declared HTTP body.
-func TestRequestBodyStalledAfterJSONIsRejected(t *testing.T) {
-	_, baseURL := startTestServer(
-		t, newTestDeps(), withRequestBodyTimeout(testBodyTimeout),
-	)
-	conn := dialTestServer(t, baseURL)
-	writePartialRequest(t, conn, "/network/list", 4096, "{}")
-	resp, body := readMeshResponse(t, conn, respondWithin)
-	requireInvalidRequest(t, resp, body)
 }
 
 // Fixed network identity shared by every test in the package so that

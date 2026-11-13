@@ -155,6 +155,33 @@ func clearRewardStakeInputsPending(
 	return saveRewardStakeInputsPending(meta, metaTxn, pending)
 }
 
+// discardRewardStakeInputsPendingAfterSlot drops the pending entries of
+// snapshots whose boundary a rollback to slot has rewound. The snapshot rows
+// are deleted by the rollback, so nothing is left for the entry to describe,
+// and a reader of the marker would otherwise report that epoch's basis as
+// incomplete.
+func discardRewardStakeInputsPendingAfterSlot(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	slot uint64,
+) error {
+	pending, err := loadRewardStakeInputsPending(meta, metaTxn)
+	if err != nil {
+		return err
+	}
+	kept := slices.DeleteFunc(
+		slices.Clone(pending.Entries),
+		func(e rewardStakeInputsPendingEntry) bool {
+			return e.BoundarySlot > slot
+		},
+	)
+	if len(kept) == len(pending.Entries) {
+		return nil
+	}
+	pending.Entries = kept
+	return saveRewardStakeInputsPending(meta, metaTxn, pending)
+}
+
 // takeDeferredRewardStakeInputs hands the reward_stake_input rows the
 // boundary capture staged in txn to a background writer that starts once txn
 // commits.
@@ -392,13 +419,21 @@ func (ls *LedgerState) ensureRewardStakeInputsReady(
 			"get reward pool inputs for epoch %d: %w", epoch, err,
 		)
 	}
-	rebuilt, err := ls.rebuildPrunedRewardStakeInputs(
+	rebuilt, rejected, err := ls.rebuildPrunedRewardStakeInputsDetailed(
 		meta, metaTxn, epoch, snapshot, poolInputs,
 	)
 	if err != nil {
 		return fmt.Errorf(
 			"rebuild pending reward stake inputs for epoch %d: %w",
 			epoch, err,
+		)
+	}
+	if rejected && snapshot.TotalDelegators > 0 {
+		return fmt.Errorf(
+			"%w: pending epoch %d reconstruction disagrees with the "+
+				"retained reward_pool_input totals",
+			errRewardStakeInputsUnrecoverable,
+			epoch,
 		)
 	}
 	if len(rebuilt) == 0 && snapshot.TotalDelegators > 0 {

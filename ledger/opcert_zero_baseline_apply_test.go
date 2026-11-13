@@ -115,6 +115,20 @@ func applyOpCertBaselineBlock(
 	counter uint64,
 ) error {
 	t.Helper()
+	return applyOpCertBaselineBlockWithValidation(
+		t, ls, praos, slot, counter, true,
+	)
+}
+
+func applyOpCertBaselineBlockWithValidation(
+	t *testing.T,
+	ls *LedgerState,
+	praos bool,
+	slot uint64,
+	counter uint64,
+	shouldValidate bool,
+) error {
+	t.Helper()
 	block := opCertBaselineBlock(t, praos, slot, counter)
 	era := eras.AlonzoEraDesc
 	var pparams lcommon.ProtocolParameters = &alonzo.AlonzoProtocolParameters{
@@ -137,7 +151,7 @@ func applyOpCertBaselineBlock(
 				txn,
 				ocommon.Point{Slot: slot, Hash: block.Hash().Bytes()},
 				block,
-				true,
+				shouldValidate,
 				false,
 				false,
 				nil,
@@ -152,6 +166,59 @@ func applyOpCertBaselineBlock(
 			)
 			return err
 		})
+}
+
+func TestLedgerProcessBlockOpCertCounterAppliesToHistoricalPeers(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		counter       uint64
+		trustedReplay bool
+		wantErr       string
+	}{
+		{
+			name:    "stale historical peer counter",
+			counter: 4,
+			wantErr: "opcert counter 4 is below last seen 5",
+		},
+		{name: "next historical peer counter", counter: 6},
+		{
+			name:          "trusted replay retains its exemption",
+			counter:       4,
+			trustedReplay: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ls := newOpCertBaselineLedgerState(t, 0)
+			ls.config.TrustedReplay = tc.trustedReplay
+			poolKeyHash := lcommon.PoolKeyHash(opCertBaselineIssuer().Hash())
+			require.NoError(t, ls.db.UpdatePoolOpCertSequence(
+				context.Background(), poolKeyHash, 5, 1, nil,
+			))
+
+			err := applyOpCertBaselineBlockWithValidation(
+				t, ls, true, 10, tc.counter, false,
+			)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				stored, found := opCertBaselineRecorded(t, ls)
+				require.True(t, found)
+				require.Equal(t, uint64(5), stored)
+				return
+			}
+			require.NoError(t, err)
+			if !tc.trustedReplay {
+				stored, found := opCertBaselineRecorded(t, ls)
+				require.True(t, found)
+				require.Equal(t, tc.counter, stored)
+			}
+		})
+	}
 }
 
 func newOpCertBaselineLedgerState(

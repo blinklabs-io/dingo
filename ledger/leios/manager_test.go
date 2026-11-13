@@ -7042,3 +7042,50 @@ func TestVoteManagerRepeatedKeylessVotesDoNotExhaustVerificationBudget(
 		),
 	)
 }
+
+type frozenSnapshotEpochProvider struct {
+	fakeEpochProvider
+	snapshotEpoch uint64
+}
+
+func (f *frozenSnapshotEpochProvider) LeaderStakeSnapshotEpoch(uint64) uint64 {
+	return f.snapshotEpoch
+}
+
+type recordingStakeProvider struct {
+	epochs []uint64
+}
+
+func (r *recordingStakeProvider) GetStakeDistribution(
+	epoch uint64,
+) (map[string]uint64, uint64, error) {
+	r.epochs = append(r.epochs, epoch)
+	return nil, 0, errors.New("recorded")
+}
+
+// TestCommitteeFollowsElectionSnapshotAcrossEmptyEpoch pins that the committee
+// is seated from the distribution that elects leaders in its epoch, which an
+// empty epoch leaves frozen at the ledger epoch label, not from the epoch
+// before the committee's own.
+func TestCommitteeFollowsElectionSnapshotAcrossEmptyEpoch(t *testing.T) {
+	t.Parallel()
+
+	stake := &recordingStakeProvider{}
+	mgr := &VoteManager{
+		epochProvider: &frozenSnapshotEpochProvider{snapshotEpoch: 2},
+		stakeProvider: stake,
+		paramsProvider: &fakeParamsProvider{
+			committeeSize: 10,
+			tau:           big.NewRat(7, 10),
+		},
+	}
+
+	_, snapshotEpoch, err := mgr.computeCommitteeEntry(9)
+
+	require.Error(t, err)
+	require.Equal(t, uint64(2), snapshotEpoch)
+	require.Equal(t, []uint64{2}, stake.epochs)
+
+	plain := &VoteManager{epochProvider: &fakeEpochProvider{}}
+	require.Equal(t, CommitteeSnapshotEpoch(9), plain.committeeSnapshotEpoch(9))
+}

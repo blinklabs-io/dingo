@@ -6287,6 +6287,101 @@ func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
 	require.Equal(t, uint(7), got.ProtocolVersion)
 }
 
+func TestProcessEpochRolloverRequiresPostRUPDBlockForRewardUpdate(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const rupdStartAfterSlot = uint64(34_560)
+	for _, tc := range []struct {
+		name          string
+		endedEpoch    uint64
+		lastBlockSlot uint64
+		wantTreasury  uint64
+		wantReserves  uint64
+	}{
+		{
+			name:          "tip in the previous epoch",
+			endedEpoch:    1,
+			lastBlockSlot: previewEpochLength - 1,
+			wantTreasury:  0,
+			wantReserves:  previewGenesisReserves,
+		},
+		{
+			name:          "no block after window",
+			lastBlockSlot: rupdStartAfterSlot,
+			wantTreasury:  0,
+			wantReserves:  previewGenesisReserves,
+		},
+		{
+			name:          "first valid post-window block",
+			lastBlockSlot: rupdStartAfterSlot + 1,
+			wantTreasury:  previewEpoch1Treasury,
+			wantReserves:  previewEpoch1Reserves,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ls, db := newPreviewRewardPotsTestLedger(t)
+			meta := db.Metadata()
+			require.Equal(
+				t,
+				rupdStartAfterSlot,
+				ls.rewardUpdateStabilityWindow(),
+			)
+			require.NoError(t, meta.SetNetworkState(
+				0, previewGenesisReserves, 0, nil,
+			))
+			require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+				Epoch:        tc.endedEpoch,
+				Reserves:     types.Uint64(previewGenesisReserves),
+				CapturedSlot: tc.endedEpoch * previewEpochLength,
+			}, nil))
+
+			blockHash := bytes.Repeat([]byte{byte(tc.lastBlockSlot)}, 32)
+			require.NoError(t, db.SetTip(ochainsync.Tip{
+				Point: ocommon.NewPoint(tc.lastBlockSlot, blockHash),
+			}, nil))
+			currentEpoch, err := meta.GetEpoch(tc.endedEpoch, nil)
+			require.NoError(t, err)
+			require.NotNil(t, currentEpoch)
+			pparams := &alonzo.AlonzoProtocolParameters{
+				NOpt:             150,
+				A0:               rewardCalcRat(3, 10),
+				Rho:              rewardCalcRat(3, 1_000),
+				Tau:              rewardCalcRat(1, 5),
+				Decentralization: rewardCalcRat(1, 1),
+				ProtocolMajor:    6,
+				ProtocolMinor:    0,
+			}
+
+			txn := db.Transaction(t.Context(), true)
+			require.NoError(t, txn.Do(func(txn *database.Txn) error {
+				_, err := ls.processEpochRollover(
+					t.Context(),
+					txn,
+					*currentEpoch,
+					eras.AlonzoEraDesc,
+					pparams,
+				)
+				return err
+			}))
+
+			state, err := meta.GetNetworkState(nil)
+			require.NoError(t, err)
+			require.NotNil(t, state)
+			if got := uint64(state.Treasury); got != tc.wantTreasury {
+				t.Fatalf(
+					"reward update trigger mismatch: treasury = %d, want %d",
+					got,
+					tc.wantTreasury,
+				)
+			}
+			require.Equal(t, tc.wantReserves, uint64(state.Reserves))
+		})
+	}
+}
+
 // TestPrecomputeStakeRewardsAsyncPathMatchesSingleTransactionPath verifies
 // that splitting the async EventBus precompute path
 // (precomputeStakeRewardsAfterEpochTransition) into a read-only calculation
@@ -7026,7 +7121,17 @@ func rewardCalcExecRows(
 	args ...any,
 ) int64 {
 	t.Helper()
-	result, err := rewardCalcSQLDB(t, db).Exec(query, args...)
+	var (
+		result sql.Result
+		err    error
+	)
+	if strings.HasPrefix(strings.TrimSpace(query), `INSERT INTO "transaction"`) {
+		result, err = testutil.ExecTransactionInsert(
+			rewardCalcSQLDB(t, db), query, args...,
+		)
+	} else {
+		result, err = rewardCalcSQLDB(t, db).Exec(query, args...)
+	}
 	require.NoError(t, err)
 	rows, err := result.RowsAffected()
 	require.NoError(t, err)
@@ -7075,17 +7180,20 @@ func rewardCalcSeedStakeCert(
 	raw := rewardCalcSQLDB(t, db)
 	hash := make([]byte, 32)
 	binary.BigEndian.PutUint64(hash[24:], uint64(id))
-	_, err := raw.Exec(`
-INSERT INTO "transaction" (id, hash, slot, block_index)
-VALUES (?, ?, ?, 0)`,
-		id, hash, slot,
+	txRes, err := testutil.ExecTransactionInsert(raw,
+		`
+INSERT INTO "transaction" (hash, slot, block_index)
+VALUES (?, ?, 0)`,
+		hash, slot,
 	)
+	require.NoError(t, err)
+	txID, err := txRes.LastInsertId()
 	require.NoError(t, err)
 	_, err = raw.Exec(`
 INSERT INTO certs (
     id, transaction_id, cert_index, slot, cert_type
 ) VALUES (?, ?, 0, ?, ?)`,
-		id, id, slot, certType,
+		id, txID, slot, certType,
 	)
 	require.NoError(t, err)
 	switch certType {
@@ -8045,6 +8153,7 @@ INSERT INTO reward_live_stake (pool_key_hash, staking_key, credential_tag,
     utxo_stake, reward_stake, total_stake, registered, pool_delegation_slot,
     updated_slot, calculation_version)
 VALUES (?, ?, 0, ?, ?, ?, 1, 1, 1, ?)`)
+	txStmt := prepare(`INSERT INTO "transaction" (hash) VALUES (?)`)
 	utxoStmt := prepare(`
 INSERT INTO utxo (tx_id, output_idx, payment_key, staking_key, credential_tag,
     added_slot, deleted_slot, amount, payment_script)
@@ -8145,8 +8254,12 @@ VALUES (?, ?, ?)`)
 			nextUtxo++
 			txID := make([]byte, 32)
 			binary.BigEndian.PutUint64(txID[24:], nextUtxo)
-			_, err := utxoStmt.Exec(
-				txID, 0, epochBoundaryBenchHash(0x50, nextUtxo), key,
+			txRes, err := txStmt.Exec(txID)
+			require.NoError(tb, err)
+			txRowID, err := txRes.LastInsertId()
+			require.NoError(tb, err)
+			_, err = utxoStmt.Exec(
+				txRowID, 0, epochBoundaryBenchHash(0x50, nextUtxo), key,
 				strconv.FormatUint(amount, 10),
 			)
 			require.NoError(tb, err)
@@ -9466,11 +9579,11 @@ func newPrototypeGenesisRewardLedger(
 			))
 		}
 	}
-	_, err = rewardCalcSQLDB(t, db).Exec(`
+	_, err = testutil.ExecTransactionInsert(rewardCalcSQLDB(t, db), `
 INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    hash, block_hash, slot, type, fee, collateral_fee, ttl,
     block_index, valid
-) VALUES (1, ?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
+) VALUES (?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
 		[]byte("genesis-performance-tx"), []byte("genesis-performance-block"))
 	require.NoError(t, err)
 	return ls, db
@@ -10564,14 +10677,19 @@ func TestApplyStakeRewardsPreviewGenesisToEpoch2(t *testing.T) {
 	}, nil))
 
 	// Preview's two epoch-0 transactions.
-	_, err := rewardCalcSQLDB(t, db).Exec(`
+	_, err := testutil.ExecTransactionInsert(rewardCalcSQLDB(t, db), `
 INSERT INTO "transaction" (
     id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
     block_index, valid
-) VALUES
-    (1, ?, ?, 60, 5, '200000', '0', '0', 0, TRUE),
-    (2, ?, ?, 320, 5, '237793', '0', '0', 0, TRUE)`,
+) VALUES (1, ?, ?, 60, 5, '200000', '0', '0', 0, TRUE)`,
 		[]byte("preview-tx-0"), []byte("preview-block-0"),
+	)
+	require.NoError(t, err)
+	_, err = testutil.ExecTransactionInsert(rewardCalcSQLDB(t, db), `
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (2, ?, ?, 320, 5, '237793', '0', '0', 0, TRUE)`,
 		[]byte("preview-tx-1"), []byte("preview-block-1"),
 	)
 	require.NoError(t, err)
@@ -10854,11 +10972,11 @@ func TestApplyStakeRewardsConwayGenesisPerformance(t *testing.T) {
 			))
 		}
 	}
-	_, err = rewardCalcSQLDB(t, db).Exec(`
+	_, err = testutil.ExecTransactionInsert(rewardCalcSQLDB(t, db), `
 INSERT INTO "transaction" (
-    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    hash, block_hash, slot, type, fee, collateral_fee, ttl,
     block_index, valid
-) VALUES (1, ?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
+) VALUES (?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
 		[]byte("genesis-performance-tx"), []byte("genesis-performance-block"))
 	require.NoError(t, err)
 

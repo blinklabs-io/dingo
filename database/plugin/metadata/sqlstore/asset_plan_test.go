@@ -154,12 +154,6 @@ func TestAssetReadsNeverScanAssetTables(t *testing.T) {
 		PolicyID: policy, Name: name,
 	})
 	require.NoError(t, err)
-	_, err = q.GetLiveUtxosByAsset(ctx, sqlitequery.GetLiveUtxosByAssetParams{
-		PolicyID: policy, Name: name,
-	})
-	require.NoError(t, err)
-	_, err = q.GetLiveUtxosByAssetPolicy(ctx, policy)
-	require.NoError(t, err)
 	var plans []string
 	plan := func(label, query string, args ...any) {
 		plans = append(plans, label)
@@ -177,8 +171,10 @@ func TestAssetReadsNeverScanAssetTables(t *testing.T) {
 	}
 
 	plan("asset quantity",
-		assetQuantityQuery("dingo_uint64_sum(amount)"),
-		policy, name, 1000)
+		assetQuantityQuery("dingo_uint64_sum(h.amount)"),
+		policy, name)
+	plan("live utxos by asset", liveUtxosByAssetQuery, policy, name)
+	plan("live utxos by asset policy", liveUtxosByAssetPolicyQuery, policy)
 	plan("asset holders count",
 		`SELECT COUNT(*) FROM (SELECT 1`+assetHolderGroups+`) AS holders`,
 		policy, name)
@@ -244,9 +240,14 @@ func TestAssetWritePathsNeverUseTheAssetIdIndex(t *testing.T) {
 	require.NoError(t, err)
 
 	for id := 1; id <= 9; id++ {
-		_, err := without.writeDB.Exec(`
+		_, err := without.writeDB.Exec(
+			`INSERT INTO "transaction" (id, hash) VALUES (?, ?)`,
+			id, []byte{0xee, byte(id)},
+		)
+		require.NoError(t, err)
+		_, err = without.writeDB.Exec(`
 INSERT INTO utxo (id, tx_id, output_idx, added_slot, deleted_slot, amount)
-VALUES (?, ?, 0, 1, 0, '1')`, id, []byte{0xee, byte(id)})
+VALUES (?, ?, 0, 1, 0, '1')`, id, id)
 		require.NoError(t, err)
 	}
 	var seen []recordedStatement

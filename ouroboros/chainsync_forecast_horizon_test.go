@@ -72,7 +72,7 @@ func newForecastHorizonFixture(
 	})
 	o.chainsyncState = state
 	o.eventBus = bus
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	return forecastHorizonFixture{
 		o:        o,
 		conn:     conn,

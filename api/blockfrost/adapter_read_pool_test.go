@@ -96,7 +96,7 @@ func TestNodeAdapterListingsReleaseSnapshotBeforeNestedReads(t *testing.T) {
 	storePointerOutputCbor(t, db, tx.Hash, 0, addr, 1_000_000)
 	_, err = raw.Exec(
 		`INSERT INTO utxo_reference_script (utxo_id, script_hash)
-SELECT id, ? FROM utxo WHERE tx_id = ?`,
+SELECT id, ? FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`,
 		script,
 		tx.Hash,
 	)

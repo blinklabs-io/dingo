@@ -359,13 +359,17 @@ func NewBarkBlobStore(
 		archiveClient: archiveconnect.NewArchiveServiceClient(
 			archiveServiceHTTPClient,
 			config.BaseUrl,
-			connect.WithReadMaxBytes(DefaultMaxResponseBody),
+			connect.WithReadMaxBytes(archiveClientMaxResponseBody),
 		),
 		httpClient:           downloadHTTPClient,
 		blockDownloadOrigins: allowedOrigins,
 		upstream:             upstream,
 	}, nil
 }
+
+// archiveClientMaxResponseBody bounds each message read from a remote Bark
+// archive service, which this node does not control.
+const archiveClientMaxResponseBody = 1 << 20
 
 // maxBlockSize returns the largest archive download to accept.
 func (b *BlobStoreBark) maxBlockSize() int64 {

@@ -248,11 +248,9 @@ func mysqlDeferredIndexPrefix(table, column string) bool {
 
 var mysqlDeferredIndexPrefixColumns = map[string]map[string]bool{
 	"utxo": {
-		"payment_key": true, "staking_key": true,
-		"spent_at_tx_id": true, "referenced_by_tx_id": true,
-		"collateral_by_tx_id": true, "amount": true,
+		"payment_key": true, "staking_key": true, "amount": true,
 	},
-	"transaction":          {"block_hash": true},
+	"applied_transaction":  {"block_hash": true},
 	"pool_opcert_sequence": {"pool_key_hash": true},
 	"asset_mint_burn": {
 		"policy_id": true, "name": true, "fingerprint": true,
@@ -268,10 +266,7 @@ var mysqlDeferredIndexPrefixColumns = map[string]map[string]bool{
 
 var mysqlForeignKeyIndexes = map[string]map[string]bool{
 	"utxo": {
-		"idx_utxo_transaction_id":      true,
-		"idx_utxo_spent_at_tx_id":      true,
-		"idx_utxo_referenced_by_tx_id": true,
-		"idx_utxo_collateral_by_tx_id": true,
+		"idx_utxo_spent_at_tx_id": true,
 	},
 	"redeemer":        {"idx_redeemer_transaction_id": true},
 	"key_witness":     {"idx_key_witness_transaction_id": true},

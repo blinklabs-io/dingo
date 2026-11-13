@@ -21,7 +21,6 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 )
 
 func (s *Store) hydrateTransactionSlice(
@@ -33,10 +32,8 @@ func (s *Store) hydrateTransactionSlice(
 		return nil
 	}
 	ids := make([]any, len(transactions))
-	hashes := make([]any, len(transactions))
 	for i := range transactions {
 		ids[i] = transactions[i].ID
-		hashes[i] = transactions[i].Hash
 		transactions[i].Outputs = nil
 		transactions[i].CollateralReturn = nil
 		transactions[i].Inputs = nil
@@ -46,7 +43,8 @@ func (s *Store) hydrateTransactionSlice(
 	outputs, err := s.transactionUtxosBatch(
 		ctx,
 		db,
-		"transaction_id",
+		"tx_id",
+		" AND collateral_return_for_tx_id IS NULL",
 		ids,
 		func(u *models.Utxo) string {
 			if u.TransactionID == nil {
@@ -62,6 +60,7 @@ func (s *Store) hydrateTransactionSlice(
 		ctx,
 		db,
 		"collateral_return_for_tx_id",
+		"",
 		ids,
 		func(u *models.Utxo) string {
 			if u.CollateralReturnForTxID == nil {
@@ -77,17 +76,23 @@ func (s *Store) hydrateTransactionSlice(
 		ctx,
 		db,
 		"spent_at_tx_id",
-		hashes,
-		func(u *models.Utxo) string { return string(u.SpentAtTxId) },
+		"",
+		ids,
+		func(u *models.Utxo) string {
+			if u.SpentAtTxID == nil {
+				return ""
+			}
+			return strconv.FormatUint(uint64(*u.SpentAtTxID), 10)
+		},
 	)
 	if err != nil {
 		return err
 	}
-	collateral, err := s.collateralInputsBatch(ctx, db, hashes)
+	collateral, err := s.collateralInputsBatch(ctx, db, ids)
 	if err != nil {
 		return err
 	}
-	references, err := s.referenceInputsBatch(ctx, db, hashes)
+	references, err := s.referenceInputsBatch(ctx, db, ids)
 	if err != nil {
 		return err
 	}
@@ -120,9 +125,9 @@ func (s *Store) hydrateTransactionSlice(
 		if got := returns[key]; len(got) > 0 {
 			transactions[i].CollateralReturn = &got[0]
 		}
-		transactions[i].Inputs = inputs[string(transactions[i].Hash)]
-		transactions[i].Collateral = collateral[string(transactions[i].Hash)]
-		transactions[i].ReferenceInputs = references[string(transactions[i].Hash)]
+		transactions[i].Inputs = inputs[key]
+		transactions[i].Collateral = collateral[key]
+		transactions[i].ReferenceInputs = references[key]
 		transactions[i].Certificates = certs[key]
 		transactions[i].KeyWitnesses = witnesses[key]
 		transactions[i].WitnessScripts = scripts[key]
@@ -159,43 +164,41 @@ func (s *Store) hydrateTransactionSlice(
 	return nil
 }
 
-// collateralInputsBatch reads durable many-to-many collateral edges. The
-// legacy UTxO column is retained for old readers and migration compatibility,
-// but cannot represent collateral reused by more than one transaction.
+// collateralInputsBatch reads the many-to-many collateral edges, which can
+// name one output for any number of transactions.
 func (s *Store) collateralInputsBatch(
 	ctx context.Context,
 	db queryer,
-	hashes []any,
+	ids []any,
 ) (map[string][]models.Utxo, error) {
-	return s.transactionInputAssociations(ctx, db, hashes, "utxo_collateral_input")
+	return s.transactionInputAssociations(ctx, db, ids, utxoCollateralEdgeTable)
 }
 
-// referenceInputsBatch reads the durable many-to-many reference-input edges.
-// The legacy UTxO column remains populated for compatibility, but cannot
-// represent two transactions referencing the same output.
+// referenceInputsBatch reads the many-to-many reference-input edges, which
+// can name one output for any number of transactions.
 func (s *Store) referenceInputsBatch(
 	ctx context.Context,
 	db queryer,
-	hashes []any,
+	ids []any,
 ) (map[string][]models.Utxo, error) {
-	return s.transactionInputAssociations(ctx, db, hashes, "utxo_reference_input")
+	return s.transactionInputAssociations(ctx, db, ids, utxoReferenceEdgeTable)
 }
 
 // table is an internal association-table name, never a query input.
 func (s *Store) transactionInputAssociations(
 	ctx context.Context,
 	db queryer,
-	hashes []any,
+	ids []any,
 	table string,
 ) (map[string][]models.Utxo, error) {
 	result := make(map[string][]models.Utxo)
-	for start := 0; start < len(hashes); start += s.dialect.ParameterLimit() {
-		end := min(start+s.dialect.ParameterLimit(), len(hashes))
-		query := `SELECT ` + qualifiedSQLiteUtxoColumns + `, input.transaction_hash
+	for start := 0; start < len(ids); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(ids))
+		query := `SELECT ` + utxoRowColumns + `, input.tx_id
 FROM utxo AS utxo
 JOIN ` + table + ` AS input ON input.utxo_id = utxo.id
-WHERE input.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.id`
-		rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), hashes[start:end]...)
+WHERE input.tx_id IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.id`
+		rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), ids[start:end]...)
 		if err != nil {
 			return nil, err
 		}
@@ -210,7 +213,8 @@ WHERE input.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY u
 				rows.Close()
 				return nil, err
 			}
-			result[string(row.reference)] = append(result[string(row.reference)], *item)
+			key := strconv.FormatInt(row.transactionID, 10)
+			result[key] = append(result[key], *item)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -224,8 +228,8 @@ WHERE input.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY u
 }
 
 type sqliteUtxoReferenceRow struct {
-	utxo      sqlitequery.Utxo
-	reference []byte
+	utxo          utxoRow
+	transactionID int64
 }
 
 func scanSQLiteUtxoWithReference(
@@ -233,23 +237,7 @@ func scanSQLiteUtxoWithReference(
 ) (sqliteUtxoReferenceRow, error) {
 	var row sqliteUtxoReferenceRow
 	if err := rows.Scan(
-		&row.utxo.TransactionID,
-		&row.utxo.CollateralReturnForTxID,
-		&row.utxo.TxID,
-		&row.utxo.PaymentKey,
-		&row.utxo.StakingKey,
-		&row.utxo.CredentialTag,
-		&row.utxo.DatumHash,
-		&row.utxo.SpentAtTxID,
-		&row.utxo.ReferencedByTxID,
-		&row.utxo.CollateralByTxID,
-		&row.utxo.ID,
-		&row.utxo.AddedSlot,
-		&row.utxo.DeletedSlot,
-		&row.utxo.Amount,
-		&row.utxo.OutputIdx,
-		&row.utxo.PaymentScript,
-		&row.reference,
+		append(row.utxo.scanArgs(), &row.transactionID)...,
 	); err != nil {
 		return row, err
 	}
@@ -454,6 +442,7 @@ func (s *Store) transactionUtxosBatch(
 	ctx context.Context,
 	db queryer,
 	column string,
+	extra string,
 	args []any,
 	key func(*models.Utxo) string,
 ) (map[string][]models.Utxo, error) {
@@ -463,9 +452,9 @@ func (s *Store) transactionUtxosBatch(
 	}
 	for start := 0; start < len(args); start += s.dialect.ParameterLimit() {
 		end := min(start+s.dialect.ParameterLimit(), len(args))
-		query := "SELECT " + sqliteUtxoColumns + " FROM utxo WHERE " + column + " IN (" + bindPlaceholders(
+		query := "SELECT " + utxoRowColumns + " FROM utxo WHERE " + column + " IN (" + bindPlaceholders(
 			end-start,
-		) + ") ORDER BY id"
+		) + ")" + extra + " ORDER BY id"
 		rows, err := db.QueryContext(
 			ctx,
 			s.dialect.Rebind(query),

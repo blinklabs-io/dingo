@@ -181,7 +181,7 @@ SELECT EXISTS(SELECT 1 FROM utxo_pointer WHERE utxo_id IN (` + placeholders + `)
 		absent:          make(map[overlayKey]struct{}),
 	}
 	for _, in := range inputs {
-		if in.DeletedSlot != 0 || len(in.SpentAtTxId) != 0 ||
+		if in.DeletedSlot != 0 || len(in.SpentAtTxHash) != 0 ||
 			!plainLeiosOverlayOutput(in) {
 			return false, nil
 		}
@@ -368,8 +368,7 @@ func plainLeiosOverlayTransaction(tx lcommon.Transaction) bool {
 func plainLeiosOverlayOutput(model models.Utxo) bool {
 	return len(model.Assets) == 0 &&
 		!model.PaymentScript && model.Pointer == nil && len(model.DatumHash) == 0 &&
-		len(model.Datum) == 0 && len(model.ScriptRef) == 0 &&
-		len(model.ReferencedByTxId) == 0 && len(model.CollateralByTxId) == 0
+		len(model.Datum) == 0 && len(model.ScriptRef) == 0
 }
 
 func retainedOverlayFromQueryer(db queryer) *utxoOverlay {
@@ -402,7 +401,12 @@ func (o *utxoOverlay) retainedUtxo(key overlayKey) (*models.Utxo, bool) {
 			return nil, false
 		}
 		model.DeletedSlot = state.deletedSlot
-		model.SpentAtTxId = state.spentBy
+		model.SpentAtTxHash = state.spentBy
+		model.SpentAtTxID = nil
+		if state.spentByID.Valid {
+			spenderID := uint(state.spentByID.Int64) //nolint:gosec // row ids are positive
+			model.SpentAtTxID = &spenderID
+		}
 	} else {
 		return nil, false
 	}
@@ -420,10 +424,14 @@ func (o *utxoOverlay) retainedUtxo(key overlayKey) (*models.Utxo, bool) {
 	model.StakingKey = bytes.Clone(model.StakingKey)
 	model.Address = bytes.Clone(model.Address)
 	model.Cbor = bytes.Clone(model.Cbor)
-	model.SpentAtTxId = bytes.Clone(model.SpentAtTxId)
+	model.SpentAtTxHash = bytes.Clone(model.SpentAtTxHash)
 	if model.TransactionID != nil {
 		id := *model.TransactionID
 		model.TransactionID = &id
+	}
+	if model.SpentAtTxID != nil {
+		id := *model.SpentAtTxID
+		model.SpentAtTxID = &id
 	}
 	return &model, true
 }

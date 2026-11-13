@@ -8,8 +8,6 @@ package sqlitequery
 import (
 	"context"
 	"database/sql"
-
-	"github.com/blinklabs-io/dingo/database/types"
 )
 
 const addNetworkDonation = `-- name: AddNetworkDonation :exec
@@ -126,7 +124,7 @@ func (q *Queries) CountTransactionsByPaymentCred(ctx context.Context, arg CountT
 
 const countTransactionsInSlotRange = `-- name: CountTransactionsInSlotRange :one
 SELECT COUNT(*)
-FROM "transaction"
+FROM applied_transaction
 WHERE slot >= ? AND slot <= ?
 `
 
@@ -457,109 +455,6 @@ func (q *Queries) CreatePoolStakeSnapshot(ctx context.Context, arg CreatePoolSta
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,
-	)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
-}
-
-const createUtxo = `-- name: CreateUtxo :one
-INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_at_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id
-`
-
-type CreateUtxoParams struct {
-	TransactionID           sql.NullInt64
-	CollateralReturnForTxID sql.NullInt64
-	TxID                    []byte
-	PaymentKey              []byte
-	StakingKey              []byte
-	CredentialTag           int64
-	DatumHash               []byte
-	SpentAtTxID             types.NullableHash
-	ReferencedByTxID        types.NullableHash
-	CollateralByTxID        types.NullableHash
-	AddedSlot               sql.NullInt64
-	DeletedSlot             sql.NullInt64
-	Amount                  sql.NullString
-	OutputIdx               sql.NullInt64
-	PaymentScript           sql.NullBool
-}
-
-func (q *Queries) CreateUtxo(ctx context.Context, arg CreateUtxoParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, createUtxo,
-		arg.TransactionID,
-		arg.CollateralReturnForTxID,
-		arg.TxID,
-		arg.PaymentKey,
-		arg.StakingKey,
-		arg.CredentialTag,
-		arg.DatumHash,
-		arg.SpentAtTxID,
-		arg.ReferencedByTxID,
-		arg.CollateralByTxID,
-		arg.AddedSlot,
-		arg.DeletedSlot,
-		arg.Amount,
-		arg.OutputIdx,
-		arg.PaymentScript,
-	)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
-}
-
-const createUtxoIfAbsent = `-- name: CreateUtxoIfAbsent :one
-INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_at_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (tx_id, output_idx) DO NOTHING
-RETURNING id
-`
-
-type CreateUtxoIfAbsentParams struct {
-	TransactionID           sql.NullInt64
-	CollateralReturnForTxID sql.NullInt64
-	TxID                    []byte
-	PaymentKey              []byte
-	StakingKey              []byte
-	CredentialTag           int64
-	DatumHash               []byte
-	SpentAtTxID             types.NullableHash
-	ReferencedByTxID        types.NullableHash
-	CollateralByTxID        types.NullableHash
-	AddedSlot               sql.NullInt64
-	DeletedSlot             sql.NullInt64
-	Amount                  sql.NullString
-	OutputIdx               sql.NullInt64
-	PaymentScript           sql.NullBool
-}
-
-func (q *Queries) CreateUtxoIfAbsent(ctx context.Context, arg CreateUtxoIfAbsentParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, createUtxoIfAbsent,
-		arg.TransactionID,
-		arg.CollateralReturnForTxID,
-		arg.TxID,
-		arg.PaymentKey,
-		arg.StakingKey,
-		arg.CredentialTag,
-		arg.DatumHash,
-		arg.SpentAtTxID,
-		arg.ReferencedByTxID,
-		arg.CollateralByTxID,
-		arg.AddedSlot,
-		arg.DeletedSlot,
-		arg.Amount,
-		arg.OutputIdx,
-		arg.PaymentScript,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -2366,54 +2261,17 @@ func (q *Queries) GetLatestNetworkState(ctx context.Context) (NetworkState, erro
 	return i, err
 }
 
-const getLiveUtxo = `-- name: GetLiveUtxo :one
-SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-       staking_key, credential_tag, datum_hash, spent_at_tx_id,
-       referenced_by_tx_id, collateral_by_tx_id, id, added_slot,
-       deleted_slot, amount, output_idx, payment_script
-FROM utxo
-WHERE tx_id = ? AND output_idx = ? AND deleted_slot = 0
-`
-
-type GetLiveUtxoParams struct {
-	TxID      []byte
-	OutputIdx sql.NullInt64
-}
-
-func (q *Queries) GetLiveUtxo(ctx context.Context, arg GetLiveUtxoParams) (Utxo, error) {
-	row := q.db.QueryRowContext(ctx, getLiveUtxo, arg.TxID, arg.OutputIdx)
-	var i Utxo
-	err := row.Scan(
-		&i.TransactionID,
-		&i.CollateralReturnForTxID,
-		&i.TxID,
-		&i.PaymentKey,
-		&i.StakingKey,
-		&i.CredentialTag,
-		&i.DatumHash,
-		&i.SpentAtTxID,
-		&i.ReferencedByTxID,
-		&i.CollateralByTxID,
-		&i.ID,
-		&i.AddedSlot,
-		&i.DeletedSlot,
-		&i.Amount,
-		&i.OutputIdx,
-		&i.PaymentScript,
-	)
-	return i, err
-}
-
 const getLiveUtxoRefsBySlot = `-- name: GetLiveUtxoRefsBySlot :many
-SELECT tx_id, output_idx
-FROM utxo
-WHERE deleted_slot = 0 AND added_slot = ?
-ORDER BY id
+SELECT t.hash AS tx_hash, u.output_idx
+FROM utxo AS u
+JOIN "transaction" AS t ON t.id = u.tx_id
+WHERE u.deleted_slot = 0 AND u.added_slot = ?
+ORDER BY u.id
 `
 
 type GetLiveUtxoRefsBySlotRow struct {
-	TxID      []byte
-	OutputIdx sql.NullInt64
+	TxHash    []byte
+	OutputIdx int64
 }
 
 func (q *Queries) GetLiveUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetLiveUtxoRefsBySlotRow, error) {
@@ -2425,126 +2283,7 @@ func (q *Queries) GetLiveUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullI
 	items := []GetLiveUtxoRefsBySlotRow{}
 	for rows.Next() {
 		var i GetLiveUtxoRefsBySlotRow
-		if err := rows.Scan(&i.TxID, &i.OutputIdx); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getLiveUtxosByAsset = `-- name: GetLiveUtxosByAsset :many
-SELECT u.transaction_id, u.collateral_return_for_tx_id, u.tx_id,
-       u.payment_key, u.staking_key, u.credential_tag, u.datum_hash,
-       u.spent_at_tx_id, u.referenced_by_tx_id, u.collateral_by_tx_id,
-       u.id, u.added_slot, u.deleted_slot, u.amount, u.output_idx,
-       u.payment_script
-FROM utxo u
-WHERE u.deleted_slot = 0
-  AND u.id IN (
-      SELECT h.utxo_id
-      FROM asset_identity i
-      JOIN asset_holding h ON h.asset_id = i.id
-      WHERE i.policy_id = ? AND i.name = ?
-  )
-ORDER BY u.id
-`
-
-type GetLiveUtxosByAssetParams struct {
-	PolicyID []byte
-	Name     []byte
-}
-
-func (q *Queries) GetLiveUtxosByAsset(ctx context.Context, arg GetLiveUtxosByAssetParams) ([]Utxo, error) {
-	rows, err := q.db.QueryContext(ctx, getLiveUtxosByAsset, arg.PolicyID, arg.Name)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []Utxo{}
-	for rows.Next() {
-		var i Utxo
-		if err := rows.Scan(
-			&i.TransactionID,
-			&i.CollateralReturnForTxID,
-			&i.TxID,
-			&i.PaymentKey,
-			&i.StakingKey,
-			&i.CredentialTag,
-			&i.DatumHash,
-			&i.SpentAtTxID,
-			&i.ReferencedByTxID,
-			&i.CollateralByTxID,
-			&i.ID,
-			&i.AddedSlot,
-			&i.DeletedSlot,
-			&i.Amount,
-			&i.OutputIdx,
-			&i.PaymentScript,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getLiveUtxosByAssetPolicy = `-- name: GetLiveUtxosByAssetPolicy :many
-SELECT u.transaction_id, u.collateral_return_for_tx_id, u.tx_id,
-       u.payment_key, u.staking_key, u.credential_tag, u.datum_hash,
-       u.spent_at_tx_id, u.referenced_by_tx_id, u.collateral_by_tx_id,
-       u.id, u.added_slot, u.deleted_slot, u.amount, u.output_idx,
-       u.payment_script
-FROM utxo u
-WHERE u.deleted_slot = 0
-  AND u.id IN (
-      SELECT h.utxo_id
-      FROM asset_identity i
-      JOIN asset_holding h ON h.asset_id = i.id
-      WHERE i.policy_id = ?
-  )
-ORDER BY u.id
-`
-
-func (q *Queries) GetLiveUtxosByAssetPolicy(ctx context.Context, policyID []byte) ([]Utxo, error) {
-	rows, err := q.db.QueryContext(ctx, getLiveUtxosByAssetPolicy, policyID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []Utxo{}
-	for rows.Next() {
-		var i Utxo
-		if err := rows.Scan(
-			&i.TransactionID,
-			&i.CollateralReturnForTxID,
-			&i.TxID,
-			&i.PaymentKey,
-			&i.StakingKey,
-			&i.CredentialTag,
-			&i.DatumHash,
-			&i.SpentAtTxID,
-			&i.ReferencedByTxID,
-			&i.CollateralByTxID,
-			&i.ID,
-			&i.AddedSlot,
-			&i.DeletedSlot,
-			&i.Amount,
-			&i.OutputIdx,
-			&i.PaymentScript,
-		); err != nil {
+		if err := rows.Scan(&i.TxHash, &i.OutputIdx); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -3529,15 +3268,30 @@ func (q *Queries) GetTokenRegistryEntry(ctx context.Context, subject string) (Ge
 }
 
 const getTransactionByHash = `-- name: GetTransactionByHash :one
-SELECT hash, block_hash, metadata, slot, type, id, fee, collateral_fee,
-       ttl, block_index, valid
-FROM "transaction"
-WHERE hash = ?
+SELECT t.hash, a.block_hash, a.metadata, a.slot, a.type, t.id, a.fee,
+       a.collateral_fee, a.ttl, a.block_index, a.valid
+FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE t.hash = ?
 `
 
-func (q *Queries) GetTransactionByHash(ctx context.Context, hash []byte) (Transaction, error) {
+type GetTransactionByHashRow struct {
+	Hash          []byte
+	BlockHash     []byte
+	Metadata      []byte
+	Slot          sql.NullInt64
+	Type          sql.NullInt64
+	ID            int64
+	Fee           sql.NullString
+	CollateralFee sql.NullString
+	Ttl           sql.NullString
+	BlockIndex    sql.NullInt64
+	Valid         sql.NullBool
+}
+
+func (q *Queries) GetTransactionByHash(ctx context.Context, hash []byte) (GetTransactionByHashRow, error) {
 	row := q.db.QueryRowContext(ctx, getTransactionByHash, hash)
-	var i Transaction
+	var i GetTransactionByHashRow
 	err := row.Scan(
 		&i.Hash,
 		&i.BlockHash,
@@ -3555,7 +3309,10 @@ func (q *Queries) GetTransactionByHash(ctx context.Context, hash []byte) (Transa
 }
 
 const getTransactionHashesAfterSlot = `-- name: GetTransactionHashesAfterSlot :many
-SELECT hash FROM "transaction" WHERE slot > ?
+SELECT t.hash
+FROM applied_transaction AS a
+JOIN "transaction" AS t ON t.id = a.tx_id
+WHERE a.slot > ?
 `
 
 func (q *Queries) GetTransactionHashesAfterSlot(ctx context.Context, slot sql.NullInt64) ([][]byte, error) {
@@ -3582,7 +3339,10 @@ func (q *Queries) GetTransactionHashesAfterSlot(ctx context.Context, slot sql.Nu
 }
 
 const getTransactionIDByHash = `-- name: GetTransactionIDByHash :one
-SELECT id FROM "transaction" WHERE hash = ?
+SELECT t.id
+FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE t.hash = ?
 `
 
 func (q *Queries) GetTransactionIDByHash(ctx context.Context, hash []byte) (int64, error) {
@@ -3593,7 +3353,10 @@ func (q *Queries) GetTransactionIDByHash(ctx context.Context, hash []byte) (int6
 }
 
 const getTransactionMetadataByHash = `-- name: GetTransactionMetadataByHash :one
-SELECT metadata FROM "transaction" WHERE hash = ?
+SELECT a.metadata
+FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE t.hash = ?
 `
 
 func (q *Queries) GetTransactionMetadataByHash(ctx context.Context, hash []byte) ([]byte, error) {
@@ -3604,7 +3367,10 @@ func (q *Queries) GetTransactionMetadataByHash(ctx context.Context, hash []byte)
 }
 
 const getTransactionSlotByHash = `-- name: GetTransactionSlotByHash :one
-SELECT slot FROM "transaction" WHERE hash = ?
+SELECT a.slot
+FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
+WHERE t.hash = ?
 `
 
 func (q *Queries) GetTransactionSlotByHash(ctx context.Context, hash []byte) (sql.NullInt64, error) {
@@ -3615,22 +3381,37 @@ func (q *Queries) GetTransactionSlotByHash(ctx context.Context, hash []byte) (sq
 }
 
 const getTransactionsByBlockHash = `-- name: GetTransactionsByBlockHash :many
-SELECT hash, block_hash, metadata, slot, type, id, fee, collateral_fee,
-       ttl, block_index, valid
-FROM "transaction"
-WHERE block_hash = ?
-ORDER BY block_index ASC
+SELECT t.hash, a.block_hash, a.metadata, a.slot, a.type, t.id, a.fee,
+       a.collateral_fee, a.ttl, a.block_index, a.valid
+FROM applied_transaction AS a
+JOIN "transaction" AS t ON t.id = a.tx_id
+WHERE a.block_hash = ?
+ORDER BY a.block_index ASC
 `
 
-func (q *Queries) GetTransactionsByBlockHash(ctx context.Context, blockHash []byte) ([]Transaction, error) {
+type GetTransactionsByBlockHashRow struct {
+	Hash          []byte
+	BlockHash     []byte
+	Metadata      []byte
+	Slot          sql.NullInt64
+	Type          sql.NullInt64
+	ID            int64
+	Fee           sql.NullString
+	CollateralFee sql.NullString
+	Ttl           sql.NullString
+	BlockIndex    sql.NullInt64
+	Valid         sql.NullBool
+}
+
+func (q *Queries) GetTransactionsByBlockHash(ctx context.Context, blockHash []byte) ([]GetTransactionsByBlockHashRow, error) {
 	rows, err := q.db.QueryContext(ctx, getTransactionsByBlockHash, blockHash)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Transaction{}
+	items := []GetTransactionsByBlockHashRow{}
 	for rows.Next() {
-		var i Transaction
+		var i GetTransactionsByBlockHashRow
 		if err := rows.Scan(
 			&i.Hash,
 			&i.BlockHash,
@@ -3657,70 +3438,17 @@ func (q *Queries) GetTransactionsByBlockHash(ctx context.Context, blockHash []by
 	return items, nil
 }
 
-const getUtxoIDByRef = `-- name: GetUtxoIDByRef :one
-SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?
-`
-
-type GetUtxoIDByRefParams struct {
-	TxID      []byte
-	OutputIdx sql.NullInt64
-}
-
-func (q *Queries) GetUtxoIDByRef(ctx context.Context, arg GetUtxoIDByRefParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, getUtxoIDByRef, arg.TxID, arg.OutputIdx)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
-}
-
-const getUtxoIncludingSpent = `-- name: GetUtxoIncludingSpent :one
-SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-       staking_key, credential_tag, datum_hash, spent_at_tx_id,
-       referenced_by_tx_id, collateral_by_tx_id, id, added_slot,
-       deleted_slot, amount, output_idx, payment_script
-FROM utxo
-WHERE tx_id = ? AND output_idx = ?
-`
-
-type GetUtxoIncludingSpentParams struct {
-	TxID      []byte
-	OutputIdx sql.NullInt64
-}
-
-func (q *Queries) GetUtxoIncludingSpent(ctx context.Context, arg GetUtxoIncludingSpentParams) (Utxo, error) {
-	row := q.db.QueryRowContext(ctx, getUtxoIncludingSpent, arg.TxID, arg.OutputIdx)
-	var i Utxo
-	err := row.Scan(
-		&i.TransactionID,
-		&i.CollateralReturnForTxID,
-		&i.TxID,
-		&i.PaymentKey,
-		&i.StakingKey,
-		&i.CredentialTag,
-		&i.DatumHash,
-		&i.SpentAtTxID,
-		&i.ReferencedByTxID,
-		&i.CollateralByTxID,
-		&i.ID,
-		&i.AddedSlot,
-		&i.DeletedSlot,
-		&i.Amount,
-		&i.OutputIdx,
-		&i.PaymentScript,
-	)
-	return i, err
-}
-
 const getUtxoRefsBySlot = `-- name: GetUtxoRefsBySlot :many
-SELECT tx_id, output_idx
-FROM utxo
-WHERE added_slot = ?
-ORDER BY id
+SELECT t.hash AS tx_hash, u.output_idx
+FROM utxo AS u
+JOIN "transaction" AS t ON t.id = u.tx_id
+WHERE u.added_slot = ?
+ORDER BY u.id
 `
 
 type GetUtxoRefsBySlotRow struct {
-	TxID      []byte
-	OutputIdx sql.NullInt64
+	TxHash    []byte
+	OutputIdx int64
 }
 
 func (q *Queries) GetUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetUtxoRefsBySlotRow, error) {
@@ -3732,115 +3460,7 @@ func (q *Queries) GetUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64
 	items := []GetUtxoRefsBySlotRow{}
 	for rows.Next() {
 		var i GetUtxoRefsBySlotRow
-		if err := rows.Scan(&i.TxID, &i.OutputIdx); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getUtxosAddedAfterSlot = `-- name: GetUtxosAddedAfterSlot :many
-SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-       staking_key, credential_tag, datum_hash, spent_at_tx_id,
-       referenced_by_tx_id, collateral_by_tx_id, id, added_slot,
-       deleted_slot, amount, output_idx, payment_script
-FROM utxo
-WHERE added_slot > ?
-ORDER BY added_slot DESC, id DESC
-`
-
-// Order by added_slot before id so the sort is the reverse of
-// idx_utxo_added_slot's own order; ordering by id alone costs a full table
-// scan. See the Store wrapper for the full rationale.
-func (q *Queries) GetUtxosAddedAfterSlot(ctx context.Context, addedSlot sql.NullInt64) ([]Utxo, error) {
-	rows, err := q.db.QueryContext(ctx, getUtxosAddedAfterSlot, addedSlot)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []Utxo{}
-	for rows.Next() {
-		var i Utxo
-		if err := rows.Scan(
-			&i.TransactionID,
-			&i.CollateralReturnForTxID,
-			&i.TxID,
-			&i.PaymentKey,
-			&i.StakingKey,
-			&i.CredentialTag,
-			&i.DatumHash,
-			&i.SpentAtTxID,
-			&i.ReferencedByTxID,
-			&i.CollateralByTxID,
-			&i.ID,
-			&i.AddedSlot,
-			&i.DeletedSlot,
-			&i.Amount,
-			&i.OutputIdx,
-			&i.PaymentScript,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getUtxosDeletedBeforeSlot = `-- name: GetUtxosDeletedBeforeSlot :many
-SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-       staking_key, credential_tag, datum_hash, spent_at_tx_id,
-       referenced_by_tx_id, collateral_by_tx_id, id, added_slot,
-       deleted_slot, amount, output_idx, payment_script
-FROM utxo
-WHERE deleted_slot > 0 AND deleted_slot <= ?
-LIMIT ?
-`
-
-type GetUtxosDeletedBeforeSlotParams struct {
-	DeletedSlot sql.NullInt64
-	Limit       int64
-}
-
-func (q *Queries) GetUtxosDeletedBeforeSlot(ctx context.Context, arg GetUtxosDeletedBeforeSlotParams) ([]Utxo, error) {
-	rows, err := q.db.QueryContext(ctx, getUtxosDeletedBeforeSlot, arg.DeletedSlot, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []Utxo{}
-	for rows.Next() {
-		var i Utxo
-		if err := rows.Scan(
-			&i.TransactionID,
-			&i.CollateralReturnForTxID,
-			&i.TxID,
-			&i.PaymentKey,
-			&i.StakingKey,
-			&i.CredentialTag,
-			&i.DatumHash,
-			&i.SpentAtTxID,
-			&i.ReferencedByTxID,
-			&i.CollateralByTxID,
-			&i.ID,
-			&i.AddedSlot,
-			&i.DeletedSlot,
-			&i.Amount,
-			&i.OutputIdx,
-			&i.PaymentScript,
-		); err != nil {
+		if err := rows.Scan(&i.TxHash, &i.OutputIdx); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -5182,7 +4802,7 @@ func (q *Queries) SumPoolStakeSnapshots(ctx context.Context, arg SumPoolStakeSna
 
 const sumTransactionFeesInSlotRange = `-- name: SumTransactionFeesInSlotRange :many
 SELECT CASE WHEN valid THEN fee ELSE collateral_fee END
-FROM "transaction"
+FROM applied_transaction
 WHERE slot >= ? AND slot <= ?
 `
 

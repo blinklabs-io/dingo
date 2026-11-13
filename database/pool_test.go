@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -67,7 +68,7 @@ func (s *retiredPoolSeeder) insertCert(
 	s.seq++
 	hash := make([]byte, 32)
 	binary.BigEndian.PutUint64(hash, s.seq)
-	res, err := s.raw.Exec(
+	res, err := testutil.ExecTransactionInsert(s.raw,
 		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, ?)`,
 		hash, slot, blockIndex,
 	)

@@ -126,6 +126,12 @@ func newExternalIngestHarnessWith(
 		PoolDeposit:      500_000_000,
 		DRepDeposit:      500_000_000,
 		GovActionDeposit: 100_000_000,
+		MaxBlockBodySize:   90_112,
+		MaxBlockHeaderSize: 1_100,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62_000_000,
+			Steps:  20_000_000_000,
+		},
 		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 			Major: lcommon.ProtocolVersionPlomin,
 		},
@@ -269,7 +275,7 @@ func utxoRowExists(
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	return rowBatchingQueryOne[int](t, raw,
-		`SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
+		`SELECT COUNT(*) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
 		txHash, idx) > 0
 }
 

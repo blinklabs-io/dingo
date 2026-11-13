@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,15 +48,22 @@ func markUtxoSpentDirect(
 	slot uint64,
 ) {
 	tb.Helper()
-	_, err := store.writeDB.Exec(
-		"UPDATE utxo SET deleted_slot = ?, spent_at_tx_id = ? "+
-			"WHERE tx_id = ? AND output_idx = ?",
+	_, err := testutil.ExecTransactionInsert(store.writeDB,
+		`INSERT INTO "transaction" (hash, slot) VALUES (?, ?)
+ON CONFLICT (hash) DO NOTHING`,
+		spenderTxID, int64(slot),
+	)
+	require.NoError(tb, err)
+	_, err = store.writeDB.Exec(
+		`UPDATE utxo SET deleted_slot = ?,
+    spent_at_tx_id = (SELECT id FROM "transaction" WHERE hash = ?)
+WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
 		int64(slot), spenderTxID, txID, int64(outputIdx),
 	)
 	require.NoError(tb, err)
 }
 
-// utxoDeletedAndSpender reads back the raw deleted_slot/spent_at_tx_id
+// utxoDeletedAndSpender reads back the raw deleted_slot/spender hash
 // columns for a reference, bypassing GetUtxo's "live only" filtering so a
 // spent row's state can be inspected directly.
 func utxoDeletedAndSpender(
@@ -66,8 +74,9 @@ func utxoDeletedAndSpender(
 ) (deletedSlot int64, spentAtTxID []byte) {
 	tb.Helper()
 	row := store.writeDB.QueryRow(
-		"SELECT deleted_slot, spent_at_tx_id FROM utxo "+
-			"WHERE tx_id = ? AND output_idx = ?",
+		`SELECT deleted_slot,
+    (SELECT hash FROM "transaction" WHERE id = utxo.spent_at_tx_id)
+FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
 		txID, int64(outputIdx),
 	)
 	require.NoError(tb, row.Scan(&deletedSlot, &spentAtTxID))

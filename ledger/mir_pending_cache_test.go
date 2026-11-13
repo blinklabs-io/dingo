@@ -80,10 +80,8 @@ func TestLedgerViewPendingInstantaneousRewardsReadsOncePerView(t *testing.T) {
 	loads := 0
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		lv := &LedgerView{
-			ls: ls, txn: txn, epochStartSlot: 100,
-			onMIRCertsLoad: func() { loads++ },
-		}
+		lv := mirReaderView(ls, txn, 100, 5)
+		lv.onMIRCertsLoad = func() { loads++ }
 		for i := range 50 {
 			_, err := lv.PendingInstantaneousRewards(
 				mirPotReserves, mirTestCredential(0, byte(1+i%3)),
@@ -129,7 +127,7 @@ func TestLedgerViewPendingInstantaneousRewardsMatchesUncached(t *testing.T) {
 	}
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
+		lv := mirReaderView(ls, txn, 100, 5)
 		for _, pot := range []uint{mirPotReserves, mirPotTreasury, 2} {
 			for _, cred := range creds {
 				want := uncachedPendingInstantaneousRewards(
@@ -166,7 +164,7 @@ func TestLedgerViewPendingInstantaneousRewardsSeesLaterStoredCert(t *testing.T) 
 		var got *big.Int
 		txn := db.Transaction(context.Background(), false)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
+			lv := mirReaderView(ls, txn, 100, 5)
 			var err error
 			got, err = lv.PendingInstantaneousRewards(mirPotReserves, cred)
 			return err

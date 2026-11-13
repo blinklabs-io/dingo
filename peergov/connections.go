@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"regexp"
 	"strconv"
@@ -395,7 +396,18 @@ func (p *PeerGovernor) createOutboundConnection(
 			return
 		}
 		currentPeerConnKnown := p.peers[peerIdx].Connection != nil
+		// A worker already waiting when the peer was demoted must not dial
+		// before the demotion ends.
+		demotedFor := time.Until(currentPeer.ChainsyncDemotedUntil)
 		p.mu.Unlock()
+		if demotedFor > 0 {
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(demotedFor):
+			}
+			continue
+		}
 
 		// Skip outbound if there is already an inbound connection from the
 		// same exact remote peer address. Matching on the full remote
@@ -486,9 +498,7 @@ func (p *PeerGovernor) createOutboundConnection(
 			}
 			oldSource := currentPeer.Source
 			oldConn := clonePeerConnection(currentPeer.Connection)
-			currentPeer.recordOutboundConnected(conn, time.Now())
-			p.recordPeerStateChange(currentPeer.State, PeerStateWarm)
-			currentPeer.State = PeerStateWarm
+			p.attachOutboundConnLocked(currentPeer, conn, time.Now())
 			selectionEvents := p.appendChainSelectionEventsLocked(
 				nil,
 				p.bootstrapExited,
@@ -923,8 +933,10 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	// Reset outbound backoff when an inbound connection from a
 	// topology peer succeeds. The inbound proves the peer is
 	// reachable, so if it drops later, the outbound should retry
-	// immediately rather than waiting on accumulated backoff.
-	if tmpPeer.Source != PeerSourceInboundConn {
+	// immediately rather than waiting on accumulated backoff. A chainsync
+	// demotion is not about reachability, so it keeps its delay.
+	if tmpPeer.Source != PeerSourceInboundConn &&
+		!chainsyncDemoted(tmpPeer, now) {
 		tmpPeer.ReconnectDelay = 0
 		tmpPeer.ReconnectCount = 0
 		tmpPeer.OutboundShortLivedCount = 0
@@ -943,6 +955,20 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	p.mu.Unlock()
 
 	p.publishPendingEvents(selectionEvents)
+}
+
+// attachOutboundConnLocked records a newly established outbound connection
+// on peer. Must be called with p.mu held.
+func (p *PeerGovernor) attachOutboundConnLocked(
+	peer *Peer,
+	conn *ouroboros.Connection,
+	now time.Time,
+) {
+	peer.recordOutboundConnected(conn, now)
+	// A dial already in flight can complete during a demotion.
+	p.withholdDeniedUpstreamLocked(peer)
+	p.recordPeerStateChange(peer.State, PeerStateWarm)
+	peer.State = PeerStateWarm
 }
 
 func isLocalChainsyncRestart(e connmanager.ConnectionClosedEvent) bool {
@@ -990,6 +1016,9 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 		connClosedAt := time.Now()
 		denied := p.isPeerDeniedLocked(peer)
 		stalled := isChainsyncStallError(e.Error)
+		// The reason is recorded before teardown, so a transport error that
+		// races the close does not cancel the demotion.
+		demoted := IsChainsyncDemotionReason(e.LocalCloseReason)
 		if peer.Source == PeerSourceInboundConn {
 			connDur := time.Duration(0)
 			if !peer.InboundConnectedAt.IsZero() {
@@ -1055,7 +1084,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 					)
 					connDur = 0
 				}
-				if stalled {
+				if stalled || demoted {
 					peer.LastChainsyncStall = connClosedAt
 				}
 				// A stall ends a long session without the peer having been
@@ -1065,7 +1094,8 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 					// Keep retry pacing and existing failure history, so a
 					// later genuine failure resumes its previous backoff rung.
 					peer.ReconnectDelay = initialReconnectDelay
-				} else if !stalled && !peer.ConnectedAt.IsZero() &&
+				} else if !stalled && !demoted &&
+					!peer.ConnectedAt.IsZero() &&
 					connDur >= minStableConnectionDuration {
 					// Connection was stable, reset backoff
 					peer.ReconnectCount = 0
@@ -1112,6 +1142,21 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 						)
 					}
 				}
+				if demoted {
+					floor := chainsyncDemotionReconnectDelay -
+						chainsyncDemotionJitter +
+						rand.N( //nolint:gosec // redial spread, not security-sensitive
+							2*chainsyncDemotionJitter,
+						)
+					peer.ReconnectDelay = max(peer.ReconnectDelay, floor)
+					peer.ChainsyncDemotedUntil = connClosedAt.Add(
+						peer.ReconnectDelay,
+					)
+					p.scheduleDemotionReleaseLocked(
+						peer,
+						peer.ReconnectDelay,
+					)
+				}
 			}
 			peer.ConnectedAt = time.Time{} // Reset for next connection
 		}
@@ -1127,8 +1172,8 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			if !peer.Reconnecting {
 				p.spawnOutboundConnectionLocked(peer)
 			}
-			if stalled {
-				// The stalled peer is now backing off. Dial alternates
+			if stalled || demoted {
+				// The peer is now backing off. Dial alternates
 				// immediately: the next reconcile is minutes away, and
 				// until then the node would only redial the peer that
 				// just failed.

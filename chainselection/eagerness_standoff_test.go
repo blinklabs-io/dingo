@@ -91,6 +91,37 @@ func feedStandoff(
 	}
 }
 
+// feedStandoffLinked is feedStandoff for a fork after parent, each header
+// naming the previous one as its parent.
+func feedStandoffLinked(
+	t *testing.T,
+	cs *ChainSelector,
+	connId ouroboros.ConnectionId,
+	parent ochainsync.Tip,
+	prefix string,
+	to uint64,
+	slot func(block uint64) uint64,
+) {
+	t.Helper()
+	prevHash := parent.Point.Hash
+	for block := parent.BlockNumber + 1; block <= to; block++ {
+		tip := standoffTip(prefix, block, slot(block))
+		require.True(t, cs.updatePeerTipObservedLinked(
+			connId,
+			tip,
+			tip,
+			nil,
+			PraosTiebreakerViewFromTip(
+				tip,
+				nil,
+				PraosTiebreakerConfigUnknown(),
+			),
+			deliveredLink{prevHash: prevHash},
+		))
+		prevHash = tip.Point.Hash
+	}
+}
+
 // sharedSlot places the common prefix, which ends at block 10.
 func sharedSlot(block uint64) uint64 { return standoffBaseSlot + block*100 }
 
@@ -155,6 +186,35 @@ func TestLimitOnEagernessStandoffRemovesSparserFork(t *testing.T) {
 	assert.Equal(t, dense, got[0].DominatingConnectionId)
 	assert.True(t, got[0].EagernessStandoff)
 	assert.Empty(t, f.evaluate(), "the surviving fork is never removed")
+}
+
+// Forks that branch exactly at each peer's session intersection share no
+// delivered header, yet the standoff must still compare them from that point.
+func TestLimitOnEagernessStandoffRemovesSparserForkAtSessionIntersection(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newStandoffFixture()
+	sparse := newTestConnectionId(1)
+	dense := newTestConnectionId(2)
+	intersection := standoffTip("c", 10, sharedSlot(10))
+	advertised := standoffTip("adv", 1_000, sharedSlot(1_000))
+	intersectSession(f.cs, sparse, intersection, advertised)
+	intersectSession(f.cs, dense, intersection, advertised)
+	feedStandoffLinked(t, f.cs, sparse, intersection, "s", 16, sparseSlot)
+	f.evaluate()
+	require.Equal(t, sparse, *f.cs.GetBestPeer())
+
+	feedStandoffLinked(t, f.cs, dense, intersection, "d", 16, denseSlot)
+	require.Equal(t, uint64(10+loeTestK), f.cs.EagernessLimit().BlockNumber)
+	hold(t, f.cs, sparse)
+	hold(t, f.cs, dense)
+
+	got := f.evaluate()
+	require.Len(t, got, 1, "the standoff must remove exactly one fork")
+	assert.Equal(t, sparse, got[0].ConnectionId)
+	assert.Equal(t, dense, got[0].DominatingConnectionId)
+	assert.Equal(t, intersection.Point, got[0].Intersection)
 }
 
 // A fork still streaming below the limit may yet be denser, so the other
@@ -471,4 +531,38 @@ func TestLimitOnEagernessEquallyDenseIdleForkIsRemovedWhenHeldWindowIncomplete(
 	assert.False(t, got[0].EagernessStandoff,
 		"explicit idling is classified by the provable rule")
 	assert.Equal(t, got[0].DominatingDensity, got[0].MaxDensity)
+}
+
+// A connection parked by the catch-up band is waiting for the ledger, not held
+// at the Limit on Eagerness, and its paused header was never verified. Its
+// fork, here one block deep, must not enter the standoff comparison, though
+// the pause still keeps it from being aged out as stale.
+func TestCatchUpBandPauseDoesNotEnterEagernessStandoff(t *testing.T) {
+	t.Parallel()
+	f := newStandoffFixture()
+	held := newTestConnectionId(1)
+	parked := newTestConnectionId(2)
+	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, held, "h", 11, 11, denseSlot)
+	feedStandoff(f.cs, parked, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, parked, "p", 11, 11, sparseSlot)
+	hold(t, f.cs, held)
+	t.Cleanup(f.cs.pauseCatchUpBand(parked))
+
+	assert.Empty(t, f.evaluate(),
+		"a catch-up band pause is not a standoff at the limit")
+	assert.True(t, f.cs.EagernessPaused(parked),
+		"a parked connection is still exempt from the stall recycler")
+
+	f.mu.Lock()
+	f.now = f.now.Add(3 * f.cs.config.StaleTipThreshold)
+	f.mu.Unlock()
+	f.cs.mutex.RLock()
+	stale := f.cs.isPeerTipStale(f.cs.peerTips[parked])
+	f.cs.mutex.RUnlock()
+	assert.False(t, stale,
+		"a parked connection sends no tips, so its silence is not staleness")
+	f.cs.cleanupStalePeers()
+	assert.NotNil(t, f.cs.GetPeerTip(parked),
+		"a parked connection is not removed as very stale")
 }

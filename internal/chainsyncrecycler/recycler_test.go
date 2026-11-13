@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -568,6 +569,8 @@ func TestTickRecyclesStalledActiveConnection(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, connId, recycleEvt.ConnectionId)
 	assert.Equal(t, "stalled_active_connection", recycleEvt.Reason)
+	assert.Empty(t, recycleEvt.LocalCloseReason,
+		"a stall recycle keeps ordinary session accounting")
 	assert.True(
 		t,
 		events[0].async,
@@ -787,6 +790,11 @@ func TestTickDisconnectsPatienceExhaustedPeer(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, connId, recycleEvt.ConnectionId)
 	assert.Equal(t, ReasonPatienceExhausted, recycleEvt.Reason)
+	assert.Equal(
+		t,
+		peergov.CloseReasonPatienceExhausted,
+		recycleEvt.LocalCloseReason,
+	)
 
 	runTickWith(r, st, live, now.Add(time.Second), 100)
 	assert.Len(

@@ -24,12 +24,14 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -159,6 +161,8 @@ type boundaryEraCase struct {
 	headerMajor uint
 	// babbageBody encodes the boundary block as Babbage instead of Conway.
 	babbageBody bool
+	// blockSlot overrides the default first slot of epoch 1.
+	blockSlot uint64
 	// conwaySource starts the ledger in Conway with Conway parameters whose
 	// major is pparamsMajor, with Dijkstra enabled. The boundary block is
 	// Dijkstra when dijkstraBody is set and Conway otherwise. It needs
@@ -185,6 +189,16 @@ type boundaryEraCase struct {
 	// delegates to meet the Shelley genesis updateQuorum. The boundary enacts
 	// it, so the major reaches the ledger only through that enactment.
 	classicUpdateMajor uint
+	// followers are blocks that follow the boundary block on the chain, in
+	// order, each linked to its predecessor.
+	followers []boundaryEraFollower
+}
+
+// boundaryEraFollower describes a block after the boundary block.
+type boundaryEraFollower struct {
+	// babbageBody encodes the block as Babbage instead of Conway.
+	babbageBody bool
+	slot        uint64
 }
 
 // boundaryEraTestUpdateQuorum is the Shelley genesis updateQuorum of a case
@@ -233,6 +247,17 @@ func newBoundaryEraLedger(
 	tc boundaryEraCase,
 ) (*LedgerState, gledger.Block) {
 	t.Helper()
+	ls, blocks := newBoundaryEraLedgerChain(t, tc)
+	return ls, blocks[0]
+}
+
+// newBoundaryEraLedgerChain is newBoundaryEraLedger returning the boundary
+// block followed by tc.followers, all already on the primary chain.
+func newBoundaryEraLedgerChain(
+	t *testing.T,
+	tc boundaryEraCase,
+) (*LedgerState, []gledger.Block) {
+	t.Helper()
 	headerMajor := tc.headerMajor
 	if headerMajor == 0 {
 		headerMajor = conway.MinProtocolVersionConway
@@ -277,9 +302,13 @@ func newBoundaryEraLedger(
 		prevHash = tipBlock.Hash()
 		fallthrough
 	default:
+		blockSlot := uint64(boundaryEraTestEpochLength + 1)
+		if tc.blockSlot != 0 {
+			blockSlot = tc.blockSlot
+		}
 		block = boundaryEraBlock(
 			t, tc.babbageBody, headerMajor,
-			tc.votingBlocks+1, boundaryEraTestEpochLength+1, prevHash,
+			tc.votingBlocks+1, blockSlot, prevHash,
 		)
 	}
 
@@ -291,6 +320,22 @@ func newBoundaryEraLedger(
 		raw = append(raw, rawBoundaryEraBlock(tipBlock, tipType))
 	}
 	raw = append(raw, rawBoundaryEraBlock(block, blockType))
+	blocks := []gledger.Block{block}
+	for _, follower := range tc.followers {
+		prev := blocks[len(blocks)-1]
+		followerType := uint(gledger.BlockTypeConway)
+		followerMajor := uint(conway.MinProtocolVersionConway)
+		if follower.babbageBody {
+			followerType = uint(gledger.BlockTypeBabbage)
+			followerMajor = tc.pparamsMajor
+		}
+		next := boundaryEraBlock(
+			t, follower.babbageBody, followerMajor,
+			prev.BlockNumber()+1, follower.slot, prev.Hash(),
+		)
+		raw = append(raw, rawBoundaryEraBlock(next, followerType))
+		blocks = append(blocks, next)
+	}
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), raw))
 
 	nodeConfig := newTestShelleyGenesisCfg(t)
@@ -374,6 +419,12 @@ func newBoundaryEraLedger(
 			),
 			BlockNumber: tipBlock.BlockNumber(),
 		}
+		require.NoError(t, db.SetTip(ls.currentTip, nil))
+		require.NoError(t, db.SetBlockNonce(
+			ls.currentTip.Point.Hash,
+			ls.currentTip.Point.Slot,
+			nonce, false, nil,
+		))
 	}
 	ls.currentTipBlockNonce = nonce
 	ls.publishSnapshotsLocked()
@@ -385,7 +436,7 @@ func newBoundaryEraLedger(
 	if tc.classicUpdateMajor != 0 {
 		seedClassicVersionUpdate(t, db, tc.classicUpdateMajor)
 	}
-	return ls, block
+	return ls, blocks
 }
 
 // TestBoundaryBlockEraMustMatchLedgerProtocolVersion pins that an epoch
@@ -485,13 +536,18 @@ func TestBoundaryBlockEraMustMatchLedgerProtocolVersion(t *testing.T) {
 		})
 		requireStaysBabbage(t, ls, err, 8)
 	})
+	// TestConwayHardForkAtEpoch moves the era without touching the ledger's
+	// protocol version: the Haskell node takes the transition epoch from the
+	// trigger (singleEraTransition) and the Babbage-to-Conway translation
+	// copies the version (upgradeConwayPParams). The ledger therefore enters
+	// Conway still at major 8, outside the major-9 bootstrap phase.
 	t.Run("configured trigger epoch transitions", func(t *testing.T) {
 		t.Parallel()
 		ls, err := runBoundaryEraCase(t, boundaryEraCase{
 			pparamsMajor: 8,
 			configure:    conwayAt(1),
 		})
-		requireBecomesConway(t, ls, err)
+		requireBecomes(t, ls, err, eras.ConwayEraDesc.Id, 8)
 	})
 	// A header major of 12 elevates the Conway body to Dijkstra, which the
 	// major-9 parameters do not authorize. The body era is authorized, so the
@@ -557,6 +613,83 @@ func TestBoundaryBlockEraMustMatchLedgerProtocolVersion(t *testing.T) {
 	})
 }
 
+// TestVersionTriggeredTransitionIntoEmptyEpochs pins the era decision when the
+// first block after the transition lies beyond an empty epoch. The hard-fork
+// combinator takes the transition epoch from the parameters pending for the
+// successor of the ledger epoch label (Shelley/Inspect.hs pparamsUpdate), and
+// extends the ledger into the new era at that epoch's start whichever later
+// epoch the block is in. The block must therefore be accepted in the new era
+// exactly as when it opens the successor epoch.
+func TestVersionTriggeredTransitionIntoEmptyEpochs(t *testing.T) {
+	t.Parallel()
+
+	k := uint64(boundaryEraTestSecurityParam)
+	skipped := uint64(3 * boundaryEraTestEpochLength)
+	t.Run("quorum-met classic major bump with a conway block is accepted", func(t *testing.T) {
+		t.Parallel()
+		ls, err := runBoundaryEraCase(t, boundaryEraCase{
+			pparamsMajor:       8,
+			classicUpdateMajor: 9,
+			votingBlocks:       k,
+			blockSlot:          skipped + 1,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id)
+		assert.Equal(t, uint64(3), ls.currentEpoch.EpochId)
+	})
+	t.Run("quorum-met classic major bump with a babbage block is rejected", func(t *testing.T) {
+		t.Parallel()
+		ls, err := runBoundaryEraCase(t, boundaryEraCase{
+			pparamsMajor:       8,
+			classicUpdateMajor: 9,
+			babbageBody:        true,
+			votingBlocks:       k,
+			blockSlot:          skipped + 1,
+		})
+		require.ErrorIs(t, err, errRestartLedgerPipeline)
+		assert.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id)
+	})
+}
+
+// TestTranslationAcrossEmptyEpochCarriesProtocolMajor pins that the Conway
+// translation carries the Babbage protocol major over unchanged
+// (Conway/PParams.hs upgradeConwayPParams). A block beyond an empty epoch
+// translates the frozen ledger, which has not enacted the pending major, so
+// the Conway ledger keeps the old major and stays out of the bootstrap phase
+// (Conway/Era.hs hardforkConwayBootstrapPhase, major 9) rather than being
+// raised to the era's first major.
+func TestTranslationAcrossEmptyEpochCarriesProtocolMajor(t *testing.T) {
+	t.Parallel()
+
+	skipped := uint64(3 * boundaryEraTestEpochLength)
+	conwayEpoch := uint64(2)
+	for name, tc := range map[string]boundaryEraCase{
+		"version trigger": {
+			pparamsMajor:       8,
+			classicUpdateMajor: 9,
+			votingBlocks:       uint64(boundaryEraTestSecurityParam),
+			blockSlot:          skipped + 1,
+		},
+		"scheduled": {
+			pparamsMajor: 8,
+			blockSlot:    skipped + 1,
+			configure: func(cfg *cardano.CardanoNodeConfig) {
+				cfg.TestConwayHardForkAtEpoch = &conwayEpoch
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ls, err := runBoundaryEraCase(t, tc)
+			require.NoError(t, err)
+			require.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id)
+			ver, err := GetProtocolVersion(ls.currentPParams)
+			require.NoError(t, err)
+			assert.Equal(t, uint(8), ver.Major)
+		})
+	}
+}
+
 // TestTrustedReplayBoundaryEraFollowsBlock pins that a boundary the node does
 // not validate keeps following the block that opens the epoch: the era
 // decision runs only where the block is validated.
@@ -586,6 +719,70 @@ func TestTrustedReplayBoundaryEraFollowsBlock(t *testing.T) {
 		assert.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id)
 		assert.Equal(t, uint64(1), ls.currentEpoch.EpochId)
 	})
+}
+
+func TestSparseBoundaryDoesNotPublishEpochTransition(t *testing.T) {
+	t.Parallel()
+
+	ls, block := newBoundaryEraLedger(t, boundaryEraCase{
+		pparamsMajor: 8,
+		babbageBody:  true,
+		blockSlot:    3*boundaryEraTestEpochLength + 1,
+	})
+	bus := newTestEventBus(t, nil)
+	ls.config.EventBus = bus
+	_, events := bus.Subscribe(event.EpochTransitionEventType)
+
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{block}}
+	close(results)
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(t.Context(), results))
+	require.Equal(t, uint64(3), ls.currentEpoch.EpochId)
+	testutil.RequireNoReceive(
+		t,
+		events,
+		50*time.Millisecond,
+		"a sparse rollover must not publish a normal epoch transition",
+	)
+}
+
+func TestSparseScheduledHardForkEventUsesTransitionEpoch(t *testing.T) {
+	t.Parallel()
+
+	conwayEpoch := uint64(2)
+	targetEpoch := uint64(3)
+	ls, block := newBoundaryEraLedger(t, boundaryEraCase{
+		pparamsMajor: 8,
+		blockSlot:    targetEpoch*boundaryEraTestEpochLength + 1,
+		configure: func(cfg *cardano.CardanoNodeConfig) {
+			cfg.TestConwayHardForkAtEpoch = &conwayEpoch
+		},
+	})
+	bus := newTestEventBus(t, nil)
+	ls.config.EventBus = bus
+	_, events := bus.Subscribe(event.HardForkEventType)
+
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{block}}
+	close(results)
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(t.Context(), results))
+
+	received := testutil.RequireReceive(
+		t,
+		events,
+		testutil.AsyncWait,
+		"the scheduled sparse transition did not publish a hard-fork event",
+	)
+	hardFork, ok := received.Data.(event.HardForkEvent)
+	require.True(t, ok)
+	// The hard-fork combinator translates at the scheduled epoch, which is
+	// empty here, not at the epoch of the first block after it.
+	require.Equal(t, conwayEpoch, hardFork.EpochNo)
+	require.Equal(
+		t,
+		conwayEpoch*boundaryEraTestEpochLength,
+		hardFork.Slot,
+	)
 }
 
 // TestRefusedBoundaryReleasesValidationTransition pins that refusing a

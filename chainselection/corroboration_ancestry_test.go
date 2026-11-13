@@ -206,7 +206,10 @@ func TestVerifiedCorroborationRetainsTrustBoundaries(t *testing.T) {
 			case "disconnect":
 				f.selector.RemovePeer(witness)
 			case "conflicting history":
-				f.selector.deliveredPeerTips[witness].observedPoints[0].Hash[0] ^= 0xff
+				tip := f.selector.deliveredPeerTips[witness]
+				rewriteFirstObservedPoint(
+					tip, tip.observedPoints[0].Hash[0]^0xff,
+				)
 			case "candidate height":
 				f.selector.peerTips[candidate].ObservedTip.BlockNumber++
 			case "uncertified continuity":

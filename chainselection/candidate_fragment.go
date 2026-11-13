@@ -16,6 +16,8 @@ package chainselection
 
 import (
 	"bytes"
+	"cmp"
+	"slices"
 	"sort"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -87,7 +89,7 @@ func (f CandidateFragment) Points() []ocommon.Point {
 
 // Intersect returns the highest point present in both fragments, comparing
 // by (slot, hash). Both fragments must already be in ascending slot order,
-// which recordObservedPoint guarantees. This is the primitive the Limit
+// which recordObservedLinkedPoint guarantees. This is the primitive the Limit
 // on Eagerness and the Genesis Density Disconnector need to compute the
 // intersection across candidate fragments (see ARCHITECTURE.md); it does not
 // itself implement either.
@@ -104,6 +106,22 @@ func (f CandidateFragment) Intersect(
 		return ocommon.Point{}, false
 	}
 	return clonePoint(point), true
+}
+
+// pointBlock returns the block number of point when the fragment retains it.
+func (f CandidateFragment) pointBlock(point ocommon.Point) (uint64, bool) {
+	i, found := slices.BinarySearchFunc(
+		f.points,
+		point.Slot,
+		func(entry ocommon.Point, slot uint64) int {
+			return cmp.Compare(entry.Slot, slot)
+		},
+	)
+	if !found || !bytes.Equal(f.points[i].Hash, point.Hash) {
+		return 0, false
+	}
+	// #nosec G115 -- the index is bounded by the retained fragment length.
+	return f.baseBlock + uint64(i), true
 }
 
 // intersectTip is Intersect with the common point's block number. Candidate

@@ -308,6 +308,7 @@ func mithrilSyncRunE(
 	if err != nil {
 		return err
 	}
+	applyDebugProfilingRates(logger, os.Stderr, cfg)
 	network := cfg.Network
 	if network == "" {
 		network = "preview"

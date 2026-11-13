@@ -71,7 +71,7 @@ func TestGetUtxoBalanceByAddressStopsAtUtxoLimit(t *testing.T) {
 		`INSERT INTO utxo (tx_id, payment_key, payment_script, credential_tag,
     added_slot, deleted_slot, amount, output_idx)
 VALUES (?, ?, ?, 0, 4, 0, 'unparseable', 0)`,
-		bytes.Repeat([]byte{0x04}, 32),
+		testutil.TransactionID(t, store.writeDB, bytes.Repeat([]byte{0x04}, 32)),
 		addr.PaymentKeyHash().Bytes(),
 		models.PaymentScriptFromAddress(addr),
 	)
@@ -114,7 +114,7 @@ func TestGetUtxoBalanceByAddressStopsAtAssetLimit(t *testing.T) {
 	require.NoError(t, store.ImportUtxos([]models.Utxo{held}, nil))
 	var heldID int64
 	err := store.writeDB.QueryRow(
-		`SELECT id FROM utxo WHERE tx_id = ?`, held.TxId,
+		`SELECT id FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, held.TxId,
 	).Scan(&heldID)
 	require.NoError(t, err)
 	testutil.InsertAssetHolding(

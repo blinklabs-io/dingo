@@ -75,11 +75,11 @@ func TestLeiosAPIBatchAppliesDependentTransactionsAndDeduplicates(
 	point := leiosApplyTestRankingPoint(0x72)
 	contextSlot := uint64(990)
 	_, err := rawDB.Exec(
-		`CREATE TRIGGER require_complete_closure_witnesses BEFORE INSERT ON key_witness WHEN (SELECT COUNT(*) FROM "transaction") < 2 BEGIN SELECT RAISE(ABORT, 'API rows flushed before closure completed'); END`,
+		`CREATE TRIGGER require_complete_closure_witnesses BEFORE INSERT ON key_witness WHEN (SELECT COUNT(*) FROM applied_transaction) < 2 BEGIN SELECT RAISE(ABORT, 'API rows flushed before closure completed'); END`,
 	)
 	require.NoError(t, err)
 	_, err = rawDB.Exec(
-		`CREATE TRIGGER require_closure_parents_before_spends BEFORE UPDATE OF spent_at_tx_id ON utxo WHEN NEW.spent_at_tx_id IS NOT NULL AND (SELECT COUNT(*) FROM "transaction") < 2 BEGIN SELECT RAISE(ABORT, 'UTxO spend was not closure-batched'); END`,
+		`CREATE TRIGGER require_closure_parents_before_spends BEFORE UPDATE OF spent_at_tx_id ON utxo WHEN NEW.spent_at_tx_id IS NOT NULL AND (SELECT COUNT(*) FROM applied_transaction) < 2 BEGIN SELECT RAISE(ABORT, 'UTxO spend was not closure-batched'); END`,
 	)
 	require.NoError(t, err)
 	var applied int

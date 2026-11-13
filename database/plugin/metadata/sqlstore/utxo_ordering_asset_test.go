@@ -44,8 +44,11 @@ func seedOrderingAssets(t *testing.T, store *Store) {
 		policy byte
 		name   string
 	}{
-		{5, 0xaa, "one"}, {5, 0xaa, "two"}, {7, 0xaa, "one"},
-		{98, 0xaa, "one"}, {200, 0xbb, "one"},
+		{5, 0xaa, "one"},
+		{5, 0xaa, "two"},
+		{7, 0xaa, "one"},
+		{98, 0xaa, "one"},
+		{200, 0xbb, "one"},
 	} {
 		testutil.InsertAssetHolding(
 			t, store.writeDB, int64(a.utxoID), []byte{a.policy},
@@ -136,7 +139,8 @@ func testUtxoOrderingAssetFilter(t *testing.T, store *Store) {
 	require.NoError(t, store.AddUtxos(utxos, nil))
 	_, err := store.writeDB.Exec(
 		store.dialect.Rebind(
-			"UPDATE utxo SET deleted_slot = 9 WHERE tx_id = ?",
+			"UPDATE utxo SET deleted_slot = 9 WHERE tx_id = (SELECT id FROM "+
+				store.dialect.QuoteIdentifier("transaction")+" WHERE hash = ?)",
 		),
 		mustDecodeHex(t, txHash(3)),
 	)

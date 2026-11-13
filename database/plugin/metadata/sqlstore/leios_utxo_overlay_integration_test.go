@@ -61,7 +61,7 @@ func testLeiosRetainedUtxoFallback(t *testing.T, store *Store) {
 	history, err := store.GetUtxoIncludingSpent(seed.Hash().Bytes(), 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, history)
-	require.Equal(t, transactions[0].Hash().Bytes(), []byte(history.SpentAtTxId))
+	require.Equal(t, transactions[0].Hash().Bytes(), []byte(history.SpentAtTxHash))
 	live, err := store.GetUtxo(transactions[1].Hash().Bytes(), 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, live)

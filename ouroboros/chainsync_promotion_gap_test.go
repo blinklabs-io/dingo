@@ -83,7 +83,7 @@ func newPromotionGapFixture(t *testing.T) *promotionGapFixture {
 		return chainselection.PeerTipUpdateAccepted
 	}
 	o.chainsyncHeaderAdmission = func(context.Context, ledger.ChainsyncEvent) (bool, error) { return true, nil }
-	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		f.verified.Add(1)
 		return 77, nil

@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -356,7 +357,7 @@ INSERT INTO utxo (
     tx_id, output_idx, payment_key, credential_tag, added_slot,
     deleted_slot, amount, payment_script
 ) VALUES (?, ?, ?, 0, 1, 0, '1000000', FALSE)`,
-			producerID, outputIndex, paymentKey,
+			testutil.TransactionID(t, store.writeDB, producerID), outputIndex, paymentKey,
 		)
 		require.NoError(t, err)
 	}
@@ -430,12 +431,14 @@ INSERT INTO utxo (
     tx_id, output_idx, payment_key, payment_script, staking_key,
     credential_tag, added_slot, deleted_slot, amount
 ) VALUES (?, 0, ?, ?, ?, 0, 1, 0, '1000000')`,
-			output.txHash, payment, output.script, staking,
+			testutil.TransactionID(t, store.writeDB, output.txHash),
+			payment, output.script, staking,
 		)
 		require.NoError(t, err)
 	}
 	insertTransaction := func(hash []byte, slot int64) int64 {
-		result, err := store.writeDB.ExecContext(ctx, `
+		result, err := testutil.ExecTransactionInsert(store.writeDB,
+			`
 INSERT INTO "transaction" (hash, block_hash, slot, type, block_index, valid)
 VALUES (?, ?, ?, 0, 0, TRUE)`, hash, bytes.Repeat([]byte{0xaa}, 32), slot)
 		require.NoError(t, err)
@@ -513,7 +516,8 @@ func TestAddressTransactionRebuildRetriesAfterMissingHistory(t *testing.T) {
 	ctx := context.Background()
 	hash := bytes.Repeat([]byte{0x41}, 32)
 	blockHash := bytes.Repeat([]byte{0x42}, 32)
-	result, err := store.writeDB.ExecContext(ctx, `
+	result, err := testutil.ExecTransactionInsert(store.writeDB,
+		`
 INSERT INTO "transaction" (hash, block_hash, slot, type, block_index, valid)
 VALUES (?, ?, 10, 0, 0, TRUE)`, hash, blockHash)
 	require.NoError(t, err)
@@ -606,7 +610,7 @@ func TestSetTransactionPersistsAssetUtxoAddress(t *testing.T) {
 	require.NoError(t, store.writeDB.QueryRow(
 		"SELECT ua.address FROM utxo_address ua "+
 			"JOIN utxo u ON u.id = ua.utxo_id "+
-			"WHERE u.tx_id = ? AND u.output_idx = 0",
+			"WHERE u.tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?) AND u.output_idx = 0",
 		tx.Hash().Bytes(),
 	).Scan(&address))
 	require.Equal(t, tx.Outputs()[0].Address().String(), address)
@@ -634,7 +638,7 @@ func TestSetTransactionPersistsAdaOnlyUtxoAddress(t *testing.T) {
 	require.NoError(t, store.writeDB.QueryRow(
 		"SELECT ua.address FROM utxo_address ua "+
 			"JOIN utxo u ON u.id = ua.utxo_id "+
-			"WHERE u.tx_id = ? AND u.output_idx = 0",
+			"WHERE u.tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?) AND u.output_idx = 0",
 		txID,
 	).Scan(&address))
 	require.Equal(t, output.Address().String(), address)
@@ -653,7 +657,7 @@ func TestSetTransactionSkipsAssetUtxoAddressInCoreMode(t *testing.T) {
 	require.NoError(t, store.writeDB.QueryRow(
 		"SELECT COUNT(*) FROM utxo_address ua "+
 			"JOIN utxo u ON u.id = ua.utxo_id "+
-			"WHERE u.tx_id = ? AND u.output_idx = 0",
+			"WHERE u.tx_id = (SELECT id FROM \"transaction\" WHERE hash = ?) AND u.output_idx = 0",
 		tx.Hash().Bytes(),
 	).Scan(&count))
 	require.Zero(t, count, "core mode must not persist API-only UTxO addresses")
@@ -810,7 +814,7 @@ func TestBatchedStakeDeltasCoalesceUntilFlush(t *testing.T) {
 		_, err := store.writeDB.ExecContext(t.Context(), `
 INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
 VALUES (?, 0, ?, ?, 1, ?, ?)`,
-			txID, credential.Key, int64(credential.Tag), row.deletedSlot, row.amount,
+			testutil.TransactionID(t, store.writeDB, txID), credential.Key, int64(credential.Tag), row.deletedSlot, row.amount,
 		)
 		require.NoError(t, err)
 	}
@@ -980,8 +984,8 @@ func TestBatchedRowsOfFailedWriteAreNotQueued(t *testing.T) {
 	_, err := store.writeDB.ExecContext(context.Background(), `
 INSERT INTO utxo (tx_id, output_idx, added_slot, deleted_slot, spent_at_tx_id, amount)
 VALUES (?, 0, 1, 5, ?, '1')`,
-		tx.Inputs()[0].Id().Bytes(),
-		[]byte{0xee},
+		testutil.TransactionID(t, store.writeDB, tx.Inputs()[0].Id().Bytes()),
+		int64(999999),
 	)
 	require.NoError(t, err)
 	err = store.SetTransactionBatchedHistorical(
@@ -1298,7 +1302,7 @@ func TestLeiosClosureFreshRowsSkipCleanupButReplayReplacesWitnesses(t *testing.T
 	require.NoError(t, err)
 	var slot uint64
 	var blockIndex uint32
-	require.NoError(t, db.QueryRowContext(ctx, `SELECT slot, block_index FROM "transaction" WHERE hash = ?`, tx.Hash().Bytes()).Scan(&slot, &blockIndex))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT a.slot, a.block_index FROM "transaction" t JOIN applied_transaction a ON a.tx_id = t.id WHERE t.hash = ?`, tx.Hash().Bytes()).Scan(&slot, &blockIndex))
 	require.Equal(t, replayPoint.Slot, slot)
 	require.Equal(t, uint32(1), blockIndex)
 }

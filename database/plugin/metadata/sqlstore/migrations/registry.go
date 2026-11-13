@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -99,6 +100,11 @@ const (
 	rewardOutputIndexReshapeSchemaRelease               = "reward-account-output-index-reshape"
 	metadataLabelSlotIndexSchemaRelease                 = "transaction-metadata-label-slot-index"
 	stakeBookkeepingIndexDropSchemaRelease              = "stake-bookkeeping-index-drop"
+	datumHashIndexDropSchemaRelease                     = "datum-hash-duplicate-index-drop"
+	utxoSpentStakingIndexSchemaRelease                  = "utxo-spent-staking-index"
+	utxoTransactionIdentitySchemaRelease                = "utxo-transaction-identity"
+	poolRelayIPv6NetworkOrderSchemaRelease              = "pool-relay-ipv6-network-order"
+	epochStakesIndexSchemaRelease                       = "reward-stake-input-epoch-registered-index"
 	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
 )
 
@@ -279,7 +285,12 @@ var schemaVersions = []struct {
 	{Version: 57, Name: rewardOutputIndexReshapeSchemaRelease, Dir: "v57"},
 	{Version: 58, Name: metadataLabelSlotIndexSchemaRelease, Dir: "v58"},
 	{Version: 59, Name: stakeBookkeepingIndexDropSchemaRelease, Dir: "v59"},
-	{Version: 60, Name: assetIdentityHoldingsSchemaRelease, Dir: "v60"},
+	{Version: 60, Name: utxoSpentStakingIndexSchemaRelease, Dir: "v60"},
+	{Version: 61, Name: utxoTransactionIdentitySchemaRelease, Dir: "v61"},
+	{Version: 62, Name: poolRelayIPv6NetworkOrderSchemaRelease, Dir: "v62"},
+	{Version: 63, Name: datumHashIndexDropSchemaRelease, Dir: "v63"},
+	{Version: 64, Name: epochStakesIndexSchemaRelease, Dir: "v64"},
+	{Version: 65, Name: assetIdentityHoldingsSchemaRelease, Dir: "v65"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -398,6 +409,22 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			dialect != "mysql" {
 			migration.BackfillRevision = "1"
 			migration.Backfill = utxoStakingPartialIndexBackfill
+		}
+		// MySQL replaces the index with a single-column one from its native
+		// v60 resource, so only the partial-index engines backfill.
+		if version.Name == utxoSpentStakingIndexSchemaRelease &&
+			dialect != "mysql" {
+			migration.BackfillRevision = "1"
+			migration.Backfill = utxoSpentStakingIndexBackfill
+		}
+		if version.Name == utxoTransactionIdentitySchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.BatchSize = utxoIdentityBatchSize
+			migration.Backfill = utxoTransactionIdentityBackfill(dialect)
+		}
+		if version.Name == poolRelayIPv6NetworkOrderSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = poolRelayIPv6NetworkOrderBackfill
 		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
@@ -988,6 +1015,85 @@ func poolDepositPositionBeforeOrEqual(a, b poolDepositPosition) bool {
 		return a.blockIndex < b.blockIndex
 	}
 	return a.certIndex <= b.certIndex
+}
+
+// poolRelayIPv6NetworkOrderBackfill swaps the bytes of each 32-bit word of
+// every stored IPv6 relay address that was written in the ledger's wire
+// order. The migration version, not the bytes, decides which rows are old: the
+// runner applies it once per database. Genesis relays are excluded because
+// they were parsed from text and already hold network order; a genesis
+// registration is the one with no certificate and slot zero.
+func poolRelayIPv6NetworkOrderBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"parse pool relay IPv6 cursor: %w",
+				err,
+			)
+		}
+		lastID = parsed
+	}
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT r.id, r.ipv6
+FROM pool_registration_relay r
+JOIN pool_registration p ON p.id = r.pool_registration_id
+WHERE r.id > ?
+  AND r.ipv6 IS NOT NULL
+  AND NOT (p.added_slot = 0 AND COALESCE(p.certificate_id, 0) = 0)
+ORDER BY r.id
+LIMIT ?`), lastID, batch.Limit)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("read pool relay IPv6 rows: %w", err)
+	}
+	defer rows.Close()
+	type relayRow struct {
+		id   int64
+		ipv6 []byte
+	}
+	var batchRows []relayRow
+	for rows.Next() {
+		var row relayRow
+		if err := rows.Scan(&row.id, &row.ipv6); err != nil {
+			return BatchResult{}, err
+		}
+		batchRows = append(batchRows, row)
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if len(batchRows) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	for _, row := range batchRows {
+		if len(row.ipv6) != net.IPv6len {
+			continue
+		}
+		swapped := common.PoolRelayIpv6WireOrder(net.IP(row.ipv6))
+		if _, err := batch.Tx.ExecContext(
+			ctx,
+			batch.Rebind(
+				"UPDATE pool_registration_relay SET ipv6 = ? WHERE id = ?",
+			),
+			[]byte(swapped),
+			row.id,
+		); err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"rewrite pool relay %d IPv6: %w",
+				row.id,
+				err,
+			)
+		}
+	}
+	return BatchResult{
+		Cursor: strconv.FormatInt(batchRows[len(batchRows)-1].id, 10),
+		Rows:   int64(len(batchRows)),
+		Done:   len(batchRows) < batch.Limit,
+	}, nil
 }
 
 // poolDepositHeldBackfill reconstructs psDeposits from the persisted
@@ -2024,6 +2130,7 @@ func translateSchemaSQLInSchema(
 				"idx_account_reward_delta_tx_hash":    "account_reward_delta",
 				"idx_account_reward_delta_withdrawal": "account_reward_delta",
 				"idx_account_drep":                    "account",
+				"idx_datum_hash":                      "datum",
 			} {
 				value = strings.ReplaceAll(
 					value,
@@ -2326,6 +2433,45 @@ SELECT 1 FROM sync_state WHERE sync_key = ?`), deferred.SyncStateKey).Scan(&pend
 		if _, err := batch.Tx.ExecContext(ctx, "CREATE INDEX "+index.name+" ON utxo ("+index.columns+") WHERE staking_key IS NOT NULL"); err != nil {
 			return BatchResult{}, fmt.Errorf("create %s: %w", index.name, err)
 		}
+	}
+	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+}
+
+// utxoSpentStakingIndexBackfill rebuilds idx_utxo_deleted_staking_amount over
+// spent rows only. A full index holds every live output at deleted_slot = 0,
+// ordered by credential and amount, so creating and spending an output each
+// dirty an unrelated leaf there. Spend slots only rise, so a spend appends at
+// the right edge of the partial index, and nothing reads the live region
+// through it: live stake and address lookups use the credential-leading
+// indexes. The index is not rebuilt while a bulk load has dropped it; the
+// deferred rebuild restores it partial from the manifest.
+func utxoSpentStakingIndexBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var pending int
+	err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT 1 FROM sync_state WHERE sync_key = ?`), deferred.SyncStateKey).Scan(&pending)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, fmt.Errorf("read deferred index marker: %w", err)
+	}
+	const name = "idx_utxo_deleted_staking_amount"
+	if _, err := batch.Tx.ExecContext(
+		ctx,
+		"DROP INDEX IF EXISTS "+name,
+	); err != nil {
+		return BatchResult{}, fmt.Errorf("drop %s: %w", name, err)
+	}
+	if pending != 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	if _, err := batch.Tx.ExecContext(
+		ctx,
+		"CREATE INDEX "+name+" ON utxo "+
+			"(deleted_slot, credential_tag, staking_key, amount) "+
+			"WHERE deleted_slot > 0",
+	); err != nil {
+		return BatchResult{}, fmt.Errorf("create %s: %w", name, err)
 	}
 	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 }

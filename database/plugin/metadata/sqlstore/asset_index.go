@@ -212,30 +212,26 @@ func (s *Store) CountAssetMintBurnHistory(
 // or mint/burn lookup. Branches are UNIONed rather than OR-ed so that none
 // loses its index and a transaction matching several branches appears once.
 const assetTransactionsSource = `
-SELECT t.hash AS hash, t.block_hash AS block_hash, t.slot AS slot,
-       t.block_index AS block_index, t.id AS id
+SELECT t.hash AS hash, a.block_hash AS block_hash, a.slot AS slot,
+       a.block_index AS block_index, t.id AS id
 FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
 WHERE t.id IN (
-    SELECT u.transaction_id FROM asset_identity AS i
-    JOIN asset_holding AS a ON a.asset_id = i.id
-    JOIN utxo AS u ON u.id = a.utxo_id
-    WHERE i.policy_id = ? AND i.name = ? AND u.transaction_id IS NOT NULL
-    UNION
-    SELECT u.collateral_return_for_tx_id FROM asset_identity AS i
-    JOIN asset_holding AS a ON a.asset_id = i.id
-    JOIN utxo AS u ON u.id = a.utxo_id
+    SELECT u.tx_id FROM asset_identity AS i
+    JOIN asset_holding AS h ON h.asset_id = i.id
+    JOIN utxo AS u ON u.id = h.utxo_id
     WHERE i.policy_id = ? AND i.name = ?
-      AND u.collateral_return_for_tx_id IS NOT NULL
+    UNION
+    SELECT u.spent_at_tx_id FROM asset_identity AS i
+    JOIN asset_holding AS h ON h.asset_id = i.id
+    JOIN utxo AS u ON u.id = h.utxo_id
+    WHERE i.policy_id = ? AND i.name = ? AND u.spent_at_tx_id IS NOT NULL
 )
 UNION
-SELECT t.hash, t.block_hash, t.slot, t.block_index, t.id
+SELECT t.hash, a.block_hash, a.slot, a.block_index, t.id
 FROM "transaction" AS t
+JOIN applied_transaction AS a ON a.tx_id = t.id
 WHERE t.hash IN (
-    SELECT u.spent_at_tx_id FROM asset_identity AS i
-    JOIN asset_holding AS a ON a.asset_id = i.id
-    JOIN utxo AS u ON u.id = a.utxo_id
-    WHERE i.policy_id = ? AND i.name = ? AND u.spent_at_tx_id IS NOT NULL
-    UNION
     SELECT m.tx_hash FROM asset_mint_burn AS m
     WHERE m.policy_id = ? AND m.name = ?
 )`
@@ -248,7 +244,7 @@ func assetTransactionsQuery(
 ) (string, []any, error) {
 	name := nonNilName(assetName)
 	args := make([]any, 0, 12)
-	for range 4 {
+	for range 3 {
 		args = append(args, policyID[:], name)
 	}
 	predicate := ""

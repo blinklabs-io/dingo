@@ -109,6 +109,12 @@ type Chain struct {
 	waitingChanMutex     sync.Mutex
 	persistent           bool
 
+	// headerTipChange is closed and cleared whenever the header tip may have
+	// moved. headerTipMutex guards it and is taken under c.mutex, never around
+	// it.
+	headerTipChange chan struct{}
+	headerTipMutex  sync.Mutex
+
 	// pendingUpdates is the chain-level sequencer for deferred chain.update
 	// / chain.fork publication. The mutex-holding ledger paths (blockfetch
 	// add under chainsyncBlockfetchMutex, rollback under chainsyncMutex) must
@@ -750,7 +756,7 @@ func (c *Chain) addBlockHeader(
 		// parent. A Byron epoch-boundary header passes the block-number rule
 		// with its parent's number and carries no signature, so this is the
 		// only check that keeps one from extending a post-Byron block.
-		parentEra, found, err := c.parentEraLocked(ctx, queued.prevHash)
+		parent, found, err := c.parentLinkLocked(ctx, queued.prevHash)
 		if err != nil {
 			return fmt.Errorf(
 				"resolve parent era of header %s: %w",
@@ -758,10 +764,25 @@ func (c *Chain) addBlockHeader(
 				err,
 			)
 		}
-		if found {
-			if err := CheckEraOrder(header.Era().Id, parentEra); err != nil {
+		if found && parent.Known {
+			if err := CheckEraOrder(header.Era().Id, parent.EraId); err != nil {
 				return fmt.Errorf("header %s: %w", headerHash.String(), err)
 			}
+		}
+		if !found {
+			parent = SlotParent{Slot: headerTip.Point.Slot}
+		}
+		if !SlotFollowsParent(
+			header.Era().Id,
+			IsByronBoundaryHeader(header),
+			queued.point.Slot,
+			parent,
+		) {
+			return NewSlotNotAfterParentError(
+				headerHash.String(),
+				queued.point.Slot,
+				parent.Slot,
+			)
 		}
 	} else if c.atOriginAfterMutation() &&
 		!firstBlockNumberValid(queued.blockNumber) {
@@ -776,6 +797,7 @@ func (c *Chain) addBlockHeader(
 	// Add header
 	c.headers = append(c.headers, queued)
 	c.headerMutationGeneration++
+	c.notifyHeaderTipChanged()
 	// Surface a Leios endorser-block announcement the moment its ranking
 	// block's header enters the queue. The apply-driven ChainUpdateEventType
 	// cannot serve this: applying an EB-announcing ranking block waits on
@@ -1257,6 +1279,7 @@ func (c *Chain) addBlockInternal(
 	}
 	c.recordCallerTxnAdd(txn)
 	evt, err := c.addBlockLocked(
+		ctx,
 		block,
 		point,
 		txn,
@@ -1279,6 +1302,7 @@ func (c *Chain) addBlockInternal(
 }
 
 func (c *Chain) addBlockLocked(
+	ctx context.Context,
 	block ledger.Block,
 	point ocommon.Point,
 	txn *database.Txn,
@@ -1339,6 +1363,28 @@ func (c *Chain) addBlockLocked(
 				blockNumber,
 				c.currentTip.BlockNumber,
 			)
+		}
+		// A block matching a queued header was ordered when the header was
+		// queued; a locally forged block was not. The parent is read only
+		// when the plain rule fails, since otherwise it is a store read per
+		// block.
+		if point.Slot <= c.currentTip.Point.Slot {
+			parent, err := c.tipSlotParentLocked(ctx, txn)
+			if err != nil {
+				return event.Event{}, err
+			}
+			if !SlotFollowsParent(
+				block.Era().Id,
+				isByronBoundaryBlock(block),
+				point.Slot,
+				parent,
+			) {
+				return event.Event{}, NewSlotNotAfterParentError(
+					hex.EncodeToString(blockHashBytes),
+					point.Slot,
+					parent.Slot,
+				)
+			}
 		}
 	} else if c.atOriginAfterMutation() && !firstBlockNumberValid(blockNumber) {
 		// Chain rolled back to origin: anchor the first block on its block
@@ -1502,6 +1548,7 @@ func (c *Chain) AddBlocks(
 					err := ctx.Err()
 					if err == nil {
 						evt, err = c.addBlockLocked(
+							ctx,
 							tmpBlock,
 							ocommon.Point{},
 							txn,
@@ -1840,7 +1887,29 @@ func (c *Chain) addRawBlocks(
 	return nil
 }
 
+// HeaderTipChanged returns a channel that is closed the next time the header
+// tip may have moved: a header is queued, or a block is added or rolled back.
+// A wake can be spurious, so the waiter re-reads the tip.
+func (c *Chain) HeaderTipChanged() <-chan struct{} {
+	c.headerTipMutex.Lock()
+	defer c.headerTipMutex.Unlock()
+	if c.headerTipChange == nil {
+		c.headerTipChange = make(chan struct{})
+	}
+	return c.headerTipChange
+}
+
+func (c *Chain) notifyHeaderTipChanged() {
+	c.headerTipMutex.Lock()
+	defer c.headerTipMutex.Unlock()
+	if c.headerTipChange != nil {
+		close(c.headerTipChange)
+		c.headerTipChange = nil
+	}
+}
+
 func (c *Chain) notifyWaitingIterators() {
+	c.notifyHeaderTipChanged()
 	c.waitingChanMutex.Lock()
 	defer c.waitingChanMutex.Unlock()
 	if c.waitingChan != nil {

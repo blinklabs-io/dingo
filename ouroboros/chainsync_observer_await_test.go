@@ -37,7 +37,7 @@ func TestChainsyncObserverAwaitReplyNamesDeliveredHeader(t *testing.T) {
 		chainselection.PeerTipUpdateEvent,
 	) {
 	}
-	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool { return true }
 	f.o.chainSelectionVerifyHeaderCrypto = func(
 		ouroboros.ConnectionId,
 		gledger.BlockHeader,
@@ -108,7 +108,7 @@ func TestChainsyncRollForwardRevokesIdleProofFirst(t *testing.T) {
 				revoked = append(revoked, point)
 			}
 			verified := false
-			f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool {
+			f.o.chainSelectionShouldVerifyHeaderCrypto = func(ocommon.Point) bool {
 				require.Len(t, revoked, 1,
 					"the idle proof must be revoked before verification")
 				verified = true
