@@ -5002,6 +5002,12 @@ func (ls *LedgerState) pruneConsumedUtxosLocked(
 		)
 		return 0, floor, err
 	}
+	// persistConsumedUtxoPruneFloor keeps a higher existing floor, so the
+	// gauge reports what is durable rather than this run's candidate. When
+	// the read fails the gauge is left as it was: the candidate can be below
+	// the durable floor, and the gauge must never report a lower boundary.
+	durableFloor, floorReadErr := ls.readConsumedUtxoPruneFloor(nil)
+	ls.metrics.observeConsumedUtxoSweepAt(durableFloor, floorReadErr, 0)
 	// No lock needed here - the database handles its own consistency
 	// and we're not accessing any in-memory LedgerState fields.
 	// The target was derived by the caller from a tip read under a lock.
@@ -5025,6 +5031,7 @@ func (ls *LedgerState) pruneConsumedUtxosLocked(
 	// exists. UtxosDeleteConsumed persisted the floor in the same
 	// transaction that removed them, so rollback already refuses to
 	// target a point below it.
+	ls.metrics.observeConsumedUtxoSweepAt(durableFloor, floorReadErr, pruned)
 	if pruned > 0 {
 		ls.config.Logger.Debug(
 			"consumed UTxO sweep raised the prune floor",
@@ -6199,6 +6206,21 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(ctx context.Context,
 	point ocommon.Point,
 	pubs *pendingPublishes,
 ) error {
+	_, err := ls.rollbackChainAndStateDeferredDepth(ctx, point, pubs)
+	return err
+}
+
+// rollbackChainAndStateDeferredDepth is rollbackChainAndStateDeferred that also
+// returns the number of blocks the chain rollback removed. The count is taken
+// from the blocks chain.RollbackDeferred removed under the chain's own mutex,
+// so a concurrent blockfetch add cannot skew it the way a before/after
+// comparison of two tip samples can. It is zero when the rollback failed before
+// truncating the chain or removed only queued headers.
+func (ls *LedgerState) rollbackChainAndStateDeferredDepth(ctx context.Context,
+	point ocommon.Point,
+	pubs *pendingPublishes,
+) (uint64, error) {
+	var removed uint64
 	ls.consumedUtxoPruneMutex.Lock()
 	defer ls.consumedUtxoPruneMutex.Unlock()
 	ls.RLock()
@@ -6224,22 +6246,22 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(ctx context.Context,
 		currentTip,
 	)
 	if resolveErr != nil {
-		return resolveErr
+		return 0, resolveErr
 	}
 	if mithrilLedgerSlot > 0 && resolved.Slot < mithrilLedgerSlot {
-		return ErrRollbackExceedsMithrilBoundary
+		return 0, ErrRollbackExceedsMithrilBoundary
 	}
 	belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(
 		resolved,
 	)
 	if floorErr != nil {
-		return fmt.Errorf(
+		return 0, fmt.Errorf(
 			"determine consumed UTxO prune floor: %w",
 			floorErr,
 		)
 	}
 	if belowPruneFloor {
-		return fmt.Errorf(
+		return 0, fmt.Errorf(
 			"%w: target slot %d, prune floor %d",
 			ErrRollbackBelowUtxoPruneFloor,
 			resolved.Slot,
@@ -6252,7 +6274,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(ctx context.Context,
 	if ls.db != nil {
 		finishTransition, err := ls.db.BeginDestructiveTransitionContext(ctx)
 		if err != nil {
-			return fmt.Errorf("begin destructive database transition: %w", err)
+			return 0, fmt.Errorf("begin destructive database transition: %w", err)
 		}
 		defer finishTransition()
 	}
@@ -6327,13 +6349,19 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(ctx context.Context,
 			ls.chainRollbackGeneration.Store(priorGeneration)
 			return err
 		}
-		if _, rbErr := ls.chain.RollbackDeferred(ctx, point); rbErr != nil {
+		events, rbErr := ls.chain.RollbackDeferred(ctx, point)
+		if rbErr != nil {
 			return rbErr
+		}
+		for _, evt := range events {
+			if rb, ok := evt.Data.(chain.ChainRollbackEvent); ok {
+				removed += uint64(len(rb.RolledBackBlocks))
+			}
 		}
 		return nil
 	}()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	// Publish the rollback's chain.update after chainsyncMutex is released.
 	// Under the mutex an inline back-pressured publish deadlocks the drain.
@@ -6364,12 +6392,12 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(ctx context.Context,
 		// is the same both-sides-reached-it test the success path below
 		// uses to decide whether to arm the continuation audit.
 		if pointMatches(ls.Tip().Point, point) {
-			return fmt.Errorf(
+			return removed, fmt.Errorf(
 				"synchronize ledger rollback state: %w",
 				err,
 			)
 		}
-		return ls.reportFailedLedgerRollbackAfterTruncation(point, err)
+		return removed, ls.reportFailedLedgerRollbackAfterTruncation(point, err)
 	}
 	// A primary chain can be ahead of the applied ledger during genesis or
 	// snapshot catch-up. In that case ls.rollback intentionally leaves the
@@ -6382,7 +6410,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(ctx context.Context,
 	} else {
 		ls.disarmContinuationAudit()
 	}
-	return nil
+	return removed, nil
 }
 
 // reportFailedLedgerRollbackAfterTruncation handles the one rollback failure

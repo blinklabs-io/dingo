@@ -213,6 +213,24 @@ type stateMetrics struct {
 	// we cannot cross to (local chain diverged), so a stuck node surfaces
 	// as a metric instead of only a WARN loop.
 	unrecoverableRollbacks prometheus.Counter
+	// Observes the depth, in blocks, of each rollback
+	// handleEventChainsyncRollback applied on a peer's MsgRollBackward
+	// without comparing the peer's chain to ours; its _count is the number
+	// of applied peer-driven rollbacks. Depth is the number of blocks the
+	// chain rollback removed, counted under the chain's own lock, so it is
+	// bounded by the security parameter; headers that were only queued are
+	// not counted.
+	peerRollbackDepthBlocks prometheus.Histogram
+	// Incremented each time stateful block header verification is deferred
+	// to ledger apply (verification timeout against a busy ledger, or a fork
+	// header whose nonce or snapshot is not yet available) and the deferred
+	// marker is recorded.
+	headerVerificationDeferred prometheus.Counter
+	// Rows the consumed-UTxO sweep hard-deleted, summed across runs.
+	consumedUtxoSweepRowsDeleted prometheus.Counter
+	// The consumed-UTxO prune floor slot most recently persisted by the
+	// sweep. It only rises while the node runs.
+	consumedUtxoPruneFloorSlot prometheus.Gauge
 	// Incremented when a chainsync peer asks for a rollback we refuse, but
 	// its own advertised tip is a strict ancestor of ours on our primary
 	// chain: the peer is behind, not forked, and is kept attached instead
@@ -783,6 +801,57 @@ func (m *stateMetrics) observeLeiosEbWait(d time.Duration, outcome string) {
 	}
 }
 
+// observePeerRollbackApplied records one peer-driven rollback applied by
+// handleEventChainsyncRollback, with its depth in blocks.
+func (m *stateMetrics) observePeerRollbackApplied(depthBlocks uint64) {
+	if m == nil || m.peerRollbackDepthBlocks == nil {
+		return
+	}
+	m.peerRollbackDepthBlocks.Observe(float64(depthBlocks))
+}
+
+func (m *stateMetrics) incHeaderVerificationDeferred() {
+	if m == nil || m.headerVerificationDeferred == nil {
+		return
+	}
+	m.headerVerificationDeferred.Inc()
+}
+
+// observeConsumedUtxoSweep records one consumed-UTxO sweep run that
+// persisted floor and hard-deleted rows rows.
+func (m *stateMetrics) observeConsumedUtxoSweep(floor uint64, rows int) {
+	if m == nil {
+		return
+	}
+	if m.consumedUtxoPruneFloorSlot != nil {
+		m.consumedUtxoPruneFloorSlot.Set(float64(floor))
+	}
+	if m.consumedUtxoSweepRowsDeleted != nil && rows > 0 {
+		m.consumedUtxoSweepRowsDeleted.Add(float64(rows))
+	}
+}
+
+// observeConsumedUtxoSweepAt exports a sweep's rows and, when the durable
+// floor was read back (floorErr nil), the floor gauge. A failed read leaves
+// the gauge as it was: the sweep's candidate can sit below the durable floor,
+// and the gauge must never report a lower rollback boundary.
+func (m *stateMetrics) observeConsumedUtxoSweepAt(
+	floor uint64,
+	floorErr error,
+	rows int,
+) {
+	if m == nil {
+		return
+	}
+	if floorErr == nil {
+		m.observeConsumedUtxoSweep(floor, rows)
+		return
+	}
+	if m.consumedUtxoSweepRowsDeleted != nil && rows > 0 {
+		m.consumedUtxoSweepRowsDeleted.Add(float64(rows))
+	}
+}
+
 func (m *stateMetrics) incLeaderThresholdRejections() {
 	if m == nil || m.leaderThresholdRejections == nil {
 		return
@@ -1183,6 +1252,36 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_chainsync_unrecoverable_rollback_total",
 			Help: "times a peer repeatedly requested a rollback we cannot cross to (local chain diverged, operator intervention required)",
+		},
+	)
+	m.peerRollbackDepthBlocks = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_chainsync_peer_rollback_depth_blocks",
+			Help: "depth in blocks of each rollback applied on a chainsync peer's MsgRollBackward without a candidate-chain comparison (the _count is the number of applied peer-driven rollbacks)",
+			// Bounded by the security parameter (2160 on mainnet); the
+			// shallow buckets separate ordinary one-block reorgs from deep
+			// ones.
+			Buckets: []float64{
+				1, 2, 3, 5, 10, 20, 50, 100, 250, 500, 1000, 2160,
+			},
+		},
+	)
+	m.headerVerificationDeferred = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_header_verification_deferred_total",
+			Help: "block headers whose stateful verification was deferred until ledger apply and a deferred marker recorded",
+		},
+	)
+	m.consumedUtxoSweepRowsDeleted = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_consumed_utxo_sweep_rows_deleted_total",
+			Help: "spent UTxO rows hard-deleted by the consumed-UTxO sweep",
+		},
+	)
+	m.consumedUtxoPruneFloorSlot = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_consumed_utxo_prune_floor_slot",
+			Help: "slot of the consumed-UTxO prune floor most recently persisted by the sweep; rollbacks below it are refused",
 		},
 	)
 	m.chainsyncBehindPeers = promautoFactory.NewCounter(

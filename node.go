@@ -1409,6 +1409,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		n.ledgerState.ActiveSlotCoeffRat(),
 	)
 	genesisSelectionMode := n.initialGenesisSelectionMode()
+	if n.config.onGenesisSelectionResolved != nil {
+		n.config.onGenesisSelectionResolved(genesisSelectionMode)
+	}
 	chainSelectorConfig := n.buildChainSelectorConfig(
 		chainSelectorSecurityParam,
 		genesisSelectionMode,

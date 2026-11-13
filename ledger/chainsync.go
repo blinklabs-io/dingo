@@ -3917,7 +3917,12 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			),
 		)
 	}
-	if err := ls.rollbackChainAndStateDeferred(ls.lifecycleContext(), e.Point, pending); err != nil {
+	depth, err := ls.rollbackChainAndStateDeferredDepth(
+		ls.lifecycleContext(),
+		e.Point,
+		pending,
+	)
+	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// Missing rollback point can happen when local state and peer
 			// chainsync cursor drift. Recover by forcing re-intersect.
@@ -4115,6 +4120,12 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 	// un-crossable-rollback tracking is stale. Clear it so a later,
 	// unrelated divergence starts counting from zero.
 	ls.clearUnrecoverableRollbacks()
+	// Counted here, after the apply succeeded, so refused, deferred and
+	// no-op rollbacks never inflate it. The handler compares no candidate
+	// chain, so this is the only signal that a peer moved our chain. The
+	// depth is the block count the chain removed under its own lock; tip
+	// samples taken around the rollback would race concurrent blockfetch adds.
+	ls.metrics.observePeerRollbackApplied(depth)
 	// Crossing to the point is forward progress toward the peer's chain, so
 	// drop this point's per-connection loop-detector records too. A rollback
 	// we actually applied must not count toward the repeat-loop threshold on
@@ -7180,6 +7191,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 					}
 					return nil
 				}
+				ls.metrics.incHeaderVerificationDeferred()
 				ls.config.Logger.Debug(
 					"deferring stateful block header verification until ledger apply",
 					"component",

@@ -401,3 +401,16 @@ func TestMithrilPprofServerUsesDedicatedBindAddress(t *testing.T) {
 		t.Fatalf("explicit wildcard pprof address = %q, want %q", got, want)
 	}
 }
+
+func TestApplyDebugLevelOverride(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Logging: config.LoggingConfig{Level: "info"}}
+	applyDebugLevelOverride(cfg, false)
+	if cfg.Logging.Level != "info" {
+		t.Fatalf("level = %q without --debug, want info", cfg.Logging.Level)
+	}
+	applyDebugLevelOverride(cfg, true)
+	if cfg.Logging.Level != "debug" {
+		t.Fatalf("level = %q with --debug, want debug", cfg.Logging.Level)
+	}
+}
