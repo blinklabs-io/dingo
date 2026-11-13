@@ -42,6 +42,13 @@ var ErrTruncateNotStarted = errors.New(
 
 const pendingTruncateSyncKey = "database_lifecycle_truncate_pending"
 
+// syncStatusSyncKey and syncStatusInProgress mirror the sync-state key and
+// value mithril writes while a sync or snapshot restore is unfinished.
+const (
+	syncStatusSyncKey    = "sync_status"
+	syncStatusInProgress = "in_progress"
+)
+
 // PendingTruncate records enough information to resume a truncate whose
 // batched blob deletion was interrupted before metadata was truncated.
 // Checksum protects every field that controls the resumed delete range. The
@@ -497,6 +504,24 @@ func Truncate(
 			batchSize,
 			delegatorInactivityEnabled,
 			delegatorInactivity,
+		)
+	}
+
+	// A Mithril import records mithril_ledger_slot only when its sync
+	// completes, so while sync_status is in progress the boundary check below
+	// reads 0 and would let a target under the imported outputs through. A
+	// resumed import skips a completed UTxO phase and never rewrites them.
+	syncStatus, err := db.GetSyncState(syncStatusSyncKey, nil)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"%w: read sync status: %w", ErrTruncateNotStarted, err,
+		)
+	}
+	if syncStatus == syncStatusInProgress {
+		return 0, fmt.Errorf(
+			"%w: a Mithril sync or snapshot restore is in progress and has "+
+				"not recorded its trust boundary; finish it before truncating",
+			ErrTruncateNotStarted,
 		)
 	}
 

@@ -2391,7 +2391,10 @@ other caller (a consumed-UTxO recovery heuristic) but wrong for a safety check â
 `MithrilTrustBoundarySlotStrict` is the fail-closed variant `lifecycle.Truncate`
 actually uses for its boundary check, propagating a read error instead of
 silently treating it as "no boundary" and letting an unverifiable truncate
-through. It propagates an unparseable value the same way, and an empty one too:
+through. Because a Mithril sync writes the boundary only when it completes,
+`lifecycle.Truncate` first refuses a database whose `sync_status` is
+`in_progress`: its imported rows sit above any target and no boundary exists
+yet to refuse it. It propagates an unparseable value the same way, and an empty one too:
 `GetSyncState` reports an absent key as the empty string, so before concluding
 that no boundary was recorded the strict variant asks the `sync_state` keyspace
 (`ListSyncStateKeysByPrefix`) whether the row exists at all â€” a row that exists
@@ -3075,7 +3078,9 @@ or before the anchor, so it only lowers `added_slot`. A row recovered from the
 block store already carries that slot. Every rollback entry point keeps its
 deletion slot at or above the anchor -- `ledger.LedgerState.rollback` and the
 `database/lifecycle` truncate both refuse a target below `mithril_ledger_slot`
-before mutating anything, and `Database.TruncateAfterSlot` floors the slot it
+before mutating anything, the truncate also refuses while `sync_status` is
+`in_progress` (a sync records that slot only when it completes, so an
+unfinished one holds imported rows with no boundary recorded), and `Database.TruncateAfterSlot` floors the slot it
 applies to UTxOs, transactions and spends -- so an imported output, linked or
 not, and its assets survive a rollback of a block that replayed or re-confirmed
 it. `TruncateAfterSlot` applies the target slot itself to its other deletions;

@@ -4296,7 +4296,7 @@ still opens its resolution/mutation handle directly against the live data
 directory after quiesce/close, same as before. It does, however, make the
 equivalent distinction for its own failure modes: `dblifecycle.ResolveTarget`
 and `lifecycle.Truncate`'s own pre-delete validation (target ahead of tip,
-target before the Mithril trust boundary) are read-only and provably safe — a
+target before the Mithril trust boundary, a `sync_status` of `in_progress`) are read-only and provably safe — a
 failure there (or a context cancellation caught before `DeleteBlocksAfter`
 starts) is wrapped in `lifecycle.ErrTruncateNotStarted`, and `Node.Truncate`
 resumes normally on it instead of calling `n.cancel()`. Before the first batched
