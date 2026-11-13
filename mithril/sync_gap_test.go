@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -1670,9 +1671,18 @@ func gapSpendTx(
 	fee uint64,
 ) lcommon.Transaction {
 	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x11}, 28),
+		nil,
+	)
+	require.NoError(t, err)
+	addrBytes, err := addr.Bytes()
+	require.NoError(t, err)
 	body, err := cbor.Encode(map[uint]any{
 		0: []any{[]any{input, uint64(0)}},
-		1: []any{},
+		1: []any{map[uint]any{0: addrBytes, 1: uint64(1_000_000)}},
 		2: fee,
 	})
 	require.NoError(t, err)
@@ -1700,6 +1710,12 @@ func processGapTx(
 	offsets := &database.BlockIngestionResult{
 		TxOffsets: map[[32]byte]database.CborOffset{
 			txHash: {
+				BlockSlot: slot, BlockHash: blockHash,
+				ByteOffset: 0, ByteLength: 1,
+			},
+		},
+		UtxoOffsets: map[database.UtxoRef]database.CborOffset{
+			{TxId: txHash, OutputIdx: 0}: {
 				BlockSlot: slot, BlockHash: blockHash,
 				ByteOffset: 0, ByteLength: 1,
 			},
@@ -1745,6 +1761,11 @@ func TestDeleteBlobBlocksAboveSlotRemovesRejectedGapRows(t *testing.T) {
 	require.NotEqual(t, fork.Hash().Bytes(), canonical.Hash().Bytes())
 
 	processGapTx(t, db, 150, "fork-block", fork)
+	forkOutputExists, err := db.UtxoExists(
+		context.Background(), fork.Hash().Bytes(), 0, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, forkOutputExists, "setup: fork must produce an output")
 	spent, err := db.Metadata().GetUtxoIncludingSpent(input, 0, nil)
 	require.NoError(t, err)
 	require.EqualValues(t, 150, spent.DeletedSlot, "setup: fork spends input")
