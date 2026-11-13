@@ -17,10 +17,11 @@ package ledgerstate
 import (
 	"bytes"
 	"context"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"log/slog"
 	"math/big"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"

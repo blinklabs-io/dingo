@@ -17,9 +17,10 @@ package governance
 import (
 	"context"
 	"database/sql"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"math/big"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"

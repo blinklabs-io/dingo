@@ -15,8 +15,9 @@
 package governance
 
 import (
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"

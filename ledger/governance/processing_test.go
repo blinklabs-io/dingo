@@ -17,11 +17,12 @@ package governance
 import (
 	"context"
 	"fmt"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"io"
 	"log/slog"
 	"math/big"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"

@@ -21,13 +21,14 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"errors"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"log/slog"
 	"math/big"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"

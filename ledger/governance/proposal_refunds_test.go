@@ -16,8 +16,9 @@ package governance
 
 import (
 	"context"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
