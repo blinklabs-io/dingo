@@ -144,10 +144,10 @@ func (w *poolCurrentWorkload) step() string {
 		return "certificate"
 	case roll < 13:
 		slot, index := w.freshPosition(300)
-		contextSlot := slot - 1 - w.rng.Uint64N(min(slot, 400))
 		if slot == 0 {
 			return "skip"
 		}
+		contextSlot := slot - 1 - w.rng.Uint64N(min(slot, 400))
 		w.apply(slot, index, w.cert(w.pool()), &contextSlot)
 		return "leios certificate"
 	case roll < 15 && len(w.placed) > 0:
