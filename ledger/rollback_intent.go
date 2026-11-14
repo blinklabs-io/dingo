@@ -488,7 +488,9 @@ func (ls *LedgerState) recoverRollbackIntentLocked(ctx context.Context) error {
 			"component", "ledger", "ledger_tip_slot", current.Slot,
 			"intent_slot", point.Slot,
 		)
-		ls.emitRollbackTransactionEvents(ctx, blocks)
+		if err := ls.emitRollbackTransactionEvents(ctx, blocks); err != nil {
+			return err
+		}
 		return ls.finishRollbackIntent(ctx)
 	}
 	if point.Slot > 0 || len(point.Hash) > 0 {
@@ -502,7 +504,9 @@ func (ls *LedgerState) recoverRollbackIntentLocked(ctx context.Context) error {
 				"component", "ledger",
 				"intent_slot", point.Slot,
 			)
-			ls.emitRollbackTransactionEvents(ctx, blocks)
+			if err := ls.emitRollbackTransactionEvents(ctx, blocks); err != nil {
+				return err
+			}
 			return ls.finishRollbackIntent(ctx)
 		}
 	}
@@ -512,7 +516,9 @@ func (ls *LedgerState) recoverRollbackIntentLocked(ctx context.Context) error {
 		}
 	}
 
-	ls.emitRollbackTransactionEvents(ctx, blocks)
+	if err := ls.emitRollbackTransactionEvents(ctx, blocks); err != nil {
+		return err
+	}
 	if err := ls.rollbackWithBlocks(ctx, point, blocks, false); err != nil {
 		return fmt.Errorf("recover rollback intent: %w", err)
 	}
