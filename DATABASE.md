@@ -2401,7 +2401,10 @@ other caller (a consumed-UTxO recovery heuristic) but wrong for a safety check â
 `MithrilTrustBoundarySlotStrict` is the fail-closed variant `lifecycle.Truncate`
 actually uses for its boundary check, propagating a read error instead of
 silently treating it as "no boundary" and letting an unverifiable truncate
-through. It propagates an unparseable value the same way, and an empty one too:
+through. Because a Mithril sync writes the boundary only when it completes,
+`lifecycle.Truncate` first refuses a database whose `sync_status` is
+`in_progress`: its imported rows sit above any target and no boundary exists
+yet to refuse it. It propagates an unparseable value the same way, and an empty one too:
 `GetSyncState` reports an absent key as the empty string, so before concluding
 that no boundary was recorded the strict variant asks the `sync_state` keyspace
 (`ListSyncStateKeysByPrefix`) whether the row exists at all â€” a row that exists
@@ -3079,6 +3082,47 @@ every import, not only `Reconcile: true`; it is idempotent and a no-op on a
 fresh database, which has no post-anchor rows. An unspent post-anchor row is
 rolled back the same way as a spent one: left live, it would be counted toward
 any mark snapshot taken before replay reaches its creation slot.
+
+An imported output carries the anchor slot as `added_slot`, so a rollback
+deletes it like any row created at the anchor and keeps no import-time state
+of its own. Nothing can delete one that the producer's replay would not: a
+replayed producer links an already-stored row without restamping it
+(`repairConflictedUtxo` writes only the collateral-return marker), and
+`hydrateImportedUtxo`, reached through `ImportUtxos` for a producer recovered
+from the block store, restamps it with the producer's block slot, which is at
+or before the anchor, so it only lowers `added_slot`. A row recovered from the
+block store already carries that slot. Every rollback entry point keeps its
+deletion slot at or above the anchor -- `ledger.LedgerState.rollback` and the
+`database/lifecycle` truncate both refuse a target below `mithril_ledger_slot`
+before mutating anything, the truncate also refuses while `sync_status` is
+`in_progress` (a sync records that slot only when it completes, so an
+unfinished one holds imported rows with no boundary recorded), and `Database.TruncateAfterSlot` floors the slot it
+applies to UTxOs, transactions and spends -- so an imported output, linked or
+not, and its assets survive a rollback of a block that replayed or re-confirmed
+it. `TruncateAfterSlot` applies the target slot itself to its other deletions;
+since both callers refuse a target below the anchor, those never reach an
+imported governance proposal, whose `added_slot` is the start slot of the
+epoch it was proposed in, at or before the anchor.
+
+The Mithril sync cleanup of a rejected stored tail
+(`deleteBlobBlocksAboveSlotExcept`) is a rollback entry point of another kind:
+it cuts UTxOs, transactions, spends and governance proposals at the immutable
+tip's slot, below the imported rows' slots, and it distinguishes rows only by
+slot. The rows it must remove are those the rejected blocks' processing wrote
+in `(immutable tip, ledger state slot]`, which a slot rule cannot tell from the
+imported rows there (a producer's hydrated `added_slot`). So it never runs
+after an import has written rows: `Sync` judges the stored blocks against the
+selected ledger state (`checkStoredGap`, which reads blocks only) and cleans
+between the immutable copy and the import (`cleanRejectedStoredGapBeforeImport`),
+or before the copy in reward-state repair. A catch-up or repair import
+reconciles every phase and never reads a checkpoint, so it rewrites whatever
+the cleanup removed. A bootstrap resume skips its UTxO phase once the import
+checkpoint for its key records it complete; there the cleanup is refused with
+an error and nothing is deleted. A re-run meets the same blocks and checkpoint
+and refuses again, so the only recovery is a fresh bootstrap into an empty data
+directory. A rejection found after the import is an
+error and deletes nothing. The cleanup cuts blocks, votes, UTxOs, transactions,
+spends and proposals at the same raw slot.
 
 `database.Config` carries the gate values a bare database open can supply,
 independently of any parsed cardano config: `NetworkMagic`, `StartEra`,
