@@ -451,10 +451,10 @@ func (s *Store) AddAccountRewardsByCredential(
 }
 
 // ApplyAccountRewardWithdrawal clears a registered reward account after a
-// withdrawal by the transaction with hash txHash. The transaction row must
-// already exist, and models.ErrWithdrawalTransactionNotFound is returned
-// otherwise: the real transaction insert keeps a pre-existing row's type, fee,
-// ttl, metadata and valid columns, so a placeholder row would stay incomplete.
+// withdrawal by the transaction with hash txHash. The transaction must already
+// be applied, with an applied_transaction row; a hash known only as an identity
+// row, such as an imported output's producer, returns
+// models.ErrWithdrawalTransactionNotFound. No placeholder row is inserted.
 // The block path records withdrawals through applyTransactionWithdrawals.
 func (s *Store) ApplyAccountRewardWithdrawal(
 	credentialTag uint8,

@@ -2547,7 +2547,8 @@ type MetadataStore interface {
 
 	// ApplyAccountRewardWithdrawal clears a registered reward account after a
 	// validated transaction withdrawal and records rollback state. txHash must
-	// identify an already stored transaction; otherwise the call fails with
+	// identify an applied transaction, one with an applied_transaction row; a
+	// hash known only as an identity row fails with
 	// models.ErrWithdrawalTransactionNotFound.
 	ApplyAccountRewardWithdrawal(
 		uint8, // credentialTag

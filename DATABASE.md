@@ -3583,12 +3583,10 @@ transaction ingestion independently checks the era-neutral upper bound,
 subtracts the amount from `account.reward`, and inserts the matching
 `reward_withdrawal` row in the same metadata transaction, keyed by the
 `transaction.id` the same write just obtained. `ApplyAccountRewardWithdrawal`
-requires the withdrawing transaction row to exist and returns
-`models.ErrWithdrawalTransactionNotFound` otherwise: it never inserts a
-placeholder `transaction` row, because the real insert's `ON CONFLICT (hash)`
-forms either keep the row's NULL `type`, `fee`, `ttl`, `metadata` and `valid`
-columns or leave the placeholder untouched. A zero withdrawal
-in a phase-2-valid
+requires the withdrawing transaction to have an `applied_transaction` row and
+returns `models.ErrWithdrawalTransactionNotFound` otherwise, including for a
+hash known only as a `transaction` identity row; it never inserts a placeholder
+row. A zero withdrawal in a phase-2-valid
 transaction does not change the balance or create a withdrawal row; when
 delegator inactivity tracking is enabled, it can still create an
 `account_withdrawal_witness` row because witnessing and balance mutation are
