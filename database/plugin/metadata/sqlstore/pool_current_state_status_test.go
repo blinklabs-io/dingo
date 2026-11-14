@@ -319,6 +319,46 @@ func TestPoolStatusOfPoolOlderThanHorizon(t *testing.T) {
 	w.checkStatus(0, "older than the horizon")
 }
 
+// A certificate whose transaction carries a Leios execution context ranks by
+// the context slot, not the slot it was added at. A retirement added after a
+// registration but executing before it is cancelled by that registration, and
+// a registration added after a retirement but executing before it does not
+// cancel it.
+func TestPoolStatusRanksLeiosContextByEffectiveSlot(t *testing.T) {
+	t.Parallel()
+	tip := func(w *poolCurrentWorkload, slot uint64) {
+		require.NoError(t, w.store.SetTip(ochainsync.Tip{
+			Point: ocommon.Point{Slot: slot, Hash: make([]byte, 32)},
+		}, nil))
+	}
+	t.Run("retirement_executes_first", func(t *testing.T) {
+		t.Parallel()
+		w := newPoolCurrentScenario(t, 0xb6)
+		pool := w.pools[0]
+		w.apply(1_000, 0, depositHeldRegistration(pool), nil)
+		contextSlot := uint64(900)
+		w.apply(2_000, 0, depositHeldRetirement(pool, 3), &contextSlot)
+		active := models.PoolStatus{Exists: true, Active: true}
+		require.Equal(t, active, w.status(pool))
+		tip(w, 3_100)
+		require.Equal(t, active, w.status(pool))
+	})
+	t.Run("registration_executes_first", func(t *testing.T) {
+		t.Parallel()
+		w := newPoolCurrentScenario(t, 0xb7)
+		pool := w.pools[0]
+		w.apply(1_000, 0, depositHeldRegistration(pool), nil)
+		w.apply(1_500, 0, depositHeldRetirement(pool, 3), nil)
+		contextSlot := uint64(1_400)
+		w.apply(2_000, 0, depositHeldRegistration(pool), &contextSlot)
+		require.Equal(t, models.PoolStatus{
+			Exists: true, Active: true, RetirementEpoch: new(uint64(3)),
+		}, w.status(pool))
+		tip(w, 3_100)
+		require.Equal(t, models.PoolStatus{Exists: true}, w.status(pool))
+	})
+}
+
 // GetPoolStatus and the at-slot lookup read the stored rows, not the history
 // they derive from: with the retirement and certificate history removed under
 // them by raw SQL, they still answer from the rows.
