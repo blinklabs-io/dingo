@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -1660,4 +1661,137 @@ func TestProcessGapBlockProposalsSettleWhatTheSnapshotDoesNotHold(
 	require.NoError(t, err)
 	require.NotNil(t, settled.ExpiredEpoch)
 	require.NotNil(t, settled.DroppedEpoch)
+}
+
+// gapSpendTx builds a transaction that spends input and pays fee; two fees
+// give two transactions that spend the same input and hash differently.
+func gapSpendTx(
+	t *testing.T,
+	input []byte,
+	fee uint64,
+) lcommon.Transaction {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x11}, 28),
+		nil,
+	)
+	require.NoError(t, err)
+	addrBytes, err := addr.Bytes()
+	require.NoError(t, err)
+	body, err := cbor.Encode(map[uint]any{
+		0: []any{[]any{input, uint64(0)}},
+		1: []any{map[uint]any{0: addrBytes, 1: uint64(1_000_000)}},
+		2: fee,
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(body), map[uint]any{}, nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	return tx
+}
+
+func processGapTx(
+	t *testing.T,
+	db *database.Database,
+	slot uint64,
+	blockSeed string,
+	tx lcommon.Transaction,
+) {
+	t.Helper()
+	point := ocommon.Point{Slot: slot, Hash: testGapHash32(blockSeed)}
+	var blockHash, txHash [32]byte
+	copy(blockHash[:], point.Hash)
+	copy(txHash[:], tx.Hash().Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot: slot, BlockHash: blockHash,
+				ByteOffset: 0, ByteLength: 1,
+			},
+		},
+		UtxoOffsets: map[database.UtxoRef]database.CborOffset{
+			{TxId: txHash, OutputIdx: 0}: {
+				BlockSlot: slot, BlockHash: blockHash,
+				ByteOffset: 0, ByteLength: 1,
+			},
+		},
+	}
+	pparams := &dijkstra.DijkstraProtocolParameters{}
+	require.NoError(t, processGapBlockTransactions(
+		context.Background(), db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		point, []lcommon.Transaction{tx}, offsets, 100,
+		dijkstra.EraIdDijkstra, pparams, &pparams.ConwayProtocolParameters,
+	))
+}
+
+// The cleanup of a rejected tail is cut at the raw slot. A transaction of the
+// rejected tail that sits inside the gap interval must lose its row, its
+// output and its spend, so the canonical transaction processed afterwards at
+// the same slot is the spender.
+func TestDeleteBlobBlocksAboveSlotRemovesRejectedGapRows(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	// A stale block keeps the cleanup from returning early.
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 300,
+		Hash: testGapHash32("stale-300"),
+		Cbor: []byte{0x82, 0x03},
+		Type: 1,
+	}, nil))
+	input := testGapHash32("input")
+	require.NoError(t, db.CreateUtxo(
+		context.Background(), nil, &models.Utxo{TxId: input, AddedSlot: 50},
+	))
+
+	fork := gapSpendTx(t, input, 1)
+	canonical := gapSpendTx(t, input, 2)
+	require.NotEqual(t, fork.Hash().Bytes(), canonical.Hash().Bytes())
+
+	processGapTx(t, db, 150, "fork-block", fork)
+	forkOutputExists, err := db.UtxoExists(
+		context.Background(), fork.Hash().Bytes(), 0, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, forkOutputExists, "setup: fork must produce an output")
+	spent, err := db.Metadata().GetUtxoIncludingSpent(input, 0, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 150, spent.DeletedSlot, "setup: fork spends input")
+
+	require.NoError(t, deleteBlobBlocksAboveSlotExcept(
+		context.Background(), db, 100, nil,
+	))
+
+	forkRow, err := db.GetTransactionByHash(
+		context.Background(), fork.Hash().Bytes(), nil,
+	)
+	require.True(t, err != nil || forkRow == nil,
+		"the rejected tail's transaction row must be removed")
+	exists, err := db.UtxoExists(
+		context.Background(), fork.Hash().Bytes(), 0, nil,
+	)
+	require.NoError(t, err)
+	require.False(t, exists, "the rejected tail's output must be removed")
+	restored, err := db.Metadata().GetUtxoIncludingSpent(input, 0, nil)
+	require.NoError(t, err)
+	require.Zero(t, restored.DeletedSlot, "the fork's spend must be undone")
+
+	processGapTx(t, db, 150, "canonical-block", canonical)
+	spent, err = db.Metadata().GetUtxoIncludingSpent(input, 0, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 150, spent.DeletedSlot)
+	require.Equal(t, canonical.Hash().Bytes(), []byte(spent.SpentAtTxHash),
+		"the canonical transaction must be the spender")
 }

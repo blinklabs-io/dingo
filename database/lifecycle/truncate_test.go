@@ -552,6 +552,92 @@ func TestTruncateRejectsTargetBeforeMithrilBoundary(t *testing.T) {
 	require.Equal(t, uint64(1), blocksRemoved)
 }
 
+// A Mithril sync records its trust boundary only when it completes, so a
+// database it left in progress holds imported outputs above any target and
+// no boundary to refuse it. Truncating there would delete outputs a resumed
+// import never rewrites.
+func TestTruncateRejectsIncompleteMithrilSync(t *testing.T) {
+	t.Parallel()
+
+	f := buildTestChain(t, 5)
+	importedTxID := bytes.Repeat([]byte{0x61}, 32)
+	require.NoError(t, f.db.CreateUtxo(
+		context.Background(), nil,
+		&models.Utxo{TxId: importedTxID, AddedSlot: f.blocks[4].Slot},
+	))
+	require.NoError(t, f.db.SetSyncState("sync_status", "in_progress", nil))
+
+	_, err := lifecycle.Truncate(
+		context.Background(), f.db, f.blocks[2], 0, false, 0,
+	)
+	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+	exists, err := f.db.UtxoExists(
+		context.Background(), importedTxID, 0, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, exists, "a refused truncate must keep imported outputs")
+	_, err = database.BlockByHash(
+		context.Background(), f.db, f.blocks[4].Hash,
+	)
+	require.NoError(t, err, "a refused truncate must keep blocks")
+}
+
+// A Mithril import that completes after a truncate was interrupted raises the
+// trust boundary and imports outputs at that slot. The marker's older floor
+// must not authorize deleting them.
+func TestTruncateRefusesResumeAfterMithrilBoundaryRises(t *testing.T) {
+	t.Parallel()
+
+	f := buildTestChain(t, 5)
+	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
+	require.ErrorIs(t, err, context.Canceled)
+
+	importedTxID := bytes.Repeat([]byte{0x62}, 32)
+	require.NoError(t, f.db.CreateUtxo(
+		context.Background(), nil,
+		&models.Utxo{TxId: importedTxID, AddedSlot: f.blocks[4].Slot},
+	))
+	require.NoError(t, f.db.SetSyncState(
+		"mithril_ledger_slot",
+		strconv.FormatUint(f.blocks[4].Slot, 10),
+		nil,
+	))
+
+	_, err = lifecycle.Truncate(
+		context.Background(), f.db, models.Block{}, 1, false, 0,
+	)
+	require.ErrorContains(t, err, "above the pending truncate")
+	exists, err := f.db.UtxoExists(
+		context.Background(), importedTxID, 0, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, exists, "a refused resume must keep imported outputs")
+	pending, err := lifecycle.GetPendingTruncate(f.db)
+	require.NoError(t, err)
+	require.NotNil(t, pending, "a refused resume must keep the marker")
+}
+
+// A Mithril sync that starts after an interrupted truncate has recorded no
+// boundary yet, so the resume is refused while it is in progress.
+func TestTruncateRefusesResumeDuringMithrilSync(t *testing.T) {
+	t.Parallel()
+
+	f := buildTestChain(t, 5)
+	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 3}
+	_, err := lifecycle.Truncate(ctx, f.db, f.blocks[1], 1, false, 0)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NoError(t, f.db.SetSyncState("sync_status", "in_progress", nil))
+
+	_, err = lifecycle.Truncate(
+		context.Background(), f.db, models.Block{}, 1, false, 0,
+	)
+	require.ErrorContains(t, err, "in progress")
+	pending, err := lifecycle.GetPendingTruncate(f.db)
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+}
+
 // TestTruncateDetectsAndResumesInterruptedBatchedDelete verifies that a
 // cancellation after one blob-delete batch cannot leave an undetectable
 // database with metadata pointing at missing blocks. The durable marker must

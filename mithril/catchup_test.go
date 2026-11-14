@@ -722,6 +722,216 @@ func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
+// rejectedTailSync is a Sync run against a database holding a stored tail that
+// fails the continuity check against an ancillary state past the certified
+// tip. The run is cancelled when it reaches the relay fetch, which only
+// happens after the cleanup and the import.
+type rejectedTailSync struct {
+	dataDir   string
+	txID      []byte
+	staleFork models.Block
+	syncErr   error
+	digest    string
+}
+
+type rejectedTailOptions struct {
+	// catchUpMarker engages the catch-up (reconcile) import.
+	catchUpMarker bool
+	// importedCheckpoint seeds the rows and the checkpoint of a previous
+	// run that completed the UTxO phase.
+	importedCheckpoint bool
+}
+
+func runRejectedTailSync(
+	t *testing.T,
+	opts rejectedTailOptions,
+) rejectedTailSync {
+	t.Helper()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, certifiedHash := validImmutableFiles(t, 1000)
+	block1050 := rewardRepairTestBlock(t, 1050, 3, certifiedHash)
+	block1100 := rewardRepairTestBlock(t, 1100, 4, block1050.Hash)
+	block1200 := rewardRepairTestBlock(t, 1200, 5, block1100.Hash)
+	stateHash := bytes.Clone(block1100.Hash)
+	txID := bytes.Repeat([]byte{0x61}, 32)
+	address := append([]byte{0x60}, bytes.Repeat([]byte{0x71}, 28)...)
+	txInCBOR, err := cbor.Encode([]any{txID, uint64(0)})
+	require.NoError(t, err)
+	txOutCBOR, err := cbor.Encode([]any{address, uint64(42)})
+	require.NoError(t, err)
+	utxoMap := append([]byte{0xa1}, txInCBOR...)
+	utxoMap = append(utxoMap, txOutCBOR...)
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		immutableFileNumber: 0,
+		validImmutable:      true,
+		ancillaryLedgerSlot: 1100,
+		ancillaryLedgerState: minimalLedgerStateWithUTxOMap(
+			t, 1100, stateHash, utxoMap,
+		),
+	})
+
+	dataDir := t.TempDir()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      discard,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot:     1000,
+		Hash:     certifiedHash,
+		PrevHash: bytes.Repeat([]byte{0}, 32),
+		Cbor:     []byte{0x80},
+		Number:   2,
+		Type:     uint(shelley.BlockTypeShelley),
+	}, nil))
+	staleFork := rewardRepairTestBlock(
+		t, 1075, 99, bytes.Repeat([]byte{0xee}, 32),
+	)
+	for _, block := range []models.Block{
+		block1050, block1100, staleFork, block1200,
+	} {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	if opts.catchUpMarker {
+		require.NoError(t, setImmutableImportMarker(db, 0))
+	}
+	require.NoError(t, db.SetSyncState(
+		"sync_status", syncStatusInProgress, nil,
+	))
+	require.NoError(t, setPinnedArtifact(db, pinnedArtifact{
+		Backend:             BackendV2,
+		Network:             "preprod",
+		Digest:              fixture.artifact.Hash,
+		Epoch:               fixture.artifact.Beacon.Epoch,
+		ImmutableFileNumber: fixture.artifact.Beacon.ImmutableFileNumber,
+		CertificateHash:     fixture.artifact.CertificateHash,
+	}))
+	require.NoError(t, recordPinnedCertifiedTip(db, 1000))
+	if opts.importedCheckpoint {
+		require.NoError(t, db.CreateUtxo(
+			context.Background(), nil,
+			&models.Utxo{TxId: txID, AddedSlot: 1100, Amount: 42},
+		))
+		require.NoError(t, db.Metadata().SetImportCheckpoint(
+			&models.ImportCheckpoint{
+				ImportKey: ledgerImportKey(fixture.artifact.Hash, 1100),
+				Phase:     models.ImportPhaseUTxO,
+			}, nil,
+		))
+	}
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, syncErr := Sync(ctx, SyncConfig{
+		Network:     "preprod",
+		DataDir:     dataDir,
+		StorageMode: "core",
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t, fixture.genesisVKey, fixture.ancillaryVKey,
+		),
+		Backend:           BackendV2,
+		VerifyCertChain:   true,
+		AggregatorURL:     fixture.server.URL,
+		AllowInsecureHTTP: true,
+		StoragePlugins:    testStoragePlugins(),
+		DatabaseWorkers:   1,
+		Logger:            discard,
+		OnProgress: func(progress SyncProgress) {
+			if progress.Phase != PhaseGapBlocks {
+				return
+			}
+			if !progress.Active {
+				return
+			}
+			cancel()
+		},
+	})
+	return rejectedTailSync{
+		dataDir:   dataDir,
+		txID:      txID,
+		staleFork: staleFork,
+		syncErr:   syncErr,
+		digest:    fixture.artifact.Hash,
+	}
+}
+
+func (r rejectedTailSync) reopen(t *testing.T) *database.Database {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     r.dataDir,
+		StorageMode: "core",
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
+	return db
+}
+
+// A catch-up resume imports in full, so the rejected tail is removed before
+// the import writes the snapshot UTxOs.
+func TestSyncCatchUpResumeKeepsSnapshotUTxOsWhenStoredTailIsRejected(
+	t *testing.T,
+) {
+	t.Parallel()
+	run := runRejectedTailSync(t, rejectedTailOptions{catchUpMarker: true})
+	require.ErrorContains(t, run.syncErr, "fetching volatile blocks")
+	db := run.reopen(t)
+	exists, err := db.UtxoExists(context.Background(), run.txID, 0, nil)
+	require.NoError(t, err)
+	require.True(t, exists,
+		"cleanup of a rejected stored tail must preserve UTxOs carried by the imported state")
+	_, err = database.BlockByHash(
+		context.Background(), db, run.staleFork.Hash,
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+// A non-catch-up resume that has not completed the UTxO phase imports it after
+// the cleanup.
+func TestSyncResumeKeepsSnapshotUTxOsWhenStoredTailIsRejected(t *testing.T) {
+	t.Parallel()
+	run := runRejectedTailSync(t, rejectedTailOptions{})
+	require.ErrorContains(t, run.syncErr, "fetching volatile blocks")
+	db := run.reopen(t)
+	exists, err := db.UtxoExists(context.Background(), run.txID, 0, nil)
+	require.NoError(t, err)
+	require.True(t, exists,
+		"cleanup of a rejected stored tail must preserve UTxOs carried by the imported state")
+	_, err = database.BlockByHash(
+		context.Background(), db, run.staleFork.Hash,
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+// A resume whose checkpoint records a completed UTxO phase skips that phase,
+// so a cleanup of imported rows could never be repaired. The run refuses to
+// clean and leaves rows and blocks untouched.
+func TestSyncResumeRefusesRejectedTailAfterUTxOImport(t *testing.T) {
+	t.Parallel()
+	run := runRejectedTailSync(t, rejectedTailOptions{importedCheckpoint: true})
+	require.ErrorContains(t, run.syncErr, "already imported")
+	db := run.reopen(t)
+	exists, err := db.UtxoExists(context.Background(), run.txID, 0, nil)
+	require.NoError(t, err)
+	require.True(t, exists, "the imported UTxO must survive the refusal")
+	_, err = database.BlockByHash(
+		context.Background(), db, run.staleFork.Hash,
+	)
+	require.NoError(t, err, "the refusal must not delete stored blocks")
+}
+
+// Nothing a later run does clears the refusal's state, so the error must be
+// distinguishable and name the only recovery: a fresh bootstrap.
+func TestSyncResumeRefusalNamesFreshBootstrapRecovery(t *testing.T) {
+	t.Parallel()
+	run := runRejectedTailSync(t, rejectedTailOptions{importedCheckpoint: true})
+	require.ErrorIs(t, run.syncErr, errRejectedTailAfterUTxOImport)
+	require.ErrorContains(t, run.syncErr, "empty data directory")
+}
+
 func TestSyncRewardRepairBelowCertifiedTipDropsOnlyForkBlocks(t *testing.T) {
 	t.Parallel()
 	testSyncRewardRepairBelowCertifiedTip(t, true)
