@@ -621,11 +621,14 @@
 #   # shelleyKesAgentAddresses:
 #   #   - "kes-agent-a.example:3443"
 #   #   - "kes-agent-b.example:3443"
+#   # The agent profile to sign for, named when the agent admits a session.
+#   # An agent with one profile needs none.
+#   # shelleyKesAgentProfile: "pool-a"
 #   # Or forge for several pools, each with its own keys and KES source
 #   # (replaces the shelley* settings above; YAML only, not with Leios):
-#   # A remote shelleyKesAgentAddress serves one pool only, so each pool
-#   # signing remotely needs its own agent address; a local socket can
-#   # serve several pools through its profiles.
+#   # Pools that share a remote agent address must each set
+#   # shelleyKesAgentProfile, to different profiles; a local socket serves
+#   # several pools through its profiles.
 #   # blockProducerPools:
 #   #   - shelleyVrfKey: "/keys/pool-a/vrf.skey"
 #   #     shelleyOperationalCertificate: "/keys/pool-a/opcert.cert"
@@ -634,6 +637,14 @@
 #   #   - shelleyVrfKey: "/keys/pool-b/vrf.skey"
 #   #     shelleyKesKey: "/keys/pool-b/kes.skey"
 #   #     shelleyOperationalCertificate: "/keys/pool-b/opcert.cert"
+#   #   - shelleyVrfKey: "/keys/pool-c/vrf.skey"
+#   #     shelleyOperationalCertificate: "/keys/pool-c/opcert.cert"
+#   #     shelleyKesAgentAddress: "kes-agent.example:3443"
+#   #     shelleyKesAgentProfile: "pool-c"
+#   #   - shelleyVrfKey: "/keys/pool-d/vrf.skey"
+#   #     shelleyOperationalCertificate: "/keys/pool-d/opcert.cert"
+#   #     shelleyKesAgentAddress: "kes-agent.example:3443"
+#   #     shelleyKesAgentProfile: "pool-d"
 #   # With storageMode: "core", Badger blob defaults switch to mmap-only:
 #   #   blockCacheSize: 0
 #   #   indexCacheSize: 0

@@ -235,3 +235,30 @@ func TestFailoverConnectedGaugeFollowsTheActiveAgent(t *testing.T) {
 	f.clients[0].setConnected(false)
 	require.InDelta(t, 1, connected(), 0)
 }
+
+func TestFailoverClientNamesItsProfileToEveryAgent(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	agents := startPlainAgents(t, 2, skeyData, vkey, opCert)
+	f, err := NewFailoverClient(
+		[]string{agents[0].addr, agents[1].addr},
+		RemoteConfig{
+			Plaintext:   true,
+			Profile:     "pool-a",
+			KESVKey:     vkey,
+			OpCert:      opCert,
+			SignTimeout: 2 * time.Second,
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = f.Close() })
+
+	require.NoError(t, f.Prepare())
+	// Prepare admits the standby in the background, under the same profile.
+	require.Eventually(t, func() bool {
+		return len(agents[1].admittedProfiles()) > 0
+	}, 5*time.Second, 10*time.Millisecond)
+	for _, a := range agents {
+		require.Equal(t, []string{"pool-a"}, a.admittedProfiles())
+	}
+}
