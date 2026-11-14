@@ -40,6 +40,15 @@ const (
 	defaultFetchRetryAttempts = 5
 	// defaultFetchRetryDelay is the pause between fetch retry attempts.
 	defaultFetchRetryDelay = 30 * time.Second
+	// defaultUnavailableRetryLimit bounds how many consecutive attempts at
+	// one check may fail because Koios is unavailable before strict mode
+	// gives up on it. runQueue re-runs a failed check on the first
+	// ErrorRetryDelay tick at or after its due time, which a failure sets
+	// one ErrorRetryDelay after the attempt ends, so consecutive attempts
+	// start at least two ticks (ten minutes at the default five-minute
+	// delay) apart. 144 attempts therefore span at least about 24 hours,
+	// and longer when an attempt itself waits out the client's retries.
+	defaultUnavailableRetryLimit = 144
 	// defaultQueueBuffer sizes the "an epoch.transition fired" wake channel.
 	// Only ever needs 1 slot of headroom in practice (see run's pending-set
 	// design below); sized slightly larger purely so a handler is never
@@ -75,10 +84,13 @@ type ObserverConfig struct {
 	// live, in-process *database.Database.
 	Source RewardParitySource
 	// Strict stops the observer (and, via FatalFunc, the node driving it)
-	// on the first Koios/tool error or non-pass parity result, except an
-	// epoch whose only significant mismatches are reference_lag: Koios's
-	// own data had not caught up, so that result is logged and recorded
-	// but never triggers FatalFunc (see Observer.fail). When
+	// on the first tool error, local cache error or non-pass parity result,
+	// except an epoch whose only significant mismatches are reference_lag:
+	// Koios's own data had not caught up, so that result is logged and
+	// recorded but never triggers FatalFunc (see Observer.fail). A Koios
+	// request that fails because Koios is unavailable is likewise retried
+	// rather than fatal, up to UnavailableRetryLimit consecutive attempts
+	// (see Observer.reportFetchError). When
 	// Strict is false, every failure is logged and recorded in the cache,
 	// and the observer keeps validating subsequent epochs — an explicit,
 	// non-default choice for advisory/observability-only use, since the
@@ -130,6 +142,15 @@ type ObserverConfig struct {
 	// not pool_history). Each refetch costs one /pool_history request per
 	// pool. Zero uses one hour.
 	PoolHistoryRefetchDelay time.Duration
+	// UnavailableRetryLimit is the number of consecutive attempts at one
+	// check (one epoch on one queue) that may fail because Koios is
+	// unavailable (see koiosUnavailable). In strict mode the attempt that
+	// reaches it is fatal; in non-strict mode it is logged and the check
+	// keeps retrying. A Koios answer of any kind, including reference lag,
+	// resets the count, and the count is not persisted across restarts.
+	// Zero or negative uses defaultUnavailableRetryLimit (144, at least about
+	// 24 hours at the default ErrorRetryDelay).
+	UnavailableRetryLimit int
 	// OnResult, if set, is called after every epoch this observer validates
 	// (pass, fail, or error), for tests/observability. Never called
 	// concurrently with itself.
@@ -192,6 +213,9 @@ type Observer struct {
 	// poolHistoryRefetchAt holds the earliest time each epoch cached with an
 	// unpublished pool_history may be fetched again. Guarded by mu.
 	poolHistoryRefetchAt map[uint64]time.Time
+	// koiosOutages holds each check's current run of consecutive attempts
+	// that failed because Koios was unavailable. Guarded by mu.
+	koiosOutages map[koiosCheckKey]koiosOutage
 
 	// pendingAccounts is pending's twin for the slow per-account queue (see
 	// the Observer doc comment). Guarded by the same mu as pending: both are
@@ -264,6 +288,9 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 	if cfg.PoolHistoryRefetchDelay <= 0 {
 		cfg.PoolHistoryRefetchDelay = time.Hour
 	}
+	if cfg.UnavailableRetryLimit <= 0 {
+		cfg.UnavailableRetryLimit = defaultUnavailableRetryLimit
+	}
 
 	cache, err := OpenCache(cfg.CachePath, cfg.Logger)
 	if err != nil {
@@ -291,6 +318,7 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 		retry:                make(map[uint64]time.Time),
 		retryAccounts:        make(map[uint64]time.Time),
 		poolHistoryRefetchAt: make(map[uint64]time.Time),
+		koiosOutages:         make(map[koiosCheckKey]koiosOutage),
 		wake:                 make(chan struct{}, defaultQueueBuffer),
 		wakeAccounts:         make(chan struct{}, defaultQueueBuffer),
 	}, nil
@@ -733,7 +761,11 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, false, fmt.Errorf("fetch koios reference: %w", err))
+		o.reportFetchError(epoch, false, err)
+		return
+	}
+
+	if !o.reconcilePoolReferenceOrReport(ctx, epoch, false) {
 		return
 	}
 
@@ -808,7 +840,7 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
+		o.reportFetchError(epoch, true, err)
 		return
 	}
 	if err := o.fetchAccountsIfNeeded(ctx, epoch); err != nil {
@@ -824,7 +856,11 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
+		o.reportFetchError(epoch, true, err)
+		return
+	}
+
+	if !o.reconcilePoolReferenceOrReport(ctx, epoch, true) {
 		return
 	}
 
@@ -915,8 +951,9 @@ func cancelled(ctx context.Context, err error) bool {
 		errors.Is(err, context.DeadlineExceeded)
 }
 
-// reportError records a genuine (non-shutdown) per-epoch fetch/check
-// failure: it logs and, in strict mode, fires FatalFunc via fail, and
+// reportError records a genuine (non-shutdown) per-epoch check failure
+// (fetch failures go through reportFetchError, which shares this path but
+// classifies fatality by provenance): it logs and, in strict mode, fires FatalFunc via fail, and
 // additionally invokes OnResult (when set) with a synthesized ERROR-status
 // result carrying err's text as a synthetic mismatch — otherwise these two
 // error branches in processEpoch would be invisible to OnResult callers,
@@ -933,14 +970,114 @@ func (o *Observer) reportError(
 	accountsChecked bool,
 	err error,
 ) {
+	o.reportErrorFatal(epoch, accountsChecked, err, true)
+}
+
+// reportFetchError reports a failure to fetch an epoch's Koios reference. The
+// fetch both requests Koios and reads and writes the local cache, so the error
+// is classified by where it came from. A Koios request that failed in a way a
+// later attempt can fix (koiosUnavailable) is not fatal: an unreachable
+// reference says nothing about whether Dingo's state agrees with it, and the
+// epoch is retried. That holds until the check has failed this way
+// UnavailableRetryLimit consecutive times; the attempt that reaches the limit
+// is fatal in strict mode, so a lasting outage cannot leave strict mode
+// checking nothing. Every other failure, including any local cache or database
+// error and a permanent Koios error, stays fatal in strict mode, and so does
+// an unavailable Koios when the retry itself cannot be recorded.
+func (o *Observer) reportFetchError(
+	epoch uint64,
+	accountsChecked bool,
+	err error,
+) {
+	err = fmt.Errorf("fetch koios reference: %w", err)
+	if !koiosUnavailable(err) {
+		o.endKoiosOutage(epoch, accountsChecked)
+		o.reportErrorFatal(epoch, accountsChecked, err, true)
+		return
+	}
+	attempts, elapsed := o.recordKoiosOutage(epoch, accountsChecked)
+	fatal := false
+	if attempts >= o.cfg.UnavailableRetryLimit {
+		err = fmt.Errorf(
+			"koios unreachable for %d consecutive attempts over %s: %w",
+			attempts, elapsed.Round(time.Second), err,
+		)
+		fatal = true
+	}
+	o.reportErrorFatal(epoch, accountsChecked, err, fatal)
+}
+
+// koiosCheckKey identifies one check: an epoch on one of the two queues.
+type koiosCheckKey struct {
+	epoch    uint64
+	accounts bool
+}
+
+// koiosOutage is one check's run of consecutive attempts that failed because
+// Koios was unavailable, and when the first of them was reported.
+type koiosOutage struct {
+	attempts int
+	since    time.Time
+}
+
+// recordKoiosOutage counts one more unavailable attempt for the check and
+// returns the run's length and how long ago it started.
+func (o *Observer) recordKoiosOutage(
+	epoch uint64,
+	accounts bool,
+) (int, time.Duration) {
+	now := time.Now()
+	key := koiosCheckKey{epoch: epoch, accounts: accounts}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	outage, ok := o.koiosOutages[key]
+	if !ok {
+		outage.since = now
+	}
+	outage.attempts++
+	o.koiosOutages[key] = outage
+	return outage.attempts, now.Sub(outage.since)
+}
+
+// endKoiosOutage resets the check's count when an attempt ends any way other
+// than in Koios unavailability, including reference lag, so only consecutive
+// unavailability reaches the limit.
+func (o *Observer) endKoiosOutage(epoch uint64, accounts bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.koiosOutages, koiosCheckKey{epoch: epoch, accounts: accounts})
+}
+
+// koiosUnavailable reports whether err is a failed Koios request that a later
+// fetch can succeed at: a transport error, timeout or 5xx that outlasted the
+// client's own retries, an exhausted 408 budget, or daily-quota exhaustion.
+// Any other ErrKoiosPermanent failure (auth, bad request, oversized response)
+// is excluded because retrying it cannot succeed.
+func koiosUnavailable(err error) bool {
+	if !errors.Is(err, errKoiosRequest) {
+		return false
+	}
+	return !errors.Is(err, ErrKoiosPermanent) ||
+		errors.Is(err, errKoiosUnavailable)
+}
+
+func (o *Observer) reportErrorFatal(
+	epoch uint64,
+	accountsChecked bool,
+	err error,
+	fatal bool,
+) {
 	if persistErr := o.cache.RecordObserverError(o.cfg.Network, epoch, accountsChecked); persistErr != nil {
 		err = errors.Join(
 			err,
 			fmt.Errorf("persist observer retry: %w", persistErr),
 		)
+		// A non-fatal failure is only safe while its retry survives a restart,
+		// and a local write failure is fatal in its own right.
+		fatal = true
 	}
 	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
-	o.fail(epoch, err, true)
+	o.fail(epoch, err, fatal)
 	now := time.Now()
 	o.emitResult(&EpochCompareResult{
 		Network:       o.cfg.Network,
@@ -960,7 +1097,8 @@ func (o *Observer) reportError(
 
 // emitResult is the single choke point every completed check result passes
 // through: processEpoch's success path, processAccountEpoch's success path,
-// and reportError's synthesized ERROR path (see their call sites) all call
+// and the synthesized ERROR path of reportError and reportFetchError (see
+// their call sites) all call
 // this rather than o.cfg.OnResult directly. Recording metrics here, once,
 // rather than at each call site individually, is what covers all three
 // without scattering dingo_koiosparity_* updates across observer.go.
@@ -1023,6 +1161,180 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 		},
 	)
 	return err
+}
+
+// errPoolHistoryUnpublished marks a pool that Koios's certificate history has
+// registered for an epoch while /pool_history keeps answering with no row.
+var errPoolHistoryUnpublished = errors.New(
+	"koios pool_history has no row for a registered pool",
+)
+
+// reconcilePoolReferenceOrReport runs reconcilePoolReference for one queue and
+// reports a failure, returning whether the queue can go on to CheckEpoch.
+func (o *Observer) reconcilePoolReferenceOrReport(
+	ctx context.Context,
+	epoch uint64,
+	accountsChecked bool,
+) bool {
+	err := o.reconcilePoolReference(ctx, epoch)
+	switch {
+	case err == nil:
+		o.endKoiosOutage(epoch, accountsChecked)
+		return true
+	case cancelled(ctx, err):
+	case errors.Is(err, errPoolHistoryUnpublished):
+		// Koios answered without the history: reference lag, which can last
+		// for days and never counts toward UnavailableRetryLimit.
+		o.endKoiosOutage(epoch, accountsChecked)
+		o.reportErrorFatal(epoch, accountsChecked, err, false)
+	default:
+		o.reportFetchError(epoch, accountsChecked, err)
+	}
+	return false
+}
+
+// reconcilePoolReference re-requests, one pool at a time, every pool Dingo has
+// in an epoch's stake basis but the cached Koios reference lacks, before the
+// comparison can call it pool_only_dingo.
+//
+// The bulk fetch cannot be trusted to prove absence: it skips pools by a
+// first-active epoch assembled from a multi-page /pool_updates scan, and a
+// single empty /pool_history answer is indistinguishable from a pool Koios
+// does not have. A pool Koios answers for now is added to the cache. A pool
+// Koios's own certificates show unregistered at the epoch stays absent, so
+// the comparison still reports it. A pool Koios registered but cannot produce
+// history for leaves the reference incomplete, which returns
+// errPoolHistoryUnpublished instead of a verdict.
+//
+// An empty reference pool set is left to the comparison, which already
+// reports it as reference_lag.
+func (o *Observer) reconcilePoolReference(
+	ctx context.Context,
+	epoch uint64,
+) error {
+	info, err := o.cache.GetEpochInfo(o.cfg.Network, epoch)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("get epoch info before pool reconcile: %w", err)
+	}
+	if info.PreStaking {
+		return nil
+	}
+	stakeEpoch, ok := koiosStakeEpoch(o.cfg.Network, epoch)
+	if !ok {
+		return nil
+	}
+	dingoPools, err := o.cfg.Source.GetPoolEpochDataMap(
+		ctx, stakeEpoch, koiosParamEpoch(epoch),
+	)
+	if err != nil {
+		// checkEpoch reads the same map and reports the failure itself.
+		return nil //nolint:nilerr // reported by the comparison
+	}
+	cached, err := o.cache.GetAllPoolsForEpoch(o.cfg.Network, epoch)
+	if err != nil {
+		return fmt.Errorf("get cached pools before pool reconcile: %w", err)
+	}
+	if len(cached) == 0 {
+		return nil
+	}
+	known := make(map[string]struct{}, len(cached))
+	for i := range cached {
+		keyHex, decErr := PoolKeyHashHex(cached[i].PoolBech32)
+		if decErr == nil {
+			known[keyHex] = struct{}{}
+		}
+	}
+	var missing []string
+	for keyHex, pool := range dingoPools {
+		if pool == nil || !pool.StakePresent {
+			continue
+		}
+		if _, inCache := known[keyHex]; inCache {
+			continue
+		}
+		bech, bechErr := PoolKeyHashHexToBech32(keyHex)
+		if bechErr != nil {
+			continue
+		}
+		missing = append(missing, bech)
+	}
+	slices.Sort(missing)
+	var unpublished []string
+	for _, poolBech32 := range missing {
+		found, err := o.refetchPoolHistory(ctx, epoch, poolBech32)
+		if err != nil {
+			return fmt.Errorf("pool %s history: %w", poolBech32, err)
+		}
+		if !found {
+			unpublished = append(unpublished, poolBech32)
+		}
+	}
+	if len(unpublished) > 0 {
+		return fmt.Errorf(
+			"epoch %d: %w: %v", epoch, errPoolHistoryUnpublished, unpublished,
+		)
+	}
+	return nil
+}
+
+// refetchPoolHistory caches poolBech32's history row for epoch when Koios
+// has one. found is true when the pool no longer needs a verdict from the
+// caller: its row was cached, or Koios's certificates show it unregistered at
+// epoch. It is false only for a registered pool whose history stays empty
+// through every attempt.
+func (o *Observer) refetchPoolHistory(
+	ctx context.Context,
+	epoch uint64,
+	poolBech32 string,
+) (found bool, err error) {
+	registeredChecked := false
+	for attempt := 0; attempt < o.cfg.FetchRetryAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-time.After(o.cfg.FetchRetryDelay):
+			}
+		}
+		item, err := o.koios.GetPoolEpochHistory(ctx, poolBech32, epoch)
+		if err != nil {
+			if errors.Is(err, ErrKoiosPermanent) ||
+				attempt == o.cfg.FetchRetryAttempts-1 {
+				return false, err
+			}
+			continue
+		}
+		if item != nil {
+			row := PoolEpochFromKoiosHistoryItem(
+				o.cfg.Network, epoch, poolBech32, item, time.Now(),
+			)
+			if err := o.cache.UpsertPoolEpoch(row); err != nil {
+				return false, fmt.Errorf("cache pool history: %w", err)
+			}
+			return true, nil
+		}
+		if registeredChecked {
+			continue
+		}
+		registered, err := o.koios.GetPoolRegisteredAtEpoch(
+			ctx, poolBech32, epoch,
+		)
+		if err != nil {
+			if errors.Is(err, ErrKoiosPermanent) ||
+				attempt == o.cfg.FetchRetryAttempts-1 {
+				return false, err
+			}
+			continue
+		}
+		if !registered {
+			return true, nil
+		}
+		registeredChecked = true
+	}
+	return false, nil
 }
 
 // fetchParamsIfNeeded fetches the /epoch_params reference row for epoch only
@@ -1325,9 +1637,12 @@ func (o *Observer) fetchAccountsIfNeeded(
 // so the comparison could not be trusted yet. Such a call is
 // still logged, and processEpoch/processAccountEpoch have already persisted
 // the result, but it never reaches FatalFunc and never sets fatalFired, so
-// run/runAccounts keep processing later epochs. Every other non-pass result,
-// including dingo_db_missing and dingo_db_error, and every reportError call
-// stays fatal in strict mode.
+// run/runAccounts keep processing later epochs. reportFetchError also passes
+// false for a Koios request that failed transiently (see koiosUnavailable),
+// unless the epoch's retry could not be persisted (see reportErrorFatal) or
+// the check has reached UnavailableRetryLimit consecutive such failures.
+// Every other non-pass result, including dingo_db_missing and dingo_db_error,
+// and every reportError call stays fatal in strict mode.
 //
 // run and runAccounts's goroutines can both call this concurrently (given
 // the queue split), so the exactly-once guarantee is enforced with an

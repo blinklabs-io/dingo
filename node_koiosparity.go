@@ -96,6 +96,7 @@ func (n *Node) startKoiosParityObserver() error {
 		AllowPrivateAddresses: cfg.AllowPrivateAddresses,
 		Source:                source,
 		Strict:                cfg.Strict,
+		UnavailableRetryLimit: cfg.UnavailableRetryLimit,
 		AccountsEnabled:       accountsEnabled,
 		GraceHours:            cfg.GraceHours,
 		AccountChunkSize:      cfg.AccountChunkSize,

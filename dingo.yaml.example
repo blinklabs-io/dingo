@@ -570,13 +570,25 @@
   # Can be overridden with DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES
   # CLI: --koios-parity-allow-private-addresses
   # allowPrivateAddresses: false
-  # Stop/cancel the node on the first Koios/tool error or non-pass parity
-  # result instead of logging it and continuing normal operation. An epoch
-  # whose only significant mismatches are reference_lag (Koios has not caught
-  # up yet) is logged and recorded but never stops the node.
+  # Stop/cancel the node on the first tool error, local cache error or
+  # non-pass parity result instead of logging it and continuing normal
+  # operation. An epoch whose only significant mismatches are reference_lag
+  # (Koios has not caught up yet) is logged, recorded and retried but never
+  # stops the node. A Koios request that failed because Koios is unavailable
+  # is retried too, until unavailableRetryLimit consecutive attempts fail.
   # Can be overridden with DINGO_KOIOS_PARITY_STRICT
   # CLI: --koios-parity-strict
   # strict: true
+  # Consecutive attempts at one epoch's check that may fail because Koios is
+  # unavailable (transport error, timeout, 5xx, exhausted 408 budget or
+  # daily-quota exhaustion). In strict mode the attempt that reaches the
+  # limit stops the node; otherwise it is logged at ERROR and retried. Any
+  # Koios answer, including reference lag, resets the count. A failed check
+  # is retried every ten minutes at the fastest, so the default of 144 is at
+  # least about 24 hours of continuous unavailability. 0 selects the default.
+  # Can be overridden with DINGO_KOIOS_PARITY_UNAVAILABLE_RETRY_LIMIT
+  # CLI: --koios-parity-unavailable-retry-limit
+  # unavailableRetryLimit: 144
   # Can be overridden with DINGO_KOIOS_PARITY_GRACE_HOURS
   # CLI: --koios-parity-grace-hours
   # graceHours: 24

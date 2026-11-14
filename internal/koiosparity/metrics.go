@@ -135,7 +135,8 @@ func resultQueue(result *EpochCompareResult) string {
 
 // recordResult updates every series from one completed result. It is called
 // only from Observer.emitResult, which every result from both queues and from
-// reportError passes through. Safe on a nil receiver and a nil result.
+// reportError and reportFetchError passes through. Safe on a nil receiver and
+// a nil result.
 func (m *metrics) recordResult(result *EpochCompareResult) {
 	if m == nil || result == nil {
 		return
