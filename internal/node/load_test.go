@@ -1972,6 +1972,7 @@ func TestLoadBlobsWithDBRetiresCommittedChunks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Positive(t, result.BlocksCopied)
 	require.NotEmpty(t, recorded)
+	assert.Len(t, recorded, 2, "retirement should batch the copied chunk prefix")
 	last := recorded[len(recorded)-1]
 	assert.Equal(t, uint64(chunks-1), last)
 
