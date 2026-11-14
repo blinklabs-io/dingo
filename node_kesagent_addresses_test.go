@@ -85,3 +85,17 @@ func TestNodeRemoteAgentAddresses(t *testing.T) {
 	)
 	require.True(t, ks.kesAgentConfigured())
 }
+
+func TestPoolKeySourceCarriesTheAgentProfile(t *testing.T) {
+	t.Parallel()
+	keys := producerKeysFromPool(BlockProducerPool{
+		ShelleyKESAgentAddress: "kes-agent.example:3443",
+		ShelleyKESAgentProfile: "pool-a",
+	})
+	require.Equal(t, "pool-a", keys.agentProfile)
+
+	n := &Node{}
+	n.config.shelleyKESAgentAddress = "kes-agent.example:3443"
+	n.config.shelleyKESAgentProfile = "pool-b"
+	require.Equal(t, "pool-b", n.primaryKeySource().keys.agentProfile)
+}

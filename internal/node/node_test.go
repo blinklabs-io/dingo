@@ -879,6 +879,7 @@ func TestBuildDingoConfigForwardsBlockProducerPools(t *testing.T) {
 			ShelleyKESAgentClientCertFile:   "/keys/b/client.crt",
 			ShelleyKESAgentClientKeyFile:    "/keys/b/client.key",
 			ShelleyKESAgentServerSPKISHA256: strings.Repeat("ab", 32),
+			ShelleyKESAgentProfile:          "pool-b",
 		},
 		{
 			ShelleyVRFKey:                 "/keys/c/vrf.skey",

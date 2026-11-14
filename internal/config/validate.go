@@ -123,6 +123,7 @@ func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
 			set  bool
 		}{
 			{"shelleyKesAgentPlaintext", p.ShelleyKESAgentPlaintext},
+			{"shelleyKesAgentProfile", p.ShelleyKESAgentProfile != ""},
 			{
 				"shelleyKesAgentClientCertFile",
 				p.ShelleyKESAgentClientCertFile != "",
@@ -270,37 +271,14 @@ func (c *Config) validateBlockProducerPools() []error {
 				"shelleyOperationalCertificate, shelleyKesAgentSocket, "+
 				"shelleyKesAgentMode, shelleyKesAgentAddress, "+
 				"shelleyKesAgentClientCertFile, shelleyKesAgentClientKeyFile, "+
-				"shelleyKesAgentServerSpkiSha256 and shelleyKesAgentPlaintext; "+
-				"set them in each pool",
+				"shelleyKesAgentServerSpkiSha256, shelleyKesAgentPlaintext and "+
+				"shelleyKesAgentProfile; set them in each pool",
 		))
 	}
 	opCerts := make(map[string]int, len(c.BlockProducerPools))
-	agentAddresses := make(map[string]int, len(c.BlockProducerPools))
 	for i, p := range c.BlockProducerPools {
 		prefix := fmt.Sprintf("blockProducerPools[%d].", i)
 		errs = append(errs, validateBlockProducerPool(p, prefix)...)
-		// An attested KES agent session cannot name a profile, so Bursa
-		// allows one profile per attested listener and a remote agent
-		// address can serve one pool only. A local socket is not
-		// limited: it serves several pools through its profiles.
-		for _, address := range p.RemoteAgentAddresses() {
-			addr := kesAgentAddressKey(address)
-			if addr == "" {
-				continue
-			}
-			if j, dup := agentAddresses[addr]; dup && j != i {
-				errs = append(errs, fmt.Errorf(
-					"blockProducerPools[%d] and blockProducerPools[%d] use the same shelleyKesAgentAddress %q: "+
-						"an attested KES agent session cannot name a profile, so Bursa allows one profile "+
-						"per attested listener and each pool needs its own agent address",
-					j,
-					i,
-					address,
-				))
-			} else if !dup {
-				agentAddresses[addr] = i
-			}
-		}
 		if p.ShelleyKESAgentMode != "" &&
 			p.ShelleyKESAgentMode != "serve-key" &&
 			p.ShelleyKESAgentMode != "sign" {
@@ -324,6 +302,59 @@ func (c *Config) validateBlockProducerPools() []error {
 			continue
 		}
 		opCerts[path] = i
+	}
+	return append(errs, c.validateSharedKESAgentAddresses()...)
+}
+
+// validateSharedKESAgentAddresses checks the pools that reach one remote KES
+// agent listener. The agent binds each session to the profile it names, so
+// pools that share a listener, through any entry of their address lists,
+// must each name a profile, and different ones. A local socket is not
+// checked: it serves several pools through its profiles.
+func (c *Config) validateSharedKESAgentAddresses() []error {
+	var errs []error
+	// users maps a listener to the pools that use it, in list order.
+	users := make(map[string][]int)
+	reported := make(map[[2]int]bool)
+	for i, p := range c.BlockProducerPools {
+		for _, address := range p.RemoteAgentAddresses() {
+			addr := kesAgentAddressKey(address)
+			if addr == "" {
+				continue
+			}
+			if slices.Contains(users[addr], i) {
+				continue
+			}
+			for _, j := range users[addr] {
+				if reported[[2]int{j, i}] {
+					continue
+				}
+				prev := c.BlockProducerPools[j].ShelleyKESAgentProfile
+				switch {
+				case prev == "" || p.ShelleyKESAgentProfile == "":
+					errs = append(errs, fmt.Errorf(
+						"blockProducerPools[%d] and blockProducerPools[%d] use the same shelleyKesAgentAddress %q, "+
+							"so each must set shelleyKesAgentProfile to the agent profile it signs for",
+						j,
+						i,
+						address,
+					))
+				case prev == p.ShelleyKESAgentProfile:
+					errs = append(errs, fmt.Errorf(
+						"blockProducerPools[%d] and blockProducerPools[%d] use the same shelleyKesAgentAddress %q "+
+							"and the same shelleyKesAgentProfile %q; each pool needs its own profile",
+						j,
+						i,
+						address,
+						prev,
+					))
+				default:
+					continue
+				}
+				reported[[2]int{j, i}] = true
+			}
+			users[addr] = append(users[addr], i)
+		}
 	}
 	return errs
 }

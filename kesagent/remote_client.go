@@ -90,6 +90,11 @@ type RemoteConfig struct {
 	// sidecar. It cannot be combined with a pin or a client certificate,
 	// which need TLS.
 	Plaintext bool
+	// Profile names the agent profile this node signs for, sent in the
+	// admission request. An agent that serves several pools on one listener
+	// binds the session to it; empty sends none, for an agent with one
+	// profile.
+	Profile string
 	// Provider is the attestation provider the agent must report. Only
 	// ProviderNone is supported; empty means ProviderNone.
 	Provider string
@@ -508,6 +513,7 @@ func (c *RemoteClient) admit(ctx context.Context) (net.Conn, error) {
 		Type:     "attestation_request",
 		Protocol: AttestedProtocolID,
 		Nonce:    nonce,
+		Profile:  c.cfg.Profile,
 	}); err != nil {
 		return nil, fmt.Errorf("kesagent: send attestation request: %w", err)
 	}
