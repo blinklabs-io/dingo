@@ -1,4 +1,5 @@
--- Running total of live script-locked lovelace: one row per slot whose
--- commit changed it, holding the total after that slot. The backfill seeds it
--- from a full scan; the contract drops the index the scan used to need.
-CREATE TABLE IF NOT EXISTS `script_locked_supply` (`slot` integer PRIMARY KEY,`amount` integer NOT NULL);
+-- idx_script_hash duplicates the index behind uni_script_hash on the same
+-- column. The unique index serves every lookup by hash and is the
+-- ON CONFLICT (hash) target of the script insert, so the second index only
+-- adds a random-position write per insert.
+DROP INDEX IF EXISTS `idx_script_hash`;

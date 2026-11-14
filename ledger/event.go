@@ -48,7 +48,8 @@ const (
 	TransactionEventType                event.EventType = "ledger.tx"
 )
 
-// It represents the direction a block is applied to the ledger.
+// BlockAction is the direction a block moved on the primary chain: added
+// (Apply) or removed (Undo). It does not mean the ledger has applied the block.
 type BlockAction string
 
 const (
@@ -56,7 +57,8 @@ const (
 	BlockActionUndo  BlockAction = "Undo"
 )
 
-// It represents a persisted block apply or rollback action.
+// BlockEvent describes a block added to or removed from the primary chain.
+// It can be published before the ledger applies the block.
 type BlockEvent struct {
 	Action BlockAction
 	Block  models.Block

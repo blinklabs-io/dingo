@@ -651,7 +651,7 @@ sequenceDiagram
     OB->>Peer: otherwise re-intersect at last accepted cursor
     Peer->>OB: replay parent-linked headers in order
     OB->>OB: strictly verify and promote each replayed header
-    LS->>EB: publish BlockEvent
+    LS->>EB: republish chain update as BlockEvent (can precede the ledger apply; not an applied-tip signal)
 
     Note over Peer,DB: Rollback Path
     Peer->>OB: RollBackward(point)
@@ -1210,7 +1210,9 @@ pending before preparation, or clears only the new intent when there was none.
 The forward path keeps async semantics deliberately: its after-commit callback
 only enqueues onto the ordered lane, so subscribers cannot observe an Apply
 before storage is durable and their work never runs inline in `Commit`.
-`ledger.block` remains `PublishBlocking` on the handler's own goroutine.
+`ledger.block` is published with `PublishBlocking` on the handler's own
+goroutine when the block joins or leaves the primary chain, which can be before
+the ledger applies it, so it is not an applied-tip signal.
 
 An ordinary stalled subscriber detaches after its delivery timeout; a lossless
 subscriber deliberately remains attached until it drains or is stopped, closed,
@@ -2641,7 +2643,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `ledger.connection_recycle_requested` | Ouroboros | Unusable peer connection detected; node wiring translates the request to `connmanager.connection_recycle_requested` |
 | `mempool.add_tx` | Mempool | Transaction added |
 | `mempool.remove_tx` | Mempool | Transaction removed |
-| `ledger.block` | LedgerState | Block applied or rolled back |
+| `ledger.block` | LedgerState | Block added to or removed from the primary chain, republished from `chain.update`. Can be published before the ledger applies the block, so it is not an applied-tip signal |
 | `ledger.tx` | LedgerState | Transaction processed (ordered lane — see below) |
 | `ledger.error` | LedgerState | Ledger error occurred |
 | `ledger.blockfetch` | Ouroboros | Block fetch event received |
@@ -7424,6 +7426,15 @@ reporting a "state as of" point names the point they were read at rather than
 sampling the tip again afterwards and reporting a point the chain has since
 moved to.
 
+The VRF key reported for a pool is the one header validation requires of a
+block from it at that point: the electing snapshot's key (as the reference
+`individualPoolStakeVrf` reads it), resolved by `electingVrfKeyHashAtSlot`, not
+the pool's latest registration. A re-registration with a new key after the
+snapshot was captured therefore does not change the reply until a later
+snapshot carries it. A live `GetStakeDistribution`/`GetStakeDistribution2`
+reply resolves the key the same way; a pinned one reports the registration in
+force at the pinned slot.
+
 The read itself lives in `ledger.LedgerState.PoolStakeDistribution`, which the
 UTxO RPC `v1beta QueryService.ReadState` handler also calls;
 `queryShelleyPoolDistr2` is only the adaptation of that result into the
@@ -7539,9 +7550,10 @@ were completely absent from dingo's reply for no reason other than that
 snapshot lag. `GetStakeDistribution2` (`queryShelleyStakeDistribution2`)
 is answered by cardano-node from the same `poolsByTotalStakeFraction`, so it
 shares `GetStakeDistribution`'s live reconstruction (`liveStakeDistribution`)
-rather than `GetPoolDistr2`'s mark snapshot: pools, stakes and VRF keys are
-as of the queried slot, and each fraction is over total circulating supply
-where `GetPoolDistr2` divides by delegated stake. Its reply total is the
+rather than `GetPoolDistr2`'s mark snapshot: pools and stakes are as of the
+queried slot (VRF keys as described for `GetPoolDistr2`), and each fraction
+is over total circulating supply where `GetPoolDistr2` divides by delegated
+stake. Its reply total is the
 delegated stake summed across the reconstructed pools, as
 `poolsByTotalStakeFraction` returns it. Both queries omit a pool with no
 delegated stake, as `calculatePoolDistr` does.
@@ -13687,6 +13699,16 @@ count toward these limits. Both readers reject GNU and PAX sparse members as
 soon as the tar header is decoded: Go's tar reader synthesizes sparse holes
 above the compressed-stream accounting, so accepting them would make the
 reported expanded-byte and cancellation boundaries incomplete.
+
+Ledger-state import supports Conway and later snapshots only. `ledgerstate`
+refuses a Byron snapshot (`ErrByronSnapshotUnsupported`) and a Shelley through
+Babbage snapshot (`ErrPreConwaySnapshotUnsupported`) while parsing, before any
+state is written. The pre-Conway refusal exists because the import never reads
+those eras' pending classic parameter update proposals or future parameters,
+so it would drop an update the snapshot's ledger had agreed on; from Conway on
+parameter changes come from the imported ratification state. Every import
+entry point parses through `ParseSnapshotBytes`, so Mithril bootstrap and
+catch-up report the refusal as a ledger-state parse failure.
 
 The post-download ImmutableDB copy completes before ledger-state import starts.
 The copy persists block and transaction metadata as well as block blobs, so it
