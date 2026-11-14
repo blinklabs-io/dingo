@@ -42,33 +42,36 @@ import (
 // direct-store postgres/mysql counterparts
 // (database/plugin/metadata/{postgres,mysql}/pool_active_ordered_test.go).
 //
-// Query cost: the result is one row per active pool (~3,000 on mainnet),
-// the same result-set shape PoolsExtended already reads via
-// GetActivePoolKeyHashes/GetActivePoolKeyHashesAtSlot; no per-page query is
-// added. The underlying scan cost is bounded by the total historical
-// pool_registration row count instead (verified via EXPLAIN on all three
-// backends, see DATABASE.md), since the added_slot filter can't use the
-// (pool_id, added_slot) index on any backend -- the same bound
-// GetActivePoolKeyHashesAtSlot already pays for PoolsExtended. Pagination
-// is applied in memory (slice), matching PoolsRetiring (GetRetiringPools +
-// PoolsRetiring) rather than pushing LIMIT/OFFSET into SQL: the ORDER BY
-// here is derived from a per-pool window-function ranking computed across
-// the full registration/retirement history, so the whole active set must
-// be ranked before any page boundary can be determined -- a SQL-side
-// LIMIT/OFFSET would trim rows only after that ranking work is done, and
-// would not reduce it. The response is bare pool ID strings, so slicing
-// the resulting hash slice in memory before conversion is cheap relative
-// to that query.
+// Query cost: the store query ranks every pool registration and retirement
+// certificate ever recorded, because the order is derived from a per-pool
+// window ranking over the full history, so it cannot be paged in SQL. The
+// result is one row per active pool (~3,000 on mainnet) and depends only on
+// the chain state, so it is cached per tip point (activePoolCache): requests
+// at one tip share one computation, and the page is sliced from the cached
+// list in memory. The tip is the one stored in the snapshot the list is read
+// from.
 func (a *NodeAdapter) PoolsList(ctx context.Context,
 	params PaginationParams,
 ) ([]string, int, error) {
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
-
-	poolKeyHashes, err := db.GetActivePoolKeyHashesOrdered(
+	// The cache key is the tip stored in the same read snapshot the list is
+	// computed from, so a list is filed under the state it was read at. The
+	// in-memory ledger tip cannot serve as the key: a block applied and then
+	// rolled back between reading it and reading the snapshot restores the
+	// same slot and hash, and the list of the discarded fork would be filed
+	// under the restored tip.
+	tip, err := db.GetTip(txn)
+	if err != nil {
+		return nil, 0, fmt.Errorf("get tip: %w", err)
+	}
+	poolKeyHashes, err := a.activePools.get(
 		ctx,
-		txn,
+		activePoolCacheKey{slot: tip.Point.Slot, hash: string(tip.Point.Hash)},
+		func() ([][]byte, error) {
+			return db.GetActivePoolKeyHashesOrdered(ctx, txn)
+		},
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(

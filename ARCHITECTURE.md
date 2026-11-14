@@ -15785,6 +15785,9 @@ nonzero default exists. The opt-in settings are:
 - Blockfrost `maxConcurrentMutations` and `maxConcurrentMutationsPerClient`
   (submission and evaluation; per-client may not exceed the shared limit when
   both are set).
+- Blockfrost `maxConcurrentPoolLists` and `maxConcurrentPoolListsPerClient`
+  (the pool list and retiring pool list; per-client may not exceed the shared
+  limit when both are set).
 - MCP `rateLimit` (requests per second) and `burst`.
 - Bark `barkArchiveMaxConcurrentFetches`, `barkArchiveLookupsPerSecond` and
   `barkArchiveCallerLookupsPerSecond`.
@@ -16084,6 +16087,13 @@ address (it may equal the shared limit, in which case one address can use the
 whole budget); work over either configured limit receives HTTP 429 without
 reading its body.
 
+Pool list admission is optional in the same way. With
+`maxConcurrentPoolLists` and `maxConcurrentPoolListsPerClient` both zero (the
+default) `GET /pools` and `GET /pools/retiring` are always admitted. A positive
+`maxConcurrentPoolLists` bounds how many of them run at once across the server
+and a positive `maxConcurrentPoolListsPerClient` caps one remote address; work
+over either limit receives HTTP 429 with `Retry-After`.
+
 The DRep detail route has no admission limit. Client cancellation flows through
 the epoch-boundary wait and the single read transaction used for the detail,
 voting-power, proposal-deposit, and registration lookups.
@@ -16379,6 +16389,19 @@ usage per backend (verified with real Postgres 16 and MySQL 8.4 containers at
 mainnet-comparable scale, not assumed from sqlite) and for the cross-backend
 behavioral tests confirming sqlite, postgres, and mysql return the identical
 oldest-first sequence against the same fixture.
+
+The ordered list depends only on chain state, so the adapter caches it for the
+tip point it was computed at (`activePoolCache`): requests at one tip share a
+single computation, a request that arrives during it waits for it or for its
+own context, a failed computation is not cached, and a new block or rollback
+moves the tip and so replaces the list. The key is the tip stored in the same
+read snapshot the list is read from, not the in-memory ledger tip: a block
+applied and rolled back while a list is read restores the same slot and hash,
+so comparing the ledger tip before and after would file the discarded fork's
+list under the restored tip. The retiring and retired lists find their candidate pools through
+the `pool_retirement` epoch index and rank certificates only for those pools, though they still rank the
+full history of each candidate, so a page does not read every registration and retirement ever recorded
+when few pools qualify.
 
 `GET /assets/{asset}` derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from

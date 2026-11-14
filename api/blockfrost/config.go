@@ -29,6 +29,12 @@ type BlockfrostConfig struct {
 	// evaluation work from one remote address. Zero (the default) is
 	// unlimited.
 	MaxConcurrentMutationsPerClient uint
+	// MaxConcurrentPoolLists bounds the pool list and retiring pool list
+	// requests across the server. Zero (the default) is unlimited.
+	MaxConcurrentPoolLists uint
+	// MaxConcurrentPoolListsPerClient bounds those requests from one remote
+	// address. Zero (the default) is unlimited.
+	MaxConcurrentPoolListsPerClient uint
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
