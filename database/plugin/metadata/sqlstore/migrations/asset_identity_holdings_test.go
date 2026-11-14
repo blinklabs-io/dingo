@@ -27,7 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const assetSplitVersion = 65
+const assetSplitVersion = 66
 
 // legacyAssetRow is one row of the pre-split asset table. A nil field is
 // stored as NULL.
