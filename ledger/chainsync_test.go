@@ -13125,6 +13125,54 @@ func TestHandleEventChainsyncIgnoresClosedConnection(t *testing.T) {
 	assert.Empty(t, ls.peerHeaderHistory[connId.String()])
 }
 
+func TestHandleEventChainsyncIgnoresFailedBlockfetchPeer(t *testing.T) {
+	t.Parallel()
+
+	connId := testChainsyncConnId(6000, 3001)
+	testChain := &chain.Chain{}
+	ls := &LedgerState{
+		chain: testChain,
+		bufferedHeaderEvents: map[string][]ChainsyncEvent{
+			connId.String(): {{ConnectionId: connId}},
+		},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.markBlockfetchPeerFailedLocked(connId)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	admitted := make(chan bool, 1)
+
+	ls.handleEventChainsync(event.NewEvent(
+		ChainsyncEventType,
+		ChainsyncEvent{
+			ConnectionId: connId,
+			Point:        ocommon.Point{Slot: 2, Hash: []byte("hdr-2")},
+			Tip: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 2, Hash: []byte("hdr-2")},
+				BlockNumber: 2,
+			},
+			BlockHeader: mockHeader{
+				hash:        lcommon.NewBlake2b256([]byte("hdr-2")),
+				prevHash:    lcommon.NewBlake2b256(nil),
+				blockNumber: 2,
+				slot:        2,
+			},
+			PeerTipAdmission: func(ok bool) { admitted <- ok },
+		},
+	))
+
+	assert.False(t, testutil.RequireReceive(
+		t,
+		admitted,
+		time.Second,
+		"failed peer admission result",
+	))
+	assert.Zero(t, testChain.HeaderCount())
+	assert.Empty(t, ls.bufferedHeaderEvents[connId.String()])
+}
+
 func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 	t.Parallel()
 

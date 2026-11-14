@@ -303,6 +303,15 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			})
 			return selected, found, available
 		},
+		MarkBlockfetchPeersFailedFunc: func(
+			connIds []ouroboros.ConnectionId,
+		) bool {
+			return n.withLiveChainsyncState(func(state *chainsync.State) {
+				for _, connId := range connIds {
+					state.MarkClientFailed(connId)
+				}
+			})
+		},
 		RecordBlockfetchLatencyFunc: func(
 			connId ouroboros.ConnectionId,
 			latency time.Duration,
