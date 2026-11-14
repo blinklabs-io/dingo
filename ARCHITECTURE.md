@@ -13087,6 +13087,30 @@ next attempt. Each signature is
 verified against the local operational certificate's KES key by the same
 `validateSignResponse` the local client uses.
 
+**Several remote agents** (`kesagent.FailoverClient`).
+`--shelley-kes-agent-addresses` (or `shelleyKesAgentAddresses`, per pool in
+`blockProducerPools` too) lists remote agents in order, in place of the single
+address, which is the same as a one-entry list; setting both is refused. Every
+other remote setting applies to each address, and each gets its own
+`RemoteClient`. One sign goes to one agent, the active one, starting with the
+first listed: a failure is never retried on another agent inside the same
+sign, so the configured `SignTimeout` (500ms by default) bounds it. A failure other than an agent refusal (`error`
+in the response, which proves the agent is working) moves the client to the
+next address for the next attempt, and logs the move at info
+(`KES agent link: moving to the next remote agent`). `Prepare`, called before
+each leader slot as above, admits the active agent or, when it does not admit
+this node (unreachable, or holding another opcert), the first one after it in
+order that does, which becomes active; it then tries to admit the agent after the
+active one on its own goroutine, so a move at the slot usually finds that
+session open; a move before that admission finishes dials inside the sign.
+`CheckReady` reports ready unless every agent failed its last attempt, so a
+client that has not tried any agent yet reports ready, as a single
+`RemoteClient` does. The client does not fail back while its active agent
+works: it moves on only after a failure, in order and wrapping from the last
+address to the first. Metrics:
+`dingo_kes_agent_remote_active{address}` (1 for the active agent) and
+`dingo_kes_agent_remote_failovers_total`.
+
 **The non-negotiable invariant**: whichever source supplies the key, KES
 signing goes through the same `credentialGeneration.kesSign`, and that method
 itself re-validates the operational-certificate lifetime

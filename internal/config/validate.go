@@ -99,16 +99,25 @@ func kesAgentAddressKey(addr string) string {
 }
 
 // validateRemoteKESAgent checks a pool's remote KES agent configuration: one
-// KES source only, sign mode, and a transport that can work: the server pin
-// and the client certificate are optional, but need TLS, so plain TCP takes
-// neither, and a client certificate is set as a pair. Without an address,
-// any remote transport option is refused, so a mistyped remote
-// configuration cannot fall back to local or Unix-socket signing. prefix is
-// prepended to every setting name, so errors name the list entry they came
-// from.
+// KES source only, sign mode, every address host:port, and a transport that
+// can work: the server pin and the client certificate are optional, but need
+// TLS, so plain TCP takes neither, and a client certificate is set as a pair.
+// Without an address, any remote transport option is refused, so a mistyped
+// remote configuration cannot fall back to local or Unix-socket signing.
+// prefix is prepended to every setting name, so errors name the list entry
+// they came from.
 func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
-	if p.ShelleyKESAgentAddress == "" {
-		var errs []error
+	field := func(name string) string { return prefix + name }
+	var errs []error
+	if p.ShelleyKESAgentAddress != "" && len(p.ShelleyKESAgentAddresses) > 0 {
+		errs = append(errs, fmt.Errorf(
+			"%s and %s are two ways to name the remote agents; set one",
+			field("shelleyKesAgentAddress"),
+			field("shelleyKesAgentAddresses"),
+		))
+	}
+	addresses := p.RemoteAgentAddresses()
+	if len(addresses) == 0 {
 		for _, opt := range []struct {
 			name string
 			set  bool
@@ -129,37 +138,49 @@ func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
 		} {
 			if opt.set {
 				errs = append(errs, fmt.Errorf(
-					"%s%s requires %sshelleyKesAgentAddress",
-					prefix,
-					opt.name,
-					prefix,
+					"%s requires %s or %s",
+					field(opt.name),
+					field("shelleyKesAgentAddress"),
+					field("shelleyKesAgentAddresses"),
 				))
 			}
 		}
 		return errs
 	}
-	field := func(name string) string { return prefix + name }
-	var errs []error
 	if p.ShelleyKESKey != "" || p.ShelleyKESAgentSocket != "" {
+		name := field("shelleyKesAgentAddress")
+		if len(p.ShelleyKESAgentAddresses) > 0 {
+			name = field("shelleyKesAgentAddresses")
+		}
 		errs = append(errs, fmt.Errorf(
 			"blockProducer cannot set %s together with %s or %s",
-			field("shelleyKesAgentAddress"),
+			name,
 			field("shelleyKesKey"),
 			field("shelleyKesAgentSocket"),
 		))
 	}
-	if err := validateHostPort(p.ShelleyKESAgentAddress); err != nil {
-		errs = append(errs, fmt.Errorf(
-			"%s %q must be host:port: %w",
-			field("shelleyKesAgentAddress"),
-			p.ShelleyKESAgentAddress,
-			err,
-		))
+	for i, address := range addresses {
+		if err := validateHostPort(address); err != nil {
+			name := field("shelleyKesAgentAddress")
+			if len(p.ShelleyKESAgentAddresses) > 0 {
+				name = fmt.Sprintf(
+					"%s[%d]",
+					field("shelleyKesAgentAddresses"),
+					i,
+				)
+			}
+			errs = append(errs, fmt.Errorf(
+				"%s %q must be host:port: %w",
+				name,
+				address,
+				err,
+			))
+		}
 	}
 	if p.ShelleyKESAgentMode != "" && p.ShelleyKESAgentMode != "sign" {
 		errs = append(errs, fmt.Errorf(
-			"%s supports only shelleyKesAgentMode \"sign\", got %q",
-			field("shelleyKesAgentAddress"),
+			"a remote KES agent supports only %s \"sign\", got %q",
+			field("shelleyKesAgentMode"),
 			p.ShelleyKESAgentMode,
 		))
 	}
@@ -211,7 +232,7 @@ func validateBlockProducerPool(p BlockProducerPool, prefix string) []error {
 	// whole point of the agent -- so requiring both made an agent-only
 	// configuration impossible to start.
 	if p.ShelleyKESKey == "" && p.ShelleyKESAgentSocket == "" &&
-		p.ShelleyKESAgentAddress == "" {
+		len(p.RemoteAgentAddresses()) == 0 {
 		missing = append(missing, prefix+"shelleyKesKey")
 	}
 	if err := ValidateKESKeySources(
@@ -262,17 +283,21 @@ func (c *Config) validateBlockProducerPools() []error {
 		// allows one profile per attested listener and a remote agent
 		// address can serve one pool only. A local socket is not
 		// limited: it serves several pools through its profiles.
-		if addr := kesAgentAddressKey(p.ShelleyKESAgentAddress); addr != "" {
-			if j, dup := agentAddresses[addr]; dup {
+		for _, address := range p.RemoteAgentAddresses() {
+			addr := kesAgentAddressKey(address)
+			if addr == "" {
+				continue
+			}
+			if j, dup := agentAddresses[addr]; dup && j != i {
 				errs = append(errs, fmt.Errorf(
 					"blockProducerPools[%d] and blockProducerPools[%d] use the same shelleyKesAgentAddress %q: "+
 						"an attested KES agent session cannot name a profile, so Bursa allows one profile "+
 						"per attested listener and each pool needs its own agent address",
 					j,
 					i,
-					p.ShelleyKESAgentAddress,
+					address,
 				))
-			} else {
+			} else if !dup {
 				agentAddresses[addr] = i
 			}
 		}

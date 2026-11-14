@@ -105,6 +105,8 @@ type fakeRemoteAgent struct {
 	// dropAfterRequest closes the connection after reading a sign request
 	// without answering it.
 	dropAfterRequest atomic.Bool
+	// refuse answers every sign request with an agent refusal.
+	refuse atomic.Bool
 	// malformedRefusal answers a sign request with an error on a frame of
 	// the wrong type.
 	malformedRefusal atomic.Bool
@@ -249,6 +251,14 @@ func (a *fakeRemoteAgent) serve(conn net.Conn, skeyData, vkey, opCert []byte) {
 			if err := writeFrame(conn, MaxSignFrameLen, SignResponse{
 				Type: "sign_response", Period: sreq.Period,
 				Error: a.refusal,
+			}); err != nil {
+				return
+			}
+			continue
+		}
+		if a.refuse.Load() {
+			if err := writeFrame(conn, MaxSignFrameLen, SignResponse{
+				Type: "sign_response", Period: sreq.Period, Error: "refused",
 			}); err != nil {
 				return
 			}

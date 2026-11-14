@@ -295,8 +295,9 @@ type Config struct {
 	shelleyKeyWatchInterval                                                             time.Duration
 	shelleyKESAgentAddress, shelleyKESAgentClientCertFile, shelleyKESAgentClientKeyFile string
 	shelleyKESAgentServerSPKISHA256                                                     string
-	shelleyKESAgentPlaintext                                                            bool
 	blockProducerPools                                                                  []BlockProducerPool
+	shelleyKESAgentPlaintext                                                            bool
+	shelleyKESAgentAddresses                                                            []string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
 	forgeEndorserBlockStalenessSlots                                                    uint64
@@ -1026,8 +1027,9 @@ func (c *Config) syncCompatFields() {
 	c.shelleyKESAgentAddress, c.shelleyKESAgentClientCertFile, c.shelleyKESAgentClientKeyFile = c.cfg.ShelleyKESAgentAddress, c.cfg.ShelleyKESAgentClientCertFile, c.cfg.ShelleyKESAgentClientKeyFile
 	c.shelleyKESAgentServerSPKISHA256 = c.cfg.ShelleyKESAgentServerSPKISHA256
 	c.shelleyKeyWatchInterval = c.cfg.ShelleyKeyWatchInterval
-	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
 	c.blockProducerPools = slices.Clone(c.cfg.BlockProducerPools)
+	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
+	c.shelleyKESAgentAddresses = slices.Clone(c.cfg.ShelleyKESAgentAddresses)
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
 	c.forgeEndorserBlockStalenessSlots = c.cfg.ForgeEndorserBlockStalenessSlots
@@ -1850,16 +1852,6 @@ func WithShelleyKESAgentRemote(
 	}
 }
 
-// WithShelleyKESAgentPlaintext runs the remote KES agent link over plain TCP
-// (CARDANO_SHELLEY_KES_AGENT_PLAINTEXT), for setups where something else
-// secures it, such as a service mesh sidecar. A server pin and a client
-// certificate need TLS, so it takes neither.
-func WithShelleyKESAgentPlaintext(plaintext bool) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.ShelleyKESAgentPlaintext = plaintext
-	}
-}
-
 // BlockProducerPool is one pool a block producer forges for: its VRF key and
 // operational certificate files and one KES source.
 type BlockProducerPool = internalconfig.BlockProducerPool
@@ -1875,6 +1867,28 @@ type BlockProducerPool = internalconfig.BlockProducerPool
 func WithBlockProducerPools(pools ...BlockProducerPool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BlockProducerPools = slices.Clone(pools)
+	}
+}
+
+// WithShelleyKESAgentPlaintext runs the remote KES agent link over plain TCP
+// (CARDANO_SHELLEY_KES_AGENT_PLAINTEXT), for setups where something else
+// secures it, such as a service mesh sidecar. A server pin and a client
+// certificate need TLS, so it takes neither.
+func WithShelleyKESAgentPlaintext(plaintext bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentPlaintext = plaintext
+	}
+}
+
+// WithShelleyKESAgentAddresses lists the remote KES agents in order
+// (CARDANO_SHELLEY_KES_AGENT_ADDRESSES). The node signs through the first one
+// that admits it and moves to the next when a sign fails on the link,
+// keeping that next one admitted ahead of each leader slot. It replaces the
+// address of WithShelleyKESAgentRemote, which is the same as a one-entry
+// list; the transport settings apply to every address.
+func WithShelleyKESAgentAddresses(addresses ...string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentAddresses = slices.Clone(addresses)
 	}
 }
 
