@@ -74,7 +74,7 @@ func TestStakeBookkeepingIndexDropAppliesOnPostgres(t *testing.T) {
 
 	registry, err := migrations.PostgresRegistry()
 	require.NoError(t, err)
-	// Stop at v59: v60 drops account_reward_delta, whose v59 indexes this
+	// Stop at v59: v66 drops account_reward_delta, whose v59 indexes this
 	// test pins.
 	registry = registry[:59]
 	runner := migrations.Runner{
@@ -138,7 +138,7 @@ func TestStakeBookkeepingIndexDropAppliesOnMySQL(t *testing.T) {
 
 	registry, err := migrations.MySQLRegistry()
 	require.NoError(t, err)
-	// Stop at v59: v60 drops account_reward_delta, whose v59 indexes this
+	// Stop at v59: v66 drops account_reward_delta, whose v59 indexes this
 	// test pins.
 	registry = registry[:59]
 	runner := migrations.Runner{

@@ -651,7 +651,7 @@ sequenceDiagram
     OB->>Peer: otherwise re-intersect at last accepted cursor
     Peer->>OB: replay parent-linked headers in order
     OB->>OB: strictly verify and promote each replayed header
-    LS->>EB: publish BlockEvent
+    LS->>EB: republish chain update as BlockEvent (can precede the ledger apply; not an applied-tip signal)
 
     Note over Peer,DB: Rollback Path
     Peer->>OB: RollBackward(point)
@@ -1199,7 +1199,9 @@ pending before preparation, or clears only the new intent when there was none.
 The forward path keeps async semantics deliberately: its after-commit callback
 only enqueues onto the ordered lane, so subscribers cannot observe an Apply
 before storage is durable and their work never runs inline in `Commit`.
-`ledger.block` remains `PublishBlocking` on the handler's own goroutine.
+`ledger.block` is published with `PublishBlocking` on the handler's own
+goroutine when the block joins or leaves the primary chain, which can be before
+the ledger applies it, so it is not an applied-tip signal.
 
 An ordinary stalled subscriber detaches after its delivery timeout; a lossless
 subscriber deliberately remains attached until it drains or is stopped, closed,
@@ -2195,10 +2197,15 @@ When `Node.Run()` is called, components are initialized in this order:
     is likewise an existing chain point rather than origin, so restart takes
     this preservation path instead of reapplying genesis declarations. The
     durable `mithril_ledger_slot` also makes a Conway-or-later imported
-    Constitutional Committee authoritative: startup never fills an absent
+    Constitutional Committee authoritative: startup never seats an absent
     imported member from Conway genesis, because absence can represent a
-    pre-snapshot removal. A pre-Conway imported tip has no committee state yet,
-    so startup retains the genesis members for the later hard fork.
+    pre-snapshot removal; it records the member as removed (soft-deleted at
+    slot 0) so committee state stays available even for a snapshot with no
+    committee, and unseats a live slot-0 genesis seat an earlier startup
+    inferred when the snapshot epoch starts after slot 0. A pre-Conway
+    snapshot has no committee state yet, so startup retains the genesis
+    members for the later hard fork; the era is read at
+    `mithril_ledger_slot`, not the current tip.
     For networks with a real Byron genesis, an empty database retains a Byron
     epoch cache until the on-chain Shelley boundary is observed. A configured
     experimental Shelley hard-fork epoch is the explicit exception used by
@@ -2625,7 +2632,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `ledger.connection_recycle_requested` | Ouroboros | Unusable peer connection detected; node wiring translates the request to `connmanager.connection_recycle_requested` |
 | `mempool.add_tx` | Mempool | Transaction added |
 | `mempool.remove_tx` | Mempool | Transaction removed |
-| `ledger.block` | LedgerState | Block applied or rolled back |
+| `ledger.block` | LedgerState | Block added to or removed from the primary chain, republished from `chain.update`. Can be published before the ledger applies the block, so it is not an applied-tip signal |
 | `ledger.tx` | LedgerState | Transaction processed (ordered lane — see below) |
 | `ledger.error` | LedgerState | Ledger error occurred |
 | `ledger.blockfetch` | Ouroboros | Block fetch event received |
@@ -4844,8 +4851,16 @@ domain for pool-registration proofs of possession. Other chains retain the
 IETF `BLS_POP` domain. Node startup, storage reinitialization, and immutable
 replay supply that immutable policy through `LedgerStateConfig` and
 `LedgerView`; gOuroboros resolves it through pending and cached validation
-views. Validation checks exactly the selected domain. This pool-registration
-policy does not change Leios committee or aggregate-certificate verification.
+views. Validation checks exactly the selected domain. The same selection
+(`LedgerStateConfig.DijkstraBlsProofDomain`) is passed to `VoteManager` as
+`KeyProofDomain`, so the proofs of possession on committee seat keys are
+verified under the domain their pool registration used. Dingo passes
+gOuroboros's `VerifyBlock` a header-only block, for which its certificate check
+returns early, and the ledger view does not implement
+`DijkstraLeiosCertificateState`, so the vote manager's certificate validation
+is the only committee-key check.
+The verified-key cache is keyed by domain, and the other domain is never tried
+after a failure.
 
 Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
 can run its own implementation — the reference-script-aware fee rule, local
@@ -7400,6 +7415,15 @@ reporting a "state as of" point names the point they were read at rather than
 sampling the tip again afterwards and reporting a point the chain has since
 moved to.
 
+The VRF key reported for a pool is the one header validation requires of a
+block from it at that point: the electing snapshot's key (as the reference
+`individualPoolStakeVrf` reads it), resolved by `electingVrfKeyHashAtSlot`, not
+the pool's latest registration. A re-registration with a new key after the
+snapshot was captured therefore does not change the reply until a later
+snapshot carries it. A live `GetStakeDistribution`/`GetStakeDistribution2`
+reply resolves the key the same way; a pinned one reports the registration in
+force at the pinned slot.
+
 The read itself lives in `ledger.LedgerState.PoolStakeDistribution`, which the
 UTxO RPC `v1beta QueryService.ReadState` handler also calls;
 `queryShelleyPoolDistr2` is only the adaptation of that result into the
@@ -7515,9 +7539,10 @@ were completely absent from dingo's reply for no reason other than that
 snapshot lag. `GetStakeDistribution2` (`queryShelleyStakeDistribution2`)
 is answered by cardano-node from the same `poolsByTotalStakeFraction`, so it
 shares `GetStakeDistribution`'s live reconstruction (`liveStakeDistribution`)
-rather than `GetPoolDistr2`'s mark snapshot: pools, stakes and VRF keys are
-as of the queried slot, and each fraction is over total circulating supply
-where `GetPoolDistr2` divides by delegated stake. Its reply total is the
+rather than `GetPoolDistr2`'s mark snapshot: pools and stakes are as of the
+queried slot (VRF keys as described for `GetPoolDistr2`), and each fraction
+is over total circulating supply where `GetPoolDistr2` divides by delegated
+stake. Its reply total is the
 delegated stake summed across the reconstructed pools, as
 `poolsByTotalStakeFraction` returns it. Both queries omit a pool with no
 delegated stake, as `calculatePoolDistr` does.
@@ -13501,9 +13526,10 @@ votes:
   `epochEntry.onChainKeys`. It excludes keys with unknown age or at or beyond
   `ceil(MaxKESEvolutions * SlotsPerKESPeriod / SlotsPerEpoch) + 2` epochs old,
   with age measured at the committee epoch the snapshot selects (snapshot epoch
-  plus one), then verifies proof of possession; an invalid, missing, unknown-age, or
-  expired key leaves the seat and its stake intact but cannot sign or validate a
-  certificate.
+  plus one), then verifies proof of possession under the network's selected
+  Dijkstra BLS proof domain (`VoteManagerConfig.KeyProofDomain`); an invalid,
+  missing, unknown-age, or expired key leaves the seat and its stake intact but
+  cannot sign or validate a certificate.
 - **Certificate admission**: before asynchronous certified endorser-block
   fetches or apply-time fetch and transaction application, ledger admission
   checks that the Dijkstra header certification flag agrees with body
@@ -13662,6 +13688,16 @@ count toward these limits. Both readers reject GNU and PAX sparse members as
 soon as the tar header is decoded: Go's tar reader synthesizes sparse holes
 above the compressed-stream accounting, so accepting them would make the
 reported expanded-byte and cancellation boundaries incomplete.
+
+Ledger-state import supports Conway and later snapshots only. `ledgerstate`
+refuses a Byron snapshot (`ErrByronSnapshotUnsupported`) and a Shelley through
+Babbage snapshot (`ErrPreConwaySnapshotUnsupported`) while parsing, before any
+state is written. The pre-Conway refusal exists because the import never reads
+those eras' pending classic parameter update proposals or future parameters,
+so it would drop an update the snapshot's ledger had agreed on; from Conway on
+parameter changes come from the imported ratification state. Every import
+entry point parses through `ParseSnapshotBytes`, so Mithril bootstrap and
+catch-up report the refusal as a ledger-state parse failure.
 
 The post-download ImmutableDB copy completes before ledger-state import starts.
 The copy persists block and transaction metadata as well as block blobs, so it

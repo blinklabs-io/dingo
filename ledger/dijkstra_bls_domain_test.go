@@ -15,11 +15,16 @@
 package ledger
 
 import (
+	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/utxoref"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/stretchr/testify/require"
 )
 
@@ -73,5 +78,91 @@ func TestLedgerViewDijkstraBlsProofDomainSurvivesPendingState(t *testing.T) {
 				},
 			),
 		)
+	}
+}
+
+type poolRuleState struct {
+	lcommon.LedgerState
+	view *LedgerView
+}
+
+func (s poolRuleState) DijkstraBlsProofDomain() lcommon.DijkstraBlsProofDomain {
+	return s.view.DijkstraBlsProofDomain()
+}
+
+func (poolRuleState) IsFutureVrfKeyInUse(
+	lcommon.Blake2b256,
+) (bool, lcommon.PoolKeyHash, error) {
+	return false, lcommon.PoolKeyHash{}, nil
+}
+
+func poolRegistrationWithProof(
+	t *testing.T,
+	dst string,
+) *dijkstra.DijkstraTransaction {
+	t.Helper()
+	scalar := big.NewInt(21)
+	var public bls12381.G2Affine
+	public.ScalarMultiplicationBase(scalar)
+	encodedPublic := public.Bytes()
+	hash, err := bls12381.HashToG1(encodedPublic[:], []byte(dst))
+	require.NoError(t, err)
+	var proof bls12381.G1Affine
+	proof.ScalarMultiplication(&hash, scalar)
+	encodedProof := proof.Bytes()
+	cert := &lcommon.PoolRegistrationCertificate{
+		CertType: uint(lcommon.CertificateTypePoolRegistration),
+		Operator: lcommon.PoolKeyHash{0x01},
+		LeiosKey: &lcommon.LeiosKey{
+			PublicKey:       encodedPublic[:],
+			PossessionProof: encodedProof[:],
+		},
+		Cost:   340_000_000,
+		Margin: cbor.Rat{Rat: big.NewRat(0, 1)},
+	}
+	require.NoError(t, cert.SetRewardAccountCredential(
+		lcommon.Credential{CredType: lcommon.CredentialTypeAddrKeyHash},
+		lcommon.AddressNetworkTestnet,
+	))
+	tx := &dijkstra.DijkstraTransaction{TxIsValid: true}
+	tx.Body.TxCertificates = []lcommon.CertificateWrapper{{
+		Type:        uint(lcommon.CertificateTypePoolRegistration),
+		Certificate: cert,
+	}}
+	return tx
+}
+
+// TestPoolRegistrationProofDomainFollowsLedgerView runs gouroboros's POOL
+// rule against the domain the LedgerView reports.
+func TestPoolRegistrationProofDomainFollowsLedgerView(t *testing.T) {
+	t.Parallel()
+	signed := map[lcommon.DijkstraBlsProofDomain]string{
+		lcommon.DijkstraBlsProofDomainPop:       leios.LeiosPoPDST,
+		lcommon.DijkstraBlsProofDomainLegacySig: leios.LeiosVoteDST,
+	}
+	pp := &dijkstra.DijkstraProtocolParameters{}
+	pp.ProtocolVersion.Major = 12
+	pp.MinPoolCost = 340_000_000
+	for signedDomain, dst := range signed {
+		for viewDomain := range signed {
+			view := &LedgerView{ls: &LedgerState{
+				config: LedgerStateConfig{DijkstraBlsProofDomain: viewDomain},
+			}}
+			ls := poolRuleState{
+				LedgerState: mockledger.NewLedgerStateBuilder().
+					WithNetworkId(0).
+					Build(),
+				view: view,
+			}
+			err := dijkstra.UtxoValidatePoolCertificates(
+				poolRegistrationWithProof(t, dst), 0, ls, pp,
+			)
+			if signedDomain == viewDomain {
+				require.NoError(t, err)
+				continue
+			}
+			var popErr *dijkstra.BlsKeyInvalidProofOfPossessionError
+			require.ErrorAs(t, err, &popErr)
+		}
 	}
 }
