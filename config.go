@@ -297,6 +297,7 @@ type Config struct {
 	shelleyKESAgentServerSPKISHA256                                                     string
 	blockProducerPools                                                                  []BlockProducerPool
 	shelleyKESAgentPlaintext                                                            bool
+	shelleyKESAgentProfile                                                              string
 	shelleyKESAgentAddresses                                                            []string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
@@ -628,8 +629,8 @@ func (n *Node) configValidate() error {
 			"WithBlockProducerPools replaces WithShelleyVRFKey, " +
 				"WithShelleyKESKey, WithShelleyOperationalCertificate, " +
 				"WithShelleyKESAgentSocket, WithShelleyKESAgentMode, " +
-				"WithShelleyKESAgentRemote and WithShelleyKESAgentPlaintext; " +
-				"set them in each pool",
+				"WithShelleyKESAgentRemote, WithShelleyKESAgentPlaintext and " +
+				"WithShelleyKESAgentProfile; set them in each pool",
 		)
 	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
@@ -1029,6 +1030,7 @@ func (c *Config) syncCompatFields() {
 	c.shelleyKeyWatchInterval = c.cfg.ShelleyKeyWatchInterval
 	c.blockProducerPools = slices.Clone(c.cfg.BlockProducerPools)
 	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
+	c.shelleyKESAgentProfile = c.cfg.ShelleyKESAgentProfile
 	c.shelleyKESAgentAddresses = slices.Clone(c.cfg.ShelleyKESAgentAddresses)
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
@@ -1860,10 +1862,11 @@ type BlockProducerPool = internalconfig.BlockProducerPool
 // with its own VRF key, operational certificate and KES source. It replaces
 // the single-pool WithShelleyVRFKey, WithShelleyKESKey,
 // WithShelleyOperationalCertificate, WithShelleyKESAgentSocket,
-// WithShelleyKESAgentMode, WithShelleyKESAgentRemote and
-// WithShelleyKESAgentPlaintext options; New refuses a config that sets any of
-// them beside the pools. WithShelleyKESAgentSignTimeout and
-// WithShelleyKeyWatchInterval apply to every pool.
+// WithShelleyKESAgentMode, WithShelleyKESAgentRemote,
+// WithShelleyKESAgentPlaintext and WithShelleyKESAgentProfile options; New
+// refuses a config that sets any of them beside the pools.
+// WithShelleyKESAgentSignTimeout and WithShelleyKeyWatchInterval apply to
+// every pool.
 func WithBlockProducerPools(pools ...BlockProducerPool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BlockProducerPools = slices.Clone(pools)
@@ -1889,6 +1892,16 @@ func WithShelleyKESAgentPlaintext(plaintext bool) ConfigOptionFunc {
 func WithShelleyKESAgentAddresses(addresses ...string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ShelleyKESAgentAddresses = slices.Clone(addresses)
+	}
+}
+
+// WithShelleyKESAgentProfile names the remote KES agent profile to sign for
+// (CARDANO_SHELLEY_KES_AGENT_PROFILE), sent when the agent admits a session.
+// An agent that serves several pools on one listener binds each session to
+// the profile it names; one with a single profile needs none.
+func WithShelleyKESAgentProfile(profile string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentProfile = profile
 	}
 }
 

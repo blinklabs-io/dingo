@@ -121,6 +121,16 @@ type fakeRemoteAgent struct {
 	mu sync.Mutex
 	// messages is every sign request's message, in arrival order.
 	messages [][]byte
+	// profiles is every admission request's profile, in arrival order.
+	profiles []string
+}
+
+// admittedProfiles returns the profile of every admission request the agent
+// read.
+func (a *fakeRemoteAgent) admittedProfiles() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.profiles...)
 }
 
 // received returns the message of every sign request the agent read.
@@ -221,6 +231,9 @@ func (a *fakeRemoteAgent) serve(conn net.Conn, skeyData, vkey, opCert []byte) {
 	if err := readFrame(conn, MaxSignFrameLen, &req); err != nil {
 		return
 	}
+	a.mu.Lock()
+	a.profiles = append(a.profiles, req.Profile)
+	a.mu.Unlock()
 	resp := attestationResponse{
 		Type:     "attestation_response",
 		Protocol: AttestedProtocolID,
@@ -329,6 +342,30 @@ func TestRemoteClientPrepareThenSignReusesSession(t *testing.T) {
 	}
 	require.Equal(t, int32(1), a.accepts.Load(),
 		"Prepare's session must carry both signs")
+}
+
+func TestRemoteClientNamesItsProfileAtAdmission(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	for _, profile := range []string{"pool-a", ""} {
+		a := startFakeRemoteAgentOn(
+			t, fakePlainTCP, testCert{}, skeyData, vkey, opCert,
+		)
+		c, err := NewRemoteClient(RemoteConfig{
+			Address:     a.addr,
+			Plaintext:   true,
+			Profile:     profile,
+			KESVKey:     vkey,
+			OpCert:      opCert,
+			SignTimeout: 2 * time.Second,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = c.Close() })
+		require.NoError(t, c.Prepare())
+		// No profile sends none, so a single-profile agent admits the
+		// session as before.
+		require.Equal(t, []string{profile}, a.admittedProfiles())
+	}
 }
 
 func TestRemoteClientRefusesWrongOrMissingPin(t *testing.T) {

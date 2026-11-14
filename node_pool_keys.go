@@ -40,6 +40,7 @@ type producerKeys struct {
 	agentClientCertFile   string
 	agentClientKeyFile    string
 	agentServerSPKISHA256 string
+	agentProfile          string
 }
 
 // poolKeySource loads and validates one pool's credentials. client and
@@ -75,6 +76,7 @@ func producerKeysFromPool(p BlockProducerPool) producerKeys {
 		agentClientCertFile:   p.ShelleyKESAgentClientCertFile,
 		agentClientKeyFile:    p.ShelleyKESAgentClientKeyFile,
 		agentServerSPKISHA256: p.ShelleyKESAgentServerSPKISHA256,
+		agentProfile:          p.ShelleyKESAgentProfile,
 	}
 }
 
@@ -122,6 +124,7 @@ func (n *Node) primaryKeySource() *poolKeySource {
 			agentClientCertFile:   n.config.shelleyKESAgentClientCertFile,
 			agentClientKeyFile:    n.config.shelleyKESAgentClientKeyFile,
 			agentServerSPKISHA256: n.config.shelleyKESAgentServerSPKISHA256,
+			agentProfile:          n.config.shelleyKESAgentProfile,
 		},
 		client:        &n.kesAgentClient,
 		cancel:        &n.kesAgentCancel,
@@ -508,6 +511,7 @@ func (ks *poolKeySource) newKESAgentSignClient(
 		ClientKeyFile:     ks.keys.agentClientKeyFile,
 		ServerSPKISHA256:  ks.keys.agentServerSPKISHA256,
 		Plaintext:         ks.keys.agentPlaintext,
+		Profile:           ks.keys.agentProfile,
 		KESVKey:           opCertKey.VKey,
 		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
 		OpCert:            opCertKey.RawCBOR,
