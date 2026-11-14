@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2346,5 +2347,64 @@ func TestRecordTxsubmissionReplyOutcomeCountsBodies(t *testing.T) {
 				)
 			},
 		)
+	}
+}
+
+func TestTxSubmissionRetainsOfferUntilRateLimitRefills(t *testing.T) {
+	t.Parallel()
+	for _, batchRequests := range []bool{false, true} {
+		t.Run(fmt.Sprintf("batched=%t", batchRequests), func(t *testing.T) {
+			t.Parallel()
+			fixtures := txsubmissionTestFixtures(t)[:2]
+			limiter := newTxSubmissionRateLimiter(1, 1)
+			frozen := time.Now()
+			var elapsed atomic.Int64
+			var calls atomic.Int32
+			deniedAfterBackoff := make(chan struct{})
+			// Freeze time through the denied retry so advancing to another offer
+			// cannot recover this transaction when tokens become available.
+			limiter.nowFunc = func() time.Time {
+				now := frozen.Add(time.Duration(elapsed.Load()))
+				if calls.Add(1) == 4 {
+					close(deniedAfterBackoff)
+				}
+				return now
+			}
+			h := newTxSubmissionRelayHarnessWithOpts(
+				t,
+				txSubmissionRelayHarnessOpts{
+					rateLimiterA:   limiter,
+					batchRequestsA: batchRequests,
+				},
+			)
+			defer h.close(t)
+			for _, fixture := range fixtures {
+				require.NoError(
+					t,
+					h.mB.AddTransaction(
+						context.Background(),
+						txsubmissionRelayTestEraId,
+						fixture.body,
+					),
+				)
+			}
+			require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+			select {
+			case <-deniedAfterBackoff:
+			case <-time.After(5 * time.Second):
+				t.Fatal("second offer never reached its denied retry")
+			}
+			elapsed.Store(int64(10 * time.Second))
+			require.Eventually(
+				t,
+				func() bool {
+					_, ok := h.mA.GetTransaction(fixtures[1].hash)
+					return ok
+				},
+				3*time.Second,
+				10*time.Millisecond,
+				"rate-limited offer must survive until it can be fetched",
+			)
+		})
 	}
 }
