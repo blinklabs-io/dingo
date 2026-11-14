@@ -741,7 +741,9 @@ recorded in the peer delivery EWMA before retry selection; a later streaming
 stall does not replace the first-block latency already recorded for that batch;
 it synchronously removes every partial responder, including a near-tip shadow,
 from peer selection before requesting its recycle, so those connections cannot
-win a later range without a new session. Retry excludes the timed-out
+win a later range without a new session. Headers already buffered from those
+responders are rejected at that point, and header replay rechecks the fence per
+event, so a fenced connection cannot regain header-pipeline ownership. Retry excludes the timed-out
 connections before pricing the remaining candidates and requires another
 eligible peer that announced the range end, including an unmeasured holder.
 With no such holder the active connection is also recycled, guaranteeing that

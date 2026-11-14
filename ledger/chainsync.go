@@ -3551,6 +3551,16 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 	delete(ls.bufferedHeaderEvents, key)
 	ls.bufferedHeaderMutex.Unlock()
 	for i, evt := range events {
+		// Failure marking runs under the blockfetch mutex without the
+		// chainsync mutex held here, so a peer can be fenced between taking
+		// the events and replaying them.
+		ls.chainsyncBlockfetchMutex.Lock()
+		failed := ls.blockfetchPeerFailedLocked(evt.ConnectionId)
+		ls.chainsyncBlockfetchMutex.Unlock()
+		if failed {
+			ls.rejectBufferedHeaderEvents(events[i:], pending)
+			return nil
+		}
 		evt.peerHeaderHistoryReplay = true
 		if err := ls.handleEventChainsyncBlockHeaderWithPending(evt, pending); err != nil {
 			ls.rejectBufferedHeaderEvents(events[i+1:], pending)
@@ -11998,6 +12008,13 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 		partialResponderFailed = true
 		for _, responder := range responders {
 			ls.markBlockfetchPeerFailedLocked(responder)
+			// Headers already buffered from the responder would otherwise
+			// be replayed into header admission, which only fences live
+			// events.
+			ls.rejectBufferedHeaderEvents(
+				ls.takeBufferedPeerHeaders(responder),
+				pending,
+			)
 			ls.requestBlockfetchConnectionRecycle(
 				responder,
 				"blockfetch_progress_timeout",

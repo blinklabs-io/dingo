@@ -1091,3 +1091,97 @@ func TestBatchDoneWithOneBlockRecordsNoThroughput(t *testing.T) {
 
 	assert.Equal(t, 0, len(*samples), "one block carries no delivery rate")
 }
+
+func TestBlockfetchProgressTimeoutRejectsFencedContributorBufferedHeaders(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	testChain, _ := buildDeepCatchupChain(t, blockfetchCommitBatchSize)
+	primary := testChainsyncConnId(6000, 3001)
+	shadow := testChainsyncConnId(6000, 3002)
+	retry := testChainsyncConnId(6000, 3003)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	admissions := []bool{}
+	ls := &LedgerState{
+		chain:                          testChain,
+		activeBlockfetchConnId:         primary,
+		selectedBlockfetchConnId:       primary,
+		shadowBlockfetchConnId:         shadow,
+		firstBlockReceived:             true,
+		activeBlockfetchTimeout:        blockfetchBusyTimeout,
+		blockfetchProgressContributors: []ouroboros.ConnectionId{shadow},
+		config: LedgerStateConfig{
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EventBus: bus,
+			MarkBlockfetchPeersFailedFunc: func(
+				[]ouroboros.ConnectionId,
+			) bool {
+				return true
+			},
+			SelectBlockfetchRetryPeerFunc: func(
+				[]ouroboros.ConnectionId,
+				ocommon.Point,
+				time.Duration,
+			) (ouroboros.ConnectionId, bool, bool) {
+				return retry, true, true
+			},
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) (uint64, error) {
+				return 1, nil
+			},
+		},
+	}
+	var seed pendingPublishes
+	ls.bufferHeaderEvent(ChainsyncEvent{
+		ConnectionId: shadow,
+		Point:        ocommon.NewPoint(10, []byte("buffered")),
+		PeerTipAdmission: func(admitted bool) {
+			admissions = append(admissions, admitted)
+		},
+	}, &seed)
+	seed.flush()
+
+	var pending pendingPublishes
+	handleBlockfetchTimeoutForTest(ls, primary, &pending)
+	pending.flush()
+
+	ls.bufferedHeaderMutex.Lock()
+	buffered := len(ls.bufferedHeaderEvents[connIdKey(shadow)])
+	ls.bufferedHeaderMutex.Unlock()
+	assert.Zero(t, buffered, "a fenced responder keeps no replayable headers")
+	assert.Equal(t, []bool{false}, admissions)
+}
+
+func TestReplayBufferedHeaderEventsRejectsFencedPeer(t *testing.T) {
+	t.Parallel()
+
+	connId := testChainsyncConnId(6000, 3002)
+	admissions := []bool{}
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	var seed pendingPublishes
+	ls.bufferHeaderEvent(ChainsyncEvent{
+		ConnectionId: connId,
+		Point:        ocommon.NewPoint(10, []byte("buffered")),
+		PeerTipAdmission: func(admitted bool) {
+			admissions = append(admissions, admitted)
+		},
+	}, &seed)
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.markBlockfetchPeerFailedLocked(connId)
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	var pending pendingPublishes
+	require.NoError(t, ls.replayBufferedHeaderEvents(connId, &pending))
+	pending.flush()
+
+	assert.Equal(t, []bool{false}, admissions)
+}
