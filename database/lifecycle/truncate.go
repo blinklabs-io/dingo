@@ -494,6 +494,12 @@ func Truncate(
 	delegatorInactivityEnabled bool,
 	delegatorInactivity uint64,
 ) (blocksRemoved uint64, err error) {
+	// Errors on this branch, including the refusals from
+	// checkPendingMithrilFloor, are deliberately NOT wrapped in
+	// ErrTruncateNotStarted even though this call changes nothing before
+	// them: a marker records a DeleteBlocksAfter that did not finish, so the
+	// database is not safe to resume normal service on, and node startup
+	// refuses it for the same reason.
 	if pending, err := GetPendingTruncate(db); err != nil {
 		return 0, fmt.Errorf("truncate: %w", err)
 	} else if pending != nil {
