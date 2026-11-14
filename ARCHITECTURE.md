@@ -16280,7 +16280,7 @@ datum/reference-script recovery `/addresses/{address}/utxos` uses. The
 account query counts matching live UTxOs and fetches the requested page with
 SQL `LIMIT`/`OFFSET`; the count and page share one read transaction so they
 describe the same database snapshot. Account withdrawals read the
-rollback-aware `account_reward_delta` withdrawal journal joined to its
+rollback-aware `reward_withdrawal` journal joined to its
 transaction, with `LIMIT`/`OFFSET` applied in SQL.
 
 Account and address transaction queries are bounded by the requested page
@@ -16957,7 +16957,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
   | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
   | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` aggregate `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
-  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` (and, for `proposal_refund`, against the proposal-deposit credit in `account_reward_delta.amount`) for member/leader/proposal_refund rows, compared as per-`(stake_address, type)` totals summed across pool contributions, and then per pool contribution, so a disagreement that preserves the total (equal and opposite per-pool errors, or a total attributed to one of the pools the other side splits it between) is reported as `account_reward_pool_amount` rather than passing; repeated `proposal_refund` rows sum as separate deposits; a type that is neither modeled nor filtered by `koiosAccountRewardTypesOutOfScope` is `reward_type_unmodeled`, an ERROR rather than a parity failure, so the account check cannot pass. |
+  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` (and, for `proposal_refund`, against the proposal-deposit credit in `reward_event_credit.amount`) for member/leader/proposal_refund rows, compared as per-`(stake_address, type)` totals summed across pool contributions, and then per pool contribution, so a disagreement that preserves the total (equal and opposite per-pool errors, or a total attributed to one of the pools the other side splits it between) is reported as `account_reward_pool_amount` rather than passing; repeated `proposal_refund` rows sum as separate deposits; a type that is neither modeled nor filtered by `koiosAccountRewardTypesOutOfScope` is `reward_type_unmodeled`, an ERROR rather than a parity failure, so the account check cannot pass. |
   | `/account_reward_history` | derived-match | `pool_id_bech32` | Decoded to `reward_account_output.pool_key_hash`'s pool ID to identify each contribution to a shared reward account; distinct pools aggregate and are then compared per pool, a repeated same-pool row is `acct_duplicate`. A side that names no pool for a key makes no per-pool statement to disagree with, so the totals are the whole verdict there. Member rows are also summed per pool and compared exactly with Dingo's spendable member sum (`reward_account_output` member rows that are `spendable` and not `guarded`, at K-1), in both directions, once the epoch's account coverage is complete. |
   | `/account_reward_history` | unsupported | `spendable_epoch` | Stored for reference only; not currently compared against Dingo's schema. |
   | `/epoch_params` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
@@ -17508,7 +17508,7 @@ second sync:
   per-account exact-parity comparison (`compareEpochAccounts`, "Per-account
   exact parity" below) reads Dingo's committed reward state through.
   `GetProposalDepositRefunds` reads `governance_proposal`,
-  `governance_proposal_drop` and the `account_reward_delta` journal through
+  `governance_proposal_drop` and the `reward_event_credit` journal through
   `GetGovernanceProposalsRefundedAt` and `GetPostSnapshotRewardCreditEvents`
   (see "Proposal refunds" below). Those tables are deleted only above a rollback
   or truncate slot, never by age or storage mode, so unlike
@@ -18093,7 +18093,7 @@ never the reverse.
 - **Proposal refunds.** `proposal_refund` is Koios's type for a governance
   proposal deposit credited to the proposal's return account. Dingo has no
   `reward_account_output` row for it: the epoch boundary journals the credit
-  post-snapshot in `account_reward_delta`, under a source hash derived from the
+  post-snapshot in `reward_event_credit`, under a source hash derived from the
   proposal's tx hash and action index (`proposalRewardSourceHash`, or
   `proposalDepositRefundSourceHash` when the same proposal's treasury withdrawal
   pays the same account). `RewardParitySource.GetProposalDepositRefunds` pairs
@@ -19333,7 +19333,7 @@ that derivation. A snapshot baseline is the authoritative full state at its
 slot and wins ties; a same-slot certificate wins a PV10 clear because the
 clear runs at the epoch transition before the block. The reward balance is
 reconstructed from the
-`account_reward_delta` journal the way historical stake reads it, including
+reward journal the way historical stake reads it, including
 the credits of a pending reward round applied at or before the slot, so the
 unpinned path's separate pending-credit addition is skipped. Certificates,
 baselines, PV10 clear rows, and the reward journal are removed only by
@@ -21600,7 +21600,8 @@ stake-witnessing certificate tables (`accountWitnessTables`:
 `stake_registration`, `stake_registration_delegation`,
 `stake_vote_registration_delegation`, `vote_registration_delegation`,
 `registration`, `stake_deregistration`, `deregistration`, `stake_delegation`,
-`stake_vote_delegation`, `vote_delegation`), `account_reward_delta`, and
+`stake_vote_delegation`, `vote_delegation`), the reward journal (`reward_credit`,
+`reward_event_credit`, `reward_withdrawal`), and
 `account_withdrawal_witness`. This is a question about
 *retention* of rows already written, separate from whether a row gets
 written in the first place: `account_withdrawal_witness` writes are
@@ -21614,10 +21615,10 @@ what the one-time activation stamp above exists to paper over uniformly, not
 a new divergence source.
 Retention itself is never configurable or age-based for any of these tables
 -- the only statements that delete rows from them are
-`DeleteCertificatesAfterSlot` and the `account_reward_delta`/
+`DeleteCertificatesAfterSlot` and the reward-journal and
 `account_withdrawal_witness` deletes in
-`database/plugin/metadata/sqlstore/account.go`, all of the form `added_slot >
-slot` for a rollback or lifecycle-truncate target slot (the same primitive
+`database/plugin/metadata/sqlstore/reward_journal.go`, all of the form
+`added_slot > slot`, `slot > slot` or `boundary_slot > slot` for a rollback or lifecycle-truncate target slot (the same primitive
 both share, see "CIP-0163 Bookkeeping Shared Between Ledger Rollback and
 Lifecycle Truncate" below). That target slot is derived from consensus chain
 state, not wall-clock time or per-node configuration, so it produces
@@ -21947,7 +21948,7 @@ POOLREAP precedes SNAP.
 
 1. Delayed stake reward application (`applyStakeRewards`): apply the reward
    update derived from the mark snapshot three epochs back — credit spendable
-   rewards through `account_reward_delta`, return undistributed rewards to
+   rewards through the reward journal, return undistributed rewards to
    reserves, and route unspendable rewards to the treasury before governance
    reads it. RUPD starts only when a block ticks the ledger after the ended
    epoch's `start + 4k/f` slot. When no block lands after that point, NEWEPOCH
@@ -22159,7 +22160,7 @@ POOLREAP precedes SNAP.
    its withdrawal destinations credits that account twice, as the reference's
    `applyEnactedWithdrawals` and `returnProposalDeposits` do: once for the
    withdrawal and once for the deposit. The two credits journal under
-   different `account_reward_delta` discriminators, so neither is dropped as a
+   different `reward_source` discriminators, so neither is dropped as a
    replay of the other.
 
    The subsequent RATIFY pass carries a running treasury budget seeded as
@@ -22390,7 +22391,7 @@ history immediately before the first reward-update slot, using the RUPD
 randomness-stabilisation window (`4k/f`); Babbage and later forgo that filter.
 Rewards omitted by the filter return to reserves. Calculated rewards that fail
 the application-time account-registration check are unspendable and go to
-treasury. Spendable rewards are credited through `account_reward_delta`.
+treasury. Spendable rewards are credited through the reward journal (`reward_credit`).
 
 `ValidateTxDijkstra` builds its rule list from the upstream Dijkstra descriptors
 and rule functions, whose phase-2-valid-only rules (governance, certificate and
@@ -22569,18 +22570,22 @@ journal rows and `reward_live_stake` refresh an eager boundary writes
 the rows `folded` in the same transaction, so no reader counts a credit twice.
 The rows are claimed before they are written
 (`ClaimPendingRewardCreditsForCredential`, `ClaimUnfoldedRewardCredits`): the
-claim marks them folded and, on PostgreSQL and MySQL, locks them first, so a
-concurrent claim of the same row skips it.
+claim marks each folded with a conditional update, so a concurrent claim of the
+same row finds it folded and skips it.
 
 Compaction folds every credited round older than the newest two
 (`rewardCreditRoundsKeptUnfolded`) into account rows in the background
 (`queueRewardCreditCompaction`, queued when a boundary credits a round and at
 start), `rewardCreditCompactionChunk` (1,000) credits per transaction under
 `rewardPrecomputeWriteMu`, so the derived-balance sums cover the last few
-rounds. Folding never changes a balance, so no reader needs an old round
+rounds. A chunk claims the next unfolded outputs in `account.id` order from a
+cursor the job keeps in memory (`rewardCreditCursor`), so a round's
+`reward_credit` rows append at the end of their key range and the account
+updates touch neighbouring pages; a restarted job begins at account zero and
+skips folded rows. Folding never changes a balance, so no reader needs an old round
 unfolded; the newest two stay unfolded because a rollback within the stability
 window can reach the boundaries that applied them. The folded flag is the job's
-progress record, so a stopped job resumes where it left off, and a rollback over
+durable progress record, so a stopped job resumes where it left off, and a rollback over
 a compacted round reverts it the same way as a withdrawal's folds. A rollback
 below the boundary removes the round and clears `folded` on its surviving
 outputs in the transaction that reverts the folded credits' journal rows. A
@@ -22646,7 +22651,7 @@ On chain rollback past an epoch boundary:
   predecessor; epochs without a stored `candidate_nonce` still have their lab
   repaired when possible, but their nonce is left unchanged because it cannot be
   safely recomputed from the lab alone.
-- Reward-account credits (`account_reward_delta` journal) and treasury/reserves
+- Reward-account credits (reward journal) and treasury/reserves
   writes (`network_state`) are slot-keyed, so reward application, governance,
   MIR, and POOLREAP effects can be reverted and re-derived on forward replay
 - Precomputed reward outputs are deleted by captured/boundary slot. A pot row

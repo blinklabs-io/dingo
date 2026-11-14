@@ -109,10 +109,11 @@ func formatFrames(label string, frames map[string]int, blocks int) string {
 }
 
 // stakeWorkloadDigest is the digest of the stake and reward bookkeeping rows,
-// their ids and their autoincrement sequences after the workload above. It was
-// recorded before any index or write-path change, so a match shows the stored
-// state, reward outputs and live stake totals are byte-identical.
-const stakeWorkloadDigest = "7a52891a744ae243a0c70c7e992e23da3cec1a5fe9609e54c80151833740c546"
+// their ids and their autoincrement sequences after the workload above. Every
+// table outside the reward journal hashes the same as under the write path
+// that predates the index and changed-column upserts, so a match shows the
+// stored state, reward outputs and live stake totals are byte-identical.
+const stakeWorkloadDigest = "2564462cf9f05c479df380a2b93057a1fd309808f778c5bd294050a7e357e739"
 
 // TestStakeBookkeepingWALFrames drives a Shelley-like workload through
 // SetTransaction on a file-backed WAL database, attributes every WAL frame to

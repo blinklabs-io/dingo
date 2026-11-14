@@ -754,14 +754,14 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Endpoint:   "/account_reward_history",
 		Field:      "amount",
 		Class:      CoverageExactMatch,
-		DingoField: "reward_account_output.amount; proposal_refund against account_reward_delta.amount",
+		DingoField: "reward_account_output.amount; proposal_refund against reward_event_credit.amount",
 		Reason:     "parsed amounts are compared as aggregated totals grouped by (stake_address, reward_type), and then per pool contribution so a disagreement that preserves the total is still reported; no rounding/sampling/tolerance",
 	},
 	{
 		Endpoint:   "/account_reward_history",
 		Field:      "type",
 		Class:      CoverageExactMatch,
-		DingoField: "reward_account_output.reward_type; proposal_refund against the post-snapshot proposal-deposit credit in account_reward_delta",
+		DingoField: "reward_account_output.reward_type; proposal_refund against the post-snapshot proposal-deposit credit in reward_event_credit",
 		Reason:     "validated member/leader/proposal_refund rows are matched after aggregation, repeated proposal_refund rows summing as separate deposits; treasury/reserves/refund rows are out of scope and any other type is reported as reward_type_unmodeled, which is ERROR",
 	},
 	{

@@ -129,7 +129,7 @@ func TestRollbackAcrossGovernanceBoundariesRestoresEveryTable(t *testing.T) {
 				"committee_quorum",
 				"pparams",
 				"network_state",
-				"account_reward_delta",
+				"reward_event_credit",
 				"drep",
 				"drep_dormancy_state",
 				"drep_expiry_history",
@@ -154,12 +154,13 @@ func withoutRowIDs(tables map[string][]string) map[string][]string {
 			fields := strings.Fields(line)
 			kept := fields[:0]
 			for _, f := range fields {
-				// A history or reward row's vote_id or mir_id names its
-				// parent row, whose own id a re-applied boundary allocates
-				// anew.
+				// A history or reward row's vote_id, mir_id or source_id
+				// names its parent row, whose own id a re-applied boundary
+				// allocates anew.
 				if !strings.HasPrefix(f, "id=") &&
 					!strings.HasPrefix(f, "vote_id=") &&
-					!strings.HasPrefix(f, "mir_id=") {
+					!strings.HasPrefix(f, "mir_id=") &&
+					!strings.HasPrefix(f, "source_id=") {
 					kept = append(kept, f)
 				}
 			}

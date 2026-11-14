@@ -976,7 +976,7 @@ func TestBatchUtxoOverlayRefusesAccountDelete(t *testing.T) {
 		"-- name: X\nDELETE FROM `account` WHERE id = ?":         true,
 		"DELETE FROM account;":                                   true,
 		"DELETE FROM `account`;":                                 true,
-		"DELETE FROM account_reward_delta WHERE added_slot > ?":  false,
+		"DELETE FROM reward_withdrawal WHERE slot > ?":           false,
 		"DELETE FROM x WHERE id IN (SELECT id FROM account)":     false,
 		"SELECT created_slot FROM account WHERE staking_key = ?": false,
 	} {

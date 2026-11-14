@@ -409,7 +409,7 @@ func runWALWorkload(t *testing.T) *walFrameReport {
 	oldest := epoch - walWorkloadRoundsUnfolded
 	for {
 		claimed, err := store.ClaimUnfoldedRewardCredits(
-			oldest, walWorkloadFoldBatch, nil,
+			oldest, 0, walWorkloadFoldBatch, nil,
 		)
 		require.NoError(t, err)
 		if len(claimed) == 0 {

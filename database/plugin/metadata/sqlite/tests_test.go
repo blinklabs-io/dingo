@@ -2500,11 +2500,11 @@ func (d *sqliteTestDB) Create(value any) sqliteTestResult {
 			v.TxId, v.OutputIdx, v.StakingKey, v.CredentialTag,
 			fmt.Sprint(uint64(v.Amount)), v.AddedSlot)
 	case *models.AccountRewardDelta:
-		result, err = d.db.Exec(`INSERT INTO account_reward_delta
-            (staking_key, credential_tag, tx_hash, amount, previous_reward, added_slot, withdrawal, post_snapshot)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, v.StakingKey, v.CredentialTag, v.TxHash,
-			fmt.Sprint(uint64(v.Amount)), fmt.Sprint(uint64(v.PreviousReward)), v.AddedSlot,
-			v.Withdrawal, v.PostSnapshot)
+		err = insertRewardJournalRow(
+			d.db, v.StakingKey, v.CredentialTag, v.TxHash,
+			fmt.Sprint(uint64(v.Amount)), fmt.Sprint(uint64(v.PreviousReward)),
+			int64(v.AddedSlot), v.Withdrawal, v.PostSnapshot, //nolint:gosec
+		)
 	case *models.Certificate:
 		result, err = d.db.Exec(`INSERT INTO certs
             (transaction_id, certificate_id, slot, cert_index, cert_type)
@@ -2902,6 +2902,9 @@ func TestEpochBoundaryStakeHandlesBoundaryWithdrawal(t *testing.T) {
 		bytes.Repeat([]byte{0xb2}, 32), nil,
 	))
 	// A withdrawal in the boundary block clears the whole balance.
+	require.NoError(t, store.SetGenesisTransaction(
+		bytes.Repeat([]byte{0xb3}, 32), nil, nil, nil,
+	))
 	require.NoError(t, store.ApplyAccountRewardWithdrawal(
 		0, stakeKey, 57, boundarySlot,
 		bytes.Repeat([]byte{0xb3}, 32), nil,

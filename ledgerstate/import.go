@@ -823,7 +823,7 @@ func ImportLedgerState(
 
 			// The snapshot sets account.reward at its anchor. Clear later
 			// journal entries without reversing amounts applied against the
-			// pre-import balance. See DATABASE.md, "account_reward_delta".
+			// pre-import balance. See DATABASE.md, "reward_credit".
 			if err := cfg.Database.DeleteAccountRewardJournalForCredentialsAfterSlot(
 				ctx, slot, importedAccounts, nil,
 			); err != nil {

@@ -50,6 +50,12 @@ func TestImportAccountsFoldsCoveredRewardCredits(t *testing.T) {
 	}
 	require.NoError(
 		t,
+		meta.SetGenesisTransaction(
+			bytes.Repeat([]byte{0x41}, 32), nil, nil, nil,
+		),
+	)
+	require.NoError(
+		t,
 		meta.ApplyAccountRewardWithdrawal(
 			0,
 			withdrawn,

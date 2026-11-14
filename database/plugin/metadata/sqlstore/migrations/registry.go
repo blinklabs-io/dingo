@@ -106,6 +106,7 @@ const (
 	utxoTransactionIdentitySchemaRelease                = "utxo-transaction-identity"
 	poolRelayIPv6NetworkOrderSchemaRelease              = "pool-relay-ipv6-network-order"
 	epochStakesIndexSchemaRelease                       = "reward-stake-input-epoch-registered-index"
+	rewardJournalTablesSchemaRelease                    = "reward-journal-tables"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -291,6 +292,7 @@ var schemaVersions = []struct {
 	{Version: 63, Name: datumHashIndexDropSchemaRelease, Dir: "v63"},
 	{Version: 64, Name: epochStakesIndexSchemaRelease, Dir: "v64"},
 	{Version: 65, Name: scriptHashIndexDropSchemaRelease, Dir: "v65"},
+	{Version: 66, Name: rewardJournalTablesSchemaRelease, Dir: "v66"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -354,14 +356,20 @@ func registryForDialect(dialect string) ([]Migration, error) {
 					Expand:   nativeExpand,
 					Contract: nativeContract,
 				}
-				ret = append(ret, Migration{
+				native := Migration{
 					Version:          version.Version,
 					Name:             version.Name,
 					BackfillRevision: "none",
 					SQL: map[string]SQL{
 						dialect: sqlForDialect,
 					},
-				})
+				}
+				if version.Name == rewardJournalTablesSchemaRelease {
+					native.BackfillRevision = "1"
+					native.Backfill = rewardJournalBackfill(dialect)
+					native.BatchSize = rewardJournalBatchSize
+				}
+				ret = append(ret, native)
 				continue
 			}
 			sqlForDialect.Expand = translateSchemaSQLInSchema(
@@ -453,6 +461,11 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == rewardCreditRoundTableSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = rewardCreditRoundBackfill
+		}
+		if version.Name == rewardJournalTablesSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = rewardJournalBackfill(dialect)
+			migration.BatchSize = rewardJournalBatchSize
 		}
 		if version.Name == accountDRepClearSchemaRelease {
 			migration.BackfillRevision = "1"

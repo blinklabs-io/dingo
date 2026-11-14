@@ -90,15 +90,11 @@ func TestGetPostSnapshotRewardCreditEventsKeepsEachSource(t *testing.T) {
 		addedSlot int,
 		withdrawal, postSnapshot bool,
 	) {
-		_, err := raw.Exec(`
-INSERT INTO account_reward_delta (
-    staking_key, credential_tag, tx_hash, amount, previous_reward,
-    added_slot, withdrawal, post_snapshot
-) VALUES (?, 0, ?, ?, NULL, ?, ?, ?)`,
-			key, credentialHash(source), amount, addedSlot, withdrawal,
-			postSnapshot,
-		)
-		require.NoError(t, err)
+		insertTestRewardRow(t, raw, testRewardRow{
+			key: key, hash: credentialHash(source), amount: amount,
+			slot: int64(addedSlot), withdrawal: withdrawal,
+			postSnapshot: postSnapshot,
+		})
 	}
 	// Two post-snapshot credits to one account at one boundary.
 	insert(0xa1, "100", slot, false, true)

@@ -337,17 +337,17 @@ func (w *stakeWorkload) epochBoundary(epoch uint64) {
 		})
 		credits = append(credits, models.AccountRewardCredit{
 			StakingKey: c.stake.Bytes(),
-			SourceHash: models.StakeRewardSourceHash(
-				epoch, c.pool, 0, c.stake.Bytes(), "member",
-			),
-			Amount: amount,
-			Slot:   boundary,
+			Amount:     amount,
+			Slot:       boundary,
 		})
 		c.reward += amount
 	}
 	txn := w.store.Transaction(context.Background())
 	require.NoError(w.t, w.store.SaveRewardStakeInputs(inputs, txn))
 	require.NoError(w.t, w.store.SaveRewardAccountOutputs(outputs, txn))
+	for i, output := range outputs {
+		credits[i].OutputID = output.ID
+	}
 	require.NoError(w.t, w.store.AddAccountRewardsByCredential(credits, txn))
 	require.NoError(w.t, txn.Commit())
 }
@@ -407,9 +407,10 @@ func stakeStateDigest(tb testing.TB, db *sql.DB) string {
 		`SELECT hex(staking_key), credential_tag, hex(coalesce(pool,x'')), pool IS NULL, hex(coalesce(drep,x'')), drep IS NULL, drep_type, reward, active, added_slot, created_slot, certificate_id, expiration_epoch FROM account ORDER BY credential_tag, staking_key`,
 		`SELECT epoch, hex(pool_key_hash), credential_tag, hex(staking_key), stake, owner, registered, captured_slot, boundary_slot FROM reward_stake_input ORDER BY epoch, pool_key_hash, credential_tag, staking_key`,
 		`SELECT epoch, hex(pool_key_hash), credential_tag, hex(staking_key), reward_type, amount, spendable, guarded, folded, captured_slot, boundary_slot FROM reward_account_output ORDER BY epoch, pool_key_hash, credential_tag, staking_key, reward_type`,
-		`SELECT withdrawal, hex(tx_hash), credential_tag, hex(staking_key), added_slot, amount, coalesce(previous_reward,''), post_snapshot FROM account_reward_delta ORDER BY withdrawal, tx_hash, credential_tag, staking_key, added_slot`,
+		`SELECT c.boundary_slot, a.credential_tag, hex(a.staking_key), c.amount FROM reward_credit c JOIN account a ON a.id = c.account_id`,
+		`SELECT hex(t.hash), a.credential_tag, hex(a.staking_key), w.slot, w.amount, w.previous_reward FROM reward_withdrawal w JOIN account a ON a.id = w.account_id JOIN "transaction" t ON t.id = w.tx_id`,
 		`SELECT hex(staking_key), credential_tag, hex(coalesce(pool_key_hash,x'')), added_slot FROM stake_delegation ORDER BY credential_tag, staking_key, added_slot, hex(coalesce(pool_key_hash,x''))`,
-		`SELECT name, seq FROM sqlite_sequence WHERE name IN ('account', 'reward_live_stake', 'account_reward_delta', 'reward_stake_input', 'reward_account_output') ORDER BY name`,
+		`SELECT name, seq FROM sqlite_sequence WHERE name IN ('account', 'reward_live_stake', 'reward_stake_input', 'reward_account_output') ORDER BY name`,
 		`SELECT id, hex(staking_key), credential_tag FROM account ORDER BY id`,
 		`SELECT id, hex(staking_key), credential_tag FROM reward_live_stake ORDER BY id`,
 	}

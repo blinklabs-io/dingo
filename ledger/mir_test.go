@@ -643,9 +643,11 @@ func boundaryRewardSourceHashes(
 ) [][]byte {
 	t.Helper()
 	rows, err := gdb.Query(`
-SELECT tx_hash FROM account_reward_delta
-WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?
-ORDER BY id ASC`,
+SELECT s.hash FROM reward_event_credit e
+JOIN account a ON a.id = e.account_id
+JOIN reward_source s ON s.id = e.source_id
+WHERE a.credential_tag = ? AND a.staking_key = ? AND e.slot = ?
+ORDER BY e.id ASC`,
 		0, credential, boundarySlot,
 	)
 	require.NoError(t, err)

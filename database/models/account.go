@@ -25,6 +25,11 @@ import (
 
 var (
 	ErrAccountNotFound = errors.New("account not found")
+	// ErrWithdrawalTransactionNotFound identifies a reward withdrawal whose
+	// withdrawing transaction has not been applied: no applied_transaction row.
+	ErrWithdrawalTransactionNotFound = errors.New(
+		"withdrawing transaction not found",
+	)
 	// ErrRewardWithdrawalExceedsBalance identifies a transaction whose
 	// withdrawal cannot be satisfied by the node's persisted reward account.
 	ErrRewardWithdrawalExceedsBalance = errors.New(
@@ -32,14 +37,17 @@ var (
 	)
 )
 
-// AccountRewardCredit is one reward-account credit for
-// AddAccountRewardsByCredential: the same arguments one
-// AddAccountRewardByCredential call takes.
+// AccountRewardCredit is one stake-reward credit for
+// AddAccountRewardsByCredential: a reward_account_output row applied to an
+// account at its round's boundary slot. Slot and OutputID identify the credit
+// (per account), so applying it twice is a no-op. AccountID is the account the
+// claim resolved; zero resolves the account from CredentialTag and StakingKey.
 type AccountRewardCredit struct {
 	StakingKey    []byte
-	SourceHash    []byte
 	Amount        uint64
 	Slot          uint64
+	OutputID      uint
+	AccountID     uint
 	CredentialTag uint8
 }
 
@@ -169,22 +177,11 @@ func (r StakeCredentialRef) MapKey() string {
 	return string([]byte{r.Tag}) + string(r.Key)
 }
 
-// AccountRewardDelta records reward-account balance changes that are not
-// otherwise represented by a rollback-aware certificate row. Credits store the
-// credited Amount. Withdrawals store the withdrawal Amount, PreviousReward, and
-// TxHash so rollback can restore the cleared reward balance.
-//
-// The unique index idx_account_reward_delta_w_tx_s_slot includes AddedSlot.
-// Withdrawal writers use TxHash and the credential as their logical replay key,
-// regardless of slot. Credit deltas (deposit refunds, MIR, POOLREAP) use an
-// event discriminator in TxHash when one is available and otherwise use the
-// normalized empty value. Without AddedSlot, repeated per-epoch credits to a
-// given account could still collapse onto a single row — colliding across
-// epochs even on a clean first pass and breaking per-row rollback accounting in
-// DeleteAccountRewardsAfterSlot. Including AddedSlot makes each per-epoch
-// credit a distinct row while keeping a replayed epoch-rollover credit (same
-// account, same event discriminator, same boundary slot) mapped to the same row
-// so it can be skipped idempotently instead of erroring.
+// AccountRewardDelta is a credit read back from reward_event_credit: a reward
+// balance change that is not otherwise represented by a rollback-aware
+// certificate row. TxHash is the credit's source hash (pool key hash for a
+// pool-retirement refund, a proposal hash for a governance credit, the
+// transaction hash for a direct deposit, an event prefix for MIR).
 type AccountRewardDelta struct {
 	StakingKey     []byte
 	CredentialTag  uint8
@@ -200,10 +197,6 @@ type AccountRewardDelta struct {
 	// update and Shelley MIR leave it false in every era.
 	// All boundary credits share added_slot, so historical reconstruction
 	// needs both this rule marker and the boundary's era.
-
-	// Not indexed: it is only ever read alongside added_slot for a single
-	// boundary slot, which idx_account_reward_delta_credential/added_slot
-	// already narrow.
 	PostSnapshot bool
 }
 

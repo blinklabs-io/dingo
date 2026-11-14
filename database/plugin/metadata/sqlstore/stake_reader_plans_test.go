@@ -37,79 +37,7 @@ type stakeReader struct {
 
 func stakeReaders(store *Store) []stakeReader {
 	key := make([]byte, 28)
-	withdrawalQuery, withdrawalArgs := withdrawalHistoryQuery(0, key)
-	hash := make([]byte, 32)
 	return []stakeReader{
-		{
-			name: "GetAccountSums withdrawals", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_credential",
-			query: `SELECT amount FROM account_reward_delta
-WHERE withdrawal = TRUE AND credential_tag = ? AND staking_key = ?`,
-			args: []any{0, key},
-		},
-		{
-			name: "AddAccountRewardsByCredential applied lookup", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_w_tx_s_slot",
-			query: `SELECT tx_hash, credential_tag, staking_key, added_slot
-FROM account_reward_delta WHERE withdrawal = FALSE AND tx_hash IN (?, ?)`,
-			args: []any{hash, hash},
-		},
-		{
-			name: "RewardCreditsAlreadyApplied", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_w_tx_s_slot",
-			query: `SELECT tx_hash, credential_tag, staking_key, added_slot
-FROM account_reward_delta WHERE withdrawal = FALSE AND tx_hash IN (?)`,
-			args: []any{hash},
-		},
-		{
-			name: "withdrawal journal exists", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_w_tx_s_slot",
-			query: `SELECT EXISTS (SELECT 1 FROM account_reward_delta
-WHERE withdrawal = TRUE AND tx_hash = ? AND credential_tag = ? AND staking_key = ?)`,
-			args: []any{hash, 0, key},
-		},
-		{
-			name: "GetPostSnapshotRewardCredits", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_added_slot",
-			query: `SELECT credential_tag, staking_key, amount FROM account_reward_delta
-WHERE added_slot = ? AND post_snapshot = TRUE AND withdrawal = FALSE
-ORDER BY credential_tag, staking_key, id`,
-			args: []any{100},
-		},
-		{
-			name: "MarkPostSnapshotAccountRewardCredit", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_w_tx_s_slot",
-			query: `UPDATE account_reward_delta SET post_snapshot = TRUE
-WHERE withdrawal = FALSE AND tx_hash = ? AND credential_tag = ?
-  AND staking_key = ? AND added_slot = ?`,
-			args: []any{hash, 0, key, 100},
-		},
-		{
-			name: "account rollback sweep", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_added_slot",
-			query: `SELECT staking_key, credential_tag, amount, previous_reward, withdrawal
-FROM account_reward_delta WHERE added_slot > ? ORDER BY added_slot DESC, id DESC`,
-			args: []any{100},
-		},
-		{
-			name: "account credential rollback delete", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_credential",
-			query: `DELETE FROM account_reward_delta WHERE added_slot > ?
-AND credential_tag = ? AND staking_key IN (?, ?)`,
-			args: []any{100, 0, key, key},
-		},
-		{
-			name: "withdrawal witness slots", table: "account_reward_delta",
-			query: `SELECT credential_tag, staking_key FROM account_reward_delta
-WHERE withdrawal = TRUE AND added_slot > ?`,
-			args: []any{100},
-		},
-		{
-			name: "withdrawalHistoryQuery", table: "account_reward_delta",
-			wantIndex: "idx_account_reward_delta_credential",
-			query:     withdrawalQuery,
-			args:      withdrawalArgs,
-		},
 		{
 			name: "GetLiveStakeInputsForPools", table: "reward_live_stake",
 			wantIndex: "idx_reward_live_stake_pool_order",

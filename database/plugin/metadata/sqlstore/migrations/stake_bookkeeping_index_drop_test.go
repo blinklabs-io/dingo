@@ -123,6 +123,9 @@ VALUES (?, ?, ?, 0, '10', 0, 1, 90, 90)`, key(i%5), key(i), i%4)
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
+	// Stop at v59: v66 drops account_reward_delta, whose v59 indexes this
+	// test pins.
+	registry = registry[:59]
 	run := func() {
 		runner := migrations.Runner{
 			DB:       db,

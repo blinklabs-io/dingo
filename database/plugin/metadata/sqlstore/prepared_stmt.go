@@ -97,9 +97,7 @@ func hotStatementsFor(u *utxoSQL) []string {
 		insertAccountWithdrawalWitnessSQL,
 		getActiveAccountRewardSQL,
 		getAccountRewardStateSQL,
-		withdrawalRewardDeltaExistsSQL,
 		updateAccountRewardSQL,
-		insertWithdrawalRewardDeltaSQL,
 		sqlitequery.GetAccountByCredentialQuery,
 		sqlitequery.GetActiveAccountByCredentialQuery,
 		sqlitequery.GetSyncStateQuery,
@@ -107,6 +105,7 @@ func hotStatementsFor(u *utxoSQL) []string {
 		sqlitequery.SetBlockNonceQuery,
 	}
 	queries = append(queries, upsertAccountChangedSQLs[:]...)
+	queries = append(queries, rewardJournalHotStatements...)
 	for _, size := range sqliteInListSizes {
 		queries = append(queries, u.stakeConsumedDeltaQuery(size))
 	}

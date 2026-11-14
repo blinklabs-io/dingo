@@ -210,7 +210,7 @@ func rewardAccountOutputReaderDigestOf(t *testing.T, store *Store) string {
 	var round []*models.RewardAccountOutput
 	var batches []string
 	for {
-		claimed, err := store.ClaimUnfoldedRewardCredits(2, 17, nil)
+		claimed, err := store.ClaimUnfoldedRewardCredits(2, 0, 17, nil)
 		require.NoError(t, err)
 		if len(claimed) == 0 {
 			break

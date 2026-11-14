@@ -887,6 +887,9 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_PinnedPointAnswersAtTha
 	))
 	seedPoolDelegationAt(t, db, moved, secondPool, 400)
 	seedStakeCertAt(t, db, left, false, 450, 2_000_000)
+	require.NoError(t, db.Metadata().SetGenesisTransaction(
+		repeatedBytes(32, 0xC3), nil, nil, nil,
+	))
 	require.NoError(t, db.Metadata().ApplyAccountRewardWithdrawal(
 		0, moved, 5_000_000, 500, repeatedBytes(32, 0xC3), nil,
 	))

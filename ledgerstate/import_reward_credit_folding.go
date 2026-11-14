@@ -42,6 +42,7 @@ func foldImportedRewardCredits(
 		if round.BoundarySlot > slot {
 			continue
 		}
+		var fromAccountID uint
 		for {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -50,12 +51,22 @@ func foldImportedRewardCredits(
 				tx := cfg.Database.MetadataTxn(ctx, true)
 				defer tx.Release()
 				outputs, err := cfg.Database.Metadata().
-					ClaimUnfoldedRewardCredits(round.SnapshotEpoch, batchSize, tx.Metadata())
+					ClaimUnfoldedRewardCredits(
+						round.SnapshotEpoch, fromAccountID, batchSize, tx.Metadata(),
+					)
 				if err != nil {
 					return false, err
 				}
 				if err := tx.Commit(); err != nil {
 					return false, err
+				}
+				// Outputs without an account carry AccountID 0 and follow
+				// the account-ordered ones; resuming from them would walk
+				// every account again.
+				for _, output := range outputs {
+					if output.AccountID != 0 {
+						fromAccountID = output.AccountID
+					}
 				}
 				return len(outputs) == 0, nil
 			}()

@@ -48,7 +48,7 @@ var stakeBookkeepingKeptIndexes = []string{
 	"idx_reward_stake_input_cred_epoch",
 }
 
-// TestStakeBookkeepingIndexDropAppliesOnPostgres runs every migration against
+// TestStakeBookkeepingIndexDropAppliesOnPostgres runs migrations through v59 on
 // a real server, requires v59's drops to have taken effect and its kept
 // indexes to remain, then replays v59's expand phase.
 func TestStakeBookkeepingIndexDropAppliesOnPostgres(t *testing.T) {
@@ -74,6 +74,9 @@ func TestStakeBookkeepingIndexDropAppliesOnPostgres(t *testing.T) {
 
 	registry, err := migrations.PostgresRegistry()
 	require.NoError(t, err)
+	// Stop at v59: v66 drops account_reward_delta, whose v59 indexes this
+	// test pins.
+	registry = registry[:59]
 	runner := migrations.Runner{
 		DB: db, Dialect: "postgres", Registry: registry,
 		Locker: migrations.NewProcessLocker(),
@@ -135,6 +138,9 @@ func TestStakeBookkeepingIndexDropAppliesOnMySQL(t *testing.T) {
 
 	registry, err := migrations.MySQLRegistry()
 	require.NoError(t, err)
+	// Stop at v59: v66 drops account_reward_delta, whose v59 indexes this
+	// test pins.
+	registry = registry[:59]
 	runner := migrations.Runner{
 		DB: db, Dialect: "mysql", Registry: registry,
 		Locker: migrations.NewProcessLocker(),

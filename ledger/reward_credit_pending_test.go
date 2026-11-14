@@ -167,6 +167,11 @@ func TestPendingRewardRoundWithdrawalCreditsOnce(t *testing.T) {
 		if err := f.ls.foldRewardCreditsForWithdrawals(context.Background(), tx, txn); err != nil {
 			return err
 		}
+		if err := f.db.Metadata().SetGenesisTransaction(
+			make([]byte, 32), nil, nil, txn.Metadata(),
+		); err != nil {
+			return err
+		}
 		return f.db.Metadata().ApplyAccountRewardWithdrawal(
 			0, []byte(key), balance,
 			epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch+1)+5,

@@ -260,8 +260,8 @@ func TestApplyStakeRewardsHaltsOnUnrecoverablePrunedStakeInputs(t *testing.T) {
 
 	var deltas int64
 	require.NoError(t, rewardCalcSQLDB(t, db).QueryRow(
-		"SELECT COUNT(*) FROM account_reward_delta WHERE added_slot = ?",
-		retentionBoundarySlot,
+		rewardJournalRowsAtSlotQuery,
+		retentionBoundarySlot, retentionBoundarySlot, retentionBoundarySlot,
 	).Scan(&deltas))
 	require.Zero(t, deltas, "skipped epoch must not record reward deltas")
 }
@@ -1108,8 +1108,8 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 
 	var deltas int64
 	require.NoError(t, rewardCalcSQLDB(t, db).QueryRow(
-		"SELECT COUNT(*) FROM account_reward_delta WHERE added_slot = ?",
-		boundarySlot,
+		rewardJournalRowsAtSlotQuery,
+		boundarySlot, boundarySlot, boundarySlot,
 	).Scan(&deltas))
 	require.Equal(t, int64(2), deltas)
 
@@ -1151,8 +1151,8 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	require.Equal(t, uint64(46_283), liveStakeByKey[string(rewardAccount)])
 	require.Equal(t, uint64(37_049), liveStakeByKey[string(member)])
 	require.NoError(t, rewardCalcSQLDB(t, db).QueryRow(
-		"SELECT COUNT(*) FROM account_reward_delta WHERE added_slot = ?",
-		boundarySlot,
+		rewardJournalRowsAtSlotQuery,
+		boundarySlot, boundarySlot, boundarySlot,
 	).Scan(&deltas))
 	require.Equal(t, int64(2), deltas)
 }
@@ -8599,6 +8599,13 @@ func epochBoundaryDumpShape() epochBoundaryBenchShape {
 	return shape
 }
 
+// rewardJournalRowsAtSlotQuery counts the journal rows of one slot across the
+// credit, event-credit and withdrawal tables; it takes the slot three times.
+const rewardJournalRowsAtSlotQuery = `SELECT
+  (SELECT COUNT(*) FROM reward_credit WHERE boundary_slot = ?) +
+  (SELECT COUNT(*) FROM reward_event_credit WHERE slot = ?) +
+  (SELECT COUNT(*) FROM reward_withdrawal WHERE slot = ?)`
+
 // dumpEpochBoundaryState renders every table an epoch boundary writes, in a
 // stable order and without surrogate keys, so the same boundary on two code
 // versions can be compared byte for byte.
@@ -8608,10 +8615,22 @@ func dumpEpochBoundaryState(t *testing.T, raw *sql.DB) string {
 		{"account", `SELECT credential_tag, hex(staking_key), reward, active,
     hex(pool), hex(drep), drep_type FROM account
 ORDER BY credential_tag, staking_key`},
-		{"account_reward_delta", `SELECT credential_tag, hex(staking_key),
-    hex(tx_hash), amount, previous_reward, added_slot, withdrawal,
-    post_snapshot FROM account_reward_delta
-ORDER BY credential_tag, staking_key, tx_hash, added_slot, withdrawal`},
+		{"reward_credit", `SELECT c.boundary_slot, a.credential_tag,
+    hex(a.staking_key), c.amount
+FROM reward_credit c JOIN account a ON a.id = c.account_id
+ORDER BY c.boundary_slot, a.credential_tag, a.staking_key, c.amount`},
+		{"reward_credit_slot", `SELECT boundary_slot FROM reward_credit_slot
+ORDER BY boundary_slot`},
+		{"reward_event_credit", `SELECT a.credential_tag, hex(a.staking_key),
+    hex(s.hash), e.amount, e.slot, e.post_snapshot, e.after_withdrawal
+FROM reward_event_credit e JOIN account a ON a.id = e.account_id
+JOIN reward_source s ON s.id = e.source_id
+ORDER BY a.credential_tag, a.staking_key, s.hash, e.slot`},
+		{"reward_withdrawal", `SELECT a.credential_tag, hex(a.staking_key),
+    hex(t.hash), w.amount, w.previous_reward, w.slot
+FROM reward_withdrawal w JOIN account a ON a.id = w.account_id
+JOIN "transaction" t ON t.id = w.tx_id
+ORDER BY a.credential_tag, a.staking_key, t.hash`},
 		{"reward_live_stake", `SELECT credential_tag, hex(staking_key),
     hex(pool_key_hash), utxo_stake, reward_stake, total_stake, registered,
     pool_delegation_slot, updated_slot, calculation_version

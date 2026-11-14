@@ -116,6 +116,7 @@ func (ls *LedgerState) queueRewardCreditCompaction(ctx context.Context) {
 // folded flag is the progress record: each transaction claims and writes the
 // next unfolded credits, so a stopped job resumes where it left off.
 func (ls *LedgerState) compactRewardCreditRounds(ctx context.Context) error {
+	var cursor rewardCreditCursor
 	for {
 		if ls.closed.Load() {
 			return nil
@@ -123,6 +124,7 @@ func (ls *LedgerState) compactRewardCreditRounds(ctx context.Context) error {
 		done, err := ls.compactRewardCreditChunk(
 			ctx,
 			rewardCreditCompactionChunk,
+			&cursor,
 		)
 		if err != nil || done {
 			return err
@@ -130,11 +132,21 @@ func (ls *LedgerState) compactRewardCreditRounds(ctx context.Context) error {
 	}
 }
 
+// rewardCreditCursor is where a compaction job resumes within a round: the
+// account the previous chunk ended on. It only saves rescanning accounts
+// already folded; the folded flag stays the record of progress, so a job that
+// starts over begins at account zero.
+type rewardCreditCursor struct {
+	epoch         uint64
+	fromAccountID uint
+}
+
 // compactRewardCreditChunk folds up to limit credits of the oldest round that
-// is due and reports whether no round is due.
+// is due, in account order from cursor, and reports whether no round is due.
 func (ls *LedgerState) compactRewardCreditChunk(
 	ctx context.Context,
 	limit int,
+	cursor *rewardCreditCursor,
 ) (bool, error) {
 	ls.rewardPrecomputeWriteMu.Lock()
 	defer ls.rewardPrecomputeWriteMu.Unlock()
@@ -161,14 +173,38 @@ func (ls *LedgerState) compactRewardCreditChunk(
 			return nil
 		}
 		for _, round := range rounds[:len(rounds)-rewardCreditRoundsKeptUnfolded] {
+			from := uint(0)
+			if cursor.epoch == round.SnapshotEpoch {
+				from = cursor.fromAccountID
+			}
 			outputs, err := meta.ClaimUnfoldedRewardCredits(
-				round.SnapshotEpoch, limit, metaTxn,
+				round.SnapshotEpoch, from, limit, metaTxn,
 			)
 			if err != nil {
 				return err
 			}
 			if len(outputs) == 0 {
+				if from > 0 {
+					// Credits behind the cursor can have been unfolded since
+					// it moved; rescan from the first account.
+					*cursor = rewardCreditCursor{}
+					done = false
+					return nil
+				}
 				continue
+			}
+			// Outputs without an account carry AccountID 0 and follow the
+			// account-ordered ones, so they must not move the cursor back to
+			// the first account.
+			next := from
+			for _, output := range outputs {
+				if output.AccountID != 0 {
+					next = output.AccountID
+				}
+			}
+			*cursor = rewardCreditCursor{
+				epoch:         round.SnapshotEpoch,
+				fromAccountID: next,
 			}
 			done = false
 			if err := ls.writeClaimedRewardCredits(ctx, txn, outputs); err != nil {

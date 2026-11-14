@@ -182,7 +182,7 @@ VALUES (?, 0, ?, ?, 0, 1, ?, ?, FALSE)`),
 						StakingKey: rewardBatchKey(0x31, i),
 						Amount:     1,
 						Slot:       20,
-						SourceHash: rewardBatchKey(0x61, i),
+						OutputID:   uint(i + 1),
 					})
 				}
 				return db.AddAccountRewardsByCredential(
@@ -336,9 +336,16 @@ func dumpRewardBatchTables(t *testing.T, raw *sql.DB) string {
 	queries := []string{
 		`SELECT credential_tag, staking_key, reward, active FROM account
 ORDER BY credential_tag, staking_key`,
-		`SELECT staking_key, credential_tag, tx_hash, amount, previous_reward,
-    added_slot, withdrawal, post_snapshot FROM account_reward_delta
-ORDER BY credential_tag, staking_key, tx_hash, added_slot`,
+		// output_id is left out because callers whose output rows come from
+		// each database's own sequence cannot agree on it; callers that supply
+		// it compare rewardCreditOutputIDs as well.
+		`SELECT a.staking_key, a.credential_tag, c.boundary_slot,
+    c.amount FROM reward_credit c JOIN account a ON a.id = c.account_id
+ORDER BY a.credential_tag, a.staking_key, c.boundary_slot, c.amount`,
+		`SELECT a.staking_key, a.credential_tag, s.hash, e.amount, e.slot,
+    e.post_snapshot, e.after_withdrawal FROM reward_event_credit e
+JOIN account a ON a.id = e.account_id JOIN reward_source s ON s.id = e.source_id
+ORDER BY a.credential_tag, a.staking_key, s.hash, e.slot`,
 		`SELECT credential_tag, staking_key, pool_key_hash, utxo_stake,
     reward_stake, total_stake, registered, pool_delegation_slot, updated_slot,
     calculation_version FROM reward_live_stake
@@ -375,6 +382,28 @@ ORDER BY epoch, pool_key_hash, credential_tag, staking_key`,
 	return sb.String()
 }
 
+// rewardCreditOutputIDs renders each reward_credit row with the output_id the
+// writer stored, for differentials whose credits carry literal output ids.
+func rewardCreditOutputIDs(t *testing.T, raw *sql.DB) string {
+	t.Helper()
+	rows, err := raw.Query(`SELECT a.credential_tag, a.staking_key,
+    c.boundary_slot, c.output_id, c.amount
+FROM reward_credit c JOIN account a ON a.id = c.account_id
+ORDER BY a.credential_tag, a.staking_key, c.boundary_slot, c.output_id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var sb strings.Builder
+	for rows.Next() {
+		var tag, slot, outputID int64
+		var key []byte
+		var amount string
+		require.NoError(t, rows.Scan(&tag, &key, &slot, &outputID, &amount))
+		fmt.Fprintf(&sb, "%d %x %d %d %s\n", tag, key, slot, outputID, amount)
+	}
+	require.NoError(t, rows.Err())
+	return sb.String()
+}
+
 // seedRewardBatchAccounts creates the same accounts in db: every fifth is
 // deregistered, and balances start non-zero so the credit adds to them.
 func seedRewardBatchAccounts(t *testing.T, db *database.Database, n int) {
@@ -407,14 +436,14 @@ func rewardBatchCredits(n int) []models.AccountRewardCredit {
 			StakingKey:    rewardBatchKey(0x31, i),
 			Amount:        uint64(7_000_000_007) + uint64(i),
 			Slot:          5_000,
-			SourceHash:    rewardBatchKey(0x51, i),
+			OutputID:      uint(0x5100 + i + 1),
 		})
 		if i%3 == 0 {
 			credits = append(credits, models.AccountRewardCredit{
 				StakingKey: rewardBatchKey(0x31, i),
 				Amount:     uint64(i) + 1,
 				Slot:       5_000,
-				SourceHash: rewardBatchKey(0x52, i),
+				OutputID:   uint(0x5200 + i + 1),
 			})
 		}
 	}
@@ -422,15 +451,15 @@ func rewardBatchCredits(n int) []models.AccountRewardCredit {
 		StakingKey: rewardBatchKey(0x31, 1),
 		Amount:     0,
 		Slot:       5_000,
-		SourceHash: rewardBatchKey(0x53, 1),
+		OutputID:   0x5302,
 	})
 	return credits
 }
 
 // TestAddAccountRewardsByCredentialMatchesOneAtATime is the differential for
-// the batched credit writer: on each backend, the batch and the
-// one-credit-at-a-time writer leave byte-identical account, journal and
-// live-stake rows, including a replay of the same credits.
+// the batched credit writer: on each backend, one call with every credit and
+// one call per credit leave byte-identical account, journal and live-stake
+// rows, including a replay of the same credits.
 func TestAddAccountRewardsByCredentialMatchesOneAtATime(t *testing.T) {
 	t.Parallel()
 	const accounts = 530
@@ -462,10 +491,9 @@ func TestAddAccountRewardsByCredentialMatchesOneAtATime(t *testing.T) {
 				for _, credit := range credits {
 					require.NoError(
 						t,
-						oneDB.AddAccountRewardByCredential(
+						oneDB.AddAccountRewardsByCredential(
 							context.Background(),
-							credit.CredentialTag, credit.StakingKey,
-							credit.Amount, credit.Slot, credit.SourceHash, nil,
+							[]models.AccountRewardCredit{credit}, nil,
 						),
 					)
 				}
@@ -482,6 +510,11 @@ func TestAddAccountRewardsByCredentialMatchesOneAtATime(t *testing.T) {
 					dumpRewardBatchTables(t, batchRaw),
 					"pass %d", replay,
 				)
+				require.Equal(
+					t, rewardCreditOutputIDs(t, oneRaw),
+					rewardCreditOutputIDs(t, batchRaw),
+					"pass %d", replay,
+				)
 			}
 			// A credit to a deregistered account fails before writing.
 			before := dumpRewardBatchTables(t, batchRaw)
@@ -490,11 +523,11 @@ func TestAddAccountRewardsByCredentialMatchesOneAtATime(t *testing.T) {
 				[]models.AccountRewardCredit{
 					{
 						StakingKey: rewardBatchKey(0x31, 0), Amount: 5,
-						Slot: 6_000, SourceHash: rewardBatchKey(0x54, 0),
+						Slot: 6_000, OutputID: 0x5401,
 					},
 					{
 						StakingKey: rewardBatchKey(0x31, 4), Amount: 5,
-						Slot: 6_000, SourceHash: rewardBatchKey(0x54, 4),
+						Slot: 6_000, OutputID: 0x5405,
 					},
 				}, nil,
 			)
@@ -621,7 +654,7 @@ func TestPendingRewardCreditStoreAcrossBackends(t *testing.T) {
 					StakingKey: rewardBatchKey(0xf1, i),
 					Amount:     1,
 					Slot:       20,
-					SourceHash: rewardBatchKey(0x61, i),
+					OutputID:   uint(i + 1),
 				})
 			}
 			require.NoError(
@@ -696,15 +729,6 @@ func TestPendingRewardCreditStoreAcrossBackends(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.Len(t, ranged, n)
-			applied, err := meta.RewardCreditsAlreadyApplied(
-				[]models.AccountRewardCredit{credits[4], {
-					StakingKey: rewardBatchKey(0xf1, 4),
-					Amount:     1, Slot: 20, SourceHash: rewardBatchKey(0x62, 4),
-				}}, nil,
-			)
-			require.NoError(t, err)
-			require.Equal(t, []bool{true, false}, applied)
-
 			require.NoError(t, meta.DeleteRewardStateAfterSlot(60, nil))
 			rounds, err := meta.GetPendingRewardCreditRounds(nil)
 			require.NoError(t, err)

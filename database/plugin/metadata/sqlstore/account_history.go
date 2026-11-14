@@ -417,13 +417,13 @@ func withdrawalHistoryQuery(
 	stakingKey []byte,
 ) (string, []any) {
 	return `
-SELECT ard.tx_hash, ard.amount, tx.slot, tx.block_index, tx.block_hash
-FROM account_reward_delta ard
-JOIN "transaction" th ON th.hash = ard.tx_hash
+SELECT th.hash AS tx_hash, w.amount, tx.slot AS tx_slot, tx.block_index, tx.block_hash
+FROM reward_withdrawal w
+JOIN "transaction" th ON th.id = w.tx_id
 JOIN applied_transaction tx ON tx.tx_id = th.id
-WHERE ard.withdrawal = TRUE
-  AND ard.credential_tag = ?
-  AND ard.staking_key = ?`, []any{credentialTag, stakingKey}
+WHERE w.account_id = (
+    SELECT id FROM account WHERE credential_tag = ? AND staking_key = ?
+)`, []any{credentialTag, stakingKey}
 }
 
 const stakeRegistrationsBySourceSQL = `
@@ -511,7 +511,6 @@ func (s *Store) AccountLastWitnessSlots(
 				ctx,
 				db,
 				table,
-				false,
 				keys[start:end],
 				maxSlot,
 				requested,
@@ -520,21 +519,103 @@ func (s *Store) AccountLastWitnessSlots(
 				return nil, err
 			}
 		}
-		if err := mergeWitnessSlots(
-			ctx,
-			db,
-			"account_reward_delta",
-			true,
-			keys[start:end],
-			maxSlot,
-			requested,
-			ret,
+		if err := mergeRewardWithdrawalSlots(
+			ctx, db, keys[start:end], maxSlot, requested, ret,
 		); err != nil {
 			return nil, err
 		}
 	}
 	return ret, nil
 }
+
+// rewardWithdrawalWitnessKeys is the fixed number of staking keys one
+// lastRewardWithdrawalSlotsSQL execution looks up; a shorter chunk repeats its
+// last key.
+const rewardWithdrawalWitnessKeys = 100
+
+// lastRewardWithdrawalSlotsSQL reads each account's newest withdrawal slot
+// through idx_reward_withdrawal_account_slot, whichever planner statistics
+// exist.
+var lastRewardWithdrawalSlotsSQL = `-- name: GetLastRewardWithdrawalSlots :many
+SELECT a.credential_tag, a.staking_key, MAX(w.slot)
+FROM account a
+JOIN reward_withdrawal w ON w.account_id = a.id
+WHERE a.credential_tag = ? AND a.staking_key IN (` +
+	strings.TrimSuffix(strings.Repeat("?,", rewardWithdrawalWitnessKeys), ",") +
+	`) AND w.slot <= ?
+GROUP BY a.credential_tag, a.staking_key`
+
+func mergeRewardWithdrawalSlots(
+	ctx context.Context,
+	db queryer,
+	keys [][]byte,
+	maxSlot uint64,
+	requested map[string]struct{},
+	ret map[string]uint64,
+) error {
+	for start := 0; start < len(keys); start += rewardWithdrawalWitnessKeys {
+		chunk := keys[start:min(start+rewardWithdrawalWitnessKeys, len(keys))]
+		if err := mergeRewardWithdrawalSlotsChunk(
+			ctx, db, chunk, maxSlot, requested, ret,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mergeRewardWithdrawalSlotsChunk reads at most rewardWithdrawalWitnessKeys
+// keys.
+func mergeRewardWithdrawalSlotsChunk(
+	ctx context.Context,
+	db queryer,
+	keys [][]byte,
+	maxSlot uint64,
+	requested map[string]struct{},
+	ret map[string]uint64,
+) error {
+	for _, tag := range []uint8{0, 1} {
+		args := make([]any, 0, rewardWithdrawalWitnessKeys+2)
+		args = append(args, tag)
+		for i := range rewardWithdrawalWitnessKeys {
+			args = append(args, keys[min(i, len(keys)-1)])
+		}
+		args = append(args, maxSlot)
+		if err := func() error {
+			rows, err := db.QueryContext(ctx, lastRewardWithdrawalSlotsSQL, args...)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var rowTag uint8
+				var key []byte
+				var last uint64
+				if err := rows.Scan(&rowTag, &key, &last); err != nil {
+					return err
+				}
+				mapKey := models.NewStakeCredentialRef(rowTag, key).MapKey()
+				if _, ok := requested[mapKey]; !ok {
+					continue
+				}
+				if current, ok := ret[mapKey]; !ok || last > current {
+					ret[mapKey] = last
+				}
+			}
+			return rows.Err()
+		}(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rewardWithdrawalsWitnessedAfterSQL reads the withdrawals above a slot through
+// idx_reward_withdrawal_slot.
+const rewardWithdrawalsWitnessedAfterSQL = `
+SELECT a.credential_tag, a.staking_key FROM reward_withdrawal w
+JOIN account a ON a.id = w.account_id
+WHERE w.slot > ?`
 
 func (s *Store) AccountsWitnessedAfterSlot(
 	slot uint64,
@@ -556,9 +637,7 @@ func (s *Store) AccountsWitnessedAfterSlot(
 SELECT credential_tag, staking_key FROM account_withdrawal_witness
 WHERE added_slot > ?`)
 	args = append(args, slot)
-	parts = append(parts, `
-SELECT credential_tag, staking_key FROM account_reward_delta
-WHERE withdrawal = TRUE AND added_slot > ?`)
+	parts = append(parts, rewardWithdrawalsWitnessedAfterSQL)
 	args = append(args, slot)
 	rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, staking_key
@@ -848,7 +927,6 @@ func mergeWitnessSlots(
 	ctx context.Context,
 	db queryer,
 	table string,
-	withdrawalsOnly bool,
 	keys [][]byte,
 	maxSlot uint64,
 	requested map[string]struct{},
@@ -859,14 +937,10 @@ func mergeWitnessSlots(
 		args = append(args, key)
 	}
 	args = append(args, maxSlot)
-	withdrawal := ""
-	if withdrawalsOnly {
-		withdrawal = "withdrawal = TRUE AND "
-	}
 	rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, staking_key, MAX(added_slot)
 FROM `+table+`
-WHERE `+withdrawal+`staking_key IN (`+bindPlaceholders(len(keys))+`)
+WHERE staking_key IN (`+bindPlaceholders(len(keys))+`)
   AND added_slot <= ?
 GROUP BY credential_tag, staking_key`,
 		args...,

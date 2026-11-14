@@ -150,7 +150,7 @@ FROM (SELECT 0 AS credential_tag, x'11' AS staking_key) a`)
 					return err
 				}},
 				{"ClaimUnfoldedRewardCredits", func() error {
-					_, err := store.ClaimUnfoldedRewardCredits(2, 5, nil)
+					_, err := store.ClaimUnfoldedRewardCredits(2, 0, 5, nil)
 					return err
 				}},
 				{"DeleteRewardStateAfterSlot", func() error {
