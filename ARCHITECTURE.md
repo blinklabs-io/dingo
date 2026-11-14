@@ -11177,6 +11177,11 @@ pump. DAG intake currently requests one transaction ID per TxSubmission round
 trip, which can reduce inbound throughput on high-latency peer links. This is
 required because gouroboros acknowledges every ID returned by a peer; support
 for acknowledging only the fetched prefix would permit batched requests.
+A rate-limited offer is retained until its token budget is available; requesting
+another ID would acknowledge and lose the unfetched transaction. Intake waits
+with connection-cancellable backoff rather than dropping offers. Batches are
+bounded by the limiter's burst capacity so they can eventually be admitted.
+
 FIFO intake requests at most ten IDs per round, matching gouroboros's
 `MaxUnackedTxIds` window. The protocol rejects a request that would exceed that
 window and applies a byte budget to TxSubmission's pending messages, so a peer
