@@ -732,18 +732,27 @@ The BlockFetch watchdog uses a five-second first-block policy for near-tip
 windows of at most four headers. This is deliberately stricter than the
 protocol client's 60-second timeout ceiling; after the first block arrives,
 the 30-second streaming watchdog applies, and bulk catch-up uses that same
-30-second budget throughout. A timeout before any block is recorded in the
-peer delivery EWMA before retry selection; a later streaming stall does not
-replace the first-block latency already recorded for that batch. Retry excludes
-the timed-out connection before pricing the remaining candidates and requires
-another eligible peer that announced the range end, including an unmeasured
-holder. With no such holder the connection is recycled without redispatching
-the range to it. If a selected holder cannot start the request, another holder
-is tried and exhausting them requests a fresh ChainSync cursor. Selection is
-deferred while live lifecycle work makes the peer registry unavailable. A
-request still blocked inside protocol dispatch follows the same recycle path;
-closing the protocol interrupts the dispatch before its longer transport
-deadline.
+30-second budget throughout. The near-tip first block replaces its short
+watchdog with that streaming budget. In bulk catch-up, buffered arrivals do not
+reset the watchdog; only a flush that extends the chain earns another window,
+so a peer cannot retain a large range by sending one block just before each
+deadline while the applied tip remains fixed. A timeout before any block is
+recorded in the peer delivery EWMA before retry selection; a later streaming
+stall does not replace the first-block latency already recorded for that batch;
+it synchronously removes every partial responder, including a near-tip shadow,
+from peer selection before requesting its recycle, so those connections cannot
+win a later range without a new session. Headers already buffered from those
+responders are rejected at that point, and header replay rechecks the fence per
+event, so a fenced connection cannot regain header-pipeline ownership. Retry excludes the timed-out
+connections before pricing the remaining candidates and requires another
+eligible peer that announced the range end, including an unmeasured holder.
+With no such holder the active connection is also recycled, guaranteeing that
+its close clears the stranded range. If a selected holder cannot start the
+request, another holder is tried and exhausting them requests a fresh ChainSync
+cursor. Selection is deferred while live lifecycle work makes the peer registry
+unavailable. A request still blocked inside protocol dispatch follows the same
+recycle path; closing the protocol interrupts the dispatch before its longer
+transport deadline.
 
 An admitted ChainSync rollback atomically refreshes the tracked client's
 cursor, advertised tip, activity, and syncing status before chain selection

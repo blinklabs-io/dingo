@@ -424,6 +424,24 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 		queuePeerTipAdmission(&pending, e, false)
 		return
 	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	blockfetchPeerFailed := ls.blockfetchPeerFailedLocked(e.ConnectionId)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	if blockfetchPeerFailed {
+		ls.config.Logger.Debug(
+			"ignoring chainsync event from failed blockfetch peer",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"rollback", e.Rollback,
+			"slot", e.Point.Slot,
+		)
+		ls.rejectBufferedHeaderEvents(
+			ls.takeBufferedPeerHeaders(e.ConnectionId),
+			&pending,
+		)
+		queuePeerTipAdmission(&pending, e, false)
+		return
+	}
 	if e.Rollback {
 		if ls.deferOpeningChainsyncRollback(e) {
 			return
@@ -1656,6 +1674,7 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	if sameConnectionId(ls.selectedBlockfetchConnId, e.ConnectionId) {
 		ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	}
+	delete(ls.failedBlockfetchConnIds, connIdKey(e.ConnectionId))
 	if sameConnectionId(ls.shadowBlockfetchConnId, e.ConnectionId) {
 		ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 		ls.shadowBlockfetchRequestDone = nil
@@ -3532,6 +3551,16 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 	delete(ls.bufferedHeaderEvents, key)
 	ls.bufferedHeaderMutex.Unlock()
 	for i, evt := range events {
+		// Failure marking runs under the blockfetch mutex without the
+		// chainsync mutex held here, so a peer can be fenced between taking
+		// the events and replaying them.
+		ls.chainsyncBlockfetchMutex.Lock()
+		failed := ls.blockfetchPeerFailedLocked(evt.ConnectionId)
+		ls.chainsyncBlockfetchMutex.Unlock()
+		if failed {
+			ls.rejectBufferedHeaderEvents(events[i:], pending)
+			return nil
+		}
 		evt.peerHeaderHistoryReplay = true
 		if err := ls.handleEventChainsyncBlockHeaderWithPending(evt, pending); err != nil {
 			ls.rejectBufferedHeaderEvents(events[i+1:], pending)
@@ -5553,14 +5582,18 @@ func (ls *LedgerState) startQueuedBlockfetchWithFallbackLocked(
 	sourceConnId ouroboros.ConnectionId,
 	pending *pendingPublishes,
 ) {
-	err := ls.startQueuedBlockfetchLocked(initialConnId, pending)
+	err := errors.New("blockfetch connection is awaiting recycle")
+	if !ls.blockfetchPeerFailedLocked(initialConnId) {
+		err = ls.startQueuedBlockfetchLocked(initialConnId, pending)
+	}
 	if err == nil {
 		return
 	}
 	// The chosen connection's blockfetch protocol may have shut
 	// down. Try the header source connection if it's different;
 	// otherwise try the active best peer before giving up.
-	if !sameConnectionId(sourceConnId, initialConnId) {
+	if !sameConnectionId(sourceConnId, initialConnId) &&
+		!ls.blockfetchPeerFailedLocked(sourceConnId) {
 		ls.config.Logger.Warn(
 			"blockfetch start failed, retrying on header source connection",
 			"component", "ledger",
@@ -5579,7 +5612,8 @@ func (ls *LedgerState) startQueuedBlockfetchWithFallbackLocked(
 	if ls.config.GetActiveConnectionFunc != nil {
 		if activeConnId := ls.config.GetActiveConnectionFunc(); activeConnId != nil &&
 			!sameConnectionId(*activeConnId, initialConnId) &&
-			!sameConnectionId(*activeConnId, sourceConnId) {
+			!sameConnectionId(*activeConnId, sourceConnId) &&
+			!ls.blockfetchPeerFailedLocked(*activeConnId) {
 			ls.config.Logger.Info(
 				"blockfetch connections unavailable, retrying with active best peer",
 				"component",
@@ -7137,6 +7171,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 	if !ls.blockfetchEventCurrent(e) {
 		return nil
 	}
+	appliedBefore := ls.batchBlocksApplied
 	// Deduplicate: if the other peer already delivered this block,
 	// discard silently. The winner records their latency sample.
 	blockHashKey := hex.EncodeToString(e.Point.Hash)
@@ -7148,12 +7183,25 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 		ls.shadowBlockReceivedHashes = make(map[string]struct{})
 	}
 	ls.shadowBlockReceivedHashes[blockHashKey] = struct{}{}
-	// Record first-block latency for the winning peer.
-	if !ls.firstBlockReceived && !ls.activeBlockfetchStart.IsZero() {
+	ls.noteBlockfetchProgressContributorLocked(e.ConnectionId)
+	// Record first-block latency for the winning peer. Replace the near-tip
+	// first-block watchdog before verification releases the mutex: its expired
+	// callback must not classify local verification time as peer inactivity.
+	if !ls.firstBlockReceived {
 		ls.firstBlockReceived = true
-		latency := time.Since(ls.activeBlockfetchStart)
-		if ls.config.RecordBlockfetchLatencyFunc != nil {
-			ls.config.RecordBlockfetchLatencyFunc(e.ConnectionId, latency)
+		if !ls.activeBlockfetchStart.IsZero() &&
+			ls.config.RecordBlockfetchLatencyFunc != nil {
+			ls.config.RecordBlockfetchLatencyFunc(
+				e.ConnectionId,
+				time.Since(ls.activeBlockfetchStart),
+			)
+		}
+		if ls.chainsyncBlockfetchTimeoutTimer != nil &&
+			ls.activeBlockfetchTimeout == blockfetchNearTipTimeout {
+			ls.armBlockfetchTimeoutForLocked(
+				ls.activeBlockfetchConnId,
+				blockfetchBusyTimeout,
+			)
 		}
 	}
 
@@ -7309,9 +7357,12 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			return err
 		}
 	}
-	// Once the batch starts, retain the bulk streaming allowance. The short
-	// near-tip bound applies only while the peer has sent no block.
-	if ls.chainsyncBlockfetchTimeoutTimer != nil {
+	// The short near-tip bound applies only while the peer has sent no block.
+	// A bulk peer earns another streaming window only by extending the chain;
+	// resetting the watchdog for buffered arrivals would let one block sent
+	// just before every deadline retain a large range indefinitely.
+	if ls.chainsyncBlockfetchTimeoutTimer != nil &&
+		ls.batchBlocksApplied > appliedBefore {
 		ls.armBlockfetchTimeoutForLocked(
 			ls.activeBlockfetchConnId,
 			blockfetchBusyTimeout,
@@ -7337,6 +7388,47 @@ func (ls *LedgerState) blockfetchEventCurrent(e BlockfetchEvent) bool {
 	return sameConnectionId(e.ConnectionId, ls.activeBlockfetchConnId) ||
 		(connIdKey(ls.shadowBlockfetchConnId) != "" &&
 			sameConnectionId(e.ConnectionId, ls.shadowBlockfetchConnId))
+}
+
+func (ls *LedgerState) markBlockfetchPeerFailedLocked(
+	connId ouroboros.ConnectionId,
+) {
+	if ls.failedBlockfetchConnIds == nil {
+		ls.failedBlockfetchConnIds = make(map[string]ouroboros.ConnectionId)
+	}
+	ls.failedBlockfetchConnIds[connIdKey(connId)] = connId
+}
+
+func (ls *LedgerState) noteBlockfetchProgressContributorLocked(
+	connId ouroboros.ConnectionId,
+) {
+	for _, contributor := range ls.blockfetchProgressContributors {
+		if sameConnectionId(contributor, connId) {
+			return
+		}
+	}
+	ls.blockfetchProgressContributors = append(
+		ls.blockfetchProgressContributors,
+		connId,
+	)
+}
+
+func (ls *LedgerState) blockfetchProgressContributorLocked(
+	connId ouroboros.ConnectionId,
+) bool {
+	for _, contributor := range ls.blockfetchProgressContributors {
+		if sameConnectionId(contributor, connId) {
+			return true
+		}
+	}
+	return false
+}
+
+func (ls *LedgerState) blockfetchPeerFailedLocked(
+	connId ouroboros.ConnectionId,
+) bool {
+	failed, ok := ls.failedBlockfetchConnIds[connIdKey(connId)]
+	return ok && sameConnectionId(failed, connId)
 }
 
 // withBlockfetchMutexReleased runs a metadata operation without holding the
@@ -7931,6 +8023,7 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	ls.shadowBlockfetchRequestDone = nil
 	ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.shadowBlockReceivedHashes = nil
+	ls.blockfetchProgressContributors = nil
 	ls.resetBatchDeliveryLocked()
 	ls.batchBlocksApplied = 0
 	ls.blockfetchBatchChainGeneration = ls.chainRollbackGeneration.Load()
@@ -11225,6 +11318,16 @@ func (ls *LedgerState) selectBlockfetchConnForWindow(
 	current ouroboros.ConnectionId,
 	skip int,
 ) ouroboros.ConnectionId {
+	if ls.blockfetchPeerFailedLocked(current) {
+		selected, found, available := ls.selectTimeoutRetryBlockfetchConn(
+			0,
+			current,
+		)
+		if available && found {
+			return selected
+		}
+		return current
+	}
 	if ls.config.SelectBlockfetchPeerFunc == nil {
 		return current
 	}
@@ -11347,8 +11450,9 @@ func (ls *LedgerState) armBlockfetchTimeoutForLocked(
 	ls.activeBlockfetchTimeout = timeout
 
 	// Start timeout timer for blockfetch operation. Near-tip windows use the
-	// stricter first-block policy; bulk windows keep the catch-up bound.
-	// Each received block resets the timer in handleEventBlockfetchBlock
+	// stricter first-block policy; bulk windows keep the catch-up bound. The
+	// first near-tip block or applied bulk progress rearms the timer in
+	// handleEventBlockfetchBlockDeferredInternal.
 	ls.chainsyncBlockfetchTimeoutTimer = time.AfterFunc(
 		timeout,
 		func() {
@@ -11769,6 +11873,7 @@ func (ls *LedgerState) blockfetchRequestRangeCleanup() {
 	// Clear shadow blockfetch state for the completed batch
 	ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.shadowBlockReceivedHashes = nil
+	ls.blockfetchProgressContributors = nil
 	ls.firstBlockReceived = false
 	// Close our blockfetch done signal channel
 	ls.chainsyncBlockfetchReadyMutex.Lock()
@@ -11889,6 +11994,34 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 	if !ls.firstBlockReceived {
 		timeoutPenalty = timeout
 	}
+	partialResponderFailed := false
+	if ls.firstBlockReceived &&
+		ls.config.MarkBlockfetchPeersFailedFunc != nil {
+		responders := ls.blockfetchProgressContributors
+		if len(responders) == 0 {
+			responders = []ouroboros.ConnectionId{currentConnId}
+		}
+		if !ls.config.MarkBlockfetchPeersFailedFunc(responders) {
+			ls.armBlockfetchTimeoutLocked(currentConnId)
+			return
+		}
+		partialResponderFailed = true
+		for _, responder := range responders {
+			ls.markBlockfetchPeerFailedLocked(responder)
+			// Headers already buffered from the responder would otherwise
+			// be replayed into header admission, which only fences live
+			// events.
+			ls.rejectBufferedHeaderEvents(
+				ls.takeBufferedPeerHeaders(responder),
+				pending,
+			)
+			ls.requestBlockfetchConnectionRecycle(
+				responder,
+				"blockfetch_progress_timeout",
+				pending,
+			)
+		}
+	}
 	if ls.config.SelectBlockfetchRetryPeerFunc == nil &&
 		timeoutPenalty > 0 && ls.config.RecordBlockfetchLatencyFunc != nil {
 		ls.config.RecordBlockfetchLatencyFunc(currentConnId, timeoutPenalty)
@@ -11903,6 +12036,12 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 		return
 	}
 	if !retryAvailable {
+		recycleReason := "blockfetch_response_timeout"
+		if ls.firstBlockReceived &&
+			(len(ls.blockfetchProgressContributors) == 0 ||
+				ls.blockfetchProgressContributorLocked(currentConnId)) {
+			recycleReason = "blockfetch_progress_timeout"
+		}
 		ls.config.Logger.Warn(
 			"blockfetch operation timed out without another range holder; recycling connection",
 			"component", "ledger",
@@ -11911,11 +12050,13 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 			"header_end_slot", headerEnd.Slot,
 			"header_count", headerCount,
 		)
-		ls.requestBlockfetchConnectionRecycle(
-			currentConnId,
-			"blockfetch_response_timeout",
-			pending,
-		)
+		if !ls.blockfetchPeerFailedLocked(currentConnId) {
+			ls.requestBlockfetchConnectionRecycle(
+				currentConnId,
+				recycleReason,
+				pending,
+			)
+		}
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		for _, connId := range excluded {
@@ -11925,6 +12066,17 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 			}
 		}
 		return
+	}
+	if ls.firstBlockReceived && !partialResponderFailed {
+		// A partial responder has already consumed the entire progress window.
+		// Retrying this range elsewhere is not enough: without removing the
+		// connection it can win a later range again on its favorable first-block
+		// latency despite never having completed a throughput sample.
+		ls.requestBlockfetchConnectionRecycle(
+			currentConnId,
+			"blockfetch_progress_timeout",
+			pending,
+		)
 	}
 	ls.blockfetchRequestRangeCleanup()
 	ls.config.Logger.Warn(

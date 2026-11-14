@@ -1054,6 +1054,7 @@ type LedgerStateConfig struct {
 	PeersWithBlockFunc            PeersWithBlockFunc
 	SelectBlockfetchPeerFunc      SelectBlockfetchPeerFunc
 	SelectBlockfetchRetryPeerFunc SelectBlockfetchRetryPeerFunc
+	MarkBlockfetchPeersFailedFunc MarkBlockfetchPeersFailedFunc
 	RecordBlockfetchLatencyFunc   RecordBlockfetchLatencyFunc
 	BlockfetchLatencyFunc         BlockfetchLatencyFunc
 	BlockfetchLatencyMedianFunc   BlockfetchLatencyMedianFunc
@@ -1427,6 +1428,13 @@ type SelectBlockfetchRetryPeerFunc func(
 	rangeEnd ocommon.Point,
 	timeoutPenalty time.Duration,
 ) (selected ouroboros.ConnectionId, found, available bool)
+
+// MarkBlockfetchPeersFailedFunc synchronously removes failed connections from
+// peer selection as one lifecycle-stable operation. available is false while
+// the live ChainSync state is being replaced and the caller must retry later.
+type MarkBlockfetchPeersFailedFunc func(
+	connIds []ouroboros.ConnectionId,
+) (available bool)
 
 // RecordBlockfetchThroughputFunc records how many bytes a batch delivered
 // after its first block and how long that took.
@@ -1825,6 +1833,10 @@ type LedgerState struct {
 	blockfetchInFlightTimeoutGeneration uint64
 	blockfetchInFlightTimeoutCount      uint8
 	selectedBlockfetchConnId            ouroboros.ConnectionId // latest selected chainsync connection for the next batch
+	// failedBlockfetchConnIds fences partial responders until their connection
+	// close is observed. ChainSync events already queued before the peer was
+	// marked failed must not make it a later range's origin.
+	failedBlockfetchConnIds map[string]ouroboros.ConnectionId
 	// chainsyncCapacityWaitHook is a test seam, nil in production. It runs
 	// each time AwaitChainsyncHeaderCapacity has found the queue at its pause
 	// threshold and is about to wait, the point after which a test may drain
@@ -1854,6 +1866,9 @@ type LedgerState struct {
 	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
 	batchBlocksApplied            int                 // blocks from the current batch that actually extended the chain
+	// blockfetchProgressContributors identifies every peer that supplied a
+	// unique block in the current batch, including the near-tip shadow.
+	blockfetchProgressContributors []ouroboros.ConnectionId
 
 	// batchFirstBlockAt and batchLastBlockAt bracket the arrival of the
 	// current batch's blocks, and batchStreamBytes counts the bytes of every

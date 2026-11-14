@@ -3232,6 +3232,42 @@ func TestLedgerStateConfigReportsRetrySelectionUnavailableDuringLifecycle(
 	assert.False(t, available)
 }
 
+func TestLedgerStateConfigMarksBlockfetchPeerFailedSynchronously(t *testing.T) {
+	t.Parallel()
+
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	connId := newNodeTestConnId(3001)
+	require.True(t, state.AddClientConnId(connId))
+	n := &Node{
+		chainsyncState: state,
+		config:         Config{cfg: &internalconfig.Config{}},
+	}
+	config := n.ledgerStateConfig()
+
+	require.True(t, config.MarkBlockfetchPeersFailedFunc(
+		[]ouroboros.ConnectionId{connId},
+	))
+	observabilityOnly, exists := state.ClientObservabilityOnly(connId)
+	require.True(t, exists)
+	assert.True(t, observabilityOnly)
+
+	otherConnId := newNodeTestConnId(3002)
+	require.True(t, state.AddClientConnId(otherConnId))
+	n.liveLifecycleMu.Lock()
+	available := config.MarkBlockfetchPeersFailedFunc(
+		[]ouroboros.ConnectionId{otherConnId},
+	)
+	n.liveLifecycleMu.Unlock()
+	assert.False(t, available)
+	observabilityOnly, exists = state.ClientObservabilityOnly(otherConnId)
+	require.True(t, exists)
+	assert.False(t, observabilityOnly)
+}
+
 func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
 	t.Parallel()
 
