@@ -493,3 +493,61 @@ func testRestorePoolStateAtSlotScopesAndReverts(
 	require.Equal(t, uint64(100), uint64(restoredAgain.Pledge))
 	require.Equal(t, uint64(1), restoredAgain.LatestOpCertSequence)
 }
+
+// TestPostgresRestorePoolStateAtSlotMatchesOracle and its MySQL twin run
+// the restore against a history that includes pools registered only after
+// the target, where the pool row delete has registration, owner and relay
+// children to take with it.
+func TestPostgresRestorePoolStateAtSlotMatchesOracle(t *testing.T) {
+	t.Parallel()
+	dsn := os.Getenv("DINGO_POSTGRES_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:dingo@127.0.0.1:55432/dingo_test?sslmode=disable"
+	}
+	admin, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	require.NoError(t, admin.PingContext(context.Background()))
+	t.Cleanup(func() { _ = admin.Close() })
+	testRestorePoolStateAtSlotMatchesOracle(t, func(t *testing.T) *Store {
+		schema := fmt.Sprintf(
+			"sqlstore_restore_oracle_%d",
+			time.Now().UnixNano(),
+		)
+		_, err := admin.Exec(`CREATE SCHEMA "` + schema + `"`)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, _ = admin.Exec(`DROP SCHEMA "` + schema + `" CASCADE`)
+		})
+		return newIntegrationSQLStore(
+			t, "pgx", postgresDSNWithSearchPath(t, dsn, schema),
+			"postgres", schema,
+		)
+	})
+}
+
+func TestMySQLRestorePoolStateAtSlotMatchesOracle(t *testing.T) {
+	t.Parallel()
+	dsn := os.Getenv("DINGO_MYSQL_DSN")
+	if dsn == "" {
+		dsn = "root:dingo@tcp(127.0.0.1:53306)/dingo_test?parseTime=true"
+	}
+	admin, err := sql.Open("mysql", dsn)
+	require.NoError(t, err)
+	require.NoError(t, admin.PingContext(context.Background()))
+	t.Cleanup(func() { _ = admin.Close() })
+	testRestorePoolStateAtSlotMatchesOracle(t, func(t *testing.T) *Store {
+		database := fmt.Sprintf(
+			"sqlstore_restore_oracle_%d",
+			time.Now().UnixNano(),
+		)
+		_, err := admin.Exec("CREATE DATABASE `" + database + "`")
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, _ = admin.Exec("DROP DATABASE `" + database + "`")
+		})
+		return newIntegrationSQLStore(
+			t, "mysql", mysqlDSNWithDatabase(t, dsn, database),
+			"mysql", database,
+		)
+	})
+}
