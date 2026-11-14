@@ -106,6 +106,7 @@ const (
 	utxoTransactionIdentitySchemaRelease                = "utxo-transaction-identity"
 	poolRelayIPv6NetworkOrderSchemaRelease              = "pool-relay-ipv6-network-order"
 	epochStakesIndexSchemaRelease                       = "reward-stake-input-epoch-registered-index"
+	assetIdentityHoldingsSchemaRelease                  = "asset-identity-holdings"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -291,6 +292,7 @@ var schemaVersions = []struct {
 	{Version: 63, Name: datumHashIndexDropSchemaRelease, Dir: "v63"},
 	{Version: 64, Name: epochStakesIndexSchemaRelease, Dir: "v64"},
 	{Version: 65, Name: scriptHashIndexDropSchemaRelease, Dir: "v65"},
+	{Version: 66, Name: assetIdentityHoldingsSchemaRelease, Dir: "v66"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -461,6 +463,11 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == committeeRenewalTermStartSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = committeeRenewalTermStartBackfill
+		}
+		if version.Name == assetIdentityHoldingsSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = assetIdentityHoldingsBackfill(dialect)
+			migration.BatchSize = assetIdentityHoldingsBatchSize
 		}
 		ret = append(ret, migration)
 	}
@@ -2008,6 +2015,7 @@ var (
 	mysqlInlineKeyPattern = regexp.MustCompile(
 		`(?is)(PRIMARY\s+KEY|UNIQUE(?:\s+KEY)?)\s*\(([^)]*)\)`,
 	)
+	withoutRowIDClause      = regexp.MustCompile(`(?i)\s+WITHOUT\s+ROWID\b`)
 	mysqlTextDefaultPattern = regexp.MustCompile(
 		`(?i)\btext(\s+NOT\s+NULL)?\s+DEFAULT\s+'0'`,
 	)
@@ -2052,6 +2060,11 @@ func translateSchemaSQLInSchema(
 	}
 	for index, statement := range statements {
 		value := statement
+		// WITHOUT ROWID is SQLite-only syntax, which PostgreSQL and MySQL
+		// reject.
+		if dialect != "sqlite" {
+			value = withoutRowIDClause.ReplaceAllString(value, "")
+		}
 		switch dialect {
 		case "postgres":
 			value = strings.ReplaceAll(value, "`", `"`)

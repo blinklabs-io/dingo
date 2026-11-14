@@ -106,7 +106,7 @@ func TestAssetAmountFingerprintIndexDropAppliesOnPostgres(t *testing.T) {
 	runner := migrations.Runner{
 		DB:       db,
 		Dialect:  "postgres",
-		Registry: registry,
+		Registry: registry[:21],
 		Locker:   migrations.NewProcessLocker(),
 	}
 	require.NoError(t, runner.Run(context.Background()))
@@ -171,7 +171,7 @@ func TestAssetAmountFingerprintIndexDropReplaysOnMySQL(t *testing.T) {
 	runner := migrations.Runner{
 		DB:       db,
 		Dialect:  "mysql",
-		Registry: registry,
+		Registry: registry[:21],
 		Locker:   migrations.NewProcessLocker(),
 	}
 	require.NoError(t, runner.Run(context.Background()))
@@ -302,7 +302,7 @@ func TestAssetNameHexDropReplaysOnPostgres(t *testing.T) {
 	runner := migrations.Runner{
 		DB:       db,
 		Dialect:  "postgres",
-		Registry: registry,
+		Registry: registry[:19],
 		Locker:   migrations.NewProcessLocker(),
 	}
 	require.NoError(t, runner.Run(context.Background()))
@@ -386,7 +386,7 @@ func TestAssetNameHexDropReplaysOnMySQL(t *testing.T) {
 	runner := migrations.Runner{
 		DB:       db,
 		Dialect:  "mysql",
-		Registry: registry,
+		Registry: registry[:19],
 		Locker:   migrations.NewProcessLocker(),
 	}
 	require.NoError(t, runner.Run(context.Background()))

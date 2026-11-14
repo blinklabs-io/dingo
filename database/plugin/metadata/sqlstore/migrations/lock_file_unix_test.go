@@ -28,7 +28,8 @@ import (
 
 // TestAssetAmountFingerprintIndexDropRemovesIndexes proves migration v21
 // drops idx_asset_amount
-// and idx_asset_fingerprint from a database migrated all the way through,
+// and idx_asset_fingerprint from a database migrated through v21 (the asset
+// table itself is dropped by a later version),
 // while leaving the asset.amount and asset.fingerprint columns themselves
 // untouched -- unlike asset.name_hex, both columns are still
 // genuinely read and returned via the blockfrost/mesh API adapters. Before
@@ -39,10 +40,8 @@ import (
 func TestAssetAmountFingerprintIndexDropRemovesIndexes(t *testing.T) {
 	t.Parallel()
 
-	registry, err := migrations.SQLiteRegistry()
-	require.NoError(t, err)
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	migrations.SeedMigratedPrefix(t, databasePath, len(registry))
+	migrations.SeedMigratedPrefix(t, databasePath, 21)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -105,16 +104,14 @@ func TestAssetAmountFingerprintIndexDropRemovesIndexes(t *testing.T) {
 
 // TestAssetNameHexColumnDropRemovesColumnAndIndex proves migration v19
 // drops both asset.name_hex and
-// idx_asset_name_hex from a database migrated all the way through. Before
+// idx_asset_name_hex from a database migrated through v19. Before
 // this migration existed, a fully migrated (through v18) database still
 // carried both: name_hex was a write-only column nothing filtered on.
 func TestAssetNameHexColumnDropRemovesColumnAndIndex(t *testing.T) {
 	t.Parallel()
 
-	registry, err := migrations.SQLiteRegistry()
-	require.NoError(t, err)
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	migrations.SeedMigratedPrefix(t, databasePath, len(registry))
+	migrations.SeedMigratedPrefix(t, databasePath, 19)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -169,7 +166,7 @@ func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 65)
+	require.Len(t, registry, 66)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -392,7 +389,7 @@ func TestGovernanceProposalDropBackfillMarksAlreadyRefundedProposals(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 65)
+	require.Len(t, registry, 66)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -468,7 +465,7 @@ func TestRewardAdaPotsImportedEpochFeesColumnIsAdditive(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 65)
+	require.Len(t, registry, 66)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,

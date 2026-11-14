@@ -51,14 +51,18 @@ func TestGetUtxosByAsset(t *testing.T) {
 			deleted_slot INTEGER NOT NULL DEFAULT 0,
 			datum_hash BLOB
 		);
-		CREATE TABLE asset (
+		CREATE TABLE asset_identity (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			utxo_id INTEGER NOT NULL,
 			policy_id BLOB NOT NULL,
 			name BLOB NOT NULL,
-			fingerprint BLOB NOT NULL,
-			amount TEXT NOT NULL
+			UNIQUE (policy_id, name)
 		);
+		CREATE TABLE asset_holding (
+			utxo_id INTEGER NOT NULL,
+			asset_id INTEGER NOT NULL,
+			amount TEXT,
+			PRIMARY KEY (utxo_id, asset_id)
+		) WITHOUT ROWID;
 	`)
 	require.NoError(t, err)
 
@@ -84,11 +88,7 @@ func TestGetUtxosByAsset(t *testing.T) {
 	require.NoError(t, err)
 
 	// Insert asset for UTxO 1
-	_, err = db.Exec(`
-		INSERT INTO asset (id, utxo_id, policy_id, name, fingerprint, amount)
-		VALUES (1, 1, ?, ?, ?, '1000')
-	`, policyBytes, []byte("HOSKY"), []byte("asset1hosky"))
-	require.NoError(t, err)
+	testutil.InsertAssetHolding(t, db, 1, policyBytes, []byte("HOSKY"), "1000")
 
 	// Insert spent UTxO 2
 	_, err = db.Exec(`
@@ -97,11 +97,7 @@ func TestGetUtxosByAsset(t *testing.T) {
 	`, payKeyBytes)
 	require.NoError(t, err)
 
-	_, err = db.Exec(`
-		INSERT INTO asset (id, utxo_id, policy_id, name, fingerprint, amount)
-		VALUES (2, 2, ?, ?, ?, '500')
-	`, policyBytes, []byte("HOSKY"), []byte("asset1hosky"))
-	require.NoError(t, err)
+	testutil.InsertAssetHolding(t, db, 2, policyBytes, []byte("HOSKY"), "500")
 
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "test-server", Version: "1.0"},
@@ -262,13 +258,18 @@ func TestGetAssetInfo(t *testing.T) {
 			tx_id INTEGER NOT NULL,
 			deleted_slot INTEGER NOT NULL DEFAULT 0
 		);
-		CREATE TABLE asset (
+		CREATE TABLE asset_identity (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			utxo_id INTEGER NOT NULL,
 			policy_id BLOB NOT NULL,
 			name BLOB NOT NULL,
-			amount TEXT NOT NULL
+			UNIQUE (policy_id, name)
 		);
+		CREATE TABLE asset_holding (
+			utxo_id INTEGER NOT NULL,
+			asset_id INTEGER NOT NULL,
+			amount TEXT,
+			PRIMARY KEY (utxo_id, asset_id)
+		) WITHOUT ROWID;
 		CREATE TABLE asset_mint_burn (
 			tx_hash BLOB NOT NULL,
 			policy_id BLOB NOT NULL,
@@ -309,11 +310,9 @@ func TestGetAssetInfo(t *testing.T) {
 		`INSERT INTO utxo (id, tx_id, deleted_slot) VALUES (1, 1, 0)`,
 	)
 	require.NoError(t, err)
-	_, err = db.Exec(`
-		INSERT INTO asset (id, utxo_id, policy_id, name, amount)
-		VALUES (1, 1, ?, ?, '500000')
-	`, policyBytes, []byte("TOKEN"))
-	require.NoError(t, err)
+	testutil.InsertAssetHolding(
+		t, db, 1, policyBytes, []byte("TOKEN"), "500000",
+	)
 
 	// 3. Insert mint record
 	_, err = db.Exec(`
@@ -630,4 +629,55 @@ func TestGetUtxosWithMetadataSchema(t *testing.T) {
 		resInvalid.Content[0].(*mcp.TextContent).Text,
 		"Invalid address or payment credential",
 	)
+}
+
+// TestGetUtxosByAssetOrdersAcrossSharedHoldings requires newest UTxO first and,
+// within one UTxO, the later-recorded holding first, with an asset shared by
+// several UTxOs listed once per holding and spent holdings left out.
+func TestGetUtxosByAssetOrdersAcrossSharedHoldings(t *testing.T) {
+	t.Parallel()
+	db := newSchemaDB(t)
+	policy := bytes.Repeat([]byte{0xa1}, 28)
+	for id := int64(1); id <= 4; id++ {
+		deleted := int64(0)
+		if id == 4 {
+			deleted = 9
+		}
+		_, err := db.Exec(
+			`INSERT INTO "transaction"(id,hash) VALUES(?,?)`,
+			id, bytes.Repeat([]byte{byte(0x10 * id)}, 32),
+		)
+		require.NoError(t, err)
+		_, err = db.Exec(
+			`INSERT INTO utxo(id,tx_id,output_idx,payment_key,amount,deleted_slot)
+VALUES(?,?,0,zeroblob(28),'1',?)`,
+			id, id, deleted,
+		)
+		require.NoError(t, err)
+	}
+	testutil.InsertAssetHolding(t, db, 1, policy, []byte("A"), "1")
+	testutil.InsertAssetHolding(t, db, 1, policy, []byte("B"), "2")
+	testutil.InsertAssetHolding(t, db, 2, policy, []byte("A"), "3")
+	testutil.InsertAssetHolding(t, db, 3, policy, []byte("B"), "4")
+	testutil.InsertAssetHolding(t, db, 4, policy, []byte("A"), "5")
+	cs := newToolSession(t, db, 100)
+
+	var rows []string
+	text := callTool(t, cs, "get_utxos_by_asset",
+		map[string]any{"policy_id": hex.EncodeToString(policy)}, false)
+	for line := range strings.SplitSeq(text, "\n") {
+		if !strings.HasPrefix(line, "| ") || !strings.Contains(line, "#0") {
+			continue
+		}
+		cells := strings.Split(line, "|")
+		rows = append(rows, strings.TrimSpace(cells[1])[:2]+" "+
+			strings.TrimSpace(cells[4])+" "+strings.TrimSpace(cells[6]))
+	}
+	require.Equal(t,
+		[]string{"30 B 4", "20 A 3", "10 B 2", "10 A 1"}, rows)
+
+	text = callTool(t, cs, "get_utxos_by_asset", map[string]any{
+		"policy_id": hex.EncodeToString(policy), "asset_name": "A",
+	}, false)
+	require.Contains(t, text, "Found 2 UTxOs")
 }

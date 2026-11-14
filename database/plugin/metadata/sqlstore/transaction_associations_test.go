@@ -428,18 +428,14 @@ PRIMARY KEY (utxo_id, tx_id))`)
 
 func TestLoadUtxoAssetsBatchPreservesGrouping(t *testing.T) {
 	t.Parallel()
-	store := newTestStore(t)
-	_, err := store.writeDB.Exec(`
-CREATE TABLE asset (
- name BLOB, policy_id BLOB, fingerprint BLOB,
- id INTEGER PRIMARY KEY, utxo_id INTEGER, amount TEXT
-)`)
-	require.NoError(t, err)
-	_, err = store.writeDB.Exec(`
-INSERT INTO asset (name, policy_id, fingerprint, id, utxo_id, amount)
-VALUES ('a', 'p', 'f1', 1, 10, '18446744073709551615'),
-       ('b', 'p', 'f2', 2, 20, '7')`)
-	require.NoError(t, err)
+	store := newMigratedSQLiteStore(t)
+	testutil.InsertAssetHolding(
+		t, store.writeDB, 10, []byte("p"), []byte("a"),
+		"18446744073709551615",
+	)
+	testutil.InsertAssetHolding(
+		t, store.writeDB, 20, []byte("p"), []byte("b"), "7",
+	)
 	utxos := map[string][]models.Utxo{
 		"first":  {{ID: 10}},
 		"second": {{ID: 20}},
@@ -465,17 +461,10 @@ VALUES ('a', 'p', 'f1', 1, 10, '18446744073709551615'),
 
 func TestLoadUtxoAssetsDeduplicatesIDsAcrossChunks(t *testing.T) {
 	t.Parallel()
-	store := newTestStore(t)
-	_, err := store.writeDB.Exec(`
-CREATE TABLE asset (
- name BLOB, policy_id BLOB, fingerprint BLOB,
- id INTEGER PRIMARY KEY, utxo_id INTEGER, amount TEXT
-)`)
-	require.NoError(t, err)
-	_, err = store.writeDB.Exec(`
-INSERT INTO asset (name, policy_id, fingerprint, id, utxo_id, amount)
-VALUES ('a', 'p', 'f1', 1, 10, '1')`)
-	require.NoError(t, err)
+	store := newMigratedSQLiteStore(t)
+	testutil.InsertAssetHolding(
+		t, store.writeDB, 10, []byte("p"), []byte("a"), "1",
+	)
 
 	// Use enough repeated instances to force the same ID into two parameter
 	// chunks.  Each instance still needs one asset, but the asset row must be

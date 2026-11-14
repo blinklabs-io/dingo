@@ -34,10 +34,9 @@ func conflictRepairUtxo(seed int, assets bool) models.Utxo {
 	utxo.Address = fmt.Appendf(nil, "addr-%d", seed)
 	if assets {
 		utxo.Assets = []models.Asset{{
-			Name:        []byte("tok"),
-			PolicyId:    bytes.Repeat([]byte{byte(seed)}, 28),
-			Fingerprint: fmt.Appendf(nil, "asset1-%d", seed),
-			Amount:      types.Uint64(uint64(seed) + 5),
+			Name:     []byte("tok"),
+			PolicyId: bytes.Repeat([]byte{byte(seed)}, 28),
+			Amount:   types.Uint64(uint64(seed) + 5),
 		}}
 	}
 	return utxo
@@ -107,7 +106,9 @@ func TestInsertUtxoModelsCheckedBatchesConflictRepair(t *testing.T) {
 	}
 	require.NoError(t, store.ImportUtxos(imported, nil))
 	assetIDs := map[uint]uint{}
-	rows, err := store.writeDB.Query(`SELECT id, utxo_id FROM asset`)
+	rows, err := store.writeDB.Query(
+		`SELECT asset_id, utxo_id FROM asset_holding`,
+	)
 	require.NoError(t, err)
 	for rows.Next() {
 		var id, utxoID uint
@@ -155,7 +156,8 @@ func TestInsertUtxoModelsCheckedBatchesConflictRepair(t *testing.T) {
 		var assetID uint
 		var amount string
 		err = store.writeDB.QueryRow(
-			`SELECT id, amount FROM asset WHERE utxo_id = ?`, got.ID,
+			`SELECT asset_id, amount FROM asset_holding WHERE utxo_id = ?`,
+			got.ID,
 		).Scan(&assetID, &amount)
 		if i%2 == 0 {
 			require.NoError(t, err)
@@ -186,7 +188,7 @@ func TestInsertUtxoModelsCheckedRepairsLinkedConflictsInFull(t *testing.T) {
 	require.NoError(t, store.ImportUtxos(
 		[]models.Utxo{linked, unlinked, collateral}, nil,
 	))
-	_, err := store.writeDB.Exec(`DELETE FROM asset`)
+	_, err := store.writeDB.Exec(`DELETE FROM asset_holding`)
 	require.NoError(t, err)
 
 	replayLinked := linked
@@ -207,7 +209,7 @@ func TestInsertUtxoModelsCheckedRepairsLinkedConflictsInFull(t *testing.T) {
 	require.Equal(t, firstTx, *got.TransactionID, "existing link kept")
 	var assets int
 	require.NoError(t, store.writeDB.QueryRow(
-		`SELECT COUNT(*) FROM asset WHERE utxo_id = ?`, got.ID,
+		`SELECT COUNT(*) FROM asset_holding WHERE utxo_id = ?`, got.ID,
 	).Scan(&assets))
 	require.Equal(t, 1, assets, "linked output's assets restored")
 

@@ -849,10 +849,7 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 					{
 						Name:     []byte("token"),
 						PolicyId: bytes.Repeat([]byte{0xCC}, 28),
-						Fingerprint: []byte(
-							"asset1cccccccccccccccccccccccccccccccccccccccc",
-						),
-						Amount: types.Uint64(1),
+						Amount:   types.Uint64(1),
 					},
 				}
 				if err := store.insertUtxoModel(ctx, db, utxo, true); err != nil {
@@ -867,8 +864,9 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 	require.NoError(t, txn.Commit())
 
 	// insertUtxoModel here consults exactly four distinct cached queries --
-	// the cross-identity probe, the insert, importAssetQuery, and
-	// getAssetIDQuery -- so 4 is the exact bound, not just an upper one.
+	// the cross-identity probe, the insert, insertAssetHoldingQuery, and
+	// insertAssetIdentityQuery (the first holding creates the identity) --
+	// so 4 is the exact bound, not just an upper one.
 	require.Equal(
 		t,
 		4,

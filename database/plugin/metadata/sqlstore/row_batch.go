@@ -40,6 +40,9 @@ type rowShape struct {
 	table   string
 	columns []string
 	suffix  string
+	// resolveAssets marks queued asset holdings, whose rows name an asset by
+	// (policy_id, name) and are written through flushAssetHoldings.
+	resolveAssets bool
 }
 
 var (
@@ -108,12 +111,6 @@ var (
 		table:   "datum",
 		columns: []string{"hash", "raw_datum", "added_slot"},
 		suffix:  "ON CONFLICT (hash) DO NOTHING",
-	}
-	assetShape = rowShape{
-		name:    "InsertAssetBatch",
-		table:   "asset",
-		columns: []string{"name", "policy_id", "fingerprint", "utxo_id", "amount"},
-		suffix:  "ON CONFLICT (name, policy_id, utxo_id) DO NOTHING",
 	}
 	utxoAddressShape = rowShape{
 		name:    "UpsertUtxoAddressBatch",
@@ -367,6 +364,14 @@ func (b *rowBatch) flush(
 	}
 	defer b.clearRows()
 	for _, entry := range b.entries {
+		if entry.shape.resolveAssets {
+			if err := flushAssetHoldings(
+				ctx, db, entry.rows, parameterLimit,
+			); err != nil {
+				return err
+			}
+			continue
+		}
 		width := len(entry.shape.columns)
 		perStatement := max(1, parameterLimit/width)
 		placeholder := "(" + strings.TrimSuffix(

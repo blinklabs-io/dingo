@@ -231,10 +231,7 @@ VALUES (?, ?, 0, 1, 0, '1',
 	}
 	utxoID, err := res.LastInsertId()
 	require.NoError(t, err)
-	_, err = f.db.Exec(`
-INSERT INTO asset (name, policy_id, fingerprint, utxo_id, amount)
-VALUES (?, ?, ?, ?, '1')`, f.name, f.policy, []byte("fp"), utxoID)
-	require.NoError(t, err)
+	testutil.InsertAssetHolding(t, f.db, utxoID, f.policy, f.name, "1")
 }
 
 func TestGetAssetTransactionsCoversMintCreateAndSpend(t *testing.T) {
@@ -283,11 +280,9 @@ func TestGetAssetTransactionsCoversMintCreateAndSpend(t *testing.T) {
 		{assetPolicy(0x42), "N"},
 		{f.policy, "M"},
 	} {
-		_, err := db.Exec(`
-INSERT INTO asset (name, policy_id, fingerprint, utxo_id, amount)
-VALUES (?, ?, ?, ?, '1')`, []byte(other.name), other.policy, []byte("fp"),
-			unrelatedUtxo)
-		require.NoError(t, err)
+		testutil.InsertAssetHolding(
+			t, db, unrelatedUtxo, other.policy, []byte(other.name), "1",
+		)
 		insertMintBurn(t, db, unrelated, other.policy, other.name, 15, 0, "1")
 	}
 	// An asset-bearing collateral return belongs to the failed transaction.
@@ -301,10 +296,7 @@ VALUES (?, 1, 1, 0, '1', 0)`, createID)
 	require.NoError(t, db.QueryRow(
 		`SELECT id FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 1`, create,
 	).Scan(&secondUtxo))
-	_, err = db.Exec(`
-INSERT INTO asset (name, policy_id, fingerprint, utxo_id, amount)
-VALUES (?, ?, ?, ?, '1')`, f.name, f.policy, []byte("fp"), secondUtxo)
-	require.NoError(t, err)
+	testutil.InsertAssetHolding(t, db, secondUtxo, f.policy, f.name, "1")
 
 	hashes := func(txs []models.Transaction) [][]byte {
 		out := make([][]byte, 0, len(txs))

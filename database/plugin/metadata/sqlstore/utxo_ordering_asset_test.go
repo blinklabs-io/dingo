@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -49,12 +50,10 @@ func seedOrderingAssets(t *testing.T, store *Store) {
 		{98, 0xaa, "one"},
 		{200, 0xbb, "one"},
 	} {
-		_, err := store.writeDB.Exec(
-			"INSERT INTO asset (utxo_id, policy_id, name, amount) "+
-				"VALUES (?, ?, ?, '1')",
-			a.utxoID, []byte{a.policy}, []byte(a.name),
+		testutil.InsertAssetHolding(
+			t, store.writeDB, int64(a.utxoID), []byte{a.policy},
+			[]byte(a.name), "1",
 		)
-		require.NoError(t, err)
 	}
 }
 
@@ -69,17 +68,18 @@ func TestUtxoOrderingAssetOnlyFilterDrivesFromAsset(t *testing.T) {
 	seedStakeRefLookupUtxos(t, store, 2_000, 256)
 	seedOrderingAssets(t, store)
 
+	query := &models.UtxoWithOrderingQuery{
+		MatchAllAddresses: true,
+		FilterByAsset:     true,
+		AssetPolicyID:     []byte{0xaa},
+	}
 	statement, args, err := countUtxosOrderingStatement(
-		&models.UtxoWithOrderingQuery{
-			MatchAllAddresses: true,
-			FilterByAsset:     true,
-			AssetPolicyID:     []byte{0xaa},
-		},
+		query, utxoOrderingDisqualifiesLivenessIndex("sqlite", query),
 	)
 	require.NoError(t, err)
 	plan := queryPlan(t, store.writeDB, statement, args...)
 	require.NotContains(t, plan, "EXISTS", plan)
-	require.Contains(t, plan, "SEARCH asset USING", plan)
+	require.Contains(t, plan, "SEARCH h USING", plan)
 	require.Contains(
 		t, plan, "SEARCH utxo USING INTEGER PRIMARY KEY", plan,
 	)

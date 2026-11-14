@@ -91,3 +91,51 @@ func TestSQLiteOverlayInsertRetainsClosureHistoryThroughBarriers(t *testing.T) {
 		})
 	}
 }
+
+// TestRetainedOverlayBarrierFlushesBeforeAssetReads reads each asset table
+// inside a retained overlay that holds unwritten output rows. A reader of an
+// output's assets must find the output row, so the read must make the
+// overlay's barrier write its pending rows first.
+func TestRetainedOverlayBarrierFlushesBeforeAssetReads(t *testing.T) {
+	t.Parallel()
+	for _, table := range []string{"asset_holding", "asset_identity"} {
+		t.Run(table, func(t *testing.T) {
+			t.Parallel()
+			seed, transactions := plainOverlayChain(t, 4)
+			store, _ := newOverlayInsertStore(t, false, 2047)
+			store.storageMode = types.StorageModeAPI
+			require.NoError(t, store.SetTransaction(seed,
+				ocommon.Point{Slot: 10, Hash: seed.Hash().Bytes()},
+				0, nil, true, nil, 0))
+			txn := store.Transaction(t.Context())
+			t.Cleanup(func() { _ = txn.Rollback() })
+			acc := store.NewLeiosClosureBatchAccumulator()
+			enabled, err := store.EnableLeiosClosureUtxoOverlay(
+				acc, txn, transactions,
+			)
+			require.NoError(t, err)
+			require.True(t, enabled)
+			for i, tx := range transactions {
+				slot := uint64(99)
+				require.NoError(t, store.SetTransactionLeiosClosureBatched(
+					tx, ocommon.Point{Slot: 100, Hash: overlayTxID(0x53, 0)},
+					uint32(i), nil, true, &slot, acc, txn, 0,
+				))
+			}
+			overlay := acc.(*transactionBatchAccumulator).overlay
+			require.Zero(t, overlay.stats.BarrierFlushes)
+
+			db, ctx, err := store.dbFromTxn(txn)
+			require.NoError(t, err)
+			var count int
+			require.NoError(t, db.QueryRowContext(
+				ctx, "SELECT COUNT(*) FROM "+table,
+			).Scan(&count))
+			require.Positive(t, overlay.stats.BarrierFlushes,
+				"a read of %s must flush the retained overlay's output rows",
+				table)
+			require.NoError(t, store.FlushBatch(acc, txn))
+			require.NoError(t, txn.Commit())
+		})
+	}
+}

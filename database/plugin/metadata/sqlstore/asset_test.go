@@ -40,10 +40,9 @@ func insertAssetHolding(
 	utxo.Address = []byte("test-address")
 	utxo.DeletedSlot = deletedSlot
 	utxo.Assets = []models.Asset{{
-		Name:        assetName,
-		PolicyId:    policyID,
-		Fingerprint: []byte("fingerprint"),
-		Amount:      types.Uint64(amount),
+		Name:     assetName,
+		PolicyId: policyID,
+		Amount:   types.Uint64(amount),
 	}}
 	insertUtxoInTxn(t, store, utxo, true)
 }

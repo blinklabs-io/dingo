@@ -217,13 +217,15 @@ SELECT t.hash AS hash, a.block_hash AS block_hash, a.slot AS slot,
 FROM "transaction" AS t
 JOIN applied_transaction AS a ON a.tx_id = t.id
 WHERE t.id IN (
-    SELECT u.tx_id FROM asset AS m
-    JOIN utxo AS u ON u.id = m.utxo_id
-    WHERE m.policy_id = ? AND m.name = ?
+    SELECT u.tx_id FROM asset_identity AS i
+    JOIN asset_holding AS h ON h.asset_id = i.id
+    JOIN utxo AS u ON u.id = h.utxo_id
+    WHERE i.policy_id = ? AND i.name = ?
     UNION
-    SELECT u.spent_at_tx_id FROM asset AS m
-    JOIN utxo AS u ON u.id = m.utxo_id
-    WHERE m.policy_id = ? AND m.name = ? AND u.spent_at_tx_id IS NOT NULL
+    SELECT u.spent_at_tx_id FROM asset_identity AS i
+    JOIN asset_holding AS h ON h.asset_id = i.id
+    JOIN utxo AS u ON u.id = h.utxo_id
+    WHERE i.policy_id = ? AND i.name = ? AND u.spent_at_tx_id IS NOT NULL
 )
 UNION
 SELECT t.hash, a.block_hash, a.slot, a.block_index, t.id

@@ -16380,7 +16380,10 @@ mainnet-comparable scale, not assumed from sqlite) and for the cross-backend
 behavioral tests confirming sqlite, postgres, and mysql return the identical
 oldest-first sequence against the same fixture.
 
-`GET /assets/{asset}` derives its mint-history fields from the API-mode
+`GET /assets/{asset}` answers 404 unless `MetadataStore.AssetHeld` finds a
+retained holding (live, or spent and not yet pruned) of the asset; neither an
+`asset_identity` row with no holdings nor a mint/burn record alone counts. The response's CIP-14 fingerprint is computed from the policy id and
+name, not stored. It derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from
 `tx.AssetMint()` (recorded in `SetTransaction`, `SetTransactionBatched`, and
 `SetGapBlockTransaction`; removed on rollback). `initial_mint_tx_hash` and
@@ -23288,7 +23291,8 @@ not incremented in place from dingo's side.
 by `dingo load`) extends the API-mode accumulator path of
 `LedgerDeltaBatch.apply` (`ledger/delta.go`) to core storage mode. API mode
 batches whether or not it is set. In core mode the accumulator defers produced
-UTxO asset rows to multi-row inserts, reuses one prepared transaction-row
+UTxO asset holdings to multi-row inserts that resolve each distinct asset to
+its `asset_identity` row at flush, reuses one prepared transaction-row
 upsert, and coalesces each block's live-stake deltas, which
 `FlushBatchStakeDeltas` writes after every delta; `FlushBatch` writes the rest
 before `apply` returns, inside the same database transaction and before the next

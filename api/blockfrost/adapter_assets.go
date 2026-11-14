@@ -63,11 +63,11 @@ func (a *NodeAdapter) assetKnown(
 	if events > 0 {
 		return true, nil
 	}
-	held, err := meta.GetAssetByPolicyAndName(policy, assetName, txn)
+	held, err := meta.AssetHeld(policy, assetName, txn)
 	if err != nil {
-		return false, fmt.Errorf("get asset: %w", err)
+		return false, fmt.Errorf("check asset holdings: %w", err)
 	}
-	return held.ID != 0, nil
+	return held, nil
 }
 
 func (a *NodeAdapter) listAssets(

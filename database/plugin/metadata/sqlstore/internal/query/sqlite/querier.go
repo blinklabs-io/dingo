@@ -11,6 +11,9 @@ import (
 
 type Querier interface {
 	AddNetworkDonation(ctx context.Context, arg AddNetworkDonationParams) error
+	// AssetHeld reports whether any retained holding, live or spent and not yet
+	// pruned, exists for the asset. An identity with no holding does not count.
+	AssetHeld(ctx context.Context, arg AssetHeldParams) (bool, error)
 	BackfillNodeSettingsNetwork(ctx context.Context, arg BackfillNodeSettingsNetworkParams) (int64, error)
 	ClaimOffchainMetadataFetch(ctx context.Context, arg ClaimOffchainMetadataFetchParams) (int64, error)
 	CountPParamsByEra(ctx context.Context, eraID sql.NullInt64) (int64, error)
@@ -18,7 +21,6 @@ type Querier interface {
 	CountTransactionsByPaymentCred(ctx context.Context, arg CountTransactionsByPaymentCredParams) (int64, error)
 	CountTransactionsInSlotRange(ctx context.Context, arg CountTransactionsInSlotRangeParams) (int64, error)
 	CreateAccount(ctx context.Context, arg CreateAccountParams) (int64, error)
-	CreateAsset(ctx context.Context, arg CreateAssetParams) (int64, error)
 	CreateDrep(ctx context.Context, arg CreateDrepParams) (int64, error)
 	CreateMidnightAriadneRollback(ctx context.Context, arg CreateMidnightAriadneRollbackParams) (int64, error)
 	CreateMidnightAssetCreate(ctx context.Context, arg CreateMidnightAssetCreateParams) (int64, error)
@@ -91,10 +93,7 @@ type Querier interface {
 	GetActiveDrepByCredential(ctx context.Context, arg GetActiveDrepByCredentialParams) (Drep, error)
 	GetActiveDrepByHash(ctx context.Context, credential []byte) (Drep, error)
 	GetActiveDreps(ctx context.Context) ([]Drep, error)
-	GetAssetByPolicyAndName(ctx context.Context, arg GetAssetByPolicyAndNameParams) (Asset, error)
 	GetAssetMintBurnInfo(ctx context.Context, arg GetAssetMintBurnInfoParams) (GetAssetMintBurnInfoRow, error)
-	GetAssetQuantityByPolicyAndName(ctx context.Context, arg GetAssetQuantityByPolicyAndNameParams) ([]sql.NullString, error)
-	GetAssetsByUtxoID(ctx context.Context, utxoID sql.NullInt64) ([]Asset, error)
 	GetBackfillCheckpoint(ctx context.Context, phase string) (BackfillCheckpoint, error)
 	GetBlockNonce(ctx context.Context, arg GetBlockNonceParams) ([]byte, error)
 	GetBlockNoncesInSlotRange(ctx context.Context, arg GetBlockNoncesInSlotRangeParams) ([]BlockNonce, error)
@@ -178,7 +177,6 @@ type Querier interface {
 	GetTransactionsByBlockHash(ctx context.Context, blockHash []byte) ([]GetTransactionsByBlockHashRow, error)
 	GetUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetUtxoRefsBySlotRow, error)
 	ImportAccount(ctx context.Context, arg ImportAccountParams) (int64, error)
-	ImportAsset(ctx context.Context, arg ImportAssetParams) error
 	ImportDrep(ctx context.Context, arg ImportDrepParams) (int64, error)
 	ImportDrepRegistration(ctx context.Context, arg ImportDrepRegistrationParams) (int64, error)
 	InsertDrepIfAbsent(ctx context.Context, arg InsertDrepIfAbsentParams) error

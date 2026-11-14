@@ -1192,12 +1192,13 @@ func registerCardanoTools(
 			if len(rawName) > 32 {
 				return nil, nil, errors.New("asset name exceeds 32 bytes")
 			}
-			q = `SELECT p.hash, u.output_idx, u.payment_key, u.amount, a.name, a.fingerprint, a.amount, u.datum_hash
-				 FROM asset a
-				 JOIN utxo u ON a.utxo_id = u.id
+			q = `SELECT p.hash, u.output_idx, u.payment_key, u.amount, i.name, h.amount, u.datum_hash
+				 FROM asset_identity i
+				 JOIN asset_holding h ON h.asset_id = i.id
+				 JOIN utxo u ON h.utxo_id = u.id
 				 JOIN "transaction" p ON p.id = u.tx_id
-				 WHERE a.policy_id = ? AND a.name = ? AND u.deleted_slot = 0
-				 ORDER BY u.id DESC, a.id DESC
+				 WHERE i.policy_id = ? AND i.name = ? AND u.deleted_slot = 0
+				 ORDER BY u.id DESC, h.asset_id DESC
 				 LIMIT ? OFFSET ?`
 			args = []any{
 				policyBytes,
@@ -1206,12 +1207,13 @@ func registerCardanoTools(
 				offset,
 			}
 		} else {
-			q = `SELECT p.hash, u.output_idx, u.payment_key, u.amount, a.name, a.fingerprint, a.amount, u.datum_hash
-				 FROM asset a
-				 JOIN utxo u ON a.utxo_id = u.id
+			q = `SELECT p.hash, u.output_idx, u.payment_key, u.amount, i.name, h.amount, u.datum_hash
+				 FROM asset_identity i
+				 JOIN asset_holding h ON h.asset_id = i.id
+				 JOIN utxo u ON h.utxo_id = u.id
 				 JOIN "transaction" p ON p.id = u.tx_id
-				 WHERE a.policy_id = ? AND u.deleted_slot = 0
-				 ORDER BY u.id DESC, a.id DESC
+				 WHERE i.policy_id = ? AND u.deleted_slot = 0
+				 ORDER BY u.id DESC, h.asset_id DESC
 				 LIMIT ? OFFSET ?`
 			args = []any{policyBytes, limit, offset}
 		}
@@ -1245,11 +1247,10 @@ func registerCardanoTools(
 			var paymentKey []byte
 			var lovelace sql.NullString
 			var aName []byte
-			var aFingerprint []byte
 			var aAmount sql.NullString
 			var datumHash []byte
 
-			if err := rows.Scan(&txID, &outIdx, &paymentKey, &lovelace, &aName, &aFingerprint, &aAmount, &datumHash); err != nil {
+			if err := rows.Scan(&txID, &outIdx, &paymentKey, &lovelace, &aName, &aAmount, &datumHash); err != nil {
 				continue
 			}
 
@@ -1263,7 +1264,7 @@ func registerCardanoTools(
 			if nameDisplay == "" {
 				nameDisplay = hex.EncodeToString(aName)
 			}
-			fprint := string(aFingerprint)
+			fprint := lcommon.NewAssetFingerprint(policyBytes, aName).String()
 			amtStr := "0"
 			if aAmount.Valid {
 				amtStr = aAmount.String
@@ -1405,20 +1406,22 @@ func registerCardanoTools(
 		var circQuery string
 		var circArgs []any
 		if len(rawName) > 0 {
-			circQuery = `SELECT a.amount, u.id
-						 FROM asset a
-						 JOIN utxo u ON a.utxo_id = u.id
-						 WHERE a.policy_id = ? AND a.name = ? AND u.deleted_slot = 0 LIMIT ?`
+			circQuery = `SELECT h.amount, u.id
+						 FROM asset_identity i
+						 JOIN asset_holding h ON h.asset_id = i.id
+						 JOIN utxo u ON h.utxo_id = u.id
+						 WHERE i.policy_id = ? AND i.name = ? AND u.deleted_slot = 0 LIMIT ?`
 			circArgs = []any{
 				policyBytes,
 				rawName,
 				limits.assetScanLimit(),
 			}
 		} else {
-			circQuery = `SELECT a.amount, u.id
-						 FROM asset a
-						 JOIN utxo u ON a.utxo_id = u.id
-						 WHERE a.policy_id = ? AND u.deleted_slot = 0 LIMIT ?`
+			circQuery = `SELECT h.amount, u.id
+						 FROM asset_identity i
+						 JOIN asset_holding h ON h.asset_id = i.id
+						 JOIN utxo u ON h.utxo_id = u.id
+						 WHERE i.policy_id = ? AND u.deleted_slot = 0 LIMIT ?`
 			circArgs = []any{policyBytes, limits.assetScanLimit()}
 		}
 		if err := func() error {

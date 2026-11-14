@@ -1996,24 +1996,6 @@ RETURNING id`
 // avoiding a RETURNING cursor; check RowsAffected first, since a skipped
 // conflict leaves LastInsertId unchanged.
 
-// importAssetQuery is the conflict-tolerant asset INSERT used by both the
-// snapshot importer and insertUtxoModel. It is a fixed query shape on every
-// imported asset, so keep one prepared statement for the Store lifetime just
-// like the surrounding UTxO importer statements.
-const importAssetQuery = `-- name: InsertAssetIfAbsent :exec
-INSERT INTO asset (
-    name, policy_id, fingerprint, utxo_id, amount
-) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
-`
-
-// getAssetIDQuery resolves the caller-visible asset row ID after an
-// insert that may have been skipped by its conflict clause.
-const getAssetIDQuery = `-- name: GetAssetIDByOutput :one
-SELECT id FROM asset
-WHERE utxo_id = ? AND policy_id = ? AND name = ?
-ORDER BY id DESC LIMIT 1`
-
 func (s *Store) insertUtxoModel(
 	ctx context.Context,
 	db queryer,
@@ -2163,30 +2145,11 @@ func (s *Store) persistUtxoRelationsWithAddressRows(
 		return err
 	}
 	for i := range utxo.Assets {
-		asset := &utxo.Assets[i]
-		asset.UtxoID = id
-		asset.ID = 0
-		if _, err := s.execCached(ctx, db, importAssetQuery,
-			asset.Name,
-			asset.PolicyId,
-			asset.Fingerprint,
-			sql.NullInt64{Int64: int64(id), Valid: true},
-			sql.NullString{
-				String: decimalUint64(asset.Amount),
-				Valid:  true,
-			},
+		if err := s.insertAssetHolding(
+			ctx, db, int64(id), &utxo.Assets[i],
 		); err != nil {
 			return err
 		}
-		var assetID uint
-		if err := s.queryRowCached(ctx, db, getAssetIDQuery,
-			id,
-			asset.PolicyId,
-			asset.Name,
-		).Scan(&assetID); err != nil {
-			return err
-		}
-		asset.ID = assetID
 	}
 	return nil
 }
@@ -2239,20 +2202,7 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 		return err
 	}
 	for i := range utxo.Assets {
-		asset := &utxo.Assets[i]
-		asset.UtxoID = id
-		asset.ID = 0
-		rows.add(
-			assetShape,
-			asset.Name,
-			asset.PolicyId,
-			asset.Fingerprint,
-			sql.NullInt64{Int64: int64(id), Valid: true},
-			sql.NullString{
-				String: decimalUint64(asset.Amount),
-				Valid:  true,
-			},
-		)
+		queueAssetHolding(rows, int64(id), &utxo.Assets[i])
 	}
 	return nil
 }
