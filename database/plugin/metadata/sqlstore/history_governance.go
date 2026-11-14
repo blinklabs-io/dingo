@@ -98,7 +98,7 @@ func (s *Store) GetGovernanceVotesPage(
 	const from = ` FROM governance_vote_history h
 JOIN governance_vote v ON v.id = h.vote_id
 JOIN governance_proposal p ON p.id = v.proposal_id AND p.deleted_slot IS NULL
-WHERE 1 = 1`
+WHERE h.deleted = false`
 	where := ""
 	var args []any
 	if filter.ProposalID != nil {
@@ -147,21 +147,36 @@ WHERE a.cold_credential_tag = ? AND a.cold_credential = ?
 	query, queryArgs := addLimitOffset(
 		`SELECT v.id, v.proposal_id, v.voter_type, v.voter_credential_tag,
 v.voter_credential, h.vote, h.anchor_url, h.anchor_hash, v.added_slot,
-v.vote_updated_slot, v.deleted_slot, p.tx_hash, p.action_index, p.action_type,
+v.vote_updated_slot,
+COALESCE((SELECT MIN(tomb.transition_slot) FROM governance_vote_history tomb
+ WHERE tomb.vote_id = h.vote_id AND tomb.deleted = true
+   AND (tomb.transition_slot > h.transition_slot
+     OR (tomb.transition_slot = h.transition_slot AND tomb.id > h.id))
+   AND NOT EXISTS (
+       SELECT 1 FROM governance_vote_history recast
+       WHERE recast.vote_id = h.vote_id AND recast.deleted = false
+         AND (recast.transition_slot > h.transition_slot
+           OR (recast.transition_slot = h.transition_slot
+               AND recast.id > h.id))
+         AND (recast.transition_slot < tomb.transition_slot
+           OR (recast.transition_slot = tomb.transition_slot
+               AND recast.id < tomb.id)))), v.deleted_slot),
+p.tx_hash, p.action_index, p.action_type,
 h.transition_slot, h.tx_hash, h.cert_index,
 (SELECT COUNT(*) FROM governance_vote_history same
  WHERE same.vote_id = h.vote_id AND same.transition_slot = h.transition_slot
-   AND same.id < h.id),
+   AND same.deleted = false AND same.id < h.id),
 (SELECT COUNT(*) FROM governance_vote_history same
- WHERE same.vote_id = h.vote_id AND same.transition_slot = h.transition_slot),
+ WHERE same.vote_id = h.vote_id AND same.transition_slot = h.transition_slot
+   AND same.deleted = false),
 CASE WHEN EXISTS (
     SELECT 1 FROM governance_vote_history earlier
-    WHERE earlier.vote_id = h.vote_id
+    WHERE earlier.vote_id = h.vote_id AND earlier.deleted = false
       AND earlier.transition_slot < h.transition_slot
 ) THEN 0 ELSE 1 END,
 CASE WHEN v.deleted_slot IS NULL AND NOT EXISTS (
     SELECT 1 FROM governance_vote_history later
-    WHERE later.vote_id = h.vote_id
+    WHERE later.vote_id = h.vote_id AND later.deleted = false
       AND (later.transition_slot > h.transition_slot
         OR (later.transition_slot = h.transition_slot AND later.id > h.id))
 ) THEN 1 ELSE 0 END`+from+where+
