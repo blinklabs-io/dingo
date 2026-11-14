@@ -63,7 +63,9 @@ func TestLedgerReadChainIteratorAppliesWhenNoQueuedHeaderCanExtendBatch(
 	require.Zero(t, ls.chain.HeaderCount())
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, 10*time.Second,
@@ -115,7 +117,9 @@ func TestLedgerReadChainIteratorCoalescesWhileHeadersRemainQueued(
 	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,

@@ -170,7 +170,7 @@ VALUES (?, ?, ?, ?, ?, ?)`,
 	require.Equal(t, want, poolCurrentStateRows(t, db))
 
 	exec(`UPDATE schema_migrations
-SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = 66`)
+SET phase = 'expand', dirty = true, completed_at = NULL WHERE version = 67`)
 	run()
 	require.Equal(t, want, poolCurrentStateRows(t, db))
 }
