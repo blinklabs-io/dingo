@@ -27,12 +27,13 @@ import (
 // votes again on the same proposal. The recast clears deleted_slot on the
 // row, so a read at a slot inside the deregistered window must still omit
 // the vote.
-func TestGetGovernanceVotesAtSlot_OmitsVoteDeletedBeforeRecast(
-	t *testing.T,
-) {
+func TestGetGovernanceVotesAtSlot_OmitsVoteDeletedBeforeRecast(t *testing.T) {
 	t.Parallel()
+	testVotesAtSlotOmitsVoteDeletedBeforeRecast(t, newMigratedTestStore(t))
+}
 
-	store := newMigratedTestStore(t)
+func testVotesAtSlotOmitsVoteDeletedBeforeRecast(t *testing.T, store *Store) {
+	t.Helper()
 	proposal := &models.GovernanceProposal{
 		TxHash:        bytes.Repeat([]byte{0xF3}, 32),
 		ActionType:    6,
@@ -96,8 +97,11 @@ func TestDeleteGovernanceVotesAfterSlot_RestoresDeletionAcrossRecast(
 	t *testing.T,
 ) {
 	t.Parallel()
+	testVoteRollbackRestoresDeletionAcrossRecast(t, newMigratedTestStore(t))
+}
 
-	store := newMigratedTestStore(t)
+func testVoteRollbackRestoresDeletionAcrossRecast(t *testing.T, store *Store) {
+	t.Helper()
 	proposal := &models.GovernanceProposal{
 		TxHash:        bytes.Repeat([]byte{0xF7}, 32),
 		ActionType:    6,
@@ -156,8 +160,11 @@ func TestDeleteGovernanceVotesAfterSlot_RestoresDeletionAcrossRecast(
 // not.
 func TestGetGovernanceVotesPage_DeletionBelongsToDeletedCast(t *testing.T) {
 	t.Parallel()
+	testVotesPageDeletionBelongsToDeletedCast(t, newMigratedTestStore(t))
+}
 
-	store := newMigratedTestStore(t)
+func testVotesPageDeletionBelongsToDeletedCast(t *testing.T, store *Store) {
+	t.Helper()
 	proposal := &models.GovernanceProposal{
 		TxHash:        bytes.Repeat([]byte{0xFB}, 32),
 		ActionType:    6,
