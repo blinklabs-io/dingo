@@ -37,7 +37,7 @@ func TestOpCertCounterEncodingMigrationPreservesLegacyValues(t *testing.T) {
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 65)
+	require.Len(t, registry, 66)
 	run := func(selected []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,

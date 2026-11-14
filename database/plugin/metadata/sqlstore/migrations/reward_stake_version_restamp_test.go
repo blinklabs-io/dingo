@@ -38,7 +38,7 @@ func restampBackfillDB(t *testing.T) (*sql.DB, func()) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 65)
+	require.Len(t, registry, 66)
 
 	runRestamp := func() {
 		full := migrations.Runner{
