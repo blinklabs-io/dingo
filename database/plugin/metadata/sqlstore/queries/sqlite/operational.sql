@@ -1013,10 +1013,6 @@ SELECT amount
 FROM utxo
 WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0;
 
--- name: GetScriptLockedSupply :many
-SELECT amount
-FROM utxo
-WHERE payment_script = TRUE AND deleted_slot = 0;
 
 -- name: CreateAsset :one
 INSERT INTO asset (

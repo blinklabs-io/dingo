@@ -73,6 +73,15 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 			).Scan(&id); err != nil {
 				return s.utxoInsertConflict(ctx, db, err, utxo)
 			}
+			delta, err := modelScriptLockedContribution(utxo)
+			if err != nil {
+				return err
+			}
+			if err := s.addScriptLockedSupply(
+				ctx, db, utxo.AddedSlot, delta,
+			); err != nil {
+				return err
+			}
 			utxo.ID = uint(id)
 			if err := s.persistUtxoAddress(ctx, db, id, utxo); err != nil {
 				return err
@@ -155,8 +164,18 @@ func (s *Store) DeleteUtxos(
 				return err
 			}
 			u := s.utxoSQL()
-			refs, err := queryUtxoStakeRefs(ctx, db, u, utxoIDs, true)
+			// Deleting a row that is still live takes its lovelace out of
+			// the script-locked total. The prune and batch-elision callers
+			// only name spent rows, for which this reads zero.
+			_, refs, liveScript, err := queryUtxoDeletionRows(
+				ctx, db, u, utxoIDs, false,
+			)
 			if err != nil {
+				return err
+			}
+			if err := s.addScriptLockedSupply(
+				ctx, db, slot, -liveScript,
+			); err != nil {
 				return err
 			}
 			chunkSize := u.deleteRefsChunk(s.dialect.ParameterLimit())
@@ -272,6 +291,11 @@ func (s *Store) DeleteUtxosAfterSlot(
 			if err != nil {
 				return err
 			}
+			if err := s.removeScriptLockedSupplyAddedAfter(
+				ctx, db, slotValue,
+			); err != nil {
+				return err
+			}
 			if _, err := db.ExecContext(
 				ctx,
 				"DELETE FROM utxo WHERE added_slot > ?",
@@ -304,6 +328,19 @@ func (s *Store) SetUtxoDeletedAtSlot(
 				return err
 			}
 			u := s.utxoSQL()
+			// The update also matches a row already deleted at this slot,
+			// which an earlier write already took out of the live total.
+			var (
+				priorDeleted sql.NullInt64
+				priorScript  sql.NullBool
+				priorAmount  sql.NullString
+			)
+			err = db.QueryRowContext(
+				ctx, u.scriptSupplyState, u.refArgs(txID, outputIndex)...,
+			).Scan(&priorDeleted, &priorScript, &priorAmount)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
 			args := u.bindRef([]any{slotValue, spender}, txID, outputIndex)
 			result, err := db.ExecContext(
 				ctx, u.markDeletedAtSlot, append(args, slotValue)...,
@@ -336,6 +373,20 @@ func (s *Store) SetUtxoDeletedAtSlot(
 					txID,
 					outputIndex,
 				)
+			}
+			if priorDeleted.Valid && priorDeleted.Int64 == 0 {
+				locked, err := scriptLockedContribution(
+					priorScript,
+					priorAmount,
+				)
+				if err != nil {
+					return err
+				}
+				if err := s.addScriptLockedSupply(
+					ctx, db, slot, -locked,
+				); err != nil {
+					return err
+				}
 			}
 			refs, err := queryUtxoStakeRefs(
 				ctx,
@@ -437,6 +488,11 @@ func (s *Store) SetUtxosNotDeletedAfterSlot(
 			); err != nil {
 				return err
 			}
+			// Last step of every rollback sweep, so the utxo rows are
+			// final and a rebuilt aggregate reads the restored state.
+			if err := s.rollbackScriptLockedSupply(ctx, db, slot); err != nil {
+				return err
+			}
 			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
 		},
 	)
@@ -464,7 +520,7 @@ func (s *Store) MarkUtxosDeletedAtSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			rowIDs, stakeRefs, err := queryUtxoDeletionRows(
+			rowIDs, stakeRefs, scriptLocked, err := queryUtxoDeletionRows(
 				ctx,
 				db,
 				s.utxoSQL(),
@@ -489,6 +545,11 @@ func (s *Store) MarkUtxosDeletedAtSlot(
 				); err != nil {
 					return err
 				}
+			}
+			if err := s.addScriptLockedSupply(
+				ctx, db, atSlot, -scriptLocked,
+			); err != nil {
+				return err
 			}
 			return s.refreshRewardLiveStakeRefs(ctx, db, stakeRefs, atSlot)
 		},
@@ -845,6 +906,7 @@ func (s *Store) importUtxos(
 			u := s.utxoSQL()
 			refs := make(map[string]models.StakeCredentialRef)
 			slots := make(map[string]uint64)
+			scriptDeltas := make(map[uint64]int64, 1)
 			// Resolving producers writes their row ids onto the models, so
 			// work on a copy and leave the caller's slice untouched.
 			owned := slices.Clone(utxos)
@@ -895,6 +957,21 @@ func (s *Store) importUtxos(
 					}
 				} else if err != nil {
 					return fmt.Errorf("import UTxO: %w", err)
+				} else {
+					// A recovered input is imported live here and spent
+					// later through the maintained primitives, so its
+					// amount has to be in the total first.
+					delta, err := modelScriptLockedContribution(&item)
+					if err != nil {
+						return err
+					}
+					scriptDeltas[item.AddedSlot], err = checkedSupplyStep(
+						scriptDeltas[item.AddedSlot],
+						delta,
+					)
+					if err != nil {
+						return err
+					}
 				}
 				// See CreateUtxo: the pointer position is a separate
 				// row, and persistUtxoPointer converges, so an output
@@ -937,6 +1014,13 @@ func (s *Store) importUtxos(
 					if item.AddedSlot > slots[ref.MapKey()] {
 						slots[ref.MapKey()] = item.AddedSlot
 					}
+				}
+			}
+			for slot, delta := range scriptDeltas {
+				if err := s.addScriptLockedSupply(
+					ctx, db, slot, delta,
+				); err != nil {
+					return err
 				}
 			}
 			if refreshRewardLiveStake {
@@ -1064,6 +1148,20 @@ func (s *Store) hydrateImportedUtxo(
 	// certified snapshot's own declaration" apart from "a locally
 	// reconstructed row that merely happens to declare DeletedSlot == 0".
 	if utxo.DeletedSlot == 0 {
+		var (
+			priorDeleted sql.NullInt64
+			priorScript  sql.NullBool
+			priorAmount  sql.NullString
+		)
+		err := db.QueryRowContext(
+			ctx, u.scriptSupplyState, u.refArgs(utxo.TxId, utxo.OutputIdx)...,
+		).Scan(&priorDeleted, &priorScript, &priorAmount)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read re-imported UTxO spend: %w", err)
+		}
+		if !priorDeleted.Valid || priorDeleted.Int64 <= 0 {
+			return nil
+		}
 		if _, err := s.execCached(
 			ctx, db,
 			u.clearStaleSpend,
@@ -1074,6 +1172,16 @@ func (s *Store) hydrateImportedUtxo(
 				err,
 			)
 		}
+		// Clearing the spend makes the output live again, so return the
+		// lovelace its spend debited, at the slot that debited it.
+		locked, err := scriptLockedContribution(priorScript, priorAmount)
+		if err != nil {
+			return err
+		}
+		return s.addScriptLockedSupply(
+			// #nosec G115 -- checked positive above
+			ctx, db, uint64(priorDeleted.Int64), locked,
+		)
 	}
 	return nil
 }
@@ -1260,20 +1368,21 @@ func (s *Store) queryUtxoStakeConsumedDeltas(
 	ctx context.Context,
 	db queryer,
 	ids []models.UtxoId,
-) ([]stakeCredentialDelta, error) {
+) ([]stakeCredentialDelta, int64, error) {
 	if len(ids) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 	txIDs, wanted := distinctUtxoTxIDs(ids)
 	sums := make(map[string]int64, len(ids))
 	refs := make(map[string]models.StakeCredentialRef, len(ids))
 	order := make([]string, 0, len(ids))
+	var scriptLocked int64
 	for start := 0; start < len(txIDs); start += 400 {
 		end := min(start+400, len(txIDs))
 		query, queryArgs := s.utxoSQL().stakeConsumedDelta(txIDs[start:end])
 		rows, err := s.queryRowsCached(ctx, db, query, queryArgs...)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		scanErr := func() error {
 			defer rows.Close()
@@ -1283,8 +1392,9 @@ func (s *Store) queryUtxoStakeConsumedDeltas(
 				var tag int64
 				var key []byte
 				var raw sql.NullString
+				var script sql.NullBool
 				if err := rows.Scan(
-					&txID, &outputIdx, &tag, &key, &raw,
+					&txID, &outputIdx, &tag, &key, &raw, &script,
 				); err != nil {
 					return err
 				}
@@ -1297,6 +1407,14 @@ func (s *Store) queryUtxoStakeConsumedDeltas(
 				}
 				if _, ok := outs[uint32(outputIdx.Int64)]; !ok {
 					continue
+				}
+				locked, err := scriptLockedContribution(script, raw)
+				if err != nil {
+					return err
+				}
+				scriptLocked, err = checkedSupplyStep(scriptLocked, locked)
+				if err != nil {
+					return err
 				}
 				delta, ok, err := consumedUtxoStakeDelta(tag, key, raw)
 				if err != nil {
@@ -1316,14 +1434,14 @@ func (s *Store) queryUtxoStakeConsumedDeltas(
 			return rows.Err()
 		}()
 		if scanErr != nil {
-			return nil, scanErr
+			return nil, 0, scanErr
 		}
 	}
 	ret := make([]stakeCredentialDelta, len(order))
 	for i, key := range order {
 		ret[i] = stakeCredentialDelta{ref: refs[key], delta: sums[key]}
 	}
-	return ret, nil
+	return ret, scriptLocked, nil
 }
 
 func currentTipSlot(ctx context.Context, db queryer) (uint64, error) {
@@ -1536,8 +1654,8 @@ func mergeStakeCredentialRefs(
 // established by queryUtxoDeletionRows.
 //
 // SQLite updates carry no "deleted_slot = 0" predicate. With one, SQLite
-// plans the statement as SEARCH utxo USING INDEX
-// idx_utxo_deleted_payment_script (deleted_slot=?) from two terms upwards
+// plans the statement as a SEARCH of a deleted_slot-leading index
+// (deleted_slot=?) from two terms upwards
 // whenever sqlite_stat1 is absent -- every live row visited and "id IN (...)"
 // evaluated per row, which is the whole-table pass, moved
 // from the lookup to the update. Populated statistics change the plan, but a
@@ -1581,22 +1699,23 @@ func queryUtxoDeletionRows(
 	u *utxoSQL,
 	ids []models.UtxoId,
 	lockRows bool,
-) ([]int64, []models.StakeCredentialRef, error) {
+) ([]int64, []models.StakeCredentialRef, int64, error) {
 	ids = dedupeUtxoIDs(ids)
 	if len(ids) == 0 {
-		return nil, nil, nil
+		return nil, nil, 0, nil
 	}
 	txIDs, wanted := distinctUtxoTxIDs(ids)
 	rowIDs := make([]int64, 0, len(ids))
 	seenRows := make(map[int64]struct{}, len(ids))
 	stakeRefs := make([]models.StakeCredentialRef, 0, len(ids))
 	seenStakeRefs := make(map[string]struct{})
+	var scriptLocked int64
 	for start := 0; start < len(txIDs); start += 400 {
 		end := min(start+400, len(txIDs))
 		query, args := u.deletionRows(txIDs[start:end], lockRows)
 		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		scanErr := func() error {
 			defer rows.Close()
@@ -1607,6 +1726,8 @@ func queryUtxoDeletionRows(
 				var deletedSlot sql.NullInt64
 				var credentialTag int64
 				var stakingKey []byte
+				var amount sql.NullString
+				var script sql.NullBool
 				if err := rows.Scan(
 					&rowID,
 					&txID,
@@ -1614,6 +1735,8 @@ func queryUtxoDeletionRows(
 					&deletedSlot,
 					&credentialTag,
 					&stakingKey,
+					&amount,
+					&script,
 				); err != nil {
 					return err
 				}
@@ -1645,6 +1768,20 @@ func queryUtxoDeletionRows(
 						if _, ok := seenRows[rowID]; !ok {
 							seenRows[rowID] = struct{}{}
 							rowIDs = append(rowIDs, rowID)
+							locked, err := scriptLockedContribution(
+								script,
+								amount,
+							)
+							if err != nil {
+								return err
+							}
+							scriptLocked, err = checkedSupplyStep(
+								scriptLocked,
+								locked,
+							)
+							if err != nil {
+								return err
+							}
 						}
 					}
 				}
@@ -1652,10 +1789,10 @@ func queryUtxoDeletionRows(
 			return rows.Err()
 		}()
 		if scanErr != nil {
-			return nil, nil, scanErr
+			return nil, nil, 0, scanErr
 		}
 	}
-	return rowIDs, stakeRefs, nil
+	return rowIDs, stakeRefs, scriptLocked, nil
 }
 
 func (s *Store) GetUtxo(
@@ -2779,16 +2916,6 @@ WHERE credential_tag = ? AND staking_key = ?
 		}
 	}
 	return ret, nil
-}
-
-func (s *Store) GetScriptLockedSupply(txn types.Txn) (uint64, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return 0, err
-	}
-	return sumUint64Rows(ctx, db, s.dialect.Rebind(`
-SELECT amount FROM utxo
-WHERE payment_script = TRUE AND deleted_slot = 0`))
 }
 
 func (s *Store) GetUtxosByAssets(

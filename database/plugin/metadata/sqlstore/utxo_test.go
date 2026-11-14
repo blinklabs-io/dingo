@@ -179,6 +179,7 @@ func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 2_000, 256)
+	addDeletedSlotTrapIndex(t, store)
 
 	for _, nTerms := range []int{2, 4, 64, 400} {
 		t.Run(fmt.Sprintf("terms=%d", nTerms), func(t *testing.T) {
@@ -473,6 +474,7 @@ func TestMarkUtxosDeletedAtSlotUsesTxIDIndex(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 2_000, 256)
+	addDeletedSlotTrapIndex(t, store)
 
 	for _, nTerms := range []int{2, 4, 64, 400} {
 		t.Run(fmt.Sprintf("terms=%d", nTerms), func(t *testing.T) {
@@ -599,6 +601,7 @@ func TestMarkUtxosDeletedAtSlotUpdatePlansOnPrimaryKey(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 2_000, 256)
+	addDeletedSlotTrapIndex(t, store)
 
 	for _, nRows := range []int{1, 2, 4, 64, 400, 998} {
 		t.Run(fmt.Sprintf("rows=%d", nRows), func(t *testing.T) {
@@ -2209,7 +2212,7 @@ func TestQueryUtxoStakeConsumedDeltasNegatesAmounts(t *testing.T) {
 		{Hash: utxoTxIDForGroup(0, 1), Idx: 0},
 		{Hash: utxoTxIDForGroup(1, 0), Idx: 0},
 	}
-	deltas, err := store.queryUtxoStakeConsumedDeltas(ctx, store.writeDB, ids)
+	deltas, _, err := store.queryUtxoStakeConsumedDeltas(ctx, store.writeDB, ids)
 	require.NoError(t, err)
 
 	byKey := make(map[string]int64, len(deltas))

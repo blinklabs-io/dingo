@@ -57,3 +57,19 @@ func (d *Database) writeConsumedUtxoPruneFloor(slot uint64, txn *Txn) error {
 		txn,
 	)
 }
+
+// pruneScriptLockedSupplyToFloor trims the script-locked supply rows a
+// rollback can no longer reach, after a sweep that removed spent rows. The
+// floor is the higher of the sweep slot, which the sweep just recorded, and
+// the floor read before it. That covers a floor some other writer raised
+// first: the ledger persists its floor before sweeping, so the sweep's own
+// floor write is then skipped while the prune is still due.
+func (d *Database) pruneScriptLockedSupplyToFloor(
+	slot, priorFloor uint64,
+	txn *Txn,
+) error {
+	return d.utxoStore().PruneScriptLockedSupplyBefore(
+		max(slot, priorFloor),
+		txn.Metadata(),
+	)
+}

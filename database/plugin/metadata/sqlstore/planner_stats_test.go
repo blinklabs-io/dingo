@@ -102,6 +102,24 @@ SELECT tx_id, MIN(added_slot) FROM utxo GROUP BY tx_id`,
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec("UPDATE utxo SET deleted_slot = 0")
 	require.NoError(t, err)
+	addDeletedSlotTrapIndex(t, store)
+}
+
+// addDeletedSlotTrapIndex recreates idx_utxo_deleted_payment_script, the full
+// deleted_slot-leading index migration 66 drops. Without statistics SQLite
+// drives a live-row lookup from it, which is the plan these fixtures need to
+// observe; the production schema no longer offers that fallback.
+func addDeletedSlotTrapIndex(tb testing.TB, store *Store) {
+	tb.Helper()
+	_, err := store.writeDB.Exec(
+		"CREATE INDEX idx_utxo_deleted_payment_script ON utxo " +
+			"(deleted_slot, payment_script, amount)",
+	)
+	require.NoError(tb, err)
+	if store.readDB != store.writeDB {
+		// Idle read connections keep the schema they loaded at Start.
+		require.NoError(tb, store.refreshReadPool(context.Background()))
+	}
 }
 
 // statsSensitiveSpendSQL is the row-value form of the batched spend UPDATE,

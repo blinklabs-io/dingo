@@ -327,10 +327,9 @@ type Utxo struct {
 	OutputIdx   uint32
 	// PaymentScript is true when the output's payment credential is a
 	// script hash (as opposed to a key hash). It is derived from the
-	// address type at index time and used to compute the network's
-	// script-locked supply (see GetScriptLockedSupply). The composite
-	// index (deleted_slot, payment_script, amount) lets the supply sum
-	// scan only live script UTxOs.
+	// address type at index time and feeds the network's script-locked
+	// supply (see GetScriptLockedSupply), which the write primitives keep
+	// as a running total rather than a scan of this column.
 	PaymentScript bool
 	// Pointer is set only for a pointer address (types 4 and 5), which
 	// designates a stake registration certificate by position instead of

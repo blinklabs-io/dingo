@@ -185,7 +185,6 @@ func TestCatchUpDroppableManifest(t *testing.T) {
 	// Each of these is read while a catch-up holds the ledger.
 	for name, reader := range map[string]string{
 		"idx_utxo_deleted_staking_amount":        "consumed-UTxO prune",
-		"idx_utxo_deleted_payment_script":        "consumed-UTxO prune",
 		"idx_transaction_slot":                   "epoch fee total",
 		"idx_pool_opcert_sequence_pool_sequence": "opcert counter",
 	} {

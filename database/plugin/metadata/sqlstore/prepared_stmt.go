@@ -49,6 +49,9 @@ func (s *Store) hotList() []string {
 func hotStatementsFor(u *utxoSQL) []string {
 	queries := []string{
 		sumCredentialUtxoStakeQuery,
+		scriptSupplyLatestQuery,
+		scriptSupplyInsertQuery,
+		scriptSupplySetQuery,
 		rewardLiveStakeAccountQuery,
 		rewardLiveStakeUpsertQuery,
 		rewardLiveStakeUpsertKeepPoolQuery,

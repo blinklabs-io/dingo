@@ -166,7 +166,6 @@ type Querier interface {
 	GetRewardStakeInputs(ctx context.Context, epoch int64) ([]RewardStakeInput, error)
 	GetRewardStakeInputsInPoolKeyHashRange(ctx context.Context, arg GetRewardStakeInputsInPoolKeyHashRangeParams) ([]RewardStakeInput, error)
 	GetScript(ctx context.Context, hash []byte) (Script, error)
-	GetScriptLockedSupply(ctx context.Context) ([]sql.NullString, error)
 	GetSyncState(ctx context.Context, syncKey string) (string, error)
 	GetTip(ctx context.Context) (GetTipRow, error)
 	GetTokenRegistryEntry(ctx context.Context, subject string) (GetTokenRegistryEntryRow, error)

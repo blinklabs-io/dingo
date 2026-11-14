@@ -1091,6 +1091,23 @@ func ImportLedgerState(
 		)
 	}
 
+	// Replace the running script-locked total with a scan at the snapshot
+	// slot: whatever the aggregate held before the import is discarded, and
+	// rollbacks above the snapshot read a base equal to the imported set. A
+	// completed import is skipped, since blocks applied after it have since
+	// written their own rows above the snapshot slot and a scan stamped at
+	// that slot would fold their deltas into it.
+	if !models.IsPhaseCompleted(
+		completedPhase,
+		models.ImportPhaseTip,
+	) {
+		if err := cfg.Database.RebuildScriptLockedSupply(
+			ctx, slot, nil,
+		); err != nil {
+			return fmt.Errorf("seeding script-locked supply: %w", err)
+		}
+	}
+
 	// Set the chain tip
 	if !models.IsPhaseCompleted(
 		completedPhase,

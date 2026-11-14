@@ -116,18 +116,8 @@ func testSpentStakingIndex(t *testing.T, store *Store, schema string) {
 // plans the bound-parameter form, which cannot prove deleted_slot > 0 on its
 // own: the partial index is chosen because the statement states it, and the
 // same statement without it must not be.
-//
-// idx_utxo_deleted_payment_script also leads with deleted_slot and holds every
-// row, so the planner may pick it for a spent-row range. It is dropped from
-// this throwaway schema so that the choice rests on the statement text alone.
 func requireSpentRangeUsesIndex(t *testing.T, store *Store) {
 	t.Helper()
-	dropSupply := "DROP INDEX idx_utxo_deleted_payment_script"
-	if store.dialect.Name() == "mysql" {
-		dropSupply += " ON utxo"
-	}
-	_, err := store.writeDB.Exec(dropSupply)
-	require.NoError(t, err)
 	// Each output names its own producer's identity row.
 	transaction := store.dialect.QuoteIdentifier("transaction")
 	var seed []string
@@ -160,14 +150,14 @@ func requireSpentRangeUsesIndex(t *testing.T, store *Store) {
 		}
 	}
 	for _, statement := range seed {
-		_, err = store.writeDB.Exec(statement)
+		_, err := store.writeDB.Exec(statement)
 		require.NoError(t, err)
 	}
 	analyze := "ANALYZE TABLE utxo"
 	if store.dialect.Name() == "postgres" {
 		analyze = "ANALYZE utxo"
 	}
-	_, err = store.writeDB.Exec(analyze)
+	_, err := store.writeDB.Exec(analyze)
 	require.NoError(t, err)
 
 	// Each name is distinct: the pooled connection keeps its prepared

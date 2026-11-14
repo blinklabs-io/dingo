@@ -104,6 +104,7 @@ type overlayInput struct {
 	tag         int64
 	stakingKey  []byte
 	amount      sql.NullString
+	script      sql.NullBool
 	deletedSlot uint64
 	// spentBy is the consuming hash, set only by this batch's own spends;
 	// spentByID is the consuming transaction's row id, from the row or the
@@ -529,7 +530,8 @@ func overlayPrefetchQuery(keys int) string {
 	values := strings.TrimSuffix(strings.Repeat("(?, ?), ", keys), ", ")
 	return `-- name: BatchOverlayPrefetchInputs :many
 SELECT u.id, t.hash, u.output_idx, u.credential_tag,
-       u.staking_key, u.amount, u.deleted_slot, u.spent_at_tx_id
+       u.staking_key, u.amount, u.deleted_slot, u.spent_at_tx_id,
+       u.payment_script
 FROM (VALUES ` + values + `) AS k
 CROSS JOIN "transaction" AS t ON t.hash = k.column1
 CROSS JOIN utxo AS u ON u.tx_id = t.id AND u.output_idx = k.column2`
@@ -687,7 +689,7 @@ func scanOverlayInputs(rows *sql.Rows, overlay *utxoOverlay) error {
 		)
 		if err := rows.Scan(
 			&in.id, &txID, &outputIdx, &in.tag, &in.stakingKey,
-			&in.amount, &deletedSlot, &in.spentByID,
+			&in.amount, &deletedSlot, &in.spentByID, &in.script,
 		); err != nil {
 			return err
 		}
@@ -758,20 +760,21 @@ func (o *utxoOverlay) collateralFee(
 // their stake deltas.
 func (o *utxoOverlay) create(
 	produced []models.Utxo,
-) ([]stakeCredentialDelta, error) {
+) ([]stakeCredentialDelta, int64, error) {
 	o.mutations++
+	var scriptLocked int64
 	deltas := make([]stakeCredentialDelta, 0, len(produced))
 	for i := range produced {
 		model := produced[i]
 		key := newOverlayKey(model.TxId, model.OutputIdx)
 		if _, exists := o.created[key]; exists {
-			return nil, fmt.Errorf(
+			return nil, 0, fmt.Errorf(
 				"%w: output %x#%d produced twice in one batch",
 				types.ErrBatchUtxoOverlayConflict, model.TxId, model.OutputIdx,
 			)
 		}
 		if _, exists := o.importedOutputs[key]; exists {
-			return nil, fmt.Errorf(
+			return nil, 0, fmt.Errorf(
 				"%w: output %x#%d is already stored by an import",
 				types.ErrBatchUtxoOverlayConflict, model.TxId, model.OutputIdx,
 			)
@@ -788,17 +791,25 @@ func (o *utxoOverlay) create(
 		o.order = append(o.order, out)
 		o.unwritten++
 		o.stats.Created++
+		locked, err := modelScriptLockedContribution(&out.model)
+		if err != nil {
+			return nil, 0, err
+		}
+		scriptLocked, err = checkedSupplyStep(scriptLocked, locked)
+		if err != nil {
+			return nil, 0, err
+		}
 		if len(model.StakingKey) > 0 {
 			gain, err := producedStakeCredentialDelta(
 				model.CredentialTag, model.StakingKey, model.Amount, true,
 			)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			deltas = append(deltas, gain)
 		}
 	}
-	return deltas, nil
+	return deltas, scriptLocked, nil
 }
 
 // consume spends one transaction level's unique inputs. It returns the
@@ -811,7 +822,7 @@ func (o *utxoOverlay) consume(
 	slot uint64,
 	hash []byte,
 	txID int64,
-) (spent, skipped []stakeCredentialDelta, err error) {
+) (spent, skipped []stakeCredentialDelta, scriptLocked int64, err error) {
 	o.mutations++
 	for _, input := range inputs {
 		key := newOverlayKey(input.Hash, input.Idx)
@@ -824,7 +835,7 @@ func (o *utxoOverlay) consume(
 					)
 					continue
 				}
-				return nil, nil, overlayConflict(
+				return nil, nil, 0, overlayConflict(
 					input, out.spentByID, out.spentSlot, txID,
 				)
 			}
@@ -853,6 +864,19 @@ func (o *utxoOverlay) consume(
 					o.unwritten--
 				}
 			}
+			locked, err := scriptLockedContribution(
+				sql.NullBool{Bool: out.model.PaymentScript, Valid: true},
+				sql.NullString{
+					String: decimalUint64(out.model.Amount), Valid: true,
+				},
+			)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			scriptLocked, err = checkedSupplyStep(scriptLocked, locked)
+			if err != nil {
+				return nil, nil, 0, err
+			}
 			delta, ok, err := consumedUtxoStakeDelta(
 				int64(out.model.CredentialTag),
 				out.model.StakingKey,
@@ -861,7 +885,7 @@ func (o *utxoOverlay) consume(
 				},
 			)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, 0, err
 			}
 			if ok {
 				spent = append(spent, delta)
@@ -870,7 +894,7 @@ func (o *utxoOverlay) consume(
 		}
 		in, err := o.lookupInput(ctx, db, input)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		if in == nil {
 			// The per-row spend matches nothing and the follow-up read
@@ -882,7 +906,7 @@ func (o *utxoOverlay) consume(
 				skipped = appendStakeTouch(skipped, in.tag, in.stakingKey)
 				continue
 			}
-			return nil, nil, overlayConflict(
+			return nil, nil, 0, overlayConflict(
 				input, in.spentByID.Int64, in.deletedSlot, txID,
 			)
 		}
@@ -896,17 +920,25 @@ func (o *utxoOverlay) consume(
 		if in.deleteOnSpend {
 			o.deletes = append(o.deletes, in.id)
 		}
+		locked, err := scriptLockedContribution(in.script, in.amount)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		scriptLocked, err = checkedSupplyStep(scriptLocked, locked)
+		if err != nil {
+			return nil, nil, 0, err
+		}
 		delta, ok, err := consumedUtxoStakeDelta(
 			in.tag, in.stakingKey, in.amount,
 		)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		if ok {
 			spent = append(spent, delta)
 		}
 	}
-	return spent, skipped, nil
+	return spent, skipped, scriptLocked, nil
 }
 
 func appendStakeTouch(
@@ -1432,15 +1464,26 @@ func (s *Store) setTransactionOverlayUtxos(
 	if o.err != nil {
 		return nil, nil, nil, o.err
 	}
-	produced, err = o.create(producedModels)
+	produced, createdScript, err := o.create(producedModels)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	consumed, skipped, err = o.consume(
+	consumed, skipped, consumedScript, err := o.consume(
 		ctx, db, uniqueConsumed, point.Slot, transaction.Hash().Bytes(),
 		transactionID,
 	)
-	return produced, consumed, skipped, err
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// The overlay elides rows, so the spent and created amounts are applied
+	// logically here, in the batch's transaction, as the per-row path's
+	// insert and spend primitives apply them.
+	if err := s.addScriptLockedSupply(
+		ctx, db, point.Slot, createdScript-consumedScript,
+	); err != nil {
+		return nil, nil, nil, err
+	}
+	return produced, consumed, skipped, nil
 }
 
 // stakeRowState is one credential's reward_live_stake row as the replay

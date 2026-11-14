@@ -16,7 +16,6 @@ package sqlstore
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -45,12 +44,12 @@ SELECT i,0,1,2,'1' FROM n`)
 	require.NoError(t, err)
 	// An import's stale statistics can describe all historical spends as one
 	// deleted-slot value, so LIMIT/rowid ordering beats the useful range index.
-	_, err = s.writeDB.Exec("UPDATE sqlite_stat1 SET stat='20003 20003 20003 20003' WHERE idx IN ('idx_utxo_deleted_payment_script','idx_utxo_deleted_staking_amount')")
+	_, err = s.writeDB.Exec("UPDATE sqlite_stat1 SET stat='20003 20003 20003 20003' WHERE idx = 'idx_utxo_deleted_staking_amount'")
 	require.NoError(t, err)
 	var hasStat4 int
 	require.NoError(t, s.writeDB.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='sqlite_stat4'").Scan(&hasStat4))
 	if hasStat4 > 0 {
-		_, err = s.writeDB.Exec("DELETE FROM sqlite_stat4 WHERE idx IN ('idx_utxo_deleted_payment_script','idx_utxo_deleted_staking_amount')")
+		_, err = s.writeDB.Exec("DELETE FROM sqlite_stat4 WHERE idx = 'idx_utxo_deleted_staking_amount'")
 		require.NoError(t, err)
 	}
 	require.NoError(t, s.refreshReadPool(context.Background()))
@@ -74,10 +73,8 @@ SELECT i,0,1,2,'1' FROM n`)
 	require.Empty(t, empty)
 	// A deferred index rebuild may leave no deleted-slot index. The query must
 	// remain correct rather than turn a planner hint into an operational error.
-	for _, name := range []string{"idx_utxo_deleted_payment_script", "idx_utxo_deleted_staking_amount"} {
-		_, err = s.writeDB.Exec(fmt.Sprintf("DROP INDEX %s", name))
-		require.NoError(t, err)
-	}
+	_, err = s.writeDB.Exec("DROP INDEX idx_utxo_deleted_staking_amount")
+	require.NoError(t, err)
 	got, err = s.GetSpentUtxosMissingAddressAfterSlot(100, 0, 128, nil)
 	require.NoError(t, err)
 	require.Len(t, got, 2)
