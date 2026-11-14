@@ -906,7 +906,7 @@ func TestLeiosRollbackSkipsUndoForEndorserTransactionRecordedElsewhere(
 	earlier := leiosApplyTestRankingPoint(0x81)
 	require.NoError(t, f.db.Transaction(t.Context(), true).Do(
 		func(txn *database.Txn) error {
-			_, _, err := f.ls.applyEndorserBlock(
+			_, _, _, err := f.ls.applyEndorserBlock(
 				t.Context(),
 				txn,
 				earlier,
