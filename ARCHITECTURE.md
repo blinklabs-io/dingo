@@ -13204,8 +13204,8 @@ choice of key source is never silently overridden; `shelleyKesAgentAddress`
 is likewise exclusive with both and accepts only sign mode. Its server pin is
 optional but must be 64 hex characters when set, the client certificate and
 key are optional but set as a pair, and `shelleyKesAgentPlaintext` takes
-neither, since both need TLS. None of these four is accepted without
-`shelleyKesAgentAddress`, so a mistyped remote configuration is refused rather
+neither, since both need TLS. None of these four, nor
+`shelleyKesAgentProfile`, is accepted without `shelleyKesAgentAddress`, so a mistyped remote configuration is refused rather
 than falling back to local-file or Unix-socket signing.
 `Config.Validate` no longer requires a local `shelleyKesKey` when a KES agent
 socket or address is configured — an agent-only configuration must be able to
@@ -13238,8 +13238,8 @@ replaces the single-pool `shelley*` key and KES source settings (the KES
 agent sign timeout and key watch interval apply to every pool). Configuration
 validation refuses the two together, in YAML and when a library caller mixes
 `WithBlockProducerPools` with the single-pool options in `New`, and also
-refuses two entries sharing an opcert or a remote agent address, and more than
-one pool
+refuses two entries sharing an opcert, two entries sharing a remote agent
+address without distinct profile names, and more than one pool
 with Leios forging or voting, whose pipeline and vote key are wired for one.
 
 The first pool keeps the node's own forging fields (`blockForger`,
@@ -13249,11 +13249,17 @@ credentials, KES agent client, leader election, durable forge fence (keyed by
 pool) and `BlockForger`. Each pool's key source (`poolKeySource`) loads and
 validates its credentials exactly as the first pool's does, with one KES
 agent client per pool. Over a local agent socket one agent can serve every
-pool through its profiles. Over the remote listener it cannot: an attested
-session cannot name a profile, so Bursa allows one profile per attested
-listener, and each pool signing remotely needs its own agent and address.
-Configuration validation refuses two pools with the same
-`shelleyKesAgentAddress`.
+pool through its profiles. Over the remote listener the same holds when each
+pool names its profile: `shelleyKesAgentProfile` is sent in the attestation
+request, and the agent binds the session to that profile. The name is used
+rather than the KES verification key from the local opcert, because Bursa
+matches a key against each profile's current active key; once the agent moves
+to a newer key than the node's certificate names, admission by key would be
+refused and the node would never learn the newer certificate from the agent.
+Configuration validation refuses two pools that reach one listener, through
+`shelleyKesAgentAddress` or any entry of `shelleyKesAgentAddresses`, unless
+both name a profile and the profiles differ. A pool without a profile sends
+none, so an agent with one profile admits it as before.
 
 **Startup and isolation.** The other pools start after the first. A pool whose
 serve-key KES source cannot be reached -- an agent that never pushes its key --
