@@ -2050,3 +2050,39 @@ func TestLoadBlobsWithDBResumesAfterRetiredChunksWereDeleted(t *testing.T) {
 	assert.Equal(t, wantTip.Slot, final[0].Slot)
 	assert.Equal(t, wantTip.Hash, final[0].Hash)
 }
+
+// A resumed copy that only reaches the final chunk must still retire the
+// committed chunks below it.
+func TestLoadBlobsWithDBRetiresPrefixWhenResumeStaysInOneChunk(t *testing.T) {
+	t.Parallel()
+
+	const chunks = 3
+	dir := copyImmutableChunkPrefix(t, chunks)
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Commit chunks 0 and 1 without retiring anything, as an interrupted
+	// copy leaves them between retirement strides.
+	partialDir := copyImmutableChunkPrefix(t, chunks-1)
+	_, err := LoadBlobsWithDB(
+		context.Background(), &config.Config{}, logger, partialDir, db,
+	)
+	require.NoError(t, err)
+
+	var recorded []uint64
+	_, err = LoadBlobsWithDB(
+		context.Background(), &config.Config{}, logger, dir, db,
+		WithChunkRetirement(func(firstKept uint64) error {
+			recorded = append(recorded, firstKept)
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{chunks - 1}, recorded)
+	for n := range uint64(chunks - 1) {
+		_, statErr := os.Stat(filepath.Join(
+			dir, immutable.ChunkName(n)+".chunk",
+		))
+		require.ErrorIs(t, statErr, os.ErrNotExist, "chunk %d", n)
+	}
+}

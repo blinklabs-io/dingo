@@ -1873,6 +1873,9 @@ func Sync(
 		// (hundreds of GB there) until it ends can exhaust the disk. With
 		// sync_status now "backfill", serve resumes the backfill without it.
 		if cfg.CleanupAfterLoad {
+			if serr := syncBlobBeforeCleanup(db); serr != nil {
+				return SyncResult{}, serr
+			}
 			bootstrapResult.Cleanup(logger)
 			cleanedUp = true
 		}
@@ -1962,6 +1965,9 @@ func Sync(
 
 	// Clean up temporary files after a successful complete load.
 	if cfg.CleanupAfterLoad && !cleanedUp {
+		if serr := syncBlobBeforeCleanup(db); serr != nil {
+			return SyncResult{}, serr
+		}
 		bootstrapResult.Cleanup(logger)
 	}
 
@@ -2151,4 +2157,15 @@ func parseOptionalDuration(
 		return 0, fmt.Errorf("invalid %s %q: %w", name, value, err)
 	}
 	return duration, nil
+}
+
+// syncBlobBeforeCleanup flushes the blob store before the extracted immutable
+// tree is deleted. Blob-only batch commits are not fsynced, and a rerun that
+// finds nothing left to copy never reaches the copy loop's own flush, so the
+// tree must not be removed until the blocks it holds are durable.
+func syncBlobBeforeCleanup(db *database.Database) error {
+	if err := db.Blob().Sync(); err != nil {
+		return fmt.Errorf("syncing blob store before cleanup: %w", err)
+	}
+	return nil
 }

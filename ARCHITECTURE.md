@@ -13741,14 +13741,16 @@ copy that runs during the download delete extracted chunks' `.chunk`,
 `.primary` and `.secondary` files after their blocks commit, so the extracted
 tree and the blob store do not both hold the chain. The post-download copy
 groups retirement work across 64 chunk numbers and retires the remaining
-prefix at completion; the pipelined copy already advances in 64-chunk steps.
+prefix at completion, including a resumed copy that stays inside one chunk; the
+pipelined copy already advances in 64-chunk steps.
 Each retirement keeps the chunk holding the newest committed block because a
 resumed copy restarts from the chain tip there. Before deleting, the copy
 records that chunk number in the ephemeral `mithril_immutable_retired_below`
 sync-state key; a resumed sync starts its download at that chunk instead of
 fetching deleted chunks, and completion clears the key with the rest of
 sync_state. Everything that reads the extracted tree (certified tip, catch-up
-ancestry check) runs before the copy starts; nothing reads it afterwards.
+ancestry check) runs before the copy starts; nothing reads it afterwards. The blob store is synced before the tree is removed, so a rerun that
+copies nothing still never deletes blocks that are not yet durable.
 
 The Core-mode copy omits produced-UTxO offset references, which are used by
 API-mode UTxO resolution. It does not mark the immutable offset range complete;

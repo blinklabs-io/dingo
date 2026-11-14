@@ -1996,7 +1996,9 @@ func copyBlocksRawWithCallback(
 				fmt.Errorf("loading blocks: %w", err)
 		}
 	}
-	if retire != nil && batchChunkSet && batchChunk > firstChunk &&
+	// A resumed copy that stays inside one chunk never advances past its
+	// first chunk, so the committed prefix below it is retired here.
+	if retire != nil && batchChunkSet &&
 		(!retiredSet || batchChunk > retiredChunk) {
 		if err := retire(batchChunk); err != nil {
 			return blocksCopied, immutableTip.Slot,
