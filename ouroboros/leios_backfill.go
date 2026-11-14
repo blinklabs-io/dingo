@@ -256,7 +256,10 @@ const leiosBackfillAffinityWindow = 2 * time.Minute
 // folded into one cooldown:
 //
 //   - busy: another fetch holds this connection's guard. Not an attempt; the
-//     connection keeps its place and its budget share is not consumed.
+//     connection keeps its place and its budget share is not consumed. When
+//     every usable connection was busy and ctx is marked
+//     ledger.WithRequiredEndorserBlockFetch, the fetch then waits for the
+//     preferred busy connection within ctx and the overall budget.
 //   - dead: this connection's leios-fetch request slot is permanently
 //     abandoned. A cooldown cannot repair it, so the connection is recycled
 //     (one request per connection) and ordered last; the replacement dialled by
@@ -357,6 +360,31 @@ func (o *Ouroboros) fetchEndorserBlockWithCandidates(
 		time.Now(),
 	)
 	var lastErr, busyErr error
+	// The first busy candidate, in preference order, is the one a required
+	// fetch waits for if no connection could be asked at all.
+	var busyConnId ouroboros.ConnectionId
+	var busyClient *oleiosfetch.Client
+	// finish applies the bookkeeping shared by a sweep attempt and the
+	// required-fetch wait below, and reports whether the endorser block is now
+	// cached complete. The recycle request is published here, with the
+	// connection's fetch guard already released, so no lock is held across an
+	// event-bus publish.
+	finish := func(connId ouroboros.ConnectionId, err error) (bool, error) {
+		if classifyLeiosFetchFailure(err) == leiosFetchFailureDead &&
+			o.leiosFetchGuardFor(connId).takeRecycleEvent() {
+			o.requestLeiosFetchConnRecycle(connId, point, err)
+		}
+		if err != nil {
+			return false, err
+		}
+		if data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash); ok &&
+			data.completeTxCache() && data.slotVerified {
+			return true, nil
+		}
+		return false, errors.New(
+			"leios backfill: fetch completed but cache incomplete",
+		)
+	}
 	usableConnection := false
 	remainingCandidates := len(connIds)
 	counted := make(map[ouroboros.ConnectionId]bool, len(connIds))
@@ -434,39 +462,54 @@ func (o *Ouroboros) fetchEndorserBlockWithCandidates(
 		// their cooldown state in fetch-completion order. Doing it here, after
 		// the guard is released, would let a slow failure's mark land after a
 		// newer success's mark and wrongly cool down a healthy connection.
-		err := fetch(
+		done, err := finish(connId, fetch(
 			ctx,
 			connId,
 			conn.LeiosFetch().Client,
 			point,
 			attemptDeadline,
-		)
-		// The recycle request is published here, with the connection's fetch
-		// guard already released, so no lock is held across an event-bus
-		// publish.
-		if classifyLeiosFetchFailure(err) == leiosFetchFailureDead &&
-			o.leiosFetchGuardFor(connId).takeRecycleEvent() {
-			o.requestLeiosFetchConnRecycle(connId, point, err)
-		}
-		if err != nil {
-			// A busy connection was never asked, so its error must not mask
-			// the outcome of a connection that was.
-			if classifyLeiosFetchFailure(err) == leiosFetchFailureBusy {
-				if busyErr == nil {
-					busyErr = err
-				}
-				continue
-			}
-			lastErr = err
-			continue
-		}
-		if data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash); ok &&
-			data.completeTxCache() && data.slotVerified {
+		))
+		if done {
 			return nil
 		}
-		lastErr = errors.New(
-			"leios backfill: fetch completed but cache incomplete",
-		)
+		// A busy connection was never asked, so its error must not mask
+		// the outcome of a connection that was.
+		if classifyLeiosFetchFailure(err) == leiosFetchFailureBusy {
+			if busyErr == nil {
+				busyErr = err
+				busyConnId = connId
+				busyClient = conn.LeiosFetch().Client
+			}
+			continue
+		}
+		lastErr = err
+	}
+	// Every usable connection was busy serving another fetch, so nothing was
+	// asked. A background prefetch gives up here and is re-offered later, but
+	// a required fetch is the certified closure block application is blocked
+	// on: returning busy would fail the chunk and restart the pipeline, which
+	// also cancels in-flight fetches and leaves their request slots abandoned.
+	// Wait for the preferred busy connection instead, within ctx and the
+	// overall budget, the same way the tip path queues on the guard
+	// (dispatchLeiosFetchReserved). Waiting only after a full non-blocking
+	// sweep keeps failover to an idle connection first.
+	if lastErr == nil && busyErr != nil && busyClient != nil &&
+		ledger.IsRequiredEndorserBlockFetch(ctx) && ctx.Err() == nil {
+		done, err := finish(busyConnId, fetch(
+			withLeiosFetchGuardWait(ctx),
+			busyConnId,
+			busyClient,
+			point,
+			overall,
+		))
+		if done {
+			return nil
+		}
+		if classifyLeiosFetchFailure(err) == leiosFetchFailureBusy {
+			busyErr = err
+		} else {
+			lastErr = err
+		}
 	}
 	if lastErr == nil {
 		lastErr = busyErr
@@ -584,12 +627,20 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 ) (err error) {
 	g := o.leiosFetchGuardFor(connId)
 	// The strict leios-fetch client cannot accept a second request while a
-	// tip-driven or backfill fetch is in progress. Do not wait here: the
-	// per-attempt deadline below would otherwise start only after the wait and
-	// failover could stall indefinitely behind the existing fetch. Busy is not a
-	// peer failure, so return before installing the cooldown outcome defer.
+	// tip-driven or backfill fetch is in progress. A sweep attempt does not
+	// wait here, so failover moves on to an idle connection instead of
+	// stalling behind the existing fetch. Only the required-fetch wait in
+	// fetchEndorserBlockWithCandidates, after a sweep found every connection
+	// busy, marks ctx to queue on the guard; that wait is bounded by ctx and
+	// deadline. Busy, a cancelled wait and an expired wait are not peer
+	// failures, so return before installing the cooldown outcome defer.
 	if !g.mu.TryLock() {
-		return errLeiosBackfillConnBusy
+		if !leiosFetchWaitsForGuard(ctx) {
+			return errLeiosBackfillConnBusy
+		}
+		if err := g.lockUntil(ctx, deadline); err != nil {
+			return err
+		}
 	}
 	defer g.mu.Unlock()
 	// Bound this connection's attempt so a slow-but-alive relay cannot park the
@@ -714,6 +765,67 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		return fmt.Errorf("store txs: %w", err)
 	}
 	return nil
+}
+
+type leiosFetchGuardWaitKey struct{}
+
+// withLeiosFetchGuardWait marks ctx so fetchEndorserBlockOnConn waits for a
+// held connection guard instead of returning errLeiosBackfillConnBusy.
+func withLeiosFetchGuardWait(ctx context.Context) context.Context {
+	return context.WithValue(ctx, leiosFetchGuardWaitKey{}, true)
+}
+
+func leiosFetchWaitsForGuard(ctx context.Context) bool {
+	wait, _ := ctx.Value(leiosFetchGuardWaitKey{}).(bool)
+	return wait
+}
+
+// lockUntil acquires g.mu, waiting until the current holder releases it, ctx
+// is done or deadline passes (a zero deadline means no deadline). It returns
+// ctx.Err() on cancellation and a wrapped errLeiosBackfillConnBusy when the
+// deadline passes first, with g.mu not held in either case.
+//
+// sync.Mutex has no context-aware Lock, so the blocking Lock runs in a helper
+// goroutine and the waiter queues on the guard alongside the tip path's
+// blocking Lock. If the wait is abandoned the helper still takes the guard
+// when the holder releases it and releases it again at once, so an abandoned
+// wait never leaves the guard held; the helper lives only as long as the
+// current holder's fetch, which is bounded by that fetch's own deadline.
+func (g *leiosFetchGuard) lockUntil(
+	ctx context.Context,
+	deadline time.Time,
+) error {
+	if g.mu.TryLock() {
+		return nil
+	}
+	acquired := make(chan struct{})
+	go func() {
+		g.mu.Lock()
+		close(acquired)
+	}()
+	var expired <-chan time.Time
+	if !deadline.IsZero() {
+		timer := time.NewTimer(time.Until(deadline))
+		defer timer.Stop()
+		expired = timer.C
+	}
+	var err error
+	select {
+	case <-acquired:
+		return nil
+	case <-ctx.Done():
+		err = ctx.Err()
+	case <-expired:
+		err = fmt.Errorf(
+			"%w: still held at the attempt deadline",
+			errLeiosBackfillConnBusy,
+		)
+	}
+	go func() {
+		<-acquired
+		g.mu.Unlock()
+	}()
+	return err
 }
 
 // leiosBackfillConnOrder orders connIds for a by-point backfill attempt.

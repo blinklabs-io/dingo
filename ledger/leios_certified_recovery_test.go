@@ -246,6 +246,122 @@ func TestEnsureReferencedEndorserBlocksRetriesUntilCertifiedEbArrives(
 	)
 }
 
+// leiosBusyConnProbe models one leios-fetch connection whose guard is held by
+// a background prefetch of another endorser block until releaseAt, following
+// the EndorserBlockFetcherFunc contract: an unmarked fetch fails busy at once,
+// a fetch marked WithRequiredEndorserBlockFetch waits for the guard within ctx
+// and then serves the endorser block.
+type leiosBusyConnProbe struct {
+	mu        sync.Mutex
+	releaseAt time.Time
+	attempts  int
+	waited    int
+	available bool
+}
+
+func (p *leiosBusyConnProbe) fetch(
+	ctx context.Context,
+	_ uint64,
+	_ []byte,
+) error {
+	p.mu.Lock()
+	p.attempts++
+	held := time.Until(p.releaseAt)
+	p.mu.Unlock()
+	if held > 0 {
+		if !IsRequiredEndorserBlockFetch(ctx) {
+			return errors.New(
+				"leios backfill: connection fetch already in progress",
+			)
+		}
+		timer := time.NewTimer(held)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
+		p.mu.Lock()
+		p.waited++
+		p.mu.Unlock()
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.available = true
+	return nil
+}
+
+func (p *leiosBusyConnProbe) provider(
+	[]byte,
+	uint64,
+) ([]cbor.RawMessage, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return nil, p.available
+}
+
+// TestEnsureReferencedEndorserBlocksWaitsOutBusyConnection is the single
+// leios-fetch connection case: a background prefetch of a later endorser block
+// holds the only connection for longer than fetchRequired's attempts span
+// (about 1.75s), which is common for a slow fetch. The mandatory certified
+// fetch must wait for the connection within its budget and let the chunk
+// through, rather than collect four instant busy failures and fail the chunk.
+func TestEnsureReferencedEndorserBlocksWaitsOutBusyConnection(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+		const held = 5 * time.Second
+		probe := &leiosBusyConnProbe{releaseAt: time.Now().Add(held)}
+		cfg := LedgerStateConfig{
+			Logger:                 slog.New(slog.NewTextHandler(io.Discard, nil)),
+			EndorserBlockProvider:  probe.provider,
+			EndorserBlockFetcher:   probe.fetch,
+			EndorserBlockWaitSlots: 0,
+		}
+		ls := &LedgerState{config: cfg}
+		ls.leiosBackfill = newLeiosBackfiller(cfg)
+		leiosTestEnableCertifiedBlock(t, ls, certifier)
+		start := time.Now()
+
+		require.NoError(t, ls.ensureReferencedEndorserBlocks(
+			t.Context(),
+			[]gledger.Block{parent, certifier},
+		))
+		require.GreaterOrEqual(t, time.Since(start), held,
+			"the certified fetch must have waited for the busy connection")
+		probe.mu.Lock()
+		defer probe.mu.Unlock()
+		require.Equal(t, 1, probe.waited,
+			"the required fetch must queue on the busy connection")
+	})
+}
+
+// TestLeiosBackfillSpawnFetchIsNotRequired keeps background prefetches
+// non-blocking: only the mandatory certified fetch may wait for a busy
+// connection, so a prefetch never queues ahead of the fetch block application
+// is waiting for.
+func TestLeiosBackfillSpawnFetchIsNotRequired(t *testing.T) {
+	t.Parallel()
+	required := make(chan bool, 1)
+	b := newLeiosBackfiller(LedgerStateConfig{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		EndorserBlockFetcher: func(ctx context.Context, _ uint64, _ []byte) error {
+			required <- IsRequiredEndorserBlockFetch(ctx)
+			return nil
+		},
+	})
+	b.spawn(t.Context(), leiosEbRef{slot: 7, hash: lcommon.NewBlake2b256([]byte{7})})
+	select {
+	case got := <-required:
+		require.False(t, got, "a background spawn must not be marked required")
+	case <-time.After(5 * time.Second):
+		t.Fatal("spawned fetch did not run")
+	}
+}
+
 // TestEnsureReferencedEndorserBlocksBoundsCertifiedRetry covers the absence
 // case: an endorser block no peer can serve must reach a bounded terminal
 // outcome -- a definite error naming the endorser block AND the reason the fetch
