@@ -35,11 +35,11 @@ type producerKeys struct {
 	opCert                string
 	agentSocket           string
 	agentMode             string
-	agentAddress          string
+	agentAddresses        []string
+	agentPlaintext        bool
 	agentClientCertFile   string
 	agentClientKeyFile    string
 	agentServerSPKISHA256 string
-	agentPlaintext        bool
 }
 
 // poolKeySource loads and validates one pool's credentials. client and
@@ -70,12 +70,24 @@ func producerKeysFromPool(p BlockProducerPool) producerKeys {
 		opCert:                p.ShelleyOperationalCertificate,
 		agentSocket:           p.ShelleyKESAgentSocket,
 		agentMode:             p.ShelleyKESAgentMode,
-		agentAddress:          p.ShelleyKESAgentAddress,
+		agentAddresses:        p.RemoteAgentAddresses(),
+		agentPlaintext:        p.ShelleyKESAgentPlaintext,
 		agentClientCertFile:   p.ShelleyKESAgentClientCertFile,
 		agentClientKeyFile:    p.ShelleyKESAgentClientKeyFile,
 		agentServerSPKISHA256: p.ShelleyKESAgentServerSPKISHA256,
-		agentPlaintext:        p.ShelleyKESAgentPlaintext,
 	}
+}
+
+// remoteAgentAddresses is the top-level remote agent list:
+// shelleyKESAgentAddresses, or shelleyKESAgentAddress as a one-entry list.
+func (n *Node) remoteAgentAddresses() []string {
+	if len(n.config.shelleyKESAgentAddresses) > 0 {
+		return n.config.shelleyKESAgentAddresses
+	}
+	if n.config.shelleyKESAgentAddress != "" {
+		return []string{n.config.shelleyKESAgentAddress}
+	}
+	return nil
 }
 
 // producerPoolCount is how many pools this node forges for.
@@ -105,11 +117,11 @@ func (n *Node) primaryKeySource() *poolKeySource {
 			opCert:                n.config.shelleyOperationalCertificate,
 			agentSocket:           n.config.shelleyKESAgentSocket,
 			agentMode:             n.config.shelleyKESAgentMode,
-			agentAddress:          n.config.shelleyKESAgentAddress,
+			agentAddresses:        n.remoteAgentAddresses(),
+			agentPlaintext:        n.config.shelleyKESAgentPlaintext,
 			agentClientCertFile:   n.config.shelleyKESAgentClientCertFile,
 			agentClientKeyFile:    n.config.shelleyKESAgentClientKeyFile,
 			agentServerSPKISHA256: n.config.shelleyKESAgentServerSPKISHA256,
-			agentPlaintext:        n.config.shelleyKESAgentPlaintext,
 		},
 		client:        &n.kesAgentClient,
 		cancel:        &n.kesAgentCancel,
@@ -295,7 +307,7 @@ func (ks *poolKeySource) loadBlockProducerCredentialsFromAgent(
 	ks.closeKESAgentClient()
 
 	mode := ks.keys.agentMode
-	if ks.keys.agentAddress != "" {
+	if len(ks.keys.agentAddresses) > 0 {
 		// A remote agent serves only sign mode. Config validation rejects
 		// any other mode with an address, but a library caller can skip it.
 		if mode != "" && mode != kesagent.ModeSign {
@@ -474,11 +486,12 @@ func (ks *poolKeySource) startKESAgentSign(creds *forging.PoolCredentials) error
 }
 
 // newKESAgentSignClient dials nothing yet: it builds the remote client when
-// shelleyKESAgentAddress is set, otherwise the local socket client.
+// remote agent addresses are set, otherwise the local socket client. Several
+// addresses give a failover client that signs through one at a time.
 func (ks *poolKeySource) newKESAgentSignClient(
 	opCertKey *bursa.LoadedKey,
 ) (kesAgentSignClient, error) {
-	if ks.keys.agentAddress == "" {
+	if len(ks.keys.agentAddresses) == 0 {
 		return kesagent.NewClient(kesagent.Config{
 			SocketPath:        ks.keys.agentSocket,
 			Mode:              kesagent.ModeSign,
@@ -489,9 +502,8 @@ func (ks *poolKeySource) newKESAgentSignClient(
 			Metrics:           ks.metrics(),
 		})
 	}
-	return kesagent.NewRemoteClient(kesagent.RemoteConfig{
+	cfg := kesagent.RemoteConfig{
 		OnNewerOpCert:     ks.onNewerOpCert,
-		Address:           ks.keys.agentAddress,
 		ClientCertFile:    ks.keys.agentClientCertFile,
 		ClientKeyFile:     ks.keys.agentClientKeyFile,
 		ServerSPKISHA256:  ks.keys.agentServerSPKISHA256,
@@ -502,20 +514,25 @@ func (ks *poolKeySource) newKESAgentSignClient(
 		SignTimeout:       ks.n.config.shelleyKESAgentSignTimeout,
 		Logger:            ks.n.config.logger,
 		Metrics:           ks.metrics(),
-	})
+	}
+	if len(ks.keys.agentAddresses) == 1 {
+		cfg.Address = ks.keys.agentAddresses[0]
+		return kesagent.NewRemoteClient(cfg)
+	}
+	return kesagent.NewFailoverClient(ks.keys.agentAddresses, cfg)
 }
 
 // kesAgentConfigured reports whether KES signing goes through an agent,
 // local or remote, rather than a local key file.
 func (ks *poolKeySource) kesAgentConfigured() bool {
 	return ks.keys.agentSocket != "" ||
-		ks.keys.agentAddress != ""
+		len(ks.keys.agentAddresses) > 0
 }
 
 // kesAgentSignMode reports whether a configured KES agent signs headers
 // (sign mode, local or remote) rather than pushing the key (serve-key).
 func (ks *poolKeySource) kesAgentSignMode() bool {
-	return ks.keys.agentAddress != "" ||
+	return len(ks.keys.agentAddresses) > 0 ||
 		ks.keys.agentMode == kesagent.ModeSign
 }
 

@@ -880,6 +880,16 @@ func TestBuildDingoConfigForwardsBlockProducerPools(t *testing.T) {
 			ShelleyKESAgentClientKeyFile:    "/keys/b/client.key",
 			ShelleyKESAgentServerSPKISHA256: strings.Repeat("ab", 32),
 		},
+		{
+			ShelleyVRFKey:                 "/keys/c/vrf.skey",
+			ShelleyOperationalCertificate: "/keys/c/node.cert",
+			ShelleyKESAgentAddresses: []string{
+				"agent-a.example:3105",
+				"agent-b.example:3105",
+			},
+			ShelleyKESAgentMode:      "sign",
+			ShelleyKESAgentPlaintext: true,
+		},
 	}
 	cfg := &config.Config{
 		BlockProducer:      true,
@@ -898,7 +908,7 @@ func TestBuildDingoConfigForwardsBlockProducerPools(t *testing.T) {
 		chainsync.HeaderSyncStrategyPrimary,
 	)
 
-	if got := built.BlockProducerPools(); !slices.Equal(got, want) {
+	if got := built.BlockProducerPools(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("block producer pools = %+v, want %+v", got, want)
 	}
 }

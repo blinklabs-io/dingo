@@ -326,3 +326,160 @@ blockProducerPools:
 	require.Equal(t, "serve-key", cfg.BlockProducerPools[1].ShelleyKESAgentMode)
 	require.Equal(t, "/run/kes-b.sock", cfg.BlockProducerPools[1].ShelleyKESAgentSocket)
 }
+
+func TestValidateRemoteKESAgentAddresses(t *testing.T) {
+	t.Parallel()
+	listPool := func() BlockProducerPool {
+		p := remotePool("a")
+		p.ShelleyKESAgentAddress = ""
+		p.ShelleyKESAgentAddresses = []string{
+			"kes-agent-a.example:3443",
+			"kes-agent-b.example:3443",
+		}
+		return p
+	}
+	tests := []struct {
+		name    string
+		modify  func(c *Config)
+		wantErr string
+	}{
+		{
+			name: "top-level list",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddress = ""
+				c.ShelleyKESAgentAddresses = []string{
+					"kes-agent-a.example:3443",
+					"kes-agent-b.example:3443",
+				}
+			},
+		},
+		{
+			name: "top-level list over plain TCP",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddress = ""
+				c.ShelleyKESAgentClientCertFile = ""
+				c.ShelleyKESAgentClientKeyFile = ""
+				c.ShelleyKESAgentServerSPKISHA256 = ""
+				c.ShelleyKESAgentPlaintext = true
+				c.ShelleyKESAgentAddresses = []string{
+					"kes-agent-a.example:3443",
+					"kes-agent-b.example:3443",
+				}
+			},
+		},
+		{
+			name: "address and list both set",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddresses = []string{"kes-agent-b.example:3443"}
+			},
+			wantErr: "shelleyKesAgentAddress and shelleyKesAgentAddresses are two ways",
+		},
+		{
+			name: "list entry without a port",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddress = ""
+				c.ShelleyKESAgentAddresses = []string{
+					"kes-agent-a.example:3443",
+					"kes-agent-b.example",
+				}
+			},
+			wantErr: "shelleyKesAgentAddresses[1] \"kes-agent-b.example\" must be host:port",
+		},
+		{
+			name: "list with a local socket",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddress = ""
+				c.ShelleyKESAgentAddresses = []string{"kes-agent-a.example:3443"}
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+			},
+			wantErr: "cannot set shelleyKesAgentAddresses together with",
+		},
+		{
+			name: "pool with a list",
+			modify: func(c *Config) {
+				c.BlockProducerPools = []BlockProducerPool{listPool()}
+			},
+		},
+		{
+			name: "pool with address and list",
+			modify: func(c *Config) {
+				p := listPool()
+				p.ShelleyKESAgentAddress = "kes-agent.example:3443"
+				c.BlockProducerPools = []BlockProducerPool{p}
+			},
+			wantErr: "blockProducerPools[0].shelleyKesAgentAddress and blockProducerPools[0].shelleyKesAgentAddresses are two ways",
+		},
+		{
+			name: "pool list entry without a port",
+			modify: func(c *Config) {
+				p := listPool()
+				p.ShelleyKESAgentAddresses[0] = "kes-agent-a.example"
+				c.BlockProducerPools = []BlockProducerPool{p}
+			},
+			wantErr: "blockProducerPools[0].shelleyKesAgentAddresses[0] \"kes-agent-a.example\" must be host:port",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := validTestConfig()
+			cfg.BlockProducer = true
+			tc.modify(cfg)
+			err := cfg.Validate(RunModeServe)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestRemoteAgentAddressesAndDefaults(t *testing.T) {
+	t.Parallel()
+	var empty BlockProducerPool
+	require.Nil(t, empty.RemoteAgentAddresses())
+	require.True(t, empty.isZero())
+	one := BlockProducerPool{ShelleyKESAgentAddress: "a.example:1"}
+	require.Equal(t, []string{"a.example:1"}, one.RemoteAgentAddresses())
+	list := []string{"a.example:1", "b.example:1"}
+	several := BlockProducerPool{ShelleyKESAgentAddresses: list}
+	require.Equal(t, list, several.RemoteAgentAddresses())
+
+	p := BlockProducerPool{ShelleyKESAgentAddresses: list}
+	p.applyDefaults()
+	require.Equal(t, "sign", p.ShelleyKESAgentMode,
+		"a pool with only an address list defaults to sign mode")
+
+	cfg := validTestConfig()
+	cfg.ShelleyKESAgentAddresses = list
+	cfg.ShelleyKESAgentPlaintext = true
+	single := cfg.singlePool()
+	require.Equal(t, list, single.ShelleyKESAgentAddresses)
+	require.True(t, single.ShelleyKESAgentPlaintext)
+	require.False(t, single.isZero())
+}
+
+// Not t.Parallel: loadConfigThroughPipeline resets the package-level
+// globalConfig.
+func TestPipeline_KESAgentAddressesFromYAML(t *testing.T) {
+	cfg, err := loadConfigThroughPipeline(t, `
+blockProducer: true
+shelleyVrfKey: /keys/vrf.skey
+shelleyOperationalCertificate: /keys/node.cert
+shelleyKesAgentAddresses:
+  - kes-agent-a.example:3443
+  - kes-agent-b.example:3443
+`, nil)
+	require.NoError(t, err)
+	require.Equal(t,
+		[]string{"kes-agent-a.example:3443", "kes-agent-b.example:3443"},
+		cfg.ShelleyKESAgentAddresses,
+	)
+	require.Equal(t, "sign", cfg.ShelleyKESAgentMode)
+}
