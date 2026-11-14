@@ -6923,6 +6923,18 @@ The `LedgerView` interface provides query access to ledger state:
   their era-specific action CBOR and reports the final slot of a pending
   action's inclusive expiry epoch so ancestry, hard-fork succession, proposal
   expiry, and security-group voting use the persisted Dingo state.
+- `PoolCurrentState`, which block validation and the BLS state overlay call for
+  every certificate and block, reads only the pool's stored current state
+  (`pool_current_state`, `pool_current_event`): `GetPoolStatus` for whether the
+  pool is active and the epoch of its pending retirement, then
+  `GetPoolRegistrationsEffectiveForEpoch` for the epoch-effective registration.
+  Neither scans the pool's certificate history; the pending retirement is the
+  newest retirement in chain order, replaced by a later one whatever its epoch
+  and cancelled by a later registration. `GetPoolRegistrationsAtSlot`,
+  `LedgerState.LatestOpCertSequence` and `PoolRegistrationVRFKeyHash` use the
+  same stored state. Only the two registration queries ever rank the
+  certificate history, for a pool whose stored horizon is later than the
+  requested epoch start or slot; `GetPoolStatus` never does.
 - `IsVrfKeyInUse` reserves both the epoch-effective VRF key and the latest
   deferred key, querying the effective owner first and falling back to
   `IsFutureVrfKeyInUse`. A superseded deferred key becomes available again.

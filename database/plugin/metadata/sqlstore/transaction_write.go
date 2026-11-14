@@ -1882,6 +1882,12 @@ SELECT tx_id FROM applied_transaction WHERE slot > ?`,
 			if err := rows.Err(); err != nil {
 				return fmt.Errorf("scan transactions for rollback: %w", err)
 			}
+			// The delete below removes these transactions' certificate and
+			// context rows, the keys their pool certificates rank by.
+			poolHashes, err := poolHashesOfTransactions(ctx, db, txIDs)
+			if err != nil {
+				return err
+			}
 			refs := []models.StakeCredentialRef{}
 			for start := 0; start < len(txIDs); start += 400 {
 				end := min(start+400, len(txIDs))
@@ -1971,6 +1977,9 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 				); err != nil {
 					return err
 				}
+			}
+			if err := refreshPoolCurrentState(ctx, db, poolHashes); err != nil {
+				return err
 			}
 			// The stake lookup returns one row per spent UTxO; refresh each
 			// credential once.
@@ -2516,7 +2525,14 @@ func recordTransactionLedgerContext(
 	}
 	_, err = db.ExecContext(ctx, `-- name: UpsertLeiosTransactionContext :exec
 INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CONFLICT (transaction_id) DO UPDATE SET slot = excluded.slot`, transactionID, value)
-	return err
+	if err != nil {
+		return err
+	}
+	// The context slot is the effective slot of the transaction's pool
+	// certificates, which pool_current_state ranks by.
+	return refreshPoolCurrentStateForTransactions(
+		ctx, db, []int64{transactionID},
+	)
 }
 
 // rollbackSpentStakeRefsIndex is the spender index the rollback stake lookup

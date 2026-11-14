@@ -156,10 +156,13 @@ func withoutRowIDs(tables map[string][]string) map[string][]string {
 			for _, f := range fields {
 				// A history or reward row's vote_id or mir_id names its
 				// parent row, whose own id a re-applied boundary allocates
-				// anew.
+				// anew. A pool_current_event row's event_id names the history
+				// row it was derived from, which a replay re-inserts under a
+				// new id.
 				if !strings.HasPrefix(f, "id=") &&
 					!strings.HasPrefix(f, "vote_id=") &&
-					!strings.HasPrefix(f, "mir_id=") {
+					!strings.HasPrefix(f, "mir_id=") &&
+					!strings.HasPrefix(f, "event_id=") {
 					kept = append(kept, f)
 				}
 			}

@@ -3735,14 +3735,11 @@ func (ls *LedgerState) PoolRegistrationVRFKeyHash(
 	txn := ls.db.MetadataTxn(ctx, false)
 	defer txn.Release()
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
-	pool, err := ls.db.GetPool(ctx, pkh, true, txn)
+	status, err := ls.db.Metadata().GetPoolStatus(pkh, txn.Metadata())
 	if err != nil {
-		if errors.Is(err, models.ErrPoolNotFound) {
-			return vrfHash, false, nil
-		}
 		return vrfHash, false, err
 	}
-	if pool == nil {
+	if !status.Exists {
 		return vrfHash, false, nil
 	}
 	slot := tipState.currentTip.Point.Slot
@@ -3834,14 +3831,11 @@ func (ls *LedgerState) LatestOpCertSequence(
 	poolID [28]byte,
 ) (sequence uint64, found bool, err error) {
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
-	pool, err := ls.db.GetPool(context.Background(), pkh, false, nil)
+	status, err := ls.db.Metadata().GetPoolStatus(pkh, nil)
 	if err != nil {
-		if errors.Is(err, models.ErrPoolNotFound) {
-			return 0, false, nil
-		}
 		return 0, false, err
 	}
-	if pool == nil {
+	if !status.Active {
 		return 0, false, nil
 	}
 	return ls.latestOpCertCounterAfterMithril(

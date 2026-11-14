@@ -898,101 +898,45 @@ func (lv *LedgerView) StakeCredentialDeposit(
 }
 
 // PoolCurrentState returns the epoch-effective pool registration certificate
-// and the epoch of any pending retirement for the given pool key hash.
+// and the epoch of any pending retirement for the given pool key hash. It reads
+// the pool's stored current state, never its certificate history. The pending
+// retirement is the newest retirement certificate in chain order, replaced by a
+// later one whatever its epoch and cancelled by a later registration, as the
+// POOL rule's psRetiring insert and delete do.
 func (lv *LedgerView) PoolCurrentState(
 	pkh lcommon.PoolKeyHash,
 ) (*lcommon.PoolRegistrationCertificate, *uint64, error) {
-	pool, err := lv.ls.db.GetPool(lv.EvaluationContext(), pkh, false, lv.txn)
+	status, err := lv.ls.db.Metadata().GetPoolStatus(pkh, lv.metadataTxn())
 	if err != nil {
-		if errors.Is(err, models.ErrPoolNotFound) {
-			pool = &models.Pool{}
-		} else {
-			return nil, nil, lv.storageFault("get pool: %w", err)
-		}
+		return nil, nil, lv.storageFault("get pool status: %w", err)
+	}
+	if !status.Active {
+		return nil, nil, nil
 	}
 	var currentReg *lcommon.PoolRegistrationCertificate
-	if len(pool.PoolKeyHash) > 0 {
-		regs, err := lv.ls.db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
-			[]lcommon.PoolKeyHash{pkh},
-			lv.epochStartSlot,
-			lv.committeeEpoch,
-			math.MaxInt64,
-			lv.metadataTxn(),
+	regs, err := lv.ls.db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+		[]lcommon.PoolKeyHash{pkh},
+		lv.epochStartSlot,
+		lv.committeeEpoch,
+		math.MaxInt64,
+		lv.metadataTxn(),
+	)
+	if err != nil {
+		return nil, nil, lv.storageFault(
+			"get epoch-effective pool registration: %w", err,
+		)
+	}
+	if len(regs) > 0 {
+		currentReg, err = poolRegistrationCertificate(
+			&models.Pool{PoolKeyHash: regs[0].PoolKeyHash}, &regs[0],
 		)
 		if err != nil {
 			return nil, nil, lv.storageFault(
-				"get epoch-effective pool registration: %w", err,
+				"decode stored pool registration: %w", err,
 			)
 		}
-		if len(regs) > 0 {
-			currentReg, err = poolRegistrationCertificate(pool, &regs[0])
-			if err != nil {
-				return nil, nil, lv.storageFault(
-					"decode stored pool registration: %w", err,
-				)
-			}
-		}
 	}
-	_, regLatestSlot, regLatestCertID, _, hasLatestReg := latestPoolRegistration(pool)
-	// pendingEpoch reports the target epoch of the pool's latest retirement
-	// certificate -- the one most recently added by (AddedSlot,
-	// CertificateID), not the maximum epoch value across every retirement
-	// row: a later retirement certificate replaces the prior schedule even
-	// when it moves the target epoch earlier (retire@10 then retire@5 must
-	// report 5, not 10). A later pool registration cancels a pending
-	// retirement -- mirroring poolIsActive's ordering rule
-	// (internal/test/conformance/state_provider.go) -- so pendingEpoch is
-	// nil whenever the latest registration was added after the latest
-	// retirement.
-	var pendingEpoch *uint64
-	if len(pool.Retirement) > 0 {
-		var retLatestIdx int
-		var retLatestSlot uint64
-		var retLatestCertID uint
-		var hasRet bool
-		for i, r := range pool.Retirement {
-			if !hasRet || r.AddedSlot > retLatestSlot ||
-				(r.AddedSlot == retLatestSlot && r.CertificateID > retLatestCertID) {
-				retLatestSlot = r.AddedSlot
-				retLatestCertID = r.CertificateID
-				retLatestIdx = i
-				hasRet = true
-			}
-		}
-		registrationSupersedesRetirement := hasLatestReg &&
-			(regLatestSlot > retLatestSlot ||
-				(regLatestSlot == retLatestSlot && regLatestCertID > retLatestCertID))
-		if hasRet && !registrationSupersedesRetirement {
-			epoch := pool.Retirement[retLatestIdx].Epoch
-			pendingEpoch = &epoch
-		}
-	}
-	return currentReg, pendingEpoch, nil
-}
-
-// latestPoolRegistration selects the pool's most recent registration row,
-// returning its slot, certificate ID, and stable registration index alongside
-// it.
-func latestPoolRegistration(
-	pool *models.Pool,
-) (reg *models.PoolRegistration, slot uint64, certID uint, registrationIndex uint, ok bool) {
-	var latestIdx int
-	for i, candidate := range pool.Registration {
-		// Use CertificateID for deterministic disambiguation when slots are equal
-		if candidate.AddedSlot > slot ||
-			(candidate.AddedSlot == slot && candidate.CertificateID > certID) ||
-			(candidate.AddedSlot == slot && candidate.CertificateID == certID &&
-				candidate.RegistrationIndex > registrationIndex) {
-			slot = candidate.AddedSlot
-			certID = candidate.CertificateID
-			registrationIndex = candidate.RegistrationIndex
-			latestIdx = i
-		}
-	}
-	if len(pool.Registration) == 0 {
-		return nil, 0, 0, 0, false
-	}
-	return &pool.Registration[latestIdx], slot, certID, registrationIndex, true
+	return currentReg, status.RetirementEpoch, nil
 }
 
 // poolRegistrationCertificate rebuilds the registration certificate from the
