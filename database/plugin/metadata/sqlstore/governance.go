@@ -1027,7 +1027,7 @@ UPDATE governance_vote SET deleted_slot = (
  ORDER BY history.transition_slot DESC, history.id DESC
  LIMIT 1
 )
-WHERE (
+WHERE deleted_slot IS NULL AND (
  SELECT history.deleted FROM governance_vote_history AS history
  WHERE history.vote_id = governance_vote.id
  ORDER BY history.transition_slot DESC, history.id DESC
