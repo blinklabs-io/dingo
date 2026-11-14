@@ -2164,7 +2164,14 @@ func parseOptionalDuration(
 // finds nothing left to copy never reaches the copy loop's own flush, so the
 // tree must not be removed until the blocks it holds are durable.
 func syncBlobBeforeCleanup(db *database.Database) error {
-	if err := db.Blob().Sync(); err != nil {
+	store := db.Blob()
+	if store == nil {
+		return fmt.Errorf(
+			"syncing blob store before cleanup: %w",
+			datatypes.ErrBlobStoreUnavailable,
+		)
+	}
+	if err := store.Sync(); err != nil {
 		return fmt.Errorf("syncing blob store before cleanup: %w", err)
 	}
 	return nil
