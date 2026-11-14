@@ -981,7 +981,7 @@ func TestLeiosRollbackReportsUnavailableEndorserBlock(t *testing.T) {
 	f.ls.config.EventBus = bus
 	f.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	require.Error(t, f.ls.emitRollbackTransactionEvents(
+	require.NoError(t, f.ls.emitRollbackTransactionEvents(
 		t.Context(),
 		[]models.Block{{
 			Slot:     certifier.SlotNumber(),
@@ -1101,11 +1101,9 @@ func TestLeiosRollbackReplayResolvesRolledBackParentAndUndoesSharedTxOnce(
 	)
 }
 
-// A rollback whose set contains one certifying block with an unresolvable
-// endorser block must fail before publishing any undo event, including those
-// of blocks that resolve, so a retry from the durable intent does not deliver
-// them twice.
-func TestLeiosRollbackUnavailableEndorserBlockPublishesNoUndo(t *testing.T) {
+// An unavailable endorser block must not suppress undo events that can be
+// reconstructed or prevent the valid rollback from progressing.
+func TestLeiosRollbackUnavailableEndorserBlockContinuesResolvedUndo(t *testing.T) {
 	t.Parallel()
 	f := newLeiosCertApplyFixture(t)
 	announcer := f.announce()
@@ -1172,12 +1170,20 @@ func TestLeiosRollbackUnavailableEndorserBlockPublishesNoUndo(t *testing.T) {
 	f.ls.config.EventBus = bus
 	f.ls.config.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	require.Error(t, f.ls.emitRollbackTransactionEvents(
+	require.NoError(t, f.ls.emitRollbackTransactionEvents(
 		t.Context(),
 		[]models.Block{newer, older},
 	))
+	evt := testutil.RequireReceive(
+		t, txCh, testutil.AsyncWait, "resolved endorser transaction undo event",
+	)
+	te, ok := evt.Data.(TransactionEvent)
+	require.True(t, ok, "unexpected payload %T", evt.Data)
+	require.True(t, te.Rollback)
+	require.Equal(t, f.ebTx.Hash().Bytes(), te.Transaction.Hash().Bytes())
+	require.Equal(t, older.Hash, te.Point.Hash)
 	testutil.RequireNoReceive(
-		t, txCh, 250*time.Millisecond, "undo published despite resolution failure",
+		t, txCh, 250*time.Millisecond, "duplicate endorser transaction undo event",
 	)
 }
 

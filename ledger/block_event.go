@@ -75,11 +75,10 @@ func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
 // merely learns of it later, as the chain-update handler does -- loses that
 // race and lets a subscriber apply an undo after the redo that followed it.
 //
-// It returns an error, having published no transaction event, when a
-// certifying block's endorser block cannot be resolved. The caller must then
-// leave the durable undo intent pending so recovery retries the whole set.
-// A block that fails to decode is logged and skipped instead: the failure is
-// deterministic, so a retry could never succeed.
+// An unavailable endorser block and a block that fails to decode are logged
+// and skipped. Transaction events are notifications, so an incomplete undo
+// must not prevent the ledger and primary chain from following a valid
+// rollback.
 func (ls *LedgerState) emitRollbackTransactionEvents(
 	ctx context.Context,
 	blocks []models.Block,
@@ -89,13 +88,8 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 	}
 
 	undoBlocks := ls.rollbackUndoBlocks(ctx, blocks)
-	// Resolve every certifying block's endorser transactions before
-	// publishing anything. A resolution failure is reported to the caller,
-	// which must then keep the durable undo intent pending: publishing the
-	// other blocks first would deliver them again when recovery retries, and
-	// swallowing the failure would leave the endorser transactions without
-	// an undo event once the chain is truncated.
-	var resolveErr error
+	// Resolve every certifying block's endorser transactions before publishing
+	// anything so the successfully resolved undo events retain their ordering.
 	for _, u := range undoBlocks {
 		if u.endorserErr == nil {
 			continue
@@ -126,10 +120,6 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 				},
 			),
 		)
-		resolveErr = errors.Join(resolveErr, undoErr)
-	}
-	if resolveErr != nil {
-		return resolveErr
 	}
 
 	for _, u := range undoBlocks {
