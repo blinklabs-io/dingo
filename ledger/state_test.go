@@ -10592,6 +10592,32 @@ func shrinkGatherCoalesceRetryInterval(
 	})
 }
 
+// runReaderUntilCleanup runs reader in a goroutine and registers a cleanup
+// that cancels it and waits for it to return. Tests that swap the
+// gatherCoalesce* seams register their restores first, and cleanups run
+// last-registered first, so the reader has exited before any seam is
+// restored.
+func runReaderUntilCleanup(
+	t *testing.T,
+	cancel context.CancelFunc,
+	reader func(),
+) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		reader()
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(testutil.AsyncWait):
+			t.Error("ledgerReadChainIterator did not return after cancel")
+		}
+	})
+}
+
 // scriptedGapLedgerReadIterator scripts a fixed sequence of non-blocking
 // Next outcomes. A nil entry simulates the iterator momentarily having
 // nothing ready (chain.ErrIteratorChainTip on a non-blocking probe) without
@@ -10676,7 +10702,9 @@ func TestLedgerReadChainIteratorCoalescesGapsDuringBulkReplay(t *testing.T) {
 	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,
@@ -10734,7 +10762,9 @@ func TestLedgerReadChainIteratorBoundsCoalesceWaitPerPass(t *testing.T) {
 	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,
@@ -10787,7 +10817,9 @@ func TestLedgerReadChainIteratorFlushesWhenChainStopsGrowing(t *testing.T) {
 	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,
@@ -10836,7 +10868,9 @@ func TestLedgerReadChainIteratorGapCapResetsPerBlock(t *testing.T) {
 	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,
@@ -10886,7 +10920,9 @@ func TestLedgerReadChainIteratorNearTipFlushesSingleBlockPromptly(
 	ls.advanceUpstreamTipSlot(1)
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, 10*time.Second,
@@ -11219,7 +11255,9 @@ func TestLedgerReadChainIteratorTakesNoConnectionLocksInsideGatherSpan(
 	}
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,
@@ -11289,7 +11327,9 @@ func TestLedgerReadChainIteratorSkipsCoalesceAfterReachingTip(t *testing.T) {
 	ls.reachedTip.Store(true)
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	result := testutil.RequireReceive(
 		t, resultCh, 10*time.Second,
@@ -11338,7 +11378,9 @@ func TestLedgerReadChainIteratorCommitBatchBlocksSkipsEmptyPasses(
 	ls.metrics.init(prometheus.NewRegistry())
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	empty := testutil.RequireReceive(
 		t, resultCh, testutil.AsyncWait,
@@ -11475,7 +11517,9 @@ func TestLedgerReadChainIteratorBoundsChainProbesPerCoalescePass(
 	}
 
 	resultCh := make(chan readChainResult, 1)
-	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	runReaderUntilCleanup(t, cancel, func() {
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
+	})
 
 	// The whole pass is attempts*1ms of sleeping, so a deadline in seconds
 	// separates "flushed after exhausting the budget" from "still retrying"

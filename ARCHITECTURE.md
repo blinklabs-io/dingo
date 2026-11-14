@@ -4324,7 +4324,7 @@ still opens its resolution/mutation handle directly against the live data
 directory after quiesce/close, same as before. It does, however, make the
 equivalent distinction for its own failure modes: `dblifecycle.ResolveTarget`
 and `lifecycle.Truncate`'s own pre-delete validation (target ahead of tip,
-target before the Mithril trust boundary) are read-only and provably safe — a
+target before the Mithril trust boundary, a `sync_status` of `in_progress`) are read-only and provably safe — a
 failure there (or a context cancellation caught before `DeleteBlocksAfter`
 starts) is wrapped in `lifecycle.ErrTruncateNotStarted`, and `Node.Truncate`
 resumes normally on it instead of calling `n.cancel()`. Before the first batched
@@ -7430,6 +7430,15 @@ reporting a "state as of" point names the point they were read at rather than
 sampling the tip again afterwards and reporting a point the chain has since
 moved to.
 
+The VRF key reported for a pool is the one header validation requires of a
+block from it at that point: the electing snapshot's key (as the reference
+`individualPoolStakeVrf` reads it), resolved by `electingVrfKeyHashAtSlot`, not
+the pool's latest registration. A re-registration with a new key after the
+snapshot was captured therefore does not change the reply until a later
+snapshot carries it. A live `GetStakeDistribution`/`GetStakeDistribution2`
+reply resolves the key the same way; a pinned one reports the registration in
+force at the pinned slot.
+
 The read itself lives in `ledger.LedgerState.PoolStakeDistribution`, which the
 UTxO RPC `v1beta QueryService.ReadState` handler also calls;
 `queryShelleyPoolDistr2` is only the adaptation of that result into the
@@ -7545,9 +7554,10 @@ were completely absent from dingo's reply for no reason other than that
 snapshot lag. `GetStakeDistribution2` (`queryShelleyStakeDistribution2`)
 is answered by cardano-node from the same `poolsByTotalStakeFraction`, so it
 shares `GetStakeDistribution`'s live reconstruction (`liveStakeDistribution`)
-rather than `GetPoolDistr2`'s mark snapshot: pools, stakes and VRF keys are
-as of the queried slot, and each fraction is over total circulating supply
-where `GetPoolDistr2` divides by delegated stake. Its reply total is the
+rather than `GetPoolDistr2`'s mark snapshot: pools and stakes are as of the
+queried slot (VRF keys as described for `GetPoolDistr2`), and each fraction
+is over total circulating supply where `GetPoolDistr2` divides by delegated
+stake. Its reply total is the
 delegated stake summed across the reconstructed pools, as
 `poolsByTotalStakeFraction` returns it. Both queries omit a pool with no
 delegated stake, as `calculatePoolDistr` does.
@@ -13092,6 +13102,30 @@ next attempt. Each signature is
 verified against the local operational certificate's KES key by the same
 `validateSignResponse` the local client uses.
 
+**Several remote agents** (`kesagent.FailoverClient`).
+`--shelley-kes-agent-addresses` (or `shelleyKesAgentAddresses`, per pool in
+`blockProducerPools` too) lists remote agents in order, in place of the single
+address, which is the same as a one-entry list; setting both is refused. Every
+other remote setting applies to each address, and each gets its own
+`RemoteClient`. One sign goes to one agent, the active one, starting with the
+first listed: a failure is never retried on another agent inside the same
+sign, so the configured `SignTimeout` (500ms by default) bounds it. A failure other than an agent refusal (`error`
+in the response, which proves the agent is working) moves the client to the
+next address for the next attempt, and logs the move at info
+(`KES agent link: moving to the next remote agent`). `Prepare`, called before
+each leader slot as above, admits the active agent or, when it does not admit
+this node (unreachable, or holding another opcert), the first one after it in
+order that does, which becomes active; it then tries to admit the agent after the
+active one on its own goroutine, so a move at the slot usually finds that
+session open; a move before that admission finishes dials inside the sign.
+`CheckReady` reports ready unless every agent failed its last attempt, so a
+client that has not tried any agent yet reports ready, as a single
+`RemoteClient` does. The client does not fail back while its active agent
+works: it moves on only after a failure, in order and wrapping from the last
+address to the first. Metrics:
+`dingo_kes_agent_remote_active{address}` (1 for the active agent) and
+`dingo_kes_agent_remote_failovers_total`.
+
 **The non-negotiable invariant**: whichever source supplies the key, KES
 signing goes through the same `credentialGeneration.kesSign`, and that method
 itself re-validates the operational-certificate lifetime
@@ -13185,8 +13219,8 @@ choice of key source is never silently overridden; `shelleyKesAgentAddress`
 is likewise exclusive with both and accepts only sign mode. Its server pin is
 optional but must be 64 hex characters when set, the client certificate and
 key are optional but set as a pair, and `shelleyKesAgentPlaintext` takes
-neither, since both need TLS. None of these four is accepted without
-`shelleyKesAgentAddress`, so a mistyped remote configuration is refused rather
+neither, since both need TLS. None of these four, nor
+`shelleyKesAgentProfile`, is accepted without `shelleyKesAgentAddress`, so a mistyped remote configuration is refused rather
 than falling back to local-file or Unix-socket signing.
 `Config.Validate` no longer requires a local `shelleyKesKey` when a KES agent
 socket or address is configured — an agent-only configuration must be able to
@@ -13219,8 +13253,8 @@ replaces the single-pool `shelley*` key and KES source settings (the KES
 agent sign timeout and key watch interval apply to every pool). Configuration
 validation refuses the two together, in YAML and when a library caller mixes
 `WithBlockProducerPools` with the single-pool options in `New`, and also
-refuses two entries sharing an opcert or a remote agent address, and more than
-one pool
+refuses two entries sharing an opcert, two entries sharing a remote agent
+address without distinct profile names, and more than one pool
 with Leios forging or voting, whose pipeline and vote key are wired for one.
 
 The first pool keeps the node's own forging fields (`blockForger`,
@@ -13230,11 +13264,17 @@ credentials, KES agent client, leader election, durable forge fence (keyed by
 pool) and `BlockForger`. Each pool's key source (`poolKeySource`) loads and
 validates its credentials exactly as the first pool's does, with one KES
 agent client per pool. Over a local agent socket one agent can serve every
-pool through its profiles. Over the remote listener it cannot: an attested
-session cannot name a profile, so Bursa allows one profile per attested
-listener, and each pool signing remotely needs its own agent and address.
-Configuration validation refuses two pools with the same
-`shelleyKesAgentAddress`.
+pool through its profiles. Over the remote listener the same holds when each
+pool names its profile: `shelleyKesAgentProfile` is sent in the attestation
+request, and the agent binds the session to that profile. The name is used
+rather than the KES verification key from the local opcert, because Bursa
+matches a key against each profile's current active key; once the agent moves
+to a newer key than the node's certificate names, admission by key would be
+refused and the node would never learn the newer certificate from the agent.
+Configuration validation refuses two pools that reach one listener, through
+`shelleyKesAgentAddress` or any entry of `shelleyKesAgentAddresses`, unless
+both name a profile and the profiles differ. A pool without a profile sends
+none, so an agent with one profile admits it as before.
 
 **Startup and isolation.** The other pools start after the first. A pool whose
 serve-key KES source cannot be reached -- an agent that never pushes its key --

@@ -32,6 +32,8 @@ type Metrics struct {
 	signSuccesses     prometheus.Counter
 	signFailures      prometheus.Counter
 	signLatency       prometheus.Histogram
+	activeAgent       *prometheus.GaugeVec
+	agentFailovers    prometheus.Counter
 }
 
 // NewMetrics registers and returns KES agent client metrics on reg.
@@ -59,7 +61,37 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Help:    "sign-mode round-trip latency to the KES agent",
 			Buckets: prometheus.DefBuckets,
 		}),
+		activeAgent: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "dingo_kes_agent_remote_active",
+			Help: "1 for the remote KES agent address signs go to, 0 for the other listed addresses",
+		}, []string{"address"}),
+		agentFailovers: factory.NewCounter(prometheus.CounterOpts{
+			Name: "dingo_kes_agent_remote_failovers_total",
+			Help: "moves from one listed remote KES agent to another",
+		}),
 	}
+}
+
+func (m *Metrics) setActiveAgent(addresses []string, active int) {
+	if m == nil {
+		return
+	}
+	// By address, not index: a list naming one address twice must not
+	// report its active entry as inactive.
+	for _, address := range addresses {
+		if address == addresses[active] {
+			m.activeAgent.WithLabelValues(address).Set(1)
+		} else {
+			m.activeAgent.WithLabelValues(address).Set(0)
+		}
+	}
+}
+
+func (m *Metrics) incAgentFailover() {
+	if m == nil {
+		return
+	}
+	m.agentFailovers.Inc()
 }
 
 func (m *Metrics) setConnected(connected bool) {

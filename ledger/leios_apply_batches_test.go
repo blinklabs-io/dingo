@@ -135,7 +135,7 @@ func TestApplyEndorserBlockDenseOffsetsExceedBlobTransaction(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		applied, _, err := ls.applyEndorserBlock(
+		applied, _, _, err := ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			rbPoint,
@@ -205,7 +205,7 @@ func applyLeiosDenseBlock(
 ) error {
 	txn := db.Transaction(context.Background(), true)
 	return txn.Do(func(txn *database.Txn) error {
-		_, _, err := ls.applyEndorserBlock(
+		_, _, _, err := ls.applyEndorserBlock(
 			context.Background(),
 			txn,
 			rbPoint,
@@ -235,13 +235,13 @@ func TestApplyEndorserBlockDenseOffsetsReadableByLaterBlock(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if _, _, err := ls.applyEndorserBlock(
+		if _, _, _, err := ls.applyEndorserBlock(
 			context.Background(), txn, rbPoint, 1, 710,
 			leiosApplyTestEbHash(0x55), raws,
 		); err != nil {
 			return err
 		}
-		_, _, err := ls.applyEndorserBlock(
+		_, _, _, err := ls.applyEndorserBlock(
 			context.Background(), txn, rbPoint, 1, 711,
 			leiosApplyTestEbHash(0x56), []cbor.RawMessage{spendRaw},
 		)

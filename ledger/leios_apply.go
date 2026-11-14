@@ -185,10 +185,14 @@ func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
 // ranking block must remove them, and the ranking block is what admits the
 // endorser block to the chain.
 //
-// It returns the number of transactions applied and the Conway donation total
-// from accepted endorser-block transactions. Malformed peer transaction bytes
-// are deterministic validation failures. Local build failures happen before
-// storage is mutated and remain retryable. Once the endorser blob or
+// It returns the number of transactions applied, the Conway donation total
+// from accepted endorser-block transactions, and the number of transaction
+// storage indexes the closure reserves under the ranking block's point. The
+// ranking block's own transactions apply after the closure, so they must be
+// stored after that reserved range: the stored (block_index, cert_index) is
+// the order every position-ranked reader uses. Malformed peer transaction
+// bytes are deterministic validation failures. Local build failures happen
+// before storage is mutated and remain retryable. Once the endorser blob or
 // transaction rows start writing, any error is wrapped in
 // leiosEndorserBlockStorageError so callers can abort the outer transaction
 // instead of committing a partial endorser-block application.
@@ -200,9 +204,10 @@ func (ls *LedgerState) applyEndorserBlock(
 	ebSlot uint64,
 	ebHashBytes []byte,
 	rawTxs []cbor.RawMessage,
-) (int, uint64, error) {
+) (int, uint64, uint64, error) {
 	ls.publishUntickedClosureAfterCommit(ctx, txn, rbPoint)
-	return ls.applyEndorserBlockInContext(
+	var reserved uint64
+	applied, donation, err := ls.applyEndorserBlockWithReservation(
 		ctx,
 		txn,
 		rbPoint,
@@ -211,7 +216,9 @@ func (ls *LedgerState) applyEndorserBlock(
 		ebHashBytes,
 		rawTxs,
 		nil,
+		&reserved,
 	)
+	return applied, donation, reserved, err
 }
 
 func (ls *LedgerState) applyEndorserBlockInContext(
@@ -223,6 +230,45 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 	ebHashBytes []byte,
 	rawTxs []cbor.RawMessage,
 	contextSlot *uint64,
+) (int, uint64, error) {
+	return ls.applyEndorserBlockWithReservation(
+		ctx,
+		txn,
+		rbPoint,
+		rbBlockNumber,
+		ebSlot,
+		ebHashBytes,
+		rawTxs,
+		contextSlot,
+		nil,
+	)
+}
+
+// endorserBlockStorageSpan is the number of storage indexes a closure's
+// transactions can occupy: one per top-level transaction plus one per child
+// body. It counts every transaction, including repeats that are not stored
+// again, so the bound does not depend on which transactions were already
+// applied.
+func endorserBlockStorageSpan(txs []lcommon.Transaction) uint64 {
+	span := uint64(len(txs))
+	for _, tx := range txs {
+		span += uint64(len(TransactionLevelsForApply(tx))) - 1
+	}
+	return span
+}
+
+// applyEndorserBlockWithReservation applies the closure. reserved, when not
+// nil, is set to endorserBlockStorageSpan once the closure decodes.
+func (ls *LedgerState) applyEndorserBlockWithReservation(
+	ctx context.Context,
+	txn *database.Txn,
+	rbPoint ocommon.Point,
+	rbBlockNumber uint64,
+	ebSlot uint64,
+	ebHashBytes []byte,
+	rawTxs []cbor.RawMessage,
+	contextSlot *uint64,
+	reserved *uint64,
 ) (int, uint64, error) {
 	if len(rawTxs) == 0 {
 		return 0, 0, nil
@@ -269,6 +315,9 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 		}
 		txs[i] = tx
 		bodyCbors[i] = []byte(elems[0])
+	}
+	if reserved != nil {
+		*reserved = endorserBlockStorageSpan(txs)
 	}
 
 	// Repeated endorser transactions are kept in the blob, which is served

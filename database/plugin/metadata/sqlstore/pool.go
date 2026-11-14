@@ -3608,6 +3608,32 @@ func (s *Store) RestorePoolStateAtSlot(
 			); err != nil {
 				return err
 			}
+			// pool_registration_owner and pool_registration_relay reference
+			// pool through a plain foreign key (fk_pool_owners,
+			// fk_pool_relays) as well as through their registration. The
+			// registration cascade alone is not enough: MySQL checks the
+			// direct reference row by row and PostgreSQL checks it before
+			// the cascaded child deletes have run, so both reject the pool
+			// delete while owner or relay rows remain.
+			for _, table := range []string{
+				"pool_registration_owner",
+				"pool_registration_relay",
+			} {
+				if _, err := db.ExecContext(ctx, `
+DELETE FROM `+table+`
+WHERE pool_id IN (
+    SELECT pool.id FROM pool
+    WHERE NOT EXISTS (
+        SELECT 1 FROM pool_registration registration
+        WHERE registration.pool_id = pool.id
+          AND registration.added_slot <= ?
+    )
+)`,
+					slot,
+				); err != nil {
+					return err
+				}
+			}
 			if _, err := db.ExecContext(ctx, `
 DELETE FROM pool
 WHERE NOT EXISTS (

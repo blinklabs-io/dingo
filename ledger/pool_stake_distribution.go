@@ -20,12 +20,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"math/big"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -467,12 +469,16 @@ func (ls *LedgerState) poolStakeDistribution(
 		return bytes.Compare(a.Bytes(), b.Bytes())
 	})
 
-	// The VRF key hash lives on the pool registration rather than the
-	// snapshot, so it is fetched in bulk rather than per pool. Unbounded
-	// (nil): this snapshot's own pinning behavior is pre-existing and
-	// unchanged by the separate GetStakeDistribution path's move to live stake
-	// -- out of scope here.
-	vrfByPool, err := ls.poolVrfKeyHashes(keyHashes, nil, metaTxn)
+	// The key reported is the one header validation requires of a block at
+	// this point: the electing snapshot's, which a re-registration after the
+	// capture does not change until a later snapshot carries it.
+	vrfSlot := tip.Point.Slot
+	if at.pinned() {
+		vrfSlot = at.Slot
+	}
+	vrfByPool, err := ls.electingPoolVrfKeyHashes(
+		ctx, keyHashes, vrfSlot, epoch, txn,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -568,33 +574,117 @@ func stakeFraction(stake, total uint64) *cbor.Rat {
 	}
 }
 
-// poolVrfKeyHashes looks up the VRF key hash each pool will be held to.
+// electingPoolVrfKeyHashes resolves, per pool, the VRF key hash header
+// validation holds a block from that pool at slot to
+// (electingVrfKeyHashAtSlot). A pool with no registration is absent from the
+// result.
 //
-// For a live (unpinned) lookup, resolution goes through
-// registeredPoolVrfKeyHash, the same function verifyRegisteredVrfKey uses to
-// decide whether an incoming block's VRF key belongs to the pool that
-// produced it. That is not an incidental reuse: a leadership schedule is only
-// worth anything if the node that produced it will accept the blocks it
-// promises, so the key this reply names has to be the key block validation
-// will require. Sharing the function means the two cannot drift apart
-// silently.
-//
-// It also settles which registration wins when a pool has re-registered with a
-// new VRF key. The Haskell node answers this query from a stake distribution
-// snapshotted at the epoch boundary, so it reports the key that was in force
-// then. dingo resolves the producing pool's key live at validation time, so
-// reporting the snapshot-era key here would describe a schedule dingo itself
-// would reject. Matching the validator is what keeps the reply true of the
-// node serving it.
-//
-// asOfSlot pins that same resolution to a historical slot instead
-// (registeredPoolVrfKeyHashAsOfSlot), for a pinned caller: a pool that
-// re-registers with a new VRF key after asOfSlot must still be reported with
-// the key it held at that slot, not its current one.
-// Pass nil for a live lookup -- the caller's own targetSlot equals the current
-// tip, but registeredPoolVrfKeyHash's unbounded "latest registration" behavior
-// is kept for that case rather than routed through the slot-bounded path, so
-// live callers see no behavior change from before asOfSlot existed.
+// A pool whose registration history cannot place the electing snapshot's key,
+// and a pool without a snapshot row while no epoch is known yet (so no
+// re-registration can be pending), is reported with its latest registration
+// instead: omitting it would hide a registered pool from every caller.
+func (ls *LedgerState) electingPoolVrfKeyHashes(
+	ctx context.Context,
+	keyHashes []lcommon.PoolKeyHash,
+	slot, epochId uint64,
+	txn *database.Txn,
+) (map[lcommon.PoolKeyHash]ledger.Blake2b256, error) {
+	out := make(map[lcommon.PoolKeyHash]ledger.Blake2b256, len(keyHashes))
+	if len(keyHashes) == 0 {
+		return out, nil
+	}
+	epochCache := ls.epochCacheSnapshot()
+	fromSnapshot, err := ls.electingSnapshotVrfKeyHashes(
+		slot, epochId, epochCache, txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("pool stake distribution: %w", err)
+	}
+	var latest []lcommon.PoolKeyHash
+	for _, pkh := range keyHashes {
+		if vrf, ok := fromSnapshot[pkh]; ok {
+			out[pkh] = vrf
+			continue
+		}
+		vrf, ok, err := ls.electingVrfKeyHashAtSlot(
+			ctx, pkh, slot, epochId, epochCache, txn,
+		)
+		switch {
+		case errors.Is(err, models.ErrPoolNotFound):
+			continue
+		case errors.Is(err, errVrfKeyRegistrationHistoryUnavailable),
+			errors.Is(err, errEpochCacheEmpty):
+			latest = append(latest, pkh)
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("pool stake distribution: %w", err)
+		}
+		if ok {
+			out[pkh] = ledger.Blake2b256(vrf)
+		}
+	}
+	if len(latest) > 0 {
+		fallback, err := ls.poolVrfKeyHashes(latest, nil, txn.Metadata())
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(out, fallback)
+	}
+	return out, nil
+}
+
+// electingSnapshotVrfKeyHashes reads, in one query, the VRF key hashes that
+// the snapshot electing slot carries on its own rows. It selects the snapshot
+// the way electingVrfKeyHashAtSlot does and keeps only the rows that function
+// would answer from directly (a capture slot and a well-formed key), so a
+// pool missing here is resolved per pool with the same result. Without the
+// bulk read an unfiltered distribution costs one snapshot query per pool.
+func (ls *LedgerState) electingSnapshotVrfKeyHashes(
+	slot, epochId uint64,
+	epochCache []models.Epoch,
+	txn *database.Txn,
+) (map[lcommon.PoolKeyHash]ledger.Blake2b256, error) {
+	snapEpoch := epochId
+	kind := models.PoolStakeSnapshotTypeActive
+	if slot == 0 || slot != ls.mithrilLedgerSlot {
+		useImportedActive, err := ls.shouldUseImportedActivePoolDistributionAtSlot(
+			slot, epochId, epochCache,
+		)
+		if err != nil {
+			return nil, nil //nolint:nilerr // reported per pool below
+		}
+		if !useImportedActive {
+			snapEpoch = leaderStakeSnapshotEpochInCache(epochId, epochCache)
+			kind = models.PoolStakeSnapshotTypeMark
+		}
+	}
+	rows, err := ls.db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		snapEpoch, kind, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read electing snapshot VRF keys: %w", err)
+	}
+	out := make(map[lcommon.PoolKeyHash]ledger.Blake2b256, len(rows))
+	for _, row := range rows {
+		if row == nil || row.CapturedSlot == 0 ||
+			len(row.PoolKeyHash) != len(lcommon.PoolKeyHash{}) ||
+			len(row.VrfKeyHash) != len(ledger.Blake2b256{}) {
+			continue
+		}
+		out[lcommon.PoolKeyHash(row.PoolKeyHash)] = ledger.Blake2b256(
+			row.VrfKeyHash,
+		)
+	}
+	return out, nil
+}
+
+// poolVrfKeyHashes looks up the VRF key hash each pool was registered with,
+// from the pool registrations rather than the electing snapshot. It serves a
+// pinned GetStakeDistribution, whose stake is reconstructed from delegation
+// state at asOfSlot, so each pool is paired with the key registered at that
+// slot (registeredPoolVrfKeyHashAsOfSlot). A nil asOfSlot resolves the latest
+// registration (registeredPoolVrfKeyHash). Callers reporting the key a block
+// must carry use electingPoolVrfKeyHashes instead.
 func (ls *LedgerState) poolVrfKeyHashes(
 	keyHashes []lcommon.PoolKeyHash,
 	asOfSlot *uint64,

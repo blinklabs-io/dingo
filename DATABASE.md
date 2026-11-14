@@ -2368,7 +2368,11 @@ sweep, not after: it detects which pools need their denormalized
 `DeleteCertificatesAfterSlot` removes, so restoring first (while those rows
 still exist) is what lets it find the surviving prior registration to revert to,
 rather than silently leaving every re-registered pool's discarded values in
-place. The denormalized-field `UPDATE` and the companion
+place. It also deletes pools with no registration at or below `slot`, removing
+their `pool_registration_owner` and `pool_registration_relay` rows first:
+those tables reference `pool` directly (`fk_pool_owners`, `fk_pool_relays`) as
+well as through their registration, and MySQL and PostgreSQL reject the pool
+delete while such rows remain. The denormalized-field `UPDATE` and the companion
 `latest_op_cert_sequence` `UPDATE` immediately after it are both scoped to only
 the pools a given rollback actually affects — a CTE restricts the first to pools
 with a `PoolRegistration` row above `slot`, and the second is restricted to the
@@ -2397,7 +2401,10 @@ other caller (a consumed-UTxO recovery heuristic) but wrong for a safety check �
 `MithrilTrustBoundarySlotStrict` is the fail-closed variant `lifecycle.Truncate`
 actually uses for its boundary check, propagating a read error instead of
 silently treating it as "no boundary" and letting an unverifiable truncate
-through. It propagates an unparseable value the same way, and an empty one too:
+through. Because a Mithril sync writes the boundary only when it completes,
+`lifecycle.Truncate` first refuses a database whose `sync_status` is
+`in_progress`: its imported rows sit above any target and no boundary exists
+yet to refuse it. It propagates an unparseable value the same way, and an empty one too:
 `GetSyncState` reports an absent key as the empty string, so before concluding
 that no boundary was recorded the strict variant asks the `sync_state` keyspace
 (`ListSyncStateKeysByPrefix`) whether the row exists at all — a row that exists
@@ -2685,7 +2692,13 @@ same transaction.
   soft deletes use nullable `deleted_slot`; `NULL` means active.
 - Certificate history ordering must use `added_slot DESC`, the producing
   transaction's `block_index DESC`, and `cert_index DESC`. `cert_index` resets
-  per transaction.
+  per transaction. `block_index` is the transaction's position in ledger
+  application order under its block's point, so writers must store it
+  increasing in that order. A certifying Leios ranking block applies its
+  endorser-block closure before its own transactions: closure transactions keep
+  their endorser-block indexes, and the ranking block's own transactions start
+  after the range the closure reserves, so every certificate type ranks
+  closure-before-body without a reader-side exception.
 - Storage mode is persisted in `node_settings_gate` (the `storage_mode` gate;
   `node_settings.storage_mode` is a read-only compatibility fallback, see
   below). `core` mode stores consensus and ledger state. `api` mode additionally
@@ -3070,6 +3083,47 @@ fresh database, which has no post-anchor rows. An unspent post-anchor row is
 rolled back the same way as a spent one: left live, it would be counted toward
 any mark snapshot taken before replay reaches its creation slot.
 
+An imported output carries the anchor slot as `added_slot`, so a rollback
+deletes it like any row created at the anchor and keeps no import-time state
+of its own. Nothing can delete one that the producer's replay would not: a
+replayed producer links an already-stored row without restamping it
+(`repairConflictedUtxo` writes only the collateral-return marker), and
+`hydrateImportedUtxo`, reached through `ImportUtxos` for a producer recovered
+from the block store, restamps it with the producer's block slot, which is at
+or before the anchor, so it only lowers `added_slot`. A row recovered from the
+block store already carries that slot. Every rollback entry point keeps its
+deletion slot at or above the anchor -- `ledger.LedgerState.rollback` and the
+`database/lifecycle` truncate both refuse a target below `mithril_ledger_slot`
+before mutating anything, the truncate also refuses while `sync_status` is
+`in_progress` (a sync records that slot only when it completes, so an
+unfinished one holds imported rows with no boundary recorded), and `Database.TruncateAfterSlot` floors the slot it
+applies to UTxOs, transactions and spends -- so an imported output, linked or
+not, and its assets survive a rollback of a block that replayed or re-confirmed
+it. `TruncateAfterSlot` applies the target slot itself to its other deletions;
+since both callers refuse a target below the anchor, those never reach an
+imported governance proposal, whose `added_slot` is the start slot of the
+epoch it was proposed in, at or before the anchor.
+
+The Mithril sync cleanup of a rejected stored tail
+(`deleteBlobBlocksAboveSlotExcept`) is a rollback entry point of another kind:
+it cuts UTxOs, transactions, spends and governance proposals at the immutable
+tip's slot, below the imported rows' slots, and it distinguishes rows only by
+slot. The rows it must remove are those the rejected blocks' processing wrote
+in `(immutable tip, ledger state slot]`, which a slot rule cannot tell from the
+imported rows there (a producer's hydrated `added_slot`). So it never runs
+after an import has written rows: `Sync` judges the stored blocks against the
+selected ledger state (`checkStoredGap`, which reads blocks only) and cleans
+between the immutable copy and the import (`cleanRejectedStoredGapBeforeImport`),
+or before the copy in reward-state repair. A catch-up or repair import
+reconciles every phase and never reads a checkpoint, so it rewrites whatever
+the cleanup removed. A bootstrap resume skips its UTxO phase once the import
+checkpoint for its key records it complete; there the cleanup is refused with
+an error and nothing is deleted. A re-run meets the same blocks and checkpoint
+and refuses again, so the only recovery is a fresh bootstrap into an empty data
+directory. A rejection found after the import is an
+error and deletes nothing. The cleanup cuts blocks, votes, UTxOs, transactions,
+spends and proposals at the same raw slot.
+
 `database.Config` carries the gate values a bare database open can supply,
 independently of any parsed cardano config: `NetworkMagic`, `StartEra`,
 `BlobPlugin`, and `MetadataPlugin`, alongside the pre-existing `StorageMode`
@@ -3189,7 +3243,7 @@ the stored blocks as they age past the window, as it does on any node.
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `transaction` | `id`, `hash` | PK `id` (`AUTOINCREMENT`); unique `hash` (`idx_transaction_hash`, `NOT NULL`) | Identity table: one row per transaction hash the store knows, either applied (it has an `applied_transaction` row) or named only by an imported or recovered output (it has none). Everything else about a transaction lives in `applied_transaction`; child tables (`certs`, `key_witness`, `plutus_data`, `redeemer`, `redeemer_script`, `witness_scripts`, `leios_transaction_context`, `address_transaction`, `transaction_metadata_label`) keep their `transaction_id` column, which still names `transaction.id`. A Dijkstra batch has one row for each sub-transaction body followed by one for the enclosing body; each row uses that body's hash. |
-| `applied_transaction` | `tx_id`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK and FK `tx_id -> transaction.id` `ON DELETE CASCADE`; indexes `idx_applied_transaction_block_hash` (`block_hash`), `idx_applied_transaction_slot` (`slot`) | One row per transaction applied to the chain, created when the transaction is applied and deleted by rollback; the position of a Dijkstra sub-transaction body is its consecutive `block_index` in ledger application order. `block_hash` and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. Mithril gap-closure writes the same body-level row shape while deliberately skipping input consumption. |
+| `applied_transaction` | `tx_id`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK and FK `tx_id -> transaction.id` `ON DELETE CASCADE`; indexes `idx_applied_transaction_block_hash` (`block_hash`), `idx_applied_transaction_slot` (`slot`) | One row per transaction applied to the chain, created when the transaction is applied and deleted by rollback; the position of a Dijkstra sub-transaction body is its consecutive `block_index` in ledger application order, and a certifying ranking block's own transactions follow the index range reserved for its endorser-block closure (the closure's transaction count plus its child bodies). `block_hash` and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. Mithril gap-closure writes the same body-level row shape while deliberately skipping input consumption. |
 | `leios_transaction_context` | `transaction_id`, `slot` | PK and FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_leios_transaction_context_slot` on `slot` | Records the parent-ledger execution slot for Musashi closure transactions whose physical transaction slot remains the certifying ranking block's slot. The cascade removes context during rollback with its transaction. |
 | `utxo` | `id`, `tx_id`, `output_idx`, `collateral_return_for_tx_id`, `spent_at_tx_id`, `payment_key`, `staking_key`, `credential_tag`, `datum_hash`, `amount`, `payment_script`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_id, output_idx)` (`idx_utxo_tx_id_output_idx`); unique `collateral_return_for_tx_id` (`idx_utxo_collateral_return_for_tx_id`, partial except on MySQL); `idx_utxo_spent_at_tx_id` (partial, non-NULL rows only, except on MySQL), `payment_key`, `staking_key` (partial), `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`; spent rows only, `WHERE deleted_slot > 0`, on MySQL `deleted_slot` alone), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | `tx_id` is `NOT NULL` and names the producing transaction for every output, a collateral return included, as `tx_id -> transaction.id`; `collateral_return_for_tx_id -> transaction.id` (equal to `tx_id`) marks the collateral return, so readers of regular outputs filter `collateral_return_for_tx_id IS NULL`. The spender is `spent_at_tx_id -> transaction.id`; reference and collateral inputs are rows of `utxo_reference_edge` and `utxo_collateral_edge` keyed by `(utxo_id, tx_id)`. The foreign keys carry no `ON DELETE` action: rollback deletes outputs explicitly. An imported output names its producer's identity row, which has no `applied_transaction` row until the producer is applied. The producer's and spender's hashes are not stored on the row; readers project them from `transaction`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `utxo_collateral_edge` | `utxo_id`, `tx_id` | PK `(utxo_id, tx_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_collateral_edge_tx_id` (`tx_id`) | Authoritative many-to-many collateral relationship, keyed by the naming transaction's row id. Apply and rollback maintain edges independently; rollback deletes by transaction id. |
@@ -3203,7 +3257,7 @@ the stored blocks as they age past the window, as it does on any node.
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. The type index is deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
 | `redeemer_script` | `transaction_id`, `tag`, `index`, `script_hash`, `slot`, `tx_index` | PK (`transaction_id`, `tag`, `index`); FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_redeemer_script_position` (`script_hash`, `slot`, `tx_index`, `tag`, `index`) | API-mode index of the script each redeemer executes, one row per attributed redeemer pointer, written by `storeRedeemerScripts` next to the `redeemer` rows. A redeemer pointer does not name its script: it resolves through the transaction body -- the spent input's address for a spend (the index points into the inputs sorted by transaction id and output index, not their body order; the address is read from the stored output's `payment_key` and `payment_script`), the sorted mint policy for a mint, the certificate or withdrawal credential, the voter, the proposal guardrail. A pointer that cannot be resolved (an input the index never saw, a spend of an output no script locks) has no row rather than failing the block; a guarding redeemer has none either, because no script purpose is built for it. `slot` and `tx_index` repeat the transaction position so a script's redeemers page in chain order straight off the index; replaying a transaction deletes and rewrites its rows, and the cascade is how rollback reaches them. |
 | `witness_scripts` | `id`, `transaction_id`, `script_hash`, `type` | PK `id`; indexes `transaction_id`, `script_hash`, `type` | API-mode witness-script references. Join `script_hash = script.hash`. The script-hash and type indexes are deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
-| `script` | `id`, `hash`, `content`, `created_slot`, `type` | PK `id`; unique/index `hash`; index `type` | API-mode de-duplicated script content by hash. The type index is unused by live query predicates and is rebuilt by background maintenance. |
+| `script` | `id`, `hash`, `content`, `created_slot`, `type` | PK `id`; unique `hash` (`uni_script_hash`, which serves hash lookups and is the `ON CONFLICT (hash)` target); index `type` | API-mode de-duplicated script content by hash. The type index is unused by live query predicates and is rebuilt by background maintenance. |
 | `plutus_data` | `id`, `transaction_id`, `data` | PK `id`; index `transaction_id` | API-mode Plutus data from witness sets. Join to `transaction.id`. Its transaction-id index remains resident because SetTransaction clears Plutus data on replays. |
 | `redeemer` | `id`, `transaction_id`, `tag`, `index`, `data`, `ex_units_memory`, `ex_units_cpu` | PK `id`; indexes `transaction_id`, `tag`, `index` | API-mode redeemers. Join to `transaction.id`. The tag and index filters are deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears redeemers on replays. |
 | `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique `hash` (`uni_datum_hash`, which serves hash lookups and is the `ON CONFLICT (hash)` target); index `added_slot` | API-mode datum hash index. UTxOs can reference it with `utxo.datum_hash = datum.hash`. The `added_slot` index is deferred and rebuilt by background maintenance. |
@@ -3718,7 +3772,7 @@ updates preserve the previous activity and expiry epochs.
 | `governance_proposal_drop` | `proposal_id`, `dropped_epoch`, `dropped_slot` | PK `proposal_id`; indexes `dropped_epoch`, `dropped_slot` | Companion table recording when an expired proposal's deposit was actually returned and the proposal reached final consideration. cardano-ledger does not refund an expired action's deposit in the same epoch it is marked expired -- that happens one full epoch later, the same one-epoch delay ratification has before enactment. A separate table rather than columns on `governance_proposal` avoids widening a table v16 (`governance-proposal-optional-anchor`) already rebuilds via rename-and-recreate with an unqualified `SELECT *`, which cannot tolerate columns added after it. FK `proposal_id` references `governance_proposal.id` with cascade deletion. A row's absence means the proposal, if expired, is still awaiting its drop. The v17 backfill stamps every proposal an upgraded database had already expired, because the pre-v17 tick refunded at expiry; without it the new drop step would return each of those deposits a second time at the first boundary after the upgrade. |
 | `governance_proposal_ratification_history` | `id`, `proposal_id`, `transition_slot`, `ratified_epoch`, `ratified_slot` | PK `id`; indexes `transition_slot`, `(proposal_id, transition_slot, id)` | Rollback journal for proposal ratification lifecycle. A paired epoch/slot records ratification; NULL marker values record an explicit return to pending. FK `proposal_id` references `governance_proposal.id` with cascade deletion. Rollback deletes transitions above the target and restores the latest remaining state, with `id` breaking ties between transitions at the same slot. |
 | `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. `SetGovernanceVote` upserts by the unique voter/proposal key, so a replaced vote overwrites `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` in place; `governance_vote_history` is what lets rollback recover the value that predated a replacement. |
-| `governance_vote_history` | `id`, `vote_id`, `transition_slot`, `vote`, `anchor_url`, `anchor_hash`, `tx_hash`, `cert_index` | PK `id`; indexes `transition_slot`, `(vote_id, transition_slot, id)` | Rollback journal for vote replacement, mirroring `governance_proposal_ratification_history`'s pattern. `SetGovernanceVote` appends a row here for every cast located by its transaction (`tx_hash`, and `cert_index`, the procedure's position among the voter's own procedures in it; migration v48), skipping one whose `(vote_id, tx_hash, cert_index)` is already recorded so a replayed block adds nothing, and for a write without that position only when the effective `vote`/`anchor_url`/`anchor_hash` changes, including a voter's first cast, keyed by the slot the new value took effect (`vote_updated_slot`, falling back to `added_slot` on a first cast). FK `vote_id` references `governance_vote.id` with cascade deletion, so a vote created after the rollback target is removed along with its own history. For a vote that existed before the rollback target but was later replaced, rollback restores `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` from the latest surviving history entry (`transition_slot` at or before the target) rather than deleting the row outright -- the prior behavior lost the vote entirely when a rollback landed between two replacements, since the row itself carries only the current value. Migration `v22` backfills one history row per pre-existing vote from its current value; a replacement that happened before the upgrade cannot be reconstructed, matching `v6`'s ratification-history backfill limitation. A vote whose only surviving history is that single backfilled row, if a rollback deletes it, has no history left to restore from; rollback falls back to deleting that vote outright (the pre-history behavior) instead of writing `NULL` into `vote`'s `NOT NULL` column. |
+| `governance_vote_history` | `id`, `vote_id`, `transition_slot`, `vote`, `anchor_url`, `anchor_hash`, `tx_hash`, `cert_index`, `deleted` | PK `id`; indexes `transition_slot`, `(vote_id, transition_slot, id)` | Rollback journal for vote replacement, mirroring `governance_proposal_ratification_history`'s pattern. `SetGovernanceVote` appends a row here for every cast located by its transaction (`tx_hash`, and `cert_index`, the procedure's position among the voter's own procedures in it; migration v48), skipping one whose `(vote_id, tx_hash, cert_index)` is already recorded so a replayed block adds nothing, and for a write without that position only when the effective `vote`/`anchor_url`/`anchor_hash` changes, including a voter's first cast, keyed by the slot the new value took effect (`vote_updated_slot`, falling back to `added_slot` on a first cast). FK `vote_id` references `governance_vote.id` with cascade deletion, so a vote created after the rollback target is removed along with its own history. For a vote that existed before the rollback target but was later replaced, rollback restores `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` from the latest surviving history entry (`transition_slot` at or before the target) rather than deleting the row outright -- the prior behavior lost the vote entirely when a rollback landed between two replacements, since the row itself carries only the current value. `deleted` marks a deletion entry written when a DRep deregistration soft-deletes the vote (migration v66). Migration `v22` backfills one history row per pre-existing vote from its current value; a replacement that happened before the upgrade cannot be reconstructed, matching `v6`'s ratification-history backfill limitation. A vote whose only surviving history is that single backfilled row, if a rollback deletes it, has no history left to restore from; rollback falls back to deleting that vote outright (the pre-history behavior) instead of writing `NULL` into `vote`'s `NOT NULL` column. |
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
 | `committee_member` | `id`, `cold_credential_tag`, `cold_cred_hash`, `expires_epoch`, `term_start_slot`, `term_start_slot_set`, `added_slot`, `deleted_slot` | PK `id`; unique `(cold_credential_tag, cold_cred_hash, added_slot)`; indexes `added_slot`, `deleted_slot` | Snapshot-imported and enacted committee state. Credential tag 0 is a key hash and 1 is a script hash. `term_start_slot` bounds the authorization and resignation certificates that apply to this membership term; `term_start_slot_set` preserves an explicit slot-zero start. An `UpdateCommittee` enactment preserves the existing `term_start_slot` of a credential that is already a seated member and stamps a fresh one only for a credential new to the committee or rejoining after removal: the later of the proposal's `added_slot` and the first slot of the epoch the enactment boundary closes, because cardano-ledger drops a non-member's committee state at each epoch boundary. Migration v44 repairs renewal rows written before this rule; a new or rejoining member's term written before the epoch-boundary rule still needs a resync. Re-election creates a new historical row; soft deletion and rollback match the full tagged identity and mutation slot. |
 | `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`; zero is a valid threshold, while SQL NULL marks a cleared quorum. Migration v23 converts legacy zero clear markers to NULL. |
@@ -4096,6 +4150,29 @@ the runner's already-applied guard makes replay-safe.
 `TestDatumHashDuplicateIndexDrop` upgrades a v62 database, plans the hash
 lookups on the unique index and replays the migration; the PostgreSQL and MySQL
 engine tests check the drop against a real server when one is configured.
+
+Migration `v65` (`script-hash-duplicate-index-drop`, integer version 65) drops
+`idx_script_hash` on SQLite, PostgreSQL and MySQL. It indexed `script.hash`,
+which `uni_script_hash` already indexes; the unique index serves every lookup by
+hash and is the `ON CONFLICT (hash)` target of the script insert, so the
+duplicate only added a random-position write per insert. Nothing names it
+(`INDEXED BY`), and a fresh database, which replays every migration, ends
+without it. MySQL uses the translated `DROP INDEX <name> ON <table>` form, which
+the runner's already-applied guard makes replay-safe.
+`TestScriptHashDuplicateIndexDrop` upgrades a v64 database, plans the hash
+lookup on the unique index and replays the migration; the PostgreSQL and MySQL
+engine tests check the drop against a real server when one is configured.
+
+Migration `v66` (`governance-vote-tombstone`, integer version 66) adds
+`governance_vote_history.deleted`, a boolean defaulting to false, and backfills
+one deletion entry per `governance_vote` row whose `deleted_slot` is set: its
+`transition_slot` is that `deleted_slot` and it repeats the row's `vote` and
+anchor. A vote that was deleted and then cast again before this version has
+already lost its `deleted_slot` (the recast clears it), so no deletion entry
+can be reconstructed for it; its reads at slots inside the deleted window keep
+returning the vote.
+`TestGovernanceVoteTombstoneBackfill` upgrades a v65 database and replays the
+migration.
 
 #### Mithril API reward-live-stake finalization
 
@@ -7280,10 +7357,23 @@ derivation takes a DRep from.
 it, in the same order. `GetGovernanceVotesAtSlot(proposalID, slot, txn)`
 returns the votes with `added_slot` at or before `slot` and `deleted_slot`
 null or after it, each with the `vote` and anchor of its latest
-`governance_vote_history` entry at or before `slot`. A vote with no such entry
-predates the v22 journal: it is returned with its row's values when they took
+`governance_vote_history` entry at or before `slot`. A vote whose latest entry
+at or before `slot` is a deletion entry (`deleted`) is left out, which keeps
+the answer right after a recast cleared the row's `deleted_slot`. A vote with
+no such entry predates the v22 journal: it is returned with its row's values when they took
 effect at or before `slot`, and left out otherwise, since a vote replaced
 before the journal after `slot` has no record of its value there.
+
+`DeleteGovernanceVotesForDrep` journals a deletion entry (`deleted` true, the
+deleted vote's value, `transition_slot` the deletion slot, no `tx_hash`) for
+each vote it soft-deletes. Deletion entries are not casts: the restore of a
+vote's value on rollback, `GetGovernanceVotesPage`'s listing and its ranking
+columns skip them. The listing reports a cast's `deleted_slot` as the first
+deletion entry after it with no later cast before that entry, falling back to
+the row's `deleted_slot`. After a rollback a vote whose latest surviving entry
+is a deletion entry gets its `deleted_slot` from it, so a recast undone by the
+rollback leaves the vote deleted. A deleted vote cast again with an unchanged
+value and no transaction position still appends a history entry.
 
 `DeleteGovernanceVotesAfterSlot` discards future history before deleting votes
 created after the target or lacking any surviving history. Orphan detection uses

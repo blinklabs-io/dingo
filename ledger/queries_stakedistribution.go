@@ -224,17 +224,18 @@ func (ls *LedgerState) liveStakeDistribution(
 		return bytes.Compare(a.Bytes(), b.Bytes())
 	})
 
-	// A pinned caller's VRF lookup must be bounded to the same slot its
-	// stake and circulation were reconstructed at -- otherwise a pool that
-	// re-registers with a new VRF key between the pinned slot and now would
-	// have its historical stake paired with a key it did not yet hold.
-	// Left nil for a live query, which keeps
-	// poolVrfKeyHashes' unbounded "latest registration" behavior.
-	var vrfAsOfSlot *uint64
+	// A pinned caller's stake is reconstructed at targetSlot, so its VRF key
+	// is the registration in force at that slot. A live caller is told the key
+	// header validation requires of a block at the tip, which is the electing
+	// snapshot's.
+	var vrfByPool map[lcommon.PoolKeyHash]ledger.Blake2b256
 	if at.pinned() {
-		vrfAsOfSlot = &targetSlot
+		vrfByPool, err = ls.poolVrfKeyHashes(keyHashes, &targetSlot, metaTxn)
+	} else {
+		vrfByPool, err = ls.electingPoolVrfKeyHashes(
+			ctx, keyHashes, targetSlot, epoch, txn,
+		)
 	}
-	vrfByPool, err := ls.poolVrfKeyHashes(keyHashes, vrfAsOfSlot, metaTxn)
 	if err != nil {
 		return nil, err
 	}

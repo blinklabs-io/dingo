@@ -561,7 +561,8 @@ func (s *Store) GetGovernanceVotesAtSlot(
 	// cast. A vote with no such entry predates the journal: its row is the
 	// value at slot only when it took effect by then. One replaced before the
 	// v22 journal after slot has no record of its value there and is left
-	// out rather than reported with a later one.
+	// out rather than reported with a later one. A deletion is a tombstone
+	// entry, so a vote whose latest entry at slot is one is not in effect.
 	rows, err := db.QueryContext(ctx, `
 SELECT v.id, v.proposal_id, v.voter_type, v.voter_credential_tag,
        v.voter_credential,
@@ -581,6 +582,7 @@ LEFT JOIN governance_vote_history h ON h.id = (
 )
 WHERE v.proposal_id = ? AND v.added_slot <= ?
   AND (v.deleted_slot IS NULL OR v.deleted_slot > ?)
+  AND (h.id IS NULL OR h.deleted = false)
   AND (h.id IS NOT NULL
        OR COALESCE(v.vote_updated_slot, v.added_slot) <= ?)`,
 		slotValue,
@@ -605,7 +607,7 @@ WHERE v.proposal_id = ? AND v.added_slot <= ?
 }
 
 const governanceVotePreviousQuery = `-- name: GetGovernanceVotePrevious :one
-SELECT vote, anchor_url, anchor_hash
+SELECT vote, anchor_url, anchor_hash, deleted_slot
 FROM governance_vote
 WHERE proposal_id = ? AND voter_type = ? AND voter_credential_tag = ?
     AND voter_credential = ?`
@@ -648,6 +650,7 @@ func (s *Store) SetGovernanceVote(
 			var previousVote sql.NullByte
 			var previousAnchorURL sql.NullString
 			var previousAnchorHash []byte
+			var previousDeletedSlot sql.NullInt64
 			previousErr := s.queryRowCached(
 				ctx,
 				db,
@@ -656,7 +659,10 @@ func (s *Store) SetGovernanceVote(
 				vote.VoterType,
 				vote.VoterCredentialTag,
 				vote.VoterCredential,
-			).Scan(&previousVote, &previousAnchorURL, &previousAnchorHash)
+			).Scan(
+				&previousVote, &previousAnchorURL, &previousAnchorHash,
+				&previousDeletedSlot,
+			)
 			if previousErr != nil && !errors.Is(previousErr, sql.ErrNoRows) {
 				return previousErr
 			}
@@ -708,8 +714,11 @@ func (s *Store) SetGovernanceVote(
 				castTxHash = vote.CastTxHash
 				castCertIndex = vote.CastCertIndex
 			} else {
+				// A deleted vote cast again with the same value is a change:
+				// the journal's latest entry is the deletion tombstone.
 				unchanged := previousErr == nil &&
 					previousVote.Valid &&
+					!previousDeletedSlot.Valid &&
 					previousVote.Byte == vote.Vote &&
 					previousAnchorURL.String == vote.AnchorURL &&
 					bytes.Equal(previousAnchorHash, vote.AnchorHash)
@@ -755,6 +764,29 @@ func (s *Store) DeleteGovernanceVotesForDrep(
 			}
 			currentEpochValue, err := checkedInt64(epoch)
 			if err != nil {
+				return err
+			}
+			// The journal records the deletion so a read at an earlier slot
+			// stays correct once a later cast clears deleted_slot.
+			if _, err := db.ExecContext(ctx, `-- name: InsertGovernanceVoteTombstones :exec
+INSERT INTO governance_vote_history (
+    vote_id, transition_slot, vote, anchor_url, anchor_hash, deleted
+)
+SELECT id, ?, vote, anchor_url, anchor_hash, true
+FROM governance_vote
+WHERE voter_type = ? AND voter_credential_tag = ?
+  AND voter_credential = ? AND deleted_slot IS NULL
+  AND proposal_id IN (
+      SELECT id FROM governance_proposal
+      WHERE expires_epoch >= ? AND enacted_epoch IS NULL
+        AND expired_epoch IS NULL AND deleted_slot IS NULL
+  )`,
+				slot,
+				models.VoterTypeDRep,
+				credentialTag,
+				credential,
+				currentEpochValue,
+			); err != nil {
 				return err
 			}
 			result, err := db.ExecContext(ctx, `-- name: DeleteGovernanceVotesForDrep :execrows
@@ -884,25 +916,25 @@ UPDATE governance_vote
 SET vote = (
 SELECT history.vote
 FROM governance_vote_history AS history
-WHERE history.vote_id = governance_vote.id
+WHERE history.vote_id = governance_vote.id AND history.deleted = false
 ORDER BY history.transition_slot DESC, history.id DESC
 LIMIT 1
 ), anchor_url = (
 SELECT history.anchor_url
 FROM governance_vote_history AS history
-WHERE history.vote_id = governance_vote.id
+WHERE history.vote_id = governance_vote.id AND history.deleted = false
 ORDER BY history.transition_slot DESC, history.id DESC
 LIMIT 1
 ), anchor_hash = (
 SELECT history.anchor_hash
 FROM governance_vote_history AS history
-WHERE history.vote_id = governance_vote.id
+WHERE history.vote_id = governance_vote.id AND history.deleted = false
 ORDER BY history.transition_slot DESC, history.id DESC
 LIMIT 1
 ), vote_updated_slot = (
 SELECT history.transition_slot
 FROM governance_vote_history AS history
-WHERE history.vote_id = governance_vote.id
+WHERE history.vote_id = governance_vote.id AND history.deleted = false
 ORDER BY history.transition_slot DESC, history.id DESC
 LIMIT 1
 )
@@ -911,7 +943,7 @@ LIMIT 1
 const governanceVoteRollbackRestoreQuery = `-- name: RestoreGovernanceVotesAfterRollback :exec` +
 	governanceVoteRollbackRestoreValues + `WHERE EXISTS (
  SELECT 1 FROM governance_vote_history AS history
- WHERE history.vote_id = governance_vote.id
+ WHERE history.vote_id = governance_vote.id AND history.deleted = false
 )`
 
 const governanceVoteRollbackRestoreSQLiteQuery = `-- name: RestoreGovernanceVotesAfterRollbackSQLite :exec` +
@@ -923,7 +955,7 @@ OR (
  SELECT history.vote, history.anchor_url, history.anchor_hash,
         history.transition_slot
  FROM governance_vote_history AS history
- WHERE history.vote_id = governance_vote.id
+ WHERE history.vote_id = governance_vote.id AND history.deleted = false
  ORDER BY history.transition_slot DESC, history.id DESC
  LIMIT 1
 )`
@@ -983,6 +1015,24 @@ DELETE FROM governance_vote_history
 UPDATE governance_vote SET deleted_slot = NULL
 				 WHERE deleted_slot > ?`,
 					args: []any{slot},
+				},
+				{
+					// A vote deleted and cast again after slot has had its
+					// deleted_slot cleared by the cast; its surviving latest
+					// entry is the tombstone that says it is deleted.
+					query: `-- name: RestoreGovernanceVoteTombstonesAfterSlot :exec
+UPDATE governance_vote SET deleted_slot = (
+ SELECT history.transition_slot FROM governance_vote_history AS history
+ WHERE history.vote_id = governance_vote.id
+ ORDER BY history.transition_slot DESC, history.id DESC
+ LIMIT 1
+)
+WHERE deleted_slot IS NULL AND (
+ SELECT history.deleted FROM governance_vote_history AS history
+ WHERE history.vote_id = governance_vote.id
+ ORDER BY history.transition_slot DESC, history.id DESC
+ LIMIT 1
+) = true`,
 				},
 			}
 			for _, query := range queries {

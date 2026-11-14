@@ -337,9 +337,95 @@ func (c *gapBlockCollector) result() ([]models.Block, error) {
 	return c.blocks, nil
 }
 
+// storedGapCheck is the verdict on the blocks stored above the immutable tip
+// against the ledger state the import anchors.
+type storedGapCheck struct {
+	// present is false when no stored block sits above the immutable tip, or
+	// when the ledger state is not above it, so there is no gap to judge.
+	present bool
+	// blocks are the stored blocks from the immutable tip up to resumeGapEnd.
+	blocks       []models.Block
+	immutableTip models.Block
+	// resumeGapEnd is the lower of the stored tip and the ledger state slot.
+	resumeGapEnd  uint64
+	storedTipSlot uint64
+	// rejected is the continuity failure, nil when the stored blocks are
+	// usable. A partial stored gap that is continuous is not rejected.
+	rejected error
+}
+
+// checkStoredGap judges the stored blocks above immutableTipSlot against the
+// ledger state at ledgerStateSlot. It reads blocks only, so it gives the same
+// verdict before and after the ledger-state import.
+func checkStoredGap(
+	ctx context.Context,
+	db *database.Database,
+	immutableTipSlot uint64,
+	ledgerStateSlot uint64,
+	ledgerStateHash []byte,
+) (storedGapCheck, error) {
+	recent, err := database.BlocksRecent(ctx, db, 1)
+	if err != nil {
+		return storedGapCheck{}, fmt.Errorf("reading chain tip: %w", err)
+	}
+	if len(recent) == 0 ||
+		recent[0].Slot <= immutableTipSlot ||
+		immutableTipSlot >= ledgerStateSlot {
+		return storedGapCheck{}, nil
+	}
+	check := storedGapCheck{
+		present:       true,
+		storedTipSlot: recent[0].Slot,
+		resumeGapEnd:  min(recent[0].Slot, ledgerStateSlot),
+	}
+	check.blocks, err = loadGapBlocksFromBlob(
+		ctx, db, immutableTipSlot+1, check.resumeGapEnd,
+	)
+	if err != nil {
+		return storedGapCheck{}, fmt.Errorf(
+			"loading stored gap blocks from blob store: %w", err,
+		)
+	}
+	check.immutableTip, err = database.BlockBeforeSlot(
+		ctx, db, immutableTipSlot+1,
+	)
+	if err != nil {
+		return storedGapCheck{}, fmt.Errorf(
+			"reading immutable tip for stored gap validation: %w", err,
+		)
+	}
+	if check.immutableTip.Slot != immutableTipSlot {
+		return storedGapCheck{}, fmt.Errorf(
+			"reading immutable tip for stored gap validation: expected slot %d, got slot %d",
+			immutableTipSlot, check.immutableTip.Slot,
+		)
+	}
+	// The terminal-hash check against ledgerStateHash applies only when the
+	// stored gap reaches the ledger state tip. A partial stored gap is still
+	// useful: it is continuity-validated and the remainder is fetched.
+	if check.resumeGapEnd == ledgerStateSlot {
+		check.rejected = validateCompleteGapBlocks(
+			check.blocks,
+			ocommon.NewPoint(check.immutableTip.Slot, check.immutableTip.Hash),
+			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
+		)
+	} else {
+		check.rejected = validateStoredGapContinuity(
+			check.blocks, check.immutableTip,
+		)
+	}
+	return check, nil
+}
+
 // deleteBlobBlocksAboveSlotExcept removes blocks above slot unless their
 // hashes are preserved for replay. It drops derived metadata above slot and
 // restores UTxOs spent by removed blocks.
+//
+// Every cut is the raw slot: the rows of a rejected tail sit at gap slots,
+// where the rows a ledger-state import wrote can sit too (imported UTxOs at
+// the state slot, reconcile tombstones at the state slot, a hydrated
+// producer's slot), and no slot rule separates the two. A caller must
+// therefore run it before the import, or with slot at or above the state slot.
 func deleteBlobBlocksAboveSlotExcept(
 	ctx context.Context,
 	db *database.Database,
