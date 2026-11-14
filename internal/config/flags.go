@@ -984,6 +984,12 @@ var flagSpecs = []flagSpec{
 		"shelley-kes-agent-plaintext",
 		"run the remote KES agent link over plain TCP",
 	),
+	stringFlag(
+		"ShelleyKESAgentProfile",
+		"shelley-kes-agent-profile",
+		"",
+		"remote KES agent profile to sign for, named when the agent admits a session",
+	),
 	durationFlag(
 		"ShelleyKeyWatchInterval",
 		"shelley-key-watch-interval",

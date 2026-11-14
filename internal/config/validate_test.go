@@ -776,6 +776,17 @@ func TestValidate(t *testing.T) {
 			wantErr: "shelleyKesAgentPlaintext requires shelleyKesAgentAddress",
 		},
 		{
+			name: "profile without a remote KES agent",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESKey = "/keys/kes.skey"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+				c.ShelleyKESAgentProfile = "pool-a"
+			},
+			wantErr: "shelleyKesAgentProfile requires shelleyKesAgentAddress",
+		},
+		{
 			name: "client certificate without a remote KES agent",
 			modify: func(c *Config) {
 				c.BlockProducer = true
