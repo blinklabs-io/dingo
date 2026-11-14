@@ -798,8 +798,9 @@ func (o *Ouroboros) chainsyncConnectionConfigOption(
 	}
 }
 
-// waitForLedger is set for node-to-client connections: see
-// chainsyncServerRequestNext.
+// waitForLedger selects the local-client wrapper. Both local clients and peers
+// wait for ledger application before a roll-forward is served; the wrappers
+// differ only in whether trusted local activity is tracked.
 func (o *Ouroboros) chainsyncServerConnOpts(
 	ctx context.Context,
 	limiter *chainsyncFindIntersectRateLimiter,
@@ -1410,14 +1411,51 @@ func (o *Ouroboros) refreshTip(next *chain.ChainIteratorResult) ochainsync.Tip {
 func (o *Ouroboros) chainsyncServerAheadOfLedger(
 	next *chain.ChainIteratorResult,
 ) bool {
-	return next != nil && !next.Rollback &&
-		next.Point.Slot > o.ledgerState.Tip().Point.Slot
+	if next == nil || next.Rollback {
+		return false
+	}
+	appliedTip := o.ledgerState.Tip().Point
+	if next.Point.Slot != appliedTip.Slot {
+		if next.Point.Slot > appliedTip.Slot {
+			return true
+		}
+		return o.chainsyncServerAppliedTipRolledBack(appliedTip)
+	}
+	if bytes.Equal(next.Point.Hash, appliedTip.Hash) {
+		return false
+	}
+	isParent, err := o.chainsyncServerAppliedParent(appliedTip, next.Point)
+	return err != nil || !isParent
+}
+
+func (o *Ouroboros) chainsyncServerAppliedTipRolledBack(
+	appliedTip ocommon.Point,
+) bool {
+	if len(appliedTip.Hash) == 0 {
+		return false
+	}
+	held, settled := o.ledgerState.Chain().HoldsPointSettled(
+		context.Background(),
+		appliedTip,
+	)
+	if !settled {
+		return true
+	}
+	if held {
+		return false
+	}
+	_, err := o.ledgerState.Chain().BlockByPoint(
+		context.Background(),
+		appliedTip,
+		nil,
+	)
+	return err == nil
 }
 
 func (o *Ouroboros) chainsyncServerRequestNextPeer(
 	ctx ochainsync.CallbackContext,
 ) error {
-	return o.chainsyncServerRequestNext(ctx, false, false)
+	return o.chainsyncServerRequestNext(ctx, true, false)
 }
 
 func (o *Ouroboros) chainsyncServerRequestNextLocal(
@@ -1435,14 +1473,15 @@ func (o *Ouroboros) chainsyncServerRequestNextTrustedLocal(
 // chainsyncServerRequestNext serves the next chain event to a downstream
 // client.
 //
-// With waitForLedger set (node-to-client connections) a roll-forward is held
+// With waitForLedger set a roll-forward is held
 // until the ledger has applied the block. A local client follows chainsync to
 // read ledger state at the points it receives, and cardano-node serves its
 // local clients only blocks on its selected chain, which it adopts after
 // validating them against the ledger, so every point it delivers can be
 // acquired by LocalStateQuery. Serving a block the ledger has not reached yet
 // makes Acquire of that point fail with AcquireFailurePointNotOnChain.
-// Peers (node-to-node) are still served ahead of the ledger.
+// Node-to-node peers use the same gate because they must only receive blocks
+// on the validated selected chain.
 func (o *Ouroboros) chainsyncServerRequestNext(
 	ctx ochainsync.CallbackContext,
 	waitForLedger bool,
@@ -1629,6 +1668,11 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 					o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
 					return
 				}
+				if !o.chainsyncServerAheadOfLedger(next) {
+					cancel()
+					o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
+					return
+				}
 			case err := <-applied:
 				if err != nil {
 					cancel()
@@ -1642,6 +1686,10 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 					return
 				}
 				appliedTip := o.ledgerState.Tip().Point
+				if appliedTip.Slot > next.Point.Slot &&
+					o.chainsyncServerAppliedTipRolledBack(appliedTip) {
+					continue
+				}
 				if appliedTip.Slot == next.Point.Slot &&
 					!bytes.Equal(appliedTip.Hash, next.Point.Hash) {
 					isParent, err := o.chainsyncServerAppliedParent(

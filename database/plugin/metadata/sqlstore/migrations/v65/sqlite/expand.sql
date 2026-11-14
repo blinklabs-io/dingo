@@ -1,4 +1,5 @@
--- Find the pools whose retirement targets an epoch from the epoch index. The
--- retiring and retired pool lists rank certificates only for those pools, so
--- a page no longer reads every retirement certificate ever recorded.
-CREATE INDEX IF NOT EXISTS `idx_pool_retirement_epoch` ON `pool_retirement`(`epoch`);
+-- idx_script_hash duplicates the index behind uni_script_hash on the same
+-- column. The unique index serves every lookup by hash and is the
+-- ON CONFLICT (hash) target of the script insert, so the second index only
+-- adds a random-position write per insert.
+DROP INDEX IF EXISTS `idx_script_hash`;
