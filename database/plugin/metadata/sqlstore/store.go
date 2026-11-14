@@ -204,6 +204,9 @@ type Store struct {
 	// Test hook runs after GetLiveStakeInputsForPools has totalled pending
 	// reward credits and before its pool reads. Production leaves it nil.
 	liveStakePendingTotalsRead func()
+	// Test hook runs after a pool_current_state read has looked up the
+	// stored rows and before its next statement. Production leaves it nil.
+	poolCurrentStatesRead func()
 
 	migrations          []migrations.Migration
 	genesisStakingEmpty bool

@@ -628,6 +628,28 @@ func lookupPoolCurrentStates(
 	return ret, nil
 }
 
+// readSnapshot returns txn when the caller supplied one. Otherwise it begins
+// a read transaction, which the caller ends with the returned func: the
+// pool_current_state reads issue several statements, and in autocommit each
+// would read its own snapshot, so a rollback committing between them could
+// remove a registration the lookup already selected.
+func (s *Store) readSnapshot(txn types.Txn) (types.Txn, func(), error) {
+	if txn != nil {
+		return txn, func() {}, nil
+	}
+	if err := s.ensureReady(); err != nil {
+		return nil, nil, err
+	}
+	readTxn := s.ReadTransaction(context.Background())
+	return readTxn, func() { _ = readTxn.Rollback() }, nil
+}
+
+func (s *Store) afterPoolCurrentStatesRead() {
+	if s.poolCurrentStatesRead != nil {
+		s.poolCurrentStatesRead()
+	}
+}
+
 // GetPoolRegistrationsEffectiveForEpoch answers from pool_current_state. The
 // stored rows are exact for any epochStartSlot at or after the pool's horizon.
 // A pool whose epochStartSlot precedes its horizon, an epoch more than
@@ -646,6 +668,11 @@ func (s *Store) GetPoolRegistrationsEffectiveForEpoch(
 	if len(poolKeyHashes) == 0 {
 		return []models.PoolRegistration{}, nil
 	}
+	txn, end, err := s.readSnapshot(txn)
+	if err != nil {
+		return nil, err
+	}
+	defer end()
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -676,6 +703,7 @@ func (s *Store) GetPoolRegistrationsEffectiveForEpoch(
 			}
 		}
 	}
+	s.afterPoolCurrentStatesRead()
 	ret, err := loadPoolRegistrationsByID(ctx, db, registrationIDs)
 	if err != nil {
 		return nil, err
@@ -725,6 +753,11 @@ func (s *Store) GetPoolRegistrationsAtSlot(
 	if len(poolKeyHashes) == 0 {
 		return []models.PoolRegistration{}, nil
 	}
+	txn, end, err := s.readSnapshot(txn)
+	if err != nil {
+		return nil, err
+	}
+	defer end()
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -752,6 +785,7 @@ func (s *Store) GetPoolRegistrationsAtSlot(
 			}
 		}
 	}
+	s.afterPoolCurrentStatesRead()
 	ret, err := loadPoolRegistrationsByID(ctx, db, registrationIDs)
 	if err != nil {
 		return nil, err
@@ -805,6 +839,11 @@ func (s *Store) GetPoolStatus(
 	txn types.Txn,
 ) (models.PoolStatus, error) {
 	var status models.PoolStatus
+	txn, end, err := s.readSnapshot(txn)
+	if err != nil {
+		return status, err
+	}
+	defer end()
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return status, err
@@ -856,6 +895,7 @@ func (s *Store) GetPoolStatus(
 	}
 	epoch := retirement.epoch
 	status.RetirementEpoch = &epoch
+	s.afterPoolCurrentStatesRead()
 	current, ok, err := currentEpoch(ctx, db)
 	if err != nil {
 		return status, err
