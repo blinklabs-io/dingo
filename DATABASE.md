@@ -5117,9 +5117,13 @@ is the immutable point's slot, and a positive setting (environment variable
 `DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) keeps uncertified records back to
 `max persisted Leios EB slot - retention slots` but never past the immutable
 point. The cutoff slot itself is retained. Nothing is pruned while the chain is
-too short to have an immutable point. When the immutable point cannot be
-resolved, or there is no ledger, a positive setting applies its window alone,
-which covers at least the stability window, and zero prunes nothing.
+too short to have an immutable point or reading the chain for it fails: ledger
+apply writes a certified endorser block's `em`/`et` records before its `ec`
+marker commits, and a cutoff past that block would let a concurrent sweep
+delete them in between. With no ledger, or one with no primary chain or
+security parameter (`ledger.ErrImmutablePointUnconfigured`), a positive setting
+applies its window alone, which covers at least the stability window, and zero
+prunes nothing.
 
 An occurrence is certified exactly when its `ec` marker exists. Ledger apply
 stages the marker in the block-apply transaction of the ranking block that

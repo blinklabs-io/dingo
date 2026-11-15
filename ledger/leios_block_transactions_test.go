@@ -387,3 +387,52 @@ func TestRejectedCertifyingBlockPersistsNoEndorserBlock(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, certified)
 }
+
+// The manifest persisted for a certified endorser block comes from the same
+// cache snapshot as the transactions apply used. An eviction right after that
+// lookup (TTL or the aggregate byte budget) must neither fail the block nor
+// leave the closure unpersisted.
+func TestCertifiedApplyPersistsEndorserBlockEvictedAfterLookup(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	manifest := testLeiosManifest(f)
+	f.ebHash = manifest.Hash()
+	manifestCbor, err := manifest.MarshalCBOR()
+	require.NoError(t, err)
+	var evicted atomic.Bool
+	txsProvider := f.ls.config.EndorserBlockProvider
+	f.ls.config.EndorserBlockProvider = func(
+		hash []byte,
+		slot uint64,
+	) ([]cbor.RawMessage, bool) {
+		if evicted.Swap(true) {
+			return nil, false
+		}
+		return txsProvider(hash, slot)
+	}
+	f.ls.config.EndorserBlockDataProvider = func(
+		hash []byte,
+		slot uint64,
+	) ([]byte, []cbor.RawMessage, bool) {
+		if evicted.Swap(true) || !bytes.Equal(hash, f.ebHash.Bytes()) ||
+			slot != leiosCertApplyAnnouncingSlot {
+			return nil, nil, false
+		}
+		return manifestCbor, f.ebTxs, true
+	}
+	parent := f.announce()
+	certifier, offsets, envParent := f.certifyingChild(parent)
+	require.NoError(t, f.process(certifier, offsets, envParent))
+
+	gotManifest, err := f.db.GetLeiosEBManifest(
+		f.ebHash.Bytes(),
+		parent.SlotNumber(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, manifestCbor, gotManifest)
+	gotTxs, err := f.db.GetLeiosEBTxs(f.ebHash.Bytes(), parent.SlotNumber())
+	require.NoError(t, err)
+	require.Equal(t, f.ebTxs, gotTxs)
+}

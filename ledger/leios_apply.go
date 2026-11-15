@@ -2130,29 +2130,51 @@ func (ls *LedgerState) publishUntickedClosureAfterCommit(
 	})
 }
 
+// certifiedEndorserBlockData resolves the closure a certifying ranking block
+// applies. With a data provider the manifest and transactions come from one
+// cache lookup, so an eviction between two lookups cannot leave apply holding
+// transactions whose manifest it can no longer persist. Without one the
+// manifest is nil and nothing is persisted.
+func (ls *LedgerState) certifiedEndorserBlockData(
+	ebHash []byte,
+	ebSlot uint64,
+) ([]byte, []cbor.RawMessage, bool) {
+	if ls.config.EndorserBlockDataProvider != nil {
+		return ls.config.EndorserBlockDataProvider(ebHash, ebSlot)
+	}
+	txs, ok := ls.config.EndorserBlockProvider(ebHash, ebSlot)
+	return nil, txs, ok
+}
+
 // persistCertifiedEndorserBlock writes the manifest and transactions of a
 // certified endorser block when the store lacks either, so the closure stays
 // readable after the in-memory endorser-block cache expires. The asynchronous
 // persist queue drops writes under pressure and is not a durability
 // guarantee for a block that certification has made part of the chain.
 //
-// The write commits in its own blob transaction, before the certification
-// marker is staged: an endorser block bigger than the shared chunk
-// transaction allows must not overflow it, and a record left by a ranking
-// block that is rejected afterwards is uncertified and pruned like any other.
-// Without a data provider nothing is written; the closure then depends on
-// whatever the queue persisted.
+// It writes exactly what apply resolved (see certifiedEndorserBlockData), so
+// it needs no second lookup that could miss. The write commits in its own blob
+// transaction, before the certification marker is staged: an endorser block
+// bigger than the shared chunk transaction allows must not overflow it, and a
+// record left by a ranking block that is rejected afterwards is uncertified
+// and pruned like any other. Pruning cannot remove the record before the
+// marker commits: the prune frontier never passes an immutable point this
+// ledger reported, and the endorser block a certifying ranking block applies
+// is its parent's, at the applied tip, which a rollback never moves behind an
+// immutable point. A nil manifest (no data provider) writes nothing; the
+// closure then depends on whatever the queue persisted.
 func (ls *LedgerState) persistCertifiedEndorserBlock(
 	ebHash []byte,
 	ebSlot uint64,
-	txCount int,
+	manifestRaw []byte,
+	txs []cbor.RawMessage,
 ) error {
-	if ls.config.EndorserBlockDataProvider == nil {
+	if manifestRaw == nil {
 		return nil
 	}
 	_, manifestErr := ls.db.GetLeiosEBManifest(ebHash, ebSlot)
-	txs, txErr := ls.db.GetLeiosEBTxs(ebHash, ebSlot)
-	if manifestErr == nil && txErr == nil && len(txs) == txCount {
+	stored, txErr := ls.db.GetLeiosEBTxs(ebHash, ebSlot)
+	if manifestErr == nil && txErr == nil && len(stored) == len(txs) {
 		return nil
 	}
 	for _, err := range []error{manifestErr, txErr} {
@@ -2160,22 +2182,8 @@ func (ls *LedgerState) persistCertifiedEndorserBlock(
 			return fmt.Errorf("read stored endorser block: %w", err)
 		}
 	}
-	manifestRaw, blockTxs, ok := ls.config.EndorserBlockDataProvider(
-		ebHash,
-		ebSlot,
-	)
-	if !ok {
-		return errors.New("endorser block data unavailable")
-	}
 	if !bytes.Equal(lcommon.Blake2b256Hash(manifestRaw).Bytes(), ebHash) {
 		return errors.New("endorser block manifest hash mismatch")
 	}
-	if len(blockTxs) != txCount {
-		return fmt.Errorf(
-			"endorser block transaction count mismatch: got %d, want %d",
-			len(blockTxs),
-			txCount,
-		)
-	}
-	return ls.db.SetLeiosEB(ebSlot, ebHash, manifestRaw, blockTxs)
+	return ls.db.SetLeiosEB(ebSlot, ebHash, manifestRaw, txs)
 }

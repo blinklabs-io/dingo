@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -486,10 +487,14 @@ func (o *Ouroboros) runLeiosPersistenceGC(
 	}
 	// An uncertified endorser block at or after the immutable point can still
 	// be certified, so no retention setting prunes past it, and nothing is
-	// pruned while the ledger reports none. Below the immutable point the
+	// pruned while the ledger reports none or fails to read its chain: ledger
+	// apply writes a certified endorser block's records before its
+	// certification marker commits, and a frontier past that block would let
+	// a concurrent sweep delete them in between. Below the immutable point the
 	// certifying ranking block has applied and written the marker, so the
-	// writer may drop an uncertified job there. A failed lookup, or no ledger
-	// at all, leaves the configured window, at least the stability window.
+	// writer may drop an uncertified job there. With no ledger, or one with no
+	// chain or security parameter to measure the point with, the configured
+	// window applies, at least the stability window.
 	var (
 		immutableSlot  uint64
 		immutableKnown bool
@@ -505,8 +510,11 @@ func (o *Ouroboros) runLeiosPersistenceGC(
 					"error", err,
 				)
 			}
-			// The default has no window to fall back on.
-			if retention == 0 {
+			// The default has no window to fall back on, and a ledger that
+			// could not read its chain may be applying a certified endorser
+			// block below the configured window's frontier.
+			if retention == 0 ||
+				!errors.Is(err, ledger.ErrImmutablePointUnconfigured) {
 				return
 			}
 			immutableSlot, immutableKnown = 0, false

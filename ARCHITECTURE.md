@@ -5342,7 +5342,9 @@ serialize against block application during catch-up. It is best-effort (a queue
 at either of its bounds drops the historical-serving write, logged with the
 reason) except for a certified endorser block, which ledger apply of the
 certifying ranking block writes itself when `em`/`et` are absent
-(`persistCertifiedEndorserBlock`), and never affects UTxO resolution, which uses the ledger's own
+(`persistCertifiedEndorserBlock`, from the same provider lookup that supplied
+the applied transactions), and never affects UTxO resolution, which uses the
+ledger's own
 genesis-blob path. The queue is bounded twice, by entry count
 (`leiosPersistMaxPending`) and by aggregate retained bytes
 (`leiosPersistMaxQueueBytes`, the same 256 MiB the in-memory endorser-block
@@ -5364,8 +5366,8 @@ slot, while a certified one (`Database.IsLeiosEBCertified`; the ledger stages
 the marker in the certifying ranking block's apply transaction, so it commits
 only with that block, and a rollback removes it) is kept permanently. A positive
 `leiosPersistenceRetentionSlots` only widens the window and never prunes past
-the immutable point, and the writer still persists a certified block below the
-cutoff. The leios-fetch server answers an uncertified block behind the
+the immutable point, nothing is pruned while reading the chain for that point
+fails, and the writer still persists a certified block below the cutoff. The leios-fetch server answers an uncertified block behind the
 immutable point as unknown, the same absence reply as any other missing block,
 whether it is still cached or persisted.
 `startLeiosPersistWriter` resets the accounting with the pending map, so a live
