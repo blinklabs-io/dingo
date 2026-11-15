@@ -18,6 +18,7 @@ package connmanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,6 +32,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/securefs"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -147,7 +149,13 @@ func TestStartListener_UnixSocket_AcceptsStickyMutableParent(t *testing.T) {
 			UnixSocketModeSet: true,
 		}},
 	})
-	require.NoError(t, cm.Start(t.Context()))
+	err = cm.Start(t.Context())
+	if errors.Is(err, securefs.ErrRenameNoReplaceUnsupported) {
+		// The FreeBSD fallback for kernels without RENAME_NOREPLACE
+		// refuses a mutable parent directory.
+		t.Skip("kernel cannot publish a socket into a mutable parent")
+	}
+	require.NoError(t, err)
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(
 			context.Background(),
