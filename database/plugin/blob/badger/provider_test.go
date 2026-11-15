@@ -439,6 +439,22 @@ func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
 		"provider stop did not honor its deadline promptly",
 	)
 
+	// Stop may return its deadline error before the GC stop signal is
+	// closed; releasing earlier lets the loop start another pass.
+	require.Eventually(
+		t,
+		func() bool {
+			select {
+			case <-store.gcStopCh:
+				return true
+			default:
+				return false
+			}
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"provider stop did not signal value-log GC to stop",
+	)
 	release()
 	require.Eventually(
 		t,
