@@ -12736,9 +12736,9 @@ them. The aggregate bounds are applied during selection only, since manifest
 construction receives the selected prefix; the size bounds limit both selection
 and manifest construction. Selection stops at the first valid transaction that
 no longer fits instead of validating the rest of a deep mempool. The size bounds
-are not optional: the reference node never fetches the closure of an endorser block
-over `maxEndorserBlockTxsSize` (`ExnLeiosClosureTooBig`), so no honest committee
-member votes for it, and a header announcing a manifest over
+are not optional: the reference node never fetches the closure of an endorser
+block over `maxEndorserBlockTxsSize` (`ExnLeiosClosureTooBig`), so no honest
+committee member votes for it, and a header announcing a manifest over
 `maxEndorserBlockReferencesSize` is invalid (`LeiosEbTooBig`). The limits are
 read from the protocol parameters in force at the slot, not from genesis, so an
 on-chain update raising them applies to the next endorser block; the operator
