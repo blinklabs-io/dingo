@@ -9617,8 +9617,14 @@ with an atomic no-replace rename, so neither the process umask nor a connection
 between bind and permission enforcement can widen access. Caller-supplied
 listeners retain their creator's permission policy, and Windows named pipes
 retain their platform ACL policy. Managed socket parents must be owned by the
-process user or root and must not be writable by group or other users; a `0660`
-socket remains shareable from a group-searchable directory. Linux abstract
+process user or root, and a parent writable by group or other users must carry
+the sticky bit, the same rule as the Mithril bootstrap and local snapshot
+ancestor checks; the refusal asks for the sticky bit (`chmod +t`) or the
+removal of group and other write access. A sticky parent stops other users from
+removing or renaming the published socket; an entry they create at the socket
+path makes the no-replace publish fail rather than being replaced, and teardown
+removes only the socket the listener published. A `0660` socket remains
+shareable from a group-searchable directory. Linux abstract
 Unix sockets retain their kernel-namespace behavior and have no pathname mode.
 A managed socket address must name a file, not end in a path separator, and fit
 in the platform's socket path limit as written. Accepted connections report the
