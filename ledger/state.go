@@ -1342,7 +1342,11 @@ type EndorserBlockProviderFunc func(
 // EndorserBlockDataProviderFunc returns the verified manifest and complete
 // transaction bodies for the exact endorser-block occurrence. It lets ledger
 // read paths serve a just-applied certified block before asynchronous
-// historical persistence finishes.
+// historical persistence finishes. When set, block apply takes a certified
+// closure from it rather than from EndorserBlockProviderFunc, so the
+// transactions it applies and the manifest it persists come from one lookup;
+// it must therefore report ok for exactly the occurrences the
+// EndorserBlockProviderFunc would.
 type EndorserBlockDataProviderFunc func(
 	ebHash []byte,
 	ebSlot uint64,
@@ -11314,7 +11318,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				// more than one slot at once, and the provider resolves
 				// exactly this occurrence rather than whichever one happens
 				// to be cached for the hash.
-				ebTxs, ok := ls.config.EndorserBlockProvider(
+				ebManifest, ebTxs, ok := ls.certifiedEndorserBlockData(
 					ebHash.Bytes(),
 					ebSlot,
 				)
@@ -11359,6 +11363,19 @@ func (ls *LedgerState) ledgerProcessBlock(
 						point.Slot,
 						err,
 					)
+				}
+				if err := ls.persistCertifiedEndorserBlock(
+					ebHash.Bytes(),
+					ebSlot,
+					ebManifest,
+					ebTxs,
+				); err != nil {
+					return nil, &leiosEndorserBlockStorageError{
+						err: fmt.Errorf(
+							"persist certified endorser block: %w",
+							err,
+						),
+					}
 				}
 				// Staged in the block-apply transaction, so the marker
 				// commits only with this ranking block: a later check that
@@ -15075,10 +15092,18 @@ func (ls *LedgerState) AwaitAppliedSlot(
 	}
 }
 
+// ErrImmutablePointUnconfigured is returned by ImmutablePoint when the ledger
+// has no primary chain or no security parameter to measure the point with, as
+// opposed to a failure reading a chain it does have.
+var ErrImmutablePointUnconfigured = errors.New(
+	"immutable point is not configured",
+)
+
 // ImmutablePoint returns the primary-chain point k blocks behind the applied
 // ledger tip.
 // found is false while the retained chain is too short to have a non-origin
-// immutable point.
+// immutable point. An error wraps ErrImmutablePointUnconfigured when the ledger
+// lacks a primary chain or security parameter.
 func (ls *LedgerState) ImmutablePoint(ctx context.Context) (
 	ocommon.Point,
 	bool,
@@ -15090,12 +15115,16 @@ func (ls *LedgerState) ImmutablePoint(ctx context.Context) (
 	appliedTip := cloneTip(ls.currentTip)
 	ls.RUnlock()
 	if primaryChain == nil {
-		return ocommon.Point{}, false, errors.New("primary chain is nil")
+		return ocommon.Point{}, false, fmt.Errorf(
+			"%w: primary chain is nil",
+			ErrImmutablePointUnconfigured,
+		)
 	}
 	securityParam, ok := ls.securityParamForEra(eraID)
 	if !ok {
-		return ocommon.Point{}, false, errors.New(
-			"security parameter is not configured",
+		return ocommon.Point{}, false, fmt.Errorf(
+			"%w: security parameter is not configured",
+			ErrImmutablePointUnconfigured,
 		)
 	}
 	if appliedTip.Point.Slot == 0 && len(appliedTip.Point.Hash) == 0 {

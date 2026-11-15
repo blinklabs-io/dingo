@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	databaseTypes "github.com/blinklabs-io/dingo/database/types"
@@ -319,4 +320,35 @@ func TestLeiosFetchServerRefusesCachedUncertifiedBehindImmutableTip(
 	)
 	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
 	require.Nil(t, txsMsg)
+}
+
+// A failed immutable-point lookup prunes nothing, even with a configured
+// window: the frontier must never pass the endorser block a certifying ranking
+// block is applying, whose records commit before its certification marker.
+func TestLeiosPersistenceGCConfiguredWindowSkipsFailedImmutableLookup(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	o.leiosImmutableSlot = func(context.Context) (uint64, bool, error) {
+		return 0, false, errors.New("chain read failed")
+	}
+	db := o.leiosDatabase()
+	old := leiosRetentionRecord{150, leiosRetentionHash(1)}
+	newest := leiosRetentionRecord{300, leiosRetentionHash(2)}
+	for _, record := range []leiosRetentionRecord{old, newest} {
+		require.NoError(t, db.SetLeiosEB(
+			record.slot, record.hash, []byte("manifest"), nil,
+		))
+	}
+
+	o.runLeiosPersistenceGC(context.Background(), nil)
+
+	requireLeiosEBPersisted(t, o, old, true)
+	requireLeiosEBPersisted(t, o, newest, true)
+	o.leiosPersistStoreMu.Lock()
+	defer o.leiosPersistStoreMu.Unlock()
+	require.Zero(t, o.leiosPersistPruneBeforeSlot)
 }
