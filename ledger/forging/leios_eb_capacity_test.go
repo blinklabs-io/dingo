@@ -164,6 +164,9 @@ func TestEffectiveLeiosEBCaps(t *testing.T) {
 		maxRefs:          20000,
 		maxBytes:         260000,
 		maxManifestBytes: 40000,
+		// The fixture leaves the aggregate limits at zero, which bound
+		// the endorser block to transactions that cost nothing.
+		aggregateBounded: true,
 	}, caps)
 
 	caps, ok = effectiveLeiosEBCaps(leiosEBCaps{maxBytes: 1000}, pparams)

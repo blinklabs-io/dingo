@@ -140,6 +140,34 @@ type TxValidationSessionProvider interface {
 	) error) error
 }
 
+// TxRefScriptSizeFunc measures the reference-script bytes tx consumes,
+// resolving its top-level inputs and reference inputs, not those of its
+// sub-transactions, through the same overlay TxValidationFunc reads, so
+// outputs created by earlier selected transactions count. Call it after the
+// transaction passed validation and before its effects enter the overlay.
+type TxRefScriptSizeFunc = func(
+	tx ledger.Transaction,
+	consumedUtxos map[utxoref.Key]struct{},
+	createdUtxos map[utxoref.Key]lcommon.Utxo,
+) (uint64, error)
+
+// LeiosSelectionSessionProvider opens the validation session endorser-block
+// selection needs: transaction validation plus the reference-script measure
+// of the protocol's per-endorser-block bound. A non-empty parentHash pins the
+// session as ParentPinnedTxValidationSessionProvider does. LedgerState
+// implements it.
+type LeiosSelectionSessionProvider interface {
+	WithLeiosSelectionSession(
+		ctx context.Context,
+		parentHash []byte,
+		fn func(
+			validate TxValidationFunc,
+			refScriptSize TxRefScriptSizeFunc,
+			stillCurrent func() bool,
+		) error,
+	) error
+}
+
 // SlotTxValidationSessionProvider pins validation to the ledger state ticked
 // to slot. LedgerState implements it for block construction, where the forge
 // slot may be in the epoch after the latest applied block.
@@ -184,16 +212,34 @@ var ErrTxValidationParentMismatch = errors.New(
 	"transaction validation ledger tip is not the block parent",
 )
 
+// errLeiosRefScriptMeasureUnavailable reports that selection must bound
+// reference-script bytes but the validator cannot measure them.
+var errLeiosRefScriptMeasureUnavailable = errors.New(
+	"validator cannot measure reference-script size",
+)
+
 // withLeiosSelectionSession runs fn in a validation session pinned to
 // parentHash when the validator supports pinning and parentHash is known, and
-// in an ordinary session otherwise.
+// in an ordinary session otherwise. fn receives the reference-script measure
+// when the validator provides one. When needMeasure is set and it cannot, the
+// session fails rather than select without the bound.
 func withLeiosSelectionSession(ctx context.Context,
 	validator TxValidator,
 	parentHash []byte,
-	fn func(TxValidationFunc, func() bool) error,
+	needMeasure bool,
+	fn func(TxValidationFunc, TxRefScriptSizeFunc, func() bool) error,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if provider, ok := validator.(LeiosSelectionSessionProvider); ok {
+		return provider.WithLeiosSelectionSession(ctx, parentHash, fn)
+	}
+	if needMeasure {
+		return errLeiosRefScriptMeasureUnavailable
+	}
+	unmeasured := func(validate TxValidationFunc, current func() bool) error {
+		return fn(validate, nil, current)
 	}
 	if len(parentHash) > 0 {
 		if provider, ok := validator.(ParentPinnedTxValidationSessionProvider); ok {
@@ -204,12 +250,12 @@ func withLeiosSelectionSession(ctx context.Context,
 					stillCurrent func() bool,
 					_ func(func() error) (bool, error),
 				) error {
-					return fn(validate, stillCurrent)
+					return unmeasured(validate, stillCurrent)
 				},
 			)
 		}
 	}
-	return withTxValidationSession(ctx, validator, fn)
+	return withTxValidationSession(ctx, validator, unmeasured)
 }
 
 // blockSelectionConstraints carries per-attempt limits from the forge loop
