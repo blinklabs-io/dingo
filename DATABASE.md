@@ -2688,6 +2688,13 @@ same transaction.
   certificate table has `certificate_id -> certs.id`, and
   `certs.certificate_id` is the polymorphic back-pointer to that specialized
   row chosen by `certs.cert_type`.
+- Conway genesis delegations (`SetGenesisGovernance`) write slot-0
+  registration and delegation history rows with `certificate_id = 0`, which
+  matches no `certs` row. Historical stake reconstruction accepts such a row
+  with block and certificate index 0 instead of requiring the `certs` and
+  `applied_transaction` join, so a genesis-delegated credential counts at every
+  later slot. Any other row whose `certs` or transaction row is missing is
+  still ignored.
 - Live UTxOs have `utxo.deleted_slot = 0`. Governance/committee/constitution
   soft deletes use nullable `deleted_slot`; `NULL` means active.
 - Certificate history ordering must use `added_slot DESC`, the producing

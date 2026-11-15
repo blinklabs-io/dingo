@@ -1167,11 +1167,11 @@ WITH `
 	for _, source := range historicalDelegationSources {
 		delegationParts = append(delegationParts, fmt.Sprintf(`
 SELECT event.credential_tag, event.staking_key, event.pool_key_hash,
-       COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), event.added_slot) AS added_slot, event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), event.added_slot) AS added_slot, event.added_slot AS ownership_slot, COALESCE(tx.block_index, 0) AS block_index, COALESCE(certs.cert_index, 0) AS cert_index
 %[2]s
-JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
-JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
-WHERE %[3]sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`, source.table, scopedFrom(source.table, "event"), scopedWhere("event")))
+LEFT JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
+LEFT JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
+WHERE %[3]s(event.certificate_id = 0 OR tx.tx_id IS NOT NULL) AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`, source.table, scopedFrom(source.table, "event"), scopedWhere("event")))
 		args = append(args, source.certType, slot)
 	}
 	allHistoryTables := make(
@@ -1222,11 +1222,11 @@ WHERE `+scopedWhere("account")+`account.added_slot <= ? AND account.active = TRU
 	for _, source := range historicalRegistrationSources {
 		registrationParts = append(registrationParts, fmt.Sprintf(`
 SELECT event.credential_tag, event.staking_key, %d AS registered, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), event.added_slot) AS added_slot,
-       event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
+       event.added_slot AS ownership_slot, COALESCE(tx.block_index, 0) AS block_index, COALESCE(certs.cert_index, 0) AS cert_index
 %s
-JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
-JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
-WHERE %sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`,
+LEFT JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
+LEFT JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
+WHERE %s(event.certificate_id = 0 OR tx.tx_id IS NOT NULL) AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`,
 			source.registered,
 			scopedFrom(source.table, "event"),
 			scopedWhere("event"),
