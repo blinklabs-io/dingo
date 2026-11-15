@@ -5340,7 +5340,9 @@ occurrence of the same hash persists independently — and does one blob commit
 per occurrence via `Database.SetLeiosEB`, so the CBOR encode + commit do not
 serialize against block application during catch-up. It is best-effort (a queue
 at either of its bounds drops the historical-serving write, logged with the
-reason) and never affects UTxO resolution, which uses the ledger's own
+reason) except for a certified endorser block, which ledger apply of the
+certifying ranking block writes itself when `em`/`et` are absent
+(`persistCertifiedEndorserBlock`), and never affects UTxO resolution, which uses the ledger's own
 genesis-blob path. The queue is bounded twice, by entry count
 (`leiosPersistMaxPending`) and by aggregate retained bytes
 (`leiosPersistMaxQueueBytes`, the same 256 MiB the in-memory endorser-block

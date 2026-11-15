@@ -11360,6 +11360,18 @@ func (ls *LedgerState) ledgerProcessBlock(
 						err,
 					)
 				}
+				if err := ls.persistCertifiedEndorserBlock(
+					ebHash.Bytes(),
+					ebSlot,
+					len(ebTxs),
+				); err != nil {
+					return nil, &leiosEndorserBlockStorageError{
+						err: fmt.Errorf(
+							"persist certified endorser block: %w",
+							err,
+						),
+					}
+				}
 				// Staged in the block-apply transaction, so the marker
 				// commits only with this ranking block: a later check that
 				// rejects it rolls the marker back with the rest.

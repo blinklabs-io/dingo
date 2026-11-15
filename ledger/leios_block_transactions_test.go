@@ -17,10 +17,12 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -300,4 +302,88 @@ func TestBlockTransactionCountKeepsTopLevelSemantics(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, len(txs), count)
 	require.Same(t, receipt, f.ls.certifiedClosureReceipt.Load())
+}
+
+// Applying a certifying ranking block persists the certified endorser block
+// itself. The fixture installs no persist writer, which is the same state a
+// full persist queue leaves behind: nothing but the apply wrote em/et, and the
+// in-memory data provider has since expired.
+func TestCertifiedApplyPersistsEndorserBlockWithoutPersistWriter(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	manifest := testLeiosManifest(f)
+	f.ebHash = manifest.Hash()
+	manifestCbor, err := manifest.MarshalCBOR()
+	require.NoError(t, err)
+	var providerExpired atomic.Bool
+	f.ls.config.EndorserBlockDataProvider = func(
+		hash []byte,
+		_ uint64,
+	) ([]byte, []cbor.RawMessage, bool) {
+		if providerExpired.Load() || !bytes.Equal(hash, f.ebHash.Bytes()) {
+			return nil, nil, false
+		}
+		return manifestCbor, f.ebTxs, true
+	}
+	parent := f.announce()
+	certifier, offsets, envParent := f.certifyingChild(parent)
+	require.NoError(t, f.ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	))
+	require.NoError(t, f.process(certifier, offsets, envParent))
+	providerExpired.Store(true)
+
+	gotManifest, err := f.db.GetLeiosEBManifest(
+		f.ebHash.Bytes(),
+		parent.SlotNumber(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, manifestCbor, gotManifest)
+	gotTxs, err := f.db.GetLeiosEBTxs(f.ebHash.Bytes(), parent.SlotNumber())
+	require.NoError(t, err)
+	require.Equal(t, f.ebTxs, gotTxs)
+
+	stored := models.Block{
+		Slot: certifier.SlotNumber(), Hash: certifier.Hash().Bytes(),
+		PrevHash: certifier.PrevHash().Bytes(), Number: certifier.BlockNumber(),
+		Type: gledger.BlockTypeDijkstra, Cbor: certifier.Cbor(),
+	}
+	txs, err := f.ls.BlockTransactions(t.Context(), stored)
+	require.NoError(t, err)
+	require.Len(t, txs, 1)
+	require.Equal(t, f.ebTx.Hash(), txs[0].Hash())
+}
+
+// A certifying block rejected during closure validation leaves no endorser
+// block record behind.
+func TestRejectedCertifyingBlockPersistsNoEndorserBlock(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	f.removeEndorserWitnesses()
+	manifest := testLeiosManifest(f)
+	f.ebHash = manifest.Hash()
+	manifestCbor, err := manifest.MarshalCBOR()
+	require.NoError(t, err)
+	f.ls.config.EndorserBlockDataProvider = func(
+		hash []byte,
+		_ uint64,
+	) ([]byte, []cbor.RawMessage, bool) {
+		return manifestCbor, f.ebTxs, bytes.Equal(hash, f.ebHash.Bytes())
+	}
+	requireRejectedEndorserClosure(t, f)
+
+	_, err = f.db.GetLeiosEBManifest(
+		f.ebHash.Bytes(),
+		leiosCertApplyAnnouncingSlot,
+	)
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+	certified, err := f.db.IsLeiosEBCertified(
+		leiosCertApplyAnnouncingSlot,
+		f.ebHash.Bytes(),
+	)
+	require.NoError(t, err)
+	require.False(t, certified)
 }

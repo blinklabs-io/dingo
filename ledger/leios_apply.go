@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -2127,4 +2128,54 @@ func (ls *LedgerState) publishUntickedClosureAfterCommit(
 			ls.publishTransactionEvent(ctx, evt)
 		}
 	})
+}
+
+// persistCertifiedEndorserBlock writes the manifest and transactions of a
+// certified endorser block when the store lacks either, so the closure stays
+// readable after the in-memory endorser-block cache expires. The asynchronous
+// persist queue drops writes under pressure and is not a durability
+// guarantee for a block that certification has made part of the chain.
+//
+// The write commits in its own blob transaction, before the certification
+// marker is staged: an endorser block bigger than the shared chunk
+// transaction allows must not overflow it, and a record left by a ranking
+// block that is rejected afterwards is uncertified and pruned like any other.
+// Without a data provider nothing is written; the closure then depends on
+// whatever the queue persisted.
+func (ls *LedgerState) persistCertifiedEndorserBlock(
+	ebHash []byte,
+	ebSlot uint64,
+	txCount int,
+) error {
+	if ls.config.EndorserBlockDataProvider == nil {
+		return nil
+	}
+	_, manifestErr := ls.db.GetLeiosEBManifest(ebHash, ebSlot)
+	txs, txErr := ls.db.GetLeiosEBTxs(ebHash, ebSlot)
+	if manifestErr == nil && txErr == nil && len(txs) == txCount {
+		return nil
+	}
+	for _, err := range []error{manifestErr, txErr} {
+		if err != nil && !errors.Is(err, types.ErrBlobKeyNotFound) {
+			return fmt.Errorf("read stored endorser block: %w", err)
+		}
+	}
+	manifestRaw, blockTxs, ok := ls.config.EndorserBlockDataProvider(
+		ebHash,
+		ebSlot,
+	)
+	if !ok {
+		return errors.New("endorser block data unavailable")
+	}
+	if !bytes.Equal(lcommon.Blake2b256Hash(manifestRaw).Bytes(), ebHash) {
+		return errors.New("endorser block manifest hash mismatch")
+	}
+	if len(blockTxs) != txCount {
+		return fmt.Errorf(
+			"endorser block transaction count mismatch: got %d, want %d",
+			len(blockTxs),
+			txCount,
+		)
+	}
+	return ls.db.SetLeiosEB(ebSlot, ebHash, manifestRaw, blockTxs)
 }
