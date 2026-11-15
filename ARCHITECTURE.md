@@ -17730,7 +17730,8 @@ second sync:
     (`ErrKoiosQuotaExceeded`, which wraps `ErrKoiosPermanent`) says nothing
     about the chain and clears on Koios's daily reset, so `reportError`
     records the epoch as ERROR without calling `FatalFunc`, and the queue
-    retries it every `ErrorRetryDelay` until the quota resets. That covers the
+    retries it every `ErrorRetryDelay` until the quota resets. If that ERROR
+    row cannot be persisted, the failure stays fatal. That covers the
     `/tx_info` sample too: `fetchTransactionsIfNeeded` returns a quota error
     rather than swallowing it, since an uncached sampled transaction would
     otherwise be checked as a fatal `dingo_db_missing`. The other ERROR-severity

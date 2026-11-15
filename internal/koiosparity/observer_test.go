@@ -2740,3 +2740,47 @@ func TestObserverStrictModeSurvivesTxInfoQuotaExhaustion(t *testing.T) {
 	}, 10*time.Second, "epoch 7 must validate once the quota is released")
 	require.Equal(t, int32(0), fatalCount.Load())
 }
+
+// TestObserverReportErrorQuotaStaysFatalWhenPersistFails pins that the quota
+// exemption covers only the Koios outage itself. When the epoch's ERROR row
+// cannot be written, a restart would not retry the epoch, so strict mode must
+// still stop even though the joined error also matches ErrKoiosQuotaExceeded.
+func TestObserverReportErrorQuotaStaysFatalWhenPersistFails(t *testing.T) {
+	t.Parallel()
+
+	for _, persistFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("persistFails=%t", persistFails), func(t *testing.T) {
+			t.Parallel()
+
+			source, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
+			require.NoError(t, err)
+			fatalCount := &atomic.Int32{}
+			o, err := NewObserver(ObserverConfig{
+				BaseURL:               "http://127.0.0.1:1",
+				Source:                source,
+				AllowInsecureHTTP:     true,
+				AllowPrivateAddresses: true,
+				Network:               "preview",
+				CachePath:             filepath.Join(t.TempDir(), "cache.db"),
+				Strict:                true,
+				Logger:                slog.New(slog.DiscardHandler),
+				FatalFunc:             func(error) { fatalCount.Add(1) },
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = o.Stop(context.Background()) })
+			if persistFails {
+				require.NoError(t, o.cache.Close())
+			}
+
+			o.reportError(7, false, fmt.Errorf(
+				"fetch koios reference: %w", ErrKoiosQuotaExceeded,
+			))
+
+			want := int32(0)
+			if persistFails {
+				want = 1
+			}
+			require.Equal(t, want, fatalCount.Load())
+		})
+	}
+}

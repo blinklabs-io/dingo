@@ -934,14 +934,19 @@ func (o *Observer) reportError(
 	accountsChecked bool,
 	err error,
 ) {
+	// Quota exhaustion is exempt only when the ERROR row was written: without
+	// it a restart would not retry the epoch. Decide before joining, since the
+	// joined error still matches ErrKoiosQuotaExceeded.
+	fatal := !errors.Is(err, ErrKoiosQuotaExceeded)
 	if persistErr := o.cache.RecordObserverError(o.cfg.Network, epoch, accountsChecked); persistErr != nil {
+		fatal = true
 		err = errors.Join(
 			err,
 			fmt.Errorf("persist observer retry: %w", persistErr),
 		)
 	}
 	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
-	o.fail(epoch, err, !errors.Is(err, ErrKoiosQuotaExceeded))
+	o.fail(epoch, err, fatal)
 	now := time.Now()
 	o.emitResult(&EpochCompareResult{
 		Network:       o.cfg.Network,
@@ -1330,7 +1335,7 @@ func (o *Observer) fetchAccountsIfNeeded(
 // including dingo_db_missing and dingo_db_error, and every reportError call
 // other than Koios quota exhaustion stays fatal in strict mode. Quota
 // exhaustion is retried on the ERROR schedule and clears on Koios's daily
-// reset.
+// reset; it stays fatal when its ERROR row cannot be persisted.
 //
 // run and runAccounts's goroutines can both call this concurrently (given
 // the queue split), so the exactly-once guarantee is enforced with an
