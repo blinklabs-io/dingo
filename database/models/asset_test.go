@@ -15,8 +15,10 @@
 package models
 
 import (
+	"bytes"
 	"math"
 	"math/big"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/types"
@@ -106,4 +108,86 @@ func TestCheckedUint64FromBigIntRejectsNil(t *testing.T) {
 	t.Parallel()
 	_, err := CheckedUint64FromBigInt(nil)
 	assert.Error(t, err)
+}
+
+// manyPolicyAssets builds a value whose policies and asset names are far
+// enough apart in count that Go's randomized map iteration cannot yield
+// canonical order by chance. Names include a prefix pair and differing
+// lengths so the comparison is bytewise, not length-first.
+func manyPolicyAssets[T lcommon.MultiAssetTypeOutput](
+	amount T,
+) *lcommon.MultiAsset[T] {
+	data := map[lcommon.Blake2b224]map[cbor.ByteString]T{}
+	names := [][]byte{
+		[]byte("b"), []byte("a"), []byte("ab"), []byte("aa"),
+		{0x01, 0x00}, {0xff},
+	}
+	for i := range 12 {
+		var policyId lcommon.Blake2b224
+		policyId[0] = byte((i * 37) % 251)
+		policyId[27] = byte(i)
+		inner := map[cbor.ByteString]T{}
+		for _, name := range names {
+			inner[cbor.NewByteString(name)] = amount
+		}
+		data[policyId] = inner
+	}
+	ma := lcommon.NewMultiAsset(data)
+	return &ma
+}
+
+func assertCanonicalAssetOrder(t *testing.T, got []Asset) {
+	t.Helper()
+	want := slices.Clone(got)
+	slices.SortFunc(want, func(a, b Asset) int {
+		if c := bytes.Compare(a.PolicyId, b.PolicyId); c != 0 {
+			return c
+		}
+		return bytes.Compare(a.Name, b.Name)
+	})
+	require.Equal(t, want, got)
+}
+
+func TestConvertMultiAssetToModelsCanonicalOrder(t *testing.T) {
+	t.Parallel()
+	ma := manyPolicyAssets(big.NewInt(5))
+	for range 20 {
+		assets, err := ConvertMultiAssetToModels(ma)
+		require.NoError(t, err)
+		require.Len(t, assets, 72)
+		assertCanonicalAssetOrder(t, assets)
+	}
+}
+
+func TestConvertMintToAssetMintBurnModelsCanonicalOrder(t *testing.T) {
+	t.Parallel()
+	ma := manyPolicyAssets(big.NewInt(5))
+	for range 20 {
+		rows := ConvertMintToAssetMintBurnModels(ma, []byte{1}, 10, 0)
+		require.Len(t, rows, 72)
+		want := slices.Clone(rows)
+		slices.SortFunc(want, func(a, b AssetMintBurn) int {
+			if c := bytes.Compare(a.PolicyId, b.PolicyId); c != 0 {
+				return c
+			}
+			return bytes.Compare(a.Name, b.Name)
+		})
+		require.Equal(t, want, rows)
+	}
+}
+
+func TestSortedPolicyAndAssetNames(t *testing.T) {
+	t.Parallel()
+	ma := manyPolicyAssets(big.NewInt(5))
+	policies := SortedPolicies(ma)
+	require.Len(t, policies, 12)
+	require.True(
+		t,
+		slices.IsSortedFunc(policies, func(a, b lcommon.Blake2b224) int {
+			return bytes.Compare(a.Bytes(), b.Bytes())
+		}),
+	)
+	names := SortedAssetNames(ma, policies[0])
+	require.Len(t, names, 6)
+	require.True(t, slices.IsSortedFunc(names, bytes.Compare))
 }
