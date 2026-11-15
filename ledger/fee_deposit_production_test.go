@@ -282,6 +282,7 @@ func babbageFeeProdBlock(
 		TransactionWitnessSets: []babbage.BabbageTransactionWitnessSet{
 			tx.WitnessSet,
 		},
+		InvalidTransactions: []uint{},
 	}
 	block.BlockHeader.Body.BlockNumber = 1
 	block.BlockHeader.Body.Slot = slot

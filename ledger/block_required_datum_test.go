@@ -193,6 +193,8 @@ func conwayTestBlock(
 		TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{
 			tx.WitnessSet,
 		},
+		TransactionMetadataSet: lcommon.TransactionMetadataSet{},
+		InvalidTransactions:    []uint{},
 	}
 	block.BlockHeader.Body.BlockNumber = 1
 	block.BlockHeader.Body.Slot = slot
