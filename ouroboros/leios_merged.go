@@ -821,6 +821,17 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 // announced slot has been verified and every transaction body is available.
 // Even a header can trigger a closure request, so publishing the manifest
 // without the complete transaction cache can tear down the shared bearer.
+//
+// A receiver ends the connection on an offer of an endorser block that was not
+// announced to it first, so nothing is offered until the announcement for this
+// exact slot and hash is known. An entry stored without one (a backfill, or a
+// block reloaded from the blob store, which keeps no announcement) takes it
+// from the recorded announcements or the selected chain's header. When neither
+// has it, the offer stays requested and is published when the announcement is
+// recorded and reconciled with the entry.
+//
+// The caller must hold neither leiosAnnouncementsMu nor leiosMu: the
+// announcement lookup takes leiosAnnouncementsMu before leiosMu.
 func (o *Ouroboros) enqueueLeiosRelayOffers(
 	point ocommon.Point,
 	data *leiosEndorserBlockData,
@@ -838,11 +849,44 @@ func (o *Ouroboros) enqueueLeiosRelayOffers(
 		}
 	}
 	key := leiosBlockKey(point.Slot, point.Hash)
+	o.leiosMu.RLock()
+	cached := o.leiosEndorserBlocks[key]
+	lacksAnnouncement := cached != nil && cached.slotVerified &&
+		cached.completeTxCache() && cached.relayOfferRequested &&
+		len(cached.announcementWire()) == 0
+	o.leiosMu.RUnlock()
+	var recordedHeader, recordedWire []byte
+	if lacksAnnouncement {
+		o.leiosAnnouncementsMu.Lock()
+		recordedHeader = o.leiosAnnouncementHeaderLocked(point.Hash, point.Slot)
+		recordedWire = o.leiosAnnouncementWireLocked(point.Hash, point.Slot)
+		o.leiosAnnouncementsMu.Unlock()
+	}
 	o.leiosMu.Lock()
 	current := o.leiosEndorserBlocks[key]
 	if current == nil || !current.slotVerified || !current.completeTxCache() {
 		o.leiosMu.Unlock()
 		return
+	}
+	if current.relayOfferRequested && len(current.announcementWire()) == 0 {
+		withAnnouncement := *current
+		withAnnouncement.announcementHeaderRaw = recordedHeader
+		withAnnouncement.announcementWireRaw = recordedWire
+		if len(withAnnouncement.announcementWire()) == 0 {
+			withAnnouncement.announcementHeaderRaw = o.selectedLeiosHeaderForDataLocked(
+				current,
+			)
+		}
+		if len(withAnnouncement.announcementWire()) == 0 {
+			o.leiosMu.Unlock()
+			return
+		}
+		for _, cacheKey := range current.cacheKeys {
+			if o.leiosEndorserBlocks[cacheKey] == current {
+				o.leiosEndorserBlocks[cacheKey] = &withAnnouncement
+			}
+		}
+		current = &withAnnouncement
 	}
 	// Admitted headers retain their original expiry even if slot timing is
 	// temporarily unavailable when their content becomes complete.
