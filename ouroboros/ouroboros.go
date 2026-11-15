@@ -799,6 +799,10 @@ type OuroborosConfig struct {
 	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LeiosMinOfferLead is how many slots an endorser block must lie above
+	// the immutable tip for this node to offer it to a peer. A peer disconnects
+	// a node that offers an endorser block below the peer's own immutable tip.
+	LeiosMinOfferLead uint64
 	// LeiosPersistenceRetentionSlots sets how many slots behind the highest
 	// persisted endorser block uncertified historical-serving Leios records
 	// are kept. Zero prunes an uncertified record once the immutable point of

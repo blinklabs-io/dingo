@@ -651,6 +651,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncBlockTimeout:          n.config.chainsyncStallTimeout,
 		EnableLeios:                    enableLeiosNetworking,
 		LeiosPersistenceRetentionSlots: n.config.leiosPersistenceRetentionSlots,
+		LeiosMinOfferLead:              n.config.cardanoNodeConfig.LeiosMinOfferLeadSlots(),
 		// Bounds how long a LocalStateQuery session holds one ledger snapshot.
 		LocalStateQueryViewMaxLifetime: n.config.LocalStateQueryViewMaxLifetimeDuration(),
 		// Current prototype votes sign their announcing ranking-block hash and

@@ -5896,6 +5896,16 @@ is never announced is never offered; at most eight pending ones are kept.
 Relayed endorser blocks already follow the same order, because
 `enqueueLeiosRelayOffers` waits for the announcement to verify the slot.
 
+Each outgoing block or closure offer is also checked as it is about to be sent
+over leios-notify: it goes out only when its slot is at least
+`LeiosMinOfferLead` (node config, default 3600) above this node's immutable
+point, and is otherwise dropped, because the reference node disconnects a peer
+that offers an endorser block below its own immutable tip. With no immutable
+point yet, the point reads as slot 0; a failed lookup drops the offer; a node
+without a ledger offers without the check. A network whose immutable point
+trails the tip by fewer slots than the lead offers nothing, so short-horizon
+networks such as the Leios DevNet set a smaller value.
+
 
 Idle LeiosNotify requests observe the owning connection's shutdown channel. This
 also releases requests started before manager registration; protocol completion
