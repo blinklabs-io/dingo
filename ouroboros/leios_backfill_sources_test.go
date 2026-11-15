@@ -173,6 +173,7 @@ func TestLeiosOffersForImplausiblePointsDoNotTouchSharedState(t *testing.T) {
 		{Slot: 3, Hash: hash[:31]},
 	}
 	for _, point := range bad {
+		o.leiosPeerAnnouncedForTest(conn.Id(), nil, point)
 		require.NoError(t, o.leiosnotifyClientNotification(
 			cb, oleiosnotify.NewMsgBlockTxsOffer(point),
 		))
@@ -191,6 +192,7 @@ func TestLeiosOffersForImplausiblePointsDoNotTouchSharedState(t *testing.T) {
 
 	// A plausible offer is still recorded.
 	good := ocommon.Point{Slot: 4, Hash: hash}
+	o.leiosPeerAnnouncedForTest(conn.Id(), nil, good)
 	require.NoError(t, o.leiosnotifyClientNotification(
 		cb, oleiosnotify.NewMsgBlockTxsOffer(good),
 	))

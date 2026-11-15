@@ -5642,8 +5642,20 @@ intent-only cache entries and backfill-source points, replacing its own oldest
 past the cap, so one connection cannot churn others' entries; the shared global
 cache and table bounds still apply. An intent entry's owner is the connection
 that created it and is not transferred by a later offer of the same point.
-Dropped offers are not penalized. An offer only identifies a peer that can
-serve a point; it never makes the point eligible for fetching. Both the notify
+Offers dropped by these screens, by the prefetch gate or by a size budget are
+not penalized. An offer that breaks the reference's offer rules ends the
+connection that sent it, and only that connection: the endorser block was not
+announced by that same peer over leios-notify, the body or the closure of the
+point was already offered on that connection, the point's slot is below the
+immutable slot (strictly), or a body offer claims zero bytes or more than
+512 KiB. Each connection keeps its own announcements and offers, from its
+start until it closes or the immutable slot passes them. A peer's announcement
+counts unless this node found the message invalid, so one deferred, already
+known, clock-skewed or dropped for a local budget still counts. The check runs
+first, before the screens above and before anything is remembered, recorded or
+fetched; an accepted offer counts as offered even if a screen then drops it,
+and a remembered offer is not checked again on replay. An offer only
+identifies a peer that can serve a point; it never makes the point eligible for fetching. Both the notify
 block offer and the transactions offer start a fetch only when the point's
 election was observed (a verified announcing header binds its slot, or a
 selected chain header announcing it is being validated) or the cached entry is
@@ -5926,6 +5938,11 @@ without a ledger offers without the check. A network whose immutable point
 trails the tip by fewer slots than the lead offers nothing, so short-horizon
 networks such as the Leios DevNet set a smaller value.
 
+The log also records, per connection, each block and closure offer it has
+delivered, and skips a later entry for the same part on that connection. The
+same part can be queued again, for example when a peer offers a forged or
+already relayed endorser block back, and a receiver ends the connection on a
+repeated offer. The record lives as long as the connection's cursor.
 
 Idle LeiosNotify requests observe the owning connection's shutdown channel. This
 also releases requests started before manager registration; protocol completion
