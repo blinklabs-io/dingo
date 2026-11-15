@@ -62,6 +62,42 @@ func TestWithTxValidationSessionAtParentRequiresParentTip(t *testing.T) {
 	require.Equal(t, 1, called)
 }
 
+// The forger selects endorser-block transactions through the measuring
+// session, so it must pin to the ranking block's parent the same way.
+func TestWithLeiosSelectionSessionRequiresParentTip(t *testing.T) {
+	t.Parallel()
+	ls, _, _ := newLeiosApplyTestLedger(t)
+	tipHash := bytes.Repeat([]byte{0x5a}, lcommon.Blake2b256Size)
+	ls.currentTip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(500, tipHash),
+		BlockNumber: 7,
+	}
+	ls.publishSnapshotsLocked()
+
+	called := 0
+	session := func(
+		_ forging.TxValidationFunc,
+		refScriptSize forging.TxRefScriptSizeFunc,
+		_ func() bool,
+	) error {
+		require.NotNil(t, refScriptSize)
+		called++
+		return nil
+	}
+
+	other := bytes.Repeat([]byte{0x5b}, lcommon.Blake2b256Size)
+	err := ls.WithLeiosSelectionSession(t.Context(), other, session)
+	require.ErrorIs(t, err, forging.ErrTxValidationParentMismatch)
+	require.Zero(t, called)
+
+	require.NoError(t, ls.WithLeiosSelectionSession(t.Context(), tipHash, session))
+	require.Equal(t, 1, called)
+
+	// An empty parent leaves the session unpinned.
+	require.NoError(t, ls.WithLeiosSelectionSession(t.Context(), nil, session))
+	require.Equal(t, 2, called)
+}
+
 // After a certifying ranking block is applied, the certified closure's
 // transactions have spent their inputs: a validation session must reject
 // re-selecting them, so the view the mempool and the forger validate against

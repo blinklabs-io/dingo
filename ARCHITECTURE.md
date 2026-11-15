@@ -12722,9 +12722,17 @@ endorser block is held to the capacity the protocol parameters in force at the
 slot allow (`effectiveLeiosEBCaps`): the referenced transactions total at most
 `maxEndorserBlockTxsSize` bytes, measured as the block_transaction bytes the
 manifest references, and the encoded manifest, the size the ranking-block header
-announces, at most `maxEndorserBlockReferencesSize`. Both bound selection as
-well as manifest construction, so selection stops at the first valid transaction
-that no longer fits instead of validating the rest of a deep mempool. They are
+announces, at most `maxEndorserBlockReferencesSize`. The execution units the
+referenced transactions declare sum to at most `maxEndorserBlockExUnits`, memory
+and steps each, and the reference-script bytes their inputs and reference inputs
+resolve to, counted per input, sum to at most `maxRefScriptSizePerEndorserBlock`.
+A zero value of either is a real bound that admits only transactions costing
+nothing in that dimension. Selection measures reference scripts through the
+validation session's overlay (`LeiosSelectionSessionProvider`), so outputs
+created by earlier selected transactions count, and refuses to select when the
+validator cannot measure them. Every bound limits selection as well as manifest
+construction, so selection stops at the first valid transaction that no longer
+fits instead of validating the rest of a deep mempool. The size bounds are
 not optional: the reference node never fetches the closure of an endorser block
 over `maxEndorserBlockTxsSize` (`ExnLeiosClosureTooBig`), so no honest committee
 member votes for it, and a header announcing a manifest over
@@ -12732,7 +12740,7 @@ member votes for it, and a header announcing a manifest over
 read from the protocol parameters in force at the slot, not from genesis, so an
 on-chain update raising them applies to the next endorser block; the operator
 defaults (24 MiB, 20000 references) can exceed them. Missing, typed-nil or
-unrecognized slot parameters, or either Dijkstra capacity set to zero, skip
+unrecognized slot parameters, or either Dijkstra size capacity set to zero, skip
 endorser-block production before mempool validation and increment the
 `protocol_capacity_unavailable` skip counter. Ranking-block forging continues
 without a new announcement. Known earlier-era parameters retain the operator

@@ -16743,6 +16743,7 @@ var (
 	_ forging.TxValidationSessionProvider               = (*LedgerState)(nil)
 	_ forging.SlotTxValidationSessionProvider           = (*LedgerState)(nil)
 	_ forging.ParentPinnedTxValidationSessionProvider   = (*LedgerState)(nil)
+	_ forging.LeiosSelectionSessionProvider             = (*LedgerState)(nil)
 	_ lcommon.GenesisDelegationState                    = (*LedgerState)(nil)
 	_ lcommon.ClassicProtocolParameterUpdateWindowState = (*LedgerState)(nil)
 )
@@ -16863,10 +16864,80 @@ func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
 			commitIfCurrent func(func() error) (bool, error),
 			_ txValidationApplyFunc,
 			resolve txValidationResolveFunc,
+			_ forging.TxRefScriptSizeFunc,
 		) error {
 			return fn(validate, stillCurrent, commitIfCurrent, resolve)
 		},
 	)
+}
+
+// WithLeiosSelectionSession is WithTxValidationSessionAtParent with the
+// reference-script measure endorser-block selection bounds by. An empty
+// parentHash leaves the session unpinned. The measure resolves inputs through
+// the session's UTxO overlay, so outputs created by earlier selected
+// transactions count.
+func (ls *LedgerState) WithLeiosSelectionSession(ctx context.Context,
+	parentHash []byte,
+	fn func(
+		validate forging.TxValidationFunc,
+		refScriptSize forging.TxRefScriptSizeFunc,
+		stillCurrent func() bool,
+	) error,
+) error {
+	var expectedParent []byte
+	if len(parentHash) > 0 {
+		expectedParent = parentHash
+	}
+	err := ls.withResolvingTxValidationSession(ctx,
+		expectedParent,
+		nil,
+		false,
+		false,
+		nil,
+		func(
+			validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+			stillCurrent func() bool,
+			_ func(func() error) (bool, error),
+			_ txValidationApplyFunc,
+			_ txValidationResolveFunc,
+			refScriptSize forging.TxRefScriptSizeFunc,
+		) error {
+			return fn(validate, refScriptSize, stillCurrent)
+		},
+	)
+	if errors.Is(err, ErrLeiosValidationParentSuperseded) {
+		return fmt.Errorf(
+			"%w: %w",
+			forging.ErrTxValidationParentMismatch,
+			err,
+		)
+	}
+	return err
+}
+
+// consumedRefScriptSize is the non-distinct reference-script size of tx: the
+// scripts its inputs and reference inputs carry, summed per input, over the
+// transaction and every sub-transaction. It is the per-transaction measure
+// dijkstra.ValidateRefScriptSizePerBlock sums for a block.
+func consumedRefScriptSize(
+	tx lcommon.Transaction,
+	state lcommon.UtxoState,
+) (uint64, error) {
+	total, err := lcommon.ConsumedReferenceScriptSize(tx, state)
+	if err != nil {
+		return 0, err
+	}
+	for _, body := range lcommon.SubTransactionBodiesFromTransaction(tx) {
+		size, err := lcommon.ConsumedReferenceScriptSize(body, state)
+		if err != nil {
+			return 0, err
+		}
+		if total > math.MaxUint64-size {
+			return 0, errors.New("consumed reference-script size overflow")
+		}
+		total += size
+	}
+	return total, nil
 }
 
 // WithTxValidationSessionAtParent is WithTxValidationSession pinned to a
@@ -16941,6 +17012,7 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 			commitIfCurrent func(func() error) (bool, error),
 			applyTx txValidationApplyFunc,
 			_ txValidationResolveFunc,
+			_ forging.TxRefScriptSizeFunc,
 		) error {
 			return fn(validate, stillCurrent, commitIfCurrent, applyTx)
 		},
@@ -17116,6 +17188,7 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 		commitIfCurrent func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
 		resolve txValidationResolveFunc,
+		refScriptSize forging.TxRefScriptSizeFunc,
 	) error,
 ) error {
 	if err := ctx.Err(); err != nil {
@@ -17314,8 +17387,24 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 		resolve := func(refs []models.UtxoId) ([]models.Utxo, error) {
 			return ls.db.UtxosByRefs(ctx, refs, txn)
 		}
+		refScriptSize := func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+		) (uint64, error) {
+			lv := &LedgerView{
+				ctx:             ctx,
+				txn:             txn,
+				ls:              ls,
+				intraBlockUtxos: createdUtxos,
+				consumedUtxos:   consumedUtxos,
+			}
+			size, err := consumedRefScriptSize(tx, lv)
+			return size, storageFaultOrErr(lv, err)
+		}
 		if err := fn(
 			validate, stillCurrent, commitIfCurrent, applyTx, resolve,
+			refScriptSize,
 		); err != nil {
 			return err
 		}
