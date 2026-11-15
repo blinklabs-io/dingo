@@ -58,6 +58,10 @@ type reintersectFixture struct {
 	// awaitReplies counts the AwaitReply answers the peer has sent.
 	awaitReplies atomic.Int32
 
+	// parked holds the server sides of the requests the peer answered with
+	// AwaitReply and has not yet answered with a block; see answerParked.
+	parked []*ochainsync.Server
+
 	mu           sync.Mutex
 	offered      [][]ocommon.Point
 	needRollback bool
@@ -148,6 +152,9 @@ func (f *reintersectFixture) dial(t *testing.T) *ouroboros.Connection {
 		}),
 		ochainsync.WithRequestNextFunc(func(cb ochainsync.CallbackContext) error {
 			if f.await.Load() {
+				f.mu.Lock()
+				f.parked = append(f.parked, cb.Server)
+				f.mu.Unlock()
 				f.awaitReplies.Add(1)
 				return cb.Server.AwaitReply()
 			}
@@ -935,14 +942,38 @@ func TestLocalRollbackWithoutPeerHistoryClosesOutbound(t *testing.T) {
 		"an outbound connection must not be re-intersected")
 }
 
-// An inbound re-intersect that cannot finish inside the watchdog falls back to
-// the close, as every in-place re-intersect does.
-func TestLocalRollbackInboundReintersectWatchdogFallsBackToClose(
+// answerParked makes the peer stream again, sending the block each request it
+// answered with AwaitReply was waiting for, as a peer at its tip does when the
+// next block arrives.
+func (f *reintersectFixture) answerParked(t *testing.T) {
+	t.Helper()
+	f.await.Store(false)
+	f.mu.Lock()
+	parked := f.parked
+	f.parked = nil
+	f.mu.Unlock()
+	require.NotEmpty(t, parked, "the peer parked no request")
+	tip := f.o.ledgerState.PrimaryChainTip()
+	for _, server := range parked {
+		require.NoError(t, server.RollForward(1, []byte{0x80}, tip))
+	}
+}
+
+// requireInboundReintersectOutlastsWatchdog parks an inbound client at its
+// peer's tip, raises a resync with publish, and has the peer send its next
+// block only after several watchdog periods. The re-intersect drains that
+// block first, so until then it waits on the peer; the connection must stay
+// open throughout and the sync must resume from the new intersection.
+func requireInboundReintersectOutlastsWatchdog(
 	t *testing.T,
+	publish func(f *reintersectFixture),
 ) {
-	t.Parallel()
-	f := newReintersectFixture(t, 300*time.Millisecond)
+	t.Helper()
+	const watchdog = 200 * time.Millisecond
+	f := newReintersectFixture(t, watchdog)
 	require.True(t, f.state.SetClientStartedAsOutbound(f.connId, false))
+	conn := f.cm.GetConnectionById(f.connId)
+	require.NotNil(t, conn)
 	f.await.Store(true)
 	testutil.WaitForCondition(
 		t,
@@ -951,14 +982,83 @@ func TestLocalRollbackInboundReintersectWatchdogFallsBackToClose(
 		"the peer never parked the client in MustReply",
 	)
 
+	publish(f)
+
+	testutil.RequireNever(
+		t,
+		func() bool { return f.cm.GetConnectionById(f.connId) != conn },
+		5*watchdog,
+		10*time.Millisecond,
+		"an inbound connection must not be closed while its re-intersect "+
+			"waits for the peer's next block",
+	)
+	require.EqualValues(t, 1, f.findIntersects.Load(),
+		"no FindIntersect may be sent while a reply is outstanding")
+
+	f.answerParked(t)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool { return f.findIntersects.Load() == 2 },
+		5*time.Second,
+		"the re-intersect must send FindIntersect once the reply drains",
+	)
+	forwardsAtIntersect := f.rollForwards.Load()
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return f.rollBackwards.Load() >= 1 &&
+				f.rollForwards.Load() > forwardsAtIntersect
+		},
+		5*time.Second,
+		"the re-intersected sync must roll back to the intersection and stream on",
+	)
+	require.Same(t, conn, f.cm.GetConnectionById(f.connId),
+		"the inbound connection must survive the re-intersect")
+}
+
+// Block gaps longer than the watchdog are normal, and a client parked at an
+// inbound peer's tip drains only when that peer sends its next block. A local
+// rollback used to close such a connection when the watchdog expired; it now
+// keeps it and re-intersects once the peer answers.
+func TestLocalRollbackInboundReintersectOutlastsWatchdog(t *testing.T) {
+	t.Parallel()
+	requireInboundReintersectOutlastsWatchdog(t, func(f *reintersectFixture) {
+		f.publishLocalRollback(f.intersect)
+	})
+}
+
+// A local cursor resync on an inbound connection waits for the peer's next
+// block the same way.
+func TestChainsyncResyncInboundReintersectOutlastsWatchdog(t *testing.T) {
+	t.Parallel()
+	requireInboundReintersectOutlastsWatchdog(t, func(f *reintersectFixture) {
+		f.publish(event.ChainsyncResyncReasonIngressPromotion)
+	})
+}
+
+// On an inbound connection the watchdog still bounds building the intersect
+// points, a ledger read: one that never returns falls back to the close.
+func TestLocalRollbackInboundReintersectWatchdogBoundsPointBuild(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newReintersectFixture(t, 300*time.Millisecond)
+	require.True(t, f.state.SetClientStartedAsOutbound(f.connId, false))
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	f.o.config.ChainsyncIntersectAtLedgerTip = func() bool {
+		<-block
+		return false
+	}
+
 	f.publishLocalRollback(f.intersect)
 
 	testutil.WaitForCondition(
 		t,
 		func() bool { return !f.connected() },
 		10*time.Second,
-		"a re-intersect that never drains must close the connection",
+		"a re-intersect whose points never build must close the connection",
 	)
-	require.EqualValues(t, 1, f.findIntersects.Load(),
-		"no FindIntersect may be sent while a reply is outstanding")
+	require.EqualValues(t, 1, f.findIntersects.Load())
 }
