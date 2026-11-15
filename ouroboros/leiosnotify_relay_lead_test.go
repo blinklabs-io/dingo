@@ -58,7 +58,11 @@ func newRelayLeadFixture(
 		},
 		ConnectionDoneChan: done,
 	}
-	o.leiosEBLog.registerConn(leiosConnectionIdString(ctx.ConnectionId), server, nil)
+	o.leiosEBLog.registerConn(
+		leiosConnectionIdString(ctx.ConnectionId),
+		server,
+		nil,
+	)
 	return &relayLeadFixture{o: o, ctx: ctx}
 }
 
@@ -144,7 +148,11 @@ func TestLeiosNotifyOfferLeadBoundary(t *testing.T) {
 				msg := f.firstMessage(t, entry)
 				_, isVote := msg.(*leiosnotify.MsgVotesOffer)
 				if tc.sent {
-					require.False(t, isVote, "offer must be sent before the vote")
+					require.False(
+						t,
+						isVote,
+						"offer must be sent before the vote",
+					)
 					return
 				}
 				require.True(
@@ -211,6 +219,19 @@ func TestLeiosNotifyOfferLeadNoImmutablePointUsesOrigin(t *testing.T) {
 	at := relayLeadPoint(relayLeadTestLead, 4)
 	f = newRelayLeadFixture(t, fixedImmutable(0, false))
 	msg := f.firstMessage(t, offerEntries(at)["block offer"])
+	require.IsType(t, &leiosnotify.MsgBlockOffer{}, msg)
+}
+
+// A lookup that finds no immutable point reads as Origin whatever slot it
+// carries alongside found=false.
+func TestLeiosNotifyOfferLeadNotFoundIgnoresReportedSlot(t *testing.T) {
+	t.Parallel()
+	point := relayLeadPoint(relayLeadTestLead, 7)
+	f := newRelayLeadFixture(
+		t,
+		fixedImmutable(relayLeadTestImmutable, false),
+	)
+	msg := f.firstMessage(t, offerEntries(point)["block offer"])
 	require.IsType(t, &leiosnotify.MsgBlockOffer{}, msg)
 }
 
