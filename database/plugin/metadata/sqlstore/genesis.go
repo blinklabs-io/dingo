@@ -234,9 +234,9 @@ func (s *Store) SetGenesisGovernance(
 		}
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO account (
-    staking_key, pool, drep, reward, id, active, added_slot,
+    staking_key, pool, drep, reward, active, added_slot,
     credential_tag, drep_type, expiration_epoch, created_slot
-) VALUES (?, ?, ?, '0', NULL, TRUE, 0, ?, ?, 0, 0)
+) VALUES (?, ?, ?, '0', TRUE, 0, ?, ?, 0, 0)
 ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
     pool = excluded.pool, drep = excluded.drep,
     drep_type = excluded.drep_type, active = TRUE`,
