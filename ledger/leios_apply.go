@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -2147,7 +2148,8 @@ func (ls *LedgerState) certifiedEndorserBlockData(
 }
 
 // persistCertifiedEndorserBlock writes the manifest and transactions of a
-// certified endorser block when the store lacks either, so the closure stays
+// certified endorser block when the store lacks either or holds different
+// bytes, so the closure stays
 // readable after the in-memory endorser-block cache expires. The asynchronous
 // persist queue drops writes under pressure and is not a durability
 // guarantee for a block that certification has made part of the chain.
@@ -2172,9 +2174,15 @@ func (ls *LedgerState) persistCertifiedEndorserBlock(
 	if manifestRaw == nil {
 		return nil
 	}
-	_, manifestErr := ls.db.GetLeiosEBManifest(ebHash, ebSlot)
+	storedManifest, manifestErr := ls.db.GetLeiosEBManifest(ebHash, ebSlot)
 	stored, txErr := ls.db.GetLeiosEBTxs(ebHash, ebSlot)
-	if manifestErr == nil && txErr == nil && len(stored) == len(txs) {
+	// Matching counts do not prove the stored bytes are the verified ones: a
+	// stale or legacy-wrapped element would be read back as the closure.
+	if manifestErr == nil && txErr == nil &&
+		bytes.Equal(storedManifest, manifestRaw) &&
+		slices.EqualFunc(stored, txs, func(a, b cbor.RawMessage) bool {
+			return bytes.Equal(a, b)
+		}) {
 		return nil
 	}
 	for _, err := range []error{manifestErr, txErr} {

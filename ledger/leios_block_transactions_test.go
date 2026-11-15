@@ -436,3 +436,27 @@ func TestCertifiedApplyPersistsEndorserBlockEvictedAfterLookup(
 	require.NoError(t, err)
 	require.Equal(t, f.ebTxs, gotTxs)
 }
+
+// Equal transaction counts do not make stored bytes the verified closure: a
+// same-length stale list is rewritten.
+func TestPersistCertifiedEndorserBlockRepairsSameCountStoredTxs(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	manifest := testLeiosManifest(f)
+	f.ebHash = manifest.Hash()
+	manifestCbor, err := manifest.MarshalCBOR()
+	require.NoError(t, err)
+	hash, slot := f.ebHash.Bytes(), uint64(7)
+	stale := make([]cbor.RawMessage, len(f.ebTxs))
+	for i := range stale {
+		stale[i] = cbor.RawMessage{0x40}
+	}
+	require.NoError(t, f.db.SetLeiosEB(slot, hash, manifestCbor, stale))
+
+	require.NoError(t, f.ls.persistCertifiedEndorserBlock(
+		hash, slot, manifestCbor, f.ebTxs,
+	))
+	got, err := f.db.GetLeiosEBTxs(hash, slot)
+	require.NoError(t, err)
+	require.Equal(t, f.ebTxs, got)
+}
