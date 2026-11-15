@@ -1167,11 +1167,11 @@ WITH `
 	for _, source := range historicalDelegationSources {
 		delegationParts = append(delegationParts, fmt.Sprintf(`
 SELECT event.credential_tag, event.staking_key, event.pool_key_hash,
-       COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), event.added_slot) AS added_slot, event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), event.added_slot) AS added_slot, event.added_slot AS ownership_slot, COALESCE(tx.block_index, 0) AS block_index, COALESCE(certs.cert_index, 0) AS cert_index
 %[2]s
-JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
-JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
-WHERE %[3]sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`, source.table, scopedFrom(source.table, "event"), scopedWhere("event")))
+LEFT JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
+LEFT JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
+WHERE %[3]s(event.certificate_id = 0 OR tx.tx_id IS NOT NULL) AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`, source.table, scopedFrom(source.table, "event"), scopedWhere("event")))
 		args = append(args, source.certType, slot)
 	}
 	allHistoryTables := make(
@@ -1186,12 +1186,29 @@ WHERE %[3]sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs
 	for _, source := range historicalRegistrationSources {
 		allHistoryTables = append(allHistoryTables, source.table)
 	}
+	// A credential an import baselined has no certificate history, and a later
+	// certificate overwrites its account row (added_slot, pool, active), so
+	// that row cannot describe the state at slot. The immutable baseline does.
+	// Only a credential with no baseline falls back to the account row.
+	delegationParts = append(delegationParts, `
+SELECT baseline.credential_tag, baseline.staking_key, baseline.pool,
+       baseline.added_slot, baseline.added_slot, 0, 0
+`+scopedFrom("account_import_baseline", "baseline")+`
+WHERE `+scopedWhere("baseline")+`baseline.added_slot <= ?
+  AND baseline.active = TRUE
+  AND baseline.pool IS NOT NULL AND length(baseline.pool) > 0`+
+		noHistorySQL("baseline", allHistoryTables))
+	args = append(args, slot)
+	for range allHistoryTables {
+		args = append(args, slot)
+	}
 	delegationParts = append(delegationParts, `
 SELECT account.credential_tag, account.staking_key, account.pool,
        account.added_slot, account.added_slot, 0, 0
 `+scopedFrom("account", "account")+`
 WHERE `+scopedWhere("account")+`account.added_slot <= ? AND account.active = TRUE
   AND account.pool IS NOT NULL AND length(account.pool) > 0`+
+		noBaselineSQL("account")+
 		noHistorySQL("account", allHistoryTables))
 	args = append(args, slot)
 	for range allHistoryTables {
@@ -1205,11 +1222,11 @@ WHERE `+scopedWhere("account")+`account.added_slot <= ? AND account.active = TRU
 	for _, source := range historicalRegistrationSources {
 		registrationParts = append(registrationParts, fmt.Sprintf(`
 SELECT event.credential_tag, event.staking_key, %d AS registered, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = tx.tx_id), event.added_slot) AS added_slot,
-       event.added_slot AS ownership_slot, tx.block_index, certs.cert_index
+       event.added_slot AS ownership_slot, COALESCE(tx.block_index, 0) AS block_index, COALESCE(certs.cert_index, 0) AS cert_index
 %s
-JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
-JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
-WHERE %sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`,
+LEFT JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
+LEFT JOIN applied_transaction tx ON tx.tx_id = certs.transaction_id
+WHERE %s(event.certificate_id = 0 OR tx.tx_id IS NOT NULL) AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`,
 			source.registered,
 			scopedFrom(source.table, "event"),
 			scopedWhere("event"),
@@ -1224,9 +1241,22 @@ WHERE %sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc
 	for _, source := range historicalRegistrationSources {
 		registrationTables = append(registrationTables, source.table)
 	}
+	// created_slot is immutable, so it still dates the registration. The
+	// active flag is overwritten by a later certificate, so a baselined
+	// credential takes it from the baseline.
 	registrationParts = append(registrationParts, `
 SELECT account.credential_tag, account.staking_key,
-       CASE WHEN account.active THEN 1 ELSE 0 END,
+       CASE WHEN EXISTS (
+         SELECT 1 FROM account_import_baseline baseline
+         WHERE baseline.credential_tag = account.credential_tag
+           AND baseline.staking_key = account.staking_key
+       ) THEN (CASE WHEN EXISTS (
+         SELECT 1 FROM account_import_baseline baseline
+         WHERE baseline.credential_tag = account.credential_tag
+           AND baseline.staking_key = account.staking_key
+           AND baseline.active = TRUE
+       ) THEN 1 ELSE 0 END)
+       ELSE (CASE WHEN account.active THEN 1 ELSE 0 END) END,
        account.created_slot, account.created_slot, 0, 0
 `+scopedFrom("account", "account")+`
 WHERE `+scopedWhere("account")+`account.created_slot <= ?`+
@@ -1476,6 +1506,15 @@ historical_expiration AS (
  AND account.created_slot < created_epoch.start_slot + created_epoch.length_in_slots
  ` + activationJoin + `
 )`, args, nil
+}
+
+func noBaselineSQL(alias string) string {
+	return fmt.Sprintf(`
+ AND NOT EXISTS (
+   SELECT 1 FROM account_import_baseline baseline
+   WHERE baseline.credential_tag = %[1]s.credential_tag
+     AND baseline.staking_key = %[1]s.staking_key
+ )`, alias)
 }
 
 func noHistorySQL(alias string, tables []string) string {
