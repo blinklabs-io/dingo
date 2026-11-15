@@ -4121,7 +4121,7 @@ const defaultChainsyncReintersectTimeout = 5 * time.Second
 // intersect points. Local authoritative
 // rollbacks additionally rewind tracked client cursors and attempt
 // ledger-side recovery before recycling affected connections as a
-// fallback.
+// fallback; an inbound connection is re-intersected in place instead.
 func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 	if o.eventBus == nil {
 		return
@@ -4209,8 +4209,16 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				// accumulated and prevented recovery after reconnect.
 				// RecoverAfterLocalRollback already cleaned up blockfetch
 				// state, so there are no in-flight lookups to break.
+				//
+				// Closing an inbound connection also ends the session our
+				// server runs for the peer that dialed us, so a downstream
+				// follower loses us until it redials, and peer governance
+				// does not redial a peer it knows only from that connection.
+				// An inbound client is re-intersected in place instead, as
+				// the local cursor resyncs are, keeping the connection; a
+				// re-intersect that fails closes it as before.
 				o.config.Logger.Info(
-					"local rollback had no recoverable peer history, closing connections for fresh chainsync",
+					"local rollback had no recoverable peer history, resyncing chainsync clients",
 					"component",
 					"ouroboros",
 					"rollback_slot",
@@ -4219,6 +4227,9 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 					len(connIds),
 				)
 				for _, connId := range connIds {
+					if o.localRollbackReintersectsInbound(ctx, connId, e.Reason) {
+						continue
+					}
 					if o.chainsyncState != nil {
 						o.chainsyncState.ClearObservedHeaderHistory(connId)
 					}
@@ -4254,6 +4265,28 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			}
 		},
 	)
+}
+
+// localRollbackReintersectsInbound re-intersects connId's chainsync client in
+// place when the connection was dialed by the peer, and reports whether it did
+// so. A local rollback with no recoverable peer history otherwise closes the
+// connection so peer governance redials it from the new intersect points. On
+// an inbound connection the close also ends the session our server runs for
+// the peer that dialed us, and governance does not redial a peer it knows only
+// from that connection.
+func (o *Ouroboros) localRollbackReintersectsInbound(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	reason string,
+) bool {
+	if o.chainsyncState == nil {
+		return false
+	}
+	outbound, tracked := o.chainsyncState.ClientStartedAsOutbound(connId)
+	if !tracked || outbound {
+		return false
+	}
+	return o.startChainsyncReintersect(ctx, connId, reason)
 }
 
 // chainsyncResyncReintersects reports whether a re-sync reason is recovered by

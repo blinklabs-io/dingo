@@ -862,3 +862,103 @@ func TestChainsyncResyncRepeatedRollbackNotFoundCloses(t *testing.T) {
 	require.EqualValues(t, 2, f.findIntersects.Load(),
 		"the repeat must not re-intersect")
 }
+
+// publishLocalRollback publishes the resync a local ledger rollback raises:
+// no connection ID, the rollback point, and the local-rollback reason.
+func (f *reintersectFixture) publishLocalRollback(point ocommon.Point) {
+	f.o.eventBus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
+				Point:  point,
+			},
+		),
+	)
+}
+
+// A local rollback that finds no peer history to replay used to close every
+// tracked client's connection. On a connection the peer dialed, the close also
+// ended the session our server runs for that peer, so a downstream follower
+// lost us, and peer governance does not redial a peer it knows only from that
+// connection. The inbound client is re-intersected in place instead.
+func TestLocalRollbackWithoutPeerHistoryReintersectsInboundInPlace(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newReintersectFixture(t, 10*time.Second)
+	require.True(t, f.state.SetClientStartedAsOutbound(f.connId, false))
+	conn := f.cm.GetConnectionById(f.connId)
+	require.NotNil(t, conn)
+
+	f.publishLocalRollback(f.intersect)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool { return f.findIntersects.Load() == 2 },
+		5*time.Second,
+		"the inbound client must be re-intersected",
+	)
+	forwardsAtIntersect := f.rollForwards.Load()
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return f.rollBackwards.Load() >= 1 &&
+				f.rollForwards.Load() > forwardsAtIntersect
+		},
+		5*time.Second,
+		"the re-intersected sync must roll back to the intersection and stream on",
+	)
+	require.Same(t, conn, f.cm.GetConnectionById(f.connId),
+		"a local rollback must keep the inbound connection")
+}
+
+// An outbound connection is still closed so peer governance redials it from
+// the new intersect points, as before.
+func TestLocalRollbackWithoutPeerHistoryClosesOutbound(t *testing.T) {
+	t.Parallel()
+	f := newReintersectFixture(t, 10*time.Second)
+	outbound, tracked := f.state.ClientStartedAsOutbound(f.connId)
+	require.True(t, tracked)
+	require.True(t, outbound)
+
+	f.publishLocalRollback(f.intersect)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool { return !f.connected() },
+		10*time.Second,
+		"a local rollback must close an outbound connection",
+	)
+	require.EqualValues(t, 1, f.findIntersects.Load(),
+		"an outbound connection must not be re-intersected")
+}
+
+// An inbound re-intersect that cannot finish inside the watchdog falls back to
+// the close, as every in-place re-intersect does.
+func TestLocalRollbackInboundReintersectWatchdogFallsBackToClose(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newReintersectFixture(t, 300*time.Millisecond)
+	require.True(t, f.state.SetClientStartedAsOutbound(f.connId, false))
+	f.await.Store(true)
+	testutil.WaitForCondition(
+		t,
+		func() bool { return f.awaitReplies.Load() > 0 },
+		5*time.Second,
+		"the peer never parked the client in MustReply",
+	)
+
+	f.publishLocalRollback(f.intersect)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool { return !f.connected() },
+		10*time.Second,
+		"a re-intersect that never drains must close the connection",
+	)
+	require.EqualValues(t, 1, f.findIntersects.Load(),
+		"no FindIntersect may be sent while a reply is outstanding")
+}
