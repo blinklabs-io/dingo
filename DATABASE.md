@@ -6695,13 +6695,29 @@ caller's transaction, so its context cancels the statement.
 
 Historical stake by pool for epoch-boundary snapshots. The query resolves the
 latest registration/deregistration and pool-delegation certificate for each
-stake credential at or before the requested slot, treats current `account` rows
-as synthetic state only when no relevant certificate history exists for
-imported/bootstrap data, computes each delegator's stake as UTxOs live at that
-slot plus the delegator's reward-account balance, and counts every
-actively-delegated credential regardless of its current stake balance
-(zero-stake delegators are included in both the delegator count and the stake
-sum, matching Cardano's reward formula semantics):
+stake credential at or before the requested slot, and synthesizes state only
+for a credential with no relevant certificate history at or before that slot
+(imported/bootstrap data). A credential with an `account_import_baseline` row
+takes its pool, `active` flag and delegation slot from that row, gated on
+`added_slot <= slot`, because a later certificate overwrites the live `account`
+row's `pool`, `active` and `added_slot`; its registration is still dated by the
+immutable `account.created_slot`. Ledger rules rewrite the row without a
+certificate too: POOLREAP (`ClearDelegationsToRetiredPool`) nulls `pool` and
+the DRep clears null `drep`, and each stamps `added_slot` with its own slot.
+Neither touches the baseline, so a snapshot slot before that write (the
+pre-Dijkstra snapshot read issued after the boundary's reap, a replay after
+truncation) still sees the imported or Shelley-genesis delegation, and the
+pool-reap guard below drops a reaped delegation from the reap boundary on. Only
+a credential with neither history nor a baseline falls back to the live
+`account` row, which is not slot-correct across those writes; `ImportAccount`
+and Shelley genesis always write a baseline, and the `v4` backfill covered
+earlier imports, so no current writer leaves such a row. The same fallback
+serves the epoch-boundary, reward-stake-input and pointer-stake reads. The query
+computes each delegator's stake as UTxOs live at that slot plus the delegator's
+reward-account balance, and counts every actively-delegated credential
+regardless of its current stake balance (zero-stake delegators are included in
+both the delegator count and the stake sum, matching Cardano's reward formula
+semantics):
 
 The reward term is required for parity with Mithril-imported mark
 rows: summing live UTxOs alone omits reward balances and understates per-pool
