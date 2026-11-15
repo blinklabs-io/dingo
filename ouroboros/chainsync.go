@@ -888,11 +888,20 @@ func (o *Ouroboros) chainsyncClientIntersectFound(
 	o.chainsyncReintersectMu.Lock()
 	run := o.chainsyncReintersecting[ctx.ConnectionId]
 	reintersecting := run != nil && run.client == ctx.Client && !run.settled
-	if reintersecting {
+	stale := reintersecting && run.absorbed
+	switch {
+	case stale:
+		// A resync arrived after the points this intersection answers may
+		// have been built, so the point may no longer be on the local chain.
+		// The run stays unsettled, which drops this session's replies as
+		// the old cursor's are, and re-intersects with fresh points.
+		run.absorbed = false
+		run.again = true
+	case reintersecting:
 		run.settled = true
 	}
 	o.chainsyncReintersectMu.Unlock()
-	if !reintersecting {
+	if !reintersecting || stale {
 		return nil
 	}
 	o.settleReintersectedCursor(ctx.ConnectionId, point)
@@ -4383,6 +4392,14 @@ type chainsyncReintersectRun struct {
 	// that arrives later is not absorbed by the run: the run has already
 	// trimmed the history and dropped the resync marker.
 	settled bool
+	// absorbed is set when a resync arrives while the run is unsettled. The
+	// run may already have built its intersect points, and a local rollback
+	// can remove a block among them, so the intersection the peer then picks
+	// is not settled: the run re-intersects again with fresh points.
+	absorbed bool
+	// again is set when the client found an intersection that was not
+	// settled because a resync had been absorbed; the run re-intersects.
+	again bool
 }
 
 // startChainsyncReintersect re-intersects connId's chainsync client in the
@@ -4411,6 +4428,7 @@ func (o *Ouroboros) startChainsyncReintersect(
 	o.chainsyncReintersectMu.Lock()
 	if prev := o.chainsyncReintersecting[connId]; prev != nil &&
 		prev.client == client && !prev.settled {
+		prev.absorbed = true
 		o.chainsyncReintersectMu.Unlock()
 		o.config.Logger.Debug(
 			"chainsync re-intersect already running",
@@ -4450,6 +4468,17 @@ func (o *Ouroboros) reintersectChainsyncClient(
 	if o.chainsyncReintersectReturnedHook != nil {
 		o.chainsyncReintersectReturnedHook()
 	}
+	for err == nil && o.takeChainsyncReintersectAgain(connId, client) {
+		o.config.Logger.Debug(
+			"chainsync re-intersect absorbed a resync, re-intersecting with fresh points",
+			"connection_id", connId.String(),
+			"reason", reason,
+		)
+		point, err = o.reintersectWithWatchdog(ctx, connId, client)
+		if o.chainsyncReintersectReturnedHook != nil {
+			o.chainsyncReintersectReturnedHook()
+		}
+	}
 	if err == nil {
 		// chainsyncClientIntersectFound has already trimmed the history and
 		// dropped the resync marker.
@@ -4486,6 +4515,23 @@ func (o *Ouroboros) reintersectChainsyncClient(
 	)
 	//nolint:contextcheck // address normalization bounds its own DNS lookup
 	o.closeConnectionForChainsyncResync(connId, reason)
+}
+
+// takeChainsyncReintersectAgain reports whether connId's running re-intersect
+// of client found an intersection it left unsettled because a resync was
+// absorbed meanwhile, and clears that mark: the caller re-intersects again.
+func (o *Ouroboros) takeChainsyncReintersectAgain(
+	connId ouroboros.ConnectionId,
+	client *ochainsync.Client,
+) bool {
+	o.chainsyncReintersectMu.Lock()
+	defer o.chainsyncReintersectMu.Unlock()
+	run := o.chainsyncReintersecting[connId]
+	if run == nil || run.client != client || !run.again {
+		return false
+	}
+	run.again = false
+	return true
 }
 
 // reintersectWithWatchdog builds connId's intersect points and runs

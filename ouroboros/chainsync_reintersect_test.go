@@ -898,6 +898,8 @@ func TestLocalRollbackWithoutPeerHistoryReintersectsInboundInPlace(
 	require.True(t, f.state.SetClientStartedAsOutbound(f.connId, false))
 	conn := f.cm.GetConnectionById(f.connId)
 	require.NotNil(t, conn)
+	// The initial sync already rolled back to the intersection.
+	rollbacksBefore := f.rollBackwards.Load()
 
 	f.publishLocalRollback(f.intersect)
 
@@ -911,7 +913,7 @@ func TestLocalRollbackWithoutPeerHistoryReintersectsInboundInPlace(
 	testutil.WaitForCondition(
 		t,
 		func() bool {
-			return f.rollBackwards.Load() >= 1 &&
+			return f.rollBackwards.Load() > rollbacksBefore &&
 				f.rollForwards.Load() > forwardsAtIntersect
 		},
 		5*time.Second,
@@ -981,6 +983,8 @@ func requireInboundReintersectOutlastsWatchdog(
 		5*time.Second,
 		"the peer never parked the client in MustReply",
 	)
+	// The initial sync already rolled back to the intersection.
+	rollbacksBefore := f.rollBackwards.Load()
 
 	publish(f)
 
@@ -1007,7 +1011,7 @@ func requireInboundReintersectOutlastsWatchdog(
 	testutil.WaitForCondition(
 		t,
 		func() bool {
-			return f.rollBackwards.Load() >= 1 &&
+			return f.rollBackwards.Load() > rollbacksBefore &&
 				f.rollForwards.Load() > forwardsAtIntersect
 		},
 		5*time.Second,
@@ -1061,4 +1065,85 @@ func TestLocalRollbackInboundReintersectWatchdogBoundsPointBuild(
 		"a re-intersect whose points never build must close the connection",
 	)
 	require.EqualValues(t, 1, f.findIntersects.Load())
+}
+
+// A local rollback that arrives while an inbound re-intersect waits on the
+// peer is absorbed by that run. The run built its intersect points before the
+// rollback, which may have removed a block among them, so the intersection
+// the peer picks from them is not settled: the run re-intersects once more
+// with points built after the rollback, and settles only that intersection.
+func TestInboundReintersectAbsorbedLocalRollbackReintersectsAgain(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newReintersectFixture(t, 200*time.Millisecond)
+	require.True(t, f.state.SetClientStartedAsOutbound(f.connId, false))
+	conn := f.cm.GetConnectionById(f.connId)
+	require.NotNil(t, conn)
+	var builds atomic.Int32
+	f.o.config.ChainsyncIntersectAtLedgerTip = func() bool {
+		builds.Add(1)
+		return false
+	}
+	f.await.Store(true)
+	testutil.WaitForCondition(
+		t,
+		func() bool { return f.awaitReplies.Load() > 0 },
+		5*time.Second,
+		"the peer never parked the client in MustReply",
+	)
+
+	f.publishLocalRollback(f.intersect)
+	testutil.WaitForCondition(
+		t,
+		func() bool { return builds.Load() == 1 },
+		5*time.Second,
+		"the re-intersect must build its points",
+	)
+	f.publishLocalRollback(f.intersect)
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			f.o.chainsyncReintersectMu.Lock()
+			defer f.o.chainsyncReintersectMu.Unlock()
+			run := f.o.chainsyncReintersecting[f.connId]
+			return run != nil && run.absorbed
+		},
+		5*time.Second,
+		"the running re-intersect must absorb the second rollback",
+	)
+	require.EqualValues(t, 1, builds.Load(),
+		"the second rollback must not start a run of its own")
+
+	f.answerParked(t)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool { return f.findIntersects.Load() == 3 },
+		5*time.Second,
+		"the run must re-intersect again after the absorbed rollback",
+	)
+	require.EqualValues(t, 2, builds.Load(),
+		"the second re-intersect must offer points built after the rollback")
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			f.o.chainsyncReintersectMu.Lock()
+			defer f.o.chainsyncReintersectMu.Unlock()
+			return len(f.o.chainsyncReintersecting) == 0
+		},
+		5*time.Second,
+		"the re-intersect must finish",
+	)
+	f.mu.Lock()
+	reopened := 0
+	for _, e := range f.ledgerEvents {
+		if e == "reopened" {
+			reopened++
+		}
+	}
+	f.mu.Unlock()
+	require.Equal(t, 1, reopened,
+		"only the intersection from fresh points may be settled")
+	require.Same(t, conn, f.cm.GetConnectionById(f.connId))
 }
