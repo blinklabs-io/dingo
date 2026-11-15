@@ -93,9 +93,10 @@ func minNonZeroCap(a, b uint64) uint64 {
 }
 
 // leiosEBMeasure is the resources one transaction takes from an endorser
-// block beyond its manifest entry: the execution units its redeemers declare,
-// and the bytes of reference scripts its inputs and reference inputs resolve
-// to, counted per input as the ledger's non-distinct measure counts them.
+// block beyond its manifest entry: the execution units its redeemers and its
+// sub-transactions' redeemers declare, and the bytes of reference scripts its
+// top-level inputs and reference inputs resolve to, counted per input as the
+// ledger's non-distinct measure counts them.
 type leiosEBMeasure struct {
 	exUnits        lcommon.ExUnits
 	refScriptBytes uint64

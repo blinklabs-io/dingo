@@ -12724,16 +12724,19 @@ slot allow (`effectiveLeiosEBCaps`): the referenced transactions total at most
 manifest references, and the encoded manifest, the size the ranking-block header
 announces, at most `maxEndorserBlockReferencesSize`. The execution units the
 referenced transactions declare sum to at most `maxEndorserBlockExUnits`, memory
-and steps each, and the reference-script bytes their inputs and reference inputs
-resolve to, counted per input, sum to at most `maxRefScriptSizePerEndorserBlock`.
-A zero value of either is a real bound that admits only transactions costing
-nothing in that dimension. Selection measures reference scripts through the
-validation session's overlay (`LeiosSelectionSessionProvider`), so outputs
-created by earlier selected transactions count, and refuses to select when the
-validator cannot measure them. Every bound limits selection as well as manifest
-construction, so selection stops at the first valid transaction that no longer
-fits instead of validating the rest of a deep mempool. The size bounds are
-not optional: the reference node never fetches the closure of an endorser block
+and steps each, and the reference-script bytes their top-level inputs and
+reference inputs resolve to, counted per input with sub-transaction inputs
+excluded as in the reference mempool's measure, sum to at most
+`maxRefScriptSizePerEndorserBlock`. A zero value of either is a real bound that
+admits only transactions costing nothing in that dimension. Selection measures
+reference scripts through the validation session's overlay
+(`LeiosSelectionSessionProvider`), so outputs created by earlier selected
+transactions count, and refuses to select when the validator cannot measure
+them. The aggregate bounds are applied during selection only, since manifest
+construction receives the selected prefix; the size bounds limit both selection
+and manifest construction. Selection stops at the first valid transaction that
+no longer fits instead of validating the rest of a deep mempool. The size bounds
+are not optional: the reference node never fetches the closure of an endorser block
 over `maxEndorserBlockTxsSize` (`ExnLeiosClosureTooBig`), so no honest committee
 member votes for it, and a header announcing a manifest over
 `maxEndorserBlockReferencesSize` is invalid (`LeiosEbTooBig`). The limits are

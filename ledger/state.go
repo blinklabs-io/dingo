@@ -16915,31 +16915,6 @@ func (ls *LedgerState) WithLeiosSelectionSession(ctx context.Context,
 	return err
 }
 
-// consumedRefScriptSize is the non-distinct reference-script size of tx: the
-// scripts its inputs and reference inputs carry, summed per input, over the
-// transaction and every sub-transaction. It is the per-transaction measure
-// dijkstra.ValidateRefScriptSizePerBlock sums for a block.
-func consumedRefScriptSize(
-	tx lcommon.Transaction,
-	state lcommon.UtxoState,
-) (uint64, error) {
-	total, err := lcommon.ConsumedReferenceScriptSize(tx, state)
-	if err != nil {
-		return 0, err
-	}
-	for _, body := range lcommon.SubTransactionBodiesFromTransaction(tx) {
-		size, err := lcommon.ConsumedReferenceScriptSize(body, state)
-		if err != nil {
-			return 0, err
-		}
-		if total > math.MaxUint64-size {
-			return 0, errors.New("consumed reference-script size overflow")
-		}
-		total += size
-	}
-	return total, nil
-}
-
 // WithTxValidationSessionAtParent is WithTxValidationSession pinned to a
 // ledger tip of parentHash: when the published tip is anything else, fn is not
 // called and the error wraps forging.ErrTxValidationParentMismatch. The block
@@ -17399,7 +17374,12 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 				intraBlockUtxos: createdUtxos,
 				consumedUtxos:   consumedUtxos,
 			}
-			size, err := consumedRefScriptSize(tx, lv)
+			// The reference mempool measures an endorser block by
+			// Conway's txNonDistinctRefScriptsSize: the top-level
+			// transaction's inputs and reference inputs only. The
+			// sub-transaction-inclusive sum is the per-transaction
+			// ledger limit, not the endorser-block measure.
+			size, err := lcommon.ConsumedReferenceScriptSize(tx, lv)
 			return size, storageFaultOrErr(lv, err)
 		}
 		if err := fn(
