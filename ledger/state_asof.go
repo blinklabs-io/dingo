@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -130,7 +131,8 @@ var (
 	poolFamilies = nodesettings.FamilyMask(0).
 			With(nodesettings.FamilyPoolsHistory)
 	accountFamilies = nodesettings.FamilyMask(0).
-			With(nodesettings.FamilyAccounts)
+			With(nodesettings.FamilyAccounts).
+			With(nodesettings.FamilyRewardOutputs)
 )
 
 // asOfRead is one ledger state read as of a slot: how the metadata store and
@@ -802,15 +804,33 @@ func (ls *LedgerState) accountsAt(
 	if r == nil {
 		return nil, ls.unavailableAsOf("accounts")
 	}
+	rr := ls.rewardOutputReader(txn)
+	if rr == nil {
+		return nil, ls.unavailableAsOf("reward outputs")
+	}
 	out := make(map[string]*models.Account, len(refs))
 	for _, ref := range refs {
 		a, err := r.AccountAt(ref.Tag, ref.Key, slot)
 		if err != nil {
 			return nil, err
 		}
-		if a != nil && a.Active {
-			out[ref.MapKey()] = a
+		if a == nil || !a.Active {
+			continue
 		}
+		// The journaled row lacks the credits of rounds not yet folded
+		// into it, which the metadata store's answer adds.
+		pending, err := pendingRewardCreditAt(rr, ref.Tag, ref.Key, slot)
+		if err != nil {
+			return nil, err
+		}
+		reward, overflow := addRewardUint64(uint64(a.Reward), pending)
+		if overflow {
+			return nil, fmt.Errorf(
+				"reward account balance overflow for %x", ref.Key,
+			)
+		}
+		a.Reward = types.Uint64(reward)
+		out[ref.MapKey()] = a
 	}
 	return out, nil
 }

@@ -169,6 +169,46 @@ type MithrilCatchUpParams struct {
 	UtxoSet func() ledgerstate.UtxoSetLoader
 }
 
+// LedgerReimportParams is what a MithrilLedgerReimporter needs from the node.
+type LedgerReimportParams struct {
+	DB *database.Database
+	// UtxoSet receives the imported ledger state.
+	UtxoSet ledgerstate.FamilyLoader
+	// Commit makes UtxoSet, a copy of the live set, the live set once the
+	// import is complete. Nil when UtxoSet is the live set.
+	Commit func(ctx context.Context, point ocommon.Point) error
+	// LocalTip is the ledger's tip; the imported state is at or below it.
+	LocalTip ocommon.Point
+	// OnChain reports whether a point is a block of the local primary chain.
+	OnChain func(context.Context, ocommon.Point) (bool, error)
+	// EpochOf returns the epoch of a slot.
+	EpochOf func(slot uint64) (uint64, error)
+}
+
+// MithrilLedgerReimporter loads the ledger state of a Mithril snapshot at or
+// below the local tip into the live UTxO set and the metadata store, without
+// downloading any block, and returns the point it loaded.
+type MithrilLedgerReimporter interface {
+	ReimportLedgerState(
+		ctx context.Context,
+		p LedgerReimportParams,
+	) (ocommon.Point, error)
+	// FinishLedgerReimport completes a re-import that loaded and swapped in
+	// the ledger state at point and stopped before recording the Mithril
+	// anchor and clearing its marks.
+	FinishLedgerReimport(
+		ctx context.Context,
+		db *database.Database,
+		point ocommon.Point,
+	) error
+}
+
+// MithrilLedgerReimportFactory builds the MithrilLedgerReimporter for a node.
+// It returns nil when the network has no Mithril aggregator to import from.
+type MithrilLedgerReimportFactory func(
+	MithrilCatchUpParams,
+) (MithrilLedgerReimporter, error)
+
 // MithrilCatchUpFactory builds the MithrilCatchUp for a node. It returns nil
 // when the configuration leaves Mithril to the manual `dingo mithril sync`.
 type MithrilCatchUpFactory func(MithrilCatchUpParams) (MithrilCatchUp, error)

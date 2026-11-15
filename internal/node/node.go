@@ -1139,6 +1139,9 @@ func buildDingoConfig(
 		dingo.WithLedgerUtxoReads(cfg.LedgerUtxoReads),
 		dingo.WithLedgerUtxoBadgerOnly(cfg.LedgerUtxoBadgerOnly),
 		dingo.WithLedgerStateSetOnly(cfg.LedgerStateSetOnly),
+		dingo.WithLedgerUtxoCheckpoint(
+			cfg.LedgerUtxoCheckpointEpochs, cfg.LedgerUtxoCheckpointKeep,
+		),
 		dingo.WithLedgerStateVerifyBeforeDrain(
 			cfg.LedgerStateVerifyBeforeDrain,
 		),

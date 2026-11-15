@@ -379,12 +379,27 @@ func Run(ctx context.Context, env Env, entries []Entry) error {
 	if unknown := nodesettings.UnknownFamilies(latch, known); unknown != 0 {
 		return fmt.Errorf(
 			"this database drained ledger-state families a newer release "+
-				"graduated (mask %s); run that release or resync",
+				"graduated (mask %s); run that release or a later one",
 			nodesettings.EncodeFamilyMask(unknown),
 		)
 	}
 	for _, entry := range entries {
 		if latch.Has(entry.Family) {
+			// A latched family whose marker is present has had its rows
+			// written back by an import into the set, which marks the family
+			// before it deletes them again.
+			begun, err := env.Store.GetSyncState(
+				ctx, MarkerPrefix+entry.Family.String(),
+			)
+			if err != nil {
+				return fmt.Errorf("read drain marker: %w", err)
+			}
+			if begun != "" {
+				if err := finish(ctx, env, entry); err != nil {
+					return fmt.Errorf("drain %s: %w", entry.Family, err)
+				}
+				continue
+			}
 			armGuard(env, entry)
 			continue
 		}
@@ -417,7 +432,7 @@ func BegunFamilies(keys []string) (nodesettings.FamilyMask, error) {
 		if !found {
 			return 0, fmt.Errorf(
 				"drain marker %q names a family this release does not "+
-					"know; run the release that began it or resync", key,
+					"know; run the release that began it or a later one", key,
 			)
 		}
 	}
@@ -449,6 +464,62 @@ func drain(ctx context.Context, env Env, entry Entry) error {
 			return fmt.Errorf("record drain marker: %w", err)
 		}
 	}
+	return finish(ctx, env, entry)
+}
+
+// MarkRewritten records, for every family in mask, that its SQL rows were
+// written again and must be deleted: the same marker a drain writes before its
+// first delete, so Run or DeleteMarked resumes the deletes after a crash.
+func MarkRewritten(
+	ctx context.Context,
+	store Store,
+	mask nodesettings.FamilyMask,
+) error {
+	for _, g := range graduated {
+		if !mask.Has(g.family) {
+			continue
+		}
+		if err := store.SetSyncState(
+			ctx, MarkerPrefix+g.family.String(), "1",
+		); err != nil {
+			return fmt.Errorf("record drain marker: %w", err)
+		}
+	}
+	return nil
+}
+
+// DeleteMarked deletes the SQL rows of every family in mask whose drain marker
+// is present, the finishing half of a drain.
+func DeleteMarked(
+	ctx context.Context,
+	env Env,
+	mask nodesettings.FamilyMask,
+) error {
+	for _, g := range graduated {
+		if !mask.Has(g.family) {
+			continue
+		}
+		begun, err := env.Store.GetSyncState(
+			ctx, MarkerPrefix+g.family.String(),
+		)
+		if err != nil {
+			return fmt.Errorf("read drain marker: %w", err)
+		}
+		if begun == "" {
+			continue
+		}
+		entry := entryFor(nil, g.family, g.syncKeys, Tables(g.family)...)
+		if err := finish(ctx, env, entry); err != nil {
+			return fmt.Errorf("drain %s: %w", g.family, err)
+		}
+	}
+	return nil
+}
+
+// finish deletes a family's rows and sync keys, latches it and clears its
+// marker. Every step is idempotent, so it resumes after a crash.
+func finish(ctx context.Context, env Env, entry Entry) error {
+	marker := MarkerPrefix + entry.Family.String()
 	chunk := env.ChunkRows
 	if chunk <= 0 {
 		chunk = DefaultChunkRows

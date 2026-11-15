@@ -1144,7 +1144,7 @@ func verifyPoolStates(
 		}
 		if p, ok := byPool[string(r.PoolKeyHash)]; ok {
 			latest, retiring := PoolLatestEvents(p)
-			if latest != nil && latest.AddedSlot > st.Params.AddedSlot {
+			if PoolRegistrationSupersedes(latest, &r) {
 				st.Future = CleanPoolRegistration(latest)
 			}
 			st.RetiringEpoch = retiring

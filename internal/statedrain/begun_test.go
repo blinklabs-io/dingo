@@ -86,3 +86,38 @@ func TestRunFinishesAPairSplitByAStop(t *testing.T) {
 			})
 	}
 }
+
+// An import into the set writes a latched family's rows again and marks the
+// family; a run that finds the mark finishes the deletes, and a latched family
+// with no mark is left alone.
+func TestRunDeletesTheRowsOfALatchedFamilyThatCarriesAMarker(t *testing.T) {
+	t.Parallel()
+	for _, marked := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no marker", true: "marker"}[marked],
+			func(t *testing.T) {
+				t.Parallel()
+				store := newFakeStore(3)
+				store.tables = map[string]*fakeTable{"n": {3}}
+				store.latch = store.latch.With(nodesettings.FamilyNonces)
+				if marked {
+					store.syncState[statedrain.MarkerPrefix+
+						nodesettings.FamilyNonces.String()] = "1"
+				}
+				env := statedrain.Env{
+					Store: store, Set: currentSet(), ChunkRows: 5,
+				}
+				require.NoError(t, statedrain.Run(
+					t.Context(), env, []statedrain.Entry{
+						pairEntry(nodesettings.FamilyNonces, "n"),
+					},
+				))
+				require.True(t, store.latch.Has(nodesettings.FamilyNonces))
+				if marked {
+					require.Zero(t, store.tables["n"].rows)
+					require.Empty(t, store.syncState)
+					return
+				}
+				require.Equal(t, int64(3), store.tables["n"].rows)
+			})
+	}
+}

@@ -913,7 +913,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"LedgerUtxoBadgerOnly",
 		"ledger-utxo-badger-only",
-		"keep the live UTxO set only in Badger, with no utxo rows in the metadata store; core mode, a database synced this way from genesis or a Mithril import (experimental; default off)",
+		"keep the live UTxO set only in Badger, with no utxo rows in the metadata store; core mode; a database that holds its UTxO set in the metadata store is moved in place at startup (experimental; default off)",
 	),
 	boolFlag(
 		"LedgerStateSetOnly",
@@ -924,6 +924,16 @@ var flagSpecs = []flagSpec{
 		"LedgerStateVerifyBeforeDrain",
 		"ledger-state-verify-before-drain",
 		"compare each family with its SQL rows in full before deleting them (default off)",
+	),
+	intFlag(
+		"LedgerUtxoCheckpointEpochs",
+		"ledger-utxo-checkpoint-epochs",
+		"write a checkpoint of the live UTxO set at an epoch boundary every this many epochs, for recovery when its journal cannot bring it to the ledger; 0 writes none; only with --ledger-state-set-only (default 1)",
+	),
+	intFlag(
+		"LedgerUtxoCheckpointKeep",
+		"ledger-utxo-checkpoint-keep",
+		"how many live UTxO set checkpoints to retain (default 2)",
 	),
 	stringFlag(
 		"LedgerUtxoReads",

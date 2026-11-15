@@ -572,34 +572,7 @@ func (b *boundaryStake) pendingCredits(
 	if !b.past {
 		return b.ls.pendingRewardCreditView(b.rr, b.txn, ref.Tag, ref.Key)
 	}
-	rows, err := b.rr.CredentialRewardOutputs(ref.Tag, ref.Key, &slot)
-	if err != nil {
-		return 0, err
-	}
-	var total uint64
-	credited := make(map[uint64]bool)
-	for _, o := range rows {
-		in, seen := credited[o.Epoch]
-		if !seen {
-			round, ok, err := b.rr.RewardRound(o.Epoch, &slot)
-			if err != nil {
-				return 0, err
-			}
-			in = ok && round.BoundarySlot <= slot
-			credited[o.Epoch] = in
-		}
-		if !in {
-			continue
-		}
-		if uint64(o.Amount) > math.MaxUint64-total {
-			return 0, fmt.Errorf(
-				"pending reward credit overflow for %x",
-				ref.Key,
-			)
-		}
-		total += uint64(o.Amount)
-	}
-	return total, nil
+	return pendingRewardCreditAt(b.rr, ref.Tag, ref.Key, slot)
 }
 
 // withdrawnAtBoundary returns the lovelace withdrawn at the boundary slot per

@@ -105,6 +105,15 @@ func (s drainStore) SQLTip(context.Context) (ocommon.Point, error) {
 	return tip.Point, nil
 }
 
+// DeleteUtxoRows deletes up to limit rows of the metadata store's utxo table;
+// its children go with them.
+func (s drainStore) DeleteUtxoRows(
+	ctx context.Context,
+	limit int,
+) (int64, error) {
+	return s.DeleteLedgerStateRows(ctx, "utxo", "id", limit)
+}
+
 func (s drainStore) GetSyncState(
 	_ context.Context,
 	key string,
@@ -120,7 +129,7 @@ func (s drainStore) SetSyncState(
 }
 
 func (s drainStore) DeleteSyncState(_ context.Context, key string) error {
-	return s.Database.DeleteSyncState(key, nil)
+	return s.DeleteFamilySyncState(key)
 }
 
 func (s drainStore) ListSyncStateKeys(

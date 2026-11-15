@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/stretchr/testify/require"
 )
 
@@ -131,4 +132,59 @@ func TestProcessGapBlocksRefusesADrainedDatabase(t *testing.T) {
 	)
 
 	require.ErrorIs(t, err, database.ErrLedgerStateDrained)
+}
+
+// TestSyncTakesADrainedDatabaseWhenTheLiveSetCanLoadIt requires a catch-up
+// into a database with a latch bit to get past the dispatch that refuses it
+// without a live UTxO set, to mark the import pending and to keep the latch.
+func TestSyncTakesADrainedDatabaseWhenTheLiveSetCanLoadIt(t *testing.T) {
+	t.Parallel()
+	fix := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 5})
+	dataDir := t.TempDir()
+	seedCompleteDB(t, dataDir, "core", 0, true)
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.RecordDrainedFamily(
+		t.Context(), nodesettings.FamilyNonces,
+	))
+	require.NoError(t, dbtest.CloseDatabase(db))
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir(), Only: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+
+	_, err = Sync(context.Background(), SyncConfig{
+		Network:           "preprod",
+		DataDir:           dataDir,
+		StorageMode:       "core",
+		Backend:           BackendV2,
+		AggregatorURL:     fix.server.URL,
+		AllowInsecureHTTP: true,
+		StoragePlugins:    testStoragePlugins(),
+		DatabaseWorkers:   1,
+		UtxoSet:           set,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	// The fixture's immutable files are not real blocks, so the run stops
+	// reading them, after the dispatch and before it writes any ledger state.
+	require.Error(t, err)
+	require.NotErrorIs(t, err, database.ErrLedgerStateDrained)
+
+	db, err = dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
+	mask, pending, err := db.DrainedImportPending(t.Context())
+	require.NoError(t, err)
+	require.True(t, pending, "the import is marked before anything is downloaded")
+	require.True(t, mask.Has(nodesettings.FamilyNonces))
+	latch, err := db.DrainedFamilies(t.Context())
+	require.NoError(t, err)
+	require.True(t, latch.Has(nodesettings.FamilyNonces), "the latch is kept")
 }

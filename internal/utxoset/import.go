@@ -28,6 +28,12 @@ func DirFor(dataDir string) string {
 	return badgerutxo.DirFor(dataDir)
 }
 
+// CheckpointDirFor is the directory a node's live UTxO set checkpoints are
+// written to, beside the set.
+func CheckpointDirFor(dataDir string) string {
+	return badgerutxo.DirFor(dataDir) + "-checkpoints"
+}
+
 // LoadUtxoSet replaces the set with the outputs feed puts, as of point. It
 // implements ledgerstate.UtxoSetLoader for a ledger-state import.
 func (s *Set) LoadUtxoSet(

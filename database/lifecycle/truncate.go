@@ -1069,8 +1069,8 @@ func (c truncateConfig) checkUtxoSet(target models.Block) error {
 	}
 	return fmt.Errorf(
 		"target slot %d is below the live UTxO set's journal floor (slot %d, "+
-			"set tip slot %d); the set cannot be rolled back that far and "+
-			"would have to be resynced -- choose a shallower target",
+			"set tip slot %d); the set holds no earlier state to roll back "+
+			"to -- choose a target at or above the floor",
 		target.Slot, floor.Slot, tip.Slot,
 	)
 }
@@ -1094,7 +1094,7 @@ func (c truncateConfig) rollBackUtxoSet(point ocommon.Point) error {
 	if !can {
 		return fmt.Errorf(
 			"live UTxO set at slot %d cannot be rolled back to slot %d; "+
-				"it must be resynced",
+				"its journal does not hold that point",
 			tip.Slot, point.Slot,
 		)
 	}

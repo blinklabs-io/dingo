@@ -367,6 +367,42 @@ func (ls *LedgerState) pendingRewardCreditView(
 	return total, nil
 }
 
+// pendingRewardCreditAt is a credential's total of pending credits as the
+// set stood at slot: the rows a rollback to slot would leave, of the rounds
+// credited by then.
+func pendingRewardCreditAt(
+	r RewardOutputReader,
+	tag uint8,
+	key []byte,
+	slot uint64,
+) (uint64, error) {
+	rows, err := r.CredentialRewardOutputs(tag, key, &slot)
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	credited := make(map[uint64]bool)
+	for _, o := range rows {
+		in, seen := credited[o.Epoch]
+		if !seen {
+			round, ok, err := r.RewardRound(o.Epoch, &slot)
+			if err != nil {
+				return 0, err
+			}
+			in = ok && round.BoundarySlot <= slot
+			credited[o.Epoch] = in
+		}
+		if !in {
+			continue
+		}
+		if uint64(o.Amount) > math.MaxUint64-total {
+			return 0, fmt.Errorf("pending reward credit overflow for %x", key)
+		}
+		total += uint64(o.Amount)
+	}
+	return total, nil
+}
+
 // epochHasRewardOutputLocked reports whether epoch has an output row with st
 // applied over the committed rows.
 func epochHasRewardOutputLocked(

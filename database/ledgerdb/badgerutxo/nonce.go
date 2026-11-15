@@ -249,7 +249,7 @@ func (s *Store) LoadNonces(nonces []Nonce) error {
 	if err := s.dropPrefix([]byte{NonceTag}); err != nil {
 		return fmt.Errorf("badgerutxo: drop nonces: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	for _, n := range nonces {
 		if err := wb.Set(nonceKey(n.Point), encodeNonce(n)); err != nil {

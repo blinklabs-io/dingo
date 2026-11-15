@@ -15,9 +15,11 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -25,6 +27,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledgerstate"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // openUtxoSet opens the live UTxO set when it is enabled. It needs an on-disk
@@ -53,7 +57,7 @@ func (n *Node) openUtxoSet() error {
 		)
 		history = 0
 	}
-	set, err := utxoset.Open(utxoset.Config{
+	cfg := utxoset.Config{
 		Dir:          utxoset.DirFor(n.config.dataDir),
 		Logger:       n.config.logger,
 		Registerer:   n.config.promRegistry,
@@ -61,12 +65,24 @@ func (n *Node) openUtxoSet() error {
 		Only:         n.config.ledgerUtxoBadgerOnly,
 		Authoritative: n.config.ledgerUtxoReads ==
 			ledger.UtxoSetReadsSet,
-	})
+	}
+	// Only a database whose set is the only copy of the ledger state needs
+	// a checkpoint to recover from; one that keeps the SQL rows rebuilds.
+	if n.config.ledgerStateSetOnly {
+		cfg.CheckpointDir = utxoset.CheckpointDirFor(n.config.dataDir)
+		cfg.CheckpointKeep = n.config.ledgerUtxoCheckpointKeep
+	}
+	set, err := utxoset.Open(cfg)
 	if err != nil {
 		return fmt.Errorf("open live UTxO set: %w", err)
 	}
 	n.utxoSet = set
 	n.anchoredUtxoSet.Store(set)
+	n.installLedgerReimport(set)
+	n.db.RegisterDiskSizeSource("utxoset_checkpoint", set.CheckpointBytes)
+	set.SetCheckpointBarrier(func(ctx context.Context) (func(), error) {
+		return n.db.PauseCommitsContext(ctx)
+	})
 	return nil
 }
 
@@ -74,6 +90,12 @@ func (n *Node) openUtxoSet() error {
 // rolling the ledger back to the set's tip when the set trails it. It runs
 // after database recovery and before the ledger starts applying blocks.
 func (n *Node) reconcileUtxoSet(ctx context.Context) error {
+	if err := n.finishDrainedImport(ctx); err != nil {
+		return err
+	}
+	if err := n.migrateUtxoRows(ctx); err != nil {
+		return err
+	}
 	if err := n.checkLedgerStateSetOnly(ctx); err != nil {
 		return err
 	}
@@ -117,17 +139,74 @@ func (n *Node) closeUtxoSet() error {
 	if n.utxoSet == nil {
 		return nil
 	}
-	n.anchoredUtxoSet.Store(nil)
+	n.stopUtxoSetCheckpoint()
 	err := n.utxoSet.Close()
 	n.utxoSet = nil
 	return err
 }
 
+// migrateUtxoRows moves a database that holds its UTxO set in the metadata
+// store into the live UTxO set when ledgerUtxoBadgerOnly is on, or finishes a
+// move an earlier start began. It runs before the mode checks, which find the
+// database marked once it has finished.
+func (n *Node) migrateUtxoRows(ctx context.Context) error {
+	if !n.config.ledgerUtxoBadgerOnly {
+		return nil
+	}
+	marked, err := n.db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	if err != nil {
+		return fmt.Errorf("read UTxO set mode: %w", err)
+	}
+	progress, err := n.db.GetSyncState(utxoset.MigrationSyncKey, nil)
+	if err != nil {
+		return fmt.Errorf("read UTxO set migration progress: %w", err)
+	}
+	if progress == "" {
+		if marked != "" {
+			return nil
+		}
+		tip, err := n.db.GetTip(nil)
+		if err != nil {
+			return fmt.Errorf("read tip: %w", err)
+		}
+		if tip.Point.Slot == 0 && len(tip.Point.Hash) == 0 {
+			return nil
+		}
+	}
+	if n.utxoSet == nil {
+		return errors.New(
+			"ledgerUtxoBadgerOnly needs the live UTxO set to move this database's UTxO set into, and it is not open",
+		)
+	}
+	n.config.logger.Info(
+		"moving the UTxO set from the metadata store into the live UTxO set",
+		"component", "node",
+	)
+	return n.utxoSet.MigrateFromSQL(
+		ctx,
+		dbadapter.New(n.db),
+		utxoset.MigrationEnv{
+			Store: drainStore{n.db},
+			Mark: func(context.Context) error {
+				return n.db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil)
+			},
+			Marked: func(context.Context) (bool, error) {
+				v, err := n.db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+				return v != "", err
+			},
+			FreeBytes: func() (uint64, error) {
+				return utxoset.AvailableDiskBytes(n.config.dataDir)
+			},
+			Logger: n.config.logger,
+		},
+	)
+}
+
 // checkUtxoSetOnly keeps a database in the mode it was synced in. A database
 // synced with the live UTxO set as the only copy has no UTxO set in its
 // metadata store to fall back to, so it refuses to start without
-// ledgerUtxoBadgerOnly; and a database with a metadata UTxO set can be
-// switched to ledgerUtxoBadgerOnly only while it is empty, before any block.
+// ledgerUtxoBadgerOnly. A database with a metadata UTxO set is marked by
+// migrateUtxoRows, which runs first.
 func (n *Node) checkUtxoSetOnly() error {
 	marked, err := n.db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
 	if err != nil {
@@ -146,7 +225,7 @@ func (n *Node) checkUtxoSetOnly() error {
 		}
 		if tip.Point.Slot != 0 || len(tip.Point.Hash) != 0 {
 			return errors.New(
-				"ledgerUtxoBadgerOnly needs a database synced that way from genesis; this one has a metadata UTxO set",
+				"ledgerUtxoBadgerOnly found a metadata UTxO set that was not moved into the live UTxO set",
 			)
 		}
 		if err := n.db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil); err != nil {
@@ -189,10 +268,9 @@ func (n *Node) checkLedgerStateSetOnly(ctx context.Context) error {
 	}
 	if tip.Point.Slot != 0 || len(tip.Point.Hash) != 0 {
 		return errors.New(
-			"ledgerStateSetOnly needs a database synced with " +
-				"ledgerUtxoBadgerOnly from genesis or a Mithril import; " +
-				"this one keeps UTxO rows in the metadata store, so " +
-				"resync it from genesis or a Mithril snapshot",
+			"ledgerStateSetOnly needs the UTxO set moved out of the " +
+				"metadata store first, and this database has not finished " +
+				"that move",
 		)
 	}
 	return nil
@@ -225,6 +303,7 @@ func (n *Node) startUtxoSetAnchorUpdater() {
 		}
 		set.UpdateAnchor(point)
 	}
+	checkpoint := n.utxoSetCheckpointer()
 	go func() {
 		update()
 		ticker := time.NewTicker(utxoSetAnchorInterval)
@@ -235,7 +314,289 @@ func (n *Node) startUtxoSetAnchorUpdater() {
 				return
 			case <-ticker.C:
 				update()
+				checkpoint(ctx)
 			}
 		}
 	}()
+}
+
+// utxoSetCheckpointNearTipSlots is how far behind the wall clock the ledger may
+// be, in slots, for a checkpoint to be written. A node replaying history would
+// otherwise copy the whole set every epoch for the length of the sync, and a
+// checkpoint far below the tip is the one recovery can least use.
+const utxoSetCheckpointNearTipSlots = 43200
+
+// checkpointPolicy decides when a checkpoint of the live UTxO set is written:
+// only while the ledger is near the wall-clock tip, at once when none exists,
+// then every `every` epochs counted from the last one written.
+type checkpointPolicy struct {
+	every   uint64
+	last    uint64
+	started bool
+}
+
+// due reports whether a checkpoint is to be written at epoch, given whether one
+// is on disk and how many slots the ledger is behind the wall clock. A policy
+// that is not due changes nothing, so a node still catching up counts no epoch.
+func (p *checkpointPolicy) due(
+	epoch uint64,
+	haveCheckpoint bool,
+	slotsBehind uint64,
+) bool {
+	if slotsBehind > utxoSetCheckpointNearTipSlots {
+		return false
+	}
+	if !p.started {
+		p.started = true
+		p.last = epoch
+		// A checkpoint from an earlier run counts from now.
+		return !haveCheckpoint
+	}
+	if epoch < p.last+p.every {
+		return false
+	}
+	p.last = epoch
+	return true
+}
+
+// utxoSetCheckpointer returns the function that writes a checkpoint of the live
+// UTxO set when its policy says so. The copy runs on its own goroutine, one at
+// a time, so the anchor updater that calls this is never held for the length of
+// a copy. A failure is logged and retried at the next due epoch: the
+// checkpoint only widens what recovery can use.
+func (n *Node) utxoSetCheckpointer() func(context.Context) {
+	every := n.config.ledgerUtxoCheckpointEpochs
+	if !n.config.ledgerStateSetOnly || every <= 0 {
+		return func(context.Context) {}
+	}
+	policy := checkpointPolicy{every: uint64(every)} // #nosec G115 -- validated non-negative
+	var writing atomic.Bool
+	return func(ctx context.Context) {
+		ls := n.wallClockLedger.Load()
+		set := n.anchoredUtxoSet.Load()
+		if ls == nil || set == nil || writing.Load() {
+			return
+		}
+		cps, err := set.Checkpoints()
+		if err != nil {
+			cps = nil
+		}
+		if !policy.due(ls.CurrentEpoch(), len(cps) > 0, ls.SlotsBehindHead()) {
+			return
+		}
+		if !writing.CompareAndSwap(false, true) {
+			return
+		}
+		if !n.launchUtxoSetCheckpoint(ctx, set, func() { writing.Store(false) }) {
+			writing.Store(false)
+		}
+	}
+}
+
+// launchUtxoSetCheckpoint writes a checkpoint of set on a goroutine the node
+// owns: stopUtxoSetCheckpoint cancels it and waits for it, so the set is never
+// closed under a copy. It reports false, starting nothing, once the set is no
+// longer the one the anchor updater feeds. done runs when the goroutine ends.
+func (n *Node) launchUtxoSetCheckpoint(
+	ctx context.Context,
+	set *utxoset.Set,
+	done func(),
+) bool {
+	n.utxoCkptMu.Lock()
+	defer n.utxoCkptMu.Unlock()
+	if n.anchoredUtxoSet.Load() != set {
+		return false
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	n.utxoCkptCancel = cancel
+	n.utxoCkptWG.Go(func() {
+		defer cancel()
+		defer done()
+		if _, err := set.WriteCheckpoint(ctx); err != nil {
+			n.config.logger.Warn(
+				"could not write a live UTxO set checkpoint",
+				"component", "dingo", "error", err,
+			)
+		}
+	})
+	return true
+}
+
+// stopUtxoSetCheckpoint cancels a running checkpoint copy and waits for it to
+// end. The anchored set is withdrawn first, so none starts afterwards.
+func (n *Node) stopUtxoSetCheckpoint() {
+	n.anchoredUtxoSet.Store(nil)
+	n.utxoCkptMu.Lock()
+	if n.utxoCkptCancel != nil {
+		n.utxoCkptCancel()
+	}
+	n.utxoCkptMu.Unlock()
+	n.utxoCkptWG.Wait()
+}
+
+// finishDrainedImport completes an import of ledger state into the live UTxO
+// set that a crash left after its SQL rows were written and before the set
+// loaded them. An import that is still writing, which leaves sync_status set,
+// is refused: only the Mithril import that began it can finish it.
+func (n *Node) finishDrainedImport(ctx context.Context) error {
+	if resumed, err := n.resumeLedgerReimport(ctx); resumed || err != nil {
+		return err
+	}
+	_, pending, err := n.db.DrainedImportPending(ctx)
+	if err != nil || !pending {
+		return err
+	}
+	status, err := n.db.GetSyncState("sync_status", nil)
+	if err != nil {
+		return fmt.Errorf("read sync status: %w", err)
+	}
+	if status != "" {
+		// An import the node began to recover the set is run again; only
+		// the Mithril command that began any other can finish it.
+		reimport, rerr := n.db.GetSyncState(database.LedgerReimportSyncKey, nil)
+		if rerr != nil {
+			return fmt.Errorf("read re-import mark: %w", rerr)
+		}
+		if reimport == "" || n.utxoSet == nil || !n.utxoSet.CanReimport() {
+			return database.ErrDrainedImportPending
+		}
+		tip, terr := n.db.GetTip(nil)
+		if terr != nil {
+			return fmt.Errorf("read ledger tip: %w", terr)
+		}
+		n.config.logger.Info(
+			"resuming a ledger-state re-import the node began",
+			"component", "dingo",
+		)
+		_, err := n.utxoSet.Reimport(ctx, tip.Point)
+		return err
+	}
+	if n.utxoSet == nil {
+		return errors.New(
+			"an import of ledger state into the live UTxO set is pending and the set is not open",
+		)
+	}
+	n.config.logger.Info(
+		"finishing an import of ledger state into the live UTxO set",
+		"component", "dingo",
+	)
+	return ledgerstate.FinishDrainedImport(ctx, n.db, n.utxoSet)
+}
+
+// resumeLedgerReimport finishes a ledger-state re-import the node began and
+// did not finish, from where it stopped. The run's marks stay set until it has
+// swapped the imported set in and recorded the Mithril anchor, so they, not the
+// import's own marker, say that something is left: a set that holds the
+// imported state, which the swap mark names, needs only the anchor and the
+// marks cleared, and anything earlier runs the import again from a full pass
+// over the snapshot. A set at the ledger's tip without the swap mark is not
+// taken for the imported one.
+func (n *Node) resumeLedgerReimport(ctx context.Context) (bool, error) {
+	if n.utxoSet == nil || !n.utxoSet.CanReimport() ||
+		n.finishLedgerReimport == nil {
+		return false, nil
+	}
+	status, err := n.db.GetSyncState("sync_status", nil)
+	if err != nil {
+		return false, fmt.Errorf("read sync status: %w", err)
+	}
+	reimport, err := n.db.GetSyncState(database.LedgerReimportSyncKey, nil)
+	if err != nil {
+		return false, fmt.Errorf("read re-import mark: %w", err)
+	}
+	if status == "" || reimport == "" {
+		return false, nil
+	}
+	if err := n.utxoSet.FinishRestore(ctx); err != nil {
+		return true, err
+	}
+	tip, err := n.db.GetTip(nil)
+	if err != nil {
+		return true, fmt.Errorf("read ledger tip: %w", err)
+	}
+	_, pending, err := n.db.DrainedImportPending(ctx)
+	if err != nil {
+		return true, err
+	}
+	setTip, ok, err := n.utxoSet.Tip()
+	if err != nil {
+		return true, fmt.Errorf("read live UTxO set tip: %w", err)
+	}
+	swapped, err := n.db.GetSyncState(database.LedgerReimportSwappedSyncKey, nil)
+	if err != nil {
+		return true, fmt.Errorf("read re-import swap mark: %w", err)
+	}
+	if !pending && ok && setTip.Slot == tip.Point.Slot &&
+		bytes.Equal(setTip.Hash, tip.Point.Hash) &&
+		swapped == database.LedgerReimportPointMark(tip.Point) {
+		n.config.logger.Info(
+			"finishing a ledger-state re-import whose set swap completed",
+			"component", "dingo", "slot", tip.Point.Slot,
+		)
+		return true, n.finishLedgerReimport(ctx, tip.Point)
+	}
+	n.config.logger.Info(
+		"resuming a ledger-state re-import the node began",
+		"component", "dingo",
+	)
+	_, err = n.utxoSet.Reimport(ctx, tip.Point)
+	return true, err
+}
+
+// installLedgerReimport gives the set the Mithril re-import it falls back to
+// when no checkpoint brings it to the ledger. It is installed only for a
+// database whose set is the only copy of the ledger state.
+func (n *Node) installLedgerReimport(set *utxoset.Set) {
+	factory := n.config.mithrilLedgerReimport
+	if factory == nil || !n.config.ledgerStateSetOnly {
+		return
+	}
+	storageMode := n.config.storageMode
+	if storageMode == "" {
+		storageMode = StorageModeCore
+	}
+	re, err := factory(MithrilCatchUpParams{
+		Mithril:           n.config.cfg.Mithril,
+		StorageMode:       storageMode,
+		CardanoNodeConfig: n.config.cardanoNodeConfig,
+		Network:           n.config.network,
+		NetworkMagic:      n.config.networkMagic,
+		DataDir:           n.config.dataDir,
+		Logger:            n.config.logger,
+		PromRegistry:      n.retainedComponentPromRegistry(),
+	})
+	if err != nil {
+		n.config.logger.Warn(
+			"no Mithril source for recovering the live UTxO set",
+			"component", "dingo", "error", err,
+		)
+		return
+	}
+	if re == nil {
+		return
+	}
+	n.finishLedgerReimport = func(ctx context.Context, point ocommon.Point) error {
+		return re.FinishLedgerReimport(ctx, n.db, point)
+	}
+	set.SetScratchReimporter(func(
+		ctx context.Context,
+		localTip ocommon.Point,
+		target utxoset.ReimportTarget,
+	) (ocommon.Point, error) {
+		ls := n.ledgerState
+		if ls == nil {
+			return ocommon.Point{}, errors.New("the ledger is not available")
+		}
+		return re.ReimportLedgerState(ctx, LedgerReimportParams{
+			DB:       n.db,
+			UtxoSet:  target.Set,
+			Commit:   target.Commit,
+			LocalTip: localTip,
+			OnChain:  ls.ChainContainsPoint,
+			EpochOf: func(slot uint64) (uint64, error) {
+				e, err := ls.SlotToEpoch(slot)
+				return e.EpochId, err
+			},
+		})
+	})
 }

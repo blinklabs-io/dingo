@@ -1714,15 +1714,22 @@ SELECT drep_type, MIN(slot) AS slot FROM (
 func (s *Store) DeactivateDreps(
 	txn types.Txn,
 	credentials []models.StakeCredentialRef,
+	slot uint64,
 ) error {
 	if len(credentials) == 0 {
 		return nil
+	}
+	removedSlot, err := checkedInt64(slot)
+	if err != nil {
+		return err
 	}
 	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("DeactivateDreps: resolve db: %w", err)
 	}
-	chunkSize := s.dialect.ParameterLimit() / 2
+	// The delegator statement binds the removal slot beside two parameters per
+	// DRep.
+	chunkSize := max(1, (s.dialect.ParameterLimit()-1)/2)
 	for start := 0; start < len(credentials); start += chunkSize {
 		end := min(start+chunkSize, len(credentials))
 		predicates := make([]string, 0, end-start)
@@ -1743,8 +1750,27 @@ func (s *Store) DeactivateDreps(
 		); err != nil {
 			return fmt.Errorf("deactivate dreps: %w", err)
 		}
+		// An inactive DRep holds no delegators, as after a deregistration.
+		query = "UPDATE drep_delegator SET removed_slot = ? WHERE removed_slot IS NULL AND (" +
+			strings.Join(delegatorPredicates(end-start), " OR ") + ")"
+		linkArgs := append([]any{removedSlot}, args...)
+		if _, err := db.ExecContext(
+			ctx,
+			s.dialect.Rebind(query),
+			linkArgs...,
+		); err != nil {
+			return fmt.Errorf("remove delegators of deactivated dreps: %w", err)
+		}
 	}
 	return nil
+}
+
+func delegatorPredicates(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = "(drep_credential_tag = ? AND drep_credential = ?)"
+	}
+	return out
 }
 
 func (s *Store) ClearDanglingDRepDelegations(

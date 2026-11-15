@@ -287,7 +287,7 @@ func (s *Store) LoadRewardOutputs(feed func(put func(k, v []byte) error) error) 
 	); err != nil {
 		return fmt.Errorf("badgerutxo: drop reward rows: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 || (k[0] != RewardOutputTag && k[0] != RewardEpochTag &&

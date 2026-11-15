@@ -386,7 +386,7 @@ func (ls *LedgerState) failUtxoSet(
 	}
 	if ls.config.FatalErrorFunc != nil {
 		ls.config.FatalErrorFunc(fmt.Errorf(
-			"live UTxO set stopped following the ledger; restart to resume it or resync: %w",
+			"live UTxO set stopped following the ledger; the next start resumes it: %w",
 			err,
 		))
 	}
@@ -688,6 +688,22 @@ func (ls *LedgerState) applyUtxoSetLocked(batch *utxoSetBatch) *UtxoEvent {
 	return rolledBack
 }
 
+type resumeCheckKey struct{}
+
+// WithResumeCheck returns a context under which ResumeUtxoSetFrom only
+// reports whether it would roll back to the point, changing nothing. The
+// rollback reads the live set, so a caller that has to keep its current set
+// until the ledger agrees asks this way first.
+func WithResumeCheck(ctx context.Context) context.Context {
+	return context.WithValue(ctx, resumeCheckKey{}, true)
+}
+
+// ResumeCheckOnly reports whether ctx came from WithResumeCheck.
+func ResumeCheckOnly(ctx context.Context) bool {
+	v, _ := ctx.Value(resumeCheckKey{}).(bool)
+	return v
+}
+
 // ResumeUtxoSetFrom rolls the ledger back to point, the tip of a live UTxO
 // set that trails the ledger, so every block after it is applied again and
 // reaches the set. The set equals the ledger's live set as of point, and the
@@ -734,6 +750,9 @@ func (ls *LedgerState) ResumeUtxoSetFrom(
 	}
 	if below {
 		return false, nil
+	}
+	if ResumeCheckOnly(ctx) {
+		return true, nil
 	}
 	ls.resumingUtxoSet.Store(true)
 	defer ls.resumingUtxoSet.Store(false)
@@ -1716,4 +1735,14 @@ func (ls *LedgerState) utxoExists(
 	}
 	_, live, err := ls.utxoSetGet(r, nil, txID, index)
 	return live, err
+}
+
+// ChainContainsPoint reports whether point is a block on the primary chain, as
+// opposed to a fork the blob store retains. The point at origin is on every
+// chain.
+func (ls *LedgerState) ChainContainsPoint(
+	ctx context.Context,
+	point ocommon.Point,
+) (bool, error) {
+	return ls.primaryChainContainsPoint(ctx, point)
 }

@@ -260,6 +260,7 @@ type Config struct {
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
 	mithrilCatchUp                                                                      MithrilCatchUpFactory
+	mithrilLedgerReimport                                                               MithrilLedgerReimportFactory
 	koiosParity                                                                         KoiosParityConfig
 	corsAllowedOrigins                                                                  []string
 	networkMagic                                                                        uint32
@@ -313,6 +314,7 @@ type Config struct {
 	ledgerUtxoReads                                                                     string
 	ledgerUtxoBadgerOnly                                                                bool
 	ledgerStateSetOnly                                                                  bool
+	ledgerUtxoCheckpointEpochs, ledgerUtxoCheckpointKeep                                int
 	ledgerStateVerifyBeforeDrain                                                        bool
 	ledgerValidateAheadEnabled                                                          bool
 	ledgerApplyRowBatchingEnabled                                                       bool
@@ -850,6 +852,8 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			// reads and signature checks with earlier blocks of its chunk.
 			LedgerPrefetchAheadEnabled: true,
 			LedgerValidateAheadEnabled: true,
+			LedgerUtxoCheckpointEpochs: 1,
+			LedgerUtxoCheckpointKeep:   2,
 			Plugins: internalconfig.PluginsConfig{
 				Consensus: hostplugin.Selection{
 					Provider: "praos",
@@ -1075,6 +1079,8 @@ func (c *Config) syncCompatFields() {
 	c.ledgerUtxoReads = c.cfg.LedgerUtxoReads
 	c.ledgerUtxoBadgerOnly = c.cfg.LedgerUtxoBadgerOnly
 	c.ledgerStateSetOnly = c.cfg.LedgerStateSetOnly
+	c.ledgerUtxoCheckpointEpochs = c.cfg.LedgerUtxoCheckpointEpochs
+	c.ledgerUtxoCheckpointKeep = c.cfg.LedgerUtxoCheckpointKeep
 	c.ledgerStateVerifyBeforeDrain = c.cfg.LedgerStateVerifyBeforeDrain
 	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
@@ -2141,8 +2147,9 @@ func WithLedgerUtxoReads(mode string) ConfigOptionFunc {
 }
 
 // WithLedgerUtxoBadgerOnly makes the Badger live UTxO set the only copy of
-// the UTxO set: the metadata store keeps no utxo rows. Core storage mode, on
-// a database synced this way from genesis. Experimental; off by default.
+// the UTxO set: the metadata store keeps no utxo rows. Core storage mode. A
+// database that holds its UTxO set in the metadata store is moved in place at
+// startup. Experimental; off by default.
 func WithLedgerUtxoBadgerOnly(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerUtxoBadgerOnly = enabled
@@ -2155,6 +2162,16 @@ func WithLedgerUtxoBadgerOnly(enabled bool) ConfigOptionFunc {
 func WithLedgerStateSetOnly(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerStateSetOnly = enabled
+	}
+}
+
+// WithLedgerUtxoCheckpoint writes a checkpoint of the live UTxO set every
+// epochs epochs and keeps the newest keep of them; zero epochs writes none.
+// Only a database with WithLedgerStateSetOnly writes checkpoints.
+func WithLedgerUtxoCheckpoint(epochs, keep int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoCheckpointEpochs = epochs
+		c.cfg.LedgerUtxoCheckpointKeep = keep
 	}
 }
 
@@ -2337,6 +2354,16 @@ func WithMithrilConfig(cfg internalconfig.MithrilConfig) ConfigOptionFunc {
 func WithMithrilCatchUp(factory MithrilCatchUpFactory) ConfigOptionFunc {
 	return func(c *Config) {
 		c.mithrilCatchUp = factory
+	}
+}
+
+// WithMithrilLedgerReimport supplies the Mithril re-import a node falls back
+// to when its live UTxO set cannot be brought to the ledger from a checkpoint.
+// It is independent of mithril.enabled: the network's aggregator is used. A
+// nil reimporter from the factory leaves that recovery without a source.
+func WithMithrilLedgerReimport(factory MithrilLedgerReimportFactory) ConfigOptionFunc {
+	return func(c *Config) {
+		c.mithrilLedgerReimport = factory
 	}
 }
 
@@ -3204,6 +3231,18 @@ func (c *Config) LedgerUtxoBadgerOnly() bool {
 // the ledger state it computes.
 func (c *Config) LedgerStateSetOnly() bool {
 	return c.cfg.LedgerStateSetOnly
+}
+
+// LedgerUtxoCheckpointEpochs returns how many epochs pass between live UTxO
+// set checkpoints; zero writes none.
+func (c *Config) LedgerUtxoCheckpointEpochs() int {
+	return c.cfg.LedgerUtxoCheckpointEpochs
+}
+
+// LedgerUtxoCheckpointKeep returns how many live UTxO set checkpoints are
+// retained.
+func (c *Config) LedgerUtxoCheckpointKeep() int {
+	return c.cfg.LedgerUtxoCheckpointKeep
 }
 
 // LedgerStateVerifyBeforeDrain returns whether each family is compared with

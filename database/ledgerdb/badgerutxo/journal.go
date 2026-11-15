@@ -945,6 +945,9 @@ func (s *Store) AsOf(point ocommon.Point) (*AsOf, error) {
 
 // asOfIn builds the view of point over txn, which the view then owns.
 func asOfIn(txn *badger.Txn, point ocommon.Point) (*AsOf, error) {
+	if err := checkBootstrapComplete(txn); err != nil {
+		return nil, err
+	}
 	res, err := previewIn(txn, point)
 	if err != nil {
 		return nil, err

@@ -135,7 +135,7 @@ func (s *Store) LoadRewardDerived(
 	); err != nil {
 		return fmt.Errorf("badgerutxo: drop derived reward rows: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 ||
@@ -143,7 +143,7 @@ func (s *Store) LoadRewardDerived(
 			return fmt.Errorf("badgerutxo: %x is not a derived reward key", k)
 		}
 		return wb.Set(k, v)
-	}, loadTombstone(wb, []byte{RewardDerivedTag, RewardCursorTag}))
+	}, wb.tombstoneFor([]byte{RewardDerivedTag, RewardCursorTag}))
 	if err != nil {
 		return fmt.Errorf("badgerutxo: load derived reward rows: %w", err)
 	}

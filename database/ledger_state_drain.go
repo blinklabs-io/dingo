@@ -38,6 +38,9 @@ var ErrCannotDrain = errors.New(
 // rollback paths do not read the gate table per call.
 type drainedMask struct {
 	v atomic.Uint64
+	// suspended is set while an import writes the SQL rows of drained
+	// families again; see BeginDrainedImport.
+	suspended atomic.Bool
 }
 
 // DrainedFamilies returns the latch: the families whose drain finished. A
@@ -105,7 +108,15 @@ type liveStakeDrainSetter interface {
 // publishDrained caches mask and tells the metadata store which of its tables
 // it must no longer maintain.
 func (d *Database) publishDrained(mask nodesettings.FamilyMask) {
+	if d.drained.suspended.Load() {
+		mask = 0
+	}
 	d.drained.v.Store(uint64(mask))
+	if mask == 0 {
+		if r, ok := d.Metadata().(metadata.DrainedFamilyResetter); ok {
+			r.ResetDrainedFamilies()
+		}
+	}
 	if aware, ok := d.Metadata().(metadata.DrainedFamilyAware); ok {
 		aware.SetDrainedFamilies(mask)
 	}
@@ -272,8 +283,8 @@ func (d *Database) deleteBlockNoncesAfterPointUnlessDrained(
 // ledger state of a database that has begun or finished draining a family.
 var ErrLedgerStateDrained = errors.New(
 	"this database has begun or finished draining ledger-state families, " +
-		"so its SQL ledger state cannot be rewritten; resync into an empty " +
-		"data directory",
+		"so its SQL ledger state cannot be rewritten by an import that has " +
+		"no live UTxO set to load them into",
 )
 
 // RefuseLedgerStateRewrite returns an error wrapping ErrLedgerStateDrained
@@ -282,6 +293,9 @@ var ErrLedgerStateDrained = errors.New(
 // reappear beside a set that no longer matches them, and a marker cleared
 // mid-drain would let the gate run again over partly deleted rows.
 func (d *Database) RefuseLedgerStateRewrite(ctx context.Context) error {
+	if d.drained.suspended.Load() {
+		return nil
+	}
 	mask, err := d.DrainedFamilies(ctx)
 	if err != nil {
 		return err

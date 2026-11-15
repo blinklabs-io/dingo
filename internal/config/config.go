@@ -933,9 +933,9 @@ type Config struct {
 	// "set" for the live UTxO set (experimental).
 	LedgerUtxoReads string `yaml:"ledgerUtxoReads"               envconfig:"DINGO_LEDGER_UTXO_READS"`
 	// LedgerUtxoBadgerOnly makes the Badger live UTxO set the only copy of
-	// the UTxO set, with no utxo rows in the metadata store (core mode, a
-	// database synced this way from genesis or a Mithril import;
-	// experimental; default off).
+	// the UTxO set, with no utxo rows in the metadata store (core mode; a
+	// database that holds its UTxO set in the metadata store is moved in
+	// place at startup; experimental; default off).
 	LedgerUtxoBadgerOnly bool `yaml:"ledgerUtxoBadgerOnly"          envconfig:"DINGO_LEDGER_UTXO_BADGER_ONLY"`
 	// LedgerStateSetOnly makes the live UTxO set the only store of the
 	// ledger state it computes: families proven current in it have their
@@ -946,6 +946,14 @@ type Config struct {
 	// LedgerStateVerifyBeforeDrain compares each family the set is about to
 	// replace with its SQL rows in full before deleting them (default off).
 	LedgerStateVerifyBeforeDrain bool `yaml:"ledgerStateVerifyBeforeDrain"  envconfig:"DINGO_LEDGER_STATE_VERIFY_BEFORE_DRAIN"`
+	// LedgerUtxoCheckpointEpochs writes a checkpoint of the live UTxO set at
+	// the first epoch boundary after this many epochs since the last one, for
+	// recovery when the set's journal cannot bring it to the ledger. Zero
+	// writes none. Only a database with LedgerStateSetOnly writes
+	// checkpoints, since only there the set is the only copy of the state.
+	LedgerUtxoCheckpointEpochs int `yaml:"ledgerUtxoCheckpointEpochs"    envconfig:"DINGO_LEDGER_UTXO_CHECKPOINT_EPOCHS"`
+	// LedgerUtxoCheckpointKeep is how many checkpoints are retained.
+	LedgerUtxoCheckpointKeep int `yaml:"ledgerUtxoCheckpointKeep"      envconfig:"DINGO_LEDGER_UTXO_CHECKPOINT_KEEP"`
 	// LedgerValidateAheadEnabled verifies the witness signatures of the
 	// validated blocks of a block-apply chunk on worker goroutines while
 	// earlier blocks of the chunk apply. Not consensus-affecting; on by
@@ -1800,6 +1808,10 @@ func newDefaultConfig() *Config {
 		// blocks of its chunk. Neither changes a verdict or stored state.
 		LedgerPrefetchAheadEnabled: true,
 		LedgerValidateAheadEnabled: true,
+		// A set-only database checkpoints its live UTxO set once an epoch
+		// and keeps the last two.
+		LedgerUtxoCheckpointEpochs: 1,
+		LedgerUtxoCheckpointKeep:   2,
 	}
 }
 

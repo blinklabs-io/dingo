@@ -132,6 +132,10 @@ type Database struct {
 
 	cborCache       *TieredCborCache
 	sizeMetricsStop chan struct{}
+	// extraDiskSizes are disk figures other components report under
+	// dingo_database_size_bytes; see RegisterDiskSizeSource.
+	extraDiskMu     sync.Mutex
+	extraDiskSizes  map[string]*extraDiskSize
 	sizeMetricsDone chan struct{}
 	closeOnce       sync.Once
 	closeErr        error
@@ -666,6 +670,7 @@ func New(
 							metadataSizeGauge.Set(float64(size))
 						}
 					}
+					db.sampleExtraDiskSizes()
 				}
 			}
 		}()

@@ -236,6 +236,7 @@ func updateMithrilReadyState(
 					key == metadata.PlannerStatsBackfillSyncKey ||
 					key == nodeconsensus.DatabaseIdentitySyncKey ||
 					key == database.UtxoSetOnlySyncKey ||
+					key == database.DrainedImportSyncKey ||
 					strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
 					continue
 				}
@@ -437,8 +438,8 @@ func selectLedgerStateSnapshot(
 
 	return nil, "", nil, false, fmt.Errorf(
 		"no ledger state at or before certified ImmutableDB tip slot %d; "+
-			"refusing to trust a volatile ancillary ledger state",
-		maxTrustedSlot,
+			"refusing to trust a volatile ancillary ledger state: %w",
+		maxTrustedSlot, ledgerstate.ErrNoUsableLedgerState,
 	)
 }
 

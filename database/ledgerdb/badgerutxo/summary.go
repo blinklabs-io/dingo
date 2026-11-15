@@ -100,7 +100,7 @@ func (s *Store) LoadSummaries(rows []SummaryRow) error {
 	if err := s.dropPrefix([]byte{SummaryTag}); err != nil {
 		return fmt.Errorf("badgerutxo: drop epoch summaries: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	for _, r := range rows {
 		if err := wb.Set(summaryRowKey(r.Epoch), r.Value); err != nil {

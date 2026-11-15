@@ -25,6 +25,13 @@ import (
 // ErrSnapshotReleased is returned by a read of a snapshot after Release.
 var ErrSnapshotReleased = errors.New("badgerutxo: snapshot released")
 
+// ErrBootstrapIncomplete reports a store whose bootstrap did not finish: its
+// contents are part written and no count, tip or format says otherwise. Only a
+// new Bootstrap, or Reset, clears it.
+var ErrBootstrapIncomplete = errors.New(
+	"badgerutxo: a bootstrap of the set did not finish, so its contents are partial",
+)
+
 // ErrSnapshotReadOnly is returned by a write through a snapshot.
 var ErrSnapshotReadOnly = errors.New("badgerutxo: snapshot is read-only")
 
@@ -83,6 +90,10 @@ func (s *Store) Snapshot() (*Store, error) {
 		return nil, ErrSnapshotReadOnly
 	}
 	sn := &snapshot{txn: s.beginRead()}
+	if err := checkBootstrapComplete(sn.txn); err != nil {
+		sn.txn.Discard()
+		return nil, err
+	}
 	sn.idle = sync.NewCond(&sn.mu)
 	return &Store{db: s.db, agg: s.agg, snap: sn}, nil
 }
@@ -90,9 +101,23 @@ func (s *Store) Snapshot() (*Store, error) {
 // view runs fn on the snapshot's transaction, or on a fresh read
 // transaction of the database.
 func (s *Store) view(fn func(txn *badger.Txn) error) error {
+	return s.viewMode(true, fn)
+}
+
+// viewRaw is view without the bootstrap check, for the reads that report it.
+func (s *Store) viewRaw(fn func(txn *badger.Txn) error) error {
+	return s.viewMode(false, fn)
+}
+
+func (s *Store) viewMode(guard bool, fn func(txn *badger.Txn) error) error {
 	if s.snap == nil {
 		txn := s.beginRead()
 		defer txn.Discard()
+		if guard {
+			if err := checkBootstrapComplete(txn); err != nil {
+				return err
+			}
+		}
 		return fn(txn)
 	}
 	txn, err := s.snap.acquire()
@@ -125,10 +150,46 @@ func (s *Store) update(fn func(txn *badger.Txn) error) error {
 	if s.snap != nil {
 		return ErrSnapshotReadOnly
 	}
+	return s.db.Update(func(txn *badger.Txn) error {
+		if err := checkBootstrapComplete(txn); err != nil {
+			return err
+		}
+		return fn(txn)
+	})
+}
+
+// updateRaw is update without the bootstrap check, for Bootstrap itself.
+func (s *Store) updateRaw(fn func(txn *badger.Txn) error) error {
+	if s.snap != nil {
+		return ErrSnapshotReadOnly
+	}
 	return s.db.Update(fn)
 }
 
+func checkBootstrapComplete(txn *badger.Txn) error {
+	_, err := txn.Get(bootstrapKey)
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return ErrBootstrapIncomplete
+}
+
+// BootstrapIncomplete reports whether a bootstrap began and did not finish.
+func (s *Store) BootstrapIncomplete() (bool, error) {
+	err := s.viewRaw(checkBootstrapComplete)
+	if errors.Is(err, ErrBootstrapIncomplete) {
+		return true, nil
+	}
+	return false, err
+}
+
 func (s *Store) dropPrefix(prefixes ...[]byte) error {
+	if s.merging.Load() {
+		return s.dropWindowed(prefixes)
+	}
 	if drained := nodesettings.FamilyMask(s.loadsRefused.Load()); drained != 0 {
 		var held bool
 		err := s.view(func(txn *badger.Txn) error {

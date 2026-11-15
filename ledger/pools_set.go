@@ -46,6 +46,24 @@ type PoolChange struct {
 	Delete bool
 }
 
+// PoolRegistrationSupersedes reports whether latest was registered after
+// effective, ranked by (AddedSlot, CertificateID, RegistrationIndex). A
+// snapshot stages a pending re-registration beside the parameters in force at
+// the same slot, so the slot alone cannot order them. Both rows must still
+// carry the identifiers CleanPoolRegistration drops.
+func PoolRegistrationSupersedes(latest, effective *models.PoolRegistration) bool {
+	if latest == nil || effective == nil {
+		return false
+	}
+	if latest.AddedSlot != effective.AddedSlot {
+		return latest.AddedSlot > effective.AddedSlot
+	}
+	if latest.CertificateID != effective.CertificateID {
+		return latest.CertificateID > effective.CertificateID
+	}
+	return latest.RegistrationIndex > effective.RegistrationIndex
+}
+
 // CleanPoolRegistration copies r without the metadata store's row IDs,
 // deposit and Leios registration-epoch bookkeeping, which the set does not
 // keep with the registration.

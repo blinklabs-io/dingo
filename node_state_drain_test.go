@@ -294,8 +294,8 @@ func TestLedgerStateSetOnlyNeedsAFreshOrMarkedDatabase(t *testing.T) {
 	synced := newDrainDatabase(t, t.TempDir())
 	require.NoError(t, synced.SetTip(tipAt10, nil))
 	err := node(synced, true).checkLedgerStateSetOnly(ctx)
-	require.ErrorContains(t, err, "ledgerStateSetOnly needs a database synced")
-	require.ErrorContains(t, err, "resync")
+	require.ErrorContains(t, err, "ledgerStateSetOnly needs the UTxO set moved")
+	require.NotContains(t, err.Error(), "resync")
 	require.NoError(
 		t,
 		node(synced, false).checkLedgerStateSetOnly(ctx),
@@ -316,10 +316,10 @@ func TestLedgerStateSetOnlyNeedsAFreshOrMarkedDatabase(t *testing.T) {
 		"a database already synced set-only may take the switch",
 	)
 
-	// reconcileUtxoSet runs the check before the UTxO mode check, whose own
-	// message would otherwise answer first.
+	// reconcileUtxoSet starts with the move of the UTxO set, which needs the
+	// live UTxO set this node does not have.
 	err = node(synced, true).reconcileUtxoSet(ctx)
-	require.ErrorContains(t, err, "ledgerStateSetOnly needs a database synced")
+	require.ErrorContains(t, err, "needs the live UTxO set")
 }
 
 func TestADrainedDatabaseRefusesToStartWithoutTheSwitch(t *testing.T) {

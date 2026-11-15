@@ -461,6 +461,20 @@ type UtxoSetLoader interface {
 	) error
 }
 
+// CatchUpLoader is a live UTxO set that keeps the ledger-state families it
+// holds when a catch-up replaces its outputs, so a catch-up into a set that is
+// the only copy of the ledger state keeps the history older than the snapshot,
+// as a catch-up into SQL rows does.
+type CatchUpLoader interface {
+	UtxoSetLoader
+	// LoadUtxoSetCatchUp replaces the outputs with the ones feed puts, as of
+	// point, keeping the families.
+	LoadUtxoSetCatchUp(
+		point ocommon.Point,
+		feed func(put func(txID []byte, index uint32, cbor []byte) error) error,
+	) error
+}
+
 type deferredRewardLiveStakeImporter interface {
 	ImportUtxosDeferredRewardLiveStakeRefresh([]models.Utxo, types.Txn) error
 }
@@ -607,8 +621,22 @@ func ImportLedgerState(
 	if cfg.Database == nil {
 		return errors.New("database is nil")
 	}
-	if err := cfg.Database.RefuseLedgerStateRewrite(ctx); err != nil {
+	drainedImport, finishDrained, err := beginDrainedImport(ctx, cfg)
+	if err != nil {
 		return err
+	}
+	if !drainedImport {
+		if err := cfg.Database.RefuseLedgerStateRewrite(ctx); err != nil {
+			return err
+		}
+	}
+	importDone := false
+	if finishDrained {
+		defer func() {
+			if !importDone {
+				cfg.Database.EndDrainedImport(ctx)
+			}
+		}()
 	}
 	// A database whose ledger keeps the UTxO set only in its live UTxO set
 	// would get a metadata UTxO set its ledger never reads.
@@ -621,7 +649,10 @@ func ImportLedgerState(
 			"this database keeps its UTxO set only in the live UTxO set; import it with that set",
 		)
 	}
-	if cfg.UtxoSet != nil && cfg.Reconcile {
+	// A set that also holds the ledger-state families takes the catch-up: it
+	// replaces the whole set with the snapshot's outputs.
+	_, familyLoader := cfg.UtxoSet.(FamilyLoader)
+	if cfg.UtxoSet != nil && cfg.Reconcile && !familyLoader {
 		return errors.New(
 			"a catch-up import into a live-UTxO-set-only database is not supported",
 		)
@@ -636,6 +667,18 @@ func ImportLedgerState(
 		return fmt.Errorf("validating imported era history: %w", err)
 	}
 	slot := cfg.State.Tip.Slot
+	if drainedImport {
+		if reset, err := cfg.Database.PinDrainedImportPoint(
+			ctx, ocommon.Point{Slot: slot, Hash: cfg.State.Tip.BlockHash},
+		); err != nil {
+			return err
+		} else if reset {
+			cfg.Logger.Warn(
+				"a pending import of another snapshot left rows in the drained families; emptied them before importing",
+				"component", "ledgerstate", "slot", slot,
+			)
+		}
+	}
 	if cfg.Reconcile {
 		if err := validateReconcileImportConfig(cfg); err != nil {
 			return err
@@ -643,6 +686,13 @@ func ImportLedgerState(
 		// Accumulate the snapshot's live keys as the import phases run, so the
 		// post-import reconcile can mark every absent live row inactive.
 		cfg.reconcileKeys = newReconcileKeys()
+		if drainedImport {
+			mask, _, err := cfg.Database.DrainedImportPending(ctx)
+			if err != nil {
+				return err
+			}
+			cfg.reconcileKeys.drained = mask
+		}
 	}
 
 	progress := func(p ImportProgress) {
@@ -1166,6 +1216,10 @@ func ImportLedgerState(
 		"slot", slot,
 	)
 
+	if finishDrained {
+		importDone = true
+		return FinishDrainedImport(ctx, cfg.Database, cfg.UtxoSet)
+	}
 	return nil
 }
 
@@ -1678,7 +1732,11 @@ func loadUtxoSet(
 		Hash: cfg.State.Tip.BlockHash,
 	}
 	total := 0
-	if err := cfg.UtxoSet.LoadUtxoSet(point,
+	load := cfg.UtxoSet.LoadUtxoSet
+	if cl, ok := cfg.UtxoSet.(CatchUpLoader); ok && cfg.Reconcile {
+		load = cl.LoadUtxoSetCatchUp
+	}
+	if err := load(point,
 		func(put func([]byte, uint32, []byte) error) error {
 			return parseImportUTxOs(cfg, func(batch []ParsedUTxO) error {
 				if err := ctx.Err(); err != nil {

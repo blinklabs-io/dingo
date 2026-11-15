@@ -3475,9 +3475,14 @@ validation reads of the set report it unavailable. Under `verify` or reads
 off the set only stops following the ledger and reads fall back to the
 metadata store. `utxoset.Set.Reconcile` rewinds a marked set from its journal
 and resumes the ledger from there, rolls a set that is ahead of the ledger tip
-back to the tip when the journal holds it, and otherwise stops a set that is
-the only copy with a resync error. After any family is drained it never
-rebuilds from SQL: it resumes by replaying blocks or stops with a resync error. `database/lifecycle` snapshots, restores and
+back to the tip when the journal holds it, and otherwise, for a set the
+metadata store cannot rebuild, walks the journal's restorable points newest
+first (`recoverFromJournal`), rolling the set back to each and asking the
+ledger to resume from it, until the ledger accepts one. When no point is
+accepted it stops with an error naming the journal floor. After any family is
+drained it never rebuilds from SQL. An existing database that holds its UTxO
+set in the metadata store is moved into the set at startup
+(`utxoset.Set.MigrateFromSQL`). `database/lifecycle` snapshots, restores and
 truncates the set with the databases (`WithUtxoSetBackup`,
 `WithTruncateUtxoSet`), and the live node closes the set around a restore or
 truncate and reopens it before the rebuilt ledger is built. See the live UTxO
@@ -3546,6 +3551,24 @@ rows carry no journal entry of their own (`RowPut.TombstonePrefix`,
 rollback also increments the durable `mrbseq` counter in its own transaction
 (`Store.RollbackSeq`), which a reader that cached a value derived from state a
 rollback can change compares to learn that one has run.
+
+A Mithril import or catch-up into a database with drained families runs when
+the live UTxO set is a `ledgerstate.FamilyLoader`: `Database.BeginDrainedImport`
+makes the database report no family drained and writes the
+`ledger.state_import.drained` marker, the import writes the SQL rows as for any
+database, and `ledgerstate.FinishDrainedImport` loads every family into the set
+through `Set.LoadLedgerState`, marks the families for deletion and deletes the
+SQL rows again, keeping the latch. `Node.finishDrainedImport` completes or
+resumes one at startup. When the journal cannot bring the set to the ledger,
+`Set.recoverUnreachable` restores the newest checkpoint at or below the
+ledger's tip (`Set.WriteCheckpoint`, written at epoch boundaries by the anchor
+goroutine under `Database.PauseCommitsContext`) and has the ledger roll back to
+it, and otherwise re-imports a signed ledger state from the network's Mithril
+aggregator through the factory `dingo.WithMithrilLedgerReimport` supplies
+(`nodemithril.NewReimporter`, `mithril.ReimportLedgerState`); the ledger
+replays the blocks it stores in both. Neither source missing ends in the
+journal's error with the missing source named. See DATABASE.md, "Checkpoints
+and recovery when the journal cannot help".
 
 `dingo load` opens no live UTxO set and replays through the metadata store, so
 `LoadWithDB` reads the latch first and refuses a database with any drained

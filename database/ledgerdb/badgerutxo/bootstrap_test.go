@@ -49,9 +49,7 @@ func TestBootstrapFailureLeavesTheStoreStale(t *testing.T) {
 	stale, err = s.Stale()
 	require.NoError(t, err)
 	require.True(t, stale, "a failed bootstrap left the format marker")
-	_, ok, err := s.Tip()
-	require.NoError(t, err)
-	require.False(t, ok, "a failed bootstrap left the old tip")
+	requireBootstrapIncomplete(t, s)
 }
 
 // A bootstrap that stops after its new contents are written, before the
@@ -73,7 +71,7 @@ func TestBootstrapStoppedAfterFlushLeavesNoTip(t *testing.T) {
 		},
 	)
 	require.ErrorIs(t, err, crash)
-	requireLive(t, s, true, out(0x21, 0).Ref)
+	requireBootstrapIncomplete(t, s)
 	stale, err := s.Stale()
 	require.NoError(t, err)
 	require.True(t, stale, "new contents kept the old format marker")
@@ -81,9 +79,53 @@ func TestBootstrapStoppedAfterFlushLeavesNoTip(t *testing.T) {
 
 	s = open(t, dir)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
-	_, ok, err := s.Tip()
+	requireBootstrapIncomplete(t, s)
+	_, err = s.Count()
+	require.ErrorIs(t, err, badgerutxo.ErrBootstrapIncomplete,
+		"an unfinished bootstrap must not read as an empty set")
+	_, err = s.Apply(point(21, 0x03), nil, nil)
+	require.ErrorIs(t, err, badgerutxo.ErrBootstrapIncomplete)
+
+	// Bootstrapping again, as the restart does, finishes it.
+	bootstrap(t, s, point(20, 0x02), out(0x21, 0))
+	incomplete, err := s.BootstrapIncomplete()
 	require.NoError(t, err)
-	require.False(t, ok, "new contents kept the old tip across a restart")
+	require.False(t, incomplete)
+	n, err := s.Count()
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), n)
+	requireLive(t, s, true, out(0x21, 0).Ref)
+}
+
+// requireBootstrapIncomplete requires every read of a store whose bootstrap
+// did not finish to fail closed, and Stale to report it.
+func requireBootstrapIncomplete(t *testing.T, s *badgerutxo.Store) {
+	t.Helper()
+	incomplete, err := s.BootstrapIncomplete()
+	require.NoError(t, err)
+	require.True(t, incomplete)
+	stale, err := s.Stale()
+	require.NoError(t, err)
+	require.True(t, stale)
+	_, _, err = s.Tip()
+	require.ErrorIs(t, err, badgerutxo.ErrBootstrapIncomplete)
+	_, err = s.Count()
+	require.ErrorIs(t, err, badgerutxo.ErrBootstrapIncomplete)
+	_, _, err = s.Get(out(0x21, 0).Ref)
+	require.ErrorIs(t, err, badgerutxo.ErrBootstrapIncomplete)
+	view, err := s.AsOf(point(20, 0x02))
+	if err == nil {
+		_, _, err = view.Get(out(0x21, 0).Ref)
+		view.Close()
+	}
+	require.ErrorIs(t, err, badgerutxo.ErrBootstrapIncomplete, "AsOf reads an unfinished bootstrap")
+	s.SetAnchor(point(20, 0x02))
+	view, err = s.AnchorView()
+	if err == nil {
+		_, _, err = view.Get(out(0x21, 0).Ref)
+		view.Close()
+	}
+	require.ErrorIs(t, err, badgerutxo.ErrBootstrapIncomplete, "AnchorView reads an unfinished bootstrap")
 }
 
 // A bootstrap replaces the whole set, so the genesis key delegations and MIR

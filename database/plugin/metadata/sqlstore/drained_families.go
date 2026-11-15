@@ -33,6 +33,13 @@ func (s *Store) SetDrainedFamilies(mask nodesettings.FamilyMask) {
 	}
 }
 
+// ResetDrainedFamilies forgets every drained family, so the store reads and
+// writes the rows of all of them. Only an import into a drained database,
+// which writes those rows again, calls it.
+func (s *Store) ResetDrainedFamilies() {
+	s.drained.Store(0)
+}
+
 func (s *Store) familyDrained(f nodesettings.Family) bool {
 	return nodesettings.FamilyMask(s.drained.Load()).Has(f)
 }

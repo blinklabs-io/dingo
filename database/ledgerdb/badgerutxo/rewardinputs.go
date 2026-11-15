@@ -168,14 +168,14 @@ func (s *Store) LoadRewardInputs(
 	if err := s.dropPrefix(prefixes...); err != nil {
 		return fmt.Errorf("badgerutxo: drop reward inputs: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 || !slices.Contains(tags, k[0]) {
 			return fmt.Errorf("badgerutxo: %x is not a reward input key", k)
 		}
 		return wb.Set(k, v)
-	}, loadTombstone(wb, tags))
+	}, wb.tombstoneFor(tags))
 	if err != nil {
 		return fmt.Errorf("badgerutxo: load reward inputs: %w", err)
 	}

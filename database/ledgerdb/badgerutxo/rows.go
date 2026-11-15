@@ -171,22 +171,6 @@ func tombstonePrefix(txn *badger.Txn, slot uint64, prefix []byte) error {
 	return txn.Set(stateJournalKey(slot, prefix), []byte{tombstoneMark})
 }
 
-// loadTombstone returns the tombstone writer a bulk load hands its feed. A
-// row loaded from the metadata store has no journal entry, so without the
-// tombstone a rollback below the slot the metadata store drops it at would
-// keep it. The prefix must start with one of tags.
-func loadTombstone(
-	wb *badger.WriteBatch,
-	tags []byte,
-) func(slot uint64, prefix []byte) error {
-	return func(slot uint64, prefix []byte) error {
-		if len(prefix) == 0 || !slices.Contains(tags, prefix[0]) {
-			return fmt.Errorf("badgerutxo: %x is not a loadable prefix", prefix)
-		}
-		return wb.Set(stateJournalKey(slot, prefix), []byte{tombstoneMark})
-	}
-}
-
 // deletePrefixKeys deletes every row under prefix.
 func deletePrefixKeys(txn *badger.Txn, prefix []byte) error {
 	var keys [][]byte
@@ -733,7 +717,7 @@ func (s *Store) LoadDrepState(
 	); err != nil {
 		return fmt.Errorf("badgerutxo: drop DRep state: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 ||
@@ -775,7 +759,7 @@ func (s *Store) LoadPools(feed func(put func(k, v []byte) error) error) error {
 	if err := s.dropPrefix([]byte{PoolTag}); err != nil {
 		return fmt.Errorf("badgerutxo: drop pools: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 || k[0] != PoolTag {
@@ -818,7 +802,7 @@ func (s *Store) LoadPoolHistory(
 	if err := s.dropPrefix([]byte{PoolHistoryTag}); err != nil {
 		return fmt.Errorf("badgerutxo: drop pool history: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 || k[0] != PoolHistoryTag {
@@ -877,7 +861,7 @@ func (s *Store) LoadRegistrationHistory(
 	); err != nil {
 		return fmt.Errorf("badgerutxo: drop registration history: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 || (k[0] != StakeHistoryTag && k[0] != DRepDepositTag) {
@@ -926,7 +910,7 @@ func (s *Store) LoadOpCerts(
 	if err := s.dropPrefix([]byte{OpCertTag}); err != nil {
 		return fmt.Errorf("badgerutxo: drop op-cert counters: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 || k[0] != OpCertTag {
@@ -972,7 +956,7 @@ func (s *Store) LoadPParamUpdates(
 	if err := s.dropPrefix([]byte{PParamUpdateTag}); err != nil {
 		return fmt.Errorf("badgerutxo: drop pparam updates: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 || k[0] != PParamUpdateTag {
@@ -1030,7 +1014,7 @@ func (s *Store) LoadGenesisMIR(
 			err,
 		)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 || (k[0] != GenesisDelegationTag && k[0] != MIRCertTag) {
@@ -1096,7 +1080,7 @@ func (s *Store) loadFamily(
 	if err := s.dropPrefix([]byte{tag}); err != nil {
 		return fmt.Errorf("badgerutxo: drop %s: %w", name, err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 || k[0] != tag {

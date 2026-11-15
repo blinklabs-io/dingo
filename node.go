@@ -119,9 +119,17 @@ type Node struct {
 	// anchoredUtxoSet is the open live UTxO set the anchor updater feeds. It
 	// follows utxoSet across a live close and reopen, which the updater
 	// goroutine cannot read without a race.
-	anchoredUtxoSet         atomic.Pointer[utxoset.Set]
-	drainGuard              *statedrain.TripGuard
-	utxoSetReconciled       bool
+	anchoredUtxoSet   atomic.Pointer[utxoset.Set]
+	drainGuard        *statedrain.TripGuard
+	utxoSetReconciled bool
+	// utxoCkptMu, utxoCkptCancel and utxoCkptWG own the goroutine that copies
+	// the live set into a checkpoint.
+	utxoCkptMu     sync.Mutex
+	utxoCkptCancel context.CancelFunc
+	utxoCkptWG     sync.WaitGroup
+	// finishLedgerReimport completes a re-import whose live set swap
+	// finished, recording its Mithril anchor and clearing its marks.
+	finishLedgerReimport    func(ctx context.Context, point ocommon.Point) error
 	dbLifecycleMgr          *dblifecycle.Manager
 	plannerStatsMgr         *plannerstats.Manager
 	leiosVoteManager        *leios.VoteManager

@@ -40,7 +40,7 @@ func (s *Store) LoadCommittee(feed func(put func(k, v []byte) error) error) erro
 	); err != nil {
 		return fmt.Errorf("badgerutxo: drop committee rows: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	err := feed(func(k, v []byte) error {
 		if len(k) == 0 || (k[0] != CommitteeMemberTag && k[0] != CommitteeQuorumTag &&

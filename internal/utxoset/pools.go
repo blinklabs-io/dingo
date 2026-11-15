@@ -200,11 +200,11 @@ func poolRows(lc ledger.LedgerChanges) ([]badgerutxo.RowPut, error) {
 	return out, nil
 }
 
-// latestEpoch returns the newest epoch row, or false at origin.
-func latestEpoch(ldb ledgerdb.LedgerDB, txn ledgerdb.Txn) (models.Epoch, bool, error) {
+// latestEpoch returns the newest epoch row, or the zero row at origin.
+func latestEpoch(ldb ledgerdb.LedgerDB, txn ledgerdb.Txn) (models.Epoch, error) {
 	epochs, err := ldb.GetEpochs(txn)
 	if err != nil || len(epochs) == 0 {
-		return models.Epoch{}, false, err
+		return models.Epoch{}, err
 	}
 	latest := epochs[0]
 	for _, e := range epochs {
@@ -212,7 +212,7 @@ func latestEpoch(ldb ledgerdb.LedgerDB, txn ledgerdb.Txn) (models.Epoch, bool, e
 			latest = e
 		}
 	}
-	return latest, true, nil
+	return latest, nil
 }
 
 // ensurePools loads every registered pool's state from the metadata store
@@ -230,7 +230,7 @@ func (s *Set) ensurePools(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 	txn := ldb.Begin(ctx, false)
 	defer txn.Release()
 	// With no epoch row yet, the ledger is in its first epoch from slot 0.
-	epoch, _, err := latestEpoch(ldb, txn)
+	epoch, err := latestEpoch(ldb, txn)
 	if err != nil {
 		return fmt.Errorf("utxoset: read the current epoch: %w", err)
 	}
@@ -240,10 +240,16 @@ func (s *Set) ensurePools(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 	}
 	err = s.store.LoadPools(func(put func(k, v []byte) error) error {
 		for _, st := range states {
+			if s.merge != nil && s.mergeOverDrained.Load() {
+				if err := s.mergeHeldPool(&st, epoch); err != nil {
+					return err
+				}
+			}
 			v, err := encodePoolState(st)
 			if err != nil {
 				return err
 			}
+			s.merge.notePool(poolKey(st.Pool))
 			if err := put(poolKey(st.Pool), v); err != nil {
 				return err
 			}
@@ -254,6 +260,35 @@ func (s *Set) ensurePools(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 		return fmt.Errorf("utxoset: load pools: %w", err)
 	}
 	s.logger.Info("loaded pools into the live UTxO set", "pools", len(states))
+	return nil
+}
+
+// mergeHeldPool applies a snapshot's registration of a pool the set already
+// holds as the metadata store's import does over the history a drain removed
+// from it: the
+// registration in force at the start of the current epoch stays in effect
+// and a newer one waits as the registration for the next boundary. A pool the
+// set does not hold, or one the snapshot's registration does not supersede,
+// takes the snapshot's state as is.
+func (s *Set) mergeHeldPool(st *ledger.PoolState, epoch models.Epoch) error {
+	held, err := s.PoolState(st.Pool)
+	if err != nil {
+		return err
+	}
+	if held == nil || held.Params == nil || st.Params == nil ||
+		st.Params.AddedSlot <= held.Params.AddedSlot ||
+		st.Params.AddedSlot < epoch.StartSlot {
+		return nil
+	}
+	base := held.Params
+	if held.Future != nil && held.Future.AddedSlot < epoch.StartSlot &&
+		held.Future.AddedSlot < st.Params.AddedSlot {
+		base = held.Future
+	}
+	if st.Future == nil {
+		st.Future = st.Params
+	}
+	st.Params = base
 	return nil
 }
 
@@ -286,7 +321,9 @@ func loadPoolStates(
 		return nil, fmt.Errorf("utxoset: read pool deposits: %w", err)
 	}
 	byPool := make(map[string]*ledger.PoolState, len(effective))
-	var out []ledger.PoolState
+	effectiveRegs := make(map[string]*models.PoolRegistration, len(effective))
+	// byPool points into out, which must not grow once the pointers are taken.
+	out := make([]ledger.PoolState, 0, len(effective))
 	for i := range effective {
 		r := effective[i]
 		st := ledger.PoolState{Pool: r.PoolKeyHash, Params: ledger.CleanPoolRegistration(&r)}
@@ -295,6 +332,7 @@ func loadPoolStates(
 		}
 		out = append(out, st)
 		byPool[string(r.PoolKeyHash)] = &out[len(out)-1]
+		effectiveRegs[string(r.PoolKeyHash)] = &effective[i]
 	}
 	for _, p := range pools {
 		st, ok := byPool[string(p.PoolKeyHash)]
@@ -302,7 +340,7 @@ func loadPoolStates(
 			continue
 		}
 		latest, retiring := ledger.PoolLatestEvents(&p)
-		if latest != nil && latest.AddedSlot > st.Params.AddedSlot {
+		if ledger.PoolRegistrationSupersedes(latest, effectiveRegs[string(p.PoolKeyHash)]) {
 			st.Future = ledger.CleanPoolRegistration(latest)
 		}
 		st.RetiringEpoch = retiring

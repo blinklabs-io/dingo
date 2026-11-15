@@ -26,9 +26,9 @@ import (
 )
 
 // TestReconcileNeverRebuildsFromADrainedStore requires a set that cannot be
-// resumed to stop with a resync error, leaving the set as it was, once the
-// metadata store has drained a family; the same set is rebuilt from the store
-// while nothing is drained.
+// resumed to stop with an error naming the journal it lacks a base in, once
+// the metadata store has drained a family, and never to rebuild it from the
+// store; the same set is rebuilt from the store while nothing is drained.
 func TestReconcileNeverRebuildsFromADrainedStore(t *testing.T) {
 	t.Parallel()
 	const applied = 4
@@ -41,7 +41,7 @@ func TestReconcileNeverRebuildsFromADrainedStore(t *testing.T) {
 		wantCount uint64
 	}{
 		{"behind, not resumable, store intact", false, slotPoint(6), false, false, 0},
-		{"behind, not resumable, drained", true, slotPoint(6), false, true, applied},
+		{"behind, not resumable, drained", true, slotPoint(6), false, true, 1},
 		{"behind, resumable, drained", true, slotPoint(6), true, false, applied},
 		{"ahead of the journal, drained", true, slotPoint(2), false, true, applied},
 	} {
@@ -59,7 +59,8 @@ func TestReconcileNeverRebuildsFromADrainedStore(t *testing.T) {
 			}
 			err := set.Reconcile(t.Context(), dbadapter.New(db), resume)
 			if tc.wantErr {
-				require.ErrorContains(t, err, "resync")
+				require.ErrorContains(t, err, "rollback journal reaches back only to")
+				require.NotContains(t, err.Error(), "resync")
 			} else {
 				require.NoError(t, err)
 			}
@@ -71,8 +72,8 @@ func TestReconcileNeverRebuildsFromADrainedStore(t *testing.T) {
 }
 
 // TestReconcileRefusesToRebuildAfterAFailedRewindOnADrainedStore requires a
-// failure mark the journal cannot rewind to stop the node with a resync error
-// rather than rebuild the set from the metadata store.
+// failure mark the journal cannot rewind to stop the node with an error naming
+// the missing state rather than rebuild the set from the metadata store.
 func TestReconcileRefusesToRebuildAfterAFailedRewindOnADrainedStore(
 	t *testing.T,
 ) {
@@ -92,7 +93,8 @@ func TestReconcileRefusesToRebuildAfterAFailedRewindOnADrainedStore(
 			require.Zero(t, n)
 			continue
 		}
-		require.ErrorContains(t, err, "resync")
+		require.ErrorContains(t, err, "no copy of the ledger state")
+		require.NotContains(t, err.Error(), "resync")
 		_, marked, err := set.FailedAt()
 		require.NoError(t, err)
 		require.True(t, marked, "the failure mark must stay")

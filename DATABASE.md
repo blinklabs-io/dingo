@@ -3403,11 +3403,36 @@ markers.
 ### Live UTxO set as the only copy
 
 `ledgerUtxoBadgerOnly` (core mode, with `ledgerUtxoBadger`) turns this on.
-The first start in that mode records `ledger.utxo_set_only` in `sync_state`,
-and only on an empty database; a marked database refuses to start without
-the mode, and a database with a metadata UTxO set refuses to switch into it.
-Without a metadata UTxO set to rebuild from, a live set that startup cannot
-resume is an error except at origin.
+The first start in that mode records `ledger.utxo_set_only` in `sync_state`
+on an empty database; a marked database refuses to start without the mode. A
+database that holds its UTxO set in the metadata store moves it into the live
+set at startup, before the ledger starts (`Node.migrateUtxoRows`,
+`utxoset.Set.MigrateFromSQL`):
+
+1. A scan of the live `utxo` rows (`IterateLiveUtxos`) counts the outputs and
+   their CBOR bytes and folds each output's SHA-256, over its reference and
+   CBOR, into an order-independent digest.
+2. A set already at the metadata tip is kept, with its journal and rollback
+   window, when step 3's digest matches. Otherwise the set is built from the
+   same rows (`Store.Bootstrap` at the metadata tip) and
+   `ledger.utxo_set_migration` records `bootstrapped:<slot>:<hash>`. Before a
+   build the start fails with `ErrMigrationInsufficientSpace` when the data
+   directory's free space is below twice the scanned bytes less what the set
+   already occupies. A crash during the build leaves a store whose bootstrap
+   did not finish (`mbootstrap`), which the next run rebuilds; a kept set that
+   differs is rebuilt once.
+3. The set is scanned and must equal the scan of step 1 in count and digest,
+   or the run stops with nothing marked and nothing deleted.
+4. The progress record becomes `committed`, then `ledger.utxo_set_only` is
+   written. Both writes are idempotent, so a crash between them is repaired by
+   the next run.
+5. The `utxo` rows are deleted in batches of 5,000 (`id` order, children by
+   cascade) and the progress record is removed. A crash between batches
+   resumes the deletes; the run logs every 100 batches.
+
+Until step 4 the metadata store stays whole and authoritative, so a stop at
+any earlier point loses nothing. Blob output offsets written for the old rows
+are left in the blob store.
 
 A ledger-state (Mithril) import in this mode (`ImportConfig.UtxoSet`, from
 `dingo mithril sync` or the node's snapshot restore) records the same mark,
@@ -3416,8 +3441,11 @@ loads the snapshot's UTxO set into the live set (`Store.Bootstrap`, at the
 snapshot's tip) in place of `utxo` rows and blob output CBOR. The metadata
 store reads UTxO stake from the set for the rest of the import, and the
 import rebuilds `reward_live_stake` in one transaction rather than in
-resumable ranges. A marked database refuses an import without the set, and
-a catch-up (`Reconcile`) import in this mode is refused.
+resumable ranges. A marked database refuses an import without the set. A
+catch-up (`Reconcile`) import in this mode is refused unless the set is a
+`ledgerstate.FamilyLoader` (the live `utxoset.Set` is one): it then replaces
+the whole set with the snapshot's outputs, and `Reconcile` skips its UTxO
+scan, since the metadata store holds no `utxo` rows.
 
 The import detaches the live source when it returns, before the gap blocks
 between the ImmutableDB tip and the snapshot's tip are ingested, so
@@ -3499,7 +3527,11 @@ metadata store's own rollback restores them when the set is rebuilt from it.
 it drops a row when the family it replaces is in the drained mask and holds
 rows; `Set.SetDrainedFamilies(mask)` sets it, so a release that changes the
 layout of a drained family cannot reload it from metadata tables a drain
-emptied and must resync instead. Each row tag maps to the family whose tables
+emptied. Such a release must ship an in-place migration of the set's rows from
+the old layout to the new one; `Reconcile` reads the layout version the set
+records (`Store.FormatVersion`) and, for a set the metadata store cannot
+rebuild, fails with a message naming the recorded and the expected version and
+the missing migration. Each row tag maps to the family whose tables
 feed its load (`badgerutxo/loadguard.go`); a family outside the mask reloads
 from its intact tables, the delegation and closure rows (loaded from
 certificate and transaction tables no drain empties) always reload, and an
@@ -3535,8 +3567,9 @@ and `ledgerUtxoReads: set`, and is refused with `verify` reads, with
 node passes it to `LedgerStateConfig.LedgerStateSetOnly`, which only declares
 the switch: no read fails closed until its family's latch bit is set. A database that
 holds UTxO rows in the metadata store (no `ledger.utxo_set_only` mark and a
-tip past origin) refuses the switch with a message to resync from genesis or
-a Mithril snapshot. `ledgerStateVerifyBeforeDrain` needs the switch.
+tip past origin) is first moved into the set (see "Live UTxO set as the only
+copy"), after which the switch applies. `ledgerStateVerifyBeforeDrain` needs
+the switch.
 
 Families graduate release by release; there is no per-family flag. A family
 is a group of SQL ledger-state tables the set also computes:
@@ -4152,18 +4185,100 @@ latches a family. The ledger's mask only widens.
 
 With any bit set, `utxoset.Set.Reconcile` never rebuilds the set from SQL: a
 set behind the ledger is handed to `ResumeUtxoSetFrom`, which replays blocks
-from the block history, and when that declines, or when a failure mark cannot
-be rewound, `Reconcile` stops with a resync error and leaves the set as it
-was.
+from the block history, and when that declines `Reconcile` recovers in place from the journal
+(`Set.recoverFromJournal`): it takes the set's restorable points newest first
+(`Store.JournalPoints`: the tip before each journaled commit), rolls the set
+back to each point at or below the ledger tip and asks the ledger to resume
+from it, and stops at the first point the ledger accepts. A point the ledger
+declines, such as a block of a fork the chain left, is passed over. An error
+from the ledger's rollback stops the walk without rolling the set further
+back. When no point is accepted the error names the journal floor; the
+state before the floor is not retained by either store, and the walk leaves
+the set at the oldest point it reached.
 
-A Mithril import or catch-up rewrites the SQL ledger state, so a database
-with any latch bit or any `ledger.state_drain.<family>` marker refuses one
-with `database.ErrLedgerStateDrained` (`Database.RefuseLedgerStateRewrite`).
-The check runs in `mithril.Sync` before anything is downloaded, in
-`ledgerstate.ImportLedgerState`, and in the import's `sync_state` clear, whose
-keep-list does not include the markers. The latch is a `node_settings_gate`
-row and is never cleared; a drained database is resynced into an empty data
-directory.
+A Mithril import or catch-up rewrites the SQL ledger state. A database with
+any latch bit or any `ledger.state_drain.<family>` marker takes one only when
+the import is given a live UTxO set that is a `ledgerstate.FamilyLoader`;
+otherwise `database.ErrLedgerStateDrained` refuses it
+(`Database.RefuseLedgerStateRewrite`, checked in `mithril.Sync` before
+anything is downloaded, in `ledgerstate.ImportLedgerState`, and in the
+import's `sync_state` clear). A drain that began and did not finish is refused
+by both: start the node once so it finishes the deletes.
+
+The import into a drained database reuses the family loaders the set runs at
+startup, so no family has a second writer:
+
+1. `Database.BeginDrainedImport` writes the `ledger.state_import.drained`
+   `sync_state` row (the mask as the latch encodes it) and makes the database
+   report no family drained: the metadata store forgets its mask
+   (`metadata.DrainedFamilyResetter`) and `Database.publishDrained` publishes
+   an empty one until the import ends. The latch is never cleared.
+   `Database.PinDrainedImportPoint` records the snapshot point in
+   `ledger.state_import.drained.point`; a pending import found with another
+   point has its drained families' SQL tables emptied first, so rows of the
+   interrupted snapshot never mix with the new one's.
+2. The import runs as for an undrained database, writing every family's rows
+   to SQL. A fresh import's `LoadUtxoSet` replaces the whole set
+   (`Store.Bootstrap`). A catch-up's `LoadUtxoSetCatchUp` replaces only the
+   live outputs, their running sums and the UTxO journal
+   (`Store.BootstrapCatchUp`) and keeps every family's rows and loaded
+   markers, so the set keeps the history older than the snapshot that a
+   catch-up into SQL rows keeps: block nonces, inactive accounts and their pool
+   and DRep history, enacted and expired proposals and votes, donations and
+   older epoch summaries, and the state journal that reads an earlier slot. It
+   writes the `mmerge` mark in the same transaction that clears the output
+   markers. A set with no tip is replaced whole. A set past the snapshot's point is rolled back to it through its
+   journal first (`Store.Rollback`, which also undoes the state journal), and
+   the load fails, leaving the set as it was, when the journal does not reach the
+   point. A catch-up's SQL reconcile skips the accounts, DReps, pools and
+   governance proposals of a drained family, whose SQL rows were deleted and so
+   cannot be stale; the set's own reconcile does it in step 3.
+3. `ledgerstate.FinishDrainedImport` lifts the set's refusal to reload
+   (`Set.SetDrainedFamilies(0)`) and runs `Set.LoadLedgerState`. With `mmerge`
+   set it merges (`Store.BeginMerge`): every family loads the SQL rows over the
+   rows the set holds, upserting by key, journaling the row it overwrites at
+   the snapshot's slot, and dropping nothing. When the import was into a drained database, whose SQL rows carry no
+   history, accounts, DReps and proposals the set already held keep the slots
+   the metadata store's import keeps, accounts take the snapshot's delegation,
+   activity and reward, and a pool the snapshot registers anew keeps the
+   registration in force at the epoch's start while the snapshot's waits as the
+   next one, as the metadata store's pool history derives them; the DRep
+   dormancy counter is always the snapshot's; proposals and votes keep their
+   row IDs and new ones are numbered above the set's sequence; protocol
+   parameter rows already held are not written twice. The reward families,
+   which hold only the epochs reward calculation still reads, are replaced.
+   `Set.reconcileStale` then does what the SQL reconcile does for the rows the
+   snapshot no longer lists: an account turns inactive with no delegation and
+   an inactive import baseline, a DRep inactive, a DRep delegator link whose
+   account no longer delegates to it is removed, a pool is scheduled to retire at
+   the current epoch by an event at the snapshot's slot, and a live proposal is
+   soft-deleted. The metadata store's reconcile removes the delegator links of
+   the DReps it deactivates. `mmerge`
+   clears only after all of it is written, so a merge that stops part way runs
+   again and writes the same rows. Without `mmerge` the loaders skip families
+   already loaded, as at a startup. Then
+   `statedrain.MarkRewritten` writes each drained family's
+   `ledger.state_drain.<family>` marker, the import marker is cleared, and
+   `statedrain.DeleteMarked` deletes the rows in chunks. A start that finds a
+   latched family with its marker finishes the deletes (`statedrain.Run`).
+   `Database.DeleteFamilySyncState` deletes the family's `sync_state` keys,
+   which `DeleteSyncState` refuses once the family is latched.
+   `updateMithrilReadyState` keeps `ledger.state_import.drained` when it
+   clears `sync_state`.
+
+The import marker is what makes the move atomic with the import's anchor:
+until it is cleared the set is not the complete copy, so `reconcileUtxoSet`
+(`Node.finishDrainedImport`) first completes an import whose SQL phases
+finished (no `sync_status`), refuses one still writing with
+`database.ErrDrainedImportPending`, and re-runs the node's own re-import
+(`ledger.state_reimport.active`, below). A crash before the marker clears
+leaves the latch and the SQL rows the import wrote, and the next import or
+start resumes: the catch-up import is a full pass each time, a pending merge
+runs again from its start, and the deletes resume by marker. Families of the
+database that are not drained keep the SQL path. The set holds no UTxO journal
+below the snapshot, so a UTxO as-of read below it is unavailable; the state
+rows an as-of read finds are exact for the rows the merge overwrote, and
+approximate between the previous tip and the snapshot.
 
 `metadata.ProviderDependencies.StatementGuard` hands every SQL statement a
 connection prepares or runs to a guard before the driver sees it
@@ -4188,7 +4303,7 @@ Readers outside the ledger's LedgerDB, for a database with drained families:
 |---|---|
 | MCP tools | `get_epoch_summary` with a ledger state reads through its LedgerDB, so the set serves it. Without one its SQL path refuses when the nonces, epochs or summaries family is drained. `sqlite_query` and `sqlite_explain` refuse a statement that names a table of a drained family (`mcp.ErrDrainedFamily`); the check matches the table name anywhere in the text. Output is unchanged when no family is drained. |
 | `internal/node` backfill | `Backfill.Run` refuses with `ErrLedgerStateDrained` before any write, unless its checkpoint is already complete. |
-| `mithril` gap replay | `processGapBlocks` refuses with `ErrLedgerStateDrained`; `mithril.Sync`, `ledgerstate.ImportLedgerState` and the import's `sync_state` clear refuse as well. |
+| `mithril` gap replay | `processGapBlocks` refuses with `ErrLedgerStateDrained` outside a drained import, as do `mithril.Sync`, `ledgerstate.ImportLedgerState` and the import's `sync_state` clear; during one the database reports nothing drained and they proceed. |
 | `internal/koiosparity` | `DatabaseSource` reads through the ledger's LedgerDB. `DingoDB` queries SQL directly and `OpenDingoDB` refuses with `ErrDrainedDatabase` when the latch holds a family it reads (epochs, summaries, era switch, pparams, pools, accounts, governance, reward inputs). |
 | `api/blockfrost` | Reads protocol parameters through `Database.GetPParamRows`, so a drained family is served from the set. Reads network state, nonces, epochs and epoch summaries from SQL. It runs only in API storage mode, which `ledgerStateSetOnly` refuses, so no latch bit can exist for it. |
 
@@ -4232,26 +4347,132 @@ from the set in the rollback's transaction (`RebuildRewardLiveStake`; a no-op
 once the `live-stake` family is drained): the
 set's journal holds none of the outputs of the blocks it never applied, so
 no per-credential refresh could name the credentials they changed. A
-marker the journal cannot rewind stops a set that is the only copy with a
-resync error and leaves the marker; any other set is rebuilt from the `utxo`
-table, which clears it.
+marker the journal cannot rewind stops a set that is the only copy, with an
+error saying that no copy of the ledger state from before the failed commit is
+retained, and leaves the marker: rows the failed commit left outside the
+journal cannot be told apart from the rest of the set. Any other set is
+rebuilt from the `utxo` table, which clears it.
 
 A set ahead of the ledger tip, as after an offline truncate, a lifecycle
 restore or a Mithril gap, is rolled back to the ledger tip with
 `Store.Rollback` when that tip is a point the journal restores exactly (the
 current tip, or the tip before a journaled commit: `Store.HasJournalPoint`).
 This applies when the set is authoritative. When the tip is not such a point,
-a set that is the only copy stops startup with a resync error and an
-authoritative set that has a metadata `utxo` table is rebuilt from it, as a
-set that is not authoritative always is.
+a set that is the only copy takes the journal walk of "Ledger state set-only
+and the drain", which rolls the set back to the nearest point the ledger can
+resume from, and an authoritative set that has a metadata `utxo` table is
+rebuilt from it, as a set that is not authoritative always is.
 
 `database/lifecycle` keeps the set in step with the database:
 
 | Operation | Set handling |
 |---|---|
 | `Snapshot` with `WithUtxoSetBackup` | Streams a Badger backup of the set to `utxoset.bak` concurrently with the blob and metadata backups, inside the same commit pause. The manifest records `utxoSetBytes` and `utxoSetSha256`, and `payloadFiles` then lists the file, so the digest check, cloud upload and cloud download cover it. A manifest without the digest has no set payload. |
-| `Restore` | Loads `utxoset.bak` into `ledger/utxo` of the staging directory, after the blob and metadata restores and before validation, so the existing atomic activation and rollback cover it. A snapshot without the payload restores a data directory with no set, which the next start rebuilds, or refuses with a resync error when the set is the only copy. |
+| `Restore` | Loads `utxoset.bak` into `ledger/utxo` of the staging directory, after the blob and metadata restores and before validation, so the existing atomic activation and rollback cover it. A snapshot without the payload restores a data directory with no set, which the next start rebuilds, or, when the set is the only copy, stops with an error saying the set has no journal point to resume from. |
 | `Truncate` with `WithTruncateUtxoSet` | Before any mutation, reloads the drain latch and binds the set to the reads of each drained family (see "Ledger state set-only and the drain"), refusing with `ErrDrainedFamilyUnserved` when it cannot, and refuses a target the set cannot be rolled back to (`journal floor` in the error, `ErrTruncateNotStarted`). The first step of the mutation, also run when a pending truncate resumes, rolls the set back to the target; a set at or behind the target is left to startup. |
+
+#### Checkpoints and recovery when the journal cannot help
+
+The journal walk and the rollbacks above need a point the set's journal
+still holds. Three states leave it without one: the set trails a Mithril trust
+boundary or the consumed-output prune floor, a failed commit is older than the
+journal's floor, and the ledger's tip is below the journal's floor. (A set in
+a layout this release does not read is the fourth.) Each reaches
+`Set.recoverUnreachable` with the journal's own error, which recovers from,
+in order:
+
+1. The newest checkpoint at or below the ledger's tip. A checkpoint is a
+   Badger backup of the whole set, so every family it holds comes with it
+   (`<databasePath>/ledger/utxo-checkpoints/ckpt-<slot>-<hash>.bak` and a
+   `.json` description with its tip, size and SHA-256). A restore changes the
+   set only after the checkpoint is proven: it checks the digest, loads the
+   backup into a scratch store beside the checkpoints, refuses a layout this
+   release does not read and a tip above the ledger's, and asks the ledger
+   whether it can roll back to that tip (`ResumeUtxoSetFrom` under
+   `ledger.WithResumeCheck`, which changes nothing). A checkpoint that fails
+   any of these, as one below a trust boundary, leaves the set as it was and
+   an older one is tried. Only then is the set replaced: `restore-pending.json`
+   (the checkpoint's slot and hash) is written and synced in the checkpoint
+   directory, the set is cleared (`Store.Reset`), the backup is loaded
+   (`Store.Restore`), the restored tip is checked, and the marker is removed.
+   A start that finds the marker (`Set.Reconcile` checks first) redoes the
+   restore from the checkpoint it names and never uses the part-restored set;
+   if that checkpoint is gone the start fails naming it. The ledger is then
+   asked to roll back to the restored tip (`ResumeUtxoSetFrom`), which replays
+   the blocks it already stores from the blob store.
+2. A re-import of ledger state from Mithril. `ScratchReimportFunc`, which the
+   node installs only with `ledgerStateSetOnly`, loads into a copy of the live
+   set (`Set.newScratch`: a backup of the set restored beside it in
+   `<set>-reimport`), so a re-import that fails leaves the live set untouched.
+   Once the import is complete and before the run is marked finished,
+   `ReimportTarget.Commit` checks the copy is at the imported point, writes it
+   as a checkpoint and restores that over the live set behind the
+   restore-pending marker, which a start that finds it finishes. The SQL
+   ledger state is rewritten by the import itself, so a crash after it and
+   before the swap leaves the run marked unfinished and the next start runs it
+   again, and one after the swap and before the Mithril anchor is recorded
+   finishes only that (`Node.resumeLedgerReimport`: the marks, not the import's
+   own marker, say a re-import is unfinished; a set already at the ledger's tip
+   needs only `mithril.FinishReimport`). The swap checkpoint is written
+   unpruned, the checkpoints of the replaced state are removed once the restore
+   has been checked, and the disk is checked for the copy and the checkpoint
+   before the import writes anything. A copy of the live set that cannot be
+   made fails the re-import; it does not load into an empty set. The function lists the network's aggregator
+   artifacts, newest first (at most eight), downloads only each one's signed
+   ledger state (`StartImmutable` is past the artifact's last immutable file,
+   so only the digest list and the ancillary archive are fetched), skips an
+   artifact whose beacon epoch is more than one past the ledger tip's epoch
+   without downloading it, takes the newest state at or below the ledger's tip
+   (the import's `maxTrustedSlot` is that tip) whose tip is a block of the
+   primary chain (`LedgerState.ChainContainsPoint`) and, when an existing
+   Mithril trust boundary lies above it, whose blocks up to that boundary are
+   all still stored (history expiry may have pruned them, in which case the
+   artifact is passed over before any write), and imports it as a
+   catch-up through the drained import above. The imported point becomes the
+   Mithril trust boundary unless an earlier import set a later one. The run
+   writes `ledger.state_reimport.active` and `sync_status` first, so a crash
+   leaves a re-import the next start runs again; `dingo serve`'s sync-state
+   check lets the node start on that pair (`mithril.ReimportInterrupted`)
+   and does not ask for a sync command. After the imported set is current
+   the run records its point in `ledger.state_reimport.swapped`; a start
+   that finds the marks finishes the run without importing again only when
+   that key names the ledger's tip, since a set at the tip says nothing by
+   itself when the run stopped before it wrote. The run clears the key before
+   it writes and with the other marks. No block is downloaded; the
+   ledger replays its stored blocks from the imported point.
+3. Neither: the error is the journal's own, followed by what is missing (no
+   checkpoint directory is configured, the directory holds no checkpoint at or
+   below the ledger's slot, none of the checkpoints could be restored, and no
+   Mithril aggregator is available for the network).
+
+`ledgerUtxoCheckpointEpochs` (default 1; 0 writes none) and
+`ledgerUtxoCheckpointKeep` (default 2) set how often a checkpoint is written
+and how many are kept. They apply only with `ledgerStateSetOnly`, the one
+mode in which the set is the only copy of the families. The node's anchor
+goroutine (`startUtxoSetAnchorUpdater`) starts one, on its own goroutine and
+one at a time, when the ledger's epoch has advanced that many epochs since the
+last, or at the first pass when none exists, and only while the ledger is
+within 43200 slots of the wall clock: a node replaying history writes none and
+counts no epoch. A write is skipped, with a warning and
+`dingo_utxo_set_checkpoints_skipped_total`, when the checkpoint directory's
+free space is not above the size of the newest checkpoint (or of the set's
+data when none exists) plus a tenth. A set with a failure mark, a pending merge or rollback or an unfinished bootstrap is refused inside the copy's read transaction, and a checkpoint that carries one is not restored. The next checkpoint and every start remove the scratch store directories a killed restore check leaves, and the checkpoint disk figure counts them. `Set.WriteCheckpoint` opens one Badger read transaction inside
+`Database.PauseCommitsContext` and `Store.gate`, so no metadata commit and no
+part-written chunked batch is open when the version is fixed, reads the tip
+through that transaction, then writes every row through the same transaction
+as a Badger backup stream to a temporary file, syncs it, writes the
+description, renames the backup into place, and removes all but the newest
+`keep`. The tip, journal and rows of a checkpoint are therefore one state
+(Badger's own non-managed `Stream` opens a transaction per worker and does not
+give that). A set with a failure mark is not checkpointed. The copy is
+otherwise concurrent with commits; a commit that lands after the transaction
+is opened is not in it.
+
+Disk: each checkpoint is about the size of the set's Badger data, so
+`ledgerUtxoCheckpointKeep` checkpoints plus the set itself need that many
+times the set's size, and a write needs the free space of one more while it is
+in progress. `dingo_database_size_bytes{store="utxoset_checkpoint"}` reports
+the directory's size, sampled with the blob and metadata sizes.
 
 The set is a directory locked by its Badger handle. An offline `database
 snapshot` or `truncate` opens it from `<dataDir>/ledger/utxo` when it exists
@@ -9336,7 +9557,10 @@ writes two registrations for that pool at the import slot. Stable registration
 indexes order the current parameters first and staged parameters second. The
 staged row is the pool's latest registration, so the next epoch boundary and a
 pool retirement refund read it, and the `pool` row holds its parameters, as
-after a live re-registration. The deposit is the same on both rows. Lookups at
+after a live re-registration. The deposit is the same on both rows. Registrations at one slot rank by certificate position, then registration
+index, in both the loader of the live UTxO set and its verifier, so the set
+holds the staged parameters as the pool's pending registration and the epoch
+boundary promotes them. Lookups at
 the import slot can resolve current and staged parameters by their index;
 electing snapshots do not depend on those rows because they carry their own
 key.

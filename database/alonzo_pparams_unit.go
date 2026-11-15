@@ -32,8 +32,8 @@ import (
 // drained from the metadata store: the rows to repair or to count are gone.
 var ErrAlonzoPParamsUnitDrained = errors.New(
 	"alonzo protocol-parameter unit marker is legacy and the protocol " +
-		"parameters are drained from the metadata store; resync into an " +
-		"empty data directory",
+		"parameters are drained from the metadata store, so the repair cannot " +
+		"read the rows it rewrites",
 )
 
 // refuseDrainedAlonzoUnit reads the latch, which a database that has just

@@ -192,6 +192,12 @@ var (
 	// formatKey holds formatVersion once the store's contents, journal and
 	// sums are all in the current format.
 	formatKey = []byte("mfmt")
+	// bootstrapKey is written in the transaction that clears the markers a
+	// bootstrap replaces and removed in the one that writes the new count,
+	// format and tip. While it is present the contents are a partial
+	// bootstrap and every read and write but Stale and BootstrapIncomplete
+	// fails with ErrBootstrapIncomplete.
+	bootstrapKey = []byte("mbootstrap")
 	// noncesKey is set once the store holds every block nonce up to its tip.
 	// legacyNoncesKey marked nonces written when a rewrite could clear a
 	// checkpoint flag, which are reloaded rather than read.
@@ -272,6 +278,10 @@ var (
 	// s is exact only when s+1 is at least the floor. Pruning and every
 	// row load raise it before they drop journal entries.
 	journalFloorKey = []byte("mjfloor")
+	// mergeKey is set by a catch-up bootstrap and cleared once the families'
+	// snapshot rows are merged into the set, so a start that finds it knows
+	// the set is not yet the complete copy of the ledger state.
+	mergeKey = []byte("mmerge")
 	// loadFloorKey holds the tip slot plus one at the last load of a row
 	// family a rollback undoes through the state journal, from rows with no
 	// entries before it. A rollback below it, other than to the tip, would

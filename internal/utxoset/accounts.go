@@ -81,7 +81,25 @@ func (s *Set) ensureAccounts(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 	err = s.store.LoadAccounts(func(put func(badgerutxo.AccountRow) error) error {
 		return ldb.IterateAccounts(txn, func(a *models.Account) error {
 			n++
-			return put(accountRow(*a))
+			s.merge.noteAccount(a.CredentialTag, a.StakingKey)
+			row := accountRow(*a)
+			if s.merge != nil && s.mergeOverDrained.Load() {
+				// The metadata store lost the rows a drain moved out, so the
+				// import wrote the account over none. One it holds keeps
+				// what an import of an account the ledger already holds does:
+				// its delegations, activity and reward update and the slots
+				// and expiry it was first written with stay.
+				held, ok, err := s.store.Account(row.Tag, row.Key)
+				if err != nil {
+					return err
+				}
+				if ok {
+					row.AddedSlot = held.AddedSlot
+					row.CreatedSlot = held.CreatedSlot
+					row.ExpirationEpoch = held.ExpirationEpoch
+				}
+			}
+			return put(row)
 		})
 	})
 	if err != nil {

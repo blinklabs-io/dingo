@@ -108,6 +108,8 @@ type Store struct {
 	// loadsRefused holds the families whose source tables have lost rows; see
 	// RefuseLoadsFor.
 	loadsRefused atomic.Uint64
+	// merging makes family loads upsert; see BeginMerge.
+	merging atomic.Bool
 	// memTableSize replaces Badger's memtable size when positive.
 	memTableSize int64
 }
@@ -148,6 +150,14 @@ func Open(dir string, options ...Option) (*Store, error) {
 		if _, ok, err := readTip(txn); err != nil || ok {
 			return err
 		}
+		// A bootstrap that did not finish leaves no tip either, and its
+		// contents are not an empty set in the current format.
+		if err := checkBootstrapComplete(txn); err != nil {
+			if errors.Is(err, ErrBootstrapIncomplete) {
+				return nil
+			}
+			return err
+		}
 		return txn.Set(formatKey, []byte{formatVersion})
 	}); err != nil {
 		_ = db.Close()
@@ -160,7 +170,7 @@ func Open(dir string, options ...Option) (*Store, error) {
 // journal or sums cannot be trusted and it must be rebuilt.
 func (s *Store) Stale() (bool, error) {
 	var stale bool
-	err := s.view(func(txn *badger.Txn) error {
+	err := s.viewRaw(func(txn *badger.Txn) error {
 		item, err := txn.Get(formatKey)
 		if errors.Is(err, badger.ErrKeyNotFound) {
 			stale = true
@@ -175,6 +185,36 @@ func (s *Store) Stale() (bool, error) {
 		})
 	})
 	return stale, err
+}
+
+// FormatVersion returns the layout version recorded in the store, whether one
+// is recorded, and the version this code writes. A set that was bootstrapped
+// or written in another layout needs its rows migrated before this code can
+// read them in place.
+func (s *Store) FormatVersion() (stored uint8, found bool, current uint8, err error) {
+	current = formatVersion
+	err = s.viewRaw(func(txn *badger.Txn) error {
+		item, err := txn.Get(formatKey)
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(v []byte) error {
+			if len(v) == 1 {
+				stored, found = v[0], true
+			}
+			return nil
+		})
+	})
+	return stored, found, current, err
+}
+
+// DataBytes returns the disk the store's data files occupy.
+func (s *Store) DataBytes() int64 {
+	lsm, vlog := s.db.Size()
+	return lsm + vlog
 }
 
 // Close closes the store. Closing a Snapshot releases the snapshot and
@@ -288,23 +328,45 @@ func (s *Store) Bootstrap(
 	point ocommon.Point,
 	feed func(put func(Output) error) error,
 ) error {
+	return s.bootstrap(point, feed, false)
+}
+
+// BootstrapCatchUp replaces the live outputs, their running sums and the UTxO
+// journal with the ones feed supplies, as of point, and keeps every other
+// family's rows and loaded markers, so the families hold the history the
+// catch-up's snapshot does not. It marks a merge pending, which only
+// BeginMerge and EndMerge clear: the rows of the families the snapshot
+// carries still have to be merged in.
+func (s *Store) BootstrapCatchUp(
+	point ocommon.Point,
+	feed func(put func(Output) error) error,
+) error {
+	return s.bootstrap(point, feed, true)
+}
+
+func (s *Store) bootstrap(
+	point ocommon.Point,
+	feed func(put func(Output) error) error,
+	catchUp bool,
+) error {
 	// Clear the markers first, in one transaction: until the final commit
 	// below the contents are partial, and a store with no tip and no format
 	// marker is rebuilt rather than trusted.
-	if err := s.update(func(txn *badger.Txn) error {
-		for _, key := range [][]byte{
-			tipKey, countKey, seqKey, formatKey, noncesKey, legacyNoncesKey,
-			epochStateKey, summaryKey,
-			legacyEpochStateKey, eraSwitchKey, networkStateKey,
-			pparamsKey, pparamsSeqKey, accountsKey, legacyAccountsKey,
-			syncMarkersKey, syntheticV2Key, syntheticV2ClearedKey,
-			drepsKey, poolsKey, poolHistoryKey, legacyPoolHistoryKey, registrationHistoryKey, legacyRegistrationHistoryKey, genesisMIRKey,
-			opCertsKey, legacyOpCertsKey, committeeKey, governanceKey, legacyGovernanceKey,
-			governanceSeqKey,
-			pparamUpdatesKey, rewardOutputsKey, importBaselinesKey, witnessSlotsKey, legacyWitnessSlotsKey,
-			rewardBlocksKey, legacyRewardBlocksKey, rewardInputsKey, rewardDerivedKey,
-			closureUtxoKey, delegationsKey, failedKey, rollbackPendingKey, loadFloorKey,
-		} {
+	markers := bootstrapMarkers
+	prefixes := bootstrapPrefixes
+	if catchUp {
+		markers, prefixes = catchUpMarkers, catchUpPrefixes
+	}
+	if err := s.updateRaw(func(txn *badger.Txn) error {
+		if err := txn.Set(bootstrapKey, []byte{1}); err != nil {
+			return err
+		}
+		if catchUp {
+			if err := txn.Set(mergeKey, []byte{1}); err != nil {
+				return err
+			}
+		}
+		for _, key := range markers {
 			if err := txn.Delete(key); err != nil {
 				return err
 			}
@@ -314,28 +376,9 @@ func (s *Store) Bootstrap(
 		return fmt.Errorf("badgerutxo: clear markers for bootstrap: %w", err)
 	}
 	// The journal describes history the new contents do not share.
-	if err := s.dropPrefixAlways(
-		[]byte{UTxOTag}, []byte{JournalTag}, []byte{AggTag}, []byte{NonceTag},
-		[]byte{EpochTag}, []byte{SnapshotTag}, []byte{SummaryTag},
-		[]byte{NetworkStateTag}, []byte{DonationTag},
-		[]byte{PParamsTag}, []byte{PParamsSlotTag},
-		[]byte{AccountTag}, []byte{AccountPoolTag}, []byte{AccountDRepTag},
-		[]byte{StateJournalTag}, []byte{RewardRecordTag},
-		[]byte{DRepTag}, []byte{DRepLinkTag}, []byte{DormancyTag},
-		[]byte{PoolTag}, []byte{PoolHistoryTag},
-		[]byte{StakeHistoryTag}, []byte{DRepDepositTag}, []byte{OpCertTag},
-		[]byte{GenesisDelegationTag}, []byte{MIRCertTag},
-		[]byte{CommitteeMemberTag}, []byte{CommitteeQuorumTag}, []byte{ConstitutionTag},
-		[]byte{HotAuthTag}, []byte{ResignTag},
-		[]byte{ProposalTag}, []byte{VoteTag}, []byte{PParamUpdateTag},
-		[]byte{RewardOutputTag}, []byte{RewardEpochTag},
-		[]byte{RewardRoundTag}, []byte{RewardPostSnapTag},
-		[]byte{ImportBaselineTag}, []byte{WitnessTag}, []byte{RewardBlocksTag},
-		[]byte{ClosureUtxoTag}, []byte{DelegationTag},
-		[]byte{RewardStakeInputTag}, []byte{RewardPoolInputTag},
-		[]byte{RewardSnapshotTag}, []byte{RewardPotsTag},
-		[]byte{RewardDerivedTag}, []byte{RewardCursorTag},
-	); err != nil {
+	// The tip is cleared, so no floor is raised: the contents the floors
+	// describe are gone with the rows.
+	if err := s.db.DropPrefix(prefixes...); err != nil {
 		return fmt.Errorf("badgerutxo: drop for bootstrap: %w", err)
 	}
 	wb := s.newWriteBatch()
@@ -369,8 +412,11 @@ func (s *Store) Bootstrap(
 			return err
 		}
 	}
-	return s.update(func(txn *badger.Txn) error {
+	return s.updateRaw(func(txn *badger.Txn) error {
 		if err := writeCount(txn, n); err != nil {
+			return err
+		}
+		if err := txn.Delete(bootstrapKey); err != nil {
 			return err
 		}
 		if err := txn.Set(formatKey, []byte{formatVersion}); err != nil {

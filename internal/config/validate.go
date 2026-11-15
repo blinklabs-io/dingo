@@ -640,6 +640,17 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if c.LedgerUtxoCheckpointEpochs < 0 {
+		errs = append(errs, errors.New(
+			"ledgerUtxoCheckpointEpochs must not be negative",
+		))
+	}
+	if c.LedgerUtxoCheckpointKeep < 0 {
+		errs = append(errs, errors.New(
+			"ledgerUtxoCheckpointKeep must not be negative",
+		))
+	}
+
 	switch c.LedgerUtxoReads {
 	case "":
 	case "verify", "set":

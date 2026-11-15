@@ -2821,7 +2821,7 @@ type MetadataStore interface {
 	// DeactivateDreps marks the given DReps inactive (Active=false). Used by
 	// Mithril v2 catch-up reconciliation; rows are never deleted, only
 	// tombstoned via the active flag. Credentials that match no row are ignored.
-	DeactivateDreps(types.Txn, []models.StakeCredentialRef) error
+	DeactivateDreps(types.Txn, []models.StakeCredentialRef, uint64) error
 
 	// RetirePools records a retirement at the given epoch (and added slot) for
 	// each supplied pool key hash, mirroring a retirement certificate. Used by
@@ -3778,6 +3778,13 @@ type IncrementalPlannerStatsUpdater interface {
 // PlannerStatsBackfillSyncKey records the completed backfill whose planner
 // statistics were refreshed after rebuilding critical indexes.
 const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"
+
+// DrainedFamilyResetter is the optional capability a metadata store offers to
+// forget every drained family, for an import that writes their rows again.
+// SetDrainedFamilies only widens, so it cannot lift the mask.
+type DrainedFamilyResetter interface {
+	ResetDrainedFamilies()
+}
 
 // DrainedFamilyAware is the optional capability a metadata store offers to
 // stop writing, rolling back and pruning the tables of drained ledger-state

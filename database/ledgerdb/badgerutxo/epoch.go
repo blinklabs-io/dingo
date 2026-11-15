@@ -379,7 +379,7 @@ func (s *Store) LoadEpochState(
 	); err != nil {
 		return fmt.Errorf("badgerutxo: drop epoch state: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	for _, e := range epochs {
 		if err := wb.Set(epochKey(e.Epoch), encodeEpoch(e)); err != nil {
@@ -399,8 +399,11 @@ func (s *Store) LoadEpochState(
 			if err := txn.Set(eraSwitchKey, eraSwitch.encode()); err != nil {
 				return err
 			}
-		} else if err := txn.Delete(eraSwitchKey); err != nil {
-			return err
+		} else if !s.merging.Load() {
+			// A merge keeps the last switch the set recorded.
+			if err := txn.Delete(eraSwitchKey); err != nil {
+				return err
+			}
 		}
 		if err := txn.Delete(legacyEpochStateKey); err != nil {
 			return err

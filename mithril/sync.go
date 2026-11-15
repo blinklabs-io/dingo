@@ -932,12 +932,30 @@ func Sync(
 	}
 	catchUp = dec.engage || cfg.RepairLegacyRewardState
 	catchUpStart = dec.start
-	if err := db.RefuseLedgerStateRewrite(ctx); err != nil {
+	// A database that drained ledger-state families takes the import when
+	// the live UTxO set can hold them: the rows are written to SQL as for any
+	// database and moved into the set once the import is complete.
+	drainedImport := false
+	if _, ok := cfg.UtxoSet.(ledgerstate.FamilyLoader); ok {
+		began, beginErr := db.BeginDrainedImport(ctx)
+		if beginErr != nil {
+			return SyncResult{}, beginErr
+		}
+		drainedImport = began
+	}
+	if drainedImport {
+		defer func() {
+			if syncErr != nil {
+				db.EndDrainedImport(ctx)
+			}
+		}()
+	} else if err := db.RefuseLedgerStateRewrite(ctx); err != nil {
 		return SyncResult{}, err
 	}
 	// The ledger-state import refuses a catch-up into a live-UTxO-set-only
 	// database, but only after the artifacts have downloaded.
-	if catchUp && cfg.UtxoSet != nil {
+	_, familyLoader := cfg.UtxoSet.(ledgerstate.FamilyLoader)
+	if catchUp && cfg.UtxoSet != nil && !familyLoader {
 		return SyncResult{}, errors.New(
 			"cannot catch up a database that keeps its UTxO set only in " +
 				"the live UTxO set",
@@ -2002,6 +2020,16 @@ func Sync(
 		return SyncResult{}, err
 	}
 	syncComplete = true
+	if drainedImport {
+		if err := ledgerstate.FinishDrainedImport(
+			ctx, db, cfg.UtxoSet,
+		); err != nil {
+			return SyncResult{}, fmt.Errorf(
+				"moving the imported ledger state into the live UTxO set: %w",
+				err,
+			)
+		}
+	}
 
 	// Record the highest imported immutable file number so a later catch-up can
 	// skip already-present archives and anchor its intersection check. Written

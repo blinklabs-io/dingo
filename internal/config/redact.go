@@ -230,6 +230,8 @@ var logPlainConfigFields = []string{
 	"LedgerUtxoReads",
 	"LedgerUtxoBadgerOnly",
 	"LedgerStateSetOnly",
+	"LedgerUtxoCheckpointEpochs",
+	"LedgerUtxoCheckpointKeep",
 	"LedgerStateVerifyBeforeDrain",
 	"LedgerValidateAheadEnabled",
 	"LeiosVoteSigningKeyFile",

@@ -207,7 +207,7 @@ func (s *Store) LoadNetworkState(
 	); err != nil {
 		return fmt.Errorf("badgerutxo: drop network state: %w", err)
 	}
-	wb := s.newWriteBatch()
+	wb := s.newLoadSink()
 	defer wb.Cancel()
 	for _, r := range states {
 		err := wb.Set(

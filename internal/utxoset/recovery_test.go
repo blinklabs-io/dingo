@@ -78,8 +78,9 @@ func neverResume(context.Context, ocommon.Point) (bool, error) {
 
 // A set ahead of the ledger, as after an offline truncate or a restore, is
 // rolled back from its journal when the ledger tip is a point the journal
-// holds, and left alone with an error when the set is the only copy and the
-// tip is not one.
+// holds; when the set is the only copy and the tip is not one, it is rolled
+// back to the nearest earlier point the ledger can resume from, and an error
+// names the journal floor when there is none.
 func TestReconcileRollsASetAheadOfTheLedgerBack(t *testing.T) {
 	t.Parallel()
 	const applied = 8
@@ -110,7 +111,7 @@ func TestReconcileRollsASetAheadOfTheLedgerBack(t *testing.T) {
 			ledgerTip: ocommon.NewPoint(
 				5, bytes.Repeat([]byte{0xee}, 32),
 			),
-			wantSlot: applied, wantCount: applied,
+			wantSlot: 1, wantCount: 1,
 			wantErr: "ahead of",
 		},
 		{
@@ -119,7 +120,7 @@ func TestReconcileRollsASetAheadOfTheLedgerBack(t *testing.T) {
 			ledgerTip: slotPoint(2),
 			prune:     6,
 			wantSlot:  applied, wantCount: applied,
-			wantErr: "journal does not reach",
+			wantErr: "rollback journal reaches back only to slot 5",
 		},
 		{
 			name:      "not authoritative, rebuilt from the store",
@@ -139,7 +140,7 @@ func TestReconcileRollsASetAheadOfTheLedgerBack(t *testing.T) {
 			err := set.Reconcile(t.Context(), dbadapter.New(db), neverResume)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
-				require.ErrorContains(t, err, "resync")
+				require.NotContains(t, err.Error(), "resync")
 			} else {
 				require.NoError(t, err)
 			}
@@ -200,7 +201,7 @@ func TestReconcileRewindsASetThatFailedAnUpdate(t *testing.T) {
 }
 
 // A failure mark the journal cannot rewind stops a set that is the only copy
-// with a resync error, and keeps the mark.
+// with an error naming the missing state, and keeps the mark.
 func TestReconcileRefusesAFailedSetItCannotRewind(t *testing.T) {
 	t.Parallel()
 	set := openRecoverySet(t, utxoset.Config{Only: true})
@@ -209,7 +210,8 @@ func TestReconcileRefusesAFailedSetItCannotRewind(t *testing.T) {
 	require.NoError(t, set.MarkUtxoSetFailed(2))
 	db := ledgerAt(t, slotPoint(6))
 	err := set.Reconcile(t.Context(), dbadapter.New(db), neverResume)
-	require.ErrorContains(t, err, "resync")
+	require.ErrorContains(t, err, "no copy of the ledger state")
+	require.NotContains(t, err.Error(), "resync")
 	slot, marked, err := set.FailedAt()
 	require.NoError(t, err)
 	require.True(t, marked)
