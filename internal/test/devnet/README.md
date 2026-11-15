@@ -107,7 +107,10 @@ specs or the `--accelerated` timeline.
 The Leios spec uses 300-slot, 150-second epochs with `f: 0.05` and `k: 3`.
 Its 240-slot nonce stability window contains 12 expected blocks, which keeps
 the finite era horizon advancing while leaving half of the ten-minute scenario
-after voting registrations become usable in epoch 2.
+after voting registrations become usable in epoch 2. The configurator sets
+`LeiosMinOfferLead` to 30 slots: with `k: 3` the immutable tip trails the tip by
+far less than the 3600-slot default, which would hold back every endorser-block
+offer.
 
 ## Network parameters
 

@@ -5638,11 +5638,7 @@ intent-only cache entries and backfill-source points, replacing its own oldest
 past the cap, so one connection cannot churn others' entries; the shared global
 cache and table bounds still apply. An intent entry's owner is the connection
 that created it and is not transferred by a later offer of the same point.
-Dropped offers are not penalized. Outgoing endorser-block offers are gated as
-each is about to be sent over leios-notify: an offer goes out only when its slot is
-at least `LeiosMinOfferLead` (node config, default 3600) above the immutable
-point, with no immutable point read as slot 0, and is otherwise dropped, because
-the reference relay disconnects a peer that offers below its own immutable tip. On a notify
+Dropped offers are not penalized. On a notify
 block offer, `ouroboros/` fetches the endorser-block manifest over leios-fetch,
 decodes and hash-validates it, rejects it if the fetched body's length does not
 match the offer's declared size (`MsgBlockOffer.Size`) or if caching it would
@@ -5899,6 +5895,16 @@ observer), immediately behind it. A forged endorser block whose ranking block
 is never announced is never offered; at most eight pending ones are kept.
 Relayed endorser blocks already follow the same order, because
 `enqueueLeiosRelayOffers` waits for the announcement to verify the slot.
+
+Each outgoing block or closure offer is also checked as it is about to be sent
+over leios-notify: it goes out only when its slot is at least
+`LeiosMinOfferLead` (node config, default 3600) above this node's immutable
+point, and is otherwise dropped, because the reference node disconnects a peer
+that offers an endorser block below its own immutable tip. With no immutable
+point yet, the point reads as slot 0; a failed lookup drops the offer; a node
+without a ledger offers without the check. A network whose immutable point
+trails the tip by fewer slots than the lead offers nothing, so short-horizon
+networks such as the Leios DevNet set a smaller value.
 
 
 Idle LeiosNotify requests observe the owning connection's shutdown channel. This
