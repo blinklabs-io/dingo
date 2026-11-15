@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"slices"
 	"sort"
@@ -81,6 +82,47 @@ type leiosForgedEBEntry struct {
 
 func (e leiosForgedEBEntry) isEndorserBlockOffer() bool {
 	return e.point != nil || e.txOffer != nil
+}
+
+// offeredEndorserBlockSlot returns the slot of the endorser block an offer
+// entry names, or nil for any other kind of entry.
+func (e leiosForgedEBEntry) offeredEndorserBlockSlot() *uint64 {
+	switch {
+	case e.txOffer != nil:
+		return &e.txOffer.Slot
+	case e.point != nil && e.announcement == nil && e.vote == nil:
+		return &e.point.Slot
+	default:
+		return nil
+	}
+}
+
+// leiosOfferRelayAllowed reports whether an endorser block at slot may be
+// offered to a peer: only if slot is at least LeiosMinOfferLead slots above
+// this node's immutable tip. The reference peer disconnects a node that offers
+// an endorser block below the peer's own immutable tip, and each side compares
+// against its own tip, so the lead is the margin that keeps an honest peer
+// whose tip is slightly ahead from dropping the connection.
+//
+// An unavailable immutable point reads as slot 0, as the reference reads an
+// empty chain. Without a ledger nothing is gated. A failed lookup refuses the
+// offer rather than risk a disconnect.
+func (o *Ouroboros) leiosOfferRelayAllowed(slot uint64) bool {
+	if o.leiosImmutableSlot == nil {
+		return true
+	}
+	immutable, found, err := o.leiosImmutableSlot(context.Background())
+	if err != nil {
+		return false
+	}
+	if !found {
+		immutable = 0
+	}
+	lead := o.config.LeiosMinOfferLead
+	if lead > math.MaxUint64-immutable {
+		return false
+	}
+	return slot >= immutable+lead
 }
 
 // prototype-2026w31 accepts announcements for up to ten minutes, and only
@@ -3462,6 +3504,15 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 		if entry != nil {
 			if entry.deliveryError != nil {
 				return nil, entry.deliveryError
+			}
+			// Decided here, as the offer is about to go out, because the
+			// immutable tip keeps advancing while an entry waits in the log.
+			// A refused offer is dropped rather than retried: the tip never
+			// moves back, so it can never become relayable again.
+			if offered := entry.offeredEndorserBlockSlot(); offered != nil &&
+				!o.leiosOfferRelayAllowed(*offered) {
+				o.leiosEBLog.discardReservation(connKey, ctx.Server)
+				continue
 			}
 			point := entry.dependencyPoint
 			if point == nil && len(entry.dependencyHeader) > 0 {

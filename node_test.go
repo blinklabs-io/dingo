@@ -4453,6 +4453,26 @@ func TestNewOuroborosConfigDoesNotInitiateLegacyLeiosVotes(t *testing.T) {
 		"prototype nodes must diffuse votes over leios-notify")
 }
 
+func TestNewOuroborosConfigCarriesLeiosMinOfferLead(t *testing.T) {
+	t.Parallel()
+
+	lead := uint64(1200)
+	n := &Node{config: NewConfig(
+		WithCardanoNodeConfig(&cardano.CardanoNodeConfig{
+			LeiosMinOfferLead: &lead,
+		}),
+	)}
+	assert.Equal(t, lead, n.newOuroborosConfig(true, 0, 0).LeiosMinOfferLead)
+
+	n = &Node{config: NewConfig()}
+	assert.Equal(
+		t,
+		cardano.DefaultLeiosMinOfferLead,
+		n.newOuroborosConfig(true, 0, 0).LeiosMinOfferLead,
+		"an unconfigured node uses the reference default",
+	)
+}
+
 // The behind-tip chainsync resync is gated on chain selection having no best
 // peer; the production config must carry that answer from the live selector.
 func TestNewOuroborosConfigReportsChainSelectionBestPeer(t *testing.T) {
