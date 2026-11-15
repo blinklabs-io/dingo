@@ -370,7 +370,7 @@ func TestProviderExplicitValueThresholdOverridesLeiosDefault(t *testing.T) {
 	}
 }
 
-func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
+func TestProviderStopWaitsForValueLogGCPastDeadline(t *testing.T) {
 	t.Parallel()
 	host := plugin.NewHost()
 	require.NoError(t, RegisterProvider(host))
@@ -416,31 +416,17 @@ func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
 		50*time.Millisecond,
 	)
 	defer cancel()
-	stopDone := make(chan struct {
-		err     error
-		elapsed time.Duration
-	}, 1)
-	go func() {
-		started := time.Now()
-		err := host.Stop(ctx)
-		stopDone <- struct {
-			err     error
-			elapsed time.Duration
-		}{err, time.Since(started)}
-	}()
-	stopResult := testutil.RequireReceive(
-		t, stopDone, 5*time.Second,
-		"provider stop exceeded its context",
-	)
-	require.Less(
-		t,
-		stopResult.elapsed,
-		2*time.Second,
-		"provider stop did not honor its deadline promptly",
-	)
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- host.Stop(ctx) }()
 
-	// Stop may return its deadline error before the GC stop signal is
-	// closed; releasing earlier lets the loop start another pass.
+	// The store close is durable: Stop must keep waiting for the in-flight
+	// value-log rewrite and the close after its context has expired.
+	<-ctx.Done()
+	select {
+	case err := <-stopDone:
+		t.Fatalf("provider stop abandoned the close at its deadline: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
 	require.Eventually(
 		t,
 		func() bool {
@@ -455,21 +441,13 @@ func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
 		10*time.Millisecond,
 		"provider stop did not signal value-log GC to stop",
 	)
+	require.False(t, store.DB().IsClosed())
 	release()
-	require.Eventually(
-		t,
-		store.DB().IsClosed,
-		5*time.Second,
-		10*time.Millisecond,
-		"provider-owned close did not finish after value-log GC drained",
-	)
-
-	require.ErrorIs(t, stopResult.err, context.DeadlineExceeded)
+	require.NoError(t, testutil.RequireReceive(
+		t, stopDone, 5*time.Second,
+		"provider stop did not finish after value-log GC drained",
+	))
 	require.Equal(t, int32(1), attempts.Load())
 	require.True(t, store.DB().IsClosed())
-	require.ErrorIs(
-		t,
-		host.Stop(context.Background()),
-		context.DeadlineExceeded,
-	)
+	require.NoError(t, host.Stop(context.Background()))
 }
