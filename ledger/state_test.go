@@ -5432,7 +5432,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			TrustedReplay: true,
 			EndorserBlockProvider: func(
 				[]byte,
@@ -6440,7 +6440,8 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 			)
 			require.NoError(t, err)
 			block := &conway.ConwayBlock{
-				BlockHeader: &conway.ConwayBlockHeader{},
+				BlockHeader:         &conway.ConwayBlockHeader{},
+				InvalidTransactions: []uint{},
 			}
 			block.BlockHeader.Body.BlockNumber = 1
 			block.BlockHeader.Body.Slot = 1

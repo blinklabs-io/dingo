@@ -67,6 +67,7 @@ func TestValidatedBlockBatchesAPIIndexesAndKeepsStateImmediate(t *testing.T) {
 			conwayBlock.BlockHeader.Body.BlockBodySize = bodySize
 			conwayBlock.BlockHeader.SetCbor(nil)
 			conwayBlock.BlockHeader.Body.SetCbor(nil)
+			conwayBlock.InvalidTransactions = []uint{}
 			encodedBlock, err := cbor.EncodeGeneric(conwayBlock)
 			require.NoError(t, err)
 			conwayBlock.SetCbor(encodedBlock)

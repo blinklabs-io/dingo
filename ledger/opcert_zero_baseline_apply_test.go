@@ -55,6 +55,9 @@ func opCertBaselineBlock(
 	issuer := opCertBaselineIssuer()
 	if praos {
 		block := &babbage.BabbageBlock{
+			TransactionBodies:      []babbage.BabbageTransactionBody{},
+			TransactionWitnessSets: []babbage.BabbageTransactionWitnessSet{},
+			InvalidTransactions:    []uint{},
 			BlockHeader: &babbage.BabbageBlockHeader{
 				Body: babbage.BabbageBlockHeaderBody{
 					BlockNumber: 1,
@@ -80,6 +83,9 @@ func opCertBaselineBlock(
 		return block
 	}
 	block := &alonzo.AlonzoBlock{
+		TransactionBodies:      []alonzo.AlonzoTransactionBody{},
+		TransactionWitnessSets: []alonzo.AlonzoTransactionWitnessSet{},
+		InvalidTransactions:    []uint{},
 		BlockHeader: &alonzo.AlonzoBlockHeader{
 			ShelleyBlockHeader: shelley.ShelleyBlockHeader{
 				Body: shelley.ShelleyBlockHeaderBody{
