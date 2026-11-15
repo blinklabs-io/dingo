@@ -5638,7 +5638,17 @@ intent-only cache entries and backfill-source points, replacing its own oldest
 past the cap, so one connection cannot churn others' entries; the shared global
 cache and table bounds still apply. An intent entry's owner is the connection
 that created it and is not transferred by a later offer of the same point.
-Dropped offers are not penalized. On a notify
+Dropped offers are not penalized. An offer only identifies a peer that can
+serve a point; it never makes the point eligible for fetching. Both the notify
+block offer and the transactions offer start a fetch only when the point's
+election was observed (a verified announcing header binds its slot, or a
+selected chain header names it) or the cached entry is already slot-verified.
+An offer that arrives earlier is remembered, not dropped, in a table bounded
+like the backfill sources (per-point peer cap, per-connection cap displacing
+only that connection's own oldest offers, the cache's point cap, and its TTL),
+and is replayed when the election is observed, so the fetch goes to the peer
+that offered it. Replay does not charge the host's offer budget again.
+On an eligible notify
 block offer, `ouroboros/` fetches the endorser-block manifest over leios-fetch,
 decodes and hash-validates it, rejects it if the fetched body's length does not
 match the offer's declared size (`MsgBlockOffer.Size`) or if caching it would

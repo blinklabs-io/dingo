@@ -1106,6 +1106,10 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 ) bool {
 	deadline, _ := ctx.Deadline()
 	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	if (!ok || !data.slotVerified) && !o.leiosElectionObserved(point) {
+		o.logLeiosOfferWithoutElection(connKey, point)
+		return false
+	}
 	if !ok {
 		// Manifest not cached yet (txs offered before/without a block
 		// offer): fetch the manifest first to learn the tx count.
@@ -1671,9 +1675,52 @@ func (o *Ouroboros) leiosOfferedPointPlausible(
 	return false
 }
 
+func (o *Ouroboros) logLeiosOfferWithoutElection(
+	connectionID string,
+	point ocommon.Point,
+) {
+	o.config.Logger.Debug(
+		"not fetching leios endorser block offered without an observed election",
+		"component", "network",
+		"protocol", "leios-notify",
+		"connection_id", connectionID,
+		"slot", point.Slot,
+	)
+}
+
+// leiosElectionObserved reports whether an endorser block at point is
+// justified for fetching: its announcing header was verified, or a selected
+// chain header carrying the verified certificate or announcement names it.
+// A peer's offer only identifies who can serve a point and never satisfies
+// this check.
+func (o *Ouroboros) leiosElectionObserved(point ocommon.Point) bool {
+	o.leiosAnnouncementsMu.Lock()
+	observed := o.leiosAnnouncementBindsSlotLocked(point.Hash, point.Slot)
+	o.leiosAnnouncementsMu.Unlock()
+	if observed {
+		return true
+	}
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	_, observed = o.leiosSelectedHeaders[leiosBlockKey(point.Slot, point.Hash)]
+	return observed
+}
+
 func (o *Ouroboros) leiosnotifyClientNotification(
 	ctx oleiosnotify.CallbackContext,
 	msg protocol.Message,
+) error {
+	return o.handleLeiosNotifyMessage(ctx, msg, false)
+}
+
+// handleLeiosNotifyMessage handles one leios-notify message. replay is true
+// when an offer remembered before its election was observed is re-submitted:
+// it was already screened and counted against its host's offer budget when it
+// first arrived.
+func (o *Ouroboros) handleLeiosNotifyMessage(
+	ctx oleiosnotify.CallbackContext,
+	msg protocol.Message,
+	replay bool,
 ) error {
 	conn := o.connManager.GetConnectionById(ctx.ConnectionId)
 	connId := leiosConnectionIdString(ctx.ConnectionId)
@@ -1692,18 +1739,27 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 	case *oleiosnotify.MsgBlockOffer:
 		// Validate the peer-supplied point before it can touch the shared
 		// cache or its lock.
-		if !o.leiosOfferedPointPlausible(
-			m.Point,
-			leiosOfferBudgetKey(ctx.ConnectionId),
-		) {
-			return nil
+		if !replay {
+			if !o.leiosOfferedPointPlausible(
+				m.Point,
+				leiosOfferBudgetKey(ctx.ConnectionId),
+			) {
+				return nil
+			}
+			o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
 		}
-		o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
 		// While the ledger is deeply behind the head, do not prefetch this
 		// head endorser block: it would expire before the ledger reaches it and
 		// would starve the chain-driven historical backfill for connections. The
 		// ledger fetches the endorser blocks it needs by point as it catches up.
 		if !o.leiosTipPrefetchEnabled() {
+			return nil
+		}
+		// An offer only identifies a serving peer. Fetching needs an election
+		// this node observed or a certificate it verified.
+		if !o.leiosElectionObserved(m.Point) {
+			o.logLeiosOfferWithoutElection(connId, m.Point)
+			o.rememberLeiosOffer(ctx, m, m.Point, false)
 			return nil
 		}
 		if conn.LeiosFetch() == nil || conn.LeiosFetch().Client == nil {
@@ -1834,13 +1890,15 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 	case *oleiosnotify.MsgBlockTxsOffer:
 		// Validate the peer-supplied point before it can touch the shared
 		// cache, the backfill-source table, or their locks.
-		if !o.leiosOfferedPointPlausible(
-			m.Point,
-			leiosOfferBudgetKey(ctx.ConnectionId),
-		) {
-			return nil
+		if !replay {
+			if !o.leiosOfferedPointPlausible(
+				m.Point,
+				leiosOfferBudgetKey(ctx.ConnectionId),
+			) {
+				return nil
+			}
+			o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
 		}
-		o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
 		o.recordLeiosBackfillSource(
 			m.Point,
 			ctx.ConnectionId,
@@ -1869,8 +1927,13 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// lookup is keyed by point, not hash alone, for the same reason as
 		// MsgBlockOffer above: a different, unrelated occurrence of this hash
 		// being complete must not satisfy this offer's point.
-		if data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok &&
-			(data.txCount == 0 || data.completeTxCache()) {
+		data, cached := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		if cached && (data.txCount == 0 || data.completeTxCache()) {
+			return nil
+		}
+		if (!cached || !data.slotVerified) && !o.leiosElectionObserved(point) {
+			o.logLeiosOfferWithoutElection(connId, point)
+			o.rememberLeiosOffer(ctx, m, point, true)
 			return nil
 		}
 		// The relay offers each EB on every connection; claim it so it is
@@ -3129,6 +3192,11 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	o.leiosAnnouncementsMu.Unlock()
 	if publish != nil {
 		publish()
+	}
+	if err == nil {
+		o.replayLeiosPendingOffers(
+			ocommon.NewPoint(header.SlotNumber(), ebHash.Bytes()),
+		)
 	}
 	if err == nil && relay && persisted &&
 		o.leiosRelayAnnouncementPending(

@@ -114,6 +114,7 @@ func TestLeiosManifestOfferClaimsBeforeCrossConnectionDispatch(t *testing.T) {
 	firstGuard := o.leiosFetchGuardFor(first.Id())
 	secondGuard := o.leiosFetchGuardFor(second.Id())
 	point, raw := testLeiosEndorserBlockRaw(t, 200)
+	o.observeLeiosElectionForTest(point)
 	for _, conn := range []struct {
 		ctx oleiosnotify.CallbackContext
 	}{
@@ -133,6 +134,7 @@ func TestLeiosManifestOfferClaimsBeforeCrossConnectionDispatch(t *testing.T) {
 		"the same manifest occurrence must admit only one cross-connection fetch",
 	)
 	otherOccurrence := ocommon.NewPoint(point.Slot+1, point.Hash)
+	o.observeLeiosElectionForTest(otherOccurrence)
 	require.NoError(t, o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: second.Id()},
 		oleiosnotify.NewMsgBlockOffer(otherOccurrence, uint64(len(raw))),
@@ -158,6 +160,7 @@ func TestLeiosManifestOfferReleasesClaimWhenDispatchIsFull(t *testing.T) {
 		require.True(t, o.dispatchLeiosFetch(first.Id(), func() {}))
 	}
 	point, raw := testLeiosEndorserBlockRaw(t, 200)
+	o.observeLeiosElectionForTest(point)
 	offer := oleiosnotify.NewMsgBlockOffer(point, uint64(len(raw)))
 	require.NoError(t, o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: first.Id()}, offer,
@@ -180,6 +183,7 @@ func TestLeiosManifestOfferDoesNotClaimBeforeAdmission(t *testing.T) {
 		require.True(t, o.dispatchLeiosFetch(first.Id(), func() {}))
 	}
 	point, raw := testLeiosEndorserBlockRaw(t, 200)
+	o.observeLeiosElectionForTest(point)
 	offer := oleiosnotify.NewMsgBlockOffer(point, uint64(len(raw)))
 	claimReached := make(chan struct{})
 	releaseClaim := make(chan struct{})
@@ -249,6 +253,7 @@ func TestLeiosTxsOfferDoesNotClaimBeforeAdmission(t *testing.T) {
 		require.True(t, o.dispatchLeiosFetch(first.Id(), func() {}))
 	}
 	point, _ := testLeiosEndorserBlockRaw(t, 200)
+	o.observeLeiosElectionForTest(point)
 	offer := oleiosnotify.NewMsgBlockTxsOffer(point)
 	claimReached := make(chan struct{})
 	releaseClaim := make(chan struct{})
@@ -849,6 +854,7 @@ func TestLeiosTxsOfferCancellationBeforeWorkerLaunch(t *testing.T) {
 		<-release
 	}
 	point := ocommon.NewPoint(462, bytes.Repeat([]byte{0x46}, 32))
+	o.observeLeiosElectionForTest(point)
 	done := make(chan any)
 	result := make(chan error, 1)
 	go func() {
@@ -1497,6 +1503,7 @@ func TestLeiosTxsOfferDisconnectedWaiterIsRemoved(t *testing.T) {
 		})
 	}
 	point := ocommon.NewPoint(463, bytes.Repeat([]byte{0x47}, 32))
+	o.observeLeiosElectionForTest(point)
 	firstDone := make(chan any)
 	secondDone := make(chan any)
 	result := make(chan error, 1)
@@ -1586,6 +1593,7 @@ func TestLeiosManifestOfferRechecksCacheAfterDispatch(t *testing.T) {
 	var unlockOnce sync.Once
 	unlock := func() { unlockOnce.Do(guard.mu.Unlock) }
 	t.Cleanup(unlock)
+	o.observeLeiosElectionForTest(point)
 	require.NoError(t, o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
 		oleiosnotify.NewMsgBlockOffer(point, uint64(len(raw))),
@@ -1644,6 +1652,7 @@ func TestLeiosManifestOfferReleasesClaimAfterSuccessfulFetch(t *testing.T) {
 	require.True(t, cm.AddConnection(conn, false, "peer"))
 	o := newOuroboros(OuroborosConfig{ConnManager: cm, EnableLeios: true})
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	o.observeLeiosElectionForTest(point)
 	require.NoError(t, o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
 		oleiosnotify.NewMsgBlockOffer(point, uint64(len(raw))),
