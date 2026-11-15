@@ -22,6 +22,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -2540,4 +2542,201 @@ func TestObserverDoesNotRefetchEmptyPoolSetWithoutLagMismatch(t *testing.T) {
 
 	require.NoError(t, o.fetchIfNeeded(context.Background(), 5))
 	require.Zero(t, calls.Load())
+}
+
+// TestObserverStrictModeSurvivesDailyQuotaExhaustion drives the observer
+// against a Koios that answers every request with the daily tier quota error
+// until it is released. Quota exhaustion says nothing about the chain data, so
+// strict mode must not call FatalFunc; the epoch stays ERROR and is validated
+// by the scheduled retry once the quota window passes.
+func TestObserverStrictModeSurvivesDailyQuotaExhaustion(t *testing.T) {
+	t.Parallel()
+
+	for _, accounts := range []bool{false, true} {
+		t.Run(fmt.Sprintf("accounts=%t", accounts), func(t *testing.T) {
+			t.Parallel()
+
+			db := newTestDatabaseSourceDB(t)
+			source, err := NewDatabaseSource(db)
+			require.NoError(t, err)
+
+			fake := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
+				7: {activeStake: "2000000", treasury: "11", reserves: "21", fees: "31"},
+			})
+			fakeURL, err := url.Parse(fake.URL)
+			require.NoError(t, err)
+			proxy := httputil.NewSingleHostReverseProxy(fakeURL)
+
+			var quotaExhausted atomic.Bool
+			quotaExhausted.Store(true)
+			var quotaHits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					if quotaExhausted.Load() && r.URL.Path != "/tip" {
+						quotaHits.Add(1)
+						w.WriteHeader(http.StatusTooManyRequests)
+						_, _ = w.Write([]byte(
+							`{"message":"Exceeded Tier Limit, count was 5021"}`,
+						))
+						return
+					}
+					proxy.ServeHTTP(w, r)
+				},
+			))
+			t.Cleanup(srv.Close)
+
+			fatalCount := &atomic.Int32{}
+			o, err := NewObserver(ObserverConfig{
+				BaseURL:               srv.URL,
+				AllowInsecureHTTP:     true,
+				AllowPrivateAddresses: true,
+				Network:               "preview",
+				CachePath:             filepath.Join(t.TempDir(), "cache.db"),
+				Source:                source,
+				Strict:                true,
+				AccountsEnabled:       accounts,
+				Logger:                slog.New(slog.DiscardHandler),
+				FetchRetryAttempts:    1,
+				FetchRetryDelay:       5 * time.Millisecond,
+				ErrorRetryDelay:       20 * time.Millisecond,
+				FatalFunc:             func(error) { fatalCount.Add(1) },
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+			require.NoError(t, o.Start(context.Background()))
+			eb := event.NewEventBus(nil, nil)
+			t.Cleanup(eb.Stop)
+			eb.SubscribeFunc(
+				event.EpochTransitionEventType,
+				o.HandleEpochTransitionEvent,
+			)
+			seedDingoEpochAggregate(t, source, 7, 2_000_000, 11, 21, 31)
+			publishEpochTransition(eb, 7)
+
+			testutil.WaitForCondition(t, func() bool {
+				return quotaHits.Load() >= 2 || fatalCount.Load() > 0
+			}, 5*time.Second, "observer must retry after the quota error")
+			require.Equal(
+				t,
+				int32(0),
+				fatalCount.Load(),
+				"quota exhaustion must not call FatalFunc in strict mode",
+			)
+
+			quotaExhausted.Store(false)
+			testutil.WaitForCondition(t, func() bool {
+				statuses, err := o.cache.GetStatusSummary("preview")
+				if err != nil {
+					return false
+				}
+				for _, s := range statuses {
+					if s.Epoch == 7 && s.Status == StatusPass {
+						return true
+					}
+				}
+				return false
+			}, 10*time.Second, "epoch 7 must validate once the quota is released")
+			require.Equal(t, int32(0), fatalCount.Load())
+		})
+	}
+}
+
+// TestObserverStrictModeSurvivesTxInfoQuotaExhaustion covers the quota running
+// out on /tx_info after the epoch's aggregate rows are cached. The
+// transaction fetch swallows other failures and lets the check report each
+// uncached transaction as missing, which strict mode treats as fatal; a quota
+// error must instead leave the epoch ERROR for the scheduled retry.
+func TestObserverStrictModeSurvivesTxInfoQuotaExhaustion(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	base, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	fake := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
+		7: {activeStake: "2000000", treasury: "11", reserves: "21", fees: "31"},
+	})
+	fakeURL, err := url.Parse(fake.URL)
+	require.NoError(t, err)
+	proxy := httputil.NewSingleHostReverseProxy(fakeURL)
+
+	var quotaExhausted atomic.Bool
+	quotaExhausted.Store(true)
+	var quotaHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/tx_info" {
+				proxy.ServeHTTP(w, r)
+				return
+			}
+			if quotaExhausted.Load() {
+				quotaHits.Add(1)
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(
+					`{"message":"Exceeded Tier Limit, count was 5021"}`,
+				))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]KoiosTxInfoItem{koiosTx()})
+		},
+	))
+	t.Cleanup(srv.Close)
+
+	fatalCount := &atomic.Int32{}
+	o, err := NewObserver(ObserverConfig{
+		BaseURL:               srv.URL,
+		AllowInsecureHTTP:     true,
+		AllowPrivateAddresses: true,
+		Network:               "preview",
+		CachePath:             filepath.Join(t.TempDir(), "cache.db"),
+		Source: &txSampleStub{
+			RewardParitySource: base,
+			sample:             []DingoTransaction{dingoTx()},
+		},
+		Strict:             true,
+		Logger:             slog.New(slog.DiscardHandler),
+		FetchRetryAttempts: 1,
+		FetchRetryDelay:    5 * time.Millisecond,
+		ErrorRetryDelay:    20 * time.Millisecond,
+		FatalFunc:          func(error) { fatalCount.Add(1) },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.NoError(t, o.Start(context.Background()))
+	eb := event.NewEventBus(nil, nil)
+	t.Cleanup(eb.Stop)
+	eb.SubscribeFunc(
+		event.EpochTransitionEventType,
+		o.HandleEpochTransitionEvent,
+	)
+	seedDingoEpochAggregate(t, base, 7, 2_000_000, 11, 21, 31)
+	publishEpochTransition(eb, 7)
+
+	testutil.WaitForCondition(t, func() bool {
+		return quotaHits.Load() >= 2 || fatalCount.Load() > 0
+	}, 5*time.Second, "observer must retry after the tx_info quota error")
+	require.Equal(
+		t,
+		int32(0),
+		fatalCount.Load(),
+		"tx_info quota exhaustion must not call FatalFunc in strict mode",
+	)
+
+	quotaExhausted.Store(false)
+	testutil.WaitForCondition(t, func() bool {
+		statuses, err := o.cache.GetStatusSummary("preview")
+		if err != nil {
+			return false
+		}
+		for _, s := range statuses {
+			if s.Epoch == 7 && s.Status == StatusPass {
+				return true
+			}
+		}
+		return false
+	}, 10*time.Second, "epoch 7 must validate once the quota is released")
+	require.Equal(t, int32(0), fatalCount.Load())
 }

@@ -76,9 +76,10 @@ type ObserverConfig struct {
 	Source RewardParitySource
 	// Strict stops the observer (and, via FatalFunc, the node driving it)
 	// on the first Koios/tool error or non-pass parity result, except an
-	// epoch whose only significant mismatches are reference_lag: Koios's
-	// own data had not caught up, so that result is logged and recorded
-	// but never triggers FatalFunc (see Observer.fail). When
+	// epoch whose only significant mismatches are reference_lag (Koios's
+	// own data had not caught up) or whose fetch failed on Koios's daily
+	// quota: those are logged and recorded but never trigger FatalFunc (see
+	// Observer.fail). When
 	// Strict is false, every failure is logged and recorded in the cache,
 	// and the observer keeps validating subsequent epochs — an explicit,
 	// non-default choice for advisory/observability-only use, since the
@@ -940,7 +941,7 @@ func (o *Observer) reportError(
 		)
 	}
 	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
-	o.fail(epoch, err, true)
+	o.fail(epoch, err, !errors.Is(err, ErrKoiosQuotaExceeded))
 	now := time.Now()
 	o.emitResult(&EpochCompareResult{
 		Network:       o.cfg.Network,
@@ -1327,7 +1328,9 @@ func (o *Observer) fetchAccountsIfNeeded(
 // the result, but it never reaches FatalFunc and never sets fatalFired, so
 // run/runAccounts keep processing later epochs. Every other non-pass result,
 // including dingo_db_missing and dingo_db_error, and every reportError call
-// stays fatal in strict mode.
+// other than Koios quota exhaustion stays fatal in strict mode. Quota
+// exhaustion is retried on the ERROR schedule and clears on Koios's daily
+// reset.
 //
 // run and runAccounts's goroutines can both call this concurrently (given
 // the queue split), so the exactly-once guarantee is enforced with an

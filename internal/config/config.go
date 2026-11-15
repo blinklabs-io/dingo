@@ -420,9 +420,10 @@ type KoiosParityConfig struct {
 	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES"`
 	// Strict stops/cancels the node on the first Koios/tool error or
 	// non-pass parity result, rather than logging it and continuing normal
-	// operation. The one exception is an epoch whose only significant
-	// mismatches are reference_lag (Koios's data has not caught up yet),
-	// which is logged and recorded but never stops the node.
+	// operation. The exceptions are an epoch whose only significant
+	// mismatches are reference_lag (Koios's data has not caught up yet) and
+	// a fetch that fails on Koios's daily quota; both are logged and
+	// recorded, and the epoch is retried, but neither stops the node.
 	Strict bool `yaml:"strict"               envconfig:"DINGO_KOIOS_PARITY_STRICT"`
 	// GraceHours is the window after an epoch closes during which a
 	// Dingo-side row still missing is treated as reference/sync lag rather

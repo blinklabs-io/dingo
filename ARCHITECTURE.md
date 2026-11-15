@@ -16923,8 +16923,8 @@ Fetch and check failures persist the affected queue's ERROR status before
 scheduling the in-memory retry, so restart recovery also selects an epoch
 whose previous comparison passed and whose Koios reference remains fresh.
 The aggregate and account timers are independent, and cancellation stops both.
-Strict-mode fatal eligibility is unchanged: only pure reference lag continues;
-DB failures and validation disagreements still stop strict validation.
+In strict mode only pure reference lag and Koios daily-quota exhaustion
+continue; DB failures and validation disagreements still stop strict validation.
 
 Status reports retain total mismatch counts and separately report significant
 counts using the comparison's severity classification. Aggregate and account
@@ -17721,12 +17721,19 @@ second sync:
     `n.cancelForFatal` — exactly once, on the first fatal-eligible failure,
     and stops processing the rest of the current batch. Every Koios/tool
     error (`reportError`) and every non-pass parity result is fatal-eligible,
-    from either queue (`processEpoch` and `processAccountEpoch`), with one
-    exception: a result whose significant mismatches are all
-    `reference_lag` (`referenceLagOnly`). That means Koios's own data for the
+    from either queue (`processEpoch` and `processAccountEpoch`), with two
+    exceptions. A result whose significant mismatches are all
+    `reference_lag` (`referenceLagOnly`) means Koios's own data for the
     epoch has not caught up, not that Dingo is wrong, so it is logged and
     persisted like any other non-pass result but never calls `FatalFunc` and
-    never stops either queue. The other ERROR-severity
+    never stops either queue. A fetch that fails on Koios's daily tier quota
+    (`ErrKoiosQuotaExceeded`, which wraps `ErrKoiosPermanent`) says nothing
+    about the chain and clears on Koios's daily reset, so `reportError`
+    records the epoch as ERROR without calling `FatalFunc`, and the queue
+    retries it every `ErrorRetryDelay` until the quota resets. That covers the
+    `/tx_info` sample too: `fetchTransactionsIfNeeded` returns a quota error
+    rather than swallowing it, since an uncached sampled transaction would
+    otherwise be checked as a fatal `dingo_db_missing`. The other ERROR-severity
     categories stay fatal: `dingo_db_missing` past the grace window,
     `dingo_db_error`, and `acct_coverage_incomplete` all mean Dingo's side or
     the reference set is unusable, and `reward_type_unmodeled` means a Koios
