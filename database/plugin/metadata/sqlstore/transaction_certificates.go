@@ -263,6 +263,12 @@ func (s *Store) deleteSpecializedCertificates(
 	if !exists {
 		return nil
 	}
+	poolHashes, err := poolHashesOfTransactions(
+		ctx, db, []int64{transactionID},
+	)
+	if err != nil {
+		return err
+	}
 	if _, err := s.execCached(ctx, db, deletePoolRegistrationOwnersSQL,
 		transactionID,
 	); err != nil {
@@ -290,7 +296,7 @@ func (s *Store) deleteSpecializedCertificates(
 			)
 		}
 	}
-	return nil
+	return refreshPoolCurrentState(ctx, db, poolHashes)
 }
 
 func certificateRequiresDeposit(certificate lcommon.Certificate) bool {
@@ -1037,6 +1043,11 @@ SELECT lc.slot FROM leios_transaction_context lc JOIN certs ON certs.transaction
 	if err != nil {
 		return 0, err
 	}
+	if err := refreshPoolCurrentState(
+		ctx, db, [][]byte{cert.Operator[:]},
+	); err != nil {
+		return 0, err
+	}
 	if _, err := db.ExecContext(ctx, `-- name: DeletePoolRegistrationOwnersByID :exec
 DELETE FROM pool_registration_owner WHERE pool_registration_id = ?`,
 		registrationID,
@@ -1110,7 +1121,7 @@ RETURNING id`,
 	if err != nil {
 		return 0, err
 	}
-	return insertCertificateRow(ctx, db, `-- name: InsertPoolRetirement :one
+	id, err := insertCertificateRow(ctx, db, `-- name: InsertPoolRetirement :one
 INSERT INTO pool_retirement (
     pool_key_hash, certificate_id, pool_id, epoch, added_slot
 ) VALUES (?, ?, ?, ?, ?)
@@ -1121,6 +1132,15 @@ RETURNING id`,
 		cert.Epoch,
 		slot,
 	)
+	if err != nil {
+		return 0, err
+	}
+	if err := refreshPoolCurrentState(
+		ctx, db, [][]byte{cert.PoolKeyHash[:]},
+	); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func applyDrepRegistrationCertificate(

@@ -1305,6 +1305,7 @@ func TestUntickedPoolRegistrationUsesContextAtBoundary(t *testing.T) {
 	require.NoError(t, err)
 	_, err = raw.Exec(`UPDATE pool_registration SET certificate_id = ? WHERE pool_key_hash = ?`, certificateID, poolHash)
 	require.NoError(t, err)
+	dbtest.RefreshPoolCurrentState(t, raw)
 	keys, err := db.Metadata().GetActivePoolKeyHashesAtSlot(999, nil)
 	require.NoError(t, err)
 	require.Equal(t, [][]byte{poolHash}, keys)

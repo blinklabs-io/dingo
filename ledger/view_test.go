@@ -3166,6 +3166,16 @@ func (s *errInjectingMetadataStore) GetPool(
 	return s.MetadataStore.GetPool(pkh, includeInactive, txn)
 }
 
+func (s *errInjectingMetadataStore) GetPoolStatus(
+	pkh lcommon.PoolKeyHash,
+	txn types.Txn,
+) (models.PoolStatus, error) {
+	if s.getPoolErr != nil {
+		return models.PoolStatus{}, s.getPoolErr
+	}
+	return s.MetadataStore.GetPoolStatus(pkh, txn)
+}
+
 func (s *errInjectingMetadataStore) GetAccountByCredential(
 	credentialTag uint8,
 	stakeKey []byte,

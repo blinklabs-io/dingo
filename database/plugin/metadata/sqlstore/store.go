@@ -204,6 +204,9 @@ type Store struct {
 	// Test hook runs after GetLiveStakeInputsForPools has totalled pending
 	// reward credits and before its pool reads. Production leaves it nil.
 	liveStakePendingTotalsRead func()
+	// Test hook runs after a pool_current_state read has looked up the
+	// stored rows and before its next statement. Production leaves it nil.
+	poolCurrentStatesRead func()
 
 	migrations          []migrations.Migration
 	genesisStakingEmpty bool
@@ -220,10 +223,16 @@ type Store struct {
 	validateBackup      func(context.Context, string) error
 	maintenanceCancel   context.CancelFunc
 	maintenanceDone     chan struct{}
-	maintenanceState    atomic.Uint32
-	vacuumCancel        context.CancelFunc
-	vacuumDone          chan struct{}
-	vacuumState         atomic.Uint32
+	// poolCurrentFastPools and poolCurrentHistoryPools count the pools
+	// GetPoolRegistrationsEffectiveForEpoch answered from pool_current_state
+	// and the pools it ranked from certificate history.
+	poolCurrentFastPools    atomic.Int64
+	poolCurrentHistoryPools atomic.Int64
+
+	maintenanceState atomic.Uint32
+	vacuumCancel     context.CancelFunc
+	vacuumDone       chan struct{}
+	vacuumState      atomic.Uint32
 
 	// tickDelay returns how long a periodic job waits before its next run.
 	// New sets it to jitteredInterval; tests replace it before Start.
