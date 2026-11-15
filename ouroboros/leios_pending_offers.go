@@ -50,6 +50,21 @@ func (o *Ouroboros) rememberLeiosOffer(
 	point ocommon.Point,
 	txs bool,
 ) {
+	o.storeLeiosPendingOffer(ctx, msg, point, txs)
+	// The election can be observed between the caller's check and the store
+	// above, after its replay found nothing to release. Re-check once the offer
+	// is visible to that replay, so one of the two releases it.
+	if o.leiosElectionObserved(point) {
+		o.replayLeiosPendingOffers(point)
+	}
+}
+
+func (o *Ouroboros) storeLeiosPendingOffer(
+	ctx oleiosnotify.CallbackContext,
+	msg protocol.Message,
+	point ocommon.Point,
+	txs bool,
+) {
 	now := time.Now()
 	key := leiosBlockKey(point.Slot, point.Hash)
 	offerKey := leiosPendingOfferKey{connId: ctx.ConnectionId, txs: txs}

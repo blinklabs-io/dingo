@@ -16,10 +16,13 @@ package ouroboros
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -203,6 +206,83 @@ func TestLeiosUnelectedOfferStaysUnfetchedAfterOtherElection(t *testing.T) {
 		firstGuard.inflight.Load(),
 		"an election for another point must not release this offer",
 	)
+}
+
+// An election observed after the offer handler's check but before it remembers
+// the offer must still release that offer: the announcement's replay has
+// already run, so nothing else would.
+func TestLeiosOfferRememberedAfterElectionObservedIsReplayed(t *testing.T) {
+	t.Parallel()
+	o, first, _ := newHeldManifestOfferPeers(t)
+	firstGuard := o.leiosFetchGuardFor(first.Id())
+	point, raw := testLeiosEndorserBlockRaw(t, 207)
+	o.observeLeiosElectionForTest(point)
+	o.rememberLeiosOffer(
+		oleiosnotify.CallbackContext{ConnectionId: first.Id()},
+		oleiosnotify.NewMsgBlockOffer(point, uint64(len(raw))),
+		point,
+		false,
+	)
+	require.Equal(
+		t,
+		int32(1),
+		firstGuard.inflight.Load(),
+		"an offer remembered after its election was observed must be fetched",
+	)
+	require.Zero(t, pendingLeiosOfferCount(o))
+}
+
+// Replay runs inside the announcement and chain-validation paths. A replayed
+// transactions offer whose connection has no fetch capacity must not hold
+// those paths until that connection drains.
+func TestLeiosOfferReplayDoesNotBlockOnSaturatedConnection(t *testing.T) {
+	t.Parallel()
+	o, first, _ := newHeldManifestOfferPeers(t)
+	firstGuard := o.leiosFetchGuardFor(first.Id())
+	point, raw := testLeiosEndorserBlockRaw(t, 208)
+	firstDone := make(chan any)
+	defer close(firstDone)
+	firstGuard.inflight.Store(leiosFetchMaxInflightPerConn)
+	defer firstGuard.inflight.Store(0)
+	firstGuard.pendingMu.Lock()
+	if firstGuard.pending == nil {
+		firstGuard.pending = make(map[string]leiosPendingFetch)
+	}
+	for idx := range leiosFetchMaxPendingPerConn {
+		firstGuard.pending[fmt.Sprintf("p6389-filler-%d", idx)] = leiosPendingFetch{
+			fn: func() {},
+		}
+	}
+	firstGuard.pendingMu.Unlock()
+	defer func() {
+		firstGuard.pendingMu.Lock()
+		clear(firstGuard.pending)
+		firstGuard.pendingMu.Unlock()
+	}()
+
+	require.NoError(t, o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{
+			ConnectionId: first.Id(), ConnectionDoneChan: firstDone,
+		},
+		oleiosnotify.NewMsgBlockTxsOffer(point),
+	))
+	require.Equal(t, 1, pendingLeiosOfferCount(o))
+
+	header := testLeiosAnnouncingHeader(t, point, uint64(len(raw)))
+	ebHash, ebSize, ok := header.LeiosAnnouncement()
+	require.True(t, ok)
+	recorded := make(chan error, 1)
+	go func() {
+		recorded <- o.recordLeiosAnnouncement(
+			header.Cbor(), header.Cbor(), ebHash, ebSize, header, "test", false,
+		)
+	}()
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		recorded,
+		2*time.Second,
+		"recording an announcement blocked on a saturated offering connection",
+	))
 }
 
 func TestFetchLeiosTxOfferRequiresObservedElection(t *testing.T) {

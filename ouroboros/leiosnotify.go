@@ -1690,7 +1690,7 @@ func (o *Ouroboros) logLeiosOfferWithoutElection(
 
 // leiosElectionObserved reports whether an endorser block at point is
 // justified for fetching: its announcing header was verified, or a selected
-// chain header carrying the verified certificate or announcement names it.
+// chain header announcing it is being validated.
 // A peer's offer only identifies who can serve a point and never satisfies
 // this check.
 func (o *Ouroboros) leiosElectionObserved(point ocommon.Point) bool {
@@ -1756,7 +1756,8 @@ func (o *Ouroboros) handleLeiosNotifyMessage(
 			return nil
 		}
 		// An offer only identifies a serving peer. Fetching needs an election
-		// this node observed or a certificate it verified.
+		// this node observed; a certified endorser block is fetched by point
+		// from the ledger's apply path instead.
 		if !o.leiosElectionObserved(m.Point) {
 			o.logLeiosOfferWithoutElection(connId, m.Point)
 			o.rememberLeiosOffer(ctx, m, m.Point, false)
@@ -1949,15 +1950,22 @@ func (o *Ouroboros) handleLeiosNotifyMessage(
 			return errors.New("missing leios fetch guard")
 		}
 		if !admitted {
+			launch := func() {
+				o.dispatchLeiosTxOfferFetch(
+					guard, client, ctx.ConnectionId, connId, point,
+					ctx.ConnectionDoneChan,
+				)
+			}
+			if replay {
+				// The offer's backfill source is recorded above, so a replay
+				// dropped by a full queue still leaves this peer to the
+				// chain-driven fetch.
+				return guard.deferLeiosFetchWaiting(
+					hashKey, ctx.ConnectionDoneChan, launch, false,
+				)
+			}
 			return guard.deferLeiosFetch(
-				hashKey,
-				ctx.ConnectionDoneChan,
-				func() {
-					o.dispatchLeiosTxOfferFetch(
-						guard, client, ctx.ConnectionId, connId, point,
-						ctx.ConnectionDoneChan,
-					)
-				},
+				hashKey, ctx.ConnectionDoneChan, launch,
 			)
 		}
 		o.dispatchLeiosTxOfferFetch(
@@ -2296,6 +2304,20 @@ func (g *leiosFetchGuard) deferLeiosFetch(
 	done <-chan any,
 	fn func(),
 ) error {
+	return g.deferLeiosFetchWaiting(key, done, fn, true)
+}
+
+// deferLeiosFetchWaiting implements deferLeiosFetch. With wait false it drops
+// fn instead of waiting for room in a full queue: a caller other than this
+// connection's own notify handler, such as an offer replay inside the
+// announcement or chain-validation path, must not be held by this
+// connection's backlog.
+func (g *leiosFetchGuard) deferLeiosFetchWaiting(
+	key string,
+	done <-chan any,
+	fn func(),
+	wait bool,
+) error {
 	for {
 		g.pendingMu.Lock()
 		if g.closed || connectionDone(done) {
@@ -2331,6 +2353,10 @@ func (g *leiosFetchGuard) deferLeiosFetch(
 					}
 				}()
 			}
+			g.pendingMu.Unlock()
+			return nil
+		}
+		if !wait {
 			g.pendingMu.Unlock()
 			return nil
 		}
