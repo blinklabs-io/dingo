@@ -301,12 +301,18 @@ func TestLeiosEBSelectionRequiresMeasureWhenBounded(t *testing.T) {
 // the selection caps, zero included, and the operator caps stay as they were.
 func TestEffectiveLeiosEBCapsCarriesAggregateBounds(t *testing.T) {
 	t.Parallel()
-	caps, ok := effectiveLeiosEBCaps(leiosEBCaps{maxRefs: 7}, &dijkstra.DijkstraProtocolParameters{
-		MaxEndorserBlockTxsSize:          260000,
-		MaxEndorserBlockReferencesSize:   40000,
-		MaxEndorserBlockExUnits:          lcommon.ExUnits{Memory: 5, Steps: 6},
-		MaxRefScriptSizePerEndorserBlock: 7,
-	})
+	caps, ok := effectiveLeiosEBCaps(
+		leiosEBCaps{maxRefs: 7},
+		&dijkstra.DijkstraProtocolParameters{
+			MaxEndorserBlockTxsSize:        260000,
+			MaxEndorserBlockReferencesSize: 40000,
+			MaxEndorserBlockExUnits: lcommon.ExUnits{
+				Memory: 5,
+				Steps:  6,
+			},
+			MaxRefScriptSizePerEndorserBlock: 7,
+		},
+	)
 	require.True(t, ok)
 	require.True(t, caps.aggregateBounded)
 	require.Equal(t, lcommon.ExUnits{Memory: 5, Steps: 6}, caps.maxExUnits)
@@ -314,16 +320,22 @@ func TestEffectiveLeiosEBCapsCarriesAggregateBounds(t *testing.T) {
 	require.Equal(t, uint64(7), caps.maxRefs)
 
 	// Zero stays a bound; it is not the operator's unlimited sentinel.
-	caps, ok = effectiveLeiosEBCaps(leiosEBCaps{}, &dijkstra.DijkstraProtocolParameters{
-		MaxEndorserBlockTxsSize:        260000,
-		MaxEndorserBlockReferencesSize: 40000,
-	})
+	caps, ok = effectiveLeiosEBCaps(
+		leiosEBCaps{},
+		&dijkstra.DijkstraProtocolParameters{
+			MaxEndorserBlockTxsSize:        260000,
+			MaxEndorserBlockReferencesSize: 40000,
+		},
+	)
 	require.True(t, ok)
 	require.True(t, caps.aggregateBounded)
 	require.Equal(t, lcommon.ExUnits{}, caps.maxExUnits)
 	require.Zero(t, caps.maxRefScriptBytes)
 
-	caps, ok = effectiveLeiosEBCaps(leiosEBCaps{}, &conway.ConwayProtocolParameters{})
+	caps, ok = effectiveLeiosEBCaps(
+		leiosEBCaps{},
+		&conway.ConwayProtocolParameters{},
+	)
 	require.True(t, ok)
 	require.False(t, caps.aggregateBounded)
 }

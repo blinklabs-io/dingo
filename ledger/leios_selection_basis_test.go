@@ -90,7 +90,10 @@ func TestWithLeiosSelectionSessionRequiresParentTip(t *testing.T) {
 	require.ErrorIs(t, err, forging.ErrTxValidationParentMismatch)
 	require.Zero(t, called)
 
-	require.NoError(t, ls.WithLeiosSelectionSession(t.Context(), tipHash, session))
+	require.NoError(
+		t,
+		ls.WithLeiosSelectionSession(t.Context(), tipHash, session),
+	)
 	require.Equal(t, 1, called)
 
 	// An empty parent leaves the session unpinned.
