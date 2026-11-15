@@ -143,8 +143,8 @@ type TxValidationSessionProvider interface {
 // TxRefScriptSizeFunc measures the reference-script bytes tx consumes,
 // resolving its top-level inputs and reference inputs, not those of its
 // sub-transactions, through the same overlay TxValidationFunc reads, so
-// outputs created by earlier selected transactions count. Call it after the transaction passed validation and before its
-// effects enter the overlay.
+// outputs created by earlier selected transactions count. Call it after the
+// transaction passed validation and before its effects enter the overlay.
 type TxRefScriptSizeFunc = func(
 	tx ledger.Transaction,
 	consumedUtxos map[utxoref.Key]struct{},
