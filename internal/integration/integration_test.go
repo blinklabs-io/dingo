@@ -40,10 +40,12 @@ func TestPluginSystemIntegration(t *testing.T) {
 	require.Contains(t, providers, plugin.Descriptor{
 		Capability: plugin.CapabilityStorageBlob,
 		Name:       "badger", Description: "BadgerDB local key-value store",
+		DurableClose: true,
 	})
 	require.Contains(t, providers, plugin.Descriptor{
 		Capability: plugin.CapabilityStorageMetadata,
 		Name:       "sqlite", Description: "SQLite relational database",
+		DurableClose: true,
 	})
 
 	runtime, err := internalplugins.OpenDatabase(

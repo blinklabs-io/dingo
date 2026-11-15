@@ -2557,6 +2557,25 @@ waited for only until that same deadline. A deadline expiry is returned as a
 shutdown error while the remaining teardown continues, so a slow peer-governor
 operation cannot hold phase 1 indefinitely.
 
+The deadline does not bound durability-critical store closes. A provider whose
+`plugin.Descriptor.DurableClose` is set (the badger blob store and the SQLite,
+MySQL, and PostgreSQL metadata stores) is stopped by `plugin.Host` with a
+context detached from the shutdown deadline, and `Host.Stop` keeps waiting for
+it after the deadline passes, logging the store name and elapsed time at
+start, finish, and periodically while it runs. An overrun is reported as the
+warning `storage close finished after the shutdown deadline`,
+not as an error. Closing a large badger store can take minutes under I/O load
+because it syncs every table file, and abandoning it risks leaving the store
+needing recovery, as cardano-node always closes its databases fully. `Node.Stop`
+therefore returns after `shutdownTimeout` plus the store close time, and the
+supervisor's grace period (Kubernetes `terminationGracePeriodSeconds`, systemd
+`TimeoutStopSec`, `docker stop -t`) must cover both; a SIGKILL from the
+supervisor or operator remains the way to abandon a wedged close. A repeated
+SIGINT or SIGTERM during shutdown is logged with that advice and does not
+interrupt the close. A later
+persistent store that sets `DurableClose` takes the same path. Non-durable
+providers and every other shutdown component keep the single deadline.
+
 The terminal EventBus close occurs after mempool teardown and runs concurrently
 with `ConnectionManager.Stop`. Lossless event delivery can backpressure a
 network protocol callback on a full ledger subscriber, while a blockfetch
@@ -4060,7 +4079,9 @@ returning the error and leaving the process running but silently unresponsive
 only if that resume itself fails does `n.cancel()` get called.
 `errStorageDrainUnconfirmed` is the one deliberate exception to that recovery
 path, raised by `closeStorageForLiveLifecycleOp`'s own `n.ledgerState.Close()`
-call, its `pluginHost.StopCapability` calls when those hit the context deadline,
+call, its wait for deferred-index maintenance when that hits the context
+deadline, its `pluginHost.StopCapability` calls when a non-durable provider hits
+the context deadline (a `DurableClose` store closes to completion instead),
 `quiesceForLiveLifecycleOp`'s call to
 `ouroboros.PauseLeiosPersistWriterForLiveLifecycleOp` (which wraps its own
 `ouroboros.ErrLeiosPersistDrainUnconfirmed`), and `quiesceForLiveLifecycleOp`'s
@@ -19763,7 +19784,8 @@ retained block contents.
 `*dingo.Node` in `node_remote_lifecycle.go`. `Node.RequestShutdown` accepts
 exactly one request (a later one gets `FAILED_PRECONDITION`), resolves the
 timeout (zero, or anything longer than `shutdownTimeout`, selects
-`shutdownTimeout`, the bound `Node.Stop` enforces), publishes
+`shutdownTimeout`, the bound `Node.Stop` enforces for everything except
+durable storage closes, which run to completion), publishes
 `event.NodeLifecycleEvent` on `node.lifecycle`, and signals a `ShutdownRequest`
 on `Node.ShutdownRequests`. `internal/node.Run` ends the run on that signal as
 it would on a signal, then, however the run ended, calls
@@ -19771,11 +19793,14 @@ it would on a signal, then, however the run ended, calls
 intake: Bark keeps serving until shutdown phase 1 stops it, so a Stop or
 Restart arriving after a signal or component error gets `FAILED_PRECONDITION`
 instead of being acknowledged and never performed. `runRequestedShutdown`
-bounds the graceful shutdown by the request's deadline and abandons it past
-that deadline. A restart then
+reports a shutdown still running at the request's deadline with a warning and
+the error `graceful shutdown exceeded`, but keeps waiting for it, logging
+progress, rather than abandoning it: `Node.Stop` already bounds everything but
+durable storage closes, and exiting or re-executing mid-close would hand the
+next process a store whose close never completed. A restart then
 calls `dingo.ReExec`, which `exec`s the same binary and arguments in place
 (Unix only; elsewhere `Restart` is `UNIMPLEMENTED`) so a supervisor sees one
-continuous process, and it does so even after a forced deadline. `GetStatus`
+continuous process, and it does so after the overrun shutdown has finished. `GetStatus`
 reports the accepted state and deadline, uptime, version, the health probe's
 readiness and tip gap as health and sync status, and the ledger tip (omitted
 while a live restore or truncate holds `liveLifecycleMu`). Unlike the

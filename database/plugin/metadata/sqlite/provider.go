@@ -45,9 +45,10 @@ func RegisterProvider(host *hostplugin.Host) error {
 	return hostplugin.Register(
 		host,
 		hostplugin.Descriptor{
-			Capability:  hostplugin.CapabilityStorageMetadata,
-			Name:        ProviderName,
-			Description: "SQLite relational database",
+			Capability:   hostplugin.CapabilityStorageMetadata,
+			Name:         ProviderName,
+			Description:  "SQLite relational database",
+			DurableClose: true,
 		},
 		func() Config { return Config{} },
 		func(_ context.Context, cfg Config, deps metadata.ProviderDependencies) (*sqlstore.Store, hostplugin.Instance, error) {

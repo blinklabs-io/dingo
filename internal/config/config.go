@@ -65,6 +65,11 @@ type ctxKey string
 
 const configContextKey ctxKey = "dingo.config"
 
+// DefaultShutdownTimeout bounds node shutdown except for storage closes. The
+// badger blob store and the metadata SQL stores always close to completion,
+// logging progress, so a supervisor's grace period (Kubernetes
+// terminationGracePeriodSeconds, systemd TimeoutStopSec, docker stop -t) must
+// cover the store close as well as this timeout.
 const DefaultShutdownTimeout = "30s"
 
 // DefaultLedgerCatchupTimeout is the maximum time LoadWithDB will wait
