@@ -502,6 +502,11 @@ type Ouroboros struct {
 	leiosBackfillSourcesMu sync.Mutex
 	leiosBackfillSources   map[string]*leiosBackfillPointSources
 	leiosBackfillSourceSeq uint64
+	// leiosPendingOffers holds offers that arrived before their election was
+	// observed, keyed by occurrence, until that election is observed.
+	leiosPendingOffersMu sync.Mutex
+	leiosPendingOffers   map[string]map[leiosPendingOfferKey]leiosPendingOffer
+	leiosPendingOfferSeq uint64
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
@@ -1055,6 +1060,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		),
 		leiosEndorserBlocks:  make(map[string]*leiosEndorserBlockData),
 		leiosBackfillSources: make(map[string]*leiosBackfillPointSources),
+		leiosPendingOffers: make(
+			map[string]map[leiosPendingOfferKey]leiosPendingOffer,
+		),
 		leiosSelectedHeaders: make(
 			map[string]map[string]map[string]selectedLeiosHeader,
 		),

@@ -1116,6 +1116,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	) {
 		return ledger.ErrLeiosValidationParentUnavailable
 	}
+	//nolint:contextcheck // Offer fetches replayed here are connection-owned work that must outlive this validation's context.
 	releaseAuthority, err := o.retainSelectedLeiosHeader(header)
 	if err != nil {
 		return err
@@ -1325,6 +1326,9 @@ func (o *Ouroboros) retainSelectedLeiosHeader(
 	selected.refs++
 	byRaw[rawKey] = selected
 	o.leiosMu.Unlock()
+	o.replayLeiosPendingOffers(
+		ocommon.NewPoint(header.SlotNumber(), ebHash.Bytes()),
+	)
 	return func() {
 		o.leiosMu.Lock()
 		if current := o.leiosSelectedHeaders[key]; current != nil {
