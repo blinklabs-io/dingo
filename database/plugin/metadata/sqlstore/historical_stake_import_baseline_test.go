@@ -15,6 +15,8 @@
 package sqlstore
 
 import (
+	"bytes"
+	"encoding/hex"
 	"fmt"
 	"testing"
 
@@ -28,6 +30,11 @@ const (
 	importBaselineSlot  = 100
 	importBaselineStake = 7_000
 	importBoundarySlot  = 1_500
+	// importReapSlot is the epoch 2 boundary, after importBoundarySlot.
+	importReapSlot = 2_000
+	// importAfterReapSlot is a read past the reap, where the delegation is
+	// gone.
+	importAfterReapSlot = 2_500
 )
 
 // An imported account has no certificate history, so the historical boundary
@@ -45,6 +52,58 @@ func TestEpochBoundaryStakeKeepsImportedStateAfterLaterCertificate(
 	})
 }
 
+// A Shelley genesis delegator has no certificate history either. POOLREAP at
+// the boundary after the snapshot slot rewrites its account row, so the
+// snapshot read issued after the reap must still find the pre-reap delegation.
+func TestEpochBoundaryStakeKeepsGenesisDelegationAcrossPoolReap(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	depositHeldEpochs(t, store, 4)
+	pool := depositHeldPoolKey(0xd4)
+	credential := stakeCredential(0xd5)
+	require.NoError(t, store.SetGenesisStaking(
+		map[string]lcommon.PoolRegistrationCertificate{
+			hex.EncodeToString(pool.Bytes()): *depositHeldRegistration(pool),
+		},
+		map[string]string{
+			hex.EncodeToString(credential.Credential.Bytes()): hex.EncodeToString(
+				pool.Bytes(),
+			),
+		},
+		2_000_000,
+		nil,
+		nil,
+	))
+	txID := fixtureIdentityRow(t, store, 0, bytes.Repeat([]byte{0xd6}, 32))
+	_, err := store.writeDB.ExecContext(t.Context(), `
+INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot, amount)
+VALUES (?, 0, ?, 0, 10, 0, ?)`,
+		txID, credential.Credential.Bytes(), fmt.Sprint(importBaselineStake))
+	require.NoError(t, err)
+	writeDepositHeldCert(t, store, 1_200, 0, depositHeldRetirement(pool, 2), 0)
+	require.NoError(t, store.ClearDelegationsToRetiredPool(
+		pool.Bytes(), importReapSlot, nil))
+
+	key := string(pool.Bytes())
+	read := func(snapshotSlot uint64) (uint64, uint64) {
+		stake, delegators, err := store.GetEpochBoundaryStakeByPools(
+			[][]byte{pool.Bytes()}, snapshotSlot, snapshotSlot+1, nil, 0, 0,
+			nil,
+		)
+		require.NoError(t, err)
+		return stake[key], delegators[key]
+	}
+	stake, delegators := read(importReapSlot - 1)
+	require.Equal(t, uint64(importBaselineStake), stake,
+		"the snapshot before the reap boundary keeps the genesis delegation")
+	require.Equal(t, uint64(1), delegators)
+	stake, delegators = read(importReapSlot + depositHeldEpochLength - 1)
+	require.Zero(t, stake, "the next snapshot follows the reap")
+	require.Zero(t, delegators)
+}
+
 // testEpochBoundaryStakeKeepsImportedState runs the scenarios against a fresh
 // store per case so each dialect's integration test can share them.
 func testEpochBoundaryStakeKeepsImportedState(
@@ -57,8 +116,12 @@ func testEpochBoundaryStakeKeepsImportedState(
 		// baseline is false for a legacy row with no account_import_baseline.
 		baseline       bool
 		importedActive bool
-		later          func(t *testing.T, store *Store, c lcommon.Credential, pool lcommon.PoolKeyHash)
-		wantCounted    bool
+		// drep gives the imported account a DRep delegation.
+		drep        bool
+		later       func(t *testing.T, store *Store, c lcommon.Credential, pool lcommon.PoolKeyHash)
+		wantCounted bool
+		// goneAfterReap requires an empty read at importAfterReapSlot.
+		goneAfterReap bool
 	}{
 		{
 			name:           "no_later_cert",
@@ -120,6 +183,37 @@ func testEpochBoundaryStakeKeepsImportedState(
 			wantCounted: true,
 		},
 		{
+			// POOLREAP clears account.pool and stamps added_slot with the
+			// boundary, writing no certificate.
+			name:           "later_pool_reap",
+			baseline:       true,
+			importedActive: true,
+			later: func(t *testing.T, store *Store, c lcommon.Credential, pool lcommon.PoolKeyHash) {
+				writeDepositHeldCert(t, store, 1_100, 0,
+					depositHeldRegistration(pool), 0)
+				writeDepositHeldCert(t, store, 1_200, 0,
+					depositHeldRetirement(pool, 2), 0)
+				require.NoError(t, store.ClearDelegationsToRetiredPool(
+					pool.Bytes(), importReapSlot, nil))
+			},
+			wantCounted:   true,
+			goneAfterReap: true,
+		},
+		{
+			// A DRep clear stamps added_slot without touching account.pool.
+			name:           "later_drep_clear",
+			baseline:       true,
+			importedActive: true,
+			drep:           true,
+			later: func(t *testing.T, store *Store, c lcommon.Credential, pool lcommon.PoolKeyHash) {
+				cleared, err := store.ClearDanglingDRepDelegations(
+					importReapSlot, nil)
+				require.NoError(t, err)
+				require.Equal(t, 1, cleared)
+			},
+			wantCounted: true,
+		},
+		{
 			name:           "baseline_inactive",
 			baseline:       true,
 			importedActive: false,
@@ -146,6 +240,11 @@ func testEpochBoundaryStakeKeepsImportedState(
 				AddedSlot:     importBaselineSlot,
 				CreatedSlot:   importBaselineSlot,
 				Reward:        types.Uint64(importBaselineStake),
+			}
+			if tc.drep {
+				// No drep row is registered, so the delegation dangles.
+				account.Drep = bytes.Repeat([]byte{0xd3}, 28)
+				account.DrepType = models.DrepTypeAddrKeyHash
 			}
 			if tc.baseline {
 				require.NoError(t, store.ImportAccount(account, nil))
@@ -217,6 +316,16 @@ VALUES (?, 0, ?, ?, ?, TRUE, ?)`),
 				scoped,
 				"the credential-scoped read the pointer overlay uses must agree",
 			)
+			if tc.goneAfterReap {
+				stake, delegators, err := store.GetEpochBoundaryStakeByPools(
+					[][]byte{pool.Bytes()}, importAfterReapSlot, 0, nil,
+					0, 0, nil,
+				)
+				require.NoError(t, err)
+				require.Zero(t, delegators[key],
+					"the reap removes the delegation after its boundary")
+				require.Zero(t, stake[key])
+			}
 		})
 	}
 }
