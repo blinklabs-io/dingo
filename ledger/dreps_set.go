@@ -1,0 +1,1117 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ledger
+
+import (
+	"bytes"
+	"context"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
+)
+
+// DRepReader serves DReps, their delegator links and the dormancy counter
+// from a live UTxO set that computes them.
+type DRepReader interface {
+	DrepStateLoaded() (bool, error)
+	Drep(tag uint8, cred []byte) (*models.Drep, error)
+	DrepAt(tag uint8, cred []byte, slot uint64) (*models.Drep, error)
+	Dreps(fn func(*models.Drep) error) error
+	DRepLinkLive(drep, stake models.StakeCredentialRef) (bool, error)
+	DRepLinkLiveAt(drep, stake models.StakeCredentialRef, slot uint64) (bool, error)
+	DRepLinks(
+		drep *models.StakeCredentialRef,
+		fn func(drep, stake models.StakeCredentialRef) error,
+	) error
+	DormantEpochs() (uint64, error)
+	DormantEpochsAt(slot uint64) (uint64, error)
+}
+
+// drepReader returns the set's DRep reader when the set computes DRep
+// state.
+func (ls *LedgerState) drepReader(txn ledgerdb.Txn) DRepReader {
+	if ls.accountReader(txn) == nil {
+		return nil
+	}
+	r, ok := ls.readSet(txn).(DRepReader)
+	if !ok {
+		return nil
+	}
+	return r
+}
+
+// stagedOps returns the staged batches txn sees, in order, and the lowest
+// staged rollback target among them, if any.
+func (ls *LedgerState) stagedOps(txn ledgerdb.Txn) []epochStateOps {
+	ls.utxoSetApplyMu.RLock()
+	defer ls.utxoSetApplyMu.RUnlock()
+	return ls.stagedEpochStateOps(txn)
+}
+
+// drepView returns the DRep of (tag, cred) as txn sees the set.
+func (ls *LedgerState) drepView(
+	r DRepReader,
+	txn ledgerdb.Txn,
+	tag uint8,
+	cred []byte,
+) (*models.Drep, error) {
+	var ceiling *uint64
+	var staged []DRepChange
+	for _, o := range ls.stagedOps(txn) {
+		if o.rollbackTo != nil {
+			to := *o.rollbackTo
+			if ceiling == nil || to < *ceiling {
+				ceiling = &to
+			}
+			staged = slices.DeleteFunc(staged, func(c DRepChange) bool {
+				return c.Slot > to
+			})
+		}
+		for _, c := range o.dreps {
+			if c.Drep.CredentialTag == tag && bytes.Equal(c.Drep.Credential, cred) {
+				staged = append(staged, c)
+			}
+		}
+	}
+	if len(staged) > 0 {
+		last := staged[len(staged)-1]
+		if last.Delete {
+			return nil, nil
+		}
+		d := last.Drep
+		return &d, nil
+	}
+	if ceiling != nil {
+		return r.DrepAt(tag, cred, *ceiling)
+	}
+	return r.Drep(tag, cred)
+}
+
+func sameRef(a, b models.StakeCredentialRef) bool {
+	return a.Tag == b.Tag && bytes.Equal(a.Key, b.Key)
+}
+
+// drepLinkView reports whether stake's link to drep is live as txn sees the
+// set.
+func (ls *LedgerState) drepLinkView(
+	r DRepReader,
+	txn ledgerdb.Txn,
+	drep, stake models.StakeCredentialRef,
+) (bool, error) {
+	var ceiling *uint64
+	var staged []DRepLinkChange
+	for _, o := range ls.stagedOps(txn) {
+		if o.rollbackTo != nil {
+			to := *o.rollbackTo
+			if ceiling == nil || to < *ceiling {
+				ceiling = &to
+			}
+			staged = slices.DeleteFunc(staged, func(c DRepLinkChange) bool {
+				return c.Slot > to
+			})
+		}
+		for _, c := range o.drepLinks {
+			if sameRef(c.Drep, drep) && sameRef(c.Stake, stake) {
+				staged = append(staged, c)
+			}
+		}
+	}
+	if len(staged) > 0 {
+		return staged[len(staged)-1].Live, nil
+	}
+	if ceiling != nil {
+		return r.DRepLinkLiveAt(drep, stake, *ceiling)
+	}
+	return r.DRepLinkLive(drep, stake)
+}
+
+// dormancyView returns the DRep dormancy counter as txn sees the set.
+func (ls *LedgerState) dormancyView(r DRepReader, txn ledgerdb.Txn) (uint64, error) {
+	var ceiling *uint64
+	var staged []DormancyChange
+	for _, o := range ls.stagedOps(txn) {
+		if o.rollbackTo != nil {
+			to := *o.rollbackTo
+			if ceiling == nil || to < *ceiling {
+				ceiling = &to
+			}
+			staged = slices.DeleteFunc(staged, func(c DormancyChange) bool {
+				return c.Slot > to
+			})
+		}
+		staged = append(staged, o.dormancy...)
+	}
+	if len(staged) > 0 {
+		return staged[len(staged)-1].Epochs, nil
+	}
+	if ceiling != nil {
+		return r.DormantEpochsAt(*ceiling)
+	}
+	return r.DormantEpochs()
+}
+
+// drepLinkCandidates returns the links the set holds, of drep alone when it
+// is not nil, with those the batches txn sees staged; a caller confirms
+// each with drepLinkView.
+func (ls *LedgerState) drepLinkCandidates(
+	r DRepReader,
+	txn ledgerdb.Txn,
+	drep *models.StakeCredentialRef,
+) ([][2]models.StakeCredentialRef, error) {
+	var out [][2]models.StakeCredentialRef
+	seen := make(map[string]struct{})
+	add := func(d, s models.StakeCredentialRef) {
+		k := d.MapKey() + "|" + s.MapKey()
+		if _, ok := seen[k]; !ok {
+			seen[k] = struct{}{}
+			out = append(out, [2]models.StakeCredentialRef{d, s})
+		}
+	}
+	if err := r.DRepLinks(drep, func(d, s models.StakeCredentialRef) error {
+		add(d, s)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	var ceiling *uint64
+	for _, o := range ls.stagedOps(txn) {
+		if o.rollbackTo != nil && (ceiling == nil || *o.rollbackTo < *ceiling) {
+			to := *o.rollbackTo
+			ceiling = &to
+		}
+		for _, c := range o.drepLinks {
+			if drep == nil || sameRef(c.Drep, *drep) {
+				add(c.Drep, c.Stake)
+			}
+		}
+	}
+	if ceiling == nil {
+		return out, nil
+	}
+	// A staged rollback restores the links closed after its target, which the
+	// set's current rows no longer list.
+	lr, ok := r.(DRepLinkAsOfReader)
+	if !ok {
+		return nil, ls.unavailableAsOf("DRep delegators")
+	}
+	changed, err := lr.DRepLinksChangedAfter(*ceiling)
+	if err != nil {
+		return nil, err
+	}
+	for _, l := range changed {
+		if drep == nil || sameRef(l[0], *drep) {
+			add(l[0], l[1])
+		}
+	}
+	return out, nil
+}
+
+func (ls *LedgerState) stageDrep(txn ledgerdb.Txn, slot uint64, d models.Drep) {
+	ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		DReps: []DRepChange{{Slot: slot, Drep: d}},
+	})
+}
+
+func (ls *LedgerState) stageDrepLink(
+	txn ledgerdb.Txn,
+	slot uint64,
+	drep, stake models.StakeCredentialRef,
+	live bool,
+) {
+	ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		DRepLinks: []DRepLinkChange{
+			{Slot: slot, Drep: drep, Stake: stake, Live: live},
+		},
+	})
+}
+
+// clearAccountDrep stages ref's DRep delegation cleared at slot, as the
+// metadata store's DRep clears do.
+func (ls *LedgerState) clearAccountDrep(
+	r AccountReader,
+	txn ledgerdb.Txn,
+	ref models.StakeCredentialRef,
+	slot uint64,
+) error {
+	a, err := ls.accountView(r, txn, ref.Tag, ref.Key)
+	if err != nil || a == nil {
+		return err
+	}
+	next := *a
+	next.Drep, next.DrepType, next.AddedSlot = nil, 0, slot
+	ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		Accounts: []AccountChange{{Slot: slot, Account: next}},
+	})
+	return nil
+}
+
+// stageDrepCertificate stages a DRep registration, update or
+// deregistration as setDrepCertificateState and removeAllDrepDelegators do
+// in the metadata store.
+func (ls *LedgerState) stageDrepCertificate(
+	ar AccountReader,
+	r DRepReader,
+	txn ledgerdb.Txn,
+	tag uint8,
+	cred []byte,
+	kind models.DrepCertificateKind,
+	anchorURL string,
+	anchorHash []byte,
+	slot uint64,
+	protocolMajor uint64,
+) error {
+	prev, err := ls.drepView(r, txn, tag, cred)
+	if err != nil {
+		return err
+	}
+	if kind != models.DrepCertificateRegistration && (prev == nil || !prev.Active) {
+		return fmt.Errorf("%w: DRep %x", models.ErrDrepNotFound, cred)
+	}
+	next := models.Drep{CredentialTag: tag, Credential: bytes.Clone(cred)}
+	if prev != nil {
+		next = *prev
+	}
+	next.AnchorURL, next.AnchorHash = anchorURL, anchorHash
+	next.AddedSlot = slot
+	next.Active = kind != models.DrepCertificateDeregistration
+	ls.stageDrep(txn, slot, next)
+	if kind != models.DrepCertificateDeregistration {
+		return nil
+	}
+	drep := models.NewStakeCredentialRef(tag, cred)
+	links, err := ls.drepLinkCandidates(r, txn, &drep)
+	if err != nil {
+		return err
+	}
+	var clear []models.StakeCredentialRef
+	if protocolMajor >= 10 {
+		refs, err := ls.accountsByDrepCandidates(ar, txn, uint64(tag), cred)
+		if err != nil {
+			return err
+		}
+		for _, ref := range refs {
+			a, err := ls.accountView(ar, txn, ref.Tag, ref.Key)
+			if err != nil {
+				return err
+			}
+			if a != nil && a.Active && a.DrepType == uint64(tag) &&
+				bytes.Equal(a.Drep, cred) {
+				clear = append(clear, ref)
+			}
+		}
+	} else {
+		for _, l := range links {
+			live, err := ls.drepLinkView(r, txn, l[0], l[1])
+			if err != nil {
+				return err
+			}
+			if live {
+				clear = append(clear, l[1])
+			}
+		}
+	}
+	for _, ref := range clear {
+		if err := ls.clearAccountDrep(ar, txn, ref, slot); err != nil {
+			return err
+		}
+	}
+	for _, l := range links {
+		live, err := ls.drepLinkView(r, txn, l[0], l[1])
+		if err != nil {
+			return err
+		}
+		if live {
+			ls.stageDrepLink(txn, slot, l[0], l[1], false)
+		}
+	}
+	return nil
+}
+
+// accountsByDrepCandidates returns the active accounts the set's DRep index
+// names for (typ, drep), with those the batches txn sees staged; a caller
+// confirms each with accountView.
+func (ls *LedgerState) accountsByDrepCandidates(
+	ar AccountReader,
+	txn ledgerdb.Txn,
+	typ uint64,
+	drep []byte,
+) ([]models.StakeCredentialRef, error) {
+	refs, err := ar.AccountsByDrep(typ, drep)
+	if err != nil {
+		return nil, err
+	}
+	return ls.accountCandidates(ar, txn, refs, refSet(refs))
+}
+
+// stageDrepLinkUpdate keeps the delegator links in step with an account
+// certificate that rewrites the account's DRep delegation, as
+// applyAccountCertificate does: it closes the link to the prior DRep when
+// models.ShouldRemovePriorDrepDelegation says so, and opens one to a newly
+// named credential DRep that is registered.
+func (ls *LedgerState) stageDrepLinkUpdate(
+	r DRepReader,
+	txn ledgerdb.Txn,
+	stake models.StakeCredentialRef,
+	prev *models.Account,
+	effect models.AccountDelegation,
+	slot uint64,
+	protocolMajor uint64,
+) error {
+	var oldDrep []byte
+	var oldType uint64
+	if prev != nil {
+		oldDrep, oldType = prev.Drep, prev.DrepType
+	}
+	if models.ShouldRemovePriorDrepDelegation(
+		protocolMajor, oldType, len(oldDrep) > 0,
+		effect.DrepType, len(effect.Drep) > 0,
+	) {
+		old := models.NewStakeCredentialRef(uint8(oldType), oldDrep) //nolint:gosec // a DRep credential type
+		live, err := ls.drepLinkView(r, txn, old, stake)
+		if err != nil {
+			return err
+		}
+		if live {
+			ls.stageDrepLink(txn, slot, old, stake, false)
+		}
+	}
+	if len(effect.Drep) == 0 || effect.DrepType > models.DrepTypeScriptHash {
+		return nil
+	}
+	target, err := ls.drepView(r, txn, uint8(effect.DrepType), effect.Drep) //nolint:gosec // a DRep credential type
+	if err != nil || target == nil || !target.Active {
+		return err
+	}
+	link := models.NewStakeCredentialRef(uint8(effect.DrepType), effect.Drep) //nolint:gosec // a DRep credential type
+	live, err := ls.drepLinkView(r, txn, link, stake)
+	if err != nil || live {
+		return err
+	}
+	ls.stageDrepLink(txn, slot, link, stake, true)
+	return nil
+}
+
+// drepStaging returns the readers DRep staging needs, or false when the set
+// does not compute DRep state or has stopped following the ledger.
+func (ls *LedgerState) drepStaging(
+	txn ledgerdb.Txn,
+) (AccountReader, DRepReader) {
+	ar := ls.accountReader(txn)
+	if ar == nil || ls.utxoSetFailed.Load() {
+		return nil, nil
+	}
+	r := ls.drepReader(txn)
+	if r == nil {
+		return nil, nil
+	}
+	return ar, r
+}
+
+// drepsUnserved is the error of a DRep write the set cannot stage: when the
+// DReps family is drained the SQL write was skipped, so the write would be
+// lost. Otherwise the metadata store holds it and there is nothing to report.
+func (s stagingLedgerDB) drepsUnserved() error {
+	if s.drepsDrained() {
+		return drainedUnserved(nodesettings.FamilyDReps)
+	}
+	return nil
+}
+
+// failDrepStaging stops the set following the ledger and, when the DReps
+// family is drained and the set alone holds the write, returns err so the
+// write is not lost.
+func (s stagingLedgerDB) failDrepStaging(err error) error {
+	s.ls.failAccountStaging(err)
+	if s.drepsDrained() {
+		return err
+	}
+	return nil
+}
+
+func (s stagingLedgerDB) UpdateDRepActivity(
+	ctx context.Context,
+	credentialTag uint8,
+	drepCredential []byte,
+	activityEpoch uint64,
+	inactivityPeriod uint64,
+	slot uint64,
+	txn ledgerdb.Txn,
+) error {
+	if !s.drepsDrained() {
+		if err := s.LedgerDB.UpdateDRepActivity(
+			ctx, credentialTag, drepCredential, activityEpoch, inactivityPeriod,
+			slot, txn,
+		); err != nil {
+			return err
+		}
+	}
+	_, r := s.ls.drepStaging(txn)
+	if r == nil {
+		return s.drepsUnserved()
+	}
+	d, err := s.ls.drepView(r, txn, credentialTag, drepCredential)
+	if err != nil {
+		return s.failDrepStaging(err)
+	}
+	if d == nil {
+		return s.failDrepStaging(
+			fmt.Errorf("%w: DRep %x", models.ErrDrepNotFound, drepCredential),
+		)
+	}
+	next := *d
+	next.LastActivityEpoch = activityEpoch
+	next.ExpiryEpoch = activityEpoch + inactivityPeriod
+	s.ls.stageDrep(txn, slot, next) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	return nil
+}
+
+func (s stagingLedgerDB) InsertDrepIfAbsent(
+	ctx context.Context,
+	credentialTag uint8,
+	cred []byte,
+	slot uint64,
+	url string,
+	hash []byte,
+	active bool,
+	txn ledgerdb.Txn,
+) error {
+	if !s.drepsDrained() {
+		if err := s.LedgerDB.InsertDrepIfAbsent(
+			ctx, credentialTag, cred, slot, url, hash, active, txn,
+		); err != nil {
+			return err
+		}
+	}
+	_, r := s.ls.drepStaging(txn)
+	if r == nil {
+		return s.drepsUnserved()
+	}
+	d, err := s.ls.drepView(r, txn, credentialTag, cred)
+	if err != nil {
+		return s.failDrepStaging(err)
+	}
+	if d != nil {
+		return nil
+	}
+	s.ls.stageDrep(txn, slot, models.Drep{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		CredentialTag: credentialTag,
+		Credential:    bytes.Clone(cred),
+		AnchorURL:     url,
+		AnchorHash:    hash,
+		AddedSlot:     slot,
+		Active:        active,
+	})
+	return nil
+}
+
+func (s stagingLedgerDB) ResetDormantDRepEpochs(
+	ctx context.Context,
+	slot uint64,
+	txn ledgerdb.Txn,
+) error {
+	if !s.drepsDrained() {
+		if err := s.LedgerDB.ResetDormantDRepEpochs(ctx, slot, txn); err != nil {
+			return err
+		}
+	}
+	_, r := s.ls.drepStaging(txn)
+	if r == nil {
+		return s.drepsUnserved()
+	}
+	n, err := s.ls.dormancyView(r, txn)
+	if err != nil {
+		return s.failDrepStaging(err)
+	}
+	if n != 0 {
+		s.ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+			Dormancy: []DormancyChange{{Slot: slot, Epochs: 0}},
+		})
+	}
+	return nil
+}
+
+// BumpDormantDRepExpiries stages the bump when the metadata store applied
+// it: it applies once per epoch, and its count does not say whether it did,
+// so the dormancy counter before and after tells.
+func (s stagingLedgerDB) BumpDormantDRepExpiries(
+	ctx context.Context,
+	slot uint64,
+	txn ledgerdb.Txn,
+) (int, error) {
+	if s.drepsDrained() {
+		return s.bumpDrainedDormantDRepExpiries(slot, txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	}
+	before, err := s.LedgerDB.GetDormantDRepEpochs(ctx, txn)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.LedgerDB.BumpDormantDRepExpiries(ctx, slot, txn)
+	if err != nil {
+		return n, err
+	}
+	after, err := s.LedgerDB.GetDormantDRepEpochs(ctx, txn)
+	if err != nil {
+		return n, err
+	}
+	_, r := s.ls.drepStaging(txn)
+	if r == nil || after == before {
+		return n, nil
+	}
+	if err := s.ls.stageDormantBump(r, txn, slot); err != nil { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		s.ls.failAccountStaging(err)
+	}
+	return n, nil
+}
+
+func (ls *LedgerState) stageDormantBump(r DRepReader, txn ledgerdb.Txn, slot uint64) error {
+	n, err := ls.dormancyView(r, txn)
+	if err != nil {
+		return err
+	}
+	ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		Dormancy: []DormancyChange{{Slot: slot, Epochs: n + 1}},
+	})
+	refs, err := ls.drepCandidates(r, txn)
+	if err != nil {
+		return err
+	}
+	for _, ref := range refs {
+		d, err := ls.drepView(r, txn, ref.Tag, ref.Key)
+		if err != nil {
+			return err
+		}
+		if d == nil || !d.Active || d.ExpiryEpoch == 0 {
+			continue
+		}
+		next := *d
+		next.ExpiryEpoch++
+		ls.stageDrep(txn, slot, next)
+	}
+	return nil
+}
+
+// drepCandidates returns every DRep the set holds and the batches txn sees
+// staged; a caller confirms each with drepView.
+func (ls *LedgerState) drepCandidates(
+	r DRepReader,
+	txn ledgerdb.Txn,
+) ([]models.StakeCredentialRef, error) {
+	var out []models.StakeCredentialRef
+	seen := make(map[string]struct{})
+	add := func(tag uint8, cred []byte) {
+		ref := models.NewStakeCredentialRef(tag, cred)
+		if _, ok := seen[ref.MapKey()]; !ok {
+			seen[ref.MapKey()] = struct{}{}
+			out = append(out, ref)
+		}
+	}
+	err := r.Dreps(func(d *models.Drep) error {
+		add(d.CredentialTag, d.Credential)
+		return nil
+	})
+	for _, o := range ls.stagedOps(txn) {
+		for _, c := range o.dreps {
+			add(c.Drep.CredentialTag, c.Drep.Credential)
+		}
+	}
+	return out, err
+}
+
+func (s stagingLedgerDB) ClearDanglingDRepDelegations(
+	ctx context.Context,
+	atSlot uint64,
+	txn ledgerdb.Txn,
+) (int, error) {
+	var n int
+	if !s.drepsDrained() {
+		var err error
+		n, err = s.LedgerDB.ClearDanglingDRepDelegations(ctx, atSlot, txn)
+		if err != nil {
+			return n, err
+		}
+	}
+	ar, r := s.ls.drepStaging(txn)
+	if ar == nil || r == nil {
+		return n, s.drepsUnserved()
+	}
+	if err := s.ls.stageDanglingClear(ar, r, txn, atSlot); err != nil { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		return n, s.failDrepStaging(err)
+	}
+	return n, nil
+}
+
+// stageDanglingClear clears every account's delegation to a credential DRep
+// that is not registered, closes every link that no longer matches an
+// active account's delegation to a registered DRep, and opens the missing
+// ones, as clearDanglingDRepDelegations does at the protocol version 10
+// hard fork.
+func (ls *LedgerState) stageDanglingClear(
+	ar AccountReader,
+	r DRepReader,
+	txn ledgerdb.Txn,
+	slot uint64,
+) error {
+	refs, err := ar.AccountsWithDrep()
+	if err != nil {
+		return err
+	}
+	refs, err = ls.accountCandidates(ar, txn, refs, refSet(refs))
+	if err != nil {
+		return err
+	}
+	registered := func(typ uint64, cred []byte) (bool, error) {
+		d, err := ls.drepView(r, txn, uint8(typ), cred) //nolint:gosec // a DRep credential type
+		return d != nil && d.Active, err
+	}
+	for _, ref := range refs {
+		a, err := ls.accountView(ar, txn, ref.Tag, ref.Key)
+		if err != nil {
+			return err
+		}
+		if a == nil || len(a.Drep) == 0 || a.DrepType > models.DrepTypeScriptHash {
+			continue
+		}
+		ok, err := registered(a.DrepType, a.Drep)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			if err := ls.clearAccountDrep(ar, txn, ref, slot); err != nil {
+				return err
+			}
+		}
+	}
+	links, err := ls.drepLinkCandidates(r, txn, nil)
+	if err != nil {
+		return err
+	}
+	for _, l := range links {
+		live, err := ls.drepLinkView(r, txn, l[0], l[1])
+		if err != nil || !live {
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		a, err := ls.accountView(ar, txn, l[1].Tag, l[1].Key)
+		if err != nil {
+			return err
+		}
+		keep := a != nil && a.Active && a.DrepType <= models.DrepTypeScriptHash &&
+			a.DrepType == uint64(l[0].Tag) && bytes.Equal(a.Drep, l[0].Key)
+		if keep {
+			if keep, err = registered(a.DrepType, a.Drep); err != nil {
+				return err
+			}
+		}
+		if !keep {
+			ls.stageDrepLink(txn, slot, l[0], l[1], false)
+		}
+	}
+	for _, ref := range refs {
+		a, err := ls.accountView(ar, txn, ref.Tag, ref.Key)
+		if err != nil {
+			return err
+		}
+		if a == nil || !a.Active || len(a.StakingKey) == 0 || len(a.Drep) == 0 ||
+			a.DrepType > models.DrepTypeScriptHash {
+			continue
+		}
+		ok, err := registered(a.DrepType, a.Drep)
+		if err != nil || !ok {
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		link := models.NewStakeCredentialRef(uint8(a.DrepType), a.Drep) //nolint:gosec // a DRep credential type
+		live, err := ls.drepLinkView(r, txn, link, ref)
+		if err != nil {
+			return err
+		}
+		if !live {
+			ls.stageDrepLink(txn, slot, link, ref, true)
+		}
+	}
+	return nil
+}
+
+func (ls *LedgerState) compareDrepRead(
+	g verifyReadGuard,
+	what string,
+	same bool,
+	setErr error,
+	detail ...any,
+) {
+	if !ls.verifying() {
+		return
+	}
+	if setErr == nil && !same && ls.verifyReadRaced(g) {
+		return
+	}
+	ls.metrics.drepReadsVerified.Inc()
+	if same && setErr == nil {
+		return
+	}
+	n := ls.drepReadMismatches.Add(1)
+	ls.metrics.drepReadMismatches.Inc()
+	if n > 20 && n%1000 != 0 {
+		return
+	}
+	ls.config.Logger.Warn(
+		"live UTxO set DRep read differs from the metadata store",
+		append([]any{
+			"component", "ledger",
+			"read", what,
+			"set_error", setErr,
+			"mismatches", n,
+		}, detail...)...,
+	)
+}
+
+// drepDiff names the fields in which the metadata store's DRep and the set's
+// differ, and the values of each.
+func drepDiff(store, set *models.Drep) string {
+	if store == nil || set == nil {
+		if store == nil && set == nil {
+			return ""
+		}
+		present := func(d *models.Drep) string {
+			if d == nil {
+				return "absent"
+			}
+			return "present"
+		}
+		return fmt.Sprintf("store=%s set=%s", present(store), present(set))
+	}
+	var diffs []string
+	add := func(name string, differs bool, s, g any) {
+		if differs {
+			diffs = append(diffs, fmt.Sprintf("%s store=%v set=%v", name, s, g))
+		}
+	}
+	add("credential", store.CredentialTag != set.CredentialTag ||
+		!bytes.Equal(store.Credential, set.Credential),
+		fmt.Sprintf("%d/%x", store.CredentialTag, store.Credential),
+		fmt.Sprintf("%d/%x", set.CredentialTag, set.Credential))
+	add("anchor_url", store.AnchorURL != set.AnchorURL,
+		store.AnchorURL, set.AnchorURL)
+	add("anchor_hash", !bytes.Equal(store.AnchorHash, set.AnchorHash),
+		hex.EncodeToString(store.AnchorHash), hex.EncodeToString(set.AnchorHash))
+	add("added_slot", store.AddedSlot != set.AddedSlot,
+		store.AddedSlot, set.AddedSlot)
+	add("active", store.Active != set.Active, store.Active, set.Active)
+	add("last_activity_epoch", store.LastActivityEpoch != set.LastActivityEpoch,
+		store.LastActivityEpoch, set.LastActivityEpoch)
+	add("expiry_epoch", store.ExpiryEpoch != set.ExpiryEpoch,
+		store.ExpiryEpoch, set.ExpiryEpoch)
+	return strings.Join(diffs, "; ")
+}
+
+func drepState(d models.Drep) string {
+	return fmt.Sprintf(
+		"(added_slot=%d last_activity_epoch=%d expiry_epoch=%d)",
+		d.AddedSlot, d.LastActivityEpoch, d.ExpiryEpoch,
+	)
+}
+
+// drepDiffLimit bounds how many DReps a set comparison names.
+const drepDiffLimit = 10
+
+// activeDrepsDiff names the DReps that only the metadata store's or only the
+// set's active list holds, and the fields of those both hold that differ.
+func activeDrepsDiff(want []*models.Drep, got map[string]models.Drep) string {
+	var parts []string
+	seen := make(map[string]struct{}, len(want))
+	for _, w := range want {
+		key := models.NewStakeCredentialRef(w.CredentialTag, w.Credential).
+			MapKey()
+		seen[key] = struct{}{}
+		g, ok := got[key]
+		label := fmt.Sprintf("%d/%x", w.CredentialTag, w.Credential)
+		switch {
+		case !ok:
+			parts = append(parts, "only in store "+label+" "+drepState(*w))
+		case !sameDrep(*w, g):
+			parts = append(parts, label+": "+drepDiff(w, &g))
+		}
+	}
+	for key, g := range got {
+		if _, ok := seen[key]; !ok {
+			parts = append(parts, fmt.Sprintf(
+				"only in set %d/%x %s",
+				g.CredentialTag,
+				g.Credential,
+				drepState(g),
+			))
+		}
+	}
+	slices.Sort(parts)
+	if len(parts) > drepDiffLimit {
+		parts = append(parts[:drepDiffLimit],
+			fmt.Sprintf("and %d more", len(parts)-drepDiffLimit))
+	}
+	return strings.Join(parts, " | ")
+}
+
+// stagedDrepSummary counts the batches txn sees over the set's applied state
+// and, of their DRep changes, those to (tag, cred) -- every DRep when cred is
+// nil.
+func (ls *LedgerState) stagedDrepSummary(
+	txn ledgerdb.Txn,
+	tag uint8,
+	cred []byte,
+) string {
+	ops := ls.stagedOps(txn)
+	changes, rollbacks := 0, 0
+	for _, o := range ops {
+		if o.rollbackTo != nil {
+			rollbacks++
+		}
+		for _, c := range o.dreps {
+			if cred == nil || (c.Drep.CredentialTag == tag &&
+				bytes.Equal(c.Drep.Credential, cred)) {
+				changes++
+			}
+		}
+	}
+	return fmt.Sprintf(
+		"batches=%d drep_changes=%d rollbacks=%d", len(ops), changes, rollbacks,
+	)
+}
+
+// drepVerifying returns the DRep reader when reads are compared with the
+// set: in any reads mode but off, while the set follows the ledger. A DRep
+// read the set does not serve is answered from the metadata store.
+func (ls *LedgerState) drepVerifying(txn ledgerdb.Txn) DRepReader {
+	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
+		return nil
+	}
+	_, r := ls.drepStaging(txn)
+	return r
+}
+
+// drepServing returns the DRep reader when DRep reads are answered from the
+// set, or nil when they stay on the metadata store.
+func (ls *LedgerState) drepServing(txn ledgerdb.Txn) DRepReader {
+	_, r := ls.drepStaging(txn)
+	if r == nil || !ls.setServes(&ls.drepsSetLoaded, r.DrepStateLoaded) {
+		return nil
+	}
+	return r
+}
+
+func sameDrepPtr(a, b *models.Drep) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return sameDrep(*a, *b)
+}
+
+func (s stagingLedgerDB) GetDrepByCredential(
+	ctx context.Context,
+	credentialTag uint8,
+	cred []byte,
+	includeInactive bool,
+	txn ledgerdb.Txn,
+) (*models.Drep, error) {
+	if r := s.ls.drepServing(txn); r != nil {
+		d, err := s.ls.drepView(r, txn, credentialTag, cred)
+		if err != nil {
+			return nil, err
+		}
+		if d == nil || !includeInactive && !d.Active {
+			return nil, models.ErrDrepNotFound
+		}
+		return d, nil
+	}
+	g := s.ls.verifyGuard(txn)
+	want, err := s.LedgerDB.GetDrepByCredential(
+		ctx, credentialTag, cred, includeInactive, txn,
+	)
+	notFound := errors.Is(err, models.ErrDrepNotFound)
+	if err != nil && !notFound {
+		return nil, err
+	}
+	if r := s.ls.drepVerifying(txn); r != nil {
+		got, setErr := s.ls.drepView(r, txn, credentialTag, cred)
+		if got != nil && !includeInactive && !got.Active {
+			got = nil
+		}
+		same := sameDrepPtr(want, got)
+		var detail []any
+		if !same && setErr == nil {
+			detail = []any{
+				"diff", drepDiff(want, got),
+				"staged", s.ls.stagedDrepSummary(txn, credentialTag, cred),
+			}
+		}
+		s.ls.compareDrepRead(
+			g, fmt.Sprintf("drep %d/%x", credentialTag, cred),
+			same, setErr, detail...,
+		)
+	}
+	return want, err
+}
+
+func (s stagingLedgerDB) GetActiveDreps(
+	ctx context.Context,
+	txn ledgerdb.Txn,
+) ([]*models.Drep, error) {
+	if r := s.ls.drepServing(txn); r != nil {
+		return s.ls.activeDrepsView(r, txn)
+	}
+	g := s.ls.verifyGuard(txn)
+	want, err := s.LedgerDB.GetActiveDreps(ctx, txn)
+	if err != nil {
+		return nil, err
+	}
+	r := s.ls.drepVerifying(txn)
+	if r == nil {
+		return want, nil
+	}
+	got := make(map[string]models.Drep)
+	var setErr error
+	active, err := s.ls.activeDrepsView(r, txn)
+	if err != nil {
+		setErr = err
+	}
+	for _, d := range active {
+		got[models.NewStakeCredentialRef(d.CredentialTag, d.Credential).MapKey()] = *d
+	}
+	same := len(got) == len(want)
+	for _, w := range want {
+		g, ok := got[models.NewStakeCredentialRef(w.CredentialTag, w.Credential).MapKey()]
+		if !ok || !sameDrep(*w, g) {
+			same = false
+		}
+	}
+	var detail []any
+	if !same && setErr == nil {
+		detail = []any{
+			"diff", activeDrepsDiff(want, got),
+			"store_count", len(want), "set_count", len(got),
+			"staged", s.ls.stagedDrepSummary(txn, 0, nil),
+		}
+	}
+	s.ls.compareDrepRead(g, "active dreps", same, setErr, detail...)
+	return want, nil
+}
+
+// activeDrepsView is the active DReps as txn sees the set. The metadata
+// store returns them in no particular order, and so does this.
+func (ls *LedgerState) activeDrepsView(
+	r DRepReader,
+	txn ledgerdb.Txn,
+) ([]*models.Drep, error) {
+	refs, err := ls.drepCandidates(r, txn)
+	if err != nil {
+		return nil, err
+	}
+	var out []*models.Drep
+	for _, ref := range refs {
+		d, err := ls.drepView(r, txn, ref.Tag, ref.Key)
+		if err != nil {
+			return nil, err
+		}
+		if d != nil && d.Active {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+func (s stagingLedgerDB) GetDormantDRepEpochs(
+	ctx context.Context,
+	txn ledgerdb.Txn,
+) (uint64, error) {
+	if r := s.ls.drepServing(txn); r != nil {
+		return s.ls.dormancyView(r, txn)
+	}
+	g := s.ls.verifyGuard(txn)
+	want, err := s.LedgerDB.GetDormantDRepEpochs(ctx, txn)
+	if err != nil {
+		return 0, err
+	}
+	if r := s.ls.drepVerifying(txn); r != nil {
+		got, setErr := s.ls.dormancyView(r, txn)
+		s.ls.compareDrepRead(g, "dormant epochs", got == want, setErr)
+	}
+	return want, nil
+}
+
+// bumpDrainedDormantDRepExpiries applies the epoch's dormancy bump to the set
+// alone. The metadata store applies it once per boundary slot, so the bump
+// is skipped when the set already holds a counter change at slot, staged in
+// txn or committed, that no staged rollback undoes.
+func (s stagingLedgerDB) bumpDrainedDormantDRepExpiries(
+	slot uint64,
+	txn ledgerdb.Txn,
+) (int, error) {
+	_, r := s.ls.drepStaging(txn)
+	if r == nil {
+		return 0, drainedUnserved(nodesettings.FamilyDReps)
+	}
+	var staged []DormancyChange
+	var ceiling *uint64
+	for _, o := range s.ls.stagedOps(txn) {
+		if o.rollbackTo != nil {
+			to := *o.rollbackTo
+			if ceiling == nil || to < *ceiling {
+				ceiling = &to
+			}
+			staged = slices.DeleteFunc(staged, func(c DormancyChange) bool {
+				return c.Slot > to
+			})
+		}
+		staged = append(staged, o.dormancy...)
+	}
+	if slices.ContainsFunc(staged, func(c DormancyChange) bool {
+		return c.Slot == slot
+	}) {
+		return 0, nil
+	}
+	if slot > 0 {
+		// A staged rollback below slot leaves the committed counter as of
+		// its target, so a bump the rollback undoes is not yet applied.
+		upTo := func(at uint64) uint64 {
+			if ceiling != nil {
+				return min(at, *ceiling)
+			}
+			return at
+		}
+		at, err := r.DormantEpochsAt(upTo(slot))
+		if err != nil {
+			return 0, err
+		}
+		before, err := r.DormantEpochsAt(upTo(slot - 1))
+		if err != nil {
+			return 0, err
+		}
+		if at != before {
+			return 0, nil
+		}
+	}
+	if err := s.ls.stageDormantBump(r, txn, slot); err != nil { //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		return 0, err
+	}
+	return 0, nil
+}

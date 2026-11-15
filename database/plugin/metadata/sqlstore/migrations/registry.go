@@ -108,6 +108,7 @@ const (
 	poolRelayIPv6NetworkOrderSchemaRelease              = "pool-relay-ipv6-network-order"
 	epochStakesIndexSchemaRelease                       = "reward-stake-input-epoch-registered-index"
 	poolCurrentStateSchemaRelease                       = "pool-current-state"
+	ledgerStateDrainSchemaRelease                       = "ledger-state-drain-latch"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -295,6 +296,7 @@ var schemaVersions = []struct {
 	{Version: 65, Name: scriptHashIndexDropSchemaRelease, Dir: "v65"},
 	{Version: 66, Name: governanceVoteTombstoneSchemaRelease, Dir: "v66"},
 	{Version: 67, Name: poolCurrentStateSchemaRelease, Dir: "v67"},
+	{Version: 68, Name: ledgerStateDrainSchemaRelease, Dir: "v68"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

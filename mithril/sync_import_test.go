@@ -612,3 +612,34 @@ func TestUpdateMithrilReadyStateClearsStaleTrustBoundaryHash(
 	require.NoError(t, err)
 	require.Empty(t, hash)
 }
+
+// TestUpdateMithrilReadyStateKeepsUtxoSetOnlyMark pins that the sync-state
+// clear ending a Mithril import keeps the mark of a database whose UTxO set is
+// only in the live UTxO set. Without it the next start reads the database as
+// one with a metadata UTxO set and refuses ledgerUtxoBadgerOnly.
+func TestUpdateMithrilReadyStateKeepsUtxoSetOnlyMark(t *testing.T) {
+	t.Parallel()
+	db := newMithrilTestDB(t)
+	ledgerStateHash := bytes.Repeat([]byte{0x55}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, ledgerStateHash),
+	}, nil))
+	require.NoError(t, db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil))
+	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
+	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		30,
+		ledgerStateHash,
+		"",
+		true,
+	))
+	marked, err := db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, "1", marked)
+	status, err := db.GetSyncState("sync_status", nil)
+	require.NoError(t, err)
+	require.Empty(t, status, "sync_status must still be cleared")
+}

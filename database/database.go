@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -94,6 +95,25 @@ type Database struct {
 	config   *Config
 	logger   *slog.Logger
 	metadata metadata.MetadataStore
+	// liveUtxo is set when the ledger holds the live UTxO set outside the
+	// metadata store; see SetLiveUtxoSource.
+	liveUtxo bool
+	// drained is the persisted ledger-state latch; see FamilyDrained.
+	drained drainedMask
+	// nonceSource serves rollback nonce reads once the nonces family is
+	// drained; see SetNonceSource.
+	nonceSource atomic.Pointer[NonceSource]
+	// epochSource serves epoch and era switch reads once those families are
+	// drained; see SetEpochSource.
+	epochSource atomic.Pointer[EpochSource]
+	// pparamsSource serves protocol parameter, update proposal and sync
+	// marker reads once the pparams-updates family is drained; see
+	// SetPParamsSource. pparamsSourceLoaded caches that it holds them all.
+	pparamsSource       atomic.Pointer[PParamsSource]
+	pparamsSourceLoaded atomic.Bool
+	// poolSource serves pool reads once the pools-history family is
+	// drained.
+	poolSource atomic.Pointer[PoolSource]
 	// blobRef is the installed blob store, guarded by blobMu. See
 	// blob_store.go for the ownership, locking, and replacement rules that
 	// apply to both fields; nothing outside that file touches blobRef

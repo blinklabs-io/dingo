@@ -155,6 +155,10 @@ type Options struct {
 	// does not disable it: with a DataDir the template is seeded into
 	// that directory instead.
 	InMemoryMetadata bool
+
+	// StatementGuard, when set, vets every SQL statement the metadata
+	// store's connections run.
+	StatementGuard metadata.StatementGuard
 }
 
 // NewDatabase composes Badger and SQLite for a test. The database is closed
@@ -297,6 +301,7 @@ func newDatabaseWithOptions(
 			DataDir: config.DataDir, StorageMode: config.StorageMode,
 			MaxConnections: opts.MaxConnections,
 			Logger:         config.Logger, PromRegistry: config.PromRegistry,
+			StatementGuard: opts.StatementGuard,
 		},
 	)
 	if err != nil {

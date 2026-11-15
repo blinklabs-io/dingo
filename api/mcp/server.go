@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
 )
@@ -150,11 +151,21 @@ func NewMCPServer(
 
 	// Register tools, resources & prompts
 	limits := newReadLimits()
+	limits.drained = func() nodesettings.FamilyMask {
+		var mask nodesettings.FamilyMask
+		if deps.LedgerState != nil {
+			mask |= deps.LedgerState.DrainedFamilies()
+		}
+		if deps.Database != nil {
+			mask |= deps.Database.DrainedMask()
+		}
+		return mask
+	}
 	registerSQLiteTools(server, db, cfg.QueryTimeout, cfg.MaxRows, limits)
 	registerCardanoTools(
 		server,
 		db,
-		deps.LedgerState,
+		ledgerStateOf(deps.LedgerState),
 		deps.Mempool,
 		deps.Network,
 		cfg.QueryTimeout,

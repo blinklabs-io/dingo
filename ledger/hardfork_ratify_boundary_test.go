@@ -22,6 +22,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -247,9 +249,13 @@ INSERT INTO auth_committee_hot (
 	// fails (TestCaptureEpochBoundarySnapshotStakeHookFailureDeferred), so
 	// this is still a realistic, supported configuration -- not a
 	// fixture-only shortcut.
-	snapshotMgr := snapshot.NewManager(db, newTestEventBus(t, nil), nil)
+	snapshotMgr := snapshot.NewManager(
+		dbadapter.New(db),
+		newTestEventBus(t, nil),
+		nil,
+	)
 	ls.SetEpochBoundarySnapshotHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return snapshotMgr.CaptureEpochBoundarySnapshot(
 				context.Background(), txn, evt,
 			)
@@ -258,7 +264,7 @@ INSERT INTO auth_committee_hot (
 	if wireCurrentBoundaryHook {
 		ls.SetCurrentBoundarySPOStakeHook(
 			func(
-				txn *database.Txn,
+				txn ledgerdb.Txn,
 				evt event.EpochTransitionEvent,
 				incomingEraID uint,
 			) ([]*models.PoolStakeSnapshot, error) {

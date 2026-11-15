@@ -82,7 +82,15 @@ func (n *Node) startKoiosParityObserver() error {
 		)
 	}
 
-	source, err := koiosparity.NewDatabaseSource(n.db)
+	var source *koiosparity.DatabaseSource
+	var err error
+	if n.ledgerState != nil {
+		source, err = koiosparity.NewDatabaseSourceWithLedgerDB(
+			n.db, n.ledgerState.LedgerDB(),
+		)
+	} else {
+		source, err = koiosparity.NewDatabaseSource(n.db)
+	}
 	if err != nil {
 		return fmt.Errorf("create koios parity reward source: %w", err)
 	}

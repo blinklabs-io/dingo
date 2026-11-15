@@ -263,7 +263,7 @@ func (ls *LedgerState) peerForkAncestorOpCertCounter(
 	poolKeyHash lcommon.PoolKeyHash,
 	ancestorSlot uint64,
 ) (opCertCounterSnapshot, error) {
-	txn := ls.db.Transaction(ctx, false)
+	txn := ls.ledgerDB().Begin(ctx, false)
 	defer txn.Release()
 
 	mithrilSlot := ls.mithrilLedgerSlotSnapshot()
@@ -275,7 +275,7 @@ func (ls *LedgerState) peerForkAncestorOpCertCounter(
 				mithrilSlot,
 			)
 		}
-		sequence, found, err := ls.db.LatestPoolOpCertSequenceInRange(
+		sequence, found, err := ls.ledgerDB().LatestPoolOpCertSequenceInRange(
 			ctx,
 			poolKeyHash,
 			mithrilSlot,
@@ -291,7 +291,7 @@ func (ls *LedgerState) peerForkAncestorOpCertCounter(
 				found:    true,
 			}, nil
 		}
-		imported, err := ls.db.PoolOpCertSequencesExistAtSlot(
+		imported, err := ls.ledgerDB().PoolOpCertSequencesExistAtSlot(
 			ctx,
 			mithrilSlot,
 			txn,
@@ -305,7 +305,7 @@ func (ls *LedgerState) peerForkAncestorOpCertCounter(
 		return opCertCounterSnapshot{}, nil
 	}
 
-	sequence, found, err := ls.db.LatestPoolOpCertSequenceAtOrBefore(
+	sequence, found, err := ls.ledgerDB().LatestPoolOpCertSequenceAtOrBefore(
 		ctx,
 		poolKeyHash,
 		ancestorSlot,

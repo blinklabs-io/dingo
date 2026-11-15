@@ -97,6 +97,15 @@ func WithMemTableSize(size int64) BlobStoreBadgerOptionFunc {
 	}
 }
 
+// WithInMemoryMemTableSize specifies the memtable size in bytes of an
+// in-memory store, which has no data directory. Zero keeps Badger's own
+// default, which differs from the on-disk default set by WithMemTableSize.
+func WithInMemoryMemTableSize(size int64) BlobStoreBadgerOptionFunc {
+	return func(b *BlobStoreBadger) {
+		b.inMemoryMemTableSize = size
+	}
+}
+
 // WithValueThreshold specifies the value threshold for keeping values in LSM tree
 func WithValueThreshold(threshold int64) BlobStoreBadgerOptionFunc {
 	return func(b *BlobStoreBadger) {

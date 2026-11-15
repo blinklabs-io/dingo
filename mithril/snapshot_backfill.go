@@ -187,6 +187,9 @@ type SnapshotConfig struct {
 	StabilityWindow uint64
 	// CardanoNodeConfig supplies era epoch lengths to the ledger import.
 	CardanoNodeConfig *cardano.CardanoNodeConfig
+	// UtxoSet, when set, receives the ledger state's UTxO set; see
+	// ledgerstate.ImportConfig.UtxoSet.
+	UtxoSet ledgerstate.UtxoSetLoader
 	// DataDir is the node's data directory. The restore downloads under it
 	// when Feed.Bootstrap.DownloadDir is empty. One of the two is required.
 	DataDir    string
@@ -626,6 +629,7 @@ func RunSnapshotBackfill(
 	cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: true})
 	_, _, _, err = importPreparedLedgerState(
 		ctx, db, logger, cfg.CardanoNodeConfig, result, prepared, false,
+		cfg.UtxoSet,
 		func(p ledgerstate.ImportProgress) {
 			cfg.emit(SyncProgress{
 				Phase:       PhaseLedgerImport,

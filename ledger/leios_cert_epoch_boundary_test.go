@@ -25,8 +25,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -357,14 +359,14 @@ func runLeiosCertEpochBoundaryCase(
 	)
 	if crossingClosure {
 		ls.SetEpochBoundarySnapshotStakeHook(func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			_ event.EpochTransitionEvent,
 		) error {
 			boundarySnapshots++
 			tx, err := db.GetTransactionByHash(
 				t.Context(),
 				closureTx.Hash().Bytes(),
-				txn,
+				dbadapter.Unwrap(txn),
 			)
 			if err != nil {
 				return err

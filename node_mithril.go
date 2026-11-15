@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/promutil"
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/plugin"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -163,6 +164,9 @@ type MithrilCatchUpParams struct {
 	// PromRegistry is the node's metrics registry, nil when it has none.
 	// Collectors registered on it last for the node's lifetime.
 	PromRegistry prometheus.Registerer
+	// UtxoSet returns the live UTxO set a snapshot restore loads when the
+	// node keeps it as the only copy, or nil.
+	UtxoSet func() ledgerstate.UtxoSetLoader
 }
 
 // MithrilCatchUpFactory builds the MithrilCatchUp for a node. It returns nil
@@ -636,6 +640,12 @@ func (n *Node) newMithrilSource() MithrilCatchUp {
 		// The source outlives every live Restore or Truncate rebuild, so
 		// its metrics must not be in the set those rebuilds unregister.
 		PromRegistry: n.retainedComponentPromRegistry(),
+		UtxoSet: func() ledgerstate.UtxoSetLoader {
+			if !n.config.ledgerUtxoBadgerOnly || n.utxoSet == nil {
+				return nil
+			}
+			return n.utxoSet
+		},
 	})
 	if err != nil {
 		n.mithrilMetrics.fallback(mithrilFallbackConfig)
@@ -864,6 +874,13 @@ func (n *Node) mithrilSnapshotStartup(ctx context.Context) error {
 	if n.mithrilSource == nil || !n.mithrilSource.SnapshotMode() {
 		return nil
 	}
+	// A restore into a node keeping the live UTxO set as its only copy
+	// loads the set, so it opens here rather than with the ledger.
+	if n.config.ledgerUtxoBadgerOnly {
+		if err := n.openUtxoSet(); err != nil {
+			return err
+		}
+	}
 	s := &mithrilSnapshotStartup{
 		source:  n.mithrilSource,
 		db:      n.db,
@@ -883,6 +900,15 @@ func (n *Node) mithrilSnapshotStartup(ctx context.Context) error {
 	defer n.reportMithrilRestore(nil)
 	until, err := s.run(ctx)
 	n.mithrilSuppressedUntil = until
+	if err != nil {
+		// Start returns without registering the set's cleanup, so close it
+		// here rather than leave its Badger directory locked.
+		if closeErr := n.closeUtxoSet(); closeErr != nil {
+			err = errors.Join(
+				err, fmt.Errorf("live UTxO set close: %w", closeErr),
+			)
+		}
+	}
 	return err
 }
 

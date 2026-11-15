@@ -1134,6 +1134,14 @@ func buildDingoConfig(
 			cfg.BlockPipelineValidateEnabled,
 		),
 		dingo.WithLedgerPrefetchAheadEnabled(cfg.LedgerPrefetchAheadEnabled),
+		dingo.WithLedgerUtxoShadow(cfg.LedgerUtxoShadow),
+		dingo.WithLedgerUtxoBadger(cfg.LedgerUtxoBadger),
+		dingo.WithLedgerUtxoReads(cfg.LedgerUtxoReads),
+		dingo.WithLedgerUtxoBadgerOnly(cfg.LedgerUtxoBadgerOnly),
+		dingo.WithLedgerStateSetOnly(cfg.LedgerStateSetOnly),
+		dingo.WithLedgerStateVerifyBeforeDrain(
+			cfg.LedgerStateVerifyBeforeDrain,
+		),
 		dingo.WithLedgerValidateAheadEnabled(cfg.LedgerValidateAheadEnabled),
 		dingo.WithLedgerApplyRowBatchingEnabled(
 			cfg.LedgerApplyRowBatchingEnabled,

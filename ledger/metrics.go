@@ -284,6 +284,68 @@ type stateMetrics struct {
 	// that block is missing, so a rising value means ledger.tx subscribers
 	// may be carrying stale derived state for an abandoned branch.
 	reconciliationUndoUnresolved prometheus.Counter
+	// Verify-mode reads of the live UTxO set, and those whose answer
+	// differed from the metadata store's.
+	utxoSetReadsVerified  prometheus.Counter
+	utxoSetReadMismatches prometheus.Counter
+	// Verify-mode block nonce reads of the live UTxO set, and those whose
+	// answer differed from the metadata store's.
+	nonceSetReadsVerified  prometheus.Counter
+	nonceSetReadMismatches prometheus.Counter
+	// Verify-mode epoch and pool stake snapshot reads of the live UTxO set,
+	// and those whose answer differed from the metadata store's.
+	epochStateReadsVerified  prometheus.Counter
+	epochStateReadMismatches prometheus.Counter
+	// Verify-mode epoch summary and total active stake reads of the live
+	// UTxO set, and those whose answer differed from the metadata store's.
+	epochSummaryReadsVerified  prometheus.Counter
+	epochSummaryReadMismatches prometheus.Counter
+
+	networkStateReadsVerified  prometheus.Counter
+	networkStateReadMismatches prometheus.Counter
+
+	pparamsReadsVerified  prometheus.Counter
+	pparamsReadMismatches prometheus.Counter
+
+	accountReadsVerified  prometheus.Counter
+	accountReadMismatches prometheus.Counter
+
+	drepReadsVerified  prometheus.Counter
+	drepReadMismatches prometheus.Counter
+
+	poolReadsVerified  prometheus.Counter
+	poolReadMismatches prometheus.Counter
+
+	pparamUpdateReadsVerified  prometheus.Counter
+	pparamUpdateReadMismatches prometheus.Counter
+
+	// Verify-mode results the live UTxO set computed from its own rows, and
+	// those that differed from what the metadata store wrote, by result
+	// (epoch, epoch_summary, pparam_enactment).
+	setComputedVerified   *prometheus.CounterVec
+	setComputedMismatches *prometheus.CounterVec
+
+	registrationReadsVerified  prometheus.Counter
+	registrationReadMismatches prometheus.Counter
+
+	certHistoryReadsVerified  prometheus.Counter
+	certHistoryReadMismatches prometheus.Counter
+
+	opCertReadsVerified  prometheus.Counter
+	opCertReadMismatches prometheus.Counter
+
+	committeeReadsVerified  prometheus.Counter
+	committeeReadMismatches prometheus.Counter
+
+	governanceReadsVerified  prometheus.Counter
+	governanceReadMismatches prometheus.Counter
+
+	liveStakeReadsVerified  prometheus.Counter
+	liveStakeReadMismatches prometheus.Counter
+
+	rewardOutputReadsVerified  prometheus.Counter
+	rewardOutputReadMismatches prometheus.Counter
+
 	// Incremented by the block-number count the reconciler's undo-block
 	// resolution expects but has no block_nonce row for at all -- not
 	// merely unresolvable (reconciliationUndoUnresolved), but entirely
@@ -1330,6 +1392,224 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_continuation_input_unresolved_total",
 			Help: "inputs in freshly fetched continuation blocks whose producing transaction is not on the local applied chain (cross-fork splice indicator)",
+		},
+	)
+	m.utxoSetReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_utxo_set_reads_verified_total",
+			Help: "validation input reads answered by both the metadata store and the live UTxO set in verify mode",
+		},
+	)
+	m.utxoSetReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_utxo_set_read_mismatches_total",
+			Help: "verify-mode validation input reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.epochStateReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_epoch_state_set_reads_verified_total",
+			Help: "epoch and pool stake snapshot reads answered by both the metadata store and the live UTxO set in verify mode",
+		},
+	)
+	m.epochStateReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_epoch_state_set_read_mismatches_total",
+			Help: "verify-mode epoch and pool stake snapshot reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.epochSummaryReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_epoch_summary_set_reads_verified_total",
+			Help: "epoch summary and total active stake reads answered by both the metadata store and the live UTxO set in verify mode",
+		},
+	)
+	m.epochSummaryReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_epoch_summary_set_read_mismatches_total",
+			Help: "verify-mode epoch summary and total active stake reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.networkStateReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_network_state_set_reads_verified_total",
+			Help: "network state and donation reads answered by both the metadata store and the live UTxO set in verify mode",
+		},
+	)
+	m.networkStateReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_network_state_set_read_mismatches_total",
+			Help: "verify-mode network state and donation reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.pparamsReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_pparams_set_reads_verified_total",
+			Help: "protocol parameter reads answered by both the metadata store and the live UTxO set in verify mode",
+		},
+	)
+	m.pparamsReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_pparams_set_read_mismatches_total",
+			Help: "verify-mode protocol parameter reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.accountReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_account_set_reads_verified_total",
+			Help: "account reads compared between the metadata store and the live UTxO set",
+		},
+	)
+	m.accountReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_account_set_read_mismatches_total",
+			Help: "account reads where the live UTxO set's account differed from the metadata store's",
+		},
+	)
+	m.drepReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_drep_set_reads_verified_total",
+			Help: "DRep reads compared between the metadata store and the live UTxO set",
+		},
+	)
+	m.drepReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_drep_set_read_mismatches_total",
+			Help: "DRep reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.poolReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_pool_set_reads_verified_total",
+			Help: "pool reads compared between the metadata store and the live UTxO set",
+		},
+	)
+	m.poolReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_pool_set_read_mismatches_total",
+			Help: "pool reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.pparamUpdateReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_pparam_update_set_reads_verified_total",
+			Help: "protocol parameter update proposal reads compared between the metadata store and the live UTxO set",
+		},
+	)
+	m.pparamUpdateReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_pparam_update_set_read_mismatches_total",
+			Help: "protocol parameter update proposal reads where the live UTxO set's rows differed from the metadata store's",
+		},
+	)
+	m.setComputedVerified = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_set_computed_verified_total",
+			Help: "results the live UTxO set computed from its own rows and compared with what the metadata store wrote, by result",
+		},
+		[]string{"result"},
+	)
+	m.setComputedMismatches = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_set_computed_mismatches_total",
+			Help: "results the live UTxO set computed from its own rows that differed from what the metadata store wrote, by result",
+		},
+		[]string{"result"},
+	)
+	m.registrationReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_registration_set_reads_verified_total",
+			Help: "stake registration history and DRep deposit reads compared between the metadata store and the live UTxO set",
+		},
+	)
+	m.registrationReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_registration_set_read_mismatches_total",
+			Help: "stake registration history and DRep deposit reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.certHistoryReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_cert_history_set_reads_verified_total",
+			Help: "genesis delegation and MIR certificate reads compared between the metadata store and the live UTxO set",
+		},
+	)
+	m.certHistoryReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_cert_history_set_read_mismatches_total",
+			Help: "genesis delegation and MIR certificate reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.opCertReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_opcert_set_reads_verified_total",
+			Help: "op-cert counter reads compared between the metadata store and the live UTxO set",
+		},
+	)
+	m.opCertReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_opcert_set_read_mismatches_total",
+			Help: "op-cert counter reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.committeeReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_committee_set_reads_verified_total",
+			Help: "committee and constitution reads compared between the metadata store and the live UTxO set",
+		},
+	)
+	m.committeeReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_committee_set_read_mismatches_total",
+			Help: "committee and constitution reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.governanceReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_governance_set_reads_verified_total",
+			Help: "governance proposal and vote reads compared between the metadata store and the live UTxO set",
+		},
+	)
+	m.governanceReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_governance_set_read_mismatches_total",
+			Help: "governance proposal and vote reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.liveStakeReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_livestake_set_reads_verified_total",
+			Help: "live stake reads compared between the metadata store and the live UTxO set",
+		},
+	)
+	m.liveStakeReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_livestake_set_read_mismatches_total",
+			Help: "live stake reads where the live UTxO set's figures differed from the metadata store's",
+		},
+	)
+	m.rewardOutputReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_rewardoutput_set_reads_verified_total",
+			Help: "reward output, credit round and post-snapshot credit reads compared between the metadata store and the live UTxO set",
+		},
+	)
+	m.rewardOutputReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_rewardoutput_set_read_mismatches_total",
+			Help: "reward output, credit round and post-snapshot credit reads where the live UTxO set's answer differed from the metadata store's",
+		},
+	)
+	m.nonceSetReadsVerified = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_nonce_set_reads_verified_total",
+			Help: "block nonce reads answered by both the metadata store and the live UTxO set in verify mode",
+		},
+	)
+	m.nonceSetReadMismatches = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_nonce_set_read_mismatches_total",
+			Help: "verify-mode block nonce reads where the live UTxO set's answer differed from the metadata store's",
 		},
 	)
 	m.reconciliationUndoUnresolved = promautoFactory.NewCounter(

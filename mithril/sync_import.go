@@ -187,6 +187,13 @@ func updateMithrilReadyState(
 	syncStatus string,
 	clearSyncState bool,
 ) error {
+	if clearSyncState {
+		// The clear below deletes every key outside the keep-list, which
+		// omits the drain markers.
+		if err := db.RefuseLedgerStateRewrite(ctx); err != nil {
+			return err
+		}
+	}
 	tipTxn := db.MetadataTxn(ctx, false)
 	ledgerTip, err := db.GetTip(tipTxn)
 	tipTxn.Release()
@@ -228,6 +235,7 @@ func updateMithrilReadyState(
 				if key == deferred.SyncStateKey ||
 					key == metadata.PlannerStatsBackfillSyncKey ||
 					key == nodeconsensus.DatabaseIdentitySyncKey ||
+					key == database.UtxoSetOnlySyncKey ||
 					strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
 					continue
 				}
@@ -447,6 +455,7 @@ func importLedgerState(
 	result *BootstrapResult,
 	reconcile bool,
 	maxTrustedSlot uint64,
+	utxoSet ledgerstate.UtxoSetLoader,
 	onLedger func(ledgerstate.ImportProgress),
 	beforeImport ...func(*preparedLedgerStateImport) error,
 ) (
@@ -471,7 +480,8 @@ func importLedgerState(
 		}
 	}
 	return importPreparedLedgerState(
-		ctx, db, logger, nodeCfg, result, prepared, reconcile, onLedger,
+		ctx, db, logger, nodeCfg, result, prepared, reconcile, utxoSet,
+		onLedger,
 	)
 }
 
@@ -618,6 +628,7 @@ func importPreparedLedgerState(
 	result *BootstrapResult,
 	prepared *preparedLedgerStateImport,
 	reconcile bool,
+	utxoSet ledgerstate.UtxoSetLoader,
 	onLedger func(ledgerstate.ImportProgress),
 ) (
 	ledgerStateSlot uint64,
@@ -644,6 +655,7 @@ func importPreparedLedgerState(
 			Logger:    logger,
 			ImportKey: importKey,
 			Reconcile: reconcile,
+			UtxoSet:   utxoSet,
 			EpochLength: epochLengthFromConfig(
 				nodeCfg,
 			),

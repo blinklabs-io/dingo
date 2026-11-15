@@ -445,7 +445,8 @@ func (d *Database) SetTransactionBatchedWithOpts(
 				point.Slot,
 			)
 		}
-		if opts.SkipProducedUtxoOffsetWrites || opts.OffsetsPersisted {
+		if opts.SkipProducedUtxoOffsetWrites || opts.OffsetsPersisted ||
+			d.liveUtxo {
 			// Offset is required to be computed (validated above) so a
 			// regression in the indexer is still caught, but the blob
 			// write itself is elided: the immutable-copy phase already
@@ -522,6 +523,9 @@ func (d *Database) SetTransactionBatchedWithOpts(
 
 	if len(pparamUpdates) > 0 && tx.IsValid() {
 		for genesisHash, update := range pparamUpdates {
+			if d.pparamsDrained() {
+				break
+			}
 			if err := d.SetPParamUpdate(
 				genesisHash.Bytes(),
 				update.Cbor(),

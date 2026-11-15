@@ -137,6 +137,10 @@ func RegisterProvider(host *hostplugin.Host) error {
 					int64(min(memTableSize, uint64(math.MaxInt64))),
 				),
 				// #nosec G115 -- values are capped to the destination maximum.
+				WithInMemoryMemTableSize(
+					int64(min(cfg.MemTableSize, uint64(math.MaxInt64))),
+				),
+				// #nosec G115 -- values are capped to the destination maximum.
 				WithValueThreshold(
 					int64(min(valueThreshold, uint64(math.MaxInt64))),
 				),

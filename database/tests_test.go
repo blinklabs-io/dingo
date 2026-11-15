@@ -2946,7 +2946,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 					producer.point,
 					0,
 					nil,
-					txn.Metadata(), 0,
+					txn.Metadata(), 0, false,
 				)
 			}))
 			metaTxn.Release()
@@ -3113,4 +3113,51 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 			require.NotContains(t, out, `"level":"WARN"`)
 		},
 	)
+}
+
+// A set-only database keeps no UTxO set in the metadata store. A Mithril
+// import detaches the live source before its gap blocks are ingested, so the
+// gap path reads the persistent mark and records only the history: no
+// output rows, no recovered inputs.
+func TestSetGapBlockTransactionKeepsNoUtxoRowsWhenSetOnly(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, db.SetSyncState(UtxoSetOnlySyncKey, "1", nil))
+
+	candidate := findGapConsumeCandidate(t)
+	storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
+	require.NoError(t, db.SetGapBlockTransaction(
+		context.Background(),
+		candidate.consumerTx,
+		candidate.consumerPoint,
+		0,
+		nil,
+		mustBlockOffsets(t, candidate.consumerBlock),
+		nil, 0,
+	))
+
+	rows := 0
+	require.NoError(t, db.IterateLiveUtxos(
+		context.Background(), nil,
+		func(*models.Utxo) error { rows++; return nil },
+	))
+	require.Zero(t, rows, "gap ingestion wrote live utxo rows")
+	for _, in := range candidate.consumerTx.Consumed() {
+		u, err := db.Metadata().GetUtxoIncludingSpent(
+			in.Id().Bytes(), in.Index(), nil,
+		)
+		require.NoError(t, err)
+		require.Nil(t, u, "gap ingestion recovered input %s", in.String())
+	}
+	tx, err := db.Metadata().GetTransactionByHash(
+		candidate.consumerTx.Hash().Bytes(), nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, tx, "the transaction is still recorded as history")
 }

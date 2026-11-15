@@ -113,6 +113,14 @@ type GovernanceVote struct {
 	CastCertIndex uint32
 }
 
+// GovernanceVoteRef is a vote with the proposal it was cast on, named by the
+// proposal's transaction hash and action index rather than its row ID.
+type GovernanceVoteRef struct {
+	TxHash      []byte
+	ActionIndex uint32
+	Vote        GovernanceVote
+}
+
 // ResignCommitteeCold represents a resignation certificate for a
 // Constitutional Committee cold credential.
 type ResignCommitteeCold struct {

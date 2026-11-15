@@ -207,6 +207,12 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: n.snapshotMgr.Stop,
 		})
 	}
+	if n.utxoShadow != nil {
+		stops = append(stops, namedStop{
+			name: "shadow UTxO set",
+			stop: n.stopUtxoShadow,
+		})
+	}
 	if n.dbLifecycleMgr != nil {
 		stops = append(stops, namedStop{
 			name: "database lifecycle manager",
@@ -572,6 +578,15 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 			)
 		}
 		n.setLedgerState(nil)
+		// The ledger no longer writes to the set. A restore replaces the
+		// data directory the set lives in and a truncate rolls it back
+		// through its own handle; reinitialization opens it again.
+		if closeErr := n.closeUtxoSet(); closeErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("live UTxO set close: %w", closeErr),
+			)
+		}
 	}
 
 	if n.deferredIndexMaintenanceDone != nil {
@@ -662,6 +677,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	// The previous ledger's tip-gap observation must not make readiness look
 	// healthy while Restore or Truncate is rebuilding the core storage.
 	n.health.forgetTipGap()
+	// The live UTxO set was reconciled against the ledger being replaced.
+	// The backfill below must wait for the reconcile that follows the new
+	// ledger's construction, or it reads stake from a set that may trail it.
+	n.utxoSetReconciled = false
 	deps, err := n.storageDependencies(n.config.dataDir)
 	if err != nil {
 		return err
@@ -709,6 +728,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		return fmt.Errorf("failed to reload chain manager: %w", err)
 	}
 	n.chainManager = cm
+	if err := n.openUtxoSet(); err != nil {
+		return err
+	}
 	// The contextcheck exemption below covers ledgerStateConfig's
 	// EndorserBlockFetcher callback: it is driven by the ledger's own later
 	// call and receives that call's fetch context. The closure only defers
@@ -805,7 +827,7 @@ func (n *Node) reinitializeMidnightIndexer() error {
 	if !midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		return nil
 	}
-	if err := n.ledgerState.PrepareEpochCacheForStartup(n.ctx); err != nil {
+	if err := n.prepareEpochCache(n.ctx); err != nil {
 		return fmt.Errorf(
 			"load epoch cache before Midnight indexer restart: %w",
 			err,
@@ -835,6 +857,9 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	if err := n.configureSnapshotManager(); err != nil {
 		return err
 	}
+	if err := n.startUtxoShadow(); err != nil {
+		return err
+	}
 
 	// Rebuild the Koios parity observer (if enabled) against the fresh
 	// n.db a live restore/truncate just reinitialized, and resubscribe it to
@@ -849,6 +874,11 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		}
 	}
 
+	// The rebuilt database can be at any tip, so the set is reconciled to it
+	// before the ledger applies a block.
+	if err := n.reconcileUtxoSet(ctx); err != nil {
+		return err
+	}
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to restart ledger: %w", err)
 	}
@@ -1341,6 +1371,7 @@ func (n *Node) storageDependencies(
 		Logger:              n.config.logger,
 		TracingEnabled:      n.config.tracing,
 		GenesisStakingEmpty: genesisStakingEmpty,
+		StatementGuard:      n.statementGuard(),
 	}, nil
 }
 
@@ -1424,6 +1455,9 @@ func (n *Node) Snapshot(
 			n.config.databaseLifecycle.SnapshotMaxCommitPause,
 		),
 	)
+	if set := n.utxoSetBackuper(); set != nil {
+		manifestOpts = append(manifestOpts, lifecycle.WithUtxoSetBackup(set))
+	}
 	return lifecycle.SnapshotToCloud(
 		ctx,
 		n.destinationRegistry,
@@ -2270,6 +2304,16 @@ func (n *Node) Truncate(
 			}
 		}
 
+		setOpts, closeSet, err := dblifecycle.TruncateOptions(
+			n.config.dataDir,
+		)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"%w: %w", lifecycle.ErrTruncateNotStarted, err,
+			)
+		}
+		defer closeSet() //nolint:errcheck // the set is closed after its rollback committed
+
 		if pending, pendingErr := lifecycle.GetPendingTruncate(tmpDB); pendingErr != nil {
 			return 0, pendingErr
 		} else if pending != nil {
@@ -2280,6 +2324,7 @@ func (n *Node) Truncate(
 				0,
 				n.config.delegatorInactivityEnabled,
 				n.config.delegatorInactivity,
+				setOpts...,
 			)
 		}
 
@@ -2296,6 +2341,7 @@ func (n *Node) Truncate(
 			0,
 			n.config.delegatorInactivityEnabled,
 			n.config.delegatorInactivity,
+			setOpts...,
 		)
 	}()
 	// tmpDB's database.New registered its own Prometheus collectors under

@@ -1,0 +1,134 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package mithril
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"log/slog"
+	"testing"
+
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/internal/statedrain"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/stretchr/testify/require"
+)
+
+// TestUpdateMithrilReadyStateRefusesADrainedDatabase requires the sync-state
+// clear that ends an import to refuse, and to leave the drain markers and the
+// latch in place, when the database has begun or finished a drain.
+func TestUpdateMithrilReadyStateRefusesADrainedDatabase(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, db *database.Database)
+		key     string
+	}{
+		{
+			"latch bit",
+			func(t *testing.T, db *database.Database) {
+				require.NoError(t, db.RecordDrainedFamily(
+					t.Context(), nodesettings.FamilyNonces,
+				))
+			},
+			"",
+		},
+		{
+			"drain begun",
+			func(t *testing.T, db *database.Database) {
+				require.NoError(t, db.SetSyncState(
+					statedrain.MarkerPrefix+"nonces", "1", nil,
+				))
+			},
+			statedrain.MarkerPrefix + "nonces",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newMithrilTestDB(t)
+			tc.prepare(t, db)
+			err := updateMithrilReadyState(
+				context.Background(),
+				db,
+				slog.New(slog.NewTextHandler(io.Discard, nil)),
+				nil, 30, nil, "", true,
+			)
+			require.ErrorIs(t, err, database.ErrLedgerStateDrained)
+			mask, err := db.DrainedFamilies(t.Context())
+			require.NoError(t, err)
+			if tc.key == "" {
+				require.True(t, mask.Has(nodesettings.FamilyNonces))
+				return
+			}
+			marker, err := db.GetSyncState(tc.key, nil)
+			require.NoError(t, err)
+			require.Equal(t, "1", marker)
+		})
+	}
+}
+
+// TestSyncRefusesADrainedDatabaseBeforeDownloading requires a catch-up into
+// a database with a latch bit to fail at dispatch.
+func TestSyncRefusesADrainedDatabaseBeforeDownloading(t *testing.T) {
+	t.Parallel()
+	fix := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 5})
+	dataDir := t.TempDir()
+	seedCompleteDB(t, dataDir, "core", 0, true)
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.RecordDrainedFamily(
+		t.Context(), nodesettings.FamilyNonces,
+	))
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	_, err = Sync(context.Background(), SyncConfig{
+		Network:           "preview",
+		DataDir:           dataDir,
+		StorageMode:       "core",
+		Backend:           BackendV2,
+		AggregatorURL:     fix.server.URL,
+		AllowInsecureHTTP: true,
+		StoragePlugins:    testStoragePlugins(),
+		DatabaseWorkers:   1,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.ErrorIs(t, err, database.ErrLedgerStateDrained)
+}
+
+// TestProcessGapBlocksRefusesADrainedDatabase requires the gap replay, which
+// reads the epoch rows and writes ledger state, to stop before touching a
+// database that has drained a family.
+func TestProcessGapBlocksRefusesADrainedDatabase(t *testing.T) {
+	t.Parallel()
+	db := newMithrilTestDB(t)
+	require.NoError(t, db.RecordDrainedFamily(
+		t.Context(), nodesettings.FamilyNonces,
+	))
+	gap := []models.Block{{Slot: 1, Hash: bytes.Repeat([]byte{1}, 32)}}
+
+	err := processGapBlocks(
+		t.Context(), db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), gap,
+	)
+
+	require.ErrorIs(t, err, database.ErrLedgerStateDrained)
+}

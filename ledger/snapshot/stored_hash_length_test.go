@@ -19,8 +19,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
@@ -53,14 +53,14 @@ func TestStakeFetchPoolsSkipsEmptyDelegatedPool(t *testing.T) {
 }
 
 type activePoolKeysStore struct {
-	metadata.MetadataStore
+	ledgerdb.LedgerDB
 	keys [][]byte
 }
 
 func (s activePoolKeysStore) GetEpochBoundaryActivePoolKeyHashes(
 	uint64,
 	uint64,
-	types.Txn,
+	ledgerdb.Txn,
 ) ([][]byte, error) {
 	return s.keys, nil
 }

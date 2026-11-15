@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
 // DeleteGovernanceProposalsAfterSlot removes governance proposals added after
@@ -30,6 +31,9 @@ func (d *Database) DeleteGovernanceProposalsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return drainedWrite(nodesettings.FamilyGovernance)
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().DeleteGovernanceProposalsAfterSlot(
 			slot,
@@ -53,6 +57,9 @@ func (d *Database) DeleteGovernanceVotesAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return drainedWrite(nodesettings.FamilyGovernance)
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().DeleteGovernanceVotesAfterSlot(
 			slot,
@@ -78,6 +85,9 @@ func (d *Database) DeleteGovernanceVotesForDrep(
 	deletedSlot uint64,
 	txn *Txn,
 ) (int, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return 0, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	var n int
 	err := d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		deleted, err := d.governanceStore().DeleteGovernanceVotesForDrep(
@@ -106,6 +116,9 @@ func (d *Database) GetGovernanceProposal(
 	actionIndex uint32,
 	txn *Txn,
 ) (*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -131,6 +144,9 @@ func (d *Database) GetActiveGovernanceProposals(
 	epoch uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -154,6 +170,9 @@ func (d *Database) GetGovernanceProposalSet(
 	ctx context.Context,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -177,6 +196,9 @@ func (d *Database) GetGovernanceProposalSetAtSlot(
 	slot uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -202,6 +224,9 @@ func (d *Database) GetExpiringGovernanceProposals(
 	epoch uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -225,6 +250,9 @@ func (d *Database) GetExpiredGovernanceProposalsAt(
 	slot uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -251,6 +279,9 @@ func (d *Database) GetExpiredAwaitingDropGovernanceProposals(
 	epoch uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -275,6 +306,9 @@ func (d *Database) GetDroppedGovernanceProposalsAt(
 	slot uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -298,6 +332,9 @@ func (d *Database) GetRatifiedGovernanceProposals(
 	ctx context.Context,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -321,6 +358,9 @@ func (d *Database) GetEnactedGovernanceProposalsAt(
 	slot uint64,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -346,6 +386,9 @@ func (d *Database) GetLastEnactedGovernanceProposal(
 	actionTypes []uint8,
 	txn *Txn,
 ) (*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -367,6 +410,9 @@ func (d *Database) SetGovernanceProposal(
 	proposal *models.GovernanceProposal,
 	txn *Txn,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if proposal == nil {
 		return errors.New("proposal cannot be nil")
 	}
@@ -391,6 +437,9 @@ func (d *Database) ClearGovernanceProposalRatification(
 	transitionSlot uint64,
 	txn *Txn,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return drainedWrite(nodesettings.FamilyGovernance)
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().ClearGovernanceProposalRatification(
 			txHash,
@@ -417,6 +466,9 @@ func (d *Database) GetChildGovernanceProposals(
 	parentActionIdx uint32,
 	txn *Txn,
 ) ([]*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -438,6 +490,9 @@ func (d *Database) GetGovernanceVotes(
 	proposalID uint,
 	txn *Txn,
 ) ([]*models.GovernanceVote, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -460,6 +515,9 @@ func (d *Database) GetGovernanceVotesAtSlot(
 	slot uint64,
 	txn *Txn,
 ) ([]*models.GovernanceVote, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if txn == nil {
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
@@ -481,6 +539,9 @@ func (d *Database) SetGovernanceVote(
 	vote *models.GovernanceVote,
 	txn *Txn,
 ) error {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return drainedWrite(nodesettings.FamilyGovernance)
+	}
 	if vote == nil {
 		return errors.New("vote cannot be nil")
 	}
@@ -493,4 +554,36 @@ func (d *Database) SetGovernanceVote(
 		}
 		return nil
 	})
+}
+
+// GetAllGovernanceProposals returns every governance proposal row,
+// soft-deleted ones included.
+func (d *Database) GetAllGovernanceProposals(
+	ctx context.Context,
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetAllGovernanceProposals(txn.Metadata())
+}
+
+// GetAllGovernanceVotes returns every governance vote row, soft-deleted ones
+// included, with the proposal's transaction hash and action index.
+func (d *Database) GetAllGovernanceVotes(
+	ctx context.Context,
+	txn *Txn,
+) ([]*models.GovernanceVoteRef, error) {
+	if d.FamilyDrained(nodesettings.FamilyGovernance) {
+		return nil, drainedWrite(nodesettings.FamilyGovernance)
+	}
+	if txn == nil {
+		txn = d.MetadataTxn(ctx, false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetAllGovernanceVotes(txn.Metadata())
 }

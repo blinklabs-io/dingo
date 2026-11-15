@@ -156,7 +156,7 @@ func TestRollbackIntentRoundTripsSlotZeroBlockPoint(t *testing.T) {
 	point := ocommon.NewPoint(0, testHashBytes("slot-zero-block"))
 	require.NoError(t, persistRollbackIntent(db, point, []models.Block{
 		{Slot: 20, Hash: testHashBytes("b20"), Cbor: []byte{0x80}},
-	}))
+	}, nil))
 	got, _, pending, err := loadRollbackIntent(db)
 	require.NoError(t, err)
 	require.True(t, pending)
@@ -218,7 +218,7 @@ func TestRecoverRollbackIntentSlotZeroBlockOffPrimaryChain(t *testing.T) {
 	ls, _, _ := newSlotZeroRollbackLedger(t, conway.BlockTypeConway)
 	tipBefore := ls.currentTip
 	forked := ocommon.NewPoint(0, testHashBytes("forked-slot-zero-block"))
-	require.NoError(t, persistRollbackIntent(ls.db, forked, nil))
+	require.NoError(t, persistRollbackIntent(ls.db, forked, nil, nil))
 	require.NoError(t, ls.recoverRollbackIntent(context.Background()))
 	_, _, pending, err := loadRollbackIntent(ls.db)
 	require.NoError(t, err)
@@ -232,7 +232,7 @@ func TestRecoverRollbackIntentSlotZeroBlockOnPrimaryChain(t *testing.T) {
 	t.Parallel()
 
 	ls, tip0, nonce0 := newSlotZeroRollbackLedger(t, conway.BlockTypeConway)
-	require.NoError(t, persistRollbackIntent(ls.db, tip0.Point, nil))
+	require.NoError(t, persistRollbackIntent(ls.db, tip0.Point, nil, nil))
 	require.NoError(t, ls.recoverRollbackIntent(context.Background()))
 	_, _, pending, err := loadRollbackIntent(ls.db)
 	require.NoError(t, err)

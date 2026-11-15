@@ -103,7 +103,9 @@ func NewPoolRelayProvider(
 		ctx context.Context,
 		poolKeyHashes [][]byte,
 	) (map[string]uint64, error) {
-		stakes, _, err := db.GetStakeByPools(ctx, poolKeyHashes, nil)
+		stakes, _, err := ledgerState.ledgerDB().GetStakeByPools(
+			ctx, poolKeyHashes, nil,
+		)
 		return stakes, err
 	}
 	if eventBus != nil {
