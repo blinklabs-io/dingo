@@ -31,9 +31,11 @@ import (
 const leiosMaxEndorserBlockBytes = 512 * 1024
 
 // leiosPeerMaxAnnouncements bounds the announcements remembered for one
-// connection. An honest peer announces at most two per election, so reaching
-// it needs far more than the announcement window holds; the oldest slots are
-// dropped first.
+// connection, and with them the offers: an offer is only accepted for an
+// announced point, so dropping an announcement drops its offer record too. An
+// honest peer announces at most two per election, so reaching it needs far
+// more than the announcement window holds; the oldest slots are dropped
+// first.
 const leiosPeerMaxAnnouncements = 4096
 
 // leiosLocalAnnouncementSource labels announcements this node forged itself,
@@ -193,6 +195,7 @@ func (o *Ouroboros) recordLeiosPeerAnnouncement(
 	})
 	for _, key := range keys[:len(keys)-leiosPeerMaxAnnouncements] {
 		delete(state.announced, key)
+		delete(state.offered, key)
 	}
 }
 

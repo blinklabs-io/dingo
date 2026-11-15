@@ -5649,7 +5649,9 @@ announced by that same peer over leios-notify, the body or the closure of the
 point was already offered on that connection, the point's slot is below the
 immutable slot (strictly), or a body offer claims zero bytes or more than
 512 KiB. Each connection keeps its own announcements and offers, from its
-start until it closes or the immutable slot passes them. A peer's announcement
+start until it closes or the immutable slot passes them; the announcements
+are capped at 4096, dropping the oldest slots and their offer records, which
+bounds the offers too. A peer's announcement
 counts unless this node found the message invalid, so one deferred, already
 known, clock-skewed or dropped for a local budget still counts. The check runs
 first, before the screens above and before anything is remembered, recorded or

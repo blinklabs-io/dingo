@@ -554,3 +554,34 @@ func TestLeiosRememberedOfferIsReplayedWithoutRecheck(t *testing.T) {
 		t, n.offerBody(n.first, point, 100), errLeiosOfferRepeated,
 	)
 }
+
+func TestLeiosPeerOfferRecordsAreBoundedByAnnouncements(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	done := make(chan any)
+	total := uint64(leiosPeerMaxAnnouncements + 100)
+	for slot := uint64(1); slot <= total; slot++ {
+		point := leiosOfferPoint(slot)
+		o.recordLeiosPeerAnnouncement("peer", done, slot, point.Hash)
+		require.NoError(
+			t,
+			o.checkLeiosPeerOffer("peer", done, point, 100, false),
+		)
+	}
+	o.leiosPeerOffersMu.Lock()
+	state := o.leiosPeerOffers["peer"]
+	announced, offered := len(state.announced), len(state.offered)
+	o.leiosPeerOffersMu.Unlock()
+	require.Equal(t, leiosPeerMaxAnnouncements, announced)
+	require.LessOrEqual(t, offered, leiosPeerMaxAnnouncements)
+	require.ErrorIs(
+		t,
+		o.checkLeiosPeerOffer("peer", done, leiosOfferPoint(1), 100, false),
+		errLeiosOfferUnannounced,
+	)
+	require.ErrorIs(
+		t,
+		o.checkLeiosPeerOffer("peer", done, leiosOfferPoint(total), 100, false),
+		errLeiosOfferRepeated,
+	)
+}
