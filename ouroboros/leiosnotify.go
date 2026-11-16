@@ -3670,8 +3670,9 @@ func (o *Ouroboros) EnqueueLeiosBlockAnnouncement(raw []byte) {
 	}
 }
 
-// The caller holds leiosMu. This path also runs during persistent cache reload,
-// which can already hold leiosAnnouncementsMu, so it never takes that mutex.
+// The caller holds leiosMu, and recordLeiosAnnouncementLocked also holds
+// leiosAnnouncementsMu, which is ordered before leiosMu, so this never takes
+// that mutex.
 func (o *Ouroboros) publishPendingLeiosRelayAnnouncementsLocked(
 	key string,
 	uncached ...*leiosEndorserBlockData,

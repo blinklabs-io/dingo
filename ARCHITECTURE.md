@@ -5930,6 +5930,17 @@ protocol shuts down, so an empty relay store is not treated as a mini-protocol
 error. Durable vote storage is still future work; CertRB production uses the
 current gouroboros/Dijkstra prototype certificate shape.
 
+The relay never offers an endorser block on a connection ahead of its
+announcement: a reference receiver ends the connection on an offer for a block
+it was not told about. `enqueueLeiosRelayOffers` therefore queues the body and
+closure offers only once the entry carries the announcement for its exact slot
+and hash. An entry stored without one (a backfill, or a block reloaded from the
+blob store, which holds no announcement) takes it from the recorded
+announcements or from the selected chain's announcing header; when neither has
+it the offer stays requested and is queued when the announcement is recorded and
+reconciled with the entry. The queued offers carry the announcement as their
+dependency header, so the connection's log sends it first.
+
 Active upstream connections that supplied the
 requested point are preferred; their exact connection lifetime is checked before
 use, and healthy fallback peers remain eligible. Candidates whose connections
