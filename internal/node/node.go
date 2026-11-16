@@ -110,15 +110,58 @@ func waitForStop(
 	return &req, signaled, err
 }
 
+// logRepeatedShutdownSignals logs each of sigs received after shutdown has
+// begun. The command's signal.NotifyContext stays registered until the process
+// returns, so a repeated SIGINT or SIGTERM would otherwise vanish while a
+// storage close runs to completion; the signal does not interrupt that close.
+// The returned func stops the watcher.
+func logRepeatedShutdownSignals(
+	logger *slog.Logger,
+	sigs ...os.Signal,
+) func() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, sigs...)
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case sig := <-ch:
+				logger.Warn(
+					"shutdown already in progress; storage close runs to completion and is not interrupted by this signal, send SIGKILL to abandon it",
+					"signal", sig.String(),
+				)
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() {
+		signal.Stop(ch)
+		close(done)
+		<-stopped
+	}
+}
+
+// requestedShutdownProgressInterval is how often runRequestedShutdown logs
+// that it is still waiting for shutdown to finish past the request deadline.
+const requestedShutdownProgressInterval = 10 * time.Second
+
 // runRequestedShutdown performs a stop or restart accepted over the remote
-// lifecycle service. The graceful shutdown is abandoned once req.Timeout
-// elapses so the request can never leave the process hanging, and a restart
-// re-executes the process even then.
+// lifecycle service. The request deadline marks the graceful shutdown as
+// overrun and reports it, but does not abandon it: shutdown's own deadline
+// already bounds everything except storage closes, which run to completion,
+// and exiting or re-executing before they finish would leave the store with an
+// unfinished close for the next process. A restart re-executes the process
+// once shutdown has returned.
 func runRequestedShutdown(
+	logger *slog.Logger,
 	req dingo.ShutdownRequest,
 	causalErr error,
 	shutdown func() error,
 	reExec func() error,
+	progressInterval time.Duration,
 ) error {
 	done := make(chan error, 1)
 	go func() { done <- shutdown() }()
@@ -126,11 +169,33 @@ func runRequestedShutdown(
 	if !req.Deadline.IsZero() {
 		remaining = max(time.Until(req.Deadline), 0)
 	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
 	var err error
 	select {
 	case err = <-done:
-	case <-time.After(remaining):
-		err = fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
+	case <-timer.C:
+		overrun := fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
+		logger.Warn(
+			"graceful shutdown exceeded the request deadline; waiting for storage close to finish",
+			"timeout", req.Timeout,
+		)
+		start := time.Now()
+		ticker := time.NewTicker(progressInterval)
+		defer ticker.Stop()
+	wait:
+		for {
+			select {
+			case shutdownErr := <-done:
+				err = errors.Join(overrun, shutdownErr)
+				break wait
+			case <-ticker.C:
+				logger.Warn(
+					"still waiting for shutdown to finish",
+					"elapsed", time.Since(start).Round(time.Millisecond),
+				)
+			}
+		}
 	}
 	if !req.Restart {
 		return errors.Join(causalErr, err)
@@ -715,6 +780,9 @@ func Run(
 
 	// Wait for signal, remote request or error
 	req, signaled, err := waitForStop(signalCtx, errChan, d.EndShutdownRequests)
+	defer logRepeatedShutdownSignals(
+		logger, syscall.SIGINT, syscall.SIGTERM,
+	)()
 	shutdown := func() error { //nolint:contextcheck // bounded by shutdownTimeout
 		return gracefulShutdown(
 			logger,
@@ -731,7 +799,10 @@ func Run(
 			"restart", req.Restart,
 			"timeout", req.Timeout,
 		)
-		return runRequestedShutdown(*req, err, shutdown, dingo.ReExec)
+		return runRequestedShutdown(
+			logger, *req, err, shutdown, dingo.ReExec,
+			requestedShutdownProgressInterval,
+		)
 	}
 	if signaled {
 		logger.Info("signal received, initiating graceful shutdown")

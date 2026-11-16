@@ -5692,7 +5692,11 @@ func addressAmountsFromUtxo(
 		Unit:     "lovelace",
 		Quantity: strconv.FormatUint(uint64(utxo.Amount), 10),
 	})
-	for _, asset := range utxo.Assets {
+	// Rows can arrive in storage order, which predates canonical ordering
+	// on existing databases.
+	assets := slices.Clone(utxo.Assets)
+	models.SortAssetsCanonical(assets)
+	for _, asset := range assets {
 		ret = append(ret, AddressAmountInfo{
 			Unit: hex.EncodeToString(asset.PolicyId) +
 				hex.EncodeToString(asset.Name),

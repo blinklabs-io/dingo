@@ -578,8 +578,13 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 		select {
 		case <-n.deferredIndexMaintenanceDone:
 		case <-ctx.Done():
+			// The maintenance goroutine may still be writing the metadata
+			// store. Durable providers below close to completion whatever
+			// ctx says, so nothing later in this function reports the
+			// drain as unconfirmed on this goroutine's behalf.
 			err = errors.Join(
 				err,
+				errStorageDrainUnconfirmed,
 				fmt.Errorf(
 					"deferred-index maintenance shutdown: %w",
 					ctx.Err(),
@@ -1757,8 +1762,9 @@ var errRestoreSwapActivated = errors.New(
 // not be confirmed to have exited before its bounded wait timed out —
 // currently n.ledgerState.Close()'s rollback-event/dbWorkerPool waits, the
 // Leios persistence/GC worker drain
-// (PauseLeiosPersistWriterForLiveLifecycleOp), or a storage provider whose
-// context-bounded Stop returned before its cleanup completed. Unlike every
+// (PauseLeiosPersistWriterForLiveLifecycleOp), the deferred-index maintenance
+// goroutine, or a non-durable storage provider whose context-bounded Stop
+// returned before its cleanup completed. Unlike every
 // other error these functions can return, this one means a goroutine may
 // still be reading/writing n.db; other errors may only report cleanup failure
 // after a resource is already unused. Restore/Truncate must not treat

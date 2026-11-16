@@ -136,6 +136,22 @@ func TestMySQLUtxoOrderingAssetFilter(t *testing.T) {
 	)
 }
 
+func TestPostgresListMintedAssetsPastSlotFoldLimit(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testListMintedAssetsPastSlotFoldLimit(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLListMintedAssetsPastSlotFoldLimit(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testListMintedAssetsPastSlotFoldLimit(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
 func TestPostgresAccountAggregateLimits(t *testing.T) {
 	dsn, schema := newPostgresIntegrationSchema(t)
 	testAccountAggregateLimits(

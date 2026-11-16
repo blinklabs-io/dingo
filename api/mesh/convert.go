@@ -286,6 +286,10 @@ func appendUtxoOps(
 	})
 	opIdx++
 
+	// Callers may hand over rows in storage order, which predates canonical
+	// ordering on existing databases.
+	assets = slices.Clone(assets)
+	models.SortAssetsCanonical(assets)
 	for i := range assets {
 		asset := &assets[i]
 		assetValue := strconv.FormatUint(
@@ -507,9 +511,9 @@ func convertBodyToOps(
 		// Native assets
 		assets := output.Assets()
 		if assets != nil {
-			for _, policyID := range assets.Policies() {
-				for _, name := range assets.Assets(
-					policyID,
+			for _, policyID := range models.SortedPolicies(assets) {
+				for _, name := range models.SortedAssetNames(
+					assets, policyID,
 				) {
 					val := assets.Asset(policyID, name)
 					pHex := hex.EncodeToString(

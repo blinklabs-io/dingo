@@ -577,7 +577,8 @@
   # Stop/cancel the node on the first Koios/tool error or non-pass parity
   # result instead of logging it and continuing normal operation. An epoch
   # whose only significant mismatches are reference_lag (Koios has not caught
-  # up yet) is logged and recorded but never stops the node.
+  # up yet) or a fetch that fails on Koios's daily quota is logged, recorded
+  # and retried, but never stops the node.
   # Can be overridden with DINGO_KOIOS_PARITY_STRICT
   # CLI: --koios-parity-strict
   # strict: true
