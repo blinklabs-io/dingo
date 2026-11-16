@@ -684,8 +684,14 @@ func TestVerifyCertificateChainAllowsDeepChains(t *testing.T) {
 			},
 		}
 		if i == chainDepth {
+			// Genesis is epoch 0 and announces epoch 1, the rest of the
+			// chain.
 			cert.GenesisSignature = "genesis_sig"
+			cert.ProtocolMessage.MessageParts["next_aggregate_verification_key"] = g2Hex
+			cert.ProtocolMessage.MessageParts["next_protocol_parameters"] = cert.Metadata.Parameters.ComputeHash()
 		} else {
+			cert.Epoch = 1
+			cert.ProtocolMessage.MessageParts["current_epoch"] = "1"
 			cert.MultiSignature = g1Hex
 		}
 		finalizeTestCertificate(t, &cert)

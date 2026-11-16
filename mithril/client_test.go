@@ -135,6 +135,10 @@ func TestGetCertificateGenesis(t *testing.T) {
 		PreviousHash:     "genesis_cert_hash",
 		Epoch:            0,
 		GenesisSignature: "genesis_sig_abc123",
+		Metadata: CertificateMetadata{
+			InitiatedAt: "2025-01-01T00:00:00Z",
+			SealedAt:    "2025-01-01T00:00:00Z",
+		},
 	}
 
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -457,7 +461,7 @@ func TestSignedEntityTypeCardanoStakeDistributionScalar(t *testing.T) {
 func TestSignedEntityTypeCardanoTransactions(t *testing.T) {
 	t.Parallel()
 
-	raw := `{"CardanoTransactions":{"epoch":271,"block_number":54321}}`
+	raw := `{"CardanoTransactions":[271,54321]}`
 	var set SignedEntityType
 	err := json.Unmarshal([]byte(raw), &set)
 	require.NoError(t, err)
@@ -474,7 +478,7 @@ func TestSignedEntityTypeCardanoTransactions(t *testing.T) {
 func TestSignedEntityTypeCardanoTransactionsFeedHash(t *testing.T) {
 	t.Parallel()
 
-	raw := `{"CardanoTransactions":{"epoch":271,"block_number":54321}}`
+	raw := `{"CardanoTransactions":[271,54321]}`
 	var set SignedEntityType
 	err := json.Unmarshal([]byte(raw), &set)
 	require.NoError(t, err)

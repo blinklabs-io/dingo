@@ -51,6 +51,20 @@ type stmMerkleTreeBatchCommitment struct {
 	NrLeaves int    `json:"nr_leaves"`
 }
 
+// MarshalJSON writes the commitment as serde_json does: the root as an
+// array of integers, and the PhantomData hasher as null.
+func (c stmMerkleTreeBatchCommitment) MarshalJSON() ([]byte, error) {
+	root := make([]int, len(c.Root))
+	for i, v := range c.Root {
+		root[i] = int(v)
+	}
+	return json.Marshal(struct {
+		Root     []int `json:"root"`
+		NrLeaves int   `json:"nr_leaves"`
+		Hasher   any   `json:"hasher"`
+	}{root, c.NrLeaves, nil})
+}
+
 type stmAggregateSignature struct {
 	Signatures []stmSingleSignatureWithRegisteredParty `json:"signatures"`
 	BatchProof stmMerkleBatchPath                      `json:"batch_proof"`
@@ -175,6 +189,52 @@ func verifySTMSignature(
 	return verifySTMConcatenationProof(msg, avk, aggrSig, params)
 }
 
+// stmAggregateVerificationKeyShape and stmAggregateSignatureShape are the
+// serde_json forms of mithril-stm 0.13.0's AggregateVerificationKey and
+// ConcatenationProof (src/proof_system/concatenation/,
+// src/membership_commitment/), ported by way of mithril2pq
+// (internal/mithril/stm/codec.go). Mithril: Copyright 2022 Input Output
+// (Hong Kong) Ltd., Apache-2.0. Byte arrays are JSON arrays of integers and
+// PhantomData is "hasher":null.
+var stmAggregateVerificationKeyShape = serdeField{
+	kind: serdeObject,
+	fields: []serdeField{
+		{name: "mt_commitment", kind: serdeObject, fields: []serdeField{
+			{name: "root", kind: serdeBytes},
+			{name: "nr_leaves", kind: serdeU64},
+			{name: "hasher", kind: serdeNull},
+		}},
+		{name: "total_stake", kind: serdeU64},
+	},
+}
+
+var stmAggregateSignatureShape = serdeField{
+	kind: serdeObject,
+	fields: []serdeField{
+		{name: "signatures", kind: serdeArray, fields: []serdeField{{
+			kind: serdeTuple,
+			fields: []serdeField{
+				{kind: serdeObject, fields: []serdeField{
+					{name: "sigma", kind: serdeBytes},
+					{name: "indexes", kind: serdeU64s},
+					{name: "signer_index", kind: serdeU64},
+				}},
+				{kind: serdeTuple, fields: []serdeField{
+					{kind: serdeBytes},
+					{kind: serdeU64},
+				}},
+			},
+		}}},
+		{name: "batch_proof", kind: serdeObject, fields: []serdeField{
+			{name: "values", kind: serdeArray, fields: []serdeField{
+				{kind: serdeBytes},
+			}},
+			{name: "indices", kind: serdeU64s},
+			{name: "hasher", kind: serdeNull},
+		}},
+	},
+}
+
 func parseSTMAggregateVerificationKey(
 	encoded string,
 ) (*stmAggregateVerificationKey, error) {
@@ -183,8 +243,14 @@ func parseSTMAggregateVerificationKey(
 		return nil, errors.New("could not decode aggregate verification key")
 	}
 	var ret stmAggregateVerificationKey
-	if err := json.Unmarshal(raw, &ret); err == nil &&
-		len(ret.MTCommitment.Root) > 0 {
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 && trimmed[0] == '{' {
+		clean, err := serdeJSON(raw, &stmAggregateVerificationKeyShape)
+		if err != nil {
+			return nil, fmt.Errorf("aggregate verification key: %w", err)
+		}
+		if err := json.Unmarshal(clean, &ret); err != nil {
+			return nil, err
+		}
 		if len(ret.MTCommitment.Root) != blake2b.Size256 {
 			return nil, fmt.Errorf(
 				"invalid Merkle root length %d, expected %d",
@@ -245,7 +311,13 @@ func parseSTMAggregateSignature(
 	}
 	var ret stmAggregateSignature
 	if err := validateSTMAggregateSignatureJSON(raw); err == nil {
-		if err := json.Unmarshal(raw, &ret); err != nil {
+		// The counts are bounded above; the shape check streams, so it
+		// adds nothing to what the message can make dingo hold.
+		clean, err := serdeJSON(raw, &stmAggregateSignatureShape)
+		if err != nil {
+			return nil, fmt.Errorf("multi-signature: %w", err)
+		}
+		if err := json.Unmarshal(clean, &ret); err != nil {
 			return nil, err
 		}
 		if len(ret.Signatures) == 0 {

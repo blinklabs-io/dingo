@@ -126,7 +126,7 @@ func testCreateEncodedSTMProofWithKey(
 	avkJSON, err := json.Marshal(
 		map[string]any{
 			"mt_commitment": map[string]any{
-				"root":      root,
+				"root":      serdeByteArray(root),
 				"nr_leaves": 1,
 				"hasher":    nil,
 			},
@@ -139,12 +139,12 @@ func testCreateEncodedSTMProofWithKey(
 			"signatures": []any{
 				[]any{
 					map[string]any{
-						"sigma":        sigBytes[:],
+						"sigma":        serdeByteArray(sigBytes[:]),
 						"indexes":      []uint64{0},
 						"signer_index": 0,
 					},
 					[]any{
-						vkBytes[:],
+						serdeByteArray(vkBytes[:]),
 						1,
 					},
 				},
@@ -410,8 +410,9 @@ func TestParseSTMAggregateVerificationKeyBoundsLeafCount(t *testing.T) {
 	jsonKey := func(nrLeaves int) string {
 		raw, err := json.Marshal(map[string]any{
 			"mt_commitment": map[string]any{
-				"root":      bytes.Repeat([]byte{1}, 32),
+				"root":      serdeByteArray(bytes.Repeat([]byte{1}, 32)),
 				"nr_leaves": nrLeaves,
+				"hasher":    nil,
 			},
 			"total_stake": 1,
 		})
@@ -567,4 +568,14 @@ func TestParseSTMAggregateSignatureBytesAcceptsMinimalEntries(t *testing.T) {
 	require.Len(t, sig.Signatures, totalSigs)
 	require.Equal(t, uint64(30), sig.Signatures[2].RegParty.Stake)
 	require.Empty(t, sig.Signatures[2].Sig.Indexes)
+}
+
+// serdeByteArray is b as serde_json writes a byte array: a JSON array of
+// integers. encoding/json would write []byte as base64.
+func serdeByteArray(b []byte) []int {
+	out := make([]int, len(b))
+	for i, v := range b {
+		out[i] = int(v)
+	}
+	return out
 }
