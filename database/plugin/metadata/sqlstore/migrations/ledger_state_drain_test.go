@@ -31,14 +31,14 @@ import (
 func TestLedgerStateDrainSchemaStopsAnOlderBinary(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "metadata.sqlite")
-	migrations.SeedMigratedPrefix(t, path, 67)
+	migrations.SeedMigratedPrefix(t, path, 68)
 	db, err := sql.Open("sqlite", "file:"+path+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 68)
+	require.Len(t, registry, 69)
 	runner := func(reg []migrations.Migration) migrations.Runner {
 		return migrations.Runner{
 			DB:       db,
@@ -48,11 +48,11 @@ func TestLedgerStateDrainSchemaStopsAnOlderBinary(t *testing.T) {
 		}
 	}
 
-	previous := runner(registry[:67])
+	previous := runner(registry[:68])
 	require.NoError(
 		t,
 		previous.Run(context.Background()),
-		"v67 binary on a v67 database",
+		"v68 binary on a v68 database",
 	)
 
 	current := runner(registry)
