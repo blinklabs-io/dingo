@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -669,12 +670,73 @@ func TestAdoptImmutableChunksPlacesChunkBeforeCommit(t *testing.T) {
 	requireTipAt(t, db, chunk0[len(chunk0)-1], len(chunk0))
 	_, err = os.Stat(filepath.Join(dir, "00001.chunk"))
 	require.ErrorIs(t, err, os.ErrNotExist, "the source copy moved")
+	pending, ok, err := db.ImmutableAdoptPending()
+	require.NoError(t, err)
+	require.True(t, ok, "the adoption is recorded as pending")
+	require.Equal(t, uint64(1), pending)
 
 	res, err := adopt(t, ctx, db, dir, digests, nil)
 	require.NoError(t, err)
 	require.Equal(t, len(blocks)-len(chunk0), res.BlocksCopied)
 	requireTipAt(t, db, blocks[len(blocks)-1], len(blocks))
 	requireBlocksMatch(t, baseline, db, blocks)
+	_, ok, err = db.ImmutableAdoptPending()
+	require.NoError(t, err)
+	require.False(t, ok, "a finished adoption leaves no pending record")
+}
+
+// A stop after a chunk's files moved into the ImmutableDB directory and before
+// the recorded tip covers them must survive startup reconciliation: the
+// source copy is gone, so cutting the files as bytes past the tip would lose
+// the certified chunk. Chunk 0 has no recorded tip at all, chunk 1 has a tip
+// at chunk 0's end.
+func TestAdoptImmutableChunksSurvivesReconcileBeforeTipRecorded(t *testing.T) {
+	t.Parallel()
+	for _, stopChunk := range []uint64{0, 1} {
+		t.Run(fmt.Sprintf("chunk%d", stopChunk), func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			const chunks = 3
+			baseline := baselineCopy(t, chunks)
+			dir, digests := adoptSource(t, chunks)
+			blocks := fixtureBlocks(t, dir)
+			db := newAdoptDB(t, datatypes.StorageModeAPI)
+
+			killed := errors.New("killed before commit")
+			_, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+				cfg.BeforeCommit = func(chunk uint64) error {
+					if chunk == stopChunk {
+						return killed
+					}
+					return nil
+				}
+			})
+			require.ErrorIs(t, err, killed)
+
+			sums := map[string][sha256.Size]byte{}
+			for _, ext := range []string{".chunk", ".primary", ".secondary"} {
+				name := immutable.ChunkName(stopChunk) + ext
+				data, err := os.ReadFile(filepath.Join(db.ImmutableDir(), name))
+				require.NoError(t, err, name)
+				sums[name] = sha256.Sum256(data)
+			}
+
+			require.NoError(t, db.ReconcileImmutable())
+
+			for name, want := range sums {
+				data, err := os.ReadFile(filepath.Join(db.ImmutableDir(), name))
+				require.NoError(t, err, "reconcile kept %s", name)
+				require.Equal(t, want, sha256.Sum256(data), name)
+			}
+
+			res, err := adopt(t, ctx, db, dir, digests, nil)
+			require.NoError(t, err)
+			require.Positive(t, res.BlocksCopied)
+			requireTipAt(t, db, blocks[len(blocks)-1], len(blocks))
+			requireBlocksMatch(t, baseline, db, blocks)
+			requireOffsetsMatch(t, baseline, db, blocks)
+		})
+	}
 }
 
 // certifiedPrefix keeps the digests of the first n chunks.

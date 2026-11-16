@@ -7665,9 +7665,17 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   has to cover the whole chunk while its blocks are still waiting for
   markers. A marker therefore never exceeds the recorded tip and never names
   a chunk file that is not yet durable, and after a kill the tip may cover
-  blocks the chain has not stored yet. The next run verifies the chunk
-  again and continues after the chain tip, including a kill inside the first
-  chunk. A chunk missing any of its three certified
+  blocks the chain has not stored yet. Between the first rename and that tip
+  write the tip does not cover the chunk, so before any file moves the import
+  durably records the chunk in `<dataDir>/immutable/adopting.pending`
+  (written, fsynced and renamed into place with the directory fsynced) and
+  removes it once the tip covers the chunk. While it exists
+  `ReconcileImmutable` leaves the directory alone and promotion and snapshots
+  refuse it with `ErrImmutableAdoptionPending`, so a kill at any point of
+  adopting a chunk, including before the first chunk has a tip, never cuts
+  certified files whose source copy has already moved. The next run verifies
+  the chunk again and continues after the chain tip, including a kill inside
+  the first chunk. A chunk missing any of its three certified
   digests, such as the ancillary archive's in-progress chunk, is not adopted.
   A resumed run skips the chunk the recorded tip ends once the chain's tip
   index has reached the recorded tip index, so blocks committed after an

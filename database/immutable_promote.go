@@ -413,6 +413,11 @@ func (d *Database) openImmutableStore() (*immutable.Store, error) {
 	if rt.store != nil {
 		return rt.store, nil
 	}
+	if _, pending, err := d.ImmutableAdoptPending(); err != nil {
+		return nil, err
+	} else if pending {
+		return nil, ErrImmutableAdoptionPending
+	}
 	st := rt.snapshot()
 	s, err := immutable.OpenStore(rt.dir, st.Geometry)
 	if err != nil {
@@ -456,7 +461,9 @@ func (d *Database) openImmutableStore() (*immutable.Store, error) {
 
 // ReconcileImmutable opens the chunk files and brings them in line with the
 // recorded tip, so a torn promotion is repaired at startup rather than at the
-// first promotion. It is a no-op without an ImmutableDB.
+// first promotion. It is a no-op without an ImmutableDB, and leaves the
+// directory untouched while a chunk adoption is pending: those files are
+// certified bytes the interrupted import resumes with.
 func (d *Database) ReconcileImmutable() error {
 	if d.immutable == nil {
 		return nil
@@ -464,6 +471,9 @@ func (d *Database) ReconcileImmutable() error {
 	d.immutable.mu.Lock()
 	defer d.immutable.mu.Unlock()
 	_, err := d.openImmutableStore()
+	if errors.Is(err, ErrImmutableAdoptionPending) {
+		return nil
+	}
 	return err
 }
 

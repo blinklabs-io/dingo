@@ -188,6 +188,12 @@ func AdoptImmutableChunks(
 			removeChunkFiles(cfg.SourceDir, num)
 			continue
 		}
+		// Record the chunk before any file moves: from the first rename until
+		// the tip covers the chunk, reconciliation would read its files as
+		// bytes past the recorded tip and cut them.
+		if err := db.BeginImmutableAdopt(num); err != nil {
+			return nil, err
+		}
 		if err := moveChunkIn(cfg.SourceDir, destDir, num, move); err != nil {
 			return nil, err
 		}
@@ -209,6 +215,9 @@ func AdoptImmutableChunks(
 				// the recorded tip ends in can already hold committed
 				// markers, so its files stay.
 				removeChunkFiles(destDir, num)
+				if cerr := db.ClearImmutableAdopt(); cerr != nil {
+					return nil, cerr
+				}
 			}
 			return nil, fmt.Errorf("adopting chunk %d: %w", num, err)
 		}
@@ -233,6 +242,9 @@ func AdoptImmutableChunks(
 			}
 		}
 		st, _ = db.ImmutableState()
+	}
+	if err := db.ClearImmutableAdopt(); err != nil {
+		return nil, err
 	}
 	if adopted && callback != nil && blocksCopied > 0 {
 		if err := markImmutableUtxoOffsetsComplete(db, lastSlot); err != nil {
@@ -409,6 +421,12 @@ func adoptChunk(
 		); err != nil {
 			return 0, nil, err
 		}
+	}
+	// The recorded tip now covers the chunk, so reconciliation keeps its
+	// files. A chunk with no blocks records no tip and its files hold nothing
+	// for reconciliation to cut.
+	if err := db.ClearImmutableAdopt(); err != nil {
+		return 0, nil, err
 	}
 	var added int
 	for len(raws) > 0 {
