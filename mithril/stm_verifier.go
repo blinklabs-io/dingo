@@ -24,6 +24,7 @@ import (
 	"math"
 	"math/big"
 	"math/bits"
+	"slices"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"golang.org/x/crypto/blake2b"
@@ -942,10 +943,7 @@ func stmConcatenateWithMessage(
 	avk *stmAggregateVerificationKey,
 	msg []byte,
 ) []byte {
-	ret := make([]byte, 0, len(msg)+len(avk.MTCommitment.Root))
-	ret = append(ret, msg...)
-	ret = append(ret, avk.MTCommitment.Root...)
-	return ret
+	return slices.Concat(msg, avk.MTCommitment.Root)
 }
 
 func stmDenseMapping(

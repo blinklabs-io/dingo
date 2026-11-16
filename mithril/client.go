@@ -169,13 +169,29 @@ func (p ProtocolParameters) ComputeHash() string {
 	hasher := sha256.New()
 	hasher.Write(uint64ToBigEndianBytes(p.K))
 	hasher.Write(uint64ToBigEndianBytes(p.M))
-	// Mithril hashes phi_f as fixed's U8F24::from_num, which rounds to
-	// nearest with ties to even; scaling by 2^24 is exact, so RoundToEven
-	// sees the true value. A phi_f outside the U8F24 range never verifies:
-	// verifySTMConcatenationProof rejects any outside (0, 1].
-	phiFixed := uint32(math.RoundToEven(p.PhiF * float64(uint64(1)<<24)))
-	hasher.Write(uint32ToBigEndianBytes(phiFixed))
+	hasher.Write(uint32ToBigEndianBytes(phiFU8F24Bits(p.PhiF)))
 	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+// phiFU8F24Bits returns the bits of fixed's U8F24::from_num(phi) in a
+// release build: phi times 2^24, rounded to nearest with ties to even, with
+// only its low 32 bits kept when it is outside the 8.24 range. Go leaves an
+// out-of-range float-to-integer conversion to the platform, so the
+// wrapping is done in floating point, where math.Mod is exact. Rust panics
+// on a phi that is not finite; this returns 0. A phi_f outside (0, 1]
+// never verifies: verifySTMConcatenationProof rejects it.
+func phiFU8F24Bits(phi float64) uint32 {
+	// Scaling by a power of two is exact unless it overflows, and a phi
+	// that large is a multiple of 2^32 once scaled.
+	scaled := math.RoundToEven(phi * (1 << 24))
+	if math.IsInf(scaled, 0) || math.IsNaN(scaled) {
+		return 0
+	}
+	w := math.Mod(scaled, 1<<32)
+	if w < 0 {
+		w += 1 << 32
+	}
+	return uint32(w)
 }
 
 // StakeDistributionParty represents a signer in the certificate
@@ -671,15 +687,22 @@ func (s *SignedEntityType) CardanoTransactions() *CardanoTransactionsBeacon {
 func signedEntityU64s(raw json.RawMessage, n int) ([]uint64, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
-	var nums []json.Number
-	if err := dec.Decode(&nums); err != nil {
+	// Decoding into []json.Number would accept a quoted number, which
+	// Mithril's u64 rejects; with UseNumber a JSON number decodes as
+	// json.Number and a string as string.
+	var items []any
+	if err := dec.Decode(&items); err != nil {
 		return nil, err
 	}
-	if len(nums) != n {
-		return nil, fmt.Errorf("want %d values, got %d", n, len(nums))
+	if len(items) != n {
+		return nil, fmt.Errorf("want %d values, got %d", n, len(items))
 	}
 	vals := make([]uint64, n)
-	for i, num := range nums {
+	for i, item := range items {
+		num, ok := item.(json.Number)
+		if !ok {
+			return nil, fmt.Errorf("value %d is not a number", i)
+		}
 		v, err := strconv.ParseUint(string(num), 10, 64)
 		if err != nil {
 			return nil, err

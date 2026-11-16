@@ -42,9 +42,11 @@ import (
 // encoding/json reads the values serde reads, or the check rejects what
 // serde rejects.
 //
-// It streams: the output is no larger than the input and no tree of the
-// message is held, so bounded decoders that run on its output still bound
-// what a message can make dingo retain.
+// It streams: no tree of the message is held, and the output is at most
+// three times the input, so bounded decoders that run on its output still
+// bound what a message can make dingo retain. Strings are re-encoded
+// without HTML escaping; the growth left is an invalid UTF-8 byte read as
+// U+FFFD and U+2028 or U+2029 written as an escape.
 
 type serdeKind int
 
@@ -90,8 +92,11 @@ func serdeJSON(data []byte, root *serdeField) ([]byte, error) {
 }
 
 func writeJSONString(out *bytes.Buffer, s string) {
-	b, _ := json.Marshal(s) //nolint:errchkjson // a string always marshals
-	out.Write(b)
+	enc := json.NewEncoder(out)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(s) //nolint:errchkjson // a string always encodes
+	// Encode terminates the value with a newline.
+	out.Truncate(out.Len() - 1)
 }
 
 // checkSerdeValue reads one value for f and writes it to out.
@@ -288,6 +293,8 @@ func checkSerdeObject(
 // copyJSONValue writes the value that starts with tok.
 func copyJSONValue(dec *json.Decoder, out *bytes.Buffer, tok json.Token) error {
 	switch v := tok.(type) {
+	case nil:
+		out.WriteString("null")
 	case json.Delim:
 		out.WriteRune(rune(v))
 		isObject := v == '{'

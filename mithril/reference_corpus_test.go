@@ -97,7 +97,22 @@ func (r referenceRecord) wantOut() string {
 	return ""
 }
 
-var errReferenceNotCompared = errors.New("not compared")
+var (
+	errReferenceNotCompared = errors.New("not compared")
+	errReferenceUnsupported = errors.New("operation has no handler")
+)
+
+// referenceUncompared lists the corpus operations this test does not
+// replay, with the reason. Any other operation without a handler fails.
+var referenceUncompared = map[string]string{
+	"gen": "key generation and signing draw from Rust's seeded ChaCha " +
+		"stream, which dingo does not reproduce",
+	"aggregate":        "builds keys and signatures with gen's RNG",
+	"verify_aggregate": "builds keys and signatures with gen's RNG",
+	"ln1m": "Rust's f64 ln(1 - phi_f); dingo decides the lottery by an " +
+		"exact rational Taylor bound with no ln, and lottery compares " +
+		"the outcome",
+}
 
 // referenceDivergences are the records where dingo deliberately answers
 // differently from the recorded Rust code. The test fails if one of them
@@ -111,12 +126,9 @@ var referenceDivergences = map[string]string{
 	"chain.jsonl#12":  "genesis parameters bound to the signed next parameters",
 	"chain.jsonl#13":  "certificate after genesis must be in the next epoch",
 	"proofs.jsonl#34": "lottery index must be below m",
-	// phi_f outside the 8.24 fixed-point range: Rust saturates or panics.
-	// Dingo still hashes it, and STM verification rejects any phi_f outside
-	// (0, 1], so no certificate carrying one verifies.
-	"hashes.jsonl#0":  "phi_f outside 8.24 range",
-	"hashes.jsonl#1":  "phi_f outside 8.24 range",
-	"hashes.jsonl#4":  "phi_f outside 8.24 range",
+	// A phi_f that is not finite: Rust panics, dingo hashes it as zero, and
+	// STM verification rejects any phi_f outside (0, 1], so no certificate
+	// carrying one verifies.
 	"hashes.jsonl#31": "phi_f infinite: Rust panics",
 	"hashes.jsonl#35": "phi_f infinite: Rust panics",
 	// An AVK in the binary bytes-hex codec: Rust re-encodes it to JSON-hex
@@ -134,6 +146,21 @@ var referenceDivergences = map[string]string{
 	"proofs.jsonl#9":   "unused batch path values",
 	"proofs.jsonl#42":  "unused batch path values",
 	"proofs.jsonl#108": "unused batch path values",
+	"merkle.jsonl#36":  "unused batch path values",
+	// serde_json parses a float without its float_roundtrip feature, which
+	// can land one ulp from the nearest double; Go's ParseFloat rounds
+	// correctly. Each record here has 17 or more significant digits.
+	"numbers.jsonl#11": "serde_json best-effort float parse",
+	"numbers.jsonl#22": "serde_json best-effort float parse",
+	"numbers.jsonl#24": "serde_json best-effort float parse",
+	"numbers.jsonl#27": "serde_json best-effort float parse",
+	"numbers.jsonl#29": "serde_json best-effort float parse",
+	"numbers.jsonl#30": "serde_json best-effort float parse",
+	"numbers.jsonl#38": "serde_json best-effort float parse",
+	"numbers.jsonl#42": "serde_json best-effort float parse",
+	"numbers.jsonl#44": "serde_json best-effort float parse",
+	"numbers.jsonl#47": "serde_json best-effort float parse",
+	"numbers.jsonl#52": "serde_json best-effort float parse",
 }
 
 // runReference evaluates one recorded request against dingo and returns
@@ -196,8 +223,75 @@ func runReference(r referenceRecord) (bool, string, error) {
 	case "sig_decode":
 		_, err := decodeSTMSignature(r.bytes("b"))
 		return err == nil, "", err
+	case "ev":
+		ev := stmDenseMapping(r.bytes("sigma"), r.bytes("msgp"), r.u64("index"))
+		return true, hex.EncodeToString(ev[:]), nil
+	case "ed25519_verify":
+		ok := verifyEd25519Strict(r.bytes("vk"), r.bytes("msg"), r.bytes("sig"))
+		return ok, "", nil
+	case "parse_f64":
+		// phi_f as a certificate's parameters decode it.
+		clean, err := serdeJSON([]byte(r.str("s")), &serdeField{kind: serdeF64})
+		if err != nil {
+			return false, "", err
+		}
+		var f float64
+		if err := json.Unmarshal(clean, &f); err != nil {
+			return false, "", err
+		}
+		return true, fmt.Sprintf("%016x", math.Float64bits(f)), nil
+	case "batch_path":
+		err := verifyReferenceBatchPath(r)
+		return err == nil, "", err
 	}
-	return false, "", errReferenceNotCompared
+	return false, "", errReferenceUnsupported
+}
+
+// verifyReferenceBatchPath checks a Merkle batch path for leaves against a
+// commitment, as STM verification checks the signers of a proof.
+func verifyReferenceBatchPath(r referenceRecord) error {
+	nrLeaves, err := strconv.Atoi(r.str("nr_leaves"))
+	if err != nil {
+		return err
+	}
+	avk := stmAggregateVerificationKey{
+		MTCommitment: stmMerkleTreeBatchCommitment{
+			Root:     r.bytes("root"),
+			NrLeaves: nrLeaves,
+		},
+	}
+	var proof stmMerkleBatchPath
+	for _, v := range r.Req["values"].([]any) {
+		b, err := hex.DecodeString(fmt.Sprint(v))
+		if err != nil {
+			return err
+		}
+		proof.Values = append(proof.Values, b)
+	}
+	for _, v := range r.Req["indices"].([]any) {
+		i, err := strconv.Atoi(fmt.Sprint(v))
+		if err != nil {
+			return err
+		}
+		proof.Indices = append(proof.Indices, i)
+	}
+	var leaves []stmClosedRegistrationEntry
+	for _, v := range r.Req["leaves"].([]any) {
+		pair := v.([]any)
+		vk, err := hex.DecodeString(fmt.Sprint(pair[0]))
+		if err != nil {
+			return err
+		}
+		stake, err := strconv.ParseUint(fmt.Sprint(pair[1]), 10, 64)
+		if err != nil {
+			return err
+		}
+		leaves = append(leaves, stmClosedRegistrationEntry{
+			VerificationKey: vk,
+			Stake:           stake,
+		})
+	}
+	return stmVerifyLeavesMembershipFromBatchPath(&avk, leaves, &proof)
 }
 
 // verifyReferenceCertificate applies the checks the chain walk applies to
@@ -269,6 +363,16 @@ func TestReferenceCorpus(t *testing.T) {
 	compared := 0
 	for _, rec := range recs {
 		ok, out, err := runReference(rec)
+		if errors.Is(err, errReferenceUnsupported) {
+			if _, listed := referenceUncompared[rec.str("op")]; !listed {
+				t.Errorf(
+					"%s: operation %q has no handler",
+					rec.id(),
+					rec.str("op"),
+				)
+			}
+			continue
+		}
 		if errors.Is(err, errReferenceNotCompared) {
 			continue
 		}

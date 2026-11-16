@@ -14767,7 +14767,11 @@ check that holds no tree, so the bounded decoders after it still bound
 retained memory). The protocol message hash scheme must be `legacy` and its
 parts must be known. Certificate timestamps are read with chrono's relaxed RFC
 3339 grammar and hashed as its `timestamp_nanos_opt` (`chrono_timestamp.go`),
-and `phi_f` is hashed in 8.24 fixed point rounded to nearest, ties to even.
+and `phi_f` is hashed in 8.24 fixed point rounded to nearest, ties to even,
+keeping the low 32 bits of a value outside that range as a release build of
+the reference does. Genesis and ancillary manifest signatures are verified as
+ed25519-dalek's `verify_strict` verifies them, which rejects a small-order
+public key or R that `crypto/ed25519.Verify` accepts.
 `TestReferenceCorpus` replays answers recorded from mithril-stm 0.13.0 and
 mithril-common 0.8.3 against this verifier and lists the few places it is
 deliberately stricter.
