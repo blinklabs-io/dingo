@@ -13567,7 +13567,19 @@ votes:
   changing vote state or emitting an event. Node composition enqueues the
   three-field vote on LeiosNotify. When `leiosVoteSigningKeyFile` is configured,
   Dingo loads the Cardano text-envelope BLS12-381 signing key and uses it for
-  vote signatures; legacy raw hex scalar files remain accepted. A node whose
+  vote signatures; legacy raw hex scalar files remain accepted. A file may also
+  hold a JSON array of such envelopes, as the reference node's
+  `--shelley-bls-key` allows. One key is bound to the producer's pool as
+  described below. Several keys are held by the vote manager as a key set,
+  matched to committee seats by registered public key rather than by pool: at
+  each announcement a key votes at the smallest seat whose resolved key equals
+  it and casts nothing if it holds none, so a rotation pair keeps a pool voting
+  through the epoch in which its registered key changes and a bundle of many
+  pools' keys votes for every seat it covers. Key-set votes use the same timing,
+  chain-choice and commit revalidation as a pool-bound vote, with the commit
+  also requiring the signing key to remain in the current set; announcements
+  that became ready before the set was configured are replayed. The latest
+  configuration, key set or pool-bound key, replaces the other. A node whose
   local historical snapshot has not reached the key's on-chain registration
   starts with voting disabled and retries the deferred configuration after epoch
   transitions. The initial provider lookup distinguishes absence from failure:

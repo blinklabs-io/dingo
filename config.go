@@ -1905,10 +1905,11 @@ func WithShelleyKESAgentProfile(profile string) ConfigOptionFunc {
 	}
 }
 
-// WithLeiosVoteSigningKeyFile specifies the path to a hex-encoded BLS12-381
-// Leios vote signing key (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE). When set on a
-// block producer whose pool is a Leios committee member, the node emits
-// votes for endorser blocks. Experimental, leios runMode only.
+// WithLeiosVoteSigningKeyFile specifies the path to a BLS12-381 Leios vote
+// signing key file (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE): a Cardano text
+// envelope, a JSON array of envelopes, or a legacy raw hex scalar. When set on
+// a block producer, the node emits votes for endorser blocks for the committee
+// seats the keys hold. Experimental, leios runMode only.
 func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LeiosVoteSigningKeyFile = path

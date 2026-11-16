@@ -1114,7 +1114,7 @@ var flagSpecs = []flagSpec{
 		"LeiosVoteSigningKeyFile",
 		"leios-vote-signing-key-file",
 		"",
-		"path to Cardano text-envelope BLS12-381 Leios vote signing key or legacy raw hex scalar",
+		"path to a Cardano text-envelope BLS12-381 Leios vote signing key, a JSON array of such envelopes, or a legacy raw hex scalar",
 	),
 	// Mithril
 	boolFlag(

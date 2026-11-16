@@ -1183,9 +1183,10 @@ type Config struct {
 
 	// Leios voting configuration (experimental, leios runMode only).
 	// LeiosVoteSigningKeyFile is the path to a Cardano text-envelope
-	// BLS12-381 vote signing key (or a legacy raw hex scalar). When set on
-	// a block producer whose pool is a committee member, the node emits
-	// Leios votes for endorser blocks.
+	// BLS12-381 vote signing key, a JSON array of such envelopes (a rotation
+	// pair or a bundle of pools' keys), or a legacy raw hex scalar. When set
+	// on a block producer, the node emits Leios votes for endorser blocks for
+	// every committee seat the keys hold.
 	LeiosVoteSigningKeyFile string `yaml:"leiosVoteSigningKeyFile" envconfig:"DINGO_LEIOS_VOTE_SIGNING_KEY_FILE"`
 
 	// PeerSharing enables the peer sharing protocol, allowing this node

@@ -476,11 +476,13 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 	return nil
 }
 
-// enableLeiosVoting enables vote emission for the block producer's pool,
-// using the operator-configured BLS signing key. A pool started without one
-// runs as a non-voting relay: upstream removed the insecure pool-derived
-// key shortcut, so there is no fallback that lets a pool vote without a
-// real registered key.
+// enableLeiosVoting enables vote emission for the block producer, using the
+// operator-configured BLS signing keys. A file with one key binds it to the
+// producer's pool and checks it against the pool's on-chain registration; a
+// file with several keys votes for every committee seat they hold. A producer
+// started without a key runs as a non-voting relay: upstream removed the
+// insecure pool-derived key shortcut, so there is no fallback that lets a
+// pool vote without a real registered key.
 func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	if n.leiosVoteManager == nil {
 		return nil
@@ -499,12 +501,38 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	poolID := creds.GetPoolID()
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], poolID[:])
-	key, err := leios.LoadVoteSigningKeyFile(
+	keys, err := leios.LoadVoteSigningKeysFile(
 		n.config.leiosVoteSigningKeyFile,
 	)
 	if err != nil {
 		return fmt.Errorf("load leios vote signing key: %w", err)
 	}
+	switch len(keys) {
+	case 0:
+		n.config.logger.Warn(
+			"leios vote signing key file holds no keys; running as a non-voting relay",
+			"component",
+			"node",
+		)
+		return nil
+	case 1:
+	default:
+		// Several keys are matched to committee seats by registered key, so
+		// none is tied to this producer's pool: a rotation pair spans the
+		// epoch in which its registered key changes, and a bundle votes for
+		// every seat it covers.
+		if err := n.leiosVoteManager.ConfigureVotingKeys(keys); err != nil {
+			return fmt.Errorf("configure leios vote signing keys: %w", err)
+		}
+		n.config.logger.Info(
+			"leios voting keys configured",
+			"component", "node",
+			"pool_id", poolID.String(),
+			"keys", len(keys),
+		)
+		return nil
+	}
+	key := keys[0]
 	status, err := n.leiosVoteManager.ConfigureVoting(poolKeyHash, key)
 	if err != nil {
 		return fmt.Errorf("validate configured leios vote signing key: %w", err)

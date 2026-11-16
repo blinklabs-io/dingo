@@ -526,7 +526,10 @@ For a manually started network, `./start.sh --leios` prints the environment
 and Go command for the matching producer-to-peer test. The test-only signing
 key and proof are paired fixtures under `testdata/`; a focused unit test
 checks that the registered proof and signing key agree. The configurator
-places the secret only in the generated local pool-key volume.
+places the secret only in the generated local pool-key volume. The first pool's
+vote key file is a JSON array holding an unregistered key followed by its
+registered key, so that pool votes through the multi-key path; the other pools
+use a single key file.
 
 ## Failure artifacts
 
