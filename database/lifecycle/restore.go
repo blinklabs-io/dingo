@@ -835,6 +835,11 @@ func restoreValidated(
 			return Manifest{}, err
 		}
 	}
+	if err := placeImmutableChunks(
+		ctx, manifest, snapshotDir, stagingDir,
+	); err != nil {
+		return Manifest{}, err
+	}
 	if err := validateRestoredDatabase(
 		ctx, host, manifest, stagingDir, storageConfig,
 	); err != nil {
@@ -1006,29 +1011,69 @@ func fetchPayloads(
 		}
 		dir := owned.dir.path
 		cleanup := func() { _ = owned.cleanup() }
-		for _, file := range manifest.payloadDownloads() {
-			src, err := os.Open(filepath.Join(snapshotDir, file.Name))
-			if err != nil {
-				return "", cleanup, err
-			}
-			err = writeBoundedFile(filepath.Join(dir, file.Name),
-				payloadContextReader{ctx: ctx, reader: src}, file)
-			closeErr := src.Close()
-			if err != nil {
-				if errors.Is(err, ErrDownloadTooLarge) {
-					err = fmt.Errorf("%w: %w", ErrSnapshotPayloadMismatch, err)
+		copyFiles := func(files []DownloadFile) error {
+			for _, file := range files {
+				src, err := os.Open(filepath.Join(snapshotDir, file.Name))
+				if err != nil {
+					return err
 				}
-				return "", cleanup, err
+				err = writeBoundedFile(filepath.Join(dir, file.Name),
+					payloadContextReader{ctx: ctx, reader: src}, file)
+				closeErr := src.Close()
+				if err != nil {
+					if errors.Is(err, ErrDownloadTooLarge) {
+						err = fmt.Errorf("%w: %w", ErrSnapshotPayloadMismatch, err)
+					}
+					return err
+				}
+				if closeErr != nil {
+					return closeErr
+				}
 			}
-			if closeErr != nil {
-				return "", cleanup, closeErr
-			}
+			return nil
+		}
+		if err := copyFiles(manifest.payloadDownloads()); err != nil {
+			return "", cleanup, err
+		}
+		chunks, err := manifest.immutableDownloads(ctx, dir)
+		if err != nil {
+			return "", cleanup, err
+		}
+		if err := copyFiles(chunks); err != nil {
+			return "", cleanup, err
 		}
 		return dir, cleanup, nil
 	}
-	return downloadCloudFiles(
+	dir, cleanup, err := downloadCloudFiles(
 		ctx, registry, snapshotDir, workParent, manifest.payloadDownloads(),
 	)
+	if err != nil {
+		return "", cleanup, err
+	}
+	chunks, err := manifest.immutableDownloads(ctx, dir)
+	if err != nil {
+		return "", cleanup, err
+	}
+	if len(chunks) == 0 {
+		return dir, cleanup, nil
+	}
+	chunkDir, chunkCleanup, err := downloadCloudFiles(
+		ctx, registry, snapshotDir, workParent, chunks,
+	)
+	if chunkCleanup != nil {
+		defer chunkCleanup()
+	}
+	if err != nil {
+		return "", cleanup, err
+	}
+	for _, file := range chunks {
+		if err := os.Rename(
+			filepath.Join(chunkDir, file.Name), filepath.Join(dir, file.Name),
+		); err != nil {
+			return "", cleanup, fmt.Errorf("collect %q: %w", file.Name, err)
+		}
+	}
+	return dir, cleanup, nil
 }
 
 // restoreRollback records pre-mutation backups for remote stores. Local

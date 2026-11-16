@@ -132,6 +132,12 @@ type Block struct {
 	Type  uint
 	Slot  uint64
 	IsEbb bool
+	// Offset and Size locate the block's wrapped bytes, [type, Cbor], in its
+	// chunk file, and CRC is their CRC-32 (IEEE). Set when read from a chunk
+	// file; a ImmutableDB marker records exactly these.
+	Offset uint64
+	Size   uint32
+	CRC    uint32
 }
 
 // New returns a new ImmutableDb using the specified data directory or an error

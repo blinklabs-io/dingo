@@ -638,6 +638,13 @@ type SyncConfig struct {
 	PinnedDigest           string                     // optional exact artifact identity for a fresh bootstrap (database hash)
 	VerifyCertChain        bool
 	CleanupAfterLoad       bool
+	// KeepChunks moves the verified ImmutableDB chunk files into the
+	// database's own ImmutableDB and indexes them in place instead of copying
+	// every block body into the blob store. It applies only to a bootstrap of
+	// an empty database, or the resume of one; a catch-up or reward repair
+	// copies bodies. The ImmutableDB state is created even when it does not
+	// apply.
+	KeepChunks bool
 	// RepairLegacyRewardState forces a same-chain Mithril reconciliation for
 	// an existing database marked by the reward-pot migration. The node may
 	// serve only after an artifact covers the local tip and the reconciliation
@@ -768,24 +775,9 @@ func Sync(
 	network := cfg.Network
 
 	// Load or reuse Cardano node config.
-	nodeCfg := cfg.CardanoNodeConfig
-	if nodeCfg == nil {
-		cardanoConfigPath := cfg.CardanoConfigPath
-		if cardanoConfigPath == "" {
-			cardanoConfigPath = cardano.EmbeddedConfigPath(network)
-		}
-		var err error
-		nodeCfg, err = cardano.LoadCardanoNodeConfigWithFallback(
-			cardanoConfigPath,
-			network,
-			cardano.EmbeddedConfigFS,
-		)
-		if err != nil {
-			return SyncResult{}, fmt.Errorf(
-				"loading cardano node config: %w",
-				err,
-			)
-		}
+	nodeCfg, err := cfg.resolveNodeConfig()
+	if err != nil {
+		return SyncResult{}, err
 	}
 
 	aggregatorURL := cfg.AggregatorURL
@@ -842,6 +834,13 @@ func Sync(
 	db := runtime.Database
 	skipImmutableUtxoOffsets := db.StorageMode() == datatypes.StorageModeCore
 	defer runtime.Close(context.Background()) //nolint:contextcheck
+	// The import rewrites blocks and may roll the chain back, which a
+	// promotion step sharing this database must not interleave with.
+	unlockImmutable, err := db.LockImmutable(ctx)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("locking immutable database: %w", err)
+	}
+	defer unlockImmutable()
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// Tolerate a recoverable commit-timestamp mismatch from a previously
 		// interrupted run; mithril import heals it on forward progress.
@@ -1159,8 +1158,12 @@ func Sync(
 	// [catchUpStart..N] range fully, then runs the divergence check before any
 	// mutation. Verified Mithril bootstrap also waits for the ancillary
 	// signature and ledger-state checks before allowing database mutation.
+	//
+	// Adopting the chunk files is not pipelined: it moves each chunk out of
+	// the extracted tree, so it runs once the whole tree is verified.
+	keepChunks := cfg.keepsChunks(catchUp)
 	chunkHook := onChunkContiguous
-	if catchUp || cfg.VerifyCertChain {
+	if catchUp || cfg.VerifyCertChain || keepChunks {
 		chunkHook = nil
 	}
 
@@ -1595,6 +1598,49 @@ func Sync(
 			"immutable_dir", bootstrapResult.ImmutableDir,
 		)
 		var loadErr error
+		if keepChunks {
+			loadResult, loadErr = node.AdoptImmutableChunks(
+				ctx, logger, db, node.AdoptChunksConfig{
+					SourceDir: bootstrapResult.ImmutableDir,
+					Digests:   bootstrapResult.ImmutableDigests,
+					OnChunkCommitted: func(firstUnadopted uint64) error {
+						return setImmutableRetiredBelow(db, firstUnadopted)
+					},
+					OnProgress: func(p node.LoadBlobsProgress) {
+						cfg.emit(SyncProgress{
+							Phase:          PhaseImmutableCopy,
+							Active:         true,
+							Count:          p.BlocksCopied,
+							CurrentSlot:    p.CurrentSlot,
+							TipSlot:        p.TipSlot,
+							Percent:        p.Percent,
+							BytesPerSecond: p.BlocksPerSecond,
+						})
+					},
+				},
+			)
+			switch {
+			case loadErr == nil:
+				cfg.emit(SyncProgress{
+					Phase:       PhaseImmutableCopy,
+					Active:      true,
+					Count:       loadResult.BlocksCopied,
+					CurrentSlot: loadResult.ImmutableTipSlot,
+					TipSlot:     loadResult.ImmutableTipSlot,
+					Percent:     100,
+				})
+				return nil
+			case errors.Is(loadErr, node.ErrAdoptUnavailable):
+				logger.Warn(
+					"database already holds block bodies; copying them "+
+						"instead of keeping the chunk files",
+					"component", "mithril",
+				)
+				loadResult = nil
+			default:
+				return fmt.Errorf("adopting ImmutableDB chunks: %w", loadErr)
+			}
+		}
 		loadOptions := []node.LoadBlobsOption{
 			node.WithImmutableDB(certifiedImmutable),
 			node.WithLoadBlobsProgress(func(p node.LoadBlobsProgress) {
@@ -2187,6 +2233,60 @@ func NeedsSync(cfg SyncConfig) (bool, error) {
 	return val != syncStatusBackfill, nil
 }
 
+// resolveNodeConfig returns the configured Cardano node config, loading the
+// network's own when none was supplied.
+func (cfg SyncConfig) resolveNodeConfig() (*cardano.CardanoNodeConfig, error) {
+	if cfg.CardanoNodeConfig != nil {
+		return cfg.CardanoNodeConfig, nil
+	}
+	path := cfg.CardanoConfigPath
+	if path == "" {
+		path = cardano.EmbeddedConfigPath(cfg.Network)
+	}
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		path, cfg.Network, cardano.EmbeddedConfigFS,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("loading cardano node config: %w", err)
+	}
+	return nodeCfg, nil
+}
+
+// immutableConfig is the ImmutableDB configuration the sync opens its database
+// with: the network's chunk geometry when chunk files are kept, otherwise none.
+func (cfg SyncConfig) immutableConfig() (database.ImmutableConfig, error) {
+	if !cfg.KeepChunks {
+		return database.ImmutableConfig{}, nil
+	}
+	if provider := cfg.StoragePlugins.Blob.Provider; provider != "" &&
+		provider != "badger" {
+		return database.ImmutableConfig{}, fmt.Errorf(
+			"keeping Mithril chunk files requires the badger blob plugin, "+
+				"got %q", provider,
+		)
+	}
+	nodeCfg, err := cfg.resolveNodeConfig()
+	if err != nil {
+		return database.ImmutableConfig{}, err
+	}
+	slots, ebb, err := nodeCfg.ImmutableChunkGeometry()
+	if err != nil {
+		return database.ImmutableConfig{}, fmt.Errorf(
+			"deriving ImmutableDB chunk geometry: %w", err,
+		)
+	}
+	return database.ImmutableConfig{
+		Enabled: true, ChunkSlots: slots, CanContainEBB: ebb,
+	}, nil
+}
+
+// keepsChunks reports whether this run adopts the chunk files. A catch-up or
+// reward repair joins onto blocks already in the blob store, which chunk files
+// cannot be joined onto.
+func (cfg SyncConfig) keepsChunks(catchUp bool) bool {
+	return cfg.KeepChunks && !catchUp && !cfg.RepairLegacyRewardState
+}
+
 func openDatabase(
 	ctx context.Context,
 	cfg SyncConfig,
@@ -2198,6 +2298,10 @@ func openDatabase(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("loading cardano node config: %w", err)
+	}
+	immutableCfg, err := cfg.immutableConfig()
+	if err != nil {
+		return nil, err
 	}
 	storagePlugins := cfg.StoragePlugins
 	if storagePlugins.Blob.Provider == "" {
@@ -2214,6 +2318,7 @@ func openDatabase(
 			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
 				cfg.CardanoNodeConfig, cfg.CardanoConfigPath, cfg.Network,
 			),
+			Immutable: immutableCfg,
 		},
 		internalplugins.StorageSelections{
 			Blob:     storagePlugins.Blob,

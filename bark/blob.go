@@ -318,6 +318,10 @@ type BlobStoreBark struct {
 	upstream             blob.BlobStore
 }
 
+// Unwrap returns the store this one reads through to, so callers that need the
+// underlying store can look past the archive layer.
+func (b *BlobStoreBark) Unwrap() blob.BlobStore { return b.upstream }
+
 func NewBarkBlobStore(
 	config BlobStoreBarkConfig,
 	upstream blob.BlobStore,
@@ -652,6 +656,14 @@ func (b *BlobStoreBark) RemainingTxnEntries(
 		return 0, false
 	}
 	return budget.RemainingTxnEntries(txn, entryBytes)
+}
+
+// ReclaimSpace forwards to the upstream store, where the local data lives.
+func (b *BlobStoreBark) ReclaimSpace() error {
+	if r, ok := b.upstream.(blob.SpaceReclaimer); ok {
+		return r.ReclaimSpace()
+	}
+	return nil
 }
 
 // DetectsWriteConflicts forwards the upstream transaction capability.

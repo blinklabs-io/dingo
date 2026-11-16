@@ -873,6 +873,12 @@ func finishPendingTruncate(
 	// error or context cancellation is noticed) — so an error from here on
 	// is deliberately NOT wrapped in ErrTruncateNotStarted, unlike the
 	// validation failures above.
+	// Promoted blocks are removed with the rest of the range, so the
+	// ImmutableDB gives them up first; DeleteBlocksAfter itself refuses to
+	// delete below the immutable tip.
+	if err := db.LowerImmutableTip(pending.TargetID); err != nil {
+		return 0, fmt.Errorf("truncate: lower immutable tip: %w", err)
+	}
 	blocksDeleted, err := DeleteBlocksAfter(
 		ctx,
 		db,

@@ -316,6 +316,13 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.blockPromoter != nil {
+		if stopErr := n.blockPromoter.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("block promotion shutdown: %w", stopErr))
+		}
+	}
 	if n.historyExpiry != nil {
 		if stopErr := n.historyExpiry.Stop(ctx); stopErr != nil {
 			err = errors.Join(
@@ -560,10 +567,11 @@ func (n *Node) shutdown() error {
 			)
 		} else {
 			n.config.logger.Info("closing database")
-			if closeErr := n.closeWithShutdownTimeout(
-				ctx,
+			// Not bounded by the shutdown deadline: the close takes the
+			// ImmutableDB lock a promotion batch holds, and the stores the
+			// plugin host closes next must not see that batch still running.
+			if closeErr := n.closeDurable(
 				"database",
-				shutdownTimeout,
 				n.db.Close,
 			); closeErr != nil {
 				err = errors.Join(

@@ -5393,3 +5393,53 @@ func TestAtTipRecoveryPruneFloorBindsAboveMithrilAnchor(t *testing.T) {
 		uint64(pruneFixtureFloorSlot),
 	)
 }
+
+// TestRecoveryRewindHaltsWhenRefusedByImmutableFloor pins the ImmutableDB
+// floor as a terminal refusal. A promoted block's removal is refused for as
+// long as the database holds it, so a recovery rewind below the immutable tip
+// is no more reachable on the next pipeline restart than one beyond K, and
+// must stop the pipeline rather than be retried forever.
+func TestRecoveryRewindHaltsWhenRefusedByImmutableFloor(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	raw := seedTestChain(t, cm.PrimaryChain(), "halt-immutable-floor", 3)
+
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+
+	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
+	refuse := func(ocommon.Point) (bool, error) {
+		return false, fmt.Errorf(
+			"rollback: %w", database.ErrRollbackBelowImmutableTip,
+		)
+	}
+	var lastErr error
+	for range maxRecoveryRewindRejections + 1 {
+		_, lastErr = ls.rewindPrimaryChainForRecoveryWithRollback(
+			target, refuse,
+		)
+		require.ErrorIs(t, lastErr, database.ErrRollbackBelowImmutableTip)
+		if errors.Is(lastErr, errHaltLedgerPipeline) {
+			return
+		}
+	}
+	t.Fatalf(
+		"a recovery rewind refused by the immutable floor must stop the "+
+			"pipeline rather than be retried forever: %v",
+		lastErr,
+	)
+}

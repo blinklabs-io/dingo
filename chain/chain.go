@@ -1601,6 +1601,10 @@ type RawBlock struct {
 	Type        uint
 	PrevHash    []byte
 	Cbor        []byte
+	// Immutable, when set, names where Cbor already sits in a chunk file of
+	// the ImmutableDB: the block is stored with that marker as its body
+	// instead of a copy of Cbor, which still feeds the callback.
+	Immutable *types.ImmutableMarker
 }
 
 func (c *Chain) addRawBlockLocked(
@@ -1664,8 +1668,16 @@ func (c *Chain) addRawBlockLocked(
 		PrevHash: rb.PrevHash,
 		Cbor:     rb.Cbor,
 	}
-	if err := c.manager.addBlock(tmpBlock, txn, c.persistent); err != nil {
-		return event.Event{}, fmt.Errorf("persisting block: %w", err)
+	var persistErr error
+	if rb.Immutable != nil && c.persistent {
+		persistErr = c.manager.db.BlockCreateImmutable(
+			tmpBlock, *rb.Immutable, txn,
+		)
+	} else {
+		persistErr = c.manager.addBlock(tmpBlock, txn, c.persistent)
+	}
+	if persistErr != nil {
+		return event.Event{}, fmt.Errorf("persisting block: %w", persistErr)
 	}
 	if callback != nil {
 		if err := callback(rb, txn); err != nil {
@@ -2286,6 +2298,16 @@ func (c *Chain) HoldsQueuedHeaderHash(hash []byte) bool {
 	return false
 }
 
+// checkImmutableFloor refuses a rollback that would remove a block already
+// promoted to the ImmutableDB. It applies to bounded and unbounded rollbacks
+// alike: the immutable tip is a storage fact, not a consensus bound.
+func (c *Chain) checkImmutableFloor(rollbackBlockIndex uint64) error {
+	if !c.persistent || c.manager.db == nil {
+		return nil
+	}
+	return c.manager.db.CheckImmutableRollback(rollbackBlockIndex)
+}
+
 // ValidateRollback verifies that Rollback(point) would be accepted without
 // mutating chain state. Callers can use this to avoid applying external
 // side effects before the chain's rollback pre-checks have run.
@@ -2328,6 +2350,9 @@ func (c *Chain) ValidateRollback(
 			return err
 		}
 		rollbackBlockIndex = tmpBlock.ID
+	}
+	if err := c.checkImmutableFloor(rollbackBlockIndex); err != nil {
+		return err
 	}
 	// Calculate fork depth before deleting blocks
 	forkDepth := c.rollbackForkDepth(point, rollbackBlockIndex)
@@ -2525,6 +2550,9 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 			return nil, err
 		}
 		rollbackBlockIndex = tmpBlock.ID
+	}
+	if err := c.checkImmutableFloor(rollbackBlockIndex); err != nil {
+		return nil, err
 	}
 	// Calculate fork depth before deleting blocks
 	forkDepth := c.rollbackForkDepth(point, rollbackBlockIndex)
@@ -2856,7 +2884,24 @@ func (c *Chain) PointAtDepth(
 	}
 	unlocks := c.lockBlockIndexReadLocks()
 	defer unlocks()
-	block, err := c.blockByIndexLocked(ctx, c.tipBlockIndex-depth)
+	return c.pointByIndexLocked(ctx, c.tipBlockIndex-depth)
+}
+
+// pointByIndexLocked resolves the point at a block index. A persistent chain
+// answers from the block index alone, so a promoted block's body is never read
+// from the chunk files just to learn its slot and hash.
+func (c *Chain) pointByIndexLocked(
+	ctx context.Context,
+	index uint64,
+) (ocommon.Point, bool, error) {
+	if c.persistent && c.manager.db != nil {
+		point, err := c.manager.db.BlockPointByIndex(index, nil)
+		if err != nil {
+			return ocommon.Point{}, false, err
+		}
+		return point, true, nil
+	}
+	block, err := c.blockByIndexLocked(ctx, index)
 	if err != nil {
 		return ocommon.Point{}, false, err
 	}
@@ -2898,11 +2943,7 @@ func (c *Chain) PointAtDepthFrom(
 	if depth == 0 {
 		return ocommon.NewPoint(active.Slot, active.Hash), true, nil
 	}
-	ancestor, err := c.blockByIndexLocked(ctx, block.ID-depth)
-	if err != nil {
-		return ocommon.Point{}, false, err
-	}
-	return ocommon.NewPoint(ancestor.Slot, ancestor.Hash), true, nil
+	return c.pointByIndexLocked(ctx, block.ID-depth)
 }
 
 // IntersectPoints returns up to count points in descending order for

@@ -2676,6 +2676,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chain.update` | ChainManager | Block added to chain (`ChainBlockEvent`), or chain rolled back (`ChainRollbackEvent`, which also carries `Seq`, the chain-mutation sequence number shared with the matching `chain.header` invalidation). Consumed by LedgerState, by the Leios PipelineManager for instance and ranking-block pruning, by the Leios VoteManager for rollback pruning and as an idempotent apply-time backstop for announcements, and by `Node.subscribeChainSelectorEvents`'s detachable diagnostic observer, which forwards each `ChainRollbackEvent`'s rolled-back blocks to `Ouroboros.RecordForkBattleParticipants` so the blockfetch fork-battle ring (`dingo_blockfetch_recent_fork_participants`/`..._distinct_slots`/`..._block_number`, a collector separate from the delay ring) can distinguish a fork-battle delay from a genuinely slow fetch. The VoteManager no longer arms announcements from this topic; that is `chain.header` |
 | `chain.header` | ChainManager | Ordered header-lifecycle stream. Carries one event for every authenticated Leios-era ranking-block header admitted to the header queue: `ChainHeaderAnnouncementEvent` (slot, header hash, announced endorser-block hash, issuer pool key hash, admission time, `Seq`) for an announcement, or `ChainHeaderObservedEvent` (slot, header hash, issuer pool key hash, `Seq`) otherwise. A block added without the queue (a local forge, a bulk restore) publishes only its announcement, and headers from eras without announcements publish nothing. `ChainHeaderInvalidationEvent` (highest still-valid point, discarded ranking-block hashes, reason, `Seq`) records queued headers leaving the chain. Events are enqueued under the chain mutex, so the Leios VoteManager can arm announcements, detect RB equivocation and identify the latest RB in chain-mutation order. Only the primary chain publishes: fork chains built by `NewChain` and `NewChainFromIntersect` carry no event bus, so their headers and blocks reach neither this topic nor `chain.update`. |
 | `chain.fork_detected` | ChainManager | Fork detected |
+| `database.immutable_tip_advanced` | blockpromote.Promoter | A promotion step moved the immutable tip (`blockpromote.TipAdvancedEvent`: tip hash, slot, block index, blocks promoted) |
 | `chainselection.peer_tip_update` | ChainSelector | Peer tip updated |
 | `chainselection.chain_switch` | ChainSelector | Active peer changed |
 | `chainselection.selection` | ChainSelector | Chain selection made |
@@ -4285,6 +4286,49 @@ in-memory logic over the already-fetched rows. The classification itself is
 intentionally duplicated rather than shared by refactoring `PoolMetadata`,
 since the single-pool and batched-page code paths have different callers
 and error-propagation needs.
+
+### ImmutableDB and VolatileDB
+
+The blob store plays two roles. Badger is the VolatileDB: recent block bodies,
+the block index, metadata and offsets. When `immutableDb.enabled` is set, the
+ImmutableDB holds the bodies of blocks older than k in cardano-node compatible
+chunk files, and Badger keeps a marker per promoted block.
+
+- `database/immutable` writes and reads the chunk, secondary and primary files
+  (`Store`), including crash recovery and O(1) point reads that find a Byron
+  epoch boundary block at its chunk's first relative slot.
+- `database` installs an `immutableBlobStore` over the blob store whenever the
+  `im_state` record exists. It resolves markers in `GetBlock`, `Get` on `bp`
+  keys and iterator values, so chain iteration, blockfetch, chainsync and
+  offset resolution are unchanged. `Database.PromoteThrough` writes markers and
+  the recorded tip as bodies age out; a Mithril bootstrap that keeps its chunk
+  files writes them through `Database.BlockCreateImmutable` and
+  `Database.AdoptImmutableTip`.
+- `internal/blockpromote` runs the promotion loop, wired in `node.go` and the
+  reload path in `node_lifecycle.go` like history expiry. Its ceiling is k
+  blocks behind the block index of the ledger's applied tip, not the chain
+  tip. After each step that moves the tip it publishes
+  `database.immutable_tip_advanced` (`blockpromote.TipAdvancedEvent`).
+  `Promoter.Stop` waits past its deadline only for a step that is writing the
+  blob store and chunk files, which ends with the current batch; a step still
+  resolving its ceiling is abandoned and writes nothing once cancelled. The
+  node then closes the database through its durable close.
+- The chain refuses any rollback below the immutable tip, including startup
+  rewinds; a recovery rewind refused this way counts toward the same halt
+  budget as one refused for exceeding k, since restarting cannot reach it; `Database.CheckImmutableRollback` and `CheckImmutableFloor` are the
+  checks, and `LowerImmutableTip` is the operator truncate's route past them.
+  `Database.PromoteThrough` and `LowerImmutableTip` share one lock, so a
+  truncate never overlaps a promotion step. A failed step closes the chunk
+  writer and re-reads `im_state`, so the next call reconciles from disk
+  instead of appending to a writer that is ahead of the recorded tip, and
+  `Database.Close` closes it.
+- `PointAtDepth` and `PointAtDepthFrom` resolve a persistent chain's points
+  from the block index and read no body.
+- `database/lifecycle` snapshots and restores the chunk files: `Snapshot` takes
+  `Database.LockImmutable` before the commit barrier, hard-links completed
+  chunks and copies the open one up to its recorded length (`immutable_snapshot.go`),
+  and a restore places the verified files under the staging directory's
+  `immutable/`. `immutable.Store` copies a hard-linked file before editing it.
 
 ### Archive And History Expiry Topology
 
@@ -14597,6 +14641,31 @@ fetching deleted chunks, and completion clears the key with the rest of
 sync_state. Everything that reads the extracted tree (certified tip, catch-up
 ancestry check) runs before the copy starts; nothing reads it afterwards. The blob store is synced before the tree is removed, so a rerun that
 copies nothing still never deletes blocks that are not yet durable.
+
+With `immutableDb.keepMithrilChunks` (which requires `immutableDb.enabled`),
+a bootstrap of an empty database adopts the verified chunks instead of copying
+bodies (`node.AdoptImmutableChunks`, wired in `mithril.Sync`). The sync opens
+its database with the network's chunk geometry
+(`CardanoNodeConfig.ImmutableChunkGeometry`) and the pipelined download-time
+copy is off, because adoption moves chunks out of the extracted tree. For each
+certified chunk, in order, it renames the three files into
+`<dataDir>/immutable`, reads them there through a digest-verified
+`immutable.ImmutableDb` bound to that directory, fsyncs them and the
+directory, advances `im_state` to the chunk's last block (startup
+reconciliation cuts chunk bytes beyond the recorded tip, so the tip covers the
+whole chunk before its markers commit), and only then commits the chunk's index
+entries, `DIM1` markers and API-mode UTxO offsets (the offsets come from the
+inner block CBOR, which is the chunk bytes after unwrapping `[type, cbor]`). A marker's chunk, offset, size and CRC come from the
+verified read of the moved chunk. Only chunks whose three files are all in the
+certificate's digest list are adopted; the ancillary archive's in-progress
+chunk is not, and its blocks reach the blob store through the normal copy.
+After each chunk the blob store is synced and `mithril_immutable_retired_below`
+advances to the next chunk. A resume takes a chunk already in the ImmutableDB
+directory as it is, verifies it again, and continues after the chain tip when
+that lies inside the chunk, including the first one (`im_state` already covers
+the chunk, so startup reconciliation leaves its files alone); a digest mismatch after a move removes that
+chunk's files and fails. A database that already holds bodies, a catch-up and a
+reward repair copy bodies instead.
 
 The Core-mode copy omits produced-UTxO offset references, which are used by
 API-mode UTxO resolution. It does not mark the immutable offset range complete;

@@ -78,6 +78,14 @@ type HistoryExpiryConfig struct {
 	Frequency time.Duration
 }
 
+// ImmutableDBConfig controls promotion of block bodies older than the security
+// parameter into cardano-node compatible chunk files.
+type ImmutableDBConfig struct {
+	Enabled          bool
+	PromoteBatch     int
+	PromoteFrequency time.Duration
+}
+
 // KoiosParityConfig controls the optional in-process Koios reward-parity
 // observer. When Enabled, Run() subscribes an observer to the
 // node's own EventBus (event.EpochTransitionEventType) that validates each
@@ -266,6 +274,7 @@ type Config struct {
 	barkLifecycleOperatorCertificateFingerprints                                        []string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
+	immutableDB                                                                         ImmutableDBConfig
 	mithrilCatchUp                                                                      MithrilCatchUpFactory
 	mithrilLedgerReimport                                                               MithrilLedgerReimportFactory
 	koiosParity                                                                         KoiosParityConfig
@@ -979,6 +988,11 @@ func (c *Config) syncCompatFields() {
 	c.historyExpiry = HistoryExpiryConfig{
 		Enabled:   c.cfg.HistoryExpiry.Enabled,
 		Frequency: c.cfg.HistoryExpiry.Frequency,
+	}
+	c.immutableDB = ImmutableDBConfig{
+		Enabled:          c.cfg.ImmutableDB.Enabled,
+		PromoteBatch:     c.cfg.ImmutableDB.PromoteBatch,
+		PromoteFrequency: c.cfg.ImmutableDB.PromoteFrequency,
 	}
 	// c.cfg.KoiosParity.Accounts is already a fully-resolved bool by this
 	// point (defaulted by WithKoiosParity or internal/config's LoadConfig),
@@ -2414,6 +2428,17 @@ func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 	}
 }
 
+// WithImmutableDB configures promotion of block bodies into chunk files.
+func WithImmutableDB(cfg ImmutableDBConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ImmutableDB = internalconfig.ImmutableDBConfig{
+			Enabled:          cfg.Enabled,
+			PromoteBatch:     cfg.PromoteBatch,
+			PromoteFrequency: cfg.PromoteFrequency,
+		}
+	}
+}
+
 // WithKoiosParity configures the optional in-process Koios reward-parity
 // observer. See KoiosParityConfig's doc comment. This is how a
 // library caller (or internal/node's composition of a real dingo.yaml/env
@@ -3088,6 +3113,11 @@ func (c *Config) GenesisBootstrap() internalconfig.GenesisBootstrapConfig {
 	cfg := c.cfg.GenesisBootstrap
 	cfg.ControlGroups = topology.ClonePeerControlGroups(cfg.ControlGroups)
 	return cfg
+}
+
+// ImmutableDB returns the ImmutableDB configuration.
+func (c *Config) ImmutableDB() internalconfig.ImmutableDBConfig {
+	return c.cfg.ImmutableDB
 }
 
 // HistoryExpiry returns the history expiry configuration.

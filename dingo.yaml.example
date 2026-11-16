@@ -421,6 +421,32 @@
   # CLI: --history-expiry-frequency
   # frequency: 1h
 
+# ImmutableDB. When enabled, block bodies more than k blocks behind the ledger's
+# applied tip move from the badger blob store into cardano-node compatible chunk
+# files under <dataDir>/immutable; block indexes and metadata stay in badger.
+# Requires the badger blob plugin, no Bark archive and no history expiry. Once
+# a database holds promoted blocks it is read correctly whatever this setting
+# says, and older binaries refuse it.
+# immutableDb:
+  # Can be overridden with DINGO_IMMUTABLE_DB_ENABLED
+  # CLI: --immutable-db-enabled
+  # enabled: false
+  # Can be overridden with DINGO_IMMUTABLE_DB_PROMOTE_BATCH
+  # CLI: --immutable-db-promote-batch
+  # Accepted range: 0 to 100000; the promoter also limits a batch to one blob
+  # transaction.
+  # promoteBatch: 1000
+  # Can be overridden with DINGO_IMMUTABLE_DB_PROMOTE_FREQUENCY
+  # CLI: --immutable-db-promote-frequency
+  # promoteFrequency: 1m
+  # A Mithril bootstrap moves the verified chunk files into the ImmutableDB and
+  # indexes them in place instead of copying every block body into the blob
+  # store. Requires enabled. Applies to a bootstrap of an empty database; any
+  # other Mithril import copies bodies.
+  # Can be overridden with DINGO_IMMUTABLE_DB_KEEP_MITHRIL_CHUNKS
+  # CLI: --immutable-db-keep-mithril-chunks
+  # keepMithrilChunks: false
+
 # Optional CIP-26 off-chain token registry sync (API storage mode only).
 # When enabled, Dingo periodically pulls the community token registry and
 # populates the `metadata` field of GET /api/v0/assets/{asset} with each

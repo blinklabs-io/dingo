@@ -39,9 +39,10 @@ type payloadFile struct {
 	sha256 string
 }
 
-// payloadFiles returns the backup files m declares. A snapshot holds exactly
+// payloadFiles returns the backup files m declares directly. A snapshot holds
 // these beside its manifest, the live UTxO set's only when it declares one; a
-// restore fetches nothing else.
+// snapshot with promoted blocks also holds the chunk files its immutable index
+// declares (see Manifest.immutablePayloadFiles).
 func (m Manifest) payloadFiles() []payloadFile {
 	files := []payloadFile{
 		{BlobBackupFileName, m.BlobBytes, m.BlobSHA256},
@@ -50,6 +51,11 @@ func (m Manifest) payloadFiles() []payloadFile {
 	if m.UtxoSetSHA256 != "" {
 		files = append(files, payloadFile{
 			UtxoSetBackupFileName, m.UtxoSetBytes, m.UtxoSetSHA256,
+		})
+	}
+	if m.ImmutableIndexSHA256 != "" {
+		files = append(files, payloadFile{
+			ImmutableIndexFileName, m.ImmutableIndexBytes, m.ImmutableIndexSHA256,
 		})
 	}
 	return files
@@ -93,7 +99,21 @@ func (m Manifest) verifyPayloads(
 	dir string,
 	requireDigests bool,
 ) error {
-	for _, f := range m.payloadFiles() {
+	if err := verifyPayloadList(ctx, dir, m.payloadFiles(), requireDigests); err != nil {
+		return err
+	}
+	return m.verifyImmutableFiles(ctx, dir)
+}
+
+// verifyPayloadList checks files in dir against their declared sizes and
+// digests.
+func verifyPayloadList(
+	ctx context.Context,
+	dir string,
+	files []payloadFile,
+	requireDigests bool,
+) error {
+	for _, f := range files {
 		path := filepath.Join(dir, f.name)
 		if f.sha256 == "" {
 			if requireDigests {

@@ -95,6 +95,33 @@ func BlockByHashStats() (hits, misses uint64) {
 }
 
 func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
+	return d.blockCreate(block, block.Cbor, txn)
+}
+
+// ErrImmutableNotEnabled reports an operation that needs an ImmutableDB state
+// record on a database without one.
+var ErrImmutableNotEnabled = errors.New("the ImmutableDB is not enabled")
+
+// BlockCreateImmutable stores a block whose body already sits in a chunk file:
+// the index, hash index and metadata are written as BlockCreate writes them
+// and the body value is the marker for that chunk location. block.Cbor is not
+// stored. The chunk bytes must be durable before the transaction commits.
+func (d *Database) BlockCreateImmutable(
+	block models.Block,
+	marker types.ImmutableMarker,
+	txn *Txn,
+) error {
+	if d.immutable == nil {
+		return ErrImmutableNotEnabled
+	}
+	return d.blockCreate(block, marker.Encode(), txn)
+}
+
+func (d *Database) blockCreate(
+	block models.Block,
+	body []byte,
+	txn *Txn,
+) error {
 	owned := false
 	if txn == nil {
 		txn = d.BlockBlobTxn()
@@ -130,7 +157,7 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 		}
 	}
 	// Use the new SetBlock method
-	if err := blob.SetBlock(blobTxn, block.Slot, block.Hash, block.Cbor, block.ID, block.Type, block.Number, block.PrevHash); err != nil {
+	if err := blob.SetBlock(blobTxn, block.Slot, block.Hash, body, block.ID, block.Type, block.Number, block.PrevHash); err != nil {
 		return err
 	}
 	if !retained {
@@ -227,7 +254,11 @@ func retainedBlockExists(
 	txn types.Txn,
 	key []byte,
 ) (bool, error) {
-	_, err := store.Get(txn, key)
+	raw := rawBlobStore(store)
+	if raw == nil {
+		return false, types.ErrBlobStoreUnavailable
+	}
+	_, err := raw.Get(txn, key)
 	if err == nil {
 		return true, nil
 	}
@@ -249,7 +280,7 @@ func (d *Database) HasGenesisCbor(slot uint64, hash []byte) (bool, error) {
 		return false, types.ErrBlobStoreUnavailable
 	}
 	key := types.BlockBlobKey(slot, hash)
-	_, err := blob.Get(txn.Blob(), key)
+	_, err := rawBlobStore(blob).Get(txn.Blob(), key)
 	if errors.Is(err, types.ErrBlobKeyNotFound) {
 		return false, nil
 	}
@@ -312,10 +343,17 @@ func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
+	if txn.db != nil {
+		if err := txn.db.CheckImmutableFloor(block.ID); err != nil {
+			return err
+		}
+	}
 	if err := txn.holdBlockInventory(); err != nil {
 		return err
 	}
-	_, existingErr := blob.Get(blobTxn, types.BlockBlobKey(block.Slot, block.Hash))
+	_, existingErr := rawBlobStore(blob).Get(
+		blobTxn, types.BlockBlobKey(block.Slot, block.Hash),
+	)
 	retained := existingErr == nil
 	if existingErr != nil &&
 		!errors.Is(existingErr, types.ErrBlobKeyNotFound) &&
@@ -351,12 +389,22 @@ func (d *Database) tombstoneBlockTxn(
 	if err := txn.holdBlockInventory(); err != nil {
 		return err
 	}
-	_, existingErr := store.Get(txn.Blob(), types.BlockBlobKey(slot, hash))
+	existing, existingErr := rawBlobStore(store).Get(
+		txn.Blob(), types.BlockBlobKey(slot, hash),
+	)
 	retained := existingErr == nil
 	if existingErr != nil &&
 		!errors.Is(existingErr, types.ErrBlobKeyNotFound) &&
 		!errors.Is(existingErr, types.ErrHistoryExpired) {
 		return fmt.Errorf("check tombstoned block for inventory: %w", existingErr)
+	}
+	if retained && types.IsImmutableMarker(existing) {
+		// A promoted body lives in the chunk files; overwriting its marker
+		// would orphan those bytes and lose the block.
+		return fmt.Errorf(
+			"%w: block at slot %d is stored in the ImmutableDB",
+			ErrRollbackBelowImmutableTip, slot,
+		)
 	}
 	if err := store.TombstoneBlock(txn.Blob(), slot, hash); err != nil {
 		return err

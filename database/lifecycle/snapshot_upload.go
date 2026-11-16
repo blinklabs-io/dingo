@@ -107,8 +107,10 @@ func openSnapshotUploadFiles(
 		)
 	}
 
-	ordered := make([]snapshotUploadFile, 0, len(manifest.payloadFiles())+1)
-	for _, payload := range manifest.payloadFiles() {
+	payloads := manifest.payloadFiles()
+	ordered := make([]snapshotUploadFile, 0, len(payloads)+1)
+	for i := 0; i < len(payloads); i++ {
+		payload := payloads[i]
 		file, err := openSnapshotUploadFile(root, payload.name)
 		if err != nil {
 			return nil, Manifest{}, nil, err
@@ -151,6 +153,20 @@ func openSnapshotUploadFiles(
 			)
 		}
 		ordered = append(ordered, snapshotUploadFile{name: payload.name, file: file})
+		if payload.name == ImmutableIndexFileName {
+			// Parse the verified handle, not the path, so the chunk list
+			// is the one whose digest the manifest vouched for.
+			chunkPayloads, err := readImmutableIndexFrom(file)
+			if err != nil {
+				return nil, Manifest{}, nil, err
+			}
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				return nil, Manifest{}, nil, fmt.Errorf(
+					"rewind snapshot upload file %q: %w", payload.name, err,
+				)
+			}
+			payloads = append(payloads, chunkPayloads...)
+		}
 	}
 	ordered = append(ordered, files[0])
 	return ordered, manifest, root, nil

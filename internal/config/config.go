@@ -381,6 +381,38 @@ type HistoryExpiryConfig struct {
 	Frequency time.Duration `yaml:"frequency" envconfig:"DINGO_HISTORY_EXPIRY_FREQUENCY"`
 }
 
+// MaxImmutableDBPromoteBatch is the largest accepted immutableDb.promoteBatch.
+// A batch commits in one blob transaction, which the store bounds well below
+// this; the promoter lowers a batch further to fit.
+const MaxImmutableDBPromoteBatch = 100000
+
+// ImmutableDBConfig controls moving block bodies older than the security
+// parameter from the badger VolatileDB into cardano-node compatible chunk
+// files under the data directory.
+type ImmutableDBConfig struct {
+	// Enabled starts promotion of block bodies once they are k blocks behind
+	// the ledger's applied tip. An existing ImmutableDB keeps being read
+	// regardless of this setting.
+	Enabled bool `yaml:"enabled"          envconfig:"DINGO_IMMUTABLE_DB_ENABLED"`
+	// PromoteBatch bounds the blocks promoted per step. Zero uses the
+	// built-in default.
+	PromoteBatch int `yaml:"promoteBatch"     envconfig:"DINGO_IMMUTABLE_DB_PROMOTE_BATCH"`
+	// PromoteFrequency is how often the promoter looks for blocks to move.
+	PromoteFrequency time.Duration `yaml:"promoteFrequency" envconfig:"DINGO_IMMUTABLE_DB_PROMOTE_FREQUENCY"`
+	// KeepMithrilChunks makes a Mithril bootstrap move the verified chunk
+	// files into the ImmutableDB and index them in place, instead of copying
+	// every block body into the blob store. Requires Enabled.
+	KeepMithrilChunks bool `yaml:"keepMithrilChunks" envconfig:"DINGO_IMMUTABLE_DB_KEEP_MITHRIL_CHUNKS"`
+}
+
+// DefaultImmutableDBConfig returns the default ImmutableDB settings.
+func DefaultImmutableDBConfig() ImmutableDBConfig {
+	return ImmutableDBConfig{
+		PromoteBatch:     1000,
+		PromoteFrequency: time.Minute,
+	}
+}
+
 // KoiosParityConfig controls the in-process Koios reward-parity observer
 // When enabled, Dingo subscribes an epoch-boundary observer to
 // its own EventBus (event.EpochTransitionEventType) and validates each newly
@@ -1023,6 +1055,10 @@ type Config struct {
 
 	// History expiry configuration for local immutable block CBOR expiry.
 	HistoryExpiry HistoryExpiryConfig `yaml:"historyExpiry"`
+	// ImmutableDB controls promotion of block bodies into chunk files; see
+	// ImmutableDBConfig. The top-level key database is a rejected legacy
+	// section, so this is not nested under it.
+	ImmutableDB ImmutableDBConfig `yaml:"immutableDb"`
 
 	// KoiosParity configures the optional in-process Koios reward-parity
 	// observer Disabled by default.
@@ -1774,6 +1810,7 @@ func newDefaultConfig() *Config {
 		GenesisBootstrap: DefaultGenesisBootstrapConfig(),
 		// History expiry defaults
 		HistoryExpiry: DefaultHistoryExpiryConfig(),
+		ImmutableDB:   DefaultImmutableDBConfig(),
 		// Koios parity observer defaults (disabled)
 		KoiosParity: DefaultKoiosParityConfig(),
 		// Logging defaults (text output at info level)
@@ -2288,6 +2325,12 @@ func (c *Config) ApplyDefaults() {
 	// the node silently starting the expiry worker on the default cadence
 	if c.HistoryExpiry.Frequency == 0 {
 		c.HistoryExpiry.Frequency = time.Hour
+	}
+	if c.ImmutableDB.PromoteBatch == 0 {
+		c.ImmutableDB.PromoteBatch = DefaultImmutableDBConfig().PromoteBatch
+	}
+	if c.ImmutableDB.PromoteFrequency == 0 {
+		c.ImmutableDB.PromoteFrequency = DefaultImmutableDBConfig().PromoteFrequency
 	}
 	if c.KoiosParity.GraceHours == 0 {
 		c.KoiosParity.GraceHours = 24

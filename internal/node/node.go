@@ -960,6 +960,11 @@ func buildDingoConfig(
 			Enabled:   cfg.HistoryExpiry.Enabled,
 			Frequency: cfg.HistoryExpiry.Frequency,
 		}),
+		dingo.WithImmutableDB(dingo.ImmutableDBConfig{
+			Enabled:          cfg.ImmutableDB.Enabled,
+			PromoteBatch:     cfg.ImmutableDB.PromoteBatch,
+			PromoteFrequency: cfg.ImmutableDB.PromoteFrequency,
+		}),
 		dingo.WithKoiosParity(dingo.KoiosParityConfig{
 			Enabled:               cfg.KoiosParity.Enabled,
 			Network:               cfg.KoiosParity.Network,

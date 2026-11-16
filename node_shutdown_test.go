@@ -629,6 +629,31 @@ func TestNodeStopWaitsForLiveUtxoSetCloseAfterDeadline(t *testing.T) {
 	assert.Contains(t, out, "live UTxO set close finished after the shutdown deadline")
 }
 
+// TestNodeStopClosesDatabaseToCompletion requires shutdown to close the
+// database, which owns the ImmutableDB chunk store, under the durable-close
+// policy rather than a deadline-bounded close that can leave a close queued
+// behind a promotion batch.
+func TestNodeStopClosesDatabaseToCompletion(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Immutable: database.ImmutableConfig{
+			Enabled: true, ChunkSlots: 4320, CanContainEBB: true,
+		},
+	})
+	require.NoError(t, err)
+	logs := &shutdownLogBuffer{}
+	n := &Node{db: db}
+	n.config = NewConfig(WithShutdownTimeout(5 * time.Second))
+	n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
+
+	require.NoError(t, n.Stop())
+	out := logs.String()
+	assert.Contains(t, out, "durable store closed")
+	assert.Contains(t, out, "resource=database")
+}
+
 type shutdownLogBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer

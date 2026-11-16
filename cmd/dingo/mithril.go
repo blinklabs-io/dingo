@@ -642,6 +642,7 @@ func runMithrilSyncWithRepair(
 		DownloadMaxBytes:        cfg.Mithril.DownloadMaxBytes,
 		VerifyCertChain:         cfg.Mithril.VerifyCertificates,
 		CleanupAfterLoad:        cfg.Mithril.CleanupAfterLoad,
+		KeepChunks:              cfg.ImmutableDB.KeepMithrilChunks,
 		RepairLegacyRewardState: repairRewardState,
 		StoragePlugins: mithril.StoragePlugins{
 			Blob:     cfg.Plugins.Storage.Blob,
