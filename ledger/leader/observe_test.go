@@ -18,6 +18,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -458,4 +459,31 @@ func TestObserveSlotDoesNotCountBelowTheFloorAfterABackwardsReading(
 		f.elapsed(),
 		"only 105 is at or after the first reading",
 	)
+}
+
+// A panic out of the epoch provider inside ObserveSlot, which the forger
+// recovers, does not leave the observation lock held, so the next forge cycle
+// observes its slot instead of blocking.
+func TestObserveSlotReleasesItsLockWhenTheEpochProviderPanics(t *testing.T) {
+	t.Parallel()
+	f := newObserveFixture(t)
+	var panicked atomic.Bool
+	f.epochs.epochForSlot = func(slot uint64) (uint64, error) {
+		if panicked.CompareAndSwap(false, true) {
+			panic("epoch provider fault")
+		}
+		return slot / electionSlotsPerEpoch, nil
+	}
+
+	require.Panics(t, func() { f.election.ObserveSlot(100) })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.election.ObserveSlot(101)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ObserveSlot blocked after a recovered panic")
+	}
 }

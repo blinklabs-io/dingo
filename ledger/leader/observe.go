@@ -62,8 +62,29 @@ func (e *Election) ObserveSlot(slot uint64) {
 	e.mu.RLock()
 	schedules := maps.Clone(e.schedules)
 	e.mu.RUnlock()
+	// Resolve the slot's epoch before taking obsMu: the provider is outside
+	// this package, and a panic out of it, which the forger recovers, must
+	// not leave obsMu held for the next forge cycle.
+	slotEpoch, err := e.epochProvider.EpochForSlot(slot)
+	elapsed := e.countObservedSlot(slot, schedules, slotEpoch, err == nil)
 
+	if elapsed > 0 {
+		m.scheduledSlotsElapsed.Add(float64(elapsed))
+	}
+	e.publishScheduleGauges()
+}
+
+// countObservedSlot updates the observation for slot under obsMu and returns
+// how many scheduled leader slots it newly reached. slotEpoch is the epoch of
+// slot when epochKnown is set.
+func (e *Election) countObservedSlot(
+	slot uint64,
+	schedules map[uint64]*Schedule,
+	slotEpoch uint64,
+	epochKnown bool,
+) uint64 {
 	e.obsMu.Lock()
+	defer e.obsMu.Unlock()
 	obs := &e.obs
 	if !obs.started {
 		obs.started = true
@@ -88,8 +109,7 @@ func (e *Election) ObserveSlot(slot uint64) {
 		elapsed += schedule.countLeaderSlotsBetween(from, slot)
 		obs.counted[epoch] = slot
 	}
-	if slotEpoch, err := e.epochProvider.EpochForSlot(slot); err == nil &&
-		slotEpoch >= maxCachedSchedules {
+	if epochKnown && slotEpoch >= maxCachedSchedules {
 		// Close the epochs older than the schedule cache's window and drop
 		// their entries. The cache prunes relative to the newest schedule it
 		// stored, not to the slot clock, so it can still hold a closed
@@ -101,20 +121,21 @@ func (e *Election) ObserveSlot(slot uint64) {
 			}
 		}
 	}
-	e.obsMu.Unlock()
+	return elapsed
+}
 
-	if elapsed > 0 {
-		m.scheduledSlotsElapsed.Add(float64(elapsed))
-	}
-	e.publishScheduleGauges()
+// observedLast returns whether the slot clock has been read and its highest
+// reading.
+func (e *Election) observedLast() (bool, uint64) {
+	e.obsMu.Lock()
+	defer e.obsMu.Unlock()
+	return e.obs.started, e.obs.last
 }
 
 // gaugeEpoch is the epoch the schedule gauges describe: the epoch of the
 // slot clock's last reading, or the ledger's current epoch before the first.
 func (e *Election) gaugeEpoch() (epoch, lastSlot uint64, observed bool) {
-	e.obsMu.Lock()
-	observed, lastSlot = e.obs.started, e.obs.last
-	e.obsMu.Unlock()
+	observed, lastSlot = e.observedLast()
 	if observed {
 		if epoch, err := e.epochProvider.EpochForSlot(lastSlot); err == nil {
 			return epoch, lastSlot, true
