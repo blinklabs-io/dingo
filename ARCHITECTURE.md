@@ -17299,8 +17299,9 @@ correctness. Blockfrost address-transaction reads apply the same CBOR-backed
 exact check over credential-index candidates and paginate the exact matches.
 Public exact-address UTxO reads carry request cancellation into their
 coordinated transaction. API-mode Blockfrost address pages use the completed
-canonical-address index for exact SQL ordering, offset, and total count; when
-that index is unavailable, the CBOR candidate fallback remains bounded by
+canonical-address index for exact SQL ordering and offset, which does not count
+the address, so the page total is exact only when the page reaches the end of
+the address; when that index is unavailable, the CBOR candidate fallback remains bounded by
 candidate count and decoded bytes. Asset-holder pages group live asset
 quantities by canonical address in metadata storage and hydrate no output
 CBOR. Historical Mesh balance aggregates from the same exact address index and

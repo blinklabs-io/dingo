@@ -37,7 +37,7 @@ func checkpointIdentityUpgradeDB(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 70)
+	require.Len(t, registry, 71)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,

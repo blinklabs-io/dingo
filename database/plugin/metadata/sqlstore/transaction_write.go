@@ -505,6 +505,11 @@ type transactionRowOps struct {
 	insertIdentityReturning func(hash any) *sql.Row
 	exec                    func(query string, args ...any) (sql.Result, error)
 	queryRow                func(query string, args ...any) *sql.Row
+	// refreshAddressOrder asks for the address-page position of the
+	// transaction's outputs to be refreshed after its application row is
+	// written. API storage mode sets it; a staged UTxO overlay does not,
+	// because it refreshes when it writes the staged rows.
+	refreshAddressOrder bool
 }
 
 // insertIdentityRow returns the id of the identity row of hash, inserting the
@@ -566,16 +571,23 @@ func insertTransactionRows(
 	if err != nil {
 		return 0, false, err
 	}
-	if affected > 0 {
-		return id, true, nil
+	created := affected > 0
+	if !created {
+		if _, err := ops.exec(
+			appliedTransactionUpdateSQL,
+			args[1], args[8], args[3], args[6], id,
+		); err != nil {
+			return 0, false, fmt.Errorf("update applied transaction: %w", err)
+		}
 	}
-	if _, err := ops.exec(
-		appliedTransactionUpdateSQL,
-		args[1], args[8], args[3], args[6], id,
-	); err != nil {
-		return 0, false, fmt.Errorf("update applied transaction: %w", err)
+	if ops.refreshAddressOrder {
+		// An output stored before its producer was applied, or applied at
+		// another position, still carries its old address-page position.
+		if _, err := ops.exec(fillUtxoAddressOrderByTransactionSQL, id); err != nil {
+			return 0, false, fmt.Errorf("refresh UTxO address order: %w", err)
+		}
 	}
-	return id, false, nil
+	return id, created, nil
 }
 
 // cachedTransactionRowOps runs the transaction row statements through the
@@ -585,6 +597,7 @@ func (s *Store) cachedTransactionRowOps(
 	db queryer,
 ) transactionRowOps {
 	return transactionRowOps{
+		refreshAddressOrder: s.storageMode == types.StorageModeAPI,
 		insertIdentity: func(hash any) (sql.Result, error) {
 			return s.execCached(ctx, db, transactionIdentityInsertSQL, hash)
 		},
@@ -646,6 +659,7 @@ func (a *transactionBatchAccumulator) insertTransaction(
 		dialect = "mysql"
 	}
 	id, isNew, err := insertTransactionRows(dialect, transactionRowOps{
+		refreshAddressOrder: a.apiRowsOnly() && a.overlay == nil,
 		insertIdentity: func(hash any) (sql.Result, error) {
 			a.countInsert()
 			return a.transactionInsert.ExecContext(ctx, hash)

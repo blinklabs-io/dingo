@@ -525,8 +525,9 @@ entries written before it leave both `NULL`.
 Blockfrost asset-holder pages aggregate live quantities in metadata storage,
 and historical Mesh balances aggregate address balances without materializing
 the matching UTxOs. Blockfrost address-list pages use the exact address index
-for SQL ordering, offset, and total count after API-mode startup backfill,
-avoiding CBOR scans of earlier outputs on deep pages. If that index is not
+for SQL ordering and offset after API-mode startup backfill, avoiding CBOR scans
+of earlier outputs on deep pages. The page does not count the address: its total
+is exact only when the page reaches the end of the address. If that index is not
 available, address listing retains the CBOR candidate scan. Historical
 balance queries sum every matching row; they return `ErrTooManyUtxoResults`
 only when the caller passes a positive row bound and the address exceeds it. `utxo_address`
@@ -6138,6 +6139,21 @@ stops with `ErrNewerSchema` instead of reading promoted block markers as block
 bodies. `TestImmutableDBSchemaReleaseStopsOlderBinaries` requires a runner
 holding the registry without it to refuse a database migrated through it.
 
+Migration `v71` (`utxo-address-order-index`, integer version 71) adds the
+nullable `tx_id`, `output_idx`, `slot` and `block_index` columns to
+`utxo_address` and the `idx_utxo_address_order` index
+`(address, slot, block_index, output_idx, tx_id)`. The columns hold the
+position the output takes in an address page: the producing transaction's
+`applied_transaction.slot` and `block_index`, or the output's `added_slot` and
+`0` while its producer has no application row. A batched backfill (cursor: last
+`utxo_address.utxo_id`) fills existing rows before the index is built, and
+every writer of `utxo_address` (single-row upserts, the row batch, the overlay
+flush, `SetUtxoAddress`) fills them from the stored `utxo` and
+`applied_transaction` rows. Writing or replaying an application row refreshes
+the outputs of that transaction, so an output stored before its producer was
+applied moves to the applied position.
+`TestUtxoAddressOrderBackfillCopiesPagePosition` pins the backfill.
+
 #### Mithril API reward-live-stake finalization
 
 After historical metadata backfill, API startup rebuilds reward stake from
@@ -8693,8 +8709,18 @@ the already narrowed set.
 
 `AddressUTXOs` (exact address) pages through the API-mode `utxo_address`
 index once its startup backfill has completed: `UtxoRefsByIndexedAddressPage`
-applies the rendered-address predicate, ordering, `Offset`, and `Count` in SQL
-and counts the total in SQL, so deep and descending pages decode no CBOR.
+applies the rendered-address predicate, ordering, `Offset`, and `Count` in SQL,
+so deep and descending pages decode no CBOR. It reads one row past the page and
+does not count the address: the total is exact only when that read shows the
+page reaches the end of the address, and otherwise is reported as unknown, so
+the route omits its `X-Pagination-*` headers on a page short of the end.
+The page query drives from `utxo_address` and reads `idx_utxo_address_order`
+in order (ascending or descending) while filtering to live outputs, so it stops
+at the page bound instead of sorting the address's live set;
+
+`TestIndexedAddressPageOrder` pins the order, including keyset and offset
+bounds. Spent outputs of the address stay in the index and are skipped, so a
+page still reads them when they sort before the requested rows.
 Without a completed index, or with an asset filter (the index carries no asset
 predicate), `MatchingUtxoRefsByAddressWithOrderingBounded` scans coarse
 candidates in the requested order in keyset batches with `SkipAssets` set,

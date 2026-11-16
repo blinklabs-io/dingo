@@ -1317,10 +1317,16 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrderingBounded(
 	return refs, false, nil
 }
 
-// UtxoRefsByIndexedAddressPage returns an exact-address page and total from
-// the API-mode address index. indexed is false when the index is unavailable
-// or its startup backfill has not completed, allowing callers to use their
+// UtxoRefsByIndexedAddressPage returns an exact-address page from the
+// API-mode address index. indexed is false when the index is unavailable or
+// its startup backfill has not completed, allowing callers to use their
 // bounded CBOR scan instead.
+//
+// The query reads one row past the page, so its cost follows offset plus page
+// size rather than the address's live set. total is the exact number of live
+// UTxOs when that row shows the page reaches the end of the address, and -1
+// when more may follow or the offset lies past the end, as the bounded scan
+// reports an unknown total.
 func (d *Database) UtxoRefsByIndexedAddressPage(
 	ctx context.Context,
 	address lcommon.Address,
@@ -1351,7 +1357,7 @@ func (d *Database) UtxoRefsByIndexedAddressPage(
 	}
 	query := &models.UtxoWithOrderingQuery{
 		IndexedExactAddress: []byte(address.String()),
-		Limit:               limit,
+		Limit:               limit + 1,
 		Offset:              offset,
 		Descending:          descending,
 		SkipAssets:          true,
@@ -1366,15 +1372,11 @@ func (d *Database) UtxoRefsByIndexedAddressPage(
 	if err := ctx.Err(); err != nil {
 		return nil, 0, false, err
 	}
-	countQuery := *query
-	countQuery.Limit = 0
-	countQuery.Offset = 0
-	total, err := d.utxoStore().CountUtxosByAddressWithOrdering(
-		&countQuery,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return nil, 0, false, err
+	total := -1
+	if len(rows) > limit {
+		rows = rows[:limit]
+	} else if len(rows) > 0 || offset == 0 {
+		total = offset + len(rows)
 	}
 	refs := make([]models.UtxoId, len(rows))
 	for i := range rows {
