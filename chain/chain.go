@@ -2369,12 +2369,22 @@ func (c *Chain) ValidateRollback(
 			"security_param", securityParam,
 			"rollback_slot", point.Slot,
 		)
-		return ErrRollbackExceedsSecurityParam
+		return c.exceedsSecurityParamError(rollbackBlockIndex)
 	}
-	// After the K bound: a target below the immutable tip is deeper than K, and
-	// peers reach it, so it must surface as the recoverable bound error. Normally
-	// only an unbounded rollback, which skips that bound, reaches this refusal.
+	// Only a target within K of the anchor reaches this refusal, or an
+	// unbounded rollback, which skips the K bound.
 	return c.checkImmutableFloor(rollbackBlockIndex)
+}
+
+// exceedsSecurityParamError returns the refusal for a target deeper than K. A
+// target that is also below the immutable tip reports both errors: the K bound
+// is checked first so a peer-named target resyncs, and the floor error stays
+// visible to callers that must never cross it.
+func (c *Chain) exceedsSecurityParamError(rollbackBlockIndex uint64) error {
+	if floorErr := c.checkImmutableFloor(rollbackBlockIndex); floorErr != nil {
+		return errors.Join(ErrRollbackExceedsSecurityParam, floorErr)
+	}
+	return ErrRollbackExceedsSecurityParam
 }
 
 // rollbackLocked performs all rollback logic under locks and returns
@@ -2571,7 +2581,7 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 			"security_param", securityParam,
 			"rollback_slot", point.Slot,
 		)
-		return nil, ErrRollbackExceedsSecurityParam
+		return nil, c.exceedsSecurityParamError(rollbackBlockIndex)
 	}
 	if err := c.checkImmutableFloor(rollbackBlockIndex); err != nil {
 		return nil, err

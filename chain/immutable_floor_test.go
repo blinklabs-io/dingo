@@ -113,6 +113,29 @@ func TestBoundedRollbackBelowImmutableTipExceedsSecurityParam(t *testing.T) {
 	require.Equal(t, uint64(10), c.Tip().BlockNumber)
 }
 
+// A target below the immutable tip that is deeper than K reports both
+// refusals, so callers that classify on either see it. Once the anchor is
+// reset to the tip, a target within K of the anchor reports only the floor.
+func TestBoundedRollbackBelowImmutableTipReportsFloor(t *testing.T) {
+	t.Parallel()
+	db, c := newImmutableChainWithK(t, 3)
+	_, err := db.PromoteThrough(context.Background(), 5)
+	require.NoError(t, err)
+	below := pointOfBlockFromDB(t, db, 4)
+
+	deep := c.ValidateRollback(t.Context(), below)
+	require.ErrorIs(t, deep, chain.ErrRollbackExceedsSecurityParam)
+	require.ErrorIs(t, deep, database.ErrRollbackBelowImmutableTip)
+
+	require.NoError(
+		t, c.Rollback(t.Context(), pointOfBlockFromDB(t, db, 7)),
+	)
+	require.NoError(t, c.ResetRollbackAnchorToTip())
+	shallow := c.ValidateRollback(t.Context(), below)
+	require.ErrorIs(t, shallow, database.ErrRollbackBelowImmutableTip)
+	require.NotErrorIs(t, shallow, chain.ErrRollbackExceedsSecurityParam)
+}
+
 func TestPointAtDepthReadsNoBodies(t *testing.T) {
 	t.Parallel()
 	db, c := newImmutableChain(t)

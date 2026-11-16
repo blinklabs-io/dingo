@@ -11805,6 +11805,10 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 	return newChainsyncRollbackFixtureWithDB(t, newTestDB(t))
 }
 
+// chainsyncFixtureBlockCbor is a non-empty CBOR array: the immutable store
+// reads the header from the first element when it promotes a block.
+var chainsyncFixtureBlockCbor = []byte{0x81, 0x00}
+
 func newChainsyncRollbackFixtureWithDB(
 	t *testing.T,
 	db *database.Database,
@@ -11824,7 +11828,7 @@ func newChainsyncRollbackFixtureWithDB(
 		Hash:        ancestorHash,
 		BlockNumber: 1,
 		Type:        1,
-		Cbor:        []byte{0x80},
+		Cbor:        chainsyncFixtureBlockCbor,
 	}
 	currentBlock := chain.RawBlock{
 		Slot:        20,
@@ -11832,7 +11836,7 @@ func newChainsyncRollbackFixtureWithDB(
 		BlockNumber: 2,
 		Type:        1,
 		PrevHash:    ancestorHash,
-		Cbor:        []byte{0x80},
+		Cbor:        chainsyncFixtureBlockCbor,
 	}
 	require.NoError(
 		t,
@@ -11938,7 +11942,7 @@ func putPrimaryChainOnForkBeyondK(
 			BlockNumber: fixture.ancestorTip.BlockNumber + blockOffset,
 			Type:        1,
 			PrevHash:    prevHash,
-			Cbor:        []byte{0x80},
+			Cbor:        chainsyncFixtureBlockCbor,
 		})
 		prevHash = hash
 	}
