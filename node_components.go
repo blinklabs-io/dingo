@@ -61,6 +61,7 @@ func (n *Node) databaseConfig() *database.Config {
 		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
 			n.config.cardanoNodeConfig, "", n.config.network,
 		),
+		Immutable: n.immutableConfig(),
 	}
 }
 

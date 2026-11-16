@@ -1330,6 +1330,9 @@ func LoadBlobsWithDB(
 	if c == nil {
 		return nil, errors.New("primary chain not available")
 	}
+	if err := refuseBehindImmutableTip(db, c); err != nil {
+		return nil, err
+	}
 
 	var utxoOffsetsStored int
 	var callback func(chain.RawBlock, *database.Txn) error
@@ -1386,6 +1389,33 @@ func LoadBlobsWithDB(
 		BlocksCopied:     blocksCopied,
 		ImmutableTipSlot: immutableTipSlot,
 	}, nil
+}
+
+// ErrLoadBehindImmutableTip reports a body copy onto a database whose recorded
+// ImmutableDB tip is ahead of its chain, which an interrupted chunk adoption
+// leaves. Copied bodies at indexes at or below that tip are never promoted.
+var ErrLoadBehindImmutableTip = errors.New(
+	"chain is behind the recorded ImmutableDB tip",
+)
+
+// refuseBehindImmutableTip returns ErrLoadBehindImmutableTip when db records
+// an ImmutableDB tip that the chain has not reached. Finish the interrupted
+// adoption, or truncate the database, before copying block bodies.
+func refuseBehindImmutableTip(db *database.Database, c *chain.Chain) error {
+	st, ok := db.ImmutableState()
+	if !ok || !st.HasTip {
+		return nil
+	}
+	tip := c.Tip().Point
+	if tip.Slot >= st.TipSlot &&
+		(tip.Slot != 0 || len(tip.Hash) != 0) {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: immutable tip is slot %d, chain tip is slot %d; finish the "+
+			"chunk adoption or truncate the database",
+		ErrLoadBehindImmutableTip, st.TipSlot, tip.Slot,
+	)
 }
 
 // copyBlocksDirect reads immutable blocks once, persists them to the chain,

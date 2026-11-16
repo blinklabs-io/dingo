@@ -1403,8 +1403,8 @@ func (ls *LedgerState) resetRecoveryRewindRejections(newTipSlot uint64) {
 // rewindPrimaryChainForRecovery is the windowed rewind every recovery path
 // takes, plus the one classification a pipeline restart cannot help with.
 //
-// A rewind the chain refuses for exceeding K leaves recovery with no legal
-// target at all, so the caller's error would otherwise return to
+// A rewind the chain refuses for exceeding K, or for reaching below the
+// ImmutableDB tip, leaves recovery with no legal target at all, so the caller's error would otherwise return to
 // ledgerProcessBlocks as an ordinary retryable failure and be recomputed on
 // the next restart, forever. Once the refusal has repeated at an applied tip
 // that never moved, it is reported as errHaltLedgerPipeline: the node stops,
@@ -1469,7 +1469,8 @@ func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 	)
 	if err == nil ||
 		(!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
-			!errors.Is(err, errRecoveryRewindNotConverging)) {
+			!errors.Is(err, errRecoveryRewindNotConverging) &&
+			!errors.Is(err, database.ErrRollbackBelowImmutableTip)) {
 		return committed, err
 	}
 	ls.RLock()
@@ -1479,7 +1480,7 @@ func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 	if !exhausted {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
-				"recovery rewind refused for exceeding the security parameter; the primary chain has outrun the applied ledger tip",
+				"recovery rewind refused for exceeding the security parameter or reaching below the immutable tip",
 				"component",
 				"ledger",
 				"rewind_target_slot",
@@ -1512,7 +1513,7 @@ func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
 			"error",
 			err,
 			"hint",
-			"the node has stopped following the chain; the rewind recovery needs is deeper than the security parameter allows, so restarting the pipeline reproduces it -- investigate the rejected block or resync the node",
+			"the node has stopped following the chain; the rewind recovery needs is deeper than the security parameter allows or removes blocks already in the ImmutableDB, so restarting the pipeline reproduces it -- investigate the rejected block or resync the node",
 		)
 	}
 	return committed, fmt.Errorf("%w (%w)", errHaltLedgerPipeline, err)

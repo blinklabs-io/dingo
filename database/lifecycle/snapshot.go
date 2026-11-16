@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -290,6 +291,15 @@ func Snapshot(
 	if pauseContext != nil {
 		pauseCtx = pauseContext(ctx)
 	}
+	// Promotion waits on a blob commit while holding the ImmutableDB lock, so
+	// the lock is taken before the barrier, never after it.
+	unlockImmutable, err := db.LockImmutable(pauseCtx)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("lock immutable database: %w", err)
+	}
+	var unlockImmutableOnce sync.Once
+	releaseImmutable := func() { unlockImmutableOnce.Do(unlockImmutable) }
+	defer releaseImmutable()
 	resume, err := db.PauseCommitsContext(pauseCtx)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("pause commits: %w", err)
@@ -381,6 +391,18 @@ func Snapshot(
 	}
 	tip, commitTimestamp, gates := state.tip, state.commitTimestamp, state.gates
 
+	// The chunk files are captured under the same barrier as the blob state
+	// that records their tip, so the two describe one point in time. Linking
+	// and the copy of the open chunk are bounded; hashing waits for the
+	// barrier to be released. Promotion commits its markers outside the
+	// barrier, so the ImmutableDB lock stays held until the blob backup has
+	// finished; markers committed before it reads would name chunk bytes the
+	// capture does not hold.
+	immutableCapture, err := captureImmutable(backupCtx, db, dir)
+	if err != nil {
+		return Manifest{}, err
+	}
+
 	type backupResult struct {
 		store string
 		err   error
@@ -418,6 +440,7 @@ func Snapshot(
 			switch result.store {
 			case "blob":
 				backupErr = result.err
+				releaseImmutable()
 			case "utxoset":
 				utxoSetErr = result.err
 			default:
@@ -591,28 +614,43 @@ func Snapshot(
 		}
 		metrics.bytes.WithLabelValues("utxoset").Add(float64(utxoSetBytes))
 	}
+	var immutableIndexBytes int64
+	var immutableIndexDigest string
+	if immutableCapture != nil {
+		immutableIndexBytes, immutableIndexDigest, err = writeImmutableIndex(
+			ctx, snapshotRoot, immutableCapture,
+		)
+		if err != nil {
+			return Manifest{}, err
+		}
+		if err := syncDir(dir); err != nil {
+			return Manifest{}, fmt.Errorf("sync snapshot directory: %w", err)
+		}
+	}
 	metrics.bytes.WithLabelValues("blob").Add(float64(blobInfo.Size()))
 	metrics.bytes.WithLabelValues("metadata").Add(float64(metadataInfo.Size()))
 
 	manifest := Manifest{
-		CreatedAt:       time.Now().UTC(),
-		Trigger:         trigger,
-		StorageMode:     db.Config().StorageMode,
-		Network:         db.Config().Network,
-		CommitTimestamp: commitTimestamp,
-		TipSlot:         tip.Point.Slot,
-		TipHash:         tip.Point.Hash,
-		TipBlockNumber:  tip.BlockNumber,
-		BlobPlugin:      blobPluginName,
-		MetadataPlugin:  metadataPluginName,
-		Gates:           gates,
-		DingoVersion:    dingoVersion,
-		BlobBytes:       blobInfo.Size(),
-		MetadataBytes:   metadataInfo.Size(),
-		BlobSHA256:      blobDigest,
-		MetadataSHA256:  metadataDigest,
-		UtxoSetBytes:    utxoSetBytes,
-		UtxoSetSHA256:   utxoSetDigest,
+		CreatedAt:            time.Now().UTC(),
+		Trigger:              trigger,
+		StorageMode:          db.Config().StorageMode,
+		Network:              db.Config().Network,
+		CommitTimestamp:      commitTimestamp,
+		TipSlot:              tip.Point.Slot,
+		TipHash:              tip.Point.Hash,
+		TipBlockNumber:       tip.BlockNumber,
+		BlobPlugin:           blobPluginName,
+		MetadataPlugin:       metadataPluginName,
+		Gates:                gates,
+		DingoVersion:         dingoVersion,
+		BlobBytes:            blobInfo.Size(),
+		MetadataBytes:        metadataInfo.Size(),
+		BlobSHA256:           blobDigest,
+		MetadataSHA256:       metadataDigest,
+		UtxoSetBytes:         utxoSetBytes,
+		UtxoSetSHA256:        utxoSetDigest,
+		ImmutableIndexBytes:  immutableIndexBytes,
+		ImmutableIndexSHA256: immutableIndexDigest,
 	}
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err

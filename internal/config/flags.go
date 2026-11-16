@@ -591,6 +591,28 @@ var flagSpecs = []flagSpec{
 		"history expiry scan frequency",
 	),
 
+	// ImmutableDB
+	boolFlag(
+		"ImmutableDB.Enabled",
+		"immutable-db-enabled",
+		"promote block bodies older than the security parameter into chunk files",
+	),
+	intFlag(
+		"ImmutableDB.PromoteBatch",
+		"immutable-db-promote-batch",
+		"blocks promoted to the ImmutableDB per step",
+	),
+	durationFlag(
+		"ImmutableDB.PromoteFrequency",
+		"immutable-db-promote-frequency",
+		"how often block bodies are promoted to the ImmutableDB",
+	),
+	boolFlag(
+		"ImmutableDB.KeepMithrilChunks",
+		"immutable-db-keep-mithril-chunks",
+		"keep verified Mithril chunk files as the ImmutableDB instead of copying block bodies",
+	),
+
 	// Koios reward-parity observer (one-off validation aid, not a
 	// permanent subsystem)
 	boolFlag(

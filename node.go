@@ -49,6 +49,7 @@ import (
 	"github.com/blinklabs-io/dingo/dmq"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	"github.com/blinklabs-io/dingo/internal/blockpromote"
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/internal/committeeauth"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
@@ -140,6 +141,7 @@ type Node struct {
 	leiosPipelineManager    *leios.PipelineManager
 	bark                    *bark.Bark
 	historyExpiry           *historyexpiry.Pruner
+	blockPromoter           *blockpromote.Promoter
 	committeeAuthSync       *committeeauth.Syncer
 	koiosParityObserver     *koiosparity.Observer
 	midnightServer          *midnightserver.Server
@@ -352,6 +354,9 @@ func (n *Node) selectedConsensusProvider() nodeconsensus.Provider {
 }
 
 func New(cfg Config) (*Node, error) {
+	if err := validateImmutableDB(cfg); err != nil {
+		return nil, err
+	}
 	pluginHost, err := internalplugins.NewHost()
 	if err != nil {
 		return nil, fmt.Errorf("create plugin host: %w", err)
@@ -1190,6 +1195,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// statistics describe the tables blocks are applied to.
 	n.runPlannerStatsStartup(ctx)
 
+	if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
+		return err
+	}
 	if n.config.historyExpiry.Enabled {
 		n.historyExpiry = n.newHistoryExpiryPruner()
 
@@ -1199,6 +1207,16 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 		started = append(started, func() {
 			_ = n.historyExpiry.Stop(context.Background())
+		})
+	}
+
+	if n.config.immutableDB.Enabled {
+		n.blockPromoter = n.newBlockPromoter()
+		if err := n.blockPromoter.Start(n.ctx); err != nil {
+			return fmt.Errorf("failed to start block promotion: %w", err)
+		}
+		started = append(started, func() {
+			_ = n.blockPromoter.Stop(context.Background())
 		})
 	}
 

@@ -1251,6 +1251,33 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if c.ImmutableDB.KeepMithrilChunks && !c.ImmutableDB.Enabled {
+		errs = append(errs, errors.New(
+			"immutableDb.keepMithrilChunks requires immutableDb.enabled",
+		))
+	}
+
+	if c.ImmutableDB.Enabled && c.HistoryExpiry.Enabled {
+		errs = append(errs, errors.New(
+			"immutableDb.enabled cannot be combined with historyExpiry.enabled",
+		))
+	}
+	// ApplyDefaults fills only an unset (zero) frequency, so a negative one
+	// was configured; the promoter would otherwise substitute its own.
+	if c.ImmutableDB.PromoteFrequency < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid immutableDb.promoteFrequency: %s (must be positive)",
+			c.ImmutableDB.PromoteFrequency,
+		))
+	}
+	if c.ImmutableDB.PromoteBatch < 0 ||
+		c.ImmutableDB.PromoteBatch > MaxImmutableDBPromoteBatch {
+		errs = append(errs, fmt.Errorf(
+			"invalid immutableDb.promoteBatch %d (want 0 to %d)",
+			c.ImmutableDB.PromoteBatch, MaxImmutableDBPromoteBatch,
+		))
+	}
+
 	// Chainsync; accepted strategy names come from
 	// AcceptedChainsyncStrategies, kept in sync with
 	// chainsync.ParseHeaderSyncStrategy by a parity test in cmd/dingo.

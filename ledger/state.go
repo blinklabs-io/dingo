@@ -3841,6 +3841,11 @@ func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
 	deleted := 0
 
 	for _, orphan := range orphans {
+		// An orphan is above the metadata tip, which promotion never passes;
+		// a blob at or below the immutable tip is not one.
+		if err := ls.db.CheckImmutableSlot(orphan.slot); err != nil {
+			return fmt.Errorf("orphaned blob cleanup: %w", err)
+		}
 		if err := blobStore.DeleteBlock(writeTxn, orphan.slot, orphan.hash, orphan.id); err != nil {
 			return fmt.Errorf(
 				"delete orphaned block at slot %d (%s): %w",

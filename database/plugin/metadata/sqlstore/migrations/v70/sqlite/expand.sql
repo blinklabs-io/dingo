@@ -1,0 +1,3 @@
+-- No schema change. This release exists so that a binary without the
+-- ImmutableDB read path stops with a newer-schema error on a database that
+-- may hold promoted block markers instead of reading marker bytes as blocks.

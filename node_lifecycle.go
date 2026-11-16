@@ -394,6 +394,14 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			)
 		}
 	}
+	if n.blockPromoter != nil {
+		if stopErr := n.blockPromoter.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("block promotion shutdown: %w", stopErr),
+			)
+		}
+	}
 	if n.historyExpiry != nil {
 		if stopErr := n.historyExpiry.Stop(ctx); stopErr != nil {
 			err = errors.Join(
@@ -792,10 +800,20 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		}
 	}
 
+	if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
+		return err
+	}
 	if n.config.historyExpiry.Enabled {
 		n.historyExpiry = n.newHistoryExpiryPruner()
 		if err := n.historyExpiry.Start(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf("failed to restart history expiry: %w", err)
+		}
+	}
+
+	if n.config.immutableDB.Enabled {
+		n.blockPromoter = n.newBlockPromoter()
+		if err := n.blockPromoter.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("failed to restart block promotion: %w", err)
 		}
 	}
 

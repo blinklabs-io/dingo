@@ -369,6 +369,42 @@ func TestValidate(t *testing.T) {
 			wantErr: "needs ledgerUtxoBadger",
 		},
 		{
+			name: "keep mithril chunks without the immutable db",
+			modify: func(c *Config) {
+				c.ImmutableDB.KeepMithrilChunks = true
+			},
+			wantErr: "immutableDb.keepMithrilChunks requires immutableDb.enabled",
+		},
+		{
+			name: "immutable db with history expiry",
+			modify: func(c *Config) {
+				c.ImmutableDB.Enabled = true
+				c.HistoryExpiry.Enabled = true
+			},
+			wantErr: "immutableDb.enabled cannot be combined with historyExpiry.enabled",
+		},
+		{
+			name: "immutable db promote batch above the limit",
+			modify: func(c *Config) {
+				c.ImmutableDB.PromoteBatch = MaxImmutableDBPromoteBatch + 1
+			},
+			wantErr: "invalid immutableDb.promoteBatch",
+		},
+		{
+			name: "negative immutable db promote batch",
+			modify: func(c *Config) {
+				c.ImmutableDB.PromoteBatch = -1
+			},
+			wantErr: "invalid immutableDb.promoteBatch",
+		},
+		{
+			name: "negative immutable db promote frequency",
+			modify: func(c *Config) {
+				c.ImmutableDB.PromoteFrequency = -5 * time.Second
+			},
+			wantErr: "invalid immutableDb.promoteFrequency",
+		},
+		{
 			name: "negative history expiry frequency",
 			modify: func(c *Config) {
 				c.HistoryExpiry.Frequency = -time.Second

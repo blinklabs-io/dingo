@@ -49,7 +49,17 @@ import (
 //
 // Version 2 added the signed snapshot ID. A version 1 manifest carries no ID,
 // so a keyed verification rejects it; see ErrManifestLegacyFormat.
+//
+// Version 3 (ManifestFormatVersionImmutable) added the immutable index payload
+// and is written only for a snapshot that carries ImmutableDB chunk files, so
+// every other snapshot stays readable by builds that predate it. Restore
+// accepts both.
 const ManifestFormatVersion = 2
+
+// ManifestFormatVersionImmutable is the format version of a snapshot whose
+// manifest declares an immutable index, and the newest version this build
+// reads.
+const ManifestFormatVersionImmutable = 3
 
 // ManifestFileName is the name of the manifest file inside a snapshot
 // directory.
@@ -418,6 +428,13 @@ type Manifest struct {
 	UtxoSetBytes  int64  `json:"utxoSetBytes,omitempty"`
 	UtxoSetSHA256 string `json:"utxoSetSha256,omitempty"`
 
+	// ImmutableIndexBytes/ImmutableIndexSHA256 declare the immutable index
+	// file (ImmutableIndexFileName), present when the snapshot carries
+	// ImmutableDB chunk files. The index in turn declares each chunk file's
+	// size and digest, which would not fit in the manifest.
+	ImmutableIndexBytes  int64  `json:"immutableIndexBytes,omitempty"`
+	ImmutableIndexSHA256 string `json:"immutableIndexSha256,omitempty"`
+
 	// Authentication is the hex HMAC-SHA256, under the operator trust key
 	// (WithManifestKey), of the manifest's JSON encoding with Checksum and
 	// Authentication blanked. Empty when no key was configured at snapshot time.
@@ -695,6 +712,9 @@ func prepareManifest(
 		return Manifest{}, nil, err
 	}
 	m.FormatVersion = ManifestFormatVersion
+	if m.ImmutableIndexSHA256 != "" {
+		m.FormatVersion = ManifestFormatVersionImmutable
+	}
 	m.ID = snapshotIDForDir(dir)
 	m.Authentication = ""
 	if key := manifestKey(opts); len(key) > 0 {
@@ -848,11 +868,11 @@ func ParseManifest(data []byte, opts ...ManifestOption) (Manifest, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return Manifest{}, fmt.Errorf("parse manifest: %w", err)
 	}
-	if m.FormatVersion > ManifestFormatVersion {
+	if m.FormatVersion > ManifestFormatVersionImmutable {
 		return Manifest{}, fmt.Errorf(
 			"manifest has format version %d, newest supported is %d",
 			m.FormatVersion,
-			ManifestFormatVersion,
+			ManifestFormatVersionImmutable,
 		)
 	}
 	wantSum := m.Checksum

@@ -2066,7 +2066,12 @@ S3 and GCS open the snapshot directory through one `os.Root`, open
 symlink or a swapped entry is refused), authenticate the manifest and check
 each payload's size and digest through those handles, and upload from the same
 handles, payloads first and the manifest last, so a remote manifest marks a
-complete upload. No other directory entry is read or uploaded. A destination
+complete upload. The immutable chunk, primary and secondary files, which can
+number in the thousands, are not held open together: a pool of eight workers
+opens each in turn, checks it against its declared size and digest, uploads or
+stages it, and closes it, and the first error cancels the rest. Open
+descriptors stay bounded by the pool size plus the fixed payload count.
+No other directory entry is read or uploaded. A destination
 that implements only `UploadDir` reads pathnames, so `MirrorToCloud` copies the
 declared files from the verified handles into a private `.dingo-cloud-upload-*`
 directory beside the snapshot, authenticates that copy, uploads it, and removes
@@ -6127,6 +6132,12 @@ whose drained families it would read as empty.
 `TestLedgerStateDrainSchemaStopsAnOlderBinary` migrates a v68 database and
 requires a runner holding the v68 registry to refuse it.
 
+Migration `v70` (`immutable-db`, integer version 70) has no statements. It
+raises the schema version so that a binary without the ImmutableDB read path
+stops with `ErrNewerSchema` instead of reading promoted block markers as block
+bodies. `TestImmutableDBSchemaReleaseStopsOlderBinaries` requires a runner
+holding the registry without it to refuse a database migrated through it.
+
 #### Mithril API reward-live-stake finalization
 
 After historical metadata backfill, API startup rebuilds reward stake from
@@ -7552,6 +7563,149 @@ memory and apply them in `Commit`, so there is no per-transaction entry budget
 to report. A store that does not implement the extension is staged unbounded,
 exactly as before this bound existed, and can only ever produce the first
 case — the bound changes behaviour only where a budget can be reported.
+
+### ImmutableDB Contract
+
+With `immutableDb.enabled`, block bodies more than k blocks behind the ledger's
+applied tip move out of Badger into cardano-node compatible chunk files under
+`<dataDir>/immutable`. Only the body moves.
+
+- **Marker.** The `bp<slot><hash>` value becomes `DIM1` followed by chunk
+  number (8 bytes), block offset (8 bytes), size (4 bytes) and CRC-32 (4
+  bytes), all big-endian, 28 bytes in total. Size and CRC cover the wrapped
+  bytes `[type, block CBOR]` as stored in the chunk file. `DIM1` cannot begin a
+  block CBOR, as with `DBT1`.
+- **Unchanged keys.** `bi`, `bh`, `bp..._metadata`, and the `DOFF` offsets of
+  UTxOs and transactions stay in Badger. The chunk bytes after unwrapping
+  `[type, cbor]` are the stored block CBOR, so offsets resolve unchanged.
+- **State record.** Blob key `im_state` holds the format version, the chunk
+  geometry (slots per chunk, whether a chunk has a leading Byron epoch
+  boundary slot), the last block written to the chunk files (slot and hash) and
+  the highest covered block index (`TipIndex`). Blocks at or below `TipIndex`
+  are immutable even where an expired body left nothing to write. Its presence
+  installs the marker-resolving read wrapper at open time for every opener,
+  whatever its configuration. An open that creates the record writes it only
+  after its startup checks pass, so an open refused by, for example, the
+  network gate leaves no geometry behind. Raw classifiers (block inventory rebuild,
+  existence checks before delete) read the stored marker and never the body.
+- **Chunk files.** `.chunk`, `.secondary` and `.primary` follow cardano-node's
+  layout: a 56-byte secondary entry per block, a primary index of one 32-bit
+  offset per relative slot plus a final offset, empty slots repeating the next
+  offset, and a completed chunk's primary padded to the full slot count. Skipped
+  chunks exist as empty trios. A Byron epoch boundary block takes relative slot
+  0 with `BlockOrEbb` set to the epoch. Writing a block appends the chunk bytes,
+  then the secondary entry, then the primary offsets.
+- **Durability order.** A promotion step appends and fsyncs the three files and
+  the directory, and only then commits one blob transaction that swaps the
+  markers in and advances `im_state`. Advancing into a new chunk fsyncs the
+  finished chunk's three files (and each skipped empty chunk's) and the
+  directory before the new chunk is created, so a marker never names bytes
+  that only the page cache held. The commit re-reads each body and refuses
+  (`ErrPromotionRaced`) a block that was deleted or rewritten since it was
+  read for promotion. After any failed step the chunk writer is dropped and
+  the recorded state re-read, so the next call reconciles from disk. A batch
+  is also bounded by what one blob transaction can stage. Startup reconciles:
+  chunk bytes ahead of the recorded tip are truncated, chunk files that end
+  before it stop startup with an instruction to restore them. Recovery checks
+  every entry of the highest chunk: each must start where the previous ended,
+  and a primary index already padded to the chunk's full slot count is left
+  as it is. Primary offsets must start at zero and step by zero or one
+  secondary entry; an offset that skips entries while a later one claims them
+  stops startup with `ErrStoreCorrupt`, while a tail of lower offsets, such as
+  a zero-filled torn write, is trimmed. A torn tail is trimmed to the last entry whose primary offset,
+  secondary entry and CRC all agree; an entry that fails while a later one
+  passes is corruption inside written data and stops startup with
+  `ErrStoreCorrupt` rather than discarding the good blocks after it.
+- **Floor.** Rollback (bounded or unbounded), block removal, orphan blob
+  cleanup and bulk block deletion refuse blocks at or below `TipIndex` with
+  `ErrRollbackBelowImmutableTip`. Block deletion also reads `TipIndex` from
+  `im_state` in its own transaction, which sees the tip a promotion commits
+  with its markers before the in-memory copy moves. An operator truncate lowers `im_state` and cuts
+  the chunk files first, in that order, so an interrupted truncate resumes
+  through the pending-truncate record.
+- **Space.** Block bodies are far below the badger value threshold, so they live
+  in the LSM tree and value-log GC has nothing to rewrite: a body replaced by a
+  marker stays on disk until a compaction covers both versions, and a node at
+  the chain tip writes too little for that to happen for weeks. The promoter
+  therefore calls `Database.ReclaimBlobSpace` (badger: flush the memtable, then
+  `Flatten`) after promoting, at most once every five minutes (`Config.ReclaimInterval`).
+  Commits are held back for the memtable flush, which badger otherwise fails
+  with `ErrBlockedWrites`.
+- **Migration.** An existing database promotes from the oldest block, in
+  batches, resuming from `TipIndex` after a restart. Metadata schema version 70
+  carries no DDL; it makes binaries without the read path stop with a
+  newer-schema error.
+- **Snapshots.** `lifecycle.Snapshot` takes the ImmutableDB lock before the
+  commit barrier (promotion holds it while waiting on a blob commit) and holds
+  it until the blob backup finishes, since promotion commits its markers
+  outside the barrier. Under the barrier it records `im_state` and the length of every chunk, primary and
+  secondary file. Chunks below the highest are hard-linked into the snapshot
+  directory, falling back to a copy across filesystems; the highest chunk is
+  copied up to its recorded length. The store copies a hard-linked file before
+  it edits it, so a later truncate or recovery never changes a snapshot. The
+  files sit flat in the snapshot directory as `immutable-<chunk file name>`,
+  declared by `immutable.index` (name, size, SHA-256 per file, plus the tip),
+  which the manifest in turn declares with `immutableIndexBytes` and
+  `immutableIndexSha256`; the list is its own payload because a mainnet chunk
+  list exceeds `MaxManifestBytes`. A manifest that declares an index has format
+  version 3; every other snapshot keeps version 2, and both restore. Restore
+  verifies every file against the index before the target exists, moves the
+  files into `<dataDir>/immutable` of the staging directory, fsyncs each one,
+  and activates it
+  with the rest. A cloud mirror uploads the same flat files; a restore fetches
+  the index first and then exactly the files it lists, each bounded by its
+  declared size. A snapshot of a database with no promoted block has no index.
+  Mithril sync holds the ImmutableDB lock for the duration of the import.
+- **Mithril chunks.** With `immutableDb.keepMithrilChunks`, a Mithril
+  bootstrap of an empty database does not copy block bodies into Badger. Each
+  certified chunk's three files are renamed into `<dataDir>/immutable`, read
+  back there against the certified SHA-256 digests (a mismatch fails, and
+  deletes the chunk's files unless the recorded tip ends in that chunk, whose
+  committed markers name them), fsynced with the directory, and only then does one
+  commit per batch write `bi`, `bh` and `bp..._metadata`, a `DIM1` marker
+  whose location comes from the chunk's secondary index and the CRC of the
+  bytes read, and in API mode the `DOFF` offsets of produced UTxOs. Before the
+  chunk's first batch commits, `im_state` advances to that chunk's last block:
+  startup reconciliation cuts chunk bytes beyond the recorded tip, so the tip
+  has to cover the whole chunk while its blocks are still waiting for
+  markers. A marker therefore never exceeds the recorded tip and never names
+  a chunk file that is not yet durable, and after a kill the tip may cover
+  blocks the chain has not stored yet. Between the first rename and that tip
+  write the tip does not cover the chunk, so before any file moves the import
+  durably records the chunk in `<dataDir>/immutable/adopting.pending`
+  (written, fsynced and renamed into place with the directory fsynced) and
+  removes it once the tip covers the chunk. While it exists
+  `ReconcileImmutable` leaves the directory alone and promotion and snapshots
+  refuse it with `ErrImmutableAdoptionPending`, so a kill at any point of
+  adopting a chunk, including before the first chunk has a tip, never cuts
+  certified files whose source copy has already moved. The next run verifies
+  the chunk again and continues after the chain tip, including a kill inside
+  the first chunk. A chunk missing any of its three certified
+  digests, such as the ancillary archive's in-progress chunk, is not adopted.
+  A resumed run skips the chunk the recorded tip ends once the chain's tip
+  index has reached the recorded tip index, so blocks committed after an
+  adoption (gap blocks) do not make it re-adopt that chunk. A chunk is adopted
+  only when its primary index has the exact length the geometry gives, one
+  version byte plus four bytes for each relative slot and the final offset;
+  otherwise it is refused before anything commits. A database that already
+  holds block bodies, including blocks past the recorded tip when a later
+  chunk is pending (`ErrAdoptUnavailable`), a catch-up and a reward repair keep the body copy, and
+  that copy is refused (`ErrLoadBehindImmutableTip`) on a database whose
+  recorded tip is ahead of its chain, which an interrupted adoption leaves:
+  bodies copied at or below the recorded tip would never be promoted. Finish
+  the adoption or truncate first.
+- **Limits.** Requires the Badger blob plugin and no history expiry (which
+  tombstones bodies in place). Configuration validation refuses
+  `historyExpiry.enabled` with `immutableDb.enabled`, startup refuses history
+  expiry on any database that has an `im_state` record whatever the current
+  setting, and the tombstone path refuses a block whose value is a marker.
+  `immutableDb.promoteBatch` is at most 100000. The chunk geometry is ten
+  security parameters of slots per chunk plus the boundary slot, taking the
+  security parameter from the Byron genesis, or the Shelley genesis when the
+  network has none. A node that reads through Bark still gets promoted blocks
+  from the marker-resolving store, but an ImmutableDB node cannot back a Bark
+  archive: archive delivery needs `GetBlockURL`, which the Badger plugin the
+  ImmutableDB requires does not implement.
 
 ### Archive And History Expiry Contract
 

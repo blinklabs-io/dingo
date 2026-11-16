@@ -70,6 +70,8 @@ type Config struct {
 	// produced this database.
 	BlobPlugin     string
 	MetadataPlugin string
+	// Immutable configures the ImmutableDB of promoted block bodies.
+	Immutable ImmutableConfig
 }
 
 // Stores contains the provider-owned storage services injected into a
@@ -129,6 +131,9 @@ type Database struct {
 	// retained caches the start of retained block history; see
 	// retained_bound.go.
 	retained retainedBound
+
+	// immutable is the ImmutableDB handle; nil until a state record exists.
+	immutable *immutableRuntime
 
 	cborCache       *TieredCborCache
 	sizeMetricsStop chan struct{}
@@ -509,6 +514,11 @@ func (d *Database) Close() error {
 			close(d.sizeMetricsStop)
 			<-d.sizeMetricsDone
 		}
+		if rt := d.immutable; rt != nil {
+			rt.mu.Lock()
+			rt.dropStore()
+			rt.mu.Unlock()
+		}
 	})
 	return d.closeErr
 }
@@ -675,8 +685,15 @@ func New(
 			}
 		}()
 	}
+	// The marker-resolving read path goes in before anything reads a block.
+	if err := db.initImmutable(); err != nil {
+		return db, err
+	}
 	if err := db.init(ctx); err != nil {
 		// Database is available for recovery, so return it with error
+		return db, err
+	}
+	if err := db.recordImmutableState(); err != nil {
 		return db, err
 	}
 	if err := db.EnsureBlockInventory(); err != nil {

@@ -186,7 +186,13 @@ func (t *badgerTxn) Commit() error {
 		t.finished = true
 		return nil
 	}
-	if err := t.tx.Commit(); err != nil {
+	// Reclaim blocks badger's write path for a moment, and a commit that
+	// reaches it then fails with ErrBlockedWrites. The gate keeps commits
+	// out of that window.
+	t.store.commitGate.RLock()
+	err := t.tx.Commit()
+	t.store.commitGate.RUnlock()
+	if err != nil {
 		return err
 	}
 	t.finished = true
@@ -329,6 +335,7 @@ type BlobStoreBadger struct {
 	runValueLogGC        func(float64) error
 	dataDir              string
 	gcWg                 sync.WaitGroup
+	commitGate           sync.RWMutex
 	gcMetrics            *badgerGCMetrics
 	closeOnce            sync.Once
 	closeDone            chan struct{}

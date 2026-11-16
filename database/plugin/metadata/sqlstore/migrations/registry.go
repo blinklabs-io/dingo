@@ -110,6 +110,7 @@ const (
 	poolRetirementEpochIndexSchemaRelease               = "pool-retirement-epoch-index"
 	poolCurrentStateSchemaRelease                       = "pool-current-state"
 	ledgerStateDrainSchemaRelease                       = "ledger-state-drain-latch"
+	immutableDBSchemaRelease                            = "immutable-db"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -299,6 +300,7 @@ var schemaVersions = []struct {
 	{Version: 67, Name: poolCurrentStateSchemaRelease, Dir: "v67"},
 	{Version: 68, Name: poolRetirementEpochIndexSchemaRelease, Dir: "v68"},
 	{Version: 69, Name: ledgerStateDrainSchemaRelease, Dir: "v69"},
+	{Version: 70, Name: immutableDBSchemaRelease, Dir: "v70"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
