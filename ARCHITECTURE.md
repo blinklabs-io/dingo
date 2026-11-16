@@ -12099,7 +12099,10 @@ are per pool (`pool_id` label with several pools, none with one):
   twice. A live database restore or truncate rebuilds the block producer: its
   new election and forger register fresh collectors, so the counter restarts
   at zero with a new floor at the first slot the new forger reads. A schedule
-  that arrives after its slots passed counts them, from the floor, once. An
+  that arrives after its slots passed counts them, from the floor, once.
+  Epochs older than the schedule cache's window (the slot clock's epoch and
+  the two before it) are closed and never counted again, even while a schedule
+  for one stays cached because no newer schedule could be produced. An
   epoch with no schedule (no nonce yet during a deep sync) counts nothing,
   since nothing says whether the pool led it, and slots that pass while the
   node is not running are never counted: compare `dingo_leader_schedule_leader_slots`

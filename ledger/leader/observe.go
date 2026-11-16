@@ -28,6 +28,10 @@ type slotObservation struct {
 	last uint64
 	// counted maps an epoch to the highest slot of it already counted.
 	counted map[uint64]uint64
+	// closed is the oldest epoch still counted. An older epoch's entry has
+	// been dropped from counted, so its schedule, should it still be cached,
+	// is skipped rather than counted again from the floor.
+	closed uint64
 }
 
 // ObserveSlot reports the slot the slot clock has reached. It counts the
@@ -70,22 +74,29 @@ func (e *Election) ObserveSlot(slot uint64) {
 	obs.last = max(obs.last, slot)
 	var elapsed uint64
 	for epoch, schedule := range schedules {
+		if epoch < obs.closed {
+			continue
+		}
 		from := obs.floor
 		if done, ok := obs.counted[epoch]; ok {
 			if done >= slot {
 				continue
 			}
-			from = done + 1
+			// A reading behind the floor leaves done below it.
+			from = max(from, done+1)
 		}
 		elapsed += schedule.countLeaderSlotsBetween(from, slot)
 		obs.counted[epoch] = slot
 	}
-	if slotEpoch, err := e.epochProvider.EpochForSlot(slot); err == nil {
-		// Drop epochs the schedule cache has already pruned. Their count is
-		// kept for as long as their schedule could still be recomputed.
+	if slotEpoch, err := e.epochProvider.EpochForSlot(slot); err == nil &&
+		slotEpoch >= maxCachedSchedules {
+		// Close the epochs older than the schedule cache's window and drop
+		// their entries. The cache prunes relative to the newest schedule it
+		// stored, not to the slot clock, so it can still hold a closed
+		// epoch's schedule when no newer one could be produced.
+		obs.closed = max(obs.closed, slotEpoch-maxCachedSchedules+1)
 		for epoch := range obs.counted {
-			if slotEpoch >= maxCachedSchedules &&
-				epoch < slotEpoch-maxCachedSchedules+1 {
+			if epoch < obs.closed {
 				delete(obs.counted, epoch)
 			}
 		}

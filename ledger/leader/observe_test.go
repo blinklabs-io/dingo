@@ -407,3 +407,55 @@ func TestNextLeaderSlotGaugeIsSetWhenAScheduleIsLoaded(t *testing.T) {
 	f.load(t, observeEpochA)
 	require.Equal(t, float64(104), value(f.election.metrics.nextLeaderSlot))
 }
+
+// A schedule that stays cached while the slot clock runs epochs past it (no
+// newer schedule could be produced, as in a stalled sync) is not counted again
+// once its bookkeeping ages out.
+func TestObserveSlotDoesNotRecountAnAgedOutCachedSchedule(t *testing.T) {
+	t.Parallel()
+	f := newObserveFixture(t)
+	f.persist(t, observeEpochA, 101, 104, 107)
+	f.runWith(t, observeEpochA)
+
+	f.election.ObserveSlot(100)
+	f.election.ObserveSlot(109)
+	require.Equal(t, float64(3), f.elapsed())
+
+	// Slots 135-137 are three epochs past epoch 10, whose schedule is still
+	// the only one cached.
+	require.NotNil(t, f.election.ScheduleForEpoch(observeEpochA))
+	for _, slot := range []uint64{135, 136, 137} {
+		f.election.ObserveSlot(slot)
+		require.Equal(
+			t,
+			float64(3),
+			f.elapsed(),
+			"slot %d recounted epoch 10",
+			slot,
+		)
+	}
+}
+
+// A clock reading behind the first one does not move the counted mark below
+// the floor, so a later reading never counts a slot that passed before the
+// node first read the clock.
+func TestObserveSlotDoesNotCountBelowTheFloorAfterABackwardsReading(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newObserveFixture(t)
+	f.run(t)
+
+	f.election.ObserveSlot(104)
+	f.persist(t, observeEpochA, 103, 105)
+	f.load(t, observeEpochA)
+	f.election.ObserveSlot(102)
+	require.Zero(t, f.elapsed())
+	f.election.ObserveSlot(106)
+	require.Equal(
+		t,
+		float64(1),
+		f.elapsed(),
+		"only 105 is at or after the first reading",
+	)
+}
