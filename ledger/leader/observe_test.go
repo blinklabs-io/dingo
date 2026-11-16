@@ -415,7 +415,7 @@ func TestNextLeaderSlotGaugeTracksTheSlotClock(t *testing.T) {
 func TestNextLeaderSlotGaugeIsSetWhenAScheduleIsLoaded(t *testing.T) {
 	t.Parallel()
 	f := newObserveFixture(t)
-	f.run(t)
+	f.runWithoutStartupCompute(t)
 	f.election.ObserveSlot(100)
 	require.Zero(t, value(f.election.metrics.nextLeaderSlot))
 
