@@ -275,22 +275,25 @@ func TestVoteManagerKeySetRotationPairFollowsRegisteredKey(t *testing.T) {
 		votes = receiveVotes(t, emittedCh, 1)
 		requireVoteSignedBy(t, newKey, rb2, votes[seat])
 	})
-	t.Run("the new key alone waits for the committee snapshot", func(t *testing.T) {
-		t.Parallel()
-		fixture := run(t, newKey)
-		subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
-		defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+	t.Run(
+		"the new key alone waits for the committee snapshot",
+		func(t *testing.T) {
+			t.Parallel()
+			fixture := run(t, newKey)
+			subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+			defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
 
-		rb := lcommon.NewBlake2b256([]byte("early-new-rb"))
-		eb := lcommon.NewBlake2b256([]byte("early-new-eb"))
-		armAnnouncement(t, fixture, firstSlot, rb, eb, 1)
-		testutil.RequireNoReceive(
-			t,
-			emittedCh,
-			300*time.Millisecond,
-			"the new key holds no seat before its snapshot governs",
-		)
-	})
+			rb := lcommon.NewBlake2b256([]byte("early-new-rb"))
+			eb := lcommon.NewBlake2b256([]byte("early-new-eb"))
+			armAnnouncement(t, fixture, firstSlot, rb, eb, 1)
+			testutil.RequireNoReceive(
+				t,
+				emittedCh,
+				300*time.Millisecond,
+				"the new key holds no seat before its snapshot governs",
+			)
+		},
+	)
 	t.Run("the old key alone goes dark after the rotation", func(t *testing.T) {
 		t.Parallel()
 		fixture := run(t, oldKey)
@@ -491,4 +494,152 @@ func TestVoteManagerKeySetVotesOnlySeatsWithoutAStoredVote(t *testing.T) {
 		}})
 		assert.Len(t, raws, 1, "seat %d holds one vote", voterId)
 	}
+}
+
+func TestVoteManagerConfigureVotingKeysCountsDistinctKeys(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	require.NoError(t, fixture.mgr.ConfigureVotingKeys([]*VoteSigningKey{
+		fixture.keys[3],
+		fixture.keys[5],
+		fixture.keys[3],
+	}))
+	assert.Equal(t, 2, fixture.mgr.VotingKeyCount())
+}
+
+func TestVoteManagerKeySetVoteDoesNotCommitAfterReconfiguration(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newKeySetFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+	require.NoError(t, fixture.mgr.ConfigureVotingKeys(
+		[]*VoteSigningKey{fixture.keys[5]},
+	))
+	var pool lcommon.PoolKeyHash
+	copy(pool[:], fixture.members[3].PoolKeyHash)
+	// A pool-bound configuration lands while the key-set vote is being
+	// signed; the vote was decided under a key set no longer in force.
+	fixture.mgr.signVote = func(
+		key *VoteSigningKey,
+		msg []byte,
+	) ([]byte, error) {
+		assert.NoError(t, fixture.mgr.EnableVoting(pool, fixture.keys[3]))
+		return SignVote(key, msg)
+	}
+
+	rbHash := lcommon.NewBlake2b256([]byte("reconfigured-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("reconfigured-eb"))
+	armAnnouncement(t, fixture, headerArmingRbSlot, rbHash, ebHash, 1)
+	testutil.RequireNoReceive(
+		t, emittedCh, 300*time.Millisecond, "the key set was replaced",
+	)
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo: headerArmingRbSlot, VoterId: 5,
+	}}))
+}
+
+func TestVoteManagerConfigureVotingReplacesKeySet(t *testing.T) {
+	t.Parallel()
+
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newKeySetFixture(
+		t,
+		slots,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			keys := make(map[string]*lcommon.LeiosKey, 2)
+			for _, voterId := range []uint64{3, 5} {
+				key := f.keys[voterId]
+				proof, err := signWithDST(
+					key, key.PublicKeyBytes(), LeiosPoPDST,
+				)
+				require.NoError(t, err)
+				keys[hex.EncodeToString(f.members[voterId].PoolKeyHash)] =
+					&lcommon.LeiosKey{
+						PublicKey:       key.PublicKeyBytes(),
+						PossessionProof: proof,
+					}
+			}
+			cfg.KeyProvider = &fakeLeiosKeyProvider{keys: keys}
+		},
+	)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+	require.NoError(t, fixture.mgr.ConfigureVotingKeys(
+		[]*VoteSigningKey{fixture.keys[5]},
+	))
+	var pool lcommon.PoolKeyHash
+	copy(pool[:], fixture.members[3].PoolKeyHash)
+	status, err := fixture.mgr.ConfigureVoting(pool, fixture.keys[3])
+	require.NoError(t, err)
+	require.Equal(t, VotingConfigurationEnabled, status)
+	assert.Zero(t, fixture.mgr.VotingKeyCount())
+
+	rbHash := lcommon.NewBlake2b256([]byte("configure-over-set-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("configure-over-set-eb"))
+	armAnnouncement(t, fixture, headerArmingRbSlot, rbHash, ebHash, 1)
+	votes := receiveVotes(t, emittedCh, 1)
+	require.Contains(t, votes, uint64(3))
+}
+
+func TestVoteManagerPoolBoundKeyStopsVotingWhenRegistrationRotates(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const seat = uint64(3)
+	oldKey := testSigningKey(t, 201)
+	oldReg := testLeiosKey(t, 201)
+	newReg := testLeiosKey(t, 202)
+	firstEpoch, secondEpoch := uint64(5), uint64(6)
+	firstSlot := firstEpoch*testSlotsPerEpoch + 77
+	secondSlot := secondEpoch*testSlotsPerEpoch + 77
+
+	reg := prometheus.NewRegistry()
+	slots := &fakeSlotProvider{slot: firstSlot + 1}
+	fixture := newKeySetFixture(
+		t,
+		slots,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			pool := hex.EncodeToString(f.members[seat].PoolKeyHash)
+			cfg.PromRegistry = reg
+			cfg.KeyProvider = &epochSwitchedKeyProvider{
+				switchAt: CommitteeSnapshotEpoch(secondEpoch),
+				before:   map[string]*lcommon.LeiosKey{pool: oldReg},
+				after:    map[string]*lcommon.LeiosKey{pool: newReg},
+			}
+		},
+	)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+	var pool lcommon.PoolKeyHash
+	copy(pool[:], fixture.members[seat].PoolKeyHash)
+	require.NoError(t, fixture.mgr.EnableVoting(pool, oldKey))
+
+	rb1 := lcommon.NewBlake2b256([]byte("pool-rotation-rb-1"))
+	eb1 := lcommon.NewBlake2b256([]byte("pool-rotation-eb-1"))
+	armAnnouncement(t, fixture, firstSlot, rb1, eb1, 1)
+	votes := receiveVotes(t, emittedCh, 1)
+	requireVoteSignedBy(t, oldKey, rb1, votes[seat])
+
+	// The committee snapshot now carries the new registration, so the
+	// configured key would sign a vote no peer accepts.
+	slots.setSlot(secondSlot + 1)
+	rb2 := lcommon.NewBlake2b256([]byte("pool-rotation-rb-2"))
+	eb2 := lcommon.NewBlake2b256([]byte("pool-rotation-eb-2"))
+	armAnnouncement(t, fixture, secondSlot, rb2, eb2, 2)
+	testutil.RequireNoReceive(
+		t, emittedCh, 300*time.Millisecond, "the pool's key was rotated",
+	)
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(
+			fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(
+				voteNotEmittedKeyMismatch,
+			),
+		) == 1
+	}, testutil.AsyncWait, 10*time.Millisecond)
 }
