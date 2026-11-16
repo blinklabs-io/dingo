@@ -87,17 +87,18 @@ func leiosQuorumPossibleFor(
 }
 
 // leiosQuorumPossible reports whether the current epoch's committee can reach
-// its quorum threshold.
+// its quorum threshold. It runs on the mempool's goroutines, which cannot take
+// liveLifecycleMu, so it reads the ledger published for such readers rather
+// than n.ledgerState, which a live restore rewrites, and it takes the epoch
+// and its parameters from one consensus snapshot.
 func (n *Node) leiosQuorumPossible() bool {
 	voteManager := n.leiosCertificateVerifier.Load()
-	if voteManager == nil || n.ledgerState == nil {
+	ls := n.wallClockLedger.Load()
+	if voteManager == nil || ls == nil {
 		return false
 	}
-	return leiosQuorumPossibleFor(
-		voteManager,
-		n.ledgerState.CurrentEpoch(),
-		n.ledgerState.GetCurrentPParams(),
-	)
+	epoch, pparams := ls.CurrentEpochAndPParams()
+	return leiosQuorumPossibleFor(voteManager, epoch, pparams)
 }
 
 // leiosGatedMempoolCapacity returns the capacity function for a mempool whose
@@ -179,22 +180,25 @@ func leiosEndorserBlockQuorumRefusal(
 }
 
 // leiosEndorserBlockQuorumRefusalForSlot is leiosEndorserBlockQuorumRefusal
-// against the node's vote manager and ledger.
+// against the node's vote manager and ledger. It runs on the forging
+// goroutine, so like leiosQuorumPossible it reads the published ledger once
+// and uses that for every lookup.
 func (n *Node) leiosEndorserBlockQuorumRefusalForSlot(slot uint64) string {
 	var source leiosQuorumSource
 	if voteManager := n.leiosCertificateVerifier.Load(); voteManager != nil {
 		source = voteManager
 	}
-	if n.ledgerState == nil {
+	ls := n.wallClockLedger.Load()
+	if ls == nil {
 		return leiosEBSkipQuorumUnresolved
 	}
 	return leiosEndorserBlockQuorumRefusal(
 		source,
 		func(slot uint64) (uint64, error) {
-			epoch, err := n.ledgerState.SlotToEpoch(slot)
+			epoch, err := ls.SlotToEpoch(slot)
 			return epoch.EpochId, err
 		},
-		n.ledgerState.ProtocolParamsForSlot,
+		ls.ProtocolParamsForSlot,
 		slot,
 	)
 }
