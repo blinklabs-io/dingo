@@ -16,12 +16,15 @@ package ledger
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -101,6 +104,59 @@ func TestWindowedRewindRefusesTargetBelowImmutableTip(t *testing.T) {
 	fixture := newImmutableChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "immutable-windowed")
 	_, err := fixture.ls.db.PromoteThrough(context.Background(), 2)
+	require.NoError(t, err)
+	tipBefore := fixture.ls.chain.Tip()
+
+	committed, err := fixture.ls.rollbackPrimaryChainInSecurityParamWindows(
+		fixture.ancestorTip.Point,
+	)
+
+	require.ErrorIs(t, err, database.ErrRollbackBelowImmutableTip)
+	require.False(t, committed)
+	require.Equal(t, tipBefore, fixture.ls.chain.Tip())
+}
+
+// The promoter keeps the immutable tip at least K below the applied tip, so a
+// recovery target below the floor is normally deeper than K and the chain
+// reports both refusals. The descent must still refuse it up front: its first
+// windows sit above the floor and would commit before the floor stops it.
+func TestWindowedRewindRefusesTargetBelowDeepImmutableTip(t *testing.T) {
+	t.Parallel()
+	const securityParam = 2
+	fixture := newImmutableChainsyncRollbackFixture(t)
+	fixture.ls.config.CardanoNodeConfig = newTestShelleyGenesisCfgWithK(
+		t, securityParam,
+	)
+	fixture.ls.currentEra = eras.ShelleyEraDesc
+	require.Equal(t, securityParam, fixture.ls.SecurityParam())
+	require.NoError(
+		t,
+		fixture.ls.chain.Rollback(
+			context.Background(),
+			fixture.ancestorTip.Point,
+		),
+	)
+	prevHash := fixture.ancestorTip.Point.Hash
+	blocks := make([]chain.RawBlock, 0, 8)
+	for idx := range 8 {
+		offset := uint64(idx + 1)
+		hash := testHashBytes(fmt.Sprintf("immutable-deep-fork-%d", idx))
+		blocks = append(blocks, chain.RawBlock{
+			Slot:        fixture.currentTip.Point.Slot + offset*5,
+			Hash:        hash,
+			BlockNumber: fixture.ancestorTip.BlockNumber + offset,
+			Type:        1,
+			PrevHash:    prevHash,
+			Cbor:        chainsyncFixtureBlockCbor,
+		})
+		prevHash = hash
+	}
+	require.NoError(
+		t,
+		fixture.ls.chain.AddRawBlocks(context.Background(), blocks),
+	)
+	// Tip index 9, immutable tip index 4: more than K below the tip.
+	_, err := fixture.ls.db.PromoteThrough(context.Background(), 4)
 	require.NoError(t, err)
 	tipBefore := fixture.ls.chain.Tip()
 
