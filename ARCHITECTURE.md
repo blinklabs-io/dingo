@@ -13349,7 +13349,9 @@ validation refuses the two together, in YAML and when a library caller mixes
 `WithBlockProducerPools` with the single-pool options in `New`, and also
 refuses two entries sharing an opcert, two entries sharing a remote agent
 address without distinct profile names, and more than one pool
-with Leios forging or voting, whose pipeline and vote key are wired for one.
+with Leios forging, whose endorser-block pipeline is wired for one. Leios
+voting is not tied to a pool count: a vote key file listing several pools'
+keys votes for every committee seat they hold.
 
 The first pool keeps the node's own forging fields (`blockForger`,
 `leaderElection`, `blockProducerCreds`, `kesAgentClient`), so a single-pool node

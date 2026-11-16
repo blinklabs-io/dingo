@@ -216,19 +216,13 @@ func TestValidateBlockProducerPools(t *testing.T) {
 
 func TestValidateBlockProducerPoolsRefusesLeiosWithSeveralPools(t *testing.T) {
 	t.Parallel()
-	const want = "more than one pool, which Leios forging and voting do not support"
+	const want = "more than one pool, which Leios forging does not support"
 	twoPools := []BlockProducerPool{remotePool("a"), remotePool("b")}
 
 	cfg := validTestConfig()
 	cfg.BlockProducer = true
 	cfg.BlockProducerPools = twoPools
 	require.ErrorContains(t, cfg.Validate(RunModeLeios), want)
-
-	cfg = validTestConfig()
-	cfg.BlockProducer = true
-	cfg.BlockProducerPools = twoPools
-	cfg.LeiosVoteSigningKeyFile = "/keys/vote.skey"
-	require.ErrorContains(t, cfg.Validate(RunModeServe), want)
 
 	cfg = validTestConfig()
 	cfg.BlockProducer = true
@@ -241,6 +235,20 @@ func TestValidateBlockProducerPoolsRefusesLeiosWithSeveralPools(t *testing.T) {
 	cfg.BlockProducer = true
 	cfg.BlockProducerPools = twoPools[:1]
 	require.NoError(t, cfg.Validate(RunModeLeios))
+}
+
+func TestValidateBlockProducerPoolsAllowsAVoteKeyWithoutLeiosForging(t *testing.T) {
+	t.Parallel()
+	// A multi-key vote file votes for every seat its keys hold, so a vote key
+	// does not tie the node to one pool. Only Leios forging still does.
+	cfg := validTestConfig()
+	cfg.BlockProducer = true
+	a, b := remotePool("a"), remotePool("b")
+	a.ShelleyKESAgentProfile = "a"
+	b.ShelleyKESAgentProfile = "b"
+	cfg.BlockProducerPools = []BlockProducerPool{a, b}
+	cfg.LeiosVoteSigningKeyFile = "/keys/vote.skey"
+	require.NoError(t, cfg.Validate(RunModeServe))
 }
 
 func TestValidateBlockProducerPoolsSharedKESAgentAddressNeedsProfiles(t *testing.T) {
