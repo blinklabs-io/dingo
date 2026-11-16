@@ -93,8 +93,9 @@ type Config struct {
 	// The blob store can hold blocks well past that point: a Mithril bootstrap
 	// imports raw blocks up to the certified immutable tip while leaving the
 	// metadata ledger cursor at the (earlier) imported ledger state, and
-	// LedgerState.Start then replays that whole suffix, emitting a live
-	// BlockEvent for each block. Sweeping the suffix here as well would index
+	// LedgerState.Start then replays that whole suffix, publishing an Apply
+	// BlockEvent for each block in chain order before any later block's event.
+	// Sweeping the suffix here as well would index
 	// every one of those blocks twice -- harmless for the rows themselves,
 	// which insert idempotently, but a duplicated scan of the post-snapshot
 	// range and a matching overcount on the event counters. Bounding the sweep

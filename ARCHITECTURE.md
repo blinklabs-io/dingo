@@ -1240,6 +1240,21 @@ before storage is durable and their work never runs inline in `Commit`.
 goroutine when the block joins or leaves the primary chain, which can be before
 the ledger applies it, so it is not an applied-tip signal.
 
+Blocks already on the primary chain but not yet applied when the node starts,
+such as the suffix after a Mithril import, never pass through that handler.
+`LedgerState.Start` therefore publishes a `ledger.block` Apply for each of them,
+oldest first, after primary-chain reconciliation and before the slot clock,
+forger and block-processing goroutine start. Nothing adds a block in that
+window, so replayed Applies precede the event for any later block.
+
+Reconciliation can itself roll the chain back, and the handler publishes that
+rollback's Undo events on its own goroutine. Before replaying, `Start`
+publishes a private `startupReplayBarrier` payload on `chain.update` and waits
+for the handler to reach it, so every such Undo precedes the replayed Applies.
+Other `chain.update` subscribers switch on the payload type and ignore it. The
+barrier and the walk are skipped when nothing subscribes to `ledger.block`
+(the barrier is also skipped when the handler is not subscribed).
+
 An ordinary stalled subscriber detaches after its delivery timeout; a lossless
 subscriber deliberately remains attached until it drains or is stopped, closed,
 or unsubscribed. A live restore/truncate closes the `LedgerState` while keeping

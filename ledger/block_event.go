@@ -37,6 +37,8 @@ import (
 
 func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
 	switch data := evt.Data.(type) {
+	case startupReplayBarrier:
+		close(data.done)
 	case chain.ChainBlockEvent:
 		ls.publishBlockEvent(BlockActionApply, data.Block)
 		// Every primary-chain addition arrives here, fetched or forged, so
