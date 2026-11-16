@@ -255,6 +255,42 @@ func TestVoteManagerKeySetRotationPairFollowsRegisteredKey(t *testing.T) {
 		votes = receiveVotes(t, emittedCh, 1)
 		requireVoteSignedBy(t, newKey, rb2, votes[seat])
 	})
+	t.Run("pair order does not matter", func(t *testing.T) {
+		t.Parallel()
+		fixture := run(t, newKey, oldKey)
+		slots := fixture.mgr.slotProvider.(*fakeSlotProvider)
+		subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+		defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+		rb1 := lcommon.NewBlake2b256([]byte("reversed-rb-1"))
+		eb1 := lcommon.NewBlake2b256([]byte("reversed-eb-1"))
+		armAnnouncement(t, fixture, firstSlot, rb1, eb1, 1)
+		votes := receiveVotes(t, emittedCh, 1)
+		requireVoteSignedBy(t, oldKey, rb1, votes[seat])
+
+		slots.setSlot(secondSlot + 1)
+		rb2 := lcommon.NewBlake2b256([]byte("reversed-rb-2"))
+		eb2 := lcommon.NewBlake2b256([]byte("reversed-eb-2"))
+		armAnnouncement(t, fixture, secondSlot, rb2, eb2, 2)
+		votes = receiveVotes(t, emittedCh, 1)
+		requireVoteSignedBy(t, newKey, rb2, votes[seat])
+	})
+	t.Run("the new key alone waits for the committee snapshot", func(t *testing.T) {
+		t.Parallel()
+		fixture := run(t, newKey)
+		subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+		defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+		rb := lcommon.NewBlake2b256([]byte("early-new-rb"))
+		eb := lcommon.NewBlake2b256([]byte("early-new-eb"))
+		armAnnouncement(t, fixture, firstSlot, rb, eb, 1)
+		testutil.RequireNoReceive(
+			t,
+			emittedCh,
+			300*time.Millisecond,
+			"the new key holds no seat before its snapshot governs",
+		)
+	})
 	t.Run("the old key alone goes dark after the rotation", func(t *testing.T) {
 		t.Parallel()
 		fixture := run(t, oldKey)
@@ -411,4 +447,48 @@ func TestVoteManagerLatestVotingConfigurationWins(t *testing.T) {
 		votes := receiveVotes(t, emittedCh, 1)
 		require.Contains(t, votes, uint64(3))
 	})
+}
+
+func TestVoteManagerKeySetVotesOnlySeatsWithoutAStoredVote(t *testing.T) {
+	t.Parallel()
+
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newKeySetFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	keys := []*VoteSigningKey{fixture.keys[3], fixture.keys[5], fixture.keys[7]}
+	require.NoError(t, fixture.mgr.ConfigureVotingKeys(keys))
+
+	rbHash := lcommon.NewBlake2b256([]byte("stored-seat-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("stored-seat-eb"))
+	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 1)
+	waitForAnnouncement(t, fixture, rbHash)
+	// Seat 5's vote reaches the node from a peer before the node votes, as
+	// when another process holds the same key: the key set must not sign a
+	// second vote for that seat, and must still vote the others.
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer",
+		fixture.makePrototypeVote(t, 5, rbHash),
+	))
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, rbHash, ebHash)
+
+	votes := receiveVotes(t, emittedCh, 2)
+	require.Contains(t, votes, uint64(3))
+	require.Contains(t, votes, uint64(7))
+
+	// Re-emitting the announcement, by validation or by reconfiguring the
+	// same keys, casts nothing more.
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, rbHash, ebHash)
+	require.NoError(t, fixture.mgr.ConfigureVotingKeys(keys))
+	testutil.RequireNoReceive(
+		t, emittedCh, 300*time.Millisecond, "the announcement was voted",
+	)
+	for _, voterId := range []uint64{3, 5, 7} {
+		raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+			SlotNo:  headerArmingRbSlot,
+			VoterId: voterId,
+		}})
+		assert.Len(t, raws, 1, "seat %d holds one vote", voterId)
+	}
 }
