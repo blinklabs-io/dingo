@@ -200,11 +200,9 @@ func (n *Node) initMultiPool() error {
 // the block producer: the pools must be refused where only one is supported,
 // and the arbiter must read the ledger the forgers are about to use.
 func (n *Node) prepareMultiPool() error {
-	if n.producerPoolCount() > 1 &&
-		(n.config.leiosForgingEnabled() ||
-			n.config.leiosVoteSigningKeyFile != "") {
+	if n.producerPoolCount() > 1 && n.config.leiosForgingEnabled() {
 		return errors.New(
-			"blockProducerPools lists more than one pool, which Leios forging and voting do not support",
+			"blockProducerPools lists more than one pool, which Leios forging does not support",
 		)
 	}
 	if err := n.initMultiPool(); err != nil {

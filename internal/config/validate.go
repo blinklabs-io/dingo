@@ -1051,17 +1051,17 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// Block production needs all three credential paths
 	if c.BlockProducer {
 		errs = append(errs, c.validateBlockProducerPools()...)
-		// Leios voting and endorser-block production are wired for one pool:
-		// one vote key, one pipeline. A second pool would forge ranking
-		// blocks with no Leios support of its own. Musashi forges Leios
-		// headers whatever the run mode.
+		// Endorser-block production is wired for one pool and one pipeline:
+		// a second pool would forge ranking blocks with no Leios support of
+		// its own. Musashi forges Leios headers whatever the run mode. Voting
+		// is not refused: a vote key file holding several keys votes for
+		// every seat they hold, whichever pools the node forges for.
 		isMusashi := c.Network == ouroboros.NetworkCardanoMusashi.Name ||
 			c.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 		if len(c.BlockProducerPools) > 1 &&
-			(effectiveMode == RunModeLeios || isMusashi ||
-				c.LeiosVoteSigningKeyFile != "") {
+			(effectiveMode == RunModeLeios || isMusashi) {
 			errs = append(errs, errors.New(
-				"blockProducerPools lists more than one pool, which Leios forging and voting do not support",
+				"blockProducerPools lists more than one pool, which Leios forging does not support",
 			))
 		}
 	}

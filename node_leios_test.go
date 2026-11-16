@@ -412,6 +412,88 @@ func TestEnableLeiosVotingDefersUntilOnChainKeyAvailable(t *testing.T) {
 	)
 }
 
+func leiosVoteKeyEnvelopeJSON(scalar byte) string {
+	return fmt.Sprintf(
+		`{"type":"BLS12-381 Signing Key","description":"Leios BLS signing key","cborHex":"5820%064x"}`,
+		scalar,
+	)
+}
+
+// startLeiosVotingWithKeyFile runs enableLeiosVoting for a producer whose key
+// file holds content and returns the node log it produced and the vote
+// manager that was configured.
+func startLeiosVotingWithKeyFile(
+	t *testing.T,
+	content string,
+) (string, *leios.VoteManager) {
+	t.Helper()
+
+	vrfPath, kesPath, opcertPath := devnetCredPaths(t)
+	creds := forging.NewPoolCredentials()
+	require.NoError(t, creds.LoadFromFiles(vrfPath, kesPath, opcertPath))
+
+	voteKeyPath := filepath.Join(t.TempDir(), "leios-vote.skey")
+	require.NoError(t, os.WriteFile(voteKeyPath, []byte(content), 0o600))
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	voteManager, err := leios.NewVoteManager(leios.VoteManagerConfig{
+		Logger:         logger,
+		EventBus:       event.NewEventBus(nil, logger),
+		StakeProvider:  startupLeiosStakeProvider{},
+		EpochProvider:  startupLeiosEpochProvider{},
+		ParamsProvider: startupLeiosParamsProvider{},
+		KeyProvider:    startupLeiosKeyProvider{},
+	})
+	require.NoError(t, err)
+
+	n := &Node{
+		config: Config{
+			logger:                  logger,
+			blockProducer:           true,
+			leiosVoteSigningKeyFile: voteKeyPath,
+		},
+		leiosVoteManager: voteManager,
+	}
+	require.NoError(t, n.enableLeiosVoting(creds))
+	return logs.String(), voteManager
+}
+
+func TestEnableLeiosVotingAcceptsAKeyBundleFile(t *testing.T) {
+	t.Parallel()
+
+	logs, voteManager := startLeiosVotingWithKeyFile(
+		t,
+		"["+leiosVoteKeyEnvelopeJSON(1)+","+leiosVoteKeyEnvelopeJSON(2)+"]",
+	)
+	assert.Contains(t, logs, "leios voting keys configured")
+	assert.Equal(t, 2, voteManager.VotingKeyCount())
+}
+
+func TestEnableLeiosVotingRoutesOneKeyArrayLikeASingleKey(t *testing.T) {
+	t.Parallel()
+
+	logs, voteManager := startLeiosVotingWithKeyFile(
+		t,
+		"["+leiosVoteKeyEnvelopeJSON(1)+"]",
+	)
+	assert.Zero(t, voteManager.VotingKeyCount())
+	assert.Contains(
+		t,
+		logs,
+		"leios voting deferred until the configured key is available in the on-chain snapshot",
+	)
+	assert.NotContains(t, logs, "leios voting keys configured")
+}
+
+func TestEnableLeiosVotingEmptyKeyFileRunsAsNonVotingRelay(t *testing.T) {
+	t.Parallel()
+
+	logs, voteManager := startLeiosVotingWithKeyFile(t, "[]")
+	assert.Contains(t, logs, "non-voting relay")
+	assert.Zero(t, voteManager.VotingKeyCount())
+}
+
 func TestEnableLeiosVotingReportsSupersededConfiguration(t *testing.T) {
 	t.Parallel()
 
