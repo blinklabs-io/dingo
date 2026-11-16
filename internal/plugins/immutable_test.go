@@ -16,6 +16,7 @@ package plugins_test
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
@@ -55,5 +56,5 @@ func TestResolveStorageProvidesImmutableDB(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = host.Stop(context.Background()) })
 	require.NotNil(t, stores.Immutable)
-	require.Equal(t, dir+"/immutable", stores.Immutable.Dir())
+	require.Equal(t, filepath.Join(dir, "immutable"), stores.Immutable.Dir())
 }
