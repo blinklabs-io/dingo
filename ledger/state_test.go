@@ -6442,7 +6442,8 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 			)
 			require.NoError(t, err)
 			block := &conway.ConwayBlock{
-				BlockHeader: &conway.ConwayBlockHeader{},
+				BlockHeader:         &conway.ConwayBlockHeader{},
+				InvalidTransactions: []uint{},
 			}
 			block.BlockHeader.Body.BlockNumber = 1
 			block.BlockHeader.Body.Slot = 1

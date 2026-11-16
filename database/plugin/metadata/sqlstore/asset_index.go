@@ -40,8 +40,10 @@ func nonNilName(name []byte) []byte {
 }
 
 // ListMintedAssets implements metadata.MetadataStore. Assets are ordered by
-// the smallest mint/burn row id they own: ids follow application order, so
-// that is the position of the asset's first recorded event.
+// the position of their first recorded event (slot, then transaction index),
+// with assets first minted by one transaction in policy ID then asset name
+// order. Row ids are not used: rows written before canonical ordering hold
+// one transaction's assets in arbitrary insertion order.
 func (s *Store) ListMintedAssets(
 	policyID []byte,
 	limit int,
@@ -53,14 +55,25 @@ func (s *Store) ListMintedAssets(
 	if err != nil {
 		return nil, err
 	}
-	query := `SELECT policy_id, name FROM asset_mint_burn`
+	query := `SELECT policy_id, name FROM (` +
+		`SELECT policy_id, name, MIN(slot) AS first_slot ` +
+		`FROM asset_mint_burn`
 	args := []any{}
 	if policyID != nil {
 		query += ` WHERE policy_id = ?`
 		args = append(args, policyID)
 	}
-	query += ` GROUP BY policy_id, name ORDER BY MIN(id) ` +
-		orderDirection(descending)
+	// The first event is the (slot, tx_index) pair minimum, so the
+	// transaction index is the smallest one within the first slot. Folding
+	// the pair into one integer overflows BIGINT once slots pass 2^31.
+	dir := orderDirection(descending)
+	query += ` GROUP BY policy_id, name) AS first_mint ` +
+		`ORDER BY first_slot ` + dir + `, (` +
+		`SELECT MIN(mint_event.tx_index) FROM asset_mint_burn AS mint_event ` +
+		`WHERE mint_event.policy_id = first_mint.policy_id ` +
+		`AND mint_event.name = first_mint.name ` +
+		`AND mint_event.slot = first_mint.first_slot) ` + dir +
+		`, policy_id ` + dir + `, name ` + dir
 	query, args = addLimitOffset(query, args, limit, offset)
 	rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
 	if err != nil {

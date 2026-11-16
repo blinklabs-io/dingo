@@ -41,7 +41,12 @@ func replayHeaderApplyBlock(t *testing.T, tb *testBlockResult) *babbage.BabbageB
 	headerCbor, err := cbor.Encode(header)
 	require.NoError(t, err)
 	header.SetCbor(headerCbor)
-	block := &babbage.BabbageBlock{BlockHeader: header}
+	block := &babbage.BabbageBlock{
+		BlockHeader:            header,
+		TransactionBodies:      []babbage.BabbageTransactionBody{},
+		TransactionWitnessSets: []babbage.BabbageTransactionWitnessSet{},
+		InvalidTransactions:    []uint{},
+	}
 	blockCbor, err := cbor.EncodeGeneric(block)
 	require.NoError(t, err)
 	block.SetCbor(blockCbor)

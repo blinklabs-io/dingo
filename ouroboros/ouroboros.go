@@ -507,6 +507,10 @@ type Ouroboros struct {
 	leiosPendingOffersMu sync.Mutex
 	leiosPendingOffers   map[string]map[leiosPendingOfferKey]leiosPendingOffer
 	leiosPendingOfferSeq uint64
+	// leiosPeerOffers holds, per LeiosNotify connection, what its peer has
+	// announced and offered, which decides whether a received offer is valid.
+	leiosPeerOffersMu sync.Mutex
+	leiosPeerOffers   map[string]*leiosPeerOfferState
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
@@ -1533,6 +1537,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.deferredHeaderRecoveryMu.Unlock()
 	o.forgetAcceptedHeaderTip(connId)
 	o.forgetServedActivity(connId)
+	o.forgetLeiosPeerOfferStates()
 	o.chainsyncReintersectMu.Lock()
 	delete(o.chainsyncCursorEpochs, connId)
 	delete(o.chainsyncLostCursorReintersects, connId)

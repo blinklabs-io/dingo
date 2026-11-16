@@ -70,9 +70,10 @@ func RegisterProvider(host *hostplugin.Host) error {
 	return hostplugin.Register(
 		host,
 		hostplugin.Descriptor{
-			Capability:  hostplugin.CapabilityStorageBlob,
-			Name:        "badger",
-			Description: "BadgerDB local key-value store",
+			Capability:   hostplugin.CapabilityStorageBlob,
+			Name:         "badger",
+			Description:  "BadgerDB local key-value store",
+			DurableClose: true,
 		},
 		defaultConfig,
 		func(_ context.Context, cfg Config, deps blob.ProviderDependencies) (*BlobStoreBadger, hostplugin.Instance, error) {

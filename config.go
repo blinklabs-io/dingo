@@ -108,9 +108,10 @@ type KoiosParityConfig struct {
 	APIKey string
 	// Strict stops/cancels the node on the first Koios/tool error or
 	// non-pass parity result, rather than logging it and continuing normal
-	// operation. The one exception is an epoch whose only significant
-	// mismatches are reference_lag (Koios's data has not caught up yet),
-	// which is logged and recorded but never stops the node.
+	// operation. The exceptions are an epoch whose only significant
+	// mismatches are reference_lag (Koios's data has not caught up yet) and
+	// a fetch that fails on Koios's daily quota; both are logged and
+	// recorded, and the epoch is retried, but neither stops the node.
 	Strict bool
 	// GraceHours is the window after an epoch closes during which a missing
 	// Dingo-side row is treated as reference/sync lag rather than a

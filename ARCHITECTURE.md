@@ -2573,6 +2573,25 @@ waited for only until that same deadline. A deadline expiry is returned as a
 shutdown error while the remaining teardown continues, so a slow peer-governor
 operation cannot hold phase 1 indefinitely.
 
+The deadline does not bound durability-critical store closes. A provider whose
+`plugin.Descriptor.DurableClose` is set (the badger blob store and the SQLite,
+MySQL, and PostgreSQL metadata stores) is stopped by `plugin.Host` with a
+context detached from the shutdown deadline, and `Host.Stop` keeps waiting for
+it after the deadline passes, logging the store name and elapsed time at
+start, finish, and periodically while it runs. An overrun is reported as the
+warning `storage close finished after the shutdown deadline`,
+not as an error. Closing a large badger store can take minutes under I/O load
+because it syncs every table file, and abandoning it risks leaving the store
+needing recovery, as cardano-node always closes its databases fully. `Node.Stop`
+therefore returns after `shutdownTimeout` plus the store close time, and the
+supervisor's grace period (Kubernetes `terminationGracePeriodSeconds`, systemd
+`TimeoutStopSec`, `docker stop -t`) must cover both; a SIGKILL from the
+supervisor or operator remains the way to abandon a wedged close. A repeated
+SIGINT or SIGTERM during shutdown is logged with that advice and does not
+interrupt the close. A later
+persistent store that sets `DurableClose` takes the same path. Non-durable
+providers and every other shutdown component keep the single deadline.
+
 The terminal EventBus close occurs after mempool teardown and runs concurrently
 with `ConnectionManager.Stop`. Lossless event delivery can backpressure a
 network protocol callback on a full ledger subscriber, while a blockfetch
@@ -4712,7 +4731,9 @@ returning the error and leaving the process running but silently unresponsive
 only if that resume itself fails does `n.cancel()` get called.
 `errStorageDrainUnconfirmed` is the one deliberate exception to that recovery
 path, raised by `closeStorageForLiveLifecycleOp`'s own `n.ledgerState.Close()`
-call, its `pluginHost.StopCapability` calls when those hit the context deadline,
+call, its wait for deferred-index maintenance when that hits the context
+deadline, its `pluginHost.StopCapability` calls when a non-durable provider hits
+the context deadline (a `DurableClose` store closes to completion instead),
 `quiesceForLiveLifecycleOp`'s call to
 `ouroboros.PauseLeiosPersistWriterForLiveLifecycleOp` (which wraps its own
 `ouroboros.ErrLeiosPersistDrainUnconfirmed`), and `quiesceForLiveLifecycleOp`'s
@@ -6294,8 +6315,22 @@ intent-only cache entries and backfill-source points, replacing its own oldest
 past the cap, so one connection cannot churn others' entries; the shared global
 cache and table bounds still apply. An intent entry's owner is the connection
 that created it and is not transferred by a later offer of the same point.
-Dropped offers are not penalized. An offer only identifies a peer that can
-serve a point; it never makes the point eligible for fetching. Both the notify
+Offers dropped by these screens, by the prefetch gate or by a size budget are
+not penalized. An offer that breaks the reference's offer rules ends the
+connection that sent it, and only that connection: the endorser block was not
+announced by that same peer over leios-notify, the body or the closure of the
+point was already offered on that connection, the point's slot is below the
+immutable slot (strictly), or a body offer claims zero bytes or more than
+512 KiB. Each connection keeps its own announcements and offers, from its
+start until it closes or the immutable slot passes them; the announcements
+are capped at 4096, dropping the oldest slots and their offer records, which
+bounds the offers too. A peer's announcement
+counts unless this node found the message invalid, so one deferred, already
+known, clock-skewed or dropped for a local budget still counts. The check runs
+first, before the screens above and before anything is remembered, recorded or
+fetched; an accepted offer counts as offered even if a screen then drops it,
+and a remembered offer is not checked again on replay. An offer only
+identifies a peer that can serve a point; it never makes the point eligible for fetching. Both the notify
 block offer and the transactions offer start a fetch only when the point's
 election was observed (a verified announcing header binds its slot, or a
 selected chain header announcing it is being validated) or the cached entry is
@@ -6578,6 +6613,11 @@ without a ledger offers without the check. A network whose immutable point
 trails the tip by fewer slots than the lead offers nothing, so short-horizon
 networks such as the Leios DevNet set a smaller value.
 
+The log also records, per connection, each block and closure offer it has
+delivered, and skips a later entry for the same part on that connection. The
+same part can be queued again, for example when a peer offers a forged or
+already relayed endorser block back, and a receiver ends the connection on a
+repeated offer. The record lives as long as the connection's cursor.
 
 Idle LeiosNotify requests observe the owning connection's shutdown channel. This
 also releases requests started before manager registration; protocol completion
@@ -17584,8 +17624,8 @@ Fetch and check failures persist the affected queue's ERROR status before
 scheduling the in-memory retry, so restart recovery also selects an epoch
 whose previous comparison passed and whose Koios reference remains fresh.
 The aggregate and account timers are independent, and cancellation stops both.
-Strict-mode fatal eligibility is unchanged: only pure reference lag continues;
-DB failures and validation disagreements still stop strict validation.
+In strict mode only pure reference lag and Koios daily-quota exhaustion
+continue; DB failures and validation disagreements still stop strict validation.
 
 Status reports retain total mismatch counts and separately report significant
 counts using the comparison's severity classification. Aggregate and account
@@ -18384,12 +18424,20 @@ second sync:
     `n.cancelForFatal` — exactly once, on the first fatal-eligible failure,
     and stops processing the rest of the current batch. Every Koios/tool
     error (`reportError`) and every non-pass parity result is fatal-eligible,
-    from either queue (`processEpoch` and `processAccountEpoch`), with one
-    exception: a result whose significant mismatches are all
-    `reference_lag` (`referenceLagOnly`). That means Koios's own data for the
+    from either queue (`processEpoch` and `processAccountEpoch`), with two
+    exceptions. A result whose significant mismatches are all
+    `reference_lag` (`referenceLagOnly`) means Koios's own data for the
     epoch has not caught up, not that Dingo is wrong, so it is logged and
     persisted like any other non-pass result but never calls `FatalFunc` and
-    never stops either queue. The other ERROR-severity
+    never stops either queue. A fetch that fails on Koios's daily tier quota
+    (`ErrKoiosQuotaExceeded`, which wraps `ErrKoiosPermanent`) says nothing
+    about the chain and clears on Koios's daily reset, so `reportError`
+    records the epoch as ERROR without calling `FatalFunc`, and the queue
+    retries it every `ErrorRetryDelay` until the quota resets. If that ERROR
+    row cannot be persisted, the failure stays fatal. That covers the
+    `/tx_info` sample too: `fetchTransactionsIfNeeded` returns a quota error
+    rather than swallowing it, since an uncached sampled transaction would
+    otherwise be checked as a fatal `dingo_db_missing`. The other ERROR-severity
     categories stay fatal: `dingo_db_missing` past the grace window,
     `dingo_db_error`, and `acct_coverage_incomplete` all mean Dingo's side or
     the reference set is unusable, and `reward_type_unmodeled` means a Koios
@@ -20426,7 +20474,8 @@ retained block contents.
 `*dingo.Node` in `node_remote_lifecycle.go`. `Node.RequestShutdown` accepts
 exactly one request (a later one gets `FAILED_PRECONDITION`), resolves the
 timeout (zero, or anything longer than `shutdownTimeout`, selects
-`shutdownTimeout`, the bound `Node.Stop` enforces), publishes
+`shutdownTimeout`, the bound `Node.Stop` enforces for everything except
+durable storage closes, which run to completion), publishes
 `event.NodeLifecycleEvent` on `node.lifecycle`, and signals a `ShutdownRequest`
 on `Node.ShutdownRequests`. `internal/node.Run` ends the run on that signal as
 it would on a signal, then, however the run ended, calls
@@ -20434,11 +20483,14 @@ it would on a signal, then, however the run ended, calls
 intake: Bark keeps serving until shutdown phase 1 stops it, so a Stop or
 Restart arriving after a signal or component error gets `FAILED_PRECONDITION`
 instead of being acknowledged and never performed. `runRequestedShutdown`
-bounds the graceful shutdown by the request's deadline and abandons it past
-that deadline. A restart then
+reports a shutdown still running at the request's deadline with a warning and
+the error `graceful shutdown exceeded`, but keeps waiting for it, logging
+progress, rather than abandoning it: `Node.Stop` already bounds everything but
+durable storage closes, and exiting or re-executing mid-close would hand the
+next process a store whose close never completed. A restart then
 calls `dingo.ReExec`, which `exec`s the same binary and arguments in place
 (Unix only; elsewhere `Restart` is `UNIMPLEMENTED`) so a supervisor sees one
-continuous process, and it does so even after a forced deadline. `GetStatus`
+continuous process, and it does so after the overrun shutdown has finished. `GetStatus`
 reports the accepted state and deadline, uptime, version, the health probe's
 readiness and tip gap as health and sync status, and the ledger tip (omitted
 while a live restore or truncate holds `liveLifecycleMu`). Unlike the
