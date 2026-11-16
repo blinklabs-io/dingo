@@ -392,8 +392,10 @@ func (s *DatabaseSource) walkEpochTransactions(
 // transactions that are not cached yet. A Koios failure that outlasts the
 // retries is logged and swallowed, keeping any rows that did arrive: the check
 // then records each transaction still uncached as a missing reference (an
-// ERROR), and the rest of the epoch is still compared. Only cancellation is
-// returned.
+// ERROR), and the rest of the epoch is still compared. Only cancellation and
+// ErrKoiosQuotaExceeded are returned: an uncached transaction is fatal in
+// strict mode, and an exhausted daily quota says nothing about the chain, so
+// the epoch is reported as a Koios outage and retried instead.
 func (o *Observer) fetchTransactionsIfNeeded(
 	ctx context.Context,
 	epoch uint64,
@@ -438,6 +440,9 @@ func (o *Observer) fetchTransactionsIfNeeded(
 		}
 	}
 	if fetchErr != nil {
+		if errors.Is(fetchErr, ErrKoiosQuotaExceeded) {
+			return fetchErr
+		}
 		return fail(fetchErr)
 	}
 	return nil

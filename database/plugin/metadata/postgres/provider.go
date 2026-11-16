@@ -74,9 +74,10 @@ func RegisterProvider(host *plugin.Host) error {
 	return plugin.Register(
 		host,
 		plugin.Descriptor{
-			Capability:  plugin.CapabilityStorageMetadata,
-			Name:        "postgres",
-			Description: "PostgreSQL relational database",
+			Capability:   plugin.CapabilityStorageMetadata,
+			Name:         "postgres",
+			Description:  "PostgreSQL relational database",
+			DurableClose: true,
 		},
 		defaultConfig,
 		func(

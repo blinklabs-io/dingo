@@ -231,6 +231,7 @@ func babbageTestBlock(
 		TransactionWitnessSets: []babbage.BabbageTransactionWitnessSet{
 			tx.WitnessSet,
 		},
+		InvalidTransactions: []uint{},
 	}
 	block.BlockHeader.Body.BlockNumber = 1
 	block.BlockHeader.Body.Slot = slot
@@ -275,6 +276,7 @@ func alonzoTestBlock(
 		TransactionWitnessSets: []alonzo.AlonzoTransactionWitnessSet{
 			tx.WitnessSet,
 		},
+		InvalidTransactions: []uint{},
 	}
 	if !tx.IsValid() {
 		block.InvalidTransactions = []uint{0}

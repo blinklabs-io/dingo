@@ -130,6 +130,9 @@ func rowBatchingBlockWithInvalid(
 	txs ...rowBatchingTx,
 ) gledger.Block {
 	t.Helper()
+	if invalid == nil {
+		invalid = []uint{}
+	}
 	block := &conway.ConwayBlock{
 		InvalidTransactions: invalid,
 		BlockHeader: &conway.ConwayBlockHeader{

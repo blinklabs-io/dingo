@@ -530,6 +530,7 @@ var dijkstraRulePhases = map[lcommon.UtxoValidationRuleId]dijkstraRulePhase{
 	lcommon.UtxoValidationRuleAccountBalanceIntervals:      dijkstraRulePhase2Valid,
 	lcommon.UtxoValidationRuleTreasuryDonationScripts:      dijkstraRuleAlways,
 	lcommon.UtxoValidationRuleValueNotConserved:            dijkstraRulePhase2Valid,
+	lcommon.UtxoValidationRuleValueNotConservedLegacyMode:  dijkstraRulePhase2Valid,
 	lcommon.UtxoValidationRuleOutputTooSmall:               dijkstraRuleAlways,
 	lcommon.UtxoValidationRuleOutputTooBig:                 dijkstraRuleAlways,
 	lcommon.UtxoValidationRuleOutputBootAddrAttrsTooBig:    dijkstraRuleAlways,
