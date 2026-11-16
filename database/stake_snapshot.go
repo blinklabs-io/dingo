@@ -92,7 +92,36 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
+	return ResolveRewardAccountAutoVotes(
+		ctx,
+		snapshots,
+		func(pkhs []lcommon.PoolKeyHash) ([]models.Pool, error) {
+			return d.GetPools(ctx, pkhs, txn)
+		},
+		func(
+			refs []models.StakeCredentialRef,
+		) (map[string]*models.Account, error) {
+			return d.GetAccountsByCredential(ctx, refs, true, txn)
+		},
+	)
+}
 
+// ResolveRewardAccountAutoVotes is ResolvePoolRewardAccountAutoVotes over the
+// caller's pool and account lookups, so a caller whose pools and accounts
+// live outside the metadata store resolves from where they are. getAccounts
+// must include inactive accounts.
+func ResolveRewardAccountAutoVotes(
+	ctx context.Context,
+	snapshots []*models.PoolStakeSnapshot,
+	getPools func([]lcommon.PoolKeyHash) ([]models.Pool, error),
+	getAccounts func(
+		[]models.StakeCredentialRef,
+	) (map[string]*models.Account, error),
+) error {
+	_ = ctx
+	if len(snapshots) == 0 {
+		return nil
+	}
 	// Group snapshots per pool key so a single pool with multiple
 	// snapshot rows (e.g. mark/set/go imported together) is resolved
 	// once and then fanned out.
@@ -121,7 +150,7 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 		snapshotsByPool[key] = append(snapshotsByPool[key], s)
 	}
 
-	pools, err := d.GetPools(ctx, pkhs, txn)
+	pools, err := getPools(pkhs)
 	if err != nil {
 		return fmt.Errorf("get pools: %w", err)
 	}
@@ -162,12 +191,7 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 	// is distinguishable from an account row that is entirely absent.
 	// Deregistered accounts are a confirmed None; absent rows stay
 	// unresolved (see the doc comment).
-	accounts, err := d.GetAccountsByCredential(
-		ctx,
-		rewardAccountRefs,
-		true,
-		txn,
-	)
+	accounts, err := getAccounts(rewardAccountRefs)
 	if err != nil {
 		return fmt.Errorf("get reward accounts: %w", err)
 	}

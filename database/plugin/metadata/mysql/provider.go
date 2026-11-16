@@ -244,7 +244,13 @@ func openStore(
 			return nil, err
 		}
 	}
-	db, err := sqlstore.OpenDB("mysql", dsn, "mysql", deps.TracingEnabled)
+	db, err := sqlstore.OpenGuardedDB(
+		"mysql",
+		dsn,
+		"mysql",
+		deps.TracingEnabled,
+		deps.StatementGuard,
+	)
 	if err != nil {
 		return nil, err
 	}

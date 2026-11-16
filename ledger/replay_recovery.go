@@ -2542,7 +2542,7 @@ func (ls *LedgerState) buildReplayRecoveryChainIndex(
 		if scanned >= maxReplayRecoveryScanBlocks {
 			break
 		}
-		block, err := ls.db.BlockByIndex(blockIndex, nil)
+		block, err := ls.ledgerDB().BlockByIndex(blockIndex, nil)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
 				if blockIndex == database.BlockInitialIndex {
@@ -2636,11 +2636,10 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 	pending replayRecoveryPendingInput,
 	chainIndex *replayRecoveryChainIndex,
 ) (*replayRecoveryResolvedProducer, bool, error) {
-	present, err := ls.db.UtxoExists(
+	present, err := ls.utxoExists(
 		context.Background(),
 		pending.Input.Id().Bytes(),
 		pending.Input.Index(),
-		nil,
 	)
 	if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
 		return nil, false, fmt.Errorf(
@@ -2674,7 +2673,7 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 			return nil, true, nil
 		}
 	}
-	producerTx, err := ls.db.GetTransactionByHash(
+	producerTx, err := ls.ledgerDB().GetTransactionByHash(
 		context.Background(),
 		pending.Input.Id().Bytes(),
 		nil,
@@ -2844,7 +2843,7 @@ func (ls *LedgerState) replayRecoveryFallbackCandidate(
 	} else if ok && floorIndex < targetIndex {
 		targetIndex = floorIndex
 	}
-	anchorBlock, err := ls.db.BlockByIndex(targetIndex, nil)
+	anchorBlock, err := ls.ledgerDB().BlockByIndex(targetIndex, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// A pruned prefix can put the security-parameter target below

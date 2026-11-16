@@ -313,7 +313,7 @@ func TestApplyStakeRewardsReplaysRoundAfterLateFirstBlock(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		ended, err := db.Metadata().GetEpoch(4, txn.Metadata())
 		require.NoError(t, err)
-		return ls.saveRewardAdaPotsForEpoch(context.Background(), txn, 5, *ended, 500)
+		return ls.saveRewardAdaPotsForEpoch(txn, 5, *ended, 500)
 	}))
 	pots, err = db.Metadata().GetRewardAdaPots(5, nil)
 	require.NoError(t, err)
@@ -340,7 +340,7 @@ func TestApplyStakeRewardsEarlyFirstBlockAppliesOwnRound(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		ended, err := db.Metadata().GetEpoch(4, txn.Metadata())
 		require.NoError(t, err)
-		return ls.saveRewardAdaPotsForEpoch(context.Background(), txn, 5, *ended, 500)
+		return ls.saveRewardAdaPotsForEpoch(txn, 5, *ended, 500)
 	}))
 	pots, err := db.Metadata().GetRewardAdaPots(5, nil)
 	require.NoError(t, err)
@@ -362,11 +362,41 @@ func TestReplaysPreviousStakeRewardRoundNeedsContiguousEpochs(t *testing.T) {
 	seedLateFirstBlockBlocks(t, db, 250, 450)
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		replay, err := ls.replaysPreviousStakeRewardRound(
-			context.Background(), txn, 5,
-		)
+		replay, err := ls.replaysPreviousStakeRewardRound(txn, 5)
 		require.NoError(t, err)
 		require.False(t, replay)
+		return nil
+	}))
+}
+
+func TestReplaysPreviousStakeRewardRoundReadsBlocksInTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	ls, db := newLateFirstBlockTestLedger(t)
+	meta := db.Metadata()
+	for e := uint64(1); e <= 5; e++ {
+		require.NoError(t, meta.SetEpoch(
+			e*100, e, nil, nil, nil, nil,
+			eras.ShelleyEraDesc.Id, 1, 100, nil,
+		))
+	}
+	// The read transaction opens before the blocks exist and must not see
+	// them, even though a fresh transaction would.
+	rtxn := db.Transaction(context.Background(), false)
+	require.NoError(t, rtxn.Do(func(txn *database.Txn) error {
+		require.NotNil(t, txn.Blob())
+		seedLateFirstBlockBlocks(t, db, 350, 450)
+		replay, err := ls.replaysPreviousStakeRewardRound(txn, 5)
+		require.NoError(t, err)
+		require.False(t, replay)
+		return nil
+	}))
+	ftxn := db.Transaction(context.Background(), false)
+	require.NoError(t, ftxn.Do(func(txn *database.Txn) error {
+		replay, err := ls.replaysPreviousStakeRewardRound(txn, 5)
+		require.NoError(t, err)
+		require.True(t, replay)
 		return nil
 	}))
 }
@@ -443,9 +473,7 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 	rtxn := db.Transaction(context.Background(), false)
 	require.NoError(t, rtxn.Do(func(txn *database.Txn) error {
 		var err error
-		replay, err = ls.replaysPreviousStakeRewardRound(
-			context.Background(), txn, 6,
-		)
+		replay, err = ls.replaysPreviousStakeRewardRound(txn, 6)
 		return err
 	}))
 	require.True(t, replay)
@@ -464,9 +492,7 @@ func TestApplyStakeRewardsReplaysFirstShelleyRoundAfterLateFirstBlock(
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		ended, err := meta.GetEpoch(5, txn.Metadata())
 		require.NoError(t, err)
-		return ls.saveRewardAdaPotsForEpoch(
-			context.Background(), txn, 6, *ended, 600,
-		)
+		return ls.saveRewardAdaPotsForEpoch(txn, 6, *ended, 600)
 	}))
 	pots, err := meta.GetRewardAdaPots(6, nil)
 	require.NoError(t, err)

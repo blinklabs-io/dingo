@@ -225,6 +225,14 @@ var logPlainConfigFields = []string{
 	"LedgerCatchupTimeout",
 	"LeiosPersistenceRetentionSlots",
 	"LedgerPrefetchAheadEnabled",
+	"LedgerUtxoShadow",
+	"LedgerUtxoBadger",
+	"LedgerUtxoReads",
+	"LedgerUtxoBadgerOnly",
+	"LedgerStateSetOnly",
+	"LedgerUtxoCheckpointEpochs",
+	"LedgerUtxoCheckpointKeep",
+	"LedgerStateVerifyBeforeDrain",
 	"LedgerValidateAheadEnabled",
 	"LeiosVoteSigningKeyFile",
 	"LocalStateQueryViewMaxLifetime",
@@ -420,6 +428,7 @@ var providerConfigPlainKeys = []string{
 	"revalidationdeltacap",
 	// api/blockfrost admission limits
 	"maxconcurrentmutations", "maxconcurrentmutationsperclient",
+	"maxconcurrentpoollists", "maxconcurrentpoollistsperclient",
 	// api/{blockfrost,kupo,mesh,utxorpc} TLS policy keys
 	"mode", "certfilepath", "keyfilepath",
 }

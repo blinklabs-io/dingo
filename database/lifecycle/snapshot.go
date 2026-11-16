@@ -43,6 +43,9 @@ var syncSnapshotFile = (*os.File).Sync
 const (
 	BlobBackupFileName     = "blob.bak"
 	MetadataBackupFileName = "metadata.sqlite"
+	// UtxoSetBackupFileName is the live UTxO set's backup, written only for
+	// a node that keeps the set.
+	UtxoSetBackupFileName = "utxoset.bak"
 )
 
 // Snapshot captures a point-in-time backup of db's blob and metadata
@@ -205,6 +208,22 @@ func Snapshot(
 	// (for example, a pre-cancelled context rejected by PauseCommitsContext):
 	// Unix permits unlinking the still-open blob file, but Windows does not.
 	defer blobFile.Close() //nolint:errcheck // the backup path records its close error below
+	utxoSetBackuper := snapshotUtxoSet(opts)
+	var utxoSetFile *os.File
+	if utxoSetBackuper != nil {
+		utxoSetFile, err = snapshotRoot.OpenFile(
+			UtxoSetBackupFileName,
+			os.O_WRONLY|os.O_CREATE|os.O_EXCL,
+			0o600,
+		)
+		if err != nil {
+			return Manifest{}, fmt.Errorf(
+				"create %q: %w",
+				filepath.Join(dir, UtxoSetBackupFileName), err,
+			)
+		}
+		defer utxoSetFile.Close() //nolint:errcheck // the backup path records its close error below
+	}
 
 	// Everything read or backed up between PauseCommits and resume()
 	// describes the same set of committed writes: no new commit can land
@@ -366,7 +385,17 @@ func Snapshot(
 		store string
 		err   error
 	}
-	backupResults := make(chan backupResult, 2)
+	backupResults := make(chan backupResult, 3)
+	pending := 2
+	if utxoSetBackuper != nil {
+		pending++
+		go func() {
+			backupResults <- backupResult{
+				store: "utxoset",
+				err:   utxoSetBackuper.Backup(backupCtx, utxoSetFile),
+			}
+		}()
+	}
 	go func() {
 		backupResults <- backupResult{
 			store: "blob",
@@ -379,16 +408,19 @@ func Snapshot(
 			err:   metadataBackuper.BackupTo(backupCtx, metadataStagePath),
 		}
 	}()
-	var backupErr, metadataErr error
+	var backupErr, metadataErr, utxoSetErr error
 	backupCtxDone := backupCtx.Done()
 	pauseLimitExpired := false
-	for completed := 0; completed < 2; {
+	for completed := 0; completed < pending; {
 		select {
 		case result := <-backupResults:
 			completed++
-			if result.store == "blob" {
+			switch result.store {
+			case "blob":
 				backupErr = result.err
-			} else {
+			case "utxoset":
+				utxoSetErr = result.err
+			default:
 				metadataErr = result.err
 			}
 			if result.err != nil {
@@ -429,7 +461,9 @@ func Snapshot(
 		return Manifest{}, fmt.Errorf(
 			"%w (%s): %w",
 			ErrCommitPauseExceeded, maxPause,
-			errors.Join(context.DeadlineExceeded, backupErr, metadataErr),
+			errors.Join(
+				context.DeadlineExceeded, backupErr, metadataErr, utxoSetErr,
+			),
 		)
 	}
 	if backupErr != nil && !errors.Is(backupErr, context.Canceled) &&
@@ -445,11 +479,17 @@ func Snapshot(
 	if metadataErr != nil && !errors.Is(metadataErr, context.Canceled) {
 		return Manifest{}, fmt.Errorf("backup metadata store: %w", metadataErr)
 	}
+	if utxoSetErr != nil && !errors.Is(utxoSetErr, context.Canceled) {
+		return Manifest{}, fmt.Errorf("backup live UTxO set: %w", utxoSetErr)
+	}
 	if backupErr != nil {
 		return Manifest{}, fmt.Errorf("backup blob store: %w", backupErr)
 	}
 	if metadataErr != nil {
 		return Manifest{}, fmt.Errorf("backup metadata store: %w", metadataErr)
+	}
+	if utxoSetErr != nil {
+		return Manifest{}, fmt.Errorf("backup live UTxO set: %w", utxoSetErr)
 	}
 	if err := os.Chmod(metadataStagePath, 0o600); err != nil {
 		return Manifest{}, fmt.Errorf("restrict %q: %w", metadataStagePath, err)
@@ -469,6 +509,15 @@ func Snapshot(
 	}
 	if err := blobFile.Close(); err != nil {
 		return Manifest{}, fmt.Errorf("close %q: %w", blobPath, err)
+	}
+	if utxoSetFile != nil {
+		utxoSetPath := filepath.Join(dir, UtxoSetBackupFileName)
+		if err := syncSnapshotFile(utxoSetFile); err != nil {
+			return Manifest{}, fmt.Errorf("sync %q: %w", utxoSetPath, err)
+		}
+		if err := utxoSetFile.Close(); err != nil {
+			return Manifest{}, fmt.Errorf("close %q: %w", utxoSetPath, err)
+		}
 	}
 	if err := installStagedSnapshotFile(
 		ctx, snapshotRoot, metadataStageDir, MetadataBackupFileName,
@@ -522,6 +571,26 @@ func Snapshot(
 	if err != nil {
 		return Manifest{}, fmt.Errorf("hash %q: %w", metadataPath, err)
 	}
+	var utxoSetBytes int64
+	var utxoSetDigest string
+	if utxoSetFile != nil {
+		utxoSetInfo, err := snapshotRoot.Stat(UtxoSetBackupFileName)
+		if err != nil {
+			return Manifest{}, fmt.Errorf(
+				"stat %q: %w", filepath.Join(dir, UtxoSetBackupFileName), err,
+			)
+		}
+		utxoSetBytes = utxoSetInfo.Size()
+		utxoSetDigest, err = hashSnapshotRootFile(
+			ctx, snapshotRoot, UtxoSetBackupFileName,
+		)
+		if err != nil {
+			return Manifest{}, fmt.Errorf(
+				"hash %q: %w", filepath.Join(dir, UtxoSetBackupFileName), err,
+			)
+		}
+		metrics.bytes.WithLabelValues("utxoset").Add(float64(utxoSetBytes))
+	}
 	metrics.bytes.WithLabelValues("blob").Add(float64(blobInfo.Size()))
 	metrics.bytes.WithLabelValues("metadata").Add(float64(metadataInfo.Size()))
 
@@ -542,6 +611,8 @@ func Snapshot(
 		MetadataBytes:   metadataInfo.Size(),
 		BlobSHA256:      blobDigest,
 		MetadataSHA256:  metadataDigest,
+		UtxoSetBytes:    utxoSetBytes,
+		UtxoSetSHA256:   utxoSetDigest,
 	}
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err

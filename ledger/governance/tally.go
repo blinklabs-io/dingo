@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -60,8 +60,8 @@ type ProposalTally struct {
 // predictedBoundaryStakeEpochFor(currentEpoch), which is a different and
 // necessarily older snapshot. Both doc comments explain why.
 type TallyContext struct {
-	DB           *database.Database
-	Txn          *database.Txn
+	DB           ledgerdb.LedgerDB
+	Txn          ledgerdb.Txn
 	StakeEpoch   uint64
 	CurrentEpoch uint64
 	// ActiveProposalEpoch selects the proposal set RATIFY tallies. At an
@@ -105,8 +105,8 @@ type CommitteeVotingState struct {
 // expired cold credentials are ignored.
 func LoadCommitteeVotingState(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	currentEpoch uint64,
 ) (*CommitteeVotingState, error) {
 	if db == nil {
@@ -260,8 +260,8 @@ type DRepVotingState struct {
 // byte-identical to the pre-CIP behavior (no account is excluded).
 func LoadDRepVotingState(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	currentEpoch uint64,
 	delegatorInactivityOn bool,
 ) (*DRepVotingState, error) {
@@ -272,8 +272,8 @@ func LoadDRepVotingState(
 
 func loadDRepVotingState(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	currentEpoch uint64,
 	activeProposalEpoch uint64,
 	delegatorInactivityOn bool,
@@ -553,21 +553,17 @@ type SPOVotingState struct {
 // LoadSPOVotingState reads the "mark" pool stake snapshot for stakeEpoch
 // and sums its total stake.
 func LoadSPOVotingState(
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	stakeEpoch uint64,
 ) (*SPOVotingState, error) {
 	if db == nil {
 		return nil, errors.New("nil database")
 	}
-	var metaTxn types.Txn
-	if txn != nil {
-		metaTxn = txn.Metadata()
-	}
-	dist, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+	dist, err := db.GetPoolStakeSnapshotsByEpoch(
 		stakeEpoch,
 		"mark",
-		metaTxn,
+		txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get pool stake snapshot: %w", err)
@@ -584,8 +580,8 @@ func LoadSPOVotingState(
 
 func includeActiveProposalDepositsInSPOVotingState(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	currentEpoch uint64,
 	expiryEpoch uint64,
 	state *SPOVotingState,

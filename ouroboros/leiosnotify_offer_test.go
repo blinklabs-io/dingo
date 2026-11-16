@@ -144,9 +144,14 @@ func TestLeiosRelayForwardsCompletedBackfillOnce(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
 	o.leiosEBLog.registerConn("downstream", nil, nil)
+	announceTestEndorserBlock(t, o, point.Slot, ebHash, len(ebRaw))
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point, ebRaw, txsRaw, leiosStoreBackfill,
 	))
+	header, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, header)
+	require.NotEmpty(t, header.announcement)
+	o.leiosEBLog.complete("downstream", nil, true)
 
 	manifest, _ := o.leiosEBLog.next("downstream")
 	require.NotNil(t, manifest)
@@ -229,11 +234,16 @@ func TestLeiosRelayOffersExistingCompleteCacheOnPeerOffer(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
 	o.leiosEBLog.registerConn("downstream", nil, nil)
+	announceTestEndorserBlock(t, o, point.Slot, ebHash, len(ebRaw))
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point, ebRaw, txsRaw, leiosStoreAuthoritative,
 	))
 
 	o.markLeiosEndorserBlockRelayOffer(point)
+	header, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, header)
+	require.NotEmpty(t, header.announcement)
+	o.leiosEBLog.complete("downstream", nil, true)
 	manifest, _ := o.leiosEBLog.next("downstream")
 	require.NotNil(t, manifest)
 	_, ok := leiosForgedEBOffer(manifest).(*oleiosnotify.MsgBlockOffer)

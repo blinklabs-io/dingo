@@ -106,8 +106,25 @@ configure_leios_dijkstra() {
             "${configs_dir}/shelley-genesis.json" \
             | write_file "${configs_dir}/shelley-genesis.json"
         if [ "${pool_id}" = "${current_pool_id}" ]; then
-            jq -r ".[${index}].signingKey" /leios-credentials.json \
-                >"${pool_dir}/keys/leios-vote.skey"
+            local registered_key
+            registered_key="$(jq -r ".[${index}].signingKey" /leios-credentials.json)"
+            if [ "${index}" -eq 0 ]; then
+                # The first producer loads a key array so the multi-key path
+                # runs: a key no pool registered precedes the registered one,
+                # which must still find its seat.
+                jq -n --arg unregistered \
+                    "0000000000000000000000000000000000000000000000000000000000000063" \
+                    --arg registered "${registered_key}" \
+                    '[$unregistered, $registered]
+                    | map({
+                        type: "BLS12-381 Signing Key",
+                        description: "Leios BLS signing key",
+                        cborHex: ("5820" + .)
+                    })' >"${pool_dir}/keys/leios-vote.skey"
+            else
+                printf '%s\n' "${registered_key}" \
+                    >"${pool_dir}/keys/leios-vote.skey"
+            fi
         fi
     done
     # With k=3 the immutable tip trails the tip by far fewer slots than the

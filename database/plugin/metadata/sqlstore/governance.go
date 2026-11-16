@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -1379,4 +1380,102 @@ func (s *Store) GetCommitteeAuthorizedCount(
 ) (int, error) {
 	members, err := s.GetActiveCommitteeMembers(txn)
 	return len(members), err
+}
+
+func (s *Store) LatestCommitteeQuorum(
+	txn types.Txn,
+) (*models.CommitteeQuorum, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	var quorum sql.NullString
+	var addedSlot int64
+	err = db.QueryRowContext(ctx, `
+SELECT quorum, added_slot
+FROM committee_quorum
+ORDER BY added_slot DESC, id DESC
+LIMIT 1`).Scan(&quorum, &addedSlot)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	row := &models.CommitteeQuorum{AddedSlot: uint64(addedSlot)} //nolint:gosec // a slot is stored as a non-negative int64
+	if quorum.Valid {
+		rat, ok := new(big.Rat).SetString(quorum.String)
+		if !ok || rat.Sign() < 0 {
+			return nil, fmt.Errorf("invalid committee quorum %q", quorum.String)
+		}
+		row.Quorum = &types.Rat{Rat: rat}
+	}
+	return row, nil
+}
+
+func (s *Store) LatestCommitteeResignations(
+	txn types.Txn,
+) ([]*models.ResignCommitteeCold, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT cold_credential_tag, cold_credential, MAX(added_slot)
+FROM resign_committee_cold
+GROUP BY cold_credential_tag, cold_credential`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []*models.ResignCommitteeCold{}
+	for rows.Next() {
+		var r models.ResignCommitteeCold
+		if err := rows.Scan(
+			&r.ColdCredentialTag, &r.ColdCredential, &r.AddedSlot,
+		); err != nil {
+			return nil, err
+		}
+		ret = append(ret, &r)
+	}
+	return ret, rows.Err()
+}
+
+func (s *Store) GetAllGovernanceProposals(
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(txn, "1 = 1", "governance_proposal.id")
+}
+
+func (s *Store) GetAllGovernanceVotes(
+	txn types.Txn,
+) ([]*models.GovernanceVoteRef, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT p.tx_hash, p.action_index, v.id, v.proposal_id, v.voter_type,
+       v.voter_credential_tag, v.voter_credential, v.vote, v.anchor_url,
+       v.anchor_hash, v.added_slot, v.vote_updated_slot, v.deleted_slot
+FROM governance_vote v
+JOIN governance_proposal p ON p.id = v.proposal_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []*models.GovernanceVoteRef{}
+	for rows.Next() {
+		var ref models.GovernanceVoteRef
+		v := &ref.Vote
+		if err := rows.Scan(
+			&ref.TxHash, &ref.ActionIndex, &v.ID, &v.ProposalID, &v.VoterType,
+			&v.VoterCredentialTag, &v.VoterCredential, &v.Vote, &v.AnchorURL,
+			&v.AnchorHash, &v.AddedSlot, &v.VoteUpdatedSlot, &v.DeletedSlot,
+		); err != nil {
+			return nil, err
+		}
+		ret = append(ret, &ref)
+	}
+	return ret, rows.Err()
 }

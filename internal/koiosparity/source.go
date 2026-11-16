@@ -22,6 +22,8 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 )
@@ -210,6 +212,9 @@ var (
 // error.
 type DatabaseSource struct {
 	db *database.Database
+	// ldb is the LedgerDB the ledger state reads go through, so they see
+	// what the ledger sees: the live UTxO set's answer in set mode.
+	ldb ledgerdb.LedgerDB
 }
 
 // NewDatabaseSource wraps an already-open, in-process *database.Database as
@@ -220,7 +225,22 @@ func NewDatabaseSource(db *database.Database) (*DatabaseSource, error) {
 			"koiosparity: DatabaseSource requires a non-nil database",
 		)
 	}
-	return &DatabaseSource{db: db}, nil
+	return NewDatabaseSourceWithLedgerDB(db, dbadapter.New(db))
+}
+
+// NewDatabaseSourceWithLedgerDB is NewDatabaseSource reading ledger state
+// through ldb, the LedgerDB the node's ledger reads through, rather than the
+// metadata store directly. Neither may be nil.
+func NewDatabaseSourceWithLedgerDB(
+	db *database.Database,
+	ldb ledgerdb.LedgerDB,
+) (*DatabaseSource, error) {
+	if db == nil || ldb == nil {
+		return nil, errors.New(
+			"koiosparity: DatabaseSource requires a non-nil database and LedgerDB",
+		)
+	}
+	return &DatabaseSource{db: db, ldb: ldb}, nil
 }
 
 // GetLatestEpoch returns the highest epoch number Dingo has committed an
@@ -238,9 +258,9 @@ func (s *DatabaseSource) GetLatestEpoch(ctx context.Context) (uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	txn := s.db.Transaction(ctx, false)
+	txn := s.ldb.Begin(ctx, false)
 	defer txn.Release()
-	summary, err := s.db.Metadata().GetLatestEpochSummary(txn.Metadata())
+	summary, err := s.ldb.GetLatestEpochSummary(txn)
 	if err != nil {
 		return 0, fmt.Errorf("get latest epoch summary: %w", err)
 	}
@@ -281,7 +301,9 @@ func (s *DatabaseSource) GetEarliestAvailableEpoch(
 	if slot == 0 {
 		return 0, false, nil
 	}
-	boundaryEpoch, err := s.db.GetEpochBySlot(slot, txn)
+	ltxn := s.ldb.Begin(ctx, false)
+	defer ltxn.Release()
+	boundaryEpoch, err := s.ldb.GetEpochBySlot(slot, ltxn)
 	if err != nil {
 		return 0, false, fmt.Errorf(
 			"epoch for mithril boundary slot %d: %w",
@@ -322,24 +344,23 @@ func (s *DatabaseSource) GetProposalDepositRefunds(
 	if err := ctx.Err(); err != nil {
 		return out, err
 	}
-	txn := s.db.Transaction(ctx, false)
+	txn := s.ldb.Begin(ctx, false)
 	defer txn.Release()
-	meta := s.db.Metadata()
-	tip, err := s.db.GetTip(txn)
+	tip, err := s.ldb.GetTip(txn)
 	if err != nil {
 		return out, fmt.Errorf("tip lookup: %w", err)
 	}
 	// As in GetPoolEpochDataMap, a genuine tip always carries a block hash.
 	if len(tip.Point.Hash) > 0 && tip.Point.Slot > 0 {
-		epoch, err := meta.GetEpoch(refundEpoch, txn.Metadata())
+		epoch, err := s.ldb.GetEpoch(refundEpoch, txn)
 		if err != nil {
 			return out, fmt.Errorf("epoch lookup %d: %w", refundEpoch, err)
 		}
 		out.Pending = epoch == nil || tip.Point.Slot < epoch.StartSlot
 	}
-	proposals, err := meta.GetGovernanceProposalsRefundedAt(
+	proposals, err := s.ldb.GetGovernanceProposalsRefundedAt(
 		refundEpoch,
-		txn.Metadata(),
+		txn,
 	)
 	if err != nil {
 		return out, fmt.Errorf(
@@ -353,9 +374,9 @@ func (s *DatabaseSource) GetProposalDepositRefunds(
 		proposals,
 		refundEpoch,
 	) {
-		slotCredits, err := meta.GetPostSnapshotRewardCreditEvents(
+		slotCredits, err := s.ldb.GetPostSnapshotRewardCreditEvents(
 			slot,
-			txn.Metadata(),
+			txn,
 		)
 		if err != nil {
 			return out, fmt.Errorf(
@@ -387,11 +408,10 @@ func (s *DatabaseSource) GetEpochData(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(ctx, false)
+	txn := s.ldb.Begin(ctx, false)
 	defer txn.Release()
-	meta := s.db.Metadata()
 
-	summary, err := meta.GetEpochSummary(epoch, txn.Metadata())
+	summary, err := s.ldb.GetEpochSummary(epoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf("epoch_summary epoch %d: %w", epoch, err)
 	}
@@ -411,7 +431,7 @@ func (s *DatabaseSource) GetEpochData(
 		BoundarySlot:   summary.BoundarySlot,
 	}
 
-	pots, err := meta.GetRewardAdaPots(epoch, txn.Metadata())
+	pots, err := s.ldb.GetRewardAdaPots(epoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf("reward_ada_pots epoch %d: %w", epoch, err)
 	}
@@ -441,12 +461,12 @@ func (s *DatabaseSource) GetPoolStakeSnapshotMembers(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(ctx, false)
+	txn := s.ldb.Begin(ctx, false)
 	defer txn.Release()
-	rows, err := s.db.Metadata().GetPoolStakeSnapshotsByEpoch(
+	rows, err := s.ldb.GetPoolStakeSnapshotsByEpoch(
 		epoch,
 		snapshotTypeMark,
-		txn.Metadata(),
+		txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -480,12 +500,12 @@ func (s *DatabaseSource) GetPoolsRetiredByEpoch(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(ctx, false)
+	txn := s.ldb.Begin(ctx, false)
 	defer txn.Release()
-	keyHashes, err := s.db.Metadata().GetPoolKeyHashesRetiredByEpoch(
+	keyHashes, err := s.ldb.GetPoolKeyHashesRetiredByEpoch(
 		epoch,
 		boundarySlot,
-		txn.Metadata(),
+		txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -515,12 +535,12 @@ func (s *DatabaseSource) GetRewardSnapshot(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(ctx, false)
+	txn := s.ldb.Begin(ctx, false)
 	defer txn.Release()
-	snapshot, err := s.db.Metadata().GetRewardSnapshot(
+	snapshot, err := s.ldb.GetRewardSnapshot(
 		epoch,
 		snapshotTypeMark,
-		txn.Metadata(),
+		txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("reward_snapshot epoch %d: %w", epoch, err)
@@ -548,9 +568,8 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(ctx, false)
+	txn := s.ldb.Begin(ctx, false)
 	defer txn.Release()
-	meta := s.db.Metadata()
 
 	// The tip decides whether this stake epoch's rewards have been applied
 	// yet; see DingoPoolEpochData.RewardsPending. A read failure is reported
@@ -559,7 +578,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	// incomplete metadata.
 	var tipSlot uint64
 	tipKnown := false
-	tip, tipErr := s.db.GetTip(txn)
+	tip, tipErr := s.ldb.GetTip(txn)
 	if tipErr != nil {
 		return nil, fmt.Errorf("tip lookup: %w", tipErr)
 	}
@@ -573,7 +592,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 
 	epochRewardsPending := false
 	if tipKnown {
-		applyEpoch, err := meta.GetEpoch(stakeEpoch+3, txn.Metadata())
+		applyEpoch, err := s.ldb.GetEpoch(stakeEpoch+3, txn)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"epoch lookup %d: %w", stakeEpoch+3, err,
@@ -586,7 +605,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 		}
 	}
 
-	stakeInputs, err := meta.GetRewardPoolInputs(stakeEpoch, txn.Metadata())
+	stakeInputs, err := s.ldb.GetRewardPoolInputs(stakeEpoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"reward_pool_input stake epoch %d: %w",
@@ -608,7 +627,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 		m[hex.EncodeToString(inp.PoolKeyHash)] = data
 	}
 
-	paramInputs, err := meta.GetRewardPoolInputs(paramEpoch, txn.Metadata())
+	paramInputs, err := s.ldb.GetRewardPoolInputs(paramEpoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"reward_pool_input param epoch %d: %w",
@@ -629,7 +648,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 		}
 	}
 
-	outputs, err := meta.GetRewardPoolOutputs(stakeEpoch, txn.Metadata())
+	outputs, err := s.ldb.GetRewardPoolOutputs(stakeEpoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"reward_pool_output epoch %d: %w",
@@ -657,9 +676,9 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	// forms it — see DingoDB.addSpendableMemberRewards for why
 	// reward_pool_output.member_reward_total is not it, and why presence is
 	// established epoch-wide rather than per pool.
-	accountOutputs, err := meta.GetRewardAccountOutputs(
+	accountOutputs, err := s.ldb.GetRewardAccountOutputs(
 		stakeEpoch,
-		txn.Metadata(),
+		txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -725,18 +744,17 @@ func (s *DatabaseSource) GetProtocolParams(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(ctx, false)
+	txn := s.ldb.Begin(ctx, false)
 	defer txn.Release()
-	meta := s.db.Metadata()
 
-	epochRow, err := meta.GetEpoch(epoch, txn.Metadata())
+	epochRow, err := s.ldb.GetEpoch(epoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf("epoch %d: %w", epoch, err)
 	}
 	if epochRow == nil {
 		return nil, nil
 	}
-	rows, err := meta.GetPParams(epoch, epochRow.EraId, txn.Metadata())
+	rows, err := s.ldb.GetPParamsRows(epoch, epochRow.EraId, txn)
 	if err != nil {
 		return nil, fmt.Errorf("pparams epoch %d: %w", epoch, err)
 	}
@@ -757,8 +775,10 @@ func (s *DatabaseSource) GetProtocolParams(
 	// path, read here directly via the database package rather than
 	// DingoDB's duplicated raw-SQL copy since this source already holds a
 	// live *database.Database.
+	syncTxn := s.db.Transaction(ctx, false)
+	defer syncTxn.Release()
 	clearedEpoch, cleared, err := database.SyntheticV2CostModelClearedEpoch(
-		s.db, txn,
+		s.db, syncTxn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -785,9 +805,9 @@ func (s *DatabaseSource) GetRewardAccountOutputs(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := s.db.Transaction(ctx, false)
+	txn := s.ldb.Begin(ctx, false)
 	defer txn.Release()
-	rows, err := s.db.Metadata().GetRewardAccountOutputs(epoch, txn.Metadata())
+	rows, err := s.ldb.GetRewardAccountOutputs(epoch, txn)
 	if err != nil {
 		return nil, fmt.Errorf("reward_account_output epoch %d: %w", epoch, err)
 	}

@@ -365,6 +365,9 @@ func TestLeiosTxsOfferRetriesAfterAdmissionReleases(t *testing.T) {
 		EnableLeiosTxFetch: true,
 	})
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	announceTestEndorserBlock(
+		t, o, point.Slot, lcommon.Blake2b256Hash(manifestRaw), len(manifestRaw),
+	)
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point, manifestRaw, nil, leiosStoreAuthoritative,
 	))
@@ -1195,6 +1198,9 @@ func TestLeiosTxsOfferOtherPathCompletionRelaysTransactionsOnce(t *testing.T) {
 	})
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
 	o.leiosEBLog.registerConn("observer", nil, nil)
+	announceTestEndorserBlock(
+		t, o, point.Slot, lcommon.Blake2b256Hash(manifestRaw), len(manifestRaw),
+	)
 	guard := &leiosFetchGuard{}
 	guard.inflight.Store(1)
 	guard.mu.Lock()
@@ -1244,6 +1250,9 @@ func TestLeiosTxsOfferCacheMissIntentSurvivesOwnerCancellation(t *testing.T) {
 	})
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
 	o.leiosEBLog.registerConn("observer", nil, nil)
+	announceTestEndorserBlock(
+		t, o, point.Slot, lcommon.Blake2b256Hash(manifestRaw), len(manifestRaw),
+	)
 	guard := o.leiosFetchGuardFor(conn.Id())
 	guard.mu.Lock()
 	var unlockOnce sync.Once
@@ -1403,7 +1412,13 @@ func TestLeiosRelayOfferIntentMergesWithPersistedCacheReload(t *testing.T) {
 	require.NoError(t, err)
 	point := ocommon.NewPoint(472, lcommon.Blake2b256Hash(manifestRaw).Bytes())
 	o := newTestOuroborosWithLeiosDB(t)
+	o.leiosAnnouncementLedger = &fakeLeiosAnnouncementLedger{
+		slotTime: time.Now(),
+	}
 	o.leiosEBLog.registerConn("observer", nil, nil)
+	announceTestEndorserBlock(
+		t, o, point.Slot, lcommon.Blake2b256Hash(manifestRaw), len(manifestRaw),
+	)
 	require.NoError(t, o.leiosDatabase().SetLeiosEB(
 		point.Slot, point.Hash, manifestRaw, []cbor.RawMessage{tx},
 	))

@@ -900,6 +900,7 @@ func buildDingoConfig(
 			plugin.CapabilityMempool,
 			cfg.Plugins.Mempool,
 		),
+		dingo.WithMempoolCapacityDefaulted(cfg.MempoolCapacityDefaulted()),
 		dingo.WithPluginSelection(
 			plugin.CapabilityAPIBlockfrost,
 			cfg.Plugins.API.Blockfrost,
@@ -1205,6 +1206,17 @@ func buildDingoConfig(
 			cfg.BlockPipelineValidateEnabled,
 		),
 		dingo.WithLedgerPrefetchAheadEnabled(cfg.LedgerPrefetchAheadEnabled),
+		dingo.WithLedgerUtxoShadow(cfg.LedgerUtxoShadow),
+		dingo.WithLedgerUtxoBadger(cfg.LedgerUtxoBadger),
+		dingo.WithLedgerUtxoReads(cfg.LedgerUtxoReads),
+		dingo.WithLedgerUtxoBadgerOnly(cfg.LedgerUtxoBadgerOnly),
+		dingo.WithLedgerStateSetOnly(cfg.LedgerStateSetOnly),
+		dingo.WithLedgerUtxoCheckpoint(
+			cfg.LedgerUtxoCheckpointEpochs, cfg.LedgerUtxoCheckpointKeep,
+		),
+		dingo.WithLedgerStateVerifyBeforeDrain(
+			cfg.LedgerStateVerifyBeforeDrain,
+		),
 		dingo.WithLedgerValidateAheadEnabled(cfg.LedgerValidateAheadEnabled),
 		dingo.WithLedgerApplyRowBatchingEnabled(
 			cfg.LedgerApplyRowBatchingEnabled,

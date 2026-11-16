@@ -206,6 +206,12 @@ type Config struct {
 	// config), so the Leios default never replaces it.
 	mempoolCapacitySet bool
 
+	// mempoolCapacityLeiosDefault records that the Leios mempool capacity
+	// came from the Leios or Musashi default rather than from the operator.
+	// Only that default follows whether the epoch's committee can reach its
+	// quorum; an explicit capacity is fixed.
+	mempoolCapacityLeiosDefault bool
+
 	// Runtime-only fields that are not loaded from YAML/env:
 	promRegistry      prometheus.Registerer
 	topologyConfig    *topology.TopologyConfig
@@ -261,6 +267,7 @@ type Config struct {
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
 	mithrilCatchUp                                                                      MithrilCatchUpFactory
+	mithrilLedgerReimport                                                               MithrilLedgerReimportFactory
 	koiosParity                                                                         KoiosParityConfig
 	corsAllowedOrigins                                                                  []string
 	networkMagic                                                                        uint32
@@ -309,6 +316,13 @@ type Config struct {
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
+	ledgerUtxoShadow                                                                    bool
+	ledgerUtxoBadger                                                                    bool
+	ledgerUtxoReads                                                                     string
+	ledgerUtxoBadgerOnly                                                                bool
+	ledgerStateSetOnly                                                                  bool
+	ledgerUtxoCheckpointEpochs, ledgerUtxoCheckpointKeep                                int
+	ledgerStateVerifyBeforeDrain                                                        bool
 	ledgerValidateAheadEnabled                                                          bool
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
@@ -617,6 +631,30 @@ func (n *Node) configValidate() error {
 			StorageModeAPI,
 		)
 	}
+	switch n.config.cfg.LedgerUtxoReads {
+	case "", "verify", "set":
+	default:
+		return fmt.Errorf(
+			"invalid ledgerUtxoReads %q: must be empty, %q or %q",
+			n.config.cfg.LedgerUtxoReads, "verify", "set",
+		)
+	}
+	// Without the Badger set neither option has anything to act on; both
+	// would be ignored silently.
+	if n.config.cfg.LedgerUtxoBadgerOnly && !n.config.cfg.LedgerUtxoBadger {
+		return errors.New("ledgerUtxoBadgerOnly needs ledgerUtxoBadger")
+	}
+	if err := internalconfig.ValidateLedgerStateSetOnly(
+		n.config.cfg,
+	); err != nil {
+		return err
+	}
+	if n.config.cfg.LedgerUtxoReads != "" && !n.config.cfg.LedgerUtxoBadger {
+		return fmt.Errorf(
+			"ledgerUtxoReads %q needs ledgerUtxoBadger",
+			n.config.cfg.LedgerUtxoReads,
+		)
+	}
 	if !n.config.cfg.StartEra.Valid() {
 		return fmt.Errorf(
 			"invalid start era %q: must be empty or %q",
@@ -821,6 +859,8 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			// reads and signature checks with earlier blocks of its chunk.
 			LedgerPrefetchAheadEnabled: true,
 			LedgerValidateAheadEnabled: true,
+			LedgerUtxoCheckpointEpochs: 1,
+			LedgerUtxoCheckpointKeep:   2,
 			Plugins: internalconfig.PluginsConfig{
 				Consensus: hostplugin.Selection{
 					Provider: "praos",
@@ -934,6 +974,7 @@ func (c *Config) syncCompatFields() {
 		c.cfg.Plugins.Mempool.Config["capacity"] = int64(
 			internalconfig.DefaultMempoolCapacityLeios,
 		)
+		c.mempoolCapacityLeiosDefault = true
 	}
 	c.historyExpiry = HistoryExpiryConfig{
 		Enabled:   c.cfg.HistoryExpiry.Enabled,
@@ -1041,6 +1082,14 @@ func (c *Config) syncCompatFields() {
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
+	c.ledgerUtxoShadow = c.cfg.LedgerUtxoShadow
+	c.ledgerUtxoBadger = c.cfg.LedgerUtxoBadger
+	c.ledgerUtxoReads = c.cfg.LedgerUtxoReads
+	c.ledgerUtxoBadgerOnly = c.cfg.LedgerUtxoBadgerOnly
+	c.ledgerStateSetOnly = c.cfg.LedgerStateSetOnly
+	c.ledgerUtxoCheckpointEpochs = c.cfg.LedgerUtxoCheckpointEpochs
+	c.ledgerUtxoCheckpointKeep = c.cfg.LedgerUtxoCheckpointKeep
+	c.ledgerStateVerifyBeforeDrain = c.cfg.LedgerStateVerifyBeforeDrain
 	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
@@ -1073,16 +1122,22 @@ func WithPluginSelection(
 			// The selection replaces the whole mempool config, so its
 			// capacity is explicit exactly when the caller supplied one.
 			_, c.mempoolCapacitySet = selection.Config["capacity"]
-			if selection.Config == nil &&
-				(selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
-				selection.Config = map[string]any{
-					"capacity": int64(
-						internalconfig.DefaultMempoolCapacityPraos,
-					),
-				}
+			if c.mempoolCapacitySet {
+				c.mempoolCapacityLeiosDefault = false
 			}
 		}
 		selection.Config = clonePluginConfig(selection.Config)
+		// The clone keeps the caller's map unchanged. A built-in selection
+		// without a capacity takes the Praos default, which syncCompatFields
+		// raises to the Leios default where that applies; without it the
+		// pool would run with no capacity at all.
+		if capability == hostplugin.CapabilityMempool &&
+			!c.mempoolCapacitySet &&
+			(selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
+			selection.Config["capacity"] = int64(
+				internalconfig.DefaultMempoolCapacityPraos,
+			)
+		}
 		switch capability {
 		case hostplugin.CapabilityStorageBlob:
 			c.cfg.Plugins.Storage.Blob = selection
@@ -1268,6 +1323,9 @@ func NewConfigFromInternal(
 		// The loaded config already resolved the capacity default from its
 		// run mode and network.
 		mempoolCapacitySet: true,
+		// Only the default ApplyDefaults chose follows the committee's
+		// quorum; a configured capacity is fixed.
+		mempoolCapacityLeiosDefault: cfg.MempoolCapacityDefaulted(),
 	}
 	c.syncCompatFields()
 	return c, nil
@@ -1473,7 +1531,25 @@ func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.Mempool.Config["capacity"] = capacity
 		c.mempoolCapacitySet = true
+		c.mempoolCapacityLeiosDefault = false
 	}
+}
+
+// WithMempoolCapacityDefaulted records that the capacity in the mempool plugin
+// selection is the Leios default rather than one the operator set. Only that
+// default follows whether the epoch's Leios committee can reach its quorum;
+// a capacity the operator set stays fixed. Apply it after the mempool plugin
+// selection, which clears the record for a selection that carries a capacity.
+func WithMempoolCapacityDefaulted(defaulted bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.mempoolCapacityLeiosDefault = defaulted
+	}
+}
+
+// MempoolCapacityLeiosDefault reports whether the mempool capacity is the
+// Leios default, which follows the committee's quorum.
+func (c *Config) MempoolCapacityLeiosDefault() bool {
+	return c.mempoolCapacityLeiosDefault
 }
 
 // WithEvictionWatermark sets the mempool eviction watermark
@@ -1906,10 +1982,12 @@ func WithShelleyKESAgentProfile(profile string) ConfigOptionFunc {
 	}
 }
 
-// WithLeiosVoteSigningKeyFile specifies the path to a hex-encoded BLS12-381
-// Leios vote signing key (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE). When set on a
-// block producer whose pool is a Leios committee member, the node emits
-// votes for endorser blocks. Experimental, leios runMode only.
+// WithLeiosVoteSigningKeyFile specifies the path to a BLS12-381 Leios vote
+// signing key file (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE): a Cardano text
+// envelope, a JSON array of envelopes, or a legacy raw hex scalar. When set on
+// a block producer, the node emits votes for endorser blocks for the committee
+// seats the keys hold. Experimental; runs with the Leios runtime (leios
+// runMode, the Musashi or Dijkstra network, or a Dijkstra start era).
 func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LeiosVoteSigningKeyFile = path
@@ -2075,6 +2153,70 @@ func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerPrefetchAheadEnabled = enabled
+	}
+}
+
+// WithLedgerUtxoShadow keeps a Badger copy of the live UTxO set beside the
+// metadata store and checks the two against each other. Diagnostic only;
+// validation never reads the copy. Off by default.
+func WithLedgerUtxoShadow(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoShadow = enabled
+	}
+}
+
+// WithLedgerUtxoBadger keeps the live UTxO set in a LedgerDB Badger store,
+// updated synchronously after each ledger commit, beside the metadata store.
+// Experimental; validation does not read it yet. Off by default.
+func WithLedgerUtxoBadger(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoBadger = enabled
+	}
+}
+
+// WithLedgerUtxoReads selects where validation resolves its inputs when the
+// live UTxO set is kept in Badger: "" for the metadata store, "verify" for
+// both with every disagreement counted, or "set" for the live UTxO set.
+func WithLedgerUtxoReads(mode string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoReads = mode
+	}
+}
+
+// WithLedgerUtxoBadgerOnly makes the Badger live UTxO set the only copy of
+// the UTxO set: the metadata store keeps no utxo rows. Core storage mode. A
+// database that holds its UTxO set in the metadata store is moved in place at
+// startup. Experimental; off by default.
+func WithLedgerUtxoBadgerOnly(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoBadgerOnly = enabled
+	}
+}
+
+// WithLedgerStateSetOnly makes the live UTxO set the only store of the ledger
+// state it computes. Needs WithLedgerUtxoBadgerOnly, core storage mode and
+// WithLedgerUtxoReads("set"). Experimental; off by default.
+func WithLedgerStateSetOnly(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerStateSetOnly = enabled
+	}
+}
+
+// WithLedgerUtxoCheckpoint writes a checkpoint of the live UTxO set every
+// epochs epochs and keeps the newest keep of them; zero epochs writes none.
+// Only a database with WithLedgerStateSetOnly writes checkpoints.
+func WithLedgerUtxoCheckpoint(epochs, keep int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerUtxoCheckpointEpochs = epochs
+		c.cfg.LedgerUtxoCheckpointKeep = keep
+	}
+}
+
+// WithLedgerStateVerifyBeforeDrain compares each ledger-state family with its
+// SQL rows in full before the rows are deleted. Needs WithLedgerStateSetOnly.
+func WithLedgerStateVerifyBeforeDrain(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerStateVerifyBeforeDrain = enabled
 	}
 }
 
@@ -2249,6 +2391,16 @@ func WithMithrilConfig(cfg internalconfig.MithrilConfig) ConfigOptionFunc {
 func WithMithrilCatchUp(factory MithrilCatchUpFactory) ConfigOptionFunc {
 	return func(c *Config) {
 		c.mithrilCatchUp = factory
+	}
+}
+
+// WithMithrilLedgerReimport supplies the Mithril re-import a node falls back
+// to when its live UTxO set cannot be brought to the ledger from a checkpoint.
+// It is independent of mithril.enabled: the network's aggregator is used. A
+// nil reimporter from the factory leaves that recovery without a source.
+func WithMithrilLedgerReimport(factory MithrilLedgerReimportFactory) ConfigOptionFunc {
+	return func(c *Config) {
+		c.mithrilLedgerReimport = factory
 	}
 }
 
@@ -3089,6 +3241,51 @@ func (c *Config) BlockPipelineValidateEnabled() bool {
 // enabled.
 func (c *Config) LedgerPrefetchAheadEnabled() bool {
 	return c.cfg.LedgerPrefetchAheadEnabled
+}
+
+// LedgerUtxoShadow returns whether the shadow UTxO set is enabled.
+func (c *Config) LedgerUtxoShadow() bool {
+	return c.cfg.LedgerUtxoShadow
+}
+
+// LedgerUtxoBadger returns whether the live UTxO set is kept in Badger.
+func (c *Config) LedgerUtxoBadger() bool {
+	return c.cfg.LedgerUtxoBadger
+}
+
+// LedgerUtxoReads returns where validation resolves its inputs.
+func (c *Config) LedgerUtxoReads() string {
+	return c.cfg.LedgerUtxoReads
+}
+
+// LedgerUtxoBadgerOnly returns whether the Badger live UTxO set is the only
+// copy of the UTxO set.
+func (c *Config) LedgerUtxoBadgerOnly() bool {
+	return c.cfg.LedgerUtxoBadgerOnly
+}
+
+// LedgerStateSetOnly returns whether the live UTxO set is the only store of
+// the ledger state it computes.
+func (c *Config) LedgerStateSetOnly() bool {
+	return c.cfg.LedgerStateSetOnly
+}
+
+// LedgerUtxoCheckpointEpochs returns how many epochs pass between live UTxO
+// set checkpoints; zero writes none.
+func (c *Config) LedgerUtxoCheckpointEpochs() int {
+	return c.cfg.LedgerUtxoCheckpointEpochs
+}
+
+// LedgerUtxoCheckpointKeep returns how many live UTxO set checkpoints are
+// retained.
+func (c *Config) LedgerUtxoCheckpointKeep() int {
+	return c.cfg.LedgerUtxoCheckpointKeep
+}
+
+// LedgerStateVerifyBeforeDrain returns whether each family is compared with
+// its SQL rows before the rows are deleted.
+func (c *Config) LedgerStateVerifyBeforeDrain() bool {
+	return c.cfg.LedgerStateVerifyBeforeDrain
 }
 
 // LedgerValidateAheadEnabled returns whether state-independent validation

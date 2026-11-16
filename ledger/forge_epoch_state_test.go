@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -325,20 +326,20 @@ func (c *boundaryHookCalls) total() int {
 
 func (c *boundaryHookCalls) install(ls *LedgerState, deferred bool) {
 	ls.SetEpochBoundarySnapshotHook(
-		func(*database.Txn, event.EpochTransitionEvent) error {
+		func(ledgerdb.Txn, event.EpochTransitionEvent) error {
 			c.snapshot++
 			return nil
 		},
 	)
 	ls.SetEpochBoundarySnapshotStakeHook(
-		func(*database.Txn, event.EpochTransitionEvent) error {
+		func(ledgerdb.Txn, event.EpochTransitionEvent) error {
 			c.stake++
 			return nil
 		},
 	)
 	ls.SetCurrentBoundarySPOStakeHook(
 		func(
-			*database.Txn,
+			ledgerdb.Txn,
 			event.EpochTransitionEvent,
 			uint,
 		) ([]*models.PoolStakeSnapshot, error) {
@@ -347,7 +348,7 @@ func (c *boundaryHookCalls) install(ls *LedgerState, deferred bool) {
 		},
 	)
 	ls.SetEpochBoundaryDeferredStakeInputsHook(
-		func(*database.Txn) (uint64, uint64, []*models.RewardStakeInput, bool) {
+		func(ledgerdb.Txn) (uint64, uint64, []*models.RewardStakeInput, bool) {
 			c.stakeInputs++
 			return 0, 0, nil, false
 		},
@@ -356,12 +357,12 @@ func (c *boundaryHookCalls) install(ls *LedgerState, deferred bool) {
 		return
 	}
 	ls.SetDeferredEpochBoundarySnapshotHooks(
-		func(*database.Txn, event.EpochTransitionEvent) error {
+		func(ledgerdb.Txn, event.EpochTransitionEvent) error {
 			c.capture++
 			return nil
 		},
 		func(uint64) { c.discard++ },
-		func(*database.Txn, event.EpochTransitionEvent) (
+		func(ledgerdb.Txn, event.EpochTransitionEvent) (
 			DeferredBoundarySnapshot, error,
 		) {
 			c.prepare++

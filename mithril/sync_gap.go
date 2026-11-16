@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -666,6 +667,9 @@ func processGapBlocks(
 	if len(blocks) == 0 {
 		return nil
 	}
+	if err := db.RefuseLedgerStateRewrite(ctx); err != nil {
+		return err
+	}
 	epochs, err := db.GetEpochs(nil)
 	if err != nil {
 		return fmt.Errorf("loading epochs for gap blocks: %w", err)
@@ -888,8 +892,8 @@ func processGapBlockTransactions(
 				uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
 				epochId,
 				govActionLifetime,
-				db,
-				txn,
+				dbadapter.New(db),
+				dbadapter.Txn(txn),
 				pparams,
 				&proposalsValidated,
 			); err != nil {

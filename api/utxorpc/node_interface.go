@@ -20,7 +20,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -87,7 +87,7 @@ type UtxorpcLedgerState interface {
 		ctx context.Context,
 		poolFilter []lcommon.PoolKeyHash,
 		at ledger.QueryPoint,
-		txn *database.Txn,
+		txn ledgerdb.Txn,
 		maxPools int,
 	) (*ledger.PoolStakeDistribution, error)
 	// PrimaryChainTip is the tip of the chain FollowTip's iterator reads. It

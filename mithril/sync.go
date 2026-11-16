@@ -651,6 +651,37 @@ type SyncConfig struct {
 	Logger                  *slog.Logger     // optional; defaults to slog.Default()
 	OnProgress              SyncProgressFunc // optional
 	Metrics                 *PipelineMetrics // optional; records the immutable chunk downloads
+	// UtxoSet, when set, receives the ledger state's UTxO set for a node
+	// that keeps the live UTxO set as its only copy; see
+	// ledgerstate.ImportConfig.UtxoSet.
+	UtxoSet ledgerstate.UtxoSetLoader
+	// InvalidateUtxoSetGovernance, when set, is called after the gap cleanup
+	// has deleted governance rows from the metadata store, so a live UTxO
+	// set that kept copies of them reloads them at its next startup instead
+	// of serving rows the store no longer has.
+	InvalidateUtxoSetGovernance func() error
+}
+
+// deleteGapBlocksAbove is deleteBlobBlocksAboveSlotExcept followed by the
+// governance invalidation, which runs even when the cleanup failed part way
+// since its deletes are not atomic with the set.
+func (cfg SyncConfig) deleteGapBlocksAbove(
+	ctx context.Context,
+	db *database.Database,
+	slot uint64,
+	preserved map[string]struct{},
+) error {
+	err := deleteBlobBlocksAboveSlotExcept(ctx, db, slot, preserved)
+	if cfg.InvalidateUtxoSetGovernance == nil {
+		return err
+	}
+	if invErr := cfg.InvalidateUtxoSetGovernance(); invErr != nil {
+		return errors.Join(
+			err,
+			fmt.Errorf("invalidate live UTxO set governance: %w", invErr),
+		)
+	}
+	return err
 }
 
 // StoragePlugins contains canonical storage provider selections used during
@@ -901,6 +932,35 @@ func Sync(
 	}
 	catchUp = dec.engage || cfg.RepairLegacyRewardState
 	catchUpStart = dec.start
+	// A database that drained ledger-state families takes the import when
+	// the live UTxO set can hold them: the rows are written to SQL as for any
+	// database and moved into the set once the import is complete.
+	drainedImport := false
+	if _, ok := cfg.UtxoSet.(ledgerstate.FamilyLoader); ok {
+		began, beginErr := db.BeginDrainedImport(ctx)
+		if beginErr != nil {
+			return SyncResult{}, beginErr
+		}
+		drainedImport = began
+	}
+	if drainedImport {
+		defer func() {
+			if syncErr != nil {
+				db.EndDrainedImport(ctx)
+			}
+		}()
+	} else if err := db.RefuseLedgerStateRewrite(ctx); err != nil {
+		return SyncResult{}, err
+	}
+	// The ledger-state import refuses a catch-up into a live-UTxO-set-only
+	// database, but only after the artifacts have downloaded.
+	_, familyLoader := cfg.UtxoSet.(ledgerstate.FamilyLoader)
+	if catchUp && cfg.UtxoSet != nil && !familyLoader {
+		return SyncResult{}, errors.New(
+			"cannot catch up a database that keeps its UTxO set only in " +
+				"the live UTxO set",
+		)
+	}
 	catchUpStart, err = resumeStartImmutable(db, mode, catchUpStart)
 	if err != nil {
 		return SyncResult{}, err
@@ -1402,6 +1462,10 @@ func Sync(
 			preservedLocalTail,
 			logger,
 		)
+		if cfg.InvalidateUtxoSetGovernance != nil &&
+			(gapCleanedBeforeImport || err != nil) {
+			err = errors.Join(err, cfg.InvalidateUtxoSetGovernance())
+		}
 		if err != nil {
 			return SyncResult{}, err
 		}
@@ -1471,6 +1535,7 @@ func Sync(
 				bootstrapResult,
 				preparedRepairImport,
 				catchUp,
+				cfg.UtxoSet,
 				onLedger,
 			)
 		} else {
@@ -1482,6 +1547,7 @@ func Sync(
 				bootstrapResult,
 				catchUp,
 				certifiedTip.Slot,
+				cfg.UtxoSet,
 				onLedger,
 				func(prepared *preparedLedgerStateImport) error {
 					var cleanErr error
@@ -1489,6 +1555,15 @@ func Sync(
 						ctx, db, logger, prepared, bootstrapResult, catchUp,
 						loadResult.ImmutableTipSlot,
 					)
+					// The cleanup deletes governance rows without going
+					// through the live set, so it is invalidated here as
+					// deleteGapBlocksAbove does for the other cleanups.
+					if cfg.InvalidateUtxoSetGovernance != nil &&
+						(gapCleanedBeforeImport || cleanErr != nil) {
+						cleanErr = errors.Join(
+							cleanErr, cfg.InvalidateUtxoSetGovernance(),
+						)
+					}
 					return cleanErr
 				},
 			)
@@ -1651,7 +1726,7 @@ func Sync(
 		// The selected state can precede the certified tip. Keep the verified
 		// local chain after that point, including certified blocks, and remove
 		// same-range fork blobs before ordinary ledger replay sees them.
-		if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+		if cleanupErr := cfg.deleteGapBlocksAbove(
 			ctx, db, ledgerStateSlot, preservedLocalTail,
 		); cleanupErr != nil {
 			return SyncResult{}, fmt.Errorf(
@@ -1681,7 +1756,7 @@ func Sync(
 			"stored_tip_slot", recentBlocks[0].Slot,
 			"ledger_state_slot", ledgerStateSlot,
 		)
-		if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+		if cleanupErr := cfg.deleteGapBlocksAbove(
 			ctx,
 			db, immutableTipSlot,
 			preservedLocalTail,
@@ -1739,7 +1814,7 @@ func Sync(
 					"stored_tip_slot", storedTipSlot,
 					"resume_gap_end_slot", resumeGapEnd,
 				)
-				if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+				if cleanupErr := cfg.deleteGapBlocksAbove(
 					ctx,
 					db, resumeGapEnd,
 					preservedLocalTail,
@@ -1945,6 +2020,16 @@ func Sync(
 		return SyncResult{}, err
 	}
 	syncComplete = true
+	if drainedImport {
+		if err := ledgerstate.FinishDrainedImport(
+			ctx, db, cfg.UtxoSet,
+		); err != nil {
+			return SyncResult{}, fmt.Errorf(
+				"moving the imported ledger state into the live UTxO set: %w",
+				err,
+			)
+		}
+	}
 
 	// Record the highest imported immutable file number so a later catch-up can
 	// skip already-present archives and anchor its intersection check. Written

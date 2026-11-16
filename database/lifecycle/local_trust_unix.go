@@ -45,11 +45,17 @@ func requirePrivateLocalSnapshot(snapshotDir string) error {
 			snapshotDir,
 		)
 	}
-	for _, name := range []string{
+	names := []string{
 		ManifestFileName,
 		BlobBackupFileName,
 		MetadataBackupFileName,
-	} {
+	}
+	if _, err := os.Lstat(
+		filepath.Join(snapshotDir, UtxoSetBackupFileName),
+	); err == nil {
+		names = append(names, UtxoSetBackupFileName)
+	}
+	for _, name := range names {
 		path := filepath.Join(snapshotDir, name)
 		entry, err := os.Lstat(path)
 		if err != nil {

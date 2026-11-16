@@ -17,7 +17,7 @@ package ledger
 import (
 	"context"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -42,7 +42,7 @@ import (
 // slot.
 func (ls *LedgerState) queryShelleyPoolDistr2(ctx context.Context, q *olocalstatequery.ShelleyPoolDistr2Query,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	// PoolFilter reports all=true with a nil pool list when the query's
 	// StrictMaybe was SNothing, and all=false otherwise -- including for an
@@ -94,7 +94,7 @@ func (ls *LedgerState) queryShelleyPoolDistr(
 	ctx context.Context,
 	q *olocalstatequery.ShelleyPoolDistrQuery,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	var requested []ledger.PoolId
 	all := len(q.Pools) == 0
@@ -143,7 +143,7 @@ func (ls *LedgerState) queryShelleyPoolDistr(
 func (ls *LedgerState) queryShelleyStakeDistribution2(
 	ctx context.Context,
 	at QueryPoint,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 ) (any, error) {
 	live, err := ls.liveStakeDistribution(ctx, at, txn)
 	if err != nil {

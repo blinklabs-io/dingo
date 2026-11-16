@@ -40,12 +40,19 @@ type payloadFile struct {
 }
 
 // payloadFiles returns the backup files m declares. A snapshot holds exactly
-// these two beside its manifest; a restore fetches nothing else.
+// these beside its manifest, the live UTxO set's only when it declares one; a
+// restore fetches nothing else.
 func (m Manifest) payloadFiles() []payloadFile {
-	return []payloadFile{
+	files := []payloadFile{
 		{BlobBackupFileName, m.BlobBytes, m.BlobSHA256},
 		{MetadataBackupFileName, m.MetadataBytes, m.MetadataSHA256},
 	}
+	if m.UtxoSetSHA256 != "" {
+		files = append(files, payloadFile{
+			UtxoSetBackupFileName, m.UtxoSetBytes, m.UtxoSetSHA256,
+		})
+	}
+	return files
 }
 
 // payloadDownloads returns the cloud objects to fetch for m, each bounded by

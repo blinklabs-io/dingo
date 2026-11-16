@@ -927,6 +927,39 @@ type Config struct {
 	// separate goroutine while the current block applies, for blocks under
 	// normal validation only. Not consensus-affecting; on by default.
 	LedgerPrefetchAheadEnabled bool `yaml:"ledgerPrefetchAheadEnabled"          envconfig:"DINGO_LEDGER_PREFETCH_AHEAD_ENABLED"`
+	// LedgerUtxoShadow keeps a Badger copy of the live UTxO set beside the
+	// metadata store and checks the two against each other (experimental,
+	// diagnostic only; default off).
+	LedgerUtxoShadow bool `yaml:"ledgerUtxoShadow"              envconfig:"DINGO_LEDGER_UTXO_SHADOW"`
+	// LedgerUtxoBadger keeps the live UTxO set in a Badger store updated
+	// synchronously after each ledger commit (experimental; default off).
+	LedgerUtxoBadger bool `yaml:"ledgerUtxoBadger"              envconfig:"DINGO_LEDGER_UTXO_BADGER"`
+	// LedgerUtxoReads selects where validation resolves its inputs with
+	// LedgerUtxoBadger: "" for the metadata store, "verify" to compare both,
+	// "set" for the live UTxO set (experimental).
+	LedgerUtxoReads string `yaml:"ledgerUtxoReads"               envconfig:"DINGO_LEDGER_UTXO_READS"`
+	// LedgerUtxoBadgerOnly makes the Badger live UTxO set the only copy of
+	// the UTxO set, with no utxo rows in the metadata store (core mode; a
+	// database that holds its UTxO set in the metadata store is moved in
+	// place at startup; experimental; default off).
+	LedgerUtxoBadgerOnly bool `yaml:"ledgerUtxoBadgerOnly"          envconfig:"DINGO_LEDGER_UTXO_BADGER_ONLY"`
+	// LedgerStateSetOnly makes the live UTxO set the only store of the
+	// ledger state it computes: families proven current in it have their
+	// SQL rows deleted. Needs LedgerUtxoBadgerOnly, core storage mode and
+	// LedgerUtxoReads "set"; refused with verify reads or the shadow set
+	// (experimental; default off).
+	LedgerStateSetOnly bool `yaml:"ledgerStateSetOnly"            envconfig:"DINGO_LEDGER_STATE_SET_ONLY"`
+	// LedgerStateVerifyBeforeDrain compares each family the set is about to
+	// replace with its SQL rows in full before deleting them (default off).
+	LedgerStateVerifyBeforeDrain bool `yaml:"ledgerStateVerifyBeforeDrain"  envconfig:"DINGO_LEDGER_STATE_VERIFY_BEFORE_DRAIN"`
+	// LedgerUtxoCheckpointEpochs writes a checkpoint of the live UTxO set at
+	// the first epoch boundary after this many epochs since the last one, for
+	// recovery when the set's journal cannot bring it to the ledger. Zero
+	// writes none. Only a database with LedgerStateSetOnly writes
+	// checkpoints, since only there the set is the only copy of the state.
+	LedgerUtxoCheckpointEpochs int `yaml:"ledgerUtxoCheckpointEpochs"    envconfig:"DINGO_LEDGER_UTXO_CHECKPOINT_EPOCHS"`
+	// LedgerUtxoCheckpointKeep is how many checkpoints are retained.
+	LedgerUtxoCheckpointKeep int `yaml:"ledgerUtxoCheckpointKeep"      envconfig:"DINGO_LEDGER_UTXO_CHECKPOINT_KEEP"`
 	// LedgerValidateAheadEnabled verifies the witness signatures of the
 	// validated blocks of a block-apply chunk on worker goroutines while
 	// earlier blocks of the chunk apply. Not consensus-affecting; on by
@@ -1187,11 +1220,14 @@ type Config struct {
 	// endorser blocks are never pruned.
 	LeiosPersistenceRetentionSlots uint64 `yaml:"leiosPersistenceRetentionSlots" envconfig:"DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS"`
 
-	// Leios voting configuration (experimental, leios runMode only).
+	// Leios voting configuration (experimental; runs with the Leios runtime:
+	// leios runMode, the Musashi or Dijkstra network, or a Dijkstra start
+	// era).
 	// LeiosVoteSigningKeyFile is the path to a Cardano text-envelope
-	// BLS12-381 vote signing key (or a legacy raw hex scalar). When set on
-	// a block producer whose pool is a committee member, the node emits
-	// Leios votes for endorser blocks.
+	// BLS12-381 vote signing key, a JSON array of such envelopes (a rotation
+	// pair or a bundle of pools' keys), or a legacy raw hex scalar. When set
+	// on a block producer, the node emits Leios votes for endorser blocks for
+	// every committee seat the keys hold.
 	LeiosVoteSigningKeyFile string `yaml:"leiosVoteSigningKeyFile" envconfig:"DINGO_LEIOS_VOTE_SIGNING_KEY_FILE"`
 
 	// PeerSharing enables the peer sharing protocol, allowing this node
@@ -1233,6 +1269,12 @@ type Config struct {
 	// RecordSourceProvenance, not by LoadConfig itself — see provenance.go
 	// and RecordSourceProvenance's own doc comment for why.
 	provenance Provenance
+
+	// mempoolCapacityDefaulted records that ApplyDefaults chose the Leios
+	// mempool capacity because none was configured. It is unexported so no
+	// YAML, environment or flag can set it: only a capacity nobody set may
+	// follow whether the committee can reach its quorum.
+	mempoolCapacityDefaulted bool
 }
 
 // PluginsConfig is the canonical configuration tree for compiled-in plugin
@@ -1781,6 +1823,10 @@ func newDefaultConfig() *Config {
 		// blocks of its chunk. Neither changes a verdict or stored state.
 		LedgerPrefetchAheadEnabled: true,
 		LedgerValidateAheadEnabled: true,
+		// A set-only database checkpoints its live UTxO set once an epoch
+		// and keeps the last two.
+		LedgerUtxoCheckpointEpochs: 1,
+		LedgerUtxoCheckpointKeep:   2,
 	}
 }
 
@@ -2135,6 +2181,12 @@ func applyAPIPortCompatibilityEnvironment(cfg *Config, environ []string) error {
 	return nil
 }
 
+// MempoolCapacityDefaulted reports whether ApplyDefaults chose the Leios
+// mempool capacity because the configuration set none.
+func (c *Config) MempoolCapacityDefaulted() bool {
+	return c.mempoolCapacityDefaulted
+}
+
 // ApplyDefaults fills in unset values whose defaults depend on other
 // settings in the fully merged configuration — most notably
 // MempoolCapacity, whose default is chosen by RunMode. It must run
@@ -2183,6 +2235,7 @@ func (c *Config) ApplyDefaults() {
 			c.Plugins.Mempool.Config["capacity"] = int64(
 				DefaultMempoolCapacityLeios,
 			)
+			c.mempoolCapacityDefaulted = true
 		} else {
 			c.Plugins.Mempool.Config["capacity"] = int64(DefaultMempoolCapacityPraos)
 		}

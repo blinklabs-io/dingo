@@ -1268,7 +1268,7 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		if err := db.Metadata().DeactivateDreps(txn.Metadata(), []models.StakeCredentialRef{
 			models.NewStakeCredentialRef(0, credentialBytes),
-		}); err != nil {
+		}, point.Slot); err != nil {
 			return err
 		}
 		return (&LedgerDelta{Point: point}).processGovernance(

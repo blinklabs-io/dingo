@@ -640,6 +640,73 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if c.LedgerUtxoCheckpointEpochs < 0 {
+		errs = append(errs, errors.New(
+			"ledgerUtxoCheckpointEpochs must not be negative",
+		))
+	}
+	if c.LedgerUtxoCheckpointKeep < 0 {
+		errs = append(errs, errors.New(
+			"ledgerUtxoCheckpointKeep must not be negative",
+		))
+	}
+
+	switch c.LedgerUtxoReads {
+	case "":
+	case "verify", "set":
+		if !c.LedgerUtxoBadger {
+			errs = append(errs, fmt.Errorf(
+				"ledgerUtxoReads %q needs ledgerUtxoBadger",
+				c.LedgerUtxoReads,
+			))
+		}
+	default:
+		errs = append(errs, fmt.Errorf(
+			"invalid ledgerUtxoReads %q: must be empty, %q or %q",
+			c.LedgerUtxoReads, "verify", "set",
+		))
+	}
+
+	// The node does not open the set without an on-disk database, and a
+	// set-only database would still be marked as holding no utxo rows.
+	if (c.LedgerUtxoBadger || c.LedgerUtxoBadgerOnly) &&
+		c.DatabasePath == "" {
+		errs = append(errs, errors.New(
+			"ledgerUtxoBadger needs databasePath: the live UTxO set is "+
+				"not opened without an on-disk database",
+		))
+	}
+
+	if c.LedgerUtxoBadgerOnly {
+		if !c.LedgerUtxoBadger {
+			errs = append(errs, errors.New(
+				"ledgerUtxoBadgerOnly needs ledgerUtxoBadger",
+			))
+		}
+		if c.LedgerUtxoReads == "verify" {
+			// There is no metadata UTxO set to compare against: reads
+			// always use the live set.
+			errs = append(errs, errors.New(
+				"ledgerUtxoReads \"verify\" has no effect with "+
+					"ledgerUtxoBadgerOnly",
+			))
+		}
+		if c.StorageMode == storageModeAPI {
+			errs = append(errs, errors.New(
+				"ledgerUtxoBadgerOnly needs core storage mode",
+			))
+		}
+		if c.LedgerUtxoShadow {
+			// The shadow bootstraps from the metadata store's UTxO set,
+			// which this mode does not keep.
+			errs = append(errs, errors.New(
+				"ledgerUtxoShadow cannot run with ledgerUtxoBadgerOnly",
+			))
+		}
+	}
+
+	errs = append(errs, ledgerStateSetOnlyErrors(c)...)
+
 	if c.TrustedNtCIdleTimeout < 0 {
 		errs = append(errs, fmt.Errorf(
 			"invalid trustedNtCIdleTimeout: %s (must be zero or positive)",
@@ -1051,17 +1118,17 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// Block production needs all three credential paths
 	if c.BlockProducer {
 		errs = append(errs, c.validateBlockProducerPools()...)
-		// Leios voting and endorser-block production are wired for one pool:
-		// one vote key, one pipeline. A second pool would forge ranking
-		// blocks with no Leios support of its own. Musashi forges Leios
-		// headers whatever the run mode.
+		// Endorser-block production is wired for one pool and one pipeline:
+		// a second pool would forge ranking blocks with no Leios support of
+		// its own. Musashi forges Leios headers whatever the run mode. Voting
+		// is not refused: a vote key file holding several keys votes for
+		// every seat they hold, whichever pools the node forges for.
 		isMusashi := c.Network == ouroboros.NetworkCardanoMusashi.Name ||
 			c.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 		if len(c.BlockProducerPools) > 1 &&
-			(effectiveMode == RunModeLeios || isMusashi ||
-				c.LeiosVoteSigningKeyFile != "") {
+			(effectiveMode == RunModeLeios || isMusashi) {
 			errs = append(errs, errors.New(
-				"blockProducerPools lists more than one pool, which Leios forging and voting do not support",
+				"blockProducerPools lists more than one pool, which Leios forging does not support",
 			))
 		}
 	}
@@ -1763,6 +1830,54 @@ func validateDMQPeers(c DMQConfig) []error {
 				c.ListenIPv6Address,
 			))
 		}
+	}
+	return errs
+}
+
+// ValidateLedgerStateSetOnly checks the combinations ledgerStateSetOnly and
+// ledgerStateVerifyBeforeDrain accept. It is shared by Validate and by
+// library callers that build a node without going through it.
+func ValidateLedgerStateSetOnly(c *Config) error {
+	return errors.Join(ledgerStateSetOnlyErrors(c)...)
+}
+
+func ledgerStateSetOnlyErrors(c *Config) []error {
+	var errs []error
+	if c.LedgerStateSetOnly {
+		if !c.LedgerUtxoBadgerOnly {
+			errs = append(errs, errors.New(
+				"ledgerStateSetOnly needs ledgerUtxoBadgerOnly",
+			))
+		}
+		if c.StorageMode == storageModeAPI {
+			errs = append(errs, errors.New(
+				"ledgerStateSetOnly needs core storage mode: API mode "+
+					"keeps every SQL table",
+			))
+		}
+		switch c.LedgerUtxoReads {
+		case "set":
+		case "verify":
+			errs = append(errs, errors.New(
+				"ledgerUtxoReads \"verify\" cannot run with "+
+					"ledgerStateSetOnly: no SQL copy is left to compare",
+			))
+		default:
+			errs = append(errs, errors.New(
+				"ledgerStateSetOnly needs ledgerUtxoReads \"set\"",
+			))
+		}
+		if c.LedgerUtxoShadow {
+			errs = append(errs, errors.New(
+				"ledgerUtxoShadow cannot run with ledgerStateSetOnly",
+			))
+		}
+	}
+
+	if c.LedgerStateVerifyBeforeDrain && !c.LedgerStateSetOnly {
+		errs = append(errs, errors.New(
+			"ledgerStateVerifyBeforeDrain needs ledgerStateSetOnly",
+		))
 	}
 	return errs
 }

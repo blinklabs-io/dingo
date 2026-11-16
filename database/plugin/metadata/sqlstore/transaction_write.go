@@ -25,9 +25,11 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -1144,7 +1146,9 @@ func (s *Store) setTransactionWithAccumulator(
 				collateralFee uint64
 				err           error
 			)
-			if overlay != nil {
+			if s.liveUtxo != nil {
+				collateralFee, err = s.liveCollateralFee(txn, transaction)
+			} else if overlay != nil {
 				collateralFee, err = overlay.collateralFee(
 					ctx, db, transaction,
 				)
@@ -1203,7 +1207,7 @@ func (s *Store) setTransactionWithAccumulator(
 				return fmt.Errorf("create transaction %x: %w", hash, err)
 			}
 			if ledgerContextSlot != nil {
-				if err := recordTransactionLedgerContext(ctx, db, transactionID, *ledgerContextSlot); err != nil {
+				if err := recordTransactionLedgerContext(ctx, db, transactionID, *ledgerContextSlot, !s.poolsDrained()); err != nil {
 					return err
 				}
 			}
@@ -1315,6 +1319,40 @@ func (s *Store) setTransactionWithAccumulator(
 					return nil
 				}
 				return nil
+			}
+			if s.liveUtxo != nil {
+				// The live UTxO set holds the outputs. reward_live_stake still
+				// carries their stake: produced outputs add theirs from the
+				// row models, spent inputs subtract theirs from the set as
+				// this transaction sees it.
+				produced, err := liveProducedStakeDeltas(producedModels)
+				if err != nil {
+					return err
+				}
+				consumed, err := s.liveConsumedStakeDeltas(txn, transaction)
+				if err != nil {
+					return err
+				}
+				deltas := mergeStakeCredentialDeltas(
+					refsToStakeCredentialDeltas(certificateRefs),
+					consumed,
+					produced,
+				)
+				// Applied now, never queued for a batch flush: the live set
+				// is staged only after this write, so a credential re-sum
+				// here sees the set before this transaction and must add
+				// the transaction's own change, which a flush after staging
+				// would count twice.
+				if err := s.refreshRewardLiveStakeDeltas(
+					context.WithValue(ctx, liveUtxoPreWriteKey{}, true),
+					db, deltas, point.Slot,
+				); err != nil {
+					return err
+				}
+				if batchedAccumulator != nil {
+					return nil
+				}
+				return staged.flush(ctx, db, s.dialect.ParameterLimit())
 			}
 			producedModelPtrs := make([]*models.Utxo, len(producedModels))
 			for i := range producedModels {
@@ -1628,6 +1666,7 @@ func (s *Store) SetGapBlockTransaction(
 	certDeposits map[int]uint64,
 	txn types.Txn,
 	protocolMajor uint64,
+	historyOnly bool,
 ) error {
 	// Gap ingestion intentionally has no available input state, so this is
 	// equivalent to SetTransaction with the consumed-input update suppressed.
@@ -1691,6 +1730,11 @@ func (s *Store) SetGapBlockTransaction(
 				if err != nil {
 					return err
 				}
+			}
+			if historyOnly {
+				// The UTxO set and its stake are the live set's, already
+				// at or past this block.
+				return nil
 			}
 			collateralReturn := transaction.CollateralReturn()
 			producedStakeDeltas := make([]stakeCredentialDelta, 0)
@@ -1800,8 +1844,10 @@ func (s *Store) SetGenesisTransaction(
 			for i := range outputs {
 				outputs[i].ID = 0
 				outputs[i].TransactionID = &transactionID
-				if err := s.insertUtxoModel(ctx, db, &outputs[i], true); err != nil {
-					return err
+				if s.liveUtxo == nil {
+					if err := s.insertUtxoModel(ctx, db, &outputs[i], true); err != nil {
+						return err
+					}
 				}
 				refs = append(refs, models.NewStakeCredentialRef(
 					outputs[i].CredentialTag,
@@ -1883,10 +1929,14 @@ SELECT tx_id FROM applied_transaction WHERE slot > ?`,
 				return fmt.Errorf("scan transactions for rollback: %w", err)
 			}
 			// The delete below removes these transactions' certificate and
-			// context rows, the keys their pool certificates rank by.
-			poolHashes, err := poolHashesOfTransactions(ctx, db, txIDs)
-			if err != nil {
-				return err
+			// context rows, the keys their pool certificates rank by. A
+			// drained pools family has no pool rows to refresh.
+			var poolHashes [][]byte
+			if !s.poolsDrained() {
+				poolHashes, err = poolHashesOfTransactions(ctx, db, txIDs)
+				if err != nil {
+					return err
+				}
 			}
 			refs := []models.StakeCredentialRef{}
 			for start := 0; start < len(txIDs); start += 400 {
@@ -2381,6 +2431,9 @@ func (s *Store) applyTransactionWithdrawals(
 	txn types.Txn,
 	batchedAccumulator *transactionBatchAccumulator,
 ) error {
+	if s.familyDrained(nodesettings.FamilyAccounts) {
+		return nil
+	}
 	for address, amount := range transaction.Withdrawals() {
 		if address == nil || amount == nil {
 			continue
@@ -2518,6 +2571,7 @@ func recordTransactionLedgerContext(
 	db queryer,
 	transactionID int64,
 	slot uint64,
+	refreshPools bool,
 ) error {
 	value, err := checkedInt64(slot)
 	if err != nil {
@@ -2529,7 +2583,11 @@ INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CO
 		return err
 	}
 	// The context slot is the effective slot of the transaction's pool
-	// certificates, which pool_current_state ranks by.
+	// certificates, which pool_current_state ranks by. A drained pools
+	// family has no pool rows to refresh.
+	if !refreshPools {
+		return nil
+	}
 	return refreshPoolCurrentStateForTransactions(
 		ctx, db, []int64{transactionID},
 	)
@@ -2614,3 +2672,111 @@ INSERT INTO account_reward_delta (
 ON CONFLICT (
     withdrawal, tx_hash, credential_tag, staking_key, added_slot
 ) DO NOTHING`
+
+// SetLiveUtxoSource makes the store keep no utxo rows and resolve inputs
+// through src instead. Call it before the first write; a nil src restores
+// utxo rows.
+func (s *Store) SetLiveUtxoSource(src types.LiveUtxoSource) {
+	s.liveUtxo = src
+}
+
+// liveCollateralFee is collateralFeeForTransaction with each collateral
+// input's amount read from the live UTxO set.
+func (s *Store) liveCollateralFee(
+	txn types.Txn,
+	transaction lcommon.Transaction,
+) (uint64, error) {
+	return collateralFeeWithLookup(transaction, func(
+		input lcommon.TransactionInput,
+	) (string, bool, error) {
+		cbor, ok, err := s.liveUtxo.LiveUtxoCbor(
+			txn, input.Id().Bytes(), input.Index(),
+		)
+		if err != nil || !ok {
+			return "", false, err
+		}
+		out, err := gledger.NewTransactionOutputFromCbor(cbor)
+		if err != nil {
+			return "", false, fmt.Errorf(
+				"decode collateral input %x#%d: %w",
+				input.Id().Bytes(), input.Index(), err,
+			)
+		}
+		return out.Amount().String(), true, nil
+	})
+}
+
+// liveUtxoTxnKey carries, in a write's context, the metadata transaction a
+// live UTxO source answers for.
+type liveUtxoTxnKey struct{}
+
+// liveUtxoPreWriteKey marks a stake refresh made inside a transaction write
+// before the live UTxO set holds that transaction's changes.
+type liveUtxoPreWriteKey struct{}
+
+func liveProducedStakeDeltas(
+	produced []models.Utxo,
+) ([]stakeCredentialDelta, error) {
+	ret := make([]stakeCredentialDelta, 0, len(produced))
+	for i := range produced {
+		m := &produced[i]
+		if len(m.StakingKey) == 0 {
+			continue
+		}
+		gain, err := producedStakeCredentialDelta(
+			m.CredentialTag, m.StakingKey, m.Amount, true,
+		)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, gain)
+	}
+	return ret, nil
+}
+
+// liveConsumedStakeDeltas is the stake each live input of transaction takes
+// from its credential, read from the live UTxO set before transaction
+// applies. An input that is not live changes nothing.
+func (s *Store) liveConsumedStakeDeltas(
+	txn types.Txn,
+	transaction lcommon.Transaction,
+) ([]stakeCredentialDelta, error) {
+	inputs := uniqueConsumedInputs(transaction)
+	ret := make([]stakeCredentialDelta, 0, len(inputs))
+	for _, in := range inputs {
+		cbor, ok, err := s.liveUtxo.LiveUtxoCbor(txn, in.Hash, in.Idx)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		out, err := gledger.NewTransactionOutputFromCbor(cbor)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode input %x#%d: %w",
+				in.Hash,
+				in.Idx,
+				err,
+			)
+		}
+		skh := out.Address().StakeKeyHash()
+		if skh == (lcommon.Blake2b224{}) {
+			continue
+		}
+		tag, _ := models.StakeCredentialTagFromAddress(out.Address())
+		amount, err := models.CheckedUint64FromBigInt(out.Amount())
+		if err != nil {
+			return nil, err
+		}
+		gain, err := producedStakeCredentialDelta(
+			tag, skh.Bytes(), types.Uint64(amount), true,
+		)
+		if err != nil {
+			return nil, err
+		}
+		gain.delta = -gain.delta
+		ret = append(ret, gain)
+	}
+	return ret, nil
+}

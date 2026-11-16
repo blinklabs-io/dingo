@@ -84,6 +84,31 @@ type manifestConfig struct {
 	// catalogReconcile restores provider-backed rows after a damaged local
 	// catalog has been rebuilt.
 	catalogReconcile func(context.Context, string) error
+	// utxoSet is consumed only by Snapshot.
+	utxoSet UtxoSetBackuper
+}
+
+// UtxoSetBackuper is a live UTxO set that can stream a consistent copy of
+// itself.
+type UtxoSetBackuper interface {
+	Backup(ctx context.Context, w io.Writer) error
+}
+
+// WithUtxoSetBackup makes Snapshot include a copy of the live UTxO set. The
+// copy is taken under the same commit pause as the blob and metadata
+// backups.
+func WithUtxoSetBackup(set UtxoSetBackuper) ManifestOption {
+	return func(cfg *manifestConfig) { cfg.utxoSet = set }
+}
+
+func snapshotUtxoSet(opts []ManifestOption) UtxoSetBackuper {
+	cfg := manifestConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg.utxoSet
 }
 
 func withSnapshotCatalogReconcile(
@@ -384,6 +409,14 @@ type Manifest struct {
 	// they existed.
 	BlobSHA256     string `json:"blobSha256,omitempty"`
 	MetadataSHA256 string `json:"metadataSha256,omitempty"`
+
+	// UtxoSetBytes/UtxoSetSHA256 describe the live UTxO set's backup file
+	// (UtxoSetBackupFileName), present only in a snapshot of a node that
+	// keeps the set. A manifest declaring it makes a restore load the set
+	// beside the restored database; one without it leaves the restored data
+	// directory without a set.
+	UtxoSetBytes  int64  `json:"utxoSetBytes,omitempty"`
+	UtxoSetSHA256 string `json:"utxoSetSha256,omitempty"`
 
 	// Authentication is the hex HMAC-SHA256, under the operator trust key
 	// (WithManifestKey), of the manifest's JSON encoding with Checksum and

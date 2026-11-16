@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -597,7 +598,7 @@ func TestLedgerViewMemoizedUtxosUnchangedByValidation(t *testing.T) {
 	var lv *LedgerView
 	require.NoError(t, fx.dingoLS.validateTxCore(
 		fx.tx,
-		func(txn *database.Txn) *LedgerView {
+		func(txn ledgerdb.Txn) *LedgerView {
 			lv = &LedgerView{txn: txn, ls: fx.dingoLS}
 			return lv
 		},

@@ -99,6 +99,9 @@ func (a *NodeAdapter) GovernanceProposals(
 	if !ok {
 		return []GovernanceProposalInfo{}, 0, nil
 	}
+	if err := a.refuseDrainedGovernance("the proposal listing"); err != nil {
+		return nil, 0, err
+	}
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
@@ -124,6 +127,9 @@ func (a *NodeAdapter) proposalByRef(
 	ref GovActionRef,
 	txn dbtypes.Txn,
 ) (*models.GovernanceProposal, error) {
+	if a.governanceDrained() {
+		return a.drainedProposalByRef(ctx, ref)
+	}
 	proposal, err := a.ledgerState.Database().Metadata().GetGovernanceProposal(
 		ref.TxHash, ref.Index, txn,
 	)
@@ -820,6 +826,9 @@ func (a *NodeAdapter) votesPage(
 	offset, ok := paginationOffset(params)
 	if !ok {
 		return []models.GovernanceVoteRow{}, []castTransaction{}, 0, nil
+	}
+	if err := a.refuseDrainedGovernance("the vote history"); err != nil {
+		return nil, nil, 0, err
 	}
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)

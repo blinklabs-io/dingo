@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -41,6 +42,9 @@ type reconcileKeys struct {
 	poolsComplete               bool
 	drepsComplete               bool
 	governanceProposalsComplete bool
+	// drained is the set of families whose SQL rows were deleted before the
+	// import: none of their rows can be stale.
+	drained nodesettings.FamilyMask
 }
 
 type utxoReconcileKey struct {
@@ -145,6 +149,13 @@ func reconcileStaleLedgerState(
 		staleProposals []*models.GovernanceProposal
 	)
 
+	skipDrained := func(entity string) {
+		logger.Info(
+			"skipping "+entity+" reconcile: its SQL rows were drained, so "+
+				"none can be stale",
+			"component", "ledgerstate",
+		)
+	}
 	skipIncomplete := func(entity string) {
 		logger.Warn(
 			"skipping "+entity+" reconcile: the snapshot import did not "+
@@ -183,7 +194,9 @@ func reconcileStaleLedgerState(
 		return fmt.Errorf("scanning live UTxOs: %w", err)
 	}
 
-	if !keys.accountsComplete {
+	if keys.drained.Has(nodesettings.FamilyAccounts) {
+		skipDrained("account")
+	} else if !keys.accountsComplete {
 		skipIncomplete("account")
 	} else {
 		accts, err := store.GetActiveAccountCredentials(rtxn.Metadata())
@@ -205,7 +218,9 @@ func reconcileStaleLedgerState(
 		}
 	}
 
-	if !keys.drepsComplete {
+	if keys.drained.Has(nodesettings.FamilyDReps) {
+		skipDrained("DRep")
+	} else if !keys.drepsComplete {
 		skipIncomplete("DRep")
 	} else {
 		dreps, err := store.GetActiveDreps(rtxn.Metadata())
@@ -228,7 +243,9 @@ func reconcileStaleLedgerState(
 		}
 	}
 
-	if !keys.poolsComplete {
+	if keys.drained.Has(nodesettings.FamilyPoolsHistory) {
+		skipDrained("pool")
+	} else if !keys.poolsComplete {
 		skipIncomplete("pool")
 	} else {
 		pools, err := store.GetActivePoolKeyHashes(rtxn.Metadata())
@@ -247,7 +264,9 @@ func reconcileStaleLedgerState(
 		}
 	}
 
-	if !keys.governanceProposalsComplete {
+	if keys.drained.Has(nodesettings.FamilyGovernance) {
+		skipDrained("governance proposal")
+	} else if !keys.governanceProposalsComplete {
 		skipIncomplete("governance proposal")
 	} else {
 		proposals, err := db.GetGovernanceProposalSet(ctx, rtxn)
@@ -307,7 +326,7 @@ func reconcileStaleLedgerState(
 		)
 	}
 	if err := store.DeactivateDreps(
-		wtxn.Metadata(), staleDreps,
+		wtxn.Metadata(), staleDreps, tipSlot,
 	); err != nil {
 		return fmt.Errorf(
 			"deactivating %d stale DReps: %w",

@@ -122,6 +122,8 @@ services:
       CARDANO_DATABASE_PATH: /data/db
       CARDANO_NODE_SOCKET_PATH: /ipc/dingo.socket
       DINGO_DEBUG: "1"
+      DINGO_LEDGER_UTXO_BADGER: "${DEVNET_LEDGER_UTXO_BADGER:-false}"
+      DINGO_LEDGER_UTXO_READS: "${DEVNET_LEDGER_UTXO_READS:-}"
       CARDANO_BLOCK_PRODUCER: "true"
       CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
       CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
@@ -314,6 +316,8 @@ services:
       CARDANO_DATABASE_PATH: /data/db
       CARDANO_NODE_SOCKET_PATH: /ipc/dingo.socket
       DINGO_DEBUG: "1"
+      DINGO_LEDGER_UTXO_BADGER: "${DEVNET_LEDGER_UTXO_BADGER:-false}"
+      DINGO_LEDGER_UTXO_READS: "${DEVNET_LEDGER_UTXO_READS:-}"
       # Block production credentials (pool 1)
       # run-tests.sh sets this to false when the network is Dijkstra at slot 0 unless
       # DEVNET_FORCE_DINGO_BLOCK_PRODUCER=true. Dingo forges the 10-field Praos header

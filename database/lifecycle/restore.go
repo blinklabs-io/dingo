@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
@@ -821,6 +822,18 @@ func restoreValidated(
 	}
 	if err := staging.checkNamed(); err != nil {
 		return Manifest{}, err
+	}
+	if manifest.UtxoSetSHA256 != "" {
+		if err := restoreUtxoSet(
+			ctx,
+			filepath.Join(snapshotDir, UtxoSetBackupFileName),
+			badgerutxo.DirFor(stagingDir),
+		); err != nil {
+			return Manifest{}, err
+		}
+		if err := staging.checkNamed(); err != nil {
+			return Manifest{}, err
+		}
 	}
 	if err := validateRestoredDatabase(
 		ctx, host, manifest, stagingDir, storageConfig,
@@ -1900,6 +1913,37 @@ func restoreMetadataStore(
 	}
 	if err := restorer.RestoreFrom(ctx, backupPath); err != nil {
 		return fmt.Errorf("restore metadata store: %w", err)
+	}
+	return nil
+}
+
+// restoreUtxoSet loads the live UTxO set backup at backupPath into an empty
+// Badger directory at dir. It runs inside the staging directory, so a failure
+// leaves the target data directory as it was.
+func restoreUtxoSet(ctx context.Context, backupPath, dir string) error {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("create live UTxO set directory: %w", err)
+	}
+	store, err := badgerutxo.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open live UTxO set for restore: %w", err)
+	}
+	backupFile, err := os.Open(backupPath)
+	if err != nil {
+		_ = store.Close()
+		return fmt.Errorf("open %q: %w", backupPath, err)
+	}
+	restoreErr := store.Restore(ctx, backupFile)
+	closeErr := backupFile.Close()
+	storeErr := store.Close()
+	if restoreErr != nil {
+		return fmt.Errorf("restore live UTxO set: %w", restoreErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close %q: %w", backupPath, closeErr)
+	}
+	if storeErr != nil {
+		return fmt.Errorf("close restored live UTxO set: %w", storeErr)
 	}
 	return nil
 }

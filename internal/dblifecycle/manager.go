@@ -79,6 +79,9 @@ type Manager struct {
 	metadataPluginName  string
 	destinationRegistry *lifecycle.DestinationRegistry
 	logger              *slog.Logger
+	// utxoSet returns the node's live UTxO set, or nil when it keeps none.
+	// It is a function because a live restore or truncate reopens the set.
+	utxoSet func() lifecycle.UtxoSetBackuper
 
 	mu             sync.Mutex
 	running        bool
@@ -122,6 +125,12 @@ func NewManager(
 		destinationRegistry: destinationRegistry,
 		logger:              logger,
 	}
+}
+
+// SetUtxoSetSource makes every automatic snapshot include the live UTxO set
+// source returns. source may return nil.
+func (m *Manager) SetUtxoSetSource(source func() lifecycle.UtxoSetBackuper) {
+	m.utxoSet = source
 }
 
 // Start begins listening for epoch transitions and capturing automatic
@@ -477,7 +486,18 @@ func (m *Manager) handleEpochTransition(
 	if err != nil {
 		return fmt.Errorf("capture epoch-boundary snapshot: %w", err)
 	}
-	manifestOpts = append(manifestOpts, lifecycle.WithMaxCommitPause(m.cfg.SnapshotMaxCommitPause))
+	manifestOpts = append(
+		manifestOpts,
+		lifecycle.WithMaxCommitPause(m.cfg.SnapshotMaxCommitPause),
+	)
+	if m.utxoSet != nil {
+		if set := m.utxoSet(); set != nil {
+			manifestOpts = append(
+				manifestOpts,
+				lifecycle.WithUtxoSetBackup(set),
+			)
+		}
+	}
 	_, err = lifecycle.SnapshotToCloud(
 		ctx,
 		m.destinationRegistry,

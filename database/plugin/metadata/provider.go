@@ -38,4 +38,14 @@ type ProviderDependencies struct {
 	// instrumentation still runs against the no-op provider and allocates
 	// on every single query for zero observability benefit.
 	TracingEnabled bool
+	// StatementGuard, when non-nil, sees the text of every statement a
+	// provider's connections prepare or run, and may refuse it. It is a debug
+	// and test aid: a guarded connection is not traced.
+	StatementGuard StatementGuard
+}
+
+// StatementGuard vets SQL statement text before a connection runs it.
+type StatementGuard interface {
+	// CheckStatement returns an error to refuse query.
+	CheckStatement(query string) error
 }

@@ -16,7 +16,6 @@ package sqlstore
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -53,6 +52,9 @@ func (s *Store) SetGenesisStakingWithDeposits(
 	txn types.Txn,
 ) error {
 	for _, certificate := range pools {
+		if s.poolsDrained() {
+			break
+		}
 		rewardTag, rewardHash, err := certutil.PoolRewardAccount(&certificate)
 		if err != nil {
 			return fmt.Errorf("pool reward account: %w", err)
@@ -74,81 +76,35 @@ func (s *Store) SetGenesisStakingWithDeposits(
 				[]byte(nil), certificate.LeiosKey.PossessionProof...,
 			)
 		}
-		registration := &models.PoolRegistration{
-			PoolKeyHash:                certificate.Operator[:],
-			VrfKeyHash:                 certificate.VrfKeyHash[:],
-			RewardAccount:              rewardHash,
-			RewardAccountCredentialTag: rewardTag,
-			Pledge:                     types.Uint64(certificate.Pledge),
-			Cost:                       types.Uint64(certificate.Cost),
-			Margin:                     &types.Rat{Rat: certificate.Margin.Rat},
-			AddedSlot:                  0,
-			DepositAmount:              types.Uint64(poolDeposit),
+		reg, err := models.PoolRegistrationFromCertificate(&certificate, 0)
+		if err != nil {
+			return fmt.Errorf("pool registration: %w", err)
 		}
+		reg.DepositAmount = types.Uint64(poolDeposit)
 		if certificate.LeiosKey != nil {
-			registration.LeiosKeyPublic = append(
-				[]byte(nil), certificate.LeiosKey.PublicKey...,
-			)
-			registration.LeiosKeyPossessionProof = append(
-				[]byte(nil), certificate.LeiosKey.PossessionProof...,
-			)
 			// The ledger registers genesis pools with mkStakePoolState at nesEL
 			// (cardano-ledger 9df9f98c, Shelley/Transition.hs).
 			genesisEpoch := leioskeyepoch.GenesisEpoch
-			registration.LeiosKeyRegistrationEpoch = &genesisEpoch
+			reg.LeiosKeyRegistrationEpoch = &genesisEpoch
 		}
-		if certificate.PoolMetadata != nil {
-			registration.MetadataUrl = certificate.PoolMetadata.Url
-			registration.MetadataHash = certificate.PoolMetadata.Hash[:]
-		}
-		for _, owner := range certificate.PoolOwners {
-			registration.Owners = append(
-				registration.Owners,
-				models.PoolRegistrationOwner{KeyHash: owner[:]},
-			)
-		}
-		for _, relay := range certificate.Relays {
-			relayType := relay.Type
-			model := models.PoolRegistrationRelay{
-				Ipv4: relay.Ipv4,
-				Ipv6: relay.Ipv6,
-				Type: &relayType,
-			}
-			if relay.Port != nil {
-				model.Port = uint(*relay.Port)
-			}
-			if relay.Hostname != nil {
-				model.Hostname = *relay.Hostname
-			}
-			registration.Relays = append(registration.Relays, model)
-		}
+		registration := &reg
 		if err := s.ImportPool(pool, registration, txn); err != nil {
 			return fmt.Errorf("create genesis pool: %w", err)
 		}
 	}
 	refs := []models.StakeCredentialRef{}
-	importDeposit := types.Uint64(keyDeposit)
-	for stakerHex, poolHex := range stakeDelegations {
-		staker, err := hex.DecodeString(stakerHex)
-		if err != nil {
-			return fmt.Errorf("decode staker hash %s: %w", stakerHex, err)
-		}
-		pool, err := hex.DecodeString(poolHex)
-		if err != nil {
-			return fmt.Errorf("decode pool hash %s: %w", poolHex, err)
-		}
-		if err := s.ImportAccount(&models.Account{
-			StakingKey:    staker,
-			CredentialTag: 0,
-			Pool:          pool,
-			Active:        true,
-			AddedSlot:     0,
-			CreatedSlot:   0,
-			ImportDeposit: &importDeposit,
-		}, txn); err != nil {
+	accounts, err := models.GenesisStakeAccounts(stakeDelegations, keyDeposit)
+	if err != nil {
+		return err
+	}
+	for i := range accounts {
+		if err := s.ImportAccount(&accounts[i], txn); err != nil {
 			return fmt.Errorf("create genesis account: %w", err)
 		}
-		refs = append(refs, models.NewStakeCredentialRef(0, staker))
+		refs = append(
+			refs,
+			models.NewStakeCredentialRef(0, accounts[i].StakingKey),
+		)
 	}
 	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
@@ -167,29 +123,11 @@ func (s *Store) SetGenesisGovernance(
 		if credential == nil {
 			continue
 		}
-		tag, err := models.CredentialTagFromUint(credential.CredType)
+		drepRow, registrationRow, err := models.GenesisDRep(credential, state)
 		if err != nil {
-			return fmt.Errorf("genesis drep credential type: %w", err)
+			return err
 		}
-		drep := &models.Drep{
-			CredentialTag: tag,
-			Credential:    credential.Credential[:],
-			AddedSlot:     0,
-			ExpiryEpoch:   state.Expiry,
-			Active:        true,
-		}
-		registration := &models.RegistrationDrep{
-			CredentialTag:  tag,
-			DrepCredential: credential.Credential[:],
-			AddedSlot:      0,
-			DepositAmount:  types.Uint64(state.Deposit),
-		}
-		if state.Anchor != nil {
-			drep.AnchorURL = state.Anchor.Url
-			drep.AnchorHash = state.Anchor.DataHash[:]
-			registration.AnchorURL = state.Anchor.Url
-			registration.AnchorHash = state.Anchor.DataHash[:]
-		}
+		drep, registration := &drepRow, &registrationRow
 		if err := s.ImportDrep(drep, registration, txn); err != nil {
 			return fmt.Errorf("create genesis drep: %w", err)
 		}
@@ -208,30 +146,11 @@ func (s *Store) SetGenesisGovernance(
 			return err
 		}
 		stakeKey := credential.Credential[:]
-		drepType, drepErr := models.DrepTypeFromInt(delegatee.DRep.Type)
-		if drepErr != nil &&
-			delegatee.Type != conway.ConwayGenesisDelegateeTypeStake {
-			return fmt.Errorf("genesis delegatee drep type: %w", drepErr)
+		effect, err := models.GenesisDelegateeOf(delegatee)
+		if err != nil {
+			return err
 		}
-		var drepCredential []byte
-		if delegatee.Type != conway.ConwayGenesisDelegateeTypeStake &&
-			drepType != models.DrepTypeAlwaysAbstain &&
-			drepType != models.DrepTypeAlwaysNoConfidence {
-			drepCredential = delegatee.DRep.Credential
-		}
-		var pool []byte
-		switch delegatee.Type {
-		case conway.ConwayGenesisDelegateeTypeStake:
-			pool = delegatee.PoolId[:]
-		case conway.ConwayGenesisDelegateeTypeVote:
-		case conway.ConwayGenesisDelegateeTypeStakeVote:
-			pool = delegatee.PoolId[:]
-		default:
-			return fmt.Errorf(
-				"unknown genesis delegatee type: %d",
-				delegatee.Type,
-			)
-		}
+		pool, drepCredential, drepType := effect.Pool, effect.Drep, effect.DrepType
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO account (
     staking_key, pool, drep, reward, active, added_slot,
@@ -311,16 +230,10 @@ WHERE NOT EXISTS (
 			return err
 		}
 		if len(drepCredential) > 0 {
-			if drepType > models.DrepTypeScriptHash {
-				return fmt.Errorf(
-					"genesis DRep credential has non-credential type: %d",
-					drepType,
-				)
-			}
 			if err := addDrepDelegator(
 				ctx,
 				db,
-				uint8(drepType),
+				uint8(drepType), //nolint:gosec // GenesisDelegateeOf bounds a credential DRep type to 0 or 1
 				drepCredential,
 				tag,
 				stakeKey,
