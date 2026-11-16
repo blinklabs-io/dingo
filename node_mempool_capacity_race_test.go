@@ -48,15 +48,13 @@ func TestLeiosQuorumReadsSurviveLedgerReplacement(t *testing.T) {
 
 	const rounds = 200
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range rounds {
 			n.setLedgerState(nil)
 			n.setLedgerState(ls)
 			n.publishStartedLedgerState()
 		}
-	}()
+	})
 	for range rounds {
 		require.False(t, n.leiosQuorumPossible())
 		_ = n.leiosEndorserBlockQuorumRefusalForSlot(100)
