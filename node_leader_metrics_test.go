@@ -46,12 +46,14 @@ func registerPoolProducer(
 	reg prometheus.Registerer,
 ) *forging.BlockForger {
 	t.Helper()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
 	election := leader.NewElection(
 		lcommon.PoolKeyHash{},
 		nil,
 		nil,
 		nil,
-		event.NewEventBus(nil, nil),
+		bus,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 	election.SetPromRegistry(reg)
