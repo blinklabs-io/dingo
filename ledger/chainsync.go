@@ -11272,12 +11272,16 @@ func (ls *LedgerState) recordSlotBattle(
 	if ls.chain == nil {
 		return
 	}
+	recorder := ls.loadSlotBattleRecorder()
 	battle := slotBattle{
 		slot:       localSlot,
 		localHash:  bytes.Clone(localHash),
 		remoteSlot: remoteSlot,
 		remoteHash: bytes.Clone(remoteHash),
 		settleAt:   ls.chain.Tip().BlockNumber + ls.slotBattleSettleDepth(),
+	}
+	if owner, ok := recorder.(SlotBattleOutcomeRecorder); ok {
+		battle.settle = owner.SlotBattleOutcome(localSlot, battle.localHash)
 	}
 	if !ls.slotBattles.add(battle) {
 		return
@@ -11291,7 +11295,7 @@ func (ls *LedgerState) recordSlotBattle(
 		"local_block_hash", hex.EncodeToString(localHash),
 		"remote_block_hash", hex.EncodeToString(remoteHash),
 	)
-	if recorder := ls.loadSlotBattleRecorder(); recorder != nil {
+	if recorder != nil {
 		recorder.RecordSlotBattle()
 	}
 }

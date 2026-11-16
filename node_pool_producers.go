@@ -549,6 +549,24 @@ func (o *ownForgedBlocks) RecordSlotBattle() {
 	}
 }
 
+// SlotBattleOutcome resolves, for the ledger, the forger that forged the block
+// of a battle: the pool whose slot tracker holds that hash for the slot. It
+// returns nil when none does.
+func (o *ownForgedBlocks) SlotBattleOutcome(
+	slot uint64,
+	localHash []byte,
+) func(won bool) {
+	o.mu.RLock()
+	forgers := o.forgers
+	o.mu.RUnlock()
+	for _, f := range forgers {
+		if settle := f.SlotBattleOutcome(slot, localHash); settle != nil {
+			return settle
+		}
+	}
+	return nil
+}
+
 // poolProducersReady reports every pool after the first that cannot forge,
 // or nil.
 func (n *Node) poolProducersReady() error {

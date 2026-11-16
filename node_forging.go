@@ -640,6 +640,14 @@ func (n *Node) initBlockForger(
 	return nil
 }
 
+// The election is what the forger reports slots to, and the forger and the
+// forged-block tracker are what the ledger reports settled slot battles to.
+var (
+	_ forging.SlotObserver             = (*leader.Election)(nil)
+	_ ledger.SlotBattleOutcomeRecorder = (*forging.BlockForger)(nil)
+	_ ledger.SlotBattleOutcomeRecorder = (*ownForgedBlocks)(nil)
+)
+
 // poolForging is one pool's running leader election and block forger.
 type poolForging struct {
 	election nodeconsensus.LeaderScheduler
