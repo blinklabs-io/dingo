@@ -293,5 +293,9 @@ func TestLeiosCertificationGapForAnnouncement(t *testing.T) {
 	f.ls.currentPParams = pparams
 	f.ls.publishSnapshotsLocked()
 	_, err = f.ls.LeiosCertificationGap(150)
-	require.ErrorContains(t, err, "dijkstra protocol parameters are unavailable")
+	require.ErrorContains(
+		t,
+		err,
+		"dijkstra protocol parameters are unavailable",
+	)
 }
