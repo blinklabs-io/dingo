@@ -398,6 +398,13 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid immutableDb.promoteBatch",
 		},
 		{
+			name: "negative immutable db promote frequency",
+			modify: func(c *Config) {
+				c.ImmutableDB.PromoteFrequency = -5 * time.Second
+			},
+			wantErr: "invalid immutableDb.promoteFrequency",
+		},
+		{
 			name: "negative history expiry frequency",
 			modify: func(c *Config) {
 				c.HistoryExpiry.Frequency = -time.Second

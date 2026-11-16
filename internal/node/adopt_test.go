@@ -803,3 +803,75 @@ func TestLoadBlobsRefusesDatabaseBehindImmutableTip(t *testing.T) {
 	after, _ := chainTipOf(t, db)
 	require.Equal(t, before, after, "the refused load added no block")
 }
+
+// Blocks the chain already holds past the recorded tip keep their bodies in
+// the blob store, below a tip the adoption would move past them, so promotion
+// would never reach them. Adoption refuses rather than skip over them.
+func TestAdoptImmutableChunksRefusesBodiesPastRecordedTip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir, digests := adoptSource(t, 2)
+	blocks := fixtureBlocks(t, dir)
+	chunk0 := blocksBelow(blocks, 4320)
+	chunk1 := blocksBelow(blocks, 2*4320)[len(chunk0):]
+	require.Greater(t, len(chunk1), 1)
+	db := newAdoptDB(t, datatypes.StorageModeAPI)
+
+	_, err := adopt(t, ctx, db, dir, certifiedPrefix(digests, 1), nil)
+	require.NoError(t, err)
+	cm, err := chain.NewManager(ctx, db, nil)
+	require.NoError(t, err)
+	rb, err := rawBlockFromImmutableBlock(&chunk1[0])
+	require.NoError(t, err)
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(ctx, []chain.RawBlock{rb}))
+
+	_, err = adopt(t, ctx, db, dir, digests, nil)
+	require.ErrorIs(t, err, ErrAdoptUnavailable)
+	_, err = os.Stat(filepath.Join(dir, "00001.chunk"))
+	require.NoError(t, err, "the refused chunk stays in the source")
+	_, err = os.Stat(filepath.Join(db.ImmutableDir(), "00001.chunk"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	st, ok := db.ImmutableState()
+	require.True(t, ok)
+	require.Equal(t, uint64(len(chunk0)), st.TipIndex)
+	require.Equal(t, chunk0[len(chunk0)-1].Slot, st.TipSlot)
+}
+
+// The chunk the recorded tip ends in already has committed markers when a run
+// stopped inside it. A digest mismatch on the resumed run must not delete the
+// files those markers name.
+func TestAdoptImmutableChunksKeepsTipChunkFilesOnDigestMismatch(t *testing.T) {
+	t.Parallel()
+	const chunks = 3
+	dir, digests := adoptSource(t, chunks)
+	blocks := fixtureBlocks(t, dir)
+	chunk0 := blocksBelow(blocks, 4320)
+	db := newAdoptDB(t, datatypes.StorageModeAPI)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err := adopt(t, ctx, db, dir, digests, func(cfg *AdoptChunksConfig) {
+		cfg.OnProgress = func(p LoadBlobsProgress) {
+			if p.BlocksCopied >= len(chunk0)+loadBlockBatchSize {
+				cancel()
+			}
+		}
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	slot, _ := chainTipOf(t, db)
+	require.Greater(t, slot, chunk0[len(chunk0)-1].Slot,
+		"blocks of chunk 1 already committed")
+
+	chunkPath := filepath.Join(db.ImmutableDir(), "00001.chunk")
+	data, err := os.ReadFile(chunkPath)
+	require.NoError(t, err)
+	data[len(data)-1] ^= 0xff
+	require.NoError(t, os.WriteFile(chunkPath, data, 0o644))
+
+	_, err = adopt(t, context.Background(), db, dir, digests, nil)
+	require.ErrorIs(t, err, immutable.ErrDigestMismatch)
+	for _, ext := range []string{".chunk", ".primary", ".secondary"} {
+		_, err := os.Stat(filepath.Join(db.ImmutableDir(), "00001"+ext))
+		require.NoError(t, err, "committed markers name 00001%s", ext)
+	}
+}

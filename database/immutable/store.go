@@ -270,6 +270,33 @@ func occupiedRels(offs []uint32) []uint64 {
 	return rels
 }
 
+// validPrimaryPrefix returns offs up to the first offset that does not follow
+// its predecessor by zero or one secondary entry, the only steps an append
+// writes. What follows that point is a torn tail when no offset in it claims
+// more entries than the prefix, as a zero-filled tail does. One that claims
+// more is damage inside the written index, and trimming there would drop the
+// valid blocks it hides.
+func validPrimaryPrefix(offs []uint32) ([]uint32, bool) {
+	for i, off := range offs {
+		var prev uint32
+		if i > 0 {
+			prev = offs[i-1]
+			if off == prev || off == prev+secondaryIndexEntrySize {
+				continue
+			}
+		} else if off == 0 {
+			continue
+		}
+		for _, later := range offs[i:] {
+			if later > prev {
+				return nil, false
+			}
+		}
+		return offs[:i], true
+	}
+	return offs, true
+}
+
 // recover reads the highest chunk and trims it to its last entry that the
 // primary index, the secondary index and the chunk bytes all agree on.
 func (s *Store) recover() error {
@@ -334,6 +361,14 @@ func (s *Store) recoverChunk(num uint64) (bool, error) {
 	offs, err := readPrimaryOffsets(s.path(num, ".primary"))
 	if err != nil {
 		return false, err
+	}
+	offs, ok := validPrimaryPrefix(offs)
+	if !ok {
+		return false, fmt.Errorf(
+			"%w: chunk %d primary index has an offset that skips entries; "+
+				"restore the chunk files or truncate the database",
+			ErrStoreCorrupt, num,
+		)
 	}
 	rels := occupiedRels(offs)
 	good := min(len(rels), len(secBytes)/secondaryIndexEntrySize)

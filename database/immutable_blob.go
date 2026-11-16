@@ -163,7 +163,6 @@ func (s *immutableBlobStore) GetContextLimited(
 		if getter, ok := s.BlobStore.(contextLimitedGetter); ok {
 			return getter.GetContextLimited(ctx, txn, key, maxBytes)
 		}
-		return s.GetContext(ctx, txn, key)
 	}
 	value, err := s.GetContext(ctx, txn, key)
 	if err != nil {

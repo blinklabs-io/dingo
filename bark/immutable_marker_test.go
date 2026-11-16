@@ -78,3 +78,39 @@ func TestBarkBlobStoreUnwrapsToItsUpstream(t *testing.T) {
 	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
 	require.Same(t, upstream, store.Unwrap())
 }
+
+// An iterator item that only classifies a promoted block reads the stored
+// marker through Bark rather than the body in the chunk files.
+func TestBarkIteratorItemExposesRawPromotedValue(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Immutable: database.ImmutableConfig{
+			Enabled: true, ChunkSlots: 1000,
+		},
+	})
+	require.NoError(t, err)
+	hash := bytes.Repeat([]byte{0x07}, 32)
+	body := []byte{0x82, 0x41, 0x07, 0x41, 0x02}
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID: 1, Slot: 70, Number: 1, Type: 1, Hash: hash, Cbor: body,
+	}, nil))
+	_, err = db.PromoteThrough(context.Background(), 1)
+	require.NoError(t, err)
+
+	baseURL, archiveSvc, httpClient := startFakeArchive(t, nil)
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	txn := db.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	key := types.BlockBlobKey(70, hash)
+	it := store.NewIterator(txn.Blob(), types.BlobIteratorOptions{Prefix: key})
+	defer it.Close()
+	it.Seek(key)
+	require.True(t, it.ValidForPrefix(key))
+	raw, ok := it.Item().(types.RawValueItem)
+	require.True(t, ok, "Bark items must forward the raw value capability")
+	got, err := raw.RawValueCopy(nil)
+	require.NoError(t, err)
+	require.True(t, types.IsImmutableMarker(got))
+	require.Zero(t, archiveSvc.fetchCalls)
+}

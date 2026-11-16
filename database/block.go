@@ -351,6 +351,22 @@ func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	if err := txn.holdBlockInventory(); err != nil {
 		return err
 	}
+	if txn.db != nil && txn.db.immutable != nil {
+		// The check above reads the in-memory tip, which promotion advances
+		// only after its markers commit. The recorded tip commits with the
+		// markers, so reading it here closes that window. A truncate lowers
+		// it before deleting, so the markers above it stay deletable.
+		floor, ok, err := recordedImmutableFloor(blob, blobTxn)
+		if err != nil {
+			return fmt.Errorf("read immutable state: %w", err)
+		}
+		if ok && block.ID <= floor {
+			return fmt.Errorf(
+				"%w: block index %d is at or below immutable tip index %d",
+				ErrRollbackBelowImmutableTip, block.ID, floor,
+			)
+		}
+	}
 	_, existingErr := rawBlobStore(blob).Get(
 		blobTxn, types.BlockBlobKey(block.Slot, block.Hash),
 	)

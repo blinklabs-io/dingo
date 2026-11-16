@@ -398,3 +398,53 @@ func TestStoreRecoveryRejectsNonContiguousEntries(t *testing.T) {
 	_, err = OpenStore(dir, geom)
 	require.ErrorIs(t, err, ErrStoreCorrupt)
 }
+
+// A primary index whose offsets describe fewer entries than the secondary
+// holds, through a damaged offset inside the written range rather than a torn
+// tail, is refused instead of trimming the valid blocks after it. A tail that
+// a torn write left zero-filled still recovers.
+func TestStoreRecoveryRejectsDamagedPrimaryOffset(t *testing.T) {
+	t.Parallel()
+	geom := Geometry{ChunkSlots: 10, CanContainEBB: false}
+	write := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		s, err := OpenStore(dir, geom)
+		require.NoError(t, err)
+		for i := range 3 {
+			_, err := s.Append(syntheticBlock(t, 1, uint64(i), byte(i+1)))
+			require.NoError(t, err)
+		}
+		require.NoError(t, s.Sync())
+		require.NoError(t, s.Close())
+		return dir
+	}
+	setOffset := func(t *testing.T, dir string, i int, v uint32) {
+		t.Helper()
+		p := filepath.Join(dir, "00000.primary")
+		data, err := os.ReadFile(p)
+		require.NoError(t, err)
+		require.Equal(t, []uint32{0, 56, 112, 168}, []uint32{
+			binary.BigEndian.Uint32(data[1:]),
+			binary.BigEndian.Uint32(data[5:]),
+			binary.BigEndian.Uint32(data[9:]),
+			binary.BigEndian.Uint32(data[13:]),
+		})
+		binary.BigEndian.PutUint32(data[1+4*i:], v)
+		require.NoError(t, os.WriteFile(p, data, 0o644))
+	}
+
+	damaged := write(t)
+	setOffset(t, damaged, 1, 0)
+	_, err := OpenStore(damaged, geom)
+	require.ErrorIs(t, err, ErrStoreCorrupt)
+
+	torn := write(t)
+	setOffset(t, torn, 3, 0)
+	s, err := OpenStore(torn, geom)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	tip, ok := s.Tip()
+	require.True(t, ok)
+	require.Equal(t, uint64(1), tip.Slot)
+}

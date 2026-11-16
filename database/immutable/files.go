@@ -109,7 +109,6 @@ func unshare(path string) error {
 	if err != nil {
 		return err
 	}
-	defer src.Close()
 	tmp := path + ".unshare"
 	dst, err := os.OpenFile(
 		tmp,
@@ -117,12 +116,16 @@ func unshare(path string) error {
 		info.Mode().Perm(),
 	)
 	if err != nil {
+		_ = src.Close()
 		return err
 	}
 	_, cerr := io.Copy(dst, src)
 	serr := dst.Sync()
 	clerr := dst.Close()
-	if err := errors.Join(cerr, serr, clerr); err != nil {
+	// Windows refuses to replace a file another handle still holds open, so
+	// the source is closed before the rename.
+	srcErr := src.Close()
+	if err := errors.Join(cerr, serr, clerr, srcErr); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("immutable store: unshare %s: %w", path, err)
 	}

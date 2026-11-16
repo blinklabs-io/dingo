@@ -841,3 +841,69 @@ func TestReclaimBlobSpaceDropsPromotedBodies(t *testing.T) {
 		require.Equal(t, b.Cbor, got.Cbor)
 	}
 }
+
+// An open that fails after the ImmutableDB would be set up, here on the
+// network gate, must not record a geometry: a retry with the configuration
+// that matches the database would otherwise meet a geometry it never chose.
+func TestFailedOpenRecordsNoImmutableGeometry(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	db, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: dir, Network: "preview"},
+	)
+	require.NoError(t, err)
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	wrong, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: dir,
+		Network: "mainnet",
+		Immutable: database.ImmutableConfig{
+			Enabled: true, ChunkSlots: 21600, CanContainEBB: true,
+		},
+	})
+	require.Error(t, err)
+	require.NoError(t, dbtest.CloseDatabase(wrong))
+
+	db, err = dbtest.NewDatabase(t, &database.Config{
+		DataDir: dir, Network: "preview", Immutable: testImmutableConfig,
+	})
+	require.NoError(t, err)
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	// A successful open records the geometry even before any promotion.
+	db, err = dbtest.NewDatabase(
+		t, &database.Config{DataDir: dir, Network: "preview"},
+	)
+	require.NoError(t, err)
+	st, ok := db.ImmutableState()
+	require.True(t, ok)
+	require.Equal(t, testImmutableConfig.ChunkSlots, st.Geometry.ChunkSlots)
+}
+
+// A promotion commits its markers before the in-memory tip moves. A delete in
+// that window passes the in-memory floor check, so it must refuse on the tip
+// recorded with the markers.
+func TestBlockDeleteRefusesBlockPromotedBeforeTipMoves(t *testing.T) {
+	t.Parallel()
+	blocks := fixtureModels(t, 3)
+	db, _ := newImmutableDB(t, 0)
+	seedBlocks(t, db, blocks)
+	var deleteErr error
+	ran := false
+	database.SetImmutablePromoteFault(db, func(step string) error {
+		if step != "state" || ran {
+			return nil
+		}
+		ran = true
+		_, below := db.ImmutableFloorIndex()
+		require.False(t, below, "the in-memory tip has not moved yet")
+		txn := db.BlockBlobTxn()
+		defer txn.Rollback() //nolint:errcheck
+		deleteErr = database.BlockDeleteTxn(txn, blocks[2])
+		return nil
+	})
+	_, err := db.PromoteThrough(context.Background(), 3)
+	require.NoError(t, err)
+	require.True(t, ran)
+	require.ErrorIs(t, deleteErr, database.ErrRollbackBelowImmutableTip)
+}

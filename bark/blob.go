@@ -569,6 +569,19 @@ func (i *barkItem) ValueCopy(dst []byte) ([]byte, error) {
 	return cbor, nil
 }
 
+// RawValueCopy returns the value as stored when the upstream item can, so a
+// caller classifying a promoted block reads its marker rather than its body.
+// Otherwise, or when the raw read fails, it reads like ValueCopy, which still
+// resolves expired history from the archive.
+func (i *barkItem) RawValueCopy(dst []byte) ([]byte, error) {
+	if raw, ok := i.upstream.(types.RawValueItem); ok {
+		if val, err := raw.RawValueCopy(dst); err == nil {
+			return val, nil
+		}
+	}
+	return i.ValueCopy(dst)
+}
+
 func (b *BlobStoreBark) GetCommitTimestamp() (int64, error) {
 	return b.upstream.GetCommitTimestamp()
 }

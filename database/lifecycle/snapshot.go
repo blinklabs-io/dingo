@@ -394,9 +394,11 @@ func Snapshot(
 	// The chunk files are captured under the same barrier as the blob state
 	// that records their tip, so the two describe one point in time. Linking
 	// and the copy of the open chunk are bounded; hashing waits for the
-	// barrier to be released.
+	// barrier to be released. Promotion commits its markers outside the
+	// barrier, so the ImmutableDB lock stays held until the blob backup has
+	// finished; markers committed before it reads would name chunk bytes the
+	// capture does not hold.
 	immutableCapture, err := captureImmutable(backupCtx, db, dir)
-	releaseImmutable()
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -438,6 +440,7 @@ func Snapshot(
 			switch result.store {
 			case "blob":
 				backupErr = result.err
+				releaseImmutable()
 			case "utxoset":
 				utxoSetErr = result.err
 			default:

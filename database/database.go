@@ -693,6 +693,9 @@ func New(
 		// Database is available for recovery, so return it with error
 		return db, err
 	}
+	if err := db.recordImmutableState(); err != nil {
+		return db, err
+	}
 	if err := db.EnsureBlockInventory(); err != nil {
 		return db, err
 	}

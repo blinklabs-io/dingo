@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/blockpromote"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
@@ -652,6 +653,43 @@ func TestNodeStopClosesDatabaseToCompletion(t *testing.T) {
 	out := logs.String()
 	assert.Contains(t, out, "durable store closed")
 	assert.Contains(t, out, "resource=database")
+}
+
+// A promotion step still resolving its ceiling at the shutdown deadline reads
+// the blob store when it returns, so shutdown must leave storage open rather
+// than close it underneath that read.
+func TestNodeStopKeepsStorageOpenWhilePromotionLookupRuns(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	var enteredOnce sync.Once
+	promoter := blockpromote.New(blockpromote.Config{
+		DB:        db,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Frequency: time.Hour,
+		Ceiling: func(context.Context) (uint64, bool, error) {
+			enteredOnce.Do(func() { close(entered) })
+			<-release
+			return 0, false, nil
+		},
+	})
+	require.NoError(t, promoter.Start(context.Background()))
+	testutil.RequireReceive(
+		t, entered, time.Second, "promotion ceiling lookup did not start",
+	)
+
+	n := &Node{
+		config:        NewConfig(WithShutdownTimeout(100 * time.Millisecond)),
+		db:            db,
+		blockPromoter: promoter,
+	}
+	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	err = n.Stop()
+	require.ErrorIs(t, err, errStorageDrainUnconfirmed)
+	_, readErr := db.Metadata().GetBackfillCheckpoint("midnight", nil)
+	require.NoError(t, readErr, "storage must remain open while the lookup runs")
 }
 
 type shutdownLogBuffer struct {

@@ -7579,7 +7579,9 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   the highest covered block index (`TipIndex`). Blocks at or below `TipIndex`
   are immutable even where an expired body left nothing to write. Its presence
   installs the marker-resolving read wrapper at open time for every opener,
-  whatever its configuration. Raw classifiers (block inventory rebuild,
+  whatever its configuration. An open that creates the record writes it only
+  after its startup checks pass, so an open refused by, for example, the
+  network gate leaves no geometry behind. Raw classifiers (block inventory rebuild,
   existence checks before delete) read the stored marker and never the body.
 - **Chunk files.** `.chunk`, `.secondary` and `.primary` follow cardano-node's
   layout: a 56-byte secondary entry per block, a primary index of one 32-bit
@@ -7602,13 +7604,18 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   before it stop startup with an instruction to restore them. Recovery checks
   every entry of the highest chunk: each must start where the previous ended,
   and a primary index already padded to the chunk's full slot count is left
-  as it is. A torn tail is trimmed to the last entry whose primary offset,
+  as it is. Primary offsets must start at zero and step by zero or one
+  secondary entry; an offset that skips entries while a later one claims them
+  stops startup with `ErrStoreCorrupt`, while a tail of lower offsets, such as
+  a zero-filled torn write, is trimmed. A torn tail is trimmed to the last entry whose primary offset,
   secondary entry and CRC all agree; an entry that fails while a later one
   passes is corruption inside written data and stops startup with
   `ErrStoreCorrupt` rather than discarding the good blocks after it.
 - **Floor.** Rollback (bounded or unbounded), block removal, orphan blob
   cleanup and bulk block deletion refuse blocks at or below `TipIndex` with
-  `ErrRollbackBelowImmutableTip`. An operator truncate lowers `im_state` and cuts
+  `ErrRollbackBelowImmutableTip`. Block deletion also reads `TipIndex` from
+  `im_state` in its own transaction, which sees the tip a promotion commits
+  with its markers before the in-memory copy moves. An operator truncate lowers `im_state` and cuts
   the chunk files first, in that order, so an interrupted truncate resumes
   through the pending-truncate record.
 - **Space.** Block bodies are far below the badger value threshold, so they live
@@ -7624,8 +7631,9 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   carries no DDL; it makes binaries without the read path stop with a
   newer-schema error.
 - **Snapshots.** `lifecycle.Snapshot` takes the ImmutableDB lock before the
-  commit barrier (promotion holds it while waiting on a blob commit) and, under
-  the barrier, records `im_state` and the length of every chunk, primary and
+  commit barrier (promotion holds it while waiting on a blob commit) and holds
+  it until the blob backup finishes, since promotion commits its markers
+  outside the barrier. Under the barrier it records `im_state` and the length of every chunk, primary and
   secondary file. Chunks below the highest are hard-linked into the snapshot
   directory, falling back to a copy across filesystems; the highest chunk is
   copied up to its recorded length. The store copies a hard-linked file before
@@ -7637,7 +7645,8 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   list exceeds `MaxManifestBytes`. A manifest that declares an index has format
   version 3; every other snapshot keeps version 2, and both restore. Restore
   verifies every file against the index before the target exists, moves the
-  files into `<dataDir>/immutable` of the staging directory and activates it
+  files into `<dataDir>/immutable` of the staging directory, fsyncs each one,
+  and activates it
   with the rest. A cloud mirror uploads the same flat files; a restore fetches
   the index first and then exactly the files it lists, each bounded by its
   declared size. A snapshot of a database with no promoted block has no index.
@@ -7645,8 +7654,9 @@ applied tip move out of Badger into cardano-node compatible chunk files under
 - **Mithril chunks.** With `immutableDb.keepMithrilChunks`, a Mithril
   bootstrap of an empty database does not copy block bodies into Badger. Each
   certified chunk's three files are renamed into `<dataDir>/immutable`, read
-  back there against the certified SHA-256 digests (a mismatch deletes the
-  chunk's files and fails), fsynced with the directory, and only then does one
+  back there against the certified SHA-256 digests (a mismatch fails, and
+  deletes the chunk's files unless the recorded tip ends in that chunk, whose
+  committed markers name them), fsynced with the directory, and only then does one
   commit per batch write `bi`, `bh` and `bp..._metadata`, a `DIM1` marker
   whose location comes from the chunk's secondary index and the CRC of the
   bytes read, and in API mode the `DOFF` offsets of produced UTxOs. Before the
@@ -7665,7 +7675,8 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   only when its primary index has the exact length the geometry gives, one
   version byte plus four bytes for each relative slot and the final offset;
   otherwise it is refused before anything commits. A database that already
-  holds block bodies, a catch-up and a reward repair keep the body copy, and
+  holds block bodies, including blocks past the recorded tip when a later
+  chunk is pending (`ErrAdoptUnavailable`), a catch-up and a reward repair keep the body copy, and
   that copy is refused (`ErrLoadBehindImmutableTip`) on a database whose
   recorded tip is ahead of its chain, which an interrupted adoption leaves:
   bodies copied at or below the recorded tip would never be promoted. Finish
@@ -7678,8 +7689,10 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   `immutableDb.promoteBatch` is at most 100000. The chunk geometry is ten
   security parameters of slots per chunk plus the boundary slot, taking the
   security parameter from the Byron genesis, or the Shelley genesis when the
-  network has none. A Bark archive node serves promoted blocks, since its
-  reads go through the marker-resolving store.
+  network has none. A node that reads through Bark still gets promoted blocks
+  from the marker-resolving store, but an ImmutableDB node cannot back a Bark
+  archive: archive delivery needs `GetBlockURL`, which the Badger plugin the
+  ImmutableDB requires does not implement.
 
 ### Archive And History Expiry Contract
 

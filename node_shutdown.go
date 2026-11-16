@@ -318,8 +318,10 @@ func (n *Node) shutdown() error {
 
 	if n.blockPromoter != nil {
 		if stopErr := n.blockPromoter.Stop(ctx); stopErr != nil {
-			err = errors.Join(
-				err,
+			// Stop fails only while a ceiling lookup is still running, and
+			// that lookup reads the blob store when it returns.
+			storageDrainConfirmed = false
+			err = errors.Join(err, errStorageDrainUnconfirmed,
 				fmt.Errorf("block promotion shutdown: %w", stopErr))
 		}
 	}

@@ -17,8 +17,10 @@ package lifecycle_test
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
@@ -268,4 +271,47 @@ func TestSnapshotWaitsForImmutableLock(t *testing.T) {
 		"test-version", "badger", "sqlite",
 	)
 	require.NoError(t, err)
+}
+
+// lockProbeStore checks, as the blob backup starts, whether promotion could
+// take the ImmutableDB lock.
+type lockProbeStore struct {
+	blob.BlobStore
+	db       *database.Database
+	unlocked atomic.Bool
+}
+
+func (s *lockProbeStore) Unwrap() blob.BlobStore { return s.BlobStore }
+
+func (s *lockProbeStore) Backup(ctx context.Context, w io.Writer) error {
+	probe, cancel := context.WithTimeout(
+		context.Background(), 100*time.Millisecond,
+	)
+	defer cancel()
+	if unlock, err := s.db.LockImmutable(probe); err == nil {
+		s.unlocked.Store(true)
+		unlock()
+	}
+	return s.BlobStore.(blob.Backuper).Backup(ctx, w)
+}
+
+// Promotion commits its markers outside the commit barrier, so the ImmutableDB
+// lock must cover the blob backup too. A promotion between the chunk capture
+// and the backup would put markers in the snapshot for chunk bytes it lacks.
+func TestSnapshotHoldsImmutableLockThroughBlobBackup(t *testing.T) {
+	t.Parallel()
+	db := promotedSnapshotDB(t)
+	probe := &lockProbeStore{BlobStore: db.Blob(), db: db}
+	db.SetBlobStore(probe)
+
+	dir := snapshotTestDir(t, "snap-lock-probe")
+	_, err := lifecycle.Snapshot(
+		context.Background(), db, dir, lifecycle.TriggerManual,
+		"test-version", "badger", "sqlite",
+	)
+	require.NoError(t, err)
+	require.False(
+		t, probe.unlocked.Load(),
+		"promotion could run between the chunk capture and the blob backup",
+	)
 }

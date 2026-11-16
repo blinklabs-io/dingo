@@ -56,7 +56,14 @@ func supersededBytes(t *testing.T, store *BlobStoreBadger) int {
 
 func newReclaimStore(t *testing.T) *BlobStoreBadger {
 	t.Helper()
-	store, err := New(WithDataDir(t.TempDir()), WithGc(false))
+	// The defaults reserve a 2 GiB value log per store; these tests write
+	// about 16 MiB, in transactions of 100 bodies the memtable must hold.
+	store, err := New(
+		WithDataDir(t.TempDir()),
+		WithGc(false),
+		WithValueLogFileSize(1<<24),
+		WithMemTableSize(32<<20),
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	return store

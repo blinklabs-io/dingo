@@ -132,6 +132,15 @@ func AdoptImmutableChunks(
 				st.TipSlot, chainTip.Point.Slot, tipChunk,
 			)
 		}
+	case hasChain && chainTip.Point.Slot > st.TipSlot:
+		// Blocks past the recorded tip were stored with their bodies.
+		// Adopting a later chunk would move the tip over them, below where
+		// promotion resumes, so they would keep their bodies for good.
+		for _, num := range chunks {
+			if num > tipChunk {
+				return nil, ErrAdoptUnavailable
+			}
+		}
 	}
 
 	destDir := db.ImmutableDir()
@@ -193,9 +202,12 @@ func AdoptImmutableChunks(
 			},
 		)
 		if err != nil {
-			if errors.Is(err, immutable.ErrDigestMismatch) {
+			if errors.Is(err, immutable.ErrDigestMismatch) &&
+				(!st.HasTip || num > tipChunk) {
 				// Nothing committed for this chunk, so its files are not
-				// covered by any marker and are not worth keeping.
+				// covered by any marker and are not worth keeping. The chunk
+				// the recorded tip ends in can already hold committed
+				// markers, so its files stay.
 				removeChunkFiles(destDir, num)
 			}
 			return nil, fmt.Errorf("adopting chunk %d: %w", num, err)
@@ -529,6 +541,16 @@ func moveChunkFile(src, dst string) error {
 	if err == nil || !errors.Is(err, syscall.EXDEV) {
 		return err
 	}
+	if err := copyChunkFile(src, dst); err != nil {
+		return err
+	}
+	return os.Remove(src)
+}
+
+// copyChunkFile copies src to dst through a temporary name. It closes src
+// before returning, since Windows refuses to remove a file a handle still
+// holds open.
+func copyChunkFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -561,5 +583,5 @@ func moveChunkFile(src, dst string) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Remove(src)
+	return nil
 }

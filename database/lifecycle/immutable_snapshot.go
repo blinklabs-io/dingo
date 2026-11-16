@@ -314,6 +314,10 @@ func placeImmutableChunks(
 			if err := copyPrefix(ctx, src, dst, f.Size); err != nil {
 				return fmt.Errorf("place immutable file %q: %w", f.Name, err)
 			}
+		} else if err := syncPlacedFile(dst); err != nil {
+			// The staged copy was written without a sync; the markers the
+			// restore activates must not name bytes a power loss can drop.
+			return fmt.Errorf("place immutable file %q: %w", f.Name, err)
 		}
 		// Staged payload files are private; chunk files are read by other
 		// tools with the mode cardano-node gives them.
@@ -332,6 +336,16 @@ func placeImmutableChunks(
 		}
 	}
 	return syncDir(target)
+}
+
+// syncPlacedFile opens path for writing because Windows flushes a file only
+// through a handle with write access.
+func syncPlacedFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	return errors.Join(f.Sync(), f.Close())
 }
 
 // verifyImmutableFiles checks the chunk files in dir against the sizes and

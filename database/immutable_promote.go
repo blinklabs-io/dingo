@@ -146,6 +146,10 @@ type immutableRuntime struct {
 	// state mirrors the persisted record for lock-free floor checks.
 	stateMu sync.RWMutex
 	state   ImmutableState
+	// unrecorded is set while a state created by this open has not been
+	// persisted. Open records it only once the database has passed its
+	// startup checks; every later state write carries the geometry anyway.
+	unrecorded bool
 	// fault, when set by a test, is called at each durability step of a
 	// promotion batch and may fail it to simulate an interruption there.
 	fault func(step string) error
@@ -271,6 +275,30 @@ func (d *Database) loadImmutableState() (ImmutableState, bool, error) {
 	return st, err == nil, err
 }
 
+// recordedImmutableFloor reads the recorded tip index through txn, which sees
+// the state a promotion commits together with its markers. The bool is false
+// when nothing is immutable.
+func recordedImmutableFloor(
+	store blob.BlobStore,
+	txn types.Txn,
+) (uint64, bool, error) {
+	data, err := rawBlobStore(store).Get(txn, []byte(ImmutableStateKey))
+	if err != nil {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	st, err := decodeImmutableState(data)
+	if err != nil {
+		return 0, false, err
+	}
+	if !st.HasTip && st.TipIndex == 0 {
+		return 0, false, nil
+	}
+	return st.TipIndex, true, nil
+}
+
 func (d *Database) writeImmutableState(st ImmutableState) error {
 	store, release := d.PinBlob()
 	defer release()
@@ -286,8 +314,9 @@ func (d *Database) writeImmutableState(st ImmutableState) error {
 }
 
 // initImmutable installs the marker-resolving read wrapper when the database
-// holds an ImmutableDB state record, and creates the record when the
-// configuration enables the feature. It runs before anything reads blocks.
+// holds an ImmutableDB state record, and creates the state when the
+// configuration enables the feature; New records a created state once the
+// open's startup checks pass. It runs before anything reads blocks.
 func (d *Database) initImmutable() error {
 	cfg := d.config.Immutable
 	st, found, err := d.loadImmutableState()
@@ -315,9 +344,6 @@ func (d *Database) initImmutable() error {
 			return fmt.Errorf("invalid ImmutableDB geometry %+v", geom)
 		}
 		st = ImmutableState{Geometry: geom}
-		if err := d.writeImmutableState(st); err != nil {
-			return fmt.Errorf("write immutable state: %w", err)
-		}
 	} else if cfg.Enabled && cfg.ChunkSlots != 0 &&
 		(cfg.ChunkSlots != st.Geometry.ChunkSlots ||
 			cfg.CanContainEBB != st.Geometry.CanContainEBB) {
@@ -341,14 +367,42 @@ func (d *Database) initImmutable() error {
 		old.mu.Unlock()
 	}
 	rt := &immutableRuntime{
-		dir:   filepath.Join(d.config.DataDir, ImmutableDirName),
-		state: st,
+		dir:        filepath.Join(d.config.DataDir, ImmutableDirName),
+		state:      st,
+		unrecorded: !found,
 	}
 	d.immutable = rt
 	d.SetBlobStore(&immutableBlobStore{
 		BlobStore: base,
 		dir:       rt.dir,
 	})
+	return nil
+}
+
+// recordImmutableState persists a state that initImmutable created. It runs
+// after the open's startup checks, so a database that fails them, such as one
+// opened with another network's configuration, is left without a geometry it
+// never ran under.
+func (d *Database) recordImmutableState() error {
+	rt := d.immutable
+	if rt == nil {
+		return nil
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if !rt.unrecorded {
+		return nil
+	}
+	// A state written since, by a promotion or adoption, already holds the
+	// geometry and must not be replaced.
+	if _, found, err := d.loadImmutableState(); err != nil {
+		return fmt.Errorf("load immutable state: %w", err)
+	} else if !found {
+		if err := d.writeImmutableState(rt.snapshot()); err != nil {
+			return fmt.Errorf("write immutable state: %w", err)
+		}
+	}
+	rt.unrecorded = false
 	return nil
 }
 
