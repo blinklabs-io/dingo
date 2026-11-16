@@ -171,6 +171,8 @@ func leiosEndorserBlockQuorumRefusal(
 		return ""
 	case leiosQuorumNotPossible:
 		return leiosEBSkipQuorumNotPossible
+	case leiosQuorumUnresolved:
+		return leiosEBSkipQuorumUnresolved
 	default:
 		return leiosEBSkipQuorumUnresolved
 	}
