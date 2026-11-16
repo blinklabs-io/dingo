@@ -30,7 +30,7 @@ import (
 // staged replay writes persist the relation without resolving transient IDs.
 func TestInsertUtxoModelCachesAssetInsert(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	store := withAPIStorage(newMigratedSQLiteStore(t))
 
 	utxo := utxoForInsertCacheTest(10, 0, 2_000_000)
 	utxo.Address = []byte("test-address")

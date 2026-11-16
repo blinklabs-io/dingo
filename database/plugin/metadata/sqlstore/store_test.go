@@ -38,6 +38,13 @@ import (
 
 var testStoreSequence atomic.Uint64
 
+// withAPIStorage switches store to API storage mode, the only mode that
+// keeps output asset rows.
+func withAPIStorage(store *Store) *Store {
+	store.storageMode = types.StorageModeAPI
+	return store
+}
+
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	db, err := sql.Open(
@@ -855,7 +862,7 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 	t *testing.T,
 ) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	store := withAPIStorage(newMigratedSQLiteStore(t))
 	ctx := context.Background()
 
 	const outputCount = 50

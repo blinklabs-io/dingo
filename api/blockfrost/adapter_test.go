@@ -422,7 +422,7 @@ func TestNodeAdapterAssetAddressesHonorsCancellation(t *testing.T) {
 func TestNodeAdapterAssetAddressesHydratesCompleteAssets(t *testing.T) {
 	t.Parallel()
 
-	adapter, store, db := newDBBackedAdapter(t)
+	adapter, store, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
 	payment := bytes.Repeat([]byte{0x35}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
@@ -736,7 +736,7 @@ func TestNodeAdapterAssetAddressesRejectsQuantityOverflow(t *testing.T) {
 func TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch(t *testing.T) {
 	t.Parallel()
 
-	adapter, store, db := newDBBackedAdapter(t)
+	adapter, store, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
 
 	payment := bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -756,6 +756,7 @@ func TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch(t *testing.T) {
 		Outputs: []models.Utxo{{
 			TxId:       txHash,
 			OutputIdx:  0,
+			Address:    []byte(addr.String()),
 			PaymentKey: payment,
 			AddedSlot:  1,
 			Amount:     types.Uint64(1_000_000),
@@ -1077,7 +1078,7 @@ func inSQLTransaction(t *testing.T, raw *sql.DB, seed func(tx *sql.Tx)) {
 func TestNodeAdapterAddressPointerIncludesSnapshotUtxos(t *testing.T) {
 	t.Parallel()
 
-	adapter, store, db := newDBBackedAdapter(t)
+	adapter, store, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
 
 	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
 	wantAddr := testPointerAddress(t, paymentHash, 0x01)

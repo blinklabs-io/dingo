@@ -943,11 +943,10 @@ func TestTrustedBatchOverlayEraGate(t *testing.T) {
 	}
 }
 
-// Every asset-bearing output the batch creates is spent again inside it,
-// on a store that never held an asset row: sqlite_sequence then has no
-// asset row to raise, and the overlay must create the one the per-row
-// path's insert-and-delete leaves.
-func TestTrustedBatchOverlayCreatesMissingSequenceRow(t *testing.T) {
+// Every asset-bearing output the batch creates is spent again inside it.
+// Core mode keeps no asset rows, so neither path writes one and neither
+// leaves an asset row in sqlite_sequence.
+func TestTrustedBatchOverlayLeavesNoAssetSequenceRow(t *testing.T) {
 	t.Parallel()
 	seed := bytes.Repeat([]byte{0xB1}, 32)
 	payOther := rowBatchingBaseAddress(t, 0x44, 0x55)
@@ -972,7 +971,7 @@ func TestTrustedBatchOverlayCreatesMissingSequenceRow(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, rowBatchingQueryOne[int](t, raw,
 		`SELECT COUNT(*) FROM asset`))
-	require.Equal(t, 1, rowBatchingQueryOne[int](t, raw,
+	require.Zero(t, rowBatchingQueryOne[int](t, raw,
 		`SELECT COUNT(*) FROM sqlite_sequence WHERE name = 'asset'`))
 }
 

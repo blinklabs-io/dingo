@@ -47,6 +47,12 @@ const utxoRowColumns = "utxo.tx_id, " +
 	"utxo.datum_hash, utxo.id, utxo.added_slot, utxo.deleted_slot, " +
 	"utxo.amount, utxo.output_idx, utxo.payment_script"
 
+// storesUtxoAssets reports whether output asset rows are maintained. Core
+// storage mode reads output values from the stored CBOR, so it keeps none.
+func (s *Store) storesUtxoAssets() bool {
+	return s.storageMode == types.StorageModeAPI
+}
+
 func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 	if utxo == nil {
 		return errors.New("create UTxO: UTxO is nil")
@@ -93,6 +99,9 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 				return err
 			}
 			for i := range utxo.Assets {
+				if !s.storesUtxoAssets() {
+					break
+				}
 				asset := &utxo.Assets[i]
 				asset.UtxoID = utxo.ID
 				assetID, err := q.CreateAsset(
@@ -964,6 +973,9 @@ func (s *Store) importUtxos(
 					return err
 				}
 				for j := range item.Assets {
+					if !s.storesUtxoAssets() {
+						break
+					}
 					asset := item.Assets[j]
 					if _, err := s.execCached(ctx, db, importAssetQuery,
 						asset.Name,
@@ -3296,7 +3308,7 @@ func (s *Store) loadUtxoAssetsPointers(
 	db queryer,
 	utxos []*models.Utxo,
 ) error {
-	if len(utxos) == 0 {
+	if len(utxos) == 0 || !s.storesUtxoAssets() {
 		return nil
 	}
 	for _, utxo := range utxos {

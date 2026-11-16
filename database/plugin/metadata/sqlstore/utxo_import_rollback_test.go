@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -50,7 +51,7 @@ WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?)
 // own slot removes it.
 func TestRollbackKeepsImportedUtxoLinkedToProducer(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	store := withAPIStorage(newMigratedSQLiteStore(t))
 
 	const anchor, producerSlot = uint64(100), uint64(80)
 	replayed := conflictRepairUtxo(1, true)
@@ -93,4 +94,44 @@ func TestRollbackKeepsImportedUtxoLinkedToProducer(t *testing.T) {
 		_, _, found := utxoAddedSlotAndAssets(t, store, u.TxId, u.OutputIdx)
 		require.False(t, found, "rollback below the anchor removes the output")
 	}
+}
+
+// TestCoreModeImportAndRollbackLeaveAssetTableEmpty proves the import,
+// producer-link and rollback sequence keeps outputs without ever writing or
+// restoring an asset row in core mode.
+func TestCoreModeImportAndRollbackLeaveAssetTableEmpty(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	require.Equal(t, types.StorageModeCore, store.storageMode)
+
+	const anchor, producerSlot = uint64(100), uint64(80)
+	imported := conflictRepairUtxo(1, true)
+	imported.AddedSlot = anchor
+	require.NotEmpty(t, imported.Assets)
+	require.NoError(t, store.ImportUtxos([]models.Utxo{imported}, nil))
+
+	hydrate := imported
+	producerID := producerFor(t, store, hydrate.TxId)
+	hydrate.TransactionID = &producerID
+	hydrate.AddedSlot = producerSlot
+	require.NoError(t, store.ImportUtxos([]models.Utxo{hydrate}, nil))
+
+	require.NoError(t, store.DeleteUtxosAfterSlot(anchor, nil))
+	_, assets, found := utxoAddedSlotAndAssets(
+		t, store, imported.TxId, imported.OutputIdx,
+	)
+	require.True(t, found, "rollback to the anchor must keep the output")
+	require.Zero(t, assets)
+
+	require.NoError(t, store.DeleteUtxosAfterSlot(producerSlot-1, nil))
+	_, _, found = utxoAddedSlotAndAssets(
+		t, store, imported.TxId, imported.OutputIdx,
+	)
+	require.False(t, found)
+
+	var assetRows int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM asset",
+	).Scan(&assetRows))
+	require.Zero(t, assetRows)
 }

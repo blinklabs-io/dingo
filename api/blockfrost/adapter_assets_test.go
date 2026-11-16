@@ -226,7 +226,9 @@ func newSlotTimeDBBackedAdapter(
 	t *testing.T,
 ) (*NodeAdapter, *sql.DB, *database.Database) {
 	t.Helper()
-	adapter, raw, db := newDBBackedAdapter(t)
+	adapter, raw, db := newDBBackedAdapterWithStorageMode(
+		t, types.StorageModeAPI,
+	)
 	adapter.slotTime = testSlotTime
 	return adapter, raw, db
 }
