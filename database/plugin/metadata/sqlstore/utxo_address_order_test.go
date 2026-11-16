@@ -209,3 +209,18 @@ func TestIndexedAddressPageStatementAvoidsSort(t *testing.T) {
 		})
 	}
 }
+
+// TestIndexedAddressJoinSyntaxFollowsDialect checks CROSS JOIN carries an ON
+// predicate only where the dialect accepts it: PostgreSQL rejects ON after
+// CROSS JOIN, so every non-SQLite caller gets a plain JOIN.
+func TestIndexedAddressJoinSyntaxFollowsDialect(t *testing.T) {
+	t.Parallel()
+	query := &models.UtxoWithOrderingQuery{IndexedExactAddress: []byte("addr")}
+	sqliteFrom, _, _, err := utxoOrderingClauses(query, true)
+	require.NoError(t, err)
+	require.Contains(t, sqliteFrom, "CROSS JOIN utxo ON")
+	otherFrom, _, _, err := utxoOrderingClauses(query, false)
+	require.NoError(t, err)
+	require.NotContains(t, otherFrom, "CROSS JOIN")
+	require.Contains(t, otherFrom, "JOIN utxo ON utxo.id = utxo_address.utxo_id")
+}

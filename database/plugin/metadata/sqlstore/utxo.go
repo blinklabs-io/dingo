@@ -2272,8 +2272,14 @@ func utxoOrderingClauses(
 			)
 		}
 		// utxo_address leads: its ordering index serves the page order, so
-		// the join to utxo must not be reordered ahead of it.
-		from = "utxo_address CROSS JOIN utxo ON utxo.id = utxo_address.utxo_id"
+		// on SQLite CROSS JOIN fixes the loop order and keeps the join to utxo
+		// from being reordered ahead of it. PostgreSQL does not accept ON after
+		// CROSS JOIN and plans the lookup from the address index on its own.
+		join := "JOIN"
+		if disqualifyLivenessIndex {
+			join = "CROSS JOIN"
+		}
+		from = "utxo_address " + join + " utxo ON utxo.id = utxo_address.utxo_id"
 		predicate += " AND utxo_address.address = ?"
 		slotExpr = utxoAddressSlotExpr
 		blockIndexExpr = utxoAddressBlockIndexExpr

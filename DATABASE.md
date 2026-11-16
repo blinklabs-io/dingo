@@ -525,8 +525,9 @@ entries written before it leave both `NULL`.
 Blockfrost asset-holder pages aggregate live quantities in metadata storage,
 and historical Mesh balances aggregate address balances without materializing
 the matching UTxOs. Blockfrost address-list pages use the exact address index
-for SQL ordering, offset, and total count after API-mode startup backfill,
-avoiding CBOR scans of earlier outputs on deep pages. If that index is not
+for SQL ordering and offset after API-mode startup backfill, avoiding CBOR scans
+of earlier outputs on deep pages. The page does not count the address: its total
+is exact only when the page reaches the end of the address. If that index is not
 available, address listing retains the CBOR candidate scan. Historical
 balance queries sum every matching row; they return `ErrTooManyUtxoResults`
 only when the caller passes a positive row bound and the address exceeds it. `utxo_address`
