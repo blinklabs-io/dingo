@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -32,6 +33,7 @@ import (
 func TestUtxoAssetsReadInCanonicalOrderRegardlessOfInsertion(t *testing.T) {
 	t.Parallel()
 	store, db := newManagementTestStoreWithRawDB(t)
+	store.storageMode = types.StorageModeAPI
 
 	var p1, p2 lcommon.Blake2b224
 	p1[0], p2[0] = 0x01, 0x02

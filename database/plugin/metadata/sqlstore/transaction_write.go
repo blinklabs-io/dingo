@@ -2172,6 +2172,9 @@ func (s *Store) persistUtxoRelationsWithAddressRows(
 		return err
 	}
 	for i := range utxo.Assets {
+		if !s.storesUtxoAssets() {
+			break
+		}
 		asset := &utxo.Assets[i]
 		asset.UtxoID = id
 		asset.ID = 0
@@ -2248,6 +2251,9 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 		return err
 	}
 	for i := range utxo.Assets {
+		if !s.storesUtxoAssets() {
+			break
+		}
 		asset := &utxo.Assets[i]
 		asset.UtxoID = id
 		asset.ID = 0

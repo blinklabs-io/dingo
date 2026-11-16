@@ -617,7 +617,13 @@ func TestApplyRowBatchingSameChunkDependencies(t *testing.T) {
 
 			assets := rowBatchingQueryOne[int](t, raw,
 				`SELECT COUNT(*) FROM asset`)
-			require.Positive(t, assets, "the native asset output is stored")
+			if mode == types.StorageModeAPI {
+				require.Positive(t, assets,
+					"the native asset output is stored")
+			} else {
+				require.Zero(t, assets,
+					"core mode stores no asset rows")
+			}
 			pools := rowBatchingQueryOne[int](t, raw,
 				`SELECT COUNT(*) FROM pool`)
 			require.Equal(t, 1, pools)

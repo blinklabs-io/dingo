@@ -270,10 +270,10 @@ func TestBatchUtxoOverlayMatchesPerRowPath(t *testing.T) {
 	require.Contains(t, states[1], "name=utxo|seq=")
 }
 
-// Core storage mode does not index UTxO addresses, so the overlay, which
-// only runs in that mode, writes no utxo_address row even for outputs that
-// carry assets.
-func TestBatchUtxoOverlayWritesNoAddressInCoreMode(t *testing.T) {
+// Core storage mode does not index UTxO addresses or asset rows, so the
+// overlay, which only runs in that mode, writes neither even for outputs
+// that carry assets.
+func TestBatchUtxoOverlayWritesNoAddressOrAssetInCoreMode(t *testing.T) {
 	t.Parallel()
 	chain := buildOverlayChain(t, 4)
 	store := newForeignKeySQLiteStore(t)
@@ -286,7 +286,7 @@ func TestBatchUtxoOverlayWritesNoAddressInCoreMode(t *testing.T) {
 	require.NoError(t, store.writeDB.QueryRowContext(
 		context.Background(), `SELECT COUNT(*) FROM utxo_address`,
 	).Scan(&addresses))
-	require.Positive(t, assets)
+	require.Zero(t, assets)
 	require.Zero(t, addresses)
 }
 

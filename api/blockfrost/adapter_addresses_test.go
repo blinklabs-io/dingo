@@ -129,7 +129,7 @@ INSERT INTO address_transaction (
 
 func TestNodeAdapterAddressAssetUTXOs(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
+	adapter, raw, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
 	addr, _, _ := testKeyAddress(t, 0x71, 0)
 	policy := bytes.Repeat([]byte{0x72}, lcommon.AddressHashSize)
 	other := bytes.Repeat([]byte{0x73}, lcommon.AddressHashSize)
@@ -197,7 +197,7 @@ func TestNodeAdapterAddressAssetUTXOs(t *testing.T) {
 
 func TestNodeAdapterAddressTotal(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
+	adapter, raw, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
 	addr, payment, _ := testKeyAddress(t, 0x81, 0)
 	policy := bytes.Repeat([]byte{0x82}, lcommon.AddressHashSize)
 	asset := []models.Asset{{PolicyId: policy, Name: []byte("T"), Amount: 2}}
@@ -266,7 +266,7 @@ func TestNodeAdapterAddressTotalUnknownAddress(t *testing.T) {
 
 func TestNodeAdapterAddressExtended(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
+	adapter, raw, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
 	addr, _, _ := testKeyAddress(t, 0xa1, 0xa2)
 	policy := bytes.Repeat([]byte{0xa3}, lcommon.AddressHashSize)
 	policyHex := hex.EncodeToString(policy)
@@ -486,7 +486,7 @@ func TestNodeAdapterAddressStopsOnCancelledContext(t *testing.T) {
 // asset order, and must not count outputs at sibling address forms.
 func TestNodeAdapterAddressBatchedBalanceIsExact(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
+	adapter, raw, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
 	addr, _, _ := testKeyAddress(t, 0xb3, 0xb4)
 	policy := bytes.Repeat([]byte{0xb5}, lcommon.AddressHashSize)
 	big := models.Asset{PolicyId: policy, Name: []byte("b"), Amount: 1 << 63}
@@ -525,7 +525,7 @@ func TestNodeAdapterAddressBatchedBalanceIsExact(t *testing.T) {
 
 func TestNodeAdapterAddressReadBudget(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
+	adapter, raw, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
 	addr, _, _ := testKeyAddress(t, 0xb7, 0xb8)
 	policy := bytes.Repeat([]byte{0xb9}, lcommon.AddressHashSize)
 	seedSummaryOutputs(
@@ -557,7 +557,7 @@ func TestNodeAdapterAddressReadBudget(t *testing.T) {
 
 func TestNodeAdapterAddressExtendedCapsEnrichment(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
+	adapter, raw, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
 	addr, _, _ := testKeyAddress(t, 0xc1, 0xc2)
 	policy := bytes.Repeat([]byte{0xc3}, lcommon.AddressHashSize)
 	seedAddressOutput(
@@ -743,7 +743,7 @@ func TestNodeAdapterAddressPaymentCredUtxoBudget(t *testing.T) {
 
 func TestNodeAdapterAddressTotalReadBudget(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
+	adapter, raw, db := newDBBackedAdapterWithStorageMode(t, types.StorageModeAPI)
 	addr, _, _ := testKeyAddress(t, 0xd1, 0xd2)
 	policy := bytes.Repeat([]byte{0xd3}, lcommon.AddressHashSize)
 	insertAdapterTransaction(

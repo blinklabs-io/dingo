@@ -53,7 +53,7 @@ func insertAssetHolding(
 // another asset's do not, and an asset nobody holds totals zero.
 func TestGetAssetQuantityByPolicyAndNameSumsLiveHoldings(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	store := withAPIStorage(newMigratedSQLiteStore(t))
 	policyID := bytes.Repeat([]byte{0x51}, 28)
 	assetName := []byte("summed")
 	other := []byte("other")
@@ -78,7 +78,7 @@ func TestGetAssetQuantityByPolicyAndNameSumsLiveHoldings(t *testing.T) {
 // bits, which must fail rather than wrap.
 func TestGetAssetQuantityByPolicyAndNameRejectsOverflow(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	store := withAPIStorage(newMigratedSQLiteStore(t))
 	policyID := bytes.Repeat([]byte{0x52}, 28)
 	assetName := []byte("overflow")
 	insertAssetHolding(t, store, 50, policyID, assetName, 1<<63, 0)

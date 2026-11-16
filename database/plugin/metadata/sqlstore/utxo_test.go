@@ -1831,7 +1831,7 @@ func TestGetUtxosByAddressDetectsOverflowAcrossOverlappingChunks(t *testing.T) {
 // paying for asset joins that would be immediately discarded.
 func TestGetUtxosByAddressWithOrderingSkipAssets(t *testing.T) {
 	t.Parallel()
-	store := newManagementTestStore(t)
+	store := withAPIStorage(newManagementTestStore(t))
 
 	var policyId lcommon.Blake2b224
 	policyId[0] = 0xaa
@@ -2060,10 +2060,10 @@ func TestImportUtxosDeferredSQLiteBatchesLiveRows(t *testing.T) {
 	require.Equal(t, outputCount, addressCount)
 }
 
-// TestImportUtxosDeferredSQLiteSkipsAddressInCoreMode proves the batched
-// import omits the API-only utxo_address relation in core mode, even for an
-// asset-bearing output.
-func TestImportUtxosDeferredSQLiteSkipsAddressInCoreMode(t *testing.T) {
+// TestImportUtxosDeferredSQLiteSkipsAddressAndAssetInCoreMode proves the
+// batched import omits the API-only utxo_address and asset relations in core
+// mode, even for an asset-bearing output.
+func TestImportUtxosDeferredSQLiteSkipsAddressAndAssetInCoreMode(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	require.Equal(t, types.StorageModeCore, store.storageMode)
@@ -2088,9 +2088,63 @@ func TestImportUtxosDeferredSQLiteSkipsAddressInCoreMode(t *testing.T) {
 	require.NoError(t, store.writeDB.QueryRow(
 		"SELECT COUNT(*) FROM utxo_address",
 	).Scan(&addressCount))
-	require.Equal(t, 1, assetCount)
+	require.Zero(t, assetCount,
+		"core mode must not persist output asset rows")
 	require.Zero(t, addressCount,
 		"core mode must not persist API-only UTxO addresses")
+}
+
+// TestInsertUtxoModelCoreModeWritesNoAssetRows proves block apply leaves the
+// asset table empty in core mode, where output values are read from CBOR.
+func TestInsertUtxoModelCoreModeWritesNoAssetRows(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	require.Equal(t, types.StorageModeCore, store.storageMode)
+
+	utxo := utxoForInsertCacheTest(0x92, 0, 1_000_000)
+	utxo.Address = []byte("test-address")
+	utxo.Assets = []models.Asset{{
+		Name:        []byte("token"),
+		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
+		Fingerprint: []byte("asset1"),
+		Amount:      types.Uint64(9),
+	}}
+	insertUtxoInTxn(t, store, utxo, true)
+	require.NotZero(t, utxo.ID)
+
+	var assetCount int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM asset",
+	).Scan(&assetCount))
+	require.Zero(t, assetCount)
+}
+
+// TestGetUtxoLoadsAssetRowsOnlyInAPIMode proves a UTxO lookup reads the asset
+// table in API mode and skips it in core mode.
+func TestGetUtxoLoadsAssetRowsOnlyInAPIMode(t *testing.T) {
+	t.Parallel()
+	store := withAPIStorage(newMigratedSQLiteStore(t))
+
+	utxo := utxoForInsertCacheTest(0x93, 0, 1_000_000)
+	utxo.Address = []byte("test-address")
+	utxo.Assets = []models.Asset{{
+		Name:        []byte("token"),
+		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
+		Fingerprint: []byte("asset1"),
+		Amount:      types.Uint64(9),
+	}}
+	insertUtxoInTxn(t, store, utxo, true)
+
+	got, err := store.GetUtxo(utxo.TxId, utxo.OutputIdx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Len(t, got.Assets, 1)
+
+	store.storageMode = types.StorageModeCore
+	got, err = store.GetUtxo(utxo.TxId, utxo.OutputIdx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Empty(t, got.Assets)
 }
 
 // TestImportUtxosDeferredSQLiteDoesNotMutateInput proves the batched path
