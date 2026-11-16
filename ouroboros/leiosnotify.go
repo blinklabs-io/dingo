@@ -383,6 +383,39 @@ type leiosForgedEBLog struct {
 	retryCursors map[string]int
 	wakeCh       chan struct{}
 	announced    map[string]map[string]time.Time
+	// offered holds the endorser-block parts already offered on each
+	// connection. A receiver ends the connection on a second offer of the
+	// same body or closure, and the same part can be queued again: a peer
+	// offering a forged or relayed endorser block back marks it for relay.
+	offered map[string]map[leiosOfferedPart]struct{}
+}
+
+// leiosOfferedPart identifies the body offer (closure false) or the closure
+// offer (closure true) of one endorser block.
+type leiosOfferedPart struct {
+	slot    uint64
+	hash    string
+	closure bool
+}
+
+// offeredPart returns the part an offer entry offers, and false for any
+// other kind of entry.
+func (e leiosForgedEBEntry) offeredPart() (leiosOfferedPart, bool) {
+	switch {
+	case e.txOffer != nil:
+		return leiosOfferedPart{
+			slot:    e.txOffer.Slot,
+			hash:    string(e.txOffer.Hash),
+			closure: true,
+		}, true
+	case e.point != nil && e.announcement == nil && e.vote == nil:
+		return leiosOfferedPart{
+			slot: e.point.Slot,
+			hash: string(e.point.Hash),
+		}, true
+	default:
+		return leiosOfferedPart{}, false
+	}
 }
 
 func newLeiosForgedEBLog() *leiosForgedEBLog {
@@ -394,6 +427,7 @@ func newLeiosForgedEBLog() *leiosForgedEBLog {
 		retryCursors: make(map[string]int),
 		wakeCh:       make(chan struct{}),
 		announced:    make(map[string]map[string]time.Time),
+		offered:      make(map[string]map[leiosOfferedPart]struct{}),
 	}
 }
 
@@ -582,8 +616,9 @@ func (l *leiosForgedEBLog) nextWhileConnected(
 		retry = retry && retryIndex == cursor
 		header := len(item.entry.dependencyHeader) > 0 &&
 			!l.announcedToLocked(connKey, item.entry.dependencyHeader)
-		if len(item.entry.announcement) > 0 &&
-			l.announcedToLocked(connKey, item.entry.announcement) {
+		if (len(item.entry.announcement) > 0 &&
+			l.announcedToLocked(connKey, item.entry.announcement)) ||
+			l.offeredToLocked(connKey, item.entry) {
 			cursor = item.index + 1
 			l.cursors[connKey] = cursor
 			if retry {
@@ -661,6 +696,7 @@ func (l *leiosForgedEBLog) complete(
 					item.entry.expiresAt,
 				)
 			}
+			l.rememberOfferLocked(connKey, item.entry)
 		}
 		if l.cursors[connKey] == reserved.index {
 			l.cursors[connKey] = reserved.index + 1
@@ -688,6 +724,47 @@ func (l *leiosForgedEBLog) complete(
 func (l *leiosForgedEBLog) announcedToLocked(connKey string, raw []byte) bool {
 	_, present := l.announced[connKey][leiosAnnouncementIdentity(raw)]
 	return present
+}
+
+func (l *leiosForgedEBLog) offeredToLocked(
+	connKey string,
+	entry leiosForgedEBEntry,
+) bool {
+	part, ok := entry.offeredPart()
+	if !ok {
+		return false
+	}
+	_, present := l.offered[connKey][part]
+	return present
+}
+
+// rememberOfferLocked records a delivered offer for connKey. Past
+// leiosEBLogMaxEntries the lowest slots are forgotten first: the relay lead
+// keeps an offer that old from being sent at all.
+func (l *leiosForgedEBLog) rememberOfferLocked(
+	connKey string,
+	entry leiosForgedEBEntry,
+) {
+	part, ok := entry.offeredPart()
+	if !ok {
+		return
+	}
+	parts := l.offered[connKey]
+	if parts == nil {
+		parts = make(map[leiosOfferedPart]struct{})
+		l.offered[connKey] = parts
+	}
+	parts[part] = struct{}{}
+	for len(parts) > leiosEBLogMaxEntries {
+		var oldest leiosOfferedPart
+		first := true
+		for candidate := range parts {
+			if first || candidate.slot < oldest.slot {
+				oldest, first = candidate, false
+			}
+		}
+		delete(parts, oldest)
+	}
 }
 
 func (l *leiosForgedEBLog) rememberAnnouncementLocked(
@@ -831,6 +908,7 @@ func (l *leiosForgedEBLog) removeConnLocked(connKey string) {
 	}
 	delete(l.cursors, connKey)
 	delete(l.announced, connKey)
+	delete(l.offered, connKey)
 	delete(l.owners, connKey)
 	delete(l.retryCursors, connKey)
 	l.pruneLocked()
@@ -1681,7 +1759,8 @@ func (o *Ouroboros) handleInvalidLeiosAnnouncement(
 // are dropped without touching the endorser-block cache or the backfill
 // source table, so a peer cannot churn those structures, or evict sources
 // recorded for real points, with arbitrary points. Dropping is not
-// penalized: clock skew makes edge-of-window offers legitimate.
+// penalized: clock skew makes edge-of-window offers legitimate. Offers that
+// checkLeiosPeerOffer rejects never reach it: they end the connection.
 func (o *Ouroboros) leiosOfferedPointPlausible(
 	point ocommon.Point,
 	budgetKey string,
@@ -1715,6 +1794,21 @@ func (o *Ouroboros) leiosOfferedPointPlausible(
 		"reason", reason,
 	)
 	return false
+}
+
+func (o *Ouroboros) logInvalidLeiosOffer(
+	connectionID string,
+	point ocommon.Point,
+	err error,
+) {
+	o.config.Logger.Warn(
+		"disconnecting leios peer after invalid offer",
+		"component", "network",
+		"protocol", "leios-notify",
+		"connection_id", connectionID,
+		"slot", point.Slot,
+		"error", err,
+	)
 }
 
 func (o *Ouroboros) logLeiosOfferWithoutElection(
@@ -1779,6 +1873,17 @@ func (o *Ouroboros) handleLeiosNotifyMessage(
 		}
 		return nil
 	case *oleiosnotify.MsgBlockOffer:
+		// A replayed offer was checked when it first arrived. Checking comes
+		// before every screen and every commit below, so no path can act on
+		// an offer this peer was not entitled to make.
+		if !replay {
+			if err := o.checkLeiosPeerOffer(
+				connId, ctx.ConnectionDoneChan, m.Point, m.Size, false,
+			); err != nil {
+				o.logInvalidLeiosOffer(connId, m.Point, err)
+				return err
+			}
+		}
 		// Validate the peer-supplied point before it can touch the shared
 		// cache or its lock.
 		if !replay {
@@ -1931,6 +2036,14 @@ func (o *Ouroboros) handleLeiosNotifyMessage(
 			)
 		})
 	case *oleiosnotify.MsgBlockTxsOffer:
+		if !replay {
+			if err := o.checkLeiosPeerOffer(
+				connId, ctx.ConnectionDoneChan, m.Point, 0, true,
+			); err != nil {
+				o.logInvalidLeiosOffer(connId, m.Point, err)
+				return err
+			}
+		}
 		// Validate the peer-supplied point before it can touch the shared
 		// cache, the backfill-source table, or their locks.
 		if !replay {
@@ -2894,6 +3007,16 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			"ranking-block header has no valid endorser-block announcement",
 		)
 	}
+	// The peer's own announcement is what lets its offers for this endorser
+	// block through. It counts unless the message itself was found invalid: a
+	// header this node could not judge for a local reason (budget, clock skew,
+	// missing ledger state, deferred verification) must not turn the peer's
+	// next offer into a disconnect.
+	announced := func() {
+		o.recordLeiosPeerAnnouncement(
+			source, done, header.SlotNumber(), ebHash.Bytes(),
+		)
+	}
 	announcementKey := string(header.Hash().Bytes())
 	alreadyKnown, releaseValidation, err := o.reserveLeiosAnnouncementValidation(
 		announcementKey,
@@ -2902,14 +3025,19 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		headerRaw,
 	)
 	if err != nil {
+		if errors.Is(err, errLeiosAnnouncementValidationBudget) {
+			announced()
+		}
 		return err
 	}
 	if alreadyKnown {
+		announced()
 		return nil
 	}
 	defer releaseValidation()
 	currentSlot, slotErr := o.leiosAnnouncementLedger.CurrentSlot()
 	if slotErr != nil {
+		announced()
 		return fmt.Errorf(
 			"%w: read current slot for announcement validation: %w",
 			errLeiosAnnouncementLocalState,
@@ -2920,6 +3048,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		header.SlotNumber(),
 	)
 	if timeErr != nil {
+		announced()
 		return fmt.Errorf(
 			"%w: read announcement slot time: %w",
 			errLeiosAnnouncementLocalState,
@@ -2929,6 +3058,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	if header.SlotNumber() > currentSlot {
 		earlyBy := time.Until(announcementStart)
 		if earlyBy >= 0 && earlyBy <= leiosAnnouncementClockSkew {
+			announced()
 			return fmt.Errorf(
 				"%w: announcement slot %d is ahead of current slot %d by %s",
 				errLeiosAnnouncementClockSkew,
@@ -2946,6 +3076,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	age := time.Since(announcementStart)
 	if age < 0 {
 		if -age <= leiosAnnouncementClockSkew {
+			announced()
 			return fmt.Errorf(
 				"%w: announcement slot %d begins in %s",
 				errLeiosAnnouncementClockSkew,
@@ -2965,12 +3096,16 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		header,
 	)
 	if err != nil {
-		if ledger.IsHeaderVerificationDeferred(err) && deferVerification {
-			o.deferLeiosAnnouncement(header, raw, source, done)
+		if ledger.IsHeaderVerificationDeferred(err) {
+			announced()
+			if deferVerification {
+				o.deferLeiosAnnouncement(header, raw, source, done)
+			}
 		}
 		return fmt.Errorf("validate ranking-block header: %w", err)
 	}
 	if staleness == ledger.LeiosAnnouncementStaleOCIN {
+		announced()
 		o.config.Logger.Debug(
 			"ignoring leios announcement with stale opcert counter",
 			"component", "network",
@@ -2996,7 +3131,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	if age > leiosNotifyRelayAnnouncementAge {
 		// The announcement is still valid for the receiver, but the w31
 		// relay bound prevents an old message from propagating indefinitely.
-		return o.recordLeiosAnnouncement(
+		err = o.recordLeiosAnnouncement(
 			raw,
 			headerRaw,
 			ebHash,
@@ -3005,16 +3140,21 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			source,
 			false,
 		)
+	} else {
+		err = o.recordLeiosAnnouncement(
+			raw,
+			headerRaw,
+			ebHash,
+			ebSize,
+			header,
+			source,
+			true,
+		)
 	}
-	return o.recordLeiosAnnouncement(
-		raw,
-		headerRaw,
-		ebHash,
-		ebSize,
-		header,
-		source,
-		true,
-	)
+	if err == nil {
+		announced()
+	}
+	return err
 }
 
 func (o *Ouroboros) deferLeiosAnnouncement(
@@ -3520,7 +3660,8 @@ func (o *Ouroboros) leiosAnnouncementWireLocked(
 // EnqueueLeiosBlockAnnouncement validates and queues a locally forged
 // ranking-block header for LeiosNotify diffusion.
 func (o *Ouroboros) EnqueueLeiosBlockAnnouncement(raw []byte) {
-	if err := o.acceptLeiosAnnouncement(raw, "local"); err != nil {
+	err := o.acceptLeiosAnnouncement(raw, leiosLocalAnnouncementSource)
+	if err != nil {
 		o.config.Logger.Debug(
 			"suppressing local leios announcement",
 			"error",

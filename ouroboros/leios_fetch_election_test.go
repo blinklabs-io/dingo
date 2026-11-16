@@ -99,6 +99,21 @@ func announceLeiosElectionForTest(
 	))
 }
 
+// leiosPeerAnnouncedForTest records that the peer on connId announced point
+// over its own connection, so that its offers for point are valid. Tests whose
+// subject is what happens to a valid offer use it in place of a full
+// announcement exchange. done is the connection's done channel, nil when the
+// test's offers carry none.
+func (o *Ouroboros) leiosPeerAnnouncedForTest(
+	connId gouroboros.ConnectionId,
+	done <-chan any,
+	point ocommon.Point,
+) {
+	o.recordLeiosPeerAnnouncement(
+		leiosConnectionIdString(connId), done, point.Slot, point.Hash,
+	)
+}
+
 type countingLeiosTxOfferRequester struct {
 	blockRaw      []byte
 	blockRequests atomic.Int32
@@ -130,6 +145,7 @@ func TestLeiosManifestOfferFetchesOnlyAfterElectionObserved(t *testing.T) {
 	point, raw := testLeiosEndorserBlockRaw(t, 200)
 	offer := oleiosnotify.NewMsgBlockOffer(point, uint64(len(raw)))
 
+	o.leiosPeerAnnouncedForTest(first.Id(), nil, point)
 	require.NoError(t, o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: first.Id()}, offer,
 	))
@@ -156,6 +172,7 @@ func TestLeiosTxsOfferFetchesOnlyAfterElectionObserved(t *testing.T) {
 	secondGuard := o.leiosFetchGuardFor(second.Id())
 	point, raw := testLeiosEndorserBlockRaw(t, 201)
 
+	o.leiosPeerAnnouncedForTest(first.Id(), nil, point)
 	require.NoError(t, o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: first.Id()},
 		oleiosnotify.NewMsgBlockTxsOffer(point),
@@ -176,6 +193,7 @@ func TestLeiosOfferFetchesAfterSelectedHeaderObserved(t *testing.T) {
 	o, first, _ := newHeldManifestOfferPeers(t)
 	firstGuard := o.leiosFetchGuardFor(first.Id())
 	point, raw := testLeiosEndorserBlockRaw(t, 204)
+	o.leiosPeerAnnouncedForTest(first.Id(), nil, point)
 	require.NoError(t, o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: first.Id()},
 		oleiosnotify.NewMsgBlockOffer(point, uint64(len(raw))),
@@ -196,6 +214,7 @@ func TestLeiosUnelectedOfferStaysUnfetchedAfterOtherElection(t *testing.T) {
 	firstGuard := o.leiosFetchGuardFor(first.Id())
 	offered, raw := testLeiosEndorserBlockRaw(t, 205)
 	other, otherRaw := testLeiosEndorserBlockRaw(t, 206)
+	o.leiosPeerAnnouncedForTest(first.Id(), nil, offered)
 	require.NoError(t, o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: first.Id()},
 		oleiosnotify.NewMsgBlockOffer(offered, uint64(len(raw))),
@@ -260,6 +279,9 @@ func TestLeiosOfferReplayDoesNotBlockOnSaturatedConnection(t *testing.T) {
 		firstGuard.pendingMu.Unlock()
 	}()
 
+	o.recordLeiosPeerAnnouncement(
+		leiosConnectionIdString(first.Id()), firstDone, point.Slot, point.Hash,
+	)
 	require.NoError(t, o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{
 			ConnectionId: first.Id(), ConnectionDoneChan: firstDone,
