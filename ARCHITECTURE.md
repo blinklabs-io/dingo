@@ -12797,6 +12797,17 @@ endorser-block production before mempool validation and increment the
 without a new announcement. Known earlier-era parameters retain the operator
 caps for the Conway-header Leios prototype.
 
+Under Dijkstra parameters an endorser block is forged only while the committee
+of the slot's epoch can reach the quorum threshold in the slot's parameters,
+the same test that sizes the defaulted Leios mempool capacity
+(`leios.CommitteeKeysReachQuorum`): no committee short of it can certify one,
+and the reference gives such a slot no endorser-block capacity. The Leios
+pipeline adapter applies it after the produce window check. A committee short
+of the threshold skips the endorser block with reason `quorum_not_possible`; a
+missing threshold, an unknown slot epoch, or a committee the vote manager cannot
+resolve skips it with `quorum_unresolved`. Ranking-block forging, including
+embedding an already certified endorser block, is unaffected.
+
 #### Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 
 The node always validates the aggregate reference-script budget between steps 5

@@ -29,6 +29,51 @@ type leiosQuorumSource interface {
 	CommitteeCanReachQuorum(epoch uint64, tau *big.Rat) (bool, error)
 }
 
+// leiosQuorumState is what can be established about whether a Leios committee
+// can reach its quorum threshold.
+type leiosQuorumState int
+
+const (
+	// leiosQuorumNotApplicable: the parameters are not Dijkstra's, so there
+	// is no committee threshold to consult.
+	leiosQuorumNotApplicable leiosQuorumState = iota
+	// leiosQuorumUnresolved: Dijkstra parameters, but no threshold or no
+	// committee answer.
+	leiosQuorumUnresolved
+	leiosQuorumNotPossible
+	leiosQuorumPossible
+)
+
+// leiosQuorumStateFor reports whether the committee of epoch can reach the
+// quorum threshold in pparams.
+func leiosQuorumStateFor(
+	source leiosQuorumSource,
+	epoch uint64,
+	pparams lcommon.ProtocolParameters,
+) leiosQuorumState {
+	dijkstra, ok := pparams.(*gdijkstra.DijkstraProtocolParameters)
+	if !ok || dijkstra == nil {
+		return leiosQuorumNotApplicable
+	}
+	if source == nil ||
+		dijkstra.LeiosQuorumStakeThreshold == nil ||
+		dijkstra.LeiosQuorumStakeThreshold.Rat == nil {
+		return leiosQuorumUnresolved
+	}
+	possible, err := source.CommitteeCanReachQuorum(
+		epoch,
+		new(big.Rat).Set(dijkstra.LeiosQuorumStakeThreshold.Rat),
+	)
+	switch {
+	case err != nil:
+		return leiosQuorumUnresolved
+	case possible:
+		return leiosQuorumPossible
+	default:
+		return leiosQuorumNotPossible
+	}
+}
+
 // leiosQuorumPossibleFor reports whether the committee of epoch can reach the
 // quorum threshold in force, taken from the current protocol parameters. It
 // answers false whenever that cannot be established: nothing to consult, no
@@ -38,20 +83,7 @@ func leiosQuorumPossibleFor(
 	epoch uint64,
 	pparams lcommon.ProtocolParameters,
 ) bool {
-	if source == nil {
-		return false
-	}
-	dijkstra, ok := pparams.(*gdijkstra.DijkstraProtocolParameters)
-	if !ok || dijkstra == nil ||
-		dijkstra.LeiosQuorumStakeThreshold == nil ||
-		dijkstra.LeiosQuorumStakeThreshold.Rat == nil {
-		return false
-	}
-	possible, err := source.CommitteeCanReachQuorum(
-		epoch,
-		new(big.Rat).Set(dijkstra.LeiosQuorumStakeThreshold.Rat),
-	)
-	return err == nil && possible
+	return leiosQuorumStateFor(source, epoch, pparams) == leiosQuorumPossible
 }
 
 // leiosQuorumPossible reports whether the current epoch's committee can reach
@@ -104,4 +136,63 @@ func (n *Node) mempoolDependencies() mempool.ProviderDependencies {
 		)
 	}
 	return deps
+}
+
+// Endorser-block skip reasons for a committee that cannot certify one.
+const (
+	leiosEBSkipQuorumNotPossible = "quorum_not_possible"
+	leiosEBSkipQuorumUnresolved  = "quorum_unresolved"
+)
+
+// leiosEndorserBlockQuorumRefusal returns why no endorser block may be forged
+// for slot, or "" when one may. Under Dijkstra an endorser block is worth
+// forging only while the committee of the slot's epoch can reach the quorum
+// threshold of the slot's parameters: no committee short of it can certify
+// one. The slot's epoch and parameters decide, not the tip's, since the first
+// block of an epoch is forged under the new epoch's committee. Parameters
+// before Dijkstra, or none at all, are left to the forger's own capacity
+// checks.
+func leiosEndorserBlockQuorumRefusal(
+	source leiosQuorumSource,
+	epochForSlot func(uint64) (uint64, error),
+	pparamsForSlot func(uint64) lcommon.ProtocolParameters,
+	slot uint64,
+) string {
+	pparams := pparamsForSlot(slot)
+	if _, ok := pparams.(*gdijkstra.DijkstraProtocolParameters); !ok {
+		return ""
+	}
+	epoch, err := epochForSlot(slot)
+	if err != nil {
+		return leiosEBSkipQuorumUnresolved
+	}
+	switch leiosQuorumStateFor(source, epoch, pparams) {
+	case leiosQuorumNotApplicable, leiosQuorumPossible:
+		return ""
+	case leiosQuorumNotPossible:
+		return leiosEBSkipQuorumNotPossible
+	default:
+		return leiosEBSkipQuorumUnresolved
+	}
+}
+
+// leiosEndorserBlockQuorumRefusalForSlot is leiosEndorserBlockQuorumRefusal
+// against the node's vote manager and ledger.
+func (n *Node) leiosEndorserBlockQuorumRefusalForSlot(slot uint64) string {
+	var source leiosQuorumSource
+	if voteManager := n.leiosCertificateVerifier.Load(); voteManager != nil {
+		source = voteManager
+	}
+	if n.ledgerState == nil {
+		return leiosEBSkipQuorumUnresolved
+	}
+	return leiosEndorserBlockQuorumRefusal(
+		source,
+		func(slot uint64) (uint64, error) {
+			epoch, err := n.ledgerState.SlotToEpoch(slot)
+			return epoch.EpochId, err
+		},
+		n.ledgerState.ProtocolParamsForSlot,
+		slot,
+	)
 }
