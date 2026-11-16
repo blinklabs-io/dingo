@@ -1187,7 +1187,9 @@ type Config struct {
 	// endorser blocks are never pruned.
 	LeiosPersistenceRetentionSlots uint64 `yaml:"leiosPersistenceRetentionSlots" envconfig:"DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS"`
 
-	// Leios voting configuration (experimental, leios runMode only).
+	// Leios voting configuration (experimental; runs with the Leios runtime:
+	// leios runMode, the Musashi or Dijkstra network, or a Dijkstra start
+	// era).
 	// LeiosVoteSigningKeyFile is the path to a Cardano text-envelope
 	// BLS12-381 vote signing key, a JSON array of such envelopes (a rotation
 	// pair or a bundle of pools' keys), or a legacy raw hex scalar. When set

@@ -1910,7 +1910,8 @@ func WithShelleyKESAgentProfile(profile string) ConfigOptionFunc {
 // signing key file (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE): a Cardano text
 // envelope, a JSON array of envelopes, or a legacy raw hex scalar. When set on
 // a block producer, the node emits votes for endorser blocks for the committee
-// seats the keys hold. Experimental, leios runMode only.
+// seats the keys hold. Experimental; runs with the Leios runtime (leios
+// runMode, the Musashi or Dijkstra network, or a Dijkstra start era).
 func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LeiosVoteSigningKeyFile = path
