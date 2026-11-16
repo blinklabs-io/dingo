@@ -109,8 +109,9 @@ type AdaptiveEbControllerConfig struct {
 	// announcing an endorser block and one certifying it. An error means
 	// the gap is unknown, and then no announcement is certifiable.
 	CertificationGap func(announcingSlot uint64) (uint64, error)
-	// CaughtUp reports whether the node follows the tip of the chain. A
-	// node that syncs past old announcements has none of their votes.
+	// CaughtUp reports whether the node follows the tip of the chain, the
+	// Genesis state machine's caught-up state. A node that syncs past old
+	// announcements has none of their votes.
 	CaughtUp func() bool
 	// inspect reads a block off a chain update. Tests replace it.
 	inspect func(chain.ChainBlockEvent) (adaptiveBlock, bool)
@@ -122,6 +123,11 @@ type AdaptiveEbControllerConfig struct {
 // endorser-block capacity this node forges with. Every announcement counts,
 // whoever made it: a quorum missed anywhere on the chain says the committee
 // is not keeping up with endorser blocks of that size.
+//
+// The committee and the quorum threshold come from the epoch of the
+// announcement. The reference reads them from the ledger at the tip, which
+// differs only when the block that samples the announcement crosses an epoch
+// boundary that changed the parameters.
 //
 // The scale starts at one on every start, is kept in memory only, is not
 // reset at an epoch boundary and is not rewound by a rollback. This follows
@@ -227,17 +233,28 @@ func (c *AdaptiveEbController) Start(ctx context.Context) error {
 	subID, ch := c.bus.Subscribe(chain.ChainUpdateEventType)
 	c.subID = subID
 	c.loopWg.Go(func() {
-		for {
-			select {
-			case <-childCtx.Done():
-				return
-			case evt, ok := <-ch:
-				if !ok {
-					return
-				}
-				c.handleChainUpdate(evt)
-			}
+		closed := c.followChain(childCtx, ch)
+		// A loop that ended without Stop leaves nothing following the chain:
+		// release the subscription and the running state so Start can be
+		// called again, and forge with the whole capacity until it is.
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.stopping || !c.running {
+			return
 		}
+		if closed {
+			c.logger.Warn(
+				"leios adaptive endorsements stopped: " +
+					"chain update subscription closed",
+			)
+		}
+		c.running = false
+		if c.cancel != nil {
+			c.cancel()
+			c.cancel = nil
+		}
+		c.bus.Unsubscribe(chain.ChainUpdateEventType, c.subID)
+		c.scale.Store(math.Float64bits(1))
 	})
 	c.logger.Info(
 		"leios adaptive endorsements started",
@@ -270,6 +287,25 @@ func (c *AdaptiveEbController) Stop() error {
 	c.stopping = false
 	c.mu.Unlock()
 	return nil
+}
+
+// followChain handles chain updates until the context is done or the bus
+// closes the subscription, which it reports.
+func (c *AdaptiveEbController) followChain(
+	ctx context.Context,
+	ch <-chan event.Event,
+) (closed bool) {
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case evt, ok := <-ch:
+			if !ok {
+				return true
+			}
+			c.handleChainUpdate(evt)
+		}
+	}
 }
 
 // handleChainUpdate follows the blocks the chain adopts. A rollback needs no

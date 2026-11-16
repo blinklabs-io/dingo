@@ -383,6 +383,9 @@ type ChainSelector struct {
 	reentryTip        ocommon.Point
 	reentryTipSet     bool
 	reentryDeadline   time.Time
+	// judgement is the caught-up state of a selector that does not select by
+	// Genesis; see CaughtUp.
+	judgement caughtUpJudgement
 	// pendingGenesisEntry stages a GenesisModeEnteredEvent for publishing
 	// outside the lock. Guarded by mutex.
 	pendingGenesisEntry *GenesisModeEnteredEvent

@@ -29,7 +29,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -544,6 +547,64 @@ func TestAdaptiveEbControllerFollowsChainUpdates(t *testing.T) {
 	require.Equal(t, 1.0, c.Scale())
 }
 
+// A subscription the bus closes ends the event loop. The controller then
+// stops following the chain, so its scale no longer says anything: it returns
+// to the whole capacity, as without a controller, and can be started again.
+func TestAdaptiveEbControllerClosedSubscriptionResetsAndStops(t *testing.T) {
+	t.Parallel()
+	f := newAdaptiveFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	f.votes.queried = make(chan adaptiveVotesCall, 4)
+	c, err := NewAdaptiveEbController(AdaptiveEbControllerConfig{
+		Logger:   slog.New(slog.NewJSONHandler(f.logs, nil)),
+		EventBus: bus,
+		Config:   DefaultAdaptiveEbConfig(),
+		Votes:    f.votes,
+		CertificationGap: func(uint64) (uint64, error) {
+			return certificationGap, nil
+		},
+		CaughtUp: func() bool { return true },
+		inspect:  f.c.inspect,
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	require.NoError(t, c.Start(ctx))
+	t.Cleanup(func() { _ = c.Stop() })
+
+	f.announced[1] = blockHash(101)
+	f.votes.set(blockHash(1), missedStake)
+	bus.Publish(chain.ChainUpdateEventType, event.NewEvent(
+		chain.ChainUpdateEventType, blockEvent(1, 0, 100)))
+	bus.Publish(chain.ChainUpdateEventType, event.NewEvent(
+		chain.ChainUpdateEventType, blockEvent(2, 1, 100+certificationGap)))
+	testutil.RequireReceive(t, f.votes.queried, 5*time.Second,
+		"the announcement's votes are read")
+	require.Eventually(t, func() bool { return c.Scale() == 0.8 },
+		5*time.Second, time.Millisecond)
+
+	c.mu.Lock()
+	subID := c.subID
+	c.mu.Unlock()
+	bus.Unsubscribe(chain.ChainUpdateEventType, subID)
+	require.Eventually(t, func() bool { return c.Scale() == 1.0 },
+		5*time.Second, time.Millisecond,
+		"a controller that follows nothing forges with the whole capacity")
+	require.Contains(t, f.logs.String(), "subscription closed")
+
+	f.announced[3] = blockHash(103)
+	f.votes.set(blockHash(3), missedStake)
+	require.NoError(t, c.Start(ctx))
+	bus.Publish(chain.ChainUpdateEventType, event.NewEvent(
+		chain.ChainUpdateEventType, blockEvent(3, 2, 300)))
+	bus.Publish(chain.ChainUpdateEventType, event.NewEvent(
+		chain.ChainUpdateEventType, blockEvent(4, 3, 300+certificationGap)))
+	require.Eventually(t, func() bool { return c.Scale() == 0.8 },
+		5*time.Second, time.Millisecond,
+		"the restarted controller follows the chain again")
+}
+
 // adaptiveTestHeader is a header with the identity the controller reads.
 type adaptiveTestHeader struct {
 	lcommon.BlockHeader
@@ -598,4 +659,139 @@ func TestAdaptiveBlockOf(t *testing.T) {
 	require.Nil(t, adaptiveBlockOf(adaptiveTestBlock{
 		header: adaptiveTestHeader{hash: blockHash(1)},
 	}).announced)
+}
+
+// dijkstraRankingBlock encodes a Dijkstra ranking block whose header carries
+// the Leios extension, with the given announcement (nil for none), and
+// decodes it back, so the bytes are the ones a node stores.
+func dijkstraRankingBlock(
+	t *testing.T,
+	number, slot uint64,
+	prev lcommon.Blake2b256,
+	announcement []byte,
+) *dijkstra.DijkstraBlock {
+	t.Helper()
+	certified, err := cbor.Encode(false)
+	require.NoError(t, err)
+	if announcement == nil {
+		announcement, err = cbor.Encode(nil)
+		require.NoError(t, err)
+	}
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: number,
+					Slot:        slot,
+					PrevHash:    prev,
+					VrfKey:      make([]byte, 32),
+					VrfResult: lcommon.VrfResult{
+						Output: make([]byte, 64),
+						Proof:  make([]byte, 80),
+					},
+					OpCert: babbage.BabbageOpCert{
+						HotVkey:   make([]byte, 32),
+						Signature: make([]byte, 64),
+					},
+					ProtoVersion: babbage.BabbageProtoVersion{
+						Major: dijkstra.MinProtocolVersionDijkstra,
+					},
+				},
+				Signature: make([]byte, 448),
+			},
+			LeiosHeaderExtension: []cbor.RawMessage{certified, announcement},
+		},
+	}
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
+	bodyCbor, err := block.BlockBody.MarshalCBOR()
+	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
+	raw, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	decoded, err := dijkstra.NewDijkstraBlockFromCbor(raw)
+	require.NoError(t, err)
+	return decoded
+}
+
+func chainEventOf(block *dijkstra.DijkstraBlock) chain.ChainBlockEvent {
+	return chain.ChainBlockEvent{
+		Point: ocommon.Point{
+			Slot: block.SlotNumber(),
+			Hash: block.Hash().Bytes(),
+		},
+		Block: models.Block{
+			Hash:     block.Hash().Bytes(),
+			PrevHash: block.PrevHash().Bytes(),
+			Slot:     block.SlotNumber(),
+			Number:   block.BlockNumber(),
+			Type:     uint(block.Type()),
+			Cbor:     block.Cbor(),
+		},
+	}
+}
+
+// The default decoder reads a real Dijkstra block as the node stores it: its
+// identity, and the endorser block its header announces.
+func TestInspectChainBlockReadsDijkstraAnnouncement(t *testing.T) {
+	t.Parallel()
+	ebHash := blockHash(7)
+	announcement, err := cbor.Encode([]any{ebHash.Bytes(), uint64(4096)})
+	require.NoError(t, err)
+	announcer := dijkstraRankingBlock(t, 5, 100, blockHash(1), announcement)
+	plain := dijkstraRankingBlock(t, 6, 130, announcer.Hash(), nil)
+
+	got, ok := inspectChainBlock(chainEventOf(announcer))
+	require.True(t, ok)
+	require.Equal(t, announcer.Hash(), got.hash)
+	require.Equal(t, blockHash(1), got.prevHash)
+	require.Equal(t, uint64(100), got.slot)
+	require.NotNil(t, got.announced)
+	require.Equal(t, ebHash, *got.announced)
+
+	got, ok = inspectChainBlock(chainEventOf(plain))
+	require.True(t, ok)
+	require.Equal(t, plain.Hash(), got.hash)
+	require.Equal(t, announcer.Hash(), got.prevHash)
+	require.Nil(t, got.announced)
+
+	_, ok = inspectChainBlock(chain.ChainBlockEvent{})
+	require.False(t, ok, "a block that does not decode is not a block")
+}
+
+// A controller on the default decoder samples the announcement of a real
+// Dijkstra block when the block that extends it arrives.
+func TestAdaptiveEbControllerSamplesRealDijkstraBlocks(t *testing.T) {
+	t.Parallel()
+	f := newAdaptiveFixture(t)
+	c, err := NewAdaptiveEbController(AdaptiveEbControllerConfig{
+		EventBus: event.NewEventBus(nil, nil),
+		Config:   DefaultAdaptiveEbConfig(),
+		Votes:    f.votes,
+		CertificationGap: func(uint64) (uint64, error) {
+			return certificationGap, nil
+		},
+		CaughtUp: func() bool { return true },
+	})
+	require.NoError(t, err)
+
+	announcement, err := cbor.Encode(
+		[]any{blockHash(9).Bytes(), uint64(4096)},
+	)
+	require.NoError(t, err)
+	announcer := dijkstraRankingBlock(t, 5, 100, blockHash(1), announcement)
+	next := dijkstraRankingBlock(
+		t, 6, 100+certificationGap, announcer.Hash(), nil,
+	)
+	f.votes.set(announcer.Hash(), missedStake)
+
+	c.handleChainUpdate(event.NewEvent(
+		chain.ChainUpdateEventType, chainEventOf(announcer)))
+	c.handleChainUpdate(event.NewEvent(
+		chain.ChainUpdateEventType, chainEventOf(next)))
+	require.Equal(t, 0.8, c.Scale())
+	require.Equal(t, []adaptiveVotesCall{{
+		slot:   100,
+		rbHash: announcer.Hash(),
+		ebHash: blockHash(9),
+	}}, f.votes.calls)
 }

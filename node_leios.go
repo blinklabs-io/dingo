@@ -593,15 +593,11 @@ func (n *Node) leiosAdaptiveEbConfig() (leios.AdaptiveEbConfig, bool) {
 }
 
 // leiosAdaptiveCaughtUp reports whether the node follows the tip of the chain:
-// the chain selector has left Genesis selection, the reference's CaughtUp
-// state of the Genesis state machine. A node that syncs past old announcements
-// has none of their votes.
+// the selector's Genesis state machine is caught up, the reference's CaughtUp
+// state that the adaptive controller is gated on in every consensus mode. A
+// node that syncs past old announcements has none of their votes.
 func leiosAdaptiveCaughtUp(cs *chainselection.ChainSelector) bool {
-	if cs == nil {
-		return false
-	}
-	genesis, _ := cs.GenesisSelectionState()
-	return !genesis
+	return cs != nil && cs.CaughtUp()
 }
 
 // initLeiosAdaptiveEndorsements starts the controller that scales the
@@ -613,6 +609,10 @@ func leiosAdaptiveCaughtUp(cs *chainselection.ChainSelector) bool {
 // after a live restore replaces them; a start always begins with the whole
 // capacity.
 func (n *Node) initLeiosAdaptiveEndorsements(ctx context.Context) error {
+	if n.leiosAdaptiveEb != nil {
+		_ = n.leiosAdaptiveEb.Stop()
+		n.leiosAdaptiveEb = nil
+	}
 	cfg, enabled := n.leiosAdaptiveEbConfig()
 	if !enabled || !n.config.blockProducer ||
 		!n.config.leiosForgingEnabled() ||

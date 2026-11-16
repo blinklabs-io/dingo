@@ -12818,15 +12818,41 @@ The controller follows the blocks the chain adopts. When a block extends one
 that announced an endorser block, it reads the verified stake of the votes
 collected for that announcement at that moment, against the committee and
 quorum threshold of the announcement's epoch, and takes one sample. Every
-announcement counts, whoever made it. A sample moves the scale only when the
-node is caught up (the chain selector has left Genesis selection), and not
-when the committee, the threshold or the certification gap cannot be resolved:
+announcement counts, whoever made it. The reference reads the committee and
+threshold from the ledger at the tip, so the two differ only when the next
+block crosses an epoch boundary that changed the parameters. A sample moves the
+scale only when the node is caught up (`ChainSelector.CaughtUp`), and not when
+the committee, the threshold or the certification gap cannot be resolved:
 
 | Outcome | Scale |
 |---|---|
 | Quorum reached | `min(1, scale + Increase)`, certifiable or not |
 | Quorum missed, announcement certifiable | `max(MinScale, scale * Decrease)` |
 | Quorum missed, next block before the certification gap | unchanged |
+
+Caught up is the Genesis state machine's judgement, which the reference runs in
+every consensus mode and Dingo runs whatever the selection mode: a node that
+selects by Praos rules (`ConsensusMode: PraosMode`, as the embedded musashi
+configuration does) still starts out syncing, so a producer syncing from genesis
+or catching up after downtime samples nothing, as the votes of the announcements
+it passes were never collected. A selector that runs Genesis selection answers
+from its mode. Any other selector evaluates the same transitions, when asked and
+without touching the selection mode, publishing a mode event or disconnecting a
+peer. Syncing becomes caught up when at least one connection is known, every
+connection is idle (its latest `MsgAwaitReply` is at its delivered frontier) and
+no candidate is better than the selection. Caught up becomes syncing when the
+selection tip is older than the maximum caught-up age (20 minutes) plus a random
+bonus of up to 300 seconds drawn once per caught-up period, and not before that
+age has passed since the node became caught up. Differences from the reference:
+the Honest Availability Assumption, the diffusion layer's trust state that moves
+the machine from PreSyncing to Syncing, is not tracked, the Genesis selection
+mode ignores it too; the judgement starts as syncing and keeps no caught-up
+marker, so a restarted node is caught up again once its peers are idle; and
+without Genesis selection the points of a peer's chain are not recorded, so a
+peer idle at a point off the node's chain counts as a better candidate where
+the reference compares the chains, which keeps the node syncing, never caught up
+early. A controller whose chain update subscription is closed stops, forges with
+the whole capacity and can be started again.
 
 An announcement is certifiable when its successor's slot is at least the
 certification gap after it: three announcement periods, the vote period and the

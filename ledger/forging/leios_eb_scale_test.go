@@ -174,3 +174,65 @@ func TestCheckAndForgeLeiosEBAppliesCapacityScale(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, caster.txBodies, 2)
 }
+
+// The scaled execution-unit and reference-script bounds apply to the
+// endorser block a forger selects, each on its own: a sum at the scaled bound
+// fits and one more transaction does not. Half of an odd protocol bound
+// rounds down, so the bound one above twice the sum fits it exactly and the
+// bound twice the sum minus one does not.
+func TestCheckAndForgeLeiosEBAppliesScaleToAggregateBounds(t *testing.T) {
+	t.Parallel()
+	each := leiosAggregateCost{memory: 10, steps: 100, refScriptBytes: 1000}
+	const unbounded = 1 << 30
+	for _, tc := range []struct {
+		name   string
+		mem    int64
+		steps  int64
+		ref    uint32
+		wantTx int
+	}{
+		{"memory at the scaled bound", 81, unbounded, unbounded, 4},
+		{"memory one under the scaled bound", 79, unbounded, unbounded, 3},
+		{"steps at the scaled bound", unbounded, 801, unbounded, 4},
+		{"steps one under the scaled bound", unbounded, 799, unbounded, 3},
+		{"reference scripts at the scaled bound", unbounded, unbounded, 8001, 4},
+		{
+			"reference scripts one under the scaled bound",
+			unbounded, unbounded, 7999, 3,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			txs, validator := leiosAggregateCandidates(
+				t, repeatLeiosCost(each, 5),
+			)
+			caster := &forgerTestLeiosCaster{}
+			forger := leiosCapacityForger(txs,
+				&dijkstra.DijkstraProtocolParameters{
+					MaxEndorserBlockTxsSize:        1 << 20,
+					MaxEndorserBlockReferencesSize: 40000,
+					MaxEndorserBlockExUnits: lcommon.ExUnits{
+						Memory: tc.mem,
+						Steps:  tc.steps,
+					},
+					MaxRefScriptSizePerEndorserBlock: tc.ref,
+				},
+				caster,
+			)
+			forger.leiosValidator = validator
+
+			forger.ebCapacityScale = func() float64 { return 1 }
+			_, err := forger.checkAndForgeLeiosEB(context.Background(), 10,
+				leiosSelectionBasis{})
+			require.NoError(t, err)
+			require.Len(t, caster.txBodies, 5,
+				"the whole protocol capacity holds every transaction")
+
+			forger.ebCapacityScale = func() float64 { return 0.5 }
+			_, err = forger.checkAndForgeLeiosEB(context.Background(), 11,
+				leiosSelectionBasis{})
+			require.NoError(t, err)
+			require.Len(t, caster.txBodies, tc.wantTx)
+		})
+	}
+}
