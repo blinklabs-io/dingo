@@ -355,7 +355,8 @@ type Ouroboros struct {
 	// ChainsyncAwaitEagerness.
 	eagernessWaitTimeout time.Duration
 	// chainsyncReintersectTimeout bounds how long a resync waits for a client
-	// to drain and re-intersect in place before the connection is closed.
+	// to drain and re-intersect in place before the connection is closed. On
+	// an inbound connection it bounds only building the intersect points.
 	chainsyncReintersectTimeout time.Duration
 	// chainsyncReintersecting holds the latest in-place re-intersect of each
 	// connection, so overlapping resyncs do not stack.
