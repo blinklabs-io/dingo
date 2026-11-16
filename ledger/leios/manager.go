@@ -3312,7 +3312,7 @@ func (m *VoteManager) poolBoundVoteCandidate(
 // keySetVoteCandidates matches each configured key against the committee's
 // resolved voting keys. A key votes at the smallest seat that holds it and a
 // key that holds none is skipped, so only the currently registered key of a
-// rotation pair finds a seat. Seats already in taken are not repeated.
+// rotation pair finds a seat. Each seat is returned at most once.
 func (m *VoteManager) keySetVoteCandidates(
 	entry *epochEntry,
 	keySet []*VoteSigningKey,
