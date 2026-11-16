@@ -528,16 +528,22 @@ func (n *Node) shutdown() error {
 			n.config.logger.Error(
 				"leaving the live UTxO set open because shutdown drain was not confirmed",
 			)
-		} else if closeErr := n.closeWithShutdownTimeout(
-			ctx,
-			"live UTxO set",
-			shutdownTimeout,
-			n.closeUtxoSet,
-		); closeErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("live UTxO set close: %w", closeErr),
-			)
+		} else {
+			// Not bounded by the shutdown deadline: abandoning a Badger
+			// close mid-sync leaves the set needing recovery.
+			if closeErr := n.closeUtxoSet(); closeErr != nil {
+				err = errors.Join(
+					err,
+					fmt.Errorf("live UTxO set close: %w", closeErr),
+				)
+			}
+			if ctx.Err() != nil {
+				n.config.logger.Warn(
+					"live UTxO set close finished after the shutdown deadline",
+					"timeout", shutdownTimeout,
+					"total_elapsed", time.Since(shutdownStart).Round(time.Millisecond),
+				)
+			}
 		}
 	}
 

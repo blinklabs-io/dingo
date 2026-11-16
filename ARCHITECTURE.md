@@ -2589,8 +2589,17 @@ supervisor's grace period (Kubernetes `terminationGracePeriodSeconds`, systemd
 supervisor or operator remains the way to abandon a wedged close. A repeated
 SIGINT or SIGTERM during shutdown is logged with that advice and does not
 interrupt the close. A later
-persistent store that sets `DurableClose` takes the same path. Non-durable
-providers and every other shutdown component keep the single deadline.
+persistent store that sets `DurableClose` takes the same path. The live UTxO
+set (`ledgerUtxoBadger`) is a Badger store with the same per-table sync cost
+and follows the same policy without being a plugin: `Node.closeUtxoSet` joins
+the checkpoint writer and then closes the set with no deadline, logging
+`closing durable store`, `durable store close still in progress` every 10
+seconds, and the result with `resource="live UTxO set"`; shutdown adds the
+warning `live UTxO set close finished after the shutdown deadline` when the
+deadline passed meanwhile. The same function serves the live lifecycle
+operations and a failed Mithril restore, and the re-import scratch set closes
+the same way. Non-durable providers and every other shutdown component keep
+the single deadline.
 
 The terminal EventBus close occurs after mempool teardown and runs concurrently
 with `ConnectionManager.Stop`. Lossless event delivery can backpressure a
@@ -3163,7 +3172,7 @@ store when that rollback is not possible. With the set as the only copy, the
 startup `reward_live_stake` consistency check and rebuild run after this
 reconcile rather than before it, since a rebuild reads UTxO stake from the
 set. The set closes after the ledger in
-shutdown phase 3. Metrics are `dingo_utxo_set_*`.
+shutdown phase 3, to completion rather than under the shutdown deadline. Metrics are `dingo_utxo_set_*`.
 
 Epoch summaries live in the set too, as `ledger.EpochSummaryReader`.
 `stagingLedgerDB.SaveEpochSummary` stages the caller's row with the sticky

@@ -127,6 +127,10 @@ type Node struct {
 	utxoCkptMu     sync.Mutex
 	utxoCkptCancel context.CancelFunc
 	utxoCkptWG     sync.WaitGroup
+
+	// durableCloseProgress overrides defaultDurableCloseProgressInterval
+	// when positive.
+	durableCloseProgress time.Duration
 	// finishLedgerReimport completes a re-import whose live set swap
 	// finished, recording its Mithril anchor and clearing its marks.
 	finishLedgerReimport    func(ctx context.Context, point ocommon.Point) error

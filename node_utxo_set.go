@@ -132,17 +132,67 @@ func (n *Node) utxoSetBackuper() lifecycle.UtxoSetBackuper {
 	return n.utxoSet
 }
 
+// defaultDurableCloseProgressInterval is how often a store close that is
+// still running is logged; it matches plugin.Host's durable-close interval.
+const defaultDurableCloseProgressInterval = 10 * time.Second
+
 // closeUtxoSet closes the live UTxO set. The ledger must have stopped
-// applying blocks.
+// applying blocks. The set is a Badger store whose close syncs every table
+// file, so, like a plugin.Descriptor.DurableClose store, the close and the
+// checkpoint join before it run to completion with no deadline, logging
+// progress while they run.
 func (n *Node) closeUtxoSet() error {
 	n.utxoSetReconciled = false
 	if n.utxoSet == nil {
 		return nil
 	}
-	n.stopUtxoSetCheckpoint()
-	err := n.utxoSet.Close()
+	set := n.utxoSet
+	err := n.closeDurable("live UTxO set", func() error {
+		n.stopUtxoSetCheckpoint()
+		return set.Close()
+	})
 	n.utxoSet = nil
 	return err
+}
+
+// closeDurable runs closeFn to completion on the calling goroutine and logs
+// its start, its progress every durableCloseProgress, and its result.
+func (n *Node) closeDurable(resource string, closeFn func() error) error {
+	interval := n.durableCloseProgress
+	if interval <= 0 {
+		interval = defaultDurableCloseProgressInterval
+	}
+	logger := n.config.logger.With("resource", resource)
+	start := time.Now()
+	logger.Info("closing durable store")
+	finished := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-finished:
+				return
+			case <-ticker.C:
+				logger.Warn(
+					"durable store close still in progress",
+					"elapsed", time.Since(start).Round(time.Millisecond),
+				)
+			}
+		}
+	}()
+	err := closeFn()
+	close(finished)
+	<-stopped
+	elapsed := time.Since(start).Round(time.Millisecond)
+	if err != nil {
+		logger.Error("durable store close failed", "elapsed", elapsed, "error", err)
+		return err
+	}
+	logger.Info("durable store closed", "elapsed", elapsed)
+	return nil
 }
 
 // migrateUtxoRows moves a database that holds its UTxO set in the metadata

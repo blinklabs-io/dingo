@@ -567,30 +567,66 @@ func TestNodeStopBoundsEventBusCloseAndSkipsDatabaseClose(t *testing.T) {
 	assert.ErrorContains(t, stopErr, "database close skipped")
 }
 
-// TestNodeStopClosesLiveUtxoSetWithinTheShutdownDeadline requires the live
-// UTxO set close to run under the shutdown deadline like the other storage
-// closes, which log one record per resource.
-// Not t.Parallel: swaps the package-level componentStopsForShutdownPhase1
-// seam.
-func TestNodeStopClosesLiveUtxoSetWithinTheShutdownDeadline(t *testing.T) {
-	previous := componentStopsForShutdownPhase1
-	t.Cleanup(func() { componentStopsForShutdownPhase1 = previous })
-	componentStopsForShutdownPhase1 = func(*Node) []namedStop { return nil }
+// TestNodeStopClosesLiveUtxoSet requires shutdown to close the live UTxO set
+// and log the close under its resource name.
+func TestNodeStopClosesLiveUtxoSet(t *testing.T) {
+	t.Parallel()
 
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
-	var closeLogs atomic.Int32
+	logs := &shutdownLogBuffer{}
 	n := &Node{utxoSet: set}
 	n.config = NewConfig(WithShutdownTimeout(5 * time.Second))
-	n.config.logger = slog.New(shutdownTestResourceLogHandler{
-		resource: "live UTxO set",
-		count:    &closeLogs,
-	})
+	n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
 
 	require.NoError(t, n.Stop())
-	assert.Equal(t, int32(1), closeLogs.Load(),
-		"shutdown must close the live UTxO set under the shutdown deadline")
 	assert.Nil(t, n.utxoSet)
+	assert.Contains(t, logs.String(), "durable store closed")
+	assert.Contains(t, logs.String(), `resource="live UTxO set"`)
+}
+
+// TestNodeStopWaitsForLiveUtxoSetCloseAfterDeadline pins that the live UTxO
+// set close is not abandoned at the shutdown deadline. The checkpoint writer
+// the close joins before closing the set is held past the deadline.
+func TestNodeStopWaitsForLiveUtxoSetCloseAfterDeadline(t *testing.T) {
+	t.Parallel()
+
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	logs := &shutdownLogBuffer{}
+	n := &Node{utxoSet: set, durableCloseProgress: 20 * time.Millisecond}
+	n.config = NewConfig(WithShutdownTimeout(50 * time.Millisecond))
+	n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWriter := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseWriter()
+	var writerDone atomic.Bool
+	n.utxoCkptWG.Go(func() {
+		<-release
+		writerDone.Store(true)
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- n.Stop() }()
+
+	select {
+	case stopErr := <-done:
+		t.Fatalf("Node.Stop abandoned the live UTxO set close at the deadline: %v", stopErr)
+	case <-time.After(300 * time.Millisecond):
+	}
+	require.False(t, writerDone.Load())
+
+	releaseWriter()
+	stopErr := testutil.RequireReceive(t, done, 5*time.Second,
+		"Node.Stop did not return after the live UTxO set close finished")
+	require.NoError(t, stopErr)
+	require.True(t, writerDone.Load())
+	assert.Nil(t, n.utxoSet)
+	out := logs.String()
+	assert.Contains(t, out, "durable store close still in progress")
+	assert.Contains(t, out, "live UTxO set close finished after the shutdown deadline")
 }
 
 type shutdownLogBuffer struct {

@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -97,8 +98,33 @@ func (s *Set) newScratch(ctx context.Context) (*Set, error) {
 	return sc, nil
 }
 
+// closeProgressInterval is how often a scratch set close that is still
+// running is logged.
+const closeProgressInterval = 10 * time.Second
+
+// closeScratch closes sc and removes its directory. The close runs to
+// completion, as the live set's does, since a Badger close syncs every table
+// file; it logs while it runs.
 func (s *Set) closeScratch(sc *Set) {
+	start := time.Now()
+	finished := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(closeProgressInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-finished:
+				return
+			case <-ticker.C:
+				s.logger.Warn(
+					"scratch UTxO set close still in progress",
+					"elapsed", time.Since(start).Round(time.Millisecond),
+				)
+			}
+		}
+	}()
 	_ = sc.Close()
+	close(finished)
 	_ = os.RemoveAll(s.scratchDir())
 }
 
