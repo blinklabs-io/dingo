@@ -11294,8 +11294,26 @@ interface, forging and APIs retain their existing narrow adapters, and none of
 them import backend state. Cardano-compatible metrics and `mempool.add_tx` /
 `mempool.remove_tx` events remain backend-neutral;
 `dingo_metrics_mempool_info{implementation="fifo|dag"}` identifies the
-selected backend. `dingo_mempool_capacity_bytes` exports the configured
-capacity, set once at construction because capacity never changes at runtime.
+selected backend. `dingo_mempool_capacity_bytes` exports the capacity in
+force.
+
+The capacity is fixed unless the Leios default chose it (the `leios` run mode
+or the Musashi network with no `capacity` configured). That default is sized
+for endorser blocks, which only a committee that can certify one makes use of,
+so the node hands the mempool a `CapacityFunc` that returns the 25 MiB default
+while the current epoch's committee can reach its quorum threshold and the
+1 MiB non-Leios capacity otherwise. The committee reaches it when the stake of
+its seats with a usable voting key is at least `leiosQuorumStakeThreshold` of
+the total active stake (`leios.CommitteeKeysReachQuorum`, compared exactly and
+inclusively; a keyless seat counts nothing). The committee is the current
+epoch's, from the vote manager, and the threshold is the one in the current
+protocol parameters. A committee that cannot be resolved keeps the non-Leios
+capacity. The mempool re-reads the function on each admission, chain update
+and cleanup tick, outside its locks. A capacity that grows wakes admission
+waiters; one that shrinks evicts nothing, so a pool above the new capacity
+refuses admissions until blocks drain it. An explicit `capacity` is never
+gated. Relay consumer caches keep their bound derived from the configured
+capacity, since transactions admitted under the larger capacity remain.
 
 Both backends maintain an address index beside the transaction list, guarded by
 the pool's state lock and consulted through `TransactionHashesByAddress`. The
@@ -20588,7 +20606,8 @@ explicit value happens to equal the previous network's default.
 Once every source is merged, `Config.ApplyDefaults()` fills in unset values
 whose defaults are derived from other settings (an empty `runMode` selects
 `serve`; `plugins.mempool.config.capacity` defaults by run mode — Leios raises
-it — and the watermarks, forge slot thresholds, and history-expiry frequency
+it, and a defaulted Leios capacity applies only while the epoch's committee can
+reach its quorum — and the watermarks, forge slot thresholds, and history-expiry frequency
 take their standard values), and then `Config.Validate()` checks the resulting
 configuration before any services start. Topology resolution
 (`config.LoadTopologyConfig`) runs last, only after the merged configuration is

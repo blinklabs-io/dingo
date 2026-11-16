@@ -1361,13 +1361,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		plugin.CapabilityMempool,
 		mempoolSelection.Provider,
 		mempoolSelection.Config,
-		mempool.ProviderDependencies{
-			PromRegistry:    n.config.promRegistry,
-			Validator:       n.ledgerState,
-			Logger:          n.config.logger,
-			EventBus:        n.eventBus,
-			CurrentSlotFunc: n.ledgerState.CurrentOrTipSlot,
-		},
+		n.mempoolDependencies(),
 	)
 	if err != nil {
 		return fmt.Errorf("resolve mempool: %w", err)

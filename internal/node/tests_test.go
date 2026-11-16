@@ -780,3 +780,39 @@ func TestRepairDeferredIndexesRestoresCatchUpIndexes(t *testing.T) {
 	}
 	requireNoPendingMarker(t, raw)
 }
+
+// TestBuildDingoConfigCarriesDefaultedMempoolCapacity follows the path the
+// binary takes: the mempool plugin selection always carries a capacity by
+// then, so only the recorded default tells a Leios capacity nobody set from
+// one the operator pinned.
+func TestBuildDingoConfigCarriesDefaultedMempoolCapacity(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	build := func(cfg *config.Config) bool {
+		cfg.ApplyDefaults()
+		built := buildDingoConfig(
+			cfg,
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			time.Minute,
+			time.Minute,
+			0,
+		)
+		return built.MempoolCapacityLeiosDefault()
+	}
+
+	require.True(t, build(&config.Config{RunMode: config.RunModeLeios}))
+
+	var pinned config.Config
+	pinned.RunMode = config.RunModeLeios
+	pinned.Plugins.Mempool.Config = map[string]any{
+		"capacity": int64(config.DefaultMempoolCapacityLeios),
+	}
+	require.False(t, build(&pinned))
+
+	require.False(t, build(&config.Config{}))
+}

@@ -205,6 +205,12 @@ type Config struct {
 	// config), so the Leios default never replaces it.
 	mempoolCapacitySet bool
 
+	// mempoolCapacityLeiosDefault records that the Leios mempool capacity
+	// came from the Leios or Musashi default rather than from the operator.
+	// Only that default follows whether the epoch's committee can reach its
+	// quorum; an explicit capacity is fixed.
+	mempoolCapacityLeiosDefault bool
+
 	// Runtime-only fields that are not loaded from YAML/env:
 	promRegistry      prometheus.Registerer
 	topologyConfig    *topology.TopologyConfig
@@ -933,6 +939,7 @@ func (c *Config) syncCompatFields() {
 		c.cfg.Plugins.Mempool.Config["capacity"] = int64(
 			internalconfig.DefaultMempoolCapacityLeios,
 		)
+		c.mempoolCapacityLeiosDefault = true
 	}
 	c.historyExpiry = HistoryExpiryConfig{
 		Enabled:   c.cfg.HistoryExpiry.Enabled,
@@ -1072,6 +1079,9 @@ func WithPluginSelection(
 			// The selection replaces the whole mempool config, so its
 			// capacity is explicit exactly when the caller supplied one.
 			_, c.mempoolCapacitySet = selection.Config["capacity"]
+			if c.mempoolCapacitySet {
+				c.mempoolCapacityLeiosDefault = false
+			}
 			if selection.Config == nil &&
 				(selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
 				selection.Config = map[string]any{
@@ -1267,6 +1277,9 @@ func NewConfigFromInternal(
 		// The loaded config already resolved the capacity default from its
 		// run mode and network.
 		mempoolCapacitySet: true,
+		// Only the default ApplyDefaults chose follows the committee's
+		// quorum; a configured capacity is fixed.
+		mempoolCapacityLeiosDefault: cfg.MempoolCapacityDefaulted(),
 	}
 	c.syncCompatFields()
 	return c, nil
@@ -1472,7 +1485,25 @@ func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.Mempool.Config["capacity"] = capacity
 		c.mempoolCapacitySet = true
+		c.mempoolCapacityLeiosDefault = false
 	}
+}
+
+// WithMempoolCapacityDefaulted records that the capacity in the mempool plugin
+// selection is the Leios default rather than one the operator set. Only that
+// default follows whether the epoch's Leios committee can reach its quorum;
+// a capacity the operator set stays fixed. Apply it after the mempool plugin
+// selection, which clears the record for a selection that carries a capacity.
+func WithMempoolCapacityDefaulted(defaulted bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.mempoolCapacityLeiosDefault = defaulted
+	}
+}
+
+// MempoolCapacityLeiosDefault reports whether the mempool capacity is the
+// Leios default, which follows the committee's quorum.
+func (c *Config) MempoolCapacityLeiosDefault() bool {
+	return c.mempoolCapacityLeiosDefault
 }
 
 // WithEvictionWatermark sets the mempool eviction watermark

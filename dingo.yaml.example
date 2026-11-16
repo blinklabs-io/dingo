@@ -94,10 +94,14 @@
       # the CBOR of the decoded outputs the pool keeps for it. Left commented
       # out so the run-mode default
       # applies: 1048576 (1 MiB) for standard modes, 26214400 (25 MiB) for the
-      # leios run mode and for the Musashi network (by name or magic). An
-      # explicit value here overrides both defaults, so a leios or Musashi
-      # node would silently run with the smaller capacity — uncomment only to
-      # pin a specific size for every run mode.
+      # leios run mode and for the Musashi network (by name or magic). The
+      # 25 MiB default applies only while the current epoch's Leios committee
+      # can reach its quorum threshold with registered voting keys; until
+      # then the pool keeps the 1 MiB capacity, as it does without Leios.
+      # An explicit value here overrides both defaults and never changes
+      # with the committee, so a leios or Musashi node would silently run
+      # with the smaller capacity — uncomment only to pin a specific size
+      # for every run mode.
       # capacity: 1048576
       # FIFO begins oldest-first eviction here. DAG never evicts and applies
       # TxSubmission backpressure as it approaches rejectionWatermark.
