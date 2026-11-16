@@ -29,6 +29,14 @@ import (
 
 func newImmutableChain(t *testing.T) (*database.Database, *chain.Chain) {
 	t.Helper()
+	return newImmutableChainWithK(t, 100)
+}
+
+func newImmutableChainWithK(
+	t *testing.T,
+	securityParam int,
+) (*database.Database, *chain.Chain) {
+	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 		Immutable: database.ImmutableConfig{
@@ -38,7 +46,7 @@ func newImmutableChain(t *testing.T) (*database.Database, *chain.Chain) {
 	require.NoError(t, err)
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
-	mustSetLedger(t, cm, 100)
+	mustSetLedger(t, cm, securityParam)
 	c := cm.PrimaryChain()
 	blocks := generateTestChain(t, 1, common.Blake2b256{}, 20, 20, 10)
 	for _, b := range blocks {
@@ -66,6 +74,66 @@ func TestRollbackRefusesBelowImmutableTip(t *testing.T) {
 	// Rolling back to the tip itself keeps it and is allowed.
 	require.NoError(t, c.Rollback(t.Context(), pointOfBlockFromDB(t, db, 5)))
 	require.Equal(t, uint64(5), c.Tip().BlockNumber)
+}
+
+// A bounded rollback below the immutable tip is also deeper than K, and must
+// report the security-parameter error callers classify as a resync. The
+// unbounded form skips the K bound, so the immutable floor still applies.
+func TestBoundedRollbackBelowImmutableTipExceedsSecurityParam(t *testing.T) {
+	t.Parallel()
+	db, c := newImmutableChainWithK(t, 3)
+	_, err := db.PromoteThrough(context.Background(), 5)
+	require.NoError(t, err)
+
+	origin := ocommon.Point{}
+	below := pointOfBlockFromDB(t, db, 4)
+	for name, point := range map[string]ocommon.Point{
+		"origin": origin,
+		"below":  below,
+	} {
+		require.ErrorIs(
+			t,
+			c.ValidateRollback(t.Context(), point),
+			chain.ErrRollbackExceedsSecurityParam,
+			"validate "+name,
+		)
+		require.ErrorIs(
+			t,
+			c.Rollback(t.Context(), point),
+			chain.ErrRollbackExceedsSecurityParam,
+			"bounded "+name,
+		)
+		require.ErrorIs(
+			t,
+			c.RollbackUnbounded(t.Context(), point),
+			database.ErrRollbackBelowImmutableTip,
+			"unbounded "+name,
+		)
+	}
+	require.Equal(t, uint64(10), c.Tip().BlockNumber)
+}
+
+// A target below the immutable tip that is deeper than K reports both
+// refusals, so callers that classify on either see it. Once the anchor is
+// reset to the tip, a target within K of the anchor reports only the floor.
+func TestBoundedRollbackBelowImmutableTipReportsFloor(t *testing.T) {
+	t.Parallel()
+	db, c := newImmutableChainWithK(t, 3)
+	_, err := db.PromoteThrough(context.Background(), 5)
+	require.NoError(t, err)
+	below := pointOfBlockFromDB(t, db, 4)
+
+	deep := c.ValidateRollback(t.Context(), below)
+	require.ErrorIs(t, deep, chain.ErrRollbackExceedsSecurityParam)
+	require.ErrorIs(t, deep, database.ErrRollbackBelowImmutableTip)
+
+	require.NoError(
+		t, c.Rollback(t.Context(), pointOfBlockFromDB(t, db, 7)),
+	)
+	require.NoError(t, c.ResetRollbackAnchorToTip())
+	shallow := c.ValidateRollback(t.Context(), below)
+	require.ErrorIs(t, shallow, database.ErrRollbackBelowImmutableTip)
+	require.NotErrorIs(t, shallow, chain.ErrRollbackExceedsSecurityParam)
 }
 
 func TestPointAtDepthReadsNoBodies(t *testing.T) {

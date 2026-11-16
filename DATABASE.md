@@ -7634,8 +7634,14 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   `ErrStoreCorrupt` rather than discarding the good blocks after it.
 - **Floor.** Rollback (bounded or unbounded), block removal, orphan blob
   cleanup and bulk block deletion refuse blocks at or below `TipIndex` with
-  `ErrRollbackBelowImmutableTip`. Block deletion also reads `TipIndex` from
-  `im_state` in its own transaction, which sees the tip a promotion commits
+  `ErrRollbackBelowImmutableTip`. A bounded rollback checks the security
+  parameter first: a target below `TipIndex` and deeper than K reports
+  `ErrRollbackExceedsSecurityParam` joined with the floor error, and one within
+  K of the rollback anchor (as after `ResetRollbackAnchorToTip`) reports only
+  the floor error. Chainsync treats either as a resync of the connection, and
+  a windowed recovery rewind refuses a target below `TipIndex` before its first
+  step. Block deletion also reads `TipIndex` from `im_state` in its own
+  transaction, which sees the tip a promotion commits
   with its markers before the in-memory copy moves. An operator truncate lowers `im_state` and cuts
   the chunk files first, in that order, so an interrupted truncate resumes
   through the pending-truncate record.

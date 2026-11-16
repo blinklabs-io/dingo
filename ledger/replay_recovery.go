@@ -1137,8 +1137,11 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	// Its over-K refusal is the one outcome that must not stop the descent:
 	// a recovery target deeper than the security parameter is precisely what
 	// this function windows, and every step is validated again on its own.
+	// A target below the immutable tip is joined to that over-K refusal when
+	// it is deeper than K, and no window reaches it, so it still stops here.
 	if err := ls.chain.ValidateRollback(context.Background(), point); err != nil &&
-		!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		(!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) ||
+			errors.Is(err, database.ErrRollbackBelowImmutableTip)) {
 		return false, fmt.Errorf("validate recovery target: %w", err)
 	}
 	window := uint64(securityParam) //nolint:gosec // positive, checked above

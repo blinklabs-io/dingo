@@ -2351,9 +2351,6 @@ func (c *Chain) ValidateRollback(
 		}
 		rollbackBlockIndex = tmpBlock.ID
 	}
-	if err := c.checkImmutableFloor(rollbackBlockIndex); err != nil {
-		return err
-	}
 	// Calculate fork depth before deleting blocks
 	forkDepth := c.rollbackForkDepth(point, rollbackBlockIndex)
 	// Reject rollbacks that exceed the security parameter K on
@@ -2372,9 +2369,22 @@ func (c *Chain) ValidateRollback(
 			"security_param", securityParam,
 			"rollback_slot", point.Slot,
 		)
-		return ErrRollbackExceedsSecurityParam
+		return c.exceedsSecurityParamError(rollbackBlockIndex)
 	}
-	return nil
+	// Only a target within K of the anchor reaches this refusal, or an
+	// unbounded rollback, which skips the K bound.
+	return c.checkImmutableFloor(rollbackBlockIndex)
+}
+
+// exceedsSecurityParamError returns the refusal for a target deeper than K. A
+// target that is also below the immutable tip reports both errors: the K bound
+// is checked first so a peer-named target resyncs, and the floor error stays
+// visible to callers that must never cross it.
+func (c *Chain) exceedsSecurityParamError(rollbackBlockIndex uint64) error {
+	if floorErr := c.checkImmutableFloor(rollbackBlockIndex); floorErr != nil {
+		return errors.Join(ErrRollbackExceedsSecurityParam, floorErr)
+	}
+	return ErrRollbackExceedsSecurityParam
 }
 
 // rollbackLocked performs all rollback logic under locks and returns
@@ -2551,9 +2561,6 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 		}
 		rollbackBlockIndex = tmpBlock.ID
 	}
-	if err := c.checkImmutableFloor(rollbackBlockIndex); err != nil {
-		return nil, err
-	}
 	// Calculate fork depth before deleting blocks
 	forkDepth := c.rollbackForkDepth(point, rollbackBlockIndex)
 	// Reject rollbacks that exceed the security parameter K from
@@ -2574,7 +2581,10 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 			"security_param", securityParam,
 			"rollback_slot", point.Slot,
 		)
-		return nil, ErrRollbackExceedsSecurityParam
+		return nil, c.exceedsSecurityParamError(rollbackBlockIndex)
+	}
+	if err := c.checkImmutableFloor(rollbackBlockIndex); err != nil {
+		return nil, err
 	}
 	// Validate the in-memory buffer before deleting anything, so a
 	// corrupt span fails the rollback whole rather than part-way through.

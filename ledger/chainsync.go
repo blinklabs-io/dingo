@@ -4033,7 +4033,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			)
 			return nil
 		}
-		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		if rollbackRefusedAsTooDeep(err) {
 			reconciled, reconcileErr := ls.reconcileLivePrimaryChainLedgerDivergence(
 				"chainsync rollback exceeds security parameter K",
 				e.ConnectionId,
@@ -6964,7 +6964,7 @@ func (ls *LedgerState) tryResolveForkPinned(
 			)
 			return true, nil
 		}
-		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		if rollbackRefusedAsTooDeep(err) {
 			reconciled, reconcileErr := ls.reconcileLivePrimaryChainLedgerDivergence(
 				"fork resolution exceeds security parameter K",
 				e.ConnectionId,
@@ -12487,4 +12487,14 @@ func (ls *LedgerState) SyncProgress() float64 {
 		progress = 1.0
 	}
 	return progress
+}
+
+// rollbackRefusedAsTooDeep reports a rollback the chain refuses to cross: past
+// the security parameter K, or below the immutable tip. A peer can name either
+// target, so both resync the connection. A target below the immutable tip can
+// lie within K of the rollback anchor, where the chain reports only the
+// immutable-floor error.
+func rollbackRefusedAsTooDeep(err error) bool {
+	return errors.Is(err, chain.ErrRollbackExceedsSecurityParam) ||
+		errors.Is(err, database.ErrRollbackBelowImmutableTip)
 }

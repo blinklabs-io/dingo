@@ -1034,8 +1034,8 @@ that point cannot be undone, so it is invalidated explicitly instead — the
 continuation-audit window is discarded and the failure is reported as
 `ErrChainTruncatedLedgerRollbackFailed`. That identity is deliberately distinct
 from the refusals that mean no state changed (`models.ErrBlockNotFound`,
-`chain.ErrRollbackExceedsSecurityParam`, `ErrRollbackExceedsMithrilBoundary`),
-each of which `handleEventChainsyncRollback` and `tryResolveFork` recover from
+`chain.ErrRollbackExceedsSecurityParam`, `database.ErrRollbackBelowImmutableTip`,
+`ErrRollbackExceedsMithrilBoundary`), each of which `handleEventChainsyncRollback` and `tryResolveFork` recover from
 with a plain re-intersect; recovering that way here would resume from a ledger
 tip whose block the chain has already deleted.
 
