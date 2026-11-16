@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func sha256Hex(data []byte) string {
+func chunkPayloadSHA256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
@@ -48,7 +48,7 @@ func writeManyChunkSnapshot(t *testing.T, dir string, chunkCount int) {
 				filepath.Join(dir, immutableFilePrefix+name), data, 0o600,
 			))
 			idx.Files = append(idx.Files, immutableIndexFile{
-				Name: name, Size: int64(len(data)), SHA256: sha256Hex(data),
+				Name: name, Size: int64(len(data)), SHA256: chunkPayloadSHA256Hex(data),
 			})
 		}
 	}
@@ -66,10 +66,10 @@ func writeManyChunkSnapshot(t *testing.T, dir string, chunkCount int) {
 	require.NoError(t, WriteManifest(dir, Manifest{
 		BlobBytes:            4,
 		MetadataBytes:        8,
-		BlobSHA256:           sha256Hex([]byte("blob")),
-		MetadataSHA256:       sha256Hex([]byte("metadata")),
+		BlobSHA256:           chunkPayloadSHA256Hex([]byte("blob")),
+		MetadataSHA256:       chunkPayloadSHA256Hex([]byte("metadata")),
 		ImmutableIndexBytes:  int64(len(indexData)),
-		ImmutableIndexSHA256: sha256Hex(indexData),
+		ImmutableIndexSHA256: chunkPayloadSHA256Hex(indexData),
 	}))
 }
 
