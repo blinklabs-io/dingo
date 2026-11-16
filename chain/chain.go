@@ -2351,9 +2351,6 @@ func (c *Chain) ValidateRollback(
 		}
 		rollbackBlockIndex = tmpBlock.ID
 	}
-	if err := c.checkImmutableFloor(rollbackBlockIndex); err != nil {
-		return err
-	}
 	// Calculate fork depth before deleting blocks
 	forkDepth := c.rollbackForkDepth(point, rollbackBlockIndex)
 	// Reject rollbacks that exceed the security parameter K on
@@ -2374,7 +2371,10 @@ func (c *Chain) ValidateRollback(
 		)
 		return ErrRollbackExceedsSecurityParam
 	}
-	return nil
+	// After the K bound: a target below the immutable tip is deeper than K, and
+	// peers reach it, so it must surface as the recoverable bound error. Normally
+	// only an unbounded rollback, which skips that bound, reaches this refusal.
+	return c.checkImmutableFloor(rollbackBlockIndex)
 }
 
 // rollbackLocked performs all rollback logic under locks and returns
@@ -2551,9 +2551,6 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 		}
 		rollbackBlockIndex = tmpBlock.ID
 	}
-	if err := c.checkImmutableFloor(rollbackBlockIndex); err != nil {
-		return nil, err
-	}
 	// Calculate fork depth before deleting blocks
 	forkDepth := c.rollbackForkDepth(point, rollbackBlockIndex)
 	// Reject rollbacks that exceed the security parameter K from
@@ -2575,6 +2572,9 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 			"rollback_slot", point.Slot,
 		)
 		return nil, ErrRollbackExceedsSecurityParam
+	}
+	if err := c.checkImmutableFloor(rollbackBlockIndex); err != nil {
+		return nil, err
 	}
 	// Validate the in-memory buffer before deleting anything, so a
 	// corrupt span fails the rollback whole rather than part-way through.
