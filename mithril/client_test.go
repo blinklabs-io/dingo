@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -135,6 +136,10 @@ func TestGetCertificateGenesis(t *testing.T) {
 		PreviousHash:     "genesis_cert_hash",
 		Epoch:            0,
 		GenesisSignature: "genesis_sig_abc123",
+		Metadata: CertificateMetadata{
+			InitiatedAt: "2025-01-01T00:00:00Z",
+			SealedAt:    "2025-01-01T00:00:00Z",
+		},
 	}
 
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -457,7 +462,7 @@ func TestSignedEntityTypeCardanoStakeDistributionScalar(t *testing.T) {
 func TestSignedEntityTypeCardanoTransactions(t *testing.T) {
 	t.Parallel()
 
-	raw := `{"CardanoTransactions":{"epoch":271,"block_number":54321}}`
+	raw := `{"CardanoTransactions":[271,54321]}`
 	var set SignedEntityType
 	err := json.Unmarshal([]byte(raw), &set)
 	require.NoError(t, err)
@@ -474,7 +479,7 @@ func TestSignedEntityTypeCardanoTransactions(t *testing.T) {
 func TestSignedEntityTypeCardanoTransactionsFeedHash(t *testing.T) {
 	t.Parallel()
 
-	raw := `{"CardanoTransactions":{"epoch":271,"block_number":54321}}`
+	raw := `{"CardanoTransactions":[271,54321]}`
 	var set SignedEntityType
 	err := json.Unmarshal([]byte(raw), &set)
 	require.NoError(t, err)
@@ -1102,4 +1107,56 @@ func TestVerifyCertChainEmptyHash(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "empty")
+}
+
+// Mithril's u64 beacon values reject JSON strings; encoding/json would read
+// a quoted number into a json.Number.
+func TestSignedEntityTypeArrayBeaconsRejectQuotedNumbers(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		`{"CardanoTransactions":["271",54321]}`,
+		`{"CardanoTransactions":[271,"54321"]}`,
+		`{"CardanoBlocksTransactions":[271,"54321",15]}`,
+	} {
+		var set SignedEntityType
+		require.NoError(t, json.Unmarshal([]byte(raw), &set), raw)
+		require.Error(t, set.feedHash(sha256.New()), raw)
+	}
+	var set SignedEntityType
+	require.NoError(t, json.Unmarshal(
+		[]byte(`{"CardanoTransactions":["271","54321"]}`), &set,
+	))
+	require.Nil(t, set.CardanoTransactions())
+}
+
+// Mithril hashes phi_f as U8F24::from_num, which in a release build rounds
+// to nearest, ties to even, and keeps the low 32 bits of a value outside
+// the 8.24 range. The conversion must not depend on the platform's
+// out-of-range float-to-integer behaviour.
+func TestProtocolParametersHashWrapsPhiF(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		phi  float64
+		bits uint32
+	}{
+		{0.5, 1 << 23},
+		{300.5, uint32((uint64(3005) << 24 / 10) % (1 << 32))},
+		{-0.5, 1<<32 - 1<<23},
+		// 2^63 + 2^11 after scaling: beyond int64, low bits still set.
+		{0x1p39 + 0x1p-13, 1 << 11},
+		{1e300, 0},
+		{math.MaxFloat64, 0},
+	} {
+		want := sha256.New()
+		want.Write(uint64ToBigEndianBytes(5))
+		want.Write(uint64ToBigEndianBytes(7))
+		want.Write(uint32ToBigEndianBytes(tc.bits))
+		p := ProtocolParameters{K: 5, M: 7, PhiF: tc.phi}
+		require.Equal(
+			t, fmt.Sprintf("%x", want.Sum(nil)), p.ComputeHash(),
+			"phi_f %v", tc.phi,
+		)
+	}
 }

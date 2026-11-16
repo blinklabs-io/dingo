@@ -7,6 +7,7 @@ require (
 	connectrpc.com/connect v1.21.1
 	connectrpc.com/grpchealth v1.5.0
 	connectrpc.com/grpcreflect v1.3.1
+	filippo.io/edwards25519 v1.2.0
 	github.com/Microsoft/go-winio v0.6.4
 	github.com/XSAM/otelsql v0.44.0
 	github.com/antithesishq/antithesis-sdk-go v0.8.0
@@ -84,7 +85,6 @@ require (
 	cloud.google.com/go/longrunning v1.3.0 // indirect
 	cloud.google.com/go/monitoring v1.30.0 // indirect
 	filippo.io/age v1.3.2 // indirect
-	filippo.io/edwards25519 v1.2.0 // indirect
 	filippo.io/hpke v0.4.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.22.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.0 // indirect

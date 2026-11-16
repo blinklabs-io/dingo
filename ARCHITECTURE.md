@@ -14777,8 +14777,25 @@ Package layout:
 
 At the chain root, the genesis signature authenticates the protocol message.
 Its signed next aggregate verification key and protocol-parameter hash must
-match the genesis certificate's own key and parameters, which same-epoch
-successors inherit.
+match the genesis certificate's own key and parameters, and the certificate
+that follows genesis must be in the next epoch, as on Mithril's main branch.
+
+Certificates, aggregate verification keys and multi-signatures are decoded as
+the reference client's serde does, not as `encoding/json` would: keys match
+exactly, a repeated or missing field is an error, null is accepted only for
+optional fields, and unknown keys are ignored (`serde_json.go`, a streaming
+check that holds no tree, so the bounded decoders after it still bound
+retained memory). The protocol message hash scheme must be `legacy` and its
+parts must be known. Certificate timestamps are read with chrono's relaxed RFC
+3339 grammar and hashed as its `timestamp_nanos_opt` (`chrono_timestamp.go`),
+and `phi_f` is hashed in 8.24 fixed point rounded to nearest, ties to even,
+keeping the low 32 bits of a value outside that range as a release build of
+the reference does. Genesis and ancillary manifest signatures are verified as
+ed25519-dalek's `verify_strict` verifies them, which rejects a small-order
+public key or R that `crypto/ed25519.Verify` accepts.
+`TestReferenceCorpus` replays answers recorded from mithril-stm 0.13.0 and
+mithril-common 0.8.3 against this verifier and lists the few places it is
+deliberately stricter.
 STM multi-signature verification rejects signer entries without a lottery
 index and follows the reference aggregation rule: a 128-bit Blake2b
 coefficient derived from the ordered signature list and each signature's
