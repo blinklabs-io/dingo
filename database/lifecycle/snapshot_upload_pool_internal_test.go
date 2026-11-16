@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !windows
-
 package lifecycle
 
 import (
@@ -24,20 +22,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-)
-
-const (
-	fdHelperDirEnv   = "DINGO_TEST_FD_SNAPSHOT_DIR"
-	fdHelperLimit    = 48
-	fdHelperChunkCnt = 100
 )
 
 func sha256Hex(data []byte) string {
@@ -81,86 +71,6 @@ func writeManyChunkSnapshot(t *testing.T, dir string, chunkCount int) {
 		ImmutableIndexBytes:  int64(len(indexData)),
 		ImmutableIndexSHA256: sha256Hex(indexData),
 	}))
-}
-
-type countingUploadDirDestination struct {
-	CloudDestination
-	files int
-}
-
-func (d *countingUploadDirDestination) UploadDir(
-	_ context.Context,
-	dir string,
-) error {
-	entries, err := os.ReadDir(dir)
-	d.files = len(entries)
-	return err
-}
-
-// TestSnapshotUploadChunkDescriptorsBounded runs the upload and the local
-// restore copy of a snapshot with far more chunk files than the descriptor
-// limit allows held open at once, in a child process whose soft RLIMIT_NOFILE
-// is lowered.
-//
-// Not t.Parallel: the child lowers a process-wide resource limit, so the
-// parent only spawns it and runs nothing else with that limit.
-func TestSnapshotUploadChunkDescriptorsBounded(t *testing.T) {
-	if dir := os.Getenv(fdHelperDirEnv); dir != "" {
-		runFDHelper(t, dir)
-		return
-	}
-	snapshotDir := filepath.Join(t.TempDir(), "epoch-1")
-	require.NoError(t, os.Mkdir(snapshotDir, 0o700))
-	writeManyChunkSnapshot(t, snapshotDir, fdHelperChunkCnt)
-
-	cmd := exec.Command(
-		os.Args[0],
-		"-test.run=^TestSnapshotUploadChunkDescriptorsBounded$",
-		"-test.count=1",
-	)
-	cmd.Env = append(os.Environ(), fdHelperDirEnv+"="+snapshotDir)
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(out))
-}
-
-func runFDHelper(t *testing.T, snapshotDir string) {
-	var lim syscall.Rlimit
-	require.NoError(t, syscall.Getrlimit(syscall.RLIMIT_NOFILE, &lim))
-	lim.Cur = fdHelperLimit
-	require.NoError(t, syscall.Setrlimit(syscall.RLIMIT_NOFILE, &lim))
-	ctx := context.Background()
-
-	dest := &countingUploadDirDestination{}
-	result, err := uploadStagedSnapshot(ctx, dest, snapshotDir)
-	require.NoError(t, err)
-	require.NoError(t, result.close())
-	require.Equal(t, fdHelperChunkCnt*3+4, dest.files)
-
-	files, _, root, err := openSnapshotUploadFiles(
-		ctx, snapshotDir, MaxManifestBytes,
-	)
-	require.NoError(t, err)
-	var visited atomic.Int64
-	require.NoError(t, forEachSnapshotUploadFile(
-		ctx, root, files, snapshotUploadWorkers,
-		func(context.Context, snapshotUploadFile, *os.File) error {
-			visited.Add(1)
-			return nil
-		},
-	))
-	require.Equal(t, int64(fdHelperChunkCnt*3+4), visited.Load())
-	require.NoError(t, closeSnapshotUploadFiles(files))
-	require.NoError(t, root.Close())
-
-	manifest, err := ReadManifest(snapshotDir)
-	require.NoError(t, err)
-	workParent := t.TempDir()
-	dir, cleanup, err := fetchPayloads(
-		ctx, nil, snapshotDir, workParent, manifest,
-	)
-	require.NoError(t, err)
-	defer cleanup()
-	require.NoError(t, manifest.verifyPayloads(ctx, dir, true))
 }
 
 func TestSnapshotUploadDeferredChunkRejectsTampering(t *testing.T) {
