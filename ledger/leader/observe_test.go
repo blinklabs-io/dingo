@@ -34,6 +34,8 @@ import (
 const (
 	observeEpochA = uint64(10)
 	observeEpochB = uint64(11)
+	// observeParkedEpoch is an epoch no test stores, persists or observes.
+	observeParkedEpoch = uint64(0)
 )
 
 // observeFixture is an election whose schedules come from a persisted store,
@@ -99,6 +101,19 @@ func (f *observeFixture) run(t *testing.T) {
 	t.Helper()
 	require.NoError(t, f.election.Start(context.Background()))
 	t.Cleanup(func() { _ = f.election.Stop() })
+}
+
+// runWithoutStartupCompute starts the election with the provider's current
+// epoch parked on observeParkedEpoch, so the computation Start queues for the
+// current epoch never touches epoch 10. Without it, that computation can read
+// epoch 10's store before a test persists the schedule and its nonce after,
+// then replace the persisted schedule with a computed one. Start reads the
+// current epoch before it returns, so restoring it afterwards is safe.
+func (f *observeFixture) runWithoutStartupCompute(t *testing.T) {
+	t.Helper()
+	f.epochs.currentEpoch.Store(observeParkedEpoch)
+	f.run(t)
+	f.epochs.currentEpoch.Store(observeEpochA)
 }
 
 // load loads the persisted schedule of epoch and returns once it is cached.
@@ -210,7 +225,7 @@ func TestObserveSlotCountsSlotsPassedBeforeTheScheduleArrived(t *testing.T) {
 	f := newObserveFixture(t)
 	// No schedule is stored yet and the epoch has no nonce, so none can be
 	// produced.
-	f.run(t)
+	f.runWithoutStartupCompute(t)
 
 	f.election.ObserveSlot(100)
 	f.election.ObserveSlot(105)
@@ -445,7 +460,7 @@ func TestObserveSlotDoesNotCountBelowTheFloorAfterABackwardsReading(
 ) {
 	t.Parallel()
 	f := newObserveFixture(t)
-	f.run(t)
+	f.runWithoutStartupCompute(t)
 
 	f.election.ObserveSlot(104)
 	f.persist(t, observeEpochA, 103, 105)
