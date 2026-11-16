@@ -15,6 +15,7 @@
 package leios
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // AdaptiveEbConfig is how the endorser-block capacity follows missed quorums.
@@ -113,6 +115,10 @@ type AdaptiveEbControllerConfig struct {
 	// Genesis state machine's caught-up state. A node that syncs past old
 	// announcements has none of their votes.
 	CaughtUp func() bool
+	// ChainTip returns the tip of the chain the node has selected. Only a
+	// block that is still the tip when its update is handled is sampled, so
+	// updates queued while the node synced never pass the caught-up gate.
+	ChainTip func() ocommon.Point
 	// inspect reads a block off a chain update. Tests replace it.
 	inspect func(chain.ChainBlockEvent) (adaptiveBlock, bool)
 }
@@ -141,6 +147,7 @@ type AdaptiveEbController struct {
 	votes   AnnouncementVoteSource
 	gap     func(uint64) (uint64, error)
 	caught  func() bool
+	tip     func() ocommon.Point
 	inspect func(chain.ChainBlockEvent) (adaptiveBlock, bool)
 
 	// scale holds the float64 bits of the current scale.
@@ -154,8 +161,10 @@ type AdaptiveEbController struct {
 	running  bool
 	stopping bool
 	cancel   context.CancelFunc
-	loopWg   sync.WaitGroup
-	subID    event.EventSubscriberId
+	// done is closed when the event loop of the current run has returned.
+	// Every Stop waits on it, so none returns while the loop still queries.
+	done  chan struct{}
+	subID event.EventSubscriberId
 }
 
 // NewAdaptiveEbController creates a controller.
@@ -176,6 +185,9 @@ func NewAdaptiveEbController(
 	if cfg.CaughtUp == nil {
 		return nil, errors.New("leios adaptive endorsements: nil caught-up")
 	}
+	if cfg.ChainTip == nil {
+		return nil, errors.New("leios adaptive endorsements: nil chain tip")
+	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -187,6 +199,7 @@ func NewAdaptiveEbController(
 		votes:   cfg.Votes,
 		gap:     cfg.CertificationGap,
 		caught:  cfg.CaughtUp,
+		tip:     cfg.ChainTip,
 		inspect: cfg.inspect,
 	}
 	if c.inspect == nil {
@@ -232,7 +245,10 @@ func (c *AdaptiveEbController) Start(ctx context.Context) error {
 
 	subID, ch := c.bus.Subscribe(chain.ChainUpdateEventType)
 	c.subID = subID
-	c.loopWg.Go(func() {
+	done := make(chan struct{})
+	c.done = done
+	go func() {
+		defer close(done)
 		closed := c.followChain(childCtx, ch)
 		// A loop that ended without Stop leaves nothing following the chain:
 		// release the subscription and the running state so Start can be
@@ -255,7 +271,7 @@ func (c *AdaptiveEbController) Start(ctx context.Context) error {
 		}
 		c.bus.Unsubscribe(chain.ChainUpdateEventType, c.subID)
 		c.scale.Store(math.Float64bits(1))
-	})
+	}()
 	c.logger.Info(
 		"leios adaptive endorsements started",
 		"decrease", c.cfg.Decrease,
@@ -265,11 +281,16 @@ func (c *AdaptiveEbController) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop unsubscribes and waits for the event loop to finish.
+// Stop unsubscribes and waits for the event loop to finish. A Stop that
+// finds another in progress waits for the same loop.
 func (c *AdaptiveEbController) Stop() error {
 	c.mu.Lock()
+	done := c.done
 	if !c.running {
 		c.mu.Unlock()
+		if done != nil {
+			<-done
+		}
 		return nil
 	}
 	c.stopping = true
@@ -281,7 +302,7 @@ func (c *AdaptiveEbController) Stop() error {
 	c.bus.Unsubscribe(chain.ChainUpdateEventType, c.subID)
 	c.mu.Unlock()
 
-	c.loopWg.Wait()
+	<-done
 
 	c.mu.Lock()
 	c.stopping = false
@@ -329,7 +350,7 @@ func (c *AdaptiveEbController) handleBlock(evt chain.ChainBlockEvent) {
 	if prev == nil || prev.announced == nil || block.prevHash != prev.hash {
 		return
 	}
-	if !c.caught() {
+	if !samePoint(evt.Point, c.tip()) || !c.caught() {
 		return
 	}
 	c.sample(*prev, block.slot)
@@ -395,6 +416,10 @@ func (c *AdaptiveEbController) sample(announcer adaptiveBlock, slot uint64) {
 		"certifiable", certifiable,
 		"eb_capacity_scale", next,
 	)
+}
+
+func samePoint(a, b ocommon.Point) bool {
+	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
 }
 
 // inspectChainBlock reads the identity of a block and the endorser block its

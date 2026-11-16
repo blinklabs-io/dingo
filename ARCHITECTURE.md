@@ -12839,9 +12839,13 @@ collected for that announcement at that moment, against the committee and
 quorum threshold of the announcement's epoch, and takes one sample. Every
 announcement counts, whoever made it. The reference reads the committee and
 threshold from the ledger at the tip, so the two differ only when the next
-block crosses an epoch boundary that changed the parameters. A sample moves the
-scale only when the node is caught up (`ChainSelector.CaughtUp`), and not when
-the committee, the threshold or the certification gap cannot be resolved:
+block crosses an epoch boundary that changed the parameters. Only a block that
+is still the tip of the selected chain when its update is handled is sampled,
+as the reference samples only its current selection: updates queued while the
+node synced are handled after it is caught up, and the votes of their
+announcements were never collected. A sample moves the scale only when the node
+is caught up (`ChainSelector.CaughtUp`), and not when the committee, the
+threshold or the certification gap cannot be resolved:
 
 | Outcome | Scale |
 |---|---|

@@ -32,6 +32,7 @@ import (
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 func validateLeiosPersistenceRetention(
@@ -620,6 +621,7 @@ func (n *Node) initLeiosAdaptiveEndorsements(ctx context.Context) error {
 		return nil
 	}
 	chainSelector := n.chainSelector
+	chainManager := n.chainManager
 	controller, err := leios.NewAdaptiveEbController(
 		leios.AdaptiveEbControllerConfig{
 			Logger:           n.config.logger,
@@ -629,6 +631,12 @@ func (n *Node) initLeiosAdaptiveEndorsements(ctx context.Context) error {
 			CertificationGap: n.ledgerState.LeiosCertificationGap,
 			CaughtUp: func() bool {
 				return leiosAdaptiveCaughtUp(chainSelector)
+			},
+			ChainTip: func() ocommon.Point {
+				if chainManager == nil {
+					return ocommon.Point{}
+				}
+				return chainManager.PrimaryChain().Tip().Point
 			},
 		},
 	)

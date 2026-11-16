@@ -177,6 +177,30 @@ type adaptiveFixture struct {
 	gapErr    error
 	announced map[byte]lcommon.Blake2b256
 	logs      *bytes.Buffer
+	tip       atomic.Pointer[ocommon.Point]
+}
+
+// chainTip is the tip of the fixture's chain: the block of the most recent
+// update, as the chain moves its tip before it publishes the update.
+func (f *adaptiveFixture) chainTip() ocommon.Point {
+	if tip := f.tip.Load(); tip != nil {
+		return *tip
+	}
+	return ocommon.Point{}
+}
+
+func (f *adaptiveFixture) setTip(point ocommon.Point) {
+	f.tip.Store(&point)
+}
+
+// publish moves the tip to the block and publishes its update on the bus.
+func (f *adaptiveFixture) publish(
+	bus *event.EventBus,
+	evt chain.ChainBlockEvent,
+) {
+	f.setTip(evt.Point)
+	bus.Publish(chain.ChainUpdateEventType,
+		event.NewEvent(chain.ChainUpdateEventType, evt))
 }
 
 func newAdaptiveFixture(t *testing.T) *adaptiveFixture {
@@ -189,19 +213,22 @@ func newAdaptiveFixture(t *testing.T) *adaptiveFixture {
 		logs:      &bytes.Buffer{},
 	}
 	f.caughtUp.Store(true)
+	// The bus is only used by the Start test.
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
 	c, err := NewAdaptiveEbController(AdaptiveEbControllerConfig{
 		Logger: slog.New(slog.NewJSONHandler(
 			f.logs,
 			&slog.HandlerOptions{Level: slog.LevelDebug},
 		)),
-		// The bus is only used by the Start test.
-		EventBus: event.NewEventBus(nil, nil),
+		EventBus: bus,
 		Config:   DefaultAdaptiveEbConfig(),
 		Votes:    f.votes,
 		CertificationGap: func(uint64) (uint64, error) {
 			return certificationGap, f.gapErr
 		},
 		CaughtUp: f.caughtUp.Load,
+		ChainTip: f.chainTip,
 		inspect: func(evt chain.ChainBlockEvent) (adaptiveBlock, bool) {
 			b := adaptiveBlock{
 				hash:     lcommon.NewBlake2b256(evt.Point.Hash),
@@ -235,6 +262,9 @@ func blockEvent(n, prev byte, slot uint64) chain.ChainBlockEvent {
 }
 
 func (f *adaptiveFixture) apply(data any) {
+	if evt, ok := data.(chain.ChainBlockEvent); ok {
+		f.setTip(evt.Point)
+	}
 	f.c.handleChainUpdate(event.NewEvent(chain.ChainUpdateEventType, data))
 }
 
@@ -508,7 +538,7 @@ func TestAdaptiveEbControllerFollowsChainUpdates(t *testing.T) {
 	t.Parallel()
 	f := newAdaptiveFixture(t)
 	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Stop)
+	t.Cleanup(bus.Close)
 	f.votes.queried = make(chan adaptiveVotesCall, 4)
 	c, err := NewAdaptiveEbController(AdaptiveEbControllerConfig{
 		EventBus: bus,
@@ -518,6 +548,7 @@ func TestAdaptiveEbControllerFollowsChainUpdates(t *testing.T) {
 			return certificationGap, nil
 		},
 		CaughtUp: func() bool { return true },
+		ChainTip: f.chainTip,
 		inspect:  f.c.inspect,
 	})
 	require.NoError(t, err)
@@ -528,10 +559,8 @@ func TestAdaptiveEbControllerFollowsChainUpdates(t *testing.T) {
 
 	f.announced[1] = blockHash(101)
 	f.votes.set(blockHash(1), missedStake)
-	bus.Publish(chain.ChainUpdateEventType, event.NewEvent(
-		chain.ChainUpdateEventType, blockEvent(1, 0, 100)))
-	bus.Publish(chain.ChainUpdateEventType, event.NewEvent(
-		chain.ChainUpdateEventType, blockEvent(2, 1, 100+certificationGap)))
+	f.publish(bus, blockEvent(1, 0, 100))
+	f.publish(bus, blockEvent(2, 1, 100+certificationGap))
 
 	call := testutil.RequireReceive(t, f.votes.queried, 5*time.Second,
 		"the announcement's votes are read")
@@ -554,7 +583,7 @@ func TestAdaptiveEbControllerClosedSubscriptionResetsAndStops(t *testing.T) {
 	t.Parallel()
 	f := newAdaptiveFixture(t)
 	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Stop)
+	t.Cleanup(bus.Close)
 	f.votes.queried = make(chan adaptiveVotesCall, 4)
 	c, err := NewAdaptiveEbController(AdaptiveEbControllerConfig{
 		Logger:   slog.New(slog.NewJSONHandler(f.logs, nil)),
@@ -565,6 +594,7 @@ func TestAdaptiveEbControllerClosedSubscriptionResetsAndStops(t *testing.T) {
 			return certificationGap, nil
 		},
 		CaughtUp: func() bool { return true },
+		ChainTip: f.chainTip,
 		inspect:  f.c.inspect,
 	})
 	require.NoError(t, err)
@@ -575,10 +605,8 @@ func TestAdaptiveEbControllerClosedSubscriptionResetsAndStops(t *testing.T) {
 
 	f.announced[1] = blockHash(101)
 	f.votes.set(blockHash(1), missedStake)
-	bus.Publish(chain.ChainUpdateEventType, event.NewEvent(
-		chain.ChainUpdateEventType, blockEvent(1, 0, 100)))
-	bus.Publish(chain.ChainUpdateEventType, event.NewEvent(
-		chain.ChainUpdateEventType, blockEvent(2, 1, 100+certificationGap)))
+	f.publish(bus, blockEvent(1, 0, 100))
+	f.publish(bus, blockEvent(2, 1, 100+certificationGap))
 	testutil.RequireReceive(t, f.votes.queried, 5*time.Second,
 		"the announcement's votes are read")
 	require.Eventually(t, func() bool { return c.Scale() == 0.8 },
@@ -596,10 +624,8 @@ func TestAdaptiveEbControllerClosedSubscriptionResetsAndStops(t *testing.T) {
 	f.announced[3] = blockHash(103)
 	f.votes.set(blockHash(3), missedStake)
 	require.NoError(t, c.Start(ctx))
-	bus.Publish(chain.ChainUpdateEventType, event.NewEvent(
-		chain.ChainUpdateEventType, blockEvent(3, 2, 300)))
-	bus.Publish(chain.ChainUpdateEventType, event.NewEvent(
-		chain.ChainUpdateEventType, blockEvent(4, 3, 300+certificationGap)))
+	f.publish(bus, blockEvent(3, 2, 300))
+	f.publish(bus, blockEvent(4, 3, 300+certificationGap))
 	require.Eventually(t, func() bool { return c.Scale() == 0.8 },
 		5*time.Second, time.Millisecond,
 		"the restarted controller follows the chain again")
@@ -763,14 +789,17 @@ func TestInspectChainBlockReadsDijkstraAnnouncement(t *testing.T) {
 func TestAdaptiveEbControllerSamplesRealDijkstraBlocks(t *testing.T) {
 	t.Parallel()
 	f := newAdaptiveFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
 	c, err := NewAdaptiveEbController(AdaptiveEbControllerConfig{
-		EventBus: event.NewEventBus(nil, nil),
+		EventBus: bus,
 		Config:   DefaultAdaptiveEbConfig(),
 		Votes:    f.votes,
 		CertificationGap: func(uint64) (uint64, error) {
 			return certificationGap, nil
 		},
 		CaughtUp: func() bool { return true },
+		ChainTip: f.chainTip,
 	})
 	require.NoError(t, err)
 
@@ -784,14 +813,87 @@ func TestAdaptiveEbControllerSamplesRealDijkstraBlocks(t *testing.T) {
 	)
 	f.votes.set(announcer.Hash(), missedStake)
 
-	c.handleChainUpdate(event.NewEvent(
-		chain.ChainUpdateEventType, chainEventOf(announcer)))
-	c.handleChainUpdate(event.NewEvent(
-		chain.ChainUpdateEventType, chainEventOf(next)))
+	for _, block := range []*dijkstra.DijkstraBlock{announcer, next} {
+		evt := chainEventOf(block)
+		f.setTip(evt.Point)
+		c.handleChainUpdate(event.NewEvent(chain.ChainUpdateEventType, evt))
+	}
 	require.Equal(t, 0.8, c.Scale())
 	require.Equal(t, []adaptiveVotesCall{{
 		slot:   100,
 		rbHash: announcer.Hash(),
 		ebHash: blockHash(9),
 	}}, f.votes.calls)
+}
+
+// An update handled after the chain has moved past its block was queued, as
+// updates are while a node syncs: its announcement's votes were never
+// collected, so it is not sampled even though the node is now caught up.
+func TestAdaptiveEbControllerSamplesOnlyTheChainTip(t *testing.T) {
+	t.Parallel()
+	f := newAdaptiveFixture(t)
+	f.announce(1, 0, 100)
+	f.votes.set(blockHash(1), missedStake)
+	f.setTip(blockEvent(3, 2, 200).Point)
+	f.c.handleChainUpdate(event.NewEvent(
+		chain.ChainUpdateEventType, blockEvent(2, 1, 100+certificationGap)))
+	require.Equal(t, 1.0, f.c.Scale())
+	require.Zero(t, f.votes.callCount())
+
+	f.announce(4, 2, 300)
+	f.sample(5, 4, 300+certificationGap, missedStake)
+	require.Equal(t, 0.8, f.c.Scale(), "the block at the tip is sampled")
+}
+
+// A Stop that finds another in progress returns only once the event loop has
+// finished its vote query.
+func TestAdaptiveEbControllerConcurrentStopWaitsForTheLoop(t *testing.T) {
+	t.Parallel()
+	f := newAdaptiveFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	f.votes.queried = make(chan adaptiveVotesCall)
+	c, err := NewAdaptiveEbController(AdaptiveEbControllerConfig{
+		EventBus: bus,
+		Config:   DefaultAdaptiveEbConfig(),
+		Votes:    f.votes,
+		CertificationGap: func(uint64) (uint64, error) {
+			return certificationGap, nil
+		},
+		CaughtUp: func() bool { return true },
+		ChainTip: f.chainTip,
+		inspect:  f.c.inspect,
+	})
+	require.NoError(t, err)
+	require.NoError(t, c.Start(t.Context()))
+
+	f.announced[1] = blockHash(101)
+	f.votes.set(blockHash(1), missedStake)
+	f.publish(bus, blockEvent(1, 0, 100))
+	f.publish(bus, blockEvent(2, 1, 100+certificationGap))
+	// The loop is now blocked inside the vote query until it is received.
+	require.Eventually(t, func() bool { return f.votes.callCount() == 1 },
+		5*time.Second, time.Millisecond)
+
+	first := make(chan struct{})
+	go func() {
+		_ = c.Stop()
+		close(first)
+	}()
+	require.Eventually(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.stopping
+	}, 5*time.Second, time.Millisecond)
+	second := make(chan struct{})
+	go func() {
+		_ = c.Stop()
+		close(second)
+	}()
+	testutil.RequireNoReceive(t, second, 100*time.Millisecond,
+		"a second Stop must wait for the loop")
+	testutil.RequireReceive(t, f.votes.queried, 5*time.Second,
+		"the vote query completes")
+	testutil.RequireReceive(t, first, 5*time.Second, "the first Stop returns")
+	testutil.RequireReceive(t, second, 5*time.Second, "the second Stop returns")
 }
