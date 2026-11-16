@@ -1242,7 +1242,11 @@ type LedgerStateConfig struct {
 	// prototype networks do. A standard cardano-node leaves those rounds
 	// empty, so only prototype networks set it; knowing the Dijkstra era is
 	// not a reason to.
-	WarmGenesisStake         bool
+	WarmGenesisStake bool
+	// LeiosStorage enables the Leios endorser-block store's lifecycle: the
+	// migration of legacy records out of the shared blob store at start. Only
+	// the leios run mode sets it.
+	LeiosStorage             bool
 	StartInDijkstra          bool
 	TrustedReplay            bool
 	ManualBlockProcessing    bool
@@ -2362,6 +2366,10 @@ type LedgerState struct {
 	// untickedClosure holds unpublished Apply events until its certifying RB
 	// commits. Guarded by the LedgerState lock.
 	untickedClosure *pendingLeiosClosure
+	// leiosPinMu serializes the pin walk and guards leiosImmutableTip, the
+	// optional override of the immutable point source; see leios_pin.go.
+	leiosPinMu        sync.Mutex
+	leiosImmutableTip ImmutableTipSource
 	// leiosApplyAnnouncer is the announcing header that ended the last
 	// prepared apply chunk, kept so the next chunk validates its endorser
 	// block while it is the ledger tip. Owned by the block-processing
@@ -3327,6 +3335,13 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Load current tip
 	if err := ls.loadTip(ctx); err != nil {
 		return fmt.Errorf("failed to load tip: %w", err)
+	}
+	// Move legacy endorser-block records into the Leios store once the
+	// immutable point is known, before anything reads or collects them.
+	if ls.config.LeiosStorage {
+		if err := ls.MigrateLeiosStore(ctx); err != nil {
+			return err
+		}
 	}
 	// Reconstruct the evolving-nonce fold across Mithril "gap blocks" (blocks
 	// between the ledger-state snapshot slot and the trust boundary) that were
@@ -11626,6 +11641,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 						err,
 					)
 				}
+				// Certification is derived from the chain when this block's
+				// ranking block becomes immutable, so no marker is written.
+				// The content is written before this block's apply commits,
+				// outside the droppable persist queue: a certified endorser
+				// block is part of the chain. A block that a later check
+				// rejects leaves a volatile record the collector removes.
 				if err := ls.persistCertifiedEndorserBlock(
 					ebHash.Bytes(),
 					ebSlot,
@@ -11635,21 +11656,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 					return nil, &leiosEndorserBlockStorageError{
 						err: fmt.Errorf(
 							"persist certified endorser block: %w",
-							err,
-						),
-					}
-				}
-				// Staged in the block-apply transaction, so the marker
-				// commits only with this ranking block: a later check that
-				// rejects it rolls the marker back with the rest.
-				if err := ls.ledgerDB().SetLeiosEBCertified(
-					ebSlot,
-					ebHash.Bytes(),
-					dbadapter.Unwrap(txn),
-				); err != nil {
-					return nil, &leiosEndorserBlockStorageError{
-						err: fmt.Errorf(
-							"mark certified endorser block: %w",
 							err,
 						),
 					}

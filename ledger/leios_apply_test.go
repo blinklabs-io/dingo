@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
@@ -692,15 +693,11 @@ func requireLeiosApplyTestEndorserBlob(
 	want []byte,
 ) {
 	t.Helper()
-	txn := db.BlobTxn(false)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		got, _, err := db.Blob().GetBlock(txn.Blob(), slot, hash)
-		if err != nil {
-			return err
-		}
-		require.Equal(t, want, got)
-		return nil
-	}))
+	store, err := db.LeiosDB()
+	require.NoError(t, err)
+	got, err := store.GetClosure(leiosdb.Ref{Slot: slot, Hash: hash})
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }
 
 func leiosApplyTestBlob(body []byte, tx lcommon.Transaction) []byte {

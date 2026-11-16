@@ -1036,6 +1036,15 @@ func (d *Database) recoverConsumedUtxo(
 			offset.BlockSlot,
 			offset.BlockHash[:],
 		)
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			// An endorser block's closure lives in the LeiosDB and has no
+			// block metadata.
+			if closure, closureErr := d.leiosClosure(
+				offset.BlockSlot, offset.BlockHash[:],
+			); closureErr == nil {
+				blockCbor, producerMeta, err = closure, types.BlockMetadata{}, nil
+			}
+		}
 		if err != nil {
 			return nil, fmt.Errorf("load producer block: %w", err)
 		}

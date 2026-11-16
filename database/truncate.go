@@ -439,13 +439,28 @@ func (d *Database) rollbackAfterSlot(
 	}
 	// Before the UTxO deletes, which can exhaust the blob transaction's
 	// budget: a stale marker would keep an endorser block that the selected
-	// chain no longer certifies.
+	// chain no longer certifies. Only a database that has not finished the
+	// Leios store migration holds markers.
 	if err := d.deleteLeiosEBCertifiedFromSlot(point.Slot, txn); err != nil {
 		return ochainsync.Tip{}, nil, fmt.Errorf(
 			"delete Leios certification markers after rollback: %w",
 			err,
 		)
 	}
+	// The LeiosDB commits on its own, so the pins certified by the removed
+	// ranking blocks are rolled back only after this transaction commits. A
+	// crash between the two leaves pins above the chain, which the pin walk
+	// reconciles against the immutable point on its next run.
+	txn.AfterCommit(func() {
+		if _, err := d.RollbackLeiosPins(point); err != nil {
+			d.logger.Error(
+				"failed to roll back Leios pins after truncate",
+				"component", "database",
+				"slot", point.Slot,
+				"error", err,
+			)
+		}
+	})
 	// Delete rolled-back UTxOs (blob offsets and metadata).
 	//
 	// Floor the deletion slot at mithrilFloor. UTxOs produced by gap

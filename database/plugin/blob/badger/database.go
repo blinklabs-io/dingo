@@ -327,13 +327,16 @@ func (i *badgerItem) ValueCopy(dst []byte) ([]byte, error) {
 
 // BlobStoreBadger stores all data in badger. Data may not be persisted
 type BlobStoreBadger struct {
-	promRegistry         prometheus.Registerer
-	db                   *badger.DB
-	logger               *slog.Logger
-	gcTicker             *time.Ticker
-	gcStopCh             chan struct{}
-	runValueLogGC        func(float64) error
-	dataDir              string
+	promRegistry  prometheus.Registerer
+	db            *badger.DB
+	logger        *slog.Logger
+	gcTicker      *time.Ticker
+	gcStopCh      chan struct{}
+	runValueLogGC func(float64) error
+	dataDir       string
+	// subdir names the directory under dataDir that holds the badger files.
+	// Empty selects "blob".
+	subdir               string
 	gcWg                 sync.WaitGroup
 	commitGate           sync.RWMutex
 	gcMetrics            *badgerGCMetrics
@@ -413,6 +416,14 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 	return db, nil
 }
 
+// storeSubdir is the directory under dataDir that holds this store's files.
+func (db *BlobStoreBadger) storeSubdir() string {
+	if db.subdir == "" {
+		return "blob"
+	}
+	return db.subdir
+}
+
 // open initializes and opens the Badger database using the configured options.
 func (db *BlobStoreBadger) open() error {
 	var blobDb *badger.DB
@@ -446,10 +457,7 @@ func (db *BlobStoreBadger) open() error {
 				return fmt.Errorf("failed to create data dir: %w", err)
 			}
 		}
-		blobDir := filepath.Join(
-			db.dataDir,
-			"blob",
-		)
+		blobDir := filepath.Join(db.dataDir, db.storeSubdir())
 		badgerOpts := badger.DefaultOptions(blobDir).
 			WithLogger(NewBadgerLogger(db.logger)).
 			WithLoggingLevel(badger.WARNING).
@@ -650,7 +658,7 @@ func (d *BlobStoreBadger) CloseContext(ctx context.Context) error {
 			if db := d.DB(); db != nil {
 				d.closeErr = db.Close()
 				if d.closeErr == nil && d.dataDir != "" {
-					lockDir := filepath.Join(d.dataDir, "blob")
+					lockDir := filepath.Join(d.dataDir, d.storeSubdir())
 					if !waitForDirLockRelease(
 						lockDir, dirLockReleaseTimeout,
 					) {
@@ -711,7 +719,7 @@ func (d *BlobStoreBadger) onDiskSize() (lsm, vlog int64, err error) {
 	if d.dataDir == "" {
 		return 0, 0, nil
 	}
-	entries, err := os.ReadDir(filepath.Join(d.dataDir, "blob"))
+	entries, err := os.ReadDir(filepath.Join(d.dataDir, d.storeSubdir()))
 	if err != nil {
 		return 0, 0, fmt.Errorf("read badger dir: %w", err)
 	}

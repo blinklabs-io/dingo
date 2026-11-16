@@ -49,6 +49,7 @@ func requirePrivateLocalSnapshot(snapshotDir string) error {
 		ManifestFileName,
 		BlobBackupFileName,
 		MetadataBackupFileName,
+		LeiosBackupFileName,
 	}
 	if _, err := os.Lstat(
 		filepath.Join(snapshotDir, UtxoSetBackupFileName),
@@ -58,6 +59,11 @@ func requirePrivateLocalSnapshot(snapshotDir string) error {
 	for _, name := range names {
 		path := filepath.Join(snapshotDir, name)
 		entry, err := os.Lstat(path)
+		if name == LeiosBackupFileName && errors.Is(err, fs.ErrNotExist) {
+			// Only a snapshot of a node with a LeiosDB carries it. A manifest
+			// that declares the file fails the payload check when it is absent.
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("inspect local snapshot file %q: %w", path, err)
 		}

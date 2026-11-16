@@ -1434,6 +1434,51 @@ func TestRecoverConsumedUtxoRefusesOffPrimaryChainProducer(t *testing.T) {
 	require.ErrorContains(t, err, "decode transaction output")
 }
 
+// A consumed output whose offset points into an endorser block's closure is
+// recovered from the LeiosDB when the shared blob store has no block there.
+func TestRecoverConsumedUtxoReadsLeiosClosure(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	txId := randomHash(t)
+	closureHash := randomHash(t)
+	var closureHashArr [32]byte
+	copy(closureHashArr[:], closureHash)
+	closureSlot := uint64(1_000)
+	require.NoError(t, db.PutLeiosClosure(
+		closureSlot, closureHash, []byte{0x80, 0xa1, 0xb2, 0xc3, 0xd4},
+	))
+	blobTxn := db.BlobTxn(true)
+	require.NoError(t, blobTxn.Do(func(itxn *Txn) error {
+		return db.Blob().SetUtxo(
+			itxn.Blob(), txId, 0,
+			EncodeUtxoOffset(&CborOffset{
+				BlockSlot:  closureSlot,
+				BlockHash:  closureHashArr,
+				ByteOffset: 1,
+				ByteLength: 3,
+			}),
+		)
+	}))
+
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Release()
+	_, err = db.recoverConsumedUtxo(
+		dbtestutil.NewMockInput(txId, 0), txn, false,
+	)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "load producer block",
+		"the closure must resolve the offset")
+	require.ErrorContains(t, err, "decode transaction output",
+		"recovery should reach the decode step")
+}
+
 // TestDeleteUtxoBlobsUsesCallerBlobTxn pins that UTxO blob deletes are staged
 // in the caller's transaction rather than committed on their own.
 //

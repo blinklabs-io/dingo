@@ -67,8 +67,8 @@ SQLite, so the steps map as follows:
   stored list before selecting the requested offsets. Dingo normally serves
   cached EBs from memory, so this measures the database reload path.
 - Vote and apply reads load the transaction list.
-- Pruning with `PruneLeiosEBBeforeSlot` every 10 fetched EBs keeps the stored
-  window near 1000 EBs, up to 9 more between prunes. The prune cutoff never
+- Collecting with the LeiosDB `GarbageCollect` every 10 fetched EBs keeps the stored
+  window near 1000 EBs, up to 9 more between collections. The cutoff never
   passes an EB whose readers are still running.
 
 Dingo manifest references contain the Blake2b-256 hash and serialized size of

@@ -34,6 +34,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
@@ -828,6 +829,19 @@ func restoreValidated(
 			ctx,
 			filepath.Join(snapshotDir, UtxoSetBackupFileName),
 			badgerutxo.DirFor(stagingDir),
+		); err != nil {
+			return Manifest{}, err
+		}
+		if err := staging.checkNamed(); err != nil {
+			return Manifest{}, err
+		}
+	}
+	// The LeiosDB lives under the staging data directory, so activating that
+	// directory replaces the target's whole Leios store and a failed restore
+	// leaves the original untouched; it has no rollback of its own.
+	if manifest.hasLeiosPayload() {
+		if err := restoreLeiosStore(
+			ctx, filepath.Join(snapshotDir, LeiosBackupFileName), stagingDir,
 		); err != nil {
 			return Manifest{}, err
 		}
@@ -2067,6 +2081,37 @@ func restoreBlobStore(
 	}
 	if stopErr != nil {
 		return fmt.Errorf("stop blob plugin after restore: %w", stopErr)
+	}
+	return nil
+}
+
+// restoreLeiosStore loads the LeiosDB backup into the Leios store under
+// targetDataDir, which must not hold one yet.
+func restoreLeiosStore(
+	ctx context.Context,
+	backupPath string,
+	targetDataDir string,
+) (err error) {
+	store, err := leiosdb.Open(leiosdb.Options{DataDir: targetDataDir})
+	if err != nil {
+		return fmt.Errorf("open Leios store for restore: %w", err)
+	}
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close Leios store after restore: %w", closeErr)
+		}
+	}()
+	restorer, ok := store.BlobStore().(blob.Restorer)
+	if !ok {
+		return errors.New("the Leios store does not support restore")
+	}
+	backupFile, err := os.Open(backupPath)
+	if err != nil {
+		return fmt.Errorf("open %q: %w", backupPath, err)
+	}
+	defer backupFile.Close() //nolint:errcheck // read-only handle
+	if err := restorer.Restore(ctx, backupFile); err != nil {
+		return fmt.Errorf("restore Leios store: %w", err)
 	}
 	return nil
 }

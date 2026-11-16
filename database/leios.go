@@ -15,118 +15,188 @@
 package database
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
+	"sync/atomic"
 
-	blobplugin "github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// SetLeiosEBManifest persists the raw Leios endorser-block manifest CBOR
-// (received over leios-fetch MsgBlock) to the blob store, keyed by the exact
-// (slot, hash) occurrence it was received under.
-// key: "em" + hash(32) + slot(8 bytes big-endian) → value: manifest CBOR.
-func (d *Database) SetLeiosEBManifest(
+// leiosStoreState lazily opens the LeiosDB. A node that never touches an
+// endorser block never creates the store or its directory.
+type leiosStoreState struct {
+	store leiosdb.Store
+	// owned is set when the Database opened the store itself and so closes it.
+	owned bool
+	// closed is set by Close so a later read cannot reopen the store.
+	closed bool
+	// migrated caches a recorded MigrationDone so the read path stops
+	// consulting the shared blob store's legacy keys.
+	migrated atomic.Bool
+}
+
+// LeiosDB returns the endorser-block store, opening it under the data
+// directory on first use. The store is in memory when the data directory is
+// empty. It creates the directory, so only paths that handle an endorser
+// block call it; chain-wide paths such as a rollback use existingLeiosDB.
+func (d *Database) LeiosDB() (leiosdb.Store, error) {
+	d.leiosMu.Lock()
+	defer d.leiosMu.Unlock()
+	return d.openLeiosDBLocked()
+}
+
+func (d *Database) openLeiosDBLocked() (leiosdb.Store, error) {
+	if d.leios.store != nil {
+		return d.leios.store, nil
+	}
+	if d.leios.closed {
+		return nil, leiosdb.ErrClosed
+	}
+	store, err := leiosdb.Open(leiosdb.Options{
+		Logger:  d.logger,
+		DataDir: d.config.DataDir,
+	})
+	if err != nil {
+		return nil, err
+	}
+	d.leios.store = store
+	d.leios.owned = true
+	return store, nil
+}
+
+// SetLeiosDB installs an externally owned endorser-block store. The caller
+// closes it.
+func (d *Database) SetLeiosDB(store leiosdb.Store) {
+	d.leiosMu.Lock()
+	defer d.leiosMu.Unlock()
+	d.leios.store = store
+	d.leios.owned = false
+	d.leios.migrated.Store(false)
+}
+
+// LeiosBackupStore returns the blob store behind the LeiosDB for a snapshot to
+// back up. It reports false when the node has no LeiosDB, open or on disk, so
+// a node that never used one snapshots nothing for it and never creates its
+// directory. An offline snapshot opens a fresh Database whose LeiosDB is not
+// yet open, so the on-disk directory counts.
+func (d *Database) LeiosBackupStore() (blob.BlobStore, bool) {
+	store, err := d.existingLeiosDB()
+	if err != nil || store == nil {
+		return nil, false
+	}
+	holder, ok := store.(interface{ BlobStore() blob.BlobStore })
+	if !ok {
+		return nil, false
+	}
+	return holder.BlobStore(), true
+}
+
+func (d *Database) closeLeiosDB() error {
+	d.leiosMu.Lock()
+	defer d.leiosMu.Unlock()
+	d.leios.closed = true
+	if d.leios.store == nil || !d.leios.owned {
+		return nil
+	}
+	err := d.leios.store.Close()
+	d.leios.store = nil
+	return err
+}
+
+// leiosRef builds the store reference for an endorser-block occurrence.
+func leiosRef(slot uint64, hash []byte) leiosdb.Ref {
+	return leiosdb.Ref{Slot: slot, Hash: hash}
+}
+
+// SetLeiosEB persists an endorser block's manifest and, when txsRaw is
+// non-nil, its transaction bodies as one record write in the LeiosDB's
+// volatile partition, or in the immutable partition when the block is already
+// pinned. Pass txsRaw==nil to write only the manifest (an incomplete endorser
+// block); an empty non-nil slice stores an empty transaction list.
+//
+// It returns leiosdb.ErrBehindImmutableTip for an unpinned block whose slot
+// the garbage collector has passed.
+func (d *Database) SetLeiosEB(
 	slot uint64,
 	hash []byte,
 	manifestRaw []byte,
+	txsRaw []cbor.RawMessage,
 ) error {
-	txn := d.BlobTxn(true)
-	defer txn.Rollback() //nolint:errcheck
-	blob := txn.BlobStore()
-	if blob == nil {
-		return types.ErrBlobStoreUnavailable
+	store, err := d.LeiosDB()
+	if err != nil {
+		return err
 	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return types.ErrNilTxn
-	}
-	if err := blob.Set(blobTxn, types.LeiosEBManifestKey(hash, slot), manifestRaw); err != nil {
-		return fmt.Errorf("SetLeiosEBManifest: %w", err)
-	}
-	if err := txn.Commit(); err != nil {
-		return fmt.Errorf("SetLeiosEBManifest: commit: %w", err)
-	}
-	return nil
+	return store.PutVolatile(
+		leiosRef(slot, hash),
+		leiosdb.Content{Manifest: manifestRaw, Txs: txsRaw},
+	)
 }
 
-// GetLeiosEBManifest retrieves the raw Leios endorser-block manifest CBOR for
-// the exact (slot, hash) occurrence named. Returns ErrBlobKeyNotFound when no
-// manifest has been stored for that occurrence -- including when a manifest
-// exists for the same hash under a different slot, since the manifest is
-// content-addressed and that is a distinct occurrence.
+// GetLeiosEBManifest retrieves the raw endorser-block manifest CBOR for the
+// exact (slot, hash) occurrence named, from the LeiosDB. It returns
+// ErrBlobKeyNotFound when the occurrence is not stored, including when the
+// same hash is stored under a different slot.
 //
-// On a miss it also tries the legacy key (hash only), so
-// data persisted by a node running before the key format changed does not
-// become silently unreachable after an upgrade: that format could only ever
-// hold one occurrence per hash, and its value carries that occurrence's slot
-// as an 8-byte big-endian prefix, which must match the requested slot before
-// the legacy record is trusted.
+// Until the migration of the shared blob store's legacy records has finished,
+// a miss falls back to those records.
 func (d *Database) GetLeiosEBManifest(
 	hash []byte,
 	slot uint64,
 ) (manifestRaw []byte, err error) {
-	txn := d.BlobTxn(false)
-	defer txn.Rollback() //nolint:errcheck
-	blob := txn.BlobStore()
-	if blob == nil {
-		return nil, types.ErrBlobStoreUnavailable
+	store, err := d.LeiosDB()
+	if err != nil {
+		return nil, err
 	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return nil, types.ErrNilTxn
-	}
-	val, err := blob.Get(blobTxn, types.LeiosEBManifestKey(hash, slot))
+	content, err := store.Get(leiosRef(slot, hash))
 	if err == nil {
-		return val, nil
+		return content.Manifest, nil
 	}
-	if !errors.Is(err, types.ErrBlobKeyNotFound) {
+	if !errors.Is(err, leiosdb.ErrNotFound) {
 		return nil, err
 	}
-	legacyVal, legacyErr := blob.Get(
-		blobTxn,
-		types.LegacyLeiosEBManifestKey(hash),
-	)
-	if legacyErr != nil {
-		// A real failure reading the legacy record (storage, network,
-		// auth) must not be hidden behind the exact-key not-found error;
-		// only "the legacy record doesn't exist either" collapses to that.
-		if !errors.Is(legacyErr, types.ErrBlobKeyNotFound) {
-			return nil, legacyErr
-		}
-		return nil, err
-	}
-	if len(legacyVal) < 8 || binary.BigEndian.Uint64(legacyVal[:8]) != slot {
-		return nil, err
-	}
-	return legacyVal[8:], nil
+	return d.legacyLeiosEBManifest(store, hash, slot, err)
 }
 
-// MaxLeiosEBSlot returns the highest slot represented by a persisted Leios
-// endorser-block manifest. Current records encode the slot in the key; legacy
-// records ("em"+hash with no slot) encode it in the first
-// eight bytes of the value.
-//
-// COST. The full prefix scan is inherent, not an oversight: the current key
-// layout is "em"+hash+slot, so keys sort by hash and no bounded reverse seek
-// can find the maximum slot. It runs at startup to restore the watermark and
-// hourly when GC computes its cutoff. On Badger it is key-only -- iterator
-// options leave PrefetchValues false and only the legacy branch copies a
-// value -- while S3 and GCS perform a paginated listing over the prefix.
-// Ordering keys by slot or maintaining the maximum as its own record would
-// make the scan bounded.
+// GetLeiosEBTxs retrieves the raw transaction bodies for the exact (slot,
+// hash) occurrence named. It returns ErrBlobKeyNotFound when no complete
+// transaction list is stored for that occurrence. The returned slice holds
+// the block_transaction CBOR values exactly as SetLeiosEB stored them.
+func (d *Database) GetLeiosEBTxs(
+	hash []byte,
+	slot uint64,
+) ([]cbor.RawMessage, error) {
+	store, err := d.LeiosDB()
+	if err != nil {
+		return nil, err
+	}
+	content, err := store.Get(leiosRef(slot, hash))
+	switch {
+	case err == nil && content.Complete():
+		return content.Txs, nil
+	case err == nil:
+		err = leiosdb.ErrNotFound
+	case !errors.Is(err, leiosdb.ErrNotFound):
+		return nil, err
+	}
+	return d.legacyLeiosEBTxs(store, hash, slot, err)
+}
+
+// MaxLeiosEBSlot returns the highest slot holding a persisted endorser-block
+// manifest, or zero when there is none. It is a reverse seek, not a scan.
 func (d *Database) MaxLeiosEBSlot() (uint64, error) {
 	return d.MaxLeiosEBSlotContext(context.Background())
 }
 
-// MaxLeiosEBSlotContext is MaxLeiosEBSlot with cancellation checks between
-// records. Blob iterator operations themselves are controlled by the selected
-// provider, but a canceled caller will not continue scanning later records.
+// MaxLeiosEBSlotContext is MaxLeiosEBSlot honouring a cancelled context.
 func (d *Database) MaxLeiosEBSlotContext(
 	ctx context.Context, //nolint:contextcheck // Preserve nil-context compatibility, matching other database context methods.
 ) (uint64, error) {
@@ -136,153 +206,97 @@ func (d *Database) MaxLeiosEBSlotContext(
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	txn := d.BlobTxn(false)
-	defer txn.Rollback() //nolint:errcheck
-	blob := txn.BlobStore()
-	if blob == nil {
-		return 0, types.ErrBlobStoreUnavailable
-	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return 0, types.ErrNilTxn
-	}
-
-	prefix := []byte(types.LeiosEBManifestKeyPrefix)
-	it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{Prefix: prefix})
-	if it == nil {
-		return 0, types.ErrBlobStoreUnavailable
-	}
-	defer it.Close()
-
-	var maxSlot uint64
-	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		item := it.Item()
-		if item == nil {
-			continue
-		}
-		key := item.Key()
-		switch len(key) {
-		case len(types.LeiosEBManifestKeyPrefix) + 32 + 8:
-			slot := binary.BigEndian.Uint64(key[len(key)-8:])
-			if slot > maxSlot {
-				maxSlot = slot
-			}
-		case len(types.LeiosEBManifestKeyPrefix) + 32:
-			value, err := item.ValueCopy(nil)
-			if err != nil {
-				return 0, err
-			}
-			if len(value) >= 8 {
-				slot := binary.BigEndian.Uint64(value[:8])
-				if slot > maxSlot {
-					maxSlot = slot
-				}
-			}
-		}
-	}
-	if err := it.Err(); err != nil {
+	store, err := d.LeiosDB()
+	if err != nil {
 		return 0, err
 	}
-	return maxSlot, nil
+	slot, _, err := store.MaxSlot()
+	return slot, err
 }
 
-// SetLeiosEBTxs persists the complete raw transaction bodies of a Leios
-// endorser block to the blob store, keyed by the exact (slot, hash)
-// occurrence. txsRaw is the list of block_transaction CBOR values from
-// leios-fetch MsgBlockTxs after its tag-24 wrapping is removed, stored as a
-// CBOR-encoded []cbor.RawMessage.
-// Only call this when the transaction cache is complete (all txCount txs).
-// key: "et" + hash(32) + slot(8) → value: CBOR-encoded []cbor.RawMessage.
-func (d *Database) SetLeiosEBTxs(
+// IsLeiosEBPinned reports whether the endorser block occurrence has been
+// pinned into the immutable partition, which happens when the ranking block
+// that certifies it becomes immutable.
+func (d *Database) IsLeiosEBPinned(slot uint64, hash []byte) (bool, error) {
+	store, err := d.LeiosDB()
+	if err != nil {
+		return false, err
+	}
+	return store.IsPinned(leiosRef(slot, hash))
+}
+
+// PutLeiosClosure stores the certified closure CBOR that transaction offsets
+// for the endorser block resolve into, and makes it resolvable from memory.
+func (d *Database) PutLeiosClosure(
 	slot uint64,
 	hash []byte,
-	txsRaw []cbor.RawMessage,
+	closure []byte,
 ) error {
-	if txsRaw == nil {
-		txsRaw = []cbor.RawMessage{}
-	}
-	txn := d.BlobTxn(true)
-	defer txn.Rollback() //nolint:errcheck
-	blob := txn.BlobStore()
-	if blob == nil {
-		return types.ErrBlobStoreUnavailable
-	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return types.ErrNilTxn
-	}
-	val, err := cbor.Encode(txsRaw)
+	store, err := d.LeiosDB()
 	if err != nil {
-		return fmt.Errorf("SetLeiosEBTxs: encode txs: %w", err)
+		return err
 	}
-	if err := blob.Set(blobTxn, types.LeiosEBTxsKey(hash, slot), val); err != nil {
-		return fmt.Errorf("SetLeiosEBTxs: %w", err)
+	if err := store.PutClosure(leiosRef(slot, hash), closure); err != nil {
+		return fmt.Errorf("store Leios closure: %w", err)
 	}
-	if err := txn.Commit(); err != nil {
-		return fmt.Errorf("SetLeiosEBTxs: commit: %w", err)
+	if len(hash) == 32 && d.cborCache != nil {
+		var blockHash [32]byte
+		copy(blockHash[:], hash)
+		d.cborCache.cacheBlockCbor(slot, blockHash, closure)
 	}
 	return nil
 }
 
-// GetLeiosEBTxs retrieves the raw transaction bodies for the exact (slot,
-// hash) occurrence named. Returns ErrBlobKeyNotFound when no txs have been
-// stored for that occurrence. The returned slice holds the block_transaction
-// CBOR values exactly as SetLeiosEBTxs stored them.
+// RollbackLeiosPins removes the endorser-block pins certified by ranking
+// blocks above point and lowers the store's watermarks to it. It returns the
+// number of pins removed.
+func (d *Database) RollbackLeiosPins(point ocommon.Point) (int, error) {
+	store, err := d.existingLeiosDB()
+	if errors.Is(err, types.ErrBlobKeyNotFound) {
+		// No store means no pins to demote; a chain rollback on a node that
+		// never handled an endorser block must not create one.
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return store.RollbackPins(leiosRef(point.Slot, point.Hash))
+}
+
+// leiosClosure returns the closure CBOR stored for an endorser block, for the
+// offset resolver to fall back to when the shared blob store has no block at
+// the same (slot, hash).
 //
-// On a miss it also tries the legacy key (hash only, see
-// GetLeiosEBManifest), gated on the legacy "em" record's embedded slot
-// matching: the legacy format paired one "em" and one "et" record per hash
-// (only one occurrence was ever trackable), so once that pairing is
-// confirmed to be this occurrence, its "et" value is safe to use too.
-func (d *Database) GetLeiosEBTxs(
-	hash []byte,
-	slot uint64,
-) ([]cbor.RawMessage, error) {
-	txn := d.BlobTxn(false)
-	defer txn.Rollback() //nolint:errcheck
-	blob := txn.BlobStore()
-	if blob == nil {
-		return nil, types.ErrBlobStoreUnavailable
-	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return nil, types.ErrNilTxn
-	}
-	val, err := blob.Get(blobTxn, types.LeiosEBTxsKey(hash, slot))
+// It opens only a store that already exists, so a node that never handled an
+// endorser block does not create the Leios directory by missing a block read.
+func (d *Database) leiosClosure(slot uint64, hash []byte) ([]byte, error) {
+	store, err := d.existingLeiosDB()
 	if err != nil {
-		if !errors.Is(err, types.ErrBlobKeyNotFound) {
-			return nil, err
-		}
-		legacyManifest, legacyErr := blob.Get(
-			blobTxn,
-			types.LegacyLeiosEBManifestKey(hash),
-		)
-		if legacyErr != nil {
-			// See GetLeiosEBManifest: a real failure reading the legacy
-			// manifest must not be hidden behind the exact-key not-found
-			// error.
-			if !errors.Is(legacyErr, types.ErrBlobKeyNotFound) {
-				return nil, legacyErr
-			}
-			return nil, err
-		}
-		if len(legacyManifest) < 8 ||
-			binary.BigEndian.Uint64(legacyManifest[:8]) != slot {
-			return nil, err
-		}
-		val, err = blob.Get(blobTxn, types.LegacyLeiosEBTxsKey(hash))
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
-	txsRaw, err := decodeLeiosEBTxs(val)
-	if err != nil {
-		return nil, fmt.Errorf("GetLeiosEBTxs: decode: %w", err)
+	return store.GetClosure(leiosRef(slot, hash))
+}
+
+// existingLeiosDB returns the Leios store when it is open or present on disk,
+// and types.ErrBlobKeyNotFound when this node has none.
+func (d *Database) existingLeiosDB() (leiosdb.Store, error) {
+	d.leiosMu.Lock()
+	defer d.leiosMu.Unlock()
+	if d.leios.store != nil {
+		return d.leios.store, nil
 	}
-	return txsRaw, nil
+	if d.leios.closed || d.config.DataDir == "" {
+		return nil, types.ErrBlobKeyNotFound
+	}
+	if _, err := os.Stat(
+		filepath.Join(d.config.DataDir, leiosdb.SubdirName),
+	); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, types.ErrBlobKeyNotFound
+		}
+		return nil, err
+	}
+	return d.openLeiosDBLocked()
 }
 
 // The blob read owns val. Retaining views of it avoids another payload copy
@@ -309,434 +323,4 @@ func (view *leiosTxView) UnmarshalCBOR(data []byte) error {
 	// Cap each view so append cannot overwrite the following transaction.
 	*view = slices.Clip(data)
 	return nil
-}
-
-// SetLeiosEB persists an endorser block's manifest and, when txsRaw is non-nil,
-// its transaction bodies in a SINGLE blob-store transaction (one commit),
-// merging what SetLeiosEBManifest + SetLeiosEBTxs do in two, for the exact
-// (slot, hash) occurrence identified by slot and hash. The stored values are
-// byte-identical to those setters, so GetLeiosEBManifest / GetLeiosEBTxs and
-// the reload path are unchanged. Pass txsRaw==nil to write only the manifest
-// (an incomplete endorser block); pass the complete tx set otherwise.
-// Note the nil contract differs from SetLeiosEBTxs: SetLeiosEBTxs(nil) writes an
-// empty tx list under the "et" key, whereas SetLeiosEB(..., nil) omits the "et"
-// key entirely (manifest-only), so the two must not be treated as interchangeable
-// nil handlers.
-// Used by the asynchronous EB-persistence writer so historical-serving storage
-// costs one commit per endorser block off the leios-fetch hot path.
-func (d *Database) SetLeiosEB(
-	slot uint64,
-	hash []byte,
-	manifestRaw []byte,
-	txsRaw []cbor.RawMessage,
-) error {
-	txn := d.BlobTxn(true)
-	defer txn.Rollback() //nolint:errcheck
-	blob := txn.BlobStore()
-	if blob == nil {
-		return types.ErrBlobStoreUnavailable
-	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return types.ErrNilTxn
-	}
-	if err := blob.Set(blobTxn, types.LeiosEBManifestKey(hash, slot), manifestRaw); err != nil {
-		return fmt.Errorf("SetLeiosEB: manifest: %w", err)
-	}
-	if txsRaw != nil {
-		txsVal, err := cbor.Encode(txsRaw)
-		if err != nil {
-			return fmt.Errorf("SetLeiosEB: encode txs: %w", err)
-		}
-		if err := blob.Set(blobTxn, types.LeiosEBTxsKey(hash, slot), txsVal); err != nil {
-			return fmt.Errorf("SetLeiosEB: txs: %w", err)
-		}
-	}
-	if err := txn.Commit(); err != nil {
-		return fmt.Errorf("SetLeiosEB: commit: %w", err)
-	}
-	return nil
-}
-
-// SetLeiosEBCertified records that a ranking block certified the endorser
-// block occurrence (slot, hash). Pruning keeps the persisted manifest and
-// transactions of a certified occurrence, and the marker is idempotent.
-//
-// Ledger apply passes the block-apply transaction, so the marker commits with
-// the certifying ranking block and is discarded with it when any later check
-// rejects the block. A nil txn commits the marker in its own blob transaction.
-func (d *Database) SetLeiosEBCertified(
-	slot uint64,
-	hash []byte,
-	txn *Txn,
-) error {
-	owned := false
-	if txn == nil {
-		txn = d.BlobTxn(true)
-		owned = true
-		defer txn.Rollback() //nolint:errcheck
-	}
-	blob := txn.BlobStore()
-	if blob == nil {
-		return types.ErrBlobStoreUnavailable
-	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return types.ErrNilTxn
-	}
-	if err := blob.Set(
-		blobTxn,
-		types.LeiosEBCertifiedKey(hash, slot),
-		[]byte{1},
-	); err != nil {
-		return fmt.Errorf("SetLeiosEBCertified: %w", err)
-	}
-	if !owned {
-		return nil
-	}
-	if err := txn.Commit(); err != nil {
-		return fmt.Errorf("SetLeiosEBCertified: commit: %w", err)
-	}
-	return nil
-}
-
-// IsLeiosEBCertified reports whether the endorser block occurrence
-// (slot, hash) was certified by a committed ranking block on the selected
-// chain: whether its certification marker exists. The standalone
-// endorser-block blob is not evidence, because ledger apply writes it before
-// the ranking block's remaining checks run and a rejection does not remove it.
-func (d *Database) IsLeiosEBCertified(
-	slot uint64,
-	hash []byte,
-) (bool, error) {
-	txn := d.BlobTxn(false)
-	defer txn.Rollback() //nolint:errcheck
-	blob := txn.BlobStore()
-	if blob == nil {
-		return false, types.ErrBlobStoreUnavailable
-	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return false, types.ErrNilTxn
-	}
-	return leiosEBCertified(blob, blobTxn, slot, hash)
-}
-
-func leiosEBCertified(
-	store blobplugin.BlobStore,
-	blobTxn types.Txn,
-	slot uint64,
-	hash []byte,
-) (bool, error) {
-	key := types.LeiosEBCertifiedKey(hash, slot)
-	it := store.NewIterator(blobTxn, types.BlobIteratorOptions{Prefix: key})
-	if it == nil {
-		return false, types.ErrBlobStoreUnavailable
-	}
-	defer it.Close()
-	it.Seek(key)
-	if !it.ValidForPrefix(key) {
-		if err := it.Err(); err != nil {
-			return false, fmt.Errorf("read Leios certification: %w", err)
-		}
-		return false, nil
-	}
-	item := it.Item()
-	if err := it.Err(); err != nil {
-		return false, fmt.Errorf("read Leios certification: %w", err)
-	}
-	return item != nil && bytes.Equal(item.Key(), key), nil
-}
-
-// deleteLeiosEBCertifiedFromSlot removes the certification markers of every
-// endorser block at or after slot, staged in the rollback transaction txn.
-// An endorser block shares its announcing ranking block's slot and is
-// certified by that block's child, so a rollback to slot removes the
-// certifying block of every such occurrence, including one announced by the
-// block at slot itself. A re-applied certifying block writes the marker again.
-// Markers left unstaged past the transaction's budget only over-retain.
-func (d *Database) deleteLeiosEBCertifiedFromSlot(
-	slot uint64,
-	txn *Txn,
-) error {
-	blob := txn.BlobStore()
-	if blob == nil {
-		return types.ErrBlobStoreUnavailable
-	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return types.ErrNilTxn
-	}
-	prefix := []byte(types.LeiosEBCertifiedKeyPrefix)
-	it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{Prefix: prefix})
-	if it == nil {
-		return types.ErrBlobStoreUnavailable
-	}
-	var keys [][]byte
-	it.Seek(types.LeiosEBCertifiedSlotPrefix(slot))
-	for ; it.ValidForPrefix(prefix); it.Next() {
-		if item := it.Item(); item != nil {
-			keys = append(keys, bytes.Clone(item.Key()))
-		}
-	}
-	err := it.Err()
-	it.Close()
-	if err != nil {
-		return fmt.Errorf("list Leios certification markers: %w", err)
-	}
-	if len(keys) == 0 {
-		return nil
-	}
-	staged := stagedBlobDeleteLimit(blob, blobTxn, len(keys[0]), len(keys))
-	for _, key := range keys[:staged] {
-		if err := blob.Delete(blobTxn, key); err != nil &&
-			!errors.Is(err, types.ErrBlobKeyNotFound) {
-			return fmt.Errorf("delete Leios certification marker: %w", err)
-		}
-	}
-	if skipped := len(keys) - staged; skipped > 0 && d.logger != nil {
-		d.logger.Warn(
-			"Leios certification markers left past the rollback budget",
-			"component", "database",
-			"skipped", skipped,
-			"total", len(keys),
-		)
-	}
-	return nil
-}
-
-// Cloud blob transactions spool every prior object value before applying
-// deletes so they can compensate a partial commit. The BlobItem interface
-// does not expose value sizes; keeping one delete per transaction bounds that
-// spool to one object without downloading every value just to measure it.
-const leiosEBPruneBatchSize = 1
-
-// PruneLeiosEBBeforeSlot removes persisted Leios manifests and transaction
-// lists strictly older than beforeSlot, except those of a certified
-// occurrence (see IsLeiosEBCertified), which are never pruned. The caller
-// chooses the retention frontier; this method does not infer one from chain
-// state.
-//
-// It scans the shared "e" prefix once because the manifest and transaction
-// prefixes are adjacent. Deletes commit in blob-only transactions containing
-// at most one key. Cloud stores spool prior object values for compensation, so
-// this avoids aggregating many large values into one local spool. Repeating the
-// same call is safe after a partial cloud commit. The returned count includes
-// only keys from fully committed transactions; on error it is a lower bound.
-func (d *Database) PruneLeiosEBBeforeSlot(
-	ctx context.Context, //nolint:contextcheck // Preserve nil-context compatibility, matching other database context methods.
-	beforeSlot uint64,
-) (int, error) {
-	if beforeSlot == 0 {
-		return 0, nil
-	}
-	if ctx == nil {
-		ctx = context.Background() //nolint:contextcheck // Preserve literal-nil compatibility for this public context method.
-	}
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-
-	readTxn := d.BlobTxn(false)
-	defer readTxn.Release()
-	blob := readTxn.BlobStore()
-	if blob == nil {
-		return 0, types.ErrBlobStoreUnavailable
-	}
-	blobTxn := readTxn.Blob()
-	if blobTxn == nil {
-		return 0, types.ErrNilTxn
-	}
-
-	// Listing one byte of prefix lets cloud stores stream em and et in one
-	// ordered object listing. Filter the exact two-byte prefixes below.
-	iteratorPrefix := []byte(types.LeiosEBManifestKeyPrefix[:1])
-	it := blob.NewIterator(
-		blobTxn,
-		types.BlobIteratorOptions{Prefix: iteratorPrefix},
-	)
-	if it == nil {
-		return 0, types.ErrBlobStoreUnavailable
-	}
-	defer it.Close()
-
-	var (
-		deleteKeys    [][]byte
-		deletedKeyCnt int
-	)
-	flush := func() error {
-		if len(deleteKeys) == 0 {
-			return nil
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		// Keep writes on the store pinned by readTxn. SetBlobStore may replace
-		// the installed store while an operation is running; re-pinning here
-		// could otherwise list one store and delete matching keys in another.
-		writeTxn := &Txn{
-			db:        d,
-			blobStore: blob,
-			blobTxn:   blob.NewTransaction(true),
-			readWrite: true,
-		}
-		if writeTxn.blobTxn == nil {
-			return types.ErrNilTxn
-		}
-		batchDeleted := 0
-		if err := writeTxn.Do(func(txn *Txn) error {
-			for _, key := range deleteKeys {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				err := blob.Delete(txn.Blob(), key)
-				if errors.Is(err, types.ErrBlobKeyNotFound) {
-					continue
-				}
-				if err != nil {
-					return fmt.Errorf("prune Leios key %x: %w", key, err)
-				}
-				batchDeleted++
-			}
-			return nil
-		}); err != nil {
-			return fmt.Errorf("prune Leios batch: %w", err)
-		}
-		deletedKeyCnt += batchDeleted
-		deleteKeys = deleteKeys[:0]
-		return nil
-	}
-	stageDelete := func(key []byte) error {
-		deleteKeys = append(deleteKeys, append([]byte(nil), key...))
-		if len(deleteKeys) >= leiosEBPruneBatchSize {
-			return flush()
-		}
-		return nil
-	}
-
-	keepCertified := func(hash []byte, slot uint64) (bool, error) {
-		return leiosEBCertified(blob, blobTxn, slot, hash)
-	}
-
-	it.Seek(iteratorPrefix)
-	for ; it.ValidForPrefix(iteratorPrefix); it.Next() {
-		if err := ctx.Err(); err != nil {
-			return deletedKeyCnt, err
-		}
-		item := it.Item()
-		if item == nil {
-			continue
-		}
-		key := item.Key()
-		if len(key) < 2 {
-			continue
-		}
-		switch string(key[:2]) {
-		case types.LeiosEBManifestKeyPrefix:
-			switch len(key) {
-			case len(types.LeiosEBManifestKeyPrefix) + 32 + 8:
-				slot := binary.BigEndian.Uint64(key[len(key)-8:])
-				if slot >= beforeSlot {
-					continue
-				}
-				keep, err := keepCertified(key[2:len(key)-8], slot)
-				if err != nil {
-					return deletedKeyCnt, err
-				}
-				if keep {
-					continue
-				}
-				if err := stageDelete(key); err != nil {
-					return deletedKeyCnt, err
-				}
-			case len(types.LeiosEBManifestKeyPrefix) + 32:
-				value, err := item.ValueCopy(nil)
-				if err != nil {
-					return deletedKeyCnt, fmt.Errorf(
-						"read legacy Leios manifest: %w",
-						err,
-					)
-				}
-				if len(value) < 8 ||
-					binary.BigEndian.Uint64(value[:8]) >= beforeSlot {
-					continue
-				}
-				keep, err := keepCertified(
-					key[2:],
-					binary.BigEndian.Uint64(value[:8]),
-				)
-				if err != nil {
-					return deletedKeyCnt, err
-				}
-				if keep {
-					continue
-				}
-				if err := stageDelete(key); err != nil {
-					return deletedKeyCnt, err
-				}
-			}
-		case types.LeiosEBTxsKeyPrefix:
-			// Transaction keys are handled here, including their paired
-			// manifests above, so each key is staged and counted only once.
-			switch len(key) {
-			case len(types.LeiosEBTxsKeyPrefix) + 32 + 8:
-				slot := binary.BigEndian.Uint64(key[len(key)-8:])
-				if slot < beforeSlot {
-					keep, err := keepCertified(key[2:len(key)-8], slot)
-					if err != nil {
-						return deletedKeyCnt, err
-					}
-					if keep {
-						continue
-					}
-					if err := stageDelete(key); err != nil {
-						return deletedKeyCnt, err
-					}
-				}
-			case len(types.LeiosEBTxsKeyPrefix) + 32:
-				hash := key[len(types.LeiosEBTxsKeyPrefix):]
-				manifest, err := blob.Get(
-					blobTxn,
-					types.LegacyLeiosEBManifestKey(hash),
-				)
-				switch {
-				case errors.Is(err, types.ErrBlobKeyNotFound):
-					// No legacy manifest can name these bodies, so they are
-					// orphaned and safe to remove.
-				case err != nil:
-					return deletedKeyCnt, fmt.Errorf(
-						"read legacy Leios manifest for transaction list: %w",
-						err,
-					)
-				case len(manifest) < 8:
-					// The slot cannot be established, so preserve the bodies
-					// alongside the malformed manifest.
-					continue
-				case binary.BigEndian.Uint64(manifest[:8]) >= beforeSlot:
-					continue
-				default:
-					keep, err := keepCertified(
-						hash,
-						binary.BigEndian.Uint64(manifest[:8]),
-					)
-					if err != nil {
-						return deletedKeyCnt, err
-					}
-					if keep {
-						continue
-					}
-				}
-				if err := stageDelete(key); err != nil {
-					return deletedKeyCnt, err
-				}
-			}
-		}
-	}
-	if err := it.Err(); err != nil {
-		return deletedKeyCnt, fmt.Errorf("prune Leios records: iterator: %w", err)
-	}
-	if err := flush(); err != nil {
-		return deletedKeyCnt, err
-	}
-	return deletedKeyCnt, nil
 }
