@@ -102,11 +102,13 @@ const (
 	stakeBookkeepingIndexDropSchemaRelease              = "stake-bookkeeping-index-drop"
 	datumHashIndexDropSchemaRelease                     = "datum-hash-duplicate-index-drop"
 	scriptHashIndexDropSchemaRelease                    = "script-hash-duplicate-index-drop"
+	governanceVoteTombstoneSchemaRelease                = "governance-vote-tombstone"
 	utxoSpentStakingIndexSchemaRelease                  = "utxo-spent-staking-index"
 	utxoTransactionIdentitySchemaRelease                = "utxo-transaction-identity"
 	poolRelayIPv6NetworkOrderSchemaRelease              = "pool-relay-ipv6-network-order"
 	epochStakesIndexSchemaRelease                       = "reward-stake-input-epoch-registered-index"
 	poolRetirementEpochIndexSchemaRelease               = "pool-retirement-epoch-index"
+	poolCurrentStateSchemaRelease                       = "pool-current-state"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -292,7 +294,9 @@ var schemaVersions = []struct {
 	{Version: 63, Name: datumHashIndexDropSchemaRelease, Dir: "v63"},
 	{Version: 64, Name: epochStakesIndexSchemaRelease, Dir: "v64"},
 	{Version: 65, Name: scriptHashIndexDropSchemaRelease, Dir: "v65"},
-	{Version: 66, Name: poolRetirementEpochIndexSchemaRelease, Dir: "v66"},
+	{Version: 66, Name: governanceVoteTombstoneSchemaRelease, Dir: "v66"},
+	{Version: 67, Name: poolCurrentStateSchemaRelease, Dir: "v67"},
+	{Version: 68, Name: poolRetirementEpochIndexSchemaRelease, Dir: "v68"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -427,6 +431,11 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == poolRelayIPv6NetworkOrderSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = poolRelayIPv6NetworkOrderBackfill
+		}
+		if version.Name == poolCurrentStateSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.BatchSize = poolCurrentStateBatchPools
+			migration.Backfill = poolCurrentStateBackfill
 		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"

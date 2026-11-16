@@ -52,10 +52,11 @@ import (
 // larger import batches, so keep the runtime load batch size aligned with the
 // chain import batch cap.
 const (
-	loadBlockBatchSize   = 50
-	progressLogInterval  = 10 * time.Second
-	loadDecodeMinWorkers = 2
-	loadDecodeMaxWorkers = 8
+	loadBlockBatchSize    = 50
+	chunkRetirementStride = 64
+	progressLogInterval   = 10 * time.Second
+	loadDecodeMinWorkers  = 2
+	loadDecodeMaxWorkers  = 8
 
 	immutableUtxoOffsetsSyncStateKey = "immutable_utxo_offsets_tip"
 )
@@ -1826,9 +1827,9 @@ func CopyImmutableBlocks(
 // directory was resolved — by pathname, or through a handle that binds the
 // reads to a directory somebody else cannot repoint. See WithImmutableDB.
 //
-// When retire is non-nil it is called after each batch commits, with the
-// chunk holding the batch's last block whenever that chunk advanced; blocks
-// arrive in ascending order, so every chunk below it is fully committed.
+// When retire is non-nil it is called after each retirement stride and at the
+// end of the copy, with the chunk holding the batch's last block; blocks arrive
+// in ascending order, so every chunk below it is fully committed.
 func copyBlocksRawWithCallback(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -1910,8 +1911,8 @@ func copyBlocksRawWithCallback(
 	lastProgressSlot := chainTip.Point.Slot
 	blockBatch := make([]chain.RawBlock, 0, loadBlockBatchSize)
 	var (
-		batchChunk, retiredChunk  uint64
-		batchChunkSet, retiredSet bool
+		batchChunk, firstChunk, retiredChunk     uint64
+		batchChunkSet, firstChunkSet, retiredSet bool
 	)
 	for {
 		for {
@@ -1943,6 +1944,9 @@ func copyBlocksRawWithCallback(
 			blockBatch = append(blockBatch, rawBlock)
 			if num, ok := iter.Chunk(); ok {
 				batchChunk, batchChunkSet = num, true
+				if !firstChunkSet {
+					firstChunk, firstChunkSet = num, true
+				}
 			}
 			if len(blockBatch) == cap(blockBatch) {
 				break
@@ -1957,8 +1961,8 @@ func copyBlocksRawWithCallback(
 				err,
 			)
 		}
-		if retire != nil && batchChunkSet &&
-			(!retiredSet || batchChunk > retiredChunk) {
+		if retire != nil && batchChunkSet && batchChunk > firstChunk &&
+			(!retiredSet || batchChunk-retiredChunk >= chunkRetirementStride) {
 			if err := retire(batchChunk); err != nil {
 				return blocksCopied + len(blockBatch), immutableTip.Slot,
 					fmt.Errorf("retiring committed chunks: %w", err)
@@ -1990,6 +1994,15 @@ func copyBlocksRawWithCallback(
 		if err := ctx.Err(); err != nil {
 			return blocksCopied, immutableTip.Slot,
 				fmt.Errorf("loading blocks: %w", err)
+		}
+	}
+	// A resumed copy that stays inside one chunk never advances past its
+	// first chunk, so the committed prefix below it is retired here.
+	if retire != nil && batchChunkSet &&
+		(!retiredSet || batchChunk > retiredChunk) {
+		if err := retire(batchChunk); err != nil {
+			return blocksCopied, immutableTip.Slot,
+				fmt.Errorf("retiring committed chunks: %w", err)
 		}
 	}
 	logger.Info(

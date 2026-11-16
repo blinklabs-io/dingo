@@ -554,11 +554,26 @@ func (n *Node) shutdown() error {
 			n.config.logger.Error(
 				"skipping plugin host shutdown because a storage user drain was not confirmed",
 			)
-		} else if stopErr := n.pluginHost.Stop(ctx); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("plugin host shutdown: %w", stopErr),
-			)
+		} else {
+			// The shutdown deadline does not bound storage providers
+			// (plugin.Descriptor.DurableClose): the plugin host closes them
+			// to completion, so Node.Stop can outlive the deadline by the
+			// store close time.
+			n.pluginHost.SetLogger(n.config.logger)
+			stopErr := n.pluginHost.Stop(ctx)
+			if stopErr != nil {
+				err = errors.Join(
+					err,
+					fmt.Errorf("plugin host shutdown: %w", stopErr),
+				)
+			}
+			if ctx.Err() != nil {
+				n.config.logger.Warn(
+					"storage close finished after the shutdown deadline",
+					"timeout", shutdownTimeout,
+					"total_elapsed", time.Since(shutdownStart).Round(time.Millisecond),
+				)
+			}
 		}
 	}
 

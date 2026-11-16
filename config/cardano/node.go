@@ -94,6 +94,11 @@ type CardanoNodeConfig struct {
 	TestConwayHardForkAtEpoch    *uint64 `yaml:"TestConwayHardForkAtEpoch"`
 	TestDijkstraHardForkAtEpoch  *uint64 `yaml:"TestDijkstraHardForkAtEpoch"`
 
+	// LeiosMinOfferLead is how many slots an endorser block must lie above the
+	// immutable tip for the node to offer it to peers. Nil leaves the reference
+	// default; see LeiosMinOfferLeadSlots.
+	LeiosMinOfferLead *uint64 `yaml:"LeiosMinOfferLead"`
+
 	// P2P peer target configuration from cardano-node config.json.
 	// These are read but only used as fallback defaults when the
 	// Dingo-native config (dingo.yaml / env) does not specify them.
@@ -352,6 +357,19 @@ func setIfPresent(dst *int, src *int) {
 	if src != nil {
 		*dst = *src
 	}
+}
+
+// DefaultLeiosMinOfferLead is the reference node's default for
+// LeiosMinOfferLead: an hour of one-second slots.
+const DefaultLeiosMinOfferLead uint64 = 3600
+
+// LeiosMinOfferLeadSlots returns the configured LeiosMinOfferLead, or
+// DefaultLeiosMinOfferLead when it is unset. A nil receiver is unset.
+func (c *CardanoNodeConfig) LeiosMinOfferLeadSlots() uint64 {
+	if c == nil || c.LeiosMinOfferLead == nil {
+		return DefaultLeiosMinOfferLead
+	}
+	return *c.LeiosMinOfferLead
 }
 
 // PBFTSignatureLimit returns the most blocks one genesis key may sign in a

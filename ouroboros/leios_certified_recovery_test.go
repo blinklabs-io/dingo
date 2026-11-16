@@ -621,6 +621,7 @@ func TestFetchEndorserBlockByPointPrefersExactOfferSource(t *testing.T) {
 	// failure here proves the wrong peer received the first request.
 	wrongGuard := o.leiosFetchGuardFor(wrongConn.Id())
 	wrongGuard.markFetchOK()
+	o.leiosPeerAnnouncedForTest(offeredConn.Id(), nil, point)
 	require.NoError(t, o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: offeredConn.Id()},
 		oleiosnotify.NewMsgBlockTxsOffer(point),

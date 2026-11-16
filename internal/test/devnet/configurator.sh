@@ -110,11 +110,15 @@ configure_leios_dijkstra() {
                 >"${pool_dir}/keys/leios-vote.skey"
         fi
     done
+    # With k=3 the immutable tip trails the tip by far fewer slots than the
+    # default LeiosMinOfferLead of 3600, which would hold back every endorser
+    # block offer. 30 is the lead the reference devnets use.
     jq '.DijkstraGenesisFile = "dijkstra-genesis.json"
         | .DijkstraGenesisHash = ""
         | .TestDijkstraHardForkAtEpoch = 1
         | .ExperimentalHardForksEnabled = true
-        | .ExperimentalProtocolsEnabled = true' \
+        | .ExperimentalProtocolsEnabled = true
+        | .LeiosMinOfferLead = 30' \
         "${configs_dir}/config.json" \
         | write_file "${configs_dir}/config.json"
 }

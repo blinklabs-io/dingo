@@ -83,6 +83,8 @@ func TestLeiosNotifyBlockOfferFetchesSameHashAtDifferentSlot(t *testing.T) {
 		leiosStorePeerOffered,
 	))
 
+	o.observeLeiosElectionForTest(offeredPoint)
+	o.leiosPeerAnnouncedForTest(conn.Id(), nil, offeredPoint)
 	require.NoError(t, o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
 		oleiosnotify.NewMsgBlockOffer(offeredPoint, uint64(len(blockRaw))),
@@ -151,6 +153,8 @@ func TestLeiosNotifyBlockTxsOfferFetchesSameHashAtDifferentSlot(t *testing.T) {
 		leiosStoreAuthoritative,
 	))
 
+	o.observeLeiosElectionForTest(offeredPoint)
+	o.leiosPeerAnnouncedForTest(conn.Id(), nil, offeredPoint)
 	require.NoError(t, o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
 		oleiosnotify.NewMsgBlockTxsOffer(offeredPoint),

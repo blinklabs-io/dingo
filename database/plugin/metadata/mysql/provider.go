@@ -78,9 +78,10 @@ func RegisterProvider(host *plugin.Host) error {
 	return plugin.Register(
 		host,
 		plugin.Descriptor{
-			Capability:  plugin.CapabilityStorageMetadata,
-			Name:        "mysql",
-			Description: "MySQL relational database",
+			Capability:   plugin.CapabilityStorageMetadata,
+			Name:         "mysql",
+			Description:  "MySQL relational database",
+			DurableClose: true,
 		},
 		func() Config {
 			return Config{

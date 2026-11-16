@@ -3319,6 +3319,11 @@ func (s *Store) loadUtxoAssetsPointers(
 			return err
 		}
 	}
+	// Row ids follow insertion order, which databases written before
+	// canonical ordering hold in arbitrary order.
+	for _, utxo := range utxos {
+		models.SortAssetsCanonical(utxo.Assets)
+	}
 	return nil
 }
 

@@ -274,7 +274,8 @@ func TestBlockReferenceScriptProducedOutputAdmission(t *testing.T) {
 			}
 			require.Less(t, uint64(size), conway.MaxRefScriptSizePerTx)
 			block := &conway.ConwayBlock{
-				BlockHeader: &conway.ConwayBlockHeader{},
+				BlockHeader:         &conway.ConwayBlockHeader{},
+				InvalidTransactions: []uint{},
 			}
 			block.BlockHeader.Body.BlockNumber = 1
 			block.BlockHeader.Body.Slot = 1
@@ -373,7 +374,8 @@ func TestPV10ReferenceScriptStateOnlySuppressesMissing(t *testing.T) {
 func TestPV10AggregateReferenceScriptLookupErrors(t *testing.T) {
 	newBlock := func() *conway.ConwayBlock {
 		return &conway.ConwayBlock{
-			BlockHeader: &conway.ConwayBlockHeader{},
+			BlockHeader:         &conway.ConwayBlockHeader{},
+			InvalidTransactions: []uint{},
 			TransactionBodies: []conway.ConwayTransactionBody{{
 				TxReferenceInputs: cbor.NewSetType(
 					[]shelley.ShelleyTransactionInput{{
@@ -454,7 +456,8 @@ func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newTestDB(t)
 			block := &conway.ConwayBlock{
-				BlockHeader: &conway.ConwayBlockHeader{},
+				BlockHeader:         &conway.ConwayBlockHeader{},
+				InvalidTransactions: []uint{},
 				TransactionBodies: []conway.ConwayTransactionBody{
 					{
 						TxReferenceInputs: cbor.NewSetType(
@@ -599,7 +602,10 @@ func TestBlockReferenceScriptAggregateReusesPrefetchedUtxos(t *testing.T) {
 				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: 11},
 			},
 			block: func(inputs []lcommon.TransactionInput) gledger.Block {
-				block := &conway.ConwayBlock{BlockHeader: &conway.ConwayBlockHeader{}}
+				block := &conway.ConwayBlock{
+					BlockHeader:         &conway.ConwayBlockHeader{},
+					InvalidTransactions: []uint{},
+				}
 				block.BlockHeader.Body.BlockNumber = 1
 				block.BlockHeader.Body.Slot = 1
 				block.BlockHeader.Body.ProtoVersion.Major = 11
@@ -704,7 +710,10 @@ func TestBlockReferenceScriptBudgetDoesNotApplyBeforeConway(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	block := &babbage.BabbageBlock{BlockHeader: &babbage.BabbageBlockHeader{}}
+	block := &babbage.BabbageBlock{
+		BlockHeader:         &babbage.BabbageBlockHeader{},
+		InvalidTransactions: []uint{},
+	}
 	block.BlockHeader.Body.BlockNumber = 1
 	block.BlockHeader.Body.Slot = 1
 	block.BlockHeader.Body.ProtoVersion.Major = 8
@@ -739,7 +748,12 @@ func TestBlockReferenceScriptsUsePreviousEraParametersOnImport(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	block := &conway.ConwayBlock{BlockHeader: &conway.ConwayBlockHeader{}}
+	block := &conway.ConwayBlock{
+		BlockHeader:            &conway.ConwayBlockHeader{},
+		TransactionBodies:      []conway.ConwayTransactionBody{},
+		TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{},
+		InvalidTransactions:    []uint{},
+	}
 	block.BlockHeader.Body.BlockNumber = 1
 	block.BlockHeader.Body.Slot = 1
 	block.BlockHeader.Body.ProtoVersion.Major = 11
@@ -794,7 +808,8 @@ func TestDijkstraBlockReferenceScriptsWithConwayParameters(t *testing.T) {
 		},
 	)
 	conwayBlock := &conway.ConwayBlock{
-		BlockHeader: &conway.ConwayBlockHeader{},
+		BlockHeader:         &conway.ConwayBlockHeader{},
+		InvalidTransactions: []uint{},
 		TransactionBodies: []conway.ConwayTransactionBody{
 			{TxReferenceInputs: refs},
 		},
@@ -824,7 +839,10 @@ func TestDijkstraBlockReferenceScriptsWithConwayParameters(t *testing.T) {
 func TestReferenceScriptParamsFollowEraListPredecessor(t *testing.T) {
 	t.Parallel()
 
-	block := &conway.ConwayBlock{BlockHeader: &conway.ConwayBlockHeader{}}
+	block := &conway.ConwayBlock{
+		BlockHeader:         &conway.ConwayBlockHeader{},
+		InvalidTransactions: []uint{},
+	}
 	current := &dijkstra.DijkstraProtocolParameters{}
 	previous := &conway.ConwayProtocolParameters{}
 	ledgerEra := eras.EraDesc{Id: uint(conway.EraIdConway) + 2}

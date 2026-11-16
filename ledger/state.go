@@ -1054,6 +1054,7 @@ type LedgerStateConfig struct {
 	PeersWithBlockFunc            PeersWithBlockFunc
 	SelectBlockfetchPeerFunc      SelectBlockfetchPeerFunc
 	SelectBlockfetchRetryPeerFunc SelectBlockfetchRetryPeerFunc
+	MarkBlockfetchPeersFailedFunc MarkBlockfetchPeersFailedFunc
 	RecordBlockfetchLatencyFunc   RecordBlockfetchLatencyFunc
 	BlockfetchLatencyFunc         BlockfetchLatencyFunc
 	BlockfetchLatencyMedianFunc   BlockfetchLatencyMedianFunc
@@ -1341,7 +1342,11 @@ type EndorserBlockProviderFunc func(
 // EndorserBlockDataProviderFunc returns the verified manifest and complete
 // transaction bodies for the exact endorser-block occurrence. It lets ledger
 // read paths serve a just-applied certified block before asynchronous
-// historical persistence finishes.
+// historical persistence finishes. When set, block apply takes a certified
+// closure from it rather than from EndorserBlockProviderFunc, so the
+// transactions it applies and the manifest it persists come from one lookup;
+// it must therefore report ok for exactly the occurrences the
+// EndorserBlockProviderFunc would.
 type EndorserBlockDataProviderFunc func(
 	ebHash []byte,
 	ebSlot uint64,
@@ -1427,6 +1432,13 @@ type SelectBlockfetchRetryPeerFunc func(
 	rangeEnd ocommon.Point,
 	timeoutPenalty time.Duration,
 ) (selected ouroboros.ConnectionId, found, available bool)
+
+// MarkBlockfetchPeersFailedFunc synchronously removes failed connections from
+// peer selection as one lifecycle-stable operation. available is false while
+// the live ChainSync state is being replaced and the caller must retry later.
+type MarkBlockfetchPeersFailedFunc func(
+	connIds []ouroboros.ConnectionId,
+) (available bool)
 
 // RecordBlockfetchThroughputFunc records how many bytes a batch delivered
 // after its first block and how long that took.
@@ -1825,6 +1837,10 @@ type LedgerState struct {
 	blockfetchInFlightTimeoutGeneration uint64
 	blockfetchInFlightTimeoutCount      uint8
 	selectedBlockfetchConnId            ouroboros.ConnectionId // latest selected chainsync connection for the next batch
+	// failedBlockfetchConnIds fences partial responders until their connection
+	// close is observed. ChainSync events already queued before the peer was
+	// marked failed must not make it a later range's origin.
+	failedBlockfetchConnIds map[string]ouroboros.ConnectionId
 	// chainsyncCapacityWaitHook is a test seam, nil in production. It runs
 	// each time AwaitChainsyncHeaderCapacity has found the queue at its pause
 	// threshold and is about to wait, the point after which a test may drain
@@ -1854,6 +1870,9 @@ type LedgerState struct {
 	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
 	batchBlocksApplied            int                 // blocks from the current batch that actually extended the chain
+	// blockfetchProgressContributors identifies every peer that supplied a
+	// unique block in the current batch, including the near-tip shadow.
+	blockfetchProgressContributors []ouroboros.ConnectionId
 
 	// batchFirstBlockAt and batchLastBlockAt bracket the arrival of the
 	// current batch's blocks, and batchStreamBytes counts the bytes of every
@@ -3735,14 +3754,11 @@ func (ls *LedgerState) PoolRegistrationVRFKeyHash(
 	txn := ls.db.MetadataTxn(ctx, false)
 	defer txn.Release()
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
-	pool, err := ls.db.GetPool(ctx, pkh, true, txn)
+	status, err := ls.db.Metadata().GetPoolStatus(pkh, txn.Metadata())
 	if err != nil {
-		if errors.Is(err, models.ErrPoolNotFound) {
-			return vrfHash, false, nil
-		}
 		return vrfHash, false, err
 	}
-	if pool == nil {
+	if !status.Exists {
 		return vrfHash, false, nil
 	}
 	slot := tipState.currentTip.Point.Slot
@@ -3834,14 +3850,11 @@ func (ls *LedgerState) LatestOpCertSequence(
 	poolID [28]byte,
 ) (sequence uint64, found bool, err error) {
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
-	pool, err := ls.db.GetPool(context.Background(), pkh, false, nil)
+	status, err := ls.db.Metadata().GetPoolStatus(pkh, nil)
 	if err != nil {
-		if errors.Is(err, models.ErrPoolNotFound) {
-			return 0, false, nil
-		}
 		return 0, false, err
 	}
-	if pool == nil {
+	if !status.Active {
 		return 0, false, nil
 	}
 	return ls.latestOpCertCounterAfterMithril(
@@ -5762,8 +5775,9 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 	if err != nil {
 		return err
 	}
+	var undoErr error
 	if emitUndo {
-		ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
+		undoErr = ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
 	}
 	// The blocks are gone from the ledger from here on, whichever path
 	// returns, including a rollbackCommittedError.
@@ -6152,6 +6166,11 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 			ls.config.FatalErrorFunc(floorErr)
 		}
 		return &rollbackCommittedError{err: floorErr}
+	}
+	// The metadata is already truncated, so report the failure as committed
+	// and keep the intent: recovery replays the undo from its payload.
+	if undoErr != nil {
+		return &rollbackCommittedError{err: undoErr}
 	}
 	if retainIntent {
 		return nil
@@ -6606,10 +6625,20 @@ func (ls *LedgerState) processChainIteratorRollback(
 			if _, ok := errors.AsType[*rollbackCommittedError](err); !ok {
 				return err
 			}
-			ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
+			if emitErr := ls.emitRollbackTransactionEvents(
+				ctx,
+				rollbackBlocks,
+			); emitErr != nil {
+				return errors.Join(err, emitErr)
+			}
 			return errors.Join(err, ls.finishRollbackIntentForPoint(ctx, point))
 		}
-		ls.emitRollbackTransactionEvents(ctx, rollbackBlocks)
+		if err := ls.emitRollbackTransactionEvents(
+			ctx,
+			rollbackBlocks,
+		); err != nil {
+			return err
+		}
 		return ls.finishRollbackIntentForPoint(ctx, point)
 	}
 	chainTip := ls.chain.Tip()
@@ -11289,7 +11318,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				// more than one slot at once, and the provider resolves
 				// exactly this occurrence rather than whichever one happens
 				// to be cached for the hash.
-				ebTxs, ok := ls.config.EndorserBlockProvider(
+				ebManifest, ebTxs, ok := ls.certifiedEndorserBlockData(
 					ebHash.Bytes(),
 					ebSlot,
 				)
@@ -11334,6 +11363,19 @@ func (ls *LedgerState) ledgerProcessBlock(
 						point.Slot,
 						err,
 					)
+				}
+				if err := ls.persistCertifiedEndorserBlock(
+					ebHash.Bytes(),
+					ebSlot,
+					ebManifest,
+					ebTxs,
+				); err != nil {
+					return nil, &leiosEndorserBlockStorageError{
+						err: fmt.Errorf(
+							"persist certified endorser block: %w",
+							err,
+						),
+					}
 				}
 				// Staged in the block-apply transaction, so the marker
 				// commits only with this ranking block: a later check that
@@ -13788,7 +13830,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 				false,
 			); err != nil {
 				if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
-					ls.emitRollbackTransactionEvents(ctx, undoBlocks)
+					if emitErr := ls.emitRollbackTransactionEvents(
+						ctx,
+						undoBlocks,
+					); emitErr != nil {
+						return errors.Join(err, emitErr)
+					}
 					return errors.Join(
 						err,
 						ls.finishRollbackIntentForPoint(ctx, chainTip.Point),
@@ -13796,7 +13843,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 				}
 				return err
 			}
-			ls.emitRollbackTransactionEvents(ctx, undoBlocks)
+			if err := ls.emitRollbackTransactionEvents(
+				ctx,
+				undoBlocks,
+			); err != nil {
+				return err
+			}
 			return ls.finishRollbackIntentForPoint(ctx, chainTip.Point)
 		}(); err != nil {
 			ls.config.Logger.Error(
@@ -14046,7 +14098,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 			false,
 		); err != nil {
 			if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
-				ls.emitRollbackTransactionEvents(ctx, undoBlocks)
+				if emitErr := ls.emitRollbackTransactionEvents(
+					ctx,
+					undoBlocks,
+				); emitErr != nil {
+					return errors.Join(err, emitErr)
+				}
 				return errors.Join(
 					err,
 					ls.finishRollbackIntentForPoint(ctx, ancestor),
@@ -14054,7 +14111,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 			}
 			return err
 		}
-		ls.emitRollbackTransactionEvents(ctx, undoBlocks)
+		if err := ls.emitRollbackTransactionEvents(
+			ctx,
+			undoBlocks,
+		); err != nil {
+			return err
+		}
 		return ls.finishRollbackIntentForPoint(ctx, ancestor)
 	}(); err != nil {
 		return fmt.Errorf(
@@ -15030,10 +15092,18 @@ func (ls *LedgerState) AwaitAppliedSlot(
 	}
 }
 
+// ErrImmutablePointUnconfigured is returned by ImmutablePoint when the ledger
+// has no primary chain or no security parameter to measure the point with, as
+// opposed to a failure reading a chain it does have.
+var ErrImmutablePointUnconfigured = errors.New(
+	"immutable point is not configured",
+)
+
 // ImmutablePoint returns the primary-chain point k blocks behind the applied
 // ledger tip.
 // found is false while the retained chain is too short to have a non-origin
-// immutable point.
+// immutable point. An error wraps ErrImmutablePointUnconfigured when the ledger
+// lacks a primary chain or security parameter.
 func (ls *LedgerState) ImmutablePoint(ctx context.Context) (
 	ocommon.Point,
 	bool,
@@ -15045,12 +15115,16 @@ func (ls *LedgerState) ImmutablePoint(ctx context.Context) (
 	appliedTip := cloneTip(ls.currentTip)
 	ls.RUnlock()
 	if primaryChain == nil {
-		return ocommon.Point{}, false, errors.New("primary chain is nil")
+		return ocommon.Point{}, false, fmt.Errorf(
+			"%w: primary chain is nil",
+			ErrImmutablePointUnconfigured,
+		)
 	}
 	securityParam, ok := ls.securityParamForEra(eraID)
 	if !ok {
-		return ocommon.Point{}, false, errors.New(
-			"security parameter is not configured",
+		return ocommon.Point{}, false, fmt.Errorf(
+			"%w: security parameter is not configured",
+			ErrImmutablePointUnconfigured,
 		)
 	}
 	if appliedTip.Point.Slot == 0 && len(appliedTip.Point.Hash) == 0 {
@@ -16698,6 +16772,7 @@ var (
 	_ forging.TxValidationSessionProvider               = (*LedgerState)(nil)
 	_ forging.SlotTxValidationSessionProvider           = (*LedgerState)(nil)
 	_ forging.ParentPinnedTxValidationSessionProvider   = (*LedgerState)(nil)
+	_ forging.LeiosSelectionSessionProvider             = (*LedgerState)(nil)
 	_ lcommon.GenesisDelegationState                    = (*LedgerState)(nil)
 	_ lcommon.ClassicProtocolParameterUpdateWindowState = (*LedgerState)(nil)
 )
@@ -16818,10 +16893,55 @@ func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
 			commitIfCurrent func(func() error) (bool, error),
 			_ txValidationApplyFunc,
 			resolve txValidationResolveFunc,
+			_ forging.TxRefScriptSizeFunc,
 		) error {
 			return fn(validate, stillCurrent, commitIfCurrent, resolve)
 		},
 	)
+}
+
+// WithLeiosSelectionSession is WithTxValidationSessionAtParent with the
+// reference-script measure endorser-block selection bounds by. An empty
+// parentHash leaves the session unpinned. The measure resolves inputs through
+// the session's UTxO overlay, so outputs created by earlier selected
+// transactions count.
+func (ls *LedgerState) WithLeiosSelectionSession(ctx context.Context,
+	parentHash []byte,
+	fn func(
+		validate forging.TxValidationFunc,
+		refScriptSize forging.TxRefScriptSizeFunc,
+		stillCurrent func() bool,
+	) error,
+) error {
+	var expectedParent []byte
+	if len(parentHash) > 0 {
+		expectedParent = parentHash
+	}
+	err := ls.withResolvingTxValidationSession(ctx,
+		expectedParent,
+		nil,
+		false,
+		false,
+		nil,
+		func(
+			validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+			stillCurrent func() bool,
+			_ func(func() error) (bool, error),
+			_ txValidationApplyFunc,
+			_ txValidationResolveFunc,
+			refScriptSize forging.TxRefScriptSizeFunc,
+		) error {
+			return fn(validate, refScriptSize, stillCurrent)
+		},
+	)
+	if errors.Is(err, ErrLeiosValidationParentSuperseded) {
+		return fmt.Errorf(
+			"%w: %w",
+			forging.ErrTxValidationParentMismatch,
+			err,
+		)
+	}
+	return err
 }
 
 // WithTxValidationSessionAtParent is WithTxValidationSession pinned to a
@@ -16896,6 +17016,7 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 			commitIfCurrent func(func() error) (bool, error),
 			applyTx txValidationApplyFunc,
 			_ txValidationResolveFunc,
+			_ forging.TxRefScriptSizeFunc,
 		) error {
 			return fn(validate, stillCurrent, commitIfCurrent, applyTx)
 		},
@@ -17071,6 +17192,7 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 		commitIfCurrent func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
 		resolve txValidationResolveFunc,
+		refScriptSize forging.TxRefScriptSizeFunc,
 	) error,
 ) error {
 	if err := ctx.Err(); err != nil {
@@ -17269,8 +17391,29 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 		resolve := func(refs []models.UtxoId) ([]models.Utxo, error) {
 			return ls.db.UtxosByRefs(ctx, refs, txn)
 		}
+		refScriptSize := func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+		) (uint64, error) {
+			lv := &LedgerView{
+				ctx:             ctx,
+				txn:             txn,
+				ls:              ls,
+				intraBlockUtxos: createdUtxos,
+				consumedUtxos:   consumedUtxos,
+			}
+			// The reference mempool measures an endorser block by
+			// Conway's txNonDistinctRefScriptsSize: the top-level
+			// transaction's inputs and reference inputs only. The
+			// sub-transaction-inclusive sum is the per-transaction
+			// ledger limit, not the endorser-block measure.
+			size, err := lcommon.ConsumedReferenceScriptSize(tx, lv)
+			return size, storageFaultOrErr(lv, err)
+		}
 		if err := fn(
 			validate, stillCurrent, commitIfCurrent, applyTx, resolve,
+			refScriptSize,
 		); err != nil {
 			return err
 		}

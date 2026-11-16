@@ -636,7 +636,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"KoiosParity.Strict",
 		"koios-parity-strict",
-		"stop/cancel the node on the first Koios/tool error or non-pass parity result (a reference_lag-only result never stops the node)",
+		"stop/cancel the node on the first Koios/tool error or non-pass parity result (a reference_lag-only result or a Koios daily quota error never stops the node)",
 	),
 	intFlag(
 		"KoiosParity.GraceHours",
@@ -956,6 +956,11 @@ var flagSpecs = []flagSpec{
 		"",
 		"host:port of a bursa KES agent's remote sign listener; implies sign mode. TLS 1.3 by default (mutual TLS only when a client certificate is set); --shelley-kes-agent-plaintext selects plain TCP",
 	),
+	stringSliceFlag(
+		"ShelleyKESAgentAddresses",
+		"shelley-kes-agent-addresses",
+		"ordered host:port list of bursa KES agent remote sign listeners; signs through the first that admits this node and moves to the next when a sign fails on the link (replaces --shelley-kes-agent-address)",
+	),
 	stringFlag(
 		"ShelleyKESAgentClientCertFile",
 		"shelley-kes-agent-client-cert-file",
@@ -978,6 +983,12 @@ var flagSpecs = []flagSpec{
 		"ShelleyKESAgentPlaintext",
 		"shelley-kes-agent-plaintext",
 		"run the remote KES agent link over plain TCP",
+	),
+	stringFlag(
+		"ShelleyKESAgentProfile",
+		"shelley-kes-agent-profile",
+		"",
+		"remote KES agent profile to sign for, named when the agent admits a session",
 	),
 	durationFlag(
 		"ShelleyKeyWatchInterval",

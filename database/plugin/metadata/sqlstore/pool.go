@@ -462,6 +462,11 @@ RETURNING id`,
 				return fmt.Errorf("import pool registration: %w", err)
 			}
 			registration.ID = uint(registrationID)
+			if err := refreshPoolCurrentState(
+				ctx, db, [][]byte{registration.PoolKeyHash, pool.PoolKeyHash},
+			); err != nil {
+				return err
+			}
 			if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_owner WHERE pool_registration_id = ?`,
 				registrationID,
@@ -1745,13 +1750,28 @@ WHERE pool_key_hash IN (`+bindPlaceholders(len(chunk))+`)`,
 				if err != nil {
 					return err
 				}
+				type retiringPool struct {
+					id   int64
+					hash []byte
+				}
+				// Read every pool before writing: a server driver cannot run
+				// a statement on the connection while a result is open.
+				var retiring []retiringPool
 				for rows.Next() {
-					var poolID int64
-					var hash []byte
-					if err := rows.Scan(&poolID, &hash); err != nil {
+					var pool retiringPool
+					if err := rows.Scan(&pool.id, &pool.hash); err != nil {
 						rows.Close()
 						return err
 					}
+					retiring = append(retiring, pool)
+				}
+				if err := rows.Close(); err != nil {
+					return err
+				}
+				if err := rows.Err(); err != nil {
+					return err
+				}
+				for _, pool := range retiring {
 					if _, err := db.ExecContext(ctx, `
 INSERT INTO pool_retirement (
     pool_key_hash, certificate_id, pool_id, epoch, added_slot
@@ -1762,22 +1782,18 @@ WHERE NOT EXISTS (
     WHERE certificate_id = 0 AND pool_id = ?
       AND epoch = ? AND added_slot = ?
 )`,
-						hash,
-						poolID,
+						pool.hash,
+						pool.id,
 						epochValue,
 						slotValue,
-						poolID,
+						pool.id,
 						epochValue,
 						slotValue,
 					); err != nil {
-						rows.Close()
 						return err
 					}
 				}
-				if err := rows.Close(); err != nil {
-					return err
-				}
-				if err := rows.Err(); err != nil {
+				if err := refreshPoolCurrentState(ctx, db, chunk); err != nil {
 					return err
 				}
 			}
@@ -2848,10 +2864,11 @@ WHERE account.active = TRUE AND utxo.deleted_slot = 0
 	return stakes, delegators, nil
 }
 
-// GetPoolRegistrationsAtSlot returns the latest registration for every
-// requested pool at or before slot. Certificate position breaks same-slot
-// ties, with the row ID as a deterministic final fallback.
-func (s *Store) GetPoolRegistrationsAtSlot(
+// getPoolRegistrationsAtSlotFromHistory ranks the certificate history of every
+// requested pool. It is the definition of the result:
+// GetPoolRegistrationsAtSlot answers from pool_current_state wherever that
+// provably gives the same answer and calls this for the rest.
+func (s *Store) getPoolRegistrationsAtSlotFromHistory(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	slot uint64,
 	txn types.Txn,
@@ -2932,7 +2949,11 @@ WHERE r.rn = 1`,
 	return ret, nil
 }
 
-func (s *Store) GetPoolRegistrationsEffectiveForEpoch(
+// getPoolRegistrationsEffectiveForEpochFromHistory ranks the certificate
+// history of every requested pool. It is the definition of the result:
+// GetPoolRegistrationsEffectiveForEpoch answers from pool_current_state
+// wherever that provably gives the same answer and calls this for the rest.
+func (s *Store) getPoolRegistrationsEffectiveForEpochFromHistory(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	epochStartSlot uint64,
 	endedEpoch uint64,
@@ -3121,6 +3142,17 @@ SELECT id FROM ranked WHERE rn = 1`,
 			return nil, err
 		}
 	}
+	return loadPoolRegistrationsByID(ctx, db, registrationIDs)
+}
+
+// loadPoolRegistrationsByID loads the registration rows with the given ids,
+// owners and relays included, in no particular order.
+func loadPoolRegistrationsByID(
+	ctx context.Context,
+	db queryer,
+	registrationIDs []uint,
+) ([]models.PoolRegistration, error) {
+	ret := []models.PoolRegistration{}
 	for start := 0; start < len(registrationIDs); start += 400 {
 		end := min(start+400, len(registrationIDs))
 		args := make([]any, end-start)
@@ -3624,6 +3656,32 @@ func (s *Store) RestorePoolStateAtSlot(
 				slot,
 			); err != nil {
 				return err
+			}
+			// pool_registration_owner and pool_registration_relay reference
+			// pool through a plain foreign key (fk_pool_owners,
+			// fk_pool_relays) as well as through their registration. The
+			// registration cascade alone is not enough: MySQL checks the
+			// direct reference row by row and PostgreSQL checks it before
+			// the cascaded child deletes have run, so both reject the pool
+			// delete while owner or relay rows remain.
+			for _, table := range []string{
+				"pool_registration_owner",
+				"pool_registration_relay",
+			} {
+				if _, err := db.ExecContext(ctx, `
+DELETE FROM `+table+`
+WHERE pool_id IN (
+    SELECT pool.id FROM pool
+    WHERE NOT EXISTS (
+        SELECT 1 FROM pool_registration registration
+        WHERE registration.pool_id = pool.id
+          AND registration.added_slot <= ?
+    )
+)`,
+					slot,
+				); err != nil {
+					return err
+				}
 			}
 			if _, err := db.ExecContext(ctx, `
 DELETE FROM pool

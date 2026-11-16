@@ -90,6 +90,11 @@ type RemoteConfig struct {
 	// sidecar. It cannot be combined with a pin or a client certificate,
 	// which need TLS.
 	Plaintext bool
+	// Profile names the agent profile this node signs for, sent in the
+	// admission request. An agent that serves several pools on one listener
+	// binds the session to it; empty sends none, for an agent with one
+	// profile.
+	Profile string
 	// Provider is the attestation provider the agent must report. Only
 	// ProviderNone is supported; empty means ProviderNone.
 	Provider string
@@ -123,6 +128,11 @@ type RemoteConfig struct {
 
 	Logger  *slog.Logger
 	Metrics *Metrics
+
+	// onConnected, when set, receives this client's session state in place
+	// of Metrics' connected gauge. A FailoverClient sets it, so a standby
+	// agent's session does not overwrite the active agent's state.
+	onConnected func(connected bool)
 }
 
 // RemoteClient signs block headers through a bursa KES agent's remote sign
@@ -440,7 +450,7 @@ func (c *RemoteClient) ensureSession(
 		return ErrClosed
 	}
 	c.conn = conn
-	c.cfg.Metrics.setConnected(true)
+	c.setConnected(true)
 	c.lastUsed = time.Now()
 	c.lastErr = nil
 	c.backoff = 0
@@ -503,6 +513,7 @@ func (c *RemoteClient) admit(ctx context.Context) (net.Conn, error) {
 		Type:     "attestation_request",
 		Protocol: AttestedProtocolID,
 		Nonce:    nonce,
+		Profile:  c.cfg.Profile,
 	}); err != nil {
 		return nil, fmt.Errorf("kesagent: send attestation request: %w", err)
 	}
@@ -791,8 +802,16 @@ func (c *RemoteClient) dropLocked() {
 	if c.conn != nil {
 		_ = c.conn.Close()
 		c.conn = nil
-		c.cfg.Metrics.setConnected(false)
+		c.setConnected(false)
 	}
+}
+
+func (c *RemoteClient) setConnected(connected bool) {
+	if c.cfg.onConnected != nil {
+		c.cfg.onConnected(connected)
+		return
+	}
+	c.cfg.Metrics.setConnected(connected)
 }
 
 func (c *RemoteClient) recordDialFailureLocked() {

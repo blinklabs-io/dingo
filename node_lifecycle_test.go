@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1211,9 +1212,9 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
-	// Expire the operation context before provider shutdown. The real Badger
-	// provider then returns from CloseContext at the deadline while its owned
-	// close continues asynchronously.
+	// Expire the operation context while deferred-index maintenance is still
+	// running, so its drain cannot be confirmed. The durable Badger provider
+	// still closes to completion afterward.
 	n.deferredIndexMaintenanceDone = make(chan struct{})
 
 	// Capture the blob store's own completion signal before Truncate closes
@@ -1410,6 +1411,58 @@ func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 		t, oldLedgerState, n.ledgerState,
 		"ledgerState must not be replaced while drain is unconfirmed",
 	)
+}
+
+// errAfterNChecks reports context.Canceled from Err after its first n calls,
+// so a truncate can be interrupted after it records its pending marker.
+type errAfterNChecks struct {
+	context.Context
+	n     int64
+	count atomic.Int64
+}
+
+func (c *errAfterNChecks) Err() error {
+	if c.count.Add(1) > c.n {
+		return context.Canceled
+	}
+	return nil
+}
+
+// A pending truncate marker records a delete that did not finish, and node
+// startup refuses to serve such a database. A refused resume of that marker
+// must therefore stop the node rather than resume service over it.
+func TestLiveTruncateRefusedPendingResumeDoesNotResumeNode(t *testing.T) {
+	t.Parallel()
+
+	const numBlocks = 10
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+	require.NoError(t, n.ledgerState.Close())
+
+	target, err := database.BlockByHash(
+		context.Background(), n.db, points[2].Hash,
+	)
+	require.NoError(t, err)
+	_, err = lifecycle.Truncate(
+		&errAfterNChecks{Context: context.Background(), n: 3},
+		n.db, target, 1, false, 0,
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	pending, err := lifecycle.GetPendingTruncate(n.db)
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	require.NoError(t, n.db.SetSyncState("sync_status", "in_progress", nil))
+
+	targetSlot := points[2].Slot
+	_, err = n.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{Slot: &targetSlot},
+	)
+	require.ErrorContains(t, err, "in progress")
+	require.Error(
+		t, n.ctx.Err(),
+		"a node holding an unfinished truncate must not resume service",
+	)
+	require.NotErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
 }
 
 // TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure guards against

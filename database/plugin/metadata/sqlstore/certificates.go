@@ -65,6 +65,10 @@ func (s *Store) DeleteCertificatesAfterSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			affectedPools, err := poolHashesAfterSlot(ctx, db, slot)
+			if err != nil {
+				return err
+			}
 			if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_owner
 WHERE pool_registration_id IN (
@@ -101,12 +105,14 @@ WHERE mir_id IN (
 					return fmt.Errorf("delete %s after slot: %w", table, err)
 				}
 			}
-			_, err := db.ExecContext(
+			if _, err := db.ExecContext(
 				ctx,
 				"DELETE FROM certs WHERE slot > ?",
 				slot,
-			)
-			return err
+			); err != nil {
+				return err
+			}
+			return refreshPoolCurrentState(ctx, db, affectedPools)
 		},
 	)
 }

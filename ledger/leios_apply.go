@@ -20,10 +20,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -2127,4 +2129,69 @@ func (ls *LedgerState) publishUntickedClosureAfterCommit(
 			ls.publishTransactionEvent(ctx, evt)
 		}
 	})
+}
+
+// certifiedEndorserBlockData resolves the closure a certifying ranking block
+// applies. With a data provider the manifest and transactions come from one
+// cache lookup, so an eviction between two lookups cannot leave apply holding
+// transactions whose manifest it can no longer persist. Without one the
+// manifest is nil and nothing is persisted.
+func (ls *LedgerState) certifiedEndorserBlockData(
+	ebHash []byte,
+	ebSlot uint64,
+) ([]byte, []cbor.RawMessage, bool) {
+	if ls.config.EndorserBlockDataProvider != nil {
+		return ls.config.EndorserBlockDataProvider(ebHash, ebSlot)
+	}
+	txs, ok := ls.config.EndorserBlockProvider(ebHash, ebSlot)
+	return nil, txs, ok
+}
+
+// persistCertifiedEndorserBlock writes the manifest and transactions of a
+// certified endorser block when the store lacks either or holds different
+// bytes, so the closure stays
+// readable after the in-memory endorser-block cache expires. The asynchronous
+// persist queue drops writes under pressure and is not a durability
+// guarantee for a block that certification has made part of the chain.
+//
+// It writes exactly what apply resolved (see certifiedEndorserBlockData), so
+// it needs no second lookup that could miss. The write commits in its own blob
+// transaction, before the certification marker is staged: an endorser block
+// bigger than the shared chunk transaction allows must not overflow it, and a
+// record left by a ranking block that is rejected afterwards is uncertified
+// and pruned like any other. Pruning cannot remove the record before the
+// marker commits: the prune frontier never passes an immutable point this
+// ledger reported, and the endorser block a certifying ranking block applies
+// is its parent's, at the applied tip, which a rollback never moves behind an
+// immutable point. A nil manifest (no data provider) writes nothing; the
+// closure then depends on whatever the queue persisted.
+func (ls *LedgerState) persistCertifiedEndorserBlock(
+	ebHash []byte,
+	ebSlot uint64,
+	manifestRaw []byte,
+	txs []cbor.RawMessage,
+) error {
+	if manifestRaw == nil {
+		return nil
+	}
+	storedManifest, manifestErr := ls.db.GetLeiosEBManifest(ebHash, ebSlot)
+	stored, txErr := ls.db.GetLeiosEBTxs(ebHash, ebSlot)
+	// Matching counts do not prove the stored bytes are the verified ones: a
+	// stale or legacy-wrapped element would be read back as the closure.
+	if manifestErr == nil && txErr == nil &&
+		bytes.Equal(storedManifest, manifestRaw) &&
+		slices.EqualFunc(stored, txs, func(a, b cbor.RawMessage) bool {
+			return bytes.Equal(a, b)
+		}) {
+		return nil
+	}
+	for _, err := range []error{manifestErr, txErr} {
+		if err != nil && !errors.Is(err, types.ErrBlobKeyNotFound) {
+			return fmt.Errorf("read stored endorser block: %w", err)
+		}
+	}
+	if !bytes.Equal(lcommon.Blake2b256Hash(manifestRaw).Bytes(), ebHash) {
+		return errors.New("endorser block manifest hash mismatch")
+	}
+	return ls.db.SetLeiosEB(ebSlot, ebHash, manifestRaw, txs)
 }

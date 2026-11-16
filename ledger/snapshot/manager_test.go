@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -593,6 +594,7 @@ INSERT INTO pool_registration_owner (
 		[]byte("reward_staking_key_123456789"),
 	)
 	require.NoError(t, err)
+	dbtest.RefreshPoolCurrentState(t, raw)
 	for _, row := range []models.PoolOpCertSequence{
 		{PoolKeyHash: poolHash, Slot: 600, Sequence: 1},
 		{

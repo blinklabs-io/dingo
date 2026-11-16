@@ -15,6 +15,9 @@
 package forging
 
 import (
+	"math"
+
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
@@ -31,6 +34,13 @@ const leiosEBReferenceHashBytes = 2 + 32
 //     endorser block over it (ExnLeiosClosureTooBig in ouroboros-consensus
 //     LeiosDemoLogic.processLeiosBlock), so no honest committee member can
 //     validate or vote for one, and it can never be certified.
+//   - maxEndorserBlockExUnits bounds the execution units summed over the
+//     referenced transactions, memory and steps each, and
+//     maxRefScriptSizePerEndorserBlock their reference-script bytes. Both
+//     are the capacity the reference mempool partitions an endorser block
+//     against (leiosEndorserBlockCapacity in ouroboros-consensus
+//     Shelley/Ledger/Mempool.hs); zero is a bound that admits only
+//     transactions costing nothing in that dimension.
 //   - maxEndorserBlockReferencesSize bounds the encoded manifest, which is
 //     the size a ranking-block header announces; a header announcing more is
 //     invalid (LeiosEbTooBig, dijkstra.ValidateLeiosAnnouncementSize).
@@ -56,6 +66,9 @@ func effectiveLeiosEBCaps(
 		return leiosEBCaps{}, false
 	}
 	caps := operator
+	caps.aggregateBounded = true
+	caps.maxExUnits = pp.MaxEndorserBlockExUnits
+	caps.maxRefScriptBytes = uint64(pp.MaxRefScriptSizePerEndorserBlock)
 	caps.maxBytes = minNonZeroCap(
 		caps.maxBytes,
 		uint64(pp.MaxEndorserBlockTxsSize),
@@ -79,11 +92,25 @@ func minNonZeroCap(a, b uint64) uint64 {
 	}
 }
 
+// leiosEBMeasure is the resources one transaction takes from an endorser
+// block beyond its manifest entry: the execution units its redeemers and its
+// sub-transactions' redeemers declare, and the bytes of reference scripts its
+// top-level inputs and reference inputs resolve to, counted per input as the
+// ledger's non-distinct measure counts them.
+type leiosEBMeasure struct {
+	exUnits        lcommon.ExUnits
+	refScriptBytes uint64
+}
+
 // leiosEBCapacity tracks how much of an endorser block's capacity the
 // references admitted so far use.
 type leiosEBCapacity struct {
 	caps leiosEBCaps
 	refs uint64
+	// exUnits and refScriptBytes are the sums over the admitted
+	// transactions, compared with the protocol bounds in caps.
+	exUnits        lcommon.ExUnits
+	refScriptBytes uint64
 	// txBytes is the total size of the referenced transactions.
 	txBytes uint64
 	// entryBytes is the encoded size of the manifest's map entries, without
@@ -91,11 +118,42 @@ type leiosEBCapacity struct {
 	entryBytes uint64
 }
 
-// admit reports whether a transaction of txSize block_transaction bytes fits
-// the remaining capacity, and accounts for it when it does.
+// admit reports whether a transaction of txSize block_transaction bytes that
+// declares no execution units and resolves no reference scripts fits the
+// remaining capacity, and accounts for it when it does.
 func (c *leiosEBCapacity) admit(txSize uint64) bool {
+	return c.admitMeasured(txSize, leiosEBMeasure{})
+}
+
+// admitMeasured is admit for a transaction with a measured cost. The running
+// sums must stay at or below the protocol bounds in every dimension, memory
+// and steps separately, as the reference mempool's endorser-block partition
+// requires of the summed measure; a bound of zero admits only transactions
+// that cost nothing in that dimension.
+func (c *leiosEBCapacity) admitMeasured(
+	txSize uint64,
+	m leiosEBMeasure,
+) bool {
 	if c.caps.maxRefs > 0 && c.refs >= c.caps.maxRefs {
 		return false
+	}
+	exUnits := c.exUnits
+	refScriptBytes := c.refScriptBytes
+	if c.caps.aggregateBounded {
+		var err error
+		exUnits, err = eras.SafeAddExUnits(c.exUnits, m.exUnits)
+		if err != nil ||
+			exUnits.Memory > c.caps.maxExUnits.Memory ||
+			exUnits.Steps > c.caps.maxExUnits.Steps {
+			return false
+		}
+		if m.refScriptBytes > math.MaxUint64-c.refScriptBytes {
+			return false
+		}
+		refScriptBytes += m.refScriptBytes
+		if refScriptBytes > c.caps.maxRefScriptBytes {
+			return false
+		}
 	}
 	txBytes := c.txBytes + txSize
 	if c.caps.maxBytes > 0 && txBytes > c.caps.maxBytes {
@@ -108,6 +166,8 @@ func (c *leiosEBCapacity) admit(txSize uint64) bool {
 		return false
 	}
 	c.refs++
+	c.exUnits = exUnits
+	c.refScriptBytes = refScriptBytes
 	c.txBytes = txBytes
 	c.entryBytes = entryBytes
 	return true

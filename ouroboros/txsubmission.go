@@ -31,12 +31,11 @@ import (
 )
 
 const (
-	txsubmissionRequestTxIdsCount        = 10              // Number of TxIds to request from peer at one time
-	txsubmissionMaxConsecutiveRateLimits = 3               // Drop TxIds after this many consecutive hits
-	txsubmissionMaxAdmissionRetryStreak  = 3               // Drop one offered TX after this many lost headroom races
-	txsubmissionMaxBackoff               = 5 * time.Second // Cap on exponential backoff wait
-	txsubmissionBaseBackoff              = 150 * time.Millisecond
-	txsubmissionLogEvery                 = 10 // Log every Nth rate limit hit after the 1st
+	txsubmissionRequestTxIdsCount       = 10              // Number of TxIds to request from peer at one time
+	txsubmissionMaxAdmissionRetryStreak = 3               // Drop one offered TX after this many lost headroom races
+	txsubmissionMaxBackoff              = 5 * time.Second // Cap on exponential backoff wait
+	txsubmissionBaseBackoff             = 150 * time.Millisecond
+	txsubmissionLogEvery                = 10 // Log every Nth rate limit hit after the 1st
 	// Match the reference TxSubmission V2 advertised-size discrepancy.
 	txsubmissionMaxSizeDiscrepancy uint64 = 32
 	// Give up on a peer only after this many consecutive rejected replies.
@@ -471,6 +470,10 @@ func (o *Ouroboros) txsubmissionServerInit(
 		for {
 			headroom, limitAdmission := o.mempool.(mempool.AdmissionHeadroom)
 			requestCount := txsubmissionRequestTxIdsCount
+			if limiter := o.txSubmissionRateLimiter; limiter != nil &&
+				limiter.burst >= 1 && limiter.burst < float64(requestCount) {
+				requestCount = int(limiter.burst)
+			}
 			if limitAdmission {
 				if !headroom.WaitForAdmissionHeadroom(
 					1,
@@ -523,65 +526,35 @@ func (o *Ouroboros) txsubmissionServerInit(
 				return
 			}
 			if len(txIds) > 0 {
-				// Check per-peer rate limit before processing
-				if o.txSubmissionRateLimiter != nil &&
-					!o.txSubmissionRateLimiter.Allow(
-						ctx.ConnectionId,
-						len(txIds),
-					) {
-					consecutiveRateLimits++
-					rateLimitTotal++
-
-					// Log throttle: 1st hit + every Nth
-					if consecutiveRateLimits == 1 ||
-						rateLimitTotal%txsubmissionLogEvery == 0 {
-						o.config.Logger.Warn(
-							"tx submission rate limit exceeded",
-							"component", "network",
-							"protocol", "tx-submission",
-							"role", "server",
-							"connection_id", ctx.ConnectionId.String(),
-							"tx_count", len(txIds),
-							"consecutive_hits", consecutiveRateLimits,
-							"total_hits", rateLimitTotal,
-						)
-					}
-
-					// Drop after N consecutive hits — peer will
-					// re-offer, goroutine parks on blocking
-					// RequestTxIds (zero CPU).
-					if consecutiveRateLimits > txsubmissionMaxConsecutiveRateLimits {
-						o.config.Logger.Info(
-							"dropping txids after sustained rate limiting",
-							"component", "network",
-							"protocol", "tx-submission",
-							"role", "server",
-							"connection_id", ctx.ConnectionId.String(),
-							"dropped_count", len(txIds),
-							"consecutive_hits", consecutiveRateLimits,
-						)
-						continue
-					}
-
-					// Exponential backoff with reused timer
-					wait := txsubmissionBackoffDuration(
-						consecutiveRateLimits,
-					)
-					backoffTimer.Reset(wait)
-					select {
-					case <-backoffTimer.C:
-						// Re-check after backoff; if still
-						// limited, loop back for next offer
-						if !o.txSubmissionRateLimiter.Allow(
-							ctx.ConnectionId,
-							len(txIds),
-						) {
-							continue
+				if o.txSubmissionRateLimiter != nil {
+					// RequestTxIds acknowledges the previous offer. Keep this
+					// offer until its bodies can be fetched, or rate limiting
+					// permanently loses transactions and their dependent inputs.
+					for !o.txSubmissionRateLimiter.Allow(ctx.ConnectionId, len(txIds)) {
+						consecutiveRateLimits++
+						rateLimitTotal++
+						if consecutiveRateLimits == 1 ||
+							rateLimitTotal%txsubmissionLogEvery == 0 {
+							o.config.Logger.Warn(
+								"tx submission rate limit exceeded",
+								"component", "network",
+								"protocol", "tx-submission",
+								"role", "server",
+								"connection_id", ctx.ConnectionId.String(),
+								"tx_count", len(txIds),
+								"consecutive_hits", consecutiveRateLimits,
+								"total_hits", rateLimitTotal,
+							)
 						}
-					case <-connDone:
-						return
+						backoffTimer.Reset(
+							txsubmissionBackoffDuration(consecutiveRateLimits),
+						)
+						select {
+						case <-backoffTimer.C:
+						case <-connDone:
+							return
+						}
 					}
-				} else {
 					consecutiveRateLimits = 0
 				}
 				requestedTxs := make(

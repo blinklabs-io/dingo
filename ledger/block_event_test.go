@@ -209,7 +209,7 @@ func TestRollbackTxEventsPrecedeLaterForwardTxEvents(t *testing.T) {
 	// The rollback path emits before chain.Rollback truncates; the
 	// block-apply goroutine publishes forward events only after it
 	// observes that truncation, i.e. strictly afterwards.
-	ls.emitRollbackTransactionEvents(context.Background(), undoOrder)
+	require.NoError(t, ls.emitRollbackTransactionEvents(context.Background(), undoOrder))
 
 	forwardBlk, err := blocks[0].Decode()
 	require.NoError(t, err)
@@ -541,7 +541,7 @@ func TestRollbackAndForwardTxEventsStayOrderedAcrossRepeatedCycles(
 
 	point := ocommon.Point{Slot: blocks[0].Slot, Hash: blocks[0].Hash}
 	for range cycles {
-		ls.emitRollbackTransactionEvents(context.Background(), blocks)
+		require.NoError(t, ls.emitRollbackTransactionEvents(context.Background(), blocks))
 		ls.publishTransactionEvent(context.Background(), TransactionEvent{
 			Transaction: cycleTxs[0],
 			Point:       point,
@@ -1201,7 +1201,7 @@ func TestRollbackRetainsIntentUntilOrderedDelivery(t *testing.T) {
 			done <- err
 			return
 		}
-		ls.emitRollbackTransactionEvents(context.Background(), blocks)
+		require.NoError(t, ls.emitRollbackTransactionEvents(context.Background(), blocks))
 		if !bus.PublishOrdered(
 			TransactionEventType,
 			event.NewEvent(TransactionEventType, TransactionEvent{}),
@@ -1726,7 +1726,7 @@ func TestEmitTransactionRollbackEvents_decodeFailureEmitsLedgerErrorPerBlock(
 		},
 	}
 
-	ls.emitRollbackTransactionEvents(context.Background(), rolledBack)
+	require.NoError(t, ls.emitRollbackTransactionEvents(context.Background(), rolledBack))
 
 	for i, wantSlot := range []uint64{100, 200} {
 		evt := testutil.RequireReceive(

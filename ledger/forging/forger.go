@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -4702,8 +4703,10 @@ func selectValidLeiosTransactions(ctx context.Context,
 	err := withLeiosSelectionSession(ctx,
 		validator,
 		basis.parentHash,
+		limits.caps.aggregateBounded,
 		func(
 			validate TxValidationFunc,
+			refScriptSize TxRefScriptSizeFunc,
 			stillCurrent func() bool,
 		) error {
 			consumed := basis.closure.consumedOverlay()
@@ -4753,7 +4756,17 @@ func selectValidLeiosTransactions(ctx context.Context,
 					validate(tx, consumed, created, accounts) != nil {
 					continue
 				}
-				if !capacity.admit(uint64(len(blockTx))) {
+				measure, err := leiosEBTxMeasure(
+					tx,
+					refScriptSize,
+					consumed,
+					created,
+					limits.caps.aggregateBounded,
+				)
+				if err != nil {
+					continue
+				}
+				if !capacity.admitMeasured(uint64(len(blockTx)), measure) {
 					// The endorser block is full. Stop rather than look
 					// for a smaller transaction further on, as manifest
 					// construction does: the selected prefix is a valid
@@ -4850,6 +4863,35 @@ func (c *leiosCertifiedClosure) consumedOverlay() map[utxoref.Key]struct{} {
 	return overlay
 }
 
+// leiosEBTxMeasure measures tx against the aggregate bounds. It measures
+// nothing when the caps carry none, so earlier eras need no resolver.
+func leiosEBTxMeasure(
+	tx lcommon.Transaction,
+	refScriptSize TxRefScriptSizeFunc,
+	consumed map[utxoref.Key]struct{},
+	created map[utxoref.Key]lcommon.Utxo,
+	bounded bool,
+) (leiosEBMeasure, error) {
+	if !bounded {
+		return leiosEBMeasure{}, nil
+	}
+	exUnits, err := eras.DeclaredExUnits(tx)
+	if err != nil {
+		return leiosEBMeasure{}, err
+	}
+	if refScriptSize == nil {
+		return leiosEBMeasure{}, errLeiosRefScriptMeasureUnavailable
+	}
+	refScriptBytes, err := refScriptSize(tx, consumed, created)
+	if err != nil {
+		return leiosEBMeasure{}, err
+	}
+	return leiosEBMeasure{
+		exUnits:        exUnits,
+		refScriptBytes: refScriptBytes,
+	}, nil
+}
+
 // leiosEBCapsForSlot returns the endorser-block caps for slot: the operator
 // caps bounded by the capacity the protocol parameters in force at the slot
 // allow (effectiveLeiosEBCaps). False means capacity cannot be resolved and
@@ -4918,6 +4960,17 @@ type leiosEBCaps struct {
 	// header announces. Only the protocol parameters set it; see
 	// effectiveLeiosEBCaps.
 	maxManifestBytes uint64
+	// aggregateBounded marks maxExUnits and maxRefScriptBytes as protocol
+	// bounds. Zero is a real bound there, admitting only transactions that
+	// cost nothing in the dimension, so it cannot double as the unlimited
+	// sentinel the other caps use. Only the Dijkstra parameters set it.
+	aggregateBounded bool
+	// maxExUnits bounds the execution units summed over the referenced
+	// transactions, memory and steps each.
+	maxExUnits lcommon.ExUnits
+	// maxRefScriptBytes bounds the reference-script bytes summed over the
+	// referenced transactions.
+	maxRefScriptBytes uint64
 }
 
 // buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions.

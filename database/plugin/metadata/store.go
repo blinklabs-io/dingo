@@ -2114,6 +2114,13 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Pool, error)
 
+	// GetPoolStatus returns the pool's lifecycle from its stored current
+	// state, without scanning or loading its certificate history.
+	GetPoolStatus(
+		lcommon.PoolKeyHash,
+		types.Txn,
+	) (models.PoolStatus, error)
+
 	UpdatePoolOpCertSequence(
 		lcommon.PoolKeyHash,
 		uint64, // sequence

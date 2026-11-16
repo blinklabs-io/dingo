@@ -502,6 +502,15 @@ type Ouroboros struct {
 	leiosBackfillSourcesMu sync.Mutex
 	leiosBackfillSources   map[string]*leiosBackfillPointSources
 	leiosBackfillSourceSeq uint64
+	// leiosPendingOffers holds offers that arrived before their election was
+	// observed, keyed by occurrence, until that election is observed.
+	leiosPendingOffersMu sync.Mutex
+	leiosPendingOffers   map[string]map[leiosPendingOfferKey]leiosPendingOffer
+	leiosPendingOfferSeq uint64
+	// leiosPeerOffers holds, per LeiosNotify connection, what its peer has
+	// announced and offered, which decides whether a received offer is valid.
+	leiosPeerOffersMu sync.Mutex
+	leiosPeerOffers   map[string]*leiosPeerOfferState
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
@@ -799,6 +808,10 @@ type OuroborosConfig struct {
 	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LeiosMinOfferLead is how many slots an endorser block must lie above
+	// the immutable tip for this node to offer it to a peer. A peer disconnects
+	// a node that offers an endorser block below the peer's own immutable tip.
+	LeiosMinOfferLead uint64
 	// LeiosPersistenceRetentionSlots sets how many slots behind the highest
 	// persisted endorser block uncertified historical-serving Leios records
 	// are kept. Zero prunes an uncertified record once the immutable point of
@@ -1051,6 +1064,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		),
 		leiosEndorserBlocks:  make(map[string]*leiosEndorserBlockData),
 		leiosBackfillSources: make(map[string]*leiosBackfillPointSources),
+		leiosPendingOffers: make(
+			map[string]map[leiosPendingOfferKey]leiosPendingOffer,
+		),
 		leiosSelectedHeaders: make(
 			map[string]map[string]map[string]selectedLeiosHeader,
 		),
@@ -1521,6 +1537,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.deferredHeaderRecoveryMu.Unlock()
 	o.forgetAcceptedHeaderTip(connId)
 	o.forgetServedActivity(connId)
+	o.forgetLeiosPeerOfferStates()
 	o.chainsyncReintersectMu.Lock()
 	delete(o.chainsyncCursorEpochs, connId)
 	delete(o.chainsyncLostCursorReintersects, connId)

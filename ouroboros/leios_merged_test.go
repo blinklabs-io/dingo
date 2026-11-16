@@ -467,11 +467,11 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 		EnableLeios:        true,
 		EnableLeiosTxFetch: true,
 	})
+	offered := ocommon.NewPoint(99, bytes.Repeat([]byte{0xaa}, 32))
+	o.leiosPeerAnnouncedForTest(conn.Id(), nil, offered)
 	err = o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
-		oleiosnotify.NewMsgBlockTxsOffer(
-			ocommon.NewPoint(99, bytes.Repeat([]byte{0xaa}, 32)),
-		),
+		oleiosnotify.NewMsgBlockTxsOffer(offered),
 	)
 	require.NoError(t, err)
 }
