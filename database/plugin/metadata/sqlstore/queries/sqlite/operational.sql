@@ -1104,6 +1104,7 @@ INSERT INTO drep (
 ON CONFLICT (credential_tag, credential) DO UPDATE SET
     anchor_url = excluded.anchor_url,
     anchor_hash = excluded.anchor_hash,
+    expiry_epoch = excluded.expiry_epoch,
     active = excluded.active
 RETURNING id;
 

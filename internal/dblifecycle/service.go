@@ -195,6 +195,12 @@ func (s *Service) Snapshot(
 			s.cfg.DatabaseLifecycle.SnapshotMaxCommitPause,
 		),
 	)
+	setOpts, closeSet, err := SnapshotOptions(s.cfg.DatabasePath)
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
+	defer closeSet() //nolint:errcheck // the set is read-only here
+	manifestOpts = append(manifestOpts, setOpts...)
 	return lifecycle.SnapshotToCloud(
 		ctx,
 		s.destinationRegistry,
@@ -401,6 +407,11 @@ func (s *Service) Truncate(
 		return 0, err
 	}
 	defer db.Close(ctx)
+	setOpts, closeSet, err := TruncateOptions(s.cfg.DatabasePath)
+	if err != nil {
+		return 0, err
+	}
+	defer closeSet() //nolint:errcheck // the set is closed after its rollback committed
 
 	if pending, pendingErr := lifecycle.GetPendingTruncate(db.Database); pendingErr != nil {
 		return 0, pendingErr
@@ -412,6 +423,7 @@ func (s *Service) Truncate(
 			0,
 			s.cfg.DelegatorInactivityEnabled,
 			s.cfg.DelegatorInactivity,
+			setOpts...,
 		)
 	}
 
@@ -426,6 +438,7 @@ func (s *Service) Truncate(
 		0,
 		s.cfg.DelegatorInactivityEnabled,
 		s.cfg.DelegatorInactivity,
+		setOpts...,
 	)
 }
 

@@ -23,22 +23,19 @@ import (
 	"log/slog"
 	"sort"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // Calculator calculates stake distribution from the current ledger state.
 type Calculator struct {
-	db     *database.Database
+	db     ledgerdb.LedgerDB
 	logger *slog.Logger
 }
 
-// NewCalculator creates a new stake calculator.
-func NewCalculator(db *database.Database) *Calculator {
-	logger := db.Logger()
+// NewCalculator creates a new stake calculator. A nil logger discards.
+func NewCalculator(db ledgerdb.LedgerDB, logger *slog.Logger) *Calculator {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
@@ -129,7 +126,7 @@ func (c *Calculator) CalculateStakeDistribution(
 ) (dist *StakeDistribution, err error) {
 	// Read-only transaction so the entire calculation observes a
 	// consistent database snapshot.
-	txn := c.db.Transaction(ctx, false)
+	txn := c.db.Begin(ctx, false)
 	defer func() {
 		if commitErr := txn.Commit(); commitErr != nil {
 			if err != nil {
@@ -178,7 +175,7 @@ func (c *Calculator) CalculateStakeDistribution(
 // CIP-0163 inactivity gate.
 func (c *Calculator) CalculateStakeDistributionInTxn(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 ) (*StakeDistribution, error) {
 	return c.calculateHistoricalStakeDistributionInTxn(
@@ -218,7 +215,7 @@ func boundaryRewardSlot(slot, boundarySlot uint64) uint64 {
 // agree at the era cutover, not only away from it.
 func (c *Calculator) calculateStakeDistributionInTxn(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 	boundarySlot uint64,
 	expiryEpoch uint64,
@@ -249,7 +246,7 @@ func (c *Calculator) calculateStakeDistributionInTxn(
 // (slot, boundarySlot), and are cross-checked against each other.
 func (c *Calculator) calculateBoundaryStakeDistributionInTxn(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 	boundarySlot uint64,
 	expiryEpoch uint64,
@@ -280,7 +277,7 @@ func (c *Calculator) calculateBoundaryStakeDistributionInTxn(
 // transaction tip is still at or before the snapshot slot.
 func (c *Calculator) calculateHistoricalBoundaryStakeDistributionInTxn(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 	boundarySlot uint64,
 	expiryEpoch uint64,
@@ -322,7 +319,7 @@ func (c *Calculator) calculateHistoricalBoundaryStakeDistributionInTxn(
 
 func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 	boundarySlot uint64,
 	expiryEpoch uint64,
@@ -336,7 +333,7 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 // with adjust applied to the per-credential rows before they are summed.
 func (c *Calculator) calculateAdjustedLiveStakeDistributionInTxn(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 	boundarySlot uint64,
 	expiryEpoch uint64,
@@ -349,12 +346,11 @@ func (c *Calculator) calculateAdjustedLiveStakeDistributionInTxn(
 		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
 		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
 	}
-	meta := c.db.Metadata()
-	metaTxn := (*txn).Metadata()
+	ldb := c.db
 	pools, err := c.getActivePoolsAtBoundary(
 		ctx,
-		meta,
-		metaTxn,
+		ldb,
+		txn,
 		slot,
 		boundarySlot,
 	)
@@ -364,7 +360,7 @@ func (c *Calculator) calculateAdjustedLiveStakeDistributionInTxn(
 	// Fetch the stake of every delegated credential, not only those whose pool
 	// is still active, so TotalActiveStake is the ledger's credential-first
 	// sigma_a denominator. Only activePools gets buckets below.
-	delegatedPools, err := meta.GetDelegatedPoolKeyHashes(metaTxn)
+	delegatedPools, err := ldb.GetDelegatedPoolKeyHashes(txn)
 	if err != nil {
 		return nil, fmt.Errorf("get delegated pools: %w", err)
 	}
@@ -381,8 +377,8 @@ func (c *Calculator) calculateAdjustedLiveStakeDistributionInTxn(
 	if len(poolKeyHashBytes) == 0 {
 		return dist, nil
 	}
-	rawInputs, err := meta.GetLiveStakeInputsForPools(
-		poolKeyHashBytes, expiryEpoch, metaTxn,
+	rawInputs, err := ldb.GetLiveStakeInputsForPools(
+		poolKeyHashBytes, expiryEpoch, txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get live stake inputs: %w", err)
@@ -397,8 +393,8 @@ func (c *Calculator) calculateAdjustedLiveStakeDistributionInTxn(
 	// and calculateHistoricalBoundaryStakeDistributionInTxn agree for the
 	// same (slot, boundarySlot) -- including at the era cutover, since both
 	// now resolve pointerStakeCounted from the same two arguments.
-	pointerInputs, err := meta.GetPointerStakeInputsForPools(
-		poolKeyHashBytes, slot, boundarySlot, expiryEpoch, metaTxn,
+	pointerInputs, err := ldb.GetPointerStakeInputsForPools(
+		poolKeyHashBytes, slot, boundarySlot, expiryEpoch, txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get pointer stake inputs: %w", err)
@@ -460,7 +456,7 @@ func (c *Calculator) calculateAdjustedLiveStakeDistributionInTxn(
 
 func (c *Calculator) calculateHistoricalStakeDistributionInTxn(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 	boundarySlot uint64,
 	expiryEpoch uint64,
@@ -494,22 +490,20 @@ func (c *Calculator) calculateHistoricalStakeDistributionInTxn(
 // with the live reward aggregate.
 func (c *Calculator) rewardStakeInputsInTxn(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 	incomingEraID *uint,
 ) ([]StakeInput, uint64, error) {
-	meta := c.db.Metadata()
-	metaTxn := (*txn).Metadata()
-
+	ldb := c.db
 	// Get all active pools at the given slot.
 	// Returns types.ErrNoEpochData (wrapped) if epoch data is not yet synced.
 	pools, err := c.getActivePoolsAtBoundary(
 		ctx,
-		meta,
-		metaTxn,
+		ldb,
+		txn,
 		slot,
 		boundarySlot,
 	)
@@ -521,8 +515,8 @@ func (c *Calculator) rewardStakeInputsInTxn(
 	// whose pool is still active, so the returned total is the ledger's
 	// credential-first sigma_a denominator. Only credentials of
 	// an active pool are returned as inputs, so no pool's reward changes.
-	delegatedPools, err := meta.GetEpochBoundaryDelegatedPoolKeyHashes(
-		slot, boundarySlot, metaTxn,
+	delegatedPools, err := ldb.GetEpochBoundaryDelegatedPoolKeyHashes(
+		slot, boundarySlot, txn,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("get delegated pools: %w", err)
@@ -550,8 +544,8 @@ func (c *Calculator) rewardStakeInputsInTxn(
 	// Batch fetch reward credential inputs for all pools in a single query.
 	stakeMap, err := c.getBatchPoolsDelegatedStake(
 		ctx,
-		meta,
-		metaTxn,
+		ldb,
+		txn,
 		fetchPools,
 		slot,
 		boundarySlot,
@@ -583,7 +577,7 @@ func (c *Calculator) rewardStakeInputsInTxn(
 // reading the live reward aggregate.
 func (c *Calculator) calculateFromHistoricalStake(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	slot uint64,
 	boundarySlot uint64,
 	expiryEpoch uint64,
@@ -591,13 +585,11 @@ func (c *Calculator) calculateFromHistoricalStake(
 	incomingEraID *uint,
 	dist *StakeDistribution,
 ) error {
-	meta := c.db.Metadata()
-	metaTxn := (*txn).Metadata()
-
+	ldb := c.db
 	pools, err := c.getActivePoolsAtBoundary(
 		ctx,
-		meta,
-		metaTxn,
+		ldb,
+		txn,
 		slot,
 		boundarySlot,
 	)
@@ -610,8 +602,8 @@ func (c *Calculator) calculateFromHistoricalStake(
 
 	stakeMap, delegatorMap, err := c.getBatchPoolsHistoricalStake(
 		ctx,
-		meta,
-		metaTxn,
+		ldb,
+		txn,
 		pools,
 		slot,
 		boundarySlot,
@@ -644,8 +636,8 @@ func (c *Calculator) calculateFromHistoricalStake(
 // no retirement or retirement.epoch > epoch at slot.
 func (c *Calculator) getActivePoolsAtBoundary(
 	_ context.Context,
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	slot uint64,
 	boundarySlot uint64,
 ) ([]lcommon.PoolKeyHash, error) {
@@ -678,8 +670,8 @@ func (c *Calculator) getActivePoolsAtBoundary(
 // advanced beyond the boundary.
 func (c *Calculator) getBatchPoolsDelegatedStake(
 	_ context.Context,
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	pools []lcommon.PoolKeyHash,
 	slot uint64,
 	boundarySlot uint64,
@@ -757,8 +749,8 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 
 func (c *Calculator) getBatchPoolsHistoricalStake(
 	_ context.Context,
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
+	meta ledgerdb.LedgerDB,
+	metaTxn ledgerdb.Txn,
 	pools []lcommon.PoolKeyHash,
 	slot uint64,
 	boundarySlot uint64,

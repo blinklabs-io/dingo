@@ -380,6 +380,22 @@ func (d *Database) classicSubmissionEpochStart(
 	decodeFunc func([]byte) (any, error),
 	txn types.Txn,
 ) (uint64, error) {
+	return classicSubmissionEpochStartFrom(
+		rows, enactEpoch, decodeFunc,
+		func(epoch uint64) (*models.Epoch, error) {
+			return d.epochRecord(epoch, txn)
+		},
+	)
+}
+
+// classicSubmissionEpochStartFrom is classicSubmissionEpochStart reading the
+// epoch record through getEpoch.
+func classicSubmissionEpochStartFrom(
+	rows []models.PParamUpdate,
+	enactEpoch uint64,
+	decodeFunc func([]byte) (any, error),
+	getEpoch func(uint64) (*models.Epoch, error),
+) (uint64, error) {
 	// Epoch 0 has no previous epoch to carry proposals over from.
 	if enactEpoch <= 1 {
 		return 0, nil
@@ -405,7 +421,7 @@ func (d *Database) classicSubmissionEpochStart(
 	if !versionUpdate {
 		return 0, nil
 	}
-	epoch, err := d.metadata.GetEpoch(enactEpoch-1, txn)
+	epoch, err := getEpoch(enactEpoch - 1)
 	if err != nil {
 		return 0, fmt.Errorf("get epoch %d: %w", enactEpoch-1, err)
 	}

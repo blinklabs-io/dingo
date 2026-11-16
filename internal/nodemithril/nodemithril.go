@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -46,6 +47,7 @@ type source struct {
 	stabilityWindow uint64
 	nodeConfig      *cardano.CardanoNodeConfig
 	dataDir         string
+	utxoSet         func() ledgerstate.UtxoSetLoader
 	logger          *slog.Logger
 
 	latestTarget func(
@@ -175,6 +177,7 @@ func New(p dingo.MithrilCatchUpParams) (dingo.MithrilCatchUp, error) {
 		stabilityWindow: stabilityWindow,
 		nodeConfig:      p.CardanoNodeConfig,
 		dataDir:         p.DataDir,
+		utxoSet:         p.UtxoSet,
 		logger:          logger,
 		latestTarget:    mithril.LatestCertifiedTarget,
 		runStream:       mithril.RunStreamCatchUp,
@@ -293,6 +296,10 @@ func (s *source) SnapshotProgress(
 }
 
 func (s *source) snapshotConfig(db *database.Database) mithril.SnapshotConfig {
+	var utxoSet ledgerstate.UtxoSetLoader
+	if s.utxoSet != nil {
+		utxoSet = s.utxoSet()
+	}
 	return mithril.SnapshotConfig{
 		Feed: mithril.ChunkFeedConfig{
 			Bootstrap:    s.bootstrap,
@@ -304,6 +311,7 @@ func (s *source) snapshotConfig(db *database.Database) mithril.SnapshotConfig {
 		CardanoNodeConfig: s.nodeConfig,
 		DataDir:           s.dataDir,
 		Logger:            s.logger,
+		UtxoSet:           utxoSet,
 	}
 }
 
@@ -324,4 +332,102 @@ func (a staleBatchApplier) ApplyTrustedBatch(
 		err = fmt.Errorf("%w: %w", mithril.ErrStaleBatch, err)
 	}
 	return tip, err
+}
+
+// reimporter implements dingo.MithrilLedgerReimporter.
+type reimporter struct {
+	bootstrap mithril.BootstrapConfig
+	nodeCfg   *cardano.CardanoNodeConfig
+	logger    *slog.Logger
+	run       func(context.Context, mithril.ReimportConfig) (ocommon.Point, error)
+}
+
+func (r *reimporter) FinishLedgerReimport(
+	ctx context.Context,
+	db *database.Database,
+	point ocommon.Point,
+) error {
+	return mithril.FinishReimport(ctx, db, point)
+}
+
+// NewReimporter is a dingo.MithrilLedgerReimportFactory. It does not depend on
+// mithril.enabled: it imports from the aggregator the Mithril config names, or
+// the network's own. It returns nil when the network has no aggregator or the
+// Cardano network config has no Mithril verification keys, so recovery reports
+// the missing source instead of guessing one.
+func NewReimporter(
+	p dingo.MithrilCatchUpParams,
+) (dingo.MithrilLedgerReimporter, error) {
+	if p.CardanoNodeConfig == nil {
+		return nil, nil
+	}
+	genesisKey := p.CardanoNodeConfig.MithrilGenesisVerificationKey
+	ancillaryKey := p.CardanoNodeConfig.MithrilGenesisAncillaryVerificationKey
+	if strings.TrimSpace(genesisKey) == "" ||
+		strings.TrimSpace(ancillaryKey) == "" {
+		return nil, nil
+	}
+	network := p.Network
+	if network == "" {
+		known, ok := ouroboros.NetworkByNetworkMagic(p.NetworkMagic)
+		if !ok {
+			return nil, nil
+		}
+		network = known.Name
+	}
+	if p.Mithril.AggregatorURL == "" {
+		if _, err := mithril.AggregatorURLForNetwork(network); err != nil {
+			return nil, nil //nolint:nilerr // no aggregator is the answer, not a failure
+		}
+	}
+	var idle time.Duration
+	if p.Mithril.DownloadIdleTimeout != "" {
+		var err error
+		idle, err = time.ParseDuration(p.Mithril.DownloadIdleTimeout)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"parsing mithril.downloadIdleTimeout: %w", err,
+			)
+		}
+	}
+	logger := p.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &reimporter{
+		bootstrap: mithril.BootstrapConfig{
+			Network:                  network,
+			Backend:                  p.Mithril.Backend,
+			AggregatorURL:            p.Mithril.AggregatorURL,
+			AllowInsecureHTTP:        p.Mithril.AllowInsecureHTTP,
+			DownloadDir:              p.Mithril.DownloadDir,
+			GenesisVerificationKey:   genesisKey,
+			AncillaryVerificationKey: ancillaryKey,
+			Logger:                   logger,
+			DownloadIdleTimeout:      idle,
+			DownloadMaxIdleRetries:   p.Mithril.DownloadMaxIdleRetries,
+			DownloadMaxBytes:         p.Mithril.DownloadMaxBytes,
+			CertificateCache:         mithril.NewCertificateCache(),
+		},
+		nodeCfg: p.CardanoNodeConfig,
+		logger:  logger,
+		run:     mithril.ReimportLedgerState,
+	}, nil
+}
+
+func (r *reimporter) ReimportLedgerState(
+	ctx context.Context,
+	p dingo.LedgerReimportParams,
+) (ocommon.Point, error) {
+	return r.run(ctx, mithril.ReimportConfig{
+		Bootstrap:         r.bootstrap,
+		DB:                p.DB,
+		CardanoNodeConfig: r.nodeCfg,
+		UtxoSet:           p.UtxoSet,
+		Commit:            p.Commit,
+		LocalTip:          p.LocalTip,
+		OnChain:           p.OnChain,
+		EpochOf:           p.EpochOf,
+		Logger:            r.logger,
+	})
 }

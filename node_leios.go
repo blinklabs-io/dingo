@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -128,7 +129,7 @@ func (a *leiosKeyProviderAdapter) GetLeiosKeys(
 			)
 		}
 	}()
-	return a.ledgerState.NewView(txn).GetLeiosKeys(
+	return a.ledgerState.NewView(dbadapter.Txn(txn)).GetLeiosKeys(
 		snapshotEpoch,
 		poolKeyHashes,
 	)
@@ -248,9 +249,9 @@ func leiosDijkstraPParamsForEpoch(
 	if pparams == nil {
 		// At the Dijkstra transition, a preceding Mark snapshot can predate
 		// the first Dijkstra row. Use the era's initial parameter set.
-		rows, listErr := db.Metadata().ListPParamsForEra(
+		rows, listErr := db.ListPParamsForEra(
 			uint(gdijkstra.EraIdDijkstra),
-			txn.Metadata(),
+			txn,
 		)
 		if listErr != nil {
 			return nil, fmt.Errorf(

@@ -844,6 +844,99 @@
 # CLI: --ledger-prefetch-ahead-enabled
 # ledgerPrefetchAheadEnabled: true
 
+# Keep a Badger copy of the live UTxO set under <databasePath>/ledger/utxo-shadow,
+# fed by the ledger's block events, and check it against the metadata store
+# (experimental, default: false). Diagnostic only: validation never reads it.
+# Mismatches are logged and counted in the dingo_utxo_shadow_* metrics.
+#
+# Can be overridden with the DINGO_LEDGER_UTXO_SHADOW environment variable
+# CLI: --ledger-utxo-shadow
+# ledgerUtxoShadow: false
+
+# Keep the live UTxO set in a Badger store under <databasePath>/ledger/utxo,
+# updated synchronously after each ledger commit and before the next block is
+# validated (experimental, default: false). ledgerUtxoReads selects whether
+# validation reads it.
+# A store left behind the ledger is caught up at startup by rolling the ledger
+# back to it, or rebuilt from the metadata store when that is not possible.
+# Counted in the dingo_utxo_set_* metrics.
+#
+# Can be overridden with the DINGO_LEDGER_UTXO_BADGER environment variable
+# CLI: --ledger-utxo-badger
+# ledgerUtxoBadger: false
+
+# Where validation resolves its inputs when ledgerUtxoBadger is on: empty for
+# the metadata store, "verify" to read both and count every disagreement in
+# dingo_utxo_set_read_mismatches_total while using the metadata store's
+# answer, or "set" to use the live UTxO set (experimental, default: empty).
+# Reads fall back to the metadata store if an update to the set fails.
+#
+# Can be overridden with the DINGO_LEDGER_UTXO_READS environment variable
+# CLI: --ledger-utxo-reads
+# ledgerUtxoReads: ""
+
+# Keep the live UTxO set only in the Badger store, with no utxo rows in the
+# metadata store (experimental, default: false). Needs ledgerUtxoBadger and
+# core storage mode. A database that holds its UTxO set in the metadata store
+# is moved in place at startup: the set is built from the utxo rows, checked
+# against them, marked, and the rows are then deleted in batches; the move
+# resumes after a crash and needs free disk space for the set. A database moved
+# or synced this way refuses to start without it, since its metadata store has
+# no UTxO set to fall back to. LocalStateQuery UTxO queries pinned more than
+# one stability window before the tip are refused.
+#
+# Can be overridden with the DINGO_LEDGER_UTXO_BADGER_ONLY environment variable
+# CLI: --ledger-utxo-badger-only
+# ledgerUtxoBadgerOnly: false
+
+# Make the live UTxO set the only store of the ledger state it computes: a
+# family of SQL ledger-state tables the set is proven to hold is deleted from
+# the metadata store, and a database that has drained one refuses to start
+# without this setting (experimental, default: false). Needs
+# ledgerUtxoBadgerOnly, core storage mode and ledgerUtxoReads: "set"; it is
+# refused with ledgerUtxoReads "verify" or ledgerUtxoShadow. A database that
+# keeps UTxO rows in the metadata store has them moved first, at startup.
+#
+# Can be overridden with the DINGO_LEDGER_STATE_SET_ONLY environment variable
+# CLI: --ledger-state-set-only
+# ledgerStateSetOnly: false
+
+# Write a checkpoint of the live UTxO set, with every ledger-state family it
+# holds, at the first epoch boundary after this many epochs since the last, for
+# recovery when the set's rollback journal cannot bring it to the ledger (a set
+# behind a Mithril trust boundary or the consumed-output prune floor, a failed
+# commit older than the journal, a ledger tip below the journal). Recovery
+# restores the newest checkpoint at or below the ledger tip and replays the
+# blocks the node stores; with no usable checkpoint it re-imports a signed
+# ledger state from the network's Mithril aggregator, and never downloads
+# blocks. 0 writes none. Only applies with ledgerStateSetOnly (default: 1).
+#
+# Disk: each checkpoint is about the size of the live UTxO set
+# (<databasePath>/ledger/utxo), kept in <databasePath>/ledger/utxo-checkpoints,
+# so ledgerUtxoCheckpointKeep checkpoints take that many times the set's size,
+# and writing one needs the free space of one more while it runs. The size is
+# reported as dingo_database_size_bytes{store="utxoset_checkpoint"}.
+#
+# Can be overridden with the DINGO_LEDGER_UTXO_CHECKPOINT_EPOCHS environment
+# variable
+# CLI: --ledger-utxo-checkpoint-epochs
+# ledgerUtxoCheckpointEpochs: 1
+
+# How many live UTxO set checkpoints to keep (default: 2).
+#
+# Can be overridden with the DINGO_LEDGER_UTXO_CHECKPOINT_KEEP environment
+# variable
+# CLI: --ledger-utxo-checkpoint-keep
+# ledgerUtxoCheckpointKeep: 2
+
+# Compare each family with its SQL rows in full before they are deleted
+# (default: false). Needs ledgerStateSetOnly.
+#
+# Can be overridden with the DINGO_LEDGER_STATE_VERIFY_BEFORE_DRAIN
+# environment variable
+# CLI: --ledger-state-verify-before-drain
+# ledgerStateVerifyBeforeDrain: false
+
 # Verify the witness signatures of every validated block of a block-apply
 # chunk on worker goroutines while earlier blocks of the chunk validate and
 # write (default: true). Not consensus-affecting: each result is bound to

@@ -363,6 +363,24 @@ func runRowBatchingScenario(
 	configure ...func(*LedgerState),
 ) *rowBatchingRun {
 	t.Helper()
+	return runRowBatchingScenarioTolerating(
+		t, blocks, storageMode, batching, batchSize, false, configure...,
+	)
+}
+
+// runRowBatchingScenarioTolerating is runRowBatchingScenario that, with
+// tolerateFailure, returns after a block batch fails instead of requiring
+// every block to apply.
+func runRowBatchingScenarioTolerating(
+	t *testing.T,
+	blocks []gledger.Block,
+	storageMode string,
+	batching bool,
+	batchSize int,
+	tolerateFailure bool,
+	configure ...func(*LedgerState),
+) *rowBatchingRun {
+	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir:     t.TempDir(),
 		StorageMode: storageMode,
@@ -422,7 +440,11 @@ func runRowBatchingScenario(
 		batches <- blocks[i:min(i+batchSize, len(blocks))]
 	}
 	close(batches)
-	require.NoError(t, ls.ProcessTrustedBlockBatches(t.Context(), batches))
+	processErr := ls.ProcessTrustedBlockBatches(t.Context(), batches)
+	if tolerateFailure && processErr != nil {
+		return run
+	}
+	require.NoError(t, processErr)
 	tip, err := db.GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, blocks[len(blocks)-1].Hash().Bytes(), tip.Point.Hash)
@@ -435,6 +457,20 @@ func runRowBatchingScenario(
 // queued API detail rows receive theirs at flush time; every column that
 // references another row's id is kept.
 func rowBatchingDigest(t *testing.T, db *database.Database) string {
+	t.Helper()
+	return metadataDigest(t, db, nil, nil, nil)
+}
+
+// metadataDigest dumps every metadata table but skipTables, without
+// surrogate keys, timestamps and the columns skipCols names per table, in a
+// form two databases can be compared by.
+func metadataDigest(
+	t *testing.T,
+	db *database.Database,
+	skipTables map[string]bool,
+	skipCols map[string]map[string]bool,
+	skipRow func(table, line string) bool,
+) string {
 	t.Helper()
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -455,6 +491,9 @@ func rowBatchingDigest(t *testing.T, db *database.Database) string {
 
 	var out strings.Builder
 	for _, table := range tables {
+		if skipTables[table] {
+			continue
+		}
 		rows, err := raw.Query(fmt.Sprintf(`SELECT * FROM "%s"`, table))
 		require.NoError(t, err)
 		cols, err := rows.Columns()
@@ -474,6 +513,9 @@ func rowBatchingDigest(t *testing.T, db *database.Database) string {
 					"commit_timestamp", "timestamp":
 					continue
 				}
+				if skipCols[table][col] {
+					continue
+				}
 				switch v := values[i].(type) {
 				case []byte:
 					parts = append(parts, col+"="+hex.EncodeToString(v))
@@ -484,6 +526,9 @@ func rowBatchingDigest(t *testing.T, db *database.Database) string {
 				}
 			}
 			line := strings.Join(parts, "|")
+			if skipRow != nil && skipRow(table, line) {
+				continue
+			}
 			// The blob store's random identity differs between any two stores.
 			if table == "node_settings_gate" &&
 				strings.HasPrefix(line, "name=blob_store_id|") {

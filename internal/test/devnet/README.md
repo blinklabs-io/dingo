@@ -821,6 +821,8 @@ Dingo mode:
 | `DEVNET_DINGO{1,2,3}_ADDR`, `DEVNET_DINGO_RELAY_ADDR` | `localhost:<port above>` | `run-tests.sh`-derived NtN addresses for the Go harness |
 | `DEVNET_DINGO{1,2,3}_NTC_ADDR`, `DEVNET_DINGO_RELAY_NTC_ADDR` | `localhost:<port above>` | NtC addresses for `DingoNtcAddrs()` |
 | `TEST_TIMEOUT`                | `20m`   | `go test -timeout` in `run-tests.sh` |
+| `DEVNET_LEDGER_UTXO_BADGER`   | `false` | `DINGO_LEDGER_UTXO_BADGER` for every Dingo node: keep the live UTxO set |
+| `DEVNET_LEDGER_UTXO_READS`    | unset   | `DINGO_LEDGER_UTXO_READS` for every Dingo node: `verify` compares the set's reads with the metadata store |
 
 Conformance mode:
 

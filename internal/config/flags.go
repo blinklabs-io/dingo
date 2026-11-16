@@ -901,6 +901,47 @@ var flagSpecs = []flagSpec{
 		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies, for validated blocks only (not consensus-affecting; default on)",
 	),
 	boolFlag(
+		"LedgerUtxoShadow",
+		"ledger-utxo-shadow",
+		"keep a Badger copy of the live UTxO set and check it against the metadata store (experimental, diagnostic only; default off)",
+	),
+	boolFlag(
+		"LedgerUtxoBadger",
+		"ledger-utxo-badger",
+		"keep the live UTxO set in a Badger store updated synchronously after each ledger commit (experimental; default off)",
+	),
+	boolFlag(
+		"LedgerUtxoBadgerOnly",
+		"ledger-utxo-badger-only",
+		"keep the live UTxO set only in Badger, with no utxo rows in the metadata store; core mode; a database that holds its UTxO set in the metadata store is moved in place at startup (experimental; default off)",
+	),
+	boolFlag(
+		"LedgerStateSetOnly",
+		"ledger-state-set-only",
+		"make the live UTxO set the only store of the ledger state it computes, deleting the SQL rows of each family proven current in it; needs --ledger-utxo-badger-only, core mode and --ledger-utxo-reads=set (experimental; default off)",
+	),
+	boolFlag(
+		"LedgerStateVerifyBeforeDrain",
+		"ledger-state-verify-before-drain",
+		"compare each family with its SQL rows in full before deleting them (default off)",
+	),
+	intFlag(
+		"LedgerUtxoCheckpointEpochs",
+		"ledger-utxo-checkpoint-epochs",
+		"write a checkpoint of the live UTxO set at an epoch boundary every this many epochs, for recovery when its journal cannot bring it to the ledger; 0 writes none; only with --ledger-state-set-only (default 1)",
+	),
+	intFlag(
+		"LedgerUtxoCheckpointKeep",
+		"ledger-utxo-checkpoint-keep",
+		"how many live UTxO set checkpoints to retain (default 2)",
+	),
+	stringFlag(
+		"LedgerUtxoReads",
+		"ledger-utxo-reads",
+		"",
+		"where validation resolves its inputs with --ledger-utxo-badger: empty for the metadata store, verify to compare both, set for the live UTxO set (experimental)",
+	),
+	boolFlag(
 		"LedgerValidateAheadEnabled",
 		"ledger-validate-ahead-enabled",
 		"verify the witness signatures of a block-apply chunk's validated blocks on worker goroutines while earlier blocks apply (not consensus-affecting; default on)",

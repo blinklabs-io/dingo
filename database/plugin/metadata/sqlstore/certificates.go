@@ -62,30 +62,37 @@ func (s *Store) DeleteCertificatesAfterSlot(
 	// chain. Always safe to call even when no live syncer is wired (a no-op
 	// store field write) and even if the delete below fails.
 	s.invalidateCommitteeAuthImmutableSlot()
+	poolsDrained := s.poolsDrained()
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			affectedPools, err := poolHashesAfterSlot(ctx, db, slot)
-			if err != nil {
-				return err
-			}
-			if _, err := db.ExecContext(ctx, `
+			// A drained pools family has no certificate rows to delete and
+			// no pool rows to refresh.
+			var affectedPools [][]byte
+			if !poolsDrained {
+				var err error
+				affectedPools, err = poolHashesAfterSlot(ctx, db, slot)
+				if err != nil {
+					return err
+				}
+				if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_owner
 WHERE pool_registration_id IN (
     SELECT id FROM pool_registration WHERE added_slot > ?
 )`,
-				slot,
-			); err != nil {
-				return err
-			}
-			if _, err := db.ExecContext(ctx, `
+					slot,
+				); err != nil {
+					return err
+				}
+				if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_relay
 WHERE pool_registration_id IN (
     SELECT id FROM pool_registration WHERE added_slot > ?
 )`,
-				slot,
-			); err != nil {
-				return err
+					slot,
+				); err != nil {
+					return err
+				}
 			}
 			if _, err := db.ExecContext(ctx, `
 DELETE FROM move_instantaneous_rewards_reward
@@ -96,7 +103,8 @@ WHERE mir_id IN (
 			); err != nil {
 				return err
 			}
-			for _, table := range rollbackCertificateTables {
+			live := s.liveCertificateTables(rollbackCertificateTables)
+			for _, table := range live {
 				if _, err := db.ExecContext(
 					ctx,
 					"DELETE FROM "+table+" WHERE added_slot > ?",
@@ -127,7 +135,7 @@ func (s *Store) GetMIRCertsInSlotRange(
 		return nil, fmt.Errorf("GetMIRCertsInSlotRange: resolve db: %w", err)
 	}
 	rows, err := db.QueryContext(ctx, `
-SELECT id, pot, other_pot
+SELECT id, pot, other_pot, added_slot
 FROM move_instantaneous_rewards
 WHERE added_slot >= ? AND added_slot < ?
 ORDER BY added_slot ASC, id ASC`,
@@ -145,6 +153,7 @@ ORDER BY added_slot ASC, id ASC`,
 			&effect.ID,
 			&effect.Pot,
 			&otherPot,
+			&effect.AddedSlot,
 		); err != nil {
 			rows.Close()
 			return nil, err

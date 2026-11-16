@@ -29,6 +29,9 @@ func (d *Database) DeleteConstitutionsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if err := d.checkCommitteeLive(); err != nil {
+		return err
+	}
 	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.governanceStore().DeleteConstitutionsAfterSlot(
 			slot,
@@ -46,6 +49,9 @@ func (d *Database) DeleteConstitutionsAfterSlot(
 
 // GetConstitution returns the current constitution
 func (d *Database) GetConstitution(txn *Txn) (*models.Constitution, error) {
+	if err := d.checkCommitteeLive(); err != nil {
+		return nil, err
+	}
 	if txn == nil {
 		return d.governanceStore().GetConstitution(nil)
 	}
@@ -57,6 +63,9 @@ func (d *Database) SetConstitution(
 	constitution *models.Constitution,
 	txn *Txn,
 ) error {
+	if err := d.checkCommitteeLive(); err != nil {
+		return err
+	}
 	if txn == nil {
 		return d.governanceStore().SetConstitution(constitution, nil)
 	}

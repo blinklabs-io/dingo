@@ -328,7 +328,7 @@ func TestSetGapBlockTransactionRefreshesSharedCredentialOnce(t *testing.T) {
 
 	before := store.sumCredentialUtxoStakeCalls.Load()
 	require.NoError(t, store.SetGapBlockTransaction(
-		fx.tx, fx.point, 0, fx.certDeposits, nil, 0,
+		fx.tx, fx.point, 0, fx.certDeposits, nil, 0, false,
 	))
 	got := store.sumCredentialUtxoStakeCalls.Load() - before
 	require.Equal(
@@ -821,13 +821,13 @@ func TestSetGapBlockTransactionReapplyAppliesNoSecondDelta(t *testing.T) {
 	fx := buildSharedCredentialTx(t, 0x44)
 
 	require.NoError(t, store.SetGapBlockTransaction(
-		fx.tx, fx.point, 0, fx.certDeposits, nil, 0,
+		fx.tx, fx.point, 0, fx.certDeposits, nil, 0, false,
 	))
 	first := readUtxoStake(t, store, fx.ref)
 	require.Equal(t, fx.producedAmount, first)
 
 	require.NoError(t, store.SetGapBlockTransaction(
-		fx.tx, fx.point, 0, fx.certDeposits, nil, 0,
+		fx.tx, fx.point, 0, fx.certDeposits, nil, 0, false,
 	))
 	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
 	require.NoError(t, err)

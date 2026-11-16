@@ -235,6 +235,39 @@ func TestCheckSyncStateAllowsInterruptedRewardRepairToResume(t *testing.T) {
 		"serve must resume an interrupted in-place repair before node startup")
 }
 
+func TestCheckSyncStateAllowsTheNodesOwnReimportToResume(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &config.Config{
+		RunMode:      config.RunModeServe,
+		StorageMode:  "core",
+		Network:      "preview",
+		DatabasePath: t.TempDir(),
+		Plugins:      testStoragePlugins(),
+	}
+	seedMigratedMetadata(t, cfg)
+	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
+	require.NoError(t, err)
+	require.NoError(t, runtime.Database.SetSyncState(
+		"sync_status", syncStatusInProgress, nil,
+	))
+	require.NoError(t, runtime.Database.SetSyncState(
+		database.LedgerReimportSyncKey, "1", nil,
+	))
+	require.NoError(t, runtime.Close(context.Background()))
+
+	require.NoError(t, checkSyncState(cfg, logger),
+		"serve must let the node run its own interrupted re-import")
+
+	// The same status without the re-import mark is still an incomplete sync.
+	runtime, err = openConfiguredDatabase(context.Background(), cfg, logger, 1)
+	require.NoError(t, err)
+	require.NoError(t, runtime.Database.DeleteSyncState(database.LedgerReimportSyncKey, nil))
+	require.NoError(t, runtime.Close(context.Background()))
+	require.ErrorContains(t, checkSyncState(cfg, logger), "incomplete sync detected")
+}
+
 func TestCheckSyncStateDoesNotIgnoreOtherInterruptedSyncForRewardRepair(t *testing.T) {
 	t.Parallel()
 

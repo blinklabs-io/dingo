@@ -486,6 +486,11 @@ func ResolveTargetByNumber(
 // target.ID) but retained in metadata (slot not > target.Slot),
 // diverging the two. Truncate refuses such a target outright (see the
 // same-slot check above) rather than let that divergence happen.
+//
+// With WithTruncateUtxoSet, Truncate refuses a target below the set's
+// journal floor before any mutation and rolls the set back to target as the
+// first step of the mutation, so a truncate resumed from its pending marker
+// finds the set already there.
 func Truncate(
 	ctx context.Context,
 	db *database.Database,
@@ -493,13 +498,29 @@ func Truncate(
 	batchSize int,
 	delegatorInactivityEnabled bool,
 	delegatorInactivity uint64,
+	opts ...TruncateOption,
 ) (blocksRemoved uint64, err error) {
-	// Errors on this branch, including the refusals from
+	var cfg truncateConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	// Errors on the pending-marker branch, including the refusals from
 	// checkPendingMithrilFloor, are deliberately NOT wrapped in
 	// ErrTruncateNotStarted even though this call changes nothing before
 	// them: a marker records a DeleteBlocksAfter that did not finish, so the
 	// database is not safe to resume normal service on, and node startup
-	// refuses it for the same reason.
+	// refuses it for the same reason. Binding the drained families runs
+	// before that branch because resuming reads them, so a bind failure is
+	// unwrapped too whenever a marker exists or cannot be read.
+	if err := cfg.bindDrainedFamilies(ctx, db); err != nil {
+		if pending, pendingErr := GetPendingTruncate(db); pendingErr != nil ||
+			pending != nil {
+			return 0, fmt.Errorf("truncate: %w", err)
+		}
+		return 0, fmt.Errorf("%w: %w", ErrTruncateNotStarted, err)
+	}
 	if pending, err := GetPendingTruncate(db); err != nil {
 		return 0, fmt.Errorf("truncate: %w", err)
 	} else if pending != nil {
@@ -513,6 +534,7 @@ func Truncate(
 			batchSize,
 			delegatorInactivityEnabled,
 			delegatorInactivity,
+			cfg,
 		)
 	}
 
@@ -747,6 +769,10 @@ func Truncate(
 		}
 	}
 
+	if err := cfg.checkUtxoSet(target); err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrTruncateNotStarted, err)
+	}
+
 	// A context already cancelled before any mutation is attempted must be
 	// reported the same way every other pre-mutation validation failure
 	// above is: ErrTruncateNotStarted-wrapped. Without this check here,
@@ -786,6 +812,7 @@ func Truncate(
 		batchSize,
 		delegatorInactivityEnabled,
 		delegatorInactivity,
+		cfg,
 	)
 }
 
@@ -832,7 +859,14 @@ func finishPendingTruncate(
 	batchSize int,
 	delegatorInactivityEnabled bool,
 	delegatorInactivity uint64,
+	cfg truncateConfig,
 ) (uint64, error) {
+	if err := cfg.rollBackUtxoSet(ocommon.Point{
+		Slot: pending.TargetSlot,
+		Hash: pending.TargetHash,
+	}); err != nil {
+		return 0, fmt.Errorf("truncate: %w", err)
+	}
 	// Everything above this point is read-only validation; DeleteBlocksAfter
 	// is where on-disk mutation actually begins (and, for a truncate
 	// spanning more than one delete batch, may partially commit before an
@@ -976,4 +1010,96 @@ func finishPendingTruncate(
 		return 0, fmt.Errorf("truncate: %w", err)
 	}
 	return blocksDeleted, nil
+}
+
+// TruncateUtxoSet is a live UTxO set that Truncate keeps in step with the
+// database it truncates.
+type TruncateUtxoSet interface {
+	// Tip returns the point the set last recorded; ok is false for a set
+	// that has recorded none.
+	Tip() (point ocommon.Point, ok bool, err error)
+	// JournalFloor returns the oldest point the set can roll back to.
+	JournalFloor() (point ocommon.Point, ok bool, err error)
+	// CanRollbackTo reports whether the set can be rolled back to exactly
+	// point.
+	CanRollbackTo(point ocommon.Point) (bool, error)
+	// RollbackTo rolls the set back to point from its journal.
+	RollbackTo(point ocommon.Point) error
+}
+
+// TruncateOption configures Truncate.
+type TruncateOption func(*truncateConfig)
+
+type truncateConfig struct {
+	utxoSet TruncateUtxoSet
+}
+
+// WithTruncateUtxoSet makes Truncate roll set back with the database. The
+// set must not be written to while Truncate runs.
+func WithTruncateUtxoSet(set TruncateUtxoSet) TruncateOption {
+	return func(cfg *truncateConfig) { cfg.utxoSet = set }
+}
+
+// checkUtxoSet refuses a target the set cannot be rolled back to. A set at
+// or behind target needs no rollback: startup resumes it from its own tip.
+func (c truncateConfig) checkUtxoSet(target models.Block) error {
+	if c.utxoSet == nil {
+		return nil
+	}
+	tip, ok, err := c.utxoSet.Tip()
+	if err != nil {
+		return fmt.Errorf("read live UTxO set tip: %w", err)
+	}
+	if !ok || tip.Slot <= target.Slot {
+		return nil
+	}
+	can, err := c.utxoSet.CanRollbackTo(ocommon.Point{
+		Slot: target.Slot,
+		Hash: target.Hash,
+	})
+	if err != nil {
+		return fmt.Errorf("check live UTxO set journal: %w", err)
+	}
+	if can {
+		return nil
+	}
+	floor, _, err := c.utxoSet.JournalFloor()
+	if err != nil {
+		return fmt.Errorf("read live UTxO set journal floor: %w", err)
+	}
+	return fmt.Errorf(
+		"target slot %d is below the live UTxO set's journal floor (slot %d, "+
+			"set tip slot %d); the set holds no earlier state to roll back "+
+			"to -- choose a target at or above the floor",
+		target.Slot, floor.Slot, tip.Slot,
+	)
+}
+
+// rollBackUtxoSet rolls the set back to point when it is ahead of it.
+func (c truncateConfig) rollBackUtxoSet(point ocommon.Point) error {
+	if c.utxoSet == nil {
+		return nil
+	}
+	tip, ok, err := c.utxoSet.Tip()
+	if err != nil {
+		return fmt.Errorf("read live UTxO set tip: %w", err)
+	}
+	if !ok || tip.Slot <= point.Slot {
+		return nil
+	}
+	can, err := c.utxoSet.CanRollbackTo(point)
+	if err != nil {
+		return fmt.Errorf("check live UTxO set journal: %w", err)
+	}
+	if !can {
+		return fmt.Errorf(
+			"live UTxO set at slot %d cannot be rolled back to slot %d; "+
+				"its journal does not hold that point",
+			tip.Slot, point.Slot,
+		)
+	}
+	if err := c.utxoSet.RollbackTo(point); err != nil {
+		return fmt.Errorf("roll back live UTxO set: %w", err)
+	}
+	return nil
 }

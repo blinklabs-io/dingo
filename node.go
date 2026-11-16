@@ -41,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -58,7 +59,10 @@ import (
 	"github.com/blinklabs-io/dingo/internal/plannerstats"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/promutil"
+	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/tracing"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
+	"github.com/blinklabs-io/dingo/internal/utxoshadow"
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -94,22 +98,42 @@ type Node struct {
 	// no Stop of its own otherwise, so a live database restore/truncate,
 	// which constructs a fresh one on every cycle, would leak its EventBus
 	// subscription every time (node_lifecycle.go).
-	poolRelayProvider       *ledger.PoolRelayProvider
-	chainsyncState          *chainsync.State
-	chainSelector           *chainselection.ChainSelector
-	chainSelectionMetrics   *chainSelectionMetrics
-	chainSelectorForGauges  atomic.Pointer[chainselection.ChainSelector]
-	lastEagernessLimit      atomic.Pointer[chainselection.EagernessLimit]
-	equivocation            *equivocationDetector
-	eventBus                *event.EventBus
-	pluginHost              *plugin.Host
-	consensusProvider       nodeconsensus.Provider
-	destinationRegistry     *lifecycle.DestinationRegistry
-	mempool                 mempool.Service
-	chainManager            *chain.ChainManager
-	db                      *database.Database
-	ledgerState             *ledger.LedgerState
-	snapshotMgr             *snapshot.Manager
+	poolRelayProvider      *ledger.PoolRelayProvider
+	chainsyncState         *chainsync.State
+	chainSelector          *chainselection.ChainSelector
+	chainSelectionMetrics  *chainSelectionMetrics
+	chainSelectorForGauges atomic.Pointer[chainselection.ChainSelector]
+	lastEagernessLimit     atomic.Pointer[chainselection.EagernessLimit]
+	equivocation           *equivocationDetector
+	eventBus               *event.EventBus
+	pluginHost             *plugin.Host
+	consensusProvider      nodeconsensus.Provider
+	destinationRegistry    *lifecycle.DestinationRegistry
+	mempool                mempool.Service
+	chainManager           *chain.ChainManager
+	db                     *database.Database
+	ledgerState            *ledger.LedgerState
+	snapshotMgr            *snapshot.Manager
+	utxoShadow             *utxoshadow.Shadow
+	utxoSet                *utxoset.Set
+	// anchoredUtxoSet is the open live UTxO set the anchor updater feeds. It
+	// follows utxoSet across a live close and reopen, which the updater
+	// goroutine cannot read without a race.
+	anchoredUtxoSet   atomic.Pointer[utxoset.Set]
+	drainGuard        *statedrain.TripGuard
+	utxoSetReconciled bool
+	// utxoCkptMu, utxoCkptCancel and utxoCkptWG own the goroutine that copies
+	// the live set into a checkpoint.
+	utxoCkptMu     sync.Mutex
+	utxoCkptCancel context.CancelFunc
+	utxoCkptWG     sync.WaitGroup
+
+	// durableCloseProgress overrides defaultDurableCloseProgressInterval
+	// when positive.
+	durableCloseProgress time.Duration
+	// finishLedgerReimport completes a re-import whose live set swap
+	// finished, recording its Mithril anchor and clearing its marks.
+	finishLedgerReimport    func(ctx context.Context, point ocommon.Point) error
 	dbLifecycleMgr          *dblifecycle.Manager
 	plannerStatsMgr         *plannerstats.Manager
 	leiosVoteManager        *leios.VoteManager
@@ -1087,6 +1111,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// requires exists. Nothing between here and there dereferences it: the
 	// callbacks handed to ledger, connmanager and peergov below are closures
 	// that resolve n.ouroboros when they fire, not method values bound now.
+	if err := n.openUtxoSet(); err != nil {
+		return err
+	}
+	started = append(started, func() {
+		// Left open when the ledger may still be writing to it.
+		if ledgerStateDrainConfirmed {
+			_ = n.closeUtxoSet()
+		}
+	})
 	// Load state
 	state, err := ledger.NewLedgerState(n.ledgerStateConfig())
 	if err != nil {
@@ -1207,7 +1240,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// function, and storage mode alone is no longer sufficient to start it (an
 	// api-mode deployment may not want Midnight indexing at all).
 	if midnightIndexerActive(n.config.storageMode, n.config.midnight) {
-		if err := n.ledgerState.PrepareEpochCacheForStartup(ctx); err != nil {
+		if err := n.prepareEpochCache(ctx); err != nil {
 			return fmt.Errorf(
 				"load epoch cache before Midnight indexer start: %w",
 				err,
@@ -1263,7 +1296,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		n.snapshotMgr.DeferEpochBoundaryCapture,
 		n.snapshotMgr.DiscardEpochBoundaryCapture,
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			evt event.EpochTransitionEvent,
 		) (ledger.DeferredBoundarySnapshot, error) {
 			return n.snapshotMgr.PrepareEpochBoundarySnapshot(n.ctx, txn, evt)
@@ -1296,11 +1329,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		})
 	}
 
+	if err := n.reconcileUtxoSet(ctx); err != nil {
+		return err
+	}
 	// Start ledger.
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
 	n.publishStartedLedgerState()
+	n.startUtxoSetAnchorUpdater()
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {
@@ -1311,6 +1348,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
 	}
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
+	if err := n.startUtxoShadow(); err != nil {
+		return err
+	}
+	started = append(started, func() { _ = n.stopUtxoShadow() })
 	// Initialize and start automatic database-snapshot manager (distinct
 	// from the stake/reward snapshot manager above — see
 	// internal/dblifecycle.Manager doc comment).
@@ -2680,6 +2721,29 @@ func (n *Node) enforceRecoveredNodeSettings(ctx context.Context) error {
 	return nil
 }
 
+// staleDrainedSnapshotEpochs lists the epochs whose mark snapshot the live
+// UTxO set holds from another accounting version. Once reward-inputs is
+// drained the set is the only copy of those headers, so the check cannot
+// proceed without it.
+func (n *Node) staleDrainedSnapshotEpochs() ([]uint64, error) {
+	if n.utxoSet == nil {
+		return nil, errors.New(
+			"the reward-inputs family is drained and the live UTxO set " +
+				"is not open",
+		)
+	}
+	return n.utxoSet.StaleRewardSnapshotEpochs(
+		models.RewardStakeCalculationVersion,
+	)
+}
+
+// mergeEpochs returns the sorted union of two ascending epoch lists.
+func mergeEpochs(a, b []uint64) []uint64 {
+	out := append(slices.Clone(a), b...)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
 // backfillRewardLiveStake repairs databases created before the live reward
 // stake aggregate existed. It runs after commit-timestamp recovery and before
 // ledger processing can advance the chain, so the next epoch-boundary snapshot
@@ -2707,6 +2771,13 @@ func (n *Node) enforceRecoveredNodeSettings(ctx context.Context) error {
 // cannot be safely reconstructed, and no cost argument justifies disabling
 // it, so it runs on every startup whether or not the scan is skipped.
 func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
+	// With the live UTxO set as the only copy, a rebuild reads UTxO stake
+	// from the set, which trails the metadata store after a crash until
+	// reconcileUtxoSet rolls the ledger back to it; reconcileUtxoSet runs
+	// this then.
+	if n.config.ledgerUtxoBadgerOnly && !n.utxoSetReconciled {
+		return nil
+	}
 	// Both probes are read-only, so they run on the read-only metadata
 	// connection and the writer stays idle. Only a genuine rebuild needs the
 	// writer, which is opened separately below. Holding the writer open across
@@ -2757,6 +2828,16 @@ func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
 		return nil
 	}); err != nil {
 		return fmt.Errorf("failed to probe reward live stake state: %w", err)
+	}
+	if n.db.FamilyDrained(nodesettings.FamilyRewardInputs) {
+		setEpochs, err := n.staleDrainedSnapshotEpochs()
+		if err != nil {
+			return fmt.Errorf("check stake snapshot provenance: %w", err)
+		}
+		if len(setEpochs) > 0 {
+			staleSnapshots = true
+			staleEpochs = mergeEpochs(staleEpochs, setEpochs)
+		}
 	}
 	// Both call sites run before ledger processing can advance the chain, so
 	// nothing can write reward_live_stake between the probe above and the
@@ -3050,7 +3131,7 @@ func wireDeferredRewardStakeInputs(
 ) {
 	ls.SetEpochBoundaryDeferredStakeInputsHook(
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 		) (uint64, uint64, []*models.RewardStakeInput, bool) {
 			deferred, ok := mgr.TakeDeferredRewardStakeInputs(txn)
 			if !ok {

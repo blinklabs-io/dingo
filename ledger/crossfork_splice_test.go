@@ -1410,6 +1410,7 @@ func TestReconcileRefusedRewindRestoresPreviousRollbackIntent(t *testing.T) {
 		fixture.ls.db,
 		fixture.currentTip.Point,
 		priorBlocks,
+		nil,
 	))
 	putPrimaryChainOnForkBeyondK(t, fixture, "reconcile-prior-intent")
 	chainTip := fixture.ls.chain.Tip()

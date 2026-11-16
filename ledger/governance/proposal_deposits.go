@@ -18,7 +18,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
@@ -29,8 +29,8 @@ type activeProposalDeposit struct {
 
 func activeProposalDepositsByReturnCredential(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	currentEpoch uint64,
 ) (map[string]activeProposalDeposit, error) {
 	proposals, err := db.GetActiveGovernanceProposals(ctx, currentEpoch, txn)
@@ -67,8 +67,8 @@ func activeProposalDepositsByReturnCredential(
 
 func accountsForProposalDeposits(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	deposits map[string]activeProposalDeposit,
 ) (map[string]*models.Account, error) {
 	refs := make([]models.StakeCredentialRef, 0, len(deposits))
@@ -113,8 +113,8 @@ func proposalDepositAccountActive(
 // every DRep's power (and every other bucket).
 func ActiveProposalDepositDRepPower(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	currentEpoch uint64,
 	expiryEpoch uint64,
 ) (map[string]uint64, uint64, error) {
@@ -125,8 +125,8 @@ func ActiveProposalDepositDRepPower(
 
 func activeProposalDepositDRepPowerAtEpochs(
 	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
+	db ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
 	activeProposalEpoch uint64,
 	expiryEpoch uint64,
 ) (map[string]uint64, uint64, error) {

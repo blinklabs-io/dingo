@@ -19,10 +19,11 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // removeAvvmUtxos ports cardano-ledger's
@@ -59,14 +60,14 @@ import (
 //
 // Returns the count and total lovelace of the rows marked deleted.
 func (ls *LedgerState) removeAvvmUtxos(ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	boundarySlot uint64,
 ) (int, uint64, error) {
 	var (
 		refs          []types.UtxoKey
 		totalLovelace uint64
 	)
-	if err := ls.db.IterateLiveUtxos(ctx, txn, func(u *models.Utxo) error {
+	if err := ls.iterateLiveUtxos(ctx, txn, func(u *models.Utxo) error {
 		out, err := u.Decode()
 		if err != nil {
 			return fmt.Errorf(
@@ -104,11 +105,25 @@ func (ls *LedgerState) removeAvvmUtxos(ctx context.Context,
 	}); err != nil {
 		return 0, 0, fmt.Errorf("scan live utxos: %w", err)
 	}
-	if err := ls.db.MarkUtxosDeletedAtSlot(
+	if err := ls.ledgerDB().MarkUtxosDeletedAtSlot(
 		ctx,
 		txn, refs, boundarySlot,
 	); err != nil {
 		return 0, 0, fmt.Errorf("mark avvm utxos deleted: %w", err)
+	}
+	if len(refs) > 0 {
+		removed := make([]models.UtxoId, 0, len(refs))
+		for _, r := range refs {
+			removed = append(
+				removed,
+				models.UtxoId{Hash: r.TxId, Idx: r.OutputIdx},
+			)
+		}
+		ls.publishUtxoEventAfterCommit(ctx, txn, UtxoEvent{
+			Point:   ocommon.Point{Slot: boundarySlot},
+			Cause:   UtxoChangeAvvmRemoval,
+			Removed: removed,
+		}, nil)
 	}
 	return len(refs), totalLovelace, nil
 }

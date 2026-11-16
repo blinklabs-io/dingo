@@ -349,6 +349,9 @@ func (d *Database) currentEpochSlot(ctx context.Context) (epoch uint64, slot uin
 		return 0, 0
 	}
 	slot = tip.Point.Slot
+	if d.FamilyDrained(nodesettings.FamilyEpochs) {
+		return 0, slot
+	}
 	ep, err := d.GetEpochBySlot(slot, txn)
 	if err != nil || ep == nil {
 		return 0, slot

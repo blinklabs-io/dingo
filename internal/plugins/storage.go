@@ -52,6 +52,8 @@ type StorageDependencies struct {
 	// TracingEnabled is forwarded to metadata.ProviderDependencies; see its
 	// doc comment.
 	TracingEnabled bool
+	// StatementGuard is forwarded to metadata.ProviderDependencies.
+	StatementGuard metadata.StatementGuard
 }
 
 // ResolveStorage starts the selected storage providers in dependency order.
@@ -94,6 +96,7 @@ func ResolveStorage(
 			PromRegistry:        deps.PromRegistry,
 			TracingEnabled:      deps.TracingEnabled,
 			GenesisStakingEmpty: deps.GenesisStakingEmpty,
+			StatementGuard:      deps.StatementGuard,
 		},
 	)
 	if err != nil {

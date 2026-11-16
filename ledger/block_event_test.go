@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -319,7 +320,7 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 			fixture.currentTip,
 			fixture.currentTip.Point,
 			"",
-			func(txn *database.Txn) error {
+			func(txn ledgerdb.Txn) error {
 				return delta.apply(context.Background(), ls, txn)
 			},
 		)
@@ -465,7 +466,7 @@ func TestBlockApplyRejectsRolledBackCandidate(t *testing.T) {
 		fixture.ancestorTip,
 		rolledBackCandidate,
 		"",
-		func(*database.Txn) error {
+		func(ledgerdb.Txn) error {
 			operationCalled = true
 			return nil
 		},
@@ -486,7 +487,7 @@ func TestBlockApplyRejectsDurablyRolledBackTipBeforeCacheReload(t *testing.T) {
 		fixture.currentTip,
 		fixture.currentTip.Point,
 		"",
-		func(*database.Txn) error {
+		func(ledgerdb.Txn) error {
 			operationCalled = true
 			return nil
 		},
@@ -1121,7 +1122,7 @@ func TestReconcileKeepsIntentWhenMetadataRollbackFailsAfterChainRewind(
 	ls.rollbackTruncateAfterSlotFunc = func(
 		ocommon.Point,
 		uint64,
-		*database.Txn,
+		ledgerdb.Txn,
 	) (ochainsync.Tip, []byte, error) {
 		return ochainsync.Tip{}, nil, injected
 	}

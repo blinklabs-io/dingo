@@ -230,6 +230,32 @@ CREATE TABLE network_donation (
 	require.Equal(t, uint64(123), total)
 }
 
+func TestListNetworkDonationsInSlotOrder(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	_, err := store.writeDB.Exec(`
+CREATE TABLE network_donation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slot INTEGER NOT NULL,
+    epoch INTEGER NOT NULL,
+    amount INTEGER NOT NULL,
+    UNIQUE (slot)
+)`)
+	require.NoError(t, err)
+	got, err := store.ListNetworkDonations(nil)
+	require.NoError(t, err)
+	require.Empty(t, got)
+	require.NoError(t, store.AddNetworkDonation(9, 4, 5, nil))
+	require.NoError(t, store.AddNetworkDonation(7, 3, 123, nil))
+	require.NoError(t, store.AddNetworkDonation(7, 3, 124, nil))
+	got, err = store.ListNetworkDonations(nil)
+	require.NoError(t, err)
+	require.Equal(t, []models.NetworkDonation{
+		{Slot: 7, Epoch: 3, Amount: 124},
+		{Slot: 9, Epoch: 4, Amount: 5},
+	}, got)
+}
+
 func TestCreateUtxoBindsEmptyNullableHashesAsSQLNull(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)

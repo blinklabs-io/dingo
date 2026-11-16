@@ -203,6 +203,7 @@ func TestPoolVrfKeyHashesRejectsMalformedReturnedPoolKey(t *testing.T) {
 	ls := &LedgerState{db: db}
 
 	_, err := ls.poolVrfKeyHashes(
+		context.Background(),
 		[]lcommon.PoolKeyHash{{}},
 		nil,
 		nil,

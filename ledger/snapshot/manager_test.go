@@ -20,6 +20,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/prometheus/client_golang/prometheus"
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
@@ -53,7 +55,7 @@ func TestSetDelegatorInactivityLockedAfterStart(t *testing.T) {
 	t.Parallel()
 
 	db := setupTestDB(t)
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	require.NoError(t, mgr.SetDelegatorInactivity(true, 90))
 	require.NoError(t, mgr.Start(context.Background()))
 	t.Cleanup(func() { require.NoError(t, mgr.Stop()) })
@@ -81,7 +83,7 @@ func TestSetDelegatorInactivityLockedAfterGenesisCapture(t *testing.T) {
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
 	})
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
 
 	require.ErrorContains(
@@ -129,7 +131,7 @@ func TestCaptureGenesisSnapshot_PostMithril(t *testing.T) {
 	}, 64800000) // registered at epoch 150's start slot
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 
 	err := mgr.CaptureGenesisSnapshot(context.Background())
 	require.NoError(t, err)
@@ -216,7 +218,7 @@ func TestCaptureGenesisSnapshot_PostMithrilSkipsUnsafeExpiryHistory(
 		nil,
 	))
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	require.NoError(t, mgr.SetDelegatorInactivity(true, 90))
 	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
 
@@ -273,7 +275,7 @@ func TestCaptureGenesisSnapshot_PostMithrilSkipsExistingWindow(t *testing.T) {
 	}
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 
 	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
 
@@ -348,7 +350,7 @@ func TestCaptureGenesisSnapshot_PostMithrilAutoVoteFlagOnlyOnCurrentEpoch(
 	)
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 
 	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
 
@@ -430,7 +432,7 @@ func TestCaptureGenesisSnapshot_FreshSync(t *testing.T) {
 	}, 0)
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 
 	err := mgr.CaptureGenesisSnapshot(context.Background())
 	require.NoError(t, err)
@@ -614,7 +616,7 @@ INSERT INTO pool_registration_owner (
 	}
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,
@@ -680,7 +682,7 @@ func TestCaptureMarkSnapshotReplacesPriorPoolSet(t *testing.T) {
 		}, nil,
 	))
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	require.NoError(t, mgr.captureMarkSnapshot(
 		context.Background(),
 		event.EpochTransitionEvent{
@@ -734,7 +736,7 @@ func TestFallbackWithoutRewardMarkerStillWritesMarkSnapshot(t *testing.T) {
 		nil,
 	))
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   6, // deliberately absent: no reward marker bundle
 		NewEpoch:        7,
@@ -840,7 +842,7 @@ func TestFallbackWithoutRewardInputsPreservesAuthoritativeMark(t *testing.T) {
 		TotalStake: 99,
 		TotalPools: 1,
 	}
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	saved, err := mgr.saveSnapshot(
 		context.Background(),
 		7,
@@ -896,7 +898,7 @@ func TestFallbackAuthoritativeNoopDoesNotRecordSuccessMetrics(t *testing.T) {
 		},
 	}, 500)
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	mgr.SetPromRegistry(prometheus.NewRegistry())
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
@@ -1020,7 +1022,7 @@ func TestHandleEpochTransitionCapturesSelfDelegatedOwnerStake(t *testing.T) {
 	}
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 	require.NoError(t, mgr.handleEpochTransition(
 		context.Background(),
 		event.EpochTransitionEvent{
@@ -1115,7 +1117,7 @@ func TestHandleEpochTransitionDoesNotTreatScriptCredentialAsOwner(
 	}))
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 	require.NoError(t, mgr.handleEpochTransition(
 		context.Background(),
 		event.EpochTransitionEvent{
@@ -1323,7 +1325,7 @@ func TestRewardInputsRejectMissingPoolRegistration(t *testing.T) {
 	copy(poolKey[:], bytes.Repeat([]byte{0x11}, len(poolKey)))
 	stakeKey := bytes.Repeat([]byte{0x31}, len(poolKey))
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	_, _, err := mgr.rewardInputs(
 		1,
 		&StakeDistribution{
@@ -1341,7 +1343,7 @@ func TestRewardInputsRejectMissingPoolRegistration(t *testing.T) {
 			},
 		},
 		event.EpochTransitionEvent{BoundarySlot: 200},
-		db.Metadata(),
+		dbadapter.New(db),
 		nil,
 	)
 	require.ErrorContains(t, err, "missing pool registration")
@@ -1370,7 +1372,7 @@ func TestRewardInputsRejectInvalidRewardAccountLength(t *testing.T) {
 		},
 	))
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	_, _, err := mgr.rewardInputs(
 		1,
 		&StakeDistribution{
@@ -1388,7 +1390,7 @@ func TestRewardInputsRejectInvalidRewardAccountLength(t *testing.T) {
 			},
 		},
 		event.EpochTransitionEvent{BoundarySlot: 200},
-		db.Metadata(),
+		dbadapter.New(db),
 		nil,
 	)
 	require.ErrorContains(t, err, "invalid reward account length")
@@ -1420,7 +1422,7 @@ func TestRewardInputsRejectInvalidRewardAccountCredentialTag(t *testing.T) {
 		},
 	))
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	_, _, err := mgr.rewardInputs(
 		1,
 		&StakeDistribution{
@@ -1438,7 +1440,7 @@ func TestRewardInputsRejectInvalidRewardAccountCredentialTag(t *testing.T) {
 			},
 		},
 		event.EpochTransitionEvent{BoundarySlot: 200},
-		db.Metadata(),
+		dbadapter.New(db),
 		nil,
 	)
 	require.ErrorContains(t, err, "invalid reward account credential tag")
@@ -1468,7 +1470,7 @@ func TestRewardInputsRejectMissingPoolMargin(t *testing.T) {
 		},
 	))
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	_, _, err := mgr.rewardInputs(
 		1,
 		&StakeDistribution{
@@ -1486,7 +1488,7 @@ func TestRewardInputsRejectMissingPoolMargin(t *testing.T) {
 			},
 		},
 		event.EpochTransitionEvent{BoundarySlot: 200},
-		db.Metadata(),
+		dbadapter.New(db),
 		nil,
 	)
 	require.ErrorContains(t, err, "missing pool margin")
@@ -1520,7 +1522,7 @@ func TestRewardInputsRejectInvalidPoolOwnerKeyHashLength(t *testing.T) {
 		},
 	))
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	_, _, err := mgr.rewardInputs(
 		1,
 		&StakeDistribution{
@@ -1538,7 +1540,7 @@ func TestRewardInputsRejectInvalidPoolOwnerKeyHashLength(t *testing.T) {
 			},
 		},
 		event.EpochTransitionEvent{BoundarySlot: 200},
-		db.Metadata(),
+		dbadapter.New(db),
 		nil,
 	)
 	require.ErrorContains(t, err, "invalid pool owner key hash length")
@@ -1566,7 +1568,7 @@ func TestHandleEpochTransitionKeepsBoundaryCapturedSnapshot(t *testing.T) {
 	}, 500)
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,
@@ -1634,7 +1636,7 @@ func TestHandleEpochTransitionCapturesAfterBoundaryKeptDeferredCapture(
 			},
 		}, 500)
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,
@@ -1684,7 +1686,7 @@ func TestHandleEpochTransitionRefreshesProvisionalSlotSnapshot(t *testing.T) {
 	}, 500)
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 	slotEvt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,
@@ -1824,7 +1826,7 @@ func TestHandleEpochTransitionReplacesStaleSnapshotRows(t *testing.T) {
 	)
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 	require.NoError(t, mgr.handleEpochTransition(
 		context.Background(),
 		event.EpochTransitionEvent{
@@ -1886,7 +1888,7 @@ func TestCaptureGenesisSnapshot_SmallEpoch(t *testing.T) {
 	}, 432000) // registered at epoch 1
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 
 	err := mgr.CaptureGenesisSnapshot(context.Background())
 	require.NoError(t, err)
@@ -1972,7 +1974,7 @@ func TestHandleEpochTransitionSkipsPoolWithMissingMargin(t *testing.T) {
 	}))
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 	evt := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
 		NewEpoch:        1,
@@ -2127,12 +2129,12 @@ func TestRewardInputsSkippingDegradedPoolsExcludesOnlyBadPools(t *testing.T) {
 		},
 	}
 
-	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr := NewManager(dbadapter.New(db), event.NewEventBus(nil, nil), nil)
 	poolInputs, stakeInputs, effective, err := mgr.rewardInputsSkippingDegradedPools(
 		1,
 		distribution,
 		event.EpochTransitionEvent{BoundarySlot: 200},
-		db.Metadata(),
+		dbadapter.New(db),
 		nil,
 	)
 	require.NoError(t, err)
@@ -2182,7 +2184,11 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 				utxoAmounts: []types.Uint64{50_000_000},
 			},
 		}, 500)
-		return NewManager(db, event.NewEventBus(nil, nil), nil), poolHash,
+		return NewManager(
+				dbadapter.New(db),
+				event.NewEventBus(nil, nil),
+				nil,
+			), poolHash,
 			event.EpochTransitionEvent{
 				PreviousEpoch:   0,
 				NewEpoch:        1,
@@ -2218,7 +2224,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		allowAuthoritativeCommit := make(chan struct{})
 		authoritativeDone := make(chan error, 1)
 		go func() {
-			txn := db.Transaction(context.Background(), true)
+			txn := db.Begin(context.Background(), true)
 			err := mgr.CaptureEpochBoundarySnapshot(
 				context.Background(),
 				txn,
@@ -2289,14 +2295,14 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		require.NoError(t, fallbackResult.err)
 		require.False(t, fallbackResult.saved)
 
-		after, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
+		after, err := db.GetRewardSnapshot(1, "mark", nil)
 		require.NoError(t, err)
 		require.NotNil(t, after)
 		require.True(t, after.Authoritative)
 		require.Equal(t, uint64(50_000_000), uint64(after.TotalActiveStake))
 		require.Equal(t, authoritativeEvt.EpochNonce, after.EpochNonce)
 
-		poolSnapshot, err := db.Metadata().GetPoolStakeSnapshot(
+		poolSnapshot, err := db.GetPoolStakeSnapshot(
 			1, "mark", poolHash, nil,
 		)
 		require.NoError(t, err)
@@ -2318,7 +2324,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 			0,
 		)
 		require.NoError(t, err)
-		fallbackTxn := db.Transaction(context.Background(), true)
+		fallbackTxn := db.Begin(context.Background(), true)
 		require.NoError(t, mgr.saveSnapshotInTxn(
 			context.Background(),
 			fallbackEvt.NewEpoch,
@@ -2335,7 +2341,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		authoritativeDone := make(chan error, 1)
 		go func() {
 			close(authoritativeStarted)
-			txn := db.Transaction(context.Background(), true)
+			txn := db.Begin(context.Background(), true)
 			err := mgr.CaptureEpochBoundarySnapshot(
 				context.Background(),
 				txn,
@@ -2359,7 +2365,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 			"authoritative replacement commit",
 		))
 
-		after, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
+		after, err := db.GetRewardSnapshot(1, "mark", nil)
 		require.NoError(t, err)
 		require.NotNil(t, after)
 		require.True(t, after.Authoritative)
@@ -2393,7 +2399,7 @@ func TestCaptureGenesisSnapshot_FreshSyncNoGenesisPools(t *testing.T) {
 	})
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 
 	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
 
@@ -2437,7 +2443,7 @@ func TestCaptureGenesisSnapshot_PostMithrilNoPoolsSkipsGenesisRow(
 	})
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 
 	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
 
@@ -2487,7 +2493,7 @@ func TestCaptureGenesisSnapshot_EpochLookupFailureIsNotAFreshSync(
 	require.NoError(t, err)
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 
 	err = mgr.CaptureGenesisSnapshot(context.Background())
 	require.Error(
@@ -2558,7 +2564,7 @@ func TestCaptureGenesisSnapshot_RestartKeepsWindowWithEmptyMark(t *testing.T) {
 	}
 
 	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+	mgr := NewManager(dbadapter.New(db), eventBus, nil)
 
 	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
 
@@ -2663,7 +2669,11 @@ func TestCaptureGenesisSnapshot_RestartReseedsUnprovenEmptyMark(
 				))
 			}
 
-			mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+			mgr := NewManager(
+				dbadapter.New(db),
+				event.NewEventBus(nil, nil),
+				nil,
+			)
 			require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
 
 			repaired, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(

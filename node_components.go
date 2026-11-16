@@ -23,6 +23,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -142,7 +144,7 @@ func (n *Node) newHistoryExpiryPruner() *historyexpiry.Pruner {
 }
 
 func (n *Node) newDatabaseLifecycleManager() *dblifecycle.Manager {
-	return dblifecycle.NewManager(
+	mgr := dblifecycle.NewManager(
 		n.db,
 		n.eventBus,
 		n.config.databaseLifecycle,
@@ -151,6 +153,8 @@ func (n *Node) newDatabaseLifecycleManager() *dblifecycle.Manager {
 		n.destinationRegistry,
 		n.config.logger,
 	)
+	mgr.SetUtxoSetSource(n.utxoSetBackuper)
+	return mgr
 }
 
 func (n *Node) midnightServerConfig() midnightserver.Config {
@@ -196,8 +200,14 @@ func (n *Node) offchainMetadataConfig() offchainmetadata.Config {
 }
 
 func (n *Node) configureSnapshotManager() error {
+	// The snapshot manager writes through the ledger's LedgerDB, so a live
+	// UTxO set that keeps epoch state gets its snapshot rows too.
+	var ldb ledgerdb.LedgerDB = dbadapter.New(n.db)
+	if n.ledgerState != nil {
+		ldb = n.ledgerState.LedgerDB()
+	}
 	n.snapshotMgr = snapshot.NewManager(
-		n.db,
+		ldb,
 		n.eventBus,
 		n.config.logger,
 	)
@@ -236,12 +246,12 @@ func (n *Node) configureSnapshotManager() error {
 	// enactment) and the row write at the end of the rollover, both inside the
 	// same transaction.
 	n.ledgerState.SetEpochBoundarySnapshotStakeHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return n.snapshotMgr.ComputeEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
 	n.ledgerState.SetEpochBoundarySnapshotHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+		func(txn ledgerdb.Txn, evt event.EpochTransitionEvent) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
@@ -253,7 +263,7 @@ func (n *Node) configureSnapshotManager() error {
 	// SPO stake for every SPO-gated action at every boundary.
 	n.ledgerState.SetCurrentBoundarySPOStakeHook(
 		func(
-			txn *database.Txn,
+			txn ledgerdb.Txn,
 			evt event.EpochTransitionEvent,
 			incomingEraID uint,
 		) ([]*models.PoolStakeSnapshot, error) {

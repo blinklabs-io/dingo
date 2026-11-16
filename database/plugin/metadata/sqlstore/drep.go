@@ -709,6 +709,9 @@ func (s *Store) GetDRepDelegators(
 	credential []byte,
 	txn types.Txn,
 ) ([]models.StakeCredentialRef, error) {
+	if err := s.refuseDrained("account"); err != nil {
+		return nil, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -740,6 +743,20 @@ func (s *Store) GetDRepVotingPower(
 	expiryEpoch uint64,
 	txn types.Txn,
 ) (uint64, error) {
+	if err := s.refuseDrained("account", "reward_live_stake"); err != nil {
+		return 0, err
+	}
+	if s.liveUtxo != nil {
+		// No utxo rows to sum; reward_live_stake carries UTxO stake.
+		ref := models.NewStakeCredentialRef(credentialTag, credential)
+		byCredential, err := s.GetDRepVotingPowerBatch(
+			[]models.StakeCredentialRef{ref}, expiryEpoch, txn,
+		)
+		if err != nil {
+			return 0, err
+		}
+		return byCredential[ref.MapKey()], nil
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
@@ -774,6 +791,9 @@ func (s *Store) GetDRepVotingPowerBatch(
 	expiryEpoch uint64,
 	txn types.Txn,
 ) (map[string]uint64, error) {
+	if err := s.refuseDrained("account", "reward_live_stake"); err != nil {
+		return nil, err
+	}
 	ret := make(map[string]uint64, len(credentials))
 	if len(credentials) == 0 {
 		return ret, nil
@@ -808,6 +828,9 @@ func (s *Store) GetDRepVotingPowerBatch(
 		if _, ok := incomplete[string(hash)]; ok {
 			hashes = append(hashes, hash)
 		}
+	}
+	if len(hashes) > 0 && s.liveUtxo != nil {
+		return nil, errLiveUtxoStakeIncomplete
 	}
 	// Each hash occurs in both the inner and outer IN list.
 	chunkSize := s.dialect.ParameterLimit() / 2
@@ -875,6 +898,9 @@ func (s *Store) GetDRepVotingPowerByType(
 	expiryEpoch uint64,
 	txn types.Txn,
 ) (map[uint64]uint64, error) {
+	if err := s.refuseDrained("account", "reward_live_stake"); err != nil {
+		return nil, err
+	}
 	ret := make(map[uint64]uint64, len(drepTypes))
 	if len(drepTypes) == 0 {
 		return ret, nil
@@ -895,6 +921,9 @@ func (s *Store) GetDRepVotingPowerByType(
 	)
 	if err != nil {
 		return nil, err
+	}
+	if len(incomplete) > 0 && s.liveUtxo != nil {
+		return nil, errLiveUtxoStakeIncomplete
 	}
 	if len(incomplete) == 0 {
 		for _, drepType := range drepTypes {
@@ -1260,6 +1289,9 @@ func (s *Store) GetDrepLastRegistrationDeposit(
 func (s *Store) GetDreps(
 	txn types.Txn,
 ) ([]models.DrepListRow, error) {
+	if err := s.refuseDrained("drep"); err != nil {
+		return nil, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -1355,6 +1387,9 @@ func (s *Store) GetDrepsPage(
 	page models.DrepListPageQuery,
 	txn types.Txn,
 ) ([]models.DrepListRow, int, error) {
+	if err := s.refuseDrained("drep", "account", "reward_live_stake"); err != nil {
+		return nil, 0, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, err
@@ -1679,15 +1714,22 @@ SELECT drep_type, MIN(slot) AS slot FROM (
 func (s *Store) DeactivateDreps(
 	txn types.Txn,
 	credentials []models.StakeCredentialRef,
+	slot uint64,
 ) error {
 	if len(credentials) == 0 {
 		return nil
+	}
+	removedSlot, err := checkedInt64(slot)
+	if err != nil {
+		return err
 	}
 	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("DeactivateDreps: resolve db: %w", err)
 	}
-	chunkSize := s.dialect.ParameterLimit() / 2
+	// The delegator statement binds the removal slot beside two parameters per
+	// DRep.
+	chunkSize := max(1, (s.dialect.ParameterLimit()-1)/2)
 	for start := 0; start < len(credentials); start += chunkSize {
 		end := min(start+chunkSize, len(credentials))
 		predicates := make([]string, 0, end-start)
@@ -1708,8 +1750,27 @@ func (s *Store) DeactivateDreps(
 		); err != nil {
 			return fmt.Errorf("deactivate dreps: %w", err)
 		}
+		// An inactive DRep holds no delegators, as after a deregistration.
+		query = "UPDATE drep_delegator SET removed_slot = ? WHERE removed_slot IS NULL AND (" +
+			strings.Join(delegatorPredicates(end-start), " OR ") + ")"
+		linkArgs := append([]any{removedSlot}, args...)
+		if _, err := db.ExecContext(
+			ctx,
+			s.dialect.Rebind(query),
+			linkArgs...,
+		); err != nil {
+			return fmt.Errorf("remove delegators of deactivated dreps: %w", err)
+		}
 	}
 	return nil
+}
+
+func delegatorPredicates(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = "(drep_credential_tag = ? AND drep_credential = ?)"
+	}
+	return out
 }
 
 func (s *Store) ClearDanglingDRepDelegations(
@@ -1930,6 +1991,74 @@ func drepRegistrationParams(
 	}, nil
 }
 
+// IterateDreps calls fn with every DRep row, active or not, in no
+// particular order. fn's DRep is its own to keep.
+func (s *Store) IterateDreps(
+	txn types.Txn,
+	fn func(*models.Drep) error,
+) error {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT anchor_url, credential, anchor_hash, id, added_slot, credential_tag,
+       last_activity_epoch, expiry_epoch, active
+FROM drep`)
+	if err != nil {
+		return fmt.Errorf("iterate dreps: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var row sqlitequery.Drep
+		if err := rows.Scan(
+			&row.AnchorUrl, &row.Credential, &row.AnchorHash, &row.ID,
+			&row.AddedSlot, &row.CredentialTag, &row.LastActivityEpoch,
+			&row.ExpiryEpoch, &row.Active,
+		); err != nil {
+			return fmt.Errorf("iterate dreps: %w", err)
+		}
+		if err := fn(drepFromSQLite(row)); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// IterateLiveDrepDelegators calls fn with every live DRep delegator link:
+// the DRep and the stake credential delegating to it.
+func (s *Store) IterateLiveDrepDelegators(
+	txn types.Txn,
+	fn func(drep, stake models.StakeCredentialRef) error,
+) error {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT drep_credential_tag, drep_credential, stake_credential_tag,
+       stake_credential
+FROM drep_delegator WHERE removed_slot IS NULL`)
+	if err != nil {
+		return fmt.Errorf("iterate drep delegators: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var drepTag, stakeTag int64
+		var drep, stake []byte
+		if err := rows.Scan(&drepTag, &drep, &stakeTag, &stake); err != nil {
+			return fmt.Errorf("iterate drep delegators: %w", err)
+		}
+		if err := fn(
+			models.NewStakeCredentialRef(uint8(drepTag), drep),   //nolint:gosec // a credential tag
+			models.NewStakeCredentialRef(uint8(stakeTag), stake), //nolint:gosec // a credential tag
+		); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 func drepFromSQLite(row sqlitequery.Drep) *models.Drep {
 	return &models.Drep{
 		AnchorURL:         row.AnchorUrl.String,
@@ -1964,6 +2093,9 @@ func validBool(value bool) sql.NullBool {
 func (s *Store) GetDrepLastRegistrationDeposits(
 	txn types.Txn,
 ) (map[string]uint64, error) {
+	if err := s.refuseDrained("drep"); err != nil {
+		return nil, err
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err

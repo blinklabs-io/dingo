@@ -337,6 +337,7 @@ type BlobStoreBadger struct {
 	indexCacheSize       uint64
 	valueLogFileSize     int64
 	memTableSize         int64
+	inMemoryMemTableSize int64
 	valueThreshold       int64
 	compactBlockMetadata bool
 	compressionEnabled   bool
@@ -420,6 +421,9 @@ func (db *BlobStoreBadger) open() error {
 			WithValueThreshold(db.valueThreshold).
 			WithCompression(db.badgerCompression()).
 			WithZSTDCompressionLevel(db.compressionLevel)
+		if db.inMemoryMemTableSize > 0 {
+			badgerOpts = badgerOpts.WithMemTableSize(db.inMemoryMemTableSize)
+		}
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return fmt.Errorf("badger open in-memory: %w", err)

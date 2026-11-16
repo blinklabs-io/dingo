@@ -17,6 +17,9 @@ package mcp
 import (
 	"errors"
 	"fmt"
+
+	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/internal/statedrain"
 )
 
 var errReadsBusy = errors.New("too many concurrent SQLite queries")
@@ -35,6 +38,54 @@ type readLimits struct {
 	// maxOffset is the largest OFFSET a paginated tool accepts; zero means
 	// unlimited.
 	maxOffset int
+	// drained reports the ledger-state families whose SQL rows are deleted;
+	// nil means none is.
+	drained func() nodesettings.FamilyMask
+}
+
+// ErrDrainedFamily is wrapped by the error a tool returns for a read of SQL
+// tables whose family the metadata store no longer holds.
+var ErrDrainedFamily = errors.New(
+	"the metadata database no longer holds this ledger-state family",
+)
+
+func (l *readLimits) drainedMask() nodesettings.FamilyMask {
+	if l == nil || l.drained == nil {
+		return 0
+	}
+	return l.drained()
+}
+
+// refuseDrainedTables refuses a caller's SQL that names a table of a drained
+// family: the table is empty, and an empty answer would read as the truth.
+func (l *readLimits) refuseDrainedTables(query string) error {
+	family, table, ok := statedrain.DrainedTableIn(l.drainedMask(), query)
+	if !ok {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: table %s belongs to family %s; use a tool that reads the ledger state",
+		ErrDrainedFamily,
+		table,
+		family,
+	)
+}
+
+// refuseDrainedFamilies refuses a tool path that reads the SQL tables of any
+// of families directly.
+func (l *readLimits) refuseDrainedFamilies(
+	families ...nodesettings.Family,
+) error {
+	mask := l.drainedMask()
+	for _, family := range families {
+		if mask.Has(family) {
+			return fmt.Errorf(
+				"%w: family %s; the tool needs the ledger state",
+				ErrDrainedFamily, family,
+			)
+		}
+	}
+	return nil
 }
 
 func newReadLimits() *readLimits {

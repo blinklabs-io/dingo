@@ -34,6 +34,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"
@@ -1005,7 +1006,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	require.NoError(t, err)
 	ls.currentEpoch = *epoch
 	ls.currentEra = eras.ShelleyEraDesc
-	cutoff, err := ls.rewardPrefilterSlot(db.Metadata(), nil, 3)
+	cutoff, err := ls.rewardPrefilterSlot(dbadapter.New(db), nil, 3)
 	require.NoError(t, err)
 	member := rewardCalcHash(0x6a)
 	// The abandoned chain deregisters member after the rollback point and
@@ -1094,6 +1095,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	readTxn := db.Transaction(context.Background(), false)
 	require.NoError(t, readTxn.Do(func(txn *database.Txn) error {
 		want, ok, err := ls.calculateStakeRewardApplication(
+			context.Background(),
 			txn, 4, replacement.Slot, 1_200, false,
 		)
 		require.NoError(t, err)

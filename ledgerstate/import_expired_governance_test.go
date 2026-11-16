@@ -22,6 +22,8 @@ import (
 	"math"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -144,7 +146,7 @@ func TestImportExpiredGovStateRefundsAtFirstPostAnchorBoundary(t *testing.T) {
 			_, err = governance.ProcessEpoch(
 				t.Context(),
 				&governance.EpochInput{
-					DB:           db,
+					DB:           dbadapter.New(db),
 					Txn:          txn,
 					PrevEpoch:    10,
 					NewEpoch:     11,

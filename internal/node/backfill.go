@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	dledger "github.com/blinklabs-io/dingo/ledger"
@@ -572,11 +573,7 @@ func (b *Backfill) storedEpochPParams(
 	eraID uint,
 	txn *database.Txn,
 ) (lcommon.ProtocolParameters, bool, error) {
-	var metaTxn dbtypes.Txn
-	if txn != nil {
-		metaTxn = txn.Metadata()
-	}
-	rows, err := b.db.Metadata().GetPParams(epochID, eraID, metaTxn)
+	rows, err := b.db.GetPParamRows(epochID, eraID, txn)
 	if err != nil {
 		return nil, false, err
 	}
@@ -841,8 +838,8 @@ func (b *Backfill) processBlockGovernanceLevel(
 		txIndex,
 		epochId,
 		proposalLifetime,
-		b.db,
-		txn,
+		dbadapter.New(b.db),
+		dbadapter.Txn(txn),
 		pp,
 		validated,
 	); err != nil {
@@ -877,6 +874,13 @@ func (b *Backfill) Run(ctx context.Context) error {
 	)
 	if err != nil {
 		return fmt.Errorf("reading backfill checkpoint: %w", err)
+	}
+	if cp == nil || !cp.Completed {
+		// Backfill rewrites SQL ledger state a drained family no longer
+		// keeps, and reads rows it deleted.
+		if err := b.db.RefuseLedgerStateRewrite(ctx); err != nil {
+			return fmt.Errorf("backfill: %w", err)
+		}
 	}
 	if cp != nil {
 		hasIndex := cp.LastIndexID != nil

@@ -35,7 +35,7 @@ const (
 	// A test writes kilobytes to a few megabytes, so it asks for files it
 	// can actually fill. Anything larger only reserves space.
 	TestBadgerValueLogFileSize = 16 * 1024 * 1024
-	TestBadgerMemTableSize     = 8 * 1024 * 1024
+	TestBadgerMemTableSize     = 16 * 1024 * 1024
 )
 
 // BadgerBlobConfig returns the badger blob provider config a test should

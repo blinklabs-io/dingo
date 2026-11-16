@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -36,6 +37,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -505,7 +507,7 @@ func (f *gapDepositFixture) applyGap(
 		ocommon.Point{Slot: slot, Hash: bytes.Repeat([]byte{0xb2}, 32)},
 		0,
 		deposits,
-		nil, 0,
+		nil, 0, false,
 	))
 }
 
@@ -1231,7 +1233,7 @@ func (f *pointerStakeFixture) applyGap(
 		ocommon.Point{Slot: slot, Hash: bytes.Repeat([]byte{0xc3}, 32)},
 		blockIndex,
 		deposits,
-		nil, 0,
+		nil, 0, false,
 	))
 }
 
@@ -2987,4 +2989,181 @@ func TestEpochBoundaryStakeIncludesPreSnapshotCreditsOnly(t *testing.T) {
 	require.Len(t, inputs, 1)
 	require.Equal(t, uint64(1_053), uint64(inputs[0].Stake),
 		"the reward basis must apply the same include/exclude split")
+}
+
+// rowsPointerSource is a live UTxO source whose pointer stake is the store's
+// own utxo_pointer rows summed per position, so a query through it can be
+// compared with the same query over the rows.
+type rowsPointerSource struct{ db *sql.DB }
+
+func (rowsPointerSource) LiveUtxoCbor(
+	types.Txn,
+	[]byte,
+	uint32,
+) ([]byte, bool, error) {
+	return nil, false, errors.New("unused")
+}
+
+func (rowsPointerSource) LiveUtxoStake(
+	types.Txn,
+	uint8,
+	[]byte,
+) (uint64, error) {
+	return 0, errors.New("unused")
+}
+
+func (rowsPointerSource) EachLiveUtxoStake(
+	types.Txn, func(uint8, []byte, uint64) error,
+) error {
+	return errors.New("unused")
+}
+
+func (s rowsPointerSource) LivePointerStakes(
+	types.Txn,
+) ([]types.PointerStake, error) {
+	rows, err := s.db.Query(`
+SELECT utxo_pointer.ptr_slot, utxo_pointer.ptr_tx_index,
+       utxo_pointer.ptr_cert_index, SUM(CAST(utxo.amount AS INTEGER))
+FROM utxo_pointer JOIN utxo ON utxo.id = utxo_pointer.utxo_id
+WHERE utxo.deleted_slot = 0
+GROUP BY 1, 2, 3`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ret []types.PointerStake
+	for rows.Next() {
+		var p types.PointerStake
+		if err := rows.Scan(&p.Slot, &p.TxIndex, &p.CertIndex, &p.Lovelace); err != nil {
+			return nil, err
+		}
+		ret = append(ret, p)
+	}
+	return ret, rows.Err()
+}
+
+// TestLivePointerStakeResolvesLikeUtxoRows reads pointer stake once from the
+// store's pointer rows and once from a live source carrying the same outputs
+// summed per position, and requires the same per-credential stake, including
+// a pointer naming no registration and two outputs at one position.
+func TestLivePointerStakeResolvesLikeUtxoRows(t *testing.T) {
+	t.Parallel()
+	f := newPointerStakeFixture(t)
+	f.setEra(t, babbage.EraIdBabbage)
+	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+	f.apply(t, 100, 0, []lcommon.Certificate{f.register(), f.delegate()})
+	f.apply(t, 200, 0, nil,
+		f.output(600, newPointerAddress(t, paymentKey, 100, 0, 0)),
+		f.output(40, newPointerAddress(t, paymentKey, 100, 0, 0)),
+		f.output(900, newPointerAddress(t, paymentKey, 100, 1, 0)),
+	)
+	read := func() map[string]uint64 {
+		inputs, err := f.store.GetPointerStakeInputsForPools(
+			[][]byte{f.pool}, 300, 0, 0, nil,
+		)
+		require.NoError(t, err)
+		got := map[string]uint64{}
+		for _, in := range inputs {
+			got[fmt.Sprintf("%x/%d/%x", in.PoolKeyHash, in.CredentialTag, in.StakingKey)] += uint64(
+				in.Stake,
+			)
+		}
+		return got
+	}
+	fromRows := read()
+	require.NotEmpty(t, fromRows)
+	f.store.SetLiveUtxoSource(rowsPointerSource{db: f.db})
+	t.Cleanup(func() { f.store.SetLiveUtxoSource(nil) })
+	require.Equal(t, fromRows, read())
+}
+
+// TestLiveHistoricalStakeAtTheTipMatchesUtxoRows computes a pool's stake at a
+// slot the ledger has not moved past, from utxo rows and then with a live
+// source, which reads reward_live_stake and live pointers, and requires the
+// same stake; a slot behind the tip is refused with a live source.
+func TestLiveHistoricalStakeAtTheTipMatchesUtxoRows(t *testing.T) {
+	t.Parallel()
+	f := newPointerStakeFixture(t)
+	f.setEra(t, babbage.EraIdBabbage)
+	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+	f.apply(t, 100, 0, []lcommon.Certificate{f.register(), f.delegate()})
+	f.apply(
+		t,
+		150,
+		0,
+		nil,
+		f.output(700, f.baseAddress(t)),
+		f.output(55, f.baseAddress(t)),
+	)
+	f.apply(t, 200, 0, nil,
+		f.output(600, newPointerAddress(t, paymentKey, 100, 0, 0)))
+	fromRows := f.stakeAt(t, 300)
+	require.Equal(t, uint64(1_355), fromRows)
+
+	f.store.SetLiveUtxoSource(rowsPointerSource{db: f.db})
+	t.Cleanup(func() { f.store.SetLiveUtxoSource(nil) })
+	require.Equal(t, fromRows, f.stakeAt(t, 300))
+
+	require.NoError(t, f.store.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{Slot: 400, Hash: bytes.Repeat([]byte{4}, 32)},
+	}, nil))
+	_, _, err := f.store.GetStakeByPoolsAtSlot([][]byte{f.pool}, 300, 0, 0, nil)
+	require.Error(t, err)
+}
+
+// emptyLiveSource is a live UTxO source before any output exists, which is
+// what a write sees of the live set while it is still writing its own
+// outputs.
+type emptyLiveSource struct{}
+
+func (emptyLiveSource) LiveUtxoCbor(
+	types.Txn,
+	[]byte,
+	uint32,
+) ([]byte, bool, error) {
+	return nil, false, nil
+}
+
+func (emptyLiveSource) LiveUtxoStake(types.Txn, uint8, []byte) (uint64, error) {
+	return 0, nil
+}
+
+func (emptyLiveSource) LivePointerStakes(
+	types.Txn,
+) ([]types.PointerStake, error) {
+	return nil, nil
+}
+
+func (emptyLiveSource) EachLiveUtxoStake(
+	types.Txn, func(uint8, []byte, uint64) error,
+) error {
+	return nil
+}
+
+// TestLiveStakeOfACredentialRegisteredAndPaidInOneTransaction registers a
+// credential and pays its base address in the same transaction, with and
+// without utxo rows, and requires the same reward_live_stake row: the live
+// set does not yet hold the transaction's outputs when the credential's row
+// is first computed.
+func TestLiveStakeOfACredentialRegisteredAndPaidInOneTransaction(t *testing.T) {
+	t.Parallel()
+	row := func(live bool) string {
+		f := newPointerStakeFixture(t)
+		f.setEra(t, babbage.EraIdBabbage)
+		if live {
+			f.store.SetLiveUtxoSource(emptyLiveSource{})
+		}
+		f.apply(t, 100, 0,
+			[]lcommon.Certificate{f.register(), f.delegate()},
+			f.output(700, f.baseAddress(t)),
+		)
+		var utxo, total string
+		require.NoError(t, f.db.QueryRow(
+			`SELECT utxo_stake, total_stake FROM reward_live_stake WHERE staking_key = ?`,
+			f.stakeKey.Bytes(),
+		).Scan(&utxo, &total))
+		return utxo + "/" + total
+	}
+	require.Equal(t, "700/700", row(false))
+	require.Equal(t, row(false), row(true))
 }

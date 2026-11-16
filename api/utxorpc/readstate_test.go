@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -76,7 +76,7 @@ func (s *blockingReadStateLedgerStub) PoolStakeDistributionBounded(
 	ctx context.Context,
 	_ []lcommon.PoolKeyHash,
 	_ ledger.QueryPoint,
-	_ *database.Txn,
+	_ ledgerdb.Txn,
 	_ int,
 ) (*ledger.PoolStakeDistribution, error) {
 	close(s.started)
@@ -104,7 +104,7 @@ func (s *readStateLedgerStub) PoolStakeDistributionBounded(
 	ctx context.Context,
 	poolFilter []lcommon.PoolKeyHash,
 	_ ledger.QueryPoint,
-	_ *database.Txn,
+	_ ledgerdb.Txn,
 	maxPools int,
 ) (*ledger.PoolStakeDistribution, error) {
 	s.calls++

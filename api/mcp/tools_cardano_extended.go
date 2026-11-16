@@ -26,9 +26,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -81,12 +80,14 @@ type CalculateMinUtxoParams struct {
 func registerExtendedCardanoTools(
 	server *mcp.Server,
 	db *sql.DB,
-	ls *ledger.LedgerState,
+	ls ledgerStateAPI,
 	mp mempool.Service,
 	network string,
 	queryTimeout time.Duration,
 	limits *readLimits,
 ) {
+	stateDB := stateDBOf(ls)
+
 	// 1. Tool: get_protocol_parameters
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_protocol_parameters",
@@ -342,7 +343,7 @@ func registerExtendedCardanoTools(
 		Name:        "get_governance_proposal",
 		Description: "Query Conway CIP-1694 governance action proposals and vote tallies across DReps, Stake Pool Operators (SPOs), and Constitutional Committee (CC).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input GovernanceProposalParams) (*mcp.CallToolResult, any, error) {
-		if db == nil {
+		if db == nil && stateDB == nil {
 			return nil, nil, errors.New(
 				"SQLite metadata database connection is nil",
 			)
@@ -392,41 +393,26 @@ func registerExtendedCardanoTools(
 				actionIdx = *input.ActionIndex
 			}
 
-			//nolint:gosec // whereClause consists only of fixed lifecycle predicates.
-			row := db.QueryRowContext(ctxTimeout, `
-				SELECT id, tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
-				       enacted_epoch, ratified_epoch, expired_epoch, anchor_url, anchor_hash, deposit, return_address
-				FROM governance_proposal
-				WHERE tx_hash = ? AND action_index = ? AND deleted_slot IS NULL AND (`+whereClause+`)
-				LIMIT 1`,
-				txHashBytes, actionIdx,
-			)
-
-			var (
-				id                                                   int64
-				txHashRaw, anchorHashRaw, returnAddressRaw           []byte
-				actionIndex, actionType, proposedEpoch, expiresEpoch int
-				enactedEpoch, ratifiedEpoch, expiredEpoch            sql.NullInt64
-				anchorURL                                            sql.NullString
-				deposit                                              uint64
-			)
-
-			err = row.Scan(
-				&id,
-				&txHashRaw,
-				&actionIndex,
-				&actionType,
-				&proposedEpoch,
-				&expiresEpoch,
-				&enactedEpoch,
-				&ratifiedEpoch,
-				&expiredEpoch,
-				&anchorURL,
-				&anchorHashRaw,
-				&deposit,
-				&returnAddressRaw,
-			)
-			if errors.Is(err, sql.ErrNoRows) {
+			var proposal *proposalRead
+			if stateDB != nil {
+				proposal, err = proposalDetailFromLedger(
+					ctxTimeout, stateDB, txHashBytes, actionIdx,
+					proposalStatusName(statusFilter),
+				)
+			} else {
+				if err := limits.refuseDrainedFamilies(
+					nodesettings.FamilyGovernance,
+				); err != nil {
+					return nil, nil, err
+				}
+				proposal, err = proposalDetailFromSQL(
+					ctxTimeout, db, txHashBytes, actionIdx, whereClause,
+				)
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+			if proposal == nil {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{
 						&mcp.TextContent{
@@ -438,155 +424,12 @@ func registerExtendedCardanoTools(
 						},
 					},
 				}, nil, nil
-			} else if err != nil {
-				return nil, nil, fmt.Errorf("query governance proposal: %w", err)
 			}
-
-			status := "Active"
-			if enactedEpoch.Valid {
-				status = fmt.Sprintf("Enacted (epoch %d)", enactedEpoch.Int64)
-			} else if ratifiedEpoch.Valid {
-				status = fmt.Sprintf("Ratified (epoch %d)", ratifiedEpoch.Int64)
-			} else if expiredEpoch.Valid {
-				status = fmt.Sprintf("Expired (epoch %d)", expiredEpoch.Int64)
-			}
-
-			urlStr := "none"
-			if anchorURL.Valid && anchorURL.String != "" {
-				urlStr = formatUntrustedInline(anchorURL.String)
-			}
-			anchorHashHex := "none"
-			if len(anchorHashRaw) > 0 {
-				anchorHashHex = hex.EncodeToString(anchorHashRaw)
-			}
-
-			// Query voting tallies
-			voteRows, err := db.QueryContext(ctxTimeout, `
-				SELECT voter_type, vote, count(*)
-				FROM governance_vote
-				WHERE proposal_id = ? AND deleted_slot IS NULL
-				GROUP BY voter_type, vote`,
-				id,
-			)
-			tallyMap := make(
-				map[string]map[string]int,
-			) // voter -> vote -> count
-			tallyMap["CC"] = map[string]int{"Yes": 0, "No": 0, "Abstain": 0}
-			tallyMap["DRep"] = map[string]int{"Yes": 0, "No": 0, "Abstain": 0}
-			tallyMap["SPO"] = map[string]int{"Yes": 0, "No": 0, "Abstain": 0}
-
-			if err != nil {
-				return nil, nil, fmt.Errorf("query vote tallies: %w", err)
-			}
-			defer voteRows.Close()
-			for voteRows.Next() {
-				var voterType, vote, count int
-				if err := voteRows.Scan(&voterType, &vote, &count); err != nil {
-					return nil, nil, fmt.Errorf("scan vote tally: %w", err)
-				}
-				var role, choice string
-				switch voterType {
-				case models.VoterTypeCC:
-					role = "CC"
-				case models.VoterTypeDRep:
-					role = "DRep"
-				case models.VoterTypeSPO:
-					role = "SPO"
-				default:
-					return nil, nil, fmt.Errorf(
-						"invalid voter type %d",
-						voterType,
-					)
-				}
-				switch vote {
-				case models.VoteNo:
-					choice = "No"
-				case models.VoteYes:
-					choice = "Yes"
-				case models.VoteAbstain:
-					choice = "Abstain"
-				default:
-					return nil, nil, fmt.Errorf("invalid vote %d", vote)
-				}
-				tallyMap[role][choice] = count
-			}
-			if err := voteRows.Err(); err != nil {
-				return nil, nil, fmt.Errorf("read vote tallies: %w", err)
-			}
-
-			var sb strings.Builder
-			fmt.Fprintf(
-				&sb,
-				"### Governance Action Proposal `%s#%d`\n\n",
-				cleanHash,
-				actionIdx,
-			)
-			sb.WriteString("| Property | Value |\n")
-			sb.WriteString("| :--- | :--- |\n")
-			fmt.Fprintf(
-				&sb,
-				"| **Action Type** | %s (ID %d) |\n",
-				govActionTypeName(actionType),
-				actionType,
-			)
-			fmt.Fprintf(&sb, "| **Lifecycle Status** | %s |\n", status)
-			fmt.Fprintf(&sb, "| **Proposed Epoch** | %d |\n", proposedEpoch)
-			fmt.Fprintf(&sb, "| **Expires Epoch** | %d |\n", expiresEpoch)
-			fmt.Fprintf(
-				&sb,
-				"| **Proposal Deposit** | %d Lovelace (%.6f ADA) |\n",
-				deposit,
-				float64(deposit)/1000000.0,
-			)
-			returnAddress := "none"
-			if len(returnAddressRaw) > 0 {
-				address, err := lcommon.NewAddressFromBytes(returnAddressRaw)
-				if err != nil {
-					returnAddress = "0x" + hex.EncodeToString(returnAddressRaw)
-				} else {
-					returnAddress = address.String()
-				}
-			}
-			fmt.Fprintf(
-				&sb,
-				"| **Deposit Return Address** | `%s` |\n",
-				returnAddress,
-			)
-			fmt.Fprintf(&sb, "| **Metadata Anchor URL** | %s |\n", urlStr)
-			fmt.Fprintf(
-				&sb,
-				"| **Metadata Anchor Hash** | `%s` |\n\n",
-				anchorHashHex,
-			)
-
-			sb.WriteString("#### CIP-1694 Voting Procedure Breakdown\n\n")
-			sb.WriteString("| Voter Role | Yes | No | Abstain |\n")
-			sb.WriteString("| :--- | :--- | :--- | :--- |\n")
-			fmt.Fprintf(
-				&sb,
-				"| **Constitutional Committee (CC)** | %d | %d | %d |\n",
-				tallyMap["CC"]["Yes"],
-				tallyMap["CC"]["No"],
-				tallyMap["CC"]["Abstain"],
-			)
-			fmt.Fprintf(
-				&sb,
-				"| **Delegated Representatives (DReps)** | %d | %d | %d |\n",
-				tallyMap["DRep"]["Yes"],
-				tallyMap["DRep"]["No"],
-				tallyMap["DRep"]["Abstain"],
-			)
-			fmt.Fprintf(
-				&sb,
-				"| **Stake Pool Operators (SPOs)** | %d | %d | %d |\n",
-				tallyMap["SPO"]["Yes"],
-				tallyMap["SPO"]["No"],
-				tallyMap["SPO"]["Abstain"],
-			)
-
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{
-					&mcp.TextContent{Text: sb.String()},
+					&mcp.TextContent{
+						Text: renderProposalDetail(cleanHash, proposal),
+					},
 				},
 			}, nil, nil
 		}
@@ -599,80 +442,29 @@ func registerExtendedCardanoTools(
 			limit = 50
 		}
 
-		//nolint:gosec // whereClause contains only fixed predicates selected above.
-		query := fmt.Sprintf(`
-			SELECT id, tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
-			       enacted_epoch, ratified_epoch, expired_epoch, deposit, anchor_url
-			FROM governance_proposal
-			WHERE deleted_slot IS NULL AND (%s)
-			ORDER BY id DESC
-			LIMIT ?`, whereClause)
-
-		rows, err := db.QueryContext(ctxTimeout, query, limit)
+		var proposals []*proposalRead
+		var err error
+		if stateDB != nil {
+			proposals, err = proposalListFromLedger(
+				ctxTimeout, stateDB, proposalStatusName(statusFilter), limit,
+			)
+		} else {
+			if err := limits.refuseDrainedFamilies(
+				nodesettings.FamilyGovernance,
+			); err != nil {
+				return nil, nil, err
+			}
+			proposals, err = proposalListFromSQL(
+				ctxTimeout, db, whereClause, limit,
+			)
+		}
 		if err != nil {
-			return nil, nil, fmt.Errorf("list governance proposals: %w", err)
-		}
-		defer rows.Close()
-
-		var sb strings.Builder
-		sb.WriteString("### Conway CIP-1694 Governance Action Proposals\n\n")
-		sb.WriteString(
-			"| Proposal Tx#Index | Action Type | Status | Proposed | Expires | Deposit (ADA) |\n",
-		)
-		sb.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
-
-		foundCount := 0
-		for rows.Next() {
-			var (
-				id                                                   int64
-				txHashRaw                                            []byte
-				actionIndex, actionType, proposedEpoch, expiresEpoch int
-				enactedEpoch, ratifiedEpoch, expiredEpoch            sql.NullInt64
-				deposit                                              uint64
-				anchorURL                                            sql.NullString
-			)
-			if scanErr := rows.Scan(&id, &txHashRaw, &actionIndex, &actionType, &proposedEpoch, &expiresEpoch, &enactedEpoch, &ratifiedEpoch, &expiredEpoch, &deposit, &anchorURL); scanErr != nil {
-				return nil, nil, fmt.Errorf(
-					"scan governance proposal: %w",
-					scanErr,
-				)
-			}
-			foundCount++
-			txHex := hex.EncodeToString(txHashRaw)
-			status := "Active"
-			if enactedEpoch.Valid {
-				status = "Enacted"
-			} else if ratifiedEpoch.Valid {
-				status = "Ratified"
-			} else if expiredEpoch.Valid {
-				status = "Expired"
-			}
-
-			fmt.Fprintf(
-				&sb,
-				"| `%s#%d` | %s | %s | Epoch %d | Epoch %d | %.2f |\n",
-				txHex,
-				actionIndex,
-				govActionTypeName(actionType),
-				status,
-				proposedEpoch,
-				expiresEpoch,
-				float64(deposit)/1000000.0,
-			)
-		}
-		if rErr := rows.Err(); rErr != nil {
-			return nil, nil, fmt.Errorf("read governance proposals: %w", rErr)
-		}
-
-		if foundCount == 0 {
-			sb.WriteString(
-				"\n*No governance action proposals found matching the selected filter criteria.*\n",
-			)
+			return nil, nil, err
 		}
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
-				&mcp.TextContent{Text: sb.String()},
+				&mcp.TextContent{Text: renderProposalList(proposals)},
 			},
 		}, nil, nil
 	})

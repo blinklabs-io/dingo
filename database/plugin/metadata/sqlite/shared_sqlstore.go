@@ -627,8 +627,9 @@ func openSQLStoreWithDialect(
 				"&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
 			sharedMemoryDBSequence.Add(1),
 		)
-		writeDB, err = sqlstore.OpenDB(
+		writeDB, err = sqlstore.OpenGuardedDB(
 			"sqlite", dsn, "sqlite", dependencies.TracingEnabled,
+			dependencies.StatementGuard,
 		)
 		if err != nil {
 			return nil, nil, nil, err
@@ -657,7 +658,7 @@ func openSQLStoreWithDialect(
 		// characters in the configured data directory remain part of the
 		// filename instead of being interpreted as DSN options/fragments.
 		databaseURI := sqliteFileURI(databasePath)
-		writeDB, err = sqlstore.OpenDB(
+		writeDB, err = sqlstore.OpenGuardedDB(
 			"sqlite",
 			fmt.Sprintf(
 				"%s?_txlock=immediate%s%s",
@@ -667,11 +668,12 @@ func openSQLStoreWithDialect(
 			),
 			"sqlite",
 			dependencies.TracingEnabled,
+			dependencies.StatementGuard,
 		)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		readDB, err = sqlstore.OpenDB(
+		readDB, err = sqlstore.OpenGuardedDB(
 			"sqlite",
 			fmt.Sprintf(
 				"%s?mode=ro%s",
@@ -680,6 +682,7 @@ func openSQLStoreWithDialect(
 			),
 			"sqlite",
 			dependencies.TracingEnabled,
+			dependencies.StatementGuard,
 		)
 		if err != nil {
 			_ = writeDB.Close()

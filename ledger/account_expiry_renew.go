@@ -17,7 +17,7 @@ package ledger
 import (
 	"context"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -126,8 +126,9 @@ func witnessedRewardCredentials(
 // earlier renewal, and re-witnessing within an epoch is idempotent.
 func (ls *LedgerState) renewWitnessedAccountExpirations(
 	ctx context.Context,
-	txn *database.Txn,
+	txn ledgerdb.Txn,
 	currentEpoch uint64,
+	slot uint64,
 	txs []lcommon.Transaction,
 ) error {
 	if !ls.config.DelegatorInactivityEnabled {
@@ -152,5 +153,9 @@ func (ls *LedgerState) renewWitnessedAccountExpirations(
 	if len(refs) == 0 {
 		return nil
 	}
-	return ls.db.RenewAccountExpirations(ctx, refs, expiration, txn)
+	if err := ls.ledgerDB().RenewAccountExpirations(ctx, refs, expiration, txn); err != nil {
+		return err
+	}
+	ls.stageAccountExpirations(txn, refs, expiration, slot) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	return nil
 }

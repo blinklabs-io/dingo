@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -405,7 +406,10 @@ func (a *NodeAdapter) GovernanceCommittee(
 	}
 
 	quorum, err := governance.EffectiveCommitteeQuorum(
-		ctx, db, txn, a.ledgerState.CardanoNodeConfig().ConwayGenesis(),
+		ctx,
+		dbadapter.New(db),
+		dbadapter.Txn(txn),
+		a.ledgerState.CardanoNodeConfig().ConwayGenesis(),
 	)
 	if err != nil {
 		return CommitteeInfo{}, fmt.Errorf("get committee quorum: %w", err)
@@ -413,13 +417,21 @@ func (a *NodeAdapter) GovernanceCommittee(
 	ret.QuorumNum = quorum.Num().Uint64()
 	ret.QuorumDenom = quorum.Denom().Uint64()
 
-	enacted, err := meta.GetLastEnactedGovernanceProposal(
-		[]uint8{
-			uint8(lcommon.GovActionTypeNoConfidence),
-			uint8(lcommon.GovActionTypeUpdateCommittee),
-		},
-		txn.Metadata(),
-	)
+	committeeActions := []uint8{
+		uint8(lcommon.GovActionTypeNoConfidence),
+		uint8(lcommon.GovActionTypeUpdateCommittee),
+	}
+	var enacted *models.GovernanceProposal
+	if a.governanceDrained() {
+		enacted, err = a.ledgerState.LedgerDB().
+			GetLastEnactedGovernanceProposal(
+				ctx, committeeActions, nil,
+			)
+	} else {
+		enacted, err = meta.GetLastEnactedGovernanceProposal(
+			committeeActions, txn.Metadata(),
+		)
+	}
 	if err != nil {
 		return CommitteeInfo{}, fmt.Errorf("get last committee action: %w", err)
 	}
@@ -439,6 +451,9 @@ func (a *NodeAdapter) GovernanceCommittee(
 // committee vote has no authorization mapping its hot credential to a cold
 // one: a cold-credential list would silently omit it.
 func (a *NodeAdapter) checkCommitteeVotesAttributed(ctx context.Context) error {
+	if err := a.refuseDrainedGovernance("the committee votes"); err != nil {
+		return err
+	}
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()

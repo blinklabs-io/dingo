@@ -94,6 +94,16 @@ type PoolOpCertSequence struct {
 	Sequence    uint64
 }
 
+// PoolOpCertCounter is a pool's highest observed op-cert sequence, the
+// highest slot of any of its op-cert rows, and the sequence of the row at that
+// slot.
+type PoolOpCertCounter struct {
+	PoolKeyHash  []byte
+	Sequence     uint64
+	Slot         uint64
+	LastSequence uint64
+}
+
 type PoolRegistration struct {
 	Margin                     *types.Rat
 	Pool                       *Pool // Belongs-to relationship; CASCADE is defined on Pool.Registration
@@ -119,7 +129,11 @@ type PoolRegistration struct {
 	ID                             uint
 	PoolID                         uint
 	AddedSlot                      uint64
-	DepositAmount                  types.Uint64
+	// EffectiveSlot is the slot a Leios closure's certificate takes effect at,
+	// the closure's context slot, when it differs from AddedSlot. Zero means
+	// the certificate takes effect at AddedSlot. Only the pool loads fill it.
+	EffectiveSlot uint64
+	DepositAmount types.Uint64
 }
 
 type PoolRegistrationOwner struct {
@@ -161,6 +175,9 @@ type PoolRetirement struct {
 	PoolID        uint
 	Epoch         uint64
 	AddedSlot     uint64
+	// EffectiveSlot is the closure context slot of a certified retirement,
+	// zero when the retirement takes effect at AddedSlot.
+	EffectiveSlot uint64
 }
 
 // PoolRetirementRefund identifies a pool retiring at an epoch boundary along

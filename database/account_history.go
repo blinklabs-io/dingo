@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
 // GetAccountDelegationHistoryByCredential returns delegation history rows for
@@ -91,6 +92,10 @@ func (d *Database) GetAccountRegistrationHistoryByCredential(
 	order string,
 	txn *Txn,
 ) ([]models.AccountRegistrationHistoryRow, error) {
+	if d.FamilyDrained(nodesettings.FamilyAccounts) {
+		err := drainedWrite(nodesettings.FamilyAccounts)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
@@ -122,6 +127,10 @@ func (d *Database) GetLatestAccountRegistrationAtOrBefore(
 	slot uint64,
 	txn *Txn,
 ) (*models.AccountRegistrationHistoryRow, error) {
+	if d.FamilyDrained(nodesettings.FamilyAccounts) {
+		err := drainedWrite(nodesettings.FamilyAccounts)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
@@ -149,6 +158,10 @@ func (d *Database) CountAccountRegistrationHistoryByCredential(
 	stakeKey []byte,
 	txn *Txn,
 ) (int, error) {
+	if d.FamilyDrained(nodesettings.FamilyAccounts) {
+		err := drainedWrite(nodesettings.FamilyAccounts)
+		return 0, err
+	}
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
@@ -176,6 +189,10 @@ func (d *Database) GetAccountImportRegistrationByCredential(
 	stakeKey []byte,
 	txn *Txn,
 ) (*models.AccountImportRegistration, error) {
+	if d.FamilyDrained(nodesettings.FamilyAccounts) {
+		err := drainedWrite(nodesettings.FamilyAccounts)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
@@ -202,6 +219,10 @@ func (d *Database) GetAccountWithdrawalHistoryByCredential(
 	order string,
 	txn *Txn,
 ) ([]models.AccountWithdrawalHistoryRow, error) {
+	if d.FamilyDrained(nodesettings.FamilyAccounts) {
+		err := drainedWrite(nodesettings.FamilyAccounts)
+		return nil, err
+	}
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
@@ -231,6 +252,10 @@ func (d *Database) CountAccountWithdrawalHistoryByCredential(
 	stakeKey []byte,
 	txn *Txn,
 ) (int, error) {
+	if d.FamilyDrained(nodesettings.FamilyAccounts) {
+		err := drainedWrite(nodesettings.FamilyAccounts)
+		return 0, err
+	}
 	if txn == nil {
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()

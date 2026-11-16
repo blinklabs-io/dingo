@@ -51,7 +51,9 @@ func (d *Database) GetSyncState(
 		val string
 		err error
 	)
-	if txn == nil {
+	if IsPParamsSyncMarker(key) && d.pparamsDrained() {
+		val, err = d.drainedSyncMarker(key)
+	} else if txn == nil {
 		val, err = d.metadata.GetSyncState(key, nil)
 	} else {
 		val, err = d.metadata.GetSyncState(
@@ -100,6 +102,9 @@ func (d *Database) SetSyncState(
 	key, value string,
 	txn *Txn,
 ) error {
+	if IsPParamsSyncMarker(key) && d.pparamsDrained() {
+		return drainedPParamsSyncError(key)
+	}
 	var err error
 	if txn == nil {
 		err = d.metadata.SetSyncState(key, value, nil)
@@ -122,6 +127,9 @@ func (d *Database) DeleteSyncState(
 	key string,
 	txn *Txn,
 ) error {
+	if IsPParamsSyncMarker(key) && d.pparamsDrained() {
+		return drainedPParamsSyncError(key)
+	}
 	var err error
 	if txn == nil {
 		err = d.metadata.DeleteSyncState(key, nil)

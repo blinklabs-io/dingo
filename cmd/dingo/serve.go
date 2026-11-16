@@ -94,6 +94,7 @@ func serveRun(
 	if err := node.Run(
 		cmd.Context(), cfg, logger,
 		dingo.WithMithrilCatchUp(nodemithril.New),
+		dingo.WithMithrilLedgerReimport(nodemithril.NewReimporter),
 	); err != nil {
 		return err
 	}
@@ -162,6 +163,14 @@ func checkSyncState(
 		return err
 	}
 	if val == syncStatusInProgress && pendingRepair && repairActive {
+		return nil
+	}
+	// The node runs its own ledger-state re-import again at start.
+	ownReimport, err := mithril.ReimportInterrupted(db)
+	if err != nil {
+		return err
+	}
+	if ownReimport {
 		return nil
 	}
 	// The node resumes its own snapshot restore, but only in the mode that
