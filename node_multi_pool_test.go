@@ -437,7 +437,11 @@ func TestPrepareMultiPoolRefusesLeiosWithSeveralPools(t *testing.T) {
 			{ShelleyOperationalCertificate: "/b"},
 		},
 	}}
-	require.ErrorContains(t, n.prepareMultiPool(), "Leios forging does not support")
+	require.ErrorContains(
+		t,
+		n.prepareMultiPool(),
+		"Leios forging does not support",
+	)
 }
 
 func TestPrepareMultiPoolAllowsAVoteKeyWithoutLeiosForging(t *testing.T) {

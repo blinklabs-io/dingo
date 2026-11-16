@@ -367,13 +367,16 @@ func TestParseVoteSigningKeysFile(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidSigningKey)
 		assert.ErrorContains(t, err, "key 1")
 	})
-	t.Run("a hex string is not an envelope inside an array", func(t *testing.T) {
-		t.Parallel()
-		_, err := parseVoteSigningKeysFile([]byte(
-			fmt.Sprintf(`[%q]`, fmt.Sprintf("%064x", 42)),
-		))
-		assert.Error(t, err)
-	})
+	t.Run(
+		"a hex string is not an envelope inside an array",
+		func(t *testing.T) {
+			t.Parallel()
+			_, err := parseVoteSigningKeysFile([]byte(
+				fmt.Sprintf(`[%q]`, fmt.Sprintf("%064x", 42)),
+			))
+			assert.Error(t, err)
+		},
+	)
 	t.Run("null is not an empty array", func(t *testing.T) {
 		t.Parallel()
 		_, err := parseVoteSigningKeysFile([]byte("null"))
@@ -444,7 +447,13 @@ func TestLoadVoteSigningKeysFile(t *testing.T) {
 		t.Parallel()
 		_, err := LoadVoteSigningKeysFile(write(
 			t,
-			fmt.Sprintf("%064x", 42)+strings.Repeat(" ", voteSigningKeysFileMaxSize),
+			fmt.Sprintf(
+				"%064x",
+				42,
+			)+strings.Repeat(
+				" ",
+				voteSigningKeysFileMaxSize,
+			),
 		))
 		assert.ErrorContains(t, err, "exceeds")
 	})

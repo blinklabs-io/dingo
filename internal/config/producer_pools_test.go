@@ -237,7 +237,9 @@ func TestValidateBlockProducerPoolsRefusesLeiosWithSeveralPools(t *testing.T) {
 	require.NoError(t, cfg.Validate(RunModeLeios))
 }
 
-func TestValidateBlockProducerPoolsAllowsAVoteKeyWithoutLeiosForging(t *testing.T) {
+func TestValidateBlockProducerPoolsAllowsAVoteKeyWithoutLeiosForging(
+	t *testing.T,
+) {
 	t.Parallel()
 	// A multi-key vote file votes for every seat its keys hold, so a vote key
 	// does not tie the node to one pool. Only Leios forging still does.

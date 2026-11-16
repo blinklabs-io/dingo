@@ -3237,8 +3237,10 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 			m.noteVoteNotEmitted(voteNotEmittedNotSeated)
 			m.logger.Debug(
 				"no configured leios voting key holds a committee seat, not voting",
-				"slot", record.slot,
-				"epoch", record.epoch,
+				"slot",
+				record.slot,
+				"epoch",
+				record.epoch,
 			)
 		}
 		return
