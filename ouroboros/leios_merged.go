@@ -2301,12 +2301,11 @@ func (o *Ouroboros) lookupLeiosEndorserBlock(
 }
 
 // loadLeiosEBFromDB loads a Leios endorser block's manifest (and txs, if
-// stored) from the persistent blob store for the exact (slot, hash)
-// occurrence named, and caches the result in memory under the same key. The
-// blob store is itself keyed by (slot, hash) (`types.LeiosEBManifestKey`),
-// so a persisted occurrence for a different slot of the same hash is a
-// distinct blob key and is never returned here.
-// Returns (nil, false) when the blob store has no manifest for this exact
+// stored) from the LeiosDB for the exact (slot, hash) occurrence named, and
+// caches the result in memory under the same key. The LeiosDB is itself keyed
+// by (slot, hash), so a persisted occurrence for a different slot of the same
+// hash is a distinct record and is never returned here.
+// Returns (nil, false) when the LeiosDB has no manifest for this exact
 // occurrence.
 func (o *Ouroboros) loadLeiosEBFromDB(
 	slot uint64,

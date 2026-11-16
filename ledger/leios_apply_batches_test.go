@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -306,6 +307,40 @@ func TestApplyEndorserBlockDenseOffsetsCrashBetweenBatches(t *testing.T) {
 	ls.afterEndorserOffsetBatch = nil
 	require.NoError(t, applyLeiosDenseBlock(ls, db, rbPoint, 720, ebHash, raws))
 	requireLeiosApplyTestTxCount(t, raw, int64(count))
+	requireLeiosDenseOutputsResolve(t, db, txs)
+}
+
+// The closure commits in the LeiosDB before any offset batch that points into
+// it, so a crash after the first committed batch never leaves an offset naming
+// a closure the store lacks, and the retry rewrites the same record.
+func TestApplyEndorserBlockClosureCommitsBeforeOffsets(t *testing.T) {
+	t.Parallel()
+
+	ls, db, count := newLeiosApplyDenseLedger(t)
+	raws, txs := leiosApplyDenseBlock(t, count)
+	rbPoint := leiosApplyTestRankingPoint(0x5e)
+	ebHash := leiosApplyTestEbHash(0x5f)
+	store, err := db.LeiosDB()
+	require.NoError(t, err)
+	ref := leiosdb.Ref{Slot: 740, Hash: ebHash}
+
+	injected := errors.New("injected crash between offset batches")
+	closureAtCrash := -1
+	ls.afterEndorserOffsetBatch = func() error {
+		if closure, err := store.GetClosure(ref); err == nil {
+			closureAtCrash = len(closure)
+		}
+		return injected
+	}
+	err = applyLeiosDenseBlock(ls, db, rbPoint, 740, ebHash, raws)
+	require.ErrorIs(t, err, injected)
+	require.Positive(t, closureAtCrash, "closure was not committed before the first offset batch")
+
+	ls.afterEndorserOffsetBatch = nil
+	require.NoError(t, applyLeiosDenseBlock(ls, db, rbPoint, 740, ebHash, raws))
+	closure, err := store.GetClosure(ref)
+	require.NoError(t, err)
+	require.Equal(t, closureAtCrash, len(closure))
 	requireLeiosDenseOutputsResolve(t, db, txs)
 }
 

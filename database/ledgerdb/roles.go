@@ -2309,18 +2309,6 @@ type LeiosStore interface {
 		txn Txn,
 		transactions []lcommon.Transaction,
 	) (int, error)
-	// PruneLeiosEBBeforeSlot removes persisted Leios manifests and transaction
-	// lists strictly older than beforeSlot. The caller chooses the retention
-	// frontier; this method does not infer one from chain state.
-	//
-	// It scans the shared "e" prefix once because the manifest and transaction
-	// prefixes are adjacent. Deletes commit in blob-only transactions
-	// containing at most one key. Cloud stores spool prior object values for
-	// compensation, so this avoids aggregating many large values into one local
-	// spool. Repeating the same call is safe after a partial cloud commit. The
-	// returned count includes only keys from fully committed transactions; on
-	// error it is a lower bound.
-	PruneLeiosEBBeforeSlot(ctx context.Context, beforeSlot uint64) (int, error)
 	// SetLeiosEB persists an endorser block's manifest and, when txsRaw is
 	// non-nil, its transaction bodies in a SINGLE blob-store transaction (one
 	// commit), merging what SetLeiosEBManifest + SetLeiosEBTxs do in two, for
@@ -2340,10 +2328,4 @@ type LeiosStore interface {
 		manifestRaw []byte,
 		txsRaw []cbor.RawMessage,
 	) error
-	// SetLeiosEBCertified records that a ranking block certified the endorser
-	// block occurrence (slot, hash). The marker is idempotent and, given the
-	// block-apply transaction, commits with the certifying ranking block and is
-	// discarded with it when a later check rejects the block. A nil txn commits
-	// the marker in its own blob transaction.
-	SetLeiosEBCertified(slot uint64, hash []byte, txn Txn) error
 }

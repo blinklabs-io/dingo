@@ -306,6 +306,15 @@ type Ouroboros struct {
 	// too short to have one. It is nil without a ledger, which disables every
 	// immutable-tip-relative Leios retention and serving rule.
 	leiosImmutableSlot func(context.Context) (slot uint64, found bool, err error)
+	// leiosPinAdvance pins the endorser blocks certified by ranking blocks up
+	// to the immutable point into the immutable partition of the Leios store.
+	// The collection worker runs it before every collection, because a pin
+	// is what keeps a certified endorser block out of the collector's reach.
+	// Nil without a ledger, which leaves collection bounded only by the
+	// immutable point.
+	leiosPinAdvance func(context.Context) error
+	// leiosGCSignal wakes the collection worker when the primary chain moves.
+	leiosGCSignal chan struct{}
 	// chainsyncHasBestPeer reports whether chain selection currently has a
 	// best peer. Nil means none. Tests override it without a node.
 	chainsyncHasBestPeer func() bool
@@ -1000,6 +1009,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		context.Background(),
 	)
 	o := &Ouroboros{
+		leiosGCSignal:           make(chan struct{}, 1),
 		config:                  cfg,
 		registerer:              newTrackingRegisterer(cfg.PromRegistry),
 		eventBus:                cfg.EventBus,
@@ -1113,6 +1123,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			point, found, err := o.ledgerState.ImmutablePoint(ctx)
 			return point.Slot, found, err
 		}
+		o.leiosPinAdvance = o.ledgerState.AdvanceLeiosPins
 		o.chainsyncHeaderCheckpoint = o.ledgerState.ValidateHeaderCheckpoint
 		if k := o.ledgerState.SecurityParam(); k > 0 {
 			o.chainsyncHeaderHistoryLimit = k + 1
@@ -1146,6 +1157,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.initDecodeCacheMetrics()
 	}
 	o.subscribeLeiosAnnouncementRetries()
+	o.subscribeTracked(ledger.BlockEventType, o.signalLeiosGC)
 	o.subscribeDeferredHeaderRecovery()
 	o.restoreLeiosVerifiedEbSlot()
 	return o

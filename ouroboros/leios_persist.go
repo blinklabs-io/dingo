@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/leiosdb"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -70,8 +72,6 @@ var leiosPersistMaxQueueBytes = 256 << 20 // 256 MiB
 // Package-level var (not const) so tests can shrink it instead of running a
 // real multi-second timeout.
 var leiosPersistShutdownDrainTimeout = 5 * time.Second
-
-const leiosPersistGCInterval = time.Hour
 
 // ErrLeiosPersistDrainUnconfirmed is returned when a bounded wait gives up
 // before confirming the persistence writer and GC workers exited. Callers
@@ -461,15 +461,25 @@ func (o *Ouroboros) leiosPersistGCLoop(
 	}
 	o.runLeiosPersistenceGC(ctx, initialMax)
 
-	ticker := time.NewTicker(leiosPersistGCInterval)
-	defer ticker.Stop()
+	// Collection follows the immutable tip, so it runs when the primary chain
+	// changes rather than on a timer. A signal that arrives during a pass
+	// leaves one wakeup pending, which is the next pass.
+	signal := o.leiosGCSignal
 	for {
 		select {
 		case <-stop:
 			return
-		case <-ticker.C:
+		case <-signal:
 			o.runLeiosPersistenceGC(ctx, nil)
 		}
+	}
+}
+
+// signalLeiosGC wakes the collection worker. It never blocks.
+func (o *Ouroboros) signalLeiosGC(event.Event) {
+	select {
+	case o.leiosGCSignal <- struct{}{}:
+	default:
 	}
 }
 
@@ -485,16 +495,19 @@ func (o *Ouroboros) runLeiosPersistenceGC(
 	if db == nil {
 		return
 	}
+	store, err := db.LeiosDB()
+	if err != nil {
+		o.config.Logger.Warn("failed to open leios store for pruning", "error", err)
+		return
+	}
 	// An uncertified endorser block at or after the immutable point can still
-	// be certified, so no retention setting prunes past it, and nothing is
-	// pruned while the ledger reports none or fails to read its chain: ledger
-	// apply writes a certified endorser block's records before its
-	// certification marker commits, and a frontier past that block would let
-	// a concurrent sweep delete them in between. Below the immutable point the
-	// certifying ranking block has applied and written the marker, so the
-	// writer may drop an uncertified job there. With no ledger, or one with no
-	// chain or security parameter to measure the point with, the configured
-	// window applies, at least the stability window.
+	// be certified, so no retention setting collects past it, and nothing is
+	// collected while the ledger reports none or fails to read its chain:
+	// ledger apply writes a certified endorser block's records before the
+	// certifying ranking block commits, and a frontier past that block would
+	// let a concurrent sweep delete them in between. With no ledger, or one
+	// with no chain or security parameter to measure the point with, the
+	// configured window applies, at least the stability window.
 	var (
 		immutableSlot  uint64
 		immutableKnown bool
@@ -522,6 +535,41 @@ func (o *Ouroboros) runLeiosPersistenceGC(
 			return
 		}
 	}
+	// Certifications up to the immutable point are pinned before anything is
+	// collected, so a certified endorser block leaves the volatile partition
+	// by promotion, never by deletion. A failed walk collects nothing. When
+	// the immutable point could not be resolved there is nothing new to pin,
+	// but the pin watermark already stored still bounds the collection.
+	var pinnedThrough *uint64
+	if o.leiosPinAdvance != nil {
+		if immutableKnown {
+			if err := o.leiosPinAdvance(ctx); err != nil {
+				if !errors.Is(err, context.Canceled) {
+					if o.leiosMetrics != nil {
+						o.leiosMetrics.pinWalkFailures.Inc()
+					}
+					o.config.Logger.Error(
+						"failed to pin certified leios endorser blocks; "+
+							"collection is stalled until the pin walk succeeds",
+						"error", err,
+					)
+				}
+				return
+			}
+		}
+		wm, err := store.Watermarks()
+		if err != nil {
+			o.config.Logger.Warn("failed to read leios watermarks", "error", err)
+			return
+		}
+		switch {
+		case wm.PinnedThroughSet:
+			pinnedThrough = &wm.PinnedThrough.Slot
+		case immutableKnown:
+			// The chain has no block to pin through yet.
+			return
+		}
+	}
 	var candidateBeforeSlot uint64
 	if retention == 0 {
 		if !immutableKnown {
@@ -533,15 +581,12 @@ func (o *Ouroboros) runLeiosPersistenceGC(
 		if knownMaxSlot != nil {
 			maxSlot = *knownMaxSlot
 		} else {
-			var err error
-			maxSlot, err = db.MaxLeiosEBSlotContext(ctx)
+			maxSlot, _, err = store.MaxSlot()
 			if err != nil {
-				if !errors.Is(err, context.Canceled) {
-					o.config.Logger.Warn(
-						"failed to scan persisted leios endorser blocks for pruning",
-						"error", err,
-					)
-				}
+				o.config.Logger.Warn(
+					"failed to find the newest persisted leios endorser block for pruning",
+					"error", err,
+				)
 				return
 			}
 		}
@@ -552,23 +597,31 @@ func (o *Ouroboros) runLeiosPersistenceGC(
 			candidateBeforeSlot = min(candidateBeforeSlot, immutableSlot)
 		}
 	}
+	// A certification is pinned once its certifying ranking block is walked,
+	// and that block is the child of the block that announced the endorser
+	// block, so an endorser block announced strictly below the pin watermark
+	// has been decided.
+	if pinnedThrough != nil {
+		candidateBeforeSlot = min(candidateBeforeSlot, *pinnedThrough)
+	}
 	if ctx.Err() != nil {
 		return
 	}
-	// Writers hold this lock for SetLeiosEB. Publishing the cutoff after the
-	// scan means an in-flight write completes before the sweep, while later
-	// writes below it are rejected. The potentially paginated scan and deletes
-	// stay outside the lock so cloud-store latency cannot stall persistence.
+	// Writers hold this lock for SetLeiosEB. Publishing the cutoff first means
+	// an in-flight write completes before the collection, while later writes
+	// below it are rejected.
 	o.leiosPersistStoreMu.Lock()
-	if candidateBeforeSlot > o.leiosPersistPruneBeforeSlot {
-		o.leiosPersistPruneBeforeSlot = candidateBeforeSlot
-	}
+	// The bounds above are read from the store and the ledger on this pass, so
+	// they replace the previous frontier even when lower: a pin rollback lowers
+	// the pin watermark and demotes records, and collecting against the
+	// earlier, higher frontier would delete them.
+	o.leiosPersistPruneBeforeSlot = candidateBeforeSlot
 	beforeSlot := o.leiosPersistPruneBeforeSlot
 	o.leiosPersistStoreMu.Unlock()
 	if beforeSlot == 0 || ctx.Err() != nil {
 		return
 	}
-	deleted, err := db.PruneLeiosEBBeforeSlot(ctx, beforeSlot)
+	deleted, err := store.GarbageCollect(ctx, beforeSlot)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			o.config.Logger.Warn(
@@ -636,27 +689,39 @@ func (o *Ouroboros) drainLeiosPersist() {
 			continue
 		}
 		o.leiosPersistStoreMu.Lock()
-		// A certified endorser block below the frontier is still persisted:
-		// replaying the ranking block that certified it needs the closure.
+		// A pinned endorser block below the frontier is still persisted: it is
+		// certified by an immutable ranking block, and replaying that block
+		// needs the closure. The store itself refuses an unpinned write below
+		// its collection watermark; the frontier check only avoids the
+		// round trip while the watermark catches up.
 		if job.slot < o.leiosPersistPruneBeforeSlot {
-			certified, err := db.IsLeiosEBCertified(job.slot, job.hash)
-			// A failed lookup persists: an extra record is pruned later,
+			pinned, err := db.IsLeiosEBPinned(job.slot, job.hash)
+			// A failed lookup persists: an extra record is collected later,
 			// a missing certified one is not recoverable.
-			if err == nil && !certified {
+			if err == nil && !pinned {
 				o.leiosPersistStoreMu.Unlock()
 				continue
 			}
 		}
 		err := db.SetLeiosEB(job.slot, job.hash, job.manifestRaw, job.txsRaw)
 		o.leiosPersistStoreMu.Unlock()
+		if errors.Is(err, leiosdb.ErrBehindImmutableTip) {
+			continue
+		}
 		if err != nil {
 			o.config.Logger.Debug(
-				"failed to persist leios EB to blob store",
+				"failed to persist leios EB to the leios store",
 				"component", "network",
 				"slot", job.slot,
 				"error", err,
 			)
+			continue
 		}
+		// Without an immutable point the collection bound follows the newest
+		// persisted endorser block, which only advances here. Ledger block
+		// events alone would leave records above the last bound uncollected
+		// while the chain is quiet.
+		o.signalLeiosGC(event.Event{})
 	}
 }
 

@@ -435,6 +435,13 @@ type Manifest struct {
 	ImmutableIndexBytes  int64  `json:"immutableIndexBytes,omitempty"`
 	ImmutableIndexSHA256 string `json:"immutableIndexSha256,omitempty"`
 
+	// LeiosBytes/LeiosSHA256 describe the LeiosDB backup file
+	// (LeiosBackupFileName), which holds the certified closures that offsets
+	// into endorser-block transactions resolve through. Both are empty for a
+	// snapshot of a node that has no LeiosDB, which then carries no such file.
+	LeiosBytes  int64  `json:"leiosBytes,omitempty"`
+	LeiosSHA256 string `json:"leiosSha256,omitempty"`
+
 	// Authentication is the hex HMAC-SHA256, under the operator trust key
 	// (WithManifestKey), of the manifest's JSON encoding with Checksum and
 	// Authentication blanked. Empty when no key was configured at snapshot time.

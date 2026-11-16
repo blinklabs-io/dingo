@@ -26,7 +26,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -359,16 +358,16 @@ func (ls *LedgerState) applyEndorserBlockWithReservation(
 	if err != nil {
 		return 0, 0, err
 	}
-	// The blob commits in its own blob transaction (nil txn) so a dense Leios
-	// backlog cannot overflow the shared 50-block chunk transaction with
-	// ErrTxnTooBig; offset reads use a fresh blob snapshot if the shared LRU
-	// misses. See DATABASE.md, "Leios endorser-block storage".
-	if err := ls.ledgerDB().SetGenesisCbor(ebSlot, ebHash[:], blob, nil); err != nil {
+	// The closure lives in the LeiosDB, so a dense Leios backlog cannot
+	// overflow the shared 50-block chunk transaction with ErrTxnTooBig, and
+	// the offsets written below resolve into it through the offset resolver's
+	// LeiosDB fallback. It is written before the offsets that point at it.
+	// See DATABASE.md, "Leios endorser-block storage".
+	if err := ls.db.PutLeiosClosure(ebSlot, ebHash[:], blob); err != nil {
 		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("store endorser block blob: %w", err),
 		}
 	}
-	dbadapter.Unwrap(txn).MarkBlockCborCommittedSeparately(ebSlot, ebHash)
 	// The offsets of a dense endorser block exceed one blob transaction, so
 	// they commit in bounded blob transactions of their own, after the blob
 	// they point at. See DATABASE.md, "Leios endorser-block storage".
@@ -2157,23 +2156,23 @@ func (ls *LedgerState) certifiedEndorserBlockData(
 }
 
 // persistCertifiedEndorserBlock writes the manifest and transactions of a
-// certified endorser block when the store lacks either or holds different
-// bytes, so the closure stays
-// readable after the in-memory endorser-block cache expires. The asynchronous
-// persist queue drops writes under pressure and is not a durability
-// guarantee for a block that certification has made part of the chain.
+// certified endorser block to the LeiosDB when it lacks either or holds
+// different bytes, so the closure stays readable after the in-memory
+// endorser-block cache expires. The asynchronous persist queue drops writes
+// under pressure and is not a durability guarantee for a block that
+// certification has made part of the chain.
 //
 // It writes exactly what apply resolved (see certifiedEndorserBlockData), so
-// it needs no second lookup that could miss. The write commits in its own blob
-// transaction, before the certification marker is staged: an endorser block
-// bigger than the shared chunk transaction allows must not overflow it, and a
-// record left by a ranking block that is rejected afterwards is uncertified
-// and pruned like any other. Pruning cannot remove the record before the
-// marker commits: the prune frontier never passes an immutable point this
-// ledger reported, and the endorser block a certifying ranking block applies
-// is its parent's, at the applied tip, which a rollback never moves behind an
-// immutable point. A nil manifest (no data provider) writes nothing; the
-// closure then depends on whatever the queue persisted.
+// it needs no second lookup that could miss. The write commits in the
+// LeiosDB's own transaction before the certifying ranking block commits, so
+// the record exists whenever that block is on the chain. A record left by a
+// ranking block that is rejected afterwards is volatile and collected like any
+// other uncertified one. Collection cannot remove it first: its bound never
+// passes the immutable point or the pin watermark, and the endorser block a
+// certifying ranking block applies is its parent's, at the applied tip, which
+// a rollback never moves behind an immutable point. A nil manifest (no data
+// provider) writes nothing; the closure then depends on whatever the queue
+// persisted.
 func (ls *LedgerState) persistCertifiedEndorserBlock(
 	ebHash []byte,
 	ebSlot uint64,
