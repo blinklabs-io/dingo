@@ -6111,7 +6111,10 @@ pin watermark's ranking block has left the primary chain, never merely because
 the immutable point moved down with an ordinary rollback, and a rollback moves
 the records back to the volatile partition instead of deleting them. A snapshot
 includes the LeiosDB (`leios.bak`) and a restore reloads it, since certified
-closures exist nowhere else.
+closures exist nowhere else. The snapshot selects the LeiosDB after it holds
+the commit barrier, because the store opens on first use, and fails when an
+existing LeiosDB cannot be opened rather than omitting it. A persisted
+endorser block signals the collector as well as primary-chain events do.
 `startLeiosPersistWriter` resets the accounting with the pending map, so a live
 Restore/Truncate restart does not carry the old queue's reservations onto the
 new one; the writer is drained and stopped at shutdown via

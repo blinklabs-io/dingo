@@ -997,6 +997,51 @@ func (d *Database) refuseOffPrimaryChainProducer(
 	return nil
 }
 
+// refuseOffPrimaryChainClosure applies the primary-chain check to a UTxO
+// recovered from an endorser block's closure. A closure is not a chain block
+// and has no block index, so its producer is the ranking block that certifies
+// it: the producing transaction's metadata row is recorded under that block,
+// and rollback deletes the row with the block's application. A row that is
+// absent, or whose ranking block is not the block indexed at its height, means
+// the closure belongs to an abandoned fork.
+func (d *Database) refuseOffPrimaryChainClosure(
+	txn *Txn,
+	input lcommon.TransactionInput,
+) error {
+	producerTx, err := d.metadata.GetTransactionByHash(
+		ledgerInputIDBytes(input),
+		txn.Metadata(),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"lookup certifying block of closure for %s: %w",
+			input.String(),
+			err,
+		)
+	}
+	if producerTx == nil || len(producerTx.BlockHash) == 0 {
+		return ErrUtxoNotFound
+	}
+	block, err := BlockByPointTxn(
+		txn,
+		ocommon.NewPoint(producerTx.Slot, producerTx.BlockHash),
+	)
+	if errors.Is(err, models.ErrBlockNotFound) ||
+		errors.Is(err, types.ErrBlobKeyNotFound) {
+		return ErrUtxoNotFound
+	}
+	if err != nil {
+		return fmt.Errorf(
+			"load certifying block of closure for %s: %w",
+			input.String(),
+			err,
+		)
+	}
+	return d.refuseOffPrimaryChainProducer(
+		txn, block.ID, block.Slot, block.Hash, input,
+	)
+}
+
 func (d *Database) recoverConsumedUtxo(
 	input lcommon.TransactionInput,
 	txn *Txn,
@@ -1025,6 +1070,7 @@ func (d *Database) recoverConsumedUtxo(
 	}
 	addedSlot := uint64(0)
 	outputCbor := utxoData
+	fromClosure := false
 	switch {
 	case err == nil && IsUtxoOffsetStorage(utxoData):
 		offset, err := DecodeUtxoOffset(utxoData)
@@ -1043,6 +1089,7 @@ func (d *Database) recoverConsumedUtxo(
 				offset.BlockSlot, offset.BlockHash[:],
 			); closureErr == nil {
 				blockCbor, producerMeta, err = closure, types.BlockMetadata{}, nil
+				fromClosure = true
 			}
 		}
 		if err != nil {
@@ -1059,7 +1106,11 @@ func (d *Database) recoverConsumedUtxo(
 		}
 		outputCbor = blockCbor[offset.ByteOffset:end]
 		addedSlot = offset.BlockSlot
-		if enforcePrimaryChain {
+		if enforcePrimaryChain && fromClosure {
+			if err := d.refuseOffPrimaryChainClosure(txn, input); err != nil {
+				return nil, err
+			}
+		} else if enforcePrimaryChain {
 			if err := d.refuseOffPrimaryChainProducer(
 				txn,
 				producerMeta.ID,

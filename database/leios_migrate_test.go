@@ -354,3 +354,29 @@ func TestMigrateLeiosStoreLoadsValuesInBoundedBatches(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, uint64(100+records-1), slot)
 }
+
+func TestMigrateLeiosStorePrefersCurrentManifestOverLegacyKey(t *testing.T) {
+	t.Parallel()
+
+	d := newTestDB(t)
+	hash := randomHash(t)
+	// Both key forms hold one occurrence; the legacy value carries a slot
+	// prefix and the current one does not.
+	writeLegacyLeiosEB(t, d, 10, hash, []byte("legacy-manifest"), nil)
+	writeCurrentLeiosEB(
+		t,
+		d,
+		10,
+		hash,
+		[]byte("current-manifest-bytes"),
+		nil,
+		false,
+	)
+
+	_, err := d.MigrateLeiosStore(t.Context(), LeiosMigrationOptions{})
+	require.NoError(t, err)
+	got, err := d.GetLeiosEBManifest(hash, 10)
+	require.NoError(t, err)
+	require.Equal(t, []byte("current-manifest-bytes"), got)
+	require.Zero(t, legacyLeiosKeysRemaining(t, d))
+}

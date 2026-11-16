@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -91,12 +92,14 @@ func (ls *LedgerState) AdvanceLeiosPins(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("advance Leios pins: %w", err)
 	}
-	if wm.PinnedThroughSet && wm.PinnedThrough.Slot > immutable.Slot {
+	if wm.PinnedThroughSet && wm.PinnedThrough.Slot >= immutable.Slot {
 		// The immutable point is derived from the applied tip, so an
 		// ordinary rollback lowers it while the pinned blocks are still on
 		// the chain. Those pins stay: only a chain that no longer contains
 		// the pinned-through block was truncated below the watermark, as when
 		// a crash fell between the truncation's commit and the pin rollback.
+		// A watermark at the immutable slot is included: a different block at
+		// that slot is a removed one, and the walk cannot start from it.
 		onChain, err := ls.leiosPinnedThroughOnChain(ctx, wm.PinnedThrough)
 		if err != nil {
 			return fmt.Errorf("advance Leios pins: %w", err)
@@ -269,12 +272,32 @@ func (ls *LedgerState) repairPendingLeiosPins(
 		)
 		return
 	}
-	for i, p := range pending {
-		if i >= leiosPinRepairPerPass || ctx.Err() != nil {
+	if len(pending) == 0 {
+		return
+	}
+	// The list is in slot order, so a fixed starting point would offer the
+	// same leading pins every pass while they stay unavailable. Resume after
+	// the last one visited and wrap around.
+	start := max(slices.IndexFunc(pending, func(p leiosdb.PendingPin) bool {
+		return leiosRefAfter(p.EB, ls.leiosPinRepairCursor)
+	}), 0)
+	for k := 0; k < min(len(pending), leiosPinRepairPerPass); k++ {
+		if ctx.Err() != nil {
 			return
 		}
+		p := pending[(start+k)%len(pending)]
+		ls.leiosPinRepairCursor = p.EB
 		ls.repairLeiosPin(ctx, store, p.EB, true)
 	}
+}
+
+// leiosRefAfter orders references the way the store lists them: by slot, then
+// by hash.
+func leiosRefAfter(a, b leiosdb.Ref) bool {
+	if a.Slot != b.Slot {
+		return a.Slot > b.Slot
+	}
+	return bytes.Compare(a.Hash, b.Hash) > 0
 }
 
 // repairLeiosPin stores the content of a pinned endorser block from the

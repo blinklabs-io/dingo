@@ -40,6 +40,9 @@ const (
 	// HookPinCopied fires in Pin after the content is copied into the
 	// immutable partition and before the pin record is written.
 	HookPinCopied = "pin-copied"
+	// HookPinCopy fires in Pin after each individual record copy commits, so
+	// a test can interrupt between the manifest and the transactions.
+	HookPinCopy = "pin-copy"
 	// HookPinRecorded fires in Pin after the pin record is committed.
 	HookPinRecorded = "pin-recorded"
 	// HookGCWatermark fires in GarbageCollect after the watermark is
@@ -146,6 +149,24 @@ func (s *BadgerStore) update(fn func(txn types.Txn) error) error {
 	return txn.Commit()
 }
 
+// commit runs update and then flushes the store to disk. It is for the
+// writes a commit in another store depends on: the blob and metadata stores
+// are made durable in step by database.Txn, but this store is separate, so a
+// closure or manifest it acknowledged could otherwise be lost on an unclean
+// shutdown while the offsets that point into it survive. Internal moves
+// (collection, demotion, watermarks) use update, because the store orders its
+// own commits and recovers by repeating them. One flush covers every commit
+// before it, so Pin flushes once after its last commit rather than per copy.
+func (s *BadgerStore) commit(fn func(txn types.Txn) error) error {
+	if err := s.update(fn); err != nil {
+		return err
+	}
+	if err := s.bs.Sync(); err != nil {
+		return fmt.Errorf("leiosdb: sync: %w", err)
+	}
+	return nil
+}
+
 func (s *BadgerStore) view(fn func(txn types.Txn) error) error {
 	txn := s.bs.NewTransaction(false)
 	defer txn.Rollback() //nolint:errcheck
@@ -216,7 +237,7 @@ func (s *BadgerStore) PutVolatile(eb Ref, content Content) error {
 	if s.closed {
 		return ErrClosed
 	}
-	return s.update(func(txn types.Txn) error {
+	return s.commit(func(txn types.Txn) error {
 		pinned, err := s.has(txn, recordKey(partImmutable, eb, kindPin))
 		if err != nil {
 			return err
@@ -287,7 +308,7 @@ func (s *BadgerStore) PutClosure(eb Ref, closure []byte) error {
 	if s.closed {
 		return ErrClosed
 	}
-	return s.update(func(txn types.Txn) error {
+	return s.commit(func(txn types.Txn) error {
 		pinned, err := s.has(txn, recordKey(partImmutable, eb, kindPin))
 		if err != nil {
 			return err
@@ -300,6 +321,22 @@ func (s *BadgerStore) PutClosure(eb Ref, closure []byte) error {
 	})
 }
 
+// readOrder returns the partitions to read for the block, in order. The
+// immutable partition is consulted only once the block has a pin record: Pin
+// copies its records one commit at a time and writes the pin record last, so
+// an interrupted pin leaves a partial immutable copy that must stay invisible
+// while the volatile copy is the complete one.
+func (s *BadgerStore) readOrder(txn types.Txn, eb Ref) ([]byte, error) {
+	pinned, err := s.has(txn, recordKey(partImmutable, eb, kindPin))
+	if err != nil {
+		return nil, err
+	}
+	if pinned {
+		return []byte{partImmutable, partVolatile}, nil
+	}
+	return []byte{partVolatile}, nil
+}
+
 // Get implements Store.
 func (s *BadgerStore) Get(eb Ref) (Content, error) {
 	s.mu.RLock()
@@ -309,7 +346,11 @@ func (s *BadgerStore) Get(eb Ref) (Content, error) {
 	}
 	var out Content
 	err := s.view(func(txn types.Txn) error {
-		for _, part := range []byte{partImmutable, partVolatile} {
+		parts, err := s.readOrder(txn, eb)
+		if err != nil {
+			return err
+		}
+		for _, part := range parts {
 			manifest, err := s.get(txn, recordKey(part, eb, kindManifest))
 			if errors.Is(err, ErrNotFound) {
 				continue
@@ -370,7 +411,11 @@ func (s *BadgerStore) GetClosure(eb Ref) ([]byte, error) {
 	}
 	var out []byte
 	err := s.view(func(txn types.Txn) error {
-		for _, part := range []byte{partImmutable, partVolatile} {
+		parts, err := s.readOrder(txn, eb)
+		if err != nil {
+			return err
+		}
+		for _, part := range parts {
 			val, err := s.get(txn, recordKey(part, eb, kindClosure))
 			if errors.Is(err, ErrNotFound) {
 				continue
@@ -442,8 +487,8 @@ func (s *BadgerStore) Pin(eb, certifier Ref) (PinResult, error) {
 	// can be large, and the pin must not be refused for the size of the
 	// transaction that carries it. A copy left behind by an interruption is
 	// overwritten by the retry, and is unreachable until the pin record
-	// exists because reads that find no pin look in the volatile partition
-	// first for an unpinned block.
+	// exists because reads consult the immutable partition only for a block
+	// that has a pin record.
 	for _, kind := range []byte{kindManifest, kindTxs, kindClosure} {
 		val, ok := vals[kind]
 		if !ok {
@@ -454,6 +499,9 @@ func (s *BadgerStore) Pin(eb, certifier Ref) (PinResult, error) {
 		}); err != nil {
 			return result, fmt.Errorf("copy %c record: %w", kind, err)
 		}
+		if err := s.fire(HookPinCopy); err != nil {
+			return result, err
+		}
 	}
 	if err := s.fire(HookPinCopied); err != nil {
 		return result, err
@@ -461,7 +509,7 @@ func (s *BadgerStore) Pin(eb, certifier Ref) (PinResult, error) {
 	_, hasM := vals[kindManifest]
 	_, hasT := vals[kindTxs]
 	result.ContentPending = !hasM || !hasT
-	if err := s.update(func(txn types.Txn) error {
+	if err := s.commit(func(txn types.Txn) error {
 		if err := s.bs.Set(txn, pinKey, encodeRef(certifier)); err != nil {
 			return err
 		}
@@ -522,6 +570,14 @@ func (s *BadgerStore) GarbageCollect(
 		wm, err := s.readWatermarks(txn)
 		if err != nil {
 			return err
+		}
+		// A caller computes its bound from a pin watermark it read earlier,
+		// and RollbackPins can lower that watermark and demote records above
+		// the target before this call takes the lock. The bound is applied
+		// against the watermark as it stands now so a demoted record is not
+		// collected on the strength of a stale one.
+		if wm.PinnedThroughSet {
+			beforeSlot = min(beforeSlot, wm.PinnedThrough.Slot)
 		}
 		effective = max(beforeSlot, wm.GCBefore)
 		if effective == wm.GCBefore {
@@ -828,7 +884,11 @@ func (s *BadgerStore) RollbackPins(target Ref) (int, error) {
 		if err != nil {
 			return err
 		}
-		if wm.PinnedThroughSet && target.Slot < wm.PinnedThrough.Slot {
+		// A watermark at the target's slot with another hash names a block
+		// the chain no longer holds, so it moves to the target as well.
+		if wm.PinnedThroughSet && (target.Slot < wm.PinnedThrough.Slot ||
+			(target.Slot == wm.PinnedThrough.Slot &&
+				!bytes.Equal(target.Hash, wm.PinnedThrough.Hash))) {
 			if err := s.bs.Set(
 				txn, keyPinnedThrough, encodeRef(target),
 			); err != nil {
@@ -879,7 +939,7 @@ func (s *BadgerStore) SetMigrationState(state MigrationState) error {
 	if s.closed {
 		return ErrClosed
 	}
-	return s.update(func(txn types.Txn) error {
+	return s.commit(func(txn types.Txn) error {
 		return s.bs.Set(txn, keyMigration, []byte{byte(state)})
 	})
 }

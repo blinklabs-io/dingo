@@ -420,6 +420,9 @@ func (d *Database) indexLegacyLeios(
 				k.slot = binary.BigEndian.Uint64(key[len(key)-8:])
 				e := get(k)
 				e.manifestKey, e.hasManifest = bytes.Clone(key), true
+				// The hash-only key sorts first; this key holds the bare
+				// manifest, so the slot prefix is not there to strip.
+				e.legacyManifest = false
 			case 2 + leiosdb.HashSize:
 				val, err := item.ValueCopy(nil)
 				if err != nil {

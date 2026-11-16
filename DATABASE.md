@@ -7078,16 +7078,29 @@ below the collection watermark with `leiosdb.ErrBehindImmutableTip`: such a
 block was never certified or lost its fork, and storing it would only leave a
 record for the next collection. The closure is written by
 `Database.PutLeiosClosure` and is never refused, because it belongs to a block
-certification has already accepted.
+certification has already accepted. `PutVolatile`, `PutClosure`, the pin
+record's commit and `SetMigrationState` flush the store (`BlobStore.Sync`)
+before returning, because a commit in another store depends on each: the
+closure before the offsets that point into it, and the copied records before
+the migration deletes its sources. `Pin` flushes once after its last commit,
+not per copied record. Collection, demotion and watermark writes are not
+flushed; the store orders its own commits, and an interrupted one is repeated.
 
 **Reads.** `GetLeiosEBManifest` and `GetLeiosEBTxs` read the immutable
-partition, then the volatile one, and return `ErrBlobKeyNotFound` for an
+partition, then the volatile one, but only an occurrence with a pin record
+reads the immutable partition: `Pin` copies its records in separate commits
+and writes the pin record last, so an interrupted pin leaves a partial
+immutable copy that stays invisible while the volatile copy is the complete
+one. They return `ErrBlobKeyNotFound` for an
 occurrence the store does not hold. Until the migration below finishes, a miss
 also falls back to the shared store's legacy records. The offset resolver
 (`TieredCborCache`) reads a closure from the shared blob store first, so
 synthetic closure blocks written before the LeiosDB stay readable, and then
 from the LeiosDB, and so does recovery of a consumed output
-(`recoverConsumedUtxo`). That fallback opens only a store that is already open
+(`recoverConsumedUtxo`). Past the Mithril boundary, that recovery checks a
+closure's producer against the ranking block that certifies it, found from the
+producing transaction's metadata row, since a closure has no block index of its
+own. That fallback opens only a store that is already open
 or already on disk, so a node that never handled an endorser block does not
 create `<dataDir>/leios/` by missing a block read; a closed `Database` never
 reopens it. `MaxLeiosEBSlot` is a reverse seek on both partitions.
@@ -7110,12 +7123,21 @@ The immutable point is derived from the applied tip, so an ordinary rollback of
 the tip lowers it. A pin watermark above the immutable point is therefore left
 alone while the watermark's ranking block is still on the primary chain; pins
 are rolled back from the walk only when that block is no longer on the chain.
+The same check covers a watermark at the immutable point's slot: another block
+at that slot is a removed one. Repair of content-pending pins rotates through
+the list with a cursor, so pins that stay unavailable do not keep later ones
+from being tried.
 
 **Collection.** Nothing runs on a timer. A primary-chain event wakes the
 collection worker (`runLeiosPersistenceGC`), which resolves the immutable
 point, runs the pin walk, and then deletes unpinned volatile records with a
 slot strictly below the smallest of the immutable point's slot and the pin
-watermark's slot. The bound is strict because an endorser block is certified by
+watermark's slot; `leiosdb.Store.GarbageCollect` also caps the bound at the
+pin watermark it holds when the call runs, so a rollback that lowers the
+watermark between the caller's read and the call cannot lead to collecting
+the records it demoted. A persisted endorser block also wakes the worker,
+because with no immutable point the bound follows the newest stored slot.
+The bound is strict because an endorser block is certified by
 the child of the block that announced it: the block at the immutable tip can
 announce an endorser block whose certifier has not yet become immutable, so its
 slot must survive, while any endorser block announced below the pin watermark
@@ -7150,9 +7172,11 @@ queue; stored bytes that differ from the verified ones are rewritten. The
 closure is written during apply, before the offsets that point into it, so
 offsets never name a closure that is not committed. A block rejected by a later
 check leaves its content and closure volatile and unpinned, and the collector
-removes them. Collection cannot delete the content first: the collector skips a
-pass unless the ledger reports the immutable point as unconfigured, and its
-bound never passes the immutable point or the pin watermark.
+removes them. Collection cannot delete the content first: the collector runs a
+pass when the ledger reports the immutable point, and, with a positive
+retention setting, also when the ledger is absent or reports the point as
+unconfigured; every other case skips the pass.
+Its bound never passes a known immutable point or the pin watermark.
 
 **Migration.** `Database.MigrateLeiosStore` runs at ledger start in leios run
 mode. It indexes the shared store's `e` prefix once, keys only, and then loads the

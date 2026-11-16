@@ -18,9 +18,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/leiosdb"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/require"
 )
@@ -552,5 +554,103 @@ func TestStoreGarbageCollectHonoursCancellation(t *testing.T) {
 		cancel()
 		_, err := s.GarbageCollect(ctx, 10)
 		require.ErrorIs(t, err, context.Canceled)
+	})
+}
+
+// syncCountingStore wraps a blob store to count the flushes a caller asks for.
+type syncCountingStore struct {
+	blob.BlobStore
+	syncs atomic.Int64
+}
+
+func (s *syncCountingStore) Sync() error {
+	s.syncs.Add(1)
+	return s.BlobStore.Sync()
+}
+
+func TestStoreFlushesWritesCrossStoreCommitsDependOn(t *testing.T) {
+	t.Parallel()
+	inner, err := leiosdb.Open(leiosdb.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inner.Close() })
+	counting := &syncCountingStore{BlobStore: inner.BlobStore()}
+	s := leiosdb.Wrap(counting)
+	ref, cert := eb(10, 1), eb(11, 9)
+
+	require.NoError(t, s.PutVolatile(ref, content("a", "tx")))
+	require.Equal(t, int64(1), counting.syncs.Load(), "PutVolatile")
+	require.NoError(t, s.PutClosure(ref, []byte("closure")))
+	require.Equal(t, int64(2), counting.syncs.Load(), "PutClosure")
+	_, err = s.Pin(ref, cert)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		int64(3),
+		counting.syncs.Load(),
+		"one flush for the whole pin, not one per copied record",
+	)
+	require.NoError(t, s.SetMigrationState(leiosdb.MigrationCopied))
+	require.Equal(t, int64(4), counting.syncs.Load(), "SetMigrationState")
+}
+
+func TestStoreGetIgnoresPartialImmutableCopyWithoutPin(t *testing.T) {
+	t.Parallel()
+	forEachStore(t, func(t *testing.T, f storeFactory) {
+		var copies int
+		s := f.open(t, t.TempDir(), func(point string) error {
+			if point != leiosdb.HookPinCopy {
+				return nil
+			}
+			copies++
+			if copies == 1 {
+				return errCrash
+			}
+			return nil
+		})
+		ref, cert := eb(10, 1), eb(11, 9)
+		full := content("a", "tx")
+		require.NoError(t, s.PutVolatile(ref, full))
+		require.NoError(t, s.PutClosure(ref, []byte("closure")))
+
+		// The manifest is copied and the transactions are not.
+		_, err := s.Pin(ref, cert)
+		require.ErrorIs(t, err, errCrash)
+
+		got, err := s.Get(ref)
+		require.NoError(t, err)
+		require.Equal(t, full, got, "the volatile copy is the complete one")
+		closure, err := s.GetClosure(ref)
+		require.NoError(t, err)
+		require.Equal(t, []byte("closure"), closure)
+	})
+}
+
+func TestStoreGarbageCollectIsCappedAtCurrentPinWatermark(t *testing.T) {
+	t.Parallel()
+	forEachStore(t, func(t *testing.T, f storeFactory) {
+		s := f.open(t, t.TempDir(), nil)
+		kept, above := eb(10, 1), eb(20, 2)
+		require.NoError(t, s.PutVolatile(kept, content("a", "tx")))
+		require.NoError(t, s.PutVolatile(above, content("b", "tx")))
+		require.NoError(t, s.AdvancePinnedThrough(eb(40, 8)))
+
+		// A rollback lowers the watermark after the caller read it.
+		_, err := s.RollbackPins(eb(15, 7))
+		require.NoError(t, err)
+		_, err = s.GarbageCollect(context.Background(), 100)
+		require.NoError(t, err)
+
+		_, err = s.Get(above)
+		require.NoError(t, err, "a record above the pin watermark is kept")
+		wm, err := s.Watermarks()
+		require.NoError(t, err)
+		require.Equal(t, uint64(15), wm.GCBefore)
+		_, err = s.Get(kept)
+		require.ErrorIs(
+			t,
+			err,
+			leiosdb.ErrNotFound,
+			"a record below it is still collected",
+		)
 	})
 }

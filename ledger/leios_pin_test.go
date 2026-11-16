@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/leiosdb"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -432,4 +433,72 @@ func TestMigrateLeiosStoreTreatsImmutablePointErrorAsUnknown(t *testing.T) {
 	pinned, err := p.store.IsPinned(p.ebRef())
 	require.NoError(t, err)
 	require.False(t, pinned)
+}
+
+// A pin watermark at the immutable slot but on a block the chain no longer
+// holds must be reconciled, or the walk starts from a point the chain rejects
+// and promotion stops.
+func TestAdvanceLeiosPinsReconcilesWatermarkAtImmutableSlotWithOtherHash(
+	t *testing.T,
+) {
+	t.Parallel()
+	p := newLeiosPinChain(t, true)
+	p.immutableAt(p.parent)
+	require.NoError(t, p.store.AdvancePinnedThrough(leiosdb.Ref{
+		Slot: p.parent.SlotNumber(),
+		Hash: bytes.Repeat([]byte{0xAA}, 32),
+	}))
+
+	require.NoError(t, p.ls.AdvanceLeiosPins(t.Context()))
+
+	wm, err := p.store.Watermarks()
+	require.NoError(t, err)
+	require.Equal(t, p.parent.SlotNumber(), wm.PinnedThrough.Slot)
+	require.Equal(t, p.parent.Hash().Bytes(), wm.PinnedThrough.Hash)
+}
+
+// Pins that stay unavailable at the front of the list must not keep the pins
+// behind them from being offered for repair.
+func TestRepairPendingLeiosPinsRotatesPastUnavailablePins(t *testing.T) {
+	t.Parallel()
+	p := newLeiosPinChain(t, false)
+	total := leiosPinRepairPerPass + 2
+	refs := make([]leiosdb.Ref, total)
+	manifests := map[string][]byte{}
+	for i := range refs {
+		manifest := []byte{byte(i), 0xEE}
+		refs[i] = leiosdb.Ref{
+			Slot: uint64(i + 1),
+			Hash: lcommon.Blake2b256Hash(manifest).Bytes(),
+		}
+		manifests[string(refs[i].Hash)] = manifest
+		_, err := p.store.Pin(refs[i], refs[i])
+		require.NoError(t, err)
+	}
+	// Only the last pin's content is available.
+	available := refs[total-1]
+	p.ls.config.EndorserBlockDataProvider = func(
+		hash []byte,
+		_ uint64,
+	) ([]byte, []cbor.RawMessage, bool) {
+		if !bytes.Equal(hash, available.Hash) {
+			return nil, nil, false
+		}
+		return manifests[string(hash)], nil, true
+	}
+
+	for range 2 {
+		p.ls.leiosPinMu.Lock()
+		p.ls.repairPendingLeiosPins(t.Context(), p.store)
+		p.ls.leiosPinMu.Unlock()
+	}
+
+	pending, err := p.store.PendingPins()
+	require.NoError(t, err)
+	for _, pin := range pending {
+		require.NotEqual(
+			t, available, pin.EB,
+			"the available pin behind the unavailable ones is repaired",
+		)
+	}
 }

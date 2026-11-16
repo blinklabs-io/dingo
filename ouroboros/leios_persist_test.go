@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/leiosdb"
 	databaseTypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -1418,4 +1419,20 @@ func TestLeiosPersistenceConstructorStartsGC(t *testing.T) {
 	}, time.Second, time.Millisecond)
 	_, err := db.GetLeiosEBManifest(latest.Hash, latest.Slot)
 	require.NoError(t, err)
+}
+
+// With no immutable point the collection bound follows the newest persisted
+// endorser block, so a persisted block must wake the collector itself.
+func TestLeiosPersistSignalsCollectionAfterPersist(t *testing.T) {
+	t.Parallel()
+	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
+	point, raw, data, _ := leiosPersistTestEntry(t, 300, 4, 512)
+
+	o.enqueueLeiosPersist(point, raw, data)
+	o.drainLeiosPersist()
+
+	testutil.RequireReceive(
+		t, o.leiosGCSignal, 2*time.Second,
+		"collection must be signalled after an endorser block persists",
+	)
 }

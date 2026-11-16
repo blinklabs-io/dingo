@@ -145,7 +145,8 @@ type Store interface {
 	// including the ranking block has been pinned. It never moves backwards.
 	AdvancePinnedThrough(through Ref) error
 	// GarbageCollect deletes unpinned volatile records with a slot strictly
-	// below beforeSlot and raises the collection watermark to it. The
+	// below beforeSlot, capped at the pin watermark once one is set, and
+	// raises the collection watermark to it. The
 	// watermark is persisted before any delete, so an interrupted collection
 	// is finished by the next call. It returns the number of keys deleted.
 	GarbageCollect(ctx context.Context, beforeSlot uint64) (int, error)

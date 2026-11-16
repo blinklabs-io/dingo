@@ -1479,6 +1479,116 @@ func TestRecoverConsumedUtxoReadsLeiosClosure(t *testing.T) {
 		"recovery should reach the decode step")
 }
 
+// A consumed output recovered from an endorser block's closure past the
+// Mithril boundary is checked against the ranking block that certifies the
+// closure: that block's transaction rows name it, and it must be the block
+// indexed at its height.
+func TestRecoverConsumedUtxoChecksClosureCertifierOnPrimaryChain(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{
+		DataDir:              t.TempDir(),
+		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		StrictUtxoValidation: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	const (
+		rankingID   = uint64(500)
+		rankingSlot = uint64(1_000)
+		closureSlot = uint64(990)
+	)
+	txId := randomHash(t)
+	closureHash := randomHash(t)
+	rankingHash := randomHash(t)
+	var closureHashArr [32]byte
+	copy(closureHashArr[:], closureHash)
+	require.NoError(t, db.PutLeiosClosure(
+		closureSlot, closureHash, []byte{0x80, 0xa1, 0xb2, 0xc3, 0xd4},
+	))
+	blobTxn := db.BlobTxn(true)
+	require.NoError(t, blobTxn.Do(func(itxn *Txn) error {
+		return db.Blob().SetUtxo(
+			itxn.Blob(), txId, 0,
+			EncodeUtxoOffset(&CborOffset{
+				BlockSlot:  closureSlot,
+				BlockHash:  closureHashArr,
+				ByteOffset: 1,
+				ByteLength: 3,
+			}),
+		)
+	}))
+
+	createRanking := func(hash []byte, slot uint64) {
+		t.Helper()
+		txn := db.Transaction(context.Background(), true)
+		require.NoError(t, txn.Do(func(itxn *Txn) error {
+			return db.BlockCreate(models.Block{
+				ID:       rankingID,
+				Slot:     slot,
+				Hash:     hash,
+				PrevHash: randomHash(t),
+				Number:   rankingID,
+				Cbor:     []byte{0x80},
+				Type:     1,
+			}, itxn)
+		}))
+		txn.Release()
+	}
+	recoverInput := func() error {
+		t.Helper()
+		txn := db.Transaction(context.Background(), true)
+		defer txn.Release()
+		_, rErr := db.recoverConsumedUtxo(
+			dbtestutil.NewMockInput(txId, 0), txn, true,
+		)
+		return rErr
+	}
+
+	// No transaction row: the closure has no certifying block on this chain.
+	createRanking(rankingHash, rankingSlot)
+	err = recoverInput()
+	require.ErrorIs(t, err, ErrUtxoNotFound)
+
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{0x88}, lcommon.Blake2b256Size),
+		0,
+	)
+	require.NoError(t, err)
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(txId)
+	txBuilder.WithType(gledger.TxTypeDijkstra)
+	txBuilder.WithValid(true)
+	txBuilder.WithInputs(input)
+	txBuilder.WithOutputs(output)
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, db.SetTransactionMetadataOnly(
+		context.Background(), tx,
+		ocommon.Point{Slot: rankingSlot, Hash: rankingHash},
+		0, nil, nil, 0,
+	))
+
+	err = recoverInput()
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrUtxoNotFound,
+		"a closure certified by a primary-chain ranking block must pass")
+	require.ErrorContains(t, err, "decode transaction output")
+
+	// The height now indexes another block: the certifying one is abandoned.
+	createRanking(randomHash(t), rankingSlot+1)
+	err = recoverInput()
+	require.ErrorIs(t, err, ErrUtxoNotFound,
+		"a closure certified on an abandoned fork must be refused")
+	require.ErrorContains(t, err, "not on the applied primary chain")
+}
+
 // TestDeleteUtxoBlobsUsesCallerBlobTxn pins that UTxO blob deletes are staged
 // in the caller's transaction rather than committed on their own.
 //

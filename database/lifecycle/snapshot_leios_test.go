@@ -19,6 +19,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -176,4 +177,57 @@ func TestSnapshotOfflineCarriesOnDiskLeiosDB(t *testing.T) {
 	closure, err := got.GetClosure(ref)
 	require.NoError(t, err)
 	require.Equal(t, []byte("closure"), closure)
+}
+
+// A LeiosDB that exists on disk but cannot be opened is not an absent one: a
+// snapshot that skipped it would succeed without the certified closures.
+func TestSnapshotFailsWhenExistingLeiosDBCannotBeOpened(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	src, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
+	require.NoError(t, err)
+	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
+	// A regular file where the store's directory belongs.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dataDir, leiosdb.SubdirName), []byte("x"), 0o600,
+	))
+
+	_, err = lifecycle.Snapshot(
+		context.Background(), src, snapshotTestDir(t, "snap-leios-broken"),
+		lifecycle.TriggerManual, "test", "badger", "sqlite",
+		lifecycle.WithManifestKey([]byte("operator-trust-root-0123456789ab")),
+	)
+	require.ErrorContains(t, err, "Leios store")
+}
+
+// The LeiosDB opens on first use, so a store created after the snapshot began
+// but before the commit barrier was taken must still be backed up.
+func TestSnapshotBacksUpLeiosDBCreatedBeforeCommitPause(t *testing.T) {
+	t.Parallel()
+
+	src := newTestDB(t)
+	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
+	ref := leiosdb.Ref{Slot: 5, Hash: bytes.Repeat([]byte{0xEB}, 32)}
+	var once sync.Once
+	createInGap := func(ctx context.Context) context.Context {
+		once.Do(func() {
+			store, err := src.LeiosDB()
+			require.NoError(t, err)
+			require.NoError(t, store.PutClosure(ref, []byte("closure")))
+		})
+		return ctx
+	}
+
+	snapshotDir := snapshotTestDir(t, "snap-leios-gap")
+	snapMan, err := lifecycle.Snapshot(
+		context.Background(), src, snapshotDir, lifecycle.TriggerManual,
+		"test", "badger", "sqlite",
+		lifecycle.WithManifestKey([]byte("operator-trust-root-0123456789ab")),
+		lifecycle.WithSnapshotPauseClockForTest(nil, createInGap),
+	)
+	require.NoError(t, err)
+	require.NotZero(t, snapMan.LeiosBytes)
+	_, err = os.Stat(filepath.Join(snapshotDir, lifecycle.LeiosBackupFileName))
+	require.NoError(t, err)
 }

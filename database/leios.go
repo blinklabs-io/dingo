@@ -84,20 +84,31 @@ func (d *Database) SetLeiosDB(store leiosdb.Store) {
 }
 
 // LeiosBackupStore returns the blob store behind the LeiosDB for a snapshot to
-// back up. It reports false when the node has no LeiosDB, open or on disk, so
-// a node that never used one snapshots nothing for it and never creates its
-// directory. An offline snapshot opens a fresh Database whose LeiosDB is not
-// yet open, so the on-disk directory counts.
-func (d *Database) LeiosBackupStore() (blob.BlobStore, bool) {
+// back up. It reports false with no error when the node has no LeiosDB, open
+// or on disk, so a node that never used one snapshots nothing for it and never
+// creates its directory. An offline snapshot opens a fresh Database whose
+// LeiosDB is not yet open, so the on-disk directory counts. A LeiosDB that
+// exists but cannot be opened, or one that cannot be backed up, is an error:
+// treating it as absent would let the snapshot succeed without the certified
+// closures that no other store keeps.
+func (d *Database) LeiosBackupStore() (blob.BlobStore, bool, error) {
 	store, err := d.existingLeiosDB()
-	if err != nil || store == nil {
-		return nil, false
+	if errors.Is(err, types.ErrBlobKeyNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("open Leios store for backup: %w", err)
+	}
+	if store == nil {
+		return nil, false, nil
 	}
 	holder, ok := store.(interface{ BlobStore() blob.BlobStore })
 	if !ok {
-		return nil, false
+		return nil, false, errors.New(
+			"the Leios store does not expose a blob store to back up",
+		)
 	}
-	return holder.BlobStore(), true
+	return holder.BlobStore(), true, nil
 }
 
 func (d *Database) closeLeiosDB() error {

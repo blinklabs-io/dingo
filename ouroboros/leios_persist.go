@@ -715,7 +715,13 @@ func (o *Ouroboros) drainLeiosPersist() {
 				"slot", job.slot,
 				"error", err,
 			)
+			continue
 		}
+		// Without an immutable point the collection bound follows the newest
+		// persisted endorser block, which only advances here. Ledger block
+		// events alone would leave records above the last bound uncollected
+		// while the chain is quiet.
+		o.signalLeiosGC(event.Event{})
 	}
 }
 

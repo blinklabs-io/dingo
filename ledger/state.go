@@ -48,6 +48,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -2370,6 +2371,10 @@ type LedgerState struct {
 	// optional override of the immutable point source; see leios_pin.go.
 	leiosPinMu        sync.Mutex
 	leiosImmutableTip ImmutableTipSource
+	// leiosPinRepairCursor is the last content-pending pin a repair pass
+	// visited; the next pass starts after it, so pins that stay unavailable
+	// do not starve the ones behind them. Guarded by leiosPinMu.
+	leiosPinRepairCursor leiosdb.Ref
 	// leiosApplyAnnouncer is the announcing header that ended the last
 	// prepared apply chunk, kept so the next chunk validates its endorser
 	// block while it is the ledger tip. Owned by the block-processing

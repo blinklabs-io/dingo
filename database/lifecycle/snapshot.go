@@ -229,34 +229,6 @@ func Snapshot(
 		defer utxoSetFile.Close() //nolint:errcheck // the backup path records its close error below
 	}
 
-	// The LeiosDB commits on its own, outside the commit barrier below, so
-	// its backup can be newer than the blob and metadata backups. That is
-	// safe: it only adds endorser blocks the restored chain has not reached
-	// yet, and the pin walk reconciles a pin watermark ahead of the chain.
-	var (
-		leiosBackuper blob.Backuper
-		leiosFile     *os.File
-	)
-	if leiosStore, ok := db.LeiosBackupStore(); ok {
-		leiosBackuper, ok = leiosStore.(blob.Backuper)
-		if !ok {
-			return Manifest{}, errors.New(
-				"snapshot: the Leios store does not support backup",
-			)
-		}
-		leiosFile, err = snapshotRoot.OpenFile(
-			LeiosBackupFileName,
-			os.O_WRONLY|os.O_CREATE|os.O_EXCL,
-			0o600,
-		)
-		if err != nil {
-			return Manifest{}, fmt.Errorf(
-				"create %q: %w", filepath.Join(dir, LeiosBackupFileName), err,
-			)
-		}
-		defer leiosFile.Close() //nolint:errcheck // the backup path records its close error below
-	}
-
 	// Everything read or backed up between PauseCommits and resume()
 	// describes the same set of committed writes: no new commit can land
 	// in this window, so the tip/commitTimestamp read here matches
@@ -357,6 +329,43 @@ func Snapshot(
 		metrics.pause.WithLabelValues(result).Observe(pauseDuration.Seconds())
 	}()
 	defer releaseBarrier()
+	// The LeiosDB commits on its own, outside the commit barrier, so its
+	// backup can be newer than the blob and metadata backups. That is safe:
+	// it only adds endorser blocks the restored chain has not reached yet,
+	// and the pin walk reconciles a pin watermark ahead of the chain. It is
+	// selected here, under the barrier, because the store opens on first use:
+	// a certified block applied before the pause may have created it, and
+	// the ranking block that block committed would be captured without its
+	// closure if the selection ran earlier.
+	var (
+		leiosBackuper blob.Backuper
+		leiosFile     *os.File
+	)
+	leiosStore, hasLeios, err := db.LeiosBackupStore()
+	if err != nil {
+		return Manifest{}, fmt.Errorf("snapshot: %w", err)
+	}
+	if hasLeios {
+		var ok bool
+		leiosBackuper, ok = leiosStore.(blob.Backuper)
+		if !ok {
+			return Manifest{}, errors.New(
+				"snapshot: the Leios store does not support backup",
+			)
+		}
+		leiosFile, err = snapshotRoot.OpenFile(
+			LeiosBackupFileName,
+			os.O_WRONLY|os.O_CREATE|os.O_EXCL,
+			0o600,
+		)
+		if err != nil {
+			return Manifest{}, fmt.Errorf(
+				"create %q: %w", filepath.Join(dir, LeiosBackupFileName), err,
+			)
+		}
+		defer leiosFile.Close() //nolint:errcheck // the backup path records its close error below
+	}
+
 	// The limit starts once the barrier is held; backupCtx is cancelled by
 	// the caller's ctx as well, so cancellation behaves as before.
 	backupCtx, cancelBackup := context.WithCancel(ctx)
