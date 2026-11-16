@@ -114,6 +114,7 @@ func TestCaughtUpJudgementDisconnectsNoOne(t *testing.T) {
 func TestCaughtUpJudgementPublishesNoGenesisModeEvents(t *testing.T) {
 	t.Parallel()
 	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
 	_, exited := bus.Subscribe(GenesisModeExitedEventType)
 	_, entered := bus.Subscribe(GenesisModeEnteredEventType)
 	f := newGSMFixture(t, gsmJudgementOnly, func(

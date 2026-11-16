@@ -87,6 +87,7 @@ func TestInitLeiosAdaptiveEndorsementsGates(t *testing.T) {
 			t.Parallel()
 			n := adaptiveTestNode(t, tc.section, tc.producer, tc.runMode)
 			n.eventBus = event.NewEventBus(nil, nil)
+			t.Cleanup(n.eventBus.Close)
 			require.NoError(t, n.initLeiosAdaptiveEndorsements(t.Context()))
 			t.Cleanup(func() {
 				if n.leiosAdaptiveEb != nil {
@@ -113,6 +114,7 @@ func TestInitLeiosAdaptiveEndorsementsDropsAStaleController(t *testing.T) {
 	n := adaptiveTestNode(t,
 		`{"LeiosAdaptiveEndorsements": {"Enabled": true}}`, true, "leios")
 	n.eventBus = event.NewEventBus(nil, nil)
+	t.Cleanup(n.eventBus.Close)
 	require.NoError(t, n.initLeiosAdaptiveEndorsements(t.Context()))
 	require.NotNil(t, n.leiosAdaptiveEb)
 	require.NoError(t, n.leiosAdaptiveEb.Stop())
