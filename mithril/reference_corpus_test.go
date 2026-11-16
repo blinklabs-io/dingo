@@ -25,6 +25,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -114,53 +115,147 @@ var referenceUncompared = map[string]string{
 		"the outcome",
 }
 
+// referenceDivergence is a record where dingo deliberately answers
+// differently from the recorded Rust code, and the answer dingo gives: its
+// output when it accepts, or a substring of its error when it rejects.
+type referenceDivergence struct {
+	reason string
+	ok     bool
+	detail string
+}
+
 // referenceDivergences are the records where dingo deliberately answers
 // differently from the recorded Rust code. The test fails if one of them
 // starts agreeing, so the list cannot go stale.
-var referenceDivergences = map[string]string{
+var referenceDivergences = map[string]referenceDivergence{
 	// Rules Mithril's main branch added after release 2642.0, which dingo
 	// enforces: a genesis certificate's AVK and parameters must be the ones
 	// its signed message names for the next epoch, and a lottery index must
 	// be below m.
-	"chain.jsonl#11":  "genesis AVK bound to the signed next AVK",
-	"chain.jsonl#12":  "genesis parameters bound to the signed next parameters",
-	"chain.jsonl#13":  "certificate after genesis must be in the next epoch",
-	"proofs.jsonl#34": "lottery index must be below m",
+	"chain.jsonl#11": {
+		"genesis AVK bound to the signed next AVK", false,
+		"genesis aggregate verification key does not match signed protocol message",
+	},
+	"chain.jsonl#12": {
+		"genesis parameters bound to the signed next parameters", false,
+		"genesis protocol parameters do not match signed protocol message",
+	},
+	"chain.jsonl#13": {
+		"certificate after genesis must be in the next epoch", false,
+		"certificate chain epoch 10 follows genesis epoch 10",
+	},
+	"proofs.jsonl#34": {
+		"lottery index must be below m", false,
+		"lottery index 12 exceeds parameter m=12",
+	},
 	// A phi_f that is not finite: Rust panics, dingo hashes it as zero, and
 	// STM verification rejects any phi_f outside (0, 1], so no certificate
 	// carrying one verifies.
-	"hashes.jsonl#31": "phi_f infinite: Rust panics",
-	"hashes.jsonl#35": "phi_f infinite: Rust panics",
+	"hashes.jsonl#31": {
+		"phi_f infinite: Rust panics", true,
+		"48034c734f1b3b5e5761ac238b54dde7b2e100f0ac6a30ff9c8d70dd6dec3746",
+	},
+	"hashes.jsonl#35": {
+		"phi_f infinite: Rust panics", true,
+		"87ba08efa8128d45471a2acf22e62b79337a12f54164865547bd333509326f82",
+	},
 	// An AVK in the binary bytes-hex codec: Rust re-encodes it to JSON-hex
 	// before hashing; dingo hashes the text it was given. Aggregators emit
 	// JSON-hex, and the hash still binds the text the signatures cover.
-	"certs.jsonl#58": "bytes-hex AVK hashed as given",
-	"certs.jsonl#61": "upper-case hex multi-signature hashed as given",
+	"certs.jsonl#58": {
+		"bytes-hex AVK hashed as given", true,
+		"18216e03c1c65ffd2e7bfd17d5841d6a8d2c90e2a163cd6d95327964815deae2",
+	},
+	"certs.jsonl#61": {
+		"upper-case hex multi-signature hashed as given", true,
+		"436b4026c721ee1e5a85b574f37dccea6a7c38b1ab979cfb8e0059ea76677157",
+	},
 	// A multi-signature that does not decode: Rust rejects it when it
 	// converts the message, dingo when STM verification decodes it.
-	"certs.jsonl#47": "multi-signature decoded at verification",
-	"certs.jsonl#51": "multi-signature decoded at verification",
+	"certs.jsonl#47": {
+		"multi-signature decoded at verification", true,
+		"02f1dfa2259961adea5c0339c047c18fc8252859d307654e032dcde2d8fdcb0d",
+	},
+	"certs.jsonl#51": {
+		"multi-signature decoded at verification", true,
+		"d5806fce250020ebc8c8865522be9872da778510df8f72c7db310883756c00b4",
+	},
 	// A batch path with sibling values left over: Rust ignores them, dingo
 	// rejects the path. Mithril never produces one, and the extra values
 	// would otherwise be unbounded work the proof does not use.
-	"proofs.jsonl#9":   "unused batch path values",
-	"proofs.jsonl#42":  "unused batch path values",
-	"proofs.jsonl#108": "unused batch path values",
-	"merkle.jsonl#36":  "unused batch path values",
+	"proofs.jsonl#9": {
+		"unused batch path values", false,
+		"verifying Merkle batch proof: merkle batch proof has 1 unused sibling values",
+	},
+	"proofs.jsonl#42": {
+		"unused batch path values", false,
+		"verifying Merkle batch proof: merkle batch proof has 1 unused sibling values",
+	},
+	"proofs.jsonl#108": {
+		"unused batch path values", false,
+		"verifying Merkle batch proof: merkle batch proof has 1 unused sibling values",
+	},
+	"merkle.jsonl#36": {
+		"unused batch path values", false,
+		"merkle batch proof has 1 unused sibling values",
+	},
 	// serde_json parses a float without its float_roundtrip feature, which
-	// can land one ulp from the nearest double; Go's ParseFloat rounds
+	// can land an ulp or two from the nearest double; Go's ParseFloat rounds
 	// correctly. Each record here has 17 or more significant digits.
-	"numbers.jsonl#11": "serde_json best-effort float parse",
-	"numbers.jsonl#22": "serde_json best-effort float parse",
-	"numbers.jsonl#24": "serde_json best-effort float parse",
-	"numbers.jsonl#27": "serde_json best-effort float parse",
-	"numbers.jsonl#29": "serde_json best-effort float parse",
-	"numbers.jsonl#30": "serde_json best-effort float parse",
-	"numbers.jsonl#38": "serde_json best-effort float parse",
-	"numbers.jsonl#42": "serde_json best-effort float parse",
-	"numbers.jsonl#44": "serde_json best-effort float parse",
-	"numbers.jsonl#47": "serde_json best-effort float parse",
-	"numbers.jsonl#52": "serde_json best-effort float parse",
+	"numbers.jsonl#11": {
+		"serde_json best-effort float parse", true,
+		"000fffffffffffff",
+	},
+	"numbers.jsonl#22": {
+		"serde_json best-effort float parse", true,
+		"3ddba7188217d8c4",
+	},
+	"numbers.jsonl#24": {
+		"serde_json best-effort float parse", true,
+		"3facb284693f1a4d",
+	},
+	"numbers.jsonl#27": {
+		"serde_json best-effort float parse", true,
+		"3fb8c36545337aff",
+	},
+	"numbers.jsonl#29": {
+		"serde_json best-effort float parse", true,
+		"3fb3fdf329e589a4",
+	},
+	"numbers.jsonl#30": {
+		"serde_json best-effort float parse", true,
+		"3f9b5cf2678b2a8b",
+	},
+	"numbers.jsonl#38": {
+		"serde_json best-effort float parse", true,
+		"3fab1f871fbce25a",
+	},
+	"numbers.jsonl#42": {
+		"serde_json best-effort float parse", true,
+		"3fa98d06c123b859",
+	},
+	"numbers.jsonl#44": {
+		"serde_json best-effort float parse", true,
+		"3fbf4838b155a08a",
+	},
+	"numbers.jsonl#47": {
+		"serde_json best-effort float parse", true,
+		"3fa64004fd1a2fe8",
+	},
+	"numbers.jsonl#52": {
+		"serde_json best-effort float parse", true,
+		"3fbf2967a21581b4",
+	},
+}
+
+func (d referenceDivergence) matches(ok bool, out string, err error) bool {
+	if ok != d.ok {
+		return false
+	}
+	if ok {
+		return out == d.detail
+	}
+	return err != nil && strings.Contains(err.Error(), d.detail)
 }
 
 // runReference evaluates one recorded request against dingo and returns
@@ -382,12 +477,25 @@ func TestReferenceCorpus(t *testing.T) {
 			agree = false
 			err = fmt.Errorf("output %s, reference %s", out, rec.wantOut())
 		}
-		reason, diverges := referenceDivergences[rec.id()]
+		div, diverges := referenceDivergences[rec.id()]
 		switch {
 		case diverges && agree:
 			t.Errorf(
 				"%s (%s): listed as a divergence (%s) but now agrees",
-				rec.id(), rec.Note, reason,
+				rec.id(), rec.Note, div.reason,
+			)
+		case diverges && !div.matches(ok, out, err):
+			t.Errorf(
+				"%s (%s): listed as a divergence (%s) with dingo ok=%v %q; "+
+					"dingo ok=%v out=%q: %v",
+				rec.id(),
+				rec.Note,
+				div.reason,
+				div.ok,
+				div.detail,
+				ok,
+				out,
+				err,
 			)
 		case !diverges && !agree:
 			t.Errorf(
