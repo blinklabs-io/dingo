@@ -111,6 +111,10 @@ after voting registrations become usable in epoch 2. The configurator sets
 `LeiosMinOfferLead` to 30 slots: with `k: 3` the immutable tip trails the tip by
 far less than the 3600-slot default, which would hold back every endorser-block
 offer.
+The configurator also enables `LeiosAdaptiveEndorsements`, as the reference
+devnets do, so the producers scale their endorser blocks by the quorums the
+announcements reach. Each sample is logged as `leios adaptive endorsements`
+with `eb_capacity_scale`.
 
 ## Network parameters
 

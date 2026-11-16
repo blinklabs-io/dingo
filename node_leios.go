@@ -580,3 +580,72 @@ func (n *Node) attachLeiosHandlers(o *ouroborosPkg.Ouroboros) error {
 	}
 	return nil
 }
+
+// leiosAdaptiveEbConfig returns the adaptive-endorsement parameters of the
+// node configuration and whether the section is enabled.
+func (n *Node) leiosAdaptiveEbConfig() (leios.AdaptiveEbConfig, bool) {
+	decrease, increase, minScale, enabled := n.config.cardanoNodeConfig.LeiosAdaptiveEndorsementsSettings()
+	return leios.AdaptiveEbConfig{
+		Decrease: decrease,
+		Increase: increase,
+		MinScale: minScale,
+	}, enabled
+}
+
+// leiosAdaptiveCaughtUp reports whether the node follows the tip of the chain:
+// the chain selector has left Genesis selection, the reference's CaughtUp
+// state of the Genesis state machine. A node that syncs past old announcements
+// has none of their votes.
+func leiosAdaptiveCaughtUp(cs *chainselection.ChainSelector) bool {
+	if cs == nil {
+		return false
+	}
+	genesis, _ := cs.GenesisSelectionState()
+	return !genesis
+}
+
+// initLeiosAdaptiveEndorsements starts the controller that scales the
+// endorser blocks this node forges down after announcements miss their quorum
+// and back up as they make it. It runs only where the scale is used, on a
+// block producer that forges endorser blocks, and only when the node
+// configuration enables LeiosAdaptiveEndorsements. It needs the vote manager,
+// the ledger state and the chain selector, so it runs after them and again
+// after a live restore replaces them; a start always begins with the whole
+// capacity.
+func (n *Node) initLeiosAdaptiveEndorsements(ctx context.Context) error {
+	cfg, enabled := n.leiosAdaptiveEbConfig()
+	if !enabled || !n.config.blockProducer ||
+		!n.config.leiosForgingEnabled() ||
+		n.leiosVoteManager == nil {
+		return nil
+	}
+	chainSelector := n.chainSelector
+	controller, err := leios.NewAdaptiveEbController(
+		leios.AdaptiveEbControllerConfig{
+			Logger:           n.config.logger,
+			EventBus:         n.eventBus,
+			Config:           cfg,
+			Votes:            n.leiosVoteManager,
+			CertificationGap: n.ledgerState.LeiosCertificationGap,
+			CaughtUp: func() bool {
+				return leiosAdaptiveCaughtUp(chainSelector)
+			},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create leios adaptive endorsements: %w", err)
+	}
+	if err := controller.Start(ctx); err != nil {
+		return fmt.Errorf("start leios adaptive endorsements: %w", err)
+	}
+	n.leiosAdaptiveEb = controller
+	return nil
+}
+
+// applyLeiosAdaptiveTuning hands the forger the scale to forge with. A node
+// without the controller forges with the whole protocol capacity.
+func (n *Node) applyLeiosAdaptiveTuning(fc *forging.ForgerConfig) {
+	if controller := n.leiosAdaptiveEb; controller != nil {
+		fc.LeiosEBCapacityScale = controller.Scale
+	}
+}

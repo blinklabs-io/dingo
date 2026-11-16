@@ -298,6 +298,10 @@ type BlockForger struct {
 	forgeEBMaxTxRefs uint64
 	forgeEBMaxBytes  uint64
 
+	// ebCapacityScale reads the share of the protocol's endorser-block
+	// capacity to forge with. Nil forges with all of it.
+	ebCapacityScale func() float64
+
 	// now reads the wall clock for slot budgeting. Overridden in tests so
 	// deadline behaviour is exercised without sleeping.
 	now func() time.Time
@@ -792,6 +796,10 @@ type ForgerConfig struct {
 	ForgeEBMaxTxRefs *uint64
 	ForgeEBMaxBytes  *uint64
 
+	// LeiosEBCapacityScale reads the share of the protocol's endorser-block
+	// capacity to forge with, in [0, 1]. Nil forges with all of it.
+	LeiosEBCapacityScale func() float64
+
 	// ForgeSelectionRetryMargin is how much of the slot must remain for
 	// the forger to re-run transaction selection after a concurrent
 	// ledger publication invalidated the candidate block. Zero uses
@@ -905,6 +913,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	if cfg.ForgeEBMaxBytes != nil {
 		f.forgeEBMaxBytes = *cfg.ForgeEBMaxBytes
 	}
+	f.ebCapacityScale = cfg.LeiosEBCapacityScale
 	f.now = time.Now
 
 	f.forgeSelectionRetryMargin = cfg.ForgeSelectionRetryMargin
@@ -4893,9 +4902,12 @@ func leiosEBTxMeasure(
 }
 
 // leiosEBCapsForSlot returns the endorser-block caps for slot: the operator
-// caps bounded by the capacity the protocol parameters in force at the slot
-// allow (effectiveLeiosEBCaps). False means capacity cannot be resolved and
-// no endorser block may be announced.
+// caps bounded by the share of the capacity the protocol parameters in force
+// at the slot allow that the producer currently forges with
+// (effectiveLeiosEBCapsScaled). The scale is read here, per endorser block,
+// and applies only to what this node forges: peers' endorser blocks are
+// validated against the whole protocol capacity. False means capacity cannot
+// be resolved and no endorser block may be announced.
 func (f *BlockForger) leiosEBCapsForSlot(slot uint64) (leiosEBCaps, bool) {
 	caps := leiosEBCaps{
 		maxRefs:  f.forgeEBMaxTxRefs,
@@ -4904,7 +4916,11 @@ func (f *BlockForger) leiosEBCapsForSlot(slot uint64) (leiosEBCaps, bool) {
 	if f.eraParams == nil || isNilProtocolParamsProvider(f.eraParams) {
 		return leiosEBCaps{}, false
 	}
-	return effectiveLeiosEBCaps(caps, f.eraParams.ProtocolParamsForSlot(slot))
+	pparams := f.eraParams.ProtocolParamsForSlot(slot)
+	if f.ebCapacityScale == nil {
+		return effectiveLeiosEBCaps(caps, pparams)
+	}
+	return effectiveLeiosEBCapsScaled(caps, pparams, f.ebCapacityScale())
 }
 
 // certifiedClosureForRebase resolves the certified closure a ranking block

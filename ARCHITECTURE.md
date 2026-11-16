@@ -12779,6 +12779,57 @@ endorser-block production before mempool validation and increment the
 without a new announcement. Known earlier-era parameters retain the operator
 caps for the Conway-header Leios prototype.
 
+##### Adaptive endorser-block capacity (`LeiosAdaptiveEndorsements`)
+
+A block producer can forge with only a share of that protocol capacity, a scale
+in `[MinScale, 1]` that follows how announcements fared, as the reference
+producer does (`LeiosAdaptiveEndorsements.hs`). It is off unless the node
+configuration (`config.json`) carries a
+`LeiosAdaptiveEndorsements` section: absent or `Enabled: false` forges with the
+whole capacity, and a present section without `Enabled` is on. The keys and
+their defaults are `Decrease` (0.8), `Increase` (0.02) and `MinScale` (0.1),
+none of them range-checked, as in the reference; the keys of the earlier
+release (`GainP`, `Attack`, `Release`, `AliveWindow`) are ignored. The
+controller (`leios.AdaptiveEbController`) runs on a node that is a block
+producer forging endorser blocks, so a relay with the section ignores it.
+
+The controller follows the blocks the chain adopts. When a block extends one
+that announced an endorser block, it reads the verified stake of the votes
+collected for that announcement at that moment, against the committee and
+quorum threshold of the announcement's epoch, and takes one sample. Every
+announcement counts, whoever made it. A sample moves the scale only when the
+node is caught up (the chain selector has left Genesis selection), and not
+when the committee, the threshold or the certification gap cannot be resolved:
+
+| Outcome | Scale |
+|---|---|
+| Quorum reached | `min(1, scale + Increase)`, certifiable or not |
+| Quorum missed, announcement certifiable | `max(MinScale, scale * Decrease)` |
+| Quorum missed, next block before the certification gap | unchanged |
+
+An announcement is certifiable when its successor's slot is at least the
+certification gap after it: three announcement periods, the vote period and the
+diffusion period, rounded up to whole slots (`LeiosCertificationGap`). The scale
+starts at one on every start of the node and again after a live restore, lives
+in memory only, is not reset at epoch boundaries and is not rewound by a
+rollback. A rollback samples nothing, because the block after it extends the
+rollback point rather than the announcing block.
+
+The forger reads the scale once per endorser block, in `leiosEBCapsForSlot`, and
+scales the protocol bounds before the operator caps bound them (so a smaller
+operator cap is not scaled): the referenced transaction bytes, the execution
+units memory and steps, and the reference-script bytes, each rounded down from
+the exact product with the scale, and the manifest bound after the widest map
+head (5 bytes). `forgeEbMaxTxRefs` has no protocol counterpart and is not
+scaled. A scaled transaction-size or manifest bound that rounds to zero skips
+the endorser block as `protocol_capacity_unavailable`. Only what this node
+forges is scaled: endorser blocks of other producers, the mempool and
+ranking-block capacity are validated and sized against the whole protocol
+capacity. Each sample is logged as `leios adaptive endorsements` with
+`participation`, `missed_quorum`, `certifiable` and `eb_capacity_scale`, the
+fields the reference traces as `LeiosAdaptiveEb`; it is a debug record unless the
+scale changed.
+
 #### Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 
 The node always validates the aggregate reference-script budget between steps 5
