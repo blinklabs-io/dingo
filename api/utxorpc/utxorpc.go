@@ -81,10 +81,14 @@ type UtxorpcConfig struct {
 	Logger      *slog.Logger
 	EventBus    UtxorpcEventBus
 	LedgerState UtxorpcLedgerState
-	Mempool     UtxorpcMempool
-	TLS         apiconfig.EffectiveTLS
-	Host        string
-	Port        uint
+	// QueryDatabase serves the QueryService's UTxO, datum and transaction
+	// reads. Nil reads the ledger, which holds those rows on the shared
+	// layout.
+	QueryDatabase QueryDatabase
+	Mempool       UtxorpcMempool
+	TLS           apiconfig.EffectiveTLS
+	Host          string
+	Port          uint
 
 	// Every limit below is off (unlimited) when zero and enforced only when
 	// the operator sets a positive value, except where noted.

@@ -126,6 +126,7 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 		"KoiosParity.APIKey":                   {},
 		"Plugins.Storage.Blob.Config":          {},
 		"Plugins.Storage.Metadata.Config":      {},
+		"Indexer.Metadata":                     {},
 		"Plugins.Consensus.Config":             {},
 		"Plugins.Mempool.Config":               {},
 		"Plugins.API.Blockfrost.Config":        {},

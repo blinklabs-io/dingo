@@ -230,6 +230,16 @@ func Load(
 	return LoadWithDB(ctx, cfg, logger, immutableDir, nil)
 }
 
+// loadIndexerLayout is the layout a load freezes into a new database: the
+// split layout's gate must be filled while the database has no chain state, or
+// the node refuses to start over the loaded blocks.
+func loadIndexerLayout(cfg *config.Config) string {
+	if cfg.SplitIndexer() {
+		return config.IndexerLayoutSplit
+	}
+	return ""
+}
+
 // ensureDB returns the provided database or opens a new one from cfg.
 // The returned cleanup function must be deferred by the caller; it closes
 // the database only when a new one was created.
@@ -250,7 +260,8 @@ func ensureDB(
 	}
 	dbConfig := &database.Config{
 		DataDir: cfg.DatabasePath, Logger: logger,
-		StorageMode:    cfg.StorageMode,
+		StorageMode:    cfg.ConsensusStorageMode(),
+		IndexerLayout:  loadIndexerLayout(cfg),
 		Network:        cfg.Network,
 		NetworkMagic:   cfg.NetworkMagic,
 		StartEra:       string(cfg.StartEra),
@@ -269,8 +280,9 @@ func ensureDB(
 		},
 		internalplugins.StorageDependencies{
 			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
-			StorageMode: cfg.StorageMode, MaxConnections: cfg.DatabaseWorkers,
-			Logger: logger, TracingEnabled: cfg.Tracing,
+			StorageMode:    cfg.ConsensusStorageMode(),
+			MaxConnections: cfg.DatabaseWorkers,
+			Logger:         logger, TracingEnabled: cfg.Tracing,
 			GenesisStakingEmpty: genesisStakingEmpty,
 		},
 	)
@@ -438,29 +450,51 @@ func WithDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
 ) *DeferredIndexRebuilder {
+	rebuilder := NewDeferredIndexRebuilder(ctx, db, logger)
+	rebuilder.drop()
+	return rebuilder
+}
+
+// NewDeferredIndexRebuilder returns the rebuilder WithDeferredIndexes would,
+// without dropping anything: for a run that resumes after the drop. Building
+// skips the indexes that exist.
+func NewDeferredIndexRebuilder(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+) *DeferredIndexRebuilder {
 	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
 	if !ok {
 		return &DeferredIndexRebuilder{}
 	}
-	rebuilder := &DeferredIndexRebuilder{
-		manager: manager,
-		logger:  logger,
-		ctx:     ctx,
+	return &DeferredIndexRebuilder{manager: manager, logger: logger, ctx: ctx}
+}
+
+// Drop drops the deferred-index manifest again; dropping what is already
+// gone is a no-op.
+func (r *DeferredIndexRebuilder) Drop() { r.drop() }
+
+func (r *DeferredIndexRebuilder) drop() {
+	if r == nil || r.manager == nil {
+		return
 	}
 	var err error
-	if dropper, ok := manager.(metadata.ContextDeferredIndexDropper); ok {
-		err = dropper.DropDeferredIndexesContext(ctx)
+	if dropper, ok := r.manager.(metadata.ContextDeferredIndexDropper); ok {
+		err = dropper.DropDeferredIndexesContext(r.ctx)
 	} else {
-		err = manager.DropDeferredIndexes()
+		err = r.manager.DropDeferredIndexes()
 	}
 	if err != nil {
+		logger := r.logger
+		if logger == nil {
+			logger = slog.New(slog.DiscardHandler)
+		}
 		logger.Warn(
 			"failed to drop deferred metadata indexes; "+
 				"continuing and repairing during rebuild phases",
 			"error", err,
 		)
 	}
-	return rebuilder
 }
 
 // criticalIndexRebuildLogThreshold is how long the critical-index check

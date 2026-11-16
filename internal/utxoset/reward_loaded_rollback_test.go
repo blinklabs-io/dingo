@@ -183,3 +183,23 @@ func TestLoadedRewardRowsAreDroppedByARollbackBelowTheirCapture(t *testing.T) {
 	require.True(t, hasSetCursor(t, set, 2))
 	require.Contains(t, setRewardRows(t, set, 2), "pots=true snap=true")
 }
+
+// A seed failure a set loads from the metadata store keeps the slot the store
+// captured it at, not the slot of the epoch's snapshot, so a rollback between
+// the two drops it as the metadata store does.
+func TestLoadedSeedFailureKeepsItsCapturedSlot(t *testing.T) {
+	t.Parallel()
+	set := openRecoverySet(t, utxoset.Config{})
+	applySlots(t, set, 8)
+	db := ledgerAt(t, slotPoint(8))
+	seedRewardEpoch(t, db, 3, 7)
+	require.NoError(t, db.Metadata().SaveRewardSeedFailure(
+		3, "mark", "imported basis", 2, nil,
+	))
+
+	require.NoError(t, set.LoadLedgerState(t.Context(), dbadapter.New(db)))
+	reason, slot, err := set.RewardFailureRow(3, "mark", nil)
+	require.NoError(t, err)
+	require.Equal(t, "imported basis", reason)
+	require.Equal(t, uint64(2), slot)
+}

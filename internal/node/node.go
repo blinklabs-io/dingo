@@ -635,17 +635,14 @@ func Run(
 		return fmt.Errorf("invalid chainsync strategy: %w", err)
 	}
 
-	// Validate storage mode
-	storageMode := dingo.StorageMode(cfg.StorageMode)
-	if storageMode == "" {
-		storageMode = dingo.StorageModeCore
+	storageMode, err := nodeStorageMode(cfg)
+	if err != nil {
+		return err
 	}
-	if !storageMode.Valid() {
-		return fmt.Errorf(
-			"invalid storage mode %q: must be %q or %q",
-			cfg.StorageMode,
-			dingo.StorageModeCore,
-			dingo.StorageModeAPI,
+	if cfg.SplitIndexer() {
+		logger.Info(
+			"indexer.layout split: API endpoints read the IndexerDB and " +
+				"answer 503 until it is ready",
 		)
 	}
 	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
@@ -653,15 +650,16 @@ func Run(
 	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
 	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
 	mcpPort := config.APIPluginPort(cfg.Plugins.API.Mcp)
+	apiMode := storageMode.IsAPI() || cfg.SplitIndexer()
 	logger.Info("storage mode",
 		"mode", string(storageMode),
-		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
-		"kupo", storageMode.IsAPI() && kupoPort > 0,
-		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
-		"mesh", storageMode.IsAPI() && meshPort > 0,
+		"blockfrost", apiMode && blockfrostPort > 0,
+		"kupo", apiMode && kupoPort > 0,
+		"utxorpc", apiMode && utxorpcPort > 0,
+		"mesh", apiMode && meshPort > 0,
 		"mcp", mcpPort > 0,
-		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
-		"midnight_grpc", storageMode.IsAPI() &&
+		"midnight_indexing", cfg.Midnight.Enabled && apiMode,
+		"midnight_grpc", apiMode &&
 			cfg.Midnight.ServerEnabled && cfg.Midnight.Port > 0,
 	)
 
@@ -856,6 +854,29 @@ func forgeEBCap(v *uint64, fallback uint64) uint64 {
 		return fallback
 	}
 	return *v
+}
+
+// nodeStorageMode validates cfg's storage mode and returns the mode the
+// ledger's own store opens in. The split layout keeps that store in core mode
+// and holds API rows in the IndexerDB, which the node opens in API mode itself
+// and serves the API endpoints from.
+func nodeStorageMode(cfg *config.Config) (dingo.StorageMode, error) {
+	storageMode := dingo.StorageMode(cfg.StorageMode)
+	if storageMode == "" {
+		storageMode = dingo.StorageModeCore
+	}
+	if !storageMode.Valid() {
+		return "", fmt.Errorf(
+			"invalid storage mode %q: must be %q or %q",
+			cfg.StorageMode,
+			dingo.StorageModeCore,
+			dingo.StorageModeAPI,
+		)
+	}
+	if cfg.SplitIndexer() {
+		return dingo.StorageModeCore, nil
+	}
+	return storageMode, nil
 }
 
 // buildDingoConfig translates the loaded internal/config.Config, plus the
@@ -1133,6 +1154,10 @@ func buildDingoConfig(
 		),
 		dingo.WithBindAddr(cfg.BindAddr),
 		dingo.WithStorageMode(storageMode),
+		dingo.WithIndexerLayout(cfg.Indexer.Layout),
+		dingo.WithIndexerWriterFactory(NewIndexerService),
+		dingo.WithIndexerMaxReadyLagBlocks(cfg.Indexer.MaxReadyLagBlocks),
+		dingo.WithIndexerMetadata(cfg.Indexer.Metadata),
 		// CIP-23 minimum pool margin (consensus-affecting)
 		dingo.WithMinPoolMargin(cfg.MinPoolMargin),
 		dingo.WithCIP0203(cfg.CIP0203Enabled),

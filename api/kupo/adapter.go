@@ -27,6 +27,7 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -66,9 +67,25 @@ func metadataBlockAtOrAfterSlot(
 // LedgerState and coordinated database calls.
 type NodeAdapter struct {
 	ledgerState *ledger.LedgerState
+	// indexer is the IndexerDB on a split layout and nil on the shared one.
+	indexer *indexerdb.Store
 	// pageSizeOverride replaces matchPageSize when positive, so tests can
 	// cross page boundaries without seeding hundreds of rows.
 	pageSizeOverride int
+}
+
+// SetIndexerStore points API reads at the IndexerDB. Without it the adapter
+// reads the ledger database, which holds the API rows on the shared layout.
+func (a *NodeAdapter) SetIndexerStore(store *indexerdb.Store) {
+	a.indexer = store
+}
+
+// db is the database API rows are read from.
+func (a *NodeAdapter) db() *database.Database {
+	if a.indexer != nil {
+		return a.indexer.Database()
+	}
+	return a.ledgerState.Database()
 }
 
 func (a *NodeAdapter) matchPageLimit() int {
@@ -88,12 +105,26 @@ func NewNodeAdapter(ls *ledger.LedgerState) (*NodeAdapter, error) {
 	return &NodeAdapter{ledgerState: ls}, nil
 }
 
-func (a *NodeAdapter) Tip() (Point, error) {
+// dataTip is the chain position the served rows cover: the IndexerDB's tip on
+// a split layout, the ledger tip otherwise.
+func (a *NodeAdapter) dataTip() (slot, blockNumber uint64, hash []byte, err error) {
+	if a.indexer != nil {
+		tip, err := a.indexer.Tip(nil)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		return tip.Slot, tip.BlockNumber, tip.Hash, nil
+	}
 	tip := a.ledgerState.Tip()
-	return Point{
-		SlotNo:     tip.Point.Slot,
-		HeaderHash: hex.EncodeToString(tip.Point.Hash),
-	}, nil
+	return tip.Point.Slot, tip.BlockNumber, tip.Point.Hash, nil
+}
+
+func (a *NodeAdapter) Tip() (Point, error) {
+	slot, _, hash, err := a.dataTip()
+	if err != nil {
+		return Point{}, err
+	}
+	return Point{SlotNo: slot, HeaderHash: hex.EncodeToString(hash)}, nil
 }
 
 const matchPageSize = 512
@@ -168,7 +199,7 @@ func (a *NodeAdapter) Matches(
 		}
 	}
 	empty := outputIndexOutsideStorage || applyPatternFilters(storageQuery, pattern)
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn, dbTip, err := database.NewReadSnapshotContext(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("open Kupo query snapshot: %w", err)
@@ -241,7 +272,7 @@ func (i *nodeMatchIterator) loadPage() error {
 	if i.txn == nil {
 		txn, _, err := database.NewReadSnapshotContext(
 			i.ctx,
-			i.adapter.ledgerState.Database(),
+			i.adapter.db(),
 		)
 		if err != nil {
 			return fmt.Errorf("open Kupo query page snapshot: %w", err)
@@ -251,7 +282,7 @@ func (i *nodeMatchIterator) loadPage() error {
 	defer i.releaseSnapshot()
 	pageSize := i.adapter.matchPageLimit()
 	i.storage.Limit = pageSize
-	page, err := i.adapter.ledgerState.Database().UtxosWithHistory(
+	page, err := i.adapter.db().UtxosWithHistory(
 		i.storage,
 		i.txn,
 	)
@@ -321,7 +352,7 @@ func (i *nodeMatchIterator) spentFields(
 	cacheKey := string(utxo.SpentAtTxHash)
 	details, ok := i.spenders[cacheKey]
 	if !ok {
-		transaction, err := i.adapter.ledgerState.Database().
+		transaction, err := i.adapter.db().
 			GetTransactionByHash(
 				i.ctx,
 				utxo.SpentAtTxHash,
@@ -555,7 +586,7 @@ func (a *NodeAdapter) matchFromUtxo(
 		}
 	}
 	if resolve && ret.DatumHash != nil && ret.Datum == nil {
-		datum, err := a.ledgerState.Database().GetDatum(
+		datum, err := a.db().GetDatum(
 			ctx,
 			utxo.DatumHash,
 			txn,
@@ -600,7 +631,7 @@ func (a *NodeAdapter) Datum(
 	ctx context.Context,
 	hash []byte,
 ) (*Datum, Point, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn, tip, err := database.NewReadSnapshotContext(ctx, db)
 	if err != nil {
 		return nil, Point{}, fmt.Errorf("open Kupo datum snapshot: %w", err)
@@ -621,7 +652,7 @@ func (a *NodeAdapter) Script(
 	ctx context.Context,
 	hash []byte,
 ) (*Script, Point, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn, tip, err := database.NewReadSnapshotContext(ctx, db)
 	if err != nil {
 		return nil, Point{}, fmt.Errorf("open Kupo script snapshot: %w", err)
@@ -668,7 +699,7 @@ func scriptLanguage(scriptType uint8) (string, error) {
 func (a *NodeAdapter) Checkpoints(
 	ctx context.Context,
 ) ([]Point, Point, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn, tip, err := database.NewReadSnapshotContext(ctx, db)
 	if err != nil {
 		return nil, Point{}, fmt.Errorf(
@@ -724,7 +755,7 @@ func (a *NodeAdapter) Checkpoint(
 	slot uint64,
 	strict bool,
 ) (*Point, Point, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn, tip, err := database.NewReadSnapshotContext(ctx, db)
 	if err != nil {
 		return nil, Point{}, fmt.Errorf(
@@ -776,7 +807,7 @@ func (a *NodeAdapter) Metadata(
 	slot uint64,
 	transactionID []byte,
 ) ([]Metadata, string, Point, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn, tip, err := database.NewReadSnapshotContext(ctx, db)
 	if err != nil {
 		return nil, "", Point{}, fmt.Errorf(
@@ -893,10 +924,14 @@ func metadatumSchema(value lcommon.TransactionMetadatum) any {
 }
 
 func (a *NodeAdapter) Health() (Health, Point, int, error) {
-	tip := a.ledgerState.Tip()
+	ledgerTip := a.ledgerState.Tip()
+	tipSlot, tipBlock, tipHash, err := a.dataTip()
+	if err != nil {
+		return Health{}, Point{}, 0, err
+	}
 	checkpoint := Point{
-		SlotNo:     tip.Point.Slot,
-		HeaderHash: hex.EncodeToString(tip.Point.Hash),
+		SlotNo:     tipSlot,
+		HeaderHash: hex.EncodeToString(tipHash),
 	}
 	targetSlot, connected := a.ledgerState.UpstreamSyncStatus()
 	ret := Health{
@@ -904,9 +939,9 @@ func (a *NodeAdapter) Health() (Health, Point, int, error) {
 		Version:          version.GetVersionString(),
 	}
 	ret.Configuration.Indexes = "installed"
-	if len(tip.Point.Hash) > 0 {
-		tipSlot := tip.Point.Slot
-		ret.MostRecentCheckpoint = &tipSlot
+	if len(tipHash) > 0 {
+		checkpointSlot := tipSlot
+		ret.MostRecentCheckpoint = &checkpointSlot
 	}
 	if !connected {
 		return ret, checkpoint, http.StatusServiceUnavailable, nil
@@ -920,7 +955,7 @@ func (a *NodeAdapter) Health() (Health, Point, int, error) {
 	progress = math.Max(0, math.Min(1, progress))
 	ret.NetworkSynchronization = &progress
 	status := http.StatusAccepted
-	if progress >= 1 {
+	if progress >= 1 && tipBlock >= ledgerTip.BlockNumber {
 		status = http.StatusOK
 	}
 	return ret, checkpoint, status, nil

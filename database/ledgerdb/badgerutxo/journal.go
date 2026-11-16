@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
@@ -983,8 +984,19 @@ func (a *AsOf) Get(r Ref) ([]byte, bool, error) {
 	return v, err == nil, err
 }
 
-// Each calls fn for every output live at the view's point.
+// Each calls fn for every output live at the view's point, in reference
+// order: the snapshot's outputs the point left alone, merged with the ones the
+// journal restored.
 func (a *AsOf) Each(fn func(Output) error) error {
+	restored := make([]Output, 0, len(a.changed))
+	for r, c := range a.changed {
+		if c != nil {
+			restored = append(restored, Output{Ref: r, Cbor: c})
+		}
+	}
+	slices.SortFunc(restored, func(x, y Output) int {
+		return bytes.Compare(x.Ref[:], y.Ref[:])
+	})
 	it := a.txn.NewIterator(badger.IteratorOptions{
 		Prefix:         []byte{UTxOTag},
 		PrefetchValues: true,
@@ -996,6 +1008,12 @@ func (a *AsOf) Each(fn func(Output) error) error {
 		if _, ok := a.changed[r]; ok {
 			continue
 		}
+		for len(restored) > 0 && bytes.Compare(restored[0].Ref[:], r[:]) < 0 {
+			if err := fn(restored[0]); err != nil {
+				return err
+			}
+			restored = restored[1:]
+		}
 		v, err := it.Item().ValueCopy(nil)
 		if err != nil {
 			return err
@@ -1004,11 +1022,8 @@ func (a *AsOf) Each(fn func(Output) error) error {
 			return err
 		}
 	}
-	for r, c := range a.changed {
-		if c == nil {
-			continue
-		}
-		if err := fn(Output{Ref: r, Cbor: c}); err != nil {
+	for _, o := range restored {
+		if err := fn(o); err != nil {
 			return err
 		}
 	}

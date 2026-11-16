@@ -316,3 +316,22 @@ func verifyOpCertHeaderCrypto(
 	}
 	return nil
 }
+
+// BlockOpCertCounter returns the pool that issued block and the operational
+// certificate issue number its header carries. ok is false for a block whose
+// header has no certificate (Byron).
+func BlockOpCertCounter(
+	block ledger.Block,
+) (pool lcommon.PoolKeyHash, issueNumber uint64, ok bool, err error) {
+	opCert, has := opCertFromHeader(block.Header())
+	if !has {
+		return pool, 0, false, nil
+	}
+	if opCert == nil {
+		return pool, 0, false, errors.New(
+			"block header reported an operational certificate but returned nil",
+		)
+	}
+	return lcommon.PoolKeyHash(block.IssuerVkey().Hash()), opCert.IssueNumber,
+		true, nil
+}

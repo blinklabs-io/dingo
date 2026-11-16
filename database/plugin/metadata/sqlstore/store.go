@@ -91,6 +91,10 @@ type Config struct {
 	// same convention Maintenance/MaintenanceInterval already use.
 	Checkpoint         func(context.Context) error
 	CheckpointInterval time.Duration
+	// SyncCommits is an optional provider-owned hook that makes every commit
+	// that returned before it began durable. A provider whose commits are
+	// durable on return leaves it unset.
+	SyncCommits func(context.Context) error
 	// BackupTo and RestoreFrom are optional provider-owned lifecycle hooks.
 	// SQLite supplies them for its file-backed store; other dialects may leave
 	// them unset until a native snapshot mechanism is available.
@@ -254,6 +258,7 @@ type Store struct {
 	// why WAL checkpointing needs a much shorter cadence than VACUUM.
 	checkpoint       func(context.Context) error
 	checkpointEvery  time.Duration
+	syncCommits      func(context.Context) error
 	checkpointCancel context.CancelFunc
 	checkpointDone   chan struct{}
 	checkpointState  atomic.Uint32
@@ -390,6 +395,7 @@ func New(config Config) (*Store, error) {
 		vacuumEvery:                 config.VacuumInterval,
 		checkpoint:                  config.Checkpoint,
 		checkpointEvery:             config.CheckpointInterval,
+		syncCommits:                 config.SyncCommits,
 		backupTo:                    config.BackupTo,
 		restoreFrom:                 config.RestoreFrom,
 		prepare:                     config.Prepare,
@@ -952,6 +958,15 @@ func (s *Store) startCheckpointTicker() {
 			}
 		}
 	}()
+}
+
+// SyncCommits implements metadata.CommitSyncer. It is a no-op for a store
+// whose provider commits durably.
+func (s *Store) SyncCommits(ctx context.Context) error {
+	if s.syncCommits == nil {
+		return nil
+	}
+	return s.syncCommits(ctx)
 }
 
 func (s *Store) runCheckpoint(ctx context.Context) error {

@@ -3744,6 +3744,127 @@ rollback depth is set by however far the stores and forks drifted, and on a
 Mithril-bootstrapped node can reach the `mithril_ledger_slot` trust boundary,
 past which rollback is refused outright and the database must be discarded.
 
+### IndexerDB layout
+
+The default `shared` layout stores consensus state and API rows in one
+metadata store. The opt-in `split` layout (`indexer.layout`) gives API rows
+their own store, the IndexerDB, which `database/indexerdb` wraps. The package
+imports neither `ledger` nor `internal/node`: it owns the IndexerDB tip and
+readiness, and the writer that fills it follows the ledger from outside. The
+layout setting, its frozen node-settings gate and the tip/readiness store sit
+beside the ordered `ledger.tip` event (`ledger.TipEvent`), published after a
+block-batch commit, a forged-block tip write and a rollback that moves
+the tip. It is a wake signal: the writer reads the durable ledger tip and
+catches up from its own tip, which also covers blocks applied during startup
+replay (no event is published for those). Leios closure transactions are
+applied inside the block batch that carries their ranking block, so the batch
+event covers them; the writer indexes them from the stored endorser block (see
+below).
+`internal/indexer` holds the writer: one goroutine pulls
+canonical blocks from the IndexerDB tip to the ledger's durable tip behind a
+`ChainSource` (`DatabaseSource` over the ledger database), and commits each
+batch's rows, ledger facts and new tip in one transaction. A `FactsSource`
+(`MetadataFacts`, over `metadata.FactRowStore`) copies the epoch-boundary facts
+by natural key, and the writer splits a batch at each boundary so a boundary's
+reward credits land between the blocks before and after it. The ledger
+journals a round's credits lazily, so credits dated before the writer's
+segment are re-read at the boundary slot of every round that still holds
+unfolded outputs, and each applied credit marks its output folded. With the
+accounts family drained the journal is the live UTxO set's reward records,
+which carry a sequence number in write order (`badgerutxo.RewardRecord.Seq`)
+so a late credit at an old slot follows the position a reader holds. The
+account and DRep facts of a batch's slot range are read from the set's state
+journal, so the export costs the rows the range changed and holds
+`utxoSetApplyMu` for bounded steps; only a range below the journal's floor, such
+as the first export from slot zero, reads the whole table in key order. A split
+node's set keeps what the writer has not acknowledged
+(`utxoset.Config.RetainRewardRecords`), including the reward stake and derived
+rows of epochs it has not copied. The writer acknowledges a batch only after
+the IndexerDB has made it durable (`metadata.CommitSyncer`, every
+`indexer.DurableAckBatches` batches and when a pass catches up), whether or not
+the accounts family is drained. Fact pages resume after the natural key of the
+last row served (the large tables seek to it in the set; `ledger.ErrFactCursorLost` when the export is gone, and the writer restarts the table), and anchor state is copied from one point of the ledger
+(`metadata.AnchorStateViewer`). The
+writer writes one `pool_opcert_sequence` row per block from the header
+(`ledger.BlockOpCertCounter`); the counters a snapshot import certified are
+read when the anchor is recorded (`metadata.AnchorOpCertSource`, which
+`ledger.LedgerState` serves from its metadata store or from the set). Stake
+inputs the ledger is still writing are deferred and copied once finished. The
+`BlockIndexer`
+is `node.Backfill` (`IndexBlocks`, `RollbackTo`), run over the IndexerDB; an
+empty IndexerDB on a chain from genesis is first seeded by
+`ledger.SeedIndexerGenesis`. A rollback goes to the exact canonical ancestor
+while the abandoned blocks are stored and otherwise to the newest tip
+checkpoint on the chain. A checkpoint left by the former history backfill
+seeds an empty tip. `IndexBlocks` applies a certifying ranking block's closure
+from `ledger.CertifiedClosureSource`, which `ledger` exports so the writer and
+the ledger resolve and check a closure through one loader.
+
+A chain imported from a Mithril snapshot adds a bootstrap in front of that
+loop (`internal/indexer/anchor.go`). `DatabaseSource` reports the anchor the
+ledger database recorded (`AnchorChain`), and `Writer.Prepare` records it in
+the IndexerDB when the service is built so readiness cannot answer early. The
+writer then replays from the chain's origin to the anchor with the
+deferred-index manifest dropped, builds the manifest, verifies the rows against
+the ledger database (`MetadataFacts` as `AnchorFacts`: applied-transaction
+count and a streamed digest of the live UTxO set at the anchor, through the
+`metadata.AnchorStateStore` capability) and applies the imported account state
+in one transaction with the phase marker (`Backfill` as `AnchorRestorer`, the
+history backfill's restore at its anchor). Each phase commits its own marker
+under `indexer_bootstrap`, so a stop resumes in the phase that has work left;
+`indexerdb.Store.ReadyServing` is not ready until the phase is `done` and the
+tip has passed the recorded anchor. A ledger that drained its accounts into
+the live UTxO set serves the imported accounts, the reward journal after the
+anchor and the UTxO digest from the set (`metadata.AnchorStateSource`, which
+`ledger.LedgerState` implements): the set's import baselines carry the pool and
+DRep delegations the import recorded, and a set that cannot (it lost them or
+the reward journal to a drain that came first) is refused with
+`ErrAnchorUnserved`. `mithril sync` on the split layout imports
+the ledger state into the core store only (`mithril.SyncConfig.IndexerLayout`)
+and refuses to advance a complete split database.
+
+The node wires the layout in `node_indexer.go`. `plugins.OpenIndexerDatabase`
+opens the second metadata store, in API mode, as a `database.Database` over
+the ledger database's blob store (`blob.NewIndexerStore`: blocks read-only,
+UTxO and transaction offsets under their own key prefix, no commit timestamp),
+after the ledger database is recovered and before the ledger starts. The writer
+starts after the ledger, is woken by `ledger.tip`, and stops before the
+IndexerDB closes, which precedes the ledger database closing the blob store.
+The root package cannot import `internal/node`, so the writer is injected with
+`WithIndexerWriterFactory`. The API readers sit over the IndexerDB on a split node: the Blockfrost and
+Kupo adapters resolve their database through one `db()` accessor (the
+IndexerDB when an `indexerdb.Store` is set, else the ledger database), Mesh,
+MCP, off-chain metadata and the token registry take `Node.apiDatabase()`, and
+Kupo and Blockfrost report the IndexerDB tip (`dataTip`) in latest-block and
+epoch responses and clamp history to it. Block bodies are shared through one
+blob store, so Midnight wraps its database in `NewBoundedDatabase`, which hides
+blocks above the IndexerDB tip. `internal/apiready`
+gates routes on `indexerdb.Store.Ready`: each API classifies its own routes
+(`classifyRoute`) as ungated, current-state or history, each exports its
+`RoutePatterns` so a test fails on a route family no class names, and a gated route
+answers 503 with `Retry-After` while its kind is not ready. The shared layout
+sets no check and serves everything. MCP gates every route but health. Routes
+the ledger or mempool serve (transaction submit and evaluation, mempool,
+health) stay ungated; Blockfrost's `network` routes read the IndexerDB and are
+gated as current state. The Blockfrost mempool endpoints resolve a pooled
+transaction's confirmed inputs and deposit parameters from the ledger store at
+the ledger tip, because the IndexerDB may not have reached it.
+UTxO RPC's QueryService reads through `utxorpc.QueryDatabase`: the
+`indexerQueryDatabase` on a split node, the ledger otherwise. It answers
+`Unavailable` while the IndexerDB is not ready and reports its tip; sync,
+watch, submit and evaluation stay on the ledger.
+
+A reader never mixes the two stores in one transaction or takes an API row
+from the ledger store: a `sqlstore` transaction is valid only on the store
+that opened it, and the ledger store keeps no API rows. The Blockfrost adapter
+reads transactions, address history, pending reward credit
+(`ledger.PendingRewardCreditIn`) and the rows behind every list from
+`db()`; the one fact only the ledger store holds, whether a snapshot's stake
+inputs are still being written, is read from its committed state
+(`RewardStakeInputsIncompleteCommitted`). Mesh's account endpoints read UTxOs
+through `Node.meshLedgerState`, which answers them from the IndexerDB and
+leaves slot-time and parameter reads to the ledger state.
+
 ## Ledger/chain reconciliation
 
 The divergence reconcilers decide whether a ledger point is on the current

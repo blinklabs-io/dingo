@@ -332,6 +332,16 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			err = errors.Join(err, stopErr)
 		}
 	}
+	// The writer reads the ledger database and writes the IndexerDB, so it
+	// stops before either closes and its ledger.tip subscription goes with it.
+	if n.indexerWriter != nil {
+		if stopErr := stopWithDeadline(
+			max(time.Until(deadline), 0), "indexer writer",
+			func() error { return n.stopIndexerWriter(ctx) },
+		); stopErr != nil {
+			err = errors.Join(err, stopErr)
+		}
+	}
 	if n.peerGov != nil {
 		if stopErr := n.peerGov.Stop(ctx); stopErr != nil {
 			err = errors.Join(
@@ -623,6 +633,12 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 		n.deferredIndexMaintenanceDone = nil
 	}
 
+	// The IndexerDB reads blocks through the ledger database's blob store, so
+	// it closes first.
+	if closeErr := n.closeIndexerDatabase(); closeErr != nil {
+		err = errors.Join(err, closeErr)
+	}
+
 	if n.db != nil {
 		if closeErr := n.db.Close(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("database close: %w", closeErr))
@@ -866,7 +882,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 // era history preparation publishes both the epoch cache and applied tip so
 // timestamp conversion uses the persisted tip's forecast horizon.
 func (n *Node) reinitializeMidnightIndexer() error {
-	if !midnightIndexerActive(n.config.storageMode, n.config.midnight) {
+	if !midnightIndexerActive(n.apiStorageMode(), n.config.midnight) {
 		return nil
 	}
 	if err := n.prepareEpochCache(n.ctx); err != nil {
@@ -1145,13 +1161,14 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.config.storageMode.IsAPI() && utxorpcPort > 0 {
+	if n.apiStorageMode().IsAPI() && utxorpcPort > 0 {
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIUtxorpc,
 			utxorpcSelection.Provider, utxorpcSelection.Config,
 			utxorpc.ProviderDependencies{
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
+				QueryDatabase:      n.utxorpcQueryDatabase(),
 				Host:               n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
@@ -1165,7 +1182,7 @@ func (n *Node) reinitializeAPIServers() error {
 		n.bark.ResumeDB(n.db)
 	}
 
-	if midnightServerActive(n.config.storageMode, n.config.midnight) {
+	if midnightServerActive(n.apiStorageMode(), n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			n.midnightServerConfig(),
@@ -1187,17 +1204,19 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.config.storageMode.IsAPI() && blockfrostPort > 0 {
+	if n.apiStorageMode().IsAPI() && blockfrostPort > 0 {
 		adapter, err := blockfrost.NewNodeAdapter(n.ledgerState, n.mempool)
 		if err != nil {
 			return fmt.Errorf("recreating blockfrost node adapter: %w", err)
 		}
+		adapter.SetIndexerStore(n.indexerStore)
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
 			blockfrostSelection.Provider, blockfrostSelection.Config,
 			blockfrost.ProviderDependencies{
 				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+				Ready:              n.apiReadiness(),
 			},
 		)
 		if err != nil {
@@ -1211,17 +1230,19 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.config.storageMode.IsAPI() && kupoPort > 0 {
+	if n.apiStorageMode().IsAPI() && kupoPort > 0 {
 		adapter, err := kupo.NewNodeAdapter(n.ledgerState)
 		if err != nil {
 			return fmt.Errorf("recreating kupo node adapter: %w", err)
 		}
+		adapter.SetIndexerStore(n.indexerStore)
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIKupo,
 			kupoSelection.Provider, kupoSelection.Config,
 			kupo.ProviderDependencies{
 				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+				Ready:              n.apiReadiness(),
 			},
 		)
 		if err != nil {
@@ -1235,7 +1256,7 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.config.storageMode.IsAPI() && meshPort > 0 {
+	if n.apiStorageMode().IsAPI() && meshPort > 0 {
 		var genesisHash string
 		if nc := n.config.cardanoNodeConfig; nc != nil {
 			genesisHash = nc.ByronGenesisHash
@@ -1251,9 +1272,10 @@ func (n *Node) reinitializeAPIServers() error {
 			meshSelection.Provider, meshSelection.Config,
 			mesh.ProviderDependencies{
 				Logger:             n.config.logger,
-				LedgerState:        n.ledgerState,
-				Database:           mesh.NewMeshDatabase(n.db),
-				Chain:              n.ledgerState.Chain(),
+				LedgerState:        n.meshLedgerState(),
+				Database:           n.meshDatabase(),
+				Chain:              n.meshChain(),
+				Ready:              n.apiReadiness(),
 				Mempool:            n.mempool,
 				Host:               n.config.bindAddr,
 				Network:            n.config.network,
@@ -1279,8 +1301,9 @@ func (n *Node) reinitializeAPIServers() error {
 			mcpSelection.Provider, mcpSelection.Config,
 			mcp.ProviderDependencies{
 				Logger:             n.config.logger,
-				Database:           n.db,
+				Database:           n.apiDatabase(),
 				LedgerState:        n.ledgerState,
+				Ready:              n.apiReadiness(),
 				Mempool:            n.mempool,
 				Host:               n.config.bindAddr,
 				Network:            n.config.network,
@@ -1292,7 +1315,7 @@ func (n *Node) reinitializeAPIServers() error {
 		}
 	}
 
-	if n.config.storageMode.IsAPI() {
+	if n.apiStorageMode().IsAPI() {
 		fetcher, err := offchainmetadata.New(
 			n.offchainMetadataConfig(),
 		)
@@ -1436,9 +1459,15 @@ func (n *Node) reinitializeAndResume(ctx context.Context) error {
 		{"core storage", func() error {
 			return n.reinitializeCoreStorage(ctx)
 		}},
+		{"indexer database", func() error {
+			return n.openIndexerWriter(ctx)
+		}},
 		{"midnight indexer", n.reinitializeMidnightIndexer},
 		{"background managers", func() error {
 			return n.reinitializeBackgroundManagers(ctx)
+		}},
+		{"indexer writer", func() error {
+			return n.startIndexerWriter(n.ctx) //nolint:contextcheck
 		}},
 		{"networking core", func() error {
 			return n.reinitializeNetworkingCore(ctx)
@@ -1500,7 +1529,31 @@ func (n *Node) Snapshot(
 	if set := n.utxoSetBackuper(); set != nil {
 		manifestOpts = append(manifestOpts, lifecycle.WithUtxoSetBackup(set))
 	}
-	return lifecycle.SnapshotToCloud(
+	var (
+		stagedIndexer string
+		indexerMeta   indexerPayload
+	)
+	if n.splitIndexer() {
+		if err := n.checkIndexerSnapshotSupported(); err != nil {
+			return lifecycle.Manifest{}, err
+		}
+		if err := dblifecycle.CheckIndexerSnapshotDestination(
+			n.config.databaseLifecycle.SnapshotCloudDestination,
+		); err != nil {
+			return lifecycle.Manifest{}, err
+		}
+		// The IndexerDB first: its tip never passes the ledger's, and the
+		// ledger snapshot below is taken at or after it.
+		var cleanup func()
+		stagedIndexer, indexerMeta, cleanup, err = n.captureIndexerPayload(
+			ctx,
+		)
+		if err != nil {
+			return lifecycle.Manifest{}, err
+		}
+		defer cleanup()
+	}
+	manifest, err := lifecycle.SnapshotToCloud(
 		ctx,
 		n.destinationRegistry,
 		n.db,
@@ -1517,6 +1570,16 @@ func (n *Node) Snapshot(
 		description,
 		manifestOpts...,
 	)
+	if err != nil || stagedIndexer == "" {
+		return manifest, err
+	}
+	if err := dblifecycle.InstallIndexerPayload(
+		destDir, stagedIndexer, indexerMeta,
+	); err != nil {
+		_ = lifecycle.RemoveSnapshotContext(context.WithoutCancel(ctx), destDir)
+		return lifecycle.Manifest{}, err
+	}
+	return manifest, nil
 }
 
 func (n *Node) stopForPendingRestoreRollback(
@@ -1571,6 +1634,18 @@ func (n *Node) Restore(
 	n.snapshotMu.Lock()
 	defer n.snapshotMu.Unlock()
 
+	// Checked before anything is quiesced, so a snapshot that cannot restore
+	// onto a split node is refused while the node is still serving.
+	var indexerSnapshot indexerPayload
+	if n.splitIndexer() {
+		if err := n.checkIndexerSnapshotSupported(); err != nil {
+			return lifecycle.Manifest{}, err
+		}
+		var err error
+		if indexerSnapshot, err = dblifecycle.ReadIndexerPayload(snapshotDir); err != nil {
+			return lifecycle.Manifest{}, err
+		}
+	}
 	// Resolved before anything is quiesced so an unusable trust key refuses
 	// the restore while the node is still serving.
 	manifestOpts, err := dblifecycle.ManifestOptions(n.config.databaseLifecycle)
@@ -1742,6 +1817,27 @@ func (n *Node) Restore(
 			)
 		}
 		return lifecycle.Manifest{}, fmt.Errorf("restore: %w", err)
+	}
+
+	if n.splitIndexer() {
+		if err := restoreIndexerPayload(
+			snapshotDir, stagingDir, indexerSnapshot, manifest,
+		); err != nil {
+			_ = lifecycle.RemoveRestoreWorkDir(stagingDir)
+			if rollbackErr := recovery.Rollback(ctx); rollbackErr != nil {
+				n.cancel()
+				return lifecycle.Manifest{}, errors.Join(err, rollbackErr)
+			}
+			if resumeErr := n.reinitializeAndResume(
+				context.WithoutCancel(ctx),
+			); resumeErr != nil {
+				n.cancel()
+				return lifecycle.Manifest{}, fmt.Errorf(
+					"restore: %w (resume also failed: %w)", err, resumeErr,
+				)
+			}
+			return lifecycle.Manifest{}, fmt.Errorf("restore: %w", err)
+		}
 	}
 
 	backupDir, err := n.swapInRestoredDataDir(stagingDir)
@@ -2376,6 +2472,20 @@ func (n *Node) Truncate(
 			return 0, fmt.Errorf(
 				"%w: %w", lifecycle.ErrTruncateNotStarted, err,
 			)
+		}
+		// Before the ledger deletes the blocks. Nothing of the ledger has
+		// changed if this fails, so it is a refusal, not a partial truncate.
+		if err := n.rollbackIndexerForTruncate(ctx, tmpDB, block, setOpts...); err != nil {
+			return 0, fmt.Errorf(
+				"%w: %w", lifecycle.ErrTruncateNotStarted, err,
+			)
+		}
+		// Test seam: the one boundary a crash between the two truncate steps
+		// can fall on.
+		if n.afterIndexerRollback != nil {
+			if err := n.afterIndexerRollback(); err != nil {
+				return 0, err
+			}
 		}
 		return lifecycle.Truncate(
 			ctx,

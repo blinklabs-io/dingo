@@ -623,9 +623,15 @@ type SyncProgressFunc func(SyncProgress)
 
 // SyncConfig is the input to a full Mithril bootstrap of a node database.
 type SyncConfig struct {
-	Network                string                     // "mainnet" | "preprod" | "preview"
-	DataDir                string                     // node database path
-	StorageMode            string                     // "api" | "core"
+	Network     string // "mainnet" | "preprod" | "preview"
+	DataDir     string // node database path
+	StorageMode string // "api" | "core"
+	// IndexerLayout is "split" when API rows live in a separate IndexerDB that
+	// the node fills from the ledger database after the bootstrap, or empty.
+	// A split bootstrap runs in core storage mode, fills the layout gate on a
+	// database that has no chain state yet, and refuses to advance a database
+	// that is already complete: the IndexerDB follows one ledger anchor.
+	IndexerLayout          string
 	CardanoNodeConfig      *cardano.CardanoNodeConfig // genesis + Mithril verification keys; if nil, loaded from EmbeddedConfigFS for Network
 	CardanoConfigPath      string                     // optional explicit config path (else the network's embedded config)
 	Backend                string                     // Mithril artifact backend; same semantics as BootstrapConfig.Backend (empty selects v2)
@@ -724,6 +730,15 @@ func pctOf(cur, total int64) float64 {
 	}
 	return float64(cur) / float64(total) * 100
 }
+
+// errSplitCatchUp refuses to advance a complete split database to a newer
+// snapshot: the IndexerDB's rows belong to the anchor it was built at, and a
+// catch-up import rewrites the ledger state under it.
+var errSplitCatchUp = errors.New(
+	"mithril sync cannot advance a complete database with indexer.layout " +
+		"split: the IndexerDB follows the ledger from the anchor it was " +
+		"built at; sync a new data directory instead",
+)
 
 // markSyncInProgress marks the database as an incomplete sync (so `dingo serve`
 // refuses to start) and, for API mode, pre-seeds the backfill checkpoint. It is
@@ -875,6 +890,9 @@ func Sync(
 	mode, modeErr := determineSyncMode(ctx, db)
 	if modeErr != nil {
 		return SyncResult{}, fmt.Errorf("determining sync mode: %w", modeErr)
+	}
+	if cfg.IndexerLayout == "split" && mode == syncModeCatchUp {
+		return SyncResult{}, errSplitCatchUp
 	}
 	pinnedDigest := cfg.PinnedDigest
 	if cfg.RepairLegacyRewardState {
@@ -2315,6 +2333,7 @@ func openDatabase(
 		&database.Config{
 			DataDir: cfg.DataDir, Logger: logger,
 			StorageMode: cfg.StorageMode, Network: cfg.Network,
+			IndexerLayout: cfg.IndexerLayout,
 			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
 				cfg.CardanoNodeConfig, cfg.CardanoConfigPath, cfg.Network,
 			),

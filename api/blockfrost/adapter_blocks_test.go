@@ -18,11 +18,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"slices"
 	"strconv"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -369,4 +371,38 @@ func TestTransactionAddressEffects(t *testing.T) {
 	outputs, spent = transactionAddressEffects(build(false), row)
 	require.Equal(t, []string{colAddr}, outputs)
 	require.Equal(t, row.Collateral, spent)
+}
+
+func TestNodeAdapterResolveBlockStopsAtTheIndexerTip(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	chain := seedChain(t, db, 5)
+	indexed := chain[2]
+	store, err := indexerdb.NewStore(
+		db,
+		fixedTipState{value: fmt.Sprintf(
+			"%d:%d:%x",
+			indexed.SlotNumber(), indexed.BlockNumber(), indexed.Hash().Bytes(),
+		)},
+		10,
+	)
+	require.NoError(t, err)
+	adapter.SetIndexerStore(store)
+	ctx := t.Context()
+
+	for _, id := range []string{
+		hex.EncodeToString(chain[4].Hash().Bytes()),
+		strconv.FormatUint(chain[4].BlockNumber(), 10),
+	} {
+		_, err := adapter.resolveBlock(ctx, id)
+		require.ErrorIs(t, err, ErrBlockNotFound, id)
+	}
+	for _, id := range []string{
+		hex.EncodeToString(indexed.Hash().Bytes()),
+		strconv.FormatUint(indexed.BlockNumber(), 10),
+	} {
+		block, err := adapter.resolveBlock(ctx, id)
+		require.NoError(t, err, id)
+		require.Equal(t, indexed.Hash().Bytes(), block.Hash)
+	}
 }

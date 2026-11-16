@@ -386,6 +386,19 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	// The IndexerDB writer reads the ledger database and writes the
+	// IndexerDB, so it stops here and the IndexerDB closes in phase 3 before
+	// the ledger database does.
+	if stopErr := stopWithDeadline(
+		max(time.Until(deadline), 0), "indexer writer",
+		func() error { return n.stopIndexerWriter(ctx) },
+	); stopErr != nil {
+		if errors.Is(stopErr, errStorageDrainUnconfirmed) {
+			storageDrainConfirmed = false
+		}
+		err = errors.Join(err, stopErr)
+	}
+
 	n.config.logger.Info(
 		"shutdown phase 1 complete",
 		"elapsed", time.Since(shutdownStart).Round(time.Millisecond),
@@ -556,6 +569,15 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.indexerDB != nil {
+		if !storageDrainConfirmed {
+			n.config.logger.Error(
+				"skipping indexer database close because a storage user drain was not confirmed",
+			)
+		} else if closeErr := n.closeIndexerDatabase(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}
 	if n.db != nil {
 		if !storageDrainConfirmed {
 			n.config.logger.Error(

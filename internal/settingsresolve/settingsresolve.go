@@ -254,6 +254,15 @@ func checkMetadataPluginSidecar(cfg *config.Config) error {
 	)
 }
 
+// ReadPersistedGateValues returns the node settings persisted in the metadata
+// store at cfg.DatabasePath, opened alone and closed again. ok is false when
+// the store cannot be opened or read.
+func ReadPersistedGateValues(
+	cfg *config.Config,
+) (values nodesettings.Values, ok bool) {
+	return readPersistedGateValues(cfg)
+}
+
 // readPersistedGateValues opens only the metadata store at cfg.DatabasePath
 // and merges the legacy node_settings row with node_settings_gate the same
 // way database/commit_timestamp.go's persistedGateValues does: the legacy
@@ -445,10 +454,16 @@ func gateBindings() []gateBinding {
 		{
 			name:       "storage_mode",
 			provenance: []string{"StorageMode"},
+			// The gate belongs to the consensus store, which is core on the
+			// split layout whatever StorageMode says: that value is the
+			// IndexerDB's.
 			configuredValue: func(cfg *config.Config) (string, bool) {
-				return cfg.StorageMode, true
+				return cfg.ConsensusStorageMode(), true
 			},
 			applyEffective: func(cfg *config.Config, value string) {
+				if cfg.SplitIndexer() {
+					return
+				}
 				cfg.StorageMode = value
 			},
 		},

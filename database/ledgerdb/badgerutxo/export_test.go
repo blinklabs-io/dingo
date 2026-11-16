@@ -244,3 +244,30 @@ func (s *Store) PendingRollbackForTest() (ocommon.Point, bool, error) {
 func (s *Store) SetAfterBootstrapFlushForTest(fn func() error) {
 	s.afterBootstrapFlush = fn
 }
+
+// WriteLegacyRewardRecordsForTest stores records as a store from before
+// sequences and the sequence index wrote them: the amount only, no number, no
+// index entry, and clears the marks that say the index is built.
+func (s *Store) WriteLegacyRewardRecordsForTest(recs []RewardRecord) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		for _, r := range recs {
+			v := make([]byte, rewardRecordAmountLen)
+			v[7] = byte(r.Amount) //nolint:gosec // a small test amount
+			if err := txn.Set(rewardRecordKey(r), v); err != nil {
+				return err
+			}
+		}
+		if err := txn.Delete(rewardSeqKey); err != nil {
+			return err
+		}
+		return txn.Delete(rewardIndexedKey)
+	})
+}
+
+// DeleteExportFloorForTest removes the export floor, as a store written
+// before it existed lacks it.
+func (s *Store) DeleteExportFloorForTest() error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(exportFloorKey)
+	})
+}

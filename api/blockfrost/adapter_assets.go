@@ -55,7 +55,7 @@ func (a *NodeAdapter) assetKnown(
 	assetName []byte,
 	txn dbtypes.Txn,
 ) (bool, error) {
-	meta := a.ledgerState.Database().Metadata()
+	meta := a.db().Metadata()
 	events, err := meta.CountAssetMintBurnHistory(policy, assetName, txn)
 	if err != nil {
 		return false, fmt.Errorf("count asset events: %w", err)
@@ -75,7 +75,7 @@ func (a *NodeAdapter) listAssets(
 	policyID []byte,
 	params PaginationParams,
 ) ([]AssetListItemInfo, int, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
@@ -162,7 +162,7 @@ func (a *NodeAdapter) AssetHistory(
 	if err != nil {
 		return nil, 0, err
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
@@ -248,7 +248,7 @@ func (a *NodeAdapter) AssetTransactions(
 			err,
 		)
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
@@ -336,7 +336,7 @@ func (a *NodeAdapter) AssetUTXOs(
 	if err != nil {
 		return nil, 0, fmt.Errorf("resolve asset UTxOs to range: %w", err)
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 

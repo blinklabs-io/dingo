@@ -2024,3 +2024,95 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 		require.NotContains(t, logBuf.String(), secret)
 	}
 }
+
+// fakeIndexerSource stages a small file as the IndexerDB payload.
+func fakeIndexerSource(t *testing.T) *dblifecycle.IndexerPayloadSource {
+	t.Helper()
+	return &dblifecycle.IndexerPayloadSource{
+		Check: func() error { return nil },
+		Capture: func(context.Context) (
+			string, dblifecycle.IndexerPayload, func(), error,
+		) {
+			stage := t.TempDir()
+			path := filepath.Join(stage, dblifecycle.IndexerPayloadFileName)
+			if err := os.WriteFile(path, []byte("indexer"), 0o600); err != nil {
+				return "", dblifecycle.IndexerPayload{}, func() {}, err
+			}
+			return path, dblifecycle.IndexerPayload{TipSlot: 1, TipHash: "00"},
+				func() {}, nil
+		},
+	}
+}
+
+// TestManagerSnapshotsCarryTheIndexerDBOnSplit verifies that an automatic
+// snapshot of a split node holds the IndexerDB payload beside the ledger's.
+func TestManagerSnapshotsCarryTheIndexerDBOnSplit(t *testing.T) {
+	t.Parallel()
+
+	db := newManagerTestDB(t)
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	snapshotDir := t.TempDir()
+	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+		SnapshotEnabled:      true,
+		SnapshotDir:          snapshotDir,
+		SnapshotEveryNEpochs: 1,
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
+	m.SetIndexerPayloadSource(fakeIndexerSource(t))
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop()
+
+	publishEpochTransition(eb, 7)
+	manifest := filepath.Join(snapshotDir, "epoch-7", "manifest.json")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(manifest)
+		return err == nil
+	}, snapshotWait, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		_, err := dblifecycle.ReadIndexerPayload(
+			filepath.Join(snapshotDir, "epoch-7"),
+		)
+		return err == nil
+	}, snapshotWait, 10*time.Millisecond,
+		"the payload is written with the snapshot")
+	require.FileExists(t, filepath.Join(
+		snapshotDir, "epoch-7", dblifecycle.IndexerPayloadFileName,
+	))
+}
+
+// TestManagerRefusesToScheduleWhatTheIndexerPayloadCannotCover verifies the
+// startup refusals on the split layout.
+func TestManagerRefusesToScheduleWhatTheIndexerPayloadCannotCover(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newManagerTestDB(t)
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	t.Run("cloud destination", func(t *testing.T) {
+		t.Parallel()
+		m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+			SnapshotEnabled:          true,
+			SnapshotDir:              t.TempDir(),
+			SnapshotCloudDestination: "s3://bucket/x",
+		}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
+		m.SetIndexerPayloadSource(fakeIndexerSource(t))
+		require.ErrorContains(t, m.Start(context.Background()),
+			"cloud destination")
+	})
+	t.Run("unsupported configuration", func(t *testing.T) {
+		t.Parallel()
+		m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+			SnapshotEnabled: true,
+			SnapshotDir:     t.TempDir(),
+		}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
+		src := fakeIndexerSource(t)
+		src.Check = func() error { return errors.New("trust key in use") }
+		m.SetIndexerPayloadSource(src)
+		require.ErrorContains(t, m.Start(context.Background()),
+			"trust key in use")
+	})
+}

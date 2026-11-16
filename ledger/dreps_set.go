@@ -230,6 +230,31 @@ func (ls *LedgerState) stageDrep(txn ledgerdb.Txn, slot uint64, d models.Drep) {
 	})
 }
 
+// stageDrepHistory stages the DRep history rows the metadata store records
+// beside a write.
+func (ls *LedgerState) stageDrepHistory(
+	txn ledgerdb.Txn,
+	rows ...DRepHistoryChange,
+) {
+	ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		DRepHistory: rows,
+	})
+}
+
+// stageDrepExpiryHistory stages the activity and expiry epochs of d from slot
+// on, which the metadata store records in drep_expiry_history.
+func (ls *LedgerState) stageDrepExpiryHistory(
+	txn ledgerdb.Txn,
+	slot uint64,
+	d models.Drep,
+) {
+	ls.stageDrepHistory(txn, DRepHistoryChange{
+		Kind: DRepHistoryExpiry, Slot: slot, Tag: d.CredentialTag,
+		Key: bytes.Clone(d.Credential), Activity: d.LastActivityEpoch,
+		Expiry: d.ExpiryEpoch,
+	})
+}
+
 func (ls *LedgerState) stageDrepLink(
 	txn ledgerdb.Txn,
 	slot uint64,
@@ -257,6 +282,10 @@ func (ls *LedgerState) clearAccountDrep(
 	}
 	next := *a
 	next.Drep, next.DrepType, next.AddedSlot = nil, 0, slot
+	ls.stageDrepHistory(txn, DRepHistoryChange{
+		Kind: DRepHistoryClear, Slot: slot, Tag: ref.Tag,
+		Key: bytes.Clone(ref.Key),
+	})
 	ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		Accounts: []AccountChange{{Slot: slot, Account: next}},
 	})
@@ -479,7 +508,8 @@ func (s stagingLedgerDB) UpdateDRepActivity(
 	next := *d
 	next.LastActivityEpoch = activityEpoch
 	next.ExpiryEpoch = activityEpoch + inactivityPeriod
-	s.ls.stageDrep(txn, slot, next) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	s.ls.stageDrep(txn, slot, next)              //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	s.ls.stageDrepExpiryHistory(txn, slot, next) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 	return nil
 }
 
@@ -544,6 +574,9 @@ func (s stagingLedgerDB) ResetDormantDRepEpochs(
 		s.ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 			Dormancy: []DormancyChange{{Slot: slot, Epochs: 0}},
 		})
+		s.ls.stageDrepHistory(txn, DRepHistoryChange{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+			Kind: DRepHistoryDormancy, Slot: slot, Previous: n,
+		})
 	}
 	return nil
 }
@@ -589,6 +622,11 @@ func (ls *LedgerState) stageDormantBump(r DRepReader, txn ledgerdb.Txn, slot uin
 	ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		Dormancy: []DormancyChange{{Slot: slot, Epochs: n + 1}},
 	})
+	ls.stageDrepHistory(
+		txn,
+		DRepHistoryChange{Kind: DRepHistoryEvent, Slot: slot},
+		DRepHistoryChange{Kind: DRepHistoryDormancy, Slot: slot, Previous: n},
+	)
 	refs, err := ls.drepCandidates(r, txn)
 	if err != nil {
 		return err
@@ -604,6 +642,7 @@ func (ls *LedgerState) stageDormantBump(r DRepReader, txn ledgerdb.Txn, slot uin
 		next := *d
 		next.ExpiryEpoch++
 		ls.stageDrep(txn, slot, next)
+		ls.stageDrepExpiryHistory(txn, slot, next)
 	}
 	return nil
 }

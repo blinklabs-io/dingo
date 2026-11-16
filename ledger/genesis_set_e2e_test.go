@@ -306,3 +306,47 @@ func TestGenesisStateIsComputedInTheSet(t *testing.T) {
 		})
 	}
 }
+
+// The genesis seed records each initial DRep's expiry history whether or not
+// the set already holds the DRep, as the metadata store's import does, so a set
+// that holds a DRep from before it kept history gets the row.
+func TestGenesisSeedStagesTheExpiryHistoryOfADRepTheSetHolds(t *testing.T) {
+	t.Parallel()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	scenario := ledger.NewGenesisScenarioWithReadsForTest(
+		t, set, ledger.UtxoSetReadsSet,
+	)
+	store := dbadapter.New(scenario.DB)
+	require.NoError(t, set.LoadLedgerState(t.Context(), store))
+	scenario.CreateGenesis()
+	var staker []byte
+	require.NoError(
+		t,
+		store.IterateAccounts(nil, func(a *models.Account) error {
+			staker = a.StakingKey
+			return nil
+		}),
+	)
+	dreps, delegs := genesisGovernance(staker)
+
+	var held []ledger.DRepChange
+	for cred, state := range dreps {
+		drep, _, err := models.GenesisDRep(cred, state)
+		require.NoError(t, err)
+		held = append(held, ledger.DRepChange{Drep: drep})
+	}
+	require.NoError(t, set.ApplyLedgerChanges(nil, ledger.LedgerChanges{
+		DReps: held,
+	}))
+	before, err := set.DRepHistory()
+	require.NoError(t, err)
+	require.Empty(t, before.Expiry, "the set holds the DReps without history")
+
+	scenario.SetGenesisGovernance(dreps, delegs)
+
+	after, err := set.DRepHistory()
+	require.NoError(t, err)
+	require.Len(t, after.Expiry, len(dreps))
+}

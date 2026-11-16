@@ -18,13 +18,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -820,6 +823,26 @@ func (a Adapter) GetRewardSeedFailure(
 	}
 	return a.db.Metadata().
 		GetRewardSeedFailure(epoch, snapshotType, metaTxn(txn))
+}
+
+// GetRewardSeedFailureSlot returns the imported basis failure and the slot it
+// was captured at. A metadata store that cannot report the slot is an error:
+// the failure would otherwise be kept at a slot it was never captured at.
+func (a Adapter) GetRewardSeedFailureSlot(
+	epoch uint64,
+	snapshotType string,
+	txn ledgerdb.Txn,
+) (string, uint64, error) {
+	if err := a.rewardInputsDrained(); err != nil {
+		return "", 0, err
+	}
+	r, ok := a.db.Metadata().(metadata.RewardSeedFailureSlotReader)
+	if !ok {
+		return "", 0, errors.New(
+			"metadata store cannot report a reward seed failure slot",
+		)
+	}
+	return r.GetRewardSeedFailureSlot(epoch, snapshotType, metaTxn(txn))
 }
 
 func (a Adapter) GetRewardSnapshot(
@@ -2914,6 +2937,160 @@ func (a Adapter) GetImportedPoolBlockCounts(
 	return a.db.Metadata().GetImportedPoolBlockCounts(epoch, metaTxn(txn))
 }
 
+// ImportedBlockRows lists the imported block counts of every epoch, as the
+// metadata store exports them.
+func (a Adapter) ImportedBlockRows(
+	txn ledgerdb.Txn,
+) (map[uint64]ledgerdb.ImportedBlockRows, error) {
+	if err := a.blockCountsDrained(); err != nil {
+		return nil, err
+	}
+	store, ok := a.db.Metadata().(metadata.FactRowStore)
+	if !ok {
+		return nil, errors.New("metadata store cannot export fact rows")
+	}
+	tables := map[string]metadata.FactTable{}
+	for _, t := range metadata.FactTables {
+		tables[t.Name] = t
+	}
+	read := func(name string) (metadata.FactRows, error) {
+		rows, _, err := store.ReadFactRows(
+			context.Background(), tables[name], 0, math.MaxInt64, 0, 0,
+			metaTxn(txn),
+		)
+		return rows, err
+	}
+	out := map[uint64]ledgerdb.ImportedBlockRows{}
+	totals, err := read("imported_epoch_block_total")
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range totals.Rows {
+		m, err := factRowMap(totals.Columns, r)
+		if err != nil {
+			return nil, err
+		}
+		epoch, total, slot := factUint(m["epoch"]), factUint(m["total_blocks"]),
+			factUint(m["captured_slot"])
+		out[epoch] = ledgerdb.ImportedBlockRows{
+			Pools: map[string]uint64{}, Total: total, CapturedSlot: slot,
+		}
+	}
+	pools, err := read("imported_pool_block_count")
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range pools.Rows {
+		m, err := factRowMap(pools.Columns, r)
+		if err != nil {
+			return nil, err
+		}
+		epoch := factUint(m["epoch"])
+		row, ok := out[epoch]
+		if !ok {
+			return nil, fmt.Errorf(
+				"imported pool block counts for epoch %d have no total", epoch,
+			)
+		}
+		hash, _ := m["pool_key_hash"].([]byte)
+		row.Pools[string(hash)] = factUint(m["blocks_produced"])
+	}
+	return out, nil
+}
+
+// DRepHistoryRows lists the DRep history tables, as the metadata store
+// exports them.
+func (a Adapter) DRepHistoryRows(
+	txn ledgerdb.Txn,
+) (ledgerdb.DRepHistoryRows, error) {
+	var out ledgerdb.DRepHistoryRows
+	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
+		return out, err
+	}
+	store, ok := a.db.Metadata().(metadata.FactRowStore)
+	if !ok {
+		return out, errors.New("metadata store cannot export fact rows")
+	}
+	tables := map[string]metadata.FactTable{}
+	for _, t := range metadata.FactTables {
+		tables[t.Name] = t
+	}
+	each := func(name string, fn func(map[string]any)) error {
+		table := tables[name]
+		var cursor int64
+		for {
+			rows, next, err := store.ReadFactRows(
+				context.Background(), table, 0, math.MaxInt64, cursor, 1000,
+				metaTxn(txn),
+			)
+			if err != nil {
+				return err
+			}
+			for _, r := range rows.Rows {
+				m, err := factRowMap(rows.Columns, r)
+				if err != nil {
+					return err
+				}
+				fn(m)
+			}
+			if next == 0 {
+				return nil
+			}
+			cursor = next
+		}
+	}
+	if err := each("drep_expiry_history", func(m map[string]any) {
+		cred, _ := m["credential"].([]byte)
+		out.Expiry = append(out.Expiry, ledgerdb.DRepExpiryHistoryRow{
+			Tag:        uint8(factUint(m["credential_tag"])), //nolint:gosec // a credential tag
+			Credential: cred, Slot: factUint(m["added_slot"]),
+			Activity: factUint(m["last_activity_epoch"]),
+			Expiry:   factUint(m["expiry_epoch"]),
+		})
+	}); err != nil {
+		return ledgerdb.DRepHistoryRows{}, err
+	}
+	if err := each("drep_dormancy_history", func(m map[string]any) {
+		out.Dormancy = append(out.Dormancy, ledgerdb.DRepDormancyHistoryRow{
+			Slot:     factUint(m["added_slot"]),
+			Previous: factUint(m["previous_dormant_epochs"]),
+		})
+	}); err != nil {
+		return ledgerdb.DRepHistoryRows{}, err
+	}
+	if err := each("drep_expiry_epoch_event", func(m map[string]any) {
+		out.Events = append(out.Events, factUint(m["added_slot"]))
+	}); err != nil {
+		return ledgerdb.DRepHistoryRows{}, err
+	}
+	if err := each("account_drep_clear", func(m map[string]any) {
+		key, _ := m["staking_key"].([]byte)
+		out.Clears = append(out.Clears, ledgerdb.DRepClearRow{
+			Tag:        uint8(factUint(m["credential_tag"])), //nolint:gosec // a credential tag
+			StakingKey: key, Slot: factUint(m["added_slot"]),
+		})
+	}); err != nil {
+		return ledgerdb.DRepHistoryRows{}, err
+	}
+	return out, nil
+}
+
+func factRowMap(cols []string, row []any) (map[string]any, error) {
+	if len(cols) != len(row) {
+		return nil, errors.New("fact row does not match its columns")
+	}
+	m := make(map[string]any, len(cols))
+	for i, c := range cols {
+		m[c] = row[i]
+	}
+	return m, nil
+}
+
+func factUint(v any) uint64 {
+	n, _ := v.(int64)
+	return uint64(max(n, 0)) //nolint:gosec // clamped
+}
+
 func (a Adapter) GetPParamsRows(
 	epoch uint64,
 	eraId uint,
@@ -3054,4 +3231,78 @@ func (a Adapter) rewardSyncKeyDrained(key string) error {
 		return a.rewardOutputsDrained()
 	}
 	return nil
+}
+
+// EachRewardJournalRow lists the reward journal in the order it was written.
+func (a Adapter) EachRewardJournalRow(
+	txn ledgerdb.Txn,
+	fn func(ledgerdb.RewardJournalRow) error,
+) error {
+	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
+		return err
+	}
+	store, ok := a.db.Metadata().(metadata.FactRowStore)
+	if !ok {
+		return errors.New("metadata store cannot export fact rows")
+	}
+	table := metadata.AccountRewardCreditTable
+	table.FilterColumn, table.FilterValue = "", nil
+	var cursor int64
+	for {
+		rows, next, err := store.ReadFactRows(
+			context.Background(), table, 0, math.MaxInt64, cursor, 5000,
+			metaTxn(txn),
+		)
+		if err != nil {
+			return err
+		}
+		for _, r := range rows.Rows {
+			m, err := factRowMap(rows.Columns, r)
+			if err != nil {
+				return err
+			}
+			key, _ := m["staking_key"].([]byte)
+			hash, _ := m["tx_hash"].([]byte)
+			if err := fn(ledgerdb.RewardJournalRow{
+				StakingKey:    key,
+				CredentialTag: uint8(factUint(m["credential_tag"])), //nolint:gosec // a credential tag
+				TxHash:        hash,
+				Amount:        factDecimal(m["amount"]),
+				Slot:          factUint(m["added_slot"]),
+				Withdrawal:    factFlag(m["withdrawal"]),
+				PostSnapshot:  factFlag(m["post_snapshot"]),
+			}); err != nil {
+				return err
+			}
+		}
+		if next == 0 {
+			return nil
+		}
+		cursor = next
+	}
+}
+
+// factDecimal reads an unsigned amount a store holds as an integer or as
+// decimal text.
+func factDecimal(v any) uint64 {
+	switch x := v.(type) {
+	case string:
+		n, _ := strconv.ParseUint(x, 10, 64)
+		return n
+	case []byte:
+		n, _ := strconv.ParseUint(string(x), 10, 64)
+		return n
+	}
+	return factUint(v)
+}
+
+// factFlag reads a boolean a store holds as a bool or an integer.
+func factFlag(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case []byte:
+		return len(x) > 0 && x[0] != '0' && x[0] != 0
+	}
+	return factUint(v) != 0
 }

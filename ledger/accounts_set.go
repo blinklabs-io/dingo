@@ -168,6 +168,16 @@ func (ls *LedgerState) stageRewardCredits(
 	txn ledgerdb.Txn,
 	credits []models.AccountRewardCredit,
 ) {
+	ls.stageRewardCreditsAs(txn, credits, false)
+}
+
+// stageRewardCreditsAs is stageRewardCredits for credits a boundary applied
+// after its SNAP point when postSnapshot is set.
+func (ls *LedgerState) stageRewardCreditsAs(
+	txn ledgerdb.Txn,
+	credits []models.AccountRewardCredit,
+	postSnapshot bool,
+) {
 	r := ls.accountReader(txn)
 	if r == nil || ls.utxoSetFailed.Load() {
 		ls.failDrainedAccountStaging()
@@ -179,9 +189,10 @@ func (ls *LedgerState) stageRewardCredits(
 			source = []byte{}
 		}
 		err := ls.stageRewardChange(r, txn, RewardRecord{
-			Slot:   c.Slot,
-			Source: source,
-			Ref:    models.NewStakeCredentialRef(c.CredentialTag, c.StakingKey),
+			Slot:         c.Slot,
+			Source:       source,
+			Ref:          models.NewStakeCredentialRef(c.CredentialTag, c.StakingKey),
+			PostSnapshot: postSnapshot,
 		}, c.Amount)
 		if err != nil {
 			ls.failAccountStaging(err)
@@ -637,10 +648,10 @@ func (s stagingLedgerDB) AddPostSnapshotAccountRewardByCredential(
 	}}, false); err != nil {
 		return err
 	}
-	s.ls.stageRewardCredits(txn, []models.AccountRewardCredit{{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	s.ls.stageRewardCreditsAs(txn, []models.AccountRewardCredit{{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		StakingKey: stakeKey, CredentialTag: credentialTag, Amount: amount,
 		Slot: slot, SourceHash: sourceHash,
-	}})
+	}}, true)
 	if amount > 0 {
 		// The store marks the credit even when its journal row existed, so
 		// the set records it whether or not the account change applied.

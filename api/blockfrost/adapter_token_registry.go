@@ -86,7 +86,7 @@ func (a *NodeAdapter) populateAssetRegistryMetadata(
 	assetName []byte,
 ) error {
 	subject := tokenRegistrySubjectFor(policyID, assetName)
-	entry, err := a.ledgerState.Database().
+	entry, err := a.db().
 		Metadata().
 		GetTokenRegistryEntry(subject, txn)
 	if err != nil {

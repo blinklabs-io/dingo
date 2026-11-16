@@ -611,7 +611,7 @@ func (s *Set) ensureRewardInputs(
 			}
 			n, err := s.loadRewardEpoch(
 				ldb, txn, e.EpochId,
-				e.EpochId+uint64(ledger.RewardInputEpochWindow) >= newest,
+				s.retainRewards || e.EpochId+uint64(ledger.RewardInputEpochWindow) >= newest,
 				put, tombstone,
 			)
 			if err != nil {
@@ -629,6 +629,29 @@ func (s *Set) ensureRewardInputs(
 		"epochs", len(epochs), "stake_rows", stakes,
 	)
 	return nil
+}
+
+// rewardSeedFailure reads the imported basis failure with the slot it was
+// captured at. A LedgerDB that cannot report the slot falls back to the
+// epoch's snapshot slot, or 0.
+func rewardSeedFailure(
+	ldb ledgerdb.LedgerDB,
+	epoch uint64,
+	snap *models.RewardSnapshot,
+	txn ledgerdb.Txn,
+) (string, uint64, error) {
+	if r, ok := ldb.(ledgerdb.RewardSeedFailureSlotReader); ok {
+		return r.GetRewardSeedFailureSlot(epoch, rewardSnapshotMark, txn)
+	}
+	reason, err := ldb.GetRewardSeedFailure(epoch, rewardSnapshotMark, txn)
+	if err != nil || reason == "" {
+		return "", 0, err
+	}
+	var slot uint64
+	if snap != nil {
+		slot = snap.CapturedSlot
+	}
+	return reason, slot, nil
 }
 
 func (s *Set) loadRewardEpoch(
@@ -657,17 +680,11 @@ func (s *Set) loadRewardEpoch(
 			return 0, err
 		}
 	}
-	reason, err := ldb.GetRewardSeedFailure(epoch, rewardSnapshotMark, txn)
+	reason, slot, err := rewardSeedFailure(ldb, epoch, snap, txn)
 	if err != nil {
 		return 0, err
 	}
 	if reason != "" {
-		// The store keeps the captured slot but does not return it: the
-		// failure is kept at the epoch's snapshot slot, or at 0.
-		var slot uint64
-		if snap != nil {
-			slot = snap.CapturedSlot
-		}
 		k := badgerutxo.RewardSnapshotKey(
 			epoch, badgerutxo.RewardSnapshotFailure, rewardSnapshotMark,
 		)

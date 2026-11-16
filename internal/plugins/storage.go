@@ -19,6 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"path/filepath"
+	"reflect"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -39,6 +42,9 @@ import (
 type StorageSelections struct {
 	Blob     plugin.Selection
 	Metadata plugin.Selection
+	// IndexerMetadataConfig holds provider settings that override the
+	// metadata selection's for the split IndexerDB's own store.
+	IndexerMetadataConfig map[string]any
 }
 
 // StorageDependencies contains shared application settings injected into
@@ -130,6 +136,133 @@ func ResolveStorage(
 		Metadata:  metadataStore,
 		Immutable: immutableStore,
 	}, nil
+}
+
+// IndexerDirName is the directory under the data directory holding a SQLite
+// IndexerDB.
+const IndexerDirName = "indexer"
+
+// IndexerMetadataSelection derives the IndexerDB's metadata provider config
+// from the consensus selection and the indexer overrides. A SQLite store gets
+// its own directory under the data directory. A client/server provider has no
+// such default, so the overrides must name a different database: two stores
+// in one schema would share tables.
+func IndexerMetadataSelection(
+	selections StorageSelections,
+	dataDir string,
+) (plugin.Selection, string, error) {
+	provider := selections.Metadata.Provider
+	cfg := maps.Clone(selections.Metadata.Config)
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+	maps.Copy(cfg, selections.IndexerMetadataConfig)
+	indexerDir := dataDir
+	if provider == "sqlite" {
+		// The consensus store's directory override must not be inherited.
+		if _, own := selections.IndexerMetadataConfig["dataDir"]; !own {
+			delete(cfg, "dataDir")
+			indexerDir = filepath.Join(dataDir, IndexerDirName)
+		}
+	} else if len(selections.IndexerMetadataConfig) == 0 ||
+		reflect.DeepEqual(cfg, selections.Metadata.Config) {
+		return plugin.Selection{}, "", fmt.Errorf(
+			"indexer.metadata must configure a separate %s database for "+
+				"the IndexerDB: the layout split would otherwise share "+
+				"tables with the consensus store",
+			provider,
+		)
+	}
+	return plugin.Selection{Provider: provider, Config: cfg}, indexerDir, nil
+}
+
+// ResolveIndexerMetadata starts the IndexerDB's own metadata store on host.
+// It is opened in API mode: the IndexerDB is the store that holds API rows.
+func ResolveIndexerMetadata(
+	ctx context.Context,
+	host *plugin.Host,
+	selections StorageSelections,
+	deps StorageDependencies,
+) (metadata.MetadataStore, error) {
+	selection, dataDir, err := IndexerMetadataSelection(selections, deps.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	store, err := plugin.Resolve[metadata.MetadataStore](
+		ctx,
+		host,
+		plugin.CapabilityStorageMetadata,
+		selection.Provider,
+		selection.Config,
+		metadata.ProviderDependencies{
+			DataDir:             dataDir,
+			StorageMode:         "api",
+			MaxConnections:      deps.MaxConnections,
+			Logger:              deps.Logger,
+			PromRegistry:        deps.PromRegistry,
+			TracingEnabled:      deps.TracingEnabled,
+			GenesisStakingEmpty: deps.GenesisStakingEmpty,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("resolve indexer metadata storage: %w", err)
+	}
+	return store, nil
+}
+
+// IndexerMetricsRole is the value of the role label on the IndexerDB's
+// metrics. IndexerMetricsPrefix also prefixes their names: a collector
+// registered twice under one name with different label sets panics, so the
+// label alone cannot let both databases register the same collectors.
+const (
+	IndexerMetricsRole   = "indexer"
+	IndexerMetricsPrefix = "indexer_"
+)
+
+// OpenIndexerDatabase composes the IndexerDB: its own metadata store, opened
+// in API mode on host, over the consensus database's blob store. The blob
+// view is read-only for blocks and keeps the IndexerDB's offsets under their
+// own key prefix. The IndexerDB keeps no commit timestamp, and its metrics
+// carry role="indexer" and an indexer_ name prefix so they register beside
+// the consensus database's.
+//
+// The caller closes the returned database before the host stops, and before
+// the consensus database closes the blob store it reads.
+func OpenIndexerDatabase(
+	ctx context.Context,
+	host *plugin.Host,
+	consensus *database.Database,
+	dbConfig *database.Config,
+	selections StorageSelections,
+	deps StorageDependencies,
+) (*database.Database, error) {
+	if deps.PromRegistry != nil {
+		deps.PromRegistry = prometheus.WrapRegistererWithPrefix(
+			IndexerMetricsPrefix,
+			prometheus.WrapRegistererWith(
+				prometheus.Labels{"role": IndexerMetricsRole}, deps.PromRegistry,
+			),
+		)
+	}
+	store, err := ResolveIndexerMetadata(ctx, host, selections, deps)
+	if err != nil {
+		return nil, err
+	}
+	cfg := *dbConfig
+	cfg.Role = database.RoleIndexer
+	cfg.StorageMode = "api"
+	cfg.PromRegistry = deps.PromRegistry
+	db, err := database.New(ctx, &cfg, database.Stores{
+		Blob:     blob.NewIndexerStore(consensus.Blob()),
+		Metadata: store,
+	})
+	if err != nil {
+		if db != nil {
+			err = errors.Join(err, db.Close())
+		}
+		return nil, fmt.Errorf("open indexer database: %w", err)
+	}
+	return db, nil
 }
 
 // DatabaseRuntime is a composed database plus the plugin host that owns its

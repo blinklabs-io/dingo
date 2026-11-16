@@ -46,7 +46,7 @@ func (a *NodeAdapter) PoolDetail(ctx context.Context, poolID string) (PoolDetail
 	}
 	pkh := lcommon.PoolKeyHash(poolKeyHash)
 
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 
@@ -386,7 +386,7 @@ func (a *NodeAdapter) totalCirculation(txn dbtypes.Txn) (uint64, error) {
 	}
 	maxSupply := nodeCfg.ShelleyGenesis().MaxLovelaceSupply
 
-	state, err := a.ledgerState.Database().Metadata().GetNetworkState(txn)
+	state, err := a.db().Metadata().GetNetworkState(txn)
 	if err != nil {
 		return 0, fmt.Errorf("get network state: %w", err)
 	}

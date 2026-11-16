@@ -15,15 +15,19 @@
 package blockfrost
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/mempool"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -330,4 +334,35 @@ func seedMempoolInput(
 		}},
 	})
 	storePointerOutputCbor(t, db, txID, 0, owner, 5_000_000)
+}
+
+func TestNodeAdapterMempoolReadsInputsFromTheLedgerStore(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	txs, _, inputIDs := mempoolFixture(t, 2)
+	adapter.mempool = &fakeMempool{txs: txs}
+	spender, _, _ := testKeyAddress(t, 0xf1, 0)
+	seedMempoolInput(t, raw, db, inputIDs[1], spender)
+
+	// The IndexerDB is empty: it has not indexed the output the mempool
+	// transaction spends, which the ledger store already holds.
+	indexerDB, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     t.TempDir(),
+		StorageMode: types.StorageModeAPI,
+	})
+	require.NoError(t, err)
+	store, err := indexerdb.NewStore(
+		indexerDB,
+		fixedTipState{value: fmt.Sprintf("1:1:%x", bytes.Repeat([]byte{1}, 32))},
+		10,
+	)
+	require.NoError(t, err)
+	adapter.SetIndexerStore(store)
+
+	hash, err := hex.DecodeString(txs[1].Hash)
+	require.NoError(t, err)
+	got, err := adapter.MempoolTransaction(t.Context(), hash)
+	require.NoError(t, err)
+	require.Len(t, got.Inputs, 1)
+	require.Equal(t, spender.String(), got.Inputs[0].Address)
 }

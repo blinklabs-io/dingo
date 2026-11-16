@@ -531,6 +531,37 @@ func RestoreValidated(
 		validate,
 		storageConfig,
 		nil,
+		nil,
+		opts...,
+	)
+}
+
+// RestoreValidatedWithStaged is RestoreValidated with a step that adds to the
+// staged data directory before it is renamed into place, so that whatever it
+// installs appears together with the restored stores or not at all. staged
+// receives the staging directory after the restored stores have been
+// validated; an error from it fails the restore with the target untouched.
+func RestoreValidatedWithStaged(
+	ctx context.Context,
+	host *plugin.Host,
+	registry *DestinationRegistry,
+	snapshotDir string,
+	targetDataDir string,
+	validate func(Manifest) error,
+	storageConfig RestoreStorageConfig,
+	staged func(stagingDir string) error,
+	opts ...ManifestOption,
+) (Manifest, error) {
+	return restoreValidated(
+		ctx,
+		host,
+		registry,
+		snapshotDir,
+		targetDataDir,
+		validate,
+		storageConfig,
+		nil,
+		staged,
 		opts...,
 	)
 }
@@ -568,6 +599,7 @@ func RestoreRecoverable(
 		validate,
 		storageConfig,
 		&recovery,
+		nil,
 		opts...,
 	)
 	return manifest, recovery, err
@@ -582,6 +614,7 @@ func restoreValidated(
 	validate func(Manifest) error,
 	storageConfig RestoreStorageConfig,
 	retainRecovery **RestoreRecovery,
+	staged func(stagingDir string) error,
 	opts ...ManifestOption,
 ) (m Manifest, err error) {
 	// Downloads and private payload copies are as large as the snapshot, so
@@ -863,6 +896,15 @@ func restoreValidated(
 	}
 	if err := staging.checkNamed(); err != nil {
 		return Manifest{}, err
+	}
+
+	if staged != nil {
+		if err := staged(stagingDir); err != nil {
+			return Manifest{}, err
+		}
+		if err := staging.checkNamed(); err != nil {
+			return Manifest{}, err
+		}
 	}
 
 	// Durability: fsync every directory in the staged tree before

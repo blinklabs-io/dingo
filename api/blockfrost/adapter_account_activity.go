@@ -47,10 +47,10 @@ func (a *NodeAdapter) AccountUTXOs(ctx context.Context,
 	// the total and the returned page describe the same snapshot: two
 	// separate (nil-txn) calls could otherwise straddle a concurrent
 	// commit and return a page inconsistent with the reported total.
-	txn := a.ledgerState.Database().Transaction(ctx, false)
+	txn := a.db().Transaction(ctx, false)
 	defer txn.Release()
 
-	if _, err := a.ledgerState.Database().
+	if _, err := a.db().
 		GetAccountByCredential(ctx, credentialTag, stakeKey, true, txn); err != nil {
 		return nil, 0, err
 	}
@@ -64,7 +64,7 @@ func (a *NodeAdapter) AccountUTXOs(ctx context.Context,
 	addressPatterns := []models.UtxoAddressPattern{
 		{DelegationPart: stakeKey},
 	}
-	total, err := a.ledgerState.Database().
+	total, err := a.db().
 		CountUtxosByAddressWithOrdering(
 			ctx,
 			&models.UtxoWithOrderingQuery{AddressPatterns: addressPatterns},
@@ -82,7 +82,7 @@ func (a *NodeAdapter) AccountUTXOs(ctx context.Context,
 		return []AccountUTXOInfo{}, total, nil
 	}
 
-	paged, err := a.ledgerState.Database().
+	paged, err := a.db().
 		UtxosByAddressWithOrdering(
 			ctx,
 			&models.UtxoWithOrderingQuery{
@@ -165,13 +165,13 @@ func (a *NodeAdapter) AccountWithdrawals(ctx context.Context,
 	if err != nil {
 		return nil, 0, err
 	}
-	if _, err := a.ledgerState.Database().
+	if _, err := a.db().
 		GetAccountByCredential(ctx, credentialTag, stakeKey, true, nil); err != nil {
 		return nil, 0, err
 	}
 
 	offset := (params.Page - 1) * params.Count
-	total, err := a.ledgerState.Database().
+	total, err := a.db().
 		CountAccountWithdrawalHistoryByCredential(ctx, credentialTag, stakeKey, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -182,7 +182,7 @@ func (a *NodeAdapter) AccountWithdrawals(ctx context.Context,
 	if offset >= total {
 		return []AccountWithdrawalInfo{}, total, nil
 	}
-	rows, err := a.ledgerState.Database().
+	rows, err := a.db().
 		GetAccountWithdrawalHistoryByCredential(
 			ctx,
 			credentialTag,
@@ -247,7 +247,7 @@ func (a *NodeAdapter) AccountTransactions(ctx context.Context,
 	if err != nil {
 		return nil, 0, err
 	}
-	if _, err := a.ledgerState.Database().
+	if _, err := a.db().
 		GetAccountByCredential(ctx, credentialTag, stakeKey, true, nil); err != nil {
 		return nil, 0, err
 	}
@@ -274,7 +274,7 @@ func (a *NodeAdapter) AccountTransactions(ctx context.Context,
 	}
 
 	offset := (params.Pagination.Page - 1) * params.Pagination.Count
-	total, err := a.ledgerState.Database().
+	total, err := a.db().
 		CountAddressTransactionsByCredential(
 			ctx,
 			credentialTag,
@@ -293,7 +293,7 @@ func (a *NodeAdapter) AccountTransactions(ctx context.Context,
 	if offset >= total {
 		return []AccountTransactionInfo{}, total, nil
 	}
-	rows, err := a.ledgerState.Database().
+	rows, err := a.db().
 		GetAddressTransactionsByCredential(
 			ctx,
 			credentialTag,
@@ -324,7 +324,7 @@ func (a *NodeAdapter) AccountTransactions(ctx context.Context,
 	for _, key := range paymentKeys {
 		keyList = append(keyList, key)
 	}
-	scriptFlags, err := a.ledgerState.Database().
+	scriptFlags, err := a.db().
 		GetUtxoPaymentScriptByCredential(ctx, credentialTag, stakeKey, keyList, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -425,7 +425,7 @@ func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Rollback() //nolint:errcheck
 

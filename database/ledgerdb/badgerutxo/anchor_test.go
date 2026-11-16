@@ -122,3 +122,34 @@ func TestPruneJournalNeverRaisesTheFloorPastTheAnchor(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, atAnchor, contents(t, s))
 }
+
+// TestAsOfEachListsOutputsInReferenceOrder requires a view to yield the
+// outputs it restored from the journal in between the ones the live set kept,
+// by reference, as a digest over them in that order needs.
+func TestAsOfEachListsOutputsInReferenceOrder(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	defer s.Close()
+	bootstrap(t, s, point(10, 1), out(1, 0), out(5, 0), out(5, 1), out(9, 0))
+	tip := point(20, 2)
+	_, err := s.ApplyBatch(&tip, []badgerutxo.Change{{
+		Point:   tip,
+		Added:   []badgerutxo.Output{out(3, 0), out(7, 0)},
+		Removed: []badgerutxo.Ref{ref(5, 0), ref(5, 1)},
+	}})
+	require.NoError(t, err)
+
+	v, err := s.AsOf(point(10, 1))
+	require.NoError(t, err)
+	defer v.Close()
+	var got []badgerutxo.Ref
+	require.NoError(t, v.Each(func(o badgerutxo.Output) error {
+		got = append(got, o.Ref)
+		return nil
+	}))
+	require.Equal(
+		t,
+		[]badgerutxo.Ref{ref(1, 0), ref(5, 0), ref(5, 1), ref(9, 0)},
+		got,
+	)
+}

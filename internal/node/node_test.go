@@ -1497,3 +1497,22 @@ func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
 		t.Fatalf("token registry headers = %v, want %v", got, headers)
 	}
 }
+
+func TestNodeStorageModeKeepsTheSplitLedgerStoreCore(t *testing.T) {
+	t.Parallel()
+	mode, err := nodeStorageMode(&config.Config{StorageMode: "api"})
+	require.NoError(t, err)
+	require.Equal(t, dingo.StorageModeAPI, mode)
+
+	split := &config.Config{
+		StorageMode: "api",
+		Indexer:     config.IndexerConfig{Layout: config.IndexerLayoutSplit},
+	}
+	mode, err = nodeStorageMode(split)
+	require.NoError(t, err)
+	require.Equal(t, dingo.StorageModeCore, mode,
+		"the IndexerDB holds the API rows, so the ledger store must not")
+
+	_, err = nodeStorageMode(&config.Config{StorageMode: "bogus"})
+	require.ErrorContains(t, err, "invalid storage mode")
+}

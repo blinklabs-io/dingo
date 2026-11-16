@@ -198,6 +198,30 @@ type Backfill struct {
 
 	onProgress func(BackfillProgress)
 
+	// indexPrimed is set once IndexBlocks has rebuilt the running state for
+	// the chain position it continues from; indexBatches counts the batches
+	// written since.
+	indexPrimed bool
+	// rollbackFloor is the Mithril anchor slot RollbackTo keeps rows at or
+	// below; zero when the IndexerDB has no anchor.
+	rollbackFloor uint64
+	// indexChainStart marks that the next block indexed is the first of the
+	// chain, which the ledger records as a nonce checkpoint although no epoch
+	// boundary precedes it.
+	indexChainStart bool
+	// debitWithdrawals makes the replayed withdrawals of IndexBlocks debit
+	// account reward balances; the history backfill leaves it false and keeps
+	// the imported balances.
+	debitWithdrawals bool
+	// indexedTxs counts the transaction bodies applied since IndexBlocks
+	// last reset it.
+	indexedTxs   uint64
+	indexBatches int
+
+	// closures reads the certified endorser blocks IndexBlocks applies with
+	// their certifying ranking blocks. Nil reads them through db.
+	closures dledger.CertifiedClosureSource
+
 	// Protocol-parameter resolution state. resolveNext indexes the first
 	// epoch in epochs not resolved yet; resolvePP and resolveEraId are the
 	// parameters and era of the last resolved epoch.
@@ -596,6 +620,25 @@ func (b *Backfill) restoreImportedAccountsAtAnchor(
 	ctx context.Context,
 	anchor uint64,
 ) (int, error) {
+	txn := b.db.Transaction(ctx, true)
+	defer txn.Rollback() //nolint:errcheck
+	restored, err := b.restoreImportedAccountsAtAnchorTxn(ctx, txn, anchor)
+	if err != nil {
+		return 0, err
+	}
+	if err := txn.Commit(); err != nil {
+		return 0, err
+	}
+	return restored, nil
+}
+
+// restoreImportedAccountsAtAnchorTxn restores inside txn, which the caller
+// commits.
+func (b *Backfill) restoreImportedAccountsAtAnchorTxn(
+	ctx context.Context,
+	txn *database.Txn,
+	anchor uint64,
+) (int, error) {
 	var protocolMajor uint
 	if b.currentEraId >= conway.EraIdConway {
 		params, ok := b.currentPParams.(lcommon.PoolRuleProtocolParameters)
@@ -606,8 +649,6 @@ func (b *Backfill) restoreImportedAccountsAtAnchor(
 		}
 		protocolMajor = params.ProtocolMajorVersion()
 	}
-	txn := b.db.Transaction(ctx, true)
-	defer txn.Rollback() //nolint:errcheck
 	restored, err := b.db.RestoreImportedAccountStates(ctx, anchor, txn)
 	if err != nil {
 		return 0, err
@@ -621,9 +662,6 @@ func (b *Backfill) restoreImportedAccountsAtAnchor(
 		); err != nil {
 			return 0, err
 		}
-	}
-	if err := txn.Commit(); err != nil {
-		return 0, err
 	}
 	return restored, nil
 }
@@ -1608,6 +1646,7 @@ func (b *Backfill) processBlockTxsBatched(
 				b.skippedUtxoRefs += uint64(len(level.Produced()))
 			}
 			setTxStart := time.Now()
+			b.indexedTxs++
 			if err := b.db.SetTransactionBatchedWithOpts(
 				ctx,
 				level, point, uint32(storageIndex), //nolint:gosec
@@ -1619,6 +1658,7 @@ func (b *Backfill) processBlockTxsBatched(
 					Stats:                        stats,
 					SkipWithdrawalWitnessWrite:   !b.delegatorInactivityEnabled,
 					HistoricalBackfill:           true,
+					DebitWithdrawals:             b.debitWithdrawals,
 					ProtocolMajor:                protocolMajor,
 				},
 			); err != nil {

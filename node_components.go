@@ -44,6 +44,7 @@ func (n *Node) databaseConfig() *database.Config {
 		Logger:               n.config.logger,
 		PromRegistry:         n.config.promRegistry,
 		StorageMode:          string(n.config.storageMode),
+		IndexerLayout:        n.config.indexerLayout,
 		Network:              n.config.network,
 		NetworkMagic:         n.config.networkMagic,
 		StartEra:             string(n.config.startEra),
@@ -155,15 +156,30 @@ func (n *Node) newDatabaseLifecycleManager() *dblifecycle.Manager {
 		n.config.logger,
 	)
 	mgr.SetUtxoSetSource(n.utxoSetBackuper)
+	mgr.SetIndexerPayloadSource(n.indexerPayloadSource())
 	return mgr
 }
 
 func (n *Node) midnightServerConfig() midnightserver.Config {
+	midnightDB := midnightserver.NewDatabase(n.apiDatabase())
+	if n.indexerStore != nil {
+		store := n.indexerStore
+		midnightDB = midnightserver.NewBoundedDatabase(
+			midnightDB,
+			func(context.Context) (uint64, uint64, bool, error) {
+				tip, err := store.Tip(nil)
+				if err != nil {
+					return 0, 0, false, err
+				}
+				return tip.Slot, tip.BlockNumber, !tip.IsZero(), nil
+			},
+		)
+	}
 	return midnightserver.Config{
 		Logger:   n.config.logger,
-		Metadata: n.db.Metadata(),
+		Metadata: n.apiDatabase().Metadata(),
 		BlockNumberByHash: func(ctx context.Context, hash []byte) (uint64, bool, error) {
-			block, err := database.BlockByHash(ctx, n.db, hash)
+			block, err := midnightDB.BlockByHash(ctx, hash)
 			if err != nil {
 				if errors.Is(err, models.ErrBlockNotFound) {
 					return 0, false, nil
@@ -179,7 +195,7 @@ func (n *Node) midnightServerConfig() midnightserver.Config {
 		TLSKeyFilePath:    n.config.tlsKeyFilePath,
 		ReflectionEnabled: n.config.midnight.ReflectionEnabled,
 		ShutdownTimeout:   n.config.shutdownTimeout,
-		Database:          midnightserver.NewDatabase(n.db),
+		Database:          midnightDB,
 		SlotTimer:         n.ledgerState,
 		PromRegistry:      n.config.promRegistry,
 	}
@@ -188,7 +204,7 @@ func (n *Node) midnightServerConfig() midnightserver.Config {
 func (n *Node) offchainMetadataConfig() offchainmetadata.Config {
 	return offchainmetadata.Config{
 		Logger:                n.config.logger,
-		Store:                 n.db.Metadata(),
+		Store:                 n.apiDatabase().Metadata(),
 		HTTPClient:            n.config.offchainMetadata.HTTPClient,
 		Interval:              n.config.offchainMetadata.Interval,
 		RequestTimeout:        n.config.offchainMetadata.RequestTimeout,

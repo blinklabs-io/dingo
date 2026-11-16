@@ -110,6 +110,10 @@ type Store struct {
 	loadsRefused atomic.Uint64
 	// merging makes family loads upsert; see BeginMerge.
 	merging atomic.Bool
+	// rangeRowsVisited counts the rows RowsInRange stepped over.
+	rangeRowsVisited atomic.Uint64
+	// rewardIndexVisited counts the index entries credit pages examined.
+	rewardIndexVisited atomic.Uint64
 	// memTableSize replaces Badger's memtable size when positive.
 	memTableSize int64
 }
@@ -160,6 +164,14 @@ func Open(dir string, options ...Option) (*Store, error) {
 		}
 		return txn.Set(formatKey, []byte{formatVersion})
 	}); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
+	}
+	if err := s.ensureRewardSeqIndex(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
+	}
+	if err := s.ensureExportFloor(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
 	}

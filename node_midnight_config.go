@@ -35,7 +35,7 @@ func midnightIndexerActive(storageMode StorageMode, cfg MidnightConfig) bool {
 func (n *Node) midnightIndexerConfig() midnightindexer.Config {
 	return midnightindexer.Config{
 		EventBus:                n.eventBus,
-		Metadata:                n.db.Metadata(),
+		Metadata:                n.apiDatabase().Metadata(),
 		SlotTimer:               n.ledgerState,
 		Logger:                  n.config.logger,
 		PromRegistry:            n.config.promRegistry,

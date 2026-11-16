@@ -63,6 +63,19 @@ func newP5Harness(
 	corrupt func(*database.Database),
 ) *p5Harness {
 	t.Helper()
+	return newSeededP5Harness(t, drain, corrupt, nil)
+}
+
+// newSeededP5Harness is newP5Harness with seed run on the metadata store
+// before the live UTxO set loads it, so the rows seed writes reach the set the
+// way a load of an existing store does.
+func newSeededP5Harness(
+	t *testing.T,
+	drain []nodesettings.Family,
+	corrupt func(*database.Database),
+	seed func(*database.Database),
+) *p5Harness {
+	t.Helper()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
@@ -84,6 +97,9 @@ func newP5Harness(
 			}
 			return nil
 		}))
+	if seed != nil {
+		seed(h.scenario.DB)
+	}
 	require.NoError(t, set.LoadLedgerState(t.Context(), h.store))
 	if len(drain) == 0 {
 		return h
@@ -524,6 +540,26 @@ func TestAccountsAndDRepsVerifyMismatchRefusesTheDrain(t *testing.T) {
 			nodesettings.FamilyDReps, "drep",
 			"INSERT INTO drep (credential, anchor_hash, added_slot, " +
 				"credential_tag, active) VALUES (x'aa', x'bb', 1, 0, 1)",
+		},
+		{
+			nodesettings.FamilyDReps, "drep_expiry_history",
+			"INSERT INTO drep_expiry_history (credential_tag, credential, " +
+				"added_slot, last_activity_epoch, expiry_epoch) " +
+				"VALUES (0, x'aa', 1, 1, 2)",
+		},
+		{
+			nodesettings.FamilyDReps, "drep_dormancy_history",
+			"INSERT INTO drep_dormancy_history (added_slot, " +
+				"previous_dormant_epochs) VALUES (3, 9)",
+		},
+		{
+			nodesettings.FamilyDReps, "drep_expiry_epoch_event",
+			"INSERT INTO drep_expiry_epoch_event (added_slot) VALUES (5)",
+		},
+		{
+			nodesettings.FamilyDReps, "account_drep_clear",
+			"INSERT INTO account_drep_clear (credential_tag, staking_key, " +
+				"added_slot) VALUES (0, x'cc', 4)",
 		},
 		{
 			nodesettings.FamilyAccounts, "account",
