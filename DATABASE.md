@@ -2066,7 +2066,12 @@ S3 and GCS open the snapshot directory through one `os.Root`, open
 symlink or a swapped entry is refused), authenticate the manifest and check
 each payload's size and digest through those handles, and upload from the same
 handles, payloads first and the manifest last, so a remote manifest marks a
-complete upload. No other directory entry is read or uploaded. A destination
+complete upload. The immutable chunk, primary and secondary files, which can
+number in the thousands, are not held open together: a pool of eight workers
+opens each in turn, checks it against its declared size and digest, uploads or
+stages it, and closes it, and the first error cancels the rest. Open
+descriptors stay bounded by the pool size plus the fixed payload count.
+No other directory entry is read or uploaded. A destination
 that implements only `UploadDir` reads pathnames, so `MirrorToCloud` copies the
 declared files from the verified handles into a private `.dingo-cloud-upload-*`
 directory beside the snapshot, authenticates that copy, uploads it, and removes

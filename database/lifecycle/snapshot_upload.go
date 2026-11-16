@@ -24,11 +24,143 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sync/errgroup"
 )
 
+// snapshotUploadWorkers bounds how many deferred chunk files are open, and
+// transferring, at once.
+const snapshotUploadWorkers = 8
+
+// forEachSnapshotUploadFile calls fn on each file's verified handle in
+// publication order, except that each run of consecutive deferred chunk files
+// is processed by at most workers concurrent goroutines, each holding one open
+// file. The run completes before the next file starts, so the manifest, which
+// is last, is only handled after every chunk. The first error cancels the
+// context passed to the other calls and is returned after they finish.
+func forEachSnapshotUploadFile(
+	ctx context.Context,
+	root *os.Root,
+	files []snapshotUploadFile,
+	workers int,
+	fn func(context.Context, snapshotUploadFile, *os.File) error,
+) error {
+	for i := 0; i < len(files); {
+		if files[i].file != nil {
+			if err := fn(ctx, files[i], files[i].file); err != nil {
+				return err
+			}
+			i++
+			continue
+		}
+		j := i
+		for j < len(files) && files[j].file == nil {
+			j++
+		}
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(workers)
+		for _, f := range files[i:j] {
+			if gctx.Err() != nil {
+				break
+			}
+			g.Go(func() error {
+				return f.with(gctx, root, func(h *os.File) error {
+					return fn(gctx, f, h)
+				})
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return err
+		}
+		i = j
+	}
+	return nil
+}
+
+// snapshotUploadFile is one file of a snapshot upload. A file with a nil
+// handle is a deferred chunk file: it holds no descriptor until with opens
+// and verifies it, so descriptors stay bounded however many chunks a
+// snapshot declares.
 type snapshotUploadFile struct {
-	name string
-	file *os.File
+	name     string
+	file     *os.File
+	declared payloadFile
+}
+
+// with runs fn on the file's verified handle. A deferred chunk file is opened
+// through root, checked against its declared size and digest, rewound, passed
+// to fn and closed before with returns, so the bytes fn reads are the bytes
+// that were verified.
+func (f snapshotUploadFile) with(
+	ctx context.Context,
+	root *os.Root,
+	fn func(*os.File) error,
+) (retErr error) {
+	if f.file != nil {
+		return fn(f.file)
+	}
+	file, err := openSnapshotUploadFile(root, f.name)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			retErr = errors.Join(
+				retErr,
+				fmt.Errorf("close snapshot upload file %q: %w", f.name, err),
+			)
+		}
+	}()
+	if err := verifySnapshotUploadFile(ctx, f.declared, file); err != nil {
+		return err
+	}
+	return fn(file)
+}
+
+// verifySnapshotUploadFile checks file against its declared size and digest
+// and rewinds it.
+func verifySnapshotUploadFile(
+	ctx context.Context,
+	payload payloadFile,
+	file *os.File,
+) error {
+	if payload.sha256 == "" {
+		return fmt.Errorf(
+			"%w: manifest declares no digest for %s",
+			ErrSnapshotPayloadMismatch,
+			payload.name,
+		)
+	}
+	digest, size, err := hashSnapshotUploadFile(ctx, file)
+	if err != nil {
+		return fmt.Errorf(
+			"hash snapshot upload file %q: %w", payload.name, err,
+		)
+	}
+	if size != payload.size {
+		return fmt.Errorf(
+			"%w: %s is %d bytes, manifest declares %d",
+			ErrSnapshotPayloadMismatch,
+			payload.name,
+			size,
+			payload.size,
+		)
+	}
+	if !strings.EqualFold(digest, payload.sha256) {
+		return fmt.Errorf(
+			"%w: %s digest %s, manifest declares %s",
+			ErrSnapshotPayloadMismatch,
+			payload.name,
+			digest,
+			payload.sha256,
+		)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf(
+			"rewind snapshot upload file %q: %w", payload.name, err,
+		)
+	}
+	return nil
 }
 
 type snapshotUploadResult struct {
@@ -109,48 +241,14 @@ func openSnapshotUploadFiles(
 
 	payloads := manifest.payloadFiles()
 	ordered := make([]snapshotUploadFile, 0, len(payloads)+1)
-	for i := 0; i < len(payloads); i++ {
-		payload := payloads[i]
+	for _, payload := range payloads {
 		file, err := openSnapshotUploadFile(root, payload.name)
 		if err != nil {
 			return nil, Manifest{}, nil, err
 		}
 		files = append(files, snapshotUploadFile{name: payload.name, file: file})
-		if payload.sha256 == "" {
-			return nil, Manifest{}, nil, fmt.Errorf(
-				"%w: manifest declares no digest for %s",
-				ErrSnapshotPayloadMismatch,
-				payload.name,
-			)
-		}
-		digest, size, err := hashSnapshotUploadFile(ctx, file)
-		if err != nil {
-			return nil, Manifest{}, nil, fmt.Errorf(
-				"hash snapshot upload file %q: %w", payload.name, err,
-			)
-		}
-		if size != payload.size {
-			return nil, Manifest{}, nil, fmt.Errorf(
-				"%w: %s is %d bytes, manifest declares %d",
-				ErrSnapshotPayloadMismatch,
-				payload.name,
-				size,
-				payload.size,
-			)
-		}
-		if !strings.EqualFold(digest, payload.sha256) {
-			return nil, Manifest{}, nil, fmt.Errorf(
-				"%w: %s digest %s, manifest declares %s",
-				ErrSnapshotPayloadMismatch,
-				payload.name,
-				digest,
-				payload.sha256,
-			)
-		}
-		if _, err := file.Seek(0, io.SeekStart); err != nil {
-			return nil, Manifest{}, nil, fmt.Errorf(
-				"rewind snapshot upload file %q: %w", payload.name, err,
-			)
+		if err := verifySnapshotUploadFile(ctx, payload, file); err != nil {
+			return nil, Manifest{}, nil, err
 		}
 		ordered = append(ordered, snapshotUploadFile{name: payload.name, file: file})
 		if payload.name == ImmutableIndexFileName {
@@ -165,7 +263,20 @@ func openSnapshotUploadFiles(
 					"rewind snapshot upload file %q: %w", payload.name, err,
 				)
 			}
-			payloads = append(payloads, chunkPayloads...)
+			// Chunk files are left unopened: a snapshot holds thousands,
+			// more than the descriptor limit, so each is opened, verified,
+			// used and closed by snapshotUploadFile.with.
+			for _, chunk := range chunkPayloads {
+				if chunk.sha256 == "" {
+					return nil, Manifest{}, nil, fmt.Errorf(
+						"%w: manifest declares no digest for %s",
+						ErrSnapshotPayloadMismatch, chunk.name,
+					)
+				}
+				ordered = append(ordered, snapshotUploadFile{
+					name: chunk.name, declared: chunk,
+				})
+			}
 		}
 	}
 	ordered = append(ordered, files[0])
@@ -210,6 +321,9 @@ func openSnapshotUploadFile(root *os.Root, name string) (*os.File, error) {
 func closeSnapshotUploadFiles(files []snapshotUploadFile) error {
 	var err error
 	for _, file := range files {
+		if file.file == nil {
+			continue
+		}
 		err = errors.Join(err, file.file.Close())
 	}
 	return err
@@ -265,12 +379,15 @@ func uploadStagedSnapshot(
 			"create staged snapshot directory: %w", err,
 		)
 	}
-	for _, file := range files {
-		if err := copySnapshotUploadFile(
-			ctx, filepath.Join(stagedDir, file.name), file.file,
-		); err != nil {
-			return snapshotUploadResult{}, err
-		}
+	if err := forEachSnapshotUploadFile(
+		ctx, root, files, snapshotUploadWorkers,
+		func(ctx context.Context, file snapshotUploadFile, src *os.File) error {
+			return copySnapshotUploadFile(
+				ctx, filepath.Join(stagedDir, file.name), src,
+			)
+		},
+	); err != nil {
+		return snapshotUploadResult{}, err
 	}
 	manifest, err := ReadManifest(stagedDir, opts...)
 	if err != nil {
