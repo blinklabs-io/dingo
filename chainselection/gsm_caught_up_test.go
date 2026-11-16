@@ -221,3 +221,47 @@ func TestCaughtUpJudgementWithoutSlotTimeIsSyncing(t *testing.T) {
 	gsmReachCaughtUp(t, f)
 	assert.False(t, f.cs.CaughtUp(), "the age of the tip cannot be told")
 }
+
+// A block producer whose only peer is its relay has just adopted a block it
+// forged: the relay is still idle at the parent, which is on the selection.
+func TestCaughtUpJudgementRelayIdleAtTheParentOfAForgedBlock(t *testing.T) {
+	t.Parallel()
+	f := newGSMFixture(t, gsmJudgementOnly)
+	relay := corrConn(90)
+	f.applyRange(1, 5)
+	f.deliver(t, relay, 1, 5)
+	f.idle(relay, gsmTip(5))
+	f.apply(gsmTip(6))
+	assert.True(t, f.cs.CaughtUp())
+}
+
+// A relay idle on a one-block fork keeps the judgement syncing only until it
+// adopts the selection; once caught up, a later fork does not undo it.
+func TestCaughtUpJudgementRelayOnAShortForkDelaysOnly(t *testing.T) {
+	t.Parallel()
+	f := newGSMFixture(t, gsmJudgementOnly)
+	relay := corrConn(90)
+	fork := genesisTip(6, "f6", 6)
+	f.applyRange(1, 6)
+	f.deliver(t, relay, 1, 5)
+	require.True(t, f.cs.UpdatePeerTip(relay, fork, nil))
+	f.idle(relay, fork)
+	assert.False(t, f.cs.CaughtUp(),
+		"an idle peer off the selection counts as a better candidate")
+
+	f.cs.HandlePeerRollbackEvent(event.Event{Data: PeerRollbackEvent{
+		ConnectionId: relay,
+		Point:        gsmTip(5).Point,
+		Tip:          gsmTip(6),
+	}})
+	require.True(t, f.cs.UpdatePeerTip(relay, gsmTip(6), nil))
+	f.idle(relay, gsmTip(6))
+	require.True(t, f.cs.CaughtUp(), "the relay follows the selection")
+
+	f.apply(gsmTip(7))
+	fork = genesisTip(8, "f8", 8)
+	require.True(t, f.cs.UpdatePeerTip(relay, gsmTip(7), nil))
+	require.True(t, f.cs.UpdatePeerTip(relay, fork, nil))
+	f.idle(relay, fork)
+	assert.True(t, f.cs.CaughtUp(), "the judgement is latched")
+}
