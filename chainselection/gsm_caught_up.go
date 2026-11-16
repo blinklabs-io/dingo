@@ -39,9 +39,9 @@ type caughtUpJudgement struct {
 //
 // A selector that runs the machine as its selection mode answers from that
 // mode. Any other selector, one that selects by Praos rules, runs the same
-// transitions for the judgement alone, evaluated when asked: it never
-// changes the selection mode, publishes no mode event and disconnects no
-// peer, because those belong to Genesis selection.
+// transitions for the judgement alone: it never changes the selection mode,
+// publishes no mode event and disconnects no peer, because those belong to
+// Genesis selection.
 //
 // Syncing becomes caught up when at least one connection is known, every
 // connection is idle and no candidate is better than the selection, the
@@ -50,6 +50,12 @@ type caughtUpJudgement struct {
 // per caught-up period, and not before that age has passed since the node
 // became caught up, the reference's blockWhileCaughtUp and
 // gsmMinCaughtUpDuration.
+//
+// Once asked, the judgement is also advanced by every evaluation the
+// selector runs, among them the one each idle report triggers and the
+// periodic one, so that the moment every connection is idle is seen as the
+// reference sees it, rather than only when a block has just arrived and the
+// peers that sent it are still busy.
 //
 // The judgement starts as syncing, as the reference does without its
 // caught-up marker, and there is none here: a restarted node is caught up
@@ -65,6 +71,14 @@ func (cs *ChainSelector) CaughtUp() bool {
 		active, _ := cs.GenesisSelectionState()
 		return !active
 	}
+	cs.judgementWanted.Store(true)
+	return cs.advanceCaughtUpJudgement()
+}
+
+// advanceCaughtUpJudgement takes one step of the judgement of a selector that
+// does not select by Genesis and reports its state. It takes the selector
+// lock, so it must be called without it.
+func (cs *ChainSelector) advanceCaughtUpJudgement() bool {
 	if cs.config.SlotTime == nil {
 		return false
 	}

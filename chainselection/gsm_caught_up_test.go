@@ -266,3 +266,34 @@ func TestCaughtUpJudgementRelayOnAShortForkDelaysOnly(t *testing.T) {
 	f.idle(relay, fork)
 	assert.True(t, f.cs.CaughtUp(), "the judgement is latched")
 }
+
+// Once asked, the judgement follows the selector's own evaluations, as the
+// reference waits for the moment every peer is idle: a node asked only when a
+// block has just arrived would find a peer still delivering it each time.
+func TestCaughtUpJudgementLatchesAtAnIdleMoment(t *testing.T) {
+	t.Parallel()
+	f := newGSMFixture(t, gsmJudgementOnly)
+	require.False(t, f.cs.CaughtUp())
+	peer := corrConn(90)
+	f.applyRange(1, 5)
+	f.deliver(t, peer, 1, 5)
+	f.idle(peer, gsmTip(5))
+	f.cs.ClearPeerIdling(peer, gsmTip(6).Point)
+	assert.True(t, f.cs.CaughtUp(),
+		"the peer was idle at the selection before it streamed again")
+}
+
+// A peer can report itself idle at a block before the node has applied it;
+// the evaluation that follows the block's adoption finds every peer idle.
+func TestCaughtUpJudgementLatchesWhenTheIdleBlockIsApplied(t *testing.T) {
+	t.Parallel()
+	f := newGSMFixture(t, gsmJudgementOnly)
+	require.False(t, f.cs.CaughtUp())
+	peer := corrConn(90)
+	f.applyRange(1, 4)
+	f.deliver(t, peer, 1, 5)
+	f.idle(peer, gsmTip(5))
+	f.apply(gsmTip(5))
+	f.cs.ClearPeerIdling(peer, gsmTip(6).Point)
+	assert.True(t, f.cs.CaughtUp())
+}

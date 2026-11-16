@@ -12859,9 +12859,11 @@ selects by Praos rules (`ConsensusMode: PraosMode`, as the embedded musashi
 configuration does) still starts out syncing, so a producer syncing from genesis
 or catching up after downtime samples nothing, as the votes of the announcements
 it passes were never collected. A selector that runs Genesis selection answers
-from its mode. Any other selector evaluates the same transitions, when asked and
-without touching the selection mode, publishing a mode event or disconnecting a
-peer. Syncing becomes caught up when at least one connection is known, every
+from its mode. Any other selector evaluates the same transitions without
+touching the selection mode, publishing a mode event or disconnecting a peer:
+once first asked, on every evaluation the selector runs (each idle report and
+the periodic one), so the moment every connection is idle is seen as the
+reference waits for it, not only when a block has just arrived. Syncing becomes caught up when at least one connection is known, every
 connection is idle (its latest `MsgAwaitReply` is at its delivered frontier) and
 no candidate is better than the selection. Caught up becomes syncing when the
 selection tip is older than the maximum caught-up age (20 minutes) plus a random

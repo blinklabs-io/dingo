@@ -386,6 +386,10 @@ type ChainSelector struct {
 	// judgement is the caught-up state of a selector that does not select by
 	// Genesis; see CaughtUp.
 	judgement caughtUpJudgement
+	// judgementWanted is set by the first CaughtUp call. From then on the
+	// selector's own evaluations advance the judgement, so a selector nothing
+	// asks does no caught-up work.
+	judgementWanted atomic.Bool
 	// pendingGenesisEntry stages a GenesisModeEnteredEvent for publishing
 	// outside the lock. Guarded by mutex.
 	pendingGenesisEntry *GenesisModeEnteredEvent
