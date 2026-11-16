@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"slices"
 	"testing"
 
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
@@ -110,5 +111,50 @@ func TestNewConfigFromInternalCarriesDefaultedMempoolCapacity(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tc.want, cfg.mempoolCapacityLeiosDefault)
 		})
+	}
+}
+
+// A built-in mempool selection that carries options but no capacity takes the
+// run-mode default, as a selection without any config does, and the caller's
+// map is left as it was.
+func TestWithPluginSelectionDefaultsAnAbsentMempoolCapacity(t *testing.T) {
+	t.Parallel()
+	musashi := ouroboros.NetworkCardanoMusashi.Name
+	for _, tc := range []struct {
+		name      string
+		opts      []ConfigOptionFunc
+		want      int64
+		defaulted bool
+	}{
+		{"serve", nil, int64(internalconfig.DefaultMempoolCapacityPraos), false},
+		{
+			"musashi",
+			[]ConfigOptionFunc{WithNetwork(musashi)},
+			int64(internalconfig.DefaultMempoolCapacityLeios),
+			true,
+		},
+	} {
+		for _, provider := range []string{"default", "fifo", "dag"} {
+			t.Run(tc.name+"/"+provider, func(t *testing.T) {
+				t.Parallel()
+				options := map[string]any{"evictionWatermark": 0.5}
+				opts := append(
+					slices.Clone(tc.opts),
+					WithPluginSelection(
+						hostplugin.CapabilityMempool,
+						hostplugin.Selection{Provider: provider, Config: options},
+					),
+				)
+				cfg := NewConfig(opts...)
+				selection := cfg.pluginSelections[hostplugin.CapabilityMempool]
+				require.Equal(t, tc.want, pluginInt64(selection.Config["capacity"]))
+				require.InDelta(t, 0.5, selection.Config["evictionWatermark"], 0)
+				require.Equal(t, tc.defaulted, cfg.mempoolCapacityLeiosDefault)
+				require.Equal(
+					t, map[string]any{"evictionWatermark": 0.5}, options,
+					"the caller's map is unchanged",
+				)
+			})
+		}
 	}
 }

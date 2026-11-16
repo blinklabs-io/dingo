@@ -1083,16 +1083,19 @@ func WithPluginSelection(
 			if c.mempoolCapacitySet {
 				c.mempoolCapacityLeiosDefault = false
 			}
-			if selection.Config == nil &&
-				(selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
-				selection.Config = map[string]any{
-					"capacity": int64(
-						internalconfig.DefaultMempoolCapacityPraos,
-					),
-				}
-			}
 		}
 		selection.Config = clonePluginConfig(selection.Config)
+		// The clone keeps the caller's map unchanged. A built-in selection
+		// without a capacity takes the Praos default, which syncCompatFields
+		// raises to the Leios default where that applies; without it the
+		// pool would run with no capacity at all.
+		if capability == hostplugin.CapabilityMempool &&
+			!c.mempoolCapacitySet &&
+			(selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
+			selection.Config["capacity"] = int64(
+				internalconfig.DefaultMempoolCapacityPraos,
+			)
+		}
 		switch capability {
 		case hostplugin.CapabilityStorageBlob:
 			c.cfg.Plugins.Storage.Blob = selection
