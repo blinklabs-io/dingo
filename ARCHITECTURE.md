@@ -1255,6 +1255,14 @@ Other `chain.update` subscribers switch on the payload type and ignore it. The
 barrier and the walk are skipped when nothing subscribes to `ledger.block`
 (the barrier is also skipped when the handler is not subscribed).
 
+Replayed Applies are published before the ledger applies the blocks, as live
+ones are. A Dijkstra block that certifies an endorser block takes its
+transactions from that endorser block, which the ledger persists only when it
+applies the certifying block and otherwise fetches from a peer. After a restart
+a stored, unapplied certifying block can therefore have no closure data yet, and
+a subscriber that resolves the block's transactions on Apply, such as the
+Midnight indexer, fails on it.
+
 An ordinary stalled subscriber detaches after its delivery timeout; a lossless
 subscriber deliberately remains attached until it drains or is stopped, closed,
 or unsubscribed. A live restore/truncate closes the `LedgerState` while keeping

@@ -89,8 +89,10 @@ func (ls *LedgerState) publishStartupReplayBlockEvents(
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
 	chainTip := ls.chain.Tip()
-	if pointMatches(chainTip.Point, ledgerTip.Point) ||
-		chainTip.BlockNumber <= ledgerTip.BlockNumber {
+	// Compare points, not block numbers: a Byron epoch-boundary block carries
+	// the number of the block before it, so an unapplied successor can sit at
+	// the ledger tip's height.
+	if pointMatches(chainTip.Point, ledgerTip.Point) {
 		return nil
 	}
 	iter, err := ls.chain.FromPointContext(ctx, ledgerTip.Point, false)

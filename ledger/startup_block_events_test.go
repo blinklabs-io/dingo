@@ -231,3 +231,31 @@ func TestStartupReplayWaitsForReconciliationUndoEvents(t *testing.T) {
 	}
 	require.NoError(t, <-replayDone)
 }
+
+// TestPublishStartupReplayBlockEventsIncludesEqualHeightSuccessor covers a
+// Byron epoch-boundary block, which shares the block number of the applied
+// block before it and must still be replayed.
+func TestPublishStartupReplayBlockEventsIncludesEqualHeightSuccessor(
+	t *testing.T,
+) {
+	t.Parallel()
+	ls, raw, blockCh := startupReplayFixture(t, 2, 2)
+	ebb := chain.RawBlock{
+		Slot:        raw[1].Slot + 10,
+		Hash:        testHashBytes("startup-replay-ebb"),
+		BlockNumber: raw[1].BlockNumber,
+		Type:        1,
+		PrevHash:    raw[1].Hash,
+		Cbor:        []byte{0x80},
+	}
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{ebb}),
+	)
+
+	require.NoError(
+		t,
+		ls.publishStartupReplayBlockEvents(context.Background()),
+	)
+	requireApplyEvent(t, blockCh, ebb)
+}
