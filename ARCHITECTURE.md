@@ -11329,8 +11329,11 @@ the total active stake (`leios.CommitteeKeysReachQuorum`, compared exactly and
 inclusively; a keyless seat counts nothing). The committee is the current
 epoch's, from the vote manager, and the threshold is the one in the current
 protocol parameters. A committee that cannot be resolved keeps the non-Leios
-capacity. The mempool re-reads the function on each admission, chain update
-and cleanup tick, outside its locks. A capacity that grows wakes admission
+capacity. The node reads the epoch and its parameters from one consensus
+snapshot of the ledger published for readers outside `liveLifecycleMu`. The
+mempool re-reads the function on each admission, chain update and cleanup
+tick, outside its locks. Reads never overlap: while one waits on the
+committee, other callers use the capacity last read rather than queueing. A capacity that grows wakes admission
 waiters; one that shrinks evicts nothing, so a pool above the new capacity
 refuses admissions until blocks drain it. An explicit `capacity` is never
 gated. Relay consumer caches keep their bound derived from the configured

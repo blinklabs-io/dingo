@@ -87,3 +87,62 @@ func TestMempoolCapacityFuncBlockingDoesNotStallLedgerCalls(t *testing.T) {
 	)
 	require.Len(t, pool.Transactions(), 1)
 }
+
+// A capacity read that stalls holds up only its own caller: every other
+// caller keeps the capacity last read instead of queueing behind it.
+func TestMempoolCapacityFuncStallDoesNotQueueOtherCallers(t *testing.T) {
+	t.Parallel()
+	var blocking atomic.Bool
+	var current atomic.Int64
+	current.Store(4096)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	pool, err := NewFIFO(MempoolConfig{
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1 << 30,
+		CapacityFunc: func() int64 {
+			if blocking.Load() {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				<-release
+			}
+			return current.Load()
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, pool.Start(context.Background()))
+	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
+	require.Equal(t, int64(4096), pool.CapacityBytes())
+
+	blocking.Store(true)
+	current.Store(8192)
+	stalled := make(chan int64, 1)
+	go func() { stalled <- pool.CapacityBytes() }()
+	dingotestutil.RequireReceive(t, entered, 2*time.Second, "a capacity read stalls")
+
+	others := make(chan int64, 1)
+	go func() {
+		pool.AdmissionHeadroomBytes()
+		others <- pool.CapacityBytes()
+	}()
+	require.Equal(
+		t,
+		int64(4096),
+		dingotestutil.RequireReceive(
+			t, others, 2*time.Second,
+			"other callers keep the last capacity while a read stalls",
+		),
+	)
+
+	blocking.Store(false)
+	close(release)
+	require.Equal(
+		t,
+		int64(8192),
+		dingotestutil.RequireReceive(t, stalled, 2*time.Second, "the stalled read lands"),
+	)
+	require.Equal(t, int64(8192), pool.CapacityBytes())
+}

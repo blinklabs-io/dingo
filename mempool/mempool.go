@@ -221,7 +221,8 @@ type MempoolConfig struct {
 	// one kept whenever the function reports zero or less. The function is
 	// called without any pool lock held, as often as admission, chain updates
 	// and the cleanup interval need a fresh value, so it must be cheap once
-	// warm. Only admission follows it: MempoolCapacity stays the bound on the
+	// warm. Calls never overlap: while one is in progress, other callers use
+	// the capacity last returned. Only admission follows it: MempoolCapacity stays the bound on the
 	// bodies relay consumers retain and the base of their derived cache
 	// budget, because transactions admitted under a larger capacity remain.
 	CapacityFunc         func() int64
@@ -2734,11 +2735,18 @@ func (m *Mempool) CapacityBytes() int64 {
 // larger capacity opens. A capacity that shrinks evicts nothing; the pool
 // refuses admissions until its contents drain below the new capacity. It must
 // be called without the pool lock held.
+//
+// Only one call reads CapacityFunc at a time, so results land in order. A
+// call that finds a read in progress returns at once and its caller uses the
+// capacity last read: the function may wait on ledger and database reads,
+// and admission, eviction and cleanup must not queue behind one that stalls.
 func (m *Mempool) refreshCapacity() {
 	if m.config.CapacityFunc == nil {
 		return
 	}
-	m.capacityMu.Lock()
+	if !m.capacityMu.TryLock() {
+		return
+	}
 	next := m.config.CapacityFunc()
 	if next <= 0 {
 		m.capacityMu.Unlock()
