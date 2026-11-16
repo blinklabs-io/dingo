@@ -629,8 +629,21 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 	// separately here, or reinitializeCoreStorage's re-resolve of the same
 	// capabilities below would collide with these still-open instances
 	// (e.g. badger's exclusive file lock on the same on-disk directory).
-	// Stopped in reverse of Run()'s resolve order (blob, then metadata).
+	// Stopped in reverse of Run()'s resolve order (blob, metadata, then
+	// immutable).
 	if n.pluginHost != nil {
+		if stopErr := n.pluginHost.StopCapability(
+			ctx, plugin.CapabilityStorageImmutable,
+		); stopErr != nil {
+			if errors.Is(stopErr, context.Canceled) ||
+				errors.Is(stopErr, context.DeadlineExceeded) {
+				stopErr = errors.Join(errStorageDrainUnconfirmed, stopErr)
+			}
+			err = errors.Join(
+				err,
+				fmt.Errorf("immutable storage shutdown: %w", stopErr),
+			)
+		}
 		if stopErr := n.pluginHost.StopCapability(
 			ctx, plugin.CapabilityStorageMetadata,
 		); stopErr != nil {

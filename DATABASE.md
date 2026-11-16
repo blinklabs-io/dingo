@@ -7586,6 +7586,14 @@ With `immutableDb.enabled`, block bodies more than k blocks behind the ledger's
 applied tip move out of Badger into cardano-node compatible chunk files under
 `<dataDir>/immutable`. Only the body moves.
 
+- **Provider.** The chunk files are served by the `storage.immutable` plugin
+  capability. The built-in `chunkfile` provider is registered in every build,
+  always resolved, and has no selector or configuration; the `immutableDb.*`
+  keys keep their meaning. `database.New` receives it as
+  `Stores.Immutable` and fails with a `storage.immutable provider` error when
+  a recorded state or the enabled configuration needs one and none was
+  injected. The directory, on-disk layout, schema guard, `adopting.pending`
+  and keep-chunks behaviour are unchanged.
 - **Marker.** The `bp<slot><hash>` value becomes `DIM1` followed by chunk
   number (8 bytes), block offset (8 bytes), size (4 bytes) and CRC-32 (4
   bytes), all big-endian, 28 bytes in total. Size and CRC cover the wrapped

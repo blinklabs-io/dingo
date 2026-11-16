@@ -83,7 +83,7 @@ func (d *Database) ImmutableLayout() (layout ImmutableLayout, ok bool, err error
 	if err := store.Sync(); err != nil {
 		return ImmutableLayout{}, false, err
 	}
-	files, err := immutable.ListFiles(rt.dir)
+	files, err := rt.svc.ListFiles()
 	if err != nil {
 		return ImmutableLayout{}, false, fmt.Errorf(
 			"list immutable files: %w",

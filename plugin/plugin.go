@@ -38,15 +38,16 @@ import (
 type Capability string
 
 const (
-	CapabilityStorageBlob     Capability = "storage.blob"
-	CapabilityStorageMetadata Capability = "storage.metadata"
-	CapabilityConsensus       Capability = "consensus"
-	CapabilityMempool         Capability = "mempool"
-	CapabilityAPIBlockfrost   Capability = "api.blockfrost"
-	CapabilityAPIKupo         Capability = "api.kupo"
-	CapabilityAPIMesh         Capability = "api.mesh"
-	CapabilityAPIUtxorpc      Capability = "api.utxorpc"
-	CapabilityAPIMcp          Capability = "api.mcp"
+	CapabilityStorageBlob      Capability = "storage.blob"
+	CapabilityStorageMetadata  Capability = "storage.metadata"
+	CapabilityStorageImmutable Capability = "storage.immutable"
+	CapabilityConsensus        Capability = "consensus"
+	CapabilityMempool          Capability = "mempool"
+	CapabilityAPIBlockfrost    Capability = "api.blockfrost"
+	CapabilityAPIKupo          Capability = "api.kupo"
+	CapabilityAPIMesh          Capability = "api.mesh"
+	CapabilityAPIUtxorpc       Capability = "api.utxorpc"
+	CapabilityAPIMcp           Capability = "api.mcp"
 )
 
 // allCapabilities is the single enumeration of the capabilities this platform
@@ -56,6 +57,7 @@ const (
 var allCapabilities = []Capability{
 	CapabilityStorageBlob,
 	CapabilityStorageMetadata,
+	CapabilityStorageImmutable,
 	CapabilityConsensus,
 	CapabilityMempool,
 	CapabilityAPIBlockfrost,

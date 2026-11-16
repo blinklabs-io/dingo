@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/prometheus/client_golang/prometheus"
@@ -79,6 +80,9 @@ type Config struct {
 type Stores struct {
 	Blob     blob.BlobStore
 	Metadata metadata.MetadataStore
+	// Immutable provides the ImmutableDB. It is required only when the
+	// database uses one: a recorded state or an enabled configuration.
+	Immutable immplugin.ImmutableDB
 }
 
 // isNilStore reports whether an injected store is a nil interface or an
@@ -134,6 +138,9 @@ type Database struct {
 
 	// immutable is the ImmutableDB handle; nil until a state record exists.
 	immutable *immutableRuntime
+	// immutableDB is the injected ImmutableDB service; nil when the caller
+	// supplied none.
+	immutableDB immplugin.ImmutableDB
 
 	cborCache       *TieredCborCache
 	sizeMetricsStop chan struct{}
@@ -587,11 +594,15 @@ func New(
 	if stores.Metadata == nil || isNilStore(stores.Metadata) {
 		return nil, errors.New("metadata store is required")
 	}
+	if stores.Immutable != nil && isNilStore(stores.Immutable) {
+		return nil, errors.New("immutable store must not be a typed nil")
+	}
 	db := &Database{
-		blobRef:  newBlobStoreRef(stores.Blob),
-		metadata: stores.Metadata,
-		logger:   configCopy.Logger,
-		config:   configCopy,
+		blobRef:     newBlobStoreRef(stores.Blob),
+		metadata:    stores.Metadata,
+		immutableDB: stores.Immutable,
+		logger:      configCopy.Logger,
+		config:      configCopy,
 	}
 	// Initialize the tiered CBOR cache
 	db.cborCache = NewTieredCborCache(configCopy.CacheConfig, db)

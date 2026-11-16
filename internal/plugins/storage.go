@@ -24,6 +24,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
+	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -32,7 +34,8 @@ import (
 )
 
 // StorageSelections identifies the providers and provider-owned
-// configuration for the two storage capabilities.
+// configuration for the selectable storage capabilities. The ImmutableDB has
+// one built-in provider and no selection.
 type StorageSelections struct {
 	Blob     plugin.Selection
 	Metadata plugin.Selection
@@ -105,7 +108,28 @@ func ResolveStorage(
 			err,
 		)
 	}
-	return database.Stores{Blob: blobStore, Metadata: metadataStore}, nil
+	immutableStore, err := plugin.Resolve[immplugin.ImmutableDB](
+		ctx,
+		host,
+		plugin.CapabilityStorageImmutable,
+		chunkfile.ProviderName,
+		nil,
+		immplugin.ProviderDependencies{
+			DataDir: deps.DataDir,
+			Logger:  deps.Logger,
+		},
+	)
+	if err != nil {
+		return database.Stores{}, fmt.Errorf(
+			"resolve immutable storage: %w",
+			err,
+		)
+	}
+	return database.Stores{
+		Blob:      blobStore,
+		Metadata:  metadataStore,
+		Immutable: immutableStore,
+	}, nil
 }
 
 // DatabaseRuntime is a composed database plus the plugin host that owns its
