@@ -782,9 +782,10 @@ func (n *Node) newPoolForger(
 	if n.config.leiosForgingEnabled() &&
 		n.leiosPipelineManager != nil && n.ouroboros() != nil {
 		adapter := &leiosPipelineAdapter{
-			mgr:              n.leiosPipelineManager,
-			chain:            n.chainManager.PrimaryChain(),
-			endorserBlockTxs: n.ouroboros().EndorserBlockClosureTxsByHash,
+			mgr:                        n.leiosPipelineManager,
+			chain:                      n.chainManager.PrimaryChain(),
+			endorserBlockTxs:           n.ouroboros().EndorserBlockClosureTxsByHash,
+			endorserBlockQuorumRefusal: n.leiosEndorserBlockQuorumRefusalForSlot,
 		}
 		leiosChecker = adapter
 		leiosCerts = adapter
@@ -1382,6 +1383,9 @@ type leiosPipelineAdapter struct {
 	mgr              *leios.PipelineManager
 	chain            leiosParentChain
 	endorserBlockTxs func(ebHash []byte, ebSlot uint64) ([]cbor.RawMessage, bool)
+	// endorserBlockQuorumRefusal, when set, returns why the committee rules
+	// out an endorser block for a slot, or "" when it does not.
+	endorserBlockQuorumRefusal func(slot uint64) string
 }
 
 type leiosParentChain interface {
@@ -1399,6 +1403,11 @@ func (a *leiosPipelineAdapter) MayProduceEndorserBlock(
 	dec, err := a.mgr.MayProduceEndorserBlock(slot)
 	if err != nil {
 		return false, "", err
+	}
+	if dec.Allowed && a.endorserBlockQuorumRefusal != nil {
+		if reason := a.endorserBlockQuorumRefusal(slot); reason != "" {
+			return false, reason, nil
+		}
 	}
 	return dec.Allowed, dec.Reason, nil
 }

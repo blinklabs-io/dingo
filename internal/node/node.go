@@ -900,6 +900,7 @@ func buildDingoConfig(
 			plugin.CapabilityMempool,
 			cfg.Plugins.Mempool,
 		),
+		dingo.WithMempoolCapacityDefaulted(cfg.MempoolCapacityDefaulted()),
 		dingo.WithPluginSelection(
 			plugin.CapabilityAPIBlockfrost,
 			cfg.Plugins.API.Blockfrost,

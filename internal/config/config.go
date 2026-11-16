@@ -1233,6 +1233,12 @@ type Config struct {
 	// RecordSourceProvenance, not by LoadConfig itself — see provenance.go
 	// and RecordSourceProvenance's own doc comment for why.
 	provenance Provenance
+
+	// mempoolCapacityDefaulted records that ApplyDefaults chose the Leios
+	// mempool capacity because none was configured. It is unexported so no
+	// YAML, environment or flag can set it: only a capacity nobody set may
+	// follow whether the committee can reach its quorum.
+	mempoolCapacityDefaulted bool
 }
 
 // PluginsConfig is the canonical configuration tree for compiled-in plugin
@@ -2135,6 +2141,12 @@ func applyAPIPortCompatibilityEnvironment(cfg *Config, environ []string) error {
 	return nil
 }
 
+// MempoolCapacityDefaulted reports whether ApplyDefaults chose the Leios
+// mempool capacity because the configuration set none.
+func (c *Config) MempoolCapacityDefaulted() bool {
+	return c.mempoolCapacityDefaulted
+}
+
 // ApplyDefaults fills in unset values whose defaults depend on other
 // settings in the fully merged configuration — most notably
 // MempoolCapacity, whose default is chosen by RunMode. It must run
@@ -2183,6 +2195,7 @@ func (c *Config) ApplyDefaults() {
 			c.Plugins.Mempool.Config["capacity"] = int64(
 				DefaultMempoolCapacityLeios,
 			)
+			c.mempoolCapacityDefaulted = true
 		} else {
 			c.Plugins.Mempool.Config["capacity"] = int64(DefaultMempoolCapacityPraos)
 		}

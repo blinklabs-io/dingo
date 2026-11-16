@@ -15765,6 +15765,18 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 	return ls.loadConsensusSnapshot().currentEpoch.EpochId
 }
 
+// CurrentEpochAndPParams returns the current epoch and the protocol
+// parameters in force in it, read from one published consensus snapshot. Two
+// separate reads can straddle an epoch rollover and pair one epoch with the
+// other's parameters.
+func (ls *LedgerState) CurrentEpochAndPParams() (
+	uint64,
+	lcommon.ProtocolParameters,
+) {
+	snapshot := ls.loadConsensusSnapshot()
+	return snapshot.currentEpoch.EpochId, snapshot.currentPParams
+}
+
 // IsByronEra reports whether the applied ledger is still in the Byron era.
 func (ls *LedgerState) IsByronEra() bool {
 	return ls.loadConsensusSnapshot().currentEra.Id == eras.ByronEraDesc.Id
