@@ -576,6 +576,10 @@ type Utxo struct {
 }
 
 type UtxoAddress struct {
-	UtxoID  int64
-	Address []byte
+	UtxoID     int64
+	Address    []byte
+	TxID       sql.NullInt64
+	OutputIdx  sql.NullInt64
+	Slot       sql.NullInt64
+	BlockIndex sql.NullInt64
 }

@@ -490,6 +490,18 @@ INSERT INTO applied_transaction (
 	if err != nil {
 		return overlayWriteError("insert batch applied transaction rows", err)
 	}
+	if o.retainHistory {
+		// Address rows queued before these application rows were written, and
+		// outputs an import stored for a reused identity, hold the position
+		// they take without one.
+		ids := make([]int64, len(o.txPending))
+		for i, row := range o.txPending {
+			ids[i] = row.id
+		}
+		if err := fillUtxoAddressOrderByTransactions(ctx, db, ids); err != nil {
+			return err
+		}
+	}
 	o.txPending = nil
 	return nil
 }

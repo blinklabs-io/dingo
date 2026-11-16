@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
@@ -26,7 +27,8 @@ import (
 
 // TestImmutableDBSchemaReleaseStopsOlderBinaries covers the downgrade guard: a
 // database migrated through the ImmutableDB release is refused, as a newer
-// schema, by a binary whose registry ends one version earlier.
+// schema, by a binary whose registry ends one version earlier. Later
+// migrations are not part of the check.
 func TestImmutableDBSchemaReleaseStopsOlderBinaries(t *testing.T) {
 	t.Parallel()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
@@ -36,7 +38,11 @@ func TestImmutableDBSchemaReleaseStopsOlderBinaries(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Equal(t, "immutable-db", registry[len(registry)-1].Name)
+	release := slices.IndexFunc(registry, func(m migrations.Migration) bool {
+		return m.Name == "immutable-db"
+	})
+	require.GreaterOrEqual(t, release, 1)
+	through := registry[:release+1]
 
 	run := func(registry []migrations.Migration) error {
 		runner := migrations.Runner{
@@ -49,8 +55,8 @@ func TestImmutableDBSchemaReleaseStopsOlderBinaries(t *testing.T) {
 		}
 		return runner.Run(context.Background())
 	}
-	require.NoError(t, run(registry))
+	require.NoError(t, run(through))
 	require.ErrorIs(
-		t, run(registry[:len(registry)-1]), migrations.ErrNewerSchema,
+		t, run(through[:len(through)-1]), migrations.ErrNewerSchema,
 	)
 }

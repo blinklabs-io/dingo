@@ -255,7 +255,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 			PaginationParams{Count: 10, Page: 3, Order: PaginationOrderAsc},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, total, gotTotal)
+		assert.Equal(t, -1, gotTotal, "a page short of the end leaves the total unknown")
 		require.Len(t, items, 10)
 		assert.Equal(t, "21000000", items[0].Amount[0].Quantity)
 		assert.Equal(t, "30000000", items[len(items)-1].Amount[0].Quantity)
@@ -268,7 +268,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 			PaginationParams{Count: 10, Page: 5, Order: PaginationOrderDesc},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, total, gotTotal)
+		assert.Equal(t, -1, gotTotal, "a page short of the end leaves the total unknown")
 		require.Len(t, items, 10)
 		// Descending page 5 (count 10) is the 41st-newest through the
 		// 50th-newest UTxO.
@@ -283,10 +283,11 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 			PaginationParams{Count: 10, Page: 1002, Order: PaginationOrderDesc},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, total, gotTotal)
+		assert.Equal(t, -1, gotTotal, "a page short of the end leaves the total unknown")
 		assert.Empty(t, items)
 	})
 
+	// The final page reaches the end of the address, so the total is exact.
 	t.Run("ascending page beyond candidate scan limit", func(t *testing.T) {
 		items, gotTotal, err := adapter.AddressUTXOs(
 			context.Background(),
