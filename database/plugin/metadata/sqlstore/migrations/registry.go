@@ -107,6 +107,7 @@ const (
 	utxoTransactionIdentitySchemaRelease                = "utxo-transaction-identity"
 	poolRelayIPv6NetworkOrderSchemaRelease              = "pool-relay-ipv6-network-order"
 	epochStakesIndexSchemaRelease                       = "reward-stake-input-epoch-registered-index"
+	poolRetirementEpochIndexSchemaRelease               = "pool-retirement-epoch-index"
 	poolCurrentStateSchemaRelease                       = "pool-current-state"
 )
 
@@ -295,6 +296,7 @@ var schemaVersions = []struct {
 	{Version: 65, Name: scriptHashIndexDropSchemaRelease, Dir: "v65"},
 	{Version: 66, Name: governanceVoteTombstoneSchemaRelease, Dir: "v66"},
 	{Version: 67, Name: poolCurrentStateSchemaRelease, Dir: "v67"},
+	{Version: 68, Name: poolRetirementEpochIndexSchemaRelease, Dir: "v68"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
