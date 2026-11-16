@@ -1212,9 +1212,9 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
-	// Expire the operation context before provider shutdown. The real Badger
-	// provider then returns from CloseContext at the deadline while its owned
-	// close continues asynchronously.
+	// Expire the operation context while deferred-index maintenance is still
+	// running, so its drain cannot be confirmed. The durable Badger provider
+	// still closes to completion afterward.
 	n.deferredIndexMaintenanceDone = make(chan struct{})
 
 	// Capture the blob store's own completion signal before Truncate closes

@@ -377,6 +377,7 @@ func aheadChainBlock(
 		TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{
 			tx.WitnessSet,
 		},
+		InvalidTransactions: []uint{},
 	}
 	block.BlockHeader.Body.BlockNumber = number
 	block.BlockHeader.Body.Slot = slot

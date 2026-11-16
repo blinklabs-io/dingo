@@ -67,6 +67,7 @@ func anyChainBlockFromModel(block models.Block) (*sync.AnyChainBlock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("convert block: %w", err)
 	}
+	canonicalizeBlockAssets(tmpBlock)
 	var acb sync.AnyChainBlock
 	acb.Chain = &sync.AnyChainBlock_Cardano{Cardano: tmpBlock}
 	acb.NativeBytes = block.Cbor

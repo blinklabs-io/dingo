@@ -167,6 +167,7 @@ func searchUtxoModelToAnyData(
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert UTxO: %w", err)
 	}
+	canonicalizeOutputAssets(tmpUtxo)
 	audc := query.AnyUtxoData_Cardano{
 		Cardano: tmpUtxo,
 	}
@@ -492,6 +493,7 @@ func (s *queryServiceServer) ReadUtxos(
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert UTxO: %w", err)
 		}
+		canonicalizeOutputAssets(tmpUtxo)
 		audc := query.AnyUtxoData_Cardano{
 			Cardano: tmpUtxo,
 		}
@@ -894,6 +896,7 @@ func (s *queryServiceServer) ReadTx(
 	if err != nil {
 		return nil, fmt.Errorf("convert transaction: %w", err)
 	}
+	canonicalizeTxAssets(tmpTx)
 
 	brForTx := blockRefFromModel(block)
 	anyTx := &query.AnyChainTx{

@@ -15,8 +15,13 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +30,23 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) contains(s string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.Contains(b.buf.String(), s)
+}
 
 func TestRunRequestedShutdown(t *testing.T) {
 	t.Parallel()
@@ -40,6 +62,10 @@ func TestRunRequestedShutdown(t *testing.T) {
 		wantErr    error
 		wantText   string
 		causalErr  error
+		// blocksPastTimeout marks a shutdown that is still running when the
+		// request deadline passes. The run must keep waiting for it, and not
+		// exit or re-execute, until it is released.
+		blocksPastTimeout bool
 	}{
 		{
 			name:     "stop completes gracefully",
@@ -58,22 +84,24 @@ func TestRunRequestedShutdown(t *testing.T) {
 			wantReExec: true,
 		},
 		{
-			name: "stop past the timeout is abandoned",
+			name: "stop past the timeout waits for shutdown to finish",
 			shutdown: func(release <-chan struct{}) error {
 				<-release
 				return nil
 			},
-			wantText: "graceful shutdown exceeded",
+			wantText:          "graceful shutdown exceeded",
+			blocksPastTimeout: true,
 		},
 		{
-			name:    "restart past the timeout still re-executes",
+			name:    "restart past the timeout re-executes after shutdown finishes",
 			restart: true,
 			shutdown: func(release <-chan struct{}) error {
 				<-release
 				return nil
 			},
-			wantReExec: true,
-			wantText:   "graceful shutdown exceeded",
+			wantReExec:        true,
+			wantText:          "graceful shutdown exceeded",
+			blocksPastTimeout: true,
 		},
 		{
 			name:       "re-exec failure is reported",
@@ -89,11 +117,15 @@ func TestRunRequestedShutdown(t *testing.T) {
 			t.Parallel()
 
 			release := make(chan struct{})
-			t.Cleanup(func() { close(release) })
-			reExecCalls := 0
+			var releaseOnce sync.Once
+			releaseShutdown := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(releaseShutdown)
+			logs := &lockedLogBuffer{}
+			var reExecCalls atomic.Int32
 			result := make(chan error, 1)
 			go func() {
 				result <- runRequestedShutdown(
+					slog.New(slog.NewTextHandler(logs, nil)),
 					dingo.ShutdownRequest{
 						Restart: tc.restart,
 						Timeout: 50 * time.Millisecond,
@@ -101,11 +133,28 @@ func TestRunRequestedShutdown(t *testing.T) {
 					tc.causalErr,
 					func() error { return tc.shutdown(release) },
 					func() error {
-						reExecCalls++
+						reExecCalls.Add(1)
 						return tc.reExecErr
 					},
+					5*time.Millisecond,
 				)
 			}()
+			if tc.blocksPastTimeout {
+				testutil.WaitForCondition(t, func() bool {
+					return logs.contains("exceeded the request deadline")
+				}, 5*time.Second, "request deadline overrun never reported")
+				select {
+				case err := <-result:
+					t.Fatalf("returned before shutdown finished: %v", err)
+				case <-time.After(100 * time.Millisecond):
+				}
+				require.Zero(t, reExecCalls.Load(),
+					"re-executed before shutdown finished")
+				testutil.WaitForCondition(t, func() bool {
+					return logs.contains("still waiting for shutdown")
+				}, 5*time.Second, "no progress logged while waiting")
+				releaseShutdown()
+			}
 			err := testutil.RequireReceive(
 				t, result, 5*time.Second, "requested shutdown result",
 			)
@@ -117,7 +166,7 @@ func TestRunRequestedShutdown(t *testing.T) {
 			default:
 				require.NoError(t, err)
 			}
-			assert.Equal(t, tc.wantReExec, reExecCalls == 1)
+			assert.Equal(t, tc.wantReExec, reExecCalls.Load() == 1)
 		})
 	}
 }
