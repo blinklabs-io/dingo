@@ -27,6 +27,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 // The epochs in these tests are electionSlotsPerEpoch (10) slots long, so
@@ -58,7 +59,7 @@ func newObserveFixture(t *testing.T) *observeFixture {
 		store:  newMockScheduleStore(),
 		bus:    event.NewEventBus(nil, nil),
 	}
-	t.Cleanup(f.bus.Stop)
+	t.Cleanup(f.bus.Close)
 	copy(f.poolId[:], []byte("testpool1234567890123"))
 	stake := newMockStakeProvider()
 	stake.totalStake = 10000
@@ -77,6 +78,16 @@ func newObserveFixture(t *testing.T) *observeFixture {
 	// background compute run VRF work before a test persists its schedule.
 	f.epochs.SetEpochNonceForEpoch(observeEpochA, nil)
 	return f
+}
+
+// The event bus newObserveFixture creates is released when its test ends.
+// Not t.Parallel: goleak compares the goroutines of the whole process.
+func TestNewObserveFixtureReleasesItsEventBus(t *testing.T) {
+	ignore := goleak.IgnoreCurrent()
+	t.Run("fixture", func(t *testing.T) {
+		newObserveFixture(t)
+	})
+	goleak.VerifyNone(t, ignore)
 }
 
 // persist stores a schedule for epoch with the given leader slots, and the

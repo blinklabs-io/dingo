@@ -26,6 +26,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 // leaderProducerSeries are the series a producing pool adds for leader
@@ -47,7 +48,7 @@ func registerPoolProducer(
 ) *forging.BlockForger {
 	t.Helper()
 	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Stop)
+	t.Cleanup(bus.Close)
 	election := leader.NewElection(
 		lcommon.PoolKeyHash{},
 		nil,
@@ -64,6 +65,16 @@ func registerPoolProducer(
 	})
 	require.NoError(t, err)
 	return forger
+}
+
+// The event bus registerPoolProducer creates is released when its test ends.
+// Not t.Parallel: goleak compares the goroutines of the whole process.
+func TestRegisterPoolProducerReleasesItsEventBus(t *testing.T) {
+	ignore := goleak.IgnoreCurrent()
+	t.Run("register", func(t *testing.T) {
+		registerPoolProducer(t, prometheus.NewRegistry())
+	})
+	goleak.VerifyNone(t, ignore)
 }
 
 // leaderSeries gathers the leader-schedule series of reg, keyed by name and
