@@ -29,6 +29,14 @@ type electionMetrics struct {
 	lastEpochSlotsWon        prometheus.Gauge
 	lastEpochSlotsNotWon     prometheus.Gauge
 	lastEvaluatedEpochNumber prometheus.Gauge
+
+	// Schedule-based series. Unlike the last_epoch gauges above, which
+	// describe whichever epoch was computed last, these follow the slot clock
+	// and the current epoch, and are set for a persisted schedule too.
+	scheduledSlotsElapsed prometheus.Counter
+	scheduleEpoch         prometheus.Gauge
+	scheduleLeaderSlots   prometheus.Gauge
+	nextLeaderSlot        prometheus.Gauge
 }
 
 func initElectionMetrics(reg prometheus.Registerer) *electionMetrics {
@@ -75,6 +83,22 @@ func initElectionMetrics(reg prometheus.Registerer) *electionMetrics {
 		lastEvaluatedEpochNumber: factory.NewGauge(prometheus.GaugeOpts{
 			Name: "dingo_metrics_leader_last_evaluated_epoch_int",
 			Help: "most recent epoch for which leader schedule was evaluated",
+		}),
+		scheduledSlotsElapsed: factory.NewCounter(prometheus.CounterOpts{
+			Name: "dingo_leader_scheduled_slots_elapsed_total",
+			Help: "scheduled leader slots the slot clock has reached since forging started, counted once per slot whether or not a block was forged; a slot reached before its epoch's schedule was available is counted when the schedule arrives",
+		}),
+		scheduleEpoch: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_leader_schedule_epoch",
+			Help: "epoch of the schedule that dingo_leader_schedule_leader_slots counts: the current epoch once its schedule is cached or loaded, the previous one until then, 0 before any",
+		}),
+		scheduleLeaderSlots: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_leader_schedule_leader_slots",
+			Help: "scheduled leader slots in the schedule of dingo_leader_schedule_epoch",
+		}),
+		nextLeaderSlot: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_leader_next_slot",
+			Help: "absolute slot number of the next scheduled leader slot after the current slot; 0 when the cached schedules hold none",
 		}),
 	}
 }
