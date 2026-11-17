@@ -5638,6 +5638,19 @@ rebuilding the rest of the deferred manifest. The durable `sync_state` marker
 still covers the complete cycle and is cleared only after all rebuildable
 indexes are present.
 
+The address- and script-hash-keyed API indexes `idx_utxo_address_address`
+(`utxo_address(address)`), `idx_utxo_address_order`
+(`utxo_address(address, slot, block_index, output_idx, tx_id)`) and
+`idx_redeemer_script_position`
+(`redeemer_script(script_hash, ...)`) are deferred and critical. Their keys
+arrive in random order, so maintaining them row by row dirties a random leaf per
+insert during a backfill. None is a conflict target or read by the backfill's
+write path, all rebuild before the API reports ready, and none is
+`CatchUpDroppable` because that set is limited to `utxo`, `transaction` and
+`asset`. The reference- and collateral-input indexes are not deferred: the edge
+tables key by integer transaction id, which grows with the chain, so their
+inserts append.
+
 SQLite commits each missing index in its own transaction so
 `wal_autocheckpoint` can run between builds. An interrupted rebuild leaves
 completed indexes in place for the next run to skip; the marker is cleared only
