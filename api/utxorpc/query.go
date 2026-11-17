@@ -30,6 +30,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -438,6 +439,9 @@ func (s *queryServiceServer) ReadUtxos(
 		"Got a ReadUtxos request",
 		"keys", len(keys),
 	)
+	if err := s.requireReady(indexerdb.KindCurrent); err != nil {
+		return nil, err
+	}
 	release, err := s.utxorpc.acquireBulk(ctx)
 	if err != nil {
 		return nil, err
@@ -452,7 +456,7 @@ func (s *queryServiceServer) ReadUtxos(
 	for i, txo := range keys {
 		refs[i] = models.UtxoId{Hash: txo.GetHash(), Idx: txo.GetIndex()}
 	}
-	utxos, err := s.utxorpc.config.LedgerState.UtxosByRefsBounded(
+	utxos, err := s.utxorpc.queryDB().UtxosByRefsBounded(
 		ctx,
 		refs,
 		budget.limit,
@@ -519,7 +523,11 @@ func (s *queryServiceServer) ReadUtxos(
 	}
 
 	// Get chain point (slot, hash, and height)
-	br := blockRefFromTip(s.utxorpc.config.LedgerState.Tip())
+	tip, err := s.queryTip()
+	if err != nil {
+		return nil, err
+	}
+	br := blockRefFromTip(tip)
 
 	// Set up response utxos
 	resp.LedgerTip = &query.ChainPoint{
@@ -532,13 +540,17 @@ func (s *queryServiceServer) ReadUtxos(
 }
 
 // searchUtxosLedgerTip returns the current tip as a ChainPoint for SearchUtxos responses.
-func (s *queryServiceServer) searchUtxosLedgerTip() *query.ChainPoint {
-	br := blockRefFromTip(s.utxorpc.config.LedgerState.Tip())
+func (s *queryServiceServer) searchUtxosLedgerTip() (*query.ChainPoint, error) {
+	tip, err := s.queryTip()
+	if err != nil {
+		return nil, err
+	}
+	br := blockRefFromTip(tip)
 	return &query.ChainPoint{
 		Slot:   br.Slot,
 		Hash:   br.Hash,
 		Height: br.Height,
-	}
+	}, nil
 }
 
 // SearchUtxos
@@ -617,13 +629,15 @@ func (s *queryServiceServer) SearchUtxos(
 	)
 	resp := &query.SearchUtxosResponse{}
 
-	if !matchAllAddresses && len(addressPatterns) == 0 {
-		resp.LedgerTip = s.searchUtxosLedgerTip()
-		return connect.NewResponse(resp), nil
+	if err := s.requireReady(indexerdb.KindCurrent); err != nil {
+		return nil, err
 	}
 
-	if effectiveMax == 0 {
-		resp.LedgerTip = s.searchUtxosLedgerTip()
+	if (!matchAllAddresses && len(addressPatterns) == 0) || effectiveMax == 0 {
+		resp.LedgerTip, err = s.searchUtxosLedgerTip()
+		if err != nil {
+			return nil, err
+		}
 		return connect.NewResponse(resp), nil
 	}
 
@@ -643,7 +657,7 @@ func (s *queryServiceServer) SearchUtxos(
 		AssetName:         assetName,
 	}
 
-	page, err := s.utxorpc.config.LedgerState.UtxosByAddressBoundedPage(
+	page, err := s.utxorpc.queryDB().UtxosByAddressBoundedPage(
 		ctx,
 		utxoQ,
 		int(maxAllowed)+1,
@@ -674,7 +688,10 @@ func (s *queryServiceServer) SearchUtxos(
 		)
 	}
 
-	resp.LedgerTip = s.searchUtxosLedgerTip()
+	resp.LedgerTip, err = s.searchUtxosLedgerTip()
+	if err != nil {
+		return nil, err
+	}
 	return connect.NewResponse(resp), nil
 }
 
@@ -731,6 +748,9 @@ func (s *queryServiceServer) ReadData(
 		"Got a ReadData request",
 		"keys", len(keys),
 	)
+	if err := s.requireReady(indexerdb.KindHistory); err != nil {
+		return nil, err
+	}
 	release, err := s.utxorpc.acquireBulk(ctx)
 	if err != nil {
 		return nil, err
@@ -752,7 +772,7 @@ func (s *queryServiceServer) ReadData(
 	}
 	datums := []*models.Datum{}
 	if len(unique) > 0 {
-		found, err := s.utxorpc.config.LedgerState.Datums(ctx, unique)
+		found, err := s.utxorpc.queryDB().Datums(ctx, unique)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, readStateContextError(ctxErr)
@@ -798,7 +818,11 @@ func (s *queryServiceServer) ReadData(
 	}
 
 	// Get chain point (slot, hash, and height)
-	br := blockRefFromTip(s.utxorpc.config.LedgerState.Tip())
+	tip, err := s.queryTip()
+	if err != nil {
+		return nil, err
+	}
+	br := blockRefFromTip(tip)
 
 	// Set up response utxos
 	resp.LedgerTip = &query.ChainPoint{
@@ -827,6 +851,9 @@ func (s *queryServiceServer) ReadTx(
 		"Got a ReadTx request",
 		"hash_bytes", len(hash),
 	)
+	if err := s.requireReady(indexerdb.KindHistory); err != nil {
+		return nil, err
+	}
 	release, err := s.utxorpc.acquireBulk(ctx)
 	if err != nil {
 		return nil, err
@@ -834,7 +861,7 @@ func (s *queryServiceServer) ReadTx(
 	defer release()
 
 	// Resolve the transaction metadata to find it's containing block.
-	txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(ctx, hash)
+	txRecord, err := s.utxorpc.queryDB().TransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, fmt.Errorf("lookup transaction: %w", err)
 	}
@@ -912,7 +939,11 @@ func (s *queryServiceServer) ReadTx(
 	}
 
 	// Get chain point (slot, hash, and height)
-	br := blockRefFromTip(s.utxorpc.config.LedgerState.Tip())
+	tip, err := s.queryTip()
+	if err != nil {
+		return nil, err
+	}
+	br := blockRefFromTip(tip)
 
 	// Set up response utxos
 	resp := &query.ReadTxResponse{

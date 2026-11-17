@@ -86,9 +86,13 @@ type AccountImportRegistration struct {
 type AccountImportBaselineRow struct {
 	CredentialTag uint8
 	StakingKey    []byte
-	Active        bool
-	AddedSlot     uint64
-	Deposit       *uint64
+	// Pool, Drep and DrepType are the delegations the import recorded.
+	Pool      []byte
+	Drep      []byte
+	DrepType  uint64
+	Active    bool
+	AddedSlot uint64
+	Deposit   *uint64
 }
 
 // AccountWithdrawalHistoryRow holds withdrawal history

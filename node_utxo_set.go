@@ -58,11 +58,12 @@ func (n *Node) openUtxoSet() error {
 		history = 0
 	}
 	cfg := utxoset.Config{
-		Dir:          utxoset.DirFor(n.config.dataDir),
-		Logger:       n.config.logger,
-		Registerer:   n.config.promRegistry,
-		HistorySlots: history,
-		Only:         n.config.ledgerUtxoBadgerOnly,
+		Dir:                 utxoset.DirFor(n.config.dataDir),
+		Logger:              n.config.logger,
+		Registerer:          n.config.promRegistry,
+		HistorySlots:        history,
+		Only:                n.config.ledgerUtxoBadgerOnly,
+		RetainRewardRecords: n.splitIndexer(),
 		Authoritative: n.config.ledgerUtxoReads ==
 			ledger.UtxoSetReadsSet,
 	}

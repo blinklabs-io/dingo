@@ -612,6 +612,18 @@ var flagSpecs = []flagSpec{
 		"immutable-db-keep-mithril-chunks",
 		"keep verified Mithril chunk files as the ImmutableDB instead of copying block bodies",
 	),
+	// Indexer layout
+	stringFlag(
+		"Indexer.Layout",
+		"indexer-layout",
+		"",
+		"API storage layout: shared (default) or split (separate IndexerDB filled asynchronously)",
+	),
+	uintFlag(
+		"Indexer.MaxReadyLagBlocks",
+		"indexer-max-ready-lag-blocks",
+		"blocks the IndexerDB may trail the ledger tip before current-state endpoints report not ready (split layout)",
+	),
 
 	// Koios reward-parity observer (one-off validation aid, not a
 	// permanent subsystem)

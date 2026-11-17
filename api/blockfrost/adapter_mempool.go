@@ -98,6 +98,13 @@ func (a *NodeAdapter) decodeMempoolTransaction(
 	return decoded, nil
 }
 
+// ledgerDB is the store the mempool reads confirmed state from. Mempool
+// transactions validate against the ledger tip, which the IndexerDB may not
+// have reached, so a split layout reads the ledger store, never the IndexerDB.
+func (a *NodeAdapter) ledgerDB() *database.Database {
+	return a.ledgerState.Database()
+}
+
 // confirmedInputAddresses resolves the addresses of the inputs that name a
 // stored, unspent output. An input of another mempool transaction, or one
 // already spent, has no confirmed output to resolve and is left out.
@@ -122,7 +129,7 @@ func (a *NodeAdapter) confirmedInputAddresses(
 	if len(refs) == 0 {
 		return ret, nil
 	}
-	utxos, err := a.ledgerState.Database().UtxosByRefs(ctx, refs, nil)
+	utxos, err := a.ledgerDB().UtxosByRefs(ctx, refs, nil)
 	if err != nil {
 		return nil, fmt.Errorf("resolve mempool transaction inputs: %w", err)
 	}
@@ -152,7 +159,7 @@ func (a *NodeAdapter) mempoolDeposit(
 	if len(tx.Certificates()) == 0 {
 		return 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.ledgerDB()
 	slot := a.ledgerState.Tip().Point.Slot
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
@@ -163,7 +170,7 @@ func (a *NodeAdapter) mempoolDeposit(
 	if epoch == nil {
 		return 0, nil
 	}
-	return a.transactionDeposit(ctx, tx, epoch.EraId, slot)
+	return a.transactionDepositFrom(db, ctx, tx, epoch.EraId, slot)
 }
 
 // outputAsUtxo carries the lovelace and native asset amounts of a decoded

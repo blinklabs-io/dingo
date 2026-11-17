@@ -3842,3 +3842,13 @@ type RewardOutputPruner interface {
 		txn types.Txn,
 	) error
 }
+
+// RewardSeedFailureSlotReader is implemented by a metadata store that returns
+// the slot an imported reward-basis failure was captured at with its reason.
+type RewardSeedFailureSlotReader interface {
+	GetRewardSeedFailureSlot(
+		epoch uint64,
+		snapshotType string,
+		txn types.Txn,
+	) (string, uint64, error)
+}

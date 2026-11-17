@@ -650,3 +650,18 @@ func TestResumeBackfillWritesBlockNonces(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 3)
 }
+
+// TestEffectiveStorageModeSplitStaysCore pins that the split layout keeps the
+// ledger's own store in core mode in every run mode, dev mode included:
+// storage_mode is a one-way latch, so a preflight that opened it as api would
+// break the next start.
+func TestEffectiveStorageModeSplitStaysCore(t *testing.T) {
+	t.Parallel()
+	for _, runMode := range []config.RunMode{config.RunModeServe, config.RunModeDev} {
+		cfg := &config.Config{
+			RunMode: runMode, StorageMode: "api",
+			Indexer: config.IndexerConfig{Layout: config.IndexerLayoutSplit},
+		}
+		require.Equal(t, dingo.StorageModeCore, effectiveStorageMode(cfg), runMode)
+	}
+}

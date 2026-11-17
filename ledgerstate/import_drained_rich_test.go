@@ -309,3 +309,27 @@ func TestDrainedCatchUpDanglingDRepDelegationMatchesSQL(t *testing.T) {
 
 	verifyEveryFamily(t, dbadapter.New(undrained), set)
 }
+
+// A catch-up that merges into a set whose DReps family is drained keeps the
+// DRep history rows the set held and adds the snapshot's, so the set holds the
+// history an undrained catch-up leaves in the metadata store.
+func TestDrainedCatchUpMergeKeepsTheDRepHistory(t *testing.T) {
+	t.Parallel()
+	undrained := richUndrained(t, drainFixtureAnchorSlot, drainFixtureCatchUpSlot)
+	f := richDrained(t, drainFixtureAnchorSlot, drainFixtureCatchUpSlot)
+
+	txn := dbadapter.New(undrained).Begin(t.Context(), false)
+	defer txn.Release()
+	want, err := dbadapter.New(undrained).DRepHistoryRows(txn)
+	require.NoError(t, err)
+	require.NotEmpty(t, want.Expiry, "the catch-up leaves expiry history")
+	got, err := f.set.DRepHistory()
+	require.NoError(t, err)
+	require.ElementsMatch(t, want.Expiry, got.Expiry)
+	require.ElementsMatch(t, want.Dormancy, got.Dormancy)
+	require.ElementsMatch(t, want.Events, got.Events)
+	require.ElementsMatch(t, want.Clears, got.Clears)
+	lost, err := f.set.DRepHistoryLost()
+	require.NoError(t, err)
+	require.False(t, lost)
+}

@@ -604,6 +604,94 @@ func (s *Store) Rows(prefix []byte, fn func(k, v []byte) error) error {
 	})
 }
 
+// RowsInRange calls fn with the key and value of every row under prefix whose
+// key is at least from and below to, in key order, seeking to from and
+// stopping at to. A nil to is open.
+func (s *Store) RowsInRange(
+	prefix, from, to []byte,
+	fn func(k, v []byte) error,
+) error {
+	return s.view(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(from); it.Valid(); it.Next() {
+			s.rangeRowsVisited.Add(1)
+			k := it.Item().Key()
+			if to != nil && bytes.Compare(k, to) >= 0 {
+				return nil
+			}
+			v, err := it.Item().ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+			if err := fn(k, v); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ErrStopRows is returned by the callback of EachRowAfter to end the walk
+// without an error.
+var ErrStopRows = errors.New("badgerutxo: stop rows")
+
+// EachRowAfter calls fn with the key and value of each row under prefix whose
+// key is strictly after after (the whole prefix when after is nil) and below
+// end (open when nil), in key order, seeking to the first. The walk ends when
+// fn returns ErrStopRows. It is how a reader resumes a large family after the
+// last row it served without stepping over the rows before it.
+func (s *Store) EachRowAfter(
+	prefix, after, end []byte,
+	fn func(k, v []byte) error,
+) error {
+	start := prefix
+	if after != nil {
+		start = append(bytes.Clone(after), 0)
+	}
+	return s.EachRowFrom(prefix, start, end, fn)
+}
+
+// EachRowFrom is EachRowAfter for the rows whose key is at least start.
+func (s *Store) EachRowFrom(
+	prefix, start, end []byte,
+	fn func(k, v []byte) error,
+) error {
+	return s.view(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(start); it.Valid(); it.Next() {
+			s.rangeRowsVisited.Add(1)
+			k := it.Item().Key()
+			if end != nil && bytes.Compare(k, end) >= 0 {
+				return nil
+			}
+			v, err := it.Item().ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+			if err := fn(k, v); err != nil {
+				if errors.Is(err, ErrStopRows) {
+					return nil
+				}
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// RangeRowsVisited returns how many rows RowsInRange and EachRowAfter have
+// stepped over since the store opened, including the one that ended a range. It exists to show
+// that a ranged read does not touch the rows outside its range.
+func (s *Store) RangeRowsVisited() uint64 {
+	return s.rangeRowsVisited.Load()
+}
+
 // Keys calls fn with the key of every row under prefix, in key order, without
 // reading the values.
 func (s *Store) Keys(prefix []byte, fn func(k []byte) error) error {
@@ -1071,14 +1159,31 @@ func (s *Store) GenesisMIRLoaded() (bool, error) {
 // loadFamily replaces the rows under tag with the ones feed supplies, each as
 // a primary key and value, and sets marker, for a store from before it kept
 // the family.
+//
+// The markers in invalidate are cleared once the old rows are dropped, so a
+// stop before the new rows are complete leaves no marker that vouches for the
+// partial family.
 func (s *Store) loadFamily(
 	tag byte,
 	marker []byte,
 	name string,
 	feed func(put func(k, v []byte) error) error,
+	invalidate ...[]byte,
 ) error {
 	if err := s.dropPrefix([]byte{tag}); err != nil {
 		return fmt.Errorf("badgerutxo: drop %s: %w", name, err)
+	}
+	if len(invalidate) > 0 {
+		if err := s.update(func(txn *badger.Txn) error {
+			for _, m := range invalidate {
+				if err := txn.Delete(m); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("badgerutxo: clear %s marker: %w", name, err)
+		}
 	}
 	wb := s.newLoadSink()
 	defer wb.Cancel()
@@ -1113,22 +1218,82 @@ func (s *Store) hasMarker(marker []byte) (bool, error) {
 }
 
 // LoadImportBaselines replaces the store's import baselines with the rows
-// feed supplies, and marks them loaded.
+// feed supplies, and marks them and their delegations loaded: the rows feed
+// supplies carry both.
 func (s *Store) LoadImportBaselines(
 	feed func(put func(k, v []byte) error) error,
 ) error {
-	return s.loadFamily(
+	if err := s.loadFamily(
 		ImportBaselineTag,
 		importBaselinesKey,
 		"import baselines",
 		feed,
-	)
+		importBaselinesKey, importBaselineDelegationsKey,
+	); err != nil {
+		return err
+	}
+	return s.update(func(txn *badger.Txn) error {
+		return txn.Set(importBaselineDelegationsKey, markerValue(false))
+	})
 }
 
 // ImportBaselinesLoaded reports whether the store holds every import baseline
 // up to its tip.
 func (s *Store) ImportBaselinesLoaded() (bool, error) {
 	return s.hasMarker(importBaselinesKey)
+}
+
+// ImportBaselineDelegationsLoaded reports whether the store has settled what
+// its import baselines say about delegations: they hold them, or
+// ImportBaselineDelegationsLost says they cannot.
+func (s *Store) ImportBaselineDelegationsLoaded() (bool, error) {
+	return s.hasMarker(importBaselineDelegationsKey)
+}
+
+// ImportBaselineDelegationsLost reports whether the import baselines were
+// written before the store kept their delegations, and the metadata store had
+// drained the rows they come from.
+func (s *Store) ImportBaselineDelegationsLost() (bool, error) {
+	return s.markerLost(importBaselineDelegationsKey)
+}
+
+// MarkImportBaselineDelegationsLost records that the import baselines have no
+// delegations and no source to take them from.
+func (s *Store) MarkImportBaselineDelegationsLost() error {
+	return s.update(func(txn *badger.Txn) error {
+		return txn.Set(importBaselineDelegationsKey, markerValue(true))
+	})
+}
+
+// RowsAfter calls fn with the key and value of at most limit rows under
+// prefix whose key is greater than after, in key order; a nil after starts at
+// the first row.
+func (s *Store) RowsAfter(
+	prefix, after []byte,
+	limit int,
+	fn func(k, v []byte) error,
+) error {
+	return s.view(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		it.Seek(prefix)
+		if after != nil {
+			it.Seek(append(bytes.Clone(after), 0))
+		}
+		for n := 0; it.Valid() && n < limit; it.Next() {
+			v, err := it.Item().ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+			if err := fn(it.Item().KeyCopy(nil), v); err != nil {
+				return err
+			}
+			n++
+		}
+		return nil
+	})
 }
 
 // LoadWitnessSlots replaces the store's witness slots with the rows feed

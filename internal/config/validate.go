@@ -691,7 +691,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 					"ledgerUtxoBadgerOnly",
 			))
 		}
-		if c.StorageMode == storageModeAPI {
+		if c.ConsensusStorageMode() == storageModeAPI {
 			errs = append(errs, errors.New(
 				"ledgerUtxoBadgerOnly needs core storage mode",
 			))
@@ -1275,6 +1275,29 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"invalid immutableDb.promoteBatch %d (want 0 to %d)",
 			c.ImmutableDB.PromoteBatch, MaxImmutableDBPromoteBatch,
+		))
+	}
+
+	switch c.Indexer.Layout {
+	case "", IndexerLayoutShared:
+	case IndexerLayoutSplit:
+		if c.StorageMode != storageModeAPI {
+			errs = append(errs, errors.New(
+				"indexer.layout split needs storageMode api: the IndexerDB "+
+					"is what serves the APIs",
+			))
+		}
+		if c.HistoryExpiry.Enabled {
+			errs = append(errs, errors.New(
+				"indexer.layout split is incompatible with "+
+					"historyExpiry.enabled: expiry would remove block "+
+					"bodies the IndexerDB writer has not yet read",
+			))
+		}
+	default:
+		errs = append(errs, fmt.Errorf(
+			"invalid indexer.layout %q (want shared or split)",
+			c.Indexer.Layout,
 		))
 	}
 
@@ -1876,7 +1899,7 @@ func ledgerStateSetOnlyErrors(c *Config) []error {
 				"ledgerStateSetOnly needs ledgerUtxoBadgerOnly",
 			))
 		}
-		if c.StorageMode == storageModeAPI {
+		if c.ConsensusStorageMode() == storageModeAPI {
 			errs = append(errs, errors.New(
 				"ledgerStateSetOnly needs core storage mode: API mode "+
 					"keeps every SQL table",

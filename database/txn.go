@@ -1204,7 +1204,8 @@ func (t *Txn) Commit() error {
 	}
 	var commitTimestamp int64
 	if t.blobTxn != nil && t.metadataTxn != nil &&
-		!t.sharedBlob && !t.sharedMetadata {
+		!t.sharedBlob && !t.sharedMetadata &&
+		!t.db.isIndexer() {
 		commitTimestamp = time.Now().UnixMilli()
 		if err := t.db.updateCommitTimestamp(t, commitTimestamp); err != nil {
 			// Rollback both transactions on timestamp update failure

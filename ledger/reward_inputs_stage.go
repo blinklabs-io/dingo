@@ -236,7 +236,7 @@ func (s stagingLedgerDB) DeleteRewardStakeInputBeforeEpoch(
 		txn,
 		RewardInputChange{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 			Kind:       RewardInputPrune,
-			PruneBelow: epoch,
+			PruneBelow: s.ls.rewardPruneBelow(epoch),
 		},
 	)
 	return nil
@@ -267,11 +267,11 @@ func (s stagingLedgerDB) DeleteRewardStateBeforeEpoch(
 		txn,
 		RewardInputChange{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 			Kind:       RewardInputPrune,
-			PruneBelow: epoch,
+			PruneBelow: s.ls.rewardPruneBelow(epoch),
 		},
 	)
 	//nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	s.pruneDerived(txn, epoch)
+	s.pruneDerived(txn, s.ls.rewardPruneBelow(epoch))
 	return nil
 }
 

@@ -564,6 +564,10 @@ func resumeBackfill(
 // next open, from node.Run in its already-upgraded api mode, would fail
 // enforcement against the gate this preflight just recorded.
 func effectiveStorageMode(cfg *config.Config) dingo.StorageMode {
+	if cfg.SplitIndexer() {
+		// The ledger's own store stays core: the IndexerDB is the API store.
+		return dingo.StorageModeCore
+	}
 	mode := dingo.StorageMode(cfg.StorageMode)
 	// internal/node.Run normalizes an unset mode to core before it reaches
 	// WithStorageMode, so do the same here rather than returning "". The

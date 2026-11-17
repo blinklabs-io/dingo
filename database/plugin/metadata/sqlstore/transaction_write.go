@@ -55,7 +55,14 @@ func transactionFee(transaction lcommon.Transaction) types.Uint64 {
 // (and therefore to one caller transaction), because database/sql statements
 // prepared on a transaction must not escape it.
 type transactionBatchAccumulator struct {
-	leiosAPIRowsOnly     bool
+	leiosAPIRowsOnly bool
+	// debitWithdrawals makes a historical-replay withdrawal debit the
+	// account balance as live apply does. It is set by the caller per
+	// transaction and survives Reset.
+	debitWithdrawals bool
+	// debitWithdrawalsSet records that the caller chose debitWithdrawals,
+	// which a certified closure honours: its default is to debit.
+	debitWithdrawalsSet  bool
 	validatedAPIRowsOnly bool
 	transactionInsert    *sql.Stmt
 	mysql                bool
@@ -692,6 +699,15 @@ func (a *transactionBatchAccumulator) resetStatement() {
 		_ = a.transactionInsert.Close()
 		a.transactionInsert = nil
 	}
+}
+
+// SetDebitWithdrawals selects whether withdrawals applied through this
+// accumulator on the historical-replay path debit the account's reward
+// balance. A replay that also replays the reward credits needs the debit; one
+// that trusts an imported balance must not apply it.
+func (a *transactionBatchAccumulator) SetDebitWithdrawals(debit bool) {
+	a.debitWithdrawals = debit
+	a.debitWithdrawalsSet = true
 }
 
 func (a *transactionBatchAccumulator) Reset() {
@@ -2493,12 +2509,10 @@ func (s *Store) applyTransactionWithdrawals(
 			tag,
 			stakeKey.Bytes(),
 		).Scan(&accountID, &reward)
-		accountFound := true
 		if errors.Is(err, sql.ErrNoRows) {
 			if !historicalBackfill {
 				return models.ErrAccountNotFound
 			}
-			accountFound = false
 			// A historical withdrawal may be applied after deregistration,
 			// so an inactive account is still a valid historical account. It
 			// must be present; silently journaling a withdrawal with no account
@@ -2516,6 +2530,16 @@ func (s *Store) applyTransactionWithdrawals(
 		} else if err != nil {
 			return err
 		}
+		debit := !historicalBackfill ||
+			(batchedAccumulator != nil && batchedAccumulator.debitWithdrawals)
+		if !historicalBackfill && batchedAccumulator != nil &&
+			batchedAccumulator.leiosAPIRowsOnly &&
+			batchedAccumulator.debitWithdrawalsSet {
+			// A closure is not a historical replay, but the replay that
+			// reaches it chose whether withdrawals debit, for the blocks
+			// around it and for it alike.
+			debit = batchedAccumulator.debitWithdrawals
+		}
 		var exists bool
 		if err := s.queryRowCached(ctx, db, withdrawalRewardDeltaExistsSQL,
 			txHash,
@@ -2531,7 +2555,7 @@ func (s *Store) applyTransactionWithdrawals(
 		if err != nil {
 			return err
 		}
-		if !historicalBackfill && amount.Uint64() > previous {
+		if debit && amount.Uint64() > previous {
 			return fmt.Errorf(
 				"reward withdrawal amount %s exceeds account balance %d: %w",
 				amount.String(),
@@ -2544,12 +2568,11 @@ func (s *Store) applyTransactionWithdrawals(
 		}
 		// Historical API backfill replays withdrawals before the imported
 		// snapshot balance's intervening credits are available. Record the
-		// withdrawal history, but leave that trusted boundary balance untouched.
-		// accountFound is guaranteed true here whenever historicalBackfill is
-		// false (the account lookup above returns early otherwise); the extra
-		// check keeps this update from ever reactivating or fabricating a
-		// current stake-registration account.
-		if !historicalBackfill && accountFound {
+		// withdrawal history, but leave that trusted boundary balance untouched,
+		// unless the caller replays the credits too. A debited replay may reach
+		// an account deregistered since, which keeps its balance row; the
+		// lookup above returns early for a missing account otherwise.
+		if debit {
 			rewardAfter := previous - amount.Uint64()
 			if _, err := s.execCached(ctx, db, updateAccountRewardSQL,
 				strconv.FormatUint(rewardAfter, 10),
@@ -2568,7 +2591,7 @@ func (s *Store) applyTransactionWithdrawals(
 		); err != nil {
 			return err
 		}
-		if !historicalBackfill {
+		if debit {
 			ref := models.NewStakeCredentialRef(tag, stakeKey.Bytes())
 			pending, err := pendingUtxoStakeDelta(
 				ctx, db, txn, batchedAccumulator, ref,

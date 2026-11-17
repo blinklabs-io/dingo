@@ -161,6 +161,7 @@ func (ls *LedgerState) stageLedgerChanges(txn ledgerdb.Txn, lc LedgerChanges) {
 		b.dreps = append(b.dreps, lc.DReps...)
 		b.drepLinks = append(b.drepLinks, lc.DRepLinks...)
 		b.dormancy = append(b.dormancy, lc.Dormancy...)
+		b.drepHistory = append(b.drepHistory, lc.DRepHistory...)
 		b.pools = append(b.pools, lc.Pools...)
 		b.poolEvents = append(b.poolEvents, lc.PoolEvents...)
 		b.stakeEvents = append(b.stakeEvents, lc.StakeEvents...)

@@ -413,6 +413,57 @@ func DefaultImmutableDBConfig() ImmutableDBConfig {
 	}
 }
 
+// IndexerLayout values for IndexerConfig.Layout.
+const (
+	// IndexerLayoutShared keeps API rows in the consensus metadata store,
+	// written inside the ledger's own commit.
+	IndexerLayoutShared = "shared"
+	// IndexerLayoutSplit keeps API rows in a separate IndexerDB filled by an
+	// asynchronous writer that follows the ledger.
+	IndexerLayoutSplit = "split"
+)
+
+// IndexerConfig selects where API and history rows live.
+type IndexerConfig struct {
+	// Layout is "shared" (default: one metadata store) or "split" (consensus
+	// store in core mode plus a separate IndexerDB).
+	Layout string `yaml:"layout"            envconfig:"DINGO_INDEXER_LAYOUT"`
+	// MaxReadyLagBlocks is how far behind the ledger tip the IndexerDB may be
+	// while current-state API endpoints still report ready (split layout).
+	MaxReadyLagBlocks uint64 `yaml:"maxReadyLagBlocks" envconfig:"DINGO_INDEXER_MAX_READY_LAG_BLOCKS"`
+	// Metadata overrides the consensus metadata provider's settings for the
+	// IndexerDB's own store (split layout). A SQLite IndexerDB defaults to
+	// <dataDir>/indexer; a PostgreSQL or MySQL one needs its own database
+	// here, for example a different dsn.
+	Metadata map[string]any `yaml:"metadata"`
+}
+
+// SplitIndexer reports whether API rows live in a separate IndexerDB.
+func (c *Config) SplitIndexer() bool {
+	return c.Indexer.Layout == IndexerLayoutSplit
+}
+
+// ConsensusStorageMode is the storage mode of the ledger's own store: core on
+// the split layout, where the IndexerDB is the store opened in API mode, and
+// the configured mode otherwise.
+func (c *Config) ConsensusStorageMode() string {
+	if c.SplitIndexer() {
+		return storageModeCore
+	}
+	return c.StorageMode
+}
+
+// DefaultIndexerMaxReadyLagBlocks is the default readiness lag bound.
+const DefaultIndexerMaxReadyLagBlocks uint64 = 100
+
+// DefaultIndexerConfig returns the default indexer settings.
+func DefaultIndexerConfig() IndexerConfig {
+	return IndexerConfig{
+		Layout:            IndexerLayoutShared,
+		MaxReadyLagBlocks: DefaultIndexerMaxReadyLagBlocks,
+	}
+}
+
 // KoiosParityConfig controls the in-process Koios reward-parity observer
 // When enabled, Dingo subscribes an epoch-boundary observer to
 // its own EventBus (event.EpochTransitionEventType) and validates each newly
@@ -1059,6 +1110,9 @@ type Config struct {
 	// ImmutableDBConfig. The top-level key database is a rejected legacy
 	// section, so this is not nested under it.
 	ImmutableDB ImmutableDBConfig `yaml:"immutableDb"`
+
+	// Indexer selects the shared or split API storage layout.
+	Indexer IndexerConfig `yaml:"indexer"`
 
 	// KoiosParity configures the optional in-process Koios reward-parity
 	// observer Disabled by default.
@@ -1811,6 +1865,7 @@ func newDefaultConfig() *Config {
 		// History expiry defaults
 		HistoryExpiry: DefaultHistoryExpiryConfig(),
 		ImmutableDB:   DefaultImmutableDBConfig(),
+		Indexer:       DefaultIndexerConfig(),
 		// Koios parity observer defaults (disabled)
 		KoiosParity: DefaultKoiosParityConfig(),
 		// Logging defaults (text output at info level)
@@ -2331,6 +2386,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.ImmutableDB.PromoteFrequency == 0 {
 		c.ImmutableDB.PromoteFrequency = DefaultImmutableDBConfig().PromoteFrequency
+	}
+	if c.Indexer.Layout == "" {
+		c.Indexer.Layout = IndexerLayoutShared
+	}
+	if c.Indexer.MaxReadyLagBlocks == 0 {
+		c.Indexer.MaxReadyLagBlocks = DefaultIndexerMaxReadyLagBlocks
 	}
 	if c.KoiosParity.GraceHours == 0 {
 		c.KoiosParity.GraceHours = 24

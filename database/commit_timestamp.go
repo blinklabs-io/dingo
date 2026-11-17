@@ -139,6 +139,9 @@ func (d *Database) phase1GateValues() (nodesettings.Values, error) {
 			uint64(d.config.NetworkMagic), 10,
 		)
 	}
+	if d.config.IndexerLayout != "" {
+		values["indexer_layout"] = d.config.IndexerLayout
+	}
 	if d.config.BlobPlugin != "" {
 		values["blob_plugin"] = d.config.BlobPlugin
 	}
@@ -359,6 +362,14 @@ func (d *Database) currentEpochSlot(ctx context.Context) (epoch uint64, slot uin
 	return ep.EpochId, slot
 }
 
+// currentEpochSlotNonEmpty reports whether the database has a chain tip.
+func (d *Database) currentEpochSlotNonEmpty(ctx context.Context) bool {
+	txn := d.MetadataTxn(ctx, false)
+	defer txn.Release()
+	tip, err := d.GetTip(txn)
+	return err == nil && tip.Point.Slot != 0
+}
+
 // mismatchStrings renders each Mismatch via its own String(), for the two
 // NodeSettingsError sites in evaluateAndPersistGates below (the ordinary
 // path and the re-evaluation after losing a first-write race).
@@ -400,6 +411,20 @@ func (d *Database) evaluateAndPersistGates(ctx context.Context,
 					err,
 				)
 			}
+		}
+	}
+	// A database that predates the indexer_layout gate and already holds
+	// blocks has its API rows in the consensus store. Filling the gate with
+	// "split" would point the readers at an IndexerDB that does not exist.
+	if configured["indexer_layout"] == "split" {
+		if _, has := persisted["indexer_layout"]; !has &&
+			d.currentEpochSlotNonEmpty(ctx) {
+			return NodeSettingsError{Mismatches: []string{
+				"indexer layout: configured \"split\" but this database " +
+					"already holds chain state without an IndexerDB, and " +
+					"only an API-mode sqlite store is migrated into one " +
+					"at startup",
+			}}
 		}
 	}
 	explicit := make(map[string]bool, len(configured))

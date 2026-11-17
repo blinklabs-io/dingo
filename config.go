@@ -30,6 +30,9 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/version"
@@ -348,6 +351,10 @@ type Config struct {
 	chainsyncMaxClients                                                                 int
 	chainsyncStrategy                                                                   chainsync.HeaderSyncStrategy
 	storageMode                                                                         StorageMode
+	indexerLayout                                                                       string
+	indexerMaxReadyLagBlocks                                                            uint64
+	indexerMetadataConfig                                                               map[string]any
+	indexerWriterFactory                                                                IndexerWriterFactory
 	cacheBlockLRUEntries, cacheHotUtxoEntries, cacheHotTxEntries                        int
 	cacheHotTxMaxBytes                                                                  int64
 }
@@ -2629,6 +2636,89 @@ func WithChainsyncHeaderStrategy(
 func WithMeshPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.API.Mesh.Config["port"] = port
+	}
+}
+
+// WithIndexerLayout records the API storage layout ("shared" or "split") so
+// the database can freeze it in its node settings. An empty value leaves the
+// layout unchecked.
+func WithIndexerLayout(layout string) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.indexerLayout = layout
+	}
+}
+
+// IndexerWriter fills the IndexerDB from the ledger's canonical chain.
+type IndexerWriter interface {
+	// Start begins following the ledger. It returns once the writer runs.
+	Start(ctx context.Context) error
+	// Wake asks the writer to look for new blocks. Signals coalesce.
+	Wake()
+	// Stop ends the writer and waits for an in-flight batch to finish or
+	// roll back, so the stores it writes can then close.
+	Stop(ctx context.Context) error
+	// RollbackTo removes everything the IndexerDB holds past target, a block
+	// of the ledger's canonical chain, and does nothing when its tip is not
+	// past target. It runs while the writer is not started and while the
+	// ledger still stores the blocks being abandoned.
+	RollbackTo(ctx context.Context, target indexerdb.Tip) error
+}
+
+// IndexerWriterDeps are what the node hands an IndexerWriterFactory.
+type IndexerWriterDeps struct {
+	// Consensus is the ledger's database, read for blocks, the tip and the
+	// ledger facts. Indexer is the IndexerDB's own database.
+	Consensus, Indexer *database.Database
+	// FactRows, when set, supplies the ledger-fact rows the writer copies,
+	// for a ledger that keeps them outside the consensus metadata store. It
+	// defaults to that store.
+	FactRows     metadata.FactRowReader
+	NodeConfig   *cardano.CardanoNodeConfig
+	Logger       *slog.Logger
+	PromRegistry prometheus.Registerer
+	// SlotTime converts a slot to wall-clock time, for the lag in seconds.
+	SlotTime                   func(uint64) (time.Time, error)
+	MaxReadyLagBlocks          uint64
+	DelegatorInactivityEnabled bool
+}
+
+// IndexerWriterFactory builds the writer of a split layout. It is a seam
+// because the writer's block indexing lives in a package that imports this
+// one.
+type IndexerWriterFactory func(IndexerWriterDeps) (IndexerWriter, error)
+
+// WithIndexerWriterFactory sets the writer a split layout runs.
+func WithIndexerWriterFactory(f IndexerWriterFactory) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.indexerWriterFactory = f
+	}
+}
+
+// WithIndexerMaxReadyLagBlocks sets how far behind the ledger tip the
+// IndexerDB may be while current-state endpoints are ready (split layout).
+func WithIndexerMaxReadyLagBlocks(blocks uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.indexerMaxReadyLagBlocks = blocks
+	}
+}
+
+// WithIndexerMetadata sets the metadata provider settings that override the
+// consensus store's for the split IndexerDB's own store.
+func WithIndexerMetadata(cfg map[string]any) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.indexerMetadataConfig = cfg
 	}
 }
 

@@ -223,12 +223,17 @@ func (s *Set) reconcileStale(
 				ExpirationEpoch: r.ExpirationEpoch,
 			},
 		})
+		ref := models.NewStakeCredentialRef(r.Tag, r.Key)
+		value, err := encodeImportBaseline(ledger.ImportBaseline{
+			Ref: ref, AddedSlot: tip.Slot,
+		})
+		if err != nil {
+			return err
+		}
 		rows = append(rows, badgerutxo.RowPut{
-			Slot: tip.Slot,
-			Key:  importBaselineKey(models.NewStakeCredentialRef(r.Tag, r.Key)),
-			Value: encodeImportBaseline(
-				false, tip.Slot, nil,
-			),
+			Slot:  tip.Slot,
+			Key:   importBaselineKey(ref),
+			Value: value,
 		})
 		return nil
 	})

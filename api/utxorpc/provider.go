@@ -33,6 +33,7 @@ type ProviderDependencies struct {
 	Logger             *slog.Logger
 	EventBus           UtxorpcEventBus
 	LedgerState        UtxorpcLedgerState
+	QueryDatabase      QueryDatabase
 	Mempool            UtxorpcMempool
 	Host               string
 	CORSAllowedOrigins []string
@@ -61,7 +62,8 @@ func RegisterProvider(host *plugin.Host) error {
 			server := NewUtxorpc(UtxorpcConfig{
 				Logger: deps.Logger, EventBus: deps.EventBus,
 				LedgerState: deps.LedgerState, Mempool: deps.Mempool,
-				Host: listenHost, Port: cfg.Port,
+				QueryDatabase: deps.QueryDatabase,
+				Host:          listenHost, Port: cfg.Port,
 				TLS:                tls,
 				CORSAllowedOrigins: deps.CORSAllowedOrigins,
 			})

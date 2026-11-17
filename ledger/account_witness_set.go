@@ -31,11 +31,18 @@ import (
 // account_import_baseline keeps it. No certificate exists for it. Active is
 // false for the state a newer snapshot left the account in, which reads as no
 // registration. Deposit is nil for a baseline whose deposit was never known.
+//
+// Pool, Drep and DrepType are the delegations the import recorded, which a
+// later certificate overwrites on the account but not here. A set whose
+// baselines were written before it kept them reads them as empty.
 type ImportBaseline struct {
 	Ref       models.StakeCredentialRef
 	Active    bool
 	AddedSlot uint64
 	Deposit   *uint64
+	Pool      []byte
+	Drep      []byte
+	DrepType  uint64
 }
 
 // ImportBaselineChange is an import baseline as the change at Slot leaves it.
@@ -323,6 +330,7 @@ func (ls *LedgerState) stageWitness(
 // stageImportBaseline stages an import baseline established at b.AddedSlot.
 func (ls *LedgerState) stageImportBaseline(txn ledgerdb.Txn, b ImportBaseline) {
 	b.Ref = models.NewStakeCredentialRef(b.Ref.Tag, bytes.Clone(b.Ref.Key))
+	b.Pool, b.Drep = bytes.Clone(b.Pool), bytes.Clone(b.Drep)
 	if b.Deposit != nil {
 		d := *b.Deposit
 		b.Deposit = &d

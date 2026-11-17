@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
+	"github.com/blinklabs-io/dingo/internal/apiready"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -62,6 +63,9 @@ type ServerConfig struct {
 	Database    MeshDatabase
 	Chain       MeshChain
 	Mempool     MeshMempool
+	// Ready gates the IndexerDB-backed routes on a split layout. Nil serves
+	// everything.
+	Ready apiready.Check
 	// ListenAddress is the TCP address to listen on (e.g. ":8080").
 	ListenAddress string
 	Network       string
@@ -189,12 +193,10 @@ func (s *Server) Start(ctx context.Context) error {
 	defer s.listener.EndStart(startDone)
 
 	server, bindDone, err := s.listener.Publish(func() *http.Server {
-		mux := http.NewServeMux()
-		s.registerRoutes(mux)
 		return &http.Server{
 			Addr: s.config.ListenAddress,
 			Handler: httpcors.Handler(
-				mux,
+				s.handler(),
 				httpcors.Config{
 					AllowedOrigins: s.config.CORSAllowedOrigins,
 				},

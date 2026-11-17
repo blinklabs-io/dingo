@@ -1736,6 +1736,9 @@ type LedgerState struct {
 	// to config.UtxoSet and dropped from the maps, and for reading while a
 	// reader merges committed batches over the set.
 	utxoSetApplyMu sync.RWMutex
+	// factCursors holds the position of each fact export in progress; see
+	// pageSetFactRows.
+	factCursors factCursorState
 	// utxoSetByMeta finds an open transaction's batch from the metadata
 	// transaction the metadata store writes in, for LiveUtxoCbor.
 	utxoSetByMeta map[types.Txn]*utxoSetBatch
@@ -6360,6 +6363,13 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 	}
 	if publishResync && !sameTip {
 		ls.publishLocalLedgerRollback(point)
+	}
+	if !sameTip {
+		rolledBackTo := ocommon.Point{
+			Slot: point.Slot,
+			Hash: bytes.Clone(point.Hash),
+		}
+		ls.publishTipEvent(ctx, newTip, &rolledBackTo)
 	}
 	var hash string
 	if point.Slot == 0 && len(point.Hash) == 0 {
@@ -11271,6 +11281,7 @@ func (ls *LedgerState) processBlocksFromSource(
 				checker = ls.config.ForgedBlockChecker
 				ls.publishSnapshotsLocked()
 				ls.Unlock()
+				ls.publishTipEvent(ctx, pendingTip, nil)
 				if !trustedReplay {
 					ls.observeBlockAdoptions(chunkAdopted)
 				}
@@ -18286,6 +18297,7 @@ func (ls *LedgerState) persistTipAfterForgedBlock(block ledger.Block) error {
 		return err
 	}
 	ls.stageUtxoSet(nil, &newTip.Point)
+	ls.publishTipEvent(context.Background(), newTip, nil)
 	return nil
 }
 

@@ -43,6 +43,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/prometheus/client_golang/prometheus"
@@ -3160,4 +3161,79 @@ func TestSetGapBlockTransactionKeepsNoUtxoRowsWhenSetOnly(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, tx, "the transaction is still recorded as history")
+}
+
+func TestPhase1PersistsIndexerLayoutAndRejectsChange(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	db, err := newTestDatabase(t, &Config{
+		DataDir:       dataDir,
+		StorageMode:   "core",
+		Network:       "preprod",
+		IndexerLayout: "split",
+	})
+	require.NoError(t, err)
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "split", gates["indexer_layout"])
+	require.NoError(t, closeTestDatabase(db))
+
+	_, err = newTestDatabase(t, &Config{
+		DataDir:       dataDir,
+		StorageMode:   "core",
+		Network:       "preprod",
+		IndexerLayout: "shared",
+	})
+	var settingsErr NodeSettingsError
+	require.True(t, errors.As(err, &settingsErr))
+	require.Contains(t, settingsErr.Error(), "indexer layout")
+
+	// A caller that does not know the layout leaves the gate alone.
+	db, err = newTestDatabase(t, &Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Network:     "preprod",
+	})
+	require.NoError(t, err)
+	require.NoError(t, closeTestDatabase(db))
+}
+
+func TestPhase1RefusesSplitOnExistingDatabase(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	db, err := newTestDatabase(t, &Config{
+		DataDir:     dataDir,
+		StorageMode: "api",
+		Network:     "preprod",
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: bytes.Repeat([]byte{1}, 32)},
+		BlockNumber: 5,
+	}, nil))
+	require.NoError(t, closeTestDatabase(db))
+
+	// The database predates the gate and holds blocks: split must be refused
+	// rather than filled in.
+	_, err = newTestDatabase(t, &Config{
+		DataDir:       dataDir,
+		StorageMode:   "api",
+		Network:       "preprod",
+		IndexerLayout: "split",
+	})
+	var settingsErr NodeSettingsError
+	require.True(t, errors.As(err, &settingsErr), "got %v", err)
+	require.Contains(t, settingsErr.Error(), "indexer layout")
+
+	// Shared is still accepted on that database.
+	db, err = newTestDatabase(t, &Config{
+		DataDir:       dataDir,
+		StorageMode:   "api",
+		Network:       "preprod",
+		IndexerLayout: "shared",
+	})
+	require.NoError(t, err)
+	require.NoError(t, closeTestDatabase(db))
 }

@@ -501,3 +501,45 @@ func TestRestoreValidatedSurfacesPostRenameSyncFailure(t *testing.T) {
 	_, statErr := os.Stat(targetDir)
 	require.NoError(t, statErr)
 }
+
+// TestRestoreValidatedWithStagedInstallsBeforeTheTargetExists verifies the
+// staged step runs while the target is still absent and that its failure
+// leaves the target absent, so what it installs can never be missing from a
+// data directory that exists.
+func TestRestoreValidatedWithStagedInstallsBeforeTheTargetExists(
+	t *testing.T,
+) {
+	t.Parallel()
+	snapshotDir := snapshotTestDir(t, "snap")
+	snapshotForTrustTest(t, snapshotDir)
+	parent := t.TempDir()
+	targetDir := filepath.Join(parent, "restored")
+	cfg := RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()}
+
+	injected := errors.New("injected staged failure")
+	_, err := RestoreValidatedWithStaged(
+		context.Background(),
+		newRestoreInternalTestHost(t),
+		nil, snapshotDir, targetDir, nil, cfg,
+		func(string) error { return injected },
+	)
+	require.ErrorIs(t, err, injected)
+	require.NoDirExists(t, targetDir)
+
+	var sawStaging string
+	_, err = RestoreValidatedWithStaged(
+		context.Background(),
+		newRestoreInternalTestHost(t),
+		nil, snapshotDir, targetDir, nil, cfg,
+		func(stagingDir string) error {
+			require.NoDirExists(t, targetDir,
+				"the target does not exist while the step runs")
+			sawStaging = stagingDir
+			return os.Mkdir(filepath.Join(stagingDir, "extra"), 0o750)
+		},
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, sawStaging)
+	require.DirExists(t, filepath.Join(targetDir, "extra"),
+		"what the step installed is part of the activated directory")
+}

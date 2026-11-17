@@ -173,6 +173,15 @@ const (
 	// RewardCursorTag keys an epoch's reward precompute cursor:
 	// Z <epoch:8 BE>.
 	RewardCursorTag = 'Z'
+	// ImportedBlocksTag keys the block counts a snapshot import carried for
+	// the epochs below its anchor, kept as imported rather than merged into
+	// the windowed RewardBlocksTag rows: Y <epoch:8 BE> <kind:1> ...
+	ImportedBlocksTag = 'Y'
+	// DRepHistoryTag keys the DRep expiry history, the dormancy counter
+	// history, the dormant expiry epoch events and the DRep delegation
+	// clears, each by the slot it was recorded at:
+	// T <slot:8 BE> <kind:1> ...
+	DRepHistoryTag = 'T'
 )
 
 // MarkerPrefix starts every marker key. No row family tag may equal it.
@@ -240,8 +249,27 @@ var (
 	// governanceSeqKey holds the next proposal and vote row IDs, which only
 	// grow: a rollback removes rows but never lowers them.
 	governanceSeqKey = []byte("mgvseq")
-	drepsKey         = []byte("mdreps")
-	poolsKey         = []byte("mpools")
+	// rewardSeqKey holds the next reward record sequence number.
+	rewardSeqKey = []byte("mrwseq")
+	// rewardRecordsKey is set once the store holds the reward records of the
+	// metadata store's journal up to its tip, or marks them lost when the
+	// journal was drained before they could be read.
+	rewardRecordsKey = []byte("mrwrecs")
+	// rewardConsumerKey is present while a reader that copies the reward
+	// records needs them; rewardConsumedKey holds the sequence number below
+	// which it has copied every record.
+	rewardConsumerKey = []byte("mrwconsumer")
+	rewardConsumedKey = []byte("mrwconsumed")
+	// rewardConsumedSlotKey holds the slot through which the consumer has
+	// copied the reward rows.
+	rewardConsumedSlotKey = []byte("mrwthrough")
+	// rewardSeqIndexPrefix keys the reward sequence index, a derived row
+	// family under the marker namespace (see reward_seq_index.go);
+	// rewardIndexedKey is set once every record has a number and an entry.
+	rewardSeqIndexPrefix = []byte("mrwq")
+	rewardIndexedKey     = []byte("mrwindexed")
+	drepsKey             = []byte("mdreps")
+	poolsKey             = []byte("mpools")
 	// poolHistoryKey is set once the store holds every pool certificate event
 	// with its effective slot. legacyPoolHistoryKey marked events without it,
 	// which are reloaded rather than read.
@@ -260,6 +288,9 @@ var (
 	// importBaselinesKey is set once the store holds every import baseline
 	// up to its tip, and witnessSlotsKey once it holds every witness slot.
 	importBaselinesKey = []byte("mbaseline")
+	// importBaselineDelegationsKey is set once the import baselines carry the
+	// delegations the import recorded, or marked lost when they cannot.
+	importBaselineDelegationsKey = []byte("mbasedelegs")
 	// witnessSlotsKey is set once the witness rows carry the effective slot
 	// of a closure's witness. legacyWitnessSlotsKey marked rows without it,
 	// which are reloaded rather than read.
@@ -287,12 +318,25 @@ var (
 	// entries before it. A rollback below it, other than to the tip, would
 	// leave the loaded rows the undone blocks wrote.
 	loadFloorKey = []byte("mloadfloor")
+	// exportFloorKey holds the lowest slot, as a big-endian uint64, from
+	// which the state journal names every account and DRep row by the slot
+	// its AddedSlot says: an entry sits at the slot of the change that set
+	// it. Rows a load or a merge wrote carry older slots than their entries,
+	// and a store from before the key had both, so a store that opens
+	// without it takes the tip plus one.
+	exportFloorKey = []byte("mexportfloor")
 	// rewardBlocksKey is set once the store holds the block counts and fees
 	// of every epoch reward calculation can still read, up to its tip, with
 	// the overlay-inclusive counts. legacyRewardBlocksKey marked rows without
 	// them, which are reloaded rather than read.
 	rewardBlocksKey       = []byte("mblkfee2")
 	legacyRewardBlocksKey = []byte("mblkfee")
+	// importedBlocksKey is set once the store holds the imported block counts
+	// of every epoch a snapshot import carried them for.
+	importedBlocksKey = []byte("mimpblocks")
+	// drepHistoryKey is set once the store holds the DRep history rows up to
+	// its tip.
+	drepHistoryLoadedKey = []byte("mdrephist")
 	// delegationsKey is set once the store holds every pool delegation
 	// certificate up to its tip.
 	delegationsKey = []byte("mdelegations")

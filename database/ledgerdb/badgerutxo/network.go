@@ -84,6 +84,11 @@ func deleteSlotKeysAfter(txn *badger.Txn, tag byte, slot uint64) error {
 		keys = append(keys, it.Item().KeyCopy(nil))
 	}
 	it.Close()
+	if tag == RewardRecordTag {
+		if err := deleteRewardSeqIndexFor(txn, keys); err != nil {
+			return err
+		}
+	}
 	return deleteKeys(txn, keys)
 }
 
@@ -108,6 +113,11 @@ func deleteSlotKeysWithin(
 		keys = append(keys, it.Item().KeyCopy(nil))
 	}
 	it.Close()
+	if tag == RewardRecordTag {
+		if err := deleteRewardSeqIndexFor(txn, keys); err != nil {
+			return false, err
+		}
+	}
 	return more, deleteKeys(txn, keys)
 }
 

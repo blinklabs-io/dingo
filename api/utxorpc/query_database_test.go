@@ -1,0 +1,164 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package utxorpc
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
+	"github.com/blinklabs-io/dingo/database/models"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/require"
+	query "github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
+)
+
+// recordingQueryDB answers queries itself; calls counts what reached it.
+type recordingQueryDB struct {
+	ready    map[indexerdb.Kind]bool
+	tip      ochainsync.Tip
+	tipErr   error
+	searches int
+	datums   int
+	txs      int
+	refs     int
+}
+
+func (d *recordingQueryDB) Datums(
+	context.Context, [][]byte,
+) ([]*models.Datum, error) {
+	d.datums++
+	return nil, errors.New("unexpected datum read")
+}
+
+func (d *recordingQueryDB) TransactionByHash(
+	context.Context, []byte,
+) (*models.Transaction, error) {
+	d.txs++
+	return nil, nil
+}
+
+func (d *recordingQueryDB) UtxosByRefsBounded(
+	context.Context, []models.UtxoId, int64,
+) ([]models.Utxo, error) {
+	d.refs++
+	return nil, nil
+}
+
+func (d *recordingQueryDB) UtxosByAddressBoundedPage(
+	context.Context, *models.UtxoWithOrderingQuery, int, int64,
+) (models.UtxoAddressPage, error) {
+	d.searches++
+	return models.UtxoAddressPage{}, nil
+}
+
+func (d *recordingQueryDB) Tip() (ochainsync.Tip, error) { return d.tip, d.tipErr }
+
+func (d *recordingQueryDB) Ready(kind indexerdb.Kind) (bool, error) {
+	return d.ready[kind], nil
+}
+
+// panicLedger fails the test, by nil dereference, if a query reaches the
+// ledger instead of the query database.
+type panicLedger struct{ UtxorpcLedgerState }
+
+func newQuerySrv(db QueryDatabase) *queryServiceServer {
+	return &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
+		Logger:        discardLogger(),
+		LedgerState:   panicLedger{},
+		QueryDatabase: db,
+	})}
+}
+
+func TestQueryServiceReadsTheQueryDatabase(t *testing.T) {
+	t.Parallel()
+	hash := make([]byte, 32)
+	db := &recordingQueryDB{
+		ready: map[indexerdb.Kind]bool{
+			indexerdb.KindCurrent: true, indexerdb.KindHistory: true,
+		},
+		tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(77, []byte{0xaa}),
+			BlockNumber: 9,
+		},
+	}
+	srv := newQuerySrv(db)
+	ctx := context.Background()
+
+	search, err := srv.SearchUtxos(
+		ctx,
+		connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 1}),
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, db.searches)
+	require.Equal(t, uint64(77), search.Msg.GetLedgerTip().GetSlot())
+	require.Equal(t, uint64(9), search.Msg.GetLedgerTip().GetHeight())
+
+	_, err = srv.ReadUtxos(ctx, connect.NewRequest(&query.ReadUtxosRequest{
+		Keys: []*query.TxoRef{{Hash: hash, Index: 0}},
+	}))
+	require.Error(t, err, "the store holds no such UTxO")
+	require.Equal(t, 1, db.refs)
+
+	_, err = srv.ReadTx(
+		ctx,
+		connect.NewRequest(&query.ReadTxRequest{Hash: hash}),
+	)
+	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+	require.Equal(t, 1, db.txs)
+}
+
+func TestQueryServiceRefusesUntilTheIndexerIsReady(t *testing.T) {
+	t.Parallel()
+	hash := make([]byte, 32)
+	db := &recordingQueryDB{ready: map[indexerdb.Kind]bool{
+		indexerdb.KindHistory: true,
+	}}
+	srv := newQuerySrv(db)
+	ctx := context.Background()
+
+	_, err := srv.SearchUtxos(
+		ctx,
+		connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 1}),
+	)
+	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
+	_, err = srv.ReadUtxos(ctx, connect.NewRequest(&query.ReadUtxosRequest{
+		Keys: []*query.TxoRef{{Hash: hash}},
+	}))
+	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
+	require.Zero(t, db.searches+db.refs, "a refused query reads nothing")
+
+	// History is ready, so the same store now answers a history read.
+	_, err = srv.ReadTx(
+		ctx,
+		connect.NewRequest(&query.ReadTxRequest{Hash: hash}),
+	)
+	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+
+	db.ready[indexerdb.KindHistory] = false
+	_, err = srv.ReadTx(
+		ctx,
+		connect.NewRequest(&query.ReadTxRequest{Hash: hash}),
+	)
+	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
+	_, err = srv.ReadData(ctx, connect.NewRequest(&query.ReadDataRequest{
+		Keys: [][]byte{hash},
+	}))
+	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
+	require.Zero(t, db.datums)
+}

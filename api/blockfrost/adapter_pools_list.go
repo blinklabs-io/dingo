@@ -53,7 +53,7 @@ import (
 func (a *NodeAdapter) PoolsList(ctx context.Context,
 	params PaginationParams,
 ) ([]string, int, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	// The cache key is the tip stored in the same read snapshot the list is

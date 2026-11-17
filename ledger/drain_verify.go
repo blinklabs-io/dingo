@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -116,7 +117,15 @@ func FamilyLoaded(
 		if !ok {
 			return false, nil
 		}
-		return r.DrepStateLoaded()
+		ok, err := r.DrepStateLoaded()
+		if err != nil || !ok {
+			return false, err
+		}
+		h, ok := set.(DRepHistoryReader)
+		if !ok {
+			return false, nil
+		}
+		return h.DRepHistoryLoaded()
 	case nodesettings.FamilyAccounts:
 		return accountsLoaded(set)
 	case nodesettings.FamilyPoolsHistory:
@@ -144,7 +153,15 @@ func FamilyLoaded(
 		if !ok {
 			return false, nil
 		}
-		return r.RewardBlocksLoaded()
+		loaded, err := r.RewardBlocksLoaded()
+		if err != nil || !loaded {
+			return false, err
+		}
+		imported, ok := set.(ImportedBlocksReader)
+		if !ok {
+			return false, nil
+		}
+		return imported.ImportedBlocksLoaded()
 	case nodesettings.FamilyRewardOutputs:
 		derived, ok := set.(RewardDerivedReader)
 		if !ok {
@@ -753,7 +770,111 @@ func verifyDReps(
 				"and the set: %d against %d", dormant, setDormant,
 		)
 	}
-	return nil
+	return verifyDRepHistory(ctx, ldb, set)
+}
+
+// verifyDRepHistory compares the DRep history rows of the metadata store with
+// the set's.
+func verifyDRepHistory(
+	ctx context.Context,
+	ldb ledgerdb.LedgerDB,
+	set UtxoSetWriter,
+) error {
+	h, ok := set.(DRepHistoryReader)
+	if !ok {
+		return errors.New("the set does not serve the DRep history")
+	}
+	src, ok := ldb.(ledgerdb.DRepHistoryRowsReader)
+	if !ok {
+		return errors.New("the store cannot list the DRep history")
+	}
+	txn := ldb.Begin(ctx, false)
+	defer txn.Release()
+	want, err := src.DRepHistoryRows(txn)
+	if err != nil {
+		return fmt.Errorf("read the DRep history from the store: %w", err)
+	}
+	got, err := h.DRepHistory()
+	if err != nil {
+		return err
+	}
+	sameSorted := func(name string, w, g int, equal func() bool) error {
+		if w != g || !equal() {
+			return fmt.Errorf(
+				"the DRep %s differs between the metadata store and the set: "+
+					"%d rows against %d", name, w, g,
+			)
+		}
+		return nil
+	}
+	sortExpiry := func(rows []ledgerdb.DRepExpiryHistoryRow) {
+		slices.SortFunc(rows, func(a, b ledgerdb.DRepExpiryHistoryRow) int {
+			return cmp.Or(
+				cmp.Compare(a.Tag, b.Tag),
+				bytes.Compare(a.Credential, b.Credential),
+				cmp.Compare(a.Slot, b.Slot),
+			)
+		})
+	}
+	sortExpiry(want.Expiry)
+	sortExpiry(got.Expiry)
+	sortDormancy := func(rows []ledgerdb.DRepDormancyHistoryRow) {
+		slices.SortFunc(rows, func(a, b ledgerdb.DRepDormancyHistoryRow) int {
+			return cmp.Or(
+				cmp.Compare(a.Slot, b.Slot), cmp.Compare(a.Previous, b.Previous),
+			)
+		})
+	}
+	sortDormancy(want.Dormancy)
+	sortDormancy(got.Dormancy)
+	sortClears := func(rows []ledgerdb.DRepClearRow) {
+		slices.SortFunc(rows, func(a, b ledgerdb.DRepClearRow) int {
+			return cmp.Or(
+				cmp.Compare(a.Tag, b.Tag),
+				bytes.Compare(a.StakingKey, b.StakingKey),
+				cmp.Compare(a.Slot, b.Slot),
+			)
+		})
+	}
+	sortClears(want.Clears)
+	sortClears(got.Clears)
+	slices.Sort(want.Events)
+	slices.Sort(got.Events)
+	if err := sameSorted(
+		"expiry history", len(want.Expiry), len(got.Expiry),
+		func() bool {
+			return slices.EqualFunc(want.Expiry, got.Expiry,
+				func(a, b ledgerdb.DRepExpiryHistoryRow) bool {
+					return a.Tag == b.Tag && a.Slot == b.Slot &&
+						a.Activity == b.Activity && a.Expiry == b.Expiry &&
+						bytes.Equal(a.Credential, b.Credential)
+				})
+		},
+	); err != nil {
+		return err
+	}
+	if err := sameSorted(
+		"dormancy history", len(want.Dormancy), len(got.Dormancy),
+		func() bool { return slices.Equal(want.Dormancy, got.Dormancy) },
+	); err != nil {
+		return err
+	}
+	if err := sameSorted(
+		"expiry epoch events", len(want.Events), len(got.Events),
+		func() bool { return slices.Equal(want.Events, got.Events) },
+	); err != nil {
+		return err
+	}
+	return sameSorted(
+		"delegation clears", len(want.Clears), len(got.Clears),
+		func() bool {
+			return slices.EqualFunc(want.Clears, got.Clears,
+				func(a, b ledgerdb.DRepClearRow) bool {
+					return a.Tag == b.Tag && a.Slot == b.Slot &&
+						bytes.Equal(a.StakingKey, b.StakingKey)
+				})
+		},
+	)
 }
 
 // verifyAccounts compares every account, import baseline and witness slot,
@@ -817,6 +938,15 @@ func verifyImportBaselines(
 	if !ok {
 		return missingReader("import baselines")
 	}
+	// A set that never held the delegations has none to compare.
+	delegations := false
+	if p, ok := set.(ImportBaselinePager); ok {
+		lost, err := p.ImportBaselineDelegationsLost()
+		if err != nil {
+			return err
+		}
+		delegations = !lost
+	}
 	return ldb.IterateAccountImportBaselines(
 		txn,
 		func(row models.AccountImportBaselineRow) error {
@@ -828,7 +958,10 @@ func verifyImportBaselines(
 			}
 			if b == nil || b.Active != row.Active ||
 				b.AddedSlot != row.AddedSlot ||
-				!sameDepositPtr(b.Deposit, row.Deposit) {
+				!sameDepositPtr(b.Deposit, row.Deposit) ||
+				(delegations && (!bytes.Equal(b.Pool, row.Pool) ||
+					!bytes.Equal(b.Drep, row.Drep) ||
+					b.DrepType != row.DrepType)) {
 				return fmt.Errorf(
 					"import baselines differ between the metadata store and "+
 						"the set at %x", row.StakingKey,
@@ -1222,6 +1355,50 @@ func verifyRewardBlocksFees(
 		if _, ok := seen[epoch]; !ok && (w.CountsKnown || w.FeesKnown) {
 			return fmt.Errorf(
 				"the set holds no reward block rows for epoch %d", epoch,
+			)
+		}
+	}
+	return verifyImportedBlocks(ctx, ldb, set)
+}
+
+// verifyImportedBlocks compares the imported block counts the set retains
+// with the metadata store's.
+func verifyImportedBlocks(
+	ctx context.Context,
+	ldb ledgerdb.LedgerDB,
+	set UtxoSetWriter,
+) error {
+	r, ok := set.(ImportedBlocksReader)
+	if !ok {
+		return errors.New("the set does not serve imported block counts")
+	}
+	src, ok := ldb.(ledgerdb.ImportedBlockRowsReader)
+	if !ok {
+		return errors.New("the store cannot list imported block counts")
+	}
+	txn := ldb.Begin(ctx, false)
+	defer txn.Release()
+	want, err := src.ImportedBlockRows(txn)
+	if err != nil {
+		return fmt.Errorf("read imported block counts from the store: %w", err)
+	}
+	got, err := r.ImportedBlocks()
+	if err != nil {
+		return err
+	}
+	if len(want) != len(got) {
+		return fmt.Errorf(
+			"imported block counts cover %d epochs in the store, %d in the set",
+			len(want), len(got),
+		)
+	}
+	for epoch, w := range want {
+		g, ok := got[epoch]
+		if !ok || g.Total != w.Total || g.CapturedSlot != w.CapturedSlot ||
+			!maps.Equal(g.Pools, w.Pools) {
+			return fmt.Errorf(
+				"imported block counts of epoch %d differ between the store and the set",
+				epoch,
 			)
 		}
 	}

@@ -447,6 +447,27 @@
   # CLI: --immutable-db-keep-mithril-chunks
   # keepMithrilChunks: false
 
+# API storage layout. "shared" (default) keeps API rows in the consensus
+# metadata store. "split" keeps consensus state in a core-mode store and API
+# rows in a separate IndexerDB under <dataDir>/indexer filled asynchronously
+# by one writer that follows the ledger. Needs storageMode api and is refused
+# with historyExpiry.enabled.
+# indexer:
+  # Can be overridden with DINGO_INDEXER_LAYOUT
+  # CLI: --indexer-layout
+  # layout: shared
+  # Blocks the IndexerDB may trail the ledger tip before current-state API
+  # endpoints report not ready (split layout only).
+  # Can be overridden with DINGO_INDEXER_MAX_READY_LAG_BLOCKS
+  # CLI: --indexer-max-ready-lag-blocks
+  # maxReadyLagBlocks: 100
+  # Provider settings that override plugins.storage.metadata.config for the
+  # IndexerDB's own store (split layout only). A SQLite IndexerDB needs none.
+  # A PostgreSQL or MySQL one must name a different database, for example a
+  # different dsn; startup is refused otherwise.
+  # metadata:
+  #   dsn: postgres://user:pass@host:5432/dingo_indexer
+
 # Optional CIP-26 off-chain token registry sync (API storage mode only).
 # When enabled, Dingo periodically pulls the community token registry and
 # populates the `metadata` field of GET /api/v0/assets/{asset} with each

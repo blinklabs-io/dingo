@@ -2329,3 +2329,88 @@ type LeiosStore interface {
 		txsRaw []cbor.RawMessage,
 	) error
 }
+
+// ImportedBlockRows is the block counts a snapshot import carried for one
+// epoch, as imported, with the slot the import captured them at.
+type ImportedBlockRows struct {
+	// Pools are the blocks each pool minted, keyed by pool key hash.
+	Pools        map[string]uint64
+	Total        uint64
+	CapturedSlot uint64
+}
+
+// ImportedBlockRowsReader is implemented by a LedgerDB that lists every epoch
+// the metadata store holds imported block counts for. A drained store holds
+// none and the read fails with database.ErrFamilyDrained.
+type ImportedBlockRowsReader interface {
+	ImportedBlockRows(txn Txn) (map[uint64]ImportedBlockRows, error)
+}
+
+// RewardJournalRow is one credit or withdrawal of the metadata store's reward
+// journal.
+type RewardJournalRow struct {
+	StakingKey    []byte
+	CredentialTag uint8
+	TxHash        []byte
+	Amount        uint64
+	Slot          uint64
+	Withdrawal    bool
+	PostSnapshot  bool
+}
+
+// RewardJournalReader is implemented by a LedgerDB that lists the reward
+// journal in the order it was written. A drained store holds none and the read
+// fails with database.ErrFamilyDrained.
+type RewardJournalReader interface {
+	EachRewardJournalRow(txn Txn, fn func(RewardJournalRow) error) error
+}
+
+// RewardSeedFailureSlotReader is implemented by a LedgerDB that returns the
+// slot an imported reward-basis failure was captured at with its reason.
+type RewardSeedFailureSlotReader interface {
+	GetRewardSeedFailureSlot(
+		epoch uint64,
+		snapshotType string,
+		txn Txn,
+	) (string, uint64, error)
+}
+
+// DRepExpiryHistoryRow is the activity and expiry epochs a DRep holds from
+// Slot on.
+type DRepExpiryHistoryRow struct {
+	Tag        uint8
+	Credential []byte
+	Slot       uint64
+	Activity   uint64
+	Expiry     uint64
+}
+
+// DRepDormancyHistoryRow is the dormancy counter in force before the change
+// at Slot.
+type DRepDormancyHistoryRow struct {
+	Slot     uint64
+	Previous uint64
+}
+
+// DRepClearRow is an account whose DRep delegation was cleared at Slot.
+type DRepClearRow struct {
+	Tag        uint8
+	StakingKey []byte
+	Slot       uint64
+}
+
+// DRepHistoryRows are the DRep history tables of the metadata store.
+type DRepHistoryRows struct {
+	Expiry   []DRepExpiryHistoryRow
+	Dormancy []DRepDormancyHistoryRow
+	// Events are the slots a dormant DRep expiry bump was applied at.
+	Events []uint64
+	Clears []DRepClearRow
+}
+
+// DRepHistoryRowsReader is implemented by a LedgerDB that lists the DRep
+// history tables. A drained store holds none and the read fails with
+// database.ErrFamilyDrained.
+type DRepHistoryRowsReader interface {
+	DRepHistoryRows(txn Txn) (DRepHistoryRows, error)
+}

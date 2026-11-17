@@ -45,7 +45,7 @@ func (a *NodeAdapter) resolveDRep(
 			tags = []uint8{1}
 		}
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	for _, tag := range tags {
 		drep, err := db.GetDrepByCredential(
 			ctx, tag, credential.Hash, true, nil,
@@ -75,7 +75,7 @@ func (a *NodeAdapter) DRepDelegators(
 	if !ok {
 		return []DRepDelegatorInfo{}, 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	rows, total, err := db.Metadata().GetDRepDelegatorStakes(
@@ -126,7 +126,7 @@ func (a *NodeAdapter) DRepMetadata(
 		URL:    drep.AnchorURL,
 		Hash:   hex.EncodeToString(drep.AnchorHash),
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	doc, err := db.Metadata().GetOffchainMetadata(
@@ -167,7 +167,7 @@ func (a *NodeAdapter) DRepUpdates(
 	if !ok {
 		return []DRepUpdateInfo{}, 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	rows, total, err := db.Metadata().GetDRepUpdates(
@@ -312,7 +312,7 @@ func committeeColdID(hash []byte, hasScript bool) string {
 func (a *NodeAdapter) GovernanceCommittee(
 	ctx context.Context,
 ) (CommitteeInfo, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
@@ -454,7 +454,7 @@ func (a *NodeAdapter) checkCommitteeVotesAttributed(ctx context.Context) error {
 	if err := a.refuseDrainedGovernance("the committee votes"); err != nil {
 		return err
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	unattributed, err := db.Metadata().HasUnattributedCommitteeVotes(

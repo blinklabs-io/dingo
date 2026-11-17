@@ -626,10 +626,12 @@ func runMithrilSyncWithRepair(
 		invalidateGovernance = set.InvalidateGovernance
 	}
 
+	storageMode, indexerLayout := mithrilSyncStorage(cfg)
 	res, err := mithril.Sync(ctx, mithril.SyncConfig{
 		Network:                 network,
 		DataDir:                 cfg.DatabasePath,
-		StorageMode:             cfg.StorageMode,
+		StorageMode:             storageMode,
+		IndexerLayout:           indexerLayout,
 		UtxoSet:                 utxoSet,
 		CardanoConfigPath:       cfg.CardanoConfig,
 		Backend:                 backend,
@@ -665,6 +667,17 @@ func runMithrilSyncWithRepair(
 		metrics.recordSnapshot(res.Snapshot)
 	}
 	return nil
+}
+
+// mithrilSyncStorage returns the storage mode and indexer layout a Mithril
+// bootstrap opens the database with. The ledger's own store stays core on the
+// split layout: the snapshot's ledger state is imported there alone, and the
+// node's IndexerDB replays the blocks into itself once it runs.
+func mithrilSyncStorage(cfg *config.Config) (storageMode, indexerLayout string) {
+	if cfg.SplitIndexer() {
+		return string(dingo.StorageModeCore), config.IndexerLayoutSplit
+	}
+	return cfg.StorageMode, ""
 }
 
 // syncCommand creates the "sync" command with --mithril flag at the

@@ -26,6 +26,11 @@ import (
 // governance family's rows, so the reads that query them directly would
 // answer empty.
 func (a *NodeAdapter) governanceDrained() bool {
+	// A split node reads the IndexerDB, which block replay fills with the
+	// whole governance history whatever the ledger drained.
+	if a.indexer != nil {
+		return false
+	}
 	return a.ledgerState.DrainedFamilies().Has(nodesettings.FamilyGovernance) ||
 		a.ledgerState.Database().FamilyDrained(nodesettings.FamilyGovernance)
 }

@@ -733,6 +733,21 @@ func (e *leiosEndorserBlockStorageError) Unwrap() error {
 	return e.err
 }
 
+// EndorserBlockOffsets returns the offsets of an endorser block's transactions
+// and outputs inside its stored blob, keyed by (ebSlot, ebHash). bodyCbors is
+// each transaction's body CBOR, as CertifiedClosure.BodyCbors returns. A
+// consumer that does not store the blob itself, because the ledger already
+// did, writes these offsets under its own keys.
+func EndorserBlockOffsets(
+	txs []lcommon.Transaction,
+	bodyCbors [][]byte,
+	ebSlot uint64,
+	ebHash [lcommon.Blake2b256Size]byte,
+) (*database.BlockIngestionResult, error) {
+	_, offsets, err := buildEndorserBlockBlob(txs, bodyCbors, ebSlot, ebHash)
+	return offsets, err
+}
+
 // buildEndorserBlockBlob lays out a standalone CBOR blob holding, for each
 // endorser transaction, its body CBOR followed by each produced output's CBOR,
 // recording the byte ranges as DOFF offsets keyed by (ebSlot, ebHash). The blob

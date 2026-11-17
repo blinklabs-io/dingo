@@ -481,3 +481,45 @@ func TestApplyPreservesExplicitMidnightFieldOnResumedNetwork(t *testing.T) {
 		cfg.Midnight.CouncilPolicyID,
 	)
 }
+
+// On the split layout the consensus store persists core while the
+// configuration says api, because the IndexerDB is the API store. A restart
+// must compare the store against the consensus mode, not the configured one.
+func TestApplyAcceptsASplitNodeRestart(t *testing.T) {
+	for name, source := range map[string]config.Source{
+		"configured":   config.SourceFlag,
+		"by default":   config.SourceDefault,
+		"from the env": config.SourceEnv,
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateConfigSnapshot(t)
+			dir := seedDatabase(t, map[string]string{
+				"storage_mode":   "core",
+				"indexer_layout": config.IndexerLayoutSplit,
+			})
+			cfg := config.GetConfig()
+			cfg.DatabasePath = dir
+			cfg.StorageMode = "api"
+			cfg.Indexer.Layout = config.IndexerLayoutSplit
+			cfg.SetProvenanceForTest("StorageMode", source)
+			require.NoError(t, settingsresolve.Apply(cfg))
+			require.Equal(t, "api", cfg.StorageMode,
+				"the configured mode is the IndexerDB's and stays api")
+		})
+	}
+}
+
+// A split layout still refuses to move a consensus store back from core.
+func TestApplyOnSplitStillRefusesTheWrongNetwork(t *testing.T) {
+	isolateConfigSnapshot(t)
+	dir := seedDatabase(t, map[string]string{
+		"storage_mode": "core", "network": "preprod",
+	})
+	cfg := config.GetConfig()
+	cfg.DatabasePath = dir
+	cfg.StorageMode = "api"
+	cfg.Network = "preview"
+	cfg.Indexer.Layout = config.IndexerLayoutSplit
+	cfg.SetProvenanceForTest("Network", config.SourceFlag)
+	require.Error(t, settingsresolve.Apply(cfg))
+}

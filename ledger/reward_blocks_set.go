@@ -148,6 +148,22 @@ type RewardBlocksReader interface {
 	RewardBlocksEpochs() ([]uint64, error)
 }
 
+// ImportedBlockEpoch is the block counts a snapshot import carried for one
+// epoch, as imported, with the slot the import captured them at.
+type ImportedBlockEpoch struct {
+	Pools        map[string]uint64
+	Total        uint64
+	CapturedSlot uint64
+}
+
+// ImportedBlocksReader serves the imported block counts a live UTxO set
+// retains apart from the windowed reward block rows.
+type ImportedBlocksReader interface {
+	ImportedBlocksLoaded() (bool, error)
+	// ImportedBlocks lists the imported counts by epoch.
+	ImportedBlocks() (map[uint64]ImportedBlockEpoch, error)
+}
+
 func (ls *LedgerState) rewardBlocksReader(txn ledgerdb.Txn) RewardBlocksReader {
 	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
 		return nil

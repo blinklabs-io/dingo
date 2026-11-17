@@ -102,6 +102,9 @@ func (ls *LedgerState) stageGenesisAccounts(
 			Active:    true,
 			AddedSlot: a.AddedSlot,
 			Deposit:   deposit,
+			Pool:      a.Pool,
+			Drep:      a.Drep,
+			DrepType:  a.DrepType,
 		})
 	}
 	return nil
@@ -206,6 +209,9 @@ func (ls *LedgerState) stageGenesisDReps(
 		if prev == nil || !sameDrep(*prev, drep) {
 			ls.stageDrep(txn, 0, drep)
 		}
+		// ImportDrep records the expiry history whether or not the row
+		// changed, so a set that holds the DRep without its history gets it.
+		ls.stageDrepExpiryHistory(txn, drep.AddedSlot, drep)
 		if hr == nil {
 			continue
 		}

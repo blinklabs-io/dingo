@@ -274,7 +274,7 @@ func (s *Set) ensureRewardDerived(
 		tombstone func(slot uint64, prefix []byte) error,
 	) error {
 		for _, e := range epochs {
-			if e.EpochId+uint64(ledger.RewardInputEpochWindow) < newest {
+			if !s.retainRewards && e.EpochId+uint64(ledger.RewardInputEpochWindow) < newest {
 				continue
 			}
 			n, err := loadDerivedEpoch(ldb, txn, e.EpochId, put, tombstone)
