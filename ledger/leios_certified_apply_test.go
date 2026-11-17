@@ -21,11 +21,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -1187,22 +1190,40 @@ func TestLeiosRollbackUnavailableEndorserBlockContinuesResolvedUndo(t *testing.T
 	)
 }
 
-// A certifying ranking block marks the endorser block it certifies, including
-// one with no transactions, which writes no standalone closure blob, so that
-// persisted serving data is not pruned as uncertified.
-func TestLeiosCertifiedRankingBlockMarksEndorserBlockCertified(t *testing.T) {
+// withCertifiedEndorserBlockData makes the fixture's in-memory endorser-block
+// cache serve the manifest and transactions, as the node's cache does while a
+// certifying block applies, and returns a function that expires it.
+func (f *leiosCertApplyFixture) withCertifiedEndorserBlockData(
+	t *testing.T,
+	slot uint64,
+) (expire func()) {
+	t.Helper()
+	manifest := testLeiosManifest(f)
+	f.ebHash = manifest.Hash()
+	manifestCbor, err := manifest.MarshalCBOR()
+	require.NoError(t, err)
+	var expired atomic.Bool
+	f.ls.config.EndorserBlockDataProvider = func(
+		hash []byte,
+		s uint64,
+	) ([]byte, []cbor.RawMessage, bool) {
+		if expired.Load() || !bytes.Equal(hash, f.ebHash.Bytes()) || s != slot {
+			return nil, nil, false
+		}
+		return manifestCbor, f.ebTxs, true
+	}
+	return func() { expired.Store(true) }
+}
+
+// A certifying ranking block persists the endorser block it certifies once its
+// apply commits, and writes no certification marker and no endorser-block key
+// to the shared blob store: certification is derived from the chain when the
+// block becomes immutable.
+func TestLeiosCertifiedApplyPersistsContentWithoutMarker(t *testing.T) {
 	t.Parallel()
 	f := newLeiosCertApplyFixture(t)
-	f.ebTxs = nil
+	f.withCertifiedEndorserBlockData(t, leiosCertApplyAnnouncingSlot)
 	parent := f.announce()
-
-	certified, err := f.db.IsLeiosEBCertified(
-		leiosCertApplyAnnouncingSlot,
-		f.ebHash.Bytes(),
-	)
-	require.NoError(t, err)
-	require.False(t, certified, "an announced endorser block is not certified")
-
 	certifier, offsets, envParent := f.certifyingChild(parent)
 	require.NoError(t, f.ls.ensureReferencedEndorserBlocks(
 		t.Context(),
@@ -1210,21 +1231,59 @@ func TestLeiosCertifiedRankingBlockMarksEndorserBlockCertified(t *testing.T) {
 	))
 	require.NoError(t, f.process(certifier, offsets, envParent))
 
-	certified, err = f.db.IsLeiosEBCertified(
-		leiosCertApplyAnnouncingSlot,
-		f.ebHash.Bytes(),
+	manifest, err := f.db.GetLeiosEBManifest(
+		f.ebHash.Bytes(), leiosCertApplyAnnouncingSlot,
 	)
 	require.NoError(t, err)
-	require.True(t, certified, "certified endorser block was not marked")
+	require.Equal(t, f.ebHash.Bytes(), lcommon.Blake2b256Hash(manifest).Bytes())
+	txs, err := f.db.GetLeiosEBTxs(f.ebHash.Bytes(), leiosCertApplyAnnouncingSlot)
+	require.NoError(t, err)
+	require.Equal(t, f.ebTxs, txs)
+
+	txn := f.db.BlobTxn(false)
+	defer txn.Release()
+	it := txn.BlobStore().NewIterator(
+		txn.Blob(), dbtypes.BlobIteratorOptions{Prefix: []byte("e")},
+	)
+	defer it.Close()
+	for it.Seek([]byte("e")); it.ValidForPrefix([]byte("e")); it.Next() {
+		t.Errorf("shared blob store holds endorser-block key %x", it.Item().Key())
+	}
+}
+
+// The certified content is written even when the asynchronous persist queue
+// has dropped the endorser block, and stays readable after the in-memory
+// cache expires.
+func TestLeiosCertifiedApplyContentSurvivesCacheExpiry(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	expire := f.withCertifiedEndorserBlockData(t, leiosCertApplyAnnouncingSlot)
+	parent := f.announce()
+	certifier, offsets, envParent := f.certifyingChild(parent)
+	require.NoError(t, f.ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{certifier},
+	))
+	require.NoError(t, f.process(certifier, offsets, envParent))
+	expire()
+
+	stored := models.Block{
+		Slot: certifier.SlotNumber(), Hash: certifier.Hash().Bytes(),
+		PrevHash: certifier.PrevHash().Bytes(), Number: certifier.BlockNumber(),
+		Type: gledger.BlockTypeDijkstra, Cbor: certifier.Cbor(),
+	}
+	txs, err := f.ls.BlockTransactions(t.Context(), stored)
+	require.NoError(t, err)
+	require.Len(t, txs, 1)
+	require.Equal(t, f.ebTx.Hash(), txs[0].Hash())
 }
 
 // A ranking block rejected by a check that runs after its certified endorser
-// block applied leaves no certification behind, with or without transactions:
-// the marker rolls back with the block, and the standalone closure blob that
-// commits on its own does not count.
-func TestLeiosRejectedRankingBlockLeavesEndorserBlockUncertified(
-	t *testing.T,
-) {
+// block applied leaves that endorser block's content in the volatile partition,
+// unpinned, for the collector: the content is written before the block's own
+// commit so it exists whenever the block does. Without a data provider there is
+// nothing to write.
+func TestLeiosRejectedRankingBlockLeavesOnlyVolatileContent(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name  string
@@ -1238,6 +1297,9 @@ func TestLeiosRejectedRankingBlockLeavesEndorserBlockUncertified(
 			f := newLeiosCertApplyFixture(t)
 			if tc.noTxs {
 				f.ebTxs = nil
+			}
+			if !tc.noTxs {
+				f.withCertifiedEndorserBlockData(t, leiosCertApplyAnnouncingSlot)
 			}
 			parent := f.announce()
 			certifier, offsets, envParent := f.certifyingChild(parent)
@@ -1254,29 +1316,27 @@ func TestLeiosRejectedRankingBlockLeavesEndorserBlockUncertified(
 			var headerErr *headerValidationError
 			require.ErrorAs(t, err, &headerErr)
 			if !tc.noTxs {
-				// The closure applied before the rejection: its standalone
-				// blob committed on its own and outlives the block.
-				_, err = database.BlockByPoint(
-					t.Context(),
-					f.db,
-					ocommon.Point{
-						Slot: leiosCertApplyAnnouncingSlot,
-						Hash: f.ebHash.Bytes(),
-					},
-				)
+				store, err := f.db.LeiosDB()
+				require.NoError(t, err)
+				_, err = store.GetClosure(leiosdb.Ref{
+					Slot: leiosCertApplyAnnouncingSlot,
+					Hash: f.ebHash.Bytes(),
+				})
 				require.NoError(t, err)
 			}
-
-			certified, err := f.db.IsLeiosEBCertified(
-				leiosCertApplyAnnouncingSlot,
-				f.ebHash.Bytes(),
+			_, err = f.db.GetLeiosEBManifest(
+				f.ebHash.Bytes(), leiosCertApplyAnnouncingSlot,
+			)
+			if tc.noTxs {
+				require.ErrorIs(t, err, dbtypes.ErrBlobKeyNotFound)
+				return
+			}
+			require.NoError(t, err)
+			pinned, err := f.db.IsLeiosEBPinned(
+				leiosCertApplyAnnouncingSlot, f.ebHash.Bytes(),
 			)
 			require.NoError(t, err)
-			require.False(
-				t,
-				certified,
-				"a rejected ranking block left its endorser block certified",
-			)
+			require.False(t, pinned)
 		})
 	}
 }

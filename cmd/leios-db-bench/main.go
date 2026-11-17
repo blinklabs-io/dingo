@@ -518,9 +518,11 @@ func runBench(db *database.Database, config benchConfig) error {
 			release()
 		}
 		if prune {
-			if _, err := db.PruneLeiosEBBeforeSlot(
-				context.Background(), cutoff,
-			); err != nil {
+			store, err := db.LeiosDB()
+			if err == nil {
+				_, err = store.GarbageCollect(context.Background(), cutoff)
+			}
+			if err != nil {
 				rec.fail(fmt.Errorf("prune before slot %d: %w", cutoff, err))
 			}
 		}

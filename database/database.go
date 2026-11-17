@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -83,6 +84,9 @@ type Stores struct {
 	// Immutable provides the ImmutableDB. It is required only when the
 	// database uses one: a recorded state or an enabled configuration.
 	Immutable immplugin.ImmutableDB
+	// Leios is the endorser-block store. Nil lets the Database open its own
+	// under the data directory on first use and close it with Close.
+	Leios leiosdb.Store
 }
 
 // isNilStore reports whether an injected store is a nil interface or an
@@ -141,6 +145,9 @@ type Database struct {
 	// immutableDB is the injected ImmutableDB service; nil when the caller
 	// supplied none.
 	immutableDB immplugin.ImmutableDB
+	// leios is the lazily opened endorser-block store; see leios.go.
+	leiosMu sync.Mutex
+	leios   leiosStoreState
 
 	cborCache       *TieredCborCache
 	sizeMetricsStop chan struct{}
@@ -526,6 +533,7 @@ func (d *Database) Close() error {
 			rt.dropStore()
 			rt.mu.Unlock()
 		}
+		d.closeErr = d.closeLeiosDB()
 	})
 	return d.closeErr
 }
@@ -603,6 +611,9 @@ func New(
 		immutableDB: stores.Immutable,
 		logger:      configCopy.Logger,
 		config:      configCopy,
+	}
+	if stores.Leios != nil && !isNilStore(stores.Leios) {
+		db.leios.store = stores.Leios
 	}
 	// Initialize the tiered CBOR cache
 	db.cborCache = NewTieredCborCache(configCopy.CacheConfig, db)

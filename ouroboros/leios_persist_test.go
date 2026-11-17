@@ -15,7 +15,6 @@
 package ouroboros
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"runtime"
@@ -23,9 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	databaseTypes "github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -785,27 +784,18 @@ func TestLeiosPersistenceGCRetainsConfiguredSlotWindow(t *testing.T) {
 	}
 }
 
-type blockingLeiosManifestScanStore struct {
-	blob.BlobStore
-	started chan struct{}
-	release <-chan struct{}
-	once    sync.Once
+// leiosStoreHooks wraps a Leios store so a test can slow or fail the
+// newest-slot lookup the collection worker makes.
+type leiosStoreHooks struct {
+	leiosdb.Store
+	maxSlot func() (uint64, bool, error)
 }
 
-func (s *blockingLeiosManifestScanStore) NewIterator(
-	txn databaseTypes.Txn,
-	opts databaseTypes.BlobIteratorOptions,
-) databaseTypes.BlobIterator {
-	if bytes.Equal(
-		opts.Prefix,
-		[]byte(databaseTypes.LeiosEBManifestKeyPrefix),
-	) {
-		s.once.Do(func() {
-			close(s.started)
-			<-s.release
-		})
+func (s *leiosStoreHooks) MaxSlot() (uint64, bool, error) {
+	if s.maxSlot != nil {
+		return s.maxSlot()
 	}
-	return s.BlobStore.NewIterator(txn, opts)
+	return s.Store.MaxSlot()
 }
 
 func TestLeiosPersistenceWriterRunsDuringSlowGCScan(t *testing.T) {
@@ -819,28 +809,31 @@ func TestLeiosPersistenceWriterRunsDuringSlowGCScan(t *testing.T) {
 	oldPoint, oldRaw := testLeiosEndorserBlockRawWithRefs(t, 30, 1)
 	require.NoError(t, db.SetLeiosEB(oldPoint.Slot, oldPoint.Hash, oldRaw, nil))
 
-	baseStore := db.Blob()
-	require.NotNil(t, baseStore)
+	base, err := db.LeiosDB()
+	require.NoError(t, err)
 	releaseScan := make(chan struct{})
 	var releaseScanOnce sync.Once
 	release := func() { releaseScanOnce.Do(func() { close(releaseScan) }) }
-	blockingStore := &blockingLeiosManifestScanStore{
-		BlobStore: baseStore,
-		started:   make(chan struct{}),
-		release:   releaseScan,
-	}
-	db.SetBlobStore(blockingStore)
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	db.SetLeiosDB(&leiosStoreHooks{
+		Store: base,
+		maxSlot: func() (uint64, bool, error) {
+			startedOnce.Do(func() { close(started) })
+			<-releaseScan
+			return base.MaxSlot()
+		},
+	})
 	t.Cleanup(func() {
 		release()
 		require.NoError(t, o.Close())
-		_, drain := db.SetBlobStore(baseStore)
-		drain()
+		db.SetLeiosDB(base)
 	})
 
 	point, blockRaw, data, _ := leiosPersistTestEntry(t, 40, 1, 4)
 	o.enqueueLeiosPersist(point, blockRaw, data)
 	select {
-	case <-blockingStore.started:
+	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("GC did not begin its max-slot scan")
 	}
@@ -890,8 +883,15 @@ func TestLeiosPersistenceGCRetriesAfterStartupWatermarkScanFailure(
 
 	db := o.leiosDatabase()
 	require.NotNil(t, db)
-	require.NoError(t, dbtest.CloseDatabase(db))
-	_, err := db.MaxLeiosEBSlot()
+	base, err := db.LeiosDB()
+	require.NoError(t, err)
+	db.SetLeiosDB(&leiosStoreHooks{
+		Store: base,
+		maxSlot: func() (uint64, bool, error) {
+			return 0, false, errors.New("scan failed")
+		},
+	})
+	_, err = db.MaxLeiosEBSlot()
 	require.Error(t, err)
 
 	o.restoreLeiosVerifiedEbSlot()
@@ -1419,4 +1419,20 @@ func TestLeiosPersistenceConstructorStartsGC(t *testing.T) {
 	}, time.Second, time.Millisecond)
 	_, err := db.GetLeiosEBManifest(latest.Hash, latest.Slot)
 	require.NoError(t, err)
+}
+
+// With no immutable point the collection bound follows the newest persisted
+// endorser block, so a persisted block must wake the collector itself.
+func TestLeiosPersistSignalsCollectionAfterPersist(t *testing.T) {
+	t.Parallel()
+	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
+	point, raw, data, _ := leiosPersistTestEntry(t, 300, 4, 512)
+
+	o.enqueueLeiosPersist(point, raw, data)
+	o.drainLeiosPersist()
+
+	testutil.RequireReceive(
+		t, o.leiosGCSignal, 2*time.Second,
+		"collection must be signalled after an endorser block persists",
+	)
 }

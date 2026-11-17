@@ -220,32 +220,37 @@ func TestBlockTransactionCountReceiptRechecksStoredContent(t *testing.T) {
 			case "body":
 				require.NoError(
 					t,
-					f.db.SetLeiosEBTxs(
+					f.db.SetLeiosEB(
 						parent.SlotNumber(),
 						f.ebHash.Bytes(),
+						raw,
 						[]cbor.RawMessage{{0x80}},
 					),
 				)
 			case "count":
 				require.NoError(
 					t,
-					f.db.SetLeiosEBTxs(
+					f.db.SetLeiosEB(
 						parent.SlotNumber(),
 						f.ebHash.Bytes(),
+						raw,
 						[]cbor.RawMessage{},
 					),
 				)
 			case "manifest":
 				require.NoError(
 					t,
-					f.db.SetLeiosEBManifest(
+					f.db.SetLeiosEB(
 						parent.SlotNumber(),
 						f.ebHash.Bytes(),
 						[]byte{0x80},
+						f.ebTxs,
 					),
 				)
 			case "pruned":
-				_, err := f.db.PruneLeiosEBBeforeSlot(
+				store, err := f.db.LeiosDB()
+				require.NoError(t, err)
+				_, err = store.GarbageCollect(
 					t.Context(),
 					parent.SlotNumber()+1,
 				)
@@ -380,12 +385,12 @@ func TestRejectedCertifyingBlockPersistsNoEndorserBlock(t *testing.T) {
 		leiosCertApplyAnnouncingSlot,
 	)
 	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
-	certified, err := f.db.IsLeiosEBCertified(
+	pinned, err := f.db.IsLeiosEBPinned(
 		leiosCertApplyAnnouncingSlot,
 		f.ebHash.Bytes(),
 	)
 	require.NoError(t, err)
-	require.False(t, certified)
+	require.False(t, pinned)
 }
 
 // The manifest persisted for a certified endorser block comes from the same

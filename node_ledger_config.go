@@ -109,6 +109,7 @@ func (n *Node) ledgerStateConfigBase() ledger.LedgerStateConfig {
 		ValidateHistorical: n.config.validateHistorical,
 		EnableDijkstra:     n.config.experimentalDijkstraEnabled(),
 		WarmGenesisStake:   n.config.leiosRuntimeEnabled(),
+		LeiosStorage:       n.config.leiosRuntimeEnabled(),
 		StartInDijkstra:    n.config.startEra.IsDijkstra(),
 		// Parallel block-decode pipeline for the chainsync replay loop
 		// (phase 1 of the pipeline). Not consensus-affecting; off by default.

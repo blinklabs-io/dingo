@@ -1771,6 +1771,8 @@ func (o *Ouroboros) leiosOfferedPointPlausible(
 		reason = "host offer budget exceeded"
 	case len(point.Hash) != lcommon.Blake2b256Size:
 		reason = "invalid hash length"
+	case o.leiosBehindImmutableTip(point.Slot):
+		reason = "behind the immutable tip"
 	case !isNilInterface(o.leiosAnnouncementLedger):
 		start, err := o.leiosAnnouncementLedger.SlotToTime(point.Slot)
 		switch {
@@ -1840,6 +1842,21 @@ func (o *Ouroboros) leiosElectionObserved(point ocommon.Point) bool {
 	defer o.leiosMu.RUnlock()
 	_, observed = o.leiosSelectedHeaders[leiosBlockKey(point.Slot, point.Hash)]
 	return observed
+}
+
+// leiosBehindImmutableTip reports whether an unsolicited offer or announcement
+// names a slot the node has already settled: no later ranking block can certify
+// an endorser block announced there, so storing it would only feed the
+// collector. Endorser blocks the ledger needs for a chain-certified ranking
+// block are fetched by point through FetchEndorserBlockByPoint, which does not
+// pass through here.
+func (o *Ouroboros) leiosBehindImmutableTip(slot uint64) bool {
+	db := o.leiosDatabase()
+	if db == nil {
+		return false
+	}
+	bound, ok := o.leiosRetentionBound(db)
+	return ok && slot < bound
 }
 
 func (o *Ouroboros) leiosnotifyClientNotification(
@@ -3016,6 +3033,19 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		o.recordLeiosPeerAnnouncement(
 			source, done, header.SlotNumber(), ebHash.Bytes(),
 		)
+	}
+	// A peer announcing behind the immutable tip is unsolicited: anything the
+	// ledger needs is fetched by point, and a retry of a local announcement
+	// never passes deferVerification.
+	if deferVerification && o.leiosBehindImmutableTip(header.SlotNumber()) {
+		o.config.Logger.Debug(
+			"dropping leios announcement behind the immutable tip",
+			"component", "network",
+			"protocol", "leios-notify",
+			"connection_id", source,
+			"slot", header.SlotNumber(),
+		)
+		return nil
 	}
 	announcementKey := string(header.Hash().Bytes())
 	alreadyKnown, releaseValidation, err := o.reserveLeiosAnnouncementValidation(

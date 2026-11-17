@@ -46,6 +46,15 @@ func WithDataDir(dataDir string) BlobStoreBadgerOptionFunc {
 	}
 }
 
+// WithSubdir selects the directory under the data directory that holds the
+// badger files. The default is "blob"; a second store in the same data
+// directory, such as the Leios store, names its own.
+func WithSubdir(subdir string) BlobStoreBadgerOptionFunc {
+	return func(b *BlobStoreBadger) {
+		b.subdir = subdir
+	}
+}
+
 // WithBlockCacheSize specifies the block cache size
 func WithBlockCacheSize(size uint64) BlobStoreBadgerOptionFunc {
 	return func(b *BlobStoreBadger) {

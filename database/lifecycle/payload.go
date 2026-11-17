@@ -39,10 +39,16 @@ type payloadFile struct {
 	sha256 string
 }
 
+// hasLeiosPayload reports whether m declares a LeiosDB backup.
+func (m Manifest) hasLeiosPayload() bool {
+	return m.LeiosBytes != 0 || m.LeiosSHA256 != ""
+}
+
 // payloadFiles returns the backup files m declares directly. A snapshot holds
-// these beside its manifest, the live UTxO set's only when it declares one; a
-// snapshot with promoted blocks also holds the chunk files its immutable index
-// declares (see Manifest.immutablePayloadFiles).
+// these beside its manifest: the live UTxO set's only when it declares one,
+// and the LeiosDB's only for a node that has one. A snapshot with promoted
+// blocks also holds the chunk files its immutable index declares; see
+// Manifest.immutablePayloadFiles.
 func (m Manifest) payloadFiles() []payloadFile {
 	files := []payloadFile{
 		{BlobBackupFileName, m.BlobBytes, m.BlobSHA256},
@@ -57,6 +63,12 @@ func (m Manifest) payloadFiles() []payloadFile {
 		files = append(files, payloadFile{
 			ImmutableIndexFileName, m.ImmutableIndexBytes, m.ImmutableIndexSHA256,
 		})
+	}
+	if m.hasLeiosPayload() {
+		files = append(
+			files,
+			payloadFile{LeiosBackupFileName, m.LeiosBytes, m.LeiosSHA256},
+		)
 	}
 	return files
 }

@@ -5985,7 +5985,7 @@ verdicts; parent movement, database, snapshot, protocol-parameter, evaluation,
 cancellation, forecast, and other local failures return the entry to unknown so
 validation can retry. `ledgerProcessBlock` looks the endorser block up through
 `LedgerStateConfig.EndorserBlockProvider` (backed by the `ouroboros` package's
-fetched-EB cache, with a persistent `em`/`et` blob-store reload path on cache
+fetched-EB cache, with a persistent LeiosDB reload path on cache
 miss); when its full transaction set is cached or reloaded, `applyEndorserBlock`
 (`ledger/leios_apply.go`) decodes the standalone transactions and applies them.
 Every call site that consults `EndorserBlockProvider` -- this one,
@@ -6063,18 +6063,19 @@ endorser blocks by point on demand when otherwise idle (`MsgLeiosBlockRequest`
 carrying the block point, then the windowed transaction fetch), so a
 from-scratch sync backfills the endorser-resident transactions for the chain
 history it replays rather than only the endorser blocks observed live. Fetched
-endorser-block manifests and complete transaction lists are also persisted under
-blob keys `em` + EB hash + slot and `et` + EB hash + slot -- keyed by (hash,
-slot) together, not hash alone, since the manifest is content-addressed and the
-same hash can be a live, independently required occurrence at more than one slot
-at once -- so the same node can later reload either occurrence after the
-10-minute in-memory cache TTL and re-serve it to downstream peers. This
+endorser-block manifests and complete transaction lists are also persisted in
+the LeiosDB (`database/leiosdb`, a dedicated store under `<dataDir>/leios/`)
+-- keyed by (slot, hash) together, slot first, since the manifest is
+content-addressed and the same hash can be a live, independently required
+occurrence at more than one slot at once -- so the same node can later reload
+either occurrence after the 10-minute in-memory cache TTL and re-serve it to
+downstream peers. This
 persistence is asynchronous and off the leios-fetch hot path:
 `storeLeiosEndorserBlock` queues the write on a single background writer
 (`ouroboros/leios_persist.go`) that coalesces by (slot, hash), not hash alone —
 a complete job supersedes a manifest-only one for the same occurrence, eliding
 the backfiller's duplicate manifest write, while a job for a different
-occurrence of the same hash persists independently — and does one blob commit
+occurrence of the same hash persists independently — and does one store write
 per occurrence via `Database.SetLeiosEB`, so the CBOR encode + commit do not
 serialize against block application during catch-up. It is best-effort (a queue
 at either of its bounds drops the historical-serving write, logged with the
@@ -6097,17 +6098,35 @@ install a job — an unwinding clone, a stopped writer, a complete job that land
 for the same occurrence meanwhile — and an installed job's reservation is
 released when it is superseded by a replacement or popped by the drain, so the
 budget is a steady-state limit rather than a one-shot allowance.
-Retention follows the reference node: the retention GC (`runLeiosPersistenceGC`)
-prunes an uncertified endorser block once the immutable point
-(`LedgerState.ImmutablePoint`, `k` blocks behind the applied tip) passes its
-slot, while a certified one (`Database.IsLeiosEBCertified`; the ledger stages
-the marker in the certifying ranking block's apply transaction, so it commits
-only with that block, and a rollback removes it) is kept permanently. A positive
-`leiosPersistenceRetentionSlots` only widens the window and never prunes past
-the immutable point, nothing is pruned while reading the chain for that point
-fails, and the writer still persists a certified block below the cutoff. The leios-fetch server answers an uncertified block behind the
-immutable point as unknown, the same absence reply as any other missing block,
-whether it is still cached or persisted.
+Retention follows the reference node. Each endorser block is first volatile.
+When the immutable point (`LedgerState.ImmutablePoint`, `k` blocks behind the
+applied tip) advances, `LedgerState.AdvanceLeiosPins` walks the primary chain
+and pins into the LeiosDB's immutable partition every endorser block certified
+by a ranking block that has become immutable; certification is derived from the
+chain, not from a stored marker. The retention GC (`runLeiosPersistenceGC`) is
+event-driven rather than timed: a primary-chain event wakes it, it runs the pin
+walk, and it then collects unpinned volatile records strictly below the smaller
+of the immutable slot and the pin watermark. A pinned endorser block is kept
+permanently. A positive `leiosPersistenceRetentionSlots` only widens the window
+and never collects past the immutable point, and the writer still persists a
+pinned block below the cutoff. The leios-fetch server answers an unpinned block
+behind the immutable point, or behind the collection watermark, as unknown (an unpinned block counts as behind
+the immutable point only below the pin watermark, so refusal never outruns the
+pin walk), the
+same absence reply as any other missing block, whether it is still cached or
+persisted, and unsolicited offers and announcements behind that bound are
+dropped. `ImmutableTipSource` abstracts the immutable point for the pin walk;
+the ledger is its production source. A certifying ranking block's apply writes
+the endorser block's manifest and transactions to the LeiosDB before it commits,
+from the same lookup it applies. The pin walk rolls pins back only when the
+pin watermark's ranking block has left the primary chain, never merely because
+the immutable point moved down with an ordinary rollback, and a rollback moves
+the records back to the volatile partition instead of deleting them. A snapshot
+includes the LeiosDB (`leios.bak`) and a restore reloads it, since certified
+closures exist nowhere else. The snapshot selects the LeiosDB after it holds
+the commit barrier, because the store opens on first use, and fails when an
+existing LeiosDB cannot be opened rather than omitting it. A persisted
+endorser block signals the collector as well as primary-chain events do.
 `startLeiosPersistWriter` resets the accounting with the pending map, so a live
 Restore/Truncate restart does not carry the old queue's reservations onto the
 new one; the writer is drained and stopped at shutdown via
@@ -6222,14 +6241,16 @@ Positive retention values must cover at least the network stability window,
 from the ledger's genesis parameters. Startup rejects a smaller value or unknown
 parameters before constructing the persistence workers.
 
-Leios historical-serving records follow the reference node's retention: the
-`em`/`et` records of a certified endorser block are kept, and an uncertified
-one is pruned once the immutable point passes its slot. A positive
-`leiosPersistenceRetentionSlots` (or `DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`)
-keeps uncertified records back to the highest persisted Leios EB slot minus
-that window, never past the immutable point; `DATABASE.md` gives the full rule.
-The separate GC worker runs first after startup restores the watermark and
-then hourly. It uses the blob namespace only;
+Leios historical-serving records follow the reference node's retention: a
+certified endorser block is pinned into the LeiosDB's immutable partition and
+kept permanently, and an unpinned one is collected once the immutable point
+passes its slot. A positive `leiosPersistenceRetentionSlots` (or
+`DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) can only extend retention: it keeps
+unpinned records back to the highest persisted Leios EB slot minus that window,
+never past the immutable point. A zero value adds no window; it does not keep
+endorser blocks forever. `DATABASE.md` gives the full rule. The separate GC
+worker runs first after startup restores the watermark and then on primary-chain
+events, with no timer. It uses the LeiosDB only;
 ordinary ledger block history and already-applied UTxO effects are unaffected.
 The Ouroboros provider also reloads EBs from these keys on a cache miss, so a
 later rollback/replay that needs pruned data must refetch it from a Leios peer;
@@ -6521,9 +6542,9 @@ entry as already verified, since the store is only ever written from a verified
 entry in the first place; reconstructing it as unverified would withhold an
 already-trustworthy historical block from the ledger provider until something
 happened to re-verify a hash whose announcement may have long since left the
-acceptance window. The persistent blob store (`em`/`et` keys, below) is keyed by
-(hash, slot) together, the same as the in-memory cache:
-`types.LeiosEBManifestKey`/`LeiosEBTxsKey` append the slot after the hash, so
+acceptance window. The persistent LeiosDB (below) is keyed by
+(slot, hash) together, the same as the in-memory cache: its keys lead with the
+slot and then the hash, so
 `Database.SetLeiosEB`/`GetLeiosEBManifest`/`GetLeiosEBTxs` persist and reload
 each occurrence independently, and a second live occurrence of a recurring hash
 no longer silently overwrites the first once its in-memory entry ages out. The
@@ -6604,7 +6625,7 @@ available to the ledger for application (see "Era-Specific Validation"). The
 leios-fetch server uses the same lookup path for downstream `MsgBlockRequest`
 and `MsgBlockTxsRequest`: it serves from the in-memory cache when present, and
 on cache miss or expired-entry eviction reloads the manifest and complete tx
-list from the durable `em`/`et` blob keys so historical EBs can be re-served
+list from the LeiosDB so historical EBs can be re-served
 after the cache TTL. Relayed ranking-block announcements remain queued, in arrival
 order per endorser-block occurrence, until that occurrence's EB manifest is
 available;

@@ -2687,14 +2687,6 @@ func (a Adapter) ResolveUtxoCborWithRecovery(
 	return a.db.ResolveUtxoCborWithRecovery(ctx, txId, outputIdx, dbTxn(txn))
 }
 
-func (a Adapter) SetLeiosEBCertified(
-	slot uint64,
-	hash []byte,
-	txn ledgerdb.Txn,
-) error {
-	return a.db.SetLeiosEBCertified(slot, hash, dbTxn(txn))
-}
-
 func (a Adapter) GetLeiosEBManifest(hash []byte, slot uint64) ([]byte, error) {
 	return a.db.GetLeiosEBManifest(hash, slot)
 }
@@ -2724,13 +2716,6 @@ func (a Adapter) PrepareLeiosClosureBatch(
 	transactions []lcommon.Transaction,
 ) (int, error) {
 	return a.db.PrepareLeiosClosureBatch(acc, dbTxn(txn), transactions)
-}
-
-func (a Adapter) PruneLeiosEBBeforeSlot(
-	ctx context.Context,
-	beforeSlot uint64,
-) (int, error) {
-	return a.db.PruneLeiosEBBeforeSlot(ctx, beforeSlot)
 }
 
 func (a Adapter) SetLeiosEB(
