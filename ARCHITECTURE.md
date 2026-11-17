@@ -10269,11 +10269,14 @@ runs out the header is not withheld either; the connection is resynced from the
 local chain (`ChainsyncResyncReasonGenesisCorroborationHoldExpired`).
 
 When the dynamo's connection closes, the driver elects, in order, the
-selector's best peer if it is an identified CSJ peer; identified streaming peers
-that are not objectors; jumpers that agreed to a jump, which stream from their
-last agreed point; jumpers that did not; and last the objectors, which refused a
-jump and hold no ingress slot. A jumper holds no ingress slot, and neither does
-an objector until a header of its is admitted, so the elected peer claims a slot
+selector's best peer if it is an identified CSJ peer that is not an objector;
+identified streaming peers that are not objectors; jumpers that agreed to a
+jump, which stream from their last agreed point; jumpers that did not; and last
+the objectors, which refused a jump and hold no ingress slot. An objector's
+opening rollback can make it the selector's best peer while jumpers have no
+streamed frontier, but that does not override the objectors-last order. A jumper
+holds no ingress slot, and neither does an objector until a header of its is
+admitted, so the elected peer claims a slot
 as it is elected, before anything else can take the one its predecessor freed;
 the closed connection's client is removed first so that its slot is free. A
 promotion of an observer, by such a claim or by a root handed a freed slot,
