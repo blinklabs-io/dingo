@@ -1252,8 +1252,7 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		if !ok {
 			return false
 		}
-		// Persistence belongs to the node lifecycle and must outlive this peer request.
-		//nolint:contextcheck
+		//nolint:contextcheck // Validation and persistence GC are node-owned and must outlive this peer request.
 		if err := o.storeLeiosEndorserBlock(
 			point,
 			respBlock.BlockRaw,
@@ -1273,6 +1272,16 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		}
 	}
 	if data.txCount == 0 || data.completeTxCache() {
+		//nolint:contextcheck // Persistence GC is node-owned and must outlive this peer request.
+		if err := o.ensureLeiosEndorserBlockDurable(data); err != nil {
+			o.config.Logger.Debug(
+				"failed to persist cached leios EB on txs offer",
+				"error", err,
+				"connection_id", connKey,
+				"slot", point.Slot,
+			)
+			return false
+		}
 		return true
 	}
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
@@ -1308,8 +1317,7 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		)
 		return false
 	}
-	// Persistence belongs to the node lifecycle and must outlive this peer request.
-	//nolint:contextcheck
+	//nolint:contextcheck // Validation and persistence GC are node-owned and must outlive this peer request.
 	if err := o.storeLeiosEndorserBlock(
 		point,
 		data.blockRaw,

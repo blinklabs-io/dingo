@@ -2436,9 +2436,10 @@ outlive it:
 - **EventBus subscriptions.** `Close` removes the subscriptions Ouroboros makes
   on its own behalf. A leaked one would be handled once per restore cycle,
   forever.
-- **Leios persistence workers.** `Close` stops the historical-serving writer
-  and retention GC before storage closes. An unconfirmed worker drain
-  prevents normal shutdown and live restore from closing storage underneath it.
+- **Leios persistence.** `Close` refuses further endorser-block writes, waits
+  for in-flight ones, and stops the retention GC before storage closes. An
+  unconfirmed wait prevents normal shutdown and live restore from closing
+  storage underneath it.
 
 `Close` is idempotent, so `Node.Stop` and an explicit restore teardown can both
 call it. Failed startup closes Ouroboros through `Run`'s LIFO rollback stack.
@@ -2497,8 +2498,8 @@ Phase 2: Drain and close connections
   Mempool, terminal EventBus close bounded by the shutdown deadline
   (concurrent with ConnectionManager), ConnectionManager,
   Ouroboros (`Ouroboros.Close`, the only shutdown close: releases acquired
-  LocalStateQuery snapshots, drains the Leios persistence writer and
-  retention GC, detaches EventBus subscriptions and Prometheus collectors,
+  LocalStateQuery snapshots, waits for in-flight Leios endorser-block writes
+  and stops the retention GC, detaches EventBus subscriptions and Prometheus collectors,
   cancels validation; bounded by the shutdown deadline and skipped once a
   phase-2 wait was abandoned)
 
@@ -4819,15 +4820,10 @@ down anyway. Both mean a background goroutine could not be confirmed to have
 exited before its bounded wait gave up — unlike every other error these steps
 can return, which mean some cleanup step failed on an already-unused resource,
 this means a goroutine may still be reading/writing `n.db`. For the Leios case
-specifically: the persist writer's
-`leiosPersistOnce`/`leiosPersistStopOnce`/`leiosPersistStarted` reset (letting a
-later `enqueueLeiosPersist` lazily relaunch a fresh writer against the
-reinitialized database) is skipped entirely on an unconfirmed drain, not just
-deferred — resetting them would let the very next enqueue start a second writer
-against a freshly reset pending map while the old writer might still be reading
-and deleting from that same map (now repointed) under the shared mutex, silently
-stealing jobs meant for the new database and writing them into the old one via
-its stale captured database reference. `reinitializeAndResume` would reopen that
+specifically: an unconfirmed pause leaves endorser-block writes refused and the
+GC's start-once guard unreset, so no new write or GC worker reaches either
+database while a write or sweep from before the pause may still be running
+against the old one. `reinitializeAndResume` would reopen that
 same data directory out from under either still-running goroutine, so both
 `closeStorageForLiveLifecycleOp` and `quiesceForLiveLifecycleOp` return
 immediately on this error without proceeding further, and `Restore`/`Truncate`
@@ -6069,35 +6065,24 @@ the LeiosDB (`database/leiosdb`, a dedicated store under `<dataDir>/leios/`)
 content-addressed and the same hash can be a live, independently required
 occurrence at more than one slot at once -- so the same node can later reload
 either occurrence after the 10-minute in-memory cache TTL and re-serve it to
-downstream peers. This
-persistence is asynchronous and off the leios-fetch hot path:
-`storeLeiosEndorserBlock` queues the write on a single background writer
-(`ouroboros/leios_persist.go`) that coalesces by (slot, hash), not hash alone —
-a complete job supersedes a manifest-only one for the same occurrence, eliding
-the backfiller's duplicate manifest write, while a job for a different
-occurrence of the same hash persists independently — and does one store write
-per occurrence via `Database.SetLeiosEB`, so the CBOR encode + commit do not
-serialize against block application during catch-up. It is best-effort (a queue
-at either of its bounds drops the historical-serving write, logged with the
-reason) except for a certified endorser block, which ledger apply of the
-certifying ranking block writes itself when `em`/`et` are absent
-(`persistCertifiedEndorserBlock`, from the same provider lookup that supplied
-the applied transactions), and never affects UTxO resolution, which uses the
-ledger's own
-genesis-blob path. The queue is bounded twice, by entry count
-(`leiosPersistMaxPending`) and by aggregate retained bytes
-(`leiosPersistMaxQueueBytes`, the same 256 MiB the in-memory endorser-block
-cache uses, since the queue only holds a copy of what that cache already holds);
-the count bound alone would have let 4096 entries at the cache's 16 MiB
-per-entry budget retain tens of gigabytes. Admission is decided before the
-payload is copied: `enqueueLeiosPersist` measures the caller's own manifest and
-transaction slices, reserves those bytes and an entry slot under
-`leiosPersistMu`, and only then clones, so an endorser block the queue is going
-to drop costs no copy. A reservation is released on every path that does not
-install a job — an unwinding clone, a stopped writer, a complete job that lands
-for the same occurrence meanwhile — and an installed job's reservation is
-released when it is superseded by a replacement or popped by the drain, so the
-budget is a steady-state limit rather than a one-shot allowance.
+downstream peers. They
+are written synchronously, before the fetch that produced them reports
+success: `storeLeiosEndorserBlock` publishes a slot-verified entry through
+`publishLeiosEndorserBlock`, which writes it with `Database.SetLeiosEB`
+(`ouroboros/leios_persist.go`) before offering it to downstream peers, and
+returns a failed write to the fetch or backfill that stored it. A manifest-only
+entry writes the manifest and a complete one the transaction list too; writing
+the same occurrence twice is harmless. An unverified peer-offered entry is not
+written until its slot is corroborated. The cache entry records the persistence
+epoch its current content was written in (`durableEpoch`), carried forward only
+while the transaction set does not grow, so re-offers of a held block from
+every connection do not rewrite it, while an offer of a block cached whole but
+not durable (its earlier write failed) retries the write instead of reporting
+success. Entries reloaded from the LeiosDB are durable. A certified endorser
+block is also written by ledger apply of the certifying ranking block when
+`em`/`et` are absent (`persistCertifiedEndorserBlock`, from the same provider
+lookup that supplied the applied transactions). None of this affects UTxO
+resolution, which uses the ledger's own genesis-blob path.
 Retention follows the reference node. Each endorser block is first volatile.
 When the immutable point (`LedgerState.ImmutablePoint`, `k` blocks behind the
 applied tip) advances, `LedgerState.AdvanceLeiosPins` walks the primary chain
@@ -6108,7 +6093,7 @@ event-driven rather than timed: a primary-chain event wakes it, it runs the pin
 walk, and it then collects unpinned volatile records strictly below the smaller
 of the immutable slot and the pin watermark. A pinned endorser block is kept
 permanently. A positive `leiosPersistenceRetentionSlots` only widens the window
-and never collects past the immutable point, and the writer still persists a
+and never collects past the immutable point, and persistence still writes a
 pinned block below the cutoff. The leios-fetch server answers an unpinned block
 behind the immutable point, or behind the collection watermark, as unknown (an unpinned block counts as behind
 the immutable point only below the pin watermark, so refusal never outruns the
@@ -6127,32 +6112,23 @@ closures exist nowhere else. The snapshot selects the LeiosDB after it holds
 the commit barrier, because the store opens on first use, and fails when an
 existing LeiosDB cannot be opened rather than omitting it. A persisted
 endorser block signals the collector as well as primary-chain events do.
-`startLeiosPersistWriter` resets the accounting with the pending map, so a live
-Restore/Truncate restart does not carry the old queue's reservations onto the
-new one; the writer is drained and stopped at shutdown via
-`StopLeiosPersistWriter`, whose drain wait is bounded by a short timeout so a
-stuck or slow blob store cannot hang graceful shutdown (the stop is still
-signalled and new enqueues are rejected once stopping, so no freshly fetched
-block is silently stranded). `StopLeiosPersistWriter` is a permanent, one-way
-stop — appropriate for process shutdown, where nothing enqueues again — but the
+Close and `PauseLeiosPersistWriterForLiveLifecycleOp` take
+`leiosPersistLifecycleMu` exclusively, so no new write registers, then wait for
+in-flight writes and for the GC worker, each bounded by
+`leiosPersistShutdownDrainTimeout` so a stuck or slow store cannot hang
+graceful shutdown or a live Restore/Truncate. A write holds the read lock only
+to register, never across `SetLeiosEB`. Close is permanent. The
 `ouroboros.Ouroboros` object survives a live Restore/Truncate
-(`node_lifecycle.go`) unlike everything else it depends on, so a plain stop
-there would drain against the pre-operation database (fine) but then reject
-every enqueue forever afterward, permanently disabling EB historical persistence
-for the rest of the process's life. `quiesceForLiveLifecycleOp` instead calls
-`PauseLeiosPersistWriterForLiveLifecycleOp`, which does the same stop-and-drain
-against the still-open pre-operation database, then resets the writer's
-start-once guard so the next enqueue — once `LedgerState` has been reassigned to
-the reinitialized database — lazily relaunches a fresh writer against it, the
-same self-healing restart every other `n.ouroboros` field already gets via
-reassignment rather than reconstruction. This call happens last in quiesce,
-after connection shutdown. If that shutdown cannot be confirmed, the operation
-requires a supervised restart instead of replacing storage while traffic can
-still enqueue. `leiosPersistLifecycleMu` holds a read lock through each
-enqueue's reservation, copy, installation and signal, and an exclusive lock
-through writer stop, drain and reset. In-flight enqueues finish before the
-drain, and no reservation or wakeup crosses writer generations. The writer loop
-receives its channels as arguments. Because endorser transactions are not part
+(`node_lifecycle.go`) unlike everything else it depends on, so
+`quiesceForLiveLifecycleOp` instead calls the pause, which, once the wait is
+confirmed, re-enables writes, resets the GC start-once guard and the pruning
+frontier, and starts a new persistence epoch so cached entries are written
+again to the reinitialized database once `LedgerState` has been reassigned to
+it. This call happens last in quiesce, after connection shutdown. If that
+shutdown cannot be confirmed, the operation requires a supervised restart
+instead of replacing storage while traffic can still write. A pause whose wait
+is not confirmed returns `ErrLeiosPersistDrainUnconfirmed` and leaves writes
+refused. Because endorser transactions are not part Because endorser transactions are not part
 of any chain block — so they have no CBOR offsets — their CBOR is persisted as a
 standalone blob keyed by the endorser block's `(slot, hash)` with DOFF offsets
 (mirroring the genesis path), and `SetTransaction`/delta apply is reused so they
@@ -6258,11 +6234,11 @@ downstream requests for pruned records have the same peer dependency. A sweep
 with a positive window lists manifests to find the highest persisted slot; every
 sweep scans the shared Leios prefix for deletion candidates. On object stores
 this means paginated listings plus per-key deletes.
-The GC worker does not share the persistence writer's queue and cannot stall
-its write drain. Live Restore/Truncate stops
-and joins both workers before storage replacement; if either worker cannot
-stop within the bounded drain window, the live operation does not proceed
-against the old database. Partial cloud-store deletes are safe to retry on the
+The GC worker holds `leiosPersistStoreMu` only to publish its frontier, so a
+slow scan cannot stall endorser-block writes. Live Restore/Truncate waits for
+in-flight writes and joins the GC worker before storage replacement; if either
+cannot finish within the bounded drain window, the live operation does not
+proceed against the old database. Partial cloud-store deletes are safe to retry on the
 next sweep.
 
 When a certified endorser-block fetch has no connected leios-fetch peer, or
@@ -6547,11 +6523,8 @@ acceptance window. The persistent LeiosDB (below) is keyed by
 slot and then the hash, so
 `Database.SetLeiosEB`/`GetLeiosEBManifest`/`GetLeiosEBTxs` persist and reload
 each occurrence independently, and a second live occurrence of a recurring hash
-no longer silently overwrites the first once its in-memory entry ages out. The
-asynchronous persistence writer's job-coalescing map
-(`ouroboros/leios_persist.go`) uses the same composite key, so a manifest-only
-job for one occurrence cannot be superseded by (or accidentally suppress) a
-complete job for a different occurrence of the same hash. `loadLeiosEBFromDB`
+no longer silently overwrites the first once its in-memory entry ages out.
+`loadLeiosEBFromDB`
 passes the caller's own expected slot straight through to the blob-store read,
 so a lookup for one occurrence can only ever return that occurrence -- there is
 no longer a separate post-read slot comparison to get wrong.

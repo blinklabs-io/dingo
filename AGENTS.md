@@ -45,7 +45,7 @@ make govulncheck  # reachable Go vulnerabilities; needs network
   when it reaches process-global state. The classes seen here: swapping a
   package-level seam (`syncDir`, `cleanupConsumedUtxosInterval`,
   `deliveryStallWarnInterval`, `afterDeferredMarkerDeleteHook`,
-  `leiosPersistMaxQueueBytes`); swapping another package's variable
+  `leiosPersistShutdownDrainTimeout`); swapping another package's variable
   (`ledger.Close*Timeout`); replacing a process-global (`slog.SetDefault`,
   `config.PublishConfig`, which `settingsresolve.Apply` ends in); asserting a
   delta of a process-wide counter (`BlobOrphanCount`, whose before/after window

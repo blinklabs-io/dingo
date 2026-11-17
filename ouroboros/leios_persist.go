@@ -17,7 +17,7 @@ package ouroboros
 import (
 	"context"
 	"errors"
-	"slices"
+	"fmt"
 	"sync"
 	"time"
 
@@ -28,370 +28,213 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// leiosPersistMaxPending bounds the coalescing pending-write map so a writer
-// that falls behind under heavy catch-up load cannot grow memory without limit.
-// When full, new distinct endorser blocks are dropped from persistence (logged)
-// rather than blocking the fetch path — historical serving is best-effort and a
-// dropped block can be re-fetched and re-persisted later. It does not affect
-// UTxO correctness (that uses the ledger's own genesis-blob path).
-const leiosPersistMaxPending = 4096
-
-// leiosPersistMaxQueueBytes bounds the aggregate retained size (manifest plus
-// every transaction body) of the pending-write map, counting both installed
-// jobs and reservations whose payload copy is still in flight.
-// leiosPersistMaxPending alone bounds only entry count: every job is built
-// from an endorser-block cache entry that storeLeiosEndorserBlock has just
-// admitted under leiosEndorserBlockCacheMaxEntryBytes (16 MiB), so
-// leiosPersistMaxPending entries could retain 64 GiB. This bounds actual
-// memory directly, at the same 256 MiB the endorser-block cache itself uses
-// (leiosEndorserBlockCacheMaxBytes) -- the queue only ever holds a copy of
-// what that cache already holds, so it has no reason to be allowed to grow
-// larger than it. A job cannot be permanently unqueueable at this budget:
-// the cache's own per-entry cap keeps every job at or below 16 MiB, far
-// under the aggregate.
-//
-// Over-budget entries are dropped, not deferred, exactly like the
-// leiosPersistMaxPending drop above: this queue feeds historical serving
-// only, a dropped endorser block is re-fetched and re-persisted later, and
-// deferring would mean blocking the leios-fetch hot path that this whole
-// writer exists to keep clear.
-//
-// Declared as a var, not a const, solely so tests can lower it (save,
-// override, t.Cleanup restore) without allocating hundreds of megabytes of
-// test data. Production code only reads it.
-var leiosPersistMaxQueueBytes = 256 << 20 // 256 MiB
-
-// leiosPersistShutdownDrainTimeout bounds how long StopLeiosPersistWriter waits
-// for the background writer to finish draining queued blob writes at shutdown.
-// The drain calls Database.SetLeiosEB, which can block indefinitely on a stuck
-// or slow blob store; persisting fetched endorser blocks for historical serving
-// is best-effort, so that must never hang a graceful shutdown. After this
-// timeout the wait is abandoned (a warning is logged, the writer goroutine is
-// left to exit on its own once the store unblocks). The stop channel is always
-// closed regardless, so the writer does exit; only the wait is bounded.
-// Package-level var (not const) so tests can shrink it instead of running a
-// real multi-second timeout.
+// leiosPersistShutdownDrainTimeout bounds how long Close and
+// PauseLeiosPersistWriterForLiveLifecycleOp wait for in-flight endorser-block
+// writes and for the GC worker. A write calls Database.SetLeiosEB, which can
+// block indefinitely on a stuck or slow store, and that must never hang a
+// graceful shutdown or a live restore; the wait is abandoned and the caller
+// told the drain is unconfirmed. Package-level var (not const) so tests can
+// shrink it instead of running a real multi-second timeout.
 var leiosPersistShutdownDrainTimeout = 5 * time.Second
 
 // ErrLeiosPersistDrainUnconfirmed is returned when a bounded wait gives up
-// before confirming the persistence writer and GC workers exited. Callers
-// must not close or replace storage while either worker may still use it.
+// before confirming that in-flight endorser-block writes finished and the GC
+// worker exited. Callers must not close or replace storage while either may
+// still use it.
 var ErrLeiosPersistDrainUnconfirmed = errors.New(
 	"leios persistence worker drain not confirmed before timeout",
 )
 
-// leiosPersistJob is one endorser block queued for best-effort blob-store
-// persistence. txsRaw is nil for a manifest-only job (incomplete EB).
-//
-// size is the byte reservation this job holds against
-// leiosPersistMaxQueueBytes. It is recorded on the job, rather than
-// recomputed from the payload when the job leaves the queue, so that the
-// amount released is always exactly the amount reserved: the reservation is
-// taken before the payload is copied (see enqueueLeiosPersist), so a
-// recomputation would be a second, independent measurement of a different
-// set of slices and any disagreement between the two would leak or
-// double-release queue capacity.
-type leiosPersistJob struct {
-	slot        uint64
-	hash        []byte
-	manifestRaw []byte
-	txsRaw      []cbor.RawMessage
-	size        int
-}
+// errLeiosPersistStopped refuses a write after Close, or after a pause whose
+// drain was not confirmed: the store it would reach is being, or has been,
+// closed or replaced.
+var errLeiosPersistStopped = errors.New("leios persistence is stopped")
 
-// leiosPersistJobSize is the retained size a job for this endorser block
-// would hold: the hash key plus the manifest plus every transaction body.
-// Measured from the caller's own slices so the admission decision in
-// reserveLeiosPersistBytes costs no allocation and no copy.
-func leiosPersistJobSize(
-	hash []byte,
-	manifestRaw []byte,
-	txsRaw []cbor.RawMessage,
-) int {
-	// The hash is charged twice because the queue retains two copies: the
-	// map key string and the cloned job.hash. Undercharging here would let
-	// the queue hold more than the budget it reports.
-	size := 2*len(hash) + len(manifestRaw)
-	for _, raw := range txsRaw {
-		size += len(raw)
-	}
-	return size
-}
-
-// enqueueLeiosPersist queues an endorser block for asynchronous blob-store
-// persistence (historical serving) instead of writing it synchronously on the
-// leios-fetch hot path. Jobs coalesce by (slot, hash): a complete job (carrying
-// txs) supersedes a manifest-only one for the same occurrence, so the
-// backfiller's manifest-only-then-complete pair collapses to a single write.
-// Best-effort: a
-// full queue drops the write; no error is surfaced to the caller.
+// persistLeiosEndorserBlock writes an endorser block to the LeiosDB before
+// returning, so a caller that reports success, or offers the block onward,
+// only does so once the block survives a restart. txsRaw is written only for
+// a complete transaction set; a manifest-only entry writes the manifest.
+// Writing the same occurrence twice is harmless: records are keyed by
+// (slot, hash) and the content is verified against the manifest hash.
 //
-// Admission runs before any copying. The queue's aggregate byte reservation
-// and its entry-count cap are both decided from the caller's own slices in
-// reserveLeiosPersistBytes, so an endorser block the queue is going to drop
-// never costs the manifest-and-every-transaction-body copy that cloning it
-// would -- previously a peer could make this path allocate a full copy of
-// every endorser block it offered and have it thrown away immediately at the
-// count cap, and 4096 accepted copies had no aggregate size limit at all.
-func (o *Ouroboros) enqueueLeiosPersist(
+// It returns the persistence epoch the write was made in, for
+// markLeiosEndorserBlockDurable. With no database it does nothing and reports
+// epoch zero, which no entry is ever marked durable under.
+func (o *Ouroboros) persistLeiosEndorserBlock(
 	point ocommon.Point,
 	blockRaw []byte,
 	data *leiosEndorserBlockData,
-) {
+) (uint64, error) {
 	if o.leiosDatabase() == nil {
-		return
+		return 0, nil
 	}
-	o.leiosPersistLifecycleMu.RLock()
-	defer o.leiosPersistLifecycleMu.RUnlock()
-	o.startLeiosPersistenceGC(0, false)
-	if !o.startLeiosPersistWriterIfOpen() {
-		return
+	epoch, ok := o.beginLeiosPersistWrite()
+	if !ok {
+		return 0, errLeiosPersistStopped
 	}
-	signal := o.leiosPersistSignal
-	// The caller's transaction slices, not a copy: they are only measured
-	// here, and are cloned below if and only if the job is admitted.
+	defer o.endLeiosPersistWrite()
+	// Read again after registering: a pause waits for registered writes
+	// before storage is replaced, so this is the store the write belongs to.
+	db := o.leiosDatabase()
+	if db == nil {
+		return 0, nil
+	}
 	var txsRaw []cbor.RawMessage
 	if data != nil && data.completeTxCache() && data.txCount > 0 {
 		txsRaw = data.txsRaw
 	}
-	key := leiosBlockKey(point.Slot, point.Hash)
-	size := leiosPersistJobSize(point.Hash, blockRaw, txsRaw)
-	admitted, dropReason := o.reserveLeiosPersistBytes(
-		key,
-		size,
-		len(txsRaw) > 0,
-	)
-	if !admitted {
-		if dropReason != "" {
-			// Logged outside leiosPersistMu: the drain holds that mutex to
-			// pop each job, and a log sink that blocks must not stall it.
-			o.logLeiosPersistDrop(point.Slot, dropReason)
+	o.leiosPersistStoreMu.Lock()
+	// A pinned endorser block below the frontier is still persisted: it is
+	// certified by an immutable ranking block, and replaying that block
+	// needs the closure. The store itself refuses an unpinned write below
+	// its collection watermark; the frontier check only avoids the round
+	// trip while the watermark catches up.
+	if point.Slot < o.leiosPersistPruneBeforeSlot {
+		pinned, err := db.IsLeiosEBPinned(point.Slot, point.Hash)
+		// A failed lookup persists: an extra record is collected later, a
+		// missing certified one is not recoverable.
+		if err == nil && !pinned {
+			o.leiosPersistStoreMu.Unlock()
+			return epoch, nil
 		}
-		return
 	}
-	// size bytes are now reserved. Every path out of this function must
-	// either hand that reservation to an installed job or give it back --
-	// a reservation that is neither is permanent queue capacity lost to
-	// nothing, which looks exactly like the memory exhaustion the budget
-	// exists to prevent. The deferred release covers the unwind path:
-	// cloning a multi-megabyte endorser block is the one allocation-failure
-	// point between the reservation and its hand-off.
-	reservationHeld := true
-	defer func() {
-		if reservationHeld {
-			o.releaseLeiosPersistReservation(size)
-		}
-	}()
-	if hook := o.leiosPersistAfterReserve; hook != nil {
-		hook()
+	err := db.SetLeiosEB(point.Slot, point.Hash, blockRaw, txsRaw)
+	o.leiosPersistStoreMu.Unlock()
+	if errors.Is(err, leiosdb.ErrBehindImmutableTip) {
+		return epoch, nil
 	}
-	job := &leiosPersistJob{
-		slot:        point.Slot,
-		hash:        slices.Clone(point.Hash),
-		manifestRaw: slices.Clone(blockRaw),
-		txsRaw:      cloneRawMessages(txsRaw),
-		size:        size,
-	}
-	// From here the reservation's fate belongs to installLeiosPersistJob,
-	// which decides it in the same critical section as the map mutation and
-	// performs the release itself on each of its own drop paths. The
-	// deferred net must not also fire, or the release would be doubled.
-	reservationHeld = false
-	if !o.installLeiosPersistJob(key, job) {
-		return
-	}
-	select {
-	case signal <- struct{}{}:
-	default:
-	}
-}
-
-// reserveLeiosPersistBytes decides whether a job of the given size is admitted
-// and, when it is, reserves those bytes against leiosPersistMaxQueueBytes
-// before the caller copies anything. It returns false having reserved nothing
-// when the job must be dropped, along with a drop reason for the caller to log
-// (empty for the routine manifest-only-behind-complete coalescing case, which
-// is not a capacity drop).
-//
-// An in-flight reservation counts against both budgets: its bytes against
-// leiosPersistMaxQueueBytes, and -- for a hash that is not already pending --
-// one slot against leiosPersistMaxPending. Counting reservations toward the
-// entry cap is what lets installLeiosPersistJob install unconditionally: N
-// concurrent enqueues for N distinct hashes would otherwise all pass the count
-// check against the same not-quite-full map and then all install, overshooting
-// the cap by N-1.
-func (o *Ouroboros) reserveLeiosPersistBytes(
-	key string,
-	size int,
-	hasTxs bool,
-) (bool, string) {
-	o.leiosPersistMu.Lock()
-	defer o.leiosPersistMu.Unlock()
-	if o.leiosPersistClosed {
-		return false, ""
-	}
-	// Reject work once the writer is stopping. The shutdown drain runs only
-	// after leiosPersistStop is closed and reads the pending map under this same
-	// mutex; a job added after the drain has emptied the map would be stranded
-	// forever (silently dropped) and would make shutdown report completion while
-	// a freshly fetched endorser block was never persisted. Checking the stop
-	// signal here, under the lock, closes that race: a job added while stop is
-	// still open is committed before the drain's map read (which needs the lock)
-	// can observe an empty map, and any job attempted after stop is closed is
-	// rejected. Best-effort — a rejected block can be re-fetched and re-persisted
-	// after restart.
-	select {
-	case <-o.leiosPersistStop:
-		return false, ""
-	default:
-	}
-	if existing := o.leiosPersistPending[key]; existing != nil {
-		// Never let a manifest-only job overwrite one that already carries
-		// txs — that would re-introduce the duplicate manifest write and lose
-		// the tx bodies from the pending write.
-		if existing.txsRaw != nil && !hasTxs {
-			return false, ""
-		}
-	} else if len(o.leiosPersistPending)+
-		o.leiosPersistReserved >= leiosPersistMaxPending {
-		return false, "queue full"
-	}
-	// A job that could never fit even in an empty queue is reported
-	// separately: it is a permanent property of that endorser block, not
-	// transient pressure, and the two want different operator responses.
-	// storeLeiosEndorserBlock's per-entry cap keeps this unreachable at the
-	// production budgets; it is enforced here so lowering either bound
-	// cannot turn it into a silent accounting hole.
-	if size > leiosPersistMaxQueueBytes {
-		return false, "endorser block larger than the whole queue budget"
-	}
-	// A replacement charges its full size rather than the delta against the
-	// job it will supersede, so that exactly `size` is reserved here and
-	// exactly `size` is released later on whichever path the reservation
-	// takes. The incumbent's bytes are released by installLeiosPersistJob as
-	// it leaves the map, so the two only overlap for the duration of the
-	// copy. That transient double-charge costs at most one endorser block of
-	// headroom (16 MiB against a 256 MiB budget), and a replacement rejected
-	// for want of it leaves the already-queued manifest-only write in place
-	// rather than losing the block entirely.
-	if o.leiosPersistBytes+size > leiosPersistMaxQueueBytes {
-		return false, "byte budget exhausted"
-	}
-	o.leiosPersistBytes += size
-	o.leiosPersistReserved++
-	return true, ""
-}
-
-// installLeiosPersistJob publishes a job whose payload copy is complete,
-// handing the reservation reserveLeiosPersistBytes took over to the installed
-// job. It always ends that reservation's in-flight phase, and it releases the
-// reserved bytes itself on every path that does not install, so the caller
-// owns the reservation only up to this call. Returns whether the job was
-// installed, and therefore whether the writer needs a wakeup.
-func (o *Ouroboros) installLeiosPersistJob(
-	key string,
-	job *leiosPersistJob,
-) bool {
-	o.leiosPersistMu.Lock()
-	defer o.leiosPersistMu.Unlock()
-	// The in-flight phase ends either way: the bytes are held by the
-	// installed job from here on, or released below.
-	o.leiosPersistReserved--
-	if o.leiosPersistClosed {
-		o.leiosPersistBytes -= job.size
-		return false
-	}
-	select {
-	case <-o.leiosPersistStop:
-		// Stop was signalled while this job was being copied. Installing it
-		// now would strand it exactly as a post-stop enqueue would: the
-		// shutdown drain may already have made its final map read.
-		o.leiosPersistBytes -= job.size
-		return false
-	default:
-	}
-	if existing := o.leiosPersistPending[key]; existing != nil {
-		if existing.txsRaw != nil && job.txsRaw == nil {
-			// A complete job for this hash landed while this manifest-only
-			// one was being copied; keep the complete one, same as
-			// reserveLeiosPersistBytes would have decided had it seen it.
-			o.leiosPersistBytes -= job.size
-			return false
-		}
-		// Replacement: the incumbent's reservation leaves the queue with it,
-		// and this job keeps the reservation it arrived holding.
-		o.leiosPersistBytes -= existing.size
-	}
-	o.leiosPersistPending[key] = job
-	return true
-}
-
-// releaseLeiosPersistReservation gives back a reservation that never became an
-// installed job -- the unwind path between reserveLeiosPersistBytes and
-// installLeiosPersistJob.
-func (o *Ouroboros) releaseLeiosPersistReservation(size int) {
-	o.leiosPersistMu.Lock()
-	defer o.leiosPersistMu.Unlock()
-	o.leiosPersistReserved--
-	o.leiosPersistBytes -= size
-}
-
-// logLeiosPersistDrop reports a dropped historical-serving write, rate-limited
-// to one log line per 256 drops so sustained pressure cannot flood the log.
-// Must be called without leiosPersistMu held.
-func (o *Ouroboros) logLeiosPersistDrop(slot uint64, reason string) {
-	if n := o.leiosPersistDropped.Add(1); n%256 == 1 {
-		o.config.Logger.Warn(
-			"dropping leios EB historical-serving write",
-			"component", "network",
-			"slot", slot,
-			"reason", reason,
-			"dropped_total", n,
+	if err != nil {
+		return 0, fmt.Errorf(
+			"persist leios endorser block at slot %d: %w",
+			point.Slot,
+			err,
 		)
 	}
+	// Without an immutable point the collection bound follows the newest
+	// persisted endorser block, which only advances here. Ledger block events
+	// alone would leave records above the last bound uncollected while the
+	// chain is quiet.
+	o.signalLeiosGC(event.Event{})
+	return epoch, nil
 }
 
-// startLeiosPersistWriter initializes the writer state and launches the single
-// background writer goroutine. Runs exactly once via leiosPersistOnce, before
-// any enqueue proceeds past the Once, so the map and channels are safely
-// published to concurrent enqueuers. Callers hold leiosPersistLifecycleMu; the
-// queue state is also assigned under leiosPersistMu because the enqueue and
-// drain paths read it under that mutex.
-func (o *Ouroboros) startLeiosPersistWriter() {
+// beginLeiosPersistWrite registers a write so that Close and a pause wait for
+// it. The lifecycle lock is held only to register, never across the write, so
+// a stuck store blocks no lifecycle operation past its bounded wait.
+func (o *Ouroboros) beginLeiosPersistWrite() (uint64, bool) {
+	o.leiosPersistLifecycleMu.RLock()
+	defer o.leiosPersistLifecycleMu.RUnlock()
+	o.leiosPersistMu.Lock()
+	if o.leiosPersistClosed || o.leiosPersistHalted {
+		o.leiosPersistMu.Unlock()
+		return 0, false
+	}
+	if o.leiosPersistInflight == 0 {
+		o.leiosPersistIdle = make(chan struct{})
+	}
+	o.leiosPersistInflight++
+	epoch := o.leiosPersistEpochLocked()
+	o.leiosPersistMu.Unlock()
+	// Started here rather than at construction for an Ouroboros whose
+	// database arrives later, and again after a pause stopped it.
+	o.startLeiosPersistenceGC(0, false)
+	return epoch, true
+}
+
+func (o *Ouroboros) endLeiosPersistWrite() {
 	o.leiosPersistMu.Lock()
 	defer o.leiosPersistMu.Unlock()
-	o.leiosPersistPending = make(map[string]*leiosPersistJob)
-	// The byte and reservation counters describe the map being replaced, so
-	// they are reset with it. This matters on the
-	// PauseLeiosPersistWriterForLiveLifecycleOp restart path, where the old
-	// map's accounting would otherwise be carried onto the new one as a
-	// permanent reduction in queue capacity.
-	o.leiosPersistBytes = 0
-	o.leiosPersistReserved = 0
-	o.leiosPersistSignal = make(chan struct{}, 1)
-	o.leiosPersistStop = make(chan struct{})
-	o.leiosPersistDone = make(chan struct{})
-	o.leiosPersistStarted.Store(true)
-	go o.leiosPersistLoop(
-		o.leiosPersistStop,
-		o.leiosPersistSignal,
-		o.leiosPersistDone,
-	)
+	o.leiosPersistInflight--
+	if o.leiosPersistInflight == 0 {
+		close(o.leiosPersistIdle)
+	}
 }
 
-func (o *Ouroboros) startLeiosPersistWriterIfOpen() bool {
+// leiosPersistWritesIdle returns a channel that is closed once no write is in
+// flight, or nil when none is.
+func (o *Ouroboros) leiosPersistWritesIdle() <-chan struct{} {
 	o.leiosPersistMu.Lock()
-	closed := o.leiosPersistClosed
-	o.leiosPersistMu.Unlock()
-	if closed {
+	defer o.leiosPersistMu.Unlock()
+	if o.leiosPersistInflight == 0 {
+		return nil
+	}
+	return o.leiosPersistIdle
+}
+
+// leiosEndorserBlockDurable reports whether data's current content was
+// written to the active LeiosDB.
+func (o *Ouroboros) leiosEndorserBlockDurable(
+	data *leiosEndorserBlockData,
+) bool {
+	if data == nil || data.durableEpoch == 0 {
 		return false
 	}
-	o.leiosPersistOnce.Do(o.startLeiosPersistWriter)
-	return true
+	return data.durableEpoch == o.leiosPersistCurrentEpoch()
 }
 
-// startLeiosPersistenceGC starts the optional pruning worker independently of
-// the persistence writer. initialMaxSlot is supplied after the startup
+// leiosPersistCurrentEpoch identifies the database writes currently reach.
+// It starts at one, so the zero durableEpoch of a new entry never matches.
+func (o *Ouroboros) leiosPersistCurrentEpoch() uint64 {
+	o.leiosPersistMu.Lock()
+	defer o.leiosPersistMu.Unlock()
+	return o.leiosPersistEpochLocked()
+}
+
+func (o *Ouroboros) leiosPersistEpochLocked() uint64 {
+	return o.leiosPersistPauses + 1
+}
+
+// persistVerifiedLeiosEndorserBlock writes a slot-verified entry unless its
+// content is already durable, and records the write on the cached entry so
+// that re-offers of the same content do not rewrite it.
+func (o *Ouroboros) persistVerifiedLeiosEndorserBlock(
+	point ocommon.Point,
+	blockRaw []byte,
+	data *leiosEndorserBlockData,
+) error {
+	if data == nil || !data.slotVerified || o.leiosEndorserBlockDurable(data) {
+		return nil
+	}
+	epoch, err := o.persistLeiosEndorserBlock(point, blockRaw, data)
+	if err != nil {
+		return err
+	}
+	o.markLeiosEndorserBlockDurable(point, data, epoch)
+	return nil
+}
+
+// markLeiosEndorserBlockDurable records that the cached entry for point holds
+// content written in epoch. The entry may have been replaced since data was
+// read; it is marked only while it still holds the content that was written.
+// Readers hold cached pointers without leiosMu, so the entry is replaced with
+// a marked copy rather than changed in place.
+func (o *Ouroboros) markLeiosEndorserBlockDurable(
+	point ocommon.Point,
+	data *leiosEndorserBlockData,
+	epoch uint64,
+) {
+	if epoch == 0 {
+		return
+	}
+	key := leiosBlockKey(point.Slot, point.Hash)
+	o.leiosMu.Lock()
+	defer o.leiosMu.Unlock()
+	current := o.leiosEndorserBlocks[key]
+	if current == nil || current.durableEpoch == epoch ||
+		!current.slotVerified || !current.hasManifest() ||
+		len(current.txsRaw) != len(data.txsRaw) {
+		return
+	}
+	marked := *current
+	marked.durableEpoch = epoch
+	for _, cacheKey := range current.cacheKeys {
+		if o.leiosEndorserBlocks[cacheKey] == current {
+			o.leiosEndorserBlocks[cacheKey] = &marked
+		}
+	}
+}
+
+// startLeiosPersistenceGC starts the optional pruning worker. initialMaxSlot is supplied after the startup
 // watermark scan so enabling GC does not repeat that full scan immediately.
 func (o *Ouroboros) startLeiosPersistenceGC(
 	initialMaxSlot uint64,
@@ -641,100 +484,6 @@ func (o *Ouroboros) runLeiosPersistenceGC(
 	}
 }
 
-// leiosPersistLoop takes its channels as arguments so a later restart, which
-// replaces the fields, cannot be observed by a loop from an earlier start.
-func (o *Ouroboros) leiosPersistLoop(
-	stop <-chan struct{},
-	signal <-chan struct{},
-	done chan<- struct{},
-) {
-	defer close(done)
-	for {
-		select {
-		case <-stop:
-			// Drain remaining queued writes before exiting so a clean
-			// shutdown still persists what was already fetched.
-			o.drainLeiosPersist()
-			return
-		case <-signal:
-			o.drainLeiosPersist()
-		}
-	}
-}
-
-// drainLeiosPersist writes every currently-pending job. Order is irrelevant
-// (each EB is independent), so it pops arbitrary map entries until empty.
-func (o *Ouroboros) drainLeiosPersist() {
-	db := o.leiosDatabase()
-	for {
-		o.leiosPersistMu.Lock()
-		var key string
-		var job *leiosPersistJob
-		for k, j := range o.leiosPersistPending {
-			key, job = k, j
-			break
-		}
-		if job != nil {
-			delete(o.leiosPersistPending, key)
-			// A popped job's bytes leave the queue with it, which is what
-			// makes room for the next enqueue. Without this the budget
-			// would be a one-shot allowance for the process lifetime.
-			o.leiosPersistBytes -= job.size
-		}
-		o.leiosPersistMu.Unlock()
-		if job == nil {
-			return
-		}
-		if db == nil {
-			continue
-		}
-		o.leiosPersistStoreMu.Lock()
-		// A pinned endorser block below the frontier is still persisted: it is
-		// certified by an immutable ranking block, and replaying that block
-		// needs the closure. The store itself refuses an unpinned write below
-		// its collection watermark; the frontier check only avoids the
-		// round trip while the watermark catches up.
-		if job.slot < o.leiosPersistPruneBeforeSlot {
-			pinned, err := db.IsLeiosEBPinned(job.slot, job.hash)
-			// A failed lookup persists: an extra record is collected later,
-			// a missing certified one is not recoverable.
-			if err == nil && !pinned {
-				o.leiosPersistStoreMu.Unlock()
-				continue
-			}
-		}
-		err := db.SetLeiosEB(job.slot, job.hash, job.manifestRaw, job.txsRaw)
-		o.leiosPersistStoreMu.Unlock()
-		if errors.Is(err, leiosdb.ErrBehindImmutableTip) {
-			continue
-		}
-		if err != nil {
-			o.config.Logger.Debug(
-				"failed to persist leios EB to the leios store",
-				"component", "network",
-				"slot", job.slot,
-				"error", err,
-			)
-			continue
-		}
-		// Without an immutable point the collection bound follows the newest
-		// persisted endorser block, which only advances here. Ledger block
-		// events alone would leave records above the last bound uncollected
-		// while the chain is quiet.
-		o.signalLeiosGC(event.Event{})
-	}
-}
-
-// StopLeiosPersistWriter stops the background persistence and GC workers,
-// giving each its own bounded wait. It logs if a worker does not stop in
-// time; callers that must confirm the drain should use Close. Safe when
-// neither worker started and idempotent across multiple calls.
-func (o *Ouroboros) StopLeiosPersistWriter() {
-	o.leiosPersistLifecycleMu.Lock()
-	defer o.leiosPersistLifecycleMu.Unlock()
-	o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout)
-}
-
 func (o *Ouroboros) stopLeiosPersistenceWorkers(timeout time.Duration) bool {
 	return o.stopLeiosPersistenceWorkersWithWait(
 		timeout,
@@ -742,61 +491,39 @@ func (o *Ouroboros) stopLeiosPersistenceWorkers(timeout time.Duration) bool {
 	)
 }
 
+// stopLeiosPersistenceWorkersWithWait waits for in-flight writes and stops the
+// GC worker, giving each its own bounded wait. The caller holds
+// leiosPersistLifecycleMu exclusively, so no new write registers meanwhile.
 func (o *Ouroboros) stopLeiosPersistenceWorkersWithWait(
 	timeout time.Duration,
 	wait func(<-chan struct{}, time.Duration) bool,
 ) bool {
-	writerDone, writerStarted := o.requestLeiosPersistWriterStop()
 	gcDone, gcStarted := o.requestLeiosPersistenceGCStop()
-	writerStopped := true
-	if writerStarted {
-		writerTimeout := timeout
-		writerStopped = wait(
-			writerDone,
-			writerTimeout,
-		)
-		if !writerStopped {
-			o.logLeiosPersistWriterStopTimeout(writerTimeout)
+	writesDone := true
+	if idle := o.leiosPersistWritesIdle(); idle != nil {
+		writesDone = wait(idle, timeout)
+		if !writesDone {
+			o.config.Logger.Warn(
+				"timed out waiting for leios endorser-block writes to finish",
+				"component", "network",
+				"timeout", timeout,
+			)
 		}
 	}
 	gcStopped := true
 	if gcStarted {
-		gcTimeout := timeout
-		gcStopped = wait(gcDone, gcTimeout)
+		gcStopped = wait(gcDone, timeout)
 		if gcStopped {
 			o.leiosPersistGCStarted.Store(false)
 		} else {
 			o.config.Logger.Warn(
 				"timed out waiting for leios persistence GC to stop",
 				"component", "network",
-				"timeout", gcTimeout,
+				"timeout", timeout,
 			)
 		}
 	}
-	return writerStopped && gcStopped
-}
-
-func (o *Ouroboros) requestLeiosPersistWriterStop() (<-chan struct{}, bool) {
-	if !o.leiosPersistStarted.Load() {
-		return nil, false
-	}
-	// Always close the stop channel so the writer observes the stop and exits,
-	// even if the caller gives up waiting below.
-	o.leiosPersistStopOnce.Do(func() { close(o.leiosPersistStop) })
-	return o.leiosPersistDone, true
-}
-
-func (o *Ouroboros) logLeiosPersistWriterStopTimeout(timeout time.Duration) {
-	// The drain is stuck (likely a slow/unavailable blob store). Abandon the
-	// wait: historical-serving persistence is best-effort and the writer
-	// goroutine will still exit once the store unblocks.
-	o.config.Logger.Warn(
-		"timed out waiting for leios EB persistence writer to drain; abandoning remaining historical-serving writes",
-		"component",
-		"network",
-		"timeout",
-		timeout,
-	)
+	return writesDone && gcStopped
 }
 
 func (o *Ouroboros) requestLeiosPersistenceGCStop() (<-chan struct{}, bool) {
@@ -840,50 +567,49 @@ func waitForLeiosPersistWorker(
 	}
 }
 
-// PauseLeiosPersistWriterForLiveLifecycleOp stops the persistence writer
-// (draining whatever is already queued against the current, about-to-close
-// database) and the optional GC worker (canceling its current sweep). It
-// resets both start-once guards, so a later enqueueLeiosPersist call -- once
-// LedgerState has been reassigned to the reinitialized database after a live
-// Restore/Truncate -- lazily relaunches fresh workers against the new database.
+// PauseLeiosPersistWriterForLiveLifecycleOp waits for in-flight endorser-block
+// writes against the current, about-to-close database and stops the optional
+// GC worker (canceling its current sweep). Once LedgerState has been
+// reassigned to the reinitialized database after a live Restore/Truncate, the
+// next write goes to the new database and lazily restarts GC against it.
+// Endorser blocks cached in memory are no longer counted as durable, so they
+// are written again to the new database when next published or offered.
 //
-// Without this, the writer (once started) ran for the whole Ouroboros
-// object's lifetime, since that object is retained (not rebuilt) across a
-// live Restore/Truncate. A job already queued before quiesce began could
-// still be mid-drain when closeStorageForLiveLifecycleOp closed the
-// database out from under it, or -- worse -- could still be sitting
-// untouched in the pending map when LedgerState was reassigned, so the
-// eventual drain would silently write pre-operation data into the freshly
-// restored/truncated store.
+// The Ouroboros object is retained across a live Restore/Truncate, so a write
+// still running when closeStorageForLiveLifecycleOp closed the database would
+// fail against it, or land in the old store after the new one took over.
 //
-// Call after inbound traffic stops so subsequent enqueues cannot restart the
-// writer while storage is replaced. The lifecycle lock waits for complete
-// enqueues and excludes new reservations throughout drain and reset. If
-// connection shutdown is unconfirmed, the caller must use a supervised restart
-// rather than replacing storage while traffic may still access it.
+// Call after inbound traffic stops. The lifecycle lock excludes new writes
+// while this waits. If connection shutdown is unconfirmed, the caller must use
+// a supervised restart rather than replacing storage while traffic may still
+// access it.
 //
-// Returns ErrLeiosPersistDrainUnconfirmed, without resetting anything, if
-// either worker misses its drain deadline. The writer may still be
-// writing against the old database, or the GC may still be scanning or
-// deleting through its pinned blob store. The caller must not proceed to close
-// or replace storage in that case; it must escalate to a supervised restart,
-// the same as errStorageDrainUnconfirmed.
+// Returns ErrLeiosPersistDrainUnconfirmed, without resetting anything, if a
+// write or the GC misses its deadline: a write may still be running against
+// the old database, or the GC may still be scanning or deleting through its
+// pinned blob store. Further writes are refused. The caller must not proceed
+// to close or replace storage in that case; it must escalate to a supervised
+// restart, the same as errStorageDrainUnconfirmed.
 func (o *Ouroboros) PauseLeiosPersistWriterForLiveLifecycleOp() error {
 	o.leiosPersistLifecycleMu.Lock()
 	defer o.leiosPersistLifecycleMu.Unlock()
 
+	o.leiosPersistMu.Lock()
+	o.leiosPersistHalted = true
+	o.leiosPersistMu.Unlock()
 	if !o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout) {
 		return ErrLeiosPersistDrainUnconfirmed
 	}
 	o.leiosPersistMu.Lock()
 	closed := o.leiosPersistClosed
+	if !closed {
+		o.leiosPersistHalted = false
+		o.leiosPersistPauses++
+	}
 	o.leiosPersistMu.Unlock()
 	if closed {
 		return nil
 	}
-	o.leiosPersistOnce = sync.Once{}
-	o.leiosPersistStopOnce = sync.Once{}
-	o.leiosPersistStarted.Store(false)
 	o.leiosPersistStoreMu.Lock()
 	o.leiosPersistPruneBeforeSlot = 0
 	o.leiosPersistStoreMu.Unlock()

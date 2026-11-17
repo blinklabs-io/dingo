@@ -2319,9 +2319,9 @@ type LeiosStore interface {
 	// tx set otherwise. Note the nil contract differs from SetLeiosEBTxs:
 	// SetLeiosEBTxs(nil) writes an empty tx list under the "et" key, whereas
 	// SetLeiosEB(..., nil) omits the "et" key entirely (manifest-only), so the
-	// two must not be treated as interchangeable nil handlers. Used by the
-	// asynchronous EB-persistence writer so historical-serving storage costs
-	// one commit per endorser block off the leios-fetch hot path.
+	// two must not be treated as interchangeable nil handlers. Used by
+	// endorser-block persistence so historical-serving storage costs one
+	// commit per endorser block.
 	SetLeiosEB(
 		slot uint64,
 		hash []byte,

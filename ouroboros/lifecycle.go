@@ -121,9 +121,9 @@ func (o *Ouroboros) subscribeTracked(
 }
 
 // Close releases everything this Ouroboros owns that outlives it: EventBus
-// subscriptions, Prometheus collectors, the background Leios endorser-block
-// persistence and optional GC workers, and the ledger snapshots held by acquired
-// LocalStateQuery sessions.
+// subscriptions, Prometheus collectors, in-flight Leios endorser-block writes
+// and the optional persistence GC worker, and the ledger snapshots held by
+// acquired LocalStateQuery sessions.
 //
 // It exists because Ouroboros takes its dependencies at construction and so
 // cannot be retained across a live snapshot/restore. That operation discards
@@ -146,8 +146,8 @@ func (o *Ouroboros) close() error {
 	o.leiosPersistLifecycleMu.Lock()
 	defer o.leiosPersistLifecycleMu.Unlock()
 
-	// The lifecycle lock waits for admitted enqueues to finish before closure,
-	// then prevents lazy worker startup and queue admission permanently.
+	// Closing under the lifecycle lock refuses every later write and GC start;
+	// writes already registered are waited for below.
 	o.leiosPersistMu.Lock()
 	o.leiosPersistClosed = true
 	o.leiosPersistMu.Unlock()

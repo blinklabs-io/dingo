@@ -19,76 +19,36 @@ import (
 	"errors"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/leiosdb"
 	databaseTypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	"github.com/stretchr/testify/require"
 )
 
-// newTestOuroborosWithPausedLeiosPersistWriter builds an Ouroboros with a real
-// Leios blob store and pre-consumes leiosPersistOnce with an initializer that
-// sets up the same queue state as startLeiosPersistWriter but does NOT launch
-// the background writer goroutine.
-//
-// These tests exercise queue admission, and a running writer drains jobs --
-// releasing their byte reservations -- concurrently with the assertions, so
-// there would be no stable queue state to assert against. Tests that need the
-// drain call drainLeiosPersist directly instead.
-//
-// leiosPersistStarted is deliberately left false: nothing here consults it on
-// the enqueue path, and leaving it false keeps a stray StopLeiosPersistWriter
-// a no-op rather than a five-second wait on a leiosPersistDone that no writer
-// will ever close.
-func newTestOuroborosWithPausedLeiosPersistWriter(t *testing.T) *Ouroboros {
-	t.Helper()
-	o := newTestOuroborosWithLeiosDB(t)
-	o.leiosPersistOnce.Do(func() {
-		o.leiosPersistPending = make(map[string]*leiosPersistJob)
-		o.leiosPersistSignal = make(chan struct{}, 1)
-		o.leiosPersistStop = make(chan struct{})
-		o.leiosPersistDone = make(chan struct{})
-	})
-	return o
-}
-
-// withLowerLeiosPersistQueueBudget temporarily lowers the aggregate queue byte
-// budget so a test can exercise admission without allocating hundreds of
-// megabytes, mirroring withLowerLeiosEndorserBlockCacheBudgets.
-func withLowerLeiosPersistQueueBudget(t *testing.T, maxBytes int) {
-	t.Helper()
-	orig := leiosPersistMaxQueueBytes
-	leiosPersistMaxQueueBytes = maxBytes
-	t.Cleanup(func() { leiosPersistMaxQueueBytes = orig })
-}
-
 // leiosPersistTestEntry builds one endorser block plus a complete transaction
-// set of txCount bodies of roughly txBytes each, and returns the retained size
-// a persistence job for it holds. The size is summed here from the payload the
-// test itself built -- hash + manifest + every transaction body -- rather than
-// by calling the production leiosPersistJobSize, so an assertion against the
-// queue's accounting is checked against an independent measurement instead of
-// against the same function that produced it.
+// set of txCount bodies of roughly txBytes each.
 //
 // Each transaction body is a real CBOR byte string, not an arbitrary buffer:
-// the drain path re-encodes txsRaw through cbor.Encode, which fails on
+// the write path re-encodes txsRaw through cbor.Encode, which fails on
 // malformed members and would take the manifest write down with it.
 func leiosPersistTestEntry(
 	t *testing.T,
 	idx int,
 	txCount int,
 	txBytes int,
-) (ocommon.Point, cbor.RawMessage, *leiosEndorserBlockData, int) {
+) (ocommon.Point, cbor.RawMessage, *leiosEndorserBlockData) {
 	t.Helper()
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, idx, txCount)
-	// Recomputed here rather than read from leiosPersistJobSize, so the
-	// expectation is independent of the code under test. The hash counts
-	// twice: the queue retains it as the map key and again as job.hash.
-	size := 2*len(point.Hash) + len(blockRaw)
 	txsRaw := make([]cbor.RawMessage, 0, txCount)
 	for i := range txCount {
 		body := make([]byte, txBytes)
@@ -99,7 +59,6 @@ func leiosPersistTestEntry(
 		encoded, err := cbor.Encode(body)
 		require.NoError(t, err)
 		txsRaw = append(txsRaw, cbor.RawMessage(encoded))
-		size += len(encoded)
 	}
 	data := &leiosEndorserBlockData{
 		point:    point,
@@ -107,538 +66,217 @@ func leiosPersistTestEntry(
 		txsRaw:   txsRaw,
 		txCount:  txCount,
 	}
-	return point, blockRaw, data, size
+	return point, blockRaw, data
 }
 
-// leiosPersistQueueState reads the queue's accounting under its own mutex.
-func leiosPersistQueueState(o *Ouroboros) (entries, bytes, reserved int) {
-	o.leiosPersistMu.Lock()
-	defer o.leiosPersistMu.Unlock()
-	return len(o.leiosPersistPending), o.leiosPersistBytes,
-		o.leiosPersistReserved
+// leiosStoreHooks wraps a Leios store so a test can slow or fail the
+// newest-slot lookup the collection worker makes, or the writes the
+// persistence path makes.
+type leiosStoreHooks struct {
+	leiosdb.Store
+	maxSlot     func() (uint64, bool, error)
+	putVolatile func(leiosdb.Ref, leiosdb.Content) error
 }
 
-// Absence case for the byte budget: an endorser block that fits is admitted
-// normally, holding exactly its own size against the budget and leaving no
-// in-flight reservation behind.
-// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
-// leiosPersistMaxQueueBytes.
-func TestLeiosPersistQueueAdmitsEntryWithinByteBudget(t *testing.T) {
-	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
-	point, blockRaw, data, size := leiosPersistTestEntry(t, 40, 4, 512)
-	withLowerLeiosPersistQueueBudget(t, size)
-
-	o.enqueueLeiosPersist(point, blockRaw, data)
-
-	entries, bytes, reserved := leiosPersistQueueState(o)
-	require.Equal(t, 1, entries, "an entry within budget must be queued")
-	require.Equal(
-		t, size, bytes,
-		"the queued job must hold exactly its own size against the budget",
-	)
-	require.Zero(t, reserved, "no reservation may remain in flight")
-	require.Zero(
-		t, o.leiosPersistDropped.Load(),
-		"an entry within budget must not be counted as a drop",
-	)
-
-	job := o.leiosPersistPending[leiosBlockKey(point.Slot, point.Hash)]
-	require.NotNil(t, job)
-	require.Equal(t, []byte(blockRaw), job.manifestRaw)
-	require.Equal(t, data.txsRaw, job.txsRaw)
-}
-
-// An endorser block that does not fit the remaining aggregate budget is
-// dropped, and the already-queued entry it did not fit alongside is left
-// untouched. Before the budget existed, leiosPersistMaxPending alone would
-// have admitted both.
-// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
-// leiosPersistMaxQueueBytes.
-func TestLeiosPersistQueueRejectsEntryOverByteBudget(t *testing.T) {
-	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
-	firstPoint, firstRaw, firstData, firstSize := leiosPersistTestEntry(
-		t, 41, 4, 512,
-	)
-	secondPoint, secondRaw, secondData, _ := leiosPersistTestEntry(
-		t, 42, 4, 512,
-	)
-	// Room for exactly one of the two.
-	withLowerLeiosPersistQueueBudget(t, firstSize)
-
-	o.enqueueLeiosPersist(firstPoint, firstRaw, firstData)
-	o.enqueueLeiosPersist(secondPoint, secondRaw, secondData)
-
-	entries, bytes, reserved := leiosPersistQueueState(o)
-	require.Equal(
-		t, 1, entries,
-		"the second endorser block must be dropped, not queued past the budget",
-	)
-	require.Equal(t, firstSize, bytes)
-	require.Zero(t, reserved)
-	_, firstQueued := o.leiosPersistPending[leiosBlockKey(firstPoint.Slot, firstPoint.Hash)]
-	require.True(t, firstQueued, "the admitted entry must be left in place")
-	_, secondQueued := o.leiosPersistPending[leiosBlockKey(secondPoint.Slot, secondPoint.Hash)]
-	require.False(t, secondQueued)
-	require.Equal(t, uint64(1), o.leiosPersistDropped.Load())
-}
-
-// Concurrent oversize case: many connections offering endorser blocks that
-// each exceed the whole queue budget are all rejected, and every rejection
-// gives its reservation back -- an oversize entry that leaked its reservation
-// would permanently consume the capacity it was refused, so a few of them
-// would close the queue to legitimate writes.
-// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
-// leiosPersistMaxQueueBytes.
-func TestLeiosPersistQueueRejectsOversizeEntriesConcurrently(t *testing.T) {
-	const enqueuers = 16
-	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
-	// Every entry below is 8 txs of 1 KiB plus its manifest, so a 1 KiB
-	// budget cannot hold even one of them.
-	withLowerLeiosPersistQueueBudget(t, 1<<10)
-
-	type entry struct {
-		point    ocommon.Point
-		blockRaw cbor.RawMessage
-		data     *leiosEndorserBlockData
+func (s *leiosStoreHooks) PutVolatile(
+	eb leiosdb.Ref,
+	content leiosdb.Content,
+) error {
+	if s.putVolatile != nil {
+		if err := s.putVolatile(eb, content); err != nil {
+			return err
+		}
 	}
-	entries := make([]entry, 0, enqueuers)
-	for i := range enqueuers {
-		point, blockRaw, data, size := leiosPersistTestEntry(
-			t, 100+i, 8, 1<<10,
-		)
-		require.Greater(
-			t, size, leiosPersistMaxQueueBytes,
-			"test entry must exceed the whole queue budget",
-		)
-		entries = append(entries, entry{point, blockRaw, data})
-	}
-
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for _, e := range entries {
-		wg.Add(1)
-		go func(e entry) {
-			defer wg.Done()
-			<-start
-			o.enqueueLeiosPersist(e.point, e.blockRaw, e.data)
-		}(e)
-	}
-	close(start)
-	wg.Wait()
-
-	queued, bytes, reserved := leiosPersistQueueState(o)
-	require.Zero(t, queued, "no oversize entry may be queued")
-	require.Zero(
-		t, bytes,
-		"a rejected oversize entry must leave no bytes reserved",
-	)
-	require.Zero(t, reserved)
-	require.Equal(t, uint64(enqueuers), o.leiosPersistDropped.Load())
+	return s.Store.PutVolatile(eb, content)
 }
 
-// A rejected endorser block must not have been copied: the reservation and
-// the count cap are both decided from the caller's own slices, so a drop
-// costs no manifest copy and no transaction-body copies. With 64 transaction
-// bodies per entry, cloning would allocate at least 65 times per rejected
-// enqueue; admission-first allocates only the pending-map lookup key.
-// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
-// leiosPersistMaxQueueBytes, and testing.AllocsPerRun panics in a parallel test.
-func TestLeiosPersistQueueDoesNotCopyRejectedEntry(t *testing.T) {
-	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
-	point, blockRaw, data, _ := leiosPersistTestEntry(t, 60, 64, 256)
-	// Budget of zero rejects every entry, including this one, at the
-	// oversize check -- the earliest possible admission decision.
-	withLowerLeiosPersistQueueBudget(t, 0)
-
-	allocs := testing.AllocsPerRun(64, func() {
-		o.enqueueLeiosPersist(point, blockRaw, data)
-	})
-
-	queued, bytes, reserved := leiosPersistQueueState(o)
-	require.Zero(t, queued)
-	require.Zero(t, bytes)
-	require.Zero(t, reserved)
-	require.Less(
-		t, allocs, 8.0,
-		"a rejected endorser block must not be cloned before admission "+
-			"(got %v allocations per rejected enqueue)", allocs,
-	)
-}
-
-// Pop path: a drained job's reservation leaves the queue with it, so the
-// budget is a steady-state limit rather than a one-shot allowance. Without
-// the release on pop, the queue would refuse every write for the rest of the
-// process lifetime once the budget had been reached even once.
-// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
-// leiosPersistMaxQueueBytes.
-func TestLeiosPersistQueueReleasesReservationOnPop(t *testing.T) {
-	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
-	firstPoint, firstRaw, firstData, firstSize := leiosPersistTestEntry(
-		t, 43, 4, 512,
-	)
-	secondPoint, secondRaw, secondData, secondSize := leiosPersistTestEntry(
-		t, 44, 4, 512,
-	)
-	withLowerLeiosPersistQueueBudget(t, firstSize)
-
-	o.enqueueLeiosPersist(firstPoint, firstRaw, firstData)
-	o.enqueueLeiosPersist(secondPoint, secondRaw, secondData)
-	queued, _, _ := leiosPersistQueueState(o)
-	require.Equal(t, 1, queued, "the second entry must not fit yet")
-
-	o.drainLeiosPersist()
-
-	queued, bytes, reserved := leiosPersistQueueState(o)
-	require.Zero(t, queued)
-	require.Zero(t, bytes, "a popped job must release its reservation")
-	require.Zero(t, reserved)
-
-	// The same endorser block that did not fit a moment ago now does.
-	o.enqueueLeiosPersist(secondPoint, secondRaw, secondData)
-	queued, bytes, reserved = leiosPersistQueueState(o)
-	require.Equal(
-		t, 1, queued,
-		"capacity freed by the drain must be reusable",
-	)
-	require.Equal(t, secondSize, bytes)
-	require.Zero(t, reserved)
-
-	db := o.leiosDatabase()
-	require.NotNil(t, db)
-	manifest, err := db.GetLeiosEBManifest(firstPoint.Hash, firstPoint.Slot)
-	require.NoError(t, err)
-	require.Equal(t, []byte(firstRaw), manifest)
-}
-
-// Replace path: a complete job superseding a queued manifest-only job for the
-// same endorser block takes over the queue slot and releases the incumbent's
-// reservation, so the queue holds one reservation for one entry rather than
-// accumulating both.
-// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
-// leiosPersistMaxQueueBytes.
-func TestLeiosPersistQueueReleasesReservationOnReplace(t *testing.T) {
-	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
-	point, blockRaw, data, completeSize := leiosPersistTestEntry(
-		t, 45, 4, 512,
-	)
-	// Hash counted twice, as in leiosPersistTestEntry.
-	manifestSize := 2*len(point.Hash) + len(blockRaw)
-	withLowerLeiosPersistQueueBudget(t, manifestSize+completeSize)
-
-	// The backfiller's manifest-only store, then the complete one.
-	o.enqueueLeiosPersist(point, blockRaw, nil)
-	queued, bytes, reserved := leiosPersistQueueState(o)
-	require.Equal(t, 1, queued)
-	require.Equal(t, manifestSize, bytes)
-	require.Zero(t, reserved)
-
-	o.enqueueLeiosPersist(point, blockRaw, data)
-
-	queued, bytes, reserved = leiosPersistQueueState(o)
-	require.Equal(t, 1, queued, "the two stores must coalesce to one job")
-	require.Equal(
-		t, completeSize, bytes,
-		"the superseded manifest-only job must release its reservation",
-	)
-	require.Zero(t, reserved)
-	job := o.leiosPersistPending[leiosBlockKey(point.Slot, point.Hash)]
-	require.NotNil(t, job)
-	require.Equal(t, data.txsRaw, job.txsRaw, "the complete job must win")
-	require.Zero(t, o.leiosPersistDropped.Load())
-
-	o.drainLeiosPersist()
-	_, bytes, reserved = leiosPersistQueueState(o)
-	require.Zero(t, bytes)
-	require.Zero(t, reserved)
-}
-
-// The reverse ordering -- a manifest-only store arriving behind an already
-// queued complete job -- is refused before it reserves anything, so it
-// neither displaces the complete job nor charges the budget.
-// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
-// leiosPersistMaxQueueBytes.
-func TestLeiosPersistQueueManifestBehindCompleteReservesNothing(t *testing.T) {
-	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
-	point, blockRaw, data, completeSize := leiosPersistTestEntry(
-		t, 46, 4, 512,
-	)
-	withLowerLeiosPersistQueueBudget(t, completeSize)
-
-	o.enqueueLeiosPersist(point, blockRaw, data)
-	o.enqueueLeiosPersist(point, blockRaw, nil)
-
-	queued, bytes, reserved := leiosPersistQueueState(o)
-	require.Equal(t, 1, queued)
-	require.Equal(t, completeSize, bytes)
-	require.Zero(t, reserved)
-	job := o.leiosPersistPending[leiosBlockKey(point.Slot, point.Hash)]
-	require.NotNil(t, job)
-	require.Equal(
-		t, data.txsRaw, job.txsRaw,
-		"a manifest-only store must not displace a complete job",
-	)
-	require.Zero(
-		t, o.leiosPersistDropped.Load(),
-		"routine coalescing is not a capacity drop",
-	)
-}
-
-// Shutdown path: a reservation taken just before the writer was told to stop
-// is released rather than installed. Installing it would strand the job (the
-// shutdown drain may already have made its final map read) and leaking the
-// reservation would leave the restarted queue short of capacity.
-//
-// reserveLeiosPersistBytes and installLeiosPersistJob are called directly, in
-// the order enqueueLeiosPersist calls them, because the stop signal has to
-// land in the window between them -- the window in which enqueueLeiosPersist
-// is copying the payload -- and that window cannot be hit deterministically
-// from outside.
-// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
-// leiosPersistMaxQueueBytes.
-func TestLeiosPersistQueueReleasesReservationWhenStopRacesInstall(
+// hookLeiosStore installs hooks over db's Leios store for the rest of the
+// test and returns the store underneath them.
+func hookLeiosStore(
 	t *testing.T,
-) {
-	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
-	point, blockRaw, data, size := leiosPersistTestEntry(t, 47, 4, 512)
-	withLowerLeiosPersistQueueBudget(t, size)
-
-	key := leiosBlockKey(point.Slot, point.Hash)
-	admitted, dropReason := o.reserveLeiosPersistBytes(key, size, true)
-	require.True(t, admitted)
-	require.Empty(t, dropReason)
-	_, bytes, reserved := leiosPersistQueueState(o)
-	require.Equal(t, size, bytes)
-	require.Equal(t, 1, reserved)
-
-	// Stop arrives while the payload would still be being copied.
-	close(o.leiosPersistStop)
-
-	installed := o.installLeiosPersistJob(key, &leiosPersistJob{
-		slot:        point.Slot,
-		hash:        point.Hash,
-		manifestRaw: blockRaw,
-		txsRaw:      data.txsRaw,
-		size:        size,
-	})
-	require.False(t, installed, "a job must not be installed after stop")
-
-	queued, bytes, reserved := leiosPersistQueueState(o)
-	require.Zero(t, queued)
-	require.Zero(
-		t, bytes,
-		"a job dropped at stop must release its reservation",
-	)
-	require.Zero(t, reserved)
+	db *database.Database,
+	hooks *leiosStoreHooks,
+) leiosdb.Store {
+	t.Helper()
+	base, err := db.LeiosDB()
+	require.NoError(t, err)
+	hooks.Store = base
+	db.SetLeiosDB(hooks)
+	t.Cleanup(func() { db.SetLeiosDB(base) })
+	return base
 }
 
-// A live Restore/Truncate rebuilds the pending map, and the accounting is
-// reset with it. Carrying the old map's byte total onto the new one would be a
-// permanent reduction in queue capacity after every live lifecycle operation.
-// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
-// leiosPersistMaxQueueBytes.
-func TestLeiosPersistWriterRestartResetsQueueAccounting(t *testing.T) {
+// blockLeiosStoreWrites makes every write to db's Leios store wait until
+// release is called. entered receives once per write that reached the store.
+func blockLeiosStoreWrites(
+	t *testing.T,
+	db *database.Database,
+) (entered <-chan struct{}, release func()) {
+	t.Helper()
+	enteredCh := make(chan struct{}, 16)
+	gate := make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	hookLeiosStore(t, db, &leiosStoreHooks{
+		putVolatile: func(leiosdb.Ref, leiosdb.Content) error {
+			enteredCh <- struct{}{}
+			<-gate
+			return nil
+		},
+	})
+	return enteredCh, release
+}
+
+// leiosFetchPeer serves one endorser block's manifest and transactions the way
+// the reference node encodes them.
+type leiosFetchPeer struct {
+	*haskellBlockTxsPeer
+	manifestRaw []byte
+}
+
+func (p *leiosFetchPeer) BlockRequest(
+	context.Context,
+	ocommon.Point,
+) (protocol.Message, error) {
+	return &leiosfetch.MsgBlock{BlockRaw: p.manifestRaw}, nil
+}
+
+// newLeiosFetchTestPeer returns an Ouroboros backed by a real LeiosDB, a peer
+// serving a txCount-transaction endorser block at slot, and that block's
+// point, with its election already observed.
+func newLeiosFetchTestPeer(
+	t *testing.T,
+	slot uint64,
+	txCount int,
+) (*Ouroboros, *leiosFetchPeer, ocommon.Point) {
+	t.Helper()
 	o := newTestOuroborosWithLeiosDB(t)
-	point, blockRaw, data, size := leiosPersistTestEntry(t, 48, 4, 512)
-	withLowerLeiosPersistQueueBudget(t, size)
-
-	o.enqueueLeiosPersist(point, blockRaw, data)
-	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
-
-	// The pause drained the job, so its reservation is already gone; the
-	// restart must not carry any residue either way.
-	nextPoint, nextRaw, nextData, nextSize := leiosPersistTestEntry(
-		t, 49, 4, 512,
+	o.leiosAnnouncementLedger = &fakeLeiosAnnouncementLedger{
+		slotTime: time.Now(),
+	}
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	txs := make([]cbor.RawMessage, txCount)
+	for i := range txCount {
+		txs[i] = testDijkstraTx(t, byte(i))
+	}
+	manifestRaw := haskellEncodeLeiosEb(txs)
+	point := ocommon.NewPoint(
+		slot,
+		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
 	)
-	o.enqueueLeiosPersist(nextPoint, nextRaw, nextData)
-	o.StopLeiosPersistWriter()
+	announceLeiosElectionForTest(t, o, point, uint64(len(manifestRaw)))
+	return o, &leiosFetchPeer{
+		haskellBlockTxsPeer: &haskellBlockTxsPeer{txs: txs},
+		manifestRaw:         manifestRaw,
+	}, point
+}
 
-	_, bytes, reserved := leiosPersistQueueState(o)
-	require.Zero(t, bytes)
-	require.Zero(t, reserved)
-	require.Zero(
-		t, o.leiosPersistDropped.Load(),
-		"the restarted queue must have full capacity, not %d bytes of it",
-		nextSize,
-	)
+// A fetch that reports success has written the endorser block to the LeiosDB:
+// nothing that relies on that success may find the record missing.
+func TestFetchLeiosTxOfferPersistsBeforeReportingSuccess(t *testing.T) {
+	t.Parallel()
+	o, peer, point := newLeiosFetchTestPeer(t, 700, 3)
+
+	require.True(t, o.fetchLeiosTxOffer(
+		context.Background(), peer, "peer", point,
+	))
 
 	db := o.leiosDatabase()
-	require.NotNil(t, db)
-	manifest, err := db.GetLeiosEBManifest(nextPoint.Hash, nextPoint.Slot)
-	require.NoError(t, err)
-	require.Equal(t, []byte(nextRaw), manifest)
+	manifest, err := db.GetLeiosEBManifest(point.Hash, point.Slot)
+	require.NoError(
+		t,
+		err,
+		"fetch reported success before the manifest was durable",
+	)
+	require.Equal(t, peer.manifestRaw, manifest)
+	txs, err := db.GetLeiosEBTxs(point.Hash, point.Slot)
+	require.NoError(
+		t,
+		err,
+		"fetch reported success before the transactions were durable",
+	)
+	require.Equal(t, peer.txs, txs)
 }
 
-func TestLeiosPersistPauseWaitsForReservedEnqueue(t *testing.T) {
+// A failed write fails the fetch and keeps the block out of the relay. The
+// transactions stay cached, so the next offer has nothing to fetch; it must
+// still retry the write rather than report the block as held.
+func TestFetchLeiosTxOfferFailsOnPersistErrorAndRetryWrites(t *testing.T) {
 	t.Parallel()
-	o := newTestOuroborosWithLeiosDB(t)
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	unblock := func() { releaseOnce.Do(func() { close(release) }) }
-	defer unblock()
-	o.leiosPersistAfterReserve = func() {
-		close(entered)
-		<-release
-	}
-	point, raw, data, _ := leiosPersistTestEntry(t, 71, 4, 512)
-	enqueued := make(chan struct{})
-	go func() {
-		o.enqueueLeiosPersist(point, raw, data)
-		close(enqueued)
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("enqueue did not reserve")
-	}
-	locked := o.leiosPersistLifecycleMu.TryLock()
-	if locked {
-		o.leiosPersistLifecycleMu.Unlock()
-	}
-	require.False(t, locked, "a reserved enqueue must prevent lifecycle reset")
-	paused := make(chan error, 1)
-	go func() { paused <- o.PauseLeiosPersistWriterForLiveLifecycleOp() }()
-	unblock()
-	select {
-	case <-enqueued:
-	case <-time.After(5 * time.Second):
-		t.Fatal("enqueue did not finish")
-	}
-	select {
-	case err := <-paused:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("pause did not finish")
-	}
-	queued, bytes, reserved := leiosPersistQueueState(o)
-	require.Zero(t, queued)
-	require.Zero(t, bytes)
-	require.Zero(t, reserved)
-	manifest, err := o.leiosDatabase().
-		GetLeiosEBManifest(point.Hash, point.Slot)
-	require.NoError(t, err)
-	require.Equal(t, []byte(raw), manifest)
-	o.leiosPersistAfterReserve = nil
-	nextPoint, nextRaw, nextData, _ := leiosPersistTestEntry(t, 72, 4, 512)
-	o.enqueueLeiosPersist(nextPoint, nextRaw, nextData)
-	o.StopLeiosPersistWriter()
-	manifest, err = o.leiosDatabase().
-		GetLeiosEBManifest(nextPoint.Hash, nextPoint.Slot)
-	require.NoError(t, err)
-	require.Equal(t, []byte(nextRaw), manifest)
-}
-
-// A panic between the reservation and the payload copy (the allocation-failure
-// window) must give the reservation back. A leaked one is permanent queue
-// capacity lost to nothing.
-func TestLeiosPersistEnqueueUnwindReleasesReservation(t *testing.T) {
-	t.Parallel()
-
-	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
-	point, blockRaw, data, size := leiosPersistTestEntry(t, 70, 4, 512)
-	o.leiosPersistAfterReserve = func() {
-		_, bytes, reserved := leiosPersistQueueState(o)
-		require.Equal(t, size, bytes, "reservation must precede the copy")
-		require.Equal(t, 1, reserved)
-		panic("simulated allocation failure")
-	}
-
-	require.Panics(t, func() {
-		o.enqueueLeiosPersist(point, blockRaw, data)
+	o, peer, point := newLeiosFetchTestPeer(t, 701, 3)
+	db := o.leiosDatabase()
+	var failTxWrites atomic.Bool
+	failTxWrites.Store(true)
+	var txWrites atomic.Int32
+	hookLeiosStore(t, db, &leiosStoreHooks{
+		putVolatile: func(_ leiosdb.Ref, content leiosdb.Content) error {
+			if len(content.Txs) == 0 {
+				return nil
+			}
+			txWrites.Add(1)
+			if failTxWrites.Load() {
+				return errors.New("store unavailable")
+			}
+			return nil
+		},
 	})
 
-	queued, bytes, reserved := leiosPersistQueueState(o)
-	require.Zero(t, queued)
-	require.Zero(t, bytes, "an unwound enqueue must release its bytes")
-	require.Zero(t, reserved, "an unwound enqueue must release its slot")
+	require.False(t, o.fetchLeiosTxOffer(
+		context.Background(), peer, "peer", point,
+	), "a fetch whose write failed must not report success")
+	_, err := db.GetLeiosEBTxs(point.Hash, point.Slot)
+	require.ErrorIs(t, err, databaseTypes.ErrBlobKeyNotFound)
+	relayOffer, _ := o.leiosEBLog.next("relay")
+	require.Nil(
+		t,
+		relayOffer,
+		"a block that is not durable must not be offered",
+	)
+
+	failTxWrites.Store(false)
+	requests := peer.requests
+	require.True(t, o.fetchLeiosTxOffer(
+		context.Background(), peer, "peer", point,
+	))
+	require.Equal(t, requests, peer.requests,
+		"the retry must reuse the cached transactions")
+	require.Equal(t, int32(2), txWrites.Load(), "the retry must write again")
+	txs, err := db.GetLeiosEBTxs(point.Hash, point.Slot)
+	require.NoError(t, err)
+	require.Equal(t, peer.txs, txs)
 }
 
-// A complete job that lands while a manifest-only job for the same hash is
-// being copied wins, and the manifest-only job's reservation is released
-// exactly once rather than replacing or double-charging the complete one.
-func TestLeiosPersistManifestOnlyLosesRaceToCompleteJob(t *testing.T) {
+// Every connection re-offers a block it has; once its content is durable those
+// offers must not each rewrite it.
+func TestFetchLeiosTxOfferDoesNotRewriteDurableBlock(t *testing.T) {
 	t.Parallel()
-
-	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
-	point, blockRaw, data, completeSize := leiosPersistTestEntry(
-		t, 71, 4, 512,
-	)
-	manifestSize := leiosPersistJobSize(point.Hash, blockRaw, nil)
-	key := leiosBlockKey(point.Slot, point.Hash)
-
-	admitted, _ := o.reserveLeiosPersistBytes(key, manifestSize, false)
-	require.True(t, admitted)
-
-	// The complete job is admitted and installed inside that window.
-	o.enqueueLeiosPersist(point, blockRaw, data)
-	queued, bytes, reserved := leiosPersistQueueState(o)
-	require.Equal(t, 1, queued)
-	require.Equal(t, completeSize+manifestSize, bytes)
-	require.Equal(t, 1, reserved)
-
-	installed := o.installLeiosPersistJob(key, &leiosPersistJob{
-		slot:        point.Slot,
-		hash:        point.Hash,
-		manifestRaw: blockRaw,
-		size:        manifestSize,
+	o, peer, point := newLeiosFetchTestPeer(t, 702, 2)
+	var writes atomic.Int32
+	hookLeiosStore(t, o.leiosDatabase(), &leiosStoreHooks{
+		putVolatile: func(leiosdb.Ref, leiosdb.Content) error {
+			writes.Add(1)
+			return nil
+		},
 	})
-	require.False(t, installed)
 
-	queued, bytes, reserved = leiosPersistQueueState(o)
-	require.Equal(t, 1, queued)
-	require.Equal(t, completeSize, bytes)
-	require.Zero(t, reserved)
-	require.NotNil(t, o.leiosPersistPending[key].txsRaw)
-}
-
-// Concurrent admission of distinct entries against a budget that holds exactly
-// K of them admits exactly K, whatever the interleaving, and a drain returns
-// the queue to zero.
-// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
-// leiosPersistMaxQueueBytes.
-func TestLeiosPersistQueueConcurrentAdmissionHonorsByteBudget(t *testing.T) {
-	const (
-		enqueuers = 24
-		fits      = 5
-	)
-	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
-	_, _, _, size := leiosPersistTestEntry(t, 200, 4, 512)
-	withLowerLeiosPersistQueueBudget(t, fits*size)
-
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := range enqueuers {
-		point, blockRaw, data, s := leiosPersistTestEntry(t, 200+i, 4, 512)
-		require.Equal(t, size, s, "entries must be equal-sized")
-		wg.Go(func() {
-			<-start
-			o.enqueueLeiosPersist(point, blockRaw, data)
-		})
+	require.True(t, o.fetchLeiosTxOffer(
+		context.Background(), peer, "peer", point,
+	))
+	written := writes.Load()
+	require.NotZero(t, written)
+	for range 3 {
+		require.True(t, o.fetchLeiosTxOffer(
+			context.Background(), peer, "other", point,
+		))
+		require.NoError(t, o.storeLeiosEndorserBlock(
+			point, peer.manifestRaw, nil, leiosStorePeerOffered,
+		))
 	}
-	close(start)
-	wg.Wait()
-
-	queued, bytes, reserved := leiosPersistQueueState(o)
-	require.Equal(t, fits, queued)
-	require.Equal(t, fits*size, bytes)
-	require.Zero(t, reserved)
-	require.Equal(t, uint64(enqueuers-fits), o.leiosPersistDropped.Load())
-
-	o.drainLeiosPersist()
-	queued, bytes, reserved = leiosPersistQueueState(o)
-	require.Zero(t, queued)
-	require.Zero(t, bytes)
-	require.Zero(t, reserved)
+	require.Equal(t, written, writes.Load())
 }
 
-// TestLeiosPersistAsyncCoalescesManifestThenComplete mirrors the backfiller's
-// two-call pattern for one endorser block — a manifest-only store followed by a
-// complete (manifest + txs) store — and verifies that after the async writer
-// drains, the blob store holds the COMPLETE endorser block (manifest + all
-// txs), i.e. the later complete write is not lost and the redundant manifest
-// write is harmless. This exercises the asynchronous persistence path and the
-// merged single-commit SetLeiosEB writer.
-func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
+func TestLeiosPersistManifestThenCompleteWritesTransactions(t *testing.T) {
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
@@ -648,41 +286,415 @@ func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
 	}
 
 	o := newTestOuroborosWithLeiosDB(t)
-
-	// First the manifest only (no txs yet), as the backfiller's manifest fetch
-	// does; then the complete block once its txs are fetched.
-	require.NoError(
-		t,
-		o.storeLeiosEndorserBlock(
-			point,
-			blockRaw,
-			nil,
-			leiosStoreAuthoritative,
-		),
-	)
-	require.NoError(
-		t,
-		o.storeLeiosEndorserBlock(
-			point,
-			blockRaw,
-			txsRaw,
-			leiosStoreAuthoritative,
-		),
-	)
-
-	// Drain the async writer so all queued persistence has committed.
-	o.StopLeiosPersistWriter()
-
 	db := o.leiosDatabase()
 	require.NotNil(t, db)
 
+	// First the manifest only (no txs yet), as the backfiller's manifest fetch
+	// does; then the complete block once its txs are fetched.
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		nil,
+		leiosStoreAuthoritative,
+	))
 	manifest, err := db.GetLeiosEBManifest(point.Hash, point.Slot)
 	require.NoError(t, err)
 	require.Equal(t, []byte(blockRaw), manifest)
 
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		txsRaw,
+		leiosStoreAuthoritative,
+	))
 	gotTxs, err := db.GetLeiosEBTxs(point.Hash, point.Slot)
 	require.NoError(t, err)
 	require.Equal(t, txsRaw, gotTxs)
+}
+
+// The bounded wait in Close covers a write the store never finishes, and Close
+// says so instead of reporting a clean shutdown.
+// Not t.Parallel: swaps the package-level leiosPersistShutdownDrainTimeout.
+func TestCloseReportsUnconfirmedLeiosPersistWrite(t *testing.T) {
+	origTimeout := leiosPersistShutdownDrainTimeout
+	leiosPersistShutdownDrainTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { leiosPersistShutdownDrainTimeout = origTimeout })
+
+	o := newTestOuroborosWithLeiosDB(t)
+	entered, release := blockLeiosStoreWrites(t, o.leiosDatabase())
+	point, raw, data := leiosPersistTestEntry(t, 50, 1, 4)
+	written := make(chan error, 1)
+	go func() {
+		_, err := o.persistLeiosEndorserBlock(point, raw, data)
+		written <- err
+	}()
+	testutil.RequireReceive(t, entered, 5*time.Second, "write did not start")
+
+	require.ErrorIs(t, o.Close(), ErrLeiosPersistDrainUnconfirmed)
+	release()
+	require.NoError(t, testutil.RequireReceive(
+		t, written, 5*time.Second, "write did not finish",
+	))
+	require.NoError(t, o.Close())
+}
+
+func TestClosePreventsLeiosPersistence(t *testing.T) {
+	t.Parallel()
+
+	t.Run("close before first write", func(t *testing.T) {
+		o := newTestOuroborosWithLeiosDB(t)
+		o.config.LeiosPersistenceRetentionSlots = 100
+		require.NoError(t, o.Close())
+
+		point, blockRaw, data := leiosPersistTestEntry(t, 0, 1, 4)
+		_, err := o.persistLeiosEndorserBlock(point, blockRaw, data)
+		require.ErrorIs(t, err, errLeiosPersistStopped)
+
+		require.False(t, o.leiosPersistGCStarted.Load())
+		_, err = o.leiosDatabase().GetLeiosEBManifest(point.Hash, point.Slot)
+		require.ErrorIs(t, err, databaseTypes.ErrBlobKeyNotFound)
+	})
+
+	t.Run("write in flight before close", func(t *testing.T) {
+		o := newTestOuroborosWithLeiosDB(t)
+		db := o.leiosDatabase()
+		entered, release := blockLeiosStoreWrites(t, db)
+		point, blockRaw, data := leiosPersistTestEntry(t, 1, 1, 4)
+		written := make(chan error, 1)
+		go func() {
+			_, err := o.persistLeiosEndorserBlock(point, blockRaw, data)
+			written <- err
+		}()
+		testutil.RequireReceive(
+			t,
+			entered,
+			5*time.Second,
+			"write did not start",
+		)
+
+		closeDone := make(chan error, 1)
+		go func() { closeDone <- o.Close() }()
+		testutil.RequireNoReceive(
+			t, closeDone, 50*time.Millisecond,
+			"Close returned while a write was in flight",
+		)
+		release()
+		require.NoError(t, testutil.RequireReceive(
+			t, closeDone, 5*time.Second, "Close did not finish",
+		))
+		require.NoError(t, testutil.RequireReceive(
+			t, written, 5*time.Second, "write did not finish",
+		))
+		got, err := db.GetLeiosEBManifest(point.Hash, point.Slot)
+		require.NoError(t, err)
+		require.Equal(t, []byte(blockRaw), got)
+	})
+}
+
+// Each wait receives the full shutdown budget independently.
+func TestLeiosPersistenceWorkersEachGetFullDrainBudget(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	_, ok := o.beginLeiosPersistWrite()
+	require.True(t, ok)
+	defer o.endLeiosPersistWrite()
+	o.leiosPersistGCMu.Lock()
+	o.leiosPersistGCStop = make(chan struct{})
+	o.leiosPersistGCDone = make(chan struct{})
+	o.leiosPersistGCMu.Unlock()
+	o.leiosPersistGCStarted.Store(true)
+
+	const budget = 400 * time.Millisecond
+	waits := make([]time.Duration, 0, 2)
+	wait := func(_ <-chan struct{}, timeout time.Duration) bool {
+		waits = append(waits, timeout)
+		return true
+	}
+
+	require.True(t, o.stopLeiosPersistenceWorkersWithWait(budget, wait))
+	require.Equal(t, []time.Duration{budget, budget}, waits)
+}
+
+func TestLeiosPersistPauseWaitsForInFlightWrite(t *testing.T) {
+	t.Parallel()
+	o := newTestOuroborosWithLeiosDB(t)
+	db := o.leiosDatabase()
+	entered, release := blockLeiosStoreWrites(t, db)
+	point, raw, data := leiosPersistTestEntry(t, 71, 4, 512)
+	written := make(chan error, 1)
+	go func() {
+		_, err := o.persistLeiosEndorserBlock(point, raw, data)
+		written <- err
+	}()
+	testutil.RequireReceive(t, entered, 5*time.Second, "write did not start")
+
+	paused := make(chan error, 1)
+	go func() { paused <- o.PauseLeiosPersistWriterForLiveLifecycleOp() }()
+	testutil.RequireNoReceive(
+		t, paused, 50*time.Millisecond,
+		"pause returned while a write was in flight",
+	)
+	release()
+	require.NoError(t, testutil.RequireReceive(
+		t, written, 5*time.Second, "write did not finish",
+	))
+	require.NoError(t, testutil.RequireReceive(
+		t, paused, 5*time.Second, "pause did not finish",
+	))
+	manifest, err := db.GetLeiosEBManifest(point.Hash, point.Slot)
+	require.NoError(t, err)
+	require.Equal(t, []byte(raw), manifest)
+
+	nextPoint, nextRaw, nextData := leiosPersistTestEntry(t, 72, 4, 512)
+	_, err = o.persistLeiosEndorserBlock(nextPoint, nextRaw, nextData)
+	require.NoError(t, err)
+	manifest, err = db.GetLeiosEBManifest(nextPoint.Hash, nextPoint.Slot)
+	require.NoError(t, err)
+	require.Equal(t, []byte(nextRaw), manifest)
+}
+
+// A live Restore/Truncate pauses persistence, replaces the database and
+// resumes. Writes made before the pause land in the old database, writes after
+// it in the new one, and a block cached as durable before the pause is not
+// durable in the new database.
+func TestLeiosPersistPauseForLiveLifecycleOpRestartsOnNewDB(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	oldDB := o.leiosDatabase()
+	require.NotNil(t, oldDB)
+
+	point1, blockRaw1 := testLeiosEndorserBlockRawWithRefs(t, 20, 1)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point1, blockRaw1, nil, leiosStoreAuthoritative,
+	))
+	manifest1, err := oldDB.GetLeiosEBManifest(point1.Hash, point1.Slot)
+	require.NoError(t, err)
+	require.Equal(t, []byte(blockRaw1), manifest1)
+	cached, ok := o.lookupLeiosEndorserBlock(point1.Slot, point1.Hash)
+	require.True(t, ok)
+	require.True(t, o.leiosEndorserBlockDurable(cached))
+
+	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
+
+	// Reassign LedgerState to a freshly built database, the way
+	// node_lifecycle.go's reinit does.
+	replacement := newTestOuroborosWithLeiosDB(t)
+	newDB := replacement.leiosDatabase()
+	require.NotNil(t, newDB)
+	o.ledgerState = replacement.ledgerState
+
+	require.False(t, o.leiosEndorserBlockDurable(cached))
+	require.NoError(t, o.ensureLeiosEndorserBlockDurable(cached))
+	_, err = newDB.GetLeiosEBManifest(point1.Hash, point1.Slot)
+	require.NoError(
+		t,
+		err,
+		"a cached block must be rewritten to the new database",
+	)
+
+	point2, blockRaw2 := testLeiosEndorserBlockRawWithRefs(t, 21, 1)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point2, blockRaw2, nil, leiosStoreAuthoritative,
+	))
+	manifest2, err := newDB.GetLeiosEBManifest(point2.Hash, point2.Slot)
+	require.NoError(t, err)
+	require.Equal(t, []byte(blockRaw2), manifest2)
+	_, err = oldDB.GetLeiosEBManifest(point2.Hash, point2.Slot)
+	require.Error(t, err)
+}
+
+// A pause that cannot confirm an in-flight write must leave persistence
+// stopped: the caller escalates to a supervised restart, and a write accepted
+// meanwhile could land in a store that is about to be closed or replaced.
+// Not t.Parallel: swaps the package-level leiosPersistShutdownDrainTimeout.
+func TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain(
+	t *testing.T,
+) {
+	origTimeout := leiosPersistShutdownDrainTimeout
+	leiosPersistShutdownDrainTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { leiosPersistShutdownDrainTimeout = origTimeout })
+
+	o := newTestOuroborosWithLeiosDB(t)
+	db := o.leiosDatabase()
+	entered, release := blockLeiosStoreWrites(t, db)
+	point, raw, data := leiosPersistTestEntry(t, 30, 1, 4)
+	written := make(chan error, 1)
+	go func() {
+		_, err := o.persistLeiosEndorserBlock(point, raw, data)
+		written <- err
+	}()
+	testutil.RequireReceive(t, entered, 5*time.Second, "write did not start")
+
+	require.ErrorIs(
+		t,
+		o.PauseLeiosPersistWriterForLiveLifecycleOp(),
+		ErrLeiosPersistDrainUnconfirmed,
+	)
+	next, nextRaw, nextData := leiosPersistTestEntry(t, 31, 1, 4)
+	_, err := o.persistLeiosEndorserBlock(next, nextRaw, nextData)
+	require.ErrorIs(t, err, errLeiosPersistStopped)
+
+	release()
+	require.NoError(t, testutil.RequireReceive(
+		t, written, 5*time.Second, "write did not finish",
+	))
+	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
+	_, err = o.persistLeiosEndorserBlock(next, nextRaw, nextData)
+	require.NoError(t, err, "a confirmed pause must resume persistence")
+}
+
+func TestLeiosPersistPauseAfterConcurrentWrites(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	const writers = 4
+	const perWriter = 25
+
+	type entry struct {
+		point ocommon.Point
+		raw   cbor.RawMessage
+	}
+	entries := make([][]entry, writers)
+	for w := range writers {
+		for i := range perWriter {
+			point, raw := testLeiosEndorserBlockRawWithRefs(
+				t, 100+w*perWriter+i, 1,
+			)
+			entries[w] = append(entries[w], entry{point, raw})
+		}
+	}
+
+	errs := make(chan error, writers*perWriter)
+	var wg sync.WaitGroup
+	for w := range writers {
+		wg.Go(func() {
+			for _, en := range entries[w] {
+				_, err := o.persistLeiosEndorserBlock(en.point, en.raw, nil)
+				errs <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
+	require.Nil(t, o.leiosPersistWritesIdle())
+	db := o.leiosDatabase()
+	for _, writerEntries := range entries {
+		for _, en := range writerEntries {
+			_, err := db.GetLeiosEBManifest(en.point.Hash, en.point.Slot)
+			require.NoError(t, err)
+		}
+	}
+}
+
+func TestLeiosPersistenceWriterRunsDuringSlowGCScan(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+
+	oldPoint, oldRaw := testLeiosEndorserBlockRawWithRefs(t, 30, 1)
+	require.NoError(t, db.SetLeiosEB(oldPoint.Slot, oldPoint.Hash, oldRaw, nil))
+
+	releaseScan := make(chan struct{})
+	var releaseScanOnce sync.Once
+	release := func() { releaseScanOnce.Do(func() { close(releaseScan) }) }
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	var base leiosdb.Store
+	base = hookLeiosStore(t, db, &leiosStoreHooks{
+		maxSlot: func() (uint64, bool, error) {
+			startedOnce.Do(func() { close(started) })
+			<-releaseScan
+			return base.MaxSlot()
+		},
+	})
+	t.Cleanup(func() {
+		release()
+		require.NoError(t, o.Close())
+	})
+
+	o.startLeiosPersistenceGC(0, false)
+	testutil.RequireReceive(
+		t, started, time.Second, "GC did not begin its max-slot scan",
+	)
+
+	point, blockRaw, data := leiosPersistTestEntry(t, 40, 1, 4)
+	written := make(chan error, 1)
+	go func() {
+		_, err := o.persistLeiosEndorserBlock(point, blockRaw, data)
+		written <- err
+	}()
+	require.NoError(t, testutil.RequireReceive(
+		t, written, time.Second,
+		"persistence write stalled behind the GC's slow scan",
+	))
+	_, err := db.GetLeiosEBManifest(point.Hash, point.Slot)
+	require.NoError(t, err)
+}
+
+func TestLeiosPersistenceWriterDoesNotRestorePrunedSlots(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+
+	newerPoint, newerRaw := testLeiosEndorserBlockRawWithRefs(t, 30, 1)
+	require.NoError(t, db.SetLeiosEB(
+		newerPoint.Slot,
+		newerPoint.Hash,
+		newerRaw,
+		nil,
+	))
+	o.leiosPersistGCOnce.Do(func() {})
+	o.runLeiosPersistenceGC(context.Background(), nil)
+
+	point, blockRaw, data := leiosPersistTestEntry(t, 10, 1, 4)
+	_, err := o.persistLeiosEndorserBlock(point, blockRaw, data)
+	require.NoError(t, err, "a pruned slot is skipped, not failed")
+	require.NoError(t, o.Close())
+
+	_, err = db.GetLeiosEBManifest(point.Hash, point.Slot)
+	require.ErrorIs(t, err, databaseTypes.ErrBlobKeyNotFound)
+}
+
+func TestLeiosPersistencePauseResetsPruningFrontier(t *testing.T) {
+	t.Parallel()
+	o := newTestOuroborosWithLeiosDB(t)
+	o.leiosPersistPruneBeforeSlot = 100
+	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
+	point, blockRaw, data := leiosPersistTestEntry(t, 10, 1, 4)
+	_, err := o.persistLeiosEndorserBlock(point, blockRaw, data)
+	require.NoError(t, err)
+	require.NoError(t, o.Close())
+	got, err := o.leiosDatabase().GetLeiosEBManifest(point.Hash, point.Slot)
+	require.NoError(t, err)
+	require.Equal(t, []byte(blockRaw), got)
+}
+
+// With no immutable point the collection bound follows the newest persisted
+// endorser block, so a persisted block must wake the collector itself.
+func TestLeiosPersistSignalsCollectionAfterPersist(t *testing.T) {
+	t.Parallel()
+	o := newTestOuroborosWithLeiosDB(t)
+	point, raw, data := leiosPersistTestEntry(t, 300, 4, 512)
+
+	_, err := o.persistLeiosEndorserBlock(point, raw, data)
+	require.NoError(t, err)
+
+	testutil.RequireReceive(
+		t, o.leiosGCSignal, 2*time.Second,
+		"collection must be signalled after an endorser block persists",
+	)
 }
 
 func TestLeiosVerifiedEbSlotRestoresFromPersistedManifest(t *testing.T) {
@@ -696,7 +708,6 @@ func TestLeiosVerifiedEbSlotRestoresFromPersistedManifest(t *testing.T) {
 		[]cbor.RawMessage{testDijkstraTx(t, 0)},
 		leiosStoreAuthoritative,
 	))
-	o.StopLeiosPersistWriter()
 
 	// Simulate a restart: the persisted manifest remains, while the process
 	// watermark and in-memory cache are rebuilt from zero.
@@ -727,7 +738,6 @@ func TestLeiosVerifiedEbSlotRestoredByNewOuroboros(t *testing.T) {
 		[]cbor.RawMessage{testDijkstraTx(t, 0)},
 		leiosStoreAuthoritative,
 	))
-	first.StopLeiosPersistWriter()
 
 	// A restart: a brand-new Ouroboros over the same database, with nothing
 	// carried over in process and nothing called on it but the constructor.
@@ -736,7 +746,7 @@ func TestLeiosVerifiedEbSlotRestoredByNewOuroboros(t *testing.T) {
 		LedgerState:             first.ledgerState,
 		LeiosAnnouncementLedger: first.ledgerState,
 	})
-	t.Cleanup(second.StopLeiosPersistWriter)
+	t.Cleanup(func() { require.NoError(t, second.Close()) })
 
 	require.Equal(t, point.Slot, second.MaxVerifiedEndorserBlockSlot())
 }
@@ -784,92 +794,11 @@ func TestLeiosPersistenceGCRetainsConfiguredSlotWindow(t *testing.T) {
 	}
 }
 
-// leiosStoreHooks wraps a Leios store so a test can slow or fail the
-// newest-slot lookup the collection worker makes.
-type leiosStoreHooks struct {
-	leiosdb.Store
-	maxSlot func() (uint64, bool, error)
-}
-
 func (s *leiosStoreHooks) MaxSlot() (uint64, bool, error) {
 	if s.maxSlot != nil {
 		return s.maxSlot()
 	}
 	return s.Store.MaxSlot()
-}
-
-func TestLeiosPersistenceWriterRunsDuringSlowGCScan(t *testing.T) {
-	t.Parallel()
-
-	o := newTestOuroborosWithLeiosDB(t)
-	o.config.LeiosPersistenceRetentionSlots = 10
-	db := o.leiosDatabase()
-	require.NotNil(t, db)
-
-	oldPoint, oldRaw := testLeiosEndorserBlockRawWithRefs(t, 30, 1)
-	require.NoError(t, db.SetLeiosEB(oldPoint.Slot, oldPoint.Hash, oldRaw, nil))
-
-	base, err := db.LeiosDB()
-	require.NoError(t, err)
-	releaseScan := make(chan struct{})
-	var releaseScanOnce sync.Once
-	release := func() { releaseScanOnce.Do(func() { close(releaseScan) }) }
-	started := make(chan struct{})
-	var startedOnce sync.Once
-	db.SetLeiosDB(&leiosStoreHooks{
-		Store: base,
-		maxSlot: func() (uint64, bool, error) {
-			startedOnce.Do(func() { close(started) })
-			<-releaseScan
-			return base.MaxSlot()
-		},
-	})
-	t.Cleanup(func() {
-		release()
-		require.NoError(t, o.Close())
-		db.SetLeiosDB(base)
-	})
-
-	point, blockRaw, data, _ := leiosPersistTestEntry(t, 40, 1, 4)
-	o.enqueueLeiosPersist(point, blockRaw, data)
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("GC did not begin its max-slot scan")
-	}
-
-	require.Eventually(t, func() bool {
-		_, err := db.GetLeiosEBManifest(point.Hash, point.Slot)
-		return err == nil
-	}, time.Second, 10*time.Millisecond,
-		"persistence writer stalled behind the GC's slow scan",
-	)
-}
-
-func TestLeiosPersistenceWriterDoesNotRestorePrunedSlots(t *testing.T) {
-	t.Parallel()
-
-	o := newTestOuroborosWithLeiosDB(t)
-	o.config.LeiosPersistenceRetentionSlots = 10
-	db := o.leiosDatabase()
-	require.NotNil(t, db)
-
-	newerPoint, newerRaw := testLeiosEndorserBlockRawWithRefs(t, 30, 1)
-	require.NoError(t, db.SetLeiosEB(
-		newerPoint.Slot,
-		newerPoint.Hash,
-		newerRaw,
-		nil,
-	))
-	o.leiosPersistGCOnce.Do(func() {})
-	o.runLeiosPersistenceGC(context.Background(), nil)
-
-	point, blockRaw, data, _ := leiosPersistTestEntry(t, 10, 1, 4)
-	o.enqueueLeiosPersist(point, blockRaw, data)
-	require.NoError(t, o.Close())
-
-	_, err := db.GetLeiosEBManifest(point.Hash, point.Slot)
-	require.ErrorIs(t, err, databaseTypes.ErrBlobKeyNotFound)
 }
 
 func TestLeiosPersistenceGCRetriesAfterStartupWatermarkScanFailure(
@@ -964,7 +893,6 @@ func TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently(
 		),
 	)
 
-	o.StopLeiosPersistWriter()
 	db := o.leiosDatabase()
 	require.NotNil(t, db)
 
@@ -1000,63 +928,6 @@ func TestCloseReportsUnconfirmedLeiosPersistenceGCDrain(t *testing.T) {
 	require.ErrorIs(t, o.Close(), ErrLeiosPersistDrainUnconfirmed)
 	close(o.leiosPersistGCDone)
 	require.NoError(t, o.Close())
-}
-
-func TestClosePreventsLeiosPersistenceFromStartingOrInstalling(t *testing.T) {
-	t.Parallel()
-
-	t.Run("close before first enqueue", func(t *testing.T) {
-		o := newTestOuroborosWithLeiosDB(t)
-		o.config.LeiosPersistenceRetentionSlots = 100
-		require.NoError(t, o.Close())
-
-		point, blockRaw, data, _ := leiosPersistTestEntry(t, 0, 1, 4)
-		o.enqueueLeiosPersist(point, blockRaw, data)
-
-		require.False(t, o.leiosPersistStarted.Load())
-		require.False(t, o.leiosPersistGCStarted.Load())
-		require.Empty(t, o.leiosPersistPending)
-	})
-
-	t.Run("enqueue admitted before close", func(t *testing.T) {
-		o := newTestOuroborosWithLeiosDB(t)
-		point, blockRaw, data, _ := leiosPersistTestEntry(t, 1, 1, 4)
-		reserved := make(chan struct{})
-		release := make(chan struct{})
-		var releaseOnce sync.Once
-		t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-		o.leiosPersistAfterReserve = func() {
-			close(reserved)
-			<-release
-		}
-
-		enqueueDone := make(chan struct{})
-		go func() {
-			o.enqueueLeiosPersist(point, blockRaw, data)
-			close(enqueueDone)
-		}()
-		select {
-		case <-reserved:
-		case <-time.After(5 * time.Second):
-			t.Fatal("enqueue did not reach its reserved-copy phase")
-		}
-
-		closeDone := make(chan error, 1)
-		go func() { closeDone <- o.Close() }()
-		releaseOnce.Do(func() { close(release) })
-		require.NoError(t, <-closeDone)
-		select {
-		case <-enqueueDone:
-		case <-time.After(5 * time.Second):
-			t.Fatal("in-flight enqueue did not finish after close")
-		}
-
-		o.leiosPersistMu.Lock()
-		defer o.leiosPersistMu.Unlock()
-		require.Empty(t, o.leiosPersistPending)
-		require.Zero(t, o.leiosPersistBytes)
-		require.Zero(t, o.leiosPersistReserved)
-	})
 }
 
 func TestLeiosPersistenceLifecycleOperationsSerialize(t *testing.T) {
@@ -1119,282 +990,6 @@ func TestLeiosPersistenceLifecycleOperationsSerialize(t *testing.T) {
 	}
 }
 
-// TestLeiosPersistStopDrainTimesOut verifies that the shutdown drain wait is
-// bounded: if the writer's drain is stuck (e.g. the blob store hangs inside
-// SetLeiosEB, so leiosPersistDone is never closed), the writer drain wait
-// returns after the timeout instead of blocking graceful shutdown forever,
-// and the stop request still lets the writer exit later.
-func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
-	t.Parallel()
-
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	// Simulate a started writer whose drain never completes.
-	o.leiosPersistStarted.Store(true)
-	o.leiosPersistStop = make(chan struct{})
-	o.leiosPersistDone = make(chan struct{}) // deliberately never closed
-
-	returned := make(chan struct{})
-	var drained bool
-	go func() {
-		done, started := o.requestLeiosPersistWriterStop()
-		require.True(t, started)
-		drained = waitForLeiosPersistWorker(done, 50*time.Millisecond)
-		close(returned)
-	}()
-
-	select {
-	case <-returned:
-	case <-time.After(5 * time.Second):
-		t.Fatal("writer drain wait hung past the bounded timeout")
-	}
-	require.False(t, drained, "drain must be reported unconfirmed on timeout")
-
-	// The stop channel must still be closed so the writer goroutine can observe
-	// the stop and exit once the blob store unblocks.
-	select {
-	case <-o.leiosPersistStop:
-	default:
-		t.Fatal("stop channel was not closed")
-	}
-}
-
-// Each worker receives the full shutdown budget independently.
-func TestLeiosPersistenceWorkersEachGetFullDrainBudget(t *testing.T) {
-	t.Parallel()
-
-	o := newTestOuroborosWithLeiosDB(t)
-	o.leiosPersistStarted.Store(true)
-	o.leiosPersistStop = make(chan struct{})
-	o.leiosPersistDone = make(chan struct{})
-	o.leiosPersistGCMu.Lock()
-	o.leiosPersistGCStop = make(chan struct{})
-	o.leiosPersistGCDone = make(chan struct{})
-	o.leiosPersistGCMu.Unlock()
-	o.leiosPersistGCStarted.Store(true)
-
-	const budget = 400 * time.Millisecond
-	waits := make([]time.Duration, 0, 2)
-	wait := func(_ <-chan struct{}, timeout time.Duration) bool {
-		waits = append(waits, timeout)
-		return true
-	}
-
-	require.True(t, o.stopLeiosPersistenceWorkersWithWait(budget, wait))
-	require.Equal(t, []time.Duration{budget, budget}, waits)
-}
-
-// TestLeiosPersistEnqueueAfterStopIsRejected verifies that once the writer is
-// stopping, a new enqueue is rejected rather than silently stranded in the
-// pending map (where no drain would ever pick it up), so shutdown cannot report
-// completion while a freshly fetched endorser block is left unpersisted.
-func TestLeiosPersistEnqueueAfterStopIsRejected(t *testing.T) {
-	t.Parallel()
-
-	o := newTestOuroborosWithLeiosDB(t)
-
-	// Start the writer via a real enqueue, then drain and stop it.
-	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 1)
-	require.NoError(
-		t,
-		o.storeLeiosEndorserBlock(
-			point,
-			blockRaw,
-			nil,
-			leiosStoreAuthoritative,
-		),
-	)
-	o.StopLeiosPersistWriter()
-
-	// The drained map must be empty now.
-	o.leiosPersistMu.Lock()
-	pendingAfterStop := len(o.leiosPersistPending)
-	o.leiosPersistMu.Unlock()
-	require.Zero(t, pendingAfterStop)
-
-	// An enqueue after stop must not add a job that would never be drained.
-	point2, blockRaw2 := testLeiosEndorserBlockRawWithRefs(t, 11, 1)
-	o.enqueueLeiosPersist(point2, blockRaw2, nil)
-
-	o.leiosPersistMu.Lock()
-	pending := len(o.leiosPersistPending)
-	o.leiosPersistMu.Unlock()
-	require.Zero(
-		t,
-		pending,
-		"enqueue after stop must not strand a job in the pending map",
-	)
-}
-
-// TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB
-// guards the gap a live Restore/Truncate used to leave open: unlike
-// StopLeiosPersistWriter (a genuine, permanent shutdown --
-// TestLeiosPersistEnqueueAfterStopIsRejected above documents that a
-// post-stop enqueue is rejected forever), PauseLeiosPersistWriterForLive
-// LifecycleOp must (1) flush whatever was already queued against the
-// CURRENT database before anything reassigns LedgerState -- so a
-// pre-operation write never lands after the database has moved on -- and
-// (2) still accept and eventually persist a job enqueued afterward, once
-// LedgerState has been reassigned to a new database, mirroring
-// node_lifecycle.go's live restore/truncate reinit reassigning
-// n.ouroboros.LedgerState.
-func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	o := newTestOuroborosWithLeiosDB(t)
-	oldDB := o.leiosDatabase()
-	require.NotNil(t, oldDB)
-
-	point1, blockRaw1 := testLeiosEndorserBlockRawWithRefs(t, 20, 1)
-	o.enqueueLeiosPersist(point1, blockRaw1, nil)
-
-	// Pause immediately -- this must drain the just-queued job against
-	// oldDB before returning, exactly like a live Restore/Truncate's
-	// quiesce step pausing right before the database closes.
-	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
-
-	manifest1, err := oldDB.GetLeiosEBManifest(point1.Hash, point1.Slot)
-	require.NoError(t, err)
-	require.Equal(t, []byte(blockRaw1), manifest1)
-
-	// Simulate reinitializeAndResume reassigning LedgerState to a freshly
-	// built database, the way node_lifecycle.go's reinit does.
-	newOuroboros := newTestOuroborosWithLeiosDB(t)
-	newDB := newOuroboros.leiosDatabase()
-	require.NotNil(t, newDB)
-	o.ledgerState = newOuroboros.ledgerState
-
-	// A job enqueued after the pause must actually be accepted (not
-	// silently dropped, unlike a plain post-Stop enqueue) and land in the
-	// NEW database, proving the writer actually restarted rather than
-	// staying permanently paused.
-	point2, blockRaw2 := testLeiosEndorserBlockRawWithRefs(t, 21, 1)
-	o.enqueueLeiosPersist(point2, blockRaw2, nil)
-	o.StopLeiosPersistWriter()
-
-	manifest2, err := newDB.GetLeiosEBManifest(point2.Hash, point2.Slot)
-	require.NoError(t, err)
-	require.Equal(t, []byte(blockRaw2), manifest2)
-
-	// And it must not have leaked into the old database.
-	_, err = oldDB.GetLeiosEBManifest(point2.Hash, point2.Slot)
-	require.Error(t, err)
-}
-
-// TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain guards
-// the use-after-close/stolen-job race a timed-out pause used to leave open:
-// if the writer's drain cannot be confirmed, PauseLeiosPersistWriterForLive
-// LifecycleOp must return ErrLeiosPersistDrainUnconfirmed and leave
-// leiosPersistOnce/leiosPersistStopOnce/leiosPersistStarted untouched --
-// resetting them here, with the old writer goroutine still potentially
-// running drainLeiosPersist against the old database, would let the very
-// next enqueue start a second writer against a freshly reset pending map
-// while the old one is still reading and deleting from that same map
-// (now repointed) under the shared mutex.
-// Not t.Parallel: swaps the package-level leiosPersistShutdownDrainTimeout.
-func TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain(
-	t *testing.T,
-) {
-	origTimeout := leiosPersistShutdownDrainTimeout
-	leiosPersistShutdownDrainTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { leiosPersistShutdownDrainTimeout = origTimeout })
-
-	o := newTestOuroborosWithLeiosDB(t)
-	// Simulate an already-started writer whose drain never completes, with
-	// no real goroutine involved (mirroring TestLeiosPersistStopDrainTimesOut)
-	// so there's nothing else touching these fields concurrently.
-	o.leiosPersistStarted.Store(true)
-	o.leiosPersistStop = make(chan struct{})
-	o.leiosPersistDone = make(chan struct{}) // deliberately never closed
-	o.leiosPersistPending = map[string]*leiosPersistJob{"stuck": {slot: 1}}
-	// Mark leiosPersistOnce as already used, matching a real prior start.
-	o.leiosPersistOnce.Do(func() {})
-
-	pauseErr := o.PauseLeiosPersistWriterForLiveLifecycleOp()
-	require.ErrorIs(t, pauseErr, ErrLeiosPersistDrainUnconfirmed)
-	require.True(
-		t, o.leiosPersistStarted.Load(),
-		"started flag must not be reset on unconfirmed drain",
-	)
-
-	// The real regression: a later enqueue must not start a second writer
-	// against a freshly reset pending map. leiosPersistStop is still
-	// closed (stopLeiosPersistWriter always closes it) and leiosPersistOnce
-	// was not reset, so this enqueue is correctly rejected rather than
-	// replacing the still-referenced pending map out from under whatever
-	// (real, in production) writer might still be draining it.
-	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 31, 1)
-	o.enqueueLeiosPersist(point, blockRaw, nil)
-	// A fresh map from a second startLeiosPersistWriter call would be
-	// empty (make(map[string]*leiosPersistJob)); the sentinel "stuck"
-	// entry surviving proves leiosPersistPending was never replaced.
-	_, stillPresent := o.leiosPersistPending["stuck"]
-	require.True(
-		t, stillPresent,
-		"a second writer must not start against a fresh pending map "+
-			"while the old drain is unconfirmed",
-	)
-}
-
-// TestLeiosPersistPauseAfterConcurrentEnqueue follows the live lifecycle
-// precondition: all enqueues finish before the writer is drained and reset.
-func TestLeiosPersistPauseAfterConcurrentEnqueue(t *testing.T) {
-	t.Parallel()
-
-	o := newTestOuroborosWithLeiosDB(t)
-	const enqueuers = 4
-	const perEnqueuer = 25
-
-	type entry struct {
-		point ocommon.Point
-		raw   cbor.RawMessage
-	}
-	entries := make([][]entry, enqueuers)
-	for e := range enqueuers {
-		for i := range perEnqueuer {
-			point, raw := testLeiosEndorserBlockRawWithRefs(
-				t, 100+e*perEnqueuer+i, 1,
-			)
-			entries[e] = append(entries[e], entry{point, raw})
-		}
-	}
-
-	var wg sync.WaitGroup
-	for e := range enqueuers {
-		wg.Go(func() {
-			for _, en := range entries[e] {
-				o.enqueueLeiosPersist(en.point, en.raw, nil)
-			}
-		})
-	}
-	wg.Wait()
-	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
-	o.leiosPersistMu.Lock()
-	require.Zero(t, o.leiosPersistBytes)
-	require.Zero(t, o.leiosPersistReserved)
-	require.Empty(t, o.leiosPersistPending)
-	o.leiosPersistMu.Unlock()
-	o.enqueueLeiosPersist(entries[0][0].point, entries[0][0].raw, nil)
-	o.leiosPersistLifecycleMu.Lock()
-	stopped := o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout)
-	o.leiosPersistLifecycleMu.Unlock()
-	require.True(t, stopped)
-}
-
-func TestLeiosPersistencePauseResetsPruningFrontier(t *testing.T) {
-	t.Parallel()
-	o := newTestOuroborosWithLeiosDB(t)
-	o.leiosPersistPruneBeforeSlot = 100
-	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
-	point, blockRaw, data, _ := leiosPersistTestEntry(t, 10, 1, 4)
-	o.enqueueLeiosPersist(point, blockRaw, data)
-	require.NoError(t, o.Close())
-	got, err := o.leiosDatabase().GetLeiosEBManifest(point.Hash, point.Slot)
-	require.NoError(t, err)
-	require.Equal(t, []byte(blockRaw), got)
-}
-
 func TestLeiosPersistenceConstructorStartsGC(t *testing.T) {
 	t.Parallel()
 	first := newTestOuroborosWithLeiosDB(t)
@@ -1419,20 +1014,4 @@ func TestLeiosPersistenceConstructorStartsGC(t *testing.T) {
 	}, time.Second, time.Millisecond)
 	_, err := db.GetLeiosEBManifest(latest.Hash, latest.Slot)
 	require.NoError(t, err)
-}
-
-// With no immutable point the collection bound follows the newest persisted
-// endorser block, so a persisted block must wake the collector itself.
-func TestLeiosPersistSignalsCollectionAfterPersist(t *testing.T) {
-	t.Parallel()
-	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
-	point, raw, data, _ := leiosPersistTestEntry(t, 300, 4, 512)
-
-	o.enqueueLeiosPersist(point, raw, data)
-	o.drainLeiosPersist()
-
-	testutil.RequireReceive(
-		t, o.leiosGCSignal, 2*time.Second,
-		"collection must be signalled after an endorser block persists",
-	)
 }

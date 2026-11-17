@@ -1349,9 +1349,6 @@ func TestEndorserBlockTxsByHashAvailableAfterDBReload(t *testing.T) {
 		leiosStoreAuthoritative,
 	))
 
-	// Endorser-block persistence is asynchronous; drain the writer so the
-	// blob store reflects the stored block before forcing a DB reload.
-	o.StopLeiosPersistWriter()
 	o.leiosMu.Lock()
 	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	o.leiosMu.Unlock()
@@ -1559,10 +1556,8 @@ func TestFetchEndorserBlockByPointRejectsStaleReloadedSlot(t *testing.T) {
 		leiosStoreAuthoritative,
 	))
 
-	// Endorser-block persistence is asynchronous; drain the writer so the
-	// blob store reflects the stale-slot store, then clear the in-memory
-	// cache so the next lookup must reload from the blob store.
-	o.StopLeiosPersistWriter()
+	// Clear the in-memory cache so the next lookup must reload from the blob
+	// store.
 	o.leiosMu.Lock()
 	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	o.leiosMu.Unlock()

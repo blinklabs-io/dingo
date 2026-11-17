@@ -7085,7 +7085,8 @@ An occurrence is the (slot, hash) pair, the slot being the announcing ranking
 block's. The manifest is content-addressed, so the same hash at two slots is
 two occurrences, stored and collected independently.
 
-**Writes.** `Database.SetLeiosEB` (the asynchronous persistence writer, and a
+**Writes.** `Database.SetLeiosEB` (a fetched or forged endorser block, written
+before the fetch reports success or the block is offered onward, and a
 certifying ranking block's apply) writes the manifest and, when the list is
 complete, the transaction list. An unpinned occurrence goes to the volatile
 partition and a pinned one to the immutable partition, which is how a
@@ -7174,7 +7175,7 @@ collection watermark and the smaller of the live immutable slot and the pin
 watermark as unknown, even while it is cached or persisted. The pin watermark
 keeps refusal from running ahead of the pin walk, so a certified block the walk
 has not reached yet, or a walk that keeps failing, never turns serving into
-refusal; without a pin walk the live immutable slot applies. The persistence writer drops an unpinned write below the
+refusal; without a pin walk the live immutable slot applies. Endorser-block persistence skips an unpinned write below the
 frontier, and an unsolicited block offer or announcement from a peer below
 that bound is dropped before it reaches the cache. An endorser block the ledger
 requests by point for a chain-certified ranking block is not subject to the

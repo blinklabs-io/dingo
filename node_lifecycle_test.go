@@ -1663,7 +1663,7 @@ func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
 // TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedConnShutdown
 // guards two related gaps flagged in review: (1) quiesceForLiveLifecycleOp
 // used to unconditionally dereference n.ouroboros to pause the Leios
-// persist writer, panicking if quiesce ever ran against a node that isn't
+// persistence, panicking if quiesce ever ran against a node that isn't
 // fully initialized (e.g. a partially-constructed Node, or a future call
 // site). This also verifies that an empty connection manager shuts down
 // cleanly when quiesce is called on a partially constructed node.
