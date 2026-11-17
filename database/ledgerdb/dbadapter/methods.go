@@ -3263,11 +3263,15 @@ func (a Adapter) EachRewardJournalRow(
 			}
 			key, _ := m["staking_key"].([]byte)
 			hash, _ := m["tx_hash"].([]byte)
+			amount, err := factDecimal(m["amount"])
+			if err != nil {
+				return fmt.Errorf("reward journal amount: %w", err)
+			}
 			if err := fn(ledgerdb.RewardJournalRow{
 				StakingKey:    key,
 				CredentialTag: uint8(factUint(m["credential_tag"])), //nolint:gosec // a credential tag
 				TxHash:        hash,
-				Amount:        factDecimal(m["amount"]),
+				Amount:        amount,
 				Slot:          factUint(m["added_slot"]),
 				Withdrawal:    factFlag(m["withdrawal"]),
 				PostSnapshot:  factFlag(m["post_snapshot"]),
@@ -3283,17 +3287,21 @@ func (a Adapter) EachRewardJournalRow(
 }
 
 // factDecimal reads an unsigned amount a store holds as an integer or as
-// decimal text.
-func factDecimal(v any) uint64 {
+// decimal text. An unparsable or negative amount is an error: reading it as
+// zero would silently drop a reward movement.
+func factDecimal(v any) (uint64, error) {
 	switch x := v.(type) {
 	case string:
-		n, _ := strconv.ParseUint(x, 10, 64)
-		return n
+		return strconv.ParseUint(x, 10, 64)
 	case []byte:
-		n, _ := strconv.ParseUint(string(x), 10, 64)
-		return n
+		return strconv.ParseUint(string(x), 10, 64)
+	case int64:
+		if x < 0 {
+			return 0, fmt.Errorf("negative amount %d", x)
+		}
+		return uint64(x), nil
 	}
-	return factUint(v)
+	return 0, fmt.Errorf("amount has type %T", v)
 }
 
 // factFlag reads a boolean a store holds as a bool or an integer.

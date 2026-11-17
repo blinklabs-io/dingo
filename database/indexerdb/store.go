@@ -63,11 +63,14 @@ func decodeTip(s string) (Tip, error) {
 	if len(parts) != 3 {
 		return Tip{}, fmt.Errorf("malformed indexer tip %q", s)
 	}
-	slot, err := strconv.ParseUint(parts[0], 10, 64)
+	// Slots and block numbers are int64 columns in every SQL backend and
+	// in the API responses built from the tip, so a value above that range is
+	// malformed rather than a real position.
+	slot, err := strconv.ParseUint(parts[0], 10, 63)
 	if err != nil {
 		return Tip{}, fmt.Errorf("malformed indexer tip slot: %w", err)
 	}
-	number, err := strconv.ParseUint(parts[1], 10, 64)
+	number, err := strconv.ParseUint(parts[1], 10, 63)
 	if err != nil {
 		return Tip{}, fmt.Errorf("malformed indexer tip block number: %w", err)
 	}

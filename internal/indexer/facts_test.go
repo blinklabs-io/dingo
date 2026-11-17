@@ -366,6 +366,30 @@ func TestCopyAnchorStateRefusesAJournalThatExceedsTheBalance(t *testing.T) {
 		"a refused copy writes no baseline")
 }
 
+func TestCopyAnchorStateRefusesARewardBeyondInt64(t *testing.T) {
+	t.Parallel()
+	src, srcRaw := newFactsDB(t)
+	dst, _ := newFactsDB(t)
+	f, err := NewMetadataFacts(src, dst)
+	require.NoError(t, err)
+
+	key := []byte("stake-credential-hash-0123456789")
+	_, err = srcRaw.Exec(`INSERT INTO account
+		(staking_key, credential_tag, added_slot, created_slot, reward, active)
+		VALUES (?, 0, 150, 10, '9223372036854775808', 1)`, key)
+	require.NoError(t, err)
+	_, err = srcRaw.Exec(`INSERT INTO account_import_baseline
+		(credential_tag, staking_key, drep_type, active, added_slot)
+		VALUES (0, ?, 0, 1, 100)`, key)
+	require.NoError(t, err)
+
+	txn := dst.Transaction(context.Background(), true)
+	err = txn.Do(func(txn *database.Txn) error {
+		return f.CopyAnchorState(context.Background(), txn, 100)
+	})
+	require.ErrorContains(t, err, "exceeds the int64 range")
+}
+
 // A proposal ratified in the range and enacted after it is copied ratified
 // only; the enactment arrives with the range that contains it.
 func TestMetadataFactsPatchProposalOutcomesAsOfTheRange(t *testing.T) {

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
@@ -302,8 +303,15 @@ func (f *MetadataFacts) CopyAnchorState(
 		for i := range accounts {
 			a := &accounts[i]
 			delta := moved[credential{key: string(a.StakingKey), tag: a.CredentialTag}]
-			bal := int64(a.Reward) //nolint:gosec // below total supply
-			if bal < 0 || bal-delta < 0 {
+			if a.Reward > math.MaxInt64 {
+				return fmt.Errorf(
+					"indexer: account %x reward %d exceeds the int64 range",
+					a.StakingKey,
+					a.Reward,
+				)
+			}
+			bal := int64(a.Reward)
+			if bal-delta < 0 {
 				return fmt.Errorf(
 					"indexer: account %x reward %d cannot undo journal movement %d",
 					a.StakingKey,
