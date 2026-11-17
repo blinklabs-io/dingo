@@ -28,6 +28,18 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
+// ErrCertifiedClosureUnavailable reports that the endorser-block closure a
+// certifying ranking block applies is neither persisted nor held by the
+// endorser-block data provider. It is not corruption: the ledger persists the
+// closure when it applies the certifying block, so a stored block the ledger
+// has not applied yet can lack it, as can any block read before the provider
+// is wired at startup. A caller that can wait may retry once the ledger has
+// applied the block; a closure that is present but invalid fails with a
+// different error.
+var ErrCertifiedClosureUnavailable = errors.New(
+	"certified endorser-block closure unavailable",
+)
+
 type leiosBlockCertifierHeader interface {
 	LeiosCertified() (certified bool, present bool)
 	PrevHash() lcommon.Blake2b256
@@ -160,16 +172,7 @@ func (ls *LedgerState) loadCertifiedClosure(
 	if errors.Is(manifestErr, types.ErrBlobKeyNotFound) ||
 		errors.Is(txErr, types.ErrBlobKeyNotFound) {
 		if ls.config.EndorserBlockDataProvider == nil {
-			if manifestErr != nil {
-				return nil, fmt.Errorf(
-					"load certified endorser-block manifest: %w",
-					manifestErr,
-				)
-			}
-			return nil, fmt.Errorf(
-				"load certified endorser-block transactions: %w",
-				txErr,
-			)
+			return nil, certifiedClosureUnavailable(manifestErr, txErr)
 		}
 		var ok bool
 		manifestRaw, blockTransactions, ok = ls.config.EndorserBlockDataProvider(
@@ -177,16 +180,7 @@ func (ls *LedgerState) loadCertifiedClosure(
 			parent.Slot,
 		)
 		if !ok {
-			if manifestErr != nil {
-				return nil, fmt.Errorf(
-					"load certified endorser-block manifest: %w",
-					manifestErr,
-				)
-			}
-			return nil, fmt.Errorf(
-				"load certified endorser-block transactions: %w",
-				txErr,
-			)
+			return nil, certifiedClosureUnavailable(manifestErr, txErr)
 		}
 	}
 	manifest, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
@@ -220,6 +214,23 @@ func (ls *LedgerState) loadCertifiedClosure(
 		manifest:     manifest,
 		transactions: blockTransactions,
 	}, nil
+}
+
+// certifiedClosureUnavailable wraps the store's not-found error for whichever
+// half of the closure was missing.
+func certifiedClosureUnavailable(manifestErr, txErr error) error {
+	if manifestErr != nil {
+		return fmt.Errorf(
+			"%w: load certified endorser-block manifest: %w",
+			ErrCertifiedClosureUnavailable,
+			manifestErr,
+		)
+	}
+	return fmt.Errorf(
+		"%w: load certified endorser-block transactions: %w",
+		ErrCertifiedClosureUnavailable,
+		txErr,
+	)
 }
 
 func (ls *LedgerState) decodeCertifiedClosure(

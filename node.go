@@ -1251,7 +1251,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Create and start the Midnight indexer before LedgerState.Start so that
 	// (a) the synchronous backfill runs while no new blocks can arrive, and
 	// (b) the EventBus subscription exists before any BlockActionApply events
-	// can be emitted, eliminating the startup gap. The
+	// can be emitted, eliminating the startup gap: LedgerState.Start publishes
+	// an Apply for every stored block it has yet to apply, in chain order,
+	// before any block added later. The
 	// epoch cache and applied tip are loaded first because Midnight backfill
 	// writes epoch-keyed Ariadne/candidate rows and resolves block timestamps
 	// through the tip-anchored era horizon. Both the explicit opt-in and API

@@ -3441,6 +3441,9 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.reconcilePrimaryChainTipWithLedgerTip(ctx); err != nil {
 		return fmt.Errorf("failed to reconcile primary chain tip: %w", err)
 	}
+	if err := ls.publishStartupReplayBlockEvents(ctx); err != nil {
+		return fmt.Errorf("publish startup replay block events: %w", err)
+	}
 	// Create genesis block
 	if err := ls.createGenesisBlock(ctx); err != nil {
 		return fmt.Errorf("failed to create genesis block: %w", err)
