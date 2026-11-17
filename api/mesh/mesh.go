@@ -360,11 +360,8 @@ func (s *Server) slotToTimestamp(slot uint64) (int64, error) {
 // chain tip.
 func (s *Server) tipBlockID(
 	tip ochainsync.Tip,
-) *BlockIdentifier {
-	return &BlockIdentifier{
-		Index: int64(tip.BlockNumber), // #nosec G115
-		Hash:  hex.EncodeToString(tip.Point.Hash),
-	}
+) (*BlockIdentifier, error) {
+	return newBlockIdentifier(tip.BlockNumber, tip.Point.Hash)
 }
 
 // writeJSON writes a JSON response.

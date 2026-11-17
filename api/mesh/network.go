@@ -95,9 +95,15 @@ func (s *Server) handleNetworkStatus(
 	if progress, ok := s.config.LedgerState.(MeshSyncProgress); ok {
 		synced = progress.SyncProgress() == 1
 	}
+	blockID, err := s.tipBlockID(tip)
+	if err != nil {
+		s.logger.Error("failed to encode tip block identifier", "error", err)
+		writeError(w, ErrInternal)
+		return
+	}
 
 	resp := &NetworkStatusResponse{
-		CurrentBlockIdentifier: s.tipBlockID(tip),
+		CurrentBlockIdentifier: blockID,
 		CurrentBlockTimestamp:  tipTimestamp,
 		GenesisBlockIdentifier: s.genesisID,
 		SyncStatus: &SyncStatus{
