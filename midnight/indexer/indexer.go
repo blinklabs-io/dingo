@@ -30,8 +30,10 @@ import (
 	"maps"
 	"math"
 	"math/big"
+	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -117,6 +119,10 @@ type Config struct {
 	// transactions, which is correct for every pre-Leios era.
 	BlockTransactions func(context.Context, models.Block) ([]lcommon.Transaction, error)
 	blockDecoder      func(models.Block) ([]lcommon.Transaction, error)
+	// closureRetryInterval is how often a block deferred for an unavailable
+	// certified closure is retried when no later event retries it. Zero uses
+	// defaultClosureRetryInterval.
+	closureRetryInterval time.Duration
 	// FatalErrorFunc is called when the indexer encounters an error that
 	// cannot be recovered without risking a checkpoint gap. Node wiring
 	// should cancel the node context so the process exits cleanly.
@@ -249,6 +255,20 @@ type Indexer struct {
 	checkpointSlot uint64
 	// Event bus subscription identifier returned by Start.
 	subID event.EventSubscriberId
+
+	// eventMu serializes live block-event handling with the deferred-block
+	// retry, so events are indexed in the order the ledger published them.
+	eventMu sync.Mutex
+	// deferred holds events, oldest first, behind a block whose certified
+	// endorser-block closure is not available yet. Guarded by eventMu.
+	deferred []ledger.BlockEvent
+	// deferring is set while deferred is non-empty and logged once per
+	// stall. Guarded by eventMu.
+	deferring bool
+	// retry fires the next attempt at the deferred head. Guarded by retryMu.
+	retryMu sync.Mutex
+	retry   *time.Timer
+	stopped atomic.Bool
 
 	// governance parsed config
 	techCommitteeAddrBytes   []byte
@@ -1036,9 +1056,33 @@ func (idx *Indexer) updateCheckpoint(slot uint64) error {
 // use-after-close risk, not just a benign leak during a normal process
 // shutdown. A non-nil return means the handler may still be using storage.
 func (idx *Indexer) Stop(ctx context.Context) error {
-	return idx.config.EventBus.UnsubscribeAndWaitContext(
+	idx.stopped.Store(true)
+	idx.retryMu.Lock()
+	if idx.retry != nil {
+		idx.retry.Stop()
+		idx.retry = nil
+	}
+	idx.retryMu.Unlock()
+	err := idx.config.EventBus.UnsubscribeAndWaitContext(
 		ctx, ledger.BlockEventType, idx.subID,
 	)
+	// A retry already running on the timer's goroutine can still be writing to
+	// storage; wait it out. It stops after its current event because stopped
+	// is set.
+	idle := make(chan struct{})
+	go func() {
+		idx.eventMu.Lock()
+		idx.eventMu.Unlock() //nolint:staticcheck // empty section waits for the holder
+		close(idle)
+	}()
+	select {
+	case <-idle:
+	case <-ctx.Done():
+		if err == nil {
+			err = ctx.Err()
+		}
+	}
+	return err
 }
 
 func (idx *Indexer) blockTimestamp(slot uint64) (uint64, error) {
@@ -1069,62 +1113,183 @@ func (idx *Indexer) fatal(err error) {
 	}
 }
 
-// handleBlockEvent is the SubscribeFunc callback; it decodes the block and
-// delegates to processBlock or rollbackBlock depending on the action.
+// defaultClosureRetryInterval is how often a deferred block is retried when no
+// later event retries it first.
+const defaultClosureRetryInterval = 2 * time.Second
+
+// handleBlockEvent is the SubscribeFunc callback. Every event joins an ordered
+// queue that is drained head first, so a block whose certified closure is not
+// available yet holds back the events behind it instead of stopping the node;
+// see indexApply.
 func (idx *Indexer) handleBlockEvent(evt event.Event) {
-	idx.mu.RLock()
-	failed := idx.failed
-	idx.mu.RUnlock()
-	if failed {
-		return
-	}
 	blockEvt, ok := evt.Data.(ledger.BlockEvent)
 	if !ok {
 		return
 	}
+	idx.eventMu.Lock()
+	defer idx.eventMu.Unlock()
+	if idx.stopped.Load() || idx.hasFailed() {
+		return
+	}
+	// A block undone before it was ever indexed leaves nothing to undo, and
+	// waiting for the closure of a block that left the chain would stall the
+	// queue for good.
+	if blockEvt.Action == ledger.BlockActionUndo &&
+		idx.dropDeferredApply(blockEvt.Block.Hash) {
+		idx.drainDeferred()
+		return
+	}
+	idx.deferred = append(idx.deferred, blockEvt)
+	idx.drainDeferred()
+}
+
+func (idx *Indexer) logger() *slog.Logger {
+	if idx.config.Logger != nil {
+		return idx.config.Logger
+	}
+	return slog.Default()
+}
+
+func (idx *Indexer) hasFailed() bool {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.failed
+}
+
+// dropDeferredApply removes the queued Apply of the block with this hash and
+// reports whether there was one. The caller holds eventMu.
+func (idx *Indexer) dropDeferredApply(hash []byte) bool {
+	for i, queued := range idx.deferred {
+		if queued.Action == ledger.BlockActionApply &&
+			bytes.Equal(queued.Block.Hash, hash) {
+			idx.deferred = slices.Delete(idx.deferred, i, i+1)
+			return true
+		}
+	}
+	return false
+}
+
+// drainDeferred indexes queued events oldest first and stops at a block whose
+// closure is unavailable, scheduling a retry. The caller holds eventMu.
+func (idx *Indexer) drainDeferred() {
+	for len(idx.deferred) > 0 {
+		if idx.stopped.Load() || idx.hasFailed() {
+			return
+		}
+		queued := idx.deferred[0]
+		if !idx.indexEvent(queued) {
+			idx.scheduleRetry()
+			return
+		}
+		idx.deferred[0] = ledger.BlockEvent{}
+		idx.deferred = idx.deferred[1:]
+	}
+	idx.deferred = nil
+	if idx.deferring {
+		idx.deferring = false
+		idx.logger().Info(
+			"midnight indexer: certified closure available, resumed indexing",
+		)
+	}
+}
+
+// scheduleRetry arms the retry timer unless one is already pending.
+func (idx *Indexer) scheduleRetry() {
+	idx.retryMu.Lock()
+	defer idx.retryMu.Unlock()
+	if idx.retry != nil || idx.stopped.Load() {
+		return
+	}
+	interval := idx.config.closureRetryInterval
+	if interval <= 0 {
+		interval = defaultClosureRetryInterval
+	}
+	idx.retry = time.AfterFunc(interval, idx.retryDeferred)
+}
+
+func (idx *Indexer) retryDeferred() {
+	idx.retryMu.Lock()
+	idx.retry = nil
+	idx.retryMu.Unlock()
+	idx.eventMu.Lock()
+	defer idx.eventMu.Unlock()
+	if idx.stopped.Load() {
+		return
+	}
+	idx.drainDeferred()
+}
+
+// indexEvent indexes one event. It returns false only for an Apply whose
+// certified closure is unavailable, which stays queued; every other outcome,
+// including a fatal error, consumes the event.
+func (idx *Indexer) indexEvent(blockEvt ledger.BlockEvent) bool {
 	switch blockEvt.Action {
 	case ledger.BlockActionUndo:
 		if err := idx.rollbackBlock(blockEvt.Block); err != nil {
 			idx.fatal(err)
 		}
 	case ledger.BlockActionApply:
-		block := blockEvt.Block
-		txs, err := idx.blockTransactions(block)
-		if err != nil {
-			idx.fatal(fmt.Errorf(
-				"midnight indexer: decode block slot=%d block=%d: %w",
-				block.Slot, block.Number, err,
-			))
-			return
-		}
-		timestampMs, err := idx.blockTimestamp(block.Slot)
-		if err != nil {
-			idx.fatal(err)
-			return
-		}
-		// Epoch resolution and advance happen inside processBlock (it must
-		// also handle the backfill path, which calls processBlock directly),
-		// so that the epoch-snapshot write it can trigger is covered by the
-		// same block-scoped write transaction as every other row this block
-		// produces, instead of committing separately beforehand.
-		if err := idx.processBlock(block, txs, timestampMs); err != nil {
-			idx.fatal(fmt.Errorf(
-				"midnight indexer: process block slot=%d block=%d: %w",
-				block.Slot, block.Number, err,
-			))
-			return
-		}
-		// Persist checkpoint only after all writes for the block succeeded.
-		if idx.config.BlockIterator != nil {
-			if err := idx.updateCheckpoint(block.Slot); err != nil {
-				idx.fatal(fmt.Errorf(
-					"midnight indexer: checkpoint slot=%d block=%d: %w",
-					block.Slot, block.Number, err,
-				))
-				return
+		return idx.indexApply(blockEvt.Block)
+	}
+	return true
+}
+
+// indexApply indexes a block applied to the chain. The ledger publishes an
+// Apply before it applies the block, and a certifying Dijkstra block's
+// transactions live in an endorser-block closure it persists only at apply, so
+// the closure can be missing here -- notably for blocks stored before a
+// restart and replayed at startup, before the endorser-block data provider is
+// wired. That is a wait, not a failure: it reports false and the block is
+// retried. Any other error is fatal.
+func (idx *Indexer) indexApply(block models.Block) bool {
+	txs, err := idx.blockTransactions(block)
+	if err != nil {
+		if errors.Is(err, ledger.ErrCertifiedClosureUnavailable) {
+			if !idx.deferring {
+				idx.deferring = true
+				idx.logger().Warn(
+					"midnight indexer: deferring block until its certified closure is available",
+					"slot", block.Slot,
+					"block", block.Number,
+					"error", err,
+				)
 			}
+			return false
+		}
+		idx.fatal(fmt.Errorf(
+			"midnight indexer: decode block slot=%d block=%d: %w",
+			block.Slot, block.Number, err,
+		))
+		return true
+	}
+	timestampMs, err := idx.blockTimestamp(block.Slot)
+	if err != nil {
+		idx.fatal(err)
+		return true
+	}
+	// Epoch resolution and advance happen inside processBlock (it must
+	// also handle the backfill path, which calls processBlock directly),
+	// so that the epoch-snapshot write it can trigger is covered by the
+	// same block-scoped write transaction as every other row this block
+	// produces, instead of committing separately beforehand.
+	if err := idx.processBlock(block, txs, timestampMs); err != nil {
+		idx.fatal(fmt.Errorf(
+			"midnight indexer: process block slot=%d block=%d: %w",
+			block.Slot, block.Number, err,
+		))
+		return true
+	}
+	// Persist checkpoint only after all writes for the block succeeded.
+	if idx.config.BlockIterator != nil {
+		if err := idx.updateCheckpoint(block.Slot); err != nil {
+			idx.fatal(fmt.Errorf(
+				"midnight indexer: checkpoint slot=%d block=%d: %w",
+				block.Slot, block.Number, err,
+			))
+			return true
 		}
 	}
+	return true
 }
 
 // errIncompleteRollback marks a rollback whose database changes committed but

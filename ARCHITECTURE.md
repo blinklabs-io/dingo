@@ -1257,11 +1257,17 @@ barrier and the walk are skipped when nothing subscribes to `ledger.block`
 
 Replayed Applies are published before the ledger applies the blocks, as live
 ones are. A Dijkstra block that certifies an endorser block takes its
-transactions from that endorser block, which the ledger persists only when it
-applies the certifying block and otherwise fetches from a peer. After a restart
-a stored, unapplied certifying block can therefore have no closure data yet, and
-a subscriber that resolves the block's transactions on Apply, such as the
-Midnight indexer, fails on it.
+transactions from that endorser block's closure, which the ledger persists only
+when it applies the certifying block and otherwise fetches from a peer. A
+stored, unapplied certifying block can therefore have no closure at replay,
+and the endorser-block data provider is not wired until after `Start`.
+`LedgerState.BlockTransactions` reports that case as
+`ErrCertifiedClosureUnavailable`, distinct from a closure that is present but
+invalid. The Midnight indexer treats it as a wait, not a failure: it queues
+every block event in order, holds the block and everything behind it until the
+closure resolves, retries on each later event and on a timer, and drops a
+queued Apply whose block is undone first. Any other block error is still
+fatal.
 
 An ordinary stalled subscriber detaches after its delivery timeout; a lossless
 subscriber deliberately remains attached until it drains or is stopped, closed,
