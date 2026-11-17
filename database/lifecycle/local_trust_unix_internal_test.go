@@ -274,3 +274,13 @@ func TestSnapshotAncestorRejectsSharedGroupDirectory(t *testing.T) {
 		})
 	}
 }
+
+// A sticky directory owned by someone else is a shared temporary root that a
+// non-release build may trust. A release build must refuse it: its owner could
+// still rename the caller's entry.
+func TestForeignOwnerAncestorPolicy(t *testing.T) {
+	t.Parallel()
+	mode := os.ModeDir | os.ModeSticky | 0o777
+	require.True(t, foreignOwnerAncestorAllowed(mode, false))
+	require.False(t, foreignOwnerAncestorAllowed(mode, true))
+}

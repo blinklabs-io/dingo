@@ -1959,7 +1959,11 @@ local restore is accepted on Unix only when the snapshot directory and its fixed
 files are owned by the current user or root, are not group- or other-writable,
 and every lexical and symlink-resolved directory ancestor, and every symlink in
 the path, is owned by the current user or root, with the sticky bit required on
-any ancestor writable by group or other. The error names the refused ancestor;
+any ancestor writable by group or other. A build that does not stamp
+`version.Version`, which includes every test binary, also accepts a sticky
+ancestor directory owned by another user, such as a shared temporary root; a
+release build never does, and the snapshot directory and its files must still
+be owned by the current user or root. The error names the refused ancestor;
 set its sticky bit (`chmod +t`) or remove its group and other write access.
 Group membership is not trusted: setgid does not stop another member of the
 group from renaming entries. A Kubernetes `fsGroup` volume root is group-writable

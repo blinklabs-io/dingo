@@ -506,9 +506,11 @@ func activateRestoreDirs(
 // ValidateRestoreWorkParent reports an error unless dir is a real directory
 // whose absolute ancestor chain only the current user or root can modify. On
 // Unix, each ancestor must be owned by one of them and may be writable by
-// group or other only with the sticky bit set. Anyone else who could write
-// dir could rename a live data directory onto a work directory's name before
-// a removal or rename by that name runs.
+// group or other only with the sticky bit set. A build that does not stamp
+// version.Version also accepts a sticky ancestor owned by another user, such
+// as a shared temporary root; a release build never does. Anyone else who
+// could write dir could rename a live data directory onto a work directory's
+// name before a removal or rename by that name runs.
 func ValidateRestoreWorkParent(dir string) error {
 	return validateRestoreWorkParent(dir)
 }

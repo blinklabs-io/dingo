@@ -5014,7 +5014,10 @@ quiesce, so an incompatible snapshot costs a quiesce and reopen cycle rather
 than any data. Before the first removal by name, `Restore` requires `dataDir`'s
 parent to pass `lifecycle.ValidateRestoreWorkParent` (on Unix, every ancestor
 owned by the current user or root and writable by others only with the sticky
-bit), and the staging and backup directories are removed through
+bit; a build that is not a release, one that does not stamp `version.Version`,
+also accepts a sticky ancestor owned by another user so tests and local runs
+work below a shared temporary root, and a release build never does), and the
+staging and backup directories are removed through
 `lifecycle.RemoveRestoreWorkDir`, which recurses through a retained directory
 handle and never follows a substituted name. Local Badger/SQLite data is
 restored in `<dataDir>.restore-staging`, opened again through the node's actual
