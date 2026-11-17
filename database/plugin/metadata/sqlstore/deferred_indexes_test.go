@@ -321,3 +321,30 @@ func TestDeferredIndexSQLPartialPredicateByDialect(t *testing.T) {
 		deferredIndexCreateSQL(MySQLDialect(), index),
 	)
 }
+
+// TestBulkLoadDefersAddressAndScriptIndexes pins that the address- and
+// script-hash-keyed API indexes are dropped for a bulk load and rebuilt with
+// the critical set, against the real migrated schema.
+func TestBulkLoadDefersAddressAndScriptIndexes(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	names := []string{
+		"idx_utxo_address_address", "idx_utxo_address_order",
+		"idx_redeemer_script_position",
+	}
+
+	require.NoError(t, store.DropDeferredIndexesContext(t.Context()))
+	missing, err := store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.Subset(t, missing, names)
+
+	require.NoError(t, store.BuildCriticalDeferredIndexesContext(t.Context()))
+	critical, err := store.MissingCriticalDeferredIndexes()
+	require.NoError(t, err)
+	require.Empty(t, critical)
+	missing, err = store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	for _, name := range names {
+		require.NotContains(t, missing, name)
+	}
+}
