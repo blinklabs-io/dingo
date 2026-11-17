@@ -23,7 +23,27 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/blinklabs-io/dingo/internal/version"
 )
+
+// releaseBuild reports whether this binary was built as a release. Release
+// builds stamp version.Version at link time; every other build, including each
+// test binary, leaves it empty.
+func releaseBuild() bool {
+	return version.Version != ""
+}
+
+// foreignOwnerAncestorAllowed reports whether a snapshot path ancestor owned
+// by neither the current user nor root may be trusted. Only a build that is not
+// a release accepts one, and only a sticky directory: a shared temporary root
+// such as a TMPDIR owned by another user, below which the caller's own
+// directories are private. Its owner could still rename the caller's entry, so
+// a release build never accepts it, and a directory the caller does not
+// control by other means (not sticky, or a symlink) is never accepted.
+func foreignOwnerAncestorAllowed(mode fs.FileMode, release bool) bool {
+	return !release && mode.IsDir() && mode&os.ModeSticky != 0
+}
 
 func requirePrivateSnapshotParent(parent string) error {
 	_, err := inspectSnapshotPath(parent, false)
@@ -147,7 +167,8 @@ func validateSnapshotAncestorChain(path string) error {
 		// a link owned by another user could be retargeted after this check.
 		// Its mode bits carry no meaning, so only the owner is checked.
 		if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			if err := requireTrustedSnapshotOwner(current, info); err != nil {
+			if err := requireTrustedSnapshotOwner(current, info); err != nil &&
+				!foreignOwnerAncestorAllowed(info.Mode(), releaseBuild()) {
 				return fmt.Errorf("snapshot path ancestor: %w", err)
 			}
 		}
