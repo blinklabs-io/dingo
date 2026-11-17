@@ -4783,11 +4783,15 @@ its `drep_expiry_history` as of that slot, because the ledger renews them in
 place without moving the row's slot. The columns with no such record are the
 ledger's current value when the row's slot falls in a segment: `drep.active`,
 the delegation and CIP-0163 `expiration_epoch` columns of `account`, and
-`reward_ada_pots.rewards`, which the reward calculation fills mid-epoch after
-the row's `captured_slot`. While the IndexerDB lags they can run ahead
-of their slot by the ledger's progress; the current-state routes that read
-them answer 503 once the lag exceeds `indexer.maxReadyLagBlocks`, and no
-route reads `reward_ada_pots`.
+`reward_ada_pots.rewards`, which the reward calculation fills after the row's `captured_slot`. A
+reward round can finish after the writer has passed that slot. The writer
+reads completed reward-precompute cursors before each fact pass, copies finished
+pool and account outputs by epoch when needed, and persists a per-epoch copy
+marker in IndexerDB. A later boundary re-reads outputs whose eligibility
+changed before crediting them, preserving IndexerDB's local folded state.
+Rollback removes markers for rounds whose captured slots were rolled back.
+Current-state routes that read ahead-running values answer 503 once the lag
+exceeds `indexer.maxReadyLagBlocks`; no current route reads `reward_ada_pots`.
 
 `pparam_update`, certificates, transactions and UTxOs are derived by block
 replay and not copied. An empty IndexerDB on a chain that starts at genesis is

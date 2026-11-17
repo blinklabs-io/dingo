@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -210,6 +211,9 @@ func (s *Store) WriteFactRows(
 	if err != nil {
 		return fmt.Errorf("write %s facts: %w", t.Name, err)
 	}
+	if t.Name == "reward_account_output" {
+		rows = withoutRewardOutputFolded(rows)
+	}
 	if t.Companion != nil {
 		return s.writeCompanionFacts(txCtx, db, t, rows)
 	}
@@ -281,6 +285,19 @@ func (s *Store) WriteFactRows(
 			", ",
 		) + ") VALUES (" + marks + ")"
 	for _, row := range rows.Rows {
+		if t.Name == "reward_account_output" {
+			if _, ok := colIdx["folded"]; !ok {
+				done, err := s.updateOutputInPlace(
+					txCtx, db, t, rows.Columns, row, keyWhere, keyArgs(row),
+				)
+				if err != nil {
+					return err
+				}
+				if done {
+					continue
+				}
+			}
+		}
 		if _, err := db.ExecContext(txCtx, del, keyArgs(row)...); err != nil {
 			return fmt.Errorf("replace %s facts: %w", t.Name, err)
 		}
@@ -568,4 +585,96 @@ func (s *Store) refreshPatchedAccountLiveStake(
 	return s.refreshRewardLiveStakeAggregateDelta(
 		ctx, db, models.NewStakeCredentialRef(uint8(tag), key), slot, 0,
 	)
+}
+
+// updateOutputInPlace overwrites the copied columns of a reward output the
+// store already holds and reports whether it did. Copied fact rows omit the
+// IndexerDB's folded bit, which records that the credit is in the account; a
+// row copied again must keep it, or its reward would count twice.
+func (s *Store) updateOutputInPlace(
+	ctx context.Context,
+	db queryer,
+	t metadata.FactTable,
+	columns []string,
+	row []any,
+	keyWhere string,
+	keyArgs []any,
+) (bool, error) {
+	isKey := make(map[string]bool, len(t.Key))
+	for _, k := range t.Key {
+		isKey[k] = true
+	}
+	var sets []string
+	var args []any
+	for i, c := range columns {
+		if isKey[c] {
+			continue
+		}
+		sets = append(sets, s.dialect.QuoteIdentifier(c)+" = ?")
+		args = append(args, row[i])
+	}
+	if len(sets) == 0 {
+		return false, nil
+	}
+	res, err := db.ExecContext(
+		ctx,
+		"UPDATE "+s.dialect.QuoteIdentifier(t.Name)+" SET "+
+			strings.Join(sets, ", ")+" WHERE "+keyWhere,
+		append(args, keyArgs...)...,
+	)
+	if err != nil {
+		return false, fmt.Errorf("update %s facts: %w", t.Name, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("update %s facts: %w", t.Name, err)
+	}
+	if n > 0 {
+		return true, nil
+	}
+	// MySQL reports no affected row for an update that changed nothing.
+	var one int
+	err = db.QueryRowContext(
+		ctx,
+		"SELECT 1 FROM "+s.dialect.QuoteIdentifier(t.Name)+" WHERE "+
+			keyWhere,
+		keyArgs...,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("update %s facts: %w", t.Name, err)
+	}
+	return true, nil
+}
+
+// withoutRewardOutputFolded removes the IndexerDB's local fold state from
+// ledger facts. The writer derives it by replaying reward credits; importing
+// the ledger's copy can either clear a credit it already applied or mark one
+// folded before the writer has applied it.
+func withoutRewardOutputFolded(rows metadata.FactRows) metadata.FactRows {
+	folded := -1
+	for i, column := range rows.Columns {
+		if column == "folded" {
+			folded = i
+			break
+		}
+	}
+	if folded < 0 {
+		return rows
+	}
+	out := metadata.FactRows{
+		Columns: make([]string, 0, len(rows.Columns)-1),
+		Rows:    make([][]any, 0, len(rows.Rows)),
+	}
+	out.Columns = append(out.Columns, rows.Columns[:folded]...)
+	out.Columns = append(out.Columns, rows.Columns[folded+1:]...)
+	for _, row := range rows.Rows {
+		withoutFolded := make([]any, 0, len(row)-1)
+		withoutFolded = append(withoutFolded, row[:folded]...)
+		withoutFolded = append(withoutFolded, row[folded+1:]...)
+		out.Rows = append(out.Rows, withoutFolded)
+	}
+	return out
 }

@@ -121,7 +121,7 @@ type rewardPrecomputeCursor struct {
 	RollbackSeq uint64 `json:"rollback_seq,omitempty"`
 }
 
-const rewardPrecomputeCursorPrefix = stakeRewardSourcePrefix + "precompute-cursor:"
+const rewardPrecomputeCursorPrefix = models.RewardPrecomputeCursorPrefix
 
 func rewardPrecomputeCursorKey(snapshotEpoch uint64) string {
 	return fmt.Sprintf("%s%d", rewardPrecomputeCursorPrefix, snapshotEpoch)

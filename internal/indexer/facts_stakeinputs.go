@@ -214,35 +214,56 @@ func (f *MetadataFacts) copyStakeInputEpoch(
 	dst *database.Txn,
 	e pendingStakeInput,
 ) error {
+	return f.copyEpochRows(
+		ctx, dst, stakeInputTable, e.BoundarySlot, e.BoundarySlot, &e.Epoch,
+	)
+}
+
+// copyEpochRows copies the rows of table dated in [from, through], only those
+// of epoch when one is given, by natural key.
+func (f *MetadataFacts) copyEpochRows(
+	ctx context.Context,
+	dst *database.Txn,
+	table metadata.FactTable,
+	from, through uint64,
+	epoch *uint64,
+) error {
 	var cursor int64
+	restarts := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		rows, next, err := f.srcRows.ReadFactRows(
-			ctx, stakeInputTable, e.BoundarySlot, e.BoundarySlot,
-			cursor, factPageRows, nil,
+			ctx, table, from, through, cursor, factPageRows, nil,
 		)
+		if errors.Is(err, metadata.ErrFactCursorLost) && restarts < maxCursorRestarts {
+			restarts++
+			cursor = 0
+			continue
+		}
 		if err != nil {
 			return err
 		}
-		epochCol := slices.Index(rows.Columns, "epoch")
-		if epochCol < 0 {
-			return errors.New("indexer: stake input rows lack epoch")
-		}
-		kept := rows.Rows[:0]
-		for _, r := range rows.Rows {
-			epoch, err := asUint64(r[epochCol])
-			if err != nil {
-				return err
+		if epoch != nil {
+			epochCol := slices.Index(rows.Columns, "epoch")
+			if epochCol < 0 {
+				return fmt.Errorf("indexer: %s rows lack epoch", table.Name)
 			}
-			if epoch == e.Epoch {
-				kept = append(kept, r)
+			kept := rows.Rows[:0]
+			for _, r := range rows.Rows {
+				got, err := asUint64(r[epochCol])
+				if err != nil {
+					return err
+				}
+				if got == *epoch {
+					kept = append(kept, r)
+				}
 			}
+			rows.Rows = kept
 		}
-		rows.Rows = kept
 		if err := f.dstRows.WriteFactRows(
-			stakeInputTable, rows, dst.Metadata(),
+			table, rows, dst.Metadata(),
 		); err != nil {
 			return err
 		}

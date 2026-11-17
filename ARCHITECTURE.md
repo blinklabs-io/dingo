@@ -3795,10 +3795,15 @@ canonical blocks from the IndexerDB tip to the ledger's durable tip behind a
 batch's rows, ledger facts and new tip in one transaction. A `FactsSource`
 (`MetadataFacts`, over `metadata.FactRowStore`) copies the epoch-boundary facts
 by natural key, and the writer splits a batch at each boundary so a boundary's
-reward credits land between the blocks before and after it. The ledger
-journals a round's credits lazily, so credits dated before the writer's
-segment are re-read at the boundary slot of every round that still holds
-unfolded outputs, and each applied credit marks its output folded. With the
+reward credits land between the blocks before and after it. Before each fact
+pass, the writer reads completed reward-precompute cursors; if a round finished
+after its captured slot was copied, it copies that round's pool and account
+outputs by epoch and records the copy in IndexerDB. Those markers are removed
+when rollback removes the round's captured slot, and are committed with the
+fact rows. The ledger journals a round's credits lazily, so credits dated
+before the writer's segment are re-read at the boundary slot of every round
+that still holds unfolded outputs, and each applied credit marks its output
+folded. With the
 accounts family drained the journal is the live UTxO set's reward records,
 which carry a sequence number in write order (`badgerutxo.RewardRecord.Seq`)
 so a late credit at an old slot follows the position a reader holds. The

@@ -217,6 +217,11 @@ const StakeRewardSourcePrefix = "dingo:stake-reward:"
 const RewardStakeInputsPendingKey = StakeRewardSourcePrefix +
 	"stake-inputs-pending"
 
+// RewardPrecomputeCursorPrefix prefixes the sync_state keys holding the
+// reward precompute cursor of each snapshot epoch.
+const RewardPrecomputeCursorPrefix = StakeRewardSourcePrefix +
+	"precompute-cursor:"
+
 // StakeRewardSourceHash is the account_reward_delta tx_hash of the credit a
 // reward_account_output row produces, which makes crediting it idempotent.
 func StakeRewardSourceHash(

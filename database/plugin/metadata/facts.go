@@ -122,6 +122,15 @@ type PendingStakeInputsReader interface {
 	RewardStakeInputsPendingState() (string, error)
 }
 
+// RewardPrecomputeCursorReader is the optional capability of a FactRowReader
+// whose ledger keeps the reward precompute cursors somewhere other than the
+// metadata store's sync state.
+type RewardPrecomputeCursorReader interface {
+	// RewardPrecomputeCursors returns each retained cursor record as the
+	// ledger stores it, by snapshot epoch.
+	RewardPrecomputeCursors() (map[uint64]string, error)
+}
+
 // ErrFactCursorLost is returned by a fact read whose cursor names an export
 // the reader no longer holds, as after a restart between pages. The caller
 // starts the table again from the beginning.

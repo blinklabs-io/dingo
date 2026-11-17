@@ -265,6 +265,10 @@ func (f *MetadataFacts) CopyFacts(
 	if err := f.copyDeferredStakeInputs(ctx, dst); err != nil {
 		return err
 	}
+	rounds, err := f.finishedRewardRounds()
+	if err != nil {
+		return err
+	}
 	for _, table := range metadata.FactTables {
 		if table.AfterBlocks() {
 			continue
@@ -272,6 +276,11 @@ func (f *MetadataFacts) CopyFacts(
 		if err := f.copyTable(ctx, dst, table, from, through); err != nil {
 			return err
 		}
+	}
+	if err := f.copyLateRewardOutputs(
+		ctx, dst, rounds, from, through,
+	); err != nil {
+		return err
 	}
 	return f.applyRewardCredits(ctx, dst, from, through)
 }
@@ -312,6 +321,9 @@ func (f *MetadataFacts) RollbackFacts(
 	// Journal ids of the source may be reused after its own rollback, so no
 	// read position survives one.
 	if err := f.clearCreditMarks(dst); err != nil {
+		return err
+	}
+	if err := f.dropCopiedRewardOutputsAfter(dst, point.Slot); err != nil {
 		return err
 	}
 	return f.dropDeferredStakeInputsAfter(dst, point.Slot)
