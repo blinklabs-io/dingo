@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -44,6 +45,7 @@ func newTestStorageHost(t *testing.T) *plugin.Host {
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
 	require.NoError(t, sqlite.RegisterProvider(host))
+	require.NoError(t, chunkfile.RegisterProvider(host))
 	t.Cleanup(func() { _ = host.Stop(context.Background()) })
 	return host
 }

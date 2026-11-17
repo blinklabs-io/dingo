@@ -33,7 +33,8 @@ import (
 // always did.
 type immutableBlobStore struct {
 	blob.BlobStore
-	dir string
+	// read resolves a marker's location through the ImmutableDB provider.
+	read func(immutable.Location) (uint, []byte, error)
 }
 
 var (
@@ -96,7 +97,7 @@ func (s *immutableBlobStore) resolve(value []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, inner, err := immutable.ReadBlockAt(s.dir, immutable.Location{
+	_, inner, err := s.read(immutable.Location{
 		Chunk:  marker.Chunk,
 		Offset: marker.Offset,
 		Size:   marker.Size,

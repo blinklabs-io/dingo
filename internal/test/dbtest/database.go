@@ -29,6 +29,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
+	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
@@ -159,6 +161,11 @@ type Options struct {
 	// StatementGuard, when set, vets every SQL statement the metadata
 	// store's connections run.
 	StatementGuard metadata.StatementGuard
+
+	// WrapImmutable, when set, passes the resolved ImmutableDB provider
+	// through itself before it is injected into the database. Returning nil
+	// injects none.
+	WrapImmutable func(immplugin.ImmutableDB) immplugin.ImmutableDB
 }
 
 // NewDatabase composes Badger and SQLite for a test. The database is closed
@@ -248,6 +255,9 @@ func newDatabaseWithOptions(
 	if err := metadataRegister(host); err != nil {
 		return nil, err
 	}
+	if err := chunkfile.RegisterProvider(host); err != nil {
+		return nil, err
+	}
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
 		plugin.CapabilityStorageBlob, blobName, blobConfig,
@@ -311,10 +321,28 @@ func newDatabaseWithOptions(
 	if wrap != nil {
 		metadataStore = wrap(metadataStore)
 	}
+	immutableStore, err := plugin.Resolve[immplugin.ImmutableDB](
+		context.Background(), host,
+		plugin.CapabilityStorageImmutable, chunkfile.ProviderName, nil,
+		immplugin.ProviderDependencies{
+			DataDir: config.DataDir, Logger: config.Logger,
+		},
+	)
+	if err != nil {
+		_ = host.Stop(context.Background())
+		return nil, err
+	}
+	if opts.WrapImmutable != nil {
+		immutableStore = opts.WrapImmutable(immutableStore)
+	}
 	db, err := database.New(
 		context.Background(),
 		config,
-		database.Stores{Blob: blobStore, Metadata: metadataStore},
+		database.Stores{
+			Blob:      blobStore,
+			Metadata:  metadataStore,
+			Immutable: immutableStore,
+		},
 	)
 	if db == nil {
 		_ = host.Stop(context.Background())

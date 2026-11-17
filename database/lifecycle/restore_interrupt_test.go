@@ -28,6 +28,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -55,6 +56,7 @@ func runRestoreInterruptHelper() {
 	host := plugin.NewHost()
 	_ = badger.RegisterProvider(host)
 	_ = sqlite.RegisterProvider(host)
+	_ = chunkfile.RegisterProvider(host)
 	_, _ = lifecycle.Restore(
 		context.Background(),
 		host,
@@ -150,6 +152,7 @@ func TestRestoreRetryReclaimsKilledAttemptWork(t *testing.T) {
 	require.NoError(t, os.WriteFile(backupPath, backup, 0o600))
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
+	require.NoError(t, chunkfile.RegisterProvider(host))
 	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 	_, err = lifecycle.Restore(
 		context.Background(),

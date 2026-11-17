@@ -4,9 +4,9 @@ Dingo plugins are compiled-in Go providers registered explicitly on an
 application-owned `plugin.Host`. Registration never happens in `init`, provider
 configuration is decoded before construction, and the host owns `Start`/`Stop`.
 
-Storage contracts remain in `database/plugin/blob` and
-`database/plugin/metadata`; the generic `plugin` package does not import either
-domain. The same platform also hosts consensus, mempool, and API providers.
+Storage contracts remain in `database/plugin/blob`,
+`database/plugin/metadata` and `database/plugin/immutable`; the generic
+`plugin` package does not import any of these domains. The same platform also hosts consensus, mempool, and API providers.
 
 Consensus providers implement `consensus.Provider`. One resolved instance must
 make header authorization, leader scheduling, and chain comparison decisions
@@ -15,6 +15,16 @@ components: use `consensus.HeaderVerifier` for ledger-owned Praos checks and
 the scheduler factory supplied by composition. A provider must return stable,
 versioned network, database, and schedule identities. Register it explicitly in
 `internal/plugins/register.go`; do not register from `init`.
+
+The `storage.immutable` capability serves the ImmutableDB of promoted block
+bodies. A provider returns `immutable.ImmutableDB`: the chunk directory
+(`Dir`), the single writer (`Open`, returning an `immutable.Store` that
+appends, syncs, reads by location, looks up points and truncates), marker reads
+(`ReadBlockAt`) and file listing (`ListFiles`). The only provider is the
+built-in `chunkfile` in `database/plugin/immutable/chunkfile`, registered in
+every build and resolved by `plugins.ResolveStorage`; it takes no configuration
+and has no selector flag. Its descriptor sets `DurableClose`, so host shutdown
+closes the open writer to completion.
 
 ## Provider shape
 

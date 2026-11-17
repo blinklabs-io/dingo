@@ -21,12 +21,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
 	"github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -40,7 +40,7 @@ const (
 	immutableStateVersion = 1
 	// ImmutableDirName is the directory under the data directory that holds
 	// the chunk files.
-	ImmutableDirName = "immutable"
+	ImmutableDirName = immplugin.DirName
 )
 
 // DefaultImmutablePromoteBatch is the number of blocks promoted per step when
@@ -139,10 +139,13 @@ func decodeImmutableState(data []byte) (ImmutableState, error) {
 // record exists.
 type immutableRuntime struct {
 	dir string
+	// svc is the ImmutableDB provider; it opens the chunk writer and reads
+	// blocks back.
+	svc immplugin.ImmutableDB
 	// mu serializes promotion with operator truncation and every other
 	// transition that rewrites the chunk files or the tip.
 	mu    sync.Mutex
-	store *immutable.Store
+	store immplugin.Store
 	// state mirrors the persisted record for lock-free floor checks.
 	stateMu sync.RWMutex
 	state   ImmutableState
@@ -335,6 +338,11 @@ func (d *Database) initImmutable() error {
 	if d.config.DataDir == "" {
 		return errors.New("the ImmutableDB requires a data directory")
 	}
+	if d.immutableDB == nil {
+		return errors.New(
+			"the ImmutableDB requires a storage.immutable provider",
+		)
+	}
 	if !found {
 		geom := immutable.Geometry{
 			ChunkSlots:    cfg.ChunkSlots,
@@ -367,14 +375,15 @@ func (d *Database) initImmutable() error {
 		old.mu.Unlock()
 	}
 	rt := &immutableRuntime{
-		dir:        filepath.Join(d.config.DataDir, ImmutableDirName),
+		dir:        d.immutableDB.Dir(),
+		svc:        d.immutableDB,
 		state:      st,
 		unrecorded: !found,
 	}
 	d.immutable = rt
 	d.SetBlobStore(&immutableBlobStore{
 		BlobStore: base,
-		dir:       rt.dir,
+		read:      rt.svc.ReadBlockAt,
 	})
 	return nil
 }
@@ -408,7 +417,7 @@ func (d *Database) recordImmutableState() error {
 
 // openImmutableStore opens the chunk writer and reconciles it with the
 // recorded tip. The caller holds rt.mu.
-func (d *Database) openImmutableStore() (*immutable.Store, error) {
+func (d *Database) openImmutableStore() (immplugin.Store, error) {
 	rt := d.immutable
 	if rt.store != nil {
 		return rt.store, nil
@@ -419,7 +428,7 @@ func (d *Database) openImmutableStore() (*immutable.Store, error) {
 		return nil, ErrImmutableAdoptionPending
 	}
 	st := rt.snapshot()
-	s, err := immutable.OpenStore(rt.dir, st.Geometry)
+	s, err := rt.svc.Open(st.Geometry)
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +578,7 @@ func (d *Database) promoteBatchLimit(batch int) int {
 // promoteBatch promotes up to batch blocks starting at index next. It returns
 // -1 (with no error) when no further block exists at or below ceiling.
 func (d *Database) promoteBatch(
-	store *immutable.Store,
+	store immplugin.Store,
 	st ImmutableState,
 	next, ceiling uint64,
 	batch int,

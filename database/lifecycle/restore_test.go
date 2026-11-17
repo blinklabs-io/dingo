@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
@@ -76,6 +77,7 @@ func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
 
 	var gotRunModes []string
 	host := plugin.NewHost()
+	require.NoError(t, chunkfile.RegisterProvider(host))
 	require.NoError(t, plugin.Register(
 		host,
 		plugin.Descriptor{
@@ -261,6 +263,7 @@ func newRemoteRestoreHostWithBlobName(
 	metadataDir := filepath.Join(dataRoot, "metadata")
 	blobDir := filepath.Join(dataRoot, "blob")
 	host := plugin.NewHost()
+	require.NoError(t, chunkfile.RegisterProvider(host))
 	require.NoError(t, plugin.Register[metadata.MetadataStore](
 		host,
 		plugin.Descriptor{

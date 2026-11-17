@@ -4297,6 +4297,18 @@ chunk files, and Badger keeps a marker per promoted block.
 - `database/immutable` writes and reads the chunk, secondary and primary files
   (`Store`), including crash recovery and O(1) point reads that find a Byron
   epoch boundary block at its chunk's first relative slot.
+- The ImmutableDB is the `storage.immutable` plugin capability. Its contract
+  is `database/plugin/immutable.ImmutableDB` (`Dir`, `Open`, `ReadBlockAt`,
+  `ListFiles`) with a `Store` writer (append, sync, tip, read by location,
+  point lookup, truncate). The built-in `chunkfile` provider
+  (`database/plugin/immutable/chunkfile`) wraps `database/immutable.Store`,
+  is registered by `internal/plugins.NewHost` in every build, and is resolved
+  by `plugins.ResolveStorage` with no selector. `database.Stores.Immutable`
+  carries it into `database.New`, which opens the chunk writer, reads markers
+  and lists snapshot files only through it; a database without an ImmutableDB
+  needs none. The provider is a durable-close plugin: host shutdown closes a
+  writer its holder left open to completion, and a later `Open` is refused.
+  `Database.Close` and the failed-step reset still close the writer first.
 - `database` installs an `immutableBlobStore` over the blob store whenever the
   `im_state` record exists. It resolves markers in `GetBlock`, `Get` on `bp`
   keys and iterator values, so chain iteration, blockfetch, chainsync and

@@ -1157,6 +1157,10 @@ func WithPluginSelection(
 			c.cfg.Plugins.Storage.Blob = selection
 		case hostplugin.CapabilityStorageMetadata:
 			c.cfg.Plugins.Storage.Metadata = selection
+		case hostplugin.CapabilityStorageImmutable:
+			// The ImmutableDB has a single built-in provider and no
+			// selection.
+			return
 		case hostplugin.CapabilityConsensus:
 			c.cfg.Plugins.Consensus = selection
 		case hostplugin.CapabilityMempool:

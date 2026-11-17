@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/prometheus/client_golang/prometheus"
@@ -80,6 +81,9 @@ type Config struct {
 type Stores struct {
 	Blob     blob.BlobStore
 	Metadata metadata.MetadataStore
+	// Immutable provides the ImmutableDB. It is required only when the
+	// database uses one: a recorded state or an enabled configuration.
+	Immutable immplugin.ImmutableDB
 	// Leios is the endorser-block store. Nil lets the Database open its own
 	// under the data directory on first use and close it with Close.
 	Leios leiosdb.Store
@@ -138,6 +142,9 @@ type Database struct {
 
 	// immutable is the ImmutableDB handle; nil until a state record exists.
 	immutable *immutableRuntime
+	// immutableDB is the injected ImmutableDB service; nil when the caller
+	// supplied none.
+	immutableDB immplugin.ImmutableDB
 	// leios is the lazily opened endorser-block store; see leios.go.
 	leiosMu sync.Mutex
 	leios   leiosStoreState
@@ -595,11 +602,15 @@ func New(
 	if stores.Metadata == nil || isNilStore(stores.Metadata) {
 		return nil, errors.New("metadata store is required")
 	}
+	if stores.Immutable != nil && isNilStore(stores.Immutable) {
+		return nil, errors.New("immutable store must not be a typed nil")
+	}
 	db := &Database{
-		blobRef:  newBlobStoreRef(stores.Blob),
-		metadata: stores.Metadata,
-		logger:   configCopy.Logger,
-		config:   configCopy,
+		blobRef:     newBlobStoreRef(stores.Blob),
+		metadata:    stores.Metadata,
+		immutableDB: stores.Immutable,
+		logger:      configCopy.Logger,
+		config:      configCopy,
 	}
 	if stores.Leios != nil && !isNilStore(stores.Leios) {
 		db.leios.store = stores.Leios

@@ -36,6 +36,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
+	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -2252,12 +2254,30 @@ func validateRestoredDatabase(
 			return err
 		}
 	}
+	immutableStore, err := plugin.Resolve[immplugin.ImmutableDB](
+		ctx,
+		host,
+		plugin.CapabilityStorageImmutable,
+		chunkfile.ProviderName,
+		nil,
+		immplugin.ProviderDependencies{DataDir: targetDataDir},
+	)
+	if err != nil {
+		return fmt.Errorf("resolve immutable plugin for validation: %w", err)
+	}
+	defer host.StopCapability( //nolint:errcheck
+		context.WithoutCancel(ctx), plugin.CapabilityStorageImmutable,
+	)
 	db, err := database.New(ctx, &database.Config{
 		DataDir:                   targetDataDir,
 		StorageMode:               manifest.StorageMode,
 		Network:                   manifest.Network,
 		AlonzoLovelacePerUtxoWord: storageConfig.AlonzoLovelacePerUtxoWord,
-	}, database.Stores{Blob: blobStore, Metadata: metadataStore})
+	}, database.Stores{
+		Blob:      blobStore,
+		Metadata:  metadataStore,
+		Immutable: immutableStore,
+	})
 	if db != nil {
 		defer db.Close()
 	}
