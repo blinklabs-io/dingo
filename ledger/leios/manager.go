@@ -84,6 +84,12 @@ const (
 	// harness/devnet mode where slotProvider is nil and EpochForSlot
 	// projects arbitrarily far.
 	committeeInFlightMaxEpochs = 16
+	// announcementArrivalMaxEntries bounds the header arrival stamps kept
+	// for announcements the chain has not armed yet. Only crypto-verified
+	// ranking-block headers are stamped, so the live set is about one per
+	// leader election inside voteStoreTTL; when it is full a new stamp is
+	// dropped and that announcement falls back to its chain admission time.
+	announcementArrivalMaxEntries = 4096
 )
 
 var (
@@ -462,6 +468,16 @@ type validatedAnnouncementRecord struct {
 	seenAt time.Time
 }
 
+// announcementArrivalRecord is when an authenticated ranking-block header
+// reached this node on a path other than the chain's header stream, kept
+// until the chain arms the announcement it carries. See
+// ObserveAnnouncementArrival.
+type announcementArrivalRecord struct {
+	ebHash    lcommon.Blake2b256
+	arrivedAt time.Time
+	seenAt    time.Time
+}
+
 // maxPendingPrototypeCandidatesPerVoter bounds alternate signatures retained
 // while an announcing ranking block is unknown. More than one candidate is
 // required because signatures cannot be verified until the announcement maps
@@ -623,6 +639,7 @@ type VoteManager struct {
 	latestRbSeq            uint64
 	acquiredEbs            map[lcommon.Blake2b256]acquiredEbRecord
 	validatedAnnouncements map[lcommon.Blake2b256]validatedAnnouncementRecord
+	announcementArrivals   map[lcommon.Blake2b256]announcementArrivalRecord
 	votedAnnouncements     map[lcommon.Blake2b256]struct{}
 	pendingVotes           map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote
 	// pendingVoteCount is the sum of all pending candidate slices;
@@ -740,6 +757,9 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		acquiredEbs:            make(map[lcommon.Blake2b256]acquiredEbRecord),
 		validatedAnnouncements: make(
 			map[lcommon.Blake2b256]validatedAnnouncementRecord,
+		),
+		announcementArrivals: make(
+			map[lcommon.Blake2b256]announcementArrivalRecord,
 		),
 		votedAnnouncements: make(map[lcommon.Blake2b256]struct{}),
 		pendingVotes: make(
@@ -2464,6 +2484,11 @@ func (m *VoteManager) prunePrototypeStateLocked(now time.Time) {
 			delete(m.validatedAnnouncements, rbHash)
 		}
 	}
+	for rbHash, record := range m.announcementArrivals {
+		if record.seenAt.Before(cutoff) {
+			delete(m.announcementArrivals, rbHash)
+		}
+	}
 	for ebHash, record := range m.acquiredEbs {
 		if record.seenAt.Before(cutoff) {
 			delete(m.acquiredEbs, ebHash)
@@ -3978,6 +4003,55 @@ func (m *VoteManager) ObserveAnnouncement(
 	m.observeAnnouncement(slot, rbHash, ebHash, 0, m.now())
 }
 
+// ObserveAnnouncementArrival records when the ranking-block header rbHash,
+// announcing endorser block ebHash at slot, reached this node outside the
+// chain's header stream. The caller must have verified the header's
+// cryptography (VRF, KES and operational certificate) before calling: the
+// stamp moves the CIP-164 L_hdr header-arrival check, so an unauthenticated
+// header must never set it.
+//
+// It never arms an announcement. Arming stays with the chain's
+// crypto-verified header admission and with block application
+// (handleChainHeaderAnnouncement, handleChainBlock); the stamp only lets
+// that announcement keep the earliest authenticated arrival time. If the
+// chain already armed the announcement, an earlier stamp lowers its
+// arrival time in place.
+func (m *VoteManager) ObserveAnnouncementArrival(
+	slot uint64,
+	rbHash lcommon.Blake2b256,
+	ebHash lcommon.Blake2b256,
+	arrivedAt time.Time,
+) {
+	if arrivedAt.IsZero() {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	m.prunePrototypeStateLocked(now)
+	if record, ok := m.announcements[rbHash]; ok {
+		if record.slot == slot && record.ebHash == ebHash &&
+			arrivedAt.Before(record.arrivedAt) {
+			record.arrivedAt = arrivedAt
+			m.announcements[rbHash] = record
+		}
+		return
+	}
+	if existing, ok := m.announcementArrivals[rbHash]; ok {
+		if existing.ebHash == ebHash && arrivedAt.Before(existing.arrivedAt) {
+			existing.arrivedAt = arrivedAt
+			m.announcementArrivals[rbHash] = existing
+		}
+		return
+	}
+	if len(m.announcementArrivals) >= announcementArrivalMaxEntries {
+		return
+	}
+	m.announcementArrivals[rbHash] = announcementArrivalRecord{
+		ebHash: ebHash, arrivedAt: arrivedAt, seenAt: now,
+	}
+}
+
 // observeAnnouncement is ObserveAnnouncement with the chain-mutation sequence
 // number of the header admission that produced it. headerSeq is zero for
 // announcements that did not come from the ordered header stream.
@@ -4023,6 +4097,17 @@ func (m *VoteManager) observeIssuedAnnouncement(
 	}
 	m.mu.Lock()
 	m.prunePrototypeStateLocked(record.seenAt)
+	// An authenticated header that reached this node before the chain armed
+	// it -- a LeiosNotify announcement -- arrived when it was first received,
+	// not when the chain admitted it. The stamp is consumed here, so a later
+	// rollback drops this announcement's arrival time together with the
+	// announcement, exactly as for one armed without a stamp.
+	if stamp, ok := m.announcementArrivals[rbHash]; ok {
+		delete(m.announcementArrivals, rbHash)
+		if stamp.ebHash == ebHash && stamp.arrivedAt.Before(record.arrivedAt) {
+			record.arrivedAt = stamp.arrivedAt
+		}
+	}
 	// The apply-path backstop re-observes announcements the header stream
 	// already armed; keep the sequence that records where on the chain
 	// this announcement came from rather than clearing it to zero.
