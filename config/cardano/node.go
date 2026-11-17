@@ -99,6 +99,12 @@ type CardanoNodeConfig struct {
 	// default; see LeiosMinOfferLeadSlots.
 	LeiosMinOfferLead *uint64 `yaml:"LeiosMinOfferLead"`
 
+	// LeiosAdaptiveEndorsements is the reference node's section for scaling
+	// the endorser blocks a block producer forges after announcements miss
+	// their quorum. Nil leaves the feature off; see
+	// LeiosAdaptiveEndorsementsSettings.
+	LeiosAdaptiveEndorsements *LeiosAdaptiveEndorsements `yaml:"LeiosAdaptiveEndorsements"`
+
 	// P2P peer target configuration from cardano-node config.json.
 	// These are read but only used as fallback defaults when the
 	// Dingo-native config (dingo.yaml / env) does not specify them.
@@ -370,6 +376,60 @@ func (c *CardanoNodeConfig) LeiosMinOfferLeadSlots() uint64 {
 		return DefaultLeiosMinOfferLead
 	}
 	return *c.LeiosMinOfferLead
+}
+
+// LeiosAdaptiveEndorsements is the LeiosAdaptiveEndorsements section of the
+// reference node's configuration. Every field is optional.
+type LeiosAdaptiveEndorsements struct {
+	// Enabled defaults to true when the section is present.
+	Enabled *bool `yaml:"Enabled"`
+	// Decrease is the factor a missed quorum scales the capacity by.
+	Decrease *float64 `yaml:"Decrease"`
+	// Increase is the share of the protocol's capacity a quorum reached
+	// adds back.
+	Increase *float64 `yaml:"Increase"`
+	// MinScale is the share of the protocol's capacity the scale never
+	// falls below.
+	MinScale *float64 `yaml:"MinScale"`
+}
+
+// Defaults of the LeiosAdaptiveEndorsements keys, as the reference node's
+// defaultLeiosAdaptiveEbConfig holds them.
+const (
+	DefaultLeiosAdaptiveDecrease = 0.8
+	DefaultLeiosAdaptiveIncrease = 0.02
+	DefaultLeiosAdaptiveMinScale = 0.1
+)
+
+// LeiosAdaptiveEndorsementsSettings returns the adaptive-endorsement
+// parameters and whether the feature is on. Like the reference node it is off
+// when the section is absent or has Enabled: false, and on when the section is
+// present without Enabled; a key left out takes its default. A nil receiver
+// is off.
+func (c *CardanoNodeConfig) LeiosAdaptiveEndorsementsSettings() (
+	decrease float64,
+	increase float64,
+	minScale float64,
+	enabled bool,
+) {
+	if c == nil || c.LeiosAdaptiveEndorsements == nil {
+		return 0, 0, 0, false
+	}
+	section := c.LeiosAdaptiveEndorsements
+	if section.Enabled != nil && !*section.Enabled {
+		return 0, 0, 0, false
+	}
+	decrease = valueOr(section.Decrease, DefaultLeiosAdaptiveDecrease)
+	increase = valueOr(section.Increase, DefaultLeiosAdaptiveIncrease)
+	minScale = valueOr(section.MinScale, DefaultLeiosAdaptiveMinScale)
+	return decrease, increase, minScale, true
+}
+
+func valueOr(v *float64, fallback float64) float64 {
+	if v == nil {
+		return fallback
+	}
+	return *v
 }
 
 // PBFTSignatureLimit returns the most blocks one genesis key may sign in a

@@ -3923,6 +3923,51 @@ func (m *VoteManager) handleChainBlock(evt chain.ChainBlockEvent) {
 	)
 }
 
+// AnnouncementVotes reports the votes collected so far for the endorser block
+// announced by the ranking block rbHash at slot, measured against the
+// committee and quorum threshold of the epoch the announcement was made in.
+// An error means that committee is unavailable, and the outcome of the
+// announcement is then unknown rather than empty.
+func (m *VoteManager) AnnouncementVotes(
+	slot uint64,
+	rbHash lcommon.Blake2b256,
+	ebHash lcommon.Blake2b256,
+) (AnnouncementVotes, error) {
+	epoch, err := m.epochProvider.EpochForSlot(slot)
+	if err != nil {
+		return AnnouncementVotes{}, fmt.Errorf(
+			"resolve announcing ranking block epoch: %w", err,
+		)
+	}
+	entry, err := m.committeeAndParamsForEpoch(epoch)
+	if err != nil {
+		return AnnouncementVotes{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	votes := AnnouncementVotes{
+		TotalActiveStake: entry.committee.TotalActiveStake,
+		Threshold:        new(big.Rat).Set(entry.tau),
+	}
+	// Legacy slot-plus-EB-hash votes are tallied under a zero announcing
+	// hash. A network votes with one scheme, so the larger tally is the
+	// announcement's, never their sum.
+	for _, announcing := range []lcommon.Blake2b256{
+		rbHash, {},
+	} {
+		if tally, ok := m.tallies[tallyKey{
+			slotNo:           slot,
+			ebHash:           ebHash,
+			announcingRbHash: announcing,
+		}]; ok {
+			votes.VerifiedStake = max(
+				votes.VerifiedStake, tally.verifiedStake,
+			)
+		}
+	}
+	return votes, nil
+}
+
 // ObserveAnnouncement records the ranking-block identity used by current
 // prototype votes and connects it to the announced EB.
 func (m *VoteManager) ObserveAnnouncement(

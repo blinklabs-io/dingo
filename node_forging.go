@@ -900,6 +900,7 @@ func (n *Node) newPoolForger(
 		EraParams: n.ledgerState,
 	}
 	applyForgeTuning(&forgerCfg, &n.config)
+	n.applyLeiosAdaptiveTuning(&forgerCfg)
 	forger, err := forging.NewBlockForger(forgerCfg)
 	if err != nil {
 		// Stop election to prevent goroutine leak

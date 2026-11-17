@@ -139,6 +139,7 @@ type Node struct {
 	plannerStatsMgr         *plannerstats.Manager
 	leiosVoteManager        *leios.VoteManager
 	leiosPipelineManager    *leios.PipelineManager
+	leiosAdaptiveEb         *leios.AdaptiveEbController
 	bark                    *bark.Bark
 	historyExpiry           *historyexpiry.Pruner
 	blockPromoter           *blockpromote.Promoter
@@ -1511,6 +1512,23 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to start chain selector: %w", err)
 	}
 	started = append(started, func() { n.chainSelector.Stop() })
+	// The adaptive endorsement controller reads the chain selector's Genesis
+	// state, so it starts once the selector exists. It stops before the vote
+	// manager it queries.
+	if enableLeiosRuntime {
+		//nolint:contextcheck // n.ctx is the node's lifecycle context
+		if err := n.initLeiosAdaptiveEndorsements(n.ctx); err != nil {
+			return fmt.Errorf(
+				"failed to initialize leios adaptive endorsements: %w",
+				err,
+			)
+		}
+		started = append(started, func() {
+			if n.leiosAdaptiveEb != nil {
+				_ = n.leiosAdaptiveEb.Stop()
+			}
+		})
+	}
 	// Configure connection manager. The listener configs and outbound
 	// connection options come from ouroboros, which does not exist yet
 	// because it needs this ConnectionManager — so they are supplied as

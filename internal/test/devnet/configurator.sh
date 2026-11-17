@@ -129,13 +129,16 @@ configure_leios_dijkstra() {
     done
     # With k=3 the immutable tip trails the tip by far fewer slots than the
     # default LeiosMinOfferLead of 3600, which would hold back every endorser
-    # block offer. 30 is the lead the reference devnets use.
+    # block offer. 30 is the lead the reference devnets use. The reference
+    # devnets also run with adaptive endorsements enabled, so producers scale
+    # their endorser blocks by the quorums announcements reach.
     jq '.DijkstraGenesisFile = "dijkstra-genesis.json"
         | .DijkstraGenesisHash = ""
         | .TestDijkstraHardForkAtEpoch = 1
         | .ExperimentalHardForksEnabled = true
         | .ExperimentalProtocolsEnabled = true
-        | .LeiosMinOfferLead = 30' \
+        | .LeiosMinOfferLead = 30
+        | .LeiosAdaptiveEndorsements = {"Enabled": true}' \
         "${configs_dir}/config.json" \
         | write_file "${configs_dir}/config.json"
 }

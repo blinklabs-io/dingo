@@ -177,6 +177,12 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: func() error { n.closeBlockProducerCredentials(); return nil },
 		})
 	}
+	if n.leiosAdaptiveEb != nil {
+		stops = append(stops, namedStop{
+			name: "leios adaptive endorsements",
+			stop: n.leiosAdaptiveEb.Stop,
+		})
+	}
 	if n.leiosPipelineManager != nil {
 		stops = append(stops, namedStop{
 			name: "leios pipeline manager",
@@ -945,6 +951,12 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		if err := n.initLeiosPipelineManager(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf(
 				"failed to reinitialize leios pipeline manager: %w",
+				err,
+			)
+		}
+		if err := n.initLeiosAdaptiveEndorsements(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf(
+				"failed to reinitialize leios adaptive endorsements: %w",
 				err,
 			)
 		}

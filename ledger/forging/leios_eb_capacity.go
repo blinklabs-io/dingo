@@ -16,6 +16,7 @@ package forging
 
 import (
 	"math"
+	"math/big"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -52,6 +53,26 @@ func effectiveLeiosEBCaps(
 	operator leiosEBCaps,
 	pparams lcommon.ProtocolParameters,
 ) (leiosEBCaps, bool) {
+	return effectiveLeiosEBCapsScaled(operator, pparams, 1)
+}
+
+// effectiveLeiosEBCapsScaled is effectiveLeiosEBCaps for a producer that
+// forges with only a share of the protocol's capacity: every protocol bound
+// is scaled and rounded down before the operator's caps bound it further, as
+// the reference scales the protocol capacity and has no other cap
+// (scaleEbCapacity in ouroboros-consensus Ledger/SupportsMempool.hs). The
+// operator's caps are not part of that capacity and stay as configured. A
+// scale at or above one, or one that is not a number, leaves the capacity
+// whole; one below zero is zero.
+//
+// A scaled transaction-size or manifest bound that rounds to nothing admits
+// no endorser block, like the zero protocol bound it resembles, so capacity
+// is then unavailable rather than unlimited.
+func effectiveLeiosEBCapsScaled(
+	operator leiosEBCaps,
+	pparams lcommon.ProtocolParameters,
+	scale float64,
+) (leiosEBCaps, bool) {
 	if _, err := extractPParamsLimits(pparams); err != nil {
 		return leiosEBCaps{}, false
 	}
@@ -65,19 +86,81 @@ func effectiveLeiosEBCaps(
 		pp.MaxEndorserBlockReferencesSize == 0 {
 		return leiosEBCaps{}, false
 	}
+	share := newLeiosEBScale(scale)
+	txsSize := share.apply(uint64(pp.MaxEndorserBlockTxsSize))
+	manifest := share.manifest(uint64(pp.MaxEndorserBlockReferencesSize))
+	if txsSize == 0 || manifest == 0 {
+		return leiosEBCaps{}, false
+	}
 	caps := operator
 	caps.aggregateBounded = true
-	caps.maxExUnits = pp.MaxEndorserBlockExUnits
-	caps.maxRefScriptBytes = uint64(pp.MaxRefScriptSizePerEndorserBlock)
-	caps.maxBytes = minNonZeroCap(
-		caps.maxBytes,
-		uint64(pp.MaxEndorserBlockTxsSize),
+	caps.maxExUnits = lcommon.ExUnits{
+		Memory: share.applyInt64(pp.MaxEndorserBlockExUnits.Memory),
+		Steps:  share.applyInt64(pp.MaxEndorserBlockExUnits.Steps),
+	}
+	caps.maxRefScriptBytes = share.apply(
+		uint64(pp.MaxRefScriptSizePerEndorserBlock),
 	)
-	caps.maxManifestBytes = minNonZeroCap(
-		caps.maxManifestBytes,
-		uint64(pp.MaxEndorserBlockReferencesSize),
-	)
+	caps.maxBytes = minNonZeroCap(caps.maxBytes, txsSize)
+	caps.maxManifestBytes = minNonZeroCap(caps.maxManifestBytes, manifest)
 	return caps, true
+}
+
+// leiosEBMaxFramingBytes is the widest map head the manifest's framing can
+// take: the head of a count that fills 32 bits. The reference subtracts it
+// once from the manifest bound to get the capacity its references share
+// (leiosReferencesCapacity), and scales only that capacity.
+const leiosEBMaxFramingBytes = 5
+
+// leiosEBScale is a share of the protocol capacity, held as the exact
+// rational value of the float the controller produced, as the reference
+// holds it (toRational of a Double), so a product rounds down from its true
+// value rather than from a float multiplication that can land on a whole
+// number.
+type leiosEBScale struct {
+	// whole is a scale of one or more, or one that is not a number.
+	whole bool
+	// share is nil for a scale of zero or less.
+	share *big.Rat
+}
+
+func newLeiosEBScale(scale float64) leiosEBScale {
+	if math.IsNaN(scale) || scale >= 1 {
+		return leiosEBScale{whole: true}
+	}
+	if scale <= 0 {
+		return leiosEBScale{}
+	}
+	return leiosEBScale{share: new(big.Rat).SetFloat64(scale)}
+}
+
+// apply scales n, rounding down.
+func (s leiosEBScale) apply(n uint64) uint64 {
+	if s.whole {
+		return n
+	}
+	if s.share == nil {
+		return 0
+	}
+	scaled := new(big.Int).Mul(s.share.Num(), new(big.Int).SetUint64(n))
+	return scaled.Quo(scaled, s.share.Denom()).Uint64()
+}
+
+func (s leiosEBScale) applyInt64(n int64) int64 {
+	if n <= 0 {
+		return n
+	}
+	return int64(s.apply(uint64(n))) // #nosec G115 -- at most n
+}
+
+// manifest scales a manifest bound. A bound within the framing leaves no room
+// for a reference, and stays as it is.
+func (s leiosEBScale) manifest(bound uint64) uint64 {
+	if bound <= leiosEBMaxFramingBytes {
+		return bound
+	}
+	return leiosEBMaxFramingBytes +
+		s.apply(bound-leiosEBMaxFramingBytes)
 }
 
 // minNonZeroCap returns the smaller of two caps, where zero is unlimited.
