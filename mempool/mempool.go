@@ -166,6 +166,22 @@ type TxValidator interface {
 	) error
 }
 
+// SubmittedTxTranslator optionally injects a transaction from an older era
+// into the current ledger era before mempool validation. The translated type
+// and bytes are what the pool retains for forging and transaction relay.
+type SubmittedTxTranslator interface {
+	TranslateSubmittedTx(gledger.Transaction) (gledger.Transaction, error)
+}
+
+type submittedTxValidationError struct {
+	era uint
+	err error
+}
+
+func (e *submittedTxValidationError) Error() string       { return e.err.Error() }
+func (e *submittedTxValidationError) Unwrap() error       { return e.err }
+func (e *submittedTxValidationError) SubmissionEra() uint { return e.era }
+
 // CertifiedClosureProvider optionally resolves the certified endorser-block
 // closure a Leios certifying ranking block applies. Such a block carries no
 // transactions of its own, but the ledger applies its parent's announced
@@ -2127,6 +2143,40 @@ func (m *Mempool) AddTransaction(
 	if err != nil {
 		return fmt.Errorf("decode transaction: %w", err)
 	}
+	if translator, ok := m.validator.(SubmittedTxTranslator); ok {
+		originalHash := tmpTx.Hash()
+		originalType := txType
+		tmpTx, err = translator.TranslateSubmittedTx(tmpTx)
+		if err != nil {
+			return fmt.Errorf("translate transaction: %w", err)
+		}
+		if tmpTx == nil {
+			return errors.New("translate transaction: translator returned nil")
+		}
+		if tmpTx.Type() < 0 {
+			return fmt.Errorf(
+				"translate transaction: invalid transaction type %d",
+				tmpTx.Type(),
+			)
+		}
+		if tmpTx.Hash() != originalHash {
+			return errors.New(
+				"translate transaction: transaction ID changed",
+			)
+		}
+		txType = uint(tmpTx.Type()) // #nosec G115 -- checked non-negative above
+		txBytes = tmpTx.Cbor()
+		if len(txBytes) == 0 {
+			return errors.New(
+				"translate transaction: empty transaction encoding",
+			)
+		}
+		if txType != originalType {
+			if err := m.rejectOversizedTx(txType, txBytes); err != nil {
+				return err
+			}
+		}
+	}
 	txHashRaw := tmpTx.Hash()
 	ctx, span = tracing.StartTx(
 		ctx,
@@ -2351,7 +2401,10 @@ func (m *Mempool) addTransactionAttempt(
 			return ErrPendingStateMoved
 		}
 		if validateErr != nil {
-			return fmt.Errorf("validate transaction: %w", validateErr)
+			return fmt.Errorf(
+				"validate transaction: %w",
+				&submittedTxValidationError{era: txType, err: validateErr},
+			)
 		}
 
 		// Resolved after validation, under the gate and in the same
