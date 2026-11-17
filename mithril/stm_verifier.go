@@ -310,26 +310,29 @@ func parseSTMAggregateSignature(
 	if !ok {
 		return nil, errors.New("could not decode multi-signature")
 	}
-	var ret stmAggregateSignature
-	if err := validateSTMAggregateSignatureJSON(raw); err == nil {
-		// The counts are bounded above; the shape check streams, so it
-		// adds nothing to what the message can make dingo hold.
-		clean, err := serdeJSON(raw, &stmAggregateSignatureShape)
-		if err != nil {
-			return nil, fmt.Errorf("multi-signature: %w", err)
-		}
-		if err := json.Unmarshal(clean, &ret); err != nil {
-			return nil, err
-		}
-		if len(ret.Signatures) == 0 {
-			return nil, errors.New("aggregate signature has no signatures")
-		}
-		return &ret, nil
-	} else if json.Valid(raw) && len(bytes.TrimSpace(raw)) > 0 &&
-		bytes.TrimSpace(raw)[0] == '{' {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(raw) {
+		return parseSTMAggregateSignatureBytes(raw)
+	}
+	// The shape check streams, so it holds nothing the counts must bound.
+	// The counts run on its output: there every key is exact and unique, so
+	// they read the members the decode below reads, where on the raw
+	// message encoding/json would match a case-variant alias instead.
+	clean, err := serdeJSON(raw, &stmAggregateSignatureShape)
+	if err != nil {
+		return nil, fmt.Errorf("multi-signature: %w", err)
+	}
+	if err := validateSTMAggregateSignatureJSON(clean); err != nil {
 		return nil, err
 	}
-	return parseSTMAggregateSignatureBytes(raw)
+	var ret stmAggregateSignature
+	if err := json.Unmarshal(clean, &ret); err != nil {
+		return nil, err
+	}
+	if len(ret.Signatures) == 0 {
+		return nil, errors.New("aggregate signature has no signatures")
+	}
+	return &ret, nil
 }
 
 func validateSTMAggregateSignatureJSON(raw []byte) error {

@@ -603,3 +603,44 @@ func TestProtocolMessagePartsCap(t *testing.T) {
 	require.Error(t, json.Unmarshal([]byte(`{"message_parts":[]}`), &msg))
 	require.Error(t, json.Unmarshal([]byte(`{"message_parts":{"a":1}}`), &msg))
 }
+
+// The collection bounds must count the members the decode reads. encoding/json
+// matches keys case-insensitively and lets the last one win, while the
+// serde shape keeps only the exact key, so a count taken from the raw
+// message reads an empty alias and lets the real array through.
+func TestParseSTMAggregateSignatureBoundsSignersBehindCaseAlias(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile(
+		"testdata/reference/preprod-cardano-blocks-transactions.json",
+	)
+	require.NoError(t, err)
+	var cert struct {
+		MultiSignature string `json:"multi_signature"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &cert))
+	msg, err := hex.DecodeString(cert.MultiSignature)
+	require.NoError(t, err)
+	var aggregate struct {
+		Signatures []json.RawMessage `json:"signatures"`
+		BatchProof json.RawMessage   `json:"batch_proof"`
+	}
+	require.NoError(t, json.Unmarshal(msg, &aggregate))
+	require.NotEmpty(t, aggregate.Signatures)
+
+	sigs := make([]json.RawMessage, stmMaxSigners+1)
+	for i := range sigs {
+		sigs[i] = aggregate.Signatures[0]
+	}
+	sigsJSON, err := json.Marshal(sigs)
+	require.NoError(t, err)
+	for _, alias := range []string{"SIGNATURES", "Signatures"} {
+		forged := `{"signatures":` + string(sigsJSON) +
+			`,"batch_proof":` + string(aggregate.BatchProof) +
+			`,"` + alias + `":[]}`
+		_, err := parseSTMAggregateSignature(
+			hex.EncodeToString([]byte(forged)),
+		)
+		require.ErrorContains(t, err, "verification budget exceeded", alias)
+	}
+}
