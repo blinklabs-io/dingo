@@ -1820,9 +1820,16 @@ func (n *Node) Restore(
 	}
 
 	if n.splitIndexer() {
-		if err := restoreIndexerPayload(
-			snapshotDir, stagingDir, indexerSnapshot, manifest,
-		); err != nil {
+		if err := func() error {
+			if err := n.validateIndexerPayloadTip(
+				ctx, stagingDir, indexerSnapshot,
+			); err != nil {
+				return err
+			}
+			return restoreIndexerPayload(
+				snapshotDir, stagingDir, indexerSnapshot, manifest,
+			)
+		}(); err != nil {
 			_ = lifecycle.RemoveRestoreWorkDir(stagingDir)
 			if rollbackErr := recovery.Rollback(ctx); rollbackErr != nil {
 				n.cancel()

@@ -227,8 +227,10 @@ func (s *Service) rollbackIndexer(
 
 // indexerRestore stages the snapshot's IndexerDB payload beside the data
 // directory once the ledger manifest is known, and installs it in the
-// ledger's staging directory.
+// ledger's staging directory after checking its tip against the restored
+// ledger.
 type indexerRestore struct {
+	ctx     context.Context //nolint:containedctx // the restore's own context, kept for the staged hook
 	service *Service
 	payload IndexerPayload
 	stage   string
@@ -258,6 +260,16 @@ func (r *indexerRestore) cleanup() {
 // which the restore then renames into place, so a data directory never exists
 // holding a restored ledger without its IndexerDB.
 func (r *indexerRestore) install(ledgerStagingDir string) error {
+	deps, err := r.service.storageDependencies()
+	if err != nil {
+		return err
+	}
+	if err := ValidateIndexerPayloadTip(
+		r.ctx, ledgerStagingDir, r.payload,
+		r.service.databaseConfig(), r.service.storageSelections(), deps,
+	); err != nil {
+		return err
+	}
 	if err := os.Rename(
 		filepath.Join(r.stage, internalplugins.IndexerDirName),
 		filepath.Join(ledgerStagingDir, internalplugins.IndexerDirName),

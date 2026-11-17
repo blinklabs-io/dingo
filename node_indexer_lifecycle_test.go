@@ -17,6 +17,7 @@ package dingo
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -384,24 +385,46 @@ func TestLiveRestoreOnSplitRefusesWhatCannotRestoreTheIndexerDB(t *testing.T) {
 		require.Same(t, oldDB, n.db, "the node was not touched")
 		requireIndexerTip(t, n, current)
 	})
-	t.Run("a payload that does not match its digest", func(t *testing.T) {
+	t.Run("a payload from another fork or with a bad digest", func(t *testing.T) {
 		t.Parallel()
 		n, points, writers := newSplitLifecycleTestNode(t, 6, nil)
+		setIndexerTip(t, n, points, 3)
 		dir := snapshotTestDir(t, "snap")
 		_, err := n.Snapshot(t.Context(), dir, "", "")
 		require.NoError(t, err)
+
+		// A payload tip that is not on the restored ledger's chain. Both
+		// refusals share one node: each restore resumes it, and a node per
+		// case multiplies the heavy parallel startups in this package.
+		foreign := snapshotTestDir(t, "foreign")
+		require.NoError(t, os.CopyFS(foreign, os.DirFS(dir)))
+		manifestPath := filepath.Join(foreign, IndexerPayloadManifestName)
+		manifest, err := os.ReadFile(manifestPath)
+		require.NoError(t, err)
+		var payload indexerPayload
+		require.NoError(t, json.Unmarshal(manifest, &payload))
+		payload.TipHash = hex.EncodeToString(bytes.Repeat([]byte{0xab}, 32))
+		manifest, err = json.Marshal(payload)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(manifestPath, manifest, 0o600))
+		current := setIndexerTip(t, n, points, 4)
+		_, err = n.Restore(t.Context(), foreign)
+		require.ErrorContains(t, err, "take the snapshot again")
+		requireIndexerTip(t, n, current)
+		all := writers.all()
+		require.True(t, all[len(all)-1].started.Load())
+
 		path := filepath.Join(dir, IndexerPayloadFileName)
 		raw, err := os.ReadFile(path)
 		require.NoError(t, err)
 		raw[len(raw)/2] ^= 0xff
 		require.NoError(t, os.WriteFile(path, raw, 0o600))
 
-		current := setIndexerTip(t, n, points, 4)
 		_, err = n.Restore(t.Context(), dir)
 		require.ErrorIs(t, err, lifecycle.ErrSnapshotPayloadMismatch)
 		// The node resumed on its own data.
 		requireIndexerTip(t, n, current)
-		all := writers.all()
+		all = writers.all()
 		require.True(t, all[len(all)-1].started.Load())
 		tip, err := n.db.GetTip(nil)
 		require.NoError(t, err)

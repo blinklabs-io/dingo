@@ -319,3 +319,82 @@ func RestoreIndexerPayload(
 	}
 	return nil
 }
+
+// ValidateIndexerPayloadTip opens the restored ledger in stagingDir and
+// refuses a payload whose tip block is not on that ledger's canonical chain.
+// A rollback between the IndexerDB backup and the ledger snapshot leaves such
+// a tip, which a node could only repair by rolling the IndexerDB back to an
+// ancestor that a non-genesis chain may not have.
+//
+// The ledger is opened with the stores and settings the restore's own
+// validation uses, so it leaves the staged directory as that validation did,
+// and it is closed before this returns, ahead of the swap that publishes the
+// directory. A payload whose IndexerDB had no tip yet carries no block to
+// check.
+func ValidateIndexerPayloadTip(
+	ctx context.Context,
+	stagingDir string,
+	payload IndexerPayload,
+	dbConfig *database.Config,
+	selections internalplugins.StorageSelections,
+	deps internalplugins.StorageDependencies,
+) (err error) {
+	if payload.TipHash == "" {
+		return nil
+	}
+	tipHash, err := hex.DecodeString(payload.TipHash)
+	if err != nil {
+		return fmt.Errorf(
+			"the IndexerDB payload tip hash is not hexadecimal: %w", err,
+		)
+	}
+	cfg := *dbConfig
+	cfg.DataDir = stagingDir
+	cfg.PromRegistry = nil
+	cfg.IndexerLayout = ""
+	cfg.Immutable = database.ImmutableConfig{}
+	deps.DataDir = stagingDir
+	deps.PromRegistry = nil
+	runtime, err := internalplugins.OpenDatabase(ctx, &cfg, selections, deps)
+	if runtime != nil {
+		defer func() {
+			err = errors.Join(err, runtime.Close(context.WithoutCancel(ctx)))
+		}()
+	}
+	if err != nil {
+		return fmt.Errorf("open the restored ledger to check the IndexerDB: %w", err)
+	}
+	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
+		return fmt.Errorf(
+			"the restored ledger needs recovery before the IndexerDB can be checked: %w",
+			recoveryErr,
+		)
+	}
+	canonical, err := database.IsCanonicalBlock(ctx, runtime.Database, tipHash)
+	if err != nil {
+		return fmt.Errorf("look up the IndexerDB payload tip: %w", err)
+	}
+	if !canonical {
+		return fmt.Errorf(
+			"the snapshot's IndexerDB payload tip %s at slot %d is not on "+
+				"its ledger's chain, so the payload is from a different "+
+				"fork than the ledger: take the snapshot again",
+			payload.TipHash, payload.TipSlot,
+		)
+	}
+	// The manifest records the tip's slot beside its hash and the restore
+	// bounds the payload by that slot, so a canonical hash at another slot
+	// is a manifest that does not describe its payload.
+	blk, err := database.BlockByHash(ctx, runtime.Database, tipHash)
+	if err != nil {
+		return fmt.Errorf("look up the IndexerDB payload tip: %w", err)
+	}
+	if blk.Slot != payload.TipSlot {
+		return fmt.Errorf(
+			"the snapshot's IndexerDB payload records its tip %s at slot "+
+				"%d, but that block is at slot %d: take the snapshot again",
+			payload.TipHash, payload.TipSlot, blk.Slot,
+		)
+	}
+	return nil
+}

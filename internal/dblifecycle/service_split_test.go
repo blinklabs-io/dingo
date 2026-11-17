@@ -17,6 +17,8 @@ package dblifecycle_test
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -194,6 +196,107 @@ func TestServiceSnapshotAndRestoreCarryTheIndexerDBOnSplit(t *testing.T) {
 	for _, e := range entries {
 		require.NotContains(t, e.Name(), ".dingo-indexer-restore-")
 	}
+}
+
+// forgedPayloadSnapshot copies a snapshot directory and rewrites the tip its
+// IndexerDB payload manifest declares. The digest covers the payload file, not
+// the manifest, so the copy still passes the integrity check.
+func forgedPayloadSnapshot(
+	t *testing.T,
+	snapDir string,
+	forge func(*dblifecycle.IndexerPayload),
+) string {
+	t.Helper()
+	dir := filepath.Join(testutil.OwnerOnlyTempDir(t), "forged")
+	require.NoError(t, os.CopyFS(dir, os.DirFS(snapDir)))
+	require.NoError(t, os.Chmod(dir, 0o700))
+	path := filepath.Join(dir, dblifecycle.IndexerPayloadManifestName)
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var payload dblifecycle.IndexerPayload
+	require.NoError(t, json.Unmarshal(raw, &payload))
+	forge(&payload)
+	raw, err = json.Marshal(payload)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0o600))
+	return dir
+}
+
+func TestServiceRestoreOnSplitChecksThePayloadTipAgainstTheLedger(
+	t *testing.T,
+) {
+	t.Parallel()
+	srcCfg := splitConfig(filepath.Join(testutil.OwnerOnlyTempDir(t), "src"))
+	points := seedSplitDir(t, srcCfg, 6, 3)
+	snapDir := filepath.Join(testutil.OwnerOnlyTempDir(t), "snap")
+	_, err := dblifecycle.NewService(srcCfg, nil, nil).Snapshot(
+		t.Context(), snapDir, "", "",
+	)
+	require.NoError(t, err)
+
+	t.Run("a tip that is not on the ledger's chain", func(t *testing.T) {
+		t.Parallel()
+		forged := forgedPayloadSnapshot(
+			t, snapDir, func(p *dblifecycle.IndexerPayload) {
+				p.TipHash = hex.EncodeToString(bytes.Repeat([]byte{0xab}, 32))
+			},
+		)
+		parent := testutil.OwnerOnlyTempDir(t)
+		dstCfg := splitConfig(filepath.Join(parent, "dst"))
+		_, err := dblifecycle.NewService(dstCfg, nil, nil).Restore(
+			t.Context(), forged,
+		)
+		require.ErrorContains(t, err, "take the snapshot again")
+		require.NoDirExists(t, dstCfg.DatabasePath)
+		entries, err := os.ReadDir(parent)
+		require.NoError(t, err)
+		require.Empty(t, entries, "no staging directory is left behind")
+	})
+	t.Run("a canonical tip recorded at another slot", func(t *testing.T) {
+		t.Parallel()
+		forged := forgedPayloadSnapshot(
+			t, snapDir, func(p *dblifecycle.IndexerPayload) {
+				p.TipSlot = points[2].Slot
+			},
+		)
+		parent := testutil.OwnerOnlyTempDir(t)
+		dstCfg := splitConfig(filepath.Join(parent, "dst"))
+		_, err := dblifecycle.NewService(dstCfg, nil, nil).Restore(
+			t.Context(), forged,
+		)
+		require.ErrorContains(t, err, "but that block is at slot")
+		require.NoDirExists(t, dstCfg.DatabasePath)
+	})
+	t.Run("a payload whose IndexerDB had no tip", func(t *testing.T) {
+		t.Parallel()
+		forged := forgedPayloadSnapshot(
+			t, snapDir, func(p *dblifecycle.IndexerPayload) {
+				p.TipSlot, p.TipHash = 0, ""
+			},
+		)
+		dstCfg := splitConfig(
+			filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"),
+		)
+		_, err := dblifecycle.NewService(dstCfg, nil, nil).Restore(
+			t.Context(), forged,
+		)
+		require.NoError(t, err)
+		require.FileExists(t, filepath.Join(
+			dstCfg.DatabasePath, internalplugins.IndexerDirName,
+			"metadata.sqlite",
+		))
+	})
+	t.Run("a tip on the ledger's chain", func(t *testing.T) {
+		t.Parallel()
+		dstCfg := splitConfig(
+			filepath.Join(testutil.OwnerOnlyTempDir(t), "dst"),
+		)
+		_, err := dblifecycle.NewService(dstCfg, nil, nil).Restore(
+			t.Context(), snapDir,
+		)
+		require.NoError(t, err)
+		require.Equal(t, points[3].Slot, indexerTipOf(t, dstCfg).Slot)
+	})
 }
 
 func TestServiceSnapshotOnSplitRefusesWhatTheIndexerDBCannotFollow(

@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -75,5 +76,22 @@ func restoreIndexerPayload(
 ) error {
 	return dblifecycle.RestoreIndexerPayload(
 		snapshotDir, stagingDir, payload, ledger,
+	)
+}
+
+// validateIndexerPayloadTip checks the payload's tip against the restored
+// ledger in stagingDir before the payload is installed beside it.
+func (n *Node) validateIndexerPayloadTip(
+	ctx context.Context,
+	stagingDir string,
+	payload indexerPayload,
+) error {
+	deps, err := n.storageDependencies(stagingDir)
+	if err != nil {
+		return fmt.Errorf("prepare restored ledger validation: %w", err)
+	}
+	return dblifecycle.ValidateIndexerPayloadTip(
+		ctx, stagingDir, payload,
+		n.databaseConfig(), n.storageSelections(), deps,
 	)
 }

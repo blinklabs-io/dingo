@@ -4552,7 +4552,9 @@ bodies the IndexerDB writer has not yet read.
 
 `database/indexerdb` holds the IndexerDB's tip under the sync-state key
 `indexer_tip` (`slot:blockNumber:hash`). It is written with the writer's own
-SQL transaction so a crash cannot leave rows the tip does not cover. Readiness
+SQL transaction so a crash cannot leave rows the tip does not cover. The tip
+decoder rejects slots and block numbers outside the signed 64-bit range used by
+SQL position columns and Mesh block indexes. Readiness
 is per endpoint kind: history endpoints need the tip at or past the Mithril
 anchor, current-state endpoints also need it within
 `indexer.maxReadyLagBlocks` of the ledger tip. The anchor is recorded under
@@ -4746,6 +4748,8 @@ transaction when the accounts are in the store, and from a set snapshot taken
 under the apply lock when they are in the set, so a credit or withdrawal that
 lands between the two reads is in neither the balance nor the journal
 (`metadata.AnchorStateViewer`), and the source is fixed for the whole copy. A
+copied account reward above the signed 64-bit range is rejected rather than
+truncated while applying signed reward-journal movements. A
 set whose baselines
 were written before it kept the delegations has them reloaded from the metadata
 store at its first load, while the rows exist, and marked lost once they do
@@ -4819,9 +4823,11 @@ SQLite backup taken before the ledger's own snapshot so its tip is never past
 the ledger's, and `indexer.json` with its digest, size and tip. Neither file is
 part of the ledger manifest, so a shared-layout snapshot is unchanged. A live
 restore on `split` verifies the digest, refuses a payload whose tip is past the
-manifest's, and publishes the IndexerDB with the restored ledger store; a
-snapshot without the payload is refused before the node is quiesced. Snapshot
-and restore on `split` need the sqlite provider, the default IndexerDB
+manifest's or whose tip block is not on the restored ledger's canonical chain
+(an IndexerDB from a different fork than the ledger; the snapshot is taken
+again), and publishes the IndexerDB with the restored ledger store; a payload
+whose IndexerDB had no tip has no block to check. A snapshot without the
+payload is refused before the node is quiesced. Snapshot and restore on `split` need the sqlite provider, the default IndexerDB
 directory, a local snapshot directory and no snapshot trust key, which would
 authenticate the ledger manifest and not the payload.
 
@@ -4834,7 +4840,8 @@ refuse before changing anything when one is not met:
 
 - `snapshot` backs the IndexerDB up before the ledger and refuses a data
   directory without an IndexerDB or one whose tip is past the ledger's.
-- `restore` verifies the payload digest and tip, stages the IndexerDB beside
+- `restore` verifies the payload digest and tip, checks the tip block against the
+  restored ledger's canonical chain, stages the IndexerDB beside
   the data directory, and publishes it with the restored ledger; a snapshot
   without the payload, a remote snapshot or a failed install leaves the target
   as it was.

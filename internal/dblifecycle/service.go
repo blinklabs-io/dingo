@@ -262,7 +262,7 @@ func (s *Service) Restore(
 		if err != nil {
 			return lifecycle.Manifest{}, err
 		}
-		indexerRestoreState = &indexerRestore{service: s, payload: payload}
+		indexerRestoreState = &indexerRestore{ctx: ctx, service: s, payload: payload}
 		defer indexerRestoreState.cleanup()
 	}
 	// A fresh, single-use plugin host built just for this restore, per

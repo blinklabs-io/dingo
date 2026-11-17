@@ -15,9 +15,7 @@
 package indexer
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -65,22 +63,7 @@ func (s *DatabaseSource) IsCanonical(
 	ctx context.Context,
 	hash []byte,
 ) (bool, error) {
-	blk, err := database.BlockByHash(ctx, s.db, hash)
-	if errors.Is(err, models.ErrBlockNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	point, err := s.db.BlockPointByIndex(blk.ID, nil)
-	if errors.Is(err, models.ErrBlockNotFound) {
-		// No index entry: the block is stored but not on the chain.
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read block index entry: %w", err)
-	}
-	return point.Slot == blk.Slot && bytes.Equal(point.Hash, hash), nil
+	return database.IsCanonicalBlock(ctx, s.db, hash)
 }
 
 // BlocksAfter walks the primary-chain index from the entry after the given
