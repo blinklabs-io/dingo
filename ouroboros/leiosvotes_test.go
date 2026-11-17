@@ -59,7 +59,15 @@ type fakeLeiosVoteHandler struct {
 	requestedIds   []lcommon.LeiosVoteId
 	ebs            []handledEb
 	removed        []string
+	arrivals       []handledArrival
 	waitStarted    chan struct{}
+}
+
+type handledArrival struct {
+	slot      uint64
+	rbHash    lcommon.Blake2b256
+	ebHash    lcommon.Blake2b256
+	arrivedAt time.Time
 }
 
 func (f *fakeLeiosVoteHandler) HandleVote(
@@ -90,6 +98,19 @@ func (f *fakeLeiosVoteHandler) ObserveAnnouncement(
 	_ lcommon.Blake2b256,
 	_ lcommon.Blake2b256,
 ) {
+}
+
+func (f *fakeLeiosVoteHandler) ObserveAnnouncementArrival(
+	slot uint64,
+	rbHash lcommon.Blake2b256,
+	ebHash lcommon.Blake2b256,
+	arrivedAt time.Time,
+) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.arrivals = append(f.arrivals, handledArrival{
+		slot: slot, rbHash: rbHash, ebHash: ebHash, arrivedAt: arrivedAt,
+	})
 }
 
 func (f *fakeLeiosVoteHandler) NextVotes(
