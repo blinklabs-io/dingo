@@ -162,6 +162,43 @@ func TestBlockTransactionsForCertifiedEndorserBlockRejectsInvalidStoredBody(
 	}
 	_, err = f.ls.BlockTransactions(context.Background(), stored)
 	require.Error(t, err)
+	require.NotErrorIs(
+		t, err, ErrCertifiedClosureUnavailable,
+		"a corrupt closure must not be retried as if it were absent",
+	)
+}
+
+// A certifying block whose closure the ledger has not persisted yet, with no
+// provider data either, is reported as unavailable so a caller can wait for
+// the ledger to apply it rather than treat it as a failure.
+func TestBlockTransactionsReportsUnavailableClosure(t *testing.T) {
+	t.Parallel()
+	for name, provider := range map[string]EndorserBlockDataProviderFunc{
+		"no provider": nil,
+		"provider misses": func(
+			[]byte, uint64,
+		) ([]byte, []cbor.RawMessage, bool) {
+			return nil, nil, false
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newLeiosCertApplyFixture(t)
+			manifest := testLeiosManifest(f)
+			f.ebHash = manifest.Hash()
+			parent := f.announce()
+			certifier, _, _ := f.certifyingChild(parent)
+			f.ls.config.EndorserBlockDataProvider = provider
+			stored := models.Block{
+				Slot: certifier.SlotNumber(), Hash: certifier.Hash().Bytes(),
+				PrevHash: certifier.PrevHash().Bytes(),
+				Number:   certifier.BlockNumber(),
+				Type:     gledger.BlockTypeDijkstra, Cbor: certifier.Cbor(),
+			}
+			_, err := f.ls.BlockTransactions(context.Background(), stored)
+			require.ErrorIs(t, err, ErrCertifiedClosureUnavailable)
+		})
+	}
 }
 
 func testLeiosManifest(f *leiosCertApplyFixture) *lcommon.LeiosEndorserBlock {

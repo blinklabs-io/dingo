@@ -1240,6 +1240,35 @@ before storage is durable and their work never runs inline in `Commit`.
 goroutine when the block joins or leaves the primary chain, which can be before
 the ledger applies it, so it is not an applied-tip signal.
 
+Blocks already on the primary chain but not yet applied when the node starts,
+such as the suffix after a Mithril import, never pass through that handler.
+`LedgerState.Start` therefore publishes a `ledger.block` Apply for each of them,
+oldest first, after primary-chain reconciliation and before the slot clock,
+forger and block-processing goroutine start. Nothing adds a block in that
+window, so replayed Applies precede the event for any later block.
+
+Reconciliation can itself roll the chain back, and the handler publishes that
+rollback's Undo events on its own goroutine. Before replaying, `Start`
+publishes a private `startupReplayBarrier` payload on `chain.update` and waits
+for the handler to reach it, so every such Undo precedes the replayed Applies.
+Other `chain.update` subscribers switch on the payload type and ignore it. The
+barrier and the walk are skipped when nothing subscribes to `ledger.block`
+(the barrier is also skipped when the handler is not subscribed).
+
+Replayed Applies are published before the ledger applies the blocks, as live
+ones are. A Dijkstra block that certifies an endorser block takes its
+transactions from that endorser block's closure, which the ledger persists only
+when it applies the certifying block and otherwise fetches from a peer. A
+stored, unapplied certifying block can therefore have no closure at replay,
+and the endorser-block data provider is not wired until after `Start`.
+`LedgerState.BlockTransactions` reports that case as
+`ErrCertifiedClosureUnavailable`, distinct from a closure that is present but
+invalid. The Midnight indexer treats it as a wait, not a failure: it queues
+every block event in order, holds the block and everything behind it until the
+closure resolves, retries on each later event and on a timer, and drops a
+queued Apply whose block is undone first. Any other block error is still
+fatal.
+
 An ordinary stalled subscriber detaches after its delivery timeout; a lossless
 subscriber deliberately remains attached until it drains or is stopped, closed,
 or unsubscribed. A live restore/truncate closes the `LedgerState` while keeping
@@ -5135,7 +5164,10 @@ quiesce, so an incompatible snapshot costs a quiesce and reopen cycle rather
 than any data. Before the first removal by name, `Restore` requires `dataDir`'s
 parent to pass `lifecycle.ValidateRestoreWorkParent` (on Unix, every ancestor
 owned by the current user or root and writable by others only with the sticky
-bit), and the staging and backup directories are removed through
+bit; a build that is not a release, one that does not stamp `version.Version`,
+also accepts a sticky ancestor owned by another user so tests and local runs
+work below a shared temporary root, and a release build never does), and the
+staging and backup directories are removed through
 `lifecycle.RemoveRestoreWorkDir`, which recurses through a retained directory
 handle and never follows a substituted name. Local Badger/SQLite data is
 restored in `<dataDir>.restore-staging`, opened again through the node's actual

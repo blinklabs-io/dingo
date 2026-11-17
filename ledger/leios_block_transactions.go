@@ -29,6 +29,18 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
+// ErrCertifiedClosureUnavailable reports that the endorser-block closure a
+// certifying ranking block applies is neither persisted nor held by the
+// endorser-block data provider. It is not corruption: the ledger persists the
+// closure when it applies the certifying block, so a stored block the ledger
+// has not applied yet can lack it, as can any block read before the provider
+// is wired at startup. A caller that can wait may retry once the ledger has
+// applied the block; a closure that is present but invalid fails with a
+// different error.
+var ErrCertifiedClosureUnavailable = errors.New(
+	"certified endorser-block closure unavailable",
+)
+
 type leiosBlockCertifierHeader interface {
 	LeiosCertified() (certified bool, present bool)
 	PrevHash() lcommon.Blake2b256
@@ -194,12 +206,14 @@ func readEndorserBlockData(
 	missing := func() error {
 		if manifestErr != nil {
 			return fmt.Errorf(
-				"load certified endorser-block manifest: %w",
+				"%w: load certified endorser-block manifest: %w",
+				ErrCertifiedClosureUnavailable,
 				manifestErr,
 			)
 		}
 		return fmt.Errorf(
-			"load certified endorser-block transactions: %w",
+			"%w: load certified endorser-block transactions: %w",
+			ErrCertifiedClosureUnavailable,
 			txErr,
 		)
 	}
