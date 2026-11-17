@@ -16,6 +16,7 @@ package mesh
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"testing"
 	"time"
@@ -24,6 +25,18 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTipBlockIDRejectsAnIndexOutsideTheMeshRange(t *testing.T) {
+	t.Parallel()
+	s := &Server{}
+
+	blockID, err := s.tipBlockID(ochainsync.Tip{BlockNumber: math.MaxInt64})
+	require.NoError(t, err)
+	require.Equal(t, int64(math.MaxInt64), blockID.Index)
+
+	_, err = s.tipBlockID(ochainsync.Tip{BlockNumber: uint64(math.MaxInt64) + 1})
+	require.ErrorContains(t, err, "exceeds the Mesh index range")
+}
 
 type syncProgressLedger struct {
 	MeshLedgerState

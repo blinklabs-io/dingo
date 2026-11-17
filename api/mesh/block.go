@@ -70,12 +70,16 @@ func (s *Server) handleBlock(
 		writeError(w, ErrInternal)
 		return
 	}
+	meshBlock, err := convertBlock(
+		block, txs, s.addrNetworkID, timestamp,
+	)
+	if err != nil {
+		s.logger.Error("failed to encode block identifier", "error", err)
+		writeError(w, ErrInternal)
+		return
+	}
 	writeJSON(w, http.StatusOK, &BlockResponse{
-		Block: convertBlock(
-			block, txs,
-			s.addrNetworkID,
-			timestamp,
-		),
+		Block: meshBlock,
 	})
 }
 
