@@ -47,7 +47,6 @@ import (
 )
 
 // The rollover stack consumes the application entry points below.
-const stakeRewardSourcePrefix = models.StakeRewardSourcePrefix
 
 var errRequiredStakeRewardBasisUnavailable = errors.New(
 	"required stake reward basis unavailable",
