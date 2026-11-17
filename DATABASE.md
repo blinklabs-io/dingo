@@ -2421,7 +2421,11 @@ with a `PoolRegistration` row above `slot`, and the second is restricted to the
 `pool_key_hash` values `RestorePoolStateAtSlot`'s own leading `DELETE FROM
 pool_opcert_sequence WHERE slot > slot` actually removed (captured before that
 delete runs, since the rows it needs are gone afterward) — rather than rewriting
-every pool row on every rollback. The unscoped shape this replaced computed each
+every pool row on every rollback. That capture reads the discarded slot range
+without SQL `DISTINCT` and deduplicates the slot-bounded result in memory. On
+SQLite, `DISTINCT pool_key_hash` otherwise chooses the pool-ordered index and
+scans the retained block history instead of ranging over the `slot` index. The
+unscoped shape this replaced computed each
 pool's correct latest value regardless (so it never produced a wrong result),
 but its cost was `O(pool_count²)` per rollback and completely flat against
 rollback depth: at mainnet scale (2823 pools) the denormalized-field statement

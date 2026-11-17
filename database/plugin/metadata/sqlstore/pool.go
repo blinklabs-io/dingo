@@ -1560,6 +1560,30 @@ SELECT pool_key_hash
 FROM pool_opcert_sequence
 WHERE slot > ?`
 
+func scanDistinctPoolKeyHashes(rows *sql.Rows) ([][]byte, error) {
+	var hashes [][]byte
+	seen := make(map[string]struct{})
+	for rows.Next() {
+		var hash []byte
+		if err := rows.Scan(&hash); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if _, ok := seen[string(hash)]; ok {
+			continue
+		}
+		seen[string(hash)] = struct{}{}
+		hashes = append(hashes, hash)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return hashes, nil
+}
+
 // PoolOpCertSequenceAtOrBeforeSQL is one pool's highest sequence at or before
 // a slot, read through idx_pool_opcert_sequence_pool_slot.
 const PoolOpCertSequenceAtOrBeforeSQL = `
@@ -1598,24 +1622,8 @@ func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
 	if err != nil {
 		return nil, err
 	}
-	var changed [][]byte
-	seen := make(map[string]struct{})
-	for rows.Next() {
-		var poolKeyHash []byte
-		if err := rows.Scan(&poolKeyHash); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if _, dup := seen[string(poolKeyHash)]; dup {
-			continue
-		}
-		seen[string(poolKeyHash)] = struct{}{}
-		changed = append(changed, poolKeyHash)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
+	changed, err := scanDistinctPoolKeyHashes(rows)
+	if err != nil {
 		return nil, err
 	}
 	for _, poolKeyHash := range changed {
@@ -3870,7 +3878,9 @@ WHERE NOT EXISTS (
 // queryPoolKeyHashesWithOpCertAfterSlot returns the distinct pool_key_hash
 // values with a pool_opcert_sequence row above slot -- exactly the rows
 // RestorePoolStateAtSlot's own DELETE FROM pool_opcert_sequence is about to
-// remove. Callers must read this before issuing that delete.
+// remove. Callers must read this before issuing that delete. Deduplication is
+// intentionally outside SQL so SQLite ranges over the slot index instead of
+// scanning the pool-ordered history to satisfy DISTINCT.
 func queryPoolKeyHashesWithOpCertAfterSlot(
 	ctx context.Context,
 	db queryer,
@@ -3878,22 +3888,13 @@ func queryPoolKeyHashesWithOpCertAfterSlot(
 ) ([][]byte, error) {
 	rows, err := db.QueryContext(
 		ctx,
-		"SELECT DISTINCT pool_key_hash FROM pool_opcert_sequence WHERE slot > ?",
+		PoolOpCertSequencesChangedAfterSQL,
 		slot,
 	)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var hashes [][]byte
-	for rows.Next() {
-		var hash []byte
-		if err := rows.Scan(&hash); err != nil {
-			return nil, err
-		}
-		hashes = append(hashes, hash)
-	}
-	return hashes, rows.Err()
+	return scanDistinctPoolKeyHashes(rows)
 }
 
 // restorePoolDenormalizedFields reverts pledge/cost/margin/VRF/reward-account/
