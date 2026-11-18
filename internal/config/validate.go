@@ -1405,11 +1405,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// one-shot `dingo mithril sync` and `dingo sync --mithril` paths are
 	// not gated by these settings.
 	if c.Mithril.Enabled && effectiveMode.RequiresListeners() {
-		if c.StorageMode == storageModeAPI {
-			errs = append(errs, errors.New(
-				"mithril.enabled requires core storage mode",
-			))
-		}
 		if c.Mithril.BatchChunks < 1 {
 			errs = append(errs, fmt.Errorf(
 				"invalid mithril.batchChunks %d: must be at least 1",

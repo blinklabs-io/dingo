@@ -777,7 +777,11 @@ var flagSpecs = []flagSpec{
 		"max simultaneous connections per IP",
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
-	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections (0 = unlimited)"),
+	intFlag(
+		"MaxNtCConns",
+		"max-ntc-conns",
+		"max node-to-client connections (0 = unlimited)",
+	),
 	intFlag(
 		"MaxTrustedLocalNtCConns",
 		"max-trusted-local-ntc-conns",
@@ -1136,7 +1140,11 @@ var flagSpecs = []flagSpec{
 		"keep SQLite planner statistics current with PRAGMA optimize at startup and after each epoch rollover",
 	),
 
-	boolFlag("CIP0203Enabled", "cip-0203-enabled", "include the build version in forged block headers (CIP-0203)"),
+	boolFlag(
+		"CIP0203Enabled",
+		"cip-0203-enabled",
+		"include the build version in forged block headers (CIP-0203)",
+	),
 
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)
 	uintFlag(
@@ -1195,7 +1203,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"Mithril.Enabled",
 		"mithril-enabled",
-		"sync from Mithril inside serve while behind the certified tip (core storage mode only)",
+		"sync from Mithril inside serve while behind the certified tip",
 	),
 	intFlag(
 		"Mithril.WindowChunks",

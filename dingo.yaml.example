@@ -1335,8 +1335,8 @@
 # mithril:
   # Make `dingo serve` sync from Mithril while it is behind the aggregator's
   # certified immutable tip, falling back to Ouroboros on any failure.
-  # Requires core storage mode. With historyExpiry.enabled false the node
-  # replays certified blocks; with it true it restores a snapshot and
+  # Works in core and API storage modes. With historyExpiry.enabled false the
+  # node replays certified blocks; with it true it restores a snapshot and
   # backfills. `dingo mithril sync` works regardless of this setting.
   # Default: false
   # enabled: false

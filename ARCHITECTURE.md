@@ -15947,10 +15947,11 @@ database Mithril never bootstrapped is flagged stream-only so
 
 ### Node-managed Mithril
 
-With `mithril.enabled: true` (core storage only), `dingo serve` uses Mithril
-itself while it is behind the aggregator's certified immutable tip, and
-Ouroboros otherwise. `mithril.enabled: false`, the default, leaves `serve`
-exactly as before: no coordinator starts and no aggregator is contacted.
+With `mithril.enabled: true`, `dingo serve` uses Mithril itself while it is
+behind the aggregator's certified immutable tip, and Ouroboros otherwise, in
+both core and API storage modes. `mithril.enabled: false`, the default, leaves
+`serve` exactly as before: no coordinator starts and no aggregator is
+contacted.
 
 - **Modes.** `mithril.SelectMode(enabled, historyExpiry.enabled)` gives
   `ModeManual` (disabled: `dingo mithril sync` only), `ModeStream` (history
@@ -15965,9 +15966,7 @@ exactly as before: no coordinator starts and no aggregator is contacted.
   `internal/nodemithril` implements on `mithril` and `cmd/dingo serve` passes
   in with `dingo.WithMithrilCatchUp(nodemithril.New)` through the options
   `internal/node.Run` now accepts. `nodemithril.New` returns nil in manual
-  mode and, with a warning, when the node's effective storage mode is not
-  core (dev mode switches to API storage after config validation), and an
-  error (logged; the node stays on Ouroboros) when Mithril data
+  mode and an error (logged; the node stays on Ouroboros) when Mithril data
   cannot be verified: no Mithril genesis verification key, no Byron genesis,
   or no network name.
 - **Coordinator lifecycle.** The coordinator starts last in `Run`, after
