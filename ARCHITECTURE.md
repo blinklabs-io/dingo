@@ -8210,8 +8210,10 @@ header chain can advance. Each calls `LedgerState.AcquireQueryView`, which waits
 (inside the caller's deadline) for any epoch-boundary job and opens a
 coordinated read snapshot (`database.NewReadSnapshotWithAnchorContext`, whose
 blob, metadata and live-ledger-set views are fixed before commits resume), and
-validates the point against it with `VerifyPointQueryable`. The live set pin
-also retains committed batches not yet applied to the set. Historical UTxO
+validates the point against it with `VerifyPointQueryable`. If committed changes
+are still awaiting application to the live set, it releases the snapshot and
+retries inside the caller's deadline so historical journal entries are present.
+Historical UTxO
 reads open from that transaction's set snapshot, and releasing the transaction
 releases its set pin. A live-set snapshot failure rejects acquisition and
 releases the database snapshot. A boundary can commit before its job is

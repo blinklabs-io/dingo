@@ -31,6 +31,8 @@ import (
 // closed, whether by its owner or by a forced expiry.
 var ErrQueryViewClosed = errors.New("ledger query view is closed")
 
+var errQueryViewSetPending = errors.New("committed live ledger changes pending")
+
 // QueryView is a read-only snapshot of the ledger that a LocalStateQuery
 // session holds between Acquire and Release. Every query answered through it
 // reads one database read transaction opened at acquire time, so a block
@@ -94,6 +96,19 @@ func (ls *LedgerState) AcquireQueryView(
 			return nil, err
 		}
 		txn, cancelView, err := ls.openQueryViewSnapshot(ctx)
+		if errors.Is(err, errQueryViewSetPending) {
+			// Historical views need the journal entries as well as the
+			// outputs, so an overlay of pending changes is insufficient.
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf(
+					"wait for live ledger changes: %w",
+					ctx.Err(),
+				)
+			case <-time.After(5 * time.Millisecond):
+				continue
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -194,6 +209,17 @@ func (ls *LedgerState) openQueryViewSnapshot(
 	if err != nil {
 		cancelView()
 		return nil, nil, err
+	}
+	if pin := ls.pinOf(txn); pin != nil && len(pin.batches) > 0 {
+		err := txn.Rollback()
+		cancelView()
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"release pending live ledger snapshot: %w",
+				err,
+			)
+		}
+		return nil, nil, errQueryViewSetPending
 	}
 	return txn, cancelView, nil
 }

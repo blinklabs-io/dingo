@@ -20,11 +20,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"maps"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -36,6 +38,23 @@ type querySnapshotSet struct {
 	committedUtxoSet
 	failure  error
 	releases *atomic.Int64
+}
+
+func (s *querySnapshotSet) ApplyUtxoChanges(
+	_ *ocommon.Point,
+	changes []UtxoEvent,
+) error {
+	for _, change := range changes {
+		for _, id := range change.Removed {
+			delete(s.committedUtxoSet, string(id.Hash)+string(rune(id.Idx)))
+		}
+		for _, output := range change.Added {
+			s.committedUtxoSet[string(output.Ref.Hash)+string(rune(output.Ref.Idx))] = bytes.Clone(
+				output.Cbor,
+			)
+		}
+	}
+	return nil
 }
 
 func (s *querySnapshotSet) SnapshotUtxoSet() (UtxoSetWriter, func(), error) {
@@ -152,4 +171,61 @@ func TestQueryViewLiveSetSnapshotFailureReleasesTheView(t *testing.T) {
 	require.NoError(t, err)
 	view.Close()
 	require.EqualValues(t, 1, releases.Load())
+}
+
+func TestQueryViewWaitsForCommittedSetChanges(t *testing.T) {
+	t.Parallel()
+	ls, db := newDiskTestLedger(t)
+	id := seedBabbageUtxo(t, db, 0x72, 0, queryViewTestAddress(t), 2_000_000)
+	row, err := db.UtxoByRef(t.Context(), id, 0, nil)
+	require.NoError(t, err)
+	var releases atomic.Int64
+	set := &querySnapshotSet{
+		committedUtxoSet: committedUtxoSet{
+			string(id) + string(rune(0)): bytes.Clone(row.Cbor),
+		},
+		releases: &releases,
+	}
+	ls.config.UtxoSet = set
+	ls.config.UtxoSetReads = UtxoSetReadsSet
+	ls.config.UtxoSetOnly = true
+	txn := db.Transaction(t.Context(), true)
+	t.Cleanup(txn.Release)
+	entered, resume := make(chan struct{}), make(chan struct{})
+	var resumeOnce sync.Once
+	resumeCommit := func() { resumeOnce.Do(func() { close(resume) }) }
+	t.Cleanup(resumeCommit)
+	txn.AfterCommit(func() { close(entered); <-resume })
+	require.NoError(t, db.MarkUtxosDeletedAtSlot(t.Context(), txn,
+		[]dbtypes.UtxoKey{{TxId: id}}, 500))
+	ls.stageUtxoSet(txn, nil, UtxoEvent{Removed: []models.UtxoId{{Hash: id}}})
+	committed := make(chan error, 1)
+	go func() { committed <- txn.Commit() }()
+	<-entered
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	view, err := ls.AcquireQueryView(ctx, QueryPoint{})
+	if view != nil {
+		view.Close()
+	}
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Nil(t, view)
+	require.Empty(t, ls.utxoSetPins)
+	require.Empty(t, ls.utxoSetPinsByMeta)
+	resumeCommit()
+	require.NoError(t, <-committed)
+	view, err = ls.AcquireQueryView(t.Context(), QueryPoint{})
+	require.NoError(t, err)
+	t.Cleanup(view.Close)
+	input := gledger.MustNewShelleyTransactionInput(hex.EncodeToString(id), 0)
+	asOf, err := ls.queryShelleyUtxoByTxIn(
+		t.Context(),
+		[]gledger.ShelleyTransactionInput{
+			input,
+		},
+		QueryPoint{Slot: 500},
+		view.txn,
+	)
+	require.NoError(t, err)
+	require.Zero(t, utxoMapLen(t, asOf))
 }
