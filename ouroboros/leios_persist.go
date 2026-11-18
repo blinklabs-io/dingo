@@ -765,11 +765,12 @@ var errLeiosPersistClosed = errors.New("leios persistence is closed")
 // full queue or a stopping writer. Without a Leios store there is nothing to
 // write and it succeeds.
 //
-// It is admitted under leiosPersistLifecycleMu like enqueueLeiosPersist, so
-// PauseLeiosPersistWriterForLiveLifecycleOp and close wait for an in-flight
-// write before storage is replaced or closed, and it restarts the retention
-// GC that a pause stopped. After close it fails with errLeiosPersistClosed,
-// so the fetch reports failure rather than success without a durable copy.
+// It is admitted like enqueueLeiosPersist (see admitLeiosSyncPersist) and
+// restarts the retention GC a pause stopped. Stop, pause and close wait for
+// it within leiosPersistShutdownDrainTimeout, never holding a lock it needs,
+// so a stuck blob store cannot hang them. After a writer stop or close it
+// fails with errLeiosPersistClosed, so the fetch reports failure rather than
+// success without a durable copy.
 func (o *Ouroboros) persistLeiosEndorserBlockNow(
 	point ocommon.Point,
 	blockRaw []byte,
@@ -778,21 +779,14 @@ func (o *Ouroboros) persistLeiosEndorserBlockNow(
 	if o.leiosDatabase() == nil {
 		return nil
 	}
-	o.leiosPersistLifecycleMu.RLock()
-	defer o.leiosPersistLifecycleMu.RUnlock()
-	o.leiosPersistMu.Lock()
-	closed := o.leiosPersistClosed
-	o.leiosPersistMu.Unlock()
-	if closed {
-		return errLeiosPersistClosed
+	db, err := o.admitLeiosSyncPersist()
+	if err != nil {
+		return err
 	}
-	o.startLeiosPersistenceGC(0, false)
-	// Read after admission, so a write admitted after a pause targets the
-	// database current then rather than one read before the pause.
-	db := o.leiosDatabase()
 	if db == nil {
 		return nil
 	}
+	defer o.finishLeiosSyncPersist()
 	var txsRaw []cbor.RawMessage
 	if data != nil && data.completeTxCache() && data.txCount > 0 {
 		txsRaw = data.txsRaw
@@ -813,6 +807,56 @@ func (o *Ouroboros) persistLeiosEndorserBlockNow(
 	return nil
 }
 
+// admitLeiosSyncPersist admits one synchronous write and returns the database
+// it must target, or nil when there is none. leiosPersistLifecycleMu is held
+// only for admission, never across the store write: stop, pause and close
+// take it exclusively before their bounded waits, and a reader held through
+// blob-store I/O would make them wait without bound. Admission registers the
+// write in leiosPersistSyncWrites so those waits cover it instead.
+func (o *Ouroboros) admitLeiosSyncPersist() (*database.Database, error) {
+	o.leiosPersistLifecycleMu.RLock()
+	defer o.leiosPersistLifecycleMu.RUnlock()
+	o.leiosPersistMu.Lock()
+	refused := o.leiosPersistClosed || o.leiosPersistWriterStopped
+	o.leiosPersistMu.Unlock()
+	if refused {
+		return nil, errLeiosPersistClosed
+	}
+	o.startLeiosPersistenceGC(0, false)
+	// Read after admission, so a write admitted after a pause targets the
+	// database current then rather than one read before the pause.
+	db := o.leiosDatabase()
+	if db == nil {
+		return nil, nil
+	}
+	o.leiosPersistMu.Lock()
+	if o.leiosPersistSyncWrites == 0 {
+		o.leiosPersistSyncIdle = make(chan struct{})
+	}
+	o.leiosPersistSyncWrites++
+	o.leiosPersistMu.Unlock()
+	return db, nil
+}
+
+// finishLeiosSyncPersist ends a write admitted by admitLeiosSyncPersist.
+func (o *Ouroboros) finishLeiosSyncPersist() {
+	o.leiosPersistMu.Lock()
+	defer o.leiosPersistMu.Unlock()
+	o.leiosPersistSyncWrites--
+	if o.leiosPersistSyncWrites == 0 {
+		close(o.leiosPersistSyncIdle)
+		o.leiosPersistSyncIdle = nil
+	}
+}
+
+// leiosSyncPersistIdle returns a channel closed once every admitted
+// synchronous write has finished, or nil when none is running.
+func (o *Ouroboros) leiosSyncPersistIdle() <-chan struct{} {
+	o.leiosPersistMu.Lock()
+	defer o.leiosPersistMu.Unlock()
+	return o.leiosPersistSyncIdle
+}
+
 // StopLeiosPersistWriter stops the background persistence and GC workers,
 // giving each its own bounded wait. It logs if a worker does not stop in
 // time; callers that must confirm the drain should use Close. Safe when
@@ -820,6 +864,9 @@ func (o *Ouroboros) persistLeiosEndorserBlockNow(
 func (o *Ouroboros) StopLeiosPersistWriter() {
 	o.leiosPersistLifecycleMu.Lock()
 	defer o.leiosPersistLifecycleMu.Unlock()
+	o.leiosPersistMu.Lock()
+	o.leiosPersistWriterStopped = true
+	o.leiosPersistMu.Unlock()
 	o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout)
 }
 
@@ -861,7 +908,21 @@ func (o *Ouroboros) stopLeiosPersistenceWorkersWithWait(
 			)
 		}
 	}
-	return writerStopped && gcStopped
+	// Synchronous fetch writes are admitted under the lifecycle lock the
+	// caller now holds, so no new one starts; wait for those already running
+	// within the same bound, as for the workers above.
+	syncStopped := true
+	if idle := o.leiosSyncPersistIdle(); idle != nil {
+		syncStopped = wait(idle, timeout)
+		if !syncStopped {
+			o.config.Logger.Warn(
+				"timed out waiting for synchronous leios EB writes to finish",
+				"component", "network",
+				"timeout", timeout,
+			)
+		}
+	}
+	return writerStopped && gcStopped && syncStopped
 }
 
 func (o *Ouroboros) requestLeiosPersistWriterStop() (<-chan struct{}, bool) {

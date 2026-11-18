@@ -21,8 +21,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/leiosdb"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -296,30 +298,142 @@ func TestStoreLeiosEndorserBlockRestartsGCAfterPause(t *testing.T) {
 	)
 }
 
-// After close, a synchronous fetch write is refused and the fetch fails
-// rather than reporting a block it did not persist.
+// After close or a writer stop, a synchronous fetch write is refused and the
+// fetch fails rather than reporting a block it did not persist.
 func TestStoreLeiosEndorserBlockFailsAfterClose(t *testing.T) {
 	t.Parallel()
 
-	o := newTestOuroborosWithLeiosDB(t)
-	require.NoError(t, o.Close())
+	for name, stop := range map[string]func(*Ouroboros){
+		"close": func(o *Ouroboros) { require.NoError(t, o.Close()) },
+		"stop writer": func(o *Ouroboros) {
+			o.StopLeiosPersistWriter()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			o := newTestOuroborosWithLeiosDB(t)
+			stop(o)
 
-	tx, ref := testLeiosManifestTx(t, 13)
-	manifestRaw, err := lcommon.LeiosEndorserBlock{
-		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
-	}.MarshalCBOR()
-	require.NoError(t, err)
-	point := ocommon.NewPoint(
-		304,
-		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
-	)
-	err = o.storeLeiosEndorserBlock(
-		point,
-		manifestRaw,
-		[]cbor.RawMessage{tx},
-		leiosStoreBackfill,
-	)
-	require.ErrorIs(t, err, errLeiosPersistClosed)
-	_, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
-	require.False(t, ok, "a refused write must not leave a cache entry")
+			tx, ref := testLeiosManifestTx(t, 13)
+			manifestRaw, err := lcommon.LeiosEndorserBlock{
+				TransactionReferences: []lcommon.LeiosTransactionReference{
+					ref,
+				},
+			}.MarshalCBOR()
+			require.NoError(t, err)
+			point := ocommon.NewPoint(
+				304,
+				lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+			)
+			err = o.storeLeiosEndorserBlock(
+				point,
+				manifestRaw,
+				[]cbor.RawMessage{tx},
+				leiosStoreBackfill,
+			)
+			require.ErrorIs(t, err, errLeiosPersistClosed)
+			_, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+			require.False(
+				t,
+				ok,
+				"a refused write must not leave a cache entry",
+			)
+		})
+	}
+}
+
+// Not t.Parallel: swaps the package-global leiosPersistShutdownDrainTimeout.
+//
+// A synchronous fetch write stuck in a blob store must not hang a writer stop,
+// a live lifecycle pause, or close: each waits for it within the shutdown
+// drain bound, and the pause and close report the write unconfirmed so
+// storage is not replaced or closed under it.
+func TestLeiosPersistStopIsBoundedByStuckSyncWrite(t *testing.T) {
+	originalTimeout := leiosPersistShutdownDrainTimeout
+	leiosPersistShutdownDrainTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { leiosPersistShutdownDrainTimeout = originalTimeout })
+
+	for name, stop := range map[string]func(*Ouroboros) error{
+		"stop writer": func(o *Ouroboros) error {
+			o.StopLeiosPersistWriter()
+			return nil
+		},
+		"pause": func(o *Ouroboros) error {
+			return o.PauseLeiosPersistWriterForLiveLifecycleOp()
+		},
+		"close": func(o *Ouroboros) error {
+			return o.Close()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			o := newTestOuroborosWithLeiosDB(t)
+			db := o.leiosDatabase()
+			require.NotNil(t, db)
+			base, err := db.LeiosDB()
+			require.NoError(t, err)
+			store := &blockingPutLeiosStore{
+				Store:   base,
+				entered: make(chan struct{}),
+				release: make(chan struct{}),
+			}
+			db.SetLeiosDB(store)
+
+			tx, ref := testLeiosManifestTx(t, 14)
+			manifestRaw, err := lcommon.LeiosEndorserBlock{
+				TransactionReferences: []lcommon.LeiosTransactionReference{
+					ref,
+				},
+			}.MarshalCBOR()
+			require.NoError(t, err)
+			point := ocommon.NewPoint(
+				305,
+				lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+			)
+			stored := make(chan error, 1)
+			go func() {
+				stored <- o.storeLeiosEndorserBlock(
+					point,
+					manifestRaw,
+					[]cbor.RawMessage{tx},
+					leiosStoreBackfill,
+				)
+			}()
+			testutil.RequireReceive(
+				t, store.entered, 2*time.Second, "sync write started",
+			)
+
+			stopped := make(chan error, 1)
+			go func() { stopped <- stop(o) }()
+			stopErr, ok := receiveWithin(stopped, 2*time.Second)
+			// Unblock before asserting so every goroutine exits either way.
+			close(store.release)
+			require.NoError(t, <-stored)
+			if !ok {
+				stopErr = <-stopped
+			}
+			db.SetLeiosDB(base)
+			require.True(
+				t,
+				ok,
+				"a stuck synchronous write must not hang the stop",
+			)
+			if name != "stop writer" {
+				require.ErrorIs(t, stopErr, ErrLeiosPersistDrainUnconfirmed)
+			}
+		})
+	}
+}
+
+// receiveWithin reports the value received from ch within timeout, and false
+// when nothing arrived.
+func receiveWithin[T any](ch <-chan T, timeout time.Duration) (T, bool) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case v := <-ch:
+		return v, true
+	case <-timer.C:
+		var zero T
+		return zero, false
+	}
 }

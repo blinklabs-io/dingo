@@ -583,7 +583,15 @@ type Ouroboros struct {
 	leiosPersistStarted     atomic.Bool
 	leiosPersistMu          sync.Mutex
 	leiosPersistClosed      bool // guarded by leiosPersistMu; permanent after Close
-	leiosPersistStoreMu     sync.Mutex
+	// leiosPersistWriterStopped is set by StopLeiosPersistWriter, after which
+	// synchronous fetch writes are refused. Guarded by leiosPersistMu.
+	leiosPersistWriterStopped bool
+	// leiosPersistSyncWrites counts synchronous fetch writes admitted and
+	// still running; leiosPersistSyncIdle is closed when it returns to zero
+	// and is nil while none runs. Both guarded by leiosPersistMu.
+	leiosPersistSyncWrites int
+	leiosPersistSyncIdle   chan struct{}
+	leiosPersistStoreMu    sync.Mutex
 	// leiosPersistPruneBeforeSlot is the active store's retention frontier.
 	// Writers hold leiosPersistStoreMu through SetLeiosEB; GC publishes its
 	// frontier under the same lock, then scans and prunes without holding it.

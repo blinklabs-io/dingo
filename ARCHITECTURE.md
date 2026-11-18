@@ -6238,9 +6238,13 @@ and the error makes the fetch report failure, so a later offer retries. If the
 entry needs more written by the time it is inserted (a concurrent announcement
 or transaction fetch), the write is repeated up to `leiosStoreDurableAttempts`
 times before falling back to the asynchronous path. The synchronous write is
-admitted under `leiosPersistLifecycleMu` like an enqueue: a live lifecycle pause
-or close waits for it, it restarts a paused retention GC, and after close it
-fails. An entry not yet bound to an announced slot is written once
+admitted under `leiosPersistLifecycleMu` like an enqueue, restarting a paused
+retention GC, but the lock is released before the store write: the write is
+registered as in flight, and a writer stop, live lifecycle pause or close waits
+for it within `leiosPersistShutdownDrainTimeout`, the same bound as the writer
+and GC workers, so a stuck blob store cannot hang them. A pause or close that
+times out returns `ErrLeiosPersistDrainUnconfirmed`. After a writer stop or
+close the write is refused and the fetch fails. An entry not yet bound to an announced slot is written once
 `bindLeiosEndorserBlockSlot` binds it. A
 locally forged block and a block published by that later binding use the
 asynchronous path: `enqueueLeiosPersist` queues the write on a single
