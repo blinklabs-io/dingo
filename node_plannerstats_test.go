@@ -84,6 +84,9 @@ func TestNodePlannerStartupOrdering(t *testing.T) {
 					ListenNetwork: "tcp", ListenAddress: "127.0.0.1:0",
 				}),
 				WithBlockfrostPort(apiPort),
+				WithUtxorpcPort(0),
+				WithMeshPort(0),
+				WithMidnightConfig(MidnightConfig{Port: 0}),
 				WithPluginSelection(plugin.CapabilityStorageBlob,
 					plugin.Selection{Provider: "badger",
 						Config: testutil.BadgerBlobConfig()}),
@@ -152,9 +155,15 @@ func TestNodePlannerStartupOrdering(t *testing.T) {
 					t, runErr, testutil.AsyncWait, "node shutdown",
 				))
 			})
-			require.NoError(t, testutil.RequireReceive(
-				t, guard.entered, testutil.AsyncWait, "planner startup pass",
-			))
+			select {
+			case err := <-guard.entered:
+				require.NoError(t, err)
+			case err := <-runErr:
+				runErr <- err
+				t.Fatalf("node stopped before planner startup: %v", err)
+			case <-time.After(testutil.AsyncWait):
+				t.Fatal("planner startup pass did not begin")
+			}
 			if mode.IsAPI() {
 				require.Eventually(
 					t,
