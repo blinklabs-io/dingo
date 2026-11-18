@@ -35,7 +35,7 @@ var errEventLedgerUnavailable = errors.New("ledger state is not available")
 
 // eventEpochForSlot gives the Event Service the epoch a block's slot falls in.
 func (n *Node) eventEpochForSlot(slot uint64) (uint64, error) {
-	ls := n.ledgerState
+	ls := n.wallClockLedger.Load()
 	if ls == nil {
 		return 0, errEventLedgerUnavailable
 	}
@@ -48,7 +48,7 @@ func (n *Node) eventEpochForSlot(slot uint64) (uint64, error) {
 
 // eventEraNameForEpoch gives the Event Service the era name of an epoch.
 func (n *Node) eventEraNameForEpoch(epoch uint64) (string, error) {
-	ls := n.ledgerState
+	ls := n.wallClockLedger.Load()
 	if ls == nil {
 		return "", errEventLedgerUnavailable
 	}

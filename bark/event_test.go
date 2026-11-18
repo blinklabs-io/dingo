@@ -16,6 +16,7 @@ package bark
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -383,6 +384,52 @@ func TestEventAckResumesAfterDisconnect(t *testing.T) {
 	require.Equal(t, []string{"c:1", "d:1", "e:1"}, got)
 }
 
+// A filtered ack stream must not count events the filter rejected toward
+// its send window: the client has nothing to acknowledge for them.
+func TestEventAckFilteredStreamIgnoresRejectedEvents(t *testing.T) {
+	t.Parallel()
+	f := newEventFixture(t, func(c *BarkConfig) {
+		c.EventBufferSize = 4
+	}, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	stream := f.client.SubscribeWithAck(ctx)
+	require.NoError(t, stream.Send(&eventv1alpha1.SubscribeWithAckRequest{
+		Message: &eventv1alpha1.SubscribeWithAckRequest_Start{
+			Start: &eventv1alpha1.SubscribeWithAckStart{
+				SubscriberId: "filtered",
+				Filter: &eventv1alpha1.EventFilter{
+					EventTypes: []string{eventtype.EpochTransition},
+				},
+			},
+		},
+	}))
+	waitActive(t, f, 1)
+
+	// One at a time, so the stream scans each rejected event on its own
+	// instead of reading them all in one batch.
+	for i := range 3 {
+		f.publishChurn(fmt.Sprintf("r:%d", i))
+		require.Eventually(t, func() bool {
+			return f.hub.position() == uint64(i+1)
+		}, 5*time.Second, 5*time.Millisecond)
+	}
+	f.bus.Publish(
+		event.EpochTransitionEventType,
+		event.NewEvent(event.EpochTransitionEventType, event.EpochTransitionEvent{
+			PreviousEpoch: 1, NewEpoch: 2,
+		}),
+	)
+	ev := recvEvent(t, func() (*eventv1alpha1.Event, error) {
+		resp, err := stream.Receive()
+		if err != nil {
+			return nil, err
+		}
+		return resp.GetEvent(), nil
+	})
+	require.Equal(t, eventtype.EpochTransition, ev.GetEventType())
+}
+
 func TestEventAckOutOfRangeWhenNotBuffered(t *testing.T) {
 	f := newEventFixture(t, func(c *BarkConfig) { c.EventBufferSize = 4 }, false)
 	for range 10 {
@@ -477,16 +524,17 @@ func TestEventPublishAndBatch(t *testing.T) {
 			{Id: "self", EventType: eventtype.PeerChurn, OriginNodeId: "node-a"},
 			{Id: "wrongpayload", EventType: eventtype.MempoolAddTx, TypedData: payload},
 			{EventType: eventtype.PeerChurn},
+			{Id: "noorigin", EventType: eventtype.PeerChurn},
 		}},
 	))
 	require.NoError(t, err)
 	res := resp.Msg.GetResults()
-	require.Len(t, res, 5)
+	require.Len(t, res, 6)
 	require.Nil(t, res[0].GetFailure())
 	require.Equal(t,
 		eventv1alpha1.PublishFailureCode_PUBLISH_FAILURE_CODE_UNKNOWN_EVENT_TYPE,
 		res[1].GetFailure().GetCode())
-	for _, i := range []int{2, 3, 4} {
+	for _, i := range []int{2, 3, 4, 5} {
 		require.Equal(t,
 			eventv1alpha1.PublishFailureCode_PUBLISH_FAILURE_CODE_INVALID_EVENT,
 			res[i].GetFailure().GetCode(), "result %d", i)

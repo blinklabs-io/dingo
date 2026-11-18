@@ -688,6 +688,15 @@ func (n *Node) configValidate() error {
 				"WithShelleyKESAgentProfile; set them in each pool",
 		)
 	}
+	for name, v := range map[string]int{
+		"barkEventBufferSize":              n.config.cfg.BarkEventBufferSize,
+		"barkEventMaxSubscribers":          n.config.cfg.BarkEventMaxSubscribers,
+		"barkEventMaxSubscribersPerClient": n.config.cfg.BarkEventMaxSubscribersPerClient,
+	} {
+		if v < 0 {
+			return fmt.Errorf("invalid %s %d: must not be negative", name, v)
+		}
+	}
 	if n.config.cfg.MinPoolMargin > 10_000 {
 		return fmt.Errorf(
 			"min pool margin (%d) must be in [0, 10000] basis points",
@@ -2379,7 +2388,8 @@ func WithBarkOperatorCertificateFingerprints(
 
 // WithBarkEventService configures Bark's EventService. It is disabled by
 // default; publish additionally lets it accept Publish and PublishBatch, and
-// a zero limit selects the service's default.
+// a zero buffer size selects the default and a zero subscriber limit means
+// unlimited.
 func WithBarkEventService(
 	enabled, publish bool,
 	bufferSize, maxSubscribers, maxSubscribersPerClient int,

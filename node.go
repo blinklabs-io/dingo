@@ -638,14 +638,15 @@ func (n *Node) apiPluginSelection(
 // configuredHost (from --bark-host/DINGO_BARK_HOST/config) always wins when set
 // -- an explicit operator choice. Otherwise, when lifecycleEnabled (the
 // database lifecycle service's destructive Restore/Truncate/CreateSnapshot/
-// etc. RPCs, or the remote Stop/Restart RPCs, will be mounted), this defaults
-// to loopback-only rather than letting bark.go's own empty-Host default
-// ("0.0.0.0") expose them on every interface; with no lifecycle service
-// mounted, "" is returned unchanged so bark's own existing default behavior
-// (all interfaces) is preserved for deployments only using it for the read-only
-// Archive service. Bark serves every RPC to anonymous callers, so the bind
-// address is the only exposure control: a caller that can reach the listener
-// can invoke the lifecycle RPCs, which is why they default to loopback.
+// etc. RPCs, the remote Stop/Restart RPCs, or the EventService will be
+// mounted), this defaults to loopback-only rather than letting bark.go's own
+// empty-Host default ("0.0.0.0") expose them on every interface; with none of
+// these mounted, "" is returned unchanged so bark's own existing default
+// behavior (all interfaces) is preserved for deployments only using it for the
+// read-only Archive service. Bark serves every RPC and event to anonymous
+// callers, so the bind address is the only exposure control: a caller that can
+// reach the listener can invoke the lifecycle RPCs or subscribe to events,
+// which is why these default to loopback.
 func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 	if configuredHost != "" {
 		return configuredHost

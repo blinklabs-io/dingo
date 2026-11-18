@@ -103,7 +103,7 @@ func newEventHub(cfg BarkConfig) *eventHub {
 		maxPerHost: maxPerHost,
 		// A send window of half the ring leaves the other half for
 		// events arriving while the client catches up on acks.
-		window:  uint64(size / 2),
+		window:  max(uint64(size/2), 1),
 		ring:    make([]*eventv1alpha1.Event, size),
 		wake:    make(chan struct{}),
 		perHost: make(map[string]int),
@@ -475,7 +475,7 @@ func (s *eventServiceHandler) SubscribeWithAck(
 	}()
 
 	for {
-		if cursor-acked.Load() >= s.hub.window {
+		if sent.Load()-acked.Load() >= s.hub.window {
 			timer := time.NewTimer(eventAckTimeout)
 			select {
 			case <-ackCh:
@@ -520,7 +520,6 @@ func (s *eventServiceHandler) SubscribeWithAck(
 				return err
 			}
 		}
-		sent.Store(cursor)
 		if len(events) > 0 {
 			continue
 		}
@@ -579,10 +578,10 @@ func (s *eventServiceHandler) validatePublished(
 			Message: fmt.Sprintf("event type %q is not registered", ev.GetEventType()),
 		}
 	}
-	if ev.GetOriginNodeId() == s.hub.nodeID {
+	if ev.GetOriginNodeId() == "" || ev.GetOriginNodeId() == s.hub.nodeID {
 		return &eventv1alpha1.PublishFailure{
 			Code:    eventv1alpha1.PublishFailureCode_PUBLISH_FAILURE_CODE_INVALID_EVENT,
-			Message: "event originated on this node",
+			Message: "event needs a remote origin_node_id",
 		}
 	}
 	if td := ev.GetTypedData(); td != nil {

@@ -20992,9 +20992,11 @@ channel; one goroutine converts and appends to a ring buffer of
 read the ring at their own pace, so a slow remote client cannot delay any
 internal subscriber: `Subscribe` detaches a client that falls more than the ring
 behind, `SubscribeWithAck` closes it with `OUT_OF_RANGE`, and a client that
-stops acknowledging a half-ring window is closed after a timeout. Resuming with
+stops acknowledging a half-ring window of delivered events is closed after a
+timeout; events a filter rejects do not count toward that window. Resuming with
 `last_acked_sequence` replays from the ring. `Publish` and `PublishBatch` are
-refused unless `barkEventPublishEnabled` is set; an accepted event goes to the
+refused unless `barkEventPublishEnabled` is set, and an event with no
+`origin_node_id` or this node's own is rejected; an accepted event goes to the
 node's remote subscribers and is not injected into the internal EventBus, which
 only accepts its own typed structs. Concurrent-stream limits
 (`barkEventMaxSubscribers`, `barkEventMaxSubscribersPerClient`) are explicit
