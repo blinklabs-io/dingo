@@ -6239,11 +6239,11 @@ locally forged block and a block published by that later binding use the
 asynchronous path: `enqueueLeiosPersist` queues the write on a single
 background writer
 (`ouroboros/leios_persist.go`) that coalesces by (slot, hash), not hash alone —
-a complete job supersedes a manifest-only one for the same occurrence, eliding
-the backfiller's duplicate manifest write, while a job for a different
-occurrence of the same hash persists independently — and does one store write
-per occurrence via `Database.SetLeiosEB`, so the CBOR encode + commit do not
-serialize against block application during catch-up. That queue is best-effort (a queue
+a complete job supersedes a manifest-only one for the same occurrence, while a
+job for a different occurrence of the same hash persists independently — and
+does one store write per occurrence via `Database.SetLeiosEB`. Both paths share
+`writeLeiosEBToStore`, which applies the same retention checks under
+`leiosPersistStoreMu`. That queue is best-effort (a queue
 at either of its bounds drops the write, logged with the reason), and a fetch
 does not depend on it. A certified endorser block is additionally written by
 ledger apply of the certifying ranking block when `em`/`et` are absent
