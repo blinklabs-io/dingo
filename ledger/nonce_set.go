@@ -439,11 +439,16 @@ type utxoSetPin struct {
 // snapshot and the batch list are taken under utxoSetApplyMu, which a batch
 // holds exclusively while it is applied, so a batch is in exactly one of them.
 func (ls *LedgerState) pinSetReads(txn ledgerdb.Txn) {
+	_ = ls.pinSetReadsResult(txn)
+}
+
+func (ls *LedgerState) pinSetReadsResult(txn ledgerdb.Txn) error {
 	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
-		return
+		return nil
 	}
 	pin := &utxoSetPin{}
 	release := func() {}
+	var snapshotErr error
 	if sn, ok := ls.readSet(txn).(UtxoSetSnapshotter); ok {
 		ls.utxoSetApplyMu.RLock()
 		set, rel, err := sn.SnapshotUtxoSet()
@@ -453,8 +458,9 @@ func (ls *LedgerState) pinSetReads(txn ledgerdb.Txn) {
 		}
 		ls.utxoSetApplyMu.RUnlock()
 		if err != nil {
+			snapshotErr = err
 			ls.config.Logger.Warn(
-				"live UTxO set snapshot failed; pinned reads use the store",
+				"live UTxO set snapshot failed",
 				"component", "ledger",
 				"error", err,
 			)
@@ -485,6 +491,7 @@ func (ls *LedgerState) pinSetReads(txn ledgerdb.Txn) {
 		ls.utxoSetMu.Unlock()
 		release()
 	})
+	return snapshotErr
 }
 
 // pinOf returns the pin of txn, nil for a transaction that is not pinned.

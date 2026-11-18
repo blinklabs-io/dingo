@@ -72,8 +72,8 @@ type QueryView struct {
 // caller can map the ErrPointNotOnChain and ErrHistoricalStateUnavailable
 // sentinels to protocol-level Acquire failures.
 //
-// The snapshot is a database.NewReadSnapshotContext: its blob and metadata
-// views are opened at one commit boundary, and it counts against the read
+// The metadata, blob and live-set views open at one commit boundary. The
+// coordinated database snapshot counts against the read
 // snapshot admission cap, which keeps one metadata read connection free for
 // the rest of the node however many views are held. When the cap is reached
 // AcquireQueryView waits for a view to close, and returns ctx's error if ctx
@@ -171,7 +171,11 @@ func (ls *LedgerState) openQueryViewSnapshot(
 ) (ledgerdb.Txn, context.CancelFunc, error) {
 	viewCtx, cancelView := context.WithCancel(context.WithoutCancel(ctx))
 	stopWatch := context.AfterFunc(ctx, cancelView)
-	txn, _, err := database.NewReadSnapshotContext(viewCtx, ls.db)
+	txn, _, err := database.NewReadSnapshotWithAnchorContext(
+		viewCtx, ls.db, func(txn *database.Txn) error {
+			return ls.pinSetReadsResult(txn)
+		},
+	)
 	if !stopWatch() {
 		// ctx ended while the snapshot was opening and cancelled viewCtx,
 		// which also ends a transaction that did open. err names the stage

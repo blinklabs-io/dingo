@@ -580,8 +580,8 @@ func (ls *LedgerState) utxoSetBatchesSeenBy(
 		}
 	}
 	ls.utxoSetMu.Unlock()
-	// IsCommitted is asked outside utxoSetMu: it waits for a commit in
-	// progress, which must not hold up staging in other transactions.
+	// Observe commit state without holding the batch map while inspecting
+	// the transactions.
 	seen := make([]*utxoSetBatch, 0, len(others)+1)
 	for _, b := range others {
 		if b.txn.IsCommitted() {
@@ -1734,14 +1734,17 @@ type UtxoSetView interface {
 // liveUtxoView opens the live UTxO set as of at for a UTxO query pinned to at
 // when the set is the only copy. It returns nil otherwise, and the caller
 // answers from its usual source.
-func (ls *LedgerState) liveUtxoView(at QueryPoint) (UtxoSetView, error) {
+func (ls *LedgerState) liveUtxoView(
+	at QueryPoint,
+	txn ledgerdb.Txn,
+) (UtxoSetView, error) {
 	if !ls.config.UtxoSetOnly || !at.pinned() {
 		return nil, nil
 	}
 	if ls.utxoSetFailed.Load() {
 		return nil, errLiveUtxoSetUnavailable
 	}
-	h, ok := ls.config.UtxoSet.(UtxoSetHistory)
+	h, ok := ls.readSet(txn).(UtxoSetHistory)
 	if !ok {
 		return nil, ErrUtxoAsOfUnavailable
 	}

@@ -8208,9 +8208,13 @@ behind the applied ledger tip. The applied tip and its era are captured
 together, and the chain lookup stays anchored to that exact point while the
 header chain can advance. Each calls `LedgerState.AcquireQueryView`, which waits
 (inside the caller's deadline) for any epoch-boundary job and opens a
-coordinated read snapshot (`database.NewReadSnapshotContext`, whose blob and
-metadata views are fixed at one commit boundary), and validates the point
-against it with `VerifyPointQueryable`. A boundary can commit before its job is
+coordinated read snapshot (`database.NewReadSnapshotWithAnchorContext`, whose
+blob, metadata and live-ledger-set views are fixed before commits resume), and
+validates the point against it with `VerifyPointQueryable`. The live set pin
+also retains committed batches not yet applied to the set. Historical UTxO
+reads open from that transaction's set snapshot, and releasing the transaction
+releases its set pin. A live-set snapshot failure rejects acquisition and
+releases the database snapshot. A boundary can commit before its job is
 published, so a snapshot that still contains the boundary's pending-ratification
 record is dropped and the open retried once the job settles. A wait that
 outlasts the caller's deadline fails with `ledger.ErrEpochBoundaryJobPending`,

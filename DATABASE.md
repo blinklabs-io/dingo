@@ -1133,6 +1133,11 @@ Use the Go APIs when code runs inside Dingo:
   the blob transaction first, then commit metadata. `Txn.BlobStore()` returns
   the blob store the transaction was opened on — the store its `Blob()` handle
   belongs to, and the one every blob call inside the transaction must use.
+  Acquired LocalStateQuery views anchor their live ledger-set snapshot before
+  the coordinated metadata/blob snapshot resumes commits. The view retains
+  that set snapshot and any committed batches awaiting application until its
+  read transaction finishes. An additional-store snapshot failure releases the
+  database snapshot and rejects acquisition.
 - `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the
   compatibility composition of the SQL-facing capabilities. New components
   should accept the narrowest one they use rather than the composition.

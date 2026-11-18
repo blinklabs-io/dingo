@@ -217,7 +217,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 		defer txn.Release()
 	}
 	if ls.config.UtxoSetOnly {
-		view, err := ls.liveUtxoView(at)
+		view, err := ls.liveUtxoView(at, txn)
 		if err != nil {
 			return nil, err
 		}
