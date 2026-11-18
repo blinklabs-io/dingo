@@ -12,24 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ledger
+package dingo
 
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"io"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	dingomempool "github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -42,18 +45,52 @@ func historicalSpendTxCbor(
 	amount uint64,
 ) []byte {
 	t.Helper()
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x31}, ed25519.SeedSize))
+	address := append(
+		[]byte{0x60},
+		lcommon.Blake2b224Hash(key.Public().(ed25519.PublicKey)).Bytes()...)
+	body := map[uint]any{
+		0: []any{[]any{inputID, uint64(inputIndex)}},
+		1: []any{[]any{address, amount}},
+		2: uint64(200_000),
+	}
+	unsigned, err := cbor.Encode([]any{body, map[uint]any{}, nil})
+	require.NoError(t, err)
+	tx, err := mary.NewMaryTransactionFromCbor(unsigned)
+	require.NoError(t, err)
+	signature := ed25519.Sign(key, tx.Hash().Bytes())
 	raw, err := cbor.Encode([]any{
+		body,
 		map[uint]any{
-			0: []any{[]any{inputID, uint64(inputIndex)}},
-			1: []any{[]any{revalidationTestAddress, amount}},
-			2: uint64(200_000),
+			0: []any{[]any{key.Public().(ed25519.PublicKey), signature}},
 		},
-		map[uint]any{},
-		true,
 		nil,
 	})
 	require.NoError(t, err)
 	return raw
+}
+
+func seedHistoricalSubmissionUtxo(
+	t *testing.T,
+	db *database.Database,
+	txID []byte,
+) {
+	t.Helper()
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x31}, ed25519.SeedSize))
+	address := append(
+		[]byte{0x60},
+		lcommon.Blake2b224Hash(key.Public().(ed25519.PublicKey)).Bytes()...)
+	output, err := cbor.Encode([]any{address, uint64(10_000_000)})
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+			if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{TxId: txID, AddedSlot: 1}); err != nil {
+				return err
+			}
+			return db.Blob().SetUtxo(txn.Blob(), txID, 0, output)
+		}),
+	)
 }
 
 func TestHistoricalSubmissionUsesCurrentEraAcrossMempoolBoundaries(
@@ -61,20 +98,13 @@ func TestHistoricalSubmissionUsesCurrentEraAcrossMempoolBoundaries(
 ) {
 	t.Parallel()
 
-	f := newPendingAccountsFixtureWithRule(
-		t,
-		0,
-		shelley.UtxoValidateBadInputsUtxo,
-		&shelley.ShelleyProtocolParameters{},
-	)
-	f.ls.activeEras = eras.Eras
-	f.ls.publishSnapshotsLocked()
+	f := newMithrilTestLedger(t)
 
 	rootID := bytes.Repeat([]byte{0x5a}, 32)
-	seedLedgerUtxo(t, f.ls.db, rootID, 0, 10_000_000)
-	raw := historicalSpendTxCbor(t, rootID, 0, 9_000_000)
+	seedHistoricalSubmissionUtxo(t, f.db, rootID)
+	raw := historicalSpendTxCbor(t, rootID, 0, 9_800_000)
 	previous, err := gledger.NewTransactionFromCbor(
-		uint(babbage.EraIdBabbage),
+		uint(mary.EraIdMary),
 		raw,
 	)
 	require.NoError(t, err)
@@ -101,12 +131,12 @@ func TestHistoricalSubmissionUsesCurrentEraAcrossMempoolBoundaries(
 
 	require.NoError(t, pool.AddTransaction(
 		context.Background(),
-		uint(babbage.EraIdBabbage),
+		uint(mary.EraIdMary),
 		raw,
 	))
 	stored, ok := pool.GetTransaction(previous.Hash().String())
 	require.True(t, ok)
-	require.Equal(t, uint(conway.EraIdConway), stored.Type)
+	require.Equal(t, uint(alonzo.EraIdAlonzo), stored.Type)
 	decoded, err := gledger.NewTransactionFromCbor(stored.Type, stored.Cbor)
 	require.NoError(t, err)
 	require.Equal(t, previous.Hash(), decoded.Hash())
@@ -115,20 +145,13 @@ func TestHistoricalSubmissionUsesCurrentEraAcrossMempoolBoundaries(
 	require.NotNil(t, consumer)
 	relayed := consumer.NextTx(false)
 	require.NotNil(t, relayed)
-	require.Equal(t, uint(conway.EraIdConway), relayed.Type)
+	require.Equal(t, uint(alonzo.EraIdAlonzo), relayed.Type)
 }
 
 func TestHistoricalSubmissionAppliesCurrentEraRules(t *testing.T) {
 	t.Parallel()
 
-	f := newPendingAccountsFixtureWithRule(
-		t,
-		0,
-		shelley.UtxoValidateBadInputsUtxo,
-		&shelley.ShelleyProtocolParameters{},
-	)
-	f.ls.activeEras = eras.Eras
-	f.ls.publishSnapshotsLocked()
+	f := newMithrilTestLedger(t)
 
 	missingID := bytes.Repeat([]byte{0x7b}, 32)
 	raw := historicalSpendTxCbor(t, missingID, 0, 9_000_000)
@@ -152,12 +175,12 @@ func TestHistoricalSubmissionAppliesCurrentEraRules(t *testing.T) {
 
 	err = pool.AddTransaction(
 		context.Background(),
-		uint(babbage.EraIdBabbage),
+		uint(mary.EraIdMary),
 		raw,
 	)
 	var badInputs shelley.BadInputsUtxoError
 	require.ErrorAs(t, err, &badInputs)
 	var submittedEra interface{ SubmissionEra() uint }
 	require.ErrorAs(t, err, &submittedEra)
-	require.Equal(t, uint(conway.EraIdConway), submittedEra.SubmissionEra())
+	require.Equal(t, uint(alonzo.EraIdAlonzo), submittedEra.SubmissionEra())
 }

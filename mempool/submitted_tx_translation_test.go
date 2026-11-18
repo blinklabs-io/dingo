@@ -17,6 +17,7 @@ package mempool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -25,12 +26,20 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
 var errUntranslatedSubmission = errors.New("submission was not translated")
 
-type submissionTranslatorValidator struct{}
+type submissionTranslatorValidator struct {
+	eraLimits map[uint]uint
+}
+
+func (v *submissionTranslatorValidator) MaxTxSize(era uint) (uint, bool) {
+	limit, ok := v.eraLimits[era]
+	return limit, ok
+}
 
 type rejectingSubmissionTranslatorValidator struct {
 	submissionTranslatorValidator
@@ -138,4 +147,55 @@ func TestTranslatedValidationErrorCarriesCurrentEra(t *testing.T) {
 	var submittedEra interface{ SubmissionEra() uint }
 	require.ErrorAs(t, err, &submittedEra)
 	require.Equal(t, uint(conway.EraIdConway), submittedEra.SubmissionEra())
+}
+
+func TestTranslatedSizeLimitUsesCurrentEra(t *testing.T) {
+	t.Parallel()
+	raw, err := cbor.Encode([]any{
+		map[uint]any{0: []any{}, 1: []any{}, 2: uint64(0)},
+		map[uint]any{}, true, nil,
+	})
+	require.NoError(t, err)
+	previous, err := babbage.NewBabbageTransactionFromCbor(raw)
+	require.NoError(t, err)
+	previousSize, err := lcommon.TxSize(previous)
+	require.NoError(t, err)
+	translated, err := (&submissionTranslatorValidator{}).TranslateSubmittedTx(
+		previous,
+	)
+	require.NoError(t, err)
+	currentSize, err := lcommon.TxSize(translated)
+	require.NoError(t, err)
+	require.Positive(t, currentSize)
+	for _, delta := range []int{-1, 0, 1} {
+		t.Run(fmt.Sprintf("limit_delta_%d", delta), func(t *testing.T) {
+			t.Parallel()
+			m := newTestMempoolWithValidator(t, &submissionTranslatorValidator{
+				eraLimits: map[uint]uint{
+					babbage.EraIdBabbage: uint(previousSize),
+					conway.EraIdConway:   uint(currentSize + delta),
+				},
+			})
+			t.Cleanup(
+				func() { require.NoError(t, m.Stop(context.Background())) },
+			)
+			err := m.AddTransaction(t.Context(), babbage.EraIdBabbage, raw)
+			if delta >= 0 {
+				require.NoError(t, err)
+				stored, ok := m.GetTransaction(previous.Hash().String())
+				require.True(t, ok)
+				require.Equal(t, uint(conway.EraIdConway), stored.Type)
+				return
+			}
+			var oversized shelley.MaxTxSizeUtxoError
+			require.ErrorAs(t, err, &oversized)
+			var submittedEra interface{ SubmissionEra() uint }
+			require.ErrorAs(t, err, &submittedEra)
+			require.Equal(
+				t,
+				uint(conway.EraIdConway),
+				submittedEra.SubmissionEra(),
+			)
+		})
+	}
 }

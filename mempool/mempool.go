@@ -2173,7 +2173,7 @@ func (m *Mempool) AddTransaction(
 		}
 		if txType != originalType {
 			if err := m.rejectOversizedTx(txType, txBytes); err != nil {
-				return err
+				return &submittedTxValidationError{era: txType, err: err}
 			}
 		}
 	}
