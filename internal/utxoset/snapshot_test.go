@@ -64,6 +64,22 @@ func TestSnapshotUtxoSetReadsTheSetAsOfTheCall(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), tip.Slot)
 
+	historical, err := view.(ledger.UtxoSetHistory).UtxoSetAt(
+		ocommon.NewPoint(1, hash(1)),
+	)
+	require.NoError(t, err)
+	_, live, err = historical.Get(hash(1), 0)
+	require.NoError(t, err)
+	require.True(t, live)
+	_, live, err = historical.Get(hash(2), 0)
+	require.NoError(t, err)
+	require.False(t, live)
+	historical.Close()
+	historical.Close()
+	_, live, err = reader.Get(hash(1), 0)
+	require.NoError(t, err)
+	require.True(t, live, "closing a historical view preserves its parent")
+
 	p := ocommon.NewPoint(3, hash(3))
 	require.Error(t, view.ApplyUtxoChanges(&p, nil), "a snapshot is read-only")
 }

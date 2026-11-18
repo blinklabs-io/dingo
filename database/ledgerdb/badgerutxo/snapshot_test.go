@@ -146,3 +146,57 @@ func TestSnapshotReleaseWaitsForReadsInFlight(t *testing.T) {
 	require.NoError(t, readErr)
 	require.Equal(t, 3, seen)
 }
+
+func TestSnapshotHistoricalViewPreservesItsParent(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { _ = s.Close() })
+	bootstrap(t, s, point(10, 1), out(1, 0))
+	_, err := s.Apply(point(11, 2), []badgerutxo.Output{out(2, 0)}, nil)
+	require.NoError(t, err)
+	snap, err := s.Snapshot()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = snap.Close() })
+	_, err = s.Apply(point(12, 3), nil, []badgerutxo.Ref{ref(1, 0)})
+	require.NoError(t, err)
+
+	view, err := snap.AsOf(point(10, 1))
+	require.NoError(t, err)
+	t.Cleanup(view.Close)
+	_, live, err := view.Get(ref(1, 0))
+	require.NoError(t, err)
+	require.True(t, live)
+	_, live, err = view.Get(ref(2, 0))
+	require.NoError(t, err)
+	require.False(t, live)
+	view.Close()
+	view.Close()
+	requireLive(t, snap, true, ref(1, 0))
+	requireLive(t, snap, true, ref(2, 0))
+	requireLive(t, s, false, ref(1, 0))
+
+	_, err = snap.AsOf(point(11, 99))
+	require.ErrorIs(t, err, badgerutxo.ErrPointNotInJournal)
+	held, err := snap.AsOf(point(10, 1))
+	require.NoError(t, err)
+	t.Cleanup(held.Close)
+	closed := make(chan error, 1)
+	go func() { closed <- snap.Close() }()
+	select {
+	case <-closed:
+		t.Fatal("parent closed while a historical view still held its transaction")
+	case <-time.After(100 * time.Millisecond):
+	}
+	_, live, err = held.Get(ref(1, 0))
+	require.NoError(t, err)
+	require.True(t, live)
+	held.Close()
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("historical view retained its parent after release or failure")
+	}
+	_, err = snap.AsOf(point(10, 1))
+	require.ErrorIs(t, err, badgerutxo.ErrSnapshotReleased)
+}

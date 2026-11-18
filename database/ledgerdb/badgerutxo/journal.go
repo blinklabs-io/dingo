@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
@@ -922,7 +923,9 @@ func previewIn(txn *badger.Txn, point ocommon.Point) (RollbackResult, error) {
 // commit during the reads cannot mix two states. Close releases the
 // snapshot.
 type AsOf struct {
-	txn *badger.Txn
+	txn       *badger.Txn
+	release   func()
+	closeOnce sync.Once
 	// changed holds each output whose state at the point differs from the
 	// snapshot's: its CBOR, or nil when it was not live.
 	changed map[Ref][]byte
@@ -930,8 +933,23 @@ type AsOf struct {
 
 // AsOf opens a view of the set as of point. A point at or past the tip sees
 // the set as it is. It returns ErrRollbackBeyondJournal when the journal does
-// not reach point.
+// not reach point. On a snapshot Store, the view shares the snapshot's commit
+// boundary and must be closed before the parent Store's Close can finish.
 func (s *Store) AsOf(point ocommon.Point) (*AsOf, error) {
+	if s.snap != nil {
+		txn, err := s.snap.acquire()
+		if err != nil {
+			return nil, err
+		}
+		a, err := asOfIn(txn, point)
+		if err != nil {
+			s.snap.done()
+			return nil, err
+		}
+		// The historical view borrows its parent's transaction until Close.
+		a.release = s.snap.done
+		return a, nil
+	}
 	txn, err := s.readTxn()
 	if err != nil {
 		return nil, err
@@ -960,12 +978,12 @@ func asOfIn(txn *badger.Txn, point ocommon.Point) (*AsOf, error) {
 	for _, r := range res.Removed {
 		changed[r] = nil
 	}
-	return &AsOf{txn: txn, changed: changed}, nil
+	return &AsOf{txn: txn, changed: changed, release: txn.Discard}, nil
 }
 
 // Close releases the view's snapshot.
 func (a *AsOf) Close() {
-	a.txn.Discard()
+	a.closeOnce.Do(a.release)
 }
 
 // Get returns the CBOR of r if it was live at the view's point.
