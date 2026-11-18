@@ -215,12 +215,13 @@ func TestStartWithStartupDoesNotWaitForRun(t *testing.T) {
 		types.PlannerStatsTriggerStartup,
 		receive(t, u.entered, "asynchronous startup run"),
 	)
-	cancel()
 	require.NoError(
 		t,
 		receive(t, started, "StartWithStartup to return"),
 		"startup must return before planner maintenance completes",
 	)
+	require.Equal(t, int64(1), u.active.Load())
+	cancel()
 }
 
 func TestFailedRunDoesNotStopLaterRuns(t *testing.T) {
