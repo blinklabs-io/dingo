@@ -217,6 +217,33 @@ func (d *Database) ImmutableDir() string {
 	return d.immutable.dir
 }
 
+// PublishImmutableChunk makes a locally staged imported chunk durable through
+// providers that store chunk files remotely. Local providers already own the
+// files in Dir and need no extra step.
+func (d *Database) PublishImmutableChunk(num uint64) error {
+	if d.immutable == nil {
+		return ErrImmutableNotEnabled
+	}
+	publisher, ok := d.immutable.svc.(immplugin.ChunkPublisher)
+	if !ok {
+		return nil
+	}
+	return publisher.PublishChunk(num)
+}
+
+// ReleaseImmutableChunk discards the local staging copy after a remotely
+// stored chunk and its database markers are durable.
+func (d *Database) ReleaseImmutableChunk(num uint64) error {
+	if d.immutable == nil {
+		return ErrImmutableNotEnabled
+	}
+	releaser, ok := d.immutable.svc.(immplugin.LocalChunkReleaser)
+	if !ok {
+		return nil
+	}
+	return releaser.ReleaseChunk(num)
+}
+
 // ImmutableState returns the persisted state, and false when the database
 // has no ImmutableDB.
 func (d *Database) ImmutableState() (ImmutableState, bool) {
@@ -328,12 +355,6 @@ func (d *Database) initImmutable() error {
 	}
 	if !found && !cfg.Enabled {
 		return nil
-	}
-	if d.config.BlobPlugin != "" && d.config.BlobPlugin != "badger" {
-		return fmt.Errorf(
-			"the ImmutableDB requires the badger blob plugin, got %q",
-			d.config.BlobPlugin,
-		)
 	}
 	if d.config.DataDir == "" {
 		return errors.New("the ImmutableDB requires a data directory")

@@ -4480,14 +4480,22 @@ chunk files, and Badger keeps a marker per promoted block.
   epoch boundary block at its chunk's first relative slot.
 - The ImmutableDB is the `storage.immutable` plugin capability. Its contract
   is `database/plugin/immutable.ImmutableDB` (`Dir`, `Open`, `ReadBlockAt`,
-  `ListFiles`) with a `Store` writer (append, sync, tip, read by location,
-  point lookup, truncate). The built-in `chunkfile` provider
-  (`database/plugin/immutable/chunkfile`) wraps `database/immutable.Store`,
-  is registered by `internal/plugins.NewHost` in every build, and is resolved
-  by `plugins.ResolveStorage` with no selector. `database.Stores.Immutable`
-  carries it into `database.New`, which opens the chunk writer, reads markers
-  and lists snapshot files only through it; a database without an ImmutableDB
-  needs none. The provider is a durable-close plugin: host shutdown closes a
+  `ListFiles`, `ReadFile`) with a `Store`
+  writer (append, sync, tip, read by location, point lookup, truncate). The
+  built-in `chunkfile` provider (`database/plugin/immutable/chunkfile`)
+  wraps `database/immutable.Store` and is registered in every build. Builds
+  with `dingo_extra_plugins` also register S3 and GCS providers; the immutable
+  selection follows the matching configured blob provider and reuses its
+  released object-store settings. Remote objects are authoritative, with only
+  the writable tail staged locally; completed trios publish chunk, secondary,
+  then primary. An interrupted new chunk without a committed primary entry
+  is removed before reopening its preceding durable tail. Snapshots link
+  local chunk files and stream remote ones through the provider; blob-key
+  backups exclude reserved immutable objects. `database.Stores.Immutable`
+  carries the selected provider into `database.New`, which opens the writer,
+  reads markers and lists snapshot files through it; a database without an
+  ImmutableDB needs none. The provider is a durable-close plugin: host
+  shutdown closes a
   writer its holder left open to completion, and a later `Open` is refused.
   `Database.Close` and the failed-step reset still close the writer first.
 - `database` installs an `immutableBlobStore` over the blob store whenever the

@@ -19,20 +19,42 @@
 package immutable
 
 import (
+	"context"
+	"io"
 	"log/slog"
 
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 )
 
 // DirName is the directory under the data directory that holds the chunk
 // files of the built-in provider.
 const DirName = "immutable"
 
+const (
+	// ChunkFileProviderName stores chunks in the local data directory.
+	ChunkFileProviderName = "chunkfile"
+	S3ProviderName        = "s3"
+	GCSProviderName       = "gcs"
+)
+
+// ProviderNameForBlob selects the ImmutableDB backend that shares the
+// configured blob provider's object store.
+func ProviderNameForBlob(blobProvider string) string {
+	switch blobProvider {
+	case S3ProviderName, GCSProviderName:
+		return blobProvider
+	default:
+		return ChunkFileProviderName
+	}
+}
+
 // ProviderDependencies are shared application settings injected into any
 // storage.immutable provider.
 type ProviderDependencies struct {
-	DataDir string
-	Logger  *slog.Logger
+	DataDir     string
+	Logger      *slog.Logger
+	ObjectFiles blob.ImmutableObjects
 }
 
 // Store is the single writer of one ImmutableDB. It appends blocks, reads
@@ -60,9 +82,8 @@ type Store interface {
 
 // ImmutableDB is the service a storage.immutable provider returns.
 type ImmutableDB interface {
-	// Dir is the directory holding the chunk files. Chunk adoption, snapshot
-	// capture and restore place and read files there, next to the adoption
-	// marker.
+	// Dir is the local chunk directory or the remote provider
+	// staging directory used by chunk adoption and restore.
 	Dir() string
 	// Open opens the writer under geom, recovering a torn tail left by an
 	// interrupted append. At most one Store may be open at a time.
@@ -70,7 +91,22 @@ type ImmutableDB interface {
 	// ReadBlockAt reads the block at loc without opening the writer, which is
 	// all a reader holding a marker needs.
 	ReadBlockAt(loc immutable.Location) (uint, []byte, error)
-	// ListFiles returns the chunk, primary and secondary files in Dir, in
-	// chunk order.
+	// ListFiles returns the durable chunk, primary and secondary files
+	// owned by the provider, in chunk order.
 	ListFiles() ([]immutable.File, error)
+	// ReadFile streams one named chunk file to dst and returns its byte count.
+	ReadFile(ctx context.Context, name string, dst io.Writer) (int64, error)
+}
+
+// ChunkPublisher publishes a chunk assembled in Dir before database markers
+// refer to its locations. Remote providers implement it; local providers do
+// not need a separate publish step.
+type ChunkPublisher interface {
+	PublishChunk(num uint64) error
+}
+
+// LocalChunkReleaser lets a remote provider discard an imported local chunk
+// after its remote objects and database markers are durable.
+type LocalChunkReleaser interface {
+	ReleaseChunk(num uint64) error
 }

@@ -158,14 +158,16 @@ type capturedImmutable struct {
 	files []immutable.File
 }
 
-// captureImmutable links or copies the ImmutableDB chunk files into the
-// snapshot directory. The caller holds database.LockImmutable and the commit
-// barrier, so the recorded tip and the file set belong together.
+// captureImmutable places the ImmutableDB files in the snapshot directory. The
+// caller holds database.LockImmutable and the commit barrier, so the recorded
+// tip and the file set belong together.
 //
-// Chunks below the highest chunk are complete and never written again, so they
-// are hard-linked; the store copies a linked file before it edits it. The
-// highest chunk is still being appended to and is copied up to the length read
-// here. Where a link is impossible, as across filesystems, the file is copied.
+// Local chunk files below the highest chunk are complete and never written
+// again, so they are hard-linked; the store copies a linked file before it
+// edits it. The highest chunk is still being appended to and is copied up to
+// the length read here. Where a link is impossible, as across filesystems, the
+// file is copied. A remote provider's files are streamed from object storage:
+// its local directory only stages the writable tail.
 func captureImmutable(
 	ctx context.Context,
 	db *database.Database,
@@ -178,6 +180,7 @@ func captureImmutable(
 	if !ok {
 		return nil, nil
 	}
+	local := db.ImmutableFilesLocal()
 	var top uint64
 	for _, f := range layout.Files {
 		top = max(top, f.Chunk)
@@ -186,8 +189,14 @@ func captureImmutable(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		src := filepath.Join(layout.Dir, f.Name)
 		dst := filepath.Join(snapshotDir, immutableFilePrefix+f.Name)
+		if !local {
+			if err := captureImmutableFile(ctx, db, f.Name, dst, f.Size); err != nil {
+				return nil, fmt.Errorf("capture immutable file %q: %w", f.Name, err)
+			}
+			continue
+		}
+		src := filepath.Join(layout.Dir, f.Name)
 		if f.Chunk < top {
 			if err := os.Link(src, dst); err == nil {
 				continue
@@ -198,6 +207,41 @@ func captureImmutable(
 		}
 	}
 	return &capturedImmutable{state: layout.State, files: layout.Files}, nil
+}
+
+// captureImmutableFile streams a remote provider's file and verifies its
+// length before it becomes part of a snapshot.
+func captureImmutableFile(
+	ctx context.Context,
+	db *database.Database,
+	name string,
+	dst string,
+	size int64,
+) error {
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	n, readErr := db.ReadImmutableFile(ctx, name, &payloadContextWriter{
+		ctx: ctx, writer: out,
+	})
+	if readErr == nil && n != size {
+		readErr = fmt.Errorf("file is %d bytes, expected %d", n, size)
+	}
+	syncErr := out.Sync()
+	return errors.Join(readErr, syncErr, out.Close())
+}
+
+type payloadContextWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+func (w *payloadContextWriter) Write(p []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return w.writer.Write(p)
 }
 
 // copyPrefix copies the first size bytes of src to a new file dst.

@@ -43,9 +43,9 @@ func validateImmutableDB(cfg Config) error {
 		return nil
 	}
 	if provider := cfg.pluginSelections[plugin.CapabilityStorageBlob].Provider; provider != "" &&
-		provider != "badger" {
+		provider != "badger" && provider != "s3" && provider != "gcs" {
 		return fmt.Errorf(
-			"immutableDb.enabled requires the badger blob plugin, got %q",
+			"immutableDb.enabled requires the badger, s3 or gcs blob plugin, got %q",
 			provider,
 		)
 	}

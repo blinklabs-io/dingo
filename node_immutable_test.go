@@ -109,13 +109,21 @@ func TestValidateImmutableDBRefusals(t *testing.T) {
 		},
 	}))
 
+	for _, provider := range []string{"s3", "gcs"} {
+		require.NoError(t, validateImmutableDB(Config{
+			immutableDB: enabled,
+			pluginSelections: map[hostplugin.Capability]hostplugin.Selection{
+				hostplugin.CapabilityStorageBlob: {Provider: provider},
+			},
+		}))
+	}
 	err := validateImmutableDB(Config{
 		immutableDB: enabled,
 		pluginSelections: map[hostplugin.Capability]hostplugin.Selection{
-			hostplugin.CapabilityStorageBlob: {Provider: "s3"},
+			hostplugin.CapabilityStorageBlob: {Provider: "unsupported"},
 		},
 	})
-	require.ErrorContains(t, err, "badger blob plugin")
+	require.ErrorContains(t, err, "blob plugin")
 
 	err = validateImmutableDB(Config{
 		immutableDB:   enabled,

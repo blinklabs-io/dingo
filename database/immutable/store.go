@@ -884,6 +884,20 @@ func readWrapped(f io.ReaderAt, loc Location) (uint, []byte, error) {
 	return tmp.BlockType, []byte(tmp.BlockCbor), nil
 }
 
+// ReadBlockByPoint reads an existing chunk directory without opening an append
+// writer or recovering its tail. The caller keeps the files stable during the read.
+func ReadBlockByPoint(
+	dir string,
+	geom Geometry,
+	slot uint64,
+	hash []byte,
+) (*Block, *Location, error) {
+	if !geom.Valid() {
+		return nil, nil, fmt.Errorf("invalid ImmutableDB geometry %+v", geom)
+	}
+	return (&Store{dir: dir, geom: geom}).GetBlock(slot, hash)
+}
+
 // GetBlock reads the block at the point in O(1): two index reads and one
 // chunk read, with no scan of the chunk. A Byron epoch boundary block is found
 // at its chunk's leading relative slot. It returns nil, nil when the point is

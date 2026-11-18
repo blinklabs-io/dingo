@@ -197,6 +197,9 @@ func AdoptImmutableChunks(
 		if err := moveChunkIn(cfg.SourceDir, destDir, num, move); err != nil {
 			return nil, err
 		}
+		if err := db.PublishImmutableChunk(num); err != nil {
+			return nil, fmt.Errorf("publishing chunk %d: %w", num, err)
+		}
 		n, last, err := adoptChunk(
 			ctx, db, c, dest, destDir, num, geom, callback,
 			cfg.BeforeCommit,
@@ -234,6 +237,9 @@ func AdoptImmutableChunks(
 			return nil, fmt.Errorf(
 				"syncing blob store after chunk %d: %w", num, err,
 			)
+		}
+		if err := db.ReleaseImmutableChunk(num); err != nil {
+			return nil, fmt.Errorf("releasing local chunk %d: %w", num, err)
 		}
 		removeChunkFiles(cfg.SourceDir, num)
 		if cfg.OnChunkCommitted != nil {

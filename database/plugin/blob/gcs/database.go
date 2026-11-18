@@ -626,7 +626,8 @@ func (it *gcsStreamIterator) advance() {
 			it.valid = false
 			return
 		}
-		if it.store.isNamespacedObject(objAttrs.Name) {
+		if it.store.isNamespacedObject(objAttrs.Name) ||
+			it.store.isImmutableObject(objAttrs.Name) {
 			continue
 		}
 		key, err := it.store.externalKey(objAttrs.Name)
@@ -1310,7 +1311,8 @@ func (d *BlobStoreGCS) listKeysToFile(
 		if err != nil {
 			return nil, cleanup(err)
 		}
-		if d.isNamespacedObject(objAttrs.Name) {
+		if d.isNamespacedObject(objAttrs.Name) ||
+			d.isImmutableObject(objAttrs.Name) {
 			continue
 		}
 

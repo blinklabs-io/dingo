@@ -315,3 +315,21 @@ func TestSnapshotHoldsImmutableLockThroughBlobBackup(t *testing.T) {
 		"promotion could run between the chunk capture and the blob backup",
 	)
 }
+
+// A local snapshot links the completed chunks instead of copying them; a
+// mainnet ImmutableDB is far too large to copy on every snapshot.
+func TestSnapshotLinksCompletedLocalChunks(t *testing.T) {
+	t.Parallel()
+	db := promotedSnapshotDB(t)
+	dir := snapshotTestDir(t, "snap-linked")
+	_, err := lifecycle.Snapshot(
+		context.Background(), db, dir, lifecycle.TriggerManual,
+		"test-version", "badger", "sqlite",
+	)
+	require.NoError(t, err)
+	src, err := os.Stat(filepath.Join(db.ImmutableDir(), "00000.chunk"))
+	require.NoError(t, err)
+	dst, err := os.Stat(filepath.Join(dir, "immutable-00000.chunk"))
+	require.NoError(t, err)
+	require.True(t, os.SameFile(src, dst), "completed chunk must be linked")
+}

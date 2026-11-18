@@ -27,10 +27,12 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
+	"github.com/blinklabs-io/dingo/database/plugin/immutable/objectfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
@@ -178,6 +180,7 @@ type remoteTestBlobStore struct {
 	*badger.BlobStoreBadger
 	control             *remoteBlobRestoreControl
 	legacyNamespaceRoot string
+	immutableDir        string
 }
 
 type remoteBlobRestoreControl struct {
@@ -223,6 +226,100 @@ func (s *remoteTestBlobStore) Reset(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *remoteTestBlobStore) ReadImmutableFile(
+	ctx context.Context, name string, dst io.Writer,
+) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if _, ok := immutable.ParseFileName(name); !ok {
+		return 0, errors.New("invalid immutable file name")
+	}
+	file, err := os.Open(filepath.Join(s.immutableDir, name))
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	return io.Copy(dst, file)
+}
+
+func (s *remoteTestBlobStore) WriteImmutableFile(
+	ctx context.Context, name string, src io.Reader, size int64,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, ok := immutable.ParseFileName(name); !ok {
+		return errors.New("invalid immutable file name")
+	}
+	if err := os.MkdirAll(s.immutableDir, 0o755); err != nil {
+		return err
+	}
+	file, err := os.Create(filepath.Join(s.immutableDir, name))
+	if err != nil {
+		return err
+	}
+	n, copyErr := io.Copy(file, src)
+	closeErr := file.Close()
+	if n != size {
+		copyErr = errors.Join(
+			copyErr,
+			errors.New("unexpected immutable file size"),
+		)
+	}
+	return errors.Join(copyErr, closeErr)
+}
+
+func (s *remoteTestBlobStore) ListImmutableFiles(
+	ctx context.Context,
+) ([]blob.ImmutableObject, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	files, err := immutable.ListFiles(s.immutableDir)
+	if err != nil {
+		return nil, err
+	}
+	objects := make([]blob.ImmutableObject, 0, len(files))
+	for _, file := range files {
+		objects = append(
+			objects,
+			blob.ImmutableObject{Name: file.Name, Size: file.Size},
+		)
+	}
+	return objects, nil
+}
+
+func (s *remoteTestBlobStore) DeleteImmutableFile(
+	ctx context.Context, name string,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, ok := immutable.ParseFileName(name); !ok {
+		return errors.New("invalid immutable file name")
+	}
+	if err := os.Remove(filepath.Join(s.immutableDir, name)); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (s *remoteTestBlobStore) ResetImmutableFiles(
+	ctx context.Context,
+) error {
+	files, err := s.ListImmutableFiles(ctx)
+	if err != nil {
+		return err
+	}
+	var resetErr error
+	for _, file := range files {
+		resetErr = errors.Join(resetErr, s.DeleteImmutableFile(ctx, file.Name))
+	}
+	return resetErr
 }
 
 func (s *remoteTestBlobStore) Restore(ctx context.Context, r io.Reader) error {
@@ -334,6 +431,10 @@ func newRemoteRestoreHostWithBlobName(
 			remote := &remoteTestBlobStore{
 				BlobStoreBadger: store,
 				control:         control,
+				immutableDir: filepath.Join(
+					resolvedBlobDir,
+					".immutable-files",
+				),
 			}
 			if namespaceAware && resolvedBlobDir == blobDir {
 				remote.legacyNamespaceRoot = blobDir
@@ -344,6 +445,9 @@ func newRemoteRestoreHostWithBlobName(
 			}, nil
 		},
 	))
+	if blobProviderName == "s3" || blobProviderName == "gcs" {
+		require.NoError(t, objectfile.RegisterProvider(host, blobProviderName))
+	}
 	t.Cleanup(func() { _ = host.Stop(context.Background()) })
 	return host
 }
@@ -770,6 +874,21 @@ func TestCloudRestoreCommitReclaimsSupersededNamespaces(t *testing.T) {
 	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x11), nil))
 	originalBlobs := readBlobContents(t, original.db)
 	original.close(t)
+	oldChunks := filepath.Join(
+		remoteDir,
+		"blob",
+		oldNamespace,
+		".immutable-files",
+	)
+	require.NoError(t, os.MkdirAll(oldChunks, 0o755))
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(oldChunks, "00000.chunk"),
+			[]byte("retired chunk"),
+			0o600,
+		),
+	)
 
 	firstSnapshot, firstBlobs := makeCloudRestoreSnapshot(t, 0x55)
 	firstTarget := filepath.Join(t.TempDir(), "first")
@@ -793,6 +912,11 @@ func TestCloudRestoreCommitReclaimsSupersededNamespaces(t *testing.T) {
 	require.Equal(t, firstBlobs, readRemoteBlobNamespace(t, remoteDir, firstNamespace))
 	require.NoError(t, firstRecovery.Commit())
 	require.Empty(t, readRemoteBlobNamespace(t, remoteDir, oldNamespace))
+	require.Empty(
+		t,
+		chunkDirDigests(t, oldChunks),
+		"retiring a namespace must reclaim its ImmutableDB files",
+	)
 
 	secondSnapshot, secondBlobs := makeCloudRestoreSnapshot(t, 0x77)
 	secondTarget := filepath.Join(t.TempDir(), "second")
@@ -1643,4 +1767,73 @@ func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher
 	)
 	require.NoError(t, err)
 	require.Equal(t, m.CommitTimestamp, peeked.CommitTimestamp)
+}
+
+func TestCloudRestorePublishesImmutableChunks(t *testing.T) {
+	t.Parallel()
+	for _, provider := range []string{"s3", "gcs"} {
+		t.Run(provider, func(t *testing.T) {
+			ctx := context.Background()
+			source := promotedSnapshotDB(t)
+			want := chunkDirDigests(t, source.ImmutableDir())
+			require.Greater(
+				t,
+				len(want),
+				6,
+				"the fixture must span multiple chunks",
+			)
+			snapshotDir := snapshotTestDir(t, "remote-immutable")
+			manifest, err := lifecycle.Snapshot(
+				ctx,
+				source,
+				snapshotDir,
+				lifecycle.TriggerManual,
+				"test",
+				"badger",
+				"sqlite",
+			)
+			require.NoError(t, err)
+			manifest.BlobPlugin = provider
+			manifest.MetadataPlugin = remoteMetadataProviderName
+			require.NoError(t, lifecycle.WriteManifest(snapshotDir, manifest))
+			remoteDir := t.TempDir()
+			host := newRemoteRestoreHostWithBlobName(
+				t,
+				remoteDir,
+				&remoteBlobRestoreControl{},
+				provider,
+				true,
+			)
+			restoredDir := filepath.Join(t.TempDir(), "restored")
+			_, err = lifecycle.Restore(
+				ctx,
+				host,
+				nil,
+				snapshotDir,
+				restoredDir,
+				lifecycle.RestoreStorageConfig{}, // restoreconfig:zero-value-required
+			)
+			require.NoError(t, err)
+			namespace, err := blob.ReadNamespace(restoredDir)
+			require.NoError(t, err)
+			require.NotEmpty(t, namespace)
+			remoteChunks := filepath.Join(
+				remoteDir,
+				"blob",
+				namespace,
+				".immutable-files",
+			)
+			require.Equal(t, want, chunkDirDigests(t, remoteChunks))
+			local, err := immutable.ListFiles(
+				filepath.Join(restoredDir, database.ImmutableDirName),
+			)
+			require.NoError(t, err)
+			require.Len(
+				t,
+				local,
+				3,
+				"only the writable tail should remain staged locally",
+			)
+		})
+	}
 }

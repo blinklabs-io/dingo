@@ -8153,14 +8153,21 @@ With `immutableDb.enabled`, block bodies more than k blocks behind the ledger's
 applied tip move out of Badger into cardano-node compatible chunk files under
 `<dataDir>/immutable`. Only the body moves.
 
-- **Provider.** The chunk files are served by the `storage.immutable` plugin
-  capability. The built-in `chunkfile` provider is registered in every build,
-  always resolved, and has no selector or configuration; the `immutableDb.*`
-  keys keep their meaning. `database.New` receives it as
-  `Stores.Immutable` and fails with a `storage.immutable provider` error when
-  a recorded state or the enabled configuration needs one and none was
-  injected. The directory, on-disk layout, schema guard, `adopting.pending`
-  and keep-chunks behaviour are unchanged.
+- **Provider.** The `storage.immutable` capability uses `chunkfile` for the
+  Badger blob plugin. Builds with `dingo_extra_plugins` also provide `s3` and
+  `gcs`, selected by the configured blob provider and sharing its bucket,
+  prefix, credentials and restore namespace. `immutableDb.enabled` remains
+  opt-in and cannot be combined with history expiry. Remote chunks are
+  authoritative in object storage; the local directory stages the writable
+  tail and caches reads. Publication writes the chunk, secondary index, then
+  primary index. Restart discards an incomplete new tail and resumes from the
+  preceding durable chunk. Rollback deletes later chunks, highest first and
+  primary index first, before republishing the shortened chunk. Snapshots
+  hard-link completed local chunk files and stream remote ones, separately
+  from the logical blob backup. Restore publishes the verified chunk trios before
+  activating their markers and retires them with their restore namespace.
+  `database.New` receives the provider as `Stores.Immutable` and refuses a
+  recorded state or enabled configuration when no provider is injected.
 - **Marker.** The `bp<slot><hash>` value becomes `DIM1` followed by chunk
   number (8 bytes), block offset (8 bytes), size (4 bytes) and CRC-32 (4
   bytes), all big-endian, 28 bytes in total. Size and CRC cover the wrapped
@@ -8301,8 +8308,10 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   security parameter from the Byron genesis, or the Shelley genesis when the
   network has none. A node that reads through Bark still gets promoted blocks
   from the marker-resolving store, but an ImmutableDB node cannot back a Bark
-  archive: archive delivery needs `GetBlockURL`, which the Badger plugin the
-  ImmutableDB requires does not implement.
+  archive: archive delivery needs `GetBlockURL`. Badger does not implement
+  it, and on S3 or GCS a promoted block's object holds its marker, so the
+  marker-resolving store refuses to sign it with
+  `ErrImmutableBlockNotSignable`.
 
 ### Archive And History Expiry Contract
 
