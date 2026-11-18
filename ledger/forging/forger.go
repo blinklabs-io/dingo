@@ -36,6 +36,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // errNoValidTxRefs is returned by buildLeiosEB when all mempool transactions
@@ -1854,6 +1855,8 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	// We are the slot leader with the same credential generation that passed
 	// the pre-selection gate.
 	leaderCheckedAt := time.Now()
+	ctx = withForgeTrace(ctx, forgeStartTime, leaderCheckedAt)
+	endPreBuild := beginForgePhase(ctx, "block.forge.pre_build")
 	if f.metrics != nil {
 		f.metrics.forgeNodeIsLeader.Inc()
 	}
@@ -1922,6 +1925,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		return nil
 	}
 
+	endLeiosPrepare := beginForgePhase(ctx, "block.forge.leios.prepare")
 	leiosState := forgeLeiosState{}
 	if altBlockContext == nil {
 		parentRbHash, parentEbHash, parentKnown := f.leiosParentAnnouncement(
@@ -1941,6 +1945,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		)
 	}
 	leiosBlockData := leiosState.data
+	endLeiosPrepare()
 	embeddedEb, embeddedEbSlot := leiosState.embeddedEb, leiosState.embeddedEbSlot
 	if altBlockContext == nil && f.leiosChecker != nil {
 		// The endorser block this ranking block announces must be a valid
@@ -1948,6 +1953,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		// parent's state plus the certified closure it applies. Selection is
 		// therefore pinned to a ledger whose tip is the parent, and rebased
 		// onto the certified closure.
+		endRebase := beginForgePhase(ctx, "block.forge.leios.rebase")
 		basis := leiosSelectionBasis{parentHash: gates.primaryTip.Hash}
 		canAnnounce := true
 		if embeddedEb != nil {
@@ -1969,6 +1975,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 			}
 			basis.closure = closure
 		}
+		endRebase()
 		if canAnnounce {
 			announcement, err := f.checkAndForgeLeiosEB(
 				ctx, currentSlot,
@@ -2029,6 +2036,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		"effective_gap_slots", gates.effectiveGap,
 	)
 
+	endPreBuild()
 	producingAt := time.Now()
 	f.logger.Info("producing block", "slot", currentSlot)
 
@@ -2093,6 +2101,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	// against the state that publication produced while the slot lasts,
 	// instead of abandoning the slot on the first abort.
 	leiosState.data = leiosBlockData
+	endBuild := beginForgePhase(ctx, "block.forge.build")
 	block, blockCbor, stats, err := f.buildBlockForSlot(
 		ctx,
 		currentSlot,
@@ -2102,6 +2111,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		gates,
 		&altBlockContext,
 	)
+	endBuild()
 	// A retry or the empty fallback may have re-resolved the payload
 	// against a new parent; the embedded-endorser-block bookkeeping below
 	// must follow the block that was actually built. Both halves of the
@@ -2161,7 +2171,9 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		if block != nil {
 			blockHashStr = hex.EncodeToString(block.Hash().Bytes())
 		}
+		endValidation := beginForgePhase(ctx, "block.forge.validate")
 		validationErr := f.validateForgedBlockSafe(ctx, block, blockCbor)
+		endValidation()
 		validationDuration := time.Since(validateStart)
 		if f.metrics != nil {
 			f.metrics.forgeValidationDuration.Observe(
@@ -2214,7 +2226,13 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	}
 	if leiosState.data.Announcement != nil &&
 		f.leiosAnnouncementValidator != nil {
-		if err := f.leiosAnnouncementValidator(ctx, block.Header()); err != nil {
+		endAnnouncement := beginForgePhase(
+			ctx,
+			"block.forge.leios.validate_announcement",
+		)
+		err := f.leiosAnnouncementValidator(ctx, block.Header())
+		endAnnouncement()
+		if err != nil {
 			if errors.Is(err, ErrLeiosAnnouncementUnavailable) {
 				f.logger.Warn(
 					"locally forged Leios announcement is not vote-eligible",
@@ -2270,6 +2288,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	endAdopt := beginForgePhase(ctx, "block.forge.adopt")
 	if altBlockContext != nil {
 		adopted, addErr := f.adoptSiblingBlockSafe(ctx, block, blockCbor)
 		if addErr != nil {
@@ -2297,12 +2316,13 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		f.incCouldNotForge()
 		return fmt.Errorf("failed to add block: %w", addErr)
 	}
+	endAdopt()
 	forgeAdopted = true
 	leaderSlotMissed = false
 	reportSlot(true)
-	// Traced here so the span ends at adoption, before the observer below,
-	// which may be slow.
-	traceForgedBlock(ctx, block, currentSlot, forgeStartTime)
+	// Keep the root visible at adoption, but export its child phases after
+	// publication so additional span processing cannot delay diffusion.
+	defer traceForgedBlock(ctx, block, currentSlot, forgeStartTime, time.Now())()
 
 	// Publish only after durable acceptance. The observer republishes the
 	// block on the event bus and enqueues its Leios announcement for
@@ -2320,6 +2340,8 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 					)
 				}
 			}()
+			endPublish := beginForgePublication(ctx, block)
+			defer endPublish()
 			f.blockForged(block, blockCbor, time.Since(forgeStartTime))
 		}()
 	}
@@ -4555,6 +4577,8 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	slot uint64,
 	basis leiosSelectionBasis,
 ) (*LeiosEndorserBlockAnnouncement, error) {
+	endEndorser := beginForgePhase(ctx, "block.forge.leios.endorser")
+	defer endEndorser()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -4605,6 +4629,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, nil
 	}
 
+	endSnapshot := beginForgePhase(ctx, "block.forge.leios.mempool_snapshot")
 	allTxs := f.leiosMempool.Transactions()
 	txs := allTxs
 	if basis.closure != nil && len(basis.closure.txIDs) > 0 {
@@ -4616,6 +4641,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 			txs = append(txs, tx)
 		}
 	}
+	endSnapshot()
 	if len(txs) == 0 {
 		f.logger.Debug("leios EB skipped: mempool empty", "slot", slot)
 		if f.metrics != nil {
@@ -4629,6 +4655,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		caps:     caps,
 	}
 	candidateCount := len(txs)
+	endSelection := beginForgePhase(ctx, "block.forge.leios.select")
 	selectStart := f.now()
 	validatedTxs, truncated, err := selectValidLeiosTransactions(ctx,
 		txs,
@@ -4637,6 +4664,11 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		basis,
 	)
 	selectDuration := f.now().Sub(selectStart)
+	endSelection(
+		attribute.Int("forge.candidates", candidateCount),
+		attribute.Int("forge.selected", len(validatedTxs)),
+		attribute.Bool("forge.selection_truncated", truncated),
+	)
 	if f.metrics != nil {
 		f.metrics.leiosEbSelectionSeconds.Observe(selectDuration.Seconds())
 		if truncated {
@@ -4681,9 +4713,11 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, nil
 	}
 
+	endEBBuild := beginForgePhase(ctx, "block.forge.leios.build")
 	buildStart := f.now()
 	ebCbor, ebHash, bodies, err := buildLeiosEB(txs, caps)
 	buildDuration := f.now().Sub(buildStart)
+	endEBBuild()
 	if err != nil {
 		if errors.Is(err, errNoValidTxRefs) {
 			f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot)
@@ -4702,6 +4736,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	endBroadcast := beginForgePhase(ctx, "block.forge.leios.broadcast")
 	broadcastStart := f.now()
 	if err := f.leiosEBCaster.BroadcastEndorserBlock(
 		slot,
@@ -4712,6 +4747,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, fmt.Errorf("broadcast leios EB: %w", err)
 	}
 	broadcastDuration := f.now().Sub(broadcastStart)
+	endBroadcast()
 
 	// Endorser-block construction is what a Leios leader slot is mostly
 	// spent on, and its hash has to be final before the ranking-block
