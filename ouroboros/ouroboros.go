@@ -567,14 +567,13 @@ type Ouroboros struct {
 	// cannot reset the distinct-announcement budget.
 	leiosAnnouncementElections map[string]map[string]struct{}
 
-	// Asynchronous best-effort persistence of fetched endorser blocks to the
-	// blob store for historical serving. The blob write (CBOR encode + commit)
-	// is moved off the leios-fetch hot path onto a single background writer so
-	// it does not serialize against block application during catch-up. Jobs
-	// coalesce by (slot, hash), not hash alone — a complete job (with txs)
-	// supersedes a manifest-only one for the same occurrence — which also
-	// elides the backfiller's duplicate manifest write, while two live
-	// occurrences of the same hash at different slots persist independently.
+	// Asynchronous best-effort persistence of locally forged endorser blocks
+	// and of blocks published by a later slot binding. A peer fetch writes
+	// synchronously (persistLeiosEndorserBlockNow) and never uses this queue.
+	// Jobs coalesce by (slot, hash), not hash alone — a complete job (with
+	// txs) supersedes a manifest-only one for the same occurrence — while two
+	// live occurrences of the same hash at different slots persist
+	// independently.
 	// Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
 	// leiosPersistLifecycleMu keeps each enqueue reservation, copy and signal
 	// in one writer generation while stop and reset hold the exclusive lock.
@@ -584,7 +583,15 @@ type Ouroboros struct {
 	leiosPersistStarted     atomic.Bool
 	leiosPersistMu          sync.Mutex
 	leiosPersistClosed      bool // guarded by leiosPersistMu; permanent after Close
-	leiosPersistStoreMu     sync.Mutex
+	// leiosPersistWriterStopped is set by StopLeiosPersistWriter, after which
+	// synchronous fetch writes are refused. Guarded by leiosPersistMu.
+	leiosPersistWriterStopped bool
+	// leiosPersistSyncWrites counts synchronous fetch writes admitted and
+	// still running; leiosPersistSyncIdle is closed when it returns to zero
+	// and is nil while none runs. Both guarded by leiosPersistMu.
+	leiosPersistSyncWrites int
+	leiosPersistSyncIdle   chan struct{}
+	leiosPersistStoreMu    sync.Mutex
 	// leiosPersistPruneBeforeSlot is the active store's retention frontier.
 	// Writers hold leiosPersistStoreMu through SetLeiosEB; GC publishes its
 	// frontier under the same lock, then scans and prunes without holding it.

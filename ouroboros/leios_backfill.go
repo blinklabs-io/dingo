@@ -649,7 +649,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 				resp,
 			)
 		}
-		//nolint:contextcheck // Persistence is handed to the Ouroboros-owned worker and must outlive this bounded backfill request.
+		//nolint:contextcheck // The store write must not be abandoned at this bounded backfill request's deadline.
 		if err := o.storeLeiosEndorserBlock(
 			point,
 			blk.BlockRaw,
@@ -704,7 +704,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	if err := validateLeiosEndorserBlockTxs(data.blockRaw, txs); err != nil {
 		return fmt.Errorf("validate tx references: %w", err)
 	}
-	//nolint:contextcheck // Persistence is handed to the Ouroboros-owned worker and must outlive this bounded backfill request.
+	//nolint:contextcheck // The store write must not be abandoned at this bounded backfill request's deadline.
 	if err := o.storeLeiosEndorserBlock(
 		point,
 		data.blockRaw,

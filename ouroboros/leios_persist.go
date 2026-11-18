@@ -17,10 +17,12 @@ package ouroboros
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -31,9 +33,10 @@ import (
 // leiosPersistMaxPending bounds the coalescing pending-write map so a writer
 // that falls behind under heavy catch-up load cannot grow memory without limit.
 // When full, new distinct endorser blocks are dropped from persistence (logged)
-// rather than blocking the fetch path — historical serving is best-effort and a
-// dropped block can be re-fetched and re-persisted later. It does not affect
-// UTxO correctness (that uses the ledger's own genesis-blob path).
+// rather than blocking the caller. Only locally forged blocks and blocks
+// published after a later slot binding use this queue; a peer fetch writes
+// through persistLeiosEndorserBlockNow and never depends on it. It does not
+// affect UTxO correctness (that uses the ledger's own genesis-blob path).
 const leiosPersistMaxPending = 4096
 
 // leiosPersistMaxQueueBytes bounds the aggregate retained size (manifest plus
@@ -119,12 +122,11 @@ func leiosPersistJobSize(
 }
 
 // enqueueLeiosPersist queues an endorser block for asynchronous blob-store
-// persistence (historical serving) instead of writing it synchronously on the
-// leios-fetch hot path. Jobs coalesce by (slot, hash): a complete job (carrying
-// txs) supersedes a manifest-only one for the same occurrence, so the
-// backfiller's manifest-only-then-complete pair collapses to a single write.
-// Best-effort: a
-// full queue drops the write; no error is surfaced to the caller.
+// persistence. A peer fetch does not use it (see persistLeiosEndorserBlockNow):
+// a dropped write here must never be reported as a completed fetch. Jobs
+// coalesce by (slot, hash): a complete job (carrying txs) supersedes a
+// manifest-only one for the same occurrence. Best-effort: a full queue drops
+// the write; no error is surfaced to the caller.
 //
 // Admission runs before any copying. The queue's aggregate byte reservation
 // and its entry-count cap are both decided from the caller's own slices in
@@ -688,26 +690,13 @@ func (o *Ouroboros) drainLeiosPersist() {
 		if db == nil {
 			continue
 		}
-		o.leiosPersistStoreMu.Lock()
-		// A pinned endorser block below the frontier is still persisted: it is
-		// certified by an immutable ranking block, and replaying that block
-		// needs the closure. The store itself refuses an unpinned write below
-		// its collection watermark; the frontier check only avoids the
-		// round trip while the watermark catches up.
-		if job.slot < o.leiosPersistPruneBeforeSlot {
-			pinned, err := db.IsLeiosEBPinned(job.slot, job.hash)
-			// A failed lookup persists: an extra record is collected later,
-			// a missing certified one is not recoverable.
-			if err == nil && !pinned {
-				o.leiosPersistStoreMu.Unlock()
-				continue
-			}
-		}
-		err := db.SetLeiosEB(job.slot, job.hash, job.manifestRaw, job.txsRaw)
-		o.leiosPersistStoreMu.Unlock()
-		if errors.Is(err, leiosdb.ErrBehindImmutableTip) {
-			continue
-		}
+		written, err := o.writeLeiosEBToStore(
+			db,
+			job.slot,
+			job.hash,
+			job.manifestRaw,
+			job.txsRaw,
+		)
 		if err != nil {
 			o.config.Logger.Debug(
 				"failed to persist leios EB to the leios store",
@@ -717,12 +706,155 @@ func (o *Ouroboros) drainLeiosPersist() {
 			)
 			continue
 		}
-		// Without an immutable point the collection bound follows the newest
-		// persisted endorser block, which only advances here. Ledger block
-		// events alone would leave records above the last bound uncollected
-		// while the chain is quiet.
+		if written {
+			// Without an immutable point the collection bound follows the
+			// newest persisted endorser block, which only advances here.
+			// Ledger block events alone would leave records above the last
+			// bound uncollected while the chain is quiet.
+			o.signalLeiosGC(event.Event{})
+		}
+	}
+}
+
+// writeLeiosEBToStore is the single path to SetLeiosEB for fetched endorser
+// blocks, shared by the background writer and persistLeiosEndorserBlockNow so
+// both apply the same retention rules under leiosPersistStoreMu. It returns
+// written=false with a nil error when retention deliberately skips the record
+// (unpinned below the pruning frontier, or behind the immutable tip): such a
+// record is collectible, so refetching it would not help.
+func (o *Ouroboros) writeLeiosEBToStore(
+	db *database.Database,
+	slot uint64,
+	hash []byte,
+	manifestRaw []byte,
+	txsRaw []cbor.RawMessage,
+) (bool, error) {
+	o.leiosPersistStoreMu.Lock()
+	defer o.leiosPersistStoreMu.Unlock()
+	// A pinned endorser block below the frontier is still persisted: it is
+	// certified by an immutable ranking block, and replaying that block
+	// needs the closure. The store itself refuses an unpinned write below
+	// its collection watermark; the frontier check only avoids the
+	// round trip while the watermark catches up.
+	if slot < o.leiosPersistPruneBeforeSlot {
+		pinned, err := db.IsLeiosEBPinned(slot, hash)
+		// A failed lookup persists: an extra record is collected later,
+		// a missing certified one is not recoverable.
+		if err == nil && !pinned {
+			return false, nil
+		}
+	}
+	err := db.SetLeiosEB(slot, hash, manifestRaw, txsRaw)
+	if errors.Is(err, leiosdb.ErrBehindImmutableTip) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// errLeiosPersistClosed reports a synchronous endorser-block write refused
+// because the Ouroboros instance is closed.
+var errLeiosPersistClosed = errors.New("leios persistence is closed")
+
+// persistLeiosEndorserBlockNow writes a fetched endorser block to the Leios
+// store on the calling goroutine and returns only once SetLeiosEB has
+// returned. A peer fetch reports success only after this, so a completed
+// fetch is a durable one: unlike enqueueLeiosPersist it cannot be dropped by a
+// full queue or a stopping writer. Without a Leios store there is nothing to
+// write and it succeeds.
+//
+// It is admitted like enqueueLeiosPersist (see admitLeiosSyncPersist) and
+// restarts the retention GC a pause stopped. Stop, pause and close wait for
+// it within leiosPersistShutdownDrainTimeout, never holding a lock it needs,
+// so a stuck blob store cannot hang them. After a writer stop or close it
+// fails with errLeiosPersistClosed, so the fetch reports failure rather than
+// success without a durable copy.
+func (o *Ouroboros) persistLeiosEndorserBlockNow(
+	point ocommon.Point,
+	blockRaw []byte,
+	data *leiosEndorserBlockData,
+) error {
+	if o.leiosDatabase() == nil {
+		return nil
+	}
+	db, err := o.admitLeiosSyncPersist()
+	if err != nil {
+		return err
+	}
+	if db == nil {
+		return nil
+	}
+	defer o.finishLeiosSyncPersist()
+	var txsRaw []cbor.RawMessage
+	if data != nil && data.completeTxCache() && data.txCount > 0 {
+		txsRaw = data.txsRaw
+	}
+	written, err := o.writeLeiosEBToStore(
+		db,
+		point.Slot,
+		point.Hash,
+		blockRaw,
+		txsRaw,
+	)
+	if err != nil {
+		return fmt.Errorf("persist leios endorser block: %w", err)
+	}
+	if written {
 		o.signalLeiosGC(event.Event{})
 	}
+	return nil
+}
+
+// admitLeiosSyncPersist admits one synchronous write and returns the database
+// it must target, or nil when there is none. leiosPersistLifecycleMu is held
+// only for admission, never across the store write: stop, pause and close
+// take it exclusively before their bounded waits, and a reader held through
+// blob-store I/O would make them wait without bound. Admission registers the
+// write in leiosPersistSyncWrites so those waits cover it instead.
+func (o *Ouroboros) admitLeiosSyncPersist() (*database.Database, error) {
+	o.leiosPersistLifecycleMu.RLock()
+	defer o.leiosPersistLifecycleMu.RUnlock()
+	o.leiosPersistMu.Lock()
+	refused := o.leiosPersistClosed || o.leiosPersistWriterStopped
+	o.leiosPersistMu.Unlock()
+	if refused {
+		return nil, errLeiosPersistClosed
+	}
+	o.startLeiosPersistenceGC(0, false)
+	// Read after admission, so a write admitted after a pause targets the
+	// database current then rather than one read before the pause.
+	db := o.leiosDatabase()
+	if db == nil {
+		return nil, nil
+	}
+	o.leiosPersistMu.Lock()
+	if o.leiosPersistSyncWrites == 0 {
+		o.leiosPersistSyncIdle = make(chan struct{})
+	}
+	o.leiosPersistSyncWrites++
+	o.leiosPersistMu.Unlock()
+	return db, nil
+}
+
+// finishLeiosSyncPersist ends a write admitted by admitLeiosSyncPersist.
+func (o *Ouroboros) finishLeiosSyncPersist() {
+	o.leiosPersistMu.Lock()
+	defer o.leiosPersistMu.Unlock()
+	o.leiosPersistSyncWrites--
+	if o.leiosPersistSyncWrites == 0 {
+		close(o.leiosPersistSyncIdle)
+		o.leiosPersistSyncIdle = nil
+	}
+}
+
+// leiosSyncPersistIdle returns a channel closed once every admitted
+// synchronous write has finished, or nil when none is running.
+func (o *Ouroboros) leiosSyncPersistIdle() <-chan struct{} {
+	o.leiosPersistMu.Lock()
+	defer o.leiosPersistMu.Unlock()
+	return o.leiosPersistSyncIdle
 }
 
 // StopLeiosPersistWriter stops the background persistence and GC workers,
@@ -732,6 +864,9 @@ func (o *Ouroboros) drainLeiosPersist() {
 func (o *Ouroboros) StopLeiosPersistWriter() {
 	o.leiosPersistLifecycleMu.Lock()
 	defer o.leiosPersistLifecycleMu.Unlock()
+	o.leiosPersistMu.Lock()
+	o.leiosPersistWriterStopped = true
+	o.leiosPersistMu.Unlock()
 	o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout)
 }
 
@@ -773,7 +908,21 @@ func (o *Ouroboros) stopLeiosPersistenceWorkersWithWait(
 			)
 		}
 	}
-	return writerStopped && gcStopped
+	// Synchronous fetch writes are admitted under the lifecycle lock the
+	// caller now holds, so no new one starts; wait for those already running
+	// within the same bound, as for the workers above.
+	syncStopped := true
+	if idle := o.leiosSyncPersistIdle(); idle != nil {
+		syncStopped = wait(idle, timeout)
+		if !syncStopped {
+			o.config.Logger.Warn(
+				"timed out waiting for synchronous leios EB writes to finish",
+				"component", "network",
+				"timeout", timeout,
+			)
+		}
+	}
+	return writerStopped && gcStopped && syncStopped
 }
 
 func (o *Ouroboros) requestLeiosPersistWriterStop() (<-chan struct{}, bool) {

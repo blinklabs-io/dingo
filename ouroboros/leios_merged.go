@@ -633,7 +633,132 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// entry yet (it is inserted below), see this check find nothing, and then
 	// insert an entry nothing will ever come back to verify. Lock order is
 	// always leiosAnnouncementsMu before leiosMu.
-	o.leiosAnnouncementsMu.Lock()
+	//
+	// A peer fetch is durable before it is visible. A slot-verified entry not
+	// forged locally is written to the Leios store before it enters the cache,
+	// so no reader (a closure waiter, a concurrent backfill, a relay offer)
+	// can find a complete entry the store does not hold, and a failed write
+	// leaves nothing to roll back. The write cannot run under these locks, so
+	// the entry is built, written, and then rebuilt and inserted under a fresh
+	// hold of both. If the rebuilt entry needs more than was written (an
+	// announcement bound the slot, or another connection completed the
+	// transaction set, in between) the write is repeated; after
+	// leiosStoreDurableAttempts writes the entry is published through the
+	// asynchronous queue instead, as bindLeiosEndorserBlockSlot does. A
+	// locally forged block always uses that queue: nothing fetched it, so
+	// there is no fetch completion to order the write against.
+	syncPersist := origin != leiosStoreAuthoritative
+	blockClone := slices.Clone(blockRaw)
+	txsClone := cloneRawMessages(txsRaw)
+	txCount := len(block.TransactionReferences)
+	var written leiosDurableWrite
+	for attempt := 1; ; attempt++ {
+		o.leiosAnnouncementsMu.Lock()
+		o.leiosMu.Lock()
+		data, existing := o.buildLeiosEndorserBlockEntryLocked(
+			point,
+			blockClone,
+			txsClone,
+			txCount,
+			origin,
+		)
+		// Reject rather than cache an entry that would exceed the per-entry
+		// byte budget. Any smaller entry already cached under the same key
+		// (e.g. a manifest-only store) is left untouched.
+		if n := data.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
+			o.leiosMu.Unlock()
+			o.leiosAnnouncementsMu.Unlock()
+			return fmt.Errorf(
+				"leios endorser block cache: entry size %d exceeds max %d",
+				n,
+				leiosEndorserBlockCacheMaxEntryBytes,
+			)
+		}
+		if syncPersist && data.slotVerified && !written.covers(data) &&
+			attempt <= leiosStoreDurableAttempts {
+			o.leiosMu.Unlock()
+			o.leiosAnnouncementsMu.Unlock()
+			// Not durable, so not fetched: nothing was inserted, and the
+			// error makes the fetch fail so a later offer retries it.
+			if err := o.persistLeiosEndorserBlockNow(
+				point,
+				blockRaw,
+				data,
+			); err != nil {
+				return err
+			}
+			written = leiosDurableWrite{
+				done:     true,
+				complete: data.completeTxCache(),
+			}
+			continue
+		}
+		// Whether the closure was already complete and slot-verified before
+		// this store, so the arrival is recorded once, at the transition.
+		wasClosureReady := existing != nil && existing.completeTxCache() &&
+			existing.slotVerified
+		o.insertLeiosEndorserBlockLocked(data)
+		o.leiosMu.Unlock()
+		// The announcement/store race window this lock closes ends at the
+		// cache insertion above; publishing has no further need for it.
+		o.leiosAnnouncementsMu.Unlock()
+		// Withhold everything keyed on the slot until the binding is
+		// verified. An unverified entry is published by
+		// bindLeiosEndorserBlockSlot once its announcement (or the ledger's
+		// chain-derived reference) corroborates the slot, so a peer that
+		// offers before announcing cannot make dingo vote, track pipeline
+		// timing, or persist a blob under a slot of its choosing.
+		if data.slotVerified {
+			o.publishLeiosEndorserBlock(
+				point,
+				blockRaw,
+				data,
+				!syncPersist || !written.covers(data),
+			)
+		}
+		// A block this node forged itself did not arrive from anywhere.
+		if origin != leiosStoreAuthoritative && !wasClosureReady &&
+			data.completeTxCache() && data.slotVerified {
+			o.recordLeiosEbArrival(point, data.txCount)
+		}
+		return nil
+	}
+}
+
+// leiosStoreDurableAttempts bounds how many times storeLeiosEndorserBlock
+// writes a fetched entry before inserting it. Each repeat follows a concurrent
+// change that raised what the entry needs written; slot verification and a
+// complete transaction set each change at most once, so three writes cover
+// both and the bound only guards against a store that keeps losing its
+// cached predecessor to pruning.
+const leiosStoreDurableAttempts = 3
+
+// leiosDurableWrite records what storeLeiosEndorserBlock has already written
+// to the Leios store for the entry it is about to insert.
+type leiosDurableWrite struct {
+	done     bool
+	complete bool
+}
+
+// covers reports whether the write already made holds everything data would
+// make servable: a manifest-only entry needs any write, a complete one needs
+// the transactions written too.
+func (w leiosDurableWrite) covers(data *leiosEndorserBlockData) bool {
+	return w.done && (w.complete || !data.completeTxCache())
+}
+
+// buildLeiosEndorserBlockEntryLocked builds the cache entry a store of
+// (point, blockRaw, txsRaw) would insert, merged with the entry already cached
+// for the same occurrence, without inserting it. blockRaw and txsRaw must
+// already be owned by the cache; they are retained, not copied. The caller
+// holds leiosAnnouncementsMu and leiosMu.
+func (o *Ouroboros) buildLeiosEndorserBlockEntryLocked(
+	point ocommon.Point,
+	blockRaw []byte,
+	txsRaw []cbor.RawMessage,
+	txCount int,
+	origin leiosStoreOrigin,
+) (*leiosEndorserBlockData, *leiosEndorserBlockData) {
 	verified := origin == leiosStoreAuthoritative ||
 		origin == leiosStoreBackfill ||
 		o.leiosAnnouncementBindsSlotLocked(point.Hash, point.Slot)
@@ -642,8 +767,8 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		origin == leiosStoreBackfill
 	data := &leiosEndorserBlockData{
 		point:    point,
-		blockRaw: slices.Clone(blockRaw),
-		txsRaw:   cloneRawMessages(txsRaw),
+		blockRaw: blockRaw,
+		txsRaw:   txsRaw,
 		announcementHeaderRaw: o.leiosAnnouncementHeaderLocked(
 			point.Hash,
 			point.Slot,
@@ -652,14 +777,13 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 			point.Hash,
 			point.Slot,
 		),
-		txCount:                  len(block.TransactionReferences),
+		txCount:                  txCount,
 		cacheKeys:                cacheKeys,
 		insertedAt:               time.Now(),
 		relayOfferRequested:      relayOfferRequested,
 		slotVerified:             verified,
 		semanticValidationStatus: leiosEBValidationUnknown,
 	}
-	o.leiosMu.Lock()
 	if !data.slotVerified {
 		if selectedHeader := o.selectedLeiosHeaderForDataLocked(data); len(
 			selectedHeader,
@@ -672,8 +796,8 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	}
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
-	o.leiosEndorserBlockSeq++
-	data.seq = o.leiosEndorserBlockSeq
+	// The sequence number insertLeiosEndorserBlockLocked will assign.
+	data.seq = o.leiosEndorserBlockSeq + 1
 	// The cache key is (slot, hash), so an existing entry found here is
 	// necessarily the same occurrence -- a peer-offered or authoritative
 	// store for a *different* slot of the same hash lands under its own,
@@ -681,10 +805,6 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// Every remaining branch below is about the same
 	// occurrence's own transaction/verification state, not a slot conflict.
 	existing := o.leiosEndorserBlocks[cacheKeys[0]]
-	// Whether the closure was already complete and slot-verified before this
-	// store, so the arrival is recorded once, at the transition.
-	wasClosureReady := existing != nil && existing.completeTxCache() &&
-		existing.slotVerified
 	if existing != nil {
 		// Never regress a cached transaction set. The relay offers each
 		// endorser block on every connection, so a manifest-only store
@@ -750,20 +870,18 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		// The transaction set is whole; the resume state is now dead weight.
 		data.partialTxs = nil
 	}
-	// Reject rather than cache an entry that would exceed the per-entry byte
-	// budget. Any smaller entry already cached under cacheKeys (e.g. a
-	// manifest-only store) is left untouched, since the map has not been
-	// mutated yet at this point.
-	if n := data.approxBytes(); n > leiosEndorserBlockCacheMaxEntryBytes {
-		o.leiosMu.Unlock()
-		o.leiosAnnouncementsMu.Unlock()
-		return fmt.Errorf(
-			"leios endorser block cache: entry size %d exceeds max %d",
-			n,
-			leiosEndorserBlockCacheMaxEntryBytes,
-		)
-	}
-	for _, key := range cacheKeys {
+	return data, existing
+}
+
+// insertLeiosEndorserBlockLocked inserts an entry built by
+// buildLeiosEndorserBlockEntryLocked under the same lock hold and wakes the
+// closure waiters it satisfies. The caller holds leiosAnnouncementsMu and
+// leiosMu.
+func (o *Ouroboros) insertLeiosEndorserBlockLocked(
+	data *leiosEndorserBlockData,
+) {
+	o.leiosEndorserBlockSeq++
+	for _, key := range data.cacheKeys {
 		o.leiosEndorserBlocks[key] = data
 	}
 	// Wake any NtC serving path waiting on this closure once its transaction
@@ -773,37 +891,22 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// completion is left unsignaled and is instead woken by
 	// bindLeiosEndorserBlockSlot once the slot is corroborated.
 	if data.completeTxCache() && data.slotVerified {
-		for _, key := range cacheKeys {
+		for _, key := range data.cacheKeys {
 			o.signalLeiosClosureWaitersLocked(key)
 		}
 	}
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
-	o.leiosMu.Unlock()
-	// The announcement/store race window this lock closes ends at the cache
-	// insertion above; publishing has no further need for it.
-	o.leiosAnnouncementsMu.Unlock()
-	// Withhold everything keyed on the slot until the binding is verified. An
-	// unverified entry is published by bindLeiosEndorserBlockSlot once its
-	// announcement (or the ledger's chain-derived reference) corroborates the
-	// slot, so a peer that offers before announcing cannot make dingo vote,
-	// track pipeline timing, or persist a blob under a slot of its choosing.
-	if data.slotVerified {
-		o.publishLeiosEndorserBlock(point, blockRaw, data)
-	}
-	// A block this node forged itself did not arrive from anywhere.
-	if origin != leiosStoreAuthoritative && !wasClosureReady &&
-		data.completeTxCache() && data.slotVerified {
-		o.recordLeiosEbArrival(point, data.txCount)
-	}
-	return nil
 }
 
 // publishLeiosEndorserBlock performs the side effects keyed on a verified
-// endorser-block slot. It must be called with leiosMu released.
+// endorser-block slot. It must be called with leiosMu released. The block is
+// queued for asynchronous persistence only when enqueuePersist is set; a
+// caller that has already written it synchronously passes false.
 func (o *Ouroboros) publishLeiosEndorserBlock(
 	point ocommon.Point,
 	blockRaw []byte,
 	data *leiosEndorserBlockData,
+	enqueuePersist bool,
 ) {
 	if data == nil || !data.slotVerified {
 		return
@@ -813,7 +916,9 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 	// when it is still manifest-only. Voting and pipeline admission remain
 	// separately gated on complete transaction bodies and semantic validation.
 	o.advanceLeiosVerifiedEbSlot(point.Slot)
-	o.enqueueLeiosPersist(point, blockRaw, data)
+	if enqueuePersist {
+		o.enqueueLeiosPersist(point, blockRaw, data)
+	}
 	o.scheduleLeiosEndorserBlockValidation(point, data)
 }
 
@@ -1924,6 +2029,7 @@ func (o *Ouroboros) bindCachedLeiosEndorserBlockSlot(
 			verified.point,
 			verified.blockRaw,
 			&verified,
+			true,
 		)
 		// Recorded here, not above: the caller may hold
 		// leiosAnnouncementsMu until it runs this closure, and recording

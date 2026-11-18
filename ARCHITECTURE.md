@@ -6228,22 +6228,39 @@ the LeiosDB (`database/leiosdb`, a dedicated store under `<dataDir>/leios/`)
 content-addressed and the same hash can be a live, independently required
 occurrence at more than one slot at once -- so the same node can later reload
 either occurrence after the 10-minute in-memory cache TTL and re-serve it to
-downstream peers. This
-persistence is asynchronous and off the leios-fetch hot path:
-`storeLeiosEndorserBlock` queues the write on a single background writer
+downstream peers. A
+peer fetch (offer, backfill) is durable before it completes:
+`storeLeiosEndorserBlock` writes a slot-verified, non-forged block through
+`Database.SetLeiosEB` on the fetching goroutine (`persistLeiosEndorserBlockNow`)
+before inserting it into the cache, so no reader or closure waiter sees a
+complete entry the store does not hold. If the write fails nothing is inserted
+and the error makes the fetch report failure, so a later offer retries. If the
+entry needs more written by the time it is inserted (a concurrent announcement
+or transaction fetch), the write is repeated up to `leiosStoreDurableAttempts`
+times before falling back to the asynchronous path. The synchronous write is
+admitted under `leiosPersistLifecycleMu` like an enqueue, restarting a paused
+retention GC, but the lock is released before the store write: the write is
+registered as in flight, and a writer stop, live lifecycle pause or close waits
+for it within `leiosPersistShutdownDrainTimeout`, the same bound as the writer
+and GC workers, so a stuck blob store cannot hang them. A pause or close that
+times out returns `ErrLeiosPersistDrainUnconfirmed`. After a writer stop or
+close the write is refused and the fetch fails. An entry not yet bound to an announced slot is written once
+`bindLeiosEndorserBlockSlot` binds it. A
+locally forged block and a block published by that later binding use the
+asynchronous path: `enqueueLeiosPersist` queues the write on a single
+background writer
 (`ouroboros/leios_persist.go`) that coalesces by (slot, hash), not hash alone —
-a complete job supersedes a manifest-only one for the same occurrence, eliding
-the backfiller's duplicate manifest write, while a job for a different
-occurrence of the same hash persists independently — and does one store write
-per occurrence via `Database.SetLeiosEB`, so the CBOR encode + commit do not
-serialize against block application during catch-up. It is best-effort (a queue
-at either of its bounds drops the historical-serving write, logged with the
-reason) except for a certified endorser block, which ledger apply of the
-certifying ranking block writes itself when `em`/`et` are absent
+a complete job supersedes a manifest-only one for the same occurrence, while a
+job for a different occurrence of the same hash persists independently — and
+does one store write per occurrence via `Database.SetLeiosEB`. Both paths share
+`writeLeiosEBToStore`, which applies the same retention checks under
+`leiosPersistStoreMu`. That queue is best-effort (a queue
+at either of its bounds drops the write, logged with the reason), and a fetch
+does not depend on it. A certified endorser block is additionally written by
+ledger apply of the certifying ranking block when `em`/`et` are absent
 (`persistCertifiedEndorserBlock`, from the same provider lookup that supplied
-the applied transactions), and never affects UTxO resolution, which uses the
-ledger's own
-genesis-blob path. The queue is bounded twice, by entry count
+the applied transactions). Neither path affects UTxO resolution, which uses the
+ledger's own genesis-blob path. The queue is bounded twice, by entry count
 (`leiosPersistMaxPending`) and by aggregate retained bytes
 (`leiosPersistMaxQueueBytes`, the same 256 MiB the in-memory endorser-block
 cache uses, since the queue only holds a copy of what that cache already holds);
