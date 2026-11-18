@@ -2317,12 +2317,12 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		return fmt.Errorf("failed to add block: %w", addErr)
 	}
 	endAdopt()
+	adoptedAt := time.Now()
 	forgeAdopted = true
 	leaderSlotMissed = false
 	reportSlot(true)
-	// Keep the root visible at adoption, but export its child phases after
-	// publication so additional span processing cannot delay diffusion.
-	defer traceForgedBlock(ctx, block, currentSlot, forgeStartTime, time.Now())()
+	// End the root before publication and process its child phases afterwards.
+	defer traceForgedBlock(ctx, block, currentSlot, forgeStartTime, adoptedAt)()
 
 	// Publish only after durable acceptance. The observer republishes the
 	// block on the event bus and enqueues its Leios announcement for
@@ -2340,7 +2340,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 					)
 				}
 			}()
-			endPublish := beginForgePublication(ctx, block)
+			endPublish := beginForgePublication(ctx, block, forgeStartTime)
 			defer endPublish()
 			f.blockForged(block, blockCbor, time.Since(forgeStartTime))
 		}()
@@ -4738,16 +4738,17 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	}
 	endBroadcast := beginForgePhase(ctx, "block.forge.leios.broadcast")
 	broadcastStart := f.now()
-	if err := f.leiosEBCaster.BroadcastEndorserBlock(
+	broadcastErr := f.leiosEBCaster.BroadcastEndorserBlock(
 		slot,
 		ebHash,
 		ebCbor,
 		bodies,
-	); err != nil {
-		return nil, fmt.Errorf("broadcast leios EB: %w", err)
-	}
+	)
 	broadcastDuration := f.now().Sub(broadcastStart)
 	endBroadcast()
+	if broadcastErr != nil {
+		return nil, fmt.Errorf("broadcast leios EB: %w", broadcastErr)
+	}
 
 	// Endorser-block construction is what a Leios leader slot is mostly
 	// spent on, and its hash has to be final before the ranking-block

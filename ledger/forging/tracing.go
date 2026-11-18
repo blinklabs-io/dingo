@@ -28,16 +28,25 @@ import (
 // traceForgedBlock records a block.forge span in the forged block's trace,
 // covering the forge attempt from start until the block was adopted. On a
 // network of dingo nodes this is the first span of the block's trace. The
-// returned function exports its child phases after publication; the root is
-// visible immediately even if the observer blocks.
+// returned function exports its child phases after publication. The root ends
+// before the observer starts, so the exporter can send it while publication
+// is still running.
 func traceForgedBlock(
 	ctx context.Context,
 	block ledger.Block,
 	slot uint64,
 	start, end time.Time,
 ) func() {
-	_, span := tracing.StartHeader(ctx, tracing.StageForge, "block.forge", block,
-		trace.WithTimestamp(start))
+	// Keep one wall-clock origin and convert the recorded monotonic intervals
+	// to timestamps. An operating system clock correction cannot reverse them.
+	end = start.Add(end.Sub(start))
+	_, span := tracing.StartHeader(
+		ctx,
+		tracing.StageForge,
+		"block.forge",
+		block,
+		trace.WithTimestamp(start),
+	)
 	if !span.IsRecording() {
 		span.End(trace.WithTimestamp(end))
 		return func() {}
@@ -61,9 +70,10 @@ func traceForgedBlock(
 			}
 			_, child := otel.Tracer(tracing.Name).Start(
 				trace.ContextWithSpanContext(ctx, parent), phase.name,
-				trace.WithTimestamp(phase.start), trace.WithAttributes(phase.attrs...))
+				trace.WithTimestamp(start.Add(phase.start.Sub(start))),
+				trace.WithAttributes(phase.attrs...))
 			parents[i] = child.SpanContext()
-			child.End(trace.WithTimestamp(phase.end))
+			child.End(trace.WithTimestamp(start.Add(phase.end.Sub(start))))
 		}
 	}
 }
@@ -123,8 +133,17 @@ func beginForgePhase(
 
 // Publication enqueues diffusion after adoption. Keep it separate so the
 // existing block.forge interval still ends at durable acceptance.
-func beginForgePublication(ctx context.Context, block ledger.Block) func() {
-	_, span := tracing.StartHeader(ctx, tracing.StageForge,
-		"block.forge.publish", block)
-	return func() { span.End() }
+func beginForgePublication(
+	ctx context.Context,
+	block ledger.Block,
+	forgeStart time.Time,
+) func() {
+	_, span := tracing.StartHeader(
+		ctx,
+		tracing.StageForge,
+		"block.forge.publish",
+		block,
+		trace.WithTimestamp(forgeStart.Add(time.Since(forgeStart))),
+	)
+	return func() { span.End(trace.WithTimestamp(forgeStart.Add(time.Since(forgeStart)))) }
 }

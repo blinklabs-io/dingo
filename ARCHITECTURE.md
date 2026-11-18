@@ -2112,9 +2112,10 @@ mempool snapshot/selection/build/broadcast, ranking-block construction,
 self-validation, announcement validation, and adoption. Endorser-block selection
 also records candidate/selected counts and whether its deadline truncated the
 selection. Timings are captured on the forging goroutine through adoption,
-when the block hash and its sampling decision are known. The root is exported at
-adoption even if the observer blocks; child phases are exported after
-publication so their processing does not delay diffusion. No per-transaction
+when the block hash and its sampling decision are known. The root ends before
+the publication observer starts. Its delivery depends on the exporter's
+schedule. Child phases are processed after publication to avoid delaying
+diffusion. No per-transaction
 spans are added. The pre-build and endorser spans contain their
 nested stages, so their durations must not be added to those children.
 `block.forge.publish` is a separate sibling for post-adoption event publication
