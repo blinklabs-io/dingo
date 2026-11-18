@@ -787,8 +787,27 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// announcement (or the ledger's chain-derived reference) corroborates the
 	// slot, so a peer that offers before announcing cannot make dingo vote,
 	// track pipeline timing, or persist a blob under a slot of its choosing.
+	//
+	// A peer fetch is durable before it completes: the write happens here, on
+	// the fetching goroutine, instead of through the best-effort queue that
+	// drops under pressure. A locally forged block keeps the queue; nothing
+	// is fetched for it, so there is no fetch completion to order against.
 	if data.slotVerified {
-		o.publishLeiosEndorserBlock(point, blockRaw, data)
+		syncPersist := origin != leiosStoreAuthoritative
+		if syncPersist {
+			if err := o.persistLeiosEndorserBlockNow(
+				point,
+				blockRaw,
+				data,
+			); err != nil {
+				// Not durable, so not fetched: take the entry back out so a
+				// later offer fetches and writes it again rather than
+				// finding a complete cache entry and reporting success.
+				o.revertLeiosEndorserBlockStore(cacheKeys, data, existing)
+				return err
+			}
+		}
+		o.publishLeiosEndorserBlock(point, blockRaw, data, !syncPersist)
 	}
 	// A block this node forged itself did not arrive from anywhere.
 	if origin != leiosStoreAuthoritative && !wasClosureReady &&
@@ -798,12 +817,38 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	return nil
 }
 
+// revertLeiosEndorserBlockStore undoes the cache insertion of data, restoring
+// the entry it replaced (or removing it when there was none). It does nothing
+// for a key another store has since replaced, so a concurrent newer entry is
+// never discarded.
+func (o *Ouroboros) revertLeiosEndorserBlockStore(
+	cacheKeys []string,
+	data *leiosEndorserBlockData,
+	existing *leiosEndorserBlockData,
+) {
+	o.leiosMu.Lock()
+	defer o.leiosMu.Unlock()
+	for _, key := range cacheKeys {
+		if o.leiosEndorserBlocks[key] != data {
+			continue
+		}
+		if existing != nil {
+			o.leiosEndorserBlocks[key] = existing
+		} else {
+			delete(o.leiosEndorserBlocks, key)
+		}
+	}
+}
+
 // publishLeiosEndorserBlock performs the side effects keyed on a verified
-// endorser-block slot. It must be called with leiosMu released.
+// endorser-block slot. It must be called with leiosMu released. The block is
+// queued for asynchronous persistence only when enqueuePersist is set; a
+// caller that has already written it synchronously passes false.
 func (o *Ouroboros) publishLeiosEndorserBlock(
 	point ocommon.Point,
 	blockRaw []byte,
 	data *leiosEndorserBlockData,
+	enqueuePersist bool,
 ) {
 	if data == nil || !data.slotVerified {
 		return
@@ -813,7 +858,9 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 	// when it is still manifest-only. Voting and pipeline admission remain
 	// separately gated on complete transaction bodies and semantic validation.
 	o.advanceLeiosVerifiedEbSlot(point.Slot)
-	o.enqueueLeiosPersist(point, blockRaw, data)
+	if enqueuePersist {
+		o.enqueueLeiosPersist(point, blockRaw, data)
+	}
 	o.scheduleLeiosEndorserBlockValidation(point, data)
 }
 
@@ -1924,6 +1971,7 @@ func (o *Ouroboros) bindCachedLeiosEndorserBlockSlot(
 			verified.point,
 			verified.blockRaw,
 			&verified,
+			true,
 		)
 		// Recorded here, not above: the caller may hold
 		// leiosAnnouncementsMu until it runs this closure, and recording
