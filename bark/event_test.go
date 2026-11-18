@@ -430,6 +430,19 @@ func TestEventAckFilteredStreamIgnoresRejectedEvents(t *testing.T) {
 	require.Equal(t, eventtype.EpochTransition, ev.GetEventType())
 }
 
+// A one-event buffer still delivers to an ack subscriber: the send window is
+// never zero.
+func TestEventAckDeliversWithSingleEventBuffer(t *testing.T) {
+	t.Parallel()
+	f := newEventFixture(t, func(c *BarkConfig) {
+		c.EventBufferSize = 1
+	}, false)
+	sess := openAck(t, f, "tiny", 0)
+	waitActive(t, f, 1)
+	f.publishChurn("r:1")
+	require.NotNil(t, sess.recv(t))
+}
+
 func TestEventAckOutOfRangeWhenNotBuffered(t *testing.T) {
 	f := newEventFixture(t, func(c *BarkConfig) { c.EventBufferSize = 4 }, false)
 	for range 10 {
