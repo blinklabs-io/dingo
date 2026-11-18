@@ -6232,9 +6232,16 @@ downstream peers. A
 peer fetch (offer, backfill) is durable before it completes:
 `storeLeiosEndorserBlock` writes a slot-verified, non-forged block through
 `Database.SetLeiosEB` on the fetching goroutine (`persistLeiosEndorserBlockNow`)
-and, if that write fails, removes the cache entry again and returns the error so
-the fetch reports failure and a later offer retries. An entry not yet bound to
-an announced slot is written once `bindLeiosEndorserBlockSlot` binds it. A
+before inserting it into the cache, so no reader or closure waiter sees a
+complete entry the store does not hold. If the write fails nothing is inserted
+and the error makes the fetch report failure, so a later offer retries. If the
+entry needs more written by the time it is inserted (a concurrent announcement
+or transaction fetch), the write is repeated up to `leiosStoreDurableAttempts`
+times before falling back to the asynchronous path. The synchronous write is
+admitted under `leiosPersistLifecycleMu` like an enqueue: a live lifecycle pause
+or close waits for it, it restarts a paused retention GC, and after close it
+fails. An entry not yet bound to an announced slot is written once
+`bindLeiosEndorserBlockSlot` binds it. A
 locally forged block and a block published by that later binding use the
 asynchronous path: `enqueueLeiosPersist` queues the write on a single
 background writer

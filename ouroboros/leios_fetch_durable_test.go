@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -186,4 +187,139 @@ func TestFetchLeiosTxOfferFailsWhenDurableWriteFails(t *testing.T) {
 	txs, err := db.GetLeiosEBTxs(point.Hash, point.Slot)
 	require.NoError(t, err)
 	require.Len(t, txs, 1)
+}
+
+// blockingPutLeiosStore holds every volatile write that carries transactions
+// until release is closed, reporting through entered that one has started.
+type blockingPutLeiosStore struct {
+	leiosdb.Store
+	entered     chan struct{}
+	enteredOnce sync.Once
+	release     chan struct{}
+}
+
+func (s *blockingPutLeiosStore) PutVolatile(
+	eb leiosdb.Ref,
+	content leiosdb.Content,
+) error {
+	if content.Txs != nil {
+		s.enteredOnce.Do(func() { close(s.entered) })
+		<-s.release
+	}
+	return s.Store.PutVolatile(eb, content)
+}
+
+// A fetched endorser block must not be visible as complete in the cache while
+// its durable write is still in progress: a concurrent reader would otherwise
+// report the block fetched before the write had a chance to fail.
+func TestStoreLeiosEndorserBlockHidesEntryUntilDurable(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+	base, err := db.LeiosDB()
+	require.NoError(t, err)
+	store := &blockingPutLeiosStore{
+		Store:   base,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	db.SetLeiosDB(store)
+	t.Cleanup(func() { db.SetLeiosDB(base) })
+
+	tx, ref := testLeiosManifestTx(t, 11)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		302,
+		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+	)
+
+	stored := make(chan error, 1)
+	go func() {
+		stored <- o.storeLeiosEndorserBlock(
+			point,
+			manifestRaw,
+			[]cbor.RawMessage{tx},
+			leiosStoreBackfill,
+		)
+	}()
+	<-store.entered
+	cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	visible := ok && cached.completeTxCache()
+	close(store.release)
+	require.NoError(t, <-stored)
+	require.False(
+		t,
+		visible,
+		"the entry must not be complete in the cache before its write returns",
+	)
+	cached, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok && cached.completeTxCache())
+}
+
+// A synchronous fetch write after a live lifecycle pause must restart the
+// retention GC the pause stopped, as an asynchronous enqueue does; otherwise
+// records written by fetches are never collected.
+func TestStoreLeiosEndorserBlockRestartsGCAfterPause(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	o.startLeiosPersistenceGC(0, false)
+	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
+	require.False(t, o.leiosPersistGCStarted.Load())
+
+	tx, ref := testLeiosManifestTx(t, 12)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		303,
+		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+	)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		manifestRaw,
+		[]cbor.RawMessage{tx},
+		leiosStoreBackfill,
+	))
+	require.True(
+		t,
+		o.leiosPersistGCStarted.Load(),
+		"a synchronous fetch write must restart the paused retention GC",
+	)
+}
+
+// After close, a synchronous fetch write is refused and the fetch fails
+// rather than reporting a block it did not persist.
+func TestStoreLeiosEndorserBlockFailsAfterClose(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	require.NoError(t, o.Close())
+
+	tx, ref := testLeiosManifestTx(t, 13)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		304,
+		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+	)
+	err = o.storeLeiosEndorserBlock(
+		point,
+		manifestRaw,
+		[]cbor.RawMessage{tx},
+		leiosStoreBackfill,
+	)
+	require.ErrorIs(t, err, errLeiosPersistClosed)
+	_, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.False(t, ok, "a refused write must not leave a cache entry")
 }

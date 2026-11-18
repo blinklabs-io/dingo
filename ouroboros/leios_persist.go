@@ -754,17 +754,41 @@ func (o *Ouroboros) writeLeiosEBToStore(
 	return true, nil
 }
 
+// errLeiosPersistClosed reports a synchronous endorser-block write refused
+// because the Ouroboros instance is closed.
+var errLeiosPersistClosed = errors.New("leios persistence is closed")
+
 // persistLeiosEndorserBlockNow writes a fetched endorser block to the Leios
 // store on the calling goroutine and returns only once SetLeiosEB has
 // returned. A peer fetch reports success only after this, so a completed
 // fetch is a durable one: unlike enqueueLeiosPersist it cannot be dropped by a
 // full queue or a stopping writer. Without a Leios store there is nothing to
 // write and it succeeds.
+//
+// It is admitted under leiosPersistLifecycleMu like enqueueLeiosPersist, so
+// PauseLeiosPersistWriterForLiveLifecycleOp and close wait for an in-flight
+// write before storage is replaced or closed, and it restarts the retention
+// GC that a pause stopped. After close it fails with errLeiosPersistClosed,
+// so the fetch reports failure rather than success without a durable copy.
 func (o *Ouroboros) persistLeiosEndorserBlockNow(
 	point ocommon.Point,
 	blockRaw []byte,
 	data *leiosEndorserBlockData,
 ) error {
+	if o.leiosDatabase() == nil {
+		return nil
+	}
+	o.leiosPersistLifecycleMu.RLock()
+	defer o.leiosPersistLifecycleMu.RUnlock()
+	o.leiosPersistMu.Lock()
+	closed := o.leiosPersistClosed
+	o.leiosPersistMu.Unlock()
+	if closed {
+		return errLeiosPersistClosed
+	}
+	o.startLeiosPersistenceGC(0, false)
+	// Read after admission, so a write admitted after a pause targets the
+	// database current then rather than one read before the pause.
 	db := o.leiosDatabase()
 	if db == nil {
 		return nil
