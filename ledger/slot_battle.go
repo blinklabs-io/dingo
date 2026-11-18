@@ -38,6 +38,9 @@ type slotBattle struct {
 	// settleAt is the tip block number from which the outcome is final: a
 	// security parameter of blocks past the tip seen at detection.
 	settleAt uint64
+	// settle, when set, records the settled outcome with the owner of the
+	// local block.
+	settle func(won bool)
 }
 
 // slotBattleBook holds the battles awaiting settlement. The zero value is
@@ -121,6 +124,9 @@ func (ls *LedgerState) resolveSlotBattles() {
 			"remote_block_hash", hex.EncodeToString(battle.remoteHash),
 			"local_won", localWon,
 		)
+		if battle.settle != nil {
+			battle.settle(localWon)
+		}
 		if ls.config.EventBus != nil {
 			ls.config.EventBus.PublishAsync(
 				forging.SlotBattleEventType,

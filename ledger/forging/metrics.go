@@ -43,6 +43,10 @@ type forgingMetrics struct {
 	// Leader slots handed to another pool of the same node that also leads
 	// the slot and wins the tiebreak.
 	forgeYieldedToOwnPool prometheus.Counter
+	// Settled slot battles by whether this pool's block won or lost.
+	slotBattleOutcome *prometheus.CounterVec
+	// Remote KES signer preparations ahead of a leader slot that failed.
+	remoteKESSignerNotReady prometheus.Counter
 
 	// Dingo-specific (no cardano-node equivalent)
 	slotBattlesTotal prometheus.Counter
@@ -194,6 +198,24 @@ func initForgingMetrics(
 		prometheus.CounterOpts{
 			Name: "dingo_metrics_slotBattlesTotal_int",
 			Help: "battles between locally forged and peer blocks detected by active Praos chain selection",
+		},
+	)
+	m.slotBattleOutcome = factory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_slot_battle_outcomes_total",
+			Help: "slot battles between a block of this pool and a peer block, by settled outcome: won when the pool's block is on the chain a security parameter of blocks later, lost otherwise; dingo_metrics_slotBattlesTotal_int counts battles at detection",
+		},
+		[]string{"result"},
+	)
+	// Materialize both results so dashboards see a zero series before the
+	// first battle settles.
+	for _, result := range []string{slotBattleWon, slotBattleLost} {
+		m.slotBattleOutcome.WithLabelValues(result)
+	}
+	m.remoteKESSignerNotReady = factory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_remote_kes_signer_not_ready_total",
+			Help: "times the remote KES signer could not be prepared ahead of a scheduled leader slot, once per leader slot",
 		},
 	)
 	m.forgeFenceBlocked = factory.NewCounter(

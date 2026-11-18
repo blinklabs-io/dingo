@@ -1798,7 +1798,17 @@ not durably adopted:
   and did not turn into a block of its own on the chain after leader selection:
   a build, validation or adoption failure, a post-selection refusal, or an
   equal-slot alternative that lost. KES and tip safety refusals before leader
-  selection are excluded.
+  selection are excluded. It is not a count of leader slots that passed;
+  `dingo_leader_scheduled_slots_elapsed_total` is. When the ledger detects a
+  slot battle it asks the forgers which one forged the local block
+  (`ledger.SlotBattleOutcomeRecorder`, resolved by block hash from the slot
+  tracker) and, a security parameter of blocks later, reports whether that block
+  won, counted in `dingo_forge_slot_battle_outcomes_total{result="won|lost"}`
+  for that pool. `dingo_metrics_slotBattlesTotal_int` is unchanged and counts
+  battles at detection, and also when the forger declines a slot a rival
+  occupies before it has a block of its own there, which never settles, so
+  `won` plus `lost` does not sum to it. A battle still unsettled at shutdown is
+  not counted.
 
 ```mermaid
 sequenceDiagram
@@ -12998,6 +13008,48 @@ The `leader schedule calculated` record retains snapshot epoch/type, epoch
 slot interval, nonce, pool/total stake, exact `f`, consensus mode and elected
 slots. It no longer exposes `leader_threshold` or a synthetic margin.
 
+**Schedule metrics.** The schedule used to reach metrics only through the
+`dingo_metrics_leader_last_epoch_*` gauges, which `computeSchedule` sets for the
+epoch it computed last (usually the next one) and never sets for a persisted
+schedule. Those gauges keep that meaning. The series below follow the slot clock
+and the current epoch, are set for computed and persisted schedules alike, and
+are per pool (`pool_id` label with several pools, none with one):
+
+- `dingo_leader_scheduled_slots_elapsed_total` counts the scheduled leader
+  slots the slot clock has reached, whatever the forger then did with them.
+  `BlockForger` reports the slot of every forge cycle to its leader checker
+  through the optional `forging.SlotObserver`, ahead of the KES, sync and
+  stale-tip gates and of leader selection, so a leader slot refused for sync or
+  a stale tip, or never evaluated, counts too. `Election.ObserveSlot` counts
+  the leader slots in `(last counted, slot]` per cached epoch schedule, so a
+  repeated or backwards reading counts nothing and a reading several slots
+  ahead counts each scheduled slot it skipped. The first reading fixes a floor:
+  slots before it are never counted and its own slot is, so a restart does not
+  backfill, and the counter itself restarts from zero with the process. The
+  watermarks live on the `Election`, so a credential reload, which keeps the
+  election, and a stop followed by a start of the same election count nothing
+  twice. A live database restore or truncate rebuilds the block producer: its
+  new election and forger register fresh collectors, so the counter restarts
+  at zero with a new floor at the first slot the new forger reads. A schedule
+  that arrives after its slots passed counts them, from the floor, once.
+  Epochs older than the schedule cache's window (the slot clock's epoch and
+  the two before it) are closed and never counted again, even while a schedule
+  for one stays cached because no newer schedule could be produced. An
+  epoch with no schedule (no nonce yet during a deep sync) counts nothing,
+  since nothing says whether the pool led it, and slots that pass while the
+  node is not running are never counted: compare `dingo_leader_schedule_leader_slots`
+  with the blocks adopted in the epoch for those.
+- `dingo_leader_schedule_epoch` and `dingo_leader_schedule_leader_slots` are the
+  current epoch and the number of leader slots in its schedule. They are set
+  when a schedule is cached (computed or persisted), when the slot clock enters
+  a new epoch, and on an epoch transition event, and keep their last values
+  until the current epoch's schedule is cached; a schedule epoch behind the
+  current epoch says the schedule is missing.
+- `dingo_leader_next_slot` is the absolute slot of the next scheduled leader
+  slot after the slot clock's last reading, looking at the current and the next
+  epoch's schedule, and 0 when there is none cached. It carries a slot number,
+  not a time, because the election has no slot length.
+
 ### Block Forging (`ledger/forging/`)
 
 `BlockForger` runs a slot-based loop that:
@@ -13664,7 +13716,8 @@ an `AddBlock` error for publication — so worker accounting
 (`forgeNotLeader`/`forgeValidationFailed`/`forgeCouldNot`), `running` state, and
 shutdown behavior are unaffected, and the next forge cycle proceeds normally.
 Recovered panics are counted by phase in `dingo_forge_panic_recovered_total` and
-logged with a stack trace. The `blockForged` observer callback (step 7) already
+logged with a stack trace. The slot report to the leader checker
+(`forging.SlotObserver`) is wrapped the same way, as phase `slot_observer`. The `blockForged` observer callback (step 7) already
 recovered its own panics separately, since observability hooks are expected to
 be best-effort.
 
@@ -14204,8 +14257,9 @@ by the slot length, rounded up, and at least one slot. With 1s slots that is
 three slots; with slots of 3s or longer it is one whole slot, so the prepare
 runs one slot length ahead. With slots longer than `SessionFreshFor`, the
 prepared session is stale by the leader slot and the sign redials. A failed
-prepare only logs a warning ahead of the slot; the sign at the slot dials
-again if it must.
+prepare logs a warning ahead of the slot and counts
+`dingo_forge_remote_kes_signer_not_ready_total`, once per leader slot; the sign
+at the slot dials again if it must.
 
 One caller at a time uses the connection: a sign, or a dial and admission.
 The client mutex is never held across network I/O, so `Close` and

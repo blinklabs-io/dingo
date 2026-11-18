@@ -349,6 +349,15 @@ type LeaderChecker interface {
 	NextLeaderSlot(fromSlot uint64) (uint64, bool)
 }
 
+// SlotObserver is an optional extension of LeaderChecker. The forger reports
+// every slot the slot clock reaches to a checker that implements it, before
+// any gate or leader selection, so the checker can account for scheduled
+// leader slots that the forger then refuses (syncing, stale tip) or never
+// evaluates. It is called at most once per forge cycle and must not block.
+type SlotObserver interface {
+	ObserveSlot(slot uint64)
+}
+
 // BlockBuilder constructs blocks from mempool transactions.
 type BlockBuilder interface {
 	// BuildBlock creates a new block for the given slot.
@@ -1226,6 +1235,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		}
 	}
 	defer reportSlot(false)
+	f.observeSlotSafe(currentSlot)
 	f.prepareRemoteSignerForUpcomingLeaderSlot(currentSlot)
 
 	// Advance the KES state on every wall-clock slot, before any chain gate or
@@ -3874,7 +3884,7 @@ func (f *BlockForger) prepareRemoteSignerForUpcomingLeaderSlot(
 		return
 	}
 	f.remoteSignerPreparedSlot = next
-	creds, logger := f.creds, f.logger
+	creds, logger, metrics := f.creds, f.logger, f.metrics
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -3883,6 +3893,9 @@ func (f *BlockForger) prepareRemoteSignerForUpcomingLeaderSlot(
 		}()
 		prepared, err := creds.PrepareRemoteSigner()
 		if err != nil {
+			if metrics != nil {
+				metrics.remoteKESSignerNotReady.Inc()
+			}
 			logger.Warn(
 				"remote KES signer not ready ahead of leader slot",
 				"leader_slot", next,
@@ -3898,6 +3911,22 @@ func (f *BlockForger) prepareRemoteSignerForUpcomingLeaderSlot(
 			)
 		}
 	}()
+}
+
+// observeSlotSafe reports slot to a leader checker that observes slots,
+// recovering a panic for the same reason checkLeaderSafe does: the report is
+// accounting, and a fault in it must not stop the producer loop.
+func (f *BlockForger) observeSlotSafe(slot uint64) {
+	observer, ok := f.leaderChecker.(SlotObserver)
+	if !ok {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			f.reportForgeCallbackPanic("slot_observer", r)
+		}
+	}()
+	observer.ObserveSlot(slot)
 }
 
 // nextLeaderSlotSafe calls the pluggable leader checker, recovering a panic
@@ -4299,6 +4328,32 @@ func (f *BlockForger) updateKESPolicyMetrics(
 	}
 	f.metrics.opCertStartKES.Set(float64(generation.opCertStartKES))
 	f.metrics.opCertExpiryKES.Set(float64(generation.opCertExpiryKES))
+}
+
+// SlotBattleOutcome returns a function that records the settled outcome of a
+// slot battle fought by the block this forger forged at slot with hash, or nil
+// when it did not forge that block. The ledger asks when it detects the battle,
+// while the slot tracker still holds the block, and calls the function when the
+// battle settles a security parameter of blocks later, by which time the
+// tracker may have evicted the block.
+func (f *BlockForger) SlotBattleOutcome(
+	slot uint64,
+	hash []byte,
+) func(won bool) {
+	forged, ok := f.slotTracker.WasForgedByUs(slot)
+	if !ok || !bytes.Equal(forged, hash) {
+		return nil
+	}
+	return func(won bool) {
+		if f.metrics == nil {
+			return
+		}
+		result := slotBattleLost
+		if won {
+			result = slotBattleWon
+		}
+		f.metrics.slotBattleOutcome.WithLabelValues(result).Inc()
+	}
 }
 
 // RecordSlotBattle increments the slot battles counter. This is
@@ -5117,3 +5172,9 @@ func (f *BlockForger) forecastHorizonSlots() uint64 {
 	}
 	return p.StabilityWindow()
 }
+
+// Values of the result label of dingo_forge_slot_battle_outcomes_total.
+const (
+	slotBattleWon  = "won"
+	slotBattleLost = "lost"
+)

@@ -1007,6 +1007,18 @@ type SlotBattleRecorder interface {
 	RecordSlotBattle()
 }
 
+// SlotBattleOutcomeRecorder is an optional extension of SlotBattleRecorder.
+// A recorder that implements it hears how each battle settles, for the
+// forger that owns the block that fought it.
+type SlotBattleOutcomeRecorder interface {
+	// SlotBattleOutcome is called when a battle is detected, for the local
+	// block at slot with localHash. It returns the function to call with
+	// the settled outcome, or nil when the recorder owns no such block. The
+	// owner is resolved at detection, while the forger still tracks the
+	// block, because settlement comes a security parameter of blocks later.
+	SlotBattleOutcome(slot uint64, localHash []byte) func(won bool)
+}
+
 // ConnectionSwitchFunc is called when the active chainsync connection
 // changes. Implementations should clear any per-connection state such as
 // the header dedup cache so the new connection can re-deliver blocks.
