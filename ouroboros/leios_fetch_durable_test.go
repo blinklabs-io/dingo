@@ -16,9 +16,12 @@ package ouroboros
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -113,4 +116,74 @@ func TestFetchLeiosTxOfferReturnsOnlyAfterDurableWrite(t *testing.T) {
 			require.True(t, fetched, "the fetch itself must succeed")
 		})
 	}
+}
+
+// failingPutLeiosStore fails every volatile write that carries transactions
+// while failing is set, so a manifest write succeeds and the write completing
+// the endorser block fails.
+type failingPutLeiosStore struct {
+	leiosdb.Store
+	failing atomic.Bool
+}
+
+func (s *failingPutLeiosStore) PutVolatile(
+	eb leiosdb.Ref,
+	content leiosdb.Content,
+) error {
+	if s.failing.Load() && content.Txs != nil {
+		return errors.New("injected leios store write failure")
+	}
+	return s.Store.PutVolatile(eb, content)
+}
+
+// A fetch whose store write fails must report failure and leave no complete
+// cache entry behind, so the next offer fetches and writes the block again
+// instead of finding it cached and reporting success without a durable copy.
+func TestFetchLeiosTxOfferFailsWhenDurableWriteFails(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
+	o.leiosAnnouncementLedger = nil
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+	base, err := db.LeiosDB()
+	require.NoError(t, err)
+	store := &failingPutLeiosStore{Store: base}
+	store.failing.Store(true)
+	db.SetLeiosDB(store)
+	t.Cleanup(func() { db.SetLeiosDB(base) })
+
+	tx, ref := testLeiosManifestTx(t, 9)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(
+		301,
+		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
+	)
+	announceLeiosElectionForTest(t, o, point, uint64(len(manifestRaw)))
+	client := &oneTxLeiosOfferRequester{blockRaw: manifestRaw, tx: tx}
+
+	require.False(
+		t,
+		o.fetchLeiosTxOffer(context.Background(), client, "peer", point),
+		"a fetch whose store write failed must not report success",
+	)
+	cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.False(
+		t,
+		ok && cached.completeTxCache(),
+		"a failed write must not leave a complete cache entry",
+	)
+
+	store.failing.Store(false)
+	require.True(
+		t,
+		o.fetchLeiosTxOffer(context.Background(), client, "peer", point),
+		"the next offer must fetch again once the store accepts writes",
+	)
+	txs, err := db.GetLeiosEBTxs(point.Hash, point.Slot)
+	require.NoError(t, err)
+	require.Len(t, txs, 1)
 }
