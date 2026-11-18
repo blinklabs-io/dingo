@@ -1196,11 +1196,16 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			)
 		}
 	}
-	// Statistics should exist before the first block batch: a database that
-	// has never been analyzed plans the batched UTxO spend as a scan of every
-	// live output. After recovery, which can roll metadata back, so the
-	// statistics describe the tables blocks are applied to.
-	n.runPlannerStatsStartup(ctx)
+	// Core storage keeps the startup pass synchronous: a database that has
+	// never been analyzed can otherwise plan the first batched UTxO spend as a
+	// scan of every live output. Shared API storage may already contain enough
+	// history for this bounded maintenance to take minutes, so its manager is
+	// prepared now and started asynchronously after the API listeners below.
+	if n.config.storageMode.IsAPI() {
+		n.plannerStatsMgr = n.newPlannerStatsManager()
+	} else {
+		n.runPlannerStatsStartup(ctx)
+	}
 
 	if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
 		return err
@@ -1410,10 +1415,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		)
 	}
 	started = append(started, func() { _ = n.dbLifecycleMgr.Stop() })
-	if err := n.startPlannerStatsManager(n.ctx); err != nil { //nolint:contextcheck
-		return fmt.Errorf("failed to start planner statistics manager: %w", err)
+	if !n.config.storageMode.IsAPI() {
+		if err := n.startPlannerStatsManager(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf(
+				"failed to start planner statistics manager: %w",
+				err,
+			)
+		}
+		started = append(started, func() { _ = n.plannerStatsMgr.Stop() })
 	}
-	started = append(started, func() { _ = n.plannerStatsMgr.Stop() })
 	// Initialize Leios vote manager (experimental)
 	if enableLeiosRuntime {
 		//nolint:contextcheck // n.ctx is the node's lifecycle context
@@ -2037,6 +2047,20 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err != nil {
 			return fmt.Errorf("failed to start block producer: %w", err)
 		}
+	}
+
+	// Shared API storage starts planner maintenance only after every API
+	// listener is serving. The startup pass runs first on the manager's worker,
+	// serialized with later epoch and periodic refreshes, without delaying API
+	// availability.
+	if n.config.storageMode.IsAPI() {
+		if err := n.startAPIPlannerStatsManager(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf(
+				"failed to start planner statistics manager: %w",
+				err,
+			)
+		}
+		started = append(started, func() { _ = n.plannerStatsMgr.Stop() })
 	}
 
 	// Node-managed Mithril starts last, once Ouroboros and the ledger it

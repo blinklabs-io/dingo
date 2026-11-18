@@ -71,3 +71,16 @@ func (n *Node) startPlannerStatsManager(ctx context.Context) error {
 	}
 	return n.plannerStatsMgr.Start(ctx)
 }
+
+// startAPIPlannerStatsManager starts the shared API database's manager with a
+// queued startup pass. Callers place it after API listener startup so planner
+// maintenance cannot delay availability.
+func (n *Node) startAPIPlannerStatsManager(ctx context.Context) error {
+	if n.plannerStatsMgr == nil {
+		n.plannerStatsMgr = n.newPlannerStatsManager()
+	}
+	if n.plannerStatsMgr == nil {
+		return nil
+	}
+	return n.plannerStatsMgr.StartWithStartup(ctx)
+}

@@ -115,9 +115,11 @@ genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
 indexes by shape alone: the batched spend `UPDATE` in `consumeUtxosBatchQuery`
 plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead of
 a seek on `idx_utxo_tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs `PRAGMA
-optimize(0x10012)` on the write connection, outside any transaction, at startup
-before block processing
-begins, after each epoch rollover commits, and once a minute in between:
+optimize(0x10012)` on the write connection, outside any transaction, at startup,
+after each epoch rollover commits, and once a minute in between. Core storage
+runs the startup pass before block processing begins. Shared API storage starts
+its listeners first and runs the pass on the manager worker, so planner
+maintenance does not delay API availability:
 statistics recorded at startup can understate tables that block application then
 fills (a node bootstrapped from Mithril records `transaction` and `certs` at
 almost no rows), and every query that reaches `transaction` through `certs` then

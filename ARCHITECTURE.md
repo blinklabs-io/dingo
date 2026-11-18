@@ -2316,12 +2316,14 @@ When `Node.Run()` is called, components are initialized in this order:
     transaction — and captures a point-in-time database snapshot
     (`database/lifecycle.Snapshot`) at epoch boundaries when
     `databaseLifecycle.snapshotEnabled` is configured.
-    Planner statistics manager (`internal/plannerstats.Manager`): the startup
-    `PRAGMA optimize` pass runs after any commit-timestamp recovery and before
-    the ledger starts processing blocks, to populate statistics before the first
-    block batch; a failed pass is logged and the node continues with the
-    statistics it had. A live restore or truncate runs the pass again on the
-    replacement database. The manager is then started and subscribes to
+    Planner statistics manager (`internal/plannerstats.Manager`): for core
+    storage, the startup `PRAGMA optimize` pass runs after any commit-timestamp
+    recovery and before the ledger starts processing blocks, to populate
+    statistics before the first block batch. Shared API storage starts its API
+    listeners first, then runs the startup pass on the manager worker so a
+    long refresh does not delay availability. A failed pass is logged and the
+    node continues with the statistics it had. A live restore or truncate runs
+    the pass again on the replacement database. The manager subscribes to
     `epoch.transition` (a post-Byron event without an epoch nonce, the slot
     clock's duplicate, is ignored; Byron rollovers carry no nonce and still
     trigger a run). Its worker also runs the pass every

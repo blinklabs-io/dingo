@@ -2135,9 +2135,10 @@ func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 }
 
 // WithPlannerStatsRefresh controls SQLite's incremental planner-statistics
-// maintenance, run before block processing starts and after each epoch
-// rollover. Enabled by default; pass false only as an escape hatch. Other
-// metadata backends are unaffected.
+// maintenance, run during startup and after each epoch rollover. Shared API
+// storage runs the startup pass after its listeners start so maintenance does
+// not delay availability. Enabled by default; pass false only as an escape
+// hatch. Other metadata backends are unaffected.
 func WithPlannerStatsRefresh(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.PlannerStatsRefreshEnabled = enabled
@@ -2423,7 +2424,9 @@ func WithMithrilCatchUp(factory MithrilCatchUpFactory) ConfigOptionFunc {
 // to when its live UTxO set cannot be brought to the ledger from a checkpoint.
 // It is independent of mithril.enabled: the network's aggregator is used. A
 // nil reimporter from the factory leaves that recovery without a source.
-func WithMithrilLedgerReimport(factory MithrilLedgerReimportFactory) ConfigOptionFunc {
+func WithMithrilLedgerReimport(
+	factory MithrilLedgerReimportFactory,
+) ConfigOptionFunc {
 	return func(c *Config) {
 		c.mithrilLedgerReimport = factory
 	}
@@ -3477,7 +3480,9 @@ func (c *Config) genesisSelectionEligible() bool {
 // selector actually starts in, once the node has resolved it from the
 // configuration and the caught-up marker. It is called once per node start,
 // before the selector is built.
-func WithGenesisSelectionResolved(fn func(genesisSelectionMode bool)) ConfigOptionFunc {
+func WithGenesisSelectionResolved(
+	fn func(genesisSelectionMode bool),
+) ConfigOptionFunc {
 	return func(c *Config) { c.onGenesisSelectionResolved = fn }
 }
 
