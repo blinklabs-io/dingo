@@ -20975,6 +20975,34 @@ consumer prints `location` without feeding it back into an operation.
 `GetDatabaseInfo` reads the persisted block inventory rather than scanning
 retained block contents.
 
+**EventService** (`bark/event.go`, `bark/event_adapter.go`) mounts bark's
+`EventService` when `BarkConfig.EventBus` is set, which `node.go`'s `Run()` does
+only when `barkEventEnabled` is true. Bark holds no credentials, so the bind
+address is the access control: enabling it defaults the listener to loopback,
+as for the lifecycle services. `eventAdapter` subscribes to the internal
+EventBus types (`peergov.peer_churn`, `chain.update`, `epoch.transition`,
+`mempool.add_tx`/`remove_tx`, `connmanager.inbound_conn`/`conn_closed`) and
+converts each to a registry event with a typed payload; a rollback travelling on
+`chain.update` stays on `chain.update` and is reported in the payload's
+`rollback` field. A subscription filter selects by registered event type or
+category pattern (`peergov.*`) and optionally by `origin_node_ids`. The bus
+handlers only enqueue onto a bounded
+channel; one goroutine converts and appends to a ring buffer of
+`barkEventBufferSize` events that carries the delivery sequence. Subscribers
+read the ring at their own pace, so a slow remote client cannot delay any
+internal subscriber: `Subscribe` detaches a client that falls more than the ring
+behind, `SubscribeWithAck` closes it with `OUT_OF_RANGE`, and a client that
+stops acknowledging a half-ring window is closed after a timeout. Resuming with
+`last_acked_sequence` replays from the ring. `Publish` and `PublishBatch` are
+refused unless `barkEventPublishEnabled` is set; an accepted event goes to the
+node's remote subscribers and is not injected into the internal EventBus, which
+only accepts its own typed structs. Concurrent-stream limits
+(`barkEventMaxSubscribers`, `barkEventMaxSubscribersPerClient`) are explicit
+operator opt-ins; zero or unset means unlimited, and `PublishBatch` has no
+fixed batch cap.
+Sync state, protocol parameter and database operation events are not in the
+registry because no internal event carries that data.
+
 **LifecycleService** (`bark/lifecycle.go`) mounts bark's `LifecycleService`
 (Stop, Restart, GetStatus) when `BarkConfig.Node` is set, which `node.go`'s
 `Run()` does only when `barkLifecycleEnabled` is true. Bark owns transport and request validation (a negative `graceful_timeout` is

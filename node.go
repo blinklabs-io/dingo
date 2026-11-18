@@ -1749,9 +1749,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if n.config.barkPort > 0 {
 		lifecycleEnabled := n.config.databaseLifecycle.SnapshotDir != ""
 		remoteLifecycleEnabled := n.config.barkLifecycleEnabled
+		eventEnabled := n.config.cfg.BarkEventEnabled
 		barkHost := effectiveBarkHost(
 			n.config.barkHost,
-			lifecycleEnabled || remoteLifecycleEnabled,
+			lifecycleEnabled || remoteLifecycleEnabled || eventEnabled,
 		)
 		barkConfig := bark.BarkConfig{
 			Logger:                                   n.config.logger,
@@ -1771,6 +1772,16 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		}
 		if remoteLifecycleEnabled {
 			barkConfig.Node = n
+		}
+		if eventEnabled {
+			barkConfig.EventBus = n.eventBus
+			barkConfig.EventPublishEnabled = n.config.cfg.BarkEventPublishEnabled
+			barkConfig.EventNodeID = n.eventNodeID()
+			barkConfig.EventBufferSize = n.config.cfg.BarkEventBufferSize
+			barkConfig.EventMaxSubscribers = n.config.cfg.BarkEventMaxSubscribers
+			barkConfig.EventMaxSubscribersPerClient = n.config.cfg.BarkEventMaxSubscribersPerClient
+			barkConfig.EventEpochForSlot = n.eventEpochForSlot
+			barkConfig.EventEraNameForEpoch = n.eventEraNameForEpoch
 		}
 		// Mount the DatabaseService only when a snapshot directory is
 		// configured — bark.NewBark requires one alongside Lifecycle, and

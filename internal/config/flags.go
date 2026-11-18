@@ -573,6 +573,31 @@ var flagSpecs = []flagSpec{
 		"bark-lifecycle-enabled",
 		"enable Bark remote Stop, Restart, and GetStatus RPCs",
 	),
+	boolFlag(
+		"BarkEventEnabled",
+		"bark-event-enabled",
+		"enable Bark EventService streaming of node events",
+	),
+	boolFlag(
+		"BarkEventPublishEnabled",
+		"bark-event-publish-enabled",
+		"let Bark EventService accept Publish and PublishBatch",
+	),
+	intFlag(
+		"BarkEventBufferSize",
+		"bark-event-buffer-size",
+		"events Bark EventService keeps for resuming subscribers (0 = default)",
+	),
+	intFlag(
+		"BarkEventMaxSubscribers",
+		"bark-event-max-subscribers",
+		"most concurrent Bark EventService streams (0 = default)",
+	),
+	intFlag(
+		"BarkEventMaxSubscribersPerClient",
+		"bark-event-max-subscribers-per-client",
+		"most concurrent Bark EventService streams per caller address (0 = default)",
+	),
 	stringSliceFlag(
 		"BarkLifecycleOperatorCertificateFingerprints",
 		"bark-lifecycle-operator-certificate-fingerprints",

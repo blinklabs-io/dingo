@@ -2377,6 +2377,22 @@ func WithBarkOperatorCertificateFingerprints(
 	}
 }
 
+// WithBarkEventService configures Bark's EventService. It is disabled by
+// default; publish additionally lets it accept Publish and PublishBatch, and
+// a zero limit selects the service's default.
+func WithBarkEventService(
+	enabled, publish bool,
+	bufferSize, maxSubscribers, maxSubscribersPerClient int,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkEventEnabled = enabled
+		c.cfg.BarkEventPublishEnabled = publish
+		c.cfg.BarkEventBufferSize = bufferSize
+		c.cfg.BarkEventMaxSubscribers = maxSubscribers
+		c.cfg.BarkEventMaxSubscribersPerClient = maxSubscribersPerClient
+	}
+}
+
 // WithBarkLifecycleEnabled explicitly enables Bark's remote node lifecycle
 // service. It is disabled by default.
 func WithBarkLifecycleEnabled(enabled bool) ConfigOptionFunc {

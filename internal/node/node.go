@@ -971,6 +971,13 @@ func buildDingoConfig(
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
 		),
+		dingo.WithBarkEventService(
+			cfg.BarkEventEnabled,
+			cfg.BarkEventPublishEnabled,
+			cfg.BarkEventBufferSize,
+			cfg.BarkEventMaxSubscribers,
+			cfg.BarkEventMaxSubscribersPerClient,
+		),
 		dingo.WithBarkLifecycleEnabled(cfg.BarkLifecycleEnabled),
 		dingo.WithBarkLifecycleOperatorCertificateFingerprints(
 			cfg.BarkLifecycleOperatorCertificateFingerprints,
