@@ -59,8 +59,7 @@ FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d
 #     compatible direction pg_dump allows.
 # Pinning to v16 here (rather than always tracking latest) is a deliberate,
 # verified choice: it dumps from/restores into any currently-supported
-# Postgres server at v16 or older cleanly, matching this repo's own
-# CI service (postgres:16, .github/workflows/go-test.yml). It cannot dump
+# Postgres server at v16 or older cleanly. It cannot dump
 # FROM a v17+ server (pg_dump's own version-mismatch guard); bump this pin
 # (and re-verify pg_restore against every currently-supported server
 # version, not just the newest) if that becomes a real requirement.
