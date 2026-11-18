@@ -3521,6 +3521,7 @@ type forgerTestLeiosCaster struct {
 	hash     []byte
 	cbor     []byte
 	txBodies [][]byte
+	err      error
 }
 
 func (c *forgerTestLeiosCaster) BroadcastEndorserBlock(
@@ -3533,7 +3534,7 @@ func (c *forgerTestLeiosCaster) BroadcastEndorserBlock(
 	c.hash = append([]byte(nil), hash...)
 	c.cbor = append([]byte(nil), cbor...)
 	c.txBodies = append([][]byte(nil), txBodies...)
-	return nil
+	return c.err
 }
 
 type forgerTestMempoolProvider struct {

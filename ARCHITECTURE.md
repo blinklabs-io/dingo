@@ -2106,8 +2106,23 @@ Stage spans, all in the block's trace: `block.header_received` (one per
 delivering peer), `block.header_validated`, `block.body_received`,
 `block.apply`, `block.commit` (one per sampled block of a committed batch,
 spanning the batch's commit), `block.rolled_back`, and on a producer
-`block.forge`. Until the ledger first reaches the upstream tip only the core
-stages (apply, commit, rollback, forge) are recorded, so a sync from genesis
+`block.forge`. A successful production forge records child spans for leader
+checks, pre-build preparation, Leios parent/closure preparation, endorser-block
+mempool snapshot/selection/build/broadcast, ranking-block construction,
+self-validation, announcement validation, and adoption. Endorser-block selection
+also records candidate/selected counts and whether its deadline truncated the
+selection. Timings are captured on the forging goroutine through adoption,
+when the block hash and its sampling decision are known. The root ends before
+the publication observer starts. Its delivery depends on the exporter's
+schedule. Child phases are processed after publication to avoid delaying
+diffusion. No per-transaction
+spans are added. The pre-build and endorser spans contain their
+nested stages, so their durations must not be added to those children.
+`block.forge.publish` is a separate sibling for post-adoption event publication
+and diffusion enqueueing; it does not change the forge span's adoption boundary
+or measure a peer receiving the block. Unadopted attempts retain their timing
+logs but have no block-derived forge trace. Until the ledger first reaches
+the upstream tip only the core stages (apply, commit, rollback, forge) are recorded, so a sync from genesis
 produces a reduced span set. A transaction's mempool admission records
 `tx.mempool_add` in a trace derived the same way from the transaction hash.
 
