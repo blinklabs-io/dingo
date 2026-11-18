@@ -3079,6 +3079,7 @@ func (ls *LedgerState) saveStakeRewardPrecompute(
 	if err := meta.SaveRewardAdaPots(app.pots, metaTxn); err != nil {
 		return fmt.Errorf("save precomputed reward ADA pots: %w", err)
 	}
+	ls.rewardFactsAfterCommit(metaTxn, app.epochs.snapshot, capturedSlot)
 	ls.config.Logger.Info(
 		"precomputed stake rewards",
 		"component", "ledger",
@@ -5443,4 +5444,19 @@ func suppressBootstrapStakeRewards(result *rewards.Result) {
 	result.Unspendable = 0
 	result.UnspendableDeficit = 0
 	result.Undistributed = result.AvailableRewards
+}
+
+func (ls *LedgerState) rewardFactsAfterCommit(
+	txn ledgerdb.Txn,
+	epoch, slot uint64,
+) {
+	if ls.config.EventBus == nil {
+		return
+	}
+	txn.AfterCommit(func() {
+		ls.config.EventBus.Publish(RewardFactsEventType, event.NewEvent(
+			RewardFactsEventType,
+			RewardFactsEvent{SnapshotEpoch: epoch, CapturedSlot: slot},
+		))
+	})
 }

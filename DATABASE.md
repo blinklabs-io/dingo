@@ -4592,8 +4592,10 @@ with `role="indexer"` and an `indexer_` name prefix: one collector name cannot b
 registered with two label sets. Closing the view does not close the shared
 store, and the IndexerDB closes before the ledger database does.
 
-The writer follows the ledger's durable tip, woken by `ledger.tip` and by a
-wake at start. `dingo_indexer_tip_slot`, `dingo_indexer_lag_blocks` and
+The writer follows the ledger's durable tip and wakes at startup, on
+`ledger.tip`, and on `ledger.reward_facts` after reward precomputation commits.
+A caught-up writer copies newly completed reward facts without advancing its
+tip or replaying withdrawals. `dingo_indexer_tip_slot`, `dingo_indexer_lag_blocks` and
 `dingo_indexer_lag_seconds` report where it is; the lag in seconds is the
 wall-clock distance between the two tips from the ledger's slot clock, and one
 second per slot until that clock exists.
