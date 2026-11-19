@@ -291,7 +291,8 @@ func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
 }
 
 // VerifyPointQueryable checks that at, once Acquired, is guaranteed to be
-// answerable by every point-aware query type below -- not just that it is
+// answerable by every point-aware query type below (ShelleyGovStateQuery is
+// tip-only and not covered) -- not just that it is
 // still on this node's chain (verifyPointOnChain), but that it is not older
 // than the strictest per-query-type retention floor (UTxO whole/by-ref via
 // checkUtxoRetentionWindow, stake/pool distribution via
@@ -319,7 +320,9 @@ func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
 // a successful Acquire there already guarantees every query answers.
 // Checking every one of Dingo's independent, differently-sized retention
 // windows here, upfront, gives Dingo that same guarantee instead of
-// discovering the gap mid-query. The cost is symmetric: a connection that
+// discovering the gap mid-query. ShelleyGovStateQuery is the exception: it
+// answers only the current tip, so a point that acquires can still fail it, and
+// the failure cannot be checked here because the query is not known yet. The cost is symmetric: a connection that
 // only ever intended to ask a genuinely unbounded query (queryShelleyEpochNo)
 // at a point older than UTxO's or stake distribution's own floor is now
 // also refused at Acquire, even though that specific query alone could
@@ -473,6 +476,8 @@ func (ls *LedgerState) checkAnnouncedPruneFloors(
 // at reaches every query type that reads ledger or consensus state, each of
 // which answers as of at; queryShelleyLeaf's doc comment audits every case,
 // and only genesis config and the ledger peer snapshot are live by design.
+// ShelleyGovStateQuery is the exception: it answers a pinned point only when
+// that point is the current tip, and refuses any other.
 //
 // Query reads current state on every call, so successive calls may observe
 // different blocks. A session that needs consistent reads across calls uses

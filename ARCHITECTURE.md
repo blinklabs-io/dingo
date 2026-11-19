@@ -8332,14 +8332,16 @@ types that are live by design (`GetGenesisConfig`, `GetLedgerPeerSnapshot`) stay
 live, as they are for any session. The LocalStateQuery protocol has no reply for
 a failed query: any error after a successful Acquire ends the connection. A
 rollback or prune committed after Acquire cannot cause one, since every query
-reads the session's snapshot, so the only remaining case is a reopen whose block
+reads the session's snapshot, so the only remaining cases are a reopen whose block
 this node can no longer answer for (rolled back, or past a retention floor,
-while the view was closed); that query fails and is logged. Closing a view never
+while the view was closed) and a `GetGovState` on a reopened view whose block is
+no longer the tip; that query fails and is logged. Closing a view never
 waits for a query in flight: that query completes against the snapshot and the
 last one out releases it.
 
-Every query type that reads ledger or consensus state honors a pinned point;
-`queryShelleyLeaf` audits each one. The first were `GetPoolDistr2`
+Every query type that reads ledger or consensus state honors a pinned point,
+except `GetGovState`, which answers only the tip; `queryShelleyLeaf` audits each
+one. The first were `GetPoolDistr2`
 (`PoolStakeDistribution`, resolving the pinned slot to the epoch that
 governed it and reading that epoch's already-persisted mark snapshot --
 rejecting a point outside the pool-snapshot retention window, ahead of the
@@ -8380,7 +8382,8 @@ honors the pin too, through the same `AddedSlot`/`DeletedSlot` predicate
 `GetUTxOByTxIn` uses. `ledger/queries.go`'s
 `queryShelleyLeaf` carries a full audit of every query type, classified as
 honoring the point or intentionally live-only; none is left answering from the
-live tip.
+live tip, except that `GetGovState` answers a pinned point only when it is the
+current tip and refuses any other.
 
 `HardForkCurrentEraQuery` (`queryHardFork`, dispatched from `queryBlock`
 alongside `ShelleyQuery` rather than through `queryShelleyLeaf`, so it sat
@@ -20641,7 +20644,7 @@ current chain (`verifyPointOnChain`, returning `ledger.ErrPointNotOnChain`
 on a mismatch) before dispatching to any handler, so every point-sensitive
 query shares one fork-safety check rather than repeating it.
 `queryShelleyLeaf`'s doc comment carries a full audit of every one of its
-cases, classified as honoring the point or intentionally live-only --
+cases, classified as honoring the point, intentionally live-only, or tip-only --
 summarized here for the ones that matter
 to this comparison:
 `queryShelleyStakeDistribution`/`queryShelleyPoolDistr2` (via
