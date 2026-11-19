@@ -36,6 +36,7 @@ import (
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/forging"
 	dingleios "github.com/blinklabs-io/dingo/ledger/leios"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -52,6 +53,8 @@ import (
 )
 
 type fakeLeiosAnnouncementLedger struct {
+	receiptMatches bool
+	receiptCalls   int
 	currentSlot    uint64
 	currentSlotErr error
 	slotTime       time.Time
@@ -3542,4 +3545,39 @@ func TestLeiosReloadDiscardsLegacyWrappedPersistedTxs(t *testing.T) {
 	require.True(t, ok)
 	require.False(t, data.completeTxCache())
 	require.Empty(t, data.txsRaw)
+}
+
+func (f *fakeLeiosAnnouncementLedger) MatchesLeiosAnnouncement(context.Context, lcommon.BlockHeader, []byte, [][]byte) bool {
+	f.receiptCalls++
+	return f.receiptMatches
+}
+
+func TestValidateLeiosEndorserBlockForHeaderReusesLocalReceipt(t *testing.T) {
+	t.Parallel()
+	for _, matches := range []bool{true, false} {
+		t.Run(fmt.Sprint(matches), func(t *testing.T) {
+			t.Parallel()
+			txRaw := testDijkstraTx(t, 0)
+			blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{TransactionReferences: []lcommon.LeiosTransactionReference{{TransactionHash: lcommon.Blake2b256Hash(txRaw), TransactionSize: uint32(len(txRaw))}}})
+			require.NoError(t, err)
+			point := ocommon.NewPoint(10, lcommon.Blake2b256Hash(blockRaw).Bytes())
+			header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(testDijkstraAnnouncementHeaderRawFor(t, point.Slot, testEbHash(point), uint64(len(blockRaw))))
+			require.NoError(t, err)
+			validationLedger := &fakeLeiosAnnouncementLedger{receiptMatches: matches}
+			o := newTestOuroborosWithLeiosDB(t)
+			o.leiosAnnouncementLedger = validationLedger
+			o.ledgerState = newTestLedgerState(t)
+			setTestLedgerTip(t, o, ochainsync.Tip{Point: ocommon.NewPoint(point.Slot-1, header.PrevHash().Bytes())})
+			defer func() { require.NoError(t, o.Close()) }()
+			require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, []cbor.RawMessage{txRaw}, leiosStoreAuthoritative))
+			ctx := forging.WithLeiosValidationReceipt(t.Context(), validationLedger)
+			require.NoError(t, o.ValidateLeiosEndorserBlockForHeader(ctx, header, header.PrevHash().Bytes()))
+			require.Equal(t, 1, validationLedger.receiptCalls)
+			expected := 1
+			if matches {
+				expected = 0
+			}
+			require.Equal(t, expected, validationLedger.txValidated)
+		})
+	}
 }

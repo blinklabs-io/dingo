@@ -1306,7 +1306,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 			break
 		}
 	}
-	if err == nil {
+	if err == nil && !ledger.ReusePreparedLeiosSelection(ctx, header, validationParent, txCbors) {
 		err = o.leiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions(
 			ctx,
 			header,

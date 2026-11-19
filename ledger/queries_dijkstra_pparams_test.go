@@ -68,7 +68,7 @@ func dijkstraQueryPParams(stride uint32) *dijkstra.DijkstraProtocolParameters {
 		PerasTargetCommitteeSize:         21,
 		PerasBootstrapRound:              &bootstrapRound,
 		PerasQuorumThresholdSafetyMargin: ratPtr(1, 2),
-		RefInputsCostPerMultiAssetPolicy: 23,
+		RefInputsCostPerMultiAssetByte:   23,
 		RefInputsCostPerDatumByte:        24,
 	}
 }
@@ -131,7 +131,7 @@ func requireDijkstraQueryReply(
 		t,
 		decoded.PerasQuorumThresholdSafetyMargin.Cmp(big.NewRat(1, 2)),
 	)
-	assert.Equal(t, uint64(23), decoded.RefInputsCostPerMultiAssetPolicy)
+	assert.Equal(t, uint64(23), decoded.RefInputsCostPerMultiAssetByte)
 	assert.Equal(t, uint64(24), decoded.RefInputsCostPerDatumByte)
 }
 

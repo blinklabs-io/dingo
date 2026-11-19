@@ -1927,6 +1927,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 
 	endLeiosPrepare := beginForgePhase(ctx, "block.forge.leios.prepare")
 	leiosState := forgeLeiosState{}
+	var leiosReceipt LeiosValidationReceipt
 	if altBlockContext == nil {
 		parentRbHash, parentEbHash, parentKnown := f.leiosParentAnnouncement(
 			ctx,
@@ -1954,7 +1955,11 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		// therefore pinned to a ledger whose tip is the parent, and rebased
 		// onto the certified closure.
 		endRebase := beginForgePhase(ctx, "block.forge.leios.rebase")
-		basis := leiosSelectionBasis{parentHash: gates.primaryTip.Hash}
+		basis := leiosSelectionBasis{
+			parentHash: gates.primaryTip.Hash,
+			slot:       currentSlot,
+			receipt:    &leiosReceipt,
+		}
 		canAnnounce := true
 		if embeddedEb != nil {
 			closure, err := f.certifiedClosureForRebase(
@@ -2230,7 +2235,11 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 			ctx,
 			"block.forge.leios.validate_announcement",
 		)
-		err := f.leiosAnnouncementValidator(ctx, block.Header())
+		announcementCtx := ctx
+		if leiosReceipt != nil && len(block.Transactions()) == 0 {
+			announcementCtx = WithLeiosValidationReceipt(ctx, leiosReceipt)
+		}
+		err := f.leiosAnnouncementValidator(announcementCtx, block.Header())
 		endAnnouncement()
 		if err != nil {
 			if errors.Is(err, ErrLeiosAnnouncementUnavailable) {
@@ -4657,12 +4666,24 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	candidateCount := len(txs)
 	endSelection := beginForgePhase(ctx, "block.forge.leios.select")
 	selectStart := f.now()
-	validatedTxs, truncated, err := selectValidLeiosTransactions(ctx,
-		txs,
-		f.leiosValidator,
-		limits,
-		basis,
-	)
+	var validatedTxs []MempoolTransaction
+	var truncated bool
+	if provider, ok := f.leiosValidator.(PreparedLeiosSelectionProvider); ok &&
+		basis.receipt != nil &&
+		len(basis.parentHash) > 0 &&
+		basis.closure == nil {
+		validatedTxs, truncated, *basis.receipt, err = selectPreparedLeiosTransactions(
+			ctx,
+			txs,
+			provider,
+			limits,
+			basis,
+		)
+	} else {
+		validatedTxs, truncated, err = selectValidLeiosTransactions(
+			ctx, txs, f.leiosValidator, limits, basis,
+		)
+	}
 	selectDuration := f.now().Sub(selectStart)
 	endSelection(
 		attribute.Int("forge.candidates", candidateCount),
@@ -4813,7 +4834,9 @@ func selectValidLeiosTransactions(ctx context.Context,
 			consumed := basis.closure.consumedOverlay()
 			created := make(map[utxoref.Key]lcommon.Utxo)
 			accounts := utxoref.NewStateOverlay()
-			for _, mempoolTx := range txs {
+			preparation := newLeiosCandidatePreparation(txs, 0)
+			preparation.expired = limits.expired
+			for range txs {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -4835,26 +4858,28 @@ func selectValidLeiosTransactions(ctx context.Context,
 					truncated = true
 					break
 				}
-				// The EB wire reference is the transaction's only representation
-				// in this slot. Do not expose outputs from a transaction that the
-				// manifest builder will later drop as unrepresentable.
-				if !validLeiosTransactionReference(mempoolTx) {
+				candidate, err := preparation.next(ctx)
+				if errors.Is(err, errLeiosPreparationExpired) {
+					truncated = true
+					break
+				}
+				if err != nil {
+					return err
+				}
+				if !stillCurrent() {
+					return errTxValidationSnapshotChanged
+				}
+				if limits.expired() {
+					truncated = true
+					break
+				}
+				mempoolTx := candidate.mempool
+				if candidate.err != nil ||
+					basis.closure.applies(mempoolTx.Hash) {
 					continue
 				}
-				if basis.closure.applies(mempoolTx.Hash) {
-					continue
-				}
-				// The manifest references the block_transaction bytes,
-				// so those are what the capacity is measured in, and a
-				// transaction that cannot take that form is never
-				// referenced.
-				blockTx, err := leiosBlockTransactionCbor(mempoolTx.Cbor)
-				if err != nil || !validLeiosTransactionSize(len(blockTx)) {
-					continue
-				}
-				tx, err := decodeMempoolTx(mempoolTx)
-				if err != nil ||
-					validate(tx, consumed, created, accounts) != nil {
+				tx, blockTx := candidate.tx, candidate.blockTx
+				if validate(tx, consumed, created, accounts) != nil {
 					continue
 				}
 				measure, err := leiosEBTxMeasure(
@@ -4901,6 +4926,8 @@ func selectValidLeiosTransactions(ctx context.Context,
 // closure that ranking block applies. The zero value is an unpinned pass over
 // the current ledger state with no closure.
 type leiosSelectionBasis struct {
+	slot    uint64
+	receipt *LeiosValidationReceipt
 	// parentHash, when non-empty, is the hash the validation session's
 	// ledger tip must equal.
 	parentHash []byte
