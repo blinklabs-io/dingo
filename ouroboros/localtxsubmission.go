@@ -150,9 +150,20 @@ type unrepresentableTxSubmissionError struct {
 	err error
 }
 
+type submittedEraError interface {
+	SubmissionEra() uint
+}
+
 func localTxSubmissionRejectReason(eraId uint16, err error) error {
 	if isLocalTxSubmissionInfrastructureError(err) {
 		return errors.New("local transaction submission unavailable")
+	}
+	var submittedEra submittedEraError
+	if errors.As(err, &submittedEra) {
+		translatedEra := submittedEra.SubmissionEra()
+		if translatedEra <= uint(^uint16(0)) {
+			eraId = uint16(translatedEra) // #nosec G115 -- range checked above
+		}
 	}
 	return newLocalTxSubmissionRejectReason(eraId, err)
 }

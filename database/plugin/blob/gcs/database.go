@@ -71,8 +71,7 @@ func readBlobObjectWithLimit(r io.Reader, maxBytes int64) ([]byte, error) {
 	}
 	if int64(len(data)) > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	return data, nil
@@ -279,8 +278,7 @@ func (d *BlobStoreGCS) readObjectLimited(
 	defer r.Close()
 	if r.Attrs.Size > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	return readBlobObjectWithLimit(r, maxBytes)
@@ -396,8 +394,7 @@ func (d *BlobStoreGCS) resolveKeyLimited(
 		}
 		if int64(len(change.value)) > maxBytes {
 			return nil, fmt.Errorf(
-				"blob object exceeds maximum size of %d bytes",
-				maxBytes,
+				"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 			)
 		}
 		value := append([]byte{}, change.value...)
@@ -626,7 +623,8 @@ func (it *gcsStreamIterator) advance() {
 			it.valid = false
 			return
 		}
-		if it.store.isNamespacedObject(objAttrs.Name) {
+		if it.store.isNamespacedObject(objAttrs.Name) ||
+			it.store.isImmutableObject(objAttrs.Name) {
 			continue
 		}
 		key, err := it.store.externalKey(objAttrs.Name)
@@ -1310,7 +1308,8 @@ func (d *BlobStoreGCS) listKeysToFile(
 		if err != nil {
 			return nil, cleanup(err)
 		}
-		if d.isNamespacedObject(objAttrs.Name) {
+		if d.isNamespacedObject(objAttrs.Name) ||
+			d.isImmutableObject(objAttrs.Name) {
 			continue
 		}
 

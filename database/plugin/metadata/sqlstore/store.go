@@ -49,7 +49,7 @@ type Config struct {
 	// Zero retains the dialect's parameter bound; the maximum is 2047 rows.
 	SQLiteOverlayInsertRows int
 	// LazyHotStatements defers preparing the hot-statement cache from Start
-	// to the first use of each statement on the write pool. It is off by
+	// to the first use on the write pool or in each transaction. It is off by
 	// default and exists for test stores, which open many short-lived stores;
 	// a production Store keeps eager preparation. See borrowStmt.
 	LazyHotStatements bool
@@ -320,8 +320,9 @@ type Store struct {
 	// txStmtMu and txStmts back the per-transaction Tx-scoped statement
 	// cache; see prepared_stmt.go's txScopedStmt/evictTxStmts for the
 	// mechanism and correctness argument.
-	txStmtMu sync.Mutex
-	txStmts  map[*sql.Tx]map[*sql.Stmt]*sql.Stmt
+	txStmtMu    sync.Mutex
+	txStmts     map[*sql.Tx]map[*sql.Stmt]*sql.Stmt
+	lazyTxStmts map[*sql.Tx]map[string]*sql.Stmt
 }
 
 // New constructs a shared store around already-opened connection pools.

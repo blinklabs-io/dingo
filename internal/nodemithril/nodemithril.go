@@ -62,28 +62,12 @@ type source struct {
 }
 
 // New is a dingo.MithrilCatchUpFactory. It returns nil when mithril.enabled
-// is false or the node does not run in core storage mode, and an error when
-// the node cannot verify Mithril data: no Cardano network config, no Mithril
-// genesis verification key, no Byron genesis to size immutable files by, or a
-// network with no known name.
+// is false, and an error when the node cannot verify Mithril data: no Cardano
+// network config, no Mithril genesis verification key, no Byron genesis to
+// size immutable files by, or a network with no known name.
 func New(p dingo.MithrilCatchUpParams) (dingo.MithrilCatchUp, error) {
 	mode := mithril.SelectMode(p.Mithril.Enabled, p.HistoryExpiry)
 	if mode == mithril.ModeManual {
-		return nil, nil
-	}
-	// Config validation refuses mithril.enabled with API storage, but dev
-	// mode switches to API storage after it, so the effective mode decides.
-	if p.StorageMode != dingo.StorageModeCore {
-		logger := p.Logger
-		if logger == nil {
-			logger = slog.Default()
-		}
-		logger.Warn(
-			"mithril: node-managed catch-up needs core storage, "+
-				"syncing from Ouroboros only",
-			"component", "mithril",
-			"storage_mode", string(p.StorageMode),
-		)
 		return nil, nil
 	}
 	if p.CardanoNodeConfig == nil {

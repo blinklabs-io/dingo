@@ -15,27 +15,62 @@
 package ledger
 
 import (
-	"errors"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
 
-func TestValidateTxRejectsPreviousEra(t *testing.T) {
+func testBabbageSubmission(t *testing.T) gledger.Transaction {
+	t.Helper()
+	raw, err := cbor.Encode([]any{
+		map[uint]any{
+			0: []any{},
+			1: []any{},
+			2: uint64(0),
+		},
+		map[uint]any{},
+		true,
+		nil,
+	})
+	require.NoError(t, err)
+	tx, err := babbage.NewBabbageTransactionFromCbor(raw)
+	require.NoError(t, err)
+	return tx
+}
+
+func testMarySubmission(t *testing.T) gledger.Transaction {
+	t.Helper()
+	raw, err := cbor.Encode([]any{
+		map[uint]any{
+			0: []any{},
+			1: []any{},
+			2: uint64(0),
+		},
+		map[uint]any{},
+		nil,
+	})
+	require.NoError(t, err)
+	tx, err := mary.NewMaryTransactionFromCbor(raw)
+	require.NoError(t, err)
+	return tx
+}
+
+func TestTranslateSubmittedTxToCurrentEra(t *testing.T) {
 	t.Parallel()
 
-	previous := eraDesc(t, eras.Eras, babbage.EraIdBabbage)
 	current := eraDesc(t, eras.Eras, conway.EraIdConway)
-	previous.ValidateTxFunc = nil
 	current.ValidateTxFunc = nil
+	current.EvaluateTxFunc = nil
 	ls := &LedgerState{
-		activeEras: []eras.EraDesc{previous, current},
+		activeEras: eras.Eras,
 		currentEra: current,
 		slotClock: NewSlotClock(
 			newMockSlotTimeProvider(time.Now(), time.Second, 100),
@@ -44,25 +79,22 @@ func TestValidateTxRejectsPreviousEra(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	currentTx := mockledger.NewTransactionBuilder().
-		WithType(int(conway.EraIdConway))
-	require.NoError(t, ls.ValidateTx(currentTx), "current-era transaction")
-
-	previousTx := mockledger.NewTransactionBuilder().
-		WithType(int(babbage.EraIdBabbage))
-	err := ls.ValidateTx(previousTx)
-	var mismatch *gledger.EraMismatch
-	if !errors.As(err, &mismatch) {
-		t.Fatalf(
-			"previous-era submission must return a typed era mismatch; got %v",
-			err,
-		)
+	for _, submitted := range []gledger.Transaction{
+		testBabbageSubmission(t),
+		testMarySubmission(t),
+	} {
+		translated, err := ls.TranslateSubmittedTx(submitted)
+		require.NoError(t, err)
+		require.Equal(t, conway.EraIdConway, translated.Type())
+		require.Equal(t, submitted.Hash(), translated.Hash())
+		require.IsType(t, &conway.ConwayTransaction{}, translated)
+		require.NoError(t, ls.ValidateTx(submitted))
+		_, _, _, err = ls.EvaluateTx(submitted)
+		require.NoError(t, err)
 	}
-	require.Equal(t, "Babbage", mismatch.OtherEra.Name)
-	require.Equal(t, "Conway", mismatch.LedgerEra.Name)
 }
 
-func TestEvaluateTxRejectsPreviousEra(t *testing.T) {
+func TestTranslateSubmittedTxRejectsUnsupportedEra(t *testing.T) {
 	t.Parallel()
 
 	previous := eraDesc(t, eras.Eras, babbage.EraIdBabbage)
@@ -79,16 +111,34 @@ func TestEvaluateTxRejectsPreviousEra(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	currentTx := mockledger.NewTransactionBuilder().
-		WithType(int(conway.EraIdConway))
-	_, _, _, err := ls.EvaluateTx(currentTx)
-	require.NoError(t, err, "current-era transaction")
-
-	previousTx := mockledger.NewTransactionBuilder().
-		WithType(int(babbage.EraIdBabbage))
-	_, _, _, err = ls.EvaluateTx(previousTx)
+	byronTx := mockledger.NewTransactionBuilder().WithType(0)
+	_, err := ls.TranslateSubmittedTx(byronTx)
 	var mismatch *gledger.EraMismatch
 	require.ErrorAs(t, err, &mismatch)
-	require.Equal(t, "Babbage", mismatch.OtherEra.Name)
+	require.Equal(t, "Byron", mismatch.OtherEra.Name)
 	require.Equal(t, "Conway", mismatch.LedgerEra.Name)
+}
+
+func TestTranslateSubmittedTxReportsConversionFailure(t *testing.T) {
+	t.Parallel()
+
+	current := eraDesc(t, eras.Eras, conway.EraIdConway)
+	ls := &LedgerState{
+		activeEras: []eras.EraDesc{
+			eraDesc(t, eras.Eras, babbage.EraIdBabbage),
+			current,
+		},
+		currentEra: current,
+	}
+	ls.publishSnapshotsLocked()
+
+	malformed := mockledger.NewTransactionBuilder().
+		WithType(int(babbage.EraIdBabbage))
+	_, err := ls.TranslateSubmittedTx(malformed)
+	require.Error(t, err)
+	var mismatch *gledger.EraMismatch
+	require.NotErrorAs(t, err, &mismatch)
+	var submittedEra interface{ SubmissionEra() uint }
+	require.ErrorAs(t, err, &submittedEra)
+	require.Equal(t, uint(conway.EraIdConway), submittedEra.SubmissionEra())
 }

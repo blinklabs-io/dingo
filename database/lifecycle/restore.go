@@ -28,16 +28,17 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/leiosdb"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
-	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -1602,6 +1603,9 @@ func resetBlobStore(
 		return fmt.Errorf("blob plugin %q does not support reset", manifest.BlobPlugin)
 	}
 	resetErr := resettable.Reset(ctx)
+	if objects, ok := store.(blob.ImmutableObjects); ok {
+		resetErr = errors.Join(resetErr, objects.ResetImmutableFiles(ctx))
+	}
 	stopErr := stopBlobCapabilityUncancelable(ctx, host)
 	if resetErr != nil {
 		return fmt.Errorf("reset blob plugin %q: %w", manifest.BlobPlugin, resetErr)
@@ -2092,6 +2096,24 @@ func restoreBlobStore(
 			manifest.BlobPlugin,
 		)
 	}
+	var immutableObjects blob.ImmutableObjects
+	if objects, ok := store.(blob.ImmutableObjects); ok {
+		immutableObjects = objects
+		files, err := objects.ListImmutableFiles(ctx)
+		if err != nil {
+			_ = stopBlobCapabilityUncancelable(ctx, host)
+			return fmt.Errorf(
+				"list ImmutableDB objects before restore: %w",
+				err,
+			)
+		}
+		if len(files) != 0 && !replacePopulated {
+			_ = stopBlobCapabilityUncancelable(ctx, host)
+			return errors.New(
+				"ImmutableDB object store is populated; replacing it requires an explicit restore",
+			)
+		}
+	}
 	if replacePopulated {
 		resettable, ok := store.(blob.Resettable)
 		if !ok {
@@ -2106,6 +2128,14 @@ func restoreBlobStore(
 			return fmt.Errorf(
 				"reset blob plugin %q before restore: %w",
 				manifest.BlobPlugin, err,
+			)
+		}
+	}
+	if replacePopulated && immutableObjects != nil {
+		if err := immutableObjects.ResetImmutableFiles(ctx); err != nil {
+			_ = stopBlobCapabilityUncancelable(ctx, host)
+			return fmt.Errorf(
+				"reset ImmutableDB objects before restore: %w", err,
 			)
 		}
 	}
@@ -2296,13 +2326,29 @@ func validateRestoredDatabase(
 			return err
 		}
 	}
+	immutableProvider := immplugin.ProviderNameForBlob(manifest.BlobPlugin)
+	var immutableObjects blob.ImmutableObjects
+	if immutableProvider == immplugin.S3ProviderName ||
+		immutableProvider == immplugin.GCSProviderName {
+		var ok bool
+		immutableObjects, ok = blobStore.(blob.ImmutableObjects)
+		if !ok {
+			return fmt.Errorf(
+				"blob provider %q does not expose ImmutableDB file operations",
+				manifest.BlobPlugin,
+			)
+		}
+	}
 	immutableStore, err := plugin.Resolve[immplugin.ImmutableDB](
 		ctx,
 		host,
 		plugin.CapabilityStorageImmutable,
-		chunkfile.ProviderName,
+		immutableProvider,
 		nil,
-		immplugin.ProviderDependencies{DataDir: targetDataDir},
+		immplugin.ProviderDependencies{
+			DataDir:     targetDataDir,
+			ObjectFiles: immutableObjects,
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("resolve immutable plugin for validation: %w", err)
@@ -2310,6 +2356,32 @@ func validateRestoredDatabase(
 	defer host.StopCapability( //nolint:errcheck
 		context.WithoutCancel(ctx), plugin.CapabilityStorageImmutable,
 	)
+	localFiles, err := immutable.ListFiles(filepath.Join(
+		targetDataDir, immplugin.DirName,
+	))
+	if err != nil {
+		return fmt.Errorf("list staged restored ImmutableDB files: %w", err)
+	}
+	chunks := make(map[uint64]struct{})
+	for _, file := range localFiles {
+		chunks[file.Chunk] = struct{}{}
+	}
+	if publisher, ok := immutableStore.(immplugin.ChunkPublisher); ok {
+		chunkNumbers := make([]uint64, 0, len(chunks))
+		for chunk := range chunks {
+			chunkNumbers = append(chunkNumbers, chunk)
+		}
+		slices.Sort(chunkNumbers)
+		for _, chunk := range chunkNumbers {
+			if err := publisher.PublishChunk(chunk); err != nil {
+				return fmt.Errorf(
+					"publish restored ImmutableDB chunk %d: %w",
+					chunk,
+					err,
+				)
+			}
+		}
+	}
 	db, err := database.New(ctx, &database.Config{
 		DataDir:                   targetDataDir,
 		StorageMode:               manifest.StorageMode,
@@ -2327,6 +2399,9 @@ func validateRestoredDatabase(
 		return fmt.Errorf(
 			"open restored database for validation: %w", err,
 		)
+	}
+	if err := db.ReconcileImmutable(); err != nil {
+		return fmt.Errorf("reconcile restored ImmutableDB: %w", err)
 	}
 	tip, err := db.GetTip(nil)
 	if err != nil {

@@ -1624,12 +1624,16 @@ occupancy. An error without a supported era-specific representation terminates
 the connection through the protocol error path instead of fabricating a ledger
 failure. Clients must reconnect after that termination.
 
-Transaction admission and standalone evaluation accept only the ledger's
-current era. A transaction tagged with any other era is rejected with the
-hard-fork combinator's typed era-mismatch error before era-specific validation.
-Block application is different: a historical block from the era immediately
-before the ledger's current era remains valid across a hard-fork boundary and
-is checked with that block era's validator and protocol parameters.
+Transaction admission and standalone evaluation inject a historical
+Shelley-family transaction through each supported era transition into the
+ledger's current era before era-specific validation. Admission retains that
+current-era representation, so forging and transaction relay consume the same
+transaction that validation accepted. Byron has no injection into Shelley;
+Byron, future-era, and unknown-era submissions retain the hard-fork
+combinator's typed era-mismatch error, while a failed supported conversion is
+reported as a conversion failure. Block application is different: a
+historical block from the era immediately before the ledger's current era is
+checked with that block era's validator and protocol parameters.
 
 LocalTxSubmission validation runs under a context that is cancelled when the
 bearer closes. The listener starts an NtC connection's protocols before it
@@ -2106,8 +2110,23 @@ Stage spans, all in the block's trace: `block.header_received` (one per
 delivering peer), `block.header_validated`, `block.body_received`,
 `block.apply`, `block.commit` (one per sampled block of a committed batch,
 spanning the batch's commit), `block.rolled_back`, and on a producer
-`block.forge`. Until the ledger first reaches the upstream tip only the core
-stages (apply, commit, rollback, forge) are recorded, so a sync from genesis
+`block.forge`. A successful production forge records child spans for leader
+checks, pre-build preparation, Leios parent/closure preparation, endorser-block
+mempool snapshot/selection/build/broadcast, ranking-block construction,
+self-validation, announcement validation, and adoption. Endorser-block selection
+also records candidate/selected counts and whether its deadline truncated the
+selection. Timings are captured on the forging goroutine through adoption,
+when the block hash and its sampling decision are known. The root ends before
+the publication observer starts. Its delivery depends on the exporter's
+schedule. Child phases are processed after publication to avoid delaying
+diffusion. No per-transaction
+spans are added. The pre-build and endorser spans contain their
+nested stages, so their durations must not be added to those children.
+`block.forge.publish` is a separate sibling for post-adoption event publication
+and diffusion enqueueing; it does not change the forge span's adoption boundary
+or measure a peer receiving the block. Unadopted attempts retain their timing
+logs but have no block-derived forge trace. Until the ledger first reaches
+the upstream tip only the core stages (apply, commit, rollback, forge) are recorded, so a sync from genesis
 produces a reduced span set. A transaction's mempool admission records
 `tx.mempool_add` in a trace derived the same way from the transaction hash.
 
@@ -2316,12 +2335,14 @@ When `Node.Run()` is called, components are initialized in this order:
     transaction — and captures a point-in-time database snapshot
     (`database/lifecycle.Snapshot`) at epoch boundaries when
     `databaseLifecycle.snapshotEnabled` is configured.
-    Planner statistics manager (`internal/plannerstats.Manager`): the startup
-    `PRAGMA optimize` pass runs after any commit-timestamp recovery and before
-    the ledger starts processing blocks, to populate statistics before the first
-    block batch; a failed pass is logged and the node continues with the
-    statistics it had. A live restore or truncate runs the pass again on the
-    replacement database. The manager is then started and subscribes to
+    Planner statistics manager (`internal/plannerstats.Manager`): for core
+    storage, the startup `PRAGMA optimize` pass runs after any commit-timestamp
+    recovery and before the ledger starts processing blocks, to populate
+    statistics before the first block batch. Shared API storage starts its API
+    listeners first, then runs the startup pass on the manager worker so a
+    long refresh does not delay availability. A failed pass is logged and the
+    node continues with the statistics it had. A live restore or truncate runs
+    the pass again on the replacement database. The manager subscribes to
     `epoch.transition` (a post-Byron event without an epoch nonce, the slot
     clock's duplicate, is ignored; Byron rollovers carry no nonce and still
     trigger a run). Its worker also runs the pass every
@@ -2376,14 +2397,14 @@ arrive before the rebuild, their older transactions are placed ahead of the
 already queued restores. Revalidation therefore sees transactions in ledger
 order.
 
-`Mempool.AddTransaction` refuses a submission larger than the `MaxTxSize`
-ledger validation would apply to it before constructing the ledger transaction,
-taking `mutationMutex`, or running ledger rules. A limit is reported only for the
-current era; a wrong-era transaction reaches ledger validation so its typed
-era-mismatch error takes precedence over a size error. No limit is reported
-for an era whose validation is skipped or parameters that are not the type its
-validation requires. From Alonzo through Conway, the ledger's fee and maximum
-size rules measure a canonical three-element transaction envelope while
+`Mempool.AddTransaction` refuses a current-era submission larger than the
+`MaxTxSize` ledger validation would apply before constructing the ledger
+transaction, taking `mutationMutex`, or running ledger rules. A historical
+Shelley-family submission is decoded and injected first, then checked against
+the current-era limit before it can reach the mutation gate. No limit is
+reported for an era whose validation is skipped or parameters that are not the
+type its validation requires. From Alonzo through Conway, the ledger's fee and
+maximum size rules measure a canonical three-element transaction envelope while
 preserving the exact received body, witness-set and auxiliary-data bytes; the
 third element of a four-element envelope is the IsValid field and is omitted.
 Dijkstra keeps the same canonical three-component measure for its current
@@ -4467,14 +4488,26 @@ chunk files, and Badger keeps a marker per promoted block.
   epoch boundary block at its chunk's first relative slot.
 - The ImmutableDB is the `storage.immutable` plugin capability. Its contract
   is `database/plugin/immutable.ImmutableDB` (`Dir`, `Open`, `ReadBlockAt`,
-  `ListFiles`) with a `Store` writer (append, sync, tip, read by location,
-  point lookup, truncate). The built-in `chunkfile` provider
-  (`database/plugin/immutable/chunkfile`) wraps `database/immutable.Store`,
-  is registered by `internal/plugins.NewHost` in every build, and is resolved
-  by `plugins.ResolveStorage` with no selector. `database.Stores.Immutable`
-  carries it into `database.New`, which opens the chunk writer, reads markers
-  and lists snapshot files only through it; a database without an ImmutableDB
-  needs none. The provider is a durable-close plugin: host shutdown closes a
+  `ListFiles`, `ReadFile`) with a `Store`
+  writer (append, sync, tip, read by location, point lookup, truncate). The
+  built-in `chunkfile` provider (`database/plugin/immutable/chunkfile`)
+  wraps `database/immutable.Store` and is registered in every build. Builds
+  with `dingo_extra_plugins` also register S3 and GCS providers; the immutable
+  selection follows the matching configured blob provider and reuses its
+  released object-store settings. Remote objects are authoritative, with only
+  the writable tail staged locally; completed trios publish chunk, secondary,
+  then primary. An interrupted new chunk without a committed primary entry
+  is removed before reopening its preceding durable tail. A rollback checks
+  that the published chunk holds its point before deleting any later chunk,
+  and the writer reads its staged chunks locally. Chunk adoption verifies a
+  staged trio before publishing it (`ChunkPublisher`) and retracts one that
+  fails before the recorded tip covers it (`ChunkUnpublisher`). Snapshots link
+  local chunk files and stream remote ones through the provider; blob-key
+  backups exclude reserved immutable objects. `database.Stores.Immutable`
+  carries the selected provider into `database.New`, which opens the writer,
+  reads markers and lists snapshot files through it; a database without an
+  ImmutableDB needs none. The provider is a durable-close plugin: host
+  shutdown closes a
   writer its holder left open to completion, and a later `Open` is refused.
   `Database.Close` and the failed-step reset still close the writer first.
 - `database` installs an `immutableBlobStore` over the blob store whenever the
@@ -4521,7 +4554,11 @@ fallback:
   consistent combination of them -- to a `(slot, hash)` point, maps that to the
   blob store's `GetBlockURL`, and returns a signed object URL plus compact
   block metadata. A reference the node does not hold comes back under
-  `not_found` without discarding the rest of the batch.
+  `not_found` without discarding the rest of the batch. A node that also
+  enables the ImmutableDB on `s3` or `gcs` cannot back the archive for
+  promoted history: a promoted block's object holds its marker, so
+  `GetBlockURL` returns `ErrImmutableBlockNotSignable` instead of a URL, and
+  only blocks not yet promoted can be signed.
 - A node with `historyExpiry.enabled` keeps its local blob plugin and starts
   `internal/historyexpiry.Pruner`. The worker derives its safety window from
   `LedgerState.StabilityWindow()` and scans only blocks older than that window,
@@ -15961,10 +15998,11 @@ database Mithril never bootstrapped is flagged stream-only so
 
 ### Node-managed Mithril
 
-With `mithril.enabled: true` (core storage only), `dingo serve` uses Mithril
-itself while it is behind the aggregator's certified immutable tip, and
-Ouroboros otherwise. `mithril.enabled: false`, the default, leaves `serve`
-exactly as before: no coordinator starts and no aggregator is contacted.
+With `mithril.enabled: true`, `dingo serve` uses Mithril itself while it is
+behind the aggregator's certified immutable tip, and Ouroboros otherwise, in
+both core and API storage modes. `mithril.enabled: false`, the default, leaves
+`serve` exactly as before: no coordinator starts and no aggregator is
+contacted.
 
 - **Modes.** `mithril.SelectMode(enabled, historyExpiry.enabled)` gives
   `ModeManual` (disabled: `dingo mithril sync` only), `ModeStream` (history
@@ -15979,9 +16017,7 @@ exactly as before: no coordinator starts and no aggregator is contacted.
   `internal/nodemithril` implements on `mithril` and `cmd/dingo serve` passes
   in with `dingo.WithMithrilCatchUp(nodemithril.New)` through the options
   `internal/node.Run` now accepts. `nodemithril.New` returns nil in manual
-  mode and, with a warning, when the node's effective storage mode is not
-  core (dev mode switches to API storage after config validation), and an
-  error (logged; the node stays on Ouroboros) when Mithril data
+  mode and an error (logged; the node stays on Ouroboros) when Mithril data
   cannot be verified: no Mithril genesis verification key, no Byron genesis,
   or no network name.
 - **Coordinator lifecycle.** The coordinator starts last in `Run`, after
