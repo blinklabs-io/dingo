@@ -58,10 +58,14 @@ func New(cfg Config, node KupoNode, logger *slog.Logger) *Server {
 	}
 	logger = logger.With("component", "kupo")
 	return &Server{
-		config:               cfg,
-		logger:               logger,
-		node:                 node,
-		listener:             apilistener.New("Kupo API", logger),
+		config: cfg,
+		logger: logger,
+		node:   node,
+		listener: apilistener.NewWithListenerFactory(
+			"Kupo API",
+			logger,
+			cfg.Listen,
+		),
 		responseWriteTimeout: responseWriteTimeout,
 	}
 }

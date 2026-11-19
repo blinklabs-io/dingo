@@ -64,12 +64,33 @@ type parityNode struct {
 	stop func()
 }
 
-func parityPort(t *testing.T) uint {
+func parityListeners(t *testing.T) (
+	map[string]uint,
+	func(string, string) (net.Listener, error),
+) {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer l.Close()
-	return uint(l.Addr().(*net.TCPAddr).Port) // #nosec G115 -- a TCP port
+	ports := make(map[string]uint)
+	listeners := make(map[string]net.Listener)
+	for _, name := range []string{"blockfrost", "mesh", "utxorpc", "kupo"} {
+		listener, port := reservedTCPListener(t, "127.0.0.1")
+		ports[name] = port
+		listeners[listener.Addr().String()] = listener
+	}
+	var mu sync.Mutex
+	return ports, func(network, address string) (net.Listener, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		listener, ok := listeners[address]
+		if network != "tcp" || !ok {
+			return nil, fmt.Errorf(
+				"no reserved parity listener for %s %s",
+				network,
+				address,
+			)
+		}
+		delete(listeners, address)
+		return listener, nil
+	}
 }
 
 // loadParityChain loads the same real preview blocks into a data directory
@@ -103,10 +124,11 @@ func startParityNode(
 ) parityNode {
 	t.Helper()
 	pn := parityNode{name: name}
-	blockfrostPort := parityPort(t)
-	meshPort := parityPort(t)
-	utxorpcPort := parityPort(t)
-	kupoPort := parityPort(t)
+	ports, listen := parityListeners(t)
+	blockfrostPort := ports["blockfrost"]
+	meshPort := ports["mesh"]
+	utxorpcPort := ports["utxorpc"]
+	kupoPort := ports["kupo"]
 	base := func(port uint) string {
 		return "http://127.0.0.1:" + strconv.FormatUint(uint64(port), 10)
 	}
@@ -116,6 +138,7 @@ func startParityNode(
 	pn.kupo = base(kupoPort)
 
 	opts := []dingo.ConfigOptionFunc{
+		dingo.WithAPIListenerFactory(listen),
 		dingo.WithDatabasePath(dir),
 		dingo.WithCardanoNodeConfig(cardanoCfg),
 		dingo.WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
@@ -773,7 +796,11 @@ func anyAccountHasRewards(
 	t.Helper()
 	for _, stake := range stakes {
 		var rewards []json.RawMessage
-		if p.getJSON(t, "/api/v0/accounts/"+stake+"/rewards?count=1", &rewards) &&
+		if p.getJSON(
+			t,
+			"/api/v0/accounts/"+stake+"/rewards?count=1",
+			&rewards,
+		) &&
 			len(rewards) > 0 {
 			return true
 		}
@@ -1042,4 +1069,33 @@ func allPages(t *testing.T, target string) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+func TestParityListenersKeepPortsReservedUntilHandoff(t *testing.T) {
+	t.Parallel()
+	ports, listen := parityListeners(t)
+	for name, port := range ports {
+		t.Run(name, func(t *testing.T) {
+			address := net.JoinHostPort(
+				"127.0.0.1",
+				strconv.FormatUint(uint64(port), 10),
+			)
+			intruder, err := net.Listen("tcp", address)
+			if intruder != nil {
+				_ = intruder.Close()
+			}
+			if err == nil {
+				t.Fatal("API socket was released before handoff")
+			}
+			listener, err := listen("tcp", address)
+			require.NoError(t, err)
+			require.Equal(t, address, listener.Addr().String())
+			_, err = listen("tcp", address)
+			require.Error(t, err, "the same socket cannot be transferred twice")
+			require.NoError(t, listener.Close())
+			replacement, err := net.Listen("tcp", address)
+			require.NoError(t, err)
+			require.NoError(t, replacement.Close())
+		})
+	}
 }

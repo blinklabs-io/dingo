@@ -935,3 +935,39 @@ func TestWatchOnAReplacedServerExitsImmediately(t *testing.T) {
 	)
 	require.Same(t, replacement, l.Server())
 }
+
+func TestBindUsesReservedListenerAndReleasesItOnStop(t *testing.T) {
+	t.Parallel()
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reserved.Close() })
+	address := reserved.Addr().String()
+	l := NewWithListenerFactory("Reserved API", nil,
+		func(network, addr string) (net.Listener, error) {
+			require.Equal(t, "tcp", network)
+			require.Equal(t, address, addr)
+			return reserved, nil
+		})
+	srv, bindDone, err := publish(l, address)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, stopNow(t, l)) })
+	served, err := l.Bind(srv, bindDone, apiconfig.EffectiveTLS{})
+	if err != nil {
+		t.Fatalf("reserved socket handoff must not rebind: %v", err)
+	}
+	require.True(t, served)
+	req, err := http.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		"http://"+address,
+		nil,
+	)
+	require.NoError(t, err)
+	response, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.NoError(t, l.Stop(t.Context(), Graceful))
+	replacement, err := net.Listen("tcp", address)
+	require.NoError(t, err, "Stop must release the transferred socket")
+	require.NoError(t, replacement.Close())
+}

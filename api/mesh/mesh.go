@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
@@ -58,6 +59,9 @@ const (
 
 // ServerConfig holds configuration for the Mesh API server.
 type ServerConfig struct {
+	// Listen acquires the listening socket. Nil uses net.Listen.
+	// Successful calls transfer ownership to the server.
+	Listen      func(string, string) (net.Listener, error)
 	Logger      *slog.Logger
 	LedgerState MeshLedgerState
 	Database    MeshDatabase
@@ -180,7 +184,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		networkID:     networkID,
 		genesisID:     genesisID,
 		addrNetworkID: addrNetID,
-		listener:      apilistener.New("Mesh API", logger),
+		listener: apilistener.NewWithListenerFactory(
+			"Mesh API",
+			logger,
+			cfg.Listen,
+		),
 	}, nil
 }
 

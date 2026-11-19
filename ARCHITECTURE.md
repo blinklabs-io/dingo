@@ -75,6 +75,15 @@ that effective configuration early; each provider also resolves it during
 construction. TLS remains optional. See External Interfaces for precedence
 and shared bind settings.
 
+Programmatic composition can supply `WithAPIListenerFactory` to transfer already
+bound sockets to the built-in Blockfrost, Kupo, Mesh and UTxO RPC servers. The
+factory receives the configured network and address on each start; a successful
+return transfers socket ownership to the server's normal shutdown lifecycle.
+The caller closes reservations that startup never consumes. With no factory,
+the servers acquire sockets through `net.Listen`. The API parity fixture keeps
+its ephemeral sockets bound until this handoff, so concurrent listeners cannot
+claim their ports between allocation and server startup.
+
 Command and bootstrap composition that opens a standalone database uses
 `internal/plugins.OpenDatabase`. Its return contract keeps ownership
 unambiguous: a non-nil error never accompanies a live runtime, while a
