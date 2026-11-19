@@ -34,6 +34,8 @@ type ProviderConfig struct {
 
 // ProviderDependencies are supplied by node composition.
 type ProviderDependencies struct {
+	// Listen transfers a socket to the server. Nil uses net.Listen.
+	Listen             func(string, string) (net.Listener, error)
 	Node               KupoNode
 	Logger             *slog.Logger
 	Host               string
@@ -63,6 +65,7 @@ func RegisterProvider(host *plugin.Host) error {
 				return nil, nil, fmt.Errorf("kupo: %w", err)
 			}
 			server := New(Config{
+				Listen: deps.Listen,
 				ListenAddress: net.JoinHostPort(
 					deps.Host,
 					strconv.FormatUint(uint64(cfg.Port), 10),

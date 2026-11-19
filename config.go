@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"runtime"
 	"slices"
@@ -208,6 +209,8 @@ type MidnightConfig struct {
 }
 
 type Config struct {
+	apiListenerFactory func(string, string) (net.Listener, error)
+
 	// cfg holds the internal configuration that was parsed from YAML/env/CLI.
 	// This is the single source of truth for all configuration fields.
 	cfg *internalconfig.Config
@@ -2630,6 +2633,16 @@ func WithChainsyncHeaderStrategy(
 	return func(c *Config) {
 		c.cfg.Chainsync.Strategy = strategy.String()
 	}
+}
+
+// WithAPIListenerFactory supplies sockets to the built-in Blockfrost, Kupo,
+// Mesh and UTxO RPC servers. Nil uses net.Listen. Each successful call transfers
+// ownership to the server; the caller retains ownership of unused reservations.
+// The factory must support every API start, including restarts.
+func WithAPIListenerFactory(
+	listen func(string, string) (net.Listener, error),
+) ConfigOptionFunc {
+	return func(c *Config) { c.apiListenerFactory = listen }
 }
 
 // WithMeshPort specifies the port for the Mesh (Coinbase
