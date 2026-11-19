@@ -3775,6 +3775,13 @@ type IncrementalPlannerStatsUpdater interface {
 	) (types.PlannerStatsResult, error)
 }
 
+// PlannerStatsPresenceChecker is an optional interface for metadata stores
+// that can report whether planner statistics have ever been collected. A
+// backend without a stored statistics catalog reports false.
+type PlannerStatsPresenceChecker interface {
+	HasPlannerStats(ctx context.Context) (bool, error)
+}
+
 // PlannerStatsBackfillSyncKey records the completed backfill whose planner
 // statistics were refreshed after rebuilding critical indexes.
 const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"
