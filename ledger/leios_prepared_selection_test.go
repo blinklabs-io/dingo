@@ -360,7 +360,8 @@ func TestPreparedLeiosSelectionCannotAdmitUnvalidatedBytes(t *testing.T) {
 					}
 					raw[len(raw)-1] ^= 1
 				}
-				return admit(raw)
+				require.ErrorContains(t, admit(raw), "does not match")
+				return nil
 			},
 		)
 		require.ErrorContains(t, err, "does not match")
