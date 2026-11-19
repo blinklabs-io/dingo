@@ -635,3 +635,35 @@ func BenchmarkPlannerStatsResume(b *testing.B) {
 		}
 	})
 }
+
+// A resumed backfill runs the incremental optimizer over statistics collected
+// before the interrupted run, after that run grew the tables. The batched
+// spend lookup must plan as it would after a full ANALYZE of the same data.
+func TestResumedPlannerStatsKeepFullAnalyzeSpendPlan(t *testing.T) {
+	skipPlanTestUnderRace(t)
+	t.Parallel()
+	store := newFilePlannerStatsStore(t, prometheus.NewRegistry())
+	seedPlannerStatsProbeUtxos(t, store)
+	require.NoError(t, store.UpdatePlannerStats())
+	_, err := store.writeDB.Exec(`INSERT INTO utxo (tx_id, output_idx,
+  staking_key, credential_tag, added_slot, deleted_slot, amount)
+SELECT tx_id, output_idx + 4, staking_key, credential_tag,
+  added_slot + 3000, deleted_slot, amount FROM utxo`)
+	require.NoError(t, err)
+
+	has, err := store.HasPlannerStats(t.Context())
+	require.NoError(t, err)
+	require.True(t, has)
+	result, err := store.OptimizePlannerStatsContext(
+		t.Context(), PlannerStatsTriggerStartup,
+	)
+	require.NoError(t, err)
+	require.True(t, result.Supported)
+	require.False(t, result.Skipped)
+	resumed := poolPlans(t, store.writeDB, 1)[0]
+
+	require.NoError(t, store.UpdatePlannerStats())
+	full := poolPlans(t, store.writeDB, 1)[0]
+	require.Contains(t, full, "idx_utxo_tx_id_output_idx")
+	require.Equal(t, full, resumed)
+}
