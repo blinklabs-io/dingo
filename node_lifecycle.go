@@ -1046,6 +1046,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// The connection-event subscriptions registered during Run do not need
 	// re-registering: they are closures over n, so they resolve whichever
 	// instance n.ouroboros currently holds.
+	//nolint:contextcheck // Close bounds its own drain; the restore deadline must not cut it short.
 	if err := n.ouroboros().Close(); err != nil {
 		return fmt.Errorf("failed to close previous ouroboros: %w", err)
 	}
@@ -1066,6 +1067,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// without this the replacement instance would silently lose Leios vote
 	// and pipeline handling. Same call Run makes after its construction.
 	if err := n.attachLeiosHandlers(rebuiltOuroboros); err != nil {
+		//nolint:contextcheck // Close bounds its own drain; see the Close above.
 		closeErr := rebuiltOuroboros.Close()
 		if errors.Is(closeErr, ouroborosPkg.ErrLeiosPersistDrainUnconfirmed) {
 			closeErr = errors.Join(errStorageDrainUnconfirmed, closeErr)
