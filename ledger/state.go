@@ -17909,10 +17909,19 @@ func (ls *LedgerState) validateTxCore(
 	tx lcommon.Transaction,
 	buildLV func(txn ledgerdb.Txn) *LedgerView,
 ) error {
+	snapshot := ls.txValidationSnapshot()
+	translated, err := translateSubmittedTx(
+		tx,
+		snapshot.currentEra,
+		snapshot.eraList,
+	)
+	if err != nil {
+		return err
+	}
+	tx = translated
 	if err := validateTransactionOutputIndexes([]lcommon.Transaction{tx}); err != nil {
 		return fmt.Errorf("validate transaction output indexes: %w", err)
 	}
-	snapshot := ls.txValidationSnapshot()
 
 	validationEra, pp, err := snapshot.validationContext(tx)
 	if err != nil {
@@ -18092,10 +18101,16 @@ func (ls *LedgerState) EvaluateTxContext(
 	snapshotEra := consensusState.currentEra
 	snapshotPParams := consensusState.currentPParams
 
-	validationEra, err := resolveSubmittedValidationEra(
+	translated, err := translateSubmittedTx(
 		tx,
 		snapshotEra,
+		ls.eraList(),
 	)
+	if err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
+	tx = translated
+	validationEra, err := resolveSubmittedValidationEra(tx, snapshotEra)
 	if err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
 	}

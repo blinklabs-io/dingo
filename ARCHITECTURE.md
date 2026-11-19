@@ -1624,12 +1624,16 @@ occupancy. An error without a supported era-specific representation terminates
 the connection through the protocol error path instead of fabricating a ledger
 failure. Clients must reconnect after that termination.
 
-Transaction admission and standalone evaluation accept only the ledger's
-current era. A transaction tagged with any other era is rejected with the
-hard-fork combinator's typed era-mismatch error before era-specific validation.
-Block application is different: a historical block from the era immediately
-before the ledger's current era remains valid across a hard-fork boundary and
-is checked with that block era's validator and protocol parameters.
+Transaction admission and standalone evaluation inject a historical
+Shelley-family transaction through each supported era transition into the
+ledger's current era before era-specific validation. Admission retains that
+current-era representation, so forging and transaction relay consume the same
+transaction that validation accepted. Byron has no injection into Shelley;
+Byron, future-era, and unknown-era submissions retain the hard-fork
+combinator's typed era-mismatch error, while a failed supported conversion is
+reported as a conversion failure. Block application is different: a
+historical block from the era immediately before the ledger's current era is
+checked with that block era's validator and protocol parameters.
 
 LocalTxSubmission validation runs under a context that is cancelled when the
 bearer closes. The listener starts an NtC connection's protocols before it
@@ -2393,14 +2397,14 @@ arrive before the rebuild, their older transactions are placed ahead of the
 already queued restores. Revalidation therefore sees transactions in ledger
 order.
 
-`Mempool.AddTransaction` refuses a submission larger than the `MaxTxSize`
-ledger validation would apply to it before constructing the ledger transaction,
-taking `mutationMutex`, or running ledger rules. A limit is reported only for the
-current era; a wrong-era transaction reaches ledger validation so its typed
-era-mismatch error takes precedence over a size error. No limit is reported
-for an era whose validation is skipped or parameters that are not the type its
-validation requires. From Alonzo through Conway, the ledger's fee and maximum
-size rules measure a canonical three-element transaction envelope while
+`Mempool.AddTransaction` refuses a current-era submission larger than the
+`MaxTxSize` ledger validation would apply before constructing the ledger
+transaction, taking `mutationMutex`, or running ledger rules. A historical
+Shelley-family submission is decoded and injected first, then checked against
+the current-era limit before it can reach the mutation gate. No limit is
+reported for an era whose validation is skipped or parameters that are not the
+type its validation requires. From Alonzo through Conway, the ledger's fee and
+maximum size rules measure a canonical three-element transaction envelope while
 preserving the exact received body, witness-set and auxiliary-data bytes; the
 third element of a four-element envelope is the IsValid field and is omitted.
 Dijkstra keeps the same canonical three-component measure for its current
