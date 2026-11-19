@@ -469,11 +469,11 @@ type KoiosParityConfig struct {
 	CachePath string `yaml:"cachePath"             envconfig:"DINGO_KOIOS_PARITY_CACHE_PATH"`
 	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
 	// uses Koios's unauthenticated rate limit.
-	APIKey string `yaml:"apiKey"                envconfig:"DINGO_KOIOS_PARITY_API_KEY"`
+	APIKey string `yaml:"apiKey"               envconfig:"DINGO_KOIOS_PARITY_API_KEY"`
 	// APIKeyFile names a file holding APIKey, so the token need not appear
 	// in a command line or environment. ResolveSecretFiles reads it into
 	// APIKey; setting both in one configuration source is an error.
-	APIKeyFile string `yaml:"apiKeyFile"            envconfig:"DINGO_KOIOS_PARITY_API_KEY_FILE"`
+	APIKeyFile string `yaml:"apiKeyFile"           envconfig:"DINGO_KOIOS_PARITY_API_KEY_FILE"`
 	// BaseURL overrides the public koios.rest host for the network, for a
 	// self-hosted or mirrored Koios instance. Full v1 API root, e.g.
 	// "https://preview-koios.example.com/api/v1". Empty selects the public
@@ -766,10 +766,10 @@ type DMQConfig struct {
 	N2NPort uint `yaml:"n2nPort"                envconfig:"DINGO_DMQ_N2N_PORT"`
 	// ListenAddress is the IPv4 address the peer listener binds. Empty
 	// disables the IPv4 listener.
-	ListenAddress string `yaml:"listenAddress"          envconfig:"DINGO_DMQ_LISTEN_ADDRESS"`
+	ListenAddress string `yaml:"listenAddress" envconfig:"DINGO_DMQ_LISTEN_ADDRESS"`
 	// ListenIPv6Address is the IPv6 address the peer listener binds. Empty
 	// disables the IPv6 listener.
-	ListenIPv6Address string `yaml:"listenIpv6Address"      envconfig:"DINGO_DMQ_LISTEN_IPV6_ADDRESS"`
+	ListenIPv6Address string `yaml:"listenIpv6Address" envconfig:"DINGO_DMQ_LISTEN_IPV6_ADDRESS"`
 	// TopologyFile is a dmq-node topology file naming the DMQ peers to dial.
 	// It is separate from the Cardano topology.
 	TopologyFile string `yaml:"topologyFile"           envconfig:"DINGO_DMQ_TOPOLOGY_FILE"`
@@ -829,8 +829,8 @@ type Config struct {
 	SocketPath             string    `yaml:"socketPath"                                                                                                      split_words:"true"`
 	SocketMode             string    `yaml:"socketMode"                                                                                                      split_words:"true"`
 	TlsCertFilePath        string    `yaml:"tlsCertFilePath"                              envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr               string    `yaml:"bindAddr"                                                                                                        split_words:"true"`
-	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                                                                 split_words:"true"`
+	BindAddr               string    `yaml:"bindAddr"                                                                                     split_words:"true"`
+	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                                              split_words:"true"`
 	ShutdownTimeout        string    `yaml:"shutdownTimeout"                                                                                                 split_words:"true"`
 	LedgerCatchupTimeout   string    `yaml:"ledgerCatchupTimeout"                         envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
 	Network                string    `yaml:"network"`
@@ -889,15 +889,15 @@ type Config struct {
 	// Prometheus listener. It defaults to loopback independently of
 	// BindAddr; operators must set this field explicitly to expose
 	// metrics on a wildcard or remote-scrape address.
-	MetricsBindAddr string `yaml:"metricsBindAddr"                              envconfig:"DINGO_METRICS_BIND_ADDR"`
+	MetricsBindAddr string `yaml:"metricsBindAddr" envconfig:"DINGO_METRICS_BIND_ADDR"`
 	MetricsPort     uint   `yaml:"metricsPort"                                                                                                     split_words:"true"`
 	// MetricsAuthToken is ignored; metrics requests do not require authentication.
-	MetricsAuthToken string `yaml:"metricsAuthToken"                             envconfig:"DINGO_METRICS_AUTH_TOKEN"`
+	MetricsAuthToken string `yaml:"metricsAuthToken" envconfig:"DINGO_METRICS_AUTH_TOKEN"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
 	// pprof on a wildcard or management-network address.
-	DebugBindAddr string `yaml:"debugBindAddr"                                envconfig:"DINGO_DEBUG_BIND_ADDR"`
+	DebugBindAddr string `yaml:"debugBindAddr"                       envconfig:"DINGO_DEBUG_BIND_ADDR"`
 	DebugPort     uint   `yaml:"debugPort"                                    envconfig:"DINGO_DEBUG_PORT"`
 	// DebugMutexProfileFraction samples on average 1 in N contended mutex
 	// events for the pprof mutex profile. 0 leaves mutex profiling off.
