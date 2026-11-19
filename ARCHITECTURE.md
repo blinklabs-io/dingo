@@ -13845,8 +13845,9 @@ windows of at most 64, using at most eight workers and no more than GOMAXPROCS.
 Each window joins before its decoded transactions reach validation. Preparation
 never accesses the ledger transaction or mutable overlays. The reducer consumes
 results in mempool order and alone performs semantic validation, reference-script
-resolution, capacity admission, and overlay updates. It rechecks the deadline
-and ledger publication after preparation. Selection stops at the first valid
+resolution, capacity admission, and overlay updates. Preparation checks the deadline before claiming each candidate, joins in-flight
+workers on expiry, and discards the unfinished window. Selection also rechecks
+the deadline and ledger publication after preparation. Selection stops at the first valid
 transaction that no longer fits; only the current preparation window can run
 ahead of that boundary. The size bounds
 are not optional: the reference node never fetches the closure of an endorser

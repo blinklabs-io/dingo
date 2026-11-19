@@ -157,6 +157,24 @@ func TestLeiosPreparationRunsIndependentWorkConcurrently(t *testing.T) {
 	}
 }
 
+func TestLeiosPreparationStopsClaimingAtDeadline(t *testing.T) {
+	t.Parallel()
+	txs := preparationCandidates(t, leiosPreparationWindow)
+	p := newLeiosCandidatePreparation(txs, 1)
+	expired := false
+	calls := 0
+	original := p.prepare
+	p.expired = func() bool { return expired }
+	p.prepare = func(tx MempoolTransaction) preparedLeiosCandidate {
+		calls++
+		expired = true
+		return original(tx)
+	}
+	_, err := p.next(t.Context())
+	require.ErrorIs(t, err, errLeiosPreparationExpired)
+	require.Equal(t, 1, calls, "no additional candidate may start after expiry")
+}
+
 func BenchmarkLeiosPreparation(b *testing.B) {
 	txs := preparationCandidates(b, 8854)
 	for _, workers := range []int{1, 2, 4, 8} {

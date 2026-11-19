@@ -4814,6 +4814,7 @@ func selectValidLeiosTransactions(ctx context.Context,
 			created := make(map[utxoref.Key]lcommon.Utxo)
 			accounts := utxoref.NewStateOverlay()
 			preparation := newLeiosCandidatePreparation(txs, 0)
+			preparation.expired = limits.expired
 			for range txs {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -4837,6 +4838,10 @@ func selectValidLeiosTransactions(ctx context.Context,
 					break
 				}
 				candidate, err := preparation.next(ctx)
+				if errors.Is(err, errLeiosPreparationExpired) {
+					truncated = true
+					break
+				}
 				if err != nil {
 					return err
 				}

@@ -26,6 +26,10 @@ import (
 
 const leiosPreparationWindow = 64
 
+var errLeiosPreparationExpired = errors.New(
+	"leios preparation deadline reached",
+)
+
 type preparedLeiosCandidate struct {
 	mempool MempoolTransaction
 	tx      lcommon.Transaction
@@ -39,6 +43,7 @@ type leiosCandidatePreparation struct {
 	index   int
 	window  []preparedLeiosCandidate
 	prepare func(MempoolTransaction) preparedLeiosCandidate
+	expired func() bool
 }
 
 func newLeiosCandidatePreparation(
@@ -102,10 +107,21 @@ func (p *leiosCandidatePreparation) fill(
 	txs []MempoolTransaction,
 ) error {
 	var next atomic.Int64
+	var expired atomic.Bool
+	var clock sync.Mutex
 	var workers sync.WaitGroup
 	run := func() {
 		defer workers.Done()
 		for ctx.Err() == nil {
+			if p.expired != nil {
+				clock.Lock()
+				stop := p.expired()
+				clock.Unlock()
+				if stop {
+					expired.Store(true)
+					return
+				}
+			}
 			i := int(next.Add(1) - 1)
 			if i >= len(txs) {
 				return
@@ -122,5 +138,11 @@ func (p *leiosCandidatePreparation) fill(
 		run()
 	}
 	workers.Wait()
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if expired.Load() {
+		return errLeiosPreparationExpired
+	}
+	return nil
 }
