@@ -675,11 +675,17 @@ func TestResumedPlannerStatsKeepFullAnalyzeSpendPlan(t *testing.T) {
 	store := newFilePlannerStatsStore(t, prometheus.NewRegistry())
 	seedPlannerStatsProbeUtxos(t, store)
 	require.NoError(t, store.UpdatePlannerStats())
-	_, err := store.writeDB.Exec(`INSERT INTO utxo (tx_id, output_idx,
+	// Grow utxo 32x: PRAGMA optimize leaves a table's statistics alone until
+	// its row count has moved by a large factor, so a smaller growth would
+	// compare a plan the optimizer never touched.
+	for shift := range 5 {
+		_, err := store.writeDB.Exec(`INSERT INTO utxo (tx_id, output_idx,
   staking_key, credential_tag, added_slot, deleted_slot, amount)
-SELECT tx_id, output_idx + 4, staking_key, credential_tag,
-  added_slot + 3000, deleted_slot, amount FROM utxo`)
-	require.NoError(t, err)
+SELECT tx_id, output_idx + ?, staking_key, credential_tag,
+  added_slot + ?, deleted_slot, amount FROM utxo`,
+			4<<shift, 3000<<shift)
+		require.NoError(t, err)
+	}
 
 	has, err := store.HasPlannerStats(t.Context())
 	require.NoError(t, err)
@@ -690,6 +696,7 @@ SELECT tx_id, output_idx + 4, staking_key, credential_tag,
 	require.NoError(t, err)
 	require.True(t, result.Supported)
 	require.False(t, result.Skipped)
+	require.True(t, result.Changed, "the optimizer must re-analyze utxo")
 	resumed := poolPlans(t, store.writeDB, 1)[0]
 
 	require.NoError(t, store.UpdatePlannerStats())
