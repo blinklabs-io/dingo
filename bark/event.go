@@ -432,8 +432,7 @@ func (s *eventServiceHandler) SubscribeWithAck(
 	log.Info("event subscription opened", "resume_from", cursor)
 	defer log.Info("event subscription closed")
 
-	var acked atomic.Uint64
-	acked.Store(cursor)
+	var win ackWindow
 	ackCh := make(chan struct{}, 1)
 	recvErr := make(chan error, 1)
 	var sent atomic.Uint64
@@ -461,12 +460,7 @@ func (s *eventServiceHandler) SubscribeWithAck(
 				)
 				return
 			}
-			for {
-				cur := acked.Load()
-				if seq <= cur || acked.CompareAndSwap(cur, seq) {
-					break
-				}
-			}
+			win.ack(seq)
 			select {
 			case ackCh <- struct{}{}:
 			default:
@@ -475,7 +469,7 @@ func (s *eventServiceHandler) SubscribeWithAck(
 	}()
 
 	for {
-		if sent.Load()-acked.Load() >= s.hub.window {
+		if win.outstanding() >= s.hub.window {
 			timer := time.NewTimer(eventAckTimeout)
 			select {
 			case <-ackCh:
@@ -514,6 +508,7 @@ func (s *eventServiceHandler) SubscribeWithAck(
 			// Recorded before the send: the client may acknowledge the
 			// event before Send returns here.
 			sent.Store(ev.GetSequence())
+			win.add(ev.GetSequence())
 			if err := stream.Send(
 				&eventv1alpha1.SubscribeWithAckResponse{Event: ev},
 			); err != nil {
@@ -536,6 +531,38 @@ func (s *eventServiceHandler) SubscribeWithAck(
 			)
 		}
 	}
+}
+
+// ackWindow tracks the sequences delivered to an acknowledging subscriber
+// and not yet acknowledged. The send window is a count of these, not a
+// sequence distance: sequences are global, so the gap between sent and
+// acknowledged positions also spans events the subscriber's filter rejected.
+type ackWindow struct {
+	mu      sync.Mutex
+	pending []uint64
+}
+
+func (w *ackWindow) add(seq uint64) {
+	w.mu.Lock()
+	w.pending = append(w.pending, seq)
+	w.mu.Unlock()
+}
+
+// ack forgets every delivered sequence up to and including seq.
+func (w *ackWindow) ack(seq uint64) {
+	w.mu.Lock()
+	n := 0
+	for n < len(w.pending) && w.pending[n] <= seq {
+		n++
+	}
+	w.pending = w.pending[n:]
+	w.mu.Unlock()
+}
+
+func (w *ackWindow) outstanding() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return uint64(len(w.pending))
 }
 
 // ackStreamEnd maps the end of the client's side of the stream: a clean

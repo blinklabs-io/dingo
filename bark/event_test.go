@@ -430,6 +430,58 @@ func TestEventAckFilteredStreamIgnoresRejectedEvents(t *testing.T) {
 	require.Equal(t, eventtype.EpochTransition, ev.GetEventType())
 }
 
+// The send window counts delivered events that await an acknowledgement. A
+// client that batches acknowledgements must still receive up to a full
+// window of matching events, however many rejected events lie between them.
+func TestEventAckWindowCountsDeliveriesNotSequenceGap(t *testing.T) {
+	t.Parallel()
+	f := newEventFixture(t, func(c *BarkConfig) {
+		c.EventBufferSize = 8
+	}, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	stream := f.client.SubscribeWithAck(ctx)
+	require.NoError(t, stream.Send(&eventv1alpha1.SubscribeWithAckRequest{
+		Message: &eventv1alpha1.SubscribeWithAckRequest_Start{
+			Start: &eventv1alpha1.SubscribeWithAckStart{
+				SubscriberId: "batching",
+				Filter: &eventv1alpha1.EventFilter{
+					EventTypes: []string{eventtype.EpochTransition},
+				},
+			},
+		},
+	}))
+	waitActive(t, f, 1)
+	recv := func() *eventv1alpha1.Event {
+		return recvEvent(t, func() (*eventv1alpha1.Event, error) {
+			resp, err := stream.Receive()
+			if err != nil {
+				return nil, err
+			}
+			return resp.GetEvent(), nil
+		})
+	}
+	publishEpoch := func(n uint64) {
+		f.bus.Publish(
+			event.EpochTransitionEventType,
+			event.NewEvent(event.EpochTransitionEventType,
+				event.EpochTransitionEvent{PreviousEpoch: n - 1, NewEpoch: n}),
+		)
+	}
+
+	for i := range 5 {
+		f.publishChurn(fmt.Sprintf("r:%d", i))
+		require.Eventually(t, func() bool {
+			return f.hub.position() == uint64(i+1)
+		}, 5*time.Second, 5*time.Millisecond)
+	}
+	publishEpoch(1)
+	recv()
+	// The first event is still unacknowledged; a second must arrive anyway.
+	publishEpoch(2)
+	recv()
+}
+
 // A one-event buffer still delivers to an ack subscriber: the send window is
 // never zero.
 func TestEventAckDeliversWithSingleEventBuffer(t *testing.T) {
