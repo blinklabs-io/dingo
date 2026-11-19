@@ -20802,8 +20802,10 @@ Non-checkpoint block nonce rows are pruned below the last three epochs, while
 checkpoint rows are kept; API storage mode accepts older points, and for those
 the fold recomputes the nonces from the stored blocks. With this, every
 implemented leaf query that reads ledger or consensus state answers at the
-acquired point; leaves not yet implemented (#394) are refused as unsupported
-rather than answered from the tip. `queryShelleyLeaf`'s audit lists each.
+acquired point, except `GetGovState`, which answers a pinned point only when it
+is the current tip and refuses any other with `ErrHistoricalStateUnavailable`;
+leaves not yet implemented (#394) are refused as unsupported rather than
+answered from the tip. `queryShelleyLeaf`'s audit lists each.
 
 Every pinned query also needs history the node actually holds, so
 `VerifyPointQueryable` refuses a point below the latest Mithril import's

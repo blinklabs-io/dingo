@@ -1356,6 +1356,14 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // registration and delegation rows, and delegations carry no per-point
 // history to read back.
 //
+// Answers only the tip: ShelleyGovStateQuery (queryShelleyGovState). A pinned
+// point is answered when it is the current tip, which is what a reopened view
+// names while the chain has not advanced, and any other point is refused with
+// ErrHistoricalStateUnavailable. The DRep distribution and the ratification
+// outcome of the epoch boundary are not stored, so the state at an earlier
+// slot cannot be rebuilt; the reply is never read from the tip for a point
+// that is not the tip.
+//
 // Not answered, so the call fails with ErrQueryNotAnswered:
 // ShelleyNonMyopicMemberRewardsQuery and ShelleyRewardInfoPoolsQuery, which
 // rank pools by a performance estimate derived from a per-pool likelihood
