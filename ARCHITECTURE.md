@@ -4486,14 +4486,26 @@ chunk files, and Badger keeps a marker per promoted block.
   epoch boundary block at its chunk's first relative slot.
 - The ImmutableDB is the `storage.immutable` plugin capability. Its contract
   is `database/plugin/immutable.ImmutableDB` (`Dir`, `Open`, `ReadBlockAt`,
-  `ListFiles`) with a `Store` writer (append, sync, tip, read by location,
-  point lookup, truncate). The built-in `chunkfile` provider
-  (`database/plugin/immutable/chunkfile`) wraps `database/immutable.Store`,
-  is registered by `internal/plugins.NewHost` in every build, and is resolved
-  by `plugins.ResolveStorage` with no selector. `database.Stores.Immutable`
-  carries it into `database.New`, which opens the chunk writer, reads markers
-  and lists snapshot files only through it; a database without an ImmutableDB
-  needs none. The provider is a durable-close plugin: host shutdown closes a
+  `ListFiles`, `ReadFile`) with a `Store`
+  writer (append, sync, tip, read by location, point lookup, truncate). The
+  built-in `chunkfile` provider (`database/plugin/immutable/chunkfile`)
+  wraps `database/immutable.Store` and is registered in every build. Builds
+  with `dingo_extra_plugins` also register S3 and GCS providers; the immutable
+  selection follows the matching configured blob provider and reuses its
+  released object-store settings. Remote objects are authoritative, with only
+  the writable tail staged locally; completed trios publish chunk, secondary,
+  then primary. An interrupted new chunk without a committed primary entry
+  is removed before reopening its preceding durable tail. A rollback checks
+  that the published chunk holds its point before deleting any later chunk,
+  and the writer reads its staged chunks locally. Chunk adoption verifies a
+  staged trio before publishing it (`ChunkPublisher`) and retracts one that
+  fails before the recorded tip covers it (`ChunkUnpublisher`). Snapshots link
+  local chunk files and stream remote ones through the provider; blob-key
+  backups exclude reserved immutable objects. `database.Stores.Immutable`
+  carries the selected provider into `database.New`, which opens the writer,
+  reads markers and lists snapshot files through it; a database without an
+  ImmutableDB needs none. The provider is a durable-close plugin: host
+  shutdown closes a
   writer its holder left open to completion, and a later `Open` is refused.
   `Database.Close` and the failed-step reset still close the writer first.
 - `database` installs an `immutableBlobStore` over the blob store whenever the
@@ -4540,7 +4552,11 @@ fallback:
   consistent combination of them -- to a `(slot, hash)` point, maps that to the
   blob store's `GetBlockURL`, and returns a signed object URL plus compact
   block metadata. A reference the node does not hold comes back under
-  `not_found` without discarding the rest of the batch.
+  `not_found` without discarding the rest of the batch. A node that also
+  enables the ImmutableDB on `s3` or `gcs` cannot back the archive for
+  promoted history: a promoted block's object holds its marker, so
+  `GetBlockURL` returns `ErrImmutableBlockNotSignable` instead of a URL, and
+  only blocks not yet promoted can be signed.
 - A node with `historyExpiry.enabled` keeps its local blob plugin and starts
   `internal/historyexpiry.Pruner`. The worker derives its safety window from
   `LedgerState.StabilityWindow()` and scans only blocks older than that window,

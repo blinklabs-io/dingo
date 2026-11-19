@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
-	"github.com/blinklabs-io/dingo/database/plugin/immutable/chunkfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -114,15 +113,29 @@ func ResolveStorage(
 			err,
 		)
 	}
+	immutableProvider := immplugin.ProviderNameForBlob(selections.Blob.Provider)
+	var immutableObjects blob.ImmutableObjects
+	if immutableProvider == immplugin.S3ProviderName ||
+		immutableProvider == immplugin.GCSProviderName {
+		var ok bool
+		immutableObjects, ok = blobStore.(blob.ImmutableObjects)
+		if !ok {
+			return database.Stores{}, fmt.Errorf(
+				"blob provider %q does not expose ImmutableDB file operations",
+				selections.Blob.Provider,
+			)
+		}
+	}
 	immutableStore, err := plugin.Resolve[immplugin.ImmutableDB](
 		ctx,
 		host,
 		plugin.CapabilityStorageImmutable,
-		chunkfile.ProviderName,
+		immutableProvider,
 		nil,
 		immplugin.ProviderDependencies{
-			DataDir: deps.DataDir,
-			Logger:  deps.Logger,
+			DataDir:     deps.DataDir,
+			Logger:      deps.Logger,
+			ObjectFiles: immutableObjects,
 		},
 	)
 	if err != nil {

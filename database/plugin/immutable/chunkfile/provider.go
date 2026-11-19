@@ -19,6 +19,9 @@ package chunkfile
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -41,7 +44,7 @@ var ErrStoreOpen = errors.New("immutable chunk store is already open")
 type Config struct{}
 
 // RegisterProvider registers the chunk-file provider with host. It is
-// registered in every build and is the only storage.immutable provider.
+// registered in every build.
 func RegisterProvider(host *hostplugin.Host) error {
 	return hostplugin.Register(
 		host,
@@ -98,6 +101,25 @@ func (s *service) ReadBlockAt(loc immutable.Location) (uint, []byte, error) {
 
 func (s *service) ListFiles() ([]immutable.File, error) {
 	return immutable.ListFiles(s.dir)
+}
+
+func (s *service) ReadFile(
+	ctx context.Context,
+	name string,
+	dst io.Writer,
+) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if _, ok := immutable.ParseFileName(name); !ok {
+		return 0, fmt.Errorf("invalid ImmutableDB file name %q", name)
+	}
+	file, err := os.Open(filepath.Join(s.dir, name))
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	return io.Copy(dst, file)
 }
 
 // stop closes the writer a holder left open and refuses later opens.

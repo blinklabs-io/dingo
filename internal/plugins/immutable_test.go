@@ -35,9 +35,14 @@ func TestNewHostRegistersBuiltInImmutableProvider(t *testing.T) {
 			found = append(found, d)
 		}
 	}
-	require.Len(t, found, 1)
-	require.Equal(t, chunkfile.ProviderName, found[0].Name)
-	require.True(t, found[0].DurableClose)
+	var chunkfileFound bool
+	for _, descriptor := range found {
+		if descriptor.Name == chunkfile.ProviderName {
+			chunkfileFound = true
+			require.True(t, descriptor.DurableClose)
+		}
+	}
+	require.True(t, chunkfileFound)
 }
 
 func TestResolveStorageProvidesImmutableDB(t *testing.T) {
