@@ -15,12 +15,14 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -44,28 +46,47 @@ var noFuturePParams = cbor.RawMessage{0x81, 0x00}
 // The proposals, enacted roots, committee, constitution and protocol
 // parameters are read as they stand at the tip. The reference node also
 // returns the DRep pulsing state it froze at the boundary that opened the
-// epoch, and the ratification outcome computed then. Dingo keeps neither, so
-// those two parts are rebuilt from live state: the DRep distribution and the
-// pool distribution can differ from the node's once stake moves within an
-// epoch, and the ratification outcome lists no enacted or expired actions and
-// no delay. A pinned point is refused because that state cannot be rebuilt
-// for an earlier slot.
+// epoch, and the ratification outcome computed then. Dingo keeps neither
+// stake distribution nor ratification outcome, so those are rebuilt from live
+// state: the DRep and pool distributions can differ from the node's once stake
+// moves within an epoch, and the ratification outcome lists no enacted or
+// expired actions and no delay. The snapshot's proposals and DRep state are
+// read as of the last slot before the epoch began.
+//
+// A pinned point is answered only when it is the current tip, which is what a
+// reopened view names while the chain has not advanced; the live state is then
+// the state at that point. Any other point is refused, because the stake
+// distributions and the ratification outcome cannot be rebuilt for an earlier
+// slot.
 func (ls *LedgerState) queryShelleyGovState(
 	ctx context.Context,
 	at QueryPoint,
 	txn ledgerdb.Txn,
 ) (any, error) {
-	if at.pinned() {
-		return nil, fmt.Errorf(
-			"%w: governance state as of slot %d cannot be reconstructed "+
-				"-- the DRep distribution and ratification outcome of the "+
-				"epoch boundary are not stored",
-			ErrHistoricalStateUnavailable,
-			at.Slot,
-		)
-	}
 	txn, release := ls.readTxn(ctx, txn)
 	defer release()
+	if at.pinned() {
+		tip, err := ls.ledgerDB().GetTip(txn)
+		if err != nil {
+			return nil, fmt.Errorf("get chain tip: %w", err)
+		}
+		if tip.Point.Slot != at.Slot ||
+			!bytes.Equal(tip.Point.Hash, at.Hash) {
+			return nil, fmt.Errorf(
+				"%w: governance state as of slot %d cannot be "+
+					"reconstructed -- the DRep distribution and "+
+					"ratification outcome of the epoch boundary are not "+
+					"stored",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+			)
+		}
+		at = QueryPoint{}
+	}
+	epoch, err := ls.govStateEpoch(txn, at)
+	if err != nil {
+		return nil, err
+	}
 
 	proposals, err := ls.govStateProposals(ctx, at, txn)
 	if err != nil {
@@ -87,7 +108,9 @@ func (ls *LedgerState) queryShelleyGovState(
 	if err != nil {
 		return nil, err
 	}
-	currentPParams, prevPParams, err := ls.govStatePParams(ctx, at, txn)
+	currentPParams, prevPParams, err := ls.govStatePParams(
+		ctx, at, txn, epoch,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +118,7 @@ func (ls *LedgerState) queryShelleyGovState(
 		ctx,
 		at,
 		txn,
-		proposals,
+		epoch,
 		roots,
 		committeeRaw,
 		constitution,
@@ -250,13 +273,33 @@ func (ls *LedgerState) govStateConstitution(
 	}, nil
 }
 
+// govStateEpoch returns the epoch the query answers for: the epoch at the tip
+// of the read transaction, which for a view acquired before a boundary is the
+// epoch it froze rather than the live one.
+func (ls *LedgerState) govStateEpoch(
+	txn ledgerdb.Txn,
+	at QueryPoint,
+) (models.Epoch, error) {
+	row, err := ls.snapshotEpoch(txn, at)
+	if err != nil {
+		return models.Epoch{}, err
+	}
+	if row != nil {
+		return *row, nil
+	}
+	return ls.loadConsensusSnapshot().currentEpoch, nil
+}
+
 // govStatePParams returns the protocol parameters in effect and those of the
-// epoch before. When the earlier epoch has no stored row the parameters did
-// not change, so the current ones stand in for them.
+// epoch before the one the query answers for. When the earlier epoch has no
+// stored row the parameters did not change, so the current ones stand in for
+// them. An earlier epoch in another era is converted to the current era's
+// representation, as the era transition does.
 func (ls *LedgerState) govStatePParams(
 	ctx context.Context,
 	at QueryPoint,
 	txn ledgerdb.Txn,
+	epoch models.Epoch,
 ) (cbor.RawMessage, cbor.RawMessage, error) {
 	reply, err := ls.queryShelleyCurrentProtocolParams(ctx, at, txn)
 	if err != nil {
@@ -264,18 +307,14 @@ func (ls *LedgerState) govStatePParams(
 	}
 	current, err := encodeWrappedReply(reply)
 	if err != nil {
-		return nil, nil, fmt.Errorf(
-			"encode current protocol parameters: %w",
-			err,
-		)
+		return nil, nil, fmt.Errorf("encode current protocol parameters: %w", err)
 	}
-	snapshot := ls.loadConsensusSnapshot()
-	epoch := snapshot.currentEpoch.EpochId
-	if epoch == 0 {
+	if epoch.EpochId == 0 {
 		return current, current, nil
 	}
+	prevEpoch := epoch.EpochId - 1
 	prevReply, err := ls.historicalProtocolParameters(
-		snapshot, epoch-1, at, txn,
+		ls.loadConsensusSnapshot(), prevEpoch, at, txn,
 	)
 	if err != nil {
 		if errors.Is(err, errPParamsRowMissing) ||
@@ -284,12 +323,38 @@ func (ls *LedgerState) govStatePParams(
 		}
 		return nil, nil, err
 	}
-	prev, err := encodeWrappedReply(prevReply)
-	if err != nil {
+	wrapped, ok := prevReply.([]any)
+	if !ok || len(wrapped) != 1 {
 		return nil, nil, fmt.Errorf(
-			"encode previous protocol parameters: %w",
-			err,
+			"previous protocol parameters reply has shape %T", prevReply,
 		)
+	}
+	prevParams, ok := wrapped[0].(lcommon.ProtocolParameters)
+	if !ok {
+		return nil, nil, fmt.Errorf(
+			"previous protocol parameters hold %T", wrapped[0],
+		)
+	}
+	prevRow, err := ls.ledgerDB().GetEpoch(prevEpoch, txn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get epoch %d: %w", prevEpoch, err)
+	}
+	if prevRow != nil && prevRow.EraId != epoch.EraId {
+		era := eras.GetEraById(epoch.EraId)
+		if era != nil && era.HardForkFunc != nil {
+			prevParams, err = era.HardForkFunc(
+				ls.config.CardanoNodeConfig, prevParams,
+			)
+			if err != nil {
+				return nil, nil, fmt.Errorf(
+					"convert previous protocol parameters: %w", err,
+				)
+			}
+		}
+	}
+	prev, err := cbor.Encode(prevParams)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode previous protocol parameters: %w", err)
 	}
 	return current, prev, nil
 }
@@ -310,7 +375,7 @@ func (ls *LedgerState) govStatePulsingState(
 	ctx context.Context,
 	at QueryPoint,
 	txn ledgerdb.Txn,
-	proposals []olocalstatequery.GovActionState,
+	epoch models.Epoch,
 	roots olocalstatequery.PrevGovActionIds,
 	committeeRaw cbor.RawMessage,
 	constitution olocalstatequery.ConstitutionResult,
@@ -321,7 +386,17 @@ func (ls *LedgerState) govStatePulsingState(
 	if err != nil {
 		return nil, err
 	}
-	drepStateReply, err := ls.queryShelleyDRepState(ctx, nil, at, txn)
+	// The pulser captures proposals and DRep registrations at the boundary,
+	// so they are read as of the last slot before the epoch began.
+	var boundary uint64
+	if epoch.StartSlot > 0 {
+		boundary = epoch.StartSlot - 1
+	}
+	snapshotProposals, err := ls.govStateBoundaryProposals(ctx, boundary, txn)
+	if err != nil {
+		return nil, err
+	}
+	drepStateReply, err := ls.queryShelleyDRepStateAt(ctx, nil, boundary, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +409,7 @@ func (ls *LedgerState) govStatePulsingState(
 		return nil, err
 	}
 	snapshot, err := cbor.Encode([]any{
-		proposals,
+		snapshotProposals,
 		drepDistr,
 		drepState,
 		poolDistr,
@@ -379,6 +454,23 @@ func (ls *LedgerState) govStatePulsingState(
 		return nil, fmt.Errorf("encode DRep pulsing state: %w", err)
 	}
 	return pulsing, nil
+}
+
+// govStateBoundaryProposals returns the proposals, with their votes, that
+// stood at slot. Slot zero precedes every block, so nothing was proposed.
+func (ls *LedgerState) govStateBoundaryProposals(
+	ctx context.Context,
+	slot uint64,
+	txn ledgerdb.Txn,
+) ([]olocalstatequery.GovActionState, error) {
+	if slot == 0 {
+		return []olocalstatequery.GovActionState{}, nil
+	}
+	// The as-of readers use only the slot. The placeholder hash keeps the
+	// point from being read as the unpinned origin.
+	return ls.govStateProposals(
+		ctx, QueryPoint{Slot: slot, Hash: []byte{0}}, txn,
+	)
 }
 
 // encodeConstitution encodes a constitution as the ledger does: the anchor and

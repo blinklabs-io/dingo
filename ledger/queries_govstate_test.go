@@ -19,11 +19,15 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -164,7 +168,6 @@ func TestQueryShelleyGovStateAssemblesLedgerGovernanceState(t *testing.T) {
 
 	pulsing, err := state.DecodeDRepPulsingState()
 	require.NoError(t, err)
-	assert.Len(t, pulsing.Snapshot.Proposals, len(state.Proposals))
 	assert.Equal(
 		t,
 		state.Constitution,
@@ -280,7 +283,6 @@ func TestQueryShelleyGovStateCarriesDRepAndPoolStake(t *testing.T) {
 		"an option holding no stake is not in the distribution",
 	)
 
-	require.Len(t, pulsing.Snapshot.DRepState, 1)
 	assert.Equal(
 		t,
 		uint64(3_000_000),
@@ -308,4 +310,195 @@ func TestQueryShelleyGovStateSeatsGenesisCommitteeWithoutEnactedQuorum(
 	require.NotNil(t, committee)
 	assert.Len(t, committee.Members, 1)
 	assert.NotNil(t, committee.Threshold.Rat)
+}
+
+// newGovStateLedger returns a Conway ledger at the given epoch with a
+// constitution recorded, the minimum GetGovState needs.
+func newGovStateLedger(
+	t *testing.T,
+	epoch models.Epoch,
+) (*LedgerState, *database.Database) {
+	t.Helper()
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	ls.currentEpoch = epoch
+	ls.publishSnapshotsLocked()
+	require.NoError(t, db.SetConstitution(&models.Constitution{
+		AnchorURL:  "https://example.com/constitution.txt",
+		AnchorHash: repeatedBytes(32, 0x62),
+		AddedSlot:  1,
+	}, nil))
+	return ls, db
+}
+
+func TestQueryShelleyGovStateAnswersPinnedPointAtTheTip(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newGovStateLedger(t, models.Epoch{EpochId: 0})
+	tip := ocommon.NewPoint(350, repeatedBytes(32, 0x0b))
+	require.NoError(t, db.SetTip(ochainsync.Tip{Point: tip}, nil))
+
+	_, err := ls.queryShelleyGovState(
+		context.Background(),
+		QueryPoint{Slot: tip.Slot, Hash: tip.Hash},
+		nil,
+	)
+	require.NoError(t, err)
+
+	_, err = ls.queryShelleyGovState(
+		context.Background(),
+		QueryPoint{Slot: tip.Slot - 1, Hash: tip.Hash},
+		nil,
+	)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+func TestQueryShelleyGovStateSnapshotHoldsOnlyBoundaryProposals(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	ls, db := newGovStateLedger(t, models.Epoch{EpochId: 1, StartSlot: 100})
+	govAction, err := cbor.Encode([]any{uint64(lcommon.GovActionTypeInfo)})
+	require.NoError(t, err)
+	returnAddress := append([]byte{0xe0}, repeatedBytes(28, 0x64)...)
+	propose := func(hash byte, slot uint64) *models.GovernanceProposal {
+		proposal := &models.GovernanceProposal{
+			TxHash:        repeatedBytes(32, hash),
+			ActionType:    uint8(lcommon.GovActionTypeInfo),
+			ExpiresEpoch:  10,
+			AnchorURL:     "https://example.com/proposal.json",
+			AnchorHash:    repeatedBytes(32, 0x68),
+			ReturnAddress: returnAddress,
+			GovActionCbor: govAction,
+			AddedSlot:     slot,
+		}
+		require.NoError(t, db.SetGovernanceProposal(ctx, proposal, nil))
+		return proposal
+	}
+	before := propose(0x71, 50)
+	after := propose(0x72, 150)
+	for _, drep := range []struct {
+		key  byte
+		slot uint64
+	}{{0xc1, 50}, {0xc2, 150}} {
+		require.NoError(t, db.CreateDrep(ctx, nil, &models.Drep{
+			Credential:    stakeCred28(drep.key),
+			CredentialTag: 0,
+			Active:        true,
+			AddedSlot:     drep.slot,
+		}))
+	}
+
+	reply, err := ls.queryShelleyGovState(ctx, QueryPoint{}, nil)
+	require.NoError(t, err)
+	state := decodeGovStateReply(t, reply)
+	pulsing, err := state.DecodeDRepPulsingState()
+	require.NoError(t, err)
+
+	ids := func(proposals []olocalstatequery.GovActionState) [][]byte {
+		var out [][]byte
+		for _, proposal := range proposals {
+			out = append(out, proposal.Id.TransactionId[:])
+		}
+		return out
+	}
+	assert.ElementsMatch(t, [][]byte{before.TxHash, after.TxHash}, ids(state.Proposals))
+	assert.Equal(t, [][]byte{before.TxHash}, ids(pulsing.Snapshot.Proposals))
+	require.Len(t, pulsing.Snapshot.DRepState, 1)
+	for credential := range pulsing.Snapshot.DRepState {
+		assert.Equal(t, stakeCred28(0xc1), credential.Bytes[:])
+	}
+}
+
+func TestQueryShelleyGovStatePreviousParametersFollowTheViewEpoch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ctx := context.Background()
+	// The live epoch is 21 while the database tip, which is what a view
+	// acquired before the boundary sees, is in epoch 20.
+	ls, db := newGovStateLedger(t, models.Epoch{EpochId: 21, StartSlot: 2100})
+	conwayEraID := uint(eras.ConwayEraDesc.Id)
+	for startSlot, epoch := range map[uint64]uint64{
+		1900: 19, 2000: 20, 2100: 21,
+	} {
+		require.NoError(t, db.SetEpoch(
+			startSlot, epoch, nil, nil, nil, nil, conwayEraID, 1, 100, nil,
+		))
+	}
+	for epoch, costs := range map[uint64][]int64{
+		19: {1, 1, 1},
+		20: {2, 2, 2},
+	} {
+		encoded, err := cbor.Encode(conwayPParamsWithCostModels(
+			map[uint][]int64{0: costs},
+		))
+		require.NoError(t, err)
+		require.NoError(t, db.SetPParams(
+			encoded, 1900+(epoch-19)*100, epoch, conwayEraID, nil,
+		))
+	}
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(2050, repeatedBytes(32, 0x0b)),
+	}, nil))
+
+	reply, err := ls.queryShelleyGovState(ctx, QueryPoint{}, nil)
+	require.NoError(t, err)
+	state := decodeGovStateReply(t, reply)
+
+	var current, previous conway.ConwayProtocolParameters
+	_, err = cbor.Decode(state.CurrentPParams, &current)
+	require.NoError(t, err)
+	_, err = cbor.Decode(state.PrevPParams, &previous)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{2, 2, 2}, current.CostModels[0])
+	assert.Equal(t, []int64{1, 1, 1}, previous.CostModels[0])
+}
+
+func TestQueryShelleyGovStateConvertsPreviousParametersToTheCurrentEra(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ctx := context.Background()
+	conwayParams := conwayPParamsWithCostModels(
+		map[uint][]int64{0: {1, 1, 1}},
+	)
+	dijkstraParams, err := eras.HardForkDijkstra(nil, conwayParams)
+	require.NoError(t, err)
+	ls, db := newGovStateLedger(t, models.Epoch{
+		EpochId: 20, StartSlot: 2000, EraId: uint(eras.DijkstraEraDesc.Id),
+	})
+	ls.currentEra = eras.DijkstraEraDesc
+	ls.currentPParams = dijkstraParams
+	ls.publishSnapshotsLocked()
+	require.NoError(t, db.SetEpoch(
+		1900, 19, nil, nil, nil, nil, uint(eras.ConwayEraDesc.Id), 1, 100, nil,
+	))
+	require.NoError(t, db.SetEpoch(
+		2000, 20, nil, nil, nil, nil, uint(eras.DijkstraEraDesc.Id), 1, 100, nil,
+	))
+	previous, err := cbor.Encode(conwayParams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		previous, 1900, 19, uint(eras.ConwayEraDesc.Id), nil,
+	))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(2050, repeatedBytes(32, 0x0b)),
+	}, nil))
+
+	reply, err := ls.queryShelleyGovState(ctx, QueryPoint{}, nil)
+	require.NoError(t, err)
+	state := decodeGovStateReply(t, reply)
+
+	want, err := cbor.Encode(dijkstraParams)
+	require.NoError(t, err)
+	assert.Equal(t, want, []byte(state.PrevPParams),
+		"the previous parameters take the current era's representation")
+	assert.NotEqual(t, previous, []byte(state.PrevPParams))
 }
