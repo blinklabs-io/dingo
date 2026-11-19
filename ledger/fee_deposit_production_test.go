@@ -854,6 +854,9 @@ type conwayDepositProdVariant struct {
 	// amount is rejected with.
 	incorrect      func() any
 	replayRecovers bool
+	// statedAmountBalances marks a refund the phase-2-invalid path counts from
+	// the certificate amount, so the stated amount always balances.
+	statedAmountBalances bool
 }
 
 // An isValid=false Conway transaction whose script genuinely fails, so the
@@ -940,11 +943,12 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 			},
 		},
 		{
-			name:      "drep deregistration refund",
-			incorrect: func() any { return &conway.CertificateRefundIncorrectError{} },
-			required:  drepDeposit,
-			wrong:     drepRefundBig,
-			refund:    true,
+			name:                 "drep deregistration refund",
+			incorrect:            func() any { return &conway.CertificateRefundIncorrectError{} },
+			required:             drepDeposit,
+			wrong:                drepRefundBig,
+			refund:               true,
+			statedAmountBalances: true,
 			extra: func(fx *feeProdFixture, amount uint64) map[uint]any {
 				return map[uint]any{4: []any{[]any{
 					uint(lcommon.CertificateTypeDeregistrationDrep),
@@ -1063,6 +1067,10 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 				func(t *testing.T) {
 					t.Parallel()
 					err := path.run(t, build(t, v, v.wrong, false, true))
+					if v.statedAmountBalances {
+						require.NoError(t, err)
+						return
+					}
 					var notConserved shelley.ValueNotConservedUtxoError
 					require.ErrorAs(t, err, &notConserved)
 					imbalance := new(big.Int).Sub(
