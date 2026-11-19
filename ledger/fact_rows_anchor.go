@@ -414,9 +414,6 @@ func (v *anchorView) EachAnchorRewardJournal(
 // been loaded yet leaves the outputs in the metadata store, which the node
 // moves into the set only as it starts.
 func (ls *LedgerState) utxoSetServesAnchor(anchor uint64) (bool, error) {
-	if !ls.config.UtxoSetOnly {
-		return false, nil
-	}
 	tipper, ok := ls.config.UtxoSet.(interface {
 		Tip() (ocommon.Point, bool, error)
 	})

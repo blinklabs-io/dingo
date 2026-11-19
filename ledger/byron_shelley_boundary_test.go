@@ -34,6 +34,9 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -333,6 +336,29 @@ func seedBoundaryFixtureLiveUtxo(t *testing.T, ls *LedgerState) {
 		},
 	))
 	require.NoError(t, txn.Commit())
+	set := ls.config.UtxoSet.(*memUtxoSet)
+	require.NoError(t, set.ApplyUtxoChanges(&ls.currentTip.Point, []UtxoEvent{{
+		Added: []UtxoOutput{{
+			Ref:  models.UtxoId{Hash: bytes.Repeat([]byte{0x03}, 32)},
+			Cbor: boundaryOutputCbor(t, 1_000_000_000),
+		}},
+	}}))
+}
+
+// boundaryOutputCbor makes a valid Shelley output for the translated
+// Byron balance held by this fixture.
+func boundaryOutputCbor(t *testing.T, amount uint64) []byte {
+	t.Helper()
+	address, err := common.NewAddressFromBytes(
+		append([]byte{0x60}, bytes.Repeat([]byte{0x03}, 28)...),
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&babbage.BabbageTransactionOutput{
+		OutputAddress: address,
+		OutputAmount:  mary.MaryTransactionOutputValue{Amount: amount},
+	})
+	require.NoError(t, err)
+	return encoded
 }
 
 // newUnseededByronShelleyBoundaryLedgerFrom is newByronShelleyBoundaryLedgerFrom
@@ -368,7 +394,7 @@ func newUnseededByronShelleyBoundaryLedgerFromBlocks(
 	require.NotEmpty(t, byronBlocks)
 	lastByron := byronBlocks[len(byronBlocks)-1]
 
-	db := newTestDB(t)
+	db := newCoreTestDB(t)
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{
@@ -423,6 +449,7 @@ func newUnseededByronShelleyBoundaryLedgerFromBlocks(
 			slog.NewJSONHandler(io.Discard, nil),
 		),
 		ValidateHistorical: true,
+		UtxoSet:            &memUtxoSet{outputs: make(map[string][]byte)},
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
@@ -1233,6 +1260,15 @@ func seedByronBoundaryUtxos(
 		))
 	}
 	require.NoError(t, txn.Commit())
+	set := ls.config.UtxoSet.(*memUtxoSet)
+	if liveUtxo > 0 {
+		require.NoError(t, set.ApplyUtxoChanges(&ls.currentTip.Point, []UtxoEvent{{
+			Added: []UtxoOutput{{
+				Ref:  models.UtxoId{Hash: bytes.Repeat([]byte{0x01}, 32)},
+				Cbor: boundaryOutputCbor(t, liveUtxo),
+			}},
+		}}))
+	}
 }
 
 func crossByronShelleyBoundary(

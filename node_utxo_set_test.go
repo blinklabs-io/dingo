@@ -25,31 +25,35 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
+	"github.com/blinklabs-io/dingo/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
-// TestUtxoSetOnlyModeIsFixedForADatabase marks a fresh database when it
-// starts with the live UTxO set as the only copy, then requires it to refuse
-// a start without that mode. checkUtxoSetOnly alone still refuses an unmarked
-// synced database; migrateUtxoRows is what marks one.
-func TestUtxoSetOnlyModeIsFixedForADatabase(t *testing.T) {
+func init() {
+	utxoset.DefaultMemTableSize = 8 << 20
+}
+
+// TestCheckUtxoSetOnlyMarksAFreshDatabase marks a database at origin as
+// holding its UTxO set only in the live UTxO set. checkUtxoSetOnly alone
+// refuses an unmarked synced database; migrateUtxoRows is what marks one.
+func TestCheckUtxoSetOnlyMarksAFreshDatabase(t *testing.T) {
 	t.Parallel()
-	node := func(db *database.Database, only bool) *Node {
+	node := func(db *database.Database) *Node {
 		n := &Node{db: db}
-		n.config.ledgerUtxoBadgerOnly = only
+		n.config.dataDir = t.TempDir()
 		return n
 	}
 
 	fresh, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(fresh) })
-	require.NoError(t, node(fresh, true).checkUtxoSetOnly())
-	require.NoError(t, node(fresh, true).checkUtxoSetOnly(), "already marked")
-	require.Error(t, node(fresh, false).checkUtxoSetOnly())
+	require.NoError(t, node(fresh).checkUtxoSetOnly())
+	require.NoError(t, node(fresh).checkUtxoSetOnly(), "already marked")
 
 	synced, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
@@ -57,8 +61,7 @@ func TestUtxoSetOnlyModeIsFixedForADatabase(t *testing.T) {
 	require.NoError(t, synced.SetTip(ochainsync.Tip{
 		Point: ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{1}, 32)},
 	}, nil))
-	require.NoError(t, node(synced, false).checkUtxoSetOnly())
-	require.Error(t, node(synced, true).checkUtxoSetOnly())
+	require.Error(t, node(synced).checkUtxoSetOnly())
 }
 
 // TestMigrateUtxoRowsMarksASyncedDatabase moves a synced database that holds
@@ -75,7 +78,6 @@ func TestMigrateUtxoRowsMarksASyncedDatabase(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	n := &Node{db: db, utxoSet: set}
-	n.config.ledgerUtxoBadgerOnly = true
 	n.config.dataDir = t.TempDir()
 	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -92,8 +94,11 @@ func TestMigrateUtxoRowsMarksASyncedDatabase(t *testing.T) {
 	require.NoError(t, n.migrateUtxoRows(t.Context()), "nothing pending")
 
 	n.utxoSet = nil
-	n.config.ledgerUtxoBadgerOnly = true
-	require.NoError(t, n.migrateUtxoRows(t.Context()), "marked: nothing to move")
+	require.NoError(
+		t,
+		n.migrateUtxoRows(t.Context()),
+		"marked: nothing to move",
+	)
 }
 
 // TestMigrateUtxoRowsNeedsTheSet requires an unmarked synced database to name
@@ -107,15 +112,15 @@ func TestMigrateUtxoRowsNeedsTheSet(t *testing.T) {
 		Point: ocommon.Point{Slot: 10, Hash: bytes.Repeat([]byte{1}, 32)},
 	}, nil))
 	n := &Node{db: db}
-	n.config.ledgerUtxoBadgerOnly = true
+	n.config.dataDir = t.TempDir()
 	err = n.migrateUtxoRows(t.Context())
-	require.ErrorContains(t, err, "needs the live UTxO set")
+	require.ErrorContains(t, err, "live UTxO set")
 	require.NotContains(t, err.Error(), "resync")
 }
 
 // TestUtxoSetOnlyStakeRebuildWaitsForTheSet requires the startup
-// reward_live_stake rebuild, with the live UTxO set as the only copy, to wait
-// for reconcileUtxoSet and then to read UTxO stake from the set.
+// reward_live_stake rebuild to wait until the live UTxO set is reconciled and
+// then to read UTxO stake from the set.
 func TestUtxoSetOnlyStakeRebuildWaitsForTheSet(t *testing.T) {
 	t.Parallel()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
@@ -153,12 +158,13 @@ updated_slot, calculation_version) VALUES (?, 0, '1', '0', '1', 0, 0, 0)`,
 	before := rows()
 
 	n := &Node{db: db}
-	n.config.ledgerUtxoBadgerOnly = true
+	n.config.dataDir = t.TempDir()
 	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	require.NoError(t, n.backfillRewardLiveStake(t.Context()))
 	require.Equal(t, before, rows(), "rebuilt before the set was reconciled")
 
-	require.NoError(t, n.reconcileUtxoSet(t.Context()))
+	n.utxoSetReconciled = true
+	require.NoError(t, n.backfillRewardLiveStake(t.Context()))
 	require.Equal(t, []string{fmt.Sprintf("%x=42", stakeKey)}, rows())
 }
 
@@ -262,7 +268,10 @@ func TestCloseUtxoSetStopsARunningCheckpointCopy(t *testing.T) {
 	require.NoError(t, set.LoadUtxoSet(tip,
 		func(func([]byte, uint32, []byte) error) error { return nil }))
 	ended := make(chan struct{})
-	require.True(t, n.launchUtxoSetCheckpoint(t.Context(), set, func() { close(ended) }))
+	require.True(
+		t,
+		n.launchUtxoSetCheckpoint(t.Context(), set, func() { close(ended) }),
+	)
 	<-entered
 
 	require.NoError(t, n.closeUtxoSet())
@@ -274,4 +283,55 @@ func TestCloseUtxoSetStopsARunningCheckpointCopy(t *testing.T) {
 	}
 	require.False(t, n.launchUtxoSetCheckpoint(t.Context(), set, func() {}),
 		"a copy started after the set closed")
+}
+
+// TestStartupMovesALegacyDatabaseToTheLiveUtxoSet runs the startup sequence of
+// a node over a database as a released version leaves it, with its UTxO set
+// and ledger state in the metadata store, and requires the database to hold
+// them in the live UTxO set afterwards: marked as such, every graduated family
+// drained, and the set at the ledger's tip, which the startup reverted below
+// the released tip so the set's rollback journal covers the blocks up to it.
+// A second start, as after a crash at any point of the first, finds nothing
+// left to do.
+func TestStartupMovesALegacyDatabaseToTheLiveUtxoSet(t *testing.T) {
+	t.Parallel()
+	n, points := newLiveLifecycleTestNodeWithGenesis(
+		t, 12, nil, disabledLiveLifecycleTestWorkerPoolCfg,
+		withLegacyStorageFixture,
+	)
+	require.NoError(t, n.ledgerState.Close())
+	tip := points[len(points)-1]
+
+	require.NoError(t, n.openUtxoSet())
+	require.NotNil(t, n.utxoSet, "the node opens the live UTxO set")
+	t.Cleanup(func() { _ = n.closeUtxoSet() })
+	ls, err := ledger.NewLedgerState(n.ledgerStateConfig())
+	require.NoError(t, err)
+	n.setLedgerState(ls)
+	require.NoError(t, n.reconcileUtxoSet(t.Context()))
+
+	marked, err := n.db.GetSyncState(database.UtxoSetOnlySyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, "1", marked, "the metadata store holds no UTxO set")
+	drained, err := n.db.EffectiveDrainedFamilies(t.Context())
+	require.NoError(t, err)
+	require.Equal(
+		t, len(statedrain.Graduated(drainNoSource{})), len(drained.Families()),
+		"every graduated family is drained",
+	)
+	setTip, ok, err := n.utxoSet.Tip()
+	require.NoError(t, err)
+	require.True(t, ok)
+	ledgerTip, err := n.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, ledgerTip.Point, setTip)
+	require.Less(t, setTip.Slot, tip.Slot,
+		"the state moves below the released tip")
+	_, err = database.BlockByPoint(t.Context(), n.db, tip)
+	require.NoError(t, err, "the blocks up to the released tip are kept")
+
+	require.NoError(t, n.reconcileUtxoSet(t.Context()), "a second start")
+	again, err := n.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, ledgerTip, again, "a second start reverts nothing")
 }

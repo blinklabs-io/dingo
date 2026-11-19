@@ -81,30 +81,6 @@ func seedClearedMarkerWithMissingCriticalIndex(
 	return raw
 }
 
-// TestRepairCriticalDeferredIndexesRestoresCriticalIndexWithoutMarker covers
-// the API-mode path: resumeBackfill calls RepairCriticalDeferredIndexes both
-// when it runs a backfill and when it finds none needed, and a node in either
-// state begins rolling back as soon as live sync resumes.
-func TestRepairCriticalDeferredIndexesRestoresCriticalIndexWithoutMarker(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := newFileTestDB(t)
-	raw := seedClearedMarkerWithMissingCriticalIndex(t, db)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	require.NoError(t, RepairCriticalDeferredIndexes(t.Context(), db, logger))
-
-	require.True(
-		t,
-		dbtest.MetadataIndexExists(t, raw, rollbackCascadeIndex),
-		"the critical repair must restore %s",
-		rollbackCascadeIndex,
-	)
-	requireNoPendingMarker(t, raw)
-}
-
 func TestCoreStartupDeferredIndexRepairHonoursCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -123,29 +99,6 @@ func TestCoreStartupDeferredIndexRepairHonoursCancellation(t *testing.T) {
 	pending, err := manager.HasDeferredIndexesPending()
 	require.NoError(t, err)
 	require.True(t, pending, "a cancelled full rebuild must remain resumable")
-}
-
-func TestCriticalStartupDeferredIndexRepairHonoursCancellation(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := newFileTestDB(t)
-	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
-	require.True(t, ok)
-	require.NoError(t, manager.DropDeferredIndexes())
-
-	err := RepairCriticalDeferredIndexes(
-		cancelDeferredIndexRepairContext(t),
-		db,
-		slog.New(slog.DiscardHandler),
-	)
-	require.ErrorIs(t, err, context.Canceled)
-
-	missing, err := manager.(metadata.MissingCriticalDeferredIndexLister).
-		MissingCriticalDeferredIndexes()
-	require.NoError(t, err)
-	require.NotEmpty(t, missing, "a cancelled critical rebuild must do no DDL")
 }
 
 func TestDeferredIndexRebuilderCriticalBuildHonoursCancellation(
@@ -188,35 +141,6 @@ func TestWithDeferredIndexesHonoursCancellationBeforeDrop(t *testing.T) {
 		MissingDeferredIndexes()
 	require.NoError(t, err)
 	require.Empty(t, missing)
-}
-
-// TestRepairCriticalDeferredIndexesRestoresLazyIndexWithoutMarker covers the
-// API-mode startup path, which must not leave a restored database missing its
-// non-critical manifest entries once no bulk-load cycle is active.
-func TestRepairCriticalDeferredIndexesRestoresLazyIndexWithoutMarker(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := newFileTestDB(t)
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	lazy := dbtest.LazyManifestIndex(t)
-	_, err = raw.Exec("DROP INDEX IF EXISTS " + lazy)
-	require.NoError(t, err)
-	_, err = raw.Exec(
-		"DELETE FROM sync_state WHERE sync_key = ?", deferred.SyncStateKey,
-	)
-	require.NoError(t, err)
-
-	require.NoError(t, RepairCriticalDeferredIndexes(
-		t.Context(),
-		db,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-	))
-
-	require.True(t, dbtest.MetadataIndexExists(t, raw, lazy))
-	requireNoPendingMarker(t, raw)
 }
 
 // requireNoPendingMarker asserts the repair did not invent a bulk-load cycle:

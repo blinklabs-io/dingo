@@ -26,7 +26,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -108,13 +110,31 @@ func seedLiveStakeFixture(
 	)
 	txId := make([]byte, 32)
 	copy(txId, poolKeyHash)
-	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
+		stakingKey,
+	)
+	require.NoError(t, err)
+	addressBytes, err := address.Bytes()
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&babbage.BabbageTransactionOutput{
+		OutputAddress: address,
+		OutputAmount:  mary.MaryTransactionOutputValue{Amount: stake},
+	})
+	require.NoError(t, err)
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
 		TxId:       txId,
 		OutputIdx:  0,
 		StakingKey: stakingKey,
+		Address:    addressBytes,
 		Amount:     dbtypes.Uint64(stake),
 		AddedSlot:  slot,
 	}))
+	require.NoError(t, db.Blob().SetUtxo(txn.Blob(), txId, 0, encoded))
+	require.NoError(t, txn.Commit())
 	return pkh
 }
 

@@ -1055,26 +1055,15 @@ type LedgerStateConfig struct {
 	Database                 *database.Database
 	ChainManager             *chain.ChainManager
 	EventBus                 *event.EventBus
-	// UtxoSet, when set, is kept equal to the live UTxO set: every change
-	// is applied to it synchronously after the commit that made it, before
-	// the next block is validated.
-	UtxoSet UtxoSetWriter
-	// UtxoSetReads selects where validation resolves its inputs: one of
-	// UtxoSetReadsOff, UtxoSetReadsVerify and UtxoSetReadsSet. A mode
-	// other than off needs a UtxoSet that is also a UtxoSetReader.
-	UtxoSetReads string
-	// UtxoSetOnly makes UtxoSet the only copy of the live UTxO set: the
-	// metadata store keeps no utxo rows, validation reads only the set,
-	// rollbacks roll the set back from its own journal, and UTxO stake is
-	// read from the set. Core storage mode only; UtxoSet must be a
-	// UtxoSetReader and a UtxoSetRollbacker.
-	UtxoSetOnly bool
-	// LedgerStateSetOnly declares that the set-only switch is on. It does
-	// not by itself stop a read falling back to the metadata store: a read
-	// fails with ErrLedgerStateAsOfUnavailable only when the family it
-	// needs is in the drained mask (SetDrainedFamilies).
-	LedgerStateSetOnly bool
-	CardanoNodeConfig  *cardano.CardanoNodeConfig
+	// UtxoSet is the live UTxO set, the only copy of it: the metadata store
+	// keeps no utxo rows, validation reads only the set, rollbacks roll the
+	// set back from its own journal, and UTxO stake is read from the set.
+	// Every change is applied to it synchronously after the commit that
+	// made it, before the next block is validated. It is required, needs
+	// core storage mode, and must be a UtxoSetReader and a
+	// UtxoSetRollbacker.
+	UtxoSet           UtxoSetWriter
+	CardanoNodeConfig *cardano.CardanoNodeConfig
 	// Network is the CLI/YAML/env network selector dingo was started with
 	// (e.g. "mainnet", "preprod", "prime-mainnet"). Shelley genesis alone
 	// cannot distinguish real Cardano mainnet from a foreign chain that
@@ -1754,12 +1743,6 @@ type LedgerState struct {
 	// utxoSetByMeta finds an open transaction's batch from the metadata
 	// transaction the metadata store writes in, for LiveUtxoCbor.
 	utxoSetByMeta map[types.Txn]*utxoSetBatch
-	// utxoSetReadMismatches counts verify-mode reads where the live UTxO
-	// set and the metadata store disagreed, for log sampling.
-	utxoSetReadMismatches atomic.Uint64
-	// nonceSetReadMismatches counts verify-mode nonce reads where the live
-	// UTxO set's answer differed from the metadata store's.
-	nonceSetReadMismatches atomic.Uint64
 	// nonceSetLoaded caches that the live UTxO set holds every nonce.
 	nonceSetLoaded atomic.Bool
 	// poolHistoryLoaded caches that the live UTxO set holds every pool
@@ -1777,36 +1760,17 @@ type LedgerState struct {
 	// genesisMIRLoaded caches that the live UTxO set holds every genesis key
 	// delegation and MIR certificate.
 	genesisMIRLoaded atomic.Bool
-	// certHistoryReadMismatches counts verify-mode genesis delegation and MIR
-	// certificate reads where the set's answer differed.
-	certHistoryReadMismatches atomic.Uint64
 	// rewardOutputsLoaded caches that the live UTxO set holds the reward
 	// outputs, credited rounds and post-snapshot credits.
 	rewardOutputsLoaded atomic.Bool
-	// rewardOutputReadMismatches counts verify-mode reward output reads
-	// where the live UTxO set's answer differed from the metadata store's.
-	rewardOutputReadMismatches atomic.Uint64
-	// epochStateReadMismatches counts verify-mode epoch state reads where
-	// the live UTxO set's answer differed from the metadata store's.
-	epochStateReadMismatches atomic.Uint64
 	// epochStateSetLoaded caches that the set holds every epoch state row.
 	epochStateSetLoaded atomic.Bool
 	// epochSummarySetLoaded caches that the set holds every epoch summary
 	// row.
 	epochSummarySetLoaded atomic.Bool
-	// epochSummaryReadMismatches counts verified epoch summary and total
-	// active stake reads where the set's answer differed from the metadata
-	// store's.
-	epochSummaryReadMismatches atomic.Uint64
-	// networkStateReadMismatches counts verify-mode network state and
-	// donation reads where the set's answer differed.
-	networkStateReadMismatches atomic.Uint64
 	// networkStateSetLoaded caches that the set holds every network state
 	// and donation row.
 	networkStateSetLoaded atomic.Bool
-	// pparamsReadMismatches counts verify-mode protocol parameter reads
-	// where the set's answer differed.
-	pparamsReadMismatches atomic.Uint64
 	// pparamsSetLoaded caches that the set holds every protocol parameter
 	// row.
 	pparamsSetLoaded atomic.Bool
@@ -1847,36 +1811,6 @@ type LedgerState struct {
 	// governanceSetLoaded caches that the set holds every proposal and
 	// vote.
 	governanceSetLoaded atomic.Bool
-	// accountReadMismatches counts verified account reads where the set's
-	// account differed.
-	accountReadMismatches atomic.Uint64
-	// drepReadMismatches counts verified DRep reads where the set's answer
-	// differed.
-	drepReadMismatches atomic.Uint64
-	// poolReadMismatches counts verified pool reads where the set's answer
-	// differed.
-	poolReadMismatches atomic.Uint64
-	// registrationReadMismatches counts verified registration history reads
-	// where the set's answer differed.
-	registrationReadMismatches atomic.Uint64
-	// opCertReadMismatches counts verified op-cert counter reads where the
-	// set's answer differed.
-	opCertReadMismatches atomic.Uint64
-	// committeeReadMismatches counts verified committee and constitution
-	// reads where the set's answer differed.
-	committeeReadMismatches atomic.Uint64
-	// governanceReadMismatches counts verified proposal and vote reads where
-	// the set's answer differed.
-	governanceReadMismatches atomic.Uint64
-	// pparamUpdateReadMismatches counts verified protocol parameter update
-	// proposal reads where the set's rows differed.
-	pparamUpdateReadMismatches atomic.Uint64
-	// setComputedMismatches counts verify-mode results the set computed
-	// that differed from what the metadata store wrote.
-	setComputedMismatches atomic.Uint64
-	// liveStakeReadMismatches counts verified live stake reads where the
-	// set's figures differed.
-	liveStakeReadMismatches atomic.Uint64
 	// utxoBatchLookups counts per-block UtxosByRefs prefetch queries made by
 	// ledgerProcessBlock. Tests only.
 	utxoBatchLookups atomic.Uint64
@@ -2780,20 +2714,14 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	if cfg.StartInDijkstra && !cfg.EnableDijkstra {
 		return nil, errors.New("StartInDijkstra requires EnableDijkstra")
 	}
-	if cfg.UtxoSetReads != UtxoSetReadsOff {
-		if _, ok := cfg.UtxoSet.(UtxoSetReader); !ok {
-			return nil, errors.New("UtxoSetReads needs a readable UtxoSet")
-		}
+	if cfg.UtxoSet == nil {
+		return nil, errors.New("the ledger needs a live UTxO set")
 	}
-	if cfg.UtxoSetOnly {
-		if _, ok := cfg.UtxoSet.(UtxoSetReader); !ok {
-			return nil, errors.New("UtxoSetOnly needs a readable UtxoSet")
-		}
-		if _, ok := cfg.UtxoSet.(UtxoSetRollbacker); !ok {
-			return nil, errors.New(
-				"UtxoSetOnly needs a UtxoSet that rolls back",
-			)
-		}
+	if _, ok := cfg.UtxoSet.(UtxoSetReader); !ok {
+		return nil, errors.New("the live UTxO set must be readable")
+	}
+	if _, ok := cfg.UtxoSet.(UtxoSetRollbacker); !ok {
+		return nil, errors.New("the live UTxO set must roll back")
 	}
 	byronPBFT, err := newByronPBFTCache(cfg)
 	if err != nil {
@@ -2885,26 +2813,15 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 				pipeline.DefaultMaxPendingBlocks + 1
 		}
 	}
-	if cfg.UtxoSetOnly {
-		if err := ls.EnableUtxoSetOnly(); err != nil {
-			return nil, err
-		}
+	if err := ls.db.SetLiveUtxoSource(ls); err != nil {
+		ls.publishCancel()
+		return nil, fmt.Errorf("use the live UTxO set: %w", err)
 	}
 	ls.installNonceSource()
 	ls.installEpochSource()
 	ls.installPParamsSource()
 	ls.installPoolSource()
 	return ls, nil
-}
-
-// EnableUtxoSetOnly makes the metadata store keep no utxo rows and resolve
-// inputs through the live UTxO set; see LedgerStateConfig.UtxoSetOnly.
-func (ls *LedgerState) EnableUtxoSetOnly() error {
-	ls.config.UtxoSetOnly = true
-	if err := ls.db.SetLiveUtxoSource(ls); err != nil {
-		return fmt.Errorf("use the live UTxO set: %w", err)
-	}
-	return nil
 }
 
 func cloneSnapshotBytes(value []byte) []byte {
@@ -5963,9 +5880,9 @@ func (ls *LedgerState) rollbackWithBlocksAndIntentOptions(
 				)
 			}
 		}
-		if err := ls.stageUtxoRollbackEvent(ctx, txn, point); err != nil {
-			return err
-		}
+		// The metadata store holds no utxo rows; the set rolls back from its
+		// own journal after the commit and its net change is published.
+		ls.stageUtxoSetRollback(txn, point) //nolint:contextcheck // the change is published after the commit, under the ledger lifecycle
 		var err error
 		if ls.rollbackTruncateAfterSlotFunc != nil {
 			newTip, newNonce, err = ls.rollbackTruncateAfterSlotFunc(
@@ -10705,7 +10622,7 @@ func (ls *LedgerState) processBlocksFromSource(
 					if trustedReplay &&
 						!dijkstraEraGate(snapshotEra) && end-i > 1 {
 						trustedReplayPrefetched = ls.prefetchBlockUtxos(
-							ctx, txn, trustedReplayTransactions,
+							txn, trustedReplayTransactions,
 							trustedReplayPrefetched, nil,
 						)
 					}
@@ -11732,7 +11649,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	blockValidateStart := time.Now()
 	if shouldValidate {
 		prefetchedUtxos = ls.prefetchBlockUtxos(
-			ctx, txn, block.Transactions(), aheadUtxosFrom(ctx), nil,
+			txn, block.Transactions(), aheadUtxosFrom(ctx), nil,
 		)
 	}
 	// Check the ranking block after any applicable endorser transactions,
@@ -16663,7 +16580,7 @@ func (ls *LedgerState) UtxoByRef(
 	txId []byte,
 	outputIdx uint32,
 ) (*models.Utxo, error) {
-	return ls.utxoByRefForValidation(context.Background(), txId, outputIdx, nil)
+	return ls.utxoByRefForValidation(txId, outputIdx, nil)
 }
 
 // UtxosByRefs returns the live UTxOs matching the given references in a
@@ -16672,7 +16589,7 @@ func (ls *LedgerState) UtxoByRef(
 func (ls *LedgerState) UtxosByRefs(
 	refs []models.UtxoId,
 ) ([]models.Utxo, error) {
-	return ls.utxosByRefsForValidation(context.Background(), refs, nil)
+	return ls.utxosByRefsForValidation(refs, nil)
 }
 
 // UtxosByRefsBounded is UtxosByRefs for query.ReadUtxos: it observes ctx and
@@ -16683,7 +16600,36 @@ func (ls *LedgerState) UtxosByRefsBounded(
 	refs []models.UtxoId,
 	maxBytes int64,
 ) ([]models.Utxo, error) {
-	return ls.ledgerDB().UtxosByRefsBounded(ctx, refs, maxBytes, nil)
+	if len(refs) == 0 {
+		return []models.Utxo{}, nil
+	}
+	r, ok := ls.utxoSetReader()
+	if !ok {
+		return nil, ErrUtxoSetUnserved
+	}
+	utxos := make([]models.Utxo, 0, len(refs))
+	var used int64
+	for _, ref := range refs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		cbor, live, err := ls.utxoSetGet(r, nil, ref.Hash, ref.Idx)
+		if err != nil {
+			return nil, err
+		}
+		if !live {
+			continue
+		}
+		size := int64(len(cbor))
+		if maxBytes > 0 && len(utxos) > 0 && used+size > maxBytes {
+			return nil, database.ErrUtxoBytesExceeded
+		}
+		used += size
+		utxos = append(utxos, models.Utxo{
+			TxId: ref.Hash, OutputIdx: ref.Idx, Cbor: cbor,
+		})
+	}
+	return utxos, nil
 }
 
 // UtxosByAddress returns all UTxOs that belong to any of the specified addresses
@@ -16692,7 +16638,6 @@ func (ls *LedgerState) UtxosByAddress(
 	addrs []ledger.Address,
 ) ([]models.Utxo, error) {
 	utxos, err := ls.utxosByAddress(
-		ctx,
 		addrs,
 		0,
 		nil,
@@ -17709,7 +17654,7 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 			)
 		}
 		resolve := func(refs []models.UtxoId) ([]models.Utxo, error) {
-			return ls.utxosByRefsForValidation(ctx, refs, txn)
+			return ls.utxosByRefsForValidation(refs, txn)
 		}
 		refScriptSize := func(
 			tx ledger.Transaction,

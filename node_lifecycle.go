@@ -88,6 +88,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/storageadopt"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
@@ -213,12 +214,6 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: n.snapshotMgr.Stop,
 		})
 	}
-	if n.utxoShadow != nil {
-		stops = append(stops, namedStop{
-			name: "shadow UTxO set",
-			stop: n.stopUtxoShadow,
-		})
-	}
 	if n.dbLifecycleMgr != nil {
 		stops = append(stops, namedStop{
 			name: "database lifecycle manager",
@@ -229,6 +224,12 @@ func (n *Node) quiesceComponentStops() []namedStop {
 		stops = append(stops, namedStop{
 			name: "planner statistics manager",
 			stop: n.plannerStatsMgr.Stop,
+		})
+	}
+	if n.indexerPlannerStatsMgr != nil {
+		stops = append(stops, namedStop{
+			name: "IndexerDB planner statistics manager",
+			stop: n.indexerPlannerStatsMgr.Stop,
 		})
 	}
 	return stops
@@ -830,6 +831,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
 			return fmt.Errorf("consensus database compatibility: %w", err)
 		}
+		if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
+			return err
+		}
 		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
 			return err
 		}
@@ -842,13 +846,6 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		n.historyExpiry = n.newHistoryExpiryPruner()
 		if err := n.historyExpiry.Start(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf("failed to restart history expiry: %w", err)
-		}
-	}
-
-	if n.config.immutableDB.Enabled {
-		n.blockPromoter = n.newBlockPromoter()
-		if err := n.blockPromoter.Start(n.ctx); err != nil { //nolint:contextcheck
-			return fmt.Errorf("failed to restart block promotion: %w", err)
 		}
 	}
 
@@ -916,9 +913,6 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	if err := n.configureSnapshotManager(); err != nil {
 		return err
 	}
-	if err := n.startUtxoShadow(); err != nil {
-		return err
-	}
 
 	// Rebuild the Koios parity observer (if enabled) against the fresh
 	// n.db a live restore/truncate just reinitialized, and resubscribe it to
@@ -952,6 +946,15 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		return fmt.Errorf("failed to restart snapshot manager: %w", err)
 	}
 
+	// The promoter reads the started ledger's immutable point, so it starts
+	// after the ledger has prepared its epoch cache.
+	if n.immutableEnabled() {
+		n.blockPromoter = n.newBlockPromoter()
+		if err := n.blockPromoter.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("failed to restart block promotion: %w", err)
+		}
+	}
+
 	n.dbLifecycleMgr = n.newDatabaseLifecycleManager()
 	if err := n.dbLifecycleMgr.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf(
@@ -969,6 +972,14 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 			"failed to restart planner statistics manager: %w",
 			err,
 		)
+	}
+	if n.indexerDB != nil {
+		if err := n.startIndexerPlannerStatsManager(n.ctx, true); err != nil { //nolint:contextcheck
+			return fmt.Errorf(
+				"failed to restart IndexerDB planner statistics manager: %w",
+				err,
+			)
+		}
 	}
 
 	if n.config.leiosRuntimeEnabled() {
@@ -1206,11 +1217,12 @@ func (n *Node) reinitializeAPIServers() error {
 		return err
 	}
 	if n.apiStorageMode().IsAPI() && blockfrostPort > 0 {
-		adapter, err := blockfrost.NewNodeAdapter(n.ledgerState, n.mempool)
+		adapter, err := blockfrost.NewNodeAdapter(
+			n.ledgerState, n.mempool, n.indexerStore,
+		)
 		if err != nil {
 			return fmt.Errorf("recreating blockfrost node adapter: %w", err)
 		}
-		adapter.SetIndexerStore(n.indexerStore)
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
 			blockfrostSelection.Provider, blockfrostSelection.Config,
@@ -1232,11 +1244,12 @@ func (n *Node) reinitializeAPIServers() error {
 		return err
 	}
 	if n.apiStorageMode().IsAPI() && kupoPort > 0 {
-		adapter, err := kupo.NewNodeAdapter(n.ledgerState)
+		adapter, err := kupo.NewNodeAdapter(
+			n.ledgerState, n.indexerStore,
+		)
 		if err != nil {
 			return fmt.Errorf("recreating kupo node adapter: %w", err)
 		}
-		adapter.SetIndexerStore(n.indexerStore)
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIKupo,
 			kupoSelection.Provider, kupoSelection.Config,
@@ -1414,6 +1427,8 @@ func (n *Node) storageSelections() internalplugins.StorageSelections {
 	return internalplugins.StorageSelections{
 		Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob],
 		Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata],
+		SplitIndexer: n.splitIndexer() ||
+			(n.config.cfg != nil && n.config.cfg.ServerCoreNamespace),
 	}
 }
 
@@ -1538,11 +1553,6 @@ func (n *Node) Snapshot(
 		if err := n.checkIndexerSnapshotSupported(); err != nil {
 			return lifecycle.Manifest{}, err
 		}
-		if err := dblifecycle.CheckIndexerSnapshotDestination(
-			n.config.databaseLifecycle.SnapshotCloudDestination,
-		); err != nil {
-			return lifecycle.Manifest{}, err
-		}
 		// The IndexerDB first: its tip never passes the ledger's, and the
 		// ledger snapshot below is taken at or after it.
 		var cleanup func()
@@ -1553,6 +1563,9 @@ func (n *Node) Snapshot(
 			return lifecycle.Manifest{}, err
 		}
 		defer cleanup()
+	}
+	if stagedIndexer != "" {
+		manifestOpts = append(manifestOpts, lifecycle.WithIndexerBackup(stagedIndexer, indexerMeta.TipSlot, indexerMeta.TipHash))
 	}
 	manifest, err := lifecycle.SnapshotToCloud(
 		ctx,
@@ -1571,16 +1584,7 @@ func (n *Node) Snapshot(
 		description,
 		manifestOpts...,
 	)
-	if err != nil || stagedIndexer == "" {
-		return manifest, err
-	}
-	if err := dblifecycle.InstallIndexerPayload(
-		destDir, stagedIndexer, indexerMeta,
-	); err != nil {
-		_ = lifecycle.RemoveSnapshotContext(context.WithoutCancel(ctx), destDir)
-		return lifecycle.Manifest{}, err
-	}
-	return manifest, nil
+	return manifest, err
 }
 
 func (n *Node) stopForPendingRestoreRollback(
@@ -1635,23 +1639,55 @@ func (n *Node) Restore(
 	n.snapshotMu.Lock()
 	defer n.snapshotMu.Unlock()
 
-	// Checked before anything is quiesced, so a snapshot that cannot restore
-	// onto a split node is refused while the node is still serving.
-	var indexerSnapshot indexerPayload
-	if n.splitIndexer() {
-		if err := n.checkIndexerSnapshotSupported(); err != nil {
-			return lifecycle.Manifest{}, err
-		}
-		var err error
-		if indexerSnapshot, err = dblifecycle.ReadIndexerPayload(snapshotDir); err != nil {
-			return lifecycle.Manifest{}, err
-		}
-	}
 	// Resolved before anything is quiesced so an unusable trust key refuses
 	// the restore while the node is still serving.
 	manifestOpts, err := dblifecycle.ManifestOptions(n.config.databaseLifecycle)
 	if err != nil {
 		return lifecycle.Manifest{}, err
+	}
+
+	restoreStorage := n.restoreStorageConfig()
+	validateManifest := func(m lifecycle.Manifest) error {
+		compatibilityGates := n.nodeSettingsGateValues()
+		if n.splitIndexer() {
+			compatibilityGates["indexer_layout"] = n.indexerLayout()
+		}
+		if n.config.networkMagic != 0 {
+			compatibilityGates["network_magic"] = strconv.FormatUint(
+				uint64(n.config.networkMagic), 10,
+			)
+		}
+		if n.config.startEra != "" {
+			compatibilityGates["start_era"] = string(n.config.startEra)
+		} else {
+			compatibilityGates["start_era"] = nodesettings.NoStartEra
+		}
+		if err := restoreStorage.CheckCompatibility(
+			m,
+			n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
+			n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
+			string(n.config.storageMode),
+			n.config.network,
+			compatibilityGates,
+		); err != nil {
+			return fmt.Errorf(
+				"snapshot is not compatible with the running node: %w", err,
+			)
+		}
+		return nil
+	}
+	if n.splitIndexer() {
+		// Refuse an incompatible snapshot before pausing the node. Restore
+		// validates the manifest again before touching any staged stores.
+		manifest, err := lifecycle.PeekManifest(
+			ctx, n.destinationRegistry, snapshotDir, manifestOpts...,
+		)
+		if err != nil {
+			return lifecycle.Manifest{}, err
+		}
+		if err := validateManifest(manifest); err != nil {
+			return lifecycle.Manifest{}, err
+		}
 	}
 
 	// Every removal and rename below works by pathname in dataDir's
@@ -1778,32 +1814,8 @@ func (n *Node) Restore(
 	manifest, recovery, err := lifecycle.RestoreRecoverable(
 		metadata.AllowResetOfPopulatedTarget(ctx),
 		restoreHost, n.destinationRegistry, snapshotDir, stagingDir,
-		func(m lifecycle.Manifest) error {
-			compatibilityGates := n.nodeSettingsGateValues()
-			if n.config.networkMagic != 0 {
-				compatibilityGates["network_magic"] = strconv.FormatUint(
-					uint64(n.config.networkMagic), 10,
-				)
-			}
-			if n.config.startEra != "" {
-				compatibilityGates["start_era"] = string(n.config.startEra)
-			} else {
-				compatibilityGates["start_era"] = nodesettings.NoStartEra
-			}
-			if err := m.CheckCompatibility(
-				n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
-				n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
-				string(n.config.storageMode),
-				n.config.network,
-				compatibilityGates,
-			); err != nil {
-				return fmt.Errorf(
-					"snapshot is not compatible with the running node: %w", err,
-				)
-			}
-			return nil
-		},
-		n.restoreStorageConfig(),
+		validateManifest,
+		restoreStorage,
 		manifestOpts...,
 	)
 	if err != nil {
@@ -1818,34 +1830,6 @@ func (n *Node) Restore(
 			)
 		}
 		return lifecycle.Manifest{}, fmt.Errorf("restore: %w", err)
-	}
-
-	if n.splitIndexer() {
-		if err := func() error {
-			if err := n.validateIndexerPayloadTip(
-				ctx, stagingDir, indexerSnapshot,
-			); err != nil {
-				return err
-			}
-			return restoreIndexerPayload(
-				snapshotDir, stagingDir, indexerSnapshot, manifest,
-			)
-		}(); err != nil {
-			_ = lifecycle.RemoveRestoreWorkDir(stagingDir)
-			if rollbackErr := recovery.Rollback(ctx); rollbackErr != nil {
-				n.cancel()
-				return lifecycle.Manifest{}, errors.Join(err, rollbackErr)
-			}
-			if resumeErr := n.reinitializeAndResume(
-				context.WithoutCancel(ctx),
-			); resumeErr != nil {
-				n.cancel()
-				return lifecycle.Manifest{}, fmt.Errorf(
-					"restore: %w (resume also failed: %w)", err, resumeErr,
-				)
-			}
-			return lifecycle.Manifest{}, fmt.Errorf("restore: %w", err)
-		}
 	}
 
 	backupDir, err := n.swapInRestoredDataDir(stagingDir)
@@ -2172,7 +2156,7 @@ func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
 }
 
 func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
-	return lifecycle.RestoreStorageConfig{
+	restoreStorage := lifecycle.RestoreStorageConfig{
 		Blob:          n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
 		Metadata:      n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
 		ActiveDataDir: n.config.dataDir,
@@ -2184,9 +2168,38 @@ func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
 			n.config.cardanoNodeConfig, "", n.config.network,
 		),
 	}
+	if n.splitIndexer() && n.config.cfg != nil &&
+		storageadopt.SupportsAPIAdoption(n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider) {
+		restoreStorage.AdoptLegacyAPI = func(ctx context.Context, stagingDir string) error {
+			cfg := *n.config.cfg
+			cfg.StorageMode = "api"
+			cfg.Network = n.config.network
+			cfg.NetworkMagic = n.config.networkMagic
+			cfg.StartEra = n.config.startEra
+			cfg.Plugins.Storage.Blob = n.config.pluginSelections[plugin.CapabilityStorageBlob]
+			cfg.Plugins.Storage.Metadata = n.config.pluginSelections[plugin.CapabilityStorageMetadata]
+			return storageadopt.AdoptStagedAPI(
+				ctx, cfg, n.config.logger, n.config.cardanoNodeConfig, stagingDir,
+			)
+		}
+	}
+	return restoreStorage
+}
+
+// ReconcileInterruptedRestore completes restore recovery before startup or
+// migration opens a database. cfg must describe the stores being recovered.
+func ReconcileInterruptedRestore(ctx context.Context, cfg Config) error {
+	n := &Node{config: cfg}
+	return n.reconcileInterruptedRestore(ctx)
 }
 
 func (n *Node) reconcileInterruptedRestore(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if n.config.dataDir == "" {
+		return nil
+	}
 	if err := n.reconcileInterruptedLiveRestoreSwap(); err != nil {
 		return fmt.Errorf(
 			"reconcile interrupted live restore swap: %w", err,
@@ -2213,17 +2226,26 @@ func (n *Node) reconcileInterruptedRemoteRestore(ctx context.Context) error {
 	_, dataErr := os.Stat(dataDir)
 	_, backupErr := os.Stat(dataDir + preRestoreBackupSuffix)
 	if dataErr != nil && !os.IsNotExist(dataErr) {
-		return fmt.Errorf("stat data directory during remote restore recovery: %w", dataErr)
+		return fmt.Errorf(
+			"stat data directory during remote restore recovery: %w",
+			dataErr,
+		)
 	}
 	if backupErr != nil && !os.IsNotExist(backupErr) {
-		return fmt.Errorf("stat backup directory during remote restore recovery: %w", backupErr)
+		return fmt.Errorf(
+			"stat backup directory during remote restore recovery: %w",
+			backupErr,
+		)
 	}
 	if !remoteRestoreNeedsRollback(dataErr == nil, backupErr == nil) {
 		return nil
 	}
 	host, err := internalplugins.NewHost()
 	if err != nil {
-		return fmt.Errorf("build storage plugin host for restore recovery: %w", err)
+		return fmt.Errorf(
+			"build storage plugin host for restore recovery: %w",
+			err,
+		)
 	}
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
 	if err := recoverInterruptedRestore(
@@ -2441,14 +2463,12 @@ func (n *Node) Truncate(
 		// The truncate's rollback reads the critical indexes a Mithril run
 		// this operation aborted left dropped; without them it scans the
 		// utxo table once per rolled-back transaction.
-		if !n.config.storageMode.IsAPI() {
-			if err := repairPendingCriticalIndexes(
-				ctx, tmpDB, n.config.logger,
-			); err != nil {
-				return 0, fmt.Errorf(
-					"%w: %w", lifecycle.ErrTruncateNotStarted, err,
-				)
-			}
+		if err := repairPendingCriticalIndexes(
+			ctx, tmpDB, n.config.logger,
+		); err != nil {
+			return 0, fmt.Errorf(
+				"%w: %w", lifecycle.ErrTruncateNotStarted, err,
+			)
 		}
 
 		setOpts, closeSet, err := dblifecycle.TruncateOptions(

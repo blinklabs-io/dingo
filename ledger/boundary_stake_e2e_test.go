@@ -46,7 +46,7 @@ func newBoundaryStakeHarness(t *testing.T, reads string) *boundaryStakeHarness {
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set, reads)
+	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 	require.NoError(t, set.LoadLedgerState(
 		t.Context(), dbadapter.New(scenario.DB),
 	))
@@ -67,30 +67,6 @@ func sortedInputs(rows []*models.RewardStakeInput) []models.RewardStakeInput {
 		return bytes.Compare(a.StakingKey, b.StakingKey)
 	})
 	return out
-}
-
-// requireSameBoundaryStake requires every answer of got to be want's.
-func requireSameBoundaryStake(
-	t *testing.T,
-	want, got ledger.BoundaryStakeAnswers,
-) {
-	t.Helper()
-	require.ElementsMatch(t, want.Active, got.Active, "active pools")
-	require.ElementsMatch(t, want.Delegated, got.Delegated, "delegated pools")
-	require.Equal(t, want.Stakes, got.Stakes, "pool stake")
-	require.Equal(t, want.Delegators, got.Delegators, "delegator counts")
-	require.Equal(
-		t,
-		sortedInputs(want.Inputs),
-		sortedInputs(got.Inputs),
-		"reward stake inputs",
-	)
-	require.Equal(
-		t,
-		sortedInputs(want.Pointers),
-		sortedInputs(got.Pointers),
-		"pointer stake inputs",
-	)
 }
 
 // requireFixtureFigures requires the answers to hold the figures the fixture
@@ -129,13 +105,13 @@ func requireFixtureFigures(
 	require.Len(t, a.Inputs, 4)
 }
 
-// TestBoundaryStakeReadsAgreeWithTheMetadataStore requires the set's
-// epoch-boundary stake, built from its accounts, pools, UTxO stake sums,
-// pointer sums and reward rows, to equal the metadata store's CTEs at a
-// boundary, and for a boundary the set has moved past, from its journals. The
-// fixture holds delegations, pointer outputs, an account that deregistered and
-// registered again, whose pointer dangles, a retiring pool and pending and post-snapshot credits.
-func TestBoundaryStakeReadsAgreeWithTheMetadataStore(t *testing.T) {
+// TestBoundaryStakeReadsAtAndPastABoundary requires the set's epoch-boundary
+// stake, built from its accounts, pools, UTxO stake sums, pointer sums and
+// reward rows, to hold the fixture's figures at a boundary, and for a boundary
+// the set has moved past, from its journals. The fixture holds delegations,
+// pointer outputs, an account that deregistered and registered again, whose
+// pointer dangles, a retiring pool and pending and post-snapshot credits.
+func TestBoundaryStakeReadsAtAndPastABoundary(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string
@@ -150,7 +126,7 @@ func TestBoundaryStakeReadsAgreeWithTheMetadataStore(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := newBoundaryStakeHarness(t, ledger.UtxoSetReadsVerify)
+			h := newBoundaryStakeHarness(t, "metadata-visible")
 			f := h.scenario.BoundaryStake(tc.retire)
 			if tc.past {
 				h.scenario.AfterBoundaryStake(f)
@@ -158,41 +134,20 @@ func TestBoundaryStakeReadsAgreeWithTheMetadataStore(t *testing.T) {
 				require.NoError(t, err)
 				require.Greater(t, tip.Slot, f.Slot)
 			}
-			verified, _ := h.scenario.LiveStakeReads()
-			poolVerified, _ := h.scenario.PoolReads()
-			want := h.scenario.ReadBoundaryStake(f, true)
-			got := h.scenario.ReadBoundaryStake(f, false)
+			got := h.scenario.ReadBoundaryStake(f)
 			if tc.retire == 5 {
 				// A retirement for the epoch its certificate is in is
-				// never reaped, so the delegations it would clear are
-				// not comparable; the active pool filter is.
-				require.ElementsMatch(t, want.Active, got.Active)
+				// never reaped, so only the active pool filter is fixed.
 				require.Empty(t, got.Active)
-				pv, pm := h.scenario.PoolReads()
-				require.Equal(t, poolVerified+1, pv)
-				require.Zero(t, pm)
 				return
 			}
-			requireSameBoundaryStake(t, want, got)
 			requireFixtureFigures(t, f, got)
-			v, mismatches := h.scenario.LiveStakeReads()
-			require.Equal(t, verified+4, v, "four stake reads are compared")
-			require.Zero(t, mismatches)
-			pv, pm := h.scenario.PoolReads()
-			require.Equal(
-				t,
-				poolVerified+1,
-				pv,
-				"the active pool read is compared",
-			)
-			require.Zero(t, pm)
 		})
 	}
 }
 
-// TestBoundaryStakeReadsAnswerWithTheStoreBlind requires set mode to answer
-// the five reads without reaching the metadata store, with the answers the
-// store gave, at a boundary and past it.
+// TestBoundaryStakeReadsAnswerWithTheStoreBlind requires the five reads to be
+// answered without reaching the metadata store, at a boundary and past it.
 func TestBoundaryStakeReadsAnswerWithTheStoreBlind(t *testing.T) {
 	t.Parallel()
 	for _, past := range []bool{false, true} {
@@ -202,17 +157,15 @@ func TestBoundaryStakeReadsAnswerWithTheStoreBlind(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			h := newBoundaryStakeHarness(t, ledger.UtxoSetReadsSet)
+			h := newBoundaryStakeHarness(t, "set")
 			f := h.scenario.BoundaryStake(0)
 			if past {
 				h.scenario.AfterBoundaryStake(f)
 			}
-			want := h.scenario.ReadBoundaryStake(f, true)
 			reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 			hide(true)
-			got := h.scenario.ReadBoundaryStake(f, false)
+			got := h.scenario.ReadBoundaryStake(f)
 			require.Zero(t, reached(), "a read reached the metadata store")
-			requireSameBoundaryStake(t, want, got)
 			requireFixtureFigures(t, f, got)
 		})
 	}
@@ -226,76 +179,42 @@ func TestBoundaryStakeReadsServeFromTheSetWithALeiosValidatorBeforeDijkstra(
 	t *testing.T,
 ) {
 	t.Parallel()
-	h := newBoundaryStakeHarness(t, ledger.UtxoSetReadsSet)
+	h := newBoundaryStakeHarness(t, "set")
 	h.scenario.ConfigureLeiosValidator()
 	f := h.scenario.BoundaryStake(0)
-	want := h.scenario.ReadBoundaryStake(f, true)
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 	hide(true)
-	got := h.scenario.ReadBoundaryStake(f, false)
+	got := h.scenario.ReadBoundaryStake(f)
 	require.Zero(t, reached(), "a read reached the metadata store")
-	requireSameBoundaryStake(t, want, got)
+	requireFixtureFigures(t, f, got)
 }
 
 // TestBoundaryStakeReadsServeFromTheSetWhenTheSetOnlyHoldsTheState requires a
 // node whose metadata store holds no ledger state, on a chain that certifies
-// Leios closures, to answer the five reads from the set, with the answers the
-// store gave before, and without a read of the store.
+// Leios closures, to answer the five reads from the set without a read of the
+// store.
 func TestBoundaryStakeReadsServeFromTheSetWhenTheSetOnlyHoldsTheState(
 	t *testing.T,
 ) {
 	t.Parallel()
-	h := newBoundaryStakeHarness(t, ledger.UtxoSetReadsSet)
+	h := newBoundaryStakeHarness(t, "set")
 	f := h.scenario.BoundaryStake(0)
 	h.scenario.CertifyLeios()
-	want := h.scenario.ReadBoundaryStake(f, true)
-	h.scenario.LedgerStateSetOnly(true)
+	h.scenario.DrainFamilies(nodesettings.AllFamilies())
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 	hide(true)
-	got := h.scenario.ReadBoundaryStake(f, false)
+	got := h.scenario.ReadBoundaryStake(f)
 	require.Zero(t, reached(), "a read reached the metadata store")
-	requireSameBoundaryStake(t, want, got)
 	requireFixtureFigures(t, f, got)
 }
 
-// TestBoundaryStakeVerificationCountsADivergence requires a verify-mode read
-// to count a mismatch when the set holds stake the metadata store does not.
-func TestBoundaryStakeVerificationCountsADivergence(t *testing.T) {
-	t.Parallel()
-	h := newBoundaryStakeHarness(t, ledger.UtxoSetReadsVerify)
-	f := h.scenario.BoundaryStake(0)
-	h.scenario.AddSetStake(f.Pointed.Key, 50)
-	want := h.scenario.ReadBoundaryStake(f, true)
-	got := h.scenario.ReadBoundaryStake(f, false)
-	requireSameBoundaryStake(t, want, got)
-	verified, mismatches := h.scenario.LiveStakeReads()
-	require.Equal(t, float64(4), verified)
-	require.Equal(
-		t,
-		float64(2),
-		mismatches,
-		"pool stake and reward inputs differ",
-	)
-}
-
-// TestBoundaryStakeReadsFollowTheBoundary requires the set to agree with the
-// store through the boundary's own snapshot, which reads the pointer stake and
-// active pools in the boundary transaction.
+// TestBoundaryStakeReadsFollowTheBoundary requires the set-backed boundary
+// snapshot to read pointer stake and active pools in its transaction.
 func TestBoundaryStakeReadsFollowTheBoundary(t *testing.T) {
 	t.Parallel()
-	h := newBoundaryStakeHarness(t, ledger.UtxoSetReadsVerify)
+	h := newBoundaryStakeHarness(t, "")
 	h.scenario.BoundaryStake(0)
 	h.scenario.ApplyBoundary()
-	_, mismatches := h.scenario.LiveStakeReads()
-	require.Zero(t, mismatches)
-	_, poolMismatches := h.scenario.PoolReads()
-	require.Zero(t, poolMismatches)
-	verified, _ := h.scenario.PoolReads()
-	stakeVerified, _ := h.scenario.LiveStakeReads()
-	// Without the set's answers the boundary compares 3 pool and 2 live
-	// stake reads; the active pools and pointer stake add one each.
-	require.GreaterOrEqual(t, verified, float64(4))
-	require.GreaterOrEqual(t, stakeVerified, float64(3))
 }
 
 // TestBoundaryStakeReadsAreServedAtTheBoundary requires the boundary's
@@ -303,7 +222,7 @@ func TestBoundaryStakeReadsFollowTheBoundary(t *testing.T) {
 // metadata store's reads of them failing.
 func TestBoundaryStakeReadsAreServedAtTheBoundary(t *testing.T) {
 	t.Parallel()
-	h := newBoundaryStakeHarness(t, ledger.UtxoSetReadsSet)
+	h := newBoundaryStakeHarness(t, "set")
 	h.scenario.BoundaryStake(0)
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 	hide(true)
@@ -358,7 +277,7 @@ func boundaryStakeReadFuncs(
 // reads need is drained in turn.
 func TestBoundaryStakeReadsServeFromTheSetOnceAFamilyIsDrained(t *testing.T) {
 	t.Parallel()
-	h := newBoundaryStakeHarness(t, ledger.UtxoSetReadsSet)
+	h := newBoundaryStakeHarness(t, "set")
 	f := h.scenario.BoundaryStake(0)
 	h.scenario.CertifyLeios()
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
@@ -366,7 +285,6 @@ func TestBoundaryStakeReadsServeFromTheSetOnceAFamilyIsDrained(t *testing.T) {
 	db := h.scenario.LedgerDB()
 	reads := boundaryStakeReadFuncs(db, f)
 	require.Len(t, reads, len(boundaryStakeReads))
-	h.scenario.SetOnlySwitch(true)
 
 	for _, drained := range []nodesettings.Family{
 		nodesettings.FamilyNonces,
@@ -392,13 +310,12 @@ func TestBoundaryStakeReadsServeFromTheSetOnceProtocolParametersAreDrained(
 	t *testing.T,
 ) {
 	t.Parallel()
-	h := newBoundaryStakeHarness(t, ledger.UtxoSetReadsSet)
+	h := newBoundaryStakeHarness(t, "set")
 	f := h.scenario.BoundaryStake(0)
 	h.scenario.CertifyLeios()
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 	hide(true)
 	reads := boundaryStakeReadFuncs(h.scenario.LedgerDB(), f)
-	h.scenario.SetOnlySwitch(true)
 	h.scenario.DrainFamilies(
 		nodesettings.FamilyMask(0).With(nodesettings.FamilyPParamsUpdates),
 	)

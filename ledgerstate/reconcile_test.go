@@ -58,19 +58,12 @@ func TestReconcileStaleLedgerState(t *testing.T) {
 	const tipSlot = uint64(5000)
 	const tipEpoch = uint64(42)
 
-	keepTxId, staleTxId := b32(0x11), b32(0x22)
 	keepStake, staleStake := b28(0xaa), b28(0xbb)
 	keepPool, stalePool := b28(0xcc), b28(0xdd)
 	keepDrep, staleDrep := b28(0xee), b28(0xff)
 
-	// Seed two live UTxOs, two active accounts, two pools, two DReps.
+	// Seed two active accounts, two pools, two DReps.
 	txn := db.MetadataTxn(context.Background(), true)
-	require.NoError(t, store.CreateUtxo(txn.Metadata(), &models.Utxo{
-		TxId: keepTxId, OutputIdx: 0, AddedSlot: 100, DeletedSlot: 0,
-	}))
-	require.NoError(t, store.CreateUtxo(txn.Metadata(), &models.Utxo{
-		TxId: staleTxId, OutputIdx: 0, AddedSlot: 100, DeletedSlot: 0,
-	}))
 	require.NoError(t, store.CreateAccount(txn.Metadata(), &models.Account{
 		StakingKey: keepStake, CredentialTag: 0, AddedSlot: 100, Active: true,
 	}))
@@ -105,11 +98,9 @@ func TestReconcileStaleLedgerState(t *testing.T) {
 
 	// The newer snapshot keeps only the "keep" rows.
 	keys := newReconcileKeys()
-	require.NoError(t, keys.addUtxo(keepTxId, 0))
 	keys.addAccount(0, keepStake)
 	keys.addPool(keepPool)
 	keys.addDrep(0, keepDrep)
-	keys.markUtxosComplete()
 	keys.markCertStateComplete()
 
 	require.NoError(t, reconcileStaleLedgerState(
@@ -120,27 +111,6 @@ func TestReconcileStaleLedgerState(t *testing.T) {
 	read := db.MetadataTxn(context.Background(), false)
 	defer read.Release()
 	rstore := db.Metadata()
-
-	// UTxO: keep is still live; stale is tombstoned at tipSlot.
-	keepU, err := rstore.GetUtxo(keepTxId, 0, read.Metadata())
-	require.NoError(t, err)
-	require.NotNil(t, keepU)
-	staleU, err := rstore.GetUtxo(staleTxId, 0, read.Metadata())
-	require.NoError(t, err)
-	require.Nil(t, staleU, "stale UTxO should no longer be live")
-	staleUSpent, err := rstore.GetUtxoIncludingSpent(
-		staleTxId, 0, read.Metadata(),
-	)
-	require.NoError(t, err)
-	require.NotNil(
-		t,
-		staleUSpent,
-		"stale UTxO should be tombstoned, not deleted",
-	)
-	require.EqualValues(
-		t, tipSlot, staleUSpent.DeletedSlot,
-		"stale UTxO should be tombstoned at the reconcile tip slot",
-	)
 
 	// Account: keep active, stale inactive.
 	keepA, err := rstore.GetAccountByCredential(
@@ -302,15 +272,11 @@ func TestReconcileCompletedEmptyKeySetsAreAuthoritative(t *testing.T) {
 	const tipSlot = uint64(5000)
 	const tipEpoch = uint64(42)
 
-	liveTxId := b32(0x11)
 	liveStake := b28(0xaa)
 	livePool := b28(0xcc)
 	liveDrep := b28(0xee)
 
 	txn := db.MetadataTxn(context.Background(), true)
-	require.NoError(t, store.CreateUtxo(txn.Metadata(), &models.Utxo{
-		TxId: liveTxId, OutputIdx: 0, AddedSlot: 100, DeletedSlot: 0,
-	}))
 	require.NoError(t, store.CreateAccount(txn.Metadata(), &models.Account{
 		StakingKey: liveStake, CredentialTag: 0, AddedSlot: 100, Active: true,
 	}))
@@ -333,7 +299,6 @@ func TestReconcileCompletedEmptyKeySetsAreAuthoritative(t *testing.T) {
 	}, nil))
 
 	keys := newReconcileKeys()
-	keys.markUtxosComplete()
 	keys.markCertStateComplete()
 
 	require.NoError(t, reconcileStaleLedgerState(
@@ -343,10 +308,6 @@ func TestReconcileCompletedEmptyKeySetsAreAuthoritative(t *testing.T) {
 
 	read := db.MetadataTxn(context.Background(), false)
 	defer read.Release()
-
-	u, err := store.GetUtxo(liveTxId, 0, read.Metadata())
-	require.NoError(t, err)
-	require.Nil(t, u, "completed empty UTxO set must tombstone stale UTxOs")
 
 	acct, err := store.GetAccountByCredential(
 		0,
@@ -371,15 +332,6 @@ func TestReconcileCompletedEmptyKeySetsAreAuthoritative(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, pool.Retirement,
 		"completed empty pool set must retire stale pools")
-}
-
-func TestReconcileKeysRejectsMalformedUtxoKey(t *testing.T) {
-	t.Parallel()
-
-	keys := newReconcileKeys()
-	err := keys.addUtxo(bytes.Repeat([]byte{0x11}, 31), 0)
-	require.ErrorContains(t, err, "malformed UTxO reconcile key")
-	require.Empty(t, keys.utxos)
 }
 
 func TestReconcileStaleLedgerStateCanceledBeforeMarkersDoesNotMutate(

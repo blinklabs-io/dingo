@@ -64,6 +64,12 @@ type FactsSource interface {
 	) error
 }
 
+// FactsRefresher copies facts completed after their slot was indexed, without
+// replaying blocks or applying their withdrawals again.
+type FactsRefresher interface {
+	RefreshFacts(context.Context, *database.Txn, uint64) error
+}
+
 // maxCursorRestarts bounds how many times one table's copy starts again
 // after the ledger loses its cursor.
 const maxCursorRestarts = 3

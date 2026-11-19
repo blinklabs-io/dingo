@@ -48,13 +48,18 @@ func OpenUtxoSet(dataDir string) (*badgerutxo.Store, error) {
 }
 
 // TruncateUtxoSet adapts a live UTxO set store to lifecycle.TruncateUtxoSet.
-type TruncateUtxoSet struct{ Store *badgerutxo.Store }
+type TruncateUtxoSet struct {
+	Store *badgerutxo.Store
+	// Checkpoints serves the set's checkpoints; nil when it has none.
+	Checkpoints *utxoset.OfflineCheckpoints
+}
 
 var (
-	_ lifecycle.TruncateUtxoSet = TruncateUtxoSet{}
-	_ database.NonceSource      = TruncateUtxoSet{}
-	_ database.EpochSource      = TruncateUtxoSet{}
-	_ database.PParamsSource    = TruncateUtxoSet{}
+	_ lifecycle.TruncateUtxoSet     = TruncateUtxoSet{}
+	_ lifecycle.TruncateCheckpoints = TruncateUtxoSet{}
+	_ database.NonceSource          = TruncateUtxoSet{}
+	_ database.EpochSource          = TruncateUtxoSet{}
+	_ database.PParamsSource        = TruncateUtxoSet{}
 )
 
 // Tip implements lifecycle.TruncateUtxoSet.
@@ -76,6 +81,14 @@ func (s TruncateUtxoSet) CanRollbackTo(point ocommon.Point) (bool, error) {
 func (s TruncateUtxoSet) RollbackTo(point ocommon.Point) error {
 	_, err := s.Store.Rollback(point)
 	return err
+}
+
+// CheckpointPoints implements lifecycle.TruncateCheckpoints.
+func (s TruncateUtxoSet) CheckpointPoints() ([]ocommon.Point, error) {
+	if s.Checkpoints == nil {
+		return nil, nil
+	}
+	return s.Checkpoints.Points()
 }
 
 // BlockNonceAt implements database.NonceSource from the set's nonces, nil
@@ -173,7 +186,12 @@ func TruncateOptions(
 		return nil, func() error { return nil }, err
 	}
 	return []lifecycle.TruncateOption{
-		lifecycle.WithTruncateUtxoSet(TruncateUtxoSet{Store: store}),
+		lifecycle.WithTruncateUtxoSet(TruncateUtxoSet{
+			Store: store,
+			Checkpoints: utxoset.NewOfflineCheckpoints(
+				store, utxoset.CheckpointDirFor(dataDir),
+			),
+		}),
 	}, store.Close, nil
 }
 

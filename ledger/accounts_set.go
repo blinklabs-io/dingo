@@ -17,10 +17,8 @@ package ledger
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -144,7 +142,8 @@ func (ls *LedgerState) stageRewardChange(
 	if rec.Withdrawal {
 		if amount > balance {
 			return fmt.Errorf(
-				"withdrawal of %d exceeds the set's balance %d for %x",
+				"%w: withdrawal of %d exceeds the set's balance %d for %x",
+				models.ErrRewardWithdrawalExceedsBalance,
 				amount, balance, rec.Ref.Key,
 			)
 		}
@@ -215,14 +214,14 @@ func (ls *LedgerState) accountReader(txn ledgerdb.Txn) AccountReader {
 }
 
 // setServes reports whether a family's reads are answered from the set
-// rather than the metadata store: reads are in set mode, the set still
-// follows the ledger, and the set holds every row of the family. loaded
+// rather than the metadata store: the set follows the ledger and holds
+// every row of the family. loaded
 // caches the answer of check.
 func (ls *LedgerState) setServes(
 	loaded *atomic.Bool,
 	check func() (bool, error),
 ) bool {
-	if _, mode := ls.utxoSetReader(); mode != UtxoSetReadsSet ||
+	if _, mode := ls.utxoSetReader(); !mode ||
 		ls.utxoSetFailed.Load() {
 		return false
 	}
@@ -297,8 +296,10 @@ func (ls *LedgerState) accountView(
 // makes, as the metadata store applies them: its withdrawals, then its
 // account certificates in order, each to the account as the transaction and
 // the batches txn sees left it. A historical backfill records withdrawals
-// without changing the balance, so it stages none. A failure stops the set
-// following the ledger.
+// without changing the balance, so it stages none. A withdrawal larger than
+// the balance is returned as models.ErrRewardWithdrawalExceedsBalance, the
+// verdict the metadata store's withdrawal write gave, and fails the
+// transaction; any other failure stops the set following the ledger.
 func (ls *LedgerState) stageAccountTransaction(
 	txn ledgerdb.Txn,
 	tx lcommon.Transaction,
@@ -307,20 +308,25 @@ func (ls *LedgerState) stageAccountTransaction(
 	blockHash []byte,
 	opts database.BatchedTxIngestOpts,
 	certDeposits map[int]uint64,
-) {
+) error {
 	r := ls.accountReader(txn)
 	if !tx.IsValid() {
-		return
+		return nil
 	}
 	if r == nil || ls.utxoSetFailed.Load() {
 		ls.failDrainedAccountStaging()
-		return
+		return nil
 	}
-	if err := ls.stageAccountTransactionErr(
+	err := ls.stageAccountTransactionErr(
 		r, txn, tx, slot, txIndex, blockHash, opts, certDeposits,
-	); err != nil {
+	)
+	if errors.Is(err, models.ErrRewardWithdrawalExceedsBalance) {
+		return err
+	}
+	if err != nil {
 		ls.failAccountStaging(err)
 	}
+	return nil
 }
 
 func (ls *LedgerState) stageAccountTransactionErr(
@@ -519,8 +525,12 @@ func (s stagingLedgerDB) SetTransactionWithOpts(
 	); err != nil {
 		return err
 	}
-	s.ls.stageAccountTransaction(txn, tx, point.Slot, idx, point.Hash, opts, certDeposits) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	s.ls.stageTransactionFee(txn, tx, point.Slot, opts)                                    //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	if err := s.ls.stageAccountTransaction( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		txn, tx, point.Slot, idx, point.Hash, opts, certDeposits,
+	); err != nil {
+		return err
+	}
+	s.ls.stageTransactionFee(txn, tx, point.Slot, opts) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 
 	s.ls.stagePParamUpdates(txn, tx, point.Slot, idx, updateEpoch, pparamUpdates) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 	return nil
@@ -545,8 +555,12 @@ func (s stagingLedgerDB) SetTransactionBatchedWithOpts(
 	); err != nil {
 		return err
 	}
-	s.ls.stageAccountTransaction(txn, tx, point.Slot, idx, point.Hash, opts, certDeposits) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	s.ls.stageTransactionFee(txn, tx, point.Slot, opts)                                    //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	if err := s.ls.stageAccountTransaction( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		txn, tx, point.Slot, idx, point.Hash, opts, certDeposits,
+	); err != nil {
+		return err
+	}
+	s.ls.stageTransactionFee(txn, tx, point.Slot, opts) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 
 	s.ls.stagePParamUpdates(txn, tx, point.Slot, idx, updateEpoch, pparamUpdates) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 	return nil
@@ -822,7 +836,9 @@ func (s stagingLedgerDB) SetGenesisStakingWithDeposits(
 	blockHash []byte,
 	txn ledgerdb.Txn,
 ) error {
-	if s.accountsDrained() {
+	// The metadata store skips the tables of a drained family, so the set
+	// staged below is then the only copy of the genesis staking.
+	if s.accountsDrained() && s.ls.accountReader(txn) == nil {
 		return drainedUnserved(nodesettings.FamilyAccounts)
 	}
 	if err := s.LedgerDB.SetGenesisStakingWithDeposits(
@@ -846,8 +862,14 @@ func (s stagingLedgerDB) SetGenesisGovernance(
 	blockHash []byte,
 	txn ledgerdb.Txn,
 ) error {
-	if s.accountsDrained() || s.drepsDrained() {
+	// The metadata store skips the tables of a drained family, so the set
+	// staged below is then the only copy of the genesis DReps and
+	// delegations.
+	if s.accountsDrained() && s.ls.accountReader(txn) == nil {
 		return drainedUnserved(nodesettings.FamilyAccounts)
+	}
+	if s.drepsDrained() && s.ls.drepReader(txn) == nil {
+		return drainedUnserved(nodesettings.FamilyDReps)
 	}
 	if err := s.LedgerDB.SetGenesisGovernance(
 		initialDReps, delegs, blockHash, txn,
@@ -856,150 +878,6 @@ func (s stagingLedgerDB) SetGenesisGovernance(
 	}
 	s.ls.stageGenesisGovernance(txn, initialDReps, delegs)
 	return nil
-}
-
-// compareAccountRead counts one account comparison. detail is logged with a
-// mismatch, as key-value pairs.
-func (ls *LedgerState) compareAccountRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-	detail ...any,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.accountReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.accountReadMismatches.Add(1)
-	ls.metrics.accountReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set account read differs from the metadata store",
-		append([]any{
-			"component", "ledger",
-			"read", what,
-			"set_error", setErr,
-			"mismatches", n,
-		}, detail...)...,
-	)
-}
-
-// accountDiff names the fields in which the metadata store's account and the
-// set's differ, and the values of each.
-func accountDiff(store, set *models.Account) string {
-	if store == nil || set == nil {
-		if store == nil && set == nil {
-			return ""
-		}
-		present := func(a *models.Account) string {
-			if a == nil {
-				return "absent"
-			}
-			return "present"
-		}
-		return fmt.Sprintf("store=%s set=%s", present(store), present(set))
-	}
-	var diffs []string
-	add := func(name string, differs bool, s, g any) {
-		if differs {
-			diffs = append(diffs, fmt.Sprintf("%s store=%v set=%v", name, s, g))
-		}
-	}
-	add("pool", !bytes.Equal(store.Pool, set.Pool),
-		hex.EncodeToString(store.Pool), hex.EncodeToString(set.Pool))
-	add("drep", !bytes.Equal(store.Drep, set.Drep),
-		hex.EncodeToString(store.Drep), hex.EncodeToString(set.Drep))
-	add("drep_type", store.DrepType != set.DrepType,
-		store.DrepType, set.DrepType)
-	add("active", store.Active != set.Active, store.Active, set.Active)
-	add("reward", store.Reward != set.Reward,
-		uint64(store.Reward), uint64(set.Reward))
-	add("added_slot", store.AddedSlot != set.AddedSlot,
-		store.AddedSlot, set.AddedSlot)
-	add("created_slot", store.CreatedSlot != set.CreatedSlot,
-		store.CreatedSlot, set.CreatedSlot)
-	add("expiration_epoch", store.ExpirationEpoch != set.ExpirationEpoch,
-		store.ExpirationEpoch, set.ExpirationEpoch)
-	add("credential", store.CredentialTag != set.CredentialTag ||
-		!bytes.Equal(store.StakingKey, set.StakingKey),
-		fmt.Sprintf("%d/%x", store.CredentialTag, store.StakingKey),
-		fmt.Sprintf("%d/%x", set.CredentialTag, set.StakingKey))
-	return strings.Join(diffs, "; ")
-}
-
-// stagedAccountSummary counts the batches txn sees over the set's applied
-// state and, of their account changes, those to (tag, key): what the set's
-// answer was built from.
-func (ls *LedgerState) stagedAccountSummary(
-	txn ledgerdb.Txn,
-	tag uint8,
-	key []byte,
-) string {
-	ls.utxoSetApplyMu.RLock()
-	defer ls.utxoSetApplyMu.RUnlock()
-	ops := ls.stagedEpochStateOps(txn)
-	changes, rollbacks := 0, 0
-	for _, o := range ops {
-		if o.rollbackTo != nil {
-			rollbacks++
-		}
-		for _, c := range o.accounts {
-			if c.Account.CredentialTag == tag &&
-				bytes.Equal(c.Account.StakingKey, key) {
-				changes++
-			}
-		}
-	}
-	return fmt.Sprintf(
-		"batches=%d account_changes=%d rollbacks=%d", len(ops), changes, rollbacks,
-	)
-}
-
-// verifyAccount compares the set's account of (tag, key) as txn sees it
-// with the metadata store's answer, in any read mode but off. The set's
-// account carries the ledger fields only: ID, CertificateID and
-// ImportDeposit are metadata row bookkeeping, which the set leaves zero and
-// no ledger read of an account consumes. Registration history is a separate
-// read that stays on the metadata store.
-func (ls *LedgerState) verifyAccount(
-	txn ledgerdb.Txn,
-	tag uint8,
-	key []byte,
-	includeInactive bool,
-	want *models.Account,
-	g verifyReadGuard,
-) {
-	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
-		return
-	}
-	r := ls.accountReader(txn)
-	if r == nil || ls.utxoSetFailed.Load() {
-		return
-	}
-	got, err := ls.accountView(r, txn, tag, key)
-	if err == nil && got != nil && !includeInactive && !got.Active {
-		got = nil
-	}
-	same := sameAccountPtr(want, got)
-	var detail []any
-	if !same && err == nil {
-		detail = []any{
-			"diff", accountDiff(want, got),
-			"staged", ls.stagedAccountSummary(txn, tag, key),
-		}
-	}
-	ls.compareAccountRead(
-		g, fmt.Sprintf("account %d/%x", tag, key), same, err, detail...,
-	)
 }
 
 func (s stagingLedgerDB) GetAccountByCredential(
@@ -1019,18 +897,7 @@ func (s stagingLedgerDB) GetAccountByCredential(
 		}
 		return a, nil
 	}
-	if s.accountsDrained() {
-		return nil, drainedAccountsRefusal()
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetAccountByCredential(
-		ctx, credentialTag, stakeKey, includeInactive, txn,
-	)
-	if err != nil {
-		return nil, err
-	}
-	s.ls.verifyAccount(txn, credentialTag, stakeKey, includeInactive, want, g)
-	return want, nil
+	return nil, s.accountsUnserved()
 }
 
 func (s stagingLedgerDB) GetAccountsByCredential(
@@ -1052,27 +919,15 @@ func (s stagingLedgerDB) GetAccountsByCredential(
 		}
 		return out, nil
 	}
-	if s.accountsDrained() {
-		return nil, drainedAccountsRefusal()
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetAccountsByCredential(
-		ctx, refs, includeInactive, txn,
-	)
-	if err != nil {
-		return nil, err
-	}
-	for _, ref := range refs {
-		s.ls.verifyAccount(txn, ref.Tag, ref.Key, includeInactive, want[ref.MapKey()], g)
-	}
-	return want, nil
+	return nil, s.accountsUnserved()
 }
 
-func sameAccountPtr(a, b *models.Account) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
+// accountsUnserved is the error of an account read the set cannot answer.
+func (s stagingLedgerDB) accountsUnserved() error {
+	if s.accountsDrained() {
+		return drainedAccountsRefusal()
 	}
-	return sameAccount(*a, *b)
+	return s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 }
 
 func (s stagingLedgerDB) accountsDrained() bool {

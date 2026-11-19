@@ -17,8 +17,6 @@ package ledger
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"maps"
 	"math"
 	"slices"
 
@@ -249,10 +247,7 @@ func (s stagingLedgerDB) opCertsDrained() bool {
 // load or journal, or a lower counter after a slot the highest was already
 // reached by.
 func (s stagingLedgerDB) opCertUnserved() error {
-	if s.opCertsDrained() {
-		return drainedUnserved(nodesettings.FamilyOpCerts)
-	}
-	return nil
+	return s.ls.setFamilyUnserved(nodesettings.FamilyOpCerts)
 }
 
 func (s stagingLedgerDB) UpdatePoolOpCertSequence(
@@ -296,146 +291,42 @@ func (s stagingLedgerDB) UpdatePoolOpCertSequenceBatched(
 	return nil
 }
 
-func (ls *LedgerState) compareOpCertRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.opCertReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.opCertReadMismatches.Add(1)
-	ls.metrics.opCertReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set op-cert read differs from the metadata store",
-		"component", "ledger",
-		"read", what,
-		"set_error", setErr,
-		"mismatches", n,
-	)
-}
-
-// verifyOpCert compares a counter read with the set's. found says whether
-// the store has a row in the read's bounds. keep reduces the set's counter
-// to that answer, and at, when set, is the slot the read is as of; a read
-// the set has no record of is not compared.
-func (s stagingLedgerDB) verifyOpCert(
-	g verifyReadGuard,
-	what string,
-	pkh lcommon.PoolKeyHash,
-	txn ledgerdb.Txn,
-	at *uint64,
-	keep func(*OpCertState) (uint64, bool),
-	want uint64,
-	wantFound bool,
-) {
-	if _, mode := s.ls.utxoSetReader(); mode == UtxoSetReadsOff {
-		return
-	}
-	r := s.ls.opCertReader(txn)
-	if r == nil || s.ls.opCertServing(txn) != nil {
-		return
-	}
-	st, known, err := s.ls.opCertView(r, txn, pkh.Bytes(), at)
-	if err == nil && !known {
-		return
-	}
-	var got uint64
-	var gotFound bool
-	if st != nil {
-		got, gotFound = keep(st)
-		if !gotFound {
-			got = 0
-		}
-	}
-	s.ls.compareOpCertRead(
-		g, fmt.Sprintf("pool %x %s", pkh.Bytes(), what),
-		got == want && gotFound == wantFound, err,
-	)
-}
-
 func (s stagingLedgerDB) LatestPoolOpCertSequence(
 	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
 	txn ledgerdb.Txn,
 ) (uint64, bool, error) {
-	if r := s.ls.opCertServing(txn); r != nil {
-		st, _, err := s.ls.opCertView(r, txn, pkh.Bytes(), nil)
-		if err != nil || st == nil {
-			return 0, false, err
-		}
-		return st.Sequence, true, nil
+	r := s.ls.opCertServing(txn)
+	if r == nil {
+		return 0, false, s.opCertUnserved()
 	}
-	if err := s.opCertUnserved(); err != nil {
+	st, _, err := s.ls.opCertView(r, txn, pkh.Bytes(), nil)
+	if err != nil || st == nil {
 		return 0, false, err
 	}
-	g := s.ls.verifyGuard(txn)
-	want, found, err := s.LedgerDB.LatestPoolOpCertSequence(ctx, pkh, txn)
-	if err != nil {
-		return want, found, err
-	}
-	s.verifyOpCert(g, "latest counter", pkh, txn, nil,
-		func(st *OpCertState) (uint64, bool) { return st.Sequence, true },
-		want, found)
-	return want, found, nil
+	return st.Sequence, true, nil
 }
 
-// LatestPoolOpCertSequenceAfter is answered from the set in set mode where
-// opCertAfterFromSet can tell. It is compared in verify mode on the set's
-// reading that a row after afterSlot exists when the pool's latest
-// observation is after it, and that its highest sequence is the highest
-// after it: a chain's counters do not decrease.
+// LatestPoolOpCertSequenceAfter returns the highest recorded sequence after
+// afterSlot, when the set has history for that slot.
 func (s stagingLedgerDB) LatestPoolOpCertSequenceAfter(
 	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
 	afterSlot uint64,
 	txn ledgerdb.Txn,
 ) (uint64, bool, error) {
-	if r := s.ls.opCertServing(txn); r != nil {
-		seq, found, ok, err := s.ls.opCertAfterFromSet(
-			r, txn, pkh.Bytes(), afterSlot,
-		)
-		if err != nil {
-			return 0, false, err
-		}
-		if ok {
-			return seq, found, nil
-		}
+	r := s.ls.opCertServing(txn)
+	if r == nil {
+		return 0, false, s.opCertUnserved()
 	}
-	if err := s.opCertUnserved(); err != nil {
+	seq, found, ok, err := s.ls.opCertAfterFromSet(r, txn, pkh.Bytes(), afterSlot)
+	if err != nil {
 		return 0, false, err
 	}
-	g := s.ls.verifyGuard(txn)
-	want, found, err := s.LedgerDB.LatestPoolOpCertSequenceAfter(
-		ctx, pkh, afterSlot, txn,
-	)
-	if err != nil {
-		return want, found, err
+	if !ok {
+		return 0, false, s.opCertUnserved()
 	}
-	s.verifyOpCert(
-		g,
-		fmt.Sprintf("counter after slot %d", afterSlot),
-		pkh,
-		txn,
-		nil,
-		func(st *OpCertState) (uint64, bool) {
-			return st.Sequence, st.Slot > afterSlot
-		},
-		want,
-		found,
-	)
-	return want, found, nil
+	return seq, found, nil
 }
 
 func (s stagingLedgerDB) LatestPoolOpCertSequenceAtOrBefore(
@@ -444,45 +335,25 @@ func (s stagingLedgerDB) LatestPoolOpCertSequenceAtOrBefore(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (uint64, bool, error) {
-	if r := s.ls.opCertServing(txn); r != nil {
-		st, known, err := s.ls.opCertView(r, txn, pkh.Bytes(), &slot)
-		if err != nil {
-			return 0, false, err
-		}
-		if known {
-			if st == nil {
-				return 0, false, nil
-			}
-			return st.Sequence, true, nil
-		}
+	r := s.ls.opCertServing(txn)
+	if r == nil {
+		return 0, false, s.opCertUnserved()
 	}
-	if err := s.opCertUnserved(); err != nil {
+	st, known, err := s.ls.opCertView(r, txn, pkh.Bytes(), &slot)
+	if err != nil {
 		return 0, false, err
 	}
-	g := s.ls.verifyGuard(txn)
-	want, found, err := s.LedgerDB.LatestPoolOpCertSequenceAtOrBefore(
-		ctx, pkh, slot, txn,
-	)
-	if err != nil {
-		return want, found, err
+	if !known {
+		return 0, false, s.opCertUnserved()
 	}
-	s.verifyOpCert(
-		g,
-		fmt.Sprintf("counter at or before slot %d", slot),
-		pkh,
-		txn,
-		&slot,
-		func(st *OpCertState) (uint64, bool) { return st.Sequence, true },
-		want,
-		found,
-	)
-	return want, found, nil
+	if st == nil {
+		return 0, false, nil
+	}
+	return st.Sequence, true, nil
 }
 
-// LatestPoolOpCertSequenceInRange is answered from the set in set mode where
-// opCertInRangeFromSet can tell. It is compared in verify mode on the set's
-// reading that the counter at endSlot, when its latest observation is at or
-// after startSlot, is the highest in the range.
+// LatestPoolOpCertSequenceInRange returns the highest recorded sequence in
+// the requested range when the set has history for it.
 func (s stagingLedgerDB) LatestPoolOpCertSequenceInRange(
 	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
@@ -490,73 +361,34 @@ func (s stagingLedgerDB) LatestPoolOpCertSequenceInRange(
 	endSlot uint64,
 	txn ledgerdb.Txn,
 ) (uint64, bool, error) {
-	if r := s.ls.opCertServing(txn); r != nil {
-		seq, found, ok, err := s.ls.opCertInRangeFromSet(
-			r, txn, pkh.Bytes(), startSlot, endSlot,
-		)
-		if err != nil {
-			return 0, false, err
-		}
-		if ok {
-			return seq, found, nil
-		}
+	r := s.ls.opCertServing(txn)
+	if r == nil {
+		return 0, false, s.opCertUnserved()
 	}
-	if err := s.opCertUnserved(); err != nil {
+	seq, found, ok, err := s.ls.opCertInRangeFromSet(r, txn, pkh.Bytes(), startSlot, endSlot)
+	if err != nil {
 		return 0, false, err
 	}
-	g := s.ls.verifyGuard(txn)
-	want, found, err := s.LedgerDB.LatestPoolOpCertSequenceInRange(
-		ctx, pkh, startSlot, endSlot, txn,
-	)
-	if err != nil {
-		return want, found, err
+	if !ok {
+		return 0, false, s.opCertUnserved()
 	}
-	s.verifyOpCert(
-		g, fmt.Sprintf("counter in slots %d to %d", startSlot, endSlot),
-		pkh, txn, &endSlot,
-		func(st *OpCertState) (uint64, bool) {
-			return st.Sequence, startSlot <= endSlot && st.Slot >= startSlot
-		}, want, found)
-	return want, found, nil
+	return seq, found, nil
 }
 
-// LatestPoolOpCertSequences answers every pool's highest sequence from the
-// set in set mode, and compares it with the set's in verify mode.
+// LatestPoolOpCertSequences returns every pool's highest recorded sequence.
 func (s stagingLedgerDB) LatestPoolOpCertSequences(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
-	if r := s.ls.opCertServing(txn); r != nil {
-		got := make(map[string]uint64)
-		if err := s.ls.opCertLatest(r, txn, got); err != nil {
-			return nil, err
-		}
-		return got, nil
+	r := s.ls.opCertServing(txn)
+	if r == nil {
+		return nil, s.opCertUnserved()
 	}
-	if err := s.opCertUnserved(); err != nil {
+	got := make(map[string]uint64)
+	if err := s.ls.opCertLatest(r, txn, got); err != nil {
 		return nil, err
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.LatestPoolOpCertSequences(ctx, txn)
-	if err != nil {
-		return want, err
-	}
-	if _, mode := s.ls.utxoSetReader(); mode == UtxoSetReadsOff {
-		return want, nil
-	}
-	r := s.ls.opCertReader(txn)
-	if r == nil {
-		return want, nil
-	}
-	got := make(map[string]uint64, len(want))
-	setErr := s.ls.opCertLatest(r, txn, got)
-	s.ls.compareOpCertRead(
-		g,
-		"every pool's latest counter",
-		maps.Equal(want, got),
-		setErr,
-	)
-	return want, nil
+	return got, nil
 }
 
 // opCertPools returns every pool the set holds a counter for or the batches
@@ -666,7 +498,7 @@ func (ls *LedgerState) opCertLatestAt(
 	return true, nil
 }
 
-// LatestPoolOpCertSequencesAtOrBefore is answered from the set in set mode
+// LatestPoolOpCertSequencesAtOrBefore is answered from the set
 // when it has a record of slot for every pool, and otherwise from the
 // metadata store.
 func (s stagingLedgerDB) LatestPoolOpCertSequencesAtOrBefore(
@@ -684,53 +516,26 @@ func (s stagingLedgerDB) LatestPoolOpCertSequencesAtOrBefore(
 			return got, nil
 		}
 	}
-	if err := s.opCertUnserved(); err != nil {
-		return nil, err
-	}
-	return s.LedgerDB.LatestPoolOpCertSequencesAtOrBefore(ctx, slot, txn)
+	return nil, s.opCertUnserved()
 }
 
-// PoolOpCertSequencesExistAtSlot is answered from the set in set mode, and
-// compared in verify mode, within the set's record of
-// slots, which runs from its load and its journal. The metadata store keeps
-// a row for each observation at its slot, and the set moves a pool's latest
-// observation to each slot a counter is observed at.
+// PoolOpCertSequencesExistAtSlot reports whether the set recorded any pool
+// op-cert sequence at slot.
 func (s stagingLedgerDB) PoolOpCertSequencesExistAtSlot(
 	ctx context.Context,
 	slot uint64,
 	txn ledgerdb.Txn,
 ) (bool, error) {
-	if r := s.ls.opCertServing(txn); r != nil {
-		observed, known, err := s.ls.opCertObservedAt(r, txn, slot)
-		if err != nil {
-			return false, err
-		}
-		if known {
-			return observed, nil
-		}
+	r := s.ls.opCertServing(txn)
+	if r == nil {
+		return false, s.opCertUnserved()
 	}
-	if err := s.opCertUnserved(); err != nil {
+	observed, known, err := s.ls.opCertObservedAt(r, txn, slot)
+	if err != nil {
 		return false, err
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.PoolOpCertSequencesExistAtSlot(ctx, slot, txn)
-	if err != nil {
-		return want, err
+	if !known {
+		return false, s.opCertUnserved()
 	}
-	if _, mode := s.ls.utxoSetReader(); mode == UtxoSetReadsOff {
-		return want, nil
-	}
-	r := s.ls.opCertReader(txn)
-	if r == nil {
-		return want, nil
-	}
-	got, known, setErr := s.ls.opCertObservedAt(r, txn, slot)
-	if setErr == nil && !known {
-		return want, nil
-	}
-	s.ls.compareOpCertRead(
-		g, fmt.Sprintf("counters observed at slot %d", slot),
-		got == want, setErr,
-	)
-	return want, nil
+	return observed, nil
 }

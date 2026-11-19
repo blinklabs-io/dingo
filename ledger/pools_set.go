@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"math"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -387,87 +386,6 @@ func samePoolRegistration(a, b *models.PoolRegistration) bool {
 	return true
 }
 
-func (ls *LedgerState) comparePoolRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.poolReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.poolReadMismatches.Add(1)
-	ls.metrics.poolReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set pool read differs from the metadata store",
-		"component", "ledger",
-		"read", what,
-		"set_error", setErr,
-		"mismatches", n,
-	)
-}
-
-// poolRegistrationsFromSet answers GetPoolRegistrationsEffectiveForEpoch at
-// an unbounded snapshot slot from the set's current pool states, or reports
-// false when the set cannot tell what the metadata store would return. It
-// keeps no registration history, so a pool whose registration in effect
-// began at or after epochStartSlot may have an earlier one the store
-// returns, and a re-registration that began before it and has not taken
-// effect means the set has not reached that epoch's boundary. A Leios
-// certified registration takes effect at its context slot, which the pool
-// states do not follow, so a node that certifies stays on the store; a drained
-// family never reaches this read, since poolBook answers it from the history.
-func (ls *LedgerState) poolRegistrationsFromSet(
-	r PoolReader,
-	txn ledgerdb.Txn,
-	poolKeyHashes []lcommon.PoolKeyHash,
-	epochStartSlot, endedEpoch uint64,
-) ([]models.PoolRegistration, bool, error) {
-	if ls.leiosCertifies() {
-		return nil, false, nil
-	}
-	out := []models.PoolRegistration{}
-	seen := make(map[string]struct{}, len(poolKeyHashes))
-	for _, pkh := range poolKeyHashes {
-		if _, ok := seen[string(pkh[:])]; ok {
-			continue
-		}
-		seen[string(pkh[:])] = struct{}{}
-		st, err := ls.poolView(r, txn, pkh[:])
-		if err != nil {
-			return nil, false, err
-		}
-		if st == nil || st.Params == nil {
-			continue
-		}
-		if st.Params.AddedSlot >= epochStartSlot ||
-			st.Future != nil && st.Future.AddedSlot < epochStartSlot {
-			return nil, false, nil
-		}
-		if st.RetiringEpoch != nil && *st.RetiringEpoch <= endedEpoch {
-			continue
-		}
-		out = append(out, *CleanPoolRegistration(st.Params))
-	}
-	return out, true, nil
-}
-
-// GetPoolRegistrationsEffectiveForEpoch answers the registration in effect
-// now (an unbounded snapshot slot) from the set in set mode where the set can
-// tell. Otherwise it answers from the metadata store and compares each
-// pool's registration with the one the set's history selects for the epoch
-// window; a set without its history compares only the current registration,
-// and only when the caller asks for the one in effect now.
 func (s stagingLedgerDB) GetPoolRegistrationsEffectiveForEpoch(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	epochStartSlot uint64,
@@ -475,80 +393,11 @@ func (s stagingLedgerDB) GetPoolRegistrationsEffectiveForEpoch(
 	snapshotSlot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.PoolRegistration, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) ([]models.PoolRegistration, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) ([]models.PoolRegistration, error) {
 		return b.effective(
 			poolKeyHashes, epochStartSlot, endedEpoch, snapshotSlot,
 		)
-	}); ok {
-		return got, err
-	}
-	serving := false
-	if snapshotSlot >= math.MaxInt64 {
-		if r := s.ls.poolServing(txn); r != nil {
-			out, ok, err := s.ls.poolRegistrationsFromSet(
-				r, txn, poolKeyHashes, epochStartSlot, endedEpoch,
-			)
-			if err != nil {
-				return nil, err
-			}
-			if ok {
-				return out, nil
-			}
-			serving = true
-		}
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetPoolRegistrationsEffectiveForEpoch(
-		poolKeyHashes, epochStartSlot, endedEpoch, snapshotSlot, txn,
-	)
-	if err != nil || serving {
-		return want, err
-	}
-	if _, mode := s.ls.utxoSetReader(); mode == UtxoSetReadsOff {
-		return want, nil
-	}
-	byPool := make(map[string]*models.PoolRegistration, len(want))
-	for i := range want {
-		byPool[string(want[i].PoolKeyHash)] = &want[i]
-	}
-	if hr := s.ls.poolHistoryReader(txn); hr != nil {
-		for _, pkh := range poolKeyHashes {
-			events, setErr := s.ls.poolHistoryView(hr, txn, pkh[:])
-			got := effectivePoolRegistration(
-				events, epochStartSlot, endedEpoch, snapshotSlot,
-			)
-			s.ls.comparePoolRead(
-				g,
-				fmt.Sprintf(
-					"pool %x effective registration at slot %d",
-					pkh[:],
-					snapshotSlot,
-				),
-				samePoolRegistration(byPool[string(pkh[:])], got),
-				setErr,
-			)
-		}
-		return want, nil
-	}
-	if snapshotSlot < math.MaxInt64 {
-		return want, nil
-	}
-	r := s.ls.poolReader(txn)
-	if r == nil {
-		return want, nil
-	}
-	for _, pkh := range poolKeyHashes {
-		st, setErr := s.ls.poolView(r, txn, pkh[:])
-		var got *models.PoolRegistration
-		if st != nil {
-			got = st.Params
-		}
-		s.ls.comparePoolRead(
-			g, fmt.Sprintf("pool %x effective registration", pkh[:]),
-			samePoolRegistration(byPool[string(pkh[:])], got), setErr,
-		)
-	}
-	return want, nil
+	})
 }
 
 // UtxoSetTipReader is implemented by a live UTxO set that records the ledger
@@ -557,187 +406,21 @@ type UtxoSetTipReader interface {
 	Tip() (ocommon.Point, bool, error)
 }
 
-// poolVerifyReader returns the set's pool reader when pool reads compare.
-func (ls *LedgerState) poolVerifyReader(txn ledgerdb.Txn) PoolReader {
-	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
-		return nil
-	}
-	return ls.poolReader(txn)
-}
-
-// activePools is the pools the store's active-pool reads give from the set:
-// a registered pool whose pending retirement is after the epoch of the
-// read. slot is the read's slot, or nil for the store's tip. The boolean is
-// false when the set cannot answer. The store filters registrations and
-// retirements by a slot the set does not keep per change, so only a read at
-// or after the set's tip, within the set's latest epoch and with no pool
-// change staged, is the set's state.
-func (ls *LedgerState) activePools(
-	r PoolReader,
-	txn ledgerdb.Txn,
-	slot *uint64,
-) (map[string]struct{}, bool, error) {
-	for _, o := range ls.stagedOps(txn) {
-		if o.rollbackTo != nil || len(o.pools) > 0 {
-			return nil, false, nil
-		}
-	}
-	er, _ := ls.epochStateReader(txn)
-	if er == nil {
-		return nil, false, nil
-	}
-	epochs, err := ls.epochStateView(er, txn)
-	if err != nil {
-		return nil, false, err
-	}
-	var latest *models.Epoch
-	for _, e := range epochs {
-		if latest == nil || e.EpochId > latest.EpochId {
-			latest = &e
-		}
-	}
-	// The set applied every boundary up to its latest epoch's, so a slot
-	// before that epoch sees pools the set has already reaped.
-	if latest == nil || (slot != nil &&
-		(*slot < latest.StartSlot ||
-			*slot >= latest.StartSlot+uint64(latest.LengthInSlots))) {
-		return nil, false, nil
-	}
-	epoch := latest.EpochId
-	if slot != nil {
-		tr, ok := ls.readSet(txn).(UtxoSetTipReader)
-		if !ok {
-			return nil, false, nil
-		}
-		tip, has, err := tr.Tip()
-		if err != nil {
-			return nil, false, err
-		}
-		if !has || *slot < tip.Slot {
-			return nil, false, nil
-		}
-	}
-	pools, err := ls.poolKeys(r, txn)
-	if err != nil {
-		return nil, false, err
-	}
-	out := make(map[string]struct{}, len(pools))
-	for _, p := range pools {
-		st, err := ls.poolView(r, txn, p)
-		if err != nil {
-			return nil, false, err
-		}
-		if st == nil ||
-			(st.RetiringEpoch != nil && *st.RetiringEpoch <= epoch) {
-			continue
-		}
-		out[string(p)] = struct{}{}
-	}
-	return out, true, nil
-}
-
-func (s stagingLedgerDB) verifyActivePools(
-	g verifyReadGuard,
-	what string,
-	txn ledgerdb.Txn,
-	slot *uint64,
-	want [][]byte,
-) {
-	r := s.ls.poolVerifyReader(txn)
-	if r == nil {
-		return
-	}
-	got, ok, setErr := s.ls.activePools(r, txn, slot)
-	if setErr == nil && !ok {
-		return
-	}
-	wanted := make(map[string]struct{}, len(want))
-	for _, p := range want {
-		wanted[string(p)] = struct{}{}
-	}
-	same := len(got) == len(wanted)
-	for p := range wanted {
-		_, found := got[p]
-		same = same && found
-	}
-	s.ls.comparePoolRead(g, what, same, setErr)
-}
-
-// activePoolsFromSet answers an active-pool read from the set in set mode
-// when activePools can tell, and reports whether it did. A Leios certified
-// registration or retirement takes effect at its context slot, which the pool
-// states do not follow, so a node that certifies stays on the store; a drained
-// family never reaches this read, since poolBook answers it from the history.
-func (s stagingLedgerDB) activePoolsFromSet(
-	txn ledgerdb.Txn,
-	slot *uint64,
-) ([][]byte, bool, error) {
-	r := s.ls.poolServing(txn)
-	if r == nil || s.ls.leiosCertifies() {
-		return nil, false, nil
-	}
-	pools, ok, err := s.ls.activePools(r, txn, slot)
-	if err != nil || !ok {
-		return nil, false, err
-	}
-	out := make([][]byte, 0, len(pools))
-	for p := range pools {
-		out = append(out, []byte(p))
-	}
-	slices.SortFunc(out, bytes.Compare)
-	return out, true, nil
-}
-
 func (s stagingLedgerDB) GetActivePoolKeyHashes(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
 		return b.active()
-	}); ok {
-		return got, err
-	}
-	if got, ok, err := s.activePoolsFromSet(txn, nil); err != nil {
-		return nil, err
-	} else if ok {
-		return got, nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetActivePoolKeyHashes(ctx, txn)
-	if err != nil {
-		return want, err
-	}
-	s.verifyActivePools(g, "active pools", txn, nil, want)
-	return want, nil
+	})
 }
 
-// GetActivePoolKeyHashesAtSlot is answered from the set, and compared, only
-// for a slot at or after the set's tip.
+// GetActivePoolKeyHashesAtSlot returns active pools recorded at slot by the set.
 func (s stagingLedgerDB) GetActivePoolKeyHashesAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	if got, ok, err := drainedPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
+	return drainedPoolRead(s, txn, func(b *poolBook) ([][]byte, error) {
 		return b.activeAtSlot(slot)
-	}); ok {
-		return got, err
-	}
-	if got, ok, err := s.activePoolsFromSet(txn, &slot); err != nil {
-		return nil, err
-	} else if ok {
-		return got, nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetActivePoolKeyHashesAtSlot(slot, txn)
-	if err != nil {
-		return want, err
-	}
-	s.verifyActivePools(
-		g,
-		fmt.Sprintf("active pools at slot %d", slot),
-		txn,
-		&slot,
-		want,
-	)
-	return want, nil
+	})
 }

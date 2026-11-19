@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -61,6 +62,7 @@ func seedInterruptedImport(t *testing.T, dataDir, digest string, epoch uint64) {
 	require.NoError(
 		t, db.SetSyncState("sync_status", syncStatusInProgress, nil),
 	)
+	require.NoError(t, db.SetSyncState(database.UtxoSetOnlySyncKey, "1", nil))
 	if digest != "" {
 		require.NoError(t, setPinnedArtifact(db, pinnedArtifact{
 			Backend:             BackendV2,
@@ -141,13 +143,15 @@ func TestValidateExplicitArtifactPin(t *testing.T) {
 }
 
 func syncConfigForFixture(
+	t *testing.T,
 	fixture *v2Fixture,
 	dataDir string,
 ) SyncConfig {
+	t.Helper()
 	return SyncConfig{
+		UtxoSet:           newSyncTestSet(t),
 		Network:           "preprod",
 		DataDir:           dataDir,
-		StorageMode:       "core",
 		Backend:           BackendV2,
 		AggregatorURL:     fixture.server.URL,
 		AllowInsecureHTTP: true,
@@ -157,6 +161,17 @@ func syncConfigForFixture(
 		DatabaseWorkers:   1,
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+}
+
+func newSyncTestSet(t *testing.T) *utxoset.Set {
+	t.Helper()
+	set, err := utxoset.Open(utxoset.Config{
+		Dir: t.TempDir(), Only: true, Authoritative: true,
+		MemTableSize: 8 << 20,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, set.Close()) })
+	return set
 }
 
 // TestSyncResumesPinnedArtifactAfterAggregatorAdvance drives the real Sync
@@ -187,7 +202,7 @@ func TestSyncResumesPinnedArtifactAfterAggregatorAdvance(t *testing.T) {
 	seedInterruptedImport(t, dataDir, pinned.Hash, pinned.Beacon.Epoch)
 
 	result, err := Sync(
-		context.Background(), syncConfigForFixture(fixture, dataDir),
+		context.Background(), syncConfigForFixture(t, fixture, dataDir),
 	)
 	require.NoError(t, err)
 	require.NotNil(t, result.Snapshot)
@@ -233,7 +248,7 @@ func TestSyncFreshBootstrapSelectsLatestArtifact(t *testing.T) {
 
 	dataDir := t.TempDir()
 	result, err := Sync(
-		context.Background(), syncConfigForFixture(fixture, dataDir),
+		context.Background(), syncConfigForFixture(t, fixture, dataDir),
 	)
 	require.NoError(t, err)
 	require.NotNil(t, result.Snapshot)
@@ -258,7 +273,7 @@ func TestSyncFreshBootstrapSelectsExplicitArtifact(t *testing.T) {
 	fixture.publishNewerArtifact(t)
 
 	dataDir := t.TempDir()
-	cfg := syncConfigForFixture(fixture, dataDir)
+	cfg := syncConfigForFixture(t, fixture, dataDir)
 	cfg.PinnedDigest = pinned.Hash
 	result, err := Sync(context.Background(), cfg)
 	require.NoError(t, err)
@@ -273,7 +288,7 @@ func TestSyncRejectsExplicitPinForAlreadyCurrentDatabase(t *testing.T) {
 	dataDir := t.TempDir()
 	seedCompleteDB(t, dataDir, "core", 5, true)
 
-	cfg := syncConfigForFixture(fixture, dataDir)
+	cfg := syncConfigForFixture(t, fixture, dataDir)
 	cfg.Network = "preview"
 	cfg.PinnedDigest = fixture.artifact.Hash
 	_, err := Sync(context.Background(), cfg)
@@ -300,8 +315,8 @@ func TestSyncRejectsExplicitPinForInterruptedCatchUp(t *testing.T) {
 
 	cfg := SyncConfig{
 		Network:           "preview",
+		UtxoSet:           newSyncTestSet(t),
 		DataDir:           dataDir,
-		StorageMode:       "core",
 		Backend:           BackendV2,
 		AggregatorURL:     "http://127.0.0.1:1",
 		AllowInsecureHTTP: true,
@@ -329,7 +344,7 @@ func TestSyncRefusesResumeWithoutArtifactPin(t *testing.T) {
 	seedInterruptedImport(t, dataDir, "", 0)
 
 	_, err := Sync(
-		context.Background(), syncConfigForFixture(fixture, dataDir),
+		context.Background(), syncConfigForFixture(t, fixture, dataDir),
 	)
 	require.ErrorIs(t, err, errNoArtifactPin)
 }
@@ -349,7 +364,7 @@ func TestSyncRefusesResumeWhenPinnedArtifactIsGone(t *testing.T) {
 	seedInterruptedImport(t, dataDir, gone, 294)
 
 	_, err := Sync(
-		context.Background(), syncConfigForFixture(fixture, dataDir),
+		context.Background(), syncConfigForFixture(t, fixture, dataDir),
 	)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "fetching pinned Cardano database snapshot")
@@ -382,7 +397,7 @@ func TestSyncRefusesResumeWhenCertifiedTipMoved(t *testing.T) {
 	require.NoError(t, dbtest.CloseDatabase(db))
 
 	_, err = Sync(
-		context.Background(), syncConfigForFixture(fixture, dataDir),
+		context.Background(), syncConfigForFixture(t, fixture, dataDir),
 	)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "certified ImmutableDB tip")

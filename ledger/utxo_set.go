@@ -267,9 +267,9 @@ type BlockNonceReader interface {
 	LatestBlockNonce() (models.BlockNonce, bool, error)
 }
 
-// UtxoSetRollbacker rolls a live UTxO set back from its own history, for
-// LedgerStateConfig.UtxoSetOnly, where the metadata store cannot supply a
-// rollback's change. It returns the net change as a rollback UtxoEvent.
+// UtxoSetRollbacker rolls a live UTxO set back from its own history, since
+// the metadata store holds no utxo rows to supply a rollback's change. It
+// returns the net change as a rollback UtxoEvent.
 type UtxoSetRollbacker interface {
 	RollbackUtxoSet(point ocommon.Point) (UtxoEvent, error)
 	// PreviewUtxoSetRollback returns the change RollbackUtxoSet(point)
@@ -298,8 +298,8 @@ type utxoSetBatch struct {
 	txn ledgerdb.Txn
 	seq uint64
 	tip *ocommon.Point
-	// rollbackTo, for UtxoSetOnly, rolls the set back to a point from its
-	// journal before changes apply.
+	// rollbackTo rolls the set back to a point from its journal before
+	// changes apply.
 	rollbackTo *ocommon.Point
 	// rollbackRefs are the stake credentials of the outputs the rollback
 	// changes, whose live reward aggregate the truncation must refresh.
@@ -380,24 +380,10 @@ func (b *utxoSetBatch) hasWrites() bool {
 		len(b.witnesses) > 0
 }
 
-// utxoChangesWanted reports whether anything consumes UTxO changes: a
-// ledger.utxo subscriber's bus or the live UTxO set.
-func (ls *LedgerState) utxoChangesWanted() bool {
-	return ls.config.EventBus != nil || ls.config.UtxoSet != nil
-}
-
-// utxoSetAuthoritative reports whether validation reads the live UTxO set
-// instead of the metadata store, so that a set that stopped following the
-// ledger must halt the node rather than be read around.
-func (ls *LedgerState) utxoSetAuthoritative() bool {
-	return ls.config.UtxoSetOnly || ls.config.UtxoSetReads == UtxoSetReadsSet
-}
-
-// failUtxoSet stops the live UTxO set following the ledger. When the set is
-// authoritative it also records the failure in the set and halts the node
-// through FatalErrorFunc, since nothing else answers for the set's rows;
-// otherwise reads fall back to the metadata store and startup resumes the
-// set. slot is the commit the update failed at, zero when unknown.
+// failUtxoSet stops the live UTxO set following the ledger, records the
+// failure in the set, and halts the node through FatalErrorFunc, since
+// nothing else answers for the set's rows; startup resumes the set. slot is
+// the commit the update failed at, zero when unknown.
 func (ls *LedgerState) failUtxoSet(
 	slot uint64,
 	msg string,
@@ -409,7 +395,7 @@ func (ls *LedgerState) failUtxoSet(
 		attrs = append(attrs, "slot", slot)
 	}
 	ls.config.Logger.Error(msg, attrs...)
-	if !first || !ls.utxoSetAuthoritative() {
+	if !first {
 		return
 	}
 	if m, ok := ls.config.UtxoSet.(UtxoSetFailureMarker); ok {
@@ -438,9 +424,6 @@ func (ls *LedgerState) stageUtxoSet(
 	tip *ocommon.Point,
 	changes ...UtxoEvent,
 ) {
-	if ls.config.UtxoSet == nil {
-		return
-	}
 	if txn == nil {
 		ls.applyUtxoSet(&utxoSetBatch{tip: tip, changes: changes})
 		return
@@ -510,6 +493,39 @@ func (ls *LedgerState) utxoSetBatchForTxn(
 	})
 	txn.AfterCommit(func() { ls.applyUtxoSet(batch) })
 	return batch
+}
+
+// markUtxoSetBatch records what txn has staged for the live UTxO set and
+// returns a function that drops everything staged after the mark. A caller
+// that rolls txn back to a savepoint calls it, because the savepoint undoes
+// only the metadata writes: without it the staged changes of the abandoned
+// work would still reach the set when txn commits.
+func (ls *LedgerState) markUtxoSetBatch(txn ledgerdb.Txn) func() {
+	ls.utxoSetMu.Lock()
+	defer ls.utxoSetMu.Unlock()
+	var saved *utxoSetBatch
+	if batch, ok := ls.utxoSetBatches[txn]; ok {
+		cp := *batch
+		cp.overlay = maps.Clone(batch.overlay)
+		cp.stake = maps.Clone(batch.stake)
+		saved = &cp
+	}
+	return func() {
+		ls.utxoSetMu.Lock()
+		defer ls.utxoSetMu.Unlock()
+		batch, ok := ls.utxoSetBatches[txn]
+		if !ok {
+			return
+		}
+		if saved == nil {
+			*batch = utxoSetBatch{txn: batch.txn, seq: batch.seq}
+			return
+		}
+		restored := *saved
+		restored.overlay = maps.Clone(saved.overlay)
+		restored.stake = maps.Clone(saved.stake)
+		*batch = restored
+	}
 }
 
 // stageBlockNonces stages nonces, for a set that keeps them, to be written
@@ -822,19 +838,6 @@ func (ls *LedgerState) ResumeUtxoSetFrom(
 	return true, nil
 }
 
-// Read modes for the live UTxO set, selected by
-// LedgerStateConfig.UtxoSetReads. Reads fall back to the metadata store
-// whatever the mode once an update to the set has failed.
-const (
-	// UtxoSetReadsOff resolves validation's inputs from the metadata store.
-	UtxoSetReadsOff = ""
-	// UtxoSetReadsVerify resolves them from the metadata store and also
-	// from the live UTxO set, and counts every answer that differs.
-	UtxoSetReadsVerify = "verify"
-	// UtxoSetReadsSet resolves them from the live UTxO set.
-	UtxoSetReadsSet = "set"
-)
-
 // UtxoSetSnapshotter is a live UTxO set that can fix a read-only view of its
 // applied state. The view answers every read interface the set does, as of
 // the call, and fails writes. release ends it.
@@ -935,7 +938,7 @@ func (ls *LedgerState) CredentialUtxoStake(
 ) (uint64, error) {
 	r, ok := ls.readSet(txn).(UtxoSetReader)
 	if !ok {
-		return 0, errors.New("no readable live UTxO set")
+		return 0, ErrUtxoSetUnserved
 	}
 	return ls.utxoStakeSeenBy(r, txn, CredentialStakeKey(tag, hash))
 }
@@ -983,9 +986,8 @@ func (ls *LedgerState) stakeWithBatch(
 	return uint64(total), nil
 }
 
-// utxoSetReader returns the live UTxO set's reader and the read mode, or
-// UtxoSetReadsOff when reads must use the metadata store.
-func (ls *LedgerState) utxoSetReader() (UtxoSetReader, string) {
+// utxoSetReader returns the live UTxO set's reader when one is configured.
+func (ls *LedgerState) utxoSetReader() (UtxoSetReader, bool) {
 	return ls.utxoSetReaderOf(ls.config.UtxoSet)
 }
 
@@ -993,29 +995,19 @@ func (ls *LedgerState) utxoSetReader() (UtxoSetReader, string) {
 // pinned snapshot for a pinned transaction.
 func (ls *LedgerState) utxoSetReaderFor(
 	txn ledgerdb.Txn,
-) (UtxoSetReader, string) {
+) (UtxoSetReader, bool) {
 	return ls.utxoSetReaderOf(ls.readSet(txn))
 }
 
-func (ls *LedgerState) utxoSetReaderOf(
-	w UtxoSetWriter,
-) (UtxoSetReader, string) {
-	if ls.utxoSetAuthoritative() {
-		// A failed set halts the node and is reported by utxoSetGet rather
-		// than routed around.
-		if r, ok := w.(UtxoSetReader); ok {
-			return r, UtxoSetReadsSet
-		}
-	}
-	mode := ls.config.UtxoSetReads
-	if mode == UtxoSetReadsOff || ls.utxoSetFailed.Load() {
-		return nil, UtxoSetReadsOff
+func (ls *LedgerState) utxoSetReaderOf(w UtxoSetWriter) (UtxoSetReader, bool) {
+	if w == nil {
+		return nil, false
 	}
 	r, ok := w.(UtxoSetReader)
 	if !ok {
-		return nil, UtxoSetReadsOff
+		return nil, false
 	}
-	return r, mode
+	return r, true
 }
 
 // utxoSetGet reads txID#index as txn sees the live UTxO set: the changes txn
@@ -1027,7 +1019,7 @@ func (ls *LedgerState) utxoSetGet(
 	index uint32,
 ) ([]byte, bool, error) {
 	// r is nil only when reads are off, which callers handle before this.
-	if r == nil || ls.utxoSetAuthoritative() && ls.utxoSetFailed.Load() {
+	if r == nil || ls.utxoSetFailed.Load() {
 		return nil, false, errLiveUtxoSetUnavailable
 	}
 	var own *utxoSetBatch
@@ -1063,162 +1055,71 @@ func (ls *LedgerState) getThroughBatches(
 	return r.Get(txID, index)
 }
 
-// utxoByRefForValidation resolves txID#index for validation from the store
-// the read mode selects.
+// utxoByRefForValidation resolves txID#index for validation from the live UTxO set.
 func (ls *LedgerState) utxoByRefForValidation(
-	ctx context.Context,
 	txID []byte,
 	index uint32,
 	txn ledgerdb.Txn,
 ) (*models.Utxo, error) {
 	r, mode := ls.utxoSetReaderFor(txn)
-	if mode == UtxoSetReadsOff {
-		return ls.ledgerDB().UtxoByRef(ctx, txID, index, txn)
+	if !mode {
+		return nil, ErrUtxoSetUnserved
 	}
-	g := ls.beginVerifyRead(txn)
 	setCbor, setFound, setErr := ls.utxoSetGet(r, txn, txID, index)
-	if mode == UtxoSetReadsSet {
-		if setErr != nil {
-			return nil, setErr
-		}
-		if !setFound {
-			return nil, database.ErrUtxoNotFound
-		}
-		return &models.Utxo{TxId: txID, OutputIdx: index, Cbor: setCbor}, nil
+	if setErr != nil {
+		return nil, setErr
 	}
-	utxo, err := ls.ledgerDB().UtxoByRef(ctx, txID, index, txn)
-	if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
-		return utxo, err
+	if !setFound {
+		return nil, database.ErrUtxoNotFound
 	}
-	var storeCbor []byte
-	if utxo != nil && err == nil {
-		storeCbor = utxo.Cbor
-	}
-	ls.compareUtxoSetRead(
-		g, txID, index, storeCbor, err == nil, setCbor, setFound, setErr,
-	)
-	return utxo, err
+	return &models.Utxo{TxId: txID, OutputIdx: index, Cbor: setCbor}, nil
 }
 
-// utxosByRefsForQuery resolves refs for a client query: the live UTxO set when
-// it is the only copy, otherwise the metadata store. Unlike
-// utxosByRefsForValidation it never runs the verify comparison, so queries do
-// not count toward or log validation read mismatches.
+// utxosByRefsForQuery resolves client query references from the live UTxO set.
 func (ls *LedgerState) utxosByRefsForQuery(
-	ctx context.Context,
 	refs []models.UtxoId,
 	txn ledgerdb.Txn,
 ) ([]models.Utxo, error) {
-	if ls.config.UtxoSetOnly {
-		return ls.utxosByRefsForValidation(ctx, refs, txn)
-	}
-	return ls.ledgerDB().UtxosByRefs(ctx, refs, txn)
+	return ls.utxosByRefsForValidation(refs, txn)
 }
 
-// utxosByRefsForValidation resolves refs for validation from the store the
-// read mode selects, leaving out refs that are not live.
+// utxosByRefsForValidation resolves refs for validation from the live UTxO set,
+// leaving out refs that are not live.
 func (ls *LedgerState) utxosByRefsForValidation(
-	ctx context.Context,
 	refs []models.UtxoId,
 	txn ledgerdb.Txn,
 ) ([]models.Utxo, error) {
+	if len(refs) == 0 {
+		return []models.Utxo{}, nil
+	}
 	r, mode := ls.utxoSetReaderFor(txn)
-	if mode == UtxoSetReadsOff {
-		return ls.ledgerDB().UtxosByRefs(ctx, refs, txn)
+	if !mode {
+		return nil, ErrUtxoSetUnserved
 	}
-	g := ls.beginVerifyRead(txn)
 	fromSet := make([]models.Utxo, 0, len(refs))
-	type setAnswer struct {
-		cbor  []byte
-		found bool
-		err   error
-	}
-	answers := make([]setAnswer, len(refs))
-	for i, ref := range refs {
+	for _, ref := range refs {
 		c, ok, err := ls.utxoSetGet(r, txn, ref.Hash, ref.Idx)
-		answers[i] = setAnswer{cbor: c, found: ok, err: err}
-		if mode == UtxoSetReadsSet {
-			if err != nil {
-				return nil, err
-			}
-			if ok {
-				fromSet = append(fromSet, models.Utxo{
-					TxId:      ref.Hash,
-					OutputIdx: ref.Idx,
-					Cbor:      c,
-				})
-			}
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			fromSet = append(fromSet, models.Utxo{
+				TxId:      ref.Hash,
+				OutputIdx: ref.Idx,
+				Cbor:      c,
+			})
 		}
 	}
-	if mode == UtxoSetReadsSet {
-		return fromSet, nil
-	}
-	rows, err := ls.ledgerDB().UtxosByRefs(ctx, refs, txn)
-	if err != nil {
-		return rows, err
-	}
-	byRef := make(map[utxoref.Key][]byte, len(rows))
-	for i := range rows {
-		byRef[utxoSetKey(rows[i].TxId, rows[i].OutputIdx)] = rows[i].Cbor
-	}
-	for i, ref := range refs {
-		storeCbor, storeFound := byRef[utxoSetKey(ref.Hash, ref.Idx)]
-		a := answers[i]
-		ls.compareUtxoSetRead(
-			g, ref.Hash, ref.Idx, storeCbor, storeFound, a.cbor, a.found, a.err,
-		)
-	}
-	return rows, nil
-}
-
-// compareUtxoSetRead counts a verify-mode read and reports when the live
-// UTxO set's answer differs from the metadata store's.
-func (ls *LedgerState) compareUtxoSetRead(
-	g verifyReadGuard,
-	txID []byte,
-	index uint32,
-	storeCbor []byte,
-	storeFound bool,
-	setCbor []byte,
-	setFound bool,
-	setErr error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	same := storeFound == setFound &&
-		(!storeFound || bytes.Equal(storeCbor, setCbor))
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.utxoSetReadsVerified.Inc()
-	if setErr == nil && same {
-		return
-	}
-	n := ls.utxoSetReadMismatches.Add(1)
-	ls.metrics.utxoSetReadMismatches.Inc()
-	// The first mismatches say the most; later ones are sampled.
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set read differs from the metadata store",
-		"component", "ledger",
-		"utxo", fmt.Sprintf("%x#%d", txID, index),
-		"store_found", storeFound,
-		"set_found", setFound,
-		"set_error", setErr,
-		"mismatches", n,
-	)
+	return fromSet, nil
 }
 
 func utxoSetKey(txID []byte, index uint32) utxoref.Key {
 	return utxoref.Key{TxId: lcommon.NewBlake2b256(txID), Index: index}
 }
 
-// LiveUtxoCbor implements types.LiveUtxoSource for the metadata store in
-// UtxoSetOnly mode: it reads txID#index as the ledger transaction writing in
-// meta sees the live UTxO set.
+// LiveUtxoCbor implements types.LiveUtxoSource for the metadata store: it
+// reads txID#index as the ledger transaction writing in meta sees the live
+// UTxO set.
 func (ls *LedgerState) LiveUtxoCbor(
 	meta types.Txn,
 	txID []byte,
@@ -1226,7 +1127,7 @@ func (ls *LedgerState) LiveUtxoCbor(
 ) ([]byte, bool, error) {
 	r, ok := ls.readSetMeta(meta).(UtxoSetReader)
 	if !ok {
-		return nil, false, errors.New("no readable live UTxO set")
+		return nil, false, ErrUtxoSetUnserved
 	}
 	if ls.utxoSetFailed.Load() {
 		return nil, false, errLiveUtxoSetUnavailable
@@ -1305,7 +1206,7 @@ func (ls *LedgerState) LiveUtxoStake(
 ) (uint64, error) {
 	r, ok := ls.readSetMeta(meta).(UtxoSetReader)
 	if !ok {
-		return 0, errors.New("no readable live UTxO set")
+		return 0, ErrUtxoSetUnserved
 	}
 	if ls.utxoSetFailed.Load() {
 		return 0, errLiveUtxoSetUnavailable
@@ -1327,7 +1228,7 @@ func (ls *LedgerState) EachLiveUtxoStake(
 ) error {
 	sums, ok := ls.readSetMeta(meta).(UtxoSetSums)
 	if !ok {
-		return errors.New("the live UTxO set keeps no stake sums")
+		return fmt.Errorf("%w: the live UTxO set keeps no stake sums", ErrUtxoSetUnserved)
 	}
 	if ls.utxoSetFailed.Load() {
 		return errLiveUtxoSetUnavailable
@@ -1428,7 +1329,7 @@ func (ls *LedgerState) refreshUtxoSetRollbackStake(
 	txn ledgerdb.Txn,
 	slot uint64,
 ) error {
-	if !ls.config.UtxoSetOnly || txn == nil {
+	if txn == nil {
 		return nil
 	}
 	if ls.resumingUtxoSet.Load() {
@@ -1454,21 +1355,16 @@ type UtxoSetIterator interface {
 	EachUtxo(fn func(txID []byte, index uint32, cbor []byte) error) error
 }
 
-// iterateLiveUtxos calls fn for every live output as txn sees the UTxO set:
-// the metadata store's rows, or with UtxoSetOnly the live UTxO set with txn's
-// staged changes over it. Rows passed to fn carry only the reference and the
-// output CBOR in UtxoSetOnly mode.
+// iterateLiveUtxos calls fn for every live output as txn sees the live UTxO
+// set, with txn's staged changes over it. Rows passed to fn carry only the
+// reference and the output CBOR.
 func (ls *LedgerState) iterateLiveUtxos(
-	ctx context.Context,
 	txn ledgerdb.Txn,
 	fn func(*models.Utxo) error,
 ) error {
-	if !ls.config.UtxoSetOnly {
-		return ls.ledgerDB().IterateLiveUtxos(ctx, txn, fn)
-	}
 	it, ok := ls.readSet(txn).(UtxoSetIterator)
 	if !ok {
-		return errors.New("the live UTxO set cannot be iterated")
+		return fmt.Errorf("%w: the live UTxO set cannot be iterated", ErrUtxoSetUnserved)
 	}
 	if ls.utxoSetFailed.Load() {
 		return errLiveUtxoSetUnavailable
@@ -1517,14 +1413,10 @@ func (ls *LedgerState) iterateLiveUtxos(
 // liveUtxoLovelace is the lovelace in every live output as txn sees the UTxO
 // set.
 func (ls *LedgerState) liveUtxoLovelace(
-	ctx context.Context,
 	txn ledgerdb.Txn,
 ) (uint64, error) {
-	if !ls.config.UtxoSetOnly {
-		return ls.ledgerDB().GetLiveUtxoLovelace(txn)
-	}
 	var total uint64
-	err := ls.iterateLiveUtxos(ctx, txn, func(u *models.Utxo) error {
+	err := ls.iterateLiveUtxos(txn, func(u *models.Utxo) error {
 		out, err := u.Decode()
 		if err != nil {
 			return fmt.Errorf("decode utxo %x#%d: %w", u.TxId, u.OutputIdx, err)
@@ -1543,8 +1435,7 @@ func (ls *LedgerState) liveUtxoLovelace(
 }
 
 // utxoIncludingSpent resolves txID#index whether or not it is still live,
-// returning nil for an output that never existed. With UtxoSetOnly a spent
-// output is read from the body of the transaction that produced it: a valid
+// returning nil for an output that never existed. A spent output is read from the body of the transaction that produced it: a valid
 // transaction's outputs, or an invalid one's collateral return at the index
 // after its outputs, as the metadata store records them.
 func (ls *LedgerState) utxoIncludingSpent(
@@ -1553,10 +1444,7 @@ func (ls *LedgerState) utxoIncludingSpent(
 	txID []byte,
 	index uint32,
 ) (*models.Utxo, error) {
-	if !ls.config.UtxoSetOnly {
-		return ls.ledgerDB().UtxoByRefIncludingSpent(ctx, txID, index, txn)
-	}
-	live, err := ls.utxoByRefForValidation(ctx, txID, index, txn)
+	live, err := ls.utxoByRefForValidation(txID, index, txn)
 	if err == nil {
 		return live, nil
 	}
@@ -1609,22 +1497,18 @@ func (ls *LedgerState) utxoIncludingSpent(
 }
 
 // utxosByAddress returns the live outputs paid to any of addrs, at most limit
-// of them when limit is positive. With UtxoSetOnly it scans the live UTxO set
-// and matches each output's exact address.
+// of them when limit is positive. It scans the live UTxO set and matches each
+// output's exact address.
 func (ls *LedgerState) utxosByAddress(
-	ctx context.Context,
 	addrs []gledger.Address,
 	limit int,
 	txn ledgerdb.Txn,
 ) ([]models.Utxo, error) {
-	if !ls.config.UtxoSetOnly {
-		return ls.ledgerDB().UtxosByAddress(ctx, addrs, limit, txn)
-	}
 	return utxosByAddressFrom(
 		addrs,
 		limit,
 		func(fn func(*models.Utxo) error) error {
-			return ls.iterateLiveUtxos(ctx, txn, fn)
+			return ls.iterateLiveUtxos(txn, fn)
 		},
 	)
 }
@@ -1683,7 +1567,7 @@ func (ls *LedgerState) LivePointerStakes(
 ) ([]types.PointerStake, error) {
 	sums, ok := ls.readSetMeta(meta).(UtxoSetSums)
 	if !ok {
-		return nil, errors.New("the live UTxO set keeps no stake sums")
+		return nil, fmt.Errorf("%w: the live UTxO set keeps no stake sums", ErrUtxoSetUnserved)
 	}
 	if ls.utxoSetFailed.Load() {
 		return nil, errLiveUtxoSetUnavailable
@@ -1734,7 +1618,7 @@ var ErrUtxoAsOfUnavailable = errors.New(
 )
 
 // UtxoSetHistory opens views of a live UTxO set as it was at an earlier
-// point, for LedgerStateConfig.UtxoSetOnly. UtxoSetAt returns an error
+// point. UtxoSetAt returns an error
 // wrapping ErrUtxoAsOfUnavailable when its history does not reach point, and
 // ErrPointNotOnChain when point is not in its retained full-point lineage.
 type UtxoSetHistory interface {
@@ -1749,14 +1633,10 @@ type UtxoSetView interface {
 	Close()
 }
 
-// liveUtxoView opens the live UTxO set as of at for a UTxO query pinned to at
-// when the set is the only copy. It returns nil otherwise, and the caller
-// answers from its usual source.
-func (ls *LedgerState) liveUtxoView(
-	at QueryPoint,
-	txn ledgerdb.Txn,
-) (UtxoSetView, error) {
-	if !ls.config.UtxoSetOnly || !at.pinned() {
+// liveUtxoView opens the transaction's live set snapshot as of at. An unpinned
+// query returns nil and reads the transaction's current set instead.
+func (ls *LedgerState) liveUtxoView(at QueryPoint, txn ledgerdb.Txn) (UtxoSetView, error) {
+	if !at.pinned() {
 		return nil, nil
 	}
 	if ls.utxoSetFailed.Load() {
@@ -1778,19 +1658,14 @@ func eachInView(v UtxoSetView) func(func(*models.Utxo) error) error {
 	}
 }
 
-// utxoExists reports whether txID#index is live, without reading its output:
-// a metadata row, or with UtxoSetOnly the live UTxO set.
+// utxoExists reports whether txID#index is live, without reading its output.
 func (ls *LedgerState) utxoExists(
-	ctx context.Context,
 	txID []byte,
 	index uint32,
 ) (bool, error) {
-	if !ls.config.UtxoSetOnly {
-		return ls.ledgerDB().UtxoExists(ctx, txID, index, nil)
-	}
-	r, _ := ls.utxoSetReader()
-	if r == nil {
-		return false, errors.New("no readable live UTxO set")
+	r, ok := ls.utxoSetReader()
+	if !ok {
+		return false, ErrUtxoSetUnserved
 	}
 	_, live, err := ls.utxoSetGet(r, nil, txID, index)
 	return live, err

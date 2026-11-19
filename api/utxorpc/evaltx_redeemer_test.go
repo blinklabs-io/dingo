@@ -59,8 +59,9 @@ func TestEvalTxOmitsRedeemerPurposesOutsideSchema(t *testing.T) {
 		},
 	}
 	srv := &submitServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
-		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		LedgerState: stub,
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerState:   stub,
+		QueryDatabase: stubQueryDB(stub),
 	})}
 
 	out, err := srv.EvalTx(

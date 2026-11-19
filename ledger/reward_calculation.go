@@ -4414,7 +4414,6 @@ func (ls *LedgerState) rewardBlockCounts(
 	} else if ls.familyDrained(nodesettings.FamilyRewardBlocksFees) {
 		return nil, 0, false, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
 	}
-	g := ls.verifyGuard(metaTxn)
 	var counts map[string]uint64
 	var total uint64
 	if decentralization != nil && decentralization.Sign() > 0 {
@@ -4443,19 +4442,13 @@ func (ls *LedgerState) rewardBlockCounts(
 	if err != nil {
 		return nil, 0, false, err
 	}
-	counts, total, known, err := meta.MergeImportedPoolBlockCounts(
+	return meta.MergeImportedPoolBlockCounts(
 		performanceEpoch,
 		startSlot,
 		counts,
 		total,
 		metaTxn,
 	)
-	if err == nil {
-		ls.verifyRewardBlockCounts(
-			g, metaTxn, performanceEpoch, poolKeys, counts, total, known,
-		)
-	}
-	return counts, total, known, err
 }
 
 func rewardBlockCountsExcludingOverlaySlots(

@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"net"
@@ -275,6 +276,7 @@ func TestNewOuroborosWiresPeerRelativeHeaderVerification(t *testing.T) {
 	conn := wiringTestConnId(t)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database: db, ChainManager: cm, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		UtxoSet: livesettest.New(),
 		PeerHeaderLookupFunc: func(got ouroboros.ConnectionId, _ []byte) (ledger.ChainsyncEvent, []byte, bool) {
 			require.Equal(t, conn, got)
 			queried = true

@@ -16,9 +16,12 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/leioskeyepoch"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -92,6 +95,9 @@ func (s *Store) SetGenesisStakingWithDeposits(
 			return fmt.Errorf("create genesis pool: %w", err)
 		}
 	}
+	if s.familyDrained(nodesettings.FamilyAccounts) {
+		return nil
+	}
 	refs := []models.StakeCredentialRef{}
 	accounts, err := models.GenesisStakeAccounts(stakeDelegations, keyDeposit)
 	if err != nil {
@@ -119,6 +125,10 @@ func (s *Store) SetGenesisGovernance(
 	_ []byte,
 	txn types.Txn,
 ) error {
+	// A drained family's tables are skipped; the delegation and registration
+	// certificate history is written either way.
+	accounts := s.familyDrained(nodesettings.FamilyAccounts)
+	dreps := s.familyDrained(nodesettings.FamilyDReps)
 	for credential, state := range initialDReps {
 		if credential == nil {
 			continue
@@ -128,6 +138,14 @@ func (s *Store) SetGenesisGovernance(
 			return err
 		}
 		drep, registration := &drepRow, &registrationRow
+		if dreps {
+			// The registration certificate history outlives the drained
+			// DRep tables.
+			if err := s.importGenesisDrepRegistration(registration, txn); err != nil {
+				return fmt.Errorf("create genesis drep registration: %w", err)
+			}
+			continue
+		}
 		if err := s.ImportDrep(drep, registration, txn); err != nil {
 			return fmt.Errorf("create genesis drep: %w", err)
 		}
@@ -151,37 +169,12 @@ func (s *Store) SetGenesisGovernance(
 			return err
 		}
 		pool, drepCredential, drepType := effect.Pool, effect.Drep, effect.DrepType
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO account (
-    staking_key, pool, drep, reward, active, added_slot,
-    credential_tag, drep_type, expiration_epoch, created_slot
-) VALUES (?, ?, ?, '0', TRUE, 0, ?, ?, 0, 0)
-ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
-    pool = excluded.pool, drep = excluded.drep,
-    drep_type = excluded.drep_type, active = TRUE`,
-			stakeKey,
-			nullBytes(pool),
-			nullBytes(drepCredential),
-			tag,
-			drepType,
-		); err != nil {
-			return err
-		}
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO registration (
-    staking_key, certificate_id, credential_tag, added_slot, deposit_amount
-)
-SELECT ?, 0, ?, 0, '0'
-WHERE NOT EXISTS (
-    SELECT 1 FROM registration
-    WHERE credential_tag = ? AND staking_key = ? AND added_slot = 0
-)`,
-			stakeKey,
-			tag,
-			tag,
-			stakeKey,
-		); err != nil {
-			return err
+		if !accounts {
+			if err := insertGenesisAccount(
+				ctx, db, stakeKey, tag, pool, drepCredential, drepType,
+			); err != nil {
+				return err
+			}
 		}
 		switch delegatee.Type {
 		case conway.ConwayGenesisDelegateeTypeStake:
@@ -229,7 +222,7 @@ WHERE NOT EXISTS (
 		if err != nil {
 			return err
 		}
-		if len(drepCredential) > 0 {
+		if len(drepCredential) > 0 && !dreps {
 			if err := addDrepDelegator(
 				ctx,
 				db,
@@ -245,6 +238,73 @@ WHERE NOT EXISTS (
 		refs = append(refs, models.NewStakeCredentialRef(tag, stakeKey))
 	}
 	return s.refreshRewardLiveStakeRefs(ctx, db, refs, 0)
+}
+
+// insertGenesisAccount writes the account a Conway genesis delegation
+// creates or updates, with its slot-0 registration.
+func insertGenesisAccount(
+	ctx context.Context,
+	db queryer,
+	stakeKey []byte,
+	tag uint8,
+	pool, drepCredential []byte,
+	drepType uint64,
+) error {
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO account (
+    staking_key, pool, drep, reward, active, added_slot,
+    credential_tag, drep_type, expiration_epoch, created_slot
+) VALUES (?, ?, ?, '0', TRUE, 0, ?, ?, 0, 0)
+ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
+    pool = excluded.pool, drep = excluded.drep,
+    drep_type = excluded.drep_type, active = TRUE`,
+		stakeKey,
+		nullBytes(pool),
+		nullBytes(drepCredential),
+		tag,
+		drepType,
+	); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO registration (
+    staking_key, certificate_id, credential_tag, added_slot, deposit_amount
+)
+SELECT ?, 0, ?, 0, '0'
+WHERE NOT EXISTS (
+    SELECT 1 FROM registration
+    WHERE credential_tag = ? AND staking_key = ? AND added_slot = 0
+)`,
+		stakeKey,
+		tag,
+		tag,
+		stakeKey,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+// importGenesisDrepRegistration writes the registration certificate of a
+// genesis DRep without the drained DRep tables.
+func (s *Store) importGenesisDrepRegistration(
+	registration *models.RegistrationDrep,
+	txn types.Txn,
+) error {
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			params, err := drepRegistrationParams(registration)
+			if err != nil {
+				return err
+			}
+			_, err = s.operationalQueries(db).ImportDrepRegistration(ctx, params)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		},
+	)
 }
 
 func insertGenesisDelegation(

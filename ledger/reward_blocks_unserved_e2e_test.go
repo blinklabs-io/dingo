@@ -18,27 +18,40 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
 
-// With the family drained and no set serving its rows, the reward round's
-// counts and fees and the capture's counts fail rather than read the emptied
-// imported-count tables and under-count.
-func TestRewardBlockReadsFailWhenTheDrainedFamilyHasNoServingSet(t *testing.T) {
+// A loaded set keeps reward block rows available after their metadata family drains.
+func TestRewardBlockReadsStayOnTheSetAfterDrain(t *testing.T) {
 	t.Parallel()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsOff, nil, true)
+	r := newRewardBlocksRun(t, "set", nil, true)
 	r.write()
+	wantCounts, wantTotal, wantKnown, err := r.scenario.Counts(4)
+	require.NoError(t, err)
+	wantFees, err := r.scenario.Fees(4)
+	require.NoError(t, err)
+	wantEpochCounts, wantEpochTotal, wantEpochKnown, err := r.scenario.EpochCounts(4)
+	require.NoError(t, err)
 	require.NoError(t, r.scenario.DB.RecordDrainedFamily(
 		t.Context(), nodesettings.FamilyRewardBlocksFees,
 	))
 	r.scenario.DrainFamilies(
 		nodesettings.FamilyMask(0).With(nodesettings.FamilyRewardBlocksFees),
 	)
-	_, _, _, err := r.scenario.Counts(4)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
-	_, err = r.scenario.Fees(4)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
-	_, _, _, err = r.scenario.EpochCounts(4)
-	require.ErrorIs(t, err, ledger.ErrDrainedFamilyUnserved)
+	reached, hide := r.scenario.HideStoreReads(rewardBlockReadNames...)
+	counts, total, known, err := r.scenario.Counts(4)
+	require.NoError(t, err)
+	fees, err := r.scenario.Fees(4)
+	require.NoError(t, err)
+	epochCounts, epochTotal, epochKnown, err := r.scenario.EpochCounts(4)
+	require.NoError(t, err)
+	hide(false)
+	require.Equal(t, wantCounts, counts)
+	require.Equal(t, wantTotal, total)
+	require.Equal(t, wantKnown, known)
+	require.Equal(t, wantFees, fees)
+	require.Equal(t, wantEpochCounts, epochCounts)
+	require.Equal(t, wantEpochTotal, epochTotal)
+	require.Equal(t, wantEpochKnown, epochKnown)
+	require.Zero(t, reached(), "loaded reward block rows reached metadata")
 }

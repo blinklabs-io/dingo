@@ -118,6 +118,7 @@ func additionalReferenceLedger(
 			CardanoNodeConfig: cfg,
 		},
 	}
+	attachTestLiveSet(t, ls)
 	ls.epochCache = []models.Epoch{ls.currentEpoch}
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
@@ -496,6 +497,7 @@ func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
 					SkipDijkstraTxValidation: tc.prototype,
 				},
 			}
+			attachTestLiveSet(t, ls)
 			ls.epochCache = []models.Epoch{ls.currentEpoch}
 			ls.metrics.init(prometheus.NewRegistry())
 			if tc.previous {

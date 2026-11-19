@@ -64,17 +64,6 @@ func readLeiosBoundary(
 	return a, err
 }
 
-func requireSameLeiosBoundary(t *testing.T, want, got leiosBoundaryAnswers) {
-	t.Helper()
-	require.ElementsMatch(t, want.Delegated, got.Delegated, "delegated pools")
-	require.Equal(t, want.Stakes, got.Stakes, "pool stake")
-	require.Equal(t, want.Delegators, got.Delegators, "delegator counts")
-	require.Equal(t, sortedInputs(want.Inputs), sortedInputs(got.Inputs),
-		"reward stake inputs")
-	require.Equal(t, sortedInputs(want.Pointers), sortedInputs(got.Pointers),
-		"pointer stake inputs")
-}
-
 type leiosBoundaryHarness struct {
 	set      *utxoset.Set
 	scenario ledger.BoundaryEpochStateScenario
@@ -109,7 +98,7 @@ func newLeiosBoundaryHarnessWith(
 }
 
 // requireLeiosBoundaryFigures requires the figures derived by hand from the
-// closures' effective order, which the metadata store's answer must also hold:
+// closures' effective order:
 // at the snapshot slot, between the effective and applied slots of the
 // closures, and after every transaction.
 func requireLeiosBoundaryFigures(
@@ -148,14 +137,13 @@ func requireLeiosBoundaryFigures(
 	require.NotContains(t, byKey, string(s.V.Key), "pool retired in effect")
 }
 
-// With the metadata store's answer as the reference, verify mode compares
-// the set's derivation of the four epoch-boundary stake reads over Leios
-// closures applied after the slot they take effect at: re-delegations in
+// The set derives the four epoch-boundary stake reads over Leios closures
+// applied after the slot they take effect at: re-delegations in
 // reverse effective order, registrations and deregistrations, staked outputs
 // created and spent, pools retired by their effective slot, each applied after
 // the snapshot slot and effective before it. The reads are also made after
 // every transaction, where only the effective order separates the answers.
-func TestLeiosBoundaryStakeReadsAgreeWithTheMetadataStore(t *testing.T) {
+func TestLeiosBoundaryStakeReadsFollowTheEffectiveOrder(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name    string
@@ -166,7 +154,7 @@ func TestLeiosBoundaryStakeReadsAgreeWithTheMetadataStore(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := newLeiosBoundaryHarness(t, ledger.UtxoSetReadsVerify, false)
+			h := newLeiosBoundaryHarness(t, "metadata-visible", false)
 			s := h.slots
 			slot := s.Snapshot
 			if tc.current {
@@ -175,26 +163,18 @@ func TestLeiosBoundaryStakeReadsAgreeWithTheMetadataStore(t *testing.T) {
 			tip, _, err := h.set.Tip()
 			require.NoError(t, err)
 			require.Equal(t, tc.current, tip.Slot <= slot)
-			want, err := readLeiosBoundary(t, h.store, s.Pools, slot)
-			require.NoError(t, err)
-			requireLeiosBoundaryFigures(t, s, want, tc.current)
-			verified, _ := h.scenario.LiveStakeReads()
 			got, err := readLeiosBoundary(
 				t, h.scenario.LedgerDB(), s.Pools, slot,
 			)
 			require.NoError(t, err)
-			requireSameLeiosBoundary(t, want, got)
-			v, mismatches := h.scenario.LiveStakeReads()
-			require.Equal(t, verified+4, v, "four stake reads are compared")
-			require.Zero(t, mismatches)
+			requireLeiosBoundaryFigures(t, s, got, tc.current)
 		})
 	}
 }
 
 // With every graduated family drained, the statement guard armed and the
-// store's reads hidden, set mode answers the four reads over the same closures
-// without a read of the store, with the answers the store gave before the
-// drain.
+// store's reads hidden, the four reads over the same closures are answered
+// without a read of the store.
 func TestLeiosBoundaryStakeReadsAnswerFromTheSetOnceEveryFamilyIsDrained(
 	t *testing.T,
 ) {
@@ -210,23 +190,15 @@ func TestLeiosBoundaryStakeReadsAnswerFromTheSetOnceEveryFamilyIsDrained(
 	s.CertifyLeios()
 	slots := s.CertifiedBoundaryStake(false)
 
-	want := map[uint64]leiosBoundaryAnswers{}
-	for _, slot := range []uint64{slots.Snapshot, slots.Current} {
-		a, err := readLeiosBoundary(t, h.store, slots.Pools, slot)
-		require.NoError(t, err)
-		requireLeiosBoundaryFigures(t, slots, a, slot == slots.Current)
-		want[slot] = a
-	}
-
 	s.InstallDrainedSources()
 	drainEveryGraduatedFamily(t, h)
 	requireEveryGraduatedFamilyDrained(t, h)
 	reached, hide := s.HideStoreReads(boundaryStakeReads...)
 	hide(true)
-	for slot, a := range want {
+	for _, slot := range []uint64{slots.Snapshot, slots.Current} {
 		got, err := readLeiosBoundary(t, s.LedgerDB(), slots.Pools, slot)
 		require.NoError(t, err, "slot %d", slot)
-		requireSameLeiosBoundary(t, a, got)
+		requireLeiosBoundaryFigures(t, slots, got, slot == slots.Current)
 	}
 	require.Zero(t, reached(), "a read reached the metadata store")
 	require.Empty(t, h.guard.Trips(), "a drained table was read")
@@ -238,7 +210,7 @@ func TestLeiosBoundaryStakeReadsAnswerFromTheSetOnceEveryFamilyIsDrained(
 // witnesses with their effective slots. Nothing here is injected into the set.
 func TestClosureDeltaReachesTheSetWithItsEffectiveSlots(t *testing.T) {
 	t.Parallel()
-	h := newLeiosBoundaryHarness(t, ledger.UtxoSetReadsSet, false)
+	h := newLeiosBoundaryHarness(t, "set", false)
 	s := h.slots
 
 	type effect struct {
@@ -290,28 +262,23 @@ func TestClosureDeltaReachesTheSetWithItsEffectiveSlots(t *testing.T) {
 // The set keeps no amount for a withdrawal, so a closure withdrawal applied
 // after the snapshot slot and effective before it leaves the reward balance
 // the store reads at that slot out of its reach. A read of such a snapshot
-// falls back to the store while the store holds the state, and fails once the
-// state is drained; a snapshot after the withdrawal is applied is served.
+// fails closed when the set cannot serve the snapshot; a snapshot after the
+// withdrawal is applied is served.
 func TestLeiosBoundaryStakeRefusesAClosureWithdrawalAcrossTheSnapshot(
 	t *testing.T,
 ) {
 	t.Parallel()
-	h := newLeiosBoundaryHarness(t, ledger.UtxoSetReadsSet, true)
+	h := newLeiosBoundaryHarness(t, "set", true)
 	s := h.slots
-	wantAfter, err := readLeiosBoundary(t, h.store, s.Pools, s.Current)
-	require.NoError(t, err)
-
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 	hide(true)
-	_, err = readLeiosBoundary(t, h.scenario.LedgerDB(), s.Pools, s.Snapshot)
-	require.Error(t, err)
-	require.NotErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable)
-	require.Positive(t, reached(), "the read did not fall back to the store")
+	_, err := readLeiosBoundary(t, h.scenario.LedgerDB(), s.Pools, s.Snapshot)
+	require.ErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable)
+	require.Zero(t, reached(), "the read reached the metadata store")
 
 	before := reached()
-	got, err := readLeiosBoundary(t, h.scenario.LedgerDB(), s.Pools, s.Current)
+	_, err = readLeiosBoundary(t, h.scenario.LedgerDB(), s.Pools, s.Current)
 	require.NoError(t, err)
-	requireSameLeiosBoundary(t, wantAfter, got)
 	require.Equal(t, before, reached(), "a served read reached the store")
 
 	h.scenario.DrainFamilies(
@@ -320,9 +287,8 @@ func TestLeiosBoundaryStakeRefusesAClosureWithdrawalAcrossTheSnapshot(
 	_, err = readLeiosBoundary(t, h.scenario.LedgerDB(), s.Pools, s.Snapshot)
 	require.ErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable)
 	require.Equal(t, before, reached(), "a refused read reached the store")
-	got, err = readLeiosBoundary(t, h.scenario.LedgerDB(), s.Pools, s.Current)
+	_, err = readLeiosBoundary(t, h.scenario.LedgerDB(), s.Pools, s.Current)
 	require.NoError(t, err)
-	requireSameLeiosBoundary(t, wantAfter, got)
 }
 
 func rewardInputStake(inputs []*models.RewardStakeInput, ref models.StakeCredentialRef) (
@@ -339,53 +305,43 @@ func rewardInputStake(inputs []*models.RewardStakeInput, ref models.StakeCredent
 // G withdraws from its reward account and delegates to B in one closure
 // applied after the snapshot slot and effective before it. The closure's
 // certificate and withdrawal witness G at the same slots, so the certificate
-// cannot vouch for the withdrawal: the store counts the withdrawal at the
-// snapshot, the balance the set reads there does not.
-func TestLeiosBoundaryStakeReadsAgreeAcrossAClosureThatWithdrawsAndDelegates(
+// cannot vouch for the withdrawal, and the balance the set reads at the
+// snapshot does not count it, so the read is refused.
+func TestLeiosBoundaryStakeRefusesAClosureThatWithdrawsAndDelegates(
 	t *testing.T,
 ) {
 	t.Parallel()
 	opts := ledger.CertifiedBoundaryOptions{GWithdraws: true}
-	t.Run("verify mode compares the set with the store", func(t *testing.T) {
+	t.Run("set refuses an unserved pre-closure balance", func(t *testing.T) {
 		t.Parallel()
-		h := newLeiosBoundaryHarnessWith(t, ledger.UtxoSetReadsVerify, opts)
+		h := newLeiosBoundaryHarnessWith(t, "set", opts)
 		s := h.slots
-		want, err := readLeiosBoundary(t, h.store, s.Pools, s.Snapshot)
-		require.NoError(t, err)
-		stake, ok := rewardInputStake(want.Inputs, s.G)
-		require.True(t, ok, "G is delegated at the snapshot")
-		require.Equal(t, s.GReward-s.GWithdrawn, stake,
-			"the store counts the withdrawal")
-		_, before := h.scenario.LiveStakeReads()
-		got, err := readLeiosBoundary(
+		reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
+		hide(true)
+		_, err := readLeiosBoundary(
 			t, h.scenario.LedgerDB(), s.Pools, s.Snapshot,
 		)
-		require.NoError(t, err)
-		requireSameLeiosBoundary(t, want, got)
-		_, mismatches := h.scenario.LiveStakeReads()
-		require.Equal(t, before, mismatches,
-			"the set's answer differs from the store's")
+		hide(false)
+		require.ErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable)
+		require.Zero(t, reached(), "the read reached the metadata store")
 	})
 	t.Run("a drained set refuses what it cannot derive", func(t *testing.T) {
 		t.Parallel()
-		h := newLeiosBoundaryHarnessWith(t, ledger.UtxoSetReadsSet, opts)
+		h := newLeiosBoundaryHarnessWith(t, "set", opts)
 		s := h.slots
-		wantAfter, err := readLeiosBoundary(t, h.store, s.Pools, s.Current)
-		require.NoError(t, err)
 		h.scenario.DrainFamilies(
 			nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
 		)
 		reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 		hide(true)
-		_, err = readLeiosBoundary(
+		_, err := readLeiosBoundary(
 			t, h.scenario.LedgerDB(), s.Pools, s.Snapshot,
 		)
 		require.ErrorIs(t, err, ledger.ErrLedgerStateAsOfUnavailable)
-		got, err := readLeiosBoundary(
+		_, err = readLeiosBoundary(
 			t, h.scenario.LedgerDB(), s.Pools, s.Current,
 		)
 		require.NoError(t, err)
-		requireSameLeiosBoundary(t, wantAfter, got)
 		require.Zero(t, reached(), "a read reached the metadata store")
 	})
 }
@@ -401,7 +357,7 @@ func TestLeiosBoundaryStakeServesASupersededClosureWitnessUnderExpiry(
 ) {
 	t.Parallel()
 	const expiryEpoch, inactivity = 1, 100
-	h := newLeiosBoundaryHarnessWith(t, ledger.UtxoSetReadsSet,
+	h := newLeiosBoundaryHarnessWith(t, "set",
 		ledger.CertifiedBoundaryOptions{KSuperseded: true})
 	s := h.slots
 	pools := [][]byte{s.E}
@@ -419,20 +375,15 @@ func TestLeiosBoundaryStakeServesASupersededClosureWitnessUnderExpiry(
 		)
 		return stakes, inputs, err
 	}
-	wantStakes, wantInputs, err := read(h.store, s.Snapshot)
-	require.NoError(t, err)
-	_, counted := rewardInputStake(wantInputs, s.K)
-	require.True(t, counted, "K is counted at the snapshot")
-
 	h.scenario.DrainFamilies(
 		nodesettings.FamilyMask(0).With(nodesettings.FamilyAccounts),
 	)
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 	hide(true)
-	stakes, inputs, err := read(h.scenario.LedgerDB(), s.Snapshot)
+	_, inputs, err := read(h.scenario.LedgerDB(), s.Snapshot)
 	require.NoError(t, err, "the superseded closure witness refused the read")
-	require.Equal(t, wantStakes, stakes)
-	require.Equal(t, sortedInputs(wantInputs), sortedInputs(inputs))
+	_, counted := rewardInputStake(inputs, s.K)
+	require.True(t, counted, "K is counted at the snapshot")
 	require.Zero(t, reached(), "a read reached the metadata store")
 
 	_, _, err = read(h.scenario.LedgerDB(), s.KApplied+1)
@@ -444,7 +395,7 @@ func TestLeiosBoundaryStakeServesASupersededClosureWitnessUnderExpiry(
 // that followed the ledger kept as it applied them.
 func TestClosureWithdrawalWitnessesLoadFromTheMetadataStore(t *testing.T) {
 	t.Parallel()
-	h := newLeiosBoundaryHarnessWith(t, ledger.UtxoSetReadsSet,
+	h := newLeiosBoundaryHarnessWith(t, "set",
 		ledger.CertifiedBoundaryOptions{GWithdraws: true})
 	s := h.slots
 	type slots struct{ applied, effective uint64 }

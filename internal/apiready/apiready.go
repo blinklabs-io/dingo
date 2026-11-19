@@ -37,7 +37,7 @@ type Deny func(w http.ResponseWriter, status int, message string)
 const RetryAfterSeconds = "5"
 
 // Middleware answers 503 for a gated request whose kind is not ready. A nil
-// check serves everything, which is the shared layout. A check that errors
+// check serves everything, which is a node with no IndexerDB. A check that errors
 // refuses the request: serving from an IndexerDB whose tip cannot be read
 // could answer from rows the tip does not cover.
 func Middleware(

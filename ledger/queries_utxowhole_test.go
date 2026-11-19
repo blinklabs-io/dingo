@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -101,18 +100,28 @@ func seedBabbageUtxo(
 	require.NoError(t, err)
 
 	txId := bytes.Repeat([]byte{txIdSeed}, 32)
+	address, err := addr.Bytes()
+	require.NoError(t, err)
 	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
 		TxId:      txId,
 		OutputIdx: outputIdx,
 		AddedSlot: 100,
+		Address:   address,
 	}))
 	blob := db.Blob()
 	require.NotNil(t, blob)
 	require.NoError(t, blob.SetUtxo(txn.Blob(), txId, outputIdx, cborBytes))
 	require.NoError(t, txn.Commit())
 	return txId
+}
+
+func mustAddressBytes(t *testing.T, addr lcommon.Address) []byte {
+	t.Helper()
+	encoded, err := addr.Bytes()
+	require.NoError(t, err)
+	return encoded
 }
 
 // TestQueryShelleyUtxoWhole_ReturnsLiveUtxos covers GetUTxOWhole against a
@@ -430,21 +439,10 @@ func TestQueryShelleyUtxoWholeRejectsWrongLengthTransactionID(t *testing.T) {
 	}
 	cborBytes, err := cbor.Encode(&out)
 	require.NoError(t, err)
-	shortTxID := bytes.Repeat([]byte{0xA2}, 31)
-	paddedTxID := append(bytes.Clone(shortTxID), 0)
-	txn := db.Transaction(context.Background(), true)
-	defer txn.Release()
-	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:      shortTxID,
-		OutputIdx: 0,
-		AddedSlot: 100,
-	}))
-	require.NoError(t, db.Blob().SetUtxo(
-		txn.Blob(), paddedTxID, 0, cborBytes,
-	))
-	require.NoError(t, txn.Commit())
-
 	ls := newPoolDistr2Ledger(t, db)
+	set := newQuerySetHistory()
+	set.rawRows = []models.Utxo{{TxId: bytes.Repeat([]byte{0xA2}, 31), Cbor: cborBytes}}
+	ls.config.UtxoSet = set
 	result, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
 	require.Error(t, err)
 	require.Nil(t, result)
@@ -452,8 +450,7 @@ func TestQueryShelleyUtxoWholeRejectsWrongLengthTransactionID(t *testing.T) {
 }
 
 // TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery covers a live UTxO
-// row whose CBOR cannot be resolved even via recovery (no blob entry and no
-// producer transaction metadata to reconstruct it from): the whole query
+// reader whose CBOR cannot be resolved: the whole query
 // must fail rather than silently return a reply missing that row.
 // GetUTxOWhole's contract is every live UTxO, and node-parity compares this
 // reply against a real cardano-node -- a silently short reply would read as a
@@ -473,35 +470,19 @@ func TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery(t *testing.T) {
 	require.NoError(t, err)
 	seedBabbageUtxo(t, db, 0xA1, 0, addrA, 1_000_000)
 
-	// A live metadata row with no blob entry and no producer transaction to
-	// recover from -- ResolveUtxoCborWithRecovery must confirm this as
-	// ErrUtxoCborUnavailable rather than reconstructing it.
-	unrecoverableTxId := bytes.Repeat([]byte{0xC3}, 32)
-	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:      unrecoverableTxId,
-		OutputIdx: 0,
-		AddedSlot: 100,
-	}))
-	require.NoError(t, txn.Commit())
-
 	ls := newPoolDistr2Ledger(t, db)
+	set := ls.config.UtxoSet.(*querySetHistory)
+	set.readErr = database.ErrUtxoCborUnavailable
 
 	_, err = ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
-	require.Error(t, err)
+	require.ErrorIs(t, err, database.ErrUtxoCborUnavailable)
 }
 
-// TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess is the
-// regression test for a worker panic: a panic
-// during a worker's resolve or decode step used to escape the worker
-// goroutine entirely and terminate the whole node process, where the
-// previous sequential implementation (running inside IterateLiveUtxos'
-// Txn.Do, whose own recover converts a panic to ErrTxnPanic) would have
-// turned it into an ordinary query error instead. Uses the
-// decodeUtxoWholeCborFunc seam to inject a real panic deterministically,
-// rather than hunting for a specific CBOR byte sequence that happens to
-// panic the real decoder.
-func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
+// TestQueryShelleyUtxoWhole_DecodePanicFailsQuery proves a panic while
+// decoding an output becomes an ordinary query error identifiable as
+// database.ErrTxnPanic. It injects the panic through decodeUtxoWholeCborFunc
+// rather than depending on a CBOR byte sequence that panics the real decoder.
+func TestQueryShelleyUtxoWhole_DecodePanicFailsQuery(t *testing.T) {
 	// Not t.Parallel: swaps the package-level decodeUtxoWholeCborFunc seam.
 	db := newTestDB(t)
 
@@ -528,15 +509,10 @@ func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
 	var queryErr error
 	require.NotPanics(t, func() {
 		_, queryErr = ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
-	}, "a worker panic must not escape and crash the process")
+	}, "a decode panic must not escape the query")
 	require.Error(t, queryErr)
 	require.Contains(t, queryErr.Error(), "panicked")
-	require.ErrorIs(
-		t, queryErr, database.ErrTxnPanic,
-		"a recovered worker panic must be identifiable via "+
-			"errors.Is(err, database.ErrTxnPanic), matching the "+
-			"sequential implementation's Txn.Do recovery contract",
-	)
+	require.ErrorIs(t, queryErr, database.ErrTxnPanic)
 }
 
 func TestQueryShelleyUtxoWhole_CancelsDuringDecode(t *testing.T) {
@@ -549,7 +525,7 @@ func TestQueryShelleyUtxoWhole_CancelsDuringDecode(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	const rowCount = 2 * utxoWholeResolveWorkers
+	const rowCount = 8
 	for i := range rowCount {
 		seedBabbageUtxo(
 			t,
@@ -580,113 +556,14 @@ func TestQueryShelleyUtxoWhole_CancelsDuringDecode(t *testing.T) {
 		t,
 		errCh,
 		testutil.AsyncWait,
-		"canceled UTxO query must drain workers and return",
+		"canceled UTxO query must return",
 	)
 	require.ErrorIs(t, err, context.Canceled)
-	require.LessOrEqual(
+	require.Equal(
 		t,
+		int64(1),
 		decodedCount.Load(),
-		int64(utxoWholeResolveWorkers),
-		"only already active workers may finish decoding",
-	)
-}
-
-// TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure is the regression
-// test for early abort: once one row's
-// resolve fails, the previous implementation kept feeding every remaining
-// row to the worker pool instead of stopping -- unlike the earlier
-// sequential implementation, which aborted its whole traversal on the
-// first failure via the error it returned from IterateLiveUtxos'
-// callback.
-//
-// Every seeded row is otherwise identical and independently resolvable
-// (no single row is "the" unrecoverable one): whichever row a worker
-// happens to reach first fails immediately, and every row reached after
-// that is slow but succeeds. IterateLiveUtxos does not order its live-row
-// scan, so the test cannot depend on visit order. The failure is tied to
-// whichever row the database yields first, keeping the test independent of
-// row identity and iteration order.
-func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
-	// Not t.Parallel: swaps the package-level decodeUtxoWholeCborFunc seam.
-	db := newTestDB(t)
-
-	const rowCount = 3 * utxoWholeResolveWorkers
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		bytes.Repeat([]byte{0xAA}, lcommon.AddressHashSize),
-		nil,
-	)
-	require.NoError(t, err)
-	for i := range rowCount {
-		seedBabbageUtxo(
-			t, db, byte(i), uint32(i), addr, 1_000_000, //nolint:gosec
-		)
-	}
-
-	var (
-		decodedCount atomic.Int64
-		failed       atomic.Bool
-	)
-	release := make(chan struct{})
-	original := decodeUtxoWholeCborFunc
-	decodeUtxoWholeCborFunc = func(
-		ref database.UtxoRef,
-		cborBytes []byte,
-	) (ledger.TransactionOutput, error) {
-		if failed.CompareAndSwap(false, true) {
-			return nil, errors.New("simulated first-row failure")
-		}
-		// Block until the test releases this gate, rather than a
-		// fixed-duration time.Sleep: the test only opens it once it has
-		// deterministically observed (via utxoWholeAbortObservedFunc,
-		// below) that queryShelleyUtxoWhole has already closed its
-		// internal done channel, so nothing here depends on decode
-		// speed or on a hand-tuned sleep duration that could silently
-		// stop covering this if utxoWholeResolveWorkers or decode cost
-		// ever changed.
-		<-release
-		decodedCount.Add(1)
-		return decodeUtxoWholeCbor(ref, cborBytes)
-	}
-	t.Cleanup(func() { decodeUtxoWholeCborFunc = original })
-
-	abortObserved := make(chan struct{})
-	originalAbortHook := utxoWholeAbortObservedFunc
-	utxoWholeAbortObservedFunc = func() { close(abortObserved) }
-	t.Cleanup(func() { utxoWholeAbortObservedFunc = originalAbortHook })
-
-	ls := newPoolDistr2Ledger(t, db)
-
-	errCh := make(chan error, 1)
-	go func() {
-		_, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
-		errCh <- err
-	}()
-
-	// The CAS above guarantees exactly one decode call ever returns the
-	// simulated failure, and that is always the first result the main
-	// loop can receive (every other row is still parked on <-release),
-	// so this always fires -- deterministically, not racing a clock.
-	testutil.RequireReceive(
-		t, abortObserved, testutil.AsyncWait,
-		"queryShelleyUtxoWhole must observe the abort",
-	)
-	close(release)
-
-	err = testutil.RequireReceive(
-		t, errCh, testutil.AsyncWait, "queryShelleyUtxoWhole must return",
-	)
-	require.Error(t, err)
-	// A bound near utxoWholeResolveWorkers, not just under rowCount: only
-	// the rows already dispatched by the time the abort above fired
-	// should ever reach the gated decode branch. Without the early
-	// abort, every remaining row (rowCount minus the one that failed)
-	// still would, so this stays a meaningful regression check
-	// rather than one only a total mechanism removal could fail.
-	require.Less(
-		t, decodedCount.Load(), int64(rowCount/2),
-		"early abort must stop the feeder well before every row is decoded",
+		"no output may be decoded after the cancellation",
 	)
 }
 
@@ -719,6 +596,7 @@ func TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt(
 	// seedBabbageUtxo always creates its row at AddedSlot 100.
 	txIdOld := seedBabbageUtxo(t, db, 0xA1, 0, addr, 1_000_000)
 
+	newCbor := queryTestOutputCBOR(t, db, txIdOld, 0)
 	txn := db.Transaction(context.Background(), true)
 	txIdNew := bytes.Repeat([]byte{0xB2}, 32)
 	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
@@ -726,9 +604,21 @@ func TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt(
 		OutputIdx: 0,
 		AddedSlot: 500,
 	}))
+	require.NoError(t, db.Blob().SetUtxo(txn.Blob(), txIdNew, 0, newCbor))
 	require.NoError(t, txn.Commit())
+	txn.Release()
 
 	ls := newPoolDistr2Ledger(t, db)
+	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
+		100: {{Added: []UtxoOutput{{
+			Ref:  models.UtxoId{Hash: txIdOld, Idx: 0},
+			Cbor: queryTestOutputCBOR(t, db, txIdOld, 0),
+		}}}},
+		500: {{Added: []UtxoOutput{{
+			Ref:  models.UtxoId{Hash: txIdNew, Idx: 0},
+			Cbor: queryTestOutputCBOR(t, db, txIdNew, 0),
+		}}}},
+	})
 
 	result, err := ls.queryShelleyUtxoWhole(
 		t.Context(),
@@ -783,6 +673,7 @@ func TestQueryShelleyUtxoWhole_PinnedPointIncludesUtxoSpentAfterIt(
 	))
 
 	ls := newPoolDistr2Ledger(t, db)
+	attachQueryUtxoLifecycle(t, ls, db, txId, 0, 100, 500)
 
 	pinned, err := ls.queryShelleyUtxoWhole(
 		t.Context(),
@@ -833,13 +724,17 @@ func TestQueryShelleyUtxoWhole_RetentionWindow_TooOldRejected(t *testing.T) {
 	}, nil))
 
 	// floor = 200_000 - 50_000 = 150_000; one slot behind it must reject.
+	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
+		150_000: {},
+		200_000: {},
+	})
 	_, err := ls.queryShelleyUtxoWhole(
 		t.Context(),
 		QueryPoint{Slot: 149_999},
 		nil,
 	)
 	require.Error(t, err)
-	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+	require.ErrorIs(t, err, ErrUtxoAsOfUnavailable)
 }
 
 // TestQueryShelleyUtxoWhole_RetentionWindow_AtFloor_Succeeds covers the
@@ -855,6 +750,10 @@ func TestQueryShelleyUtxoWhole_RetentionWindow_AtFloor_Succeeds(t *testing.T) {
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
 	}, nil))
+	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
+		150_000: {},
+		200_000: {},
+	})
 
 	_, err := ls.queryShelleyUtxoWhole(
 		t.Context(),

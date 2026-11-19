@@ -47,8 +47,9 @@ func readDataWith(
 	keys [][]byte,
 ) (*query.ReadDataResponse, error) {
 	srv := &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
-		Logger:      discardLogger(),
-		LedgerState: stub,
+		Logger:        discardLogger(),
+		LedgerState:   stub,
+		QueryDatabase: stubQueryDB(stub),
 	})}
 	out, err := srv.ReadData(
 		ctx,
@@ -149,15 +150,15 @@ func TestReadData_CancelDuringLookup(t *testing.T) {
 	require.Equal(t, connect.CodeCanceled, connect.CodeOf(err))
 }
 
-// TestReadData_DuplicateKeysAgainstRealDatabase runs ReadData over the real
-// ledger and metadata store with a repeated hash and a second distinct one.
+// TestReadData_DuplicateKeysAgainstRealDatabase runs ReadData over a real
+// IndexerDB with a repeated hash and a second distinct one.
 // Each distinct datum is returned once, in first-seen order.
 func TestReadData_DuplicateKeysAgainstRealDatabase(t *testing.T) {
 	t.Parallel()
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 2})
 	rawA, rawB := []byte{0x01}, []byte{0x02}
-	require.NoError(t, h.DB.SetDatum(rawA, 1, nil))
-	require.NoError(t, h.DB.SetDatum(rawB, 1, nil))
+	require.NoError(t, h.IndexerDB.SetDatum(rawA, 1, nil))
+	require.NoError(t, h.IndexerDB.SetDatum(rawB, 1, nil))
 	hashA := lcommon.Blake2b256Hash(rawA).Bytes()
 	hashB := lcommon.Blake2b256Hash(rawB).Bytes()
 

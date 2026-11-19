@@ -66,12 +66,8 @@ func TestPoolAbsentFromPopulatedSnapshotReadsTheSet(t *testing.T) {
 			1: {Epoch: 1, TotalActiveStake: types.Uint64(500), SnapshotReady: true},
 		},
 	}
-	ls.config.UtxoSetReads = UtxoSetReadsSet
 	snap := electingSnapshot{epoch: 1, kind: models.PoolStakeSnapshotTypeMark}
 	require.True(t, ls.poolAbsentFromPopulatedSnapshot(snap),
 		"the set's ready summary shows a populated snapshot")
 
-	ls.config.UtxoSetReads = UtxoSetReadsOff
-	require.False(t, ls.poolAbsentFromPopulatedSnapshot(snap),
-		"the metadata store holds no summary")
 }

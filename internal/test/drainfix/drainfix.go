@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/internal/statedrain"
@@ -63,20 +62,14 @@ func (s Store) ListSyncStateKeys(
 	return s.ListSyncStateKeysByPrefix(prefix, nil)
 }
 
-// Source adapts the set and the metadata store to statedrain.Source.
+// Source adapts the set to statedrain.Source.
 type Source struct {
 	*utxoset.Set
-	LDB ledgerdb.LedgerDB
 }
 
 // Loaded implements statedrain.Source.
 func (s Source) Loaded(f nodesettings.Family) (bool, error) {
 	return ledger.FamilyLoaded(f, s.Set)
-}
-
-// Verify implements statedrain.Source.
-func (s Source) Verify(ctx context.Context, f nodesettings.Family) error {
-	return ledger.VerifyFamily(ctx, f, s.LDB, s.Set)
 }
 
 // Drain loads set from db's SQL rows and drains every graduated family,
@@ -93,7 +86,7 @@ func Drain(
 	require.NoError(t, statedrain.Run(
 		ctx,
 		statedrain.Env{Store: Store{db}, Set: set},
-		statedrain.Graduated(Source{Set: set, LDB: ldb}),
+		statedrain.Graduated(Source{Set: set}),
 	))
 	mask, err := db.DrainedFamilies(ctx)
 	require.NoError(t, err)

@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -27,66 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
-
-const (
-	computedEpoch           = "epoch"
-	computedEpochSummary    = "epoch_summary"
-	computedPParamEnactment = "pparam_enactment"
-)
-
-// verifyGuardStaged is verifyGuard for a write that stages its result and
-// then compares it: txn's batch exists before the guard is taken, so
-// staging does not itself read as a write racing the comparison.
-func (ls *LedgerState) verifyGuardStaged(txn ledgerdb.Txn) verifyReadGuard {
-	if txn != nil && ls.verifying() {
-		ls.utxoSetBatchForTxn(txn, func(*utxoSetBatch) {})
-	}
-	return ls.verifyGuard(txn)
-}
-
-// compareComputed counts a result the set computed against what the metadata
-// store wrote, in verify mode only.
-func (ls *LedgerState) compareComputed(
-	g verifyReadGuard,
-	result string,
-	same bool,
-	detail error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if detail == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.setComputedVerified.WithLabelValues(result).Inc()
-	if same && detail == nil {
-		return
-	}
-	n := ls.setComputedMismatches.Add(1)
-	ls.metrics.setComputedMismatches.WithLabelValues(result).Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set computed result differs from the metadata store",
-		"component", "ledger",
-		"result", result,
-		"error", detail,
-		"mismatches", n,
-	)
-}
-
-// sameEpochRow compares epoch rows apart from their store row IDs and the
-// nil-or-empty form of a nonce.
-func sameEpochRow(a, b models.Epoch) bool {
-	return a.EpochId == b.EpochId && a.StartSlot == b.StartSlot &&
-		a.EraId == b.EraId && a.SlotLength == b.SlotLength &&
-		a.LengthInSlots == b.LengthInSlots &&
-		bytes.Equal(a.Nonce, b.Nonce) &&
-		bytes.Equal(a.EvolvingNonce, b.EvolvingNonce) &&
-		bytes.Equal(a.CandidateNonce, b.CandidateNonce) &&
-		bytes.Equal(a.LastEpochBlockNonce, b.LastEpochBlockNonce)
-}
 
 // pparamEnactmentReader returns the set's proposal reader when the set holds
 // every proposal, so the enactment can be computed from it.
@@ -183,31 +122,10 @@ func (s stagingLedgerDB) computeEnactment(
 	)
 }
 
-// sameEnactment compares the set's enactment with the rows and result the
-// metadata store's write produced.
-func sameEnactment(
-	computed *database.ClassicPParamEnactment,
-	written []models.PParams,
-	plutusV2 bool,
-	slot, epoch uint64,
-	era uint,
-) bool {
-	if computed == nil {
-		return len(written) == 0 && !plutusV2
-	}
-	if len(written) != 1 || plutusV2 != computed.PlutusV2CostModelWritten {
-		return false
-	}
-	w := written[0]
-	return bytes.Equal(w.Cbor, computed.Cbor) &&
-		w.AddedSlot == slot && w.Epoch == epoch && w.EraId == era
-}
-
-// ComputeAndApplyPParamUpdates writes the enactment to the metadata store
-// and stages the rows the set computed from its own proposals. Where the set
-// does not hold every proposal, it stages the rows the store wrote. Verify
-// mode compares the two and returns the store's result; set mode returns the
-// set's.
+// ComputeAndApplyPParamUpdates stages the rows the set computed from its own
+// proposals and returns the set's result, writing the enactment to the
+// metadata store too while the family is not drained. A set that does not
+// hold every proposal cannot enact.
 func (s stagingLedgerDB) ComputeAndApplyPParamUpdates(
 	ctx context.Context,
 	slot, epoch uint64,
@@ -222,38 +140,16 @@ func (s stagingLedgerDB) ComputeAndApplyPParamUpdates(
 	hasPlutusV2CostModelFunc func(any) bool,
 	txn ledgerdb.Txn,
 ) (lcommon.ProtocolParameters, bool, error) {
-	drained := s.pparamsDrained()
 	r := s.ls.pparamEnactmentReader(txn)
-	if drained && r == nil {
-		return nil, false, drainedUnserved(nodesettings.FamilyPParamsUpdates)
+	if r == nil {
+		return nil, false, s.ls.setFamilyUnserved(nodesettings.FamilyPParamsUpdates)
 	}
-	verifying := s.ls.verifying() && !drained
-	var before []models.PParams
-	if r == nil || verifying {
-		var err error
-		before, err = s.LedgerDB.ListPParamsForEra(era, txn)
-		if err != nil {
-			return nil, false, fmt.Errorf("read pparams before update: %w", err)
-		}
-	}
-	g := s.ls.verifyGuardStaged(txn) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-	var (
-		computed *database.ClassicPParamEnactment
-		setErr   error
+	computed, err := s.computeEnactment(
+		r, txn, epoch, era, quorum, currentPParams,
+		decodeFunc, updateFunc, hasPlutusV2CostModelFunc,
 	)
-	if r != nil {
-		computed, setErr = s.computeEnactment(
-			r, txn, epoch, era, quorum, currentPParams,
-			decodeFunc, updateFunc, hasPlutusV2CostModelFunc,
-		)
-	}
-	var (
-		res lcommon.ProtocolParameters
-		cm  bool
-		err error
-	)
-	if !drained {
-		res, cm, err = s.LedgerDB.ComputeAndApplyPParamUpdates(
+	if !s.pparamsDrained() {
+		res, cm, err := s.LedgerDB.ComputeAndApplyPParamUpdates(
 			ctx, slot, epoch, era, quorum, currentPParams,
 			decodeFunc, updateFunc, hasPlutusV2CostModelFunc, txn,
 		)
@@ -261,55 +157,19 @@ func (s stagingLedgerDB) ComputeAndApplyPParamUpdates(
 			return res, cm, err
 		}
 	}
-	var written []models.PParams
-	if r == nil || verifying {
-		after, err := s.LedgerDB.ListPParamsForEra(era, txn)
-		if err != nil {
-			return nil, false, fmt.Errorf("read pparams after update: %w", err)
-		}
-		if len(after) > len(before) {
-			written = slices.Clone(after[len(before):])
-		}
+	if err != nil {
+		return nil, false, fmt.Errorf("compute pparam enactment: %w", err)
 	}
-	if r != nil && verifying {
-		s.ls.compareComputed(
-			g, computedPParamEnactment,
-			setErr == nil &&
-				sameEnactment(computed, written, cm, slot, epoch, era),
-			setErr,
-		)
+	if computed == nil {
+		return currentPParams, false, nil
 	}
-	_, mode := s.ls.utxoSetReader()
-	if r != nil && setErr != nil && (mode == UtxoSetReadsSet || drained) {
-		return nil, false, fmt.Errorf("compute pparam enactment: %w", setErr)
-	}
-	switch {
-	case r != nil && setErr == nil:
-		if computed != nil {
-			s.ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-				PParams: []models.PParams{{
-					Cbor: slices.Clone(computed.Cbor), AddedSlot: slot,
-					Epoch: epoch, EraId: era,
-				}},
-			})
-		}
-	case len(written) > 0:
-		s.ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-			PParams: written,
-		})
-	}
-	// The enactment reads the proposals of the epoch before its own, which
-	// it writes nothing to, so reading them back gives what it selected from.
-	if !drained {
-		s.verifyPParamUpdates(g, txn, epoch)
-	}
-	if r != nil && setErr == nil && (mode == UtxoSetReadsSet || drained) {
-		if computed == nil {
-			return currentPParams, false, nil
-		}
-		return computed.PParams, computed.PlutusV2CostModelWritten, nil
-	}
-	return res, cm, nil
+	s.ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		PParams: []models.PParams{{
+			Cbor: slices.Clone(computed.Cbor), AddedSlot: slot,
+			Epoch: epoch, EraId: era,
+		}},
+	})
+	return computed.PParams, computed.PlutusV2CostModelWritten, nil
 }
 
 // SaveEpochSummary writes the summary to the metadata store and stages the
@@ -321,23 +181,19 @@ func (s stagingLedgerDB) SaveEpochSummary(
 	txn ledgerdb.Txn,
 ) error {
 	drained := s.ls.familyDrained(nodesettings.FamilySummaries)
-	er, sr, mode := s.ls.epochSummaryReader(txn)
+	er, sr, _ := s.ls.epochSummaryReader(txn)
 	if er == nil || sr == nil {
 		if drained {
 			return drainedUnserved(nodesettings.FamilySummaries)
 		}
 		return s.saveEpochSummaryReadBack(summary, txn)
 	}
-	g := s.ls.verifyGuardStaged(txn)
 	s.ls.utxoSetApplyMu.RLock()
 	prior, setErr := s.ls.summaryViewLocked(er, sr, txn, summary.Epoch)
 	s.ls.utxoSetApplyMu.RUnlock()
 	if setErr != nil {
-		if mode == UtxoSetReadsSet || drained {
-			return fmt.Errorf("read epoch summary %d from the set: %w",
-				summary.Epoch, setErr)
-		}
-		return s.saveEpochSummaryReadBack(summary, txn)
+		return fmt.Errorf("read epoch summary %d from the set: %w",
+			summary.Epoch, setErr)
 	}
 	if !drained {
 		if err := s.LedgerDB.SaveEpochSummary(summary, txn); err != nil {
@@ -348,13 +204,6 @@ func (s stagingLedgerDB) SaveEpochSummary(
 	computed.EpochNonce = slices.Clone(summary.EpochNonce)
 	computed.SnapshotReady = summary.SnapshotReady ||
 		prior != nil && prior.SnapshotReady
-	if s.ls.verifying() && !drained {
-		row, err := s.LedgerDB.GetEpochSummary(summary.Epoch, txn)
-		s.ls.compareComputed(
-			g, computedEpochSummary,
-			err == nil && sameSummaryPtr(&computed, row), err,
-		)
-	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{
 		Summaries: []models.EpochSummary{computed},
 	})
@@ -394,7 +243,6 @@ func (s stagingLedgerDB) SetEpoch(
 	era, slotLength, lengthInSlots uint,
 	txn ledgerdb.Txn,
 ) error {
-	g := s.ls.verifyGuardStaged(txn)
 	drained := s.ls.familyDrained(nodesettings.FamilyEpochs)
 	if !drained {
 		if err := s.LedgerDB.SetEpoch(
@@ -414,13 +262,6 @@ func (s stagingLedgerDB) SetEpoch(
 		EraId:               era,
 		SlotLength:          slotLength,
 		LengthInSlots:       lengthInSlots,
-	}
-	if s.ls.verifying() && !drained {
-		row, err := s.LedgerDB.GetEpoch(epoch, txn)
-		s.ls.compareComputed(
-			g, computedEpoch,
-			err == nil && row != nil && sameEpochRow(computed, *row), err,
-		)
 	}
 	s.ls.stageLedgerChanges(txn, LedgerChanges{
 		Epochs: []models.Epoch{computed},

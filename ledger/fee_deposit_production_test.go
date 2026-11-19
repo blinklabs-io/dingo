@@ -95,7 +95,10 @@ func feeProdScriptBytes(t *testing.T, fails bool) []byte {
 }
 
 type feeProdFixture struct {
-	db      *database.Database
+	db *database.Database
+	// ls is the ledger the case last built, whose live set holds the
+	// outputs its block left.
+	ls      *LedgerState
 	key     ed25519.PrivateKey
 	keyHash lcommon.Blake2b224
 	keyAddr []byte
@@ -327,9 +330,10 @@ type feeProdCase struct {
 
 func (c feeProdCase) ledger(t *testing.T) *LedgerState {
 	t.Helper()
-	return newReplayTestLedger(
+	c.fx.ls = newReplayTestLedger(
 		t, c.fx.db, c.block, c.blockType, c.era, c.pparams,
 	)
+	return c.fx.ls
 }
 
 func (c feeProdCase) applyBlock(ls *LedgerState) error {
@@ -442,10 +446,7 @@ var (
 			if first == nil {
 				require.NoError(t, ls.rollback(context.Background(), ocommon.Point{}))
 				for _, input := range c.tx.Inputs() {
-					_, err := c.fx.db.UtxoByRef(
-						context.Background(),
-						input.Id().Bytes(), input.Index(), nil,
-					)
+					_, err := c.fx.ls.UtxoByRef(input.Id().Bytes(), input.Index())
 					require.NoError(t, err, "rollback left %s spent", input)
 				}
 				// Rolling back to origin restores the genesis era, which this
@@ -1086,15 +1087,9 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 						return
 					}
 					// Only the collateral is consumed.
-					_, err := c.fx.db.UtxoByRef(
-						context.Background(),
-						c.tx.Collateral()[0].Id().Bytes(), 0, nil,
-					)
+					_, err := c.fx.ls.UtxoByRef(c.tx.Collateral()[0].Id().Bytes(), 0)
 					require.ErrorIs(t, err, types.ErrUtxoNotFound)
-					_, err = c.fx.db.UtxoByRef(
-						context.Background(),
-						c.tx.Inputs()[0].Id().Bytes(), 0, nil,
-					)
+					_, err = c.fx.ls.UtxoByRef(c.tx.Inputs()[0].Id().Bytes(), 0)
 					require.NoError(t, err)
 				},
 			)

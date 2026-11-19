@@ -36,17 +36,18 @@ import (
 )
 
 // seedChain stores count generated Conway blocks with transactions at heights
-// 1..count and returns them. Block ids follow the store's 1-based index.
+// 1..count, records the last as the IndexerDB tip and returns them. Block ids
+// follow the store's 1-based index.
 func seedChain(
 	t *testing.T,
-	db *database.Database,
+	adapter *NodeAdapter,
 	count int,
 ) []gledger.Block {
 	t.Helper()
 	chain, err := testfixtures.GenerateConwayChainWithTransactions(count)
 	require.NoError(t, err)
 	for _, block := range chain {
-		require.NoError(t, db.BlockCreate(models.Block{
+		require.NoError(t, adapter.ledgerState.Database().BlockCreate(models.Block{
 			Hash:     block.Hash().Bytes(),
 			PrevHash: block.PrevHash().Bytes(),
 			Slot:     block.SlotNumber(),
@@ -56,6 +57,7 @@ func seedChain(
 			Cbor:     block.Cbor(),
 		}, nil))
 	}
+	setIndexedThrough(t, adapter, chain[len(chain)-1])
 	return chain
 }
 
@@ -69,14 +71,14 @@ func heightsOf(blocks []models.Block) []uint64 {
 
 func TestNodeAdapterNeighborBlocks(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
-	chain := seedChain(t, db, 5)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
+	adapter, _, _ := newDBBackedAdapter(t)
+	chain := seedChain(t, adapter, 5)
+	setIndexerTip(t, adapter, ochainsync.Tip{
 		Point: ocommon.NewPoint(
 			chain[4].SlotNumber(), chain[4].Hash().Bytes(),
 		),
 		BlockNumber: 5,
-	}, nil))
+	})
 	hashOf := func(height int) string { return chain[height-1].Hash().String() }
 	ctx := context.Background()
 
@@ -178,8 +180,8 @@ func TestNodeAdapterNeighborBlocks(t *testing.T) {
 
 func TestNodeAdapterBlockAtSlot(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
-	chain := seedChain(t, db, 3)
+	adapter, _, _ := newDBBackedAdapter(t)
+	chain := seedChain(t, adapter, 3)
 	ctx := context.Background()
 
 	block, err := adapter.blockAtSlot(ctx, chain[1].SlotNumber())
@@ -193,7 +195,7 @@ func TestNodeAdapterBlockAtSlot(t *testing.T) {
 func TestNodeAdapterBlockAtEpochSlot(t *testing.T) {
 	t.Parallel()
 	adapter, _, db := newDBBackedAdapter(t)
-	chain := seedChain(t, db, 3)
+	chain := seedChain(t, adapter, 3)
 	ctx := context.Background()
 	// Epoch 4 starts 7 slots before the second block and ends where the
 	// third block's slot begins, so that block belongs to the next epoch.
@@ -217,8 +219,8 @@ func TestNodeAdapterBlockAtEpochSlot(t *testing.T) {
 
 func TestNodeAdapterBlockTransactions(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
-	chain := seedChain(t, db, 3)
+	adapter, _, _ := newDBBackedAdapter(t)
+	chain := seedChain(t, adapter, 3)
 	ctx := context.Background()
 	for _, block := range chain {
 		txs := block.Transactions()
@@ -265,8 +267,8 @@ func insertSpentAdapterUtxo(
 
 func TestNodeAdapterBlockAddresses(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
-	chain := seedChain(t, db, 2)
+	adapter, raw, _ := newDBBackedAdapter(t)
+	chain := seedChain(t, adapter, 2)
 	ctx := context.Background()
 	block := chain[0]
 	txs := block.Transactions()
@@ -376,7 +378,7 @@ func TestTransactionAddressEffects(t *testing.T) {
 func TestNodeAdapterResolveBlockStopsAtTheIndexerTip(t *testing.T) {
 	t.Parallel()
 	adapter, _, db := newDBBackedAdapter(t)
-	chain := seedChain(t, db, 5)
+	chain := seedChain(t, adapter, 5)
 	indexed := chain[2]
 	store, err := indexerdb.NewStore(
 		db,
@@ -387,7 +389,7 @@ func TestNodeAdapterResolveBlockStopsAtTheIndexerTip(t *testing.T) {
 		10,
 	)
 	require.NoError(t, err)
-	adapter.SetIndexerStore(store)
+	adapter.indexer = store
 	ctx := t.Context()
 
 	for _, id := range []string{

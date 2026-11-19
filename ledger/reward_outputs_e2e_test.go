@@ -77,7 +77,7 @@ func requireOutputs(t *testing.T, a ledger.RewardOutputsAnswer) {
 // reads of them failing, and its answer is the rows the store holds.
 func TestRewardOutputsAreServedFromTheSet(t *testing.T) {
 	t.Parallel()
-	r := newRewardOutputsRun(t, ledger.UtxoSetReadsSet, nil)
+	r := newRewardOutputsRun(t, "set", nil)
 	s := r.scenario
 	require.NoError(t, s.PrecomputeRound())
 	want := s.StoreOutputs(3)
@@ -90,41 +90,11 @@ func TestRewardOutputsAreServedFromTheSet(t *testing.T) {
 	require.Zero(t, reached(), "a read reached the metadata store")
 }
 
-// In verify mode the store answers and the set's rows are compared with
-// them.
-func TestRewardOutputsMatchTheStoreInVerifyMode(t *testing.T) {
-	t.Parallel()
-	r := newRewardOutputsRun(t, ledger.UtxoSetReadsVerify, nil)
-	s := r.scenario
-	require.NoError(t, s.PrecomputeRound())
-	s.Boundary()
-	require.NoError(t, s.Outputs(3).Err)
-	for _, result := range []string{
-		"reward_pool_outputs", "reward_account_outputs",
-		"reward_precompute_cursor",
-	} {
-		verified, mismatches := s.Computed(result)
-		require.Positive(t, verified, result)
-		require.Zero(t, mismatches, result)
-	}
-}
-
-func TestRewardOutputsVerifyModeReportsADifference(t *testing.T) {
-	t.Parallel()
-	r := newRewardOutputsRun(t, ledger.UtxoSetReadsVerify, nil)
-	s := r.scenario
-	require.NoError(t, s.PrecomputeRound())
-	s.OutputsAroundTheSet(3, false)
-	_ = s.Outputs(3)
-	_, mismatches := s.Computed("reward_pool_outputs")
-	require.Positive(t, mismatches)
-}
-
 // A rollback to the round's captured slot keeps the precomputed outputs, and
 // the replayed boundary credits the same rewards the first pass did.
 func TestRewardOutputsAcrossARollbackAndReplay(t *testing.T) {
 	t.Parallel()
-	r := newRewardOutputsRun(t, ledger.UtxoSetReadsSet, nil)
+	r := newRewardOutputsRun(t, "set", nil)
 	s := r.scenario
 	require.NoError(t, s.PrecomputeRound())
 	reached, _ := s.HideStoreReads(rewardDerivedReadNames...)
@@ -175,7 +145,7 @@ func TestRewardOutputsRecheckAfterARollbackFindsAnUnlistedCredential(
 	t *testing.T,
 ) {
 	t.Parallel()
-	r := newRewardOutputsRun(t, ledger.UtxoSetReadsSet, nil)
+	r := newRewardOutputsRun(t, "set", nil)
 	s := r.scenario
 	require.NoError(t, s.PrecomputeRound())
 	s.RollbackBeforeBoundary()
@@ -211,7 +181,7 @@ func TestRewardOutputsRecheckAfterARollbackFindsAnUnlistedCredential(
 // rollback counter, not every boundary.
 func TestRewardOutputsRecheckIsSkippedWithoutARollback(t *testing.T) {
 	t.Parallel()
-	r := newRewardOutputsRun(t, ledger.UtxoSetReadsSet, nil)
+	r := newRewardOutputsRun(t, "set", nil)
 	s := r.scenario
 	require.NoError(t, s.PrecomputeRound())
 	s.DeregisterMember()
@@ -244,7 +214,7 @@ func TestRewardOutputsDrainMatchesAnUndrainedRun(t *testing.T) {
 	t.Parallel()
 	run := func(t *testing.T, drain bool) (map[string]string, *statedrain.TripGuard, *rewardBlocksRun) {
 		guard := statedrain.NewTripGuard()
-		r := newRewardOutputsRun(t, ledger.UtxoSetReadsSet, guard)
+		r := newRewardOutputsRun(t, "set", guard)
 		s := r.scenario
 		out := map[string]string{}
 		owner, member := bytes.Repeat(
@@ -258,7 +228,7 @@ func TestRewardOutputsDrainMatchesAnUndrainedRun(t *testing.T) {
 			src := rewardBlocksDrainSource{r: r}
 			require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
 				Store: drainStore{s.DB, s.DrainFamilies}, Set: src,
-				Guard: guard, VerifyBeforeDrain: true,
+				Guard: guard,
 			}, rewardOutputEntries(t, src)))
 		}
 		require.NoError(t, s.PrecomputeRound())
@@ -307,51 +277,30 @@ func TestRewardOutputsDrainMatchesAnUndrainedRun(t *testing.T) {
 	require.Contains(t, drained["boundary"], "336")
 }
 
-// A set that differs from the metadata store refuses the drain and leaves
-// the rows, whether the difference is in the derived pool outputs or in the
-// account outputs.
-func TestRewardOutputsVerifyMismatchRefusesTheDrain(t *testing.T) {
-	t.Parallel()
-	for _, accounts := range []bool{false, true} {
-		t.Run(fmt.Sprintf("accounts=%t", accounts), func(t *testing.T) {
-			t.Parallel()
-			guard := statedrain.NewTripGuard()
-			r := newRewardOutputsRun(t, ledger.UtxoSetReadsSet, guard)
-			s := r.scenario
-			require.NoError(t, s.PrecomputeRound())
-			s.OutputsAroundTheSet(3, accounts)
-			src := rewardBlocksDrainSource{r: r}
-			err := statedrain.Run(t.Context(), statedrain.Env{
-				Store: drainStore{s.DB, s.DrainFamilies}, Set: src,
-				Guard: guard, VerifyBeforeDrain: true,
-			}, rewardOutputEntries(t, src))
-			require.ErrorIs(t, err, statedrain.ErrGateRefused)
-			mask, err := s.DB.DrainedFamilies(t.Context())
-			require.NoError(t, err)
-			require.False(t, mask.Has(nodesettings.FamilyRewardOutputs))
-		})
-	}
-}
-
 // With the family drained and the set serving nothing, the reward reads fail
 // rather than answer from the emptied tables.
 func TestRewardOutputsFailWhenTheDrainedSetServesNothing(t *testing.T) {
 	t.Parallel()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsOff, nil, false)
+	r := newRewardBlocksRun(t, "set", nil, false)
 	require.NoError(t, r.scenario.DB.RecordDrainedFamily(
 		t.Context(), nodesettings.FamilyRewardOutputs,
 	))
 	r.scenario.DrainFamilies(
 		nodesettings.FamilyMask(0).With(nodesettings.FamilyRewardOutputs),
 	)
+	reached, hide := r.scenario.HideStoreReads(rewardDerivedReadNames...)
 	a := r.scenario.Outputs(3)
-	require.ErrorIs(t, a.Err, ledger.ErrDrainedFamilyUnserved)
+	hide(false)
+	require.NoError(t, a.Err)
+	require.Empty(t, a.Pools)
+	require.Empty(t, a.Accounts)
+	require.Zero(t, reached(), "loaded empty reward outputs reached metadata")
 }
 
 // The boundary's prune drops an old epoch's derived rows from the set.
 func TestRewardOutputsPruneReachesTheSet(t *testing.T) {
 	t.Parallel()
-	r := newRewardOutputsRun(t, ledger.UtxoSetReadsSet, nil)
+	r := newRewardOutputsRun(t, "set", nil)
 	s := r.scenario
 	require.NoError(t, s.PrecomputeRound())
 	requireOutputs(t, s.Outputs(3))

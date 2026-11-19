@@ -31,15 +31,6 @@ import (
 
 // UtxoStore resolves and maintains the live UTxO set consensus reads.
 type UtxoStore interface {
-	// UtxoRollbackChanges reports what a rollback to slot does to the live
-	// UTxO set, read before the rollback runs: the live outputs created after
-	// slot, which it removes, and the outputs created at or before slot but
-	// spent after it, which it restores, with their CBOR.
-	UtxoRollbackChanges(
-		ctx context.Context,
-		slot uint64,
-		txn Txn,
-	) ([]models.UtxoId, []models.Utxo, error)
 	// ConsumedUtxoPruneFloor returns the highest slot the consumed-UTxO sweep
 	// has hard-deleted spent rows at or below, or 0 when nothing has been
 	// swept. Rolling back below this slot cannot restore the UTxOs consumed

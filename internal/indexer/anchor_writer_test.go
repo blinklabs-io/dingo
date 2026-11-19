@@ -221,7 +221,7 @@ func TestWriterBootstrapsWithoutAnAnchorDigestTheLedgerCannotRebuild(t *testing.
 func TestWriterAdoptsAStoreWithHistoryWithoutReplaying(t *testing.T) {
 	t.Parallel()
 	r := newAnchorRig(t, 30, 12)
-	// A store adopted from a shared layout already holds its history.
+	// A store adopted from a v0.94.2 API database already holds its history.
 	txn := r.store.Database().Transaction(context.Background(), true)
 	b := r.chain.canonical[20]
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {

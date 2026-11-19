@@ -17,6 +17,7 @@ package lifecycle_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -300,4 +302,91 @@ func TestRestoreOfTheUtxoSetPayload(t *testing.T) {
 		require.ErrorIs(t, err, lifecycle.ErrSnapshotPayloadMismatch)
 		require.NoDirExists(t, restored)
 	})
+}
+
+// openCheckpointedSet applies blocks 1 to checkpointAt to the set under dir,
+// writes a checkpoint of it, applies blocks up to tip and prunes the journal
+// past block pruneTo.
+func openCheckpointedSet(
+	t *testing.T,
+	dir, ckptDir string,
+	checkpointAt, tip, pruneTo uint64,
+) {
+	t.Helper()
+	store, err := badgerutxo.Open(dir)
+	require.NoError(t, err)
+	applyBlocks(t, store, 1, checkpointAt)
+	require.NoError(t, store.Close())
+	set, err := utxoset.Open(utxoset.Config{
+		Dir: dir, Only: true, Authoritative: true, CheckpointDir: ckptDir,
+	})
+	require.NoError(t, err)
+	_, err = set.WriteCheckpoint(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, set.Close())
+	store, err = badgerutxo.Open(dir)
+	require.NoError(t, err)
+	applyBlocks(t, store, checkpointAt+1, tip)
+	require.NoError(t, store.PruneJournal(blockPoint(pruneTo).Slot))
+	require.NoError(t, store.Close())
+}
+
+// A target below the set's journal is accepted when a checkpoint of the chain
+// is at or below it: the set is left for the next start to restore, so the
+// database truncates and the set stays as it was.
+func TestTruncateBelowTheUtxoSetJournalUsesACheckpoint(t *testing.T) {
+	t.Parallel()
+	f := buildTestChain(t, 5)
+	dir := filepath.Join(t.TempDir(), "set")
+	ckptDir := filepath.Join(t.TempDir(), "ckpt")
+	openCheckpointedSet(t, dir, ckptDir, 2, 5, 4)
+	store := openUtxoSetStore(t, dir)
+	floor, _, err := store.JournalFloor()
+	require.NoError(t, err)
+	require.Greater(t, floor.Slot, f.blocks[1].Slot,
+		"the target is below the journal")
+	opts := lifecycle.WithTruncateUtxoSet(dblifecycle.TruncateUtxoSet{
+		Store:       store,
+		Checkpoints: utxoset.NewOfflineCheckpoints(store, ckptDir),
+	})
+
+	_, err = lifecycle.Truncate(
+		context.Background(), f.db, f.blocks[1], 0, false, 0, opts,
+	)
+	require.NoError(t, err)
+	tip, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.blocks[1].Slot, tip.Point.Slot)
+	requireSetAt(t, store, 5)
+}
+
+// With no checkpoint at or below the target the truncate is refused before
+// anything is removed, and the error names the earliest slot that can be
+// reached: the older of the journal floor and the oldest checkpoint.
+func TestTruncateBelowEveryUtxoSetCheckpointNamesTheEarliestSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := buildTestChain(t, 5)
+	dir := filepath.Join(t.TempDir(), "set")
+	ckptDir := filepath.Join(t.TempDir(), "ckpt")
+	openCheckpointedSet(t, dir, ckptDir, 2, 5, 4)
+	store := openUtxoSetStore(t, dir)
+	opts := lifecycle.WithTruncateUtxoSet(dblifecycle.TruncateUtxoSet{
+		Store:       store,
+		Checkpoints: utxoset.NewOfflineCheckpoints(store, ckptDir),
+	})
+
+	_, err := lifecycle.Truncate(
+		context.Background(), f.db, f.blocks[0], 0, false, 0, opts,
+	)
+	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+	require.ErrorContains(t, err, "journal floor")
+	require.ErrorContains(
+		t, err,
+		fmt.Sprintf("earliest reachable slot is %d", blockPoint(2).Slot),
+	)
+	tip, err := f.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, f.blocks[4].Slot, tip.Point.Slot)
 }

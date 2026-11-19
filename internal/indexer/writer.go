@@ -402,6 +402,15 @@ func (w *Writer) step(
 	if !tip.IsZero() &&
 		(bytes.Equal(tip.Hash, target.Point.Hash) ||
 			tip.Slot > target.Point.Slot) {
+		if refresh, ok := w.facts.(FactsRefresher); ok && ceiling == nil &&
+			bytes.Equal(tip.Hash, target.Point.Hash) {
+			txn := w.store.Database().Transaction(ctx, true)
+			if err := txn.Do(func(txn *database.Txn) error {
+				return refresh.RefreshFacts(ctx, txn, tip.Slot)
+			}); err != nil {
+				return false, fmt.Errorf("refresh ledger facts at tip: %w", err)
+			}
+		}
 		w.report(tip, ledgerTip)
 		return true, nil
 	}

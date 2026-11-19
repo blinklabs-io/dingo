@@ -201,6 +201,7 @@ func newDijkstraRefFeeLedgerState(
 			CardanoNodeConfig: nodeConfig,
 		},
 	}
+	attachTestLiveSet(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 	return ls

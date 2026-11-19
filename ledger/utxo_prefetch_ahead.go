@@ -127,7 +127,6 @@ func (p *utxoPrefetchAhead) run(ctx context.Context) {
 		var result map[utxoref.Key]lcommon.Utxo
 		if p.wanted[k] {
 			result = p.ls.prefetchBlockUtxos(
-				ctx,
 				p.readTxn,
 				p.blocks[k].Transactions(),
 				nil,

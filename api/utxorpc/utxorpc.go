@@ -82,8 +82,7 @@ type UtxorpcConfig struct {
 	EventBus    UtxorpcEventBus
 	LedgerState UtxorpcLedgerState
 	// QueryDatabase serves the QueryService's UTxO, datum and transaction
-	// reads. Nil reads the ledger, which holds those rows on the shared
-	// layout.
+	// reads from the IndexerDB.
 	QueryDatabase QueryDatabase
 	Mempool       UtxorpcMempool
 	TLS           apiconfig.EffectiveTLS

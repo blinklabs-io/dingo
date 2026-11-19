@@ -45,6 +45,7 @@ func TestReadTxTakesABulkSlot(t *testing.T) {
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:                    discardLogger(),
 		LedgerState:               ls,
+		QueryDatabase:             stubQueryDB(ls),
 		MaxConcurrentBulkRequests: 1,
 	})
 	srv := &queryServiceServer{utxorpc: u}

@@ -315,7 +315,7 @@ func TestDrainedSetRefusesFactTablesItLostBeforeLoadingThem(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	s := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet, statedrain.NewTripGuard(),
+		t, set, statedrain.NewTripGuard(),
 	)
 	require.NoError(t, set.LoadLedgerState(
 		t.Context(), drainedHistoryLedgerDB{dbadapter.New(s.DB)},

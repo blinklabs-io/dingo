@@ -17,40 +17,22 @@ package dblifecycle
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 )
 
-// An IndexerDB travels beside a ledger snapshot as two extra files, kept apart
-// from the ledger manifest and its digests so a snapshot of the shared layout
-// stays exactly what it was.
-const (
-	// IndexerPayloadFileName is the IndexerDB's SQLite backup in a snapshot
-	// directory.
-	IndexerPayloadFileName = "indexer.sqlite"
-	// IndexerPayloadManifestName describes the backup: its digest, size and
-	// the IndexerDB tip it holds.
-	IndexerPayloadManifestName = "indexer.json"
+// IndexerPayloadFileName is the provider-native IndexerDB snapshot backup.
+const IndexerPayloadFileName = lifecycle.IndexerMetadataBackupFileName
 
-	// indexerRestoredFileName is the name the SQLite metadata provider gives
-	// its database file inside the IndexerDB directory.
-	indexerRestoredFileName = "metadata.sqlite"
-)
-
-// IndexerPayload is the content of IndexerPayloadManifestName.
+// IndexerPayload describes a captured provider-native IndexerDB backup.
 type IndexerPayload struct {
 	SHA256 string `json:"sha256"`
 	Bytes  int64  `json:"bytes"`
@@ -75,47 +57,14 @@ type IndexerPayloadSource struct {
 	) (staged string, payload IndexerPayload, cleanup func(), err error)
 }
 
-// CheckIndexerPayloadSupported refuses the snapshot and restore shapes an
-// IndexerDB payload does not cover: a store that is not a SQLite directory
-// under the data directory, and a manifest trust key, which authenticates the
-// ledger manifest and would not cover the payload.
-func CheckIndexerPayloadSupported(
-	metadataProvider string,
-	hasIndexerMetadataOverride bool,
-	trustKeyFile string,
-) error {
-	if hasIndexerMetadataOverride {
-		return errors.New(
-			"snapshot and restore with indexer.layout split need the " +
-				"IndexerDB in its default directory: remove indexer.metadata",
-		)
+// CheckIndexerPayloadSupported validates the metadata selection used by snapshots.
+func CheckIndexerPayloadSupported(metadataProvider string) error {
+	switch metadataProvider {
+	case "sqlite", "postgres", "mysql":
+		return nil
+	default:
+		return fmt.Errorf("unsupported IndexerDB metadata provider %q", metadataProvider)
 	}
-	if metadataProvider != "sqlite" {
-		return errors.New(
-			"snapshot and restore with indexer.layout split support the " +
-				"sqlite metadata provider only",
-		)
-	}
-	if trustKeyFile != "" {
-		return errors.New(
-			"snapshot and restore with indexer.layout split cannot be " +
-				"combined with a snapshot trust key: the key authenticates " +
-				"the ledger manifest and not the IndexerDB payload",
-		)
-	}
-	return nil
-}
-
-// CheckIndexerSnapshotDestination refuses a cloud destination: the payload is
-// written beside the local snapshot only.
-func CheckIndexerSnapshotDestination(cloudDestination string) error {
-	if cloudDestination != "" {
-		return errors.New(
-			"snapshot with indexer.layout split cannot be mirrored to a " +
-				"cloud destination: the IndexerDB payload is local only",
-		)
-	}
-	return nil
 }
 
 // CaptureIndexerPayload backs up the IndexerDB db into a private directory
@@ -196,205 +145,14 @@ func CaptureIndexerPayload(
 // IndexerDB tip moved while it ran.
 const payloadBackupAttempts = 3
 
-// InstallIndexerPayload copies the staged backup into the snapshot directory
-// and writes its description. Copying hashes the bytes written.
-func InstallIndexerPayload(
-	destDir, stagedPath string,
-	payload IndexerPayload,
-) error {
-	digest, size, err := copyHashed(
-		stagedPath, filepath.Join(destDir, IndexerPayloadFileName),
-	)
-	if err != nil {
-		return fmt.Errorf("write the IndexerDB payload: %w", err)
-	}
-	payload.SHA256, payload.Bytes = digest, size
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(
-		filepath.Join(destDir, IndexerPayloadManifestName), raw, 0o600,
-	); err != nil {
-		return fmt.Errorf("write the IndexerDB payload manifest: %w", err)
-	}
-	return nil
-}
-
-// copyHashed copies src to a new file dst, flushes it and returns the SHA-256
-// and size of the bytes it wrote.
-func copyHashed(src, dst string) (string, int64, error) {
-	in, err := os.Open(src)
-	if err != nil {
-		return "", 0, err
-	}
-	defer in.Close() //nolint:errcheck // read-only handle
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "", 0, err
-	}
-	h := sha256.New()
-	size, err := io.Copy(io.MultiWriter(out, h), in)
-	if err == nil {
-		err = out.Sync()
-	}
-	if closeErr := out.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		_ = os.Remove(dst)
-		return "", 0, err
-	}
-	return hex.EncodeToString(h.Sum(nil)), size, nil
-}
-
-// ReadIndexerPayload loads and checks the description of the IndexerDB
-// payload in a local snapshot directory.
+// ReadIndexerPayload reads the authenticated manifest's IndexerDB description.
 func ReadIndexerPayload(snapshotDir string) (IndexerPayload, error) {
-	var payload IndexerPayload
-	if strings.Contains(snapshotDir, "://") {
-		return payload, errors.New(
-			"restore with indexer.layout split needs a local snapshot " +
-				"directory that holds the IndexerDB payload",
-		)
-	}
-	raw, err := os.ReadFile(
-		filepath.Join(snapshotDir, IndexerPayloadManifestName),
-	)
+	m, err := lifecycle.ReadManifest(snapshotDir)
 	if err != nil {
-		return payload, fmt.Errorf(
-			"the snapshot carries no IndexerDB payload (%s): take it with "+
-				"a split node: %w",
-			IndexerPayloadManifestName, err,
-		)
+		return IndexerPayload{}, err
 	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return payload, fmt.Errorf(
-			"parse %s: %w",
-			IndexerPayloadManifestName,
-			err,
-		)
+	if m.IndexerSHA256 == "" {
+		return IndexerPayload{}, errors.New("the snapshot carries no IndexerDB payload")
 	}
-	if payload.SHA256 == "" {
-		return payload, fmt.Errorf(
-			"%s declares no digest", IndexerPayloadManifestName,
-		)
-	}
-	return payload, nil
-}
-
-// RestoreIndexerPayload copies the snapshot's IndexerDB backup into the
-// staged data directory stagingDir, where the swap publishes it with the
-// ledger store. It refuses a payload whose digest differs from its
-// description, or whose tip is past the ledger manifest's.
-func RestoreIndexerPayload(
-	snapshotDir, stagingDir string,
-	payload IndexerPayload,
-	ledger lifecycle.Manifest,
-) error {
-	if payload.TipSlot > ledger.TipSlot {
-		return fmt.Errorf(
-			"the IndexerDB payload is at slot %d, past the ledger "+
-				"snapshot's slot %d: the snapshot is inconsistent",
-			payload.TipSlot, ledger.TipSlot,
-		)
-	}
-	dir := filepath.Join(stagingDir, internalplugins.IndexerDirName)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return err
-	}
-	digest, size, err := copyHashed(
-		filepath.Join(snapshotDir, IndexerPayloadFileName),
-		filepath.Join(dir, indexerRestoredFileName),
-	)
-	if err != nil {
-		return fmt.Errorf("restore the IndexerDB payload: %w", err)
-	}
-	if size != payload.Bytes || !strings.EqualFold(digest, payload.SHA256) {
-		_ = os.RemoveAll(dir)
-		return fmt.Errorf(
-			"%w: %s", lifecycle.ErrSnapshotPayloadMismatch,
-			IndexerPayloadFileName,
-		)
-	}
-	return nil
-}
-
-// ValidateIndexerPayloadTip opens the restored ledger in stagingDir and
-// refuses a payload whose tip block is not on that ledger's canonical chain.
-// A rollback between the IndexerDB backup and the ledger snapshot leaves such
-// a tip, which a node could only repair by rolling the IndexerDB back to an
-// ancestor that a non-genesis chain may not have.
-//
-// The ledger is opened with the stores and settings the restore's own
-// validation uses, so it leaves the staged directory as that validation did,
-// and it is closed before this returns, ahead of the swap that publishes the
-// directory. A payload whose IndexerDB had no tip yet carries no block to
-// check.
-func ValidateIndexerPayloadTip(
-	ctx context.Context,
-	stagingDir string,
-	payload IndexerPayload,
-	dbConfig *database.Config,
-	selections internalplugins.StorageSelections,
-	deps internalplugins.StorageDependencies,
-) (err error) {
-	if payload.TipHash == "" {
-		return nil
-	}
-	tipHash, err := hex.DecodeString(payload.TipHash)
-	if err != nil {
-		return fmt.Errorf(
-			"the IndexerDB payload tip hash is not hexadecimal: %w", err,
-		)
-	}
-	cfg := *dbConfig
-	cfg.DataDir = stagingDir
-	cfg.PromRegistry = nil
-	cfg.IndexerLayout = ""
-	cfg.Immutable = database.ImmutableConfig{}
-	deps.DataDir = stagingDir
-	deps.PromRegistry = nil
-	runtime, err := internalplugins.OpenDatabase(ctx, &cfg, selections, deps)
-	if runtime != nil {
-		defer func() {
-			err = errors.Join(err, runtime.Close(context.WithoutCancel(ctx)))
-		}()
-	}
-	if err != nil {
-		return fmt.Errorf("open the restored ledger to check the IndexerDB: %w", err)
-	}
-	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		return fmt.Errorf(
-			"the restored ledger needs recovery before the IndexerDB can be checked: %w",
-			recoveryErr,
-		)
-	}
-	canonical, err := database.IsCanonicalBlock(ctx, runtime.Database, tipHash)
-	if err != nil {
-		return fmt.Errorf("look up the IndexerDB payload tip: %w", err)
-	}
-	if !canonical {
-		return fmt.Errorf(
-			"the snapshot's IndexerDB payload tip %s at slot %d is not on "+
-				"its ledger's chain, so the payload is from a different "+
-				"fork than the ledger: take the snapshot again",
-			payload.TipHash, payload.TipSlot,
-		)
-	}
-	// The manifest records the tip's slot beside its hash and the restore
-	// bounds the payload by that slot, so a canonical hash at another slot
-	// is a manifest that does not describe its payload.
-	blk, err := database.BlockByHash(ctx, runtime.Database, tipHash)
-	if err != nil {
-		return fmt.Errorf("look up the IndexerDB payload tip: %w", err)
-	}
-	if blk.Slot != payload.TipSlot {
-		return fmt.Errorf(
-			"the snapshot's IndexerDB payload records its tip %s at slot "+
-				"%d, but that block is at slot %d: take the snapshot again",
-			payload.TipHash, payload.TipSlot, blk.Slot,
-		)
-	}
-	return nil
+	return IndexerPayload{SHA256: m.IndexerSHA256, Bytes: m.IndexerBytes, TipSlot: m.IndexerTipSlot, TipHash: m.IndexerTipHash}, nil
 }

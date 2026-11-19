@@ -16,9 +16,7 @@ package dingo
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/plugin"
 )
@@ -27,9 +25,6 @@ const (
 	// IndexerPayloadFileName is the IndexerDB's SQLite backup in a snapshot
 	// directory.
 	IndexerPayloadFileName = dblifecycle.IndexerPayloadFileName
-	// IndexerPayloadManifestName describes the backup: its digest, size and
-	// the IndexerDB tip it holds.
-	IndexerPayloadManifestName = dblifecycle.IndexerPayloadManifestName
 )
 
 type indexerPayload = dblifecycle.IndexerPayload
@@ -39,8 +34,6 @@ type indexerPayload = dblifecycle.IndexerPayload
 func (n *Node) checkIndexerSnapshotSupported() error {
 	return dblifecycle.CheckIndexerPayloadSupported(
 		n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
-		len(n.config.indexerMetadataConfig) != 0,
-		n.config.databaseLifecycle.SnapshotTrustKeyFile,
 	)
 }
 
@@ -65,33 +58,4 @@ func (n *Node) indexerPayloadSource() *dblifecycle.IndexerPayloadSource {
 		Check:   n.checkIndexerSnapshotSupported,
 		Capture: n.captureIndexerPayload,
 	}
-}
-
-// restoreIndexerPayload copies the snapshot's IndexerDB backup into the
-// staged data directory, where the swap publishes it with the ledger store.
-func restoreIndexerPayload(
-	snapshotDir, stagingDir string,
-	payload indexerPayload,
-	ledger lifecycle.Manifest,
-) error {
-	return dblifecycle.RestoreIndexerPayload(
-		snapshotDir, stagingDir, payload, ledger,
-	)
-}
-
-// validateIndexerPayloadTip checks the payload's tip against the restored
-// ledger in stagingDir before the payload is installed beside it.
-func (n *Node) validateIndexerPayloadTip(
-	ctx context.Context,
-	stagingDir string,
-	payload indexerPayload,
-) error {
-	deps, err := n.storageDependencies(stagingDir)
-	if err != nil {
-		return fmt.Errorf("prepare restored ledger validation: %w", err)
-	}
-	return dblifecycle.ValidateIndexerPayloadTip(
-		ctx, stagingDir, payload,
-		n.databaseConfig(), n.storageSelections(), deps,
-	)
 }

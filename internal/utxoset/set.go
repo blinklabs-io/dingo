@@ -407,6 +407,12 @@ func (s *Set) ApplyLedgerChanges(
 	for _, p := range lc.PParams {
 		pparams = append(pparams, pparamsRow(p))
 	}
+	if tip != nil && rollbackTo == nil {
+		batch, err = s.withBlockPoints(batch, nonces, *tip)
+		if err != nil {
+			return err
+		}
+	}
 	leading, batch := splitTipless(tip, changes, batch)
 	var res badgerutxo.ApplyResult
 	for _, group := range leading {
@@ -1261,6 +1267,54 @@ func (s *Set) noBaseError(
 
 func samePoint(a, b ocommon.Point) bool {
 	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
+}
+
+// withBlockPoints returns batch with an empty change at every block of the
+// commit that changed no output. The store journals one record per change
+// point and a rollback can only target a record's point, so without them a
+// block with no transactions that commits with later blocks is not a point
+// the set can roll back to. The commit's blocks are its nonce points, which
+// the ledger stages for every block it applies.
+func (s *Set) withBlockPoints(
+	batch []badgerutxo.Change,
+	nonces []badgerutxo.Nonce,
+	tip ocommon.Point,
+) ([]badgerutxo.Change, error) {
+	if len(nonces) == 0 {
+		return batch, nil
+	}
+	cur, _, err := s.store.Tip()
+	if err != nil {
+		return nil, fmt.Errorf("utxoset: read tip: %w", err)
+	}
+	last := cur.Slot
+	for _, n := range nonces {
+		// Points out of order or outside the commit are not its blocks.
+		if len(n.Point.Hash) == 0 || n.Point.Slot < last ||
+			n.Point.Slot > tip.Slot || samePoint(n.Point, cur) {
+			return batch, nil
+		}
+		last = n.Point.Slot
+	}
+	out := make([]badgerutxo.Change, 0, len(batch)+len(nonces))
+	i := 0
+	for _, n := range nonces {
+		for i < len(batch) && batch[i].Point.Slot < n.Point.Slot {
+			out = append(out, batch[i])
+			i++
+		}
+		if i == len(batch) || !samePoint(batch[i].Point, n.Point) {
+			if len(out) == 0 || !samePoint(out[len(out)-1].Point, n.Point) {
+				out = append(out, badgerutxo.Change{Point: n.Point})
+			}
+			continue
+		}
+		for i < len(batch) && samePoint(batch[i].Point, n.Point) {
+			out = append(out, batch[i])
+			i++
+		}
+	}
+	return append(out, batch[i:]...), nil
 }
 
 // Sum returns the stake sum for a key built by ledger.CredentialStakeKey or

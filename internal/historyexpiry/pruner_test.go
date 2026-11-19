@@ -387,3 +387,29 @@ func TestPrunerRefreshesOldestRetainedSlot(t *testing.T) {
 		return ok && slot == 10
 	}, 5*time.Second, 10*time.Millisecond)
 }
+
+// A reader that has not yet read older block bodies, such as the IndexerDB
+// writer, bounds expiry through Ceiling: nothing above it is expired, and
+// nothing at all before the reader reports a position.
+func TestPrunerStopsAtCeiling(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	read := insertTestBlock(t, db, 5, 0x05)
+	unread := insertTestBlock(t, db, 7, 0x07)
+
+	pruner := newTestPruner(db, 100, 5)
+	pruner.config.Ceiling = func(context.Context) (uint64, bool, error) {
+		return 0, false, nil
+	}
+	pruner.prune(t.Context())
+	require.False(t, blockIsExpired(t, db, 5, read))
+	require.False(t, blockIsExpired(t, db, 7, unread))
+
+	pruner.config.Ceiling = func(context.Context) (uint64, bool, error) {
+		return 6, true, nil
+	}
+	pruner.prune(t.Context())
+	require.True(t, blockIsExpired(t, db, 5, read))
+	require.False(t, blockIsExpired(t, db, 7, unread),
+		"a block above the ceiling stays readable")
+}

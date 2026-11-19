@@ -112,6 +112,7 @@ func TestImportAccountsFoldsCoveredRewardCredits(t *testing.T) {
 	require.NoError(t, meta.SaveRewardAccountOutputs(outputs, nil))
 	require.NoError(t, meta.FoldRewardAccountOutputs([]uint64{2}, 0, key, nil))
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -230,6 +231,7 @@ func TestImportAccountRewardFoldFailureRollsBackBalance(t *testing.T) {
 	)
 	require.NoError(t, err)
 	cfg := ImportConfig{
+		UtxoSet:  importSetFor(t, db),
 		Database: db,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

@@ -176,7 +176,7 @@ func p3DrainRun(
 	t.Cleanup(func() { _ = set.Close() })
 	guard := statedrain.NewTripGuard()
 	scenario := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet, guard,
+		t, set, guard,
 	)
 	require.NoError(t, set.LoadLedgerState(
 		t.Context(), dbadapter.New(scenario.DB),
@@ -233,7 +233,7 @@ func p3DrainRun(
 		require.Len(t, entries, 1)
 		err := statedrain.Run(t.Context(), statedrain.Env{
 			Store: drainStore{scenario.DB, scenario.DrainFamilies}, Set: src,
-			Guard: guard, VerifyBeforeDrain: true,
+			Guard: guard,
 		}, entries)
 		if err != nil {
 			return run, err
@@ -307,64 +307,6 @@ func TestOpCertsDrainMatchesAnUndrainedRun(t *testing.T) {
 	requireP3DrainedLikeUndrained(t, nodesettings.FamilyOpCerts, opCertTables)
 }
 
-// A set that differs from the metadata store refuses the drain and leaves
-// the rows.
-func TestP3DrainVerifyMismatchRefusesTheDrain(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name    string
-		family  nodesettings.Family
-		table   string
-		corrupt func(*database.Database)
-	}{
-		{
-			"committee quorum",
-			nodesettings.FamilyCommitteeConstitution, "committee_quorum",
-			func(db *database.Database) {
-				require.NoError(t, db.SetCommitteeQuorum(
-					t.Context(), big.NewRat(1, 3), 1<<20, nil,
-				))
-			},
-		},
-		{
-			"an unknown pool",
-			nodesettings.FamilyOpCerts, "pool_opcert_sequence",
-			func(db *database.Database) {
-				require.NoError(t, db.UpdatePoolOpCertSequence(
-					t.Context(), lcommon.PoolKeyHash(bytes.Repeat([]byte{0x6f}, 28)),
-					99, 5, nil,
-				))
-			},
-		},
-		{
-			"a raised counter",
-			nodesettings.FamilyOpCerts, "pool_opcert_sequence",
-			func(db *database.Database) {
-				counters, err := db.Metadata().LatestPoolOpCertCounters(nil)
-				require.NoError(t, err)
-				require.NotEmpty(t, counters)
-				require.NoError(t, db.UpdatePoolOpCertSequence(
-					t.Context(), lcommon.PoolKeyHash(counters[0].PoolKeyHash),
-					counters[0].Sequence+10, counters[0].Slot+1, nil,
-				))
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			run, err := p3DrainRun(t, tc.family, true, tc.corrupt)
-			require.ErrorIs(t, err, statedrain.ErrGateRefused)
-			require.ErrorContains(t, err, "differ")
-			mask, err := run.db.DrainedFamilies(t.Context())
-			require.NoError(t, err)
-			require.False(t, mask.Has(tc.family))
-			raw, err := dbtest.RawSQLiteMetadata(t, run.db)
-			require.NoError(t, err)
-			require.Positive(t, tableRows(t, raw, tc.table))
-		})
-	}
-}
-
 // With a family drained and the set not holding it, the LedgerDB and the
 // database fail every read rather than answer from the empty SQL tables.
 func TestP3DrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
@@ -373,7 +315,7 @@ func TestP3DrainedReadsFailWhenTheSetCannotServe(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	// The set never loads the metadata store's rows.
 	for _, f := range []nodesettings.Family{
@@ -452,7 +394,7 @@ func TestOpCertReadOutsideTheSetsRecordFailsOnceDrained(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	require.NoError(t, set.LoadLedgerState(
 		t.Context(), dbadapter.New(scenario.DB),

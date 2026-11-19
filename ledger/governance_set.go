@@ -19,15 +19,13 @@ import (
 	"cmp"
 	"context"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
 // ProposalChange is a governance proposal row as the change at Slot leaves
@@ -687,37 +685,39 @@ func (s stagingLedgerDB) DeleteGovernanceVotesForDrep(
 	deletedSlot uint64,
 	txn ledgerdb.Txn,
 ) (int, error) {
-	if s.ls.governanceDrained() {
-		return s.deleteDrainedDRepVotes( //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
-			credentialTag, credential, epoch, deletedSlot, txn,
+	drained := s.ls.governanceDrained()
+	n := 0
+	if !drained {
+		var err error
+		n, err = s.LedgerDB.DeleteGovernanceVotesForDrep(
+			ctx, credentialTag, credential, epoch, deletedSlot, txn,
 		)
-	}
-	g := s.ls.verifyGuard(txn)
-	n, err := s.LedgerDB.DeleteGovernanceVotesForDrep(
-		ctx, credentialTag, credential, epoch, deletedSlot, txn,
-	)
-	if err != nil {
-		return n, err
+		if err != nil {
+			return n, err
+		}
 	}
 	r := s.ls.governanceReader(txn)
 	if r == nil {
-		return n, nil
+		return n, s.ls.setFamilyUnserved(nodesettings.FamilyGovernance)
+	}
+	loaded, err := r.GovernanceLoaded()
+	if err != nil {
+		return n, err
+	}
+	if !loaded {
+		return n, s.ls.setFamilyUnserved(nodesettings.FamilyGovernance)
 	}
 	changes, err := s.ls.drepVoteDeletions(
 		r, txn, credentialTag, credential, epoch, deletedSlot,
 	)
 	if err != nil {
-		s.ls.failAccountStaging(err)
-		return n, nil
+		return n, err
 	}
 	if len(changes) > 0 {
 		s.ls.stageGovernance(txn, LedgerChanges{Votes: changes}) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 	}
-	if _, mode := s.ls.utxoSetReader(); mode != UtxoSetReadsOff {
-		s.ls.compareGovernanceRead(
-			g, fmt.Sprintf("votes of DRep %x deleted", credential),
-			len(changes) == n, nil,
-		)
+	if drained {
+		return len(changes), nil
 	}
 	return n, nil
 }
@@ -758,192 +758,12 @@ func (ls *LedgerState) drepVoteDeletions(
 	return changes, err
 }
 
-func (ls *LedgerState) compareGovernanceRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-	detail ...any,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.governanceReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.governanceReadMismatches.Add(1)
-	ls.metrics.governanceReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set governance read differs from the metadata store",
-		append([]any{
-			"component", "ledger",
-			"read", what,
-			"set_error", setErr,
-			"mismatches", n,
-		}, detail...)...,
-	)
-}
-
-// voteDiffLimit bounds how many votes a comparison names.
-const voteDiffLimit = 10
-
-func voteState(v models.GovernanceVote) string {
-	vu := "nil"
-	if v.VoteUpdatedSlot != nil {
-		vu = strconv.FormatUint(*v.VoteUpdatedSlot, 10)
-	}
-	return fmt.Sprintf("(vote=%d added_slot=%d vote_updated_slot=%s)",
-		v.Vote, v.AddedSlot, vu)
-}
-
-// votesDiff names the votes that only the metadata store's or only the set's
-// list holds, and the fields of those both hold that differ, as store=V
-// set=V.
-func votesDiff(
-	want []*models.GovernanceVote,
-	got map[string]models.GovernanceVote,
-) string {
-	var parts []string
-	seen := make(map[string]struct{}, len(want))
-	label := func(v models.GovernanceVote) string {
-		return fmt.Sprintf(
-			"voter %d/%d/%x",
-			v.VoterType,
-			v.VoterCredentialTag,
-			v.VoterCredential,
-		)
-	}
-	for _, w := range want {
-		key := voterKey(*w)
-		seen[key] = struct{}{}
-		g, ok := got[key]
-		if !ok {
-			parts = append(parts, "only in store "+label(*w)+" "+voteState(*w))
-			continue
-		}
-		var diffs []string
-		add := func(name string, differs bool, s, v any) {
-			if differs {
-				diffs = append(
-					diffs,
-					fmt.Sprintf("%s store=%v set=%v", name, s, v),
-				)
-			}
-		}
-		add("id", w.ID != g.ID, w.ID, g.ID)
-		add(
-			"proposal_id", w.ProposalID != g.ProposalID,
-			w.ProposalID, g.ProposalID,
-		)
-		add("vote", w.Vote != g.Vote, w.Vote, g.Vote)
-		add("anchor_url", w.AnchorURL != g.AnchorURL, w.AnchorURL, g.AnchorURL)
-		add("anchor_hash", !bytes.Equal(w.AnchorHash, g.AnchorHash),
-			hex.EncodeToString(w.AnchorHash), hex.EncodeToString(g.AnchorHash))
-		add("added_slot", w.AddedSlot != g.AddedSlot, w.AddedSlot, g.AddedSlot)
-		add(
-			"vote_updated_slot",
-			!samePtrT(w.VoteUpdatedSlot, g.VoteUpdatedSlot),
-			ptrString(w.VoteUpdatedSlot),
-			ptrString(g.VoteUpdatedSlot),
-		)
-		if len(diffs) > 0 {
-			parts = append(parts, label(*w)+": "+strings.Join(diffs, ", "))
-		}
-	}
-	for key, g := range got {
-		if _, ok := seen[key]; !ok {
-			parts = append(parts, "only in set "+label(g)+" "+voteState(g))
-		}
-	}
-	slices.Sort(parts)
-	if len(parts) > voteDiffLimit {
-		parts = append(parts[:voteDiffLimit],
-			fmt.Sprintf("and %d more", len(parts)-voteDiffLimit))
-	}
-	return strings.Join(parts, " | ")
-}
-
-func ptrString(p *uint64) string {
-	if p == nil {
-		return "nil"
-	}
-	return strconv.FormatUint(*p, 10)
-}
-
-// verifyGovernance compares a governance read with the set's, which same
-// computes from the set's reader.
-func (s stagingLedgerDB) verifyGovernance(
-	g verifyReadGuard,
-	what string,
-	same func(GovernanceReader) (bool, error),
-) {
-	s.verifyGovernanceDetail(g, what,
-		func(r GovernanceReader) (bool, []any, error) {
-			ok, err := same(r)
-			return ok, nil, err
-		})
-}
-
-// verifyGovernanceDetail is verifyGovernance for a comparison that also
-// reports detail, logged with a mismatch, as key-value pairs.
-func (s stagingLedgerDB) verifyGovernanceDetail(
-	g verifyReadGuard,
-	what string,
-	same func(GovernanceReader) (bool, []any, error),
-) {
-	if _, mode := s.ls.utxoSetReader(); mode == UtxoSetReadsOff {
-		return
-	}
-	r := s.ls.governanceReader(g.txn)
-	if r == nil {
-		return
-	}
-	ok, detail, err := same(r)
-	s.ls.compareGovernanceRead(g, what, err == nil && ok, err, detail...)
-}
-
-func sameProposalLists(want []*models.GovernanceProposal, got []models.GovernanceProposal) bool {
-	return slices.EqualFunc(want, got, func(a *models.GovernanceProposal, b models.GovernanceProposal) bool {
-		return sameProposal(a, &b)
-	})
-}
-
-// verifyProposals compares a proposal list read with the set's proposals
-// that keep accepts, in the order the read has.
-func (s stagingLedgerDB) verifyProposals(
-	g verifyReadGuard,
-	what string,
-	txn ledgerdb.Txn,
-	want []*models.GovernanceProposal,
-	keep func(models.GovernanceProposal) bool,
-	order func(a, b models.GovernanceProposal) int,
-) {
-	s.verifyGovernance(g, what, func(r GovernanceReader) (bool, error) {
-		all, err := s.ls.proposalsView(r, txn)
-		if err != nil {
-			return false, err
-		}
-		return sameProposalLists(want, selectProposals(all, keep, order)), nil
-	})
-}
-
-// proposalList answers a proposal list read: from the set in set mode, and
-// from the metadata store otherwise, with the store's answer compared with
-// the set's in verify mode. keep and order are the read's predicate and
-// ORDER BY.
+// proposalList selects proposals from the set using the read's predicate and
+// order.
 func (s stagingLedgerDB) proposalList(
-	what string,
 	txn ledgerdb.Txn,
 	keep func(models.GovernanceProposal) bool,
 	order func(a, b models.GovernanceProposal) int,
-	fromStore func() ([]*models.GovernanceProposal, error),
 ) ([]*models.GovernanceProposal, error) {
 	r, err := s.ls.governanceServing(txn)
 	if err != nil {
@@ -962,16 +782,10 @@ func (s stagingLedgerDB) proposalList(
 		}
 		return out, nil
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := fromStore()
-	if err != nil {
-		return want, err
-	}
-	s.verifyProposals(g, what, txn, want, keep, order)
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyGovernance)
 }
 
-// GetGovernanceProposal is answered from the set in set mode.
+// GetGovernanceProposal is answered from the set.
 func (s stagingLedgerDB) GetGovernanceProposal(
 	ctx context.Context,
 	txHash []byte,
@@ -993,24 +807,7 @@ func (s stagingLedgerDB) GetGovernanceProposal(
 		c := cleanProposal(*p)
 		return &c, nil
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetGovernanceProposal(ctx, txHash, actionIndex, txn)
-	// A missing proposal is an answer too, and the set must agree.
-	if err != nil && !errors.Is(err, models.ErrGovernanceProposalNotFound) {
-		return want, err
-	}
-	s.verifyGovernance(g, fmt.Sprintf("proposal %x#%d", txHash, actionIndex),
-		func(r GovernanceReader) (bool, error) {
-			p, err := s.ls.proposalView(r, txn, txHash, actionIndex)
-			if err != nil {
-				return false, err
-			}
-			if p != nil && p.DeletedSlot != nil {
-				p = nil
-			}
-			return sameProposal(want, p), nil
-		})
-	return want, err
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyGovernance)
 }
 
 func (s stagingLedgerDB) GetActiveGovernanceProposals(
@@ -1018,27 +815,21 @@ func (s stagingLedgerDB) GetActiveGovernanceProposals(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	return s.proposalList("active proposals", txn,
+	return s.proposalList(txn,
 		func(p models.GovernanceProposal) bool {
 			return p.ExpiresEpoch >= epoch && p.EnactedEpoch == nil &&
 				p.ExpiredEpoch == nil && p.DeletedSlot == nil
-		}, cmpProposals,
-		func() ([]*models.GovernanceProposal, error) {
-			return s.LedgerDB.GetActiveGovernanceProposals(ctx, epoch, txn)
-		})
+		}, cmpProposals)
 }
 
 func (s stagingLedgerDB) GetGovernanceProposalSet(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	return s.proposalList("proposal set", txn,
+	return s.proposalList(txn,
 		func(p models.GovernanceProposal) bool {
 			return p.EnactedEpoch == nil && p.DroppedEpoch == nil && p.DeletedSlot == nil
-		}, cmpProposals,
-		func() ([]*models.GovernanceProposal, error) {
-			return s.LedgerDB.GetGovernanceProposalSet(ctx, txn)
-		})
+		}, cmpProposals)
 }
 
 func (s stagingLedgerDB) GetGovernanceProposalSetAtSlot(
@@ -1046,14 +837,11 @@ func (s stagingLedgerDB) GetGovernanceProposalSetAtSlot(
 	slot uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	return s.proposalList(fmt.Sprintf("proposal set at slot %d", slot), txn,
+	return s.proposalList(txn,
 		func(p models.GovernanceProposal) bool {
 			return p.AddedSlot <= slot && slotAfter(p.EnactedSlot, slot) &&
 				slotAfter(p.DroppedSlot, slot) && slotAfter(p.DeletedSlot, slot)
-		}, cmpProposals,
-		func() ([]*models.GovernanceProposal, error) {
-			return s.LedgerDB.GetGovernanceProposalSetAtSlot(ctx, slot, txn)
-		})
+		}, cmpProposals)
 }
 
 func (s stagingLedgerDB) GetExpiringGovernanceProposals(
@@ -1061,14 +849,11 @@ func (s stagingLedgerDB) GetExpiringGovernanceProposals(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	return s.proposalList("expiring proposals", txn,
+	return s.proposalList(txn,
 		func(p models.GovernanceProposal) bool {
 			return p.ExpiresEpoch < epoch && p.RatifiedEpoch == nil &&
 				p.EnactedEpoch == nil && p.ExpiredEpoch == nil && p.DeletedSlot == nil
-		}, cmpProposals,
-		func() ([]*models.GovernanceProposal, error) {
-			return s.LedgerDB.GetExpiringGovernanceProposals(ctx, epoch, txn)
-		})
+		}, cmpProposals)
 }
 
 func (s stagingLedgerDB) GetExpiredGovernanceProposalsAt(
@@ -1076,16 +861,11 @@ func (s stagingLedgerDB) GetExpiredGovernanceProposalsAt(
 	epoch, slot uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	return s.proposalList("proposals expired at a boundary", txn,
+	return s.proposalList(txn,
 		func(p models.GovernanceProposal) bool {
 			return samePtrT(p.ExpiredEpoch, &epoch) && samePtrT(p.ExpiredSlot, &slot) &&
 				p.EnactedEpoch == nil && p.DeletedSlot == nil
-		}, cmpProposals,
-		func() ([]*models.GovernanceProposal, error) {
-			return s.LedgerDB.GetExpiredGovernanceProposalsAt(
-				ctx, epoch, slot, txn,
-			)
-		})
+		}, cmpProposals)
 }
 
 func (s stagingLedgerDB) GetExpiredAwaitingDropGovernanceProposals(
@@ -1093,16 +873,11 @@ func (s stagingLedgerDB) GetExpiredAwaitingDropGovernanceProposals(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	return s.proposalList("proposals awaiting drop", txn,
+	return s.proposalList(txn,
 		func(p models.GovernanceProposal) bool {
 			return p.ExpiredEpoch != nil && *p.ExpiredEpoch < epoch &&
 				p.DroppedEpoch == nil && p.DeletedSlot == nil
-		}, cmpProposals,
-		func() ([]*models.GovernanceProposal, error) {
-			return s.LedgerDB.GetExpiredAwaitingDropGovernanceProposals(
-				ctx, epoch, txn,
-			)
-		})
+		}, cmpProposals)
 }
 
 func (s stagingLedgerDB) GetDroppedGovernanceProposalsAt(
@@ -1110,16 +885,11 @@ func (s stagingLedgerDB) GetDroppedGovernanceProposalsAt(
 	epoch, slot uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	return s.proposalList("proposals dropped at a boundary", txn,
+	return s.proposalList(txn,
 		func(p models.GovernanceProposal) bool {
 			return samePtrT(p.DroppedEpoch, &epoch) && samePtrT(p.DroppedSlot, &slot) &&
 				p.DeletedSlot == nil
-		}, cmpProposals,
-		func() ([]*models.GovernanceProposal, error) {
-			return s.LedgerDB.GetDroppedGovernanceProposalsAt(
-				ctx, epoch, slot, txn,
-			)
-		})
+		}, cmpProposals)
 }
 
 func (s stagingLedgerDB) GetEnactedGovernanceProposalsAt(
@@ -1127,35 +897,25 @@ func (s stagingLedgerDB) GetEnactedGovernanceProposalsAt(
 	epoch, slot uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	return s.proposalList("proposals enacted at a boundary", txn,
+	return s.proposalList(txn,
 		func(p models.GovernanceProposal) bool {
 			return p.RatifiedEpoch != nil && samePtrT(p.EnactedEpoch, &epoch) &&
 				samePtrT(p.EnactedSlot, &slot) && p.DeletedSlot == nil
-		}, cmpRatified,
-		func() ([]*models.GovernanceProposal, error) {
-			return s.LedgerDB.GetEnactedGovernanceProposalsAt(
-				ctx, epoch, slot, txn,
-			)
-		})
+		}, cmpRatified)
 }
 
 func (s stagingLedgerDB) GetRatifiedGovernanceProposals(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	return s.proposalList("ratified proposals", txn,
+	return s.proposalList(txn,
 		func(p models.GovernanceProposal) bool {
 			return p.RatifiedEpoch != nil && p.EnactedEpoch == nil && p.DeletedSlot == nil
-		}, cmpRatified,
-		func() ([]*models.GovernanceProposal, error) {
-			return s.LedgerDB.GetRatifiedGovernanceProposals(ctx, txn)
-		})
+		}, cmpRatified)
 }
 
-// governanceServing returns the governance reader when governance reads are
-// answered from the set, or nil when they stay on the metadata store. Once
-// the family is drained the metadata store holds no rows, so the set answers
-// whatever the read mode, and a set that cannot is an error rather than nil.
+// governanceServing returns the loaded governance reader or an error when the
+// set cannot serve governance reads.
 func (ls *LedgerState) governanceServing(
 	txn ledgerdb.Txn,
 ) (GovernanceReader, error) {
@@ -1164,12 +924,12 @@ func (ls *LedgerState) governanceServing(
 	}
 	r := ls.governanceReader(txn)
 	if r == nil || !ls.setServes(&ls.governanceSetLoaded, r.GovernanceLoaded) {
-		return nil, nil
+		return nil, ls.setFamilyUnserved(nodesettings.FamilyGovernance)
 	}
 	return r, nil
 }
 
-// GetLastEnactedGovernanceProposal is answered from the set in set mode.
+// GetLastEnactedGovernanceProposal is answered from the set.
 func (s stagingLedgerDB) GetLastEnactedGovernanceProposal(
 	ctx context.Context,
 	actionTypes []uint8,
@@ -1191,19 +951,7 @@ func (s stagingLedgerDB) GetLastEnactedGovernanceProposal(
 		c := cleanProposal(*p)
 		return &c, nil
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetLastEnactedGovernanceProposal(ctx, actionTypes, txn)
-	if err != nil {
-		return want, err
-	}
-	s.verifyGovernance(g, "last enacted proposal", func(r GovernanceReader) (bool, error) {
-		all, err := s.ls.proposalsView(r, txn)
-		if err != nil {
-			return false, err
-		}
-		return sameProposal(want, lastEnactedProposal(all, actionTypes)), nil
-	})
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyGovernance)
 }
 
 // liveVotesOn returns the votes on the proposal (txHash, idx) as txn sees
@@ -1231,27 +979,7 @@ func (ls *LedgerState) liveVotesOn(
 	return out, nil
 }
 
-// proposalKeyInStore finds the transaction hash and action index of the
-// proposal with row ID id among the metadata store's proposal set, the only
-// proposals a vote can be cast on.
-func (s stagingLedgerDB) proposalKeyInStore(
-	ctx context.Context,
-	txn ledgerdb.Txn,
-	id uint,
-) ([]byte, uint32, bool, error) {
-	set, err := s.LedgerDB.GetGovernanceProposalSet(ctx, txn)
-	if err != nil {
-		return nil, 0, false, err
-	}
-	for _, p := range set {
-		if p.ID == id {
-			return p.TxHash, p.ActionIndex, true, nil
-		}
-	}
-	return nil, 0, false, nil
-}
-
-// GetGovernanceVotes is answered from the set in set mode.
+// GetGovernanceVotes is answered from the set.
 func (s stagingLedgerDB) GetGovernanceVotes(
 	ctx context.Context,
 	proposalID uint,
@@ -1276,51 +1004,5 @@ func (s stagingLedgerDB) GetGovernanceVotes(
 		}
 		return out, nil
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetGovernanceVotes(ctx, proposalID, txn)
-	if err != nil {
-		return want, err
-	}
-	if _, mode := s.ls.utxoSetReader(); mode == UtxoSetReadsOff ||
-		s.ls.governanceReader(txn) == nil {
-		return want, nil
-	}
-	txHash, idx, found, err := s.proposalKeyInStore(ctx, txn, proposalID)
-	if err != nil {
-		return want, err
-	}
-	if !found {
-		// Only a proposal in the set can be compared; one already enacted
-		// or dropped has no votes to tally.
-		return want, nil
-	}
-	s.verifyGovernanceDetail(
-		g,
-		fmt.Sprintf("votes on proposal %x#%d", txHash, idx),
-		func(r GovernanceReader) (bool, []any, error) {
-			rows, err := s.ls.liveVotesOn(r, txn, txHash, idx)
-			if err != nil {
-				return false, nil, err
-			}
-			got := make(map[string]models.GovernanceVote, len(rows))
-			for _, v := range rows {
-				got[voterKey(v)] = v
-			}
-			same := len(got) == len(want)
-			for _, w := range want {
-				v, ok := got[voterKey(*w)]
-				if !ok || !sameVote(&v, w) {
-					same = false
-				}
-			}
-			if same {
-				return true, nil, nil
-			}
-			return false, []any{
-				"proposal", fmt.Sprintf("%x#%d", txHash, idx),
-				"diff", votesDiff(want, got),
-				"store_count", len(want), "set_count", len(got),
-			}, nil
-		})
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyGovernance)
 }

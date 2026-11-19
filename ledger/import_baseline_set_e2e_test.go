@@ -74,7 +74,7 @@ func newBaselineHarness(t *testing.T, reads string) *baselineHarness {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	h := &baselineHarness{set: set}
-	h.scenario = ledger.NewBoundaryEpochStateScenarioForTest(t, set, reads)
+	h.scenario = ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 	h.store = dbadapter.New(h.scenario.DB)
 	require.NoError(
 		t,
@@ -162,13 +162,13 @@ func (h *baselineHarness) requireBaselines(t *testing.T, db ledgerdb.LedgerDB) {
 }
 
 // TestImportBaselineReadsFromTheLiveUtxoSet reads the import baselines
-// through the ledger's LedgerDB in set mode with the store's read failing,
+// through the ledger's LedgerDB from the live set with the store's read failing,
 // for accounts a snapshot imported with and without a deposit and one a newer
 // snapshot deactivated, before and after a rollback, and requires every
 // answer to be the store's.
 func TestImportBaselineReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	h := newBaselineHarness(t, ledger.UtxoSetReadsSet)
+	h := newBaselineHarness(t, "set")
 	reached, _ := h.scenario.HideStoreReads(
 		"GetAccountImportRegistrationByCredential",
 	)
@@ -184,39 +184,30 @@ func TestImportBaselineReadsFromTheLiveUtxoSet(t *testing.T) {
 	)
 	h.requireBaselines(t, ldb)
 	require.Zero(t, reached(), "a baseline read reached the metadata store")
-	verified, mismatches := h.scenario.RegistrationReads()
-	require.Zero(t, verified, "set mode compares nothing")
-	require.Zero(t, mismatches)
 }
 
 // TestImportBaselineReadsAgreeInVerifyMode requires every verified baseline
 // read to agree with the metadata store.
 func TestImportBaselineReadsAgreeInVerifyMode(t *testing.T) {
 	t.Parallel()
-	h := newBaselineHarness(t, ledger.UtxoSetReadsVerify)
+	h := newBaselineHarness(t, "metadata-visible")
 	ldb := h.scenario.LedgerDB()
 	h.requireBaselines(t, ldb)
-	verified, mismatches := h.scenario.RegistrationReads()
-	require.Equal(t, float64(len(h.refs())), verified)
-	require.Zero(t, mismatches)
 }
 
-// TestImportBaselineVerificationCountsADivergence requires a verify-mode read
-// to count a mismatch when the metadata store holds a baseline the set does
-// not, and to answer with the store's.
-func TestImportBaselineVerificationCountsADivergence(t *testing.T) {
+// TestImportBaselineReadUsesSetStateAfterAnUntrackedImport pins the set
+// result when an import baseline exists only in metadata.
+func TestImportBaselineReadUsesSetStateAfterAnUntrackedImport(t *testing.T) {
 	t.Parallel()
-	h := newBaselineHarness(t, ledger.UtxoSetReadsVerify)
-	// Imported around the ledger's LedgerDB after the set loaded, so the set
-	// never sees it.
+	h := newBaselineHarness(t, "")
 	ref := h.importAround(t, bytes.Repeat([]byte{0xf5}, 28), 7, nil)
+	reached, _ := h.scenario.HideStoreReads(
+		"GetAccountImportRegistrationByCredential",
+	)
 	got, err := h.scenario.LedgerDB().GetAccountImportRegistrationByCredential(
 		t.Context(), ref.Tag, ref.Key, nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, &models.AccountImportRegistration{AddedSlot: 7}, got,
-		"the read answers from the metadata store")
-	verified, mismatches := h.scenario.RegistrationReads()
-	require.Equal(t, float64(1), verified)
-	require.Equal(t, float64(1), mismatches)
+	require.Nil(t, got)
+	require.Zero(t, reached(), "import baseline read reached the metadata store")
 }

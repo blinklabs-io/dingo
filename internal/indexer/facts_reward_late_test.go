@@ -304,3 +304,30 @@ func TestWriterCopiesRewardRoundFinishedBehindItsTip(t *testing.T) {
 	require.Equal(t, "8", scalar[string](t, l.dstRaw,
 		`SELECT total_reward FROM reward_pool_output WHERE epoch = 12`))
 }
+
+func TestCaughtUpWriterCopiesRewardRoundWithoutAnotherBlock(t *testing.T) {
+	t.Parallel()
+	l := newLateRewardFixture(t)
+	store, err := indexerdb.NewStore(l.dst, l.dst, 10)
+	require.NoError(t, err)
+	chain := newFakeChain(3, "idle-reward")
+	w := NewWriter(store, chain, &syncRowIndexer{}, nil, 1).WithFacts(l.f)
+	require.NoError(t, w.CatchUp(t.Context()))
+	tip, err := store.Tip(nil)
+	require.NoError(t, err)
+	require.Zero(t, l.poolRows(t, 12))
+	l.ledgerPrecomputes(t, 12, tip.Slot, "idle-round", "500")
+
+	require.NoError(t, w.CatchUp(t.Context()))
+	require.Equal(t, 1, l.poolRows(t, 12), "finished rewards must not wait for another block")
+	require.Equal(t, "500", l.accountAmount(t, 12))
+	got, err := store.Tip(nil)
+	require.NoError(t, err)
+	require.Equal(t, tip, got)
+
+	l.restart(t)
+	w = NewWriter(store, chain, &syncRowIndexer{}, nil, 1).WithFacts(l.f)
+	require.NoError(t, w.CatchUp(t.Context()))
+	require.Equal(t, 1, l.poolRows(t, 12))
+	require.Equal(t, "500", l.accountAmount(t, 12))
+}

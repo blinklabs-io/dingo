@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"slices"
@@ -131,6 +132,7 @@ func newTestOuroborosWithLeiosDB(t *testing.T) *Ouroboros {
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:       db,
+		UtxoSet:        livesettest.New(),
 		ChainManager:   cm,
 		EnableDijkstra: true,
 		Logger: slog.New(

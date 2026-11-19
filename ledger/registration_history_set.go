@@ -18,12 +18,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -112,7 +112,7 @@ type DRepDepositChange struct {
 // registration deposits from a live UTxO set.
 type RegistrationHistoryReader interface {
 	// RegistrationHistoryLoaded reports whether the reader holds every event
-	// up to its tip; until it does, reads stay on the metadata store.
+	// up to its tip; until it does, reads fail closed when the set cannot serve.
 	RegistrationHistoryLoaded() (bool, error)
 	// StakeHistory returns every event of ref, oldest first.
 	StakeHistory(ref models.StakeCredentialRef) ([]StakeEvent, error)
@@ -133,14 +133,14 @@ func stakeEventBefore(a, b StakeEvent) bool {
 }
 
 // registrationHistoryReader returns the set's registration history reader
-// once it holds the history, or nil when reads stay on the metadata store.
+// when history is unavailable.
 func (ls *LedgerState) registrationHistoryReader(
 	txn ledgerdb.Txn,
 ) RegistrationHistoryReader {
 	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
 		return nil
 	}
-	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
+	if _, mode := ls.utxoSetReader(); !mode {
 		return nil
 	}
 	r, ok := ls.readSet(txn).(RegistrationHistoryReader)
@@ -369,20 +369,13 @@ func sameHistoryRow(a, b models.AccountRegistrationHistoryRow) bool {
 		a.TxSlot == b.TxSlot && bytes.Equal(a.BlockHash, b.BlockHash)
 }
 
-func sameHistoryRowPtr(a, b *models.AccountRegistrationHistoryRow) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return sameHistoryRow(*a, *b)
-}
-
 // registrationServing returns the set's registration history reader when
-// those reads are answered from it: reads are in set mode and the set holds
+// those reads are answered from it and the set holds
 // the history.
 func (ls *LedgerState) registrationServing(
 	txn ledgerdb.Txn,
 ) RegistrationHistoryReader {
-	if _, mode := ls.utxoSetReader(); mode != UtxoSetReadsSet {
+	if _, mode := ls.utxoSetReader(); !mode {
 		return nil
 	}
 	return ls.registrationHistoryReader(txn)
@@ -461,38 +454,8 @@ func stakeRegistrationCerts(
 	return out, true, nil
 }
 
-func (ls *LedgerState) compareRegistrationRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.registrationReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.registrationReadMismatches.Add(1)
-	ls.metrics.registrationReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set registration read differs from the metadata store",
-		"component", "ledger",
-		"read", what,
-		"set_error", setErr,
-		"mismatches", n,
-	)
-}
-
-// GetAccountRegistrationHistoryByCredential is compared on every row, in the
-// requested order, under the limit and offset.
+// GetAccountRegistrationHistoryByCredential returns a credential's registration
+// events in the requested order, under the limit and offset.
 func (s stagingLedgerDB) GetAccountRegistrationHistoryByCredential(
 	ctx context.Context,
 	credentialTag uint8,
@@ -511,36 +474,11 @@ func (s stagingLedgerDB) GetAccountRegistrationHistoryByCredential(
 		}
 		return historyRows(events, limit, offset, order), nil
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetAccountRegistrationHistoryByCredential(
-		ctx, credentialTag, stakeKey, limit, offset, order, txn,
-	)
-	if err != nil {
-		return want, err
-	}
-	r := s.ls.registrationHistoryReader(txn)
-	if r == nil {
-		return want, nil
-	}
-	events, setErr := s.ls.stakeHistoryView(
-		r, txn, models.NewStakeCredentialRef(credentialTag, stakeKey),
-	)
-	rows := historyRows(events, limit, offset, order)
-	same := len(rows) == len(want)
-	for i := 0; same && i < len(rows); i++ {
-		same = sameHistoryRow(rows[i], want[i])
-	}
-	s.ls.compareRegistrationRead(
-		g, fmt.Sprintf("registration history %d/%x", credentialTag, stakeKey),
-		same, setErr,
-	)
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 }
 
-// GetStakeCredentialsWithRegistrationEvents is compared on the set of
-// credentials. The store lists the credentials of its registration and
-// deregistration certificate tables; the set's events are those same
-// certificates, so a drained accounts family is served from them.
+// GetStakeCredentialsWithRegistrationEvents lists credentials with registration
+// or deregistration events in the requested slot range.
 func (s stagingLedgerDB) GetStakeCredentialsWithRegistrationEvents(
 	fromSlot, toSlot uint64,
 	txn ledgerdb.Txn,
@@ -548,36 +486,10 @@ func (s stagingLedgerDB) GetStakeCredentialsWithRegistrationEvents(
 	if r := s.ls.registrationServing(txn); r != nil {
 		return s.ls.stakeCredentialsInRangeView(r, txn, fromSlot, toSlot)
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetStakeCredentialsWithRegistrationEvents(
-		fromSlot, toSlot, txn,
-	)
-	if err != nil {
-		return want, err
-	}
-	r := s.ls.registrationHistoryReader(txn)
-	if r == nil {
-		return want, nil
-	}
-	got, setErr := s.ls.stakeCredentialsInRangeView(r, txn, fromSlot, toSlot)
-	same := slices.Equal(sortedRefKeys(want), sortedRefKeys(got))
-	s.ls.compareRegistrationRead(
-		g, fmt.Sprintf("registered credentials in slots %d-%d", fromSlot, toSlot),
-		same, setErr,
-	)
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 }
 
-func sortedRefKeys(refs []models.StakeCredentialRef) []string {
-	keys := make([]string, 0, len(refs))
-	for _, ref := range refs {
-		keys = append(keys, ref.MapKey())
-	}
-	slices.Sort(keys)
-	return slices.Compact(keys)
-}
-
-// GetLatestAccountRegistrationAtOrBefore is compared on the newest
+// GetLatestAccountRegistrationAtOrBefore is returns the newest
 // registration or deregistration at or before the slot.
 func (s stagingLedgerDB) GetLatestAccountRegistrationAtOrBefore(
 	ctx context.Context,
@@ -595,31 +507,11 @@ func (s stagingLedgerDB) GetLatestAccountRegistrationAtOrBefore(
 		}
 		return latestStakeEventAtOrBefore(events, slot), nil
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetLatestAccountRegistrationAtOrBefore(
-		ctx, credentialTag, stakeKey, slot, txn,
-	)
-	if err != nil {
-		return want, err
-	}
-	r := s.ls.registrationHistoryReader(txn)
-	if r == nil {
-		return want, nil
-	}
-	events, setErr := s.ls.stakeHistoryView(
-		r, txn, models.NewStakeCredentialRef(credentialTag, stakeKey),
-	)
-	got := latestStakeEventAtOrBefore(events, slot)
-	s.ls.compareRegistrationRead(
-		g, fmt.Sprintf("latest registration %d/%x at slot %d", credentialTag, stakeKey, slot),
-		sameHistoryRowPtr(want, got), setErr,
-	)
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 }
 
-// GetStakeRegistrationsByCredential is compared on the number of stake
-// registration certificates. A credential holding a loaded registration
-// whose table is unknown is not compared.
+// GetStakeRegistrationsByCredential returns stake registration certificates
+// represented in the set's history for the credential.
 func (s stagingLedgerDB) GetStakeRegistrationsByCredential(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -642,48 +534,11 @@ func (s stagingLedgerDB) GetStakeRegistrationsByCredential(
 			return certs, nil
 		}
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetStakeRegistrationsByCredential(
-		credentialTag, stakingKey, txn,
-	)
-	if err != nil {
-		return want, err
-	}
-	r := s.ls.registrationHistoryReader(txn)
-	if r == nil {
-		return want, nil
-	}
-	events, setErr := s.ls.stakeHistoryView(
-		r, txn, models.NewStakeCredentialRef(credentialTag, stakingKey),
-	)
-	legacy := 0
-	for _, e := range events {
-		switch {
-		case e.Registered && e.Class == StakeClassUnknown:
-			return want, nil
-		case e.Registered && e.Class == StakeClassLegacy:
-			legacy++
-		}
-	}
-	same := legacy == len(want)
-	for _, c := range want {
-		if !bytes.Equal(c.StakeCredential.Credential[:], stakingKey) ||
-			(c.StakeCredential.CredType == lcommon.CredentialTypeScriptHash) != (credentialTag == 1) {
-			same = false
-		}
-	}
-	s.ls.compareRegistrationRead(
-		g, fmt.Sprintf("stake registrations %d/%x", credentialTag, stakingKey),
-		same, setErr,
-	)
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 }
 
-// GetAccountsActiveAtSlot is compared on the credentials whose newest
-// registration at or before the slot follows their newest deregistration,
-// with the metadata store's fallback for a credential with no registration
-// certificate: its account row, created by then and either active or once
-// deregistered.
+// GetAccountsActiveAtSlot returns the requested credentials whose newest
+// registration at or before the slot follows their newest deregistration.
 func (s stagingLedgerDB) GetAccountsActiveAtSlot(
 	stakeCredentials []models.StakeCredentialRef,
 	slot uint64,
@@ -704,33 +559,7 @@ func (s stagingLedgerDB) GetAccountsActiveAtSlot(
 			return got, nil
 		}
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetAccountsActiveAtSlot(stakeCredentials, slot, txn)
-	if err != nil {
-		return want, err
-	}
-	r := s.ls.registrationHistoryReader(txn)
-	ar := s.ls.accountReader(txn)
-	if r == nil || ar == nil {
-		return want, nil
-	}
-	got := make(map[string]struct{}, len(want))
-	var setErr error
-	for _, ref := range stakeCredentials {
-		active, err := s.activeAtSlot(r, ar, txn, ref, slot)
-		if err != nil {
-			setErr = err
-			break
-		}
-		if active {
-			got[ref.MapKey()] = struct{}{}
-		}
-	}
-	s.ls.compareRegistrationRead(
-		g, fmt.Sprintf("accounts active at slot %d", slot),
-		maps.Equal(got, want), setErr,
-	)
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 }
 
 func (s stagingLedgerDB) activeAtSlot(
@@ -773,7 +602,7 @@ func (s stagingLedgerDB) activeAtSlot(
 	return a.Active || everDeregistered, nil
 }
 
-// GetDrepLastRegistrationDeposit is compared on the latest registration's
+// GetDrepLastRegistrationDeposit returns the latest registration's
 // deposit.
 func (s stagingLedgerDB) GetDrepLastRegistrationDeposit(
 	ctx context.Context,
@@ -784,24 +613,10 @@ func (s stagingLedgerDB) GetDrepLastRegistrationDeposit(
 	if r := s.ls.registrationServing(txn); r != nil {
 		return s.ls.drepDepositView(r, txn, credentialTag, credential)
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetDrepLastRegistrationDeposit(
-		ctx, credentialTag, credential, txn,
-	)
-	if err != nil {
-		return want, err
-	}
-	if r := s.ls.registrationHistoryReader(txn); r != nil {
-		got, setErr := s.ls.drepDepositView(r, txn, credentialTag, credential)
-		s.ls.compareRegistrationRead(
-			g, fmt.Sprintf("drep deposit %d/%x", credentialTag, credential),
-			sameDepositPtr(want, got), setErr,
-		)
-	}
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 }
 
-// GetDrepLastRegistrationDeposits is compared on the latest registration
+// GetDrepLastRegistrationDeposits returns the latest registration
 // deposit of every active DRep the set holds.
 func (s stagingLedgerDB) GetDrepLastRegistrationDeposits(
 	ctx context.Context,
@@ -812,21 +627,7 @@ func (s stagingLedgerDB) GetDrepLastRegistrationDeposits(
 			return s.drepDeposits(r, dr, txn)
 		}
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetDrepLastRegistrationDeposits(ctx, txn)
-	if err != nil {
-		return want, err
-	}
-	r := s.ls.registrationHistoryReader(txn)
-	dr := s.ls.drepVerifying(txn)
-	if r == nil || dr == nil {
-		return want, nil
-	}
-	got, setErr := s.drepDeposits(r, dr, txn)
-	s.ls.compareRegistrationRead(
-		g, "drep deposits", maps.Equal(got, want), setErr,
-	)
-	return want, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 }
 
 // drepDeposits is the latest registration deposit of every active DRep the
