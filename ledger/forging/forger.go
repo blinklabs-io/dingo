@@ -1927,6 +1927,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 
 	endLeiosPrepare := beginForgePhase(ctx, "block.forge.leios.prepare")
 	leiosState := forgeLeiosState{}
+	var leiosReceipt LeiosValidationReceipt
 	if altBlockContext == nil {
 		parentRbHash, parentEbHash, parentKnown := f.leiosParentAnnouncement(
 			ctx,
@@ -1954,7 +1955,11 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		// therefore pinned to a ledger whose tip is the parent, and rebased
 		// onto the certified closure.
 		endRebase := beginForgePhase(ctx, "block.forge.leios.rebase")
-		basis := leiosSelectionBasis{parentHash: gates.primaryTip.Hash}
+		basis := leiosSelectionBasis{
+			parentHash: gates.primaryTip.Hash,
+			slot:       currentSlot,
+			receipt:    &leiosReceipt,
+		}
 		canAnnounce := true
 		if embeddedEb != nil {
 			closure, err := f.certifiedClosureForRebase(
@@ -2230,7 +2235,11 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 			ctx,
 			"block.forge.leios.validate_announcement",
 		)
-		err := f.leiosAnnouncementValidator(ctx, block.Header())
+		announcementCtx := ctx
+		if leiosReceipt != nil && len(block.Transactions()) == 0 {
+			announcementCtx = WithLeiosValidationReceipt(ctx, leiosReceipt)
+		}
+		err := f.leiosAnnouncementValidator(announcementCtx, block.Header())
 		endAnnouncement()
 		if err != nil {
 			if errors.Is(err, ErrLeiosAnnouncementUnavailable) {
@@ -4657,12 +4666,24 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	candidateCount := len(txs)
 	endSelection := beginForgePhase(ctx, "block.forge.leios.select")
 	selectStart := f.now()
-	validatedTxs, truncated, err := selectValidLeiosTransactions(ctx,
-		txs,
-		f.leiosValidator,
-		limits,
-		basis,
-	)
+	var validatedTxs []MempoolTransaction
+	var truncated bool
+	if provider, ok := f.leiosValidator.(PreparedLeiosSelectionProvider); ok &&
+		basis.receipt != nil &&
+		len(basis.parentHash) > 0 &&
+		basis.closure == nil {
+		validatedTxs, truncated, *basis.receipt, err = selectPreparedLeiosTransactions(
+			ctx,
+			txs,
+			provider,
+			limits,
+			basis,
+		)
+	} else {
+		validatedTxs, truncated, err = selectValidLeiosTransactions(
+			ctx, txs, f.leiosValidator, limits, basis,
+		)
+	}
 	selectDuration := f.now().Sub(selectStart)
 	endSelection(
 		attribute.Int("forge.candidates", candidateCount),
@@ -4905,6 +4926,8 @@ func selectValidLeiosTransactions(ctx context.Context,
 // closure that ranking block applies. The zero value is an unpinned pass over
 // the current ledger state with no closure.
 type leiosSelectionBasis struct {
+	slot    uint64
+	receipt *LeiosValidationReceipt
 	// parentHash, when non-empty, is the hash the validation session's
 	// ledger tip must equal.
 	parentHash []byte
