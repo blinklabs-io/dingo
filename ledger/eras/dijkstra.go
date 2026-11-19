@@ -185,7 +185,7 @@ func validateDijkstraProtocolParameterDomains(
 		PerasBootstrapRound:              p.PerasBootstrapRound,
 		PerasBootstrapRoundSet:           p.PerasBootstrapRound != nil,
 		PerasQuorumThresholdSafetyMargin: p.PerasQuorumThresholdSafetyMargin,
-		RefInputsCostPerMultiAssetPolicy: &p.RefInputsCostPerMultiAssetPolicy,
+		RefInputsCostPerMultiAssetByte:   &p.RefInputsCostPerMultiAssetByte,
 		RefInputsCostPerDatumByte:        &p.RefInputsCostPerDatumByte,
 	}
 	if genesis == nil {
@@ -322,7 +322,7 @@ func isEmptyDijkstraGenesis(genesis *gdijkstra.DijkstraGenesis) bool {
 		genesis.PerasTargetCommitteeSize != 0 ||
 		genesis.PerasBootstrapRound != nil ||
 		genesis.PerasQuorumThresholdSafetyMargin != nil ||
-		genesis.RefInputsCostPerMultiAssetPolicy != 0 ||
+		genesis.RefInputsCostPerMultiAssetByte != 0 ||
 		genesis.RefInputsCostPerDatumByte != 0 {
 		return false
 	}

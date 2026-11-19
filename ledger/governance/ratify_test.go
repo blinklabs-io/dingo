@@ -327,7 +327,7 @@ func TestShouldRatify_DijkstraParameterGroupsMatchPV12(
 			wantGroups:   drepParameterGroupEconomic,
 			wantSecurity: true,
 			update: gdijkstra.DijkstraProtocolParameterUpdate{
-				RefInputsCostPerMultiAssetPolicy: &refInputPolicyCost,
+				RefInputsCostPerMultiAssetByte: &refInputPolicyCost,
 			},
 		},
 		{

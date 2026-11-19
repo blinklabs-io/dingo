@@ -1495,7 +1495,7 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 				PerasBootstrapRound:              &perasBootstrapRound,
 				PerasBootstrapRoundSet:           true,
 				PerasQuorumThresholdSafetyMargin: perasSafetyMargin,
-				RefInputsCostPerMultiAssetPolicy: &refInputPolicyCost,
+				RefInputsCostPerMultiAssetByte:   &refInputPolicyCost,
 				RefInputsCostPerDatumByte:        &refInputDatumCost,
 			},
 			assert: func(t *testing.T, p *gdijkstra.DijkstraProtocolParameters) {
@@ -1512,7 +1512,7 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 				require.Equal(
 					t,
 					refInputPolicyCost,
-					p.RefInputsCostPerMultiAssetPolicy,
+					p.RefInputsCostPerMultiAssetByte,
 				)
 				require.Equal(t, refInputDatumCost, p.RefInputsCostPerDatumByte)
 			},
