@@ -118,6 +118,7 @@ type Node struct {
 	indexerStore           *indexerdb.Store
 	indexerWriter          IndexerWriter
 	indexerWakeSub         event.EventSubscriberId
+	indexerFactsSub        event.EventSubscriberId
 	afterIndexerRollback   func() error // test hook; see Truncate
 	ledgerState            *ledger.LedgerState
 	snapshotMgr            *snapshot.Manager

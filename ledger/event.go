@@ -33,7 +33,9 @@ const (
 	// round trip while EventBus backpressure stops further admission.
 	ChainsyncEventBufferSize = ochainsync.DefaultPipelineLimit
 
-	BlockfetchEventType event.EventType = "ledger.blockfetch"
+	// RewardFactsEventType reports a reward round whose output facts committed.
+	RewardFactsEventType event.EventType = "ledger.reward_facts"
+	BlockfetchEventType  event.EventType = "ledger.blockfetch"
 	// BlockEventType carries a BlockEvent for a block added to or removed from
 	// the primary chain. The ledger republishes it from the chain-update
 	// stream, so an Apply marks the block joining the chain, not the ledger
@@ -223,4 +225,10 @@ type ConnectionClosedEvent struct {
 type ConnectionRecycleRequestedEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	Reason       string
+}
+
+// RewardFactsEvent identifies completed reward outputs without advancing the tip.
+type RewardFactsEvent struct {
+	SnapshotEpoch uint64
+	CapturedSlot  uint64
 }

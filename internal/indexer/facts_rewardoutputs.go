@@ -149,6 +149,42 @@ func (f *MetadataFacts) saveCopiedRewardOutputs(
 	return f.dst.SetSyncState(copiedRewardOutputsKey(r.Epoch), string(raw), dst)
 }
 
+// RefreshFacts copies completed reward outputs even while the chain is idle.
+func (f *MetadataFacts) RefreshFacts(
+	ctx context.Context,
+	dst *database.Txn,
+	through uint64,
+) error {
+	if err := f.copyDeferredStakeInputs(ctx, dst); err != nil {
+		return err
+	}
+	rounds, err := f.finishedRewardRounds()
+	if err != nil {
+		return err
+	}
+	for _, r := range rounds {
+		if r.CapturedSlot > through {
+			continue
+		}
+		have, err := f.loadCopiedRewardOutputs(dst, r.Epoch)
+		if err != nil {
+			return err
+		}
+		if have == (copiedRewardOutputs{
+			Fingerprint: r.Fingerprint, CapturedSlot: r.CapturedSlot,
+		}) {
+			continue
+		}
+		if err := f.copyRewardRound(ctx, dst, r); err != nil {
+			return err
+		}
+		if err := f.saveCopiedRewardOutputs(dst, r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // copyLateRewardOutputs copies, by epoch, the outputs of each round the ledger
 // finished after the writer passed the slot they are dated at. rounds was read
 // before the slot range copy of [from, through].

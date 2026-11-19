@@ -561,3 +561,42 @@ func TestRunReportsRepeatedIdenticalFailures(t *testing.T) {
 		w.Wake()
 	}
 }
+
+func TestRunRetriesFailureWithoutAnotherWake(t *testing.T) {
+	t.Parallel()
+	for _, recoverPass := range []bool{true, false} {
+		t.Run(fmt.Sprintf("recover=%t", recoverPass), func(t *testing.T) {
+			t.Parallel()
+			store := newTestStore(t)
+			chain := newFakeChain(3, "retry")
+			idx := &syncRowIndexer{failOnNumber: map[uint64]bool{1: true}}
+			counts := make(chan int, 8)
+			w := NewWriter(store, chain, idx, nil, 10).
+				WithFailureReport(func(n int) {
+					if recoverPass && n == 1 {
+						idx.mu.Lock()
+						idx.failOnNumber = nil
+						idx.mu.Unlock()
+					}
+					counts <- n
+				})
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() { done <- w.Run(ctx) }()
+			t.Cleanup(cancel)
+			require.Equal(t, 1, testutil.RequireReceive(
+				t, counts, 5*time.Second, "failed pass",
+			))
+			if recoverPass {
+				require.Zero(t, testutil.RequireReceive(
+					t, counts, 5*time.Second, "automatic retry without a wake",
+				))
+				require.Len(t, rows(t, store), 3)
+			}
+			cancel()
+			require.ErrorIs(t, testutil.RequireReceive(
+				t, done, 5*time.Second, "writer cancellation",
+			), context.Canceled)
+		})
+	}
+}
