@@ -6150,6 +6150,20 @@ unapplied blocks, and selecting against that trailing state would miss the
 effects of those blocks, including the certified closures they apply. While the
 ledger tip is not the parent, the slot announces no endorser block
 (`dingo_metrics_leios_forge_eb_skipped_total{reason="ledger_not_at_parent"}`).
+For a local announcement without a certified closure, selection uses
+`LedgerState.WithPreparedLeiosSelection`: it decodes the exact wire transaction
+bytes, ticks to the leader slot, and stages full ordered ledger effects in a
+rollback-only transaction. Only admitted candidates enter that staged state.
+The resulting ephemeral receipt binds the ordered bytes, parent publication,
+slot, and block number. After constructing an empty ranking block, the forger
+carries this receipt to announcement validation. The validator still verifies
+manifest completeness and header binding; a matching receipt reuses the ledger
+verdict. Any publication, byte, slot, or header-context mismatch takes the full
+validation path. Certifying ranking blocks retain the existing selection and
+full validation path because their certified closure changes the state basis.
+No preparation writes become durable, and receipts are never accepted from
+network messages or restored from storage.
+
 An announcing slot carries the EB or ranking-block transactions, never both: the
 two are selected from the mempool separately, so carrying both could put one
 transaction in each set, and the EB would then fail closure validation against
