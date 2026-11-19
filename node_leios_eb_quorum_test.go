@@ -171,3 +171,32 @@ func TestLeiosPipelineAdapterRefusesEndorserBlockWithoutQuorum(t *testing.T) {
 	require.True(t, allowed)
 	require.Empty(t, reason)
 }
+
+func TestLeiosPipelineAdapterPreparesWithoutOpeningProduceWindow(t *testing.T) {
+	t.Parallel()
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Stop()
+	mgr, err := leios.NewPipelineManager(leios.PipelineManagerConfig{EventBus: bus, SlotProvider: occurrencePipelineClock{}, EpochProvider: occurrencePipelineClock{}, Timing: leios.DefaultPipelineTiming()})
+	require.NoError(t, err)
+	require.NoError(t, mgr.Start(t.Context()))
+	defer func() { require.NoError(t, mgr.Stop()) }()
+	refusal := ""
+	adapter := &leiosPipelineAdapter{mgr: mgr, endorserBlockQuorumRefusal: func(uint64) string { return refusal }}
+	allowed, reason, err := adapter.MayProduceEndorserBlock(102)
+	require.NoError(t, err)
+	require.False(t, allowed)
+	require.Contains(t, reason, "not yet open")
+	allowed, reason, err = adapter.MayPrepareEndorserBlock(102)
+	require.NoError(t, err)
+	require.True(t, allowed)
+	require.Empty(t, reason)
+	allowed, reason, err = adapter.MayProduceEndorserBlock(102)
+	require.NoError(t, err)
+	require.False(t, allowed)
+	require.Contains(t, reason, "not yet open")
+	refusal = leiosEBSkipQuorumNotPossible
+	allowed, reason, err = adapter.MayPrepareEndorserBlock(102)
+	require.NoError(t, err)
+	require.False(t, allowed)
+	require.Equal(t, refusal, reason)
+}

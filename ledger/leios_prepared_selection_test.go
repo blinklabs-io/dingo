@@ -19,11 +19,13 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -223,8 +225,41 @@ func TestPreparedLeiosReceiptRejectsNewPublicationAndCancellation(
 		true,
 	)
 	txs := [][]byte{f.ebTxs[0]}
+	prepared := receipt.(forging.LeiosPreparationReceipt)
+	require.True(
+		t,
+		prepared.StillValidForParent(
+			t.Context(),
+			f.originHash,
+			leiosCertApplyAnnouncingSlot,
+		),
+	)
+	require.False(
+		t,
+		prepared.StillValidForParent(
+			t.Context(),
+			[]byte{1},
+			leiosCertApplyAnnouncingSlot,
+		),
+	)
+	require.False(
+		t,
+		prepared.StillValidForParent(
+			t.Context(),
+			f.originHash,
+			leiosCertApplyAnnouncingSlot+1,
+		),
+	)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
+	require.False(
+		t,
+		prepared.StillValidForParent(
+			ctx,
+			f.originHash,
+			leiosCertApplyAnnouncingSlot,
+		),
+	)
 	require.False(
 		t,
 		receipt.MatchesLeiosAnnouncement(
@@ -235,6 +270,14 @@ func TestPreparedLeiosReceiptRejectsNewPublicationAndCancellation(
 		),
 	)
 	f.ls.publishSnapshotsLocked()
+	require.False(
+		t,
+		prepared.StillValidForParent(
+			t.Context(),
+			f.originHash,
+			leiosCertApplyAnnouncingSlot,
+		),
+	)
 	require.False(
 		t,
 		receipt.MatchesLeiosAnnouncement(
@@ -421,4 +464,284 @@ func BenchmarkLeiosSelectionReceipt(b *testing.B) {
 			}
 		})
 	}
+}
+
+func TestParallelLeiosSelectionAdmitsOnlyTheValidatedToken(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	valid := bytes.Clone(f.ebTxs[0])
+	f.corruptEndorserWitness()
+	receipt, err := f.ls.WithParallelLeiosSelection(
+		t.Context(),
+		f.originHash,
+		leiosCertApplyAnnouncingSlot,
+		func(
+			prepare func([]byte) (forging.PreparedLeiosTransaction, error),
+			validate func(forging.PreparedLeiosTransaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) (lcommon.Transaction, error),
+			_ forging.TxRefScriptSizeFunc,
+			admit func(forging.PreparedLeiosTransaction) error,
+			_ func() bool,
+		) error {
+			original, err := prepare(valid)
+			if err != nil {
+				return err
+			}
+			other, err := prepare(f.ebTxs[0])
+			if err != nil {
+				return err
+			}
+			_, err = validate(
+				original,
+				map[utxoref.Key]struct{}{},
+				map[utxoref.Key]lcommon.Utxo{},
+			)
+			if err != nil {
+				return err
+			}
+			require.ErrorContains(t, admit(other), "does not match")
+			return nil
+		},
+	)
+	require.ErrorContains(t, err, "does not match")
+	require.Nil(t, receipt)
+	f.requireEndorserEffects(false)
+}
+
+func TestParallelLeiosPreparationOwnsWireBytes(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	raw := bytes.Clone(f.ebTxs[0])
+	token, err := prepareLeiosSelectionTransaction(raw)
+	require.NoError(t, err)
+	original := bytes.Clone(token.BlockTransactionCbor())
+	raw[len(raw)-1] ^= 1
+	require.Equal(t, original, token.BlockTransactionCbor())
+}
+
+func TestParallelLeiosSelectionDoesNotApplyAnUnadmittedCandidate(t *testing.T) {
+	t.Parallel()
+	account := pathKeyAccount(0x42)
+	f := newLeiosCertApplyFixtureWithTransactions(
+		t,
+		[]pathAccount{{key: 0x42, reward: 5}},
+		0x42,
+		[]pathTx{
+			{
+				top: pathLevel{
+					fields: pathDeposits(
+						map[cbor.ByteString]uint64{account: 20},
+					),
+					funds: 20,
+				},
+			},
+			{top: pathLevel{fields: pathExact(account, 5, 26)}},
+		},
+	)
+	receipt, err := f.ls.WithParallelLeiosSelection(
+		t.Context(),
+		f.originHash,
+		leiosCertApplyAnnouncingSlot,
+		func(
+			prepare func([]byte) (forging.PreparedLeiosTransaction, error),
+			validate func(forging.PreparedLeiosTransaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) (lcommon.Transaction, error),
+			_ forging.TxRefScriptSizeFunc,
+			admit func(forging.PreparedLeiosTransaction) error,
+			_ func() bool,
+		) error {
+			consumed := map[utxoref.Key]struct{}{}
+			created := map[utxoref.Key]lcommon.Utxo{}
+			first, err := prepare(f.ebTxs[0])
+			if err != nil {
+				return err
+			}
+			if _, err := validate(first, consumed, created); err != nil {
+				return err
+			}
+			second, err := prepare(f.ebTxs[1])
+			if err != nil {
+				return err
+			}
+			if _, err := validate(second, consumed, created); err != nil {
+				return err
+			}
+			return admit(second)
+		},
+	)
+	require.NoError(t, err)
+	block, _ := f.block(
+		1,
+		leiosCertApplyAnnouncingSlot,
+		f.originHash,
+		false,
+		true,
+	)
+	require.True(
+		t,
+		receipt.MatchesLeiosAnnouncement(
+			t.Context(),
+			block.Header(),
+			f.originHash,
+			[][]byte{f.ebTxs[1]},
+		),
+	)
+	require.NoError(
+		t,
+		f.ls.ValidateLeiosEndorserBlockTransactions(
+			t.Context(),
+			block.Header(),
+			f.originHash,
+			[][]byte{f.ebTxs[1]},
+		),
+	)
+	f.requireEndorserEffects(false)
+}
+
+func TestParallelLeiosSelectionValidatesThePreparedObject(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	era := eras.DijkstraEraDesc
+	original := era.ValidateTxFunc
+	var validated lcommon.Transaction
+	era.ValidateTxFunc = func(tx lcommon.Transaction, slot uint64, state lcommon.LedgerState, pp lcommon.ProtocolParameters) error {
+		validated = tx
+		return original(tx, slot, state, pp)
+	}
+	f.ls.currentEra = era
+	f.ls.activeEras = []eras.EraDesc{era}
+	f.ls.publishSnapshotsLocked()
+	receipt, err := f.ls.WithParallelLeiosSelection(
+		t.Context(),
+		f.originHash,
+		leiosCertApplyAnnouncingSlot,
+		func(
+			prepare func([]byte) (forging.PreparedLeiosTransaction, error),
+			validate func(forging.PreparedLeiosTransaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) (lcommon.Transaction, error),
+			_ forging.TxRefScriptSizeFunc,
+			admit func(forging.PreparedLeiosTransaction) error,
+			_ func() bool,
+		) error {
+			token, err := prepare(f.ebTxs[0])
+			if err != nil {
+				return err
+			}
+			prepared := token.Transaction()
+			selected, err := validate(
+				token,
+				map[utxoref.Key]struct{}{},
+				map[utxoref.Key]lcommon.Utxo{},
+			)
+			if err != nil {
+				return err
+			}
+			require.Same(t, prepared, validated)
+			require.Same(t, prepared, selected)
+			return admit(token)
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, receipt)
+	f.requireEndorserEffects(false)
+}
+
+func TestParallelLeiosSelectionYieldsWriterToLedgerTransition(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	entered := make(chan struct{})
+	finished := make(chan struct{})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	t.Cleanup(
+		func() { cancel(); testutil.RequireReceive(t, finished, 5*time.Second, "selection cleanup") },
+	)
+	era := eras.DijkstraEraDesc
+	era.ValidateTxFunc = func(_ lcommon.Transaction, _ uint64, state lcommon.LedgerState, _ lcommon.ProtocolParameters) error {
+		evaluation := state.(interface{ EvaluationContext() context.Context }).EvaluationContext()
+		close(entered)
+		<-evaluation.Done()
+		return evaluation.Err()
+	}
+	f.ls.currentEra = era
+	f.ls.activeEras = []eras.EraDesc{era}
+	f.ls.publishSnapshotsLocked()
+	type result struct {
+		receipt forging.LeiosValidationReceipt
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		defer close(finished)
+		receipt, err := f.ls.WithParallelLeiosSelection(
+			ctx,
+			f.originHash,
+			leiosCertApplyAnnouncingSlot,
+			func(
+				prepare func([]byte) (forging.PreparedLeiosTransaction, error),
+				validate func(forging.PreparedLeiosTransaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) (lcommon.Transaction, error),
+				_ forging.TxRefScriptSizeFunc,
+				_ func(forging.PreparedLeiosTransaction) error,
+				_ func() bool,
+			) error {
+				token, err := prepare(f.ebTxs[0])
+				if err != nil {
+					return err
+				}
+				_, err = validate(
+					token,
+					map[utxoref.Key]struct{}{},
+					map[utxoref.Key]lcommon.Utxo{},
+				)
+				return err
+			},
+		)
+		done <- result{receipt: receipt, err: err}
+	}()
+	testutil.RequireReceive(t, entered, 5*time.Second, "validation owns writer")
+	finish := f.ls.beginTxValidationTransition()
+	defer finish()
+	outcome := testutil.RequireReceive(
+		t,
+		done,
+		5*time.Second,
+		"transition preempts validation",
+	)
+	require.ErrorIs(t, outcome.err, forging.ErrTxValidationParentMismatch)
+	require.ErrorIs(t, outcome.err, ErrLeiosValidationParentSuperseded)
+	require.Nil(t, outcome.receipt)
+	f.ls.leiosSelectionMu.Lock()
+	registrations := len(f.ls.leiosSelections)
+	f.ls.leiosSelectionMu.Unlock()
+	require.Zero(t, registrations)
+	f.requireEndorserEffects(false)
+}
+
+func TestParallelLeiosPreparationPreservesIndefiniteWireBytes(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	raw := append([]byte{0x9f}, f.ebTxs[0][1:]...)
+	raw = append(raw, 0xff)
+	token, err := prepareLeiosSelectionTransaction(raw)
+	require.NoError(t, err)
+	require.Equal(t, raw, token.BlockTransactionCbor())
+}
+
+func TestPreparedLeiosSelectionDoesNotQueueBehindLedgerTransition(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	finish := f.ls.beginTxValidationTransition()
+	defer finish()
+	opened := false
+	called := false
+	f.ls.txValidationSessionOpenedHook = func() { opened = true }
+	receipt, err := f.ls.WithPreparedLeiosSelection(t.Context(), f.originHash, leiosCertApplyAnnouncingSlot, func(
+		_ func([]byte, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) (lcommon.Transaction, error),
+		_ forging.TxRefScriptSizeFunc,
+		_ func([]byte) error,
+		_ func() bool,
+	) error {
+		called = true
+		return nil
+	})
+	require.ErrorIs(t, err, forging.ErrTxValidationParentMismatch)
+	require.Nil(t, receipt)
+	require.False(t, opened, "speculation must not queue for the writer during a ledger transition")
+	require.False(t, called)
 }

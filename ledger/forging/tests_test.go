@@ -3308,6 +3308,7 @@ func TestForgeMarksTheReResolvedEndorserBlockSlot(t *testing.T) {
 // instant, so tests can put the forge either comfortably inside its slot or
 // past the end of it without sleeping.
 type retryTestSlotClock struct {
+	slotLength          time.Duration
 	currentSlot         uint64
 	chainTipSlot        uint64
 	chainTipHash        []byte
@@ -3357,6 +3358,15 @@ func (c *retryTestSlotClock) PrimaryChainTip() ocommon.Point {
 		return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}
 	}
 	return c.ChainTip()
+}
+
+func (c *retryTestSlotClock) SlotToTime(slot uint64) (time.Time, error) {
+	length := c.slotLength
+	if length == 0 {
+		length = time.Second
+	}
+	delta := int64(slot) - int64(c.currentSlot) - 1
+	return c.slotEnd.Add(time.Duration(delta) * length), nil
 }
 
 func (c *retryTestSlotClock) NextSlotTime() (time.Time, error) {
