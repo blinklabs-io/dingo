@@ -79,6 +79,7 @@ Programmatic composition can supply `WithAPIListenerFactory` to transfer already
 bound sockets to the built-in Blockfrost, Kupo, Mesh and UTxO RPC servers. The
 factory receives the configured network and address on each start; a successful
 return transfers socket ownership to the server's normal shutdown lifecycle.
+Live restore and truncate retain this factory when recreating API providers.
 The caller closes reservations that startup never consumes. With no factory,
 the servers acquire sockets through `net.Listen`. The API parity fixture keeps
 its ephemeral sockets bound until this handoff, so concurrent listeners cannot

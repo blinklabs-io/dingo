@@ -1167,6 +1167,7 @@ func (n *Node) reinitializeAPIServers() error {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIUtxorpc,
 			utxorpcSelection.Provider, utxorpcSelection.Config,
 			utxorpc.ProviderDependencies{
+				Listen: n.config.apiListenerFactory,
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
 				QueryDatabase:      n.utxorpcQueryDatabase(),
@@ -1215,7 +1216,8 @@ func (n *Node) reinitializeAPIServers() error {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
 			blockfrostSelection.Provider, blockfrostSelection.Config,
 			blockfrost.ProviderDependencies{
-				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				Listen: n.config.apiListenerFactory,
+				Node:   adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 				Ready:              n.apiReadiness(),
 			},
@@ -1241,7 +1243,8 @@ func (n *Node) reinitializeAPIServers() error {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIKupo,
 			kupoSelection.Provider, kupoSelection.Config,
 			kupo.ProviderDependencies{
-				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				Listen: n.config.apiListenerFactory,
+				Node:   adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 				Ready:              n.apiReadiness(),
 			},
@@ -1272,6 +1275,7 @@ func (n *Node) reinitializeAPIServers() error {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIMesh,
 			meshSelection.Provider, meshSelection.Config,
 			mesh.ProviderDependencies{
+				Listen:             n.config.apiListenerFactory,
 				Logger:             n.config.logger,
 				LedgerState:        n.meshLedgerState(),
 				Database:           n.meshDatabase(),
