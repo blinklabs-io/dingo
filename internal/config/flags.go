@@ -591,12 +591,12 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"BarkEventMaxSubscribers",
 		"bark-event-max-subscribers",
-		"most concurrent Bark EventService streams (0 = default)",
+		"most concurrent Bark EventService streams (0 = unlimited)",
 	),
 	intFlag(
 		"BarkEventMaxSubscribersPerClient",
 		"bark-event-max-subscribers-per-client",
-		"most concurrent Bark EventService streams per caller address (0 = default)",
+		"most concurrent Bark EventService streams per caller address (0 = unlimited)",
 	),
 	stringSliceFlag(
 		"BarkLifecycleOperatorCertificateFingerprints",
