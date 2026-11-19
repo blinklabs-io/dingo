@@ -78,6 +78,9 @@ type Utxorpc struct {
 }
 
 type UtxorpcConfig struct {
+	// Listen acquires the listening socket. Nil uses net.Listen.
+	// Successful calls transfer ownership to the server.
+	Listen      func(string, string) (net.Listener, error)
 	Logger      *slog.Logger
 	EventBus    UtxorpcEventBus
 	LedgerState UtxorpcLedgerState
@@ -228,8 +231,8 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 			cfg.MaxReplayBlocksPerClient,
 			cfg.ReplayBudgetWindow,
 		),
-		listener: apilistener.New(
-			"utxorpc gRPC", cfg.Logger,
+		listener: apilistener.NewWithListenerFactory(
+			"utxorpc gRPC", cfg.Logger, cfg.Listen,
 		),
 	}
 }

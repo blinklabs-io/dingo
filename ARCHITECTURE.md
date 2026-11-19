@@ -75,6 +75,16 @@ that effective configuration early; each provider also resolves it during
 construction. TLS remains optional. See External Interfaces for precedence
 and shared bind settings.
 
+Programmatic composition can supply `WithAPIListenerFactory` to transfer already
+bound sockets to the built-in Blockfrost, Kupo, Mesh and UTxO RPC servers. The
+factory receives the configured network and address on each start; a successful
+return transfers socket ownership to the server's normal shutdown lifecycle.
+Live restore and truncate retain this factory when recreating API providers.
+The caller closes reservations that startup never consumes. With no factory,
+the servers acquire sockets through `net.Listen`. The API parity fixture keeps
+its ephemeral sockets bound until this handoff, so concurrent listeners cannot
+claim their ports between allocation and server startup.
+
 Command and bootstrap composition that opens a standalone database uses
 `internal/plugins.OpenDatabase`. Its return contract keeps ownership
 unambiguous: a non-nil error never accompanies a live runtime, while a
@@ -3896,8 +3906,12 @@ opens the second metadata store, in API mode, as a `database.Database` over
 the ledger database's blob store (`blob.NewIndexerStore`: blocks read-only,
 UTxO and transaction offsets under their own key prefix, no commit timestamp),
 after the ledger database is recovered and before the ledger starts. The writer
-starts after the ledger, is woken by `ledger.tip`, and stops before the
-IndexerDB closes, which precedes the ledger database closing the blob store.
+starts after the ledger, wakes when `ledger.tip` or `ledger.reward_facts`
+fires, and stops before the IndexerDB closes, which precedes the ledger
+database closing the blob store.
+Failed passes retry with exponential backoff from one to thirty seconds,
+without requiring another ledger event. Wakes interrupt the retry delay and
+successful passes return to waiting for events.
 The root package cannot import `internal/node`, so the writer is injected with
 `WithIndexerWriterFactory`. The API readers sit over the IndexerDB on a split node: the Blockfrost and
 Kupo adapters resolve their database through one `db()` accessor (the
@@ -13854,8 +13868,16 @@ reference scripts through the validation session's overlay
 transactions count, and refuses to select when the validator cannot measure
 them. The aggregate bounds are applied during selection only, since manifest
 construction receives the selected prefix; the size bounds limit both selection
-and manifest construction. Selection stops at the first valid transaction that
-no longer fits instead of validating the rest of a deep mempool. The size bounds
+and manifest construction. Selection prepares transaction CBOR and decodes independent candidates in
+windows of at most 64, using at most eight workers and no more than GOMAXPROCS.
+Each window joins before its decoded transactions reach validation. Preparation
+never accesses the ledger transaction or mutable overlays. The reducer consumes
+results in mempool order and alone performs semantic validation, reference-script
+resolution, capacity admission, and overlay updates. Preparation checks the deadline before claiming each candidate, joins in-flight
+workers on expiry, and discards the unfinished window. Selection also rechecks
+the deadline and ledger publication after preparation. Selection stops at the first valid
+transaction that no longer fits; only the current preparation window can run
+ahead of that boundary. The size bounds
 are not optional: the reference node never fetches the closure of an endorser
 block over `maxEndorserBlockTxsSize` (`ExnLeiosClosureTooBig`), so no honest
 committee member votes for it, and a header announcing a manifest over

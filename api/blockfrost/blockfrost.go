@@ -77,7 +77,11 @@ func New(
 			cfg.MaxConcurrentPoolLists,
 			cfg.MaxConcurrentPoolListsPerClient,
 		),
-		listener: apilistener.New("Blockfrost API", logger),
+		listener: apilistener.NewWithListenerFactory(
+			"Blockfrost API",
+			logger,
+			cfg.Listen,
+		),
 	}
 }
 

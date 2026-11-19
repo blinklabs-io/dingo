@@ -723,7 +723,7 @@ func (w *Writer) replay(ctx context.Context, anchor indexerdb.Tip) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		done, err := w.step(ctx, &anchor)
+		done, err := w.step(ctx, &anchor, false)
 		if errors.Is(err, errForked) {
 			continue
 		}
