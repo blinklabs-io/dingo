@@ -4813,7 +4813,9 @@ func selectValidLeiosTransactions(ctx context.Context,
 			consumed := basis.closure.consumedOverlay()
 			created := make(map[utxoref.Key]lcommon.Utxo)
 			accounts := utxoref.NewStateOverlay()
-			for _, mempoolTx := range txs {
+			preparation := newLeiosCandidatePreparation(txs, 0)
+			preparation.expired = limits.expired
+			for range txs {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -4835,26 +4837,28 @@ func selectValidLeiosTransactions(ctx context.Context,
 					truncated = true
 					break
 				}
-				// The EB wire reference is the transaction's only representation
-				// in this slot. Do not expose outputs from a transaction that the
-				// manifest builder will later drop as unrepresentable.
-				if !validLeiosTransactionReference(mempoolTx) {
+				candidate, err := preparation.next(ctx)
+				if errors.Is(err, errLeiosPreparationExpired) {
+					truncated = true
+					break
+				}
+				if err != nil {
+					return err
+				}
+				if !stillCurrent() {
+					return errTxValidationSnapshotChanged
+				}
+				if limits.expired() {
+					truncated = true
+					break
+				}
+				mempoolTx := candidate.mempool
+				if candidate.err != nil ||
+					basis.closure.applies(mempoolTx.Hash) {
 					continue
 				}
-				if basis.closure.applies(mempoolTx.Hash) {
-					continue
-				}
-				// The manifest references the block_transaction bytes,
-				// so those are what the capacity is measured in, and a
-				// transaction that cannot take that form is never
-				// referenced.
-				blockTx, err := leiosBlockTransactionCbor(mempoolTx.Cbor)
-				if err != nil || !validLeiosTransactionSize(len(blockTx)) {
-					continue
-				}
-				tx, err := decodeMempoolTx(mempoolTx)
-				if err != nil ||
-					validate(tx, consumed, created, accounts) != nil {
+				tx, blockTx := candidate.tx, candidate.blockTx
+				if validate(tx, consumed, created, accounts) != nil {
 					continue
 				}
 				measure, err := leiosEBTxMeasure(
