@@ -1414,6 +1414,8 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		)
 	case *olocalstatequery.ShelleyGetProposalsQuery:
 		return ls.queryShelleyGetProposals(ctx, q.ActionIds.Items(), at, txn)
+	case *olocalstatequery.ShelleyGovStateQuery:
+		return ls.queryShelleyGovState(ctx, at, txn)
 	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		return ls.queryShelleyDebugChainDepState(ctx, at, txn)
 	case *olocalstatequery.ShelleyPoolDistr2Query:

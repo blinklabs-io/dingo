@@ -20765,6 +20765,22 @@ activity has no recorded expiry: a DRep whose certificate state at that point
 is still its current one (or that was imported at slot 0) reports its current
 expiry, and any other reports 0 (unset). Rollback applies the same rule.
 
+`GetGovState` (`queryShelleyGovState`) answers at the tip only; a pinned point
+is refused with `ErrHistoricalStateUnavailable`. The proposals come from
+`queryShelleyGetProposals`, the roots from the latest enacted proposal of each
+purpose, the committee from the enacted members with the enacted quorum or
+the Conway genesis threshold (none after a NoConfidence), the constitution from `GetConstitution`, and the protocol
+parameters from the current epoch and the epoch before it, falling back to the
+current ones when that epoch has no stored row. FuturePParams is always "no
+update". The DRep pulsing state is rebuilt from live tables, because the
+reference node's value is frozen at the boundary that opened the epoch and
+Dingo stores no such snapshot: the DRep distribution (registered DReps and the
+two predefined options that hold stake, without proposal deposits or the delegator-inactivity
+gate) and the pool distribution can differ from the node's once stake moves
+within an epoch, and the ratify state carries the current enact state with a
+zero treasury, as the reference node reports, and no enacted or expired
+actions and no delay.
+
 `DebugChainDepState` (`queryShelleyDebugChainDepState`) describes the
 acquired block instead of the tip: its slot as the last slot, the epoch rows
 of the epoch containing it (era, epoch, previous-epoch and last-epoch-block
