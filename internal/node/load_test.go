@@ -1547,8 +1547,8 @@ func TestRunPlannerStats_Idempotent(t *testing.T) {
 
 	db := newFileTestDB(t)
 
-	require.NoError(t, RunPlannerStats(db, slog.Default()))
-	require.NoError(t, RunPlannerStats(db, slog.Default()))
+	require.NoError(t, RunPlannerStats(t.Context(), db, slog.Default()))
+	require.NoError(t, RunPlannerStats(t.Context(), db, slog.Default()))
 
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -1566,7 +1566,7 @@ func TestRunPlannerStats_ReturnsErrorWhenUpdaterFails(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, closeTestDB(db))
 
-	err := RunPlannerStats(db, slog.Default())
+	err := RunPlannerStats(t.Context(), db, slog.Default())
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "planner statistics maintenance")
 }

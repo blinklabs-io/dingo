@@ -2029,7 +2029,7 @@ func Sync(
 			"backfilling historical metadata for API mode",
 			"component", "mithril",
 		)
-		if err := node.RunPlannerStats(db, logger); err != nil {
+		if err := node.RunPlannerStats(ctx, db, logger); err != nil {
 			return SyncResult{}, fmt.Errorf(
 				"running planner statistics before backfill: %w",
 				err,
