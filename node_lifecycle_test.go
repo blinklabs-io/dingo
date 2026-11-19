@@ -40,6 +40,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -2729,4 +2730,64 @@ func loadLiveUtxoSetFamiliesAtOrigin(
 	require.NoError(t, err)
 	require.NoError(t, set.Reconcile(t.Context(), dbadapter.New(db), nil))
 	require.NoError(t, set.Close())
+}
+
+func TestReinitializeAPIServersPreservesListenerFactory(t *testing.T) {
+	t.Parallel()
+	n, _ := newLiveLifecycleTestNodeWithStorageMode(
+		t,
+		1,
+		nil,
+		disabledLiveLifecycleTestWorkerPoolCfg,
+		StorageModeCore,
+	)
+	WithStorageMode(StorageModeAPI)(&n.config)
+	n.config.syncCompatFields()
+	indexer, err := dbtest.NewDatabase(t, &database.Config{})
+	require.NoError(t, err)
+	store, err := indexerdb.NewStore(indexer, indexer, 10)
+	require.NoError(t, err)
+	n.indexerDB = indexer
+	n.indexerStore = store
+	n.mempool = n.ouroborosConfig.Mempool
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reserved.Close()) })
+	port := reserved.Addr().(*net.TCPAddr).Port
+	for _, capability := range []plugin.Capability{
+		plugin.CapabilityAPIUtxorpc,
+		plugin.CapabilityAPIBlockfrost,
+		plugin.CapabilityAPIKupo,
+		plugin.CapabilityAPIMesh,
+	} {
+		t.Run(string(capability), func(t *testing.T) {
+			WithPluginSelection(capability, plugin.Selection{
+				Provider: "builtin", Config: map[string]any{"port": uint(port)},
+			})(&n.config)
+			t.Cleanup(func() {
+				WithPluginSelection(capability, plugin.Selection{
+					Provider: "builtin", Config: map[string]any{"port": uint(0)},
+				})(&n.config)
+				n.config.syncCompatFields()
+			})
+			n.config.syncCompatFields()
+			n.config.bindAddr = "127.0.0.1"
+			_, selectedPort, err := n.apiPluginSelection(capability)
+			require.NoError(t, err)
+			require.Equal(t, uint(port), selectedPort)
+			sentinel := errors.New(
+				"listener factory invoked during API recreation",
+			)
+			var calls int
+			n.config.apiListenerFactory = func(network, address string) (net.Listener, error) {
+				calls++
+				require.Equal(t, "tcp", network)
+				require.Equal(t, reserved.Addr().String(), address)
+				return nil, sentinel
+			}
+			err = n.reinitializeAPIServers()
+			require.ErrorIs(t, err, sentinel)
+			require.Equal(t, 1, calls)
+		})
+	}
 }

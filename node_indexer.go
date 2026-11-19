@@ -216,8 +216,8 @@ func (n *Node) rollbackIndexerForTruncate(
 	return nil
 }
 
-// startIndexerWriter starts the writer and wakes it on every ledger.tip
-// event. It runs after the ledger started so the writer sees the tip the
+// startIndexerWriter starts the writer and wakes it on ledger tip and reward
+// fact events. It runs after the ledger started so the writer sees the tip the
 // ledger recovered to.
 func (n *Node) startIndexerWriter(ctx context.Context) error {
 	if n.indexerWriter == nil {
@@ -231,6 +231,10 @@ func (n *Node) startIndexerWriter(ctx context.Context) error {
 	writer := n.indexerWriter
 	n.indexerWakeSub = n.eventBus.SubscribeFunc(
 		ledger.TipEventType,
+		func(event.Event) { writer.Wake() },
+	)
+	n.indexerFactsSub = n.eventBus.SubscribeFunc(
+		ledger.RewardFactsEventType,
 		func(event.Event) { writer.Wake() },
 	)
 	writer.Wake()
@@ -247,6 +251,10 @@ func (n *Node) stopIndexerWriter(ctx context.Context) error {
 	if n.indexerWakeSub != 0 {
 		n.eventBus.Unsubscribe(ledger.TipEventType, n.indexerWakeSub)
 		n.indexerWakeSub = 0
+	}
+	if n.indexerFactsSub != 0 {
+		n.eventBus.Unsubscribe(ledger.RewardFactsEventType, n.indexerFactsSub)
+		n.indexerFactsSub = 0
 	}
 	var err error
 	if stopErr := n.indexerWriter.Stop(ctx); stopErr != nil {

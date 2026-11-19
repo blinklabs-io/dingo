@@ -992,6 +992,11 @@ func (ls *LedgerState) finishStakeRewardPrecomputeLocked(
 	if err := saveRewardPrecomputeCursor(meta, metaTxn, cursor); err != nil {
 		return err
 	}
+	ls.rewardFactsAfterCommit(
+		metaTxn,
+		round.epochs.snapshot,
+		round.capturedSlot,
+	)
 	ls.config.Logger.Info(
 		"precomputed stake rewards",
 		"component", "ledger",

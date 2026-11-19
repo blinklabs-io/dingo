@@ -44,6 +44,8 @@ func providerDefaults() ProviderConfig {
 }
 
 type ProviderDependencies struct {
+	// Listen transfers a socket to the server. Nil uses net.Listen.
+	Listen      func(string, string) (net.Listener, error)
 	Logger      *slog.Logger
 	LedgerState MeshLedgerState
 	Database    MeshDatabase
@@ -74,6 +76,7 @@ func RegisterProvider(host *plugin.Host) error {
 				return nil, nil, fmt.Errorf("mesh: %w", err)
 			}
 			server, err := NewServer(ServerConfig{
+				Listen: deps.Listen,
 				Logger: deps.Logger, LedgerState: deps.LedgerState,
 				Database: deps.Database, Chain: deps.Chain, Mempool: deps.Mempool,
 				Ready: deps.Ready,
