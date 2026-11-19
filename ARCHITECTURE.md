@@ -21770,13 +21770,19 @@ all of which derive from `Network`, and it works at all only because
 `settingsresolve` is its own package, not part of `internal/config`,
 specifically so that `internal/config` — imported by roughly half the tree —
 does not have to depend on the plugin host and storage plugins that opening a
-metadata store requires. It opens only the metadata store
+metadata store requires. It opens metadata stores only
 (`plugin.Resolve[metadata.MetadataStore]` directly, never
-`internal/plugins.ResolveStorage`, which also resolves the blob store) at
-`DatabasePath`, reads the legacy `node_settings` row and `node_settings_gate`,
-and closes the store and stops its plugin host on every path, including every
-error path, before returning — leaving either open would block the real
-`database.New` that follows moments later. Before opening anything, it reads the
+`internal/plugins.ResolveStorage`, which also resolves the blob store), reads
+the legacy `node_settings` row and `node_settings_gate`, and closes each store
+and stops its plugin host on every path, including every error path, before
+returning — leaving either open would block the real
+`database.New` that follows moments later. It first reads the configured metadata
+store, using `DatabasePath` for SQLite. For a split PostgreSQL or MySQL node,
+that store is the IndexerDB, so it also reads the consensus namespace in core
+storage mode. If the consensus namespace has a persisted network, its settings
+take precedence;
+otherwise the IndexerDB settings remain the source until adoption has copied
+them into the consensus namespace. Before opening a provider, it reads the
 `dbinfo` sidecar (`database/dbinfo`, a small JSON file named `dingo.dbinfo`
 recording only the metadata plugin that created the database) and refuses to
 proceed if it names a different plugin than the one configured: resolving a
@@ -21791,11 +21797,16 @@ reopen with) and never overwrites a sidecar that is already present.
 `evaluateAndPersistGates` calls it on every open, not only one that writes a
 gate to `node_settings_gate` — a steady-state start with nothing new to persist
 still restores a sidecar an operator deleted, rather than leaving this pre-open
-check silently disabled from then on. A database directory that does not exist,
-or one this process cannot open for any reason, makes `settingsresolve.Apply` a
-silent no-op — a corrupt or in-use database is `database.New`'s problem to
-report properly, and failing here would only mask its better error behind a
-worse one.
+check silently disabled from then on. Before provider resolution can migrate a
+SQLite store, `Apply` opens its existing metadata file read-only and checks for
+an interrupted v0.94.2 API-history backfill. A persisted backfill status is fatal
+unless the store's persisted storage mode is core; startup leaves the database
+untouched. Provider resolution also propagates `metadata.ErrInterruptedBackfill`
+instead of treating it as an unavailable store. Missing or inaccessible
+directories and ordinary store-open or read failures leave settings unresolved
+so `database.New` can report the storage error. These no-op paths do not suppress
+sidecar validation errors, interrupted-backfill refusals, or persisted gate
+conflicts.
 
 A sidecar write failure is fatal while the `metadata_plugin` gate is not
 yet persisted: a database in that state has no `metadata_plugin` gate row
