@@ -206,13 +206,14 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 	}
 	if detachedPoint != nil {
 		at = *detachedPoint
+		txn = nil
 		// The point could be rolled back while the query waited for
 		// admission; the paged path re-checks it for the same reason.
 		if err := ls.VerifyPointQueryable(ctx, nil, at); err != nil {
 			return nil, err
 		}
 	}
-	if txn == nil {
+	if txn == nil && !ls.config.UtxoSetOnly {
 		txn = ls.ledgerDB().Begin(ctx, false)
 		defer txn.Release()
 	}

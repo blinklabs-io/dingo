@@ -569,6 +569,24 @@ func (ls *LedgerState) utxoSetBatchesSeenBy(
 	pin *utxoSetPin,
 	own *utxoSetBatch,
 ) []*utxoSetBatch {
+	return ls.utxoSetBatchesObserved(pin, own, func(txn ledgerdb.Txn) bool {
+		return txn.IsCommitted()
+	})
+}
+
+// The database snapshot anchor holds the commit-phase barrier. Waiting for a
+// transaction mutex here would deadlock a writer waiting to enter that phase.
+func (ls *LedgerState) utxoSetBatchesAtCommitAnchor() []*utxoSetBatch {
+	return ls.utxoSetBatchesObserved(nil, nil, func(txn ledgerdb.Txn) bool {
+		return dbadapter.Unwrap(txn).CommitPublished()
+	})
+}
+
+func (ls *LedgerState) utxoSetBatchesObserved(
+	pin *utxoSetPin,
+	own *utxoSetBatch,
+	committed func(ledgerdb.Txn) bool,
+) []*utxoSetBatch {
 	if pin != nil {
 		return slices.Clone(pin.batches)
 	}
@@ -584,7 +602,7 @@ func (ls *LedgerState) utxoSetBatchesSeenBy(
 	// the transactions.
 	seen := make([]*utxoSetBatch, 0, len(others)+1)
 	for _, b := range others {
-		if b.txn.IsCommitted() {
+		if committed(b.txn) {
 			seen = append(seen, b)
 		}
 	}

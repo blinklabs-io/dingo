@@ -1140,6 +1140,15 @@ Use the Go APIs when code runs inside Dingo:
   inside the caller's deadline, so the set's journal also contains them.
   An additional-store snapshot failure releases the
   database snapshot and rejects acquisition.
+  `Txn.IsCommitted()` waits for an in-progress commit to publish its result;
+  only the coordinated snapshot anchor uses the non-blocking
+  `Txn.CommitPublished()` observation under the commit-phase barrier.
+  A contended live-set snapshot lock drops the database snapshot and retries
+  within the acquisition deadline, and a provider panic releases that lock
+  while unwinding. Set-only query views require snapshot and historical-read
+  capabilities before acquisition
+  succeeds. A historical child releases its parent borrow on construction
+  errors and panics as well as on close.
 - `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the
   compatibility composition of the SQL-facing capabilities. New components
   should accept the narrowest one they use rather than the composition.

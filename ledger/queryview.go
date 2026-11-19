@@ -188,7 +188,7 @@ func (ls *LedgerState) openQueryViewSnapshot(
 	stopWatch := context.AfterFunc(ctx, cancelView)
 	txn, _, err := database.NewReadSnapshotWithAnchorContext(
 		viewCtx, ls.db, func(txn *database.Txn) error {
-			return ls.pinSetReadsResult(txn)
+			return ls.pinSetReadsResult(txn, true)
 		},
 	)
 	if !stopWatch() {

@@ -625,7 +625,7 @@ func TestReadSnapshotAnchorBlocksAConcurrentCommit(t *testing.T) {
 				return true
 			}, 5*time.Second, "writer reached the paused commit phase")
 			state := make(chan bool, 1)
-			go func() { state <- writer.IsCommitted() }()
+			go func() { state <- writer.CommitPublished() }()
 			require.False(t, testutil.RequireReceive(
 				t,
 				state,

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"maps"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -36,8 +38,10 @@ import (
 
 type querySnapshotSet struct {
 	committedUtxoSet
-	failure  error
-	releases *atomic.Int64
+	failure                error
+	snapshotPanic          bool
+	snapshotWithoutHistory bool
+	releases               *atomic.Int64
 }
 
 func (s *querySnapshotSet) ApplyUtxoChanges(
@@ -58,6 +62,9 @@ func (s *querySnapshotSet) ApplyUtxoChanges(
 }
 
 func (s *querySnapshotSet) SnapshotUtxoSet() (UtxoSetWriter, func(), error) {
+	if s.snapshotPanic {
+		panic("snapshot provider panic")
+	}
 	if s.failure != nil {
 		return nil, nil, s.failure
 	}
@@ -65,7 +72,128 @@ func (s *querySnapshotSet) SnapshotUtxoSet() (UtxoSetWriter, func(), error) {
 		committedUtxoSet: maps.Clone(s.committedUtxoSet),
 		releases:         s.releases,
 	}
+	if s.snapshotWithoutHistory {
+		return struct {
+				UtxoSetWriter
+				UtxoSetReader
+			}{view, view},
+			func() { s.releases.Add(1) }, nil
+	}
 	return view, func() { s.releases.Add(1) }, nil
+}
+
+func TestQueryViewSnapshotPanicReleasesApplyLock(t *testing.T) {
+	t.Parallel()
+	ls, _ := newDiskTestLedger(t)
+	ls.config.UtxoSet = &querySnapshotSet{snapshotPanic: true}
+	ls.config.UtxoSetReads = UtxoSetReadsSet
+	require.PanicsWithValue(t, "snapshot provider panic", func() {
+		_, _ = ls.AcquireQueryView(t.Context(), QueryPoint{})
+	})
+	unlocked := ls.utxoSetApplyMu.TryLock()
+	if unlocked {
+		ls.utxoSetApplyMu.Unlock()
+	} else {
+		// Keep a retained read lock from hanging cleanup on a broken build.
+		t.Cleanup(ls.utxoSetApplyMu.RUnlock)
+	}
+	require.True(t, unlocked, "snapshot panic retained the apply lock")
+}
+
+func TestQueryViewContendedAnchorReturnsPending(t *testing.T) {
+	t.Parallel()
+	ls, db := newDiskTestLedger(t)
+	var releases atomic.Int64
+	ls.config.UtxoSet = &querySnapshotSet{releases: &releases}
+	ls.config.UtxoSetReads = UtxoSetReadsSet
+	ls.utxoSetApplyMu.Lock()
+	unlock := sync.OnceFunc(ls.utxoSetApplyMu.Unlock)
+	done, result := make(chan struct{}), make(chan error, 1)
+	t.Cleanup(func() {
+		unlock()
+		testutil.RequireReceive(t, done, 5*time.Second, "anchor cleanup")
+	})
+	go func() {
+		defer close(done)
+		txn, _, err := database.NewReadSnapshotWithAnchorContext(
+			t.Context(), db, func(txn *database.Txn) error {
+				return ls.pinSetReadsResult(txn, true)
+			},
+		)
+		if txn != nil {
+			txn.Release()
+		}
+		result <- err
+	}()
+	require.ErrorIs(t, testutil.RequireReceive(
+		t, result, 5*time.Second, "contended anchor must release commits",
+	), errQueryViewSetPending)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	writer := db.MetadataTxn(ctx, true)
+	t.Cleanup(writer.Release)
+	require.NoError(t, writer.Commit())
+}
+
+func TestQueryViewApplyLockHonorsAcquisitionDeadline(t *testing.T) {
+	t.Parallel()
+	ls, _ := newDiskTestLedger(t)
+	var releases atomic.Int64
+	ls.config.UtxoSet = &querySnapshotSet{releases: &releases}
+	ls.config.UtxoSetReads = UtxoSetReadsSet
+	ls.utxoSetApplyMu.Lock()
+	unlock := sync.OnceFunc(ls.utxoSetApplyMu.Unlock)
+	done, result := make(chan struct{}), make(chan error, 1)
+	t.Cleanup(func() {
+		unlock()
+		testutil.RequireReceive(t, done, 5*time.Second, "acquisition cleanup")
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	go func() {
+		defer close(done)
+		view, err := ls.AcquireQueryView(ctx, QueryPoint{})
+		if view != nil {
+			view.Close()
+		}
+		result <- err
+	}()
+	require.ErrorIs(t, testutil.RequireReceive(
+		t, result, 5*time.Second, "snapshot acquisition deadline",
+	), context.DeadlineExceeded)
+}
+
+func TestSetOnlyQueryViewRequiresSnapshotCapabilities(t *testing.T) {
+	t.Parallel()
+	var releases atomic.Int64
+	set := &querySnapshotSet{releases: &releases}
+	providers := []UtxoSetWriter{
+		struct {
+			UtxoSetWriter
+			UtxoSetReader
+			UtxoSetHistory
+		}{set, set, set},
+		struct {
+			UtxoSetWriter
+			UtxoSetReader
+			UtxoSetSnapshotter
+		}{set, set, set},
+		&querySnapshotSet{releases: &releases, snapshotWithoutHistory: true},
+	}
+	for i, provider := range providers {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			t.Parallel()
+			ls, _ := newDiskTestLedger(t)
+			ls.config.UtxoSet, ls.config.UtxoSetOnly = provider, true
+			ls.config.UtxoSetReads = UtxoSetReadsSet
+			view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
+			if view != nil {
+				view.Close()
+			}
+			require.ErrorContains(t, err, "set-only")
+			require.Nil(t, view)
+		})
+	}
 }
 
 func (s *querySnapshotSet) UtxoSetAt(ocommon.Point) (UtxoSetView, error) {
@@ -201,7 +329,13 @@ func TestQueryViewWaitsForCommittedSetChanges(t *testing.T) {
 	ls.stageUtxoSet(txn, nil, UtxoEvent{Removed: []models.UtxoId{{Hash: id}}})
 	committed := make(chan error, 1)
 	go func() { committed <- txn.Commit() }()
-	<-entered
+	select {
+	case <-entered:
+	case err := <-committed:
+		t.Fatalf("writer stopped before after-commit callback: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("writer did not reach after-commit callback")
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	view, err := ls.AcquireQueryView(ctx, QueryPoint{})

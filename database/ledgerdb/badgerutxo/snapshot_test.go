@@ -15,6 +15,7 @@
 package badgerutxo_test
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -182,10 +183,14 @@ func TestSnapshotHistoricalViewPreservesItsParent(t *testing.T) {
 	t.Cleanup(held.Close)
 	closed := make(chan error, 1)
 	go func() { closed <- snap.Close() }()
+	require.Eventually(t, func() bool {
+		_, _, err := snap.Get(ref(1, 0))
+		return errors.Is(err, badgerutxo.ErrSnapshotReleased)
+	}, 5*time.Second, time.Millisecond, "parent enters its closing state")
 	select {
 	case <-closed:
 		t.Fatal("parent closed while a historical view still held its transaction")
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 	_, live, err = held.Get(ref(1, 0))
 	require.NoError(t, err)

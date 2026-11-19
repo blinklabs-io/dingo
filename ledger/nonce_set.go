@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"cmp"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -415,7 +416,7 @@ func (ls *LedgerState) compareNonceRead(what string, same bool, setErr error) {
 // they had not committed. A verify read reads the set and then the metadata
 // store; a write that commits in between shows only in the metadata store
 // and is not a disagreement. A read of a pinned transaction (see
-// pinSetReads) reads both as of the pin, so no write can race it.
+// pinSetReadsResult) reads both as of the pin, so no write can race it.
 type verifyReadGuard struct {
 	txn     ledgerdb.Txn
 	seq     uint64
@@ -434,29 +435,57 @@ type utxoSetPin struct {
 	batches []*utxoSetBatch
 }
 
-// pinSetReads makes txn, a read transaction whose metadata snapshot is
-// already fixed, read the live UTxO set as of now until it finishes. The
-// snapshot and the batch list are taken under utxoSetApplyMu, which a batch
-// holds exclusively while it is applied, so a batch is in exactly one of them.
-func (ls *LedgerState) pinSetReads(txn ledgerdb.Txn) {
-	_ = ls.pinSetReadsResult(txn)
-}
-
-func (ls *LedgerState) pinSetReadsResult(txn ledgerdb.Txn) error {
+// pinSetReadsResult pins the set snapshot and committed batches until txn
+// finishes. atCommitAnchor requires the coordinated database snapshot barrier.
+func (ls *LedgerState) pinSetReadsResult(
+	txn ledgerdb.Txn, atCommitAnchor bool,
+) error {
 	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
 		return nil
+	}
+	set := ls.readSet(txn)
+	if ls.config.UtxoSetOnly {
+		if _, ok := set.(UtxoSetSnapshotter); !ok {
+			return errors.New("set-only query views need UTxO snapshots")
+		}
+		if _, ok := set.(UtxoSetHistory); !ok {
+			return errors.New("set-only query views need UTxO history")
+		}
 	}
 	pin := &utxoSetPin{}
 	release := func() {}
 	var snapshotErr error
-	if sn, ok := ls.readSet(txn).(UtxoSetSnapshotter); ok {
-		ls.utxoSetApplyMu.RLock()
-		set, rel, err := sn.SnapshotUtxoSet()
-		if err == nil {
-			pin.set, release = set, rel
-			pin.batches = ls.utxoSetBatchesSeenBy(nil, nil)
+	if sn, ok := set.(UtxoSetSnapshotter); ok {
+		err := func() error {
+			if atCommitAnchor {
+				if !ls.utxoSetApplyMu.TryRLock() {
+					return errQueryViewSetPending
+				}
+			} else {
+				ls.utxoSetApplyMu.RLock()
+			}
+			defer ls.utxoSetApplyMu.RUnlock()
+			set, rel, err := sn.SnapshotUtxoSet()
+			if err == nil {
+				pin.set, release = set, rel
+				if atCommitAnchor {
+					pin.batches = ls.utxoSetBatchesAtCommitAnchor()
+				} else {
+					pin.batches = ls.utxoSetBatchesSeenBy(nil, nil)
+				}
+				if ls.config.UtxoSetOnly {
+					if _, ok := set.(UtxoSetHistory); !ok {
+						return errors.New(
+							"set-only snapshot needs UTxO history",
+						)
+					}
+				}
+			}
+			return err
+		}()
+		if errors.Is(err, errQueryViewSetPending) {
+			return err
 		}
-		ls.utxoSetApplyMu.RUnlock()
 		if err != nil {
 			snapshotErr = err
 			ls.config.Logger.Warn(

@@ -773,9 +773,18 @@ func (t *Txn) IsReadWrite() bool {
 }
 
 // IsCommitted reports whether this transaction reached a successful commit.
-// It does not wait for a commit in progress, so snapshot anchors can inspect
-// pending transactions while the commit phase is paused.
+// It waits for an in-progress commit to publish its result.
 func (t *Txn) IsCommitted() bool {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	return t.committed.Load()
+}
+
+// CommitPublished reports the published commit state without waiting for a
+// commit in progress. Snapshot anchors that already exclude commits use it
+// while holding the database commit-phase barrier. A false result alone does
+// not imply that metadata writes are still invisible to ordinary readers.
+func (t *Txn) CommitPublished() bool {
 	return t.committed.Load()
 }
 

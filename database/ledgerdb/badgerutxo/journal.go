@@ -936,29 +936,34 @@ type AsOf struct {
 // not reach point. On a snapshot Store, the view shares the snapshot's commit
 // boundary and must be closed before the parent Store's Close can finish.
 func (s *Store) AsOf(point ocommon.Point) (*AsOf, error) {
+	var txn *badger.Txn
+	var release func()
+	var err error
 	if s.snap != nil {
-		txn, err := s.snap.acquire()
+		txn, err = s.snap.acquire()
 		if err != nil {
 			return nil, err
 		}
-		a, err := asOfIn(txn, point)
+		release = s.snap.done
+	} else {
+		txn, err = s.readTxn()
 		if err != nil {
-			s.snap.done()
 			return nil, err
 		}
-		// The historical view borrows its parent's transaction until Close.
-		a.release = s.snap.done
-		return a, nil
+		release = txn.Discard
 	}
-	txn, err := s.readTxn()
-	if err != nil {
-		return nil, err
-	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
 	a, err := asOfIn(txn, point)
 	if err != nil {
-		txn.Discard()
 		return nil, err
 	}
+	a.release = release
+	transferred = true
 	return a, nil
 }
 

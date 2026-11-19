@@ -3327,15 +3327,17 @@ the reads it serves, answers the others from the metadata store, and holds
 no race guard that could tell a disagreement from a write committing
 between the two reads. A read through a transaction pinned at a past
 commit, such as the deferred ratification's, answers from the set as of the
-pin in every read mode. `LedgerState.pinSetReads` takes, under
+pin in every read mode. `LedgerState.pinSetReadsResult` takes, under
 `utxoSetApplyMu`, a read-only Badger snapshot of the set
 (`ledger.UtxoSetSnapshotter`) and the batches committed but not yet
 applied; the pinned transaction's reads, in every family, see that snapshot
 under those batches and nothing that committed or staged after. A snapshot
 is held until the transaction finishes, so Badger keeps the versions it can
-still read for the job's duration. If no snapshot can be taken, the pinned
-transaction's reads stay on the metadata store. Verify mode compares a pinned
-read exactly: both sides are as of the pin, so no write can race it.
+still read for the job's duration. In metadata-backed storage, a provider
+without snapshot support leaves pinned reads on the metadata store. Set-only
+query views require snapshots and historical reads. A snapshot error aborts
+acquisition or the deferred job. Verify mode compares a pinned read exactly:
+both sides are as of the pin, so no write can race it.
 
 Each level of each transaction is staged right after the delta writes it,
 so later transactions in the same commit see it. The staged batch also keeps
@@ -8213,12 +8215,16 @@ blob, metadata and live-ledger-set views are fixed before commits resume), and
 validates the point against it with `VerifyPointQueryable`. If committed changes
 are still awaiting application to the live set, it releases the snapshot and
 retries inside the caller's deadline so historical journal entries are present.
-Historical UTxO
-reads open from that transaction's set snapshot, and releasing the transaction
+Historical UTxO reads open from that transaction's set snapshot, and releasing
+the transaction
 releases its set pin. A live-set snapshot failure rejects acquisition and
-releases the database snapshot. A boundary can commit before its job is
-published, so a snapshot that still contains the boundary's pending-ratification
-record is dropped and the open retried once the job settles. A wait that
+releases the database snapshot. Contention on the live-set lock drops the
+database snapshot before retrying within the acquisition deadline. Provider
+panics release the lock, and historical-view construction releases its parent
+borrow on failure. Set-only acquisitions reject
+providers that cannot supply snapshots and historical reads. A boundary can
+commit before its job is published, so a snapshot that still contains the
+boundary's pending-ratification record is dropped and the open retried once the job settles. A wait that
 outlasts the caller's deadline fails with `ledger.ErrEpochBoundaryJobPending`,
 naming the boundary's epoch. A volatile-tip Acquire does not wait for the job:
 the job can outlast the Acquire budget (seconds on preprod, tens of seconds
@@ -8608,6 +8614,8 @@ slot (`UtxosDeleteRolledback`, `UtxosUnspend`) marks the walk disturbed; the
 query re-verifies the point and restarts, up to three times. A later query on
 the same session reopens a snapshot pinned to that block, as an expired view
 does, keeping the forecast frozen at `Acquire`.
+In set-only storage, the detached walk opens the set's historical view
+directly and keeps the metadata transaction released throughout the walk.
 Both queries exist to
 support cross-node ledger-state comparison in the devnet conformance
 harness (`internal/test/devnet`, see its README's "LocalStateQuery in
