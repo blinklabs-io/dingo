@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/leiosdb"
 	databaseTypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -396,7 +397,7 @@ func TestLeiosPersistenceWorkersEachGetFullDrainBudget(t *testing.T) {
 	t.Parallel()
 
 	o := newTestOuroborosWithLeiosDB(t)
-	_, ok := o.beginLeiosPersistWrite()
+	ok := o.beginLeiosPersistWrite()
 	require.True(t, ok)
 	defer o.endLeiosPersistWrite()
 	o.leiosPersistGCMu.Lock()
@@ -448,17 +449,16 @@ func TestLeiosPersistPauseWaitsForInFlightWrite(t *testing.T) {
 
 	nextPoint, nextRaw, nextData := leiosPersistTestEntry(t, 72, 4, 512)
 	_, err = o.persistLeiosEndorserBlock(nextPoint, nextRaw, nextData)
-	require.NoError(t, err)
-	manifest, err = db.GetLeiosEBManifest(nextPoint.Hash, nextPoint.Slot)
-	require.NoError(t, err)
-	require.Equal(t, []byte(nextRaw), manifest)
+	require.ErrorIs(t, err, errLeiosPersistStopped)
 }
 
-// A live Restore/Truncate pauses persistence, replaces the database and
-// resumes. Writes made before the pause land in the old database, writes after
-// it in the new one, and a block cached as durable before the pause is not
-// durable in the new database.
-func TestLeiosPersistPauseForLiveLifecycleOpRestartsOnNewDB(t *testing.T) {
+// A live Restore/Truncate pauses persistence and then discards this
+// Ouroboros for a replacement, so the pause must refuse writes for good: a
+// fetch worker still running here must not reach the store being closed, even
+// after the pause returned and LedgerState was reassigned.
+func TestLeiosPersistPauseForLiveLifecycleOpRefusesWritesForGood(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	o := newTestOuroborosWithLeiosDB(t)
@@ -469,40 +469,25 @@ func TestLeiosPersistPauseForLiveLifecycleOpRestartsOnNewDB(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point1, blockRaw1, nil, leiosStoreAuthoritative,
 	))
-	manifest1, err := oldDB.GetLeiosEBManifest(point1.Hash, point1.Slot)
-	require.NoError(t, err)
-	require.Equal(t, []byte(blockRaw1), manifest1)
 	cached, ok := o.lookupLeiosEndorserBlock(point1.Slot, point1.Hash)
 	require.True(t, ok)
 	require.True(t, o.leiosEndorserBlockDurable(cached))
 
 	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
 
-	// Reassign LedgerState to a freshly built database, the way
-	// node_lifecycle.go's reinit does.
 	replacement := newTestOuroborosWithLeiosDB(t)
 	newDB := replacement.leiosDatabase()
 	require.NotNil(t, newDB)
 	o.ledgerState = replacement.ledgerState
 
-	require.False(t, o.leiosEndorserBlockDurable(cached))
-	require.NoError(t, o.ensureLeiosEndorserBlockDurable(cached))
-	_, err = newDB.GetLeiosEBManifest(point1.Hash, point1.Slot)
-	require.NoError(
-		t,
-		err,
-		"a cached block must be rewritten to the new database",
-	)
-
 	point2, blockRaw2 := testLeiosEndorserBlockRawWithRefs(t, 21, 1)
-	require.NoError(t, o.storeLeiosEndorserBlock(
+	require.ErrorIs(t, o.storeLeiosEndorserBlock(
 		point2, blockRaw2, nil, leiosStoreAuthoritative,
-	))
-	manifest2, err := newDB.GetLeiosEBManifest(point2.Hash, point2.Slot)
-	require.NoError(t, err)
-	require.Equal(t, []byte(blockRaw2), manifest2)
+	), errLeiosPersistStopped)
+	_, err := newDB.GetLeiosEBManifest(point2.Hash, point2.Slot)
+	require.ErrorIs(t, err, databaseTypes.ErrBlobKeyNotFound)
 	_, err = oldDB.GetLeiosEBManifest(point2.Hash, point2.Slot)
-	require.Error(t, err)
+	require.ErrorIs(t, err, databaseTypes.ErrBlobKeyNotFound)
 }
 
 // A pause that cannot confirm an in-flight write must leave persistence
@@ -542,7 +527,7 @@ func TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain(
 	))
 	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
 	_, err = o.persistLeiosEndorserBlock(next, nextRaw, nextData)
-	require.NoError(t, err, "a confirmed pause must resume persistence")
+	require.ErrorIs(t, err, errLeiosPersistStopped)
 }
 
 func TestLeiosPersistPauseAfterConcurrentWrites(t *testing.T) {
@@ -665,20 +650,6 @@ func TestLeiosPersistenceWriterDoesNotRestorePrunedSlots(t *testing.T) {
 
 	_, err = db.GetLeiosEBManifest(point.Hash, point.Slot)
 	require.ErrorIs(t, err, databaseTypes.ErrBlobKeyNotFound)
-}
-
-func TestLeiosPersistencePauseResetsPruningFrontier(t *testing.T) {
-	t.Parallel()
-	o := newTestOuroborosWithLeiosDB(t)
-	o.leiosPersistPruneBeforeSlot = 100
-	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
-	point, blockRaw, data := leiosPersistTestEntry(t, 10, 1, 4)
-	_, err := o.persistLeiosEndorserBlock(point, blockRaw, data)
-	require.NoError(t, err)
-	require.NoError(t, o.Close())
-	got, err := o.leiosDatabase().GetLeiosEBManifest(point.Hash, point.Slot)
-	require.NoError(t, err)
-	require.Equal(t, []byte(blockRaw), got)
 }
 
 // With no immutable point the collection bound follows the newest persisted
@@ -1014,4 +985,86 @@ func TestLeiosPersistenceConstructorStartsGC(t *testing.T) {
 	}, time.Second, time.Millisecond)
 	_, err := db.GetLeiosEBManifest(latest.Hash, latest.Slot)
 	require.NoError(t, err)
+}
+
+const leiosPersistTestEventType event.EventType = "test.leios.persist"
+
+// A handler that registers a write after Close has begun must be refused, not
+// block on the lifecycle lock Close would otherwise hold while waiting for it.
+func TestCloseDoesNotDeadlockOnHandlerRegisteringWrite(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	bus := newWiringTestEventBus(t)
+	o.eventBus = bus
+	point, raw, data := leiosPersistTestEntry(t, 60, 1, 4)
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate) }) }
+	defer release()
+	writeErr := make(chan error, 1)
+	o.subscribeTracked(leiosPersistTestEventType, func(event.Event) {
+		close(entered)
+		<-gate
+		_, err := o.persistLeiosEndorserBlock(point, raw, data)
+		writeErr <- err
+	})
+	bus.Publish(
+		leiosPersistTestEventType,
+		event.NewEvent(leiosPersistTestEventType, nil),
+	)
+	testutil.RequireReceive(t, entered, 5*time.Second, "handler did not start")
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- o.Close() }()
+	// Close refuses writes before it waits for handlers, so once the flag is
+	// set it is waiting on the handler.
+	testutil.WaitForCondition(t, func() bool {
+		o.leiosPersistMu.Lock()
+		defer o.leiosPersistMu.Unlock()
+		return o.leiosPersistClosed
+	}, 5*time.Second, "Close did not start")
+	release()
+
+	require.NoError(t, testutil.RequireReceive(
+		t, closeDone, 5*time.Second, "Close deadlocked on an in-flight handler",
+	))
+	require.ErrorIs(t, testutil.RequireReceive(
+		t, writeErr, 5*time.Second, "handler did not finish",
+	), errLeiosPersistStopped)
+}
+
+// A handler stuck in a store write must not hang Close past the drain bound.
+// Not t.Parallel: swaps the package-level leiosPersistShutdownDrainTimeout.
+func TestCloseBoundsHandlerStuckInPersistWrite(t *testing.T) {
+	origTimeout := leiosPersistShutdownDrainTimeout
+	leiosPersistShutdownDrainTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { leiosPersistShutdownDrainTimeout = origTimeout })
+
+	o := newTestOuroborosWithLeiosDB(t)
+	bus := newWiringTestEventBus(t)
+	o.eventBus = bus
+	entered, release := blockLeiosStoreWrites(t, o.leiosDatabase())
+	point, raw, data := leiosPersistTestEntry(t, 61, 1, 4)
+	handlerDone := make(chan struct{})
+	o.subscribeTracked(leiosPersistTestEventType, func(event.Event) {
+		defer close(handlerDone)
+		_, _ = o.persistLeiosEndorserBlock(point, raw, data)
+	})
+	bus.Publish(
+		leiosPersistTestEventType,
+		event.NewEvent(leiosPersistTestEventType, nil),
+	)
+	testutil.RequireReceive(t, entered, 5*time.Second, "write did not start")
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- o.Close() }()
+	require.ErrorIs(t, testutil.RequireReceive(
+		t, closeDone, 5*time.Second, "Close hung on a stuck handler",
+	), ErrLeiosPersistDrainUnconfirmed)
+	release()
+	testutil.RequireReceive(
+		t, handlerDone, 5*time.Second, "handler did not finish",
+	)
 }

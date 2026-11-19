@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/event"
@@ -143,14 +144,17 @@ func (o *Ouroboros) close() error {
 	// The ChainSync Jumping driver's goroutines read the dependencies a
 	// live restore closes next.
 	o.outboundChainsyncLifecycle.close()
-	o.leiosPersistLifecycleMu.Lock()
-	defer o.leiosPersistLifecycleMu.Unlock()
 
-	// Closing under the lifecycle lock refuses every later write and GC start;
-	// writes already registered are waited for below.
+	// The lifecycle lock is held only to refuse later writes, never across
+	// the handler wait below: a handler mid-publish registers its write under
+	// the read side of this lock, so holding it exclusively while waiting for
+	// that handler would deadlock. Registered writes are waited for after the
+	// handlers, under the lock again.
+	o.leiosPersistLifecycleMu.Lock()
 	o.leiosPersistMu.Lock()
 	o.leiosPersistClosed = true
 	o.leiosPersistMu.Unlock()
+	o.leiosPersistLifecycleMu.Unlock()
 
 	o.leiosValidationMu.Lock()
 	o.leiosValidationClosed = true
@@ -168,18 +172,33 @@ func (o *Ouroboros) close() error {
 	subs := o.subscriptions
 	o.subscriptions = nil
 	o.subscriptionsMu.Unlock()
+	var closeErr error
 	if o.eventBus != nil {
+		// One deadline covers every handler: a handler stuck in a store
+		// write must not hang shutdown. Each unsubscribe still takes effect
+		// when the wait is abandoned.
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			leiosPersistShutdownDrainTimeout,
+		)
 		for _, sub := range subs {
-			// UnsubscribeAndWait, not Unsubscribe: Close is called on the
-			// live restore path immediately before the ledger state,
+			// Wait for the handler, not just unsubscribe: Close is called on
+			// the live restore path immediately before the ledger state,
 			// mempool and chainsync state this instance holds are closed
 			// and replaced. Returning while a handler is still mid-flight
 			// would let it touch a closed dependency.
-			o.eventBus.UnsubscribeAndWait(sub.eventType, sub.id)
+			if err := o.eventBus.UnsubscribeAndWaitContext(
+				ctx, sub.eventType, sub.id,
+			); err != nil {
+				closeErr = ErrLeiosPersistDrainUnconfirmed
+			}
 		}
+		cancel()
 	}
-	var closeErr error
-	if !o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout) {
+	o.leiosPersistLifecycleMu.Lock()
+	drained := o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout)
+	o.leiosPersistLifecycleMu.Unlock()
+	if !drained {
 		closeErr = ErrLeiosPersistDrainUnconfirmed
 	}
 	o.closeLocalStateQuerySessions()

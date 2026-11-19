@@ -6073,9 +6073,9 @@ success: `storeLeiosEndorserBlock` publishes a slot-verified entry through
 returns a failed write to the fetch or backfill that stored it. A manifest-only
 entry writes the manifest and a complete one the transaction list too; writing
 the same occurrence twice is harmless. An unverified peer-offered entry is not
-written until its slot is corroborated. The cache entry records the persistence
-epoch its current content was written in (`durableEpoch`), carried forward only
-while the transaction set does not grow, so re-offers of a held block from
+written until its slot is corroborated. The cache entry records that its current
+content was written (`durable`), carried forward only while the transaction
+set does not grow, so re-offers of a held block from
 every connection do not rewrite it, while an offer of a block cached whole but
 not durable (its earlier write failed) retries the write instead of reporting
 success. Entries reloaded from the LeiosDB are durable. A certified endorser
@@ -6112,23 +6112,24 @@ closures exist nowhere else. The snapshot selects the LeiosDB after it holds
 the commit barrier, because the store opens on first use, and fails when an
 existing LeiosDB cannot be opened rather than omitting it. A persisted
 endorser block signals the collector as well as primary-chain events do.
-Close and `PauseLeiosPersistWriterForLiveLifecycleOp` take
-`leiosPersistLifecycleMu` exclusively, so no new write registers, then wait for
-in-flight writes and for the GC worker, each bounded by
+Close and `PauseLeiosPersistWriterForLiveLifecycleOp` set a permanent
+refusal of new writes under `leiosPersistLifecycleMu`, then wait for in-flight
+writes and for the GC worker, each bounded by
 `leiosPersistShutdownDrainTimeout` so a stuck or slow store cannot hang
 graceful shutdown or a live Restore/Truncate. A write holds the read lock only
-to register, never across `SetLeiosEB`. Close is permanent. The
-`ouroboros.Ouroboros` object survives a live Restore/Truncate
-(`node_lifecycle.go`) unlike everything else it depends on, so
-`quiesceForLiveLifecycleOp` instead calls the pause, which, once the wait is
-confirmed, re-enables writes, resets the GC start-once guard and the pruning
-frontier, and starts a new persistence epoch so cached entries are written
-again to the reinitialized database once `LedgerState` has been reassigned to
-it. This call happens last in quiesce, after connection shutdown. If that
-shutdown cannot be confirmed, the operation requires a supervised restart
-instead of replacing storage while traffic can still write. A pause whose wait
-is not confirmed returns `ErrLeiosPersistDrainUnconfirmed` and leaves writes
-refused. Because endorser transactions are not part
+to register, never across `SetLeiosEB`, and Close does not hold the lock while
+it waits for EventBus handlers, which may be registering a write; that wait is
+bounded by the same timeout and reports `ErrLeiosPersistDrainUnconfirmed` when
+a handler does not finish. A live Restore/Truncate does not keep the
+`ouroboros.Ouroboros` object: `quiesceForLiveLifecycleOp` calls the pause,
+which refuses writes for good, and `reinitializeNetworkingCore` then closes the
+old instance and constructs a replacement whose cache starts empty and reloads
+from the LeiosDB. Fetch workers and handlers still running on the old instance
+therefore cannot reach the storage being closed. The pause call happens last in
+quiesce, after connection shutdown. If that shutdown cannot be confirmed, the
+operation requires a supervised restart instead of replacing storage while
+traffic can still write. A pause whose wait is not confirmed returns
+`ErrLeiosPersistDrainUnconfirmed`. Because endorser transactions are not part
 of any chain block — so they have no CBOR offsets — their CBOR is persisted as a
 standalone blob keyed by the endorser block's `(slot, hash)` with DOFF offsets
 (mirroring the genesis path), and `SetTransaction`/delta apply is reused so they

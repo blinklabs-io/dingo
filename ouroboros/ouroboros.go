@@ -573,28 +573,23 @@ type Ouroboros struct {
 	// which then wait for registered writes to finish.
 	leiosPersistLifecycleMu sync.RWMutex
 	leiosPersistMu          sync.Mutex
-	// The following are guarded by leiosPersistMu. leiosPersistClosed is
-	// permanent after Close; leiosPersistHalted refuses writes while a pause
-	// is waiting, and stays set when that wait is not confirmed.
+	// leiosPersistClosed is guarded by leiosPersistMu. It is permanent: Close
+	// and the live-lifecycle pause both set it, and a write is refused once it
+	// is.
 	leiosPersistClosed bool
-	leiosPersistHalted bool
 	// leiosPersistInflight counts registered writes; leiosPersistIdle is
 	// closed when it returns to zero. A channel rather than a WaitGroup
 	// because a waiter may time out and writes keep registering afterwards.
 	leiosPersistInflight int
 	leiosPersistIdle     chan struct{}
-	// leiosPersistPauses counts confirmed pauses, each of which may replace
-	// the database, so durability recorded on a cached entry before one no
-	// longer holds.
-	leiosPersistPauses  uint64
-	leiosPersistStoreMu sync.Mutex
+	leiosPersistStoreMu  sync.Mutex
 	// leiosPersistPruneBeforeSlot is the active store's retention frontier.
 	// Writers hold leiosPersistStoreMu through SetLeiosEB; GC publishes its
 	// frontier under the same lock, then scans and prunes without holding it.
 	leiosPersistPruneBeforeSlot uint64
 	// The optional blob-store GC has its own worker so full prefix scans never
-	// stall persistence writes. It is paused before live storage replacement
-	// and restarted by the next endorser-block write.
+	// stall persistence writes. It is stopped before live storage replacement
+	// and never restarted on the same instance.
 	leiosPersistGCOnce     sync.Once
 	leiosPersistGCStopOnce sync.Once
 	leiosPersistGCStarted  atomic.Bool

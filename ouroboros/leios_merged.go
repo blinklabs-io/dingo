@@ -366,10 +366,9 @@ type leiosEndorserBlockData struct {
 	// (bindLeiosEndorserBlockSlot) replaces it with a new, distinct value
 	// under the lock rather than flipping this field on the shared one.
 	slotVerified bool
-	// durableEpoch is the persistence epoch in which this entry's current
-	// content was written to the LeiosDB, zero when it has not been. A copy
-	// whose transaction set grows must reset it.
-	durableEpoch uint64
+	// durable records that this entry's current content was written to the
+	// LeiosDB. A copy whose transaction set grows must reset it.
+	durable bool
 }
 
 type selectedLeiosHeader struct {
@@ -708,7 +707,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		// Without this every re-offer of the block, from every connection,
 		// would rewrite its closure to the LeiosDB.
 		if len(data.txsRaw) == len(existing.txsRaw) {
-			data.durableEpoch = existing.durableEpoch
+			data.durable = existing.durable
 		}
 		// Carry retained partial-fetch state forward for the same reason: a
 		// manifest-only store arrives on every connection that offers the
@@ -1902,7 +1901,7 @@ func (o *Ouroboros) bindCachedLeiosEndorserBlockSlot(
 			completed.partialTxs = nil
 			completed.txCount = candidate.txCount
 			completed.semanticValidationStatus = leiosEBValidationUnknown
-			completed.durableEpoch = 0
+			completed.durable = false
 			for _, cacheKey := range data.cacheKeys {
 				if current := o.leiosEndorserBlocks[cacheKey]; current == data ||
 					current == nil {
@@ -2365,9 +2364,6 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 	if db == nil {
 		return nil, false
 	}
-	// Read before the store: a pause between the two must leave the entry
-	// counted against the database it was read from.
-	epoch := o.leiosPersistCurrentEpoch()
 	manifestRaw, err := db.GetLeiosEBManifest(hash, slot)
 	if err != nil {
 		// ErrBlobKeyNotFound is the normal "not stored" path; anything else
@@ -2440,7 +2436,7 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		// announcement may have long since aged out of the acceptance
 		// window.
 		slotVerified: true,
-		durableEpoch: epoch,
+		durable:      true,
 	}
 	// A persisted (or pre-cap-era) blob can exceed the per-entry byte budget
 	// even though storeLeiosEndorserBlock would reject it on the write path;

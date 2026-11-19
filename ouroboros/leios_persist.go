@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/leiosdb"
@@ -45,10 +44,13 @@ var ErrLeiosPersistDrainUnconfirmed = errors.New(
 	"leios persistence worker drain not confirmed before timeout",
 )
 
-// errLeiosPersistStopped refuses a write after Close, or after a pause whose
-// drain was not confirmed: the store it would reach is being, or has been,
-// closed or replaced.
+// errLeiosPersistStopped refuses a write after Close or a live-lifecycle
+// pause: the store it would reach is being, or has been, closed or replaced.
 var errLeiosPersistStopped = errors.New("leios persistence is stopped")
+
+// errLeiosPersistWrite marks a failure of the local LeiosDB rather than of
+// the peer that supplied the content.
+var errLeiosPersistWrite = errors.New("persist leios endorser block")
 
 // persistLeiosEndorserBlock writes an endorser block to the LeiosDB before
 // returning, so a caller that reports success, or offers the block onward,
@@ -57,27 +59,26 @@ var errLeiosPersistStopped = errors.New("leios persistence is stopped")
 // Writing the same occurrence twice is harmless: records are keyed by
 // (slot, hash) and the content is verified against the manifest hash.
 //
-// It returns the persistence epoch the write was made in, for
+// It reports whether the content is now durable, for
 // markLeiosEndorserBlockDurable. With no database it does nothing and reports
-// epoch zero, which no entry is ever marked durable under.
+// false, so no entry is ever marked durable without one.
 func (o *Ouroboros) persistLeiosEndorserBlock(
 	point ocommon.Point,
 	blockRaw []byte,
 	data *leiosEndorserBlockData,
-) (uint64, error) {
+) (bool, error) {
 	if o.leiosDatabase() == nil {
-		return 0, nil
+		return false, nil
 	}
-	epoch, ok := o.beginLeiosPersistWrite()
-	if !ok {
-		return 0, errLeiosPersistStopped
+	if !o.beginLeiosPersistWrite() {
+		return false, errLeiosPersistStopped
 	}
 	defer o.endLeiosPersistWrite()
 	// Read again after registering: a pause waits for registered writes
 	// before storage is replaced, so this is the store the write belongs to.
 	db := o.leiosDatabase()
 	if db == nil {
-		return 0, nil
+		return false, nil
 	}
 	var txsRaw []cbor.RawMessage
 	if data != nil && data.completeTxCache() && data.txCount > 0 {
@@ -95,17 +96,18 @@ func (o *Ouroboros) persistLeiosEndorserBlock(
 		// missing certified one is not recoverable.
 		if err == nil && !pinned {
 			o.leiosPersistStoreMu.Unlock()
-			return epoch, nil
+			return true, nil
 		}
 	}
 	err := db.SetLeiosEB(point.Slot, point.Hash, blockRaw, txsRaw)
 	o.leiosPersistStoreMu.Unlock()
 	if errors.Is(err, leiosdb.ErrBehindImmutableTip) {
-		return epoch, nil
+		return true, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf(
-			"persist leios endorser block at slot %d: %w",
+		return false, fmt.Errorf(
+			"%w at slot %d: %w",
+			errLeiosPersistWrite,
 			point.Slot,
 			err,
 		)
@@ -115,30 +117,29 @@ func (o *Ouroboros) persistLeiosEndorserBlock(
 	// alone would leave records above the last bound uncollected while the
 	// chain is quiet.
 	o.signalLeiosGC(event.Event{})
-	return epoch, nil
+	return true, nil
 }
 
 // beginLeiosPersistWrite registers a write so that Close and a pause wait for
 // it. The lifecycle lock is held only to register, never across the write, so
 // a stuck store blocks no lifecycle operation past its bounded wait.
-func (o *Ouroboros) beginLeiosPersistWrite() (uint64, bool) {
+func (o *Ouroboros) beginLeiosPersistWrite() bool {
 	o.leiosPersistLifecycleMu.RLock()
 	defer o.leiosPersistLifecycleMu.RUnlock()
 	o.leiosPersistMu.Lock()
-	if o.leiosPersistClosed || o.leiosPersistHalted {
+	if o.leiosPersistClosed {
 		o.leiosPersistMu.Unlock()
-		return 0, false
+		return false
 	}
 	if o.leiosPersistInflight == 0 {
 		o.leiosPersistIdle = make(chan struct{})
 	}
 	o.leiosPersistInflight++
-	epoch := o.leiosPersistEpochLocked()
 	o.leiosPersistMu.Unlock()
 	// Started here rather than at construction for an Ouroboros whose
-	// database arrives later, and again after a pause stopped it.
+	// database arrives later.
 	o.startLeiosPersistenceGC(0, false)
-	return epoch, true
+	return true
 }
 
 func (o *Ouroboros) endLeiosPersistWrite() {
@@ -162,26 +163,22 @@ func (o *Ouroboros) leiosPersistWritesIdle() <-chan struct{} {
 }
 
 // leiosEndorserBlockDurable reports whether data's current content was
-// written to the active LeiosDB.
+// written to the LeiosDB.
 func (o *Ouroboros) leiosEndorserBlockDurable(
 	data *leiosEndorserBlockData,
 ) bool {
-	if data == nil || data.durableEpoch == 0 {
-		return false
-	}
-	return data.durableEpoch == o.leiosPersistCurrentEpoch()
+	return data != nil && data.durable
 }
 
-// leiosPersistCurrentEpoch identifies the database writes currently reach.
-// It starts at one, so the zero durableEpoch of a new entry never matches.
-func (o *Ouroboros) leiosPersistCurrentEpoch() uint64 {
-	o.leiosPersistMu.Lock()
-	defer o.leiosPersistMu.Unlock()
-	return o.leiosPersistEpochLocked()
-}
-
-func (o *Ouroboros) leiosPersistEpochLocked() uint64 {
-	return o.leiosPersistPauses + 1
+// leiosEndorserBlockNeedsWrite reports whether data holds slot-verified
+// content that has a database to be written to and has not been. With no
+// database nothing is ever durable, so it is excluded: there is nothing to
+// write and nothing to wait for.
+func (o *Ouroboros) leiosEndorserBlockNeedsWrite(
+	data *leiosEndorserBlockData,
+) bool {
+	return data != nil && data.slotVerified && !data.durable &&
+		o.leiosDatabase() != nil
 }
 
 // persistVerifiedLeiosEndorserBlock writes a slot-verified entry unless its
@@ -192,41 +189,41 @@ func (o *Ouroboros) persistVerifiedLeiosEndorserBlock(
 	blockRaw []byte,
 	data *leiosEndorserBlockData,
 ) error {
-	if data == nil || !data.slotVerified || o.leiosEndorserBlockDurable(data) {
+	if !o.leiosEndorserBlockNeedsWrite(data) {
 		return nil
 	}
-	epoch, err := o.persistLeiosEndorserBlock(point, blockRaw, data)
+	written, err := o.persistLeiosEndorserBlock(point, blockRaw, data)
 	if err != nil {
 		return err
 	}
-	o.markLeiosEndorserBlockDurable(point, data, epoch)
+	o.markLeiosEndorserBlockDurable(point, data, written)
 	return nil
 }
 
 // markLeiosEndorserBlockDurable records that the cached entry for point holds
-// content written in epoch. The entry may have been replaced since data was
+// content that was written. The entry may have been replaced since data was
 // read; it is marked only while it still holds the content that was written.
 // Readers hold cached pointers without leiosMu, so the entry is replaced with
 // a marked copy rather than changed in place.
 func (o *Ouroboros) markLeiosEndorserBlockDurable(
 	point ocommon.Point,
 	data *leiosEndorserBlockData,
-	epoch uint64,
+	written bool,
 ) {
-	if epoch == 0 {
+	if !written {
 		return
 	}
 	key := leiosBlockKey(point.Slot, point.Hash)
 	o.leiosMu.Lock()
 	defer o.leiosMu.Unlock()
 	current := o.leiosEndorserBlocks[key]
-	if current == nil || current.durableEpoch == epoch ||
+	if current == nil || current.durable ||
 		!current.slotVerified || !current.hasManifest() ||
 		len(current.txsRaw) != len(data.txsRaw) {
 		return
 	}
 	marked := *current
-	marked.durableEpoch = epoch
+	marked.durable = true
 	for _, cacheKey := range current.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == current {
 			o.leiosEndorserBlocks[cacheKey] = &marked
@@ -567,54 +564,35 @@ func waitForLeiosPersistWorker(
 	}
 }
 
-// PauseLeiosPersistWriterForLiveLifecycleOp waits for in-flight endorser-block
-// writes against the current, about-to-close database and stops the optional
-// GC worker (canceling its current sweep). Once LedgerState has been
-// reassigned to the reinitialized database after a live Restore/Truncate, the
-// next write goes to the new database and lazily restarts GC against it.
-// Endorser blocks cached in memory are no longer counted as durable, so they
-// are written again to the new database when next published or offered.
+// PauseLeiosPersistWriterForLiveLifecycleOp refuses every later endorser-block
+// write, waits for those already in flight against the current, about-to-close
+// database, and stops the optional GC worker (canceling its current sweep).
 //
-// The Ouroboros object is retained across a live Restore/Truncate, so a write
-// still running when closeStorageForLiveLifecycleOp closed the database would
-// fail against it, or land in the old store after the new one took over.
+// The refusal is permanent, like Close's. A live Restore/Truncate discards
+// this Ouroboros and builds a replacement whose cache starts empty and reloads
+// from the new database, so nothing on this instance may write once storage is
+// being closed. Fetch workers and subscribed handlers still running here
+// would otherwise register a write against the closing store.
 //
 // Call after inbound traffic stops. The lifecycle lock excludes new writes
 // while this waits. If connection shutdown is unconfirmed, the caller must use
 // a supervised restart rather than replacing storage while traffic may still
 // access it.
 //
-// Returns ErrLeiosPersistDrainUnconfirmed, without resetting anything, if a
-// write or the GC misses its deadline: a write may still be running against
-// the old database, or the GC may still be scanning or deleting through its
-// pinned blob store. Further writes are refused. The caller must not proceed
-// to close or replace storage in that case; it must escalate to a supervised
-// restart, the same as errStorageDrainUnconfirmed.
+// Returns ErrLeiosPersistDrainUnconfirmed if a write or the GC misses its
+// deadline: a write may still be running against the old database, or the GC
+// may still be scanning or deleting through its pinned blob store. The caller
+// must not proceed to close or replace storage in that case; it must escalate
+// to a supervised restart, the same as errStorageDrainUnconfirmed.
 func (o *Ouroboros) PauseLeiosPersistWriterForLiveLifecycleOp() error {
 	o.leiosPersistLifecycleMu.Lock()
 	defer o.leiosPersistLifecycleMu.Unlock()
 
 	o.leiosPersistMu.Lock()
-	o.leiosPersistHalted = true
+	o.leiosPersistClosed = true
 	o.leiosPersistMu.Unlock()
 	if !o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout) {
 		return ErrLeiosPersistDrainUnconfirmed
 	}
-	o.leiosPersistMu.Lock()
-	closed := o.leiosPersistClosed
-	if !closed {
-		o.leiosPersistHalted = false
-		o.leiosPersistPauses++
-	}
-	o.leiosPersistMu.Unlock()
-	if closed {
-		return nil
-	}
-	o.leiosPersistStoreMu.Lock()
-	o.leiosPersistPruneBeforeSlot = 0
-	o.leiosPersistStoreMu.Unlock()
-	o.leiosPersistGCOnce = sync.Once{}
-	o.leiosPersistGCStopOnce = sync.Once{}
-	o.leiosPersistGCStarted.Store(false)
 	return nil
 }
