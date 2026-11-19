@@ -13840,8 +13840,15 @@ reference scripts through the validation session's overlay
 transactions count, and refuses to select when the validator cannot measure
 them. The aggregate bounds are applied during selection only, since manifest
 construction receives the selected prefix; the size bounds limit both selection
-and manifest construction. Selection stops at the first valid transaction that
-no longer fits instead of validating the rest of a deep mempool. The size bounds
+and manifest construction. Selection prepares transaction CBOR and decodes independent candidates in
+windows of at most 64, using at most eight workers and no more than GOMAXPROCS.
+Each window joins before its decoded transactions reach validation. Preparation
+never accesses the ledger transaction or mutable overlays. The reducer consumes
+results in mempool order and alone performs semantic validation, reference-script
+resolution, capacity admission, and overlay updates. It rechecks the deadline
+and ledger publication after preparation. Selection stops at the first valid
+transaction that no longer fits; only the current preparation window can run
+ahead of that boundary. The size bounds
 are not optional: the reference node never fetches the closure of an endorser
 block over `maxEndorserBlockTxsSize` (`ExnLeiosClosureTooBig`), so no honest
 committee member votes for it, and a header announcing a manifest over
