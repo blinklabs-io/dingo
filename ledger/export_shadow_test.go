@@ -4621,3 +4621,7 @@ func (h *boundaryReplayHarness) coverSlot(slot uint64) {
 	})
 	h.ls.consensus.Store(&cp)
 }
+
+func (ls *LedgerState) pinSetReads(txn ledgerdb.Txn) {
+	_ = ls.pinSetReadsResult(txn, false)
+}

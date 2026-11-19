@@ -2709,7 +2709,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		return nil, err
 	}
 	var utxos []models.Utxo
-	view, err := ls.liveUtxoView(at)
+	view, err := ls.liveUtxoView(at, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -3302,7 +3302,7 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(ctx context.Context, txIns []ledge
 		}
 	}
 	var utxos []models.Utxo
-	view, err := ls.liveUtxoView(at)
+	view, err := ls.liveUtxoView(at, txn)
 	if err != nil {
 		return nil, err
 	}

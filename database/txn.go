@@ -81,7 +81,7 @@ type Txn struct {
 	sharedMetadata bool
 	lock           sync.Mutex
 	finished       bool
-	committed      bool
+	committed      atomic.Bool
 	readWrite      bool
 	afterCommit    []func()
 	dispatching    bool
@@ -414,6 +414,19 @@ func NewReadSnapshotContext(
 	ctx context.Context,
 	db *Database,
 ) (*Txn, ochainsync.Tip, error) {
+	return NewReadSnapshotWithAnchorContext(ctx, db, nil)
+}
+
+// NewReadSnapshotWithAnchorContext opens a coordinated read snapshot and runs
+// anchor before allowing another commit. The callback may anchor an additional
+// read-only store and register its release with Txn.OnFinish. It must not write
+// or commit a transaction. An anchor error rolls back the opened snapshot;
+// a panic propagates after the snapshot is released.
+func NewReadSnapshotWithAnchorContext(
+	ctx context.Context,
+	db *Database,
+	anchor func(*Txn) error,
+) (*Txn, ochainsync.Tip, error) {
 	ctx = nonNilContext(ctx)
 	ms := db.Metadata()
 	var reservation types.ReadReservation
@@ -460,6 +473,12 @@ func NewReadSnapshotContext(
 	defer resume()
 
 	t := &Txn{db: db}
+	returned := false
+	defer func() {
+		if !returned {
+			_ = safeRollback(t)
+		}
+	}()
 	t.readSnapshotAdmissionHeld = admissionHeld
 	admissionHeld = false
 	pinBlobStoreForTxn(t, db)
@@ -485,6 +504,15 @@ func NewReadSnapshotContext(
 	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(false)
 	}
+	if anchor != nil {
+		if err := anchor(t); err != nil {
+			return nil, tip, fmt.Errorf(
+				"anchor read snapshot: %w",
+				errors.Join(err, t.Rollback()),
+			)
+		}
+	}
+	returned = true
 	return t, tip, nil
 }
 
@@ -745,12 +773,19 @@ func (t *Txn) IsReadWrite() bool {
 }
 
 // IsCommitted reports whether this transaction reached a successful commit.
-// It is safe to call from an OnFinish callback, which runs after the
-// transaction lock has been released.
+// It waits for an in-progress commit to publish its result.
 func (t *Txn) IsCommitted() bool {
 	t.lock.Lock()
 	defer t.lock.Unlock()
-	return t.committed
+	return t.committed.Load()
+}
+
+// CommitPublished reports the published commit state without waiting for a
+// commit in progress. Snapshot anchors that already exclude commits use it
+// while holding the database commit-phase barrier. A false result alone does
+// not imply that metadata writes are still invisible to ordinary readers.
+func (t *Txn) CommitPublished() bool {
+	return t.committed.Load()
 }
 
 // MarkBlockCborCommittedSeparately marks a block written outside this
@@ -851,12 +886,12 @@ func (t *Txn) AfterCommit(fn func()) {
 		return
 	}
 	t.lock.Lock()
-	if t.finished && !t.committed {
+	if t.finished && !t.committed.Load() {
 		t.lock.Unlock()
 		return
 	}
 	t.afterCommit = append(t.afterCommit, fn)
-	if !t.committed || t.dispatching {
+	if !t.committed.Load() || t.dispatching {
 		t.lock.Unlock()
 		return
 	}
@@ -1299,7 +1334,7 @@ func (t *Txn) Commit() error {
 			return fmt.Errorf("metadata commit failed: %w", err)
 		}
 	}
-	t.committed = true
+	t.committed.Store(true)
 	t.dispatching = true
 	t.finishLocked()
 	dispatchAfterUnlock = true

@@ -50,6 +50,38 @@ func (*blockingAfterCommitTxn) Rollback() error {
 	return nil
 }
 
+func TestTxnCommittedWaitsForCommitPublication(t *testing.T) {
+	t.Parallel()
+	backend := &blockingAfterCommitTxn{
+		commitStarted: make(chan struct{}), allowCommit: make(chan struct{}),
+	}
+	txn := &Txn{metadataTxn: backend, readWrite: true}
+	release := sync.OnceFunc(func() { close(backend.allowCommit) })
+	t.Cleanup(release)
+	done := make(chan error, 1)
+	go func() { done <- txn.Commit() }()
+	testutil.RequireReceive(t, backend.commitStarted, time.Second, "commit entry")
+	published := make(chan bool, 1)
+	go func() { published <- txn.CommitPublished() }()
+	require.False(t, testutil.RequireReceive(
+		t, published, time.Second, "anchor polling must not block",
+	))
+	checking, result := make(chan struct{}), make(chan bool, 1)
+	go func() {
+		close(checking)
+		result <- txn.IsCommitted()
+	}()
+	testutil.RequireReceive(t, checking, time.Second, "commit-state reader")
+	testutil.RequireNoReceive(t, result, 100*time.Millisecond,
+		"ordinary readers must wait for commit publication")
+	release()
+	require.NoError(t, testutil.RequireReceive(t, done, time.Second, "commit"))
+	require.True(t, testutil.RequireReceive(
+		t, result, time.Second, "commit state",
+	))
+	require.True(t, txn.CommitPublished())
+}
+
 // TestTxnAfterCommitRunsOnCommit verifies after-commit callbacks fire, once and
 // in registration order, only after a read-write transaction commits.
 func TestTxnAfterCommitRunsOnCommit(t *testing.T) {
