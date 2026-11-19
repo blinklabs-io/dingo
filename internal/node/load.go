@@ -384,12 +384,16 @@ func withBulkLoadPragmas(
 
 // RunPlannerStats collects query-planner statistics on the metadata store
 // if it implements PlannerStatsUpdater. No-op for non-SQLite stores.
-func RunPlannerStats(db *database.Database, logger *slog.Logger) error {
+func RunPlannerStats(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+) error {
 	updater, ok := db.Metadata().(metadata.PlannerStatsUpdater)
 	if !ok {
 		return nil
 	}
-	if err := runPlannerStats(context.Background(), updater); err != nil {
+	if err := runPlannerStats(ctx, updater); err != nil {
 		return fmt.Errorf("planner statistics maintenance: %w", err)
 	}
 	return nil

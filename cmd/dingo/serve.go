@@ -514,7 +514,7 @@ func resumeBackfill(
 		return clearBackfillSyncStatus(db)
 	}
 
-	if err := node.RunPlannerStats(db, logger); err != nil {
+	if err := node.RunPlannerStats(ctx, db, logger); err != nil {
 		return fmt.Errorf("running planner statistics before backfill: %w", err)
 	}
 
