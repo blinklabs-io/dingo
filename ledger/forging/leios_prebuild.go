@@ -28,7 +28,7 @@ import (
 
 const leiosPrebuildLead = 3 * time.Second
 
-var errLeiosPrebuildStale = errors.New("Leios prebuild receipt is stale")
+var errLeiosPrebuildStale = errors.New("leios prebuild receipt is stale")
 
 type preparedLeiosEndorserBlock struct {
 	slot                          uint64
