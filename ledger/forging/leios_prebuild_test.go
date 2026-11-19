@@ -300,6 +300,7 @@ func TestLeiosPrebuildScheduleUsesUpcomingLeaderWithoutPublishing(
 	t *testing.T,
 ) {
 	t.Parallel()
+	now := time.Now().Add(time.Hour)
 	requests := make(chan leiosPrebuildRequest, 1)
 	worker := newLeiosPrebuildWorker(
 		t.Context(),
@@ -320,10 +321,11 @@ func TestLeiosPrebuildScheduleUsesUpcomingLeaderWithoutPublishing(
 		currentSlot:  10,
 		chainTipSlot: 9,
 		chainTipHash: []byte{1},
-		slotEnd:      time.Now().Add(time.Second),
+		slotEnd:      now.Add(time.Second),
 	}
 	forger := &BlockForger{
 		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		now:           func() time.Time { return now },
 		slotDuration:  time.Second,
 		slotClock:     clock,
 		leaderChecker: forgerTestLeader{},
@@ -353,6 +355,7 @@ func TestLeiosPrebuildScheduleUsesUpcomingLeaderWithoutPublishing(
 
 func TestLeiosPrebuildScheduleUsesNetworkSlotTimes(t *testing.T) {
 	t.Parallel()
+	now := time.Now().Add(time.Hour)
 	requests := make(chan leiosPrebuildRequest, 1)
 	worker := newLeiosPrebuildWorker(
 		t.Context(),
@@ -363,7 +366,7 @@ func TestLeiosPrebuildScheduleUsesNetworkSlotTimes(t *testing.T) {
 		nil,
 	)
 	t.Cleanup(worker.stop)
-	start := time.Now().Add(200 * time.Millisecond)
+	start := now.Add(200 * time.Millisecond)
 	clock := &retryTestSlotClock{
 		currentSlot:  10,
 		chainTipSlot: 9,
@@ -373,6 +376,7 @@ func TestLeiosPrebuildScheduleUsesNetworkSlotTimes(t *testing.T) {
 	}
 	forger := &BlockForger{
 		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		now:           func() time.Time { return now },
 		slotDuration:  time.Second,
 		slotClock:     clock,
 		leaderChecker: forgerTestLeader{},
@@ -604,4 +608,80 @@ func TestPreparedLeiosManifestMatchesWireConstruction(t *testing.T) {
 	require.Equal(t, expected, actualBodies)
 	_, _, _, err = buildPreparedLeiosEB(bodies, leiosEBCaps{maxRefs: 2})
 	require.ErrorContains(t, err, "capacity")
+}
+
+func TestLeiosPrebuildRechecksReceiptAtBroadcast(t *testing.T) {
+	t.Parallel()
+	forger, cached, caster := prebuildCacheForgerFixture(t)
+	var checks atomic.Int64
+	cached.current = func(context.Context, []byte, uint64) bool { return checks.Add(1) == 1 }
+	raw := makeMinimalTxCbor(t, 0x72, 0)
+	tx, err := conway.NewConwayTransactionFromCbor(raw)
+	require.NoError(t, err)
+	forger.leiosMempool = forgerTestMempoolProvider{
+		txs: []MempoolTransaction{
+			{Hash: tx.Hash().String(), Cbor: raw, Type: conway.TxTypeConway},
+		},
+	}
+	var receipt LeiosValidationReceipt
+	announcement, err := forger.checkAndForgeLeiosEB(
+		t.Context(),
+		10,
+		leiosSelectionBasis{parentHash: []byte{1}, slot: 10, receipt: &receipt},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, announcement)
+	require.NotEqual(
+		t,
+		lcommon.NewBlake2b256(cached.hash),
+		announcement.Hash,
+		"a stale cached candidate must be replaced before publication",
+	)
+	require.Equal(t, [][]byte{blockTxFromMempool(t, raw)}, caster.txBodies)
+	require.EqualValues(
+		t,
+		1,
+		promtest.ToFloat64(
+			forger.metrics.leiosPrebuildTotal.WithLabelValues("stale"),
+		),
+	)
+	require.Zero(
+		t,
+		promtest.ToFloat64(
+			forger.metrics.leiosPrebuildTotal.WithLabelValues("hit"),
+		),
+	)
+}
+
+func TestLeiosPrebuildDoesNotCountProductionSkips(t *testing.T) {
+	t.Parallel()
+	forger, _, _ := prebuildCacheForgerFixture(t)
+	forger.leiosMempool = forgerTestMempoolProvider{}
+	_, err := forger.prepareUpcomingLeiosEndorserBlock(
+		t.Context(),
+		testLeiosPrebuildRequest(10, 1),
+	)
+	require.NoError(t, err)
+	require.Zero(
+		t,
+		promtest.ToFloat64(
+			forger.metrics.leiosEbSkipped.WithLabelValues("no_transactions"),
+		),
+		"speculative emptiness is not a skipped production attempt",
+	)
+	_, err = forger.prepareLeiosEndorserBlock(
+		t.Context(),
+		10,
+		leiosSelectionBasis{},
+		leiosEBCaps{},
+		time.Now().Add(time.Hour),
+	)
+	require.NoError(t, err)
+	require.EqualValues(
+		t,
+		1,
+		promtest.ToFloat64(
+			forger.metrics.leiosEbSkipped.WithLabelValues("no_transactions"),
+		),
+	)
 }

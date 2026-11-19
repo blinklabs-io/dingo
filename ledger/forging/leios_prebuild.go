@@ -28,6 +28,8 @@ import (
 
 const leiosPrebuildLead = 3 * time.Second
 
+var errLeiosPrebuildStale = errors.New("Leios prebuild receipt is stale")
+
 type preparedLeiosEndorserBlock struct {
 	slot                          uint64
 	parent                        []byte
@@ -273,7 +275,7 @@ func (f *BlockForger) scheduleLeiosPrebuild(currentSlot uint64) {
 	if err != nil {
 		return
 	}
-	now := time.Now()
+	now := f.now()
 	if !now.Before(start) || start.Sub(now) > leiosPrebuildLead {
 		return
 	}
@@ -307,7 +309,7 @@ func (f *BlockForger) scheduleLeiosPrebuild(currentSlot uint64) {
 	reserve := min(defaultForgeEBSelectionReserve, duration/4)
 	deadline := start.Add(-min(50*time.Millisecond, duration/10))
 	selectionDeadline := start.Add(-reserve)
-	if !time.Now().Before(selectionDeadline) {
+	if !f.now().Before(selectionDeadline) {
 		return
 	}
 	f.leiosPrebuild.request(
@@ -330,9 +332,10 @@ func (f *BlockForger) prepareUpcomingLeiosEndorserBlock(
 		ctx,
 		request.slot,
 		leiosSelectionBasis{
-			parentHash: request.parent,
-			slot:       request.slot,
-			receipt:    &receipt,
+			parentHash:  request.parent,
+			speculative: true,
+			slot:        request.slot,
+			receipt:     &receipt,
 		},
 		request.caps,
 		request.selectionDeadline,

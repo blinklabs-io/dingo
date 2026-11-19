@@ -208,6 +208,7 @@ func selectParallelPreparedLeiosTransactions(
 			current func() bool,
 		) error {
 			preparation := newLeiosCandidatePreparation(txs, 0)
+			defer preparation.close()
 			preparation.expired = limits.expired
 			preparation.prepare = func(candidate MempoolTransaction) (result preparedLeiosCandidate) {
 				defer func() {

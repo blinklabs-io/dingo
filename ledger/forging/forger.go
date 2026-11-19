@@ -4672,20 +4672,27 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 			caps,
 		)
 		if cached != nil {
-			endConsume(
-				attribute.Bool("forge.prebuilt", true),
-				attribute.Int("forge.candidates", cached.candidates),
-				attribute.Int("forge.selected", len(cached.bodies)),
+			announcement, err := f.broadcastPreparedLeiosEndorserBlock(
+				ctx,
+				cached,
 			)
-		} else {
-			endConsume(attribute.Bool("forge.prebuilt", false))
+			if !errors.Is(err, errLeiosPrebuildStale) {
+				endConsume(
+					attribute.Bool("forge.prebuilt", true),
+					attribute.Int("forge.candidates", cached.candidates),
+					attribute.Int("forge.selected", len(cached.bodies)),
+				)
+				if f.metrics != nil {
+					f.metrics.leiosPrebuildTotal.WithLabelValues(reason).Inc()
+				}
+				*basis.receipt = cached.receipt
+				return announcement, err
+			}
+			reason = "stale"
 		}
+		endConsume(attribute.Bool("forge.prebuilt", false))
 		if f.metrics != nil {
 			f.metrics.leiosPrebuildTotal.WithLabelValues(reason).Inc()
-		}
-		if cached != nil {
-			*basis.receipt = cached.receipt
-			return f.broadcastPreparedLeiosEndorserBlock(ctx, cached)
 		}
 	}
 	prepared, err := f.prepareLeiosEndorserBlock(
@@ -4727,7 +4734,7 @@ func (f *BlockForger) prepareLeiosEndorserBlock(
 	endSnapshot()
 	if len(txs) == 0 {
 		f.logger.Debug("leios EB skipped: mempool empty", "slot", slot)
-		if f.metrics != nil {
+		if f.metrics != nil && !basis.speculative {
 			f.metrics.leiosEbSkipped.WithLabelValues("no_transactions").Inc()
 		}
 		return nil, nil
@@ -4766,7 +4773,7 @@ func (f *BlockForger) prepareLeiosEndorserBlock(
 		attribute.Int("forge.selected", len(validatedTxs)),
 		attribute.Bool("forge.selection_truncated", truncated),
 	)
-	if f.metrics != nil {
+	if f.metrics != nil && !basis.speculative {
 		f.metrics.leiosEbSelectionSeconds.Observe(selectDuration.Seconds())
 		if truncated {
 			f.metrics.leiosEbSelectionTruncated.Inc()
@@ -4783,7 +4790,7 @@ func (f *BlockForger) prepareLeiosEndorserBlock(
 			"slot", slot,
 			"error", err,
 		)
-		if f.metrics != nil {
+		if f.metrics != nil && !basis.speculative {
 			f.metrics.leiosEbSkipped.WithLabelValues("ledger_not_at_parent").
 				Inc()
 		}
@@ -4803,7 +4810,7 @@ func (f *BlockForger) prepareLeiosEndorserBlock(
 	txs = validatedTxs
 	if len(txs) == 0 {
 		f.logger.Debug("leios EB skipped: no valid transactions", "slot", slot)
-		if f.metrics != nil {
+		if f.metrics != nil && !basis.speculative {
 			f.metrics.leiosEbSkipped.WithLabelValues("no_valid_transactions").
 				Inc()
 		}
@@ -4824,7 +4831,7 @@ func (f *BlockForger) prepareLeiosEndorserBlock(
 	if err != nil {
 		if errors.Is(err, errNoValidTxRefs) {
 			f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot)
-			if f.metrics != nil {
+			if f.metrics != nil && !basis.speculative {
 				f.metrics.leiosEbSkipped.WithLabelValues("no_valid_tx_refs").
 					Inc()
 			}
@@ -4856,6 +4863,11 @@ func (f *BlockForger) broadcastPreparedLeiosEndorserBlock(
 	}
 	endBroadcast := beginForgePhase(ctx, "block.forge.leios.broadcast")
 	broadcastStart := f.now()
+	if prepared.prebuilt &&
+		!prepared.isCurrent(ctx, prepared.parent, prepared.slot) {
+		endBroadcast()
+		return nil, errLeiosPrebuildStale
+	}
 	broadcastErr := f.leiosEBCaster.BroadcastEndorserBlock(
 		prepared.slot,
 		prepared.hash,
@@ -4933,6 +4945,7 @@ func selectValidLeiosTransactions(ctx context.Context,
 			created := make(map[utxoref.Key]lcommon.Utxo)
 			accounts := utxoref.NewStateOverlay()
 			preparation := newLeiosCandidatePreparation(txs, 0)
+			defer preparation.close()
 			preparation.expired = limits.expired
 			for range txs {
 				if err := ctx.Err(); err != nil {
@@ -5024,6 +5037,7 @@ func selectValidLeiosTransactions(ctx context.Context,
 // closure that ranking block applies. The zero value is an unpinned pass over
 // the current ledger state with no closure.
 type leiosSelectionBasis struct {
+	speculative    bool
 	preparedBodies *[][]byte
 	slot           uint64
 	receipt        *LeiosValidationReceipt

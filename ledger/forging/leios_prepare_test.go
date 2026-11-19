@@ -17,10 +17,12 @@ package forging
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
@@ -69,6 +71,7 @@ func TestLeiosPreparationMatchesSerial(t *testing.T) {
 		t.Run(fmt.Sprint(workers), func(t *testing.T) {
 			t.Parallel()
 			p := newLeiosCandidatePreparation(txs, workers)
+			defer p.close()
 			for i := range txs {
 				expected := prepareLeiosCandidate(txs[i])
 				actual, err := p.next(t.Context())
@@ -91,6 +94,7 @@ func TestLeiosPreparationCancellationJoinsAndBoundsWork(t *testing.T) {
 	t.Parallel()
 	txs := preparationCandidates(t, 3*leiosPreparationWindow)
 	p := newLeiosCandidatePreparation(txs, 4)
+	defer p.close()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var active, calls atomic.Int64
@@ -107,6 +111,7 @@ func TestLeiosPreparationCancellationJoinsAndBoundsWork(t *testing.T) {
 	require.Zero(t, active.Load())
 	require.LessOrEqual(t, calls.Load(), int64(4))
 	p = newLeiosCandidatePreparation(txs, 4)
+	defer p.close()
 	calls.Store(0)
 	p.prepare = func(tx MempoolTransaction) preparedLeiosCandidate {
 		calls.Add(1)
@@ -114,7 +119,7 @@ func TestLeiosPreparationCancellationJoinsAndBoundsWork(t *testing.T) {
 	}
 	_, err = p.next(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, int64(leiosPreparationWindow), calls.Load())
+	require.LessOrEqual(t, calls.Load(), int64(leiosPreparationWindow))
 	for range leiosPreparationWindow - 1 {
 		_, err = p.next(t.Context())
 		require.NoError(t, err)
@@ -126,6 +131,7 @@ func TestLeiosPreparationRunsIndependentWorkConcurrently(t *testing.T) {
 	t.Parallel()
 	txs := preparationCandidates(t, leiosPreparationWindow)
 	p := newLeiosCandidatePreparation(txs, 4)
+	defer p.close()
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -161,18 +167,123 @@ func TestLeiosPreparationStopsClaimingAtDeadline(t *testing.T) {
 	t.Parallel()
 	txs := preparationCandidates(t, leiosPreparationWindow)
 	p := newLeiosCandidatePreparation(txs, 1)
-	expired := false
-	calls := 0
+	defer p.close()
+	var expired atomic.Bool
+	var calls atomic.Int64
 	original := p.prepare
-	p.expired = func() bool { return expired }
+	p.expired = expired.Load
 	p.prepare = func(tx MempoolTransaction) preparedLeiosCandidate {
-		calls++
-		expired = true
+		calls.Add(1)
+		result := original(tx)
+		expired.Store(true)
+		return result
+	}
+	candidate, err := p.next(t.Context())
+	require.NoError(
+		t,
+		err,
+		"the completed prefix survives the preparation deadline",
+	)
+	require.Equal(t, txs[0].Hash, candidate.mempool.Hash)
+	_, err = p.next(t.Context())
+	require.ErrorIs(t, err, errLeiosPreparationExpired)
+	require.EqualValues(
+		t,
+		1,
+		calls.Load(),
+		"no additional candidate may start after expiry",
+	)
+}
+
+func TestLeiosPreparationReturnsHeadBeforeLaterCandidate(t *testing.T) {
+	t.Parallel()
+	txs := preparationCandidates(t, 2)
+	p := newLeiosCandidatePreparation(txs, 2)
+	defer p.close()
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	later := make(chan struct{})
+	original := p.prepare
+	p.prepare = func(tx MempoolTransaction) preparedLeiosCandidate {
+		if tx.Hash == txs[1].Hash {
+			close(later)
+			<-release
+		}
+		return original(tx)
+	}
+	type result struct {
+		candidate preparedLeiosCandidate
+		err       error
+	}
+	first := make(chan result, 1)
+	go func() { candidate, err := p.next(t.Context()); first <- result{candidate, err} }()
+	testutil.RequireReceive(
+		t,
+		later,
+		5*time.Second,
+		"later candidate preparation is blocked",
+	)
+	ready := testutil.RequireReceive(
+		t,
+		first,
+		5*time.Second,
+		"the head candidate before later preparation finishes",
+	)
+	require.NoError(t, ready.err)
+	require.Equal(t, txs[0].Hash, ready.candidate.mempool.Hash)
+	unblock()
+	second, err := p.next(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, txs[1].Hash, second.mempool.Hash)
+}
+
+func TestLeiosPreparationCloseJoinsRunningWorkers(t *testing.T) {
+	t.Parallel()
+	txs := preparationCandidates(t, 2)
+	p := newLeiosCandidatePreparation(txs, 2)
+	defer p.close()
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	entered := make(chan struct{})
+	original := p.prepare
+	p.prepare = func(tx MempoolTransaction) preparedLeiosCandidate {
+		if tx.Hash == txs[1].Hash {
+			close(entered)
+			<-release
+		}
 		return original(tx)
 	}
 	_, err := p.next(t.Context())
-	require.ErrorIs(t, err, errLeiosPreparationExpired)
-	require.Equal(t, 1, calls, "no additional candidate may start after expiry")
+	require.NoError(t, err)
+	testutil.RequireReceive(
+		t,
+		entered,
+		5*time.Second,
+		"a later preparation is running",
+	)
+	cancelled := make(chan struct{})
+	cancel := p.batch.cancel
+	p.batch.cancel = func() { cancel(); close(cancelled) }
+	closed := make(chan struct{})
+	go func() { p.close(); close(closed) }()
+	testutil.RequireReceive(
+		t,
+		cancelled,
+		5*time.Second,
+		"preparation cancellation",
+	)
+	testutil.RequireNoReceive(
+		t,
+		closed,
+		20*time.Millisecond,
+		"close must join running preparation",
+	)
+	unblock()
+	testutil.RequireReceive(t, closed, 5*time.Second, "joined preparation")
 }
 
 func BenchmarkLeiosPreparation(b *testing.B) {
@@ -182,6 +293,7 @@ func BenchmarkLeiosPreparation(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				p := newLeiosCandidatePreparation(txs, workers)
+				defer p.close()
 				for range txs {
 					candidate, err := p.next(b.Context())
 					if err != nil || candidate.err != nil {

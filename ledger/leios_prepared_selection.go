@@ -152,15 +152,16 @@ func (ls *LedgerState) WithPreparedLeiosSelection(
 // preparedLeiosSelectionTransaction keeps decoded semantics and immutable wire
 // bytes together. Only the ledger's pure constructor can create this token.
 type preparedLeiosSelectionTransaction struct {
-	raw []byte
-	tx  lcommon.Transaction
+	owner *LedgerState
+	raw   []byte
+	tx    lcommon.Transaction
 }
 
 func (p *preparedLeiosSelectionTransaction) Transaction() lcommon.Transaction { return p.tx }
 
 func (p *preparedLeiosSelectionTransaction) BlockTransactionCbor() []byte { return p.raw }
 
-func prepareLeiosSelectionTransaction(
+func (ls *LedgerState) prepareLeiosSelectionTransaction(
 	raw []byte,
 ) (forging.PreparedLeiosTransaction, error) {
 	raw = bytes.Clone(raw)
@@ -171,7 +172,7 @@ func prepareLeiosSelectionTransaction(
 	if err := validateTransactionOutputIndexes([]lcommon.Transaction{tx}); err != nil {
 		return nil, err
 	}
-	return &preparedLeiosSelectionTransaction{raw: raw, tx: tx}, nil
+	return &preparedLeiosSelectionTransaction{owner: ls, raw: raw, tx: tx}, nil
 }
 
 var errLeiosSelectionPreempted = errors.New(
@@ -219,7 +220,7 @@ func (ls *LedgerState) cancelLeiosSelectionsForTransition() {
 }
 
 // WithParallelLeiosSelection owns the ordered validation session while pure
-// transaction decoding may run concurrently before each ordered batch joins.
+// transaction decoding runs concurrently with serial ordered ledger work.
 func (ls *LedgerState) WithParallelLeiosSelection(
 	ctx context.Context,
 	parent []byte,
@@ -267,7 +268,7 @@ func (ls *LedgerState) WithParallelLeiosSelection(
 			validatePrepared := func(token forging.PreparedLeiosTransaction, consumed map[utxoref.Key]struct{}, created map[utxoref.Key]lcommon.Utxo) (lcommon.Transaction, error) {
 				validated = nil
 				candidate, ok := token.(*preparedLeiosSelectionTransaction)
-				if !ok || candidate == nil {
+				if !ok || candidate == nil || candidate.owner != ls {
 					fault = errors.New(
 						"invalid prepared Leios transaction token",
 					)
@@ -311,7 +312,7 @@ func (ls *LedgerState) WithParallelLeiosSelection(
 				selectedBytes += uint64(len(candidate.raw))
 				return nil
 			}
-			if err := fn(prepareLeiosSelectionTransaction, validatePrepared, measure, admit, current); err != nil {
+			if err := fn(ls.prepareLeiosSelectionTransaction, validatePrepared, measure, admit, current); err != nil {
 				return err
 			}
 			if fault != nil {

@@ -511,7 +511,7 @@ func TestParallelLeiosPreparationOwnsWireBytes(t *testing.T) {
 	t.Parallel()
 	f := newLeiosCertApplyFixture(t)
 	raw := bytes.Clone(f.ebTxs[0])
-	token, err := prepareLeiosSelectionTransaction(raw)
+	token, err := f.ls.prepareLeiosSelectionTransaction(raw)
 	require.NoError(t, err)
 	original := bytes.Clone(token.BlockTransactionCbor())
 	raw[len(raw)-1] ^= 1
@@ -718,7 +718,7 @@ func TestParallelLeiosPreparationPreservesIndefiniteWireBytes(t *testing.T) {
 	f := newLeiosCertApplyFixture(t)
 	raw := append([]byte{0x9f}, f.ebTxs[0][1:]...)
 	raw = append(raw, 0xff)
-	token, err := prepareLeiosSelectionTransaction(raw)
+	token, err := f.ls.prepareLeiosSelectionTransaction(raw)
 	require.NoError(t, err)
 	require.Equal(t, raw, token.BlockTransactionCbor())
 }
@@ -744,4 +744,34 @@ func TestPreparedLeiosSelectionDoesNotQueueBehindLedgerTransition(t *testing.T) 
 	require.Nil(t, receipt)
 	require.False(t, opened, "speculation must not queue for the writer during a ledger transition")
 	require.False(t, called)
+}
+
+func TestParallelLeiosSelectionRejectsAnotherProvidersToken(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	owner := &LedgerState{}
+	token, err := owner.prepareLeiosSelectionTransaction(f.ebTxs[0])
+	require.NoError(t, err)
+	receipt, err := f.ls.WithParallelLeiosSelection(
+		t.Context(),
+		f.originHash,
+		leiosCertApplyAnnouncingSlot,
+		func(
+			_ func([]byte) (forging.PreparedLeiosTransaction, error),
+			validate func(forging.PreparedLeiosTransaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) (lcommon.Transaction, error),
+			_ forging.TxRefScriptSizeFunc,
+			_ func(forging.PreparedLeiosTransaction) error,
+			_ func() bool,
+		) error {
+			_, err := validate(
+				token,
+				map[utxoref.Key]struct{}{},
+				map[utxoref.Key]lcommon.Utxo{},
+			)
+			return err
+		},
+	)
+	require.ErrorContains(t, err, "invalid prepared Leios transaction token")
+	require.Nil(t, receipt)
+	f.requireEndorserEffects(false)
 }
