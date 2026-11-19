@@ -79,6 +79,9 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 				)
 				if !commit {
 					require.NoError(t, txn.Rollback())
+					cursor, err := loadRewardPrecomputeCursor(ldb, nil, 1)
+					require.NoError(t, err)
+					require.Nil(t, cursor)
 					testutil.RequireNoReceive(
 						t,
 						received,
@@ -99,8 +102,16 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 					RewardFactsEvent{SnapshotEpoch: 1, CapturedSlot: 200},
 					ev,
 				)
+				cursor, err := loadRewardPrecomputeCursor(ldb, nil, 1)
+				require.NoError(t, err)
+				require.NotNil(t, cursor, "event readers can discover the round")
+				require.True(t, cursor.Done)
+				require.Equal(t, len(round.poolInputs), cursor.CompletedPools)
+				require.Equal(t, round.inputFingerprint, cursor.InputFingerprint)
+				require.Equal(t, uint64(200), cursor.CapturedSlot)
 				rows, err := db.Metadata().GetRewardPoolOutputs(1, nil)
 				require.NoError(t, err)
+				require.Equal(t, rewardPoolOutputFingerprint(rows), cursor.OutputFingerprint)
 				require.NotEmpty(
 					t,
 					rows,
@@ -109,4 +120,24 @@ func TestRewardFactsEventFollowsPrecomputeCommit(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestSinglePassShelleyRewardCompletion(t *testing.T) {
+	t.Parallel()
+	ls, _ := seedMultiPoolRewardPrecomputeFixture(t, 1, 1, 2)
+	ldb := ls.ledgerDB()
+	txn := ldb.Begin(t.Context(), true)
+	defer txn.Release()
+	app, ok, err := ls.precomputeStakeRewardsCalculate(txn, 4, 1200, 1200)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.False(t, app.params.SupportsPerPoolMemberRewards())
+	require.NoError(t, ls.saveStakeRewardPrecompute(ldb, txn, app, 4, 1200, 1200))
+	require.NoError(t, txn.Commit())
+	cursor, err := loadRewardPrecomputeCursor(ldb, nil, 1)
+	require.NoError(t, err)
+	require.NotNil(t, cursor)
+	require.True(t, cursor.Done)
+	require.NotEmpty(t, cursor.InputFingerprint)
+	require.Equal(t, 1, cursor.CompletedPools)
 }

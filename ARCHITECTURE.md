@@ -3876,6 +3876,9 @@ after the ledger database is recovered and before the ledger starts. The writer
 starts after the ledger, wakes when `ledger.tip` or `ledger.reward_facts`
 fires, and stops before the IndexerDB closes, which precedes the ledger
 database closing the blob store.
+Failed passes retry with exponential backoff from one to thirty seconds,
+without requiring another ledger event. Wakes interrupt the retry delay and
+successful passes return to waiting for events.
 The root package cannot import `internal/node`, so the writer is injected with
 `WithIndexerWriterFactory`. The API readers sit over the IndexerDB on a split node: the Blockfrost and
 Kupo adapters resolve their database through one `db()` accessor (the

@@ -4595,7 +4595,11 @@ store, and the IndexerDB closes before the ledger database does.
 The writer follows the ledger's durable tip and wakes at startup, on
 `ledger.tip`, and on `ledger.reward_facts` after reward precomputation commits.
 A caught-up writer copies newly completed reward facts without advancing its
-tip or replaying withdrawals. `dingo_indexer_tip_slot`, `dingo_indexer_lag_blocks` and
+tip or replaying withdrawals. Single-pass and chunked completion both persist
+the completed cursor before publishing the reward-facts event. Failed writer
+passes retry after one second, doubling the delay up to thirty seconds; a wake
+can retry sooner, and cancellation interrupts the wait.
+`dingo_indexer_tip_slot`, `dingo_indexer_lag_blocks` and
 `dingo_indexer_lag_seconds` report where it is; the lag in seconds is the
 wall-clock distance between the two tips from the ledger's slot clock, and one
 second per slot until that clock exists.

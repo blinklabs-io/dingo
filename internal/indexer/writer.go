@@ -30,6 +30,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
@@ -243,10 +244,11 @@ func (w *Writer) Wake() {
 }
 
 // Run catches up, then again after each Wake, until ctx ends. A pass that
-// fails is logged and retried on the next wake.
+// fails is logged and retried with bounded backoff, or on the next wake.
 func (w *Writer) Run(ctx context.Context) error {
 	var lastErr string
 	var consecutive int
+	delay := time.Second
 	for {
 		err := w.CatchUp(ctx)
 		switch {
@@ -266,10 +268,25 @@ func (w *Writer) Run(ctx context.Context) error {
 		if w.failures != nil && ctx.Err() == nil {
 			w.failures(consecutive)
 		}
+		var timer *time.Timer
+		var retry <-chan time.Time
+		if err != nil && ctx.Err() == nil {
+			timer = time.NewTimer(delay)
+			retry = timer.C
+			delay = min(2*delay, 30*time.Second)
+		} else {
+			delay = time.Second
+		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
 		case <-w.wake:
+		case <-retry:
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 	}
 }
