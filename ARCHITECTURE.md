@@ -6128,7 +6128,7 @@ it. This call happens last in quiesce, after connection shutdown. If that
 shutdown cannot be confirmed, the operation requires a supervised restart
 instead of replacing storage while traffic can still write. A pause whose wait
 is not confirmed returns `ErrLeiosPersistDrainUnconfirmed` and leaves writes
-refused. Because endorser transactions are not part Because endorser transactions are not part
+refused. Because endorser transactions are not part
 of any chain block — so they have no CBOR offsets — their CBOR is persisted as a
 standalone blob keyed by the endorser block's `(slot, hash)` with DOFF offsets
 (mirroring the genesis path), and `SetTransaction`/delta apply is reused so they
@@ -6411,10 +6411,10 @@ On an eligible notify
 block offer, `ouroboros/` fetches the endorser-block manifest over leios-fetch,
 decodes and hash-validates it, rejects it if the fetched body's length does not
 match the offer's declared size (`MsgBlockOffer.Size`) or if caching it would
-exceed the cache's per-entry byte budget, caches it, queues the manifest and
-complete transaction set for asynchronous persistence to the blob store (a
-single background writer, off the fetch hot path; see "Era-Specific
-Validation"), and hands it to the vote and pipeline managers. The relay offers
+exceed the cache's per-entry byte budget, caches it, writes the manifest and
+any complete transaction set to the LeiosDB once its slot is verified, before
+the fetch reports success or the block is offered downstream (see
+"Era-Specific Validation"), and hands it to the vote and pipeline managers. The relay offers
 each endorser block on every connection, so the manifest fetch is skipped once
 this exact (slot, hash) occurrence is already cached, mirroring the same guard
 on the transactions offer; the cache (`Ouroboros.leiosEndorserBlocks`) is keyed
@@ -17249,7 +17249,7 @@ transaction lists, and transaction-by-hash lookup use the ledger transaction
 view. For a certified Dijkstra ranking block, that view resolves the parent
 ranking block's endorser-block announcement and loads the matching persisted
 manifest and transaction bodies, using the verified in-memory endorser-block
-cache when asynchronous persistence has not completed. It verifies the
+cache when the LeiosDB lacks the manifest or bodies. It verifies the
 manifest and each body against the announced hash, ordered references,
 transaction hashes, and encoded sizes before exposing them. A missing or
 inconsistent certified body is an error rather than an empty transaction list.

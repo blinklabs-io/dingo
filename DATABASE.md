@@ -7184,8 +7184,9 @@ offer check, so backfill of history still works.
 **Certified writes.** A certifying ranking block's apply resolves the endorser
 block's manifest and transactions with one provider lookup
 (`certifiedEndorserBlockData`) and writes them to the LeiosDB with
-`PutVolatile` before the ranking block commits, bypassing the droppable persist
-queue; stored bytes that differ from the verified ones are rewritten. The
+`PutVolatile` before the ranking block commits, independently of the
+synchronous fetch-path write, which is skipped for an unverified slot and may
+have failed; stored bytes that differ from the verified ones are rewritten. The
 closure is written during apply, before the offsets that point into it, so
 offsets never name a closure that is not committed. A block rejected by a later
 check leaves its content and closure volatile and unpinned, and the collector
