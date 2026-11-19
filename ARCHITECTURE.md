@@ -6076,9 +6076,14 @@ the same occurrence twice is harmless. An unverified peer-offered entry is not
 written until its slot is corroborated. The cache entry records that its current
 content was written (`durable`), carried forward only while the transaction
 set does not grow, so re-offers of a held block from
-every connection do not rewrite it, while an offer of a block cached whole but
-not durable (its earlier write failed) retries the write instead of reporting
-success. Entries reloaded from the LeiosDB are durable. A certified endorser
+every connection do not rewrite it, while a manifest or transaction offer, or
+a by-point request from the ledger, for a block cached but not durable (its
+earlier write failed) retries the write instead of reporting success. A block
+that needs a write is also withheld from relay offers and from relayed
+announcements until a write succeeds. A failed LeiosDB write is classified as a
+local failure: it leaves the serving peer's cooldown unchanged and ends the
+by-point request rather than failing over to another peer. Entries reloaded
+from the LeiosDB are durable. A certified endorser
 block is also written by ledger apply of the certifying ranking block when
 `em`/`et` are absent (`persistCertifiedEndorserBlock`, from the same provider
 lookup that supplied the applied transactions). None of this affects UTxO

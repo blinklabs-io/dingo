@@ -903,7 +903,10 @@ func (o *Ouroboros) enqueueLeiosRelayOffers(
 	}
 	o.leiosMu.Lock()
 	current := o.leiosEndorserBlocks[key]
-	if current == nil || !current.slotVerified || !current.completeTxCache() {
+	// An entry that is not durable stays pending, with its offer requested:
+	// the write that makes it durable enqueues again.
+	if current == nil || !current.slotVerified ||
+		!o.leiosRelayContentReady(current) {
 		o.leiosMu.Unlock()
 		return
 	}
