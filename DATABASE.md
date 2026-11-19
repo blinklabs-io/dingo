@@ -145,8 +145,10 @@ full update path. PostgreSQL and MySQL report the operation unsupported and use
 that fallback. Before a backfill starts or resumes, `node.RunPlannerStats` uses
 the same optimizer when `sqlite_stat1` already has rows
 (`metadata.PlannerStatsPresenceChecker`), so a full `ANALYZE` over a large
-database does not delay the resume; with no statistics it runs the full
-`ANALYZE`.
+database does not delay the resume. It runs the full `ANALYZE` instead when no
+statistics exist, when the presence check fails, or when the optimizer reports
+the operation unsupported or skipped, so existing statistics do not guarantee
+the incremental path.
 
 The growth rule never corrects `utxo` statistics taken over an imported
 ledger state. Every imported UTxO is unspent and shares one `added_slot`, so

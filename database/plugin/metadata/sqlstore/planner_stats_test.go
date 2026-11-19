@@ -615,21 +615,51 @@ func TestHasPlannerStatsTracksSqliteStat1(t *testing.T) {
 }
 
 // BenchmarkPlannerStatsResume compares the full ANALYZE a resumed backfill
-// used to run with the incremental path, on a database that already has
-// statistics and then receives unrelated inserts.
+// used to run with the incremental path. The grown cases analyze utxo, then
+// double it before the timed run, as an interrupted backfill does; each
+// iteration builds that state afresh, because one run refreshes the
+// statistics and a second would measure the unchanged case instead.
 func BenchmarkPlannerStatsResume(b *testing.B) {
-	store := newFilePlannerStatsStore(b, prometheus.NewRegistry())
-	seedStakeRefLookupUtxos(b, store, 1_000_000, 4096)
-	require.NoError(b, store.UpdatePlannerStats())
-	b.Run("full_analyze", func(b *testing.B) {
+	const rows = 500_000
+	grownStore := func(b *testing.B) *Store {
+		b.Helper()
+		store := newFilePlannerStatsStore(b, prometheus.NewRegistry())
+		seedStakeRefLookupUtxos(b, store, rows, 4096)
+		require.NoError(b, store.UpdatePlannerStats())
+		_, err := store.writeDB.Exec(`INSERT INTO utxo (tx_id, output_idx,
+  staking_key, credential_tag, added_slot, deleted_slot, amount)
+SELECT tx_id, output_idx + 4, staking_key, credential_tag,
+  added_slot + ?, deleted_slot, amount FROM utxo`, rows)
+		require.NoError(b, err)
+		return store
+	}
+	b.Run("grown/full_analyze", func(b *testing.B) {
 		for range b.N {
+			b.StopTimer()
+			store := grownStore(b)
+			b.StartTimer()
 			require.NoError(b, store.UpdatePlannerStats())
 		}
 	})
-	b.Run("incremental", func(b *testing.B) {
+	b.Run("grown/incremental", func(b *testing.B) {
+		for range b.N {
+			b.StopTimer()
+			store := grownStore(b)
+			b.StartTimer()
+			_, err := store.OptimizePlannerStatsContext(
+				b.Context(), PlannerStatsTriggerStartup,
+			)
+			require.NoError(b, err)
+		}
+	})
+	b.Run("unchanged/incremental", func(b *testing.B) {
+		store := newFilePlannerStatsStore(b, prometheus.NewRegistry())
+		seedStakeRefLookupUtxos(b, store, rows, 4096)
+		require.NoError(b, store.UpdatePlannerStats())
+		b.ResetTimer()
 		for range b.N {
 			_, err := store.OptimizePlannerStatsContext(
-				b.Context(), "startup",
+				b.Context(), PlannerStatsTriggerStartup,
 			)
 			require.NoError(b, err)
 		}
