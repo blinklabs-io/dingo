@@ -1252,8 +1252,7 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		if !ok {
 			return false
 		}
-		// Persistence belongs to the node lifecycle and must outlive this peer request.
-		//nolint:contextcheck
+		//nolint:contextcheck // Validation and persistence GC are node-owned and must outlive this peer request.
 		if err := o.storeLeiosEndorserBlock(
 			point,
 			respBlock.BlockRaw,
@@ -1273,6 +1272,16 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		}
 	}
 	if data.txCount == 0 || data.completeTxCache() {
+		//nolint:contextcheck // Persistence GC is node-owned and must outlive this peer request.
+		if err := o.ensureLeiosEndorserBlockDurable(data); err != nil {
+			o.config.Logger.Debug(
+				"failed to persist cached leios EB on txs offer",
+				"error", err,
+				"connection_id", connKey,
+				"slot", point.Slot,
+			)
+			return false
+		}
 		return true
 	}
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
@@ -1308,8 +1317,7 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		)
 		return false
 	}
-	// Persistence belongs to the node lifecycle and must outlive this peer request.
-	//nolint:contextcheck
+	//nolint:contextcheck // Validation and persistence GC are node-owned and must outlive this peer request.
 	if err := o.storeLeiosEndorserBlock(
 		point,
 		data.blockRaw,
@@ -1942,8 +1950,17 @@ func (o *Ouroboros) handleLeiosNotifyMessage(
 		// same hash can be a live, independently required occurrence at
 		// another slot at the same time, and that other
 		// occurrence being cached must not suppress fetching this one.
-		if _, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok {
-			return nil
+		if cachedData, ok := o.lookupLeiosEndorserBlock(
+			point.Slot, point.Hash,
+		); ok {
+			if !o.leiosEndorserBlockNeedsWrite(cachedData) {
+				return nil
+			}
+			// The manifest is held but its write failed: retry the write
+			// instead of fetching it again.
+			return o.dispatchLeiosDurabilityRetry(
+				ctx.ConnectionId, connId, point,
+			)
 		}
 		// Reject an offer that already declares more than the cache's
 		// per-entry byte budget instead of spending a fetch on a body
@@ -2099,9 +2116,12 @@ func (o *Ouroboros) handleLeiosNotifyMessage(
 		// empty) at this offer's point. Skip without spawning a fetch. The
 		// lookup is keyed by point, not hash alone, for the same reason as
 		// MsgBlockOffer above: a different, unrelated occurrence of this hash
-		// being complete must not satisfy this offer's point.
+		// being complete must not satisfy this offer's point. An entry whose
+		// write failed is not skipped: the dispatched fetch retries it without
+		// requesting the bodies again.
 		data, cached := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
-		if cached && (data.txCount == 0 || data.completeTxCache()) {
+		if cached && (data.txCount == 0 || data.completeTxCache()) &&
+			!o.leiosEndorserBlockNeedsWrite(data) {
 			return nil
 		}
 		if (!cached || !data.slotVerified) && !o.leiosElectionObserved(point) {
@@ -3574,7 +3594,7 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 		if cached, available := o.cachedLeiosEndorserBlockManifest(
 			slot,
 			ebHash.Bytes(),
-		); !available || !cached.completeTxCache() {
+		); !available || !o.leiosRelayContentReady(cached) {
 			o.leiosMu.Lock()
 			if o.leiosRelayPendingAnnouncements == nil {
 				o.leiosRelayPendingAnnouncements = make(
@@ -3593,7 +3613,7 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 			// A persistent reload can populate the cache while the lookup above
 			// misses. Recheck under the cache lock before parking the header.
 			if current := o.leiosEndorserBlocks[pointKey]; current != nil &&
-				current.completeTxCache() {
+				o.leiosRelayContentReady(current) {
 				o.publishPendingLeiosRelayAnnouncementsLocked(pointKey)
 			}
 			o.leiosMu.Unlock()
@@ -3700,6 +3720,57 @@ func (o *Ouroboros) EnqueueLeiosBlockAnnouncement(raw []byte) {
 	}
 }
 
+// leiosRelayContentReady reports whether data may be offered downstream: its
+// transactions are all present and its content needs no write. A header
+// released earlier prompts the receiver to request the closure, so an entry
+// that would not survive a restart is held back until a write succeeds.
+func (o *Ouroboros) leiosRelayContentReady(
+	data *leiosEndorserBlockData,
+) bool {
+	return data.completeTxCache() && !o.leiosEndorserBlockNeedsWrite(data)
+}
+
+// dispatchLeiosDurabilityRetry retries the write of a cached endorser block
+// off the offering handler, deduped across connections by the manifest claim.
+func (o *Ouroboros) dispatchLeiosDurabilityRetry(
+	connectionID ouroboros.ConnectionId,
+	connKey string,
+	point ocommon.Point,
+) error {
+	guard, admitted := o.reserveLeiosFetch(connectionID)
+	if guard == nil {
+		return errors.New("missing leios fetch guard")
+	}
+	if !admitted {
+		return nil
+	}
+	manifestKey := leiosBlockKey(point.Slot, point.Hash)
+	claim := &leiosManifestFetchClaim{done: make(chan struct{})}
+	if _, loaded := o.leiosManifestFetchInProgress.LoadOrStore(
+		manifestKey, claim,
+	); loaded {
+		o.releaseLeiosFetch(guard)
+		return nil
+	}
+	o.dispatchLeiosFetchReserved(guard, func() {
+		defer o.finishLeiosManifestFetch(manifestKey, claim)
+		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		if !ok {
+			return
+		}
+		//nolint:contextcheck // Persistence is node-owned and must outlive this peer request.
+		if err := o.ensureLeiosEndorserBlockDurable(data); err != nil {
+			o.config.Logger.Debug(
+				"failed to persist cached leios EB on manifest offer",
+				"error", err,
+				"connection_id", connKey,
+				"slot", point.Slot,
+			)
+		}
+	})
+	return nil
+}
+
 // The caller holds leiosMu, and recordLeiosAnnouncementLocked also holds
 // leiosAnnouncementsMu, which is ordered before leiosMu, so this never takes
 // that mutex.
@@ -3711,7 +3782,7 @@ func (o *Ouroboros) publishPendingLeiosRelayAnnouncementsLocked(
 	if len(uncached) > 0 {
 		current = uncached[0]
 	}
-	if current == nil || !current.completeTxCache() {
+	if current == nil || !o.leiosRelayContentReady(current) {
 		return
 	}
 	for _, announcement := range o.leiosRelayPendingAnnouncements[key] {
