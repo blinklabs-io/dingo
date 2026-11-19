@@ -259,6 +259,11 @@ composed once at start-up, and callers pad the arguments with NULL, which
 matches no row. Every SQLite statement of the apply path is prepared at start
 and served from the statement cache.
 
+Test stores can defer hot-statement preparation until first use. A statement
+first used inside a transaction is prepared on that transaction's connection
+and reused until commit or rollback, which closes it and releases its cache
+entry. It never requests another connection from the write pool.
+
 Applying a transaction inserts its identity row, `INSERT INTO "transaction"
 (hash) ... ON CONFLICT (hash) DO NOTHING` (the existing id is read back on a
 conflict), then its `applied_transaction` row. Whether the application row was
