@@ -31,10 +31,11 @@ var errLeiosPreparationExpired = errors.New(
 )
 
 type preparedLeiosCandidate struct {
-	mempool MempoolTransaction
-	tx      lcommon.Transaction
-	blockTx []byte
-	err     error
+	mempool  MempoolTransaction
+	tx       lcommon.Transaction
+	prepared PreparedLeiosTransaction
+	blockTx  []byte
+	err      error
 }
 
 type leiosCandidatePreparation struct {
@@ -61,6 +62,14 @@ func newLeiosCandidatePreparation(
 }
 
 func prepareLeiosCandidate(tx MempoolTransaction) preparedLeiosCandidate {
+	result := prepareLeiosCandidateBytes(tx)
+	if result.err == nil {
+		result.tx, result.err = decodeMempoolTx(tx)
+	}
+	return result
+}
+
+func prepareLeiosCandidateBytes(tx MempoolTransaction) preparedLeiosCandidate {
 	result := preparedLeiosCandidate{mempool: tx}
 	if !validLeiosTransactionReference(tx) {
 		result.err = errors.New("unrepresentable Leios transaction reference")
@@ -74,7 +83,6 @@ func prepareLeiosCandidate(tx MempoolTransaction) preparedLeiosCandidate {
 		result.err = errors.New("unrepresentable Leios block transaction size")
 		return result
 	}
-	result.tx, result.err = decodeMempoolTx(tx)
 	return result
 }
 

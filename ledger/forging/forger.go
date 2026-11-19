@@ -232,8 +232,10 @@ const (
 
 // BlockForger coordinates block production for a stake pool.
 type BlockForger struct {
-	mode   Mode
-	logger *slog.Logger
+	// A restart must not replace a worker while the previous loop joins it.
+	lifecycleMu sync.Mutex
+	mode        Mode
+	logger      *slog.Logger
 
 	// Production mode components
 	creds            *PoolCredentials
@@ -279,6 +281,7 @@ type BlockForger struct {
 	leiosCerts                 LeiosCertificateProvider
 	leiosParent                LeiosParentAnnouncementProvider
 	leiosCertTiming            LeiosCertificationTimingChecker
+	leiosPrebuild              *leiosPrebuildWorker
 
 	// Prometheus metrics
 	metrics *forgingMetrics
@@ -1048,6 +1051,8 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 // Start begins the block forging process.
 // The provided context controls the forger's lifecycle.
 func (f *BlockForger) Start(ctx context.Context) error {
+	f.lifecycleMu.Lock()
+	defer f.lifecycleMu.Unlock()
 	f.mu.Lock()
 	if f.running {
 		f.mu.Unlock()
@@ -1057,6 +1062,17 @@ func (f *BlockForger) Start(ctx context.Context) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 	f.cancel = cancel
+	if f.mode == ModeProduction && f.leiosChecker != nil &&
+		f.leiosMempool != nil {
+		_, canPrepare := f.leiosChecker.(LeiosPreparationChecker)
+		if _, ok := f.leiosValidator.(ParallelLeiosSelectionProvider); ok && canPrepare {
+			f.leiosPrebuild = newLeiosPrebuildWorker(
+				ctx,
+				f.prepareUpcomingLeiosEndorserBlock,
+				f.observeLeiosPrebuild,
+			)
+		}
+	}
 	f.wg.Add(1)
 	f.mu.Unlock()
 
@@ -1086,6 +1102,8 @@ func (f *BlockForger) Start(ctx context.Context) error {
 // Stop stops the block forging process.
 // It blocks until the runLoop goroutine has exited.
 func (f *BlockForger) Stop() {
+	f.lifecycleMu.Lock()
+	defer f.lifecycleMu.Unlock()
 	f.mu.Lock()
 	if !f.running {
 		f.mu.Unlock()
@@ -1114,6 +1132,9 @@ func (f *BlockForger) IsRunning() bool {
 func (f *BlockForger) runLoop(ctx context.Context) {
 	defer f.wg.Done()
 	defer func() {
+		if f.leiosPrebuild != nil {
+			f.leiosPrebuild.stop()
+		}
 		f.mu.Lock()
 		f.running = false
 		f.mu.Unlock()
@@ -1223,6 +1244,10 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	currentSlot, err := f.slotClock.CurrentSlot()
 	if err != nil {
 		return fmt.Errorf("failed to get current slot: %w", err)
+	}
+	if f.leiosPrebuild != nil {
+		f.leiosPrebuild.expire(currentSlot)
+		defer f.scheduleLeiosPrebuild(currentSlot)
 	}
 	// Every exit reports this pool's outcome for the slot to the arbiter, so
 	// a pool of this node that yielded the slot to this one forges it when
@@ -4638,6 +4663,55 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, nil
 	}
 
+	if f.leiosPrebuild != nil && basis.closure == nil && basis.receipt != nil {
+		endConsume := beginForgePhase(ctx, "block.forge.leios.prebuild_consume")
+		cached, reason := f.leiosPrebuild.take(
+			ctx,
+			slot,
+			basis.parentHash,
+			caps,
+		)
+		if cached != nil {
+			endConsume(
+				attribute.Bool("forge.prebuilt", true),
+				attribute.Int("forge.candidates", cached.candidates),
+				attribute.Int("forge.selected", len(cached.bodies)),
+			)
+		} else {
+			endConsume(attribute.Bool("forge.prebuilt", false))
+		}
+		if f.metrics != nil {
+			f.metrics.leiosPrebuildTotal.WithLabelValues(reason).Inc()
+		}
+		if cached != nil {
+			*basis.receipt = cached.receipt
+			return f.broadcastPreparedLeiosEndorserBlock(ctx, cached)
+		}
+	}
+	prepared, err := f.prepareLeiosEndorserBlock(
+		ctx,
+		slot,
+		basis,
+		caps,
+		selectionDeadline,
+	)
+	if err != nil || prepared == nil {
+		return nil, err
+	}
+	return f.broadcastPreparedLeiosEndorserBlock(ctx, prepared)
+}
+
+func (f *BlockForger) prepareLeiosEndorserBlock(
+	ctx context.Context,
+	slot uint64,
+	basis leiosSelectionBasis,
+	caps leiosEBCaps,
+	selectionDeadline time.Time,
+) (*preparedLeiosEndorserBlock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var err error
 	endSnapshot := beginForgePhase(ctx, "block.forge.leios.mempool_snapshot")
 	allTxs := f.leiosMempool.Transactions()
 	txs := allTxs
@@ -4667,6 +4741,8 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	endSelection := beginForgePhase(ctx, "block.forge.leios.select")
 	selectStart := f.now()
 	var validatedTxs []MempoolTransaction
+	var preparedBodies [][]byte
+	basis.preparedBodies = &preparedBodies
 	var truncated bool
 	if provider, ok := f.leiosValidator.(PreparedLeiosSelectionProvider); ok &&
 		basis.receipt != nil &&
@@ -4718,7 +4794,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	}
 	if truncated {
 		f.logger.Warn(
-			"leios endorser block selection stopped at the slot deadline",
+			"leios endorser block selection reached its deadline",
 			"slot", slot,
 			"candidates", len(txs),
 			"selected", len(validatedTxs),
@@ -4736,7 +4812,13 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 
 	endEBBuild := beginForgePhase(ctx, "block.forge.leios.build")
 	buildStart := f.now()
-	ebCbor, ebHash, bodies, err := buildLeiosEB(txs, caps)
+	var ebCbor, ebHash []byte
+	var bodies [][]byte
+	if preparedBodies != nil {
+		ebCbor, ebHash, bodies, err = buildPreparedLeiosEB(preparedBodies, caps)
+	} else {
+		ebCbor, ebHash, bodies, err = buildLeiosEB(txs, caps)
+	}
 	buildDuration := f.now().Sub(buildStart)
 	endEBBuild()
 	if err != nil {
@@ -4751,6 +4833,21 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, fmt.Errorf("build leios EB: %w", err)
 	}
 
+	var receipt LeiosValidationReceipt
+	if basis.receipt != nil {
+		receipt = *basis.receipt
+	}
+	return &preparedLeiosEndorserBlock{
+		slot: slot, parent: append([]byte(nil), basis.parentHash...), caps: caps,
+		raw: ebCbor, hash: ebHash, bodies: bodies, candidates: candidateCount, truncated: truncated,
+		selectDuration: selectDuration, buildDuration: buildDuration, receipt: receipt,
+	}, nil
+}
+
+func (f *BlockForger) broadcastPreparedLeiosEndorserBlock(
+	ctx context.Context,
+	prepared *preparedLeiosEndorserBlock,
+) (*LeiosEndorserBlockAnnouncement, error) {
 	// Pass the transaction bodies alongside the manifest so the endorser
 	// block can be served to peers over leios-fetch (they request the bodies
 	// after fetching the manifest).
@@ -4760,10 +4857,10 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	endBroadcast := beginForgePhase(ctx, "block.forge.leios.broadcast")
 	broadcastStart := f.now()
 	broadcastErr := f.leiosEBCaster.BroadcastEndorserBlock(
-		slot,
-		ebHash,
-		ebCbor,
-		bodies,
+		prepared.slot,
+		prepared.hash,
+		prepared.raw,
+		prepared.bodies,
 	)
 	broadcastDuration := f.now().Sub(broadcastStart)
 	endBroadcast()
@@ -4777,21 +4874,22 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	// diagnosed from.
 	f.logger.Info(
 		"leios endorser block produced",
-		"slot", slot,
-		"hash", hex.EncodeToString(ebHash),
-		"tx_refs", len(bodies),
-		"candidates", candidateCount,
-		"truncated", truncated,
-		"eb_select", selectDuration,
-		"eb_build", buildDuration,
+		"slot", prepared.slot,
+		"hash", hex.EncodeToString(prepared.hash),
+		"tx_refs", len(prepared.bodies),
+		"candidates", prepared.candidates,
+		"truncated", prepared.truncated,
+		"prebuilt", prepared.prebuilt,
+		"eb_select", prepared.selectDuration,
+		"eb_build", prepared.buildDuration,
 		"eb_broadcast", broadcastDuration,
 	)
 	if f.metrics != nil {
 		f.metrics.leiosEbForged.Inc()
 	}
 	return &LeiosEndorserBlockAnnouncement{
-		Hash: lcommon.NewBlake2b256(ebHash),
-		Size: uint64(len(ebCbor)),
+		Hash: lcommon.NewBlake2b256(prepared.hash),
+		Size: uint64(len(prepared.raw)),
 	}, nil
 }
 
@@ -4926,8 +5024,9 @@ func selectValidLeiosTransactions(ctx context.Context,
 // closure that ranking block applies. The zero value is an unpinned pass over
 // the current ledger state with no closure.
 type leiosSelectionBasis struct {
-	slot    uint64
-	receipt *LeiosValidationReceipt
+	preparedBodies *[][]byte
+	slot           uint64
+	receipt        *LeiosValidationReceipt
 	// parentHash, when non-empty, is the hash the validation session's
 	// ledger tip must equal.
 	parentHash []byte

@@ -6174,6 +6174,43 @@ full validation path because their certified closure changes the state basis.
 No preparation writes become durable, and receipts are never accepted from
 network messages or restored from storage.
 
+The production forger prepares an unsigned candidate for its next cached leader
+slot when that slot is within three seconds. One worker owns this work; a
+single pending request replaces older requests, cancelling and joining an old
+attempt before the replacement starts. Canonical slot-to-time conversion sets
+the deadline before the leader boundary, including on networks with sub-second
+slots. Future planning checks the target committee without opening the produce
+window; the live window is checked only at publication. The worker takes no
+credential generation, consumes no forge fence,
+and publishes no endorser block. Ledger transitions invalidate its receipt.
+
+Pure wire preparation runs in bounded parallel windows. The ledger constructs
+opaque transaction tokens that keep the exact wire bytes and decoded value
+together. Ordered validation consumes these tokens without decoding again;
+only capacity-admitted tokens stage full effects. Prepared sessions register
+cancellable contexts: when a durable ledger transition begins, it cancels them
+before waiting for the database writer. A long script therefore yields to block
+application rather than holding the writer until its future slot deadline.
+The raw preparation callback
+remains available as an adapter over the same ledger session.
+
+At the leader slot the forger cancels unfinished preparation and runs its usual
+sync, leadership, credential and fence gates. It rechecks committee eligibility
+and capacity before consuming a candidate. A hit must match the parent,
+publication, target slot and capacity. The immutable transaction subset remains
+valid when new mempool transactions arrive. A miss, changed context, or certified
+closure follows the bounded synchronous path. Publication and ranking-block
+signing occur only after the normal forge fence. Stop joins the worker before
+a restart can replace it.
+
+`dingo_forge_leios_prebuild_total` distinguishes preparation outcomes and cache
+hits, misses, parent changes, capacity changes and stale publications;
+`dingo_forge_leios_prebuild_seconds` measures preparation time. The
+`block.forge.leios.prebuild_consume` span records whether the forge used a
+prepared candidate, and the endorser-block log marks background durations with
+`prebuilt=true`.
+
+
 An announcing slot carries the EB or ranking-block transactions, never both: the
 two are selected from the mempool separately, so carrying both could put one
 transaction in each set, and the EB would then fail closure validation against
