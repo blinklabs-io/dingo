@@ -598,3 +598,40 @@ func TestPlannerStatsRunSeriesExistBeforeAnyRun(t *testing.T) {
 	}
 	require.Equal(t, 12, series, "3 triggers x 4 results")
 }
+
+func TestHasPlannerStatsTracksSqliteStat1(t *testing.T) {
+	t.Parallel()
+
+	store := newFilePlannerStatsStore(t, prometheus.NewRegistry())
+	has, err := store.HasPlannerStats(t.Context())
+	require.NoError(t, err)
+	require.False(t, has, "a database never analyzed has no statistics")
+
+	seedPlannerStatsProbeUtxos(t, store)
+	require.NoError(t, store.UpdatePlannerStats())
+	has, err = store.HasPlannerStats(t.Context())
+	require.NoError(t, err)
+	require.True(t, has)
+}
+
+// BenchmarkPlannerStatsResume compares the full ANALYZE a resumed backfill
+// used to run with the incremental path, on a database that already has
+// statistics and then receives unrelated inserts.
+func BenchmarkPlannerStatsResume(b *testing.B) {
+	store := newFilePlannerStatsStore(b, prometheus.NewRegistry())
+	seedStakeRefLookupUtxos(b, store, 1_000_000, 4096)
+	require.NoError(b, store.UpdatePlannerStats())
+	b.Run("full_analyze", func(b *testing.B) {
+		for range b.N {
+			require.NoError(b, store.UpdatePlannerStats())
+		}
+	})
+	b.Run("incremental", func(b *testing.B) {
+		for range b.N {
+			_, err := store.OptimizePlannerStatsContext(
+				b.Context(), "startup",
+			)
+			require.NoError(b, err)
+		}
+	})
+}

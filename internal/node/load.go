@@ -389,10 +389,42 @@ func RunPlannerStats(db *database.Database, logger *slog.Logger) error {
 	if !ok {
 		return nil
 	}
-	if err := updater.UpdatePlannerStats(); err != nil {
+	if err := runPlannerStats(context.Background(), updater); err != nil {
 		return fmt.Errorf("planner statistics maintenance: %w", err)
 	}
 	return nil
+}
+
+// runPlannerStats keeps a full ANALYZE for a database that has no statistics.
+// Once statistics exist it runs the incremental form instead: a full ANALYZE
+// reads every table and index, so its cost grows with the database and delays
+// a resumed backfill. The final statistics are still a full ANALYZE, taken by
+// FinalizeBackfillPlannerStats.
+func runPlannerStats(
+	ctx context.Context,
+	updater metadata.PlannerStatsUpdater,
+) error {
+	incremental, hasIncremental := updater.(metadata.IncrementalPlannerStatsUpdater)
+	presence, hasPresence := updater.(metadata.PlannerStatsPresenceChecker)
+	if hasIncremental && hasPresence {
+		exists, err := presence.HasPlannerStats(ctx)
+		if err == nil && exists {
+			result, err := incremental.OptimizePlannerStatsContext(
+				ctx,
+				datatypes.PlannerStatsTriggerStartup,
+			)
+			if err != nil {
+				return err
+			}
+			if result.Supported && !result.Skipped {
+				return nil
+			}
+		}
+	}
+	if contextual, ok := updater.(metadata.ContextPlannerStatsUpdater); ok {
+		return contextual.UpdatePlannerStatsContext(ctx)
+	}
+	return updater.UpdatePlannerStats()
 }
 
 // DeferredIndexRebuilder owns the drop/rebuild pairing for a single

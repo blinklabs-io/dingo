@@ -142,7 +142,11 @@ normal pragmas after rebuilding critical indexes, then uses this optimizer; if
 the backend does not support it or skips it, the full planner-statistics update
 runs instead. Resumed Mithril imports and other completed backfills retain the
 full update path. PostgreSQL and MySQL report the operation unsupported and use
-that fallback.
+that fallback. Before a backfill starts or resumes, `node.RunPlannerStats` uses
+the same optimizer when `sqlite_stat1` already has rows
+(`metadata.PlannerStatsPresenceChecker`), so a full `ANALYZE` over a large
+database does not delay the resume; with no statistics it runs the full
+`ANALYZE`.
 
 The growth rule never corrects `utxo` statistics taken over an imported
 ledger state. Every imported UTxO is unspent and shares one `added_slot`, so

@@ -262,3 +262,80 @@ func TestFinalizeMithrilBackfillPlannerStatsFreshBootstrap(t *testing.T) {
 	require.NoError(t, raw.QueryRow("SELECT COUNT(*) FROM sqlite_stat1").Scan(&statRows))
 	require.Greater(t, statRows, 0)
 }
+
+type plannerStatsPresenceStub struct {
+	plannerStatsUpdaterStub
+	exists bool
+	err    error
+}
+
+func (s *plannerStatsPresenceStub) HasPlannerStats(
+	context.Context,
+) (bool, error) {
+	return s.exists, s.err
+}
+
+func TestRunPlannerStatsSkipsFullAnalyzeWhenStatisticsExist(t *testing.T) {
+	t.Parallel()
+
+	optimized := types.PlannerStatsResult{Supported: true}
+	for _, tc := range []struct {
+		name            string
+		stub            plannerStatsPresenceStub
+		wantIncremental int
+		wantFull        int
+	}{
+		{
+			name: "statistics exist",
+			stub: plannerStatsPresenceStub{
+				plannerStatsUpdaterStub: plannerStatsUpdaterStub{result: optimized},
+				exists:                  true,
+			},
+			wantIncremental: 1,
+		},
+		{
+			name: "no statistics yet",
+			stub: plannerStatsPresenceStub{
+				plannerStatsUpdaterStub: plannerStatsUpdaterStub{result: optimized},
+			},
+			wantFull: 1,
+		},
+		{
+			name: "incremental skipped",
+			stub: plannerStatsPresenceStub{
+				plannerStatsUpdaterStub: plannerStatsUpdaterStub{
+					result: types.PlannerStatsResult{Supported: true, Skipped: true},
+				},
+				exists: true,
+			},
+			wantIncremental: 1,
+			wantFull:        1,
+		},
+		{
+			name: "incremental unsupported",
+			stub: plannerStatsPresenceStub{
+				exists: true,
+			},
+			wantIncremental: 1,
+			wantFull:        1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			stub := tc.stub
+			require.NoError(t, runPlannerStats(t.Context(), &stub))
+			require.Equal(t, tc.wantIncremental, stub.incrementalCalls)
+			require.Equal(t, tc.wantFull, stub.fullUpdateCalls)
+		})
+	}
+}
+
+func TestRunPlannerStatsFallsBackToFullWhenPresenceCheckFails(t *testing.T) {
+	t.Parallel()
+
+	stub := &plannerStatsPresenceStub{err: context.DeadlineExceeded}
+	require.NoError(t, runPlannerStats(t.Context(), stub))
+	require.Zero(t, stub.incrementalCalls)
+	require.Equal(t, 1, stub.fullUpdateCalls)
+}
