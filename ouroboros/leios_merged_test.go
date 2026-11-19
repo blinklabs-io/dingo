@@ -1057,12 +1057,6 @@ func TestLeiosEndorserBlockLookupReloadsFromDBAndServesFetchRequests(
 		),
 	)
 
-	// Endorser-block persistence is asynchronous: storeLeiosEndorserBlock
-	// queues the blob write on a background writer. Drain it so the blob store
-	// reflects the stored block before we force the DB-reload path by clearing
-	// the in-memory cache below.
-	o.StopLeiosPersistWriter()
-
 	o.leiosMu.Lock()
 	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	o.leiosMu.Unlock()
@@ -1548,7 +1542,6 @@ func TestStoreLeiosEndorserBlockRejectsMalformedCompleteBodyBeforePublication(
 		time.Second,
 		"closure waiter cancellation",
 	))
-	o.StopLeiosPersistWriter()
 	_, err = o.leiosDatabase().GetLeiosEBTxs(point.Hash, point.Slot)
 	require.Error(t, err)
 }
@@ -1781,7 +1774,6 @@ func TestLoadLeiosEBFromDBRejectsMalformedCompleteTransactions(
 	require.Nil(t, manifestOffer, "incomplete or malformed closures must not be advertised")
 	relayOffer, _ := o.leiosEBLog.next("relay")
 	require.Nil(t, relayOffer, "malformed persisted transactions must not be relayed")
-	o.StopLeiosPersistWriter()
 }
 
 func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
