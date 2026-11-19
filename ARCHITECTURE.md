@@ -4489,7 +4489,11 @@ chunk files, and Badger keeps a marker per promoted block.
   released object-store settings. Remote objects are authoritative, with only
   the writable tail staged locally; completed trios publish chunk, secondary,
   then primary. An interrupted new chunk without a committed primary entry
-  is removed before reopening its preceding durable tail. Snapshots link
+  is removed before reopening its preceding durable tail. A rollback checks
+  that the published chunk holds its point before deleting any later chunk,
+  and the writer reads its staged chunks locally. Chunk adoption verifies a
+  staged trio before publishing it (`ChunkPublisher`) and retracts one that
+  fails before the recorded tip covers it (`ChunkUnpublisher`). Snapshots link
   local chunk files and stream remote ones through the provider; blob-key
   backups exclude reserved immutable objects. `database.Stores.Immutable`
   carries the selected provider into `database.New`, which opens the writer,
@@ -4542,7 +4546,11 @@ fallback:
   consistent combination of them -- to a `(slot, hash)` point, maps that to the
   blob store's `GetBlockURL`, and returns a signed object URL plus compact
   block metadata. A reference the node does not hold comes back under
-  `not_found` without discarding the rest of the batch.
+  `not_found` without discarding the rest of the batch. A node that also
+  enables the ImmutableDB on `s3` or `gcs` cannot back the archive for
+  promoted history: a promoted block's object holds its marker, so
+  `GetBlockURL` returns `ErrImmutableBlockNotSignable` instead of a URL, and
+  only blocks not yet promoted can be signed.
 - A node with `historyExpiry.enabled` keeps its local blob plugin and starts
   `internal/historyexpiry.Pruner`. The worker derives its safety window from
   `LedgerState.StabilityWindow()` and scans only blocks older than that window,

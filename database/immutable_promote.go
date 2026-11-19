@@ -231,6 +231,40 @@ func (d *Database) PublishImmutableChunk(num uint64) error {
 	return publisher.PublishChunk(num)
 }
 
+// ImmutableChunksPublished reports whether the provider stores chunk files
+// remotely, so an imported chunk needs PublishImmutableChunk.
+func (d *Database) ImmutableChunksPublished() bool {
+	if d.immutable == nil {
+		return false
+	}
+	_, ok := d.immutable.svc.(immplugin.ChunkPublisher)
+	return ok
+}
+
+// UnpublishImmutableChunk removes the remote copy of an imported chunk whose
+// adoption failed before its markers committed. It refuses a chunk at or
+// below the one the recorded tip ends in, whose objects committed markers may
+// name. Local providers publish nothing and need no step.
+func (d *Database) UnpublishImmutableChunk(num uint64) error {
+	if d.immutable == nil {
+		return ErrImmutableNotEnabled
+	}
+	unpublisher, ok := d.immutable.svc.(immplugin.ChunkUnpublisher)
+	if !ok {
+		return nil
+	}
+	st := d.immutable.snapshot()
+	if st.HasTip && (!st.Geometry.Valid() ||
+		num <= st.TipSlot/st.Geometry.ChunkSlots) {
+		return fmt.Errorf(
+			"refusing to unpublish ImmutableDB chunk %d: "+
+				"the recorded tip at slot %d covers it",
+			num, st.TipSlot,
+		)
+	}
+	return unpublisher.UnpublishChunk(num)
+}
+
 // ReleaseImmutableChunk discards the local staging copy after a remotely
 // stored chunk and its database markers are durable.
 func (d *Database) ReleaseImmutableChunk(num uint64) error {

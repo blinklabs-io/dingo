@@ -427,3 +427,137 @@ func TestSkippedChunksArePublished(t *testing.T) {
 	require.NoError(t, local.Close())
 	require.NoError(t, st.Close())
 }
+
+// A rollback to a point the published chunks do not hold is refused with the
+// underlying store's error before any object is deleted: the later chunks are
+// durable history the refusal must leave in place.
+func TestTruncateAfterAbsentPointDeletesNothing(t *testing.T) {
+	t.Parallel()
+	objects := newMemoryObjects()
+	host, svc := resolveObjectStore(t, t.TempDir(), objects)
+	t.Cleanup(func() { require.NoError(t, host.Stop(context.Background())) })
+	geom := immutable.Geometry{ChunkSlots: 100}
+	st, err := svc.Open(geom)
+	require.NoError(t, err)
+	first := objectBlock(3)
+	for _, slot := range []uint64{3, 103, 203} {
+		_, err = st.Append(objectBlock(slot))
+		require.NoError(t, err)
+	}
+	require.NoError(t, st.Sync())
+	objects.mu.Lock()
+	before := maps.Clone(objects.files)
+	objects.mu.Unlock()
+	require.Len(t, before, 9)
+
+	absent := bytes.Repeat([]byte{0xee}, 32)
+	for name, slot := range map[string]uint64{
+		"wrong hash":  first.Slot,
+		"empty slot":  first.Slot + 1,
+		"later chunk": 150,
+	} {
+		err = st.TruncateAfter(slot, absent)
+		require.ErrorIs(t, err, immutable.ErrTruncatePointNotFound, name)
+		objects.mu.Lock()
+		require.Equal(t, before, objects.files, name)
+		objects.mu.Unlock()
+	}
+
+	tip, ok := st.Tip()
+	require.True(t, ok)
+	require.Equal(t, uint64(203), tip.Slot)
+	_, err = st.Append(objectBlock(204))
+	require.NoError(t, err)
+	require.NoError(t, st.Sync())
+	require.NoError(t, st.TruncateAfter(first.Slot, first.Hash))
+	files, err := svc.ListFiles()
+	require.NoError(t, err)
+	require.Len(t, files, 3)
+	require.NoError(t, st.Close())
+}
+
+// The underlying store refuses an absent point with the same error, so a
+// caller handles one refusal whichever provider is configured.
+func TestTruncateAfterAbsentPointMatchesLocalStore(t *testing.T) {
+	t.Parallel()
+	geom := immutable.Geometry{ChunkSlots: 100}
+	local, err := immutable.OpenStore(t.TempDir(), geom)
+	require.NoError(t, err)
+	host, svc := resolveObjectStore(t, t.TempDir(), newMemoryObjects())
+	t.Cleanup(func() { require.NoError(t, host.Stop(context.Background())) })
+	st, err := svc.Open(geom)
+	require.NoError(t, err)
+	_, err = local.Append(objectBlock(3))
+	require.NoError(t, err)
+	_, err = st.Append(objectBlock(3))
+	require.NoError(t, err)
+	require.NoError(t, local.Sync())
+	require.NoError(t, st.Sync())
+	absent := bytes.Repeat([]byte{0xee}, 32)
+	want := local.TruncateAfter(3, absent)
+	require.Error(t, want)
+	require.EqualError(t, st.TruncateAfter(3, absent), want.Error())
+	require.NoError(t, local.Close())
+	require.NoError(t, st.Close())
+}
+
+// Blocks appended since the last Sync exist only in the staged files, and a
+// cached download of their chunk is an older prefix of it. Reads through the
+// writer must see them.
+func TestStagedBlocksAreReadableBeforeSync(t *testing.T) {
+	t.Parallel()
+	objects := newMemoryObjects()
+	host, svc := resolveObjectStore(t, t.TempDir(), objects)
+	t.Cleanup(func() { require.NoError(t, host.Stop(context.Background())) })
+	geom := immutable.Geometry{ChunkSlots: 100}
+	st, err := svc.Open(geom)
+	require.NoError(t, err)
+
+	// Nothing is published yet.
+	first := objectBlock(3)
+	firstLoc, err := st.Append(first)
+	require.NoError(t, err)
+	_, body, err := st.ReadLocation(firstLoc)
+	require.NoError(t, err)
+	require.Equal(t, first.Cbor, body)
+	block, loc, err := st.GetBlock(first.Slot, first.Hash)
+	require.NoError(t, err)
+	require.NotNil(t, block)
+	require.Equal(t, first.Cbor, block.Cbor)
+	require.Equal(t, firstLoc, *loc)
+	require.NoError(t, st.Sync())
+
+	// The published chunk is cached, then extended locally.
+	_, _, err = svc.ReadBlockAt(firstLoc)
+	require.NoError(t, err)
+	second := objectBlock(4)
+	secondLoc, err := st.Append(second)
+	require.NoError(t, err)
+	block, loc, err = st.GetBlock(second.Slot, second.Hash)
+	require.NoError(t, err)
+	require.NotNil(t, block, "the cached prefix must not hide a staged block")
+	require.Equal(t, second.Cbor, block.Cbor)
+	require.Equal(t, secondLoc, *loc)
+	_, body, err = st.ReadLocation(secondLoc)
+	require.NoError(t, err)
+	require.Equal(t, second.Cbor, body)
+
+	// A chunk filled and left behind by a later append is still staged.
+	third := objectBlock(103)
+	_, err = st.Append(third)
+	require.NoError(t, err)
+	_, body, err = st.ReadLocation(secondLoc)
+	require.NoError(t, err)
+	require.Equal(t, second.Cbor, body)
+	require.NoError(t, st.Sync())
+
+	// Once released, chunk 0 is read from its published objects.
+	_, body, err = st.ReadLocation(secondLoc)
+	require.NoError(t, err)
+	require.Equal(t, second.Cbor, body)
+	block, _, err = st.GetBlock(second.Slot, second.Hash)
+	require.NoError(t, err)
+	require.NotNil(t, block)
+	require.Equal(t, second.Cbor, block.Cbor)
+	require.NoError(t, st.Close())
+}

@@ -48,20 +48,35 @@ func TestS3ImmutableFilesRemainOutsideBlobBackupAndReset(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(len(want)), n)
 	require.Equal(t, want, out.Bytes())
+	blobKey := []byte("ordinary-blob-key")
+	blobValue := []byte("ordinary blob bytes")
+	write := store.NewTransaction(true)
+	require.NoError(t, store.Set(write, blobKey, blobValue))
+	require.NoError(t, write.Commit())
 	txn := store.NewTransaction(false)
-	defer txn.Rollback()
 	it := store.NewIterator(txn, types.BlobIteratorOptions{})
-	it.Rewind()
-	require.False(
+	var keys [][]byte
+	for it.Rewind(); it.Valid(); it.Next() {
+		keys = append(keys, bytes.Clone(it.Item().Key()))
+	}
+	require.NoError(t, it.Err())
+	it.Close()
+	require.NoError(t, txn.Rollback())
+	require.Equal(
 		t,
-		it.Valid(),
+		[][]byte{blobKey},
+		keys,
 		"ImmutableDB objects must not appear in blob iteration",
 	)
-	it.Close()
 	var backup bytes.Buffer
 	require.NoError(t, store.Backup(ctx, &backup))
+	require.Contains(t, backup.String(), string(blobValue))
 	require.NotContains(t, backup.String(), string(want))
 	require.NoError(t, store.Reset(ctx))
+	txn = store.NewTransaction(false)
+	_, err = store.Get(txn, blobKey)
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+	require.NoError(t, txn.Rollback())
 	out.Reset()
 	_, err = store.ReadImmutableFile(ctx, "00001.chunk", &out)
 	require.NoError(

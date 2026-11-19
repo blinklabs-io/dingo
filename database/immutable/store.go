@@ -89,6 +89,22 @@ func (g Geometry) position(slot uint64, ebb bool) (uint64, uint64, error) {
 // the chunk files restored.
 var ErrStoreCorrupt = errors.New("immutable store: corrupt chunk")
 
+// ErrTruncatePointNotFound reports a truncation whose point is not in the
+// store. Nothing is removed.
+var ErrTruncatePointNotFound = errors.New(
+	"immutable store: truncation point not found",
+)
+
+// TruncatePointNotFoundError returns the ErrTruncatePointNotFound a store
+// reports for the point, so a provider that checks the point before the store
+// does refuses it identically.
+func TruncatePointNotFoundError(slot uint64, hash []byte) error {
+	return fmt.Errorf(
+		"%w: point at slot %d with hash %x not found; refusing truncation",
+		ErrTruncatePointNotFound, slot, hash,
+	)
+}
+
 // ErrStoreOutOfOrder reports an append at or before the store's tip position.
 var ErrStoreOutOfOrder = errors.New(
 	"immutable store: block does not follow the tip",
@@ -1009,10 +1025,7 @@ func (s *Store) TruncateAfter(slot uint64, hash []byte) error {
 		return err
 	}
 	if blk == nil || loc == nil {
-		return fmt.Errorf(
-			"immutable store: point at slot %d with hash %x not found; "+
-				"refusing truncation", slot, hash,
-		)
+		return TruncatePointNotFoundError(slot, hash)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

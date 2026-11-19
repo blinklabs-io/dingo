@@ -469,8 +469,7 @@ func (b *BlobStoreBark) GetContextLimited(
 	}
 	if int64(len(value)) > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	return value, nil

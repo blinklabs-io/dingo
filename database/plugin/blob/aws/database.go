@@ -79,8 +79,7 @@ func readBlobBodyWithLimit(r io.Reader, maxBytes int64) ([]byte, error) {
 	}
 	if int64(len(data)) > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	return data, nil
@@ -296,8 +295,7 @@ func (d *BlobStoreS3) resolveKeyLimited(
 		}
 		if int64(len(change.value)) > maxBytes {
 			return nil, fmt.Errorf(
-				"blob object exceeds maximum size of %d bytes",
-				maxBytes,
+				"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 			)
 		}
 		value := append([]byte{}, change.value...)
@@ -1369,8 +1367,7 @@ func (d *BlobStoreS3) getInternalLimited(
 	defer out.Body.Close()
 	if out.ContentLength != nil && *out.ContentLength > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 

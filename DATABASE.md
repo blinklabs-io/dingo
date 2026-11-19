@@ -7040,6 +7040,17 @@ namespace. Durable cleanup state is retried before a later live restore creates
 its own record, and an incomplete recovery directory without a record is removed
 consistently during retry and startup cleanup.
 
+S3 and GCS reserve the logical keys `immutable/<NNNNN>.chunk`,
+`immutable/<NNNNN>.primary` and `immutable/<NNNNN>.secondary` for the
+ImmutableDB chunk files of the object-backed `storage.immutable` providers
+(`database/plugin/blob/{aws,gcs}/immutable_files.go`). They are hex-encoded
+into object names under the same prefix and restore namespace as every other
+key, so the object name is the hex of the whole key, not a readable
+`immutable/` path. They are not blob values: blob iteration skips them, so the
+logical blob backup does not contain them and the blob store's `Reset` does
+not delete them. Only the ImmutableDB provider reads, writes, lists and
+deletes them, through `blob.ImmutableObjects`.
+
 ### Sync and Leios value placement
 
 Mithril sync (run mode `sync`) uses a 1 KiB Badger value threshold by default
@@ -8150,8 +8161,9 @@ case — the bound changes behaviour only where a budget can be reported.
 ### ImmutableDB Contract
 
 With `immutableDb.enabled`, block bodies more than k blocks behind the ledger's
-applied tip move out of Badger into cardano-node compatible chunk files under
-`<dataDir>/immutable`. Only the body moves.
+applied tip move out of the blob store into cardano-node compatible chunk
+files: under `<dataDir>/immutable` with the Badger blob plugin, and in the
+blob provider's bucket with S3 or GCS. Only the body moves.
 
 - **Provider.** The `storage.immutable` capability uses `chunkfile` for the
   Badger blob plugin. Builds with `dingo_extra_plugins` also provide `s3` and
@@ -8161,8 +8173,14 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   authoritative in object storage; the local directory stages the writable
   tail and caches reads. Publication writes the chunk, secondary index, then
   primary index. Restart discards an incomplete new tail and resumes from the
-  preceding durable chunk. Rollback deletes later chunks, highest first and
-  primary index first, before republishing the shortened chunk. Snapshots
+  preceding durable chunk. Rollback first reads the rollback point from the
+  published copy of its chunk and refuses an absent point with
+  `immutable.ErrTruncatePointNotFound`, the error the local store returns,
+  deleting nothing; it then deletes later chunks, highest first and primary
+  index first, before republishing the shortened chunk. The writer reads the
+  chunk its tip is in, and any chunk appended to since the last sync, from
+  the staged files, and released chunks from their published objects.
+  Snapshots
   hard-link completed local chunk files and stream remote ones, separately
   from the logical blob backup. Restore publishes the verified chunk trios before
   activating their markers and retires them with their restore namespace.
@@ -8174,7 +8192,7 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   bytes `[type, block CBOR]` as stored in the chunk file. `DIM1` cannot begin a
   block CBOR, as with `DBT1`.
 - **Unchanged keys.** `bi`, `bh`, `bp..._metadata`, and the `DOFF` offsets of
-  UTxOs and transactions stay in Badger. The chunk bytes after unwrapping
+  UTxOs and transactions stay in the blob store. The chunk bytes after unwrapping
   `[type, cbor]` are the stored block CBOR, so offsets resolve unchanged.
 - **State record.** Blob key `im_state` holds the format version, the chunk
   geometry (slots per chunk, whether a chunk has a leading Byron epoch
@@ -8286,6 +8304,13 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   the chunk again and continues after the chain tip, including a kill inside
   the first chunk. A chunk missing any of its three certified
   digests, such as the ancillary archive's in-progress chunk, is not adopted.
+  With an S3 or GCS ImmutableDB the staged trio is hashed against the
+  certified digests before it is published, so uncertified bytes are never
+  uploaded, and it is published before the read that precedes its markers. A
+  chunk that then fails before the recorded tip covers it has its published
+  objects deleted (`Database.UnpublishImmutableChunk`); once the tip covers a
+  chunk, including one an earlier run stopped inside, its objects are kept,
+  since committed markers may name them.
   A resumed run skips the chunk the recorded tip ends once the chain's tip
   index has reached the recorded tip index, so blocks committed after an
   adoption (gap blocks) do not make it re-adopt that chunk. A chunk is adopted
@@ -8298,8 +8323,9 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   recorded tip is ahead of its chain, which an interrupted adoption leaves:
   bodies copied at or below the recorded tip would never be promoted. Finish
   the adoption or truncate first.
-- **Limits.** Requires the Badger blob plugin and no history expiry (which
-  tombstones bodies in place). Configuration validation refuses
+- **Limits.** Requires the Badger blob plugin, or S3 or GCS in a build with
+  `dingo_extra_plugins`, and no history expiry (which tombstones bodies in
+  place). Configuration validation refuses
   `historyExpiry.enabled` with `immutableDb.enabled`, startup refuses history
   expiry on any database that has an `im_state` record whatever the current
   setting, and the tombstone path refuses a block whose value is a marker.
@@ -8311,7 +8337,10 @@ applied tip move out of Badger into cardano-node compatible chunk files under
   archive: archive delivery needs `GetBlockURL`. Badger does not implement
   it, and on S3 or GCS a promoted block's object holds its marker, so the
   marker-resolving store refuses to sign it with
-  `ErrImmutableBlockNotSignable`.
+  `ErrImmutableBlockNotSignable`. It decides that from a read bounded to the
+  marker's size and signs only when the read reports `types.ErrBlobTooLarge`,
+  which every bounded blob read wraps for a value over its limit; any other
+  read failure is returned, since the object may hold a marker.
 
 ### Archive And History Expiry Contract
 

@@ -179,7 +179,7 @@ func (s *immutableBlobStore) GetContextLimited(
 	}
 	if int64(len(value)) > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes", maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	return value, nil
@@ -187,8 +187,9 @@ func (s *immutableBlobStore) GetContextLimited(
 
 // GetBlockURL refuses a promoted block rather than signing its marker object.
 // The bounded read fetches at most one byte past a marker, so an unpromoted
-// body is not downloaded just to sign it; any read failure is left to the
-// signing call to report.
+// body is not downloaded just to sign it. Only a value too large to be a
+// marker goes on to be signed: any other read failure leaves the value
+// unknown, and signing then could hand out a marker.
 func (s *immutableBlobStore) GetBlockURL(
 	ctx context.Context,
 	txn types.Txn,
@@ -199,7 +200,11 @@ func (s *immutableBlobStore) GetBlockURL(
 			ctx, txn, types.BlockBlobKey(point.Slot, point.Hash),
 			types.BlockImmutableMarkerSize,
 		)
-		if err == nil && types.IsImmutableMarker(value) {
+		switch {
+		case errors.Is(err, types.ErrBlobTooLarge):
+		case err != nil:
+			return types.SignedURL{}, types.BlockMetadata{}, err
+		case types.IsImmutableMarker(value):
 			return types.SignedURL{}, types.BlockMetadata{},
 				ErrImmutableBlockNotSignable
 		}

@@ -105,6 +105,13 @@ type ChunkPublisher interface {
 	PublishChunk(num uint64) error
 }
 
+// ChunkUnpublisher removes a chunk published through ChunkPublisher whose
+// adoption failed before any database marker referred to it. The caller must
+// not unpublish a chunk the recorded immutable tip covers.
+type ChunkUnpublisher interface {
+	UnpublishChunk(num uint64) error
+}
+
 // LocalChunkReleaser lets a remote provider discard an imported local chunk
 // after its remote objects and database markers are durable.
 type LocalChunkReleaser interface {

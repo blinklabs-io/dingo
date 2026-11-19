@@ -828,8 +828,7 @@ func (d *BlobStoreBadger) GetContextLimited(
 	}
 	if item.ValueSize() > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	value, err := item.ValueCopy(nil)
@@ -838,8 +837,7 @@ func (d *BlobStoreBadger) GetContextLimited(
 	}
 	if int64(len(value)) > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	if err := ctx.Err(); err != nil {

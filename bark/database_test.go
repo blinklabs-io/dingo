@@ -105,6 +105,15 @@ func TestBlobStoreBarkForwardsBoundedContextRead(t *testing.T) {
 		t.Context(), txn, []byte("key"), 4,
 	)
 	require.ErrorContains(t, err, "exceeds maximum size")
+	require.ErrorIs(t, err, types.ErrBlobTooLarge)
+	// An upstream that cannot bound the read leaves the bound to the wrapper.
+	unbounded := &BlobStoreBark{upstream: conflictCapabilityBlobStore{
+		BlobStore: db.Blob(),
+	}}
+	_, err = unbounded.GetContextLimited(
+		t.Context(), txn, []byte("key"), 4,
+	)
+	require.ErrorIs(t, err, types.ErrBlobTooLarge)
 	value, err := wrapped.GetContextLimited(
 		t.Context(), txn, []byte("key"), 5,
 	)

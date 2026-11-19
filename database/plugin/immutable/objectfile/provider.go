@@ -216,6 +216,14 @@ func (s *service) PublishChunk(num uint64) error {
 	return s.clearReadCache(func(chunk uint64) bool { return chunk == num })
 }
 
+// UnpublishChunk removes a published chunk that no database marker names.
+func (s *service) UnpublishChunk(num uint64) error {
+	if err := s.deleteRemoteChunk(num); err != nil {
+		return err
+	}
+	return s.clearReadCache(func(chunk uint64) bool { return chunk == num })
+}
+
 func (s *service) ReleaseChunk(num uint64) error {
 	var removeErr error
 	for _, ext := range []string{".chunk", ".primary", ".secondary"} {
@@ -602,7 +610,21 @@ func (s *store) Sync() error {
 	return nil
 }
 
+// staged reports whether the writer holds chunk num locally: the chunk its
+// tip is in, and any chunk appended to since the last Sync. The remote copy of
+// such a chunk lags the writer or does not exist yet.
+func (s *store) staged(num uint64) bool {
+	if _, dirty := s.owner.dirty[num]; dirty {
+		return true
+	}
+	tip, ok := s.Tip()
+	return ok && num == tip.Slot/s.geom.ChunkSlots
+}
+
 func (s *store) ReadLocation(loc immutable.Location) (uint, []byte, error) {
+	if s.staged(loc.Chunk) {
+		return s.Store.ReadLocation(loc)
+	}
 	dir, cleanup, err := s.owner.readChunkDir(loc.Chunk)
 	if err != nil {
 		return 0, nil, err
@@ -612,6 +634,17 @@ func (s *store) ReadLocation(loc immutable.Location) (uint, []byte, error) {
 }
 
 func (s *store) GetBlock(
+	slot uint64,
+	hash []byte,
+) (*immutable.Block, *immutable.Location, error) {
+	if s.staged(slot / s.geom.ChunkSlots) {
+		return s.Store.GetBlock(slot, hash)
+	}
+	return s.remoteBlock(slot, hash)
+}
+
+// remoteBlock reads the point from the published objects alone.
+func (s *store) remoteBlock(
 	slot uint64,
 	hash []byte,
 ) (*immutable.Block, *immutable.Location, error) {
@@ -627,6 +660,17 @@ func (s *store) TruncateAfter(slot uint64, hash []byte) error {
 	chunk := slot / s.geom.ChunkSlots
 	if err := s.owner.clearReadCache(func(c uint64) bool { return c >= chunk }); err != nil {
 		return err
+	}
+	// The truncation below runs on the published copy of the point's chunk,
+	// so that copy has to hold the point before any later chunk is deleted:
+	// the underlying writer would refuse an absent point only after those
+	// chunks were gone.
+	blk, _, err := s.remoteBlock(slot, hash)
+	if err != nil {
+		return fmt.Errorf("locate truncation point: %w", err)
+	}
+	if blk == nil {
+		return immutable.TruncatePointNotFoundError(slot, hash)
 	}
 	// Remove later chunks first, highest down, so an interruption never leaves
 	// a gap below a surviving tail; the next Open stages whichever chunk is
