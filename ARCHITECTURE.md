@@ -12246,8 +12246,11 @@ watermark-evicts transactions. Its TxSubmission intake waits for sufficient
 admission headroom, while direct submissions receive `MempoolFullError` above
 the rejection watermark. A transaction that repeatedly loses the available
 headroom race to another peer is dropped after a bounded retry streak so that
-one offer cannot stall the connection indefinitely. Per-item CBOR decode and
-mempool validation rejections are likewise logged and dropped without stopping
+one offer cannot stall the connection indefinitely. An admission whose ledger
+snapshot moves during reconciliation is retried under the same bound so the
+peer's already-acknowledged transaction is not dropped without a verdict.
+Per-item CBOR decode and mempool validation rejections are likewise logged and
+dropped without stopping
 the peer's intake pump; peer, protocol, or mempool shutdown still terminates the
 pump. DAG intake currently requests one transaction ID per TxSubmission round
 trip, which can reduce inbound throughput on high-latency peer links. This is
