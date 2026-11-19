@@ -32,17 +32,15 @@ package dingo
 // stale reference to n.db/n.ledgerState — see the Phase 2 design notes):
 // n.eventBus, n.chainSelector (holds only a one-time
 // SecurityParam snapshot and closures over n). n.ouroboros has one
-// deliberate, narrow exception to "left running": its background Leios
-// endorser-block persistence writer is paused (not merely left alone) by
+// deliberate, narrow exception to "left running": its Leios endorser-block
+// persistence is paused (not merely left alone) by
 // quiesceForLiveLifecycleOp, since — unlike everything else on
-// n.ouroboros — that writer directly calls Database.SetLeiosEB on
-// whatever n.ouroboros's ledger state currently resolves to, on its own
-// timer, entirely independent of the request/response flow every other
-// part of n.ouroboros only reacts to. Left unpaused, a write already queued
-// before quiesce began could still be draining when the database closes
-// out from under it, or could still be sitting queued when LedgerState is
-// reassigned post-reinit, silently writing pre-operation data into the
-// freshly restored/truncated store.
+// n.ouroboros — persistence directly calls Database.SetLeiosEB on
+// whatever n.ouroboros's ledger state currently resolves to, and its
+// retention GC deletes from it on its own schedule. Left unpaused, a write
+// that began before quiesce could still be running when the database closes
+// out from under it, and endorser blocks cached as already written would
+// never be written to the freshly restored/truncated store.
 //
 // Everything else that depends on n.db or n.ledgerState — chainManager,
 // ledgerState, mempool, chainsyncState, peerGov, connManager, the
@@ -102,7 +100,7 @@ import (
 // holds a direct (non-self-healing) reference to n.db/n.ledgerState, in
 // preparation for closing the database out from under this running node.
 // It does not touch n.eventBus, n.chainSelector, or n.ctx. It does touch
-// n.ouroboros exactly once, to pause its Leios persistence writer — see
+// n.ouroboros exactly once, to pause its Leios persistence — see
 // this file's top doc comment for why that one piece of n.ouroboros can't
 // simply be left running like everything else on it.
 // namedStop pairs a component's Stop with the name quiesce reports it under.
@@ -512,8 +510,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	n.mempool = nil
 	if n.connManager != nil {
 		if stopErr := n.connManager.Stop(ctx); stopErr != nil {
-			// Unconfirmed connection shutdown leaves traffic able to restart the
-			// persistence writer, so storage replacement requires a full restart.
+			// Unconfirmed connection shutdown leaves traffic able to write
+			// endorser blocks, so storage replacement requires a full restart.
 			err = errors.Join(
 				err,
 				errStorageDrainUnconfirmed,
@@ -1065,6 +1063,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// The connection-event subscriptions registered during Run do not need
 	// re-registering: they are closures over n, so they resolve whichever
 	// instance n.ouroboros currently holds.
+	//nolint:contextcheck // Close bounds its own drain; the restore deadline must not cut it short.
 	if err := n.ouroboros().Close(); err != nil {
 		return fmt.Errorf("failed to close previous ouroboros: %w", err)
 	}
@@ -1085,6 +1084,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// without this the replacement instance would silently lose Leios vote
 	// and pipeline handling. Same call Run makes after its construction.
 	if err := n.attachLeiosHandlers(rebuiltOuroboros); err != nil {
+		//nolint:contextcheck // Close bounds its own drain; see the Close above.
 		closeErr := rebuiltOuroboros.Close()
 		if errors.Is(closeErr, ouroborosPkg.ErrLeiosPersistDrainUnconfirmed) {
 			closeErr = errors.Join(errStorageDrainUnconfirmed, closeErr)

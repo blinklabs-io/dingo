@@ -567,55 +567,35 @@ type Ouroboros struct {
 	// cannot reset the distinct-announcement budget.
 	leiosAnnouncementElections map[string]map[string]struct{}
 
-	// Asynchronous best-effort persistence of fetched endorser blocks to the
-	// blob store for historical serving. The blob write (CBOR encode + commit)
-	// is moved off the leios-fetch hot path onto a single background writer so
-	// it does not serialize against block application during catch-up. Jobs
-	// coalesce by (slot, hash), not hash alone — a complete job (with txs)
-	// supersedes a manifest-only one for the same occurrence — which also
-	// elides the backfiller's duplicate manifest write, while two live
-	// occurrences of the same hash at different slots persist independently.
-	// Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
-	// leiosPersistLifecycleMu keeps each enqueue reservation, copy and signal
-	// in one writer generation while stop and reset hold the exclusive lock.
+	// Endorser blocks are written to the LeiosDB synchronously by
+	// persistLeiosEndorserBlock. leiosPersistLifecycleMu is held shared only to
+	// register a write and exclusively by Close and the live-lifecycle pause,
+	// which then wait for registered writes to finish.
 	leiosPersistLifecycleMu sync.RWMutex
-	leiosPersistOnce        sync.Once
-	leiosPersistStopOnce    sync.Once
-	leiosPersistStarted     atomic.Bool
 	leiosPersistMu          sync.Mutex
-	leiosPersistClosed      bool // guarded by leiosPersistMu; permanent after Close
-	leiosPersistStoreMu     sync.Mutex
+	// leiosPersistClosed is guarded by leiosPersistMu. It is permanent: Close
+	// and the live-lifecycle pause both set it, and a write is refused once it
+	// is.
+	leiosPersistClosed bool
+	// leiosPersistInflight counts registered writes; leiosPersistIdle is
+	// closed when it returns to zero. A channel rather than a WaitGroup
+	// because a waiter may time out and writes keep registering afterwards.
+	leiosPersistInflight int
+	leiosPersistIdle     chan struct{}
+	leiosPersistStoreMu  sync.Mutex
 	// leiosPersistPruneBeforeSlot is the active store's retention frontier.
 	// Writers hold leiosPersistStoreMu through SetLeiosEB; GC publishes its
 	// frontier under the same lock, then scans and prunes without holding it.
 	leiosPersistPruneBeforeSlot uint64
-	leiosPersistPending         map[string]*leiosPersistJob
-	// leiosPersistBytes is the aggregate reserved size of the queue: the sum
-	// of leiosPersistPending's job sizes plus every reservation whose payload
-	// copy is still in flight. leiosPersistReserved counts those in-flight
-	// reservations so they also occupy a leiosPersistMaxPending slot. Both
-	// are guarded by leiosPersistMu and are reset with the pending map in
-	// startLeiosPersistWriter; see leiosPersistMaxQueueBytes.
-	leiosPersistBytes    int
-	leiosPersistReserved int
-	leiosPersistSignal   chan struct{}
-	leiosPersistStop     chan struct{}
-	leiosPersistDone     chan struct{}
-	leiosPersistDropped  atomic.Uint64
 	// The optional blob-store GC has its own worker so full prefix scans never
-	// stall persistence writes. It is paused with the writer before live storage
-	// replacement and restarted after the next persisted endorser block.
+	// stall persistence writes. It is stopped before live storage replacement
+	// and never restarted on the same instance.
 	leiosPersistGCOnce     sync.Once
 	leiosPersistGCStopOnce sync.Once
 	leiosPersistGCStarted  atomic.Bool
 	leiosPersistGCMu       sync.Mutex
 	leiosPersistGCStop     chan struct{}
 	leiosPersistGCDone     chan struct{}
-	// leiosPersistAfterReserve, when non-nil, runs between the byte
-	// reservation and the payload copy. Tests use it to unwind or to stall
-	// inside that window, which allocation failure alone would reach only
-	// nondeterministically.
-	leiosPersistAfterReserve func()
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.

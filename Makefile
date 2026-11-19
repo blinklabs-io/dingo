@@ -116,14 +116,15 @@ lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and mo
 
 # CI runs these same targets in the lint job.
 #
-# nilaway's live heap on this tree is about 12 GB, and without a limit its peak
-# passes the 16 GB of a hosted runner and the runner is killed. GOMEMLIMIT
-# makes the collector hold it near the floor at the cost of run time.
+# The analysis driver loads every package's test variants unless -test=false;
+# -exclude-test-files only filters diagnostics, and loading them takes the peak
+# past the 16 GB of a hosted runner. An unlimited run still peaks there without
+# them, so GOMEMLIMIT holds it near 11 GB.
 nilaway: export GOMEMLIMIT ?= 10GiB
 nilaway: ## Fail on NilAway findings in production code
 	# Test fixtures establish preconditions with testify assertions that nilaway
 	# cannot track across calls; analyze production code here.
-	GOFLAGS="$(ANALYZER_GOFLAGS)" nilaway $(NILAWAY_FLAGS) -exclude-test-files ./...
+	GOFLAGS="$(ANALYZER_GOFLAGS)" nilaway $(NILAWAY_FLAGS) -test=false ./...
 
 modernize: ## Fail on modernize findings in hand-written packages
 	GOFLAGS="$(ANALYZER_GOFLAGS)" modernize $(MODERNIZE_FLAGS) $(MODERNIZE_PACKAGES)

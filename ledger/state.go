@@ -11678,7 +11678,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				// Certification is derived from the chain when this block's
 				// ranking block becomes immutable, so no marker is written.
 				// The content is written before this block's apply commits,
-				// outside the droppable persist queue: a certified endorser
+				// independently of the fetch-path write: a certified endorser
 				// block is part of the chain. A block that a later check
 				// rejects leaves a volatile record the collector removes.
 				if err := ls.persistCertifiedEndorserBlock(

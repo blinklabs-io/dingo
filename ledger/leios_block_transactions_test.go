@@ -347,9 +347,8 @@ func TestBlockTransactionCountKeepsTopLevelSemantics(t *testing.T) {
 }
 
 // Applying a certifying ranking block persists the certified endorser block
-// itself. The fixture installs no persist writer, which is the same state a
-// full persist queue leaves behind: nothing but the apply wrote em/et, and the
-// in-memory data provider has since expired.
+// itself. The fixture installs no endorser-block persistence, so nothing but
+// the apply wrote em/et, and the in-memory data provider has since expired.
 func TestCertifiedApplyPersistsEndorserBlockWithoutPersistWriter(
 	t *testing.T,
 ) {
