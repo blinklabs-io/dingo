@@ -131,7 +131,6 @@ func additionalReferenceAdmission(
 	era eras.EraDesc,
 	pp lcommon.ProtocolParameters,
 	wantSize uint64,
-	wantLookupError bool,
 ) {
 	t.Helper()
 	ls, sentinel := additionalReferenceLedger(t, db, block, era, pp)
@@ -147,13 +146,6 @@ func additionalReferenceAdmission(
 		t.Run(path, func(t *testing.T) {
 			err := run()
 			switch {
-			case wantLookupError:
-				require.ErrorContains(
-					t,
-					err,
-					"resolve consumed reference-script input",
-					"reference lookup failure must reject before transaction validation",
-				)
 			case wantSize != 0:
 				var limit lcommon.RefScriptSizePerBlockTooLargeError
 				require.ErrorAs(
@@ -247,7 +239,6 @@ func TestDijkstraBlockReferenceScriptCustomLimitAdmission(t *testing.T) {
 				eras.DijkstraEraDesc,
 				pp,
 				want,
-				false,
 			)
 		})
 	}
@@ -331,7 +322,6 @@ func TestBlockReferenceScriptProducedOutputAdmission(t *testing.T) {
 				eras.ConwayEraDesc,
 				pp,
 				want,
-				tc.invalidProducer || tc.missing,
 			)
 		})
 	}
@@ -347,10 +337,10 @@ func (f referenceScriptStateFunc) UtxoById(
 	return f(input)
 }
 
-func TestPV10ReferenceScriptStateOnlySuppressesMissing(t *testing.T) {
+func TestAggregateReferenceScriptStateOnlySuppressesAbsence(t *testing.T) {
 	input := &shelley.ShelleyTransactionInput{}
 	wrappedMissing := fmt.Errorf("lookup: %w", database.ErrUtxoNotFound)
-	state := pv10ReferenceScriptState{
+	state := aggregateReferenceScriptState{
 		state: referenceScriptStateFunc(
 			func(lcommon.TransactionInput) (lcommon.Utxo, error) {
 				return lcommon.Utxo{}, wrappedMissing
@@ -369,9 +359,18 @@ func TestPV10ReferenceScriptStateOnlySuppressesMissing(t *testing.T) {
 	)
 	_, err = state.UtxoById(input)
 	require.ErrorIs(t, err, storageErr)
+
+	state.state = referenceScriptStateFunc(
+		func(lcommon.TransactionInput) (lcommon.Utxo, error) {
+			return lcommon.Utxo{}, ErrUtxoAlreadyConsumed
+		},
+	)
+	utxo, err = state.UtxoById(input)
+	require.NoError(t, err)
+	require.Equal(t, lcommon.Utxo{}, utxo)
 }
 
-func TestPV10AggregateReferenceScriptLookupErrors(t *testing.T) {
+func TestAggregateReferenceScriptLookupErrors(t *testing.T) {
 	newBlock := func() *conway.ConwayBlock {
 		return &conway.ConwayBlock{
 			BlockHeader:         &conway.ConwayBlockHeader{},
@@ -415,11 +414,7 @@ func TestPV10AggregateReferenceScriptLookupErrors(t *testing.T) {
 	)
 
 	pp.ProtocolVersion.Major = 11
-	require.ErrorContains(
-		t,
-		validateBlockReferenceScripts(newBlock(), pp, missing),
-		"resolve consumed reference-script input",
-	)
+	require.NoError(t, validateBlockReferenceScripts(newBlock(), pp, missing))
 }
 
 func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
@@ -533,11 +528,10 @@ func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
 				)
 				return
 			}
-			require.ErrorContains(
+			require.NoError(
 				t,
 				ls.ValidateBlockReferenceScripts(context.Background(), block),
-				"resolve consumed reference-script input",
-				"Conway input lookup must not bypass aggregate validation or use Dijkstra parameters",
+				"missing inputs contribute zero to aggregate reference-script size",
 			)
 		})
 	}
@@ -736,7 +730,6 @@ func TestBlockReferenceScriptBudgetDoesNotApplyBeforeConway(t *testing.T) {
 			MaxBlockBodySize: 2_000_000, MaxBlockHeaderSize: 100_000,
 		},
 		0,
-		false,
 	)
 }
 
@@ -787,11 +780,10 @@ func TestBlockReferenceScriptsUsePreviousEraParametersOnImport(t *testing.T) {
 	)
 }
 
-// TestDijkstraBlockReferenceScriptsWithConwayParameters pins the stricter
-// lookup a Dijkstra block gets when handed Conway-shaped parameters at an
-// earlier protocol major. Conway tolerates a missing reference input there;
-// Dijkstra does not. Dijkstra blocks do not exist before major 12, so the
-// asymmetry is unreachable on a chain and rejecting is the safe behaviour.
+// TestDijkstraBlockReferenceScriptsWithConwayParameters pins the missing-input
+// accounting a Dijkstra block gets when handed Conway-shaped parameters at an
+// earlier protocol major. Both era paths follow the reference restricted-map
+// rule and count the absent input as zero.
 func TestDijkstraBlockReferenceScriptsWithConwayParameters(t *testing.T) {
 	t.Parallel()
 
@@ -824,11 +816,7 @@ func TestDijkstraBlockReferenceScriptsWithConwayParameters(t *testing.T) {
 		TxIsValid: true,
 		Body:      dijkstra.DijkstraTransactionBody{TxReferenceInputs: refs},
 	}}
-	require.ErrorContains(
-		t,
-		validateBlockReferenceScripts(dijkstraBlock, pp, state),
-		"resolve consumed reference-script input",
-	)
+	require.NoError(t, validateBlockReferenceScripts(dijkstraBlock, pp, state))
 }
 
 // TestReferenceScriptParamsFollowEraListPredecessor checks that the aggregate
