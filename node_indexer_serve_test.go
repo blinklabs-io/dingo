@@ -39,6 +39,50 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// startSignalWriter is a fakeIndexerWriter that closes startedCh when the node
+// starts it, so a test can block on the start instead of polling for it.
+type startSignalWriter struct {
+	fakeIndexerWriter
+	startedCh chan struct{}
+	startOnce sync.Once
+}
+
+func newStartSignalWriter() *startSignalWriter {
+	return &startSignalWriter{
+		fakeIndexerWriter: fakeIndexerWriter{wakes: make(chan struct{}, 8)},
+		startedCh:         make(chan struct{}),
+	}
+}
+
+func (w *startSignalWriter) Start(ctx context.Context) error {
+	err := w.fakeIndexerWriter.Start(ctx)
+	w.startOnce.Do(func() { close(w.startedCh) })
+	return err
+}
+
+// requireWriterStarted blocks until Run starts the writer, and fails with
+// Run's own error if Run returns first.
+//
+// The first data directory a test process opens migrates the shared metadata
+// template inside Run, before the writer starts, and that takes tens of
+// seconds on a loaded host. The wait therefore follows the two events that
+// end it rather than a budget for that work; AsyncWait only reports a Run
+// that does neither.
+func requireWriterStarted(
+	t *testing.T,
+	writer *startSignalWriter,
+	runErr <-chan error,
+) {
+	t.Helper()
+	select {
+	case <-writer.startedCh:
+	case err := <-runErr:
+		t.Fatalf("node run ended before the IndexerDB writer started: %v", err)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("node run neither started the IndexerDB writer nor returned")
+	}
+}
+
 func freeLoopbackPort(t *testing.T) uint {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -56,7 +100,7 @@ func TestSplitNodeServesEveryAPI(t *testing.T) {
 	utxorpcPort := freeLoopbackPort(t)
 	blockfrostPort := freeLoopbackPort(t)
 	meshPort := freeLoopbackPort(t)
-	writer := &fakeIndexerWriter{wakes: make(chan struct{}, 8)}
+	writer := newStartSignalWriter()
 	var indexerDB atomic.Pointer[database.Database]
 	var slotTime atomic.Pointer[func(uint64) (time.Time, error)]
 	dbPath := t.TempDir()
@@ -103,8 +147,7 @@ func TestSplitNodeServesEveryAPI(t *testing.T) {
 		require.NoError(t, n.Stop())
 		testutil.RequireReceive(t, runErr, 30*time.Second, "node run returned")
 	})
-	require.Eventually(t, writer.started.Load, 20*time.Second,
-		10*time.Millisecond, "a split node starts the IndexerDB writer")
+	requireWriterStarted(t, writer, runErr)
 	requireStartupComplete(t, n)
 
 	clock := slotTime.Load()
@@ -207,7 +250,7 @@ func TestSplitNodeServesEveryAPI(t *testing.T) {
 func runSplitNode(t *testing.T, dbPath string) func() {
 	t.Helper()
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
-	writer := &fakeIndexerWriter{wakes: make(chan struct{}, 8)}
+	writer := newStartSignalWriter()
 	n, err := New(NewConfig(
 		WithPluginSelection(plugin.CapabilityStorageBlob, plugin.Selection{
 			Provider: "badger", Config: map[string]any{"memTableSize": int64(8 << 20)},
@@ -248,14 +291,7 @@ func runSplitNode(t *testing.T, dbPath string) func() {
 		})
 	}
 	t.Cleanup(stop)
-	require.Eventually(t, func() bool {
-		select {
-		case err := <-runErr:
-			t.Fatalf("node run ended early: %v", err)
-		default:
-		}
-		return writer.started.Load()
-	}, 20*time.Second, 10*time.Millisecond, "the IndexerDB writer starts")
+	requireWriterStarted(t, writer, runErr)
 	requireStartupComplete(t, n)
 	return stop
 }
@@ -273,7 +309,7 @@ func requireStartupComplete(t *testing.T, n *Node) {
 		}
 		n.startupLifecycleMu.Unlock()
 		return true
-	}, 60*time.Second, 10*time.Millisecond, "node startup completes")
+	}, testutil.AsyncWait, 10*time.Millisecond, "node startup completes")
 }
 
 // A split node persists its consensus store in core mode, which a second
