@@ -114,7 +114,7 @@ func (fx *epochFixture) addPool(
 		AddedSlot:     10,
 		Relays:        relays,
 	}
-	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().ImportPool(
+	require.NoError(t, fx.adapter.db().Metadata().ImportPool(
 		pool, registration, nil,
 	))
 	id, err := poolIDString(poolKeyHash)
@@ -438,7 +438,7 @@ func TestNodeAdapterPoolHistoryMergesImportedBlockCounts(t *testing.T) {
 	ctx := context.Background()
 	poolID := fx.addPool(t, fx.poolA, nil)
 	fx.addMarkSnapshot(t, 0, "700")
-	meta := fx.adapter.ledgerState.Database().Metadata()
+	meta := fx.adapter.db().Metadata()
 	// The anchor sits between epoch 1's two blocks of pool A.
 	require.NoError(t, meta.SetSyncState("mithril_ledger_slot", "100000", nil))
 	require.NoError(t, meta.SaveImportedPoolBlockCounts([]models.ImportedPoolBlockCount{{

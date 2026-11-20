@@ -18,7 +18,11 @@ import "github.com/blinklabs-io/dingo/internal/utxoset"
 
 // Badger allocates a memtable arena per open set and again per flush. The
 // default 64 MiB across the many parallel sets here exhausted a CI runner's
-// memory, so every set these tests open uses a small memtable.
+// memory, so every set these tests open uses a small memtable. The block
+// cache's admission sketch is sized from the cache when a set opens, and a
+// finished parallel test keeps its closed set reachable until the binary
+// exits, so the cache is small too.
 func init() {
 	utxoset.DefaultMemTableSize = 8 << 20
+	utxoset.DefaultBlockCacheSize = 1 << 20
 }

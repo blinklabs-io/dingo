@@ -283,18 +283,9 @@ func (u *countingPlannerUpdater) OptimizePlannerStatsContext(
 
 func newTuningTestDatabase(t *testing.T, dir string) *database.Database {
 	t.Helper()
-	return newTuningTestDatabaseMode(t, dir, types.StorageModeCore)
-}
-
-func newTuningTestDatabaseMode(
-	t *testing.T,
-	dir string,
-	mode string,
-) *database.Database {
-	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir:     dir,
-		StorageMode: mode,
+		StorageMode: types.StorageModeCore,
 	})
 	require.NoError(t, err)
 	return db
@@ -478,25 +469,6 @@ func TestNodeMithrilTuningSkipsNonSQLiteBackends(t *testing.T) {
 	require.False(t, pending)
 	tuned.restore(t.Context())
 	tuned.end(t.Context())
-}
-
-// The catch-up droppable indexes are dropped only for a core-mode database:
-// API storage serves rollback-independent queries off them throughout, so an
-// API database keeps them and loses only the lazy entries.
-func TestNodeMithrilTuningKeepsCatchUpIndexesInAPIMode(t *testing.T) {
-	t.Parallel()
-	db := newTuningTestDatabaseMode(t, t.TempDir(), types.StorageModeAPI)
-	tuning := nodeMithrilTuning{db: db, logger: discardLogger()}
-	tuned := tuning.begin(t.Context(), fullScope)
-	missing, pending := deferredIndexState(t, db)
-	require.ElementsMatch(t, lazyIndexNames(), missing,
-		"an API-mode run dropped a catch-up droppable index")
-	require.True(t, pending)
-	tuned.restore(t.Context())
-	tuned.end(t.Context())
-	missing, pending = deferredIndexState(t, db)
-	require.Empty(t, missing)
-	require.False(t, pending)
 }
 
 // clockTuning stands in for an in-hold rebuild that takes an hour.

@@ -67,7 +67,7 @@ func (ls *LedgerState) removeAvvmUtxos(ctx context.Context,
 		refs          []types.UtxoKey
 		totalLovelace uint64
 	)
-	if err := ls.iterateLiveUtxos(ctx, txn, func(u *models.Utxo) error {
+	if err := ls.iterateLiveUtxos(txn, func(u *models.Utxo) error {
 		out, err := u.Decode()
 		if err != nil {
 			return fmt.Errorf(

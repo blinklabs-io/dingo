@@ -114,7 +114,14 @@ func newStoredQueryRowsLedger(
 	)
 	require.NoError(t, err)
 	configure(db, store)
-	return newPoolDistr2Ledger(t, db)
+	ls := newPoolDistr2Ledger(t, db)
+	if len(store.utxos) != 0 {
+		set := newQuerySetHistory()
+		set.rawRows = store.utxos
+		_, set.readErr = lcommon.NewBlake2b256Checked(store.utxos[0].TxId)
+		ls.config.UtxoSet = set
+	}
+	return ls
 }
 
 func TestAllDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
@@ -246,11 +253,12 @@ func seedShortTxIDUtxo(
 		TxId:       shortTxID,
 		OutputIdx:  0,
 		PaymentKey: paymentKey[:],
+		Cbor:       cborBytes,
 	}}
 	return addr
 }
 
-func TestQueryUtxoByTxInRejectsMalformedStoredTransactionID(t *testing.T) {
+func TestQueryUtxoByTxInPropagatesMalformedLiveSetKey(t *testing.T) {
 	t.Parallel()
 	ls := newStoredQueryRowsLedger(t, func(
 		db *database.Database,
@@ -258,7 +266,7 @@ func TestQueryUtxoByTxInRejectsMalformedStoredTransactionID(t *testing.T) {
 	) {
 		seedShortTxIDUtxo(t, db, s)
 	})
-	result, err := ls.queryShelleyUtxoByTxIn(t.Context(), []ledger.ShelleyTransactionInput{
+	result, err := ls.queryShelleyUtxoByTxIn([]ledger.ShelleyTransactionInput{
 		{TxId: lcommon.NewBlake2b256(bytes.Repeat([]byte{0x7B}, 32))},
 	},
 		QueryPoint{},
@@ -278,7 +286,6 @@ func TestQueryUtxoByAddressRejectsMalformedStoredTransactionID(t *testing.T) {
 		addr = seedShortTxIDUtxo(t, db, s)
 	})
 	result, err := ls.queryShelleyUtxoByAddress(
-		context.Background(),
 		[]ledger.Address{addr},
 		QueryPoint{},
 		nil,

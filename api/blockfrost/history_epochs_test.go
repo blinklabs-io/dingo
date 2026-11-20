@@ -253,6 +253,7 @@ func TestHandleEpochBlocks(t *testing.T) {
 // the tip inside the third, and the transactions, blocks and stake rows the
 // epoch endpoints aggregate.
 type epochFixture struct {
+	t       *testing.T
 	adapter *NodeAdapter
 	raw     *sql.DB
 	poolA   []byte
@@ -267,15 +268,8 @@ func newEpochFixture(t *testing.T) *epochFixture {
 	)
 	require.NoError(t, err)
 	adapter, raw, _ := newDBBackedAdapter(t, nodeConfig)
-	for epoch := range uint64(3) {
-		_, err := raw.Exec(
-			`INSERT INTO epoch (epoch_id, start_slot, length_in_slots, slot_length, era_id) VALUES (?, ?, 86400, 1000, 6)`,
-			epoch, epoch*86400,
-		)
-		require.NoError(t, err)
-	}
-	require.NoError(t, adapter.ledgerState.PrepareEpochCacheForStartup(context.Background()))
-	adapter.ledgerState.SetTipForTesting(ochainsync.Tip{
+	seedEpochs(t, adapter, raw, 0, 3)
+	setChainTip(t, adapter, ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 172900, Hash: fill32(0xee)},
 		BlockNumber: 5,
 	})
@@ -353,7 +347,7 @@ func newEpochFixture(t *testing.T) *epochFixture {
 		)
 		require.NoError(t, err)
 	}
-	return &epochFixture{adapter: adapter, raw: raw, poolA: poolA, poolB: poolB}
+	return &epochFixture{t: t, adapter: adapter, raw: raw, poolA: poolA, poolB: poolB}
 }
 
 func bytes32of(n int, b byte) []byte {
@@ -566,7 +560,7 @@ func TestNodeAdapterBlockListsRefuseUnretainedHistory(t *testing.T) {
 		t.Parallel()
 		fx := newEpochFixture(t)
 		poolID := fx.addPool(t, fx.poolA, nil)
-		meta := fx.adapter.ledgerState.Database().Metadata()
+		meta := fx.adapter.db().Metadata()
 		require.NoError(t, meta.SetSyncState("mithril_ledger_slot", "100000", nil))
 
 		_, _, err := fx.adapter.EpochBlocks(ctx, 1, asc)
@@ -594,7 +588,7 @@ func TestNodeAdapterBlockListsAfterBackfillBelowAnchor(t *testing.T) {
 	setup := func(t *testing.T, completed bool) *epochFixture {
 		t.Helper()
 		fx := newEpochFixture(t)
-		meta := fx.adapter.ledgerState.Database().Metadata()
+		meta := fx.adapter.db().Metadata()
 		require.NoError(t, meta.SetSyncState("mithril_ledger_slot", "100000", nil))
 		require.NoError(t, meta.SetBackfillCheckpoint(&models.BackfillCheckpoint{
 			Phase:     "metadata",
@@ -815,7 +809,8 @@ func TestNodeAdapterEpochOutputBeyondUint64(t *testing.T) {
 					insertAdapterTransaction(t, sqlTx, tx)
 				}
 			})
-			fx.adapter.ledgerState.SetTipForTesting(
+			setChainTip(
+				t, fx.adapter,
 				ochainsync.Tip{
 					Point: ocommon.Point{
 						Slot: 110001,

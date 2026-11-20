@@ -733,6 +733,9 @@ func Snapshot(
 		ImmutableIndexBytes:  immutableIndexBytes,
 		ImmutableIndexSHA256: immutableIndexDigest,
 	}
+	if err := captureIndexerBackup(ctx, snapshotRoot, &manifest, opts); err != nil {
+		return Manifest{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err
 	}

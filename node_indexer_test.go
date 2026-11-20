@@ -94,7 +94,7 @@ func TestIndexerWriterIsWokenByLedgerTipEventsUntilStopped(t *testing.T) {
 	)
 }
 
-func TestIndexerWriterIsAbsentOnTheSharedLayout(t *testing.T) {
+func TestIndexerWriterIsAbsentOnACoreNode(t *testing.T) {
 	t.Parallel()
 	n := &Node{}
 	require.NoError(t, n.openIndexerWriter(t.Context()))
@@ -107,9 +107,9 @@ func TestIndexerWriterIsAbsentOnTheSharedLayout(t *testing.T) {
 func TestAPIDatabaseFollowsTheLayout(t *testing.T) {
 	t.Parallel()
 	consensus := &database.Database{}
-	shared := &Node{db: consensus}
-	require.Same(t, consensus, shared.apiDatabase())
-	require.Nil(t, shared.apiReadiness(), "the shared layout gates nothing")
+	core := &Node{db: consensus}
+	require.Same(t, consensus, core.apiDatabase())
+	require.Nil(t, core.apiReadiness(), "a core node gates nothing")
 
 	indexer := &database.Database{}
 	store, err := indexerdb.NewStore(indexer, indexer, 10)
@@ -138,4 +138,36 @@ func TestMeshReportsTheIndexerTipOnTheSplitLayout(t *testing.T) {
 	require.EqualValues(t, 50, tip.Point.Slot)
 	require.EqualValues(t, 5, tip.BlockNumber)
 	require.NotNil(t, n.apiReadiness())
+}
+
+// History expiry stays below the IndexerDB tip, keeping the tip block the
+// writer reads again to resume, and expires nothing before the first block is
+// indexed. Without an IndexerDB nothing bounds it.
+func TestHistoryExpiryCeilingFollowsTheIndexerTip(t *testing.T) {
+	t.Parallel()
+	ceiling, ok, err := (&Node{}).historyExpiryCeiling(t.Context())
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, ^uint64(0), ceiling)
+
+	idx, err := dbtest.NewDatabase(t, &database.Config{})
+	require.NoError(t, err)
+	store, err := indexerdb.NewStore(idx, idx, 10)
+	require.NoError(t, err)
+	n := &Node{indexerDB: idx, indexerStore: store}
+	_, ok, err = n.historyExpiryCeiling(t.Context())
+	require.NoError(t, err)
+	require.False(t, ok, "nothing is indexed yet")
+
+	require.NoError(t, idx.Transaction(t.Context(), true).Do(
+		func(txn *database.Txn) error {
+			return store.SetTip(indexerdb.Tip{
+				Slot: 50, BlockNumber: 5, Hash: []byte("indexer-tip"),
+			}, txn)
+		},
+	))
+	ceiling, ok, err = n.historyExpiryCeiling(t.Context())
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(49), ceiling)
 }

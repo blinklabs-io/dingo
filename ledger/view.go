@@ -701,9 +701,7 @@ func (lv *LedgerView) UtxoById(
 	}
 
 	lv.ls.utxoByRefReads.Add(1)
-	utxo, err := lv.ls.utxoByRefForValidation(
-		lv.EvaluationContext(),
-		utxoId.Id().Bytes(),
+	utxo, err := lv.ls.utxoByRefForValidation(utxoId.Id().Bytes(),
 		utxoId.Index(),
 		lv.txn,
 	)

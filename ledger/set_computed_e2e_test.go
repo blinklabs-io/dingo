@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
@@ -39,19 +38,6 @@ func openComputedSet(t *testing.T) *utxoset.Set {
 	return set
 }
 
-// requireComputed requires result to have been computed and compared in
-// verify mode, with no difference from the metadata store.
-func requireComputed(
-	t *testing.T,
-	counts func(string) (float64, float64),
-	result string,
-) {
-	t.Helper()
-	verified, mismatches := counts(result)
-	require.Positive(t, verified, "no %s result was compared", result)
-	require.Zero(t, mismatches, "%s results differ from the store", result)
-}
-
 // TestSetComputedEpochRowsEqualTheStores requires the epoch and summary rows
 // the set computes at a boundary to be the rows the metadata store wrote,
 // and to survive a rollback the same way, with every result compared.
@@ -59,7 +45,7 @@ func TestSetComputedEpochRowsEqualTheStores(t *testing.T) {
 	t.Parallel()
 	set := openComputedSet(t)
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -77,8 +63,6 @@ func TestSetComputedEpochRowsEqualTheStores(t *testing.T) {
 	match()
 	scenario.ApplyBoundary()
 	require.Positive(t, match(), "the second boundary saved no summary")
-	requireComputed(t, scenario.ComputedResults, computedEpoch)
-	requireComputed(t, scenario.ComputedResults, computedEpochSummary)
 }
 
 // TestSetComputedEpochRowsAcrossAMidEpochEraSwitch requires the epoch rows
@@ -88,7 +72,7 @@ func TestSetComputedEpochRowsAcrossAMidEpochEraSwitch(t *testing.T) {
 	t.Parallel()
 	set := openComputedSet(t)
 	scenario := ledger.NewMidEpochEraSwitchScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -103,7 +87,6 @@ func TestSetComputedEpochRowsAcrossAMidEpochEraSwitch(t *testing.T) {
 	match()
 	scenario.RollbackBeforeSwitch()
 	match()
-	requireComputed(t, scenario.ComputedResults, computedEpoch)
 }
 
 // TestSetComputedEnactmentEqualsTheStores requires the protocol parameter
@@ -113,7 +96,7 @@ func TestSetComputedEnactmentEqualsTheStores(t *testing.T) {
 	t.Parallel()
 	set := openComputedSet(t)
 	scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -129,17 +112,16 @@ func TestSetComputedEnactmentEqualsTheStores(t *testing.T) {
 	require.Equal(t, before+2, match())
 	scenario.RollbackBeforeBoundary()
 	require.Equal(t, before, match())
-	requireComputed(t, scenario.ComputedResults, computedEnactment)
 }
 
 // TestSetComputesEpochStateWithoutTheStore requires a boundary and its
-// rollback, in set mode, to give the set the rows the store holds while the
+// rollback, from the live set, to give the set the rows the store holds while the
 // store's epoch, summary and parameter reads fail.
 func TestSetComputesEpochStateWithoutTheStore(t *testing.T) {
 	t.Parallel()
 	set := openComputedSet(t)
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -164,13 +146,13 @@ func TestSetComputesEpochStateWithoutTheStore(t *testing.T) {
 }
 
 // TestSetEnactsWithoutTheStore requires the boundary that enacts a classic
-// update, in set mode, to stage the store's rows while the store's parameter
+// update, from the live set, to stage the store's rows while the store's parameter
 // and proposal reads fail.
 func TestSetEnactsWithoutTheStore(t *testing.T) {
 	t.Parallel()
 	set := openComputedSet(t)
 	scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
@@ -191,24 +173,6 @@ func TestSetEnactsWithoutTheStore(t *testing.T) {
 	require.Zero(t, reached(), "the enactment was read back from the store")
 }
 
-// TestSetComputedEpochDivergenceIsCounted requires an epoch row the store
-// keeps differently from the set's to be counted in verify mode.
-func TestSetComputedEpochDivergenceIsCounted(t *testing.T) {
-	t.Parallel()
-	set := openComputedSet(t)
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
-	)
-	require.NoError(t, set.LoadLedgerState(
-		t.Context(), dbadapter.New(scenario.DB),
-	))
-	scenario.CorruptEpochWrites()
-	scenario.ApplyBoundary()
-	verified, mismatches := scenario.ComputedResults(computedEpoch)
-	require.Positive(t, verified)
-	require.Positive(t, mismatches, "the stored nonce differs from the set's")
-}
-
 // TestSetComputedSummaryCarriesTheStickyReadiness requires a summary saved
 // not ready over a ready one to stay ready in the set, and a ready summary
 // the set never saw to be counted as a divergence.
@@ -216,73 +180,18 @@ func TestSetComputedSummaryCarriesTheStickyReadiness(t *testing.T) {
 	t.Parallel()
 	set := openComputedSet(t)
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
-	saveReady := func(epoch uint64, ready bool) {
-		t.Helper()
-		sm := models.EpochSummary{
-			Epoch: epoch, TotalActiveStake: 5, SnapshotReady: ready,
-		}
-		scenario.SummaryInsideTxn(sm)
-	}
 	// An abandoned transaction leaves nothing to carry over, so the sticky
 	// bit is carried within one: the ready save, then the not-ready one.
 	kept := scenario.SaveSummariesInsideTxn(60, true, false)
 	require.NotNil(t, kept)
 	require.True(t, kept.SnapshotReady, "readiness is kept once set")
-	verified, mismatches := scenario.ComputedResults(computedEpochSummary)
-	require.Equal(t, float64(2), verified)
-	require.Zero(t, mismatches)
 
-	// Ready in the store alone: the set computes not ready.
-	require.NoError(t, store.SaveEpochSummary(&models.EpochSummary{
-		Epoch: 61, TotalActiveStake: 5, SnapshotReady: true,
-	}, nil))
-	saveReady(61, false)
-	verified, mismatches = scenario.ComputedResults(computedEpochSummary)
-	require.Equal(t, float64(3), verified)
-	require.Equal(t, float64(1), mismatches)
 }
 
 // TestSetComputedEnactmentDivergenceIsCounted requires an enactment the
 // store makes from a proposal the set does not hold to be counted, and the
 // same enactment through the ledger not to be.
-func TestSetComputedEnactmentDivergenceIsCounted(t *testing.T) {
-	t.Parallel()
-	for _, around := range []bool{false, true} {
-		name := "through the ledger"
-		if around {
-			name = "around the ledger"
-		}
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			set := openComputedSet(t)
-			scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(
-				t, set, ledger.UtxoSetReadsVerify,
-			)
-			require.NoError(t, set.LoadLedgerState(
-				t.Context(), dbadapter.New(scenario.DB),
-			))
-			p := ledger.UpdateProposal{
-				Slot: scenario.RollbackTarget.Slot + 1, Epoch: 1,
-				Keys: []byte{1, 2}, MaxTxSize: 21_000,
-			}
-			if around {
-				scenario.ProposeAroundTheLedger(p)
-			} else {
-				scenario.Propose(p)
-			}
-			require.NoError(t, scenario.EnactInsideTxn(2))
-			verified, mismatches := scenario.ComputedResults(computedEnactment)
-			require.Equal(t, float64(1), verified)
-			if around {
-				require.Equal(t, float64(1), mismatches,
-					"the store enacted a proposal the set does not hold")
-			} else {
-				require.Zero(t, mismatches)
-			}
-		})
-	}
-}

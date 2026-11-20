@@ -400,56 +400,6 @@ func (s *Store) GetSpentUtxosMissingAddressAfterSlot(
 	return ret, rows.Err()
 }
 
-// GetUtxosRestoredByRollback returns the UTxOs a rollback to slot makes live
-// again: created at or before slot and spent after it.
-func (s *Store) GetUtxosRestoredByRollback(
-	slot uint64,
-	txn types.Txn,
-) ([]models.Utxo, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, err
-	}
-	slotValue, err := checkedInt64(slot)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
-		utxosRestoredByRollbackSQL(s.dialect.Name()),
-	), slotValue, slotValue)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ret []models.Utxo
-	for rows.Next() {
-		row, err := scanSQLiteUtxo(rows)
-		if err != nil {
-			return nil, err
-		}
-		utxo, err := utxoFromSQLite(row)
-		if err != nil {
-			return nil, err
-		}
-		ret = append(ret, *utxo)
-	}
-	return ret, rows.Err()
-}
-
-func utxosRestoredByRollbackSQL(dialect string) string {
-	id := "utxo.id"
-	if dialect == "sqlite" {
-		// Ordering by the rowid makes SQLite scan the whole table in id
-		// order instead of ranging over the partial spent-row index.
-		id = "+utxo.id"
-	}
-	return `-- name: GetUtxosRestoredByRollback
-SELECT ` + utxoRowColumns + ` FROM utxo
-WHERE utxo.deleted_slot > ? AND utxo.deleted_slot > 0
-  AND utxo.added_slot <= ?
-ORDER BY ` + id
-}
-
 func spentUtxosMissingAddressAfterSlotSQL(dialect string) string {
 	id := "utxo.id"
 	if dialect == "sqlite" {
@@ -1113,11 +1063,9 @@ func (s *Store) hydrateImportedUtxo(
 	//
 	// ImportUtxos/ImportUtxosDeferredRewardLiveStakeRefresh (and so this
 	// conflict path) are also reached by database/transaction.go's
-	// ensureTransactionConsumedUtxos and ensureGapConsumedUtxos, which
-	// recover a missing input's producer row from the blob store rather than
-	// hydrate a certified snapshot. Neither can trigger this clause in
-	// practice: ensureGapConsumedUtxos always sets its own DeletedSlot to the
-	// consuming slot (never 0), and ensureTransactionConsumedUtxos only ever
+	// ensureTransactionConsumedUtxos, which recovers a missing input's
+	// producer row from the blob store rather than hydrate a certified
+	// snapshot. It cannot trigger this clause in practice: it only ever
 	// inserts a reference GetUtxoIncludingSpent just confirmed absent, so
 	// reaching this ON CONFLICT branch for it would require a concurrent
 	// writer to the same row within one block's write transaction -- which

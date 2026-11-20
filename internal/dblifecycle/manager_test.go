@@ -42,6 +42,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -2025,8 +2027,29 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 	}
 }
 
-// fakeIndexerSource stages a small file as the IndexerDB payload.
-func fakeIndexerSource(t *testing.T) *dblifecycle.IndexerPayloadSource {
+// managerTestLedgerTipSlot is the ledger tip the IndexerDB payload tests
+// snapshot at.
+const managerTestLedgerTipSlot = 100
+
+// seedManagerLedgerTip records a ledger tip, which the snapshot manifest
+// reads as the snapshot's own.
+func seedManagerLedgerTip(t *testing.T, db *database.Database) {
+	t.Helper()
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: managerTestLedgerTipSlot,
+			Hash: bytes.Repeat([]byte{0xa1}, 32),
+		},
+		BlockNumber: 10,
+	}, nil))
+}
+
+// fakeIndexerSource stages a small file as the backup of an IndexerDB whose
+// tip is at tipSlot.
+func fakeIndexerSource(
+	t *testing.T,
+	tipSlot uint64,
+) *dblifecycle.IndexerPayloadSource {
 	t.Helper()
 	return &dblifecycle.IndexerPayloadSource{
 		Check: func() error { return nil },
@@ -2038,18 +2061,22 @@ func fakeIndexerSource(t *testing.T) *dblifecycle.IndexerPayloadSource {
 			if err := os.WriteFile(path, []byte("indexer"), 0o600); err != nil {
 				return "", dblifecycle.IndexerPayload{}, func() {}, err
 			}
-			return path, dblifecycle.IndexerPayload{TipSlot: 1, TipHash: "00"},
-				func() {}, nil
+			return path, dblifecycle.IndexerPayload{
+				TipSlot: tipSlot,
+				TipHash: hex.EncodeToString(bytes.Repeat([]byte{0xb2}, 32)),
+			}, func() {}, nil
 		},
 	}
 }
 
 // TestManagerSnapshotsCarryTheIndexerDBOnSplit verifies that an automatic
-// snapshot of a split node holds the IndexerDB payload beside the ledger's.
+// snapshot of a split node holds the IndexerDB payload beside the ledger's,
+// with the IndexerDB tip the capture reported.
 func TestManagerSnapshotsCarryTheIndexerDBOnSplit(t *testing.T) {
 	t.Parallel()
 
 	db := newManagerTestDB(t)
+	seedManagerLedgerTip(t, db)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
@@ -2059,7 +2086,10 @@ func TestManagerSnapshotsCarryTheIndexerDBOnSplit(t *testing.T) {
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 1,
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
-	m.SetIndexerPayloadSource(fakeIndexerSource(t))
+	// An IndexerDB that trails the ledger, as the asynchronous writer leaves
+	// it.
+	const indexerTipSlot = managerTestLedgerTipSlot - 1
+	m.SetIndexerPayloadSource(fakeIndexerSource(t, indexerTipSlot))
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
@@ -2069,16 +2099,49 @@ func TestManagerSnapshotsCarryTheIndexerDBOnSplit(t *testing.T) {
 		_, err := os.Stat(manifest)
 		return err == nil
 	}, snapshotWait, 10*time.Millisecond)
-	require.Eventually(t, func() bool {
-		_, err := dblifecycle.ReadIndexerPayload(
-			filepath.Join(snapshotDir, "epoch-7"),
-		)
-		return err == nil
-	}, snapshotWait, 10*time.Millisecond,
-		"the payload is written with the snapshot")
+	payload, err := dblifecycle.ReadIndexerPayload(
+		filepath.Join(snapshotDir, "epoch-7"),
+	)
+	require.NoError(t, err, "the payload is written with the snapshot")
+	require.Equal(t, uint64(indexerTipSlot), payload.TipSlot)
 	require.FileExists(t, filepath.Join(
 		snapshotDir, "epoch-7", dblifecycle.IndexerPayloadFileName,
 	))
+}
+
+// TestManagerRefusesAnIndexerDBAheadOfTheLedger verifies that a backup whose
+// IndexerDB tip is past the ledger snapshot's is not published: its rows
+// describe blocks the restored ledger would not hold.
+func TestManagerRefusesAnIndexerDBAheadOfTheLedger(t *testing.T) {
+	t.Parallel()
+
+	db := newManagerTestDB(t)
+	seedManagerLedgerTip(t, db)
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, nil))
+	eb := event.NewEventBus(nil, logger)
+	defer eb.Stop()
+
+	snapshotDir := t.TempDir()
+	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+		SnapshotEnabled:      true,
+		SnapshotDir:          snapshotDir,
+		SnapshotEveryNEpochs: 1,
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
+	m.SetIndexerPayloadSource(
+		fakeIndexerSource(t, managerTestLedgerTipSlot+1),
+	)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop()
+
+	publishEpochTransition(eb, 7)
+	require.Eventually(t, func() bool {
+		return strings.Contains(
+			logBuf.String(),
+			"IndexerDB backup tip is past the ledger snapshot",
+		)
+	}, snapshotWait, 10*time.Millisecond)
+	require.NoDirExists(t, filepath.Join(snapshotDir, "epoch-7"))
 }
 
 // TestManagerRefusesToScheduleWhatTheIndexerPayloadCannotCover verifies the
@@ -2092,24 +2155,13 @@ func TestManagerRefusesToScheduleWhatTheIndexerPayloadCannotCover(
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
-	t.Run("cloud destination", func(t *testing.T) {
-		t.Parallel()
-		m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
-			SnapshotEnabled:          true,
-			SnapshotDir:              t.TempDir(),
-			SnapshotCloudDestination: "s3://bucket/x",
-		}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
-		m.SetIndexerPayloadSource(fakeIndexerSource(t))
-		require.ErrorContains(t, m.Start(context.Background()),
-			"cloud destination")
-	})
 	t.Run("unsupported configuration", func(t *testing.T) {
 		t.Parallel()
 		m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
 			SnapshotEnabled: true,
 			SnapshotDir:     t.TempDir(),
 		}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
-		src := fakeIndexerSource(t)
+		src := fakeIndexerSource(t, 0)
 		src.Check = func() error { return errors.New("trust key in use") }
 		m.SetIndexerPayloadSource(src)
 		require.ErrorContains(t, m.Start(context.Background()),

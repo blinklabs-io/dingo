@@ -19,10 +19,8 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"sort"
-	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -31,38 +29,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
-
-// utxoWholeResolveWorkers bounds how many goroutines
-// queryShelleyUtxoWhole uses to resolve live UTxOs' CBOR concurrently. Each
-// worker opens its own read transaction (TieredCborCache's own caches
-// synchronize themselves, but a *Txn is not shared-safe across goroutines
-// the way the underlying blob store's reads are), so this is
-// disk-I/O-bound parallelism, not CPU-bound -- a plain constant rather
-// than a runtime.NumCPU()-scaled value, since the bottleneck this
-// parallelizes (badger reads for cold blocks scattered across the whole
-// chain) isn't a CPU resource.
-//
-// 16 was chosen from a controlled sweep (4/8/12/16/24 workers, two
-// interleaved trials each) against a real Preview node's 3.17M live
-// UTxOs: 16 workers had the lowest mean resolve time (~113.4s vs 8
-// workers' ~146.2s) and won every one of its 8 head-to-head trials
-// against 4, 8, 12, and 24 workers. A CPU profile at 16 workers put
-// ~23% of cumulative samples in badger's own levelHandler.get ->
-// table.Iterator.seek -> table.Table.block path (locating and decoding
-// an SSTable block for a cold key) and another ~18% in GC mark work --
-// neither is lock contention, which is why more workers stop helping
-// past a point (24 workers, like an earlier 32-worker trial, measured
-// worse than 16): badger's own per-lookup block-index seek cost
-// dominates over any further parallelism this pool can extract.
-//
-// That sweep predates each worker holding a blob-only transaction instead
-// of a full one: at the metadata read pool's default size (DatabaseWorkers =
-// 5), every trial from 8 workers up was actually saturating at 5 concurrent
-// metadata connections regardless of this constant, so the 16-vs-8 gap above
-// may partly reflect that contention rather than pure disk-I/O parallelism.
-// Worth re-sweeping now that the worker transaction no longer takes a metadata
-// connection at all on the common path.
-const utxoWholeResolveWorkers = 16
 
 // utxoWholeResult caches the wire representation. LocalStateQuery's server
 // encoder calls MarshalCBOR after the query callback returns, so caching avoids
@@ -152,39 +118,15 @@ func encodeUtxoWholeResult(
 	return encoded, nil
 }
 
-// queryShelleyUtxoWhole answers GetUTxOWhole: every UTxO live as of right
-// now (or, for a pinned at, as of that exact point).
-//
-// A pinned at used to be silently ignored -- this answered from live state
-// regardless of what point was Acquired, unlike GetStakeDistribution and
-// GetPoolDistr2's own pinning support and unlike a real cardano-node, which
-// genuinely pins its whole reply for the rest of the LocalStateQuery
-// session. That made this the one comparison
-// field cmd/node-parity's periodic full checks reported as "diverged" on
-// essentially every run that took long enough for the live tip to move
-// during the walk -- confirmed live against a real Preview cardano-node:
-// every flagged UTxO's own AddedSlot was strictly after the pinned slot,
-// i.e. it was created after the point this reply claimed to answer for.
+// queryShelleyUtxoWhole answers GetUTxOWhole from the live UTxO set: every
+// UTxO live at the tip, or at a pinned at as of that exact point.
 //
 // The successful response is always the complete set. GetUTxOWhole cannot
 // apply item, byte, time, pagination, or offset limits because a partial or
-// refused response based on result size breaks the protocol contract. A
-// pinned at is slower still:
-// IterateUtxosAsOf has no indexed shortcut for "added_slot <= X" against an X
-// near the live tip (it matches nearly every row ever created, live or already
-// spent), unlike IterateLiveUtxos' indexed deleted_slot = 0 filter -- accepted
-// deliberately rather than left unfixed, since a wrong answer is worse than a
-// slow one for a tool whose whole purpose is catching real ledger divergence.
-//
-// Resolves every live UTxO's CBOR across a worker pool rather than
-// IterateLiveUtxos' inline per-row loadCbor: on a chain whose live UTxOs
-// are scattered across its whole history (the common case -- most were
-// created long before the current tip, and typically only one live UTxO
-// survives per originating block once the rest of that block's outputs
-// are spent), almost every row is both a tiered-cache miss and a distinct
-// block, so resolving them one at a time serializes millions of
-// independent blob-store reads with no data dependency between them.
-func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
+// refused response based on result size breaks the protocol contract.
+func (ls *LedgerState) queryShelleyUtxoWhole(
+	ctx context.Context,
+	at QueryPoint,
 	txn ledgerdb.Txn,
 ) (any, error) {
 	// Detach an acquired view before waiting for admission. Queued whole-UTxO
@@ -201,80 +143,26 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 		return nil, err
 	}
 	defer releaseAdmission()
-	if detachedPoint != nil && !ls.config.UtxoSetOnly {
-		return ls.queryUtxoWholePaged(ctx, *detachedPoint)
-	}
 	if detachedPoint != nil {
 		at = *detachedPoint
+		txn = nil
 		// The point could be rolled back while the query waited for
-		// admission; the paged path re-checks it for the same reason.
+		// admission.
 		if err := ls.VerifyPointQueryable(ctx, nil, at); err != nil {
 			return nil, err
 		}
 	}
-	if txn == nil {
-		txn = ls.ledgerDB().Begin(ctx, false)
-		defer txn.Release()
+	view, err := ls.liveUtxoView(at, txn)
+	if err != nil {
+		return nil, err
 	}
-	if ls.config.UtxoSetOnly {
-		view, err := ls.liveUtxoView(at)
-		if err != nil {
-			return nil, err
-		}
-		if view == nil {
-			return liveUtxoWhole(ctx, func(fn func(*models.Utxo) error) error {
-				return ls.iterateLiveUtxos(ctx, txn, fn)
-			})
-		}
+	if view != nil {
 		defer view.Close()
 		return liveUtxoWhole(ctx, eachInView(view))
 	}
-
-	// A bare UtxoRef, not a ref-plus-UtxoId pair: UtxoId is trivially
-	// reconstructed from a ref (see resolveRow below), so storing it here
-	// too would retain the same 32-byte hash and index twice per entry --
-	// 80 bytes/entry instead of UtxoRef's 36, about 140MB of pure
-	// duplication at the 3.17M live UTxOs measured against a real Preview
-	// node. Holding the full live set in memory at
-	// all (rather than a bounded window) is a further, larger memory cost
-	// this doc comment already tracks as future work (streaming the reply) --
-	// deliberately not attempted
-	// here: IterateLiveUtxoRefs'/IterateUtxoRefsAsOf's enumeration
-	// transaction would have to stay open for the whole resolve phase
-	// instead of the current brief enumeration pass, holding one more
-	// connection from the same scarce metadata pool the
-	// worker-side blob-only-txn design exists to stop starving.
-	var live []database.UtxoRef
-	collect := func(u *models.Utxo) error {
-		txID, err := ledger.NewBlake2b256Checked(u.TxId)
-		if err != nil {
-			return fmt.Errorf("utxo ref tx id: %w", err)
-		}
-		ref := database.UtxoRef{TxId: txID, OutputIdx: u.OutputIdx}
-		live = append(live, ref)
-		return nil
-	}
-	if at.pinned() {
-		// A pin older than the retention floor cannot be answered
-		// correctly: a row spent between at.Slot and the floor may
-		// already be hard-deleted, and IterateUtxosAsOf has no way to
-		// distinguish that from a row that was never live at at.Slot at
-		// all -- same reasoning
-		// queryShelleyUtxoByTxIn's identical check documents.
-		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
-			return nil, err
-		}
-		if err := ls.ledgerDB().IterateUtxoRefsAsOf(ctx, at.Slot, txn, collect); err != nil {
-			return nil, err
-		}
-	} else if err := ls.ledgerDB().IterateLiveUtxoRefs(ctx, txn, collect); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	return ls.resolveUtxoWhole(ctx, live)
+	return liveUtxoWhole(ctx, func(fn func(*models.Utxo) error) error {
+		return ls.iterateLiveUtxos(txn, fn)
+	})
 }
 
 // acquireUtxoWholeAdmission serializes complete GetUTxOWhole
@@ -299,285 +187,15 @@ func (ls *LedgerState) acquireUtxoWholeAdmission(
 	}
 }
 
-// resolveUtxoWhole resolves and encodes the GetUTxOWhole reply for live. It
-// reads only the blob store, through per-worker blob transactions.
-func (ls *LedgerState) resolveUtxoWhole(
-	ctx context.Context,
-	live []database.UtxoRef,
-) (any, error) {
-	type resolved struct {
-		id    olocalstatequery.UtxoId
-		txOut ledger.TransactionOutput
-		err   error
-	}
-	// resolveRow resolves and decodes one row, recovering any panic from
-	// either step into an ordinary error result instead of letting it
-	// escape the worker goroutine below. A panic here cannot be recovered
-	// by the goroutine that spawned this worker -- Go does not propagate a
-	// panic across a wg.Go boundary the way Txn.Do's own recover contains
-	// one on the caller's own goroutine -- so without this, a single
-	// malformed row would terminate the whole node process instead of
-	// failing the query with an ordinary error the way the previous
-	// sequential implementation did (its resolve loop ran inside
-	// IterateLiveUtxos' Txn.Do, whose recover converts a panic to
-	// ErrTxnPanic). Precedent: callRewardPrecompute
-	// (ledger/reward_calculation.go).
-	//
-	// The recovered error wraps database.ErrTxnPanic via NewTxnPanicError,
-	// not a bare fmt.Errorf, so it matches the same sentinel the
-	// sequential path's Txn.Do recovery would have produced: a caller
-	// using errors.Is(err, database.ErrTxnPanic) to distinguish "the
-	// worker's transaction machinery panicked" from an ordinary resolve
-	// failure must see the same sentinel regardless of which
-	// implementation answered the query.
-	resolveRow := func(txn ledgerdb.Txn, ref database.UtxoRef) (r resolved) {
-		if err := ctx.Err(); err != nil {
-			return resolved{err: err}
-		}
-		defer func() {
-			if rec := recover(); rec != nil {
-				r = resolved{err: database.NewTxnPanicError(
-					fmt.Sprintf(
-						"resolve utxo cbor %x#%d",
-						ref.TxId[:8], ref.OutputIdx,
-					),
-					rec,
-				)}
-			}
-		}()
-		id := olocalstatequery.UtxoId{
-			Hash: ledger.NewBlake2b256(ref.TxId[:]),
-			Idx:  int(ref.OutputIdx),
-		}
-		// WithRecovery, not the tiered cache's bare ResolveUtxoCbor: a
-		// missing blob is not necessarily gone for good -- IterateLiveUtxos'
-		// inline loadCbor reconstructs it from the producing block when
-		// possible, and this reply must not silently regress to omitting a
-		// row that path would have recovered. Even once recovery itself
-		// confirms the CBOR is unrecoverable (ErrUtxoCborUnavailable), this
-		// is still a live row GetUTxOWhole's contract can't omit -- main
-		// fails the whole query on that sentinel rather than silently
-		// returning a short set, since a cross-node comparison against a
-		// Haskell node would
-		// otherwise read a dropped row as a ledger divergence rather than a
-		// storage fault.
-		cborBytes, err := ls.ledgerDB().ResolveUtxoCborWithRecovery(
-			ctx,
-			ref.TxId[:],
-			ref.OutputIdx,
-			txn,
-		)
-		if err != nil {
-			return resolved{err: fmt.Errorf(
-				"resolve utxo cbor %x#%d: %w",
-				ref.TxId[:8], ref.OutputIdx, err,
-			)}
-		}
-		if err := ctx.Err(); err != nil {
-			return resolved{err: err}
-		}
-		txOut, err := decodeUtxoWholeCborFunc(ref, cborBytes)
-		return resolved{
-			id: id, txOut: txOut, err: err,
-		}
-	}
-
-	jobs := make(chan database.UtxoRef)
-	results := make(chan resolved)
-	// done is closed the moment the first resolve failure arrives on
-	// results, telling the feeder goroutine below to stop sending new
-	// jobs. Without it, a node with one unrecoverable row still paid the
-	// full resolve cost (and full peak memory) for every other row before
-	// returning the error it already had at the first one -- the previous
-	// sequential implementation aborted its whole traversal on the first
-	// failure, via the error it returned from IterateLiveUtxos' callback.
-	done := make(chan struct{})
-	workerCount := min(utxoWholeResolveWorkers, len(live))
-	var wg sync.WaitGroup
-	for range workerCount {
-		wg.Go(func() {
-			// Each worker owns its own transaction -- see
-			// utxoWholeResolveWorkers' doc comment for why one *Txn can't
-			// be shared across these goroutines. Blob-only: the resolve
-			// hot path (TieredCborCache.ResolveUtxoCbor) never touches
-			// metadata, only ResolveUtxoCborWithRecovery's rare recovery
-			// fallback does, and it opens its own metadata-capable
-			// transaction on demand for that branch. A full
-			// Database.Transaction(ctx, false) here would hold a metadata read
-			// connection from the shared pool (sized by DatabaseWorkers,
-			// 5 by default) for this whole worker's lifetime, well past
-			// utxoWholeResolveWorkers workers deep -- starving every other
-			// concurrent metadata reader in the node for the resolve
-			// phase's entire duration.
-			txn := ls.db.BlobTxn(false)
-			defer txn.Release()
-			for ref := range jobs {
-				results <- resolveRow(txn, ref)
-			}
-		})
-	}
-	go func() {
-		defer close(jobs)
-		for _, ref := range live {
-			// Checked separately, and first, from the send below: once
-			// done is closed, a worker simultaneously ready to receive on
-			// jobs makes both cases of a single select ready together, and
-			// select picks uniformly at random between ready cases rather
-			// than preferring done -- so the abort was not actually
-			// guaranteed to stop feeding promptly, only increasingly
-			// likely to over repeated iterations. A
-			// non-blocking check up front gives done priority; the second
-			// select still catches the remaining narrow window where done
-			// closes between this check and the send.
-			select {
-			case <-ctx.Done():
-				return
-			case <-done:
-				return
-			default:
-			}
-			select {
-			case jobs <- ref:
-			case <-ctx.Done():
-				return
-			case <-done:
-				return
-			}
-		}
-	}()
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput, len(live))
-	// firstErr is the first error to arrive on results, which is
-	// scheduling-dependent, not the first row in iteration order -- unlike
-	// the previous sequential implementation, which always failed on the
-	// same row for the same data. A deliberate choice, not an overlooked
-	// one: serializing worker completion order to make this deterministic
-	// would give up the parallelism this pool exists for, and every
-	// resolve failure is still reported (just possibly naming a different
-	// one of several unresolvable rows across runs), so nothing is lost
-	// except which specific ref is named first.
-	var firstErr error
-	// Drain every result after cancellation so workers release their blob
-	// transactions before this call returns.
-	for r := range results {
-		if r.err != nil {
-			if firstErr == nil {
-				firstErr = r.err
-				close(done)
-				if utxoWholeAbortObservedFunc != nil {
-					utxoWholeAbortObservedFunc()
-				}
-			}
-			continue
-		}
-		if ctx.Err() == nil && firstErr == nil {
-			ret[r.id] = r.txOut
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if firstErr != nil {
-		return nil, firstErr
-	}
-	encoded, err := encodeUtxoWholeResult(ctx, ret)
-	if err != nil {
-		return nil, fmt.Errorf("encode whole UTxO result: %w", err)
-	}
-	return &utxoWholeResult{encoded: encoded}, nil
-}
-
-// utxoWholePageSize is how many UTxO rows queryUtxoWholePaged reads per
-// read transaction. Each page is one indexed range scan on the row id, so a
-// page holds the WAL for milliseconds rather than the whole walk's minutes.
-const utxoWholePageSize = 10_000
-
-// utxoWholeRollbackRetries bounds how many times queryUtxoWholePaged restarts
-// a walk that a rollback below its slot interrupted.
-const utxoWholeRollbackRetries = 3
-
-// queryUtxoWholePaged answers GetUTxOWhole as of point without holding one
-// database read transaction for the walk: a QueryView running it has
-// released its snapshot (QueryView.detachForUtxoWhole), and the UTxO refs are
-// read as of point's slot in short pages (database.IterateUtxoRefsAsOfPaged).
-// A pin on point keeps spent-row pruning at or below its slot for the walk,
-// and the announced prune floor is checked afterwards in case the pin's
-// backstop let it pass. A rollback below the slot restarts the walk, after
-// confirming point is still on the chain.
-func (ls *LedgerState) queryUtxoWholePaged(
-	ctx context.Context,
-	point QueryPoint,
-) (any, error) {
-	releasePin := ls.PinAcquiredPoint(point.Slot)
-	defer releasePin()
-	var live []database.UtxoRef
-	for attempt := 0; ; attempt++ {
-		if err := ls.VerifyPointQueryable(ctx, nil, point); err != nil {
-			return nil, err
-		}
-		live = live[:0]
-		err := ls.ledgerDB().IterateUtxoRefsAsOfPaged(
-			ctx,
-			point.Slot,
-			utxoWholePageSize,
-			func(ref database.UtxoRef) error {
-				live = append(live, ref)
-				return nil
-			},
-		)
-		if errors.Is(err, database.ErrUtxoHistoryRolledBack) &&
-			attempt < utxoWholeRollbackRetries {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		break
-	}
-	if floor := ls.announcedUtxoPruneFloor(); floor > point.Slot {
-		return nil, fmt.Errorf(
-			"%w: spent-UTxO pruning reached slot %d during a GetUTxOWhole "+
-				"walk as of slot %d",
-			ErrHistoricalStateUnavailable,
-			floor,
-			point.Slot,
-		)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return ls.resolveUtxoWhole(ctx, live)
-}
-
-// decodeUtxoWholeCborFunc is decodeUtxoWholeCbor by default. resolveRow
-// calls it through this package-level variable rather than the function
-// directly so a test can substitute a stub -- e.g. one that panics, to
-// prove resolveRow's recover actually contains a panic from this step
-// without depending on a specific CBOR byte sequence that happens to
-// panic the real decoder, which isn't itself a documented, stable
-// behavior to write a test against. Not t.Parallel-safe for a test that
-// swaps it.
+// decodeUtxoWholeCborFunc is decodeUtxoWholeCbor by default. liveUtxoWhole
+// calls it through this package-level variable so a test can substitute a
+// stub, such as one that panics, without depending on a CBOR byte sequence
+// that happens to panic the real decoder. Not t.Parallel-safe for a test
+// that swaps it.
 var decodeUtxoWholeCborFunc = decodeUtxoWholeCbor
 
-// utxoWholeAbortObservedFunc, when non-nil, is called the instant
-// queryShelleyUtxoWhole's first resolve failure closes done. nil (its
-// production default) skips the call entirely. This lets a test observe
-// exactly when the abort signal fires without depending on a fixed number
-// of already-dispatched jobs or an arbitrary timing margin -- the feeder's
-// own done-select race (see its comment above) already means how many jobs
-// are in flight at that instant varies run to run, so a test asserting a
-// specific count would be asserting on an implementation detail this
-// function deliberately doesn't guarantee. Not t.Parallel-safe for a test
-// that swaps it, same as decodeUtxoWholeCborFunc above.
-var utxoWholeAbortObservedFunc func()
-
-// decodeUtxoWholeCbor decodes one resolved UTxO's CBOR into
-// GetUTxOWhole's reply shape. Split out from queryShelleyUtxoWhole so it
-// can be tested directly against hand-built inputs.
+// decodeUtxoWholeCbor decodes one UTxO's CBOR into GetUTxOWhole's reply
+// shape.
 func decodeUtxoWholeCbor(
 	ref database.UtxoRef,
 	cbor []byte,
@@ -598,17 +216,22 @@ func decodeUtxoWholeCbor(
 	return localStateQueryTransactionOutput(txOut), nil
 }
 
-// liveUtxoWhole answers GetUTxOWhole from the live UTxO set when it is the
-// only copy, decoding each output's CBOR the way resolveUtxoWhole does.
-//
-// It decodes on the calling goroutine instead of resolveUtxoWhole's worker
-// pool. The set hands over each output's CBOR already in memory, so there is
-// no per-row blob read for a pool to overlap, and no spawned goroutine whose
-// panic could escape the request's own recovery.
+// liveUtxoWhole decodes and encodes the GetUTxOWhole reply for the outputs
+// each yields. It decodes on the calling goroutine: the set hands over each
+// output's CBOR already in memory, and a panic stays within the request's
+// own recovery.
 func liveUtxoWhole(
 	ctx context.Context,
 	each func(func(*models.Utxo) error) error,
-) (any, error) {
+) (result any, resultErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = nil
+			resultErr = database.NewTxnPanicError(
+				"iterate live UTxO set", recovered,
+			)
+		}
+	}()
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	err := each(func(u *models.Utxo) error {
 		if err := ctx.Err(); err != nil {

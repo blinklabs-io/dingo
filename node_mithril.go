@@ -164,8 +164,8 @@ type MithrilCatchUpParams struct {
 	// PromRegistry is the node's metrics registry, nil when it has none.
 	// Collectors registered on it last for the node's lifetime.
 	PromRegistry prometheus.Registerer
-	// UtxoSet returns the live UTxO set a snapshot restore loads when the
-	// node keeps it as the only copy, or nil.
+	// UtxoSet returns the live UTxO set a snapshot restore loads, nil only
+	// before the set is open. Snapshot mode requires it.
 	UtxoSet func() ledgerstate.UtxoSetLoader
 }
 
@@ -681,7 +681,7 @@ func (n *Node) newMithrilSource() MithrilCatchUp {
 		// its metrics must not be in the set those rebuilds unregister.
 		PromRegistry: n.retainedComponentPromRegistry(),
 		UtxoSet: func() ledgerstate.UtxoSetLoader {
-			if !n.config.ledgerUtxoBadgerOnly || n.utxoSet == nil {
+			if n.utxoSet == nil {
 				return nil
 			}
 			return n.utxoSet
@@ -801,7 +801,8 @@ var (
 func (st *mithrilRestoreStatus) retryDetail() string {
 	detail := "last: " + st.lastErr
 	if !st.nextAttempt.IsZero() {
-		detail += ", next attempt at " + st.nextAttempt.UTC().Format(time.RFC3339)
+		detail += ", next attempt at " + st.nextAttempt.UTC().
+			Format(time.RFC3339)
 	}
 	return detail
 }
@@ -914,12 +915,10 @@ func (n *Node) mithrilSnapshotStartup(ctx context.Context) error {
 	if n.mithrilSource == nil || !n.mithrilSource.SnapshotMode() {
 		return nil
 	}
-	// A restore into a node keeping the live UTxO set as its only copy
-	// loads the set, so it opens here rather than with the ledger.
-	if n.config.ledgerUtxoBadgerOnly {
-		if err := n.openUtxoSet(); err != nil {
-			return err
-		}
+	// A restore loads the live UTxO set, so it opens here rather than with
+	// the ledger.
+	if err := n.openUtxoSet(); err != nil {
+		return err
 	}
 	s := &mithrilSnapshotStartup{
 		source:  n.mithrilSource,

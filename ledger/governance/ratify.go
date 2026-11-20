@@ -423,7 +423,7 @@ func parameterChangeDRepGroups(
 			groups |= drepParameterGroupTechnical
 		}
 		if a.ParamUpdate.MinPoolMargin != nil ||
-			a.ParamUpdate.RefInputsCostPerMultiAssetPolicy != nil ||
+			a.ParamUpdate.RefInputsCostPerMultiAssetByte != nil ||
 			a.ParamUpdate.RefInputsCostPerDatumByte != nil {
 			groups |= drepParameterGroupEconomic
 		}

@@ -41,6 +41,8 @@ type ProviderConfig struct {
 }
 
 type ProviderDependencies struct {
+	// Listen transfers a socket to the server. Nil uses net.Listen.
+	Listen             func(string, string) (net.Listener, error)
 	Node               BlockfrostNode
 	Logger             *slog.Logger
 	Host               string
@@ -93,6 +95,7 @@ func RegisterProvider(host *plugin.Host) error {
 				)
 			}
 			server := New(BlockfrostConfig{
+				Listen: deps.Listen,
 				ListenAddress: net.JoinHostPort(
 					listenHost,
 					strconv.FormatUint(uint64(cfg.Port), 10),

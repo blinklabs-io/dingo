@@ -561,7 +561,9 @@ func TestLogEffectiveConfigInfoLineHasNoSecrets(t *testing.T) {
 	}
 	if rec["component"] != "node" ||
 		rec["genesis_selection_mode"] != true ||
-		rec["health_ready_gap_slots"] != float64(config.DefaultHealthReadyGapSlots) {
+		rec["health_ready_gap_slots"] != float64(
+			config.DefaultHealthReadyGapSlots,
+		) {
 		t.Fatalf("unexpected fields: %v", rec)
 	}
 	for _, sentinel := range sentinels {
@@ -1498,20 +1500,11 @@ func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
 	}
 }
 
-func TestNodeStorageModeKeepsTheSplitLedgerStoreCore(t *testing.T) {
+func TestNodeStorageModeValidatesTheConfiguredMode(t *testing.T) {
 	t.Parallel()
 	mode, err := nodeStorageMode(&config.Config{StorageMode: "api"})
 	require.NoError(t, err)
 	require.Equal(t, dingo.StorageModeAPI, mode)
-
-	split := &config.Config{
-		StorageMode: "api",
-		Indexer:     config.IndexerConfig{Layout: config.IndexerLayoutSplit},
-	}
-	mode, err = nodeStorageMode(split)
-	require.NoError(t, err)
-	require.Equal(t, dingo.StorageModeCore, mode,
-		"the IndexerDB holds the API rows, so the ledger store must not")
 
 	_, err = nodeStorageMode(&config.Config{StorageMode: "bogus"})
 	require.ErrorContains(t, err, "invalid storage mode")

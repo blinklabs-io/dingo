@@ -75,6 +75,16 @@ that effective configuration early; each provider also resolves it during
 construction. TLS remains optional. See External Interfaces for precedence
 and shared bind settings.
 
+Programmatic composition can supply `WithAPIListenerFactory` to transfer already
+bound sockets to the built-in Blockfrost, Kupo, Mesh and UTxO RPC servers. The
+factory receives the configured network and address on each start; a successful
+return transfers socket ownership to the server's normal shutdown lifecycle.
+Live restore and truncate retain this factory when recreating API providers.
+The caller closes reservations that startup never consumes. With no factory,
+the servers acquire sockets through `net.Listen`. The API parity fixture keeps
+its ephemeral sockets bound until this handoff, so concurrent listeners cannot
+claim their ports between allocation and server startup.
+
 Command and bootstrap composition that opens a standalone database uses
 `internal/plugins.OpenDatabase`. Its return contract keeps ownership
 unambiguous: a non-nil error never accompanies a live runtime, while a
@@ -1624,12 +1634,16 @@ occupancy. An error without a supported era-specific representation terminates
 the connection through the protocol error path instead of fabricating a ledger
 failure. Clients must reconnect after that termination.
 
-Transaction admission and standalone evaluation accept only the ledger's
-current era. A transaction tagged with any other era is rejected with the
-hard-fork combinator's typed era-mismatch error before era-specific validation.
-Block application is different: a historical block from the era immediately
-before the ledger's current era remains valid across a hard-fork boundary and
-is checked with that block era's validator and protocol parameters.
+Transaction admission and standalone evaluation inject a historical
+Shelley-family transaction through each supported era transition into the
+ledger's current era before era-specific validation. Admission retains that
+current-era representation, so forging and transaction relay consume the same
+transaction that validation accepted. Byron has no injection into Shelley;
+Byron, future-era, and unknown-era submissions retain the hard-fork
+combinator's typed era-mismatch error, while a failed supported conversion is
+reported as a conversion failure. Block application is different: a
+historical block from the era immediately before the ledger's current era is
+checked with that block era's validator and protocol parameters.
 
 LocalTxSubmission validation runs under a context that is cancelled when the
 bearer closes. The listener starts an NtC connection's protocols before it
@@ -2106,8 +2120,23 @@ Stage spans, all in the block's trace: `block.header_received` (one per
 delivering peer), `block.header_validated`, `block.body_received`,
 `block.apply`, `block.commit` (one per sampled block of a committed batch,
 spanning the batch's commit), `block.rolled_back`, and on a producer
-`block.forge`. Until the ledger first reaches the upstream tip only the core
-stages (apply, commit, rollback, forge) are recorded, so a sync from genesis
+`block.forge`. A successful production forge records child spans for leader
+checks, pre-build preparation, Leios parent/closure preparation, endorser-block
+mempool snapshot/selection/build/broadcast, ranking-block construction,
+self-validation, announcement validation, and adoption. Endorser-block selection
+also records candidate/selected counts and whether its deadline truncated the
+selection. Timings are captured on the forging goroutine through adoption,
+when the block hash and its sampling decision are known. The root ends before
+the publication observer starts. Its delivery depends on the exporter's
+schedule. Child phases are processed after publication to avoid delaying
+diffusion. No per-transaction
+spans are added. The pre-build and endorser spans contain their
+nested stages, so their durations must not be added to those children.
+`block.forge.publish` is a separate sibling for post-adoption event publication
+and diffusion enqueueing; it does not change the forge span's adoption boundary
+or measure a peer receiving the block. Unadopted attempts retain their timing
+logs but have no block-derived forge trace. Until the ledger first reaches
+the upstream tip only the core stages (apply, commit, rollback, forge) are recorded, so a sync from genesis
 produces a reduced span set. A transaction's mempool admission records
 `tx.mempool_add` in a trace derived the same way from the transaction hash.
 
@@ -2316,12 +2345,15 @@ When `Node.Run()` is called, components are initialized in this order:
     transaction — and captures a point-in-time database snapshot
     (`database/lifecycle.Snapshot`) at epoch boundaries when
     `databaseLifecycle.snapshotEnabled` is configured.
-    Planner statistics manager (`internal/plannerstats.Manager`): the startup
-    `PRAGMA optimize` pass runs after any commit-timestamp recovery and before
-    the ledger starts processing blocks, to populate statistics before the first
-    block batch; a failed pass is logged and the node continues with the
-    statistics it had. A live restore or truncate runs the pass again on the
-    replacement database. The manager is then started and subscribes to
+    Planner statistics managers (`internal/plannerstats.Manager`): for the
+    consensus store, the startup `PRAGMA optimize` pass runs after any
+    commit-timestamp recovery and before the ledger starts processing blocks,
+    to populate statistics before the first block batch. An API node runs a
+    second manager over the IndexerDB: it starts after the API listeners and
+    runs its startup pass on the manager worker, so a long refresh over the
+    API history does not delay availability. A failed pass is logged and the
+    node continues with the statistics it had. A live restore or truncate runs
+    the pass again on the replacement database. The manager subscribes to
     `epoch.transition` (a post-Byron event without an epoch nonce, the slot
     clock's duplicate, is ignored; Byron rollovers carry no nonce and still
     trigger a run). Its worker also runs the pass every
@@ -2376,14 +2408,14 @@ arrive before the rebuild, their older transactions are placed ahead of the
 already queued restores. Revalidation therefore sees transactions in ledger
 order.
 
-`Mempool.AddTransaction` refuses a submission larger than the `MaxTxSize`
-ledger validation would apply to it before constructing the ledger transaction,
-taking `mutationMutex`, or running ledger rules. A limit is reported only for the
-current era; a wrong-era transaction reaches ledger validation so its typed
-era-mismatch error takes precedence over a size error. No limit is reported
-for an era whose validation is skipped or parameters that are not the type its
-validation requires. From Alonzo through Conway, the ledger's fee and maximum
-size rules measure a canonical three-element transaction envelope while
+`Mempool.AddTransaction` refuses a current-era submission larger than the
+`MaxTxSize` ledger validation would apply before constructing the ledger
+transaction, taking `mutationMutex`, or running ledger rules. A historical
+Shelley-family submission is decoded and injected first, then checked against
+the current-era limit before it can reach the mutation gate. No limit is
+reported for an era whose validation is skipped or parameters that are not the
+type its validation requires. From Alonzo through Conway, the ledger's fee and
+maximum size rules measure a canonical three-element transaction envelope while
 preserving the exact received body, witness-set and auxiliary-data bytes; the
 third element of a four-element envelope is the IsValid field and is omitted.
 Dijkstra keeps the same canonical three-component measure for its current
@@ -2475,9 +2507,10 @@ outlive it:
 - **EventBus subscriptions.** `Close` removes the subscriptions Ouroboros makes
   on its own behalf. A leaked one would be handled once per restore cycle,
   forever.
-- **Leios persistence workers.** `Close` stops the historical-serving writer
-  and retention GC before storage closes. An unconfirmed worker drain
-  prevents normal shutdown and live restore from closing storage underneath it.
+- **Leios persistence.** `Close` refuses further endorser-block writes, waits
+  for in-flight ones, and stops the retention GC before storage closes. An
+  unconfirmed wait prevents normal shutdown and live restore from closing
+  storage underneath it.
 
 `Close` is idempotent, so `Node.Stop` and an explicit restore teardown can both
 call it. Failed startup closes Ouroboros through `Run`'s LIFO rollback stack.
@@ -2536,8 +2569,8 @@ Phase 2: Drain and close connections
   Mempool, terminal EventBus close bounded by the shutdown deadline
   (concurrent with ConnectionManager), ConnectionManager,
   Ouroboros (`Ouroboros.Close`, the only shutdown close: releases acquired
-  LocalStateQuery snapshots, drains the Leios persistence writer and
-  retention GC, detaches EventBus subscriptions and Prometheus collectors,
+  LocalStateQuery snapshots, waits for in-flight Leios endorser-block writes
+  and stops the retention GC, detaches EventBus subscriptions and Prometheus collectors,
   cancels validation; bounded by the shutdown deadline and skipped once a
   phase-2 wait was abandoned)
 
@@ -2629,7 +2662,7 @@ supervisor or operator remains the way to abandon a wedged close. A repeated
 SIGINT or SIGTERM during shutdown is logged with that advice and does not
 interrupt the close. A later
 persistent store that sets `DurableClose` takes the same path. The live UTxO
-set (`ledgerUtxoBadger`) is a Badger store with the same per-table sync cost
+set is a Badger store with the same per-table sync cost
 and follows the same policy without being a plugin: `Node.closeUtxoSet` joins
 the checkpoint writer and then closes the set with no deadline, logging
 `closing durable store`, `durable store close still in progress` every 10
@@ -3161,29 +3194,15 @@ The ledger publishes every change to the live UTxO set on the ordered
 from each published `ledger.tx` transaction (`Consumed` removed, `Produced`
 added, so an invalid transaction spends its collateral and adds its
 collateral return); genesis and the Allegra AVVM removal publish their own.
-A rollback's change is read from the store inside the truncation
-transaction, before the truncation, by `UtxoRollbackChanges`: the live
-outputs created after the rollback point are removed and the outputs spent
-after it but created at or before it are restored with their CBOR. Reading
-it from the store makes it exact whichever path rolled back, and it covers
-undoing the AVVM removal and Leios endorser-block transactions. A consumer
+A rollback's change is the live UTxO set's net change from its journal
+(`ledger.UtxoSetRollbacker`), which makes it exact whichever path rolled
+back, and it covers undoing the AVVM removal and Leios endorser-block
+transactions. A consumer
 that applies the events in order reproduces the live set without reading the
 store; `finishRollbackIntent` waits for both the `ledger.tx` and
 `ledger.utxo` lanes to drain.
 
-`internal/utxoshadow` is an opt-in diagnostic (`ledgerUtxoShadow`) that
-consumes `ledger.utxo` the way a stateless consumer would. It keeps a Badger
-copy of the live set (`database/ledgerdb/badgerutxo`), bootstraps it from the
-metadata store at the first event, self-checks every change (removed outputs
-must be live, added outputs must not be), and when a block's first
-transaction shows the previous block is complete, compares a sample with the
-metadata store as of that block's slot. It subscribes with the lossless
-backpressure policy, because a detached subscription would skip changes with no
-signal to rebuild; a stalled shadow therefore backs up delivery rather than
-silently going stale. Results are logged and counted in the `dingo_utxo_shadow_*` metrics;
-validation never reads the copy.
-
-The live UTxO set (`ledgerUtxoBadger`, `internal/utxoset`) is the same Badger
+The live UTxO set (`internal/utxoset`) is the same Badger
 layout, kept by the ledger itself rather than by a subscriber.
 Genesis outputs are staged as several events, each within `ledger.MaxUtxoEventEntries`
 and `ledger.MaxUtxoEventBytes`, and `utxoset.Set` writes a batch that carries
@@ -3221,10 +3240,8 @@ row is read back only where the set does not hold the summaries), the batch
 writes it as an `f` row, and a rollback deletes
 the rows above the newest surviving epoch as it does the snapshots.
 `stagingLedgerDB` answers `GetEpochSummary` and `GetTotalActiveStake` (a ready
-summary for a `"mark"` query, else the snapshot rows' sum) from the metadata
-store and compares each with the set under the verify read guard, counting
-`epochSummaryReadsVerified` and `epochSummaryReadMismatches`; in set mode the
-set answers. The header path's producing-pool check reads the total through
+summary for a `"mark"` query, else the snapshot rows' sum) from the set.
+The header path's producing-pool check reads the total through
 `ledgerDB()` rather than the metadata store. `LoadLedgerState` loads the
 summaries into a set from before it kept them.
 
@@ -3235,9 +3252,7 @@ batch applies it as a `y` row of the generic state journal, and
 `stagingLedgerDB` answers `GetPoolVrfKeyHashAtSlot`,
 `GetPoolEarliestVrfKeyHashAtSlot`, `GetPoolVrfState`, `GetPoolRegistrations`,
 `GetPoolRegistrationsEffectiveForEpoch`, `GetPoolsRetiringAtEpoch` and `GetPool`
-(inactive pools included) from the metadata store and compares each with the
-history under the verify read guard, counting `poolReadsVerified` and
-`poolReadMismatches`. A read in an open write transaction sees the
+(inactive pools included) from the set's history. A read in an open write transaction sees the
 transaction's staged events, cut back by a staged rollback. `LoadLedgerState`
 loads the history into a set from before it kept it.
 
@@ -3251,10 +3266,7 @@ so a rollback removes them. `stagingLedgerDB` answers
 `GetLatestAccountRegistrationAtOrBefore`, `GetStakeRegistrationsByCredential`,
 `GetAccountsActiveAtSlot`, `GetStakeCredentialsWithRegistrationEvents`,
 `GetDrepLastRegistrationDeposit` and
-`GetDrepLastRegistrationDeposits` from the metadata store in `verify` mode and
-compares each with the history under the verify read guard, counting
-`registrationReadsVerified` and `registrationReadMismatches`; in `set` mode it
-answers them from the history once the set reports it loaded (the active-at-slot
+`GetDrepLastRegistrationDeposits` from the history once the set reports it loaded (the active-at-slot
 read also needs the accounts, and the deposits map the DReps). A stake
 registration read for a credential holding a registration of unknown table
 stays on the store. A read in an
@@ -3266,8 +3278,7 @@ stream: an account's import baseline, which genesis staking stages and a
 snapshot import or catch-up import writes around the ledger, and each slot a
 credential was witnessed at by an account certificate or a reward withdrawal,
 staged by `stageAccountTransaction`. `LoadLedgerState` loads both from the
-metadata store into a set from before it kept them. Each read is compared with
-the metadata store in `verify` mode and answered from the set in `set` mode. The
+metadata store during migration. Each read is answered from the set. The
 genesis writes stage the set's accounts, pools, DReps, DRep deposits, delegator
 links, baselines and witnesses from the genesis configuration through the
 functions the metadata store imports them with, and read nothing back from it.
@@ -3277,9 +3288,7 @@ Genesis key delegations and MIR certificates live in the set as
 its transaction index (`stageGenesisMIRCertificate`), the batch applies it as
 a `G` or `M` row of the state journal, and `stagingLedgerDB` answers
 `GetGenesisDelegationForSlot`, `GetGenesisDelegationsInSlotRange` and
-`GetMIRCertsInSlotRange` from the set in set mode, or from the metadata store
-compared with the set under the verify read guard in verify mode, counting
-`certHistoryReadsVerified` and `certHistoryReadMismatches`. A read in an open
+`GetMIRCertsInSlotRange` from the set. A read in an open
 write transaction sees the transaction's staged certificates, cut back by a
 staged rollback. The epoch boundary's MIR application needs nothing further:
 it reads the certificates through this path and credits accounts and moves
@@ -3298,17 +3307,14 @@ after that transaction commits and is dropped if it rolls back.
 `RewardOutputChange`, `RewardRoundChange` and `PostSnapshotCredit` rows. Reads
 (`rewardStagedOps`) overlay the staged changes of the batches a transaction sees
 over the committed rows, cut back by a staged rollback, and
-`stagingLedgerDB` compares `HasAppliedRewardCreditRound`,
+`stagingLedgerDB` answers `HasAppliedRewardCreditRound`,
 `GetPendingRewardCreditRounds`, `GetPendingRewardAccountOutputsForCredential`,
 `HasPendingRewardCreditRounds`, `HasUnfoldedRewardCreditsThroughEpoch` and
-`GetPostSnapshotRewardCredits` under the verify race guard
-(`dingo_rewardoutput_set_*`) in `verify` mode, and answers them from the
-rows in `set` mode once the set reports them loaded. `LoadLedgerState` loads
+`GetPostSnapshotRewardCredits` from the rows once the set reports them loaded. `LoadLedgerState` loads
 the rows into a set from before it kept them.
 
-`ledgerUtxoReads` (`LedgerStateConfig.UtxoSetReads`) routes validation's
-input reads, `LedgerView.UtxoById` and the block prefetch, to the set when
-the writer is also a `ledger.UtxoSetReader`. Each open transaction's staged
+Validation's input reads, `LedgerView.UtxoById` and the block prefetch use the
+set through `ledger.UtxoSetReader`. Each open transaction's staged
 batch keeps the last state of every output it changed, and a read in that
 transaction consults it before the set. The batch is applied to the set after
 its transaction commits, so another write can start in between; until it is
@@ -3316,33 +3322,25 @@ applied every reader also consults it, after any older such batch, and
 applying it and dropping it is one step under `utxoSetApplyMu`. Without this,
 a stake re-sum in that gap (a deferred reward-credit fold, for one) would
 store a credential's stake from before the commit until its next re-sum.
-`verify` mode reads both stores,
-uses the metadata store's answer and counts disagreements in
-`dingo_utxo_set_read_mismatches_total`; a mempool view's read-only snapshot
-can predate a commit the set already holds, so near the tip it can count
-disagreements that are not errors. `set` mode uses the set alone. Both fall
-back to the metadata store once an update to the set has failed. Only
-`verify` mode compares, in every read family: `set` mode trusts the set for
-the reads it serves, answers the others from the metadata store, and holds
-no race guard that could tell a disagreement from a write committing
-between the two reads. A read through a transaction pinned at a past
+An unavailable set fails the read. A read through a transaction pinned at a past
 commit, such as the deferred ratification's, answers from the set as of the
-pin in every read mode. `LedgerState.pinSetReads` takes, under
+pin. `LedgerState.pinSetReadsResult` takes, under
 `utxoSetApplyMu`, a read-only Badger snapshot of the set
 (`ledger.UtxoSetSnapshotter`) and the batches committed but not yet
 applied; the pinned transaction's reads, in every family, see that snapshot
 under those batches and nothing that committed or staged after. A snapshot
 is held until the transaction finishes, so Badger keeps the versions it can
-still read for the job's duration. If no snapshot can be taken, the pinned
-transaction's reads stay on the metadata store. Verify mode compares a pinned
-read exactly: both sides are as of the pin, so no write can race it.
+still read for the job's duration. Query views require snapshots and
+historical reads. A snapshot error aborts acquisition or the deferred job.
 
 Each level of each transaction is staged right after the delta writes it,
 so later transactions in the same commit see it. The staged batch also keeps
 a stake delta per stake sum (`ledger.UtxoStakeOf` classifies outputs as
 `utxo` rows do), so `LedgerState.CredentialUtxoStake` answers as the open
 transaction sees the set. The set's journal keeps one record per block, so a
-rollback can stop between two blocks of one commit.
+rollback can stop between two blocks of one commit; a block with no
+transactions stages no change, and `utxoset.Set` adds its point from the
+commit's block nonces.
 
 A set that is a `ledger.LedgerChangesWriter` also receives each commit's
 block nonces, nonce prune, epoch rows, pool stake snapshot changes,
@@ -3361,34 +3359,27 @@ when the set holds every proposal the decorator computes the enactment from
 the set's proposals and epoch records with
 `database.ComputeClassicPParamEnactmentFromRows`, the function the database
 layer runs, over a copy of the current parameters, and stages that row.
-Otherwise it stages the era's rows it finds added after the call. In `verify`
-mode `SetEpoch`, `SaveEpochSummary` and the enactment compare their computed
-result with what the store wrote and count differences in
-`dingo_ledger_set_computed_mismatches_total`; in `set` mode the enactment
-returns the set's result. A batch's rollback applies before its writes, as in a rollback
+The enactment returns the set's result. A batch's rollback applies before its writes, as in a rollback
 transaction the truncation precedes anything it rewrites.
 The ledger stages nonces where it writes them; the other writes go through
 `stagingLedgerDB`, the `LedgerDB` that `LedgerState.LedgerDB` returns, which
-the snapshot manager also writes through. The same reads mode applies to
+the snapshot manager also writes through. This applies to
 nonce, epoch, snapshot, network state, donation and protocol parameter
 reads through the set's typed readers, with the staged batches overlaid,
-once the set reports the rows loaded. Their metrics are `dingo_nonce_set_*`,
-`dingo_epoch_state_set_*`, `dingo_network_state_set_*` and
-`dingo_pparams_set_*`. Account lookups (`GetAccountByCredential` and
-`GetAccountsByCredential`) are compared with the set in `verify` mode and
-answered from its view in `set` mode, once the set reports its accounts
+once the set reports the rows loaded. Account lookups (`GetAccountByCredential` and
+`GetAccountsByCredential`) are answered from its view once the set reports its accounts
 loaded and while it follows the ledger; the set's account leaves `ID`,
 `CertificateID` and `ImportDeposit`, metadata row bookkeeping no ledger read
 consumes, at zero.
 The DRep lookup, active set and dormancy counter
 (`GetDrepByCredential`, `GetActiveDreps`, `GetDormantDRepEpochs`) follow the
-same split once the set reports its DReps loaded; the set's DRep leaves `ID`
+same path once the set reports its DReps loaded; the set's DRep leaves `ID`
 and `Delegators` empty, and the active set has no order, as the store's has
 none. `BumpDormantDRepExpiries` still reads the store's dormancy counter
 around its write, since that tells whether the store applied the bump.
 The pool registration in effect now
 (`GetPoolRegistrationsEffectiveForEpoch` at an unbounded snapshot slot) is
-answered from the set in `set` mode when the set can tell what the store
+answered from the set when the set can tell what the store
 would return: the pool's registration began before the epoch's start slot
 and no waiting re-registration began before it either (the set keeps no
 earlier registration, and has not reached the boundary), and the chain is in
@@ -3397,11 +3388,10 @@ closure's context slot, which the pool states do not follow; every node
 configures a certificate validator, so the era decides). A drained
 pools-history family answers it from the certificate history, whose events
 keep the effective slot. Otherwise, and for any
-other snapshot slot, the store answers. In `verify` mode it is compared.
+other snapshot slot, the certificate history supplies the answer after migration.
 The op-cert counter reads (`LatestPoolOpCertSequence`, `...After`,
 `...AtOrBefore`, `...InRange` and `LatestPoolOpCertSequences`) are
-answered from the set in `set` mode once it reports the counters loaded, and
-compared with the set's in `verify` mode, except where the set cannot tell.
+answered from the set once it reports the counters loaded.
 The set keeps each pool's highest sequence and latest slot, with the `k`
 journal for earlier slots, not every row: a read as of a slot before its
 record stays on the metadata store; `...After` and `...InRange` are answered
@@ -3409,15 +3399,13 @@ when the pool has no observation in the bound or its highest sequence rose
 inside it, and otherwise a lower counter could be the only row there, so the
 store answers. The existence read at a slot and the per-pool map at a slot
 (`LatestPoolOpCertSequencesAtOrBefore`) are answered from the set where it
-has a record of the slot, and compared there in `verify` mode; a slot before
-the record stays on the store. Verify-mode comparisons count in `dingo_account_set_*`,
-`dingo_drep_set_*`, `dingo_pool_set_*` and `dingo_opcert_set_*`. The decorator
+has a record of the slot; unavailable history fails the read. The decorator
 stages each `UpdatePoolOpCertSequence` and `UpdatePoolOpCertSequenceBatched`
 call's counter on the transaction's batch, where reads in the transaction
 see it. It stages the classic update proposals a valid transaction's
 `SetTransactionWithOpts` or `SetTransactionBatchedWithOpts` call stores
 (`pparam_update` rows) the same way. `GetPParamUpdates` and
-`ForecastPParamUpdates` are answered from them in `set` mode once the set
+`ForecastPParamUpdates` are answered from them once the set
 reports them loaded; the forecast selects the update with
 `database.ForecastPParamUpdatesFromRows`, the function the database layer
 runs over the store's rows. `ComputeAndApplyPParamUpdates` enacts from the
@@ -3435,9 +3423,8 @@ and governance paths make (`GetConstitution`, `GetCommitteeQuorum`,
 `IsCommitteeMemberResigned`, `GetResignedCommitteeMembers`,
 `GetActiveCommitteeMembers`, `GetCommitteeAuthorizedCount`,
 `GetCommitteeHotAuthorizationsSince`, `LatestCommitteeQuorum` and
-`LatestCommitteeResignations`) are answered from the set's view in
-`set` mode, once the set reports the rows loaded, and compared with it in
-`verify` mode (`dingo_committee_set_*`). The view overlays the staged batches
+`LatestCommitteeResignations`) are answered from the set's view once it reports
+the rows loaded. The view overlays the staged batches
 and any staged rollback on the set's rows. Its member rows have no row IDs
 and come in (added slot, tag, hash) order where the store's come in
 insertion order; no consumer depends on either: the lookups match by
@@ -3461,9 +3448,8 @@ and its `AtSlot` form, `GetExpiringGovernanceProposals`,
 `GetDroppedGovernanceProposalsAt`, `GetEnactedGovernanceProposalsAt`,
 `GetRatifiedGovernanceProposals` and `GetLastEnactedGovernanceProposal`), the
 transaction validation lookup `GetGovernanceProposal` and
-`GetGovernanceVotes` are compared with the set's view
-(`dingo_governance_set_*`) in `verify` mode, row IDs included, and answered
-from the set in `set` mode, in the store's order. The store's ID matters to
+`GetGovernanceVotes` are answered from the set in the store's order, with row
+IDs preserved. The store's ID matters to
 their callers: tallies fetch votes by proposal ID, a vote records its
 proposal's ID, and the committee lineage walk tracks visited proposals and
 breaks same-slot ties by it. The store's upsert returns the ID and the
@@ -3472,28 +3458,23 @@ marker is from before they carried it.
 
 The hard-fork stability scan runs in the background, outside the ledger
 lock and any transaction; it reads through the LedgerDB the ledger reads
-with, so those governance reads are compared too, as is the electing
+with, as does the electing
 snapshot's total active stake in header verification.
 
 The consensus reads served from `reward_live_stake` (`GetLiveStakeInputsForPools`,
 `GetDelegatedPoolKeyHashes`, `GetStakeByPools` and the DRep voting power reads)
-are answered in `set` mode, once the set holds the accounts, from live stake
+are answered, once the set holds the accounts, from live stake
 the set derives from its UTxO stake sums and accounts as the transaction
-sees them, and compared with it in `verify` mode under the same race guard
-(`dingo_livestake_set_*`). Pending reward credits are part of that figure
-(`ledger.RewardOutputReader`), so the comparison is exact; only a set that has
-not loaded its reward rows is compared one-sidedly while the store has credits.
-`set` mode answers the reads that include credits (the pool inputs and the
-three DRep voting power reads) from the set once it holds the reward rows; a
-set without them leaves those reads on the store while
-`HasPendingRewardCreditRounds` holds. The batch and by-type DRep power reads
+sees them. Pending reward credits are part of that figure
+(`ledger.RewardOutputReader`), so these reads require the reward rows to be
+loaded too. The batch and by-type DRep power reads
 leave out a DRep with no counted delegator, as the store does.
 
 The epoch-boundary stake reads the snapshot manager makes
 (`GetEpochBoundaryActivePoolKeyHashes`, `GetEpochBoundaryDelegatedPoolKeyHashes`,
 `GetEpochBoundaryStakeByPools`, `GetEpochBoundaryRewardStakeInputsForPools` and
-`GetPointerStakeInputsForPools`) are answered from the set in `set` mode and
-compared with the store's CTEs in `verify` mode (`ledger/boundary_stake_set.go`).
+`GetPointerStakeInputsForPools`) are answered from the set
+(`ledger/boundary_stake_set.go`).
 At the boundary the set's state as the boundary transaction sees it is read;
 for a boundary the set has moved past, the as-of machinery of
 `ledger/state_asof.go` reads the journals and the outputs live at the
@@ -3505,8 +3486,7 @@ effective order from the certificate histories and closure output effects
 context slot; see DATABASE.md for the correspondence and the refused cases.
 
 `GetPoolsRetiringAtEpoch`, `GetActivePoolKeyHashes` and
-`GetActivePoolKeyHashesAtSlot` are compared with the set's pool states
-(`dingo_pool_set_*`) in `verify` mode, and answered from them in `set` mode,
+`GetActivePoolKeyHashesAtSlot` are answered from the set's pool states,
 through the staged batches the read's transaction sees. The retirement read
 runs before the boundary stages the pool's removal, and stays on the store
 once a retiring pool's state is gone; the active-pool reads stay on the store
@@ -3523,25 +3503,18 @@ database's own pool reads go through `database.PoolSource`. The family is
 graduated and drains after accounts.
 
 `ForecastPParamUpdates` and `ComputeAndApplyPParamUpdates` select the classic
-update to enact from the proposals `GetPParamUpdates` returns. In `verify`
-mode the decorator reads them again after each call and compares the set's
-proposals, under the staged batches the transaction sees, with them
-(`dingo_pparam_update_set_*`); the call's result is the metadata store's. In
-`set` mode `ForecastPParamUpdates` is computed from the set's proposals.
+update to enact from the proposals `GetPParamUpdates` returns, computed from
+the set's proposals under the staged batches the transaction sees.
 
 `GetActiveAccountCredentials`, `GetActiveDelegatorCountsByPool`,
-`GetActiveDelegatorCredentialsByPool` and `GetDRepDelegators` are compared
-with the set's accounts, through the batches the read's transaction sees
-(`dingo_account_set_*`), in `verify` mode and answered from them in `set`
-mode, once the set holds the accounts. A `GetDRepDelegators` read for an
-empty credential stays on the metadata store in every mode.
+`GetActiveDelegatorCredentialsByPool` and `GetDRepDelegators` are answered from
+the set's accounts through the batches the read's transaction sees, once the
+set holds the accounts. `GetDRepDelegators` returns no delegators for an empty
+credential.
 
-A failed update of an authoritative set (`UtxoSetOnly`, or reads in `set`
-mode) is not read around: `failUtxoSet` marks the set failed, records the slot
+A failed update is not read around: `failUtxoSet` marks the set failed, records the slot
 through `ledger.UtxoSetFailureMarker`, and calls `FatalErrorFunc`, and
-validation reads of the set report it unavailable. Under `verify` or reads
-off the set only stops following the ledger and reads fall back to the
-metadata store. `utxoset.Set.Reconcile` rewinds a marked set from its journal
+validation reads of the set report it unavailable. `utxoset.Set.Reconcile` rewinds a marked set from its journal
 and resumes the ledger from there, rolls a set that is ahead of the ledger tip
 back to the tip when the journal holds it, and otherwise, for a set the
 metadata store cannot rebuild, walks the journal's restorable points newest
@@ -3557,7 +3530,8 @@ truncate and reopens it before the rebuilt ledger is built. See the live UTxO
 set sections of DATABASE.md for the marker, the manifest fields and the
 Mithril gap invalidation.
 
-`LedgerStateConfig.UtxoSetOnly` makes the set the only copy. The ledger
+The set is always present and is the only copy: `LedgerStateConfig.UtxoSet`
+is required, and `NewLedgerState` refuses a ledger without one. The ledger
 registers itself as the database's `types.LiveUtxoSource`
 (`LedgerState.LiveUtxoCbor`, which finds the writing transaction's batch by
 its metadata transaction), so the metadata store writes no `utxo` rows and
@@ -3605,10 +3579,8 @@ The LocalStateQuery reads of ledger state as of a slot (`GetDrepsAtSlot`,
 `GetRetiringPoolsAtSlot`, `GetPoolDepositsHeldAtSlot`,
 `GetAccountsByCredentialAtSlot`) go through one path in `ledger/state_asof.go`
 (`answerAsOf`). The set answers from the `k` state journal while
-`StateHistory.StateReachesSlot` holds before and after the read; in `verify`
-mode the metadata store answers and the set's answer is compared; outside the
-journal window `set` mode falls back to the store, and a read whose family is
-drained (`LedgerState.SetDrainedFamilies`) fails with
+`StateHistory.StateReachesSlot` holds before and after the read; outside the
+journal window a read whose family is drained (`LedgerState.SetDrainedFamilies`) fails with
 `ledger.ErrLedgerStateAsOfUnavailable`.
 `DATABASE.md` ("Ledger state as of a slot") has the per-read sources.
 
@@ -3638,14 +3610,43 @@ replays the blocks it stores in both. Neither source missing ends in the
 journal's error with the missing source named. See DATABASE.md, "Checkpoints
 and recovery when the journal cannot help".
 
-`dingo load` opens no live UTxO set and replays through the metadata store, so
-`LoadWithDB` reads the latch first and refuses a database with any drained
-family, failing with `nodesettings.ErrFamilyDrained`, before opening the
-chain or the ledger.
+`dingo load` composes its storage through the same code as the node
+(`internal/nodestorage`). `LoadWithDB` opens the database with the node's
+ImmutableDB configuration (`nodestorage.ImmutableConfig`, off under history
+expiry, which it refuses on a database that holds an ImmutableDB state record)
+and the live UTxO set of that database's data directory
+(`nodestorage.OpenUtxoSet`, a temporary directory for a database without one),
+and hands the set to the ledger. Before the ledger starts it runs
+`nodestorage.Reconcile`, the sequence `Node.reconcileUtxoSet` runs: finish a
+pending import into the set, move a released database's SQL UTxO set into the
+set (first reverting such a database `k` blocks below its tip, as the node
+does, with the kept blocks replayed before any is appended), mark a database at origin as set-only, reconcile the set with the ledger,
+and drain the graduated families. While it replays, a goroutine feeds the set
+the ledger's immutable point (`nodestorage.UpdateAnchor`) so the rollback
+journal is pruned, and its snapshot manager writes through
+`LedgerState.LedgerDB`. A loaded database is therefore one a node opens with
+nothing to migrate, and load runs on a database a node or an earlier load
+drained. It stops, before it copies a block, on a set that cannot be brought
+to the database's ledger tip, on an import into the set that is still writing
+(`database.ErrDrainedImportPending`), and on a chain behind the recorded
+ImmutableDB tip (`ErrLoadBehindImmutableTip`). Load writes no checkpoint, has
+no Mithril re-import fallback and promotes no block into the chunk files; the
+node's block promoter moves the loaded bodies on its first start.
 
-`ledgerStateSetOnly` is the one operator switch for making the set the only
-store of that state. It needs `ledgerUtxoBadgerOnly`, core storage mode and
-`set` reads, and `Node` passes it to `LedgerStateConfig.LedgerStateSetOnly`.
+The set is the only store of that state on every node. A database
+written by a release that kept the state in SQL moves in place at startup in a
+fixed order (see DATABASE.md, "Storage layout and the move from a released
+database"). The `dingo` command runs the move before any command opens a
+store; `Node.Run` does not, and refuses a PostgreSQL or MySQL API store that
+has a tip but was not adopted (`storageadopt.CheckServerAdopted`). The node's
+reconcile reverts the released metadata store to the block `k` blocks below
+its tip before the state moves (`nodestorage.Reconcile.RewindBlocks`,
+`lifecycle.RewindMetadata`) and the ledger applies the kept blocks again
+through the set, so the set's rollback journal covers the last `k` blocks of
+the released tip and a fork on the first start is followed. A truncate below the set's journal does not replace the set: it
+removes the blocks and leaves the set ahead of the ledger, and the next start's
+reconcile restores the newest checkpoint at or below the ledger's tip and has
+the ledger replay from it.
 At startup, after `reconcileUtxoSet`, `internal/statedrain.Run` deletes the SQL
 rows of each family the release graduates once its set markers are loaded and
 the set tip equals the metadata tip, then records the family in the
@@ -3694,7 +3695,8 @@ that the reward path used (live stake inputs, post-snapshot credits, historical
 stake) refuse a drained table in the SQL store and are answered from the set.
 The committee and governance tables are still read by API-only queries (the
 votes history, the proposal listing order and the off-chain anchor discovery),
-which a set-only node, refused in API storage mode, never runs. A drained
+which the ledger's core-mode store never runs: on the storage-role layout
+the IndexerDB answers them. A drained
 governance family has its new proposal and vote row IDs allocated by the set
 (`GovernanceReader.NextGovernanceIDs`), above every ID the set or a staged
 commit holds, since the SQL upsert no longer returns them. The metadata store
@@ -3721,7 +3723,7 @@ that confirmed real data; `lifecycle.Truncate` reloads the latch and installs
 the opened set
 as that source itself, and refuses a drained family it cannot serve
 (`lifecycle.ErrDrainedFamilyUnserved`). `statedrain.Graduated` takes a
-`Source` that supplies the set's markers and `ledger.VerifyFamily`. Whenever
+`Source` that supplies the set's markers (`ledger.FamilyLoaded`). Whenever
 `Database` learns the latch (`DrainedFamilies`, `RecordDrainedFamily`) it tells
 the metadata store whether live stake is drained
 (`Store.SetRewardLiveStakeDrained`): the store then no longer refreshes,
@@ -3785,12 +3787,11 @@ past which rollback is refused outright and the database must be discarded.
 
 ### IndexerDB layout
 
-The default `shared` layout stores consensus state and API rows in one
-metadata store. The opt-in `split` layout (`indexer.layout`) gives API rows
-their own store, the IndexerDB, which `database/indexerdb` wraps. The package
+In API storage mode, API rows live in their own store, the IndexerDB,
+which `database/indexerdb` wraps, and the consensus store is core. The package
 imports neither `ledger` nor `internal/node`: it owns the IndexerDB tip and
 readiness, and the writer that fills it follows the ledger from outside. The
-layout setting, its frozen node-settings gate and the tip/readiness store sit
+frozen layout gate and the tip/readiness store sit
 beside the ordered `ledger.tip` event (`ledger.TipEvent`), published after a
 block-batch commit, a forged-block tip write and a rollback that moves
 the tip. It is a wake signal: the writer reads the durable ledger tip and
@@ -3811,7 +3812,9 @@ after its captured slot was copied, it copies that round's pool and account
 outputs by epoch and reward ADA pots rows dated no later than its captured
 slot, then records the copy in IndexerDB. Those markers are removed
 when rollback removes the round's captured slot, and are committed with the
-fact rows. The ledger journals a round's credits lazily, so credits dated
+fact rows. A caught-up writer also refreshes completed rounds and deferred
+stake inputs without replaying blocks, so an idle chain does not delay their
+publication until another block arrives. The ledger journals a round's credits lazily, so credits dated
 before the writer's segment are re-read at the boundary slot of every round
 that still holds unfolded outputs, and each applied credit marks its output
 folded. With the
@@ -3864,7 +3867,7 @@ anchor and the UTxO digest from the set (`metadata.AnchorStateSource`, which
 `ledger.LedgerState` implements): the set's import baselines carry the pool and
 DRep delegations the import recorded, and a set that cannot (it lost them or
 the reward journal to a drain that came first) is refused with
-`ErrAnchorUnserved`. `mithril sync` on the split layout imports
+`ErrAnchorUnserved`. `mithril sync` in API storage mode imports
 the ledger state into the core store only (`mithril.SyncConfig.IndexerLayout`)
 and refuses to advance a complete split database.
 
@@ -3873,13 +3876,18 @@ opens the second metadata store, in API mode, as a `database.Database` over
 the ledger database's blob store (`blob.NewIndexerStore`: blocks read-only,
 UTxO and transaction offsets under their own key prefix, no commit timestamp),
 after the ledger database is recovered and before the ledger starts. The writer
-starts after the ledger, is woken by `ledger.tip`, and stops before the
-IndexerDB closes, which precedes the ledger database closing the blob store.
+starts after the ledger, wakes when `ledger.tip` or `ledger.reward_facts`
+fires, and stops before the IndexerDB closes, which precedes the ledger
+database closing the blob store.
+Failed passes retry with exponential backoff from one to thirty seconds,
+without requiring another ledger event. Wakes interrupt the retry delay and
+successful passes return to waiting for events.
 The root package cannot import `internal/node`, so the writer is injected with
-`WithIndexerWriterFactory`. The API readers sit over the IndexerDB on a split node: the Blockfrost and
-Kupo adapters resolve their database through one `db()` accessor (the
-IndexerDB when an `indexerdb.Store` is set, else the ledger database), Mesh,
-MCP, off-chain metadata and the token registry take `Node.apiDatabase()`, and
+`WithIndexerWriterFactory`. The API readers sit over the IndexerDB: the Blockfrost and
+Kupo adapters take its `indexerdb.Store` at construction and resolve their
+database through one `db()` accessor, Mesh and Midnight read `Node.indexerDB`,
+MCP, off-chain metadata and the token registry take `Node.apiDatabase()` (MCP
+also runs on a core node, where that is the ledger database), and
 Kupo and Blockfrost report the IndexerDB tip (`dataTip`) in latest-block and
 epoch responses and clamp history to it. Block bodies are shared through one
 blob store, so Midnight wraps its database in `NewBoundedDatabase`, which hides
@@ -3887,15 +3895,15 @@ blocks above the IndexerDB tip. `internal/apiready`
 gates routes on `indexerdb.Store.Ready`: each API classifies its own routes
 (`classifyRoute`) as ungated, current-state or history, each exports its
 `RoutePatterns` so a test fails on a route family no class names, and a gated route
-answers 503 with `Retry-After` while its kind is not ready. The shared layout
-sets no check and serves everything. MCP gates every route but health. Routes
+answers 503 with `Retry-After` while its kind is not ready. A node with no IndexerDB (core storage
+mode) sets no check and serves everything. MCP gates every route but health. Routes
 the ledger or mempool serve (transaction submit and evaluation, mempool,
 health) stay ungated; Blockfrost's `network` routes read the IndexerDB and are
 gated as current state. The Blockfrost mempool endpoints resolve a pooled
 transaction's confirmed inputs and deposit parameters from the ledger store at
 the ledger tip, because the IndexerDB may not have reached it.
-UTxO RPC's QueryService reads through `utxorpc.QueryDatabase`: the
-`indexerQueryDatabase` on a split node, the ledger otherwise. It answers
+UTxO RPC's QueryService reads through `utxorpc.QueryDatabase`, which the node
+builds over the IndexerDB with `utxorpc.NewIndexerQueryDatabase`. It answers
 `Unavailable` while the IndexerDB is not ready and reports its tip; sync,
 watch, submit and evaluation stay on the ledger.
 
@@ -4456,34 +4464,48 @@ and error-propagation needs.
 ### ImmutableDB and VolatileDB
 
 The blob store plays two roles. Badger is the VolatileDB: recent block bodies,
-the block index, metadata and offsets. When `immutableDb.enabled` is set, the
+the block index, metadata and offsets. On every node, the
 ImmutableDB holds the bodies of blocks older than k in cardano-node compatible
-chunk files, and Badger keeps a marker per promoted block.
+chunk files, and the blob store keeps a marker per promoted block. Ephemeral
+nodes use temporary chunk files; S3/GCS nodes keep them in object storage.
 
 - `database/immutable` writes and reads the chunk, secondary and primary files
   (`Store`), including crash recovery and O(1) point reads that find a Byron
   epoch boundary block at its chunk's first relative slot.
 - The ImmutableDB is the `storage.immutable` plugin capability. Its contract
   is `database/plugin/immutable.ImmutableDB` (`Dir`, `Open`, `ReadBlockAt`,
-  `ListFiles`) with a `Store` writer (append, sync, tip, read by location,
-  point lookup, truncate). The built-in `chunkfile` provider
-  (`database/plugin/immutable/chunkfile`) wraps `database/immutable.Store`,
-  is registered by `internal/plugins.NewHost` in every build, and is resolved
-  by `plugins.ResolveStorage` with no selector. `database.Stores.Immutable`
-  carries it into `database.New`, which opens the chunk writer, reads markers
-  and lists snapshot files only through it; a database without an ImmutableDB
-  needs none. The provider is a durable-close plugin: host shutdown closes a
+  `ListFiles`, `ReadFile`) with a `Store`
+  writer (append, sync, tip, read by location, point lookup, truncate). The
+  built-in `chunkfile` provider (`database/plugin/immutable/chunkfile`)
+  wraps `database/immutable.Store` and is registered in every build. Builds
+  with `dingo_extra_plugins` also register S3 and GCS providers; the immutable
+  selection follows the matching configured blob provider and reuses its
+  released object-store settings. Remote objects are authoritative, with only
+  the writable tail staged locally; completed trios publish chunk, secondary,
+  then primary. An interrupted new chunk without a committed primary entry
+  is removed before reopening its preceding durable tail. A rollback checks
+  that the published chunk holds its point before deleting any later chunk,
+  and the writer reads its staged chunks locally. Chunk adoption verifies a
+  staged trio before publishing it (`ChunkPublisher`) and retracts one that
+  fails before the recorded tip covers it (`ChunkUnpublisher`). Snapshots link
+  local chunk files and stream remote ones through the provider; blob-key
+  backups exclude reserved immutable objects. `database.Stores.Immutable`
+  carries the selected provider into `database.New`, which opens the writer,
+  reads markers and lists snapshot files through it; a database without an
+  ImmutableDB needs none. The provider is a durable-close plugin: host
+  shutdown closes a
   writer its holder left open to completion, and a later `Open` is refused.
   `Database.Close` and the failed-step reset still close the writer first.
 - `database` installs an `immutableBlobStore` over the blob store whenever the
   `im_state` record exists. It resolves markers in `GetBlock`, `Get` on `bp`
   keys and iterator values, so chain iteration, blockfetch, chainsync and
   offset resolution are unchanged. `Database.PromoteThrough` writes markers and
-  the recorded tip as bodies age out; a Mithril bootstrap that keeps its chunk
-  files writes them through `Database.BlockCreateImmutable` and
+  the recorded tip as bodies age out; a `dingo mithril sync` bootstrap, which
+  keeps its chunk files unless `historyExpiry.enabled` is set, writes them through `Database.BlockCreateImmutable` and
   `Database.AdoptImmutableTip`.
 - `internal/blockpromote` runs the promotion loop, wired in `node.go` and the
-  reload path in `node_lifecycle.go` like history expiry. Its ceiling is k
+  reload path in `node_lifecycle.go` unless `historyExpiry.enabled` is set,
+  in which case no promoter starts. Its ceiling is k
   blocks behind the block index of the ledger's applied tip, not the chain
   tip. After each step that moves the tip it publishes
   `database.immutable_tip_advanced` (`blockpromote.TipAdvancedEvent`).
@@ -4519,15 +4541,23 @@ fallback:
   consistent combination of them -- to a `(slot, hash)` point, maps that to the
   blob store's `GetBlockURL`, and returns a signed object URL plus compact
   block metadata. A reference the node does not hold comes back under
-  `not_found` without discarding the rest of the batch.
-- A node with `historyExpiry.enabled` keeps its local blob plugin and starts
-  `internal/historyexpiry.Pruner`. The worker derives its safety window from
+  `not_found` without discarding the rest of the batch. A node that also
+  enables the ImmutableDB on `s3` or `gcs` cannot back the archive for
+  promoted history: a promoted block's object holds its marker, so
+  `GetBlockURL` returns `ErrImmutableBlockNotSignable` instead of a URL, and
+  only blocks not yet promoted can be signed.
+- A node with `historyExpiry.enabled`, in either storage mode, keeps its
+  block bodies in its local blob plugin and starts
+  `internal/historyexpiry.Pruner`; the ImmutableDB is off and no block is
+  promoted. The worker derives its safety window from
   `LedgerState.StabilityWindow()` and scans only blocks older than that window,
   starting from a durable cursor in `sync_state` so each round costs the newly
-  eligible blocks rather than every earlier tombstone.
-  `Database.PruneBlock` materializes any UTxO CBOR still stored as block
-  offsets before replacing the block CBOR value with an expired-history marker,
-  leaving block indexes and metadata intact.
+  eligible blocks rather than every earlier tombstone. With an IndexerDB its
+  `Ceiling` keeps it below the IndexerDB tip, so the writer reads every body
+  before it is expired. `Database.PruneBlock` materializes any UTxO CBOR still
+  stored as block offsets before replacing the block CBOR value with an
+  expired-history marker, leaving block indexes and metadata intact. Startup
+  refuses history expiry on a database with an ImmutableDB state record.
 - A node with `barkBaseUrl` is wired by `node.go` with a `bark.BlobStoreBark`
   wrapper. Normal block writes still go to the local blob plugin. Reads first
   check local storage; expired or missing historical blocks fall back to the
@@ -4728,6 +4758,15 @@ lifecycle fsyncs a durable
 recovery record before that mutation. Startup combines the record with the
 live/backup directory state to compensate an incomplete swap or retain the
 activated external pair.
+
+A split snapshot's authenticated manifest describes a second provider-native
+backup for IndexerDB. Live restore retains the original external IndexerDB
+alongside the original consensus metadata. For a released API snapshot, the
+live restore first verifies the staged API store, then adopts it with the
+same migration used at startup. The recovery record also covers the
+consensus namespace beside the API database before that migration resets
+it. Server metadata
+compensation leaves the active local ledger directory intact.
 
 Any reset/restore error, cancellation after mutation, or final cross-store
 validation failure discards the staged cloud namespace and triggers metadata
@@ -4985,15 +5024,10 @@ down anyway. Both mean a background goroutine could not be confirmed to have
 exited before its bounded wait gave up — unlike every other error these steps
 can return, which mean some cleanup step failed on an already-unused resource,
 this means a goroutine may still be reading/writing `n.db`. For the Leios case
-specifically: the persist writer's
-`leiosPersistOnce`/`leiosPersistStopOnce`/`leiosPersistStarted` reset (letting a
-later `enqueueLeiosPersist` lazily relaunch a fresh writer against the
-reinitialized database) is skipped entirely on an unconfirmed drain, not just
-deferred — resetting them would let the very next enqueue start a second writer
-against a freshly reset pending map while the old writer might still be reading
-and deleting from that same map (now repointed) under the shared mutex, silently
-stealing jobs meant for the new database and writing them into the old one via
-its stale captured database reference. `reinitializeAndResume` would reopen that
+specifically: an unconfirmed pause leaves endorser-block writes refused and the
+GC's start-once guard unreset, so no new write or GC worker reaches either
+database while a write or sweep from before the pause may still be running
+against the old one. `reinitializeAndResume` would reopen that
 same data directory out from under either still-running goroutine, so both
 `closeStorageForLiveLifecycleOp` and `quiesceForLiveLifecycleOp` return
 immediately on this error without proceeding further, and `Restore`/`Truncate`
@@ -5461,7 +5495,11 @@ it on a fresh sync whose genesis registers no pools — preview, whose pools
 register on chain during epoch 0 — rather than treating an empty distribution
 as nothing to record. An empty slot-0 distribution behind a later current epoch
 still skips the capture: there it means the pool data predates a Mithril
-import, not that the network had no stake.
+import, not that the network had no stake. On a database past its first block
+the capture reads the ledger state as of slot 0; when the live UTxO set's
+history does not reach it (a released database moved into the set inside
+epoch 0) and the epoch 0 mark is already recorded, the capture is skipped
+rather than failed.
 
 CIP-0163 full-pot reward distribution is an operator-set, consensus-affecting
 feature gate (`FullPotRewardsEnabled`, default off; see `WithFullPotRewards` and
@@ -6111,6 +6149,65 @@ unapplied blocks, and selecting against that trailing state would miss the
 effects of those blocks, including the certified closures they apply. While the
 ledger tip is not the parent, the slot announces no endorser block
 (`dingo_metrics_leios_forge_eb_skipped_total{reason="ledger_not_at_parent"}`).
+For a local announcement without a certified closure, selection uses
+`LedgerState.WithPreparedLeiosSelection`: it decodes the exact wire transaction
+bytes, ticks to the leader slot, and stages full ordered ledger effects in a
+rollback-only transaction. Only admitted candidates enter that staged state.
+The resulting ephemeral receipt binds the ordered bytes, parent publication,
+slot, and block number. After constructing an empty ranking block, the forger
+carries this receipt to announcement validation. The validator still verifies
+manifest completeness and header binding; a matching receipt reuses the ledger
+verdict. Any publication, byte, slot, or header-context mismatch takes the full
+validation path. Certifying ranking blocks retain the existing selection and
+full validation path because their certified closure changes the state basis.
+No preparation writes become durable, and receipts are never accepted from
+network messages or restored from storage.
+
+The production forger prepares an unsigned candidate for its next cached leader
+slot when that slot is within three seconds. One worker owns this work; a
+single pending request replaces older requests, cancelling and joining an old
+attempt before the replacement starts. Canonical slot-to-time conversion sets
+the deadline before the leader boundary, including on networks with sub-second
+slots. Future planning checks the target committee without opening the produce
+window; the live window is checked only at publication. The worker takes no
+credential generation, consumes no forge fence,
+and publishes no endorser block. Ledger transitions invalidate its receipt.
+
+Pure wire preparation runs in bounded parallel windows. Each candidate becomes
+available in mempool order as soon as its own preparation finishes; later work
+cannot hold up that prefix. Preparation stops claiming work at its deadline and
+keeps its completed prefix, while live validation still enforces the selection
+budget. Every exit cancels and joins remaining preparation workers before the
+ledger session returns. The ledger constructs opaque transaction tokens bound
+to their issuing ledger instance, keeping the exact wire bytes and decoded value
+together. Ordered validation consumes these tokens without decoding again;
+only capacity-admitted tokens stage full effects. Prepared sessions register
+cancellable contexts: when a durable ledger transition begins, it cancels them
+before waiting for the database writer. A long script therefore yields to block
+application rather than holding the writer until its future slot deadline.
+The raw preparation callback
+remains available as an adapter over the same ledger session.
+
+At the leader slot the forger cancels unfinished preparation and runs its usual
+sync, leadership, credential and fence gates. It rechecks committee eligibility
+and capacity before consuming a candidate. A hit must match the parent,
+publication, target slot and capacity. Receipt freshness is checked again at
+broadcast; a stale candidate takes the normal bounded selection path. The
+immutable transaction subset remains
+valid when new mempool transactions arrive. A miss, changed context, or certified
+closure follows the bounded synchronous path. Publication and ranking-block
+signing occur only after the normal forge fence. Stop joins the worker before
+a restart can replace it.
+
+`dingo_forge_leios_prebuild_total` distinguishes preparation outcomes and cache
+hits, misses, parent changes, capacity changes and stale publications;
+`dingo_forge_leios_prebuild_seconds` measures preparation time. Speculative
+attempts do not increment production skip or selection metrics. The
+`block.forge.leios.prebuild_consume` span records whether the forge used a
+prepared candidate, and the endorser-block log marks background durations with
+`prebuilt=true`.
+
+
 An announcing slot carries the EB or ranking-block transactions, never both: the
 two are selected from the mempool separately, so carrying both could put one
 transaction in each set, and the EB would then fail closure validation against
@@ -6238,35 +6335,29 @@ the LeiosDB (`database/leiosdb`, a dedicated store under `<dataDir>/leios/`)
 content-addressed and the same hash can be a live, independently required
 occurrence at more than one slot at once -- so the same node can later reload
 either occurrence after the 10-minute in-memory cache TTL and re-serve it to
-downstream peers. This
-persistence is asynchronous and off the leios-fetch hot path:
-`storeLeiosEndorserBlock` queues the write on a single background writer
-(`ouroboros/leios_persist.go`) that coalesces by (slot, hash), not hash alone —
-a complete job supersedes a manifest-only one for the same occurrence, eliding
-the backfiller's duplicate manifest write, while a job for a different
-occurrence of the same hash persists independently — and does one store write
-per occurrence via `Database.SetLeiosEB`, so the CBOR encode + commit do not
-serialize against block application during catch-up. It is best-effort (a queue
-at either of its bounds drops the historical-serving write, logged with the
-reason) except for a certified endorser block, which ledger apply of the
-certifying ranking block writes itself when `em`/`et` are absent
-(`persistCertifiedEndorserBlock`, from the same provider lookup that supplied
-the applied transactions), and never affects UTxO resolution, which uses the
-ledger's own
-genesis-blob path. The queue is bounded twice, by entry count
-(`leiosPersistMaxPending`) and by aggregate retained bytes
-(`leiosPersistMaxQueueBytes`, the same 256 MiB the in-memory endorser-block
-cache uses, since the queue only holds a copy of what that cache already holds);
-the count bound alone would have let 4096 entries at the cache's 16 MiB
-per-entry budget retain tens of gigabytes. Admission is decided before the
-payload is copied: `enqueueLeiosPersist` measures the caller's own manifest and
-transaction slices, reserves those bytes and an entry slot under
-`leiosPersistMu`, and only then clones, so an endorser block the queue is going
-to drop costs no copy. A reservation is released on every path that does not
-install a job — an unwinding clone, a stopped writer, a complete job that lands
-for the same occurrence meanwhile — and an installed job's reservation is
-released when it is superseded by a replacement or popped by the drain, so the
-budget is a steady-state limit rather than a one-shot allowance.
+downstream peers. They
+are written synchronously, before the fetch that produced them reports
+success: `storeLeiosEndorserBlock` publishes a slot-verified entry through
+`publishLeiosEndorserBlock`, which writes it with `Database.SetLeiosEB`
+(`ouroboros/leios_persist.go`) before offering it to downstream peers, and
+returns a failed write to the fetch or backfill that stored it. A manifest-only
+entry writes the manifest and a complete one the transaction list too; writing
+the same occurrence twice is harmless. An unverified peer-offered entry is not
+written until its slot is corroborated. The cache entry records that its current
+content was written (`durable`), carried forward only while the transaction
+set does not grow, so re-offers of a held block from
+every connection do not rewrite it, while a manifest or transaction offer, or
+a by-point request from the ledger, for a block cached but not durable (its
+earlier write failed) retries the write instead of reporting success. A block
+that needs a write is also withheld from relay offers and from relayed
+announcements until a write succeeds. A failed LeiosDB write is classified as a
+local failure: it leaves the serving peer's cooldown unchanged and ends the
+by-point request rather than failing over to another peer. Entries reloaded
+from the LeiosDB are durable. A certified endorser
+block is also written by ledger apply of the certifying ranking block when
+`em`/`et` are absent (`persistCertifiedEndorserBlock`, from the same provider
+lookup that supplied the applied transactions). None of this affects UTxO
+resolution, which uses the ledger's own genesis-blob path.
 Retention follows the reference node. Each endorser block is first volatile.
 When the immutable point (`LedgerState.ImmutablePoint`, `k` blocks behind the
 applied tip) advances, `LedgerState.AdvanceLeiosPins` walks the primary chain
@@ -6277,7 +6368,7 @@ event-driven rather than timed: a primary-chain event wakes it, it runs the pin
 walk, and it then collects unpinned volatile records strictly below the smaller
 of the immutable slot and the pin watermark. A pinned endorser block is kept
 permanently. A positive `leiosPersistenceRetentionSlots` only widens the window
-and never collects past the immutable point, and the writer still persists a
+and never collects past the immutable point, and persistence still writes a
 pinned block below the cutoff. The leios-fetch server answers an unpinned block
 behind the immutable point, or behind the collection watermark, as unknown (an unpinned block counts as behind
 the immutable point only below the pin watermark, so refusal never outruns the
@@ -6296,32 +6387,24 @@ closures exist nowhere else. The snapshot selects the LeiosDB after it holds
 the commit barrier, because the store opens on first use, and fails when an
 existing LeiosDB cannot be opened rather than omitting it. A persisted
 endorser block signals the collector as well as primary-chain events do.
-`startLeiosPersistWriter` resets the accounting with the pending map, so a live
-Restore/Truncate restart does not carry the old queue's reservations onto the
-new one; the writer is drained and stopped at shutdown via
-`StopLeiosPersistWriter`, whose drain wait is bounded by a short timeout so a
-stuck or slow blob store cannot hang graceful shutdown (the stop is still
-signalled and new enqueues are rejected once stopping, so no freshly fetched
-block is silently stranded). `StopLeiosPersistWriter` is a permanent, one-way
-stop — appropriate for process shutdown, where nothing enqueues again — but the
-`ouroboros.Ouroboros` object survives a live Restore/Truncate
-(`node_lifecycle.go`) unlike everything else it depends on, so a plain stop
-there would drain against the pre-operation database (fine) but then reject
-every enqueue forever afterward, permanently disabling EB historical persistence
-for the rest of the process's life. `quiesceForLiveLifecycleOp` instead calls
-`PauseLeiosPersistWriterForLiveLifecycleOp`, which does the same stop-and-drain
-against the still-open pre-operation database, then resets the writer's
-start-once guard so the next enqueue — once `LedgerState` has been reassigned to
-the reinitialized database — lazily relaunches a fresh writer against it, the
-same self-healing restart every other `n.ouroboros` field already gets via
-reassignment rather than reconstruction. This call happens last in quiesce,
-after connection shutdown. If that shutdown cannot be confirmed, the operation
-requires a supervised restart instead of replacing storage while traffic can
-still enqueue. `leiosPersistLifecycleMu` holds a read lock through each
-enqueue's reservation, copy, installation and signal, and an exclusive lock
-through writer stop, drain and reset. In-flight enqueues finish before the
-drain, and no reservation or wakeup crosses writer generations. The writer loop
-receives its channels as arguments. Because endorser transactions are not part
+Close and `PauseLeiosPersistWriterForLiveLifecycleOp` set a permanent
+refusal of new writes under `leiosPersistLifecycleMu`, then wait for in-flight
+writes and for the GC worker, each bounded by
+`leiosPersistShutdownDrainTimeout` so a stuck or slow store cannot hang
+graceful shutdown or a live Restore/Truncate. A write holds the read lock only
+to register, never across `SetLeiosEB`, and Close does not hold the lock while
+it waits for EventBus handlers, which may be registering a write; that wait is
+bounded by the same timeout and reports `ErrLeiosPersistDrainUnconfirmed` when
+a handler does not finish. A live Restore/Truncate does not keep the
+`ouroboros.Ouroboros` object: `quiesceForLiveLifecycleOp` calls the pause,
+which refuses writes for good, and `reinitializeNetworkingCore` then closes the
+old instance and constructs a replacement whose cache starts empty and reloads
+from the LeiosDB. Fetch workers and handlers still running on the old instance
+therefore cannot reach the storage being closed. The pause call happens last in
+quiesce, after connection shutdown. If that shutdown cannot be confirmed, the
+operation requires a supervised restart instead of replacing storage while
+traffic can still write. A pause whose wait is not confirmed returns
+`ErrLeiosPersistDrainUnconfirmed`. Because endorser transactions are not part
 of any chain block — so they have no CBOR offsets — their CBOR is persisted as a
 standalone blob keyed by the endorser block's `(slot, hash)` with DOFF offsets
 (mirroring the genesis path), and `SetTransaction`/delta apply is reused so they
@@ -6427,11 +6510,11 @@ downstream requests for pruned records have the same peer dependency. A sweep
 with a positive window lists manifests to find the highest persisted slot; every
 sweep scans the shared Leios prefix for deletion candidates. On object stores
 this means paginated listings plus per-key deletes.
-The GC worker does not share the persistence writer's queue and cannot stall
-its write drain. Live Restore/Truncate stops
-and joins both workers before storage replacement; if either worker cannot
-stop within the bounded drain window, the live operation does not proceed
-against the old database. Partial cloud-store deletes are safe to retry on the
+The GC worker holds `leiosPersistStoreMu` only to publish its frontier, so a
+slow scan cannot stall endorser-block writes. Live Restore/Truncate waits for
+in-flight writes and joins the GC worker before storage replacement; if either
+cannot finish within the bounded drain window, the live operation does not
+proceed against the old database. Partial cloud-store deletes are safe to retry on the
 next sweep.
 
 When a certified endorser-block fetch has no connected leios-fetch peer, or
@@ -6604,10 +6687,10 @@ On an eligible notify
 block offer, `ouroboros/` fetches the endorser-block manifest over leios-fetch,
 decodes and hash-validates it, rejects it if the fetched body's length does not
 match the offer's declared size (`MsgBlockOffer.Size`) or if caching it would
-exceed the cache's per-entry byte budget, caches it, queues the manifest and
-complete transaction set for asynchronous persistence to the blob store (a
-single background writer, off the fetch hot path; see "Era-Specific
-Validation"), and hands it to the vote and pipeline managers. The relay offers
+exceed the cache's per-entry byte budget, caches it, writes the manifest and
+any complete transaction set to the LeiosDB once its slot is verified, before
+the fetch reports success or the block is offered downstream (see
+"Era-Specific Validation"), and hands it to the vote and pipeline managers. The relay offers
 each endorser block on every connection, so the manifest fetch is skipped once
 this exact (slot, hash) occurrence is already cached, mirroring the same guard
 on the transactions offer; the cache (`Ouroboros.leiosEndorserBlocks`) is keyed
@@ -6716,11 +6799,8 @@ acceptance window. The persistent LeiosDB (below) is keyed by
 slot and then the hash, so
 `Database.SetLeiosEB`/`GetLeiosEBManifest`/`GetLeiosEBTxs` persist and reload
 each occurrence independently, and a second live occurrence of a recurring hash
-no longer silently overwrites the first once its in-memory entry ages out. The
-asynchronous persistence writer's job-coalescing map
-(`ouroboros/leios_persist.go`) uses the same composite key, so a manifest-only
-job for one occurrence cannot be superseded by (or accidentally suppress) a
-complete job for a different occurrence of the same hash. `loadLeiosEBFromDB`
+no longer silently overwrites the first once its in-memory entry ages out.
+`loadLeiosEBFromDB`
 passes the caller's own expected slot straight through to the blob-store read,
 so a lookup for one occurrence can only ever return that occurrence -- there is
 no longer a separate post-read slot comparison to get wrong.
@@ -7784,11 +7864,10 @@ dependency across two points in the pipeline:
   reference's `VRFKeyUnknown`. A Mithril restore imports the certified Praos
   HeaderState counter map at its trusted tip, so each included pool has an
   authoritative baseline before the first replayed block and a pool absent from
-  that map is absent from the reference state too. A Mithril-restored database
-  with no certified row at its boundary never imported the map, so the counter
-  of a pool not observed since the boundary is unknown rather than zero; the
-  read fails with a rebootstrap error instead of rejecting that pool's next
-  valid block. Rollback safety is inherited from the per-`(pool, slot)`
+  that map is absent from the reference state too. The loaded map is the
+  ledger's counter state from then on: block application reads a pool's
+  current counter the same way whether the state was loaded at a tip or built
+  block by block. Rollback safety is inherited from the per-`(pool, slot)`
   `PoolOpCertSequence` store, which drops rows past the rollback slot and
   recomputes the latest counter, so the counter never advances for a block that
   is later rolled back. The SQL store flips the counter's sign bit on write and
@@ -7870,10 +7949,11 @@ large-DB startup for minutes.
 
 The `LedgerView` interface provides query access to ledger state:
 - UTXO lookups by address or output reference
-- Block reference-script budget checks use a narrow PV10 aggregate-accounting
-  view: a genuinely absent reference UTxO contributes zero, matching Conway's
-  pre-block restricted-map rule, while storage/decode errors and normal
-  per-transaction validation remain fail-closed.
+- Block reference-script budget checks use a narrow aggregate-accounting view:
+  an input absent from the database or consumed in the pending overlay
+  contributes zero in Conway and Dijkstra, matching the reference ledger's
+  restricted-map rule at every protocol version, while storage/decode errors
+  and normal per-transaction validation remain fail-closed.
 - Protocol parameter queries
 - Classic Shelley-family protocol parameter update (PPUP) and
   move-instantaneous-rewards validation use two explicit `LedgerView`
@@ -8208,11 +8288,21 @@ behind the applied ledger tip. The applied tip and its era are captured
 together, and the chain lookup stays anchored to that exact point while the
 header chain can advance. Each calls `LedgerState.AcquireQueryView`, which waits
 (inside the caller's deadline) for any epoch-boundary job and opens a
-coordinated read snapshot (`database.NewReadSnapshotContext`, whose blob and
-metadata views are fixed at one commit boundary), and validates the point
-against it with `VerifyPointQueryable`. A boundary can commit before its job is
-published, so a snapshot that still contains the boundary's pending-ratification
-record is dropped and the open retried once the job settles. A wait that
+coordinated read snapshot (`database.NewReadSnapshotWithAnchorContext`, whose
+blob, metadata and live-ledger-set views are fixed before commits resume), and
+validates the point against it with `VerifyPointQueryable`. If committed changes
+are still awaiting application to the live set, it releases the snapshot and
+retries inside the caller's deadline so historical journal entries are present.
+Historical UTxO reads open from that transaction's set snapshot, and releasing
+the transaction
+releases its set pin. A live-set snapshot failure rejects acquisition and
+releases the database snapshot. Contention on the live-set lock drops the
+database snapshot before retrying within the acquisition deadline. Provider
+panics release the lock, and historical-view construction releases its parent
+borrow on failure. Set-only acquisitions reject
+providers that cannot supply snapshots and historical reads. A boundary can
+commit before its job is published, so a snapshot that still contains the
+boundary's pending-ratification record is dropped and the open retried once the job settles. A wait that
 outlasts the caller's deadline fails with `ledger.ErrEpochBoundaryJobPending`,
 naming the boundary's epoch. A volatile-tip Acquire does not wait for the job:
 the job can outlast the Acquire budget (seconds on preprod, tens of seconds
@@ -8570,8 +8660,8 @@ stake. Its reply total is the
 delegated stake summed across the reconstructed pools, as
 `poolsByTotalStakeFraction` returns it. Both queries omit a pool with no
 delegated stake, as `calculatePoolDistr` does.
-`GetUTxOWhole` enumerates live references, resolves their stored
-CBOR through a fixed worker pool, and decodes them into the node-to-client
+`GetUTxOWhole` walks the live UTxO set -- the tip, or the set's view at the
+acquired point -- and decodes each output's CBOR into the node-to-client
 reply shape. The UTxO query leaves serialize Babbage-era ADA-only outputs
 without a datum or reference script as the backwards-compatible two-element
 array that cardano-ledger emits from its compact UTxO state. They do not reuse
@@ -8584,24 +8674,16 @@ partial result. Internal database pages only shorten read transactions; they
 are assembled into one complete protocol response. This contract must remain
 explicit in implementation and protocol documentation.
 
-`GetUTxOWhole` on an acquired view does not read through the view's snapshot.
-Its walk takes minutes on a large chain, and SQLite cannot restart its WAL
-while any reader holds a read transaction, so whole-UTxO queries one after
-another -- a node-parity replay asks for one at every epoch boundary -- kept
-the WAL growing without bound under every checkpoint strategy (42 GB live).
-Instead the view releases its read transaction
-(`QueryView.detachForUtxoWhole`) and the query reads the references as of the
-view's block -- the acquired point, or the snapshot's tip for a tip acquire --
-in pages of 10,000 rows, each in its own short read transaction
-(`database.IterateUtxoRefsAsOfPaged`, paging on the UTxO row id). The as-of
-predicate makes the pages agree: blocks applied meanwhile add rows after the
-slot, which it excludes, and spend rows after it, which it still includes. An
-acquired-point pin holds spent-row pruning at or below the slot for the walk,
-and the announced prune floor is checked once it ends. A rollback below the
-slot (`UtxosDeleteRolledback`, `UtxosUnspend`) marks the walk disturbed; the
-query re-verifies the point and restarts, up to three times. A later query on
-the same session reopens a snapshot pinned to that block, as an expired view
-does, keeping the forecast frozen at `Acquire`.
+`GetUTxOWhole` on an acquired view does not hold the view's metadata read
+transaction. Its walk takes minutes on a large chain, and SQLite cannot restart
+its WAL while any reader holds a read transaction. The view releases its read
+transaction (`QueryView.detachForUtxoWhole`) before the query waits for
+admission, and the query reads the live UTxO set's view at the view's block --
+the acquired point, or the snapshot's tip for a tip acquire -- after
+re-verifying that the point is still queryable. An acquired-point pin holds the
+point for the walk. A later query on the same session reopens a snapshot pinned
+to that block, as an expired view does, keeping the forecast frozen at
+`Acquire`.
 Both queries exist to
 support cross-node ledger-state comparison in the devnet conformance
 harness (`internal/test/devnet`, see its README's "LocalStateQuery in
@@ -12188,8 +12270,13 @@ watermark-evicts transactions. Its TxSubmission intake waits for sufficient
 admission headroom, while direct submissions receive `MempoolFullError` above
 the rejection watermark. A transaction that repeatedly loses the available
 headroom race to another peer is dropped after a bounded retry streak so that
-one offer cannot stall the connection indefinitely. Per-item CBOR decode and
-mempool validation rejections are likewise logged and dropped without stopping
+one offer cannot stall the connection indefinitely. An admission whose ledger
+snapshot moves during reconciliation is retried under the same bound.
+Exhausting that bound drops the peer's already-acknowledged transaction without
+a verdict so repeated snapshot movement cannot stall the connection
+indefinitely. A CBOR decode failure rejects the complete reply; three
+consecutive invalid replies stop intake for that connection. Mempool validation
+rejections for decoded transactions are logged and dropped without stopping
 the peer's intake pump; peer, protocol, or mempool shutdown still terminates the
 pump. DAG intake currently requests one transaction ID per TxSubmission round
 trip, which can reduce inbound throughput on high-latency peer links. This is
@@ -13647,16 +13734,11 @@ therefore share the reference's full counter range.
 
 `LedgerState.LatestOpCertSequence` -- the `LedgerView` method both this
 gate and startup's `PoolCredentials.ValidateAgainstLedger` read through --
-resolves the "latest observed" counter via the same Mithril-boundary-aware
-path as block application (`latestOpCertCounterForValidation`, both now
-backed by the shared `latestOpCertCounterAfterMithril`), instead of a plain
-`MAX` over the whole table. A Mithril-restored node's per-pool opcert
-history is only trustworthy after the certified boundary; a plain MAX could
-return a stale pre-boundary row that block application itself does not
-trust as a baseline. Neither caller otherwise holds a lock across
-`mithrilLedgerSlot`, so both resolve it through the existing lock-safe
-`mithrilLedgerSlotSnapshot` accessor before calling the shared resolver,
-rather than reading the field directly.
+returns the pool's current counter, the same read block application makes
+(`latestOpCertCounterForValidation`). A ledger loaded at a tip holds that
+tip's counter map, so no caller distinguishes a loaded state from one built
+block by block. The live UTxO set answers a counter read as of a slot before
+its record from the oldest counter it holds, the baseline it was loaded with.
 
 Startup's `PoolCredentials.ValidateAgainstLedger` deliberately stays on the
 staleness-only half of this rule and does not apply the era-scoped no-gap
@@ -13789,8 +13871,16 @@ reference scripts through the validation session's overlay
 transactions count, and refuses to select when the validator cannot measure
 them. The aggregate bounds are applied during selection only, since manifest
 construction receives the selected prefix; the size bounds limit both selection
-and manifest construction. Selection stops at the first valid transaction that
-no longer fits instead of validating the rest of a deep mempool. The size bounds
+and manifest construction. Selection prepares transaction CBOR and decodes independent candidates in
+windows of at most 64, using at most eight workers and no more than GOMAXPROCS.
+Each window joins before its decoded transactions reach validation. Preparation
+never accesses the ledger transaction or mutable overlays. The reducer consumes
+results in mempool order and alone performs semantic validation, reference-script
+resolution, capacity admission, and overlay updates. Preparation checks the deadline before claiming each candidate, joins in-flight
+workers on expiry, and discards the unfinished window. Selection also rechecks
+the deadline and ledger publication after preparation. Selection stops at the first valid
+transaction that no longer fits; only the current preparation window can run
+ahead of that boundary. The size bounds
 are not optional: the reference node never fetches the closure of an endorser
 block over `maxEndorserBlockTxsSize` (`ExnLeiosClosureTooBig`), so no honest
 committee member votes for it, and a header announcing a manifest over
@@ -14974,7 +15064,7 @@ sync_state. Everything that reads the extracted tree (certified tip, catch-up
 ancestry check) runs before the copy starts; nothing reads it afterwards. The blob store is synced before the tree is removed, so a rerun that
 copies nothing still never deletes blocks that are not yet durable.
 
-With `immutableDb.keepMithrilChunks` (which requires `immutableDb.enabled`),
+On a database with the ImmutableDB,
 a bootstrap of an empty database adopts the verified chunks instead of copying
 bodies (`node.AdoptImmutableChunks`, wired in `mithril.Sync`). The sync opens
 its database with the network's chunk geometry
@@ -15303,13 +15393,7 @@ auto-created temporary root is retained on the same terms. Cleanup also
 retains the archive's parent handle and file identity, so a file or directory
 substituted at the archive name is preserved.
 
-With `CleanupAfterLoad` set, an API-mode `Sync` runs `Cleanup` as soon as
-`sync_status` becomes `backfill`, before the metadata backfill starts: the
-backfill reads blocks from the blob store, and on mainnet it runs for days
-while the extracted immutable tree holds hundreds of GB. Both `serve` and a
-re-run of `dingo mithril sync` resume an interrupted backfill from its
-checkpoint without the tree or the aggregator. Core mode cleans up at
-completion.
+With `CleanupAfterLoad` set, `Sync` runs `Cleanup` at completion.
 
 Temporary feed, extraction, and probe directories are created privately before
 their names are exposed. On Unix, each real directory in the absolute ancestor
@@ -15947,10 +16031,11 @@ database Mithril never bootstrapped is flagged stream-only so
 
 ### Node-managed Mithril
 
-With `mithril.enabled: true` (core storage only), `dingo serve` uses Mithril
-itself while it is behind the aggregator's certified immutable tip, and
-Ouroboros otherwise. `mithril.enabled: false`, the default, leaves `serve`
-exactly as before: no coordinator starts and no aggregator is contacted.
+With `mithril.enabled: true`, `dingo serve` uses Mithril itself while it is
+behind the aggregator's certified immutable tip, and Ouroboros otherwise, in
+both core and API storage modes. `mithril.enabled: false`, the default, leaves
+`serve` exactly as before: no coordinator starts and no aggregator is
+contacted.
 
 - **Modes.** `mithril.SelectMode(enabled, historyExpiry.enabled)` gives
   `ModeManual` (disabled: `dingo mithril sync` only), `ModeStream` (history
@@ -15965,9 +16050,7 @@ exactly as before: no coordinator starts and no aggregator is contacted.
   `internal/nodemithril` implements on `mithril` and `cmd/dingo serve` passes
   in with `dingo.WithMithrilCatchUp(nodemithril.New)` through the options
   `internal/node.Run` now accepts. `nodemithril.New` returns nil in manual
-  mode and, with a warning, when the node's effective storage mode is not
-  core (dev mode switches to API storage after config validation), and an
-  error (logged; the node stays on Ouroboros) when Mithril data
+  mode and an error (logged; the node stays on Ouroboros) when Mithril data
   cannot be verified: no Mithril genesis verification key, no Byron genesis,
   or no network name.
 - **Coordinator lifecycle.** The coordinator starts last in `Run`, after
@@ -16027,7 +16110,7 @@ exactly as before: no coordinator starts and no aggregator is contacted.
   collapse into one run after the end. A run whose gap is at least
   `mithrilTunedCatchUpMinChunks` (100) immutable files also sets the store's
   crash-safe catch-up pragmas (`metadata.CatchUpPragmaTuner`) and drops the
-  lazy deferred indexes. On a core-mode database whose gap, estimated in
+  lazy deferred indexes. When the gap, estimated in
   blocks from the local chain's blocks per file, is also at least
   `mithrilCatchUpIndexMinGapFraction` (0.5) of the blocks the ledger already
   holds (an empty ledger always qualifies), it drops, in the same
@@ -16223,7 +16306,12 @@ exactly as before: no coordinator starts and no aggregator is contacted.
   the gate as for any bootstrapped database.
 - **`serve` preflight.** An empty `sync_status` (an empty database included)
   passes in every mode, and an interrupted manual sync still refuses,
-  `mithril.enabled` or not. In snapshot mode with the CIP-0163 gate off,
+  `mithril.enabled` or not. The `backfill` status a v0.94.2 API-mode sync
+  left passes on a store that runs as core, which keeps no history to
+  backfill, and nothing clears it there. A store that is still API never
+  reaches the preflight: `settingsresolve.Apply` refuses a SQLite one before
+  any open migrates its schema, so v0.94.2 can still finish the backfill, and
+  the migration to the IndexerDB refuses one on any provider. In snapshot mode with the CIP-0163 gate off,
   `checkSyncState` also passes the node's own interrupted restore
   (`mithril.SnapshotRestoreInterrupted`), which the node then resumes; in
   any other configuration it refuses that restore with the settings that let
@@ -16235,12 +16323,8 @@ exactly as before: no coordinator starts and no aggregator is contacted.
 the database state alone, so the operator never needs to know it:
 
 - empty database -> full bootstrap
-- `sync_status` `backfill` in API mode, as an ordinary backfill with no
-  pending repair or catch-up -> resume the metadata backfill from its
-  checkpoint and finish the import; every block is already in the blob store,
-  so nothing is downloaded (`resumeMithrilBackfill`). The recorded artifact pin
-  is still checked against the run's backend and network first
-- any other non-empty `sync_status` (`in_progress`, or an unknown future value)
+- any non-empty `sync_status` (`in_progress`, the `backfill` a v0.94.2
+  API-mode sync left, or an unknown future value)
   -> resume the existing path against the pinned artifact (below), except an
   interrupted v2 core catch-up
   (import marker present, or the ephemeral `mithril_catchup_active` flag for a
@@ -16570,10 +16654,9 @@ consumed UTxO it cannot find or reconstruct from the blob store. By default
 for an unrecoverable input, because a normal from-origin node is expected to
 hold complete producer history. A non-genesis chainsync intersection without a
 Mithril snapshot may explicitly set `StrictUtxoValidation: false` when
-pre-intersect UTxOs are intentionally absent. Gap-block ingestion
-(`ensureGapConsumedUtxos`, used while closing the range between the snapshot
-and the chain tip) is unconditionally strict already, since that range is
-always expected to be fully recoverable from the snapshot import.
+pre-intersect UTxOs are intentionally absent. Gap-block ingestion, which
+closes the range between the snapshot and the chain tip, consumes no inputs
+from the metadata store: the live UTxO set is already at or past that range.
 
 That default recovery is deliberately one-sided: it only fires when the produced
 `utxo` row is *absent* from the metadata store, and it rebuilds it from the
@@ -16840,9 +16923,9 @@ not part of the aggregator, and certificates carry no KES operational
 certificates. The caller supplies the epoch's signer stakes.
 
 After a completed metadata backfill,
-`internal/node.FinalizeBackfillPlannerStats` refreshes planner statistics after
-critical index repair and before either Mithril sync or `serve` clears import
-readiness state. It records a checkpoint identity in
+`internal/node.FinalizeMithrilBackfillPlannerStats` refreshes planner statistics
+after critical index repair and before Mithril sync clears import readiness
+state. It records a checkpoint identity in
 `metadata_planner_stats_backfill` only after successful analysis; startup
 repairs older completed imports without that marker, and interruption or failure
 leaves the refresh retryable. Built-in SQL providers accept the startup context
@@ -17492,7 +17575,7 @@ transaction lists, and transaction-by-hash lookup use the ledger transaction
 view. For a certified Dijkstra ranking block, that view resolves the parent
 ranking block's endorser-block announcement and loads the matching persisted
 manifest and transaction bodies, using the verified in-memory endorser-block
-cache when asynchronous persistence has not completed. It verifies the
+cache when the LeiosDB lacks the manifest or bodies. It verifies the
 manifest and each body against the announced hash, ordered references,
 transaction hashes, and encoded sizes before exposing them. A missing or
 inconsistent certified body is an error rather than an empty transaction list.
@@ -18025,10 +18108,9 @@ rather than `Internal`, naming the expired slot and hash. `historyExpiredError`
 also asks the ledger for the start of retained history
 (`UtxorpcLedgerState.OldestRetainedSlot`, served by
 `Database.OldestRetainedSlot`) and appends `oldest retained slot=N` when it is
-known. The bound is kept in memory by the history-expiry pruner, which
-recomputes it from the cursor in `sync_state` after each round, so the error
-path does no I/O and repeated expired requests cannot drive disk scans. An
-unknown bound leaves the message without it and keeps the code.
+known. The bound is refreshed after each expiry round, so the error path does
+no I/O and repeated expired requests cannot drive disk scans. An unknown bound
+leaves the message without it and keeps the code.
 
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3
@@ -18132,8 +18214,9 @@ Fetch and check failures persist the affected queue's ERROR status before
 scheduling the in-memory retry, so restart recovery also selects an epoch
 whose previous comparison passed and whose Koios reference remains fresh.
 The aggregate and account timers are independent, and cancellation stops both.
-In strict mode only pure reference lag and Koios daily-quota exhaustion
-continue; DB failures and validation disagreements still stop strict validation.
+In strict mode only pure reference lag, Koios daily-quota exhaustion and an
+IndexerDB that has not yet indexed the epoch's transactions continue; DB
+failures and validation disagreements still stop strict validation.
 
 Status reports retain total mismatch counts and separately report significant
 counts using the comparison's severity classification. Aggregate and account
@@ -19079,9 +19162,21 @@ second sync:
     transaction is compared on what the ledger applied: its collateral and
     collateral return. Core storage mode is not sampled: it hard-deletes
     consumed UTxOs after the stability window and does not retain the
-    collateral and reference associations. The standalone `check` CLI reads
-    through `DingoDB`, which does not implement the interface, so it skips
-    this comparison.
+    collateral and reference associations. On an API node the consensus
+    database is itself core mode, so the node builds the source with
+    `WithTransactionHistory` over the IndexerDB: the epoch's slot range still
+    comes from the consensus database, and the blocks' transactions from the
+    IndexerDB. The IndexerDB trails the ledger, so both sample reads return
+    `ErrTransactionHistoryPending` until its tip reaches the epoch's last
+    slot; a partial sample would differ between the fetch and the check. At
+    an epoch boundary the IndexerDB usually trails by seconds to minutes, so
+    the fetch and the check poll the sample (every 5 s, up to 10 min) before
+    giving up. Only a history still behind after that aborts them: the fetch
+    returns the error rather than swallowing it, the check aborts on it, and
+    `deferForHistory` persists the queue's ERROR status and retries the epoch
+    after `ErrorRetryDelay` without emitting a result or calling
+    `FatalFunc`. The standalone `check` CLI reads through `DingoDB`, which
+    does not implement the interface, so it skips this comparison.
   - **Prometheus metrics** (`internal/koiosparity/metrics.go`). Before this, a
     FAIL/ERROR result was visible only by grepping the node's log or querying
     `check_epoch_status`/`check_mismatches` directly. `Observer .emitResult` —
@@ -20347,8 +20442,7 @@ waits, including one complete whole-UTxO result, while reclaiming the admission
 slot after a client becomes idle before or after protocol activity. The ledger
 admits one `GetUTxOWhole` materialization at a time; later requests wait on
 their connection context without retaining an acquired database snapshot.
-Admission bounds the simultaneous worker pools and complete in-memory maps but
-does not limit, paginate, offset, truncate, or otherwise alter the response.
+Admission bounds the simultaneous complete in-memory maps but does not limit, paginate, offset, truncate, or otherwise alter the response.
 
 It always starts with one full `Check` pinned at the live tip
 (`establishBaseline`) before validating anything incrementally -- the
@@ -21752,13 +21846,19 @@ all of which derive from `Network`, and it works at all only because
 `settingsresolve` is its own package, not part of `internal/config`,
 specifically so that `internal/config` — imported by roughly half the tree —
 does not have to depend on the plugin host and storage plugins that opening a
-metadata store requires. It opens only the metadata store
+metadata store requires. It opens metadata stores only
 (`plugin.Resolve[metadata.MetadataStore]` directly, never
-`internal/plugins.ResolveStorage`, which also resolves the blob store) at
-`DatabasePath`, reads the legacy `node_settings` row and `node_settings_gate`,
-and closes the store and stops its plugin host on every path, including every
-error path, before returning — leaving either open would block the real
-`database.New` that follows moments later. Before opening anything, it reads the
+`internal/plugins.ResolveStorage`, which also resolves the blob store), reads
+the legacy `node_settings` row and `node_settings_gate`, and closes each store
+and stops its plugin host on every path, including every error path, before
+returning — leaving either open would block the real
+`database.New` that follows moments later. It first reads the configured metadata
+store, using `DatabasePath` for SQLite. For a split PostgreSQL or MySQL node,
+that store is the IndexerDB, so it also reads the consensus namespace in core
+storage mode. If the consensus namespace has a persisted network, its settings
+take precedence;
+otherwise the IndexerDB settings remain the source until adoption has copied
+them into the consensus namespace. Before opening a provider, it reads the
 `dbinfo` sidecar (`database/dbinfo`, a small JSON file named `dingo.dbinfo`
 recording only the metadata plugin that created the database) and refuses to
 proceed if it names a different plugin than the one configured: resolving a
@@ -21773,11 +21873,16 @@ reopen with) and never overwrites a sidecar that is already present.
 `evaluateAndPersistGates` calls it on every open, not only one that writes a
 gate to `node_settings_gate` — a steady-state start with nothing new to persist
 still restores a sidecar an operator deleted, rather than leaving this pre-open
-check silently disabled from then on. A database directory that does not exist,
-or one this process cannot open for any reason, makes `settingsresolve.Apply` a
-silent no-op — a corrupt or in-use database is `database.New`'s problem to
-report properly, and failing here would only mask its better error behind a
-worse one.
+check silently disabled from then on. Before provider resolution can migrate a
+SQLite store, `Apply` opens its existing metadata file read-only and checks for
+an interrupted v0.94.2 API-history backfill. A persisted backfill status is fatal
+unless the store's persisted storage mode is core; startup leaves the database
+untouched. Provider resolution also propagates `metadata.ErrInterruptedBackfill`
+instead of treating it as an unavailable store. Missing or inaccessible
+directories and ordinary store-open or read failures leave settings unresolved
+so `database.New` can report the storage error. These no-op paths do not suppress
+sidecar validation errors, interrupted-backfill refusals, or persisted gate
+conflicts.
 
 A sidecar write failure is fatal while the `metadata_plugin` gate is not
 yet persisted: a database in that state has no `metadata_plugin` gate row
@@ -22914,14 +23019,10 @@ bound and is never pruned. `LedgerDelta.apply` sets
 `MetadataStore.SetTransaction`'s `skipWithdrawalWitness` argument
 (`database/plugin/metadata/sqlstore/transaction_write.go`).
 `internal/node.Backfill`'s batched historical-replay path derives it the same
-way, from its own `delegatorInactivityEnabled` field. Neither caller relies on
-the field's zero-value default: `mithril/sync.go` hardcodes it false, since
-the gate can never be on for a Mithril bootstrap (see
-`errMithrilInactivityIncompatible` below); `cmd/dingo/serve.go`'s
-`resumeBackfill` instead passes the real `DelegatorInactivityEnabled` config
-value, which can genuinely be true there -- it resumes any pending API-mode
-backfill checkpoint, not only a Mithril-originated one, and does not itself
-check the gate.
+way, from its own `delegatorInactivityEnabled` field. Its caller does not rely
+on the field's zero-value default: the IndexerDB writer
+(`internal/node.newIndexerWriter`) passes the node's
+`DelegatorInactivityEnabled` setting, which can be true.
 
 At the authoritative SNAP point, both reward and leader-election Mark snapshots
 consume `RewardLiveStake` instead of scanning certificate and UTxO history. The

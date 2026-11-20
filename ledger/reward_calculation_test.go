@@ -8945,8 +8945,8 @@ func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
 
 	eraBounds := make([]ledgerstate.EraBound, ledgerstate.EraConway+1)
 	nonce := make([]byte, 32)
-	require.NoError(t, ledgerstate.ImportLedgerState(
-		context.Background(),
+	require.NoError(t, importLedgerStateForTest(
+		t, ls,
 		ledgerstate.ImportConfig{
 			Database: db,
 			Logger: slog.New(
@@ -10224,6 +10224,7 @@ func TestRollbackRewardPrecomputeDropsAbandonedPrefilterHistory(
 	cfg := seed.config
 	cfg.Database = db
 	cfg.ChainManager = cm
+	cfg.UtxoSet = NewMemLiveSetForTest()
 	ls, err := NewLedgerState(cfg)
 	require.NoError(t, err)
 	ls.metrics.init(prometheus.NewRegistry())

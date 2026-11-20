@@ -28,7 +28,9 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -62,6 +64,9 @@ func preprodParams(t *testing.T) dingo.MithrilCatchUpParams {
 		Network:           "preprod",
 		DataDir:           "/data/dir",
 		Logger:            slog.New(slog.DiscardHandler),
+		UtxoSet: func() ledgerstate.UtxoSetLoader {
+			return livesettest.Open(t)
+		},
 	}
 }
 
@@ -226,18 +231,16 @@ func TestUseMithrilAppliesDecide(t *testing.T) {
 	assert.False(t, s.UseMithril(d))
 }
 
-// Dev mode forces API storage inside node startup, after config validation
-// refused mithril.enabled with API storage, so New checks the mode the node
-// actually runs in.
-func TestNewRequiresCoreStorage(t *testing.T) {
+func TestNewSupportsServingStorageModes(t *testing.T) {
 	t.Parallel()
-	p := preprodParams(t)
-	p.StorageMode = dingo.StorageModeAPI
-	src, err := New(p)
-	require.NoError(t, err)
-	assert.Nil(t, src, "API storage must leave the node on Ouroboros")
-	p.StorageMode = dingo.StorageModeCore
-	assert.NotNil(t, newSource(t, p))
+	for _, storageMode := range []dingo.StorageMode{
+		dingo.StorageModeCore,
+		dingo.StorageModeAPI,
+	} {
+		p := preprodParams(t)
+		p.StorageMode = storageMode
+		assert.NotNil(t, newSource(t, p), storageMode)
+	}
 }
 
 // Snapshot mode keeps what history expiry keeps: 3k/f slots, from the Shelley

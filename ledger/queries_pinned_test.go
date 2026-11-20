@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -70,7 +71,7 @@ func utxoByAddressAmounts(
 ) []uint64 {
 	t.Helper()
 	result, err := ls.queryShelleyUtxoByAddress(
-		t.Context(), []ledger.Address{addr}, at, nil,
+		[]ledger.Address{addr}, at, nil,
 	)
 	require.NoError(t, err)
 	reply := result.([]any)[0]
@@ -115,6 +116,19 @@ func TestQueryShelleyUtxoByAddress_PinnedPointAnswersAtThatPoint(t *testing.T) {
 		[]dbtypes.UtxoKey{{TxId: spentBefore, OutputIdx: 0}},
 		200,
 	))
+	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
+		100: {{Added: []UtxoOutput{
+			{Ref: models.UtxoId{Hash: spentLater}, Cbor: queryTestOutputCBOR(t, db, spentLater, 0)},
+			{Ref: models.UtxoId{Hash: bytes.Repeat([]byte{0x02}, 32)}, Cbor: queryTestOutputCBOR(t, db, bytes.Repeat([]byte{0x02}, 32), 0)},
+			{Ref: models.UtxoId{Hash: spentBefore}, Cbor: queryTestOutputCBOR(t, db, spentBefore, 0)},
+		}}},
+		200: {{Removed: []models.UtxoId{{Hash: spentBefore}}}},
+		500: {{Removed: []models.UtxoId{{Hash: spentLater}}}},
+		600: {{Added: []UtxoOutput{{
+			Ref:  models.UtxoId{Hash: bytes.Repeat([]byte{0x03}, 32)},
+			Cbor: queryTestOutputCBOR(t, db, bytes.Repeat([]byte{0x03}, 32), 0),
+		}}}},
+	})
 
 	require.ElementsMatch(
 		t,
@@ -130,7 +144,7 @@ func TestQueryShelleyUtxoByAddress_PinnedPointAnswersAtThatPoint(t *testing.T) {
 	)
 }
 
-func TestQueryShelleyUtxoByAddress_PinnedPastRetentionFloorRejected(
+func TestQueryShelleyUtxoByAddress_PinnedBeforeSetHistoryRejected(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -149,12 +163,16 @@ func TestQueryShelleyUtxoByAddress_PinnedPastRetentionFloorRejected(
 	)
 	require.NoError(t, err)
 
+	attachQueryUtxoHistory(t, ls, map[uint64][]UtxoEvent{
+		150_000: {},
+		200_000: {},
+	})
 	_, err = ls.queryShelleyUtxoByAddress(
-		t.Context(), []ledger.Address{addr}, QueryPoint{Slot: 149_999}, nil,
+		[]ledger.Address{addr}, QueryPoint{Slot: 149_999}, nil,
 	)
-	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+	require.ErrorIs(t, err, ErrUtxoAsOfUnavailable)
 	_, err = ls.queryShelleyUtxoByAddress(
-		t.Context(), []ledger.Address{addr}, QueryPoint{Slot: 150_000}, nil,
+		[]ledger.Address{addr}, QueryPoint{Slot: 150_000}, nil,
 	)
 	require.NoError(t, err)
 }
@@ -164,6 +182,32 @@ func accountState(t *testing.T, result any) olocalstatequery.AccountState {
 	st, ok := result.([]any)[0].(olocalstatequery.AccountState)
 	require.True(t, ok)
 	return st
+}
+
+func TestPinnedUtxoAddressAndRefQueriesFailClosedWithoutSet(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.config.UtxoSet = nil
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xA6}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	txID := seedAddressUtxoAt(t, db, addr, 0x66, 100, 1_000_000)
+	at := QueryPoint{Slot: 300, Hash: bytes.Repeat([]byte{0x33}, 32)}
+
+	_, err = ls.queryShelleyUtxoByAddress(
+		[]ledger.Address{addr}, at, nil,
+	)
+	require.ErrorIs(t, err, ErrUtxoAsOfUnavailable)
+	txIn := ledger.MustNewShelleyTransactionInput(hex.EncodeToString(txID), 0)
+	_, err = ls.queryShelleyUtxoByTxIn(
+		[]ledger.ShelleyTransactionInput{txIn}, at, nil,
+	)
+	require.ErrorIs(t, err, ErrUtxoAsOfUnavailable)
 }
 
 func TestQueryShelleyAccountState_PinnedPointReadsRowInEffect(t *testing.T) {
@@ -386,6 +430,7 @@ func TestQuery_PinnedPointReachesUtxoByAddressAccountStateAndStakeSnapshots(
 		600,
 	))
 
+	attachQueryUtxoLifecycle(t, ls, db, spent, 0, 100, 600)
 	result, err := ls.Query(
 		t.Context(),
 		shelleyLeafQuery(&olocalstatequery.ShelleyUtxoByAddressQuery{

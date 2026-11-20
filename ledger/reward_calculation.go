@@ -663,9 +663,10 @@ func (ls *LedgerState) rewardRollbackSeq(txn ledgerdb.Txn) (uint64, error) {
 }
 
 type stakeRewardApplication struct {
-	pparams lcommon.ProtocolParameters
-	params  rewards.Parameters
-	pots    *models.RewardAdaPots
+	precomputeCursor rewardPrecomputeCursor
+	pparams          lcommon.ProtocolParameters
+	params           rewards.Parameters
+	pots             *models.RewardAdaPots
 	// replayBaseline marks a round replayed at a later boundary (see
 	// reward_late_first_block.go). The round's inputs come from pots; its
 	// deltas apply to replayBaseline, the pots at that boundary.
@@ -1038,7 +1039,29 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		boundarySlot,
 		result.AccountRewards,
 	)
+	cursor := rewardPrecomputeCursor{
+		FormatVersion: rewardPrecomputeCursorFormatVersion,
+		SnapshotEpoch: epochs.snapshot, Generation: rewardInputGeneration,
+		InputFingerprint: ls.rewardPrecomputeInputFingerprint(
+			&stakeRewardPrecomputeRound{
+				newEpoch: newEpoch, epochs: epochs, boundarySlot: boundarySlot,
+				pots: pots, rewardSnapshot: rewardSnapshot, poolInputs: poolInputs,
+				params: params, blockCounts: blockCounts, totalBlocks: totalBlocks,
+				prefilterSlot: prefilterSlot,
+			},
+		),
+		CapturedSlot: capturedSlot, Done: true, CompletedPools: len(poolInputs),
+		EffectiveRewards:   result.EffectiveRewards,
+		UnspendableRewards: result.Unspendable,
+		OutputFingerprint:  rewardPoolOutputFingerprint(poolOutputs),
+	}
+	if len(poolInputs) > 0 {
+		cursor.LastPoolKeyHash = hex.EncodeToString(
+			poolInputs[len(poolInputs)-1].PoolKeyHash,
+		)
+	}
 	return &stakeRewardApplication{
+		precomputeCursor:            cursor,
 		epochs:                      epochs,
 		pparams:                     pparams,
 		params:                      params,
@@ -3079,6 +3102,16 @@ func (ls *LedgerState) saveStakeRewardPrecompute(
 	if err := meta.SaveRewardAdaPots(app.pots, metaTxn); err != nil {
 		return fmt.Errorf("save precomputed reward ADA pots: %w", err)
 	}
+	seq, err := ls.rewardRollbackSeq(metaTxn)
+	if err != nil {
+		return err
+	}
+	cursor := app.precomputeCursor
+	cursor.RollbackSeq = seq
+	if err := saveRewardPrecomputeCursor(meta, metaTxn, &cursor); err != nil {
+		return err
+	}
+	ls.rewardFactsAfterCommit(metaTxn, app.epochs.snapshot, capturedSlot)
 	ls.config.Logger.Info(
 		"precomputed stake rewards",
 		"component", "ledger",
@@ -4414,7 +4447,6 @@ func (ls *LedgerState) rewardBlockCounts(
 	} else if ls.familyDrained(nodesettings.FamilyRewardBlocksFees) {
 		return nil, 0, false, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
 	}
-	g := ls.verifyGuard(metaTxn)
 	var counts map[string]uint64
 	var total uint64
 	if decentralization != nil && decentralization.Sign() > 0 {
@@ -4443,19 +4475,13 @@ func (ls *LedgerState) rewardBlockCounts(
 	if err != nil {
 		return nil, 0, false, err
 	}
-	counts, total, known, err := meta.MergeImportedPoolBlockCounts(
+	return meta.MergeImportedPoolBlockCounts(
 		performanceEpoch,
 		startSlot,
 		counts,
 		total,
 		metaTxn,
 	)
-	if err == nil {
-		ls.verifyRewardBlockCounts(
-			g, metaTxn, performanceEpoch, poolKeys, counts, total, known,
-		)
-	}
-	return counts, total, known, err
 }
 
 func rewardBlockCountsExcludingOverlaySlots(
@@ -5443,4 +5469,19 @@ func suppressBootstrapStakeRewards(result *rewards.Result) {
 	result.Unspendable = 0
 	result.UnspendableDeficit = 0
 	result.Undistributed = result.AvailableRewards
+}
+
+func (ls *LedgerState) rewardFactsAfterCommit(
+	txn ledgerdb.Txn,
+	epoch, slot uint64,
+) {
+	if ls.config.EventBus == nil {
+		return
+	}
+	txn.AfterCommit(func() {
+		ls.config.EventBus.Publish(RewardFactsEventType, event.NewEvent(
+			RewardFactsEventType,
+			RewardFactsEvent{SnapshotEpoch: epoch, CapturedSlot: slot},
+		))
+	})
 }

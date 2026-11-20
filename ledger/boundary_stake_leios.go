@@ -287,8 +287,6 @@ func (b *boundaryStake) leiosDelegations() ([]boundaryDelegation, error) {
 	if hist == nil {
 		return nil, b.ls.unavailableAsOf("pool certificate history")
 	}
-	// Only the certificate history is read, so verify mode, which does not
-	// serve pool reads from the set, can compare too.
 	book := &poolBook{ls: b.ls, txn: b.txn, hist: hist}
 	refs, err := b.candidateRefs()
 	if err != nil {

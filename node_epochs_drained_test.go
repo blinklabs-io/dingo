@@ -34,25 +34,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// bootDrainedNode runs the startup sequence of a node with ledgerStateSetOnly
-// over dir: reconcile (which drains every graduated family), the epoch cache,
-// then the ledger. The statement guard is armed over every graduated table
+// bootDrainedNode runs the startup sequence of a node over dir with the
+// embedded configuration of network: reconcile (which drains every graduated
+// family), the epoch cache, then the ledger. Each mutate edits the loaded
+// configuration first. The statement guard is armed over every graduated table
 // once the drain has run, and stop shuts the node down. Each boot installs its
 // own guard, as a process does: the schema checks that run while the store
 // opens read tables a drained family has already emptied.
 func bootDrainedNode(
 	t *testing.T,
 	dir string,
+	network string,
+	mutate ...func(*cardano.CardanoNodeConfig),
 ) (n *Node, guard *statedrain.TripGuard, stop func()) {
 	t.Helper()
 	guard = statedrain.NewTripGuard()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
-		cardano.EmbeddedConfigPath("preview"),
-		"preview",
+		cardano.EmbeddedConfigPath(network),
+		network,
 		cardano.EmbeddedConfigFS,
 	)
 	require.NoError(t, err)
+	for _, m := range mutate {
+		m(nodeCfg)
+	}
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{
 			DataDir: dir, StorageMode: types.StorageModeCore,
@@ -68,25 +74,20 @@ func bootDrainedNode(
 	cm, err := chain.NewManager(t.Context(), db, bus)
 	require.NoError(t, err)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:           db,
-		ChainManager:       cm,
-		EventBus:           bus,
-		Logger:             logger,
-		CardanoNodeConfig:  nodeCfg,
-		Network:            "preview",
-		PromRegistry:       prometheus.NewRegistry(),
-		UtxoSet:            set,
-		UtxoSetReads:       ledger.UtxoSetReadsSet,
-		UtxoSetOnly:        true,
-		LedgerStateSetOnly: true,
+		Database:          db,
+		ChainManager:      cm,
+		EventBus:          bus,
+		Logger:            logger,
+		CardanoNodeConfig: nodeCfg,
+		Network:           network,
+		PromRegistry:      prometheus.NewRegistry(),
+		UtxoSet:           set,
 	})
 	require.NoError(t, err)
 	n = &Node{db: db, utxoSet: set, ledgerState: ls, chainManager: cm}
 	n.config.logger = logger
-	n.config.ledgerUtxoBadger = true
-	n.config.ledgerUtxoBadgerOnly = true
-	n.config.ledgerUtxoReads = ledger.UtxoSetReadsSet
-	n.config.ledgerStateSetOnly = true
+	n.config.dataDir = dir
+	n.config.cardanoNodeConfig = nodeCfg
 
 	ctx, cancel := context.WithCancel(context.Background())
 	require.NoError(t, n.reconcileUtxoSet(ctx))
@@ -117,7 +118,7 @@ func TestNodeRestartServesEpochsFromTheSetWhenEveryFamilyIsDrained(
 	t.Parallel()
 	dir := t.TempDir()
 
-	first, firstGuard, stop := bootDrainedNode(t, dir)
+	first, firstGuard, stop := bootDrainedNode(t, dir, "preview")
 	want, err := first.db.GetEpochs(nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, want, "the ledger writes its first epoch to the set")
@@ -138,7 +139,7 @@ func TestNodeRestartServesEpochsFromTheSetWhenEveryFamilyIsDrained(
 	require.Empty(t, firstGuard.Trips(), "a drained table was touched")
 	stop()
 
-	second, guard, stop := bootDrainedNode(t, dir)
+	second, guard, stop := bootDrainedNode(t, dir, "preview")
 	defer stop()
 	got, err := second.db.GetEpochs(nil)
 	require.NoError(t, err)

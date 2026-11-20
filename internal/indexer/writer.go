@@ -30,6 +30,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
@@ -243,10 +244,11 @@ func (w *Writer) Wake() {
 }
 
 // Run catches up, then again after each Wake, until ctx ends. A pass that
-// fails is logged and retried on the next wake.
+// fails is logged and retried with bounded backoff, or on the next wake.
 func (w *Writer) Run(ctx context.Context) error {
 	var lastErr string
 	var consecutive int
+	delay := time.Second
 	for {
 		err := w.CatchUp(ctx)
 		switch {
@@ -266,10 +268,25 @@ func (w *Writer) Run(ctx context.Context) error {
 		if w.failures != nil && ctx.Err() == nil {
 			w.failures(consecutive)
 		}
+		var timer *time.Timer
+		var retry <-chan time.Time
+		if err != nil && ctx.Err() == nil {
+			timer = time.NewTimer(delay)
+			retry = timer.C
+			delay = min(2*delay, 30*time.Second)
+		} else {
+			delay = time.Second
+		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
 		case <-w.wake:
+		case <-retry:
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 	}
 }
@@ -295,12 +312,14 @@ func (w *Writer) CatchUp(ctx context.Context) error {
 		}
 		return err
 	}
+	refreshAtTip := true
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		done, err := w.step(ctx, nil)
+		done, err := w.step(ctx, nil, refreshAtTip)
 		if errors.Is(err, errForked) {
+			refreshAtTip = true
 			continue
 		}
 		if err != nil {
@@ -310,6 +329,8 @@ func (w *Writer) CatchUp(ctx context.Context) error {
 			w.syncAndAck(ctx)
 			return nil
 		}
+		// The batch copied completed facts. A later reward commit wakes Run.
+		refreshAtTip = false
 	}
 }
 
@@ -374,6 +395,7 @@ func (w *Writer) syncAndAck(ctx context.Context) {
 func (w *Writer) step(
 	ctx context.Context,
 	ceiling *indexerdb.Tip,
+	refreshAtTip bool,
 ) (bool, error) {
 	tip, err := w.store.Tip(nil)
 	if err != nil {
@@ -385,7 +407,10 @@ func (w *Writer) step(
 			return false, fmt.Errorf("check indexer tip: %w", err)
 		}
 		if !canonical {
-			return false, w.rollback(ctx, tip)
+			if err := w.rollback(ctx, tip); err != nil {
+				return false, err
+			}
+			return false, errForked
 		}
 	}
 	ledgerTip, err := w.src.LedgerTip(ctx)
@@ -402,6 +427,16 @@ func (w *Writer) step(
 	if !tip.IsZero() &&
 		(bytes.Equal(tip.Hash, target.Point.Hash) ||
 			tip.Slot > target.Point.Slot) {
+		if refresh, ok := w.facts.(FactsRefresher); ok && ceiling == nil &&
+			refreshAtTip &&
+			bytes.Equal(tip.Hash, target.Point.Hash) {
+			txn := w.store.Database().Transaction(ctx, true)
+			if err := txn.Do(func(txn *database.Txn) error {
+				return refresh.RefreshFacts(ctx, txn, tip.Slot)
+			}); err != nil {
+				return false, fmt.Errorf("refresh ledger facts at tip: %w", err)
+			}
+		}
 		w.report(tip, ledgerTip)
 		return true, nil
 	}

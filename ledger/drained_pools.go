@@ -51,11 +51,11 @@ func (ls *LedgerState) poolBook(txn ledgerdb.Txn) (*poolBook, error) {
 	state := ls.poolServing(txn)
 	hist := ls.poolHistoryServes(txn)
 	if state == nil || hist == nil {
-		return nil, drainedUnserved(nodesettings.FamilyPoolsHistory)
+		return nil, ls.setFamilyUnserved(nodesettings.FamilyPoolsHistory)
 	}
 	lister, ok := hist.(PoolHistoryLister)
 	if !ok {
-		return nil, drainedUnserved(nodesettings.FamilyPoolsHistory)
+		return nil, ls.setFamilyUnserved(nodesettings.FamilyPoolsHistory)
 	}
 	return &poolBook{
 		ls: ls, txn: txn, state: state, hist: hist, lister: lister,

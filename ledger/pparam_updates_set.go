@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"bytes"
-	"fmt"
 	"maps"
 	"slices"
 
@@ -66,24 +65,6 @@ type PParamUpdateReader interface {
 	PParamUpdates(fn func(models.PParamUpdate) error) error
 }
 
-// pparamUpdateVerifyReader returns the set's proposal reader when proposal
-// reads compare.
-func (ls *LedgerState) pparamUpdateVerifyReader(
-	txn ledgerdb.Txn,
-) PParamUpdateReader {
-	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
-		return nil
-	}
-	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
-		return nil
-	}
-	r, ok := ls.readSet(txn).(PParamUpdateReader)
-	if !ok {
-		return nil
-	}
-	return r
-}
-
 // pparamUpdateView returns the proposals the store's GetPParamUpdates gives
 // for epoch, those targeting it or the epoch before it, as txn sees the set:
 // the committed proposals under the rollbacks and writes of the batches txn
@@ -127,8 +108,7 @@ func (ls *LedgerState) pparamUpdateView(
 }
 
 // pparamUpdateServing returns the set's proposal reader when proposal reads
-// are answered from it: reads are in set mode and the set holds every
-// proposal.
+// are answered from it and the set holds every proposal.
 func (ls *LedgerState) pparamUpdateServing(
 	txn ledgerdb.Txn,
 ) PParamUpdateReader {
@@ -142,7 +122,7 @@ func (ls *LedgerState) pparamUpdateServing(
 	return r
 }
 
-// GetPParamUpdates is answered from the set in set mode. The set's rows have
+// GetPParamUpdates is answered from the set. The set's rows have
 // no row IDs, and the store's order between genesis keys is the order of a
 // map within one transaction, so the answer is the newest proposal first.
 func (s stagingLedgerDB) GetPParamUpdates(
@@ -157,10 +137,7 @@ func (s stagingLedgerDB) GetPParamUpdates(
 		slices.Reverse(rows)
 		return rows, nil
 	}
-	if s.pparamsDrained() {
-		return nil, drainedUnserved(nodesettings.FamilyPParamsUpdates)
-	}
-	return s.LedgerDB.GetPParamUpdates(epoch, txn)
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyPParamsUpdates)
 }
 
 type pparamProposal struct {
@@ -192,64 +169,8 @@ func samePParamUpdates(want, got []models.PParamUpdate) bool {
 	)
 }
 
-func (ls *LedgerState) comparePParamUpdateRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.pparamUpdateReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.pparamUpdateReadMismatches.Add(1)
-	ls.metrics.pparamUpdateReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set protocol parameter update read differs from the metadata store",
-		"component", "ledger",
-		"read", what,
-		"set_error", setErr,
-		"mismatches", n,
-	)
-}
-
-// verifyPParamUpdates compares the proposals the store reads to select the
-// update enacted for epoch, which it reads from the epoch before, with the
-// set's. The selection is a function of those rows and the epoch records,
-// so the rows are what the set can check; the store's answer to the caller
-// is its own.
-func (s stagingLedgerDB) verifyPParamUpdates(
-	g verifyReadGuard,
-	txn ledgerdb.Txn,
-	epoch uint64,
-) {
-	r := s.ls.pparamUpdateVerifyReader(txn)
-	if r == nil || epoch == 0 {
-		return
-	}
-	submission := epoch - 1
-	want, err := s.GetPParamUpdates(submission, txn)
-	if err != nil {
-		return
-	}
-	got, setErr := s.ls.pparamUpdateView(r, txn, submission)
-	s.ls.comparePParamUpdateRead(
-		g, fmt.Sprintf("proposals for epoch %d", submission),
-		setErr == nil && samePParamUpdates(want, got), setErr,
-	)
-}
-
-// ForecastPParamUpdates is compared on the proposals it selects from, when
-// it reads any.
+// ForecastPParamUpdates is answered from the proposals the set holds, when it
+// serves them.
 func (s stagingLedgerDB) ForecastPParamUpdates(
 	epoch uint64,
 	quorum int,
@@ -264,41 +185,21 @@ func (s stagingLedgerDB) ForecastPParamUpdates(
 			updateFunc == nil || cloneFunc == nil {
 			return currentPParams, nil
 		}
-		{
-			rows, err := s.ls.pparamUpdateView(r, txn, epoch-1)
-			if err != nil {
-				return nil, err
-			}
-			// The proposals' order within a slot is the order stored.
-			for i := range rows {
-				rows[i].ID = uint(i) + 1
-			}
-			return database.ForecastPParamUpdatesFromRows(
-				rows, epoch, quorum, currentPParams,
-				decodeFunc, updateFunc, cloneFunc,
-				func(id uint64) (*models.Epoch, error) {
-					return s.GetEpoch(id, txn)
-				},
-			)
+		rows, err := s.ls.pparamUpdateView(r, txn, epoch-1)
+		if err != nil {
+			return nil, err
 		}
-	}
-	if s.pparamsDrained() {
-		if epoch == 0 || currentPParams == nil || decodeFunc == nil ||
-			updateFunc == nil || cloneFunc == nil {
-			return currentPParams, nil
+		// The proposals' order within a slot is the order stored.
+		for i := range rows {
+			rows[i].ID = uint(i) + 1
 		}
-		return nil, drainedUnserved(nodesettings.FamilyPParamsUpdates)
+		return database.ForecastPParamUpdatesFromRows(
+			rows, epoch, quorum, currentPParams,
+			decodeFunc, updateFunc, cloneFunc,
+			func(id uint64) (*models.Epoch, error) {
+				return s.GetEpoch(id, txn)
+			},
+		)
 	}
-	g := s.ls.verifyGuard(txn)
-	res, err := s.LedgerDB.ForecastPParamUpdates(
-		epoch, quorum, currentPParams, decodeFunc, updateFunc, cloneFunc, txn,
-	)
-	if err != nil {
-		return res, err
-	}
-	if currentPParams != nil && decodeFunc != nil && updateFunc != nil &&
-		cloneFunc != nil {
-		s.verifyPParamUpdates(g, txn, epoch)
-	}
-	return res, nil
+	return nil, s.ls.setFamilyUnserved(nodesettings.FamilyPParamsUpdates)
 }

@@ -1251,9 +1251,8 @@ func TestLeiosCertifiedApplyPersistsContentWithoutMarker(t *testing.T) {
 	}
 }
 
-// The certified content is written even when the asynchronous persist queue
-// has dropped the endorser block, and stays readable after the in-memory
-// cache expires.
+// The certified content is written even when the fetch path never wrote the
+// endorser block, and stays readable after the in-memory cache expires.
 func TestLeiosCertifiedApplyContentSurvivesCacheExpiry(t *testing.T) {
 	t.Parallel()
 	f := newLeiosCertApplyFixture(t)

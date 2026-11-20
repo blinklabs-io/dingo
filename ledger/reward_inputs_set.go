@@ -31,14 +31,6 @@ const RewardInputEpochWindow = 3
 // rewardSnapshotMark is the only snapshot type reward calculation reads.
 const rewardSnapshotMark = "mark"
 
-const (
-	computedRewardPots     = "reward_ada_pots"
-	computedRewardSnapshot = "reward_snapshot"
-	computedRewardPools    = "reward_pool_inputs"
-	computedRewardStakes   = "reward_stake_inputs"
-	computedRewardFailure  = "reward_seed_failure"
-)
-
 // RewardInputKind is what a RewardInputChange does.
 type RewardInputKind uint8
 

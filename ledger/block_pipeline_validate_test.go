@@ -79,6 +79,7 @@ func TestNewLedgerStateRejectsPipelineValidationWithoutKesConfig(
 	_, err = NewLedgerState(LedgerStateConfig{
 		ChainManager:                 cm,
 		Database:                     db,
+		UtxoSet:                      NewMemLiveSetForTest(),
 		Logger:                       testLogger(),
 		BlockPipelineEnabled:         true,
 		BlockPipelineValidateEnabled: true,

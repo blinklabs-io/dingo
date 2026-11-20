@@ -96,3 +96,26 @@ func TestLoadAccountsKeepsOtherFamiliesJournal(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, present, "the DRep's journal entry survived the load")
 }
+
+// A store whose first commit had no tip before it reaches back to the tip that
+// commit left: the commit with no predecessor is not a point a rollback can
+// stop at, and it does not hide the points after it.
+func TestJournalFloorSkipsTheCommitWithNoPreviousTip(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	defer s.Close()
+	_, err := s.Apply(point(10, 1), []badgerutxo.Output{out(1, 0)}, nil)
+	require.NoError(t, err)
+	_, err = s.Apply(point(20, 2), []badgerutxo.Output{out(2, 0)}, nil)
+	require.NoError(t, err)
+	_, err = s.Apply(point(30, 3), []badgerutxo.Output{out(3, 0)}, nil)
+	require.NoError(t, err)
+
+	floor, ok, err := s.JournalFloor()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(10), floor.Slot)
+	has, err := s.HasJournalPoint(point(10, 1))
+	require.NoError(t, err)
+	require.True(t, has, "the floor is a point the journal reaches")
+}

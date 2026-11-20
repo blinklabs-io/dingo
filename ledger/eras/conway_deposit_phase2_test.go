@@ -280,6 +280,9 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 		// on; for a refund, understated is an overstated claim.
 		required, understated uint64
 		drepDeposit           *uint64
+		// statedAmountBalances marks a refund the phase-2-invalid path counts
+		// from the certificate amount, so the stated amount always balances.
+		statedAmountBalances bool
 	}
 	registered := uint64(phase2DepositDRepRefund)
 	variants := []variant{
@@ -326,10 +329,11 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 			},
 		},
 		{
-			name:        "drep deregistration refund",
-			required:    phase2DepositDRepRefund,
-			understated: phase2DepositDRepRefund + 1_000_000,
-			drepDeposit: &registered,
+			name:                 "drep deregistration refund",
+			required:             phase2DepositDRepRefund,
+			understated:          phase2DepositDRepRefund + 1_000_000,
+			drepDeposit:          &registered,
+			statedAmountBalances: true,
 			shape: func(t *testing.T, amount uint64) phase2DepositShape {
 				// #nosec G115 -- small test constants
 				return phase2DepositShape{
@@ -389,6 +393,10 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 		t.Run(v.name+" understated", func(t *testing.T) {
 			t.Parallel()
 			err := run(t, v.understated, false)
+			if v.statedAmountBalances {
+				require.NoError(t, err)
+				return
+			}
 			var notConserved shelley.ValueNotConservedUtxoError
 			require.ErrorAs(t, err, &notConserved)
 			shortfall := new(big.Int).Sub(

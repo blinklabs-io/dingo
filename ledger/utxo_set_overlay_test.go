@@ -61,9 +61,8 @@ func TestUtxoSetReadsSeeTheirTransactionsStagedChanges(t *testing.T) {
 	ls := &LedgerState{
 		db: newTestDB(t),
 		config: LedgerStateConfig{
-			UtxoSet:      set,
-			UtxoSetReads: UtxoSetReadsSet,
-			Logger:       testLogger(),
+			UtxoSet: set,
+			Logger:  testLogger(),
 		},
 	}
 	txn := ls.ledgerDB().Begin(t.Context(), true)
@@ -225,9 +224,8 @@ func TestUtxoSetReadsSeeACommittedBatchBeforeItIsApplied(t *testing.T) {
 	ls := &LedgerState{
 		db: newTestDB(t),
 		config: LedgerStateConfig{
-			UtxoSet:      set,
-			UtxoSetReads: UtxoSetReadsSet,
-			Logger:       testLogger(),
+			UtxoSet: set,
+			Logger:  testLogger(),
 		},
 	}
 	type seen struct {

@@ -257,7 +257,12 @@ func TestStopDoesNotWaitPastDeadlineForCeiling(t *testing.T) {
 		},
 	})
 	require.NoError(t, p.Start(t.Context()))
-	testutil.RequireReceive(t, entered, 10*time.Second, "ceiling lookup started")
+	testutil.RequireReceive(
+		t,
+		entered,
+		10*time.Second,
+		"ceiling lookup started",
+	)
 
 	stopCtx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
@@ -276,4 +281,48 @@ func TestStopDoesNotWaitPastDeadlineForCeiling(t *testing.T) {
 		t.Fatal("reclaim ran after Stop")
 	default:
 	}
+}
+
+// A step the space check refuses writes nothing and is asked again on the next
+// run, which promotes once the check passes.
+func TestRunOnceRefusedBySpaceCheckPromotesNothingUntilItPasses(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:   t.TempDir(),
+		Immutable: database.ImmutableConfig{Enabled: true, ChunkSlots: 1000},
+	})
+	require.NoError(t, err)
+	seed(t, db, 20)
+	refuse := errors.New("not enough free disk space")
+	var asked []uint64
+	p := blockpromote.New(blockpromote.Config{
+		DB: db,
+		Ceiling: func(context.Context) (uint64, bool, error) {
+			return 12, true, nil
+		},
+		CheckSpace: func(_ context.Context, ceiling uint64) error {
+			asked = append(asked, ceiling)
+			return refuse
+		},
+	})
+	n, err := p.RunOnce(t.Context())
+	require.ErrorIs(t, err, refuse)
+	require.Zero(t, n)
+	st, _ := db.ImmutableState()
+	require.Zero(t, st.TipIndex, "a refused step promoted blocks")
+
+	p = blockpromote.New(blockpromote.Config{
+		DB: db,
+		Ceiling: func(context.Context) (uint64, bool, error) {
+			return 12, true, nil
+		},
+		CheckSpace: func(_ context.Context, ceiling uint64) error {
+			asked = append(asked, ceiling)
+			return nil
+		},
+	})
+	n, err = p.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 12, n)
+	require.Equal(t, []uint64{12, 12}, asked)
 }

@@ -10129,7 +10129,6 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 		if err := timePhase(
 			transitionEpoch.EpochId, "byron_translation", func() error {
 				return ls.applyByronTranslationReserves(
-					ctx,
 					txn,
 					transitionEpoch.EpochId,
 					transitionEpoch.StartSlot,
@@ -10150,6 +10149,10 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 			)
 			currentEpoch = transitionEpoch
 			ledgerEpoch = transitionEpoch.EpochId
+			// The transition epoch is crossed without a block, so no epoch
+			// write opens it: open it here, or the boundary that closes it
+			// finds its block counts and fees unknown rather than zero.
+			ls.stageEpochOpened(txn, transitionEpoch) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		}
 	}
 
@@ -10951,7 +10954,9 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 		)
 		return nil
 	}
+	dropStaged := ls.markUtxoSetBatch(txn)
 	if err := hook(txn, evt); err != nil {
+		dropStaged()
 		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
 			ls.config.Logger.Error(
 				"failed to roll back snap-point stake savepoint",
@@ -11068,12 +11073,14 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(ctx context.Context,
 		)
 		return nil
 	}
+	dropStaged := ls.markUtxoSetBatch(txn)
 	err := hook(txn, evt)
 	if err == nil {
 		err = ls.takeDeferredRewardStakeInputs(ctx, txn)
 	}
 	if err != nil {
 		ls.discardDeferredRewardStakeInputs(txn)
+		dropStaged()
 		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
 			return fmt.Errorf(
 				"roll back epoch-boundary snapshot savepoint (capture error: %w): %w",

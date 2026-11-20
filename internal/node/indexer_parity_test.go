@@ -15,16 +15,20 @@
 package node
 
 import (
+	"archive/tar"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -40,18 +44,27 @@ import (
 	"github.com/blinklabs-io/dingo/api/kupo"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/internal/config"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/settingsresolve"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/klauspost/compress/zstd"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
-// parityChunks is the number of preview chunks loaded, the whole fixture. The
-// first transactions on the chain land in epoch 7 and the first rewards are
-// paid in epoch 10, so the walk covers stake, pool history and reward epochs
-// through epoch 14.
-const parityChunks = 300
+// legacyParityChunks is the number of preview chunks the released version
+// loaded into the database under legacyParityArchive: all of epoch 0 and the
+// first chunk of epoch 1.
+const legacyParityChunks = 21
+
+// legacyParityArchive is a data directory `dingo load` of the v0.94.2 release
+// wrote in API storage mode; the README beside it states how.
+var legacyParityArchive = filepath.Join(
+	"testdata", "v0.94.2-api-preview", "database.tar.zst",
+)
 
 // parityNode is a started node and the base URLs of its API servers.
 type parityNode struct {
@@ -60,23 +73,43 @@ type parityNode struct {
 	kupo       string
 	mesh       string
 	utxorpc    string
+	// ledgerSlot is the slot of the ledger's applied tip.
+	ledgerSlot func() uint64
 	// stop stops the node; the test's cleanup calls it if the test has not.
 	stop func()
 }
 
-func parityPort(t *testing.T) uint {
+func parityListeners(t *testing.T) (
+	map[string]uint,
+	func(string, string) (net.Listener, error),
+) {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer l.Close()
-	return uint(l.Addr().(*net.TCPAddr).Port) // #nosec G115 -- a TCP port
+	ports := make(map[string]uint)
+	listeners := make(map[string]net.Listener)
+	for _, name := range []string{"blockfrost", "mesh", "utxorpc", "kupo"} {
+		listener, port := reservedTCPListener(t, "127.0.0.1")
+		ports[name] = port
+		listeners[listener.Addr().String()] = listener
+	}
+	var mu sync.Mutex
+	return ports, func(network, address string) (net.Listener, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		listener, ok := listeners[address]
+		if network != "tcp" || !ok {
+			return nil, fmt.Errorf(
+				"no reserved parity listener for %s %s",
+				network,
+				address,
+			)
+		}
+		delete(listeners, address)
+		return listener, nil
+	}
 }
 
-// loadParityChain loads the same real preview blocks into a data directory
-// whose layout is shared or split, as `dingo load` does.
-func loadParityChain(t *testing.T, immutableDir string, split bool) string {
-	t.Helper()
-	dir := testutil.OwnerOnlyTempDir(t)
+// parityConfig is the configuration of a node in API storage mode over dir.
+func parityConfig(dir string) *config.Config {
 	cfg := &config.Config{
 		Network:      "preview",
 		DatabasePath: dir,
@@ -84,29 +117,76 @@ func loadParityChain(t *testing.T, immutableDir string, split bool) string {
 	}
 	cfg.Plugins.Storage.Blob = plugin.Selection{Provider: "badger"}
 	cfg.Plugins.Storage.Metadata = plugin.Selection{Provider: "sqlite"}
-	if split {
-		cfg.Indexer.Layout = config.IndexerLayoutSplit
-	}
+	return cfg
+}
+
+// loadParityChain loads real preview blocks into a new data directory, as
+// `dingo load` does.
+func loadParityChain(t *testing.T, immutableDir string) string {
+	t.Helper()
+	dir := testutil.OwnerOnlyTempDir(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	require.NoError(t, Load(t.Context(), cfg, logger, immutableDir))
+	require.NoError(
+		t,
+		Load(t.Context(), parityConfig(dir), logger, immutableDir),
+	)
 	return dir
 }
 
-// startParityNode runs a node over dir with every API enabled. The split node
+// unpackLegacyDatabase unpacks the released version's data directory from
+// archive into a new directory.
+func unpackLegacyDatabase(t *testing.T, archive string) string {
+	t.Helper()
+	dir := testutil.OwnerOnlyTempDir(t)
+	f, err := os.Open(archive)
+	require.NoError(t, err)
+	defer f.Close()
+	zr, err := zstd.NewReader(f)
+	require.NoError(t, err)
+	defer zr.Close()
+	// The root refuses an entry that names a path outside dir.
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+	tr := tar.NewReader(zr)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			require.NoError(t, root.MkdirAll(hdr.Name, 0o700))
+		case tar.TypeReg:
+			out, err := root.OpenFile(
+				hdr.Name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600,
+			)
+			require.NoError(t, err)
+			_, err = io.CopyN(out, tr, hdr.Size)
+			require.NoError(t, errors.Join(err, out.Close()), hdr.Name)
+		default:
+			t.Fatalf("unexpected archive entry %q", hdr.Name)
+		}
+	}
+	return dir
+}
+
+// startParityNode runs a node over dir with every API enabled. Both nodes
 // gets the real IndexerDB writer.
 func startParityNode(
 	t *testing.T,
 	name, dir string,
-	split bool,
 	cardanoCfg *cardano.CardanoNodeConfig,
 	extra ...dingo.ConfigOptionFunc,
 ) parityNode {
 	t.Helper()
 	pn := parityNode{name: name}
-	blockfrostPort := parityPort(t)
-	meshPort := parityPort(t)
-	utxorpcPort := parityPort(t)
-	kupoPort := parityPort(t)
+	ports, listen := parityListeners(t)
+	blockfrostPort := ports["blockfrost"]
+	meshPort := ports["mesh"]
+	utxorpcPort := ports["utxorpc"]
+	kupoPort := ports["kupo"]
 	base := func(port uint) string {
 		return "http://127.0.0.1:" + strconv.FormatUint(uint64(port), 10)
 	}
@@ -116,6 +196,7 @@ func startParityNode(
 	pn.kupo = base(kupoPort)
 
 	opts := []dingo.ConfigOptionFunc{
+		dingo.WithAPIListenerFactory(listen),
 		dingo.WithDatabasePath(dir),
 		dingo.WithCardanoNodeConfig(cardanoCfg),
 		dingo.WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
@@ -136,27 +217,37 @@ func startParityNode(
 				Config:   map[string]any{"port": kupoPort},
 			},
 		),
-		dingo.WithShutdownTimeout(5 * time.Second),
+		// The shutdown deadline bounds Stop's phases, and a store close
+		// outlives it; a package of parallel tests makes a close of a few
+		// hundred milliseconds take longer than a short bound, which Stop
+		// reports as an error.
+		dingo.WithShutdownTimeout(time.Minute),
 	}
-	if split {
-		opts = append(
-			opts,
-			dingo.WithStorageMode(dingo.StorageModeCore),
-			dingo.WithIndexerLayout(config.IndexerLayoutSplit),
-			dingo.WithIndexerWriterFactory(NewIndexerService),
-			dingo.WithIndexerMaxReadyLagBlocks(0),
-		)
-	}
+	opts = append(
+		opts,
+		dingo.WithIndexerWriterFactory(NewIndexerService),
+		dingo.WithIndexerMaxReadyLagBlocks(0),
+	)
 	opts = append(opts, extra...)
 	n, err := dingo.New(dingo.NewConfig(opts...))
 	require.NoError(t, err)
+	pn.ledgerSlot = func() uint64 {
+		return n.LifecycleStatus().GetSync().GetTip().GetSlot()
+	}
 	runErr := make(chan error, 1)
 	go func() { runErr <- n.Run(context.Background()) }()
+	// Failures are reported without FailNow: the cleanup calls stop again,
+	// and a sync.OnceFunc whose function ended through Goexit panics the
+	// second call, which ends the whole test binary.
 	pn.stop = sync.OnceFunc(func() {
-		require.NoError(t, n.Stop())
-		testutil.RequireReceive(
-			t, runErr, 3*time.Minute, name+" node run returned",
-		)
+		if err := n.Stop(); err != nil {
+			t.Errorf("stop the %s node: %v", name, err)
+		}
+		select {
+		case <-runErr:
+		case <-time.After(3 * time.Minute):
+			t.Errorf("the %s node run did not return", name)
+		}
 	})
 	t.Cleanup(pn.stop)
 	require.Eventually(t, func() bool {
@@ -175,7 +266,7 @@ func startParityNode(
 	return pn
 }
 
-// apiResponse is one HTTP exchange, compared across the two layouts.
+// apiResponse is one HTTP exchange, compared across the two nodes.
 type apiResponse struct {
 	status int
 	body   string
@@ -201,16 +292,39 @@ func parityDo(
 	return apiResponse{status: resp.StatusCode, body: string(body)}
 }
 
-// normalizeParity removes what legitimately differs between two nodes over
-// one chain. Pool metadata documents are fetched from the network by
-// each node on its own schedule, so everything but the registered hash and URL is dropped.
-func normalizeParity(path, body string) string {
+// The UTxO RPC search that names no address returns the oldest outputs of the
+// chain first.
+const (
+	paritySearchUtxos      = "/utxorpc.v1alpha.query.QueryService/SearchUtxos"
+	parityUnfilteredSearch = `{"maxItems":50}`
+)
+
+// normalizeParity removes the two things that differ between a database the
+// released version wrote and one the current code loads from the same chain,
+// neither of which is chain data.
+//
+// Pool metadata documents are fetched from the network by each node on its
+// own schedule, so everything but the registered hash and URL is dropped.
+//
+// The search orders outputs by the slot, block index and output index of the
+// transaction that made them and then by that transaction's row id. The
+// genesis transactions share the first three, so their outputs come in the
+// order the transactions were inserted in. The released version inserts them
+// in an order that changes from one load to the next (three loads of these
+// chunks gave three orders) and the current code inserts them sorted by hash.
+// The outputs of the genesis transactions, whose hashes genesisTxs holds in
+// base64, are therefore compared as a set, each kept at a position a genesis
+// output holds; every other output is compared in place.
+func normalizeParity(
+	path, payload, body string,
+	genesisTxs map[string]bool,
+) string {
 	var v any
 	if err := json.Unmarshal([]byte(body), &v); err != nil {
 		return body
 	}
-	switch strings.SplitN(path, "?", 2)[0] {
-	case "/api/v0/pools/extended":
+	switch {
+	case strings.SplitN(path, "?", 2)[0] == "/api/v0/pools/extended":
 		if list, ok := v.([]any); ok {
 			for _, row := range list {
 				if m, ok := row.(map[string]any); ok {
@@ -224,8 +338,25 @@ func normalizeParity(path, body string) string {
 				}
 			}
 		}
+	case path == paritySearchUtxos && payload == parityUnfilteredSearch:
+		m, _ := v.(map[string]any)
+		items, _ := m["items"].([]any)
+		var at []int
+		var genesis []string
+		for i, item := range items {
+			entry, _ := item.(map[string]any)
+			ref, _ := entry["txoRef"].(map[string]any)
+			if hash, _ := ref["hash"].(string); genesisTxs[hash] {
+				b, _ := json.Marshal(item)
+				at = append(at, i)
+				genesis = append(genesis, string(b))
+			}
+		}
+		sort.Strings(genesis)
+		for n, i := range at {
+			items[i] = json.RawMessage(genesis[n])
+		}
 	}
-	canonicalAssetOrder(v)
 	out, err := json.Marshal(v)
 	if err != nil {
 		return body
@@ -233,70 +364,30 @@ func normalizeParity(path, body string) string {
 	return string(out)
 }
 
-// canonicalAssetOrder sorts the multi-asset collections of a decoded
-// response. The assets one transaction output holds are stored in the order
-// of a Go map, so two loads of one chain may list them differently. This is
-// needed only until the canonical asset order change lands on main, after
-// which both layouts serve one order and the comparison can be exact.
-func canonicalAssetOrder(v any) {
-	switch x := v.(type) {
-	case map[string]any:
-		for _, child := range x {
-			canonicalAssetOrder(child)
-		}
-	case []any:
-		for _, child := range x {
-			canonicalAssetOrder(child)
-		}
-		sortBy := func(key func(any) string) {
-			sort.SliceStable(x, func(i, j int) bool {
-				return key(x[i]) < key(x[j])
-			})
-		}
-		field := func(name string) func(any) string {
-			return func(e any) string {
-				m, _ := e.(map[string]any)
-				return fmt.Sprint(m[name])
-			}
-		}
-		allHave := func(names ...string) bool {
-			if len(x) == 0 {
-				return false
-			}
-			for _, e := range x {
-				m, ok := e.(map[string]any)
-				if !ok {
-					return false
-				}
-				for _, n := range names {
-					if _, ok := m[n]; !ok {
-						return false
-					}
-				}
-			}
-			return true
-		}
-		switch {
-		case allHave("unit", "quantity"):
-			sortBy(field("unit"))
-		case allHave("policyId", "assets"):
-			sortBy(field("policyId"))
-		case allHave("name", "outputCoin"):
-			sortBy(field("name"))
-		case allHave("operation_identifier"):
-			// Mesh numbers operations in output order, so the order of a
-			// transaction's assets decides their indexes.
-			for _, e := range x {
-				m := e.(map[string]any)
-				delete(m, "operation_identifier")
-				delete(m, "related_operations")
-			}
-			sortBy(func(e any) string {
-				b, _ := json.Marshal(e)
-				return string(b)
-			})
-		}
+// parityGenesisTxs returns the hashes of the transactions the genesis files
+// fund, in base64 as the UTxO RPC JSON mapping carries them.
+func parityGenesisTxs(
+	t *testing.T,
+	cfg *cardano.CardanoNodeConfig,
+) map[string]bool {
+	t.Helper()
+	var utxos []lcommon.Utxo
+	if byron := cfg.ByronGenesis(); byron != nil {
+		more, err := byron.GenesisUtxos()
+		require.NoError(t, err)
+		utxos = append(utxos, more...)
 	}
+	if shelley := cfg.ShelleyGenesis(); shelley != nil {
+		more, err := shelley.GenesisUtxos()
+		require.NoError(t, err)
+		utxos = append(utxos, more...)
+	}
+	out := map[string]bool{}
+	for _, u := range utxos {
+		out[base64.StdEncoding.EncodeToString(u.Id.Id().Bytes())] = true
+	}
+	require.NotEmpty(t, out, "the genesis files fund outputs")
+	return out
 }
 
 // getJSON decodes a successful GET from a node into v.
@@ -310,29 +401,46 @@ func (p parityNode) getJSON(t *testing.T, path string, v any) bool {
 	return true
 }
 
-// waitParityTip blocks until the split node serves the chain the shared node
-// holds, so the comparison starts from one chain point.
-func waitParityTip(t *testing.T, shared, split parityNode) {
+// waitParityTip blocks until both nodes serve one chain tip and answer the
+// current-state routes, so the comparison starts from one chain point. A fresh
+// node fills its IndexerDB from the ledger after it starts, while a migrated
+// one already holds the rows it copied, so the tips meet when the fresh node
+// has caught up.
+func waitParityTip(t *testing.T, fresh, migrated parityNode) {
 	t.Helper()
-	var want struct {
-		Hash string `json:"hash"`
-	}
-	require.True(t, shared.getJSON(t, "/api/v0/blocks/latest", &want))
-	require.Eventually(t, func() bool {
-		var got struct {
+	tip := func(p parityNode) string {
+		var latest struct {
 			Hash string `json:"hash"`
 		}
-		if !split.getJSON(t, "/api/v0/blocks/latest", &got) {
+		if !p.getJSON(t, "/api/v0/blocks/latest", &latest) {
+			return ""
+		}
+		return latest.Hash
+	}
+	require.Eventually(t, func() bool {
+		want := tip(fresh)
+		if want == "" || tip(migrated) != want {
 			return false
 		}
-		if got.Hash != want.Hash {
+		// The IndexerDB of a migrated node is at the released tip while its
+		// ledger applies the last blocks again.
+		if fresh.ledgerSlot() != migrated.ledgerSlot() {
 			return false
 		}
-		r := parityDo(t, http.MethodGet,
-			split.blockfrost+"/api/v0/epochs/latest", "")
-		return r.status == http.StatusOK
+		for _, p := range []parityNode{fresh, migrated} {
+			r := parityDo(
+				t,
+				http.MethodGet,
+				p.blockfrost+"/api/v0/epochs/latest",
+				"",
+			)
+			if r.status != http.StatusOK {
+				return false
+			}
+		}
+		return true
 	}, 10*time.Minute, 100*time.Millisecond,
-		"the split node serves the shared node's tip %s", want.Hash)
+		"the fresh and the migrated node serve one chain tip")
 }
 
 // parityIDs are path-parameter values found in the loaded chain.
@@ -372,8 +480,8 @@ func decodeList(t *testing.T, raw string, key string) []string {
 	return out
 }
 
-// discoverParityIDs reads identifiers from the shared node, the layout whose
-// answers are the reference.
+// discoverParityIDs reads identifiers from the fresh node, whose answers are
+// the reference.
 func discoverParityIDs(t *testing.T, ref parityNode) parityIDs {
 	t.Helper()
 	var ids parityIDs
@@ -399,8 +507,8 @@ func discoverParityIDs(t *testing.T, ref parityNode) parityIDs {
 		return out
 	}
 	ids.pools = list("/api/v0/pools?count=3", "", 3)
-	for _, epoch := range []uint64{ids.latestEpoch - 1, ids.latestEpoch - 2} {
-		ep := strconv.FormatUint(epoch, 10)
+	for back := uint64(0); back <= 2 && back <= ids.latestEpoch; back++ {
+		ep := strconv.FormatUint(ids.latestEpoch-back, 10)
 		for _, row := range list("/api/v0/epochs/"+ep+"/stakes?count=20", "stake_address", 20) {
 			ids.stakes = append(ids.stakes, row)
 		}
@@ -435,6 +543,18 @@ func discoverParityIDs(t *testing.T, ref parityNode) parityIDs {
 	}
 	for h := ids.latestHeight; h > 0 && len(ids.txs) < 12 &&
 		ids.latestHeight-h < 6000; h -= 41 {
+		for _, tx := range list(
+			"/api/v0/blocks/"+strconv.FormatUint(h, 10)+"/txs?count=3", "", 3,
+		) {
+			if !seen[tx] {
+				seen[tx] = true
+				ids.txs = append(ids.txs, tx)
+			}
+		}
+	}
+	// The chain's first transactions, which the stride above can miss.
+	for h := uint64(1); h <= 32 && h <= ids.latestHeight &&
+		len(ids.txs) < 12; h++ {
 		for _, tx := range list(
 			"/api/v0/blocks/"+strconv.FormatUint(h, 10)+"/txs?count=3", "", 3,
 		) {
@@ -485,13 +605,17 @@ func (ids parityIDs) expand(pattern string) []string {
 			),
 			"stake_test1uzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzs0m4k9d",
 		),
-		"address":     capList(ids.addresses, 6),
-		"hash":        capList(ids.txs, 6),
-		"label":       capList(ids.labels, 3),
-		"pool_id":     capList(ids.pools, 3),
-		"script_hash": capList(ids.scripts, 3),
-		"asset":       capList(ids.assets, 3),
-		"datum_hash":  {parityMissingHash},
+		"address": capList(ids.addresses, 6),
+		"hash":    append(capList(ids.txs, 6), parityMissingHash),
+		"label":   append(capList(ids.labels, 3), "674"),
+		"pool_id": capList(ids.pools, 3),
+		"script_hash": append(
+			capList(ids.scripts, 3), parityMissingHash[:56],
+		),
+		"asset": append(
+			capList(ids.assets, 3), parityMissingHash[:56]+"00",
+		),
+		"datum_hash": {parityMissingHash},
 		"hash_or_number": append(
 			capList(ids.blocks, 3),
 			ids.latestHash, strconv.FormatUint(ids.latestHeight-5, 10),
@@ -499,12 +623,12 @@ func (ids parityIDs) expand(pattern string) []string {
 		),
 		"epoch_number": {
 			strconv.FormatUint(ids.latestEpoch, 10),
-			strconv.FormatUint(ids.latestEpoch-1, 10),
+			strconv.FormatUint(ids.latestEpoch-min(ids.latestEpoch, 1), 10),
 			"1",
 		},
 		"number": {
 			strconv.FormatUint(ids.latestEpoch, 10),
-			strconv.FormatUint(ids.latestEpoch-1, 10),
+			strconv.FormatUint(ids.latestEpoch-min(ids.latestEpoch, 1), 10),
 			"1",
 		},
 		"slot_number": {strconv.FormatUint(ids.latestSlot, 10)},
@@ -577,18 +701,6 @@ func capList(l []string, n int) []string {
 	return slices.Clone(l)
 }
 
-// parityIgnored lists Blockfrost routes whose body legitimately differs: wall
-// clock readings, process metrics, and the health route a split node answers
-// from its IndexerDB readiness.
-var parityIgnored = map[string]bool{
-	"/api/v0/health":            true,
-	"/health":                   true,
-	"/health/clock":             true,
-	"/api/v0/health/clock":      true,
-	"/api/v0/metrics":           true,
-	"/api/v0/metrics/endpoints": true,
-}
-
 func hexToBase64(t *testing.T, h string) string {
 	t.Helper()
 	b, err := hex.DecodeString(h)
@@ -596,79 +708,119 @@ func hexToBase64(t *testing.T, h string) string {
 	return base64.StdEncoding.EncodeToString(b)
 }
 
-// TestSplitLayoutServesTheSameAPIsAsShared loads one real preview chain into
-// a shared-layout node and a split-layout node and requires every Blockfrost
-// GET route, the Kupo and Mesh endpoints and the UTxO RPC queries to answer
-// the same on both.
-func TestSplitLayoutServesTheSameAPIsAsShared(t *testing.T) {
+// TestMigratedNodeServesTheSameAPIsAsAFreshOne takes a database the v0.94.2
+// release wrote in API storage mode, moves it to the storage-role layout the
+// way a node's startup does, loads the same chunks into a new database with
+// the current code, and requires every Blockfrost GET route, the Kupo and Mesh
+// endpoints and the UTxO RPC queries to answer the same on both nodes.
+func TestMigratedNodeServesTheSameAPIsAsAFreshOne(t *testing.T) {
 	t.Parallel()
-	runSplitParity(t, false)
-}
-
-// The same walk with the split node's ledger holding its state only in the
-// live UTxO set: every row the APIs read, pool history included, comes from
-// the IndexerDB the writer filled from that set.
-func TestSplitLayoutWithSetOnlyServesTheSameAPIsAsShared(t *testing.T) {
-	t.Parallel()
-	runSplitParity(t, true)
-}
-
-func runSplitParity(t *testing.T, setOnly bool) {
-	testutil.SkipUnderRace(
+	requireMigratedNodeMatchesFresh(
 		t,
-		"it replays one real chain into two nodes and walks every API, "+
-			"about 18 minutes instrumented against about 75 seconds "+
-			"without; the unraced run covers the comparison, and the "+
-			"IndexerDB writer under race is covered by "+
-			"TestIndexerWriterMatchesLiveApplyOnRealBlocks and "+
-			"TestSplitNodeServesEveryAPI",
+		unpackLegacyDatabase(t, legacyParityArchive),
+		copyImmutableChunkPrefix(t, legacyParityChunks),
 	)
-	immutableDir := copyImmutableChunkPrefix(t, parityChunks)
+}
+
+// requireMigratedNodeMatchesFresh migrates the released version's data
+// directory legacyDir, loads the chunks under immutableDir it was loaded from
+// into a new data directory, and compares the APIs of a node over each.
+func requireMigratedNodeMatchesFresh(
+	t *testing.T,
+	legacyDir, immutableDir string,
+) {
+	t.Helper()
 	cardanoCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardano.EmbeddedConfigPath("preview"), "preview",
 		cardano.EmbeddedConfigFS,
 	)
 	require.NoError(t, err)
-	var sharedDir, splitDir string
-	var loads sync.WaitGroup
-	loads.Add(2)
-	go func() { defer loads.Done(); sharedDir = loadParityChain(t, immutableDir, false) }()
-	go func() { defer loads.Done(); splitDir = loadParityChain(t, immutableDir, true) }()
-	loads.Wait()
-	var extra []dingo.ConfigOptionFunc
-	if setOnly {
-		// The node moves the UTxO set out of the consensus store itself.
-		extra = append(setOnlyOptions(), warnLogger(t))
-	} else {
-		drainConsensusUtxos(t, splitDir)
+	freshDir := loadParityChain(t, immutableDir)
+	// The startup sequence of cmd/dingo: the API rows move to the IndexerDB
+	// before anything opens the consensus store, and the node then moves the
+	// UTxO set and the ledger state into the LedgerDB and the blocks into the
+	// ImmutableDB.
+	require.NoError(t, MigrateToSplit(
+		t.Context(), parityConfig(legacyDir),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+	// The IndexerDB holds the released version's rows before the node and its
+	// writer start, so what the migrated node serves is what was copied and
+	// not what a writer indexed from genesis.
+	copied, err := sql.Open("sqlite", "file:"+filepath.Join(
+		legacyDir, internalplugins.IndexerDirName, "metadata.sqlite",
+	)+"?mode=ro")
+	require.NoError(t, err)
+	for _, table := range []string{
+		"applied_transaction", "utxo", "epoch", "pool_registration",
+	} {
+		require.NotZero(t, rowCount(t, copied, table),
+			"the migration copied no %s rows", table)
 	}
+	require.NoError(t, copied.Close())
+	migrated, ids := requireNodesServeTheSame(
+		t, freshDir, legacyDir, cardanoCfg,
+	)
+
+	// The migrated directory is left as a node writes one: the ledger and
+	// the live UTxO set at the tip, and every graduated ledger-state family
+	// drained from the metadata store.
+	tipHash, err := hex.DecodeString(ids.latestHash)
+	require.NoError(t, err)
+	migrated.stop()
+	requireLoadedStorage(
+		t, legacyDir, ocommon.NewPoint(ids.latestSlot, tipHash),
+	)
+}
+
+// requireNodesServeTheSame starts a node over freshDir and one over
+// migratedDir, waits until they are at one tip, and compares every API
+// answer. It returns the node over migratedDir and the values the walk used.
+func requireNodesServeTheSame(
+	t *testing.T,
+	freshDir, migratedDir string,
+	cardanoCfg *cardano.CardanoNodeConfig,
+) (parityNode, parityIDs) {
+	t.Helper()
 	started := time.Now()
-	shared := startParityNode(t, "shared", sharedDir, false, cardanoCfg)
-	split := startParityNode(t, "split", splitDir, true, cardanoCfg, extra...)
-	waitParityTip(t, shared, split)
-	t.Logf("nodes up and split caught up after %s", time.Since(started))
-	ids := discoverParityIDs(t, shared)
+	fresh := startParityNode(t, "fresh", freshDir, cardanoCfg)
+	migrated := startParityNode(
+		t, "migrated", migratedDir, cardanoCfg, warnLogger(t),
+	)
+	waitParityTip(t, fresh, migrated)
+	t.Logf(
+		"nodes up and the migrated node caught up after %s",
+		time.Since(started),
+	)
+	ids := discoverParityIDs(t, fresh)
 	require.NotEmpty(t, ids.pools, "the chain has pools")
 	require.NotEmpty(t, ids.stakes, "the chain has staked accounts")
 	require.NotEmpty(t, ids.txs, "the chain has transactions")
 	require.NotEmpty(t, ids.addresses, "the chain has addresses")
-	require.True(t, anyAccountHasRewards(t, shared, ids.stakes),
-		"the walk reaches epochs in which accounts earned rewards")
 
-	var diffs, timings []string
+	genesisTxs := parityGenesisTxs(t, cardanoCfg)
+	var diffs, timings, serverErrors []string
+	statuses := map[int]int{}
 	walkStart := time.Now()
 	compare := func(label, method, path, payload string, a, b parityNode, aBase, bBase string) {
 		t.Helper()
-		if label == "blockfrost" && epochStakesPath.MatchString(path) {
+		// An epoch the chain has not reached is an error both nodes answer,
+		// compared like any other answer.
+		if label == "blockfrost" && epochStakesPath.MatchString(path) &&
+			parityDo(t, method, aBase+path, payload).status == http.StatusOK {
 			// The listing pages by row id, so which rows a page holds
-			// follows the order the rows were written in; whole
+			// follows the order the rows were written in: the released
+			// version wrote a snapshot's stake rows as it captured them,
+			// and the IndexerDB writer copies them by key. Whole
 			// distributions are compared.
 			want := allPages(t, aBase+path)
 			got := allPages(t, bBase+path)
 			if !slices.Equal(want, got) {
+				missing, extra := diffLines(want, got)
 				diffs = append(diffs, fmt.Sprintf(
-					"%s GET %s\n  shared: %d stakes\n  split:  %d stakes",
-					label, path, len(want), len(got),
+					"%s GET %s\n  fresh: %d stakes, only here: %v\n  migrated: %d stakes, only here: %v",
+					label, path, len(want), firstN(missing, 2),
+					len(got), firstN(extra, 2),
 				))
 			}
 			return
@@ -678,16 +830,24 @@ func runSplitParity(t *testing.T, setOnly bool) {
 		mid := time.Now()
 		got := parityDo(t, method, bBase+path, payload)
 		timings = append(timings, fmt.Sprintf(
-			"%6dms shared %6dms split %s %s", mid.Sub(began).Milliseconds(),
+			"%6dms fresh %6dms migrated %s %s", mid.Sub(began).Milliseconds(),
 			time.Since(mid).Milliseconds(), method, truncate(path, 90),
 		))
+		statuses[want.status]++
+		if want.status >= http.StatusInternalServerError &&
+			want.status != http.StatusNotImplemented {
+			serverErrors = append(serverErrors, fmt.Sprintf(
+				"%s %s %s: %d %s", label, method, truncate(path, 90),
+				want.status, truncate(want.body, 200),
+			))
+		}
 		if want.status == got.status &&
-			normalizeParity(path, want.body) ==
-				normalizeParity(path, got.body) {
+			normalizeParity(path, payload, want.body, genesisTxs) ==
+				normalizeParity(path, payload, got.body, genesisTxs) {
 			return
 		}
-		wantBody := normalizeParity(path, want.body)
-		gotBody := normalizeParity(path, got.body)
+		wantBody := normalizeParity(path, payload, want.body, genesisTxs)
+		gotBody := normalizeParity(path, payload, got.body, genesisTxs)
 		at := 0
 		for at < len(wantBody) && at < len(gotBody) &&
 			wantBody[at] == gotBody[at] {
@@ -695,7 +855,7 @@ func runSplitParity(t *testing.T, setOnly bool) {
 		}
 		from := max(at-80, 0)
 		diffs = append(diffs, fmt.Sprintf(
-			"%s %s %s\n  shared: %d ...%s\n  split:  %d ...%s",
+			"%s %s %s\n  fresh: %d ...%s\n  migrated:  %d ...%s",
 			label, method, path,
 			want.status, truncate(wantBody[from:], 240),
 			got.status, truncate(gotBody[from:], 240),
@@ -708,47 +868,36 @@ func runSplitParity(t *testing.T, setOnly bool) {
 		if method != http.MethodGet {
 			continue
 		}
-		for _, p := range ids.expand(pattern) {
-			if parityIgnored[strings.SplitN(p, "?", 2)[0]] {
-				continue
-			}
-			if p == "/api/v0/assets" {
-				continue
-			}
+		paths := ids.expand(pattern)
+		require.NotEmpty(t, paths, "no request for %s", pattern)
+		for _, p := range paths {
 			checked++
-			compare("blockfrost", method, p, "", shared, split,
-				shared.blockfrost, split.blockfrost)
+			compare("blockfrost", method, p, "", fresh, migrated,
+				fresh.blockfrost, migrated.blockfrost)
 		}
 	}
 	require.Greater(t, checked, 100, "the route walk covered the API")
-	// The assets list orders by the id of an asset's first mint row, and the
-	// assets one transaction mints are inserted in the order of a Go map, so
-	// the order within a transaction differs between any two loads and a
-	// page can end inside such a group. Every page is compared as a set.
-	require.Equal(t, allAssets(t, shared), allAssets(t, split),
-		"the assets the two nodes list")
-
 	kupoChecked := 0
-	for _, p := range ids.kupoPaths(kupo.RoutePatterns()) {
+	for _, p := range ids.kupoPaths(t, kupo.RoutePatterns()) {
 		kupoChecked++
-		compare("kupo", http.MethodGet, p, "", shared, split,
-			shared.kupo, split.kupo)
+		compare("kupo", http.MethodGet, p, "", fresh, migrated,
+			fresh.kupo, migrated.kupo)
 	}
 	require.Greater(t, kupoChecked, 10, "the Kupo walk covered the API")
 
 	meshChecked := 0
-	for _, r := range ids.meshRequests(t, shared) {
+	for _, r := range ids.meshRequests(t, fresh) {
 		meshChecked++
-		compare("mesh", http.MethodPost, r.path, r.body, shared, split,
-			shared.mesh, split.mesh)
+		compare("mesh", http.MethodPost, r.path, r.body, fresh, migrated,
+			fresh.mesh, migrated.mesh)
 	}
 	require.Greater(t, meshChecked, 5, "the Mesh walk covered the API")
 
 	rpcChecked := 0
-	for _, r := range ids.utxorpcRequests(t, shared) {
+	for _, r := range ids.utxorpcRequests(t, fresh) {
 		rpcChecked++
-		compare("utxorpc", http.MethodPost, r.path, r.body, shared, split,
-			shared.utxorpc, split.utxorpc)
+		compare("utxorpc", http.MethodPost, r.path, r.body, fresh, migrated,
+			fresh.utxorpc, migrated.utxorpc)
 	}
 	require.Greater(t, rpcChecked, 5, "the UTxO RPC walk covered the API")
 
@@ -757,43 +906,35 @@ func runSplitParity(t *testing.T, setOnly bool) {
 	for _, line := range timings[:min(12, len(timings))] {
 		t.Log(line)
 	}
-	t.Logf("%d requests", len(timings))
+	t.Logf("%d requests, by the fresh node's status: %v", len(timings), statuses)
+	// A route both nodes fail the same way compares equal without comparing
+	// any data, so the ones that do are listed; a route the API does not
+	// implement answers 501 on any node.
+	for _, e := range serverErrors {
+		t.Logf("answered with a server error by both nodes: %s", e)
+	}
 	for _, d := range diffs {
 		t.Error(d)
 	}
+	return migrated, ids
 }
 
-// anyAccountHasRewards reports whether the node lists a reward for any of the
-// stake addresses.
-func anyAccountHasRewards(
-	t *testing.T,
-	p parityNode,
-	stakes []string,
-) bool {
+// kupoPaths expands the Kupo GET routes over the discovered addresses, assets
+// and slots.
+func (ids parityIDs) kupoPaths(t *testing.T, patterns []string) []string {
 	t.Helper()
-	for _, stake := range stakes {
-		var rewards []json.RawMessage
-		if p.getJSON(t, "/api/v0/accounts/"+stake+"/rewards?count=1", &rewards) &&
-			len(rewards) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// kupoPaths expands the Kupo GET routes, except the health and metrics
-// routes, over the discovered addresses, assets and slots.
-func (ids parityIDs) kupoPaths(patterns []string) []string {
 	candidates := map[string][]string{
 		"pattern": {
 			"*", ids.first(ids.addresses, "*"),
 			ids.first(ids.stakes, "*"),
 			ids.first(ids.scripts, "*") + ".*",
 		},
-		"payment":     {"*"},
-		"delegation":  {"*"},
-		"datum_hash":  {parityMissingHash},
-		"script_hash": capList(ids.scripts, 2),
+		"payment":    {"*"},
+		"delegation": {"*"},
+		"datum_hash": {parityMissingHash},
+		"script_hash": append(
+			capList(ids.scripts, 2), parityMissingHash[:56],
+		),
 		"slot_no": {
 			strconv.FormatUint(ids.latestSlot, 10),
 			strconv.FormatUint(ids.latestSlot/2, 10),
@@ -809,8 +950,7 @@ func (ids parityIDs) kupoPaths(patterns []string) []string {
 	var out []string
 	for _, pattern := range patterns {
 		method, path, _ := strings.Cut(pattern, " ")
-		if method != http.MethodGet || strings.HasPrefix(path, "/v1") ||
-			path == "/health" || path == "/metrics" {
+		if method != http.MethodGet {
 			continue
 		}
 		paths := []string{path}
@@ -831,10 +971,11 @@ func (ids parityIDs) kupoPaths(patterns []string) []string {
 			}
 			paths = next
 		}
+		require.NotEmpty(t, paths, "no request for %s", pattern)
 		for _, p := range paths {
-			if strings.HasPrefix(p, "/matches") {
+			if strings.HasPrefix(strings.TrimPrefix(p, "/v1"), "/matches") {
 				qs := queries
-				if p == "/matches" || strings.Contains(p, "%2A") &&
+				if strings.HasSuffix(p, "/matches") || strings.Contains(p, "%2A") &&
 					!strings.Contains(p, ".%2A") {
 					qs = wildcardQueries
 				}
@@ -852,7 +993,7 @@ func (ids parityIDs) kupoPaths(patterns []string) []string {
 type parityRequest struct{ path, body string }
 
 // meshRequests builds the Mesh data API requests for the discovered chain,
-// taking the network identifier the shared node announces.
+// taking the network identifier the fresh node announces.
 func (ids parityIDs) meshRequests(
 	t *testing.T,
 	ref parityNode,
@@ -905,7 +1046,7 @@ func (ids parityIDs) meshRequests(
 }
 
 // utxorpcRequests builds the UTxO RPC query requests, with UTxO references
-// taken from what the shared node's search returns.
+// taken from what the fresh node's search returns.
 func (ids parityIDs) utxorpcRequests(
 	t *testing.T,
 	ref parityNode,
@@ -922,13 +1063,13 @@ func (ids parityIDs) utxorpcRequests(
 		{svc + "ReadParams", `{}`},
 		{svc + "ReadEraSummary", `{}`},
 		{svc + "ReadGenesis", `{}`},
-		{svc + "SearchUtxos", `{"maxItems":50}`},
+		{svc + "SearchUtxos", parityUnfilteredSearch},
 	}
 	for _, addr := range capList(ids.addresses, 4) {
 		out = append(out, parityRequest{svc + "SearchUtxos", search(addr)})
 	}
 	found := parityDo(t, http.MethodPost, ref.utxorpc+svc+"SearchUtxos",
-		`{"maxItems":50}`)
+		parityUnfilteredSearch)
 	require.Equal(t, http.StatusOK, found.status, found.body)
 	var items struct {
 		Items []struct {
@@ -979,48 +1120,6 @@ func bech32ToBase64(t *testing.T, addr string) string {
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
-// allAssets returns every asset a node lists, sorted.
-func allAssets(t *testing.T, p parityNode) []string {
-	t.Helper()
-	var out []string
-	for page := 1; ; page++ {
-		r := parityDo(t, http.MethodGet, fmt.Sprintf(
-			"%s/api/v0/assets?count=100&page=%d", p.blockfrost, page,
-		), "")
-		require.Equal(t, http.StatusOK, r.status, r.body)
-		var rows []struct {
-			Asset    string `json:"asset"`
-			Quantity string `json:"quantity"`
-		}
-		require.NoError(t, json.Unmarshal([]byte(r.body), &rows))
-		if len(rows) == 0 {
-			break
-		}
-		for _, row := range rows {
-			out = append(out, row.Asset+" "+row.Quantity)
-		}
-	}
-	require.NotEmpty(t, out, p.name+" lists assets")
-	sort.Strings(out)
-	return out
-}
-
-// drainConsensusUtxos empties the UTxO table of a split data directory's
-// consensus store. The split layout's API readers must find UTxOs in the
-// IndexerDB alone: a consensus store that keeps the UTxO set outside SQL has
-// none there, and a reader that still consults it answers as if no output
-// existed.
-func drainConsensusUtxos(t *testing.T, dataDir string) {
-	t.Helper()
-	raw := openRaw(t, filepath.Join(dataDir, "metadata.sqlite"))
-	res, err := raw.ExecContext(t.Context(), "DELETE FROM utxo")
-	require.NoError(t, err)
-	n, err := res.RowsAffected()
-	require.NoError(t, err)
-	require.NotZero(t, n, "the consensus store held UTxOs to drain")
-	require.NoError(t, raw.Close())
-}
-
 var epochStakesPath = regexp.MustCompile(`^/api/v0/epochs/\d+/stakes$`)
 
 // allPages lists every entry of a paged route, each as its JSON text, sorted.
@@ -1042,4 +1141,95 @@ func allPages(t *testing.T, target string) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// storeSchema is the schema of the SQLite store at path and the migrations
+// recorded in it, as text to compare.
+func storeSchema(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	require.NoError(t, err)
+	defer raw.Close()
+	var out strings.Builder
+	for _, query := range []string{
+		`SELECT type || ' ' || name || ' ' || COALESCE(sql, '') FROM sqlite_master ORDER BY type, name`,
+		`SELECT version || ' ' || phase || ' ' || dirty FROM schema_migrations ORDER BY version`,
+	} {
+		rows, err := raw.Query(query)
+		require.NoError(t, err)
+		for rows.Next() {
+			var line string
+			require.NoError(t, rows.Scan(&line))
+			out.WriteString(line + "\n")
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+	}
+	return out.String()
+}
+
+// TestStartupRefusesAReleasedInterruptedBackfillUntouched takes the database
+// the v0.94.2 release wrote and marks it as that release leaves an API-mode
+// Mithril bootstrap that stopped during its metadata backfill. The first step
+// of a start that opens the store refuses it, and the refusal names v0.94.2 as
+// what finishes the backfill, so it must leave a store that release still
+// opens: no schema migration applied, no IndexerDB, and the status in place.
+func TestStartupRefusesAReleasedInterruptedBackfillUntouched(t *testing.T) {
+	t.Parallel()
+	dir := unpackLegacyDatabase(t, legacyParityArchive)
+	store := filepath.Join(dir, "metadata.sqlite")
+	raw, err := sql.Open("sqlite", store)
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		`INSERT INTO sync_state(sync_key,value) VALUES('sync_status','backfill')`,
+	)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+	before := storeSchema(t, store)
+	require.NotEmpty(t, before)
+
+	err = settingsresolve.Apply(parityConfig(dir))
+	require.ErrorIs(t, err, settingsresolve.ErrInterruptedBackfill)
+	require.ErrorContains(t, err, "v0.94.2")
+
+	require.Equal(t, before, storeSchema(t, store),
+		"the refusal changed the released store's schema")
+	require.NoDirExists(t, filepath.Join(dir, internalplugins.IndexerDirName))
+	raw, err = sql.Open("sqlite", "file:"+store+"?mode=ro")
+	require.NoError(t, err)
+	defer raw.Close()
+	var status string
+	require.NoError(t, raw.QueryRow(
+		`SELECT value FROM sync_state WHERE sync_key='sync_status'`,
+	).Scan(&status))
+	require.Equal(t, "backfill", status)
+}
+
+func TestParityListenersKeepPortsReservedUntilHandoff(t *testing.T) {
+	t.Parallel()
+	ports, listen := parityListeners(t)
+	for name, port := range ports {
+		t.Run(name, func(t *testing.T) {
+			address := net.JoinHostPort(
+				"127.0.0.1",
+				strconv.FormatUint(uint64(port), 10),
+			)
+			intruder, err := net.Listen("tcp", address)
+			if intruder != nil {
+				_ = intruder.Close()
+			}
+			if err == nil {
+				t.Fatal("API socket was released before handoff")
+			}
+			listener, err := listen("tcp", address)
+			require.NoError(t, err)
+			require.Equal(t, address, listener.Addr().String())
+			_, err = listen("tcp", address)
+			require.Error(t, err, "the same socket cannot be transferred twice")
+			require.NoError(t, listener.Close())
+			replacement, err := net.Listen("tcp", address)
+			require.NoError(t, err)
+			require.NoError(t, replacement.Close())
+		})
+	}
 }

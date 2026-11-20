@@ -39,10 +39,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
@@ -122,8 +125,9 @@ func newFollowTipTimestampServer(
 	ls UtxorpcLedgerState,
 ) *syncServiceServer {
 	u := NewUtxorpc(UtxorpcConfig{
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		LedgerState: ls,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		LedgerState:   ls,
+		QueryDatabase: stubQueryDB(ls),
 	})
 	return &syncServiceServer{utxorpc: u}
 }
@@ -733,13 +737,15 @@ func (noopTxValidator) ValidateTxWithOverlay(
 // in-memory database, starts LedgerState (manual block processing), and serves
 // the utxorpc Connect handlers over HTTP/2 cleartext (h2c) like production.
 type utxorpcConnectHarness struct {
-	EB     *event.EventBus
-	DB     *database.Database
-	LS     *ledger.LedgerState
-	MP     *mempool.Mempool
-	U      *Utxorpc
-	Server *httptest.Server
-	Client *http.Client
+	EB *event.EventBus
+	DB *database.Database
+	// IndexerDB holds the rows the QueryService reads.
+	IndexerDB *database.Database
+	LS        *ledger.LedgerState
+	MP        *mempool.Mempool
+	U         *Utxorpc
+	Server    *httptest.Server
+	Client    *http.Client
 	// Tx hashes that were successfully indexed into metadata during harness setup.
 	IndexedTxHashes [][]byte
 }
@@ -851,13 +857,29 @@ func newUtxorpcConnectHarness(
 		true, // isCheckpoint
 		nil,
 	))
+	// The ledger's store holds the outputs its live UTxO set is seeded from;
+	// the IndexerDB holds the rows the QueryService reads.
+	indexFixtureTransactionsForReadTx(t, db, blocks, opts.skipIndexTxHash)
+	indexerDB, err := dbtest.NewIndexerDatabase(
+		t, db, dbtest.IndexerOptions{},
+	)
+	require.NoError(t, err)
 	indexedTxHashes := indexFixtureTransactionsForReadTx(
 		t,
-		db,
+		indexerDB,
 		blocks,
 		opts.skipIndexTxHash,
 	)
 	tip := blocks[len(blocks)-1]
+	indexerStore, err := indexerdb.NewStore(indexerDB, indexerDB, 0)
+	require.NoError(t, err)
+	require.NoError(t, indexerDB.Transaction(t.Context(), true).Do(
+		func(txn *database.Txn) error {
+			return indexerStore.SetTip(indexerdb.Tip{
+				Slot: tip.Slot, BlockNumber: tip.Number, Hash: tip.Hash,
+			}, txn)
+		},
+	))
 	require.NoError(
 		t,
 		db.SetTip(
@@ -879,6 +901,7 @@ func newUtxorpcConnectHarness(
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:              db,
+		UtxoSet:               livesettest.NewFrom(t, db),
 		ChainManager:          cm,
 		EventBus:              nil,
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -912,9 +935,13 @@ func newUtxorpcConnectHarness(
 		maxHist = DefaultMaxHistoryItems
 	}
 	cfg := UtxorpcConfig{
-		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:        apiBus,
-		LedgerState:     ls,
+		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:    apiBus,
+		LedgerState: ls,
+		QueryDatabase: NewIndexerQueryDatabase(
+			indexerDB, indexerStore,
+			func(indexerdb.Kind) (bool, error) { return true, nil },
+		),
 		Mempool:         mp,
 		MaxHistoryItems: maxHist,
 		ServerTimeout:   opts.serverTimeout,
@@ -932,6 +959,7 @@ func newUtxorpcConnectHarness(
 	return &utxorpcConnectHarness{
 		EB:              apiBus,
 		DB:              db,
+		IndexerDB:       indexerDB,
 		LS:              ls,
 		MP:              mp,
 		U:               u,
@@ -2370,8 +2398,9 @@ func newTipHeightServers(
 ) (*syncServiceServer, *queryServiceServer) {
 	t.Helper()
 	u := NewUtxorpc(UtxorpcConfig{
-		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		LedgerState: ls,
+		Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerState:   ls,
+		QueryDatabase: stubQueryDB(ls),
 	})
 	return &syncServiceServer{utxorpc: u}, &queryServiceServer{utxorpc: u}
 }

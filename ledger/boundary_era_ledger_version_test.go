@@ -254,6 +254,9 @@ func newBoundaryEraLedger(
 ) (*LedgerState, gledger.Block) {
 	t.Helper()
 	ls, blocks := newBoundaryEraLedgerChain(t, tc)
+	if tc.utxoSet == nil {
+		attachTestLiveSet(t, ls)
+	}
 	return ls, blocks[0]
 }
 
@@ -391,6 +394,7 @@ func newBoundaryEraLedgerChain(
 	))
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
+		UtxoSet:               NewMemLiveSetForTest(),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -457,6 +461,9 @@ func newBoundaryEraLedgerChain(
 	}
 	if tc.classicUpdateMajor != 0 {
 		seedClassicVersionUpdate(t, db, tc.classicUpdateMajor)
+	}
+	if tc.utxoSet == nil {
+		attachTestLiveSet(t, ls)
 	}
 	return ls, blocks
 }

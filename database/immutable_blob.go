@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // immutableBlobStore resolves promoted-block markers. Once a block body moves
@@ -45,6 +46,13 @@ var (
 	_ blob.Backuper              = (*immutableBlobStore)(nil)
 	_ blob.Restorer              = (*immutableBlobStore)(nil)
 	_ blob.Resettable            = (*immutableBlobStore)(nil)
+)
+
+// ErrImmutableBlockNotSignable reports a block whose body was promoted to the
+// ImmutableDB. Its bp object holds a marker, so a signed object-store URL
+// would deliver the marker instead of the block.
+var ErrImmutableBlockNotSignable = errors.New(
+	"block body is in the ImmutableDB and has no signed URL",
 )
 
 // ErrBlobCapabilityUnsupported reports a lifecycle operation the store beneath
@@ -171,10 +179,37 @@ func (s *immutableBlobStore) GetContextLimited(
 	}
 	if int64(len(value)) > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes", maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	return value, nil
+}
+
+// GetBlockURL refuses a promoted block rather than signing its marker object.
+// The bounded read fetches at most one byte past a marker, so an unpromoted
+// body is not downloaded just to sign it. Only a value too large to be a
+// marker goes on to be signed: any other read failure leaves the value
+// unknown, and signing then could hand out a marker.
+func (s *immutableBlobStore) GetBlockURL(
+	ctx context.Context,
+	txn types.Txn,
+	point ocommon.Point,
+) (types.SignedURL, types.BlockMetadata, error) {
+	if getter, ok := s.BlobStore.(contextLimitedGetter); ok {
+		value, err := getter.GetContextLimited(
+			ctx, txn, types.BlockBlobKey(point.Slot, point.Hash),
+			types.BlockImmutableMarkerSize,
+		)
+		switch {
+		case errors.Is(err, types.ErrBlobTooLarge):
+		case err != nil:
+			return types.SignedURL{}, types.BlockMetadata{}, err
+		case types.IsImmutableMarker(value):
+			return types.SignedURL{}, types.BlockMetadata{},
+				ErrImmutableBlockNotSignable
+		}
+	}
+	return s.BlobStore.GetBlockURL(ctx, txn, point)
 }
 
 func (s *immutableBlobStore) GetBlock(

@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,13 +40,16 @@ import (
 // runPgDump invokes pg_dump, indirected through a variable so a test can
 // inject a failure at this exact point deterministically, mirroring
 // sqlite's runVacuumInto seam.
-var runPgDump = func(ctx context.Context, env []string, dstPath string) error {
-	cmd := exec.CommandContext( //nolint:gosec // G204: dstPath is our own staging temp path, not user input
-		ctx,
-		"pg_dump",
+var runPgDump = func(ctx context.Context, env []string, dstPath string, scope []string) error {
+	args := append([]string{
 		"--format=custom",
 		"--no-password",
-		"--file="+dstPath,
+		"--file=" + dstPath,
+	}, scope...)
+	cmd := exec.CommandContext( //nolint:gosec // G204: dstPath is our own staging temp path and scope a derived schema name, not user input
+		ctx,
+		"pg_dump",
+		args...,
 	)
 	cmd.Env = env
 	var stderr bytes.Buffer
@@ -319,13 +323,13 @@ func escapePGOption(value string) string {
 
 // backupPostgres writes a pg_dump custom-format archive of the database dsn
 // points at to dstPath (which must not already exist).
-func backupPostgres(ctx context.Context, dsn, dstPath string) error {
+func backupPostgres(ctx context.Context, dsn, dstPath string, scope pgScope) error {
 	env, _, err := connEnv(dsn)
 	if err != nil {
 		return fmt.Errorf("postgres backup: %w", err)
 	}
 	err = sqlstore.PublishBackupFile(dstPath, func(stagedPath string) error {
-		return runPgDump(ctx, env, stagedPath)
+		return runPgDump(ctx, env, stagedPath, scope.dumpArgs())
 	})
 	if err != nil {
 		return fmt.Errorf("postgres backup: %w", err)
@@ -339,7 +343,7 @@ func backupPostgres(ctx context.Context, dsn, dstPath string) error {
 // directory to enforce this the way badger/sqlite's file-based Restore
 // contracts do, so this checks explicitly instead of silently merging into
 // (or partially overwriting) a populated schema.
-func restorePostgres(ctx context.Context, dsn, srcPath string) error {
+func restorePostgres(ctx context.Context, dsn, srcPath string, scope pgScope) error {
 	env, database, err := connEnv(dsn)
 	if err != nil {
 		return fmt.Errorf("postgres restore: %w", err)
@@ -349,7 +353,7 @@ func restorePostgres(ctx context.Context, dsn, srcPath string) error {
 		return fmt.Errorf("postgres restore: open connection: %w", err)
 	}
 	defer db.Close() //nolint:errcheck
-	empty, err := databaseIsEmpty(ctx, db)
+	empty, err := databaseIsEmpty(ctx, db, scope)
 	if err != nil {
 		return fmt.Errorf("postgres restore: %w", err)
 	}
@@ -359,10 +363,68 @@ func restorePostgres(ctx context.Context, dsn, srcPath string) error {
 				"restore must only be called against an empty database",
 		)
 	}
+	// A consensus schema's archive creates the schema itself, under the name
+	// derived from the database it was taken from.
+	var before []string
+	if scope.schema != "" {
+		if _, err := db.ExecContext(ctx, "DROP SCHEMA IF EXISTS "+pgQuoteIdentifier(scope.schema)); err != nil {
+			return fmt.Errorf("postgres restore: drop empty schema %q: %w", scope.schema, err)
+		}
+		if before, err = coreSchemas(ctx, db); err != nil {
+			return fmt.Errorf("postgres restore: %w", err)
+		}
+	}
 	if err := runPgRestore(ctx, env, database, srcPath); err != nil {
 		return fmt.Errorf("postgres restore: %w", err)
 	}
-	return nil
+	if scope.schema == "" {
+		return nil
+	}
+	after, err := coreSchemas(ctx, db)
+	if err != nil {
+		return fmt.Errorf("postgres restore: %w", err)
+	}
+	var created []string
+	for _, name := range after {
+		if !slices.Contains(before, name) {
+			created = append(created, name)
+		}
+	}
+	switch {
+	case slices.Contains(created, scope.schema):
+		return nil
+	case len(created) == 1:
+		// Taken from a database of another name: move it to this one's.
+		if _, err := db.ExecContext(ctx, "ALTER SCHEMA "+pgQuoteIdentifier(created[0])+" RENAME TO "+pgQuoteIdentifier(scope.schema)); err != nil {
+			return fmt.Errorf("postgres restore: rename schema %q to %q: %w", created[0], scope.schema, err)
+		}
+		return nil
+	default:
+		return fmt.Errorf(
+			"postgres restore: the archive created schemas %v, not one consensus schema to restore as %q",
+			created, scope.schema,
+		)
+	}
+}
+
+// coreSchemas lists the consensus schemas of the connected database.
+func coreSchemas(ctx context.Context, db *sql.DB) ([]string, error) {
+	//nolint:gosec // G202: the condition is a constant prefix pattern
+	rows, err := db.QueryContext(ctx, `SELECT nspname FROM pg_namespace WHERE `+
+		(pgScope{}).negated("nspname"))
+	if err != nil {
+		return nil, fmt.Errorf("list consensus schemas: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
 }
 
 // databaseIsEmpty reports whether the connected database has no tables in
@@ -376,13 +438,13 @@ func restorePostgres(ctx context.Context, dsn, srcPath string) error {
 // doesn't count as occupying the database: resetDatabase below can't
 // clear one with DROP TABLE, so counting it here would make an
 // otherwise-empty database wrongly report "not empty" with no way to fix it.
-func databaseIsEmpty(ctx context.Context, db *sql.DB) (bool, error) {
+func databaseIsEmpty(ctx context.Context, db *sql.DB, scope pgScope) (bool, error) {
 	var count int
 	err := db.QueryRowContext(ctx, `
 		SELECT count(*) FROM information_schema.tables
 		WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-		AND table_type = 'BASE TABLE'
-	`).Scan(&count)
+		AND table_type = 'BASE TABLE' AND `+scope.predicate("table_schema"),
+	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check target database: %w", err)
 	}
@@ -420,32 +482,13 @@ func databaseIsEmpty(ctx context.Context, db *sql.DB) (bool, error) {
 // in the restore flow even if this function captured its definition
 // first, since RestoreFrom (which runs after Reset, not before) is what
 // recreates the tables such a view would depend on.
-func resetDatabase(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx, `
-		SELECT table_schema, table_name FROM information_schema.tables
-		WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-		AND table_type = 'BASE TABLE'
-	`)
+func resetDatabase(ctx context.Context, db *sql.DB, scope pgScope) error {
+	tables, err := tablesForReset(ctx, db, scope)
 	if err != nil {
-		return fmt.Errorf("list tables: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	var tables []qualifiedTable
-	for rows.Next() {
-		var t qualifiedTable
-		if err := rows.Scan(&t.schema, &t.name); err != nil {
-			return fmt.Errorf("scan table name: %w", err)
-		}
-		tables = append(tables, t)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("list tables: %w", err)
-	}
-	if err := refuseIfDependentViewsExist(ctx, db, tables); err != nil {
 		return err
 	}
-	if err := refuseIfTargetHasData(ctx, db, tables); err != nil {
-		return err
+	if len(tables) == 0 {
+		return nil
 	}
 	for _, t := range tables {
 		quoted := pgQuoteIdentifier(t.schema) + "." + pgQuoteIdentifier(t.name)
@@ -454,6 +497,37 @@ func resetDatabase(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func tablesForReset(ctx context.Context, db *sql.DB, scope pgScope) ([]qualifiedTable, error) {
+	//nolint:gosec // G202: the predicate quotes a derived schema name
+	rows, err := db.QueryContext(ctx, `
+		SELECT table_schema, table_name FROM information_schema.tables
+		WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+		AND table_type = 'BASE TABLE' AND `+scope.predicate("table_schema"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var tables []qualifiedTable
+	for rows.Next() {
+		var t qualifiedTable
+		if err := rows.Scan(&t.schema, &t.name); err != nil {
+			return nil, fmt.Errorf("scan table name: %w", err)
+		}
+		tables = append(tables, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	if err := refuseIfDependentViewsExist(ctx, db, tables); err != nil {
+		return nil, err
+	}
+	if err := refuseIfTargetHasData(ctx, db, tables); err != nil {
+		return nil, err
+	}
+	return tables, nil
 }
 
 // refuseIfDependentViewsExist errors out, before resetDatabase drops
@@ -612,4 +686,40 @@ func refuseIfTargetHasData(
 // the server), not external input, but quoting defensively costs nothing.
 func pgQuoteIdentifier(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// pgScope bounds the whole-database operations of a store to its own
+// schemas. The consensus schema of an adopted IndexerDB shares the database
+// with it: the consensus store covers only that schema, and the IndexerDB
+// every schema except the consensus ones, so neither backs up, restores or
+// resets the other.
+type pgScope struct {
+	// schema is the consensus schema, empty for a store on its configured
+	// schema.
+	schema string
+}
+
+// predicate returns an SQL condition on column, a schema-name column,
+// selecting the schemas in scope.
+func (p pgScope) predicate(column string) string {
+	if p.schema != "" {
+		return column + " = '" + strings.ReplaceAll(p.schema, "'", "''") + "'"
+	}
+	return column + ` NOT LIKE '` +
+		strings.ReplaceAll(metadata.CoreNamespacePrefix, "_", `\_`) + `%'`
+}
+
+// negated returns an SQL condition on column selecting the consensus
+// schemas a scope without a schema leaves out.
+func (p pgScope) negated(column string) string {
+	return column + ` LIKE '` +
+		strings.ReplaceAll(metadata.CoreNamespacePrefix, "_", `\_`) + `%'`
+}
+
+// dumpArgs returns the pg_dump arguments selecting the schemas in scope.
+func (p pgScope) dumpArgs() []string {
+	if p.schema != "" {
+		return []string{"--schema=" + p.schema}
+	}
+	return []string{"--exclude-schema=" + metadata.CoreNamespacePrefix + "*"}
 }

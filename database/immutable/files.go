@@ -143,3 +143,37 @@ func unshareChunk(s *Store, num uint64) error {
 	}
 	return nil
 }
+
+// RemoveChunksBefore removes every chunk file whose number is below num.
+// Missing files are ignored, making a partially completed removal safe to
+// retry. The caller must serialize removal with readers and writers.
+func RemoveChunksBefore(dir string, num uint64) error {
+	files, err := ListFiles(dir)
+	if err != nil {
+		return fmt.Errorf("immutable store: list files to remove: %w", err)
+	}
+	var (
+		changed   bool
+		removeErr error
+	)
+	for _, file := range files {
+		if file.Chunk >= num {
+			continue
+		}
+		err := os.Remove(filepath.Join(dir, file.Name))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			removeErr = errors.Join(removeErr, fmt.Errorf(
+				"immutable store: remove %s: %w", file.Name, err,
+			))
+			continue
+		}
+		changed = true
+	}
+	if changed {
+		removeErr = errors.Join(removeErr, fsyncdir.Sync(dir))
+	}
+	return removeErr
+}

@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/apiready"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/storageadopt"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/plugin"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -53,8 +54,8 @@ func (n *Node) indexerSlotTime(slot uint64) (time.Time, error) {
 	return ls.SlotToTime(slot)
 }
 
-// apiDatabase is the database API readers use: the IndexerDB on the split
-// layout, the consensus database otherwise.
+// apiDatabase is the database API readers use: the IndexerDB on an API node,
+// the consensus database on a core node.
 func (n *Node) apiDatabase() *database.Database {
 	if n.indexerDB != nil {
 		return n.indexerDB
@@ -62,8 +63,8 @@ func (n *Node) apiDatabase() *database.Database {
 	return n.db
 }
 
-// apiReadiness gates IndexerDB-backed API routes on the split layout and is
-// nil, serving everything, on the shared one.
+// apiReadiness gates IndexerDB-backed API routes and is nil, serving
+// everything, on a core node, which has no IndexerDB.
 func (n *Node) apiReadiness() apiready.Check {
 	store := n.indexerStore
 	if store == nil {
@@ -74,22 +75,30 @@ func (n *Node) apiReadiness() apiready.Check {
 	}
 }
 
-// apiStorageMode is the storage mode the API servers and indexers gate on. On
-// the split layout the consensus store runs in core mode while the IndexerDB
-// serves the APIs, so it reports API there.
+// apiStorageMode is the storage mode the API servers and indexers gate on.
+// The consensus store always runs in core mode; an API node serves the APIs
+// from its IndexerDB.
 func (n *Node) apiStorageMode() StorageMode {
 	if n.splitIndexer() {
 		return StorageModeAPI
 	}
-	return n.config.storageMode
+	return StorageModeCore
 }
 
 func (n *Node) splitIndexer() bool {
-	return n.config.indexerLayout == internalconfig.IndexerLayoutSplit
+	return n.config.splitIndexer
+}
+
+// indexerLayout is the layout recorded in the database's node settings.
+func (n *Node) indexerLayout() string {
+	if n.storageSelections().SplitIndexer {
+		return internalconfig.IndexerLayoutSplit
+	}
+	return internalconfig.IndexerLayoutShared
 }
 
 // openIndexerWriter opens the IndexerDB beside the consensus database and
-// builds the writer that fills it. It does nothing on the shared layout.
+// builds the writer that fills it. It does nothing on a core node.
 func (n *Node) openIndexerWriter(ctx context.Context) error {
 	if !n.splitIndexer() {
 		return nil
@@ -126,7 +135,7 @@ func (n *Node) buildIndexerWriter(
 ) (*database.Database, IndexerWriter, error) {
 	if n.config.indexerWriterFactory == nil {
 		return nil, nil, errors.New(
-			"indexer.layout split has no indexer writer configured",
+			"API storage mode has no indexer writer configured",
 		)
 	}
 	deps, err := n.storageDependencies(n.config.dataDir)
@@ -135,7 +144,6 @@ func (n *Node) buildIndexerWriter(
 	}
 	deps.PromRegistry = n.config.promRegistry
 	selections := n.storageSelections()
-	selections.IndexerMetadataConfig = n.config.indexerMetadataConfig
 	db, err := internalplugins.OpenIndexerDatabase(
 		ctx, host, consensus, n.databaseConfig(), selections, deps,
 	)
@@ -173,7 +181,7 @@ func (n *Node) buildIndexerWriter(
 // blocks being removed so the writer finds exact parents. It runs before the
 // ledger truncates: a crash between the two leaves the IndexerDB tip at or
 // below the ledger's, and the writer indexes the difference again. It
-// does nothing on the shared layout.
+// does nothing on a core node.
 func (n *Node) rollbackIndexerForTruncate(
 	ctx context.Context,
 	ledgerDB *database.Database,
@@ -208,8 +216,8 @@ func (n *Node) rollbackIndexerForTruncate(
 	return nil
 }
 
-// startIndexerWriter starts the writer and wakes it on every ledger.tip
-// event. It runs after the ledger started so the writer sees the tip the
+// startIndexerWriter starts the writer and wakes it on ledger tip and reward
+// fact events. It runs after the ledger started so the writer sees the tip the
 // ledger recovered to.
 func (n *Node) startIndexerWriter(ctx context.Context) error {
 	if n.indexerWriter == nil {
@@ -223,6 +231,10 @@ func (n *Node) startIndexerWriter(ctx context.Context) error {
 	writer := n.indexerWriter
 	n.indexerWakeSub = n.eventBus.SubscribeFunc(
 		ledger.TipEventType,
+		func(event.Event) { writer.Wake() },
+	)
+	n.indexerFactsSub = n.eventBus.SubscribeFunc(
+		ledger.RewardFactsEventType,
 		func(event.Event) { writer.Wake() },
 	)
 	writer.Wake()
@@ -239,6 +251,10 @@ func (n *Node) stopIndexerWriter(ctx context.Context) error {
 	if n.indexerWakeSub != 0 {
 		n.eventBus.Unsubscribe(ledger.TipEventType, n.indexerWakeSub)
 		n.indexerWakeSub = 0
+	}
+	if n.indexerFactsSub != 0 {
+		n.eventBus.Unsubscribe(ledger.RewardFactsEventType, n.indexerFactsSub)
+		n.indexerFactsSub = 0
 	}
 	var err error
 	if stopErr := n.indexerWriter.Stop(ctx); stopErr != nil {
@@ -261,38 +277,29 @@ func (n *Node) closeIndexerDatabase() error {
 	return nil
 }
 
-// meshLedgerState is the ledger state the Mesh server reads. On the split
-// layout its account endpoints read the UTxO set from the IndexerDB, which
-// holds it for the APIs, and not from the consensus store, which keeps only
-// what validation needs.
+// meshLedgerState is the ledger state the Mesh server reads. Its account
+// endpoints read the UTxO set from the IndexerDB, which holds it for the
+// APIs, and not from the consensus store, which keeps only what validation
+// needs.
 func (n *Node) meshLedgerState() mesh.MeshLedgerState {
-	if n.indexerDB == nil {
-		return n.ledgerState
-	}
 	return &indexerMeshLedger{
 		LedgerState: n.ledgerState,
 		db:          n.indexerDB,
 	}
 }
 
-// meshChain is the chain whose tip the Mesh server reports. On the split
-// layout it is the IndexerDB's tip: the ledger's tip is ahead of the rows the
-// Mesh answers are built from.
+// meshChain is the chain whose tip the Mesh server reports: the IndexerDB's
+// tip, since the ledger's tip is ahead of the rows the Mesh answers are built
+// from.
 func (n *Node) meshChain() mesh.MeshChain {
-	if n.indexerStore == nil {
-		return n.ledgerState.Chain()
-	}
 	return &indexerMeshChain{store: n.indexerStore}
 }
 
-// meshDatabase is the block and transaction store the Mesh server reads. On
-// the split layout blocks above the IndexerDB's tip are hidden, since their
-// transactions are not indexed yet.
+// meshDatabase is the block and transaction store the Mesh server reads.
+// Blocks above the IndexerDB's tip are hidden, since their transactions are
+// not indexed yet.
 func (n *Node) meshDatabase() mesh.MeshDatabase {
-	db := mesh.NewMeshDatabase(n.apiDatabase())
-	if n.indexerStore == nil {
-		return db
-	}
+	db := mesh.NewMeshDatabase(n.indexerDB)
 	return mesh.NewBoundedDatabase(db, (&indexerMeshChain{
 		store: n.indexerStore,
 	}).tip)
@@ -355,69 +362,32 @@ func (m *indexerMeshLedger) UtxoBalanceByAddressAtSlot(
 	return m.db.UtxoBalanceByAddressAtSlot(ctx, addr, slot, txn)
 }
 
-// utxorpcQueryDatabase is the store UTxO RPC queries read: the IndexerDB on
-// the split layout, nil (the ledger) otherwise.
+// utxorpcQueryDatabase is the store UTxO RPC queries read: the IndexerDB.
 func (n *Node) utxorpcQueryDatabase() utxorpc.QueryDatabase {
-	if n.indexerStore == nil {
+	return utxorpc.NewIndexerQueryDatabase(
+		n.indexerDB, n.indexerStore, n.apiReadiness(),
+	)
+}
+
+// checkServerAdopted refuses a PostgreSQL or MySQL API store a release
+// without the split layout wrote and startup has not adopted. The dingo
+// command adopts it before any store opens; Run alone does not.
+func (n *Node) checkServerAdopted(
+	ctx context.Context,
+	deps internalplugins.StorageDependencies,
+) (err error) {
+	selection := n.config.pluginSelections[plugin.CapabilityStorageMetadata]
+	if selection.Provider != "postgres" && selection.Provider != "mysql" {
 		return nil
 	}
-	return &indexerQueryDatabase{
-		db:    n.indexerDB,
-		store: n.indexerStore,
-		ready: n.apiReadiness(),
-	}
-}
-
-// indexerQueryDatabase reads UTxOs, datums and transactions from the
-// IndexerDB and reports its tip.
-type indexerQueryDatabase struct {
-	db    *database.Database
-	store *indexerdb.Store
-	ready apiready.Check
-}
-
-func (q *indexerQueryDatabase) Datums(
-	ctx context.Context,
-	hashes [][]byte,
-) ([]*models.Datum, error) {
-	return q.db.GetDatums(ctx, hashes)
-}
-
-func (q *indexerQueryDatabase) TransactionByHash(
-	ctx context.Context,
-	hash []byte,
-) (*models.Transaction, error) {
-	return q.db.GetTransactionByHash(ctx, hash, nil)
-}
-
-func (q *indexerQueryDatabase) UtxosByRefsBounded(
-	ctx context.Context,
-	refs []models.UtxoId,
-	maxBytes int64,
-) ([]models.Utxo, error) {
-	return q.db.UtxosByRefsBounded(ctx, refs, maxBytes, nil)
-}
-
-func (q *indexerQueryDatabase) UtxosByAddressBoundedPage(
-	ctx context.Context,
-	query *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-) (models.UtxoAddressPage, error) {
-	return q.db.UtxosByAddressBoundedPage(ctx, query, maxCandidates, maxBytes)
-}
-
-func (q *indexerQueryDatabase) Tip() (ochainsync.Tip, error) {
-	tip, err := q.store.Tip(nil)
+	host, err := internalplugins.NewHost()
 	if err != nil {
-		return ochainsync.Tip{}, err
+		return err
 	}
-	return ochainsync.Tip{
-		Point:       ocommon.NewPoint(tip.Slot, tip.Hash),
-		BlockNumber: tip.BlockNumber,
-	}, nil
-}
-
-func (q *indexerQueryDatabase) Ready(kind indexerdb.Kind) (bool, error) {
-	return q.ready(kind)
+	defer func() {
+		err = errors.Join(err, host.Stop(context.WithoutCancel(ctx)))
+	}()
+	return storageadopt.CheckServerAdopted(
+		ctx, host, selection, deps.DataDir, deps.GenesisStakingEmpty,
+	)
 }

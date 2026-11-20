@@ -47,7 +47,13 @@ func TestExactAddressCursorBudgetAndResume(t *testing.T) {
 		matchedRows = 8
 		pageLimit   = 5
 	)
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	consensus, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+	db, err := dbtest.NewIndexerDatabase(
+		t, consensus, dbtest.IndexerOptions{},
+	)
 	require.NoError(t, err)
 	payment := bytes.Repeat([]byte{0x45}, 28)
 	enterprise, err := lcommon.NewAddressFromParts(
@@ -82,7 +88,7 @@ func TestExactAddressCursorBudgetAndResume(t *testing.T) {
 			binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
 			if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
 				TxId: txID, PaymentKey: payment, StakingKey: stake,
-				AddedSlot: uint64(i + 1), Amount: 1000000,
+				AddedSlot: uint64(i + 1), Amount: 1000000, Cbor: raw,
 			}); err != nil {
 				return err
 			}
@@ -203,9 +209,12 @@ func TestExactAddressInterruptedPageResumes(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			db, err := dbtest.NewDatabase(
-				t,
-				&database.Config{DataDir: t.TempDir()},
+			consensus, err := dbtest.NewDatabase(
+				t, &database.Config{DataDir: t.TempDir()},
+			)
+			require.NoError(t, err)
+			db, err := dbtest.NewIndexerDatabase(
+				t, consensus, dbtest.IndexerOptions{},
 			)
 			require.NoError(t, err)
 			payment := bytes.Repeat([]byte{0x67}, 28)
@@ -228,7 +237,7 @@ func TestExactAddressInterruptedPageResumes(t *testing.T) {
 				db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
 					for i := range 3 {
 						id := bytes.Repeat([]byte{byte(i + 1)}, 32)
-						if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{TxId: id, PaymentKey: payment, AddedSlot: uint64(i + 1), Amount: 1000000}); err != nil {
+						if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{TxId: id, PaymentKey: payment, AddedSlot: uint64(i + 1), Amount: 1000000, Cbor: raw}); err != nil {
 							return err
 						}
 						if err := db.Blob().SetUtxo(txn.Blob(), id, 0, raw); err != nil {
@@ -309,7 +318,13 @@ func TestExactAddressInterruptedPageResumes(t *testing.T) {
 
 func TestExactAddressDeadlineInterruptsSQL(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	consensus, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+	db, err := dbtest.NewIndexerDatabase(
+		t, consensus, dbtest.IndexerOptions{},
+	)
 	require.NoError(t, err)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -352,7 +367,13 @@ func TestExactAddressDeadlineInterruptsSQL(t *testing.T) {
 
 func TestExactAddressFiltersBeforePagination(t *testing.T) {
 	t.Parallel()
-	nodeDB, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	consensus, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+	nodeDB, err := dbtest.NewIndexerDatabase(
+		t, consensus, dbtest.IndexerOptions{},
+	)
 	require.NoError(t, err)
 	hash := bytes.Repeat([]byte{0x44}, 28)
 	var enterprise lcommon.Address
@@ -383,6 +404,7 @@ func TestExactAddressFiltersBeforePagination(t *testing.T) {
 			PaymentScript: kind == lcommon.AddressTypeScriptNone,
 			AddedSlot:     uint64(i + 1),
 			Amount:        1000000,
+			Cbor:          raw,
 		}
 		if kind == lcommon.AddressTypeKeyKey {
 			model.StakingKey = hash
@@ -439,7 +461,7 @@ func TestExactAddressFiltersBeforePagination(t *testing.T) {
 		txHash := bytes.Repeat([]byte{byte(i + 5)}, 32)
 		require.NoError(t, nodeDB.CreateUtxo(t.Context(), nil, &models.Utxo{
 			TxId: txHash, PaymentKey: hash, StakingKey: hash,
-			AddedSlot: uint64(i + 5), Amount: 1000000,
+			AddedSlot: uint64(i + 5), Amount: 1000000, Cbor: raw,
 		}))
 		require.NoError(
 			t,

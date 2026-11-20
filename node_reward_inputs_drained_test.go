@@ -87,6 +87,7 @@ func TestBackfillRewardLiveStakeChecksDrainedSnapshotProvenanceInTheSet(
 				},
 			}
 
+			n.utxoSetReconciled = true
 			err = n.backfillRewardLiveStake(t.Context())
 
 			require.Empty(t, guard.Trips())

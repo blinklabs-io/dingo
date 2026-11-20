@@ -25,19 +25,20 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
-// pv10ReferenceScriptState applies Conway's pre-PV11 restricted-map behavior
-// only to aggregate block reference-script accounting. A missing reference
-// input contributes zero to that accounting; transaction validation still
+// aggregateReferenceScriptState applies the reference ledger's restricted-map
+// behavior only to aggregate block reference-script accounting. An input that
+// is absent from this view contributes zero; transaction validation still
 // resolves it through the original state and owns validity.
-type pv10ReferenceScriptState struct {
+type aggregateReferenceScriptState struct {
 	state lcommon.UtxoState
 }
 
-func (s pv10ReferenceScriptState) UtxoById(
+func (s aggregateReferenceScriptState) UtxoById(
 	input lcommon.TransactionInput,
 ) (lcommon.Utxo, error) {
 	utxo, err := s.state.UtxoById(input)
-	if errors.Is(err, database.ErrUtxoNotFound) {
+	if errors.Is(err, database.ErrUtxoNotFound) ||
+		errors.Is(err, ErrUtxoAlreadyConsumed) {
 		return lcommon.Utxo{}, nil
 	}
 	return utxo, err
@@ -87,15 +88,14 @@ func validateBlockReferenceScripts(
 	pp lcommon.ProtocolParameters,
 	state lcommon.UtxoState,
 ) error {
+	if state != nil {
+		state = aggregateReferenceScriptState{state: state}
+	}
 	switch b := block.(type) {
 	case *conway.ConwayBlock:
 		conwayPParams, ok := pp.(*conway.ConwayProtocolParameters)
 		if !ok || conwayPParams == nil {
 			return errors.New("pparams are not expected type")
-		}
-		if state != nil &&
-			conwayPParams.ProtocolVersion.Major <= lcommon.ProtocolVersionPlomin {
-			state = pv10ReferenceScriptState{state: state}
 		}
 		return conway.ValidateRefScriptSizePerBlock(b, pp, state)
 	case *dijkstra.DijkstraBlock:

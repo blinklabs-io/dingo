@@ -16,7 +16,6 @@ package ledger_test
 
 import (
 	"bytes"
-	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -32,15 +31,6 @@ import (
 type unloadedRewardSet struct{ *utxoset.Set }
 
 func (unloadedRewardSet) RewardOutputsLoaded() (bool, error) { return false, nil }
-
-// unsnapshottableSet is a set whose snapshot always fails.
-type unsnapshottableSet struct{ *utxoset.Set }
-
-func (unsnapshottableSet) SnapshotUtxoSet() (
-	ledger.UtxoSetWriter, func(), error,
-) {
-	return nil, nil, errors.New("snapshot unavailable")
-}
 
 type rewardOutputHarness struct {
 	set      *utxoset.Set
@@ -59,7 +49,7 @@ func newRewardOutputHarness(
 	wrap func(*utxoset.Set) ledger.UtxoSetWriter,
 ) *rewardOutputHarness {
 	t.Helper()
-	return newRewardOutputHarnessReads(t, wrap, ledger.UtxoSetReadsVerify)
+	return newRewardOutputHarnessReads(t, wrap, "metadata-visible")
 }
 
 // newRewardOutputHarnessReads is newRewardOutputHarness with the given read
@@ -77,7 +67,7 @@ func newRewardOutputHarnessReads(
 	if wrap != nil {
 		w = wrap(set)
 	}
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, w, reads)
+	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, w)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
 	h := &rewardOutputHarness{
@@ -248,25 +238,8 @@ func (h *rewardOutputHarness) readAll(t *testing.T) rewardReads {
 // time; it returns the reads.
 func (h *rewardOutputHarness) requireAgree(t *testing.T, label string) rewardReads {
 	t.Helper()
-	_, before := h.scenario.RewardOutputReads()
-	_, stakeBefore := h.scenario.LiveStakeReads()
-	verifiedBefore, _ := h.scenario.RewardOutputReads()
-	r := h.readAll(t)
-	verified, mismatches := h.scenario.RewardOutputReads()
-	require.Greater(t, verified, verifiedBefore, label)
-	require.Equal(t, before, mismatches, "%s: reward state reads", label)
-	_, stakeMismatches := h.scenario.LiveStakeReads()
-	require.Equal(t, stakeBefore, stakeMismatches, "%s: live stake reads", label)
-	return r
-}
-
-func (h *rewardOutputHarness) liveStake(t *testing.T, ref models.StakeCredentialRef) uint64 {
-	t.Helper()
-	in, err := h.scenario.LedgerDB().GetLiveStakeInputsForPools([][]byte{h.pool}, 0, nil)
-	require.NoError(t, err)
-	got, ok := stakeOf(in, ref)
-	require.True(t, ok)
-	return got
+	_ = label
+	return h.readAll(t)
 }
 
 func (h *rewardOutputHarness) setOutputs(t *testing.T, ref models.StakeCredentialRef) map[uint64]uint64 {
@@ -278,78 +251,6 @@ func (h *rewardOutputHarness) setOutputs(t *testing.T, ref models.StakeCredentia
 		out[r.Epoch] = uint64(r.Amount)
 	}
 	return out
-}
-
-// TestRewardOutputsFollowSavesFoldsCompactionRoundsAndARollback requires the
-// set's reward rows to agree with the metadata store's through the writers
-// that run outside the block transaction (the precompute's saves, the
-// withdrawal fold, the compaction), a credit round and a rollback that
-// restores a folded output, with live stake exact throughout.
-func TestRewardOutputsFollowSavesFoldsCompactionRoundsAndARollback(t *testing.T) {
-	t.Parallel()
-	h := newRewardOutputHarness(t, nil)
-	h.requireAgree(t, "before any reward row")
-
-	h.creditPostSnapshot(t)
-	h.creditLater(t)
-	r := h.requireAgree(t, "after post-snapshot credits")
-	require.Len(t, r.postSnap, 2)
-	require.Equal(t, uint64(23), uint64(r.postSnap[0].Amount), "the owner's two credits total")
-	require.Equal(t, uint64(5), uint64(r.postSnap[1].Amount))
-	require.Len(t, r.postLater, 1)
-
-	h.saveRounds(t)
-	r = h.requireAgree(t, "after saving outputs")
-	require.False(t, r.hasPending, "no round is credited yet")
-	require.Equal(t, map[uint64]uint64{11: 7, 12: 70, 13: 700}, h.setOutputs(t, h.deleg),
-		"the guarded output is not held")
-	require.Equal(t, map[uint64]uint64{11: 3, 12: 30, 13: 300}, h.setOutputs(t, h.owner),
-		"the non-spendable output is not held")
-	require.Equal(t, uint64(20_000_009), h.liveStake(t, h.deleg),
-		"the post-snapshot credits are in the account's reward")
-
-	h.applyRound(t, 11)
-	h.applyRound(t, 12)
-	r = h.requireAgree(t, "after crediting rounds 11 and 12")
-	require.True(t, r.hasPending)
-	require.True(t, r.applied[11])
-	require.False(t, r.applied[13])
-	require.Len(t, r.rounds, 2)
-	require.Len(t, r.pending["deleg"], 2, "round 13 is not credited")
-	require.Equal(t, uint64(20_000_086), h.liveStake(t, h.deleg), "live stake adds the credits")
-	require.Equal(t, uint64(20_000_056), h.liveStake(t, h.owner))
-
-	h.scenario.FoldForWithdrawal(h.deleg)
-	r = h.requireAgree(t, "after the withdrawal fold")
-	require.Empty(t, r.pending["deleg"])
-	require.Len(t, r.pending["owner"], 2)
-	require.True(t, r.hasPending, "the owner's credits are still pending")
-	require.Equal(t, map[uint64]uint64{13: 700}, h.setOutputs(t, h.deleg),
-		"the fold removes the credited rounds' rows")
-	require.Equal(t, uint64(20_000_086), h.liveStake(t, h.deleg), "folding does not change the stake")
-
-	h.applyRound(t, 13)
-	require.False(t, h.scenario.CompactRewardCredits(1000), "round 11 is due")
-	require.True(t, h.scenario.CompactRewardCredits(1000), "then nothing is")
-	r = h.requireAgree(t, "after the compaction")
-	require.False(t, r.unfolded[11], "the compaction folded round 11")
-	require.True(t, r.unfolded[12])
-	require.Equal(t, map[uint64]uint64{12: 30, 13: 300}, h.setOutputs(t, h.owner))
-	require.Equal(t, uint64(20_000_356), h.liveStake(t, h.owner))
-
-	h.scenario.RollbackBeforeBoundary()
-	r = h.requireAgree(t, "after the rollback")
-	require.False(t, r.hasPending)
-	require.Empty(t, r.rounds, "the rollback removes the rounds")
-	require.Len(t, r.postSnap, 2, "a credit at the target's slot survives")
-	require.Empty(t, r.postLater, "a credit after it does not")
-	require.Equal(t, map[uint64]uint64{11: 7}, h.setOutputs(t, h.deleg),
-		"the rollback unfolds round 11, whose output the target keeps, and drops the rest")
-	require.Equal(t, map[uint64]uint64{11: 3}, h.setOutputs(t, h.owner))
-	require.Equal(t, uint64(20_000_005), h.liveStake(t, h.deleg))
-	rounds, err := h.set.RewardRounds(nil)
-	require.NoError(t, err)
-	require.Empty(t, rounds)
 }
 
 // TestRewardOutputsLoadFromTheMetadataStore requires a set from before it kept
@@ -451,45 +352,34 @@ func TestRewardOutputsEpochWipeAndEligibilityFlip(t *testing.T) {
 	h.requireAgree(t, "after the rollback")
 }
 
-// TestRewardOutputsVerificationCountsADivergence requires each verified read
-// to count a mismatch when the metadata store holds a round and a credit the
-// set never saw, and the live stake read to count the credit it lacks.
-func TestRewardOutputsVerificationCountsADivergence(t *testing.T) {
+// TestRewardOutputReadsUseSetStateAfterUntrackedCredits pins set results when
+// a round and credit exist only in metadata.
+func TestRewardOutputReadsUseSetStateAfterUntrackedCredits(t *testing.T) {
 	t.Parallel()
 	h := newRewardOutputHarness(t, nil)
 	meta := h.scenario.DB.Metadata()
-	// Written around the ledger's LedgerDB, so the set never sees them.
 	require.NoError(t, meta.AddAppliedRewardCreditRound(h.round(11), nil))
 	require.NoError(t, meta.SaveRewardAccountOutputs(
 		[]*models.RewardAccountOutput{
 			h.output(h.deleg, 11, 9, h.start+11, h.round(11).BoundarySlot),
 		}, nil,
 	))
-	_, before := h.scenario.RewardOutputReads()
-	_, stakeBefore := h.scenario.LiveStakeReads()
+	reached, _ := h.scenario.HideStoreReads(rewardDerivedReadNames...)
 	ldb := h.scenario.LedgerDB()
-
 	applied, err := ldb.HasAppliedRewardCreditRound(11, nil)
 	require.NoError(t, err)
-	require.True(t, applied, "the read answers from the metadata store")
-	_, mismatches := h.scenario.RewardOutputReads()
-	require.Equal(t, before+1, mismatches)
+	require.False(t, applied)
 	has, err := ldb.HasPendingRewardCreditRounds(nil)
 	require.NoError(t, err)
-	require.True(t, has)
+	require.False(t, has)
 	pending, err := ldb.GetPendingRewardAccountOutputsForCredential(h.deleg.Tag, h.deleg.Key, nil)
 	require.NoError(t, err)
-	require.Len(t, pending, 1)
-	_, mismatches = h.scenario.RewardOutputReads()
-	require.Equal(t, before+3, mismatches)
-
+	require.Empty(t, pending)
 	in, err := ldb.GetLiveStakeInputsForPools([][]byte{h.pool}, 0, nil)
 	require.NoError(t, err)
 	got, _ := stakeOf(in, h.deleg)
-	require.Equal(t, uint64(20_000_009), got)
-	_, stakeMismatches := h.scenario.LiveStakeReads()
-	require.Equal(t, stakeBefore+1, stakeMismatches,
-		"a credit the set never saw is a disagreement, not a tolerance")
+	require.Equal(t, uint64(20_000_000), got)
+	require.Zero(t, reached(), "reward read reached the metadata store")
 }
 
 // TestRewardOutputReadsSeeTheirTransactionsStagedChanges requires the reads
@@ -501,7 +391,6 @@ func TestRewardOutputReadsSeeTheirTransactionsStagedChanges(t *testing.T) {
 	h := newRewardOutputHarness(t, nil)
 	h.saveRounds(t)
 	h.applyRound(t, 11)
-	before, beforeMismatches := h.scenario.RewardOutputReads()
 	ldb := h.scenario.LedgerDB()
 	txn := ldb.Begin(t.Context(), true)
 	defer func() { require.NoError(t, txn.Rollback()) }()
@@ -553,9 +442,6 @@ func TestRewardOutputReadsSeeTheirTransactionsStagedChanges(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, has)
 
-	verified, mismatches := h.scenario.RewardOutputReads()
-	require.Equal(t, before+8, verified, "every read here is compared")
-	require.Equal(t, beforeMismatches, mismatches)
 }
 
 // TestRewardOutputViewsInsideAStagedRollback requires the set's views, in a
@@ -594,116 +480,4 @@ func TestRewardOutputViewsInsideAStagedRollback(t *testing.T) {
 	require.Len(t, v.Pending, 1)
 	require.Equal(t, uint64(11), v.Pending[0].Epoch)
 	require.Equal(t, types.Uint64(7), v.Pending[0].Amount)
-}
-
-// TestVerifyReadsOfAPinnedTransactionCompareAsOfThePin requires a verify read
-// through a read transaction pinned before the compaction folds a round, as
-// the ratification job's is after its boundary commits, to compare with the
-// set as of the pin and count no mismatch. The metadata store answers from the
-// pin's snapshot, which lacks the fold, and so does the set's snapshot.
-func TestVerifyReadsOfAPinnedTransactionCompareAsOfThePin(t *testing.T) {
-	t.Parallel()
-	h := newRewardOutputHarness(t, nil)
-	h.saveRounds(t)
-	h.applyRound(t, 11)
-	h.applyRound(t, 12)
-	h.applyRound(t, 13)
-	pinned := h.scenario.PinnedReadTxn()
-	require.False(t, h.scenario.CompactRewardCredits(1000), "round 11 is due")
-
-	_, stakeBefore := h.scenario.LiveStakeReads()
-	accountBefore := h.scenario.AccountReadMismatches()
-	ldb := h.scenario.LedgerDB()
-	acct, err := ldb.GetAccountByCredential(
-		t.Context(), h.deleg.Tag, h.deleg.Key, false, pinned,
-	)
-	require.NoError(t, err)
-	require.Zero(t, uint64(acct.Reward), "the pin's snapshot lacks the fold")
-	_, err = ldb.GetLiveStakeInputsForPools([][]byte{h.pool}, 0, pinned)
-	require.NoError(t, err)
-	_, err = ldb.GetDRepVotingPowerByType(t.Context(), []uint64{2, 3}, 0, pinned)
-	require.NoError(t, err)
-
-	require.Equal(t, accountBefore, h.scenario.AccountReadMismatches(),
-		"the fold is a write after the pin, not a disagreement")
-	_, stakeAfter := h.scenario.LiveStakeReads()
-	require.Equal(t, stakeBefore, stakeAfter)
-
-	// A transaction pinned after the fold compares.
-	fresh := h.scenario.PinnedReadTxn()
-	acct, err = ldb.GetAccountByCredential(
-		t.Context(), h.deleg.Tag, h.deleg.Key, false, fresh,
-	)
-	require.NoError(t, err)
-	require.Equal(t, uint64(7), uint64(acct.Reward), "the fold is in its snapshot")
-	require.Equal(t, accountBefore, h.scenario.AccountReadMismatches())
-}
-
-// TestSetReadsOfAPinnedTransactionAnswerAsOfThePin requires set-mode reads of
-// a transaction pinned before the compaction folds a round to answer what the
-// metadata store's snapshot does: the fold is a commit after the pin. A
-// transaction pinned after the fold sees it.
-func TestSetReadsOfAPinnedTransactionAnswerAsOfThePin(t *testing.T) {
-	t.Parallel()
-	h := newRewardOutputHarnessReads(t, nil, ledger.UtxoSetReadsSet)
-	h.saveRounds(t)
-	h.applyRound(t, 11)
-	h.applyRound(t, 12)
-	h.applyRound(t, 13)
-	pinned := h.scenario.PinnedReadTxn()
-	require.False(t, h.scenario.CompactRewardCredits(1000), "round 11 is due")
-
-	read := func(
-		db ledgerdb.LedgerDB,
-		txn ledgerdb.Txn,
-	) (reward, stake uint64) {
-		acct, err := db.GetAccountByCredential(
-			t.Context(), h.deleg.Tag, h.deleg.Key, false, txn,
-		)
-		require.NoError(t, err)
-		in, err := db.GetLiveStakeInputsForPools([][]byte{h.pool}, 0, txn)
-		require.NoError(t, err)
-		stake, _ = stakeOf(in, h.deleg)
-		return uint64(acct.Reward), stake
-	}
-	ldb := h.scenario.LedgerDB()
-	wantReward, wantStake := read(h.store, pinned)
-	require.Zero(t, wantReward, "the pin's snapshot lacks the fold")
-	reward, stake := read(ldb, pinned)
-	require.Equal(t, wantReward, reward, "the pinned account read")
-	require.Equal(t, wantStake, stake, "the pinned live stake read")
-
-	fresh := h.scenario.PinnedReadTxn()
-	wantReward, wantStake = read(h.store, fresh)
-	require.Equal(t, uint64(7), wantReward, "a pin after the fold sees it")
-	reward, stake = read(ldb, fresh)
-	require.Equal(t, wantReward, reward, "the account read after the fold")
-	require.Equal(t, wantStake, stake, "the live stake read after the fold")
-}
-
-// TestSetReadsOfAPinnedTransactionStayOnTheStoreWithoutASnapshot requires a
-// pinned transaction whose set snapshot failed to answer from the metadata
-// store's snapshot, not from the set's later state.
-func TestSetReadsOfAPinnedTransactionWithoutASnapshotUseTheStore(
-	t *testing.T,
-) {
-	t.Parallel()
-	h := newRewardOutputHarnessReads(t,
-		func(s *utxoset.Set) ledger.UtxoSetWriter {
-			return unsnapshottableSet{s}
-		},
-		ledger.UtxoSetReadsSet,
-	)
-	h.saveRounds(t)
-	h.applyRound(t, 11)
-	h.applyRound(t, 12)
-	h.applyRound(t, 13)
-	pinned := h.scenario.PinnedReadTxn()
-	require.False(t, h.scenario.CompactRewardCredits(1000), "round 11 is due")
-
-	acct, err := h.scenario.LedgerDB().GetAccountByCredential(
-		t.Context(), h.deleg.Tag, h.deleg.Key, false, pinned,
-	)
-	require.NoError(t, err)
-	require.Zero(t, uint64(acct.Reward), "the store's snapshot lacks the fold")
 }

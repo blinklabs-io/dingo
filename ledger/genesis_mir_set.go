@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -40,9 +41,8 @@ type MIRCert struct {
 	Rewards  []models.MIRReward
 }
 
-// CertHistoryReader serves the genesis key delegations and MIR certificates
-// from a live UTxO set. Both are kept whole: header verification reads a
-// delegation as of any slot, and a certificate is one small row.
+// CertHistoryReader serves genesis key delegations from the set. MIR certificate
+// history remains in the metadata store.
 type CertHistoryReader interface {
 	// GenesisMIRLoaded reports whether the reader holds every genesis key
 	// delegation and MIR certificate up to its tip; until it does, reads
@@ -58,32 +58,30 @@ func genesisDelegationPosition(d *models.GenesisDelegation) uint64 {
 	return PoolEventPosition(d.BlockIndex, uint32(d.CertIndex)) //nolint:gosec // a transaction holds far fewer than 2^32 certificates
 }
 
-// certHistoryReader returns the set's genesis delegation and MIR reader and
-// the read mode, or UtxoSetReadsOff when these reads stay on the metadata
-// store. Certificates are staged with the account certificates, so the set
-// must follow accounts too.
+// certHistoryReader returns the set's genesis delegation and MIR reader, or
+// nil when the set cannot serve them. Certificates are staged with the
+// account certificates, so the set must follow accounts too.
 func (ls *LedgerState) certHistoryReader(
 	txn ledgerdb.Txn,
-) (CertHistoryReader, string) {
+) CertHistoryReader {
 	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
-		return nil, UtxoSetReadsOff
+		return nil
 	}
-	_, mode := ls.utxoSetReader()
-	if mode == UtxoSetReadsOff {
-		return nil, UtxoSetReadsOff
+	if _, mode := ls.utxoSetReader(); !mode {
+		return nil
 	}
 	r, ok := ls.readSet(txn).(CertHistoryReader)
 	if !ok {
-		return nil, UtxoSetReadsOff
+		return nil
 	}
 	if !ls.genesisMIRLoaded.Load() {
 		loaded, err := r.GenesisMIRLoaded()
 		if err != nil || !loaded {
-			return nil, UtxoSetReadsOff
+			return nil
 		}
 		ls.genesisMIRLoaded.Store(true)
 	}
-	return r, mode
+	return r
 }
 
 // genesisDelegationView returns every genesis key delegation as txn sees
@@ -118,38 +116,6 @@ func (ls *LedgerState) genesisDelegationView(
 			return c
 		}
 		return cmp.Compare(genesisDelegationPosition(&a), genesisDelegationPosition(&b))
-	})
-	return rows, nil
-}
-
-// mirCertView is genesisDelegationView for MIR certificates.
-func (ls *LedgerState) mirCertView(
-	r CertHistoryReader,
-	txn ledgerdb.Txn,
-) ([]MIRCert, error) {
-	rows, err := r.MIRCerts()
-	if err != nil {
-		return nil, err
-	}
-	for _, o := range ls.stagedOps(txn) {
-		if o.rollbackTo != nil {
-			to := *o.rollbackTo
-			rows = slices.DeleteFunc(rows, func(c MIRCert) bool {
-				return c.Slot > to
-			})
-		}
-		for _, c := range o.mirCerts {
-			rows = slices.DeleteFunc(rows, func(e MIRCert) bool {
-				return e.Slot == c.Slot && e.Position == c.Position
-			})
-			rows = append(rows, c)
-		}
-	}
-	slices.SortFunc(rows, func(a, b MIRCert) int {
-		if c := cmp.Compare(a.Slot, b.Slot); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.Position, b.Position)
 	})
 	return rows, nil
 }
@@ -238,80 +204,8 @@ func sameGenesisDelegations(a, b []models.GenesisDelegation) bool {
 	})
 }
 
-// sameMIREffects compares MIR effects as the consumers read them: in order,
-// with each distribution's rewards as a set, since the metadata store keeps
-// a certificate's reward map in the order Go iterated it.
-func sameMIREffects(a, b []models.MIREffect) bool {
-	return slices.EqualFunc(a, b, func(x, y models.MIREffect) bool {
-		if x.AddedSlot != y.AddedSlot || x.Pot != y.Pot ||
-			x.OtherPot != y.OtherPot || len(x.Rewards) != len(y.Rewards) {
-			return false
-		}
-		xr, yr := slices.Clone(x.Rewards), slices.Clone(y.Rewards)
-		sortMIRRewards(xr)
-		sortMIRRewards(yr)
-		return slices.EqualFunc(xr, yr, func(p, q models.MIRReward) bool {
-			if p.CredentialTag != q.CredentialTag ||
-				!bytes.Equal(p.Credential, q.Credential) {
-				return false
-			}
-			if p.Amount == nil || q.Amount == nil {
-				return p.Amount == nil && q.Amount == nil
-			}
-			return p.Amount.Cmp(q.Amount) == 0
-		})
-	})
-}
-
-func mirEffectsOf(certs []MIRCert, start, end uint64) []models.MIREffect {
-	out := []models.MIREffect{}
-	for _, c := range certs {
-		if c.Slot < start || c.Slot >= end {
-			continue
-		}
-		out = append(out, models.MIREffect{
-			AddedSlot: c.Slot,
-			Pot:       c.Pot,
-			OtherPot:  c.OtherPot,
-			Rewards:   slices.Clone(c.Rewards),
-		})
-	}
-	return out
-}
-
-func (ls *LedgerState) compareCertHistoryRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.certHistoryReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.certHistoryReadMismatches.Add(1)
-	ls.metrics.certHistoryReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set genesis delegation or MIR read differs from the metadata store",
-		"component", "ledger",
-		"read", what,
-		"set_error", setErr,
-		"mismatches", n,
-	)
-}
-
 // GetGenesisDelegationForSlot answers from the set's delegations when it
-// holds them, or compares them with the metadata store's answer in verify
-// mode: the latest delegation of the genesis key certified at least the
+// holds them: the latest delegation of the genesis key certified at least the
 // stability window before blockSlot.
 func (s stagingLedgerDB) GetGenesisDelegationForSlot(
 	genesisHash []byte,
@@ -319,13 +213,10 @@ func (s stagingLedgerDB) GetGenesisDelegationForSlot(
 	stabilityWindow uint64,
 	txn ledgerdb.Txn,
 ) (*models.GenesisDelegation, error) {
-	r, mode := s.ls.certHistoryReader(txn)
+	r := s.ls.certHistoryReader(txn)
 	if r == nil {
-		return s.LedgerDB.GetGenesisDelegationForSlot(
-			genesisHash, blockSlot, stabilityWindow, txn,
-		)
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyMIRGenesis)
 	}
-	g := s.ls.verifyGuard(txn)
 	var got *models.GenesisDelegation
 	rows, setErr := s.ls.genesisDelegationView(r, txn)
 	if setErr == nil && blockSlot >= stabilityWindow {
@@ -337,36 +228,20 @@ func (s stagingLedgerDB) GetGenesisDelegationForSlot(
 			}
 		}
 	}
-	if mode == UtxoSetReadsSet {
-		return got, setErr
-	}
-	want, err := s.LedgerDB.GetGenesisDelegationForSlot(
-		genesisHash, blockSlot, stabilityWindow, txn,
-	)
-	if err != nil {
-		return want, err
-	}
-	s.ls.compareCertHistoryRead(
-		g,
-		fmt.Sprintf("genesis delegation of %x at slot %d", genesisHash, blockSlot),
-		sameGenesisDelegation(want, got), setErr,
-	)
-	return want, nil
+	return got, setErr
 }
 
 // GetGenesisDelegationsInSlotRange answers from the set's delegations when
-// it holds them, or compares them with the metadata store's answer in verify
-// mode: every delegation certified in [fromSlot, uptoSlot].
+// it holds them: every delegation certified in [fromSlot, uptoSlot].
 func (s stagingLedgerDB) GetGenesisDelegationsInSlotRange(
 	fromSlot uint64,
 	uptoSlot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.GenesisDelegation, error) {
-	r, mode := s.ls.certHistoryReader(txn)
+	r := s.ls.certHistoryReader(txn)
 	if r == nil {
-		return s.LedgerDB.GetGenesisDelegationsInSlotRange(fromSlot, uptoSlot, txn)
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyMIRGenesis)
 	}
-	g := s.ls.verifyGuard(txn)
 	var got []models.GenesisDelegation
 	rows, setErr := s.ls.genesisDelegationView(r, txn)
 	if setErr == nil && uptoSlot >= fromSlot {
@@ -376,50 +251,14 @@ func (s stagingLedgerDB) GetGenesisDelegationsInSlotRange(
 			}
 		}
 	}
-	if mode == UtxoSetReadsSet {
-		return got, setErr
-	}
-	want, err := s.LedgerDB.GetGenesisDelegationsInSlotRange(fromSlot, uptoSlot, txn)
-	if err != nil {
-		return want, err
-	}
-	s.ls.compareCertHistoryRead(
-		g,
-		fmt.Sprintf("genesis delegations in slots [%d, %d]", fromSlot, uptoSlot),
-		sameGenesisDelegations(want, got), setErr,
-	)
-	return want, nil
+	return got, setErr
 }
 
-// GetMIRCertsInSlotRange answers from the set's MIR certificates when it
-// holds them, or compares them with the metadata store's answer in verify
-// mode: every certificate in [startSlot, endSlot), oldest first.
+// GetMIRCertsInSlotRange returns certificates in [startSlot, endSlot), oldest first.
 func (s stagingLedgerDB) GetMIRCertsInSlotRange(
 	ctx context.Context,
 	startSlot, endSlot uint64,
 	txn ledgerdb.Txn,
 ) ([]models.MIREffect, error) {
-	r, mode := s.ls.certHistoryReader(txn)
-	if r == nil {
-		return s.LedgerDB.GetMIRCertsInSlotRange(ctx, startSlot, endSlot, txn)
-	}
-	g := s.ls.verifyGuard(txn)
-	certs, setErr := s.ls.mirCertView(r, txn)
-	got := mirEffectsOf(certs, startSlot, endSlot)
-	if mode == UtxoSetReadsSet {
-		if setErr != nil {
-			return nil, setErr
-		}
-		return got, nil
-	}
-	want, err := s.LedgerDB.GetMIRCertsInSlotRange(ctx, startSlot, endSlot, txn)
-	if err != nil {
-		return want, err
-	}
-	s.ls.compareCertHistoryRead(
-		g,
-		fmt.Sprintf("MIR certificates in slots [%d, %d)", startSlot, endSlot),
-		sameMIREffects(want, got), setErr,
-	)
-	return want, nil
+	return s.LedgerDB.GetMIRCertsInSlotRange(ctx, startSlot, endSlot, txn)
 }

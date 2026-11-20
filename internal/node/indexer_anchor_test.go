@@ -15,7 +15,6 @@
 package node
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
@@ -23,7 +22,6 @@ import (
 	"io"
 	"log/slog"
 	"maps"
-	"math"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -33,14 +31,11 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/indexer"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -118,27 +113,24 @@ func (s *cancelingSource) Anchor(
 	return s.ChainSource.(indexer.AnchorChain).Anchor(ctx)
 }
 
-// anchorFixture is a split node bootstrapped the way `mithril sync` leaves
-// one: the ledger database holds the chain and the ledger state at a later
-// point than the anchor, and records the anchor with the import baseline of
-// the accounts the snapshot held there. liveAtAnchor and liveAtTip are a
-// shared-layout store's tables at the anchor and at the chain's end, which a
-// split IndexerDB must reproduce.
+// anchorFixture is a node's storage as `mithril sync` leaves it: the ledger
+// database holds the chain and, in its live UTxO set, the ledger state at a
+// later point than the anchor it records. refAtAnchor and refAtTip are the
+// tables of an IndexerDB indexed from genesis at the anchor and at the chain's
+// end, which an IndexerDB bootstrapped at the anchor must reproduce.
 type anchorFixture struct {
-	consensus    *database.Database
-	consensusRaw *sql.DB
-	indexerDB    *database.Database
-	indexerRaw   *sql.DB
-	deps         dingo.IndexerWriterDeps
-	anchor       models.Block
-	tip          ochainsync.Tip
-	liveAtAnchor map[string][]string
-	liveAtTip    map[string][]string
+	consensus   *database.Database
+	indexerDB   *database.Database
+	indexerRaw  *sql.DB
+	deps        dingo.IndexerWriterDeps
+	anchor      models.Block
+	tip         ochainsync.Tip
+	refAtAnchor map[string][]string
+	refAtTip    map[string][]string
 }
 
 // anchorSkipTables differ by construction: the IndexerDB takes the import
-// baseline from the ledger database, a store that applied the blocks live
-// holds none.
+// baseline from the ledger, one indexed from genesis holds none.
 var anchorSkipTables = []string{"account_import_baseline"}
 
 func newAnchorFixture(t *testing.T) *anchorFixture {
@@ -150,43 +142,30 @@ func newAnchorFixture(t *testing.T) *anchorFixture {
 	dirAnchor := copyImmutableChunkPrefix(t, anchorChunks)
 	dirChain := copyImmutableChunkPrefix(t, chainChunks)
 
-	// The oracle: blocks applied live to a shared-layout store, read at the
-	// anchor and again at the end of the chain.
-	live, liveRaw := newEquivalenceDB(t)
+	// The reference: a ledger database loaded to the anchor and indexed from
+	// genesis, read there and again at the end of the chain.
+	ref := newEquivalenceDB(t)
 	require.NoError(t, LoadWithDB(
-		ctx, &config.Config{Network: "preview"}, logger, dirAnchor, live,
+		ctx, equivalenceLoadConfig(), logger, dirAnchor, ref,
 	))
-	anchorTip, err := live.GetTip(nil)
+	anchorTip, err := ref.GetTip(nil)
 	require.NoError(t, err)
-	f.liveAtAnchor = dumpTables(t, liveRaw)
-	type baseline struct {
-		tag             uint8
-		key, pool, drep []byte
-		drepType        int64
-		active          bool
-	}
-	var baselines []baseline
-	rs, err := liveRaw.Query(
-		`SELECT credential_tag, staking_key, pool, drep, drep_type, active FROM account`,
-	)
-	require.NoError(t, err)
-	for rs.Next() {
-		var b baseline
-		require.NoError(
-			t,
-			rs.Scan(&b.tag, &b.key, &b.pool, &b.drep, &b.drepType, &b.active),
-		)
-		baselines = append(baselines, b)
-	}
-	require.NoError(t, rs.Err())
-	require.NoError(t, rs.Close())
+	refLedger, closeRefLedger := openFactLedger(t, ref)
+	_, refRaw := indexFromGenesis(t, ref, refLedger, nil)
+	f.refAtAnchor = dumpTables(t, refRaw)
+	closeRefLedger()
 	require.NoError(t, LoadWithDB(
-		ctx, &config.Config{Network: "preview"}, logger, dirChain, live,
+		ctx, equivalenceLoadConfig(), logger, dirChain, ref,
 	))
-	f.liveAtTip = dumpTables(t, liveRaw)
+	// A second index from genesis, not the first one followed to the tip:
+	// the rows of an epoch whose reward round completed past the anchor are
+	// then the final ones.
+	refLedger, _ = openFactLedger(t, ref)
+	_, refRaw = indexFromGenesis(t, ref, refLedger, nil)
+	f.refAtTip = dumpTables(t, refRaw)
 	for _, name := range anchorSkipTables {
-		delete(f.liveAtAnchor, name)
-		delete(f.liveAtTip, name)
+		delete(f.refAtAnchor, name)
+		delete(f.refAtTip, name)
 	}
 
 	dataDir := t.TempDir()
@@ -215,7 +194,7 @@ func newAnchorFixture(t *testing.T) *anchorFixture {
 	require.NoError(t, err)
 	f.consensus = runtime.Database
 	require.NoError(t, LoadWithDB(
-		ctx, &config.Config{Network: "preview"}, logger, dirChain, f.consensus,
+		ctx, equivalenceLoadConfig(), logger, dirChain, f.consensus,
 	))
 	f.tip, err = f.consensus.GetTip(nil)
 	require.NoError(t, err)
@@ -229,17 +208,6 @@ func newAnchorFixture(t *testing.T) *anchorFixture {
 	require.NoError(t, f.consensus.SetSyncState(
 		"mithril_ledger_hash", hex.EncodeToString(f.anchor.Hash), nil,
 	))
-	f.consensusRaw = openRaw(t, filepath.Join(dataDir, "metadata.sqlite"))
-	for _, b := range baselines {
-		_, err := f.consensusRaw.Exec(
-			`INSERT INTO account_import_baseline
-			(credential_tag, staking_key, pool, drep, drep_type, active, added_slot)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			b.tag, b.key, b.pool, b.drep, b.drepType, b.active, f.anchor.Slot,
-		)
-		require.NoError(t, err)
-	}
-
 	f.indexerDB, err = internalplugins.OpenIndexerDatabase(
 		ctx, runtime.Host, f.consensus, dbConfig, selections, deps,
 	)
@@ -265,9 +233,12 @@ func newAnchorFixture(t *testing.T) *anchorFixture {
 		cardano.EmbeddedConfigFS,
 	)
 	require.NoError(t, err)
+	// The ledger serves the fact rows and the imported state at the anchor
+	// from the live UTxO set, as it does in a node.
+	factLedger, _ := openFactLedger(t, f.consensus)
 	f.deps = dingo.IndexerWriterDeps{
-		Consensus: f.consensus, Indexer: f.indexerDB, NodeConfig: nodeCfg,
-		Logger: logger, MaxReadyLagBlocks: 10,
+		Consensus: f.consensus, FactRows: factLedger, Indexer: f.indexerDB,
+		NodeConfig: nodeCfg, Logger: logger, MaxReadyLagBlocks: 10,
 	}
 	return f
 }
@@ -307,7 +278,7 @@ func (f *anchorFixture) requireTablesAt(
 	requireSameTables(t, want, got)
 }
 
-func TestSplitMithrilBootstrapMatchesSharedLayoutAtAnchor(t *testing.T) {
+func TestSplitMithrilBootstrapMatchesAGenesisIndexAtAnchor(t *testing.T) {
 	t.Parallel()
 	f := newAnchorFixture(t)
 	ctx := context.Background()
@@ -342,9 +313,9 @@ func TestSplitMithrilBootstrapMatchesSharedLayoutAtAnchor(t *testing.T) {
 	require.True(t, ready())
 	// A reward pot dated before the anchor is copied with the rewards the
 	// ledger filled in afterwards, so the pot of an epoch whose round
-	// completed past the anchor is ahead of the shared layout's at that
+	// completed past the anchor is ahead of the reference's at that
 	// point. It is compared at the end of the chain, where both are final.
-	atAnchor := maps.Clone(f.liveAtAnchor)
+	atAnchor := maps.Clone(f.refAtAnchor)
 	delete(atAnchor, "reward_ada_pots")
 	got := dumpTables(t, f.indexerRaw)
 	for _, name := range anchorSkipTables {
@@ -353,14 +324,14 @@ func TestSplitMithrilBootstrapMatchesSharedLayoutAtAnchor(t *testing.T) {
 	delete(got, "reward_ada_pots")
 	requireSameTables(t, atAnchor, got)
 
-	// Following the ledger from the anchor reaches the shared layout's
+	// Following the ledger from the anchor reaches the reference's
 	// state at the end of the chain.
 	follow, _ := f.writer(t, nil, indexer.DefaultBatchBlocks)
 	require.NoError(t, follow.CatchUp(ctx))
 	tip, err = store.Tip(nil)
 	require.NoError(t, err)
 	require.Equal(t, f.tip.Point.Hash, tip.Hash)
-	f.requireTablesAt(t, f.liveAtTip)
+	f.requireTablesAt(t, f.refAtTip)
 }
 
 var errStopped = errors.New("stopped")
@@ -463,7 +434,7 @@ func TestSplitMithrilBootstrapResumesAfterAStopMidReplayAndMidIndexBuild(
 	require.True(t, ready)
 
 	// The result is the one an uninterrupted bootstrap reaches.
-	atAnchor := maps.Clone(f.liveAtAnchor)
+	atAnchor := maps.Clone(f.refAtAnchor)
 	delete(atAnchor, "reward_ada_pots")
 	got := dumpTables(t, f.indexerRaw)
 	for _, name := range anchorSkipTables {
@@ -544,218 +515,17 @@ func TestSplitMithrilBootstrapRefusesRowsThatDisagreeWithTheImportedState(
 	}
 }
 
-// The ledger database's core-mode sweep hard-deletes spent UTxOs, so by the
-// time the replay reaches the anchor it has lost the outputs that were live at
-// the anchor and spent since. The digest taken when the anchor was recorded
-// stands in for the ledger's set, so the sweep is not read as a mismatch.
-func TestSplitMithrilBootstrapToleratesSweptSpentOutputs(t *testing.T) {
-	t.Parallel()
-	f := newAnchorFixture(t)
-	ctx := context.Background()
-	w, store := f.writer(t, f.cappedAtAnchor(), indexer.DefaultBatchBlocks)
-	w.WithDeferredIndexes(
-		func(ctx context.Context) error {
-			NewDeferredIndexRebuilder(ctx, f.indexerDB, f.deps.Logger).Drop()
-			return nil
-		},
-		func(ctx context.Context) error {
-			return NewDeferredIndexRebuilder(
-				ctx, f.indexerDB, f.deps.Logger,
-			).BuildAll()
-		},
-	)
-	require.NoError(t, w.Prepare(ctx))
-	f.sweepSpentOutputs(t)
-
-	require.NoError(t, w.CatchUp(ctx))
-	phase, err := store.Bootstrap(nil)
-	require.NoError(t, err)
-	require.Equal(t, indexerdb.PhaseDone, phase)
-}
-
-// A row the IndexerDB lost is still caught once the ledger has swept past the
-// anchor: the comparison no longer depends on the ledger's current rows.
-func TestSplitMithrilBootstrapDetectsCorruptionAfterTheSweep(t *testing.T) {
-	t.Parallel()
-	f := newAnchorFixture(t)
-	ctx := context.Background()
-	w, store := f.writer(t, f.cappedAtAnchor(), indexer.DefaultBatchBlocks)
-	w.WithDeferredIndexes(
-		func(ctx context.Context) error {
-			NewDeferredIndexRebuilder(ctx, f.indexerDB, f.deps.Logger).Drop()
-			return nil
-		},
-		func(ctx context.Context) error {
-			if err := NewDeferredIndexRebuilder(
-				ctx, f.indexerDB, f.deps.Logger,
-			).BuildAll(); err != nil {
-				return err
-			}
-			_, err := f.indexerRaw.Exec(
-				`UPDATE utxo SET amount = '999999999' WHERE id = (SELECT MIN(id) FROM utxo WHERE deleted_slot = 0)`,
-			)
-			return err
-		},
-	)
-	require.NoError(t, w.Prepare(ctx))
-	f.sweepSpentOutputs(t)
-
-	require.ErrorIs(t, w.CatchUp(ctx), indexer.ErrAnchorMismatch)
-	phase, err := store.Bootstrap(nil)
-	require.NoError(t, err)
-	require.Equal(t, indexerdb.PhaseIndex, phase)
-}
-
-// sweepSpentOutputs removes the outputs spent after the anchor from the
-// ledger database and moves its prune floor past the anchor, as the core-mode
-// sweep does.
-func (f *anchorFixture) sweepSpentOutputs(t *testing.T) {
-	t.Helper()
-	res, err := f.consensusRaw.Exec(
-		`DELETE FROM utxo WHERE deleted_slot > ?`, f.anchor.Slot,
-	)
-	require.NoError(t, err)
-	swept, err := res.RowsAffected()
-	require.NoError(t, err)
-	require.Positive(t, swept, "the chain past the anchor must spend outputs")
-	require.NoError(t, f.consensus.SetSyncState(
-		database.ConsumedUtxoPruneFloorSyncKey,
-		strconv.FormatUint(f.tip.Point.Slot, 10), nil,
-	))
-}
-
-func TestSplitMithrilBootstrapAppliesTheImportedAccountState(t *testing.T) {
-	t.Parallel()
-	f := newAnchorFixture(t)
-	ctx := context.Background()
-
-	// An account the snapshot held on a pool other than the one its
-	// certificates delegate to (a reaped pool's delegations are cleared by a
-	// rule no certificate carries), with a balance; a later certificate then
-	// moved it to a third pool, and credits and a withdrawal were journaled
-	// since.
-	var key, replayedPool, anchorPool, laterPool []byte
-	require.NoError(t, f.consensusRaw.QueryRow(
-		`SELECT staking_key, pool FROM account ORDER BY id LIMIT 1`,
-	).Scan(&key, &replayedPool))
-	require.NoError(t, f.consensusRaw.QueryRow(
-		`SELECT pool FROM account WHERE pool != ? ORDER BY id LIMIT 1`,
-		replayedPool,
-	).Scan(&anchorPool))
-	require.NoError(t, f.consensusRaw.QueryRow(
-		`SELECT pool FROM account WHERE pool != ? AND pool != ? ORDER BY id LIMIT 1`,
-		replayedPool,
-		anchorPool,
-	).Scan(&laterPool))
-	_, err := f.consensusRaw.Exec(
-		`UPDATE account_import_baseline SET pool = ? WHERE staking_key = ?`,
-		anchorPool, key,
-	)
-	require.NoError(t, err)
-	_, err = f.consensusRaw.Exec(
-		`UPDATE account SET pool = ?, reward = '100', added_slot = ? WHERE staking_key = ?`,
-		laterPool,
-		f.tip.Point.Slot,
-		key,
-	)
-	require.NoError(t, err)
-	_, err = f.consensusRaw.Exec(
-		`INSERT INTO account_reward_delta
-		(staking_key, credential_tag, tx_hash, amount, added_slot, withdrawal, post_snapshot)
-		VALUES (?, 0, ?, '30', ?, 0, 0), (?, 0, ?, '10', ?, 1, 0)`,
-		key, []byte("credit"), f.anchor.Slot+1,
-		key, []byte("withdrawal"), f.anchor.Slot+2,
-	)
-	require.NoError(t, err)
-
-	w, _ := f.writer(t, f.cappedAtAnchor(), indexer.DefaultBatchBlocks)
-	require.NoError(t, w.CatchUp(ctx))
-	var pool []byte
-	var reward string
-	require.NoError(t, f.indexerRaw.QueryRow(
-		`SELECT pool, reward FROM account WHERE staking_key = ?`, key,
-	).Scan(&pool, &reward))
-	require.Equal(
-		t,
-		anchorPool,
-		pool,
-		"the anchor holds the snapshot's delegation, neither the replayed nor the later one",
-	)
-	require.Equal(
-		t,
-		"80",
-		reward,
-		"the anchor balance is today's 100 less the later credit of 30 plus the later withdrawal of 10",
-	)
-	var baselines int
-	require.NoError(t, f.indexerRaw.QueryRow(
-		`SELECT COUNT(*) FROM account_import_baseline WHERE staking_key = ?`,
-		key,
-	).Scan(&baselines))
-	require.Equal(t, 1, baselines)
-
-	// Past the anchor the writer reaches the ledger's later delegation.
-	follow, _ := f.writer(t, nil, indexer.DefaultBatchBlocks)
-	require.NoError(t, follow.CatchUp(ctx))
-	require.NoError(t, f.indexerRaw.QueryRow(
-		`SELECT pool FROM account WHERE staking_key = ?`, key,
-	).Scan(&pool))
-	require.Equal(t, laterPool, pool)
-}
-
-func TestSplitMithrilBootstrapRecordsCertifiedOpCertCounters(t *testing.T) {
-	t.Parallel()
-	f := newAnchorFixture(t)
-	ctx := context.Background()
-
-	// A snapshot import writes one counter per certified pool at the anchor
-	// slot. The pool below never issued a block in the fixture's chain.
-	var certified lcommon.PoolKeyHash
-	copy(certified[:], bytes.Repeat([]byte{0xC7}, len(certified)))
-	require.NoError(t, f.consensus.UpdatePoolOpCertSequence(
-		ctx, certified, 7, f.anchor.Slot, nil,
-	))
-
-	w, _ := f.writer(t, f.cappedAtAnchor(), indexer.DefaultBatchBlocks)
-	require.NoError(t, w.CatchUp(ctx))
-
-	var rows int
-	require.NoError(t, f.indexerRaw.QueryRow(
-		`SELECT COUNT(*) FROM pool_opcert_sequence WHERE pool_key_hash = ? AND slot = ?`,
-		certified[:], f.anchor.Slot,
-	).Scan(&rows))
-	require.Equal(t, 1, rows, "the certified counter is written at the anchor slot")
-
-	counts, total, err := f.indexerDB.Metadata().CountPoolBlocksInSlotRange(
-		[]lcommon.PoolKeyHash{certified}, 0, math.MaxInt64, nil,
-	)
-	require.NoError(t, err)
-	require.Zero(t, total)
-	require.Zero(t, counts[string(certified[:])], "a certified counter is not a block")
-
-	var blocks int
-	require.NoError(t, f.indexerRaw.QueryRow(
-		`SELECT COUNT(*) FROM pool_opcert_sequence WHERE pool_key_hash != ?`,
-		certified[:],
-	).Scan(&blocks))
-	require.NotZero(t, blocks, "replay writes one row per block")
-}
-
-// A ledger that drained its accounts holds neither the imported balances nor
-// the journal the anchor state is rebuilt from, so an empty IndexerDB refuses
-// the bootstrap rather than take over an empty state.
-func TestSplitMithrilBootstrapRefusesALedgerThatDrainedItsAccounts(
+// The ledger-state families live in the live UTxO set, so a writer that is not
+// given the ledger to read them through finds neither the imported balances
+// nor the journal the anchor state is rebuilt from, and an empty IndexerDB
+// refuses the bootstrap rather than take over an empty state.
+func TestSplitMithrilBootstrapRefusesAWriterWithoutTheLedgerState(
 	t *testing.T,
 ) {
 	t.Parallel()
 	f := newAnchorFixture(t)
 	ctx := context.Background()
-	require.NoError(t, f.consensus.RecordDrainedFamily(
-		ctx, nodesettings.FamilyDReps,
-	))
-	require.NoError(t, f.consensus.RecordDrainedFamily(
-		ctx, nodesettings.FamilyAccounts,
-	))
+	f.deps.FactRows = nil
 
 	w, store := f.writer(t, f.cappedAtAnchor(), indexer.DefaultBatchBlocks)
 	require.ErrorIs(t, w.Prepare(ctx), indexer.ErrAnchorUnserved)

@@ -617,11 +617,6 @@ var flagSpecs = []flagSpec{
 	),
 
 	// ImmutableDB
-	boolFlag(
-		"ImmutableDB.Enabled",
-		"immutable-db-enabled",
-		"promote block bodies older than the security parameter into chunk files",
-	),
 	intFlag(
 		"ImmutableDB.PromoteBatch",
 		"immutable-db-promote-batch",
@@ -632,22 +627,11 @@ var flagSpecs = []flagSpec{
 		"immutable-db-promote-frequency",
 		"how often block bodies are promoted to the ImmutableDB",
 	),
-	boolFlag(
-		"ImmutableDB.KeepMithrilChunks",
-		"immutable-db-keep-mithril-chunks",
-		"keep verified Mithril chunk files as the ImmutableDB instead of copying block bodies",
-	),
-	// Indexer layout
-	stringFlag(
-		"Indexer.Layout",
-		"indexer-layout",
-		"",
-		"API storage layout: shared (default) or split (separate IndexerDB filled asynchronously)",
-	),
+	// Indexer
 	uintFlag(
 		"Indexer.MaxReadyLagBlocks",
 		"indexer-max-ready-lag-blocks",
-		"blocks the IndexerDB may trail the ledger tip before current-state endpoints report not ready (split layout)",
+		"blocks the IndexerDB may trail the ledger tip before current-state endpoints report not ready",
 	),
 
 	// Koios reward-parity observer (one-off validation aid, not a
@@ -802,7 +786,11 @@ var flagSpecs = []flagSpec{
 		"max simultaneous connections per IP",
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
-	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections (0 = unlimited)"),
+	intFlag(
+		"MaxNtCConns",
+		"max-ntc-conns",
+		"max node-to-client connections (0 = unlimited)",
+	),
 	intFlag(
 		"MaxTrustedLocalNtCConns",
 		"max-trusted-local-ntc-conns",
@@ -959,46 +947,15 @@ var flagSpecs = []flagSpec{
 		"ledger-prefetch-ahead-enabled",
 		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies, for validated blocks only (not consensus-affecting; default on)",
 	),
-	boolFlag(
-		"LedgerUtxoShadow",
-		"ledger-utxo-shadow",
-		"keep a Badger copy of the live UTxO set and check it against the metadata store (experimental, diagnostic only; default off)",
-	),
-	boolFlag(
-		"LedgerUtxoBadger",
-		"ledger-utxo-badger",
-		"keep the live UTxO set in a Badger store updated synchronously after each ledger commit (experimental; default off)",
-	),
-	boolFlag(
-		"LedgerUtxoBadgerOnly",
-		"ledger-utxo-badger-only",
-		"keep the live UTxO set only in Badger, with no utxo rows in the metadata store; core mode; a database that holds its UTxO set in the metadata store is moved in place at startup (experimental; default off)",
-	),
-	boolFlag(
-		"LedgerStateSetOnly",
-		"ledger-state-set-only",
-		"make the live UTxO set the only store of the ledger state it computes, deleting the SQL rows of each family proven current in it; needs --ledger-utxo-badger-only, core mode and --ledger-utxo-reads=set (experimental; default off)",
-	),
-	boolFlag(
-		"LedgerStateVerifyBeforeDrain",
-		"ledger-state-verify-before-drain",
-		"compare each family with its SQL rows in full before deleting them (default off)",
-	),
 	intFlag(
 		"LedgerUtxoCheckpointEpochs",
 		"ledger-utxo-checkpoint-epochs",
-		"write a checkpoint of the live UTxO set at an epoch boundary every this many epochs, for recovery when its journal cannot bring it to the ledger; 0 writes none; only with --ledger-state-set-only (default 1)",
+		"write a checkpoint of the live UTxO set at an epoch boundary every this many epochs, for recovery when its journal cannot bring it to the ledger; 0 writes none (default 1)",
 	),
 	intFlag(
 		"LedgerUtxoCheckpointKeep",
 		"ledger-utxo-checkpoint-keep",
 		"how many live UTxO set checkpoints to retain (default 2)",
-	),
-	stringFlag(
-		"LedgerUtxoReads",
-		"ledger-utxo-reads",
-		"",
-		"where validation resolves its inputs with --ledger-utxo-badger: empty for the metadata store, verify to compare both, set for the live UTxO set (experimental)",
 	),
 	boolFlag(
 		"LedgerValidateAheadEnabled",
@@ -1161,7 +1118,11 @@ var flagSpecs = []flagSpec{
 		"keep SQLite planner statistics current with PRAGMA optimize at startup and after each epoch rollover",
 	),
 
-	boolFlag("CIP0203Enabled", "cip-0203-enabled", "include the build version in forged block headers (CIP-0203)"),
+	boolFlag(
+		"CIP0203Enabled",
+		"cip-0203-enabled",
+		"include the build version in forged block headers (CIP-0203)",
+	),
 
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)
 	uintFlag(
@@ -1220,7 +1181,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"Mithril.Enabled",
 		"mithril-enabled",
-		"sync from Mithril inside serve while behind the certified tip (core storage mode only)",
+		"sync from Mithril inside serve while behind the certified tip",
 	),
 	intFlag(
 		"Mithril.WindowChunks",

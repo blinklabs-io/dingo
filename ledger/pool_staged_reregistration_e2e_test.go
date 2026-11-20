@@ -35,7 +35,7 @@ func TestBoundaryPromotesTheStagedRegistrationOfALoadedPool(t *testing.T) {
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set, "")
+	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 
 	pool := bytes.Repeat([]byte{0x52}, 28)
 	vrfNow := bytes.Repeat([]byte{0x53}, 32)

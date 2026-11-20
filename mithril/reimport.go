@@ -401,3 +401,29 @@ func setMithrilLedgerAnchor(db *database.Database, point ocommon.Point) error {
 	}
 	return db.SetSyncState(mithrilLedgerHashSyncKey, hex.EncodeToString(point.Hash), nil)
 }
+
+// mithrilLedgerAnchor reads the stable ledger point a Mithril import recorded.
+func mithrilLedgerAnchor(db *database.Database) (uint64, []byte, error) {
+	slotText, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	if err != nil {
+		return 0, nil, fmt.Errorf("reading Mithril ledger slot: %w", err)
+	}
+	if slotText == "" {
+		return 0, nil, errors.New(
+			"the database has no recorded Mithril ledger slot",
+		)
+	}
+	slot, err := strconv.ParseUint(slotText, 10, 64)
+	if err != nil {
+		return 0, nil, fmt.Errorf("parsing Mithril ledger slot: %w", err)
+	}
+	hashText, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	if err != nil {
+		return 0, nil, fmt.Errorf("reading Mithril ledger hash: %w", err)
+	}
+	hash, err := hex.DecodeString(hashText)
+	if err != nil {
+		return 0, nil, fmt.Errorf("parsing Mithril ledger hash: %w", err)
+	}
+	return slot, hash, nil
+}

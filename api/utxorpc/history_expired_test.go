@@ -119,8 +119,9 @@ func (l *expiredHistoryLedger) BlockTransactions(
 
 func newExpiredHistoryServer(ls UtxorpcLedgerState) *Utxorpc {
 	return NewUtxorpc(UtxorpcConfig{
-		Logger:      discardLogger(),
-		LedgerState: ls,
+		Logger:        discardLogger(),
+		LedgerState:   ls,
+		QueryDatabase: stubQueryDB(ls),
 	})
 }
 

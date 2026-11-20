@@ -199,6 +199,11 @@ type NodeSettings struct {
 // ErrBlobKeyNotFound is returned by blob operations when a key is missing
 var ErrBlobKeyNotFound = errors.New("blob key not found")
 
+// ErrBlobTooLarge is wrapped by a bounded blob read whose value is larger
+// than the caller's limit. It distinguishes a value that exists but was not
+// read from a read that failed.
+var ErrBlobTooLarge = errors.New("blob object exceeds maximum size")
+
 // ErrHistoryExpired is returned when a block's local CBOR has expired from
 // history storage. Callers can use errors.Is(err, ErrHistoryExpired) for
 // existence checks. To get the (slot, hash), use errors.As to extract a

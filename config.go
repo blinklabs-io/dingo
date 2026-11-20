@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"runtime"
 	"slices"
@@ -84,7 +85,6 @@ type HistoryExpiryConfig struct {
 // ImmutableDBConfig controls promotion of block bodies older than the security
 // parameter into cardano-node compatible chunk files.
 type ImmutableDBConfig struct {
-	Enabled          bool
 	PromoteBatch     int
 	PromoteFrequency time.Duration
 }
@@ -208,6 +208,8 @@ type MidnightConfig struct {
 }
 
 type Config struct {
+	apiListenerFactory func(string, string) (net.Listener, error)
+
 	// cfg holds the internal configuration that was parsed from YAML/env/CLI.
 	// This is the single source of truth for all configuration fields.
 	cfg *internalconfig.Config
@@ -253,7 +255,9 @@ type Config struct {
 	localStateQueryViewMaxLifetime time.Duration
 	// Compatibility mirrors used by the composition layer. cfg remains the
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
-	dataDir                         string
+	dataDir string
+	// splitIndexer is set when the IndexerDB holds the API rows.
+	splitIndexer                    bool
 	bindAddr                        string
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
 	network                         string
@@ -328,13 +332,7 @@ type Config struct {
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
-	ledgerUtxoShadow                                                                    bool
-	ledgerUtxoBadger                                                                    bool
-	ledgerUtxoReads                                                                     string
-	ledgerUtxoBadgerOnly                                                                bool
-	ledgerStateSetOnly                                                                  bool
 	ledgerUtxoCheckpointEpochs, ledgerUtxoCheckpointKeep                                int
-	ledgerStateVerifyBeforeDrain                                                        bool
 	ledgerValidateAheadEnabled                                                          bool
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
@@ -351,9 +349,7 @@ type Config struct {
 	chainsyncMaxClients                                                                 int
 	chainsyncStrategy                                                                   chainsync.HeaderSyncStrategy
 	storageMode                                                                         StorageMode
-	indexerLayout                                                                       string
 	indexerMaxReadyLagBlocks                                                            uint64
-	indexerMetadataConfig                                                               map[string]any
 	indexerWriterFactory                                                                IndexerWriterFactory
 	cacheBlockLRUEntries, cacheHotUtxoEntries, cacheHotTxEntries                        int
 	cacheHotTxMaxBytes                                                                  int64
@@ -645,30 +641,6 @@ func (n *Node) configValidate() error {
 			storageMode,
 			StorageModeCore,
 			StorageModeAPI,
-		)
-	}
-	switch n.config.cfg.LedgerUtxoReads {
-	case "", "verify", "set":
-	default:
-		return fmt.Errorf(
-			"invalid ledgerUtxoReads %q: must be empty, %q or %q",
-			n.config.cfg.LedgerUtxoReads, "verify", "set",
-		)
-	}
-	// Without the Badger set neither option has anything to act on; both
-	// would be ignored silently.
-	if n.config.cfg.LedgerUtxoBadgerOnly && !n.config.cfg.LedgerUtxoBadger {
-		return errors.New("ledgerUtxoBadgerOnly needs ledgerUtxoBadger")
-	}
-	if err := internalconfig.ValidateLedgerStateSetOnly(
-		n.config.cfg,
-	); err != nil {
-		return err
-	}
-	if n.config.cfg.LedgerUtxoReads != "" && !n.config.cfg.LedgerUtxoBadger {
-		return fmt.Errorf(
-			"ledgerUtxoReads %q needs ledgerUtxoBadger",
-			n.config.cfg.LedgerUtxoReads,
 		)
 	}
 	if !n.config.cfg.StartEra.Valid() {
@@ -983,10 +955,13 @@ func (c *Config) syncCompatFields() {
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
 	c.validateHistorical, c.strictUtxoValidation = c.cfg.ValidateHistorical, c.cfg.StrictUtxoValidation
 	c.skipRewardLiveStakeBackfillCheck = c.cfg.SkipRewardLiveStakeBackfillCheck
+	// storageMode is the ledger's own store's mode, which is core when the
+	// IndexerDB holds the API rows.
+	c.splitIndexer = c.cfg.SplitIndexer()
 	c.runMode, c.startEra, c.storageMode = string(
 		c.cfg.RunMode,
 	), c.cfg.StartEra, StorageMode(
-		c.cfg.StorageMode,
+		c.cfg.ConsensusStorageMode(),
 	)
 	// Leios run mode and the Musashi testnet (which enables Leios networking
 	// without changing the run mode) both default to the larger mempool.
@@ -1006,7 +981,6 @@ func (c *Config) syncCompatFields() {
 		Frequency: c.cfg.HistoryExpiry.Frequency,
 	}
 	c.immutableDB = ImmutableDBConfig{
-		Enabled:          c.cfg.ImmutableDB.Enabled,
 		PromoteBatch:     c.cfg.ImmutableDB.PromoteBatch,
 		PromoteFrequency: c.cfg.ImmutableDB.PromoteFrequency,
 	}
@@ -1112,14 +1086,8 @@ func (c *Config) syncCompatFields() {
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
-	c.ledgerUtxoShadow = c.cfg.LedgerUtxoShadow
-	c.ledgerUtxoBadger = c.cfg.LedgerUtxoBadger
-	c.ledgerUtxoReads = c.cfg.LedgerUtxoReads
-	c.ledgerUtxoBadgerOnly = c.cfg.LedgerUtxoBadgerOnly
-	c.ledgerStateSetOnly = c.cfg.LedgerStateSetOnly
 	c.ledgerUtxoCheckpointEpochs = c.cfg.LedgerUtxoCheckpointEpochs
 	c.ledgerUtxoCheckpointKeep = c.cfg.LedgerUtxoCheckpointKeep
-	c.ledgerStateVerifyBeforeDrain = c.cfg.LedgerStateVerifyBeforeDrain
 	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
@@ -2144,9 +2112,10 @@ func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 }
 
 // WithPlannerStatsRefresh controls SQLite's incremental planner-statistics
-// maintenance, run before block processing starts and after each epoch
-// rollover. Enabled by default; pass false only as an escape hatch. Other
-// metadata backends are unaffected.
+// maintenance, run during startup and after each epoch rollover. Shared API
+// storage runs the startup pass after its listeners start so maintenance does
+// not delay availability. Enabled by default; pass false only as an escape
+// hatch. Other metadata backends are unaffected.
 func WithPlannerStatsRefresh(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.PlannerStatsRefreshEnabled = enabled
@@ -2190,67 +2159,12 @@ func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 	}
 }
 
-// WithLedgerUtxoShadow keeps a Badger copy of the live UTxO set beside the
-// metadata store and checks the two against each other. Diagnostic only;
-// validation never reads the copy. Off by default.
-func WithLedgerUtxoShadow(enabled bool) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.LedgerUtxoShadow = enabled
-	}
-}
-
-// WithLedgerUtxoBadger keeps the live UTxO set in a LedgerDB Badger store,
-// updated synchronously after each ledger commit, beside the metadata store.
-// Experimental; validation does not read it yet. Off by default.
-func WithLedgerUtxoBadger(enabled bool) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.LedgerUtxoBadger = enabled
-	}
-}
-
-// WithLedgerUtxoReads selects where validation resolves its inputs when the
-// live UTxO set is kept in Badger: "" for the metadata store, "verify" for
-// both with every disagreement counted, or "set" for the live UTxO set.
-func WithLedgerUtxoReads(mode string) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.LedgerUtxoReads = mode
-	}
-}
-
-// WithLedgerUtxoBadgerOnly makes the Badger live UTxO set the only copy of
-// the UTxO set: the metadata store keeps no utxo rows. Core storage mode. A
-// database that holds its UTxO set in the metadata store is moved in place at
-// startup. Experimental; off by default.
-func WithLedgerUtxoBadgerOnly(enabled bool) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.LedgerUtxoBadgerOnly = enabled
-	}
-}
-
-// WithLedgerStateSetOnly makes the live UTxO set the only store of the ledger
-// state it computes. Needs WithLedgerUtxoBadgerOnly, core storage mode and
-// WithLedgerUtxoReads("set"). Experimental; off by default.
-func WithLedgerStateSetOnly(enabled bool) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.LedgerStateSetOnly = enabled
-	}
-}
-
 // WithLedgerUtxoCheckpoint writes a checkpoint of the live UTxO set every
 // epochs epochs and keeps the newest keep of them; zero epochs writes none.
-// Only a database with WithLedgerStateSetOnly writes checkpoints.
 func WithLedgerUtxoCheckpoint(epochs, keep int) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerUtxoCheckpointEpochs = epochs
 		c.cfg.LedgerUtxoCheckpointKeep = keep
-	}
-}
-
-// WithLedgerStateVerifyBeforeDrain compares each ledger-state family with its
-// SQL rows in full before the rows are deleted. Needs WithLedgerStateSetOnly.
-func WithLedgerStateVerifyBeforeDrain(enabled bool) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.LedgerStateVerifyBeforeDrain = enabled
 	}
 }
 
@@ -2449,7 +2363,9 @@ func WithMithrilCatchUp(factory MithrilCatchUpFactory) ConfigOptionFunc {
 // to when its live UTxO set cannot be brought to the ledger from a checkpoint.
 // It is independent of mithril.enabled: the network's aggregator is used. A
 // nil reimporter from the factory leaves that recovery without a source.
-func WithMithrilLedgerReimport(factory MithrilLedgerReimportFactory) ConfigOptionFunc {
+func WithMithrilLedgerReimport(
+	factory MithrilLedgerReimportFactory,
+) ConfigOptionFunc {
 	return func(c *Config) {
 		c.mithrilLedgerReimport = factory
 	}
@@ -2469,7 +2385,6 @@ func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 func WithImmutableDB(cfg ImmutableDBConfig) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ImmutableDB = internalconfig.ImmutableDBConfig{
-			Enabled:          cfg.Enabled,
 			PromoteBatch:     cfg.PromoteBatch,
 			PromoteFrequency: cfg.PromoteFrequency,
 		}
@@ -2655,6 +2570,16 @@ func WithChainsyncHeaderStrategy(
 	}
 }
 
+// WithAPIListenerFactory supplies sockets to the built-in Blockfrost, Kupo,
+// Mesh and UTxO RPC servers. Nil uses net.Listen. Each successful call transfers
+// ownership to the server; the caller retains ownership of unused reservations.
+// The factory must support every API start, including restarts.
+func WithAPIListenerFactory(
+	listen func(string, string) (net.Listener, error),
+) ConfigOptionFunc {
+	return func(c *Config) { c.apiListenerFactory = listen }
+}
+
 // WithMeshPort specifies the port for the Mesh (Coinbase
 // Rosetta) compatible REST API server. The server binds
 // to the node's bindAddr on this port. 0 disables the
@@ -2662,18 +2587,6 @@ func WithChainsyncHeaderStrategy(
 func WithMeshPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.API.Mesh.Config["port"] = port
-	}
-}
-
-// WithIndexerLayout records the API storage layout ("shared" or "split") so
-// the database can freeze it in its node settings. An empty value leaves the
-// layout unchecked.
-func WithIndexerLayout(layout string) ConfigOptionFunc {
-	return func(c *Config) {
-		if c.cfg == nil {
-			*c = NewConfig()
-		}
-		c.indexerLayout = layout
 	}
 }
 
@@ -2737,17 +2650,6 @@ func WithIndexerMaxReadyLagBlocks(blocks uint64) ConfigOptionFunc {
 	}
 }
 
-// WithIndexerMetadata sets the metadata provider settings that override the
-// consensus store's for the split IndexerDB's own store.
-func WithIndexerMetadata(cfg map[string]any) ConfigOptionFunc {
-	return func(c *Config) {
-		if c.cfg == nil {
-			*c = NewConfig()
-		}
-		c.indexerMetadataConfig = cfg
-	}
-}
-
 // WithStorageMode specifies the storage mode. StorageModeCore
 // stores only consensus data; StorageModeAPI adds full
 // transaction metadata for API queries.
@@ -2757,7 +2659,7 @@ func WithStorageMode(mode StorageMode) ConfigOptionFunc {
 			*c = NewConfig()
 		}
 		c.cfg.StorageMode = string(mode)
-		c.storageMode = mode
+		c.storageMode = StorageMode(c.cfg.ConsensusStorageMode())
 	}
 }
 
@@ -3393,33 +3295,6 @@ func (c *Config) LedgerPrefetchAheadEnabled() bool {
 	return c.cfg.LedgerPrefetchAheadEnabled
 }
 
-// LedgerUtxoShadow returns whether the shadow UTxO set is enabled.
-func (c *Config) LedgerUtxoShadow() bool {
-	return c.cfg.LedgerUtxoShadow
-}
-
-// LedgerUtxoBadger returns whether the live UTxO set is kept in Badger.
-func (c *Config) LedgerUtxoBadger() bool {
-	return c.cfg.LedgerUtxoBadger
-}
-
-// LedgerUtxoReads returns where validation resolves its inputs.
-func (c *Config) LedgerUtxoReads() string {
-	return c.cfg.LedgerUtxoReads
-}
-
-// LedgerUtxoBadgerOnly returns whether the Badger live UTxO set is the only
-// copy of the UTxO set.
-func (c *Config) LedgerUtxoBadgerOnly() bool {
-	return c.cfg.LedgerUtxoBadgerOnly
-}
-
-// LedgerStateSetOnly returns whether the live UTxO set is the only store of
-// the ledger state it computes.
-func (c *Config) LedgerStateSetOnly() bool {
-	return c.cfg.LedgerStateSetOnly
-}
-
 // LedgerUtxoCheckpointEpochs returns how many epochs pass between live UTxO
 // set checkpoints; zero writes none.
 func (c *Config) LedgerUtxoCheckpointEpochs() int {
@@ -3430,12 +3305,6 @@ func (c *Config) LedgerUtxoCheckpointEpochs() int {
 // retained.
 func (c *Config) LedgerUtxoCheckpointKeep() int {
 	return c.cfg.LedgerUtxoCheckpointKeep
-}
-
-// LedgerStateVerifyBeforeDrain returns whether each family is compared with
-// its SQL rows before the rows are deleted.
-func (c *Config) LedgerStateVerifyBeforeDrain() bool {
-	return c.cfg.LedgerStateVerifyBeforeDrain
 }
 
 // LedgerValidateAheadEnabled returns whether state-independent validation
@@ -3503,7 +3372,9 @@ func (c *Config) genesisSelectionEligible() bool {
 // selector actually starts in, once the node has resolved it from the
 // configuration and the caught-up marker. It is called once per node start,
 // before the selector is built.
-func WithGenesisSelectionResolved(fn func(genesisSelectionMode bool)) ConfigOptionFunc {
+func WithGenesisSelectionResolved(
+	fn func(genesisSelectionMode bool),
+) ConfigOptionFunc {
 	return func(c *Config) { c.onGenesisSelectionResolved = fn }
 }
 

@@ -140,7 +140,7 @@ func TestPoolReapOfDeregisteredRewardAccountMatchesAnUndrainedRun(
 		}
 		h.drainErr = statedrain.Run(t.Context(), statedrain.Env{
 			Store: drainStore{h.scenario.DB, h.scenario.DrainFamilies},
-			Set:   src, Guard: h.guard, VerifyBeforeDrain: true,
+			Set:   src, Guard: h.guard,
 		}, entries)
 		require.Equal(t, want, reap(h))
 	})
