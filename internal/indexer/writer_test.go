@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -599,4 +600,46 @@ func TestRunRetriesFailureWithoutAnotherWake(t *testing.T) {
 			), context.Canceled)
 		})
 	}
+}
+
+// sizeLimitedIndexer refuses a call for more than limit blocks the way the
+// blob store refuses a transaction past its size, formatting the cause with
+// %v as the storage layers do.
+type sizeLimitedIndexer struct {
+	syncRowIndexer
+	limit int
+	calls atomic.Int64
+}
+
+func (s *sizeLimitedIndexer) IndexBlocks(
+	ctx context.Context, txn *database.Txn, blocks []models.Block,
+) error {
+	s.calls.Add(1)
+	if len(blocks) > s.limit {
+		return fmt.Errorf("set utxo offset: %v", badger.ErrTxnTooBig)
+	}
+	return s.syncRowIndexer.IndexBlocks(ctx, txn, blocks)
+}
+
+func TestCatchUpShrinksBatchWhenBlobWritesAreTooBig(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	chain := newFakeChain(40, "a")
+	idx := &sizeLimitedIndexer{limit: 5}
+	w := NewWriter(store, chain, idx, nil, 32)
+	require.NoError(t, w.CatchUp(t.Context()))
+	requireMatchesChain(t, store, chain)
+}
+
+func TestCatchUpFailsWhenOneBlockIsTooBig(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	chain := newFakeChain(4, "a")
+	idx := &sizeLimitedIndexer{limit: 0}
+	w := NewWriter(store, chain, idx, nil, 4)
+	err := w.CatchUp(t.Context())
+	require.Error(t, err)
+	require.ErrorContains(t, err, badger.ErrTxnTooBig.Error())
+	// 4 blocks, 2, 1: then the single block cannot shrink further.
+	require.Equal(t, int64(3), idx.calls.Load())
 }
