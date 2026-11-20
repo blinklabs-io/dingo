@@ -39,13 +39,15 @@ const rewardStakeInputsPendingKey = models.RewardStakeInputsPendingKey
 // holds the metadata writer for the whole snapshot.
 const deferredStakeInputChunk = 50_000
 
-type rewardStakeInputsPendingEntry struct {
+// RewardStakeInputsPendingEntry names a snapshot whose stake rows are not
+// all written.
+type RewardStakeInputsPendingEntry struct {
 	Epoch        uint64 `json:"epoch"`
 	BoundarySlot uint64 `json:"boundary_slot"`
 }
 
 type rewardStakeInputsPending struct {
-	Entries []rewardStakeInputsPendingEntry `json:"entries"`
+	Entries []RewardStakeInputsPendingEntry `json:"entries"`
 }
 
 // errRewardStakeInputsNotReady reports that a snapshot's reward basis is still
@@ -66,6 +68,12 @@ func loadRewardStakeInputsPending(
 	if err != nil {
 		return nil, fmt.Errorf("load pending reward stake inputs: %w", err)
 	}
+	return decodeRewardStakeInputsPending(raw)
+}
+
+func decodeRewardStakeInputsPending(
+	raw string,
+) (*rewardStakeInputsPending, error) {
 	pending := &rewardStakeInputsPending{}
 	if raw == "" {
 		return pending, nil
@@ -84,6 +92,33 @@ func loadRewardStakeInputsPending(
 		return nil, fmt.Errorf("decode pending reward stake inputs: %w", err)
 	}
 	return pending, nil
+}
+
+// ParseRewardStakeInputsPending decodes the value of the pending sync_state
+// key, rejecting a format it does not know.
+func ParseRewardStakeInputsPending(
+	raw string,
+) ([]RewardStakeInputsPendingEntry, error) {
+	pending, err := decodeRewardStakeInputsPending(raw)
+	if err != nil {
+		return nil, err
+	}
+	return pending.Entries, nil
+}
+
+// FormatRewardStakeInputsPending is the pending sync_state value naming
+// entries, empty when there are none.
+func FormatRewardStakeInputsPending(
+	entries []RewardStakeInputsPendingEntry,
+) (string, error) {
+	if len(entries) == 0 {
+		return "", nil
+	}
+	raw, err := json.Marshal(&rewardStakeInputsPending{Entries: entries})
+	if err != nil {
+		return "", fmt.Errorf("encode pending reward stake inputs: %w", err)
+	}
+	return string(raw), nil
 }
 
 func saveRewardStakeInputsPending(
@@ -106,7 +141,7 @@ func saveRewardStakeInputsPending(
 func (p *rewardStakeInputsPending) find(epoch uint64) int {
 	return slices.IndexFunc(
 		p.Entries,
-		func(e rewardStakeInputsPendingEntry) bool {
+		func(e RewardStakeInputsPendingEntry) bool {
 			return e.Epoch == epoch
 		},
 	)
@@ -124,7 +159,7 @@ func markRewardStakeInputsPending(
 	if err != nil {
 		return err
 	}
-	entry := rewardStakeInputsPendingEntry{
+	entry := RewardStakeInputsPendingEntry{
 		Epoch: epoch, BoundarySlot: boundarySlot,
 	}
 	if i := pending.find(epoch); i >= 0 {
@@ -168,7 +203,7 @@ func discardRewardStakeInputsPendingAfterSlot(
 	}
 	kept := slices.DeleteFunc(
 		slices.Clone(pending.Entries),
-		func(e rewardStakeInputsPendingEntry) bool {
+		func(e RewardStakeInputsPendingEntry) bool {
 			return e.BoundarySlot > slot
 		},
 	)

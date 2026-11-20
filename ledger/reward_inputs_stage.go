@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"reflect"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
@@ -467,4 +468,51 @@ func (s stagingLedgerDB) ResolvePoolRewardAccountAutoVotes(
 			return s.GetAccountsByCredential(ctx, refs, true, txn)
 		},
 	)
+}
+
+// getPendingStakeInputs reads the pending sync_state record from the set
+// once the reward-inputs family is drained.
+func (s stagingLedgerDB) getPendingStakeInputs(
+	txn ledgerdb.Txn,
+) (string, error) {
+	v, err := s.rewardInputsServed(txn)
+	if err != nil {
+		return "", err
+	}
+	return v.pendingRaw()
+}
+
+// setPendingStakeInputs writes the pending record to the metadata store
+// while the family is not drained, and always stages it for the set.
+func (s stagingLedgerDB) setPendingStakeInputs(
+	value string,
+	txn ledgerdb.Txn,
+) error {
+	if !s.rewardInputsDrained() {
+		if err := s.LedgerDB.SetSyncState(
+			models.RewardStakeInputsPendingKey, value, txn,
+		); err != nil {
+			return err
+		}
+	}
+	entries, err := ParseRewardStakeInputsPending(value)
+	if err != nil {
+		return err
+	}
+	s.stageRewardInput(txn, RewardInputChange{
+		Kind: RewardInputPending, Pending: slices.Clone(entries),
+	})
+	return nil
+}
+
+func (s stagingLedgerDB) deletePendingStakeInputs(txn ledgerdb.Txn) error {
+	if !s.rewardInputsDrained() {
+		if err := s.LedgerDB.DeleteSyncState(
+			models.RewardStakeInputsPendingKey, txn,
+		); err != nil {
+			return err
+		}
+	}
+	s.stageRewardInput(txn, RewardInputChange{Kind: RewardInputPending})
+	return nil
 }

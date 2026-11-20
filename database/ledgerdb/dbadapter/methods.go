@@ -3205,8 +3205,10 @@ func (a Adapter) accountReadsDrained() error {
 	)
 }
 
-// rewardSyncKeyDrained refuses a read or write of a sync_state key the
-// reward-outputs family owns once it is drained.
+// rewardSyncKeyDrained refuses a read or write of a sync_state key a reward
+// family owns once it is drained: the precompute cursors and the eligibility
+// recheck belong to reward outputs, the pending stake-input record to reward
+// inputs.
 func (a Adapter) rewardSyncKeyDrained(key string) error {
 	if strings.HasPrefix(
 		key,
@@ -3214,6 +3216,9 @@ func (a Adapter) rewardSyncKeyDrained(key string) error {
 	) ||
 		key == models.RewardEligibilityRecheckKey {
 		return a.rewardOutputsDrained()
+	}
+	if key == models.RewardStakeInputsPendingKey {
+		return a.rewardInputsDrained()
 	}
 	return nil
 }
