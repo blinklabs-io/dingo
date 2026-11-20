@@ -138,7 +138,9 @@ type RewardPrecomputeCursorReader interface {
 // ErrFactCursorLost is returned by a fact read whose cursor names an export
 // the reader no longer holds, as after a restart between pages. The caller
 // starts the table again from the beginning.
-var ErrFactCursorLost = errors.New("fact read cursor names no export in progress")
+var ErrFactCursorLost = errors.New(
+	"fact read cursor names no export in progress",
+)
 
 // CommitSyncer is an optional capability of a metadata store whose commits
 // are not durable when they return. SyncCommits returns only once every commit
@@ -603,11 +605,12 @@ func (d *UtxoDigester) Add(
 
 // canonicalOutputCbor returns an output's CBOR as a snapshot import stores
 // it: the map form {0: address, 1: value, 2: datum, 3: script ref} with the
-// value in the MemPack form (see canonicalValueCbor). An output created as the
-// legacy array [address, value] or [address, value, datum hash] keeps the
-// array in its block, and a block keeps the value's own ordering and integer
-// heads, so the same output would otherwise digest differently from its
-// imported copy. The result is a fixed point of this function. Anything that
+// value in the MemPack form (see canonicalValueCbor) and every other field
+// re-encoded with its shortest heads, keeping an inline datum's and a native
+// script's own bytes. An output created as the legacy array [address, value]
+// or [address, value, datum hash] keeps the array in its block, and a block
+// keeps its own ordering and heads, so the same output would otherwise digest
+// differently from its imported copy. The result is a fixed point of this function. Anything that
 // does not decode as such an output is returned unchanged.
 func canonicalOutputCbor(raw []byte) []byte {
 	if len(raw) == 0 {
@@ -636,11 +639,113 @@ func canonicalOutputCbor(raw []byte) []byte {
 		return raw
 	}
 	fields[1] = canonValue
+	for key, canon := range map[uint64]func(
+		cbor.RawMessage,
+	) (cbor.RawMessage, bool){
+		0: canonicalBytesCbor,
+		2: canonicalDatumCbor,
+		3: canonicalScriptRefCbor,
+	} {
+		field, present := fields[key]
+		if !present {
+			continue
+		}
+		if fields[key], ok = canon(field); !ok {
+			return raw
+		}
+	}
 	out, err := cbor.Encode(fields)
 	if err != nil {
 		return raw
 	}
 	return out
+}
+
+// canonicalBytesCbor re-encodes a byte string with its shortest length head
+// and as one definite-length string.
+func canonicalBytesCbor(raw cbor.RawMessage) (cbor.RawMessage, bool) {
+	var b []byte
+	if _, err := cbor.Decode(raw, &b); err != nil {
+		return nil, false
+	}
+	out, err := cbor.Encode(b)
+	return out, err == nil
+}
+
+// tag24Content returns the byte string a tag 24 item wraps.
+func tag24Content(raw cbor.RawMessage) ([]byte, bool) {
+	if len(raw) < 2 || raw[0] != 0xd8 || raw[1] != 24 {
+		return nil, false
+	}
+	var b []byte
+	if _, err := cbor.Decode(raw[2:], &b); err != nil {
+		return nil, false
+	}
+	return b, true
+}
+
+// canonicalDatumCbor re-encodes a datum option, [0, hash] or
+// [1, #6.24(bytes)], as the snapshot import does (ledgerstate
+// encodeMempackTxOut). The inline datum's own bytes are kept.
+func canonicalDatumCbor(raw cbor.RawMessage) (cbor.RawMessage, bool) {
+	var pair []cbor.RawMessage
+	if _, err := cbor.Decode(raw, &pair); err != nil || len(pair) != 2 {
+		return nil, false
+	}
+	var kind uint64
+	if _, err := cbor.Decode(pair[0], &kind); err != nil {
+		return nil, false
+	}
+	var item any
+	switch kind {
+	case 0:
+		var hash []byte
+		if _, err := cbor.Decode(pair[1], &hash); err != nil {
+			return nil, false
+		}
+		item = hash
+	case 1:
+		datum, ok := tag24Content(pair[1])
+		if !ok {
+			return nil, false
+		}
+		item = cbor.Tag{Number: 24, Content: datum}
+	default:
+		return nil, false
+	}
+	out, err := cbor.Encode([]any{kind, item})
+	return out, err == nil
+}
+
+// canonicalScriptRefCbor re-encodes a reference script,
+// #6.24(bytes .cbor [type, script]), as the snapshot import does (ledgerstate
+// encodeMempackScriptRef): a native script's CBOR is kept, a Plutus script's
+// bytes get the shortest head.
+func canonicalScriptRefCbor(raw cbor.RawMessage) (cbor.RawMessage, bool) {
+	inner, ok := tag24Content(raw)
+	if !ok {
+		return nil, false
+	}
+	var pair []cbor.RawMessage
+	if _, err := cbor.Decode(inner, &pair); err != nil || len(pair) != 2 {
+		return nil, false
+	}
+	var typ uint64
+	if _, err := cbor.Decode(pair[0], &typ); err != nil || typ > 3 {
+		return nil, false
+	}
+	script := pair[1]
+	if typ != 0 {
+		if script, ok = canonicalBytesCbor(script); !ok {
+			return nil, false
+		}
+	}
+	inner, err := cbor.Encode([]any{typ, script})
+	if err != nil {
+		return nil, false
+	}
+	out, err := cbor.Encode(cbor.Tag{Number: 24, Content: inner})
+	return out, err == nil
 }
 
 // legacyOutputFields maps a legacy array output onto the fields of the map

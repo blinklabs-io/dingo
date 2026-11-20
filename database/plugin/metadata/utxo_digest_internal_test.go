@@ -21,8 +21,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestCanonicalOutputCborIdempotent checks that canonical output CBOR is a
-// fixed point, and that CBOR which is not an output is returned unchanged.
+// TestCanonicalOutputCborIdempotent checks that canonical output CBOR, and an
+// imported output, is a fixed point, and that CBOR which is not an output is
+// returned unchanged.
 func TestCanonicalOutputCborIdempotent(t *testing.T) {
 	t.Parallel()
 	for name, h := range map[string]string{
@@ -36,12 +37,30 @@ func TestCanonicalOutputCborIdempotent(t *testing.T) {
 		require.NotEqual(t, raw, once, name)
 		require.Equal(t, once, canonicalOutputCbor(once), name)
 	}
+	// Outputs as a Preview snapshot import stored them: a digest the ledger
+	// recorded over them before the canonicalisation existed stays valid only
+	// if they are already canonical.
+	for _, h := range []string{
+		"a2005839001b9cdd4e5a6cb08501e46e10551b7a859d4a98251009bb91d69785f65691d68ad87582fc89b9ac43fd0227cfa4108efb791b9987b290a9ba011a00124f80",
+		"a200581d70204215e45ce89569f0501597cd7bd7a97816b1f6c67643d7739cc54b01821a0012378ea1581c204215e45ce89569f0501597cd7bd7a97816b1f6c67643d7739cc54ba24a53656c6c4d617267696e014553656c6c5401",
+		"a200581d60ef0f4519a2c1856d9486bec2f938cad9dab5145c50449fa2cd7fbcd1011a00117e5c",
+	} {
+		raw, err := hex.DecodeString(h)
+		require.NoError(t, err)
+		require.Equal(t, raw, canonicalOutputCbor(raw), h)
+	}
 	for name, raw := range map[string][]byte{
 		"empty":             {},
 		"uint":              {0x01},
 		"truncated map":     {0xa2, 0x00},
 		"map without value": {0xa1, 0x00, 0x41, 0x01},
 		"value is text":     {0xa2, 0x00, 0x41, 0x01, 0x01, 0x61, 'a'},
+		"unknown datum kind": {
+			0xa3, 0x00, 0x41, 0x01, 0x01, 0x01, 0x02, 0x82, 0x02, 0x00,
+		},
+		"script ref untagged": {
+			0xa3, 0x00, 0x41, 0x01, 0x01, 0x01, 0x03, 0x41, 0x00,
+		},
 	} {
 		require.Equal(t, raw, canonicalOutputCbor(raw), name)
 	}

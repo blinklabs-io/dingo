@@ -291,3 +291,139 @@ func TestUtxoDigesterValueDistinguishesOutputs(t *testing.T) {
 		require.NotEqual(t, base, digestOne(t, other), name)
 	}
 }
+
+// longHead encodes b as a byte string whose length head is two bytes wide, a
+// valid but non-minimal encoding.
+func longHead(b []byte) []byte {
+	return append([]byte{0x59, 0, byte(len(b))}, b...)
+}
+
+// chunked encodes b as an indefinite-length byte string of two chunks.
+func chunked(t *testing.T, b []byte) []byte {
+	t.Helper()
+	out := []byte{0x5f}
+	out = append(out, mustCbor(t, b[:1])...)
+	out = append(out, mustCbor(t, b[1:])...)
+	return append(out, 0xff)
+}
+
+// tag24 wraps an already encoded byte string in tag 24.
+func tag24(encoded []byte) cbor.RawMessage {
+	return append([]byte{0xd8, 0x18}, encoded...)
+}
+
+// TestUtxoDigesterFieldEncodingMatchesLedger checks an output's address,
+// datum and reference script as a block may encode them against the form a
+// snapshot import writes, which re-encodes each with its shortest heads.
+func TestUtxoDigesterFieldEncodingMatchesLedger(t *testing.T) {
+	t.Parallel()
+	addr := make([]byte, 29)
+	addr[0] = 0x60
+	datumHash := bytes.Repeat([]byte{0xaa}, 32)
+	datum := mustCbor(t, []any{uint64(1), []byte("datum")})
+	native := mustCbor(t, []any{uint64(0), bytes.Repeat([]byte{0x33}, 28)})
+	plutus := bytes.Repeat([]byte{0x44}, 40)
+	plutusRef := mustCbor(t, []any{uint64(2), plutus})
+	nativeRef := mustCbor(t, []any{uint64(0), cbor.RawMessage(native)})
+	type m = map[uint64]any
+	const coin = uint64(5000000)
+	inline := []any{uint64(1), cbor.Tag{Number: 24, Content: datum}}
+
+	cases := map[string]struct{ block, ledger []byte }{
+		"address head non-minimal": {
+			block:  mustCbor(t, m{0: cbor.RawMessage(longHead(addr)), 1: coin}),
+			ledger: mustCbor(t, m{0: addr, 1: coin}),
+		},
+		"legacy address head non-minimal": {
+			block:  mustCbor(t, []any{cbor.RawMessage(longHead(addr)), coin}),
+			ledger: mustCbor(t, m{0: addr, 1: coin}),
+		},
+		"datum hash head non-minimal": {
+			block: mustCbor(t, m{0: addr, 1: coin, 2: []any{
+				uint64(0), cbor.RawMessage(longHead(datumHash)),
+			}}),
+			ledger: mustCbor(t, m{
+				0: addr, 1: coin, 2: []any{uint64(0), datumHash},
+			}),
+		},
+		"inline datum head non-minimal": {
+			block: mustCbor(t, m{0: addr, 1: coin, 2: []any{
+				uint64(1), tag24(longHead(datum)),
+			}}),
+			ledger: mustCbor(t, m{0: addr, 1: coin, 2: inline}),
+		},
+		"inline datum chunked": {
+			block: mustCbor(t, m{0: addr, 1: coin, 2: []any{
+				uint64(1), tag24(chunked(t, datum)),
+			}}),
+			ledger: mustCbor(t, m{0: addr, 1: coin, 2: inline}),
+		},
+		"plutus script ref head non-minimal": {
+			block: mustCbor(t, m{
+				0: addr, 1: coin, 3: tag24(longHead(plutusRef)),
+			}),
+			ledger: mustCbor(t, m{
+				0: addr, 1: coin, 3: cbor.Tag{Number: 24, Content: plutusRef},
+			}),
+		},
+		"plutus script bytes head non-minimal": {
+			block: mustCbor(t, m{0: addr, 1: coin, 3: cbor.Tag{
+				Number:  24,
+				Content: append([]byte{0x82, 0x02}, longHead(plutus)...),
+			}}),
+			ledger: mustCbor(t, m{
+				0: addr, 1: coin, 3: cbor.Tag{Number: 24, Content: plutusRef},
+			}),
+		},
+		"native script ref head non-minimal": {
+			block: mustCbor(t, m{
+				0: addr, 1: coin, 3: tag24(longHead(nativeRef)),
+			}),
+			ledger: mustCbor(t, m{
+				0: addr, 1: coin, 3: cbor.Tag{Number: 24, Content: nativeRef},
+			}),
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(
+				t, digestOne(t, tc.ledger), digestOne(t, tc.block),
+				"block and ledger encodings of one output must digest equal",
+			)
+		})
+	}
+}
+
+// TestUtxoDigesterFieldsDistinguishOutputs guards against the field
+// canonicalisation collapsing outputs whose datum or script differ.
+func TestUtxoDigesterFieldsDistinguishOutputs(t *testing.T) {
+	t.Parallel()
+	addr := make([]byte, 29)
+	type m = map[uint64]any
+	out := func(k uint64, v any) []byte {
+		return mustCbor(t, m{0: addr, 1: uint64(1), k: v})
+	}
+	ref := func(typ uint64, script []byte) cbor.Tag {
+		return cbor.Tag{Number: 24, Content: mustCbor(t, []any{typ, script})}
+	}
+	inline := func(d []byte) []any {
+		return []any{uint64(1), cbor.Tag{Number: 24, Content: d}}
+	}
+	outs := map[string][]byte{
+		"no datum":      mustCbor(t, m{0: addr, 1: uint64(1)}),
+		"datum hash":    out(2, []any{uint64(0), bytes.Repeat([]byte{1}, 32)}),
+		"other hash":    out(2, []any{uint64(0), bytes.Repeat([]byte{2}, 32)}),
+		"inline datum":  out(2, inline([]byte{0x01})),
+		"other datum":   out(2, inline([]byte{0x02})),
+		"plutus v2 ref": out(3, ref(2, []byte{0x01})),
+		"plutus v3 ref": out(3, ref(3, []byte{0x01})),
+		"other script":  out(3, ref(2, []byte{0x02})),
+	}
+	seen := map[metadata.UtxoSetDigest]string{}
+	for name, o := range outs {
+		d := digestOne(t, o)
+		require.NotContains(t, seen, d, "%s collides with %s", name, seen[d])
+		seen[d] = name
+	}
+}

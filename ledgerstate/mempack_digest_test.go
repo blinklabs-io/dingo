@@ -16,6 +16,7 @@ package ledgerstate
 
 import (
 	"bytes"
+	"encoding/binary"
 	"math/rand/v2"
 	"testing"
 
@@ -23,11 +24,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMempackOutputDigestsEqualBlockForm pins the UTxO digest's value
+// TestMempackOutputDigestsEqualBlockForm pins the UTxO digest's
 // canonicalisation to encodeMempackTxOut: an output as the snapshot import
 // writes it must digest equal to the same output as a block holds it, with
 // policies and names in arbitrary order, zero quantities and empty policies
-// present, and an empty multiasset next to a bare coin.
+// present, an empty multiasset next to a bare coin, and the address, datum
+// and reference script byte strings under non-minimal length heads.
 func TestMempackOutputDigestsEqualBlockForm(t *testing.T) {
 	t.Parallel()
 	rng := rand.New(rand.NewPCG(6546, 1))
@@ -85,15 +87,50 @@ func TestMempackOutputDigestsEqualBlockForm(t *testing.T) {
 			}
 			policies = append(policies, p)
 		}
-		ledger, err := encodeMempackTxOut(&decodedMempackTxOut{
+		out := &decodedMempackTxOut{
 			Address: addr, Lovelace: coin, Assets: imported,
-		})
+		}
+		switch rng.IntN(3) {
+		case 1:
+			out.DatumHash = bytes.Repeat([]byte{byte(rng.IntN(256))}, 32)
+		case 2:
+			out.Datum = []byte{0x80 | byte(rng.IntN(24))}
+			for range out.Datum[0] & 0x1f {
+				out.Datum = append(out.Datum, byte(rng.IntN(24)))
+			}
+		}
+		if rng.IntN(2) == 0 {
+			out.ScriptRefType = uint8(rng.IntN(4))
+			out.ScriptRef = bytes.Repeat([]byte{0x01}, 1+rng.IntN(300))
+			if out.ScriptRefType == 0 {
+				out.ScriptRef = []byte{0x82, 0x05, 0x01}
+			}
+		}
+		ledger, err := encodeMempackTxOut(out)
 		require.NoError(t, err)
 
-		block := appendCBORHead(nil, 5, 2)
+		// byteString writes b under its shortest or, at random, an
+		// eight-byte length head; both are valid CBOR.
+		byteString := func(dst, b []byte) []byte {
+			if rng.IntN(2) == 0 {
+				dst = binary.BigEndian.AppendUint64(
+					append(dst, 0x5b), uint64(len(b)),
+				)
+			} else {
+				dst = appendCBORHead(dst, 2, uint64(len(b)))
+			}
+			return append(dst, b...)
+		}
+		fields := uint64(2)
+		if out.DatumHash != nil || out.Datum != nil {
+			fields++
+		}
+		if out.ScriptRef != nil {
+			fields++
+		}
+		block := appendCBORHead(nil, 5, fields)
 		block = appendCBORHead(block, 0, 0)
-		block = appendCBORHead(block, 2, uint64(len(addr)))
-		block = append(block, addr...)
+		block = byteString(block, addr)
 		block = appendCBORHead(block, 0, 1)
 		if len(policies) == 0 && rng.IntN(2) == 0 {
 			block = appendCBORHead(block, 0, coin)
@@ -111,6 +148,24 @@ func TestMempackOutputDigestsEqualBlockForm(t *testing.T) {
 					block = appendCBORHead(block, 0, e.qty)
 				}
 			}
+		}
+		switch {
+		case out.DatumHash != nil:
+			block = append(block, 0x02, 0x82, 0x00)
+			block = byteString(block, out.DatumHash)
+		case out.Datum != nil:
+			block = append(block, 0x02, 0x82, 0x01, 0xd8, 0x18)
+			block = byteString(block, out.Datum)
+		}
+		if out.ScriptRef != nil {
+			inner := []byte{0x82, out.ScriptRefType}
+			if out.ScriptRefType == 0 {
+				inner = append(inner, out.ScriptRef...)
+			} else {
+				inner = byteString(inner, out.ScriptRef)
+			}
+			block = append(block, 0x03, 0xd8, 0x18)
+			block = byteString(block, inner)
 		}
 		require.Equal(
 			t, digest(ledger), digest(block),
