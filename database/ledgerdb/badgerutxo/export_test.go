@@ -271,3 +271,15 @@ func (s *Store) DeleteExportFloorForTest() error {
 		return txn.Delete(exportFloorKey)
 	})
 }
+
+// AddedIndexFloorForTest returns the floor the family's index of rows below
+// the floor was built at, and whether one is held.
+func (s *Store) AddedIndexFloorForTest(family byte) (uint64, bool) {
+	s.added.mu.Lock()
+	defer s.added.mu.Unlock()
+	idx := s.added.fam[family]
+	if idx == nil {
+		return 0, false
+	}
+	return idx.floor, true
+}

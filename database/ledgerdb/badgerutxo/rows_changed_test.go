@@ -191,3 +191,65 @@ func TestAccountsChangedInBelowTheFloorFollowsRewrites(t *testing.T) {
 	require.True(t, covered)
 	require.Equal(t, []byte{7, 8}, keys, "the load replaced the accounts")
 }
+
+// A prune raises the floor as blocks apply, but the rows below the floor an
+// index was built at are the ones it still holds, so a later segment below
+// that floor reuses it. A segment between the two floors needs the rows a
+// block added there, so it does not.
+func TestAccountsChangedInBelowTheFloorSurvivesAPrune(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(11, 0x01))
+	loadAccountsAtSlots(t, s, 1, 2, 3, 4, 5)
+
+	keys, covered := changedIn(t, s, 1, 2)
+	require.True(t, covered)
+	require.Equal(t, []byte{1, 2}, keys)
+	built, ok := s.AddedIndexFloorForTest(badgerutxo.AccountTag)
+	require.True(t, ok)
+
+	applyAccounts(t, s, point(20, 0x02), accountAt(9, 20))
+	applyAccounts(t, s, point(30, 0x03), accountAt(10, 30))
+	require.NoError(t, s.PruneJournal(25))
+
+	keys, covered = changedIn(t, s, 3, 5)
+	require.True(t, covered)
+	require.Equal(t, []byte{3, 4, 5}, keys)
+	floor, ok := s.AddedIndexFloorForTest(badgerutxo.AccountTag)
+	require.True(t, ok)
+	require.Equal(t, built, floor, "the prune made the segment read the table")
+
+	keys, covered = changedIn(t, s, built, 24)
+	require.True(t, covered)
+	require.Equal(t, []byte{9}, keys, "account 9 was added at slot 20")
+}
+
+// A merge's reconcile marks inactive, at the tip's slot, an account the
+// snapshot no longer lists. That slot is below the floor the merge raised, so
+// an index built while the merge ran does not name the account there.
+func TestAccountsChangedInBelowTheFloorFollowsAMerge(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(11, 0x01))
+	loadAccountsAtSlots(t, s, 1, 2, 3)
+
+	require.NoError(t, s.BeginMerge())
+	loadAccountsAtSlots(t, s, 1, 2)
+	keys, covered := changedIn(t, s, 1, 11)
+	require.True(t, covered)
+	require.Equal(t, []byte{1, 2, 3}, keys)
+
+	stale := accountAt(3, 11)
+	stale.Active = false
+	_, err := s.ApplyLedgerBatch(nil, badgerutxo.LedgerBatch{
+		Accounts: []badgerutxo.AccountPut{{Slot: 11, Row: stale}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.EndMerge(true))
+
+	keys, covered = changedIn(t, s, 11, 11)
+	require.True(t, covered)
+	require.Equal(t, []byte{3}, keys, "the reconcile wrote account 3 at slot 11")
+}

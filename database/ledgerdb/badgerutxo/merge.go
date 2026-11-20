@@ -176,6 +176,9 @@ func (s *Store) BeginMerge() error {
 // only stops the merge mode, leaving the mark for the run that finishes it.
 func (s *Store) EndMerge(complete bool) error {
 	s.merging.Store(false)
+	// The reconcile that ends a merge rewrites rows below the floor the
+	// merge raised, outside any load.
+	s.bumpRowsRewritten()
 	if !complete {
 		return nil
 	}

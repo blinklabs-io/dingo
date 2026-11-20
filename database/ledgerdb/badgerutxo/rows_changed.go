@@ -70,9 +70,10 @@ func changedFloor(txn *badger.Txn) (uint64, error) {
 //
 // A range wholly below the floor is served from the rows themselves: addedSlot
 // reads the AddedSlot out of a row's value, and the rows added in the range are
-// named by an index of the family, built on first use and kept until a
-// rollback, load or floor change could have put a row below the floor. A nil
-// addedSlot leaves such a range uncovered.
+// named by an index of the family, built on first use. It serves every range
+// below the floor it was built at, until a rollback, load, merge, restore or
+// reset could have put a row there. A nil addedSlot leaves such a range
+// uncovered.
 //
 // It stops after fn returns ErrStopRows, or after stepping over maxVisit
 // journal entries of any family, and returns the position to resume after.
