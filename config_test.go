@@ -316,6 +316,23 @@ func TestProgrammaticPublicAPIConfigAcceptsRemoteAddresses(t *testing.T) {
 	}
 }
 
+// History expiry runs in either storage mode, as it did in v0.94.2.
+func TestNodeAllowsHistoryExpiryInAPIStorageMode(t *testing.T) {
+	t.Parallel()
+	cardanoCfg := newNodeTestCardanoNodeCfg(t)
+	_, err := New(NewConfig(
+		WithCardanoNodeConfig(cardanoCfg),
+		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
+		WithStorageMode(StorageModeAPI),
+		WithHistoryExpiry(HistoryExpiryConfig{Enabled: true, Frequency: time.Minute}),
+		WithListeners(ListenerConfig{
+			ListenNetwork: "tcp",
+			ListenAddress: "127.0.0.1:0",
+		}),
+	))
+	require.NoError(t, err)
+}
+
 func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 	t.Parallel()
 

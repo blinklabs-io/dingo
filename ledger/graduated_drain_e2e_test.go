@@ -47,13 +47,13 @@ func graduatedTables() map[nodesettings.Family][]string {
 }
 
 // drainEveryGraduatedFamily drains the whole of statedrain.Graduated in its
-// own order, verified, with the statement guard armed.
+// own order with the statement guard armed.
 func drainEveryGraduatedFamily(t *testing.T, h *p5Harness) {
 	t.Helper()
 	src := drainTestSource{set: h.set, db: h.scenario.DB}
 	h.drainErr = statedrain.Run(t.Context(), statedrain.Env{
 		Store: drainStore{h.scenario.DB, h.scenario.DrainFamilies},
-		Set:   src, Guard: h.guard, VerifyBeforeDrain: true,
+		Set:   src, Guard: h.guard,
 	}, statedrain.Graduated(src))
 }
 
@@ -283,7 +283,7 @@ func newRewardBoundaryRun(
 	guard *statedrain.TripGuard,
 ) *rewardBlocksRun {
 	t.Helper()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, guard, true)
+	r := newRewardBlocksRun(t, "set", guard, true)
 	s := r.scenario
 	s.Collateral(0xc0, 1_000)
 	s.Block(9, s.PoolB)
@@ -321,7 +321,7 @@ func TestEveryGraduatedFamilyDrainedTogetherCapturesTheSameRewardInputs(
 			src := rewardBlocksDrainSource{r: r}
 			require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
 				Store: drainStore{s.DB, s.DrainFamilies}, Set: src,
-				Guard: guard, VerifyBeforeDrain: true,
+				Guard: guard,
 			}, statedrain.Graduated(src)))
 		}
 		out := map[string]string{}

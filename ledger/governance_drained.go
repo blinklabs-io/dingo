@@ -40,7 +40,7 @@ func (ls *LedgerState) drainedGovernanceReader(
 	txn ledgerdb.Txn,
 ) (GovernanceReader, error) {
 	r := ls.governanceReader(txn)
-	if _, mode := ls.utxoSetReader(); r == nil || mode == UtxoSetReadsOff {
+	if _, mode := ls.utxoSetReader(); r == nil || !mode {
 		return nil, drainedUnserved(nodesettings.FamilyGovernance)
 	}
 	if !ls.governanceSetLoaded.Load() {
@@ -218,40 +218,12 @@ func (s stagingLedgerDB) setDrainedVote(
 	return nil
 }
 
-// deleteDrainedDRepVotes is DeleteGovernanceVotesForDrep for a drained
-// family.
-func (s stagingLedgerDB) deleteDrainedDRepVotes(
-	credentialTag uint8,
-	credential []byte,
-	epoch uint64,
-	deletedSlot uint64,
-	txn ledgerdb.Txn,
-) (int, error) {
-	r, err := s.ls.drainedGovernanceReader(txn)
-	if err != nil {
-		return 0, err
-	}
-	changes, err := s.ls.drepVoteDeletions(
-		r, txn, credentialTag, credential, epoch, deletedSlot,
-	)
-	if err != nil {
-		return 0, err
-	}
-	if len(changes) > 0 {
-		s.ls.stageGovernance(txn, LedgerChanges{Votes: changes})
-	}
-	return len(changes), nil
-}
-
 // GetAllGovernanceProposals lists the set's proposals in row ID order, soft
 // deleted ones included, when the family is drained.
 func (s stagingLedgerDB) GetAllGovernanceProposals(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	if !s.ls.governanceDrained() {
-		return s.LedgerDB.GetAllGovernanceProposals(ctx, txn)
-	}
 	r, err := s.ls.drainedGovernanceReader(txn)
 	if err != nil {
 		return nil, err
@@ -272,14 +244,11 @@ func (s stagingLedgerDB) GetAllGovernanceProposals(
 }
 
 // GetAllGovernanceVotes lists the set's votes, soft deleted ones included,
-// when the family is drained.
+// from the set.
 func (s stagingLedgerDB) GetAllGovernanceVotes(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceVoteRef, error) {
-	if !s.ls.governanceDrained() {
-		return s.LedgerDB.GetAllGovernanceVotes(ctx, txn)
-	}
 	r, err := s.ls.drainedGovernanceReader(txn)
 	if err != nil {
 		return nil, err
@@ -311,9 +280,6 @@ func (s stagingLedgerDB) GetGovernanceProposalsRefundedAt(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.GovernanceProposal, error) {
-	if !s.ls.governanceDrained() {
-		return s.LedgerDB.GetGovernanceProposalsRefundedAt(epoch, txn)
-	}
 	r, err := s.ls.drainedGovernanceReader(txn)
 	if err != nil {
 		return nil, err

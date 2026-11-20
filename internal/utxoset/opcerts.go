@@ -113,8 +113,9 @@ func (s *Set) OpCertState(pool []byte) (*ledger.OpCertState, error) {
 }
 
 // OpCertStateAt returns pool's counter as a rollback to slot would leave
-// it. The set keeps history only from its load and within its journal, so a
-// returned state whose Slot is after slot means it has no record of slot.
+// it. The set keeps history only from its load and within its journal, so
+// the oldest counter it holds answers every earlier slot, and its Slot may be
+// after slot.
 func (s *Set) OpCertStateAt(
 	pool []byte,
 	slot uint64,

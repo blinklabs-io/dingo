@@ -34,7 +34,7 @@ import (
 
 func TestBlockNumbersDifferFromStorageIDs(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
+	adapter, raw, _ := newDBBackedAdapter(t)
 	raw.SetMaxOpenConns(1)
 	// The second entry models an EBB sharing its parent's number.
 	blocks := []models.Block{
@@ -44,18 +44,12 @@ func TestBlockNumbersDifferFromStorageIDs(t *testing.T) {
 		{ID: 5, Number: 4, Slot: 40, Hash: fill32(4), Cbor: []byte{4}},
 	}
 	for _, block := range blocks {
-		require.NoError(t, db.BlockCreate(block, nil))
+		require.NoError(t, adapter.ledgerState.Database().BlockCreate(block, nil))
 	}
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(40, blocks[3].Hash),
-				BlockNumber: 4,
-			},
-			nil,
-		),
-	)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point:       ocommon.NewPoint(40, blocks[3].Hash),
+		BlockNumber: 4,
+	})
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	t.Run("successor hash", func(t *testing.T) {
@@ -130,21 +124,15 @@ func TestBlockNumbersDifferFromStorageIDs(t *testing.T) {
 
 func TestNeighborBlocksStopAtAppliedTip(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
-	chain := seedChain(t, db, 5)
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point: ocommon.NewPoint(
-					chain[2].SlotNumber(),
-					chain[2].Hash().Bytes(),
-				),
-				BlockNumber: 3,
-			},
-			nil,
+	adapter, _, _ := newDBBackedAdapter(t)
+	chain := seedChain(t, adapter, 5)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			chain[2].SlotNumber(),
+			chain[2].Hash().Bytes(),
 		),
-	)
+		BlockNumber: 3,
+	})
 	blocks, total, err := adapter.neighborBlocks(
 		context.Background(),
 		chain[2].Hash().String(),
@@ -158,11 +146,11 @@ func TestNeighborBlocksStopAtAppliedTip(t *testing.T) {
 
 func TestRangeBoundsStopAtAppliedTipBeforePrefetchedEBB(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
+	adapter, _, _ := newDBBackedAdapter(t)
 	for i, number := range []uint64{1, 1, 2} {
 		require.NoError(
 			t,
-			db.BlockCreate(
+			adapter.ledgerState.Database().BlockCreate(
 				models.Block{
 					ID:     uint64(i) + 2,
 					Number: number,
@@ -174,16 +162,10 @@ func TestRangeBoundsStopAtAppliedTipBeforePrefetchedEBB(t *testing.T) {
 			),
 		)
 	}
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(10, fill32(1)),
-				BlockNumber: 1,
-			},
-			nil,
-		),
-	)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point:       ocommon.NewPoint(10, fill32(1)),
+		BlockNumber: 1,
+	})
 	for _, number := range []uint64{1, 99} {
 		bound, ok, err := adapter.resolveBlockRangeBound(
 			context.Background(),
@@ -198,10 +180,10 @@ func TestRangeBoundsStopAtAppliedTipBeforePrefetchedEBB(t *testing.T) {
 
 func TestRangeBoundsRequireAnAppliedTip(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
+	adapter, _, _ := newDBBackedAdapter(t)
 	require.NoError(
 		t,
-		db.BlockCreate(
+		adapter.ledgerState.Database().BlockCreate(
 			models.Block{
 				ID:     1,
 				Number: 0,
@@ -222,16 +204,10 @@ func TestRangeBoundsRequireAnAppliedTip(t *testing.T) {
 		require.False(t, ok)
 		require.Nil(t, bound)
 	}
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(20, fill32(2)),
-				BlockNumber: 0,
-			},
-			nil,
-		),
-	)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point:       ocommon.NewPoint(20, fill32(2)),
+		BlockNumber: 0,
+	})
 	_, _, err := adapter.resolveBlockRangeBound(
 		context.Background(),
 		&BlockRangePosition{Block: 0},
@@ -240,29 +216,14 @@ func TestRangeBoundsRequireAnAppliedTip(t *testing.T) {
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
-func TestNeighborBlocksWithoutAppliedTipAreEmpty(t *testing.T) {
-	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
-	chain := seedChain(t, db, 2)
-	blocks, total, err := adapter.neighborBlocks(
-		context.Background(),
-		chain[0].Hash().String(),
-		PaginationParams{Count: 1, Page: 1, Order: PaginationOrderAsc},
-		true,
-	)
-	require.NoError(t, err)
-	require.Empty(t, blocks)
-	require.Zero(t, total)
-}
-
 func TestNextBlockHashDoesNotRequireSuccessorBody(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
+	adapter, raw, _ := newDBBackedAdapter(t)
 	raw.SetMaxOpenConns(1)
 	hash := fill32(0x81)
 	require.NoError(
 		t,
-		db.BlockCreate(
+		adapter.ledgerState.Database().BlockCreate(
 			models.Block{
 				ID:     3,
 				Number: 1,
@@ -273,10 +234,10 @@ func TestNextBlockHashDoesNotRequireSuccessorBody(t *testing.T) {
 			nil,
 		),
 	)
-	txn := db.BlobTxn(true)
+	txn := adapter.ledgerState.Database().BlobTxn(true)
 	require.NoError(
 		t,
-		db.Blob().Delete(txn.Blob(), types.BlockBlobKey(20, hash)),
+		adapter.ledgerState.Database().Blob().Delete(txn.Blob(), types.BlockBlobKey(20, hash)),
 	)
 	require.NoError(t, txn.Commit())
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -289,7 +250,7 @@ func TestNextBlockHashDoesNotRequireSuccessorBody(t *testing.T) {
 
 func seedSparseChain(
 	t *testing.T,
-	db *database.Database,
+	adapter *NodeAdapter,
 	ids []uint64,
 ) []models.Block {
 	t.Helper()
@@ -305,27 +266,21 @@ func seedSparseChain(
 			Cbor:   []byte{0x80},
 			Type:   uint(gledger.BlockTypeConway),
 		}
-		require.NoError(t, db.BlockCreate(block, nil))
+		require.NoError(t, adapter.ledgerState.Database().BlockCreate(block, nil))
 		blocks = append(blocks, block)
 	}
 	last := blocks[len(blocks)-1]
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(last.Slot, last.Hash),
-				BlockNumber: last.Number,
-			},
-			nil,
-		),
-	)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point:       ocommon.NewPoint(last.Slot, last.Hash),
+		BlockNumber: last.Number,
+	})
 	return blocks
 }
 
 func TestNextBlockHashSkipsSparseIDs(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
-	blocks := seedSparseChain(t, db, []uint64{2, 1000, 1005})
+	adapter, _, _ := newDBBackedAdapter(t)
+	blocks := seedSparseChain(t, adapter, []uint64{2, 1000, 1005})
 	tip := ocommon.NewPoint(blocks[2].Slot, blocks[2].Hash)
 	for i := range 2 {
 		next, err := adapter.nextBlockHash(
@@ -342,8 +297,8 @@ func TestNextBlockHashSkipsSparseIDs(t *testing.T) {
 
 func TestNeighborBlocksSkipSparseIDs(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
-	blocks := seedSparseChain(t, db, []uint64{2, 1000, 1005, 2000})
+	adapter, _, _ := newDBBackedAdapter(t)
+	blocks := seedSparseChain(t, adapter, []uint64{2, 1000, 1005, 2000})
 	heights := func(got []models.Block) []uint64 { return heightsOf(got) }
 	ctx := t.Context()
 
@@ -400,13 +355,13 @@ func (c errCountingContext) Err() error {
 
 func TestNeighborBlocksOutOfRangePageDoesNotWalkTheIndex(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
+	adapter, _, _ := newDBBackedAdapter(t)
 	const wide = 100
 	ids := make([]uint64, wide+10)
 	for i := range ids {
 		ids[i] = uint64(i) + 1
 	}
-	blocks := seedSparseChain(t, db, ids)
+	blocks := seedSparseChain(t, adapter, ids)
 
 	steps := func(hash []byte, page, count int, forward bool) ([]models.Block, int64) {
 		var calls atomic.Int64
@@ -441,12 +396,12 @@ func TestNeighborBlocksOutOfRangePageDoesNotWalkTheIndex(t *testing.T) {
 
 func TestNeighborBlocksDeepPageJumpsByBlockNumber(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
+	adapter, _, _ := newDBBackedAdapter(t)
 	ids := make([]uint64, 1200)
 	for i := range ids {
 		ids[i] = uint64(i)*3 + 1
 	}
-	blocks := seedSparseChain(t, db, ids)
+	blocks := seedSparseChain(t, adapter, ids)
 
 	run := func(hash []byte, forward bool) ([]uint64, int64) {
 		var calls atomic.Int64
@@ -480,7 +435,7 @@ type indexedBlock struct {
 // chain can carry Byron boundary blocks that share their parent's number.
 func seedIndexedBlocks(
 	t *testing.T,
-	db *database.Database,
+	adapter *NodeAdapter,
 	specs []indexedBlock,
 ) []models.Block {
 	t.Helper()
@@ -496,20 +451,14 @@ func seedIndexedBlocks(
 			Cbor:   []byte{0x80},
 			Type:   spec.typ,
 		}
-		require.NoError(t, db.BlockCreate(block, nil))
+		require.NoError(t, adapter.ledgerState.Database().BlockCreate(block, nil))
 		blocks = append(blocks, block)
 	}
 	last := blocks[len(blocks)-1]
-	require.NoError(
-		t,
-		db.SetTip(
-			ochainsync.Tip{
-				Point:       ocommon.NewPoint(last.Slot, last.Hash),
-				BlockNumber: last.Number,
-			},
-			nil,
-		),
-	)
+	setIndexerTip(t, adapter, ochainsync.Tip{
+		Point:       ocommon.NewPoint(last.Slot, last.Hash),
+		BlockNumber: last.Number,
+	})
 	return blocks
 }
 
@@ -596,8 +545,8 @@ func TestNeighborBlocksCountEntriesSharingAHeight(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			adapter, _, db := newDBBackedAdapter(t)
-			blocks := seedIndexedBlocks(t, db, specs)
+			adapter, _, _ := newDBBackedAdapter(t)
+			blocks := seedIndexedBlocks(t, adapter, specs)
 			assertEveryNeighborPage(t, adapter, blocks)
 		})
 	}
@@ -605,7 +554,7 @@ func TestNeighborBlocksCountEntriesSharingAHeight(t *testing.T) {
 
 func TestNeighborBlocksDeepPageAfterBoundaryBlocksStaysBounded(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
+	adapter, _, _ := newDBBackedAdapter(t)
 	specs := []indexedBlock{
 		{1, 0, uint(gledger.BlockTypeByronMain)},
 		{2, 1, uint(gledger.BlockTypeByronMain)},
@@ -619,7 +568,7 @@ func TestNeighborBlocksDeepPageAfterBoundaryBlocksStaysBounded(t *testing.T) {
 			typ:    uint(gledger.BlockTypeConway),
 		})
 	}
-	blocks := seedIndexedBlocks(t, db, specs)
+	blocks := seedIndexedBlocks(t, adapter, specs)
 
 	run := func(origin models.Block, forward bool) ([]string, int64) {
 		var calls atomic.Int64
@@ -658,7 +607,7 @@ func TestNeighborBlocksDeepPageAfterBoundaryBlocksStaysBounded(t *testing.T) {
 
 func TestNeighborBlocksPageStartOnPrunedChain(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
+	adapter, _, _ := newDBBackedAdapter(t)
 	specs := []indexedBlock{
 		{1, 0, uint(gledger.BlockTypeByronMain)},
 		{2, 1, uint(gledger.BlockTypeByronMain)},
@@ -672,13 +621,13 @@ func TestNeighborBlocksPageStartOnPrunedChain(t *testing.T) {
 			typ:    uint(gledger.BlockTypeConway),
 		})
 	}
-	blocks := seedIndexedBlocks(t, db, specs)
+	blocks := seedIndexedBlocks(t, adapter, specs)
 
 	// History expires oldest first; only the last 20 blocks keep their body.
 	expired := blocks[:len(blocks)-20]
-	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+	require.NoError(t, adapter.ledgerState.Database().BlobTxn(true).Do(func(txn *database.Txn) error {
 		for _, block := range expired {
-			if err := db.Blob().TombstoneBlock(
+			if err := adapter.ledgerState.Database().Blob().TombstoneBlock(
 				txn.Blob(), block.Slot, block.Hash,
 			); err != nil {
 				return err
@@ -701,8 +650,8 @@ func TestNeighborBlocksPageStartOnPrunedChain(t *testing.T) {
 
 func TestNeighborBlocksTotalIsStableAcrossPages(t *testing.T) {
 	t.Parallel()
-	adapter, _, db := newDBBackedAdapter(t)
-	blocks := seedIndexedBlocks(t, db, []indexedBlock{
+	adapter, _, _ := newDBBackedAdapter(t)
+	blocks := seedIndexedBlocks(t, adapter, []indexedBlock{
 		{1, 1, uint(gledger.BlockTypeByronMain)},
 		{2, 1, uint(gledger.BlockTypeByronEbb)},
 		{3, 2, uint(gledger.BlockTypeByronMain)},

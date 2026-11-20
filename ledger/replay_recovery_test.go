@@ -66,6 +66,9 @@ func newReplayRecoveryLedgerState(
 	config LedgerStateConfig,
 ) (*LedgerState, error) {
 	t.Helper()
+	if config.UtxoSet == nil {
+		config.UtxoSet = NewMemLiveSetForTest()
+	}
 	ls, err := NewLedgerState(config)
 	if ls != nil {
 		t.Cleanup(func() { require.NoError(t, ls.Close()) })
@@ -1059,6 +1062,8 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		[]types.UtxoKey{{TxId: producerTxHash, OutputIdx: 0}},
 		failingBlock.Slot,
 	))
+
+	seedTestOutputCBOR(t, db, producerTxHash, 0, 100)
 
 	validationErr := &txValidationError{
 		BlockPoint: ocommon.NewPoint(
@@ -3709,6 +3714,7 @@ func TestTryRecoverFromTxValidationErrorSkipsUnknownProducer(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	recovered, err := ls.tryRecoverFromTxValidationError(
 		&txValidationError{
 			BlockPoint: ocommon.NewPoint(100, testHashBytes("current")),
@@ -3924,6 +3930,8 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 		AddedSlot: producerBlock.Slot,
 	}))
 
+	seedTestLiveOutput(t, ls, producerTxHash, 1, 11688720)
+
 	validationErr := &txValidationError{
 		BlockPoint: currentTip.Point,
 		TxHash:     testHashBytes("script-data-hash-failing-tx"),
@@ -4129,6 +4137,8 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 		Amount:    types.Uint64(1_000_000),
 		AddedSlot: 10,
 	}))
+
+	seedTestLiveOutput(t, ls, presentTx, 0, 1_000_000)
 
 	index := &replayRecoveryChainIndex{
 		Txs: make(map[string]replayRecoveryChainTx),

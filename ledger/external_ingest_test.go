@@ -19,12 +19,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
@@ -49,6 +48,7 @@ type externalIngestHarness struct {
 	ls       *LedgerState
 	db       *database.Database
 	cm       *chain.ChainManager
+	closeSet func() error
 	shutOnce sync.Once
 }
 
@@ -103,9 +103,11 @@ func newExternalIngestHarnessWith(
 	if securityParam != 0 {
 		cfg.ShelleyGenesis().SecurityParam = securityParam
 	}
+	set, closeSet := OpenUtxoOnlyLiveSetForTest(t, dataDir)
 	lsCfg := LedgerStateConfig{
 		Database:              db,
 		ChainManager:          cm,
+		UtxoSet:               set,
 		CardanoNodeConfig:     cfg,
 		Logger:                testLogger(),
 		PromRegistry:          prometheus.NewRegistry(),
@@ -117,7 +119,7 @@ func newExternalIngestHarnessWith(
 	}
 	ls, err := NewLedgerState(lsCfg)
 	require.NoError(t, err)
-	h := &externalIngestHarness{ls: ls, db: db, cm: cm}
+	h := &externalIngestHarness{ls: ls, db: db, cm: cm, closeSet: closeSet}
 	t.Cleanup(func() { h.shutdown(t) })
 	nonce := bytes.Repeat([]byte{0x42}, 32)
 	ls.currentEra = eras.ConwayEraDesc
@@ -157,6 +159,7 @@ func (h *externalIngestHarness) shutdown(t testing.TB) {
 	t.Helper()
 	h.shutOnce.Do(func() {
 		require.NoError(t, h.ls.Close())
+		require.NoError(t, h.closeSet())
 		require.NoError(t, dbtest.CloseDatabase(h.db))
 	})
 }
@@ -258,25 +261,33 @@ func (h *externalIngestHarness) applyPaused(
 	return tip, err
 }
 
-func utxoRowCount(t *testing.T, db *database.Database) int {
+// liveOutputs is the live UTxO set of h's ledger as tx_id:index strings,
+// sorted.
+func liveOutputs(t *testing.T, h *externalIngestHarness) []string {
 	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	return rowBatchingQueryOne[int](t, raw, `SELECT COUNT(*) FROM utxo`)
+	it, ok := h.ls.config.UtxoSet.(UtxoSetIterator)
+	require.True(t, ok)
+	var keys []string
+	require.NoError(t, it.EachUtxo(func(txID []byte, idx uint32, _ []byte) error {
+		keys = append(keys, fmt.Sprintf("%X:%d", txID, idx))
+		return nil
+	}))
+	slices.Sort(keys)
+	return keys
 }
 
-func utxoRowExists(
+func outputLive(
 	t *testing.T,
-	db *database.Database,
+	h *externalIngestHarness,
 	txHash []byte,
 	idx uint32,
 ) bool {
 	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	r, ok := h.ls.config.UtxoSet.(UtxoSetReader)
+	require.True(t, ok)
+	_, live, err := r.Get(txHash, idx)
 	require.NoError(t, err)
-	return rowBatchingQueryOne[int](t, raw,
-		`SELECT COUNT(*) FROM utxo WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = ?`,
-		txHash, idx) > 0
+	return live
 }
 
 func TestApplyTrustedBatchRequiresPause(t *testing.T) {
@@ -296,14 +307,14 @@ func TestApplyTrustedBatchStaleTip(t *testing.T) {
 
 	h := newExternalIngestHarness(t, false)
 	blocks, _ := externalIngestBlocks(t, 0)
-	before := utxoRowCount(t, h.db)
+	before := len(liveOutputs(t, h))
 
 	stale := ocommon.NewPoint(5, bytes.Repeat([]byte{0x99}, 32))
 	tip, err := h.applyPaused(t, stale, blocks)
 	require.ErrorIs(t, err, ErrStaleBatch)
 	require.Equal(t, ocommon.Point{}.Slot, tip.Slot)
 	require.Equal(t, ochainsync.Tip{}, h.ls.Tip(), "the ledger tip moved")
-	require.Equal(t, before, utxoRowCount(t, h.db), "the UTxO set changed")
+	require.Equal(t, before, len(liveOutputs(t, h)), "the UTxO set changed")
 	require.Zero(t, h.cm.PrimaryChain().Tip().Point.Slot,
 		"a stale batch must not store blocks")
 }
@@ -319,26 +330,24 @@ func TestApplyTrustedBatchIntraBatchSpend(t *testing.T) {
 
 	// register:0 is created in block 1 and spent by spend in block 2, and
 	// spend:1 is created in block 2 and spent by chain in block 3.
-	require.False(t, utxoRowExists(t, h.db, names["register"].hash, 0),
-		"an output created and spent within the batch was written")
-	require.False(t, utxoRowExists(t, h.db, names["spend"].hash, 1),
-		"an output created and spent within the batch was written")
-	require.True(t, utxoRowExists(t, h.db, names["spend"].hash, 0))
-	require.True(t, utxoRowExists(t, h.db, names["chain"].hash, 0))
+	require.False(t, outputLive(t, h, names["register"].hash, 0),
+		"an output created and spent within the batch is live")
+	require.False(t, outputLive(t, h, names["spend"].hash, 1),
+		"an output created and spent within the batch is live")
+	require.True(t, outputLive(t, h, names["spend"].hash, 0))
+	require.True(t, outputLive(t, h, names["chain"].hash, 0))
 	// The phase-2-invalid transaction consumed only its collateral
 	// (register:1) and produced only its collateral return (invalid:1),
 	// which retspend then spent.
-	require.True(t, utxoRowExists(t, h.db, names["drep"].hash, 0),
+	require.True(t, outputLive(t, h, names["drep"].hash, 0),
 		"an invalid transaction's regular input was consumed")
-	require.False(t, utxoRowExists(t, h.db, names["register"].hash, 1),
-		"collateral created and spent within the batch was written")
-	require.False(t, utxoRowExists(t, h.db, names["invalid"].hash, 0),
+	require.False(t, outputLive(t, h, names["register"].hash, 1),
+		"collateral created and spent within the batch is live")
+	require.False(t, outputLive(t, h, names["invalid"].hash, 0),
 		"an invalid transaction's regular output was produced")
-	require.False(t, utxoRowExists(t, h.db, names["invalid"].hash, 1),
-		"a collateral return created and spent within the batch was written")
-	require.True(t, utxoRowExists(t, h.db, names["retspend"].hash, 0))
-	_, err = h.db.UtxoByRef(t.Context(), names["chain"].hash, 0, nil)
-	require.NoError(t, err)
+	require.False(t, outputLive(t, h, names["invalid"].hash, 1),
+		"a collateral return created and spent within the batch is live")
+	require.True(t, outputLive(t, h, names["retspend"].hash, 0))
 }
 
 func TestApplyTrustedBatchSingleCommit(t *testing.T) {
@@ -368,16 +377,31 @@ func TestApplyTrustedBatchSingleCommit(t *testing.T) {
 	require.Equal(t, tip.Hash, stored.Point.Hash)
 }
 
-// withoutPruneFloor drops the consumed-UTxO prune floor from a digest. The
-// periodic cleanup writes it from whatever tip it last saw, so it records
-// when cleanup ran, not what was applied.
+// withoutPruneFloor drops the consumed-UTxO prune floor from a digest, and
+// from its table's row count. The cleanup writes it from whatever tip it last
+// saw, so it records when cleanup ran, not what was applied.
 func withoutPruneFloor(digest string) string {
 	lines := strings.Split(digest, "\n")
 	kept := lines[:0]
+	header := -1
 	for _, line := range lines {
-		if !strings.HasPrefix(line, "sync_key=consumed_utxo_prune_floor|") {
-			kept = append(kept, line)
+		if strings.HasPrefix(line, "## ") {
+			header = len(kept)
 		}
+		if strings.HasPrefix(line, "sync_key=consumed_utxo_prune_floor|") {
+			var table string
+			var n int
+			_, err := fmt.Sscanf(kept[header], "## %s (%d)", &table, &n)
+			if err == nil {
+				kept[header] = fmt.Sprintf("## %s (%d)", table, n-1)
+			}
+			if n == 1 {
+				// An empty table still renders its blank row line.
+				kept = append(kept, "")
+			}
+			continue
+		}
+		kept = append(kept, line)
 	}
 	return strings.Join(kept, "\n")
 }
@@ -412,13 +436,10 @@ func TestApplyTrustedBatchSplitsTxnTooBig(t *testing.T) {
 		h.ls.trustedBatchSplit = func(int) { splits.Add(1) }
 		var commits atomic.Int64
 		h.ls.afterLedgerWriteCommit = func() { commits.Add(1) }
-		overlays := h.countOverlays()
 		tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
 		require.NoError(t, err)
 		require.Equal(t, blockPoint(blocks[len(blocks)-1]), tip)
 		assert.Positive(t, splits.Load())
-		assert.Positive(t, overlays.Load(),
-			"the split halves must apply through the overlay")
 		total := 0
 		for _, n := range committed {
 			assert.LessOrEqual(t, n, limit)
@@ -479,7 +500,7 @@ func TestApplyTrustedBatchCrashBetweenStores(t *testing.T) {
 	stored, err := h.db.GetTip(nil)
 	require.NoError(t, err)
 	require.Zero(t, stored.Point.Slot, "the metadata tip moved")
-	require.Zero(t, utxoRowCount(t, h.db), "metadata rows were committed")
+	require.Empty(t, liveOutputs(t, h), "outputs were committed")
 	require.Equal(t,
 		blocks[len(blocks)-1].Hash().Bytes(),
 		h.cm.PrimaryChain().Tip().Point.Hash,
@@ -488,25 +509,14 @@ func TestApplyTrustedBatchCrashBetweenStores(t *testing.T) {
 
 	// Replay from the unchanged committed tip over the stored blobs.
 	fail.Store(false)
-	overlays := h.countOverlays()
 	tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
 	require.NoError(t, err)
-	require.Positive(t, overlays.Load(),
-		"the replay must apply through the overlay")
 	require.Equal(t, blockPoint(blocks[len(blocks)-1]), tip)
 	require.Equal(t,
 		rowBatchingDigest(t, clean.db),
 		rowBatchingDigest(t, h.db),
 		"re-replay after the crash diverged from a clean run",
 	)
-}
-
-// countOverlays counts the block-apply transactions h's ledger applies
-// through the batch UTxO overlay.
-func (h *externalIngestHarness) countOverlays() *atomic.Int64 {
-	var n atomic.Int64
-	h.ls.afterTrustedBatchOverlay = func() { n.Add(1) }
-	return &n
 }
 
 // countBatchedWrites counts the transactions h's ledger writes through the
@@ -562,22 +572,12 @@ func testApplyTrustedBatchMatchesReplay(t *testing.T, dropped bool) {
 	require.NoError(t, reference.ls.ProcessTrustedBlockBatches(
 		t.Context(), batches,
 	))
-	// The trusted path keeps spent rows until the routine consumed-UTxO
-	// sweep removes them; the external path never commits the rows its
-	// own batch created and spent. Sweep the reference to the same tip.
-	lastSlot := blocks[len(blocks)-1].SlotNumber()
-	pruned, err := reference.db.UtxosDeleteConsumed(
-		t.Context(), lastSlot, 1_000, nil,
-	)
-	require.NoError(t, err)
-	require.Positive(t, pruned, "the scenario must spend within the batch")
 
 	h := newExternalIngestHarness(t, false)
 	if dropped {
 		dropCatchUpIndexes(t, h.db)
 	}
 	batched := h.countBatchedWrites()
-	overlays := h.countOverlays()
 	tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
 	require.NoError(t, err)
 	require.Equal(t, blockPoint(blocks[len(blocks)-1]), tip)
@@ -585,8 +585,6 @@ func testApplyTrustedBatchMatchesReplay(t *testing.T, dropped bool) {
 		"the reference must take the unbatched path")
 	require.Positive(t, batched.Load(),
 		"a trusted batch must write through the row-batching accumulator")
-	require.Positive(t, overlays.Load(),
-		"a trusted batch must apply through the batch UTxO overlay")
 
 	if dropped {
 		// The run ends its cycle with the full rebuild; the digest
@@ -595,8 +593,8 @@ func testApplyTrustedBatchMatchesReplay(t *testing.T, dropped bool) {
 			BuildDeferredIndexes())
 	}
 	require.Equal(t,
-		rowBatchingDigest(t, reference.db),
-		rowBatchingDigest(t, h.db),
+		withoutPruneFloor(rowBatchingDigest(t, reference.db)),
+		withoutPruneFloor(rowBatchingDigest(t, h.db)),
 		"external ingest diverged from the trusted replay path",
 	)
 }
@@ -669,13 +667,9 @@ func TestPauseChainIngestResumesFromExternalTip(t *testing.T) {
 		blocks[split:],
 	)
 	require.NoError(t, err)
-	// The external path prunes spent rows up to each batch tip; the live loop
-	// leaves them to the routine sweep. Sweep the loop's store to the same tip.
-	_, err = h.db.UtxosDeleteConsumed(t.Context(), last.Slot, 1_000, nil)
-	require.NoError(t, err)
 	require.Equal(t,
-		rowBatchingDigest(t, reference.db),
-		rowBatchingDigest(t, h.db),
+		withoutPruneFloor(rowBatchingDigest(t, reference.db)),
+		withoutPruneFloor(rowBatchingDigest(t, h.db)),
 		"the resumed loop diverged from applying the same blocks externally",
 	)
 }
@@ -687,7 +681,7 @@ func requireNothingCommitted(t *testing.T, h *externalIngestHarness) {
 	stored, err := h.db.GetTip(nil)
 	require.NoError(t, err)
 	require.Zero(t, stored.Point.Slot, "the metadata tip moved")
-	require.Zero(t, utxoRowCount(t, h.db), "metadata rows were committed")
+	require.Empty(t, liveOutputs(t, h), "outputs were committed")
 }
 
 // TestApplyTrustedBatchTipMovesAfterGuard moves the ledger tip after the tip
@@ -880,18 +874,15 @@ func testApplyTrustedBatchCrossesEpochMatchesReplay(
 	var commits atomic.Int64
 	h.ls.afterLedgerWriteCommit = func() { commits.Add(1) }
 	batched := h.countBatchedWrites()
-	overlays := h.countOverlays()
 	tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
 	require.NoError(t, err)
 	require.Equal(t, blockPoint(blocks[len(blocks)-1]), tip)
-	require.GreaterOrEqual(t, overlays.Load(), int64(2),
-		"each side of the boundary must apply through the overlay")
 	require.Zero(t, referenceBatched.Load())
 	require.Positive(t, batched.Load(),
 		"a trusted batch must write through the row-batching accumulator")
 	require.GreaterOrEqual(t, commits.Load(), int64(3),
 		"the batch must split at the epoch boundary")
-	require.False(t, utxoRowExists(t, h.db, names["chain"].hash, 0),
+	require.False(t, outputLive(t, h, names["chain"].hash, 0),
 		"an output spent after the boundary was kept")
 
 	want := captureExternalIngestLedgerState(reference.ls)
@@ -906,8 +897,8 @@ func testApplyTrustedBatchCrossesEpochMatchesReplay(
 			BuildDeferredIndexes())
 	}
 	require.Equal(t,
-		rowBatchingDigest(t, reference.db),
-		rowBatchingDigest(t, h.db),
+		withoutPruneFloor(rowBatchingDigest(t, reference.db)),
+		withoutPruneFloor(rowBatchingDigest(t, h.db)),
 		"external ingest diverged from trusted replay across an epoch",
 	)
 }
@@ -921,27 +912,6 @@ func restartDigest(t *testing.T, db *database.Database) string {
 	return strings.ReplaceAll(
 		rowBatchingDigest(t, db), "|is_checkpoint=1", "|is_checkpoint=0",
 	)
-}
-
-// liveUtxoKeys lists the live UTxO set as tx_id:index strings.
-func liveUtxoKeys(t *testing.T, db *database.Database) []string {
-	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	rows, err := raw.Query(
-		`SELECT hex(tx_id) || ':' || output_idx FROM utxo
-		 WHERE deleted_slot = 0 ORDER BY 1`,
-	)
-	require.NoError(t, err)
-	defer rows.Close()
-	var keys []string
-	for rows.Next() {
-		var key string
-		require.NoError(t, rows.Scan(&key))
-		keys = append(keys, key)
-	}
-	require.NoError(t, rows.Err())
-	return keys
 }
 
 // TestApplyTrustedBatchCrashRestart fails a batch's metadata commit after its
@@ -961,20 +931,14 @@ func TestApplyTrustedBatchCrashRestart(t *testing.T) {
 		t.Helper()
 		dir := t.TempDir()
 		h := newExternalIngestHarnessAt(t, false, dir)
-		overlays := h.countOverlays()
 		_, err := h.applyPaused(t, ocommon.Point{}, first)
 		require.NoError(t, err)
-		require.Positive(t, overlays.Load(),
-			"the first batch must apply through the overlay")
 		injected := errors.New("injected crash before metadata commit")
 		h.ls.trustedBatchBeforeCommit = func([]gledger.Block) error {
 			return injected
 		}
-		before := overlays.Load()
 		_, err = h.applyPaused(t, firstTip, second)
 		require.ErrorIs(t, err, injected)
-		require.Greater(t, overlays.Load(), before,
-			"the crashed batch must apply through the overlay")
 		require.Equal(t, lastTip.Hash, h.cm.PrimaryChain().Tip().Point.Hash,
 			"the blob write precedes the metadata commit")
 		h.shutdown(t)
@@ -992,13 +956,10 @@ func TestApplyTrustedBatchCrashRestart(t *testing.T) {
 		h := newExternalIngestHarnessAt(t, false, crashed(t))
 		require.Equal(t, firstTip, h.ls.Tip().Point,
 			"the restart did not resume from the committed tip")
-		overlays := h.countOverlays()
 		tip, err := h.applyPaused(t, h.ls.Tip().Point, second)
 		require.NoError(t, err)
-		require.Positive(t, overlays.Load(),
-			"the replay after a restart must apply through the overlay")
 		require.Equal(t, lastTip, tip)
-		require.Equal(t, liveUtxoKeys(t, clean.db), liveUtxoKeys(t, h.db),
+		require.Equal(t, liveOutputs(t, clean), liveOutputs(t, h),
 			"duplicate or missing UTxOs after restart")
 		require.Equal(t,
 			restartDigest(t, clean.db),
@@ -1026,7 +987,7 @@ func TestApplyTrustedBatchCrashRestart(t *testing.T) {
 		testutil.WaitForCondition(t, func() bool {
 			return pointMatches(h.ls.Tip().Point, lastTip)
 		}, testutil.AsyncWait, "live fixture reaches its committed tip")
-		require.Equal(t, liveUtxoKeys(t, clean.db), liveUtxoKeys(t, h.db),
+		require.Equal(t, liveOutputs(t, clean), liveOutputs(t, h),
 			"duplicate or missing UTxOs after restart")
 		require.Equal(t,
 			restartDigest(t, clean.db),
@@ -1034,432 +995,6 @@ func TestApplyTrustedBatchCrashRestart(t *testing.T) {
 			"the live loop after a restart diverged from an uninterrupted run",
 		)
 	})
-}
-
-func spentUtxoRowCount(t *testing.T, db *database.Database) int {
-	t.Helper()
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	return rowBatchingQueryOne[int](t, raw,
-		`SELECT COUNT(*) FROM utxo WHERE deleted_slot != 0`)
-}
-
-// TestApplyTrustedBatchPrunesSpentRows spends, in later batches, outputs an
-// earlier batch committed, so the spent rows are committed rather than
-// dropped within a batch. The trusted cleanup after a batch must hard-delete
-// them, persist the prune floor at the batch tip and leave the live UTxO set
-// as a run without the cleanup has it; API storage mode must keep them.
-func TestApplyTrustedBatchPrunesSpentRows(t *testing.T) {
-	t.Parallel()
-
-	blocks, _ := externalIngestBlocks(t, 2)
-	tipOf := func(b []gledger.Block) ocommon.Point {
-		return blockPoint(b[len(b)-1])
-	}
-	// run applies the scenario as four batches. Holding
-	// cleanupConsumedUtxosRunning, as an in-flight periodic sweep does, keeps
-	// the trusted cleanup out of a batch.
-	run := func(
-		t *testing.T, mode string, cleanup func(batch int) bool,
-	) (*externalIngestHarness, []int) {
-		t.Helper()
-		h := newExternalIngestHarnessWith(t, false, t.TempDir(), mode, 0)
-		batches := [][]gledger.Block{
-			blocks[:3], blocks[3:4], blocks[4:5], blocks[5:],
-		}
-		spent := make([]int, 0, len(batches))
-		tip := ocommon.Point{}
-		for i, batch := range batches {
-			h.ls.cleanupConsumedUtxosRunning.Store(!cleanup(i))
-			var err error
-			tip, err = h.applyPaused(t, tip, batch)
-			require.NoError(t, err)
-			require.Equal(t, tipOf(batch), tip)
-			spent = append(spent, spentUtxoRowCount(t, h.db))
-		}
-		h.ls.cleanupConsumedUtxosRunning.Store(false)
-		return h, spent
-	}
-
-	for _, tc := range []struct {
-		name  string
-		mode  string
-		prune bool
-	}{
-		{name: "core", mode: types.StorageModeCore, prune: true},
-		{name: "api", mode: types.StorageModeAPI, prune: false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			reference, kept := run(t, tc.mode, func(int) bool { return false })
-			require.Positive(t, kept[1],
-				"the second batch must spend a committed output")
-			require.Greater(t, kept[2], kept[1],
-				"the third batch must spend another committed output")
-
-			// The second batch is held back from the cleanup, so its spent
-			// row is still there when the third batch prunes.
-			h, spent := run(t, tc.mode, func(batch int) bool {
-				return batch != 1
-			})
-			floor, err := h.ls.readConsumedUtxoPruneFloor(nil)
-			require.NoError(t, err)
-			require.Equal(t,
-				liveUtxoKeys(t, reference.db), liveUtxoKeys(t, h.db),
-				"the cleanup changed the live UTxO set")
-			if !tc.prune {
-				require.Equal(t, kept, spent,
-					"API storage mode must keep spent rows")
-				require.Zero(t, floor)
-				return
-			}
-			require.Equal(t, kept[1], spent[1])
-			require.Zero(t, spent[2],
-				"spent rows at or below the trusted tip were kept")
-			require.Zero(t, spent[3])
-			require.Equal(t, tipOf(blocks).Slot, floor,
-				"the prune floor must be persisted at the batch tip")
-		})
-	}
-}
-
-// TestApplyTrustedBatchPruneKeepsUpWithDenseBatch spends, in one batch, more
-// committed outputs than sixteen cleanup deletes remove. The cleanup after
-// that batch must drain every prunable row rather than stop at a fixed number
-// of deletes and leave the backlog to grow.
-func TestApplyTrustedBatchPruneKeepsUpWithDenseBatch(t *testing.T) {
-	t.Parallel()
-
-	const outputs = 40
-	seed := bytes.Repeat([]byte{0x7a}, 32)
-	addr := rowBatchingBaseAddress(t, 0x44, 0x22)
-	produced := make([]any, outputs)
-	for i := range produced {
-		produced[i] = map[uint]any{0: addr, 1: uint64(1_000_000)}
-	}
-	fanOut := newRowBatchingTx(t, map[uint]any{
-		0: []any{[]any{seed, uint64(0)}},
-		1: produced,
-		2: uint64(100_000),
-	})
-	spent := make([]any, outputs)
-	for i := range spent {
-		spent[i] = []any{fanOut.hash, uint64(i)}
-	}
-	fanIn := newRowBatchingTx(t, map[uint]any{
-		0: spent,
-		1: []any{map[uint]any{0: addr, 1: uint64(1_000_000)}},
-		2: uint64(100_000),
-	})
-	b1 := rowBatchingBlock(t, 10, 1, lcommon.Blake2b256{}, fanOut)
-	b2 := rowBatchingBlock(t, 20, 2, b1.Hash(), fanIn)
-
-	h := newExternalIngestHarness(t, false)
-	// One row per delete makes sixteen deletes fall short of this batch.
-	h.ls.trustedPruneRows = 1
-	tip, err := h.applyPaused(t, ocommon.Point{}, []gledger.Block{b1})
-	require.NoError(t, err)
-	tip, err = h.applyPaused(t, tip, []gledger.Block{b2})
-	require.NoError(t, err)
-	require.Equal(t, blockPoint(b2), tip)
-	require.Zero(t, spentUtxoRowCount(t, h.db),
-		"spent rows at or below the trusted tip were left behind")
-	backlog, err := h.db.CountUtxosConsumedUpTo(t.Context(), tip.Slot, 100)
-	require.NoError(t, err)
-	require.Zero(t, backlog)
-	require.Len(t, liveUtxoKeys(t, h.db), 1)
-}
-
-// TestApplyTrustedBatchPruneCadence applies the spend scenario of
-// TestApplyTrustedBatchPrunesSpentRows inside one outer pause, as the Mithril
-// stream does. The trusted cleanup must skip batches until the cadence is
-// reached, keep the live UTxO set identical to an every-batch cleanup while
-// spent rows wait, and prune everything up to the tip when it runs.
-func TestApplyTrustedBatchPruneCadence(t *testing.T) {
-	t.Parallel()
-
-	blocks, _ := externalIngestBlocks(t, 2)
-	batches := [][]gledger.Block{
-		blocks[:3], blocks[3:4], blocks[4:5], blocks[5:],
-	}
-	reference := newExternalIngestHarness(t, false)
-	referenceLive := make([][]string, len(batches))
-	tip := ocommon.Point{}
-	for i, batch := range batches {
-		var err error
-		tip, err = reference.applyPaused(t, tip, batch)
-		require.NoError(t, err)
-		referenceLive[i] = liveUtxoKeys(t, reference.db)
-	}
-
-	h := newExternalIngestHarness(t, false)
-	// The first batch of a process always prunes, so the cadence counts
-	// from the second: it prunes again after the fourth.
-	h.ls.trustedPruneEvery = 3
-	resume := h.ls.PauseChainIngest()
-	defer resume()
-	tip = ocommon.Point{}
-	spent := make([]int, len(batches))
-	for i, batch := range batches {
-		var err error
-		tip, err = h.ls.ApplyTrustedBatch(t.Context(), tip, batch)
-		require.NoError(t, err)
-		spent[i] = spentUtxoRowCount(t, h.db)
-		require.Equal(t, referenceLive[i], liveUtxoKeys(t, h.db),
-			"spent rows awaiting the cleanup changed the live UTxO set "+
-				"after batch %d", i)
-	}
-	require.Zero(t, spent[0])
-	require.Positive(t, spent[1],
-		"the cleanup ran before the cadence was reached")
-	require.Greater(t, spent[2], spent[1],
-		"the cleanup ran before the cadence was reached")
-	require.Zero(t, spent[3],
-		"spent rows at or below the trusted tip were kept at the cadence")
-	floor, err := h.ls.readConsumedUtxoPruneFloor(nil)
-	require.NoError(t, err)
-	require.Equal(t, tip.Slot, floor,
-		"the prune floor must be persisted at the batch tip")
-}
-
-// owedTrustedPrune applies two batches inside one pause with a cadence the
-// second does not reach, so the second batch's spent row is owed to the
-// cleanup. It returns the harness, still paused, and the trusted tip.
-func owedTrustedPrune(
-	t *testing.T,
-	opts ...func(*LedgerStateConfig),
-) (*externalIngestHarness, ocommon.Point) {
-	t.Helper()
-	blocks, _ := externalIngestBlocks(t, 2)
-	h := newExternalIngestHarnessWith(
-		t, false, t.TempDir(), types.StorageModeCore, 0, opts...,
-	)
-	h.ls.trustedPruneEvery = 100
-	resume := h.ls.PauseChainIngest()
-	t.Cleanup(resume)
-	tip, err := h.ls.ApplyTrustedBatch(t.Context(), ocommon.Point{}, blocks[:3])
-	require.NoError(t, err)
-	tip, err = h.ls.ApplyTrustedBatch(t.Context(), tip, blocks[3:5])
-	require.NoError(t, err)
-	require.Positive(t, spentUtxoRowCount(t, h.db),
-		"the second batch must leave spent rows for the cleanup")
-	return h, tip
-}
-
-// TestDrainTrustedPrune drains what the cadence left owed: every spent row up
-// to the trusted tip goes, the floor is persisted at it, and the live UTxO
-// set is unchanged. The drain reports its start and its end, with the rows
-// it deleted, at Info. Draining again with nothing owed is a silent no-op.
-func TestDrainTrustedPrune(t *testing.T) {
-	t.Parallel()
-
-	var logs syncSafeBuffer
-	h, tip := owedTrustedPrune(t, func(cfg *LedgerStateConfig) {
-		cfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
-	})
-	spent := spentUtxoRowCount(t, h.db)
-	live := liveUtxoKeys(t, h.db)
-	require.NoError(t, h.ls.DrainTrustedPrune(t.Context()))
-	require.Zero(t, spentUtxoRowCount(t, h.db),
-		"the drain left spent rows at or below the trusted tip")
-	floor, err := h.ls.readConsumedUtxoPruneFloor(nil)
-	require.NoError(t, err)
-	require.Equal(t, tip.Slot, floor)
-	require.Equal(t, live, liveUtxoKeys(t, h.db))
-	out := logs.String()
-	require.Equal(t, 1, strings.Count(
-		out,
-		"level=INFO msg=\"draining consumed UTxO cleanup owed by "+
-			"trusted batches\"",
-	))
-	require.Contains(t, out, fmt.Sprintf(
-		"level=INFO msg=\"finished consumed UTxO cleanup owed by trusted "+
-			"batches\" component=ledger pruned=%d", spent))
-	require.NoError(t, h.ls.DrainTrustedPrune(t.Context()))
-	require.Equal(t, out, logs.String(),
-		"a drain with nothing owed must not log")
-}
-
-// TestDrainTrustedPruneWaitsOutAnotherRun holds the cleanup, as an in-flight
-// periodic sweep does, when the drain starts. The drain must wait for it and
-// then prune, rather than give up and leave the backlog to live mode.
-func TestDrainTrustedPruneWaitsOutAnotherRun(t *testing.T) {
-	t.Parallel()
-
-	h, _ := owedTrustedPrune(t)
-	h.ls.cleanupConsumedUtxosRunning.Store(true)
-	done := make(chan error, 1)
-	go func() { done <- h.ls.DrainTrustedPrune(t.Context()) }()
-	testutil.RequireNoReceive(t, done, 300*time.Millisecond,
-		"the drain gave up while another cleanup run held the connection")
-	h.ls.cleanupConsumedUtxosRunning.Store(false)
-	require.NoError(t, testutil.RequireReceive(t, done, testutil.AsyncWait,
-		"the drain did not finish once the other run ended"))
-	require.Zero(t, spentUtxoRowCount(t, h.db),
-		"the drain left spent rows at or below the trusted tip")
-}
-
-// TestDrainTrustedPruneOutlastsBudget owes the cleanup forty spent rows and
-// gives it deletes of one row and a budget one delete exhausts. The drain
-// must keep going past the budget until nothing is owed.
-func TestDrainTrustedPruneOutlastsBudget(t *testing.T) {
-	t.Parallel()
-
-	const outputs = 40
-	seed := bytes.Repeat([]byte{0x7b}, 32)
-	addr := rowBatchingBaseAddress(t, 0x44, 0x22)
-	produced := make([]any, outputs)
-	for i := range produced {
-		produced[i] = map[uint]any{0: addr, 1: uint64(1_000_000)}
-	}
-	fanOut := newRowBatchingTx(t, map[uint]any{
-		0: []any{[]any{seed, uint64(0)}},
-		1: produced,
-		2: uint64(100_000),
-	})
-	spent := make([]any, outputs)
-	for i := range spent {
-		spent[i] = []any{fanOut.hash, uint64(i)}
-	}
-	fanIn := newRowBatchingTx(t, map[uint]any{
-		0: spent,
-		1: []any{map[uint]any{0: addr, 1: uint64(1_000_000)}},
-		2: uint64(100_000),
-	})
-	b1 := rowBatchingBlock(t, 10, 1, lcommon.Blake2b256{}, fanOut)
-	b2 := rowBatchingBlock(t, 20, 2, b1.Hash(), fanIn)
-
-	h := newExternalIngestHarness(t, false)
-	h.ls.trustedPruneEvery = 100
-	resume := h.ls.PauseChainIngest()
-	defer resume()
-	tip, err := h.ls.ApplyTrustedBatch(
-		t.Context(), ocommon.Point{}, []gledger.Block{b1},
-	)
-	require.NoError(t, err)
-	_, err = h.ls.ApplyTrustedBatch(t.Context(), tip, []gledger.Block{b2})
-	require.NoError(t, err)
-	require.Equal(t, outputs, spentUtxoRowCount(t, h.db))
-	h.ls.trustedPruneRows = 1
-	h.ls.trustedPruneBudget = time.Nanosecond
-	require.NoError(t, h.ls.DrainTrustedPrune(t.Context()))
-	require.Zero(t, spentUtxoRowCount(t, h.db),
-		"the drain stopped at the cleanup's time budget")
-}
-
-// TestDrainTrustedPruneStopsWithContext drains on an ended context, as a
-// lifecycle abort or a node shutdown leaves it. The drain must return the
-// context's error at once and delete nothing.
-func TestDrainTrustedPruneStopsWithContext(t *testing.T) {
-	t.Parallel()
-
-	h, _ := owedTrustedPrune(t)
-	spent := spentUtxoRowCount(t, h.db)
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	require.ErrorIs(t, h.ls.DrainTrustedPrune(ctx), context.Canceled)
-	require.Equal(t, spent, spentUtxoRowCount(t, h.db))
-}
-
-// TestApplyTrustedBatchPrunesBacklogAfterRestart leaves spent rows awaiting
-// the cleanup when the process stops, then restarts over the same store. The
-// restarted process's first trusted batch must prune the backlog the earlier
-// process left, rather than wait for a cadence it never counted.
-func TestApplyTrustedBatchPrunesBacklogAfterRestart(t *testing.T) {
-	t.Parallel()
-
-	blocks, _ := externalIngestBlocks(t, 2)
-	dir := t.TempDir()
-	h := newExternalIngestHarnessAt(t, false, dir)
-	h.ls.trustedPruneEvery = 100
-	tip, err := h.applyPaused(t, ocommon.Point{}, blocks[:3])
-	require.NoError(t, err)
-	// Held, as by an in-flight periodic sweep, the cleanup skips the second
-	// batch, as a process stopped before its cleanup would.
-	h.ls.cleanupConsumedUtxosRunning.Store(true)
-	tip, err = h.applyPaused(t, tip, blocks[3:5])
-	require.NoError(t, err)
-	h.ls.cleanupConsumedUtxosRunning.Store(false)
-	require.Positive(t, spentUtxoRowCount(t, h.db))
-	h.shutdown(t)
-
-	h = newExternalIngestHarnessAt(t, false, dir)
-	h.ls.trustedPruneEvery = 100
-	require.Positive(t, spentUtxoRowCount(t, h.db))
-	resume := h.ls.PauseChainIngest()
-	defer resume()
-	_, err = h.ls.ApplyTrustedBatch(t.Context(), tip, blocks[5:])
-	require.NoError(t, err)
-	require.Zero(t, spentUtxoRowCount(t, h.db),
-		"the first batch after a restart left the earlier backlog")
-}
-
-// TestApplyTrustedBatchPruneRetriedAfterSkip holds the cleanup, as an
-// in-flight periodic sweep does, on the batch that reaches the cadence. The
-// next batch must run it rather than count a new cadence from the skip.
-func TestApplyTrustedBatchPruneRetriedAfterSkip(t *testing.T) {
-	t.Parallel()
-
-	blocks, _ := externalIngestBlocks(t, 2)
-	h := newExternalIngestHarness(t, false)
-	h.ls.trustedPruneEvery = 2
-	resume := h.ls.PauseChainIngest()
-	defer resume()
-	tip, err := h.ls.ApplyTrustedBatch(t.Context(), ocommon.Point{}, blocks[:3])
-	require.NoError(t, err)
-	tip, err = h.ls.ApplyTrustedBatch(t.Context(), tip, blocks[3:4])
-	require.NoError(t, err)
-	h.ls.cleanupConsumedUtxosRunning.Store(true)
-	tip, err = h.ls.ApplyTrustedBatch(t.Context(), tip, blocks[4:5])
-	require.NoError(t, err)
-	h.ls.cleanupConsumedUtxosRunning.Store(false)
-	require.Positive(t, spentUtxoRowCount(t, h.db),
-		"the held cleanup must leave the spent rows")
-	_, err = h.ls.ApplyTrustedBatch(t.Context(), tip, blocks[5:])
-	require.NoError(t, err)
-	require.Zero(t, spentUtxoRowCount(t, h.db),
-		"a skipped cleanup was not retried on the next batch")
-}
-
-// TestApplyTrustedBatchPruneStopsAtTrustedTip leaves a trusted cleanup owed
-// past the pause, lets the live loop apply blocks above the trusted tip, and
-// then drains it. The owed cleanup must stop at the tip the
-// trusted batch committed: rows the live blocks spent lie inside the rollback
-// window, so neither they nor the prune floor may move.
-func TestApplyTrustedBatchPruneStopsAtTrustedTip(t *testing.T) {
-	t.Parallel()
-
-	blocks, _ := externalIngestBlocks(t, 2)
-	h := newExternalIngestHarness(t, false)
-	h.ls.trustedPruneEvery = 100
-	tip, err := h.applyPaused(t, ocommon.Point{}, blocks[:3])
-	require.NoError(t, err)
-	// Held, the cleanup skips the batch, so the batch's spent row is still
-	// owed when the live loop takes over.
-	h.ls.cleanupConsumedUtxosRunning.Store(true)
-	trusted, err := h.applyPaused(t, tip, blocks[3:4])
-	require.NoError(t, err)
-	h.ls.cleanupConsumedUtxosRunning.Store(false)
-	owed := spentUtxoRowCount(t, h.db)
-	require.Positive(t, owed)
-
-	h.startLiveLoop(t)
-	require.NoError(t, h.cm.PrimaryChain().AddBlocks(t.Context(), blocks[4:]))
-	last := blockPoint(blocks[len(blocks)-1])
-	testutil.WaitForCondition(t, func() bool {
-		return pointMatches(h.ls.Tip().Point, last)
-	}, testutil.AsyncWait, "live fixture reaches its committed tip")
-	require.Greater(t, spentUtxoRowCount(t, h.db), owed,
-		"the live blocks must spend a committed output")
-	liveSpent := spentUtxoRowCount(t, h.db) - owed
-
-	require.NoError(t, h.ls.DrainTrustedPrune(t.Context()))
-	require.Equal(t, liveSpent, spentUtxoRowCount(t, h.db),
-		"the owed cleanup pruned rows spent above the trusted tip")
-	floor, err := h.ls.readConsumedUtxoPruneFloor(nil)
-	require.NoError(t, err)
-	require.Equal(t, trusted.Slot, floor,
-		"the owed cleanup raised the prune floor above the trusted tip")
 }
 
 // A cancelled context makes the chain report every block absent. Storing

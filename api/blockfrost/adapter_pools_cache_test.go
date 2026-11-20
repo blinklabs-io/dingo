@@ -155,7 +155,7 @@ func TestPoolsListCachesUnderSnapshotTip(t *testing.T) {
 		Point:       ocommon.NewPoint(50, []byte("snapshot-tip-hash-0000000000")),
 		BlockNumber: 5,
 	}
-	require.NoError(t, db.SetTip(stored, nil))
+	setIndexerTip(t, adapter, stored)
 	adapter.ledgerState.SetTipForTesting(ochainsync.Tip{
 		Point:       ocommon.NewPoint(99, []byte("ledger-tip-hash-00000000000")),
 		BlockNumber: 9,

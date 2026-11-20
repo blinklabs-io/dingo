@@ -20,58 +20,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestValidateIndexerLayout(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		modify  func(*Config)
-		wantErr string
-	}{
-		{name: "default is shared", modify: func(*Config) {}},
-		{
-			name:   "split in api mode",
-			modify: func(c *Config) { c.StorageMode = "api"; c.Indexer.Layout = "split" },
-		},
-		{
-			name:    "split in core mode",
-			modify:  func(c *Config) { c.StorageMode = "core"; c.Indexer.Layout = "split" },
-			wantErr: "indexer.layout split needs storageMode api",
-		},
-		{
-			name: "split with history expiry",
-			modify: func(c *Config) {
-				c.StorageMode = "api"
-				c.Indexer.Layout = "split"
-				c.HistoryExpiry.Enabled = true
-			},
-			wantErr: "incompatible with historyExpiry.enabled",
-		},
-		{
-			name:    "unknown layout",
-			modify:  func(c *Config) { c.Indexer.Layout = "sharded" },
-			wantErr: `invalid indexer.layout "sharded"`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			cfg := validTestConfig()
-			tt.modify(cfg)
-			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
-			if tt.wantErr == "" {
-				require.NoError(t, err)
-				return
-			}
-			require.ErrorContains(t, err, tt.wantErr)
-		})
-	}
-}
-
 func TestIndexerDefaults(t *testing.T) {
 	t.Parallel()
 	cfg := &Config{}
 	cfg.ApplyDefaults()
-	require.Equal(t, IndexerLayoutShared, cfg.Indexer.Layout)
 	require.Equal(
 		t,
 		DefaultIndexerMaxReadyLagBlocks,
@@ -79,70 +31,26 @@ func TestIndexerDefaults(t *testing.T) {
 	)
 }
 
-func TestConsensusStorageModeIsCoreOnTheSplitLayout(t *testing.T) {
+// API storage mode always uses a separate IndexerDB, including in-memory nodes.
+func TestSplitIndexerFollowsStorageMode(t *testing.T) {
 	t.Parallel()
-	cfg := &Config{StorageMode: "api"}
-	require.Equal(t, "api", cfg.ConsensusStorageMode())
-	require.False(t, cfg.SplitIndexer())
-	cfg.Indexer.Layout = IndexerLayoutSplit
-	require.True(t, cfg.SplitIndexer())
-	require.Equal(t, "core", cfg.ConsensusStorageMode())
-}
-
-// The split layout runs the IndexerDB in API mode and the consensus store in
-// core mode, so the core-mode requirements of the live UTxO set apply to the
-// consensus store, not to the configured storageMode.
-func TestValidateIndexerSplitWithLiveUtxoSet(t *testing.T) {
-	t.Parallel()
-	split := func(c *Config) {
-		c.StorageMode = "api"
-		c.Indexer.Layout = IndexerLayoutSplit
-		c.LedgerUtxoBadger = true
-		c.LedgerUtxoBadgerOnly = true
-		c.LedgerUtxoReads = "set"
-	}
 	tests := []struct {
-		name    string
-		modify  func(*Config)
-		wantErr string
+		name          string
+		mode          string
+		databasePath  string
+		wantSplit     bool
+		wantConsensus string
 	}{
-		{name: "split with badger only", modify: split},
-		{
-			name: "shared api with badger only",
-			modify: func(c *Config) {
-				split(c)
-				c.Indexer.Layout = IndexerLayoutShared
-			},
-			wantErr: "ledgerUtxoBadgerOnly needs core storage mode",
-		},
-		{
-			name: "split with set only",
-			modify: func(c *Config) {
-				split(c)
-				c.LedgerStateSetOnly = true
-			},
-		},
-		{
-			name: "shared api with set only",
-			modify: func(c *Config) {
-				split(c)
-				c.Indexer.Layout = IndexerLayoutShared
-				c.LedgerStateSetOnly = true
-			},
-			wantErr: "ledgerStateSetOnly needs core storage mode",
-		},
+		{"api on disk", "api", "/data", true, "core"},
+		{"core on disk", "core", "/data", false, "core"},
+		{"api in memory", "api", "", true, "core"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			cfg := validTestConfig()
-			tt.modify(cfg)
-			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
-			if tt.wantErr == "" {
-				require.NoError(t, err)
-				return
-			}
-			require.ErrorContains(t, err, tt.wantErr)
+			cfg := &Config{StorageMode: tt.mode, DatabasePath: tt.databasePath}
+			require.Equal(t, tt.wantSplit, cfg.SplitIndexer())
+			require.Equal(t, tt.wantConsensus, cfg.ConsensusStorageMode())
 		})
 	}
 }

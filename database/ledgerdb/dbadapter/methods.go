@@ -498,9 +498,7 @@ func (a Adapter) SetGenesisStakingWithDeposits(
 	blockHash []byte,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
-		return err
-	}
+	// The metadata store skips the tables of a drained family.
 	return a.db.SetGenesisStakingWithDeposits(
 		pools,
 		stakeDelegations,
@@ -2079,12 +2077,7 @@ func (a Adapter) SetGenesisGovernance(
 	blockHash []byte,
 	txn ledgerdb.Txn,
 ) error {
-	if err := a.familyDrained(nodesettings.FamilyAccounts); err != nil {
-		return err
-	}
-	if err := a.familyDrained(nodesettings.FamilyDReps); err != nil {
-		return err
-	}
+	// The metadata store skips the tables of a drained family.
 	return a.db.SetGenesisGovernance(
 		initialDReps,
 		delegs,
@@ -3126,14 +3119,6 @@ func (a Adapter) GetPParamsRows(
 	txn ledgerdb.Txn,
 ) ([]models.PParams, error) {
 	return a.db.GetPParamRows(epoch, eraId, dbTxn(txn))
-}
-
-func (a Adapter) UtxoRollbackChanges(
-	ctx context.Context,
-	slot uint64,
-	txn ledgerdb.Txn,
-) ([]models.UtxoId, []models.Utxo, error) {
-	return a.db.UtxoRollbackChanges(ctx, slot, dbTxn(txn))
 }
 
 func (a Adapter) GetLatestEpochSummary(

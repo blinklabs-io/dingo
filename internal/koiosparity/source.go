@@ -215,6 +215,12 @@ type DatabaseSource struct {
 	// ldb is the LedgerDB the ledger state reads go through, so they see
 	// what the ledger sees: the live UTxO set's answer in set mode.
 	ldb ledgerdb.LedgerDB
+	// history is the database the transaction sample reads: db itself, or
+	// the IndexerDB set by WithTransactionHistory.
+	history *database.Database
+	// historyTrails records that history is filled behind db, so a closed
+	// epoch is sampled only once history's tip covers it.
+	historyTrails bool
 }
 
 // NewDatabaseSource wraps an already-open, in-process *database.Database as
@@ -240,7 +246,24 @@ func NewDatabaseSourceWithLedgerDB(
 			"koiosparity: DatabaseSource requires a non-nil database and LedgerDB",
 		)
 	}
-	return &DatabaseSource{db: db, ldb: ldb}, nil
+	return &DatabaseSource{db: db, ldb: ldb, history: db}, nil
+}
+
+// WithTransactionHistory makes the transaction sample read history, the
+// IndexerDB of an API node, whose consensus database runs in core mode and
+// holds no transaction history. The reward state is still read from the
+// consensus database. The IndexerDB is filled asynchronously, so a sample of
+// an epoch its tip has not passed is ErrTransactionHistoryPending. A nil
+// history leaves the source unchanged.
+func (s *DatabaseSource) WithTransactionHistory(
+	history *database.Database,
+) *DatabaseSource {
+	if history == nil {
+		return s
+	}
+	s.history = history
+	s.historyTrails = true
+	return s
 }
 
 // GetLatestEpoch returns the highest epoch number Dingo has committed an

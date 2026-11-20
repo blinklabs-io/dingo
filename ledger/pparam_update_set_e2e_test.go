@@ -32,7 +32,7 @@ var pparamUpdateReadNames = []string{
 }
 
 // pparamUpdateOutcome runs the proposal scenario in reads mode and returns
-// what the forecasts and proposal reads answered. In set mode the store's
+// what the forecasts and proposal reads answered. With the live set the store's
 // proposal reads fail, and the count of reads that reached it is returned.
 func pparamUpdateOutcome(
 	t *testing.T,
@@ -42,12 +42,12 @@ func pparamUpdateOutcome(
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(t, set, reads)
+	scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(t, set)
 	require.NoError(t, set.LoadLedgerState(
 		t.Context(), dbadapter.New(scenario.DB),
 	))
 	count := func() int64 { return 0 }
-	if reads == ledger.UtxoSetReadsSet {
+	if reads == "set" {
 		count = scenario.HideStoreReads(pparamUpdateReadNames...)
 	}
 	read := func(stage string, epoch uint64) {
@@ -93,27 +93,26 @@ func pparamUpdateOutcome(
 }
 
 // TestPParamUpdateReadsFromTheLiveUtxoSet requires the forecast and the
-// proposal read to give, in set mode with the store's reads failing, the
-// answers they give in verify mode, through proposals of both kinds of
+// proposal read to give, from the live set with the store's reads failing, the
+// answers they give with metadata reads available, through proposals of both kinds of
 // transaction, an invalid transaction's, a boundary and a rollback.
 func TestPParamUpdateReadsFromTheLiveUtxoSet(t *testing.T) {
 	t.Parallel()
-	verify, _ := pparamUpdateOutcome(t, ledger.UtxoSetReadsVerify)
-	setMode, reached := pparamUpdateOutcome(t, ledger.UtxoSetReadsSet)
-	require.Equal(t, verify, setMode)
+	visible, _ := pparamUpdateOutcome(t, "metadata-visible")
+	setMode, reached := pparamUpdateOutcome(t, "set")
+	require.Equal(t, visible, setMode)
 	require.Zero(t, reached, "a proposal read reached the metadata store")
 }
 
-// TestPParamUpdateReadsStayOnTheStoreInVerifyMode requires verify mode to
-// answer from the metadata store: a proposal written around the ledger shows
-// in the answer.
-func TestPParamUpdateReadsStayOnTheStoreInVerifyMode(t *testing.T) {
+// TestPParamUpdateReadsUseTheSetAfterAnUntrackedStoreWrite requires an
+// update written outside the ledger to stay out of the set's answer.
+func TestPParamUpdateReadsUseTheSetAfterAnUntrackedStoreWrite(t *testing.T) {
 	t.Parallel()
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(
-		t, set, ledger.UtxoSetReadsVerify,
+		t, set,
 	)
 	require.NoError(t, set.LoadLedgerState(
 		t.Context(), dbadapter.New(scenario.DB),
@@ -124,7 +123,7 @@ func TestPParamUpdateReadsStayOnTheStoreInVerifyMode(t *testing.T) {
 	})
 	rows, err := scenario.Updates(1)
 	require.NoError(t, err)
-	require.True(t, slices.ContainsFunc(rows, func(u models.PParamUpdate) bool {
+	require.False(t, slices.ContainsFunc(rows, func(u models.PParamUpdate) bool {
 		return u.GenesisHash[0] == 7
-	}), "the store's proposal is in the answer")
+	}), "an untracked store proposal is absent from the set")
 }

@@ -46,13 +46,6 @@ const (
 	LeiosAnnouncementStaleOCIN
 )
 
-// errOpCertBaselineNotImported reports a Mithril-restored database that holds
-// no certified operational-certificate counter at its trust boundary, so a
-// pool with no later observation has no known counter at all.
-var errOpCertBaselineNotImported = errors.New(
-	"certified opcert counter baseline missing at the Mithril trust boundary",
-)
-
 // opCertFromHeader extracts the operational certificate from a Praos/TPraos
 // block header. The Shelley-family headers carry the opcert fields flat on the
 // header body; the Babbage-family headers (Babbage/Conway/Dijkstra) nest them

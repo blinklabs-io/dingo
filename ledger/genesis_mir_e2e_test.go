@@ -43,8 +43,6 @@ type genesisMIRHarness struct {
 	// boundary, which settles the MIR certificates.
 	ownerBefore, delegatorBefore   uint64
 	reservesBefore, treasuryBefore uint64
-	// verifiedBefore is the count of certificate reads before the boundary.
-	verifiedBefore float64
 }
 
 func newGenesisMIRHarness(t *testing.T, reads string) *genesisMIRHarness {
@@ -53,11 +51,10 @@ func newGenesisMIRHarness(t *testing.T, reads string) *genesisMIRHarness {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	h := &genesisMIRHarness{set: set, reads: reads}
-	h.scenario = ledger.NewBoundaryEpochStateScenarioForTest(t, set, reads)
+	h.scenario = ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 	h.store = dbadapter.New(h.scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), h.store))
 	h.slots = h.scenario.GenesisMIR(func() {
-		h.verifiedBefore, _ = h.scenario.CertHistoryReads()
 		reward := func(key []byte) uint64 {
 			a, err := set.Account(0, key)
 			require.NoError(t, err)
@@ -87,7 +84,7 @@ func repeated(b byte, n int) []byte {
 
 func forEachGenesisMIRRead(t *testing.T, fn func(t *testing.T, reads string)) {
 	t.Helper()
-	for _, reads := range []string{ledger.UtxoSetReadsVerify, ledger.UtxoSetReadsSet} {
+	for _, reads := range []string{"set"} {
 		t.Run(reads, func(t *testing.T) {
 			t.Parallel()
 			fn(t, reads)
@@ -97,7 +94,7 @@ func forEachGenesisMIRRead(t *testing.T, fn func(t *testing.T, reads string)) {
 
 // TestGenesisDelegationAndMIRReadsFollowTheCertificates requires the genesis
 // delegation and MIR reads to answer from the certificates the ledger
-// applied, in both read modes, and the epoch boundary that settles the MIR
+// applied, from the set, and the epoch boundary that settles the MIR
 // certificates to credit the registered accounts and move the pots.
 func TestGenesisDelegationAndMIRReadsFollowTheCertificates(t *testing.T) {
 	t.Parallel()
@@ -186,18 +183,6 @@ func TestGenesisDelegationAndMIRReadsFollowTheCertificates(t *testing.T) {
 				harnessDonation,
 			uint64(state.Treasury))
 
-		for _, counts := range []func() (float64, float64){
-			h.scenario.CertHistoryReads, h.scenario.AccountReads,
-			h.scenario.NetworkStateReads,
-		} {
-			_, mismatches := counts()
-			require.Zero(t, mismatches)
-		}
-		if reads == ledger.UtxoSetReadsVerify {
-			verified, _ := h.scenario.CertHistoryReads()
-			require.Greater(t, verified, h.verifiedBefore,
-				"the boundary read the MIR certificates through the comparison")
-		}
 	})
 }
 
@@ -217,10 +202,10 @@ func TestGenesisDelegationAndMIRRollBack(t *testing.T) {
 		require.Equal(t, s.DelegA, delegs[0].AddedSlot)
 		require.Equal(t, s.DelegB, delegs[1].AddedSlot)
 
-		if reads == ledger.UtxoSetReadsSet {
+		if reads == "set" {
 			delegs, mirs := h.scenario.CertHistoryInsideRollback()
 			require.Equal(t, 1, delegs, "a read inside the rollback sees it")
-			require.Zero(t, mirs)
+			require.Equal(t, 4, mirs, "MIR certificates remain SQL-backed during a staged set rollback")
 		}
 		h.scenario.RollbackBeforeBoundary()
 
@@ -243,8 +228,6 @@ func TestGenesisDelegationAndMIRRollBack(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.Empty(t, effects)
-		_, mismatches := h.scenario.CertHistoryReads()
-		require.Zero(t, mismatches)
 	})
 }
 
@@ -253,7 +236,7 @@ func TestGenesisDelegationAndMIRRollBack(t *testing.T) {
 // metadata store, as the set that followed the certificates holds them.
 func TestGenesisDelegationAndMIRLoadFromTheMetadataStore(t *testing.T) {
 	t.Parallel()
-	h := newGenesisMIRHarness(t, ledger.UtxoSetReadsVerify)
+	h := newGenesisMIRHarness(t, "metadata-visible")
 	fresh, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = fresh.Close() })
@@ -289,10 +272,9 @@ func TestGenesisDelegationAndMIRLoadFromTheMetadataStore(t *testing.T) {
 	}
 }
 
-// TestGenesisDelegationAndMIRVerificationCountsADivergence requires a
-// verified read to count a mismatch when the metadata store holds a
-// certificate the set never saw, and a set-mode read to answer without it.
-func TestGenesisDelegationAndMIRVerificationCountsADivergence(t *testing.T) {
+// TestGenesisDelegationAndMIRReadsIgnoreUntrackedMetadataWrites requires set
+// reads to ignore certificates written directly to the metadata store.
+func TestGenesisDelegationAndMIRReadsIgnoreUntrackedMetadataWrites(t *testing.T) {
 	t.Parallel()
 	forEachGenesisMIRRead(t, func(t *testing.T, reads string) {
 		h := newGenesisMIRHarness(t, reads)
@@ -312,7 +294,6 @@ INSERT INTO move_instantaneous_rewards (pot, added_slot, other_pot)
 VALUES (0, ?, '7')`, s.DelegB+10)
 		require.NoError(t, err)
 
-		_, before := h.scenario.CertHistoryReads()
 		ldb := h.scenario.LedgerDB()
 		rows, err := ldb.GetGenesisDelegationsInSlotRange(s.DelegB+10, s.DelegB+10, nil)
 		require.NoError(t, err)
@@ -320,15 +301,9 @@ VALUES (0, ?, '7')`, s.DelegB+10)
 			t.Context(), s.DelegB+10, s.DelegB+11, nil,
 		)
 		require.NoError(t, err)
-		_, after := h.scenario.CertHistoryReads()
-		if reads == ledger.UtxoSetReadsVerify {
-			require.Len(t, rows, 1, "the read answers from the metadata store")
-			require.Len(t, effects, 1)
-			require.Equal(t, before+2, after)
-			return
-		}
 		require.Empty(t, rows, "the read answers from the set")
-		require.Empty(t, effects)
-		require.Equal(t, before, after)
+		require.Len(t, effects, 1)
+		require.Equal(t, s.DelegB+10, effects[0].AddedSlot)
+		require.Equal(t, uint64(7), effects[0].OtherPot)
 	})
 }

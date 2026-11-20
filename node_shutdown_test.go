@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
 	"io"
 	"log/slog"
 	"sync"
@@ -359,6 +360,7 @@ func TestNodeStopSkipsLedgerStateCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      livesettest.New(),
 		ChainManager: chainManager,
 		Logger: slog.New(nodeTestLogSignalHandler{
 			message: "waiting for in-flight header replay goroutines",
@@ -440,6 +442,7 @@ func TestNodeStopClosesLedgerStateWhenPhase1DrainConfirmed(t *testing.T) {
 	ledgerCloseStarted := make(chan struct{}, 1)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
+		UtxoSet:      livesettest.New(),
 		ChainManager: chainManager,
 		Logger: slog.New(nodeTestLogSignalHandler{
 			message: "waiting for in-flight header replay goroutines",

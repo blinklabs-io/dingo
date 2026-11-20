@@ -280,7 +280,7 @@ func requireDrainedPoolAnswers(
 
 // p4DrainRun registers a pool, rotates its VRF key, retires another pool and
 // reaps it at the boundary, rolls back before all of it and replays it. With
-// drain set the pools-history family is drained, after verification, before
+// drain set the pools-history family is drained before
 // the first certificate.
 func p4DrainRun(
 	t *testing.T,
@@ -293,7 +293,7 @@ func p4DrainRun(
 	t.Cleanup(func() { _ = set.Close() })
 	guard := statedrain.NewTripGuard()
 	scenario := ledger.NewGuardedBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet, guard,
+		t, set, guard,
 	)
 	run := poolRun{reads: map[string][]string{}, guard: guard, db: scenario.DB}
 	require.NoError(
@@ -313,7 +313,7 @@ func p4DrainRun(
 		require.Len(t, entries, 1)
 		if err := statedrain.Run(t.Context(), statedrain.Env{
 			Store: drainStore{scenario.DB, scenario.DrainFamilies}, Set: src,
-			Guard: guard, VerifyBeforeDrain: true,
+			Guard: guard,
 		}, entries); err != nil {
 			return run, err
 		}
@@ -407,41 +407,6 @@ func TestPoolsHistoryDrainMatchesAnUndrainedRun(t *testing.T) {
 	)
 }
 
-// A set that differs from the metadata store refuses the drain and leaves the
-// rows.
-func TestPoolsHistoryDrainVerifyMismatchRefusesTheDrain(t *testing.T) {
-	t.Parallel()
-	for name, corrupt := range map[string]func(*database.Database){
-		"a registration only the store holds": func(db *database.Database) {
-			reg := models.PoolRegistration{
-				PoolKeyHash: make([]byte, 28), VrfKeyHash: make([]byte, 32),
-				RewardAccount: make([]byte, 28), AddedSlot: 7,
-			}
-			require.NoError(t, db.ImportPool(
-				t.Context(), nil,
-				&models.Pool{
-					PoolKeyHash: reg.PoolKeyHash, VrfKeyHash: reg.VrfKeyHash,
-					RewardAccount: reg.RewardAccount,
-				}, &reg,
-			))
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			run, err := p4DrainRun(t, true, corrupt)
-			require.ErrorIs(t, err, statedrain.ErrGateRefused)
-			require.ErrorContains(t, err, "differ")
-			mask, err := run.db.DrainedFamilies(t.Context())
-			require.NoError(t, err)
-			require.False(t, mask.Has(nodesettings.FamilyPoolsHistory))
-			raw, err := dbtest.RawSQLiteMetadata(t, run.db)
-			require.NoError(t, err)
-			require.Positive(t, tableRows(t, raw, "pool"))
-			require.Positive(t, tableRows(t, raw, "pool_registration"))
-		})
-	}
-}
-
 // With the family drained and the set not holding it, the LedgerDB and the
 // database fail the read rather than answer from the empty SQL tables.
 func TestDrainedPoolReadsFailWhenTheSetCannotServe(t *testing.T) {
@@ -450,7 +415,7 @@ func TestDrainedPoolReadsFailWhenTheSetCannotServe(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	// The set never loads the metadata store's rows.
 	require.NoError(t, scenario.DB.RecordDrainedFamily(

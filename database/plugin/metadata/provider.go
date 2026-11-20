@@ -23,6 +23,9 @@ import (
 // ProviderDependencies are shared application settings injected into any
 // storage.metadata provider.
 type ProviderDependencies struct {
+	// CoreNamespace selects a provider-owned consensus database beside the
+	// configured API database. Its released configuration remains the IndexerDB.
+	CoreNamespace bool
 	// GenesisStakingEmpty certifies that the loaded genesis has no initial staking.
 	GenesisStakingEmpty bool
 	DataDir             string

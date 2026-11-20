@@ -234,6 +234,7 @@ func TestWaitForTxAlreadyCommittedPreservesFirstRequestOrder(t *testing.T) {
 		utxorpc: NewUtxorpc(UtxorpcConfig{
 			EventBus:      eb,
 			LedgerState:   ledgerState,
+			QueryDatabase: stubQueryDB(ledgerState),
 			ServerTimeout: time.Second,
 		}),
 	}
@@ -301,6 +302,7 @@ func TestWaitForTxCommitDuringLookupIsConfirmedOnce(t *testing.T) {
 				utxorpc: NewUtxorpc(UtxorpcConfig{
 					EventBus:      eb,
 					LedgerState:   ledgerState,
+					QueryDatabase: stubQueryDB(ledgerState),
 					ServerTimeout: 100 * time.Millisecond,
 				}),
 			}
@@ -345,6 +347,7 @@ func TestWaitForTxCommittedLookupError(t *testing.T) {
 		utxorpc: NewUtxorpc(UtxorpcConfig{
 			EventBus:      eb,
 			LedgerState:   ledgerState,
+			QueryDatabase: stubQueryDB(ledgerState),
 			ServerTimeout: time.Second,
 		}),
 	}
@@ -555,6 +558,7 @@ func TestWaitForTxTimeoutCancelsCommittedLookupAndUnsubscribes(
 		utxorpc: NewUtxorpc(UtxorpcConfig{
 			EventBus:      eb,
 			LedgerState:   ledgerState,
+			QueryDatabase: stubQueryDB(ledgerState),
 			ServerTimeout: 100 * time.Millisecond,
 		}),
 	}
@@ -1956,6 +1960,7 @@ func TestWaitForTxLooksUpEveryReferenceInOneBatch(t *testing.T) {
 		utxorpc: NewUtxorpc(UtxorpcConfig{
 			EventBus:      newControlledWaitForTxEventBus(),
 			LedgerState:   ledgerState,
+			QueryDatabase: stubQueryDB(ledgerState),
 			ServerTimeout: time.Second,
 		}),
 	}

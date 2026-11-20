@@ -23,7 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -54,7 +53,7 @@ func registrationEventCredentials(
 // certificate tables does, before and after a rollback.
 func TestRegistrationEventCredentialsAreServedFromTheSet(t *testing.T) {
 	t.Parallel()
-	h := newRegistrationHarnessWith(t, ledger.UtxoSetReadsSet, nil)
+	h := newRegistrationHarnessWith(t, "set", nil)
 	ldb := h.scenario.LedgerDB()
 	s := h.slots
 	ranges := [][2]uint64{
@@ -92,16 +91,12 @@ func TestRegistrationEventCredentialsAreServedFromTheSet(t *testing.T) {
 func TestRegistrationEventCredentialsMatchTheStoreInVerifyMode(t *testing.T) {
 	t.Parallel()
 	h := newRegistrationHarness(t)
-	verifiedBefore, before := h.scenario.RegistrationReads()
 	got := registrationEventCredentials(
 		t, h.scenario.LedgerDB(), 0, math.MaxInt64,
 	)
 	require.Equal(
 		t, registrationEventCredentials(t, h.store, 0, math.MaxInt64), got,
 	)
-	verified, mismatches := h.scenario.RegistrationReads()
-	require.Greater(t, verified, verifiedBefore, "the read was compared")
-	require.Equal(t, before, mismatches)
 	// Written around the ledger, so the set never sees it.
 	cred := bytes.Repeat([]byte{0x7e}, 28)
 	raw, err := dbtest.RawSQLiteMetadata(t, h.scenario.DB)
@@ -113,8 +108,6 @@ VALUES (?, 0, ?)`, cred, 5)
 	_ = registrationEventCredentials(
 		t, h.scenario.LedgerDB(), 0, math.MaxInt64,
 	)
-	_, after := h.scenario.RegistrationReads()
-	require.Equal(t, before+1, after, "the set's answer differs")
 }
 
 // A write transaction sees the registrations it staged and none the staged
@@ -123,7 +116,7 @@ func TestRegistrationEventCredentialsSeeStagedRegistrationsAndRollbacks(
 	t *testing.T,
 ) {
 	t.Parallel()
-	h := newRegistrationHarnessWith(t, ledger.UtxoSetReadsSet, nil)
+	h := newRegistrationHarnessWith(t, "set", nil)
 	s := h.slots
 	h.scenario.HideStoreReads(registrationEventsRead)
 	fresh := models.NewStakeCredentialRef(0, bytes.Repeat([]byte{0x9a}, 28))

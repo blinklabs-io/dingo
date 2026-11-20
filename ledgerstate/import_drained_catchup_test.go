@@ -20,6 +20,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -119,6 +120,30 @@ func openDrainFixtureSet(t *testing.T) *utxoset.Set {
 	return set
 }
 
+// importSetFor returns the live UTxO set of db in this test, opening it on
+// first use, so every import into db loads the set a node keeps beside it.
+func importSetFor(t *testing.T, db *database.Database) *utxoset.Set {
+	t.Helper()
+	importSetsMu.Lock()
+	defer importSetsMu.Unlock()
+	if set, ok := importSets[db]; ok {
+		return set
+	}
+	set := openDrainFixtureSet(t)
+	importSets[db] = set
+	t.Cleanup(func() {
+		importSetsMu.Lock()
+		delete(importSets, db)
+		importSetsMu.Unlock()
+	})
+	return set
+}
+
+var (
+	importSetsMu sync.Mutex
+	importSets   = map[*database.Database]*utxoset.Set{}
+)
+
 func newDrainFixtureDB(t *testing.T) *database.Database {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
@@ -142,7 +167,7 @@ func newDrainedFixture(t *testing.T) *drainedFixture {
 }
 
 // requireSetMatchesSQL compares every graduated family in set with the SQL
-// rows an undrained database holds, and the live outputs with its utxo rows.
+// rows an undrained database holds, and the live outputs with its own set's.
 func requireSetMatchesSQL(
 	t *testing.T,
 	undrained *database.Database,
@@ -172,8 +197,8 @@ func requireSetMatchesSQL(
 	}
 	require.Positive(t, checked)
 	want := map[string][]byte{}
-	require.NoError(t, undrained.IterateLiveUtxos(ctx, nil, func(u *models.Utxo) error {
-		want[string(u.TxId)+string(rune(u.OutputIdx))] = u.Cbor
+	require.NoError(t, importSetFor(t, undrained).EachUtxo(func(txID []byte, idx uint32, cbor []byte) error {
+		want[string(txID)+string(rune(idx))] = cbor
 		return nil
 	}))
 	got := map[string][]byte{}
@@ -228,10 +253,10 @@ func newUndrainedCatchUp(t *testing.T, slot uint64) *database.Database {
 	t.Helper()
 	db := newDrainFixtureDB(t)
 	require.NoError(t, ImportLedgerState(
-		t.Context(), drainFixtureConfig(t, db, drainFixtureAnchorSlot, false, nil),
+		t.Context(), drainFixtureConfig(t, db, drainFixtureAnchorSlot, false, importSetFor(t, db)),
 	))
 	require.NoError(t, ImportLedgerState(
-		t.Context(), drainFixtureConfig(t, db, slot, true, nil),
+		t.Context(), drainFixtureConfig(t, db, slot, true, importSetFor(t, db)),
 	))
 	return db
 }

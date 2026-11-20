@@ -134,6 +134,7 @@ func TestImportLedgerStateSeedsAnchorEpochDonations(t *testing.T) {
 				},
 			}
 			cfg := ImportConfig{
+				UtxoSet:  importSetFor(t, db),
 				Database: db,
 				Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 				State:    state,

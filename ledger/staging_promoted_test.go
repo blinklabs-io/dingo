@@ -86,7 +86,6 @@ var stagingPromoted = map[string]string{
 	"UtxoByRef":                               noFamilyRows,
 	"UtxoByRefIncludingSpent":                 noFamilyRows,
 	"UtxoExists":                              noFamilyRows,
-	"UtxoRollbackChanges":                     noFamilyRows,
 	"UtxosByAddress":                          noFamilyRows,
 	"UtxosByAddressAsOf":                      noFamilyRows,
 	"UtxosByRefs":                             noFamilyRows,

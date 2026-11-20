@@ -30,19 +30,26 @@ import (
 // only place where Mesh's dependency interface meets the storage
 // layer's own numbering and lookup helpers, so it is exercised against
 // real storage rather than a double.
-func newAdapterDatabase(t *testing.T) *database.Database {
+func newAdapterDatabase(
+	t *testing.T,
+) (consensus, indexerDB *database.Database) {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	consensus, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-	return db
+	indexerDB, err = dbtest.NewIndexerDatabase(
+		t, consensus, dbtest.IndexerOptions{},
+	)
+	require.NoError(t, err)
+	return consensus, indexerDB
 }
 
 func TestMeshDatabaseAdapterBlockByIndexUsesChainHeight(t *testing.T) {
 	t.Parallel()
 
-	db := newAdapterDatabase(t)
-	meshDB := NewMeshDatabase(db)
+	db, indexerDB := newAdapterDatabase(t)
+	meshDB := NewMeshDatabase(indexerDB)
 
 	// Heights 0, 1 and 2, stored in chain order as a from-genesis node
 	// would, so storage indices run 1, 2, 3.
@@ -79,8 +86,8 @@ func TestMeshDatabaseAdapterBlockByIndexUsesChainHeight(t *testing.T) {
 func TestMeshDatabaseAdapterBlockByHash(t *testing.T) {
 	t.Parallel()
 
-	db := newAdapterDatabase(t)
-	meshDB := NewMeshDatabase(db)
+	db, indexerDB := newAdapterDatabase(t)
+	meshDB := NewMeshDatabase(indexerDB)
 	hash := testHash(0x5a)
 	require.NoError(t, db.BlockCreate(models.Block{
 		Hash:   hash,
@@ -104,8 +111,8 @@ func TestMeshDatabaseAdapterBlockByHash(t *testing.T) {
 func TestMeshDatabaseAdapterEmptyDatabaseLookups(t *testing.T) {
 	t.Parallel()
 
-	db := newAdapterDatabase(t)
-	meshDB := NewMeshDatabase(db)
+	db, indexerDB := newAdapterDatabase(t)
+	meshDB := NewMeshDatabase(indexerDB)
 
 	t.Run("block by index not found", func(t *testing.T) {
 		_, err := meshDB.BlockByIndex(context.Background(), 9999)
@@ -148,7 +155,7 @@ func TestMeshDatabaseAdapterEmptyDatabaseLookups(t *testing.T) {
 
 func TestMeshHeightWithBoundaryBlockStorageOffset(t *testing.T) {
 	t.Parallel()
-	db := newAdapterDatabase(t)
+	db, indexerDB := newAdapterDatabase(t)
 	for i, number := range []uint64{0, 0, 1, 2} {
 		require.NoError(
 			t,
@@ -164,7 +171,7 @@ func TestMeshHeightWithBoundaryBlockStorageOffset(t *testing.T) {
 			),
 		)
 	}
-	block, err := NewMeshDatabase(db).BlockByIndex(context.Background(), 2)
+	block, err := NewMeshDatabase(indexerDB).BlockByIndex(context.Background(), 2)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), block.Number)
 	require.Equal(t, testHash(3), block.Hash)
@@ -172,7 +179,7 @@ func TestMeshHeightWithBoundaryBlockStorageOffset(t *testing.T) {
 
 func TestMeshRetainsUnsupportedHeightBoundary(t *testing.T) {
 	t.Parallel()
-	db := newAdapterDatabase(t)
+	db, indexerDB := newAdapterDatabase(t)
 	require.NoError(t, db.BlockCreate(models.Block{
 		ID: 1, Number: math.MaxUint64, Slot: 1, Hash: testHash(0xa9),
 		Cbor: []byte{0x80},
@@ -182,7 +189,7 @@ func TestMeshRetainsUnsupportedHeightBoundary(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(math.MaxUint64), block.Number)
-	_, err = NewMeshDatabase(db).BlockByIndex(
+	_, err = NewMeshDatabase(indexerDB).BlockByIndex(
 		context.Background(), math.MaxUint64,
 	)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
@@ -190,7 +197,7 @@ func TestMeshRetainsUnsupportedHeightBoundary(t *testing.T) {
 
 func TestMeshHeightBoundaryIsSignedInt64(t *testing.T) {
 	t.Parallel()
-	db := newAdapterDatabase(t)
+	db, indexerDB := newAdapterDatabase(t)
 	require.NoError(t, db.BlockCreate(models.Block{
 		ID: 1, Number: math.MaxInt64, Slot: 1, Hash: testHash(0xaa),
 		Cbor: []byte{0x80},
@@ -199,7 +206,7 @@ func TestMeshHeightBoundaryIsSignedInt64(t *testing.T) {
 		ID: 2, Number: math.MaxInt64 + 1, Slot: 2, Hash: testHash(0xab),
 		Cbor: []byte{0x80},
 	}, nil))
-	meshDB := NewMeshDatabase(db)
+	meshDB := NewMeshDatabase(indexerDB)
 	block, err := meshDB.BlockByIndex(context.Background(), math.MaxInt64)
 	require.NoError(t, err)
 	require.Equal(t, testHash(0xaa), block.Hash)

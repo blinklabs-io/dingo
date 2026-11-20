@@ -30,7 +30,7 @@ var opCertSlotReadNames = []string{
 }
 
 // TestOpCertSlotReadsFromTheLiveUtxoSet reads whether a counter was observed
-// at a slot, and every pool's counters as of a slot, in set mode with the
+// at a slot, and every pool's counters as of a slot, from the live set with the
 // store's reads failing, over counters that rise, repeat, drop and are
 // batched, and a rollback, and requires the answers to be the store's.
 func TestOpCertSlotReadsFromTheLiveUtxoSet(t *testing.T) {
@@ -77,16 +77,13 @@ func TestOpCertSlotReadsFromTheLiveUtxoSet(t *testing.T) {
 	scenario.RollbackBeforeBoundary()
 	check("after the rollback")
 	require.Zero(t, reached(), "a slot read reached the metadata store")
-	verified, mismatches := scenario.OpCertReads()
-	require.Zero(t, verified, "set mode compares nothing")
-	require.Zero(t, mismatches)
 }
 
-// TestOpCertSlotReadsStayOnTheStoreForSlotsTheSetHasNoRecordOf requires the
-// slot reads to reach the metadata store for a slot before the set's record,
-// which a set loaded from the store holds only as each pool's latest
-// observation.
-func TestOpCertSlotReadsStayOnTheStoreForSlotsTheSetHasNoRecordOf(
+// TestOpCertSlotReadsBeforeTheSetsRecordUseItsBaseline requires the slot
+// reads for a slot before the set's record to be answered from the counters
+// the set was loaded with, each pool's latest observation, without reaching
+// the metadata store.
+func TestOpCertSlotReadsBeforeTheSetsRecordUseItsBaseline(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -94,7 +91,7 @@ func TestOpCertSlotReadsStayOnTheStoreForSlotsTheSetHasNoRecordOf(
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewBoundaryEpochStateScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	store := dbadapter.New(scenario.DB)
 	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x44}, 28))
@@ -119,9 +116,11 @@ func TestOpCertSlotReadsStayOnTheStoreForSlotsTheSetHasNoRecordOf(
 	require.Equal(t, map[string]uint64{string(pool[:]): 6}, got)
 	require.Zero(t, reached())
 
-	_, err = ldb.PoolOpCertSequencesExistAtSlot(ctx, 100, nil)
-	require.Error(t, err, "slot 100 is before the set's record")
-	_, err = ldb.LatestPoolOpCertSequencesAtOrBefore(ctx, 100, nil)
-	require.Error(t, err)
-	require.Equal(t, int64(2), reached())
+	ok, err = ldb.PoolOpCertSequencesExistAtSlot(ctx, 100, nil)
+	require.NoError(t, err, "slot 100 is before the set's record")
+	require.False(t, ok)
+	got, err = ldb.LatestPoolOpCertSequencesAtOrBefore(ctx, 100, nil)
+	require.NoError(t, err)
+	require.Equal(t, map[string]uint64{string(pool[:]): 6}, got)
+	require.Zero(t, reached(), "historical reads did not use SQL")
 }

@@ -95,8 +95,15 @@ func (c *govCursor) opt32() *uint32 {
 	return &v
 }
 
+// bytes returns nil for an empty field. The encoding does not tell an absent
+// field from an empty one, and readers test the absent ones against nil: a
+// proposal with no parent must read back with a nil ParentTxHash, as it was
+// staged, or ratification takes it for a child of a missing root.
 func (c *govCursor) bytes() []byte {
 	n := int(c.u32())
+	if n == 0 {
+		return nil
+	}
 	return bytes.Clone(c.take(n))
 }
 

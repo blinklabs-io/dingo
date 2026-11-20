@@ -56,8 +56,6 @@ func TestMithrilSnapshotStartupClosesUtxoSetOnFailure(t *testing.T) {
 	n.config.dataDir = t.TempDir()
 	n.config.cardanoNodeConfig = &cardano.CardanoNodeConfig{}
 	n.config.cfg = &internalconfig.Config{}
-	n.config.ledgerUtxoBadger = true
-	n.config.ledgerUtxoBadgerOnly = true
 
 	require.Error(t, n.mithrilSnapshotStartup(t.Context()))
 	if n.utxoSet != nil {

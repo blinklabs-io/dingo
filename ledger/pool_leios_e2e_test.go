@@ -163,7 +163,7 @@ func certifiedPoolScenarioWithSet(
 	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
-	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set, reads)
+	scenario := ledger.NewBoundaryEpochStateScenarioForTest(t, set)
 	store := dbadapter.New(scenario.DB)
 	require.NoError(t, set.LoadLedgerState(t.Context(), store))
 	scenario.CertifyLeios()
@@ -182,7 +182,7 @@ func certifiedPoolScenarioWithSet(
 // applied after the epoch boundary whose effective slot lies before it.
 func TestCertifiedPoolReadsFromTheSetMatchTheStore(t *testing.T) {
 	t.Parallel()
-	scenario, store, s := certifiedPoolScenario(t, ledger.UtxoSetReadsSet, nil)
+	scenario, store, s := certifiedPoolScenario(t, "set", nil)
 	want := poolLeiosReads(t, store, s, true)
 	require.NotEmpty(t, want)
 
@@ -198,14 +198,13 @@ func TestCertifiedPoolReadsFromTheSetMatchTheStore(t *testing.T) {
 	require.Zero(t, reached(), "a read reached the metadata store")
 }
 
-// Over the same run, verify mode compares each set answer with the store's
-// and counts no difference.
-func TestCertifiedPoolReadsVerifyAgainstTheStore(t *testing.T) {
+// The live set and metadata store must retain the same certified pool state.
+func TestCertifiedPoolReadsMatchTheStore(t *testing.T) {
 	t.Parallel()
 	// Before the boundary reaps the harness pool, its refund is read in both.
 	var before, beforeStore []models.PoolRetirementRefund
 	scenario, store, s := certifiedPoolScenario(
-		t, ledger.UtxoSetReadsVerify,
+		t, "metadata-visible",
 		func(sc ledger.BoundaryEpochStateScenario, store ledgerdb.LedgerDB) {
 			epochs, err := store.GetEpochs(nil)
 			require.NoError(t, err)
@@ -232,16 +231,13 @@ func TestCertifiedPoolReadsVerifyAgainstTheStore(t *testing.T) {
 	got := poolLeiosReads(t, scenario.LedgerDB(), s, true)
 
 	require.Equal(t, poolLeiosReads(t, store, s, true), got)
-	verified, mismatches := scenario.PoolReads()
-	require.Positive(t, verified)
-	require.Zero(t, mismatches)
 }
 
 // The certificates differ in effective and applied slot as the scenario
 // intends: the scenario is not a pre-Leios run in disguise.
 func TestCertifiedPoolScenarioSeparatesEffectiveFromAppliedSlots(t *testing.T) {
 	t.Parallel()
-	_, store, s := certifiedPoolScenario(t, ledger.UtxoSetReadsSet, nil)
+	_, store, s := certifiedPoolScenario(t, "set", nil)
 	regs, err := store.GetPoolRegistrationsAtSlot(
 		[]lcommon.PoolKeyHash{lcommon.PoolKeyHash(s.Pool)}, s.RegB, nil,
 	)
@@ -259,7 +255,7 @@ func TestCertifiedPoolScenarioSeparatesEffectiveFromAppliedSlots(t *testing.T) {
 func TestCertifiedPoolHistoryLoadsItsEffectiveSlots(t *testing.T) {
 	t.Parallel()
 	_, followed, store, s := certifiedPoolScenarioWithSet(
-		t, ledger.UtxoSetReadsSet, nil,
+		t, "set", nil,
 	)
 	fresh, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
 	require.NoError(t, err)
@@ -296,7 +292,7 @@ func TestCertifiedPoolHistoryLoadsItsEffectiveSlots(t *testing.T) {
 // certificates take effect at a Leios context slot.
 func TestCertifiedPoolStatusFromTheSetMatchesTheStore(t *testing.T) {
 	t.Parallel()
-	scenario, store, s := certifiedPoolScenario(t, ledger.UtxoSetReadsSet, nil)
+	scenario, store, s := certifiedPoolScenario(t, "set", nil)
 	// The store reads the current epoch at its tip, which the drained set
 	// reads as the newest epoch row; align them.
 	tip, err := scenario.DB.GetTip(nil)

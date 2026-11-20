@@ -37,7 +37,7 @@ func (tipFailsSet) Tip() (ocommon.Point, bool, error) {
 func TestAnchorUtxoInMetadataFailsClosedWhenTheSetTipIsUnreadable(t *testing.T) {
 	t.Parallel()
 	ls := &LedgerState{config: LedgerStateConfig{
-		UtxoSetOnly: true, UtxoSet: tipFailsSet{},
+		UtxoSet: tipFailsSet{},
 	}}
 	inMetadata, err := ls.AnchorUtxoInMetadata(10)
 	require.ErrorIs(t, err, errTipUnreadable)

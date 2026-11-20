@@ -39,26 +39,25 @@ type EpochSummaryLister interface {
 }
 
 // epochSummaryReader returns the set's epoch state and summary readers and
-// the read mode, or UtxoSetReadsOff when these reads stay on the metadata
-// store. The total active stake read falls back to snapshot rows, so both
+// a true indicator when both readers are available from the set. The total active stake read falls back to snapshot rows, so both
 // readers must hold their rows.
 func (ls *LedgerState) epochSummaryReader(txn ledgerdb.Txn) (
 	EpochStateReader,
 	EpochSummaryReader,
-	string,
+	bool,
 ) {
 	er, mode := ls.epochStateReader(txn)
-	if mode == UtxoSetReadsOff || er == nil {
-		return nil, nil, UtxoSetReadsOff
+	if !mode || er == nil {
+		return nil, nil, false
 	}
 	sr, ok := ls.readSet(txn).(EpochSummaryReader)
 	if !ok {
-		return nil, nil, UtxoSetReadsOff
+		return nil, nil, false
 	}
 	if !ls.epochSummarySetLoaded.Load() {
 		loaded, err := sr.EpochSummariesLoaded()
 		if err != nil || !loaded {
-			return nil, nil, UtxoSetReadsOff
+			return nil, nil, false
 		}
 		ls.epochSummarySetLoaded.Store(true)
 	}
@@ -138,63 +137,21 @@ func sameSummaryPtr(a, b *models.EpochSummary) bool {
 	return fmt.Sprintf("%+v", x) == fmt.Sprintf("%+v", y)
 }
 
-func (ls *LedgerState) compareEpochSummaryRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.epochSummaryReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.epochSummaryReadMismatches.Add(1)
-	ls.metrics.epochSummaryReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set epoch summary read differs from the metadata store",
-		"component", "ledger",
-		"read", what,
-		"set_error", setErr,
-		"mismatches", n,
-	)
-}
-
 func (s stagingLedgerDB) GetEpochSummary(
 	epoch uint64,
 	txn ledgerdb.Txn,
 ) (*models.EpochSummary, error) {
 	er, sr, mode := s.ls.epochSummaryReader(txn)
-	if mode == UtxoSetReadsOff || er == nil || sr == nil {
-		if s.ls.familyDrained(nodesettings.FamilySummaries) {
-			return nil, drainedUnserved(nodesettings.FamilySummaries)
-		}
-		return s.LedgerDB.GetEpochSummary(epoch, txn)
+	if !mode {
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilySummaries)
 	}
-	g := s.ls.beginVerifyRead(txn)
+	if er == nil || sr == nil {
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilySummaries)
+	}
 	s.ls.utxoSetApplyMu.RLock()
 	fromSet, setErr := s.ls.summaryViewLocked(er, sr, txn, epoch)
 	s.ls.utxoSetApplyMu.RUnlock()
-	if mode == UtxoSetReadsSet {
-		return fromSet, setErr
-	}
-	want, err := s.LedgerDB.GetEpochSummary(epoch, txn)
-	if err != nil {
-		return nil, err
-	}
-	s.ls.compareEpochSummaryRead(
-		g, fmt.Sprintf("epoch summary %d", epoch),
-		sameSummaryPtr(want, fromSet), setErr,
-	)
-	return want, nil
+	return fromSet, setErr
 }
 
 func (s stagingLedgerDB) GetTotalActiveStake(
@@ -203,13 +160,12 @@ func (s stagingLedgerDB) GetTotalActiveStake(
 	txn ledgerdb.Txn,
 ) (uint64, error) {
 	er, sr, mode := s.ls.epochSummaryReader(txn)
-	if mode == UtxoSetReadsOff || er == nil || sr == nil {
-		if s.ls.familyDrained(nodesettings.FamilySummaries) {
-			return 0, drainedUnserved(nodesettings.FamilySummaries)
-		}
-		return s.LedgerDB.GetTotalActiveStake(epoch, snapshotType, txn)
+	if !mode {
+		return 0, s.ls.setFamilyUnserved(nodesettings.FamilySummaries)
 	}
-	g := s.ls.beginVerifyRead(txn)
+	if er == nil || sr == nil {
+		return 0, s.ls.setFamilyUnserved(nodesettings.FamilySummaries)
+	}
 	// One lock hold, so a commit's set apply cannot land between the summary
 	// and the snapshot rows.
 	s.ls.utxoSetApplyMu.RLock()
@@ -225,18 +181,7 @@ func (s stagingLedgerDB) GetTotalActiveStake(
 		return totalActiveStakeFrom(sm, snapshotType, rows)
 	}()
 	s.ls.utxoSetApplyMu.RUnlock()
-	if mode == UtxoSetReadsSet {
-		return fromSet, setErr
-	}
-	want, err := s.LedgerDB.GetTotalActiveStake(epoch, snapshotType, txn)
-	if err != nil {
-		return 0, err
-	}
-	s.ls.compareEpochSummaryRead(
-		g, fmt.Sprintf("total active stake %d/%s", epoch, snapshotType),
-		want == fromSet, setErr,
-	)
-	return want, nil
+	return fromSet, setErr
 }
 
 // summaryListViewLocked is every summary row as txn sees the set. The caller
@@ -289,13 +234,10 @@ func (ls *LedgerState) summaryListViewLocked(
 func (s stagingLedgerDB) GetLatestEpochSummary(
 	txn ledgerdb.Txn,
 ) (*models.EpochSummary, error) {
-	if !s.ls.familyDrained(nodesettings.FamilySummaries) {
-		return s.LedgerDB.GetLatestEpochSummary(txn)
-	}
 	er, sr, _ := s.ls.epochSummaryReader(txn)
 	lister, ok := sr.(EpochSummaryLister)
 	if er == nil || sr == nil || !ok {
-		return nil, drainedUnserved(nodesettings.FamilySummaries)
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilySummaries)
 	}
 	s.ls.utxoSetApplyMu.RLock()
 	view, err := s.ls.summaryListViewLocked(er, lister, txn)

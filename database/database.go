@@ -48,8 +48,9 @@ type Config struct {
 	// pairs the ledger's two stores, and the IndexerDB's own transaction
 	// carries its tip instead.
 	Role string
-	// IndexerLayout is "shared" or "split"; empty means the caller does not
-	// know it and the indexer_layout gate is left unchecked.
+	// IndexerLayout is "split" beside an IndexerDB and "shared" without one;
+	// empty means the caller does not know it and the indexer_layout gate is
+	// left unchecked.
 	IndexerLayout string
 	Network       string // Cardano network name (e.g. "preview", "mainnet")
 	CacheConfig   CborCacheConfig

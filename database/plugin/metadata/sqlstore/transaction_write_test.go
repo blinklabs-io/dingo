@@ -313,33 +313,6 @@ WHERE credential_tag = ? AND staking_key = ?`,
 	}
 }
 
-// TestSetGapBlockTransactionRefreshesSharedCredentialOnce proves
-// SetGapBlockTransaction dedupes a stake credential named by both a
-// certificate and a produced output before refreshing -- the same class of
-// redundant-refresh bug setTransaction's own mergeStakeCredentialRefs call
-// fixes. Before this fix, certificateRefs and each produced output's own ref
-// were appended to one shared slice with no deduplication between the two
-// sources, so a credential named by both would trigger sumCredentialUtxoStake
-// twice for the same final total.
-func TestSetGapBlockTransactionRefreshesSharedCredentialOnce(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	fx := buildSharedCredentialTx(t, 0x05)
-
-	before := store.sumCredentialUtxoStakeCalls.Load()
-	require.NoError(t, store.SetGapBlockTransaction(
-		fx.tx, fx.point, 0, fx.certDeposits, nil, 0, false,
-	))
-	got := store.sumCredentialUtxoStakeCalls.Load() - before
-	require.Equal(
-		t,
-		int64(1),
-		got,
-		"expected exactly one sumCredentialUtxoStake call for the credential "+
-			"named by both the certificate and the produced output",
-	)
-}
-
 // TestSetGenesisTransactionRefreshesSharedCredentialOnce proves
 // SetGenesisTransaction dedupes a stake credential repeated across multiple
 // genesis outputs -- the same class of fix as
@@ -806,37 +779,6 @@ WHERE tx_id = (SELECT id FROM "transaction" WHERE hash = ?) AND output_idx = 0`,
 		want,
 		readUtxoStake(t, store, fx.ref),
 		"an already-spent input must contribute no loss delta",
-	)
-}
-
-// TestSetGapBlockTransactionReapplyAppliesNoSecondDelta is the same check for
-// SetGapBlockTransaction, the other caller on the incremental path. It is the
-// likeliest place for a colliding produced output in practice: gap closure
-// replays blocks whose outputs a Mithril snapshot import may already have
-// created.
-func TestSetGapBlockTransactionReapplyAppliesNoSecondDelta(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	ctx := context.Background()
-	fx := buildSharedCredentialTx(t, 0x44)
-
-	require.NoError(t, store.SetGapBlockTransaction(
-		fx.tx, fx.point, 0, fx.certDeposits, nil, 0, false,
-	))
-	first := readUtxoStake(t, store, fx.ref)
-	require.Equal(t, fx.producedAmount, first)
-
-	require.NoError(t, store.SetGapBlockTransaction(
-		fx.tx, fx.point, 0, fx.certDeposits, nil, 0, false,
-	))
-	want, err := store.sumCredentialUtxoStake(ctx, store.writeDB, fx.ref)
-	require.NoError(t, err)
-	require.Equal(t, fx.producedAmount, want, "the utxo table must not move")
-	require.Equal(
-		t,
-		want,
-		readUtxoStake(t, store, fx.ref),
-		"a replayed gap block must not double-count its produced outputs",
 	)
 }
 

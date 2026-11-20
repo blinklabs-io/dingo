@@ -15,9 +15,9 @@
 package ledger_test
 
 import (
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,37 +29,15 @@ import (
 // the epochs the snapshot serves.
 func TestBoundaryStakeReadsCountAPoolTheBoundaryReaped(t *testing.T) {
 	t.Parallel()
-	for _, reads := range []string{
-		ledger.UtxoSetReadsSet, ledger.UtxoSetReadsVerify,
-	} {
-		t.Run(reads, func(t *testing.T) {
-			t.Parallel()
-			h := newBoundaryStakeHarness(t, reads)
-			f := h.scenario.BoundaryStake(6)
-			verified, _ := h.scenario.PoolReads()
-			want := h.scenario.ReadBoundaryStake(f, true)
-			require.ElementsMatch(t, [][]byte{f.Pool}, want.Active)
-			h.scenario.ApplyBoundary()
-			tip, _, err := h.set.Tip()
-			require.NoError(t, err)
-			require.LessOrEqual(
-				t, tip.Slot, f.Slot, "the set's tip is at the snapshot slot",
-			)
-			got := h.scenario.ReadBoundaryStake(f, false)
-			require.ElementsMatch(t, want.Active, got.Active, "active pools")
-			if reads == ledger.UtxoSetReadsVerify {
-				// The store's own stake answer for the slot loses the
-				// delegations the reap cleared, so only the pool read is
-				// compared here.
-				pv, pm := h.scenario.PoolReads()
-				require.Greater(t, pv, verified, "the pool read is compared")
-				require.Zero(t, pm, "the set disagreed with the store")
-				return
-			}
-			requireSameBoundaryStake(t, want, got)
-			requireFixtureFigures(t, f, got)
-		})
-	}
+	h := newBoundaryStakeHarness(t, "set")
+	f := h.scenario.BoundaryStake(6)
+	h.scenario.ApplyBoundary()
+	tip, _, err := h.set.Tip()
+	require.NoError(t, err)
+	require.LessOrEqual(t, tip.Slot, f.Slot, "the set's tip is at the snapshot slot")
+	got := h.scenario.ReadBoundaryStake(f)
+	require.ElementsMatch(t, [][]byte{f.Pool}, got.Active, "active pools")
+	requireFixtureFigures(t, f, got)
 }
 
 // TestBoundaryStakeReadsCountAReapedPoolWhenTheSetOnlyHoldsTheState is the
@@ -68,17 +46,15 @@ func TestBoundaryStakeReadsCountAReapedPoolWhenTheSetOnlyHoldsTheState(
 	t *testing.T,
 ) {
 	t.Parallel()
-	h := newBoundaryStakeHarness(t, ledger.UtxoSetReadsSet)
+	h := newBoundaryStakeHarness(t, "set")
 	f := h.scenario.BoundaryStake(6)
-	want := h.scenario.ReadBoundaryStake(f, true)
 	h.scenario.ApplyBoundary()
-	h.scenario.LedgerStateSetOnly(true)
+	h.scenario.DrainFamilies(nodesettings.AllFamilies())
 	reached, hide := h.scenario.HideStoreReads(boundaryStakeReads...)
 	hide(true)
-	got := h.scenario.ReadBoundaryStake(f, false)
+	got := h.scenario.ReadBoundaryStake(f)
 	require.Zero(t, reached(), "a read reached the metadata store")
 	require.ElementsMatch(t, [][]byte{f.Pool}, got.Active, "active pools")
-	requireSameBoundaryStake(t, want, got)
 	requireFixtureFigures(t, f, got)
 }
 
@@ -91,7 +67,7 @@ func TestDeferredBoundarySnapshotHoldsAPoolTheBoundaryReaped(t *testing.T) {
 	for _, name := range []string{"set", "set only"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			own := newBoundaryStakeHarness(t, ledger.UtxoSetReadsSet)
+			own := newBoundaryStakeHarness(t, "set")
 			ownFixture := own.scenario.BoundaryStake(6)
 			own.scenario.ApplyBoundary()
 			want, err := own.scenario.LedgerDB().GetPoolStakeSnapshot(
@@ -99,11 +75,11 @@ func TestDeferredBoundarySnapshotHoldsAPoolTheBoundaryReaped(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.NotNil(t, want, "the boundary's own snapshot holds the pool")
-			h := newBoundaryStakeHarness(t, ledger.UtxoSetReadsSet)
+			h := newBoundaryStakeHarness(t, "set")
 			f := h.scenario.BoundaryStake(6)
 			if name == "set only" {
 				h.scenario.InstallDrainedSources()
-				h.scenario.LedgerStateSetOnly(true)
+				h.scenario.DrainFamilies(nodesettings.AllFamilies())
 			}
 			rows := h.scenario.DeferredBoundaryRows(f)
 			require.Len(t, rows, 1, "the reaped pool is in the snapshot")

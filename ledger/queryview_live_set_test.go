@@ -86,7 +86,6 @@ func TestQueryViewSnapshotPanicReleasesApplyLock(t *testing.T) {
 	t.Parallel()
 	ls, _ := newDiskTestLedger(t)
 	ls.config.UtxoSet = &querySnapshotSet{snapshotPanic: true}
-	ls.config.UtxoSetReads = UtxoSetReadsSet
 	require.PanicsWithValue(t, "snapshot provider panic", func() {
 		_, _ = ls.AcquireQueryView(t.Context(), QueryPoint{})
 	})
@@ -105,7 +104,6 @@ func TestQueryViewContendedAnchorReturnsPending(t *testing.T) {
 	ls, db := newDiskTestLedger(t)
 	var releases atomic.Int64
 	ls.config.UtxoSet = &querySnapshotSet{releases: &releases}
-	ls.config.UtxoSetReads = UtxoSetReadsSet
 	ls.utxoSetApplyMu.Lock()
 	unlock := sync.OnceFunc(ls.utxoSetApplyMu.Unlock)
 	done, result := make(chan struct{}), make(chan error, 1)
@@ -140,7 +138,6 @@ func TestQueryViewApplyLockHonorsAcquisitionDeadline(t *testing.T) {
 	ls, _ := newDiskTestLedger(t)
 	var releases atomic.Int64
 	ls.config.UtxoSet = &querySnapshotSet{releases: &releases}
-	ls.config.UtxoSetReads = UtxoSetReadsSet
 	ls.utxoSetApplyMu.Lock()
 	unlock := sync.OnceFunc(ls.utxoSetApplyMu.Unlock)
 	done, result := make(chan struct{}), make(chan error, 1)
@@ -163,7 +160,7 @@ func TestQueryViewApplyLockHonorsAcquisitionDeadline(t *testing.T) {
 	), context.DeadlineExceeded)
 }
 
-func TestSetOnlyQueryViewRequiresSnapshotCapabilities(t *testing.T) {
+func TestQueryViewRequiresSnapshotCapabilities(t *testing.T) {
 	t.Parallel()
 	var releases atomic.Int64
 	set := &querySnapshotSet{releases: &releases}
@@ -184,13 +181,12 @@ func TestSetOnlyQueryViewRequiresSnapshotCapabilities(t *testing.T) {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			t.Parallel()
 			ls, _ := newDiskTestLedger(t)
-			ls.config.UtxoSet, ls.config.UtxoSetOnly = provider, true
-			ls.config.UtxoSetReads = UtxoSetReadsSet
+			ls.config.UtxoSet = provider
 			view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
 			if view != nil {
 				view.Close()
 			}
-			require.ErrorContains(t, err, "set-only")
+			require.ErrorContains(t, err, "query view")
 			require.Nil(t, view)
 		})
 	}
@@ -229,8 +225,6 @@ func TestQueryViewPinsLiveUtxoReads(t *testing.T) {
 		releases: &releases,
 	}
 	ls.config.UtxoSet = set
-	ls.config.UtxoSetReads = UtxoSetReadsSet
-	ls.config.UtxoSetOnly = true
 	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
 	require.NoError(t, err)
 	t.Cleanup(view.Close)
@@ -260,7 +254,6 @@ func TestQueryViewPinsLiveUtxoReads(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, utxoMapLen(t, pinned))
 	asOf, err := ls.queryShelleyUtxoByTxIn(
-		t.Context(),
 		[]gledger.ShelleyTransactionInput{input},
 		QueryPoint{Slot: 300},
 		view.txn,
@@ -283,7 +276,6 @@ func TestQueryViewLiveSetSnapshotFailureReleasesTheView(t *testing.T) {
 		releases:         &releases,
 	}
 	ls.config.UtxoSet = set
-	ls.config.UtxoSetReads = UtxoSetReadsSet
 	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
 	if view != nil {
 		t.Cleanup(view.Close)
@@ -315,8 +307,6 @@ func TestQueryViewWaitsForCommittedSetChanges(t *testing.T) {
 		releases: &releases,
 	}
 	ls.config.UtxoSet = set
-	ls.config.UtxoSetReads = UtxoSetReadsSet
-	ls.config.UtxoSetOnly = true
 	txn := db.Transaction(t.Context(), true)
 	t.Cleanup(txn.Release)
 	entered, resume := make(chan struct{}), make(chan struct{})
@@ -353,7 +343,6 @@ func TestQueryViewWaitsForCommittedSetChanges(t *testing.T) {
 	t.Cleanup(view.Close)
 	input := gledger.MustNewShelleyTransactionInput(hex.EncodeToString(id), 0)
 	asOf, err := ls.queryShelleyUtxoByTxIn(
-		t.Context(),
 		[]gledger.ShelleyTransactionInput{
 			input,
 		},

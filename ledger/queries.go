@@ -1383,9 +1383,9 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
 		return ls.queryShelleyGenesisConfig(ctx, protocolVersion)
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
-		return ls.queryShelleyUtxoByAddress(ctx, q.Addrs, at, txn)
+		return ls.queryShelleyUtxoByAddress(q.Addrs, at, txn)
 	case *olocalstatequery.ShelleyUtxoByTxinQuery:
-		return ls.queryShelleyUtxoByTxIn(ctx, q.TxIns, at, txn)
+		return ls.queryShelleyUtxoByTxIn(q.TxIns, at, txn)
 	case *olocalstatequery.ShelleyFilteredDelegationAndRewardAccountsQuery:
 		return ls.queryShelleyFilteredDelegationAndRewardAccounts(
 			ctx,
@@ -2691,7 +2691,6 @@ func stakePoolsResult(keyHashes [][]byte) ([]any, error) {
 }
 
 func (ls *LedgerState) queryShelleyUtxoByAddress(
-	ctx context.Context,
 	addrs []ledger.Address,
 	at QueryPoint,
 	txn ledgerdb.Txn,
@@ -2715,22 +2714,9 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 			addrs, 0, eachInView(view),
 		)
 	} else if at.pinned() {
-		var release func()
-		txn, release = ls.readTxn(ctx, txn)
-		defer release()
-		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
-			return nil, err
-		}
-		utxos, err = ls.ledgerDB().UtxosByAddressAsOf(
-			ctx,
-			addrs,
-			at.Slot,
-			0,
-			txn,
-		)
+		return nil, ErrUtxoAsOfUnavailable
 	} else {
 		utxos, err = ls.utxosByAddress(
-			ctx,
 			addrs,
 			0,
 			txn,
@@ -3282,7 +3268,8 @@ func stakeCredentialFromVote(
 // node's spent-UTxO retention floor: see its doc comment for why answering
 // past that floor risks a silently wrong "absent" result instead of an
 // honest rejection.
-func (ls *LedgerState) queryShelleyUtxoByTxIn(ctx context.Context, txIns []ledger.ShelleyTransactionInput,
+func (ls *LedgerState) queryShelleyUtxoByTxIn(
+	txIns []ledger.ShelleyTransactionInput,
 	at QueryPoint,
 	txn ledgerdb.Txn,
 ) (any, error) {
@@ -3316,21 +3303,9 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(ctx context.Context, txIns []ledge
 			}
 		}
 	} else if at.pinned() {
-		if txn == nil {
-			txn = ls.ledgerDB().Begin(ctx, false)
-			defer txn.Release()
-		}
-		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
-			return nil, err
-		}
-		utxos, err = ls.ledgerDB().UtxosByRefsAsOf(
-			ctx,
-			refs,
-			at.Slot,
-			txn,
-		)
+		return nil, ErrUtxoAsOfUnavailable
 	} else {
-		utxos, err = ls.utxosByRefsForQuery(ctx, refs, txn)
+		utxos, err = ls.utxosByRefsForQuery(refs, txn)
 	}
 	if err != nil {
 		return nil, err

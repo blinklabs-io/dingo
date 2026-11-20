@@ -120,9 +120,7 @@ func (a *NodeAdapter) AccountStakeHistory(
 	meta := db.Metadata()
 	// A snapshot captured before the account existed holds none of its
 	// stake, so only labels from first on can leave its history partial.
-	incomplete, err := a.rewardStakeInputsIncomplete(
-		txn, first, current,
-	)
+	incomplete, err := a.rewardStakeInputsIncomplete(first, current)
 	if err != nil {
 		return nil, 0, fmt.Errorf("check account stake history: %w", err)
 	}

@@ -125,6 +125,7 @@ func TestDijkstraPledgeLeverageClearProposalThroughProduction(t *testing.T) {
 					AnchorHash: bytes.Repeat([]byte{0xc1}, 32),
 				}, nil))
 
+				attachTestLiveSet(t, fx.ls)
 				tx := pledgeLeverageProposalTx(t, fx, tc.update)
 				require.NoError(t, fx.ls.ValidateTx(tx), "mempool validation")
 

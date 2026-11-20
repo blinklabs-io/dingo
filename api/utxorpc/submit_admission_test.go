@@ -32,6 +32,7 @@ func TestEvalTxPerClientLimitIsResourceExhausted(t *testing.T) {
 	srv := &submitServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
 		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		LedgerState:              &evalTxLedgerStub{},
+		QueryDatabase:            stubQueryDB(&evalTxLedgerStub{}),
 		MaxEvalRequestsPerClient: 2,
 	})}
 	req := connect.NewRequest(&submit.EvalTxRequest{

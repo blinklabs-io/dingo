@@ -421,17 +421,9 @@ func (a *NodeAdapter) GovernanceCommittee(
 		uint8(lcommon.GovActionTypeNoConfidence),
 		uint8(lcommon.GovActionTypeUpdateCommittee),
 	}
-	var enacted *models.GovernanceProposal
-	if a.governanceDrained() {
-		enacted, err = a.ledgerState.LedgerDB().
-			GetLastEnactedGovernanceProposal(
-				ctx, committeeActions, nil,
-			)
-	} else {
-		enacted, err = meta.GetLastEnactedGovernanceProposal(
-			committeeActions, txn.Metadata(),
-		)
-	}
+	enacted, err := meta.GetLastEnactedGovernanceProposal(
+		committeeActions, txn.Metadata(),
+	)
 	if err != nil {
 		return CommitteeInfo{}, fmt.Errorf("get last committee action: %w", err)
 	}
@@ -451,9 +443,6 @@ func (a *NodeAdapter) GovernanceCommittee(
 // committee vote has no authorization mapping its hot credential to a cold
 // one: a cold-credential list would silently omit it.
 func (a *NodeAdapter) checkCommitteeVotesAttributed(ctx context.Context) error {
-	if err := a.refuseDrainedGovernance("the committee votes"); err != nil {
-		return err
-	}
 	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()

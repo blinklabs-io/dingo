@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +50,9 @@ type plannerStartupStore struct {
 func (s *plannerStartupStore) OptimizePlannerStatsContext(
 	ctx context.Context, trigger string,
 ) (types.PlannerStatsResult, error) {
+	if s.gate == nil {
+		return s.Store.OptimizePlannerStatsContext(ctx, trigger)
+	}
 	// Block before taking SQLite's write connection, so database contention
 	// cannot conceal a core node that starts its ledger asynchronously.
 	s.gate.once.Do(func() {
@@ -72,6 +76,13 @@ func TestNodePlannerStartupOrdering(t *testing.T) {
 				apiPort = freeLoopbackPort(t)
 			}
 			n, err := New(NewConfig(
+				WithIndexerWriterFactory(
+					func(IndexerWriterDeps) (IndexerWriter, error) {
+						return &fakeIndexerWriter{
+							wakes: make(chan struct{}, 8),
+						}, nil
+					},
+				),
 				WithDatabasePath(t.TempDir()),
 				WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 				WithCardanoNodeConfig(cardanoCfg),
@@ -79,7 +90,6 @@ func TestNodePlannerStartupOrdering(t *testing.T) {
 				WithPrometheusRegistry(prometheus.NewRegistry()),
 				WithNetwork("preview"),
 				WithStorageMode(mode),
-				WithIndexerLayout("shared"),
 				WithListeners(ListenerConfig{
 					ListenNetwork: "tcp", ListenAddress: "127.0.0.1:0",
 				}),
@@ -137,11 +147,24 @@ func TestNodePlannerStartupOrdering(t *testing.T) {
 				func(_ context.Context, cfg sqlite.Config,
 					deps metadata.ProviderDependencies,
 				) (*plannerStartupStore, plugin.Instance, error) {
+					if deps.StorageMode == string(StorageModeAPI) &&
+						deps.DataDir != "" {
+						// The real sqlite provider gives the IndexerDB its own
+						// directory; this wrapper registers under another name.
+						deps.DataDir = filepath.Join(deps.DataDir, "indexer")
+					}
 					store, err := sqlite.NewSQLStore(cfg, deps)
 					if err != nil {
 						return nil, nil, err
 					}
-					return &plannerStartupStore{Store: store, gate: guard},
+					// An API node's consensus store runs its pass before the
+					// ledger like a core node's; only the IndexerDB's pass,
+					// over the API history, waits for the API listeners.
+					gate := guard
+					if mode.IsAPI() && deps.StorageMode != string(StorageModeAPI) {
+						gate = nil
+					}
+					return &plannerStartupStore{Store: store, gate: gate},
 						plugin.Lifecycle{StartFunc: store.Start,
 							StopFunc: store.CloseContext}, nil
 				}))

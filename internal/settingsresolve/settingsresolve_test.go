@@ -16,6 +16,7 @@ package settingsresolve_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,6 +24,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/dbinfo"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/settingsresolve"
@@ -500,7 +504,6 @@ func TestApplyAcceptsASplitNodeRestart(t *testing.T) {
 			cfg := config.GetConfig()
 			cfg.DatabasePath = dir
 			cfg.StorageMode = "api"
-			cfg.Indexer.Layout = config.IndexerLayoutSplit
 			cfg.SetProvenanceForTest("StorageMode", source)
 			require.NoError(t, settingsresolve.Apply(cfg))
 			require.Equal(t, "api", cfg.StorageMode,
@@ -519,7 +522,164 @@ func TestApplyOnSplitStillRefusesTheWrongNetwork(t *testing.T) {
 	cfg.DatabasePath = dir
 	cfg.StorageMode = "api"
 	cfg.Network = "preview"
-	cfg.Indexer.Layout = config.IndexerLayoutSplit
 	cfg.SetProvenanceForTest("Network", config.SourceFlag)
 	require.Error(t, settingsresolve.Apply(cfg))
+}
+
+// serverAsSQLiteHost registers SQLite stores under a server provider's name:
+// the configured store in dir, its consensus namespace in dir/core.
+func serverAsSQLiteHost(provider string) func() (*plugin.Host, error) {
+	return func() (*plugin.Host, error) {
+		host := plugin.NewHost()
+		err := plugin.Register(
+			host,
+			plugin.Descriptor{
+				Capability: plugin.CapabilityStorageMetadata,
+				Name:       provider,
+			},
+			func() struct{} { return struct{}{} },
+			func(_ context.Context, _ struct{}, deps metadata.ProviderDependencies) (*sqlstore.Store, plugin.Instance, error) {
+				dir := deps.DataDir
+				if deps.CoreNamespace {
+					dir = filepath.Join(dir, "core")
+				}
+				store, err := sqlite.NewSQLStore(sqlite.Config{DataDir: dir}, deps)
+				if err != nil {
+					return nil, nil, err
+				}
+				return store, plugin.Lifecycle{
+					StartFunc: store.Start,
+					StopFunc:  store.CloseContext,
+				}, nil
+			},
+		)
+		return host, err
+	}
+}
+
+// TestReadPersistedGateValuesReadsTheConsensusNamespace reads the settings of
+// an adopted PostgreSQL store from its consensus namespace, as the SQLite
+// consensus store's are read, not from the IndexerDB the configuration names.
+// Not t.Parallel: it swaps the package's host factory.
+func TestReadPersistedGateValuesReadsTheConsensusNamespace(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	template, err := dbtest.MetadataTemplateBytes()
+	require.NoError(t, err)
+	factory := serverAsSQLiteHost("postgres")
+	for _, seed := range []struct {
+		dir   string
+		core  bool
+		gates nodesettings.Values
+	}{
+		{dir, false, nodesettings.Values{"network": "preview", "storage_mode": "api", "indexer_layout": "split"}},
+		{filepath.Join(dir, "core"), true, nodesettings.Values{"network": "preview", "storage_mode": "core", "indexer_layout": "split"}},
+	} {
+		require.NoError(t, dbtest.SeedMetadataTemplateBytes(seed.dir, template))
+		host, err := factory()
+		require.NoError(t, err)
+		store, err := plugin.Resolve[metadata.MetadataStore](
+			ctx, host, plugin.CapabilityStorageMetadata, "postgres", nil,
+			metadata.ProviderDependencies{DataDir: dir, CoreNamespace: seed.core, StorageMode: seed.gates["storage_mode"]},
+		)
+		require.NoError(t, err)
+		require.NoError(t, store.SetNodeSettingsGates(ctx, seed.gates, 0, 0))
+		require.NoError(t, host.Stop(ctx))
+	}
+	defer settingsresolve.SetNewHost(factory)()
+	cfg := &config.Config{StorageMode: "api", DatabasePath: dir}
+	cfg.Plugins.Storage.Metadata = plugin.Selection{Provider: "postgres"}
+	values, ok, err := settingsresolve.ReadPersistedGateValues(cfg)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "core", values["storage_mode"],
+		"the node's settings are the consensus namespace's")
+}
+
+// A v0.94.2 API store interrupted during its metadata backfill is refused
+// before the store is opened; one that has since been latched as core keeps
+// no API history to finish and resolves as any other.
+func TestApplyRefusesAnInterruptedBackfillOfAnAPIStore(t *testing.T) {
+	isolateConfigSnapshot(t)
+	for mode, refused := range map[string]bool{"api": true, "core": false} {
+		dir := seedDatabase(t, map[string]string{"storage_mode": mode})
+		raw, err := sql.Open("sqlite", filepath.Join(dir, "metadata.sqlite"))
+		require.NoError(t, err)
+		_, err = raw.Exec(
+			`INSERT INTO sync_state(sync_key,value) VALUES('sync_status','backfill')`,
+		)
+		require.NoError(t, err)
+		require.NoError(t, raw.Close())
+		cfg := config.GetConfig()
+		cfg.DatabasePath = dir
+		cfg.Plugins.Storage.Metadata.Provider = "sqlite"
+		err = settingsresolve.Apply(cfg)
+		if refused {
+			require.ErrorIs(t, err, settingsresolve.ErrInterruptedBackfill, mode)
+			continue
+		}
+		require.NoError(t, err, mode)
+	}
+}
+
+// A v0.94.2 API store interrupted during its metadata backfill is refused by
+// the open of its provider, before that open migrates the schema: on a
+// PostgreSQL or MySQL store, and on a SQLite store outside the data directory,
+// none of which the read of the data directory's SQLite file covers. The
+// store is left as v0.94.2 wrote it, which that release still opens.
+func TestApplyRefusesAnInterruptedBackfillBeforeTheProviderMigrates(
+	t *testing.T,
+) {
+	isolateConfigSnapshot(t)
+	for _, tc := range []struct {
+		name     string
+		provider string
+		external bool
+	}{
+		{name: "postgres", provider: "postgres"},
+		{name: "mysql", provider: "mysql"},
+		{name: "sqlite outside the data directory", provider: "sqlite", external: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			storeDir := dir
+			cfg := config.GetConfig()
+			cfg.DatabasePath = dir
+			cfg.StorageMode = "api"
+			cfg.Plugins.Storage.Metadata = plugin.Selection{Provider: tc.provider}
+			if tc.external {
+				storeDir = t.TempDir()
+				cfg.Plugins.Storage.Metadata.Config = map[string]any{
+					"dataDir": storeDir,
+				}
+				require.NoError(t, os.Mkdir(filepath.Join(dir, "blob"), 0o755))
+			} else {
+				defer settingsresolve.SetNewHost(
+					serverAsSQLiteHost(tc.provider),
+				)()
+			}
+			require.NoError(t, dbtest.SeedReleasedMetadata(storeDir, "backfill"))
+			before, err := dbtest.MetadataFingerprint(storeDir)
+			require.NoError(t, err)
+
+			err = settingsresolve.Apply(cfg)
+			require.ErrorIs(t, err, settingsresolve.ErrInterruptedBackfill)
+			require.ErrorContains(t, err, "start dingo v0.94.2")
+
+			after, err := dbtest.MetadataFingerprint(storeDir)
+			require.NoError(t, err)
+			require.Equal(t, before, after,
+				"the refusal changed the released store")
+			status, err := dbtest.ReleasedMetadataSyncStatus(storeDir)
+			require.NoError(t, err, "v0.94.2 no longer opens the store")
+			require.Equal(t, "backfill", status)
+
+			// The same store with its backfill finished upgrades.
+			require.NoError(t, os.RemoveAll(storeDir))
+			require.NoError(t, dbtest.SeedReleasedMetadata(storeDir, ""))
+			require.NoError(t, settingsresolve.Apply(cfg))
+			_, err = dbtest.ReleasedMetadataSyncStatus(storeDir)
+			require.ErrorIs(t, err, migrations.ErrNewerSchema)
+		})
+	}
 }

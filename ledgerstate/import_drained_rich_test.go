@@ -132,8 +132,8 @@ func richConfigDangling(t *testing.T, db *database.Database, slot uint64, anchor
 
 func richUndrained(t *testing.T, anchorSlot, slot uint64) *database.Database {
 	db := newDrainFixtureDB(t)
-	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, db, anchorSlot, true, false, nil)))
-	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, db, slot, false, true, nil)))
+	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, db, anchorSlot, true, false, importSetFor(t, db))))
+	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, db, slot, false, true, importSetFor(t, db))))
 	return db
 }
 
@@ -255,8 +255,8 @@ func verifyEveryFamily(t *testing.T, ldb dbadapter.Adapter, set *utxoset.Set) {
 func TestDrainedCatchUpKeepsAPendingReRegistration(t *testing.T) {
 	t.Parallel()
 	undrained := newDrainFixtureDB(t)
-	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, undrained, drainFixtureAnchorSlot, true, false, nil)))
-	require.NoError(t, ImportLedgerState(t.Context(), richConfigFuture(t, undrained, drainFixtureCatchUpSlot, false, true, nil)))
+	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, undrained, drainFixtureAnchorSlot, true, false, importSetFor(t, undrained))))
+	require.NoError(t, ImportLedgerState(t.Context(), richConfigFuture(t, undrained, drainFixtureCatchUpSlot, false, true, importSetFor(t, undrained))))
 	db := newDrainFixtureDB(t)
 	set := openDrainFixtureSet(t)
 	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, db, drainFixtureAnchorSlot, true, false, set)))
@@ -299,8 +299,8 @@ func TestFreshSetLoadHoldsAPendingReRegistration(t *testing.T) {
 func TestDrainedCatchUpDanglingDRepDelegationMatchesSQL(t *testing.T) {
 	t.Parallel()
 	undrained := newDrainFixtureDB(t)
-	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, undrained, drainFixtureAnchorSlot, true, false, nil)))
-	require.NoError(t, ImportLedgerState(t.Context(), richConfigDangling(t, undrained, drainFixtureCatchUpSlot, false, true, nil)))
+	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, undrained, drainFixtureAnchorSlot, true, false, importSetFor(t, undrained))))
+	require.NoError(t, ImportLedgerState(t.Context(), richConfigDangling(t, undrained, drainFixtureCatchUpSlot, false, true, importSetFor(t, undrained))))
 	db := newDrainFixtureDB(t)
 	set := openDrainFixtureSet(t)
 	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, db, drainFixtureAnchorSlot, true, false, set)))

@@ -165,12 +165,14 @@ func (c *rollbackCycle) attachLedger(t *testing.T, boundaries int) {
 	old := s.ls
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          s.db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: old.config.CardanoNodeConfig,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	mirrorSeededUtxoRowsForTest(t, ls)
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.currentEra = old.currentEra
 	ls.currentEpoch = old.currentEpoch
