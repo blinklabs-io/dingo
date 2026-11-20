@@ -17,6 +17,7 @@ package node
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -376,4 +377,36 @@ func TestReconcileResolvesRewardInputsBeforeTheUtxoRowsMove(t *testing.T) {
 
 	err = run(func(context.Context, ledgerdb.LedgerDB) error { return boom })
 	require.ErrorIs(t, err, boom)
+}
+
+// `dingo load` can be the first to open a database the released version
+// wrote, so it resolves the pending reward stake inputs before the UTxO rows
+// move as the node does. A pending entry whose snapshot is gone is cleared
+// there; carried into the set, no rebuild could ever clear it.
+func TestLoadResolvesPendingRewardInputsBeforeTheUtxoRowsMove(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	dir := unpackLegacyDatabase(t, legacyParityArchive)
+	require.NoError(t, MigrateToSplit(ctx, parityConfig(dir), logger))
+	// Below every rewind point, so only the resolve can clear it.
+	raw, err := json.Marshal(map[string][]ledger.RewardStakeInputsPendingEntry{
+		"entries": {{Epoch: 999, BoundarySlot: 1}},
+	})
+	require.NoError(t, err)
+	db, closeDB := openConsensus(t, dir)
+	require.NoError(t, db.SetSyncState(
+		models.RewardStakeInputsPendingKey, string(raw), nil,
+	))
+	closeDB()
+
+	require.NoError(t, Load(
+		ctx, parityConfig(dir), logger,
+		copyImmutableChunkPrefix(t, legacyRollbackChunks+2),
+	))
+
+	m := openMigratedLedger(t, dir, previewNodeConfig(t), 0)
+	pending, err := m.ls.RewardStakeInputsPendingState()
+	require.NoError(t, err)
+	require.Empty(t, pending, "the load resolved the pending entry")
 }
