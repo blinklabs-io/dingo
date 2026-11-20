@@ -440,7 +440,11 @@ func (s *Set) validateCheckpoint(
 	scratch := filepath.Join(dir, restoreScratch+checkpointName(cp.Slot, cp.Hash))
 	_ = os.RemoveAll(scratch)
 	defer func() { _ = os.RemoveAll(scratch) }()
-	st, err := badgerutxo.Open(scratch, badgerutxo.WithMemTableSize(DefaultMemTableSize))
+	st, err := badgerutxo.Open(
+		scratch,
+		badgerutxo.WithMemTableSize(DefaultMemTableSize),
+		badgerutxo.WithBlockCacheSize(DefaultBlockCacheSize),
+	)
 	if err != nil {
 		return ocommon.Point{}, fmt.Errorf("open a scratch store: %w", err)
 	}

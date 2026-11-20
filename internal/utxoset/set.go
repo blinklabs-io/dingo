@@ -75,6 +75,11 @@ type Config struct {
 // many sets sets it once from TestMain, before any set is opened.
 var DefaultMemTableSize int64
 
+// DefaultBlockCacheSize is the Badger block cache size of every set; zero
+// keeps Badger's default. A test binary that opens many sets sets it once
+// from TestMain, before any set is opened.
+var DefaultBlockCacheSize int64
+
 // pruneEvery is how many tip-moving commits pass between journal prunes.
 const pruneEvery = 1000
 
@@ -269,6 +274,7 @@ func Open(cfg Config) (*Set, error) {
 		cfg.Dir,
 		badgerutxo.WithAggregator(ledger.UtxoStakeOf),
 		badgerutxo.WithMemTableSize(memTable),
+		badgerutxo.WithBlockCacheSize(DefaultBlockCacheSize),
 	)
 	if err != nil {
 		return nil, err

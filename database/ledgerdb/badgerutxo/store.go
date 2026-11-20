@@ -116,6 +116,8 @@ type Store struct {
 	rewardIndexVisited atomic.Uint64
 	// memTableSize replaces Badger's memtable size when positive.
 	memTableSize int64
+	// blockCacheSize replaces Badger's block cache size when positive.
+	blockCacheSize int64
 }
 
 // ErrLoadsRefused reports a family load refused by RefuseLoads.
@@ -142,6 +144,9 @@ func Open(dir string, options ...Option) (*Store, error) {
 	opts := badger.DefaultOptions(dir).WithLogger(nil)
 	if s.memTableSize > 0 {
 		opts = opts.WithMemTableSize(s.memTableSize)
+	}
+	if s.blockCacheSize > 0 {
+		opts = opts.WithBlockCacheSize(s.blockCacheSize)
 	}
 	db, err := badger.Open(opts)
 	if err != nil {

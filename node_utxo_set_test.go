@@ -36,6 +36,7 @@ import (
 
 func init() {
 	utxoset.DefaultMemTableSize = 8 << 20
+	utxoset.DefaultBlockCacheSize = 1 << 20
 }
 
 // TestCheckUtxoSetOnlyMarksAFreshDatabase marks a database at origin as
