@@ -739,6 +739,17 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid plugins.mempool.config.revalidationDeltaCap",
 		},
 		{
+			name: "mempool fee-density selection",
+			modify: func(c *Config) {
+				setMempoolSetting(c, "selection", MempoolSelectionFeeDensity)
+			},
+		},
+		{
+			name:    "unknown mempool selection",
+			modify:  func(c *Config) { setMempoolSetting(c, "selection", "feedensity") },
+			wantErr: "invalid plugins.mempool.config.selection",
+		},
+		{
 			// Every ordered comparison with NaN is false, so a plain
 			// out-of-range check would let NaN through (e.g. from
 			// --eviction-watermark NaN, which strconv parses).

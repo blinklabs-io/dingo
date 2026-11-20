@@ -259,6 +259,9 @@ type MempoolConfig struct {
 	// separate from the pool used by peer relay, so API load never takes
 	// capacity from relay. Zero uses the size of the peer pool.
 	MaxAPISubmissions int
+	// Selection is the order BlockCandidates offers transactions to block
+	// production. Empty means SelectionAdmission.
+	Selection SelectionPolicy
 }
 
 type Mempool struct {
@@ -745,6 +748,12 @@ func newMempool(
 			implementation,
 		)
 	}
+	if !config.Selection.Valid() {
+		return nil, fmt.Errorf(
+			"unknown mempool selection policy %q",
+			config.Selection,
+		)
+	}
 	evictionWatermark := config.EvictionWatermark
 	if evictionWatermark < 0 {
 		return nil, fmt.Errorf(
@@ -1118,6 +1127,9 @@ type ProviderConfig struct {
 	// submitted through an API, separate from the pool used by peer relay.
 	// Zero uses the size of the peer pool; see MempoolConfig.MaxAPISubmissions.
 	MaxAPISubmissions int `yaml:"maxApiSubmissions"`
+	// Selection is "admission" (the default) or "feeDensity"; see
+	// MempoolConfig.Selection.
+	Selection SelectionPolicy `yaml:"selection"`
 }
 
 // ProviderDependencies are runtime dependencies assembled after ledger and
@@ -1179,6 +1191,7 @@ func registerProvider(
 				RevalidationDeltaCap: cfg.RevalidationDeltaCap,
 				ConsumerCacheBytes:   cfg.ConsumerCacheBytes,
 				MaxAPISubmissions:    cfg.MaxAPISubmissions,
+				Selection:            cfg.Selection,
 				CurrentSlotFunc:      deps.CurrentSlotFunc,
 				CapacityFunc:         deps.CapacityFunc,
 			}
