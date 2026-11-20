@@ -251,13 +251,16 @@ func reimportFromArtifact(
 		)
 	}
 	defer result.Cleanup(logger)
-	slot, hash, _, err := importLedgerState(
+	slot, hash, err := importLedgerState(
 		ctx, cfg.DB, logger, cfg.CardanoNodeConfig, result,
 		true, cfg.LocalTip.Slot, cfg.UtxoSet,
 		func(ledgerstate.ImportProgress) {},
 		func(p *preparedLedgerStateImport) error {
-			point := ocommon.Point{
-				Slot: p.state.Tip.Slot, Hash: p.state.Tip.BlockHash,
+			point := p.point()
+			if err := refuseStateAboveImmutableTip(
+				cfg.DB, cfg.LocalTip, point,
+			); err != nil {
+				return err
 			}
 			onChain, err := cfg.OnChain(ctx, point)
 			if err != nil {

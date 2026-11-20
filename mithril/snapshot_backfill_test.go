@@ -136,11 +136,6 @@ func (f snapshotFixture) config(
 		),
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.DiscardHandler),
-		fetchGap: func(
-			context.Context, *slog.Logger, string, ocommon.Point, ocommon.Point,
-		) ([]models.Block, error) {
-			return nil, errors.New("the fixture's ledger state needs no gap")
-		},
 	}
 }
 

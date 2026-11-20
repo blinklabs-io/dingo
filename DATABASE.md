@@ -3504,14 +3504,17 @@ catch-up (`Reconcile`) import in this mode is refused unless the set is a
 the whole set with the snapshot's outputs, and `Reconcile` skips its UTxO
 scan, since the metadata store holds no `utxo` rows.
 
-The import detaches the live source when it returns, before the gap blocks
-between the ImmutableDB tip and the snapshot's tip are ingested.
-`Database.SetGapBlockTransaction` stores each gap transaction's blob offset,
-transaction row and certificates, and `MetadataStore.SetGapBlockTransaction`
-writes no `utxo` rows and no `reward_live_stake` change: the live set and its
-stake are already at or past the gap. No consumed inputs are recovered, since
-there are no input rows to recover or to price a phase-2-invalid
-transaction's collateral from.
+The import detaches the live source when it returns. It loads the set at the
+ledger state's point, which is a block at or below the tip of the ImmutableDB
+the import built (the certified immutable files and the signed ancillary
+chunk). The set's rollback floor is the slot after the point it was loaded at,
+so it never sits above the ImmutableDB tip: every rollback to that tip or a
+block above it stays within the set's journal, and only a rollback below the
+immutable tip can fall outside it. A database that records an ImmutableDB
+tip refuses that rollback in the chain first
+(`ErrRollbackBelowImmutableTip`); one without chunk files refuses it at the
+security parameter and at `mithril_ledger_slot`. A re-import on a database
+that records an ImmutableDB tip is bound by that tip as well.
 
 The live UTxO set is always present and is the only copy of the UTxO set:
 `LedgerStateConfig.UtxoSet` is required, and `NewLedgerState` refuses a
@@ -4347,7 +4350,7 @@ Readers outside the ledger's LedgerDB, for a database with drained families:
 |---|---|
 | MCP tools | `get_epoch_summary` with a ledger state reads through its LedgerDB, so the set serves it. Without one its SQL path refuses when the nonces, epochs or summaries family is drained. `sqlite_query` and `sqlite_explain` refuse a statement that names a table of a drained family (`mcp.ErrDrainedFamily`); the check matches the table name anywhere in the text. Output is unchanged when no family is drained. |
 | `internal/node` backfill | `Backfill.Run` refuses with `ErrLedgerStateDrained` before any write, unless its checkpoint is already complete. |
-| `mithril` gap replay | `processGapBlocks` refuses with `ErrLedgerStateDrained` outside a drained import, as do `mithril.Sync`, `ledgerstate.ImportLedgerState` and the import's `sync_state` clear; during one the database reports nothing drained and they proceed. |
+| `mithril` import | `mithril.Sync`, `ledgerstate.ImportLedgerState` and the import's `sync_state` clear refuse with `ErrLedgerStateDrained` outside a drained import; during one the database reports nothing drained and they proceed. |
 | `internal/koiosparity` | `DatabaseSource` reads through the ledger's LedgerDB. Its transaction sample reads the IndexerDB on an API node, once the IndexerDB tip covers the epoch. `DingoDB` queries SQL directly and `OpenDingoDB` refuses with `ErrDrainedDatabase` when the latch holds a family it reads (epochs, summaries, era switch, pparams, pools, accounts, governance, reward inputs). |
 | `api/blockfrost` | Reads protocol parameters through `Database.GetPParamRows`, so a drained family is served from the set. Reads network state, nonces, epochs and epoch summaries from SQL. It reads the IndexerDB, so no latch bit can exist for it. |
 
@@ -5613,8 +5616,7 @@ still-live one. Either shape leaves the row permanently wrong once a later
 catch-up/repair re-import of the same anchor runs, with the same "utxo not
 found" halt as above.
 `ImportLedgerState` closes this with `Database.UtxosDeleteRolledback`
-(the same primitive a rejected Mithril gap-block range uses to discard
-itself) called once, after the UTxO import phase and before both the
+(the same primitive the removal of stale volatile blocks uses) called once, after the UTxO import phase and before both the
 reconcile pass and the post-import reward-live-stake rebuild: every UTxO
 whose `added_slot` is strictly after the import's anchor is deleted outright,
 cascading to its `asset` and `utxo_pointer` rows, so the ordinary block
@@ -8165,7 +8167,7 @@ imports persisted the evolving nonce at one ledger state slot but advanced the
 trust boundary across separately ingested "gap blocks" without folding their VRF
 output into `block_nonce`. `healMithrilGapBlockNonces` repairs that legacy shape
 by re-folding the evolving nonce over canonical-chain blocks. New imports select
-a ledger state at or below the certified immutable tip, keep both the metadata
+a ledger state at or below the ImmutableDB tip, keep both the metadata
 tip and trust boundary at that point, and let ordinary ledger replay fold every
 later block. The legacy heal remains idempotent and uses the primary chain index
 so retained fork blobs and synthetic endorser blobs are never folded.
@@ -8524,7 +8526,8 @@ written.
   since committed markers may name them.
   A resumed run skips the chunk the recorded tip ends once the chain's tip
   index has reached the recorded tip index, so blocks committed after an
-  adoption (gap blocks) do not make it re-adopt that chunk. A chunk is adopted
+  adoption (the signed ancillary chunk's blocks, which the import appends
+  through the chunk writer) do not make it re-adopt that chunk. A chunk is adopted
   only when its primary index has the exact length the geometry gives, one
   version byte plus four bytes for each relative slot and the final offset;
   otherwise it is refused before anything commits. A database that already

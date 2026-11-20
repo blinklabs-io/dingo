@@ -30,7 +30,7 @@ import (
 // which a live UTxO set that copied them cannot see, so the cleanup must drop
 // the set's governance marker. The invalidation also runs when the cleanup
 // itself failed part way.
-func TestGapCleanupInvalidatesTheLiveUtxoSetGovernance(t *testing.T) {
+func TestVolatileCleanupInvalidatesTheLiveUtxoSetGovernance(t *testing.T) {
 	t.Parallel()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
@@ -38,7 +38,7 @@ func TestGapCleanupInvalidatesTheLiveUtxoSetGovernance(t *testing.T) {
 	for _, slot := range []uint64{100, 200} {
 		require.NoError(t, db.BlockCreate(models.Block{
 			Slot: slot,
-			Hash: testGapHash32("blk"),
+			Hash: testHash32("blk"),
 			Cbor: []byte{0x82, byte(slot)},
 			Type: 1,
 		}, nil))
@@ -55,7 +55,7 @@ func TestGapCleanupInvalidatesTheLiveUtxoSetGovernance(t *testing.T) {
 
 	cfg := SyncConfig{InvalidateUtxoSetGovernance: store.InvalidateGovernance}
 	require.NoError(
-		t, cfg.deleteGapBlocksAbove(context.Background(), db, 150, nil),
+		t, cfg.deleteVolatileBlocksAbove(context.Background(), db, 150, nil),
 	)
 	loaded, err = store.GovernanceLoaded()
 	require.NoError(t, err)
@@ -66,7 +66,7 @@ func TestGapCleanupInvalidatesTheLiveUtxoSetGovernance(t *testing.T) {
 	cfg.InvalidateUtxoSetGovernance = func() error { return boom }
 	require.ErrorIs(
 		t,
-		cfg.deleteGapBlocksAbove(context.Background(), db, 150, nil),
+		cfg.deleteVolatileBlocksAbove(context.Background(), db, 150, nil),
 		boom,
 	)
 }

@@ -73,7 +73,7 @@ func newReimportFixture(t *testing.T) *reimportFixture {
 		states:  map[string]uint64{},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	_, _, _, err = importLedgerState(
+	_, _, err = importLedgerState(
 		t.Context(), db, logger, nodeCfg,
 		verifiedAncillaryStateAt(t, "1000", minimalLedgerState(t, 1000, stateHash(1000))),
 		false, 1000, set, nil,
