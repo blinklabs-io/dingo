@@ -234,7 +234,7 @@ export DEVNET_NETWORK_MAGIC
 unset DEVNET_TXPUMP_USERS DEVNET_GOVERNANCE_PAYMENT_KEY
 if [[ "${MODE}" != "conformance" && "${ACCELERATED}" == "true" &&
   "${TACHYS}" != "true" && "${LEIOS}" != "true" ]]; then
-  DEVNET_POOL_COUNT="$(sed -n 's/^poolCount:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "${DEVNET_TESTNET_YAML}")"
+  DEVNET_POOL_COUNT="$(sed -n 's/^poolCount:[[:space:]]*\([0-9][0-9]*\)\([[:space:]]\{1,\}#.*\)\{0,1\}[[:space:]]*$/\1/p' "${DEVNET_TESTNET_YAML}")"
   if [[ -z "${DEVNET_POOL_COUNT}" || "${DEVNET_POOL_COUNT}" -lt 2 ]]; then
     echo "[run-tests] ERROR: ${DEVNET_TESTNET_YAML} needs poolCount >= 2 to reserve a governance funding key" >&2
     exit 1
