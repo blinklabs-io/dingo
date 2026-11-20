@@ -21,6 +21,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -36,45 +37,76 @@ func compareAdded(a, b addedEntry) int {
 }
 
 // addedIndex lists the rows of one family whose AddedSlot is below floor, by
-// (slot, key). A block writes at a slot above the tip, which is at or above
-// the floor, so it only moves a row's AddedSlot up: its entry goes stale and
-// never missing, and eachRowAddedIn skips a stale entry. The index therefore
-// answers any range below the floor it was built at, after a prune has raised
-// the floor further. What can bring a row back below the floor, or add one
-// there, is a rollback, a load, a merge, a restore or a reset: each bumps
-// rowsRewritten, and an index is current only at the generation it was built
-// at.
+// (slot, key), as the transaction at readTs held them. A block writes at a
+// slot above the tip, which is at or above the floor, so it only moves a row's
+// AddedSlot up: its entry goes stale and never missing, and eachRowAddedIn
+// skips a stale entry. The index therefore answers any range below the floor
+// it was built at, for a transaction at or after readTs, after a prune has
+// raised the floor further. A transaction before readTs may hold a row at the
+// slot a later block moved it from, which the index does not name. What can
+// bring a row back below the floor, or add one there, is a rollback, a load, a
+// merge, a restore or a reset: each runs inside rewriteRows, and an index is
+// shared only at the generation it was built at, with no rewrite running.
 type addedIndex struct {
-	floor, gen uint64
-	entries    []addedEntry
+	floor, gen, readTs uint64
+	entries            []addedEntry
 }
 
 type addedIndexes struct {
 	mu  sync.Mutex
 	fam map[byte]*addedIndex
+	// rewriting counts the rewrites running. A rewrite writes below the
+	// floor across several transactions between its two moves of the
+	// generation, so a read during one cannot share an index.
+	rewriting atomic.Int64
+	// endMerge ends the rewrite BeginMerge began.
+	endMerge atomic.Pointer[func()]
+	// afterGen and beforeIndex pause a read between taking the generation
+	// and beginning its transaction, and inside the transaction before the
+	// index is looked up. Only tests set them.
+	afterGen, beforeIndex func()
 }
 
-// bumpRowsRewritten bumps the generation that invalidates every addedIndex.
-func (s *Store) bumpRowsRewritten() {
+// rewriteRows begins an operation that can put a row below the floor, and
+// returns the function that ends it. Both move the generation.
+func (s *Store) rewriteRows() (end func()) {
+	s.added.rewriting.Add(1)
 	s.rowsRewritten.Add(1)
+	return func() {
+		// The generation moves before the count drops, so a read that
+		// finds no rewrite running also finds this one's generation.
+		s.rowsRewritten.Add(1)
+		s.added.rewriting.Add(-1)
+	}
 }
 
-// addedIndexFor returns an index of family at gen that reaches through,
-// building one at floor when none does. It returns nil when the rows were
-// rewritten while it was built, in which case nothing is kept.
+// rowsUnchangedSince reports, for a read that took gen before its transaction
+// began and calls it after, that no rewrite wrote between the two or runs
+// now, so the transaction holds the rows every other such read at gen holds,
+// up to the blocks between them.
+func (s *Store) rowsUnchangedSince(gen uint64) bool {
+	return s.added.rewriting.Load() == 0 && s.rowsRewritten.Load() == gen
+}
+
+// addedIndexFor returns an index of family that reaches through and answers
+// txn, which began after gen was read. It reuses the shared one when that
+// does, and otherwise builds one at floor from txn, which it shares only when
+// the rows did not change since gen.
 func (s *Store) addedIndexFor(
 	txn *badger.Txn,
 	family byte,
 	addedSlot func([]byte) (uint64, error),
 	floor, gen, through uint64,
 ) (*addedIndex, error) {
+	readTs := txn.ReadTs()
 	s.added.mu.Lock()
 	defer s.added.mu.Unlock()
 	if idx := s.added.fam[family]; idx != nil &&
-		idx.gen == gen && through < idx.floor {
+		idx.gen == gen && readTs >= idx.readTs && through < idx.floor &&
+		s.rowsUnchangedSince(gen) {
 		return idx, nil
 	}
-	idx := &addedIndex{floor: floor, gen: gen}
+	idx := &addedIndex{floor: floor, gen: gen, readTs: readTs}
 	opts := badger.DefaultIteratorOptions
 	opts.Prefix = []byte{family}
 	it := txn.NewIterator(opts)
@@ -95,13 +127,12 @@ func (s *Store) addedIndexFor(
 		}
 	}
 	slices.SortFunc(idx.entries, compareAdded)
-	if s.rowsRewritten.Load() != gen {
-		return nil, nil
+	if s.rowsUnchangedSince(gen) {
+		if s.added.fam == nil {
+			s.added.fam = map[byte]*addedIndex{}
+		}
+		s.added.fam[family] = idx
 	}
-	if s.added.fam == nil {
-		s.added.fam = map[byte]*addedIndex{}
-	}
-	s.added.fam[family] = idx
 	return idx, nil
 }
 
@@ -128,10 +159,13 @@ func (s *Store) eachRowAddedIn(
 			pk:   after[9:],
 		}
 	}
+	if s.added.beforeIndex != nil {
+		s.added.beforeIndex()
+	}
 	idx, err := s.addedIndexFor(
 		txn, family, addedSlot, floor, gen, through,
 	)
-	if err != nil || idx == nil {
+	if err != nil {
 		return nil, false, false, err
 	}
 	i, found := slices.BinarySearchFunc(idx.entries, start, compareAdded)

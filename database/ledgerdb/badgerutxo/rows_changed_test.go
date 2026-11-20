@@ -253,3 +253,109 @@ func TestAccountsChangedInBelowTheFloorFollowsAMerge(t *testing.T) {
 	require.True(t, covered)
 	require.Equal(t, []byte{3}, keys, "the reconcile wrote account 3 at slot 11")
 }
+
+// changedInOnce reads every account added in [from, through] in one call, so
+// one transaction serves the whole range.
+func changedInOnce(
+	t *testing.T,
+	s *badgerutxo.Store,
+	from, through uint64,
+) (keys []byte, covered bool) {
+	t.Helper()
+	_, covered, done, err := s.EachAccountChangedIn(from, through, nil, 1<<20,
+		func(slot uint64, r badgerutxo.AccountRow, _ []byte) error {
+			if r.AddedSlot == slot {
+				keys = append(keys, r.Key[0])
+			}
+			return nil
+		})
+	require.NoError(t, err)
+	if covered {
+		require.True(t, done)
+	}
+	return keys, covered
+}
+
+// A read takes the rows' generation before its transaction begins. A load
+// that completes in between is visible to the transaction, so the index built
+// before the load does not serve it.
+func TestAccountsChangedInBelowTheFloorSeesALoadBeforeItsTransaction(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(11, 0x01))
+	loadAccountsAtSlots(t, s, 1, 2)
+	keys, covered := changedInOnce(t, s, 1, 10)
+	require.True(t, covered)
+	require.Equal(t, []byte{1, 2}, keys)
+
+	fired := false
+	s.SetAfterRowsGenerationForTest(func() {
+		if fired {
+			return
+		}
+		fired = true
+		loadAccountsAtSlots(t, s, 7, 8)
+	})
+	keys, covered = changedInOnce(t, s, 1, 10)
+	require.True(t, fired)
+	require.True(t, covered)
+	require.Equal(t, []byte{7, 8}, keys, "the transaction sees the loaded accounts")
+}
+
+// A block that moves a row's AddedSlot above the floor does not change the
+// rows' generation. An index a newer transaction built no longer names the row
+// at its old slot, so it does not serve an older transaction that still holds
+// the row there.
+func TestAccountsChangedInBelowTheFloorIgnoresAnIndexFromANewerRead(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(11, 0x01))
+	loadAccountsAtSlots(t, s, 1, 2, 3, 4, 5)
+
+	fired := false
+	s.SetBeforeAddedIndexForTest(func() {
+		if fired {
+			return
+		}
+		fired = true
+		applyAccounts(t, s, point(20, 0x02), accountAt(3, 20))
+		keys, covered := changedInOnce(t, s, 1, 10)
+		require.True(t, covered)
+		require.Equal(t, []byte{1, 2, 4, 5}, keys, "account 3 was added at slot 20")
+	})
+	keys, covered := changedInOnce(t, s, 1, 10)
+	require.True(t, fired)
+	require.True(t, covered)
+	require.Equal(t, []byte{1, 2, 3, 4, 5}, keys,
+		"the older transaction holds account 3 at slot 3")
+}
+
+// A merge's reconcile writes below the floor between its loads and its end,
+// so an index built while the merge runs does not serve a read after that
+// write, even before the merge ends.
+func TestAccountsChangedInBelowTheFloorFollowsAMergeBeforeItEnds(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(11, 0x01))
+	loadAccountsAtSlots(t, s, 1, 2, 3)
+
+	require.NoError(t, s.BeginMerge())
+	loadAccountsAtSlots(t, s, 1, 2)
+	keys, covered := changedInOnce(t, s, 1, 11)
+	require.True(t, covered)
+	require.Equal(t, []byte{1, 2, 3}, keys)
+
+	stale := accountAt(3, 11)
+	stale.Active = false
+	_, err := s.ApplyLedgerBatch(nil, badgerutxo.LedgerBatch{
+		Accounts: []badgerutxo.AccountPut{{Slot: 11, Row: stale}},
+	})
+	require.NoError(t, err)
+	keys, covered = changedInOnce(t, s, 11, 11)
+	require.True(t, covered)
+	require.Equal(t, []byte{3}, keys, "the reconcile wrote account 3 at slot 11")
+	require.NoError(t, s.EndMerge(true))
+}

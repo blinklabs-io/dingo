@@ -4872,7 +4872,11 @@ first use (`Store.eachRowAddedIn`): the rows are the loaded ones, which a
 later write can only move out of the range, and an entry whose row has since
 changed is skipped. An index serves every range below the floor it was
 built at, so a prune that raises the floor keeps it; a range above that floor
-builds it again, and a rollback, load, merge, restore or reset drops it. A
+builds it again, and a rollback, load, merge, restore or reset drops it. A read
+reuses the index only when its transaction began no earlier than the one the
+index was built from, since a block between them may have moved a row out of
+the range, and no rewrite began, ended or is running since the read began;
+otherwise it builds one from its own transaction. A
 range that crosses the floor reads the table
 in key order from the Badger key of the last row served
 (`Store.EachRowAfter`). If pruning raises

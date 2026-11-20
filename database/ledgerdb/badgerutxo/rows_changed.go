@@ -93,6 +93,9 @@ func (s *Store) EachRowChangedIn(
 	// Read before the transaction begins, so a rewrite after this point shows
 	// as a different generation than the one an index is stamped with.
 	gen := s.rowsRewritten.Load()
+	if s.added.afterGen != nil {
+		s.added.afterGen()
+	}
 	err = s.view(func(txn *badger.Txn) error {
 		floor, err := changedFloor(txn)
 		if err != nil {

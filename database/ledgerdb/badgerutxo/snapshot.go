@@ -245,8 +245,7 @@ func (s *Store) dropPrefixAlways(prefixes ...[]byte) error {
 			break
 		}
 	}
-	s.bumpRowsRewritten()
-	defer s.bumpRowsRewritten()
+	defer s.rewriteRows()()
 	return s.db.DropPrefix(prefixes...)
 }
 

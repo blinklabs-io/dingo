@@ -567,8 +567,7 @@ func readPendingRollback(txn *badger.Txn) (ocommon.Point, bool, error) {
 // rollback undoes the batches after point. marked is whether the pending
 // mark is already set.
 func (s *Store) rollback(point ocommon.Point, marked bool) (RollbackResult, error) {
-	s.bumpRowsRewritten()
-	defer s.bumpRowsRewritten()
+	defer s.rewriteRows()()
 	entries, maxBytes := s.txnBudget()
 	prefixes, err := s.tombstonedPrefixes(point.Slot)
 	if err != nil {

@@ -400,8 +400,7 @@ func (s *Store) bootstrap(
 	// The journal describes history the new contents do not share.
 	// The tip is cleared, so no floor is raised: the contents the floors
 	// describe are gone with the rows.
-	s.bumpRowsRewritten()
-	defer s.bumpRowsRewritten()
+	defer s.rewriteRows()()
 	if err := s.db.DropPrefix(prefixes...); err != nil {
 		return fmt.Errorf("badgerutxo: drop for bootstrap: %w", err)
 	}
