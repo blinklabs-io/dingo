@@ -260,13 +260,20 @@ func (ls *LedgerState) snapshotViewLocked(
 	if err != nil {
 		return nil, err
 	}
-	epochs, err := r.Epochs()
-	if err != nil {
-		return nil, err
-	}
-	starts := make(map[uint64]uint64, len(epochs))
-	for _, e := range epochs {
-		starts[e.EpochId] = e.StartSlot
+	// Only a staged rollback reads the epoch starts, and Epochs decodes every
+	// epoch row, so a read with no rollback staged leaves it alone.
+	var starts map[uint64]uint64
+	if slices.ContainsFunc(ops, func(o epochStateOps) bool {
+		return o.rollbackTo != nil
+	}) {
+		epochs, err := r.Epochs()
+		if err != nil {
+			return nil, err
+		}
+		starts = make(map[uint64]uint64, len(epochs))
+		for _, e := range epochs {
+			starts[e.EpochId] = e.StartSlot
+		}
 	}
 	view := make(map[string]*models.PoolStakeSnapshot, len(rows))
 	for _, s := range rows {
@@ -282,7 +289,9 @@ func (ls *LedgerState) snapshotViewLocked(
 			}
 		}
 		for _, e := range o.epochs {
-			starts[e.EpochId] = e.StartSlot
+			if starts != nil {
+				starts[e.EpochId] = e.StartSlot
+			}
 		}
 		for _, c := range o.snapshots {
 			switch c.Kind {
