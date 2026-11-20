@@ -820,7 +820,9 @@ again, up to four waits per roll-forward. All waits of one roll-forward share
 one `catchUpBandWaitTimeout` bound, which stays under the protocol state
 timers, and end when the connection closes. Only a header still deferred at
 the bound is parked by `markDeferredHeaderRecovery`; an invalid header is
-rejected without waiting.
+rejected without waiting. A competing header that verifies after the wait is
+admitted on the same ChainSync session, so its descendants can make that fork
+long enough to replace the incumbent through ordinary chain selection.
 Queue admission has the same tolerance: a verdict that a tip publication expires
 between its verification and its pin (`pinHeaderVerdict`) is verified again, up
 to three times while each new verdict expires the same way, before the header
