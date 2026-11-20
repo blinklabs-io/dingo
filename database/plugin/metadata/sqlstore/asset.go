@@ -28,10 +28,11 @@ import (
 )
 
 const assetHolderGroups = `
-FROM asset AS a
+FROM asset_identity AS i
+INNER JOIN asset_holding AS a ON a.asset_id = i.id
 INNER JOIN utxo AS u ON u.id = a.utxo_id
 INNER JOIN utxo_address AS ua ON ua.utxo_id = u.id
-WHERE a.policy_id = ? AND a.name = ? AND u.deleted_slot = 0
+WHERE i.policy_id = ? AND i.name = ? AND u.deleted_slot = 0
 GROUP BY ua.address`
 
 func (s *Store) GetAssetHolders(
@@ -45,13 +46,14 @@ func (s *Store) GetAssetHolders(
 	if err != nil {
 		return nil, 0, err
 	}
-	args := []any{query.PolicyID, query.AssetName}
+	args := []any{query.PolicyID, nonNilName(query.AssetName)}
 	var missing int
 	err = db.QueryRowContext(ctx, s.dialect.Rebind(`
-SELECT 1 FROM asset AS a
+SELECT 1 FROM asset_identity AS i
+INNER JOIN asset_holding AS a ON a.asset_id = i.id
 INNER JOIN utxo AS u ON u.id = a.utxo_id
 LEFT JOIN utxo_address AS ua ON ua.utxo_id = u.id
-WHERE a.policy_id = ? AND a.name = ? AND u.deleted_slot = 0
+WHERE i.policy_id = ? AND i.name = ? AND u.deleted_slot = 0
   AND ua.utxo_id IS NULL
 LIMIT 1`), args...).Scan(&missing)
 	if err == nil {
@@ -100,7 +102,7 @@ LIMIT 1`), args...).Scan(&missing)
 		ctx,
 		s.dialect.Rebind(pageSQL),
 		query.PolicyID,
-		query.AssetName,
+		nonNilName(query.AssetName),
 		query.Limit,
 		query.Offset,
 	)
@@ -127,44 +129,38 @@ LIMIT 1`), args...).Scan(&missing)
 	return ret, total, nil
 }
 
-func (s *Store) GetAssetByPolicyAndName(
+// AssetHeld reports whether any retained holding of the asset exists, live or
+// spent and not yet pruned. An identity whose holdings are all gone does not
+// count: the identity row outlives its holdings, so the answer comes from the
+// holdings.
+func (s *Store) AssetHeld(
 	policyID lcommon.Blake2b224,
 	assetName []byte,
 	txn types.Txn,
-) (models.Asset, error) {
+) (bool, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
-		return models.Asset{}, err
+		return false, err
 	}
-	q := s.operationalQueries(db)
-	row, err := q.GetAssetByPolicyAndName(
+	return s.operationalQueries(db).AssetHeld(
 		ctx,
-		sqlitequery.GetAssetByPolicyAndNameParams{
+		sqlitequery.AssetHeldParams{
 			PolicyID: policyID[:],
-			Name:     assetName,
+			Name:     nonNilName(assetName),
 		},
 	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return models.Asset{}, nil
-	}
-	if err != nil {
-		return models.Asset{}, err
-	}
-	amount := uint64(0)
-	if row.Amount.Valid {
-		amount, err = parseUint64("asset amount", row.Amount.String)
-		if err != nil {
-			return models.Asset{}, err
-		}
-	}
-	return models.Asset{
-		Name:        row.Name,
-		PolicyId:    row.PolicyID,
-		Fingerprint: row.Fingerprint,
-		ID:          uint(row.ID),
-		UtxoID:      uint(row.UtxoID.Int64),
-		Amount:      types.Uint64(amount),
-	}, nil
+}
+
+// assetQuantityQuery totals the live holdings of one asset with
+// sumExpression, which reads h.amount.
+func assetQuantityQuery(sumExpression string) string {
+	return `
+SELECT ` + sumExpression + `
+FROM asset_identity AS i
+INNER JOIN asset_holding AS h ON h.asset_id = i.id
+INNER JOIN utxo ON h.utxo_id = utxo.id
+WHERE i.policy_id = ? AND i.name = ? AND utxo.deleted_slot = 0
+  AND h.amount IS NOT NULL`
 }
 
 // GetAssetQuantityByPolicyAndName sums the live holdings of an asset in the
@@ -180,18 +176,14 @@ func (s *Store) GetAssetQuantityByPolicyAndName(
 	if err != nil {
 		return 0, err
 	}
-	sumExpression := "SUM(CAST(asset.amount AS DECIMAL(20, 0)))"
+	sumExpression := "SUM(CAST(h.amount AS DECIMAL(20, 0)))"
 	if s.dialect.Name() == "sqlite" {
-		sumExpression = "dingo_uint64_sum(asset.amount)"
+		sumExpression = "dingo_uint64_sum(h.amount)"
 	}
 	var raw sql.NullString
-	err = db.QueryRowContext(ctx, s.dialect.Rebind(`
-SELECT `+sumExpression+`
-FROM asset
-INNER JOIN utxo ON asset.utxo_id = utxo.id
-WHERE asset.policy_id = ? AND asset.name = ? AND utxo.deleted_slot = 0
-  AND asset.amount IS NOT NULL`),
-		policyID[:], assetName,
+	err = db.QueryRowContext(ctx, s.dialect.Rebind(
+		assetQuantityQuery(sumExpression)),
+		policyID[:], nonNilName(assetName),
 	).Scan(&raw)
 	if err != nil {
 		// The sqlite aggregate refuses a sum beyond 64 bits itself.

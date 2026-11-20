@@ -44,7 +44,10 @@ func TestCoreCopyPlanCarriesCoreModeTables(t *testing.T) {
 	} {
 		require.Contains(t, plan.Copied, table)
 	}
-	for _, table := range []string{"address_transaction", "redeemer_script"} {
+	for _, table := range []string{
+		"address_transaction", "redeemer_script",
+		"asset_identity", "asset_holding",
+	} {
 		require.NotContains(t, plan.Copied, table)
 	}
 	// A table without a single-column key has no cursor to resume from and

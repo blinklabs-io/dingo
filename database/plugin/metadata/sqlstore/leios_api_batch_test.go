@@ -42,7 +42,10 @@ func TestLeiosAPIBatchKeepsDatumAndAssetsImmediate(t *testing.T) {
 	require.Equal(t, map[string]int{"datum": 1, "key_witness": 0, "address_transaction": 0, "transaction_metadata_label": 0}, tableCounts(t, store, txn, "datum", "key_witness", "address_transaction", "transaction_metadata_label"))
 	assetTx, assetPoint, _, _ := assetOutputTx(t, 32)
 	require.NoError(t, store.SetTransactionLeiosClosureBatched(assetTx, assetPoint, 1, nil, true, nil, acc, txn, 0))
-	require.Equal(t, 1, tableCounts(t, store, txn, "asset")["asset"])
+	require.Equal(
+		t, 1,
+		tableCounts(t, store, txn, "asset_holding")["asset_holding"],
+	)
 	require.NoError(t, store.FlushBatch(acc, txn))
 	require.Equal(t, 1, keyWitnessCount(t, store, txn))
 	require.Equal(t, 2, tableCounts(t, store, txn, "transaction_metadata_label")["transaction_metadata_label"])
@@ -240,7 +243,7 @@ func TestLeiosAPIBatchDefersRepairedOutputAddresses(t *testing.T) {
 			require.NoError(t, err)
 			_, err = db.ExecContext(ctx, "DELETE FROM utxo_address")
 			require.NoError(t, err)
-			_, err = db.ExecContext(ctx, "DELETE FROM asset")
+			_, err = db.ExecContext(ctx, "DELETE FROM asset_holding")
 			require.NoError(t, err)
 			require.NoError(t, store.SetTransactionLeiosClosureBatched(tx, point, 0, nil, true, nil, acc, txn, 0))
 			require.Zero(t, tableCounts(t, store, txn, "utxo_address")["utxo_address"], "repaired output addresses must wait for the closure flush")
