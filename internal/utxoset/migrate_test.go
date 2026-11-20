@@ -195,6 +195,31 @@ func TestMigrateFromSQLMovesTheUtxoSet(t *testing.T) {
 	requireMigrated(t, set, f, outputs)
 }
 
+// A node can finish its cutover before deleting historical SQL rows. The
+// durable commit and set-only mark make the cleanup safe, and its progress
+// record remains until a managed worker completes every batch.
+func TestMigrateFromSQLDefersRowCleanupAfterCutover(t *testing.T) {
+	t.Parallel()
+	const outputs = 25
+	f := newSQLFixture(outputs)
+	set := openOnly(t, t.TempDir())
+	t.Cleanup(func() { _ = set.Close() })
+	env := f.env(nil)
+	env.DeferCleanup = true
+
+	require.NoError(t, set.MigrateFromSQL(t.Context(), f, env))
+	require.True(t, f.marked)
+	require.Equal(t, outputs, f.remaining())
+	require.Equal(
+		t,
+		"committed",
+		f.sync[utxoset.MigrationSyncKey],
+	)
+
+	require.NoError(t, set.CleanupMigratedSQLRows(t.Context(), env))
+	requireMigrated(t, set, f, outputs)
+}
+
 // A stop between any two steps, as a crash would cause, leaves the metadata
 // store intact until the mark, and the next run finishes the migration.
 func TestMigrateFromSQLResumesAfterACrashAtEveryStep(t *testing.T) {

@@ -3415,9 +3415,13 @@ released database below its tip"):
 4. The progress record becomes `committed`, then `ledger.utxo_set_only` is
    written. Both writes are idempotent, so a crash between them is repaired by
    the next run.
-5. The `utxo` rows are deleted in batches of 5,000 (`id` order, children by
-   cascade) and the progress record is removed. A crash between batches
-   resumes the deletes; the run logs every 100 batches.
+5. Node startup continues once the ledger and its services are ready. A
+   node-managed worker then deletes the redundant `utxo` rows in batches of
+   5,000 (`id` order, children by cascade) and removes the progress record.
+   Shutdown, restore, and truncate cancel and join the worker before closing
+   storage. A crash or cancellation between batches retains `committed`, so
+   the next run resumes cleanup; the worker logs every 100 batches. Offline
+   callers that do not defer cleanup still finish these batches inline.
 
 Until step 4 the metadata store stays whole and authoritative, so a stop at
 any earlier point loses nothing. Blob output offsets written for the old rows

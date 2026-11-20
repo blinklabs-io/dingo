@@ -138,6 +138,12 @@ type Node struct {
 	utxoCkptMu     sync.Mutex
 	utxoCkptCancel context.CancelFunc
 	utxoCkptWG     sync.WaitGroup
+	// utxoMigrationCleanup owns the post-cutover SQL row cleanup. It has a
+	// separate context because live restore and truncate stop storage users
+	// without cancelling the node context.
+	utxoMigrationCleanupMu     sync.Mutex
+	utxoMigrationCleanupCancel context.CancelFunc
+	utxoMigrationCleanupDone   chan struct{}
 
 	// durableCloseProgress overrides defaultDurableCloseProgressInterval
 	// when positive.
@@ -2087,6 +2093,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		//nolint:contextcheck // n.ctx owns the node lifecycle.
 		n.startMithrilCoordinator(n.ctx),
 	)
+	started = append(started, n.startUtxoMigrationCleanup(n.ctx))
 
 	// All components started successfully
 	n.startupLifecycleMu.Unlock()

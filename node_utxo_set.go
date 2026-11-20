@@ -30,6 +30,8 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+var cleanupMigratedUtxoRows = nodestorage.CleanupMigratedUtxoRows
+
 // openUtxoSet opens the live UTxO set, which holds the UTxO set and the ledger
 // state. An in-memory node uses a temporary directory. It stays open across a live
 // restore or truncate, which reconcile it again.
@@ -75,6 +77,7 @@ func (n *Node) reconcileUtxoSet(ctx context.Context) error {
 		RewindBlocks:               n.shelleySecurityParam(),
 		DelegatorInactivityEnabled: n.config.delegatorInactivityEnabled,
 		DelegatorInactivity:        n.config.delegatorInactivity,
+		DeferUtxoRowCleanup:        true,
 		Reconciled: func(ctx context.Context) error {
 			n.utxoSetReconciled = true
 			if err := n.backfillRewardLiveStake(ctx); err != nil {
@@ -89,6 +92,59 @@ func (n *Node) reconcileUtxoSet(ctx context.Context) error {
 		r.Guard = n.drainGuard
 	}
 	return r.Run(ctx)
+}
+
+// startUtxoMigrationCleanup removes legacy SQL UTxO rows after the live set
+// has become authoritative and the rest of node startup has completed. The
+// returned stop joins the worker before storage can close.
+func (n *Node) startUtxoMigrationCleanup(parent context.Context) func() {
+	n.utxoMigrationCleanupMu.Lock()
+	if n.utxoMigrationCleanupDone != nil {
+		n.utxoMigrationCleanupMu.Unlock()
+		return func() { _ = n.stopUtxoMigrationCleanup() }
+	}
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	n.utxoMigrationCleanupCancel = cancel
+	n.utxoMigrationCleanupDone = done
+	db := n.db
+	set := n.utxoSet
+	n.utxoMigrationCleanupMu.Unlock()
+
+	go func() {
+		defer close(done)
+		err := cleanupMigratedUtxoRows(
+			ctx, db, set, n.config.logger,
+		)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			n.config.logger.Error(
+				"legacy SQL UTxO row cleanup failed",
+				"error", err,
+			)
+		}
+	}()
+	return func() { _ = n.stopUtxoMigrationCleanup() }
+}
+
+func (n *Node) stopUtxoMigrationCleanup() error {
+	n.utxoMigrationCleanupMu.Lock()
+	cancel := n.utxoMigrationCleanupCancel
+	done := n.utxoMigrationCleanupDone
+	n.utxoMigrationCleanupMu.Unlock()
+	if done == nil {
+		return nil
+	}
+	if cancel != nil {
+		cancel()
+	}
+	<-done
+	n.utxoMigrationCleanupMu.Lock()
+	if n.utxoMigrationCleanupDone == done {
+		n.utxoMigrationCleanupCancel = nil
+		n.utxoMigrationCleanupDone = nil
+	}
+	n.utxoMigrationCleanupMu.Unlock()
+	return nil
 }
 
 // utxoSetBackuper returns the live UTxO set for a snapshot, nil when the node

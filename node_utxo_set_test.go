@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -117,6 +118,45 @@ func TestMigrateUtxoRowsNeedsTheSet(t *testing.T) {
 	err = n.migrateUtxoRows(t.Context())
 	require.ErrorContains(t, err, "live UTxO set")
 	require.NotContains(t, err.Error(), "resync")
+}
+
+func TestUtxoMigrationCleanupJoinsBeforeStorageClose(t *testing.T) {
+	original := cleanupMigratedUtxoRows
+	t.Cleanup(func() { cleanupMigratedUtxoRows = original })
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	cleanupMigratedUtxoRows = func(
+		ctx context.Context,
+		_ *database.Database,
+		_ *utxoset.Set,
+		_ *slog.Logger,
+	) error {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	n := &Node{ctx: ctx}
+	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	stop := n.startUtxoMigrationCleanup(ctx)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not start")
+	}
+	stop()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not stop")
+	}
+	n.utxoMigrationCleanupMu.Lock()
+	require.Nil(t, n.utxoMigrationCleanupCancel)
+	require.Nil(t, n.utxoMigrationCleanupDone)
+	n.utxoMigrationCleanupMu.Unlock()
 }
 
 // TestUtxoSetOnlyStakeRebuildWaitsForTheSet requires the startup
