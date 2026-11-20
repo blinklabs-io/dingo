@@ -19,11 +19,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -43,13 +47,13 @@ func graduatedTables() map[nodesettings.Family][]string {
 }
 
 // drainEveryGraduatedFamily drains the whole of statedrain.Graduated in its
-// own order, verified, with the statement guard armed.
+// own order with the statement guard armed.
 func drainEveryGraduatedFamily(t *testing.T, h *p5Harness) {
 	t.Helper()
 	src := drainTestSource{set: h.set, db: h.scenario.DB}
 	h.drainErr = statedrain.Run(t.Context(), statedrain.Env{
 		Store: drainStore{h.scenario.DB, h.scenario.DrainFamilies},
-		Set:   src, Guard: h.guard, VerifyBeforeDrain: true,
+		Set:   src, Guard: h.guard,
 	}, statedrain.Graduated(src))
 }
 
@@ -64,7 +68,9 @@ func allGraduatedRun(
 	drive func(h *p5Harness) func() []string,
 ) (map[string][]string, *p5Harness) {
 	t.Helper()
-	h := newP5Harness(t, nil, nil)
+	h := newSeededP5Harness(t, nil, nil, func(db *database.Database) {
+		seedRewardInputFacts(t, db.Metadata())
+	})
 	s := h.scenario
 	s.ConfigureLeiosValidator()
 	// The harness wrote its two nonces to the metadata store only.
@@ -195,6 +201,7 @@ func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
 				require.Len(t, refunds, 1)
 				first := true
 				return func() []string {
+					initial := first
 					if first {
 						tip, err = h.scenario.DB.GetTip(nil)
 						require.NoError(t, err)
@@ -211,7 +218,7 @@ func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
 						h.scenario.DB,
 						slots,
 					)
-					return append(lines, renderOpCerts(
+					lines = append(lines, renderOpCerts(
 						t,
 						h.reads(drained),
 						[][]byte{ops.Pool, ops.Other},
@@ -222,6 +229,28 @@ func TestEveryGraduatedFamilyDrainedTogetherServesPoolHistory(
 							ops.Batched,
 						},
 					)...)
+					// The counters observed at one slot are what a snapshot
+					// import's anchor exports.
+					for _, slot := range []uint64{
+						ops.Base, ops.Raised, ops.Repeated, ops.Lowered,
+						ops.Batched, ops.Batched + 1,
+					} {
+						got, err := h.scenario.AnchorOpCertCounters(slot)
+						require.NoError(t, err, "anchor counters at %d", slot)
+						if initial && slot == ops.Repeated {
+							require.Len(t, got, 2, "both pools observed at %d", slot)
+						}
+						for _, c := range got {
+							lines = append(lines, fmt.Sprintf(
+								"anchor %d %x %d", slot, c.PoolKeyHash,
+								c.Sequence,
+							))
+						}
+						lines = append(lines, fmt.Sprintf(
+							"anchor %d count %d", slot, len(got),
+						))
+					}
+					return lines
 				}
 			},
 		)
@@ -254,7 +283,7 @@ func newRewardBoundaryRun(
 	guard *statedrain.TripGuard,
 ) *rewardBlocksRun {
 	t.Helper()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, guard, true)
+	r := newRewardBlocksRun(t, "set", guard, true)
 	s := r.scenario
 	s.Collateral(0xc0, 1_000)
 	s.Block(9, s.PoolB)
@@ -292,7 +321,7 @@ func TestEveryGraduatedFamilyDrainedTogetherCapturesTheSameRewardInputs(
 			src := rewardBlocksDrainSource{r: r}
 			require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
 				Store: drainStore{s.DB, s.DrainFamilies}, Set: src,
-				Guard: guard, VerifyBeforeDrain: true,
+				Guard: guard,
 			}, statedrain.Graduated(src)))
 		}
 		out := map[string]string{}
@@ -348,4 +377,144 @@ func TestEveryGraduatedFamilyDrainedTogetherCapturesTheSameRewardInputs(
 	require.Equal(t, undrained, drained)
 	require.Equal(t, drained["boundary"], drained["replay"])
 	require.NotEqual(t, drained["boundary"], drained["rollback"])
+}
+
+// seedRewardInputFacts stores the reward input rows a harness block run does
+// not write: pool and stake inputs, and an imported basis failure.
+func seedRewardInputFacts(
+	t *testing.T,
+	store metadata.MetadataStore,
+) {
+	t.Helper()
+	epochs, err := store.GetEpochs(nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, epochs)
+	var epoch uint64
+	for _, e := range epochs {
+		epoch = max(epoch, e.EpochId)
+	}
+	slot := epochs[0].StartSlot + 1
+	pool := bytes.Repeat([]byte{0x61}, 28)
+	other := bytes.Repeat([]byte{0x62}, 28)
+	blocks := uint64(5)
+	require.NoError(t, store.SaveRewardPoolInputs([]*models.RewardPoolInput{
+		{
+			Epoch: epoch, PoolKeyHash: pool, RewardAccount: bytes.Repeat([]byte{1}, 29),
+			Margin: &types.Rat{Rat: big.NewRat(1, 20)}, Pledge: 3,
+			DelegatedStake: 100, OwnerStake: 3, Cost: 340, DelegatorCount: 2,
+			BlocksProduced: &blocks, TotalBlocksInEpoch: &blocks,
+			CapturedSlot: slot, BoundarySlot: slot,
+		},
+		{
+			Epoch: epoch, PoolKeyHash: other, Pledge: 1, DelegatedStake: 50,
+			Cost: 170, DelegatorCount: 1, CapturedSlot: slot, BoundarySlot: slot,
+		},
+	}, nil))
+	var stakes []*models.RewardStakeInput
+	for i, p := range [][]byte{pool, pool, other} {
+		stakes = append(stakes, &models.RewardStakeInput{
+			Epoch: epoch, PoolKeyHash: p, CredentialTag: uint8(i % 2),
+			StakingKey: bytes.Repeat([]byte{byte(0x70 + i)}, 28),
+			Stake:      types.Uint64(10 * (i + 1)), Owner: i == 0, Registered: true,
+			CapturedSlot: slot, BoundarySlot: slot,
+		})
+	}
+	require.NoError(t, store.SaveRewardStakeInputs(stakes, nil))
+	// The set keeps a basis failure at its snapshot's captured slot, so the
+	// two share one here as an import writes them.
+	excluded := types.Uint64(4)
+	require.NoError(t, store.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch: epoch, SnapshotType: models.PoolStakeSnapshotTypeMark,
+		TotalActiveStake: 150, ExcludedActiveStake: &excluded,
+		TotalPoolCount: 2, TotalDelegators: 3, CapturedSlot: slot,
+		BoundarySlot: slot, EpochNonce: bytes.Repeat([]byte{9}, 32),
+		ProtocolVersion: 10, Authoritative: true, CalculationVersion: 3,
+	}, nil))
+	require.NoError(t, store.SaveRewardSeedFailure(
+		epoch, models.PoolStakeSnapshotTypeMark, "basis missing", slot, nil,
+	))
+	require.NoError(t, store.SaveImportedPoolBlockCounts(
+		[]models.ImportedPoolBlockCount{
+			{PoolKeyHash: pool, Epoch: epoch, BlocksProduced: 4, CapturedSlot: slot},
+			{PoolKeyHash: other, Epoch: epoch, BlocksProduced: 2, CapturedSlot: slot},
+		}, nil,
+	))
+	require.NoError(t, store.SaveImportedEpochBlockTotal(epoch, 6, slot, nil))
+	perf := &types.Rat{Rat: big.NewRat(9, 10)}
+	require.NoError(t, store.SaveRewardPoolOutputs([]*models.RewardPoolOutput{{
+		Epoch: epoch, PoolKeyHash: pool, ApparentPerformance: perf,
+		OptimalReward: 90, TotalReward: 80, LeaderReward: 30,
+		LeaderRewardDeficit: 1, MemberRewardTotal: 50, OwnerStake: 3,
+		Undistributed: 2, Unspendable: 4, CapturedSlot: slot,
+		BoundarySlot: slot,
+	}, {
+		Epoch: epoch, PoolKeyHash: other, OptimalReward: 5, TotalReward: 4,
+		CapturedSlot: slot, BoundarySlot: slot,
+	}}, nil))
+	require.NoError(t, store.SaveRewardAccountOutputs(
+		[]*models.RewardAccountOutput{
+			{
+				Epoch: epoch, PoolKeyHash: pool, CredentialTag: 0,
+				StakingKey: bytes.Repeat([]byte{0x70}, 28),
+				RewardType: "leader", Amount: 30, Spendable: true,
+				CapturedSlot: slot, BoundarySlot: slot,
+			},
+			{
+				Epoch: epoch, PoolKeyHash: pool, CredentialTag: 1,
+				StakingKey: bytes.Repeat([]byte{0x71}, 28),
+				RewardType: "member", Amount: 20, Guarded: true,
+				CapturedSlot: slot, BoundarySlot: slot,
+			},
+		}, nil,
+	))
+	require.NoError(t, store.AddAppliedRewardCreditRound(
+		models.RewardCreditRound{SnapshotEpoch: epoch, BoundarySlot: slot}, nil,
+	))
+	for i := range 2 {
+		require.NoError(t, store.CreateDrep(nil, &models.Drep{
+			Credential: bytes.Repeat([]byte{byte(0x50 + i)}, 28),
+			AddedSlot:  slot, Active: i == 0, LastActivityEpoch: epoch,
+			ExpiryEpoch: epoch + 20, CredentialTag: uint8(i),
+		}))
+	}
+	u := func(v uint64) *uint64 { return &v }
+	for i, p := range []models.GovernanceProposal{
+		{
+			RatifiedEpoch: u(epoch), RatifiedSlot: u(slot),
+			EnactedEpoch: u(epoch + 1), EnactedSlot: u(slot + 5),
+		},
+		{
+			ExpiredEpoch: u(epoch), ExpiredSlot: u(slot),
+			DroppedEpoch: u(epoch + 1), DroppedSlot: u(slot + 7),
+		},
+		{DeletedSlot: u(slot + 2)},
+	} {
+		p.TxHash = bytes.Repeat([]byte{byte(0x40 + i)}, 32)
+		p.ActionIndex = uint32(i)
+		p.ActionType = 1
+		p.ProposedEpoch, p.ExpiresEpoch = epoch, epoch+6
+		p.Deposit, p.AddedSlot = 100, slot
+		p.AnchorURL, p.AnchorHash = "https://a", bytes.Repeat([]byte{1}, 32)
+		p.ReturnAddress = bytes.Repeat([]byte{2}, 29)
+		require.NoError(t, store.SetGovernanceProposal(&p, nil))
+	}
+	proof := bytes.Repeat([]byte{5}, 48)
+	regEpoch := epoch
+	require.NoError(t, store.SavePoolStakeSnapshots(
+		[]*models.PoolStakeSnapshot{
+			{
+				Epoch: epoch, SnapshotType: models.PoolStakeSnapshotTypeMark,
+				PoolKeyHash: pool, TotalStake: 900, DelegatorCount: 3,
+				CapturedSlot: slot, VrfKeyHash: bytes.Repeat([]byte{6}, 32),
+				LeiosKeyPublic: bytes.Repeat([]byte{7}, 96), LeiosKeyPossessionProof: proof,
+				LeiosKeyRegistrationEpoch: &regEpoch, CalculationVersion: 3,
+				RewardAccountAutoVote: 1, RewardAccountAutoVoteResolved: true,
+			},
+			{
+				Epoch: epoch, SnapshotType: models.PoolStakeSnapshotTypeActive,
+				PoolKeyHash: other, TotalStake: 5, StakeDenominator: 40,
+				DelegatorCount: 1, CapturedSlot: slot,
+			},
+		}, nil,
+	))
 }

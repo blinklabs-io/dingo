@@ -311,6 +311,7 @@ func runLeiosCertEpochBoundaryCase(
 	nodeConfig.ShelleyGenesisHash = strings.Repeat("42", 32)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
+		UtxoSet:               NewMemLiveSetForTest(),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -340,6 +341,7 @@ func runLeiosCertEpochBoundaryCase(
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	attachTestLiveSet(t, ls)
 	ls.currentEra = startEra
 	ls.currentPParams = startPParams
 	ls.currentEpoch = epoch0
@@ -575,7 +577,8 @@ func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	cfg.ShelleyGenesisHash = strings.Repeat("42", 32)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database: db, ChainManager: cm, CardanoNodeConfig: cfg,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), PromRegistry: prometheus.NewRegistry(),
+		UtxoSet: NewMemLiveSetForTest(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)), PromRegistry: prometheus.NewRegistry(),
 		EnableDijkstra: true, ManualBlockProcessing: true, TrustedReplay: true,
 		EndorserBlockProvider: func(hash []byte, _ uint64) ([]cbor.RawMessage, bool) {
 			return []cbor.RawMessage{spenderRaw}, bytes.Equal(hash, ebHash)
@@ -584,6 +587,7 @@ func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	attachTestLiveSet(t, ls)
 	ls.currentEra = eras.DijkstraEraDesc
 	ls.currentPParams = dijkstraTestProtocolParameters()
 	ls.currentEpoch = epoch
@@ -601,9 +605,11 @@ func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
 	stored, err := db.GetTransactionByHash(t.Context(), spender.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
-	require.Len(t, stored.Inputs, 1, "the closure must consume the earlier ranking-block output even in a shared batch")
-	require.Equal(t, certifier.SlotNumber(), stored.Inputs[0].DeletedSlot)
-	require.Equal(t, spender.Hash().Bytes(), []byte(stored.Inputs[0].SpentAtTxHash))
+	inputs := spender.Inputs()
+	require.Len(t, inputs, 1)
+	require.False(t,
+		outputLiveIn(t, ls, inputs[0].Id().Bytes(), inputs[0].Index()),
+		"the closure must consume the earlier ranking-block output even in a shared batch")
 }
 
 // A certifying ranking block whose parent announced no endorser block has
@@ -667,6 +673,7 @@ func TestLedgerProcessBlocksRejectsCertificateWithoutParentAnnouncement(
 	certChecks := 0
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:              db,
+		UtxoSet:               NewMemLiveSetForTest(),
 		ChainManager:          cm,
 		CardanoNodeConfig:     nodeConfig,
 		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -683,6 +690,7 @@ func TestLedgerProcessBlocksRejectsCertificateWithoutParentAnnouncement(
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	attachTestLiveSet(t, ls)
 	ls.currentEra = eras.DijkstraEraDesc
 	ls.currentPParams = params
 	ls.currentEpoch = epoch0

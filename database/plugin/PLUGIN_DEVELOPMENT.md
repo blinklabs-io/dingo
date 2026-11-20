@@ -20,11 +20,20 @@ The `storage.immutable` capability serves the ImmutableDB of promoted block
 bodies. A provider returns `immutable.ImmutableDB`: the chunk directory
 (`Dir`), the single writer (`Open`, returning an `immutable.Store` that
 appends, syncs, reads by location, looks up points and truncates), marker reads
-(`ReadBlockAt`) and file listing (`ListFiles`). The only provider is the
-built-in `chunkfile` in `database/plugin/immutable/chunkfile`, registered in
-every build and resolved by `plugins.ResolveStorage`; it takes no configuration
-and has no selector flag. Its descriptor sets `DurableClose`, so host shutdown
-closes the open writer to completion.
+(`ReadBlockAt`), file listing (`ListFiles`) and streamed file reads
+(`ReadFile`). The built-in `chunkfile` provider in
+`database/plugin/immutable/chunkfile` is registered in every build. Builds
+with `dingo_extra_plugins` also register `s3` and `gcs` ImmutableDB
+providers, selected automatically with the matching blob provider and reusing
+its released bucket, namespace, and credentials configuration. Remote chunks
+are authoritative: only the writable tail is staged under the data directory,
+completed chunks are uploaded as chunk, secondary, then primary, and reads
+retain at most two idle cached chunks; active reads keep their leased files
+until completion. Snapshot file reads stream directly from the
+selected provider. Reserved ImmutableDB objects are excluded from blob-key
+iteration and blob-only backup. Remote providers require streamed
+object-file operations from the matching blob provider. Provider descriptors
+set `DurableClose`; host shutdown closes the open writer.
 
 ## Provider shape
 

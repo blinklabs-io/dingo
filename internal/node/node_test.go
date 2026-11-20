@@ -561,7 +561,9 @@ func TestLogEffectiveConfigInfoLineHasNoSecrets(t *testing.T) {
 	}
 	if rec["component"] != "node" ||
 		rec["genesis_selection_mode"] != true ||
-		rec["health_ready_gap_slots"] != float64(config.DefaultHealthReadyGapSlots) {
+		rec["health_ready_gap_slots"] != float64(
+			config.DefaultHealthReadyGapSlots,
+		) {
 		t.Fatalf("unexpected fields: %v", rec)
 	}
 	for _, sentinel := range sentinels {
@@ -1496,4 +1498,14 @@ func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
 	if got := built.TokenRegistry().HeaderSecrets; !maps.Equal(got, headers) {
 		t.Fatalf("token registry headers = %v, want %v", got, headers)
 	}
+}
+
+func TestNodeStorageModeValidatesTheConfiguredMode(t *testing.T) {
+	t.Parallel()
+	mode, err := nodeStorageMode(&config.Config{StorageMode: "api"})
+	require.NoError(t, err)
+	require.Equal(t, dingo.StorageModeAPI, mode)
+
+	_, err = nodeStorageMode(&config.Config{StorageMode: "bogus"})
+	require.ErrorContains(t, err, "invalid storage mode")
 }

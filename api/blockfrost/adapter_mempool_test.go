@@ -16,17 +16,19 @@ package blockfrost
 
 import (
 	"context"
-	"database/sql"
 	"encoding/hex"
 	"sync"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/livesettest"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
@@ -171,7 +173,8 @@ func TestNodeAdapterMempoolTransactions(t *testing.T) {
 
 func TestNodeAdapterMempoolTransaction(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
+	fx := newAdapterFixture(t, dbtest.IndexerOptions{})
+	adapter := fx.adapter
 	txs, addresses, inputIDs := mempoolFixture(t, 2)
 	adapter.mempool = &fakeMempool{txs: txs}
 	ctx := context.Background()
@@ -179,7 +182,7 @@ func TestNodeAdapterMempoolTransaction(t *testing.T) {
 	// The second transaction's input resolves to a confirmed output at a
 	// known address.
 	spender, _, _ := testKeyAddress(t, 0xf1, 0)
-	seedMempoolInput(t, raw, db, inputIDs[1], spender)
+	seedMempoolInput(t, fx.utxoSet, inputIDs[1], spender)
 
 	hash, err := hex.DecodeString(txs[1].Hash)
 	require.NoError(t, err)
@@ -312,22 +315,43 @@ func TestNodeAdapterMempoolAddressTransactionsReadsOnlyTheIndex(
 	require.Zero(t, pool.boundedReads, "the pool must not be snapshotted")
 }
 
-// seedMempoolInput stores the confirmed output a mempool transaction spends.
+// seedMempoolInput adds the confirmed output a mempool transaction spends to
+// the ledger's live UTxO set.
 func seedMempoolInput(
 	t *testing.T,
-	raw *sql.DB,
-	db *database.Database,
+	utxoSet *livesettest.Mem,
 	txID []byte,
 	owner lcommon.Address,
 ) {
 	t.Helper()
-	insertAdapterTransaction(t, raw, &models.Transaction{
-		Hash: txID, Slot: 1, Valid: true,
-		Outputs: []models.Utxo{{
-			TxId: txID, OutputIdx: 0,
-			PaymentKey: owner.PaymentKeyHash().Bytes(),
-			AddedSlot:  1, Amount: types.Uint64(5_000_000),
-		}},
+	output, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: owner,
+		OutputAmount:  5_000_000,
 	})
-	storePointerOutputCbor(t, db, txID, 0, owner, 5_000_000)
+	require.NoError(t, err)
+	require.NoError(t, utxoSet.ApplyUtxoChanges(nil, []ledger.UtxoEvent{{
+		Added: []ledger.UtxoOutput{{
+			Ref:  models.UtxoId{Hash: txID, Idx: 0},
+			Cbor: output,
+		}},
+	}}))
+}
+
+// The IndexerDB has not indexed the output the mempool transaction spends,
+// which the ledger already holds.
+func TestNodeAdapterMempoolReadsInputsFromTheLedger(t *testing.T) {
+	t.Parallel()
+	fx := newAdapterFixture(t, dbtest.IndexerOptions{})
+	adapter := fx.adapter
+	txs, _, inputIDs := mempoolFixture(t, 2)
+	adapter.mempool = &fakeMempool{txs: txs}
+	spender, _, _ := testKeyAddress(t, 0xf1, 0)
+	seedMempoolInput(t, fx.utxoSet, inputIDs[1], spender)
+
+	hash, err := hex.DecodeString(txs[1].Hash)
+	require.NoError(t, err)
+	got, err := adapter.MempoolTransaction(t.Context(), hash)
+	require.NoError(t, err)
+	require.Len(t, got.Inputs, 1)
+	require.Equal(t, spender.String(), got.Inputs[0].Address)
 }

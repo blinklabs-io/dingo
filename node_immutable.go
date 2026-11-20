@@ -18,89 +18,46 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"path/filepath"
 	"time"
 
-	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/blockpromote"
+	"github.com/blinklabs-io/dingo/internal/nodestorage"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
-	"github.com/blinklabs-io/dingo/plugin"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// immutableGeometry derives the chunk geometry of nodeCfg's network; see
-// cardano.CardanoNodeConfig.ImmutableChunkGeometry.
-func immutableGeometry(
-	nodeCfg *cardano.CardanoNodeConfig,
-) (chunkSlots uint64, canContainEBB bool, err error) {
-	return nodeCfg.ImmutableChunkGeometry()
-}
-
-// validateImmutableDB refuses configurations the ImmutableDB cannot serve.
-func validateImmutableDB(cfg Config) error {
-	if !cfg.immutableDB.Enabled {
-		return nil
-	}
-	if provider := cfg.pluginSelections[plugin.CapabilityStorageBlob].Provider; provider != "" &&
-		provider != "badger" {
-		return fmt.Errorf(
-			"immutableDb.enabled requires the badger blob plugin, got %q",
-			provider,
-		)
-	}
-	if cfg.historyExpiry.Enabled {
-		return errors.New(
-			"immutableDb.enabled cannot be combined with historyExpiry.enabled: " +
-				"history expiry tombstones block bodies in place, which the " +
-				"chunk files do not support",
-		)
-	}
-	return nil
+// immutableEnabled reports whether block bodies move into the ImmutableDB.
+// A node that expires history tombstones bodies in place in the blob store
+// instead, and a chunk file cannot hold a tombstone, so the two never mix.
+func (n *Node) immutableEnabled() bool {
+	return !n.config.historyExpiry.Enabled
 }
 
 // refuseHistoryExpiryOverImmutable refuses history expiry on a database that
-// holds an ImmutableDB state record, whatever the configuration says now:
-// expiry tombstones block bodies in place, and a promoted block's body lives
-// in the chunk files.
+// holds an ImmutableDB state record: the bodies of its promoted blocks live in
+// chunk files, which expiry cannot tombstone.
 func refuseHistoryExpiryOverImmutable(
 	cfg Config,
 	db *database.Database,
 ) error {
-	if !cfg.historyExpiry.Enabled || db == nil {
-		return nil
-	}
-	if _, ok := db.ImmutableState(); ok {
-		return errors.New(
-			"historyExpiry.enabled cannot be used on a database with an " +
-				"ImmutableDB: block bodies below the immutable tip live in " +
-				"chunk files",
-		)
-	}
-	return nil
+	return nodestorage.RefuseHistoryExpiryOverImmutable(
+		cfg.historyExpiry.Enabled, db,
+	)
 }
 
 func (n *Node) immutableConfig() database.ImmutableConfig {
-	cfg := database.ImmutableConfig{
-		Enabled:      n.config.immutableDB.Enabled,
-		PromoteBatch: n.config.immutableDB.PromoteBatch,
-	}
-	if !cfg.Enabled {
-		return cfg
-	}
-	// A failure leaves the geometry zero, which database.New rejects with
-	// the invalid-geometry error unless a recorded state supplies it.
-	if slots, ebb, err := immutableGeometry(n.config.cardanoNodeConfig); err == nil {
-		cfg.ChunkSlots, cfg.CanContainEBB = slots, ebb
-	}
-	return cfg
+	return nodestorage.ImmutableConfig(
+		n.config.historyExpiry.Enabled,
+		n.config.cardanoNodeConfig,
+		n.config.immutableDB.PromoteBatch,
+	)
 }
 
-// immutablePointSource reports the primary-chain point k blocks behind the
-// ledger's applied tip.
-type immutablePointSource interface {
-	ImmutablePoint(ctx context.Context) (ocommon.Point, bool, error)
-}
+type immutablePointSource = nodestorage.ImmutablePointSource
 
 // immutableCeiling is the highest block index that may leave the VolatileDB:
 // the ledger's immutable point, the same point the live UTxO set is anchored
@@ -146,16 +103,105 @@ func immutableCeilingFor(
 	return id, id > 0, ctx.Err()
 }
 
+// immutableSpaceMargin is free space required beyond the block bodies a
+// promotion step copies.
+const immutableSpaceMargin = 64 << 20
+
+// immutableSpaceCheck refuses a promotion step the data directory's volume
+// cannot hold. A step copies block bodies into chunk files before the blob
+// store reclaims them, so the bound is the blob store's size scaled by the
+// share of its blocks the step promotes: the whole store when a database
+// first moves its block bodies, a margin once the ImmutableDB keeps up.
+func (n *Node) immutableSpaceCheck(
+	ctx context.Context,
+	ceiling uint64,
+) error {
+	// A node without a data directory keeps its blob store in memory and
+	// its chunk files in a temporary directory; there is no volume to size.
+	if n.config.dataDir == "" {
+		return nil
+	}
+	var done uint64
+	if st, ok := n.db.ImmutableState(); ok {
+		done = st.TipIndex
+	}
+	if ceiling <= done {
+		return nil
+	}
+	pending := ceiling - done
+	need := uint64(immutableSpaceMargin)
+	if pending > uint64(max(n.config.immutableDB.PromoteBatch, 1)) {
+		blobBytes, err := dirBytes(ctx, filepath.Join(n.config.dataDir, "blob"))
+		if err != nil {
+			return fmt.Errorf("measure the blob store: %w", err)
+		}
+		// The share is computed in floating point: a block count times a
+		// byte count overflows uint64 only on a chain far beyond any real one.
+		need += uint64(float64(blobBytes) * float64(pending) / float64(ceiling))
+		n.config.logger.Info(
+			"moving block bodies into the ImmutableDB",
+			"component", "node",
+			"blocks_pending", pending,
+			"space_needed_bytes", need,
+		)
+	}
+	available := n.availableDiskBytes
+	if available == nil {
+		available = utxoset.AvailableDiskBytes
+	}
+	free, err := available(n.config.dataDir)
+	if err != nil {
+		return fmt.Errorf("check free disk space: %w", err)
+	}
+	if free < need {
+		return fmt.Errorf(
+			"not enough free disk space to move %d blocks into the "+
+				"ImmutableDB: %d bytes needed and %d available in %s",
+			pending, need, free, n.config.dataDir,
+		)
+	}
+	return nil
+}
+
+// dirBytes sums the disk the files under dir occupy.
+func dirBytes(ctx context.Context, dir string) (uint64, error) {
+	var total uint64
+	err := filepath.WalkDir(
+		dir,
+		func(_ string, d fs.DirEntry, err error) error {
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if d.Type().IsRegular() {
+				info, err := d.Info()
+				if err != nil {
+					return err
+				}
+				total += allocatedBytes(info)
+			}
+			return nil
+		},
+	)
+	return total, err
+}
+
 func (n *Node) newBlockPromoter() *blockpromote.Promoter {
 	freq := n.config.immutableDB.PromoteFrequency
 	if freq <= 0 {
 		freq = time.Minute
 	}
 	return blockpromote.New(blockpromote.Config{
-		DB:        n.db,
-		EventBus:  n.eventBus,
-		Logger:    n.config.logger,
-		Ceiling:   n.immutableCeiling,
-		Frequency: freq,
+		DB:         n.db,
+		EventBus:   n.eventBus,
+		Logger:     n.config.logger,
+		Ceiling:    n.immutableCeiling,
+		CheckSpace: n.immutableSpaceCheck,
+		Frequency:  freq,
 	})
 }

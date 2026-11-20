@@ -197,6 +197,47 @@ func AdoptImmutableChunks(
 		if err := moveChunkIn(cfg.SourceDir, destDir, num, move); err != nil {
 			return nil, err
 		}
+		// discard undoes a chunk that failed before its markers could
+		// commit. The recorded tip is read afresh: adoptChunk moves it over
+		// the chunk before the first marker commits, and from then on, as
+		// for a chunk an earlier run stopped inside, committed markers can
+		// name the chunk's local and published files, so both stay.
+		discard := func(err error) error {
+			cur, _ := db.ImmutableState()
+			if cur.HasTip && num <= cur.TipSlot/geom.ChunkSlots {
+				return err
+			}
+			if uerr := db.UnpublishImmutableChunk(num); uerr != nil {
+				return errors.Join(err, fmt.Errorf(
+					"removing published chunk %d: %w", num, uerr,
+				))
+			}
+			if errors.Is(err, immutable.ErrDigestMismatch) {
+				// Files that are not the certified ones are not worth
+				// keeping for a later run to resume with.
+				removeChunkFiles(destDir, num)
+				if cerr := db.ClearImmutableAdopt(); cerr != nil {
+					return cerr
+				}
+			}
+			return err
+		}
+		if db.ImmutableChunksPublished() {
+			// Publication uploads whatever the staged files hold, and the
+			// object store keeps it whether or not the adoption goes on. Check
+			// the files first so bytes that are not certified are not
+			// published at all; adoptChunk still verifies the bytes it parses.
+			if err := dest.VerifyChunkFiles(num); err != nil {
+				return nil, discard(
+					fmt.Errorf("verifying chunk %d: %w", num, err),
+				)
+			}
+			if err := db.PublishImmutableChunk(num); err != nil {
+				return nil, discard(
+					fmt.Errorf("publishing chunk %d: %w", num, err),
+				)
+			}
+		}
 		n, last, err := adoptChunk(
 			ctx, db, c, dest, destDir, num, geom, callback,
 			cfg.BeforeCommit,
@@ -208,18 +249,7 @@ func AdoptImmutableChunks(
 			},
 		)
 		if err != nil {
-			if errors.Is(err, immutable.ErrDigestMismatch) &&
-				(!st.HasTip || num > tipChunk) {
-				// Nothing committed for this chunk, so its files are not
-				// covered by any marker and are not worth keeping. The chunk
-				// the recorded tip ends in can already hold committed
-				// markers, so its files stay.
-				removeChunkFiles(destDir, num)
-				if cerr := db.ClearImmutableAdopt(); cerr != nil {
-					return nil, cerr
-				}
-			}
-			return nil, fmt.Errorf("adopting chunk %d: %w", num, err)
+			return nil, discard(fmt.Errorf("adopting chunk %d: %w", num, err))
 		}
 		blocksCopied += n
 		adopted = true
@@ -234,6 +264,9 @@ func AdoptImmutableChunks(
 			return nil, fmt.Errorf(
 				"syncing blob store after chunk %d: %w", num, err,
 			)
+		}
+		if err := db.ReleaseImmutableChunk(num); err != nil {
+			return nil, fmt.Errorf("releasing local chunk %d: %w", num, err)
 		}
 		removeChunkFiles(cfg.SourceDir, num)
 		if cfg.OnChunkCommitted != nil {

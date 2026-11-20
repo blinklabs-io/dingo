@@ -130,7 +130,8 @@ func logRepeatedShutdownSignals(
 			case sig := <-ch:
 				logger.Warn(
 					"shutdown already in progress; storage close runs to completion and is not interrupted by this signal, send SIGKILL to abandon it",
-					"signal", sig.String(),
+					"signal",
+					sig.String(),
 				)
 			case <-done:
 				return
@@ -178,7 +179,8 @@ func runRequestedShutdown(
 		overrun := fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
 		logger.Warn(
 			"graceful shutdown exceeded the request deadline; waiting for storage close to finish",
-			"timeout", req.Timeout,
+			"timeout",
+			req.Timeout,
 		)
 		start := time.Now()
 		ticker := time.NewTicker(progressInterval)
@@ -635,17 +637,13 @@ func Run(
 		return fmt.Errorf("invalid chainsync strategy: %w", err)
 	}
 
-	// Validate storage mode
-	storageMode := dingo.StorageMode(cfg.StorageMode)
-	if storageMode == "" {
-		storageMode = dingo.StorageModeCore
+	storageMode, err := nodeStorageMode(cfg)
+	if err != nil {
+		return err
 	}
-	if !storageMode.Valid() {
-		return fmt.Errorf(
-			"invalid storage mode %q: must be %q or %q",
-			cfg.StorageMode,
-			dingo.StorageModeCore,
-			dingo.StorageModeAPI,
+	if cfg.SplitIndexer() {
+		logger.Info(
+			"API endpoints read the IndexerDB and answer 503 until it is ready",
 		)
 	}
 	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
@@ -653,15 +651,16 @@ func Run(
 	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
 	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
 	mcpPort := config.APIPluginPort(cfg.Plugins.API.Mcp)
+	apiMode := storageMode.IsAPI()
 	logger.Info("storage mode",
 		"mode", string(storageMode),
-		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
-		"kupo", storageMode.IsAPI() && kupoPort > 0,
-		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
-		"mesh", storageMode.IsAPI() && meshPort > 0,
+		"blockfrost", apiMode && blockfrostPort > 0,
+		"kupo", apiMode && kupoPort > 0,
+		"utxorpc", apiMode && utxorpcPort > 0,
+		"mesh", apiMode && meshPort > 0,
 		"mcp", mcpPort > 0,
-		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
-		"midnight_grpc", storageMode.IsAPI() &&
+		"midnight_indexing", cfg.Midnight.Enabled && apiMode,
+		"midnight_grpc", apiMode &&
 			cfg.Midnight.ServerEnabled && cfg.Midnight.Port > 0,
 	)
 
@@ -858,6 +857,26 @@ func forgeEBCap(v *uint64, fallback uint64) uint64 {
 	return *v
 }
 
+// nodeStorageMode validates cfg's storage mode and returns it. In API mode the
+// node keeps the ledger's own store in core mode and holds API rows in the
+// IndexerDB, which it opens in API mode itself and serves the API endpoints
+// from.
+func nodeStorageMode(cfg *config.Config) (dingo.StorageMode, error) {
+	storageMode := dingo.StorageMode(cfg.StorageMode)
+	if storageMode == "" {
+		storageMode = dingo.StorageModeCore
+	}
+	if !storageMode.Valid() {
+		return "", fmt.Errorf(
+			"invalid storage mode %q: must be %q or %q",
+			cfg.StorageMode,
+			dingo.StorageModeCore,
+			dingo.StorageModeAPI,
+		)
+	}
+	return storageMode, nil
+}
+
 // buildDingoConfig translates the loaded internal/config.Config, plus the
 // values Run derives from it (the resolved cardano-node config, listeners,
 // peer-sharing decision, storage mode, and parsed durations/strategy), into
@@ -961,7 +980,6 @@ func buildDingoConfig(
 			Frequency: cfg.HistoryExpiry.Frequency,
 		}),
 		dingo.WithImmutableDB(dingo.ImmutableDBConfig{
-			Enabled:          cfg.ImmutableDB.Enabled,
 			PromoteBatch:     cfg.ImmutableDB.PromoteBatch,
 			PromoteFrequency: cfg.ImmutableDB.PromoteFrequency,
 		}),
@@ -1133,6 +1151,8 @@ func buildDingoConfig(
 		),
 		dingo.WithBindAddr(cfg.BindAddr),
 		dingo.WithStorageMode(storageMode),
+		dingo.WithIndexerWriterFactory(NewIndexerService),
+		dingo.WithIndexerMaxReadyLagBlocks(cfg.Indexer.MaxReadyLagBlocks),
 		// CIP-23 minimum pool margin (consensus-affecting)
 		dingo.WithMinPoolMargin(cfg.MinPoolMargin),
 		dingo.WithCIP0203(cfg.CIP0203Enabled),
@@ -1211,16 +1231,8 @@ func buildDingoConfig(
 			cfg.BlockPipelineValidateEnabled,
 		),
 		dingo.WithLedgerPrefetchAheadEnabled(cfg.LedgerPrefetchAheadEnabled),
-		dingo.WithLedgerUtxoShadow(cfg.LedgerUtxoShadow),
-		dingo.WithLedgerUtxoBadger(cfg.LedgerUtxoBadger),
-		dingo.WithLedgerUtxoReads(cfg.LedgerUtxoReads),
-		dingo.WithLedgerUtxoBadgerOnly(cfg.LedgerUtxoBadgerOnly),
-		dingo.WithLedgerStateSetOnly(cfg.LedgerStateSetOnly),
 		dingo.WithLedgerUtxoCheckpoint(
 			cfg.LedgerUtxoCheckpointEpochs, cfg.LedgerUtxoCheckpointKeep,
-		),
-		dingo.WithLedgerStateVerifyBeforeDrain(
-			cfg.LedgerStateVerifyBeforeDrain,
 		),
 		dingo.WithLedgerValidateAheadEnabled(cfg.LedgerValidateAheadEnabled),
 		dingo.WithLedgerApplyRowBatchingEnabled(

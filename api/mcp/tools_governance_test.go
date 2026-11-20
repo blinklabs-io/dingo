@@ -189,7 +189,13 @@ func TestGetGovernanceState(t *testing.T) {
 
 func newGovernanceProposalDB(t *testing.T) (*sql.DB, string) {
 	t.Helper()
-	nodeDB, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	consensus, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+	nodeDB, err := dbtest.NewIndexerDatabase(
+		t, consensus, dbtest.IndexerOptions{},
+	)
 	require.NoError(t, err)
 	db, err := dbtest.RawSQLiteMetadata(t, nodeDB)
 	require.NoError(t, err)

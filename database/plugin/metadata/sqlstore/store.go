@@ -49,7 +49,7 @@ type Config struct {
 	// Zero retains the dialect's parameter bound; the maximum is 2047 rows.
 	SQLiteOverlayInsertRows int
 	// LazyHotStatements defers preparing the hot-statement cache from Start
-	// to the first use of each statement on the write pool. It is off by
+	// to the first use on the write pool or in each transaction. It is off by
 	// default and exists for test stores, which open many short-lived stores;
 	// a production Store keeps eager preparation. See borrowStmt.
 	LazyHotStatements bool
@@ -60,6 +60,10 @@ type Config struct {
 	// StorageMode controls retention of API-only transaction detail. Empty
 	// selects the consensus-focused core mode.
 	StorageMode string
+	// Namespace names the provider-owned consensus namespace this store
+	// opened, the PostgreSQL schema or MySQL database derived from the
+	// adopted IndexerDB. Empty for a store opened on its configured location.
+	Namespace string
 	// CommitteeAuthRetentionSlots overrides how far back superseded
 	// auth_committee_hot rows are retained for rollback, in slots. Zero
 	// selects DefaultCommitteeAuthRetentionSlots; see committee_prune.go for
@@ -91,6 +95,10 @@ type Config struct {
 	// same convention Maintenance/MaintenanceInterval already use.
 	Checkpoint         func(context.Context) error
 	CheckpointInterval time.Duration
+	// SyncCommits is an optional provider-owned hook that makes every commit
+	// that returned before it began durable. A provider whose commits are
+	// durable on return leaves it unset.
+	SyncCommits func(context.Context) error
 	// BackupTo and RestoreFrom are optional provider-owned lifecycle hooks.
 	// SQLite supplies them for its file-backed store; other dialects may leave
 	// them unset until a native snapshot mechanism is available.
@@ -111,7 +119,8 @@ type Config struct {
 	// undo a brief resolve-and-start's real migrations against the actual
 	// remote database, which a directory wipe (sqlite/badger's mechanism)
 	// cannot touch. Left unset, Reset is a harmless no-op.
-	Reset func(context.Context) error
+	Reset              func(context.Context) error
+	CheckRestoreTarget func(context.Context) error
 	// ValidateBackup is an optional provider-owned hook checking a backup
 	// file's structural integrity without touching any database -- see
 	// metadata.BackupValidator's doc comment for why this exists
@@ -150,6 +159,7 @@ type Store struct {
 	dialect                 Dialect
 	logger                  *slog.Logger
 	storageMode             string
+	namespace               string
 	// liveUtxo, when set, holds the live UTxO set: the store writes no utxo
 	// rows and resolves inputs through it. Set before the first write.
 	liveUtxo types.LiveUtxoSource
@@ -231,6 +241,7 @@ type Store struct {
 	restoreFrom         func(context.Context, string) error
 	prepare             func(context.Context) error
 	reset               func(context.Context) error
+	checkRestoreTarget  func(context.Context) error
 	validateBackup      func(context.Context, string) error
 	maintenanceCancel   context.CancelFunc
 	maintenanceDone     chan struct{}
@@ -254,6 +265,7 @@ type Store struct {
 	// why WAL checkpointing needs a much shorter cadence than VACUUM.
 	checkpoint       func(context.Context) error
 	checkpointEvery  time.Duration
+	syncCommits      func(context.Context) error
 	checkpointCancel context.CancelFunc
 	checkpointDone   chan struct{}
 	checkpointState  atomic.Uint32
@@ -315,8 +327,9 @@ type Store struct {
 	// txStmtMu and txStmts back the per-transaction Tx-scoped statement
 	// cache; see prepared_stmt.go's txScopedStmt/evictTxStmts for the
 	// mechanism and correctness argument.
-	txStmtMu sync.Mutex
-	txStmts  map[*sql.Tx]map[*sql.Stmt]*sql.Stmt
+	txStmtMu    sync.Mutex
+	txStmts     map[*sql.Tx]map[*sql.Stmt]*sql.Stmt
+	lazyTxStmts map[*sql.Tx]map[string]*sql.Stmt
 }
 
 // New constructs a shared store around already-opened connection pools.
@@ -378,6 +391,7 @@ func New(config Config) (*Store, error) {
 		dialect:                     config.Dialect,
 		logger:                      config.Logger,
 		storageMode:                 config.StorageMode,
+		namespace:                   config.Namespace,
 		committeeAuthRetentionSlots: config.CommitteeAuthRetentionSlots,
 		migrations:                  config.Migrations,
 		migrationLocker:             config.MigrationLocker,
@@ -390,10 +404,12 @@ func New(config Config) (*Store, error) {
 		vacuumEvery:                 config.VacuumInterval,
 		checkpoint:                  config.Checkpoint,
 		checkpointEvery:             config.CheckpointInterval,
+		syncCommits:                 config.SyncCommits,
 		backupTo:                    config.BackupTo,
 		restoreFrom:                 config.RestoreFrom,
 		prepare:                     config.Prepare,
 		reset:                       config.Reset,
+		checkRestoreTarget:          config.CheckRestoreTarget,
 		validateBackup:              config.ValidateBackup,
 		closeDone:                   make(chan struct{}),
 		plannerStats: newPlannerStatsMetrics(
@@ -496,6 +512,15 @@ func (s *Store) HasDestructiveReset() bool {
 	return s.reset != nil
 }
 
+// CheckRestoreTarget validates the provider's offline reset guards without
+// resetting the store.
+func (s *Store) CheckRestoreTarget(ctx context.Context) error {
+	if s.checkRestoreTarget == nil {
+		return errors.New("metadata provider cannot check a server restore target")
+	}
+	return s.checkRestoreTarget(ctx)
+}
+
 // ValidateBackup checks a backup file's structural integrity, for
 // providers that supply the hook (see metadata.BackupValidator). A no-op
 // for providers that don't -- every backend built on this shared Store
@@ -538,9 +563,7 @@ func (s *Store) Start(ctx context.Context) error {
 	}
 	if len(s.migrations) > 0 {
 		runner := migrations.Runner{
-			// A prior binary may have committed the current schema before its
-			// later provenance gate failed, so this must also run at target.
-			BeforeUpgrade: s.preflightRewardStakeUpgrade,
+			BeforeUpgrade: s.beforeUpgrade,
 			DB:            s.writeDB,
 			Dialect:       s.dialect.Name(),
 			Registry:      s.migrations,
@@ -952,6 +975,15 @@ func (s *Store) startCheckpointTicker() {
 			}
 		}
 	}()
+}
+
+// SyncCommits implements metadata.CommitSyncer. It is a no-op for a store
+// whose provider commits durably.
+func (s *Store) SyncCommits(ctx context.Context) error {
+	if s.syncCommits == nil {
+		return nil
+	}
+	return s.syncCommits(ctx)
 }
 
 func (s *Store) runCheckpoint(ctx context.Context) error {
@@ -1536,3 +1568,9 @@ func (t *sqlTxn) restoreBatches(
 // This optional capability lets clients own separate read-only pools without
 // exposing the provider's pools or requiring it on every MetadataStore.
 func (s *Store) SQLitePath() string { return s.sqlitePath }
+
+// Namespace returns the provider-owned consensus namespace this store opened,
+// empty for a store opened on its configured location.
+func (s *Store) Namespace() string {
+	return s.namespace
+}

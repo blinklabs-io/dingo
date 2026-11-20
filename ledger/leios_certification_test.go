@@ -112,7 +112,7 @@ func setLeiosCertificationEnv(
 	encoded, err := cbor.Encode(f.pparams)
 	require.NoError(f.t, err)
 	for _, epoch := range cache {
-		require.NoError(f.t, f.db.SetPParams(
+		require.NoError(f.t, f.ls.ledgerDB().SetPParams(
 			encoded,
 			epoch.StartSlot,
 			epoch.EpochId,

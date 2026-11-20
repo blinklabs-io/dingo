@@ -57,7 +57,7 @@ func (a *NodeAdapter) storedScript(
 	if err != nil {
 		return nil, fmt.Errorf("script hash %x: %w", hash, err)
 	}
-	script, err := a.ledgerState.Database().
+	script, err := a.db().
 		Metadata().
 		GetScript(scriptHash, txn)
 	if err != nil {
@@ -75,7 +75,7 @@ func (a *NodeAdapter) Scripts(
 	ctx context.Context,
 	params PaginationParams,
 ) ([]string, int, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
@@ -239,7 +239,7 @@ func (a *NodeAdapter) storedDatum(hash []byte) (*models.Datum, error) {
 	if err != nil {
 		return nil, fmt.Errorf("datum hash %x: %w", hash, err)
 	}
-	datum, err := a.ledgerState.Database().Metadata().GetDatum(datumHash, nil)
+	datum, err := a.db().Metadata().GetDatum(datumHash, nil)
 	if err != nil {
 		return nil, fmt.Errorf("get datum %x: %w", hash, err)
 	}
@@ -352,7 +352,7 @@ func (a *NodeAdapter) ScriptRedeemers(
 	if err != nil {
 		return nil, 0, fmt.Errorf("script hash %x: %w", hash, err)
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
@@ -403,7 +403,7 @@ func (a *NodeAdapter) ScriptUTXOs(
 	if err != nil {
 		return nil, 0, fmt.Errorf("script hash %x: %w", hash, err)
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()

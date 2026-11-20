@@ -197,6 +197,33 @@ func TestRunStartupReportsResultAndError(t *testing.T) {
 	require.ErrorContains(t, err, "boom")
 }
 
+func TestStartWithStartupDoesNotWaitForRun(t *testing.T) {
+	t.Parallel()
+	u := newFakeUpdater()
+	m := newTestManager(u, event.NewEventBus(nil, nil))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	started := make(chan error, 1)
+	go func() { started <- m.StartWithStartup(ctx) }()
+	defer func() { require.NoError(t, m.Stop()) }()
+	var once sync.Once
+	releaseOnce := func() { once.Do(func() { close(u.release) }) }
+	defer releaseOnce()
+
+	require.Equal(
+		t,
+		types.PlannerStatsTriggerStartup,
+		receive(t, u.entered, "asynchronous startup run"),
+	)
+	require.NoError(
+		t,
+		receive(t, started, "StartWithStartup to return"),
+		"startup must return before planner maintenance completes",
+	)
+	require.Equal(t, int64(1), u.active.Load())
+	cancel()
+}
+
 func TestFailedRunDoesNotStopLaterRuns(t *testing.T) {
 	t.Parallel()
 	u := newFakeUpdater()
@@ -279,7 +306,10 @@ func TestStartDuringStopDoesNotHangStop(t *testing.T) {
 	go func() { stopped <- m.Stop() }()
 	require.NoError(t, receive(t, stopped, "Stop to return"))
 	require.NoError(t, receive(t, u.started, "the concurrent Start"))
-	require.NoError(t, receive(t, asyncStop(m), "the restarted manager to stop"))
+	require.NoError(
+		t,
+		receive(t, asyncStop(m), "the restarted manager to stop"),
+	)
 }
 
 func asyncStop(m *Manager) <-chan error {

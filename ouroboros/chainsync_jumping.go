@@ -448,22 +448,22 @@ type csjCandidate struct {
 }
 
 // csjElectionOrderLocked ranks the peers that can replace a dynamo: the
-// selector's best peer; streamers that are not objectors, which stream already
-// and need no protocol transition; jumpers that agreed to a jump, then those
-// that did not, which resume from a dynamo point; and last the objectors,
-// which refused a jump, so they follow another chain or lag the dynamo, and
-// hold no ingress slot. It must be called with j.mu held.
+// selector's best peer when it is not an objector; other streamers that are not
+// objectors, which stream already and need no protocol transition; jumpers that
+// agreed to a jump, then those that did not, which resume from a dynamo point;
+// and last the objectors, which refused a jump, so they follow another chain or
+// lag the dynamo, and hold no ingress slot. It must be called with j.mu held.
 func (j *chainsyncJumping) csjElectionOrderLocked(
 	best *ouroboros.ConnectionId,
 ) []csjCandidate {
 	var streamers, agreed, unagreed, objectors []ouroboros.ConnectionId
 	for id := range j.streamers {
-		if best != nil && id == *best {
-			continue
-		}
 		if _, objector := j.objectors[id]; objector {
 			objectors = append(objectors, id)
 		} else {
+			if best != nil && id == *best {
+				continue
+			}
 			streamers = append(streamers, id)
 		}
 	}
@@ -478,7 +478,8 @@ func (j *chainsyncJumping) csjElectionOrderLocked(
 	}
 	candidates := make([]csjCandidate, 0, len(j.streamers)+len(j.jumpers))
 	if best != nil {
-		if _, ok := j.streamers[*best]; ok {
+		_, objector := j.objectors[*best]
+		if _, ok := j.streamers[*best]; ok && !objector {
 			candidates = append(candidates, csjCandidate{connId: *best})
 		} else if _, ok := j.jumpers[*best]; ok {
 			candidates = append(

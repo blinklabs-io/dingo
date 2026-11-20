@@ -182,14 +182,9 @@ type Backfill struct {
 	// (ledger/delta.go): !delegatorInactivityEnabled skips the write.
 	//
 	// The zero value (false, skip) is NOT a safety guarantee about this
-	// path's callers -- it is just what "unset" happens to mean. Both current
-	// callers always call SetDelegatorInactivityEnabled explicitly instead of
-	// relying on it: mithril/sync.go hardcodes false (SyncConfig has no gate
-	// field, and the gate can never be on for that path -- see its call site's
-	// comment), while cmd/dingo/serve.go's resumeBackfill passes the real
-	// cfg.DelegatorInactivityEnabled, which CAN be true (it resumes any
-	// pending API-mode backfill checkpoint, not only a Mithril-originated
-	// one, and does not itself check the gate). A future caller that skips
+	// path's callers -- it is just what "unset" happens to mean. The IndexerDB
+	// writer calls SetDelegatorInactivityEnabled explicitly with the node's
+	// setting, which can be true. A future caller that skips
 	// SetDelegatorInactivityEnabled and relies on this default would silently
 	// drop withdrawal-witness rows if the gate happens to be on for it --
 	// always call the setter explicitly rather than assuming the default is
@@ -197,6 +192,30 @@ type Backfill struct {
 	delegatorInactivityEnabled bool
 
 	onProgress func(BackfillProgress)
+
+	// indexPrimed is set once IndexBlocks has rebuilt the running state for
+	// the chain position it continues from; indexBatches counts the batches
+	// written since.
+	indexPrimed bool
+	// rollbackFloor is the Mithril anchor slot RollbackTo keeps rows at or
+	// below; zero when the IndexerDB has no anchor.
+	rollbackFloor uint64
+	// indexChainStart marks that the next block indexed is the first of the
+	// chain, which the ledger records as a nonce checkpoint although no epoch
+	// boundary precedes it.
+	indexChainStart bool
+	// debitWithdrawals makes the replayed withdrawals of IndexBlocks debit
+	// account reward balances; the history backfill leaves it false and keeps
+	// the imported balances.
+	debitWithdrawals bool
+	// indexedTxs counts the transaction bodies applied since IndexBlocks
+	// last reset it.
+	indexedTxs   uint64
+	indexBatches int
+
+	// closures reads the certified endorser blocks IndexBlocks applies with
+	// their certifying ranking blocks. Nil reads them through db.
+	closures dledger.CertifiedClosureSource
 
 	// Protocol-parameter resolution state. resolveNext indexes the first
 	// epoch in epochs not resolved yet; resolvePP and resolveEraId are the
@@ -596,6 +615,25 @@ func (b *Backfill) restoreImportedAccountsAtAnchor(
 	ctx context.Context,
 	anchor uint64,
 ) (int, error) {
+	txn := b.db.Transaction(ctx, true)
+	defer txn.Rollback() //nolint:errcheck
+	restored, err := b.restoreImportedAccountsAtAnchorTxn(ctx, txn, anchor)
+	if err != nil {
+		return 0, err
+	}
+	if err := txn.Commit(); err != nil {
+		return 0, err
+	}
+	return restored, nil
+}
+
+// restoreImportedAccountsAtAnchorTxn restores inside txn, which the caller
+// commits.
+func (b *Backfill) restoreImportedAccountsAtAnchorTxn(
+	ctx context.Context,
+	txn *database.Txn,
+	anchor uint64,
+) (int, error) {
 	var protocolMajor uint
 	if b.currentEraId >= conway.EraIdConway {
 		params, ok := b.currentPParams.(lcommon.PoolRuleProtocolParameters)
@@ -606,8 +644,6 @@ func (b *Backfill) restoreImportedAccountsAtAnchor(
 		}
 		protocolMajor = params.ProtocolMajorVersion()
 	}
-	txn := b.db.Transaction(ctx, true)
-	defer txn.Rollback() //nolint:errcheck
 	restored, err := b.db.RestoreImportedAccountStates(ctx, anchor, txn)
 	if err != nil {
 		return 0, err
@@ -621,9 +657,6 @@ func (b *Backfill) restoreImportedAccountsAtAnchor(
 		); err != nil {
 			return 0, err
 		}
-	}
-	if err := txn.Commit(); err != nil {
-		return 0, err
 	}
 	return restored, nil
 }
@@ -1069,7 +1102,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	}
 	var resolveThrough uint64
 	if resumePoint != nil {
-		resolveThrough, _ = b.slotToEpoch(cp.LastSlot)
+		resolveThrough, _ = b.slotToEpoch(resumePoint.Slot)
 	} else if len(b.epochs) > 0 {
 		resolveThrough = b.epochs[0].EpochId
 	}
@@ -1608,6 +1641,7 @@ func (b *Backfill) processBlockTxsBatched(
 				b.skippedUtxoRefs += uint64(len(level.Produced()))
 			}
 			setTxStart := time.Now()
+			b.indexedTxs++
 			if err := b.db.SetTransactionBatchedWithOpts(
 				ctx,
 				level, point, uint32(storageIndex), //nolint:gosec
@@ -1619,6 +1653,7 @@ func (b *Backfill) processBlockTxsBatched(
 					Stats:                        stats,
 					SkipWithdrawalWitnessWrite:   !b.delegatorInactivityEnabled,
 					HistoricalBackfill:           true,
+					DebitWithdrawals:             b.debitWithdrawals,
 					ProtocolMajor:                protocolMajor,
 				},
 			); err != nil {

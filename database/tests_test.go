@@ -43,6 +43,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/prometheus/client_golang/prometheus"
@@ -835,100 +836,6 @@ type batchedCrossBlockSpendCandidate struct {
 	input         lcommon.TransactionInput
 }
 
-func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db, err := newTestDatabase(t, &Config{
-		DataDir: t.TempDir(),
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-
-	require.NoError(t, err)
-	defer db.Close()
-
-	candidate := findGapRollbackCandidate(t)
-	// The fixture contains three stake registrations and three pool
-	// registrations. Preserve their protocol deposits instead of recording
-	// an authoritative zero for the first certificate only.
-	certificateDeposits := map[int]uint64{
-		0: 2_000_000,
-		1: 500_000_000,
-		3: 2_000_000,
-		4: 500_000_000,
-		6: 2_000_000,
-		7: 500_000_000,
-	}
-	for _, block := range candidate.producerBlocks {
-		storeBlockOffsetsOnly(t, db, block)
-	}
-	storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
-
-	require.NoError(
-		t,
-		db.SetGapBlockTransaction(
-			context.Background(),
-			candidate.consumerTx,
-			candidate.consumerPoint,
-			0,
-			certificateDeposits,
-			mustBlockOffsets(t, candidate.consumerBlock),
-			nil, 0,
-		),
-	)
-
-	for _, input := range candidate.consumerTx.Consumed() {
-		utxo, err := db.Metadata().GetUtxoIncludingSpent(
-			input.Id().Bytes(),
-			input.Index(),
-			nil,
-		)
-		require.NoError(t, err)
-		require.NotNil(
-			t,
-			utxo,
-			"expected gap-consumed input %s to be present for rollback",
-			input.String(),
-		)
-		require.Equal(t, candidate.consumerPoint.Slot, utxo.DeletedSlot)
-		require.Equal(
-			t,
-			candidate.consumerTx.Hash().Bytes(),
-			[]byte(utxo.SpentAtTxHash),
-		)
-	}
-
-	txn := db.MetadataTxn(context.Background(), true)
-	require.NoError(
-		t,
-		txn.Do(func(txn *Txn) error {
-			return db.Metadata().DeleteTransactionsAfterSlot(
-				candidate.consumerPoint.Slot-1,
-				txn.Metadata(),
-			)
-		}),
-	)
-	txn.Release()
-
-	for _, input := range candidate.consumerTx.Consumed() {
-		utxo, err := db.Metadata().GetUtxo(
-			input.Id().Bytes(),
-			input.Index(),
-			nil,
-		)
-		require.NoError(t, err)
-		require.NotNil(
-			t,
-			utxo,
-			"expected rollback to restore gap-consumed input %s",
-			input.String(),
-		)
-		require.Zero(t, utxo.DeletedSlot)
-		require.Nil(t, utxo.SpentAtTxHash)
-	}
-}
-
 func TestSetTransactionRecoversMissingConsumedInputsFromBlob(
 	t *testing.T,
 ) {
@@ -1548,190 +1455,6 @@ func scanBatchedCrossBlockSpendCandidate(
 		"failed to find previous-block spend candidate in immutable testdata",
 	)
 	return batchedCrossBlockSpendCandidate{}
-}
-
-// TestSetGapBlockTransactionSpendsLiveProducedInputs verifies that when
-// a gap-block transaction consumes a UTxO produced by an earlier
-// gap-block transaction (both ingested through SetGapBlockTransaction),
-// the produced UTxO row is marked as spent with both deleted_slot and
-// spent_at_tx_id populated — matching the normal SetTransaction path.
-//
-// Regression test for a bug where ensureGapConsumedUtxos unconditionally
-// skipped existing UTxO rows, leaving outputs produced by earlier gap
-// blocks live forever even after a later gap block consumed them.
-func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
-	t.Parallel()
-
-	db, err := newTestDatabase(t, &Config{
-		DataDir: t.TempDir(),
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-
-	require.NoError(t, err)
-	defer db.Close()
-
-	candidate := findGapConsumeCandidate(t)
-	certificateDeposits := map[int]uint64{
-		0: 2_000_000,
-		1: 500_000_000,
-		3: 2_000_000,
-		4: 500_000_000,
-		6: 2_000_000,
-		7: 500_000_000,
-	}
-
-	// Store blob offsets for all producer blocks plus the consumer
-	// block so SetGapBlockTransaction can look up and persist
-	// produced UTxO offset references.
-	storedBlocks := make(map[string]struct{})
-	for _, producer := range candidate.producers {
-		key := fmt.Sprintf("%d:%x", producer.block.Slot, producer.block.Hash)
-		if _, ok := storedBlocks[key]; ok {
-			continue
-		}
-		storedBlocks[key] = struct{}{}
-		storeBlockOffsetsOnly(t, db, producer.block)
-	}
-	consumerKey := fmt.Sprintf(
-		"%d:%x",
-		candidate.consumerBlock.Slot,
-		candidate.consumerBlock.Hash,
-	)
-	if _, ok := storedBlocks[consumerKey]; !ok {
-		storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
-	}
-
-	// Seed each producer tx's own consumed inputs as already-spent
-	// rows (without a SpentAtTxHash, to avoid needing a parent
-	// transaction row for the Inputs FK) so the producer's
-	// gap-block ingestion does not try to recover them from a blob
-	// store that lacks the predecessor blocks. This mimics the
-	// Mithril snapshot state where inputs from before the gap
-	// window are already recorded as spent.
-	//
-	// Contract for the gap path: AddedSlot = DeletedSlot = seedSlot
-	// with seedSlot != point.Slot drives ensureGapConsumedUtxos into
-	// its "already spent by a different tx" branch (SpentAtTxHash == nil
-	// AND DeletedSlot != 0 AND DeletedSlot != point.Slot), so the
-	// existing row is left untouched. Future changes to the gap-path
-	// branch conditions must keep this skip path reachable or update
-	// this seed accordingly.
-	seedSlot := uint64(1)
-	for _, producer := range candidate.producers {
-		seeded := make([]models.Utxo, 0, len(producer.tx.Consumed()))
-		for _, in := range producer.tx.Consumed() {
-			seeded = append(seeded, models.Utxo{
-				TxId:        in.Id().Bytes(),
-				OutputIdx:   in.Index(),
-				AddedSlot:   seedSlot,
-				DeletedSlot: seedSlot,
-			})
-		}
-		if len(seeded) > 0 {
-			txn := db.MetadataTxn(context.Background(), true)
-			require.NoError(
-				t,
-				txn.Do(func(txn *Txn) error {
-					return db.Metadata().ImportUtxos(
-						seeded,
-						txn.Metadata(),
-					)
-				}),
-			)
-			txn.Release()
-		}
-	}
-
-	// Ingest every producer tx through the gap path first, so the
-	// consumed inputs exist as live UTxO rows when the consumer tx
-	// arrives.
-	for _, producer := range candidate.producers {
-		require.NoError(
-			t,
-			db.SetGapBlockTransaction(
-				context.Background(),
-				producer.tx,
-				producer.point,
-				0,
-				nil,
-				mustBlockOffsets(t, producer.block),
-				nil, 0,
-			),
-		)
-	}
-
-	// Sanity: every consumed input is live before the consumer runs.
-	for _, input := range candidate.consumerTx.Consumed() {
-		utxo, err := db.Metadata().GetUtxoIncludingSpent(
-			input.Id().Bytes(),
-			input.Index(),
-			nil,
-		)
-		require.NoError(t, err)
-		require.NotNil(
-			t,
-			utxo,
-			"producer gap tx did not persist input %s",
-			input.String(),
-		)
-		require.Zero(
-			t,
-			utxo.DeletedSlot,
-			"input %s should be live before consumer gap tx runs",
-			input.String(),
-		)
-		require.Nil(
-			t,
-			utxo.SpentAtTxHash,
-			"input %s should be unspent before consumer gap tx runs",
-			input.String(),
-		)
-	}
-
-	// Now ingest the consumer gap tx. This must mark the produced
-	// UTxOs as spent rather than silently skipping them.
-	require.NoError(
-		t,
-		db.SetGapBlockTransaction(
-			context.Background(),
-			candidate.consumerTx,
-			candidate.consumerPoint,
-			0,
-			certificateDeposits,
-			mustBlockOffsets(t, candidate.consumerBlock),
-			nil, 0,
-		),
-	)
-
-	spenderTxHash := candidate.consumerTx.Hash().Bytes()
-	for _, input := range candidate.consumerTx.Consumed() {
-		utxo, err := db.Metadata().GetUtxoIncludingSpent(
-			input.Id().Bytes(),
-			input.Index(),
-			nil,
-		)
-		require.NoError(t, err)
-		require.NotNil(
-			t,
-			utxo,
-			"expected consumed input %s to remain in metadata",
-			input.String(),
-		)
-		require.Equal(
-			t,
-			candidate.consumerPoint.Slot,
-			utxo.DeletedSlot,
-			"input %s deleted_slot not set to consumer slot",
-			input.String(),
-		)
-		require.Equal(
-			t,
-			spenderTxHash,
-			[]byte(utxo.SpentAtTxHash),
-			"input %s spent_at_tx_id not set to consumer tx hash",
-			input.String(),
-		)
-	}
 }
 
 func TestPhase1PersistsNetworkMagicOnFirstStart(t *testing.T) {
@@ -2946,7 +2669,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 					producer.point,
 					0,
 					nil,
-					txn.Metadata(), 0, false,
+					txn.Metadata(), 0,
 				)
 			}))
 			metaTxn.Release()
@@ -3160,4 +2883,79 @@ func TestSetGapBlockTransactionKeepsNoUtxoRowsWhenSetOnly(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, tx, "the transaction is still recorded as history")
+}
+
+func TestPhase1PersistsIndexerLayoutAndRejectsChange(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	db, err := newTestDatabase(t, &Config{
+		DataDir:       dataDir,
+		StorageMode:   "core",
+		Network:       "preprod",
+		IndexerLayout: "split",
+	})
+	require.NoError(t, err)
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "split", gates["indexer_layout"])
+	require.NoError(t, closeTestDatabase(db))
+
+	_, err = newTestDatabase(t, &Config{
+		DataDir:       dataDir,
+		StorageMode:   "core",
+		Network:       "preprod",
+		IndexerLayout: "shared",
+	})
+	var settingsErr NodeSettingsError
+	require.True(t, errors.As(err, &settingsErr))
+	require.Contains(t, settingsErr.Error(), "indexer layout")
+
+	// A caller that does not know the layout leaves the gate alone.
+	db, err = newTestDatabase(t, &Config{
+		DataDir:     dataDir,
+		StorageMode: "core",
+		Network:     "preprod",
+	})
+	require.NoError(t, err)
+	require.NoError(t, closeTestDatabase(db))
+}
+
+func TestPhase1RefusesSplitOnExistingDatabase(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	db, err := newTestDatabase(t, &Config{
+		DataDir:     dataDir,
+		StorageMode: "api",
+		Network:     "preprod",
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: bytes.Repeat([]byte{1}, 32)},
+		BlockNumber: 5,
+	}, nil))
+	require.NoError(t, closeTestDatabase(db))
+
+	// The database predates the gate and holds blocks: split must be refused
+	// rather than filled in.
+	_, err = newTestDatabase(t, &Config{
+		DataDir:       dataDir,
+		StorageMode:   "api",
+		Network:       "preprod",
+		IndexerLayout: "split",
+	})
+	var settingsErr NodeSettingsError
+	require.True(t, errors.As(err, &settingsErr), "got %v", err)
+	require.Contains(t, settingsErr.Error(), "indexer layout")
+
+	// Shared is still accepted on that database.
+	db, err = newTestDatabase(t, &Config{
+		DataDir:       dataDir,
+		StorageMode:   "api",
+		Network:       "preprod",
+		IndexerLayout: "shared",
+	})
+	require.NoError(t, err)
+	require.NoError(t, closeTestDatabase(db))
 }

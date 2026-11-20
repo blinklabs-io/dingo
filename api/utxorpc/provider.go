@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -30,9 +31,12 @@ type ProviderConfig struct {
 }
 
 type ProviderDependencies struct {
+	// Listen transfers a socket to the server. Nil uses net.Listen.
+	Listen             func(string, string) (net.Listener, error)
 	Logger             *slog.Logger
 	EventBus           UtxorpcEventBus
 	LedgerState        UtxorpcLedgerState
+	QueryDatabase      QueryDatabase
 	Mempool            UtxorpcMempool
 	Host               string
 	CORSAllowedOrigins []string
@@ -59,9 +63,11 @@ func RegisterProvider(host *plugin.Host) error {
 				listenHost = deps.Host
 			}
 			server := NewUtxorpc(UtxorpcConfig{
+				Listen: deps.Listen,
 				Logger: deps.Logger, EventBus: deps.EventBus,
 				LedgerState: deps.LedgerState, Mempool: deps.Mempool,
-				Host: listenHost, Port: cfg.Port,
+				QueryDatabase: deps.QueryDatabase,
+				Host:          listenHost, Port: cfg.Port,
 				TLS:                tls,
 				CORSAllowedOrigins: deps.CORSAllowedOrigins,
 			})

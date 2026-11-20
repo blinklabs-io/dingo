@@ -99,10 +99,7 @@ func (a *NodeAdapter) GovernanceProposals(
 	if !ok {
 		return []GovernanceProposalInfo{}, 0, nil
 	}
-	if err := a.refuseDrainedGovernance("the proposal listing"); err != nil {
-		return nil, 0, err
-	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	rows, total, err := db.Metadata().GetGovernanceProposalsPage(
@@ -127,10 +124,7 @@ func (a *NodeAdapter) proposalByRef(
 	ref GovActionRef,
 	txn dbtypes.Txn,
 ) (*models.GovernanceProposal, error) {
-	if a.governanceDrained() {
-		return a.drainedProposalByRef(ctx, ref)
-	}
-	proposal, err := a.ledgerState.Database().Metadata().GetGovernanceProposal(
+	proposal, err := a.db().Metadata().GetGovernanceProposal(
 		ref.TxHash, ref.Index, txn,
 	)
 	if err != nil {
@@ -345,7 +339,7 @@ func (a *NodeAdapter) GovernanceProposal(
 	ctx context.Context,
 	ref GovActionRef,
 ) (GovernanceProposalDetailInfo, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	proposal, err := a.proposalByRef(ctx, ref, txn.Metadata())
@@ -390,7 +384,7 @@ func (a *NodeAdapter) GovernanceProposalParameters(
 	ctx context.Context,
 	ref GovActionRef,
 ) (GovernanceProposalParametersInfo, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	proposal, err := a.proposalByRef(ctx, ref, txn.Metadata())
@@ -437,7 +431,7 @@ func (a *NodeAdapter) GovernanceProposalWithdrawals(
 	ref GovActionRef,
 	params PaginationParams,
 ) ([]GovernanceWithdrawalInfo, int, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	proposal, err := a.proposalByRef(ctx, ref, txn.Metadata())
@@ -475,7 +469,7 @@ func (a *NodeAdapter) GovernanceProposalMetadata(
 	ctx context.Context,
 	ref GovActionRef,
 ) (GovernanceProposalMetadataInfo, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	proposal, err := a.proposalByRef(ctx, ref, txn.Metadata())
@@ -540,7 +534,7 @@ func (a *NodeAdapter) loadSlotBlock(
 	if a.slotBlocks != nil {
 		return a.slotBlocks(ctx, slot)
 	}
-	stored, err := database.BlockBySlot(ctx, a.ledgerState.Database(), slot)
+	stored, err := database.BlockBySlot(ctx, a.db(), slot)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, fmt.Errorf(
@@ -827,10 +821,7 @@ func (a *NodeAdapter) votesPage(
 	if !ok {
 		return []models.GovernanceVoteRow{}, []castTransaction{}, 0, nil
 	}
-	if err := a.refuseDrainedGovernance("the vote history"); err != nil {
-		return nil, nil, 0, err
-	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	rows, total, err := db.Metadata().GetGovernanceVotesPage(
 		filter, params.Count, offset, params.Order, txn.Metadata(),
@@ -852,7 +843,7 @@ func (a *NodeAdapter) GovernanceProposalVotes(
 	ref GovActionRef,
 	params PaginationParams,
 ) ([]GovernanceProposalVoteInfo, int, error) {
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	proposal, err := a.proposalByRef(ctx, ref, txn.Metadata())
 	txn.Release()

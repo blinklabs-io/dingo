@@ -38,11 +38,6 @@ import (
 // two epochs before it, and a rollback across a boundary needs one more.
 const rewardBlockEpochWindow = 2
 
-const (
-	computedRewardBlockCounts = "reward_block_counts"
-	computedRewardEpochFees   = "reward_epoch_fees"
-)
-
 // RewardBlockChange is one change to the per-epoch block counts and fees the
 // live UTxO set keeps for reward calculation, applied in order.
 type RewardBlockChange struct {
@@ -148,6 +143,22 @@ type RewardBlocksReader interface {
 	RewardBlocksEpochs() ([]uint64, error)
 }
 
+// ImportedBlockEpoch is the block counts a snapshot import carried for one
+// epoch, as imported, with the slot the import captured them at.
+type ImportedBlockEpoch struct {
+	Pools        map[string]uint64
+	Total        uint64
+	CapturedSlot uint64
+}
+
+// ImportedBlocksReader serves the imported block counts a live UTxO set
+// retains apart from the windowed reward block rows.
+type ImportedBlocksReader interface {
+	ImportedBlocksLoaded() (bool, error)
+	// ImportedBlocks lists the imported counts by epoch.
+	ImportedBlocks() (map[uint64]ImportedBlockEpoch, error)
+}
+
 func (ls *LedgerState) rewardBlocksReader(txn ledgerdb.Txn) RewardBlocksReader {
 	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
 		return nil
@@ -251,46 +262,8 @@ func sameCounts(a, b map[string]uint64) bool {
 	return true
 }
 
-// verifyRewardBlockCounts compares the metadata store's counts with the
-// set's in verify mode.
-func (ls *LedgerState) verifyRewardBlockCounts(
-	g verifyReadGuard,
-	txn ledgerdb.Txn,
-	epoch uint64,
-	poolKeys []lcommon.PoolKeyHash,
-	counts map[string]uint64,
-	total uint64,
-	known bool,
-) {
-	if !ls.verifying() {
-		return
-	}
-	r := ls.rewardBlocksReader(txn)
-	if r == nil {
-		return
-	}
-	loaded, err := r.RewardBlocksLoaded()
-	if err != nil || !loaded {
-		return
-	}
-	got, gotTotal, ok, err := ls.rewardBlockCountsFromSet(
-		r,
-		txn,
-		epoch,
-		poolKeys,
-	)
-	if err == nil && !ok && known {
-		// The set holds no counts for an epoch the store knows: an epoch
-		// outside its window, not a disagreement.
-		return
-	}
-	same := ok == known && (!known ||
-		(gotTotal == total && sameCounts(got, counts)))
-	ls.compareComputed(g, computedRewardBlockCounts, same, err)
-}
-
 // rewardEpochFeesFor is rewardEpochFees answered from the set when the set
-// serves reward block rows, and compared with the set in verify mode.
+// serves reward block rows.
 func (ls *LedgerState) rewardEpochFeesFor(
 	meta ledgerdb.LedgerDB,
 	txn ledgerdb.Txn,
@@ -313,23 +286,7 @@ func (ls *LedgerState) rewardEpochFeesFor(
 	} else if ls.familyDrained(nodesettings.FamilyRewardBlocksFees) {
 		return 0, drainedUnserved(nodesettings.FamilyRewardBlocksFees)
 	}
-	g := ls.verifyGuard(txn)
-	fees, err := rewardEpochFees(meta, txn, epoch)
-	if err != nil || !ls.verifying() {
-		return fees, err
-	}
-	if r := ls.rewardBlocksReader(txn); r != nil {
-		if loaded, lerr := r.RewardBlocksLoaded(); lerr == nil && loaded {
-			view, verr := ls.rewardBlocksView(r, txn, epoch.EpochId)
-			if verr != nil || view.FeesKnown {
-				ls.compareComputed(
-					g, computedRewardEpochFees,
-					verr == nil && view.Fees == fees, verr,
-				)
-			}
-		}
-	}
-	return fees, nil
+	return rewardEpochFees(meta, txn, epoch)
 }
 
 // rewardEpochOfSlot resolves the epoch containing slot from the published

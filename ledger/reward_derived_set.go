@@ -23,12 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
-const (
-	computedRewardPoolOutputs    = "reward_pool_outputs"
-	computedRewardAccountOutputs = "reward_account_outputs"
-	computedRewardCursor         = "reward_precompute_cursor"
-)
-
 // RewardDerivedKind is what a RewardDerivedChange does.
 type RewardDerivedKind uint8
 

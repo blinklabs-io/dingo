@@ -54,6 +54,9 @@ func (m Manifest) payloadFiles() []payloadFile {
 		{BlobBackupFileName, m.BlobBytes, m.BlobSHA256},
 		{MetadataBackupFileName, m.MetadataBytes, m.MetadataSHA256},
 	}
+	if m.IndexerSHA256 != "" {
+		files = append(files, payloadFile{IndexerMetadataBackupFileName, m.IndexerBytes, m.IndexerSHA256})
+	}
 	if m.UtxoSetSHA256 != "" {
 		files = append(files, payloadFile{
 			UtxoSetBackupFileName, m.UtxoSetBytes, m.UtxoSetSHA256,

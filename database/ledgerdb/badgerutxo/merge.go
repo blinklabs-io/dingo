@@ -46,9 +46,11 @@ var loadedMarkers = [][]byte{
 	legacyPoolHistoryKey, registrationHistoryKey,
 	legacyRegistrationHistoryKey, genesisMIRKey, opCertsKey, legacyOpCertsKey,
 	committeeKey, governanceKey, legacyGovernanceKey, pparamUpdatesKey,
-	rewardOutputsKey, importBaselinesKey, witnessSlotsKey,
+	rewardOutputsKey, importBaselinesKey, importBaselineDelegationsKey,
+	witnessSlotsKey,
 	legacyWitnessSlotsKey, rewardBlocksKey, legacyRewardBlocksKey,
 	rewardInputsKey, rewardDerivedKey, closureUtxoKey, delegationsKey,
+	importedBlocksKey, drepHistoryLoadedKey, rewardRecordsKey,
 }
 
 // utxoMarkers describe the live outputs and the journal over them.
@@ -58,10 +60,13 @@ var utxoMarkers = [][]byte{
 }
 
 // valueMarkers hold values a full bootstrap resets with the rows they
-// describe.
+// describe. The reward consumer's marks are positions in the reward record
+// numbering, so they restart with it; the consumer's registration is not
+// listed and stays.
 var valueMarkers = [][]byte{
 	eraSwitchKey, pparamsSeqKey, syntheticV2Key, syntheticV2ClearedKey,
-	governanceSeqKey,
+	governanceSeqKey, rewardSeqKey, rewardConsumedKey, rewardConsumedSlotKey,
+	exportFloorKey,
 }
 
 var (
@@ -89,6 +94,7 @@ var (
 		{AccountDRepTag},
 		{StateJournalTag},
 		{RewardRecordTag},
+		rewardSeqIndexPrefix,
 		{DRepTag},
 		{DRepLinkTag},
 		{DormancyTag},
@@ -122,6 +128,8 @@ var (
 		{RewardPotsTag},
 		{RewardDerivedTag},
 		{RewardCursorTag},
+		{ImportedBlocksTag},
+		{DRepHistoryTag},
 	}
 )
 
@@ -219,6 +227,11 @@ func (s *Store) newLoadSink() *loadSink {
 		}
 		return err
 	})
+	if l.err == nil {
+		// Merged rows keep the AddedSlot they were written with, which
+		// the entry journaled at the tip does not match.
+		l.err = s.raiseFloor(exportFloorKey, l.slot+1)
+	}
 	return l
 }
 
@@ -312,7 +325,9 @@ func (l *loadSink) tombstoneFor(tags []byte) func(slot uint64, prefix []byte) er
 
 // windowedTags are the families a catch-up's import replaces rather than adds
 // to: the reward inputs, outputs and block counts only the epochs reward
-// calculation can still read, which the snapshot restates in full.
+// calculation can still read, which the snapshot restates in full. The
+// imported block counts are not among them: the metadata store keeps the
+// counts of an epoch a later snapshot does not carry.
 var windowedTags = []byte{
 	RewardOutputTag, RewardEpochTag, RewardRoundTag, RewardPostSnapTag,
 	RewardBlocksTag, RewardStakeInputTag, RewardPoolInputTag,

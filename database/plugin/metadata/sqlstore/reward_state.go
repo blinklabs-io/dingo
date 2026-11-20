@@ -413,6 +413,40 @@ func (s *Store) GetRewardSeedFailure(
 	return reason, nil
 }
 
+// GetRewardSeedFailureSlot returns the durable imported reward-basis failure
+// and the slot it was captured at, or an empty reason when none was recorded.
+func (s *Store) GetRewardSeedFailureSlot(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) (string, uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return "", 0, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return "", 0, err
+	}
+	var reason string
+	var slot int64
+	err = db.QueryRowContext(ctx, `
+SELECT failure_reason, captured_slot
+FROM reward_seed_failure
+WHERE epoch = ? AND snapshot_type = ?`, sqlEpoch, snapshotType,
+	).Scan(&reason, &slot)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, nil
+	}
+	if err != nil {
+		return "", 0, fmt.Errorf("get reward seed failure slot: %w", err)
+	}
+	if slot < 0 {
+		return "", 0, fmt.Errorf("reward seed failure slot %d is negative", slot)
+	}
+	return reason, uint64(slot), nil
+}
+
 func (s *Store) DeleteRewardSeedFailure(
 	epoch uint64,
 	snapshotType string,

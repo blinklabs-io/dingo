@@ -76,7 +76,7 @@ func p2PParamsRun(
 	t.Cleanup(func() { _ = set.Close() })
 	guard := statedrain.NewTripGuard()
 	scenario := ledger.NewGuardedClassicUpdateBoundaryScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet, guard,
+		t, set, guard,
 	)
 	run := p2Run{reads: map[string][]string{}, guard: guard, db: scenario.DB}
 	require.NoError(
@@ -100,7 +100,7 @@ func p2PParamsRun(
 		require.Len(t, entries, 1)
 		if err := statedrain.Run(t.Context(), statedrain.Env{
 			Store: drainStore{scenario.DB, scenario.DrainFamilies}, Set: src,
-			Guard: guard, VerifyBeforeDrain: true,
+			Guard: guard,
 		}, entries); err != nil {
 			return run, err
 		}
@@ -207,46 +207,6 @@ func parameterLines(lines []string) []string {
 	return out
 }
 
-// A set that differs from the metadata store in a parameter row, a proposal
-// or a marker refuses the drain and leaves the rows and keys.
-func TestPParamsUpdatesDrainVerifyMismatchRefusesTheDrain(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name    string
-		corrupt func(*database.Database)
-	}{
-		{"pparams row", func(db *database.Database) {
-			require.NoError(t, db.Metadata().SetPParams(
-				[]byte{0x80}, 9_000, 99, 6, nil,
-			))
-		}},
-		{"proposal", func(db *database.Database) {
-			require.NoError(t, db.Metadata().SetPParamUpdate(
-				[]byte{9}, []byte{0xa0}, 9_000, 99, nil,
-			))
-		}},
-		{"marker", func(db *database.Database) {
-			require.NoError(t, db.SetSyncState(
-				database.SyntheticV2CostModelClearedEpochSyncKey, "9", nil,
-			))
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			run, err := p2PParamsRun(t, true, tc.corrupt)
-			require.ErrorIs(t, err, statedrain.ErrGateRefused)
-			require.ErrorContains(t, err, "differ")
-			mask, err := run.db.DrainedFamilies(t.Context())
-			require.NoError(t, err)
-			require.False(t, mask.Has(nodesettings.FamilyPParamsUpdates))
-			raw, err := dbtest.RawSQLiteMetadata(t, run.db)
-			require.NoError(t, err)
-			require.Positive(t, tableRows(t, raw, "pparams"))
-			require.Positive(t, tableRows(t, raw, "pparam_update"))
-		})
-	}
-}
-
 // With the family drained and the set not holding it, the LedgerDB and the
 // database fail the read rather than answer from the empty SQL tables, and
 // a write the set must make is refused.
@@ -256,7 +216,7 @@ func TestDrainedPParamReadsFailWhenTheSetCannotServe(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = set.Close() })
 	scenario := ledger.NewClassicUpdateBoundaryScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet,
+		t, set,
 	)
 	// The set never loads the metadata store's rows.
 	require.NoError(t, scenario.DB.RecordDrainedFamily(
@@ -347,7 +307,7 @@ func p2EraSwitchRun(t *testing.T, drain bool) p2Run {
 	t.Cleanup(func() { _ = set.Close() })
 	guard := statedrain.NewTripGuard()
 	scenario := ledger.NewGuardedMidEpochEraSwitchScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet, guard,
+		t, set, guard,
 	)
 	run := p2Run{reads: map[string][]string{}, guard: guard, db: scenario.DB}
 	require.NoError(
@@ -364,7 +324,7 @@ func p2EraSwitchRun(t *testing.T, drain bool) p2Run {
 		}
 		require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
 			Store: drainStore{scenario.DB, scenario.DrainFamilies}, Set: src,
-			Guard: guard, VerifyBeforeDrain: true,
+			Guard: guard,
 		}, entries))
 	}
 	scenario.ApplySwitch()

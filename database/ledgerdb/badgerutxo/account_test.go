@@ -268,3 +268,99 @@ func TestWithdrawnAtSumsTheWithdrawalsOfOneSlot(t *testing.T) {
 		string([]byte{0, 2}): 11,
 	}, got)
 }
+
+// The store numbers each record in the order it wrote them, whatever the
+// slot: a credit written later under an old slot follows every earlier one,
+// and a record written again keeps its number.
+func TestRewardRecordsAreNumberedByWriteOrder(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(1, 0x01))
+	credit := func(slot uint64, source byte, post bool) badgerutxo.RewardRecord {
+		return badgerutxo.RewardRecord{
+			Slot: slot, Source: []byte{source}, Tag: 1, Key: []byte{9, 9},
+			Amount: uint64(source) * 10, PostSnapshot: post,
+		}
+	}
+	apply := func(slot uint64, recs ...badgerutxo.RewardRecord) {
+		tip := point(slot, byte(slot))
+		_, err := s.ApplyLedgerBatch(&tip, badgerutxo.LedgerBatch{RewardRecords: recs})
+		require.NoError(t, err)
+	}
+	apply(20, credit(20, 1, false), credit(20, 2, true))
+	apply(30, credit(10, 3, false))
+	apply(31, credit(20, 1, false))
+
+	got, err := s.RewardRecordsIn(0, 100)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	var order []byte
+	for i, r := range got {
+		order = append(order, r.Source[0])
+		require.Equal(t, uint64(i), r.Seq, "numbers run from zero without a gap")
+		require.Equal(t, uint64(r.Source[0])*10, r.Amount)
+		require.Equal(t, r.Source[0] == 2, r.PostSnapshot)
+		require.Equal(t, uint8(1), r.Tag)
+		require.Equal(t, []byte{9, 9}, r.Key)
+	}
+	require.Equal(t, []byte{1, 2, 3}, order,
+		"the credit written last, at the oldest slot, is last")
+
+	inRange, err := s.RewardRecordsIn(15, 25)
+	require.NoError(t, err)
+	require.Len(t, inRange, 2)
+	require.Equal(t, uint64(0), inRange[0].Seq)
+}
+
+// While a consumer is registered a prune keeps the reward records it has not
+// copied: those it has not acknowledged, and those dated after the slot it
+// copied through. Without one every record below the slot goes.
+func TestRewardRecordPruneKeepsWhatTheConsumerHasNotCopied(t *testing.T) {
+	t.Parallel()
+	setup := func(t *testing.T, consumer bool) *badgerutxo.Store {
+		s := open(t, t.TempDir())
+		t.Cleanup(func() { require.NoError(t, s.Close()) })
+		bootstrap(t, s, point(1, 0x01))
+		require.NoError(t, s.SetRewardConsumer(consumer))
+		tip := point(100, 0x64)
+		_, err := s.ApplyLedgerBatch(&tip, badgerutxo.LedgerBatch{
+			RewardRecords: []badgerutxo.RewardRecord{
+				{Slot: 10, Source: []byte{1}, Key: []byte{1}, Amount: 1},
+				{Slot: 20, Source: []byte{2}, Key: []byte{1}, Amount: 2},
+				{Slot: 30, Source: []byte{3}, Key: []byte{1}, Amount: 3},
+			},
+		})
+		require.NoError(t, err)
+		return s
+	}
+	slots := func(t *testing.T, s *badgerutxo.Store) []uint64 {
+		recs, err := s.RewardRecordsIn(0, 1000)
+		require.NoError(t, err)
+		var out []uint64
+		for _, r := range recs {
+			out = append(out, r.Slot)
+		}
+		return out
+	}
+
+	s := setup(t, false)
+	require.NoError(t, s.PruneJournal(25))
+	require.Equal(t, []uint64{30}, slots(t, s), "no consumer: everything below 25 goes")
+
+	s = setup(t, true)
+	require.NoError(t, s.PruneJournal(25))
+	require.Equal(t, []uint64{10, 20, 30}, slots(t, s), "nothing is acknowledged")
+
+	// Records 0 and 1 are acknowledged, copied through slot 20.
+	require.NoError(t, s.AckRewardRecords(2, 20))
+	require.NoError(t, s.PruneJournal(25))
+	require.Equal(t, []uint64{30}, slots(t, s))
+
+	s = setup(t, true)
+	// Everything is acknowledged, but only slots through 10 were copied.
+	require.NoError(t, s.AckRewardRecords(3, 10))
+	require.NoError(t, s.PruneJournal(25))
+	require.Equal(t, []uint64{20, 30}, slots(t, s),
+		"a record dated after the copied slot stays")
+}

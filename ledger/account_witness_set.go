@@ -17,13 +17,12 @@ package ledger
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"maps"
 	"math"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 
 // ImportBaseline is the virtual registration a snapshot import, genesis or a
@@ -31,11 +30,18 @@ import (
 // account_import_baseline keeps it. No certificate exists for it. Active is
 // false for the state a newer snapshot left the account in, which reads as no
 // registration. Deposit is nil for a baseline whose deposit was never known.
+//
+// Pool, Drep and DrepType are the delegations the import recorded, which a
+// later certificate overwrites on the account but not here. A set whose
+// baselines were written before it kept them reads them as empty.
 type ImportBaseline struct {
 	Ref       models.StakeCredentialRef
 	Active    bool
 	AddedSlot uint64
 	Deposit   *uint64
+	Pool      []byte
+	Drep      []byte
+	DrepType  uint64
 }
 
 // ImportBaselineChange is an import baseline as the change at Slot leaves it.
@@ -125,13 +131,6 @@ func (b *ImportBaseline) registration() *models.AccountImportRegistration {
 	return r
 }
 
-func sameImportRegistration(a, b *models.AccountImportRegistration) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return a.AddedSlot == b.AddedSlot && sameDepositPtr(a.Deposit, b.Deposit)
-}
-
 // importBaselineReader returns the set's import baseline reader once it holds
 // the baselines, or nil when reads stay on the metadata store.
 func (ls *LedgerState) importBaselineReader(
@@ -140,7 +139,7 @@ func (ls *LedgerState) importBaselineReader(
 	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
 		return nil
 	}
-	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
+	if _, mode := ls.utxoSetReader(); !mode {
 		return nil
 	}
 	r, ok := ls.readSet(txn).(ImportBaselineReader)
@@ -162,7 +161,7 @@ func (ls *LedgerState) importBaselineReader(
 func (ls *LedgerState) importBaselineServing(
 	txn ledgerdb.Txn,
 ) ImportBaselineReader {
-	if _, mode := ls.utxoSetReader(); mode != UtxoSetReadsSet {
+	if _, mode := ls.utxoSetReader(); !mode {
 		return nil
 	}
 	return ls.importBaselineReader(txn)
@@ -174,7 +173,7 @@ func (ls *LedgerState) witnessReader(txn ledgerdb.Txn) WitnessReader {
 	if ls.accountReader(txn) == nil || ls.utxoSetFailed.Load() {
 		return nil
 	}
-	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
+	if _, mode := ls.utxoSetReader(); !mode {
 		return nil
 	}
 	r, ok := ls.readSet(txn).(WitnessReader)
@@ -192,7 +191,7 @@ func (ls *LedgerState) witnessReader(txn ledgerdb.Txn) WitnessReader {
 }
 
 func (ls *LedgerState) witnessServing(txn ledgerdb.Txn) WitnessReader {
-	if _, mode := ls.utxoSetReader(); mode != UtxoSetReadsSet {
+	if _, mode := ls.utxoSetReader(); !mode {
 		return nil
 	}
 	return ls.witnessReader(txn)
@@ -323,6 +322,7 @@ func (ls *LedgerState) stageWitness(
 // stageImportBaseline stages an import baseline established at b.AddedSlot.
 func (ls *LedgerState) stageImportBaseline(txn ledgerdb.Txn, b ImportBaseline) {
 	b.Ref = models.NewStakeCredentialRef(b.Ref.Tag, bytes.Clone(b.Ref.Key))
+	b.Pool, b.Drep = bytes.Clone(b.Pool), bytes.Clone(b.Drep)
 	if b.Deposit != nil {
 		d := *b.Deposit
 		b.Deposit = &d
@@ -337,8 +337,8 @@ func (ls *LedgerState) stageImportBaseline(txn ledgerdb.Txn, b ImportBaseline) {
 	)
 }
 
-// GetAccountImportRegistrationByCredential is compared on the baseline's slot
-// and deposit, or on there being none.
+// GetAccountImportRegistrationByCredential returns the account's imported
+// registration baseline, if one exists.
 func (s stagingLedgerDB) GetAccountImportRegistrationByCredential(
 	ctx context.Context,
 	credentialTag uint8,
@@ -346,62 +346,28 @@ func (s stagingLedgerDB) GetAccountImportRegistrationByCredential(
 	txn ledgerdb.Txn,
 ) (*models.AccountImportRegistration, error) {
 	ref := models.NewStakeCredentialRef(credentialTag, stakeKey)
-	if r := s.ls.importBaselineServing(txn); r != nil {
-		b, err := s.ls.importBaselineView(r, txn, ref)
-		if err != nil {
-			return nil, err
-		}
-		return b.registration(), nil
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetAccountImportRegistrationByCredential(
-		ctx, credentialTag, stakeKey, txn,
-	)
-	if err != nil {
-		return want, err
-	}
-	r := s.ls.importBaselineReader(txn)
+	r := s.ls.importBaselineServing(txn)
 	if r == nil {
-		return want, nil
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 	}
-	b, setErr := s.ls.importBaselineView(r, txn, ref)
-	s.ls.compareRegistrationRead(
-		g, fmt.Sprintf("import baseline %d/%x", credentialTag, stakeKey),
-		sameImportRegistration(want, b.registration()), setErr,
-	)
-	return want, nil
+	b, err := s.ls.importBaselineView(r, txn, ref)
+	if err != nil {
+		return nil, err
+	}
+	return b.registration(), nil
 }
 
-// AccountLastWitnessSlots is compared on the slot of each requested
-// credential's last witness at or below maxSlot.
+// AccountLastWitnessSlots returns each requested credential's latest witness
+// slot at or below maxSlot.
 func (s stagingLedgerDB) AccountLastWitnessSlots(
 	ctx context.Context,
 	refs []models.StakeCredentialRef,
 	maxSlot uint64,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
-	if r := s.ls.witnessServing(txn); r != nil {
-		return s.ls.lastWitnessSlots(r, txn, refs, maxSlot)
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.AccountLastWitnessSlots(ctx, refs, maxSlot, txn)
-	if err != nil {
-		return want, err
-	}
-	r := s.ls.witnessReader(txn)
+	r := s.ls.witnessServing(txn)
 	if r == nil {
-		return want, nil
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyAccounts)
 	}
-	got, setErr := s.ls.lastWitnessSlots(r, txn, refs, maxSlot)
-	s.ls.compareAccountRead(
-		g,
-		fmt.Sprintf(
-			"witness slots of %d credentials at %d",
-			len(refs),
-			maxSlot,
-		),
-		maps.Equal(got, want),
-		setErr,
-	)
-	return want, nil
+	return s.ls.lastWitnessSlots(r, txn, refs, maxSlot)
 }

@@ -183,34 +183,20 @@ func loadUtxoMemoPreprodFixture(tb testing.TB) *utxoMemoPreprodFixture {
 
 	db, err := dbtest.NewDatabase(tb, &database.Config{DataDir: ""})
 	require.NoError(tb, err)
-	require.NoError(
-		tb,
-		db.Transaction(context.Background(), true).
-			Do(func(txn *database.Txn) error {
-				for _, fu := range funding {
-					if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
-						TxId:      fu.txIdBytes,
-						OutputIdx: uint32(fu.idx), // #nosec G115 -- small fixture index
-						AddedSlot: 0,
-					}); err != nil {
-						return err
-					}
-					encoded, err := cbor.Encode(fu.output)
-					if err != nil {
-						return err
-					}
-					if err := db.Blob().SetUtxo(
-						txn.Blob(),
-						fu.txIdBytes,
-						uint32(fu.idx), // #nosec G115 -- small fixture index
-						encoded,
-					); err != nil {
-						return err
-					}
-				}
-				return nil
-			}),
-	)
+	set := NewMemLiveSetForTest()
+	added := make([]UtxoOutput, 0, len(funding))
+	for _, fu := range funding {
+		encoded, err := cbor.Encode(fu.output)
+		require.NoError(tb, err)
+		added = append(added, UtxoOutput{
+			Ref: models.UtxoId{
+				Hash: fu.txIdBytes,
+				Idx:  uint32(fu.idx), // #nosec G115 -- small fixture index
+			},
+			Cbor: encoded,
+		})
+	}
+	require.NoError(tb, set.ApplyUtxoChanges(nil, []UtxoEvent{{Added: added}}))
 
 	era := eras.ConwayEraDesc
 	nodeConfig := newTestShelleyGenesisCfg(tb)
@@ -249,8 +235,10 @@ func loadUtxoMemoPreprodFixture(tb testing.TB) *utxoMemoPreprodFixture {
 		config: LedgerStateConfig{
 			Logger:            testLogger(),
 			CardanoNodeConfig: nodeConfig,
+			UtxoSet:           set,
 		},
 	}
+	require.NoError(tb, db.SetLiveUtxoSource(dingoLS))
 	dingoLS.metrics.init(prometheus.NewRegistry())
 	dingoLS.publishSnapshotsLocked()
 

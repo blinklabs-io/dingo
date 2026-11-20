@@ -270,7 +270,8 @@ func rollsBackWithoutJournal(tag byte) bool {
 		DonationTag, PParamsTag, PParamsSlotTag, RewardRecordTag,
 		RewardStakeInputTag, RewardPoolInputTag, RewardSnapshotTag,
 		RewardPotsTag, RewardDerivedTag, RewardCursorTag,
-		RewardOutputTag, RewardEpochTag, RewardRoundTag, RewardPostSnapTag:
+		RewardOutputTag, RewardEpochTag, RewardRoundTag, RewardPostSnapTag,
+		ImportedBlocksTag:
 		return true
 	}
 	return false
@@ -283,7 +284,7 @@ func rollsBackWithoutJournal(tag byte) bool {
 // load is accepted today.
 var journaledFamilyTags = []byte{
 	AccountTag, AccountPoolTag, AccountDRepTag, DRepTag, DRepLinkTag,
-	PoolTag, PoolHistoryTag, StakeHistoryTag, DRepDepositTag,
+	DRepHistoryTag, PoolTag, PoolHistoryTag, StakeHistoryTag, DRepDepositTag,
 	OpCertTag, GenesisDelegationTag, MIRCertTag, CommitteeMemberTag,
 	CommitteeQuorumTag, ConstitutionTag, HotAuthTag, ResignTag, ProposalTag,
 	VoteTag, PParamUpdateTag, ImportBaselineTag, WitnessTag, ClosureUtxoTag,

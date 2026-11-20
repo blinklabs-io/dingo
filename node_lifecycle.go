@@ -32,17 +32,15 @@ package dingo
 // stale reference to n.db/n.ledgerState — see the Phase 2 design notes):
 // n.eventBus, n.chainSelector (holds only a one-time
 // SecurityParam snapshot and closures over n). n.ouroboros has one
-// deliberate, narrow exception to "left running": its background Leios
-// endorser-block persistence writer is paused (not merely left alone) by
+// deliberate, narrow exception to "left running": its Leios endorser-block
+// persistence is paused (not merely left alone) by
 // quiesceForLiveLifecycleOp, since — unlike everything else on
-// n.ouroboros — that writer directly calls Database.SetLeiosEB on
-// whatever n.ouroboros's ledger state currently resolves to, on its own
-// timer, entirely independent of the request/response flow every other
-// part of n.ouroboros only reacts to. Left unpaused, a write already queued
-// before quiesce began could still be draining when the database closes
-// out from under it, or could still be sitting queued when LedgerState is
-// reassigned post-reinit, silently writing pre-operation data into the
-// freshly restored/truncated store.
+// n.ouroboros — persistence directly calls Database.SetLeiosEB on
+// whatever n.ouroboros's ledger state currently resolves to, and its
+// retention GC deletes from it on its own schedule. Left unpaused, a write
+// that began before quiesce could still be running when the database closes
+// out from under it, and endorser blocks cached as already written would
+// never be written to the freshly restored/truncated store.
 //
 // Everything else that depends on n.db or n.ledgerState — chainManager,
 // ledgerState, mempool, chainsyncState, peerGov, connManager, the
@@ -88,6 +86,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/storageadopt"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
@@ -102,7 +101,7 @@ import (
 // holds a direct (non-self-healing) reference to n.db/n.ledgerState, in
 // preparation for closing the database out from under this running node.
 // It does not touch n.eventBus, n.chainSelector, or n.ctx. It does touch
-// n.ouroboros exactly once, to pause its Leios persistence writer — see
+// n.ouroboros exactly once, to pause its Leios persistence — see
 // this file's top doc comment for why that one piece of n.ouroboros can't
 // simply be left running like everything else on it.
 // namedStop pairs a component's Stop with the name quiesce reports it under.
@@ -213,12 +212,6 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: n.snapshotMgr.Stop,
 		})
 	}
-	if n.utxoShadow != nil {
-		stops = append(stops, namedStop{
-			name: "shadow UTxO set",
-			stop: n.stopUtxoShadow,
-		})
-	}
 	if n.dbLifecycleMgr != nil {
 		stops = append(stops, namedStop{
 			name: "database lifecycle manager",
@@ -229,6 +222,12 @@ func (n *Node) quiesceComponentStops() []namedStop {
 		stops = append(stops, namedStop{
 			name: "planner statistics manager",
 			stop: n.plannerStatsMgr.Stop,
+		})
+	}
+	if n.indexerPlannerStatsMgr != nil {
+		stops = append(stops, namedStop{
+			name: "IndexerDB planner statistics manager",
+			stop: n.indexerPlannerStatsMgr.Stop,
 		})
 	}
 	return stops
@@ -328,6 +327,16 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		}
 		if stopErr := stopWithDeadline(
 			max(time.Until(deadline), 0), cs.name, cs.stop,
+		); stopErr != nil {
+			err = errors.Join(err, stopErr)
+		}
+	}
+	// The writer reads the ledger database and writes the IndexerDB, so it
+	// stops before either closes and its ledger.tip subscription goes with it.
+	if n.indexerWriter != nil {
+		if stopErr := stopWithDeadline(
+			max(time.Until(deadline), 0), "indexer writer",
+			func() error { return n.stopIndexerWriter(ctx) },
 		); stopErr != nil {
 			err = errors.Join(err, stopErr)
 		}
@@ -502,8 +511,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	n.mempool = nil
 	if n.connManager != nil {
 		if stopErr := n.connManager.Stop(ctx); stopErr != nil {
-			// Unconfirmed connection shutdown leaves traffic able to restart the
-			// persistence writer, so storage replacement requires a full restart.
+			// Unconfirmed connection shutdown leaves traffic able to write
+			// endorser blocks, so storage replacement requires a full restart.
 			err = errors.Join(
 				err,
 				errStorageDrainUnconfirmed,
@@ -621,6 +630,12 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 			)
 		}
 		n.deferredIndexMaintenanceDone = nil
+	}
+
+	// The IndexerDB reads blocks through the ledger database's blob store, so
+	// it closes first.
+	if closeErr := n.closeIndexerDatabase(); closeErr != nil {
+		err = errors.Join(err, closeErr)
 	}
 
 	if n.db != nil {
@@ -814,6 +829,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
 			return fmt.Errorf("consensus database compatibility: %w", err)
 		}
+		if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
+			return err
+		}
 		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
 			return err
 		}
@@ -826,13 +844,6 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		n.historyExpiry = n.newHistoryExpiryPruner()
 		if err := n.historyExpiry.Start(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf("failed to restart history expiry: %w", err)
-		}
-	}
-
-	if n.config.immutableDB.Enabled {
-		n.blockPromoter = n.newBlockPromoter()
-		if err := n.blockPromoter.Start(n.ctx); err != nil { //nolint:contextcheck
-			return fmt.Errorf("failed to restart block promotion: %w", err)
 		}
 	}
 
@@ -867,7 +878,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 // Startup era history preparation publishes both the epoch cache and applied tip so
 // timestamp conversion uses the persisted tip's forecast horizon.
 func (n *Node) reinitializeMidnightIndexer() error {
-	if !midnightIndexerActive(n.config.storageMode, n.config.midnight) {
+	if !midnightIndexerActive(n.apiStorageMode(), n.config.midnight) {
 		return nil
 	}
 	if err := n.prepareEpochCache(n.ctx); err != nil {
@@ -898,9 +909,6 @@ func (n *Node) reinitializeMidnightIndexer() error {
 // (if enabled) the Leios vote/pipeline managers, matching Run()'s order.
 func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	if err := n.configureSnapshotManager(); err != nil {
-		return err
-	}
-	if err := n.startUtxoShadow(); err != nil {
 		return err
 	}
 
@@ -936,6 +944,15 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		return fmt.Errorf("failed to restart snapshot manager: %w", err)
 	}
 
+	// The promoter reads the started ledger's immutable point, so it starts
+	// after the ledger has prepared its epoch cache.
+	if n.immutableEnabled() {
+		n.blockPromoter = n.newBlockPromoter()
+		if err := n.blockPromoter.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("failed to restart block promotion: %w", err)
+		}
+	}
+
 	n.dbLifecycleMgr = n.newDatabaseLifecycleManager()
 	if err := n.dbLifecycleMgr.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf(
@@ -953,6 +970,14 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 			"failed to restart planner statistics manager: %w",
 			err,
 		)
+	}
+	if n.indexerDB != nil {
+		if err := n.startIndexerPlannerStatsManager(n.ctx, true); err != nil { //nolint:contextcheck
+			return fmt.Errorf(
+				"failed to restart IndexerDB planner statistics manager: %w",
+				err,
+			)
+		}
 	}
 
 	if n.config.leiosRuntimeEnabled() {
@@ -1049,6 +1074,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// The connection-event subscriptions registered during Run do not need
 	// re-registering: they are closures over n, so they resolve whichever
 	// instance n.ouroboros currently holds.
+	//nolint:contextcheck // Close bounds its own drain; the restore deadline must not cut it short.
 	if err := n.ouroboros().Close(); err != nil {
 		return fmt.Errorf("failed to close previous ouroboros: %w", err)
 	}
@@ -1069,6 +1095,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// without this the replacement instance would silently lose Leios vote
 	// and pipeline handling. Same call Run makes after its construction.
 	if err := n.attachLeiosHandlers(rebuiltOuroboros); err != nil {
+		//nolint:contextcheck // Close bounds its own drain; see the Close above.
 		closeErr := rebuiltOuroboros.Close()
 		if errors.Is(closeErr, ouroborosPkg.ErrLeiosPersistDrainUnconfirmed) {
 			closeErr = errors.Join(errStorageDrainUnconfirmed, closeErr)
@@ -1146,13 +1173,15 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.config.storageMode.IsAPI() && utxorpcPort > 0 {
+	if n.apiStorageMode().IsAPI() && utxorpcPort > 0 {
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIUtxorpc,
 			utxorpcSelection.Provider, utxorpcSelection.Config,
 			utxorpc.ProviderDependencies{
+				Listen: n.config.apiListenerFactory,
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
+				QueryDatabase:      n.utxorpcQueryDatabase(),
 				Host:               n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
@@ -1166,7 +1195,7 @@ func (n *Node) reinitializeAPIServers() error {
 		n.bark.ResumeDB(n.db)
 	}
 
-	if midnightServerActive(n.config.storageMode, n.config.midnight) {
+	if midnightServerActive(n.apiStorageMode(), n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			n.midnightServerConfig(),
@@ -1188,8 +1217,10 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.config.storageMode.IsAPI() && blockfrostPort > 0 {
-		adapter, err := blockfrost.NewNodeAdapter(n.ledgerState, n.mempool)
+	if n.apiStorageMode().IsAPI() && blockfrostPort > 0 {
+		adapter, err := blockfrost.NewNodeAdapter(
+			n.ledgerState, n.mempool, n.indexerStore,
+		)
 		if err != nil {
 			return fmt.Errorf("recreating blockfrost node adapter: %w", err)
 		}
@@ -1197,8 +1228,10 @@ func (n *Node) reinitializeAPIServers() error {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
 			blockfrostSelection.Provider, blockfrostSelection.Config,
 			blockfrost.ProviderDependencies{
-				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				Listen: n.config.apiListenerFactory,
+				Node:   adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+				Ready:              n.apiReadiness(),
 			},
 		)
 		if err != nil {
@@ -1212,8 +1245,10 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.config.storageMode.IsAPI() && kupoPort > 0 {
-		adapter, err := kupo.NewNodeAdapter(n.ledgerState)
+	if n.apiStorageMode().IsAPI() && kupoPort > 0 {
+		adapter, err := kupo.NewNodeAdapter(
+			n.ledgerState, n.indexerStore,
+		)
 		if err != nil {
 			return fmt.Errorf("recreating kupo node adapter: %w", err)
 		}
@@ -1221,8 +1256,10 @@ func (n *Node) reinitializeAPIServers() error {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIKupo,
 			kupoSelection.Provider, kupoSelection.Config,
 			kupo.ProviderDependencies{
-				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				Listen: n.config.apiListenerFactory,
+				Node:   adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+				Ready:              n.apiReadiness(),
 			},
 		)
 		if err != nil {
@@ -1236,7 +1273,7 @@ func (n *Node) reinitializeAPIServers() error {
 	if err != nil {
 		return err
 	}
-	if n.config.storageMode.IsAPI() && meshPort > 0 {
+	if n.apiStorageMode().IsAPI() && meshPort > 0 {
 		var genesisHash string
 		if nc := n.config.cardanoNodeConfig; nc != nil {
 			genesisHash = nc.ByronGenesisHash
@@ -1251,10 +1288,12 @@ func (n *Node) reinitializeAPIServers() error {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIMesh,
 			meshSelection.Provider, meshSelection.Config,
 			mesh.ProviderDependencies{
+				Listen:             n.config.apiListenerFactory,
 				Logger:             n.config.logger,
-				LedgerState:        n.ledgerState,
-				Database:           mesh.NewMeshDatabase(n.db),
-				Chain:              n.ledgerState.Chain(),
+				LedgerState:        n.meshLedgerState(),
+				Database:           n.meshDatabase(),
+				Chain:              n.meshChain(),
+				Ready:              n.apiReadiness(),
 				Mempool:            n.mempool,
 				Host:               n.config.bindAddr,
 				Network:            n.config.network,
@@ -1280,8 +1319,9 @@ func (n *Node) reinitializeAPIServers() error {
 			mcpSelection.Provider, mcpSelection.Config,
 			mcp.ProviderDependencies{
 				Logger:             n.config.logger,
-				Database:           n.db,
+				Database:           n.apiDatabase(),
 				LedgerState:        n.ledgerState,
+				Ready:              n.apiReadiness(),
 				Mempool:            n.mempool,
 				Host:               n.config.bindAddr,
 				Network:            n.config.network,
@@ -1293,7 +1333,7 @@ func (n *Node) reinitializeAPIServers() error {
 		}
 	}
 
-	if n.config.storageMode.IsAPI() {
+	if n.apiStorageMode().IsAPI() {
 		fetcher, err := offchainmetadata.New(
 			n.offchainMetadataConfig(),
 		)
@@ -1391,6 +1431,8 @@ func (n *Node) storageSelections() internalplugins.StorageSelections {
 	return internalplugins.StorageSelections{
 		Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob],
 		Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata],
+		SplitIndexer: n.splitIndexer() ||
+			(n.config.cfg != nil && n.config.cfg.ServerCoreNamespace),
 	}
 }
 
@@ -1437,9 +1479,15 @@ func (n *Node) reinitializeAndResume(ctx context.Context) error {
 		{"core storage", func() error {
 			return n.reinitializeCoreStorage(ctx)
 		}},
+		{"indexer database", func() error {
+			return n.openIndexerWriter(ctx)
+		}},
 		{"midnight indexer", n.reinitializeMidnightIndexer},
 		{"background managers", func() error {
 			return n.reinitializeBackgroundManagers(ctx)
+		}},
+		{"indexer writer", func() error {
+			return n.startIndexerWriter(n.ctx) //nolint:contextcheck
 		}},
 		{"networking core", func() error {
 			return n.reinitializeNetworkingCore(ctx)
@@ -1501,7 +1549,29 @@ func (n *Node) Snapshot(
 	if set := n.utxoSetBackuper(); set != nil {
 		manifestOpts = append(manifestOpts, lifecycle.WithUtxoSetBackup(set))
 	}
-	return lifecycle.SnapshotToCloud(
+	var (
+		stagedIndexer string
+		indexerMeta   indexerPayload
+	)
+	if n.splitIndexer() {
+		if err := n.checkIndexerSnapshotSupported(); err != nil {
+			return lifecycle.Manifest{}, err
+		}
+		// The IndexerDB first: its tip never passes the ledger's, and the
+		// ledger snapshot below is taken at or after it.
+		var cleanup func()
+		stagedIndexer, indexerMeta, cleanup, err = n.captureIndexerPayload(
+			ctx,
+		)
+		if err != nil {
+			return lifecycle.Manifest{}, err
+		}
+		defer cleanup()
+	}
+	if stagedIndexer != "" {
+		manifestOpts = append(manifestOpts, lifecycle.WithIndexerBackup(stagedIndexer, indexerMeta.TipSlot, indexerMeta.TipHash))
+	}
+	manifest, err := lifecycle.SnapshotToCloud(
 		ctx,
 		n.destinationRegistry,
 		n.db,
@@ -1518,6 +1588,7 @@ func (n *Node) Snapshot(
 		description,
 		manifestOpts...,
 	)
+	return manifest, err
 }
 
 func (n *Node) stopForPendingRestoreRollback(
@@ -1577,6 +1648,50 @@ func (n *Node) Restore(
 	manifestOpts, err := dblifecycle.ManifestOptions(n.config.databaseLifecycle)
 	if err != nil {
 		return lifecycle.Manifest{}, err
+	}
+
+	restoreStorage := n.restoreStorageConfig()
+	validateManifest := func(m lifecycle.Manifest) error {
+		compatibilityGates := n.nodeSettingsGateValues()
+		if n.splitIndexer() {
+			compatibilityGates["indexer_layout"] = n.indexerLayout()
+		}
+		if n.config.networkMagic != 0 {
+			compatibilityGates["network_magic"] = strconv.FormatUint(
+				uint64(n.config.networkMagic), 10,
+			)
+		}
+		if n.config.startEra != "" {
+			compatibilityGates["start_era"] = string(n.config.startEra)
+		} else {
+			compatibilityGates["start_era"] = nodesettings.NoStartEra
+		}
+		if err := restoreStorage.CheckCompatibility(
+			m,
+			n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
+			n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
+			string(n.config.storageMode),
+			n.config.network,
+			compatibilityGates,
+		); err != nil {
+			return fmt.Errorf(
+				"snapshot is not compatible with the running node: %w", err,
+			)
+		}
+		return nil
+	}
+	if n.splitIndexer() {
+		// Refuse an incompatible snapshot before pausing the node. Restore
+		// validates the manifest again before touching any staged stores.
+		manifest, err := lifecycle.PeekManifest(
+			ctx, n.destinationRegistry, snapshotDir, manifestOpts...,
+		)
+		if err != nil {
+			return lifecycle.Manifest{}, err
+		}
+		if err := validateManifest(manifest); err != nil {
+			return lifecycle.Manifest{}, err
+		}
 	}
 
 	// Every removal and rename below works by pathname in dataDir's
@@ -1703,32 +1818,8 @@ func (n *Node) Restore(
 	manifest, recovery, err := lifecycle.RestoreRecoverable(
 		metadata.AllowResetOfPopulatedTarget(ctx),
 		restoreHost, n.destinationRegistry, snapshotDir, stagingDir,
-		func(m lifecycle.Manifest) error {
-			compatibilityGates := n.nodeSettingsGateValues()
-			if n.config.networkMagic != 0 {
-				compatibilityGates["network_magic"] = strconv.FormatUint(
-					uint64(n.config.networkMagic), 10,
-				)
-			}
-			if n.config.startEra != "" {
-				compatibilityGates["start_era"] = string(n.config.startEra)
-			} else {
-				compatibilityGates["start_era"] = nodesettings.NoStartEra
-			}
-			if err := m.CheckCompatibility(
-				n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
-				n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
-				string(n.config.storageMode),
-				n.config.network,
-				compatibilityGates,
-			); err != nil {
-				return fmt.Errorf(
-					"snapshot is not compatible with the running node: %w", err,
-				)
-			}
-			return nil
-		},
-		n.restoreStorageConfig(),
+		validateManifest,
+		restoreStorage,
 		manifestOpts...,
 	)
 	if err != nil {
@@ -2069,7 +2160,7 @@ func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
 }
 
 func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
-	return lifecycle.RestoreStorageConfig{
+	restoreStorage := lifecycle.RestoreStorageConfig{
 		Blob:          n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
 		Metadata:      n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
 		ActiveDataDir: n.config.dataDir,
@@ -2081,9 +2172,38 @@ func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
 			n.config.cardanoNodeConfig, "", n.config.network,
 		),
 	}
+	if n.splitIndexer() && n.config.cfg != nil &&
+		storageadopt.SupportsAPIAdoption(n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider) {
+		restoreStorage.AdoptLegacyAPI = func(ctx context.Context, stagingDir string) error {
+			cfg := *n.config.cfg
+			cfg.StorageMode = "api"
+			cfg.Network = n.config.network
+			cfg.NetworkMagic = n.config.networkMagic
+			cfg.StartEra = n.config.startEra
+			cfg.Plugins.Storage.Blob = n.config.pluginSelections[plugin.CapabilityStorageBlob]
+			cfg.Plugins.Storage.Metadata = n.config.pluginSelections[plugin.CapabilityStorageMetadata]
+			return storageadopt.AdoptStagedAPI(
+				ctx, cfg, n.config.logger, n.config.cardanoNodeConfig, stagingDir,
+			)
+		}
+	}
+	return restoreStorage
+}
+
+// ReconcileInterruptedRestore completes restore recovery before startup or
+// migration opens a database. cfg must describe the stores being recovered.
+func ReconcileInterruptedRestore(ctx context.Context, cfg Config) error {
+	n := &Node{config: cfg}
+	return n.reconcileInterruptedRestore(ctx)
 }
 
 func (n *Node) reconcileInterruptedRestore(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if n.config.dataDir == "" {
+		return nil
+	}
 	if err := n.reconcileInterruptedLiveRestoreSwap(); err != nil {
 		return fmt.Errorf(
 			"reconcile interrupted live restore swap: %w", err,
@@ -2110,17 +2230,26 @@ func (n *Node) reconcileInterruptedRemoteRestore(ctx context.Context) error {
 	_, dataErr := os.Stat(dataDir)
 	_, backupErr := os.Stat(dataDir + preRestoreBackupSuffix)
 	if dataErr != nil && !os.IsNotExist(dataErr) {
-		return fmt.Errorf("stat data directory during remote restore recovery: %w", dataErr)
+		return fmt.Errorf(
+			"stat data directory during remote restore recovery: %w",
+			dataErr,
+		)
 	}
 	if backupErr != nil && !os.IsNotExist(backupErr) {
-		return fmt.Errorf("stat backup directory during remote restore recovery: %w", backupErr)
+		return fmt.Errorf(
+			"stat backup directory during remote restore recovery: %w",
+			backupErr,
+		)
 	}
 	if !remoteRestoreNeedsRollback(dataErr == nil, backupErr == nil) {
 		return nil
 	}
 	host, err := internalplugins.NewHost()
 	if err != nil {
-		return fmt.Errorf("build storage plugin host for restore recovery: %w", err)
+		return fmt.Errorf(
+			"build storage plugin host for restore recovery: %w",
+			err,
+		)
 	}
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
 	if err := recoverInterruptedRestore(
@@ -2338,14 +2467,12 @@ func (n *Node) Truncate(
 		// The truncate's rollback reads the critical indexes a Mithril run
 		// this operation aborted left dropped; without them it scans the
 		// utxo table once per rolled-back transaction.
-		if !n.config.storageMode.IsAPI() {
-			if err := repairPendingCriticalIndexes(
-				ctx, tmpDB, n.config.logger,
-			); err != nil {
-				return 0, fmt.Errorf(
-					"%w: %w", lifecycle.ErrTruncateNotStarted, err,
-				)
-			}
+		if err := repairPendingCriticalIndexes(
+			ctx, tmpDB, n.config.logger,
+		); err != nil {
+			return 0, fmt.Errorf(
+				"%w: %w", lifecycle.ErrTruncateNotStarted, err,
+			)
 		}
 
 		setOpts, closeSet, err := dblifecycle.TruncateOptions(
@@ -2377,6 +2504,20 @@ func (n *Node) Truncate(
 			return 0, fmt.Errorf(
 				"%w: %w", lifecycle.ErrTruncateNotStarted, err,
 			)
+		}
+		// Before the ledger deletes the blocks. Nothing of the ledger has
+		// changed if this fails, so it is a refusal, not a partial truncate.
+		if err := n.rollbackIndexerForTruncate(ctx, tmpDB, block, setOpts...); err != nil {
+			return 0, fmt.Errorf(
+				"%w: %w", lifecycle.ErrTruncateNotStarted, err,
+			)
+		}
+		// Test seam: the one boundary a crash between the two truncate steps
+		// can fall on.
+		if n.afterIndexerRollback != nil {
+			if err := n.afterIndexerRollback(); err != nil {
+				return 0, err
+			}
 		}
 		return lifecycle.Truncate(
 			ctx,

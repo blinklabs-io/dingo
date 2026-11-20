@@ -41,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/indexerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -56,6 +57,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
+	"github.com/blinklabs-io/dingo/internal/nodestorage"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	"github.com/blinklabs-io/dingo/internal/plannerstats"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -63,7 +65,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/statedrain"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/internal/utxoset"
-	"github.com/blinklabs-io/dingo/internal/utxoshadow"
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -113,10 +114,19 @@ type Node struct {
 	mempool                mempool.Service
 	chainManager           *chain.ChainManager
 	db                     *database.Database
+	indexerDB              *database.Database
+	indexerStore           *indexerdb.Store
+	indexerWriter          IndexerWriter
+	indexerWakeSub         event.EventSubscriberId
+	indexerFactsSub        event.EventSubscriberId
+	afterIndexerRollback   func() error // test hook; see Truncate
 	ledgerState            *ledger.LedgerState
 	snapshotMgr            *snapshot.Manager
-	utxoShadow             *utxoshadow.Shadow
 	utxoSet                *utxoset.Set
+	utxoSetTempDir         string
+	// availableDiskBytes reports free space on a path's volume for the
+	// ImmutableDB promotion check; nil uses the platform's.
+	availableDiskBytes func(path string) (uint64, error)
 	// anchoredUtxoSet is the open live UTxO set the anchor updater feeds. It
 	// follows utxoSet across a live close and reopen, which the updater
 	// goroutine cannot read without a race.
@@ -137,6 +147,7 @@ type Node struct {
 	finishLedgerReimport    func(ctx context.Context, point ocommon.Point) error
 	dbLifecycleMgr          *dblifecycle.Manager
 	plannerStatsMgr         *plannerstats.Manager
+	indexerPlannerStatsMgr  *plannerstats.Manager
 	leiosVoteManager        *leios.VoteManager
 	leiosPipelineManager    *leios.PipelineManager
 	leiosAdaptiveEb         *leios.AdaptiveEbController
@@ -355,9 +366,6 @@ func (n *Node) selectedConsensusProvider() nodeconsensus.Provider {
 }
 
 func New(cfg Config) (*Node, error) {
-	if err := validateImmutableDB(cfg); err != nil {
-		return nil, err
-	}
 	pluginHost, err := internalplugins.NewHost()
 	if err != nil {
 		return nil, fmt.Errorf("create plugin host: %w", err)
@@ -961,6 +969,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return err
 	}
+	if n.storageSelections().SplitIndexer {
+		if err := n.checkServerAdopted(n.ctx, deps); err != nil {
+			return err
+		}
+	}
 	deps.PromRegistry = n.config.promRegistry
 	stores, err := internalplugins.ResolveStorage(
 		n.ctx, n.pluginHost, n.storageSelections(), deps,
@@ -1037,6 +1050,12 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	} else {
 		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
 			return fmt.Errorf("consensus database compatibility: %w", err)
+		}
+		// Before the gates are written: refusing after them would latch
+		// history_expiry_active, and the database could then not be started
+		// with history expiry turned back off.
+		if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
+			return err
 		}
 		if err := n.db.EnforceNodeSettings(ctx, n.nodeSettingsGateValues()); err != nil {
 			return fmt.Errorf("node settings: %w", err)
@@ -1183,6 +1202,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
 			return fmt.Errorf("consensus database compatibility: %w", err)
 		}
+		if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
+			return err
+		}
 		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
 			return fmt.Errorf(
 				"failed to enforce recovered node settings: %w",
@@ -1190,15 +1212,24 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			)
 		}
 	}
-	// Statistics should exist before the first block batch: a database that
-	// has never been analyzed plans the batched UTxO spend as a scan of every
-	// live output. After recovery, which can roll metadata back, so the
-	// statistics describe the tables blocks are applied to.
+	// The consensus store's startup pass is synchronous: a database that has
+	// never been analyzed can otherwise plan the first batched UTxO spend as a
+	// scan of every live output. It holds no API history, so the pass is
+	// bounded; the IndexerDB's runs after the API listeners below.
 	n.runPlannerStatsStartup(ctx)
 
-	if err := refuseHistoryExpiryOverImmutable(n.config, n.db); err != nil {
-		return err
+	// The IndexerDB reads blocks through the ledger database's blob store, so
+	// it opens after that store is recovered and closes before it. The
+	// cleanups run in reverse: writer stop, then the IndexerDB close.
+	if err := n.openIndexerWriter(ctx); err != nil {
+		return fmt.Errorf("failed to open indexer: %w", err)
 	}
+	started = append(started, func() {
+		if err := n.closeIndexerDatabase(); err != nil {
+			n.config.logger.Error("indexer database close failed", "error", err)
+		}
+	})
+
 	if n.config.historyExpiry.Enabled {
 		n.historyExpiry = n.newHistoryExpiryPruner()
 
@@ -1208,16 +1239,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 		started = append(started, func() {
 			_ = n.historyExpiry.Stop(context.Background())
-		})
-	}
-
-	if n.config.immutableDB.Enabled {
-		n.blockPromoter = n.newBlockPromoter()
-		if err := n.blockPromoter.Start(n.ctx); err != nil {
-			return fmt.Errorf("failed to start block promotion: %w", err)
-		}
-		started = append(started, func() {
-			_ = n.blockPromoter.Stop(context.Background())
 		})
 	}
 
@@ -1260,7 +1281,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// storage mode are required: the indexer depends on the api-mode indexes to
 	// function, and storage mode alone is no longer sufficient to start it (an
 	// api-mode deployment may not want Midnight indexing at all).
-	if midnightIndexerActive(n.config.storageMode, n.config.midnight) {
+	if midnightIndexerActive(n.apiStorageMode(), n.config.midnight) {
 		if err := n.prepareEpochCache(ctx); err != nil {
 			return fmt.Errorf(
 				"load epoch cache before Midnight indexer start: %w",
@@ -1293,6 +1314,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				)
 			}
 		})
+		n.config.logger.Info("midnight indexer started")
 	}
 
 	// Initialize snapshot manager for stake snapshot capture and wire the
@@ -1350,15 +1372,37 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		})
 	}
 
-	if err := n.reconcileUtxoSet(ctx); err != nil {
-		return err
+	if !n.utxoSetReconciled {
+		if err := n.reconcileUtxoSet(ctx); err != nil {
+			return err
+		}
 	}
 	// Start ledger.
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
 	n.publishStartedLedgerState()
+	// The promoter reads the started ledger's immutable point, so it starts
+	// after the ledger has prepared its epoch cache.
+	if n.immutableEnabled() {
+		n.blockPromoter = n.newBlockPromoter()
+		if err := n.blockPromoter.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("failed to start block promotion: %w", err)
+		}
+		started = append(started, func() {
+			_ = n.blockPromoter.Stop(context.Background())
+		})
+	}
+
 	n.startUtxoSetAnchorUpdater()
+	if err := n.startIndexerWriter(n.ctx); err != nil { //nolint:contextcheck
+		return err
+	}
+	started = append(started, func() {
+		if err := n.stopIndexerWriter(context.Background()); err != nil {
+			n.config.logger.Error("indexer writer stop failed", "error", err)
+		}
+	})
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {
@@ -1369,10 +1413,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
 	}
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
-	if err := n.startUtxoShadow(); err != nil {
-		return err
-	}
-	started = append(started, func() { _ = n.stopUtxoShadow() })
 	// Initialize and start automatic database-snapshot manager (distinct
 	// from the stake/reward snapshot manager above — see
 	// internal/dblifecycle.Manager doc comment).
@@ -1385,7 +1425,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	}
 	started = append(started, func() { _ = n.dbLifecycleMgr.Stop() })
 	if err := n.startPlannerStatsManager(n.ctx); err != nil { //nolint:contextcheck
-		return fmt.Errorf("failed to start planner statistics manager: %w", err)
+		return fmt.Errorf(
+			"failed to start planner statistics manager: %w",
+			err,
+		)
 	}
 	started = append(started, func() { _ = n.plannerStatsMgr.Stop() })
 	// Initialize Leios vote manager (experimental)
@@ -1699,13 +1742,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to select UTxO RPC API plugin: %w", err)
 	}
-	if n.config.storageMode.IsAPI() && utxorpcPort > 0 {
+	if n.apiStorageMode().IsAPI() && utxorpcPort > 0 {
 		err = plugin.ResolveProvider(
 			n.ctx, n.pluginHost, plugin.CapabilityAPIUtxorpc,
 			utxorpcSelection.Provider, utxorpcSelection.Config,
 			utxorpc.ProviderDependencies{
+				Listen: n.config.apiListenerFactory,
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
+				QueryDatabase:      n.utxorpcQueryDatabase(),
 				Host:               n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
@@ -1778,7 +1823,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 	// Configure the Midnight gRPC server only after the operator explicitly
 	// enables it in API mode. The indexer has an independent opt-in.
-	if midnightServerActive(n.config.storageMode, n.config.midnight) {
+	if midnightServerActive(n.apiStorageMode(), n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			n.midnightServerConfig(),
@@ -1822,10 +1867,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to select Blockfrost API plugin: %w", err)
 	}
-	if n.config.storageMode.IsAPI() && blockfrostPort > 0 {
+	if n.apiStorageMode().IsAPI() && blockfrostPort > 0 {
 		adapter, err := blockfrost.NewNodeAdapter(
 			n.ledgerState,
 			n.mempool,
+			n.indexerStore,
 		)
 		if err != nil {
 			return fmt.Errorf(
@@ -1837,8 +1883,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
 			blockfrostSelection.Provider, blockfrostSelection.Config,
 			blockfrost.ProviderDependencies{
-				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				Listen: n.config.apiListenerFactory,
+				Node:   adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+				Ready:              n.apiReadiness(),
 			},
 		)
 		if err != nil {
@@ -1858,8 +1906,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		// apiPluginSelection names the capability in its errors.
 		return err
 	}
-	if n.config.storageMode.IsAPI() && kupoPort > 0 {
-		adapter, err := kupo.NewNodeAdapter(n.ledgerState)
+	if n.apiStorageMode().IsAPI() && kupoPort > 0 {
+		adapter, err := kupo.NewNodeAdapter(
+			n.ledgerState, n.indexerStore,
+		)
 		if err != nil {
 			return fmt.Errorf("creating kupo node adapter: %w", err)
 		}
@@ -1867,8 +1917,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIKupo,
 			kupoSelection.Provider, kupoSelection.Config,
 			kupo.ProviderDependencies{
-				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				Listen: n.config.apiListenerFactory,
+				Node:   adapter, Logger: n.config.logger, Host: n.config.bindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+				Ready:              n.apiReadiness(),
 			},
 		)
 		if err != nil {
@@ -1886,7 +1938,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to select Mesh API plugin: %w", err)
 	}
-	if n.config.storageMode.IsAPI() && meshPort > 0 {
+	if n.apiStorageMode().IsAPI() && meshPort > 0 {
 		var genesisHash string
 		if nc := n.config.cardanoNodeConfig; nc != nil {
 			genesisHash = nc.ByronGenesisHash
@@ -1901,10 +1953,12 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIMesh,
 			meshSelection.Provider, meshSelection.Config,
 			mesh.ProviderDependencies{
+				Listen:             n.config.apiListenerFactory,
 				Logger:             n.config.logger,
-				LedgerState:        n.ledgerState,
-				Database:           mesh.NewMeshDatabase(n.db),
-				Chain:              n.ledgerState.Chain(),
+				LedgerState:        n.meshLedgerState(),
+				Database:           n.meshDatabase(),
+				Chain:              n.meshChain(),
+				Ready:              n.apiReadiness(),
 				Mempool:            n.mempool,
 				Host:               n.config.bindAddr,
 				Network:            n.config.network,
@@ -1938,8 +1992,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			mcpSelection.Provider, mcpSelection.Config,
 			mcp.ProviderDependencies{
 				Logger:             n.config.logger,
-				Database:           n.db,
+				Database:           n.apiDatabase(),
 				LedgerState:        n.ledgerState,
+				Ready:              n.apiReadiness(),
 				Mempool:            n.mempool,
 				Host:               n.config.bindAddr,
 				Network:            n.config.network,
@@ -1955,7 +2010,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		)
 	}
 
-	if n.config.storageMode.IsAPI() {
+	if n.apiStorageMode().IsAPI() {
 		fetcher, err := offchainmetadata.New(
 			n.offchainMetadataConfig(),
 		)
@@ -2004,6 +2059,24 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err != nil {
 			return fmt.Errorf("failed to start block producer: %w", err)
 		}
+	}
+
+	// The IndexerDB's planner maintenance starts only after every API
+	// listener is serving. Its startup pass runs first on the manager's
+	// worker, serialized with later epoch and periodic refreshes, without
+	// delaying API availability.
+	if n.indexerDB != nil {
+		if err := n.startIndexerPlannerStatsManager(n.ctx, true); err != nil { //nolint:contextcheck
+			return fmt.Errorf(
+				"failed to start IndexerDB planner statistics manager: %w",
+				err,
+			)
+		}
+		started = append(started, func() {
+			if n.indexerPlannerStatsMgr != nil {
+				_ = n.indexerPlannerStatsMgr.Stop()
+			}
+		})
 	}
 
 	// Node-managed Mithril starts last, once Ouroboros and the ledger it
@@ -2809,11 +2882,14 @@ func mergeEpochs(a, b []uint64) []uint64 {
 // cannot be safely reconstructed, and no cost argument justifies disabling
 // it, so it runs on every startup whether or not the scan is skipped.
 func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("failed to probe reward live stake state: %w", err)
+	}
 	// With the live UTxO set as the only copy, a rebuild reads UTxO stake
 	// from the set, which trails the metadata store after a crash until
 	// reconcileUtxoSet rolls the ledger back to it; reconcileUtxoSet runs
 	// this then.
-	if n.config.ledgerUtxoBadgerOnly && !n.utxoSetReconciled {
+	if !n.utxoSetReconciled {
 		return nil
 	}
 	// Both probes are read-only, so they run on the read-only metadata
@@ -2917,13 +2993,8 @@ func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
 // repairCriticalIndexesBeforeIngest rebuilds the critical deferred indexes a
 // pending bulk-load cycle left missing in n.db, before anything builds the
 // ledger that ingests. Run calls it at startup and reinitializeCoreStorage
-// after a live Restore or Truncate reopens storage. Core mode only: API mode
-// rebuilds the critical subset before Run, while it resumes its backfill,
-// and finishes the rest in startDeferredIndexMaintenance.
+// after a live Restore or Truncate reopens storage.
 func (n *Node) repairCriticalIndexesBeforeIngest(ctx context.Context) error {
-	if n.config.storageMode.IsAPI() {
-		return nil
-	}
 	return repairPendingCriticalIndexes(ctx, n.db, n.config.logger)
 }
 
@@ -3058,7 +3129,7 @@ func (n *Node) newTokenRegistrySync() (
 	return offchainmetadata.NewTokenRegistrySync(
 		offchainmetadata.TokenRegistryConfig{
 			Logger:                n.config.logger,
-			Store:                 n.db.Metadata(),
+			Store:                 n.apiDatabase().Metadata(),
 			HTTPClient:            n.config.tokenRegistry.HTTPClient,
 			SourceURL:             n.config.tokenRegistry.SourceURL,
 			ManifestURL:           n.config.tokenRegistry.ManifestURL,
@@ -3150,14 +3221,7 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 // shelleySecurityParam returns the Shelley genesis security parameter, or zero
 // when it is unknown.
 func (n *Node) shelleySecurityParam() uint64 {
-	if n.config.cardanoNodeConfig == nil {
-		return 0
-	}
-	sg := n.config.cardanoNodeConfig.ShelleyGenesis()
-	if sg == nil || sg.SecurityParam <= 0 {
-		return 0
-	}
-	return uint64(sg.SecurityParam) //nolint:gosec // checked positive above
+	return nodestorage.SecurityParam(n.config.cardanoNodeConfig)
 }
 
 // wireDeferredRewardStakeInputs lets the authoritative boundary capture leave

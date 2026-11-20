@@ -33,8 +33,22 @@ var ErrDrainedFamilyUnserved = errors.New(
 	"ledger-state family is drained and the live UTxO set cannot serve it",
 )
 
+// ErrUtxoSetUnserved reports a read that a configured live UTxO set cannot
+// answer. An attached set is authoritative, so the read does not fall back
+// to the metadata store.
+var ErrUtxoSetUnserved = errors.New(
+	"live UTxO set cannot serve ledger-state family",
+)
+
 func drainedUnserved(f nodesettings.Family) error {
 	return fmt.Errorf("%w: %s", ErrDrainedFamilyUnserved, f)
+}
+
+func (ls *LedgerState) setFamilyUnserved(f nodesettings.Family) error {
+	if ls.familyDrained(f) {
+		return drainedUnserved(f)
+	}
+	return fmt.Errorf("%w: %s", ErrUtxoSetUnserved, f)
 }
 
 // drainedAccountsRefusal is drainedUnserved for an account read that falls
@@ -57,10 +71,7 @@ func (s stagingLedgerDB) GetBlockNonce(
 	point ocommon.Point,
 	txn ledgerdb.Txn,
 ) ([]byte, error) {
-	if s.noncesDrained() {
-		return s.ls.blockNonce(point, txn)
-	}
-	return s.LedgerDB.GetBlockNonce(point, txn)
+	return s.ls.blockNonce(point, txn)
 }
 
 // GetBlockNoncesInSlotRange reads from the set when the nonces family is
@@ -69,20 +80,14 @@ func (s stagingLedgerDB) GetBlockNoncesInSlotRange(
 	start, end uint64,
 	txn ledgerdb.Txn,
 ) ([]models.BlockNonce, error) {
-	if s.noncesDrained() {
-		return s.ls.blockNoncesInSlotRange(start, end, txn)
-	}
-	return s.LedgerDB.GetBlockNoncesInSlotRange(start, end, txn)
+	return s.ls.blockNoncesInSlotRange(start, end, txn)
 }
 
 // GetLatestBlockNonce reads from the set when the nonces family is drained.
 func (s stagingLedgerDB) GetLatestBlockNonce(
 	txn ledgerdb.Txn,
 ) (models.BlockNonce, bool, error) {
-	if s.noncesDrained() {
-		return s.ls.latestBlockNonce(txn)
-	}
-	return s.LedgerDB.GetLatestBlockNonce(txn)
+	return s.ls.latestBlockNonce(txn)
 }
 
 // SetBlockNonce skips the SQL write of a drained nonces family; callers stage

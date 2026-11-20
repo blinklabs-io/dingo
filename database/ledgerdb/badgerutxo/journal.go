@@ -19,6 +19,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
+	"sync"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/dgraph-io/badger/v4"
@@ -921,7 +923,9 @@ func previewIn(txn *badger.Txn, point ocommon.Point) (RollbackResult, error) {
 // commit during the reads cannot mix two states. Close releases the
 // snapshot.
 type AsOf struct {
-	txn *badger.Txn
+	txn       *badger.Txn
+	release   func()
+	closeOnce sync.Once
 	// changed holds each output whose state at the point differs from the
 	// snapshot's: its CBOR, or nil when it was not live.
 	changed map[Ref][]byte
@@ -929,17 +933,37 @@ type AsOf struct {
 
 // AsOf opens a view of the set as of point. A point at or past the tip sees
 // the set as it is. It returns ErrRollbackBeyondJournal when the journal does
-// not reach point.
+// not reach point. On a snapshot Store, the view shares the snapshot's commit
+// boundary and must be closed before the parent Store's Close can finish.
 func (s *Store) AsOf(point ocommon.Point) (*AsOf, error) {
-	txn, err := s.readTxn()
-	if err != nil {
-		return nil, err
+	var txn *badger.Txn
+	var release func()
+	var err error
+	if s.snap != nil {
+		txn, err = s.snap.acquire()
+		if err != nil {
+			return nil, err
+		}
+		release = s.snap.done
+	} else {
+		txn, err = s.readTxn()
+		if err != nil {
+			return nil, err
+		}
+		release = txn.Discard
 	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
 	a, err := asOfIn(txn, point)
 	if err != nil {
-		txn.Discard()
 		return nil, err
 	}
+	a.release = release
+	transferred = true
 	return a, nil
 }
 
@@ -959,12 +983,12 @@ func asOfIn(txn *badger.Txn, point ocommon.Point) (*AsOf, error) {
 	for _, r := range res.Removed {
 		changed[r] = nil
 	}
-	return &AsOf{txn: txn, changed: changed}, nil
+	return &AsOf{txn: txn, changed: changed, release: txn.Discard}, nil
 }
 
 // Close releases the view's snapshot.
 func (a *AsOf) Close() {
-	a.txn.Discard()
+	a.closeOnce.Do(a.release)
 }
 
 // Get returns the CBOR of r if it was live at the view's point.
@@ -983,8 +1007,19 @@ func (a *AsOf) Get(r Ref) ([]byte, bool, error) {
 	return v, err == nil, err
 }
 
-// Each calls fn for every output live at the view's point.
+// Each calls fn for every output live at the view's point, in reference
+// order: the snapshot's outputs the point left alone, merged with the ones the
+// journal restored.
 func (a *AsOf) Each(fn func(Output) error) error {
+	restored := make([]Output, 0, len(a.changed))
+	for r, c := range a.changed {
+		if c != nil {
+			restored = append(restored, Output{Ref: r, Cbor: c})
+		}
+	}
+	slices.SortFunc(restored, func(x, y Output) int {
+		return bytes.Compare(x.Ref[:], y.Ref[:])
+	})
 	it := a.txn.NewIterator(badger.IteratorOptions{
 		Prefix:         []byte{UTxOTag},
 		PrefetchValues: true,
@@ -996,6 +1031,12 @@ func (a *AsOf) Each(fn func(Output) error) error {
 		if _, ok := a.changed[r]; ok {
 			continue
 		}
+		for len(restored) > 0 && bytes.Compare(restored[0].Ref[:], r[:]) < 0 {
+			if err := fn(restored[0]); err != nil {
+				return err
+			}
+			restored = restored[1:]
+		}
 		v, err := it.Item().ValueCopy(nil)
 		if err != nil {
 			return err
@@ -1004,11 +1045,8 @@ func (a *AsOf) Each(fn func(Output) error) error {
 			return err
 		}
 	}
-	for r, c := range a.changed {
-		if c == nil {
-			continue
-		}
-		if err := fn(Output{Ref: r, Cbor: c}); err != nil {
+	for _, o := range restored {
+		if err := fn(o); err != nil {
 			return err
 		}
 	}

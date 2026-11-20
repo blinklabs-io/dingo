@@ -16,8 +16,10 @@ package utxoset
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/ledgerdb/badgerutxo"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -140,10 +142,55 @@ func (s *Set) Accounts(fn func(*models.Account) error) error {
 	})
 }
 
+// stopRows maps the ledger's end-of-page sentinel to the store's.
+func stopRows(err error) error {
+	if errors.Is(err, ledger.ErrStopRows) {
+		return badgerutxo.ErrStopRows
+	}
+	return err
+}
+
+// AccountsAfter calls fn with each account whose key is strictly after the
+// account key after (every account when nil), in key order, with that key,
+// until fn returns ledger.ErrStopRows. It seeks to after rather than reading
+// the accounts before it.
+func (s *Set) AccountsAfter(
+	after []byte,
+	fn func(a *models.Account, key []byte) error,
+) error {
+	return s.store.AccountsAfter(after, func(r badgerutxo.AccountRow, key []byte) error {
+		return stopRows(fn(accountModel(r), key))
+	})
+}
+
+// AccountsChangedIn calls fn with each account the state journal records a
+// change to at a slot in [from, through], with that slot and the journal
+// position to resume after, stopping after fn returns ledger.ErrStopRows or
+// maxVisit journal entries. It reports whether the journal covers the range;
+// see badgerutxo.Store.EachRowChangedIn.
+func (s *Set) AccountsChangedIn(
+	from, through uint64,
+	after []byte,
+	maxVisit int,
+	fn func(a *models.Account, slot uint64, pos []byte) error,
+) (next []byte, covered, done bool, err error) {
+	return s.store.EachAccountChangedIn(from, through, after, maxVisit,
+		func(slot uint64, r badgerutxo.AccountRow, pos []byte) error {
+			return stopRows(fn(accountModel(r), slot, pos))
+		})
+}
+
+// RangeRowsVisited returns how many rows and journal entries the set's
+// ranged reads have stepped over.
+func (s *Set) RangeRowsVisited() uint64 {
+	return s.store.RangeRowsVisited()
+}
+
 func rewardRecord(r ledger.RewardRecord) badgerutxo.RewardRecord {
 	return badgerutxo.RewardRecord{
 		Slot: r.Slot, Withdrawal: r.Withdrawal, Source: r.Source,
 		Tag: r.Ref.Tag, Key: r.Ref.Key, Amount: r.Amount,
+		PostSnapshot: r.PostSnapshot,
 	}
 }
 
@@ -153,6 +200,64 @@ func rewardRecords(rs []ledger.RewardRecord) []badgerutxo.RewardRecord {
 		out = append(out, rewardRecord(r))
 	}
 	return out
+}
+
+// RewardRecordsIn returns the reward records the set holds dated in [from,
+// through], oldest write first.
+func (s *Set) RewardRecordsIn(from, through uint64) ([]ledger.RewardRecord, error) {
+	recs, err := s.store.RewardRecordsIn(from, through)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ledger.RewardRecord, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, ledger.RewardRecord{
+			Slot: r.Slot, Withdrawal: r.Withdrawal, Source: r.Source,
+			Ref:    models.NewStakeCredentialRef(r.Tag, r.Key),
+			Amount: r.Amount, PostSnapshot: r.PostSnapshot, Seq: r.Seq,
+		})
+	}
+	return out, nil
+}
+
+// RewardCreditsAfter returns the credits dated in [from, through], oldest
+// write first, those numbered above cursor when it is positive, at most limit
+// of them; more reports another follows.
+func (s *Set) RewardCreditsAfter(
+	from, through, cursor uint64,
+	limit int,
+) ([]ledger.RewardRecord, bool, error) {
+	recs, more, err := s.store.RewardCreditsAfter(from, through, cursor, limit)
+	if err != nil {
+		return nil, false, err
+	}
+	out := make([]ledger.RewardRecord, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, ledger.RewardRecord{
+			Slot:         r.Slot,
+			Source:       r.Source,
+			Ref:          models.NewStakeCredentialRef(r.Tag, r.Key),
+			Amount:       r.Amount,
+			PostSnapshot: r.PostSnapshot,
+			Seq:          r.Seq,
+		})
+	}
+	return out, more, nil
+}
+
+// EachRewardRecordIn calls fn with each reward record the set holds dated in
+// [from, through], without holding them all.
+func (s *Set) EachRewardRecordIn(
+	from, through uint64,
+	fn func(ledger.RewardRecord) error,
+) error {
+	return s.store.EachRewardRecordIn(from, through, func(r badgerutxo.RewardRecord) error {
+		return fn(ledger.RewardRecord{
+			Slot: r.Slot, Withdrawal: r.Withdrawal, Source: r.Source,
+			Ref:    models.NewStakeCredentialRef(r.Tag, r.Key),
+			Amount: r.Amount, PostSnapshot: r.PostSnapshot, Seq: r.Seq,
+		})
+	})
 }
 
 // HasRewardRecord reports whether the set applied r.
@@ -209,4 +314,76 @@ func (s *Set) AccountsWithDrep() ([]models.StakeCredentialRef, error) {
 		return nil
 	})
 	return refs, err
+}
+
+// ensureRewardRecords loads the metadata store's reward journal into a set
+// that has not held it. A drained store holds none, and the load then marks the
+// records as lost: what the drain removed cannot be read back.
+func (s *Set) ensureRewardRecords(
+	ctx context.Context,
+	ldb ledgerdb.LedgerDB,
+) error {
+	loaded, err := s.store.RewardRecordsLoaded()
+	if err != nil {
+		return fmt.Errorf("utxoset: read the reward record marker: %w", err)
+	}
+	if loaded {
+		return nil
+	}
+	r, ok := ldb.(ledgerdb.RewardJournalReader)
+	if !ok {
+		return nil
+	}
+	lost := false
+	n := 0
+	err = s.store.LoadRewardRecords(false, func(put func(badgerutxo.RewardRecord) error) error {
+		txn := ldb.Begin(ctx, false)
+		defer txn.Release()
+		err := r.EachRewardJournalRow(txn, func(row ledgerdb.RewardJournalRow) error {
+			n++
+			return put(badgerutxo.RewardRecord{
+				Slot: row.Slot, Withdrawal: row.Withdrawal, Source: row.TxHash,
+				Tag: row.CredentialTag, Key: row.StakingKey, Amount: row.Amount,
+				PostSnapshot: row.PostSnapshot,
+			})
+		})
+		if errors.Is(err, database.ErrFamilyDrained) {
+			lost = true
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("utxoset: load reward records: %w", err)
+	}
+	if lost {
+		if err := s.store.MarkRewardRecordsLost(); err != nil {
+			return err
+		}
+	}
+	s.logger.Info("loaded reward records into the live UTxO set", "records", n, "lost", lost)
+	return nil
+}
+
+// RewardRecordsLost reports whether the metadata store had drained its reward
+// journal before the set could load it.
+func (s *Set) RewardRecordsLost() (bool, error) {
+	return s.store.RewardRecordsLost()
+}
+
+// RewardRecordHigh returns the sequence number the next record will take.
+func (s *Set) RewardRecordHigh() (uint64, error) {
+	return s.store.RewardRecordHigh()
+}
+
+// AckRewardRecords records that every record numbered below seq has been
+// copied by the consumer, with the rows dated through slot.
+func (s *Set) AckRewardRecords(seq, slot uint64) error {
+	return s.store.AckRewardRecords(seq, slot)
+}
+
+// RewardConsumedSlot returns the slot through which the consumer has copied
+// the reward rows. ok is false when no consumer is registered.
+func (s *Set) RewardConsumedSlot() (slot uint64, ok bool, err error) {
+	return s.store.RewardConsumedSlot()
 }

@@ -15,12 +15,17 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -78,4 +83,51 @@ func TestKoiosParityObserverRegistersThroughNodeRegistry(t *testing.T) {
 			"registry: %v",
 		err,
 	)
+}
+
+// TestKoiosParitySourceReadsTransactionHistoryFromTheIndexerDB verifies the
+// source an API node builds samples transactions from its IndexerDB. The
+// consensus database runs in core mode, where the sample is skipped, so a
+// source built on it alone never compares a transaction. The IndexerDB's tip
+// decides the answer here: pending while it trails the epoch, a sample after.
+func TestKoiosParitySourceReadsTransactionHistoryFromTheIndexerDB(
+	t *testing.T,
+) {
+	t.Parallel()
+	ctx := context.Background()
+
+	consensus, err := dbtest.NewDatabase(
+		t, &database.Config{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+	indexerDB, err := dbtest.NewIndexerDatabase(
+		t, consensus, dbtest.IndexerOptions{},
+	)
+	require.NoError(t, err)
+	raw, err := dbtest.RawSQLiteMetadata(t, consensus)
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		`INSERT INTO epoch (epoch_id, start_slot, era_id, slot_length, length_in_slots)
+		VALUES (3, 1000, 5, 1000, 500)`,
+	)
+	require.NoError(t, err)
+
+	core, err := (&Node{db: consensus}).koiosParitySource()
+	require.NoError(t, err)
+	hashes, err := core.GetEpochTransactionHashes(ctx, 3, 20)
+	require.NoError(t, err)
+	require.Empty(t, hashes, "a core node retains no history to sample")
+
+	api, err := (&Node{db: consensus, indexerDB: indexerDB}).
+		koiosParitySource()
+	require.NoError(t, err)
+	_, err = api.GetEpochTransactionHashes(ctx, 3, 20)
+	require.ErrorIs(t, err, koiosparity.ErrTransactionHistoryPending,
+		"the sample must be read from the IndexerDB, which is still empty")
+
+	require.NoError(t, indexerDB.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1500, bytes.Repeat([]byte{0x0a}, 32)),
+	}, nil))
+	_, err = api.GetEpochTransactionHashes(ctx, 3, 20)
+	require.NoError(t, err)
 }

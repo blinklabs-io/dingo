@@ -159,6 +159,14 @@ func Gates() []Gate {
 			Ordered:          []string{"api", "core"},
 			OverrideEligible: true,
 		},
+		// indexer_layout is not override-eligible: restoring it alone would
+		// select a layout without the IndexerDB directory it implies.
+		{
+			Name:   "indexer_layout",
+			Label:  "indexer layout",
+			Class:  FrozenFillOnce,
+			Remedy: "adopt or rebuild the IndexerDB before changing layout",
+		},
 		{
 			Name:             "history_expiry_active",
 			Label:            "history expiry",

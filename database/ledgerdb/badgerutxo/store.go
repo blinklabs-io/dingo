@@ -110,8 +110,14 @@ type Store struct {
 	loadsRefused atomic.Uint64
 	// merging makes family loads upsert; see BeginMerge.
 	merging atomic.Bool
+	// rangeRowsVisited counts the rows RowsInRange stepped over.
+	rangeRowsVisited atomic.Uint64
+	// rewardIndexVisited counts the index entries credit pages examined.
+	rewardIndexVisited atomic.Uint64
 	// memTableSize replaces Badger's memtable size when positive.
 	memTableSize int64
+	// blockCacheSize replaces Badger's block cache size when positive.
+	blockCacheSize int64
 }
 
 // ErrLoadsRefused reports a family load refused by RefuseLoads.
@@ -139,6 +145,9 @@ func Open(dir string, options ...Option) (*Store, error) {
 	if s.memTableSize > 0 {
 		opts = opts.WithMemTableSize(s.memTableSize)
 	}
+	if s.blockCacheSize > 0 {
+		opts = opts.WithBlockCacheSize(s.blockCacheSize)
+	}
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
@@ -160,6 +169,14 @@ func Open(dir string, options ...Option) (*Store, error) {
 		}
 		return txn.Set(formatKey, []byte{formatVersion})
 	}); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
+	}
+	if err := s.ensureRewardSeqIndex(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
+	}
+	if err := s.ensureExportFloor(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("badgerutxo: open %s: %w", dir, err)
 	}
@@ -674,11 +691,15 @@ func (s *Store) applyLedgerTxn(
 		return err
 	}
 	// A batch with no tip written into a set with none is the baseline:
-	// the state a rollback to the empty point restores. The batch's chunks
-	// share the verdict, so it is carried in chain once a record is written.
+	// the state a rollback to the empty point restores. A set bootstrapped
+	// before the first block records the empty point as its tip, and is as
+	// much without one: the genesis outputs written next would otherwise be
+	// undone by a read as of the empty point. The batch's chunks share the
+	// verdict, so it is carried in chain once a record is written.
 	baseline := chain.baseline
 	if !chain.has {
-		baseline = !chain.advances && !rec.hadTip
+		baseline = !chain.advances &&
+			(!rec.hadTip || samePoint(rec.prevTip, ocommon.Point{}))
 	}
 	rec.advancesTip, rec.baseline = chain.advances, baseline
 	open := false

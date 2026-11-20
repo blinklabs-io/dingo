@@ -43,8 +43,17 @@ type Config struct {
 	Logger       *slog.Logger
 	DataDir      string
 	StorageMode  string // "core" or "api"
-	Network      string // Cardano network name (e.g. "preview", "mainnet")
-	CacheConfig  CborCacheConfig
+	// Role is empty for the ledger's own database and RoleIndexer for the
+	// IndexerDB. An indexer database holds no commit timestamp: that value
+	// pairs the ledger's two stores, and the IndexerDB's own transaction
+	// carries its tip instead.
+	Role string
+	// IndexerLayout is "split" beside an IndexerDB and "shared" without one;
+	// empty means the caller does not know it and the indexer_layout gate is
+	// left unchecked.
+	IndexerLayout string
+	Network       string // Cardano network name (e.g. "preview", "mainnet")
+	CacheConfig   CborCacheConfig
 	// StrictUtxoValidation, when true, turns an unrecoverable consumed UTxO
 	// (not present in the metadata store and not reconstructable from the
 	// blob store) into a hard error for blocks past the recorded Mithril
@@ -75,6 +84,9 @@ type Config struct {
 	// Immutable configures the ImmutableDB of promoted block bodies.
 	Immutable ImmutableConfig
 }
+
+// RoleIndexer is the Config.Role of an IndexerDB.
+const RoleIndexer = "indexer"
 
 // Stores contains the provider-owned storage services injected into a
 // Database. Their lifecycle remains owned by the plugin host.
@@ -538,6 +550,16 @@ func (d *Database) Close() error {
 	return d.closeErr
 }
 
+// isIndexer reports whether d is an IndexerDB. A Database built without a
+// Config is the ledger's.
+func (d *Database) isIndexer() bool {
+	return d.config != nil && d.config.Role == RoleIndexer
+}
+
+// IsIndexer reports whether d is an IndexerDB, whose metadata tip row its own
+// writer owns, and not the ledger's database.
+func (d *Database) IsIndexer() bool { return d.isIndexer() }
+
 func (d *Database) init(ctx context.Context) error {
 	if d.logger == nil {
 		// Create logger to throw away logs
@@ -545,8 +567,10 @@ func (d *Database) init(ctx context.Context) error {
 		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	// Check commit timestamp
-	if err := d.checkCommitTimestamp(ctx); err != nil {
-		return err
+	if !d.isIndexer() {
+		if err := d.checkCommitTimestamp(ctx); err != nil {
+			return err
+		}
 	}
 	// Check immutable settings have not changed since initial sync
 	if err := d.CheckNodeSettings(ctx); err != nil {

@@ -43,6 +43,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/utxoset"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -977,6 +978,7 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 	)
 	require.ErrorIs(t, err, stopAfterHook)
 	require.Same(t, db, captured.Database)
+	require.NotNil(t, captured.UtxoSet, "load replays into a live UTxO set")
 	require.NotNil(t, captured.ChainManager)
 	require.NotNil(t, capturedHook)
 	require.True(t, captured.TrustedReplay)
@@ -1440,59 +1442,47 @@ func TestCaptureLoadGenesisSnapshot_RelayWarnsAndContinues(t *testing.T) {
 // CaptureGenesisSnapshot, or the first reward round applied at the epoch-3
 // boundary is silently skipped.
 //
-// The chain tip is advanced past the immutable testdata tip before calling
-// LoadWithDB so copyBlocksDirect takes its "chain tip already beyond
-// immutable DB tip" short-circuit (see load.go) and skips decoding the real
-// mainnet blocks in testdata, which are unrelated to the devnet genesis
-// configured here. This isolates the test to the genesis-application and
-// genesis-snapshot-capture behavior that finding B is about.
+// The snapshot is written through the ledger's LedgerDB into the live UTxO
+// set, where the reward-input families live, so it is read back from there.
 func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
 	t *testing.T,
 ) {
-	t.Parallel()
-
-	// No t.Parallel(): newTestDB shares process-wide plugin state (see
-	// database construction, so concurrent test runs share no provider options and
-	// the in-memory schema migration.
+	// Not t.Parallel: swaps processTrustedBlockBatchesForLoad.
 	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
-	imm, err := immutable.New(immutableDir)
-	require.NoError(t, err)
-	immutableTip, err := imm.GetTip()
-	require.NoError(t, err)
-	require.NotNil(t, immutableTip)
 
-	db := newTestDB(t)
+	// File-backed: the snapshot lands in the live UTxO set, which is read
+	// back from the data directory once the load has closed it.
+	db := newFileTestDB(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	cm, err := chain.NewManager(context.Background(), db, nil)
-	require.NoError(t, err)
-	currentTip := cm.PrimaryChain().Tip()
-	stubSlot := immutableTip.Slot + 5
-	stubHash := bytes.Repeat([]byte{0xAB}, 32)
-	require.NoError(
-		t,
-		cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
-			{
-				Slot:        stubSlot,
-				Hash:        stubHash,
-				BlockNumber: currentTip.BlockNumber + 1,
-				Type:        0,
-				PrevHash:    currentTip.Point.Hash,
-				Cbor:        []byte{0x80},
-			},
-		}),
-	)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point:       ocommon.NewPoint(stubSlot, stubHash),
-		BlockNumber: currentTip.BlockNumber + 1,
-	}, nil))
+	// The fixture's blocks belong to preview and the genesis under test to
+	// devnet, so the replay discards them: the snapshot is captured from the
+	// genesis state alone, before any block is applied.
+	oldProcess := processTrustedBlockBatchesForLoad
+	processTrustedBlockBatchesForLoad = func(
+		_ *ledger.LedgerState,
+		ctx context.Context,
+		batches <-chan []gledger.Block,
+	) error {
+		for {
+			select {
+			case _, ok := <-batches:
+				if !ok {
+					return nil
+				}
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	t.Cleanup(func() { processTrustedBlockBatchesForLoad = oldProcess })
 
 	cfg := &config.Config{
 		Network:       "devnet",
 		CardanoConfig: "devnet/config.json",
 	}
 
-	err = LoadWithDB(context.Background(), cfg, logger, immutableDir, db)
+	err := LoadWithDB(context.Background(), cfg, logger, immutableDir, db)
 	require.NoError(t, err)
 
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
@@ -1509,7 +1499,12 @@ func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
 		"devnet genesis fixture must declare staking for this test to be meaningful",
 	)
 
-	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(0, "mark", nil)
+	set, err := utxoset.Open(utxoset.Config{
+		Dir: utxoset.DirFor(db.DataDir()), Only: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, set.Close()) })
+	rewardSnapshot, err := set.RewardSnapshotRow(0, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(
 		t,
@@ -1547,8 +1542,8 @@ func TestRunPlannerStats_Idempotent(t *testing.T) {
 
 	db := newFileTestDB(t)
 
-	require.NoError(t, RunPlannerStats(db, slog.Default()))
-	require.NoError(t, RunPlannerStats(db, slog.Default()))
+	require.NoError(t, RunPlannerStats(t.Context(), db, slog.Default()))
+	require.NoError(t, RunPlannerStats(t.Context(), db, slog.Default()))
 
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -1566,7 +1561,7 @@ func TestRunPlannerStats_ReturnsErrorWhenUpdaterFails(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, closeTestDB(db))
 
-	err := RunPlannerStats(db, slog.Default())
+	err := RunPlannerStats(t.Context(), db, slog.Default())
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "planner statistics maintenance")
 }

@@ -620,6 +620,7 @@ func newLeiosApplyTestLedger(
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	initializeLeiosApplyTestState(ls)
 	return ls, db, raw
 }

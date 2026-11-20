@@ -77,6 +77,10 @@ type Config struct {
 	// the replaced bodies stay in the store until a compaction covers both
 	// versions.
 	Reclaim func() error
+	// CheckSpace, when set, runs before each step that promotes through
+	// ceiling and refuses the step by returning an error, which leaves every
+	// store as it was; the next run asks again.
+	CheckSpace func(ctx context.Context, ceiling uint64) error
 	// Now reports the current time; nil uses time.Now.
 	Now func() time.Time
 }
@@ -135,6 +139,11 @@ func (p *Promoter) RunOnce(ctx context.Context) (int, error) {
 	if !ok {
 		p.reclaimIfDue(ctx)
 		return 0, nil
+	}
+	if p.cfg.CheckSpace != nil {
+		if err := p.cfg.CheckSpace(ctx, ceiling); err != nil {
+			return 0, fmt.Errorf("block promotion not started: %w", err)
+		}
 	}
 	res, err := p.cfg.DB.PromoteThrough(ctx, ceiling)
 	if res.Promoted > 0 {

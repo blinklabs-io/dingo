@@ -64,6 +64,51 @@ func TestSnapshotUtxoSetReadsTheSetAsOfTheCall(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), tip.Slot)
 
+	historical, err := view.(ledger.UtxoSetHistory).UtxoSetAt(
+		ocommon.NewPoint(1, hash(1)),
+	)
+	require.NoError(t, err)
+	t.Cleanup(historical.Close)
+	_, live, err = historical.Get(hash(1), 0)
+	require.NoError(t, err)
+	require.True(t, live)
+	_, live, err = historical.Get(hash(2), 0)
+	require.NoError(t, err)
+	require.False(t, live)
+	historical.Close()
+	historical.Close()
+	_, live, err = reader.Get(hash(1), 0)
+	require.NoError(t, err)
+	require.True(t, live, "closing a historical view preserves its parent")
+
 	p := ocommon.NewPoint(3, hash(3))
 	require.Error(t, view.ApplyUtxoChanges(&p, nil), "a snapshot is read-only")
+}
+
+func TestSnapshotHistorySurvivesLiveRollback(t *testing.T) {
+	t.Parallel()
+	set, err := utxoset.Open(utxoset.Config{Dir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = set.Close() })
+	first := ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32))
+	second := ocommon.NewPoint(2, bytes.Repeat([]byte{2}, 32))
+	require.NoError(t, set.ApplyUtxoChanges(&first, nil))
+	require.NoError(t, set.ApplyUtxoChanges(&second, []ledger.UtxoEvent{{
+		Added: []ledger.UtxoOutput{{
+			Ref: models.UtxoId{Hash: second.Hash}, Cbor: []byte{0x80},
+		}},
+	}}))
+	view, release, err := set.SnapshotUtxoSet()
+	require.NoError(t, err)
+	t.Cleanup(release)
+	require.NoError(t, set.RollbackTo(first))
+	_, live, err := set.Get(second.Hash, 0)
+	require.NoError(t, err)
+	require.False(t, live)
+	historical, err := view.(ledger.UtxoSetHistory).UtxoSetAt(second)
+	require.NoError(t, err, "pinned history must survive a live rollback")
+	t.Cleanup(historical.Close)
+	_, live, err = historical.Get(second.Hash, 0)
+	require.NoError(t, err)
+	require.True(t, live, "pinned history lost an output after live rollback")
 }

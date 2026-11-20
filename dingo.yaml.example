@@ -412,7 +412,9 @@
 
 # Local immutable block history expiry. When enabled, Dingo replaces block CBOR
 # older than the ledger-derived stability window with an expired-history marker
-# while retaining local indexes and metadata. Bark fallback is optional.
+# in the blob store while retaining local indexes and metadata, in either
+# storage mode. Bark fallback is optional. It turns the ImmutableDB off, and a
+# database whose block bodies already moved into the ImmutableDB refuses it.
 # historyExpiry:
   # Can be overridden with DINGO_HISTORY_EXPIRY_ENABLED
   # CLI: --history-expiry-enabled
@@ -421,16 +423,16 @@
   # CLI: --history-expiry-frequency
   # frequency: 1h
 
-# ImmutableDB. When enabled, block bodies more than k blocks behind the ledger's
-# applied tip move from the badger blob store into cardano-node compatible chunk
-# files under <dataDir>/immutable; block indexes and metadata stay in badger.
-# Requires the badger blob plugin, no Bark archive and no history expiry. Once
-# a database holds promoted blocks it is read correctly whatever this setting
-# says, and older binaries refuse it.
+# ImmutableDB. Block bodies more than k blocks behind the ledger's applied tip
+# move from the blob store into cardano-node compatible chunk files under
+# <dataDir>/immutable (a temporary directory without a data directory, the
+# object store for S3 and GCS); block indexes and metadata stay in the blob
+# store. It runs unless historyExpiry.enabled is set; a node that expires
+# history keeps its block bodies in the blob store and promotes nothing. A
+# database written by a release without it is moved at startup, in batches
+# that resume after a stop, and the move is refused while the volume lacks the
+# free space it needs. Older binaries refuse a database that has moved.
 # immutableDb:
-  # Can be overridden with DINGO_IMMUTABLE_DB_ENABLED
-  # CLI: --immutable-db-enabled
-  # enabled: false
   # Can be overridden with DINGO_IMMUTABLE_DB_PROMOTE_BATCH
   # CLI: --immutable-db-promote-batch
   # Accepted range: 0 to 100000; the promoter also limits a batch to one blob
@@ -439,13 +441,19 @@
   # Can be overridden with DINGO_IMMUTABLE_DB_PROMOTE_FREQUENCY
   # CLI: --immutable-db-promote-frequency
   # promoteFrequency: 1m
-  # A Mithril bootstrap moves the verified chunk files into the ImmutableDB and
-  # indexes them in place instead of copying every block body into the blob
-  # store. Requires enabled. Applies to a bootstrap of an empty database; any
-  # other Mithril import copies bodies.
-  # Can be overridden with DINGO_IMMUTABLE_DB_KEEP_MITHRIL_CHUNKS
-  # CLI: --immutable-db-keep-mithril-chunks
-  # keepMithrilChunks: false
+
+# API rows. In API storage mode on an on-disk database they live in an
+# IndexerDB under <dataDir>/indexer, filled asynchronously by one writer that
+# follows the ledger, and the consensus store runs in core mode. A database
+# written by a release that kept them in the consensus store is moved at
+# startup. With historyExpiry.enabled, expiry never passes the block the
+# IndexerDB writer last indexed.
+# indexer:
+  # Blocks the IndexerDB may trail the ledger tip before current-state API
+  # endpoints report not ready.
+  # Can be overridden with DINGO_INDEXER_MAX_READY_LAG_BLOCKS
+  # CLI: --indexer-max-ready-lag-blocks
+  # maxReadyLagBlocks: 100
 
 # Optional CIP-26 off-chain token registry sync (API storage mode only).
 # When enabled, Dingo periodically pulls the community token registry and
@@ -870,62 +878,14 @@
 # CLI: --ledger-prefetch-ahead-enabled
 # ledgerPrefetchAheadEnabled: true
 
-# Keep a Badger copy of the live UTxO set under <databasePath>/ledger/utxo-shadow,
-# fed by the ledger's block events, and check it against the metadata store
-# (experimental, default: false). Diagnostic only: validation never reads it.
-# Mismatches are logged and counted in the dingo_utxo_shadow_* metrics.
-#
-# Can be overridden with the DINGO_LEDGER_UTXO_SHADOW environment variable
-# CLI: --ledger-utxo-shadow
-# ledgerUtxoShadow: false
-
-# Keep the live UTxO set in a Badger store under <databasePath>/ledger/utxo,
-# updated synchronously after each ledger commit and before the next block is
-# validated (experimental, default: false). ledgerUtxoReads selects whether
-# validation reads it.
-# A store left behind the ledger is caught up at startup by rolling the ledger
-# back to it, or rebuilt from the metadata store when that is not possible.
-# Counted in the dingo_utxo_set_* metrics.
-#
-# Can be overridden with the DINGO_LEDGER_UTXO_BADGER environment variable
-# CLI: --ledger-utxo-badger
-# ledgerUtxoBadger: false
-
-# Where validation resolves its inputs when ledgerUtxoBadger is on: empty for
-# the metadata store, "verify" to read both and count every disagreement in
-# dingo_utxo_set_read_mismatches_total while using the metadata store's
-# answer, or "set" to use the live UTxO set (experimental, default: empty).
-# Reads fall back to the metadata store if an update to the set fails.
-#
-# Can be overridden with the DINGO_LEDGER_UTXO_READS environment variable
-# CLI: --ledger-utxo-reads
-# ledgerUtxoReads: ""
-
-# Keep the live UTxO set only in the Badger store, with no utxo rows in the
-# metadata store (experimental, default: false). Needs ledgerUtxoBadger and
-# core storage mode. A database that holds its UTxO set in the metadata store
-# is moved in place at startup: the set is built from the utxo rows, checked
-# against them, marked, and the rows are then deleted in batches; the move
-# resumes after a crash and needs free disk space for the set. A database moved
-# or synced this way refuses to start without it, since its metadata store has
-# no UTxO set to fall back to. LocalStateQuery UTxO queries pinned more than
-# one stability window before the tip are refused.
-#
-# Can be overridden with the DINGO_LEDGER_UTXO_BADGER_ONLY environment variable
-# CLI: --ledger-utxo-badger-only
-# ledgerUtxoBadgerOnly: false
-
-# Make the live UTxO set the only store of the ledger state it computes: a
-# family of SQL ledger-state tables the set is proven to hold is deleted from
-# the metadata store, and a database that has drained one refuses to start
-# without this setting (experimental, default: false). Needs
-# ledgerUtxoBadgerOnly, core storage mode and ledgerUtxoReads: "set"; it is
-# refused with ledgerUtxoReads "verify" or ledgerUtxoShadow. A database that
-# keeps UTxO rows in the metadata store has them moved first, at startup.
-#
-# Can be overridden with the DINGO_LEDGER_STATE_SET_ONLY environment variable
-# CLI: --ledger-state-set-only
-# ledgerStateSetOnly: false
+# The live UTxO set and the ledger state it computes live in a Badger store
+# under <databasePath>/ledger/utxo on every on-disk database. A database written
+# by a release that kept them in the metadata store is moved at startup: the
+# set is built from the SQL rows, checked against them, marked, and the rows
+# are deleted in batches. The move resumes after a crash and is refused, with
+# the figure needed, while the volume lacks the free space for the set. A store
+# left behind the ledger is caught up at startup by rolling the ledger back to
+# it. Counted in the dingo_utxo_set_* metrics.
 
 # Write a checkpoint of the live UTxO set, with every ledger-state family it
 # holds, at the first epoch boundary after this many epochs since the last, for
@@ -935,7 +895,7 @@
 # restores the newest checkpoint at or below the ledger tip and replays the
 # blocks the node stores; with no usable checkpoint it re-imports a signed
 # ledger state from the network's Mithril aggregator, and never downloads
-# blocks. 0 writes none. Only applies with ledgerStateSetOnly (default: 1).
+# blocks. 0 writes none (default: 1).
 #
 # Disk: each checkpoint is about the size of the live UTxO set
 # (<databasePath>/ledger/utxo), kept in <databasePath>/ledger/utxo-checkpoints,
@@ -954,14 +914,6 @@
 # variable
 # CLI: --ledger-utxo-checkpoint-keep
 # ledgerUtxoCheckpointKeep: 2
-
-# Compare each family with its SQL rows in full before they are deleted
-# (default: false). Needs ledgerStateSetOnly.
-#
-# Can be overridden with the DINGO_LEDGER_STATE_VERIFY_BEFORE_DRAIN
-# environment variable
-# CLI: --ledger-state-verify-before-drain
-# ledgerStateVerifyBeforeDrain: false
 
 # Verify the witness signatures of every validated block of a block-apply
 # chunk on worker goroutines while earlier blocks of the chunk validate and
@@ -1314,8 +1266,8 @@
 # mithril:
   # Make `dingo serve` sync from Mithril while it is behind the aggregator's
   # certified immutable tip, falling back to Ouroboros on any failure.
-  # Requires core storage mode. With historyExpiry.enabled false the node
-  # replays certified blocks; with it true it restores a snapshot and
+  # Works in core and API storage modes. With historyExpiry.enabled false the
+  # node replays certified blocks; with it true it restores a snapshot and
   # backfills. `dingo mithril sync` works regardless of this setting.
   # Default: false
   # enabled: false

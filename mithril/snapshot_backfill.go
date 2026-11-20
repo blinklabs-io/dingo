@@ -187,7 +187,7 @@ type SnapshotConfig struct {
 	StabilityWindow uint64
 	// CardanoNodeConfig supplies era epoch lengths to the ledger import.
 	CardanoNodeConfig *cardano.CardanoNodeConfig
-	// UtxoSet, when set, receives the ledger state's UTxO set; see
+	// UtxoSet receives the ledger state's UTxO set and is required; see
 	// ledgerstate.ImportConfig.UtxoSet.
 	UtxoSet ledgerstate.UtxoSetLoader
 	// DataDir is the node's data directory. The restore downloads under it

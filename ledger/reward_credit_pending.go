@@ -18,7 +18,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
+	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -83,14 +85,14 @@ func (ls *LedgerState) rewardRoundCredited(
 	)
 }
 
-// pendingRewardCreditOutputs returns one credential's unfolded credits in the
-// credited rounds.
-func (ls *LedgerState) pendingRewardCreditOutputs(
+// pendingRewardCreditOutputsFrom returns one credential's unfolded credits in
+// the credited rounds, read from ldb.
+func pendingRewardCreditOutputsFrom(
+	ldb ledgerdb.LedgerDB,
 	txn ledgerdb.Txn,
 	credentialTag uint8,
 	stakingKey []byte,
 ) ([]models.AccountRewardCredit, error) {
-	ldb := ls.ledgerDB()
 	outputs, err := ldb.GetPendingRewardAccountOutputsForCredential(
 		credentialTag, stakingKey, txn,
 	)
@@ -121,7 +123,33 @@ func (ls *LedgerState) pendingRewardCredit(
 	credentialTag uint8,
 	stakingKey []byte,
 ) (uint64, error) {
-	credits, err := ls.pendingRewardCreditOutputs(
+	return pendingRewardCreditFrom(
+		ls.ledgerDB(), txn, credentialTag, stakingKey,
+	)
+}
+
+// PendingRewardCreditIn is PendingRewardCredit over db, the database whose
+// rows and transaction the caller reads: the ledger's own, or a split
+// IndexerDB holding the copied reward outputs.
+func PendingRewardCreditIn(
+	db *database.Database,
+	txn *database.Txn,
+	credentialTag uint8,
+	stakingKey []byte,
+) (uint64, error) {
+	return pendingRewardCreditFrom(
+		dbadapter.New(db), dbadapter.Txn(txn), credentialTag, stakingKey,
+	)
+}
+
+func pendingRewardCreditFrom(
+	ldb ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
+	credentialTag uint8,
+	stakingKey []byte,
+) (uint64, error) {
+	credits, err := pendingRewardCreditOutputsFrom(
+		ldb,
 		txn,
 		credentialTag,
 		stakingKey,

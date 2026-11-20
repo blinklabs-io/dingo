@@ -182,6 +182,11 @@ const (
 	// request returns ErrRequestSlotAbandoned. No cooldown can repair it: the
 	// connection must be replaced.
 	leiosFetchFailureDead
+	// leiosFetchFailureLocal means this node's own LeiosDB write failed or was
+	// refused. The peer did nothing wrong and every other candidate would hit
+	// the same store, so the connection's cooldown is left as it was and the
+	// caller does not fail over.
+	leiosFetchFailureLocal
 	// leiosFetchFailureTransient is everything else -- a stalled peer, a
 	// deadline overrun, wrong or incomplete bytes. Escalating cooldown, retry
 	// later.
@@ -196,6 +201,9 @@ func classifyLeiosFetchFailure(err error) leiosFetchFailureClass {
 		return leiosFetchFailureNone
 	case errors.Is(err, errLeiosBackfillConnBusy):
 		return leiosFetchFailureBusy
+	case errors.Is(err, errLeiosPersistWrite),
+		errors.Is(err, errLeiosPersistStopped):
+		return leiosFetchFailureLocal
 	case errors.Is(err, oleiosfetch.ErrRequestSlotAbandoned),
 		errors.Is(err, protocol.ErrProtocolShuttingDown):
 		return leiosFetchFailureDead
@@ -289,9 +297,12 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	// only satisfies this specific occurrence when its persisted slot
 	// actually matches ebSlot, so a stale reload of a different occurrence
 	// cannot satisfy this check.
+	// A cached entry whose write failed is retried here: the ledger would
+	// otherwise be told the block is available when it would not survive a
+	// restart. A durable one is served without touching a peer.
 	if data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash); ok &&
 		data.completeTxCache() && data.slotVerified {
-		return nil
+		return o.ensureLeiosEndorserBlockDurable(data)
 	}
 	if o.connManager == nil {
 		return errors.New("leios backfill: no connection manager")
@@ -457,6 +468,10 @@ func (o *Ouroboros) fetchEndorserBlockWithCandidates(
 				}
 				continue
 			}
+			// Another peer would write to the same failing store.
+			if classifyLeiosFetchFailure(err) == leiosFetchFailureLocal {
+				return err
+			}
 			lastErr = err
 			continue
 		}
@@ -621,6 +636,8 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 			if g.markProtocolDead() {
 				g.recycleEventPending.Store(true)
 			}
+		case leiosFetchFailureLocal:
+			// The peer answered correctly; its cooldown is unchanged.
 		case leiosFetchFailureBusy, leiosFetchFailureTransient:
 			// A stalled peer, a deadline overrun, wrong or incomplete bytes.
 			// leiosFetchFailureBusy cannot occur here (the TryLock guard above
@@ -649,7 +666,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 				resp,
 			)
 		}
-		//nolint:contextcheck // Persistence is handed to the Ouroboros-owned worker and must outlive this bounded backfill request.
+		//nolint:contextcheck // Validation and persistence GC are node-owned and must outlive this bounded backfill request.
 		if err := o.storeLeiosEndorserBlock(
 			point,
 			blk.BlockRaw,
@@ -671,7 +688,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		// otherwise return nil on every connection this backfill tries
 		// without any of them ever verifying the entry, since none would
 		// take the !ok branch above.
-		//nolint:contextcheck // Publication may enqueue Ouroboros-lifetime persistence beyond this request's deadline.
+		//nolint:contextcheck // Validation and persistence GC are node-owned and must outlive this bounded backfill request.
 		if publish := o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot); publish != nil {
 			publish()
 		}
@@ -683,6 +700,10 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		}
 	}
 	if data.txCount == 0 || data.completeTxCache() {
+		//nolint:contextcheck // Validation and persistence GC are node-owned and must outlive this bounded backfill request.
+		if err := o.ensureLeiosEndorserBlockDurable(data); err != nil {
+			return fmt.Errorf("persist cached endorser block: %w", err)
+		}
 		return nil
 	}
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
@@ -704,7 +725,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	if err := validateLeiosEndorserBlockTxs(data.blockRaw, txs); err != nil {
 		return fmt.Errorf("validate tx references: %w", err)
 	}
-	//nolint:contextcheck // Persistence is handed to the Ouroboros-owned worker and must outlive this bounded backfill request.
+	//nolint:contextcheck // Validation and persistence GC are node-owned and must outlive this bounded backfill request.
 	if err := o.storeLeiosEndorserBlock(
 		point,
 		data.blockRaw,

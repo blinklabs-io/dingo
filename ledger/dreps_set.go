@@ -17,11 +17,8 @@ package ledger
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -230,6 +227,31 @@ func (ls *LedgerState) stageDrep(txn ledgerdb.Txn, slot uint64, d models.Drep) {
 	})
 }
 
+// stageDrepHistory stages the DRep history rows the metadata store records
+// beside a write.
+func (ls *LedgerState) stageDrepHistory(
+	txn ledgerdb.Txn,
+	rows ...DRepHistoryChange,
+) {
+	ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+		DRepHistory: rows,
+	})
+}
+
+// stageDrepExpiryHistory stages the activity and expiry epochs of d from slot
+// on, which the metadata store records in drep_expiry_history.
+func (ls *LedgerState) stageDrepExpiryHistory(
+	txn ledgerdb.Txn,
+	slot uint64,
+	d models.Drep,
+) {
+	ls.stageDrepHistory(txn, DRepHistoryChange{
+		Kind: DRepHistoryExpiry, Slot: slot, Tag: d.CredentialTag,
+		Key: bytes.Clone(d.Credential), Activity: d.LastActivityEpoch,
+		Expiry: d.ExpiryEpoch,
+	})
+}
+
 func (ls *LedgerState) stageDrepLink(
 	txn ledgerdb.Txn,
 	slot uint64,
@@ -257,6 +279,10 @@ func (ls *LedgerState) clearAccountDrep(
 	}
 	next := *a
 	next.Drep, next.DrepType, next.AddedSlot = nil, 0, slot
+	ls.stageDrepHistory(txn, DRepHistoryChange{
+		Kind: DRepHistoryClear, Slot: slot, Tag: ref.Tag,
+		Key: bytes.Clone(ref.Key),
+	})
 	ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		Accounts: []AccountChange{{Slot: slot, Account: next}},
 	})
@@ -472,14 +498,15 @@ func (s stagingLedgerDB) UpdateDRepActivity(
 		return s.failDrepStaging(err)
 	}
 	if d == nil {
-		return s.failDrepStaging(
-			fmt.Errorf("%w: DRep %x", models.ErrDrepNotFound, drepCredential),
-		)
+		// The metadata store's answer for a missing DRep, which vote
+		// processing repairs by recreating the record; nothing is staged.
+		return models.ErrDrepActivityNotUpdated
 	}
 	next := *d
 	next.LastActivityEpoch = activityEpoch
 	next.ExpiryEpoch = activityEpoch + inactivityPeriod
-	s.ls.stageDrep(txn, slot, next) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	s.ls.stageDrep(txn, slot, next)              //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+	s.ls.stageDrepExpiryHistory(txn, slot, next) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 	return nil
 }
 
@@ -544,6 +571,9 @@ func (s stagingLedgerDB) ResetDormantDRepEpochs(
 		s.ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 			Dormancy: []DormancyChange{{Slot: slot, Epochs: 0}},
 		})
+		s.ls.stageDrepHistory(txn, DRepHistoryChange{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
+			Kind: DRepHistoryDormancy, Slot: slot, Previous: n,
+		})
 	}
 	return nil
 }
@@ -589,6 +619,11 @@ func (ls *LedgerState) stageDormantBump(r DRepReader, txn ledgerdb.Txn, slot uin
 	ls.stageLedgerChanges(txn, LedgerChanges{ //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		Dormancy: []DormancyChange{{Slot: slot, Epochs: n + 1}},
 	})
+	ls.stageDrepHistory(
+		txn,
+		DRepHistoryChange{Kind: DRepHistoryEvent, Slot: slot},
+		DRepHistoryChange{Kind: DRepHistoryDormancy, Slot: slot, Previous: n},
+	)
 	refs, err := ls.drepCandidates(r, txn)
 	if err != nil {
 		return err
@@ -604,6 +639,7 @@ func (ls *LedgerState) stageDormantBump(r DRepReader, txn ledgerdb.Txn, slot uin
 		next := *d
 		next.ExpiryEpoch++
 		ls.stageDrep(txn, slot, next)
+		ls.stageDrepExpiryHistory(txn, slot, next)
 	}
 	return nil
 }
@@ -754,161 +790,6 @@ func (ls *LedgerState) stageDanglingClear(
 	return nil
 }
 
-func (ls *LedgerState) compareDrepRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-	detail ...any,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.drepReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.drepReadMismatches.Add(1)
-	ls.metrics.drepReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set DRep read differs from the metadata store",
-		append([]any{
-			"component", "ledger",
-			"read", what,
-			"set_error", setErr,
-			"mismatches", n,
-		}, detail...)...,
-	)
-}
-
-// drepDiff names the fields in which the metadata store's DRep and the set's
-// differ, and the values of each.
-func drepDiff(store, set *models.Drep) string {
-	if store == nil || set == nil {
-		if store == nil && set == nil {
-			return ""
-		}
-		present := func(d *models.Drep) string {
-			if d == nil {
-				return "absent"
-			}
-			return "present"
-		}
-		return fmt.Sprintf("store=%s set=%s", present(store), present(set))
-	}
-	var diffs []string
-	add := func(name string, differs bool, s, g any) {
-		if differs {
-			diffs = append(diffs, fmt.Sprintf("%s store=%v set=%v", name, s, g))
-		}
-	}
-	add("credential", store.CredentialTag != set.CredentialTag ||
-		!bytes.Equal(store.Credential, set.Credential),
-		fmt.Sprintf("%d/%x", store.CredentialTag, store.Credential),
-		fmt.Sprintf("%d/%x", set.CredentialTag, set.Credential))
-	add("anchor_url", store.AnchorURL != set.AnchorURL,
-		store.AnchorURL, set.AnchorURL)
-	add("anchor_hash", !bytes.Equal(store.AnchorHash, set.AnchorHash),
-		hex.EncodeToString(store.AnchorHash), hex.EncodeToString(set.AnchorHash))
-	add("added_slot", store.AddedSlot != set.AddedSlot,
-		store.AddedSlot, set.AddedSlot)
-	add("active", store.Active != set.Active, store.Active, set.Active)
-	add("last_activity_epoch", store.LastActivityEpoch != set.LastActivityEpoch,
-		store.LastActivityEpoch, set.LastActivityEpoch)
-	add("expiry_epoch", store.ExpiryEpoch != set.ExpiryEpoch,
-		store.ExpiryEpoch, set.ExpiryEpoch)
-	return strings.Join(diffs, "; ")
-}
-
-func drepState(d models.Drep) string {
-	return fmt.Sprintf(
-		"(added_slot=%d last_activity_epoch=%d expiry_epoch=%d)",
-		d.AddedSlot, d.LastActivityEpoch, d.ExpiryEpoch,
-	)
-}
-
-// drepDiffLimit bounds how many DReps a set comparison names.
-const drepDiffLimit = 10
-
-// activeDrepsDiff names the DReps that only the metadata store's or only the
-// set's active list holds, and the fields of those both hold that differ.
-func activeDrepsDiff(want []*models.Drep, got map[string]models.Drep) string {
-	var parts []string
-	seen := make(map[string]struct{}, len(want))
-	for _, w := range want {
-		key := models.NewStakeCredentialRef(w.CredentialTag, w.Credential).
-			MapKey()
-		seen[key] = struct{}{}
-		g, ok := got[key]
-		label := fmt.Sprintf("%d/%x", w.CredentialTag, w.Credential)
-		switch {
-		case !ok:
-			parts = append(parts, "only in store "+label+" "+drepState(*w))
-		case !sameDrep(*w, g):
-			parts = append(parts, label+": "+drepDiff(w, &g))
-		}
-	}
-	for key, g := range got {
-		if _, ok := seen[key]; !ok {
-			parts = append(parts, fmt.Sprintf(
-				"only in set %d/%x %s",
-				g.CredentialTag,
-				g.Credential,
-				drepState(g),
-			))
-		}
-	}
-	slices.Sort(parts)
-	if len(parts) > drepDiffLimit {
-		parts = append(parts[:drepDiffLimit],
-			fmt.Sprintf("and %d more", len(parts)-drepDiffLimit))
-	}
-	return strings.Join(parts, " | ")
-}
-
-// stagedDrepSummary counts the batches txn sees over the set's applied state
-// and, of their DRep changes, those to (tag, cred) -- every DRep when cred is
-// nil.
-func (ls *LedgerState) stagedDrepSummary(
-	txn ledgerdb.Txn,
-	tag uint8,
-	cred []byte,
-) string {
-	ops := ls.stagedOps(txn)
-	changes, rollbacks := 0, 0
-	for _, o := range ops {
-		if o.rollbackTo != nil {
-			rollbacks++
-		}
-		for _, c := range o.dreps {
-			if cred == nil || (c.Drep.CredentialTag == tag &&
-				bytes.Equal(c.Drep.Credential, cred)) {
-				changes++
-			}
-		}
-	}
-	return fmt.Sprintf(
-		"batches=%d drep_changes=%d rollbacks=%d", len(ops), changes, rollbacks,
-	)
-}
-
-// drepVerifying returns the DRep reader when reads are compared with the
-// set: in any reads mode but off, while the set follows the ledger. A DRep
-// read the set does not serve is answered from the metadata store.
-func (ls *LedgerState) drepVerifying(txn ledgerdb.Txn) DRepReader {
-	if _, mode := ls.utxoSetReader(); mode == UtxoSetReadsOff {
-		return nil
-	}
-	_, r := ls.drepStaging(txn)
-	return r
-}
-
 // drepServing returns the DRep reader when DRep reads are answered from the
 // set, or nil when they stay on the metadata store.
 func (ls *LedgerState) drepServing(txn ledgerdb.Txn) DRepReader {
@@ -919,13 +800,6 @@ func (ls *LedgerState) drepServing(txn ledgerdb.Txn) DRepReader {
 	return r
 }
 
-func sameDrepPtr(a, b *models.Drep) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return sameDrep(*a, *b)
-}
-
 func (s stagingLedgerDB) GetDrepByCredential(
 	ctx context.Context,
 	credentialTag uint8,
@@ -933,87 +807,29 @@ func (s stagingLedgerDB) GetDrepByCredential(
 	includeInactive bool,
 	txn ledgerdb.Txn,
 ) (*models.Drep, error) {
-	if r := s.ls.drepServing(txn); r != nil {
-		d, err := s.ls.drepView(r, txn, credentialTag, cred)
-		if err != nil {
-			return nil, err
-		}
-		if d == nil || !includeInactive && !d.Active {
-			return nil, models.ErrDrepNotFound
-		}
-		return d, nil
+	r := s.ls.drepServing(txn)
+	if r == nil {
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyDReps)
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetDrepByCredential(
-		ctx, credentialTag, cred, includeInactive, txn,
-	)
-	notFound := errors.Is(err, models.ErrDrepNotFound)
-	if err != nil && !notFound {
+	d, err := s.ls.drepView(r, txn, credentialTag, cred)
+	if err != nil {
 		return nil, err
 	}
-	if r := s.ls.drepVerifying(txn); r != nil {
-		got, setErr := s.ls.drepView(r, txn, credentialTag, cred)
-		if got != nil && !includeInactive && !got.Active {
-			got = nil
-		}
-		same := sameDrepPtr(want, got)
-		var detail []any
-		if !same && setErr == nil {
-			detail = []any{
-				"diff", drepDiff(want, got),
-				"staged", s.ls.stagedDrepSummary(txn, credentialTag, cred),
-			}
-		}
-		s.ls.compareDrepRead(
-			g, fmt.Sprintf("drep %d/%x", credentialTag, cred),
-			same, setErr, detail...,
-		)
+	if d == nil || !includeInactive && !d.Active {
+		return nil, models.ErrDrepNotFound
 	}
-	return want, err
+	return d, nil
 }
 
 func (s stagingLedgerDB) GetActiveDreps(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) ([]*models.Drep, error) {
-	if r := s.ls.drepServing(txn); r != nil {
-		return s.ls.activeDrepsView(r, txn)
-	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetActiveDreps(ctx, txn)
-	if err != nil {
-		return nil, err
-	}
-	r := s.ls.drepVerifying(txn)
+	r := s.ls.drepServing(txn)
 	if r == nil {
-		return want, nil
+		return nil, s.ls.setFamilyUnserved(nodesettings.FamilyDReps)
 	}
-	got := make(map[string]models.Drep)
-	var setErr error
-	active, err := s.ls.activeDrepsView(r, txn)
-	if err != nil {
-		setErr = err
-	}
-	for _, d := range active {
-		got[models.NewStakeCredentialRef(d.CredentialTag, d.Credential).MapKey()] = *d
-	}
-	same := len(got) == len(want)
-	for _, w := range want {
-		g, ok := got[models.NewStakeCredentialRef(w.CredentialTag, w.Credential).MapKey()]
-		if !ok || !sameDrep(*w, g) {
-			same = false
-		}
-	}
-	var detail []any
-	if !same && setErr == nil {
-		detail = []any{
-			"diff", activeDrepsDiff(want, got),
-			"store_count", len(want), "set_count", len(got),
-			"staged", s.ls.stagedDrepSummary(txn, 0, nil),
-		}
-	}
-	s.ls.compareDrepRead(g, "active dreps", same, setErr, detail...)
-	return want, nil
+	return s.ls.activeDrepsView(r, txn)
 }
 
 // activeDrepsView is the active DReps as txn sees the set. The metadata
@@ -1043,19 +859,11 @@ func (s stagingLedgerDB) GetDormantDRepEpochs(
 	ctx context.Context,
 	txn ledgerdb.Txn,
 ) (uint64, error) {
-	if r := s.ls.drepServing(txn); r != nil {
-		return s.ls.dormancyView(r, txn)
+	r := s.ls.drepServing(txn)
+	if r == nil {
+		return 0, s.ls.setFamilyUnserved(nodesettings.FamilyDReps)
 	}
-	g := s.ls.verifyGuard(txn)
-	want, err := s.LedgerDB.GetDormantDRepEpochs(ctx, txn)
-	if err != nil {
-		return 0, err
-	}
-	if r := s.ls.drepVerifying(txn); r != nil {
-		got, setErr := s.ls.dormancyView(r, txn)
-		s.ls.compareDrepRead(g, "dormant epochs", got == want, setErr)
-	}
-	return want, nil
+	return s.ls.dormancyView(r, txn)
 }
 
 // bumpDrainedDormantDRepExpiries applies the epoch's dormancy bump to the set

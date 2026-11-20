@@ -21,6 +21,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob/aws"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
+	immplugin "github.com/blinklabs-io/dingo/database/plugin/immutable"
+	"github.com/blinklabs-io/dingo/database/plugin/immutable/objectfile"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -31,10 +33,16 @@ func registerExtra(host *plugin.Host) error {
 		name     string
 		register func(*plugin.Host) error
 	}{
-		{
-			"s3",
-			aws.RegisterProvider,
-		}, {"gcs", gcs.RegisterProvider}, {"mysql", mysql.RegisterProvider}, {"postgres", postgres.RegisterProvider},
+		{"s3", aws.RegisterProvider},
+		{"gcs", gcs.RegisterProvider},
+		{"immutable-s3", func(host *plugin.Host) error {
+			return objectfile.RegisterProvider(host, immplugin.S3ProviderName)
+		}},
+		{"immutable-gcs", func(host *plugin.Host) error {
+			return objectfile.RegisterProvider(host, immplugin.GCSProviderName)
+		}},
+		{"mysql", mysql.RegisterProvider},
+		{"postgres", postgres.RegisterProvider},
 	}
 	for _, item := range registrations {
 		if err := item.register(host); err != nil {

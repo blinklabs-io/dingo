@@ -3969,6 +3969,7 @@ func TestLedgerStateStartFailsOnMalformedMithrilTrustBoundary(t *testing.T) {
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		PromRegistry:      prometheus.NewRegistry(),
@@ -4708,6 +4709,7 @@ func TestNewLedgerStateHardForkTransitionUsesConfiguredEraList(t *testing.T) {
 			require.NoError(t, err)
 			ls, err := NewLedgerState(LedgerStateConfig{
 				Database:       db,
+				UtxoSet:        NewMemLiveSetForTest(),
 				ChainManager:   cm,
 				Logger:         slog.New(slog.NewJSONHandler(io.Discard, nil)),
 				EnableDijkstra: tt.enableDijkstra,
@@ -4786,6 +4788,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 		require.NoError(t, err)
 		ls, err := NewLedgerState(LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -4868,6 +4871,7 @@ func TestPrepareEpochCacheForStartupUsesEmbeddedMainnetConfig(t *testing.T) {
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: cardanoConfig,
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -6533,6 +6537,7 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 				},
 			}
 			ls.epochCache = []models.Epoch{ls.currentEpoch}
+			attachTestLiveSet(t, ls)
 			ls.metrics.init(prometheus.NewRegistry())
 			ls.publishSnapshotsLocked()
 			for path, run := range map[string]func() error{
@@ -7687,6 +7692,7 @@ func newBoundaryRolloverLedger(
 		},
 	}
 	seedEmptyRewardBasisForRollover(t, db, currentEpoch, ls.currentPParams)
+	attachTestLiveSet(t, ls)
 	return ls, db
 }
 
@@ -11594,6 +11600,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),
 		EventBus:          bus,
@@ -11819,6 +11826,7 @@ func TestRollbackRewardPrecomputePersistsReusableOutputs(t *testing.T) {
 			cfg := seed.config
 			cfg.Database = db
 			cfg.ChainManager = cm
+			cfg.UtxoSet = NewMemLiveSetForTest()
 			ls, err := NewLedgerState(cfg)
 			require.NoError(t, err)
 			ls.metrics.init(prometheus.NewRegistry())
@@ -12043,6 +12051,7 @@ func TestLedgerStateStartQueuesStartupRewardPrecompute(t *testing.T) {
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
+		UtxoSet:           NewMemLiveSetForTest(),
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -12160,6 +12169,7 @@ func newSameSlotCompetitorFixtureOpts(
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -12378,6 +12388,7 @@ func TestRollbackToByronEbbRestoresSameSlotUtxos(t *testing.T) {
 	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database: db, ChainManager: cm,
+		UtxoSet:           NewMemLiveSetForTest(),
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -13436,6 +13447,7 @@ func newPrunedUtxoFixtureWithFillers(
 	ls, err := NewLedgerState(
 		LedgerStateConfig{
 			Database:          db,
+			UtxoSet:           NewMemLiveSetForTest(),
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -13500,6 +13512,7 @@ func newPrunedUtxoFixtureWithFillers(
 				AddedSlot:   addedSlot,
 				DeletedSlot: deletedSlot,
 				Amount:      types.Uint64(1_000_000),
+				Address:     append([]byte{0x60}, bytes.Repeat([]byte{0x01}, 28)...),
 			})
 		}))
 	}
@@ -14184,6 +14197,7 @@ func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {
 	require.NoError(t, err)
 	_, err = NewLedgerState(LedgerStateConfig{
 		Database: db, ChainManager: cm, MaxConcurrentEvaluations: -1,
+		UtxoSet: NewMemLiveSetForTest(),
 	})
 	require.ErrorContains(t, err, "MaxConcurrentEvaluations must not be negative")
 }

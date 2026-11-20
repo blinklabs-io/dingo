@@ -55,7 +55,7 @@ func requireCaptured(t *testing.T, a ledger.RewardInputsAnswer) {
 // reads of them failing.
 func TestRewardInputsAreServedFromTheSet(t *testing.T) {
 	t.Parallel()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, nil, false)
+	r := newRewardBlocksRun(t, "set", nil, false)
 	s := r.scenario
 	r.write()
 	stakeUp(r)
@@ -70,52 +70,12 @@ func TestRewardInputsAreServedFromTheSet(t *testing.T) {
 	require.Equal(t, s.StoreInputs(5), s.Inputs(5))
 }
 
-// In verify mode the store answers and the set's rows are compared with
-// them: a boundary leaves the two equal, and a row written around the set is
-// a difference.
-func TestRewardInputsMatchTheStoreInVerifyMode(t *testing.T) {
-	t.Parallel()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsVerify, nil, false)
-	s := r.scenario
-	r.write()
-	stakeUp(r)
-	s.Boundary()
-	s.WaitDeferred()
-	requireCaptured(t, s.Inputs(6))
-	for _, result := range []string{
-		"reward_ada_pots", "reward_snapshot", "reward_pool_inputs",
-		"reward_stake_inputs", "reward_seed_failure",
-	} {
-		verified, mismatches := s.Computed(result)
-		require.Positive(t, verified, result)
-		require.Zero(t, mismatches, result)
-	}
-}
-
-func TestRewardInputsVerifyModeReportsADifference(t *testing.T) {
-	t.Parallel()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsVerify, nil, false)
-	s := r.scenario
-	r.write()
-	stakeUp(r)
-	s.Boundary()
-	s.WaitDeferred()
-	s.InputsAroundTheSet(6)
-	_ = s.Inputs(6)
-	for _, result := range []string{
-		"reward_ada_pots", "reward_pool_inputs", "reward_stake_inputs",
-	} {
-		_, mismatches := s.Computed(result)
-		require.Positive(t, mismatches, result)
-	}
-}
-
 // A rollback across the boundary leaves the set with none of the epoch's
 // inputs, as the store has none, and the replayed boundary writes the rows
 // the first pass did.
 func TestRewardInputsAcrossABoundaryRollbackAndReplay(t *testing.T) {
 	t.Parallel()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, nil, false)
+	r := newRewardBlocksRun(t, "set", nil, false)
 	s := r.scenario
 	r.write()
 	stakeUp(r)
@@ -166,7 +126,7 @@ func TestRewardInputsDrainMatchesAnUndrainedRun(t *testing.T) {
 	t.Parallel()
 	run := func(t *testing.T, drain bool) (map[string]string, *statedrain.TripGuard, *rewardBlocksRun) {
 		guard := statedrain.NewTripGuard()
-		r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, guard, false)
+		r := newRewardBlocksRun(t, "set", guard, false)
 		s := r.scenario
 		out := map[string]string{}
 		r.write()
@@ -177,7 +137,7 @@ func TestRewardInputsDrainMatchesAnUndrainedRun(t *testing.T) {
 			src := rewardBlocksDrainSource{r: r}
 			require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
 				Store: drainStore{s.DB, s.DrainFamilies}, Set: src,
-				Guard: guard, VerifyBeforeDrain: true,
+				Guard: guard,
 			}, rewardInputEntries(t, src)))
 		}
 		read := func(name string) {
@@ -226,46 +186,25 @@ func TestRewardInputsDrainMatchesAnUndrainedRun(t *testing.T) {
 	require.Equal(t, drained["boundary"], drained["replay"])
 }
 
-// A set that differs from the metadata store refuses the drain and leaves
-// the rows.
-func TestRewardInputsVerifyMismatchRefusesTheDrain(t *testing.T) {
-	t.Parallel()
-	guard := statedrain.NewTripGuard()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, guard, false)
-	s := r.scenario
-	r.write()
-	stakeUp(r)
-	s.Boundary()
-	s.WaitDeferred()
-	s.InputsAroundTheSet(6)
-	src := rewardBlocksDrainSource{r: r}
-	err := statedrain.Run(t.Context(), statedrain.Env{
-		Store: drainStore{s.DB, s.DrainFamilies}, Set: src,
-		Guard: guard, VerifyBeforeDrain: true,
-	}, rewardInputEntries(t, src))
-	require.ErrorIs(t, err, statedrain.ErrGateRefused)
-	mask, err := s.DB.DrainedFamilies(t.Context())
-	require.NoError(t, err)
-	require.False(t, mask.Has(nodesettings.FamilyRewardInputs))
-	raw, err := dbtest.RawSQLiteMetadata(t, s.DB)
-	require.NoError(t, err)
-	require.Positive(t, tableRows(t, raw, "reward_stake_input"))
-}
-
 // With the family drained and the set holding no rows for an epoch, the
 // reward round's reads fail rather than answer from the emptied tables, and
 // a fallback snapshot capture is refused.
 func TestRewardInputsFailWhenTheDrainedSetServesNothing(t *testing.T) {
 	t.Parallel()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsOff, nil, false)
+	r := newRewardBlocksRun(t, "set", nil, false)
 	require.NoError(t, r.scenario.DB.RecordDrainedFamily(
 		t.Context(), nodesettings.FamilyRewardInputs,
 	))
 	r.scenario.DrainFamilies(
 		nodesettings.FamilyMask(0).With(nodesettings.FamilyRewardInputs),
 	)
+	reached, hide := r.scenario.HideStoreReads(rewardInputReadNames...)
 	a := r.scenario.Inputs(6)
-	require.ErrorIs(t, a.Err, ledger.ErrDrainedFamilyUnserved)
+	hide(false)
+	require.NoError(t, a.Err)
+	require.Empty(t, a.Pools)
+	require.Empty(t, a.Stakes)
+	require.Zero(t, reached(), "loaded empty reward inputs reached metadata")
 }
 
 // The boundary capture resolves each pool's reward-account auto-vote and
@@ -274,7 +213,7 @@ func TestRewardInputsFailWhenTheDrainedSetServesNothing(t *testing.T) {
 func TestRewardCaptureRunsWithItsInputFamiliesDrained(t *testing.T) {
 	t.Parallel()
 	guard := statedrain.NewTripGuard()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, guard, false)
+	r := newRewardBlocksRun(t, "set", guard, false)
 	s := r.scenario
 	r.write()
 	stakeUp(r)
@@ -294,7 +233,7 @@ func TestRewardCaptureRunsWithItsInputFamiliesDrained(t *testing.T) {
 	require.Len(t, entries, len(want))
 	require.NoError(t, statedrain.Run(t.Context(), statedrain.Env{
 		Store: drainStore{s.DB, s.DrainFamilies}, Set: src,
-		Guard: guard, VerifyBeforeDrain: true,
+		Guard: guard,
 	}, entries))
 	s.Boundary()
 	s.WaitDeferred()
@@ -307,7 +246,7 @@ func TestRewardCaptureRunsWithItsInputFamiliesDrained(t *testing.T) {
 // does from the store, and leaves its pots, snapshot and pool inputs.
 func TestRewardStakeInputPruneReachesTheSet(t *testing.T) {
 	t.Parallel()
-	r := newRewardBlocksRun(t, ledger.UtxoSetReadsSet, nil, false)
+	r := newRewardBlocksRun(t, "set", nil, false)
 	s := r.scenario
 	r.write()
 	stakeUp(r)

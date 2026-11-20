@@ -132,8 +132,8 @@ func richConfigDangling(t *testing.T, db *database.Database, slot uint64, anchor
 
 func richUndrained(t *testing.T, anchorSlot, slot uint64) *database.Database {
 	db := newDrainFixtureDB(t)
-	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, db, anchorSlot, true, false, nil)))
-	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, db, slot, false, true, nil)))
+	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, db, anchorSlot, true, false, importSetFor(t, db))))
+	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, db, slot, false, true, importSetFor(t, db))))
 	return db
 }
 
@@ -255,8 +255,8 @@ func verifyEveryFamily(t *testing.T, ldb dbadapter.Adapter, set *utxoset.Set) {
 func TestDrainedCatchUpKeepsAPendingReRegistration(t *testing.T) {
 	t.Parallel()
 	undrained := newDrainFixtureDB(t)
-	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, undrained, drainFixtureAnchorSlot, true, false, nil)))
-	require.NoError(t, ImportLedgerState(t.Context(), richConfigFuture(t, undrained, drainFixtureCatchUpSlot, false, true, nil)))
+	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, undrained, drainFixtureAnchorSlot, true, false, importSetFor(t, undrained))))
+	require.NoError(t, ImportLedgerState(t.Context(), richConfigFuture(t, undrained, drainFixtureCatchUpSlot, false, true, importSetFor(t, undrained))))
 	db := newDrainFixtureDB(t)
 	set := openDrainFixtureSet(t)
 	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, db, drainFixtureAnchorSlot, true, false, set)))
@@ -299,8 +299,8 @@ func TestFreshSetLoadHoldsAPendingReRegistration(t *testing.T) {
 func TestDrainedCatchUpDanglingDRepDelegationMatchesSQL(t *testing.T) {
 	t.Parallel()
 	undrained := newDrainFixtureDB(t)
-	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, undrained, drainFixtureAnchorSlot, true, false, nil)))
-	require.NoError(t, ImportLedgerState(t.Context(), richConfigDangling(t, undrained, drainFixtureCatchUpSlot, false, true, nil)))
+	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, undrained, drainFixtureAnchorSlot, true, false, importSetFor(t, undrained))))
+	require.NoError(t, ImportLedgerState(t.Context(), richConfigDangling(t, undrained, drainFixtureCatchUpSlot, false, true, importSetFor(t, undrained))))
 	db := newDrainFixtureDB(t)
 	set := openDrainFixtureSet(t)
 	require.NoError(t, ImportLedgerState(t.Context(), richConfig(t, db, drainFixtureAnchorSlot, true, false, set)))
@@ -308,4 +308,28 @@ func TestDrainedCatchUpDanglingDRepDelegationMatchesSQL(t *testing.T) {
 	require.NoError(t, ImportLedgerState(t.Context(), richConfigDangling(t, db, drainFixtureCatchUpSlot, false, true, set)))
 
 	verifyEveryFamily(t, dbadapter.New(undrained), set)
+}
+
+// A catch-up that merges into a set whose DReps family is drained keeps the
+// DRep history rows the set held and adds the snapshot's, so the set holds the
+// history an undrained catch-up leaves in the metadata store.
+func TestDrainedCatchUpMergeKeepsTheDRepHistory(t *testing.T) {
+	t.Parallel()
+	undrained := richUndrained(t, drainFixtureAnchorSlot, drainFixtureCatchUpSlot)
+	f := richDrained(t, drainFixtureAnchorSlot, drainFixtureCatchUpSlot)
+
+	txn := dbadapter.New(undrained).Begin(t.Context(), false)
+	defer txn.Release()
+	want, err := dbadapter.New(undrained).DRepHistoryRows(txn)
+	require.NoError(t, err)
+	require.NotEmpty(t, want.Expiry, "the catch-up leaves expiry history")
+	got, err := f.set.DRepHistory()
+	require.NoError(t, err)
+	require.ElementsMatch(t, want.Expiry, got.Expiry)
+	require.ElementsMatch(t, want.Dormancy, got.Dormancy)
+	require.ElementsMatch(t, want.Events, got.Events)
+	require.ElementsMatch(t, want.Clears, got.Clears)
+	lost, err := f.set.DRepHistoryLost()
+	require.NoError(t, err)
+	require.False(t, lost)
 }

@@ -193,6 +193,7 @@ func TestClassicPPUPRejectedBeforeBlockApply(t *testing.T) {
 			addressBytes, err := address.Bytes()
 			require.NoError(t, err)
 			inputTxId := seedBabbageUtxo(t, db, 0x31, 0, address, 1_000_000)
+			attachTestLiveSet(t, ls)
 			updateCbor := []byte{0xa1, 0x00, 0x01} // {minFeeA: 1}
 
 			// newTx encodes a real era transaction spending the seeded

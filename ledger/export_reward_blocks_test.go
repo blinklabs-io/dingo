@@ -128,10 +128,7 @@ type RewardBlocksScenario struct {
 	DrainFamilies func(mask nodesettings.FamilyMask)
 	// InstallDrainedSources is BoundaryEpochStateScenario.InstallDrainedSources.
 	InstallDrainedSources func()
-	// Computed reports the verify-mode results the set computed for result
-	// and how many differed from the metadata store's.
-	Computed func(result string) (verified, mismatches float64)
-	LedgerDB func() ledgerdb.LedgerDB
+	LedgerDB              func() ledgerdb.LedgerDB
 }
 
 // RewardInputsAnswer is what a read of an epoch's reward snapshot inputs
@@ -236,7 +233,6 @@ func NewRewardBlocksScenarioForTest(
 	})
 	require.NoError(t, err)
 	h := newBoundaryReplayHarnessWithSet(t, db, set)
-	h.ls.config.UtxoSetReads = reads
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 9_000, 0, nil))
 	require.NoError(
 		t,
@@ -700,7 +696,6 @@ func NewRewardBlocksScenarioForTest(
 			h.ls.installPParamsSource()
 			h.ls.installPoolSource()
 		},
-		Computed: computedResultCounts(h.ls),
 	}
 }
 

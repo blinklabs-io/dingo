@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
 // meshDatabaseAdapter adapts *database.Database to MeshDatabase.
@@ -76,4 +77,54 @@ func (a *meshDatabaseAdapter) GetTransactionsByBlockHash(ctx context.Context,
 	hash []byte,
 ) ([]models.Transaction, error) {
 	return a.db.GetTransactionsByBlockHash(ctx, hash, nil)
+}
+
+// boundedDatabase hides the blocks above a tip: on the split layout the
+// ledger's block store is ahead of the IndexerDB that holds their
+// transactions, and a block answered from the store alone would be empty.
+type boundedDatabase struct {
+	MeshDatabase
+	tip func() (ochainsync.Tip, error)
+}
+
+// NewBoundedDatabase makes db answer only for blocks at or below the tip
+// that tip returns. A block above it is reported as not found.
+func NewBoundedDatabase(
+	db MeshDatabase,
+	tip func() (ochainsync.Tip, error),
+) MeshDatabase {
+	return &boundedDatabase{MeshDatabase: db, tip: tip}
+}
+
+func (b *boundedDatabase) bound(block models.Block) (models.Block, error) {
+	tip, err := b.tip()
+	if err != nil {
+		return models.Block{}, err
+	}
+	if block.Slot > tip.Point.Slot {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return block, nil
+}
+
+func (b *boundedDatabase) BlockByHash(
+	ctx context.Context,
+	hash []byte,
+) (models.Block, error) {
+	block, err := b.MeshDatabase.BlockByHash(ctx, hash)
+	if err != nil {
+		return block, err
+	}
+	return b.bound(block)
+}
+
+func (b *boundedDatabase) BlockByIndex(
+	ctx context.Context,
+	height uint64,
+) (models.Block, error) {
+	block, err := b.MeshDatabase.BlockByIndex(ctx, height)
+	if err != nil {
+		return block, err
+	}
+	return b.bound(block)
 }

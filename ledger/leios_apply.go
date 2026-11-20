@@ -733,6 +733,21 @@ func (e *leiosEndorserBlockStorageError) Unwrap() error {
 	return e.err
 }
 
+// EndorserBlockOffsets returns the offsets of an endorser block's transactions
+// and outputs inside its stored blob, keyed by (ebSlot, ebHash). bodyCbors is
+// each transaction's body CBOR, as CertifiedClosure.BodyCbors returns. A
+// consumer that does not store the blob itself, because the ledger already
+// did, writes these offsets under its own keys.
+func EndorserBlockOffsets(
+	txs []lcommon.Transaction,
+	bodyCbors [][]byte,
+	ebSlot uint64,
+	ebHash [lcommon.Blake2b256Size]byte,
+) (*database.BlockIngestionResult, error) {
+	_, offsets, err := buildEndorserBlockBlob(txs, bodyCbors, ebSlot, ebHash)
+	return offsets, err
+}
+
 // buildEndorserBlockBlob lays out a standalone CBOR blob holding, for each
 // endorser transaction, its body CBOR followed by each produced output's CBOR,
 // recording the byte ranges as DOFF offsets keyed by (ebSlot, ebHash). The blob
@@ -2158,9 +2173,9 @@ func (ls *LedgerState) certifiedEndorserBlockData(
 // persistCertifiedEndorserBlock writes the manifest and transactions of a
 // certified endorser block to the LeiosDB when it lacks either or holds
 // different bytes, so the closure stays readable after the in-memory
-// endorser-block cache expires. The asynchronous persist queue drops writes
-// under pressure and is not a durability guarantee for a block that
-// certification has made part of the chain.
+// endorser-block cache expires. The fetch-path write is skipped for an
+// unverified slot and can fail, so it is not a durability guarantee for a
+// block that certification has made part of the chain.
 //
 // It writes exactly what apply resolved (see certifiedEndorserBlockData), so
 // it needs no second lookup that could miss. The write commits in the
@@ -2171,8 +2186,8 @@ func (ls *LedgerState) certifiedEndorserBlockData(
 // passes the immutable point or the pin watermark, and the endorser block a
 // certifying ranking block applies is its parent's, at the applied tip, which
 // a rollback never moves behind an immutable point. A nil manifest (no data
-// provider) writes nothing; the closure then depends on whatever the queue
-// persisted.
+// provider) writes nothing; the closure then depends on whatever the fetch
+// path persisted.
 func (ls *LedgerState) persistCertifiedEndorserBlock(
 	ebHash []byte,
 	ebSlot uint64,

@@ -25,11 +25,11 @@ import (
 
 // accountReads makes every account table read through the ledger's LedgerDB
 // and requires each answer to be the metadata store's. It returns the pool's
-// delegator credentials and how many reads it made that the set compares.
+// delegator credentials.
 func (h *liveStakeHarness) accountReads(
 	t *testing.T,
 	drepKeys ...[]byte,
-) ([]models.StakeCredentialRef, float64) {
+) []models.StakeCredentialRef {
 	t.Helper()
 	ldb := h.scenario.LedgerDB()
 	pools := []lcommon.PoolKeyHash{
@@ -39,7 +39,7 @@ func (h *liveStakeHarness) accountReads(
 	require.NoError(t, err)
 	ga, err := ldb.GetActiveAccountCredentials(nil)
 	require.NoError(t, err)
-	require.Equal(t, wa, ga)
+	require.ElementsMatch(t, wa, ga)
 	wn, err := h.store.GetActiveDelegatorCountsByPool(pools, nil)
 	require.NoError(t, err)
 	gn, err := ldb.GetActiveDelegatorCountsByPool(pools, nil)
@@ -49,15 +49,20 @@ func (h *liveStakeHarness) accountReads(
 	require.NoError(t, err)
 	gc, err := ldb.GetActiveDelegatorCredentialsByPool(pools, nil)
 	require.NoError(t, err)
-	require.Equal(t, wc, gc)
+	require.Len(t, gc, len(wc))
+	for pool, want := range wc {
+		got, ok := gc[pool]
+		require.True(t, ok, "pool %x is missing", pool)
+		require.ElementsMatch(t, want, got, "pool %x", pool)
+	}
 	for _, key := range drepKeys {
 		wd, err := h.store.GetDRepDelegators(t.Context(), 0, key, nil)
 		require.NoError(t, err)
 		gd, err := ldb.GetDRepDelegators(t.Context(), 0, key, nil)
 		require.NoError(t, err)
-		require.Equal(t, wd, gd)
+		require.ElementsMatch(t, wd, gd)
 	}
-	return gc[string(h.pool)], float64(3 + len(drepKeys))
+	return gc[string(h.pool)]
 }
 
 // TestAccountTableReadsAgreeWithTheLiveUtxoSet requires the set's accounts
@@ -69,28 +74,10 @@ func TestAccountTableReadsAgreeWithTheLiveUtxoSet(t *testing.T) {
 	h := newLiveStakeHarness(t, false)
 	// The rollback undoes only what is written after the boundary.
 	h.scenario.ApplyBoundary()
-	verified0, mismatches0 := h.scenario.AccountReads()
 	drepKey := bytes.Repeat([]byte{0x5d}, 28)
 	check := func(stage string, drepKeys ...[]byte) []models.StakeCredentialRef {
 		t.Helper()
-		creds, reads := h.accountReads(t, drepKeys...)
-		v, m := h.scenario.AccountReads()
-		require.Equal(
-			t,
-			mismatches0,
-			m,
-			"%s: the set differs from the store",
-			stage,
-		)
-		require.Equal(
-			t,
-			reads,
-			v-verified0,
-			"%s: a read was not compared",
-			stage,
-		)
-		verified0 = v
-		return creds
+		return h.accountReads(t, drepKeys...)
 	}
 	creds := check("initial", drepKey)
 	require.Equal(t, []models.StakeCredentialRef{h.owner, h.deleg}, creds)
@@ -122,50 +109,10 @@ func TestAccountTableReadsAgreeWithTheLiveUtxoSet(t *testing.T) {
 func TestAccountTableReadsSeeTheirTransactionsStagedAccounts(t *testing.T) {
 	t.Parallel()
 	h := newLiveStakeHarness(t, false)
-	verified0, mismatches0 := h.scenario.AccountReads()
 	script := bytes.Repeat([]byte{0x74}, 28)
 	creds, count := h.scenario.RegisterCredentialInsideTxn(1, script, h.pool)
 	require.Equal(t, uint64(3), count)
 	require.Equal(t, []models.StakeCredentialRef{
 		models.NewStakeCredentialRef(1, script), h.owner, h.deleg,
 	}, creds, "a script credential sorts before a key credential")
-	verified, mismatches := h.scenario.AccountReads()
-	require.Equal(t, float64(3), verified-verified0)
-	require.Equal(
-		t,
-		mismatches0,
-		mismatches,
-		"the set lists the staged account",
-	)
-}
-
-// TestAccountTableReadVerificationCountsADivergence requires a verify-mode
-// read to count a mismatch when the metadata store holds an active account
-// the set does not.
-func TestAccountTableReadVerificationCountsADivergence(t *testing.T) {
-	t.Parallel()
-	h := newLiveStakeHarness(t, false)
-	verified0, mismatches0 := h.scenario.AccountReads()
-	drepKey := bytes.Repeat([]byte{0x5d}, 28)
-	// Written around the ledger's LedgerDB, so the set never sees it.
-	require.NoError(
-		t,
-		h.scenario.DB.CreateAccount(t.Context(), nil, &models.Account{
-			StakingKey: bytes.Repeat([]byte{0x75}, 28),
-			Pool:       h.pool,
-			Drep:       drepKey,
-			DrepType:   0,
-			Active:     true,
-		}),
-	)
-	creds, reads := h.accountReads(t, drepKey)
-	require.Len(t, creds, 3, "the read answers from the metadata store")
-	verified, mismatches := h.scenario.AccountReads()
-	require.Equal(t, reads, verified-verified0)
-	require.Equal(
-		t,
-		reads,
-		mismatches-mismatches0,
-		"the set has no such account",
-	)
 }

@@ -22,10 +22,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
+	"github.com/blinklabs-io/dingo/internal/apiready"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -57,11 +59,17 @@ const (
 
 // ServerConfig holds configuration for the Mesh API server.
 type ServerConfig struct {
+	// Listen acquires the listening socket. Nil uses net.Listen.
+	// Successful calls transfer ownership to the server.
+	Listen      func(string, string) (net.Listener, error)
 	Logger      *slog.Logger
 	LedgerState MeshLedgerState
 	Database    MeshDatabase
 	Chain       MeshChain
 	Mempool     MeshMempool
+	// Ready gates the IndexerDB-backed routes on a split layout. Nil serves
+	// everything.
+	Ready apiready.Check
 	// ListenAddress is the TCP address to listen on (e.g. ":8080").
 	ListenAddress string
 	Network       string
@@ -176,7 +184,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		networkID:     networkID,
 		genesisID:     genesisID,
 		addrNetworkID: addrNetID,
-		listener:      apilistener.New("Mesh API", logger),
+		listener: apilistener.NewWithListenerFactory(
+			"Mesh API",
+			logger,
+			cfg.Listen,
+		),
 	}, nil
 }
 
@@ -189,12 +201,10 @@ func (s *Server) Start(ctx context.Context) error {
 	defer s.listener.EndStart(startDone)
 
 	server, bindDone, err := s.listener.Publish(func() *http.Server {
-		mux := http.NewServeMux()
-		s.registerRoutes(mux)
 		return &http.Server{
 			Addr: s.config.ListenAddress,
 			Handler: httpcors.Handler(
-				mux,
+				s.handler(),
 				httpcors.Config{
 					AllowedOrigins: s.config.CORSAllowedOrigins,
 				},
@@ -358,11 +368,8 @@ func (s *Server) slotToTimestamp(slot uint64) (int64, error) {
 // chain tip.
 func (s *Server) tipBlockID(
 	tip ochainsync.Tip,
-) *BlockIdentifier {
-	return &BlockIdentifier{
-		Index: int64(tip.BlockNumber), // #nosec G115
-		Hash:  hex.EncodeToString(tip.Point.Hash),
-	}
+) (*BlockIdentifier, error) {
+	return newBlockIdentifier(tip.BlockNumber, tip.Point.Hash)
 }
 
 // writeJSON writes a JSON response.

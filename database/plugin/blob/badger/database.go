@@ -442,6 +442,16 @@ func (db *BlobStoreBadger) open() error {
 		if db.inMemoryMemTableSize > 0 {
 			badgerOpts = badgerOpts.WithMemTableSize(db.inMemoryMemTableSize)
 		}
+		// Badger sizes the block cache's admission sketch from
+		// BlockCacheSize when the store opens, tens of megabytes at its
+		// 256 MiB default, and requires the cache only for compressed or
+		// encrypted blocks. An uncompressed in-memory store already holds
+		// its blocks in memory, and a process that opens thousands of
+		// them, as a test binary does, keeps one sketch per store
+		// reachable.
+		if !db.compressionEnabled {
+			badgerOpts = badgerOpts.WithBlockCacheSize(0)
+		}
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return fmt.Errorf("badger open in-memory: %w", err)
@@ -828,8 +838,7 @@ func (d *BlobStoreBadger) GetContextLimited(
 	}
 	if item.ValueSize() > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	value, err := item.ValueCopy(nil)
@@ -838,8 +847,7 @@ func (d *BlobStoreBadger) GetContextLimited(
 	}
 	if int64(len(value)) > maxBytes {
 		return nil, fmt.Errorf(
-			"blob object exceeds maximum size of %d bytes",
-			maxBytes,
+			"%w of %d bytes", types.ErrBlobTooLarge, maxBytes,
 		)
 	}
 	if err := ctx.Err(); err != nil {

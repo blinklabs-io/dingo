@@ -212,6 +212,16 @@ type RewardCreditRound struct {
 // source hashes of the stake-reward round.
 const StakeRewardSourcePrefix = "dingo:stake-reward:"
 
+// RewardStakeInputsPendingKey is the sync_state key listing the snapshots
+// whose reward_stake_input rows the ledger has not finished writing.
+const RewardStakeInputsPendingKey = StakeRewardSourcePrefix +
+	"stake-inputs-pending"
+
+// RewardPrecomputeCursorPrefix prefixes the sync_state keys holding the
+// reward precompute cursor of each snapshot epoch.
+const RewardPrecomputeCursorPrefix = StakeRewardSourcePrefix +
+	"precompute-cursor:"
+
 // StakeRewardSourceHash is the account_reward_delta tx_hash of the credit a
 // reward_account_output row produces, which makes crediting it idempotent.
 func StakeRewardSourceHash(

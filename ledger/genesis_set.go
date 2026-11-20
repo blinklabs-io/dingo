@@ -25,9 +25,9 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
 
-// The genesis writes put accounts, pools, DReps and delegations in the
-// metadata store as data, not as transitions of certificates, after the set
-// has loaded the empty tables at origin. The set computes them from the
+// The genesis writes put accounts, pools, DReps and delegations in the set
+// as data, not as transitions of certificates; the metadata store keeps only
+// the certificate history of a drained family. The set computes them from the
 // genesis configuration with the functions the metadata store imports them
 // with (models.GenesisStakeAccounts, models.GenesisDelegateeOf,
 // models.GenesisDRep, models.PoolRegistrationFromCertificate), and reads
@@ -102,6 +102,9 @@ func (ls *LedgerState) stageGenesisAccounts(
 			Active:    true,
 			AddedSlot: a.AddedSlot,
 			Deposit:   deposit,
+			Pool:      a.Pool,
+			Drep:      a.Drep,
+			DrepType:  a.DrepType,
 		})
 	}
 	return nil
@@ -141,6 +144,13 @@ func (ls *LedgerState) stageGenesisPools(
 			Params:      CleanPoolRegistration(&reg),
 			DepositHeld: &deposit,
 		}, false)
+		// The registration is also the pool's first certificate: the reads
+		// of the pool's history, which find a pool and its parameters at a
+		// slot, know a genesis pool only by it.
+		event := reg
+		ls.stagePoolEvent(txn, reg.PoolKeyHash, PoolEvent{
+			Slot: 0, Position: uint64(i), Registration: &event,
+		})
 	}
 	return nil
 }
@@ -206,6 +216,9 @@ func (ls *LedgerState) stageGenesisDReps(
 		if prev == nil || !sameDrep(*prev, drep) {
 			ls.stageDrep(txn, 0, drep)
 		}
+		// ImportDrep records the expiry history whether or not the row
+		// changed, so a set that holds the DRep without its history gets it.
+		ls.stageDrepExpiryHistory(txn, drep.AddedSlot, drep)
 		if hr == nil {
 			continue
 		}

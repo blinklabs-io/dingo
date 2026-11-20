@@ -281,7 +281,8 @@ func (s *Store) IterateAccountImportBaselines(
 		return err
 	}
 	rows, err := db.QueryContext(ctx, `
-SELECT credential_tag, staking_key, active, added_slot, deposit_amount
+SELECT credential_tag, staking_key, pool, drep, drep_type, active,
+    added_slot, deposit_amount
 FROM account_import_baseline`)
 	if err != nil {
 		return fmt.Errorf("iterate account import baselines: %w", err)
@@ -290,11 +291,19 @@ FROM account_import_baseline`)
 	for rows.Next() {
 		var row models.AccountImportBaselineRow
 		var addedSlot int64
+		var drepType sql.NullInt64
 		var raw sql.NullString
 		if err := rows.Scan(
-			&row.CredentialTag, &row.StakingKey, &row.Active, &addedSlot, &raw,
+			&row.CredentialTag, &row.StakingKey, &row.Pool, &row.Drep,
+			&drepType, &row.Active, &addedSlot, &raw,
 		); err != nil {
 			return fmt.Errorf("iterate account import baselines: %w", err)
+		}
+		if drepType.Valid {
+			row.DrepType, err = checkedUint64(drepType.Int64)
+			if err != nil {
+				return fmt.Errorf("iterate account import baselines: %w", err)
+			}
 		}
 		row.AddedSlot, err = checkedUint64(addedSlot)
 		if err != nil {

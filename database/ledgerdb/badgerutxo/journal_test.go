@@ -339,6 +339,36 @@ func TestRollbackFromSlotZeroBlockToOrigin(t *testing.T) {
 	requireTip(t, s, ocommon.NewPointOrigin())
 }
 
+func TestRollbackToOriginKeepsBaselineOfSetBootstrappedAtOrigin(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	defer s.Close()
+	bootstrap(t, s, ocommon.NewPointOrigin())
+	genesisPoint := point(0, 9)
+	_, err := s.ApplyBatch(nil, []badgerutxo.Change{
+		{Point: genesisPoint, Added: []badgerutxo.Output{out(9, 0)}},
+	})
+	require.NoError(t, err)
+	tip := point(1, 1)
+	_, err = s.ApplyBatch(&tip, []badgerutxo.Change{
+		{Point: tip, Added: []badgerutxo.Output{out(1, 0)}},
+	})
+	require.NoError(t, err)
+
+	requireAsOf(
+		t,
+		s,
+		ocommon.NewPointOrigin(),
+		map[badgerutxo.Ref]string{ref(9, 0): string(out(9, 0).Cbor)},
+	)
+	result, err := s.Rollback(ocommon.NewPointOrigin())
+	require.NoError(t, err)
+	require.Equal(t, []badgerutxo.Ref{ref(1, 0)}, result.Removed)
+	requireLive(t, s, false, ref(1, 0))
+	requireLive(t, s, true, ref(9, 0))
+	requireTip(t, s, ocommon.NewPointOrigin())
+}
+
 func TestAsOfAndRollbackUndoAuxiliaryChangesAfterTip(t *testing.T) {
 	t.Parallel()
 	s := open(t, t.TempDir())

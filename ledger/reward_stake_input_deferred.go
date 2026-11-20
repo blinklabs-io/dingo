@@ -33,8 +33,7 @@ import (
 // entry in rewardStakeInputsPendingKey marks its rows as incomplete until the
 // last chunk commits; every reader of reward_stake_input goes through
 // ensureRewardStakeInputsReady first.
-const rewardStakeInputsPendingKey = stakeRewardSourcePrefix +
-	"stake-inputs-pending"
+const rewardStakeInputsPendingKey = models.RewardStakeInputsPendingKey
 
 // deferredStakeInputChunk bounds each write transaction, so the writer never
 // holds the metadata writer for the whole snapshot.
@@ -367,10 +366,34 @@ func (ls *LedgerState) RewardStakeInputsIncomplete(
 	from uint64,
 	through uint64,
 ) (bool, error) {
-	pending, err := loadRewardStakeInputsPending(
-		ls.ledgerDB(),
-		txn,
-	)
+	return ls.rewardStakeInputsIncomplete(txn, from, through)
+}
+
+// RewardStakeInputsPendingState returns the pending record as the ledger
+// stores it, in the set once the reward-inputs family is drained, or the empty
+// string when none exists.
+func (ls *LedgerState) RewardStakeInputsPendingState() (string, error) {
+	return ls.ledgerDB().GetSyncState(rewardStakeInputsPendingKey, nil)
+}
+
+// RewardStakeInputsIncompleteCommitted is RewardStakeInputsIncomplete read
+// from the ledger store's committed state, for a reader whose own
+// transaction belongs to another store: the ledger store records which
+// snapshots are still being written, and a split IndexerDB copies their rows
+// from it.
+func (ls *LedgerState) RewardStakeInputsIncompleteCommitted(
+	from uint64,
+	through uint64,
+) (bool, error) {
+	return ls.rewardStakeInputsIncomplete(nil, from, through)
+}
+
+func (ls *LedgerState) rewardStakeInputsIncomplete(
+	txn ledgerdb.Txn,
+	from uint64,
+	through uint64,
+) (bool, error) {
+	pending, err := loadRewardStakeInputsPending(ls.ledgerDB(), txn)
 	if err != nil {
 		return false, err
 	}

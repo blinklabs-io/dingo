@@ -48,11 +48,9 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -8693,107 +8691,18 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 		return err
 	}
 	err = ls.ledgerDB().Run(txn, func(txn ledgerdb.Txn) error {
-		// Record genesis UTxOs
-		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
-		byronGenesisUtxos, err := byronGenesis.GenesisUtxos()
+		utxoSet, err := buildGenesisUtxoSet(
+			ls.config.CardanoNodeConfig, genesisHash, ls.config.Logger,
+		)
 		if err != nil {
-			return fmt.Errorf("generate Byron genesis UTxOs: %w", err)
+			return err
 		}
 		shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
-		shelleyGenesisUtxos, err := shelleyGenesis.GenesisUtxos()
-		if err != nil {
-			return fmt.Errorf("generate Shelley genesis UTxOs: %w", err)
-		}
-		if len(byronGenesisUtxos)+len(shelleyGenesisUtxos) == 0 {
-			return errors.New("failed to generate genesis UTxOs")
-		}
-		ls.config.Logger.Info(
-			fmt.Sprintf("creating %d genesis UTxOs (%d Byron, %d Shelley)",
-				len(byronGenesisUtxos)+len(shelleyGenesisUtxos),
-				len(byronGenesisUtxos),
-				len(shelleyGenesisUtxos),
-			),
-			"component", "ledger",
-		)
-
-		// Group genesis UTxOs by transaction hash
-		genesisUtxos := slices.Concat(byronGenesisUtxos, shelleyGenesisUtxos)
-		if err := rejectDuplicateGenesisUtxos(genesisUtxos); err != nil {
-			return fmt.Errorf("validate genesis UTxOs: %w", err)
-		}
-		genesisReserves, err := genesisReserveBalance(
-			shelleyGenesis.MaxLovelaceSupply,
-			genesisUtxos,
-		)
-		if err != nil {
-			return fmt.Errorf("calculate genesis reserves: %w", err)
-		}
-		txUtxos := make(map[[32]byte][]lcommon.Utxo)
-		for i := range genesisUtxos {
-			txHash := genesisUtxos[i].Id.Id()
-			var txHashArray [32]byte
-			copy(txHashArray[:], txHash.Bytes())
-
-			// Generate CBOR for genesis UTxO outputs since they don't have original CBOR
-			cborData, err := cbor.Encode(genesisUtxos[i].Output)
-			if err != nil {
-				return fmt.Errorf("encode genesis UTxO output to CBOR: %w", err)
-			}
-
-			// Create a new Utxo with CBOR-encoded output
-			var newOutput lcommon.TransactionOutput
-			switch output := genesisUtxos[i].Output.(type) {
-			case byron.ByronTransactionOutput:
-				newByronOutput := output
-				(&newByronOutput).SetCbor(cborData)
-				newOutput = newByronOutput
-			case shelley.ShelleyTransactionOutput:
-				newShelleyOutput := output
-				(&newShelleyOutput).SetCbor(cborData)
-				newOutput = newShelleyOutput
-			default:
-				return fmt.Errorf("unsupported genesis UTxO output type: %T", genesisUtxos[i].Output)
-			}
-
-			txUtxos[txHashArray] = append(txUtxos[txHashArray], lcommon.Utxo{
-				Id:     genesisUtxos[i].Id,
-				Output: newOutput,
-			})
-		}
-
-		// Build synthetic genesis block with proper structure:
-		// Block -> Transactions -> Outputs (UTxOs)
-		//
-		// CBOR structure:
-		// [                                    // block: array of transactions
-		//   {0: tx_hash, 1: [output, ...]},    // transaction 1
-		//   {0: tx_hash, 1: [output, ...]},    // transaction 2
-		//   ...
-		// ]
-		//
-		// We track byte offsets for each output within this structure.
-		utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
-
-		// Sort transaction hashes for deterministic ordering
-		txHashes := make([][32]byte, 0, len(txUtxos))
-		for txHash := range txUtxos {
-			txHashes = append(txHashes, txHash)
-		}
-		slices.SortFunc(txHashes, func(a, b [32]byte) int {
-			return bytes.Compare(a[:], b[:])
-		})
-
-		// Build the block structure manually to track exact byte offsets
-		// We need to know where each output CBOR starts within the block
-		blockCbor, err := buildGenesisBlockCbor(
-			txHashes,
-			txUtxos,
-			utxoOffsets,
-			genesisHash,
-		)
-		if err != nil {
-			return fmt.Errorf("build genesis block cbor: %w", err)
-		}
+		txUtxos := utxoSet.txUtxos
+		utxoOffsets := utxoSet.offsets
+		blockCbor := utxoSet.blockCbor
+		genesisReserves := utxoSet.reserves
+		genesisUtxos := utxoSet.utxos
 
 		// Store synthetic genesis block CBOR.
 		// We use SetGenesisCbor to avoid creating a block index entry that
@@ -8855,7 +8764,12 @@ func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 			for _, part := range splitUtxoEvent(genesisEvt) {
 				ls.publishUtxoEventAfterCommit(ctx, txn, part, nil)
 			}
-			for txHashArray, utxos := range txUtxos {
+			// Sorted, so every store assigns the same surrogate ids.
+			for _, txHashArray := range slices.SortedFunc(
+				maps.Keys(txUtxos),
+				func(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) },
+			) {
+				utxos := txUtxos[txHashArray]
 				if err := ls.ledgerDB().SetGenesisTransaction(
 					ctx,
 					txHashArray[:],
@@ -10215,7 +10129,6 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 		if err := timePhase(
 			transitionEpoch.EpochId, "byron_translation", func() error {
 				return ls.applyByronTranslationReserves(
-					ctx,
 					txn,
 					transitionEpoch.EpochId,
 					transitionEpoch.StartSlot,
@@ -10236,6 +10149,10 @@ func (ls *LedgerState) processEpochRolloverForTargetWithOptions(
 			)
 			currentEpoch = transitionEpoch
 			ledgerEpoch = transitionEpoch.EpochId
+			// The transition epoch is crossed without a block, so no epoch
+			// write opens it: open it here, or the boundary that closes it
+			// finds its block counts and fees unknown rather than zero.
+			ls.stageEpochOpened(txn, transitionEpoch) //nolint:contextcheck // the set applies after commit, under the ledger lifecycle context
 		}
 	}
 
@@ -11037,7 +10954,9 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 		)
 		return nil
 	}
+	dropStaged := ls.markUtxoSetBatch(txn)
 	if err := hook(txn, evt); err != nil {
+		dropStaged()
 		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
 			ls.config.Logger.Error(
 				"failed to roll back snap-point stake savepoint",
@@ -11154,12 +11073,14 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(ctx context.Context,
 		)
 		return nil
 	}
+	dropStaged := ls.markUtxoSetBatch(txn)
 	err := hook(txn, evt)
 	if err == nil {
 		err = ls.takeDeferredRewardStakeInputs(ctx, txn)
 	}
 	if err != nil {
 		ls.discardDeferredRewardStakeInputs(txn)
+		dropStaged()
 		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
 			return fmt.Errorf(
 				"roll back epoch-boundary snapshot savepoint (capture error: %w): %w",
@@ -11307,12 +11228,16 @@ func (ls *LedgerState) recordSlotBattle(
 	if ls.chain == nil {
 		return
 	}
+	recorder := ls.loadSlotBattleRecorder()
 	battle := slotBattle{
 		slot:       localSlot,
 		localHash:  bytes.Clone(localHash),
 		remoteSlot: remoteSlot,
 		remoteHash: bytes.Clone(remoteHash),
 		settleAt:   ls.chain.Tip().BlockNumber + ls.slotBattleSettleDepth(),
+	}
+	if owner, ok := recorder.(SlotBattleOutcomeRecorder); ok {
+		battle.settle = owner.SlotBattleOutcome(localSlot, battle.localHash)
 	}
 	if !ls.slotBattles.add(battle) {
 		return
@@ -11326,7 +11251,7 @@ func (ls *LedgerState) recordSlotBattle(
 		"local_block_hash", hex.EncodeToString(localHash),
 		"remote_block_hash", hex.EncodeToString(remoteHash),
 	)
-	if recorder := ls.loadSlotBattleRecorder(); recorder != nil {
+	if recorder != nil {
 		recorder.RecordSlotBattle()
 	}
 }

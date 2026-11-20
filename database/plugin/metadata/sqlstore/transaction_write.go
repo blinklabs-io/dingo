@@ -55,7 +55,14 @@ func transactionFee(transaction lcommon.Transaction) types.Uint64 {
 // (and therefore to one caller transaction), because database/sql statements
 // prepared on a transaction must not escape it.
 type transactionBatchAccumulator struct {
-	leiosAPIRowsOnly     bool
+	leiosAPIRowsOnly bool
+	// debitWithdrawals makes a historical-replay withdrawal debit the
+	// account balance as live apply does. It is set by the caller per
+	// transaction and survives Reset.
+	debitWithdrawals bool
+	// debitWithdrawalsSet records that the caller chose debitWithdrawals,
+	// which a certified closure honours: its default is to debit.
+	debitWithdrawalsSet  bool
 	validatedAPIRowsOnly bool
 	transactionInsert    *sql.Stmt
 	mysql                bool
@@ -692,6 +699,15 @@ func (a *transactionBatchAccumulator) resetStatement() {
 		_ = a.transactionInsert.Close()
 		a.transactionInsert = nil
 	}
+}
+
+// SetDebitWithdrawals selects whether withdrawals applied through this
+// accumulator on the historical-replay path debit the account's reward
+// balance. A replay that also replays the reward credits needs the debit; one
+// that trusts an imported balance must not apply it.
+func (a *transactionBatchAccumulator) SetDebitWithdrawals(debit bool) {
+	a.debitWithdrawals = debit
+	a.debitWithdrawalsSet = true
 }
 
 func (a *transactionBatchAccumulator) Reset() {
@@ -1680,12 +1696,10 @@ func (s *Store) SetGapBlockTransaction(
 	certDeposits map[int]uint64,
 	txn types.Txn,
 	protocolMajor uint64,
-	historyOnly bool,
 ) error {
-	// Gap ingestion intentionally has no available input state, so this is
-	// equivalent to SetTransaction with the consumed-input update suppressed.
-	// The transaction, its certificates, and its produced outputs are all
-	// persisted.
+	// Gap ingestion stores the transaction and its certificates only: the
+	// UTxO set and its stake are the LedgerDB UTxO set's, already at or past
+	// this block.
 	//
 	// certDeposits may be partial or nil: the caller calculates it from the
 	// era's CertDepositFunc, which has no entry for a certificate whose
@@ -1726,10 +1740,8 @@ func (s *Store) SetGapBlockTransaction(
 			if err != nil {
 				return err
 			}
-			var certificateRefs []models.StakeCredentialRef
 			if transaction.IsValid() {
-				var err error
-				certificateRefs, err = s.applyTransactionCertificates(
+				if _, err := s.applyTransactionCertificates(
 					ctx,
 					db,
 					transactionID,
@@ -1740,95 +1752,11 @@ func (s *Store) SetGapBlockTransaction(
 					allowUnknownDeposits,
 					false,
 					protocolMajor,
-				)
-				if err != nil {
+				); err != nil {
 					return err
 				}
 			}
-			if historyOnly {
-				// The UTxO set and its stake are the live set's, already
-				// at or past this block.
-				return nil
-			}
-			collateralReturn := transaction.CollateralReturn()
-			producedStakeDeltas := make([]stakeCredentialDelta, 0)
-			for _, produced := range transaction.Produced() {
-				model, err := models.UtxoLedgerToModel(produced, point.Slot)
-				if err != nil {
-					return fmt.Errorf(
-						"convert output %d: %w",
-						produced.Id.Index(),
-						err,
-					)
-				}
-				id := uint(transactionID)
-				if collateralReturn != nil &&
-					produced.Output == collateralReturn {
-					model.CollateralReturnForTxID = &id
-				} else {
-					model.TransactionID = &id
-				}
-				inserted, err := s.insertUtxoModelChecked(
-					ctx, db, &model, true,
-				)
-				if err != nil {
-					return err
-				}
-				if len(model.StakingKey) > 0 {
-					gain, err := producedStakeCredentialDelta(
-						model.CredentialTag,
-						model.StakingKey,
-						model.Amount,
-						inserted,
-					)
-					if err != nil {
-						return err
-					}
-					producedStakeDeltas = append(producedStakeDeltas, gain)
-				}
-			}
-			// Merge as setTransactionWithAccumulator does: certificateRefs
-			// and producedStakeDeltas are each already deduped/summed
-			// against themselves, but not against each other, and a
-			// certificate touching the same credential as one of this gap
-			// block's produced outputs would otherwise apply that
-			// credential's delta twice instead of once net.
-			return s.refreshRewardLiveStakeDeltas(
-				ctx,
-				db,
-				mergeStakeCredentialDeltas(
-					refsToStakeCredentialDeltas(certificateRefs),
-					producedStakeDeltas,
-				),
-				point.Slot,
-			)
-		},
-	)
-}
-
-func (s *Store) RecomputeGapCollateralFee(
-	transaction lcommon.Transaction,
-	_ ocommon.Point,
-	txn types.Txn,
-) error {
-	if transaction.IsValid() {
-		return nil
-	}
-	return s.withWriteTransaction(
-		txn,
-		func(db queryer, ctx context.Context) error {
-			fee, err := s.collateralFeeForTransaction(ctx, db, transaction)
-			if err != nil {
-				return err
-			}
-			_, err = db.ExecContext(
-				ctx,
-				`-- name: UpdateTransactionCollateralFee :exec
-UPDATE "transaction" SET collateral_fee = ? WHERE hash = ?`,
-				decimalUint64(types.Uint64(fee)),
-				transaction.Hash().Bytes(),
-			)
-			return err
+			return nil
 		},
 	)
 }
@@ -2493,12 +2421,10 @@ func (s *Store) applyTransactionWithdrawals(
 			tag,
 			stakeKey.Bytes(),
 		).Scan(&accountID, &reward)
-		accountFound := true
 		if errors.Is(err, sql.ErrNoRows) {
 			if !historicalBackfill {
 				return models.ErrAccountNotFound
 			}
-			accountFound = false
 			// A historical withdrawal may be applied after deregistration,
 			// so an inactive account is still a valid historical account. It
 			// must be present; silently journaling a withdrawal with no account
@@ -2516,6 +2442,16 @@ func (s *Store) applyTransactionWithdrawals(
 		} else if err != nil {
 			return err
 		}
+		debit := !historicalBackfill ||
+			(batchedAccumulator != nil && batchedAccumulator.debitWithdrawals)
+		if !historicalBackfill && batchedAccumulator != nil &&
+			batchedAccumulator.leiosAPIRowsOnly &&
+			batchedAccumulator.debitWithdrawalsSet {
+			// A closure is not a historical replay, but the replay that
+			// reaches it chose whether withdrawals debit, for the blocks
+			// around it and for it alike.
+			debit = batchedAccumulator.debitWithdrawals
+		}
 		var exists bool
 		if err := s.queryRowCached(ctx, db, withdrawalRewardDeltaExistsSQL,
 			txHash,
@@ -2531,7 +2467,7 @@ func (s *Store) applyTransactionWithdrawals(
 		if err != nil {
 			return err
 		}
-		if !historicalBackfill && amount.Uint64() > previous {
+		if debit && amount.Uint64() > previous {
 			return fmt.Errorf(
 				"reward withdrawal amount %s exceeds account balance %d: %w",
 				amount.String(),
@@ -2544,12 +2480,11 @@ func (s *Store) applyTransactionWithdrawals(
 		}
 		// Historical API backfill replays withdrawals before the imported
 		// snapshot balance's intervening credits are available. Record the
-		// withdrawal history, but leave that trusted boundary balance untouched.
-		// accountFound is guaranteed true here whenever historicalBackfill is
-		// false (the account lookup above returns early otherwise); the extra
-		// check keeps this update from ever reactivating or fabricating a
-		// current stake-registration account.
-		if !historicalBackfill && accountFound {
+		// withdrawal history, but leave that trusted boundary balance untouched,
+		// unless the caller replays the credits too. A debited replay may reach
+		// an account deregistered since, which keeps its balance row; the
+		// lookup above returns early for a missing account otherwise.
+		if debit {
 			rewardAfter := previous - amount.Uint64()
 			if _, err := s.execCached(ctx, db, updateAccountRewardSQL,
 				strconv.FormatUint(rewardAfter, 10),
@@ -2568,7 +2503,7 @@ func (s *Store) applyTransactionWithdrawals(
 		); err != nil {
 			return err
 		}
-		if !historicalBackfill {
+		if debit {
 			ref := models.NewStakeCredentialRef(tag, stakeKey.Bytes())
 			pending, err := pendingUtxoStakeDelta(
 				ctx, db, txn, batchedAccumulator, ref,

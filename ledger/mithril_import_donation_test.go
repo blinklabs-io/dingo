@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -48,8 +47,8 @@ func TestMithrilImportedDonationReachesBoundaryTreasuryAndRatify(
 	_, reservesBefore, _ := networkState(t, f.db)
 
 	nonce := make([]byte, 32)
-	require.NoError(t, ledgerstate.ImportLedgerState(
-		context.Background(),
+	require.NoError(t, importLedgerStateForTest(
+		t, f.ls,
 		ledgerstate.ImportConfig{
 			Database: f.db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),

@@ -24,6 +24,7 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/internal/apilistener"
+	"github.com/blinklabs-io/dingo/internal/apiready"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 )
 
@@ -45,6 +46,8 @@ type Blockfrost struct {
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
 	listener *apilistener.Listener
+	// ready gates IndexerDB-backed routes; nil serves every route.
+	ready apiready.Check
 }
 
 // New creates a new Blockfrost API server instance.
@@ -74,7 +77,11 @@ func New(
 			cfg.MaxConcurrentPoolLists,
 			cfg.MaxConcurrentPoolListsPerClient,
 		),
-		listener: apilistener.New("Blockfrost API", logger),
+		listener: apilistener.NewWithListenerFactory(
+			"Blockfrost API",
+			logger,
+			cfg.Listen,
+		),
 	}
 }
 
@@ -163,10 +170,33 @@ func (b *Blockfrost) mutationHandler(next http.HandlerFunc) http.Handler {
 	})
 }
 
-// handler builds the HTTP handler for the Blockfrost API,
-// including route registration and middleware.
-func (b *Blockfrost) handler() http.Handler {
-	mux := http.NewServeMux()
+// routeMux records every pattern registered on it so tests can check that each
+// one is classified for readiness.
+type routeMux struct {
+	*http.ServeMux
+	patterns []string
+}
+
+func (m *routeMux) HandleFunc(
+	pattern string,
+	handler func(http.ResponseWriter, *http.Request),
+) {
+	m.patterns = append(m.patterns, pattern)
+	m.ServeMux.HandleFunc(pattern, handler)
+}
+
+func (m *routeMux) Handle(pattern string, handler http.Handler) {
+	m.patterns = append(m.patterns, pattern)
+	m.ServeMux.Handle(pattern, handler)
+}
+
+// RoutePatterns returns every method-and-path pattern the API registers.
+func RoutePatterns() []string {
+	return New(BlockfrostConfig{}, nil, nil).buildMux().patterns
+}
+
+func (b *Blockfrost) buildMux() *routeMux {
+	mux := &routeMux{ServeMux: http.NewServeMux()}
 	// "GET /{$}" matches only the literal root path. Without
 	// "{$}" the pattern would act as a subtree match and
 	// silently catch every unimplemented route.
@@ -512,15 +542,28 @@ func (b *Blockfrost) handler() http.Handler {
 	// ServeMux resolves by pattern specificity, not
 	// registration order.
 	mux.HandleFunc("/", b.handleNotFound)
+	return mux
+}
 
+// handler builds the HTTP handler for the Blockfrost API,
+// including route registration and middleware.
+func (b *Blockfrost) handler() http.Handler {
+	mux := b.buildMux()
 	routed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if b.writeUnsupportedMethod(w, r) {
 			return
 		}
 		mux.ServeHTTP(w, r)
 	})
-	return httpcors.Handler(
+	gated := apiready.Middleware(
+		b.ready, classifyRoute,
+		func(w http.ResponseWriter, status int, message string) {
+			writeError(w, status, "Service Unavailable", message)
+		},
 		routed,
+	)
+	return httpcors.Handler(
+		gated,
 		httpcors.Config{
 			AllowedOrigins: b.config.CORSAllowedOrigins,
 			ExposeHeaders:  []string{"Retry-After"},

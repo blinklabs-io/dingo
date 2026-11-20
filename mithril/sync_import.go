@@ -27,12 +27,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/node"
@@ -116,67 +114,6 @@ func epochLengthFromConfig(
 	}
 }
 
-func ensureMithrilBackfillCheckpoint(db *database.Database) error {
-	cp, err := db.Metadata().GetBackfillCheckpoint(
-		node.BackfillPhase, nil,
-	)
-	if err != nil {
-		return fmt.Errorf("reading backfill checkpoint: %w", err)
-	}
-
-	if cp != nil && !cp.Completed && cp.LastIndexID != nil &&
-		len(cp.LastBlockHash) == 32 {
-		return nil
-	}
-
-	now := time.Now()
-	if cp == nil {
-		cp = &models.BackfillCheckpoint{
-			Phase:     node.BackfillPhase,
-			LastSlot:  0,
-			StartedAt: now,
-			UpdatedAt: now,
-			Completed: false,
-		}
-	} else {
-		cp.LastSlot = 0
-		cp.LastIndexID = nil
-		cp.LastBlockHash = nil
-		cp.TotalSlots = 0
-		cp.Completed = false
-		cp.UpdatedAt = now
-	}
-
-	if err := db.Metadata().SetBackfillCheckpoint(cp, nil); err != nil {
-		return fmt.Errorf("setting backfill checkpoint: %w", err)
-	}
-	return nil
-}
-
-func resetMithrilBackfillCheckpoint(db *database.Database) error {
-	cp, err := db.Metadata().GetBackfillCheckpoint(
-		node.BackfillPhase, nil,
-	)
-	if err != nil {
-		return fmt.Errorf("reading backfill checkpoint for repair: %w", err)
-	}
-	now := time.Now()
-	if cp == nil {
-		cp = &models.BackfillCheckpoint{Phase: node.BackfillPhase}
-	}
-	cp.LastSlot = 0
-	cp.LastIndexID = nil
-	cp.LastBlockHash = nil
-	cp.TotalSlots = 0
-	cp.Completed = false
-	cp.StartedAt = now
-	cp.UpdatedAt = now
-	if err := db.Metadata().SetBackfillCheckpoint(cp, nil); err != nil {
-		return fmt.Errorf("resetting backfill checkpoint for repair: %w", err)
-	}
-	return nil
-}
-
 func updateMithrilReadyState(
 	ctx context.Context,
 	db *database.Database,
@@ -184,15 +121,11 @@ func updateMithrilReadyState(
 	loadResult *node.LoadBlobsResult,
 	ledgerStateSlot uint64,
 	ledgerStateHash []byte,
-	syncStatus string,
-	clearSyncState bool,
 ) error {
-	if clearSyncState {
-		// The clear below deletes every key outside the keep-list, which
-		// omits the drain markers.
-		if err := db.RefuseLedgerStateRewrite(ctx); err != nil {
-			return err
-		}
+	// The clear below deletes every key outside the keep-list, which omits
+	// the drain markers.
+	if err := db.RefuseLedgerStateRewrite(ctx); err != nil {
+		return err
 	}
 	tipTxn := db.MetadataTxn(ctx, false)
 	ledgerTip, err := db.GetTip(tipTxn)
@@ -223,34 +156,25 @@ func updateMithrilReadyState(
 
 	txn := db.MetadataTxn(ctx, true)
 	if err := txn.Do(func(txn *database.Txn) error {
-		if clearSyncState {
-			// A read-clear-restore cycle can overwrite a newer fence on
-			// backends that allow concurrent writers. Leave persistent rows
-			// untouched so a forger's advancing slot never enters that cycle.
-			keys, err := db.ListSyncStateKeysByPrefix("", txn)
-			if err != nil {
-				return fmt.Errorf("listing sync state: %w", err)
+		// A read-clear-restore cycle can overwrite a newer fence on
+		// backends that allow concurrent writers. Leave persistent rows
+		// untouched so a forger's advancing slot never enters that cycle.
+		keys, err := db.ListSyncStateKeysByPrefix("", txn)
+		if err != nil {
+			return fmt.Errorf("listing sync state: %w", err)
+		}
+		for _, key := range keys {
+			if key == deferred.SyncStateKey ||
+				key == metadata.PlannerStatsBackfillSyncKey ||
+				key == nodeconsensus.DatabaseIdentitySyncKey ||
+				key == database.UtxoSetOnlySyncKey ||
+				key == database.DrainedImportSyncKey ||
+				key == database.HistoryExpiryCursorSyncKey ||
+				strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
+				continue
 			}
-			for _, key := range keys {
-				if key == deferred.SyncStateKey ||
-					key == metadata.PlannerStatsBackfillSyncKey ||
-					key == nodeconsensus.DatabaseIdentitySyncKey ||
-					key == database.UtxoSetOnlySyncKey ||
-					key == database.DrainedImportSyncKey ||
-					strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
-					continue
-				}
-				if err := db.DeleteSyncState(key, txn); err != nil {
-					return fmt.Errorf("cleaning up sync state %q: %w", key, err)
-				}
-			}
-		} else if syncStatus != "" {
-			if err := db.SetSyncState(
-				"sync_status", syncStatus, txn,
-			); err != nil {
-				return fmt.Errorf(
-					"recording sync status: %w", err,
-				)
+			if err := db.DeleteSyncState(key, txn); err != nil {
+				return fmt.Errorf("cleaning up sync state %q: %w", key, err)
 			}
 		}
 		if err := db.SetSyncState(

@@ -157,23 +157,16 @@ func testEntry() statedrain.Entry {
 			{Name: "t2", Key: "id"},
 		},
 		Loaded: func() (bool, error) { return true, nil },
-		Verify: func(context.Context) error { return nil },
 	}
 }
 
 type fakeSource struct {
 	fakeSet
-	loaded   map[nodesettings.Family]bool
-	verified []nodesettings.Family
+	loaded map[nodesettings.Family]bool
 }
 
 func (s *fakeSource) Loaded(f nodesettings.Family) (bool, error) {
 	return s.loaded[f], nil
-}
-
-func (s *fakeSource) Verify(_ context.Context, f nodesettings.Family) error {
-	s.verified = append(s.verified, f)
-	return nil
 }
 
 func TestGraduatedListNamesTheFamiliesAndTheirTables(t *testing.T) {
@@ -278,10 +271,6 @@ func TestGraduatedListNamesTheFamiliesAndTheirTables(t *testing.T) {
 	loaded, err = entries[2].Loaded()
 	require.NoError(t, err)
 	require.False(t, loaded)
-	require.NoError(t, entries[2].Verify(t.Context()))
-	require.Equal(t, []nodesettings.Family{
-		nodesettings.FamilyNetworkDonations,
-	}, src.verified)
 }
 
 func TestRunDrainsAndRecordsTheBit(t *testing.T) {
@@ -308,7 +297,6 @@ func TestRunRefusesEachUnmetPrecondition(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
 		mutate func(*statedrain.Env, *statedrain.Entry, *fakeStore)
-		verify bool
 	}{
 		"markers not loaded": {
 			mutate: func(_ *statedrain.Env, e *statedrain.Entry, _ *fakeStore) {
@@ -339,27 +327,13 @@ func TestRunRefusesEachUnmetPrecondition(t *testing.T) {
 				env.Set = fakeSet{}
 			},
 		},
-		"verification fails": {
-			verify: true,
-			mutate: func(_ *statedrain.Env, e *statedrain.Entry, _ *fakeStore) {
-				e.Verify = func(context.Context) error {
-					return errors.New("row differs")
-				}
-			},
-		},
-		"verification requested but not declared": {
-			verify: true,
-			mutate: func(_ *statedrain.Env, e *statedrain.Entry, _ *fakeStore) {
-				e.Verify = nil
-			},
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			store := newFakeStore(3)
 			entry := testEntry()
 			env := statedrain.Env{
-				Store: store, Set: currentSet(), VerifyBeforeDrain: tc.verify,
+				Store: store, Set: currentSet(),
 			}
 			tc.mutate(&env, &entry, store)
 			err := statedrain.Run(t.Context(), env, []statedrain.Entry{entry})
@@ -369,21 +343,6 @@ func TestRunRefusesEachUnmetPrecondition(t *testing.T) {
 			require.Empty(t, store.syncState, "no marker is written")
 		})
 	}
-}
-
-func TestRunSkipsVerifyUnlessAsked(t *testing.T) {
-	t.Parallel()
-	store := newFakeStore(1)
-	entry := testEntry()
-	entry.Verify = func(context.Context) error {
-		return errors.New("must not run")
-	}
-	env := statedrain.Env{Store: store, Set: currentSet()}
-	require.NoError(
-		t,
-		statedrain.Run(t.Context(), env, []statedrain.Entry{entry}),
-	)
-	require.True(t, store.latch.Has(testFamily))
 }
 
 func TestRunResumesAnInterruptedDrain(t *testing.T) {
@@ -399,13 +358,10 @@ func TestRunResumesAnInterruptedDrain(t *testing.T) {
 	require.Positive(t, store.tables["t2"].rows)
 
 	// Resuming must not re-run the gate: the set tip no longer matters once
-	// rows are gone, and verification would see the deleted rows as a
-	// difference.
+	// rows are gone.
 	store.failAfter = 0
 	env.Set = fakeSet{}
 	entry.Loaded = func() (bool, error) { return false, nil }
-	entry.Verify = func(context.Context) error { return errors.New("partial") }
-	env.VerifyBeforeDrain = true
 	require.NoError(
 		t,
 		statedrain.Run(t.Context(), env, []statedrain.Entry{entry}),
@@ -487,10 +443,8 @@ func TestRunRefusedGateKeepsTheSyncKeys(t *testing.T) {
 	store := newFakeStore(3)
 	store.syncState["owned"] = "v"
 	entry := syncKeyEntry()
-	entry.Verify = func(context.Context) error { return errors.New("differ") }
-	env := statedrain.Env{
-		Store: store, Set: currentSet(), VerifyBeforeDrain: true,
-	}
+	entry.Loaded = func() (bool, error) { return false, nil }
+	env := statedrain.Env{Store: store, Set: currentSet()}
 	err := statedrain.Run(t.Context(), env, []statedrain.Entry{entry})
 	require.ErrorIs(t, err, statedrain.ErrGateRefused)
 	require.Equal(t, "v", store.syncState["owned"])
@@ -517,8 +471,7 @@ func TestRunResumesAnInterruptedSyncKeyDeletion(t *testing.T) {
 
 	store.failKeyDelete = ""
 	env.Set = fakeSet{}
-	env.VerifyBeforeDrain = true
-	entry.Verify = func(context.Context) error { return errors.New("partial") }
+	entry.Loaded = func() (bool, error) { return false, nil }
 	require.NoError(
 		t,
 		statedrain.Run(t.Context(), env, []statedrain.Entry{entry}),
@@ -628,8 +581,7 @@ func TestRunResumesAnInterruptedPrefixDeletion(t *testing.T) {
 
 	store.failKeyDelete = ""
 	env.Set = fakeSet{}
-	env.VerifyBeforeDrain = true
-	entry.Verify = func(context.Context) error { return errors.New("partial") }
+	entry.Loaded = func() (bool, error) { return false, nil }
 	require.NoError(
 		t, statedrain.Run(t.Context(), env, []statedrain.Entry{entry}),
 	)

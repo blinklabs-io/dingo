@@ -60,6 +60,11 @@ type Config struct {
 	// when below one.
 	CheckpointDir  string
 	CheckpointKeep int
+	// RetainRewardRecords keeps the reward records an IndexerDB writer has
+	// not copied past the rollback window, so a writer that lags, or a
+	// database moved to the split layout, still finds the credits it has not
+	// applied.
+	RetainRewardRecords bool
 	// MemTableSize is Badger's memtable size in bytes; zero uses
 	// DefaultMemTableSize.
 	MemTableSize int64
@@ -70,14 +75,22 @@ type Config struct {
 // many sets sets it once from TestMain, before any set is opened.
 var DefaultMemTableSize int64
 
+// DefaultBlockCacheSize is the Badger block cache size of every set; zero
+// keeps Badger's default. A test binary that opens many sets sets it once
+// from TestMain, before any set is opened.
+var DefaultBlockCacheSize int64
+
 // pruneEvery is how many tip-moving commits pass between journal prunes.
 const pruneEvery = 1000
 
 // Set is the live UTxO set in Badger. It implements ledger.UtxoSetWriter.
 type Set struct {
-	store  *badgerutxo.Store
-	logger *slog.Logger
-	m      *metrics
+	// retainRewards loads the reward stake and derived rows of every epoch
+	// rather than the window's, for a reader that copies them.
+	retainRewards bool
+	store         *badgerutxo.Store
+	logger        *slog.Logger
+	m             *metrics
 	// unregister releases the metrics Open registered. A snapshot view
 	// shares them and has none.
 	unregister func()
@@ -261,22 +274,28 @@ func Open(cfg Config) (*Set, error) {
 		cfg.Dir,
 		badgerutxo.WithAggregator(ledger.UtxoStakeOf),
 		badgerutxo.WithMemTableSize(memTable),
+		badgerutxo.WithBlockCacheSize(DefaultBlockCacheSize),
 	)
 	if err != nil {
 		return nil, err
 	}
 	m, unregister := newMetrics(cfg.Registerer)
 	set := &Set{
-		store:        store,
-		dir:          cfg.Dir,
-		logger:       logger.With("component", "utxoset"),
-		m:            m,
-		unregister:   unregister,
-		history:      cfg.HistorySlots,
-		only:         cfg.Only,
-		pruneJournal: store.PruneJournal,
+		store:         store,
+		dir:           cfg.Dir,
+		logger:        logger.With("component", "utxoset"),
+		m:             m,
+		unregister:    unregister,
+		history:       cfg.HistorySlots,
+		only:          cfg.Only,
+		retainRewards: cfg.RetainRewardRecords,
+		pruneJournal:  store.PruneJournal,
 
 		rollBackAhead: cfg.Only || cfg.Authoritative,
+	}
+	if err := store.SetRewardConsumer(cfg.RetainRewardRecords); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("utxoset: set the reward record consumer: %w", err)
 	}
 	set.SetCheckpointDir(cfg.CheckpointDir, cfg.CheckpointKeep)
 	return set, nil
@@ -393,6 +412,12 @@ func (s *Set) ApplyLedgerChanges(
 	pparams := make([]badgerutxo.PParamsRow, 0, len(lc.PParams))
 	for _, p := range lc.PParams {
 		pparams = append(pparams, pparamsRow(p))
+	}
+	if tip != nil && rollbackTo == nil {
+		batch, err = s.withBlockPoints(batch, nonces, *tip)
+		if err != nil {
+			return err
+		}
 	}
 	leading, batch := splitTipless(tip, changes, batch)
 	var res badgerutxo.ApplyResult
@@ -722,6 +747,9 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 	if err := s.ensureDrepState(ctx, ldb); err != nil {
 		return err
 	}
+	if err := s.ensureDRepHistory(ctx, ldb); err != nil {
+		return err
+	}
 	if err := s.ensurePools(ctx, ldb); err != nil {
 		return err
 	}
@@ -753,6 +781,12 @@ func (s *Set) loadFamilies(ctx context.Context, ldb ledgerdb.LedgerDB) error {
 		return err
 	}
 	if err := s.ensureRewardBlocks(ctx, ldb); err != nil {
+		return err
+	}
+	if err := s.ensureImportedBlocks(ctx, ldb); err != nil {
+		return err
+	}
+	if err := s.ensureRewardRecords(ctx, ldb); err != nil {
 		return err
 	}
 	if err := s.ensureRewardInputs(ctx, ldb); err != nil {
@@ -1239,6 +1273,54 @@ func (s *Set) noBaseError(
 
 func samePoint(a, b ocommon.Point) bool {
 	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
+}
+
+// withBlockPoints returns batch with an empty change at every block of the
+// commit that changed no output. The store journals one record per change
+// point and a rollback can only target a record's point, so without them a
+// block with no transactions that commits with later blocks is not a point
+// the set can roll back to. The commit's blocks are its nonce points, which
+// the ledger stages for every block it applies.
+func (s *Set) withBlockPoints(
+	batch []badgerutxo.Change,
+	nonces []badgerutxo.Nonce,
+	tip ocommon.Point,
+) ([]badgerutxo.Change, error) {
+	if len(nonces) == 0 {
+		return batch, nil
+	}
+	cur, _, err := s.store.Tip()
+	if err != nil {
+		return nil, fmt.Errorf("utxoset: read tip: %w", err)
+	}
+	last := cur.Slot
+	for _, n := range nonces {
+		// Points out of order or outside the commit are not its blocks.
+		if len(n.Point.Hash) == 0 || n.Point.Slot < last ||
+			n.Point.Slot > tip.Slot || samePoint(n.Point, cur) {
+			return batch, nil
+		}
+		last = n.Point.Slot
+	}
+	out := make([]badgerutxo.Change, 0, len(batch)+len(nonces))
+	i := 0
+	for _, n := range nonces {
+		for i < len(batch) && batch[i].Point.Slot < n.Point.Slot {
+			out = append(out, batch[i])
+			i++
+		}
+		if i == len(batch) || !samePoint(batch[i].Point, n.Point) {
+			if len(out) == 0 || !samePoint(out[len(out)-1].Point, n.Point) {
+				out = append(out, badgerutxo.Change{Point: n.Point})
+			}
+			continue
+		}
+		for i < len(batch) && samePoint(batch[i].Point, n.Point) {
+			out = append(out, batch[i])
+			i++
+		}
+	}
+	return append(out, batch[i:]...), nil
 }
 
 // Sum returns the stake sum for a key built by ledger.CredentialStakeKey or

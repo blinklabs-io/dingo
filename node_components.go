@@ -44,6 +44,7 @@ func (n *Node) databaseConfig() *database.Config {
 		Logger:               n.config.logger,
 		PromRegistry:         n.config.promRegistry,
 		StorageMode:          string(n.config.storageMode),
+		IndexerLayout:        n.indexerLayout(),
 		Network:              n.config.network,
 		NetworkMagic:         n.config.networkMagic,
 		StartEra:             string(n.config.startEra),
@@ -141,7 +142,27 @@ func (n *Node) newHistoryExpiryPruner() *historyexpiry.Pruner {
 		DB:          n.db,
 		Logger:      n.config.logger,
 		Frequency:   prunerFreq,
+		Ceiling:     n.historyExpiryCeiling,
 	})
+}
+
+// historyExpiryCeiling keeps history expiry behind the IndexerDB writer,
+// which reads block bodies from the consensus store: it expires nothing the
+// writer has not indexed, and keeps the writer's tip block, which the writer
+// reads again to resume. Without an IndexerDB nothing bounds it.
+func (n *Node) historyExpiryCeiling(context.Context) (uint64, bool, error) {
+	store := n.indexerStore
+	if store == nil {
+		return ^uint64(0), true, nil
+	}
+	tip, err := store.Tip(nil)
+	if err != nil {
+		return 0, false, err
+	}
+	if tip.IsZero() || tip.Slot == 0 {
+		return 0, false, nil
+	}
+	return tip.Slot - 1, true, nil
 }
 
 func (n *Node) newDatabaseLifecycleManager() *dblifecycle.Manager {
@@ -155,15 +176,27 @@ func (n *Node) newDatabaseLifecycleManager() *dblifecycle.Manager {
 		n.config.logger,
 	)
 	mgr.SetUtxoSetSource(n.utxoSetBackuper)
+	mgr.SetIndexerPayloadSource(n.indexerPayloadSource())
 	return mgr
 }
 
 func (n *Node) midnightServerConfig() midnightserver.Config {
+	store := n.indexerStore
+	midnightDB := midnightserver.NewBoundedDatabase(
+		midnightserver.NewDatabase(n.indexerDB),
+		func(context.Context) (uint64, uint64, bool, error) {
+			tip, err := store.Tip(nil)
+			if err != nil {
+				return 0, 0, false, err
+			}
+			return tip.Slot, tip.BlockNumber, !tip.IsZero(), nil
+		},
+	)
 	return midnightserver.Config{
 		Logger:   n.config.logger,
-		Metadata: n.db.Metadata(),
+		Metadata: n.indexerDB.Metadata(),
 		BlockNumberByHash: func(ctx context.Context, hash []byte) (uint64, bool, error) {
-			block, err := database.BlockByHash(ctx, n.db, hash)
+			block, err := midnightDB.BlockByHash(ctx, hash)
 			if err != nil {
 				if errors.Is(err, models.ErrBlockNotFound) {
 					return 0, false, nil
@@ -179,7 +212,7 @@ func (n *Node) midnightServerConfig() midnightserver.Config {
 		TLSKeyFilePath:    n.config.tlsKeyFilePath,
 		ReflectionEnabled: n.config.midnight.ReflectionEnabled,
 		ShutdownTimeout:   n.config.shutdownTimeout,
-		Database:          midnightserver.NewDatabase(n.db),
+		Database:          midnightDB,
 		SlotTimer:         n.ledgerState,
 		PromRegistry:      n.config.promRegistry,
 	}
@@ -188,7 +221,7 @@ func (n *Node) midnightServerConfig() midnightserver.Config {
 func (n *Node) offchainMetadataConfig() offchainmetadata.Config {
 	return offchainmetadata.Config{
 		Logger:                n.config.logger,
-		Store:                 n.db.Metadata(),
+		Store:                 n.apiDatabase().Metadata(),
 		HTTPClient:            n.config.offchainMetadata.HTTPClient,
 		Interval:              n.config.offchainMetadata.Interval,
 		RequestTimeout:        n.config.offchainMetadata.RequestTimeout,

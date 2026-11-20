@@ -43,7 +43,7 @@ func newDrainableRewardRoundRun(
 		g = guard
 	}
 	scenario := ledger.NewRewardBlocksScenarioForTest(
-		t, set, ledger.UtxoSetReadsSet, g,
+		t, set, "set", g,
 		ledger.RewardBlocksOptions{Imported: true, Round: true},
 	)
 	require.NoError(t, set.LoadLedgerState(

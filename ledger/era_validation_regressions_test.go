@@ -171,6 +171,7 @@ func validateTxInBlock(
 	tx lcommon.Transaction,
 ) error {
 	t.Helper()
+	attachTestLiveSet(t, ls)
 	block := &validityOutcomeTestBlock{
 		header: &conway.ConwayBlockHeader{},
 		txs:    []lcommon.Transaction{tx},

@@ -1740,6 +1740,32 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	return models.Block{}, models.ErrBlockNotFound
 }
 
+// IsCanonicalBlock reports whether the block is the primary-chain entry at its
+// own index. A block the database no longer stores, as after a rollback that
+// deleted it, is not canonical, and neither is a stored block with no index
+// entry.
+func IsCanonicalBlock(
+	ctx context.Context,
+	db *Database,
+	hash []byte,
+) (bool, error) {
+	blk, err := BlockByHash(ctx, db, hash)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	point, err := db.BlockPointByIndex(blk.ID, nil)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read block index entry: %w", err)
+	}
+	return point.Slot == blk.Slot && bytes.Equal(point.Hash, hash), nil
+}
+
 func BlockBySlotTxn(txn *Txn, slot uint64) (models.Block, error) {
 	if txn == nil {
 		return models.Block{}, types.ErrNilTxn

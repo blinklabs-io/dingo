@@ -364,12 +364,14 @@ func newTestLSForHardForkRule(
 	db *database.Database,
 ) *LedgerState {
 	t.Helper()
-	return &LedgerState{
+	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	attachTestLiveSet(t, ls)
+	return ls
 }
 
 // seedByronAvvmFixtures inserts two live Byron UTxOs — one at a redeem
@@ -443,11 +445,14 @@ func seedByronUtxoAt(
 	require.NoError(t, err)
 
 	txId := bytes.Repeat([]byte{txIdSeed}, 32)
+	addressBytes, err := addr.Bytes()
+	require.NoError(t, err)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
 		TxId:      txId,
 		OutputIdx: outputIdx,
 		AddedSlot: 100,
+		Address:   addressBytes,
 	}))
 	blob := db.Blob()
 	require.NotNil(t, blob)

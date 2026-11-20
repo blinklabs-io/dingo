@@ -128,6 +128,7 @@ func mainnetMIRView(
 			Logger:            testLogger(),
 		},
 	}
+	attachTestLiveSet(t, ls)
 	ls.publishSnapshotsLocked()
 	return ls, pp
 }

@@ -21,8 +21,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"strconv"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/database/ledgerdb"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -57,7 +55,7 @@ func (ls *LedgerState) liveStakeSource(
 	txn ledgerdb.Txn,
 ) (liveStakeSource, bool) {
 	ur, mode := ls.utxoSetReaderFor(txn)
-	if mode == UtxoSetReadsOff || ur == nil {
+	if !mode || ur == nil {
 		return liveStakeSource{}, false
 	}
 	ar := ls.accountReader(txn)
@@ -203,10 +201,6 @@ func expiryAllows(a *models.Account, expiryEpoch uint64) bool {
 		a.ExpirationEpoch >= expiryEpoch
 }
 
-func liveStakeKey(pool []byte, tag uint8, key []byte) string {
-	return fmt.Sprintf("%x/%d/%x", pool, tag, key)
-}
-
 // poolInputRows is GetLiveStakeInputsForPools's rows: every active account
 // delegating to one of pools that the CIP-0163 gate leaves counted, with its
 // UTxO stake and reward balance, ordered as the store orders them.
@@ -249,22 +243,6 @@ func (src liveStakeSource) poolInputRows(
 			bytes.Compare(a.StakingKey, b.StakingKey),
 		)
 	})
-	return out, nil
-}
-
-// poolInputs is GetLiveStakeInputsForPools's stake per (pool, credential).
-func (src liveStakeSource) poolInputs(
-	pools [][]byte,
-	expiryEpoch uint64,
-) (map[string]uint64, error) {
-	rows, err := src.poolInputRows(pools, expiryEpoch)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]uint64, len(rows))
-	for _, r := range rows {
-		out[liveStakeKey(r.PoolKeyHash, r.CredentialTag, r.StakingKey)] = uint64(r.Stake)
-	}
 	return out, nil
 }
 
@@ -328,23 +306,6 @@ func (src liveStakeSource) poolStakeMaps(
 	return stakes, delegators, nil
 }
 
-// poolStakes is GetStakeByPools's UTxO stake and delegator count per pool,
-// under "stake/" and "delegators/" keys.
-func (src liveStakeSource) poolStakes(pools [][]byte) (map[string]uint64, error) {
-	stakes, delegators, err := src.poolStakeMaps(pools)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]uint64, len(stakes)+len(delegators))
-	for p, v := range stakes {
-		out["stake/"+p] = v
-	}
-	for p, v := range delegators {
-		out["delegators/"+p] = v
-	}
-	return out, nil
-}
-
 // drepPowerOf is the stake delegated to the DRep (typ, drep), by the active
 // accounts the CIP-0163 gate leaves counted: UTxO stake plus reward balance.
 // It also returns how many accounts count, which the store's batch and by-type
@@ -389,184 +350,19 @@ func (src liveStakeSource) drepPower(
 	return power, err
 }
 
-// sameLiveStake compares the store's answer with the set's. credits says the
-// store's answer includes pending reward credits the set cannot account for
-// because it does not hold its reward rows, so each of the set's figures may
-// fall short of the store's but not exceed it.
-func sameLiveStake(want, got map[string]uint64, credits bool) bool {
-	if len(want) != len(got) {
-		return false
-	}
-	for k, g := range got {
-		w, ok := want[k]
-		if !ok || g > w || (!credits && g != w) {
-			return false
-		}
-	}
-	return true
-}
-
-func (ls *LedgerState) compareLiveStakeRead(
-	g verifyReadGuard,
-	what string,
-	same bool,
-	setErr error,
-	detail ...any,
-) {
-	if !ls.verifying() {
-		return
-	}
-	if setErr == nil && !same && ls.verifyReadRaced(g) {
-		return
-	}
-	ls.metrics.liveStakeReadsVerified.Inc()
-	if same && setErr == nil {
-		return
-	}
-	n := ls.liveStakeReadMismatches.Add(1)
-	ls.metrics.liveStakeReadMismatches.Inc()
-	if n > 20 && n%1000 != 0 {
-		return
-	}
-	ls.config.Logger.Warn(
-		"live UTxO set live stake read differs from the metadata store",
-		append([]any{
-			"component", "ledger",
-			"read", what,
-			"set_error", setErr,
-			"mismatches", n,
-		}, detail...)...,
-	)
-}
-
-// liveStakeDiffLimit bounds the figures a mismatch warning lists.
-const liveStakeDiffLimit = 10
-
-// liveStakeDiff names the keys whose store and set figures differ, with both,
-// as the warning's detail. A key is hex, since a key is raw credential or pool
-// bytes. The figures of a key only one side holds read "absent" on the other.
-func liveStakeDiff(want, got map[string]uint64) string {
-	keys := make([]string, 0, len(want)+len(got))
-	for k := range want {
-		keys = append(keys, k)
-	}
-	for k := range got {
-		if _, ok := want[k]; !ok {
-			keys = append(keys, k)
-		}
-	}
-	slices.Sort(keys)
-	figure := func(m map[string]uint64, k string) string {
-		if v, ok := m[k]; ok {
-			return strconv.FormatUint(v, 10)
-		}
-		return "absent"
-	}
-	var diffs []string
-	total := 0
-	for _, k := range keys {
-		w, g := figure(want, k), figure(got, k)
-		if w == g {
-			continue
-		}
-		total++
-		if total <= liveStakeDiffLimit {
-			diffs = append(diffs, fmt.Sprintf("%x store=%s set=%s", k, w, g))
-		}
-	}
-	out := fmt.Sprintf(
-		"differing=%d of store=%d set=%d keys", total, len(want), len(got),
-	)
-	if len(diffs) > 0 {
-		out += ": " + strings.Join(diffs, "; ")
-	}
-	return out
-}
-
-// stagedBatchSummary counts the batches txn sees over the set's applied state:
-// what the set's answer was built from.
-func (ls *LedgerState) stagedBatchSummary(txn ledgerdb.Txn) string {
-	ls.utxoSetApplyMu.RLock()
-	defer ls.utxoSetApplyMu.RUnlock()
-	return fmt.Sprintf("batches=%d", len(ls.stagedEpochStateOps(txn)))
-}
-
-// verifyLiveStake compares a read's live-stake figures with the set's.
-// hasCredits says the store's answer adds pending reward credits. The set
-// adds its own, so the comparison is exact; only a set that does not hold its
-// reward rows is compared loosely, and then whether any credits exist is read
-// after the store's answer, so a credit that folded meanwhile is a write the
-// guard sees, and one that appeared only loosens the comparison.
-func (s stagingLedgerDB) verifyLiveStake(
-	g verifyReadGuard,
-	txn ledgerdb.Txn,
-	what string,
-	hasCredits bool,
-	want map[string]uint64,
-	compute func(liveStakeSource) (map[string]uint64, error),
-) {
-	src, ok := s.ls.liveStakeSource(txn)
-	if !ok {
-		return
-	}
-	credits := false
-	if hasCredits && src.rr == nil {
-		var err error
-		credits, err = s.HasPendingRewardCreditRounds(txn)
-		if err != nil {
-			return
-		}
-	}
-	got, err := compute(src)
-	same := err == nil && sameLiveStake(want, got, credits)
-	if same || err != nil {
-		s.ls.compareLiveStakeRead(g, what, same, err)
-		return
-	}
-	s.ls.compareLiveStakeRead(g, what, same, err,
-		"diff", liveStakeDiff(want, got),
-		"staged", s.ls.stagedBatchSummary(txn),
-		"credits_loose", credits,
-	)
-}
-
-// liveStakeServed returns the source when a live stake read is answered from
-// the set: reads are in set mode and the set holds the accounts. A read that
-// includes pending reward credits is answered from the set once the set holds
-// the reward rows, which carry the credits. Until it does, such a read is
-// answered from the set only while the metadata store has no pending credit;
-// the others count no credits and are answered regardless.
+// liveStakeServed returns the source a live stake read is answered from: the
+// set's accounts and stake.
 func (s stagingLedgerDB) liveStakeServed(
 	txn ledgerdb.Txn,
-	withCredits bool,
-) (liveStakeSource, bool, error) {
-	src, ok, err := s.liveStakeServedFromSet(txn, withCredits)
-	if err == nil && !ok && s.ls.familyDrained(nodesettings.FamilyLiveStake) {
-		return liveStakeSource{}, false, drainedUnserved(
-			nodesettings.FamilyLiveStake,
-		)
-	}
-	return src, ok, err
-}
-
-func (s stagingLedgerDB) liveStakeServedFromSet(
-	txn ledgerdb.Txn,
-	withCredits bool,
-) (liveStakeSource, bool, error) {
-	if s.ls.accountServing(txn) == nil {
-		return liveStakeSource{}, false, nil
-	}
-	src, ok := s.ls.liveStakeSource(txn)
-	if !ok {
-		return liveStakeSource{}, false, nil
-	}
-	if withCredits && src.rr == nil {
-		pending, err := s.HasPendingRewardCreditRounds(txn)
-		if err != nil || pending {
-			return liveStakeSource{}, false, err
+) (liveStakeSource, error) {
+	if s.ls.accountServing(txn) != nil {
+		if src, ok := s.ls.liveStakeSource(txn); ok {
+			return src, nil
 		}
 	}
-	return src, true, nil
+	return liveStakeSource{}, s.ls.setFamilyUnserved(
+		nodesettings.FamilyLiveStake,
+	)
 }
 
 func (s stagingLedgerDB) GetLiveStakeInputsForPools(
@@ -574,61 +370,33 @@ func (s stagingLedgerDB) GetLiveStakeInputsForPools(
 	expiryEpoch uint64,
 	txn ledgerdb.Txn,
 ) ([]*models.RewardStakeInput, error) {
-	if src, ok, err := s.liveStakeServed(txn, true); err != nil {
-		return nil, err
-	} else if ok {
-		if len(poolKeyHashes) == 0 {
-			return nil, nil
-		}
-		return src.poolInputRows(poolKeyHashes, expiryEpoch)
-	}
-	g := s.ls.verifyGuard(txn)
-	res, err := s.LedgerDB.GetLiveStakeInputsForPools(poolKeyHashes, expiryEpoch, txn)
+	src, err := s.liveStakeServed(txn)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
-	want := make(map[string]uint64, len(res))
-	for _, in := range res {
-		want[liveStakeKey(in.PoolKeyHash, in.CredentialTag, in.StakingKey)] = uint64(in.Stake)
+	if len(poolKeyHashes) == 0 {
+		return nil, nil
 	}
-	s.verifyLiveStake(g, txn, "live stake inputs for pools", true, want,
-		func(src liveStakeSource) (map[string]uint64, error) {
-			return src.poolInputs(poolKeyHashes, expiryEpoch)
-		})
-	return res, nil
+	return src.poolInputRows(poolKeyHashes, expiryEpoch)
 }
 
 func (s stagingLedgerDB) GetDelegatedPoolKeyHashes(
 	txn ledgerdb.Txn,
 ) ([][]byte, error) {
-	if src, ok, err := s.liveStakeServed(txn, false); err != nil {
-		return nil, err
-	} else if ok {
-		pools, err := src.delegatedPools()
-		if err != nil {
-			return nil, err
-		}
-		out := make([][]byte, 0, len(pools))
-		for p := range pools {
-			out = append(out, []byte(p))
-		}
-		slices.SortFunc(out, bytes.Compare)
-		return out, nil
-	}
-	g := s.ls.verifyGuard(txn)
-	res, err := s.LedgerDB.GetDelegatedPoolKeyHashes(txn)
+	src, err := s.liveStakeServed(txn)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
-	want := make(map[string]uint64, len(res))
-	for _, p := range res {
-		want[string(p)] = 0
+	pools, err := src.delegatedPools()
+	if err != nil {
+		return nil, err
 	}
-	s.verifyLiveStake(g, txn, "delegated pools", false, want,
-		func(src liveStakeSource) (map[string]uint64, error) {
-			return src.delegatedPools()
-		})
-	return res, nil
+	out := make([][]byte, 0, len(pools))
+	for p := range pools {
+		out = append(out, []byte(p))
+	}
+	slices.SortFunc(out, bytes.Compare)
+	return out, nil
 }
 
 func (s stagingLedgerDB) GetStakeByPools(
@@ -636,28 +404,11 @@ func (s stagingLedgerDB) GetStakeByPools(
 	poolKeyHashes [][]byte,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
-	if src, ok, err := s.liveStakeServed(txn, false); err != nil {
-		return nil, nil, err
-	} else if ok {
-		return src.poolStakeMaps(poolKeyHashes)
-	}
-	g := s.ls.verifyGuard(txn)
-	stakes, delegators, err := s.LedgerDB.GetStakeByPools(ctx, poolKeyHashes, txn)
+	src, err := s.liveStakeServed(txn)
 	if err != nil {
-		return stakes, delegators, err
+		return nil, nil, err
 	}
-	want := make(map[string]uint64, len(stakes)+len(delegators))
-	for p, v := range stakes {
-		want["stake/"+p] = v
-	}
-	for p, v := range delegators {
-		want["delegators/"+p] = v
-	}
-	s.verifyLiveStake(g, txn, "stake by pools", false, want,
-		func(src liveStakeSource) (map[string]uint64, error) {
-			return src.poolStakes(poolKeyHashes)
-		})
-	return stakes, delegators, nil
+	return src.poolStakeMaps(poolKeyHashes)
 }
 
 func (s stagingLedgerDB) GetDRepVotingPower(
@@ -667,25 +418,11 @@ func (s stagingLedgerDB) GetDRepVotingPower(
 	expiryEpoch uint64,
 	txn ledgerdb.Txn,
 ) (uint64, error) {
-	if src, ok, err := s.liveStakeServed(txn, true); err != nil {
-		return 0, err
-	} else if ok {
-		return src.drepPower(uint64(credentialTag), drepCredential, expiryEpoch)
-	}
-	g := s.ls.verifyGuard(txn)
-	res, err := s.LedgerDB.GetDRepVotingPower(
-		ctx, credentialTag, drepCredential, expiryEpoch, txn,
-	)
+	src, err := s.liveStakeServed(txn)
 	if err != nil {
-		return res, err
+		return 0, err
 	}
-	s.verifyLiveStake(g, txn, "DRep voting power", true,
-		map[string]uint64{"": res},
-		func(src liveStakeSource) (map[string]uint64, error) {
-			p, err := src.drepPower(uint64(credentialTag), drepCredential, expiryEpoch)
-			return map[string]uint64{"": p}, err
-		})
-	return res, nil
+	return src.drepPower(uint64(credentialTag), drepCredential, expiryEpoch)
 }
 
 func (s stagingLedgerDB) GetDRepVotingPowerBatch(
@@ -694,44 +431,21 @@ func (s stagingLedgerDB) GetDRepVotingPowerBatch(
 	expiryEpoch uint64,
 	txn ledgerdb.Txn,
 ) (map[string]uint64, error) {
-	if src, ok, err := s.liveStakeServed(txn, true); err != nil {
-		return nil, err
-	} else if ok {
-		out := make(map[string]uint64, len(drepCredentials))
-		for _, ref := range drepCredentials {
-			p, n, err := src.drepPowerOf(uint64(ref.Tag), ref.Key, expiryEpoch)
-			if err != nil {
-				return nil, err
-			}
-			if n > 0 {
-				out[ref.MapKey()] = p
-			}
-		}
-		return out, nil
-	}
-	g := s.ls.verifyGuard(txn)
-	res, err := s.LedgerDB.GetDRepVotingPowerBatch(ctx, drepCredentials, expiryEpoch, txn)
+	src, err := s.liveStakeServed(txn)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
-	// The store leaves a DRep with no delegator out; the set counts it as zero.
-	want := make(map[string]uint64, len(drepCredentials))
+	out := make(map[string]uint64, len(drepCredentials))
 	for _, ref := range drepCredentials {
-		want[ref.MapKey()] = res[ref.MapKey()]
+		power, count, err := src.drepPowerOf(uint64(ref.Tag), ref.Key, expiryEpoch)
+		if err != nil {
+			return nil, err
+		}
+		if count > 0 {
+			out[ref.MapKey()] = power
+		}
 	}
-	s.verifyLiveStake(g, txn, "DRep voting power batch", true, want,
-		func(src liveStakeSource) (map[string]uint64, error) {
-			got := make(map[string]uint64, len(drepCredentials))
-			for _, ref := range drepCredentials {
-				p, err := src.drepPower(uint64(ref.Tag), ref.Key, expiryEpoch)
-				if err != nil {
-					return nil, err
-				}
-				got[ref.MapKey()] = p
-			}
-			return got, nil
-		})
-	return res, nil
+	return out, nil
 }
 
 func (s stagingLedgerDB) GetDRepVotingPowerByType(
@@ -740,41 +454,19 @@ func (s stagingLedgerDB) GetDRepVotingPowerByType(
 	expiryEpoch uint64,
 	txn ledgerdb.Txn,
 ) (map[uint64]uint64, error) {
-	if src, ok, err := s.liveStakeServed(txn, true); err != nil {
-		return nil, err
-	} else if ok {
-		out := make(map[uint64]uint64, len(drepTypes))
-		for _, t := range drepTypes {
-			p, n, err := src.drepPowerOf(t, nil, expiryEpoch)
-			if err != nil {
-				return nil, err
-			}
-			if n > 0 {
-				out[t] = p
-			}
-		}
-		return out, nil
-	}
-	g := s.ls.verifyGuard(txn)
-	res, err := s.LedgerDB.GetDRepVotingPowerByType(ctx, drepTypes, expiryEpoch, txn)
+	src, err := s.liveStakeServed(txn)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
-	want := make(map[string]uint64, len(drepTypes))
-	for _, t := range drepTypes {
-		want[strconv.FormatUint(t, 10)] = res[t]
+	out := make(map[uint64]uint64, len(drepTypes))
+	for _, drepType := range drepTypes {
+		power, count, err := src.drepPowerOf(drepType, nil, expiryEpoch)
+		if err != nil {
+			return nil, err
+		}
+		if count > 0 {
+			out[drepType] = power
+		}
 	}
-	s.verifyLiveStake(g, txn, "DRep voting power by type", true, want,
-		func(src liveStakeSource) (map[string]uint64, error) {
-			got := make(map[string]uint64, len(drepTypes))
-			for _, t := range drepTypes {
-				p, err := src.drepPower(t, nil, expiryEpoch)
-				if err != nil {
-					return nil, err
-				}
-				got[strconv.FormatUint(t, 10)] = p
-			}
-			return got, nil
-		})
-	return res, nil
+	return out, nil
 }

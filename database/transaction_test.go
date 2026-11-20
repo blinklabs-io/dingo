@@ -42,9 +42,9 @@ import (
 // TestConsumedInputKeyEquality verifies that consumedInputKey compares two
 // inputs by hash and index the same way the fmt.Sprintf("%x:%d", ...) string
 // key it replaced did: equal for a repeated (hash, index) pair, distinct
-// when either component differs. ensureTransactionConsumedUtxos and
-// ensureGapConsumedUtxos rely on this equality to dedup a transaction's
-// Consumed() set, which can legitimately list the same input more than once.
+// when either component differs. ensureTransactionConsumedUtxos relies on
+// this equality to dedup a transaction's Consumed() set, which can
+// legitimately list the same input more than once.
 func TestConsumedInputKeyEquality(t *testing.T) {
 	t.Parallel()
 
@@ -107,8 +107,7 @@ func TestConsumedInputKeyAllocationFree(t *testing.T) {
 }
 
 // BenchmarkConsumedInputKeyOldPattern reproduces, verbatim, the dedup-key
-// construction ensureTransactionConsumedUtxos and ensureGapConsumedUtxos
-// used before this change: a hex-formatted "hash:index" string built with
+// construction ensureTransactionConsumedUtxos used before this change: a hex-formatted "hash:index" string built with
 // fmt.Sprintf, once per consumed input, purely to key a same-transaction
 // "seen" dedup set. Kept for direct before/after comparison against
 // BenchmarkConsumedInputKeyNewPattern.
@@ -912,7 +911,7 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 					producer.point,
 					0,
 					nil,
-					txn.Metadata(), 0, false,
+					txn.Metadata(), 0,
 				)
 			}),
 		)
@@ -1115,7 +1114,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 					producer.point,
 					0,
 					nil,
-					txn.Metadata(), 0, false,
+					txn.Metadata(), 0,
 				)
 			}))
 			metaTxn.Release()
@@ -1223,7 +1222,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 					producer.point,
 					0,
 					nil,
-					txn.Metadata(), 0, false,
+					txn.Metadata(), 0,
 				)
 			}))
 			metaTxn.Release()

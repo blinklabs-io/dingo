@@ -724,6 +724,10 @@ var knownOptionalProviders = map[Capability]map[string]struct{}{
 		"mysql":    {},
 		"postgres": {},
 	},
+	CapabilityStorageImmutable: {
+		"gcs": {},
+		"s3":  {},
+	},
 }
 
 // MissingProviderError returns an actionable error for known providers that

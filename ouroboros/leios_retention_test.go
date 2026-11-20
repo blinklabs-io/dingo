@@ -198,21 +198,31 @@ func TestLeiosPersistenceWriterKeepsCertifiedBehindFrontier(t *testing.T) {
 	withImmutableSlot(o, 100)
 	o.leiosPersistGCOnce.Do(func() {})
 	db := o.leiosDatabase()
-	certifiedPoint, certifiedRaw, certifiedData, _ := leiosPersistTestEntry(
+	certifiedPoint, certifiedRaw, certifiedData := leiosPersistTestEntry(
 		t, 10, 1, 4,
 	)
 	pinLeiosEB(t, db, certifiedPoint.Slot, certifiedPoint.Hash)
-	uncertifiedPoint, uncertifiedRaw, uncertifiedData, _ := leiosPersistTestEntry(
+	uncertifiedPoint, uncertifiedRaw, uncertifiedData := leiosPersistTestEntry(
 		t, 11, 1, 4,
 	)
 	o.leiosPersistStoreMu.Lock()
 	o.leiosPersistPruneBeforeSlot = 100
 	o.leiosPersistStoreMu.Unlock()
-	o.enqueueLeiosPersist(certifiedPoint, certifiedRaw, certifiedData)
-	o.enqueueLeiosPersist(uncertifiedPoint, uncertifiedRaw, uncertifiedData)
+	_, err := o.persistLeiosEndorserBlock(
+		certifiedPoint,
+		certifiedRaw,
+		certifiedData,
+	)
+	require.NoError(t, err)
+	_, err = o.persistLeiosEndorserBlock(
+		uncertifiedPoint,
+		uncertifiedRaw,
+		uncertifiedData,
+	)
+	require.NoError(t, err, "a write below the frontier is skipped, not failed")
 	require.NoError(t, o.Close())
 
-	_, err := db.GetLeiosEBManifest(certifiedPoint.Hash, certifiedPoint.Slot)
+	_, err = db.GetLeiosEBManifest(certifiedPoint.Hash, certifiedPoint.Slot)
 	require.NoError(t, err, "certified endorser block was not persisted")
 	_, err = db.GetLeiosEBManifest(uncertifiedPoint.Hash, uncertifiedPoint.Slot)
 	require.ErrorIs(t, err, databaseTypes.ErrBlobKeyNotFound)

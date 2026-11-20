@@ -122,16 +122,12 @@ func TestNodeAdapterLatestBlockTipOutsideStore(t *testing.T) {
 		cardano.EmbeddedConfigPath("preview"),
 	)
 	require.NoError(t, err)
-	adapter, raw, db := newDBBackedAdapter(t, nodeConfig)
-	f, _ := seedCertifiedEndorserBlock(t, db)
+	adapter, raw, _ := newDBBackedAdapter(t, nodeConfig)
+	f, _ := seedCertifiedEndorserBlock(t, adapter)
 	ctx := context.Background()
-	_, err = raw.Exec(
-		`INSERT INTO epoch (epoch_id, start_slot, length_in_slots, slot_length, era_id) VALUES (0, 0, 86400, 1000, 6)`,
-	)
-	require.NoError(t, err)
-	require.NoError(t, adapter.ledgerState.PrepareEpochCacheForStartup(ctx))
+	seedEpochs(t, adapter, raw, 0, 1)
 
-	adapter.ledgerState.SetTipForTesting(ochainsync.Tip{
+	setChainTip(t, adapter, ochainsync.Tip{
 		Point:       ocommon.NewPoint(f.Certifier.SlotNumber()+1, []byte("rolled-back-block-hash-00000")),
 		BlockNumber: f.Certifier.BlockNumber() + 1,
 	})
@@ -140,7 +136,7 @@ func TestNodeAdapterLatestBlockTipOutsideStore(t *testing.T) {
 	_, err = adapter.LatestBlockTxHashes(ctx)
 	require.ErrorIs(t, err, ErrTipBlockUnavailable)
 
-	adapter.ledgerState.SetTipForTesting(ochainsync.Tip{
+	setChainTip(t, adapter, ochainsync.Tip{
 		Point: ocommon.NewPoint(
 			f.Certifier.SlotNumber(),
 			f.Certifier.Hash().Bytes(),

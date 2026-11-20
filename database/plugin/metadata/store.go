@@ -38,6 +38,20 @@ var ErrNotFound = errors.New("metadata not found")
 // limit. The value is not read.
 var ErrSyncStateTooLarge = errors.New("sync state value exceeds size limit")
 
+// ErrInterruptedBackfill refuses an API-mode store whose v0.94.2 Mithril
+// bootstrap stopped while it was still writing API history. That history ends
+// below the ledger tip and the pass leaves account rows it has yet to put
+// back, so the store cannot be moved to the storage-role layout, and only the
+// release that began the backfill can finish it. A store is refused before
+// this version's schema migrations run: v0.94.2 does not open a store whose
+// schema is newer than its own.
+var ErrInterruptedBackfill = errors.New(
+	"the database holds an interrupted Mithril metadata backfill " +
+		"(sync_status is \"backfill\"), which this version cannot finish: " +
+		"start dingo v0.94.2 on this database until it finishes the " +
+		"backfill, then start this version again. Nothing was changed",
+)
+
 // The interfaces below are the compiled-in metadata provider contract
 // (database/plugin/PLUGIN_DEVELOPMENT.md). A provider maintained outside this
 // repository builds against a pinned module version, so adding a method or a
@@ -994,9 +1008,6 @@ type UtxoStore interface {
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
-	// GetUtxosRestoredByRollback returns the UTxOs a rollback to the given
-	// slot makes live again: created at or before it and spent after it.
-	GetUtxosRestoredByRollback(uint64, types.Txn) ([]models.Utxo, error)
 	GetSpentUtxosMissingAddressAfterSlot(
 		uint64,
 		uint,
@@ -1420,13 +1431,9 @@ type TransactionStore interface {
 		uint64, // protocol major version
 	) error
 
-	// SetGapBlockTransaction stores a transaction record and its
-	// produced outputs without looking up or consuming input UTxOs.
-	// This is used for mithril gap blocks where the snapshot's UTxO
-	// set already reflects the correct spent/unspent state. With
-	// historyOnly it stores the transaction and its certificates but no
-	// output rows or stake changes, for a database whose UTxO set lives
-	// outside the metadata store.
+	// SetGapBlockTransaction stores a mithril gap block's transaction and
+	// its certificates, but no output rows or stake changes: the LedgerDB
+	// UTxO set already reflects the block.
 	SetGapBlockTransaction(
 		lcommon.Transaction,
 		ocommon.Point,
@@ -1434,20 +1441,6 @@ type TransactionStore interface {
 		map[int]uint64, // certDeposits; see SetTransaction
 		types.Txn,
 		uint64, // protocol major version
-		bool, // historyOnly
-	) error
-
-	// RecomputeGapCollateralFee recomputes and persists the collateral fee
-	// for a phase-2-invalid gap-block transaction after its consumed
-	// collateral inputs have been recovered into the metadata UTxO table.
-	// SetGapBlockTransaction computes the collateral fee before those inputs
-	// exist, so for a transaction that declares no total collateral the fee
-	// is undercounted until this recompute runs. It is a no-op for valid
-	// transactions (which have no collateral fee).
-	RecomputeGapCollateralFee(
-		lcommon.Transaction,
-		ocommon.Point,
-		types.Txn,
 	) error
 
 	// SetGenesisTransaction stores a genesis transaction record.
@@ -3775,6 +3768,13 @@ type IncrementalPlannerStatsUpdater interface {
 	) (types.PlannerStatsResult, error)
 }
 
+// PlannerStatsPresenceChecker is an optional interface for metadata stores
+// that can report whether planner statistics have ever been collected. A
+// backend without a stored statistics catalog reports false.
+type PlannerStatsPresenceChecker interface {
+	HasPlannerStats(ctx context.Context) (bool, error)
+}
+
 // PlannerStatsBackfillSyncKey records the completed backfill whose planner
 // statistics were refreshed after rebuilding critical indexes.
 const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"
@@ -3841,4 +3841,14 @@ type RewardOutputPruner interface {
 		epoch uint64,
 		txn types.Txn,
 	) error
+}
+
+// RewardSeedFailureSlotReader is implemented by a metadata store that returns
+// the slot an imported reward-basis failure was captured at with its reason.
+type RewardSeedFailureSlotReader interface {
+	GetRewardSeedFailureSlot(
+		epoch uint64,
+		snapshotType string,
+		txn types.Txn,
+	) (string, uint64, error)
 }

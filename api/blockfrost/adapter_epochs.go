@@ -23,7 +23,6 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/ledgerdb/dbadapter"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -66,7 +65,7 @@ func (a *NodeAdapter) epochInfoFor(
 			endSlot = epochLastSlot
 		}
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
@@ -179,14 +178,18 @@ func (a *NodeAdapter) reachedEpoch(
 	ctx context.Context,
 	epoch uint64,
 ) (models.Epoch, error) {
-	db := a.ledgerState.Database()
+	tip, err := a.dataTip()
+	if err != nil {
+		return models.Epoch{}, err
+	}
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	row, err := db.GetEpoch(epoch, txn)
 	if err != nil {
 		return models.Epoch{}, fmt.Errorf("get epoch %d: %w", epoch, err)
 	}
-	if row == nil || row.StartSlot > a.ledgerState.Tip().Point.Slot {
+	if row == nil || row.StartSlot > tip.Point.Slot {
 		return models.Epoch{}, fmt.Errorf(
 			"epoch %d: %w",
 			epoch,
@@ -205,12 +208,20 @@ func (a *NodeAdapter) Epoch(
 	if err != nil {
 		return EpochInfo{}, err
 	}
-	return a.epochInfoFor(ctx, row, a.ledgerState.Tip().Point.Slot)
+	tip, err := a.dataTip()
+	if err != nil {
+		return EpochInfo{}, err
+	}
+	return a.epochInfoFor(ctx, row, tip.Point.Slot)
 }
 
 // currentEpochNumber is the epoch containing the synced tip.
 func (a *NodeAdapter) currentEpochNumber() (uint64, error) {
-	tipSlot := a.ledgerState.Tip().Point.Slot
+	tip, err := a.dataTip()
+	if err != nil {
+		return 0, err
+	}
+	tipSlot := tip.Point.Slot
 	tipEpoch, err := a.ledgerState.SlotToEpoch(tipSlot)
 	if err != nil {
 		return 0, fmt.Errorf("get epoch for tip slot %d: %w", tipSlot, err)
@@ -282,7 +293,11 @@ func (a *NodeAdapter) epochsAround(
 	}
 	first, count, total := epochWindow(epoch, current, after, params)
 	ret := make([]EpochInfo, 0, count)
-	tipSlot := a.ledgerState.Tip().Point.Slot
+	tip, err := a.dataTip()
+	if err != nil {
+		return nil, 0, err
+	}
+	tipSlot := tip.Point.Slot
 	for i := range count {
 		number := first + uint64(i)
 		if !after {
@@ -336,12 +351,10 @@ func (a *NodeAdapter) epochStakeRows(
 	if !ok {
 		return []models.EpochStakeRow{}, 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
-	incomplete, err := a.ledgerState.RewardStakeInputsIncomplete(
-		dbadapter.Txn(txn), label, label+1,
-	)
+	incomplete, err := a.rewardStakeInputsIncomplete(label, label+1)
 	if err != nil {
 		return nil, 0, fmt.Errorf("check epoch %d stakes: %w", epoch, err)
 	}
@@ -492,7 +505,11 @@ func (a *NodeAdapter) epochSlotRange(
 	if err != nil {
 		return 0, 0, err
 	}
-	end := a.ledgerState.Tip().Point.Slot
+	tip, err := a.dataTip()
+	if err != nil {
+		return 0, 0, err
+	}
+	end := tip.Point.Slot
 	if row.LengthInSlots > 0 {
 		last := row.StartSlot + uint64(row.LengthInSlots) - 1
 		if last < end {
@@ -570,7 +587,7 @@ func (a *NodeAdapter) EpochBlocks(
 	if !ok {
 		return []string{}, 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	if err := checkBlockHistoryRetained(db, txn, start, end); err != nil {
@@ -605,7 +622,7 @@ func (a *NodeAdapter) EpochPoolBlocks(
 	if !ok {
 		return []string{}, 0, nil
 	}
-	db := a.ledgerState.Database()
+	db := a.db()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	if err := checkBlockHistoryRetained(db, txn, start, end); err != nil {

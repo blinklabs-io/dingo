@@ -82,6 +82,7 @@ type Manager struct {
 	// utxoSet returns the node's live UTxO set, or nil when it keeps none.
 	// It is a function because a live restore or truncate reopens the set.
 	utxoSet func() lifecycle.UtxoSetBackuper
+	indexer *IndexerPayloadSource
 
 	mu             sync.Mutex
 	running        bool
@@ -133,6 +134,15 @@ func (m *Manager) SetUtxoSetSource(source func() lifecycle.UtxoSetBackuper) {
 	m.utxoSet = source
 }
 
+// SetIndexerPayloadSource makes every automatic snapshot carry the IndexerDB
+// of a split node, taken before the ledger snapshot. Start then refuses the
+// configurations the payload does not cover. It must be called before Start.
+func (m *Manager) SetIndexerPayloadSource(src *IndexerPayloadSource) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.indexer = src
+}
+
 // Start begins listening for epoch transitions and capturing automatic
 // snapshots, if enabled. The provided context is used as the parent for
 // the manager's internal context; cancelling it stops the manager.
@@ -150,6 +160,17 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	if !m.cfg.SnapshotEnabled {
 		return nil
+	}
+	if m.indexer != nil {
+		if m.indexer.Check != nil {
+			if err := m.indexer.Check(); err != nil {
+				return fmt.Errorf(
+					"automatic snapshots: %w; disable "+
+						"databaseLifecycle.snapshotEnabled or change it",
+					err,
+				)
+			}
+		}
 	}
 	if m.blobPluginName == "s3" || m.blobPluginName == "gcs" {
 		return fmt.Errorf(
@@ -497,6 +518,23 @@ func (m *Manager) handleEpochTransition(
 				lifecycle.WithUtxoSetBackup(set),
 			)
 		}
+	}
+	var (
+		stagedIndexer string
+		indexerMeta   IndexerPayload
+	)
+	if m.indexer != nil {
+		// The IndexerDB first: its tip never passes the ledger's, and the
+		// ledger snapshot below is taken at or after it.
+		var cleanup func()
+		stagedIndexer, indexerMeta, cleanup, err = m.indexer.Capture(ctx)
+		if err != nil {
+			return fmt.Errorf("capture epoch-boundary snapshot: %w", err)
+		}
+		defer cleanup()
+	}
+	if stagedIndexer != "" {
+		manifestOpts = append(manifestOpts, lifecycle.WithIndexerBackup(stagedIndexer, indexerMeta.TipSlot, indexerMeta.TipHash))
 	}
 	_, err = lifecycle.SnapshotToCloud(
 		ctx,

@@ -45,6 +45,15 @@ func WithMemTableSize(n int64) Option {
 	return func(s *Store) { s.memTableSize = n }
 }
 
+// WithBlockCacheSize sets Badger's block cache size in bytes. Badger sizes
+// the cache's admission sketch from it when the store opens, tens of
+// megabytes at the default, so a process holding many small stores, as a
+// test binary does, uses far less memory with a small value. Zero keeps
+// Badger's default.
+func WithBlockCacheSize(n int64) Option {
+	return func(s *Store) { s.blockCacheSize = n }
+}
+
 func aggKey(key []byte) []byte {
 	return append([]byte{AggTag}, key...)
 }

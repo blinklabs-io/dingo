@@ -19,6 +19,9 @@ package chunkfile
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -41,7 +44,7 @@ var ErrStoreOpen = errors.New("immutable chunk store is already open")
 type Config struct{}
 
 // RegisterProvider registers the chunk-file provider with host. It is
-// registered in every build and is the only storage.immutable provider.
+// registered in every build.
 func RegisterProvider(host *hostplugin.Host) error {
 	return hostplugin.Register(
 		host,
@@ -57,8 +60,19 @@ func RegisterProvider(host *hostplugin.Host) error {
 			_ Config,
 			deps immplugin.ProviderDependencies,
 		) (immplugin.ImmutableDB, hostplugin.Instance, error) {
+			dataDir := deps.DataDir
+			var temporary string
+			if dataDir == "" {
+				var err error
+				temporary, err = os.MkdirTemp("", "dingo-immutable-")
+				if err != nil {
+					return nil, nil, fmt.Errorf("create ephemeral ImmutableDB: %w", err)
+				}
+				dataDir = temporary
+			}
 			svc := &service{
-				dir: filepath.Join(deps.DataDir, immplugin.DirName),
+				dir:       filepath.Join(dataDir, immplugin.DirName),
+				temporary: temporary,
 			}
 			return svc, hostplugin.Lifecycle{StopFunc: svc.stop}, nil
 		},
@@ -66,7 +80,8 @@ func RegisterProvider(host *hostplugin.Host) error {
 }
 
 type service struct {
-	dir string
+	dir       string
+	temporary string
 
 	mu      sync.Mutex
 	open    *store
@@ -100,17 +115,40 @@ func (s *service) ListFiles() ([]immutable.File, error) {
 	return immutable.ListFiles(s.dir)
 }
 
+func (s *service) ReadFile(
+	ctx context.Context,
+	name string,
+	dst io.Writer,
+) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if _, ok := immutable.ParseFileName(name); !ok {
+		return 0, fmt.Errorf("invalid ImmutableDB file name %q", name)
+	}
+	file, err := os.Open(filepath.Join(s.dir, name))
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	return io.Copy(dst, file)
+}
+
 // stop closes the writer a holder left open and refuses later opens.
 func (s *service) stop(context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stopped = true
-	if s.open == nil {
-		return nil
+	var err error
+	if s.open != nil {
+		st := s.open
+		s.open = nil
+		err = st.Store.Close()
 	}
-	st := s.open
-	s.open = nil
-	return st.Store.Close()
+	if s.temporary != "" {
+		err = errors.Join(err, os.RemoveAll(s.temporary))
+	}
+	return err
 }
 
 // release forgets st once its holder closed it, so Open can hand out the
