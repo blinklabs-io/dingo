@@ -35,6 +35,8 @@ type countingEpochSet struct {
 	epochsReads atomic.Int64
 }
 
+var _ EpochStateReader = (*countingEpochSet)(nil)
+
 func (*countingEpochSet) EpochStateLoaded() (bool, error) { return true, nil }
 func (*countingEpochSet) EraSwitch() (*database.MidEpochEraSwitch, error) {
 	return nil, nil
@@ -53,6 +55,27 @@ func (s *countingEpochSet) PoolStakeSnapshots(
 		Epoch: epoch, SnapshotType: typ, PoolKeyHash: []byte{byte(epoch)},
 		CapturedSlot: epoch * 100,
 	}}, nil
+}
+
+func (s *countingEpochSet) PoolStakeSnapshotsCapturedIn(
+	from, through uint64,
+) ([]*models.PoolStakeSnapshot, error) {
+	var rows []*models.PoolStakeSnapshot
+	for _, epoch := range s.epochs {
+		for _, typ := range rewardSnapshotTypes {
+			snapshots, err := s.PoolStakeSnapshots(epoch.EpochId, typ)
+			if err != nil {
+				return nil, err
+			}
+			for _, snapshot := range snapshots {
+				if snapshot.CapturedSlot >= from &&
+					snapshot.CapturedSlot <= through {
+					rows = append(rows, snapshot)
+				}
+			}
+		}
+	}
+	return rows, nil
 }
 
 // The fact copy reads the epoch family once, however many epochs the set
