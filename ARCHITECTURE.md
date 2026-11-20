@@ -3620,7 +3620,9 @@ and hands the set to the ledger. Before the ledger starts it runs
 `nodestorage.Reconcile`, the sequence `Node.reconcileUtxoSet` runs: finish a
 pending import into the set, move a released database's SQL UTxO set into the
 set (first reverting such a database `k` blocks below its tip, as the node
-does, with the kept blocks replayed before any is appended), mark a database at origin as set-only, reconcile the set with the ledger,
+does, with the kept blocks replayed before any is appended, then
+rebuilding from its SQL history any reward stake inputs a deferred write left
+partial), mark a database at origin as set-only, reconcile the set with the ledger,
 and drain the graduated families. While it replays, a goroutine feeds the set
 the ledger's immutable point (`nodestorage.UpdateAnchor`) so the rollback
 journal is pruned, and its snapshot manager writes through

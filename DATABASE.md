@@ -3896,9 +3896,9 @@ header, pool inputs and failure and the window's stake inputs from the store,
 and the pending record (an epoch whose stake rows are only partly written
 stays incomplete in the set)
 (an imported failure keeps its snapshot's captured slot, which the store does
-not return). Before that load, and before the UTxO rows move into the set, startup
-rebuilds every pending epoch from the store's UTxO and delegation history and
-clears its marker; the set cannot rebuild an epoch from before its journal.
+not return). Before that load, and before the UTxO rows move into the set, the
+node's startup and `dingo load` rebuild every pending epoch from the store's UTxO and delegation history and
+clear its marker; the set cannot rebuild an epoch from before its journal.
 An epoch whose rebuild does not reproduce the retained pool totals keeps its
 marker. The load writes a range tombstone for each epoch's pots, header,
 failure, pool rows and stake rows at their captured slots (the earliest of an
