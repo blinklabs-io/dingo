@@ -112,6 +112,11 @@
       # by peer relay, so API load never delays relay. Submissions wait for a
       # slot rather than being refused. 0 uses the peer pool's size.
       # maxApiSubmissions: 0
+      # Order in which block production takes pending transactions.
+      # "admission" (default) keeps arrival order. "feeDensity" takes the
+      # highest fee per byte first, never ahead of a transaction it depends
+      # on. Relay and API listings keep arrival order either way.
+      # selection: admission
   # api:
     # blockfrost:
       # provider: "builtin"

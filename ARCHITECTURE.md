@@ -1989,6 +1989,7 @@ dingo/
 │   ├── backend.go       # FIFO/DAG backend contract and constructors
 │   ├── dag.go           # Dependency graph and topological ordering
 │   ├── mempool.go       # Shared validation, lifecycle, capacity, providers
+│   ├── selection.go     # Block-production selection order (fee density)
 │   └── consumer.go      # Per-consumer transaction tracking
 ├── ouroboros/            # Ouroboros protocol handlers
 │   ├── ouroboros.go      # N2N and N2C protocol management
@@ -12246,6 +12247,20 @@ therefore exposed to forging and relay consumers in admission order. Duplicate
 submission refreshes `LastSeen` without changing position, and oldest entries
 are removed first when watermark eviction is active. FIFO is not a fee-density
 priority queue.
+
+`plugins.mempool.config.selection` sets the order in which block production is
+offered pending transactions, for either provider. The default, `admission`,
+uses the order above. `feeDensity` offers first the transaction paying the
+most fee per serialized CBOR byte among those whose pending parents are
+already placed; equal densities keep admission order. A transaction that
+spends, references, or pledges as collateral the output of another pending
+transaction always follows it, because the block builder validates each
+transaction against the outputs of those selected before it. A high-fee child
+therefore waits for a low-fee parent: parents are not promoted for their
+children's fees. The policy applies only where forging reads the pool through
+`BlockCandidates`. Admission, capacity, eviction, TxSubmission relay, and the
+order `Transactions` reports to LocalTxMonitor and the APIs are unchanged, and
+no transaction is replaced or evicted for paying less.
 
 Pending-transaction overlays in both mempool validation and forging apply the
 consensus UTxO outcome exposed by `Transaction.Consumed()` and
