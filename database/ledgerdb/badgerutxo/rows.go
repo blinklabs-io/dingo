@@ -624,15 +624,26 @@ func (s *Store) EdgeRows(
 			opts.Prefix = prefix
 			opts.PrefetchValues = false
 			opts.Reverse = reverse
+			if reverse {
+				// A reverse seek lands on end itself when that key exists,
+				// and an iterator bounded by prefix reports it invalid
+				// without a way to step past it. Bound this one by the
+				// bytes end shares with prefix, which every key between the
+				// range and end carries, and step over end explicitly.
+				opts.Prefix = end[:len(end)-1]
+			}
 			it := txn.NewIterator(opts)
 			defer it.Close()
 			if reverse {
 				it.Seek(end)
+				if it.Valid() && bytes.Equal(it.Item().Key(), end) {
+					it.Next()
+				}
 			} else {
 				it.Rewind()
 			}
 			s.rangeRowsVisited.Add(1)
-			if !it.Valid() {
+			if !it.ValidForPrefix(prefix) {
 				return nil, nil, false, nil
 			}
 			v, err = it.Item().ValueCopy(nil)
@@ -646,9 +657,17 @@ func (s *Store) EdgeRows(
 		if err != nil || !ok {
 			return err
 		}
-		lastK, lastV, _, err = edge(true)
+		lastK, lastV, ok, err = edge(true)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New(
+				"badgerutxo: no last row under a prefix with a first row",
+			)
+		}
 		found = true
-		return err
+		return nil
 	})
 	return firstK, firstV, lastK, lastV, found, err
 }
