@@ -582,6 +582,19 @@ func splitTipless(
 	return leading, batch[start:]
 }
 
+// RemoveOutputs removes the live outputs among refs and returns how many it
+// removed. The removal is not a change of the chain: it leaves the tip alone
+// and writes no journal record, which would otherwise be undone first by the
+// next rollback of any depth. It is for outputs the ledger's genesis never
+// holds, found in a set built before it dropped them.
+func (s *Set) RemoveOutputs(refs []models.UtxoId) (int, error) {
+	out := make([]badgerutxo.Ref, len(refs))
+	for i, r := range refs {
+		out[i] = badgerutxo.NewRef(r.Hash, r.Idx)
+	}
+	return s.store.RemoveOutputs(out)
+}
+
 // Get returns the CBOR of the live output txID#index.
 func (s *Set) Get(txID []byte, index uint32) ([]byte, bool, error) {
 	return s.store.Get(badgerutxo.NewRef(txID, index))
