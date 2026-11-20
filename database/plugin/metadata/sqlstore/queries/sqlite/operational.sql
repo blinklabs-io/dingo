@@ -672,6 +672,59 @@ ON CONFLICT (
     boundary_slot = excluded.boundary_slot
 RETURNING id;
 
+-- name: SaveRewardLikelihoodState :one
+INSERT INTO reward_likelihood_state (
+    epoch, reward_pot, captured_slot, boundary_slot, complete
+) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (epoch) DO UPDATE SET
+    reward_pot = excluded.reward_pot,
+    captured_slot = excluded.captured_slot,
+    boundary_slot = excluded.boundary_slot,
+    complete = excluded.complete
+RETURNING id;
+
+-- name: SaveRewardPoolLikelihood :one
+INSERT INTO reward_pool_likelihood (
+    epoch, pool_key_hash, log_weights, performance_estimate
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
+    log_weights = excluded.log_weights,
+    performance_estimate = excluded.performance_estimate
+RETURNING id;
+
+-- name: DeleteRewardPoolLikelihoodsForEpoch :exec
+DELETE FROM reward_pool_likelihood WHERE epoch = ?;
+
+-- name: GetRewardLikelihoodStateBeforeEpoch :one
+SELECT id, epoch, reward_pot, captured_slot, boundary_slot, complete
+FROM reward_likelihood_state
+WHERE epoch < ?
+ORDER BY epoch DESC
+LIMIT 1;
+
+-- name: GetRewardLikelihoodStateAtSlot :one
+SELECT id, epoch, reward_pot, captured_slot, boundary_slot, complete
+FROM reward_likelihood_state
+WHERE boundary_slot <= ?
+ORDER BY boundary_slot DESC, epoch DESC
+LIMIT 1;
+
+-- name: GetRewardPoolLikelihoods :many
+SELECT id, epoch, pool_key_hash, log_weights, performance_estimate
+FROM reward_pool_likelihood
+WHERE epoch = ?
+ORDER BY pool_key_hash ASC;
+
+-- name: DeleteRewardLikelihoodStatesAfterSlot :exec
+DELETE FROM reward_likelihood_state WHERE boundary_slot > ?;
+
+-- name: DeleteOrphanRewardPoolLikelihoods :exec
+DELETE FROM reward_pool_likelihood
+WHERE NOT EXISTS (
+    SELECT 1 FROM reward_likelihood_state
+    WHERE reward_likelihood_state.epoch = reward_pool_likelihood.epoch
+);
+
 -- name: GetRewardAccountOutputs :many
 SELECT staking_key, pool_key_hash, reward_type, id, epoch, credential_tag,
        amount, spendable, guarded, captured_slot, boundary_slot

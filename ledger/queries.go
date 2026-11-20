@@ -1458,13 +1458,9 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	case *olocalstatequery.ShelleyPoolStateQuery:
 		return ls.queryShelleyPoolState(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
-		return nil, queryNotAnswered(
-			"GetNonMyopicMemberRewards", missingPoolPerformance,
-		)
+		return ls.queryShelleyNonMyopicMemberRewards(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
-		return nil, queryNotAnswered(
-			"GetRewardInfoPools", missingPoolPerformance,
-		)
+		return ls.queryShelleyRewardInfoPools(ctx, at, txn)
 	case *olocalstatequery.ShelleyDebugEpochStateQuery:
 		return nil, queryNotAnswered("DebugEpochState", missingEpochState)
 	case *olocalstatequery.ShelleyDebugNewEpochStateQuery:

@@ -403,7 +403,7 @@ func minimalLedgerStateWithUTxOMap(
 		cbor.RawMessage(accountState),
 		cbor.RawMessage(ledgerState),
 		cbor.RawMessage(snapshots),
-		cbor.RawMessage(emptyMap),
+		[]any{cbor.RawMessage(emptyMap), uint64(0)},
 	})
 	require.NoError(t, err)
 	// nesBprev and nesBcur are BlocksMade, which the reference encodes as a

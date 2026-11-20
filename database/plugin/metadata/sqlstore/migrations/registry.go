@@ -112,6 +112,7 @@ const (
 	ledgerStateDrainSchemaRelease                       = "ledger-state-drain-latch"
 	immutableDBSchemaRelease                            = "immutable-db"
 	utxoAddressOrderSchemaRelease                       = "utxo-address-order-index"
+	rewardLikelihoodStateSchemaRelease                  = "reward-likelihood-state"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -303,6 +304,7 @@ var schemaVersions = []struct {
 	{Version: 69, Name: ledgerStateDrainSchemaRelease, Dir: "v69"},
 	{Version: 70, Name: immutableDBSchemaRelease, Dir: "v70"},
 	{Version: 71, Name: utxoAddressOrderSchemaRelease, Dir: "v71"},
+	{Version: 72, Name: rewardLikelihoodStateSchemaRelease, Dir: "v72"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
