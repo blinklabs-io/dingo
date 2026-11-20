@@ -4398,7 +4398,7 @@ journal cannot be told apart from the rest of the set. Any other set is
 rebuilt from the `utxo` table, which clears it.
 
 A set ahead of the ledger tip, as after an offline truncate, a lifecycle
-restore or a Mithril gap, is rolled back to the ledger tip with
+restore, is rolled back to the ledger tip with
 `Store.Rollback` when that tip is a point the journal restores exactly (the
 current tip, or the tip before a journaled commit: `Store.HasJournalPoint`).
 This applies when the set is authoritative. When the tip is not such a point,
@@ -4524,7 +4524,8 @@ snapshot` or `truncate` opens it from `<dataDir>/ledger/utxo` when it exists
 snapshot, closes it with the ledger before a live restore or truncate, and
 opens it again before the rebuilt ledger starts.
 
-The Mithril gap cleanup (`mithril.SyncConfig`, `dingo mithril sync`) deletes
+The Mithril import's volatile-block cleanup (`mithril.SyncConfig`,
+`dingo mithril sync`) deletes
 governance proposals and votes straight from the metadata store, with no
 ledger to stage the change. It calls `SyncConfig.InvalidateUtxoSetGovernance`
 afterwards, which removes the set's `mgov2` marker (`Store.InvalidateGovernance`)
@@ -8930,9 +8931,8 @@ deletes or unspends rows the walk may already have passed, so
 `UtxosDeleteRolledback` and `UtxosUnspend` mark every walk below whose slot they
 reach, once when they start and again when their transaction finishes, and the
 walk returns `ErrUtxoHistoryRolledBack`. Mithril import's re-import path can
-clear a spend on an existing row and gap-block recovery can insert a missing
-producer row; neither runs inside a pinned LocalStateQuery walk on a synced
-node, and both only correct rows to what the slot's state already was.
+clear a spend on an existing row; it does not run inside a pinned LocalStateQuery walk on a synced
+node, and it only corrects rows to what the slot's state already was.
 
 ### `GetUtxosByRefsAsOf`
 

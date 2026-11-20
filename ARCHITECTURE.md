@@ -3528,7 +3528,7 @@ truncates the set with the databases (`WithUtxoSetBackup`,
 `WithTruncateUtxoSet`), and the live node closes the set around a restore or
 truncate and reopens it before the rebuilt ledger is built. See the live UTxO
 set sections of DATABASE.md for the marker, the manifest fields and the
-Mithril gap invalidation.
+Mithril import's governance invalidation.
 
 The set is always present and is the only copy: `LedgerStateConfig.UtxoSet`
 is required, and `NewLedgerState` refuses a ledger without one. The ledger
@@ -7384,21 +7384,21 @@ and governance updates run in that same order inside the block's single
 database transaction. Direct-deposit credits use the body hash in the reward
 rollback journal, so rollback and replay restore the account balance with the
 rest of the block. An invalid batch applies only the enclosing transaction's
-collateral outcome. Historical backfill and Mithril gap indexing also persist
-the child and enclosing body hashes and process governance per body; they do
+collateral outcome. Historical backfill also persists
+the child and enclosing body hashes and processes governance per body; it does
 not reapply direct deposits to account balances already represented by their
 imported state.
 
 Persisting a ParameterChange proposal re-applies the era's proposal rule to the
 whole enclosing transaction once, under the protocol parameters transaction
 validation used for it: the previous era's for a block of that era applied
-after the ledger advanced. Historical backfill and Mithril gap indexing select
+after the ledger advanced. Historical backfill selects
 parameters by epoch, and the epoch that starts an era is recorded with the
-successor era, so for a block of an earlier era than its epoch they take the
+successor era, so for a block of an earlier era than its epoch it takes the
 parameters, and the era, of that block's era's last epoch
 (`ledger.PreviousEraEpoch`); its certificate deposits use them too. Live
-application, replay with or without validation,
-historical backfill and Mithril gap indexing therefore fail a block that
+application, replay with or without validation
+and historical backfill therefore fail a block that
 carries a proposal the rule refuses, and no `governance_proposal` row is
 written for it. Ledger-state snapshot import is the exception: it stores the
 proposals the snapshot holds without running the rule.
@@ -7408,9 +7408,9 @@ block's slot and select one parameter set for the block's era. Proposal expiry
 and live DRep activity therefore use that same selection as proposal validation
 when an era-1 block is applied after the ledger has advanced. Rollback restores
 the current- and previous-era parameter snapshots before blocks re-enter this
-same replay path. Historical backfill and Mithril gap indexing also keep the
-block-slot epoch, but use the selected block-era parameters only for proposal
-validation, proposal lifetime, and certificate deposits: their DRep processing
+same replay path. Historical backfill also keeps the
+block-slot epoch, but uses the selected block-era parameters only for proposal
+validation, proposal lifetime, and certificate deposits: its DRep processing
 records historical activity while preserving the expiry imported in the
 ledger-state snapshot.
 
@@ -15831,9 +15831,10 @@ stores those blocks after the certified ones through the same raw-block copy
 (`node.CopyImmutableBlocks`). An import that moved the certified chunk files
 into the database's ImmutableDB also appends them through the database's own
 chunk writer (`Database.PromoteThroughLocked`), so the recorded tip is the
-chunk's last block; a catch-up or repair, which copies block bodies, leaves
-them as bodies for the node to promote with the rest. A chunk that does not continue
-the stored chain is an error.
+chunk's last block. Any database that records an ImmutableDB tip is promoted
+the same way, including a catch-up or repair that copied block bodies, so no
+state loads above the recorded tip; `requireStateInImmutableDB` refuses one
+that would. A chunk that does not continue the stored chain is an error.
 
 `selectLedgerStateSnapshot` (`mithril/sync_import.go`) then picks the newest
 state at or before that tip, and `requireStateInImmutableDB` checks the
