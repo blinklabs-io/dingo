@@ -247,9 +247,9 @@ type Config struct {
 	CorroborationIdentity func(ouroboros.ConnectionId) string
 	// AdvertisedTipStale reports whether chain selection will never select a
 	// peer advertising tip, so its connection must not hold an eligible slot.
-	// The answer can change between calls as the wall clock advances. It is
-	// called with no State lock held, so it may take locks that are held while
-	// calling into State. When nil no tip is stale.
+	// The answer can change between calls as the wall clock or the local tip
+	// advances. It is called with no State lock held, so it may take locks
+	// that are held while calling into State. When nil no tip is stale.
 	AdvertisedTipStale func(ochainsync.Tip) bool
 }
 
