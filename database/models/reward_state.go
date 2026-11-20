@@ -182,6 +182,28 @@ type RewardPoolOutput struct {
 	BoundarySlot        uint64
 }
 
+// RewardLikelihoodState is the non-myopic pool-ranking state installed by a
+// completed reward update. BoundarySlot is when the state became visible.
+type RewardLikelihoodState struct {
+	ID           uint
+	Epoch        uint64
+	RewardPot    types.Uint64
+	CapturedSlot uint64
+	BoundarySlot uint64
+	Complete     bool
+}
+
+// RewardPoolLikelihood stores one pool's cumulative 100-point log-likelihood
+// distribution for a RewardLikelihoodState. LogWeights contains 100 IEEE-754
+// binary32 values in network byte order.
+type RewardPoolLikelihood struct {
+	ID                  uint
+	Epoch               uint64
+	PoolKeyHash         []byte
+	LogWeights          []byte
+	PerformanceEstimate float64
+}
+
 // RewardAccountOutput captures per-account reward calculation output.
 type RewardAccountOutput struct {
 	StakingKey    []byte

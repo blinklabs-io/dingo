@@ -454,10 +454,43 @@ func (b *rewardInputRows) apply(c ledger.RewardInputChange) error {
 		delete(b.bulk, c.Epoch)
 	case ledger.RewardInputStakes:
 		return b.stakes(c)
+	case ledger.RewardInputPending:
+		return b.pending(c.Pending)
 	case ledger.RewardInputPrune:
 		return b.prune(c.PruneBelow)
 	default:
 		return fmt.Errorf("utxoset: unknown reward input change %d", c.Kind)
+	}
+	return nil
+}
+
+// pending replaces the pending stake-input rows with entries.
+func (b *rewardInputRows) pending(
+	entries []ledger.RewardStakeInputsPendingEntry,
+) error {
+	keys, err := b.keys([]byte{badgerutxo.RewardSnapshotTag})
+	if err != nil {
+		return err
+	}
+	for _, k := range keys {
+		if _, kind, _, err := badgerutxo.DecodeRewardSnapshotKey(k); err != nil {
+			return err
+		} else if kind != badgerutxo.RewardSnapshotPending {
+			continue
+		}
+		v, ok, err := b.get(k)
+		if err != nil {
+			return err
+		}
+		if ok && len(v) == 8 {
+			b.del(binary.BigEndian.Uint64(v), k)
+		}
+	}
+	for _, e := range entries {
+		b.put(
+			e.BoundarySlot, badgerutxo.RewardStakePendingKey(e.Epoch),
+			appendU64(nil, e.BoundarySlot),
+		)
 	}
 	return nil
 }
@@ -619,7 +652,7 @@ func (s *Set) ensureRewardInputs(
 			}
 			stakes += n
 		}
-		return nil
+		return s.loadPendingStakeInputs(ldb, txn, put, tombstone)
 	})
 	if err != nil {
 		return fmt.Errorf("utxoset: load reward inputs: %w", err)
@@ -628,6 +661,35 @@ func (s *Set) ensureRewardInputs(
 		"loaded reward inputs into the live UTxO set",
 		"epochs", len(epochs), "stake_rows", stakes,
 	)
+	return nil
+}
+
+// loadPendingStakeInputs carries the pending stake-input record into the set,
+// so an epoch whose stake rows were only partly written stays marked
+// incomplete after the sync_state key is drained.
+func (s *Set) loadPendingStakeInputs(
+	ldb ledgerdb.LedgerDB,
+	txn ledgerdb.Txn,
+	put func(k, v []byte) error,
+	tombstone func(slot uint64, prefix []byte) error,
+) error {
+	raw, err := ldb.GetSyncState(models.RewardStakeInputsPendingKey, txn)
+	if err != nil {
+		return err
+	}
+	entries, err := ledger.ParseRewardStakeInputsPending(raw)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		k := badgerutxo.RewardStakePendingKey(e.Epoch)
+		if err := put(k, appendU64(nil, e.BoundarySlot)); err != nil {
+			return err
+		}
+		if err := tombstone(e.BoundarySlot, k); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -906,6 +968,31 @@ func (s *Set) RewardStakeSlotBounds(
 		return 0, 0, false, err
 	}
 	return f.CapturedSlot, l.CapturedSlot, true, nil
+}
+
+// RewardStakePending returns the snapshots whose stake rows are still being
+// written, oldest first.
+func (s *Set) RewardStakePending(
+	asOf *uint64,
+) ([]ledger.RewardStakeInputsPendingEntry, error) {
+	var out []ledger.RewardStakeInputsPendingEntry
+	err := s.rewardRows(
+		[]byte{badgerutxo.RewardSnapshotTag}, asOf,
+		func(k, v []byte) error {
+			epoch, kind, _, err := badgerutxo.DecodeRewardSnapshotKey(k)
+			if err != nil || kind != badgerutxo.RewardSnapshotPending {
+				return err
+			}
+			if len(v) != 8 {
+				return errRewardInputRow
+			}
+			out = append(out, ledger.RewardStakeInputsPendingEntry{
+				Epoch: epoch, BoundarySlot: binary.BigEndian.Uint64(v),
+			})
+			return nil
+		},
+	)
+	return out, err
 }
 
 // RewardInputEpochs lists the epochs the set holds a snapshot, pool or stake

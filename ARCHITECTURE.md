@@ -1989,6 +1989,7 @@ dingo/
 │   ├── backend.go       # FIFO/DAG backend contract and constructors
 │   ├── dag.go           # Dependency graph and topological ordering
 │   ├── mempool.go       # Shared validation, lifecycle, capacity, providers
+│   ├── selection.go     # Block-production selection order (fee density)
 │   └── consumer.go      # Per-consumer transaction tracking
 ├── ouroboros/            # Ouroboros protocol handlers
 │   ├── ouroboros.go      # N2N and N2C protocol management
@@ -3620,8 +3621,11 @@ and hands the set to the ledger. Before the ledger starts it runs
 `nodestorage.Reconcile`, the sequence `Node.reconcileUtxoSet` runs: finish a
 pending import into the set, move a released database's SQL UTxO set into the
 set (first reverting such a database `k` blocks below its tip, as the node
-does, with the kept blocks replayed before any is appended), mark a database at origin as set-only, reconcile the set with the ledger,
-and drain the graduated families. While it replays, a goroutine feeds the set
+does, then rebuilding from its SQL history any reward stake inputs a deferred
+write left partial, then moving its SQL UTxO rows into the set), mark a database
+at origin as set-only, reconcile the set with the ledger, and drain the graduated
+families. `LoadWithDB` replays the kept blocks after reconciliation returns and
+before the ledger appends any. While it replays, a goroutine feeds the set
 the ledger's immutable point (`nodestorage.UpdateAnchor`) so the rollback
 journal is pruned, and its snapshot manager writes through
 `LedgerState.LedgerDB`. A loaded database is therefore one a node opens with
@@ -3889,7 +3893,9 @@ database through one `db()` accessor, Mesh and Midnight read `Node.indexerDB`,
 MCP, off-chain metadata and the token registry take `Node.apiDatabase()` (MCP
 also runs on a core node, where that is the ledger database), and
 Kupo and Blockfrost report the IndexerDB tip (`dataTip`) in latest-block and
-epoch responses and clamp history to it. Block bodies are shared through one
+epoch responses and clamp history to it. Blockfrost's retired and retiring
+pool lists partition retirement epochs using that tip from the same read
+transaction as their pool rows. Block bodies are shared through one
 blob store, so Midnight wraps its database in `NewBoundedDatabase`, which hides
 blocks above the IndexerDB tip. `internal/apiready`
 gates routes on `indexerdb.Store.Ready`: each API classifies its own routes
@@ -8213,16 +8219,19 @@ registrations, retirements (`GetRetiringPoolsAtSlot`) and deposits
 containing it. Reward provenance (`GetRewardProvenance`) answers the constant
 cardano-node sends, the ledger's zero-valued provenance with every scalar zero,
 both rationals 0/1 and every map empty, whatever the point. Non-myopic member
-rewards (`GetNonMyopicMemberRewards`), reward info (`GetRewardInfoPools`) and
-the debug epoch-state queries (`DebugEpochState`, `DebugNewEpochState`) are not
-answered. The first two rank pools by a performance estimate the ledger derives
-from a decayed per-pool likelihood history carried across epoch boundaries (100
-single-precision log weights per pool) and report the reward pot of the last
-boundary; neither is tracked, and an estimate computed from a partial history
-would rank pools wrongly, so the query fails rather than answer. The debug
-queries return the whole epoch or new-epoch state in the ledger's encoding,
-which is not held in that form. Each fails with `ErrQueryNotAnswered`, which
-names the query and what is missing. The LocalStateQuery state machine has no
+rewards (`GetNonMyopicMemberRewards`) and reward info (`GetRewardInfoPools`)
+use the current stake and pool parameters at the acquired point together with
+the last installed reward-boundary state. That state retains the reward pot and
+each active pool's decayed 100-sample single-precision log-likelihood history;
+rollback removes states installed above the rollback point, and a Mithril
+import seeds the history carried by its `EpochState`. The member query follows
+the reference top-pool desirability, non-myopic stake, pledge, cost, margin and
+performance calculations for both coin and credential inputs. The debug
+epoch-state queries (`DebugEpochState`, `DebugNewEpochState`) remain deliberately
+unanswered: they return the whole epoch or new-epoch state in the ledger's
+encoding, which Dingo does not hold in that form. Each fails with
+`ErrQueryNotAnswered`, which names the query and what is missing. The
+LocalStateQuery state machine has no
 failure reply to a query (the only message the server may send after one is
 `MsgResult`), so the error ends the client's session; the connection log records
 it at warn level with that reason. At node-to-client versions 21 to 23 the
@@ -11423,7 +11432,16 @@ gossip or ledger peer becomes sharable only after an outbound connection to it
 succeeds, as the reference node shares only peers it has connected to. An
 inbound connection never makes its remote address sharable: a duplex handshake
 does not prove the source port is a listening port, since Dingo negotiates
-duplex mode whether or not it dials from its listening port. Valid candidates
+duplex mode whether or not it dials from its listening port. An operator can
+set `advertiseAddress` (`--advertise-address`, `DINGO_ADVERTISE_ADDRESS`) to the
+public IP:port at which peers can reach the node over NtN. It is independent of
+the local socket endpoint and may differ from it behind NAT. When set, replies
+lead with it, it counts toward
+the reply cap and is not repeated if a peer shares the same address, and it
+passes the same routability check; configuration rejects a hostname, a zero
+port, or a non-routable address, and the server drops an invalid value rather
+than share it. The programmatic node and Ouroboros constructors enforce the
+same validation before startup. Valid candidates
 are ordered by a salted hash of the address and the reply is capped at 10 addresses and at the
 requested count, as in the reference node. The salt is regenerated every 823
 seconds, so a requester sees a stable answer within a window and a different
@@ -12246,6 +12264,20 @@ therefore exposed to forging and relay consumers in admission order. Duplicate
 submission refreshes `LastSeen` without changing position, and oldest entries
 are removed first when watermark eviction is active. FIFO is not a fee-density
 priority queue.
+
+`plugins.mempool.config.selection` sets the order in which block production is
+offered pending transactions, for either provider. The default, `admission`,
+uses the order above. `feeDensity` offers first the transaction paying the
+most fee per serialized CBOR byte among those whose pending parents are
+already placed; equal densities keep admission order. A transaction that
+spends, references, or pledges as collateral the output of another pending
+transaction always follows it, because the block builder validates each
+transaction against the outputs of those selected before it. A high-fee child
+therefore waits for a low-fee parent: parents are not promoted for their
+children's fees. The policy applies only where forging reads the pool through
+`BlockCandidates`. Admission, capacity, eviction, TxSubmission relay, and the
+order `Transactions` reports to LocalTxMonitor and the APIs are unchanged, and
+no transaction is replaced or evicted for paying less.
 
 Pending-transaction overlays in both mempool validation and forging apply the
 consensus UTxO outcome exposed by `Transaction.Consumed()` and
@@ -16719,6 +16751,18 @@ cumulative threshold also controls row flushes. Rows are drained while they
 are staged when the temporary buffer reaches 5,000 rows or 32 MiB; one row may
 exceed the byte threshold. SQL commits remain at complete-block boundaries, so
 one block can make the transaction exceed the 32 MiB estimate.
+
+The historical replay reader has a one-block handoff channel. The channel does
+not bound decoded-block memory: the reader decodes and prefetches one more block
+while the channel is full, so up to three decoded blocks can be live (the block
+being applied, the buffered block, and the block waiting to send). It decodes the
+next canonical block and, for file-backed SQLite, reads that block's distinct
+consumed UTxO references across the metadata read pool while the replay loop
+writes the preceding block. Those read snapshots are advisory cache warming:
+their results never enter ledger state or the write transaction. Application,
+governance effects, checkpoints, flushes, and commits remain serial and ordered
+by the canonical iterator. A prefetch error stops replay before the affected
+block is applied, and cancellation joins the reader before `Run` returns.
 
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay

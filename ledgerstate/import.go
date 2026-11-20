@@ -33,7 +33,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/rewardlikelihood"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -87,6 +89,8 @@ type RawLedgerState struct {
 	PrevPParamsData cbor.RawMessage
 	// SnapShotsData is the deferred CBOR for mark/set/go stake snapshots.
 	SnapShotsData cbor.RawMessage
+	// NonMyopicData is EpochState's per-pool likelihood history and reward pot.
+	NonMyopicData cbor.RawMessage
 	// PoolDistrData is the deferred CBOR for the active consensus pool
 	// distribution in NewEpochState.pool-distr.
 	PoolDistrData cbor.RawMessage
@@ -2771,9 +2775,93 @@ func seedImportedRewardBasis(
 	); err != nil {
 		return err
 	}
+	if err := seedImportedNonMyopicState(
+		cfg,
+		epoch,
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return err
+	}
 	// Release stays with the defer for both outcomes: nilling the handle
 	// here to signal "committed" would skip it on the success path.
 	return txn.Commit()
+}
+
+func seedImportedNonMyopicState(
+	cfg ImportConfig,
+	epoch uint64,
+	slot uint64,
+	txn types.Txn,
+) error {
+	if len(cfg.State.NonMyopicData) == 0 {
+		return nil
+	}
+	items, err := decodeRawArray(cfg.State.NonMyopicData)
+	if err != nil {
+		return fmt.Errorf("decode imported non-myopic state: %w", err)
+	}
+	if len(items) != 2 {
+		return fmt.Errorf(
+			"decode imported non-myopic state: got %d fields, want 2",
+			len(items),
+		)
+	}
+	var likelihoods map[gledger.Blake2b224][]float32
+	if _, err := cbor.Decode(items[0], &likelihoods); err != nil {
+		return fmt.Errorf("decode imported pool likelihoods: %w", err)
+	}
+	var rewardPot uint64
+	if _, err := cbor.Decode(items[1], &rewardPot); err != nil {
+		return fmt.Errorf("decode imported non-myopic reward pot: %w", err)
+	}
+	pools := make([]*models.RewardPoolLikelihood, 0, len(likelihoods))
+	for key, values := range likelihoods {
+		if len(values) != rewardlikelihood.SampleCount {
+			return fmt.Errorf(
+				"decode imported likelihood for pool %x: got %d samples, want %d",
+				key.Bytes(),
+				len(values),
+				rewardlikelihood.SampleCount,
+			)
+		}
+		encoded, err := rewardlikelihood.Encode(values)
+		if err != nil {
+			return fmt.Errorf(
+				"decode imported likelihood for pool %x: %w",
+				key.Bytes(),
+				err,
+			)
+		}
+		performance, err := rewardlikelihood.Performance(values)
+		if err != nil {
+			return fmt.Errorf(
+				"decode imported likelihood for pool %x: %w",
+				key.Bytes(),
+				err,
+			)
+		}
+		pools = append(pools, &models.RewardPoolLikelihood{
+			Epoch:               epoch,
+			PoolKeyHash:         key.Bytes(),
+			LogWeights:          encoded,
+			PerformanceEstimate: performance,
+		})
+	}
+	if err := cfg.Database.Metadata().SaveRewardLikelihoodState(
+		&models.RewardLikelihoodState{
+			Epoch:        epoch,
+			RewardPot:    types.Uint64(rewardPot),
+			CapturedSlot: slot,
+			BoundarySlot: slot,
+			Complete:     true,
+		},
+		pools,
+		txn,
+	); err != nil {
+		return fmt.Errorf("seed imported non-myopic state: %w", err)
+	}
+	return nil
 }
 
 func persistImportedSnapshot(

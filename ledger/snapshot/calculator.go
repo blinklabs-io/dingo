@@ -189,6 +189,25 @@ func (c *Calculator) CalculateStakeDistributionInTxn(
 	)
 }
 
+// CalculateStakeDistributionWithInputsInTxn reconstructs current stake and
+// the per-credential rows from the same transaction. The wallet ranking
+// queries need those rows to resolve a credential key and pool-owner stake.
+func (c *Calculator) CalculateStakeDistributionWithInputsInTxn(
+	ctx context.Context,
+	txn ledgerdb.Txn,
+	slot uint64,
+) (*StakeDistribution, error) {
+	return c.calculateHistoricalBoundaryStakeDistributionInTxn(
+		ctx,
+		txn,
+		slot,
+		0,
+		0,
+		0,
+		nil,
+	)
+}
+
 // boundaryRewardSlot validates the epoch-boundary reward cut before it reaches
 // SQL. SNAP reward semantics are defined only for the mark snapshot's own
 // boundary, whose snapshot slot is exactly one before the boundary slot (see

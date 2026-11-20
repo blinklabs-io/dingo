@@ -254,6 +254,12 @@ var flagSpecs = []flagSpec{
 		"peer-sharing",
 		"enable peer sharing protocol (default: cardano-node config.json fallback for non-block-producers, else true; false for block producers)",
 	),
+	stringFlag(
+		"AdvertiseAddress",
+		"advertise-address",
+		"",
+		"public IP:port shared with peers as this node's own address (PeerSharing)",
+	),
 
 	// APIs
 	stringFlag(

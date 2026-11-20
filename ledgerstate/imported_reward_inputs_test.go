@@ -1018,6 +1018,39 @@ func TestDeriveRewardInputsPreservesScriptCredentialType(t *testing.T) {
 // agreed with the bug.
 const testdataLedgerSnapshot = "testdata/devnet-ledger-snapshot-epoch4.cbor"
 
+func TestSeedImportedNonMyopicStateUsesSnapshotHistory(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	require.NotEmpty(t, state.NonMyopicData)
+
+	require.NoError(t, seedImportedNonMyopicState(
+		ImportConfig{Database: db, State: state},
+		state.Epoch,
+		state.Tip.Slot,
+		nil,
+	))
+	stored, err := db.Metadata().GetRewardLikelihoodStateAtSlot(
+		state.Tip.Slot,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.True(t, stored.Complete)
+	require.Equal(t, state.Epoch, stored.Epoch)
+	pools, err := db.Metadata().GetRewardPoolLikelihoods(stored.Epoch, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, pools)
+	for _, pool := range pools {
+		require.Len(t, pool.LogWeights, 400)
+		require.GreaterOrEqual(t, pool.PerformanceEstimate, float64(0))
+		require.LessOrEqual(t, pool.PerformanceEstimate, float64(1))
+	}
+}
+
 // The seeding is only worth anything if it runs. Its pure derivation is
 // covered elsewhere, and separately checked against cardano-node's own stake
 // snapshot, but neither exercises the wiring: reading the parsed snapshot,

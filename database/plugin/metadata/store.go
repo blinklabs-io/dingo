@@ -3150,6 +3150,27 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.RewardAdaPots, error)
 
+	SaveRewardLikelihoodState(
+		*models.RewardLikelihoodState,
+		[]*models.RewardPoolLikelihood,
+		types.Txn,
+	) error
+
+	GetRewardLikelihoodStateBeforeEpoch(
+		uint64,
+		types.Txn,
+	) (*models.RewardLikelihoodState, error)
+
+	GetRewardLikelihoodStateAtSlot(
+		uint64,
+		types.Txn,
+	) (*models.RewardLikelihoodState, error)
+
+	GetRewardPoolLikelihoods(
+		uint64,
+		types.Txn,
+	) ([]*models.RewardPoolLikelihood, error)
+
 	// SaveRewardSnapshot saves reward snapshot metadata for an epoch,
 	// overwriting any existing row for the (epoch, snapshot_type) pair
 	// (including its authoritative flag). Used by the authoritative
@@ -3674,6 +3695,13 @@ type AddressTransactionIndexRebuilder interface {
 // GetUtxoIncludingSpent. Providers without this capability keep the full lookup.
 type UtxoSpendStateReader interface {
 	GetUtxoSpendState([]byte, uint32, types.Txn) (*models.UtxoSpendState, error)
+}
+
+// BackfillInputPrefetcher optionally warms metadata pages for the consumed
+// inputs of upcoming historical blocks. The operation is advisory only: it
+// must not mutate state or change the result of the ordered backfill writer.
+type BackfillInputPrefetcher interface {
+	PrefetchBackfillInputs(context.Context, []models.UtxoId) error
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

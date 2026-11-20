@@ -48,6 +48,9 @@ const (
 	RewardInputReplace
 	// RewardInputPrune drops the stake rows of every epoch below PruneBelow.
 	RewardInputPrune
+	// RewardInputPending replaces the snapshots whose stake rows are still
+	// being written with Pending.
+	RewardInputPending
 )
 
 // RewardInputChange is one change to the reward snapshot inputs the live
@@ -62,6 +65,7 @@ type RewardInputChange struct {
 	Pools      []*models.RewardPoolInput
 	Stakes     []*models.RewardStakeInput
 	PruneBelow uint64
+	Pending    []RewardStakeInputsPendingEntry
 }
 
 // RewardInputSlot is the slot a rollback to that slot or later keeps the
@@ -100,6 +104,11 @@ type RewardInputsReader interface {
 	// RewardInputEpochs lists the epochs the set holds a snapshot, pool or
 	// stake row of, oldest first, and those it holds pots of.
 	RewardInputEpochs() (snapshots, pots []uint64, err error)
+	// RewardStakePending returns the snapshots whose stake rows are still
+	// being written, oldest first.
+	RewardStakePending(
+		asOf *uint64,
+	) ([]RewardStakeInputsPendingEntry, error)
 }
 
 // rewardInputsReader returns the set's reader when it keeps reward inputs
@@ -182,6 +191,13 @@ func dropRewardInputsAfter(
 				continue
 			}
 		case RewardInputReplace, RewardInputPrune:
+		case RewardInputPending:
+			c.Pending = slices.DeleteFunc(
+				slices.Clone(c.Pending),
+				func(e RewardStakeInputsPendingEntry) bool {
+					return e.BoundarySlot > slot
+				},
+			)
 		case RewardInputPools:
 			c.Pools = slices.DeleteFunc(
 				slices.Clone(c.Pools),
@@ -256,6 +272,20 @@ func (v rewardInputsView) snapshot(
 		}
 	}
 	return row, nil
+}
+
+// pendingRaw is the pending sync_state value as the view has it.
+func (v rewardInputsView) pendingRaw() (string, error) {
+	entries, err := v.r.RewardStakePending(v.at)
+	if err != nil {
+		return "", err
+	}
+	for _, c := range v.st.changes {
+		if c.Kind == RewardInputPending {
+			entries = c.Pending
+		}
+	}
+	return FormatRewardStakeInputsPending(entries)
 }
 
 func (v rewardInputsView) failure(epoch uint64, typ string) (string, error) {

@@ -112,6 +112,11 @@
       # by peer relay, so API load never delays relay. Submissions wait for a
       # slot rather than being refused. 0 uses the peer pool's size.
       # maxApiSubmissions: 0
+      # Order in which block production takes pending transactions.
+      # "admission" (default) keeps arrival order. "feeDensity" takes the
+      # highest fee per byte first, never ahead of a transaction it depends
+      # on. Relay and API listings keep arrival order either way.
+      # selection: admission
   # api:
     # blockfrost:
       # provider: "builtin"
@@ -330,6 +335,18 @@
 # Can be overridden with the port environment variable
 # CLI: --port
 # relayPort: 3001
+
+# Public IP:port that other nodes can reach this node's NtN listener at. When
+# set and peer sharing is enabled, it is included first in PeerSharing replies as
+# this node's own address. It does not change what the node listens on: use it
+# when the public address differs from bindAddr and relayPort, such as behind
+# NAT or a load balancer. Must be an IP literal (no hostname) that is globally
+# routable; leave unset to advertise no address. The value below is an RFC 5737
+# documentation address, which validation rejects: replace it with the node's
+# real public address.
+#
+# CLI: --advertise-address  Env: DINGO_ADVERTISE_ADDRESS
+# advertiseAddress: "203.0.113.10:3001"
 
 # Storage mode controls how much data is persisted.
 # - "core": Only consensus data (UTxOs, certs, pools, pparams). Suitable for
