@@ -214,6 +214,7 @@ const (
 )
 
 func (s *Store) newLoadSink() *loadSink {
+	s.bumpRowsRewritten()
 	if !s.merging.Load() {
 		return &loadSink{wb: s.newWriteBatch(), s: s}
 	}
@@ -263,6 +264,7 @@ func (l *loadSink) Delete(k []byte) error {
 
 // Flush writes what is buffered.
 func (l *loadSink) Flush() error {
+	defer l.s.bumpRowsRewritten()
 	if l.wb != nil {
 		return l.wb.Flush()
 	}
@@ -349,5 +351,7 @@ func (s *Store) dropWindowed(prefixes [][]byte) error {
 	if s.snap != nil {
 		return ErrSnapshotReadOnly
 	}
+	s.bumpRowsRewritten()
+	defer s.bumpRowsRewritten()
 	return s.db.DropPrefix(drop...)
 }

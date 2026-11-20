@@ -68,6 +68,12 @@ func changedFloor(txn *badger.Txn) (uint64, error) {
 // several slots is passed once per slot, and a row since deleted is skipped.
 // Its cost is the journal entries in the range, not the size of the family.
 //
+// A range wholly below the floor is served from the rows themselves: addedSlot
+// reads the AddedSlot out of a row's value, and the rows added in the range are
+// named by an index of the family, built on first use and kept until a
+// rollback, load or floor change could have put a row below the floor. A nil
+// addedSlot leaves such a range uncovered.
+//
 // It stops after fn returns ErrStopRows, or after stepping over maxVisit
 // journal entries of any family, and returns the position to resume after.
 // covered is false when the journal cannot name every row the range
@@ -76,15 +82,26 @@ func changedFloor(txn *badger.Txn) (uint64, error) {
 // family whole. done is true when the range is exhausted.
 func (s *Store) EachRowChangedIn(
 	family byte,
+	addedSlot func(value []byte) (uint64, error),
 	from, through uint64,
 	after []byte,
 	maxVisit int,
 	fn func(slot uint64, key, value, pos []byte) error,
 ) (next []byte, covered, done bool, err error) {
 	covered = true
+	// Read before the transaction begins, so a rewrite after this point shows
+	// as a different generation than the one an index is stamped with.
+	gen := s.rowsRewritten.Load()
 	err = s.view(func(txn *badger.Txn) error {
 		floor, err := changedFloor(txn)
 		if err != nil {
+			return err
+		}
+		if through < floor && addedSlot != nil {
+			next, covered, done, err = s.eachRowAddedIn(
+				txn, family, addedSlot, floor, gen,
+				from, through, after, maxVisit, fn,
+			)
 			return err
 		}
 		start := slotKey(StateJournalTag, from)
@@ -153,7 +170,7 @@ func (s *Store) EachAccountChangedIn(
 	maxVisit int,
 	fn func(slot uint64, r AccountRow, pos []byte) error,
 ) (next []byte, covered, done bool, err error) {
-	return s.EachRowChangedIn(AccountTag, from, through, after, maxVisit,
+	return s.EachRowChangedIn(AccountTag, accountAddedSlot, from, through, after, maxVisit,
 		func(slot uint64, key, value, pos []byte) error {
 			if len(key) < 2 {
 				return errMalformedAccount

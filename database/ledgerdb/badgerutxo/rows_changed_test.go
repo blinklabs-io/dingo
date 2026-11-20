@@ -119,3 +119,75 @@ func TestAccountsChangedInIsNotCoveredBelowTheJournalsFloor(t *testing.T) {
 	_, covered = changedIn(t, s, 61, 70)
 	require.True(t, covered)
 }
+
+// A set loaded from a snapshot holds rows below the journal's floor, and a
+// replay reads them one segment at a time. Each segment is served from the
+// rows added in it, so its cost is those rows and not the table.
+func TestAccountsChangedInServesLoadedRowsBelowTheFloorByRange(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	const n = 200
+	bootstrap(t, s, point(n+1, 0x01))
+	require.NoError(t, s.LoadAccounts(func(put func(badgerutxo.AccountRow) error) error {
+		for i := 1; i <= n; i++ {
+			if err := put(accountAt(byte(i), uint64(i))); err != nil { //nolint:gosec // a small index
+				return err
+			}
+		}
+		return nil
+	}))
+
+	const width = 10
+	for from := uint64(1); from <= n; from += width {
+		before := s.RangeRowsVisited()
+		keys, covered := changedIn(t, s, from, from+width-1)
+		require.True(t, covered, "segment from %d", from)
+		want := make([]byte, 0, width)
+		for k := from; k < from+width; k++ {
+			want = append(want, byte(k)) //nolint:gosec // a small index
+		}
+		require.Equal(t, want, keys, "segment from %d", from)
+		require.LessOrEqual(t, s.RangeRowsVisited()-before, uint64(2*width),
+			"segment from %d stepped over rows outside it", from)
+	}
+}
+
+func loadAccountsAtSlots(t *testing.T, s *badgerutxo.Store, keys ...byte) {
+	t.Helper()
+	require.NoError(t, s.LoadAccounts(func(put func(badgerutxo.AccountRow) error) error {
+		for i, k := range keys {
+			if err := put(accountAt(k, uint64(i+1))); err != nil { //nolint:gosec // a small index
+				return err
+			}
+		}
+		return nil
+	}))
+}
+
+// A row a block changed after the load is no longer added in its old range,
+// and a rollback that restores it puts it back there, however early the
+// index of that range was built.
+func TestAccountsChangedInBelowTheFloorFollowsRewrites(t *testing.T) {
+	t.Parallel()
+	s := open(t, t.TempDir())
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	bootstrap(t, s, point(11, 0x01))
+	loadAccountsAtSlots(t, s, 1, 2, 3, 4, 5)
+
+	applyAccounts(t, s, point(20, 0x02), accountAt(3, 20))
+	keys, covered := changedIn(t, s, 1, 10)
+	require.True(t, covered)
+	require.Equal(t, []byte{1, 2, 4, 5}, keys, "account 3 was added at slot 20")
+
+	_, err := s.Rollback(point(11, 0x01))
+	require.NoError(t, err)
+	keys, covered = changedIn(t, s, 1, 10)
+	require.True(t, covered)
+	require.Equal(t, []byte{1, 2, 3, 4, 5}, keys, "the rollback restored account 3")
+
+	loadAccountsAtSlots(t, s, 7, 8)
+	keys, covered = changedIn(t, s, 1, 10)
+	require.True(t, covered)
+	require.Equal(t, []byte{7, 8}, keys, "the load replaced the accounts")
+}
