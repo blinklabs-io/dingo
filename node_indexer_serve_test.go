@@ -91,10 +91,10 @@ func freeLoopbackPort(t *testing.T) uint {
 	return uint(l.Addr().(*net.TCPAddr).Port) // #nosec G115 -- a TCP port
 }
 
-// TestSplitNodeServesEveryAPI runs a node on the split layout with the real
+// TestNodeServesEveryAPIFromTheIndexerDB runs a node with the real
 // built-in API providers and checks that each answers a request from the
 // IndexerDB rather than refusing it.
-func TestSplitNodeServesEveryAPI(t *testing.T) {
+func TestNodeServesEveryAPIFromTheIndexerDB(t *testing.T) {
 	t.Parallel()
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
 	utxorpcPort := freeLoopbackPort(t)
@@ -245,9 +245,9 @@ func TestSplitNodeServesEveryAPI(t *testing.T) {
 		"UTxO RPC reports the IndexerDB tip, not the ledger tip")
 }
 
-// runSplitNode starts a split-layout node over dbPath and returns when its
+// runIndexerNode starts a node over dbPath and returns when its IndexerDB
 // writer is running, with a function that stops it.
-func runSplitNode(t *testing.T, dbPath string) func() {
+func runIndexerNode(t *testing.T, dbPath string) func() {
 	t.Helper()
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
 	writer := newStartSignalWriter()
@@ -312,22 +312,22 @@ func requireStartupComplete(t *testing.T, n *Node) {
 	}, testutil.AsyncWait, 10*time.Millisecond, "node startup completes")
 }
 
-// A split node persists its consensus store in core mode, which a second
+// A node persists its consensus store in core mode, which a second
 // start over the same data directory must accept, after a clean stop and
 // after the directory is copied from under a running node as a crash would
 // leave it.
-func TestSplitNodeRestarts(t *testing.T) {
+func TestNodeRestartsOverItsDataDirectory(t *testing.T) {
 	t.Parallel()
 	dbPath := testutil.OwnerOnlyTempDir(t)
-	stop := runSplitNode(t, dbPath)
+	stop := runIndexerNode(t, dbPath)
 	crashImage := filepath.Join(testutil.OwnerOnlyTempDir(t), "image")
 	require.NoError(t, os.CopyFS(crashImage, os.DirFS(dbPath)))
 	require.NoError(t, os.Chmod(crashImage, 0o700))
 	stop()
 
-	stopAgain := runSplitNode(t, dbPath)
+	stopAgain := runIndexerNode(t, dbPath)
 	stopAgain()
 
-	stopImage := runSplitNode(t, crashImage)
+	stopImage := runIndexerNode(t, crashImage)
 	stopImage()
 }
