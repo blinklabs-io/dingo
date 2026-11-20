@@ -303,7 +303,9 @@ var errForked = errors.New("indexer: chain changed under batch")
 
 // errBatchShrunk reports that a batch exceeded the blob store's transaction
 // size and the writer halved its batch size, so the step is worth repeating.
-var errBatchShrunk = errors.New("indexer: batch halved after oversized transaction")
+var errBatchShrunk = errors.New(
+	"indexer: batch halved after oversized transaction",
+)
 
 // isTxnTooBig reports whether err is Badger refusing a transaction for its
 // size. Some storage layers format the cause with %v rather than wrap it, so
